@@ -1,0 +1,10 @@
+source_table,source_columns,target_table,field,expected,actual
+YPRECEIPTD,"PTHNUM_0,PTDLIN_0",PRECEIPTD,join_type,business,INNER
+YPRECEIPTD,"POHNUM_0,POPLIN_0",PORDERQ,join_type,business,INNER
+PRECEIPTD,"POHNUM_0,POPLIN_0",PORDERQ,join_type,business,INNER
+PREQUISO,"PSHNUM_0,PSDLIN_0",PREQUISD,join_type,foreign_key,INNER
+PREQUISO,"POHNUM_0,POPLIN_0",PORDERQ,join_type,business,INNER
+PPRICLIST,"PLI_0,PLICRD_0",PPRICFICH,join_type,foreign_key,INNER
+PORDERQ,ITMREF_0,PPRICLIST,join_type,business,INNER
+PPRICCONF,PLI_0,PPRICFICH,join_type,business,INNER
+PPRICCONF,PLI_0,PPRICLIST,join_type,business,INNER

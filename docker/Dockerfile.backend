@@ -1,0 +1,71 @@
+# syntax=docker/dockerfile:1.7
+# -------- builder：含编译工具链 --------
+FROM python:3.12-slim AS builder
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+
+WORKDIR /app
+
+# 编译期需要的工具（含 gcc / g++ / make，供偶发无 wheel 的 C 扩展）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 装 uv（Astral 官方静态二进制，按 uname -m 自适应 x86_64 / aarch64）
+RUN set -eux; \
+    case "$(uname -m)" in \
+      x86_64) UV_ARCH=x86_64 ;; \
+      aarch64|arm64) UV_ARCH=aarch64 ;; \
+      *) echo "unsupported arch: $(uname -m)"; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/uv.tar.gz \
+      "https://github.com/astral-sh/uv/releases/latest/download/uv-${UV_ARCH}-unknown-linux-gnu.tar.gz"; \
+    mkdir -p /tmp/uv-extract; \
+    tar -xzf /tmp/uv.tar.gz -C /tmp/uv-extract --strip-components=1; \
+    mv /tmp/uv-extract/uv /tmp/uv-extract/uvx /usr/local/bin/; \
+    chmod +x /usr/local/bin/uv /usr/local/bin/uvx; \
+    rm -rf /tmp/uv.tar.gz /tmp/uv-extract
+
+# 先拷依赖文件以利用缓存（README.md 供 hatchling 构建元数据）
+COPY backend/pyproject.toml backend/uv.lock* backend/README.md ./
+
+# 装依赖到 /app/.venv（无锁文件时回退到解析）
+RUN uv sync --frozen --no-dev || uv sync --no-dev
+
+# 拷源码
+COPY backend/ ./
+
+# 清理 .pyc 与 tests 占空间（uv sync --no-dev 已过滤 dev，但保险再清一次）
+RUN find /app/.venv -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true; \
+    find /app/.venv -type f -name '*.pyc' -delete
+
+# -------- runtime：仅留运行所需 --------
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    PATH=/app/.venv/bin:/usr/local/bin:$PATH
+
+WORKDIR /app
+
+# runtime 不再需要 build-essential，只留 curl / ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 从 builder 复制 venv + 源码 + uv 二进制
+COPY --from=builder /app /app
+COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
+COPY --from=builder /usr/local/bin/uvx /usr/local/bin/uvx
+
+EXPOSE 8000
+
+# 启动前执行数据库迁移，再运行 uvicorn
+CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000"]

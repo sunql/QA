@@ -1,0 +1,81 @@
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 流式输出打字光标（5.6） */
+.typing-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: #1677ff;
+  animation: typing-blink 1s steps(1) infinite;
+}
+
+@keyframes typing-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Markdown 回答渲染（#64） */
+.markdown-body {
+  word-break: break-word;
+  line-height: 1.7;
+}
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+.markdown-body p {
+  margin: 0 0 8px;
+}
+.markdown-body ol,
+.markdown-body ul {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+.markdown-body li {
+  margin-bottom: 2px;
+}
+.markdown-body table {
+  border-collapse: collapse;
+  margin: 4px 0 8px;
+  width: 100%;
+}
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid #d9d9d9;
+  padding: 4px 8px;
+  text-align: left;
+}
+.markdown-body pre {
+  background: #f5f5f5;
+  padding: 8px;
+  border-radius: 4px;
+  overflow: auto;
+}
+.markdown-body :not(pre) > code {
+  background: #f5f5f5;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.9em;
+}

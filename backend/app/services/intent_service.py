@@ -1,0 +1,464 @@
+"""意图识别服务（关键词匹配，不调用 LLM 以节省 Token）。
+
+多轮五类意图（在原有 QUERY / CHITCHAT 基础上增强）：
+- CHITCHAT：问候/帮助/寒暄；消息过短。
+- CLARIFY：询问概念含义（"X 是什么意思"），不进 NL2SQL 流水线。
+- DEFINE / MAP / METRIC：本体治理指令（设计稿保留意图，此处接入流水线）——
+  DEFINE 定义指标（"定义指标 X = 公式"）、MAP 映射属性到类（"把 X 映射到 Y"）、
+  METRIC 查询/列举指标（"有哪些指标"）。
+- REFINE：基于上一轮查询微调（排序 / 筛选 / 行数），需有历史状态。
+- FOLLOW_UP：追问上一轮结果（指代 / 原因 / 比较），需有历史状态。
+- QUERY / NEW_QUERY：全新查询；NEW_QUERY 表示有历史状态时开启的新一轮。
+
+REFINE / FOLLOW_UP 仅在 hasPriorState=True 时成立；否则视为全新查询，
+避免把"排序"这类调整词误判为对不存在历史的微调。
+
+classifyResult 在返回意图之外，best-effort 抽取查询实体（维度/指标/图表类型）
+与领域命令参数（DEFINE 的指标名与公式、MAP 的源与目标），供 ChatService 使用。
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from app.domain.enums import ChartType, IntentType
+from app.services.step_query_planner import StepQueryPlanner
+
+# 命中任一关键词（前缀匹配）即判为闲聊
+CHITCHAT_KEYWORDS: tuple[str, ...] = (
+    "你好",
+    "您好",
+    "hi",
+    "hello",
+    "谢谢",
+    "感谢",
+    "再见",
+    "拜拜",
+    "帮助",
+    "help",
+    "能做什么",
+    "你是谁",
+)
+
+_SHORT_MESSAGE_LIMIT = 3
+
+# CLARIFY：询问概念 / 术语含义（3-1 收紧，优先于 REFINE 判断）。
+# 修复 N5：宽泛关键词（"是什么"）把"最高的是什么产品"这类实体查询误判为概念解释。
+# 仅保留明确的含义/解释句式；含最高级形容词的"X 是什么"视为实体查询，降级 QUERY。
+_CLARIFY_MEANING_SUFFIXES: tuple[str, ...] = (
+    "是什么意思",
+    "什么意思",
+    "什么含义",
+    "有什么含义",
+    "指什么",
+    "指的是什么",
+    "如何理解",
+    "怎么理解",
+)
+# "周转率是什么"（术语 + 是什么 结尾）→ 概念解释；但含最高级时是"哪个最高"类实体查询
+_CLARIFY_TERM_IS_RE = re.compile(r"^(.{1,15})是什么$")
+_CLARIFY_SUPERLATIVE_RE = re.compile(r"(最高|最低|最大|最小|最多|最少|最好|最差|最畅销|最新)")
+
+# REFINE：对上一轮查询的调整（排序 / 筛选 / 行数）
+_REFINE_KEYWORDS: tuple[str, ...] = (
+    "排序",
+    "升序",
+    "降序",
+    "从小到大",
+    "从大到小",
+    "筛选",
+    "过滤",
+    "只看",
+    "只显示",
+    "只要",
+    "去掉",
+    "排除",
+    "改成",
+    "改为",
+    "调整为",
+    "换成",
+    "重新",
+)
+# 行数 / 名次调整：只看前 N 条 / top N / 前 N 名 / 限 N 条
+_REFINE_LIMIT_RE = re.compile(r"(前\s*\d|top\s*\d|前\s*\d+\s*[名条个]|限\s*\d)", re.IGNORECASE)
+
+# FOLLOW_UP：追问上一轮结果（需有历史状态）
+_FOLLOW_UP_KEYWORDS: tuple[str, ...] = (
+    "为什么",
+    "原因",
+    "分别",
+    "各自",
+    "其中",
+    "哪个",
+    "哪些",
+    "最多",
+    "最少",
+    "最高",
+    "最低",
+    "最大",
+    "最小",
+    "占比",
+    "比例",
+    "还有",
+    "继续",
+    "接着",
+    "另外",
+    "再",
+)
+# 指代词：对上一轮结果的直接指代（3-2 收紧后，FOLLOW_UP 须命中其一）。
+# "它"用负向断言排除"其他/其它"里的它（那是形容词"其他"，不是指代）。
+_FOLLOW_UP_REFERENT_RE = re.compile(r"(?:它们|他们|这个|那个|这些|那些|(?<!其)它)")
+# 纯承接词：本身即指代上一轮操作，无需再带指代词。
+# 仅保留语义上必然指代的"继续/接着"；"还有/另外"歧义大（"还有库存""另外的仓库"是
+# 全新查询），仍在 _FOLLOW_UP_KEYWORDS 中，须带指代词才按追问处理。
+_FOLLOW_UP_CONTINUATION_WORDS: tuple[str, ...] = (
+    "继续",
+    "接着",
+)
+
+# =============================================================================
+# 领域命令意图（Phase 2）：DEFINE / MAP / METRIC
+# =============================================================================
+
+# DEFINE：定义/新增指标
+_DEFINE_KEYWORDS: tuple[str, ...] = (
+    "定义指标",
+    "新增指标",
+    "创建指标",
+    "新指标",
+    "加一个指标",
+    "建一个指标",
+)
+# 提取"指标 <名> = <公式>"；允许中文冒号分隔，名称为中文/字母数字/下划线
+_DEFINE_FORMULA_RE = re.compile(
+    r"指标\s*[:：]?\s*([\w一-龥]{1,30})\s*=\s*(.+)"
+)
+
+# MAP：把源属性/类映射到目标类
+_MAP_RE = re.compile(
+    r"(?:把|将)?\s*([\w一-龥]{1,30})\s*(?:映射到|关联到|绑定到|->)\s*([\w一-龥]{1,30})"
+)
+
+# METRIC：查询/列举指标——须同时命中"指标"与查询性提示词，避免
+# "各业务线的销售额指标汇总"这类数据查询被误判为 METRIC
+_METRIC_QUERY_MARKERS: tuple[str, ...] = (
+    "查看",
+    "查询",
+    "有哪些",
+    "列表",
+    "看看",
+    "数据",
+    "多少",
+    "什么",
+)
+
+# =============================================================================
+# 斜杠指令（Phase 5）：优先级最高，跳过所有自然语言关键词匹配
+# =============================================================================
+
+# /metric <name> = <formula>  —— 定义指标
+_SLASH_METRIC_RE = re.compile(
+    r"^/metric\s+(?P<name>[\w一-龥]{1,30})\s*=\s*(?P<formula>.+)$"
+)
+# /metric <name>  —— 无公式（ChatService 层补引导文案）
+_SLASH_METRIC_NAME_ONLY_RE = re.compile(
+    r"^/metric\s+(?P<name>[\w一-龥]{1,30})\s*$"
+)
+# /define <class_name> [alias=xxx] [desc=xxx]  —— 创建本体类
+_SLASH_DEFINE_RE = re.compile(
+    r"^/define\s+(?P<name>[\w一-龥][\w一-龥]{0,29})(?:\s+(?P<rest>.+))?$"
+)
+# /define <class_name> 额外标注：alias=xxx / desc=xxx
+_SLASH_DEFINE_KV_RE = re.compile(r"(?P<key>alias|desc)\s*=\s*(?P<val>[^\s]+)")
+# /map <property> -> <class> | /map <property> 映射到 <class>
+_SLASH_MAP_RE = re.compile(
+    r"^/map\s+(?P<source>[\w一-龥]{1,30})\s*(?:->|映射到|关联到|绑定到)\s*(?P<target>[\w一-龥]{1,30})\s*$"
+)
+
+# =============================================================================
+# 查询实体抽取（best-effort，未命中返回 None）
+# =============================================================================
+
+# 维度：按<X>分组/汇总/统计/看；每个<X>的
+_DIMENSION_BY_RE = re.compile(
+    r"按\s*(.{1,12}?)\s*(?:分组|汇总|统计|来看|来统计|查看|显示|展示|看)"
+)
+_DIMENSION_PER_RE = re.compile(r"每\s*个?\s*(.{1,12}?)\s*(?:的|分)")
+
+# 指标量词后缀：取最靠右的后缀，再逐字回退抽取其前短语（见 _extractMetric）
+_METRIC_SUFFIXES: tuple[str, ...] = (
+    "的总和",
+    "总金额",
+    "总数量",
+    "总量",
+    "总数",
+    "总额",
+    "合计",
+    "均值",
+    "平均数",
+    "平均",
+    "总和",
+    "汇总",
+)
+# 维度动词：指标短语的左侧边界（配合"的"与空白一起作为分隔符）
+_DIMENSION_VERBS: tuple[str, ...] = ("汇总", "统计", "分组", "展示", "查看", "显示")
+_METRIC_PHRASE_LIMIT = 8
+
+# 图表类型关键词 → ChartType
+_CHART_TYPE_PATTERNS: tuple[tuple[tuple[str, ...], ChartType], ...] = (
+    (("柱状图", "柱图", "柱形图"), ChartType.BAR),
+    (("饼图", "环形图", "占比图"), ChartType.PIE),
+    (("折线图", "趋势图", "线图"), ChartType.LINE),
+    (("散点图", "散点"), ChartType.SCATTER),
+    (("表格", "列表"), ChartType.TABLE),
+)
+
+
+@dataclass(frozen=True)
+class IntentResult:
+    """分类结果：意图 + 抽取的查询实体 / 领域命令参数（best-effort，可为 None）。
+
+    dimension / metric / chartType：查询类意图的实体。
+    metric 另用于 DEFINE 的指标名；source / target 用于 MAP；formula 用于 DEFINE。
+    """
+
+    intent: IntentType
+    dimension: str | None = None
+    metric: str | None = None
+    chartType: ChartType | None = None
+    source: str | None = None
+    target: str | None = None
+    formula: str | None = None
+
+
+class IntentService:
+    """根据消息文本分类用户意图。
+
+    hasPriorState 表示该会话上一轮是否有成功查询（存在 session_query_state）。
+    仅在有历史状态时 REFINE / FOLLOW_UP 才成立；否则回退为全新查询。
+    """
+
+    def classify(self, message: str, *, hasPriorState: bool = False) -> IntentType:
+        """兼容入口：仅返回意图类型（旧调用点）。"""
+        return self.classifyResult(message, hasPriorState=hasPriorState).intent
+
+    def classifyResult(self, message: str, *, hasPriorState: bool = False) -> IntentResult:
+        """完整分类：意图 + 抽取实体/命令参数。
+
+        关键词判断用小写化文本（兼容 "HELP"/"help" 等），但 DEFINE 公式与
+        MAP 源/目标等需保留原始大小写的实体，从原始消息抽取。
+        """
+        original = message.strip()
+        # 斜杠指令优先匹配（Phase 5）：以 / 起头，跳过所有自然语言分类
+        if original.startswith("/"):
+            slashResult = self._matchSlashCommand(original)
+            if slashResult is not None:
+                return slashResult
+        normalized = message.strip().lower()
+        if any(normalized.startswith(kw) for kw in CHITCHAT_KEYWORDS):
+            return IntentResult(intent=IntentType.CHITCHAT)
+        if len(normalized) <= _SHORT_MESSAGE_LIMIT:
+            return IntentResult(intent=IntentType.CHITCHAT)
+        if self._isClarify(normalized):
+            return IntentResult(intent=IntentType.CLARIFY)
+        if any(kw in normalized for kw in _DEFINE_KEYWORDS):
+            name, formula = self._extractDefine(original)
+            return IntentResult(intent=IntentType.DEFINE, metric=name, formula=formula)
+        mapMatch = _MAP_RE.search(original)
+        if mapMatch:
+            return IntentResult(
+                intent=IntentType.MAP, source=mapMatch.group(1), target=mapMatch.group(2)
+            )
+        # 调整意图优先于 METRIC：避免"按指标排序"被误判为指标列举
+        if hasPriorState and self._isRefine(normalized):
+            return self._queryResult(IntentType.REFINE, original)
+        if self._isMetricQuery(normalized):
+            return IntentResult(intent=IntentType.METRIC)
+        if hasPriorState:
+            if self._isFollowUp(normalized):
+                return self._queryResult(IntentType.FOLLOW_UP, original)
+            return self._queryResult(IntentType.NEW_QUERY, original)
+        return self._queryResult(IntentType.QUERY, original)
+
+    @staticmethod
+    def _queryResult(intent: IntentType, normalized: str) -> IntentResult:
+        return IntentResult(
+            intent=intent,
+            dimension=IntentService._extractDimension(normalized),
+            metric=IntentService._extractMetric(normalized),
+            chartType=IntentService._extractChartType(normalized),
+        )
+
+    @staticmethod
+    def _matchSlashCommand(original: str) -> IntentResult | None:
+        """斜杠指令解析：以 / 起头时优先匹配；不匹配返回 None，回退自然语言。
+
+        返回结构化 IntentResult，复用现有 IntentType 枚举：
+        - /metric <name> = <formula> → METRIC(metric, formula)
+        - /metric <name>            → METRIC(metric)   # 公式为空由 ChatService 引导
+        - /define <class> [alias=…] [desc=…] → DEFINE(target=class, source=alias, formula=desc)
+          # 设计01：/define = 创建本体类（区别于 Phase 2 的"定义指标"）
+        - /map <property> -> <class> → MAP(source, target)
+        """
+        match = _SLASH_METRIC_RE.match(original)
+        if match:
+            return IntentResult(
+                intent=IntentType.METRIC,
+                metric=match.group("name"),
+                formula=match.group("formula").strip(),
+            )
+        match = _SLASH_METRIC_NAME_ONLY_RE.match(original)
+        if match:
+            return IntentResult(
+                intent=IntentType.METRIC,
+                metric=match.group("name"),
+                formula=None,
+            )
+        match = _SLASH_DEFINE_RE.match(original)
+        if match:
+            name = match.group("name")
+            rest = match.group("rest") or ""
+            alias = None
+            description = None
+            for kv in _SLASH_DEFINE_KV_RE.finditer(rest):
+                key, value = kv.group("key"), kv.group("val")
+                if key == "alias":
+                    alias = value
+                elif key == "desc":
+                    description = value
+            # source 复用为别名；formula 复用为描述（语义独立、不冲突）
+            return IntentResult(
+                intent=IntentType.DEFINE,
+                target=name,
+                source=alias,
+                formula=description,
+            )
+        match = _SLASH_MAP_RE.match(original)
+        if match:
+            return IntentResult(
+                intent=IntentType.MAP,
+                source=match.group("source"),
+                target=match.group("target"),
+            )
+        return None
+
+    @staticmethod
+    def _isClarify(normalized: str) -> bool:
+        """收紧版 CLARIFY（3-1）：仅明确的术语含义/解释句式，其余降级 QUERY。
+
+        - "X 是什么意思/什么含义/指什么/如何理解" → 含义
+        - "解释(一下) X" → 请求解释
+        - "什么是 X"（开头）→ 请求解释；但 X 含最高级形容词（"什么是最畅销的产品"）除外，
+          此时问的是实体而非概念，应走 QUERY。
+        - "X 和 Y 的区别" / "X 的含义/概念/的意思" → 名词性含义
+        - "X 是什么"（结尾、X 为短术语）→ 含义；但含最高级形容词（"最高的是什么"）除外，
+          用户问的是实体（哪款产品最高），应走 QUERY。
+        """
+        if any(suffix in normalized for suffix in _CLARIFY_MEANING_SUFFIXES):
+            return True
+        if normalized.startswith(("解释", "解释一下", "说明一下")):
+            return True
+        if normalized.startswith("什么是"):
+            remainder = normalized[3:]
+            return not bool(_CLARIFY_SUPERLATIVE_RE.search(remainder))
+        # 区别类需"和"连接（毛利和净利区别）；"各供应商销售额的区别"这类数据比较无"和"，走 QUERY
+        if re.search(r"(的含义|的概念|的意思|和.{1,15}区别)", normalized):
+            return True
+        termIs = _CLARIFY_TERM_IS_RE.match(normalized)
+        return bool(termIs and not _CLARIFY_SUPERLATIVE_RE.search(normalized))
+
+    @staticmethod
+    def _isExplicitMultiStep(normalized: str) -> bool:
+        """显式分步问题（≥2 个「第X步」/序数副词标号）必须走全新查询进多步流水线。
+
+        「top10」命中 _REFINE_LIMIT_RE、「这些…占比」命中追问关键词，但整句
+        是一条独立的多步新问题，不应锚定到上一轮历史状态。
+        """
+        return StepQueryPlanner.rule_based_split(normalized) is not None
+
+    @staticmethod
+    def _isRefine(normalized: str) -> bool:
+        if IntentService._isExplicitMultiStep(normalized):
+            return False
+        if any(kw in normalized for kw in _REFINE_KEYWORDS):
+            return True
+        return _REFINE_LIMIT_RE.search(normalized) is not None
+
+    @staticmethod
+    def _isFollowUp(normalized: str) -> bool:
+        """3-2 收紧：FOLLOW_UP 需命中指代词（它/这个/这些…），否则视为全新查询。
+
+        修复 N6：泛化关键词（为什么/分别/最高）把"为什么A公司最多"这类有前置状态的
+        新查询锚定到旧上下文。仅当消息含指代词（确实指向上一轮）时才按追问处理；
+        纯承接词（继续/接着）本身即指代上一轮，免于指代词要求。
+
+        权衡（有意为之）：无指代词的追问（"为什么1月最高"）会被重分类为新查询——
+        纯关键词匹配无法区分"新实体"与"上一轮维度"，宁可不锚定也不误锚定。
+        """
+        if IntentService._isExplicitMultiStep(normalized):
+            return False
+        if any(cw in normalized for cw in _FOLLOW_UP_CONTINUATION_WORDS):
+            return True
+        if _FOLLOW_UP_REFERENT_RE.search(normalized) is None:
+            return False
+        return any(kw in normalized for kw in _FOLLOW_UP_KEYWORDS)
+
+    @staticmethod
+    def _isMetricQuery(normalized: str) -> bool:
+        if "指标" not in normalized:
+            return False
+        return any(marker in normalized for marker in _METRIC_QUERY_MARKERS)
+
+    @staticmethod
+    def _extractDefine(normalized: str) -> tuple[str | None, str | None]:
+        match = _DEFINE_FORMULA_RE.search(normalized)
+        if match is None:
+            return None, None
+        return match.group(1).strip(), match.group(2).strip()
+
+    @staticmethod
+    def _extractDimension(normalized: str) -> str | None:
+        for regex in (_DIMENSION_BY_RE, _DIMENSION_PER_RE):
+            match = regex.search(normalized)
+            if match:
+                return match.group(1).strip()
+        return None
+
+    @staticmethod
+    def _extractMetric(normalized: str) -> str | None:
+        """抽取量词后缀前的指标短语（best-effort）。
+
+        选最靠右的量词后缀（如"总额"优先于句中更早的"汇总"），然后从后缀前
+        逐字回退，遇分隔符（的 / 空白 / 维度动词起点）停止，最多取 8 字。
+        """
+        bestIdx, bestLen = -1, 0
+        for suffix in _METRIC_SUFFIXES:
+            idx = normalized.rfind(suffix)
+            if idx > bestIdx:
+                bestIdx, bestLen = idx, len(suffix)
+        if bestIdx <= 0:
+            return None
+        i = bestIdx - 1
+        while i >= 0 and (bestIdx - i) <= _METRIC_PHRASE_LIMIT:
+            ch = normalized[i]
+            if ch in ("的", " ", "　"):
+                break
+            verbLen = next(
+                (len(verb) for verb in _DIMENSION_VERBS if normalized.startswith(verb, i)),
+                0,
+            )
+            if verbLen:
+                # 跳过维度动词：指标短语从动词之后开始（如"汇总销售额总额"→"销售额"）
+                i += verbLen - 1
+                break
+            i -= 1
+        phrase = normalized[i + 1:bestIdx]
+        return phrase.strip() or None
+
+    @staticmethod
+    def _extractChartType(normalized: str) -> ChartType | None:
+        for keywords, chartType in _CHART_TYPE_PATTERNS:
+            if any(kw in normalized for kw in keywords):
+                return chartType
+        return None

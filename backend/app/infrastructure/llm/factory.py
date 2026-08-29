@@ -1,0 +1,77 @@
+"""LLM 客户端工厂。
+
+根据 LlmConfig 的 provider 创建对应客户端，并按配置 id 缓存单例。
+API Key 优先使用配置中的加密 key（解密），否则回退到环境变量。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.config import Settings, getSettings
+from app.domain.enums import ProviderType
+from app.infrastructure.llm.base_client import BaseLlmClient
+from app.infrastructure.llm.ollama_client import OllamaClient
+from app.infrastructure.llm.openai_client import OpenAiClient
+from app.infrastructure.security.crypto import decryptApiKey
+
+# config_id -> 客户端单例
+_clients: dict[int, BaseLlmClient] = {}
+
+
+def createClient(config: Any, *, settings: Settings | None = None, apiKey: str | None = None) -> BaseLlmClient:
+    """创建或复用 LlmConfig 对应的客户端。
+
+    Args:
+        config: LlmConfig（或兼容鸭子类型），需含 id、provider、model_name、api_endpoint、api_key_encrypted
+        settings: 可选 Settings，默认取单例
+        apiKey: 可选明文 key（测试注入）；否则按 provider 从配置密文或环境变量解析
+    """
+    settings = settings or getSettings()
+    configId = _resolveConfigId(config)
+    if configId in _clients:
+        return _clients[configId]
+
+    provider = ProviderType(config.provider)
+    if provider == ProviderType.OLLAMA:
+        # 优先用各模型配置的 api_endpoint，其次用全局配置
+        baseUrl = getattr(config, "api_endpoint", None) or settings.ollamaBaseUrl
+        client: BaseLlmClient = OllamaClient(config, baseUrl=baseUrl)
+    else:
+        key = apiKey or _resolveApiKey(config, provider, settings)
+        client = OpenAiClient(config, apiKey=key, provider=provider)
+    _clients[configId] = client
+    return client
+
+
+def _resolveConfigId(config: Any) -> int:
+    configId = getattr(config, "id", None)
+    if configId is None:
+        # 未持久化对象（测试用），用 Python 对象 id
+        return id(config)
+    return int(configId)
+
+
+def _resolveApiKey(config: Any, provider: ProviderType, settings: Settings) -> str:
+    """优先解密配置中的密文 key，否则按 provider 回退到环境变量。"""
+    encrypted = getattr(config, "api_key_encrypted", None)
+    if encrypted:
+        return decryptApiKey(encrypted)
+    if provider == ProviderType.OPENAI:
+        return settings.openaiApiKey
+    if provider == ProviderType.AZURE_OPENAI:
+        return settings.azureOpenaiApiKey
+    if provider == ProviderType.OPENAI_COMPATIBLE_PROXY:
+        # 按模型名启发：deepseek/qwen
+        name = (config.model_name or "").lower()
+        if "deepseek" in name:
+            return settings.deepseekApiKey
+        if "qwen" in name:
+            return settings.qwenApiKey
+        return settings.openaiApiKey
+    return ""
+
+
+def resetFactory() -> None:
+    """清空客户端缓存（测试用；不关闭连接，因测试注入的是 mock）。"""
+    _clients.clear()

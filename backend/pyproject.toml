@@ -1,0 +1,85 @@
+[project]
+name = "qa-system-backend"
+version = "0.1.0"
+description = "Intelligent Q&A System - FastAPI backend (model router, ontology, NL2SQL, chart)"
+requires-python = ">=3.12,<3.15"
+readme = "README.md"
+
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.8.0",
+    "pydantic-settings>=2.4.0",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29.0",
+    "aiomysql>=0.2.0",
+    "alembic>=1.13.0",
+    "openai>=1.40.0",
+    "httpx>=0.27.0",
+    "aiohttp>=3.9.0",
+    "tiktoken>=0.7.0",
+    "neo4j>=5.23.0",
+    "pymilvus>=2.4.0",
+    "sqlparse>=0.5.0",
+    "cryptography>=42.0.0",
+    "python-dotenv>=1.0.0",
+    "reportlab>=4.2.0",
+    "markdown>=3.6",
+    "tenacity>=8.5.0",
+    "oracledb>=4.0.0",
+    "slowapi>=0.1.9",
+]
+
+[project.optional-dependencies]
+# Optional: precise token counting for non-OpenAI models via HuggingFace
+ml = [
+    "transformers>=4.40.0",
+]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "respx>=0.21.0",
+    "anyio>=4.4.0",
+    "ruff>=0.6.0",
+    "aiosqlite>=0.20.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["app/tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: marks integration tests (require external services)",
+    "e2e: marks end-to-end tests",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/tests/*", "app/alembic/*"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]

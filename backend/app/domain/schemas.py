@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
@@ -566,6 +567,26 @@ class ImportRuleConfig(CamelModel):
 
     table_filter: TableFilterRules = Field(default_factory=TableFilterRules)
     type_mapping: TypeMappingRules = Field(default_factory=TypeMappingRules)
+
+
+class ConflictType(str, Enum):
+    """导入冲突类型：类（表级）或属性（列级）。"""
+
+    CLASS = "class"
+    PROPERTY = "property"
+
+
+class ImportConflict(CamelModel):
+    """本地导入时，建议的类/属性与既有本体的冲突。"""
+
+    type: ConflictType = Field(..., description="冲突类型：class | property")
+    source_table: str | None = Field(default=None, description="冲突涉及的源表名")
+    source_column: str | None = Field(default=None, description="冲突涉及的源列名（仅属性冲突）")
+    existing_id: int = Field(..., description="既有本体类/属性的 id")
+    existing_name: str | None = Field(default=None, description="既有本体类/属性名称")
+    proposed_name: str | None = Field(default=None, description="建议的类/属性名称")
+    # 处置动作：skip（默认，保留既有）| overwrite（覆盖）| rename（改名新建）
+    action: str = "skip"
 
 
 class MissingColumnRead(CamelModel):

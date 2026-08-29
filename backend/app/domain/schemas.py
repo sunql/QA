@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -15,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
 from app.domain.enums import ChartType, DataSourceType
+from app.domain.exceptions import ConfigError
 from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_AFFINITY,
     MSG_SCHEMA_CHAT_CHART_TYPE_EXPLICIT,
@@ -508,6 +510,30 @@ class SchemaIntrospectResponse(CamelModel):
 # 默认表名黑名单：排除日志表与临时表（匹配 tmp_/temp_ 前缀另行由 include_temp_tables 控制）。
 DEFAULT_TABLE_NAME_BLACKLIST_PATTERNS: list[str] = [r"^log$", r"^log_", r"_log$"]
 
+# 表名黑名单正则防护上限：封顶数量与单项长度，避免恶意 pattern 撑爆正则求值（ReDoS）。
+_NAME_BLACKLIST_MAX_PATTERNS = 20
+_NAME_BLACKLIST_PATTERN_MAX_LEN = 100
+
+
+def _validateNameBlacklistPatterns(value: list[str]) -> list[str]:
+    """校验表名黑名单正则：数量/长度封顶 + re.compile 合法性（防 ReDoS 与 500）。
+
+    该字段由客户端经 ImportPreviewRequest.rules.tableFilter 直接提供，
+    非法 pattern 在 DTO 边界即抛 ConfigError（→ HTTP 400），不流入规则引擎。
+    """
+    if len(value) > _NAME_BLACKLIST_MAX_PATTERNS:
+        raise ConfigError(f"name_blacklist_patterns 最多 {_NAME_BLACKLIST_MAX_PATTERNS} 项")
+    for pattern in value:
+        if len(pattern) > _NAME_BLACKLIST_PATTERN_MAX_LEN:
+            raise ConfigError(
+                f"name_blacklist_patterns 单项最长 {_NAME_BLACKLIST_PATTERN_MAX_LEN} 字符"
+            )
+        try:
+            re.compile(pattern, re.IGNORECASE)
+        except re.error as exc:
+            raise ConfigError(f"表名黑名单正则非法: {pattern!r}（{exc}）") from exc
+    return value
+
 # 默认类型映射：key 为规范化后的 DB 类型（大写、无参数），value 为 DataType 枚举值。
 DEFAULT_TYPE_MAPPINGS: dict[str, str] = {
     "NUMBER(p=0,s=0)": "INT",
@@ -545,14 +571,15 @@ class TableFilterRules(CamelModel):
     include_temp_tables: bool = False
     # 表名黑名单正则（大小写不敏感，re.search 语义）。
     #
-    # ReDoS 警告：patterns 以 Python re 执行（re.search、无超时）。
-    # 当前仅供服务端内置默认值使用；若未来将此字段开放给用户配置，
-    # 必须先加防护（如限制 pattern 长度/复杂度、编译白名单校验，
-    # 或改用 fnmatch 等无回溯的匹配），否则恶意 pattern 可导致
-    # 灾难性回溯、阻塞导入流程。
+    # 由客户端经 ImportPreviewRequest.rules.tableFilter 提供；缺省时回落到
+    # DEFAULT_TABLE_NAME_BLACKLIST_PATTERNS。ReDoS 防护：字段校验器
+    # _validateNameBlacklistPatterns 在 DTO 边界封顶数量/长度并做 re.compile 校验，
+    # 非法 pattern 直接 400 拒绝，避免灾难性回溯与未捕获 re.error 导致的 500。
     name_blacklist_patterns: list[str] = Field(
         default_factory=lambda: list(DEFAULT_TABLE_NAME_BLACKLIST_PATTERNS)
     )
+
+    _check_blacklist = field_validator("name_blacklist_patterns")(_validateNameBlacklistPatterns)
 
 
 class TypeMappingRules(CamelModel):

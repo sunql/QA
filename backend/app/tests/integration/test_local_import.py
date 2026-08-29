@@ -178,6 +178,19 @@ async def test_import_preview_applies_table_filter(client) -> None:
     assert tables == ["orders"]  # customers 被 ^cust 过滤
 
 
+async def test_import_preview_rejects_invalid_blacklist_regex(client) -> None:
+    _useFakeSchema(client)
+    ds_id = await _create_datasource(client)
+
+    # 未闭合字符类 "[" 触发 re.error；应在 DTO 边界被拦截为 400，而非 500
+    resp = await client.post(
+        f"/api/v1/datasources/{ds_id}/import-preview",
+        json={"rules": {"tableFilter": {"nameBlacklistPatterns": ["["]}}},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "正则非法" in resp.json()["error"]
+
+
 async def test_import_preview_applies_type_mapping(client) -> None:
     _useFakeSchema(client)
     ds_id = await _create_datasource(client)

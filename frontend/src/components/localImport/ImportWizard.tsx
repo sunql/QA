@@ -7,6 +7,7 @@ import ConfirmStep from "./ConfirmStep";
 import { getImportPreview, executeImport } from "../../api/localImport";
 import type {
   ImportExecuteRequest,
+  ImportExecuteResponse,
   ImportPreviewResponse,
   ImportRuleConfig,
 } from "../../types/localImport";
@@ -22,6 +23,7 @@ export default function ImportWizard({ open, datasourceId, onClose }: Props) {
   const [current, setCurrent] = useState(0);
   const [rules, setRules] = useState<ImportRuleConfig>({});
   const [preview, setPreview] = useState<ImportPreviewResponse | null>(null);
+  const [result, setResult] = useState<ImportExecuteResponse | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handlePreview = async () => {
@@ -40,9 +42,9 @@ export default function ImportWizard({ open, datasourceId, onClose }: Props) {
   const handleExecute = async (request: ImportExecuteRequest) => {
     setLoading(true);
     try {
-      await executeImport(datasourceId, request);
+      const executeResult = await executeImport(datasourceId, request);
+      setResult(executeResult);
       setCurrent(2);
-      // pass result to ConfirmStep via state
     } catch {
       message.error(t("toast.importFailed"));
     } finally {
@@ -61,7 +63,7 @@ export default function ImportWizard({ open, datasourceId, onClose }: Props) {
     },
     {
       title: t("localImport.steps.confirm"),
-      content: <ConfirmStep />,
+      content: <ConfirmStep result={result} />,
     },
   ];
 

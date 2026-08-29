@@ -540,6 +540,14 @@ export const enUS = {
       confirm: "Import Done",
     },
     confirmImport: "Confirm Import",
+    confirm: {
+      errorTitle: "Import completed with errors",
+      errorSummary:
+        "Created {createdClasses} classes, {createdProperties} properties, {createdJoins} joins; {errorCount} failed",
+      errorType: "Type",
+      errorName: "Name",
+      errorMessage: "Message",
+    },
     preview: {
       sourceTable: "Source Table",
       className: "Class Name",

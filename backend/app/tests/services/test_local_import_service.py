@@ -525,3 +525,123 @@ async def test_execute_import_records_join_creation_error(dbSession: AsyncSessio
     assert result.created_classes == 2
     assert result.created_joins == 0
     assert any(e.type == "join" for e in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_execute_import_recovers_session_after_property_db_failure(
+    dbSession: AsyncSession,
+):
+    """属性 DB 失败污染会话后，后续项仍能继续写入（防 InvalidRequestError 级联）。
+
+    createProperty 第 2 次调用模拟真实 DB 层失败（NOT NULL 违规提交失败），
+    会话进入 pending rollback；修复后 execute_import 在 except 中回滚恢复会话，
+    后续类/属性仍可正常创建，不会级联失败。
+    """
+    from types import SimpleNamespace
+
+    from app.domain.models import OntologyClass, OntologyProperty
+
+    ds = await _seed_datasource(dbSession)
+
+    schema_svc = FakeSchemaService()
+    schema_svc.buildResponse = lambda cache: SchemaIntrospectResponse(
+        tables=[
+            TableSchemaRead(
+                table_name="orders",
+                columns=[
+                    ColumnSchemaRead(column_name="id", data_type="INT", nullable=False),
+                    ColumnSchemaRead(
+                        column_name="customer_id", data_type="INT", nullable=False
+                    ),
+                ],
+                primary_keys=["id"],
+                foreign_keys=[],
+            ),
+            TableSchemaRead(
+                table_name="customers",
+                columns=[
+                    ColumnSchemaRead(column_name="id", data_type="INT", nullable=False)
+                ],
+                primary_keys=["id"],
+                foreign_keys=[],
+            ),
+        ],
+        cached_at=datetime(2026, 8, 29, 0, 0, 0),
+    )
+
+    class PoisoningOntologyService:
+        """createProperty 第 2 次调用时模拟 DB 失败并污染会话。"""
+
+        def __init__(self):
+            self._property_calls = 0
+            # listClasses 返回 detached 摘要，避免回滚后过期 ORM 对象触发同步惰性加载
+            self._classes: list[SimpleNamespace] = []
+
+        async def listClasses(self, session, includeExpired=False):
+            return list(self._classes)
+
+        async def listPropertiesByClass(self, session, classId):
+            return []
+
+        async def createClass(self, session, dto):
+            cls = OntologyClass(class_name=dto.class_name, source_table=dto.source_table)
+            session.add(cls)
+            await session.commit()
+            await session.refresh(cls)
+            self._classes.append(
+                SimpleNamespace(id=cls.id, source_table=dto.source_table)
+            )
+            return cls
+
+        async def createProperty(self, session, dto):
+            self._property_calls += 1
+            if self._property_calls == 2:
+                # property_name=None 违反 NOT NULL：commit 失败后会话进入 pending rollback
+                session.add(
+                    OntologyProperty(
+                        class_id=dto.class_id,
+                        property_name=None,
+                        data_type=dto.data_type,
+                    )
+                )
+                await session.commit()  # raises IntegrityError
+            prop = OntologyProperty(
+                class_id=dto.class_id,
+                property_name=dto.property_name,
+                data_type=dto.data_type,
+            )
+            session.add(prop)
+            await session.commit()
+            return prop
+
+        async def createJoin(self, session, dto):
+            return None
+
+    svc = LocalImportService(
+        schema_service=schema_svc,
+        ontology_service=PoisoningOntologyService(),
+    )
+    preview = await svc.build_preview(
+        dbSession, datasource_id=ds.id, rules=ImportRuleConfig()
+    )
+    request = ImportExecuteRequest(
+        confirmed_classes=preview.proposed_classes,
+        confirmed_joins=[],
+        conflict_resolutions=[],
+        sync_embeddings=False,
+    )
+
+    result = await svc.execute_import(
+        dbSession,
+        datasource_id=ds.id,
+        request=request,
+        created_by="admin",
+    )
+
+    property_errors = [e for e in result.errors if e.type == "property"]
+    class_errors = [e for e in result.errors if e.type == "class"]
+    assert len(property_errors) == 1  # 仅 orders.customer_id 失败
+    assert class_errors == []  # customers 类未被级联失败
+    assert result.created_classes == 2
+    assert result.created_properties == 2  # orders.id + customers.id 成功
+    assert result.success is False

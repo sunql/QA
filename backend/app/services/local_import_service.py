@@ -191,59 +191,14 @@ class LocalImportService:
         for proposed in request.confirmed_classes:
             if not proposed.is_selected:
                 continue
-            try:
-                class_dto = OntologyClassCreate(
-                    class_name=proposed.class_name,
-                    class_alias=proposed.class_alias,
-                    description=proposed.description,
-                    source_table=proposed.source_table,
-                    created_by=created_by,
-                )
-                created_class = await self._ontology_service.createClass(
-                    session, class_dto
-                )
+            class_id, props_created, item_errors = await self._create_class_with_properties(
+                session, proposed, created_by
+            )
+            errors.extend(item_errors)
+            created_properties += props_created
+            if class_id is not None:
                 created_classes += 1
-                created_class_by_table[proposed.source_table] = created_class.id
-
-                for prop in proposed.properties:
-                    try:
-                        prop_dto = OntologyPropertyCreate(
-                            class_id=created_class.id,
-                            property_name=prop.property_name,
-                            property_alias=prop.property_alias,
-                            description=prop.description,
-                            data_type=prop.data_type,
-                            is_primary_key=prop.is_primary_key,
-                            is_foreign_key=prop.is_foreign_key,
-                            source_column=prop.source_column,
-                        )
-                        await self._ontology_service.createProperty(session, prop_dto)
-                        created_properties += 1
-                    except Exception as exc:  # noqa: BLE001
-                        msg = str(exc) if str(exc) else type(exc).__name__
-                        logger.warning(
-                            "创建属性失败 %s.%s: %s",
-                            proposed.source_table,
-                            prop.property_name,
-                            exc,
-                        )
-                        errors.append(
-                            ImportErrorInfo(
-                                type="property",
-                                name=f"{proposed.source_table}.{prop.property_name}",
-                                message=msg,
-                            )
-                        )
-            except Exception as exc:  # noqa: BLE001
-                msg = str(exc) if str(exc) else type(exc).__name__
-                logger.warning("创建类失败 %s: %s", proposed.source_table, exc)
-                errors.append(
-                    ImportErrorInfo(
-                        type="class",
-                        name=proposed.source_table,
-                        message=msg,
-                    )
-                )
+                created_class_by_table[proposed.source_table] = class_id
 
         class_id_by_table = await self._build_table_to_class_id_map(
             session, created_class_by_table
@@ -271,6 +226,7 @@ class LocalImportService:
                 await self._ontology_service.createJoin(session, join_dto)
                 created_joins += 1
             except Exception as exc:  # noqa: BLE001
+                await session.rollback()
                 msg = str(exc) if str(exc) else type(exc).__name__
                 logger.warning("创建 join 失败 %s: %s", proposed_join.source_table, exc)
                 errors.append(
@@ -297,6 +253,77 @@ class LocalImportService:
             overwritten_conflicts=overwritten_conflicts,
             errors=errors,
         )
+
+    async def _create_class_with_properties(
+        self,
+        session: AsyncSession,
+        proposed: ProposedClass,
+        created_by: str | None,
+    ) -> tuple[int | None, int, list[ImportErrorInfo]]:
+        """创建单个类及其属性；逐项失败隔离（回滚会话，继续处理其余项）。
+
+        每个 createClass/createProperty 内部自行 commit；DB 层失败会把会话留在
+        pending rollback 状态，故在 except 中显式 rollback 恢复会话，避免后续项
+        因 InvalidRequestError 级联失败。返回 (class_id, 属性成功数, 错误项)。
+        """
+        errors: list[ImportErrorInfo] = []
+        class_dto = OntologyClassCreate(
+            class_name=proposed.class_name,
+            class_alias=proposed.class_alias,
+            description=proposed.description,
+            source_table=proposed.source_table,
+            created_by=created_by,
+        )
+        try:
+            created_class = await self._ontology_service.createClass(session, class_dto)
+        except Exception as exc:  # noqa: BLE001
+            await session.rollback()
+            msg = str(exc) if str(exc) else type(exc).__name__
+            logger.warning("创建类失败 %s: %s", proposed.source_table, exc)
+            errors.append(
+                ImportErrorInfo(
+                    type="class",
+                    name=proposed.source_table,
+                    message=msg,
+                )
+            )
+            return None, 0, errors
+
+        # 立即取 id：后续属性失败回滚会话会使 created_class 属性过期，
+        # 延迟访问会触发同步惰性加载（MissingGreenlet），故先固化为普通 int。
+        class_id = created_class.id
+        props_created = 0
+        for prop in proposed.properties:
+            try:
+                prop_dto = OntologyPropertyCreate(
+                    class_id=class_id,
+                    property_name=prop.property_name,
+                    property_alias=prop.property_alias,
+                    description=prop.description,
+                    data_type=prop.data_type,
+                    is_primary_key=prop.is_primary_key,
+                    is_foreign_key=prop.is_foreign_key,
+                    source_column=prop.source_column,
+                )
+                await self._ontology_service.createProperty(session, prop_dto)
+                props_created += 1
+            except Exception as exc:  # noqa: BLE001
+                await session.rollback()
+                msg = str(exc) if str(exc) else type(exc).__name__
+                logger.warning(
+                    "创建属性失败 %s.%s: %s",
+                    proposed.source_table,
+                    prop.property_name,
+                    exc,
+                )
+                errors.append(
+                    ImportErrorInfo(
+                        type="property",
+                        name=f"{proposed.source_table}.{prop.property_name}",
+                        message=msg,
+                    )
+                )
+        return class_id, props_created, errors
 
     async def _build_table_to_class_id_map(
         self,

@@ -558,6 +558,14 @@ export const zhCN = {
       confirm: "导入完成",
     },
     confirmImport: "确认导入",
+    confirm: {
+      errorTitle: "导入未完全成功",
+      errorSummary:
+        "已创建 {createdClasses} 个类、{createdProperties} 个属性、{createdJoins} 个关联，失败 {errorCount} 项",
+      errorType: "类型",
+      errorName: "名称",
+      errorMessage: "错误信息",
+    },
     preview: {
       sourceTable: "源表",
       className: "类名",

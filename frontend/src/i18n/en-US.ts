@@ -25,6 +25,8 @@ export const enUS = {
     none: "(None)",
     dash: "-",
     emDash: "—",
+    next: "Next",
+    prev: "Previous",
   },
 
   appLayout: {
@@ -80,6 +82,8 @@ export const enUS = {
     sqlCopied: "SQL copied",
     copyFailed: "Copy failed: {message}",
     versionUpdated: "Updated (new version created)",
+    previewFailed: "Failed to generate import preview",
+    importFailed: "Import failed, see error details",
   },
 
   queryPlan: {
@@ -526,6 +530,14 @@ export const enUS = {
       },
       latency: "Latency {ms} ms",
       checkedAt: "Checked at {time}",
+    },
+  },
+
+  localImport: {
+    steps: {
+      rule: "Rule Config",
+      preview: "Preview & Confirm",
+      confirm: "Import Done",
     },
   },
 

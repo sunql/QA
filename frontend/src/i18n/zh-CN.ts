@@ -31,6 +31,8 @@ export const zhCN = {
     none: "（无）",
     dash: "-",
     emDash: "—",
+    next: "下一步",
+    prev: "上一步",
   },
 
   appLayout: {
@@ -87,6 +89,8 @@ export const zhCN = {
     sqlCopied: "SQL 已复制",
     copyFailed: "复制失败：{message}",
     versionUpdated: "更新成功（新版本已创建）",
+    previewFailed: "生成导入预览失败，请稍后重试",
+    importFailed: "导入失败，请查看错误详情",
   },
 
   queryPlan: {
@@ -544,6 +548,14 @@ export const zhCN = {
       },
       latency: "延迟 {ms} ms",
       checkedAt: "探测时间：{time}",
+    },
+  },
+
+  localImport: {
+    steps: {
+      rule: "规则配置",
+      preview: "预览确认",
+      confirm: "导入完成",
     },
   },
 

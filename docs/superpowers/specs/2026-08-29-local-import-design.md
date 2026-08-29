@@ -163,13 +163,10 @@ POST /api/v1/datasources/{datasource_id}/import-preview
 {
   "rules": {
     "tableFilter": {
-      "includeViews": false,
-      "includeSystemTables": false,
       "includeTempTables": false,
-      "nameBlacklistPatterns": ["^temp_", "_log$", "_backup$"],
-      "ownerWhitelist": null
+      "nameBlacklistPatterns": ["^temp_", "_log$", "_backup$"]
     },
-    "typeMappings": {
+    "typeMapping": {
       "VARCHAR": "STRING",
       "TEXT": "STRING",
       "INT": "INT",
@@ -323,7 +320,7 @@ POST /api/v1/datasources/{datasource_id}/import
 
 #### Step 1：规则配置
 
-- **表过滤规则**：开关（视图/临时表/系统表）+ 表名黑名单正则 + LLM 建议采纳区。
+- **表过滤规则**：开关（临时表）+ 表名黑名单正则 + LLM 建议采纳区。
 - **类型映射规则**：数据库类型 → 本体类型表格，支持 `NUMBER` 按精度细分，提供“恢复默认”。
 
 #### Step 2：智能预览

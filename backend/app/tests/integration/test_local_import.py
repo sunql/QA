@@ -163,3 +163,82 @@ async def test_import_execute_missing_datasource_returns_404(client) -> None:
     )
     assert resp.status_code == 404
     assert "不存在" in resp.json()["error"]
+
+
+async def test_import_preview_applies_table_filter(client) -> None:
+    _useFakeSchema(client)
+    ds_id = await _create_datasource(client)
+
+    resp = await client.post(
+        f"/api/v1/datasources/{ds_id}/import-preview",
+        json={"rules": {"tableFilter": {"nameBlacklistPatterns": ["^cust"]}}},
+    )
+    assert resp.status_code == 200, resp.text
+    tables = [c["sourceTable"] for c in resp.json()["proposedClasses"]]
+    assert tables == ["orders"]  # customers 被 ^cust 过滤
+
+
+async def test_import_preview_applies_type_mapping(client) -> None:
+    _useFakeSchema(client)
+    ds_id = await _create_datasource(client)
+
+    resp = await client.post(
+        f"/api/v1/datasources/{ds_id}/import-preview",
+        json={"rules": {"typeMapping": {"mappings": {"INT": "DATETIME"}}}},
+    )
+    assert resp.status_code == 200, resp.text
+    props = resp.json()["proposedClasses"][0]["properties"]
+    assert all(p["dataType"] == "DATETIME" for p in props)
+
+
+async def test_import_preview_detects_conflict_with_existing_class(client) -> None:
+    _useFakeSchema(client)
+    ds_id = await _create_datasource(client)
+
+    # 先通过本体 API 创建一个 sourceTable=orders 的既有类
+    created = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "OrdersExisting", "sourceTable": "orders"},
+    )
+    assert created.status_code == 201, created.text
+
+    resp = await client.post(
+        f"/api/v1/datasources/{ds_id}/import-preview",
+        json={"rules": {}},
+    )
+    assert resp.status_code == 200, resp.text
+    conflicts = resp.json()["conflicts"]
+    assert any(c["type"] == "class" and c["sourceTable"] == "orders" for c in conflicts)
+
+
+async def test_import_execute_respects_is_selected(client, dbSession) -> None:
+    _useFakeSchema(client)
+    ds_id = await _create_datasource(client)
+
+    preview = await client.post(
+        f"/api/v1/datasources/{ds_id}/import-preview",
+        json={"rules": {}},
+    )
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    classes = [
+        {**c, "isSelected": False} if c["sourceTable"] == "customers" else c
+        for c in body["proposedClasses"]
+    ]
+
+    resp = await client.post(
+        f"/api/v1/datasources/{ds_id}/import",
+        json={
+            "confirmedClasses": classes,
+            "confirmedJoins": [],
+            "conflictResolutions": [],
+            "syncEmbeddings": False,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    result = resp.json()
+    assert result["createdClasses"] == 1  # 仅 orders
+    assert result["createdProperties"] == 2
+
+    classCount = await dbSession.scalar(select(func.count()).select_from(OntologyClass))
+    assert classCount == 1

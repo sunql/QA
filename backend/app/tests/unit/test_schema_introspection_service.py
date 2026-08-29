@@ -138,6 +138,30 @@ class TestInfoSchemaIntrospection:
         assert tables[0].table_name == "wms_order"
         assert any("DATABASE()" in sql for sql in adapter.executed)
 
+    @pytest.mark.parametrize("type_", ["mysql", "postgresql"])
+    async def test_fk_query_reads_referenced_columns_from_key_column_usage(self, type_: str) -> None:
+        """外键查询从 key_column_usage 直接读 referenced_* 列，不依赖 MariaDB 专有的 constraint_column_usage 视图。
+
+        MySQL 8 没有 information_schema.constraint_column_usage（1109 Unknown table），该视图仅存在于 MariaDB；
+        PG/MySQL 的 key_column_usage 均含 referenced_table_name / referenced_column_name。
+        """
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {"table_name": "wms_order_item", "column_name": "order_id", "data_type": "int", "nullable": 1, "owner": "wms"},
+            ],
+            pkRows=[],
+            fkRows=[
+                {"table_name": "wms_order_item", "column_name": "order_id", "ref_table": "wms_order", "ref_column": "id"},
+            ],
+        )
+        tables = await _service(adapter).introspect(_datasource(type_=type_))
+        fkSql = next(sql for sql in adapter.executed if "FOREIGN KEY" in sql)
+        assert "constraint_column_usage" not in fkSql.lower()
+        assert "referenced_table_name" in fkSql.lower()
+        assert "referenced_column_name" in fkSql.lower()
+        assert tables[0].foreign_keys[0].ref_table == "wms_order"
+        assert tables[0].foreign_keys[0].ref_column == "id"
+
     async def test_unsupported_type_raises_validation_error(self) -> None:
         adapter = _FakeSchemaAdapter(columnRows=[], pkRows=[], fkRows=[])
         with pytest.raises(ValidationError):

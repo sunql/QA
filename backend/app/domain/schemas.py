@@ -543,6 +543,12 @@ class TableFilterRules(CamelModel):
     # 是否包含临时表（tmp_/temp_/# 前缀）；默认 False 即排除。
     include_temp_tables: bool = False
     # 表名黑名单正则（大小写不敏感，re.search 语义）。
+    #
+    # ReDoS 警告：patterns 以 Python re 执行（re.search、无超时）。
+    # 当前仅供服务端内置默认值使用；若未来将此字段开放给用户配置，
+    # 必须先加防护（如限制 pattern 长度/复杂度、编译白名单校验，
+    # 或改用 fnmatch 等无回溯的匹配），否则恶意 pattern 可导致
+    # 灾难性回溯、阻塞导入流程。
     name_blacklist_patterns: list[str] = Field(
         default_factory=lambda: list(DEFAULT_TABLE_NAME_BLACKLIST_PATTERNS)
     )

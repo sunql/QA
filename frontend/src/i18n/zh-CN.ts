@@ -559,6 +559,10 @@ export const zhCN = {
     },
   },
 
+  datasource: {
+    importToOntology: "智能导入到本体",
+  },
+
   enums: {
     datasourceType: {
       oracle: "Oracle",

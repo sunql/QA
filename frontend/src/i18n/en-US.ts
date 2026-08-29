@@ -541,6 +541,10 @@ export const enUS = {
     },
   },
 
+  datasource: {
+    importToOntology: "Import to Ontology",
+  },
+
   enums: {
     datasourceType: {
       oracle: "Oracle",

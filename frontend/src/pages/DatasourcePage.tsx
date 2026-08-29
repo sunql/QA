@@ -14,7 +14,7 @@ import {
   message,
   Typography,
 } from "antd";
-import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { ImportOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
   listDataSources,
   createDataSource,
@@ -36,6 +36,7 @@ import {
   ORACLE_VERSION_OPTIONS,
 } from "../types/datasource";
 import { useTranslation } from "../i18n";
+import ImportWizard from "../components/localImport/ImportWizard";
 
 const { Title } = Typography;
 
@@ -83,6 +84,7 @@ export default function DatasourcePage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [testing, setTesting] = useState(false);
   const [editing, setEditing] = useState<DataSource | null>(null);
+  const [importingId, setImportingId] = useState<number | null>(null);
   const [form] = Form.useForm<FormValues>();
   // 监听类型字段，用于条件展示 Oracle 版本下拉
   const currentType = Form.useWatch("type", form);
@@ -247,9 +249,16 @@ export default function DatasourcePage() {
     },
     {
       title: t("forms.datasource.columns.actions"),
-      width: 150,
+      width: 250,
       render: (_: unknown, record: DataSource) => (
         <Space>
+          <Button
+            size="small"
+            icon={<ImportOutlined />}
+            onClick={() => setImportingId(record.id)}
+          >
+            {t("datasource.importToOntology")}
+          </Button>
           <Button size="small" onClick={() => openEdit(record)}>
             {t("common.edit")}
           </Button>
@@ -423,6 +432,13 @@ export default function DatasourcePage() {
           </Space>
         </Form>
       </Modal>
+
+      <ImportWizard
+        key={importingId ?? "none"}
+        open={importingId !== null}
+        datasourceId={importingId ?? 0}
+        onClose={() => setImportingId(null)}
+      />
     </div>
   );
 }

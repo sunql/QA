@@ -170,4 +170,11 @@ describe("DatasourcePage", () => {
     expect(api.testDataSource).not.toHaveBeenCalled();
     expect(await screen.findByText(/请先填写密码/)).toBeInTheDocument();
   });
+
+  it("数据行渲染后显示「智能导入到本体」入口按钮", async () => {
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /智能导入到本体/i })).toBeInTheDocument();
+  });
 });

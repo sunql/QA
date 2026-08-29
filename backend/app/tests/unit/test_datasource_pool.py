@@ -480,3 +480,87 @@ class TestServiceTestConnection:
         result = await DataSourceService().test_connection(dto)
         assert result.success is False
         assert "connection refused" in result.message
+
+
+class _FakeMappings:
+    """模拟 SQLAlchemy MappingResult；fetchmany(None) 复刻 aiomysql 行为（arraysize 默认 1 行）。"""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+        self.allCalled = False
+        self.fetchManySize: int | None = None
+
+    def all(self) -> list[dict]:
+        self.allCalled = True
+        return list(self._rows)
+
+    def fetchmany(self, size: int | None = None) -> list[dict]:
+        self.fetchManySize = size
+        if size is None:
+            return list(self._rows[:1])  # aiomysql: fetchmany(None) 按 arraysize=1 取行
+        return list(self._rows[:size])
+
+
+class _FakeResult:
+    def __init__(self, rows: list[dict]) -> None:
+        self._mappings = _FakeMappings(rows)
+
+    def mappings(self) -> _FakeMappings:
+        return self._mappings
+
+
+class _FakeConn:
+    def __init__(self, result: _FakeResult) -> None:
+        self._result = result
+
+    async def __aenter__(self) -> "_FakeConn":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def execute(self, sql: str) -> _FakeResult:
+        return self._result
+
+
+class _FakeEngine:
+    """模拟 SQLAlchemy AsyncEngine：connect() 同步返回 AsyncConnection（而非协程）。"""
+
+    def __init__(self, conn: _FakeConn) -> None:
+        self._conn = conn
+
+    def connect(self) -> _FakeConn:
+        return self._conn
+
+
+class TestSqlaAdapterRowFetch:
+    """回归：queryRowLimit<=0（无限）时必须显式 all() 取全部行。
+
+    背景：aiomysql 的 fetchmany(None) 按 cursor.arraysize（默认 1）只返回 1 行，
+    “fetchmany(None)=全部行”的假设仅对 asyncpg 成立。旧实现导致 MySQL 数据源
+    introspection 每个查询只取到首行（表/列/外键大面积丢失）。
+    """
+
+    async def test_unlimited_limit_returns_all_rows(self, monkeypatch) -> None:
+        rows = [{"a": 1}, {"a": 2}, {"a": 3}]
+        engine = _FakeEngine(_FakeConn(_FakeResult(rows)))
+        monkeypatch.setattr(pool, "create_async_engine", lambda url, **kwargs: engine)
+        monkeypatch.setattr(
+            pool, "getSettings", lambda: SimpleNamespace(queryRowLimit=0, queryTimeoutSeconds=30)
+        )
+        adapter = pool._SqlaAdapter("mysql+aiomysql://u:p@h:3306/db")
+        result = await adapter.execute_read_only("SELECT a FROM t")
+        assert result == rows
+        assert engine._conn._result._mappings.allCalled is True
+
+    async def test_positive_limit_uses_fetchmany(self, monkeypatch) -> None:
+        rows = [{"a": 1}, {"a": 2}, {"a": 3}]
+        engine = _FakeEngine(_FakeConn(_FakeResult(rows)))
+        monkeypatch.setattr(pool, "create_async_engine", lambda url, **kwargs: engine)
+        monkeypatch.setattr(
+            pool, "getSettings", lambda: SimpleNamespace(queryRowLimit=2, queryTimeoutSeconds=30)
+        )
+        adapter = pool._SqlaAdapter("mysql+aiomysql://u:p@h:3306/db")
+        result = await adapter.execute_read_only("SELECT a FROM t")
+        assert result == [{"a": 1}, {"a": 2}]
+        assert engine._conn._result._mappings.fetchManySize == 2

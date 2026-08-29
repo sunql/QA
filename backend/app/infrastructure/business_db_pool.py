@@ -269,16 +269,18 @@ class _SqlaAdapter:
 
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
         _assert_read_only(sql)
-        # queryRowLimit <= 0 视为取消行数上限：SQLAlchemy 的 fetchmany(None) 返回所有剩余行。
+        # queryRowLimit <= 0 视为取消行数上限。注意：不能依赖 fetchmany(None)=全部行——
+        # 该假设仅对 asyncpg 成立，aiomysql 的 fetchmany(None) 按 cursor.arraysize（默认 1）
+        # 只返回 1 行，导致 MySQL 数据源 introspection 每个查询只取到首行。无限行必须显式 all()。
         limit = getSettings().queryRowLimit
-        fetchSize: int | None = limit if limit > 0 else None
         timeout = getSettings().queryTimeoutSeconds
 
         async def _run() -> list[dict[str, Any]]:
             engine = self._ensureEngine()
             async with engine.connect() as conn:
                 result = await conn.execute(text(sql))
-                rows = result.mappings().fetchmany(fetchSize)
+                mappings = result.mappings()
+                rows = mappings.all() if limit <= 0 else mappings.fetchmany(limit)
                 return [dict(r) for r in rows]
 
         return await asyncio.wait_for(_run(), timeout)

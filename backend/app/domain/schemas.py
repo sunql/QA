@@ -502,6 +502,66 @@ class SchemaIntrospectResponse(CamelModel):
     cached_at: datetime = Field(..., description=MSG_SCHEMA_DATASOURCE_SCHEMA_CACHED_AT)
 
 
+# ===== 本地导入规则（local import）=====
+
+# 默认表名黑名单：排除日志表与临时表（匹配 tmp_/temp_ 前缀另行由 include_temp_tables 控制）。
+DEFAULT_TABLE_NAME_BLACKLIST_PATTERNS: list[str] = [r"^log$", r"^log_", r"_log$"]
+
+# 默认类型映射：key 为规范化后的 DB 类型（大写、无参数），value 为 DataType 枚举值。
+DEFAULT_TYPE_MAPPINGS: dict[str, str] = {
+    "NUMBER(p=0,s=0)": "INT",
+    "NUMBER": "DECIMAL",
+    "INT": "INT",
+    "INTEGER": "INT",
+    "BIGINT": "INT",
+    "SMALLINT": "INT",
+    "TINYINT": "INT",
+    "DECIMAL": "DECIMAL",
+    "NUMERIC": "DECIMAL",
+    "FLOAT": "DECIMAL",
+    "DOUBLE": "DECIMAL",
+    "REAL": "DECIMAL",
+    "VARCHAR": "STRING",
+    "VARCHAR2": "STRING",
+    "NVARCHAR": "STRING",
+    "NCHAR": "STRING",
+    "CHAR": "STRING",
+    "TEXT": "STRING",
+    "CLOB": "STRING",
+    "DATE": "DATETIME",
+    "TIMESTAMP": "DATETIME",
+    "DATETIME": "DATETIME",
+    "BOOLEAN": "BOOLEAN",
+    "BOOL": "BOOLEAN",
+    "BIT": "BOOLEAN",
+}
+
+
+class TableFilterRules(CamelModel):
+    """导入时的表过滤规则。"""
+
+    # 是否包含临时表（tmp_/temp_/# 前缀）；默认 False 即排除。
+    include_temp_tables: bool = False
+    # 表名黑名单正则（大小写不敏感，re.search 语义）。
+    name_blacklist_patterns: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_TABLE_NAME_BLACKLIST_PATTERNS)
+    )
+
+
+class TypeMappingRules(CamelModel):
+    """导入时的 DB 类型 -> DataType 映射规则。"""
+
+    # 规范化后的 DB 类型（大写、无参数）-> DataType 枚举值。
+    mappings: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_TYPE_MAPPINGS))
+
+
+class ImportRuleConfig(CamelModel):
+    """本地导入规则配置：表过滤 + 类型映射。"""
+
+    table_filter: TableFilterRules = Field(default_factory=TableFilterRules)
+    type_mapping: TypeMappingRules = Field(default_factory=TypeMappingRules)
+
+
 class MissingColumnRead(CamelModel):
     """本体系引用的、在当前数据源实际 schema 中已不存在的字段。"""
 

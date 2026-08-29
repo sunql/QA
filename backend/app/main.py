@@ -121,6 +121,7 @@ def createApp() -> FastAPI:
         datasource,
         embedding_provider,
         graph,
+        local_import,
         model_config,
         ontology,
         session,
@@ -141,6 +142,7 @@ def createApp() -> FastAPI:
         term_dictionary.router, prefix="/api/v1", tags=["term-dictionary"]
     )
     app.include_router(datasource.router, prefix="/api/v1/datasources", tags=["datasources"])
+    app.include_router(local_import.router, prefix="/api/v1/datasources", tags=["datasources"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(graph.router, prefix="/api/v1/system", tags=["system"])

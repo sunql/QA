@@ -20,6 +20,7 @@ from app.api.v1 import (
     chat,
     datasource,
     embedding_provider,
+    local_import,
     model_config,
     ontology,
     session,
@@ -85,6 +86,7 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         term_dictionary.router, prefix="/api/v1", tags=["term-dictionary"]
     )
     testApp.include_router(datasource.router, prefix="/api/v1/datasources", tags=["datasources"])
+    testApp.include_router(local_import.router, prefix="/api/v1/datasources", tags=["datasources"])
     testApp.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"])
 

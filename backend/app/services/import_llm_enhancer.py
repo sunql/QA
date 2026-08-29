@@ -6,7 +6,8 @@ import json
 import logging
 from typing import Any
 
-from app.domain.schemas import CamelModel, ColumnSchemaRead, TableSchemaRead
+from app.domain.schemas import CamelModel, TableSchemaRead
+from app.infrastructure.llm.base_client import LlmMessage
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +63,12 @@ class ImportLlmEnhancer:
     async def _call_llm(self, tables: list[TableSchemaRead]) -> str:
         if self._llm_client is None:
             raise RuntimeError("llm_client not provided")
-        prompt = self._build_prompt(tables)
-        return await self._llm_client.complete(prompt)
+        messages = self._build_prompt(tables)
+        response = await self._llm_client.complete(messages)
+        return response.content
 
     @staticmethod
-    def _build_prompt(tables: list[TableSchemaRead]) -> list[dict[str, Any]]:
+    def _build_prompt(tables: list[TableSchemaRead]) -> list[LlmMessage]:
         schema = [
             {
                 "name": t.table_name,
@@ -86,8 +88,8 @@ class ImportLlmEnhancer:
             "输出必须是严格 JSON，不要任何额外解释。"
         )
         return [
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps({"tables": schema}, ensure_ascii=False)},
+            LlmMessage(role="system", content=system),
+            LlmMessage(role="user", content=json.dumps({"tables": schema}, ensure_ascii=False)),
         ]
 
     def _parse(self, data: dict[str, Any], original: list[TableSchemaRead]) -> EnhancedSchemaResult:

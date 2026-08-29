@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
@@ -26,7 +26,6 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_HISTORY_LAST_ANSWER_PREVIEW,
     MSG_SCHEMA_CHAT_HISTORY_LAST_QUESTION,
     MSG_SCHEMA_CHAT_HISTORY_LAST_TIME,
-    MSG_SCHEMA_CHAT_HISTORY_MESSAGES,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CONTENT,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_COUNT,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CREATED_TIME,
@@ -34,6 +33,7 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_QUESTION,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_ROLE,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_SQL,
+    MSG_SCHEMA_CHAT_HISTORY_MESSAGES,
     MSG_SCHEMA_CHAT_HISTORY_SESSION_ID,
     MSG_SCHEMA_CHAT_LOCKED_MODEL,
     MSG_SCHEMA_CHAT_METRIC,
@@ -562,14 +562,24 @@ class TypeMappingRules(CamelModel):
     mappings: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_TYPE_MAPPINGS))
 
 
+class LlmEnhanceOptions(CamelModel):
+    """本地导入时 LLM 语义增强选项。"""
+
+    generate_aliases: bool = True
+    generate_descriptions: bool = True
+    detect_enums: bool = True
+    suggest_filters: bool = True
+
+
 class ImportRuleConfig(CamelModel):
-    """本地导入规则配置：表过滤 + 类型映射。"""
+    """本地导入规则配置：表过滤 + 类型映射 + LLM 增强。"""
 
     table_filter: TableFilterRules = Field(default_factory=TableFilterRules)
     type_mapping: TypeMappingRules = Field(default_factory=TypeMappingRules)
+    llm_enhance_options: LlmEnhanceOptions = Field(default_factory=LlmEnhanceOptions)
 
 
-class ConflictType(str, Enum):
+class ConflictType(StrEnum):
     """导入冲突类型：类（表级）或属性（列级）。"""
 
     CLASS = "class"
@@ -587,6 +597,112 @@ class ImportConflict(CamelModel):
     proposed_name: str | None = Field(default=None, description="建议的类/属性名称")
     # 处置动作：skip（默认，保留既有）| overwrite（覆盖）| rename（改名新建）
     action: str = "skip"
+
+
+class ProposedProperty(CamelModel):
+    """本地导入建议的属性。"""
+
+    source_column: str
+    property_name: str
+    property_alias: str | None = None
+    description: str | None = None
+    data_type: str
+    is_primary_key: bool = False
+    is_foreign_key: bool = False
+    enum_values: list[str] | None = None
+
+
+class ProposedClass(CamelModel):
+    """本地导入建议的类。"""
+
+    source_table: str
+    class_name: str
+    class_alias: str | None = None
+    description: str | None = None
+    properties: list[ProposedProperty] = Field(default_factory=list)
+    is_selected: bool = True
+
+
+class ProposedJoin(CamelModel):
+    """本地导入建议的关联关系。"""
+
+    source_table: str
+    source_columns: list[str]
+    target_table: str
+    target_columns: list[str]
+    join_type: str = "INNER"
+    relation_type: str = "foreign_key"
+    is_selected: bool = True
+
+
+class ImportPreviewRequest(CamelModel):
+    """本地导入预览请求。"""
+
+    rules: ImportRuleConfig = Field(default_factory=ImportRuleConfig)
+
+
+class FilterSuggestions(CamelModel):
+    """本地导入的表过滤建议。"""
+
+    recommended_blacklist_patterns: list[str] = Field(default_factory=list)
+    excluded_tables: list[str] = Field(default_factory=list)
+
+
+class LlmUsageInfo(CamelModel):
+    """本地导入 LLM 用量信息。"""
+
+    model_name: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
+class ImportPreviewResponse(CamelModel):
+    """本地导入预览响应。"""
+
+    datasource_id: int
+    proposed_classes: list[ProposedClass] = Field(default_factory=list)
+    proposed_joins: list[ProposedJoin] = Field(default_factory=list)
+    conflicts: list[ImportConflict] = Field(default_factory=list)
+    filter_suggestions: FilterSuggestions = Field(default_factory=FilterSuggestions)
+    llm_usage: LlmUsageInfo = Field(default_factory=LlmUsageInfo)
+
+
+class ConflictResolution(CamelModel):
+    """本地导入冲突处置。"""
+
+    type: str
+    existing_id: int
+    action: str  # skip | overwrite | rename
+    new_name: str | None = None
+
+
+class ImportExecuteRequest(CamelModel):
+    """本地导入执行请求。"""
+
+    confirmed_classes: list[ProposedClass]
+    confirmed_joins: list[ProposedJoin]
+    conflict_resolutions: list[ConflictResolution] = Field(default_factory=list)
+    sync_embeddings: bool = True
+
+
+class ImportErrorInfo(CamelModel):
+    """本地导入执行错误项。"""
+
+    type: str
+    name: str
+    message: str
+
+
+class ImportExecuteResponse(CamelModel):
+    """本地导入执行响应。"""
+
+    success: bool = True
+    created_classes: int = 0
+    created_properties: int = 0
+    created_joins: int = 0
+    skipped_conflicts: int = 0
+    overwritten_conflicts: int = 0
+    errors: list[ImportErrorInfo] = Field(default_factory=list)
 
 
 class MissingColumnRead(CamelModel):

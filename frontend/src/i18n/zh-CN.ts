@@ -557,6 +557,12 @@ export const zhCN = {
       preview: "预览确认",
       confirm: "导入完成",
     },
+    confirmImport: "确认导入",
+    preview: {
+      sourceTable: "源表",
+      className: "类名",
+      propertyCount: "属性数",
+    },
   },
 
   datasource: {

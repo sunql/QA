@@ -539,6 +539,12 @@ export const enUS = {
       preview: "Preview & Confirm",
       confirm: "Import Done",
     },
+    confirmImport: "Confirm Import",
+    preview: {
+      sourceTable: "Source Table",
+      className: "Class Name",
+      propertyCount: "Properties",
+    },
   },
 
   datasource: {

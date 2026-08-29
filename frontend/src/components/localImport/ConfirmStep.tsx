@@ -1,4 +1,8 @@
-// 骨架：导入结果展示将在后续任务中完善。
+import { Result } from "antd";
+import { useTranslation } from "../../i18n";
+
+// 导入完成：展示成功结果。
 export default function ConfirmStep() {
-  return <div>导入结果将在后续任务中完善</div>;
+  const { t } = useTranslation();
+  return <Result status="success" title={t("localImport.steps.confirm")} />;
 }

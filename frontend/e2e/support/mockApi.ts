@@ -267,6 +267,51 @@ function parseQuery(url: string): URLSearchParams {
 
 // ===== 各实体路由处理器（H1：dispatch 拆分，每个 <50 行） =====
 
+// 本地导入：预览走 httpClient（信封解包），执行走原始 axios（直接返回本体）。
+// 在 handleDatasourceRoutes 之前分发，避免被其 idMatch 兜底 404 吞掉。
+async function handleLocalImportRoutes(route: Route, ctx: RouteCtx): Promise<void> {
+  const { method, path } = ctx;
+  const previewMatch = path.match(/^\/datasources\/(\d+)\/import-preview$/);
+  if (previewMatch && method === "POST") {
+    const dsId = Number(previewMatch[1]);
+    const preview = {
+      datasourceId: dsId,
+      proposedClasses: [
+        {
+          sourceTable: "orders",
+          className: "orders",
+          classAlias: null,
+          description: null,
+          isSelected: true,
+          properties: [
+            { sourceColumn: "id", propertyName: "id", propertyAlias: null, description: null, dataType: "INT", isPrimaryKey: true, isForeignKey: false, enumValues: null },
+            { sourceColumn: "customer_id", propertyName: "customer_id", propertyAlias: null, description: null, dataType: "INT", isPrimaryKey: false, isForeignKey: true, enumValues: null },
+          ],
+        },
+      ],
+      proposedJoins: [],
+      conflicts: [],
+      filterSuggestions: { recommendedBlacklistPatterns: [], excludedTables: [] },
+      llmUsage: { modelName: "mock-model", promptTokens: 0, completionTokens: 0 },
+    };
+    return respondJson(route, 200, ok(preview));
+  }
+  const importMatch = path.match(/^\/datasources\/(\d+)\/import$/);
+  if (importMatch && method === "POST") {
+    // executeImport 走原始 axios：返回 ImportExecuteResponse 本体，不包信封
+    return respondJson(route, 200, {
+      success: true,
+      createdClasses: 1,
+      createdProperties: 2,
+      createdJoins: 0,
+      skippedConflicts: 0,
+      overwrittenConflicts: 0,
+      errors: [],
+    });
+  }
+  return respondJson(route, 404, fail(`模拟后端未实现 ${method} ${path}`));
+}
+
 async function handleDatasourceRoutes(route: Route, ctx: RouteCtx): Promise<void> {
   const { method, path, body, query, backend } = ctx;
   if (path === "/datasources" && method === "GET") {
@@ -530,6 +575,8 @@ async function dispatch(route: Route, backend: MockBackend): Promise<void> {
     query: parseQuery(request.url()),
     body: (request.postDataJSON() ?? {}) as Record<string, unknown>,
   };
+  if (ctx.path.startsWith("/datasources") && /\/import(-preview)?$/.test(ctx.path))
+    return handleLocalImportRoutes(route, ctx);
   if (ctx.path.startsWith("/datasources")) return handleDatasourceRoutes(route, ctx);
   if (ctx.path.startsWith("/ontology/classes")) return handleClassRoutes(route, ctx);
   if (ctx.path.startsWith("/ontology/properties")) return handlePropertyRoutes(route, ctx);

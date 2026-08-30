@@ -176,9 +176,12 @@ export default function ChatPanel({
               {t("chatPanel.suggesting")}
             </Text>
           ) : null}
-          {suggestions.map((s) => (
+          {suggestions.map((s, idx) => (
             <Button
-              key={s.question}
+              // key 加 idx 后缀：SimilarQuery 只有 question/sql/similarity 三字段，
+              // 后端偶发会返回相同 question 的多条（如同一问题多次命中），
+              // 用 idx 保证 React key 唯一，避免 duplicate key 警告
+              key={`${idx}-${s.question}`}
               size="small"
               onClick={() => setQuestion(s.question)}
               title={s.sql ? t("chatPanel.suggestTitle") : undefined}

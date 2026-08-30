@@ -100,4 +100,30 @@ describe("ChatPanel 相似问题建议", () => {
     await new Promise((resolve) => setTimeout(resolve, 400));
     expect(chatApi.getSuggestions).not.toHaveBeenCalled();
   });
+
+  // 回归测试：后端偶发返回相同 question 的多条建议时，不应触发 React duplicate key 警告
+  // （前端 console.error spy 监听；通过即代表 key 唯一）
+  it("后端返回重复 question 的多条建议 → 不产生 duplicate key 警告", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    chatApi.getSuggestions.mockResolvedValueOnce([
+      { question: "查 2026 年同期", sql: null, similarity: 0.91 },
+      { question: "查 2026 年同期", sql: "SELECT 2", similarity: 0.88 },
+      { question: "查 2026 年同期", sql: null, similarity: 0.85 },
+    ]);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.type(screen.getByPlaceholderText(/输入自然语言问题/), "查");
+    await waitFor(
+      () => expect(chatApi.getSuggestions).toHaveBeenCalledTimes(1),
+      { timeout: 1500 }
+    );
+    // 等 chips 渲染（3 条同名建议都应被找到，用 findAllByRole 而非 findByRole）
+    const chips = await screen.findAllByRole("button", { name: /查 2026 年同期/ });
+    expect(chips).toHaveLength(3);
+    const duplicateKeyCalls = errorSpy.mock.calls.filter((call) =>
+      String(call[0] ?? "").includes("two children with the same key")
+    );
+    expect(duplicateKeyCalls).toHaveLength(0);
+    errorSpy.mockRestore();
+  });
 });

@@ -68,6 +68,44 @@ class TestAssertReadOnly:
         with pytest.raises(SqlSafetyError):
             pool._assert_read_only("EXPLAIN SELECT 1")
 
+    # —— 深度扫描：首 token 合法但语义为写/侧信道的形态 ——
+
+    def test_rejects_data_modifying_cte(self) -> None:
+        with pytest.raises(SqlSafetyError):
+            pool._assert_read_only(
+                "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x"
+            )
+
+    def test_rejects_select_into(self) -> None:
+        with pytest.raises(SqlSafetyError):
+            pool._assert_read_only("SELECT * INTO t2 FROM t")
+
+    def test_rejects_select_into_outfile(self) -> None:
+        with pytest.raises(SqlSafetyError):
+            pool._assert_read_only("SELECT * FROM t INTO OUTFILE '/tmp/dump'")
+
+    def test_rejects_for_update(self) -> None:
+        with pytest.raises(SqlSafetyError):
+            pool._assert_read_only("SELECT * FROM t FOR UPDATE")
+
+    def test_rejects_for_share(self) -> None:
+        with pytest.raises(SqlSafetyError):
+            pool._assert_read_only("SELECT * FROM t FOR SHARE")
+
+    def test_rejects_nextval(self) -> None:
+        with pytest.raises(SqlSafetyError):
+            pool._assert_read_only("SELECT nextval('s')")
+
+    def test_rejects_pg_read_file(self) -> None:
+        with pytest.raises(SqlSafetyError):
+            pool._assert_read_only("SELECT pg_read_file('/etc/passwd')")
+
+    def test_accepts_write_words_inside_string_literal(self) -> None:
+        pool._assert_read_only("SELECT * FROM t WHERE x = 'DELETE FROM t'")
+
+    def test_accepts_delete_as_column_name(self) -> None:
+        pool._assert_read_only('SELECT "DELETE" AS col FROM t')
+
 
 class TestBuildUrl:
     def test_postgres_url_encodes_password(self) -> None:

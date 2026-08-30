@@ -55,6 +55,22 @@ _FORBIDDEN_VERBS = {
     "EXECUTE",
 }
 
+# 危险函数名（即便包在只读 SELECT 里也属写/侧信道）：序列推进、跨库执行、
+# 大对象文件 I/O、服务器文件读写/列目录。命中即拒，仅当 token 为 Name（函数名）。
+_FORBIDDEN_FUNCTIONS = {
+    "NEXTVAL",
+    "SETVAL",
+    "DBLINK_EXEC",
+    "DBLINK_SEND_QUERY",
+    "LO_EXPORT",
+    "LO_IMPORT",
+    "PG_READ_FILE",
+    "PG_WRITE_FILE",
+    "PG_READ_BINARY_FILE",
+    "PG_WRITE_BINARY_FILE",
+    "PG_LS_DIR",
+}
+
 _adapters: dict[int, "BusinessDbAdapter"] = {}
 
 # Oracle 取消行数上限时的循环 fetchmany 批量大小（避免一次性巨大数组）
@@ -71,6 +87,10 @@ def _assert_read_only(sql: str) -> None:
 
     使用 sqlparse 拆分语句；每个语句的首个非空白 token 必须是白名单动词。
     含多语句（出现 ; 分隔的多条非空语句）且其中有非只读语句时拒绝。
+
+    仅看首 token 不足以防注入：`WITH x AS (DELETE ...) SELECT ...`、
+    `SELECT ... INTO ...`、`SELECT ... FOR UPDATE` 等首 token 都合法，
+    故在首 token 白名单通过后再做深度扫描（见 _assertNoHiddenWrites）。
     """
     if not sql or not sql.strip():
         raise SqlSafetyError(MSG_SQL_EMPTY, sql=sql)
@@ -100,6 +120,45 @@ def _assert_read_only(sql: str) -> None:
         raise SqlSafetyError(MSG_SQL_FORBIDDEN_OPERATION.format(verb=verb), sql=sql)
     if verb not in _READ_ONLY_VERBS:
         raise SqlSafetyError(MSG_SQL_NOT_READONLY.format(verb=verb), sql=sql)
+
+    # 深度扫描：白名单首 token 通过后，仍要拦下藏于 CTE/子查询/尾随子句的写操作
+    _assertNoHiddenWrites(stmt, sql)
+
+
+def _assertNoHiddenWrites(stmt: sqlparse.sql.Statement, sql: str) -> None:
+    """深度扫描已通过白名单首 token 的语句，拦截隐藏写操作。
+
+    覆盖（均为首 token 合法但语义为写/侧信道的形态）：
+    - `WITH x AS (DELETE ...) SELECT * FROM x`：数据修改 CTE —— DELETE 等
+      动词出现在 Keyword.DML/DDL token 中；
+    - `SELECT ... INTO t`（PG/标准 SQL 建表）、`SELECT ... INTO OUTFILE/DUMPFILE`
+      （MySQL 写文件）—— 关键 token 是 Keyword `INTO`（OUTFILE 本身被 sqlparse
+      归为 Name，故不单独判）；
+    - `SELECT ... FOR UPDATE` / `FOR SHARE`（PG 行锁）与 `LOCK IN SHARE MODE`
+      （MySQL）—— UPDATE 已入 _FORBIDDEN_VERBS，SHARE 是 Keyword 需单独判；
+    - `SELECT nextval('seq')` / `pg_read_file(...)` 等危险函数 —— Name token
+      命中 _FORBIDDEN_FUNCTIONS。
+
+    字符串/数字字面量（Token.Literal）整段跳过，避免把 `'DELETE FROM x'` 这类
+    文本误判为写操作；注释亦跳过。
+    """
+    from sqlparse import tokens as T
+
+    for tok in stmt.flatten():
+        if tok.is_whitespace:
+            continue
+        ttype = tok.ttype
+        if ttype in T.Comment or ttype in T.Literal:
+            continue
+        upper = tok.value.upper()
+        if ttype in (T.Keyword.DML, T.Keyword.DDL) and upper in _FORBIDDEN_VERBS:
+            raise SqlSafetyError(MSG_SQL_FORBIDDEN_OPERATION.format(verb=upper), sql=sql)
+        if ttype is T.Keyword and upper == "INTO":
+            raise SqlSafetyError(MSG_SQL_FORBIDDEN_OPERATION.format(verb="INTO"), sql=sql)
+        if ttype is T.Keyword and upper == "SHARE":
+            raise SqlSafetyError(MSG_SQL_FORBIDDEN_OPERATION.format(verb="SHARE"), sql=sql)
+        if ttype is T.Name and upper in _FORBIDDEN_FUNCTIONS:
+            raise SqlSafetyError(MSG_SQL_FORBIDDEN_OPERATION.format(verb=upper), sql=sql)
 
 
 # Oracle 标识符字符集：数字/字母/下划线 + CJK 统一表意文字（含扩展 A）

@@ -34,6 +34,36 @@ Phase 2 预置本体：
 
 支持动态注册（`POST /api/v1/datasource`），可接入 SRM（供应商/采购订单）等其它业务库。
 
+## 采购域业务对象目录（Phase 3.3）
+
+`seed_ontology.py` 现有 27 个类，覆盖采购域核心单据与主数据。Phase 3.3 补齐 3 个缺失业务对象（6 个类），源表与关键属性基于 ZJTH 真实库（`all_tab_columns` 实证）：
+
+| 对象 | 类 | source_table | 关键属性 |
+|---|---|---|---|
+| QUOT（报价/询价） | `Quotation` / `QuotationDetail` | `PQUOTAT` / `PQUOTATD` | 报价单号、报价日期、响应期限、受邀/响应供应商数；明细：物料、数量、提前期、来源请购行 |
+| INV（采购发票） | `PurchaseInvoice` / `PurchaseInvoiceDetail` | `PINVOICE` / `PINVOICED` | 发票号、供应商、含税/不含税金额、到期日、状态；明细：物料、数量、金额、三向匹配关联 |
+| PAY（付款） | `Payment` / `PaymentDetail` | `PAYMENTH` / `PAYMENTD` | 付款单号、付款类型、付款金额、付款/到期日期、状态；明细：科目、供应商、被支付凭证 |
+
+### 关键映射与业务流转
+
+- **QUOT 映射修正**：采购域「报价」对应 Sage X3 **采购报价 `PQUOTAT`**（`SQUOTE` 是销售报价——含销售员 `REP_0`、销售订单 `SOHNUM_0`，不属采购域）。`PQUOTAT` 一张单据覆盖「询价 → 报价」两端：表头 `BPSNBR_0`（受邀供应商数）/`RSPNBR_0`（响应供应商数），明细 `PSHNUM_0`/`PSDLIN_0` 引用来源请购单（`PREQUISD`）。当前表内 0 行（结构性建模，供后续数据加载）。
+- **INV 三向匹配**：`PINVOICED` 明细经 `POHNUM_0`+`POPLIN_0` → `PORDERQ`（订单）、`PTHNUM_0`+`PTDLIN_0` → `PRECEIPTD`（收货）、`PNHNUM_0`+`PNDLIN_0` → `PAYMENTD`（付款），支撑「订单/收货/发票/付款」四单对账。数据规模：发票 38K 行 / 明细 2.4M 行。
+- **PAY 与发票核销**：`PAYMENTD` 的 `VCRNUM_0`/`VCRTYP_0` 为被支付凭证（发票）；发票明细的 `PNHNUM_0`/`PNDLIN_0` 反指付款行。
+- **新 KPI**：`KPI_INVOICE_AMT`（发票金额）、`KPI_PAYMENT_AMT`（付款金额）、`KPI_QUOTATION_QTY`（询价数量）。
+
+### 已覆盖 / 已知缺口
+
+| 目录对象 | 状态 | 说明 |
+|---|---|---|
+| ASN（发运通知） | ✅ 已建模 | = 到货单 `ArrivalNotice`（`YPRECEIPT`），`XSRMID_0` 即 ASN 号 |
+| DELIVERY（交付） | ✅ 已覆盖 | 采购交付无独立表，由到货单 `YPRECEIPT`/收货单 `PRECEIPT` 全流程覆盖（`SDELIVERY` 为销售发货，不属采购域） |
+| RFQ（询价） | ✅ 并入 QUOT | `PQUOTAT` 即询价/报价单据（与 QUOT 同表两端） |
+| CONTRACT（采购合同） | ⚠️ 已知缺口 | ZJTH 无合同主数据表；合同条款可存于 `DocumentCatalog`（Phase 5） |
+| NCR（不合格处理） | ⚠️ 已知缺口 | 属 QMS 域，当前业务库无 NCR 表 |
+| SUP_PERF（供应商绩效） | ⚠️ 已知缺口 | 为派生指标域（OTD/质量/价格），由 Phase 4 Feature/KPI 计算，无源表 |
+
+NL2SQL 引用新类经 `_validateOntologyAgainstSchema` 校验：`PQUOTAT`/`PINVOICE`/`PAYMENTH` 等表均存在于 ZJTH schema 缓存，无漂移告警。见 [[Supplier 收货模式 YPTHFLGM_0]]、[[nl2sql-engine]]。
+
 ## 供应商域（Supplier）
 
 业务表：`BPSUPPLIER`（供应商主档）→ `PORDER`/`PORDERQ`（采购订单及明细）→ `YPRECEIPT`/`YPRECEIPTD`（到货单及明细）→ `PRECEIPT`/`PRECEIPTD`（收货单/入库单及明细）。

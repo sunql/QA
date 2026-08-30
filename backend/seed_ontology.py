@@ -1,17 +1,19 @@
-"""预置本体（Ontology）种子数据：基于 Sage X3 业务库 17 张核心表。
+"""预置本体（Ontology）种子数据：基于 Sage X3 业务库 27 张核心表。
 
-覆盖表（业务数据库信息.md 第2点 + ROUOPE + 收货单据4表 + 关键表4表 + 采购订单2表）：
-  ITMMASTER(物料)  BPCUSTOMER(客户)  BPARTNER(合作伙伴)  BPSUPPLIER(供应商)
+覆盖表（业务数据库信息.md 第2点 + ROUOPE + 收货单据4表 + 关键表4表 + 采购订单2表 + Phase 3.3 缺失对象（3 对象 6 表 6 类））：
+  ITMMASTER(物料)  BPCUSTOMER(客户)  BPARTNER(合作伙伴)  BPSUPPLIER(供应商)  BPCARRIER(承运商)
   BOM(物料清单)    BOMD(BOM明细)     ITMFACILIT(物料地点)  FACILITY(地点)  ROUOPE(工艺工序)
   YPRECEIPT(到货单) YPRECEIPTD(到货明细) PRECEIPT(收货单/入库单) PRECEIPTD(收货明细)
   PREQUISD(采购需求明细) PREQUISO(请购订单关联) PPRICFICH(供应商价格单) PPRICLIST(供应商价格明细)
   PPRICCONF(供应商价格配置) PORDER(采购订单) PORDERQ(采购订单明细)
+  PQUOTAT(采购报价) PQUOTATD(采购报价明细) PINVOICE(采购发票) PINVOICED(采购发票明细)
+  PAYMENTH(付款单) PAYMENTD(付款明细)
 
 每类录入主要字段（主键/外键/SQL样例字段/核心业务字段），跳过 DIE/CCE/INVDTA/DISCRG/CLCAMT/DCGVAL 等扩展槽位。
 外键关系按 Sage X3 命名约定 + SQL JOIN 推断（库内无声明 PK/FK 约束）。
 
 幂等：按 source_table 复用类、按 (class_id, property_name) 跳过已有属性、按 metric_name 复用指标。
-PG 写完后同步 Neo4j 本体图（20 类 + 属性 + 指标 + HAS_PROPERTY/REFERENCES/DERIVED_FROM 关系，幂等 MERGE）。
+PG 写完后同步 Neo4j 本体图（27 类 + 属性 + 指标 + HAS_PROPERTY/REFERENCES/DERIVED_FROM 关系，幂等 MERGE）。
 
 指标（METRICS）种子：Phase 2 数据血缘 KPI 层数据源。lineage_auto_extract.py 消费
 formula 中的聚合列生成 SOURCE -> KPI 血缘边；无指标时血缘图退化为单系统图。
@@ -163,6 +165,42 @@ CLASSES = [
         "class_alias": "采购订单明细",
         "source_table": "PORDERQ",
         "description": "采购订单明细表（PORDERQ），记录每张采购订单下的物料行、数量、单价、金额与交货/收货需求等。",
+    },
+    {
+        "class_name": "Quotation",
+        "class_alias": "采购报价",
+        "source_table": "PQUOTAT",
+        "description": "采购报价/询价单表头（PQUOTAT），向供应商发出询价并收集报价，含报价日期、响应期限、受邀与响应供应商数等。",
+    },
+    {
+        "class_name": "QuotationDetail",
+        "class_alias": "采购报价明细",
+        "source_table": "PQUOTATD",
+        "description": "采购报价/询价单明细（PQUOTATD），记录每行询价/报价的物料、数量、提前期、要求收货日与来源请购行等。",
+    },
+    {
+        "class_name": "PurchaseInvoice",
+        "class_alias": "采购发票",
+        "source_table": "PINVOICE",
+        "description": "采购发票表头（PINVOICE），记录供应商发票的供应商、日期、金额（含税/不含税）、应付到期日与过账状态等。",
+    },
+    {
+        "class_name": "PurchaseInvoiceDetail",
+        "class_alias": "采购发票明细",
+        "source_table": "PINVOICED",
+        "description": "采购发票明细（PINVOICED），记录每行发票的物料、数量、单价、金额，以及采购订单/收货单/付款单三向匹配关联。",
+    },
+    {
+        "class_name": "Payment",
+        "class_alias": "付款单",
+        "source_table": "PAYMENTH",
+        "description": "付款单表头（PAYMENTH），记录向供应商付款的单据，含付款类型、付款金额、付款/到期日期与状态等。",
+    },
+    {
+        "class_name": "PaymentDetail",
+        "class_alias": "付款明细",
+        "source_table": "PAYMENTD",
+        "description": "付款单明细（PAYMENTD），记录每行付款的科目、供应商、被支付凭证（发票）与金额等。",
     },
 ]
 
@@ -1030,6 +1068,189 @@ PROPERTIES = {
         P("SRM Line", "XSRMLIN_0", "INT"),
         # === 从 Excel 字段字典补全 123 条 ===
     ],
+
+    # ---------- PQUOTAT 采购报价/询价单 ----------
+    "PQUOTAT": [
+        P("报价单号", "PQHNUM_0", "STRING", pk=True,
+          aliases=["询价单号", "RFQ号", "报价请求号"],
+          desc="采购报价/询价单号（向供应商询价并收集报价的单据头唯一号）"),
+        P("公司", "CPY_0", "STRING"),
+        P("采购地点", "PQHFCY_0", "STRING", fk="FACILITY"),
+        P("报价日期", "PQHDAT_0", "DATETIME", aliases=["询价日期", "发出日期"]),
+        P("响应期限", "RSPDEA_0", "INT", desc="要求供应商响应（报价）的天数"),
+        P("参考", "PQHREF_0", "STRING"),
+        P("行数", "LINNBR_0", "INT"),
+        P("需求人", "REQUSR_0", "STRING"),
+        P("标题", "TEX1_0", "STRING"),
+        P("文本", "TEX2_0", "STRING"),
+        P("报价供应商数", "BPSNBR_0", "INT", desc="受邀报价的供应商数量"),
+        P("响应供应商数", "RSPNBR_0", "INT", desc="实际响应报价的供应商数量"),
+        P("创建人", "CREUSR_0", "STRING"),
+        P("创建日期", "CREDAT_0", "DATETIME"),
+        P("更新人", "UPDUSR_0", "STRING"),
+        P("更新日期", "UPDDAT_0", "DATETIME"),
+    ],
+    # ---------- PQUOTATD 采购报价/询价明细 ----------
+    "PQUOTATD": [
+        P("报价单号", "PQHNUM_0", "STRING", pk=True, fk="PQUOTAT"),
+        P("行号", "PQDLIN_0", "INT", pk=True),
+        P("公司", "CPY_0", "STRING"),
+        P("采购地点", "PQHFCY_0", "STRING", fk="FACILITY"),
+        P("物料编号", "ITMREF_0", "STRING", fk="ITMMASTER"),
+        P("物料描述1", "ITMDES1_0", "STRING"),
+        P("物料描述", "ITMDES_0", "STRING"),
+        P("项目", "PQDPJT_0", "STRING"),
+        P("采购单位", "PUU_0", "STRING"),
+        P("采购数量", "QTYPUU_0", "DECIMAL", aliases=["数量", "询价数量"],
+          desc="询价/报价行的采购数量"),
+        P("提前期", "LTI_0", "DECIMAL", desc="该行要求供应商交付的提前期（天）"),
+        P("要求收货日期", "RCPDAT_0", "DATETIME"),
+        P("请购单号", "PSHNUM_0", "STRING"),
+        P("请购行", "PSDLIN_0", "INT"),
+        P("需要的库存数量", "RETQTYSTU_0", "DECIMAL"),
+        P("存货单位", "STU_0", "STRING"),
+        P("文本", "LINTEX_0", "STRING"),
+        P("响应行数", "LINRSPNBR_0", "INT", desc="该报价行收到的供应商响应数量"),
+        P("创建人", "CREUSR_0", "STRING"),
+        P("创建日期", "CREDAT_0", "DATETIME"),
+        P("更新人", "UPDUSR_0", "STRING"),
+        P("更新日期", "UPDDAT_0", "DATETIME"),
+    ],
+    # ---------- PINVOICE 采购发票 ----------
+    "PINVOICE": [
+        P("发票号", "NUM_0", "STRING", pk=True,
+          aliases=["采购发票号", "发票编号"],
+          desc="采购发票号（PINVOICE 主键，供应商发票入账后的内部发票号）"),
+        P("发票类型", "INVTYP_0", "STRING", desc="发票类型（如 SINVOICE=普通采购发票）"),
+        P("发票类别", "PIVTYP_0", "STRING"),
+        P("供应商", "BPR_0", "STRING", fk="BPARTNER",
+          aliases=["业务伙伴"],
+          desc="发票抬头供应商（业务伙伴编码，关联 BPARTNER）"),
+        P("供应商名称", "BPRNAM_0", "STRING"),
+        P("供应商发票号", "BPRVCR_0", "STRING", aliases=["供应商凭证号"],
+          desc="供应商侧的发票号/凭证号"),
+        P("供应商发票日期", "BPRDAT_0", "DATETIME", desc="供应商开具发票的日期"),
+        P("会计日期", "ACCDAT_0", "DATETIME", aliases=["入账日期"]),
+        P("到期日", "STRDUDDAT_0", "DATETIME", desc="发票应付到期日"),
+        P("货币", "CUR_0", "STRING"),
+        P("采购类型", "PURTYP_0", "STRING"),
+        P("发票参考", "INVREF_0", "STRING"),
+        P("描述", "DES_0", "STRING"),
+        P("不含税总额", "AMTNOT_0", "DECIMAL",
+          aliases=["发票金额", "不含税金额", "发票不含税金额"],
+          desc="采购发票不含税总额（净额，发票金额主口径）"),
+        P("含税总额", "AMTATI_0", "DECIMAL",
+          aliases=["含税金额", "发票含税金额"],
+          desc="采购发票含税总额（价税合计）"),
+        P("税额合计", "AMTTAX_0", "DECIMAL", aliases=["税额"]),
+        P("状态", "STA_0", "STRING"),
+        P("过账标志", "PST_0", "STRING", desc="发票是否已过账到财务"),
+        P("财年", "FIY_0", "STRING"),
+        P("期间", "PER_0", "STRING"),
+        P("创建人", "CREUSR_0", "STRING"),
+        P("创建日期", "CREDAT_0", "DATETIME"),
+        P("更新人", "UPDUSR_0", "STRING"),
+        P("更新日期", "UPDDAT_0", "DATETIME"),
+    ],
+    # ---------- PINVOICED 采购发票明细 ----------
+    "PINVOICED": [
+        P("发票号", "NUM_0", "STRING", pk=True, fk="PINVOICE"),
+        P("行号", "PIDLIN_0", "INT", pk=True),
+        P("发票类型", "INVTYP_0", "STRING"),
+        P("发票类别", "PIVTYP_0", "STRING"),
+        P("会计日期", "ACCDAT_0", "DATETIME"),
+        P("供应商", "BPR_0", "STRING", fk="BPARTNER"),
+        P("物料编号", "ITMREF_0", "STRING", fk="ITMMASTER"),
+        P("物料描述1", "ITMDES1_0", "STRING"),
+        P("物料描述", "ITMDES_0", "STRING"),
+        P("单位", "UOM_0", "STRING"),
+        P("采购单位", "PUU_0", "STRING"),
+        P("数量", "QTYUOM_0", "DECIMAL", aliases=["发票数量", "采购数量"],
+          desc="发票行数量"),
+        P("采购单位数量", "QTYPUU_0", "DECIMAL"),
+        P("采购价", "GROPRI_0", "DECIMAL"),
+        P("净价", "NETPRI_0", "DECIMAL"),
+        P("原始净价", "ORINETPRI_0", "DECIMAL"),
+        P("货币", "NETCUR_0", "STRING"),
+        P("不含税行金额", "AMTNOTLIN_0", "DECIMAL",
+          aliases=["行不含税金额", "行金额", "发票金额"],
+          desc="发票行不含税金额"),
+        P("含税行金额", "AMTATILIN_0", "DECIMAL", aliases=["行含税金额"],
+          desc="发票行含税金额"),
+        P("采购订单号", "POHNUM_0", "STRING", desc="关联采购订单号（三向匹配：发票→订单）"),
+        P("订单行", "POPLIN_0", "INT"),
+        P("收货单号", "PTHNUM_0", "STRING", desc="关联收货单号（三向匹配：发票→收货）"),
+        P("收货行", "PTDLIN_0", "INT"),
+        P("付款单号", "PNHNUM_0", "STRING", desc="关联付款单号（发票→付款）"),
+        P("付款行", "PNDLIN_0", "INT"),
+        P("税码", "VAT_0", "STRING"),
+        P("创建人", "CREUSR_0", "STRING"),
+        P("创建日期", "CREDAT_0", "DATETIME"),
+        P("更新人", "UPDUSR_0", "STRING"),
+        P("更新日期", "UPDDAT_0", "DATETIME"),
+    ],
+    # ---------- PAYMENTH 付款单 ----------
+    "PAYMENTH": [
+        P("付款单号", "NUM_0", "STRING", pk=True,
+          aliases=["付款编号", "支付单号"],
+          desc="付款单号（PAYMENTH 主键）"),
+        P("付款类型", "PAYTYP_0", "STRING",
+          desc="付款类型（CHEQUE=支票、TRANSFER=转账、CASH=现金、DD=直接扣款等）"),
+        P("付款方式", "PAM_0", "STRING"),
+        P("供应商", "BPR_0", "STRING", fk="BPARTNER",
+          aliases=["收款方"],
+          desc="付款收款方（业务伙伴，通常为供应商）"),
+        P("公司", "CPY_0", "STRING"),
+        P("地点", "FCY_0", "STRING", fk="FACILITY"),
+        P("银行", "BAN_0", "STRING"),
+        P("会计科目", "ACC_0", "STRING"),
+        P("货币", "CUR_0", "STRING"),
+        P("付款金额", "AMTCUR_0", "DECIMAL", aliases=["金额", "支付金额"],
+          desc="付款单金额（本币）"),
+        P("银行金额", "AMTBAN_0", "DECIMAL", desc="银行实际支付金额"),
+        P("状态", "STA_0", "STRING"),
+        P("会计日期", "ACCDAT_0", "DATETIME", aliases=["入账日期"]),
+        P("付款日期", "VALDAT_0", "DATETIME", aliases=["生效日期"],
+          desc="付款生效日期"),
+        P("到期日", "DUDDAT_0", "DATETIME"),
+        P("银行日期", "BANDAT_0", "DATETIME"),
+        P("参考", "REF_0", "STRING"),
+        P("描述", "DES_0", "STRING"),
+        P("支票号", "CHQNUM_0", "STRING", desc="支票类型付款的支票号"),
+        P("支票银行", "CHQBAN_0", "STRING"),
+        P("信用卡号", "CRDNUM_0", "STRING",
+          desc="信用卡类型付款的卡号（敏感字段：仅授权场景可查询/返回）"),
+        P("来源单号", "FRMNUM_0", "STRING"),
+        P("财年", "FIY_0", "STRING"),
+        P("期间", "PER_0", "STRING"),
+        P("创建人", "CREUSR_0", "STRING"),
+        P("创建日期", "CREDAT_0", "DATETIME"),
+        P("更新人", "UPDUSR_0", "STRING"),
+        P("更新日期", "UPDDAT_0", "DATETIME"),
+    ],
+    # ---------- PAYMENTD 付款明细 ----------
+    "PAYMENTD": [
+        P("付款单号", "NUM_0", "STRING", pk=True, fk="PAYMENTH"),
+        P("行号", "LIN_0", "INT", pk=True),
+        P("币种", "DENCOD_0", "STRING"),
+        P("科目类型", "ACCTYP_0", "STRING"),
+        P("地点", "FCYLIN_0", "STRING"),
+        P("供应商", "BPRLIN_0", "STRING", fk="BPARTNER"),
+        P("会计科目", "ACC_0", "STRING"),
+        P("税码", "VATLIN_0", "STRING"),
+        P("货币", "CURLIN_0", "STRING"),
+        P("数量", "QTYLIN_0", "DECIMAL"),
+        P("描述", "DESLIN_0", "STRING"),
+        P("凭证类型", "VCRTYP_0", "STRING", desc="被支付凭证类型（如发票）"),
+        P("凭证号", "VCRNUM_0", "STRING", desc="被支付凭证号（如发票号）"),
+        P("票据号", "DUDNUM_0", "STRING"),
+        P("票据行", "DUDLIG_0", "INT"),
+        P("开票供应商", "BPRINV_0", "STRING", fk="BPARTNER"),
+        P("创建人", "CREUSR_0", "STRING"),
+        P("创建日期", "CREDAT_0", "DATETIME"),
+        P("更新人", "UPDUSR_0", "STRING"),
+        P("更新日期", "UPDDAT_0", "DATETIME"),
+    ],
 }
 
 # =============================================================================
@@ -1064,6 +1285,18 @@ BUSINESS_JOINS = [
      "business", "价格配置按价格表号关联价格单（取价条件/优先级定义）"),
     ("PPRICCONF", ["PLI_0"], "PPRICLIST", ["PLI_0"],
      "business", "价格配置按价格表号关联价格明细（取价条件维度/优先级）"),
+    # 报价明细 → 请购明细（请购单号+请购行，询价响应来源）
+    ("PQUOTATD", ["PSHNUM_0", "PSDLIN_0"], "PREQUISD", ["PSHNUM_0", "PSDLIN_0"],
+     "business", "采购报价明细关联请购明细（请购单号+请购行，询价响应来源）"),
+    # 发票明细 → 采购订单明细（采购订单号+订单行，三向匹配）
+    ("PINVOICED", ["POHNUM_0", "POPLIN_0"], "PORDERQ", ["POHNUM_0", "POPLIN_0"],
+     "business", "采购发票明细关联采购订单明细（采购订单号+订单行，三向匹配）"),
+    # 发票明细 → 收货明细（收货单号+收货行，三向匹配）
+    ("PINVOICED", ["PTHNUM_0", "PTDLIN_0"], "PRECEIPTD", ["PTHNUM_0", "PTDLIN_0"],
+     "business", "采购发票明细关联收货明细（收货单号+收货行，三向匹配）"),
+    # 发票明细 → 付款明细（付款单号+付款行，发票被付款核销）
+    ("PINVOICED", ["PNHNUM_0", "PNDLIN_0"], "PAYMENTD", ["NUM_0", "LIN_0"],
+     "business", "采购发票明细关联付款明细（付款单号+付款行，发票被付款核销）"),
 ]
 
 # =============================================================================
@@ -1125,6 +1358,33 @@ METRICS = [
         "agg_function": "AVG",
         "dimension_defaults": None,
         "description": "加权平均入库金额 = 收货行金额 / 收货数量",
+    },
+    {
+        "metric_name": "KPI_INVOICE_AMT",
+        "metric_alias": "采购发票总金额",
+        "target_table": "PINVOICED",
+        "formula": "SUM(t.AMTNOTLIN_0)",
+        "agg_function": "SUM",
+        "dimension_defaults": None,
+        "description": "采购发票明细不含税行金额合计（按供应商/发票维度）",
+    },
+    {
+        "metric_name": "KPI_PAYMENT_AMT",
+        "metric_alias": "付款总金额",
+        "target_table": "PAYMENTH",
+        "formula": "SUM(t.AMTCUR_0)",
+        "agg_function": "SUM",
+        "dimension_defaults": None,
+        "description": "付款单金额合计（按供应商/付款类型维度）",
+    },
+    {
+        "metric_name": "KPI_QUOTATION_QTY",
+        "metric_alias": "询价报价总数量",
+        "target_table": "PQUOTATD",
+        "formula": "SUM(t.QTYPUU_0)",
+        "agg_function": "SUM",
+        "dimension_defaults": None,
+        "description": "采购报价明细询价数量合计（询价响应量口径）",
     },
 ]
 

@@ -158,6 +158,7 @@ async def testUpdateClass(client: AsyncClient) -> None:
     response = await client.put(
         f"/api/v1/ontology/classes/{supplierId}",
         json={"classAlias": "供应商", "description": "供应商主数据"},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     assert response.status_code == 200
     data = response.json()
@@ -173,7 +174,7 @@ async def testDeleteClass(client: AsyncClient) -> None:
         json={"className": "Warehouse", "sourceTable": "t_warehouse"},
     )
     warehouseId = create.json()["id"]
-    response = await client.delete(f"/api/v1/ontology/classes/{warehouseId}")
+    response = await client.delete(f"/api/v1/ontology/classes/{warehouseId}", headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"})
     assert response.status_code == 204
     # 软删除：按 id 仍可查得（valid_to 非空）
     getDeleted = await client.get(f"/api/v1/ontology/classes/{warehouseId}")
@@ -230,6 +231,7 @@ async def testUpdateClassSetsParent(client: AsyncClient) -> None:
     response = await client.put(
         f"/api/v1/ontology/classes/{childId}",
         json={"parentClassId": parentId},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     assert response.status_code == 200
     assert response.json()["parentClassId"] == parentId
@@ -254,6 +256,7 @@ async def testUpdateClassClearsParent(client: AsyncClient) -> None:
     response = await client.put(
         f"/api/v1/ontology/classes/{childId}",
         json={"parentClassId": None},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     assert response.status_code == 200
     assert response.json()["parentClassId"] is None
@@ -272,6 +275,7 @@ async def testUpdateClassRejectsSelfInheritance(client: AsyncClient) -> None:
     response = await client.put(
         f"/api/v1/ontology/classes/{classId}",
         json={"parentClassId": classId},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     assert response.status_code == 422
     assert "自身" in response.json().get("error", "")
@@ -297,6 +301,7 @@ async def testUpdateClassRejectsInheritanceCycle(
     response = await client.put(
         f"/api/v1/ontology/classes/{parentId}",
         json={"parentClassId": childId},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     assert response.status_code == 422
     assert "环" in response.json().get("error", "")
@@ -332,6 +337,7 @@ async def testUpdateClassInPlace(client: AsyncClient) -> None:
     response = await client.put(
         f"/api/v1/ontology/classes/{firstId}",
         json={"description": "v2"},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     assert response.status_code == 200
     updated = response.json()
@@ -354,7 +360,7 @@ async def testListClassesDefaultExcludesExpired(client: AsyncClient) -> None:
         json={"className": "Expiring", "description": "v1", "sourceTable": "t_exp"},
     )
     firstId = create.json()["id"]
-    await client.put(f"/api/v1/ontology/classes/{firstId}", json={"description": "v2"})
+    await client.put(f"/api/v1/ontology/classes/{firstId}", json={"description": "v2"}, headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"})
 
     # 默认：仍 1 行（无新版本行），description 已更新
     response = await client.get("/api/v1/ontology/classes")
@@ -373,8 +379,8 @@ async def testListClassesIncludeExpiredReturnsSameRow(client: AsyncClient) -> No
         json={"className": "HistoryA", "description": "v1", "sourceTable": "t_ha"},
     )
     firstId = create.json()["id"]
-    await client.put(f"/api/v1/ontology/classes/{firstId}", json={"description": "v2"})
-    await client.put(f"/api/v1/ontology/classes/{firstId}", json={"description": "v3"})
+    await client.put(f"/api/v1/ontology/classes/{firstId}", json={"description": "v2"}, headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"})
+    await client.put(f"/api/v1/ontology/classes/{firstId}", json={"description": "v3"}, headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"})
 
     listing = await client.get("/api/v1/ontology/classes?includeExpired=true")
     rows = [r for r in listing.json() if r["className"] == "HistoryA"]
@@ -390,7 +396,7 @@ async def testListClassVersionsEndpoint(client: AsyncClient) -> None:
         json={"className": "MultiVer", "description": "v1", "sourceTable": "t_mv"},
     )
     firstId = create.json()["id"]
-    await client.put(f"/api/v1/ontology/classes/{firstId}", json={"description": "v2"})
+    await client.put(f"/api/v1/ontology/classes/{firstId}", json={"description": "v2"}, headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"})
 
     response = await client.get("/api/v1/ontology/classes/MultiVer/versions")
     assert response.status_code == 200
@@ -407,7 +413,7 @@ async def testDeleteClassIsSoftDelete(client: AsyncClient) -> None:
         json={"className": "SoftDel", "description": "v1", "sourceTable": "t_sd"},
     )
     firstId = create.json()["id"]
-    await client.put(f"/api/v1/ontology/classes/{firstId}", json={"description": "v2"})
+    await client.put(f"/api/v1/ontology/classes/{firstId}", json={"description": "v2"}, headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"})
     currentId = (
         await client.get("/api/v1/ontology/classes?includeExpired=true")
     ).json()
@@ -416,7 +422,7 @@ async def testDeleteClassIsSoftDelete(client: AsyncClient) -> None:
     )
     currentId = currentRow["id"]
 
-    response = await client.delete(f"/api/v1/ontology/classes/{currentId}")
+    response = await client.delete(f"/api/v1/ontology/classes/{currentId}", headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"})
     assert response.status_code == 204
 
     # 默认列表不显示
@@ -522,6 +528,7 @@ async def testUpdateProperty(client: AsyncClient) -> None:
     response = await client.put(
         f"/api/v1/ontology/properties/{propId}",
         json={"propertyAlias": "分类名称", "isPrimaryKey": True},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     assert response.status_code == 200
     data = response.json()
@@ -541,7 +548,7 @@ async def testDeleteProperty(client: AsyncClient) -> None:
     )
     propId = prop.json()["id"]
 
-    response = await client.delete(f"/api/v1/ontology/properties/{propId}")
+    response = await client.delete(f"/api/v1/ontology/properties/{propId}", headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"})
     assert response.status_code == 204
 
 
@@ -598,6 +605,7 @@ async def testUpdateMetric(client: AsyncClient) -> None:
     response = await client.put(
         f"/api/v1/ontology/metrics/{metricId}",
         json={"metricAlias": "订单总量", "aggFunction": "SUM"},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     assert response.status_code == 200
     data = response.json()
@@ -611,7 +619,7 @@ async def testDeleteMetric(client: AsyncClient) -> None:
         json={"metricName": "stock_val", "formula": "SUM(qty*price)", "aggFunction": "SUM"},
     )
     metricId = metric.json()["id"]
-    response = await client.delete(f"/api/v1/ontology/metrics/{metricId}")
+    response = await client.delete(f"/api/v1/ontology/metrics/{metricId}", headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"})
     assert response.status_code == 204
 
 
@@ -676,6 +684,7 @@ async def testUpdateClassSyncsNeo4j(client: AsyncClient) -> None:
     await client.put(
         f"/api/v1/ontology/classes/{supplierId}",
         json={"classAlias": "供应商", "description": "供应商主数据"},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
     # 更新触发 MERGE 节点属性同步
@@ -703,6 +712,7 @@ async def testUpdateClassToleratesNeo4jFailure(
     response = await client.put(
         f"/api/v1/ontology/classes/{warehouseId}",
         json={"classAlias": "仓库"},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     assert response.status_code == 200
     assert response.json()["classAlias"] == "仓库"
@@ -723,6 +733,7 @@ async def testUpdatePropertySyncsNeo4j(client: AsyncClient) -> None:
     await client.put(
         f"/api/v1/ontology/properties/{propId}",
         json={"propertyAlias": "分类名称", "isPrimaryKey": True},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
     assert "MERGE (p:Property {id: $id})" in cqls
@@ -755,6 +766,7 @@ async def testUpdatePropertyRelinksReferences(client: AsyncClient) -> None:
     await client.put(
         f"/api/v1/ontology/properties/{propId}",
         json={"refClassId": classBId},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
     # 引用类变化时：先删除旧 REFERENCES 关系，再建立新关系
@@ -785,6 +797,7 @@ async def testUpdatePropertyClearsReferencesWhenForeignKeyDisabled(
     await client.put(
         f"/api/v1/ontology/properties/{propId}",
         json={"isForeignKey": False},  # ref_class_id 未变但外键已取消
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
     # 只删除旧边，不因残留的 ref_class_id 重建 REFERENCES
@@ -807,6 +820,7 @@ async def testUpdatePropertyEnsuresHasPropertyEdge(client: AsyncClient) -> None:
     await client.put(
         f"/api/v1/ontology/properties/{propId}",
         json={"propertyAlias": "部门名称"},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
     # 每次 update 都幂等 MERGE HAS_PROPERTY，自愈 create 中断导致的缺失边
@@ -823,6 +837,7 @@ async def testUpdateMetricSyncsNeo4j(client: AsyncClient) -> None:
     await client.put(
         f"/api/v1/ontology/metrics/{metricId}",
         json={"metricAlias": "订单总量", "aggFunction": "SUM"},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
     assert "MERGE (m:Metric {id: $id})" in cqls
@@ -854,6 +869,7 @@ async def testUpdateMetricRelinksDerivedFrom(client: AsyncClient) -> None:
     await client.put(
         f"/api/v1/ontology/metrics/{metricId}",
         json={"targetClassId": classBId},
+    headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
     # 目标类变化时重建 DERIVED_FROM 关系
@@ -972,3 +988,50 @@ async def testSearchMilvusFailureReturns400(
     # MilvusError -> DomainError -> 全局处理器转 400
     assert response.status_code == 400
     assert "向量检索失败" in response.json().get("error", "")
+
+
+# =============================================================================
+# Phase 4.5 ACL：owner 部门可改 ontology_class，跨部门 403，admin 通过
+# =============================================================================
+
+
+async def test_ontology_class_owner_dept_can_modify_cross_dept_blocked(
+    client: AsyncClient,
+) -> None:
+    """Phase 4.5 ACL 在 ontology_class 上的完整链路（非 admin 路径）。
+
+    创建时通过 X-User-Departments 头让 service 派生 object_owner=procurement；
+    owner 部门 PUT → 200，跨部门 PUT → 403，admin DELETE → 204。
+    """
+    created = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "测试ACL类"},
+        headers={"X-User-Departments": "procurement"},
+    )
+    assert created.status_code == 201, created.text
+    clsId = created.json()["id"]
+    # 服务端从 actor.departments[0] 派生 object_owner
+    assert created.json()["objectOwner"] == "procurement"
+
+    # owner 部门 PUT → 200
+    okPut = await client.put(
+        f"/api/v1/ontology/classes/{clsId}",
+        json={"classAlias": "改后"},
+        headers={"X-User-Departments": "procurement"},
+    )
+    assert okPut.status_code == 200, okPut.text
+
+    # 跨部门 PUT → 403
+    denied = await client.put(
+        f"/api/v1/ontology/classes/{clsId}",
+        json={"classAlias": "finance想改"},
+        headers={"X-User-Departments": "finance"},
+    )
+    assert denied.status_code == 403
+
+    # admin DELETE → 204（覆盖 owner=procurement 的限制）
+    adminDel = await client.delete(
+        f"/api/v1/ontology/classes/{clsId}",
+        headers={"X-User-Roles": "admin"},
+    )
+    assert adminDel.status_code == 204

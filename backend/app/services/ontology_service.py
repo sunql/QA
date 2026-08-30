@@ -7,6 +7,9 @@ Milvus 仅在调用方提供 embedding 时同步写入向量。
 - Class / Property / Metric 的 CRUD（PG + Neo4j）
 - 关系维护（HAS_PROPERTY / REFERENCES / DERIVED_FROM）
 - 语义搜索（Milvus，向量由调用方提供）
+
+Phase 4.5 扩展：updateClass / deleteClass 走 AclService.assertCanModify
+（基于 ontology_class.object_owner 字段，Phase 3.4 已加）。CREATE 不走 ACL。
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.dependencies import CurrentUser
 from app.domain.exceptions import (
     MilvusError,
     NotFoundError,
@@ -41,6 +45,7 @@ from app.domain.schemas import (
 )
 from app.infrastructure import milvus_client as milvus
 from app.infrastructure import neo4j_client as neo4j
+from app.services.acl_service import AclService
 from app.services.embedding_service import EmbeddingService
 from app.services.messages_zh import (
     MSG_CLASS_ALREADY_EXPIRED,
@@ -104,9 +109,16 @@ def makeJoinKey(
 class OntologyService:
     """本体服务：Class / Property / Metric CRUD。"""
 
-    def __init__(self, *, embeddingService: EmbeddingService | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        embeddingService: EmbeddingService | None = None,
+        acl: AclService | None = None,
+    ) -> None:
         # EmbeddingService 延迟到首次语义检索时构造（未注入则按需创建）
         self._embedding: EmbeddingService | None = embeddingService
+        # AclService 默认实例：service 内部 new；测试可注入 mock
+        self._acl = acl or AclService()
 
     def _ensureEmbedding(self) -> EmbeddingService:
         if self._embedding is None:
@@ -114,13 +126,16 @@ class OntologyService:
         return self._embedding
 
     async def createClass(
-        self, session: AsyncSession, dto: OntologyClassCreate
+        self, session: AsyncSession, dto: OntologyClassCreate, actor: CurrentUser
     ) -> OntologyClass:
         """创建本体类（起始 version=1, validFrom=now, validTo=None）。
 
         重名校验：class_name 一旦被占用（含软删除墓碑）即拒绝——DB 唯一约束
         (class_name, version) 使墓碑名称无法复用（复用会 IntegrityError 500），
         故此处统一拦截为干净的 ValidationError。
+
+        Phase 4.5：object_owner 由 actor.departments[0] 派生，**不接受**
+        client body 中的 object_owner（DTO 已移除），防止越权。
         """
         # 名称占用校验：任一行（含墓碑）同名即拒绝
         existing = await session.execute(
@@ -137,13 +152,14 @@ class OntologyService:
             if parent is None:
                 raise ValidationError(MSG_PARENT_CLASS_NOT_FOUND.format(id=dto.parent_class_id))
 
+        derivedOwner = actor.departments[0] if actor.departments else None
         entity = OntologyClass(
             class_name=dto.class_name,
             class_alias=dto.class_alias,
             description=dto.description,
             source_table=dto.source_table,
             object_type=dto.object_type.value if dto.object_type is not None else None,
-            object_owner=dto.object_owner,
+            object_owner=derivedOwner,
             parent_class_id=dto.parent_class_id,
             created_by=dto.created_by,
             version=1,
@@ -205,7 +221,7 @@ class OntologyService:
         return list(result.scalars().all())
 
     async def updateClass(
-        self, session: AsyncSession, id: int, dto: OntologyClassUpdate
+        self, session: AsyncSession, id: int, dto: OntologyClassUpdate, actor: CurrentUser
     ) -> OntologyClass:
         """更新本体类：原地 UPDATE，主键 id 稳定（版本管理已移除）。
 
@@ -215,14 +231,21 @@ class OntologyService:
         查询计划"且属性视图为空。原地更新后 id 不变，属性与引用天然保持有效。
 
         流程（单事务）：
-        1. 校验 id 存在且未被软删除（valid_to IS NULL）。
-        2. 继承校验（同 Phase 1，仅在显式更新 parent_class_id 时执行）。
-        3. 逐字段覆盖到原行并提交。
-        4. 父类变化时，Neo4j 重建 SUBCLASS_OF 边（id 不变，按原 id 同步）。
+        1. ACL 校验（Phase 4.5：owner 不匹配 + 非 admin → 403）。
+        2. 校验 id 存在且未被软删除（valid_to IS NULL）。
+        3. 继承校验（同 Phase 1，仅在显式更新 parent_class_id 时执行）。
+        4. 逐字段覆盖到原行并提交。
+        5. 父类变化时，Neo4j 重建 SUBCLASS_OF 边（id 不变，按原 id 同步）。
 
         返回更新后的同一行（id 与调用方传入一致）。
         """
         existing = await self.getClass(session, id)
+        self._acl.assertCanModify(
+            actor,
+            entity_owner=existing.object_owner,
+            entity_label="ONTOLOGY_CLASS",
+            entity_code=existing.class_name,
+        )
         if existing.valid_to is not None:
             raise ValidationError(
                 MSG_ONTOLOGY_CLASS_EXPIRED.format(id=id, valid_to=existing.valid_to)
@@ -292,13 +315,23 @@ class OntologyService:
         logger.info("更新本体类 id=%d name=%s", existing.id, existing.class_name)
         return existing
 
-    async def deleteClass(self, session: AsyncSession, id: int) -> None:
+    async def deleteClass(
+        self, session: AsyncSession, id: int, actor: CurrentUser
+    ) -> None:
         """软删除本体类：valid_to = now()（墓碑标记），listClasses 默认不再返回。
 
         版本管理移除后 valid_to 退化为软删除标记。同步清理 Neo4j 节点与
         Milvus 向量（best-effort，避免图谱/向量悬空引用）。
+
+        Phase 4.5 扩展：先 ACL 检查（object_owner 不匹配 + 非 admin → 403）。
         """
         entity = await self.getClass(session, id)
+        self._acl.assertCanModify(
+            actor,
+            entity_owner=entity.object_owner,
+            entity_label="ONTOLOGY_CLASS",
+            entity_code=entity.class_name,
+        )
         if entity.valid_to is not None:
             raise ValidationError(MSG_CLASS_ALREADY_EXPIRED.format(id=id))
         entity.valid_to = _utcnow()

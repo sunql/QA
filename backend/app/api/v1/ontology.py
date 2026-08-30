@@ -76,8 +76,12 @@ async def createClass(
     user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> OntologyClassRead:
-    """创建本体类（起始 version=1）。"""
-    entity = await _ontologyService.createClass(db, dto)
+    """创建本体类（起始 version=1）。
+
+    Phase 4.5：object_owner 由 service 从 actor.departments[0] 派生，DTO
+    中不接受该字段（防越权声明）。
+    """
+    entity = await _ontologyService.createClass(db, dto, user)
     return OntologyClassRead.model_validate(entity)
 
 
@@ -109,20 +113,28 @@ async def getClass(
 async def updateClass(
     id: int,
     dto: OntologyClassUpdate,
+    user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> OntologyClassRead:
-    """更新本体类（Phase 6：创建新版本而非原地修改，返回新 id）。"""
-    entity = await _ontologyService.updateClass(db, id, dto)
+    """更新本体类（Phase 6：创建新版本而非原地修改，返回新 id）。
+
+    Phase 4.5 扩展：走 owner-based ACL（object_owner 字段）。
+    """
+    entity = await _ontologyService.updateClass(db, id, dto, user)
     return OntologyClassRead.model_validate(entity)
 
 
 @router.delete("/classes/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteClass(
     id: int,
+    user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> None:
-    """软删除本体类：valid_to = now()（墓碑），listClasses 默认不再返回。"""
-    await _ontologyService.deleteClass(db, id)
+    """软删除本体类：valid_to = now()（墓碑），listClasses 默认不再返回。
+
+    Phase 4.5 扩展：走 owner-based ACL。
+    """
+    await _ontologyService.deleteClass(db, id, user)
 
 
 # =============================================================================

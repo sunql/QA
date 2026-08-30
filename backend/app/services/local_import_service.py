@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies import CurrentUser
 from app.domain.exceptions import NotFoundError
 from app.domain.models import DataSource
 from app.domain.schemas import FilterSuggestions as FilterSuggestionsDto
@@ -55,6 +56,7 @@ class LocalImportService:
         session: AsyncSession,
         datasource_id: int,
         rules: ImportRuleConfig,
+        selected_tables: list[str] | None = None,
     ) -> ImportPreviewResponse:
         ds = await session.get(DataSource, datasource_id)
         if ds is None:
@@ -64,6 +66,7 @@ class LocalImportService:
         response = self._schema_service.buildResponse(cache)
 
         filtered = self._rule_engine.filter_tables(response.tables, rules.table_filter)
+        filtered = self._apply_selected_tables(filtered, selected_tables)
         enhanced = await self._llm_enhancer.enhance_schema(
             filtered,
             generate_aliases=rules.llm_enhance_options.generate_aliases,
@@ -75,6 +78,15 @@ class LocalImportService:
         proposed_classes, proposed_properties, proposed_joins = self._build_proposals(
             enhanced, rules, filtered
         )
+        # 分批导入：只保留两端都在白名单内的 join，避免对未导入的目标表生成悬空关联。
+        if selected_tables:
+            wanted = {t.strip().lower() for t in selected_tables if t and t.strip()}
+            if wanted:
+                proposed_joins = [
+                    j
+                    for j in proposed_joins
+                    if (j.target_table or "").lower() in wanted
+                ]
 
         existing_classes = await self._ontology_service.listClasses(session)
         existing_properties: list = []
@@ -101,6 +113,24 @@ class LocalImportService:
             ),
             llm_usage=LlmUsageInfo(),
         )
+
+    @staticmethod
+    def _apply_selected_tables(
+        tables: Sequence[Any],
+        selected_tables: list[str] | None,
+    ) -> list[Any]:
+        """按表名白名单收窄预览范围（超大 schema 分批导入用）。
+
+        传入 None 或空列表时返回原列表（不限制）。白名单与规则引擎过滤是 AND 关系：
+        先按 nameBlacklistPatterns/临时表规则剔除，再仅保留白名单命中的表。
+        表名匹配不区分大小写（Oracle 表名大写，用户可能输入小写）。返回新列表，不改输入。
+        """
+        if not selected_tables:
+            return list(tables)
+        wanted = {t.strip().lower() for t in selected_tables if t and t.strip()}
+        if not wanted:
+            return list(tables)
+        return [t for t in tables if (t.table_name or "").lower() in wanted]
 
     def _build_proposals(
         self,
@@ -177,6 +207,7 @@ class LocalImportService:
         datasource_id: int,
         request: ImportExecuteRequest,
         created_by: str | None,
+        actor: CurrentUser,
     ) -> ImportExecuteResponse:
         ds = await session.get(DataSource, datasource_id)
         if ds is None:
@@ -192,7 +223,7 @@ class LocalImportService:
             if not proposed.is_selected:
                 continue
             class_id, props_created, item_errors = await self._create_class_with_properties(
-                session, proposed, created_by
+                session, proposed, created_by, actor
             )
             errors.extend(item_errors)
             created_properties += props_created
@@ -259,6 +290,7 @@ class LocalImportService:
         session: AsyncSession,
         proposed: ProposedClass,
         created_by: str | None,
+        actor: CurrentUser,
     ) -> tuple[int | None, int, list[ImportErrorInfo]]:
         """创建单个类及其属性；逐项失败隔离（回滚会话，继续处理其余项）。
 
@@ -275,7 +307,9 @@ class LocalImportService:
             created_by=created_by,
         )
         try:
-            created_class = await self._ontology_service.createClass(session, class_dto)
+            created_class = await self._ontology_service.createClass(
+                session, class_dto, actor
+            )
         except Exception as exc:  # noqa: BLE001
             await session.rollback()
             msg = str(exc) if str(exc) else type(exc).__name__

@@ -156,6 +156,7 @@ async def test_execute_import_creates_class_and_property(dbSession: AsyncSession
         datasource_id=ds.id,
         request=execute_request,
         created_by="admin",
+        actor=_ADMIN,
     )
 
     assert result.created_classes == 1
@@ -236,6 +237,110 @@ async def test_build_preview_includes_proposed_joins(dbSession: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_build_preview_filters_by_selected_tables_whitelist(dbSession: AsyncSession):
+    """selected_tables 白名单收窄预览：仅保留命中的类；join 只保留两端都在白名单内的。"""
+    ds = await _seed_datasource(dbSession)
+    schema_svc = FakeSchemaService()
+    schema_svc.buildResponse = lambda cache: SchemaIntrospectResponse(
+        tables=[
+            TableSchemaRead(
+                table_name="orders",
+                columns=[
+                    ColumnSchemaRead(column_name="id", data_type="INT", nullable=False)
+                ],
+                primary_keys=["id"],
+                foreign_keys=[],
+            ),
+            TableSchemaRead(
+                table_name="order_items",
+                columns=[
+                    ColumnSchemaRead(column_name="id", data_type="INT", nullable=False),
+                    ColumnSchemaRead(column_name="order_id", data_type="INT", nullable=False),
+                    ColumnSchemaRead(column_name="supplier_id", data_type="INT", nullable=False),
+                ],
+                primary_keys=["id"],
+                foreign_keys=[
+                    ForeignKeySchemaRead(
+                        column_name="order_id", ref_table="orders", ref_column="id"
+                    ),
+                    ForeignKeySchemaRead(
+                        column_name="supplier_id", ref_table="suppliers", ref_column="id"
+                    ),
+                ],
+            ),
+            TableSchemaRead(
+                table_name="customers",
+                columns=[
+                    ColumnSchemaRead(column_name="id", data_type="INT", nullable=False)
+                ],
+                primary_keys=["id"],
+                foreign_keys=[],
+            ),
+        ],
+        cached_at=datetime(2026, 8, 29, 0, 0, 0),
+    )
+    svc = LocalImportService(
+        schema_service=schema_svc,
+        ontology_service=FakeOntologyService(),
+    )
+
+    result = await svc.build_preview(
+        dbSession,
+        datasource_id=ds.id,
+        rules=ImportRuleConfig(),
+        selected_tables=["orders", "order_items"],
+    )
+
+    assert [c.source_table for c in result.proposed_classes] == [
+        "orders",
+        "order_items",
+    ]
+    # order_items->suppliers 的 target 不在白名单内，join 一并丢弃
+    assert [j.target_table for j in result.proposed_joins] == ["orders"]
+
+
+@pytest.mark.asyncio
+async def test_build_preview_whitelist_none_or_empty_keeps_all(dbSession: AsyncSession):
+    ds = await _seed_datasource(dbSession)
+    schema_svc = FakeSchemaService()
+    schema_svc.buildResponse = lambda cache: SchemaIntrospectResponse(
+        tables=[
+            TableSchemaRead(
+                table_name="orders",
+                columns=[
+                    ColumnSchemaRead(column_name="id", data_type="INT", nullable=False)
+                ],
+                primary_keys=["id"],
+                foreign_keys=[],
+            ),
+            TableSchemaRead(
+                table_name="customers",
+                columns=[
+                    ColumnSchemaRead(column_name="id", data_type="INT", nullable=False)
+                ],
+                primary_keys=["id"],
+                foreign_keys=[],
+            ),
+        ],
+        cached_at=datetime(2026, 8, 29, 0, 0, 0),
+    )
+    svc = LocalImportService(
+        schema_service=schema_svc,
+        ontology_service=FakeOntologyService(),
+    )
+
+    result = await svc.build_preview(
+        dbSession, datasource_id=ds.id, rules=ImportRuleConfig(), selected_tables=None
+    )
+    assert len(result.proposed_classes) == 2
+
+    result_empty = await svc.build_preview(
+        dbSession, datasource_id=ds.id, rules=ImportRuleConfig(), selected_tables=[]
+    )
+    assert len(result_empty.proposed_classes) == 2
+
+
+@pytest.mark.asyncio
 async def test_execute_import_records_class_creation_error(dbSession: AsyncSession):
     ds = await _seed_datasource(dbSession)
     ontology = FakeOntologyService()
@@ -263,6 +368,7 @@ async def test_execute_import_records_class_creation_error(dbSession: AsyncSessi
         datasource_id=ds.id,
         request=request,
         created_by="admin",
+        actor=_ADMIN,
     )
 
     assert result.created_classes == 0
@@ -298,6 +404,7 @@ async def test_execute_import_records_property_creation_error(dbSession: AsyncSe
         datasource_id=ds.id,
         request=request,
         created_by="admin",
+        actor=_ADMIN,
     )
 
     assert result.created_classes == 1
@@ -330,6 +437,7 @@ async def test_execute_import_counts_conflict_resolutions(dbSession: AsyncSessio
         datasource_id=ds.id,
         request=request,
         created_by="admin",
+        actor=_ADMIN,
     )
 
     assert result.skipped_conflicts == 1
@@ -359,6 +467,7 @@ async def test_execute_import_skips_unselected_items(dbSession: AsyncSession):
         datasource_id=ds.id,
         request=request,
         created_by="admin",
+        actor=_ADMIN,
     )
 
     assert result.created_classes == 0
@@ -447,6 +556,7 @@ async def test_execute_import_creates_join(dbSession: AsyncSession):
         datasource_id=ds.id,
         request=request,
         created_by="admin",
+        actor=_ADMIN,
     )
 
     assert result.created_classes == 2
@@ -520,6 +630,7 @@ async def test_execute_import_records_join_creation_error(dbSession: AsyncSessio
         datasource_id=ds.id,
         request=request,
         created_by="admin",
+        actor=_ADMIN,
     )
 
     assert result.created_classes == 2
@@ -636,6 +747,7 @@ async def test_execute_import_recovers_session_after_property_db_failure(
         datasource_id=ds.id,
         request=request,
         created_by="admin",
+        actor=_ADMIN,
     )
 
     property_errors = [e for e in result.errors if e.type == "property"]

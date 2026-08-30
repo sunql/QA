@@ -43,29 +43,30 @@ class TestObjectTypeEnum:
 
 class TestClassSchemasGovernance:
     def test_create_accepts_governance_fields(self) -> None:
+        """Create DTO 接受 object_type；objectOwner 由服务端按部门派生（DTO 移除防越权）。"""
         dto = OntologyClassCreate(
             class_name="Order",
             object_type=ObjectType.TRANSACTION,
-            object_owner="采购部",
         )
         assert dto.object_type == ObjectType.TRANSACTION
-        assert dto.object_owner == "采购部"
+        # object_owner 不再是 DTO 字段；DTO 不暴露此属性
+        assert not hasattr(dto, "object_owner")
 
     def test_create_governance_fields_optional(self) -> None:
         dto = OntologyClassCreate(class_name="Order")
         assert dto.object_type is None
-        assert dto.object_owner is None
+        # object_owner 字段不存在；服务端按 actor.departments[0] 派生
 
     def test_create_rejects_invalid_object_type(self) -> None:
         with pytest.raises(ValidationError):
             OntologyClassCreate(class_name="X", object_type="Nonsense")  # type: ignore[arg-type]
 
     def test_update_accepts_governance_fields(self) -> None:
-        dto = OntologyClassUpdate(
-            object_type=ObjectType.MASTER, object_owner="主数据管理组"
-        )
+        """Update DTO 仅 object_type；objectOwner 变更需走独立特权接口（未实现）。"""
+        dto = OntologyClassUpdate(object_type=ObjectType.MASTER)
         assert dto.object_type == ObjectType.MASTER
-        assert dto.object_owner == "主数据管理组"
+        # Update DTO 不暴露 object_owner（防 mass-assignment 越权转移）
+        assert not hasattr(dto, "object_owner")
 
     def test_read_includes_governance_fields(self) -> None:
         data = OntologyClassRead(

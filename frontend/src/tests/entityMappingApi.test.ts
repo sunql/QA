@@ -29,6 +29,7 @@ const mapping: EntityMappingRead = {
   matchRule: "MDM_MASTER",
   effectiveDate: "2026-01-01",
   expiryDate: "2099-12-31",
+  owner: "procurement", // 服务端按 actor.departments[0] 派生，仅展示用
   createdTime: "2026-08-30T00:00:00Z",
   updatedTime: "2026-08-30T00:00:00Z",
 };

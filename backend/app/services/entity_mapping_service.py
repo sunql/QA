@@ -1,8 +1,12 @@
-"""跨系统编码映射服务（Phase 3.1）。
+"""跨系统编码映射服务（Phase 3.1 + Phase 4.5 扩展 owner-based ACL）。
 
 承载 EntityMapping 表的 CRUD：把各源系统（ERP/SRM/QMS/MDM/PLM）的原始编码
 映射到企业统一代理键 / 统一编码。唯一约束 (entity_type, enterprise_key,
 source_system) 由 service 层主动查重抛 ValidationError，DB 唯一索引兜底防 race。
+
+Phase 4.5 扩展：updateMapping / deleteMapping 走 AclService.assertCanModify。
+createMapping 接收 actor 并将 owner 设为 actor.departments[0]（防止 client
+任意声明 owner 越权）；actor.departments 为空时 owner=None（仅 admin 可改）。
 """
 
 from __future__ import annotations
@@ -13,10 +17,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies import CurrentUser
 from app.domain.enums import EntityType, SourceSystem
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import EntityMapping
 from app.domain.schemas import EntityMappingCreate, EntityMappingRead, EntityMappingUpdate
+from app.services.acl_service import AclService
 from app.services.messages_zh import (
     MSG_ENTITY_MAPPING_DATE_RANGE,
     MSG_ENTITY_MAPPING_EXISTS,
@@ -55,6 +61,10 @@ def _assertDateRange(*, effective_date: date | None, expiry_date: date | None) -
 class EntityMappingService:
     """跨系统编码映射 CRUD。"""
 
+    def __init__(self, acl: AclService | None = None) -> None:
+        # 默认实例：service 内部 new；测试可注入 mock
+        self._acl = acl or AclService()
+
     async def listMappings(
         self,
         session: AsyncSession,
@@ -88,8 +98,14 @@ class EntityMappingService:
         self,
         session: AsyncSession,
         dto: EntityMappingCreate,
+        actor: CurrentUser,
     ) -> EntityMapping:
-        """创建编码映射；同实体 + 同源系统重复抛 ValidationError。"""
+        """创建编码映射；同实体 + 同源系统重复抛 ValidationError。
+
+        Phase 4.5：owner 由 actor.departments[0] 派生，**不接受** client body
+        中的 owner（已在 DTO 中移除），防止「finance 用户创建 owner=procurement
+        的实体」式越权。actor.departments 为空 → owner=None → 仅 admin 可改。
+        """
         _assertDateRange(effective_date=dto.effective_date, expiry_date=dto.expiry_date)
         # 唯一性查重（service 层兜底；三列均非空，DB 唯一索引也完整兜底）
         existing = await session.execute(
@@ -102,6 +118,7 @@ class EntityMappingService:
         if existing.scalar_one_or_none() is not None:
             raise _existsError(dto)
 
+        derivedOwner = actor.departments[0] if actor.departments else None
         entity = EntityMapping(
             entity_type=dto.entity_type,
             enterprise_key=dto.enterprise_key,
@@ -112,6 +129,7 @@ class EntityMappingService:
             match_rule=dto.match_rule,
             effective_date=dto.effective_date,
             expiry_date=dto.expiry_date,
+            owner=derivedOwner,
         )
         session.add(entity)
         # 并发场景：两条请求同时越过查重，败者 commit 撞唯一索引 → 转 422 而非裸 500。
@@ -128,9 +146,20 @@ class EntityMappingService:
         session: AsyncSession,
         id: int,
         dto: EntityMappingUpdate,
+        actor: CurrentUser,
     ) -> EntityMapping:
-        """局部更新编码映射；非空列 None 视为不动，日期列可置 None 清除。"""
+        """局部更新编码映射；非空列 None 视为不动，日期列可置 None 清除。
+
+        Phase 4.5 扩展：先 ACL 检查（owner 不匹配 + 非 admin → PermissionDeniedError），
+        再 apply dto changes + commit。
+        """
         entity = await self.getMapping(session, id)
+        self._acl.assertCanModify(
+            actor,
+            entity_owner=entity.owner,
+            entity_label="ENTITY_MAPPING",
+            entity_code=str(entity.id),
+        )
         changes = dto.model_dump(exclude_unset=True, by_alias=False)
         for field, value in changes.items():
             if value is None and field in _NON_NULL_UPDATE_FIELDS:
@@ -141,9 +170,23 @@ class EntityMappingService:
         await session.refresh(entity)
         return entity
 
-    async def deleteMapping(self, session: AsyncSession, id: int) -> None:
-        """删除编码映射（物理删除，映射记录无历史追溯需求）。"""
+    async def deleteMapping(
+        self,
+        session: AsyncSession,
+        id: int,
+        actor: CurrentUser,
+    ) -> None:
+        """删除编码映射（物理删除，映射记录无历史追溯需求）。
+
+        Phase 4.5 扩展：先 ACL 检查（owner 不匹配 + 非 admin → 403）。
+        """
         entity = await self.getMapping(session, id)
+        self._acl.assertCanModify(
+            actor,
+            entity_owner=entity.owner,
+            entity_label="ENTITY_MAPPING",
+            entity_code=str(entity.id),
+        )
         await session.delete(entity)
         await session.commit()
 

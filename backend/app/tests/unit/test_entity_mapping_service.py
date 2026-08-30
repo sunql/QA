@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from app.dependencies import CurrentUser
 from app.domain.enums import EntityType, SourceSystem, MatchRule
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import EntityMapping
@@ -30,6 +31,7 @@ from app.domain.schemas import (
     EntityMappingUpdate,
     EntityMappingRead,
 )
+from app.services.acl_service import ADMIN_ROLE
 from app.services.entity_mapping_service import (
     EntityMappingService,
     entityMappingToRead,
@@ -39,6 +41,15 @@ from app.services.entity_mapping_service import (
 def _run(coro):
     """Python 3.14 取消隐式 loop 创建，需手动驱动。"""
     return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def _adminActor() -> CurrentUser:
+    """Phase 4.5 ACL 扩展后，update/delete 要求 actor。
+
+    本测试不验 ACL 行为，默认用 admin 角色绕过（admin.roles ⊇ {ADMIN_ROLE}）。
+    ACL 行为由 test_governance_extension_acl.py 覆盖。
+    """
+    return CurrentUser(userId="t-admin", roles=(ADMIN_ROLE,), departments=())
 
 
 def _fakeSession(
@@ -174,7 +185,7 @@ class TestCreateMapping:
     def test_creates_with_all_fields(self):
         session = _fakeSession()
         dto = _makeCreate()
-        entity = _run(EntityMappingService().createMapping(session, dto))
+        entity = _run(EntityMappingService().createMapping(session, dto, _adminActor()))
         assert entity.id is not None
         assert entity.entity_type == EntityType.SUPPLIER
         assert entity.enterprise_key == 100001
@@ -188,7 +199,7 @@ class TestCreateMapping:
         session = _fakeSession()
         dto = _makeCreate(effective_date=date(2099, 12, 31), expiry_date=date(2026, 1, 1))
         with pytest.raises(ValidationError):
-            _run(EntityMappingService().createMapping(session, dto))
+            _run(EntityMappingService().createMapping(session, dto, _adminActor()))
         # 校验失败不应产生任何提交
         assert session.commits == 0
 
@@ -202,7 +213,7 @@ class TestCreateMapping:
         )}, precheck_hit=True)
         dto = _makeCreate()
         with pytest.raises(ValidationError):
-            _run(EntityMappingService().createMapping(session, dto))
+            _run(EntityMappingService().createMapping(session, dto, _adminActor()))
         assert session.commits == 0
 
     def test_commit_integrity_error_rolls_back_and_raises_validation(self):
@@ -210,7 +221,7 @@ class TestCreateMapping:
         session = _fakeSession(commit_error=IntegrityError("stmt", {}, Exception("dup")))
         dto = _makeCreate()
         with pytest.raises(ValidationError):
-            _run(EntityMappingService().createMapping(session, dto))
+            _run(EntityMappingService().createMapping(session, dto, _adminActor()))
         assert session.rollbacks == 1
 
 
@@ -229,7 +240,7 @@ class TestUpdateMapping:
         e = self._record()
         session = _fakeSession(records={3: e})
         dto = EntityMappingUpdate(source_code="V000001-X")
-        updated = _run(EntityMappingService().updateMapping(session, 3, dto))
+        updated = _run(EntityMappingService().updateMapping(session, 3, dto, _adminActor()))
         assert updated.source_code == "V000001-X"
         # 未发送字段保留
         assert updated.entity_type == EntityType.SUPPLIER
@@ -242,7 +253,7 @@ class TestUpdateMapping:
         e = self._record()
         session = _fakeSession(records={3: e})
         dto = EntityMappingUpdate(source_code=None)
-        updated = _run(EntityMappingService().updateMapping(session, 3, dto))
+        updated = _run(EntityMappingService().updateMapping(session, 3, dto, _adminActor()))
         assert updated.source_code == "V000001"
 
     def test_none_for_date_clears_field(self):
@@ -250,7 +261,7 @@ class TestUpdateMapping:
         e = self._record()
         session = _fakeSession(records={3: e})
         dto = EntityMappingUpdate(expiry_date=None)
-        updated = _run(EntityMappingService().updateMapping(session, 3, dto))
+        updated = _run(EntityMappingService().updateMapping(session, 3, dto, _adminActor()))
         assert updated.expiry_date is None
 
     def test_rejects_inverted_date_range_on_update(self):
@@ -259,14 +270,14 @@ class TestUpdateMapping:
         session = _fakeSession(records={3: e})
         dto = EntityMappingUpdate(effective_date=date(2100, 1, 1))
         with pytest.raises(ValidationError):
-            _run(EntityMappingService().updateMapping(session, 3, dto))
+            _run(EntityMappingService().updateMapping(session, 3, dto, _adminActor()))
         assert session.commits == 0
 
     def test_raises_not_found_when_missing(self):
         session = _fakeSession(records={})
         dto = EntityMappingUpdate(source_code="X")
         with pytest.raises(NotFoundError):
-            _run(EntityMappingService().updateMapping(session, 999, dto))
+            _run(EntityMappingService().updateMapping(session, 999, dto, _adminActor()))
 
 
 class TestDeleteMapping:
@@ -278,14 +289,14 @@ class TestDeleteMapping:
             match_rule=MatchRule.MAPPING,
         )
         session = _fakeSession(records={4: e})
-        _run(EntityMappingService().deleteMapping(session, 4))
+        _run(EntityMappingService().deleteMapping(session, 4, _adminActor()))
         assert session.removed == [e]
         assert session.commits == 1
 
     def test_raises_not_found_when_missing(self):
         session = _fakeSession(records={})
         with pytest.raises(NotFoundError):
-            _run(EntityMappingService().deleteMapping(session, 999))
+            _run(EntityMappingService().deleteMapping(session, 999, _adminActor()))
 
 
 class TestEntityMappingToRead:

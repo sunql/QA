@@ -42,7 +42,10 @@ class TestAclService:
             self._svc.assertCanModify(
                 _user(departments=("财务部",)), "采购部", "KPI", "KPI_SUPPLIER_OTD"
             )
-        assert "KPI_SUPPLIER_OTD" in str(excInfo.value)
+        # 通用 403 消息：不暴露 entity_code（防枚举侧信道）
+        msg = str(excInfo.value)
+        assert "KPI_SUPPLIER_OTD" not in msg
+        assert "无权修改" in msg
 
     def test_empty_owner_denies_non_admin(self) -> None:
         """owner 为空 + 无 admin → 拒绝（避免「无主 KPI 任意改」）。"""
@@ -58,15 +61,22 @@ class TestAclService:
         with pytest.raises(PermissionDeniedError):
             self._svc.assertCanModify(_user(), "采购部", "KPI", "X")
 
-    def test_message_contains_owner_and_user_departments(self) -> None:
-        """错误消息含 owner 与 user.departments（便于调试/合规审计）。"""
+    def test_message_is_generic_no_owner_or_user_departments_leak(self) -> None:
+        """错误消息**不暴露** owner / entity_code / user.departments
+        等内部状态（防枚举侧信道）。运维上下文改走服务端日志。
+        """
         with pytest.raises(PermissionDeniedError) as excInfo:
             self._svc.assertCanModify(
                 _user(departments=("财务部",)), "采购部", "KPI", "KPI_SUPPLIER_OTD"
             )
         msg = str(excInfo.value)
-        assert "采购部" in msg
-        assert "财务部" in msg
+        # 不应出现的内容：owner 值 / 用户部门 / 实体 code
+        assert "采购部" not in msg
+        assert "财务部" not in msg
+        assert "KPI_SUPPLIER_OTD" not in msg
+        # 应出现的内容：通用权限提示
+        assert "无权修改" in msg
+        assert "admin" in msg
 
     def test_whitespace_owner_stripped(self) -> None:
         """owner 前后空白应被剥离后再比较。"""

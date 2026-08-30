@@ -794,6 +794,8 @@ class EntityMapping(Base, TimestampMixin):
     )
     effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 治理字段（Phase 4.5 扩展：3 张表 owner-based ACL）
+    owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     __table_args__ = (
         # 同一实体 + 同一源系统只允许一条映射；三列均非空，DB 约束即完整兜底。
@@ -805,6 +807,7 @@ class EntityMapping(Base, TimestampMixin):
         ),
         Index("ix_entity_mapping_enterprise_key", "enterprise_key"),
         Index("ix_entity_mapping_source", "entity_type", "source_system", "source_key"),
+        Index("ix_entity_mapping_owner", "owner"),
     )
 
     def __repr__(self) -> str:

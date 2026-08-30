@@ -36,6 +36,9 @@ class TestGovernanceMigration:
 
 class TestGovernanceApi:
     async def test_create_class_with_governance_fields(self, client) -> None:
+        """Phase 4.5：objectOwner 由服务端从 actor.departments[0] 派生，
+        DTO 已移除 objectOwner 字段（防越权）。
+        """
         response = await client.post(
             "/api/v1/ontology/classes",
             json={
@@ -43,13 +46,14 @@ class TestGovernanceApi:
                 "classAlias": "治理订单",
                 "sourceTable": "t_gov_order",
                 "objectType": "Transaction",
-                "objectOwner": "采购部",
             },
+            headers={"X-User-Departments": "procurement"},
         )
         assert response.status_code == 201
         data = response.json()
         assert data["objectType"] == "Transaction"
-        assert data["objectOwner"] == "采购部"
+        # objectOwner 由服务端按部门派生，不再来自 body
+        assert data["objectOwner"] == "procurement"
 
     async def test_create_class_rejects_invalid_object_type(self, client) -> None:
         response = await client.post(
@@ -59,27 +63,35 @@ class TestGovernanceApi:
         assert response.status_code == 422
 
     async def test_update_class_governance_fields(self, client) -> None:
+        """Update DTO 中 objectOwner 已移除（防越权转移 owner）。
+        本测试仅验 objectType 更新；objectOwner 修改需走独立特权接口。
+        """
         created = await client.post(
             "/api/v1/ontology/classes",
             json={"className": "UpdOrder", "sourceTable": "t_upd"},
+            headers={"X-User-Departments": "procurement"},
         )
         cid = created.json()["id"]
         response = await client.put(
             f"/api/v1/ontology/classes/{cid}",
-            json={"objectType": "Reference", "objectOwner": "数据治理组"},
+            json={"objectType": "Reference"},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
         )
         assert response.status_code == 200
         assert response.json()["objectType"] == "Reference"
-        assert response.json()["objectOwner"] == "数据治理组"
+        # objectOwner 保留创建时的派生值
+        assert response.json()["objectOwner"] == "procurement"
 
     async def test_update_clears_governance_fields_with_null(self, client) -> None:
-        """显式 null 清空：PUT objectType:null 应落 NULL（前端清空下拉依赖此契约）。"""
+        """显式 null 清空：PUT objectType:null 应落 NULL（前端清空下拉依赖此契约）。
+
+        objectOwner 不再支持 Update 清空（DTO 移除）；admin 改 owner 需走独立接口。
+        """
         created = await client.post(
             "/api/v1/ontology/classes",
             json={
                 "className": "ClearOrder",
                 "objectType": "Transaction",
-                "objectOwner": "采购部",
             },
         )
         cid = created.json()["id"]
@@ -87,11 +99,11 @@ class TestGovernanceApi:
 
         response = await client.put(
             f"/api/v1/ontology/classes/{cid}",
-            json={"objectType": None, "objectOwner": None},
+            json={"objectType": None},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
         )
         assert response.status_code == 200
         assert response.json()["objectType"] is None
-        assert response.json()["objectOwner"] is None
 
     async def test_list_includes_governance_fields(self, client) -> None:
         await client.post(
@@ -99,24 +111,25 @@ class TestGovernanceApi:
             json={
                 "className": "ListOrder",
                 "objectType": "Master",
-                "objectOwner": "主数据管理组",
             },
+            headers={"X-User-Departments": "procurement"},
         )
         listed = await client.get("/api/v1/ontology/classes")
         assert listed.status_code == 200
         match = next(c for c in listed.json() if c["className"] == "ListOrder")
         assert match["objectType"] == "Master"
-        assert match["objectOwner"] == "主数据管理组"
+        assert match["objectOwner"] == "procurement"
 
     async def test_get_class_returns_governance_fields(self, client) -> None:
         created = await client.post(
             "/api/v1/ontology/classes",
-            json={"className": "GetOrder", "objectType": "Event", "objectOwner": "采购部"},
+            json={"className": "GetOrder", "objectType": "Event"},
+            headers={"X-User-Departments": "procurement"},
         )
         cid = created.json()["id"]
         got = await client.get(f"/api/v1/ontology/classes/{cid}")
         assert got.json()["objectType"] == "Event"
-        assert got.json()["objectOwner"] == "采购部"
+        assert got.json()["objectOwner"] == "procurement"
 
 
 class TestGovernanceSeedBackfill:

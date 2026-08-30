@@ -227,6 +227,14 @@ export default function EntityMappingPage() {
       render: (d: string | null) => d ?? t("common.dash"),
     },
     {
+      // 服务端按 actor.departments[0] 派生，仅展示（不可编辑）
+      title: t("entityMapping.owner"),
+      dataIndex: "owner",
+      key: "owner",
+      width: 110,
+      render: (o: string | null) => (o ? <Tag>{o}</Tag> : t("common.dash")),
+    },
+    {
       title: t("common.actions"),
       key: "actions",
       width: 140,

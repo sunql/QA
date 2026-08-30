@@ -157,6 +157,7 @@ class TestDataQualityRuleApi:
         resp = await client.put(
             f"/api/v1/data-quality/rules/{rid}",
             json={"severity": "HIGH", "threshold": "99.00"},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -178,7 +179,7 @@ class TestDataQualityRuleApi:
             },
         )
         rid = created.json()["id"]
-        resp = await client.delete(f"/api/v1/data-quality/rules/{rid}")
+        resp = await client.delete(f"/api/v1/data-quality/rules/{rid}", headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"})
         assert resp.status_code == 204
 
         # is_enabled=false 后默认列表不返回（enabledOnly=None 时仍返回），按 enabledOnly=true 过滤验证
@@ -224,3 +225,51 @@ class TestDataQualityRuleApi:
         )
         assert len(by_table.json()) == 1
         assert by_table.json()[0]["ruleCode"] == "FILTER_B"
+
+    async def test_owner_dept_can_update_and_other_dept_blocked(self, client) -> None:
+        """Phase 4.5 ACL：owner 部门可改；跨部门 403；admin 通过。
+
+        创建时通过 X-User-Departments 头让 service 派生 owner = procurement，
+        然后用相同部门 PUT（200）+ 跨部门 PUT（403）走完整 ACL 链路。
+        """
+        ds_id = await _createTestDatasource(client)
+        created = await client.post(
+            "/api/v1/data-quality/rules",
+            json={
+                "ruleName": "owner部门",
+                "ruleCode": "OWNER_DEPT_RULE",
+                "datasourceId": ds_id,
+                "targetTable": "PORDER",
+                "ruleType": "COMPLETENESS",
+            },
+            headers={"X-User-Departments": "procurement"},
+        )
+        assert created.status_code == 201, created.text
+        rid = created.json()["id"]
+        # 服务端已按部门派生 owner → 读回应是 procurement
+        assert created.json()["owner"] == "procurement"
+
+        # owner 部门 PUT → 200
+        okPut = await client.put(
+            f"/api/v1/data-quality/rules/{rid}",
+            json={"ruleName": "owner改后"},
+            headers={"X-User-Departments": "procurement"},
+        )
+        assert okPut.status_code == 200, okPut.text
+        assert okPut.json()["ruleName"] == "owner改后"
+
+        # 跨部门 PUT → 403
+        denied = await client.put(
+            f"/api/v1/data-quality/rules/{rid}",
+            json={"ruleName": "finance想改"},
+            headers={"X-User-Departments": "finance"},
+        )
+        assert denied.status_code == 403
+
+        # admin 任意改 → 200（覆盖前面 owner=procurement）
+        adminPut = await client.put(
+            f"/api/v1/data-quality/rules/{rid}",
+            json={"ruleName": "admin改"},
+            headers={"X-User-Roles": "admin"},
+        )
+        assert adminPut.status_code == 200, adminPut.text

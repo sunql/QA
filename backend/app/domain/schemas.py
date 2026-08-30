@@ -351,7 +351,6 @@ class OntologyClassCreate(CamelModel):
     object_type: ObjectType | None = Field(
         default=None, description="Master/Transaction/Reference/Event"
     )
-    object_owner: str | None = Field(default=None, max_length=100)
     parent_class_id: int | None = None
     created_by: str | None = None
 
@@ -364,7 +363,6 @@ class OntologyClassUpdate(CamelModel):
     object_type: ObjectType | None = Field(
         default=None, description="Master/Transaction/Reference/Event"
     )
-    object_owner: str | None = Field(default=None, max_length=100)
     parent_class_id: int | None = None
 
 
@@ -1187,7 +1185,6 @@ class DataQualityRuleCreate(CamelModel):
     severity: Severity = Field(default=Severity.MEDIUM, description=MSG_SCHEMA_DQ_SEVERITY)
     is_enabled: bool = Field(default=True, description=MSG_SCHEMA_DQ_IS_ENABLED)
     version: str = Field(default="v1.0", max_length=20, description=MSG_SCHEMA_DQ_VERSION)
-    owner: str | None = Field(default=None, max_length=100, description=MSG_SCHEMA_DQ_OWNER)
     description: str | None = Field(default=None, description=MSG_SCHEMA_DQ_DESCRIPTION)
 
 
@@ -1204,7 +1201,6 @@ class DataQualityRuleUpdate(CamelModel):
     severity: Severity | None = None
     is_enabled: bool | None = None
     version: str | None = Field(default=None, max_length=20)
-    owner: str | None = Field(default=None, max_length=100)
     description: str | None = None
 
 
@@ -1462,6 +1458,7 @@ class EntityMappingRead(CamelModel):
     match_rule: MatchRule
     effective_date: date | None = None
     expiry_date: date | None = None
+    owner: str | None = None
     created_time: datetime | None = Field(
         default=None, description=MSG_SCHEMA_ENTITY_MAPPING_CREATED_TIME
     )

@@ -151,7 +151,7 @@ class TestDataQualityScoreApi:
             threshold="0.00",
         )
         # 软删
-        await client.delete(f"/api/v1/data-quality/rules/{rid}")
+        await client.delete(f"/api/v1/data-quality/rules/{rid}", headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"})
         adapter = _FakeAdapter()
         _installFakeAdapter(monkeypatch, adapter)
 

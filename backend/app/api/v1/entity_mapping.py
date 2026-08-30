@@ -13,7 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import getCurrentUser, getDb
+from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.enums import EntityType, SourceSystem
 from app.domain.schemas import EntityMappingCreate, EntityMappingRead, EntityMappingUpdate
 from app.services.entity_mapping_service import (
@@ -21,7 +21,7 @@ from app.services.entity_mapping_service import (
     entityMappingToRead,
 )
 
-router = APIRouter(dependencies=[Depends(getCurrentUser)])
+router = APIRouter()
 
 
 def getEntityMappingService() -> EntityMappingService:
@@ -31,6 +31,7 @@ def getEntityMappingService() -> EntityMappingService:
 
 @router.get("", response_model=list[EntityMappingRead])
 async def listEntityMappings(
+    _user: CurrentUser = Depends(getCurrentUser),
     entityType: EntityType | None = Query(default=None, alias="entityType"),
     sourceSystem: SourceSystem | None = Query(default=None, alias="sourceSystem"),
     enterpriseKey: int | None = Query(default=None, alias="enterpriseKey"),
@@ -53,6 +54,7 @@ async def listEntityMappings(
 @router.get("/{mappingId}", response_model=EntityMappingRead)
 async def getEntityMapping(
     mappingId: int,
+    _user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
     service: EntityMappingService = Depends(getEntityMappingService),
 ) -> EntityMappingRead:
@@ -63,10 +65,11 @@ async def getEntityMapping(
 @router.post("", response_model=EntityMappingRead, status_code=status.HTTP_201_CREATED)
 async def createEntityMapping(
     payload: EntityMappingCreate,
+    user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
     service: EntityMappingService = Depends(getEntityMappingService),
 ) -> EntityMappingRead:
-    mapping = await service.createMapping(session, payload)
+    mapping = await service.createMapping(session, payload, user)
     return entityMappingToRead(mapping)
 
 
@@ -74,17 +77,19 @@ async def createEntityMapping(
 async def updateEntityMapping(
     mappingId: int,
     payload: EntityMappingUpdate,
+    user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
     service: EntityMappingService = Depends(getEntityMappingService),
 ) -> EntityMappingRead:
-    mapping = await service.updateMapping(session, mappingId, payload)
+    mapping = await service.updateMapping(session, mappingId, payload, user)
     return entityMappingToRead(mapping)
 
 
 @router.delete("/{mappingId}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteEntityMapping(
     mappingId: int,
+    user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
     service: EntityMappingService = Depends(getEntityMappingService),
 ) -> None:
-    await service.deleteMapping(session, mappingId)
+    await service.deleteMapping(session, mappingId, user)

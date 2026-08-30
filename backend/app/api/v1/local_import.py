@@ -38,7 +38,9 @@ async def importPreview(
     session: AsyncSession = Depends(getDb),
     service: LocalImportService = Depends(getLocalImportService),
 ) -> ImportPreviewResponse:
-    return await service.build_preview(session, datasourceId, payload.rules)
+    return await service.build_preview(
+        session, datasourceId, payload.rules, selected_tables=payload.selected_tables
+    )
 
 
 @router.post("/{datasourceId}/import", response_model=ImportExecuteResponse)
@@ -49,4 +51,6 @@ async def importExecute(
     session: AsyncSession = Depends(getDb),
     service: LocalImportService = Depends(getLocalImportService),
 ) -> ImportExecuteResponse:
-    return await service.execute_import(session, datasourceId, payload, created_by=user.userId)
+    return await service.execute_import(
+        session, datasourceId, payload, created_by=user.userId, actor=user
+    )

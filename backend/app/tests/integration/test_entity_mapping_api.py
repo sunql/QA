@@ -68,6 +68,7 @@ class TestEntityMappingApi:
         upd = await client.put(
             f"/api/v1/entity-mappings/{mapping_id}",
             json={"sourceCode": "V000001-X", "matchRule": "MAPPING"},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
         )
         assert upd.status_code == 200, upd.text
         upd_body = upd.json()
@@ -87,7 +88,7 @@ class TestEntityMappingApi:
         assert created.status_code == 201
         mapping_id = created.json()["id"]
 
-        delete = await client.delete(f"/api/v1/entity-mappings/{mapping_id}")
+        delete = await client.delete(f"/api/v1/entity-mappings/{mapping_id}", headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"})
         assert delete.status_code == 204
 
         after = await client.get(f"/api/v1/entity-mappings/{mapping_id}")
@@ -191,6 +192,7 @@ class TestEntityMappingApi:
         upd = await client.put(
             f"/api/v1/entity-mappings/{mapping_id}",
             json={"sourceCode": None},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
         )
         assert upd.status_code == 200, upd.text
         assert upd.json()["sourceCode"] == "V000001"
@@ -205,6 +207,7 @@ class TestEntityMappingApi:
         upd = await client.put(
             f"/api/v1/entity-mappings/{mapping_id}",
             json={"expiryDate": None},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
         )
         assert upd.status_code == 200, upd.text
         assert upd.json()["expiryDate"] is None
@@ -218,6 +221,7 @@ class TestEntityMappingApi:
         resp = await client.put(
             f"/api/v1/entity-mappings/{mapping_id}",
             json={"sourceCode": ""},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
         )
         assert resp.status_code == 422
 

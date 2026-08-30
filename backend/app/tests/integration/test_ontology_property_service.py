@@ -13,12 +13,18 @@ from __future__ import annotations
 import pytest
 
 import app.infrastructure.neo4j_client as neo4j
+from app.dependencies import CurrentUser
 from app.domain.schemas import (
     OntologyClassCreate,
     OntologyPropertyCreate,
     OntologyPropertyUpdate,
 )
+from app.services.acl_service import ADMIN_ROLE
 from app.services.ontology_service import OntologyService
+
+
+# Phase 4.5 ACL 扩展后 createClass 要求 actor。本测试不验 ACL，用 admin 绕过。
+_ADMIN = CurrentUser(userId="t-admin", roles=(ADMIN_ROLE,), departments=())
 
 
 @pytest.fixture()
@@ -39,7 +45,9 @@ def service() -> OntologyService:
 
 async def _createProp(dbSession, service: OntologyService, **extra) -> object:
     cls = await service.createClass(
-        dbSession, OntologyClassCreate(class_name="PRECEIPT", source_table="ZJTH.PRECEIPT")
+        dbSession,
+        OntologyClassCreate(class_name="PRECEIPT", source_table="ZJTH.PRECEIPT"),
+        actor=_ADMIN,
     )
     return await service.createProperty(
         dbSession,

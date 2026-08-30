@@ -18,11 +18,14 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import ProgrammingError
 
 from app.domain.enums import LineageLayer, RefreshFrequency
-from app.domain.models import DataLineage, OntologyClass, OntologyJoin, OntologyMetric
+from app.domain.models import DataLineage, OntologyClass, OntologyJoin, OntologyMetric, SchemaCache
 from app.services.lineage_extractor import (
     ExtractedEdge,
+    _edgesFromSystemToOds,
+    _loadSchemaTableNames,
     extractEdges,
     layerForSourceTable,
 )
@@ -40,17 +43,28 @@ class _FakeSession:
         joins: list[OntologyJoin] | None = None,
         metrics: list[OntologyMetric] | None = None,
         existing: list[DataLineage] | None = None,
+        schema_caches: list[SchemaCache] | None = None,
+        schema_cache_error: Exception | None = None,
     ) -> None:
         self.classes = classes or []
         self.joins = joins or []
         self.metrics = metrics or []
         self.existing = existing or []
+        self.schema_caches = schema_caches or []
+        self.schema_cache_error = schema_cache_error
         self.added: list[Any] = []
         self.commits = 0
+        self.rollbacks = 0
 
     async def execute(self, stmt):
         # 简化：根据 stmt 描述的 table 选择返回对应数据
         description = str(stmt).lower()
+        if "schema_cache" in description:
+            if self.schema_cache_error is not None:
+                raise self.schema_cache_error
+            return SimpleNamespace(
+                scalars=lambda: SimpleNamespace(all=lambda: list(self.schema_caches))
+            )
         if "ontology_class" in description:
             return SimpleNamespace(
                 scalars=lambda: SimpleNamespace(all=lambda: list(self.classes))
@@ -76,6 +90,9 @@ class _FakeSession:
 
     async def commit(self):
         self.commits += 1
+
+    async def rollback(self):
+        self.rollbacks += 1
 
 
 def _makeClass(
@@ -140,6 +157,27 @@ class TestLayerForSourceTable:
 
     def test_empty_returns_source_system(self):
         assert layerForSourceTable("") == LineageLayer.SOURCE_SYSTEM
+
+    # ---- Phase 2.2 分层前缀推断（计划 Change 2.2 阶段 3：SYSTEM→ODS 层边）----
+
+    def test_ods_prefix_returns_ods(self):
+        assert layerForSourceTable("ODS_PORDER") == LineageLayer.ODS
+
+    def test_dwd_prefix_returns_dwd(self):
+        assert layerForSourceTable("DWD_PURCHASE_ORDER") == LineageLayer.DWD
+
+    def test_dws_prefix_returns_dws(self):
+        assert layerForSourceTable("DWS_SUPPLIER_DELIVERY") == LineageLayer.DWS
+
+    def test_ads_prefix_returns_ads(self):
+        assert layerForSourceTable("ADS_PROCUREMENT_DASHBOARD") == LineageLayer.ADS
+
+    def test_ods_prefix_case_insensitive(self):
+        assert layerForSourceTable("ods_porder") == LineageLayer.ODS
+
+    def test_prefix_not_matched_falls_back_to_source(self):
+        """无匹配前缀（如 DIM_ 非 7 层之一）回落 SOURCE_SYSTEM。"""
+        assert layerForSourceTable("DIM_BPSUPPLIER") == LineageLayer.SOURCE_SYSTEM
 
 
 # ---- extractEdges：JOIN → DataLineage ----
@@ -358,3 +396,159 @@ class TestExtractEdgesContract:
 
         assert edges[0].transformation_rule is not None
         assert len(edges[0].transformation_rule) > 0
+
+
+# ---- _edgesFromSystemToOds：schema introspection 补 SYSTEM→ODS 层边（计划 2.2 阶段 3）----
+
+
+class TestEdgesFromSystemToOds:
+    def test_generates_cdc_edge_for_ods_table(self):
+        """ODS_PORDER 在 schema 中且源表 PORDER 也在 → 生成 SYSTEM→ODS CDC 边（表级）。"""
+        edges = _edgesFromSystemToOds({"PORDER", "ODS_PORDER"})
+
+        assert len(edges) == 1
+        edge = edges[0]
+        assert edge.source_layer == LineageLayer.SOURCE_SYSTEM
+        assert edge.source_object == "PORDER"
+        assert edge.source_field is None  # 表级边
+        assert edge.target_layer == LineageLayer.ODS
+        assert edge.target_object == "ODS_PORDER"
+        assert edge.target_field is None  # 表级边
+        assert "CDC" in (edge.transformation_rule or "")
+        assert edge.refresh_frequency == RefreshFrequency.REALTIME
+
+    def test_skips_ods_table_without_source_table(self):
+        """ODS 表在 schema 中但源表（去前缀）不在 → 跳过（不能凭空造上游）。"""
+        edges = _edgesFromSystemToOds({"ODS_GHOST"})
+        assert edges == []
+
+    def test_generates_multiple_edges_for_multiple_ods_tables(self):
+        tables = {
+            "PORDER", "ODS_PORDER",
+            "PRECEIPTD", "ODS_PRECEIPTD",
+            "BPSUPPLIER",  # 非 ODS 表不产生边
+        }
+        edges = _edgesFromSystemToOds(tables)
+        assert len(edges) == 2
+        targets = sorted(e.target_object for e in edges)
+        assert targets == ["ODS_PORDER", "ODS_PRECEIPTD"]
+
+    def test_empty_schema_no_edges(self):
+        assert _edgesFromSystemToOds(set()) == []
+
+    def test_case_insensitive_table_matching(self):
+        """schema 表名大小写不一致（如 ODS_porder vs PORDER）仍能匹配源表。"""
+        edges = _edgesFromSystemToOds({"PORDER", "ods_porder"})
+        assert len(edges) == 1
+        assert edges[0].target_object.upper() == "ODS_PORDER"
+
+    def test_ods_alone_with_empty_source_produces_no_edge(self):
+        """表名恰为 ODS_：去前缀后源表名为空串 → 显式跳过（守卫自包含，不依赖外部过滤）。"""
+        assert _edgesFromSystemToOds({"ODS_"}) == []
+
+    def test_preserves_original_table_case(self):
+        """输出保留 schema 原始拼写（PG 带引号小写标识符场景），大小写仅用于匹配。"""
+        edges = _edgesFromSystemToOds({"PORDER", "ods_porder"})
+        assert len(edges) == 1
+        assert edges[0].source_object == "PORDER"
+        assert edges[0].target_object == "ods_porder"
+
+
+# ---- _loadSchemaTableNames：schema introspection 缓存读取的容错 ----
+
+class TestLoadSchemaTableNames:
+    async def test_schema_cache_query_failure_returns_empty_and_rolls_back(self):
+        """schema_cache 表缺失（迁移未跑）→ 返回空集 + 显式 rollback 清事务。
+
+        若不 rollback，PG 事务进入 aborted 态，调用方后续 commit 会抛
+        InFailedSQLTransactionError，真实根因被掩盖在混乱的下游错误里。
+        """
+        err = ProgrammingError("SELECT", {}, Exception("relation schema_cache does not exist"))
+        session = _FakeSession(schema_cache_error=err)
+
+        tables = await _loadSchemaTableNames(session)
+
+        assert tables == set()
+        assert session.rollbacks == 1
+
+    async def test_malformed_rows_are_skipped_but_valid_retained(self):
+        """schema_data 含非 dict 元素 → 只跳过坏行，不丢弃其他行的有效表名。"""
+        cache = SchemaCache(
+            id=1,
+            datasource_id=1,
+            schema_data=[{"table_name": "PORDER"}, "BAD", None, 123, {"table_name": "ODS_PORDER"}],
+            schema_version="v1",
+        )
+        session = _FakeSession(schema_caches=[cache])
+
+        tables = await _loadSchemaTableNames(session)
+
+        assert tables == {"PORDER", "ODS_PORDER"}
+
+    async def test_schema_data_none_returns_empty(self):
+        """schema_data 为 NULL → 空集，不抛错（与 _edgesFromSystemToOds 配套）。"""
+        cache = SchemaCache(id=1, datasource_id=1, schema_data=None, schema_version="v1")
+        session = _FakeSession(schema_caches=[cache])
+
+        tables = await _loadSchemaTableNames(session)
+
+        assert tables == set()
+
+
+# ---- extractEdges 集成：读取 SchemaCache 补 SYSTEM→ODS 层边 ----
+
+
+class TestExtractEdgesWithSchemaIntrospection:
+    def _cache(self, tables: list[str]) -> SchemaCache:
+        return SchemaCache(
+            id=1,
+            datasource_id=1,
+            schema_data=[{"table_name": t} for t in tables],
+            schema_version="v1",
+        )
+
+    async def test_extracts_system_to_ods_edges_from_schema_cache(self):
+        """schema cache 含 ODS 物理表 → extractEdges 一并产出 SYSTEM→ODS 层边。"""
+        session = _FakeSession(
+            schema_caches=[self._cache(["PORDER", "ODS_PORDER", "BPSUPPLIER"])]
+        )
+
+        edges = await extractEdges(session)
+
+        ods_edges = [e for e in edges if e.target_layer == LineageLayer.ODS]
+        assert len(ods_edges) == 1
+        assert ods_edges[0].source_object == "PORDER"
+        assert ods_edges[0].target_object == "ODS_PORDER"
+
+    async def test_empty_schema_cache_no_ods_edges(self):
+        """schema cache 为空 → 不产生 ODS 层边（不报错）。"""
+        session = _FakeSession(schema_caches=[])
+        edges = await extractEdges(session)
+        assert edges == []
+
+    async def test_combines_join_and_system_to_ods_edges(self):
+        """JOIN 边（字段级）+ SYSTEM→ODS 边（表级）共存，互不干扰。"""
+        cls_porder = _makeClass(1, "PURCHASE_ORDER", "PORDER")
+        cls_supplier = _makeClass(2, "SUPPLIER", "BPSUPPLIER")
+        join = _makeJoin(
+            id=10,
+            src_class=cls_porder,
+            tgt_class=cls_supplier,
+            src_cols=["BPSNUM"],
+            tgt_cols=["BPSNUM"],
+            description="订单 → 供应商",
+        )
+        session = _FakeSession(
+            classes=[cls_porder, cls_supplier],
+            joins=[join],
+            schema_caches=[self._cache(["PORDER", "ODS_PORDER"])],
+        )
+
+        edges = await extractEdges(session)
+
+        join_edges = [e for e in edges if e.target_layer == LineageLayer.SOURCE_SYSTEM]
+        ods_edges = [e for e in edges if e.target_layer == LineageLayer.ODS]
+        assert len(join_edges) == 1
+        assert join_edges[0].source_field == "BPSNUM"
+        assert len(ods_edges) == 1
+        assert ods_edges[0].source_field is None

@@ -11,8 +11,15 @@ from __future__ import annotations
 
 from sqlalchemy import delete, select as sql_select
 
-from app.domain.enums import LineageLayer
-from app.domain.models import DataLineage, OntologyClass, OntologyJoin, OntologyMetric
+from app.domain.enums import DataSourceType, LineageLayer
+from app.domain.models import (
+    DataLineage,
+    DataSource,
+    OntologyClass,
+    OntologyJoin,
+    OntologyMetric,
+    SchemaCache,
+)
 from app.services.lineage_extractor import extractEdges
 
 
@@ -273,4 +280,56 @@ class TestLineageExtractorIntegration:
 
         # Cleanup
         await dbSession.execute(delete(DataLineage).where(DataLineage.source_object == "TA"))
+        await dbSession.commit()
+
+    async def test_schema_introspection_adds_system_to_ods_edges(
+        self, dbSession, client
+    ) -> None:
+        """计划 Change 2.2 阶段 3：schema cache 有 ODS 物理表 → SYSTEM→ODS 层边（真实 PG）。
+
+        ODS 表是物理 schema 中真实存在的表（如 Sage X3 的 ODS_PORDER），
+        extractor 从 schema introspection 缓存识别并补 CDC 层边，不依赖 ontology。
+        """
+        # Arrange：种子 DataSource（schema_cache 的 FK 依赖）+ schema cache 含 ODS 表
+        ds = DataSource(
+            name="TEST_SOURCE",
+            type=DataSourceType.ORACLE,
+            host="localhost",
+            port=1521,
+            database_name="svc",
+            username="TEST_USER",
+            password_encrypted="enc",  # 非本测试关注点，任意串即可通过 FK
+        )
+        dbSession.add(ds)
+        await dbSession.flush()
+
+        cache = SchemaCache(
+            datasource_id=ds.id,
+            schema_data=[
+                {"table_name": "PORDER"},
+                {"table_name": "ODS_PORDER"},
+                {"table_name": "BPSUPPLIER"},  # 非 ODS 表不产边
+            ],
+            schema_version="v1",
+        )
+        dbSession.add(cache)
+        await dbSession.commit()
+
+        # Act：不种任何 ontology class/join，纯靠 schema introspection
+        edges = await extractEdges(dbSession)
+
+        # Assert：恰好 1 条 SYSTEM→ODS 表级边
+        ods_edges = [e for e in edges if e.target_layer == LineageLayer.ODS]
+        assert len(ods_edges) == 1
+        edge = ods_edges[0]
+        assert edge.source_layer == LineageLayer.SOURCE_SYSTEM
+        assert edge.source_object == "PORDER"
+        assert edge.source_field is None  # 表级
+        assert edge.target_object == "ODS_PORDER"
+        assert edge.target_field is None  # 表级
+        assert edge.transformation_rule == "CDC 原样接入"
+
+        # Cleanup
+        await dbSession.execute(delete(SchemaCache).where(SchemaCache.datasource_id == ds.id))
+        await dbSession.execute(delete(DataSource).where(DataSource.id == ds.id))
         await dbSession.commit()

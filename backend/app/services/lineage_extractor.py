@@ -1,17 +1,19 @@
 """lineage_extractor（Phase 2.2）。
 
-从 ontology 数据（OntologyJoin + OntologyMetric.formula）推断 DataLineage 边。
+从 ontology 数据（OntologyJoin + OntologyMetric.formula）+ schema introspection 推断 DataLineage 边。
 
 覆盖规则：
 1. JOIN → 字段级血缘（每对 (src_cols[i], tgt_cols[i]) 产生一条边）
 2. Metric formula → 源端列引用 + 目标端 metric 聚合层血缘
+3. schema introspection → SYSTEM→ODS 层边（表级 CDC 接入：源表 → ODS_ 前缀物理表）
 
 层分配策略（Phase 2.2 启发式）：
-- 当前 ontology 数据全部为 SOURCE_SYSTEM 层（来自 ERP/SRM/WMS 业务表）
+- 表名按前缀约定推断层（ODS_/DWD_/DWS_/ADS_ → 对应分层），其余回落 SOURCE_SYSTEM
 - 目标层视上下文而定：
-  - JOIN：两边均为 SOURCE_SYSTEM（跨业务表 JOIN 视为逻辑视图）
+  - JOIN：两侧各按 layerForSourceTable 推断（跨层 JOIN 自然产跨层边）
   - Metric：目标层 = KPI（聚合指标）
-- Phase 3+ ODS/DWD 层落地后，扩展 layerForSourceTable 函数即可启用更多层
+  - schema introspection：目标层 = ODS（贴源 CDC 接入，物理 ODS_ 表）
+- 无前缀匹配的表（如 DIM_）仍归 SOURCE_SYSTEM，避免过度归类
 
 重复边去重：
 - 同一上下游 + 字段组合只生成一次（in-memory 去重 + 与现有 data_lineage 双向查重）
@@ -19,14 +21,18 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import LineageLayer, RefreshFrequency
-from app.domain.models import DataLineage, OntologyClass, OntologyJoin, OntologyMetric
+from app.domain.models import DataLineage, OntologyClass, OntologyJoin, OntologyMetric, SchemaCache
 from app.services.formula_parser import parseFormula
+
+logger = logging.getLogger(__name__)
 
 
 # ---- 配置：source_table → 业务系统简称的映射 ----
@@ -34,6 +40,18 @@ from app.services.formula_parser import parseFormula
 _SOURCE_SYSTEM_FOR_LAYER: dict[LineageLayer, str] = {
     LineageLayer.SOURCE_SYSTEM: "ERP",
 }
+
+# 表名前缀 → 分层约定（计划 Change 2.2 阶段 3：从 schema introspection 补 SYSTEM→ODS 层边）。
+# 匹配顺序无关（前缀互斥）；无前缀匹配回落 SOURCE_SYSTEM。
+_LAYER_PREFIXES: tuple[tuple[str, LineageLayer], ...] = (
+    ("ODS_", LineageLayer.ODS),
+    ("DWD_", LineageLayer.DWD),
+    ("DWS_", LineageLayer.DWS),
+    ("ADS_", LineageLayer.ADS),
+)
+
+# ODS 层边 transformation_rule：贴源 CDC 原样接入
+_ODS_CDC_RULE = "CDC 原样接入"
 
 
 @dataclass(frozen=True)
@@ -52,12 +70,19 @@ class ExtractedEdge:
     refresh_frequency: RefreshFrequency
 
 
-def layerForSourceTable(_sourceTable: str) -> LineageLayer:
+def layerForSourceTable(sourceTable: str) -> LineageLayer:
     """根据 source_table 推断所属层。
 
-    Phase 2.2：所有已知业务表 → SOURCE_SYSTEM。
-    Phase 3+ 扩展点：可通过 source_table 前缀或 ontology class metadata 推断层。
+    按表名前缀约定推断（计划 Change 2.2 阶段 3）：
+    - ODS_ / DWD_ / DWS_ / ADS_ 前缀 → 对应分层（数仓分层物理表）
+    - 其余（含 DIM_ 与无前缀业务表）→ SOURCE_SYSTEM（贴源层）
+
+    大小写不敏感：表名统一转大写后匹配前缀。
     """
+    upper = (sourceTable or "").upper()
+    for prefix, layer in _LAYER_PREFIXES:
+        if upper.startswith(prefix):
+            return layer
     return LineageLayer.SOURCE_SYSTEM
 
 
@@ -122,6 +147,71 @@ async def _loadExistingEdges(session: AsyncSession) -> set[tuple]:
             )
         )
     return existing
+
+
+async def _loadSchemaTableNames(session: AsyncSession) -> set[str]:
+    """载入 schema introspection 缓存中的全部物理表名（计划 2.2 阶段 3）。
+
+    供 _edgesFromSystemToOds 判断 ODS 表与源表是否存在。best-effort 降级：
+    - schema_cache 不可用（迁移未跑 / 连接失败）→ 记 WARN + rollback 清事务 + 空集
+      （不 rollback 会让 PG 事务进入 aborted 态，调用方后续 commit 报 InFailedSQLTransactionError）
+    - 单行 schema_data 畸形（非 dict）→ 只跳过该行，保留其余有效表名
+    """
+    try:
+        stmt = select(SchemaCache)
+        result = await session.execute(stmt)
+        tables: set[str] = set()
+        for cache in result.scalars().all():
+            for table in cache.schema_data or []:
+                if not isinstance(table, dict):
+                    logger.warning("schema_cache 含非 dict 行，跳过: %r", table)
+                    continue
+                name = table.get("table_name")
+                if name:
+                    tables.add(name)
+        return tables
+    except (ProgrammingError, OperationalError) as exc:
+        # introspection 不可用不阻断血缘提取；但必须先 rollback 再返回，
+        # 否则残留 aborted 事务污染调用方后续写入。
+        logger.warning("schema introspection 缓存不可用，跳过 SYSTEM→ODS 层边: %s", exc)
+        await session.rollback()
+        return set()
+
+
+def _edgesFromSystemToOds(schemaTables: set[str]) -> list[ExtractedEdge]:
+    """从 schema introspection 物理表清单补 SYSTEM→ODS 层边（计划 2.2 阶段 3）。
+
+    规则：对每个以 ODS_ 开头的物理表，去掉前缀得源表名（ODS_PORDER → PORDER）；
+    若源表也存在于 schema（贴源 CDC 来源真实），生成表级 CDC 边：
+        SOURCE_SYSTEM.PORDER → ODS.ODS_PORDER（transformation_rule=CDC 原样接入）
+
+    大小写不敏感：统一转大写做前缀匹配与源表存在性判断；
+    输出保留 schema 原始拼写（PG 带引号小写标识符场景也正确）。
+    表级边：source_field / target_field 均为 None。
+    """
+    upper = {t.upper(): t for t in schemaTables if t}
+    edges: list[ExtractedEdge] = []
+    for upper_name in sorted(upper):
+        if not upper_name.startswith("ODS_"):
+            continue
+        source_upper = upper_name[len("ODS_"):]
+        if not source_upper or source_upper not in upper:
+            continue  # 源表为空串（表名恰为 ODS_）或不在 schema → 不能凭空造上游
+        edges.append(
+            ExtractedEdge(
+                source_layer=LineageLayer.SOURCE_SYSTEM,
+                source_system=_systemForLayer(LineageLayer.SOURCE_SYSTEM),
+                source_object=upper[source_upper],
+                source_field=None,
+                target_layer=LineageLayer.ODS,
+                target_system=_systemForLayer(LineageLayer.SOURCE_SYSTEM),
+                target_object=upper[upper_name],
+                target_field=None,
+                transformation_rule=_ODS_CDC_RULE,
+                refresh_frequency=RefreshFrequency.REALTIME,
+            )
+        )
+    return edges
 
 
 def _edgesFromJoin(
@@ -233,6 +323,7 @@ async def extractEdges(session: AsyncSession) -> list[ExtractedEdge]:
     joins = await _loadJoins(session)
     metrics = await _loadMetrics(session)
     existing = await _loadExistingEdges(session)
+    schemaTables = await _loadSchemaTableNames(session)
 
     edges: list[ExtractedEdge] = []
     seen: set[tuple] = set(existing)
@@ -256,5 +347,13 @@ async def extractEdges(session: AsyncSession) -> list[ExtractedEdge]:
         except Exception:  # noqa: BLE001
             # 单 metric 解析失败不阻断；运维侧从日志/警告发现
             continue
+
+    # 计划 2.2 阶段 3：schema introspection 补 SYSTEM→ODS 层边（表级 CDC）
+    for edge in _edgesFromSystemToOds(schemaTables):
+        key = _edgeIdentity(edge)
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append(edge)
 
     return edges

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -28,12 +29,38 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """应用生命周期：启动时预热引擎，关闭时释放。"""
+    """应用生命周期：启动时预热引擎 + schema drift 校验，关闭时释放。
+
+    Schema 漂移防护（Harness 工程结构.md）：ORM 与 DB 不一致时启动 fail-fast，
+    避免「代码新增模型但 DB 未迁移」运行时踩 "relation does not exist"。
+    通过环境变量 SKIP_SCHEMA_CHECK=1 可临时跳过（如紧急回滚 + 旧镜像兼容）。
+    """
     settings = getSettings()
     logging.basicConfig(level=getattr(logging, settings.logLevel.upper(), logging.INFO))
     logger.info("启动 QA System 后端 v%s (env=%s)", __version__, settings.appEnv)
     engine = getEngine()
     logger.info("元数据库引擎已就绪: %s", engine.url.render_as_string(hide_password=True))
+    # Schema drift 校验：默认开启，SKIP_SCHEMA_CHECK=1 可关闭（紧急场景）
+    if os.environ.get("SKIP_SCHEMA_CHECK") != "1":
+        from scripts.check_schema_drift import _checkDriftAsync
+
+        try:
+            issues = await _checkDriftAsync(engine)
+        except Exception as e:
+            logger.exception("Schema drift 校验异常: %s", e)
+            raise RuntimeError(
+                "Schema drift 校验失败：无法确认 ORM 与 DB 一致。"
+                "如确认 DB 状态正确可设置 SKIP_SCHEMA_CHECK=1 跳过。"
+            ) from e
+        if issues:
+            logger.error("Schema drift 校验失败（%d 项）：", len(issues))
+            for issue in issues:
+                logger.error("  - %s", issue)
+            raise RuntimeError(
+                "DB schema 与 ORM 不一致，禁止启动。"
+                "请执行 alembic upgrade head 后重启。"
+                "如紧急回滚可设置 SKIP_SCHEMA_CHECK=1。"
+            )
     yield
     logger.info("关闭中，释放外部连接...")
     await shutdownCleanup()

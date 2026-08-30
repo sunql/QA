@@ -152,6 +152,7 @@ def createApp() -> FastAPI:
     # prefix 双重叠加 bug（v1Router.include_router(sub, prefix="/x") +
     # app.include_router(v1Router, prefix="/api/v1") 会导致 /api/v1/x/x/...）
     from app.api.v1 import (
+        audit,
         chat,
         data_lineage,
         data_quality,
@@ -203,6 +204,7 @@ def createApp() -> FastAPI:
         kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"]
     )
     app.include_router(features.router, prefix="/api/v1/features", tags=["features"])
+    app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(graph.router, prefix="/api/v1/system", tags=["system"])

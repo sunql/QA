@@ -1570,3 +1570,21 @@ class EntityMappingRead(CamelModel):
     updated_time: datetime | None = Field(
         default=None, description=MSG_SCHEMA_ENTITY_MAPPING_UPDATED_TIME
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.5: audit_log 查询 API
+# ---------------------------------------------------------------------------
+
+
+class AuditLogRead(CamelModel):
+    """audit_log 单条记录响应（Phase 4.5 治理 API）。"""
+    id: int
+    entity_type: str
+    entity_id: int
+    action: str
+    actor: str
+    actor_departments: str | None = None
+    before_json: dict | None = None
+    after_json: dict | None = None
+    created_at: datetime

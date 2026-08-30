@@ -1,7 +1,10 @@
 """审计日志服务（Phase 4.5 governance hardening，遗留 #68）。
 
-通用 AuditService：捕获任意实体（entity_type+entity_id）的 CREATE/UPDATE/DELETE 事件。
-仅写入，不提供查询/修改 API（查询走原生 SQL 即可；不可变是治理前提）。
+通用 AuditService：
+1. 写入 audit_log（record）
+2. 查询 audit_log（listByEntity / listByActor / listAll / getById）
+
+仅写入，不提供修改/删除 API（不可变是治理前提）。
 
 用法（service 层）：
     audit = AuditService()
@@ -18,6 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import AuditLog
@@ -26,9 +30,17 @@ logger = logging.getLogger(__name__)
 
 _VALID_ACTIONS = frozenset({"CREATE", "UPDATE", "DELETE"})
 
+# 查询默认上限（防止一次拉太多）
+_DEFAULT_LIMIT = 100
+_MAX_LIMIT = 1000
+
 
 class AuditService:
-    """写入 audit_log 通用审计日志。"""
+    """写入 + 查询 audit_log 通用审计日志。"""
+
+    # ------------------------------------------------------------------
+    # 写入
+    # ------------------------------------------------------------------
 
     async def record(
         self,
@@ -85,3 +97,76 @@ class AuditService:
             actor,
         )
         return row
+
+    # ------------------------------------------------------------------
+    # 查询
+    # ------------------------------------------------------------------
+
+    async def listByEntity(
+        self,
+        session: AsyncSession,
+        entity_type: str,
+        entity_id: int,
+        *,
+        limit: int = _DEFAULT_LIMIT,
+        offset: int = 0,
+    ) -> list[AuditLog]:
+        """按实体查询审计记录（entity_type + entity_id 精确匹配）。"""
+        limit = min(limit, _MAX_LIMIT)
+        stmt = (
+            select(AuditLog)
+            .where(AuditLog.entity_type == entity_type, AuditLog.entity_id == entity_id)
+            .order_by(AuditLog.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def listByActor(
+        self,
+        session: AsyncSession,
+        actor: str,
+        *,
+        limit: int = _DEFAULT_LIMIT,
+        offset: int = 0,
+    ) -> list[AuditLog]:
+        """按用户 ID 查询审计记录。"""
+        limit = min(limit, _MAX_LIMIT)
+        stmt = (
+            select(AuditLog)
+            .where(AuditLog.actor == actor)
+            .order_by(AuditLog.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def listAll(
+        self,
+        session: AsyncSession,
+        *,
+        entity_type: str | None = None,
+        action: str | None = None,
+        actor: str | None = None,
+        limit: int = _DEFAULT_LIMIT,
+        offset: int = 0,
+    ) -> list[AuditLog]:
+        """全局审计记录查询（支持 entity_type / action / actor 过滤，全部可选）。"""
+        limit = min(limit, _MAX_LIMIT)
+        stmt = select(AuditLog).order_by(AuditLog.created_at.desc())
+        if entity_type:
+            stmt = stmt.where(AuditLog.entity_type == entity_type)
+        if action:
+            stmt = stmt.where(AuditLog.action == action)
+        if actor:
+            stmt = stmt.where(AuditLog.actor == actor)
+        stmt = stmt.limit(limit).offset(offset)
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def getById(self, session: AsyncSession, id: int) -> AuditLog | None:
+        """按 ID 查单条审计记录。"""
+        entity = await session.get(AuditLog, id)
+        return entity

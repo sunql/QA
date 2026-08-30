@@ -10,11 +10,11 @@
 每类录入主要字段（主键/外键/SQL样例字段/核心业务字段），跳过 DIE/CCE/INVDTA/DISCRG/CLCAMT/DCGVAL 等扩展槽位。
 外键关系按 Sage X3 命名约定 + SQL JOIN 推断（库内无声明 PK/FK 约束）。
 
-幂等：按 source_table 复用类、按 (class_id, property_name) 跳过已有属性。
-PG 写完后同步 Neo4j 本体图（20 类 + 属性 + HAS_PROPERTY/REFERENCES 关系，幂等 MERGE）。
+幂等：按 source_table 复用类、按 (class_id, property_name) 跳过已有属性、按 metric_name 复用指标。
+PG 写完后同步 Neo4j 本体图（20 类 + 属性 + 指标 + HAS_PROPERTY/REFERENCES/DERIVED_FROM 关系，幂等 MERGE）。
 
-当前仅预置类与属性，暂无指标（Metric）种子数据；如后续补充，需同步扩展 _syncToNeo4j 的
-DERIVED_FROM 关系处理。
+指标（METRICS）种子：Phase 2 数据血缘 KPI 层数据源。lineage_auto_extract.py 消费
+formula 中的聚合列生成 SOURCE -> KPI 血缘边；无指标时血缘图退化为单系统图。
 
 运行: uv run python seed_ontology.py
 """
@@ -26,7 +26,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
+from app.domain.models import OntologyClass, OntologyJoin, OntologyMetric, OntologyProperty
 from app.infrastructure import neo4j_client as neo4j
 from app.infrastructure.database import getEngine, getSessionFactory
 from app.services.ontology_service import makeJoinKey
@@ -511,6 +511,7 @@ PROPERTIES = {
         P("包装单日期", "NDEDAT_0", "DATETIME"),
         P("收货日期", "RCPDAT_0", "DATETIME"),
         P("供应商", "BPSNUM_0", "STRING", fk="BPARTNER"),
+        P("承运人", "BPTNUM_0", "STRING", fk="BPCARRIER"),
         P("地址", "BPAADD_0", "STRING"),
         P("装运地址", "BPOADD_0", "STRING"),
         P("供应商公司名称", "BPONAM_0", "STRING"),
@@ -789,6 +790,9 @@ PROPERTIES = {
         P("物料编码", "PLICRI2_0", "STRING", fk="ITMMASTER",
           aliases=["价格条件3", "物料编号"],
           desc="价格条件3列在本库实际存放物料编码（实证：CPNITMREF_0 恒为空格），接 PORDERQ.ITMREF_0 取报价/比价"),
+        P("价格条件4", "PLICRI3_0", "STRING",
+          aliases=["地点", "地点编码", "工厂", "场所", "地点编号"],
+          desc="取价条件4：地点维度（含税/不含税地点清单，对应 PPRICCONF 价格清单号 T20/T21）"),
         P("生效日期", "PLISTRDAT_0", "DATETIME",
           aliases=["生效日", "起始日期", "生效起始日", "开始日期"],
           desc="报价行的生效起始日期；查询当期价格须同时满足 生效日期 不晚于查询日 且 失效日期 不早于查询日，勿把不同时间段的报价混在一起取平均"),
@@ -1062,6 +1066,68 @@ BUSINESS_JOINS = [
      "business", "价格配置按价格表号关联价格明细（取价条件维度/优先级）"),
 ]
 
+# =============================================================================
+# 指标（Metric）种子：Phase 2 数据血缘 KPI 层数据源。
+# formula 使用 target_table 的真实列名（与 PROPERTIES 对齐），聚合函数限 5 白名单。
+# lineage_extractor 解析 formula 聚合列 -> 生成 source_table 列 -> KPI 血缘边。
+# =============================================================================
+METRICS = [
+    {
+        "metric_name": "KPI_TOTAL_QTY",
+        "metric_alias": "采购总数量",
+        "target_table": "PORDERQ",
+        "formula": "SUM(t.QTYUOM_0)",
+        "agg_function": "SUM",
+        "dimension_defaults": None,
+        "description": "采购订单明细采购数量合计（按订单/供应商/物料维度）",
+    },
+    {
+        "metric_name": "KPI_RECEIPT_QTY",
+        "metric_alias": "收货总数量",
+        "target_table": "PRECEIPTD",
+        "formula": "SUM(t.QTYUOM_0)",
+        "agg_function": "SUM",
+        "dimension_defaults": None,
+        "description": "收货明细库存数量合计（实际入库量口径）",
+    },
+    {
+        "metric_name": "KPI_ORDER_AMT",
+        "metric_alias": "采购总金额",
+        "target_table": "PORDERQ",
+        "formula": "SUM(t.LINAMT_0)",
+        "agg_function": "SUM",
+        "dimension_defaults": None,
+        "description": "采购订单明细行金额合计（不含税口径）",
+    },
+    {
+        "metric_name": "KPI_AVG_PRICE",
+        "metric_alias": "平均采购单价",
+        "target_table": "PORDERQ",
+        "formula": "SUM(t.LINAMT_0) / NULLIF(SUM(t.QTYUOM_0), 0)",
+        "agg_function": "AVG",
+        "dimension_defaults": None,
+        "description": "加权平均采购单价 = 行金额合计 / 数量合计",
+    },
+    {
+        "metric_name": "KPI_RETURN_QTY",
+        "metric_alias": "退货总数量",
+        "target_table": "PRECEIPTD",
+        "formula": "SUM(t.RTNQTYPUU_0)",
+        "agg_function": "SUM",
+        "dimension_defaults": None,
+        "description": "收货明细退货数量合计（供应商质量侧信号）",
+    },
+    {
+        "metric_name": "KPI_AVG_RECEIPT_PRICE",
+        "metric_alias": "平均入库金额",
+        "target_table": "PRECEIPTD",
+        "formula": "SUM(t.LINAMT_0) / NULLIF(SUM(t.QTYUOM_0), 0)",
+        "agg_function": "AVG",
+        "dimension_defaults": None,
+        "description": "加权平均入库金额 = 收货行金额 / 收货数量",
+    },
+]
+
 async def _seedClasses(session: Any) -> dict[str, int]:
     """幂等创建/复用类，返回 source_table -> class_id 映射。"""
     cid: dict[str, int] = {}
@@ -1131,6 +1197,34 @@ async def _seedProperties(
     logger.info("properties: created=%d skipped=%d", n_created, n_skipped)
     return pid
 
+async def _seedMetrics(session: Any, cid: dict[str, int]) -> None:
+    """幂等创建/复用指标，供 lineage 自动提取 KPI 层血缘边。
+
+    按 metric_name 复用已有行（描述等元数据不回写，保持人工治理优先）；
+    formula/agg 保持种子值与业务口径对齐。
+    """
+    for m in METRICS:
+        stmt = select(OntologyMetric).where(OntologyMetric.metric_name == m["metric_name"])
+        existing = (await session.execute(stmt)).scalar_one_or_none()
+        if existing:
+            logger.info("metric exists: %s (id=%d)", m["metric_name"], existing.id)
+            continue
+        obj = OntologyMetric(
+            metric_name=m["metric_name"],
+            metric_alias=m["metric_alias"],
+            formula=m["formula"],
+            agg_function=m["agg_function"],
+            target_class_id=cid[m["target_table"]],
+            dimension_defaults=m["dimension_defaults"],
+            created_by="seed_ontology",
+        )
+        session.add(obj)
+        await session.flush()
+        logger.info("metric created: %s (id=%d)", m["metric_name"], obj.id)
+    await session.commit()
+    logger.info("metrics ready: %d", len(METRICS))
+
+
 async def _seedJoins(session: Any, cid: dict[str, int]) -> None:
     """幂等物化 join 目录：外键（写对目标主键列）+ curated 业务流转。
 
@@ -1191,11 +1285,13 @@ async def _seedJoins(session: Any, cid: dict[str, int]) -> None:
     logger.info("joins: created=%d skipped=%d", n_created, n_skipped)
 
 def _syncToNeo4j(
-    cid: dict[str, int], pid: dict[tuple[int, str], int]
+    cid: dict[str, int], pid: dict[tuple[int, str], int],
+    mid: dict[str, int] | None = None,
 ) -> None:
     """将种子本体同步到 Neo4j（幂等 MERGE + 关系）。
 
-    cid: source_table -> class_id；pid: (class_id, property_name) -> property_id。
+    cid: source_table -> class_id；pid: (class_id, property_name) -> property_id；
+    mid: metric_name -> metric_id（Phase 2 KPI 血缘数据源）。
     单个节点/属性失败只跳过该项并告警，不中断其余同步（PG 已就绪，可重跑补齐）。
     """
     for c in CLASSES:
@@ -1228,6 +1324,20 @@ def _syncToNeo4j(
                     neo4j.linkPropertyReferences(prop_id, cid[p["fk"]])
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Neo4j 同步失败属性 %s.%s: %s", src_table, p["name"], exc)
+    if mid:
+        for m in METRICS:
+            try:
+                metric_id = mid[m["metric_name"]]
+                neo4j.upsertMetricNode(
+                    id=metric_id,
+                    name=m["metric_name"],
+                    alias=m["metric_alias"],
+                    formula=m["formula"],
+                    aggFunction=m["agg_function"],
+                )
+                neo4j.linkMetricDerivedFrom(metric_id, cid[m["target_table"]])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Neo4j 同步失败指标 %s: %s", m["metric_name"], exc)
 
 async def seed() -> None:
     engine = getEngine()
@@ -1238,8 +1348,12 @@ async def seed() -> None:
         cid = await _seedClasses(session)
         pid = await _seedProperties(session, cid)
         await _seedJoins(session, cid)
+        await _seedMetrics(session, cid)
+        # 查询 metric id 映射（_seedMetrics 可能因幂等复用而不返回映射，读库保证准确）
+        metricRows = (await session.execute(select(OntologyMetric))).scalars().all()
+        mid = {r.metric_name: r.id for r in metricRows}
         # Neo4j 本体图同步（阻塞 I/O 移到线程，避免阻塞事件循环）
-        await asyncio.to_thread(_syncToNeo4j, cid, pid)
+        await asyncio.to_thread(_syncToNeo4j, cid, pid, mid)
 
     await engine.dispose()
     logger.info("done.")

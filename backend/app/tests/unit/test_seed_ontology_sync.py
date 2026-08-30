@@ -221,18 +221,18 @@ async def testSeedRecordsPidAndInvokesSyncToNeo4j(
 
     monkeypatch.setattr(seed_ontology, "getEngine", lambda: engine)
     monkeypatch.setattr(seed_ontology, "getSessionFactory", lambda: factory)
-    syncCalls: list[tuple[dict[str, int], dict[tuple[int, str], int]]] = []
+    syncCalls: list[tuple] = []
     monkeypatch.setattr(
         seed_ontology,
         "_syncToNeo4j",
-        lambda cid, pid: syncCalls.append((cid, pid)),
+        lambda cid, pid, mid=None: syncCalls.append((cid, pid, mid)),
     )
 
     await seed_ontology.seed()
 
     # seed() 结束时恰好触发一次 Neo4j 同步
     assert len(syncCalls) == 1
-    cid, pid = syncCalls[0]
+    cid, pid, mid = syncCalls[0]
     assert len(cid) == len(CLASSES)
     # pid 覆盖全部属性，且其 class_id 全部来自 cid
     assert len(pid) == _totalProperties()
@@ -260,7 +260,7 @@ async def testSeedCreatesPriceUnitWithAliasesAndDescription(
 
     monkeypatch.setattr(seed_ontology, "getEngine", lambda: engine)
     monkeypatch.setattr(seed_ontology, "getSessionFactory", lambda: factory)
-    monkeypatch.setattr(seed_ontology, "_syncToNeo4j", lambda cid, pid: None)
+    monkeypatch.setattr(seed_ontology, "_syncToNeo4j", lambda cid, pid, mid=None: None)
 
     await seed_ontology.seed()
 
@@ -310,7 +310,7 @@ async def testSeedJoinsMaterializesEdgesAndIsIdempotent(
     monkeypatch.setattr(seed_ontology, "getEngine", lambda: engine)
     monkeypatch.setattr(seed_ontology, "getSessionFactory", lambda: factory)
     # 不依赖 Neo4j：seed() 内 _syncToNeo4j 替换为 no-op（本测试只关心 join 目录）
-    monkeypatch.setattr(seed_ontology, "_syncToNeo4j", lambda cid, pid: None)
+    monkeypatch.setattr(seed_ontology, "_syncToNeo4j", lambda cid, pid, mid=None: None)
 
     await seed_ontology.seed()
 

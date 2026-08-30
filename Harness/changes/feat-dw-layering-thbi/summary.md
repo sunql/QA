@@ -27,7 +27,7 @@
 
 **数据观察**（对 AI 应用有意义的初步发现）：
 
-- 近 12 月 OTD 分布：大供应商 60%-78% 居多，个别异常低（Q630 浙江椋誉 2.37%——疑似数据或业务异常，值得 DQ 规则跟进）
+- 近 12 月 OTD 分布：大供应商 60%-78% 居多，个别异常低（Q630 浙江椋誉 2.37%）——已诊断为**系统性数据缺陷**（预期收货日未维护，见 §9），item 3c DQ 规则按用户决策整体延期
 - 拒收数量（RRRQTYPUU）稀疏，reject_rate 普遍为 0——供应商质量指标弱，需 IQC 数据源接入
 - ORDER_DETAIL 宽表视图可直接回答"某供应商某批逾期几天"类问题
 
@@ -268,6 +268,7 @@ SELECT * FROM ADS_SUPPLIER_360 FETCH FIRST 5 ROWS ONLY;
 | DEMRCPDAT 不可用 | 需求日期全为 1599 占位 | REQUEST_DATE 用 PORDER 行级 EXTRCPDAT；GR 承诺日期用 PO 行级 |
 | PORDERQ 数量/金额脏数据 | 19 行 order_qty > 1e9（PO C12009POH0182 等，qty 达 4.1e17），污染金额聚合 | 已加 DWD 清洗规则：qty>1e9 置 NULL；其余 >1亿 金额（≤300亿，qty 正常）按真实大额保留 |
 | 零库存供应商 OTD 极低 | 零库存（YPTHFLGM_0=2）月均 OTD 3.98% vs 非零 50.23% | 疑似零库存 JIT 承诺日期口径不同或系统性延迟；AI 语义层需按 zero_stock_flag 分口径，勿混比 |
+| 预期收货日未维护 → OTD 失真（Q630 等） | 全局 97.7% PO 行（192,238/196,753）`EXTRCPDAT_0 == ORDDAT_0`（承诺日=下单日，提前期 0）；13.4% 供应商月（4,400/32,815）`received_line_count>=30 AND on_time_rate<0.10`；Q630 浙江椋誉 2.37% 即此系统性缺陷的表象，非单供应商业务异常 | 数据侧不建 DQ 规则（item 3c **整体延期**，2026-08-30 用户决策）；属 ERP 预期收货日管理缺失，待业务侧字段管理上线后再建「OTD 异常」症状级 DQ 规则 |
 | DIM 无 SCD2 | 首版 SCD1（全量重建） | 主数据变更频率低，SCD2 待真实需求 |
 | qa-system 未接入 | THBI 建仓后需注册数据源 + 本体重建 | ✅ 已完成：feat-dw-ontology-rebind（THBI 默认数据源 + 27 类 rebind DWD + NL2SQL 验证通过） |
 

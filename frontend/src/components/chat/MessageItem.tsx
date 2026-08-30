@@ -79,7 +79,7 @@ function MessageItem({ message, exporting = false, onExportSingleTurn }: Message
             )}
             {message.queryPlan && !message.isStreaming ? (
               <div style={{ marginTop: 8 }}>
-                <QueryPlanCard plan={message.queryPlan} />
+                <QueryPlanCard plan={message.queryPlan} dataQuality={message.dataQuality ?? null} />
               </div>
             ) : null}
             {message.steps && message.steps.length ? (

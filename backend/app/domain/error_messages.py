@@ -64,6 +64,73 @@ MSG_AZURE_OPENAI_MISSING_ENDPOINT_DETAIL = "请配置 api_endpoint 或 AZURE_OPE
 MSG_RATE_LIMIT_REQUESTS_INVALID = "RATE_LIMIT_REQUESTS 必须 >= 1"
 MSG_API_DESCRIPTION = "智能问答系统 - 模型路由 / 本体 / NL2SQL / 图表渲染"
 
+
+# =============================================================================
+# 数据质量规则（data_quality_rule）
+# =============================================================================
+
+MSG_SCHEMA_DQ_RULE_NAME = "规则中文名（如：订单数量必须 > 0）"
+MSG_SCHEMA_DQ_RULE_CODE = "规则业务编码（unique，全大写下划线）"
+MSG_SCHEMA_DQ_DATASOURCE_ID = "数据源 ID（评估执行时使用的业务库）"
+MSG_SCHEMA_DQ_TARGET_TABLE = "目标业务表（如 PORDER）"
+MSG_SCHEMA_DQ_TARGET_COLUMN = "目标列（表级规则可为空）"
+MSG_SCHEMA_DQ_RULE_TYPE = "规则类型：COMPLETENESS / VALIDITY / UNIQUENESS / CONSISTENCY / REFERENTIAL"
+MSG_SCHEMA_DQ_RULE_EXPRESSION = "规则表达式（如 ORDER_QTY > 0；仅 VALIDITY/CONSISTENCY 用）"
+MSG_SCHEMA_DQ_THRESHOLD = "通过率阈值（0-100，DECIMAL(5,2)）"
+MSG_SCHEMA_DQ_SEVERITY = "严重级别：HIGH / MEDIUM / LOW / INFO"
+MSG_SCHEMA_DQ_IS_ENABLED = "是否启用"
+MSG_SCHEMA_DQ_VERSION = "规则治理版本号"
+MSG_SCHEMA_DQ_OWNER = "责任方（部门/人）"
+MSG_SCHEMA_DQ_DESCRIPTION = "规则说明"
+MSG_SCHEMA_DQ_CREATED_TIME = "创建时间"
+MSG_SCHEMA_DQ_UPDATED_TIME = "更新时间"
+
+# Phase 1.2 evaluator 响应字段描述
+MSG_SCHEMA_DQ_EVAL_RULE_ID = "规则 ID"
+MSG_SCHEMA_DQ_EVAL_RULE_CODE = "规则编码"
+MSG_SCHEMA_DQ_EVAL_RULE_TYPE = "规则类型"
+MSG_SCHEMA_DQ_EVAL_DATASOURCE_ID = "评估所用业务数据源 ID"
+MSG_SCHEMA_DQ_EVAL_TOTAL_COUNT = "评估总行数"
+MSG_SCHEMA_DQ_EVAL_PASSED_COUNT = "通过的行数"
+MSG_SCHEMA_DQ_EVAL_PASS_RATE = "通过率（0-100）"
+MSG_SCHEMA_DQ_EVAL_STATUS = "PASS（通过阈值）/ FAIL（不通过）"
+MSG_SCHEMA_DQ_EVAL_EVALUATED_AT = "评估时间"
+MSG_SCHEMA_DQ_EVAL_DURATION_MS = "评估耗时（毫秒）"
+MSG_SCHEMA_DQ_EVAL_MESSAGE = "评估说明或错误信息"
+MSG_SCHEMA_DQ_EVAL_RULE_IDS = "要评估的规则 ID 列表"
+MSG_SCHEMA_DQ_EVAL_RESULTS = "每条规则的评估结果"
+MSG_SCHEMA_DQ_EVAL_SUMMARY_TOTAL = "本次评估的规则总数"
+MSG_SCHEMA_DQ_EVAL_SUMMARY_PASSED = "本次评估通过的规则数"
+
+# Phase 1.3 数据质量评分
+MSG_SCHEMA_DQ_SCORE_ID = "评分记录 ID"
+MSG_SCHEMA_DQ_SCORE_TARGET_TABLE = "目标表（GLOBAL 时为 '*'）"
+MSG_SCHEMA_DQ_SCORE_TYPE = "聚合粒度：TABLE / GLOBAL"
+MSG_SCHEMA_DQ_SCORE_COMPLETENESS = "完整性维度分（0-100，Phase 1.2 已实现）"
+MSG_SCHEMA_DQ_SCORE_VALIDITY = "合理性维度分（0-100）"
+MSG_SCHEMA_DQ_SCORE_UNIQUENESS = "唯一性维度分（0-100）"
+MSG_SCHEMA_DQ_SCORE_CONSISTENCY = "一致性维度分（0-100）"
+MSG_SCHEMA_DQ_SCORE_TIMELINESS = "时效性维度分（0-100，Phase 2 补）"
+MSG_SCHEMA_DQ_SCORE_REFERENTIAL = "引用完整性维度分（0-100）"
+MSG_SCHEMA_DQ_SCORE_OVERALL = "整体评分 = 6 维非 NULL 平均（0-100）"
+MSG_SCHEMA_DQ_SCORE_EVALUATED_AT = "评估时间戳"
+MSG_SCHEMA_DQ_SCORE_DURATION_MS = "评估总耗时（毫秒）"
+MSG_SCHEMA_DQ_SCORE_RULES_COUNT = "本次评估涉及的规则数"
+MSG_SCHEMA_DQ_SCORE_CREATED_TIME = "记录创建时间"
+MSG_SCHEMA_DQ_SCORE_UPDATED_TIME = "记录更新时间"
+
+# Phase 1.4 Chat 可信度 badge（精简版，不暴露 6 维明细）
+MSG_SCHEMA_CHAT_DQ_BADGE_TARGET_TABLE = "目标表名（与 QueryPlan.selectedClasses 对齐）"
+MSG_SCHEMA_CHAT_DQ_BADGE_OVERALL = "整体评分（0-100，NULL = 已评估但全维度 NULL 或未评估）"
+MSG_SCHEMA_CHAT_DQ_BADGE_EVALUATED_AT = "最新评估时间（NULL = 该表从未评估）"
+MSG_SCHEMA_CHAT_DQ_BADGE_RULES_COUNT = "本次评估规则数（NULL = 未评估）"
+MSG_SCHEMA_CHAT_DQ_BADGE_EVALUATED = "True=已评估，False=未评估（前端用此区分灰色 vs 红/黄/绿）"
+MSG_SCHEMA_CHAT_DQ_BADGES = "目标表的可信度 badge 列表（每张 selectedClass 一个）；无 selectedClasses 或 DQ 服务降级时为 None"
+MSG_SCHEMA_DQ_COMPUTE_EVALUATED_RULES = "本次评估的规则总数"
+MSG_SCHEMA_DQ_COMPUTE_SAVED_SCORES = "本次落库的评分数（TABLE + GLOBAL）"
+MSG_SCHEMA_DQ_COMPUTE_DURATION_MS = "本次 compute 全流程耗时（毫秒）"
+MSG_SCHEMA_DQ_COMPUTE_SCORES = "本次落库的评分列表"
+
 # =============================================================================
 # 数据源 Schema 缓存（api/v1/datasource）
 # =============================================================================

@@ -129,12 +129,25 @@ export interface ChatResponse {
   affinityStatus?: AffinityStatus | null;
   // 多步查询各子步骤结果（仅 intent=multi_step 时填充；单步查询为 null）
   steps?: StepResultRead[] | null;
+  // Phase 1.4：目标表的可信度 badge 列表（顺序对齐 queryPlan.selectedClasses）；
+  // 无 selectedClasses / DQ 服务降级时为 null
+  dataQuality?: DataQualityBadge[] | null;
 }
 
 // 会话亲和性状态：前 N 轮锁定模型 + 剩余轮数（解锁时为 null）
 export interface AffinityStatus {
   lockedModel: string;
   remainingTurns: number;
+}
+
+// 数据质量可信度 badge（Phase 1.4）：每张 selectedClass 对应一条
+// 后端 Decimal → string 已转换；evaluated=false 表示该表从未评估过
+export interface DataQualityBadge {
+  targetTable: string;
+  overallScore: string | null;
+  evaluatedAt: string | null;
+  rulesCount: number | null;
+  evaluated: boolean;
 }
 
 // 前端消息（后端响应 + UI 状态）
@@ -168,6 +181,8 @@ export interface ChatMessage {
   steps?: MultiStepStep[];
   // 当前正在执行的步骤序号（step_plan 事件回填）
   currentStepIndex?: number;
+  // Phase 1.4：目标表可信度 badge（流式 data_quality 事件回填，可与 queryPlan 一起展示）
+  dataQuality?: DataQualityBadge[] | null;
   // 后端 SessionMessage 主键（PDF 单条导出需要：chatStore 暂未在 sendMessage
   // 完成后回填，故默认 undefined，全局按钮正常工作，单条入口 disabled）
   dbMessageId?: number;

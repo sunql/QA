@@ -37,6 +37,7 @@ export const enUS = {
       chat: "AIChatService",
       ontology: "Ontology",
       datasource: "Data Sources",
+      dataQuality: "Data Quality",
       usage: "Usage Dashboard",
       status: "Service Status",
     },
@@ -60,6 +61,7 @@ export const enUS = {
     chat: "AIChatService",
     ontology: "Ontology Management",
     datasource: "Data Source Management",
+    dataQuality: "Data Quality Management",
     modelConfig: "Model Configuration",
     embeddings: "Embedding Services",
     usage: "Usage Dashboard",
@@ -99,6 +101,13 @@ export const enUS = {
     joins: "JOIN Relationships",
     rowLimit: "Row Limit",
     viewSql: "View SQL",
+    dataQuality: {
+      unevaluated: "DQ: Not evaluated",
+      tooltip: {
+        unevaluated: "This table has no DQ evaluation. Visit Data Quality page to trigger.",
+        view: "Click for details",
+      },
+    },
   },
 
   multiStep: {
@@ -208,6 +217,29 @@ export const enUS = {
       mappedPropertyName: "e.g. received quantity",
       formulaHint: "e.g. SUM(qty) / SUM(SUM(qty)) OVER ()",
     },
+  },
+
+  dataQuality: {
+    createRule: "New Rule",
+    editRule: "Edit Rule",
+    ruleCode: "Rule Code",
+    ruleName: "Rule Name",
+    datasource: "Datasource",
+    datasourcePlaceholder: "Select a datasource",
+    targetTable: "Target Table",
+    targetColumn: "Target Column",
+    ruleType: "Rule Type",
+    ruleExpression: "Rule Expression",
+    threshold: "Threshold (%)",
+    severity: "Severity",
+    enabled: "Enabled",
+    owner: "Owner",
+    description: "Description",
+    filterType: "Filter by Rule Type",
+    ruleCodePattern: "Code must start with uppercase letter; uppercase letters / digits / underscore only",
+    createSuccess: "Rule created",
+    updateSuccess: "Rule updated",
+    disableSuccess: "Rule disabled",
   },
 
   forms: {
@@ -552,6 +584,9 @@ export const enUS = {
       sourceTable: "Source Table",
       className: "Class Name",
       propertyCount: "Properties",
+      searchPlaceholder: "Search table/class name",
+      selectFiltered: "Select all filtered",
+      selectedCount: "{count} of {total} tables selected",
     },
   },
 

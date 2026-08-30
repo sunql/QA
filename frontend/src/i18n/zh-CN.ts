@@ -43,6 +43,7 @@ export const zhCN = {
       chat: "AIChatService",
       ontology: "本体管理",
       datasource: "数据源",
+      dataQuality: "数据质量",
       usage: "用量看板",
       status: "服务状态",
       graph: "Neo4j 图库",
@@ -68,6 +69,7 @@ export const zhCN = {
     chat: "AIChatService",
     ontology: "本体管理",
     datasource: "数据源管理",
+    dataQuality: "数据质量管理",
     modelConfig: "模型配置管理",
     embeddings: "Embedding 服务管理",
     usage: "用量看板",
@@ -106,6 +108,13 @@ export const zhCN = {
     joins: "JOIN 关系",
     rowLimit: "行数限制",
     viewSql: "查看 SQL",
+    dataQuality: {
+      unevaluated: "DQ: 未评估",
+      tooltip: {
+        unevaluated: "该表尚未评估数据质量，可去数据质量页触发评估",
+        view: "点击查看明细",
+      },
+    },
   },
 
   multiStep: {
@@ -215,6 +224,29 @@ export const zhCN = {
       mappedPropertyName: "如 收货数量",
       formulaHint: "如 SUM(数量) / SUM(SUM(数量)) OVER ()",
     },
+  },
+
+  dataQuality: {
+    createRule: "新建规则",
+    editRule: "编辑规则",
+    ruleCode: "规则编码",
+    ruleName: "规则名称",
+    datasource: "数据源",
+    datasourcePlaceholder: "请选择数据源",
+    targetTable: "目标表",
+    targetColumn: "目标列",
+    ruleType: "规则类型",
+    ruleExpression: "规则表达式",
+    threshold: "阈值（%）",
+    severity: "严重级别",
+    enabled: "启用",
+    owner: "责任方",
+    description: "说明",
+    filterType: "按规则类型过滤",
+    ruleCodePattern: "编码必须以大写字母开头，仅含大写字母/数字/下划线",
+    createSuccess: "规则已创建",
+    updateSuccess: "规则已更新",
+    disableSuccess: "规则已停用",
   },
 
   forms: {
@@ -570,6 +602,9 @@ export const zhCN = {
       sourceTable: "源表",
       className: "类名",
       propertyCount: "属性数",
+      searchPlaceholder: "搜索表名/类名",
+      selectFiltered: "全选当前筛选",
+      selectedCount: "已选 {count} / 共 {total} 张表",
     },
   },
 

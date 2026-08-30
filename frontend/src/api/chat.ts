@@ -1,6 +1,6 @@
 import { httpClient } from "./client";
 import { API_BASE_URL } from "../config";
-import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, QueryPlan, SimilarQuery } from "../types/chat";
+import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, DataQualityBadge, QueryPlan, SimilarQuery } from "../types/chat";
 import { i18n } from "../i18n";
 
 const BASE = "/chat";
@@ -113,6 +113,11 @@ export interface StreamSummary {
   affinityStatus?: AffinityStatus | null;
 }
 
+// data_quality 事件负载（Phase 1.4）：每张 selectedClass 对应一条 badge
+export interface StreamDataQualityPayload {
+  badges: DataQualityBadge[];
+}
+
 // 流式事件回调（与后端 SSE 事件一一对应）
 export interface StreamEventHandlers {
   onMeta?: (intent: string) => void;
@@ -126,6 +131,8 @@ export interface StreamEventHandlers {
   onStepPlanOverview?: (steps: StepPlanOverviewItem[]) => void;
   onStepPlan?: (step: StepPlanView) => void;
   onStepResult?: (result: StepResultView) => void;
+  // Phase 1.4：目标表可信度 badge
+  onDataQuality?: (payload: StreamDataQualityPayload) => void;
 }
 
 /**
@@ -261,5 +268,25 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
         handlers.onStepResult?.(d);
       }
       break;
+    case "data_quality":
+      if (Array.isArray(d.badges)) {
+        const badges = d.badges.filter(isDataQualityBadge);
+        if (badges.length) {
+          handlers.onDataQuality?.({ badges });
+        }
+      }
+      break;
   }
+}
+
+function isDataQualityBadge(value: unknown): value is DataQualityBadge {
+  if (!value || typeof value !== "object") return false;
+  const b = value as Record<string, unknown>;
+  return (
+    typeof b.targetTable === "string" &&
+    typeof b.evaluated === "boolean" &&
+    (b.overallScore === null || typeof b.overallScore === "string") &&
+    (b.evaluatedAt === null || typeof b.evaluatedAt === "string") &&
+    (b.rulesCount === null || typeof b.rulesCount === "number")
+  );
 }

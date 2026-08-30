@@ -1,11 +1,15 @@
 import { Collapse, Space, Tag, Typography } from "antd";
-import type { QueryPlan } from "../../types/chat";
+import type { DataQualityBadge, QueryPlan } from "../../types/chat";
 import { useTranslation } from "../../i18n";
+import DataQualityBadgeTag from "./DataQualityBadgeTag";
 
 const { Text } = Typography;
 
 interface QueryPlanCardProps {
   plan: QueryPlan;
+  // Phase 1.4：每张 selectedClass 对应一条 badge；顺序对齐 plan.selectedClasses
+  // 未传入 / 空数组 → 不渲染 badge 区（向后兼容）
+  dataQuality?: DataQualityBadge[] | null;
 }
 
 function ItemLabel({ children }: { children: string }) {
@@ -33,7 +37,31 @@ function FieldTags({ items }: { items: string[] }) {
   );
 }
 
-export default function QueryPlanCard({ plan }: QueryPlanCardProps) {
+/** 把 dataQuality 数组按 selectedClasses 顺序建立 table → badge 索引，
+ *  未匹配（selectedClasses 比 dataQuality 多）的情况视为未评估占位。
+ *  不可变：用 reduce + spread 构造新对象。
+ */
+function buildBadgeIndex(
+  plan: QueryPlan,
+  dataQuality?: DataQualityBadge[] | null
+): Map<string, DataQualityBadge> {
+  if (!dataQuality || dataQuality.length === 0) {
+    return new Map();
+  }
+  return plan.selectedClasses.reduce<Map<string, DataQualityBadge>>(
+    (acc, cls, idx) => {
+      const badge = dataQuality[idx];
+      if (badge !== undefined) {
+        acc.set(cls, badge);
+      }
+      return acc;
+    },
+    new Map()
+  );
+}
+
+export default function QueryPlanCard({ plan, dataQuality }: QueryPlanCardProps) {
+  const badgeIndex = buildBadgeIndex(plan, dataQuality);
   const { t } = useTranslation();
   return (
     <Collapse
@@ -54,6 +82,23 @@ export default function QueryPlanCard({ plan }: QueryPlanCardProps) {
               <Text>{plan.target || t("common.emDash")}</Text>
               <ItemLabel>{t("queryPlan.tables")}</ItemLabel>
               <FieldTags items={plan.selectedClasses} />
+              {badgeIndex.size > 0 ? (
+                <div style={{ marginTop: 4 }}>
+                  {plan.selectedClasses.map((cls, idx) => {
+                    const badge = badgeIndex.get(cls);
+                    if (!badge) return null;
+                    return (
+                      <span
+                        // key 附加 idx：selectedClasses 可能含重复表名（罕见），避免 React key 冲突
+                        key={`${cls}-${idx}`}
+                        style={{ marginRight: 4 }}
+                      >
+                        <DataQualityBadgeTag badge={badge} />
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : null}
               <ItemLabel>{t("queryPlan.selectedFields")}</ItemLabel>
               <FieldTags items={plan.selectedProperties} />
               {plan.aggregations.length ? (

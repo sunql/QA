@@ -236,6 +236,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 error: result.error ?? null,
               }),
             })),
+          // Phase 1.4：目标表可信度 badge（与 queryPlan 一起展示）
+          // 用浅合并（不可变 patch）覆盖，避免后续事件把已有 badge 抹掉
+          onDataQuality: (payload) =>
+            set((state) => ({
+              messages: patchLastMessage(state.messages, {
+                dataQuality: payload.badges,
+              }),
+            })),
           onToken: (content) =>
             set((state) => {
               const last = state.messages[state.messages.length - 1];
@@ -287,6 +295,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             modelName: res.modelName ?? undefined,
             isStreaming: false,
             affinityStatus: res.affinityStatus ?? null,
+            // Phase 1.4：DQ 可信度 badge（顺序对齐 queryPlan.selectedClasses）
+            dataQuality: res.dataQuality ?? null,
             // 非流式多步：steps 数组均为「已完成」（后端仅回传数据步骤，无汇总步骤）
             steps: res.steps?.map(
               (s): MultiStepStep => ({

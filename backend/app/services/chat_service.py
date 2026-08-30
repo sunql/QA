@@ -45,6 +45,7 @@ from app.domain.schemas import (
     AffinityStatus,
     ChatRequest,
     ChatResponse,
+    DataQualityBadge,
     ExtractedEntities,
     HistoryMessage,
     OntologyClassCreate,
@@ -72,6 +73,7 @@ from app.services.term_dictionary_service import TermDictionaryService
 from app.services.stream_events import (
     ErrorType,
     EVENT_CHART,
+    EVENT_DATA_QUALITY,
     EVENT_DONE,
     EVENT_ERROR,
     EVENT_META,
@@ -298,6 +300,7 @@ class ChatService(ChatStreamOutputMixin):
         affinityTurns: int | None = None,
         stepPlanner: StepQueryPlanner | None = None,
         stepAggregator: StepAggregator | None = None,
+        dqScoreService: Any | None = None,  # Phase 1.4：数据可信度 badge 查询
     ) -> None:
         self._intent = intentService or IntentService()
         self._nl2sql = nl2sqlService or Nl2SqlService()
@@ -313,6 +316,8 @@ class ChatService(ChatStreamOutputMixin):
         self._adapterProvider = adapterProvider or get_adapter
         self._stepPlanner = stepPlanner or StepQueryPlanner()
         self._stepAggregator = stepAggregator or StepAggregator()
+        # Phase 1.4：注入 DQ 评分 service（默认懒加载避免循环 import）
+        self._dqScoreService = dqScoreService
         # 会话亲和性窗口：前 N 轮锁定模型；None 时按需懒加载 settings
         self._affinityTurns = affinityTurns
 
@@ -423,6 +428,8 @@ class ChatService(ChatStreamOutputMixin):
         affinity = await self._buildAffinityStatus(
             session, dto.sessionId, answerConfig.id, answerConfig.model_name,
         )
+        # Phase 1.4：拉取目标表的可信度 badge（每张 selectedClass 一条；无 selectedClasses 或失败时为 None）
+        dqBadges = await self._buildDataQualityBadges(session, outcome)
         return ChatResponse(
             answer=answerResp.content,
             intent=result.intent.value,
@@ -445,6 +452,7 @@ class ChatService(ChatStreamOutputMixin):
             queryPlan=outcome.plan.to_dict() if outcome.plan else None,
             extractedEntities=self._entitiesFor(result),
             affinityStatus=affinity,
+            dataQuality=dqBadges,
         )
 
     # -------------------------------------------------------------------------
@@ -1457,6 +1465,15 @@ class ChatService(ChatStreamOutputMixin):
         totalCost += self._costFor(pc.selected, chartPt, chartCt)
         yield StreamEvent(EVENT_CHART, {"chartType": chartType.value, "chartOption": option, "data": data})
 
+        # Phase 1.4：拉取目标表的可信度 badge 并通过 SSE 单独下发（前端订阅后渲染）
+        # 在 chart 之后、answer 流之前：不影响用户感知的回答延迟；DQ 故障由 helper 内部静默
+        dqBadges = await self._buildDataQualityBadges(session, outcome)
+        if dqBadges is not None:
+            yield StreamEvent(
+                EVENT_DATA_QUALITY,
+                {"badges": [b.model_dump(mode="json", by_alias=True) for b in dqBadges]},
+            )
+
         # 回答流式输出（失败降级：仅当主模型未产出任何 token 时）
         answerPieces: list[str] = []
         # 默认取主模型名：即使流异常地零块完成，done 事件仍报告一个合理的模型名
@@ -1993,6 +2010,39 @@ class ChatService(ChatStreamOutputMixin):
             lockedModel=currentModelName,
             remainingTurns=affinityTurns - turnCount,
         )
+
+    async def _buildDataQualityBadges(
+        self,
+        session: AsyncSession,
+        outcome: _SqlOutcome,
+    ) -> list[DataQualityBadge] | None:
+        """拉取 NL2SQL 目标表的可信度 badge（Phase 1.4）。
+
+        - 无 selectedClasses → 返回 None（不显示 badge 区域）
+        - 任一异常 → 返回 None + WARN 日志（chat 主链路不挂）
+        - 顺序对齐 selectedClasses（与前端 QueryPlanCard 一致）
+
+        懒加载 self._dqScoreService 避免循环 import（dq service 不依赖 chat service）。
+        """
+        plan = outcome.plan
+        if plan is None or not plan.selectedClasses:
+            return None
+        if self._dqScoreService is None:
+            from app.services.data_quality_score_service import DataQualityScoreService
+            self._dqScoreService = DataQualityScoreService()
+        try:
+            badges_by_table = await self._dqScoreService.getLatestTableScores(
+                session, plan.selectedClasses,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 静默降级日志告警
+            logger.warning(
+                "Chat DQ badge 查询失败（已静默降级）: tables=%s exc=%s",
+                plan.selectedClasses,
+                exc,
+            )
+            return None
+        # 按 selectedClasses 顺序排列（前端展示一致）；未评估也输出 evaluated=False badge
+        return [badges_by_table[t] for t in plan.selectedClasses]
 
     async def _buildRoutingContext(self, session: AsyncSession, sessionId: str) -> RoutingContext:
         return RoutingContext(

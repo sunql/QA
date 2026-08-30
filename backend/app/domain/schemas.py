@@ -15,7 +15,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
-from app.domain.enums import ChartType, DataSourceType
+from app.domain.enums import ChartType, DataSourceType, RuleType, ScoreType, Severity
 from app.domain.exceptions import ConfigError
 from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_AFFINITY,
@@ -48,6 +48,61 @@ from app.domain.error_messages import (
     MSG_SCHEMA_DATASOURCE_DATABASE,
     MSG_SCHEMA_DATASOURCE_NAME,
     MSG_SCHEMA_DATASOURCE_ORACLE_VERSION,
+    MSG_SCHEMA_DQ_RULE_NAME,
+    MSG_SCHEMA_DQ_RULE_CODE,
+    MSG_SCHEMA_DQ_DATASOURCE_ID,
+    MSG_SCHEMA_DQ_TARGET_TABLE,
+    MSG_SCHEMA_DQ_TARGET_COLUMN,
+    MSG_SCHEMA_DQ_RULE_TYPE,
+    MSG_SCHEMA_DQ_RULE_EXPRESSION,
+    MSG_SCHEMA_DQ_THRESHOLD,
+    MSG_SCHEMA_DQ_SEVERITY,
+    MSG_SCHEMA_DQ_IS_ENABLED,
+    MSG_SCHEMA_DQ_VERSION,
+    MSG_SCHEMA_DQ_OWNER,
+    MSG_SCHEMA_DQ_DESCRIPTION,
+    MSG_SCHEMA_DQ_CREATED_TIME,
+    MSG_SCHEMA_DQ_UPDATED_TIME,
+    MSG_SCHEMA_DQ_EVAL_RULE_ID,
+    MSG_SCHEMA_DQ_EVAL_RULE_CODE,
+    MSG_SCHEMA_DQ_EVAL_RULE_TYPE,
+    MSG_SCHEMA_DQ_EVAL_DATASOURCE_ID,
+    MSG_SCHEMA_DQ_EVAL_TOTAL_COUNT,
+    MSG_SCHEMA_DQ_EVAL_PASSED_COUNT,
+    MSG_SCHEMA_DQ_EVAL_PASS_RATE,
+    MSG_SCHEMA_DQ_EVAL_STATUS,
+    MSG_SCHEMA_DQ_EVAL_EVALUATED_AT,
+    MSG_SCHEMA_DQ_EVAL_DURATION_MS,
+    MSG_SCHEMA_DQ_EVAL_MESSAGE,
+    MSG_SCHEMA_DQ_EVAL_RULE_IDS,
+    MSG_SCHEMA_DQ_EVAL_RESULTS,
+    MSG_SCHEMA_DQ_EVAL_SUMMARY_TOTAL,
+    MSG_SCHEMA_DQ_EVAL_SUMMARY_PASSED,
+    MSG_SCHEMA_DQ_SCORE_ID,
+    MSG_SCHEMA_DQ_SCORE_TARGET_TABLE,
+    MSG_SCHEMA_DQ_SCORE_TYPE,
+    MSG_SCHEMA_DQ_SCORE_COMPLETENESS,
+    MSG_SCHEMA_DQ_SCORE_VALIDITY,
+    MSG_SCHEMA_DQ_SCORE_UNIQUENESS,
+    MSG_SCHEMA_DQ_SCORE_CONSISTENCY,
+    MSG_SCHEMA_DQ_SCORE_TIMELINESS,
+    MSG_SCHEMA_DQ_SCORE_REFERENTIAL,
+    MSG_SCHEMA_DQ_SCORE_OVERALL,
+    MSG_SCHEMA_DQ_SCORE_EVALUATED_AT,
+    MSG_SCHEMA_DQ_SCORE_DURATION_MS,
+    MSG_SCHEMA_DQ_SCORE_RULES_COUNT,
+    MSG_SCHEMA_DQ_SCORE_CREATED_TIME,
+    MSG_SCHEMA_DQ_SCORE_UPDATED_TIME,
+    MSG_SCHEMA_CHAT_DQ_BADGE_TARGET_TABLE,
+    MSG_SCHEMA_CHAT_DQ_BADGE_OVERALL,
+    MSG_SCHEMA_CHAT_DQ_BADGE_EVALUATED_AT,
+    MSG_SCHEMA_CHAT_DQ_BADGE_RULES_COUNT,
+    MSG_SCHEMA_CHAT_DQ_BADGE_EVALUATED,
+    MSG_SCHEMA_CHAT_DQ_BADGES,
+    MSG_SCHEMA_DQ_COMPUTE_EVALUATED_RULES,
+    MSG_SCHEMA_DQ_COMPUTE_SAVED_SCORES,
+    MSG_SCHEMA_DQ_COMPUTE_DURATION_MS,
+    MSG_SCHEMA_DQ_COMPUTE_SCORES,
     MSG_SCHEMA_DATASOURCE_ORACLE_VERSION_FULL,
     MSG_SCHEMA_DATASOURCE_PASSWORD_KEEP,
     MSG_SCHEMA_DATASOURCE_PASSWORD_PLAIN,
@@ -666,6 +721,9 @@ class ImportPreviewRequest(CamelModel):
     """本地导入预览请求。"""
 
     rules: ImportRuleConfig = Field(default_factory=ImportRuleConfig)
+    # 表名白名单：非空时预览只返回命中该列表的表（用于超大 schema 分批导入）。
+    # 与 rules.table_filter 是 AND 关系：先按规则过滤，再仅保留白名单命中的表。
+    selected_tables: list[str] | None = None
 
 
 class FilterSuggestions(CamelModel):
@@ -850,6 +908,37 @@ class ChatResponse(CamelModel):
         default=None,
         description="多步查询各子步骤执行结果",
     )
+    # Phase 1.4 数据可信度 badge：每张 selectedClass 对应一条；无 selectedClasses 或
+    # DQ 服务降级时为 None；存在 selectedClasses 但部分表未评估时，相应 badge 的
+    # evaluated=False、其余分数字段全 None。
+    data_quality: list[DataQualityBadge] | None = Field(
+        default=None,
+        description=MSG_SCHEMA_CHAT_DQ_BADGES,
+    )
+
+
+class DataQualityBadge(CamelModel):
+    """Chat UI 数据可信度 badge（精简版，不暴露 6 维明细）。
+
+    与 DataQualityScoreRead 的关系：
+    - DataQualityScoreRead 是后端 /scores 接口的完整历史记录（含 id、6 维、duration）。
+    - DataQualityBadge 是 chat 流式响应中嵌入的精简版（仅 overall_score + 时间戳），
+      避免 chat payload 膨胀；明细按需前端拉 /scores?table=X。
+    """
+
+    target_table: str = Field(..., description=MSG_SCHEMA_CHAT_DQ_BADGE_TARGET_TABLE)
+    overall_score: Decimal | None = Field(
+        default=None, description=MSG_SCHEMA_CHAT_DQ_BADGE_OVERALL
+    )
+    evaluated_at: datetime | None = Field(
+        default=None, description=MSG_SCHEMA_CHAT_DQ_BADGE_EVALUATED_AT
+    )
+    rules_count: int | None = Field(
+        default=None, description=MSG_SCHEMA_CHAT_DQ_BADGE_RULES_COUNT
+    )
+    evaluated: bool = Field(
+        ..., description=MSG_SCHEMA_CHAT_DQ_BADGE_EVALUATED
+    )
 
 
 class AffinityStatus(CamelModel):
@@ -956,4 +1045,164 @@ class SessionMessagesResponse(CamelModel):
     session_id: str = Field(..., description=MSG_SCHEMA_CHAT_HISTORY_SESSION_ID)
     messages: list[ChatMessageRead] = Field(
         default_factory=list, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGES
+    )
+
+
+# ===== 数据质量规则（Phase 1.1） =====
+
+
+class DataQualityRuleCreate(CamelModel):
+    """创建数据质量规则的请求体。"""
+
+    rule_name: str = Field(..., min_length=1, max_length=100, description=MSG_SCHEMA_DQ_RULE_NAME)
+    rule_code: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Z][A-Z0-9_]*$",
+        description=MSG_SCHEMA_DQ_RULE_CODE,
+    )
+    datasource_id: int = Field(..., gt=0, description=MSG_SCHEMA_DQ_DATASOURCE_ID)
+    target_table: str = Field(..., min_length=1, max_length=100, description=MSG_SCHEMA_DQ_TARGET_TABLE)
+    target_column: str | None = Field(default=None, max_length=100, description=MSG_SCHEMA_DQ_TARGET_COLUMN)
+    rule_type: RuleType = Field(..., description=MSG_SCHEMA_DQ_RULE_TYPE)
+    rule_expression: str | None = Field(default=None, description=MSG_SCHEMA_DQ_RULE_EXPRESSION)
+    threshold: Decimal = Field(default=Decimal("95.00"), ge=0, le=100, description=MSG_SCHEMA_DQ_THRESHOLD)
+    severity: Severity = Field(default=Severity.MEDIUM, description=MSG_SCHEMA_DQ_SEVERITY)
+    is_enabled: bool = Field(default=True, description=MSG_SCHEMA_DQ_IS_ENABLED)
+    version: str = Field(default="v1.0", max_length=20, description=MSG_SCHEMA_DQ_VERSION)
+    owner: str | None = Field(default=None, max_length=100, description=MSG_SCHEMA_DQ_OWNER)
+    description: str | None = Field(default=None, description=MSG_SCHEMA_DQ_DESCRIPTION)
+
+
+class DataQualityRuleUpdate(CamelModel):
+    """更新数据质量规则的请求体。rule_code 不允许修改。"""
+
+    rule_name: str | None = Field(default=None, min_length=1, max_length=100)
+    datasource_id: int | None = Field(default=None, gt=0)
+    target_table: str | None = Field(default=None, min_length=1, max_length=100)
+    target_column: str | None = Field(default=None, max_length=100)
+    rule_type: RuleType | None = None
+    rule_expression: str | None = None
+    threshold: Decimal | None = Field(default=None, ge=0, le=100)
+    severity: Severity | None = None
+    is_enabled: bool | None = None
+    version: str | None = Field(default=None, max_length=20)
+    owner: str | None = Field(default=None, max_length=100)
+    description: str | None = None
+
+
+class DataQualityRuleRead(CamelModel):
+    """数据质量规则响应。"""
+
+    id: int
+    rule_name: str
+    rule_code: str
+    datasource_id: int
+    target_table: str
+    target_column: str | None = None
+    rule_type: RuleType
+    rule_expression: str | None = None
+    threshold: Decimal
+    severity: Severity
+    is_enabled: bool
+    version: str
+    owner: str | None = None
+    description: str | None = None
+    created_time: datetime | None = None
+    updated_time: datetime | None = None
+
+
+# ===== Phase 1.2 数据质量评估执行 =====
+
+
+class EvaluationResult(CamelModel):
+    """单条规则的评估结果。
+
+    status=PASS 时表示 pass_rate ≥ rule.threshold；FAIL 反之。
+    message 包含错误信息（如 SQL 校验失败、目标表不存在等）。
+    """
+
+    rule_id: int = Field(..., description=MSG_SCHEMA_DQ_EVAL_RULE_ID)
+    rule_code: str = Field(..., description=MSG_SCHEMA_DQ_EVAL_RULE_CODE)
+    rule_type: RuleType = Field(..., description=MSG_SCHEMA_DQ_EVAL_RULE_TYPE)
+    datasource_id: int | None = Field(default=None, description=MSG_SCHEMA_DQ_EVAL_DATASOURCE_ID)
+    total_count: int = Field(default=0, ge=0, description=MSG_SCHEMA_DQ_EVAL_TOTAL_COUNT)
+    passed_count: int = Field(default=0, ge=0, description=MSG_SCHEMA_DQ_EVAL_PASSED_COUNT)
+    pass_rate: float = Field(default=0.0, ge=0.0, description=MSG_SCHEMA_DQ_EVAL_PASS_RATE)
+    status: str = Field(default="FAIL", description=MSG_SCHEMA_DQ_EVAL_STATUS)
+    evaluated_at: datetime = Field(..., description=MSG_SCHEMA_DQ_EVAL_EVALUATED_AT)
+    duration_ms: int = Field(default=0, ge=0, description=MSG_SCHEMA_DQ_EVAL_DURATION_MS)
+    message: str | None = Field(default=None, description=MSG_SCHEMA_DQ_EVAL_MESSAGE)
+
+
+class EvaluateBatchRequest(CamelModel):
+    """批量评估请求体。"""
+
+    rule_ids: list[int] = Field(default_factory=list, description=MSG_SCHEMA_DQ_EVAL_RULE_IDS)
+
+
+class EvaluateBatchResponse(CamelModel):
+    """批量评估响应：results + summary。"""
+
+    results: list[EvaluationResult] = Field(
+        default_factory=list, description=MSG_SCHEMA_DQ_EVAL_RESULTS
+    )
+    summary_total: int = Field(default=0, ge=0, description=MSG_SCHEMA_DQ_EVAL_SUMMARY_TOTAL)
+    summary_passed: int = Field(default=0, ge=0, description=MSG_SCHEMA_DQ_EVAL_SUMMARY_PASSED)
+
+
+# ===== Phase 1.3 数据质量评分 =====
+
+
+class DataQualityScoreRead(CamelModel):
+    """数据质量评分响应（一条历史记录）。"""
+
+    id: int = Field(..., description=MSG_SCHEMA_DQ_SCORE_ID)
+    target_table: str = Field(..., description=MSG_SCHEMA_DQ_SCORE_TARGET_TABLE)
+    score_type: ScoreType = Field(..., description=MSG_SCHEMA_DQ_SCORE_TYPE)
+    completeness_score: Decimal | None = Field(
+        default=None, description=MSG_SCHEMA_DQ_SCORE_COMPLETENESS
+    )
+    validity_score: Decimal | None = Field(
+        default=None, description=MSG_SCHEMA_DQ_SCORE_VALIDITY
+    )
+    uniqueness_score: Decimal | None = Field(
+        default=None, description=MSG_SCHEMA_DQ_SCORE_UNIQUENESS
+    )
+    consistency_score: Decimal | None = Field(
+        default=None, description=MSG_SCHEMA_DQ_SCORE_CONSISTENCY
+    )
+    timeliness_score: Decimal | None = Field(
+        default=None, description=MSG_SCHEMA_DQ_SCORE_TIMELINESS
+    )
+    referential_score: Decimal | None = Field(
+        default=None, description=MSG_SCHEMA_DQ_SCORE_REFERENTIAL
+    )
+    overall_score: Decimal = Field(..., description=MSG_SCHEMA_DQ_SCORE_OVERALL)
+    evaluated_at: datetime = Field(..., description=MSG_SCHEMA_DQ_SCORE_EVALUATED_AT)
+    evaluation_duration_ms: int = Field(
+        default=0, ge=0, description=MSG_SCHEMA_DQ_SCORE_DURATION_MS
+    )
+    rules_count: int = Field(default=0, ge=0, description=MSG_SCHEMA_DQ_SCORE_RULES_COUNT)
+    created_time: datetime | None = Field(
+        default=None, description=MSG_SCHEMA_DQ_SCORE_CREATED_TIME
+    )
+    updated_time: datetime | None = Field(
+        default=None, description=MSG_SCHEMA_DQ_SCORE_UPDATED_TIME
+    )
+
+
+class ComputeScoresResponse(CamelModel):
+    """触发 compute 后的响应：聚合结果 + 落库条数 + 总耗时。"""
+
+    evaluated_rules: int = Field(
+        default=0, ge=0, description=MSG_SCHEMA_DQ_COMPUTE_EVALUATED_RULES
+    )
+    saved_scores: int = Field(
+        default=0, ge=0, description=MSG_SCHEMA_DQ_COMPUTE_SAVED_SCORES
+    )
+    duration_ms: int = Field(default=0, ge=0, description=MSG_SCHEMA_DQ_COMPUTE_DURATION_MS)
+    scores: list[DataQualityScoreRead] = Field(
+        default_factory=list, description=MSG_SCHEMA_DQ_COMPUTE_SCORES
     )

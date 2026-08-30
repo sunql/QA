@@ -80,7 +80,7 @@ THBI 数仓建仓后，本体仍绑定 ZJTH X3 源表（大写列名）。本 ch
 
 ## 7. 安全审查
 
-- **密码**：THBI 密码仅走 `THBI_PASSWORD` 环境变量，脚本 `_thbiPassword()` 缺失即抛错；不再有硬编码（初始版本曾有 `encryptApiKey("thbi123")` 已修正）
+- **密码**：THBI 密码仅走 `THBI_PASSWORD` 环境变量，脚本 `_thbiPassword()` 缺失即抛错；不再有硬编码（初始版本曾有 `encryptApiKey("<密码>")` 硬编码已修正）
 - **ZJTH**：降为非默认但保留 is_active（可手动切回）；密码未改动
 - 只读约束不变：业务查询仍走 SQL Guard 只读校验
 - 无新 API、无用户输入面；脚本为一次性 DDL/DML，无注入面

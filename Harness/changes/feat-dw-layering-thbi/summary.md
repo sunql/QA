@@ -31,6 +31,35 @@
 - 拒收数量（RRRQTYPUU）稀疏，reject_rate 普遍为 0——供应商质量指标弱，需 IQC 数据源接入
 - ORDER_DETAIL 宽表视图可直接回答"某供应商某批逾期几天"类问题
 
+### 补充区分维度 + 金额清洗（2026-08-30 二次执行）
+
+**背景**：本体重建前置要求——本体需区分「物料分类」与「零库存供应商」，DWD/DIM/DWS/ADS 缺该属性。
+
+**改动**（已回写 SQL 脚本）：
+
+| 层 | 表 | 新增字段 | 源 |
+|---|---|---|---|
+| DWD | DWD_SUPPLIER | `zero_stock_flag NUMBER` | BPSUPPLIER.YPTHFLGM_0（2=零库存，1=非零库存） |
+| DWD | DWD_MATERIAL | `material_category VARCHAR2(20)` | ITMMASTER.TCLCOD_0（产品大类，TH1/TJ1/A06E…） |
+| DIM | DIM_SUPPLIER / DIM_MATERIAL | 同上透传 | 自 DWD |
+| DWS | 4 张供应商月度汇总 | `zero_stock_flag`（LEFT JOIN DWD_SUPPLIER） | — |
+| DWS | DWS_MATERIAL_PRICE_MONTHLY | `material_category`（LEFT JOIN DWD_MATERIAL） | — |
+| ADS | ADS_SUPPLIER_360 / ADS_SUPPLIER_ORDER_DETAIL | 同上透出 | 自 DIM |
+
+**金额清洗规则**（DWD_PURCHASE_ORDER_LINE）：X3 源 PORDERQ 存在 **19 行 order_qty > 1e9 的污染数据**（如 PO C12009POH0182 qty 达 4.1e17、金额 2.4e18，单价 ~5.8 正常 → qty 被异常放大）；GR 侧全库 MAX 仅 120 万，1e9 为天然分界 → **该行 order_qty / line_amount_excl_tax / line_amount_incl_tax 置 NULL**（unit_price 保留）。
+
+**验证**：
+1. ✅ zero_stock_flag：DWD 与 DIM 均为 1→3326 / 2→174，与 ZJTH 源完全一致
+2. ✅ material_category：DWD/DIM 落值（TH1 138,754 / TJ1 132,504 / A06E 20,441…）
+3. ✅ 5 张 DWS 全部透传，分组可用
+4. ✅ 清洗后残留 qty>1e9 = 0；DWS 采购金额恢复正常（全库 624 亿 / 1,191 家供应商）
+5. ✅ ADS 两视图可查（零库存供应商 360：如 A119 苏州利来 近12月采购 2.75 亿、OTD 1.63%）
+
+**新业务观察（强区分度，值得 AI 应用利用）**：
+
+- **零库存供应商 OTD 极低**：月均值 3.98% vs 非零库存 50.23%（未按量加权）。零库存（JIT 直送）供应商承诺日期口径与普通供应商不同，或存在系统性延迟——后续可作「按零库存类型分开看 OTD」的语义，否则会误判供应商表现
+- 物料类别采购额 Top：A01（86 亿）、C02（18.9 亿）、A06E（15.1 亿）——类别维度可直接支撑品类分析
+
 ## 1. 需求
 
 把 ZJTH（Sage X3 ERP 业务库，1371 张表）中**本体管理已映射的 27 张表**（采购域业务数据 + 主数据，共 1016 万行）复制抽取到新建 Oracle 用户 **THBI** 下，按数仓分层架构组织：
@@ -69,11 +98,11 @@ ZJTH 原始表 --> ODS --> DWD --> DIM --> DWS --> ADS
 
 | 源表 | DWD 表 | 行数 | 核心字段（示例） |
 |---|---|---|---|
-| BPSUPPLIER | DWD_SUPPLIER | 3,500 | supplier_code / supplier_name / payment_code |
+| BPSUPPLIER | DWD_SUPPLIER | 3,500 | supplier_code / supplier_name / payment_code / **zero_stock_flag**（YPTHFLGM_0，2=零库存） |
 | BPARTNER | DWD_BUSINESS_PARTNER | 5,923 | partner_code / partner_name / vat_number |
 | BPCUSTOMER | DWD_CUSTOMER | 708 | customer_code / customer_name / status |
 | BPCARRIER | DWD_CARRIER | 0 | carrier_code / carrier_name |
-| ITMMASTER | DWD_MATERIAL | 350,922 | material_code / description_1 / status / item_category |
+| ITMMASTER | DWD_MATERIAL | 350,922 | material_code / description_1 / status / item_category / **material_category**（TCLCOD_0，产品大类） |
 | FACILITY | DWD_FACILITY | 41 | facility_code / facility_name |
 | ITMFACILIT | DWD_ITEM_FACILITY | 818,347 | material_code / facility_code / lot_qty |
 | BOM / BOMD | DWD_BOM / DWD_BOM_DETAIL | 1.95万 / 5.17万 | material_code / component_code / component_qty |
@@ -209,11 +238,13 @@ SELECT * FROM ADS_SUPPLIER_360 FETCH FIRST 5 ROWS ONLY;
 | 拒收数据稀疏 | RRRQTYPUU 仅 50 行非零（无独立 IQC 表） | 供应商质量指标弱；IQC 系统接入是远期 |
 | 价格表头关联缺失 | PPRICFICH/PPRICCONF 与 PPRICLIST 的关联键语义待业务确认 | 暂留 ODS；确认后补 DWD |
 | DEMRCPDAT 不可用 | 需求日期全为 1599 占位 | REQUEST_DATE 用 PORDER 行级 EXTRCPDAT；GR 承诺日期用 PO 行级 |
+| PORDERQ 数量/金额脏数据 | 19 行 order_qty > 1e9（PO C12009POH0182 等，qty 达 4.1e17），污染金额聚合 | 已加 DWD 清洗规则：qty>1e9 置 NULL；其余 >1亿 金额（≤300亿，qty 正常）按真实大额保留 |
+| 零库存供应商 OTD 极低 | 零库存（YPTHFLGM_0=2）月均 OTD 3.98% vs 非零 50.23% | 疑似零库存 JIT 承诺日期口径不同或系统性延迟；AI 语义层需按 zero_stock_flag 分口径，勿混比 |
 | DIM 无 SCD2 | 首版 SCD1（全量重建） | 主数据变更频率低，SCD2 待真实需求 |
-| qa-system 未接入 | THBI 建仓后需注册数据源 + 本体重建 | **后续 change：feat-dw-ontology-rebind** |
+| qa-system 未接入 | THBI 建仓后需注册数据源 + 本体重建 | ✅ 已完成：feat-dw-ontology-rebind（THBI 默认数据源 + 27 类 rebind DWD + NL2SQL 验证通过） |
 
 ## 10. 关联
 
 - 前置：`docs/data-knowledge/采购域.md`（§4.3 DWD 样例 / §13 核心先行建议）、`系统差距评估报告.md`（P0-3）
-- 后续：feat-dw-ontology-rebind（THBI 注册 + 本体重建 + NL2SQL 切换 DWD）
+- 后续：✅ `Harness/changes/feat-dw-ontology-rebind/summary.md`（THBI 注册 + 本体重建 + NL2SQL 切换 DWD，2026-08-30 完成）
 - 关联：`Harness/changes/feat-data-lineage-model`（数仓分层落地后血缘表可补 SYSTEM->ODS->DWD->DWS->ADS 全链边）

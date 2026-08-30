@@ -21,6 +21,7 @@ from app.domain.enums import (
     EntityType,
     LineageLayer,
     MatchRule,
+    ObjectType,
     RefreshFrequency,
     RuleType,
     ScoreType,
@@ -345,6 +346,11 @@ class OntologyClassCreate(CamelModel):
     class_alias: str | None = Field(default=None, max_length=100)
     description: str | None = None
     source_table: str | None = Field(default=None, max_length=100)
+    # 治理字段（Phase 3.4，采购域 Sheet 03 业务对象目录）
+    object_type: ObjectType | None = Field(
+        default=None, description="Master/Transaction/Reference/Event"
+    )
+    object_owner: str | None = Field(default=None, max_length=100)
     parent_class_id: int | None = None
     created_by: str | None = None
 
@@ -354,6 +360,10 @@ class OntologyClassUpdate(CamelModel):
     class_alias: str | None = Field(default=None, max_length=100)
     description: str | None = None
     source_table: str | None = Field(default=None, max_length=100)
+    object_type: ObjectType | None = Field(
+        default=None, description="Master/Transaction/Reference/Event"
+    )
+    object_owner: str | None = Field(default=None, max_length=100)
     parent_class_id: int | None = None
 
 
@@ -432,6 +442,8 @@ class OntologyClassRead(CamelModel):
     class_alias: str | None = None
     description: str | None = None
     source_table: str | None = None
+    object_type: ObjectType | None = None
+    object_owner: str | None = None
     parent_class_id: int | None = None
     created_by: str | None = None
     created_time: datetime | None = None

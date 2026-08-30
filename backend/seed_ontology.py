@@ -13,6 +13,7 @@
 外键关系按 Sage X3 命名约定 + SQL JOIN 推断（库内无声明 PK/FK 约束）。
 
 幂等：按 source_table 复用类、按 (class_id, property_name) 跳过已有属性、按 metric_name 复用指标。
+类治理字段（Phase 3.4 object_type/object_owner）按 CLASSES 契约只增不删回填，重跑幂等。
 PG 写完后同步 Neo4j 本体图（27 类 + 属性 + 指标 + HAS_PROPERTY/REFERENCES/DERIVED_FROM 关系，幂等 MERGE）。
 
 指标（METRICS）种子：Phase 2 数据血缘 KPI 层数据源。lineage_auto_extract.py 消费
@@ -44,162 +45,216 @@ CLASSES = [
         "class_name": "ItemMaster",
         "class_alias": "物料",
         "source_table": "ITMMASTER",
+        "object_type": "Master",
+        "object_owner": "主数据管理组",
         "description": "物料/产品主数据表，承载物料编码、描述、分类、单位、状态等核心属性。",
     },
     {
         "class_name": "Customer",
         "class_alias": "客户",
         "source_table": "BPCUSTOMER",
+        "object_type": "Master",
+        "object_owner": "主数据管理组",
         "description": "客户信息表，记录客户编码、名称、类型、开票与地址等。",
     },
     {
         "class_name": "BusinessPartner",
         "class_alias": "合作伙伴",
         "source_table": "BPARTNER",
+        "object_type": "Master",
+        "object_owner": "主数据管理组",
         "description": "合作伙伴表，作为客户/供应商/承运人的统一主档，含税号、国家、行业等。",
     },
     {
         "class_name": "Supplier",
         "class_alias": "供应商",
         "source_table": "BPSUPPLIER",
+        "object_type": "Master",
+        "object_owner": "主数据管理组",
         "description": "供应商信息表，记录供应商编码、名称、类型、开票与付款等。",
     },
     {
         "class_name": "Carrier",
         "class_alias": "承运人",
         "source_table": "BPCARRIER",
+        "object_type": "Master",
+        "object_owner": "主数据管理组",
         "description": "承运人主档，记录承运人编码、名称、地址、运输方式、税号等。",
     },
     {
         "class_name": "BOM",
         "class_alias": "物料清单",
         "source_table": "BOM",
+        "object_type": "Master",
+        "object_owner": "主数据管理组",
         "description": "BOM 表，一个物料对应若干替代 BOM；BOMALT_0||ITMREF_0||BOMALTTYP_0 唯一。",
     },
     {
         "class_name": "BOMDetail",
         "class_alias": "BOM明细",
         "source_table": "BOMD",
+        "object_type": "Master",
+        "object_owner": "主数据管理组",
         "description": "BOM 明明细表，记录每个 BOM 的组件物料、用量、工序与生效区间。",
     },
     {
         "class_name": "ItemFacility",
         "class_alias": "物料地点",
         "source_table": "ITMFACILIT",
+        "object_type": "Master",
+        "object_owner": "主数据管理组",
         "description": "物料地点表，管理物料在各基地的库存参数（安全库存、提前期、仓库等）。",
     },
     {
         "class_name": "Facility",
         "class_alias": "地点",
         "source_table": "FACILITY",
+        "object_type": "Master",
+        "object_owner": "主数据管理组",
         "description": "地点信息表，基地编码与名称对应，含制造/采购/仓储/财务等业务标志。",
     },
     {
         "class_name": "RoutingOperation",
         "class_alias": "工艺工序",
         "source_table": "ROUOPE",
+        "object_type": "Master",
+        "object_owner": "主数据管理组",
         "description": "工艺路线工序表，记录物料在各基地的工序、工作中心、工时与合作伙伴。",
     },
     {
         "class_name": "ArrivalNotice",
         "class_alias": "到货单",
         "source_table": "YPRECEIPT",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "到货单表头，记录供应商到货通知（ASN），含供应商、收货地点、收货日期、质检员等。",
     },
     {
         "class_name": "ArrivalNoticeDetail",
         "class_alias": "到货明细",
         "source_table": "YPRECEIPTD",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "到货单明细，记录每笔到货的物料、收货数量、采购员、仓库收货员及质量确认等。",
     },
     {
         "class_name": "Receipt",
         "class_alias": "收货单",
         "source_table": "PRECEIPT",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "收货单/入库单表头，记录正式入库的供应商、收货地点、采购类型、运输、重量体积及过账等。",
     },
     {
         "class_name": "ReceiptDetail",
         "class_alias": "收货明细",
         "source_table": "PRECEIPTD",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "收货单/入库单明细，记录每行收货物料的数量、价格、税额、仓库、采购订单与到货单关联等。",
     },
     {
         "class_name": "PurchaseRequisitionDetail",
         "class_alias": "采购需求明细",
         "source_table": "PREQUISD",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "采购需求/请购明细表，记录请购物料、数量、供应商、价格、要求交货日及下单/关闭状态等。",
     },
     {
         "class_name": "RequisitionOrderLink",
         "class_alias": "请购订单关联",
         "source_table": "PREQUISO",
+        "object_type": "Reference",
+        "object_owner": "采购部",
         "description": "请购明细与采购订单的关联表，记录请购行被转单到采购订单的数量与订单序列。",
     },
     {
         "class_name": "SupplierPriceList",
         "class_alias": "供应商价格单",
         "source_table": "PPRICFICH",
+        "object_type": "Master",
+        "object_owner": "主数据管理组",
         "description": "供应商价格表头，记录价格表号、记录、生效/失效日期与有效状态等。",
     },
     {
         "class_name": "SupplierPriceDetail",
         "class_alias": "供应商价格明细",
         "source_table": "PPRICLIST",
+        "object_type": "Master",
+        "object_owner": "主数据管理组",
         "description": "供应商价格表明细，记录物料、单价、数量区间、免费物料、佣金系数及生效区间等。",
     },
     {
         "class_name": "SupplierPriceConf",
         "class_alias": "供应商价格配置",
         "source_table": "PPRICCONF",
+        "object_type": "Reference",
+        "object_owner": "采购部",
         "description": "供应商价格配置表，定义价格清单的取价条件维度（供应商/物料等字段组合）、取价优先级与价格类型。",
     },
     {
         "class_name": "PurchaseOrder",
         "class_alias": "采购订单",
         "source_table": "PORDER",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "采购订单主表（PORDER），记录订单号、日期、供应商、采购员、交货条款与收货地点等。",
     },
     {
         "class_name": "PurchaseOrderDetail",
         "class_alias": "采购订单明细",
         "source_table": "PORDERQ",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "采购订单明细表（PORDERQ），记录每张采购订单下的物料行、数量、单价、金额与交货/收货需求等。",
     },
     {
         "class_name": "Quotation",
         "class_alias": "采购报价",
         "source_table": "PQUOTAT",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "采购报价/询价单表头（PQUOTAT），向供应商发出询价并收集报价，含报价日期、响应期限、受邀与响应供应商数等。",
     },
     {
         "class_name": "QuotationDetail",
         "class_alias": "采购报价明细",
         "source_table": "PQUOTATD",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "采购报价/询价单明细（PQUOTATD），记录每行询价/报价的物料、数量、提前期、要求收货日与来源请购行等。",
     },
     {
         "class_name": "PurchaseInvoice",
         "class_alias": "采购发票",
         "source_table": "PINVOICE",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "采购发票表头（PINVOICE），记录供应商发票的供应商、日期、金额（含税/不含税）、应付到期日与过账状态等。",
     },
     {
         "class_name": "PurchaseInvoiceDetail",
         "class_alias": "采购发票明细",
         "source_table": "PINVOICED",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "采购发票明细（PINVOICED），记录每行发票的物料、数量、单价、金额，以及采购订单/收货单/付款单三向匹配关联。",
     },
     {
         "class_name": "Payment",
         "class_alias": "付款单",
         "source_table": "PAYMENTH",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "付款单表头（PAYMENTH），记录向供应商付款的单据，含付款类型、付款金额、付款/到期日期与状态等。",
     },
     {
         "class_name": "PaymentDetail",
         "class_alias": "付款明细",
         "source_table": "PAYMENTD",
+        "object_type": "Transaction",
+        "object_owner": "采购部",
         "description": "付款单明细（PAYMENTD），记录每行付款的科目、供应商、被支付凭证（发票）与金额等。",
     },
 ]
@@ -1396,6 +1451,14 @@ async def _seedClasses(session: Any) -> dict[str, int]:
         existing = (await session.execute(stmt)).scalar_one_or_none()
         if existing:
             cid[c["source_table"]] = existing.id
+            # 治理字段回填（Phase 3.4，只增不删）：seed 是治理字段契约源，
+            # 重跑会将偏离契约的值校正回 CLASSES 定义（历史行迁移后为 NULL 的首跑必回填，
+            # 人工改过的若偏离契约也一并校正——与 _seedProperties 对别名/描述的处理一致）；
+            # seed 未提供的字段保留 DB 既有值，不删除管理端后续补充的信息。
+            if c.get("object_type") is not None and existing.object_type != c["object_type"]:
+                existing.object_type = c["object_type"]
+            if c.get("object_owner") is not None and existing.object_owner != c["object_owner"]:
+                existing.object_owner = c["object_owner"]
             logger.info("class exists: %s (id=%d, name=%s)", c["source_table"], existing.id, existing.class_name)
         else:
             obj = OntologyClass(created_by="seed_ontology", **c)

@@ -203,6 +203,13 @@ class OntologyClass(Base, TimestampMixin):
     class_alias: Mapped[str | None] = mapped_column(String(100), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_table: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 治理字段（Phase 3.4，采购域 Sheet 03 业务对象目录）
+    object_type: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, comment="Master/Transaction/Reference/Event"
+    )
+    object_owner: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, comment="责任部门/人"
+    )
     parent_class_id: Mapped[int | None] = mapped_column(
         BigIntFk, ForeignKey("ontology_class.id"), nullable=True
     )

@@ -20,10 +20,12 @@ import {
   listClassVersions,
 } from "../../api/ontology";
 import type {
+  ObjectType,
   OntologyClass,
   OntologyClassCreate,
   OntologyClassUpdate,
 } from "../../types/ontology";
+import { OBJECT_TYPE_OPTIONS } from "../../types/ontology";
 import { useTranslation } from "../../i18n";
 import FilterBar from "./FilterBar";
 import type { FilterField } from "./FilterBar";
@@ -33,12 +35,22 @@ import { classOptions } from "./classOptions";
 
 const { TextArea } = Input;
 
+/** 对象类型 Tag 配色（Phase 3.4 治理字段）。 */
+const OBJECT_TYPE_TAG_COLOR: Record<ObjectType, string> = {
+  Master: "blue",
+  Transaction: "green",
+  Reference: "orange",
+  Event: "default",
+};
+
 interface ClassFormValues {
   className: string;
   classAlias: string;
   description: string;
   sourceTable: string;
   parentClassId: number | undefined;
+  objectType: ObjectType | undefined;
+  objectOwner: string;
 }
 
 const EMPTY_CLASS_FORM: ClassFormValues = {
@@ -47,6 +59,8 @@ const EMPTY_CLASS_FORM: ClassFormValues = {
   description: "",
   sourceTable: "",
   parentClassId: undefined,
+  objectType: undefined,
+  objectOwner: "",
 };
 
 export interface ClassTabProps {
@@ -108,6 +122,8 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
       description: record.description ?? "",
       sourceTable: record.sourceTable ?? "",
       parentClassId: record.parentClassId ?? undefined,
+      objectType: record.objectType ?? undefined,
+      objectOwner: record.objectOwner ?? "",
     });
     setModalOpen(true);
   };
@@ -167,6 +183,10 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
         description: values.description || undefined,
         sourceTable: values.sourceTable || undefined,
         parentClassId: values.parentClassId,
+        // 治理字段：清空（undefined/空串）映射为 null 显式提交，后端落 NULL
+        // （若用 undefined 会被 JSON.stringify 丢弃，exclude_unset 视为未修改，清空不生效）
+        objectType: values.objectType ?? null,
+        objectOwner: values.objectOwner || null,
       };
       if (editing) {
         const updatePayload: OntologyClassUpdate = { ...payload };
@@ -228,6 +248,23 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
         id ? classes.find((c) => c.id === id)?.className ?? `ID:${id}` : "-",
     },
     { title: t("forms.ontology.classColumns.sourceTable"), dataIndex: "sourceTable" },
+    {
+      title: t("forms.ontology.classColumns.objectType"),
+      dataIndex: "objectType",
+      width: 130,
+      render: (v: ObjectType | null) =>
+        v ? (
+          <Tag color={OBJECT_TYPE_TAG_COLOR[v]}>{t(`enums.objectType.${v}`)}</Tag>
+        ) : (
+          t("common.dash")
+        ),
+    },
+    {
+      title: t("forms.ontology.classColumns.objectOwner"),
+      dataIndex: "objectOwner",
+      width: 130,
+      render: (v: string | null) => v || t("common.dash"),
+    },
     {
       title: t("forms.ontology.classColumns.description"),
       dataIndex: "description",
@@ -307,6 +344,19 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
           </Form.Item>
           <Form.Item name="sourceTable" label={t("forms.ontology.classLabels.sourceTable")}>
             <Input placeholder={t("forms.ontology.classPlaceholders.sourceTable")} />
+          </Form.Item>
+          <Form.Item name="objectType" label={t("forms.ontology.classLabels.objectType")}>
+            <Select
+              allowClear
+              placeholder={t("forms.ontology.classPlaceholders.objectType")}
+              options={OBJECT_TYPE_OPTIONS.map((o) => ({
+                value: o.value,
+                label: t(`enums.objectType.${o.labelKey}`),
+              }))}
+            />
+          </Form.Item>
+          <Form.Item name="objectOwner" label={t("forms.ontology.classLabels.objectOwner")}>
+            <Input placeholder={t("forms.ontology.classPlaceholders.objectOwner")} />
           </Form.Item>
           <Form.Item
             name="parentClassId"

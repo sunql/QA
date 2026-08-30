@@ -98,6 +98,21 @@ class ScoreType(str, Enum):
     GLOBAL = "GLOBAL"
 
 
+class ObjectType(str, Enum):
+    """本体类业务对象类型（Phase 3.4，采购域 Sheet 03 业务对象目录）。
+
+    Master：主数据（物料/供应商/地点等稳定参照实体）。
+    Transaction：交易单据（订单/收货/发票/付款/报价等业务单据）。
+    Reference：参考/配置/关联（价格配置、请购订单关联等辅助表）。
+    Event：事件（本期未使用，预留）。
+    """
+
+    MASTER = "Master"
+    TRANSACTION = "Transaction"
+    REFERENCE = "Reference"
+    EVENT = "Event"
+
+
 class IntentType(str, Enum):
     """用户意图类型。
 

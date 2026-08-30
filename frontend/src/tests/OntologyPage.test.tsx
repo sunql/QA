@@ -22,6 +22,8 @@ const mockClass: OntologyClass = {
   description: "客户信息",
   sourceTable: "t_customer",
   parentClassId: null,
+  objectType: null,
+  objectOwner: null,
   createdBy: null,
   createdTime: "2026-08-11T00:00:00Z",
   updatedTime: "2026-08-11T00:00:00Z",
@@ -185,6 +187,41 @@ describe("OntologyPage", () => {
     await waitFor(() => {
       expect(api.createClass).toHaveBeenCalledTimes(1);
       expect(api.createClass.mock.calls[0][0].parentClassId).toBe(1);
+    });
+  });
+
+  it("类列表渲染对象类型 Tag 与责任部门（治理字段）", async () => {
+    api.listClasses.mockResolvedValue([
+      { ...mockClass, objectType: "Transaction", objectOwner: "采购部" },
+    ]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Customer")).toBeInTheDocument());
+    expect(screen.getByText("交易单据 Transaction")).toBeInTheDocument();
+    expect(screen.getByText("采购部")).toBeInTheDocument();
+  });
+
+  it("新增类时携带对象类型与责任部门治理字段", async () => {
+    const user = userEvent.setup();
+    api.createClass.mockResolvedValue({ ...mockClass, id: 2, className: "Order" });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Customer")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /新增类/ }));
+    const nameInput = screen.getByRole("textbox", { name: "类名" });
+    await user.type(nameInput, "Order");
+    // 选择对象类型 Transaction
+    await user.click(screen.getByRole("combobox", { name: /对象类型/ }));
+    await user.click(screen.getByText("交易单据 Transaction"));
+    // 填写责任部门
+    const ownerInput = screen.getByRole("textbox", { name: /责任部门/ });
+    await user.type(ownerInput, "采购部");
+    await user.click(screen.getByRole("button", { name: /确\s?定$/ }));
+
+    await waitFor(() => {
+      expect(api.createClass).toHaveBeenCalledTimes(1);
+      const payload = api.createClass.mock.calls[0][0];
+      expect(payload.objectType).toBe("Transaction");
+      expect(payload.objectOwner).toBe("采购部");
     });
   });
 

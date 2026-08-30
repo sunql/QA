@@ -2,6 +2,21 @@
 
 // ===== Class =====
 
+/** 业务对象类型（Phase 3.4，采购域 Sheet 03 业务对象目录）。 */
+export type ObjectType = "Master" | "Transaction" | "Reference" | "Event";
+
+/**
+ * 业务对象类型下拉选项。
+ * labelKey 与 value 一致；组件渲染时通过 ``t(`enums.objectType.${labelKey}`)`` 解析。
+ * 与 DATA_TYPE_OPTIONS 同模式（types 层无 hook 依赖）。
+ */
+export const OBJECT_TYPE_OPTIONS: { value: ObjectType; labelKey: ObjectType }[] = [
+  { value: "Master", labelKey: "Master" },
+  { value: "Transaction", labelKey: "Transaction" },
+  { value: "Reference", labelKey: "Reference" },
+  { value: "Event", labelKey: "Event" },
+];
+
 export interface OntologyClass {
   id: number;
   className: string;
@@ -9,6 +24,9 @@ export interface OntologyClass {
   description: string | null;
   sourceTable: string | null;
   parentClassId: number | null;
+  /** 治理字段（Phase 3.4）：业务对象类型 / 责任部门或人 */
+  objectType: ObjectType | null;
+  objectOwner: string | null;
   createdBy: string | null;
   createdTime: string | null;
   updatedTime: string | null;
@@ -24,6 +42,9 @@ export interface OntologyClassCreate {
   description?: string;
   sourceTable?: string;
   parentClassId?: number;
+  /** 治理字段：null 表示显式不设置（后端落 NULL），undefined 表示不提交该字段 */
+  objectType?: ObjectType | null;
+  objectOwner?: string | null;
   createdBy?: string;
 }
 
@@ -33,6 +54,9 @@ export interface OntologyClassUpdate {
   description?: string;
   sourceTable?: string;
   parentClassId?: number;
+  /** 治理字段：null 表示显式清空（后端落 NULL），undefined 表示不提交该字段 */
+  objectType?: ObjectType | null;
+  objectOwner?: string | null;
 }
 
 // ===== Property =====

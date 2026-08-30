@@ -142,6 +142,8 @@ class OntologyService:
             class_alias=dto.class_alias,
             description=dto.description,
             source_table=dto.source_table,
+            object_type=dto.object_type.value if dto.object_type is not None else None,
+            object_owner=dto.object_owner,
             parent_class_id=dto.parent_class_id,
             created_by=dto.created_by,
             version=1,
@@ -227,6 +229,10 @@ class OntologyService:
             )
 
         updates = dto.model_dump(exclude_unset=True)
+
+        # 治理字段归一化：object_type 为枚举成员，DB 列存字符串值（"Master"/...）
+        if updates.get("object_type") is not None:
+            updates["object_type"] = updates["object_type"].value
 
         # 改名重名校验：原地更新后 class_name 无 DB 唯一约束，若改名为另一行
         # 的同名（含墓碑），会产生同名双行（或 IntegrityError 500）。与 createClass

@@ -445,6 +445,8 @@ export const zhCN = {
         validFrom: "生效时间",
         parentClassId: "父类",
         sourceTable: "数据表",
+        objectType: "对象类型",
+        objectOwner: "责任部门/人",
         description: "描述",
         actions: "操作",
         versionTag: "v{version}",
@@ -524,6 +526,8 @@ export const zhCN = {
         classAlias: "别名",
         sourceTable: "数据表",
         parentClassId: "父类（继承）",
+        objectType: "对象类型",
+        objectOwner: "责任部门/人",
         description: "描述",
       },
       classPlaceholders: {
@@ -531,6 +535,8 @@ export const zhCN = {
         classAlias: "如 客户 / 订单 / 商品",
         sourceTable: "如 t_customer / t_order",
         parentClassId: "可选，选择父类以继承语义",
+        objectType: "Master 主数据 / Transaction 交易单据 / Reference 参考配置",
+        objectOwner: "如 采购部 / 主数据管理组",
         description: "类用途说明",
       },
 
@@ -684,6 +690,12 @@ export const zhCN = {
       COUNT: "计数 COUNT",
       MAX: "最大值 MAX",
       MIN: "最小值 MIN",
+    },
+    objectType: {
+      Master: "主数据 Master",
+      Transaction: "交易单据 Transaction",
+      Reference: "参考配置 Reference",
+      Event: "事件 Event",
     },
     entityType: {
       class: "类",

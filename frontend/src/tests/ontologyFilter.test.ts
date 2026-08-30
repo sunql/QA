@@ -24,6 +24,8 @@ function cls(over: Partial<OntologyClass>): OntologyClass {
     description: null,
     sourceTable: null,
     parentClassId: null,
+    objectType: null,
+    objectOwner: null,
     createdBy: null,
     createdTime: null,
     updatedTime: null,

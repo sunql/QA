@@ -438,6 +438,8 @@ export const enUS = {
         validFrom: "Effective Since",
         parentClassId: "Parent Class",
         sourceTable: "Data Table",
+        objectType: "Object Type",
+        objectOwner: "Owner Dept./Person",
         description: "Description",
         actions: "Actions",
         versionTag: "v{version}",
@@ -509,6 +511,8 @@ export const enUS = {
         classAlias: "Alias",
         sourceTable: "Data Table",
         parentClassId: "Parent Class (Inheritance)",
+        objectType: "Object Type",
+        objectOwner: "Owner Dept./Person",
         description: "Description",
       },
       classPlaceholders: {
@@ -516,6 +520,8 @@ export const enUS = {
         classAlias: "e.g. Customer / Order / Product",
         sourceTable: "e.g. t_customer / t_order",
         parentClassId: "Optional — select a parent class to inherit semantics",
+        objectType: "Master / Transaction / Reference / Event",
+        objectOwner: "e.g. Procurement Dept. / Master Data Team",
         description: "Class description",
       },
       propertyLabels: {
@@ -666,6 +672,12 @@ export const enUS = {
       COUNT: "Count COUNT",
       MAX: "Max MAX",
       MIN: "Min MIN",
+    },
+    objectType: {
+      Master: "Master Data Master",
+      Transaction: "Transaction Document Transaction",
+      Reference: "Reference/Config Reference",
+      Event: "Event Event",
     },
     entityType: {
       class: "Class",

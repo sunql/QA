@@ -5,16 +5,23 @@
     cd backend && THBI_PASSWORD=*** ./.venv/bin/python ../dw/run_build.py --phase all
     THBI_PASSWORD=*** ./.venv/bin/python ../dw/run_build.py --phase dwd,dws
     THBI_PASSWORD=*** ./.venv/bin/python ../dw/run_build.py --phase all --verify
+    THBI_PASSWORD=*** ./.venv/bin/python ../dw/run_build.py --incremental          # ODS/DWD 增量 MERGE
+    THBI_PASSWORD=*** ./.venv/bin/python ../dw/run_build.py --incremental --verify
 
 行为：
-- 按 phase 顺序执行 dw/*.sql，逐语句提交并打印耗时/影响行数
+- 默认全量快照：按 phase 顺序执行 dw/*.sql，逐语句提交并打印耗时/影响行数
 - CREATE 前自动 drop-if-exists（幂等可重跑）
 - --verify 时对 ODS 层做与 ZJTH 源表的行数对账
+- --incremental：ODS/DWD 按 UPDDATTIM_0 水位 MERGE 增量（DWD 表无 PK 时全量 reload；
+  DIM/DWS/ADS 保持全量重建）。水位存 THBI.ETL_WATERMARK，首次增量从 1900-01-01 起
+  全量 MERGE 后推进到源 MAX(UPDDATTIM_0)。要求 ODS/DWD 表已存在（先跑一次全量）。
+  注意：MERGE 只处理插入/更新，不处理源表物理删除的行（X3 多以状态字段软删）。
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
 import os
 import re
 import sys
@@ -25,6 +32,30 @@ import oracledb
 
 DW_DIR = Path(__file__).resolve().parent
 ORACLE_DSN = {"host": "192.168.205.70", "port": 1521, "service_name": "X3V71ORA"}
+
+# dwd_merge 在 backend/scripts（dwd_spec 同目录）；保证 scripts 包可导入
+sys.path.insert(0, str(DW_DIR.parent / "backend" / "scripts"))
+from dwd_merge import (  # noqa: E402
+    buildDwdMerge,
+    buildOdsMerge,
+    buildOdsWatermarkQuery,
+    buildReload,
+    buildWatermarkQuery,
+    parseCreatePks,
+    parseDwdInserts,
+)
+
+WATERMARK_DDL = """CREATE TABLE THBI.ETL_WATERMARK (
+  target_table   VARCHAR2(60) PRIMARY KEY,
+  last_watermark TIMESTAMP(3),
+  last_sync_ts   TIMESTAMP(3) DEFAULT SYSTIMESTAMP
+)"""
+
+# ZJTH 源表无唯一索引的表 -> 手动 MERGE 键（大写 X3 列名）
+MANUAL_ODS_KEYS = {"ITMMASTER": ["ITMREF_0"]}
+
+# 首次增量（无水位）时的低水位：全量 MERGE
+EPOCH_WM = datetime.datetime(1900, 1, 1)
 
 PHASE_FILES = {
     "ods": DW_DIR / "01_ods.sql",
@@ -168,10 +199,155 @@ def verifyCleaning(conn: oracledb.Connection) -> None:
             print(f"    {row}")
 
 
+# ---------------------------------------------------------------- 增量同步 --
+
+def ensureWatermarkTable(conn: oracledb.Connection) -> None:
+    """水位控制表不存在则创建（幂等）。"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM USER_TABLES WHERE TABLE_NAME = 'ETL_WATERMARK'")
+        if cur.fetchone()[0] == 0:
+            cur.execute(WATERMARK_DDL)
+            conn.commit()
+            print("  [create] THBI.ETL_WATERMARK")
+
+
+def getWatermark(conn: oracledb.Connection, target: str) -> datetime.datetime | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT last_watermark FROM THBI.ETL_WATERMARK WHERE target_table = :t",
+            t=target,
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def setWatermark(conn: oracledb.Connection, target: str, ts: datetime.datetime) -> None:
+    """写入/更新某目标表的同步水位（源 MAX(UPDDATTIM_0)）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "MERGE INTO THBI.ETL_WATERMARK t "
+            "USING (SELECT :t AS tt, :w AS wm FROM DUAL) s "
+            "ON (t.target_table = s.tt) "
+            "WHEN MATCHED THEN UPDATE SET t.last_watermark = s.wm "
+            "WHEN NOT MATCHED THEN INSERT (target_table, last_watermark) "
+            "VALUES (s.tt, s.wm)",
+            t=target, w=ts,
+        )
+    conn.commit()
+
+
+def uniqueIndexCols(conn: oracledb.Connection, owner: str, table: str) -> list[str]:
+    """源表唯一索引列清单（列数最少者优先）；无唯一索引返回 []。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT i.INDEX_NAME, COUNT(ic.COLUMN_NAME) AS ncols "
+            "FROM ALL_INDEXES i "
+            "JOIN ALL_IND_COLUMNS ic "
+            "  ON ic.INDEX_NAME = i.INDEX_NAME AND ic.TABLE_OWNER = i.TABLE_OWNER "
+            "WHERE i.TABLE_OWNER = :o AND i.TABLE_NAME = :t AND i.UNIQUENESS = 'UNIQUE' "
+            "GROUP BY i.INDEX_NAME ORDER BY ncols, i.INDEX_NAME",
+            o=owner, t=table,
+        )
+        row = cur.fetchone()
+    if not row:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COLUMN_NAME FROM ALL_IND_COLUMNS "
+            "WHERE TABLE_OWNER = :o AND INDEX_NAME = :i ORDER BY COLUMN_POSITION",
+            o=owner, i=row[0],
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def syncOds(conn: oracledb.Connection, source: str) -> None:
+    """单张 ODS 表增量：从 ZJTH 源表按 UPDDATTIM_0 水位 MERGE。"""
+    target = f"ODS_{source}"
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COLUMN_NAME FROM USER_TAB_COLUMNS WHERE TABLE_NAME = :t "
+            "ORDER BY COLUMN_ID",
+            t=target,
+        )
+        cols = [r[0] for r in cur.fetchall()]
+    if not cols:
+        raise SystemExit(f"{target} 不存在，请先执行全量建仓（--phase all）")
+    pk = MANUAL_ODS_KEYS.get(source) or uniqueIndexCols(conn, "ZJTH", source)
+    if not pk:
+        raise SystemExit(f"{source}: ZJTH 无唯一索引且未配置手动 MERGE 键，无法增量")
+    wm = getWatermark(conn, target) or EPOCH_WM
+    sql = buildOdsMerge(source, target, cols, pk)
+    started = time.monotonic()
+    with conn.cursor() as cur:
+        cur.execute(sql, wm=wm)
+        n = cur.rowcount
+        cur.execute(buildOdsWatermarkQuery(source))
+        new_wm = cur.fetchone()[0]
+    setWatermark(conn, target, new_wm)
+    print(f"  [ok] {target:<24} merged={n:<10} wm={wm} -> {new_wm} "
+          f"{time.monotonic() - started:.1f}s")
+
+
+def syncDwd(conn: oracledb.Connection, info, pk_cols: list[str]) -> None:
+    """单张 DWD 表增量：有 PK 走 MERGE，无 PK（表小）走全量 reload。"""
+    target = info.target
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM USER_TABLES WHERE TABLE_NAME = :t", t=target)
+        if cur.fetchone()[0] == 0:
+            raise SystemExit(f"{target} 不存在，请先执行全量建仓（--phase all）")
+    wm = getWatermark(conn, target) or EPOCH_WM
+    started = time.monotonic()
+    if not pk_cols:
+        # 无 PK（BOM/BOM_DETAIL/ROUTING_OPERATION，小表）：全量重灌，语义与全量一致
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM THBI.{target}")
+            cur.execute(buildReload(info))
+            n = cur.rowcount
+            cur.execute(buildWatermarkQuery(info))
+            new_wm = cur.fetchone()[0]
+        setWatermark(conn, target, new_wm)
+        kind = f"reload={n}"
+    else:
+        with conn.cursor() as cur:
+            cur.execute(buildDwdMerge(info, pk_cols), wm=wm)
+            n = cur.rowcount
+            cur.execute(buildWatermarkQuery(info))
+            new_wm = cur.fetchone()[0]
+        setWatermark(conn, target, new_wm)
+        kind = f"merged={n} wm={wm} -> {new_wm}"
+    print(f"  [ok] {target:<38} {kind:<30} {time.monotonic() - started:.1f}s")
+
+
+def runIncremental(conn: oracledb.Connection, phases: list[str]) -> None:
+    """增量同步：ODS/DWD 按 UPDDATTIM_0 水位 MERGE，DIM/DWS/ADS 全量重建。"""
+    ensureWatermarkTable(conn)
+    if "ods" in phases:
+        print("\n=== incremental: ODS MERGE ===")
+        for src in ODS_TABLES:
+            syncOds(conn, src)
+    if "dwd" in phases:
+        print("\n=== incremental: DWD MERGE ===")
+        sql_text = "\n".join(
+            f.read_text(encoding="utf-8") for f in PHASE_FILES["dwd"]
+        )
+        inserts = parseDwdInserts(sql_text)
+        pks = parseCreatePks(sql_text)
+        for table, info in inserts.items():
+            syncDwd(conn, info, pks.get(table, []))
+    for phase in ("dim", "dws", "ads"):
+        if phase in phases:
+            spec = PHASE_FILES[phase]
+            files = spec if isinstance(spec, list) else [spec]
+            executePhase(conn, phase, files)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="THBI 数仓建仓")
     parser.add_argument("--phase", default="all",
                         help="逗号分隔：ods,dwd,dim,dws,ads 或 all")
+    parser.add_argument("--incremental", action="store_true",
+                        help="增量同步：ODS/DWD 按 UPDDATTIM_0 水位 MERGE，"
+                             "DIM/DWS/ADS 全量重建")
     parser.add_argument("--verify", action="store_true",
                         help="只跑校验（ODS 对账 + 清洗校验 + OTD 抽样）")
     args = parser.parse_args()
@@ -182,7 +358,7 @@ def main() -> None:
 
     conn = oracledb.connect(user="THBI", password=password, **ORACLE_DSN)
     try:
-        if args.verify:
+        if args.verify and not args.incremental:
             verifyOds(conn)
             verifyCleaning(conn)
             return
@@ -192,6 +368,14 @@ def main() -> None:
         unknown = [p for p in phases if p not in PHASE_FILES]
         if unknown:
             raise SystemExit(f"未知 phase: {unknown}（可选 ods,dwd,dim,dws,ads）")
+
+        if args.incremental:
+            runIncremental(conn, phases)
+            if args.verify:
+                verifyOds(conn)
+                verifyCleaning(conn)
+            print("\n=== 增量同步完成 ===")
+            return
 
         for phase in phases:
             spec = PHASE_FILES[phase]

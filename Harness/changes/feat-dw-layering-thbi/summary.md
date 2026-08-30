@@ -60,6 +60,34 @@
 - **零库存供应商 OTD 极低**：月均值 3.98% vs 非零库存 50.23%（未按量加权）。零库存（JIT 直送）供应商承诺日期口径与普通供应商不同，或存在系统性延迟——后续可作「按零库存类型分开看 OTD」的语义，否则会误判供应商表现
 - 物料类别采购额 Top：A01（86 亿）、C02（18.9 亿）、A06E（15.1 亿）——类别维度可直接支撑品类分析
 
+### MERGE 增量同步（2026-08-30 第三次执行）
+
+**背景**：全量快照的增量补充（§9 已知限制闭环）——按 `UPDDATTIM_0` 水位 MERGE，ODS/DWD 增量、DIM/DWS/ADS 全量重建。
+
+**改动**（已回写代码）：
+
+- 新增 `backend/scripts/dwd_merge.py`：纯函数 MERGE 生成器（解析 dw/*.sql 的 INSERT SELECT → 按水位 MERGE；解析 PK / 源表 / WHERE / 双源 JOIN）
+- `dw/run_build.py` 增加 `--incremental` 模式 + `THBI.ETL_WATERMARK` 水位控制表（target_table PK, last_watermark TIMESTAMP(3)）
+- 首次增量从 1900-01-01 起全量 MERGE 后推进到源 `MAX(UPDDATTIM_0)`；MERGE 键 = ZJTH 唯一索引（ITMMASTER 无唯一索引 → 手动 `ITMREF_0`）
+- DWD 24 张 PK 表 MERGE；3 张无 PK 表（BOM/BOM_DETAIL/ROUTING_OPERATION）reload（DELETE+INSERT）
+- 双源 JOIN 表（INVOICE_LINE / SUPPLIER_PAYMENT_LINE）水位 = `GREATEST(d.UPDDATTIM_0, h.UPDDATTIM_0)`（头行变更也触发行重灌）
+
+**验证**（真实 THBI，全部通过）：
+
+1. ✅ ODS 27 表 merged 行数 == ZJTH 源（如 PRECEIPTD 3,558,008、PINVOICED 2,486,311、PORDERQ 927,648）
+2. ✅ DWD 27 表计数与全量基线一致（PO_LINE 927,648、GR_LINE 3,558,008、INV_LINE 2,486,311、PAY_LINE 44,493）
+3. ✅ 校验和一致：DWD_PURCHASE_ORDER_LINE `SUM(ORDER_QTY)=4,373,106,735.863` == 全量基线
+4. ✅ 增量语义：回拨水位 2026-01-01 → 重跑只 merged 89,307 行（2026-01 后变更行），水位自动推进回 2026-08-10；幂等（追赶重灌后计数/校验和不变）
+5. ✅ `--verify`：ODS 对账 27/27 OK、清洗校验 0 残留、OTD 抽样正常
+6. ✅ 单测 14/14 GREEN（`backend/app/tests/unit/test_dwd_merge.py`）
+
+**code-review 修复**（code-reviewer 发现后已修 + 回归测试）：
+
+- **HIGH**：`buildWatermarkQuery` 丢 WHERE → 5 张业务过滤表（PRICE_LIST_HEADER / PURCHASE_INVOICE[+LINE] / SUPPLIER_PAYMENT[+LINE]）水位被不合格行抬高，后续增量会静默漏数。已修：水位查询与 MERGE 同谓词（保留 `info.where`）。
+- **MEDIUM**：双源 `GREATEST(d.UPDDATTIM_0, h.UPDDATTIM_0)` 遇 NULL 返回 NULL → 一侧 UPDDATTIM_0 为 NULL 的行被水位过滤掉。已修：`COALESCE(..., TIMESTAMP '1900-01-01 00:00:00')`。修复后实测 DWD_PURCHASE_INVOICE_LINE 收回 6 行（MATCHED 更新，计数/校验和不变）。
+
+**已知限制**：MERGE 只处理插入/更新，不处理源表物理删除的行（X3 多以状态字段软删，影响可控）；DWD 无 PK 3 表仍全量 reload（表小）；水位在 MERGE 后采集（标准高水位，源同步窗口内并发写有竞争，手工批量可接受）。
+
 ## 1. 需求
 
 把 ZJTH（Sage X3 ERP 业务库，1371 张表）中**本体管理已映射的 27 张表**（采购域业务数据 + 主数据，共 1016 万行）复制抽取到新建 Oracle 用户 **THBI** 下，按数仓分层架构组织：
@@ -233,7 +261,7 @@ SELECT * FROM ADS_SUPPLIER_360 FETCH FIRST 5 ROWS ONLY;
 
 | 事项 | 说明 | 处理 |
 |---|---|---|
-| 全量快照，无增量 | CTAS 一次性抽取；X3 无 CDC | 后续 change 加 MERGE 增量（按 UPDDATTIM 水位）或 scheduled rebuild |
+| 全量快照，无增量 | CTAS 一次性抽取；X3 无 CDC | ✅ 已实现 MERGE 增量（按 UPDDATTIM_0 水位，见顶部执行记录）；scheduled rebuild 待调度器 |
 | UOM 混用 | order_qty 为 QTYUOM（订单 UOM），received/rejected 为 QTYPUU（价格 UOM） | DWS 质量率用同表 QTYPUU 口径内部一致；跨表数量对比需注意 |
 | 拒收数据稀疏 | RRRQTYPUU 仅 50 行非零（无独立 IQC 表） | 供应商质量指标弱；IQC 系统接入是远期 |
 | 价格表头关联缺失 | PPRICFICH/PPRICCONF 与 PPRICLIST 的关联键语义待业务确认 | 暂留 ODS；确认后补 DWD |
@@ -248,3 +276,4 @@ SELECT * FROM ADS_SUPPLIER_360 FETCH FIRST 5 ROWS ONLY;
 - 前置：`docs/data-knowledge/采购域.md`（§4.3 DWD 样例 / §13 核心先行建议）、`系统差距评估报告.md`（P0-3）
 - 后续：✅ `Harness/changes/feat-dw-ontology-rebind/summary.md`（THBI 注册 + 本体重建 + NL2SQL 切换 DWD，2026-08-30 完成）
 - 关联：`Harness/changes/feat-data-lineage-model`（数仓分层落地后血缘表可补 SYSTEM->ODS->DWD->DWS->ADS 全链边）
+- 增量：本 change 顶部「MERGE 增量同步」执行记录（`backend/scripts/dwd_merge.py` + `dw/run_build.py --incremental` + `THBI.ETL_WATERMARK`）

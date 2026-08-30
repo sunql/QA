@@ -35,6 +35,10 @@ dist/
 frontend/test-results/
 frontend/playwright-report/
 
+# Test artifacts (vitest/jest coverage reports)
+frontend/coverage/
+frontend/tsconfig.tsbuildinfo
+
 # Env
 .env
 .env.local

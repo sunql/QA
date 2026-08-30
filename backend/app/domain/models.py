@@ -471,6 +471,42 @@ class FeatureValue(Base):
         )
 
 
+class FeatureDefinitionHistory(Base):
+    """FeatureDefinition 变更历史（Phase 4.5 治理加固）。
+
+    一行 = 某次变更的完整快照。feature_id FK ON DELETE SET NULL：
+    删除特征时历史保留，仅 feature_id 置 NULL。不可变（仅 INSERT）。
+
+    与 KpiCatalogHistory 同模式，与 audit_log 的区别见 history_service.py。
+    """
+
+    __tablename__ = "feature_definition_history"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    feature_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("feature_definition.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(
+        postgresql.JSONB, nullable=False
+    )
+    changed_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_feature_def_history_feature_changed", "feature_id", "changed_at"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<FeatureDefinitionHistory id={self.id} feature_id={self.feature_id} "
+            f"by {self.changed_by}>"
+        )
+
+
 class OntologyJoin(Base, TimestampMixin):
     """本体关联关系目录表：运行时 JOIN 生成的唯一真源。
 

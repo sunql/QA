@@ -1,14 +1,25 @@
-"""AI 特征定义服务（Phase 4.3）。
+"""AI 特征定义服务（Phase 4.3 + Phase 4.5 治理加固）。
 
-承载 feature_definition 表 CRUD + 特征值列表查询。owner-based ACL（entity_mapping
-同模式，无 audit/history）：owner 由 actor.departments[0] 派生，update/delete 走
+Phase 4.3：feature_definition 表 CRUD + 特征值列表查询。
+Phase 4.5：接入 AuditService（通用审计）+ HistoryService（历史快照）。
+
+owner-based ACL：owner 由 actor.departments[0] 派生，update/delete 走
 AclService.assertCanModify；create 不接受 client body 声明 owner（DTO 无 owner 字段）。
 
-calculation_logic 只读校验：创建/更新时经 _assert_read_only 校验（SqlSafetyError →
-400），计算时 execute_read_only 二次校验，双重护栏防 SQL 注入。
+calculation_logic 只读校验：创建/更新时经 _assert_read_only（SqlSafetyError → 400），
+计算时 execute_read_only 二次校验，双重护栏防 SQL 注入。
+
+审计+历史：与 KpiCatalogService 同模式。
+- createFeature：audit.record(CREATE) + history.snapshotFeature(revision=0)
+- updateFeature：audit.record(UPDATE, before+after) + history.snapshotFeature
+- deleteFeature：audit.record(DELETE, before)
 """
 
 from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -20,6 +31,8 @@ from app.domain.models import DataSource, FeatureDefinition, FeatureValue
 from app.domain.schemas import FeatureDefinitionCreate, FeatureDefinitionUpdate
 from app.infrastructure.business_db_pool import _assert_read_only
 from app.services.acl_service import AclService
+from app.services.audit_service import AuditService
+from app.services.history_service import HistoryService
 from app.services.messages_zh import (
     MSG_FEATURE_DATASOURCE_NOT_FOUND,
     MSG_FEATURE_DUPLICATE_NAME,
@@ -47,11 +60,17 @@ def _duplicateError(name: str) -> ConflictError:
 
 
 class FeatureDefinitionService:
-    """AI 特征定义 CRUD + 特征值列表查询。"""
+    """AI 特征定义 CRUD + 特征值列表查询（含 audit + history，Phase 4.5）。"""
 
-    def __init__(self, acl: AclService | None = None) -> None:
-        # 默认实例：service 内部 new；测试可注入 mock
+    def __init__(
+        self,
+        acl: AclService | None = None,
+        audit: AuditService | None = None,
+        history: HistoryService | None = None,
+    ) -> None:
         self._acl = acl or AclService()
+        self._audit = audit or AuditService()
+        self._history = history or HistoryService()
 
     async def listFeatures(self, session: AsyncSession) -> list[FeatureDefinition]:
         """按 feature_name 升序列出全部特征定义。"""
@@ -78,6 +97,7 @@ class FeatureDefinitionService:
         - datasource_id 存在性校验（不存在 → ValidationError 422）
         - feature_name 查重（重复 → ConflictError 409，DB 唯一索引兜底 race）
         - owner = actor.departments[0]（为空则 None → 仅 admin 可改）
+        Phase 4.5：audit.record(CREATE) + history.snapshotFeature(revision=0)
         """
         _assert_read_only(dto.calculation_logic)
         await self._assertDatasourceExists(session, dto.datasource_id)
@@ -108,6 +128,26 @@ class FeatureDefinitionService:
             owner=derivedOwner,
         )
         session.add(entity)
+        await session.flush()  # 获取 id，audit/history 需要
+
+        # Phase 4.5：audit + history（同一事务，flush 后写入）
+        actor_departments = ",".join(actor.departments) if actor.departments else None
+        await self._audit.record(
+            session=session,
+            entity_type="feature_definition",
+            entity_id=entity.id,
+            action="CREATE",
+            actor=actor.userId,
+            actor_departments=actor_departments,
+            before=None,
+            after=_entityToDict(entity),
+        )
+        await self._history.snapshotFeature(
+            session=session,
+            feature=entity,
+            changed_by=actor.userId,
+        )
+
         try:
             await session.commit()
         except IntegrityError as exc:
@@ -126,7 +166,8 @@ class FeatureDefinitionService:
         """局部更新特征定义；非空列 None 视为不动，可空列 None 清空。
 
         先 ACL 检查（owner 不匹配 + 非 admin → PermissionDeniedError），再校验
-        calculation_logic 只读 / datasource 存在性，最后 apply + commit。
+        calculation_logic 只读 / datasource 存在性，最后 apply + audit + history + commit。
+        Phase 4.5：audit.record(UPDATE, before+after) + history.snapshotFeature
         """
         entity = await self.getFeature(session, id)
         self._acl.assertCanModify(
@@ -135,6 +176,7 @@ class FeatureDefinitionService:
             entity_label="FEATURE",
             entity_code=str(entity.id),
         )
+        before = _entityToDict(entity)
         changes = dto.model_dump(exclude_unset=True, by_alias=False)
         if changes.get("calculation_logic") is not None:
             _assert_read_only(changes["calculation_logic"])
@@ -144,6 +186,25 @@ class FeatureDefinitionService:
             if value is None and field in _NON_NULL_UPDATE_FIELDS:
                 continue
             setattr(entity, field, value)
+
+        # Phase 4.5：audit + history（commit 前写入）
+        actor_departments = ",".join(actor.departments) if actor.departments else None
+        await self._audit.record(
+            session=session,
+            entity_type="feature_definition",
+            entity_id=entity.id,
+            action="UPDATE",
+            actor=actor.userId,
+            actor_departments=actor_departments,
+            before=before,
+            after=_entityToDict(entity),
+        )
+        await self._history.snapshotFeature(
+            session=session,
+            feature=entity,
+            changed_by=actor.userId,
+        )
+
         try:
             await session.commit()
         except IntegrityError as exc:
@@ -161,6 +222,7 @@ class FeatureDefinitionService:
         """删除特征定义（级联删 feature_value，ondelete CASCADE）。
 
         先 ACL 检查（owner 不匹配 + 非 admin → 403）。
+        Phase 4.5：audit.record(DELETE, before)。不写 history（删了就删了，同 KPI 模式）。
         """
         entity = await self.getFeature(session, id)
         self._acl.assertCanModify(
@@ -169,7 +231,22 @@ class FeatureDefinitionService:
             entity_label="FEATURE",
             entity_code=str(entity.id),
         )
+        before = _entityToDict(entity)
         await session.delete(entity)
+
+        # Phase 4.5：audit（DELETE 不写 history，与 KpiCatalogService 同模式）
+        actor_departments = ",".join(actor.departments) if actor.departments else None
+        await self._audit.record(
+            session=session,
+            entity_type="feature_definition",
+            entity_id=id,
+            action="DELETE",
+            actor=actor.userId,
+            actor_departments=actor_departments,
+            before=before,
+            after=None,
+        )
+
         await session.commit()
 
     async def listValues(
@@ -201,3 +278,26 @@ class FeatureDefinitionService:
             raise ValidationError(
                 MSG_FEATURE_DATASOURCE_NOT_FOUND.format(id=datasource_id)
             )
+
+
+# ---------------------------------------------------------------------------
+# Dict 构造工具（JSON 序列化安全，用于 audit_log JSONB 列）
+# ---------------------------------------------------------------------------
+
+def _entityToDict(entity: FeatureDefinition) -> dict[str, Any]:
+    """FeatureDefinition 实体 → JSON 可序列化 dict（用于 audit_log JSONB 列）。
+
+    datetime → ISO 字符串；Decimal → float；其余原样保留。
+    PG JSONB 写入要求 Python json 编码成功；datetime/Decimal 原样放入会抛
+    `Object of type datetime is not JSON serializable`。
+    """
+    out: dict[str, Any] = {}
+    for col in entity.__table__.columns.keys():
+        v = getattr(entity, col)
+        if isinstance(v, datetime):
+            out[col] = v.isoformat()
+        elif isinstance(v, Decimal):
+            out[col] = float(v)
+        else:
+            out[col] = v
+    return out

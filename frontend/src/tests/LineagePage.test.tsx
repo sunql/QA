@@ -1,4 +1,4 @@
-/** LineagePage 集成测试（Phase 2.3 RED）。
+/** LineagePage 集成测试（Phase 2.3 RED + Step 5 对象级下拉）。
  *
  * 覆盖：
  * - mount 时拉取 edges
@@ -6,6 +6,9 @@
  * - LayerFilter 取消勾选某层 → LineageGraph 收到的 edges 不含该层
  * - 拉取失败显示错误 toast
  * - 空 edges 时显示空状态
+ * - ObjectFilter 候选来自层过滤后的 edges（按层排序）
+ * - 选中对象 → LineageGraph 只渲染触及该对象的边
+ * - 取消某层 → 该层对象从候选移除，且对象选择被裁剪
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
@@ -24,6 +27,28 @@ vi.mock("echarts-for-react", () => ({
     return (
       <div data-testid="echarts-mock">{props.option ? "rendered" : "empty"}</div>
     );
+  },
+}));
+
+// ObjectFilter 只 mock 组件外壳；纯函数（collectObjectCandidates / filterEdgesByObjects）
+// 用真实实现，LineagePage 的接线逻辑才能被真实执行。
+const objectFilterProps = vi.hoisted(() => ({
+  current: null as {
+    candidates: Array<{ layer: string; object: string; count: number }>;
+    value: Set<string>;
+    onChange: (next: Set<string>) => void;
+  } | null,
+}));
+
+vi.mock("../components/lineage/ObjectFilter", () => ({
+  __esModule: true,
+  default: (props: {
+    candidates: Array<{ layer: string; object: string; count: number }>;
+    value: Set<string>;
+    onChange: (next: Set<string>) => void;
+  }) => {
+    objectFilterProps.current = props;
+    return <div data-testid="object-filter-mock" />;
   },
 }));
 
@@ -57,6 +82,7 @@ describe("LineagePage", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     echartsOptionCapture.current = null;
+    objectFilterProps.current = null;
   });
 
   it("fetches edges on mount and renders graph", async () => {
@@ -112,6 +138,89 @@ describe("LineagePage", () => {
       const names = nodes.map((n) => n.name).sort();
       expect(names).toEqual(["DWD_X", "ODS_X"]);
       expect(opt?.series?.[0]?.links?.length).toBe(1);
+    });
+  });
+
+  it("passes object candidates derived from layer-filtered edges", async () => {
+    vi.mocked(lineageApi.listEdges).mockResolvedValue([
+      edge({
+        id: 1,
+        sourceLayer: "SOURCE_SYSTEM",
+        targetLayer: "SOURCE_SYSTEM",
+        sourceObject: "PORDER",
+        targetObject: "BPSUPPLIER",
+      }),
+      edge({
+        id: 2,
+        sourceLayer: "ODS",
+        targetLayer: "DWD",
+        sourceObject: "ODS_PORDER",
+        targetObject: "DWD_X",
+      }),
+    ]);
+    render(<LineagePage />);
+    await waitFor(() => {
+      expect(objectFilterProps.current).not.toBeNull();
+    });
+    // 候选按层名排序：DWD < ODS < SOURCE_SYSTEM
+    const layers = objectFilterProps.current!.candidates.map((c) => c.layer);
+    expect(layers).toEqual(["DWD", "ODS", "SOURCE_SYSTEM", "SOURCE_SYSTEM"]);
+    const objects = objectFilterProps.current!.candidates.map((c) => c.object).sort();
+    expect(objects).toEqual(["BPSUPPLIER", "DWD_X", "ODS_PORDER", "PORDER"]);
+  });
+
+  it("narrows graph to edges touching the selected object", async () => {
+    vi.mocked(lineageApi.listEdges).mockResolvedValue([
+      edge({ id: 1, sourceObject: "PORDER", targetObject: "BPSUPPLIER" }),
+      edge({ id: 2, sourceObject: "BPSUPPLIER", targetObject: "ITMMASTER" }),
+    ]);
+    render(<LineagePage />);
+    await waitFor(() => {
+      expect(screen.getByTestId("echarts-mock").textContent).toBe("rendered");
+    });
+    // 模拟用户在 ObjectFilter 选中 PORDER（纯函数被真实执行）
+    objectFilterProps.current!.onChange(new Set(["SOURCE_SYSTEM/PORDER"]));
+    await waitFor(() => {
+      const opt = echartsOptionCapture.current as {
+        series?: Array<{ nodes?: Array<{ name: string }> }>;
+      } | null;
+      const names = (opt?.series?.[0]?.nodes ?? []).map((n) => n.name).sort();
+      // 只剩 PORDER → BPSUPPLIER 一条边；ITMMASTER 不再出现
+      expect(names).toEqual(["BPSUPPLIER", "PORDER"]);
+    });
+  });
+
+  it("prunes selected objects when their layer is deselected", async () => {
+    vi.mocked(lineageApi.listEdges).mockResolvedValue([
+      edge({
+        id: 1,
+        sourceLayer: "SOURCE_SYSTEM",
+        targetLayer: "SOURCE_SYSTEM",
+        sourceObject: "PORDER",
+        targetObject: "BPSUPPLIER",
+      }),
+      edge({
+        id: 2,
+        sourceLayer: "ODS",
+        targetLayer: "DWD",
+        sourceObject: "ODS_PORDER",
+        targetObject: "DWD_X",
+      }),
+    ]);
+    render(<LineagePage />);
+    await waitFor(() => {
+      expect(objectFilterProps.current).not.toBeNull();
+    });
+    // 先选中 SOURCE_SYSTEM 层的 PORDER
+    objectFilterProps.current!.onChange(new Set(["SOURCE_SYSTEM/PORDER"]));
+    // 再取消 SOURCE_SYSTEM 层
+    const checkbox = screen.getByLabelText("SOURCE_SYSTEM") as HTMLInputElement;
+    fireEvent.click(checkbox);
+    await waitFor(() => {
+      const layers = objectFilterProps.current!.candidates.map((c) => c.layer);
+      expect(layers).toEqual(["DWD", "ODS"]);
+      // effectiveSelected 裁剪：PORDER 已不在候选 → value 为空
+      expect(objectFilterProps.current!.value.size).toBe(0);
     });
   });
 });

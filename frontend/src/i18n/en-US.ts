@@ -249,11 +249,14 @@ export const enUS = {
     },
     filter: {
       layers: "Layer filter",
-      summary: "{selected}/{total} layers selected, showing {edges} of {allEdges} edges",
+      objects: "Object filter",
+      objectPlaceholder: "Filter by object (e.g., PORDER)",
+      summary:
+        "{selected}/{total} layers, {objects} objects selected, showing {edges} of {allEdges} edges",
     },
     empty: {
       noData: "No lineage data yet. Create some via Ontology management or /api/v1/lineage/edges.",
-      filteredOut: "No edges match the current layer filter. Try adjusting the selection.",
+      filteredOut: "No edges match the current filter. Try adjusting the layer or object selection.",
     },
   },
 

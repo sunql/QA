@@ -16,7 +16,8 @@
 - 边支持 active（实线）/ inactive（虚线）区分
 - 字段级血缘（sourceField 非 NULL）渲染为 `object.field` 节点
 - 边携带 transformationRule 作为 label
-- 真实数据：62 条边 → 72 个节点可视
+- **对象级筛选（Step 5）**：层过滤后按具体对象多选聚焦；候选带相连边数 `(count)`；同名对象跨层以复合键 `layer/object` 消歧（如 `SOURCE_SYSTEM/PORDER` vs `ODS/ODS_PORDER`）
+- 真实数据：93 条边 → 37 个对象候选可视（21 SOURCE_SYSTEM + 10 ODS + 6 KPI）
 
 ## 2. 设计评审
 
@@ -28,8 +29,9 @@
 | 节点 ID 策略 | 字段级：`object.field`；表级：`object` | 同对象不同字段各算独立节点（语义清晰：1 个 BPARTNER.FCY_0 节点 ≠ BPARTNER.BPRNUM 节点） |
 | 层颜色 | SOURCE_SYSTEM=蓝 / ODS=青 / DWD=绿 / DWS=紫 / ADS=橙 / KPI=红 / AI=品红 | 与 7 层标准颜色对应；色盲友好（亮度递增） |
 | 布局算法 | force（默认 ECharts） | 无需指定坐标；节点自动避让边；可拖拽 |
-| 过滤粒度 | 仅按层（不下钻到具体对象） | 对象级别过滤在 62 边上粒度过细；本 Phase 仅覆盖层过滤 |
+| 过滤粒度 | 层过滤 + 对象级多选（Step 5 补充） | 层过滤缩小到层后，再按具体对象（复合键 `layer/object`）聚焦；候选派生自层过滤后的 edges，随层筛选联动 |
 | 空数据处理 | LineageGraph 返 null；LineagePage 显式 Empty 占位 | 与 Ant Design Empty 组件对齐 |
+| 级联裁剪（Step 5） | `effectiveSelected` 纯派生，不做写回 | 取消某层 → 该层对象选择自动失效；重新勾选层 → 恢复该层先前选中的对象（粘性选择，纯派生实现，无 useEffect） |
 | 节点点击 | 不做 Drawer（留 Phase 5） | 字段级边可显示 tooltip；本 Phase 暂不做节点详情 |
 
 **多视角审视**：
@@ -59,7 +61,9 @@
 |---|---|
 | `frontend/src/components/lineage/LineageGraph.tsx` | 新文件：`edgesToGraphOption` 纯函数 + `LineageGraph` 组件 + `LAYER_COLORS` 7 层颜色常量 + `GraphNode/GraphLink/GraphOption` 类型 |
 | `frontend/src/components/lineage/LayerFilter.tsx` | 新文件：受控多选 Checkbox.Group + Tag 颜色预览 + `ALL_LAYERS` 7 层常量 + `layerColor` 辅助 |
-| `frontend/src/pages/LineagePage.tsx` | 新文件：useEffect 拉 edges + LayerFilter 受控 + useMemo 过滤 + LineageGraph 渲染 + Empty/Spin/Alert 状态 |
+| `frontend/src/pages/LineagePage.tsx` | 新文件：useEffect 拉 edges + LayerFilter 受控 + useMemo 过滤 + LineageGraph 渲染 + Empty/Spin/Alert 状态；Step 5 加 `selectedObjects` 状态 + 对象候选/级联裁剪派生 + ObjectFilter 渲染 |
+| `frontend/src/components/lineage/lineageFilter.ts` | Step 5 新文件：纯函数 `ObjectCandidate` / `objectKey` / `collectObjectCandidates`（复合键去重 + 边数统计 + 层名排序 + 自环只计一次）/ `filterEdgesByObjects` |
+| `frontend/src/components/lineage/ObjectFilter.tsx` | Step 5 新文件：antd Select 多选 + 按层 OptGroup 分组 + 搜索 + 可清空 + 无候选禁用 + `aria-label` |
 | `frontend/src/App.tsx` | 注册 `/lineage` 路由 |
 | `frontend/src/components/common/AppLayout.tsx` | 左侧导航加 `{ key: "/lineage", labelKey: "appLayout.menu.lineage" }` |
 | `frontend/src/i18n/zh-CN.ts` | 加 `appLayout.menu.lineage = "数据血缘"` + `lineage.page.title / lineage.filter / lineage.empty` 命名空间 |
@@ -87,22 +91,26 @@ function nodeId(object, field) {
 
 ## 6. 测试
 
-**vitest 单元 + 集成测试**（21 测试 PASS）：
+**vitest 单元 + 集成测试**（37 测试 PASS，含 Step 5 新增 16）：
 - `LineageGraph.test.tsx`：11 测试
   - `edgesToGraphOption` 纯函数 8 例：空 / 单边 / 多字段 dedup / 表级 dedup / 层颜色 / active 虚实线 / transformationRule label
   - `LineageGraph` 组件 3 例：渲染 option / 空数据返 null / height 自定义
 - `LayerFilter.test.tsx`：6 测试
   - 渲染 7 层 / 取消勾选 / 勾选 / ALL_LAYERS 常量顺序 / layerColor 不同色 / hex 格式
-- `LineagePage.test.tsx`：4 测试
+- `LineagePage.test.tsx`：7 测试（Step 5 新增 3）
   - mount 拉 edges + 渲染 graph / 失败 toast / 空数据 Empty / LayerFilter 过滤生效
+  - Step 5：对象候选来自层过滤后的 edges（按层名排序）/ 选中对象收窄到触及边 / 取消层 → 该层对象选择被裁剪
+- `ObjectFilter.test.tsx`（Step 5 新文件）：13 测试
+  - 纯函数 10 例：objectKey 复合键格式 / 候选去重 + 计数 / 确定性排序 / 空输入 / 空选全保留 / source+target 匹配 / 复合键匹配 / 过期键丢弃 / 自环只计一次
+  - 组件 3 例：渲染多选 / 无候选禁用 / 选中回调复合键 / 清空回调空集
 
 **Playwright E2E**（2 测试 PASS）：
 - `lineage.spec.ts`：
   - `打开 /lineage 页面渲染 graph 节点` — 验证 `<canvas>` 可见
-  - `LayerFilter 取消勾选 SOURCE_SYSTEM 后过滤为 0 条边` — 验证 Empty 占位
+  - `LayerFilter 取消勾选 SOURCE_SYSTEM 后过滤为 0 条边` — 验证 Empty 占位（filteredOut 文案已含「对象筛选」，正则前缀兼容）
 
 **全量验证**：
-- `npx vitest run`：291/291 PASS（含 21 新增）
+- `npx vitest run`：307/307 PASS（含 Step 5 新增 16）
 - `npx tsc --noEmit`：clean
 - `npx playwright test e2e/lineage.spec.ts`：2/2 PASS
 - `npx playwright test`（全量）：11 PASS / 3 pre-existing failure（chat/local-import/ontology strict-mode placeholder，与本 Phase 无关）
@@ -175,6 +183,25 @@ Top target objects:
 ### 9.3 数据契约 Roundtrip 一致性
 
 后端 `LineageEdgeRead` JSON → 前端 `LineageEdgeRead` interface → `edgesToGraphOption` → ECharts `series[0].nodes/links`，全程字段 1:1 对齐。`sourceField: null` 自动渲染为表级节点（symbolSize=40），非 NULL 渲染为字段级（symbolSize=28）。
+
+### 9.4 Step 5 对象级筛选真实数据验证（2026-08-30）
+
+**验证载体**：真实 `qa_metadata` 库（localhost:5433）93 条活跃 `data_lineage` 边 → 导出 TSV → 用 `vite-node` 执行真实 `frontend/src/components/lineage/lineageFilter.ts` 纯函数。
+
+**结果**：
+```
+edges loaded: 93
+total candidates: 37
+composite keys unique: true                      # 37 个复合键无碰撞
+SOURCE_SYSTEM/PORDER count: 14                   # 同名对象跨层消歧
+ODS/ODS_PORDER count: 1
+filtered by KPI/KPI_KPI_TOTAL_QTY: 1 edges       # 跨层收窄有效
+edges touching any ODS object: 10                # 与 Step 4 的 10 条 SOURCE→ODS 边一致
+cross-layer edges: 18                            # 10 SOURCE→ODS + 8 SOURCE→KPI
+candidates per layer: KPI=6, ODS=10, SOURCE_SYSTEM=21
+```
+
+**验证结论**：对象候选覆盖 3 层 37 个对象，复合键消歧正确（`SOURCE_SYSTEM/PORDER` 与 `ODS/ODS_PORDER` 独立候选）；按真实对象过滤能精确收窄到触及边；层间边（SOURCE→ODS/KPI）在对象过滤下完整保留。
 
 ## 10. 关联
 

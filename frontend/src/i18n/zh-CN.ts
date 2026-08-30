@@ -256,11 +256,14 @@ export const zhCN = {
     },
     filter: {
       layers: "层级筛选",
-      summary: "已选 {selected}/{total} 层，当前显示 {edges} 条边（共 {allEdges} 条）",
+      objects: "对象筛选",
+      objectPlaceholder: "按对象筛选（如 PORDER）",
+      summary:
+        "已选 {selected}/{total} 层、{objects} 个对象，当前显示 {edges} 条边（共 {allEdges} 条）",
     },
     empty: {
       noData: "暂无血缘数据，请先在本体管理或调用 /api/v1/lineage/edges 创建",
-      filteredOut: "当前筛选条件下无血缘边，请调整层级筛选",
+      filteredOut: "当前筛选条件下无血缘边，请调整层级或对象筛选",
     },
   },
 

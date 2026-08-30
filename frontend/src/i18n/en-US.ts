@@ -38,6 +38,7 @@ export const enUS = {
       ontology: "Ontology",
       datasource: "Data Sources",
       dataQuality: "Data Quality",
+      lineage: "Data Lineage",
       usage: "Usage Dashboard",
       status: "Service Status",
     },
@@ -240,6 +241,20 @@ export const enUS = {
     createSuccess: "Rule created",
     updateSuccess: "Rule updated",
     disableSuccess: "Rule disabled",
+  },
+
+  lineage: {
+    page: {
+      title: "Data Lineage",
+    },
+    filter: {
+      layers: "Layer filter",
+      summary: "{selected}/{total} layers selected, showing {edges} of {allEdges} edges",
+    },
+    empty: {
+      noData: "No lineage data yet. Create some via Ontology management or /api/v1/lineage/edges.",
+      filteredOut: "No edges match the current layer filter. Try adjusting the selection.",
+    },
   },
 
   forms: {

@@ -14,6 +14,8 @@ const NAV_KEYS = [
   { key: "/chat", labelKey: "appLayout.menu.chat" },
   { key: "/ontology", labelKey: "appLayout.menu.ontology" },
   { key: "/datasource", labelKey: "appLayout.menu.datasource" },
+  { key: "/data-quality", labelKey: "appLayout.menu.dataQuality" },
+  { key: "/lineage", labelKey: "appLayout.menu.lineage" },
   { key: "/usage", labelKey: "appLayout.menu.usage" },
   { key: "/status", labelKey: "appLayout.menu.status" },
   { key: "/graph", labelKey: "appLayout.menu.graph" },

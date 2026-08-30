@@ -68,15 +68,35 @@ export interface MockMetric {
   updatedTime: string | null;
 }
 
-type EntityKind = "datasource" | "class" | "property" | "metric";
+type EntityKind = "datasource" | "class" | "property" | "metric" | "lineageEdge";
 
 // 后端暴露给 spec 断言/构造的内存存储（每个 page 独立实例）
+export interface MockLineageEdge {
+  id: number;
+  sourceLayer: string;
+  sourceSystem: string;
+  sourceObject: string;
+  sourceField: string | null;
+  targetLayer: string;
+  targetSystem: string;
+  targetObject: string;
+  targetField: string | null;
+  transformationRule: string | null;
+  refreshFrequency: string;
+  owner: string | null;
+  description: string | null;
+  isActive: boolean;
+  createdTime: string | null;
+  updatedTime: string | null;
+}
+
 export interface MockBackend {
   page: Page;
   datasources: MockDatasource[];
   classes: MockClass[];
   properties: MockProperty[];
   metrics: MockMetric[];
+  lineageEdges: MockLineageEdge[];
   nextId: (kind: EntityKind) => number;
 }
 
@@ -162,12 +182,52 @@ const SEED_METRICS: MockMetric[] = [
   },
 ];
 
+const SEED_LINEAGE_EDGES: MockLineageEdge[] = [
+  {
+    id: 1,
+    sourceLayer: "SOURCE_SYSTEM",
+    sourceSystem: "ERP",
+    sourceObject: "PORDER",
+    sourceField: "BPSNUM",
+    targetLayer: "SOURCE_SYSTEM",
+    targetSystem: "ERP",
+    targetObject: "BPSUPPLIER",
+    targetField: "BPSNUM",
+    transformationRule: "JOIN[business]",
+    refreshFrequency: "DAILY",
+    owner: null,
+    description: null,
+    isActive: true,
+    createdTime: NOW,
+    updatedTime: NOW,
+  },
+  {
+    id: 2,
+    sourceLayer: "SOURCE_SYSTEM",
+    sourceSystem: "ERP",
+    sourceObject: "PORDER",
+    sourceField: "ORDER_QTY",
+    targetLayer: "KPI",
+    targetSystem: "KPI",
+    targetObject: "KPI_TOTAL_QTY",
+    targetField: "TOTAL_QTY",
+    transformationRule: "SUM(t.ORDER_QTY)",
+    refreshFrequency: "DAILY",
+    owner: null,
+    description: null,
+    isActive: true,
+    createdTime: NOW,
+    updatedTime: NOW,
+  },
+];
+
 function seed() {
   return {
     datasources: SEED_DATASOURCES.map((d) => ({ ...d })),
     classes: SEED_CLASSES.map((c) => ({ ...c })),
     properties: SEED_PROPERTIES.map((p) => ({ ...p })),
     metrics: SEED_METRICS.map((m) => ({ ...m })),
+    lineageEdges: SEED_LINEAGE_EDGES.map((e) => ({ ...e })),
   };
 }
 
@@ -526,6 +586,52 @@ async function handleModelRoutes(route: Route, ctx: RouteCtx): Promise<void> {
   return respondJson(route, 404, fail(`模拟后端未实现 ${ctx.method} ${ctx.path}`));
 }
 
+async function handleLineageRoutes(route: Route, ctx: RouteCtx): Promise<void> {
+  const { method, path } = ctx;
+  const idMatch = path.match(/^\/lineage\/edges\/(\d+)$/);
+  if (idMatch && method === "GET") {
+    const id = Number(idMatch[1]);
+    const target = ctx.backend.lineageEdges.find((e) => e.id === id);
+    if (!target) return respondJson(route, 404, fail("血缘边不存在"));
+    return respondJson(route, 200, ok(target));
+  }
+  if (path === "/lineage/edges" && method === "GET") {
+    let edges = ctx.backend.lineageEdges;
+    const activeOnly = ctx.query.get("activeOnly") === "true";
+    if (activeOnly) edges = edges.filter((e) => e.isActive);
+    const sourceLayer = ctx.query.get("sourceLayer");
+    const targetLayer = ctx.query.get("targetLayer");
+    if (sourceLayer) edges = edges.filter((e) => e.sourceLayer === sourceLayer);
+    if (targetLayer) edges = edges.filter((e) => e.targetLayer === targetLayer);
+    return respondJson(route, 200, ok(edges));
+  }
+  if (path === "/lineage/edges" && method === "POST") {
+    const body = ctx.body;
+    const id = ctx.backend.nextId("lineageEdge");
+    const edge: MockLineageEdge = {
+      id,
+      sourceLayer: String(body.sourceLayer ?? "SOURCE_SYSTEM"),
+      sourceSystem: String(body.sourceSystem ?? ""),
+      sourceObject: String(body.sourceObject ?? ""),
+      sourceField: body.sourceField == null ? null : String(body.sourceField),
+      targetLayer: String(body.targetLayer ?? "SOURCE_SYSTEM"),
+      targetSystem: String(body.targetSystem ?? ""),
+      targetObject: String(body.targetObject ?? ""),
+      targetField: body.targetField == null ? null : String(body.targetField),
+      transformationRule: body.transformationRule == null ? null : String(body.transformationRule),
+      refreshFrequency: String(body.refreshFrequency ?? "DAILY"),
+      owner: body.owner == null ? null : String(body.owner),
+      description: body.description == null ? null : String(body.description),
+      isActive: true,
+      createdTime: NOW,
+      updatedTime: NOW,
+    };
+    ctx.backend.lineageEdges.push(edge);
+    return respondJson(route, 201, ok(edge));
+  }
+  return respondJson(route, 404, fail(`模拟后端未实现 ${method} ${path}`));
+}
+
 async function handleChatRoutes(route: Route, ctx: RouteCtx): Promise<void> {
   const question = String(ctx.body.question ?? "");
   if (ctx.path === "/chat/stream" && ctx.method === "POST") {
@@ -582,6 +688,7 @@ async function dispatch(route: Route, backend: MockBackend): Promise<void> {
   if (ctx.path.startsWith("/ontology/properties")) return handlePropertyRoutes(route, ctx);
   if (ctx.path.startsWith("/ontology/metrics")) return handleMetricRoutes(route, ctx);
   if (ctx.path.startsWith("/models")) return handleModelRoutes(route, ctx);
+  if (ctx.path.startsWith("/lineage")) return handleLineageRoutes(route, ctx);
   if (ctx.path.startsWith("/chat")) return handleChatRoutes(route, ctx);
   return respondJson(route, 404, fail(`模拟后端未实现 ${ctx.method} ${ctx.path}`));
 }
@@ -593,6 +700,7 @@ export async function mockApi(page: Page): Promise<MockBackend> {
     class: 100,
     property: 100,
     metric: 100,
+    lineageEdge: 100,
   };
   const backend: MockBackend = {
     page,

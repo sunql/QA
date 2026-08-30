@@ -44,6 +44,7 @@ export const zhCN = {
       ontology: "本体管理",
       datasource: "数据源",
       dataQuality: "数据质量",
+      lineage: "数据血缘",
       usage: "用量看板",
       status: "服务状态",
       graph: "Neo4j 图库",
@@ -247,6 +248,20 @@ export const zhCN = {
     createSuccess: "规则已创建",
     updateSuccess: "规则已更新",
     disableSuccess: "规则已停用",
+  },
+
+  lineage: {
+    page: {
+      title: "数据血缘",
+    },
+    filter: {
+      layers: "层级筛选",
+      summary: "已选 {selected}/{total} 层，当前显示 {edges} 条边（共 {allEdges} 条）",
+    },
+    empty: {
+      noData: "暂无血缘数据，请先在本体管理或调用 /api/v1/lineage/edges 创建",
+      filteredOut: "当前筛选条件下无血缘边，请调整层级筛选",
+    },
   },
 
   forms: {

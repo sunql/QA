@@ -133,6 +133,18 @@ MSG_LINEAGE_SELF_LOOP = (
 
 
 # =============================================================================
+# 跨系统编码映射（entity_mapping，Phase 3.1）
+# =============================================================================
+
+MSG_ENTITY_MAPPING_NOT_FOUND = "编码映射 id={id} 不存在"
+MSG_ENTITY_MAPPING_EXISTS = (
+    "已存在同实体类型 + 企业代理键 + 源系统的映射: "
+    "{entityType} enterprise_key={enterpriseKey} source_system={sourceSystem}"
+)
+MSG_ENTITY_MAPPING_DATE_RANGE = "生效日期不得晚于失效日期: {effectiveDate} > {expiryDate}"
+
+
+# =============================================================================
 # 模型路由
 # =============================================================================
 

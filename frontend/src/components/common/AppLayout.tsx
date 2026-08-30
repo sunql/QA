@@ -16,6 +16,7 @@ const NAV_KEYS = [
   { key: "/datasource", labelKey: "appLayout.menu.datasource" },
   { key: "/data-quality", labelKey: "appLayout.menu.dataQuality" },
   { key: "/lineage", labelKey: "appLayout.menu.lineage" },
+  { key: "/entity-mapping", labelKey: "appLayout.menu.entityMapping" },
   { key: "/usage", labelKey: "appLayout.menu.usage" },
   { key: "/status", labelKey: "appLayout.menu.status" },
   { key: "/graph", labelKey: "appLayout.menu.graph" },

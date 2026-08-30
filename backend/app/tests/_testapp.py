@@ -22,6 +22,7 @@ from app.api.v1 import (
     data_quality,
     datasource,
     embedding_provider,
+    entity_mapping,
     local_import,
     model_config,
     ontology,
@@ -100,6 +101,11 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     testApp.include_router(
         data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"]
+    )
+    testApp.include_router(
+        entity_mapping.router,
+        prefix="/api/v1/entity-mappings",
+        tags=["entity-mapping"],
     )
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"])
 

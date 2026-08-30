@@ -9,7 +9,7 @@ JSON 契约的 camelCase 由 Pydantic schema 的 alias_generator 负责。
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -18,6 +18,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -33,11 +34,14 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.domain.enums import (
     DataSourceType,
+    EntityType,
     LineageLayer,
+    MatchRule,
     RefreshFrequency,
     RuleType,
     ScoreType,
     Severity,
+    SourceSystem,
 )
 
 
@@ -693,3 +697,62 @@ class DataLineage(Base, TimestampMixin):
         if self.target_field:
             tgt += f".{self.target_field}"
         return f"<DataLineage id={self.id} {src} -> {tgt}>"
+
+
+# =============================================================================
+# Phase 3.1: Entity Mapping（跨系统编码映射）
+# =============================================================================
+
+
+class EntityMapping(Base, TimestampMixin):
+    """跨系统编码映射表。
+
+    一行 = 一个企业实体（SUPPLIER/MATERIAL/PO/GR/IQC/NCR）在某个源系统
+    （ERP/SRM/QMS/MDM/PLM）中的原始编码到企业统一代理键 / 统一编码的映射。
+
+    企业侧标识：
+      enterprise_key   — 企业统一代理键（BIGINT，MDM 主数据）
+      enterprise_code  — 企业统一编码（可读，如 SUP000001）
+    源系统侧标识：
+      source_key       — 源系统原始 key（如 ERP 的 V000001）
+      source_code      — 源系统原始编码
+      match_rule       — 匹配规则（MDM_MASTER/BUSINESS_KEY/MAPPING）
+
+    effective_date / expiry_date 描述映射有效期；expiry_date 为空表示长期有效。
+    同一 (entity_type, enterprise_key, source_system) 只允许一条映射：
+    由唯一约束 uq_entity_mapping_entity_source 保护，service 层抛 ValidationError。
+    """
+
+    __tablename__ = "entity_mapping"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    entity_type: Mapped[EntityType] = mapped_column(String(20), nullable=False)
+    enterprise_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    enterprise_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_system: Mapped[SourceSystem] = mapped_column(String(20), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    match_rule: Mapped[MatchRule] = mapped_column(
+        String(20), nullable=False, default=MatchRule.MAPPING
+    )
+    effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    __table_args__ = (
+        # 同一实体 + 同一源系统只允许一条映射；三列均非空，DB 约束即完整兜底。
+        UniqueConstraint(
+            "entity_type",
+            "enterprise_key",
+            "source_system",
+            name="uq_entity_mapping_entity_source",
+        ),
+        Index("ix_entity_mapping_enterprise_key", "enterprise_key"),
+        Index("ix_entity_mapping_source", "entity_type", "source_system", "source_key"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<EntityMapping id={self.id} "
+            f"{self.entity_type.value} key={self.enterprise_key} "
+            f"via {self.source_system.value}/{self.source_key}>"
+        )

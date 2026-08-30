@@ -18,11 +18,14 @@ from pydantic.alias_generators import to_camel
 from app.domain.enums import (
     ChartType,
     DataSourceType,
+    EntityType,
     LineageLayer,
+    MatchRule,
     RefreshFrequency,
     RuleType,
     ScoreType,
     Severity,
+    SourceSystem,
 )
 from app.domain.exceptions import ConfigError
 from app.domain.error_messages import (
@@ -111,6 +114,17 @@ from app.domain.error_messages import (
     MSG_SCHEMA_DQ_COMPUTE_SAVED_SCORES,
     MSG_SCHEMA_DQ_COMPUTE_DURATION_MS,
     MSG_SCHEMA_DQ_COMPUTE_SCORES,
+    MSG_SCHEMA_ENTITY_MAPPING_CREATED_TIME,
+    MSG_SCHEMA_ENTITY_MAPPING_EFFECTIVE_DATE,
+    MSG_SCHEMA_ENTITY_MAPPING_ENTERPRISE_CODE,
+    MSG_SCHEMA_ENTITY_MAPPING_ENTERPRISE_KEY,
+    MSG_SCHEMA_ENTITY_MAPPING_ENTITY_TYPE,
+    MSG_SCHEMA_ENTITY_MAPPING_EXPIRY_DATE,
+    MSG_SCHEMA_ENTITY_MAPPING_MATCH_RULE,
+    MSG_SCHEMA_ENTITY_MAPPING_SOURCE_CODE,
+    MSG_SCHEMA_ENTITY_MAPPING_SOURCE_KEY,
+    MSG_SCHEMA_ENTITY_MAPPING_SOURCE_SYSTEM,
+    MSG_SCHEMA_ENTITY_MAPPING_UPDATED_TIME,
     MSG_SCHEMA_DATASOURCE_ORACLE_VERSION_FULL,
     MSG_SCHEMA_DATASOURCE_PASSWORD_KEEP,
     MSG_SCHEMA_DATASOURCE_PASSWORD_PLAIN,
@@ -1299,3 +1313,79 @@ class LineageEdgeRead(CamelModel):
     is_active: bool
     created_time: datetime | None = Field(default=None, description=MSG_SCHEMA_LINEAGE_CREATED_TIME)
     updated_time: datetime | None = Field(default=None, description=MSG_SCHEMA_LINEAGE_UPDATED_TIME)
+
+
+# ===== 跨系统编码映射（Phase 3.1）=====
+
+
+class EntityMappingCreate(CamelModel):
+    """创建跨系统编码映射的请求体。
+
+    enterprise_key / enterprise_code 为企业侧统一标识；source_key / source_code
+    为源系统侧原始标识。同一 (entity_type, enterprise_key, source_system) 不允许重复。
+    """
+
+    entity_type: EntityType = Field(..., description=MSG_SCHEMA_ENTITY_MAPPING_ENTITY_TYPE)
+    enterprise_key: int = Field(
+        ...,
+        gt=0,
+        le=2**63 - 1,
+        description=MSG_SCHEMA_ENTITY_MAPPING_ENTERPRISE_KEY,
+    )
+    enterprise_code: str = Field(
+        ..., min_length=1, max_length=100, description=MSG_SCHEMA_ENTITY_MAPPING_ENTERPRISE_CODE
+    )
+    source_system: SourceSystem = Field(
+        ..., description=MSG_SCHEMA_ENTITY_MAPPING_SOURCE_SYSTEM
+    )
+    source_key: str = Field(
+        ..., min_length=1, max_length=100, description=MSG_SCHEMA_ENTITY_MAPPING_SOURCE_KEY
+    )
+    source_code: str = Field(
+        ..., min_length=1, max_length=100, description=MSG_SCHEMA_ENTITY_MAPPING_SOURCE_CODE
+    )
+    match_rule: MatchRule = Field(
+        default=MatchRule.MAPPING, description=MSG_SCHEMA_ENTITY_MAPPING_MATCH_RULE
+    )
+    effective_date: date | None = Field(
+        default=None, description=MSG_SCHEMA_ENTITY_MAPPING_EFFECTIVE_DATE
+    )
+    expiry_date: date | None = Field(
+        default=None, description=MSG_SCHEMA_ENTITY_MAPPING_EXPIRY_DATE
+    )
+
+
+class EntityMappingUpdate(CamelModel):
+    """更新编码映射的请求体。所有字段可选，None 视为不动。
+
+    非空列（enterprise_code / source_key / source_code / match_rule）不接受
+    空串（min_length=1）且不可置 None；日期列允许显式 null 以清除。
+    """
+
+    enterprise_code: str | None = Field(default=None, min_length=1, max_length=100)
+    source_key: str | None = Field(default=None, min_length=1, max_length=100)
+    source_code: str | None = Field(default=None, min_length=1, max_length=100)
+    match_rule: MatchRule | None = Field(default=None)
+    effective_date: date | None = Field(default=None)
+    expiry_date: date | None = Field(default=None)
+
+
+class EntityMappingRead(CamelModel):
+    """编码映射响应。"""
+
+    id: int
+    entity_type: EntityType
+    enterprise_key: int
+    enterprise_code: str
+    source_system: SourceSystem
+    source_key: str
+    source_code: str
+    match_rule: MatchRule
+    effective_date: date | None = None
+    expiry_date: date | None = None
+    created_time: datetime | None = Field(
+        default=None, description=MSG_SCHEMA_ENTITY_MAPPING_CREATED_TIME
+    )
+    updated_time: datetime | None = Field(
+        default=None, description=MSG_SCHEMA_ENTITY_MAPPING_UPDATED_TIME
+    )

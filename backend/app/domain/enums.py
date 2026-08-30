@@ -147,3 +147,43 @@ class RefreshFrequency(str, Enum):
     HOURLY = "HOURLY"
     DAILY = "DAILY"
     WEEKLY = "WEEKLY"
+
+
+class EntityType(str, Enum):
+    """跨系统实体类型（Phase 3.1）。
+
+    对应采购域业务对象目录：供应商 / 物料 / 采购订单 / 收货 / 来料检验 / 不合格处理。
+    """
+
+    SUPPLIER = "SUPPLIER"
+    MATERIAL = "MATERIAL"
+    PO = "PO"
+    GR = "GR"
+    IQC = "IQC"
+    NCR = "NCR"
+
+
+class SourceSystem(str, Enum):
+    """源业务系统（Phase 3.1）。
+
+    覆盖采购域涉及的系统：ERP（Sage X3）/ SRM / QMS / MDM / PLM。
+    """
+
+    ERP = "ERP"
+    SRM = "SRM"
+    QMS = "QMS"
+    MDM = "MDM"
+    PLM = "PLM"
+
+
+class MatchRule(str, Enum):
+    """编码匹配规则（Phase 3.1）。
+
+    - MDM_MASTER：以 MDM 主数据记录为准（source_key 即 MDM 主键）
+    - BUSINESS_KEY：按业务键规则匹配（如 PO 号 + 行号）
+    - MAPPING：人工/规则映射表
+    """
+
+    MDM_MASTER = "MDM_MASTER"
+    BUSINESS_KEY = "BUSINESS_KEY"
+    MAPPING = "MAPPING"

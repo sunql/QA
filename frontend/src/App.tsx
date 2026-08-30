@@ -7,6 +7,7 @@ import OntologyPage from "./pages/OntologyPage";
 import DatasourcePage from "./pages/DatasourcePage";
 import DataQualityPage from "./pages/DataQualityPage";
 import LineagePage from "./pages/LineagePage";
+import EntityMappingPage from "./pages/EntityMappingPage";
 import UsagePage from "./pages/UsagePage";
 import ServiceStatusPage from "./pages/ServiceStatusPage";
 import Neo4jGraphPage from "./pages/Neo4jGraphPage";
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="datasource" element={<DatasourcePage />} />
         <Route path="data-quality" element={<DataQualityPage />} />
         <Route path="lineage" element={<LineagePage />} />
+        <Route path="entity-mapping" element={<EntityMappingPage />} />
         <Route path="usage" element={<UsagePage />} />
         <Route path="status" element={<ServiceStatusPage />} />
         <Route path="graph" element={<Neo4jGraphPage />} />

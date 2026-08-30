@@ -122,6 +122,7 @@ def createApp() -> FastAPI:
         data_quality,
         datasource,
         embedding_provider,
+        entity_mapping,
         graph,
         local_import,
         model_config,
@@ -155,6 +156,11 @@ def createApp() -> FastAPI:
     )
     app.include_router(
         data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"]
+    )
+    app.include_router(
+        entity_mapping.router,
+        prefix="/api/v1/entity-mappings",
+        tags=["entity-mapping"],
     )
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])

@@ -19,6 +19,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import (
@@ -29,6 +30,9 @@ from app.domain.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_LIMIT = 100
+_MAX_LIMIT = 1000
 
 
 class HistoryService:
@@ -65,6 +69,40 @@ class HistoryService:
         )
         return row
 
+    async def listKpiHistory(
+        self,
+        session: AsyncSession,
+        kpi_id: int,
+        *,
+        limit: int = _DEFAULT_LIMIT,
+        offset: int = 0,
+    ) -> list[KpiCatalogHistory]:
+        """按 KPI ID 查询历史快照（按 revision 倒序）。"""
+        limit = min(limit, _MAX_LIMIT)
+        stmt = (
+            select(KpiCatalogHistory)
+            .where(KpiCatalogHistory.kpi_id == kpi_id)
+            .order_by(KpiCatalogHistory.revision.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def getKpiHistoryRevision(
+        self,
+        session: AsyncSession,
+        kpi_id: int,
+        revision: int,
+    ) -> KpiCatalogHistory | None:
+        """查指定 KPI 的指定 revision 快照。"""
+        stmt = select(KpiCatalogHistory).where(
+            KpiCatalogHistory.kpi_id == kpi_id,
+            KpiCatalogHistory.revision == revision,
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
     # ------------------------------------------------------------------
     # FeatureDefinition 历史
     # ------------------------------------------------------------------
@@ -92,6 +130,26 @@ class HistoryService:
             changed_by,
         )
         return row
+
+    async def listFeatureHistory(
+        self,
+        session: AsyncSession,
+        feature_id: int,
+        *,
+        limit: int = _DEFAULT_LIMIT,
+        offset: int = 0,
+    ) -> list[FeatureDefinitionHistory]:
+        """按 Feature ID 查询历史快照（按 changed_at 倒序）。"""
+        limit = min(limit, _MAX_LIMIT)
+        stmt = (
+            select(FeatureDefinitionHistory)
+            .where(FeatureDefinitionHistory.feature_id == feature_id)
+            .order_by(FeatureDefinitionHistory.changed_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
 
 
 # ---------------------------------------------------------------------------

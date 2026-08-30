@@ -1588,3 +1588,27 @@ class AuditLogRead(CamelModel):
     before_json: dict | None = None
     after_json: dict | None = None
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.5: history 回放 API
+# ---------------------------------------------------------------------------
+
+
+class KpiCatalogHistoryRead(CamelModel):
+    """KPI 历史快照记录（Phase 4.5 回放 API）。"""
+    id: int
+    kpi_id: int | None = None  # FK ON DELETE SET NULL
+    revision: int
+    snapshot_json: dict
+    changed_by: str | None = None
+    changed_at: datetime
+
+
+class FeatureDefinitionHistoryRead(CamelModel):
+    """FeatureDefinition 历史快照记录（Phase 4.5 回放 API）。"""
+    id: int
+    feature_id: int | None = None  # FK ON DELETE SET NULL
+    snapshot_json: dict
+    changed_by: str | None = None
+    changed_at: datetime

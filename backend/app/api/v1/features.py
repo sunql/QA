@@ -10,8 +10,9 @@ ACL：PUT / DELETE 走 AclService（owner-based），PermissionDenied → 403（
 from __future__ import annotations
 
 from datetime import date
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
@@ -19,6 +20,7 @@ from app.domain.schemas import (
     FeatureComputeBatchResult,
     FeatureComputeResult,
     FeatureDefinitionCreate,
+    FeatureDefinitionHistoryRead,
     FeatureDefinitionRead,
     FeatureDefinitionUpdate,
     FeatureQueryResponse,
@@ -27,11 +29,13 @@ from app.domain.schemas import (
 from app.services.feature_compute_service import FeatureComputeService
 from app.services.feature_definition_service import FeatureDefinitionService
 from app.services.feature_query_service import FeatureQueryService
+from app.services.history_service import HistoryService
 
 router = APIRouter(dependencies=[])
 _service = FeatureDefinitionService()
 _computeService = FeatureComputeService()
 _queryService = FeatureQueryService()
+_history_service = HistoryService()
 
 
 def getFeatureDefinitionService() -> FeatureDefinitionService:
@@ -178,3 +182,27 @@ async def queryFeatureValuesByName(
         valid_at=result["valid_at"],
         values=result["values"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.5: feature_definition_history 回放 API
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{featureId}/history",
+    response_model=list[FeatureDefinitionHistoryRead],
+    status_code=status.HTTP_200_OK,
+    summary="FeatureDefinition 历史快照回放",
+)
+async def listFeatureHistory(
+    featureId: int,
+    _user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[FeatureDefinitionHistoryRead]:
+    """按 Feature ID 查询其全部历史快照（按 changed_at 倒序）。"""
+    await _service.getFeature(db, featureId)  # 校验特征存在
+    rows = await _history_service.listFeatureHistory(db, feature_id=featureId, limit=limit, offset=offset)
+    return [FeatureDefinitionHistoryRead.model_validate(r) for r in rows]

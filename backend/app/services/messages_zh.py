@@ -273,6 +273,21 @@ MSG_KPI_CATALOG_STATUS_NULL = "KPI status 不允许为 null（NOT NULL 约束）
 
 
 # =============================================================================
+# AI Feature Layer（Phase 4.3）
+# =============================================================================
+
+MSG_FEATURE_NOT_FOUND = "Feature id={id} 不存在"
+MSG_FEATURE_DUPLICATE_NAME = "Feature 名称「{name}」已存在"
+MSG_FEATURE_DATASOURCE_NOT_FOUND = "数据源 id={id} 不存在"
+MSG_FEATURE_VALUE_EMPTY = "特征值 value 与 value_text 不能同时为空"
+MSG_FEATURE_VALUE_NO_ENTITY_KEY = "特征值缺少 entity_key 列（calculation_logic 必须返回 entity_key 与 value/value_text）"
+MSG_FEATURE_TOO_MANY_ROWS = "特征计算返回 {count} 行，超过上限 {limit}（请收紧 calculation_logic 过滤条件）"
+MSG_FEATURE_VALUE_TEXT_TOO_LONG = "value_text 长度 {length} 超过上限 500"
+MSG_FEATURE_ENTITY_KEY_TOO_LONG = "entity_key 长度 {length} 超过上限 100"
+MSG_FEATURE_EXECUTE_FAILED = "特征计算执行失败（数据源 id={id}）：{detail}"
+
+
+# =============================================================================
 # Governance Hardening（Phase 4.5，遗留 #68）
 # =============================================================================
 

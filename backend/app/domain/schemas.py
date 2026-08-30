@@ -19,6 +19,8 @@ from app.domain.enums import (
     ChartType,
     DataSourceType,
     EntityType,
+    FeatureRefreshFrequency,
+    FeatureStatus,
     KpiStatus,
     LineageLayer,
     MatchRule,
@@ -546,6 +548,95 @@ class KpiCatalogRead(CamelModel):
     created_by: str | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
+
+
+class FeatureDefinitionCreate(CamelModel):
+    """AI 特征定义创建请求（Phase 4.3）。
+
+    owner 不在 DTO 中：由 actor.departments[0] 派生（entity_mapping 同模式），
+    防止 client 任意声明 owner 越权。calculation_logic 必须是读业务库的单条
+    只读 SELECT（service 层 _assert_read_only 校验）。
+    """
+
+    feature_name: str = Field(..., min_length=1, max_length=100)
+    feature_alias: str | None = Field(default=None, max_length=200)
+    feature_definition: str | None = Field(default=None, max_length=8000)
+    entity_type: EntityType
+    calculation_logic: str = Field(..., min_length=1, max_length=8000)
+    window_size: str | None = Field(default=None, max_length=20)
+    refresh_frequency: FeatureRefreshFrequency = FeatureRefreshFrequency.DAILY
+    unit: str | None = Field(default=None, max_length=50)
+    version: str | None = Field(default=None, max_length=20)
+    status: FeatureStatus = FeatureStatus.DRAFT
+    is_enabled: bool = True
+    datasource_id: int = Field(..., gt=0)
+
+
+class FeatureDefinitionUpdate(CamelModel):
+    """AI 特征定义更新请求。
+
+    全部字段可选；exclude_unset 模式下未传字段不动。非空列传 null 视为不动
+    （entity_mapping 的 _NON_NULL_UPDATE_FIELDS 同模式）。owner 不可改（不在 DTO）。
+    """
+
+    feature_name: str | None = Field(default=None, min_length=1, max_length=100)
+    feature_alias: str | None = Field(default=None, max_length=200)
+    feature_definition: str | None = Field(default=None, max_length=8000)
+    entity_type: EntityType | None = None
+    calculation_logic: str | None = Field(default=None, min_length=1, max_length=8000)
+    window_size: str | None = Field(default=None, max_length=20)
+    refresh_frequency: FeatureRefreshFrequency | None = None
+    unit: str | None = Field(default=None, max_length=50)
+    version: str | None = Field(default=None, max_length=20)
+    status: FeatureStatus | None = None
+    is_enabled: bool | None = None
+    datasource_id: int | None = Field(default=None, gt=0)
+
+
+class FeatureDefinitionRead(CamelModel):
+    id: int
+    feature_name: str
+    feature_alias: str | None = None
+    feature_definition: str | None = None
+    entity_type: EntityType
+    calculation_logic: str
+    window_size: str | None = None
+    refresh_frequency: FeatureRefreshFrequency
+    unit: str | None = None
+    owner: str | None = None
+    version: str
+    status: FeatureStatus
+    is_enabled: bool
+    datasource_id: int
+    created_by: str | None = None
+    created_time: datetime | None = None
+    updated_time: datetime | None = None
+
+
+class FeatureValueRead(CamelModel):
+    """特征值读 DTO（Phase 4.3）。value / value_text 至少一者非空。"""
+
+    id: int
+    feature_id: int
+    entity_key: str
+    value: Decimal | None = None
+    value_text: str | None = None
+    valid_at: date
+    computed_at: datetime
+
+
+class FeatureComputeResult(CamelModel):
+    """单特征计算结果（Phase 4.3）。rows = 落库/覆盖的特征值行数。"""
+
+    feature_id: int
+    rows: int
+
+
+class FeatureComputeBatchResult(CamelModel):
+    """批量计算汇总（Phase 4.3）。"""
+
+    results: list[FeatureComputeResult]
+    total_rows: int
 
 
 class OntologyJoinCreate(CamelModel):

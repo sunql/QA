@@ -35,6 +35,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from app.domain.enums import (
     DataSourceType,
     EntityType,
+    FeatureRefreshFrequency,
+    FeatureStatus,
     KpiStatus,
     LineageLayer,
     MatchRule,
@@ -367,6 +369,106 @@ class KpiCatalog(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<KpiCatalog id={self.id} code={self.kpi_code} status={self.status}>"
+
+
+class FeatureDefinition(Base, TimestampMixin):
+    """AI 特征定义（Phase 4.3）。
+
+    一行 = 一个特征的定义（名称/实体类型/计算逻辑/刷新频率/状态等）。
+    calculation_logic 是「读业务库的单条只读 SELECT」，由 service 层在
+    创建/更新时经 _assert_read_only 校验，计算时 execute_read_only 二次校验。
+
+    entity_key 用 VARCHAR 业务编码（供应商 Q630、物料 RM-STEEL-001），
+    故 feature_value.entity_key 也是 VARCHAR 而非 BIGINT 代理键（见 SSOT §2）。
+
+    owner 由 actor.departments[0] 派生（entity_mapping 同模式），不接受 client
+    body 声明，防止越权。不进 Neo4j / Milvus（预计算快照，不参与本体检索）。
+    """
+
+    __tablename__ = "feature_definition"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    feature_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    feature_alias: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    feature_definition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    entity_type: Mapped[EntityType] = mapped_column(String(20), nullable=False)
+    calculation_logic: Mapped[str] = mapped_column(Text, nullable=False)
+    window_size: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    refresh_frequency: Mapped[FeatureRefreshFrequency] = mapped_column(
+        String(20), nullable=False, default=FeatureRefreshFrequency.DAILY
+    )
+    unit: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    version: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="v1.0"
+    )
+    status: Mapped[FeatureStatus] = mapped_column(
+        String(20), nullable=False, default=FeatureStatus.DRAFT
+    )
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    datasource_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("data_source.id"), nullable=False
+    )
+    created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # Relationships
+    values: Mapped[list[FeatureValue]] = relationship(
+        back_populates="feature",
+        lazy="selectin",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<FeatureDefinition id={self.id} name={self.feature_name} "
+            f"status={self.status}>"
+        )
+
+
+class FeatureValue(Base):
+    """AI 特征值（Phase 4.3）。
+
+    一行 = 一个特征在某个实体（entity_key）某个有效期（valid_at）的预计算值。
+    value（数值）+ value_text（文本逃生口）至少一者非空。
+    unique (feature_id, entity_key, valid_at) 保证同窗口重算覆盖旧值（幂等）。
+
+    刻意不继承 TimestampMixin：computed_at 已承载时间戳语义（计算时刻），
+    created_time/updated_time 冗余，且迁移 0027 未建这两列（见 SSOT §2）。
+    """
+
+    __tablename__ = "feature_value"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    feature_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("feature_definition.id", ondelete="CASCADE"), nullable=False
+    )
+    entity_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    value: Mapped[Decimal | None] = mapped_column(Numeric(38, 10), nullable=True)
+    value_text: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    valid_at: Mapped[date] = mapped_column(Date, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    # Relationships
+    feature: Mapped[FeatureDefinition] = relationship(back_populates="values")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "feature_id",
+            "entity_key",
+            "valid_at",
+            name="uq_feature_value_dedup",
+        ),
+        Index("ix_feature_value_feature_id", "feature_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<FeatureValue id={self.id} feature={self.feature_id} "
+            f"entity={self.entity_key} valid_at={self.valid_at}>"
+        )
 
 
 class OntologyJoin(Base, TimestampMixin):

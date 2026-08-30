@@ -6,6 +6,7 @@ import ChatPage from "./pages/ChatPage";
 import OntologyPage from "./pages/OntologyPage";
 import DatasourcePage from "./pages/DatasourcePage";
 import DataQualityPage from "./pages/DataQualityPage";
+import KpiCatalogPage from "./pages/KpiCatalogPage";
 import LineagePage from "./pages/LineagePage";
 import EntityMappingPage from "./pages/EntityMappingPage";
 import UsagePage from "./pages/UsagePage";
@@ -26,6 +27,7 @@ export default function App() {
         <Route path="data-quality" element={<DataQualityPage />} />
         <Route path="lineage" element={<LineagePage />} />
         <Route path="entity-mapping" element={<EntityMappingPage />} />
+        <Route path="kpi-catalog" element={<KpiCatalogPage />} />
         <Route path="usage" element={<UsagePage />} />
         <Route path="status" element={<ServiceStatusPage />} />
         <Route path="graph" element={<Neo4jGraphPage />} />

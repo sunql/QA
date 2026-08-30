@@ -202,3 +202,16 @@ class MatchRule(str, Enum):
     MDM_MASTER = "MDM_MASTER"
     BUSINESS_KEY = "BUSINESS_KEY"
     MAPPING = "MAPPING"
+
+
+class KpiStatus(str, Enum):
+    """KPI Catalog 治理状态（Phase 4.1）。
+
+    - DRAFT：草稿中，可任意编辑
+    - PUBLISHED：已发布，进入企业级指标目录；PUT 仅修订（revision_count+1）
+    - DEPRECATED：已停用（被新版替代或下线），列表保留供历史溯源
+    """
+
+    DRAFT = "DRAFT"
+    PUBLISHED = "PUBLISHED"
+    DEPRECATED = "DEPRECATED"

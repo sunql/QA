@@ -35,6 +35,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from app.domain.enums import (
     DataSourceType,
     EntityType,
+    KpiStatus,
     LineageLayer,
     MatchRule,
     RefreshFrequency,
@@ -317,6 +318,55 @@ class OntologyMetric(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<OntologyMetric id={self.id} name={self.metric_name}>"
+
+
+class KpiCatalog(Base, TimestampMixin):
+    """KPI 业务目录（Phase 4.1）。
+
+    业务视角的 KPI 治理元数据，与 ontology_metric 并存：
+    - ontology_metric：技术形态（formula/agg_function/target_class_id），
+      供 NL2SQL 生成 SQL 使用
+    - kpi_catalog：业务视角（VERSION/OWNER/UNIT/GRAIN/NUMERATOR/DENOMINATOR），
+      供治理、展示、可信度评估使用
+
+    两表通过 metric_id 弱关联（nullable FK），KPI 可先于 metric 存在
+    （业务定义先行，技术实现后置）。不进 Neo4j / Milvus（治理层不入向量检索）。
+    """
+
+    __tablename__ = "kpi_catalog"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    kpi_code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    kpi_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    business_definition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    formula: Mapped[str | None] = mapped_column(Text, nullable=True)
+    numerator: Mapped[str | None] = mapped_column(Text, nullable=True)
+    denominator: Mapped[str | None] = mapped_column(Text, nullable=True)
+    grain: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    unit: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    data_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    version: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="v1.0"
+    )
+    revision_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=KpiStatus.DRAFT.value
+    )
+    metric_id: Mapped[int | None] = mapped_column(
+        BigIntFk, ForeignKey("ontology_metric.id"), nullable=True
+    )
+    created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # Relationships
+    metric: Mapped[OntologyMetric | None] = relationship(
+        "OntologyMetric", lazy="selectin"
+    )
+
+    def __repr__(self) -> str:
+        return f"<KpiCatalog id={self.id} code={self.kpi_code} status={self.status}>"
 
 
 class OntologyJoin(Base, TimestampMixin):

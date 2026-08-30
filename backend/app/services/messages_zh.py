@@ -261,3 +261,12 @@ MSG_TERM_DICT_NOT_FOUND = "术语 id={id} 不存在"
 # 兜底规则生成的 ECharts 默认标题（chart_service.py 规则分支）
 MSG_CHART_TITLE_PIE = "数据分布"
 MSG_CHART_TITLE_RESULT = "查询结果"
+
+
+# =============================================================================
+# KPI Catalog（Phase 4.1）
+# =============================================================================
+
+MSG_KPI_CATALOG_NOT_FOUND = "KPI Catalog id={id} 不存在"
+MSG_KPI_CATALOG_DUPLICATE_CODE = "KPI 编码「{code}」已存在"
+MSG_KPI_CATALOG_STATUS_NULL = "KPI status 不允许为 null（NOT NULL 约束）"

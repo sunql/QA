@@ -124,6 +124,7 @@ def createApp() -> FastAPI:
         embedding_provider,
         entity_mapping,
         graph,
+        kpi_catalog,
         local_import,
         model_config,
         ontology,
@@ -162,6 +163,9 @@ def createApp() -> FastAPI:
         prefix="/api/v1/entity-mappings",
         tags=["entity-mapping"],
     )
+    app.include_router(
+        kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"]
+    )
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(graph.router, prefix="/api/v1/system", tags=["system"])
@@ -189,10 +193,12 @@ def registerExceptionHandlers(app: FastAPI) -> None:
 
 def _statusFor(exc: DomainError) -> int:
     """领域异常 -> HTTP 状态码。"""
-    from app.domain.exceptions import NotFoundError, ValidationError
+    from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 
     if isinstance(exc, NotFoundError):
         return 404
+    if isinstance(exc, ConflictError):
+        return 409
     if isinstance(exc, ValidationError):
         return 422
     return 400

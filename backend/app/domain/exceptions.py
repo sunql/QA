@@ -25,6 +25,10 @@ class NotFoundError(DomainError):
     """资源不存在。"""
 
 
+class ConflictError(DomainError):
+    """资源冲突（唯一约束 / 业务规则不允许重复等）。"""
+
+
 class ValidationError(DomainError):
     """输入校验失败（领域规则层面）。"""
 

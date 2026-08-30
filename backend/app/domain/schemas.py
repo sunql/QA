@@ -19,6 +19,7 @@ from app.domain.enums import (
     ChartType,
     DataSourceType,
     EntityType,
+    KpiStatus,
     LineageLayer,
     MatchRule,
     ObjectType,
@@ -478,6 +479,72 @@ class OntologyMetricRead(CamelModel):
     agg_function: str
     target_class_id: int | None = None
     dimension_defaults: dict | None = None
+    created_by: str | None = None
+    created_time: datetime | None = None
+    updated_time: datetime | None = None
+
+
+class KpiCatalogCreate(CamelModel):
+    """KPI 业务目录创建请求（Phase 4.1）。
+
+    kpi_code 唯一（DB 层 unique 约束兜底）。status 默认 DRAFT；version 默认 v1.0；
+    revision_count 默认 0，PUT 时由 service 自增。
+    """
+
+    kpi_code: str = Field(..., min_length=1, max_length=50)
+    kpi_name: str = Field(..., min_length=1, max_length=200)
+    business_definition: str | None = Field(default=None, max_length=4000)
+    formula: str | None = Field(default=None, max_length=4000)
+    numerator: str | None = Field(default=None, max_length=1000)
+    denominator: str | None = Field(default=None, max_length=1000)
+    grain: str | None = Field(default=None, max_length=100)
+    unit: str | None = Field(default=None, max_length=50)
+    data_source: str | None = Field(default=None, max_length=200)
+    owner: str | None = Field(default=None, max_length=100)
+    version: str | None = Field(default=None, max_length=20)
+    status: KpiStatus = KpiStatus.DRAFT
+    metric_id: int | None = None
+    created_by: str | None = Field(default=None, max_length=50)
+
+
+class KpiCatalogUpdate(CamelModel):
+    """KPI 业务目录更新请求。
+
+    全部字段可选；exclude_unset 模式下未传字段不动。显式传 null 清空（前端
+    清空表单依赖此契约，与 Phase 3.4 object_type 同模式）。
+    """
+
+    kpi_code: str | None = Field(default=None, max_length=50)
+    kpi_name: str | None = Field(default=None, max_length=200)
+    business_definition: str | None = Field(default=None, max_length=4000)
+    formula: str | None = Field(default=None, max_length=4000)
+    numerator: str | None = Field(default=None, max_length=1000)
+    denominator: str | None = Field(default=None, max_length=1000)
+    grain: str | None = Field(default=None, max_length=100)
+    unit: str | None = Field(default=None, max_length=50)
+    data_source: str | None = Field(default=None, max_length=200)
+    owner: str | None = Field(default=None, max_length=100)
+    version: str | None = Field(default=None, max_length=20)
+    status: KpiStatus | None = Field(default=None, description="KPI 状态；显式传 null 会被 422 拒绝（NOT NULL 约束）")
+    metric_id: int | None = None
+
+
+class KpiCatalogRead(CamelModel):
+    id: int
+    kpi_code: str
+    kpi_name: str
+    business_definition: str | None = None
+    formula: str | None = None
+    numerator: str | None = None
+    denominator: str | None = None
+    grain: str | None = None
+    unit: str | None = None
+    data_source: str | None = None
+    owner: str | None = None
+    version: str
+    revision_count: int
+    status: KpiStatus
+    metric_id: int | None = None
     created_by: str | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None

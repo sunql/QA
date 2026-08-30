@@ -23,6 +23,7 @@ from app.api.v1 import (
     datasource,
     embedding_provider,
     entity_mapping,
+    kpi_catalog,
     local_import,
     model_config,
     ontology,
@@ -67,6 +68,8 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     async def handleDomainError(request, exc: DomainError) -> JSONResponse:
         if exc.__class__.__name__ == "NotFoundError":
             status = 404
+        elif exc.__class__.__name__ == "ConflictError":
+            status = 409
         elif exc.__class__.__name__ == "ValidationError":
             status = 422
         else:
@@ -106,6 +109,9 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         entity_mapping.router,
         prefix="/api/v1/entity-mappings",
         tags=["entity-mapping"],
+    )
+    testApp.include_router(
+        kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"]
     )
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"])
 

@@ -15,7 +15,15 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
-from app.domain.enums import ChartType, DataSourceType, RuleType, ScoreType, Severity
+from app.domain.enums import (
+    ChartType,
+    DataSourceType,
+    LineageLayer,
+    RefreshFrequency,
+    RuleType,
+    ScoreType,
+    Severity,
+)
 from app.domain.exceptions import ConfigError
 from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_AFFINITY,
@@ -130,6 +138,21 @@ from app.domain.error_messages import (
     MSG_SCHEMA_SIMILAR_SIMILARITY,
     MSG_SCHEMA_SIMILAR_SQL,
     MSG_SCHEMA_SIMILAR_SUGGESTIONS,
+    MSG_SCHEMA_LINEAGE_CREATED_TIME,
+    MSG_SCHEMA_LINEAGE_DESCRIPTION,
+    MSG_SCHEMA_LINEAGE_IS_ACTIVE,
+    MSG_SCHEMA_LINEAGE_OWNER,
+    MSG_SCHEMA_LINEAGE_REFRESH_FREQ,
+    MSG_SCHEMA_LINEAGE_SOURCE_FIELD,
+    MSG_SCHEMA_LINEAGE_SOURCE_LAYER,
+    MSG_SCHEMA_LINEAGE_SOURCE_OBJECT,
+    MSG_SCHEMA_LINEAGE_SOURCE_SYSTEM,
+    MSG_SCHEMA_LINEAGE_TARGET_FIELD,
+    MSG_SCHEMA_LINEAGE_TARGET_LAYER,
+    MSG_SCHEMA_LINEAGE_TARGET_OBJECT,
+    MSG_SCHEMA_LINEAGE_TARGET_SYSTEM,
+    MSG_SCHEMA_LINEAGE_TRANSFORMATION,
+    MSG_SCHEMA_LINEAGE_UPDATED_TIME,
     MSG_SCHEMA_USAGE_BY_MODEL,
     MSG_SCHEMA_USAGE_LAST_QUESTION,
     MSG_SCHEMA_USAGE_TOTAL_COST,
@@ -1206,3 +1229,73 @@ class ComputeScoresResponse(CamelModel):
     scores: list[DataQualityScoreRead] = Field(
         default_factory=list, description=MSG_SCHEMA_DQ_COMPUTE_SCORES
     )
+
+
+# ===== 数据血缘（Phase 2.1）=====
+
+
+class LineageEdgeCreate(CamelModel):
+    """创建数据血缘边的请求体。
+
+    source_field / target_field 可空（表级血缘）；不为空时表示字段级血缘。
+    """
+
+    source_layer: LineageLayer = Field(..., description=MSG_SCHEMA_LINEAGE_SOURCE_LAYER)
+    source_system: str = Field(
+        ..., min_length=1, max_length=100, description=MSG_SCHEMA_LINEAGE_SOURCE_SYSTEM
+    )
+    source_object: str = Field(
+        ..., min_length=1, max_length=100, description=MSG_SCHEMA_LINEAGE_SOURCE_OBJECT
+    )
+    source_field: str | None = Field(
+        default=None, max_length=100, description=MSG_SCHEMA_LINEAGE_SOURCE_FIELD
+    )
+    target_layer: LineageLayer = Field(..., description=MSG_SCHEMA_LINEAGE_TARGET_LAYER)
+    target_system: str = Field(
+        ..., min_length=1, max_length=100, description=MSG_SCHEMA_LINEAGE_TARGET_SYSTEM
+    )
+    target_object: str = Field(
+        ..., min_length=1, max_length=100, description=MSG_SCHEMA_LINEAGE_TARGET_OBJECT
+    )
+    target_field: str | None = Field(
+        default=None, max_length=100, description=MSG_SCHEMA_LINEAGE_TARGET_FIELD
+    )
+    transformation_rule: str | None = Field(
+        default=None, description=MSG_SCHEMA_LINEAGE_TRANSFORMATION
+    )
+    refresh_frequency: RefreshFrequency = Field(
+        default=RefreshFrequency.DAILY, description=MSG_SCHEMA_LINEAGE_REFRESH_FREQ
+    )
+    owner: str | None = Field(default=None, max_length=100, description=MSG_SCHEMA_LINEAGE_OWNER)
+    description: str | None = Field(default=None, description=MSG_SCHEMA_LINEAGE_DESCRIPTION)
+
+
+class LineageEdgeUpdate(CamelModel):
+    """更新血缘边的请求体。所有字段可选，None 视为不动。"""
+
+    transformation_rule: str | None = Field(default=None)
+    refresh_frequency: RefreshFrequency | None = Field(default=None)
+    owner: str | None = Field(default=None, max_length=100)
+    description: str | None = Field(default=None)
+    is_active: bool | None = Field(default=None)
+
+
+class LineageEdgeRead(CamelModel):
+    """血缘边响应。"""
+
+    id: int
+    source_layer: LineageLayer
+    source_system: str
+    source_object: str
+    source_field: str | None = None
+    target_layer: LineageLayer
+    target_system: str
+    target_object: str
+    target_field: str | None = None
+    transformation_rule: str | None = None
+    refresh_frequency: RefreshFrequency
+    owner: str | None = None
+    description: str | None = None
+    is_active: bool
+    created_time: datetime | None = Field(default=None, description=MSG_SCHEMA_LINEAGE_CREATED_TIME)
+    updated_time: datetime | None = Field(default=None, description=MSG_SCHEMA_LINEAGE_UPDATED_TIME)

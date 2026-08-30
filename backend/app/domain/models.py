@@ -17,8 +17,10 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -29,7 +31,14 @@ from sqlalchemy import (
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from app.domain.enums import DataSourceType
+from app.domain.enums import (
+    DataSourceType,
+    LineageLayer,
+    RefreshFrequency,
+    RuleType,
+    ScoreType,
+    Severity,
+)
 
 
 def _utcnow() -> datetime:
@@ -162,6 +171,8 @@ __all__ = [
     "SessionMessage",
     "SchemaCache",
     "SessionQueryState",
+    "DataQualityRule",
+    "DataQualityScore",
 ]
 
 
@@ -489,3 +500,196 @@ class TermDictionary(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<TermDictionary id={self.id} term={self.term}>"
+
+
+# =============================================================================
+# Phase 1.1: Data Quality Rule
+# =============================================================================
+
+
+class DataQualityRule(Base, TimestampMixin):
+    """数据质量规则定义表。
+
+    一行 = 一条可执行的规则，覆盖 5 种 rule_type 维度（COMPLETENESS / VALIDITY /
+    UNIQUENESS / CONSISTENCY / REFERENTIAL），TIMELINESS 留 Phase 2 血缘模块。
+    rule_code 业务唯一；rule_expression 为文本表达式（如 "ORDER_QTY > 0"），
+    threshold DECIMAL(5,2) 表示通过率阈值（0-100）；is_enabled 软启用开关；
+    severity 分级（HIGH/MEDIUM/LOW/INFO）。version 为治理版本（不参与 NL2SQL）。
+
+    datasource_id 关联 data_source，决定评估执行时的业务库连接。Phase 1.2 引入
+    （迁移 0018 追加），由评估 dispatcher 通过 business_db_pool.get_adapter 复用。
+
+    评估执行与评分由 Phase 1.2 / 1.3 通过外部 evaluator 调用实现；本表仅承载
+    规则定义本身的 CRUD。
+    """
+
+    __tablename__ = "data_quality_rule"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    rule_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    rule_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    datasource_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    target_table: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_column: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    rule_type: Mapped[RuleType] = mapped_column(String(20), nullable=False)
+    rule_expression: Mapped[str | None] = mapped_column(Text, nullable=True)
+    threshold: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), nullable=False, default=Decimal("95.00")
+    )
+    severity: Mapped[Severity] = mapped_column(
+        String(10), nullable=False, default=Severity.MEDIUM
+    )
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    version: Mapped[str] = mapped_column(String(20), nullable=False, default="v1.0")
+    owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("rule_code", name="uq_data_quality_rule_code"),
+        Index("ix_data_quality_rule_table", "target_table"),
+        Index("ix_data_quality_rule_type", "rule_type"),
+        Index("ix_data_quality_rule_enabled", "is_enabled"),
+        Index("ix_data_quality_rule_datasource", "datasource_id"),
+        ForeignKeyConstraint(
+            ["datasource_id"],
+            ["data_source.id"],
+            name="fk_data_quality_rule_datasource",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataQualityRule id={self.id} code={self.rule_code} "
+            f"type={self.rule_type} enabled={self.is_enabled}>"
+        )
+
+
+# =============================================================================
+# Phase 1.3: Data Quality Score
+# =============================================================================
+
+
+class DataQualityScore(Base, TimestampMixin):
+    """数据质量评分历史表。
+
+    一次 compute 写 N 条 score：每个 target_table 一条 TABLE 记录 + 一条 GLOBAL
+    记录（target_table='*'）。6 维评分中 completeness/validity/uniqueness/
+    consistency/referential 由 Phase 1.2 evaluator 实际填充；timeliness 暂为
+    NULL（Phase 2 血缘模块补 ETL 时间字段后再算）。
+
+    overall_score = 6 维非 NULL 分量的算术平均（分子维度数 = sum(dim != NULL)）。
+    维度缺失时不拉低整体分，避免单维度未实现就把整体分打到 0。
+    """
+
+    __tablename__ = "data_quality_score"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    target_table: Mapped[str] = mapped_column(String(100), nullable=False)
+    score_type: Mapped[ScoreType] = mapped_column(
+        String(10), nullable=False, default=ScoreType.TABLE
+    )
+    completeness_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    validity_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    uniqueness_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    consistency_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    timeliness_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    referential_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    overall_score: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    evaluation_duration_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    rules_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        CheckConstraint(
+            "score_type IN ('TABLE', 'GLOBAL')",
+            name="ck_data_quality_score_type",
+        ),
+        Index(
+            "ix_data_quality_score_lookup",
+            "target_table",
+            "score_type",
+            "evaluated_at",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataQualityScore id={self.id} target_table={self.target_table} "
+            f"score_type={self.score_type} overall={self.overall_score}>"
+        )
+
+
+# =============================================================================
+# Phase 2.1: Data Lineage
+# =============================================================================
+
+
+class DataLineage(Base, TimestampMixin):
+    """数据血缘边表。
+
+    一行 = 一条「上游对象/字段 → 下游对象/字段」血缘边，覆盖 7 层模型：
+    SOURCE_SYSTEM / ODS / DWD / DWS / ADS / KPI / AI。
+
+    表级血缘：source_field / target_field 留空，仅描述 table → table 流向。
+    字段级血缘：source_field / target_field 必填，描述字段 → 字段映射。
+    同一上下游 (source_layer, source_system, source_object, source_field,
+    target_layer, target_system, target_object, target_field) 不允许重复：
+    由唯一约束 uq_data_lineage_edge 保护，service 层抛 ValidationError。
+
+    transformation_rule 是自然语言描述（如「标准化 + 代理键」「CDC 原样接入」），
+    Phase 2.2 自动提取脚本会从 ontology formula 推断；本期为人工录入字段。
+    refresh_frequency 描述 ETL 刷新节奏（REALTIME/HOURLY/DAILY/WEEKLY），
+    与 Phase 1.3 TIMELINESS 评分计算互为输入。
+    is_active=false 表示软删除（保留审计与历史可视化追溯）。
+    """
+
+    __tablename__ = "data_lineage"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    source_layer: Mapped[LineageLayer] = mapped_column(String(20), nullable=False)
+    source_system: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_object: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_field: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    target_layer: Mapped[LineageLayer] = mapped_column(String(20), nullable=False)
+    target_system: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_object: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_field: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    transformation_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+    refresh_frequency: Mapped[RefreshFrequency] = mapped_column(
+        String(20), nullable=False, default=RefreshFrequency.DAILY
+    )
+    owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        # 同上下游 + 字段组合唯一；表级血缘 source/target_field 同时为 NULL 时
+        # 唯一约束在 PG 视为「(..., NULL) 与 (..., NULL) 不冲突」（SQL 标准语义）。
+        # 因此 service 层在创建时主动查重；DB 约束作为兜底，防止 race condition。
+        UniqueConstraint(
+            "source_layer",
+            "source_system",
+            "source_object",
+            "source_field",
+            "target_layer",
+            "target_system",
+            "target_object",
+            "target_field",
+            name="uq_data_lineage_edge",
+        ),
+        Index("ix_data_lineage_source", "source_layer", "source_system", "source_object"),
+        Index("ix_data_lineage_target", "target_layer", "target_system", "target_object"),
+        Index("ix_data_lineage_active", "is_active"),
+    )
+
+    def __repr__(self) -> str:
+        src = f"{self.source_layer.value}.{self.source_object}"
+        if self.source_field:
+            src += f".{self.source_field}"
+        tgt = f"{self.target_layer.value}.{self.target_object}"
+        if self.target_field:
+            tgt += f".{self.target_field}"
+        return f"<DataLineage id={self.id} {src} -> {tgt}>"

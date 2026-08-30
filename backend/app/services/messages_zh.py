@@ -93,6 +93,46 @@ MSG_MAP_PROPERTY_OK = "属性「{property}」已映射到类「{className}」"
 
 
 # =============================================================================
+# 数据质量规则（data_quality_rule）
+# =============================================================================
+
+MSG_DQ_RULE_NOT_FOUND = "数据质量规则 id={id} 不存在"
+MSG_DQ_RULE_CODE_EXISTS = "数据质量规则编码「{code}」已存在"
+
+# Phase 1.2 evaluator
+MSG_DQ_EVAL_INVALID_IDENTIFIER = (
+    "数据质量评估 SQL 标识符不合法（仅允许字母/数字/下划线，且不以数字开头）: {value}"
+)
+MSG_DQ_EVAL_INVALID_EXPRESSION = (
+    "数据质量评估表达式不合法（仅允许标识符 + 比较 + 算术 + 括号）: {value}"
+)
+MSG_DQ_EVAL_INVALID_REF_FORMAT = (
+    "REFERENTIAL 规则的 rule_expression 必须为 `REF <ref_table>.<ref_column>` 格式，收到: {value}"
+)
+MSG_DQ_EVAL_RULE_EXPRESSION_REQUIRED = (
+    "规则类型 {ruleType} 必须填写 rule_expression"
+)
+MSG_DQ_EVAL_TARGET_COLUMN_REQUIRED = (
+    "规则类型 {ruleType} 必须填写 target_column"
+)
+MSG_DQ_EVAL_DATASOURCE_NOT_FOUND = "评估 DQ 规则 {ruleId} 找不到关联业务数据源"
+MSG_DQ_EVAL_RULE_TYPE_UNSUPPORTED = "不支持的数据质量规则类型: {ruleType}"
+
+
+# =============================================================================
+# 数据血缘（data_lineage，Phase 2.1）
+# =============================================================================
+
+MSG_LINEAGE_EDGE_NOT_FOUND = "数据血缘边 id={id} 不存在"
+MSG_LINEAGE_EDGE_EXISTS = (
+    "已存在相同上下游的血缘边: {src} -> {tgt}（source_field / target_field 需同时区分）"
+)
+MSG_LINEAGE_SELF_LOOP = (
+    "血缘边禁止自指（source 与 target 同层同对象），收到: {src} -> {tgt}"
+)
+
+
+# =============================================================================
 # 模型路由
 # =============================================================================
 

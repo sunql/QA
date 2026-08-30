@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import __version__
 from app.api.v1 import (
     chat,
+    data_lineage,
+    data_quality,
     datasource,
     embedding_provider,
     local_import,
@@ -87,7 +89,18 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     )
     testApp.include_router(datasource.router, prefix="/api/v1/datasources", tags=["datasources"])
     testApp.include_router(local_import.router, prefix="/api/v1/datasources", tags=["datasources"])
+    testApp.include_router(
+        data_quality.router, prefix="/api/v1/data-quality/rules", tags=["data-quality"]
+    )
+    testApp.include_router(
+        data_quality.scores_router,
+        prefix="/api/v1/data-quality/scores",
+        tags=["data-quality"],
+    )
     testApp.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
+    testApp.include_router(
+        data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"]
+    )
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"])
 
     @testApp.get("/api/v1/health", response_model=HealthResponse, tags=["system"])

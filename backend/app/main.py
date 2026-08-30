@@ -118,6 +118,8 @@ def createApp() -> FastAPI:
     # app.include_router(v1Router, prefix="/api/v1") 会导致 /api/v1/x/x/...）
     from app.api.v1 import (
         chat,
+        data_lineage,
+        data_quality,
         datasource,
         embedding_provider,
         graph,
@@ -143,6 +145,17 @@ def createApp() -> FastAPI:
     )
     app.include_router(datasource.router, prefix="/api/v1/datasources", tags=["datasources"])
     app.include_router(local_import.router, prefix="/api/v1/datasources", tags=["datasources"])
+    app.include_router(
+        data_quality.router, prefix="/api/v1/data-quality/rules", tags=["data-quality"]
+    )
+    app.include_router(
+        data_quality.scores_router,
+        prefix="/api/v1/data-quality/scores",
+        tags=["data-quality"],
+    )
+    app.include_router(
+        data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"]
+    )
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(graph.router, prefix="/api/v1/system", tags=["system"])

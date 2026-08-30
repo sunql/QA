@@ -253,3 +253,23 @@ MSG_SCHEMA_SIMILAR_SUGGESTIONS = "相似问法列表"
 # =============================================================================
 
 MSG_ORACLE_NOT_SQLALCHEMY_URL = "Oracle 不使用 SQLAlchemy URL，收到类型: {dsType}"
+
+# =============================================================================
+# 数据血缘（data_lineage，Phase 2.1）
+# =============================================================================
+
+MSG_SCHEMA_LINEAGE_SOURCE_LAYER = "上游层：SOURCE_SYSTEM/ODS/DWD/DWS/ADS/KPI/AI"
+MSG_SCHEMA_LINEAGE_SOURCE_SYSTEM = "上游系统简称（如 ERP/SRM/WMS）"
+MSG_SCHEMA_LINEAGE_SOURCE_OBJECT = "上游对象名（表/类名，如 PORDER）"
+MSG_SCHEMA_LINEAGE_SOURCE_FIELD = "上游字段名（表级血缘留空）"
+MSG_SCHEMA_LINEAGE_TARGET_LAYER = "下游层：SOURCE_SYSTEM/ODS/DWD/DWS/ADS/KPI/AI"
+MSG_SCHEMA_LINEAGE_TARGET_SYSTEM = "下游系统简称"
+MSG_SCHEMA_LINEAGE_TARGET_OBJECT = "下游对象名"
+MSG_SCHEMA_LINEAGE_TARGET_FIELD = "下游字段名（表级血缘留空）"
+MSG_SCHEMA_LINEAGE_TRANSFORMATION = "转换规则描述（如「标准化 + 代理键」「CDC 原样接入」）"
+MSG_SCHEMA_LINEAGE_REFRESH_FREQ = "刷新频率：REALTIME/HOURLY/DAILY/WEEKLY"
+MSG_SCHEMA_LINEAGE_OWNER = "责任方（部门/人）"
+MSG_SCHEMA_LINEAGE_DESCRIPTION = "血缘边说明"
+MSG_SCHEMA_LINEAGE_IS_ACTIVE = "是否启用（false 表示软删除，保留历史可视化追溯）"
+MSG_SCHEMA_LINEAGE_CREATED_TIME = "创建时间"
+MSG_SCHEMA_LINEAGE_UPDATED_TIME = "更新时间"

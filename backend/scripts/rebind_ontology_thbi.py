@@ -51,8 +51,9 @@ logger = logging.getLogger("rebind_ontology_thbi")
 DW_DIR = Path(__file__).resolve().parents[2] / "dw"
 DWD_FILES = ["02_dwd_master.sql", "03_dwd_facts.sql"]
 
-# 保留 ODS 的类（价格表头/配置，关联键待业务确认，见 SSOT §9）
-_ODS_TABLES = {"ODS_PPRICFICH", "ODS_PPRICCONF"}
+# 保留 ODS 的类。当前全部切 DWD（价格表头/配置已补 DWD，见 SSOT §9），
+# 留空集合保持既有分支不触发。
+_ODS_TABLES: set[str] = set()
 
 # class_name -> 目标表（DWD 裸表名 / ODS 保留）
 CLASS_TABLE: dict[str, str] = {
@@ -69,13 +70,13 @@ CLASS_TABLE: dict[str, str] = {
     "ReceiptDetail": "DWD_GOODS_RECEIPT_LINE",
     "PurchaseRequisitionDetail": "DWD_PURCHASE_REQUISITION_LINE",
     "RequisitionOrderLink": "DWD_REQUISITION_ORDER_LINK",
-    "SupplierPriceList": "ODS_PPRICFICH",  # 保留 ODS
+    "SupplierPriceList": "DWD_SUPPLIER_PRICE_LIST_HEADER",
     "SupplierPriceDetail": "DWD_SUPPLIER_PRICE_LIST",
     "PurchaseOrder": "DWD_PURCHASE_ORDER",
     "PurchaseOrderDetail": "DWD_PURCHASE_ORDER_LINE",
     "Customer": "DWD_CUSTOMER",
     "Supplier": "DWD_SUPPLIER",
-    "SupplierPriceConf": "ODS_PPRICCONF",  # 保留 ODS
+    "SupplierPriceConf": "DWD_SUPPLIER_PRICE_LIST_CONFIG",
     "Carrier": "DWD_CARRIER",
     "Quotation": "DWD_QUOTATION",
     "QuotationDetail": "DWD_QUOTATION_LINE",
@@ -131,6 +132,9 @@ COLUMN_CN: dict[str, str] = {
     "bill_date": "票据日期",  # BILDAT_0
     "payment_type": "付款类型",  # PAYTYP_0
     "line_amount": "行金额",  # AMTLIN_0
+    # 价格表三件套：明细补的关联键（新建属性需要中文名）
+    "price_list_code": "价格表号",  # PLI_0
+    "price_list_record": "价格表记录",  # PLICRD_0
 }
 
 # Oracle 类型 -> 本体 data_type
@@ -164,6 +168,29 @@ METRIC_FORMULAS: dict[str, str] = {
     "KPI_PAYMENT_AMT": "SUM(t.payment_amount)",
     "KPI_QUOTATION_QTY": "SUM(t.quantity)",
 }
+
+# 显式删除的属性（历史脏数据）：(class_name, property_name)
+# SupplierPriceConf.没有用处 与 价格清单说明 同映射 LANDESSHO_0，
+# rebind 后两属性都叫 local_name 会撞 (class_id, property_name) 唯一约束。
+DELETE_PROPS: set[tuple[str, str]] = {("SupplierPriceConf", "没有用处")}
+
+# 新增 join：(源类, 源列, 目标类, 目标列)
+# 明细↔表头 用 (price_list_code, price_list_record) 版本键；配置↔明细 用价目表号。
+# 这两条 join 此前因明细缺关联键列被删除，DWD 补键后恢复。
+NEW_JOINS: list[tuple[str, list[str], str, list[str]]] = [
+    (
+        "SupplierPriceDetail",
+        ["price_list_code", "price_list_record"],
+        "SupplierPriceList",
+        ["price_list_code", "price_list_record"],
+    ),
+    (
+        "SupplierPriceConf",
+        ["price_list_code"],
+        "SupplierPriceDetail",
+        ["price_list_code"],
+    ),
+]
 
 # =============================================================================
 # 计划计算（纯函数，可 --dump-spec / --dry-run 预览）
@@ -265,6 +292,59 @@ def planJoins(
     return keep, drop
 
 
+def dropJunkProps(
+    classes: list[OntologyClass],
+    propsByClass: dict[int, list[OntologyProperty]],
+) -> list[OntologyProperty]:
+    """删除 DELETE_PROPS 指定的脏属性，并原地从本地 propsByClass 快照移除。
+
+    只改内存快照（每次运行从 DB 重建），由调用方 session.delete 落库。
+    """
+    classIdByName = {c.class_name: c.id for c in classes}
+    dropped: list[OntologyProperty] = []
+    for class_name, prop_name in DELETE_PROPS:
+        cid = classIdByName.get(class_name)
+        if cid is None:
+            continue
+        props = propsByClass.get(cid, [])
+        for p in list(props):
+            if p.property_name == prop_name:
+                props.remove(p)
+                dropped.append(p)
+    return dropped
+
+
+def planNewJoins(
+    classes: list[OntologyClass],
+    joins: list[OntologyJoin],
+) -> list[dict]:
+    """生成 NEW_JOINS 中尚未存在的 join 定义（幂等：已有同键 join 则跳过）。
+
+    返回 dict 列表，由调用方创建 OntologyJoin；只计算不写库。
+    """
+    classIdByName = {c.class_name: c.id for c in classes}
+    existing = {
+        (j.source_class_id, tuple(j.source_columns), j.target_class_id, tuple(j.target_columns))
+        for j in joins
+    }
+    out: list[dict] = []
+    for src_name, src_cols, tgt_name, tgt_cols in NEW_JOINS:
+        sid = classIdByName.get(src_name)
+        tid = classIdByName.get(tgt_name)
+        if sid is None or tid is None:
+            continue
+        key = (sid, tuple(src_cols), tid, tuple(tgt_cols))
+        if key in existing:
+            continue
+        out.append({
+            "source_class_id": sid,
+            "source_columns": src_cols,
+            "target_class_id": tid,
+            "target_columns": tgt_cols,
+        })
+    return out
+
+
 # =============================================================================
 # 执行
 # =============================================================================
@@ -316,6 +396,12 @@ async def _registerDataSource(session) -> DataSource:
 
 async def _dumpOrDry(args, session, spec, classes, classById, classToTable, propsByClass, joins, metrics):
     """dump-spec / dry-run 共用：输出计划，不写库。"""
+    dropped_junk = dropJunkProps(classes, propsByClass)
+    if dropped_junk:
+        print("===== 显式删除脏属性（DELETE_PROPS）=====")
+        for p in dropped_junk:
+            print(f"  - 删除 {p.property_name}（同列重复映射）")
+
     print("===== 属性 rebind 计划 =====")
     total_delete = 0
     for c in classes:
@@ -345,6 +431,13 @@ async def _dumpOrDry(args, session, spec, classes, classById, classToTable, prop
         src = classById[j.source_class_id].class_name
         tgt = classById[j.target_class_id].class_name
         print(f"  - 删除 {src}({j.source_columns}) -> {tgt}({j.target_columns})")
+    new_j = planNewJoins(classes, joins)
+    if new_j:
+        print(f"  + 新增 {len(new_j)} 条 DWD 价格表关联")
+        for d in new_j:
+            s = classById[d["source_class_id"]].class_name
+            t = classById[d["target_class_id"]].class_name
+            print(f"  + {s}({d['source_columns']}) -> {t}({d['target_columns']})")
 
     print("\n===== Metric 公式 =====")
     for m in metrics:
@@ -413,6 +506,11 @@ async def run(args) -> None:
         thbi = await _registerDataSource(session)
         await session.commit()
         logger.info("数据源：THBI 默认 id=%s，ZJTH 非默认", thbi.id)
+
+        # 显式删除脏属性（如 SupplierPriceConf.没有用处，同列重复映射）
+        for p in dropJunkProps(classes, propsByClass):
+            await session.delete(p)
+            logger.info("删脏属性 %s.%s", p.class_id, p.property_name)
 
         # 类 rebind
         for c in classes:
@@ -491,6 +589,24 @@ async def run(args) -> None:
                     classById[j.target_class_id].class_name,
                     new_src, new_tgt,
                 )
+        for nd in planNewJoins(classes, joins):
+            src_id = nd["source_class_id"]
+            tgt_id = nd["target_class_id"]
+            session.add(OntologyJoin(
+                source_class_id=src_id,
+                source_columns=nd["source_columns"],
+                target_class_id=tgt_id,
+                target_columns=nd["target_columns"],
+                join_type="INNER",
+                relation_type="business",
+                description="DWD 价格表关联（版本键/价目表号）",
+                join_key=makeJoinKey(src_id, nd["source_columns"], tgt_id, nd["target_columns"]),
+            ))
+            logger.info(
+                "新增 join %s.%s == %s.%s",
+                classById[src_id].class_name, nd["source_columns"],
+                classById[tgt_id].class_name, nd["target_columns"],
+            )
 
         # metric rebind
         for m in metrics:

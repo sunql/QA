@@ -625,6 +625,20 @@ class FeatureValueRead(CamelModel):
     computed_at: datetime
 
 
+class FeatureQueryResponse(CamelModel):
+    """按 feature_name 在线查询响应（Phase 4.4，外部消费契约）。
+
+    valid_at 为实际返回值的有效期（请求缺省时为该特征最新窗口；
+    无任何值时为占位今日 + 空 values，前端渲染空态）。
+    """
+
+    feature_name: str
+    entity_type: EntityType
+    unit: str | None = None
+    valid_at: date
+    values: list[FeatureValueRead] = Field(default_factory=list)
+
+
 class FeatureComputeResult(CamelModel):
     """单特征计算结果（Phase 4.3）。rows = 落库/覆盖的特征值行数。"""
 

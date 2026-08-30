@@ -286,6 +286,16 @@ MSG_FEATURE_VALUE_TEXT_TOO_LONG = "value_text 长度 {length} 超过上限 500"
 MSG_FEATURE_ENTITY_KEY_TOO_LONG = "entity_key 长度 {length} 超过上限 100"
 MSG_FEATURE_EXECUTE_FAILED = "特征计算执行失败（数据源 id={id}）：{detail}"
 
+# Feature 在线查询（Phase 4.4）
+MSG_FEATURE_NOT_FOUND_BY_NAME = "Feature「{name}」不存在"
+MSG_FEATURE_NAME_INVALID = "Feature 名「{name}」不合法（须大写字母开头 + 大写/数字/下划线）"
+MSG_FEATURE_ENTITY_KEYS_TOO_MANY = "entity_keys 数量超上限 {limit}"
+
+# Chat 特征回流（Phase 4.4）
+MSG_CHAT_FEATURE_ANSWER_LINE = "{entity_key} 的 {feature_name}（{alias}）为 {value}{unit}"
+MSG_CHAT_FEATURE_ANSWER_FOOTER = "（特征值有效期 {valid_at}，计算时间 {computed_at}；来源：预计算特征）"
+MSG_CHAT_FEATURE_EMPTY = "特征 {feature_name} 当前没有已计算的特征值，请先触发计算"
+
 
 # =============================================================================
 # Governance Hardening（Phase 4.5，遗留 #68）

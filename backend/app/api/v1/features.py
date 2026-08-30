@@ -9,6 +9,8 @@ ACL：PUT / DELETE 走 AclService（owner-based），PermissionDenied → 403（
 
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,14 +21,17 @@ from app.domain.schemas import (
     FeatureDefinitionCreate,
     FeatureDefinitionRead,
     FeatureDefinitionUpdate,
+    FeatureQueryResponse,
     FeatureValueRead,
 )
 from app.services.feature_compute_service import FeatureComputeService
 from app.services.feature_definition_service import FeatureDefinitionService
+from app.services.feature_query_service import FeatureQueryService
 
 router = APIRouter(dependencies=[])
 _service = FeatureDefinitionService()
 _computeService = FeatureComputeService()
+_queryService = FeatureQueryService()
 
 
 def getFeatureDefinitionService() -> FeatureDefinitionService:
@@ -37,6 +42,11 @@ def getFeatureDefinitionService() -> FeatureDefinitionService:
 def getFeatureComputeService() -> FeatureComputeService:
     """compute service 依赖；测试可 monkeypatch 其 _adapterProvider。"""
     return _computeService
+
+
+def getFeatureQueryService() -> FeatureQueryService:
+    """query service 依赖（Phase 4.4）；测试可 monkeypatch。"""
+    return _queryService
 
 
 @router.get("", response_model=list[FeatureDefinitionRead], status_code=status.HTTP_200_OK)
@@ -132,3 +142,39 @@ async def listFeatureValues(
     """列出某特征的特征值（分页，验证用）。"""
     values = await service.listValues(db, featureId, limit=limit, offset=offset)
     return [FeatureValueRead.model_validate(v) for v in values]
+
+
+@router.get("/by-name/{feature_name}/values", response_model=FeatureQueryResponse, status_code=status.HTTP_200_OK)
+async def queryFeatureValuesByName(
+    feature_name: str,
+    _user: CurrentUser = Depends(getCurrentUser),
+    entity_keys: str | None = Query(default=None, description="逗号分隔实体键列表，上限 100"),
+    valid_at: date | None = Query(default=None, description="特征有效期（缺省取最新窗口）"),
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(getDb),
+    service: FeatureQueryService = Depends(getFeatureQueryService),
+) -> FeatureQueryResponse:
+    """按 feature_name 在线查特征值（Phase 4.4，外部消费契约）。
+
+    feature_name 须匹配 ^[A-Z][A-Z0-9_]{0,99}$（422）；不存在 -> 404。
+    使用 /by-name/ 前缀段与 /{featureId}/values 路由显式区分（FastAPI
+    路径参数不做类型互斥，前缀可避免歧义与误路由）。
+    """
+    keys = (
+        [k.strip() for k in entity_keys.split(",") if k.strip()]
+        if entity_keys
+        else None
+    )
+    result = await service.queryValues(
+        db, feature_name, entity_keys=keys, valid_at=valid_at,
+        limit=limit, offset=offset,
+    )
+    feature = result["feature"]
+    return FeatureQueryResponse(
+        feature_name=feature.feature_name,
+        entity_type=feature.entity_type,
+        unit=feature.unit,
+        valid_at=result["valid_at"],
+        values=result["values"],
+    )

@@ -254,6 +254,9 @@ class _PipelineContext:
     driftWarning: str | None = None
     # B3：术语词典文本（buildDictionaryText 渲染）；空表/加载失败时为 None
     dictionaryText: str | None = None
+    # Phase 4.4：可用 Feature 目录文本（buildFeatureCatalogText 渲染）；
+    # 空目录/加载失败时为 None（增强非依赖，行为与之前一致）
+    featureCatalogText: str | None = None
     # 关联关系目录（OntologyJoin 边列表，运行时 JOIN 唯一真源）；空目录时为 []
     joins: list[Any] = field(default_factory=list)
     # 用户是否明确选择了模型（而非自动路由）；明确时跳过模型降级
@@ -318,6 +321,8 @@ class ChatService(ChatStreamOutputMixin):
         self._stepAggregator = stepAggregator or StepAggregator()
         # Phase 1.4：注入 DQ 评分 service（默认懒加载避免循环 import）
         self._dqScoreService = dqScoreService
+        # Phase 4.4：注入 Feature 查询 service（默认懒加载避免循环 import）
+        self._featureQueryService: Any | None = None
         # 会话亲和性窗口：前 N 轮锁定模型；None 时按需懒加载 settings
         self._affinityTurns = affinityTurns
 
@@ -377,6 +382,11 @@ class ChatService(ChatStreamOutputMixin):
         if outcome.sql is None:
             # 计划 target=无法回答：不执行 SQL/图表/回答 LLM，直接给出固定友好回答
             return await self._unanswerableResponse(session, dto, pc, result.intent, outcome)
+        # Phase 4.4：计划引用了可用 Feature 且特征有值 -> 直接回流特征值，
+        # 跳过 SQL 生成与业务库执行（feature_value 在元数据库，非业务库）。
+        featureResponse = await self._tryFeatureResponse(session, dto, pc, outcome)
+        if featureResponse is not None:
+            return featureResponse
         try:
             data, finalSql, retryTokens = await self._runQueryWithRetry(session, dto, pc, outcome)
         except Exception:
@@ -505,12 +515,14 @@ class ChatService(ChatStreamOutputMixin):
         valueSamples = await self._sampleValueDomains(ds, classes) if needSamples else {}
         driftWarning = await self._buildDriftWarning(session, ds, classes) if needDrift else None
         dictionaryText = await self._loadDictionaryText(session)
+        featureCatalogText = await self._loadFeatureCatalogText(session)
         forcedModel = dto.modelId is not None
         return _PipelineContext(
             ds=ds, classes=classes, configs=configs, selected=selected,
             client=self._llmFactory(selected), contextPrompt=contextPrompt,
             fewShot=fewShot, valueSamples=valueSamples, driftWarning=driftWarning,
             dictionaryText=dictionaryText, joins=joins, forcedModel=forcedModel,
+            featureCatalogText=featureCatalogText,
         )
 
     async def _buildDriftWarning(
@@ -541,6 +553,22 @@ class ChatService(ChatStreamOutputMixin):
             return await self._termDictionary.buildDictionaryText(session)
         except Exception:
             logger.warning("术语词典加载失败，跳过注入", exc_info=True)
+            return None
+
+    async def _loadFeatureCatalogText(self, session: AsyncSession) -> str | None:
+        """加载可用 Feature 目录文本（Phase 4.4）；空目录返回 None。
+
+        Feature 目录是增强而非硬依赖：加载失败只记录日志并返回 None，
+        不阻断流水线（与 _loadDictionaryText 同降级策略）。
+        懒加载 self._featureQueryService 避免循环 import。
+        """
+        if self._featureQueryService is None:
+            from app.services.feature_query_service import FeatureQueryService
+            self._featureQueryService = FeatureQueryService()
+        try:
+            return await self._featureQueryService.buildFeatureCatalogText(session)
+        except Exception:
+            logger.warning("Feature 目录加载失败，跳过注入", exc_info=True)
             return None
 
     async def _sampleValueDomains(
@@ -695,6 +723,8 @@ class ChatService(ChatStreamOutputMixin):
                 # （"2025 年的采购情况：第一步查…" → 子问题只剩"第一步查…"）；
                 # 把主问题透传给计划阶段做"主问题 ∪ 子问题"并集判定。
                 scopeQuestion=dto.question if sub_question is not None else None,
+                # Phase 4.4：Feature 目录注入计划 prompt（空目录时为 None 不注入）
+                featureCatalogText=pc.featureCatalogText,
             ),
             forced=pc.forcedModel,
         )
@@ -987,6 +1017,7 @@ class ChatService(ChatStreamOutputMixin):
         dictionaryText: str | None = None,
         joins: list[Any] | None = None,
         scopeQuestion: str | None = None,
+        featureCatalogText: str | None = None,
     ) -> tuple[Any, Any]:
         """两阶段 LLM 调用：先生成并校验查询计划，再基于计划生成 SQL。
 
@@ -1007,6 +1038,7 @@ class ChatService(ChatStreamOutputMixin):
             valueSamples=valueSamples, driftWarning=driftWarning,
             dictionaryText=dictionaryText, joins=joins,
             scopeQuestion=scopeQuestion,
+            featureCatalogText=featureCatalogText,
         )
         if planResult.plan.isUnanswerable:
             return planResult, SqlResult(sql="", promptTokens=0, completionTokens=0)
@@ -1421,6 +1453,44 @@ class ChatService(ChatStreamOutputMixin):
             yield StreamEvent(EVENT_PLAN, {"plan": outcome.plan.to_dict()})
         yield StreamEvent(EVENT_SQL, {"sql": outcome.sql})
 
+        # Phase 4.4：检测计划是否引用了可用 Feature，命中则直接回流特征值（SSE 流）。
+        featureResp = await self._tryFeatureResponse(session, dto, pc, outcome)
+        if featureResp is not None:
+            await self._storeSessionMessages(session, dto.sessionId, dto.question, featureResp.answer, None)
+            await self._saveQueryState(
+                session, dto.sessionId,
+                question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
+            )
+            affinity = await self._buildAffinityStatus(
+                session, dto.sessionId, pc.selected.id, pc.selected.model_name,
+            )
+            affinityPayload = (
+                {"lockedModel": affinity.lockedModel, "remainingTurns": affinity.remainingTurns}
+                if affinity is not None
+                else None
+            )
+            # 从非流式 ChatResponse 提取 steps 渲染 SSE step result 事件
+            for step in (featureResp.steps or []):
+                yield self._stepResultEvent(StepResult(
+                    step_index=step.step_index,
+                    description=step.description,
+                    sub_question=step.sub_question or dto.question,
+                    sql=None,
+                    data=step.data,
+                    summary=step.summary,
+                ))
+            yield StreamEvent(EVENT_TOKEN, {"content": featureResp.answer})
+            yield StreamEvent(
+                EVENT_DONE,
+                {
+                    "tokensUsed": featureResp.tokensUsed,
+                    "cost": featureResp.cost,
+                    "modelName": featureResp.modelName,
+                    "affinityStatus": affinityPayload,
+                },
+            )
+            return
+
         try:
             data, finalSql, retryTokens = await self._runQueryWithRetry(session, dto, pc, outcome)
         except Exception:
@@ -1771,6 +1841,87 @@ class ChatService(ChatStreamOutputMixin):
         """4-2：不可回答回答全文 = 固定前缀 + 缺表/缺术语建议（无建议时兜底引导）。"""
         suggestion = _buildUnanswerableSuggestion(question, classes)
         return f"{_UNANSWERABLE_ANSWER}{suggestion or _UNANSWERABLE_SUGGESTION_FALLBACK}"
+
+    async def _tryFeatureResponse(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        pc: _PipelineContext,
+        outcome: _SqlOutcome,
+    ) -> ChatResponse | None:
+        """Phase 4.4：检测计划是否引用了可用 Feature，命中则直接回流特征值。
+
+        匹配顺序：conditions 优先（LLM 按 prompt 指引写「使用特征 X」），
+        interpretation 兜底。无引用 / 引用了但无值 / feature 不存在时返回 None，
+        流水线正常走 SQL 生成路径。
+        featureCatalogText 为 None（空目录/加载失败）时直接返回 None。
+
+        返回 ChatResponse 时，跳过了 SQL 执行与图表 LLM（预计算值不需要），
+        但仍调用 answer LLM（生成自然语言解释），Token 消耗计入。
+        """
+        plan = outcome.plan
+        if plan is None or pc.featureCatalogText is None:
+            return None
+        # 懒加载 feature query service 避免循环 import
+        if self._featureQueryService is None:
+            from app.services.feature_query_service import FeatureQueryService
+            self._featureQueryService = FeatureQueryService()
+        try:
+            catalogFeatures = await self._featureQueryService._listCatalogFeatures(session)
+        except Exception:
+            logger.warning("Feature 目录加载失败，无法检测特征回流", exc_info=True)
+            return None
+        hit = self._featureQueryService.matchPlanFeature(plan, catalogFeatures)
+        if hit is None:
+            return None
+        # 命中：查特征值
+        result = await self._featureQueryService.queryValues(
+            session, hit.feature_name,
+        )
+        values = result["values"]
+        if not values:
+            # 无值：不阻断流水线（返回 None 由调用方走 SQL 生成路径）
+            return None
+        # 构造回答文本
+        lines = []
+        for v in values[:5]:  # 最多展示 5 行
+            alias = hit.feature_alias or hit.feature_name
+            val_str = str(v.value) if v.value is not None else v.value_text or "—"
+            unit = hit.unit or ""
+            lines.append(
+                f"{v.entity_key} 的 {hit.feature_name}（{alias}）为 {val_str}{unit}（有效期 {result['valid_at']}，"
+                f"计算时间 {v.computed_at.strftime('%Y-%m-%d %H:%M')}；来源：预计算特征）"
+            )
+        answer = "\n".join(lines)
+        if len(values) > 5:
+            answer += f"\n（…共 {len(values)} 条，仅展示前 5 条）"
+        await self._storeSessionMessages(session, dto.sessionId, dto.question, answer, None)
+        await self._saveQueryState(
+            session, dto.sessionId,
+            question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
+        )
+        totalTokens = outcome.promptTokens + outcome.completionTokens
+        affinity = await self._buildAffinityStatus(
+            session, dto.sessionId, pc.selected.id, pc.selected.model_name,
+        )
+        return ChatResponse(
+            answer=answer,
+            intent=IntentType.QUERY.value,
+            sql=None,
+            steps=[_step_result_to_read(StepResult(
+                step_index=0,
+                description=f"预计算特征 {hit.feature_name}",
+                sub_question=dto.question,
+                sql=None,
+                data=[v.model_dump() for v in values],
+                summary=f"预计算特征 {hit.feature_name}，共 {len(values)} 条",
+            ))],
+            tokensUsed=totalTokens,
+            cost=float(self._costForSql(outcome, pc.selected)),
+            modelName=pc.selected.model_name,
+            queryPlan=outcome.plan.to_dict() if outcome.plan else None,
+            affinityStatus=affinity,
+        )
 
     async def _unanswerableResponse(
         self,

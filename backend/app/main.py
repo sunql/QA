@@ -158,6 +158,7 @@ def createApp() -> FastAPI:
         datasource,
         embedding_provider,
         entity_mapping,
+        features,
         graph,
         kpi_catalog,
         local_import,
@@ -201,6 +202,7 @@ def createApp() -> FastAPI:
     app.include_router(
         kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"]
     )
+    app.include_router(features.router, prefix="/api/v1/features", tags=["features"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(graph.router, prefix="/api/v1/system", tags=["system"])

@@ -270,3 +270,14 @@ MSG_CHART_TITLE_RESULT = "查询结果"
 MSG_KPI_CATALOG_NOT_FOUND = "KPI Catalog id={id} 不存在"
 MSG_KPI_CATALOG_DUPLICATE_CODE = "KPI 编码「{code}」已存在"
 MSG_KPI_CATALOG_STATUS_NULL = "KPI status 不允许为 null（NOT NULL 约束）"
+
+
+# =============================================================================
+# Governance Hardening（Phase 4.5，遗留 #68）
+# =============================================================================
+
+MSG_GOVERNANCE_PERMISSION_DENIED = (
+    "无权修改 KPI「{kpi_code}」（owner={owner}，当前用户部门={user_departments}）；"
+    "仅 owner 部门或 admin 角色可改"
+)
+MSG_GOVERNANCE_KPI_NOT_FOUND = "KPI Catalog id={id} 不存在"

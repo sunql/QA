@@ -813,3 +813,102 @@ class EntityMapping(Base, TimestampMixin):
             f"{self.entity_type.value} key={self.enterprise_key} "
             f"via {self.source_system.value}/{self.source_key}>"
         )
+
+
+class AuditLog(Base):
+    """通用审计日志（Phase 4.5，遗留 #68）。
+
+    一行 = 一个实体的一次变更。不可变（仅 INSERT，不 UPDATE / DELETE），
+    由 service 层纪律保证；DB 无 trigger 拦截「UPDATE/DELETE by app」，
+    因为应用层从不发出这类 SQL。
+
+    action ∈ {'CREATE', 'UPDATE', 'DELETE'}：
+        CREATE：after_json 必有，before_json 为空
+        UPDATE：before_json + after_json 双端
+    entity_type / entity_id 用 VARCHAR(50)/BIGINT 而非 FK 关联，保留
+    对任意实体类型（kpi_catalog / ontology_class / data_quality_rule /
+    entity_mapping ...）的扩展性。
+
+    actor / actor_departments 来自 CurrentUser：actor=userId（X-User-Id），
+    actor_departments=',' 拼接的部门（X-User-Departments），便于审计查询
+    「哪个部门改了什么」。
+    """
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False)
+    actor_departments: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    before_json: Mapped[dict[str, Any] | None] = mapped_column(
+        postgresql.JSONB, nullable=True
+    )
+    after_json: Mapped[dict[str, Any] | None] = mapped_column(
+        postgresql.JSONB, nullable=True
+    )
+    # 不复用 TimestampMixin（它包含 created_time/updated_time，
+    # 本表无 updated_time，且语义是「事件发生时间」更直白）
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('CREATE','UPDATE','DELETE')",
+            name="ck_audit_log_action",
+        ),
+        Index(
+            "ix_audit_log_entity",
+            "entity_type",
+            "entity_id",
+            "created_at",
+        ),
+        Index("ix_audit_log_actor", "actor", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AuditLog id={self.id} {self.action} "
+            f"{self.entity_type}/{self.entity_id} by {self.actor}>"
+        )
+
+
+class KpiCatalogHistory(Base):
+    """KPI Catalog 变更历史（Phase 4.5，遗留 #68）。
+
+    一行 = KPI 在某个 revision 的完整快照。revision 与 kpi_catalog.revision_count
+    对齐：service.updateKpi 在 PUT 成功后 +1 revision_count，并写入本表 snapshot
+    （包含新 revision_count）。kpi_id FK ON DELETE SET NULL：删除 KPI 时历史保留，
+    仅 kpi_id 置 NULL；不让「删除」级联清空历史。
+
+    不可变（仅 INSERT），与 audit_log 一致。
+    """
+
+    __tablename__ = "kpi_catalog_history"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    kpi_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("kpi_catalog.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(
+        postgresql.JSONB, nullable=False
+    )
+    changed_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_kpi_history_kpi_revision", "kpi_id", "revision"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<KpiCatalogHistory id={self.id} kpi_id={self.kpi_id} "
+            f"revision={self.revision} by {self.changed_by}>"
+        )

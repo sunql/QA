@@ -19,6 +19,10 @@ from app.domain.enums import KpiStatus
 from app.domain.models import KpiCatalog
 
 
+# Phase 4.5：现有 CRUD 测试（非 ACL 专项）需带 admin headers 通过 ACL；专项测试见 test_kpi_catalog_governance.py
+ADMIN_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
+
+
 class TestKpiMigration:
     async def test_table_and_columns_after_migration(self, dbSession) -> None:
         """Alembic upgrade head 后 kpi_catalog 表 + 关键列齐全。"""
@@ -146,6 +150,7 @@ class TestKpiCatalogApi:
         resp = await client.put(
             f"/api/v1/kpi-catalog/{cid}",
             json={"businessDefinition": "补业务定义", "owner": "采购部"},
+            headers=ADMIN_HEADERS,
         )
         assert resp.status_code == 200
         assert resp.json()["revisionCount"] == 1
@@ -161,6 +166,7 @@ class TestKpiCatalogApi:
         resp = await client.put(
             f"/api/v1/kpi-catalog/{cid}",
             json={"unit": "%"},
+            headers=ADMIN_HEADERS,
         )
         assert resp.status_code == 200
         assert resp.json()["revisionCount"] == 1
@@ -177,6 +183,7 @@ class TestKpiCatalogApi:
         resp = await client.put(
             f"/api/v1/kpi-catalog/{cid}",
             json={"owner": None, "unit": None},
+            headers=ADMIN_HEADERS,
         )
         assert resp.status_code == 200
         assert resp.json()["owner"] is None
@@ -191,6 +198,7 @@ class TestKpiCatalogApi:
         resp = await client.put(
             f"/api/v1/kpi-catalog/{cid}",
             json={"status": "DEPRECATED"},
+            headers=ADMIN_HEADERS,
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "DEPRECATED"
@@ -205,6 +213,7 @@ class TestKpiCatalogApi:
         resp = await client.put(
             f"/api/v1/kpi-catalog/{cid}",
             json={"status": None},
+            headers=ADMIN_HEADERS,
         )
         # 400 = 服务层 ValidationError；422 = Pydantic schema 层拒绝；两者都是合法拒绝
         assert resp.status_code in (400, 422)
@@ -219,7 +228,9 @@ class TestKpiCatalogApi:
             json={"kpiCode": "KPI_DEL", "kpiName": "X"},
         )
         cid = created.json()["id"]
-        resp = await client.delete(f"/api/v1/kpi-catalog/{cid}")
+        resp = await client.delete(
+            f"/api/v1/kpi-catalog/{cid}", headers=ADMIN_HEADERS
+        )
         assert resp.status_code == 204
         resp2 = await client.get(f"/api/v1/kpi-catalog/{cid}")
         assert resp2.status_code == 404
@@ -242,8 +253,16 @@ class TestKpiCatalogDbConstraints:
             json={"kpiCode": "KPI_DB", "kpiName": "D"},
         )
         cid = created.json()["id"]
-        await client.put(f"/api/v1/kpi-catalog/{cid}", json={"owner": "X"})
-        await client.put(f"/api/v1/kpi-catalog/{cid}", json={"owner": "Y"})
+        await client.put(
+            f"/api/v1/kpi-catalog/{cid}",
+            json={"owner": "X"},
+            headers=ADMIN_HEADERS,
+        )
+        await client.put(
+            f"/api/v1/kpi-catalog/{cid}",
+            json={"owner": "Y"},
+            headers=ADMIN_HEADERS,
+        )
         row = (
             await dbSession.execute(select(KpiCatalog).where(KpiCatalog.id == cid))
         ).scalar_one()

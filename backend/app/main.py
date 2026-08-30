@@ -38,6 +38,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = getSettings()
     logging.basicConfig(level=getattr(logging, settings.logLevel.upper(), logging.INFO))
     logger.info("启动 QA System 后端 v%s (env=%s)", __version__, settings.appEnv)
+    # Phase 4.5 安全护栏：生产 + stub auth 同时启用应大声告警
+    if settings.appEnv == "production" and os.environ.get("AUTH_STUB_ENABLED", "1") == "1":
+        logger.error(
+            "🚨 安全告警：生产环境 (env=production) 仍在使用 stub auth "
+            "(AUTH_STUB_ENABLED=1)。任何客户端可伪造 X-User-Roles=admin 绕过 ACL。"
+            "生产部署前必须：AUTH_STUB_ENABLED=0 + 反向代理剥离 X-User-* 头，"
+            "或接入 JWT/IdP 替换 getCurrentUser。"
+        )
     engine = getEngine()
     logger.info("元数据库引擎已就绪: %s", engine.url.render_as_string(hide_password=True))
     # Schema drift 校验：默认开启，SKIP_SCHEMA_CHECK=1 可关闭（紧急场景）
@@ -220,7 +228,12 @@ def registerExceptionHandlers(app: FastAPI) -> None:
 
 def _statusFor(exc: DomainError) -> int:
     """领域异常 -> HTTP 状态码。"""
-    from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
+    from app.domain.exceptions import (
+        ConflictError,
+        NotFoundError,
+        PermissionDeniedError,
+        ValidationError,
+    )
 
     if isinstance(exc, NotFoundError):
         return 404
@@ -228,6 +241,8 @@ def _statusFor(exc: DomainError) -> int:
         return 409
     if isinstance(exc, ValidationError):
         return 422
+    if isinstance(exc, PermissionDeniedError):
+        return 403
     return 400
 
 

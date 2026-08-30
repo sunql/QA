@@ -1,7 +1,10 @@
-"""KPI Catalog REST API（Phase 4.1）。
+"""KPI Catalog REST API（Phase 4.1 + Phase 4.5 governance hardening）。
 
 与 data_quality / entity_mapping 同模式：扁平路径，挂在 /api/v1/kpi-catalog。
 KPI 不进 Neo4j / Milvus（治理层）。
+
+Phase 4.5：PUT / DELETE 走 AclService（owner-based）；PermissionDenied → 403。
+ACL 已在 service 层抛 PermissionDeniedError；不再路由层重复检查。
 """
 
 from __future__ import annotations
@@ -33,11 +36,14 @@ async def listKpis(
 @router.post("", response_model=KpiCatalogRead, status_code=status.HTTP_201_CREATED)
 async def createKpi(
     dto: KpiCatalogCreate,
-    _user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> KpiCatalogRead:
-    """创建 KPI。重复 kpi_code 返回 409。"""
-    return KpiCatalogRead.model_validate(await _service.createKpi(db, dto))
+    """创建 KPI。重复 kpi_code 返回 409。
+
+    CREATE 不做 ACL（任何部门都能创建新 KPI）；审计 + 历史快照由 service 层写入。
+    """
+    return KpiCatalogRead.model_validate(await _service.createKpi(db, dto, user))
 
 
 @router.get("/{id}", response_model=KpiCatalogRead, status_code=status.HTTP_200_OK)
@@ -54,18 +60,18 @@ async def getKpi(
 async def updateKpi(
     id: int,
     dto: KpiCatalogUpdate,
-    _user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> KpiCatalogRead:
-    """更新 KPI（revision_count +1）。"""
-    return KpiCatalogRead.model_validate(await _service.updateKpi(db, id, dto))
+    """更新 KPI。owner 不匹配 → 403；revision_count 始终 +1。"""
+    return KpiCatalogRead.model_validate(await _service.updateKpi(db, id, dto, user))
 
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteKpi(
     id: int,
-    _user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> None:
-    """删除 KPI。"""
-    await _service.deleteKpi(db, id)
+    """删除 KPI。owner 不匹配 → 403；审计 before 写入。"""
+    await _service.deleteKpi(db, id, user)

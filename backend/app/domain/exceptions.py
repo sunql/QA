@@ -87,3 +87,11 @@ class Nl2SqlError(DomainError):
 
 class MilvusError(DomainError):
     """Milvus 向量检索/存储失败。"""
+
+
+class PermissionDeniedError(DomainError):
+    """权限不足（owner 不匹配 + 非 admin 角色）。
+
+    Phase 4.5 governance hardening：当前仅用于 KpiCatalogService 写入路径，
+    后续可扩展到其他实体的 PUT/DELETE 检查。
+    """

@@ -72,6 +72,8 @@ def buildTestApp(testFactory: Any) -> FastAPI:
             status = 409
         elif exc.__class__.__name__ == "ValidationError":
             status = 422
+        elif exc.__class__.__name__ == "PermissionDeniedError":
+            status = 403
         else:
             status = 400
         return JSONResponse(

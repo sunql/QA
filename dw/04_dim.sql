@@ -47,6 +47,7 @@ CREATE TABLE THBI.DIM_SUPPLIER (
   supplier_name   VARCHAR2(90),
   payment_code    VARCHAR2(20),
   currency_code   VARCHAR2(3),
+  zero_stock_flag NUMBER,
   creation_date   DATE,
   update_date     DATE,
   etl_load_ts     TIMESTAMP(3)  DEFAULT SYSTIMESTAMP NOT NULL,
@@ -58,25 +59,27 @@ CREATE SEQUENCE THBI.SQ_DIM_SUPPLIER START WITH 1 INCREMENT BY 1 CACHE 100;
 
 INSERT INTO THBI.DIM_SUPPLIER
   (supplier_key, supplier_code, supplier_name, payment_code,
-   currency_code, creation_date, update_date)
+   currency_code, zero_stock_flag, creation_date, update_date)
 SELECT
   THBI.SQ_DIM_SUPPLIER.NEXTVAL,
   supplier_code,
   supplier_name,
   payment_code,
   currency_code,
+  zero_stock_flag,
   creation_date,
   update_date
 FROM THBI.DWD_SUPPLIER;
 
 -- ---------- 物料维度 ----------
 CREATE TABLE THBI.DIM_MATERIAL (
-  material_key    NUMBER        NOT NULL,
-  material_code   VARCHAR2(20)  NOT NULL,
-  description_1   VARCHAR2(130),
-  material_status NUMBER,
-  item_category   VARCHAR2(20),
-  etl_load_ts     TIMESTAMP(3)  DEFAULT SYSTIMESTAMP NOT NULL,
+  material_key      NUMBER        NOT NULL,
+  material_code     VARCHAR2(20)  NOT NULL,
+  description_1     VARCHAR2(130),
+  material_status   NUMBER,
+  item_category     VARCHAR2(20),
+  material_category VARCHAR2(20),
+  etl_load_ts       TIMESTAMP(3)  DEFAULT SYSTIMESTAMP NOT NULL,
   CONSTRAINT PK_DIM_MATERIAL PRIMARY KEY (material_key),
   CONSTRAINT UQ_DIM_MATERIAL_CODE UNIQUE (material_code)
 );
@@ -84,13 +87,14 @@ CREATE TABLE THBI.DIM_MATERIAL (
 CREATE SEQUENCE THBI.SQ_DIM_MATERIAL START WITH 1 INCREMENT BY 1 CACHE 1000;
 
 INSERT INTO THBI.DIM_MATERIAL
-  (material_key, material_code, description_1, material_status, item_category)
+  (material_key, material_code, description_1, material_status, item_category, material_category)
 SELECT
   THBI.SQ_DIM_MATERIAL.NEXTVAL,
   material_code,
   description_1,
   material_status,
-  item_category
+  item_category,
+  material_category
 FROM THBI.DWD_MATERIAL;
 
 -- ---------- 工厂维度 ----------

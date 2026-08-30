@@ -9,6 +9,7 @@
 -- ---------- 采购月度汇总（按订单日期归期） ----------
 CREATE TABLE THBI.DWS_SUPPLIER_PURCHASE_MONTHLY (
   supplier_code       VARCHAR2(20)   NOT NULL,
+  zero_stock_flag     NUMBER,
   facility_code       VARCHAR2(10),
   year_month          VARCHAR2(7)    NOT NULL,
   order_count         NUMBER,
@@ -21,24 +22,27 @@ CREATE TABLE THBI.DWS_SUPPLIER_PURCHASE_MONTHLY (
 );
 
 INSERT INTO THBI.DWS_SUPPLIER_PURCHASE_MONTHLY
-  (supplier_code, facility_code, year_month, order_count,
+  (supplier_code, zero_stock_flag, facility_code, year_month, order_count,
    order_line_count, order_qty, order_amount_excl_tax, material_count)
 SELECT
-  supplier_code,
-  facility_code,
-  TO_CHAR(order_date, 'YYYY-MM'),
-  COUNT(DISTINCT po_no),
+  f.supplier_code,
+  s.zero_stock_flag,
+  f.facility_code,
+  TO_CHAR(f.order_date, 'YYYY-MM'),
+  COUNT(DISTINCT f.po_no),
   COUNT(*),
-  SUM(order_qty),
-  SUM(line_amount_excl_tax),
-  COUNT(DISTINCT material_code)
-FROM THBI.DWD_PURCHASE_ORDER_LINE
-WHERE supplier_code IS NOT NULL AND order_date IS NOT NULL
-GROUP BY supplier_code, facility_code, TO_CHAR(order_date, 'YYYY-MM');
+  SUM(f.order_qty),
+  SUM(f.line_amount_excl_tax),
+  COUNT(DISTINCT f.material_code)
+FROM THBI.DWD_PURCHASE_ORDER_LINE f
+LEFT JOIN THBI.DWD_SUPPLIER s ON s.supplier_code = f.supplier_code
+WHERE f.supplier_code IS NOT NULL AND f.order_date IS NOT NULL
+GROUP BY f.supplier_code, s.zero_stock_flag, f.facility_code, TO_CHAR(f.order_date, 'YYYY-MM');
 
 -- ---------- 交付月度汇总（OTD 核心表，按收货日期归期） ----------
 CREATE TABLE THBI.DWS_SUPPLIER_DELIVERY_MONTHLY (
   supplier_code       VARCHAR2(20)   NOT NULL,
+  zero_stock_flag     NUMBER,
   facility_code       VARCHAR2(10),
   year_month          VARCHAR2(7)    NOT NULL,
   received_line_count NUMBER,
@@ -52,11 +56,12 @@ CREATE TABLE THBI.DWS_SUPPLIER_DELIVERY_MONTHLY (
 );
 
 INSERT INTO THBI.DWS_SUPPLIER_DELIVERY_MONTHLY
-  (supplier_code, facility_code, year_month, received_line_count,
+  (supplier_code, zero_stock_flag, facility_code, year_month, received_line_count,
    on_time_line_count, late_line_count, on_time_rate, avg_delay_days,
    received_qty)
 SELECT
   g.supplier_code,
+  s.zero_stock_flag,
   g.facility_code,
   TO_CHAR(g.receipt_date, 'YYYY-MM'),
   COUNT(*),
@@ -72,15 +77,17 @@ SELECT
 FROM THBI.DWD_GOODS_RECEIPT_LINE g
 JOIN THBI.DWD_PURCHASE_ORDER_LINE p
   ON p.po_no = g.po_no AND p.po_line_no = g.po_line_no
+LEFT JOIN THBI.DWD_SUPPLIER s ON s.supplier_code = g.supplier_code
 WHERE g.supplier_code IS NOT NULL
   AND g.receipt_date IS NOT NULL
   AND g.po_no IS NOT NULL
   AND p.promised_receipt_date IS NOT NULL
-GROUP BY g.supplier_code, g.facility_code, TO_CHAR(g.receipt_date, 'YYYY-MM');
+GROUP BY g.supplier_code, s.zero_stock_flag, g.facility_code, TO_CHAR(g.receipt_date, 'YYYY-MM');
 
 -- ---------- 质量月度汇总（拒收率，按收货日期归期） ----------
 CREATE TABLE THBI.DWS_SUPPLIER_QUALITY_MONTHLY (
   supplier_code       VARCHAR2(20)   NOT NULL,
+  zero_stock_flag     NUMBER,
   facility_code       VARCHAR2(10),
   material_code       VARCHAR2(20),
   year_month          VARCHAR2(7)    NOT NULL,
@@ -93,23 +100,26 @@ CREATE TABLE THBI.DWS_SUPPLIER_QUALITY_MONTHLY (
 );
 
 INSERT INTO THBI.DWS_SUPPLIER_QUALITY_MONTHLY
-  (supplier_code, facility_code, material_code, year_month,
+  (supplier_code, zero_stock_flag, facility_code, material_code, year_month,
    received_qty, rejected_qty, reject_rate)
 SELECT
-  supplier_code,
-  facility_code,
-  material_code,
-  TO_CHAR(receipt_date, 'YYYY-MM'),
-  SUM(received_qty_price_uom),
-  SUM(rejected_qty),
-  ROUND(SUM(rejected_qty) / NULLIF(SUM(received_qty_price_uom), 0), 4)
-FROM THBI.DWD_GOODS_RECEIPT_LINE
-WHERE supplier_code IS NOT NULL AND receipt_date IS NOT NULL
-GROUP BY supplier_code, facility_code, material_code, TO_CHAR(receipt_date, 'YYYY-MM');
+  f.supplier_code,
+  s.zero_stock_flag,
+  f.facility_code,
+  f.material_code,
+  TO_CHAR(f.receipt_date, 'YYYY-MM'),
+  SUM(f.received_qty_price_uom),
+  SUM(f.rejected_qty),
+  ROUND(SUM(f.rejected_qty) / NULLIF(SUM(f.received_qty_price_uom), 0), 4)
+FROM THBI.DWD_GOODS_RECEIPT_LINE f
+LEFT JOIN THBI.DWD_SUPPLIER s ON s.supplier_code = f.supplier_code
+WHERE f.supplier_code IS NOT NULL AND f.receipt_date IS NOT NULL
+GROUP BY f.supplier_code, s.zero_stock_flag, f.facility_code, f.material_code, TO_CHAR(f.receipt_date, 'YYYY-MM');
 
 -- ---------- 付款月度汇总（按 value_date 归期） ----------
 CREATE TABLE THBI.DWS_SUPPLIER_PAYMENT_MONTHLY (
   supplier_code       VARCHAR2(20)   NOT NULL,
+  zero_stock_flag     NUMBER,
   facility_code       VARCHAR2(10),
   currency_code       VARCHAR2(3),
   year_month          VARCHAR2(7)    NOT NULL,
@@ -121,22 +131,25 @@ CREATE TABLE THBI.DWS_SUPPLIER_PAYMENT_MONTHLY (
 );
 
 INSERT INTO THBI.DWS_SUPPLIER_PAYMENT_MONTHLY
-  (supplier_code, facility_code, currency_code, year_month,
+  (supplier_code, zero_stock_flag, facility_code, currency_code, year_month,
    payment_count, payment_amount)
 SELECT
-  supplier_code,
-  facility_code,
-  currency_code,
-  TO_CHAR(value_date, 'YYYY-MM'),
+  f.supplier_code,
+  s.zero_stock_flag,
+  f.facility_code,
+  f.currency_code,
+  TO_CHAR(f.value_date, 'YYYY-MM'),
   COUNT(*),
-  SUM(payment_amount)
-FROM THBI.DWD_SUPPLIER_PAYMENT
-WHERE supplier_code IS NOT NULL AND value_date IS NOT NULL
-GROUP BY supplier_code, facility_code, currency_code, TO_CHAR(value_date, 'YYYY-MM');
+  SUM(f.payment_amount)
+FROM THBI.DWD_SUPPLIER_PAYMENT f
+LEFT JOIN THBI.DWD_SUPPLIER s ON s.supplier_code = f.supplier_code
+WHERE f.supplier_code IS NOT NULL AND f.value_date IS NOT NULL
+GROUP BY f.supplier_code, s.zero_stock_flag, f.facility_code, f.currency_code, TO_CHAR(f.value_date, 'YYYY-MM');
 
 -- ---------- 物料价格月度趋势（按收货日期归期） ----------
 CREATE TABLE THBI.DWS_MATERIAL_PRICE_MONTHLY (
   material_code       VARCHAR2(20)   NOT NULL,
+  material_category   VARCHAR2(20),
   supplier_code       VARCHAR2(20),
   year_month          VARCHAR2(7)    NOT NULL,
   price_line_count    NUMBER,
@@ -149,18 +162,20 @@ CREATE TABLE THBI.DWS_MATERIAL_PRICE_MONTHLY (
 );
 
 INSERT INTO THBI.DWS_MATERIAL_PRICE_MONTHLY
-  (material_code, supplier_code, year_month, price_line_count,
+  (material_code, material_category, supplier_code, year_month, price_line_count,
    avg_net_unit_price, min_net_unit_price, max_net_unit_price)
 SELECT
-  material_code,
-  supplier_code,
-  TO_CHAR(receipt_date, 'YYYY-MM'),
+  f.material_code,
+  m.material_category,
+  f.supplier_code,
+  TO_CHAR(f.receipt_date, 'YYYY-MM'),
   COUNT(*),
-  ROUND(AVG(net_unit_price), 6),
-  MIN(net_unit_price),
-  MAX(net_unit_price)
-FROM THBI.DWD_GOODS_RECEIPT_LINE
-WHERE material_code IS NOT NULL
-  AND receipt_date IS NOT NULL
-  AND net_unit_price > 0
-GROUP BY material_code, supplier_code, TO_CHAR(receipt_date, 'YYYY-MM');
+  ROUND(AVG(f.net_unit_price), 6),
+  MIN(f.net_unit_price),
+  MAX(f.net_unit_price)
+FROM THBI.DWD_GOODS_RECEIPT_LINE f
+LEFT JOIN THBI.DWD_MATERIAL m ON m.material_code = f.material_code
+WHERE f.material_code IS NOT NULL
+  AND f.receipt_date IS NOT NULL
+  AND f.net_unit_price > 0
+GROUP BY f.material_code, m.material_category, f.supplier_code, TO_CHAR(f.receipt_date, 'YYYY-MM');

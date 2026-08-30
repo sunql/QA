@@ -15,15 +15,17 @@ CREATE TABLE THBI.DWD_SUPPLIER (
   payment_code       VARCHAR2(20),
   payment_term_type  VARCHAR2(20),
   currency_code      VARCHAR2(3),
+  zero_stock_flag    NUMBER,
   creation_date      DATE,
   update_date        DATE,
   etl_load_ts        TIMESTAMP(3)  DEFAULT SYSTIMESTAMP NOT NULL,
   CONSTRAINT PK_DWD_SUPPLIER PRIMARY KEY (supplier_code)
 );
 
+-- zero_stock_flag：2=零库存供应商，1=非零库存供应商（X3 YPTHFLGM_0，DWD 起按标准保留原值）
 INSERT INTO THBI.DWD_SUPPLIER
   (supplier_code, supplier_name, contact_name, payment_code,
-   payment_term_type, currency_code, creation_date, update_date)
+   payment_term_type, currency_code, zero_stock_flag, creation_date, update_date)
 SELECT
   BPSNUM_0,
   NULLIF(BPSNAM_0, ' '),
@@ -31,6 +33,7 @@ SELECT
   NULLIF(BPRPAY_0, ' '),
   NULLIF(BPTNUM_0, ' '),
   NULLIF(CUR_0, ' '),
+  YPTHFLGM_0,
   CASE WHEN CREDAT_0 > DATE '1900-01-01' THEN CREDAT_0 END,
   CASE WHEN UPDDAT_0 > DATE '1900-01-01' THEN UPDDAT_0 END
 FROM THBI.ODS_BPSUPPLIER;
@@ -114,6 +117,7 @@ CREATE TABLE THBI.DWD_MATERIAL (
   description_3       VARCHAR2(100),
   material_status     NUMBER,
   item_category       VARCHAR2(20),
+  material_category   VARCHAR2(20),
   standard_weight     NUMBER,
   standard_volume     NUMBER,
   purchase_base_price NUMBER,
@@ -123,9 +127,10 @@ CREATE TABLE THBI.DWD_MATERIAL (
   CONSTRAINT PK_DWD_MATERIAL PRIMARY KEY (material_code)
 );
 
+-- material_category：物料类别（X3 TCLCOD_0，产品大类，如 TH1/TJ1/A06E；item_category 为自定义分类 YITMCAT_0）
 INSERT INTO THBI.DWD_MATERIAL
   (material_code, description_1, description_2, description_3,
-   material_status, item_category, standard_weight, standard_volume,
+   material_status, item_category, material_category, standard_weight, standard_volume,
    purchase_base_price, creation_date, update_date)
 SELECT
   ITMREF_0,
@@ -134,6 +139,7 @@ SELECT
   NULLIF(ITMDES3_0, ' '),
   ITMSTA_0,
   NULLIF(YITMCAT_0, ' '),
+  NULLIF(TCLCOD_0, ' '),
   ITMWEI_0,
   ITMVOU_0,
   PURBASPRI_0,

@@ -9,6 +9,7 @@ SELECT
   s.supplier_key,
   s.supplier_code,
   s.supplier_name,
+  s.zero_stock_flag,
   -- 近 12 月准时交付率（收货行口径，权重 = 各月收货行数）
   ROUND(
     (SELECT SUM(d.on_time_line_count) FROM THBI.DWS_SUPPLIER_DELIVERY_MONTHLY d
@@ -73,8 +74,10 @@ SELECT
   g.po_line_no,
   g.supplier_code,
   s.supplier_name,
+  s.zero_stock_flag,
   g.material_code,
   m.description_1 AS material_desc,
+  m.material_category,
   g.received_qty,
   g.rejected_qty,
   g.net_unit_price,

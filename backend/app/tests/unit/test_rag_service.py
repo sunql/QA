@@ -18,7 +18,7 @@ class TestRagServiceSearch:
     @pytest.mark.asyncio
     async def test_searchDocuments_returns_hits(self) -> None:
         mock_emb_svc = AsyncMock()
-        mock_emb_svc.embed_texts = AsyncMock(return_value=[[0.1] * 1024])
+        mock_emb_svc.generateEmbedding = AsyncMock(return_value=[0.1] * 1024)
 
         mock_hit = {
             "document_id": "DOC-001",
@@ -46,13 +46,13 @@ class TestRagServiceSearch:
         assert len(hits) == 1
         assert hits[0]["document_id"] == "DOC-001"
         assert hits[0]["chunk_text"] == "测试文本内容"
-        mock_emb_svc.embed_texts.assert_called_once_with(["测试查询"])
+        mock_emb_svc.generateEmbedding.assert_called_once_with("测试查询")
         mock_search.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_searchDocuments_empty_result(self) -> None:
         mock_emb_svc = AsyncMock()
-        mock_emb_svc.embed_texts = AsyncMock(return_value=[[0.1] * 1024])
+        mock_emb_svc.generateEmbedding = AsyncMock(return_value=[0.1] * 1024)
 
         with patch(
             "app.services.rag_service._getEmbeddingService",
@@ -71,7 +71,7 @@ class TestRagServiceSearch:
     @pytest.mark.asyncio
     async def test_searchDocuments_embedding_failure_raises(self) -> None:
         mock_emb_svc = AsyncMock()
-        mock_emb_svc.embed_texts = AsyncMock(
+        mock_emb_svc.generateEmbedding = AsyncMock(
             side_effect=RuntimeError("模型不可用")
         )
 
@@ -103,7 +103,7 @@ class TestRagServiceIngest:
             MagicMock(chunk_id="chunk-0", text="这是测试文档内容。", sequence=0),
         ]
         mock_emb = AsyncMock()
-        mock_emb.embed_texts = AsyncMock(return_value=[[0.1] * 1024])
+        mock_emb.generateEmbedding = AsyncMock(return_value=[0.1] * 1024)
 
         with patch(
             "app.services.rag_service.parse_document",
@@ -179,7 +179,7 @@ class TestRagServiceIngest:
     async def test_ingestDocument_milvus_failure_raises(self) -> None:
         mock_session = MagicMock()
         mock_emb = AsyncMock()
-        mock_emb.embed_texts = AsyncMock(return_value=[[0.1] * 1024])
+        mock_emb.generateEmbedding = AsyncMock(return_value=[0.1] * 1024)
 
         with patch(
             "app.services.rag_service.parse_document",

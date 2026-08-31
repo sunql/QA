@@ -29,10 +29,11 @@ _embedding_service = None
 
 
 def _getEmbeddingService():
+    """返回 EmbeddingService 单例（懒初始化）。"""
     global _embedding_service
     if _embedding_service is None:
-        from app.services.embedding_service import getEmbeddingService
-        _embedding_service = getEmbeddingService()
+        from app.services.embedding_service import EmbeddingService
+        _embedding_service = EmbeddingService()
     return _embedding_service
 
 
@@ -103,11 +104,10 @@ class RagService:
         if not chunks:
             raise RagError("分块结果为空")
 
-        # 3. 生成 embedding
+        # 3. 生成 embedding（逐条调用 EmbeddingService.generateEmbedding）
         embedding_service = _getEmbeddingService()
-        texts_for_embed = [c.text for c in chunks]
         try:
-            embeddings = await embedding_service.embed_texts(texts_for_embed)
+            embeddings = [await embedding_service.generateEmbedding(c.text) for c in chunks]
         except Exception as e:
             raise RagError(f"Embedding 生成失败: {e}") from e
 
@@ -209,12 +209,12 @@ class RagService:
         """
         embedding_service = _getEmbeddingService()
         try:
-            query_emb = await embedding_service.embed_texts([query_text])
+            query_emb = await embedding_service.generateEmbedding(query_text)
         except Exception as e:
             raise RagError(f"Query embedding 失败: {e}") from e
 
         hits = searchDocumentChunks(
-            query_emb[0],
+            query_emb,
             securityLevel=security_level,
             topK=top_k,
         )

@@ -18,6 +18,10 @@ from pydantic.alias_generators import to_camel
 from app.domain.enums import (
     ChartType,
     DataSourceType,
+    DocumentSecurityLevel,
+    DocumentStatus,
+    DocumentType,
+    DocEntityRelationType,
     EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
@@ -1612,3 +1616,72 @@ class FeatureDefinitionHistoryRead(CamelModel):
     snapshot_json: dict
     changed_by: str | None = None
     changed_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.1: Document Catalog
+# ---------------------------------------------------------------------------
+
+
+class DocumentCreate(CamelModel):
+    """创建文档的请求体（Phase 5.1）。"""
+    document_id: str = Field(
+        ..., min_length=1, max_length=50,
+        description="业务唯一文档编号（如 DOC-2026-001）",
+    )
+    document_name: str = Field(..., min_length=1, max_length=255)
+    document_type: DocumentType = Field(default=DocumentType.CONTRACT)
+    version: str = Field(default="v1.0", max_length=20)
+    owner: str | None = Field(default=None, max_length=100)
+    effective_date: date | None = Field(default=None)
+    security_level: DocumentSecurityLevel = Field(default=DocumentSecurityLevel.L1)
+    storage_url: str | None = Field(default=None, max_length=512)
+    content_hash: str | None = Field(default=None, max_length=64)
+
+
+class DocumentUpdate(CamelModel):
+    """更新文档的请求体（Phase 5.1）。所有字段可选。"""
+    document_name: str | None = Field(default=None, max_length=255)
+    document_type: DocumentType | None = Field(default=None)
+    version: str | None = Field(default=None, max_length=20)
+    status: DocumentStatus | None = Field(default=None)
+    owner: str | None = Field(default=None, max_length=100)
+    effective_date: date | None = Field(default=None)
+    security_level: DocumentSecurityLevel | None = Field(default=None)
+    storage_url: str | None = Field(default=None, max_length=512)
+    content_hash: str | None = Field(default=None, max_length=64)
+
+
+class DocumentRead(CamelModel):
+    """文档响应（Phase 5.1）。"""
+    id: int
+    document_id: str
+    document_name: str
+    document_type: DocumentType
+    version: str
+    status: DocumentStatus
+    owner: str | None = None
+    effective_date: date | None = None
+    security_level: DocumentSecurityLevel
+    storage_url: str | None = None
+    content_hash: str | None = None
+    created_time: datetime
+    updated_time: datetime
+
+
+class DocEntityRelationCreate(CamelModel):
+    """创建文档-实体关联的请求体（Phase 5.1）。"""
+    document_id: str = Field(..., min_length=1, max_length=50)
+    entity_type: EntityType = Field(...)
+    entity_key: int = Field(..., gt=0)
+    relation_type: DocEntityRelationType = Field(default=DocEntityRelationType.CONTRACT)
+
+
+class DocEntityRelationRead(CamelModel):
+    """文档-实体关联响应（Phase 5.1）。"""
+    id: int
+    document_id: str
+    entity_type: str
+    entity_key: int
+    relation_type: DocEntityRelationType
+    created_time: datetime

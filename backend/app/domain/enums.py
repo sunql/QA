@@ -240,3 +240,41 @@ class FeatureRefreshFrequency(str, Enum):
     DAILY = "DAILY"
     WEEKLY = "WEEKLY"
     MONTHLY = "MONTHLY"
+
+
+class DocumentType(str, Enum):
+    """文档类型（Phase 5.1）。"""
+
+    CONTRACT = "CONTRACT"
+    REPORT_8D = "8D_REPORT"
+    AUDIT_REPORT = "AUDIT_REPORT"
+    SPEC = "SPEC"
+    SOP = "SOP"
+    QUALITY = "QUALITY"
+    OTHER = "OTHER"
+
+
+class DocumentStatus(str, Enum):
+    """文档状态（Phase 5.1）。"""
+
+    ACTIVE = "ACTIVE"
+    EXPIRED = "EXPIRED"
+    ARCHIVED = "ARCHIVED"
+
+
+class DocumentSecurityLevel(str, Enum):
+    """文档安全等级（Phase 5.1）。L1=公开，L2=内部，L3=机密。"""
+
+    L1 = "L1"
+    L2 = "L2"
+    L3 = "L3"
+
+
+class DocEntityRelationType(str, Enum):
+    """文档-实体关联类型（Phase 5.1）。"""
+
+    CONTRACT = "CONTRACT"
+    REPORT_8D = "8D_REPORT"
+    AUDIT_REPORT = "AUDIT_REPORT"
+    SPEC = "SPEC"
+    SOP = "SOP"

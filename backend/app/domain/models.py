@@ -35,6 +35,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.domain.enums import (
     DataSourceType,
+    DocumentSecurityLevel,
+    DocumentStatus,
+    DocumentType,
+    DocEntityRelationType,
     EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
@@ -1117,4 +1121,78 @@ class KpiCatalogHistory(Base):
         return (
             f"<KpiCatalogHistory id={self.id} kpi_id={self.kpi_id} "
             f"revision={self.revision} by {self.changed_by}>"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.1: Document Catalog
+# ---------------------------------------------------------------------------
+
+
+class DocumentCatalog(Base, TimestampMixin):
+    """文档目录表（Phase 5.1）。
+
+    存储文档元数据：合同/8D报告/审核报告/规格书/SOP 等。
+    document_id 业务唯一；security_level 控制向量检索权限（L1/L2/L3）。
+    storage_url 指向文件存储地址（本地路径或 S3/OSS URL）。
+    content_hash 用于完整性校验（MD5/SHA-256）。
+    """
+
+    __tablename__ = "document_catalog"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    document_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    document_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    document_type: Mapped[DocumentType] = mapped_column(String(30), nullable=False)
+    version: Mapped[str] = mapped_column(String(20), nullable=False, default="v1.0")
+    status: Mapped[DocumentStatus] = mapped_column(String(20), nullable=False, default=DocumentStatus.ACTIVE)
+    owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    security_level: Mapped[DocumentSecurityLevel] = mapped_column(
+        String(10), nullable=False, default=DocumentSecurityLevel.L1
+    )
+    storage_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentCatalog id={self.id} document_id={self.document_id} "
+            f"name={self.document_name} type={self.document_type}>"
+        )
+
+
+class DocumentEntityRelation(Base):
+    """文档-实体多对多关联表（Phase 5.1）。
+
+    一行 = 一个（文档 × 业务实体 × 关系类型）三元组。
+    用于：RAG 检索时按实体权限过滤 + 「某供应商有哪些合同」类查询。
+    唯一约束防止重复关联。
+    """
+
+    __tablename__ = "document_entity_relation"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    document_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    entity_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    relation_type: Mapped[DocEntityRelationType] = mapped_column(
+        String(30), nullable=False
+    )
+    created_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id", "entity_type", "entity_key", "relation_type",
+            name="uq_doc_entity_rel",
+        ),
+        Index("ix_doc_rel_entity", "entity_type", "entity_key"),
+        Index("ix_doc_rel_document", "document_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentEntityRelation id={self.id} doc={self.document_id} "
+            f"entity={self.entity_type}/{self.entity_key}>"
         )

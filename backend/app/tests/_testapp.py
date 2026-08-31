@@ -22,6 +22,7 @@ from app.api.v1 import (
     data_lineage,
     data_quality,
     datasource,
+    documents,
     embedding_provider,
     entity_mapping,
     features,
@@ -118,6 +119,9 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"]
     )
     testApp.include_router(features.router, prefix="/api/v1/features", tags=["features"])
+    testApp.include_router(
+        documents.router, prefix="/api/v1/documents", tags=["documents"]
+    )
     testApp.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"])
 

@@ -157,6 +157,7 @@ def createApp() -> FastAPI:
         data_lineage,
         data_quality,
         datasource,
+        documents,
         embedding_provider,
         entity_mapping,
         features,
@@ -204,6 +205,9 @@ def createApp() -> FastAPI:
         kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"]
     )
     app.include_router(features.router, prefix="/api/v1/features", tags=["features"])
+    app.include_router(
+        documents.router, prefix="/api/v1/documents", tags=["documents"]
+    )
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])

@@ -306,3 +306,14 @@ MSG_GOVERNANCE_PERMISSION_DENIED = (
     "仅 owner 部门或 admin 角色可改"
 )
 MSG_GOVERNANCE_KPI_NOT_FOUND = "KPI Catalog id={id} 不存在"
+
+# =============================================================================
+# Document Catalog（Phase 5.1）
+# =============================================================================
+
+MSG_DOCUMENT_NOT_FOUND = "文档 id={id} 不存在"
+MSG_DOCUMENT_DUPLICATE = "文档编号「{document_id}」已存在"
+MSG_DOCUMENT_REL_NOT_FOUND = "文档关联 id={id} 不存在"
+MSG_DOCUMENT_REL_EXISTS = (
+    "文档「{documentId}」与实体 {entityType}/{entityKey} 的关联已存在"
+)

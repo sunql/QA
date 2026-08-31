@@ -90,7 +90,7 @@ AI 可信度集成        自动解析              缺失对象建模          
 |---|---|---|
 | `feat-agent-registry` | 1.5-2 周 | ✅ done（2026-08-31） |
 | `feat-semantic-relations` | 2 周 | ✅ done（2026-08-31） |
-| `feat-graph-traversal-api` | 1.5-2 周 | 待启动 |
+| `feat-graph-traversal-api` | 1.5-2 周 | ✅ done（2026-08-31） |
 | `feat-agent-runtime-mvp` | 2-3 周 | 待启动 |
 
 ## 5. 复用的基础设施
@@ -125,8 +125,15 @@ AI 可信度集成        自动解析              缺失对象建模          
 
 ## 8. 当前进度
 
-- ✅ **Phase 1.1 `feat-data-quality-rule-model`** 进行中
-- ⏳ 其余 23 个 change 待启动
+- ✅ **Phase 1（DQ 质量 1.1-1.4）** done
+- ✅ **Phase 2（血缘 2.1-2.3）** done
+- ✅ **Phase 3（编码映射 + 缺失对象建模 + 治理字段 3.1-3.4）** done
+- ✅ **Phase 4（KPI Catalog + Feature Layer + 治理加固 + 在线查询 4.1-4.5）** done
+- ✅ **Phase 5（文档 RAG + Supplier 360° ADS + Risk Agent 5.1-5.4）** done
+- ✅ **Phase 6.1 `feat-agent-registry`** done（2026-08-31）
+- ✅ **Phase 6.2 `feat-semantic-relations`** done（2026-08-31）
+- ✅ **Phase 6.3 `feat-graph-traversal-api`** done（2026-08-31）
+- ⏳ **Phase 6.4 `feat-agent-runtime-mvp`** 待启动（最后一个 change）
 
 ## 9. 参考资料
 

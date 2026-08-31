@@ -322,3 +322,16 @@ MSG_AGENT_POLICY_DUPLICATE = (
     "同一 Agent 对同一 data_object + data_layer 已存在策略"
 )
 MSG_AGENT_REGISTRY_FORBIDDEN = "无权修改该 Agent：仅 owner 部门成员或 admin 角色可操作"
+
+# =============================================================================
+# Phase 6.3 feat-graph-traversal-api：知识图谱多跳推理
+# =============================================================================
+
+MSG_SCHEMA_GRAPH_HOP = "一跳遍历记录：起点/终点节点属性 + 关系类型 + 深度（1..maxHops）"
+MSG_SCHEMA_GRAPH_TRAVERSAL = (
+    "多跳推理结果（仅 intent=graph_reasoning 时填充）；由 GraphTraversalService "
+    "对 Neo4j 业务关系图（BusinessEntity 子图）从起始实体做多跳遍历生成。"
+    "前端 MessageItem 按字段存在性路由到 GraphTraversalCard"
+)
+MSG_GRAPH_TRAVERSAL_NOT_FOUND = "业务图中不存在该实体：{label} {key}"
+MSG_GRAPH_TRAVERSAL_EMPTY = "该实体在 {maxHops} 跳内无关联业务实体"

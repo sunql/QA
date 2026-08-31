@@ -60,8 +60,16 @@ from app.services.chat_stream_output import _ANSWER_SYSTEM_PROMPT, ChatStreamOut
 from app.services.datasource_service import DataSourceService
 from app.services.embedding_service import EmbeddingService
 from app.services.intent_service import IntentResult, IntentService
-from app.domain.error_messages import MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING
-from app.services.messages_zh import MSG_SUPPLIER_360_NOT_FOUND, MSG_SUPPLIER_RISK_NOT_FOUND
+from app.domain.error_messages import (
+    MSG_GRAPH_TRAVERSAL_NOT_FOUND,
+    MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING,
+)
+from app.services.graph_traversal_service import GraphTraversalService
+from app.services.messages_zh import (
+    MSG_GRAPH_TRAVERSAL_UNAVAILABLE,
+    MSG_SUPPLIER_360_NOT_FOUND,
+    MSG_SUPPLIER_RISK_NOT_FOUND,
+)
 from app.services.model_router_service import ModelRouterService, RoutingContext
 from app.services.nl2sql_service import Nl2SqlService, SqlResult, _safeSchemaPrefix, _sanitizeContext
 from app.services.ontology_service import OntologyService
@@ -308,6 +316,7 @@ class ChatService(ChatStreamOutputMixin):
         stepPlanner: StepQueryPlanner | None = None,
         stepAggregator: StepAggregator | None = None,
         dqScoreService: Any | None = None,  # Phase 1.4：数据可信度 badge 查询
+        graphTraversalService: GraphTraversalService | None = None,  # Phase 6.3：图推理
     ) -> None:
         self._intent = intentService or IntentService()
         self._nl2sql = nl2sqlService or Nl2SqlService()
@@ -327,6 +336,8 @@ class ChatService(ChatStreamOutputMixin):
         self._dqScoreService = dqScoreService
         # Phase 4.4：注入 Feature 查询 service（默认懒加载避免循环 import）
         self._featureQueryService: Any | None = None
+        # Phase 6.3：图推理 service（无循环依赖，直接实例化）
+        self._graphTraversal = graphTraversalService or GraphTraversalService()
         # 会话亲和性窗口：前 N 轮锁定模型；None 时按需懒加载 settings
         self._affinityTurns = affinityTurns
 
@@ -351,6 +362,9 @@ class ChatService(ChatStreamOutputMixin):
         # Phase 5.4：供应商风险 Agent（chat 拦截，跳过 NL2SQL）
         if result.intent == IntentType.SUPPLIER_RISK:
             return await self._handleSupplierRisk(session, dto, result)
+        # Phase 6.3：知识图谱多跳推理（chat 拦截，跳过 NL2SQL）
+        if result.intent == IntentType.GRAPH_REASONING:
+            return await self._handleGraphReasoning(session, dto, result)
 
         pc = await self._buildPipelineContext(
             session, dto,
@@ -1227,6 +1241,58 @@ class ChatService(ChatStreamOutputMixin):
             answer=answer,
             intent=result.intent.value,
             supplier_risk=data,
+        )
+
+    async def _handleGraphReasoning(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        result: IntentResult,
+    ) -> ChatResponse:
+        """Phase 6.3：知识图谱多跳推理（chat 拦截路径，跳过 NL2SQL）。
+
+        与 _handleSupplierRisk 同语义：supplierKey 缺失 / 实体不在图中都返回
+        ChatResponse + 友好 answer，graph_traversal=None（前端按字段存在性路由）。
+        成功 -> answer=可达实体摘要（模板合成，不调 LLM），graph_traversal=<完整对象>。
+        Neo4j 异常 -> warn + 降级 answer（不阻断 chat 主链路）。
+        """
+        if not result.supplierKey:
+            return ChatResponse(
+                answer=MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING,
+                intent=result.intent.value,
+            )
+        try:
+            supplierKey = int(result.supplierKey)
+        except ValueError:
+            return ChatResponse(
+                answer=MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING,
+                intent=result.intent.value,
+            )
+        try:
+            traversal = self._graphTraversal.traverseForChat(str(supplierKey))
+            answer = self._graphTraversal.buildChatAnswer(traversal)
+        except NotFoundError:
+            return ChatResponse(
+                answer=MSG_GRAPH_TRAVERSAL_NOT_FOUND.format(
+                    label="Supplier", key=supplierKey
+                ),
+                intent=result.intent.value,
+            )
+        except Exception:  # noqa: BLE001 - 图库故障降级，不阻断 chat
+            logger.warning(
+                "graph reasoning failed for supplier %s, degrading", supplierKey
+            )
+            return ChatResponse(
+                answer=MSG_GRAPH_TRAVERSAL_UNAVAILABLE,
+                intent=result.intent.value,
+            )
+        await self._storeSessionMessages(
+            session, dto.sessionId, dto.question, answer, None
+        )
+        return ChatResponse(
+            answer=answer,
+            intent=result.intent.value,
+            graph_traversal=traversal,
         )
 
     async def _handleDefineMetric(

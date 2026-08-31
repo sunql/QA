@@ -125,6 +125,8 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_DQ_BADGES,
     MSG_SCHEMA_CHAT_SUPPLIER_360,
     MSG_SCHEMA_CHAT_SUPPLIER_RISK,
+    MSG_SCHEMA_GRAPH_HOP,
+    MSG_SCHEMA_GRAPH_TRAVERSAL,
     MSG_SCHEMA_DQ_COMPUTE_EVALUATED_RULES,
     MSG_SCHEMA_DQ_COMPUTE_SAVED_SCORES,
     MSG_SCHEMA_DQ_COMPUTE_DURATION_MS,
@@ -779,6 +781,45 @@ class SupplierRiskRead(CamelModel):
     )
 
 
+class GraphTraversalHop(CamelModel):
+    """一跳遍历记录（Phase 6.3，外部消费契约）。
+
+    对应 ``traverseBusinessGraph`` 返回行：depth = 1..maxHops，
+    起点固定为遍历起始实体（variable-length path 的每条行按末边展开）。
+    """
+
+    depth: int = Field(..., ge=1, description=MSG_SCHEMA_GRAPH_HOP)
+    from_key: str
+    from_code: str
+    from_name: str | None = None
+    from_type: str
+    rel_type: str
+    to_key: str
+    to_code: str
+    to_name: str | None = None
+    to_type: str
+
+
+class GraphTraversalRead(CamelModel):
+    """多跳推理结果（Phase 6.3，外部消费契约）。
+
+    - start：遍历起点（entityType + key，来自用户问句或 API 参数）
+    - maxHops：实际遍历深度上限（1..5）
+    - hops：逐跳展开的可达链（已按深度 + 终点 key 排序，不含起始节点自身）
+    - reachableTypes：去重后的可达实体类型集合（快速摘要，前端徽标用）
+    """
+
+    start_key: str
+    start_type: str
+    max_hops: int = Field(..., ge=1)
+    hops: list[GraphTraversalHop] = Field(default_factory=list)
+    reachable_types: list[str] = Field(default_factory=list)
+    fetched_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="遍历执行时间",
+    )
+
+
 class FeatureComputeResult(CamelModel):
     """单特征计算结果（Phase 4.3）。rows = 落库/覆盖的特征值行数。"""
 
@@ -1283,6 +1324,11 @@ class ChatResponse(CamelModel):
     supplier_risk: SupplierRiskRead | None = Field(
         default=None,
         description=MSG_SCHEMA_CHAT_SUPPLIER_RISK,
+    )
+    # Phase 6.3：知识图谱多跳推理（仅 intent=graph_reasoning 时填充；前端按字段存在性路由）
+    graph_traversal: GraphTraversalRead | None = Field(
+        default=None,
+        description=MSG_SCHEMA_GRAPH_TRAVERSAL,
     )
 
 

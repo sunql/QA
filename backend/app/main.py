@@ -181,6 +181,7 @@ def createApp() -> FastAPI:
         entity_mapping,
         features,
         graph,
+        graph_traversal,
         kpi_catalog,
         local_import,
         model_config,
@@ -244,6 +245,9 @@ def createApp() -> FastAPI:
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(graph.router, prefix="/api/v1/system", tags=["system"])
+    app.include_router(
+        graph_traversal.router, prefix="/api/v1/graph", tags=["graph"]
+    )
     app.include_router(vectors.router, prefix="/api/v1/system", tags=["system"])
 
     @app.get("/api/v1/health", response_model=HealthResponse, tags=["system"])

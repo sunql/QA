@@ -217,6 +217,37 @@ export const zhCN = {
     requestFailed: "查询失败：{message}",
   },
 
+  graphTraversal: {
+    cardTitle: "知识图谱推理",
+    maxHops: "遍历 {hops} 跳",
+    fetchedAt: "执行时间：{time}",
+    reachable: "可达实体类型：",
+    table: {
+      depth: "跳数",
+      relation: "关系",
+      // from 为末边前驱（depth=1 时即起点，depth≥2 时为路径中间节点），非始终是遍历起点
+      from: "上一跳",
+      to: "终点",
+    },
+    empty: {
+      hops: "该实体 {maxHops} 跳内无关联业务实体",
+      types: "无",
+    },
+  },
+
+  graphTraversalPage: {
+    title: "业务知识图谱 · 多跳遍历",
+    hint: "从业务实体（供应商 / 物料 / 采购订单 / 收货 / 来料检验 / NCR / 合同）出发做多跳推理，查看供应链链路上的可达实体。也可在 AIChatService 中问「供应商 X 涉及哪些物料」自动触发。",
+    startType: "起点类型",
+    startKey: "实体键（enterprise_key / document_id）",
+    startKeyPlaceholder: "如 100001",
+    maxHops: "最大跳数",
+    query: "遍历",
+    invalidKey: "请输入实体键",
+    requestFailed: "遍历失败：{message}",
+    empty: "暂无数据",
+  },
+
   messageList: {
     empty: "输入问题开始对话",
   },

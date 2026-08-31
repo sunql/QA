@@ -180,6 +180,29 @@ _SUPPLIER_RISK_RE = re.compile(
 )
 
 # =============================================================================
+# 知识图谱多跳推理（Phase 6.3）：chat 拦截路径，跳过 NL2SQL
+# =============================================================================
+
+# 命中关键词：含「涉及 / 关联 / 关系 / 图谱 / 链路 / 路径」任一，且上下文
+# 出现「供应商 X」或「supplier X」。避免与 supplier_360 / supplier_risk 重叠：
+# 不命中 360 / 全貌 / 风险 / 健康度 / 评分 等词（优先级在前两者之后）。
+# 排除「相关 / 相连 / 有关」等形容词性宽泛词（code-reviewer HIGH：会把
+# 「供应商 X 相关的订单金额」这类普通聚合查询误吸为图推理）。
+# 「关联 / 关系」等名词 + 聚合量词残留风险由 _SUPPLIER_AGGREGATION_RE 兜底。
+_SUPPLIER_GRAPH_RE = re.compile(
+    r"(?:供应商|supplier)[^\n。?]*?(?P<key>\d{5,9})[^\n。?]*?(?:涉及|关联|关系|图谱|链路|路径)"
+    r"|(?:涉及|关联|关系|图谱|链路|路径)[^\n。?]*?(?:供应商|supplier)[^\n。?]*?(?P<key2>\d{5,9})"
+    r"|(?:供应商|supplier)\s*(?P<key3>\d{5,9})\s*(?:涉及|关联|关系)"
+)
+
+# 聚合量词兜底：图推理回答「与谁关联」的实体集合，从不回答数值指标；
+# 命中任一量词（金额 / 数量 / 合计 / 成本 / 占比…）即视为数值型聚合查询，
+# 交由 NL2SQL 处理，避免「供应商 X 关联的订单总金额」被吸为图推理卡片。
+_SUPPLIER_AGGREGATION_RE = re.compile(
+    r"(?:总金额|金额|总数量|数量|总额|合计|总计|均值|平均数|平均|总数|总价|成本|多少钱|多少元|占比|比例)"
+)
+
+# =============================================================================
 # 斜杠指令（Phase 5）：优先级最高，跳过所有自然语言关键词匹配
 # =============================================================================
 
@@ -304,6 +327,13 @@ class IntentService:
         if riskKey is not None:
             return IntentResult(
                 intent=IntentType.SUPPLIER_RISK, supplierKey=riskKey
+            )
+        # Phase 6.3: 知识图谱多跳推理检测（在 supplier_360 / supplier_risk 之后，
+        # 兜住「供应商 100001 涉及哪些物料 / 关联什么」类推理问法）。
+        graphKey = self._extractSupplierGraphKey(original)
+        if graphKey is not None:
+            return IntentResult(
+                intent=IntentType.GRAPH_REASONING, supplierKey=graphKey
             )
         if any(kw in normalized for kw in _DEFINE_KEYWORDS):
             name, formula = self._extractDefine(original)
@@ -445,6 +475,32 @@ class IntentService:
         if match is None:
             return None
         return match.group("key") or match.group("key2") or match.group("key3")
+
+    def _extractSupplierGraphKey(self, message: str) -> str | None:
+        """从用户问句提取 supplier enterprise_key（Phase 6.3 图推理）。
+
+        匹配模式（_SUPPLIER_GRAPH_RE）：
+        - 「供应商 100001 涉及哪些物料」
+        - 「supplier 100001 的关联订单」
+        - 「图谱上 供应商 100001 有什么关系」
+        - 「供应商 100001 涉及什么」
+
+        与 supplier_360 / supplier_risk 同数字边界（5-9 位），使用 ORIGINAL 文本。
+        优先级在两者之后：命中 360 / 风险词的问句已被前序分支消费。
+        聚合量词兜底：命中 _SUPPLIER_AGGREGATION_RE 的数值型聚合查询不判为图推理
+        （如「供应商 100001 关联的采购订单总金额是多少」走 NL2SQL）。
+        未命中返回 None。
+        """
+        match = _SUPPLIER_GRAPH_RE.search(message)
+        if match is None:
+            return None
+        if _SUPPLIER_AGGREGATION_RE.search(message) is not None:
+            return None
+        return (
+            match.group("key")
+            or match.group("key2")
+            or match.group("key3")
+        )
 
     @staticmethod
     def _isExplicitMultiStep(normalized: str) -> bool:

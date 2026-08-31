@@ -30,6 +30,10 @@ const KNOWN_INTENTS = new Set<IntentType>([
   "define",
   "map",
   "metric",
+  // 拦截路径意图（Phase 5.3/5.4/6.3）：卡片按字段存在性渲染，但意图需可持久化
+  "supplier_360",
+  "supplier_risk",
+  "graph_reasoning",
 ]);
 
 function isIntent(value: unknown): value is IntentType {

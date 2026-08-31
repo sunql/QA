@@ -10,6 +10,7 @@ import ChartRenderer from "./ChartRenderer";
 import TermDictionaryButton from "./TermDictionaryButton";
 import Supplier360Card from "./Supplier360Card";
 import SupplierRiskCard from "./SupplierRiskCard";
+import GraphTraversalCard from "./GraphTraversalCard";
 import type { ChatMessage } from "../../types/chat";
 import { useTranslation } from "../../i18n";
 
@@ -114,6 +115,12 @@ function MessageItem({ message, exporting = false, onExportSingleTurn }: Message
             {message.supplierRisk ? (
               <div style={{ marginTop: 8 }}>
                 <SupplierRiskCard data={message.supplierRisk} />
+              </div>
+            ) : null}
+            {/* Phase 6.3：知识图谱多跳推理卡片（仅 intent=graph_reasoning + 命中起点时回填） */}
+            {message.graphTraversal ? (
+              <div style={{ marginTop: 8 }}>
+                <GraphTraversalCard data={message.graphTraversal} />
               </div>
             ) : null}
             {message.tokensUsed !== undefined ||

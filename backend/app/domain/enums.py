@@ -135,6 +135,8 @@ class IntentType(str, Enum):
     SUPPLIER_360 = "supplier_360"
     # Phase 5.4: 供应商风险 Agent（chat 拦截路径，跳过 NL2SQL 走 SupplierRiskService）
     SUPPLIER_RISK = "supplier_risk"
+    # Phase 6.3: 知识图谱多跳推理（chat 拦截路径，跳过 NL2SQL 走 GraphTraversalService）
+    GRAPH_REASONING = "graph_reasoning"
 
 
 class LineageLayer(str, Enum):

@@ -354,3 +354,12 @@ MSG_DOCUMENT_REL_NOT_FOUND = "文档关联 id={id} 不存在"
 MSG_DOCUMENT_REL_EXISTS = (
     "文档「{documentId}」与实体 {entityType}/{entityKey} 的关联已存在"
 )
+
+# =============================================================================
+# Phase 6.3 feat-graph-traversal-api：知识图谱多跳推理
+# =============================================================================
+
+MSG_GRAPH_TRAVERSAL_UNAVAILABLE = (
+    "知识图谱服务暂时不可用，无法执行多跳推理。请稍后重试，"
+    "或改用数据查询问法（如「供应商 X 的订单数」）。"
+)

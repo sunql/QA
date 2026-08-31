@@ -55,6 +55,10 @@ BUSINESS_RELATION_TYPES = frozenset(
     }
 )
 
+# 多跳遍历上限（Phase 6.3）：防止无界 variable-length path 拖垮图库。
+# 业务链路语义上限为 5 跳（Supplier->Material<-PO->GR->IQC->NCR）。
+_MAX_TRAVERSAL_HOPS = 5
+
 
 def _assertBusinessLabel(label: str) -> None:
     """业务节点 label 白名单校验（CQL 拼接前置防御）。"""
@@ -498,3 +502,73 @@ def isNeo4jAvailable() -> bool:
     except Exception:  # noqa: BLE001 - 探测语义：任何连接异常都视为不可用
         logger.warning("Neo4j unavailable, business graph tests will be skipped")
         return False
+
+
+def traverseBusinessGraph(
+    startLabel: str,
+    startKey: str,
+    maxHops: int,
+) -> list[dict[str, Any]]:
+    """从起始业务实体做多跳遍历（方向不限），返回逐跳展开的可达链。
+
+    每行一条 (深度, 末边起点, 末边关系, 终点)，from→relType→to 是真实边：
+    - depth：1..maxHops（起始节点自身不返回）
+    - from*：**末边（rels[-1]）的真实前驱节点**（= nodes(path)[-2]）。
+      depth=1 时即起始节点；depth≥2 时为路径中间节点（如 S→M→PO 行的
+      from=Material、rel=CONTAINS、to=PurchaseOrder）。
+    - to*：可达终点节点 key / code / name / entityType
+    - relType：末边关系类型（白名单内的 6 种业务关系）
+
+    用 variable-length path ``[*1..N]``（由 maxHops 拼入 CQL 前强制
+    ``1 <= maxHops <= _MAX_TRAVERSAL_HOPS``，防无界遍历）。
+    遍历会展开所有方向（-），符合业务推理语义（如从物料反查供应商）。
+    """
+    _assertBusinessLabel(startLabel)
+    if not 1 <= maxHops <= _MAX_TRAVERSAL_HOPS:
+        raise ValueError(
+            f"maxHops must be in [1, {_MAX_TRAVERSAL_HOPS}], got {maxHops}"
+        )
+    driver = getDriver()
+    cql = f"""
+        MATCH path = (start:BusinessEntity:{startLabel} {{key: $key}})
+              -[rels*1..{maxHops}]-(end:BusinessEntity)
+        WHERE start <> end
+        WITH start, end, rels, nodes(path) AS pathNodes, size(rels) AS depth
+        ORDER BY depth, end.key
+        RETURN depth,
+               pathNodes[-2].key AS fromKey, pathNodes[-2].code AS fromCode,
+               pathNodes[-2].name AS fromName, pathNodes[-2].entityType AS fromType,
+               type(rels[-1]) AS relType,
+               end.key AS toKey, end.code AS toCode,
+               end.name AS toName, end.entityType AS toType
+    """
+    with driver.session() as session:
+        return [
+            {
+                "depth": r["depth"],
+                "fromKey": r["fromKey"],
+                "fromCode": r["fromCode"],
+                "fromName": r["fromName"],
+                "fromType": r["fromType"],
+                "relType": r["relType"],
+                "toKey": r["toKey"],
+                "toCode": r["toCode"],
+                "toName": r["toName"],
+                "toType": r["toType"],
+            }
+            for r in session.run(cql, key=startKey)
+        ]
+
+
+def getBusinessNode(label: str, key: str) -> dict[str, Any] | None:
+    """查询单个业务实体节点属性（不存在返回 None）。"""
+    _assertBusinessLabel(label)
+    driver = getDriver()
+    cql = f"""
+        MATCH (b:BusinessEntity:{label} {{key: $key}})
+        RETURN b.key AS key, b.code AS code, b.name AS name,
+               b.entityType AS entityType, b.source AS source, labels(b) AS labels
+    """
+    with driver.session() as session:
+        records = list(session.run(cql, key=key))
+        return dict(records[0]) if records else None

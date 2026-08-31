@@ -12,10 +12,11 @@ import {
 import { ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { listGraphNodes, getGraphRelations, type GraphNode, type GraphRelation } from "../api/systemViewer";
+import GraphTraversalPanel from "../components/graph/GraphTraversalPanel";
 
 const { Text } = Typography;
 
-const LABELS = ["Class", "Property", "Metric"] as const;
+const LABELS = ["Class", "Property", "Metric", "业务图"] as const;
 
 function RelationPanel({ label, nodeId }: { label: string; nodeId: number }) {
   const [rels, setRels] = useState<GraphRelation[]>([]);
@@ -130,6 +131,27 @@ export default function Neo4jGraphPage() {
       : activeLabel === "Property"
       ? propertyColumns
       : metricColumns;
+
+  // 业务图 Tab：直接渲染多跳遍历面板，跳过本体节点表
+  if (activeLabel === "业务图") {
+    return (
+      <div style={{ overflow: "hidden" }}>
+        <Space style={{ marginBottom: 12 }} wrap>
+          <Segmented
+            options={[...LABELS]}
+            value={activeLabel}
+            onChange={(v) => {
+              setActiveLabel(String(v));
+              setSearch("");
+            }}
+          />
+        </Space>
+        <Card bodyStyle={{ padding: 16 }} style={{ overflow: "hidden" }}>
+          <GraphTraversalPanel />
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div style={{ overflow: "hidden" }}>

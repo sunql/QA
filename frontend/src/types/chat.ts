@@ -14,7 +14,8 @@ export type IntentType =
   | "map"
   | "metric"
   | "supplier_360"
-  | "supplier_risk";
+  | "supplier_risk"
+  | "graph_reasoning";
 
 export type ChartType = "table" | "bar" | "pie" | "line" | "scatter";
 
@@ -140,6 +141,9 @@ export interface ChatResponse {
   // Phase 5.4：供应商风险 Agent（仅 intent=supplier_risk 时填充；其余为 null）。
   // 由 MessageItem 按字段存在性路由到 SupplierRiskCard 渲染。
   supplierRisk?: import("./supplierRisk").SupplierRiskRead | null;
+  // Phase 6.3：知识图谱多跳推理（仅 intent=graph_reasoning 时填充；其余为 null）。
+  // 由 MessageItem 按字段存在性路由到 GraphTraversalCard 渲染。
+  graphTraversal?: import("./graphTraversal").GraphTraversalRead | null;
 }
 
 // 会话亲和性状态：前 N 轮锁定模型 + 剩余轮数（解锁时为 null）
@@ -195,6 +199,8 @@ export interface ChatMessage {
   supplier360?: import("./supplier").Supplier360Read | null;
   // Phase 5.4：供应商风险 Agent 完整对象（仅 intent=supplier_risk 时回填）
   supplierRisk?: import("./supplierRisk").SupplierRiskRead | null;
+  // Phase 6.3：知识图谱多跳推理完整对象（仅 intent=graph_reasoning 时回填）
+  graphTraversal?: import("./graphTraversal").GraphTraversalRead | null;
   // 后端 SessionMessage 主键（PDF 单条导出需要：chatStore 暂未在 sendMessage
   // 完成后回填，故默认 undefined，全局按钮正常工作，单条入口 disabled）
   dbMessageId?: number;

@@ -46,6 +46,8 @@ export const enUS = {
       features: "Feature Catalog",
       usage: "Usage Dashboard",
       status: "Service Status",
+      graph: "Neo4j Graph DB",
+      vectors: "Milvus Vector DB",
       supplier360: "Supplier 360°",
       supplierRisk: "Supplier Risk",
       agents: "Agent Registry",
@@ -208,6 +210,37 @@ export const enUS = {
     invalidKey: "Please enter a valid enterprise_key (5-9 digits)",
     notFound: "Supplier enterprise_key={key} does not exist or is not registered in entity_mapping",
     requestFailed: "Query failed: {message}",
+  },
+
+  graphTraversal: {
+    cardTitle: "Knowledge Graph Reasoning",
+    maxHops: "Traverse {hops} hops",
+    fetchedAt: "Executed: {time}",
+    reachable: "Reachable entity types:",
+    table: {
+      depth: "Hop",
+      relation: "Relation",
+      // from is the last-edge predecessor (start at depth=1, intermediate node at depth>=2), not always the traversal root
+      from: "Prev Hop",
+      to: "To",
+    },
+    empty: {
+      hops: "No related business entities within {maxHops} hops",
+      types: "None",
+    },
+  },
+
+  graphTraversalPage: {
+    title: "Business Knowledge Graph · Multi-hop Traversal",
+    hint: "Start from a business entity (Supplier / Material / Purchase Order / Goods Receipt / Incoming Inspection / NCR / Contract) and reason across hops to see reachable entities on the supply-chain path. Or ask AIChatService 'what materials does supplier X involve'.",
+    startType: "Start type",
+    startKey: "Entity key (enterprise_key / document_id)",
+    startKeyPlaceholder: "e.g. 100001",
+    maxHops: "Max hops",
+    query: "Traverse",
+    invalidKey: "Please enter an entity key",
+    requestFailed: "Traversal failed: {message}",
+    empty: "No data",
   },
 
   messageList: {

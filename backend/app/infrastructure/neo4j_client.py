@@ -20,6 +20,53 @@ logger = logging.getLogger(__name__)
 # 仅允许删除这些已知 label（deleteNode 通过字符串拼接 label，必须白名单防注入）
 _ALLOWED_LABELS = frozenset({"Class", "Property", "Metric"})
 
+# =============================================================================
+# 业务实体子图（Phase 6.2 feat-semantic-relations）
+# =============================================================================
+
+# 业务实体节点 label：节点统一携带 BusinessEntity 主 label + 具体类型副 label，
+# 与本体图（Class/Property/Metric）物理隔离 —— 本体同步/删除路径永不触碰业务节点。
+# CQL label 不可参数化，必须白名单防注入（同 _ALLOWED_LABELS 模式）。
+BUSINESS_ENTITY_LABELS = frozenset(
+    {
+        "Supplier",
+        "Material",
+        "PurchaseOrder",
+        "GoodsReceipt",
+        "IncomingInspection",
+        "NCR",
+        "Contract",
+    }
+)
+
+# 业务关系类型（Sheet 16 采购业务流转语义）：
+# Supplier-SUPPLIES->Material / PurchaseOrder-CONTAINS->Material /
+# PurchaseOrder-GENERATES->GoodsReceipt / GoodsReceipt-INSPECTED_BY->IncomingInspection /
+# IncomingInspection-GENERATED->NCR / Supplier-SIGNED->Contract
+# CQL 关系类型同样不可参数化，白名单防注入。
+BUSINESS_RELATION_TYPES = frozenset(
+    {
+        "SUPPLIES",
+        "CONTAINS",
+        "GENERATES",
+        "INSPECTED_BY",
+        "GENERATED",
+        "SIGNED",
+    }
+)
+
+
+def _assertBusinessLabel(label: str) -> None:
+    """业务节点 label 白名单校验（CQL 拼接前置防御）。"""
+    if label not in BUSINESS_ENTITY_LABELS:
+        raise ValueError(f"Invalid business entity label: {label!r}")
+
+
+def _assertBusinessRelation(relType: str) -> None:
+    """业务关系类型白名单校验（CQL 拼接前置防御）。"""
+    if relType not in BUSINESS_RELATION_TYPES:
+        raise ValueError(f"Invalid business relation type: {relType!r}")
+
 
 def _sanitizeUri(uri: str) -> str:
     """去除 URI 中可能内嵌的凭据，避免密码写入日志。"""
@@ -320,3 +367,134 @@ def getNodeRelationships(label: str, nodeId: int) -> list[dict[str, Any]]:
     """
     with driver.session() as session:
         return [dict(r) for r in session.run(cql, id=nodeId)]
+
+
+# =============================================================================
+# Business entity graph operations（Phase 6.2，幂等 MERGE）
+# =============================================================================
+
+
+def upsertBusinessEntityNode(
+    label: str, key: str, code: str, name: str | None, source: str
+) -> None:
+    """按 key 幂等创建/更新业务实体节点（BusinessEntity + 具体类型双 label）。
+
+    - key：实体唯一键（entity_mapping 的 enterprise_key 字符串化 / Contract 的 document_id）
+    - code：业务编码（SUP000001 / RM-STEEL-001 / PO202608001 …）
+    - source：来源标记（entity_mapping | sheet16_demo | document_catalog），便于溯源
+    """
+    _assertBusinessLabel(label)
+    driver = getDriver()
+    cql = f"""
+        MERGE (b:BusinessEntity:{label} {{key: $key}})
+        SET b.code = $code, b.name = $name, b.entityType = $label, b.source = $source
+        RETURN b
+    """
+    with driver.session() as session:
+        session.run(
+            cql, key=key, code=code, name=name, label=label, source=source
+        )
+
+
+def linkBusinessRelation(
+    relType: str,
+    fromLabel: str,
+    fromKey: str,
+    toLabel: str,
+    toKey: str,
+    properties: dict[str, Any] | None = None,
+) -> None:
+    """幂等创建业务实体间关系边（MERGE，含可选边属性）。
+
+    两端节点须已存在（MATCH 而非 MERGE，防止边写入悄悄创建孤立节点）。
+    relType / fromLabel / toLabel 均经白名单校验后拼入 CQL。
+    """
+    _assertBusinessRelation(relType)
+    _assertBusinessLabel(fromLabel)
+    _assertBusinessLabel(toLabel)
+    driver = getDriver()
+    props = properties or {}
+    cql = f"""
+        MATCH (a:BusinessEntity:{fromLabel} {{key: $fromKey}}),
+              (b:BusinessEntity:{toLabel} {{key: $toKey}})
+        MERGE (a)-[r:{relType}]->(b)
+        SET r += $props
+    """
+    with driver.session() as session:
+        session.run(
+            cql, fromKey=fromKey, toKey=toKey, props=props
+        )
+
+
+def deleteBusinessGraph() -> int:
+    """清空业务实体子图（含全部边）。本体节点（Class/Property/Metric）不受影响。
+
+    供 seed 重放与测试隔离使用；BusinessEntity 主 label 保证删除范围封闭。
+    """
+    driver = getDriver()
+    cql = """
+        MATCH (b:BusinessEntity)
+        DETACH DELETE b
+        RETURN count(b) AS deleted
+    """
+    with driver.session() as session:
+        [record] = session.run(cql)
+        return int(record["deleted"])
+
+
+def countBusinessNodes() -> int:
+    """业务实体节点总数（含 Contract 等文档实体）。"""
+    driver = getDriver()
+    with driver.session() as session:
+        [record] = session.run("MATCH (b:BusinessEntity) RETURN count(b) AS cnt")
+        return int(record["cnt"])
+
+
+def countBusinessRelations() -> int:
+    """业务实体间关系边总数（任意 BusinessEntity 节点间的边）。"""
+    driver = getDriver()
+    cql = """
+        MATCH (:BusinessEntity)-[r]->(:BusinessEntity)
+        RETURN count(r) AS cnt
+    """
+    with driver.session() as session:
+        [record] = session.run(cql)
+        return int(record["cnt"])
+
+
+def getBusinessGraphSnapshot() -> dict[str, Any]:
+    """业务关系图快照：节点（label/key/code/name）+ 边（relType/from/to）。
+
+    供 seed 校验、前端图渲染（后续 Phase）与 6.3 图遍历 API 预研使用。
+    """
+    driver = getDriver()
+    nodesCql = """
+        MATCH (b:BusinessEntity)
+        RETURN b.key AS key, b.code AS code, b.name AS name,
+               b.entityType AS entityType, b.source AS source,
+               labels(b) AS labels
+        ORDER BY b.entityType, b.code
+    """
+    edgesCql = """
+        MATCH (a:BusinessEntity)-[r]->(b:BusinessEntity)
+        RETURN a.key AS fromKey, a.entityType AS fromType,
+               type(r) AS relType,
+               b.key AS toKey, b.entityType AS toType
+        ORDER BY type(r), a.key
+    """
+    with driver.session() as session:
+        nodes = [dict(r) for r in session.run(nodesCql)]
+        edges = [dict(r) for r in session.run(edgesCql)]
+        return {"nodes": nodes, "edges": edges}
+
+
+def isNeo4jAvailable() -> bool:
+    """探测 Neo4j 连接是否可用（供集成测试按需跳过，避免 CI 无图库时阻断）。"""
+    try:
+        driver = getDriver()
+        with driver.session() as session:
+            session.run("RETURN 1")
+        return True
+    except Exception:  # noqa: BLE001 - 探测语义：任何连接异常都视为不可用
+        logger.warning("Neo4j unavailable, business graph tests will be skipped")
+        return False

@@ -14,6 +14,7 @@ import UsagePage from "./pages/UsagePage";
 import ServiceStatusPage from "./pages/ServiceStatusPage";
 import Neo4jGraphPage from "./pages/Neo4jGraphPage";
 import MilvusVectorsPage from "./pages/MilvusVectorsPage";
+import Supplier360Page from "./pages/Supplier360Page";
 
 export default function App() {
   return (
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="status" element={<ServiceStatusPage />} />
         <Route path="graph" element={<Neo4jGraphPage />} />
         <Route path="vectors" element={<MilvusVectorsPage />} />
+        <Route path="supplier-360" element={<Supplier360Page />} />
       </Route>
     </Routes>
   );

@@ -131,6 +131,8 @@ class IntentType(str, Enum):
     MAP = "map"
     METRIC = "metric"
     CHITCHAT = "chitchat"
+    # Phase 5.3: 供应商 360° 视图（chat 拦截路径，跳过 NL2SQL 走 Supplier360Service）
+    SUPPLIER_360 = "supplier_360"
 
 
 class LineageLayer(str, Enum):

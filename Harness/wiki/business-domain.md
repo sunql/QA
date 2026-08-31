@@ -122,3 +122,52 @@ PRECEIPT / PRECEIPTD          [状态：收货 receipt]
 涉及「订单完成率 / 收货完成率 / 到货及时率」等指标时，Prompt 须注入 **BPSUPPLIER.YPTHFLGM_0** 维度并显式要求按 `1` / `2` 分组；面向零库存供应商的查询应略过 `YPRECEIPT`，直接走 `PRECEIPT`。
 
 详见 [[供应商收货流程（零库存 vs 非零库存）]]。
+
+## Supplier 360° ADS 视图（Phase 5.3）
+
+单供应商全维度数据聚合，作为采购域首个 AI 落地样板。
+
+### 数据流（实时聚合，不建新表）
+
+```
+entity_mapping（主数据 + 跨系统编码 + owner）
+        │
+        ▼
+Supplier360Service.get360(supplier_key)
+        ├─→ profile  ─→ enterprise_code + owner + match_rule + 生效期
+        ├─→ entity_codes  ─→ 多源 system/code（ERP/SRM/QMS/...）
+        └─→ kpis  ─→ Feature 默认 4 项
+                  ├─ SUPPLIER_OTD_3M        （准时交付率，3 月窗口）
+                  ├─ SUPPLIER_DEFECT_RATE_3M（缺陷率，3 月窗口）
+                  ├─ SUPPLIER_PRICE_VARIANCE_3M（价格偏差率，3 月窗口）
+                  └─ SUPPLIER_RISK_SCORE    （综合风险评分）
+```
+
+### KPI 三态语义
+
+| 状态 | 含义 | 前端展示 |
+|---|---|---|
+| **latest=True** | feature 定义启用 + status=ACTIVE + 有最新 value | Statistic 数字 + unit + validAt |
+| **latest=False** | feature 定义存在但 disabled / DRAFT / 无最新 value | placeholder Tag「暂无数据」 |
+| **不显示** | feature 定义在 DB 中不存在 | 不在 kpis 列表中（不污染展示） |
+
+### Chat 拦截与路由
+
+- intent_service 正则：`供应商 X 的 360° / 全貌 / 整体` + 5-9 位 BIGINT → SUPPLIER_360
+- 优先级：supplier_360 > REFINE > METRIC > QUERY（防误吸普通「供应商 X 的订单数」）
+- chat_service `_handleSupplier360`：
+  - supplierKey 缺失 → ChatResponse(answer=引导文案, supplier360=None)
+  - NotFoundError → ChatResponse(answer=通用 404 消息, supplier360=None)（Phase 4.5 ACL 原则）
+  - 成功 → ChatResponse(answer=中文摘要, supplier360=完整对象)
+- 前端 MessageItem 按 `message.supplier360` 存在性路由渲染 Supplier360Card
+
+### 异常隔离原则
+
+任意子模块（entity_codes / kpis / 单个 feature 查询）失败 → `log.warn` + 该字段返回空值，绝不阻断整体响应（与 Plan §5.3「异常隔离」一致）。
+
+### 入口
+
+- 直接 API：`GET /api/v1/supplier-360/{supplier_key}`（侧栏「供应商 360°」入口）
+- Chat：AIChatService 中问「供应商 X 的 360° 视图」
+
+详见 [[Harness/changes/feat-supplier-360-ads/summary.md]]。

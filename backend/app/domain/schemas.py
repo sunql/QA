@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 
@@ -118,6 +118,7 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_DQ_BADGE_RULES_COUNT,
     MSG_SCHEMA_CHAT_DQ_BADGE_EVALUATED,
     MSG_SCHEMA_CHAT_DQ_BADGES,
+    MSG_SCHEMA_CHAT_SUPPLIER_360,
     MSG_SCHEMA_DQ_COMPUTE_EVALUATED_RULES,
     MSG_SCHEMA_DQ_COMPUTE_SAVED_SCORES,
     MSG_SCHEMA_DQ_COMPUTE_DURATION_MS,
@@ -643,6 +644,70 @@ class FeatureQueryResponse(CamelModel):
     values: list[FeatureValueRead] = Field(default_factory=list)
 
 
+# ===========================================================================
+# Phase 5.3: Supplier 360° ADS 视图 DTO
+# ===========================================================================
+
+
+class Supplier360Profile(CamelModel):
+    """供应商 360° 主数据块（Phase 5.3）。
+
+    来源：entity_mapping.enterprise_code (e.g. SUP000001) + 各源系统 source_code。
+    DIM_SUPPLIER 主数据表（dw/04_dim.sql）目前未在 metadata DB 中镜像，本块先
+    用 enterprise_code 作为展示名锚点；后续 ADS view 接入后可补充 supplier_name。
+    """
+
+    enterprise_key: int = Field(..., description="企业统一代理键（MDM 主数据）")
+    enterprise_code: str = Field(..., description="企业统一编码（如 SUP000001）")
+    entity_type: EntityType
+
+
+class Supplier360Kpi(CamelModel):
+    """单个特征 KPI 卡片（Phase 5.3）。
+
+    对应 SUPPLIER_OTD_3M / SUPPLIER_DEFECT_RATE_3M / SUPPLIER_PRICE_VARIANCE_3M /
+    SUPPLIER_RISK_SCORE 四类。value/value_text 至少一者非空（与 FeatureValueRead
+    一致）；latest 为 false 表示特征已定义但尚无最新值（前端应展示「暂无数据」态）。
+    """
+
+    feature_name: str = Field(..., description="特征名（来自 feature_definition）")
+    feature_alias: str | None = None
+    value: Decimal | None = None
+    value_text: str | None = None
+    unit: str | None = None
+    valid_at: date | None = None
+    computed_at: datetime | None = None
+    latest: bool = Field(default=False, description="True=已取到最新值，False=特征无值")
+
+
+class Supplier360EntityCode(CamelModel):
+    """供应商跨系统编码（Phase 5.3）。"""
+
+    source_system: str
+    source_code: str
+    source_key: str
+    match_rule: str
+
+
+class Supplier360Read(CamelModel):
+    """供应商 360° 视图响应（Phase 5.3，外部消费契约）。
+
+    设计原则（plan §5.3）：
+    - 不建新表，**实时聚合** entity_mapping + feature_value + （未来）DW ADS view
+    - 任意子模块失败不影响整体响应（log warn + 该字段空值返回，前端按字段渲染）
+    - kpis 默认拉 4 个 SUPPLIER 特征最新值；空值即「暂无数据」，不报错
+    - entity_codes 来自 entity_mapping；为空表示该 supplier 尚未建立跨系统映射
+    """
+
+    profile: Supplier360Profile
+    entity_codes: list[Supplier360EntityCode] = Field(default_factory=list)
+    kpis: list[Supplier360Kpi] = Field(default_factory=list)
+    fetched_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="后端聚合时间；前端可用作缓存命中判断",
+    )
+
+
 class FeatureComputeResult(CamelModel):
     """单特征计算结果（Phase 4.3）。rows = 落库/覆盖的特征值行数。"""
 
@@ -1137,6 +1202,11 @@ class ChatResponse(CamelModel):
     data_quality: list[DataQualityBadge] | None = Field(
         default=None,
         description=MSG_SCHEMA_CHAT_DQ_BADGES,
+    )
+    # Phase 5.3：供应商 360° 视图（仅 intent=supplier_360 时填充；前端按字段存在性路由）
+    supplier360: Supplier360Read | None = Field(
+        default=None,
+        description=MSG_SCHEMA_CHAT_SUPPLIER_360,
     )
 
 

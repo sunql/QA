@@ -154,6 +154,19 @@ _METRIC_QUERY_MARKERS: tuple[str, ...] = (
 )
 
 # =============================================================================
+# 供应商 360° 视图（Phase 5.3）：chat 拦截路径，跳过 NL2SQL
+# =============================================================================
+
+# 命中关键词：含 "360" / "供应商" / "全貌" 任一即视为 supplier_360 候选。
+# 注意：避免把 "供应商 100001 的订单数" 这类查询误判；要求问题意图明确指向 360 视图。
+# 优先级高于普通 QUERY（先判 supplier_360 → 再判 query）。
+_SUPPLIER_360_RE = re.compile(
+    r"(?:供应商|supplier)[^\n。?]*?(?P<key>\d{5,9})[^\n。?]*?(?:360|全貌|360°|整体|全维度)"
+    r"|(?:360|全貌|360°|整体视图)[^\n。?]*?(?:供应商|supplier)[^\n。?]*?(?P<key2>\d{5,9})"
+    r"|(?:供应商|supplier)\s*(?P<key3>\d{5,9})\s*的\s*(?:360|全貌|整体)"
+)
+
+# =============================================================================
 # 斜杠指令（Phase 5）：优先级最高，跳过所有自然语言关键词匹配
 # =============================================================================
 
@@ -221,6 +234,7 @@ class IntentResult:
 
     dimension / metric / chartType：查询类意图的实体。
     metric 另用于 DEFINE 的指标名；source / target 用于 MAP；formula 用于 DEFINE。
+    supplierKey：仅 SUPPLIER_360 意图时填充（提取的 enterprise_key，BIGINT 字符串）。
     """
 
     intent: IntentType
@@ -230,6 +244,7 @@ class IntentResult:
     source: str | None = None
     target: str | None = None
     formula: str | None = None
+    supplierKey: str | None = None
 
 
 class IntentService:
@@ -262,6 +277,13 @@ class IntentService:
             return IntentResult(intent=IntentType.CHITCHAT)
         if self._isClarify(normalized):
             return IntentResult(intent=IntentType.CLARIFY)
+        # Phase 5.3: supplier-360 检测（优先于 REFINE/METRIC/QUERY，避免「供应商 100001 的订单数」
+        # 这类普通查询被误判）。extractSuppplierKey 返回 None → 不命中，走下层判定。
+        supplierKey = self._extractSupplierKey(original)
+        if supplierKey is not None:
+            return IntentResult(
+                intent=IntentType.SUPPLIER_360, supplierKey=supplierKey
+            )
         if any(kw in normalized for kw in _DEFINE_KEYWORDS):
             name, formula = self._extractDefine(original)
             return IntentResult(intent=IntentType.DEFINE, metric=name, formula=formula)
@@ -367,6 +389,24 @@ class IntentService:
             return True
         termIs = _CLARIFY_TERM_IS_RE.match(normalized)
         return bool(termIs and not _CLARIFY_SUPERLATIVE_RE.search(normalized))
+
+    def _extractSupplierKey(self, message: str) -> str | None:
+        """从用户问句提取 supplier enterprise_key（Phase 5.3）。
+
+        匹配模式（_SUPPLIER_360_RE）：
+        - 「供应商 100001 的 360° 视图」
+        - 「supplier 100001 全貌」
+        - 「360 视图 供应商 100001」
+        - 「供应商 100001 的 360」
+
+        返回字符串形式的 key（service 层转 int）；未命中返回 None。
+        使用 ORIGINAL 文本（不归一化大小写）；enterprise_key 是 BIGINT，
+        5-9 位数字限制避免误中日期/年份等。
+        """
+        match = _SUPPLIER_360_RE.search(message)
+        if match is None:
+            return None
+        return match.group("key") or match.group("key2") or match.group("key3")
 
     @staticmethod
     def _isExplicitMultiStep(normalized: str) -> bool:

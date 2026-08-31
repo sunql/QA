@@ -54,6 +54,7 @@ export const zhCN = {
       status: "服务状态",
       graph: "Neo4j 图库",
       vectors: "Milvus 向量库",
+      supplier360: "供应商 360°",
     },
     themeToggle: "切换暗色模式",
     themeDark: "暗",
@@ -139,6 +140,42 @@ export const zhCN = {
     typing: "正在输入",
     validationDetail: "校验失败详情",
     affinityLocked: "🔒 锁定 {model} · 剩 {turns} 轮",
+  },
+
+  supplier360: {
+    cardTitle: "供应商 360° 视图",
+    fetchedAt: "获取时间：{time}",
+    field: {
+      enterpriseKey: "企业代理键",
+      owner: "归属部门",
+      matchRule: "匹配规则",
+      effective: "生效期",
+    },
+    section: {
+      entityCodes: "跨系统编码",
+      kpis: "关键指标（Feature）",
+    },
+    empty: {
+      entityCodes: "该供应商尚未在 entity_mapping 注册跨系统编码",
+      kpis: "暂无启用的 Feature 定义",
+    },
+    kpi: {
+      name: "指标",
+      value: "当前值",
+      window: "窗口",
+      validAt: "生效日期",
+      placeholder: "暂无数据",
+    },
+  },
+
+  supplier360Page: {
+    title: "供应商 360° 直接查询",
+    hint: "输入 enterprise_key（5-9 位 BIGINT）直接拉取该供应商的主数据 + 跨系统编码 + 关键 Feature。也可在 AIChatService 中问「供应商 X 的 360° 视图」自动触发。",
+    placeholder: "请输入 enterprise_key",
+    query: "查询",
+    invalidKey: "请输入合法的 enterprise_key（5-9 位数字）",
+    notFound: "供应商 enterprise_key={key} 不存在或尚未在 entity_mapping 建档",
+    requestFailed: "查询失败：{message}",
   },
 
   messageList: {

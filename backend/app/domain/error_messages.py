@@ -126,6 +126,8 @@ MSG_SCHEMA_CHAT_DQ_BADGE_EVALUATED_AT = "最新评估时间（NULL = 该表从�
 MSG_SCHEMA_CHAT_DQ_BADGE_RULES_COUNT = "本次评估规则数（NULL = 未评估）"
 MSG_SCHEMA_CHAT_DQ_BADGE_EVALUATED = "True=已评估，False=未评估（前端用此区分灰色 vs 红/黄/绿）"
 MSG_SCHEMA_CHAT_DQ_BADGES = "目标表的可信度 badge 列表（每张 selectedClass 一个）；无 selectedClasses 或 DQ 服务降级时为 None"
+MSG_SCHEMA_CHAT_SUPPLIER_360 = "供应商 360° 视图（仅 intent=supplier_360 时填充）；由 Supplier360Service 实时聚合 entity_mapping + feature_value 生成。前端 MessageItem 按字段存在性路由到 Supplier360Card"
+MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING = "请在问题中提供 enterprise_key（如「供应商 100001 的 360° 视图」）"
 MSG_SCHEMA_DQ_COMPUTE_EVALUATED_RULES = "本次评估的规则总数"
 MSG_SCHEMA_DQ_COMPUTE_SAVED_SCORES = "本次落库的评分数（TABLE + GLOBAL）"
 MSG_SCHEMA_DQ_COMPUTE_DURATION_MS = "本次 compute 全流程耗时（毫秒）"

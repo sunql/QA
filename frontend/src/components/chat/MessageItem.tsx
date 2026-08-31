@@ -8,6 +8,7 @@ import MultiStepPlanCard from "./MultiStepPlanCard";
 import SqlPreview from "./SqlPreview";
 import ChartRenderer from "./ChartRenderer";
 import TermDictionaryButton from "./TermDictionaryButton";
+import Supplier360Card from "./Supplier360Card";
 import type { ChatMessage } from "../../types/chat";
 import { useTranslation } from "../../i18n";
 
@@ -99,6 +100,13 @@ function MessageItem({ message, exporting = false, onExportSingleTurn }: Message
                   chartOption={message.chartOption}
                   data={message.data}
                 />
+              </div>
+            ) : null}
+            {/* Phase 5.3：供应商 360° ADS 视图卡片（仅 intent=supplier_360 + 命中 supplier_key 时回填）。
+                按字段存在性路由，不依赖 message.intent 兜底（意图可能是 chitchat/clarify 等其他）。 */}
+            {message.supplier360 ? (
+              <div style={{ marginTop: 8 }}>
+                <Supplier360Card data={message.supplier360} />
               </div>
             ) : null}
             {message.tokensUsed !== undefined ||

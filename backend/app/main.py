@@ -185,6 +185,7 @@ def createApp() -> FastAPI:
         model_config,
         ontology,
         session,
+        supplier_360,
         system,
         term_dictionary,
         vectors,
@@ -223,6 +224,11 @@ def createApp() -> FastAPI:
         kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"]
     )
     app.include_router(features.router, prefix="/api/v1/features", tags=["features"])
+    app.include_router(
+        supplier_360.router,
+        prefix="/api/v1/supplier-360",
+        tags=["supplier-360"],
+    )
     app.include_router(
         documents.router, prefix="/api/v1/documents", tags=["documents"]
     )

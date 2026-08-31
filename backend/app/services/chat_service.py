@@ -32,7 +32,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import ChartType, IntentType
-from app.domain.exceptions import DomainError, LlmClientError, Nl2SqlError
+from app.domain.exceptions import DomainError, LlmClientError, Nl2SqlError, NotFoundError
 from app.domain.models import DataSource, LlmConfig, SessionMessage, SessionQueryState
 from app.domain.multi_step_plan import (
     MultiStepPlan,
@@ -60,11 +60,14 @@ from app.services.chat_stream_output import _ANSWER_SYSTEM_PROMPT, ChatStreamOut
 from app.services.datasource_service import DataSourceService
 from app.services.embedding_service import EmbeddingService
 from app.services.intent_service import IntentResult, IntentService
+from app.domain.error_messages import MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING
+from app.services.messages_zh import MSG_SUPPLIER_360_NOT_FOUND
 from app.services.model_router_service import ModelRouterService, RoutingContext
 from app.services.nl2sql_service import Nl2SqlService, SqlResult, _safeSchemaPrefix, _sanitizeContext
 from app.services.ontology_service import OntologyService
 from app.services.step_aggregator import StepAggregator
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
+from app.services.supplier_360_service import Supplier360Service
 from app.services.schema_introspection_service import (
     SchemaIntrospectionService,
     buildDriftWarning,
@@ -341,6 +344,9 @@ class ChatService(ChatStreamOutputMixin):
             return response
         if result.intent in (IntentType.DEFINE, IntentType.MAP, IntentType.METRIC):
             return await self._handleDomainCommand(session, dto, result)
+        # Phase 5.3：供应商 360° 视图（chat 拦截，跳过 NL2SQL）
+        if result.intent == IntentType.SUPPLIER_360:
+            return await self._handleSupplier360(session, dto, result)
 
         pc = await self._buildPipelineContext(
             session, dto,
@@ -1122,6 +1128,52 @@ class ChatService(ChatStreamOutputMixin):
                 )
             return await self._handleShowMetric(session, dto, result)
         raise AssertionError(f"非领域命令意图: {result.intent}")
+
+    async def _handleSupplier360(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        result: IntentResult,
+    ) -> ChatResponse:
+        """Phase 5.3：供应商 360° 视图（chat 拦截路径，跳过 NL2SQL）。
+
+        supplierKey 缺失 → 引导文案（澄清如何提问），answer=提示语，
+        supplier360=None（前端按字段存在性路由，不渲染卡片）。
+        supplierKey 找不到 supplier → 仍返回 ChatResponse + answer=错误说明，
+        supplier360=None（与 4.5 ACL 「NotFoundError 通用消息」原则一致：避免泄漏
+        「不存在 vs 无权限」侧信道）。
+        成功 → answer=中文简短摘要 + supplier360=<完整对象>，前端 MessageItem
+        按字段存在性路由到 Supplier360Card 渲染。
+        """
+        if not result.supplierKey:
+            return ChatResponse(
+                answer=MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING,
+                intent=result.intent.value,
+            )
+        try:
+            supplierKey = int(result.supplierKey)
+        except ValueError:
+            return ChatResponse(
+                answer=MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING,
+                intent=result.intent.value,
+            )
+        try:
+            data = await Supplier360Service().get360(session, supplierKey)
+        except NotFoundError:
+            return ChatResponse(
+                answer=MSG_SUPPLIER_360_NOT_FOUND.format(key=supplierKey),
+                intent=result.intent.value,
+            )
+        answer = (
+            f"供应商 {data.profile.enterprise_code}（{supplierKey}）360° 视图："
+            f"已聚合 {len(data.entity_codes)} 条跨系统编码 + "
+            f"{len(data.kpis)} 项 SUPPLIER 特征指标。"
+        )
+        return ChatResponse(
+            answer=answer,
+            intent=result.intent.value,
+            supplier360=data,
+        )
 
     async def _handleDefineMetric(
         self,

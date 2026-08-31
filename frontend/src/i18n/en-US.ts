@@ -46,6 +46,7 @@ export const enUS = {
       features: "Feature Catalog",
       usage: "Usage Dashboard",
       status: "Service Status",
+      supplier360: "Supplier 360°",
     },
     themeToggle: "Toggle dark mode",
     themeDark: "Dark",
@@ -132,6 +133,42 @@ export const enUS = {
     typing: "Typing…",
     validationDetail: "Validation details",
     affinityLocked: "🔒 Locked to {model} · {turns} turns remaining",
+  },
+
+  supplier360: {
+    cardTitle: "Supplier 360° View",
+    fetchedAt: "Fetched at: {time}",
+    field: {
+      enterpriseKey: "Enterprise Key",
+      owner: "Owner",
+      matchRule: "Match Rule",
+      effective: "Effective Period",
+    },
+    section: {
+      entityCodes: "Cross-System Codes",
+      kpis: "Key Metrics (Feature)",
+    },
+    empty: {
+      entityCodes: "No cross-system code registered for this supplier",
+      kpis: "No enabled feature definition",
+    },
+    kpi: {
+      name: "Metric",
+      value: "Current Value",
+      window: "Window",
+      validAt: "Valid At",
+      placeholder: "No data",
+    },
+  },
+
+  supplier360Page: {
+    title: "Supplier 360° Direct Query",
+    hint: "Enter enterprise_key (5-9 digit BIGINT) to load master data + cross-system codes + key features. Or ask AIChatService 'show 360° view of supplier X'.",
+    placeholder: "Enter enterprise_key",
+    query: "Query",
+    invalidKey: "Please enter a valid enterprise_key (5-9 digits)",
+    notFound: "Supplier enterprise_key={key} does not exist or is not registered in entity_mapping",
+    requestFailed: "Query failed: {message}",
   },
 
   messageList: {

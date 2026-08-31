@@ -18,6 +18,7 @@ const NAV_KEYS = [
   { key: "/lineage", labelKey: "appLayout.menu.lineage" },
   { key: "/entity-mapping", labelKey: "appLayout.menu.entityMapping" },
   { key: "/kpi-catalog", labelKey: "appLayout.menu.kpiCatalog" },
+  { key: "/features", labelKey: "appLayout.menu.features" },
   { key: "/usage", labelKey: "appLayout.menu.usage" },
   { key: "/status", labelKey: "appLayout.menu.status" },
   { key: "/graph", labelKey: "appLayout.menu.graph" },

@@ -215,3 +215,28 @@ class KpiStatus(str, Enum):
     DRAFT = "DRAFT"
     PUBLISHED = "PUBLISHED"
     DEPRECATED = "DEPRECATED"
+
+
+class FeatureStatus(str, Enum):
+    """AI 特征定义状态（Phase 4.3）。
+
+    - DRAFT：草稿，可任意编辑，不参与计算
+    - ACTIVE：已启用，参与 compute-batch 批量计算
+    - DEPRECATED：已停用，保留供历史溯源，不参与计算
+    """
+
+    DRAFT = "DRAFT"
+    ACTIVE = "ACTIVE"
+    DEPRECATED = "DEPRECATED"
+
+
+class FeatureRefreshFrequency(str, Enum):
+    """AI 特征刷新频率（Phase 4.3）。
+
+    与血缘边 RefreshFrequency（REALTIME/HOURLY/DAILY/WEEKLY）语义不同：
+    特征是「预计算快照」，按日/周/月刷新，无实时/小时级。
+    """
+
+    DAILY = "DAILY"
+    WEEKLY = "WEEKLY"
+    MONTHLY = "MONTHLY"

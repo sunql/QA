@@ -81,6 +81,43 @@ TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_
 
 连 5432 = ConnectionRefused；连 5433 = 正常。
 
+### SSOT 端口契约（2026-08-31 加固）
+
+**问题**：容器内 / 容器外用同一个 `.env` 端口契约不一致——容器内 `postgres:5432`（Docker DNS 解析容器 service）、容器外 `localhost:5433`（宿主端口重映射）。`.env` 一份文件无法同时表达两种契约，过去靠口口相传，新人必然踩坑。
+
+**SSOT 设计**：把容器内 / 容器外的端口契约分离到两个独立 `.env`，并通过 `docker-compose env_file` + `scripts/run_local.sh` 自动注入。**改端口只改一处**。
+
+| 场景 | 配置文件 | URL 写法 | 注入方式 |
+|---|---|---|---|
+| 容器内（docker compose up） | `docker/.env` | `postgres:5432`（容器 service + 容器端口） | compose `env_file: .env` |
+| 容器外（本机 uvicorn / 测试） | `backend/.env` | `localhost:5433`（宿主端口） | `scripts/run_local.sh` 自动 export |
+
+**容器内变更**：把 `docker-compose.yml` 的 backend service 从硬编码 `environment: DATABASE_URL: ...` 改成 `env_file: .env`。`docker/.env` 是容器内端口契约 SSOT。
+
+**容器外入口**：
+
+```bash
+# 推荐：用 wrapper 脚本（自动端口可达性预检 + SSOT 防御 + 注入正确端口）
+./scripts/run_local.sh --port 8001 \
+  .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001
+
+# 跑 alembic（自动用 5433）
+./scripts/run_local.sh alembic upgrade head
+
+# 跳过预检（如已知端口 OK）
+./scripts/run_local.sh --no-preflight .venv/bin/uvicorn app.main:app --port 8001
+```
+
+**双层 fail-fast**：
+
+1. `scripts/run_local.sh` 在启动前检查 `.env` 是否仍写 `localhost:5432` —— 是则拒绝运行并指向 SSOT 说明。
+2. `app/main.py` 的 lifespan 启动预检：连不上 PG 时，如果 URL 是 `localhost:5432` / `127.0.0.1:5432`，打印精确端口契约提示（容器外 → 改 5433；容器内 → 改 `postgres:5432`）。
+
+**未来改端口的口径**：
+
+- 改 PG 宿主端口：只改 `docker-compose.yml` 的 `5433:5432` 映射 + `backend/.env` 的 `localhost:5433` + `scripts/run_local.sh` 提示文字。`docker/.env` 容器内端口 `postgres:5432` 不动。
+- 改容器内 PG 端口：只改 `docker-compose.yml` 容器端口段 + `docker/.env` 的 `postgres:<新端口>`。宿主端口不动。
+
 ### 迁移：`git pull` 后必须 alembic upgrade head
 
 ORM 模型一旦新增表/列，必须有对应迁移文件。DB 与 ORM 不一致会出现两类故障：

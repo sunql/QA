@@ -129,29 +129,11 @@ services:
       dockerfile: docker/Dockerfile.backend
     container_name: qa-backend
     restart: unless-stopped
-    environment:
-      DATABASE_URL: postgresql+asyncpg://qa_user:${POSTGRES_PASSWORD}@postgres:5432/qa_metadata
-      NEO4J_URI: bolt://neo4j:7687
-      NEO4J_USER: neo4j
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
-      MILVUS_URI: http://milvus-standalone:19530
-      SECRET_KEY: ${SECRET_KEY}
-      SESSION_BUDGET: ${SESSION_BUDGET}
-      DATASOURCE_HOST_ALLOWLIST: ${DATASOURCE_HOST_ALLOWLIST}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
-      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL}
-      QWEN_API_KEY: ${QWEN_API_KEY}
-      QWEN_BASE_URL: ${QWEN_BASE_URL}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL}
-      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE}
-      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY}
-      EMBEDDING_HOST_OVERRIDE: ${EMBEDDING_HOST_OVERRIDE}
-      LLM_TRUST_ENV: ${LLM_TRUST_ENV}
-      APP_ENV: ${APP_ENV}
-      LOG_LEVEL: ${LOG_LEVEL}
+    # 容器内配置全部从 docker/.env 注入（SSOT：容器内端口用容器 service 名 + 容器端口）。
+    # 本地 dev（容器外跑 uvicorn）用 backend/.env，端口用 localhost:5433（因宿主端口重映射）。
+    # 端口契约详见 Harness/wiki/operations-runbook.md「SSOT 端口契约」段。
+    env_file:
+      - .env
     extra_hosts:
       # 容器内访问宿主机（host.docker.internal）；Linux Docker 需显式 host-gateway，
       # macOS/Windows Docker Desktop 自动解析，此映射兼容两者。

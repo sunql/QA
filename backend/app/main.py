@@ -48,6 +48,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     engine = getEngine()
     logger.info("元数据库引擎已就绪: %s", engine.url.render_as_string(hide_password=True))
+
+    # 端口契约预检：连不上时给精确提示（容器外常见 5432 vs 5433 错配）。
+    # SSOT 详见 Harness/wiki/operations-runbook.md「SSOT 端口契约」段。
+    from sqlalchemy import text
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception as e:
+        url = engine.url.render_as_string(hide_password=True)
+        hint = ""
+        if "localhost:5432" in url or "127.0.0.1:5432" in url:
+            hint = (
+                "\n[端口契约提示] DATABASE_URL 用了 5432，但宿主端口已重映射到 5433。"
+                "\n  - 容器外运行：把 backend/.env 的 DATABASE_URL 改成 localhost:5433，或用 ./scripts/run_local.sh"
+                "\n  - 容器内运行：DATABASE_URL 应是 postgres:5432（容器 service 名 + 容器端口）"
+            )
+        logger.error("❌ 元数据库连接失败: %s%s", e, hint)
+        raise RuntimeError(f"启动失败：无法连接到 {url}。{hint}") from e
     # Schema drift 校验：默认开启，SKIP_SCHEMA_CHECK=1 可关闭（紧急场景）
     if os.environ.get("SKIP_SCHEMA_CHECK") != "1":
         from scripts.check_schema_drift import _checkDriftAsync

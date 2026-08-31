@@ -703,6 +703,12 @@ export const enUS = {
     computeAllDone: "Computed {count} features, {rows} rows total",
     values: "Values",
     valuesTitle: "Feature Values - {name}",
+    aclBanner:
+      "Permission note: PUT/DELETE on this page is gated by an owner-based ACL (see the Owner column). In stub auth mode the default user has the admin role and can edit every row; to exercise the non-admin path, explicitly set the X-User-Roles header.",
+    aclForbiddenTitle: "Permission denied",
+    aclForbiddenBody:
+      "The backend ACL rejected the request: only members of the Owning department or users with the admin role can modify this entry. Contact the owner department, or set X-User-Roles=admin in dev mode only.",
+    aclForbiddenDetailLabel: "Backend response:",
     columns: {
       featureName: "Feature Name",
       featureAlias: "Alias",

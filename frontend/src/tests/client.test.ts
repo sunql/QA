@@ -77,4 +77,43 @@ describe("api/client", () => {
       "网络异常，请稍后重试"
     );
   });
+
+  it("HTTP 错误时把 status 挂到 reject Error 上供业务页分流", async () => {
+    const error = {
+      response: {
+        status: 403,
+        data: { success: false, error: "无权修改该资源", data: null },
+      },
+    };
+    try {
+      await responseHandlers.onRejected(error);
+      expect.fail("should have rejected");
+    } catch (err) {
+      const e = err as Error & { status?: number; detail?: string };
+      expect(e.status).toBe(403);
+      expect(e.message).toContain("无权修改该资源");
+    }
+  });
+
+  it("HTTP 错误时把 detail 字段透传", async () => {
+    const error = {
+      response: {
+        status: 422,
+        data: {
+          success: false,
+          error: "校验失败",
+          data: null,
+          detail: "feature_name 长度超限",
+        },
+      },
+    };
+    try {
+      await responseHandlers.onRejected(error);
+      expect.fail("should have rejected");
+    } catch (err) {
+      const e = err as Error & { status?: number; detail?: string };
+      expect(e.detail).toBe("feature_name 长度超限");
+      expect(e.status).toBe(422);
+    }
+  });
 });

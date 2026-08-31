@@ -46,9 +46,13 @@ export function createHttpClient(): AxiosInstance {
           : i18n.t("errors.networkError"));
       void message.error(errMsg);
       // 携带领域异常 detail（如 NL2SQL 校验差异），供错误消息折叠展示
-      const err = new Error(errMsg) as Error & { detail?: string };
+      // 携带 HTTP status，便于业务页面按状态分流（如 403 → 权限提示 Modal）
+      const err = new Error(errMsg) as Error & { detail?: string; status?: number };
       if (typeof apiDetail === "string") {
         err.detail = apiDetail;
+      }
+      if (typeof status === "number") {
+        err.status = status;
       }
       return Promise.reject(err);
     }

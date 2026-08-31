@@ -1025,7 +1025,11 @@ async def test_ontology_class_owner_dept_can_modify_cross_dept_blocked(
     denied = await client.put(
         f"/api/v1/ontology/classes/{clsId}",
         json={"classAlias": "finance想改"},
-        headers={"X-User-Departments": "finance"},
+        headers={
+            "X-User-Id": "fin-user",
+            "X-User-Roles": "user",
+            "X-User-Departments": "finance",
+        },
     )
     assert denied.status_code == 403
 

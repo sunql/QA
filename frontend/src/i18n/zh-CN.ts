@@ -721,6 +721,12 @@ export const zhCN = {
     computeAllDone: "批量计算完成：{count} 个特征，共 {rows} 行",
     values: "特征值",
     valuesTitle: "特征值 - {name}",
+    aclBanner:
+      "权限说明：本页 PUT/DELETE 受 owner-based ACL 控制（详见「责任部门」列）。stub 模式下默认带 admin 角色可改全部条目；如需切换非 admin 路径，可在请求头显式设置 X-User-Roles。",
+    aclForbiddenTitle: "权限不足，无法修改",
+    aclForbiddenBody:
+      "后端 ACL 拒绝：仅「责任部门」成员或 admin 角色可修改该条目。如需继续，请联系 owner 部门或将 X-User-Roles 设为 admin（仅 dev 环境）。",
+    aclForbiddenDetailLabel: "后端返回：",
     columns: {
       featureName: "特征名",
       featureAlias: "别名",

@@ -118,6 +118,16 @@ TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_
 - 改 PG 宿主端口：只改 `docker-compose.yml` 的 `5433:5432` 映射 + `backend/.env` 的 `localhost:5433` + `scripts/run_local.sh` 提示文字。`docker/.env` 容器内端口 `postgres:5432` 不动。
 - 改容器内 PG 端口：只改 `docker-compose.yml` 容器端口段 + `docker/.env` 的 `postgres:<新端口>`。宿主端口不动。
 
+### Stub auth 默认 admin（2026-08-31 落地）
+
+dev/test 下默认 stub user 带 `("user", "admin")` 角色，避免未登录访问 `/api/v1/features` 等带 owner-based ACL 的端点必 403。生产安全护栏不变：
+
+- `AUTH_STUB_ENABLED=0` → 拒绝任何 `X-User-*` 头请求（`getCurrentUser` 入口校验）
+- `APP_ENV=production` + stub 仍开启 → 启动时 ERROR 日志告警（`main.py`）
+- 反向代理剥离 `X-User-*` 头是兜底（与 stub 模式无关）
+
+测试非 admin 路径时显式设 `X-User-Roles: user` 即可（11 处现有集成测试已补）。详见 `Harness/changes/feat-acl-default-admin-stub/summary.md`。
+
 ### 迁移：`git pull` 后必须 alembic upgrade head
 
 ORM 模型一旦新增表/列，必须有对应迁移文件。DB 与 ORM 不一致会出现两类故障：

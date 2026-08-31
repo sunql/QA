@@ -125,7 +125,11 @@ class TestEntityMappingAcl:
         resp = await client.put(
             f"/api/v1/entity-mappings/{m['id']}",
             json={"sourceCode": "X"},
-            headers={"X-User-Id": "bob", "X-User-Departments": FINANCE},
+            headers={
+                "X-User-Id": "bob",
+                "X-User-Roles": "user",
+                "X-User-Departments": FINANCE,
+            },
         )
         assert resp.status_code == 403
         assert "无权修改" in resp.json().get("error", "")
@@ -145,7 +149,11 @@ class TestEntityMappingAcl:
         m = await self._create(client, "EM_ACL_D", QUALITY)
         resp = await client.delete(
             f"/api/v1/entity-mappings/{m['id']}",
-            headers={"X-User-Id": "bob", "X-User-Departments": FINANCE},
+            headers={
+                "X-User-Id": "bob",
+                "X-User-Roles": "user",
+                "X-User-Departments": FINANCE,
+            },
         )
         assert resp.status_code == 403
 
@@ -168,7 +176,11 @@ class TestEntityMappingAcl:
         resp = await client.put(
             f"/api/v1/entity-mappings/{m['id']}",
             json={"sourceCode": "X"},
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "user",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         assert resp.status_code == 403
         # admin → 200
@@ -230,7 +242,11 @@ class TestDataQualityRuleAcl:
         resp = await client.put(
             f"/api/v1/data-quality/rules/{rule['id']}",
             json={"ruleName": "X"},
-            headers={"X-User-Id": "bob", "X-User-Departments": FINANCE},
+            headers={
+                "X-User-Id": "bob",
+                "X-User-Roles": "user",
+                "X-User-Departments": FINANCE,
+            },
         )
         assert resp.status_code == 403
 
@@ -241,7 +257,11 @@ class TestDataQualityRuleAcl:
         rule = await self._create(client, ds.id, QUALITY)
         resp = await client.delete(
             f"/api/v1/data-quality/rules/{rule['id']}",
-            headers={"X-User-Id": "bob", "X-User-Departments": FINANCE},
+            headers={
+                "X-User-Id": "bob",
+                "X-User-Roles": "user",
+                "X-User-Departments": FINANCE,
+            },
         )
         assert resp.status_code == 403
 
@@ -298,7 +318,11 @@ class TestOntologyClassAcl:
         resp = await client.put(
             f"/api/v1/ontology/classes/{cls['id']}",
             json={"classAlias": "X"},
-            headers={"X-User-Id": "bob", "X-User-Departments": FINANCE},
+            headers={
+                "X-User-Id": "bob",
+                "X-User-Roles": "user",
+                "X-User-Departments": FINANCE,
+            },
         )
         assert resp.status_code == 403
 
@@ -316,6 +340,10 @@ class TestOntologyClassAcl:
         cls = await self._create(client, "CLS_ACL_D", QUALITY)
         resp = await client.delete(
             f"/api/v1/ontology/classes/{cls['id']}",
-            headers={"X-User-Id": "bob", "X-User-Departments": FINANCE},
+            headers={
+                "X-User-Id": "bob",
+                "X-User-Roles": "user",
+                "X-User-Departments": FINANCE,
+            },
         )
         assert resp.status_code == 403

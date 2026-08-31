@@ -11,6 +11,7 @@ import {
   Tag,
   Tooltip,
   Popconfirm,
+  Alert,
   message,
 } from "antd";
 import {
@@ -101,6 +102,20 @@ export default function FeatureCatalogPage() {
     values: FeatureValue[];
     loading: boolean;
   } | null>(null);
+  /** 403 ACL 拒绝的友好提示 Modal；null = 关闭。携带后端错误原文供排错。 */
+  const [forbiddenModal, setForbiddenModal] = useState<{ detail?: string } | null>(
+    null,
+  );
+
+  /** 业务错误统一处理：403 → 友好 Modal；其他 → 让 axios 拦截器 toast。 */
+  const handleMutationError = useCallback((err: unknown) => {
+    const e = err as (Error & { status?: number; detail?: string }) | null;
+    if (e && e.status === 403) {
+      setForbiddenModal({ detail: e.detail ?? e.message });
+      return;
+    }
+    // 其他错误由 axios 拦截器统一 toast，不重复弹
+  }, []);
 
   const updateFilter = useCallback(
     (k: string, v: string) => setFilters((prev) => ({ ...prev, [k]: v })),
@@ -174,8 +189,8 @@ export default function FeatureCatalogPage() {
       await deleteFeature(id);
       void message.success(t("toast.deleted"));
       void load();
-    } catch {
-      // 错误由拦截器提示
+    } catch (err) {
+      handleMutationError(err);
     }
   };
 
@@ -249,8 +264,10 @@ export default function FeatureCatalogPage() {
       }
       setModalOpen(false);
       void load();
-    } catch {
-      // 错误由拦截器提示
+    } catch (err) {
+      // form.validateFields() 失败会抛 AntD 内部对象，无 status 字段；
+      // 透传到 handleMutationError 后会被当作「非 403」忽略（form 自己显示错误）。
+      handleMutationError(err);
     }
   };
 
@@ -345,6 +362,12 @@ export default function FeatureCatalogPage() {
           </Button>
         </Space>
       </div>
+      <Alert
+        type="info"
+        showIcon
+        message={t("feature.aclBanner")}
+        style={{ marginBottom: 16 }}
+      />
       <FilterBar
         fields={filterFields}
         values={filters}
@@ -495,6 +518,35 @@ export default function FeatureCatalogPage() {
           dataSource={valuesModal?.values ?? []}
           columns={valuesColumns}
         />
+      </Modal>
+      <Modal
+        title={t("feature.aclForbiddenTitle")}
+        open={forbiddenModal !== null}
+        onCancel={() => setForbiddenModal(null)}
+        okText={t("common.confirm")}
+        cancelButtonProps={{ style: { display: "none" } }}
+        width={520}
+      >
+        <p style={{ marginBottom: forbiddenModal?.detail ? 12 : 0 }}>
+          {t("feature.aclForbiddenBody")}
+        </p>
+        {forbiddenModal?.detail && (
+          <div
+            style={{
+              padding: 8,
+              background: "#f5f5f5",
+              borderRadius: 4,
+              fontSize: 12,
+              fontFamily: "monospace",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+            }}
+          >
+            <strong>{t("feature.aclForbiddenDetailLabel")}</strong>
+            <br />
+            {forbiddenModal.detail}
+          </div>
+        )}
       </Modal>
     </>
   );

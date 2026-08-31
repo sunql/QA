@@ -262,7 +262,11 @@ class TestDataQualityRuleApi:
         denied = await client.put(
             f"/api/v1/data-quality/rules/{rid}",
             json={"ruleName": "finance想改"},
-            headers={"X-User-Departments": "finance"},
+            headers={
+                "X-User-Id": "fin-user",
+                "X-User-Roles": "user",
+                "X-User-Departments": "finance",
+            },
         )
         assert denied.status_code == 403
 

@@ -19,6 +19,7 @@ PROC_HEADERS = {
 }
 FIN_HEADERS = {
     "X-User-Id": "fin-user",
+    "X-User-Roles": "user",
     "X-User-Departments": "finance",
 }
 

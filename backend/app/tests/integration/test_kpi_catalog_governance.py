@@ -94,7 +94,11 @@ class TestKpiAcl:
         resp = await client.put(
             f"/api/v1/kpi-catalog/{kpi['id']}",
             json={"kpiName": "改后"},
-            headers={"X-User-Id": "bob", "X-User-Departments": FINANCE},
+            headers={
+                "X-User-Id": "bob",
+                "X-User-Roles": "user",
+                "X-User-Departments": FINANCE,
+            },
         )
         assert resp.status_code == 403
         body = resp.json()
@@ -117,7 +121,11 @@ class TestKpiAcl:
         kpi = await self._create(client, "KPI_GOV_E", PROCUREMENT)
         resp = await client.delete(
             f"/api/v1/kpi-catalog/{kpi['id']}",
-            headers={"X-User-Id": "bob", "X-User-Departments": FINANCE},
+            headers={
+                "X-User-Id": "bob",
+                "X-User-Roles": "user",
+                "X-User-Departments": FINANCE,
+            },
         )
         assert resp.status_code == 403
 
@@ -129,7 +137,11 @@ class TestKpiAcl:
         resp = await client.put(
             f"/api/v1/kpi-catalog/{kpi['id']}",
             json={"kpiName": "改"},
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "user",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         assert resp.status_code == 403
         # admin → 200
@@ -420,7 +432,11 @@ class TestKpiAclRollbackOnFailure:
         putResp = await client.put(
             f"/api/v1/kpi-catalog/{kpiId}",
             json={"kpiName": "应被拒"},
-            headers={"X-User-Id": "bob", "X-User-Departments": FINANCE},
+            headers={
+                "X-User-Id": "bob",
+                "X-User-Roles": "user",
+                "X-User-Departments": FINANCE,
+            },
         )
         assert putResp.status_code == 403
         await _Helper.drainOutbox(dbSession)

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import __version__
 from app.api.v1 import (
+    agent_runtime,
     agents,
     audit,
     chat,
@@ -137,6 +138,9 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         documents.router, prefix="/api/v1/documents", tags=["documents"]
     )
     testApp.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
+    testApp.include_router(
+        agent_runtime.router, prefix="/api/v1/agents", tags=["agents"]
+    )
     testApp.include_router(
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"]
     )

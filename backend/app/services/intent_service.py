@@ -202,6 +202,71 @@ _SUPPLIER_AGGREGATION_RE = re.compile(
     r"(?:总金额|金额|总数量|数量|总额|合计|总计|均值|平均数|平均|总数|总价|成本|多少钱|多少元|占比|比例)"
 )
 
+# Phase 6.4: Agent 显式指名（如「用 supplier_risk_agent 评估供应商 100001」）。
+# 独立 token + _AGENT 后缀 + 词边界，误中普通问法的概率极低；
+# 匹配后统一大写（Agent 编码约定全大写下划线，见 AgentDefinitionCreate）。
+_AGENT_RUN_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<code>[A-Za-z][A-Za-z0-9_]{2,63}_AGENT)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+# Phase 6.4: 通用供应商编码抽取（Agent 显式指名回退用，无意图关键词约束）。
+# 仅要求「供应商/supplier」后紧跟 5-9 位企业编码，见 extractSupplierAnyKey。
+_SUPPLIER_ANY_KEY_RE = re.compile(r"(?:供应商|supplier)\s*[:：]?\s*(?P<key>\d{5,9})")
+
+
+def extractSupplierKey(message: str) -> str | None:
+    """模块级 supplier enterprise_key 抽取（Phase 5.3 供应商 360°）。"""
+    match = _SUPPLIER_360_RE.search(message)
+    if match is None:
+        return None
+    return match.group("key") or match.group("key2") or match.group("key3")
+
+
+def extractSupplierRiskKey(message: str) -> str | None:
+    """模块级 supplier enterprise_key 抽取（Phase 5.4 风险 Agent）。"""
+    match = _SUPPLIER_RISK_RE.search(message)
+    if match is None:
+        return None
+    return match.group("key") or match.group("key2") or match.group("key3")
+
+
+def extractSupplierGraphKey(message: str) -> str | None:
+    """模块级 supplier enterprise_key 抽取（Phase 6.3 图推理，含聚合量词兜底）。"""
+    match = _SUPPLIER_GRAPH_RE.search(message)
+    if match is None:
+        return None
+    if _SUPPLIER_AGGREGATION_RE.search(message) is not None:
+        return None
+    return match.group("key") or match.group("key2") or match.group("key3")
+
+
+def extractAgentCode(message: str) -> str | None:
+    """从用户问句提取显式指名的 Agent 编码（Phase 6.4）。
+
+    - 「用 supplier_risk_agent 评估供应商 100001」→ SUPPLIER_RISK_AGENT
+    - 「让 GRAPH_REASONING_AGENT 查 100001 的链路」→ GRAPH_REASONING_AGENT
+    - 未命中返回 None；命中即优先路由到 AgentRuntimeService。
+    """
+    match = _AGENT_RUN_RE.search(message)
+    if match is None:
+        return None
+    return match.group("code").upper()
+
+
+def extractSupplierAnyKey(message: str) -> str | None:
+    """通用 supplier enterprise_key 抽取（Phase 6.4 Agent 显式指名回退）。
+
+    只要求「供应商/supplier」后紧跟 5-9 位企业编码，不做意图关键词约束。
+    用途：用户在 chat 显式指名 Agent（如「用 supplier_risk_agent 评估供应商 100001」）
+    时，工具已被确定性解析，专用 extractor（360/risk/graph 的关键词正则）匹配
+    失败并无意义——回退到本函数即可拿到 key 执行工具。
+    """
+    match = _SUPPLIER_ANY_KEY_RE.search(message)
+    if match is None:
+        return None
+    return match.group("key")
+
 # =============================================================================
 # 斜杠指令（Phase 5）：优先级最高，跳过所有自然语言关键词匹配
 # =============================================================================
@@ -282,6 +347,8 @@ class IntentResult:
     formula: str | None = None
     supplierKey: str | None = None
     # Phase 5.4: SUPPLIER_RISK 复用 supplierKey 字段（与 supplier_360 同语义）。
+    # Phase 6.4: AGENT_RUN 填充（提取的 agent_code，如 SUPPLIER_RISK_AGENT）。
+    agent_code: str | None = None
 
 
 class IntentService:
@@ -314,6 +381,11 @@ class IntentService:
             return IntentResult(intent=IntentType.CHITCHAT)
         if self._isClarify(normalized):
             return IntentResult(intent=IntentType.CLARIFY)
+        # Phase 6.4: Agent 显式指名检测（优先于 supplier_360 / risk / graph：
+        # 指名是最高优先级领域信号，如「用 supplier_risk_agent 评估供应商 100001」）。
+        agentCode = extractAgentCode(original)
+        if agentCode is not None:
+            return IntentResult(intent=IntentType.AGENT_RUN, agent_code=agentCode)
         # Phase 5.3: supplier-360 检测（优先于 REFINE/METRIC/QUERY，避免「供应商 100001 的订单数」
         # 这类普通查询被误判）。extractSuppplierKey 返回 None → 不命中，走下层判定。
         supplierKey = self._extractSupplierKey(original)
@@ -454,10 +526,7 @@ class IntentService:
         使用 ORIGINAL 文本（不归一化大小写）；enterprise_key 是 BIGINT，
         5-9 位数字限制避免误中日期/年份等。
         """
-        match = _SUPPLIER_360_RE.search(message)
-        if match is None:
-            return None
-        return match.group("key") or match.group("key2") or match.group("key3")
+        return extractSupplierKey(message)
 
     def _extractSupplierRiskKey(self, message: str) -> str | None:
         """从用户问句提取 supplier enterprise_key（Phase 5.4 Risk Agent）。
@@ -471,10 +540,7 @@ class IntentService:
         与 _extractSupplierKey 同数字边界（5-9 位），使用 ORIGINAL 文本。
         未命中返回 None。
         """
-        match = _SUPPLIER_RISK_RE.search(message)
-        if match is None:
-            return None
-        return match.group("key") or match.group("key2") or match.group("key3")
+        return extractSupplierRiskKey(message)
 
     def _extractSupplierGraphKey(self, message: str) -> str | None:
         """从用户问句提取 supplier enterprise_key（Phase 6.3 图推理）。
@@ -491,16 +557,7 @@ class IntentService:
         （如「供应商 100001 关联的采购订单总金额是多少」走 NL2SQL）。
         未命中返回 None。
         """
-        match = _SUPPLIER_GRAPH_RE.search(message)
-        if match is None:
-            return None
-        if _SUPPLIER_AGGREGATION_RE.search(message) is not None:
-            return None
-        return (
-            match.group("key")
-            or match.group("key2")
-            or match.group("key3")
-        )
+        return extractSupplierGraphKey(message)
 
     @staticmethod
     def _isExplicitMultiStep(normalized: str) -> bool:

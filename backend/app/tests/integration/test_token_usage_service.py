@@ -11,7 +11,7 @@ asyncpg 按本地时区解析再转 UTC（本机 UTC+8 时 08-13 00:00 会落成
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
 import pytest
@@ -164,24 +164,29 @@ class TestTokenUsageService:
         assert summary.total_cost == Decimal("0")
 
     async def test_getDailyTrends_groups_by_date_ascending(self, dbSession) -> None:
-        # Arrange：直接插入指定 request_time 的行（aware UTC，与生产 _utcnow 写入路径一致）
+        # Arrange：直接插入指定 request_time 的行（aware UTC，与生产 _utcnow 写入路径一致）。
+        # 日期相对今天计算（day-2 两行 + day-1 一行），避免硬编码绝对日期随时间
+        # 滑出 30 天窗口导致测试腐烂（getDailyTrends 过滤 request_time >= now-30d）。
         config = await _seedConfig(dbSession)
+        today = datetime.now(UTC).date()
+        day1 = today - timedelta(days=2)
+        day2 = today - timedelta(days=1)
         dbSession.add_all(
             [
                 SessionTokenUsage(
                     session_id="s1", model_config_id=config.id, model_name="gpt-4o",
                     prompt_tokens=10, completion_tokens=5, total_tokens=15,
-                    cost=Decimal("0.002"), request_time=datetime(2026, 8, 1, 9, 0, tzinfo=UTC), purpose="chat",
+                    cost=Decimal("0.002"), request_time=datetime.combine(day1, time(9, 0), tzinfo=UTC), purpose="chat",
                 ),
                 SessionTokenUsage(
                     session_id="s1", model_config_id=config.id, model_name="gpt-4o",
                     prompt_tokens=10, completion_tokens=5, total_tokens=15,
-                    cost=Decimal("0.003"), request_time=datetime(2026, 8, 1, 12, 0, tzinfo=UTC), purpose="chat",
+                    cost=Decimal("0.003"), request_time=datetime.combine(day1, time(12, 0), tzinfo=UTC), purpose="chat",
                 ),
                 SessionTokenUsage(
                     session_id="s2", model_config_id=None, model_name="ollama",
                     prompt_tokens=2, completion_tokens=1, total_tokens=3,
-                    cost=Decimal("0.001"), request_time=datetime(2026, 8, 2, 8, 0, tzinfo=UTC), purpose="chat",
+                    cost=Decimal("0.001"), request_time=datetime.combine(day2, time(8, 0), tzinfo=UTC), purpose="chat",
                 ),
             ]
         )
@@ -190,7 +195,7 @@ class TestTokenUsageService:
         # Act
         trends = await svc.getDailyTrends(dbSession, limit=30)
         # Assert
-        assert [t.date for t in trends] == [date(2026, 8, 1), date(2026, 8, 2)]
+        assert [t.date for t in trends] == [day1, day2]
         assert trends[0].requests == 2
         assert trends[0].tokens == 30
         assert trends[0].cost == Decimal("0.005")

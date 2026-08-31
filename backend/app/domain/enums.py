@@ -137,6 +137,8 @@ class IntentType(str, Enum):
     SUPPLIER_RISK = "supplier_risk"
     # Phase 6.3: 知识图谱多跳推理（chat 拦截路径，跳过 NL2SQL 走 GraphTraversalService）
     GRAPH_REASONING = "graph_reasoning"
+    # Phase 6.4: Agent 运行时（用户显式指名 agent_code，走 AgentRuntimeService 调度 Tool）
+    AGENT_RUN = "agent_run"
 
 
 class LineageLayer(str, Enum):

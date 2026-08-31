@@ -56,6 +56,7 @@ export const zhCN = {
       vectors: "Milvus 向量库",
       supplier360: "供应商 360°",
       supplierRisk: "供应商风险",
+      agentRuntime: "Agent 运行时",
       agents: "Agent Registry",
     },
     themeToggle: "切换暗色模式",
@@ -246,6 +247,29 @@ export const zhCN = {
     invalidKey: "请输入实体键",
     requestFailed: "遍历失败：{message}",
     empty: "暂无数据",
+  },
+
+  agentRuntime: {
+    owner: "负责人：{owner}",
+    executedAt: "执行时间：{time}",
+    rawDetail: "工具原始结果",
+    cost: "成本: ${amount}",
+  },
+
+  agentRuntimePage: {
+    title: "Agent 运行时 · 直接调用",
+    hint: "选择已注册的 ACTIVE Agent，输入自然语言（含供应商 enterprise_key）直接触发工具执行。也可在 AIChatService 中指名 Agent（如「用 supplier_risk_agent 评估供应商 100001」）自动触发。",
+    selectPlaceholder: "选择 Agent",
+    inputPlaceholder: "如：评估供应商 100001 的风险",
+    run: "运行",
+    loadFailed: "Agent 列表加载失败",
+    selectAgent: "请先选择一个 Agent",
+    emptyInput: "请输入执行指令",
+    error404: "Agent {code} 未注册",
+    error409: "Agent {code} 当前不可运行（状态非 ACTIVE 或未绑定工具）",
+    error403: "Agent {code} 缺少数据对象读取策略（deny-by-default 拦截）",
+    error422: "输入无法解析出执行参数（请提供供应商 enterprise_key）",
+    requestFailed: "运行失败：{message}",
   },
 
   messageList: {

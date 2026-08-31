@@ -223,9 +223,11 @@ class SupplierRiskService:
             )
 
         content = getattr(response, "content", "") or ""
-        prompt_tokens = int(getattr(response, "prompt_tokens", 0) or 0)
-        completion_tokens = int(getattr(response, "completion_tokens", 0) or 0)
-        model_name = getattr(response, "model_name", None)
+        # 真实 BaseLlmClient 返回 LlmResponse（camelCase: promptTokens/completionTokens/modelName）；
+        # 兼容既有测试 fake（snake_case）。此前只读 snake_case 导致真实客户端计量恒为 0（审查 MEDIUM#2 根因）。
+        prompt_tokens = int(getattr(response, "promptTokens", None) or getattr(response, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(response, "completionTokens", None) or getattr(response, "completion_tokens", 0) or 0)
+        model_name = getattr(response, "modelName", None) or getattr(response, "model_name", None)
         # 价格估算沿用项目惯例：输入 0.001 / 输出 0.002 CNY per 1k token（与现有 chat fakes 对齐）
         cost = round(
             (prompt_tokens / 1000.0) * 0.001
@@ -350,3 +352,21 @@ def _buildLlmPrompt(
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+
+
+def buildRiskAnswer(read: SupplierRiskRead, supplier_key: int) -> str:
+    """风险评估的人类可读回答（chat 拦截路径与 Agent Tool 共用，DRY）。
+
+    - read.recommended_actions / risk_points 可能为空 → 兜底占位。
+    - risk_points 超 80 字截断，避免答案卡片过长。
+    """
+    first_action = read.recommended_actions[0] if read.recommended_actions else "（无建议）"
+    risk_excerpt = (read.risk_points or "").strip()
+    if len(risk_excerpt) > 80:
+        risk_excerpt = risk_excerpt[:77] + "..."
+    return (
+        f"供应商 {read.profile.enterprise_code}（{supplier_key}）风险等级："
+        f"**{read.level.value}**。"
+        f"主要风险点：{risk_excerpt or '（暂无）'}。"
+        f"建议：{first_action}。"
+    )

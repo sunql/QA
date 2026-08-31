@@ -104,13 +104,18 @@ export interface StreamChartData {
   data: Record<string, unknown>[] | null;
 }
 
-// done 事件负载（累计 token / 成本 / 实际模型名 / 亲和性）
+// done 事件负载（累计 token / 成本 / 实际模型名 / 亲和性 / 拦截类卡片对象）
 export interface StreamSummary {
   tokensUsed: number;
   cost: number;
   modelName?: string | null;
   // 会话亲和性（Phase 7）：解锁/闲聊/领域命令为 null
   affinityStatus?: AffinityStatus | null;
+  // #207 审查 HIGH 修复：流式 done 事件携带拦截类卡片对象（前端按存在性回填渲染）
+  agentRun?: import("../types/agentRuntime").AgentRunRead | null;
+  supplier360?: import("../types/supplier").Supplier360Read | null;
+  supplierRisk?: import("../types/supplierRisk").SupplierRiskRead | null;
+  graphTraversal?: import("../types/graphTraversal").GraphTraversalRead | null;
 }
 
 // data_quality 事件负载（Phase 1.4）：每张 selectedClass 对应一条 badge

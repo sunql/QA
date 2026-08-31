@@ -31,8 +31,17 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies import CurrentUser
 from app.domain.enums import ChartType, IntentType
-from app.domain.exceptions import DomainError, LlmClientError, Nl2SqlError, NotFoundError
+from app.domain.exceptions import (
+    ConflictError,
+    DomainError,
+    LlmClientError,
+    Nl2SqlError,
+    NotFoundError,
+    PermissionDeniedError,
+    ValidationError,
+)
 from app.domain.models import DataSource, LlmConfig, SessionMessage, SessionQueryState
 from app.domain.multi_step_plan import (
     MultiStepPlan,
@@ -61,9 +70,15 @@ from app.services.datasource_service import DataSourceService
 from app.services.embedding_service import EmbeddingService
 from app.services.intent_service import IntentResult, IntentService
 from app.domain.error_messages import (
+    MSG_AGENT_NOT_FOUND_BY_CODE,
+    MSG_AGENT_NOT_RUNNABLE,
+    MSG_AGENT_RUN_BAD_INPUT,
+    MSG_AGENT_RUN_FAILED,
+    MSG_AGENT_RUN_MISSING_CODE,
     MSG_GRAPH_TRAVERSAL_NOT_FOUND,
     MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING,
 )
+from app.services.agent_runtime_service import AgentRuntimeService
 from app.services.graph_traversal_service import GraphTraversalService
 from app.services.messages_zh import (
     MSG_GRAPH_TRAVERSAL_UNAVAILABLE,
@@ -76,7 +91,7 @@ from app.services.ontology_service import OntologyService
 from app.services.step_aggregator import StepAggregator
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.supplier_360_service import Supplier360Service
-from app.services.supplier_risk_service import SupplierRiskService
+from app.services.supplier_risk_service import SupplierRiskService, buildRiskAnswer
 from app.services.schema_introspection_service import (
     SchemaIntrospectionService,
     buildDriftWarning,
@@ -317,6 +332,7 @@ class ChatService(ChatStreamOutputMixin):
         stepAggregator: StepAggregator | None = None,
         dqScoreService: Any | None = None,  # Phase 1.4：数据可信度 badge 查询
         graphTraversalService: GraphTraversalService | None = None,  # Phase 6.3：图推理
+        agentRuntimeService: AgentRuntimeService | None = None,  # Phase 6.4：Agent 运行时
     ) -> None:
         self._intent = intentService or IntentService()
         self._nl2sql = nl2sqlService or Nl2SqlService()
@@ -338,15 +354,26 @@ class ChatService(ChatStreamOutputMixin):
         self._featureQueryService: Any | None = None
         # Phase 6.3：图推理 service（无循环依赖，直接实例化）
         self._graphTraversal = graphTraversalService or GraphTraversalService()
+        # Phase 6.4：Agent 运行时（注册 → 工具路由 → 策略拦截 → 执行）
+        self._agentRuntime = agentRuntimeService or AgentRuntimeService()
         # 会话亲和性窗口：前 N 轮锁定模型；None 时按需懒加载 settings
         self._affinityTurns = affinityTurns
 
-    async def processMessage(self, dto: ChatRequest, session: AsyncSession) -> ChatResponse:
+    async def processMessage(
+        self,
+        dto: ChatRequest,
+        session: AsyncSession,
+        *,
+        user: CurrentUser | None = None,
+    ) -> ChatResponse:
         """处理一条用户消息，返回完整回答响应。
 
         意图流水线：先无状态分类拦截 CHITCHAT；随后加载会话查询状态，
         有上一轮状态时重新分类（可能升级为 REFINE/FOLLOW_UP/NEW_QUERY）。
         CLARIFY 走概念解释（不执行 SQL）；查询意图走 ReAct 两阶段并保存本轮状态。
+
+        user 可选（#207 安全修复）：API 层透传真实调用方，Agent 运行用它作 actor
+        归属审计；不传（测试直调）时 actor 回退为 "chat"。
         """
         result, state = await self._classifyMessage(session, dto)
         if result.intent == IntentType.CHITCHAT:
@@ -365,6 +392,11 @@ class ChatService(ChatStreamOutputMixin):
         # Phase 6.3：知识图谱多跳推理（chat 拦截，跳过 NL2SQL）
         if result.intent == IntentType.GRAPH_REASONING:
             return await self._handleGraphReasoning(session, dto, result)
+        # Phase 6.4：Agent 运行时（用户显式指名 Agent → 调度 Tool，跳过 NL2SQL）。
+        # 该意图在 classifyResult 中位于最优先（明确指名胜过一切启发式），保证
+        # 「用 supplier_risk_agent 评估供应商 100001」这类指令不被风险/360 拦截吸走。
+        if result.intent == IntentType.AGENT_RUN:
+            return await self._handleAgentRun(session, dto, result, user=user)
 
         pc = await self._buildPipelineContext(
             session, dto,
@@ -1227,20 +1259,101 @@ class ChatService(ChatStreamOutputMixin):
                 answer=MSG_SUPPLIER_RISK_NOT_FOUND.format(key=supplierKey),
                 intent=result.intent.value,
             )
-        # answer 拼装：等级 + 主要风险点（截断 80 字）+ 首要建议
-        first_action = data.recommended_actions[0] if data.recommended_actions else "（无建议）"
-        risk_excerpt = (data.risk_points or "").strip()
-        if len(risk_excerpt) > 80:
-            risk_excerpt = risk_excerpt[:77] + "..."
-        answer = (
-            f"供应商 {data.profile.enterprise_code}（{supplierKey}）风险等级：**{data.level.value}**。"
-            f"主要风险点：{risk_excerpt or '（暂无）'}。"
-            f"建议：{first_action}。"
+        # 审查 MEDIUM#2 同型缺口：风险点 LLM 调用此前只计量不落库，这里补写审计
+        await self._recordDirectUsage(
+            session, dto.sessionId,
+            tokens_used=data.tokens_used, cost=data.cost, model_name=data.llm_model_name,
+            purpose="supplier_risk",
         )
+        # answer 拼装复用 buildRiskAnswer（与 Agent Tool 共用同一文案，DRY）
+        answer = buildRiskAnswer(data, supplierKey)
         return ChatResponse(
             answer=answer,
             intent=result.intent.value,
             supplier_risk=data,
+        )
+
+    async def _handleAgentRun(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        result: IntentResult,
+        *,
+        user: CurrentUser | None = None,
+    ) -> ChatResponse:
+        """Phase 6.4：Agent 运行时（chat 拦截路径，跳过 NL2SQL）。
+
+        用户显式指名 Agent（如「用 supplier_risk_agent 评估供应商 100001」）时，
+        由 AgentRuntimeService 完成：注册解析 → 状态门禁 → 工具绑定 → 策略拦截 →
+        参数抽取 → 执行。成功 → answer=工具返回文案 + agent_run=<完整对象>，
+        前端 MessageItem 按字段存在性路由到 AgentResponseCard 渲染。
+
+        失败语义（不向用户抛领域异常，全部转友好 answer + agent_run=None）：
+        - Agent 未注册 → MSG_AGENT_NOT_FOUND_BY_CODE（不泄漏「不存在 vs 无权限」侧信道）
+        - 不可运行（DRAFT/DEPRECATED/无工具绑定）→ MSG_AGENT_NOT_RUNNABLE
+        - 策略拦截（403）→ MSG_AGENT_RUN_DENIED（detail 含真实 data_object）
+        - 参数解析失败（422）→ MSG_AGENT_RUN_BAD_INPUT
+        - 其他未预期异常 → log warning + MSG_AGENT_RUN_FAILED（绝不阻断 chat 主链路）
+
+        每次成功运行后持久化对话消息；若工具内部发生了 LLM 调用（tokens>0），
+        补写 token_usage 审计（审查 MEDIUM#2 修复：此前只进 DTO 计量、从不落库）。
+        """
+        agent_code = (result.agent_code or "").strip().upper()
+        if not agent_code:
+            return ChatResponse(
+                answer=MSG_AGENT_RUN_MISSING_CODE,
+                intent=result.intent.value,
+            )
+        try:
+            run = await self._agentRuntime.run(
+                session, agent_code, dto.question, llm_factory=self._llmFactory,
+                # 真实调用方身份透传为 actor（归属审计；安全审查 HIGH#1 修复）
+                actor=user.userId if user is not None else "chat",
+            )
+        except NotFoundError:
+            return ChatResponse(
+                answer=MSG_AGENT_NOT_FOUND_BY_CODE.format(code=agent_code),
+                intent=result.intent.value,
+            )
+        except PermissionDeniedError as exc:
+            # 用异常自身 message（含真实 data_object），替代硬编码 object="?"（审查 LOW#5）
+            return ChatResponse(
+                answer=exc.message,
+                intent=result.intent.value,
+            )
+        except ConflictError:
+            return ChatResponse(
+                answer=MSG_AGENT_NOT_RUNNABLE.format(code=agent_code, status="inactive"),
+                intent=result.intent.value,
+            )
+        except ValidationError as exc:
+            return ChatResponse(
+                answer=exc.message,
+                intent=result.intent.value,
+            )
+        except Exception:  # noqa: BLE001 - Agent 执行降级，不阻断 chat 主链路
+            logger.warning(
+                "agent run failed for %s, degrading: %s",
+                agent_code, dto.question, exc_info=True,
+            )
+            return ChatResponse(
+                answer=MSG_AGENT_RUN_FAILED,
+                intent=result.intent.value,
+            )
+        # 审查 MEDIUM#2：Agent 内部 LLM 调用（如 supplier_risk 生成风险点）补写
+        # token_usage 审计（modelConfigId=None：工具路径未透传配置，落已知 modelName + cost）
+        await self._recordDirectUsage(
+            session, dto.sessionId,
+            tokens_used=run.tokens_used, cost=run.cost, model_name=run.llm_model_name,
+            purpose="agent_run",
+        )
+        await self._storeSessionMessages(
+            session, dto.sessionId, dto.question, run.answer, None
+        )
+        return ChatResponse(
+            answer=run.answer,
+            intent=result.intent.value,
+            agent_run=run,
         )
 
     async def _handleGraphReasoning(
@@ -1430,15 +1543,23 @@ class ChatService(ChatStreamOutputMixin):
     # =========================================================================
 
     async def processMessageStream(
-        self, dto: ChatRequest, session: AsyncSession
+        self,
+        dto: ChatRequest,
+        session: AsyncSession,
+        *,
+        user: CurrentUser | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """流式处理一条消息。
 
         meta 事件最先产出（告知意图）；有上一轮状态时重新分类并二次产出 meta。
         chitchat 直接产出一条问候；DEFINE/MAP/METRIC 走 _streamDomainCommand（零 LLM）；
-        CLARIFY 走 _streamClarify；其余走 _streamQuery。
+        CLARIFY 走 _streamClarify；拦截类意图（360°/风险/图推理/Agent 运行）走
+        _streamInterceptCard（#207 审查 HIGH 修复：此前流式路径从不路由这些意图，
+        默认 streaming UI 下卡片从未渲染）；其余走 _streamQuery。
         查询流水线中的领域异常转为 error 事件（4-1 携带 errorType），保证 SSE
         始终以结构化事件结束。4-4：闲聊/出错轮也持久化消息，历史链不断。
+
+        user 可选（#207 安全修复）：API 层透传真实调用方，Agent 运行用它作 actor。
         """
         result = self._intent.classifyResult(dto.question)
         yield StreamEvent(EVENT_META, {"intent": result.intent.value})
@@ -1464,6 +1585,17 @@ class ChatService(ChatStreamOutputMixin):
                 return
             if result.intent == IntentType.CLARIFY:
                 async for event in self._streamClarify(dto, session):
+                    yield event
+                return
+            # #207 审查 HIGH 修复：拦截类意图在流式路径同样路由（token + done 卡片对象），
+            # 覆盖 SUPPLIER_360 / SUPPLIER_RISK / GRAPH_REASONING / AGENT_RUN 四个卡片意图。
+            if result.intent in (
+                IntentType.SUPPLIER_360,
+                IntentType.SUPPLIER_RISK,
+                IntentType.GRAPH_REASONING,
+                IntentType.AGENT_RUN,
+            ):
+                async for event in self._streamInterceptCard(dto, session, result, user):
                     yield event
                 return
             async for event in self._streamQuery(
@@ -1525,6 +1657,65 @@ class ChatService(ChatStreamOutputMixin):
                 "cost": resp.cost,
                 "modelName": resp.modelName,
                 "affinityStatus": affinityPayload,
+            },
+        )
+
+    async def _streamInterceptCard(
+        self,
+        dto: ChatRequest,
+        session: AsyncSession,
+        result: IntentResult,
+        user: CurrentUser | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """拦截类意图（360°/风险/图推理/Agent 运行）的 SSE 形式。
+
+        #207 审查 HIGH 修复：此前流式路径从不路由这些意图，默认 streaming UI 下
+        卡片（Supplier360Card / SupplierRiskCard / GraphTraversalCard / AgentResponseCard）
+        从未渲染。此处复用非流式 handler 得到 ChatResponse（保证两条路径语义一致），
+        再转成 token(整段 answer) + done(携带卡片对象)。
+
+        卡片对象序列化必须用 model_dump(by_alias=True)：toSse 的 default=str 会把
+        Pydantic 模型直接变成 repr 字符串（见 stream_events.StreamEvent.toSse）。
+        """
+        if result.intent == IntentType.SUPPLIER_360:
+            resp = await self._handleSupplier360(session, dto, result)
+        elif result.intent == IntentType.SUPPLIER_RISK:
+            resp = await self._handleSupplierRisk(session, dto, result)
+        elif result.intent == IntentType.GRAPH_REASONING:
+            resp = await self._handleGraphReasoning(session, dto, result)
+        elif result.intent == IntentType.AGENT_RUN:
+            resp = await self._handleAgentRun(session, dto, result, user=user)
+        else:
+            # 仅拦截意图可达；其他意图由调用方前置守卫（processMessageStream 拦截）。
+            raise AssertionError(f"unexpected intercept intent: {result.intent}")
+
+        yield StreamEvent(EVENT_TOKEN, {"content": resp.answer})
+        yield StreamEvent(
+            EVENT_DONE,
+            {
+                "tokensUsed": resp.tokensUsed,
+                "cost": float(resp.cost),
+                "modelName": resp.modelName,
+                "agentRun": (
+                    resp.agent_run.model_dump(mode="json", by_alias=True)
+                    if resp.agent_run is not None
+                    else None
+                ),
+                "supplier360": (
+                    resp.supplier360.model_dump(mode="json", by_alias=True)
+                    if resp.supplier360 is not None
+                    else None
+                ),
+                "supplierRisk": (
+                    resp.supplier_risk.model_dump(mode="json", by_alias=True)
+                    if resp.supplier_risk is not None
+                    else None
+                ),
+                "graphTraversal": (
+                    resp.graph_traversal.model_dump(mode="json", by_alias=True)
+                    if resp.graph_traversal is not None
+                    else None
+                ),
             },
         )
 
@@ -2444,6 +2635,35 @@ class ChatService(ChatStreamOutputMixin):
             promptTokens=promptTokens,
             completionTokens=completionTokens,
             cost=self._costFor(config, promptTokens, completionTokens),
+            purpose=purpose,
+        )
+
+    async def _recordDirectUsage(
+        self,
+        session: AsyncSession,
+        sessionId: str,
+        *,
+        tokens_used: int,
+        cost: float,
+        model_name: str | None,
+        purpose: str,
+    ) -> None:
+        """按已知计量写 token_usage（供 Agent/Tool 路径：模型配置未透传）。
+
+        与 _recordUsage 的区别：ModelConfig 未透传到工具内部，无法用配置推算成本，
+        直接落工具已计算的 total tokens + cost（modelConfigId=None）。tokens<=0
+        （模板降级、无 LLM 调用）时跳过。审查 MEDIUM#2 修复。
+        """
+        if tokens_used <= 0:
+            return
+        await self._tokenUsage.recordUsage(
+            session,
+            sessionId=sessionId,
+            modelConfigId=None,
+            modelName=model_name,
+            promptTokens=tokens_used,
+            completionTokens=0,
+            cost=Decimal(str(cost)),
             purpose=purpose,
         )
 

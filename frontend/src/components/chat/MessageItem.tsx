@@ -11,6 +11,7 @@ import TermDictionaryButton from "./TermDictionaryButton";
 import Supplier360Card from "./Supplier360Card";
 import SupplierRiskCard from "./SupplierRiskCard";
 import GraphTraversalCard from "./GraphTraversalCard";
+import AgentResponseCard from "./AgentResponseCard";
 import type { ChatMessage } from "../../types/chat";
 import { useTranslation } from "../../i18n";
 
@@ -121,6 +122,12 @@ function MessageItem({ message, exporting = false, onExportSingleTurn }: Message
             {message.graphTraversal ? (
               <div style={{ marginTop: 8 }}>
                 <GraphTraversalCard data={message.graphTraversal} />
+              </div>
+            ) : null}
+            {/* Phase 6.4：Agent 运行时响应卡片（仅 intent=agent_run + 运行时成功时回填） */}
+            {message.agentRun ? (
+              <div style={{ marginTop: 8 }}>
+                <AgentResponseCard data={message.agentRun} />
               </div>
             ) : null}
             {message.tokensUsed !== undefined ||

@@ -8,6 +8,7 @@ import type {
   AgentDefinitionUpdate,
   AgentStatus,
 } from "../types/agentRegistry";
+import type { AgentRunRead } from "../types/agentRuntime";
 
 const PREFIX = "/agents";
 
@@ -91,4 +92,17 @@ export async function deleteAgentPolicy(
   policyId: number,
 ): Promise<void> {
   await httpClient.delete(`${PREFIX}/${agentCode}/policies/${policyId}`);
+}
+
+// Phase 6.4：Agent 运行时执行（POST /agents/{code}/run）
+// 成功返回 AgentRunRead；失败由全局 DomainError handler 映射（404/409/403/422），
+// httpClient 拦截器转为携带 .status 的 Error，页面按状态分流。
+export async function runAgent(
+  agentCode: string,
+  input: string,
+): Promise<AgentRunRead> {
+  const res = await httpClient.post<AgentRunRead>(`${PREFIX}/${agentCode}/run`, {
+    input,
+  });
+  return res.data;
 }

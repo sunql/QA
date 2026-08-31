@@ -50,6 +50,7 @@ export const enUS = {
       vectors: "Milvus Vector DB",
       supplier360: "Supplier 360°",
       supplierRisk: "Supplier Risk",
+      agentRuntime: "Agent Runtime",
       agents: "Agent Registry",
     },
     themeToggle: "Toggle dark mode",
@@ -241,6 +242,29 @@ export const enUS = {
     invalidKey: "Please enter an entity key",
     requestFailed: "Traversal failed: {message}",
     empty: "No data",
+  },
+
+  agentRuntime: {
+    owner: "Owner: {owner}",
+    executedAt: "Executed: {time}",
+    rawDetail: "Raw tool result",
+    cost: "Cost: ${amount}",
+  },
+
+  agentRuntimePage: {
+    title: "Agent Runtime · Direct Invocation",
+    hint: "Pick an ACTIVE Agent and enter natural language (with supplier enterprise_key) to trigger its tool directly. Or mention the Agent by name in AIChatService (e.g. 'use supplier_risk_agent to assess supplier 100001').",
+    selectPlaceholder: "Select Agent",
+    inputPlaceholder: "e.g. assess the risk of supplier 100001",
+    run: "Run",
+    loadFailed: "Failed to load Agent list",
+    selectAgent: "Please select an Agent first",
+    emptyInput: "Please enter an instruction",
+    error404: "Agent {code} is not registered",
+    error409: "Agent {code} is not runnable (status != ACTIVE or no tool bound)",
+    error403: "Agent {code} lacks a read policy for its data object (deny-by-default)",
+    error422: "Could not parse execution args from input (provide a supplier enterprise_key)",
+    requestFailed: "Run failed: {message}",
   },
 
   messageList: {

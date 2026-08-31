@@ -279,3 +279,53 @@ supplier_risk: SupplierRiskRead | None = Field(default=None)
 - Chat：AIChatService 中问「供应商 X 的风险 / 健康度 / 评分」
 
 详见 [[Harness/changes/feat-supplier-risk-agent-mini/summary.md]]。
+
+---
+
+## Agent Runtime（Phase 6.4）
+
+Agent 运行时最小版（MVP）：复用 [[Harness/changes/feat-agent-registry/summary.md|Agent Registry]] 注册资产，完成「注册 → 调度 → 工具调用」最小闭环。轻量调度器，不替代 LangGraph 等框架。
+
+### 工具绑定（AGENT_TOOLS）
+
+| Agent | 工具 | 说明 |
+|---|---|---|
+| `SUPPLIER_360_AGENT` | `supplier_360` | 单供应商 360° 视图（只读聚合，无 LLM） |
+| `SUPPLIER_RISK_AGENT` | `supplier_risk` | 风险等级评估 + LLM 风险点 |
+| `GRAPH_REASONING_AGENT` | `graph_traverse` | Neo4j 多跳供应链链路推理 |
+
+已注册但未绑定工具的元数据 Agent（`PROCUREMENT_COPILOT` / `SUPPLIER_OTD_REPORT`）→ 409 不可运行，Phase 7+ 排期。
+
+### 触发路径
+
+1. **REST**：`POST /api/v1/agents/{agent_code}/run`（确定性测试入口，不注入真实 LLM factory）。
+2. **Chat 指名**：用户问题显式指名 Agent（如「用 supplier_risk_agent 评估供应商 100001」）→ `IntentType.AGENT_RUN`（classifyResult 最优先）→ 复用真实 LLM factory + 模型路由 + 术语字典。
+3. **前端**：AgentRuntimePage 手动触发 + AgentResponseCard 卡片（chat 与 REST 双路径共用）。
+
+### 运行编排
+
+```
+run(session, agent_code, params, *, actor)
+  → 查注册（404）→ 状态门禁（非 ACTIVE → 不可运行）
+  → AGENT_TOOLS 绑定（无绑定 → 不可运行）
+  → deny-by-default 策略拦截（无政策条目 → 拒绝，不静默放行）
+  → arg_extractor 参数提取 → 工具执行 → AgentRunRead
+```
+
+### 审计与计量
+
+- `actor` 从 API 层 `getCurrentUser` 透传（`ChatRequest` 无 user 字段，身份仅存在于 API 层）。
+- 每次 Agent 内部 LLM 调用经 `_recordDirectUsage` 写 `token_usage` 审计（purpose=agent_run / supplier_risk；`modelConfigId=None`）。
+- 真实计量修复：`LlmResponse` 为 camelCase（promptTokens/completionTokens/modelName），`_generateRiskPoints` 兼容读取（此前读 snake_case 恒为 0）。
+
+### 流式路由
+
+默认 UI 全走 `/chat/stream`：`_streamInterceptCard` 统一拦截 4 类卡片意图（agent_run / supplier_360 / supplier_risk / graph_reasoning），产出 `meta → token → done`；`done` 事件携带 `agentRun/supplier360/supplierRisk/graphTraversal` 卡片对象（前端按字段存在性渲染）。
+
+### 入口
+
+- 直接 API：`POST /api/v1/agents/{agent_code}/run`（侧栏「Agent 运行时」页面）
+- Chat：AIChatService 中问「用 xxx_agent …」（显式指名，最优先）
+- 幂等 Seed：`scripts/seed_agents.py`（5 个 Agent，3 可运行）
+
+详见 [[Harness/changes/feat-agent-runtime-mvp/summary.md]]。

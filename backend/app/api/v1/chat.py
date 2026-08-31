@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import getCurrentUser, getDb
+from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.exceptions import DomainError
 from app.domain.schemas import ChatRequest, ChatResponse, QuerySuggestRequest, QuerySuggestResponse
 from app.infrastructure.rate_limit import limiter, rateLimitValue
@@ -32,10 +32,14 @@ _embeddingService = EmbeddingService()
 async def chat(
     request: Request,
     dto: ChatRequest,
+    _user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
 ) -> ChatResponse:
-    """处理一条自然语言问题，返回回答 + SQL + 图表 option + 数据。"""
-    return await _service.processMessage(dto, session)
+    """处理一条自然语言问题，返回回答 + SQL + 图表 option + 数据。
+
+    #207 安全修复：真实调用方（_user）透传为 Agent 运行 actor（归属审计）。
+    """
+    return await _service.processMessage(dto, session, user=_user)
 
 
 @router.post("/stream")
@@ -43,15 +47,17 @@ async def chat(
 async def chatStream(
     request: Request,
     dto: ChatRequest,
+    _user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
 ) -> StreamingResponse:
     """SSE 流式对话：meta → sql → chart → token×N → done（失败发 error 事件）。
 
     DB 会话依赖在响应体完整发送后才会释放（依赖项 teardown），
     因此整个生成器可安全使用 session 提交 Token 审计与对话消息。
+    #207 安全修复：真实调用方（_user）透传为 Agent 运行 actor（归属审计）。
     """
     async def eventSource() -> AsyncIterator[str]:
-        async for event in _service.processMessageStream(dto, session):
+        async for event in _service.processMessageStream(dto, session, user=_user):
             yield event.toSse()
 
     return StreamingResponse(

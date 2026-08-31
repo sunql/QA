@@ -124,6 +124,7 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_DQ_BADGE_EVALUATED,
     MSG_SCHEMA_CHAT_DQ_BADGES,
     MSG_SCHEMA_CHAT_SUPPLIER_360,
+    MSG_SCHEMA_CHAT_AGENT_RUN,
     MSG_SCHEMA_CHAT_SUPPLIER_RISK,
     MSG_SCHEMA_GRAPH_HOP,
     MSG_SCHEMA_GRAPH_TRAVERSAL,
@@ -142,6 +143,7 @@ from app.domain.error_messages import (
     MSG_SCHEMA_AGENT_POLICY_NOTES,
     MSG_SCHEMA_AGENT_POLICY_PERMISSION,
     MSG_SCHEMA_AGENT_RESPONSE_LATENCY,
+    MSG_SCHEMA_AGENT_RUN_INPUT,
     MSG_SCHEMA_AGENT_STATUS,
     MSG_SCHEMA_AGENT_TRIGGER_TYPE,
     MSG_SCHEMA_AGENT_VERSION,
@@ -1330,6 +1332,11 @@ class ChatResponse(CamelModel):
         default=None,
         description=MSG_SCHEMA_GRAPH_TRAVERSAL,
     )
+    # Phase 6.4：Agent 运行时执行结果（仅 intent=agent_run 时填充；前端按字段存在性路由）
+    agent_run: AgentRunRead | None = Field(
+        default=None,
+        description=MSG_SCHEMA_CHAT_AGENT_RUN,
+    )
 
 
 class DataQualityBadge(CamelModel):
@@ -1969,3 +1976,34 @@ class AgentDefinitionRead(CamelModel):
     created_time: datetime | None = None
     updated_time: datetime | None = None
     created_time: datetime
+
+
+class AgentRunRequest(CamelModel):
+    """Agent 运行请求（POST /agents/{code}/run，Phase 6.4）。"""
+
+    input: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description=MSG_SCHEMA_AGENT_RUN_INPUT,
+    )
+
+
+class AgentRunRead(CamelModel):
+    """Agent 运行时执行结果（Phase 6.4 feat-agent-runtime-mvp）。
+
+    run() 成功时返回；失败（Agent 不存在 / 不可运行 / 策略拦截 / 参数缺失）
+    抛领域异常（404 / 409 / 403 / 422），由全局 DomainError handler 映射。
+    result 为 Tool 原始输出（JSON-serializable）；answer 为人类可读回答。
+    """
+
+    agent_code: str
+    agent_name: str
+    agent_owner: str | None = None
+    tool: str
+    result: dict
+    answer: str
+    tokens_used: int = 0
+    cost: float = 0.0
+    llm_model_name: str | None = None
+    executed_at: datetime

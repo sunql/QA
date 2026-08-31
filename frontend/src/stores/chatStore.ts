@@ -34,6 +34,8 @@ const KNOWN_INTENTS = new Set<IntentType>([
   "supplier_360",
   "supplier_risk",
   "graph_reasoning",
+  // Phase 6.4：Agent 运行时（AGENT_RUN 意图最优先，显式指名 Agent）
+  "agent_run",
 ]);
 
 function isIntent(value: unknown): value is IntentType {
@@ -257,7 +259,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 }),
               };
             }),
-          onDone: ({ tokensUsed, cost, modelName, affinityStatus }) =>
+          onDone: ({
+            tokensUsed,
+            cost,
+            modelName,
+            affinityStatus,
+            agentRun,
+            supplier360,
+            supplierRisk,
+            graphTraversal,
+          }) =>
             set((state) => ({
               messages: finalizeRunningSteps(
                 patchLastMessage(state.messages, {
@@ -266,6 +277,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   modelName: modelName ?? undefined,
                   isStreaming: false,
                   affinityStatus: affinityStatus ?? null,
+                  // #207 审查 HIGH 修复：流式 done 事件同样携带拦截类卡片对象
+                  //（此前仅非流式分支回填，导致默认 streaming UI 下卡片从未渲染）
+                  agentRun: agentRun ?? null,
+                  supplier360: supplier360 ?? null,
+                  supplierRisk: supplierRisk ?? null,
+                  graphTraversal: graphTraversal ?? null,
                 })
               ),
               loading: false,
@@ -301,6 +318,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             affinityStatus: res.affinityStatus ?? null,
             // Phase 1.4：DQ 可信度 badge（顺序对齐 queryPlan.selectedClasses）
             dataQuality: res.dataQuality ?? null,
+            // 拦截路径卡片对象（非流式响应回填，MessageItem 按字段存在性渲染）。
+            // 修复：Phase 5.3/5.4/6.3 曾只读不写，导致 supplier360/supplierRisk/
+            // graphTraversal 卡片在真实 chat 流中从未渲染（#206 审查发现）。
+            supplier360: res.supplier360 ?? null,
+            supplierRisk: res.supplierRisk ?? null,
+            graphTraversal: res.graphTraversal ?? null,
+            // Phase 6.4：Agent 运行时执行结果（仅 intent=agent_run 时非 null）
+            agentRun: res.agentRun ?? null,
             // 非流式多步：steps 数组均为「已完成」（后端仅回传数据步骤，无汇总步骤）
             steps: res.steps?.map(
               (s): MultiStepStep => ({

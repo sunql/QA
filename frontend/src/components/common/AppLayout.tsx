@@ -25,6 +25,7 @@ const NAV_KEYS = [
   { key: "/vectors", labelKey: "appLayout.menu.vectors" },
   { key: "/supplier-360", labelKey: "appLayout.menu.supplier360" },
   { key: "/supplier-risk", labelKey: "appLayout.menu.supplierRisk" },
+  { key: "/agents/run", labelKey: "appLayout.menu.agentRuntime" },
   { key: "/agents", labelKey: "appLayout.menu.agents" },
 ] as const;
 

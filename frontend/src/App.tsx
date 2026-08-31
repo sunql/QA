@@ -17,6 +17,7 @@ import MilvusVectorsPage from "./pages/MilvusVectorsPage";
 import Supplier360Page from "./pages/Supplier360Page";
 import SupplierRiskPage from "./pages/SupplierRiskPage";
 import AgentRegistryPage from "./pages/AgentRegistryPage";
+import AgentRuntimePage from "./pages/AgentRuntimePage";
 
 export default function App() {
   return (
@@ -39,6 +40,7 @@ export default function App() {
         <Route path="vectors" element={<MilvusVectorsPage />} />
         <Route path="supplier-360" element={<Supplier360Page />} />
         <Route path="supplier-risk" element={<SupplierRiskPage />} />
+        <Route path="agents/run" element={<AgentRuntimePage />} />
         <Route path="agents" element={<AgentRegistryPage />} />
       </Route>
     </Routes>

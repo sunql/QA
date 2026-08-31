@@ -323,6 +323,29 @@ MSG_AGENT_POLICY_DUPLICATE = (
 )
 MSG_AGENT_REGISTRY_FORBIDDEN = "无权修改该 Agent：仅 owner 部门成员或 admin 角色可操作"
 
+# ---------------------------------------------------------------------------
+# Phase 6.4 feat-agent-runtime-mvp：Agent 运行时
+# ---------------------------------------------------------------------------
+
+MSG_AGENT_NOT_RUNNABLE = "Agent 当前不可运行：code={code}（status={status}）"
+MSG_AGENT_RUN_DENIED = (
+    "无权调用 Agent：code={code}（数据对象 {object} 无读取策略）。"
+    "请先在 Agent 注册表中为其添加 READ / MASKED_READ 策略"
+)
+MSG_AGENT_RUN_BAD_INPUT = (
+    "无法从输入中解析执行参数：code={code}（tool={tool}）。"
+    "请提供企业编码，如「供应商 100001」"
+)
+MSG_AGENT_RUN_FAILED = "Agent 执行失败，请稍后重试"
+MSG_AGENT_RUN_MISSING_CODE = (
+    "请在问题中指定要调用的 Agent（如「用 supplier_risk_agent 评估供应商 100001」）"
+)
+MSG_SCHEMA_AGENT_RUN_INPUT = "Agent 运行输入（自然语言，如「评估供应商 100001」）"
+MSG_SCHEMA_CHAT_AGENT_RUN = (
+    "Agent 运行时执行结果（仅 intent=agent_run 时填充）；"
+    "由 AgentRuntimeService 调度 Tool 生成。前端 MessageItem 按字段存在性路由到 AgentResponseCard"
+)
+
 # =============================================================================
 # Phase 6.3 feat-graph-traversal-api：知识图谱多跳推理
 # =============================================================================

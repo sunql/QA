@@ -202,6 +202,51 @@ describe("MessageItem 消息渲染", () => {
   });
 
   // =========================================================================
+  // Phase 6.4：Agent 运行时响应卡片
+  // =========================================================================
+
+  it("消息含 agentRun 时渲染 AgentResponseCard", () => {
+    renderItem({
+      content: "供应商 **SUP000001** 风险等级：high。",
+      intent: "agent_run",
+      agentRun: {
+        agentCode: "SUPPLIER_RISK_AGENT",
+        agentName: "供应商风险 Agent",
+        agentOwner: "procurement",
+        tool: "supplier_risk",
+        result: {
+          level: "high",
+          levelSource: "risk_score",
+          profile: {
+            enterpriseKey: 100001,
+            enterpriseCode: "SUP000001",
+            owner: "procurement",
+            matchRule: "MDM_MASTER",
+            effectiveDate: "2026-01-01",
+            expiryDate: null,
+          },
+          contributions: [],
+          riskPoints: null,
+          riskPointsSource: "fallback_template",
+          recommendedActions: [],
+          tokensUsed: 0,
+          cost: 0,
+          llmModelName: null,
+          fetchedAt: "2026-08-31T00:00:00Z",
+        },
+        answer: "供应商 **SUP000001** 风险等级：high。",
+        tokensUsed: 0,
+        cost: 0,
+        llmModelName: null,
+        executedAt: "2026-08-31T00:00:00Z",
+      },
+    });
+    // AgentResponseCard 头部 agentName + tool Tag
+    expect(screen.getByText("供应商风险 Agent")).toBeInTheDocument();
+    expect(screen.getByText("supplier_risk")).toBeInTheDocument();
+  });
+
+  // =========================================================================
   // Phase 8：SQL 预览使用只读 Monaco + 自定义复制按钮
   // =========================================================================
 

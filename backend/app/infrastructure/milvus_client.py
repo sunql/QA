@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 _COLLECTION_NAME = "ontology_embeddings"
 _QUERY_COLLECTION_NAME = "query_embeddings"
+_DOCUMENT_COLLECTION_NAME = "document_embeddings"
 _DIM = 1024  # 默认 embedding 维度（bge-m3 输出 1024 维；改模型需同步重建集合，见 scripts/backfill_milvus_embeddings.py）
 
 # 合法 embedding 类型。ontology_id 在 Milvus 中非跨类型唯一（类/属性共用 id 序列），
@@ -323,6 +324,95 @@ def searchQueryEmbedding(
                 "session_id": hit.entity.get("session_id"),
                 "question": hit.entity.get("question"),
                 "sql": hit.entity.get("sql"),
+                "distance": float(hit.distance),
+            })
+    return hits
+
+
+# =============================================================================
+# Phase 5.2: document_embeddings（文档向量）
+# =============================================================================
+
+
+def _documentFields() -> list[FieldSchema]:
+    return [
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+        FieldSchema(name="document_id", dtype=DataType.VARCHAR, max_length=50),
+        FieldSchema(name="chunk_id", dtype=DataType.VARCHAR, max_length=64),
+        FieldSchema(name="chunk_text", dtype=DataType.VARCHAR, max_length=4000),
+        FieldSchema(name="chunk_sequence", dtype=DataType.INT64),
+        FieldSchema(name="effective_date", dtype=DataType.VARCHAR, max_length=20),
+        FieldSchema(name="security_level", dtype=DataType.VARCHAR, max_length=10),
+        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=_DIM),
+    ]
+
+
+def ensureDocumentCollection() -> Collection:
+    """确保 document_embeddings 集合存在（不存在则创建）。"""
+    return _ensureCollection(_DOCUMENT_COLLECTION_NAME, _documentFields())
+
+
+def insertDocumentChunks(records: list[dict[str, Any]]) -> None:
+    """批量插入文档 chunk 向量记录。
+
+    Args:
+        records: 每条记录包含 document_id, chunk_id, chunk_text, chunk_sequence,
+                 effective_date, security_level, embedding (list[float])
+    """
+    collection = ensureDocumentCollection()
+    data = [
+        [r["document_id"] for r in records],
+        [r["chunk_id"] for r in records],
+        [r["chunk_text"][:4000] for r in records],  # truncate to max_length
+        [r["chunk_sequence"] for r in records],
+        [r.get("effective_date") or "" for r in records],
+        [r.get("security_level") or "" for r in records],
+        [r["embedding"] for r in records],
+    ]
+    collection.insert(data)
+    collection.flush()
+    logger.info("Inserted %d document chunks into Milvus", len(records))
+
+
+def searchDocumentChunks(
+    queryEmbedding: list[float],
+    *,
+    securityLevel: str | None = None,
+    topK: int = 5,
+) -> list[dict[str, Any]]:
+    """向量相似度检索文档 chunks。
+
+    Args:
+        queryEmbedding: 查询向量
+        securityLevel: 可选，按安全等级过滤（L1/L2/L3）
+        topK: 返回条数
+
+    Returns:
+        匹配的 chunk 列表，含 document_id, chunk_id, chunk_text, chunk_sequence, distance
+    """
+    collection = ensureDocumentCollection()
+
+    expr = None
+    if securityLevel is not None:
+        expr = f'security_level == "{securityLevel}"'
+    results = collection.search(
+        data=[queryEmbedding],
+        anns_field="embedding",
+        param={"metric_type": "L2", "params": {"n_probe": 10}},
+        limit=topK,
+        output_fields=["document_id", "chunk_id", "chunk_text", "chunk_sequence", "security_level"],
+        expr=expr,
+    )
+
+    hits: list[dict[str, Any]] = []
+    for result in results:
+        for hit in result:
+            hits.append({
+                "document_id": hit.entity.get("document_id"),
+                "chunk_id": hit.entity.get("chunk_id"),
+                "chunk_text": hit.entity.get("chunk_text"),
+                "chunk_sequence": hit.entity.get("chunk_sequence"),
+                "security_level": hit.entity.get("security_level"),
                 "distance": float(hit.distance),
             })
     return hits

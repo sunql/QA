@@ -1,4 +1,4 @@
-"""文档目录 API 路由（Phase 5.1）。
+"""文档目录 API 路由（Phase 5.1+5.2）。
 
 挂在 /api/v1/documents：
   GET    /api/v1/documents                          列表（过滤：type / security_level / status）
@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import getCurrentUser, getDb
@@ -165,3 +165,68 @@ async def deleteRelation(
     service: DocumentService = Depends(getDocumentService),
 ) -> None:
     await service.deleteRelation(session, relationId)
+
+
+# ---------------------------------------------------------------------------
+# RAG: Upload & Search
+# ---------------------------------------------------------------------------
+
+
+@router.post("/upload", status_code=status.HTTP_201_CREATED)
+async def uploadDocument(
+    file: UploadFile,
+    document_type: str | None = Query(default=None, alias="documentType"),
+    version: str = Query(default="v1.0"),
+    owner: str = Query(default=""),
+    effective_date: str | None = Query(default=None, alias="effectiveDate"),
+    security_level: str = Query(default="L1", alias="securityLevel"),
+    _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> dict:
+    """上传文档并触发 RAG 向量化入库。
+
+    文件类型支持：PDF、DOCX、TXT、MD。
+    """
+    from app.services.rag_service import RagService, RagError
+
+    content = await file.read()
+    mime = file.content_type or "application/octet-stream"
+    fname = file.filename or "unknown"
+
+    svc = RagService()
+    try:
+        result = await svc.ingestDocument(
+            session,
+            content=content,
+            filename=fname,
+            mime_type=mime,
+            document_type=document_type or "OTHER",
+            version=version,
+            owner=owner,
+            effective_date=effective_date,
+            security_level=security_level,
+        )
+        return result
+    except RagError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@router.post("/search")
+async def searchDocuments(
+    q: str = Query(..., min_length=1),
+    security_level: str | None = Query(default=None, alias="securityLevel"),
+    top_k: int = Query(default=5, ge=1, le=50, alias="topK"),
+    _user=Depends(getCurrentUser),
+) -> list[dict]:
+    """语义检索文档 chunks。"""
+    from app.services.rag_service import RagService, RagError
+
+    svc = RagService()
+    try:
+        return await svc.searchDocuments(
+            q,
+            security_level=security_level,
+            top_k=top_k,
+        )
+    except RagError as e:
+        raise HTTPException(status_code=422, detail=str(e))

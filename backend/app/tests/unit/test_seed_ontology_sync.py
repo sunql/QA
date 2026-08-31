@@ -203,22 +203,10 @@ def testSyncToNeo4jToleratesNeo4jFailure(
 
 
 async def testSeedRecordsPidAndInvokesSyncToNeo4j(
+    seedEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-    from sqlalchemy.pool import StaticPool
-
-    from app.domain.models import Base
-
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
+    factory, engine = seedEngine
     monkeypatch.setattr(seed_ontology, "getEngine", lambda: engine)
     monkeypatch.setattr(seed_ontology, "getSessionFactory", lambda: factory)
     syncCalls: list[tuple] = []
@@ -239,25 +227,18 @@ async def testSeedRecordsPidAndInvokesSyncToNeo4j(
     classIds = set(cid.values())
     for classId, _ in pid:
         assert classId in classIds
-    await engine.dispose()
 
 
 async def testSeedCreatesPriceUnitWithAliasesAndDescription(
+    seedEngine,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
 ) -> None:
     """seed 创建 PPRICLIST.单价(PRI_0) 时落库业务别名与说明（比价类查询可达）。"""
     from sqlalchemy import select
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from app.domain.models import Base, OntologyClass, OntologyProperty
+    from app.domain.models import OntologyClass, OntologyProperty
 
-    db_file = tmp_path / "price.sqlite"
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
+    factory, engine = seedEngine
     monkeypatch.setattr(seed_ontology, "getEngine", lambda: engine)
     monkeypatch.setattr(seed_ontology, "getSessionFactory", lambda: factory)
     monkeypatch.setattr(seed_ontology, "_syncToNeo4j", lambda cid, pid, mid=None: None)
@@ -281,32 +262,22 @@ async def testSeedCreatesPriceUnitWithAliasesAndDescription(
         assert prop.property_alias == "PRI_0"
         assert prop.business_aliases == ["报价", "供应商报价", "采购报价"]
         assert prop.description and "报价" in prop.description
-    await engine.dispose()
 
 
 async def testSeedJoinsMaterializesEdgesAndIsIdempotent(
+    seedEngine,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
 ) -> None:
     """_seedJoins：外键（写对目标主键列）+ curated 业务流转，幂等去重。
 
     断言：join 边数 = 单主键外键数 + curated 数；BPTNUM_0 → BPARTNER 的目标列
     是 BPRNUM_0（而非同名 BPTNUM_0）；重跑不增行。
-
-    用文件型 SQLite（非 :memory:）：seed() 结束会 engine.dispose()，文件库在
-    连接关闭后仍保留，便于 seed 后再查询 join 行。
     """
     from sqlalchemy import select
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from app.domain.models import Base, OntologyClass, OntologyJoin
+    from app.domain.models import OntologyClass, OntologyJoin
 
-    db_file = tmp_path / "seed.sqlite"
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
+    factory, engine = seedEngine
     monkeypatch.setattr(seed_ontology, "getEngine", lambda: engine)
     monkeypatch.setattr(seed_ontology, "getSessionFactory", lambda: factory)
     # 不依赖 Neo4j：seed() 内 _syncToNeo4j 替换为 no-op（本测试只关心 join 目录）
@@ -347,4 +318,3 @@ async def testSeedJoinsMaterializesEdgesAndIsIdempotent(
     async with factory() as session:
         joinsAfter = (await session.execute(select(OntologyJoin))).scalars().all()
     assert len(joinsAfter) == len(joins)
-    await engine.dispose()

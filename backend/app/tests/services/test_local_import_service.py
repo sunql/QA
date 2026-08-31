@@ -24,6 +24,7 @@ from app.domain.schemas import (
     TableSchemaRead,
 )
 from app.services.local_import_service import LocalImportService
+from app.tests.services.conftest import _ADMIN
 
 
 class FakeSchemaService:
@@ -63,7 +64,7 @@ class FakeOntologyService:
     async def listPropertiesByClass(self, session, classId):
         return [p for p in self._properties if p.class_id == classId]
 
-    async def createClass(self, session, dto):
+    async def createClass(self, session, dto, actor):
         from app.domain.models import OntologyClass
 
         self._next_id += 1
@@ -75,7 +76,7 @@ class FakeOntologyService:
         self._classes.append(cls)
         return cls
 
-    async def createProperty(self, session, dto):
+    async def createProperty(self, session, dto, actor=None):
         from app.domain.models import OntologyProperty
 
         self._next_id += 1
@@ -494,6 +495,7 @@ async def test_execute_import_raises_not_found_for_missing_datasource(
             datasource_id=999,
             request=request,
             created_by="admin",
+            actor=_ADMIN,
         )
 
 
@@ -694,7 +696,7 @@ async def test_execute_import_recovers_session_after_property_db_failure(
         async def listPropertiesByClass(self, session, classId):
             return []
 
-        async def createClass(self, session, dto):
+        async def createClass(self, session, dto, actor=None):
             cls = OntologyClass(class_name=dto.class_name, source_table=dto.source_table)
             session.add(cls)
             await session.commit()
@@ -704,7 +706,7 @@ async def test_execute_import_recovers_session_after_property_db_failure(
             )
             return cls
 
-        async def createProperty(self, session, dto):
+        async def createProperty(self, session, dto, actor=None):
             self._property_calls += 1
             if self._property_calls == 2:
                 # property_name=None 违反 NOT NULL：commit 失败后会话进入 pending rollback

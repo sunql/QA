@@ -105,23 +105,15 @@ def testSyncToNeo4jToleratesMetricNeo4jFailure(
 
 
 async def testSeedCreatesMetricsAndIsIdempotent(
+    seedEngine,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
 ) -> None:
     """seed 创建指标（metric_name 幂等复用），重跑不增行。"""
-    from sqlalchemy import select, func
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy import func, select
 
-    from app.domain.models import Base, OntologyMetric
+    from app.domain.models import OntologyMetric
 
-    db_file = tmp_path / "metrics.sqlite"
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    monkeypatch.setattr(seed_ontology, "getEngine", lambda: engine)
-    monkeypatch.setattr(seed_ontology, "getSessionFactory", lambda: factory)
+    factory, _ = seedEngine
     monkeypatch.setattr(seed_ontology, "_syncToNeo4j", lambda cid, pid, mid=None: None)
 
     await seed_ontology.seed()
@@ -135,31 +127,20 @@ async def testSeedCreatesMetricsAndIsIdempotent(
     async with factory() as session:
         n2 = (await session.execute(select(func.count(OntologyMetric.id)))).scalar() or 0
     assert n2 == n
-    await engine.dispose()
 
 
 async def testLineageExtractorProducesKpiEdgesFromSeedMetrics(
+    seedEngine,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
 ) -> None:
     """端到端（内存级）：种子指标 -> lineage_extractor -> KPI 层血缘边。
 
     这修复 Phase 2 验收缺口：metrics=0 时抽取不到 KPI 层边，
     血缘图退化为 ERP 单系统图。种子指标就位后 KPI 层必须有边。
     """
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-    from app.domain.models import Base
     from app.services.lineage_extractor import extractEdges
 
-    db_file = tmp_path / "lineage.sqlite"
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    monkeypatch.setattr(seed_ontology, "getEngine", lambda: engine)
-    monkeypatch.setattr(seed_ontology, "getSessionFactory", lambda: factory)
+    factory, _ = seedEngine
     monkeypatch.setattr(seed_ontology, "_syncToNeo4j", lambda cid, pid, mid=None: None)
     await seed_ontology.seed()
 
@@ -173,4 +154,3 @@ async def testLineageExtractorProducesKpiEdgesFromSeedMetrics(
         assert e.source_object in {m["target_table"] for m in METRICS}
     # 至少覆盖 KPI_TOTAL_QTY（extractor 目标对象命名：KPI_{metric_name}）
     assert any(e.target_object == "KPI_KPI_TOTAL_QTY" for e in kpiEdges)
-    await engine.dispose()

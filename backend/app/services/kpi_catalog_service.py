@@ -6,9 +6,11 @@
 - 不强制 metric_id 关联（业务 KPI 可先于技术 metric 存在）
 
 Phase 4.5 governance hardening 增量：
-- createKpi / updateKpi / deleteKpi 写入 audit_log（actor / before / after）
-- updateKpi / deleteKpi / createKpi 写入 kpi_catalog_history（revision 快照）
 - deleteKpi / updateKpi 走 AclService.assertCanModify（owner-based ACL）
+
+feat-audit-outbox 增量：
+- createKpi / updateKpi / deleteKpi 只入队 audit_outbox（同事务）；
+  audit_log / kpi_catalog_history 由独立 worker 进程消费写入（审计失败不回滚业务）
 """
 
 from __future__ import annotations
@@ -26,8 +28,7 @@ from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import KpiCatalog
 from app.domain.schemas import KpiCatalogCreate, KpiCatalogUpdate
 from app.services.acl_service import AclService
-from app.services.audit_service import AuditService
-from app.services.history_service import HistoryService
+from app.services.outbox_service import OutboxService
 from app.services.messages_zh import (
     MSG_KPI_CATALOG_DUPLICATE_CODE,
     MSG_KPI_CATALOG_NOT_FOUND,
@@ -42,13 +43,11 @@ class KpiCatalogService:
 
     def __init__(
         self,
-        audit: AuditService | None = None,
-        history: HistoryService | None = None,
+        outbox: OutboxService | None = None,
         acl: AclService | None = None,
     ) -> None:
         # 默认实例：service 内部 new；测试可注入 mock
-        self._audit = audit or AuditService()
-        self._history = history or HistoryService()
+        self._outbox = outbox or OutboxService()
         self._acl = acl or AclService()
 
     async def listKpis(self, session: AsyncSession) -> list[KpiCatalog]:
@@ -99,18 +98,15 @@ class KpiCatalogService:
             raise ConflictError(
                 MSG_KPI_CATALOG_DUPLICATE_CODE.format(code=dto.kpi_code)
             ) from exc
-        # audit + history 必须在 commit 前写入（同一事务绑定）
-        await self._audit.record(
+        # outbox 入队（同一事务绑定）：worker 消费后写 audit_log + history
+        await self._outbox.enqueue(
             session,
+            event_type="kpi_created",
             entity_type="kpi_catalog",
             entity_id=entity.id,
-            action="CREATE",
             actor=actor.userId,
             actor_departments=actor.departments,
-            after=_entityToDict(entity),
-        )
-        await self._history.snapshot(
-            session, kpi=entity, changed_by=actor.userId
+            payload={"after": _entityToDict(entity)},
         )
         await session.commit()
         await session.refresh(entity)
@@ -148,19 +144,15 @@ class KpiCatalogService:
         for key, value in updates.items():
             setattr(entity, key, value)
         entity.revision_count += 1
-        # audit + history 必须在 commit 前
-        await self._audit.record(
+        # outbox 入队（同一事务绑定）：worker 消费后写 audit_log + history
+        await self._outbox.enqueue(
             session,
+            event_type="kpi_updated",
             entity_type="kpi_catalog",
             entity_id=entity.id,
-            action="UPDATE",
             actor=actor.userId,
             actor_departments=actor.departments,
-            before=before,
-            after=_entityToDict(entity),
-        )
-        await self._history.snapshot(
-            session, kpi=entity, changed_by=actor.userId
+            payload={"before": before, "after": _entityToDict(entity)},
         )
         await session.commit()
         await session.refresh(entity)
@@ -187,15 +179,15 @@ class KpiCatalogService:
             entity_code=entity.kpi_code,
         )
         before = _entityToDict(entity)
-        # 先写审计（保持 entity 在 session 内可访问其属性）
-        await self._audit.record(
+        # outbox 入队先于 session.delete（保持 entity 属性可访问），同事务 commit
+        await self._outbox.enqueue(
             session,
+            event_type="kpi_deleted",
             entity_type="kpi_catalog",
             entity_id=entity.id,
-            action="DELETE",
             actor=actor.userId,
             actor_departments=actor.departments,
-            before=before,
+            payload={"before": before},
         )
         await session.delete(entity)
         await session.commit()

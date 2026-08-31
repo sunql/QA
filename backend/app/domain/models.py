@@ -28,6 +28,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -504,6 +505,60 @@ class FeatureDefinitionHistory(Base):
         return (
             f"<FeatureDefinitionHistory id={self.id} feature_id={self.feature_id} "
             f"by {self.changed_by}>"
+        )
+
+
+class AuditOutbox(Base):
+    """审计 Outbox（feat-audit-outbox，Phase 4.5 扩展）。
+
+    业务事务与审计写入解耦：业务 service 在同一事务内 enqueue 一行，
+    独立 worker 进程轮询本表写 audit_log / *_history。审计失败不回滚业务。
+
+    - event_type：'<entity>_<created|updated|deleted>'，worker 据此路由
+    - entity_id 可空：DELETE 后业务行可能已不存在，审计仍需记录实体 id
+    - payload：{before, after}（与 AuditLog.record 的参数同构）
+    - attempts / last_error：worker 处理失败计数；attempts >= 5 停止重试（毒丸防护）
+    - processed_at：NULL = pending；worker 处理成功后置 now()
+    """
+
+    __tablename__ = "audit_outbox"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    entity_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False)
+    actor_departments: Mapped[list[str] | None] = mapped_column(
+        postgresql.JSONB, nullable=True
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(postgresql.JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_audit_outbox_pending",
+            "created_at",
+            postgresql_where=text("processed_at IS NULL"),
+        ),
+        Index(
+            "ix_audit_outbox_processed",
+            "processed_at",
+            postgresql_where=text("processed_at IS NOT NULL"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        status = "pending" if self.processed_at is None else "processed"
+        return (
+            f"<AuditOutbox id={self.id} {self.event_type} "
+            f"{self.entity_type}/{self.entity_id} [{status}] attempts={self.attempts}>"
         )
 
 
@@ -994,6 +1049,10 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    # Outbox 幂等键（feat-audit-outbox）：worker 写入时填 outbox 行 id，
+    # 唯一 partial index 兜底「同一 outbox 行至多一条 audit_log」。
+    # 直接 record() 的旧路径（业务同事务）不填，保持 NULL。
+    outbox_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -1007,6 +1066,12 @@ class AuditLog(Base):
             "created_at",
         ),
         Index("ix_audit_log_actor", "actor", "created_at"),
+        Index(
+            "ix_audit_log_outbox",
+            "outbox_id",
+            unique=True,
+            postgresql_where=text("outbox_id IS NOT NULL"),
+        ),
     )
 
     def __repr__(self) -> str:

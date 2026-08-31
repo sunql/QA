@@ -1,43 +1,48 @@
-"""FeatureDefinition audit + history 单元测试（Phase 4.5）。
+"""FeatureDefinition audit + history 单元测试（Phase 4.5 outbox 模式）。
 
-覆盖：createFeature / updateFeature / deleteFeature 的 audit_log 写入
-+ createFeature / updateFeature 的 feature_definition_history 写入。
+覆盖：createFeature / updateFeature / deleteFeature 通过 outbox.enqueue 写入
+audit_outbox，worker 消费后写 audit_log + feature_definition_history。
 
-与 KpiCatalogService 的 audit/history 测试设计对齐。
+与 KpiCatalogService 的 outbox 测试设计对齐：不再 mock AuditService /
+HistoryService，直接验证 OutboxService.enqueue 调用参数。
 """
 
 from __future__ import annotations
 
-from decimal import Decimal
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
-from app.domain.models import FeatureDefinition, FeatureValue
 from app.domain.schemas import FeatureDefinitionCreate, FeatureDefinitionUpdate
 from app.services.feature_definition_service import FeatureDefinitionService
 
 
-class _FakeAuditService:
-    """审计写入桩（记录所有 record 调用）。"""
+class _FakeOutboxService:
+    """outbox 入队桩（记录所有 enqueue 调用）。"""
 
     def __init__(self) -> None:
-        self.records: list[dict] = []
+        self.calls: list[dict] = []
 
-    async def record(self, **kwargs) -> None:
-        self.records.append(kwargs)
-
-
-class _FakeHistoryService:
-    """历史快照桩（记录所有 snapshotFeature 调用）。"""
-
-    def __init__(self) -> None:
-        self.snapshots: list[dict] = []
-
-    async def snapshotFeature(self, **kwargs) -> None:
-        self.snapshots.append(kwargs)
+    async def enqueue(
+        self,
+        session,
+        *,
+        event_type: str,
+        entity_type: str,
+        entity_id: int,
+        actor: str,
+        payload: dict,
+        actor_departments=None,
+    ) -> None:
+        self.calls.append({
+            "event_type": event_type,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "actor": actor,
+            "payload": payload,
+            "actor_departments": actor_departments,
+        })
 
 
 class _FakeFeatureDefinition:
@@ -46,203 +51,276 @@ class _FakeFeatureDefinition:
     def __init__(self, **kwargs) -> None:
         self.__dict__.update(kwargs)
 
+    @property
     def __table__(self):
-        class _T:
-            columns = type(
-                "C",
-                (),
-                {"keys": lambda self: ["feature_name", "entity_type", "status"]},
-            )()
-
-        return _T()
+        """支持 _entityToDict 的 entity.__table__.columns.keys() 访问。"""
+        class _Columns:
+            def keys(self):
+                return ["feature_name", "entity_type", "status", "owner", "id"]
+        return type("T", (), {"columns": _Columns()})()
 
 
-@pytest.fixture
-def actor() -> CurrentUser:
-    return CurrentUser(userId="alice", departments=("采购部",))
+async def _make_mock_session():
+    """返回一个正确配置的 mock session（async chain 正确连接）。"""
+    session = AsyncMock()
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    session.refresh = AsyncMock()
+    return session
 
 
-@pytest.fixture
-def actor_multi_dept() -> CurrentUser:
-    return CurrentUser(userId="bob", departments=("采购部", "财务部"))
+def _make_mock_result(scalar_return_value):
+    """返回一个 mock execute result。
+
+    用 MagicMock 而非 AsyncMock：session.execute() 已经是 async（被 await），
+    其返回值的 .scalar_one_or_none() 是普通同步调用，不是 coroutine。
+    """
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = scalar_return_value
+    return result
 
 
-class TestFeatureAuditHistory:
-    """audit_log + feature_definition_history 写入验证。"""
+class TestFeatureOutboxEvents:
+    """验证 createFeature / updateFeature / deleteFeature 调用 outbox.enqueue。"""
 
     @pytest.mark.asyncio
-    async def test_createFeature_writes_audit_CREATE(
-        self, actor: CurrentUser
-    ) -> None:
-        fake_audit = _FakeAuditService()
-        fake_history = _FakeHistoryService()
-        svc = FeatureDefinitionService(audit=fake_audit, history=fake_history)
+    async def test_createFeature_enqueues_event_type_feature_created(self) -> None:
+        """createFeature → outbox.enqueue(event_type='feature_created')。"""
+        fake_outbox = _FakeOutboxService()
+        svc = FeatureDefinitionService(outbox=fake_outbox)
+        session = await _make_mock_session()
+        session.execute = AsyncMock(return_value=_make_mock_result(None))
 
-        mock_session = AsyncMock(spec=AsyncSession)
-        mock_session.flush = AsyncMock()
+        dto = FeatureDefinitionCreate(
+            featureName="TEST_3M",
+            featureAlias="测试特征",
+            entityType="SUPPLIER",
+            calculationLogic="SELECT 1",
+            datasourceId=1,
+        )
+        actor = CurrentUser(userId="alice", departments=("采购部",))
 
         with patch.object(svc, "_assertDatasourceExists", new_callable=AsyncMock):
-            dto = FeatureDefinitionCreate(
-                featureName="TEST_3M",
-                entityType="SUPPLIER",
-                calculationLogic="SELECT 1",
-                datasourceId=1,
-            )
-            # mock get by name = not found
-            with patch.object(svc, "getFeature", new_callable=AsyncMock) as mock_get:
-                mock_get.side_effect = Exception("not called")
-                with patch(
-                    "sqlalchemy.select"
-                ) as mock_select:
-                    mock_select.return_value.where.return_value.scalar_one_or_none = (
-                        lambda: None
-                    )
-                    with patch(
-                        "sqlalchemy.ext.asyncio.async_sessionmaker.__call__",
-                        new_callable=AsyncMock,
-                    ):
-                        pass
+            try:
+                await svc.createFeature(session, dto, actor)
+            except Exception:
+                pass  # entity.id may be None after rollback
 
-        # 直接测试内部逻辑：createFeature 调用 audit.record 和 history.snapshotFeature
-        # 验证调用参数
-        assert fake_audit.records == []
-        assert fake_history.snapshots == []
+        assert any(c["event_type"] == "feature_created" for c in fake_outbox.calls)
 
     @pytest.mark.asyncio
-    async def test_audit_record_entity_type_is_feature_definition(
-        self, actor: CurrentUser
-    ) -> None:
-        """audit.record 的 entity_type 必须是 'feature_definition'。"""
-        fake_audit = _FakeAuditService()
-        fake_history = _FakeHistoryService()
-        svc = FeatureDefinitionService(audit=fake_audit, history=fake_history)
+    async def test_createFeature_enqueues_payload_with_after(self) -> None:
+        """createFeature → payload 含 after 快照。"""
+        fake_outbox = _FakeOutboxService()
+        svc = FeatureDefinitionService(outbox=fake_outbox)
+        session = await _make_mock_session()
+        session.execute = AsyncMock(return_value=_make_mock_result(None))
 
-        # 通过内部方法验证 entity_type 写入
-        # audit service 的 entity_type 来自 service 层传入
-        await fake_audit.record(
-            session=AsyncMock(),
-            entity_type="feature_definition",
-            entity_id=1,
-            action="CREATE",
-            actor="alice",
-            actor_departments="采购部",
-            before=None,
-            after={"feature_name": "TEST_3M"},
+        dto = FeatureDefinitionCreate(
+            featureName="TEST_3M",
+            featureAlias="测试特征",
+            entityType="SUPPLIER",
+            calculationLogic="SELECT 1",
+            datasourceId=1,
         )
+        actor = CurrentUser(userId="alice", departments=("采购部",))
 
-        assert fake_audit.records[0]["entity_type"] == "feature_definition"
+        with patch.object(svc, "_assertDatasourceExists", new_callable=AsyncMock):
+            try:
+                await svc.createFeature(session, dto, actor)
+            except Exception:
+                pass
+
+        call = next(
+            (c for c in fake_outbox.calls if c["event_type"] == "feature_created"), None
+        )
+        assert call is not None
+        assert "after" in call["payload"]
+        assert call["payload"]["after"]["feature_name"] == "TEST_3M"
 
     @pytest.mark.asyncio
-    async def test_history_snapshotFeature_receives_feature_and_changed_by(
-        self, actor: CurrentUser
-    ) -> None:
-        """snapshotFeature 必须接收 feature 实体和 changed_by。"""
-        fake_history = _FakeHistoryService()
-        fake_feature = _FakeFeatureDefinition(
+    async def test_createFeature_carries_actor_info(self) -> None:
+        """createFeature → actor=alice, actor_departments 传入 enqueue。"""
+        fake_outbox = _FakeOutboxService()
+        svc = FeatureDefinitionService(outbox=fake_outbox)
+        session = await _make_mock_session()
+        session.execute = AsyncMock(return_value=_make_mock_result(None))
+
+        dto = FeatureDefinitionCreate(
+            featureName="TEST_3M",
+            featureAlias="测试特征",
+            entityType="SUPPLIER",
+            calculationLogic="SELECT 1",
+            datasourceId=1,
+        )
+        actor = CurrentUser(userId="alice", departments=("采购部",))
+
+        with patch.object(svc, "_assertDatasourceExists", new_callable=AsyncMock):
+            try:
+                await svc.createFeature(session, dto, actor)
+            except Exception:
+                pass
+
+        call = next(
+            (c for c in fake_outbox.calls if c["event_type"] == "feature_created"), None
+        )
+        assert call is not None
+        assert call["actor"] == "alice"
+        assert call["actor_departments"] == ("采购部",)
+
+    @pytest.mark.asyncio
+    async def test_updateFeature_enqueues_event_type_feature_updated(self) -> None:
+        """updateFeature → outbox.enqueue(event_type='feature_updated')。"""
+        fake_outbox = _FakeOutboxService()
+        svc = FeatureDefinitionService(outbox=fake_outbox)
+        session = await _make_mock_session()
+
+        existing = _FakeFeatureDefinition(
             id=1,
-            feature_name="SUPPLIER_OTD_3M",
+            feature_name="OLD_NAME",
             entity_type="SUPPLIER",
             status="DRAFT",
+            owner="采购部",
         )
 
-        await fake_history.snapshotFeature(
-            session=AsyncMock(), feature=fake_feature, changed_by="alice"
-        )
+        async def fake_get(*args, **kwargs):
+            return existing
 
-        assert fake_history.snapshots[0]["changed_by"] == "alice"
-        assert fake_history.snapshots[0]["feature"] is fake_feature
+        with patch.object(svc, "getFeature", side_effect=fake_get):
+            with patch.object(svc, "_assertDatasourceExists", new_callable=AsyncMock):
+                dto = FeatureDefinitionUpdate(featureAlias="新别名")
+                actor = CurrentUser(userId="alice", departments=("采购部",))
+                try:
+                    await svc.updateFeature(session, 1, dto, actor)
+                except Exception:
+                    pass
+
+        assert any(c["event_type"] == "feature_updated" for c in fake_outbox.calls)
 
     @pytest.mark.asyncio
-    async def test_deleteFeature_writes_audit_DELETE_no_history(
-        self, actor: CurrentUser
-    ) -> None:
-        """deleteFeature 只写 audit(DELETE)，不写 history。"""
-        fake_audit = _FakeAuditService()
-        fake_history = _FakeHistoryService()
-        svc = FeatureDefinitionService(audit=fake_audit, history=fake_history)
+    async def test_updateFeature_enqueues_before_and_after(self) -> None:
+        """updateFeature → payload 含 before + after。"""
+        fake_outbox = _FakeOutboxService()
+        svc = FeatureDefinitionService(outbox=fake_outbox)
+        session = await _make_mock_session()
 
-        # deleteFeature 路径验证
-        await fake_audit.record(
-            session=AsyncMock(),
-            entity_type="feature_definition",
-            entity_id=1,
-            action="DELETE",
-            actor="alice",
-            actor_departments="采购部",
-            before={"feature_name": "TEST_3M"},
-            after=None,
+        existing = _FakeFeatureDefinition(
+            id=1,
+            feature_name="OLD_NAME",
+            entity_type="SUPPLIER",
+            status="DRAFT",
+            owner="采购部",
         )
 
-        assert fake_audit.records[0]["action"] == "DELETE"
-        assert fake_audit.records[0]["before"] is not None
-        assert fake_audit.records[0]["after"] is None
+        async def fake_get(*args, **kwargs):
+            return existing
+
+        with patch.object(svc, "getFeature", side_effect=fake_get):
+            with patch.object(svc, "_assertDatasourceExists", new_callable=AsyncMock):
+                dto = FeatureDefinitionUpdate(featureAlias="新别名")
+                actor = CurrentUser(userId="alice", departments=("采购部",))
+                try:
+                    await svc.updateFeature(session, 1, dto, actor)
+                except Exception:
+                    pass
+
+        call = next(
+            (c for c in fake_outbox.calls if c["event_type"] == "feature_updated"), None
+        )
+        assert call is not None
+        assert "before" in call["payload"]
+        assert "after" in call["payload"]
+        assert call["payload"]["before"]["feature_name"] == "OLD_NAME"
 
     @pytest.mark.asyncio
-    async def test_updateFeature_writes_audit_UPDATE_and_history(
-        self, actor: CurrentUser
-    ) -> None:
-        """updateFeature 同时写 audit(UPDATE, before+after) 和 history。"""
-        fake_audit = _FakeAuditService()
-        fake_history = _FakeHistoryService()
-        svc = FeatureDefinitionService(audit=fake_audit, history=fake_history)
+    async def test_deleteFeature_enqueues_event_type_feature_deleted(self) -> None:
+        """deleteFeature → outbox.enqueue(event_type='feature_deleted')。"""
+        fake_outbox = _FakeOutboxService()
+        svc = FeatureDefinitionService(outbox=fake_outbox)
+        session = await _make_mock_session()
 
-        before_dict = {"feature_name": "OLD_NAME"}
-        after_dict = {"feature_name": "NEW_NAME"}
-
-        await fake_audit.record(
-            session=AsyncMock(),
-            entity_type="feature_definition",
-            entity_id=1,
-            action="UPDATE",
-            actor="alice",
-            actor_departments="采购部",
-            before=before_dict,
-            after=after_dict,
-        )
-        fake_feature = _FakeFeatureDefinition(id=1, feature_name="NEW_NAME")
-        await fake_history.snapshotFeature(
-            session=AsyncMock(), feature=fake_feature, changed_by="alice"
+        existing = _FakeFeatureDefinition(
+            id=1,
+            feature_name="TO_DELETE",
+            entity_type="SUPPLIER",
+            status="DRAFT",
+            owner="采购部",
         )
 
-        assert fake_audit.records[0]["action"] == "UPDATE"
-        assert fake_audit.records[0]["before"] == before_dict
-        assert fake_audit.records[0]["after"] == after_dict
-        assert len(fake_history.snapshots) == 1
+        async def fake_get(*args, **kwargs):
+            return existing
+
+        with patch.object(svc, "getFeature", side_effect=fake_get):
+            with patch.object(svc, "_assertDatasourceExists", new_callable=AsyncMock):
+                actor = CurrentUser(userId="alice", departments=("采购部",))
+                try:
+                    await svc.deleteFeature(session, 1, actor)
+                except Exception:
+                    pass
+
+        assert any(c["event_type"] == "feature_deleted" for c in fake_outbox.calls)
 
     @pytest.mark.asyncio
-    async def test_multi_department_actor_departments_joined(self) -> None:
-        """actor.departments 多部门时逗号拼接写入 audit.actor_departments。"""
-        fake_audit = _FakeAuditService()
-        actor_multi = CurrentUser(userId="bob", departments=("采购部", "财务部"))
+    async def test_deleteFeature_enqueues_before_only(self) -> None:
+        """deleteFeature → payload 只含 before，无 after。"""
+        fake_outbox = _FakeOutboxService()
+        svc = FeatureDefinitionService(outbox=fake_outbox)
+        session = await _make_mock_session()
 
-        await fake_audit.record(
-            session=AsyncMock(),
-            entity_type="feature_definition",
-            entity_id=1,
-            action="CREATE",
-            actor="bob",
-            actor_departments=",".join(actor_multi.departments),
-            before=None,
-            after={"id": 1},
+        existing = _FakeFeatureDefinition(
+            id=1,
+            feature_name="TO_DELETE",
+            entity_type="SUPPLIER",
+            status="DRAFT",
+            owner="采购部",
         )
 
-        assert fake_audit.records[0]["actor_departments"] == "采购部,财务部"
+        async def fake_get(*args, **kwargs):
+            return existing
+
+        with patch.object(svc, "getFeature", side_effect=fake_get):
+            with patch.object(svc, "_assertDatasourceExists", new_callable=AsyncMock):
+                actor = CurrentUser(userId="alice", departments=("采购部",))
+                try:
+                    await svc.deleteFeature(session, 1, actor)
+                except Exception:
+                    pass
+
+        call = next(
+            (c for c in fake_outbox.calls if c["event_type"] == "feature_deleted"), None
+        )
+        assert call is not None
+        assert "before" in call["payload"]
+        assert call["payload"].get("after") is None
 
     @pytest.mark.asyncio
-    async def test_empty_departments_stored_as_none(self) -> None:
-        """actor.departments 为空时，actor_departments 存 None。"""
-        fake_audit = _FakeAuditService()
-        actor_empty = CurrentUser(userId="guest", departments=())
+    async def test_multi_department_actor_carried_to_enqueue(self) -> None:
+        """多部门 actor → actor_departments 传入 enqueue（tuple）。"""
+        fake_outbox = _FakeOutboxService()
+        svc = FeatureDefinitionService(outbox=fake_outbox)
+        session = await _make_mock_session()
 
-        await fake_audit.record(
-            session=AsyncMock(),
-            entity_type="feature_definition",
-            entity_id=1,
-            action="CREATE",
-            actor="guest",
-            actor_departments=None,
-            before=None,
-            after={"id": 1},
+        existing = _FakeFeatureDefinition(
+            id=1, feature_name="X", entity_type="SUPPLIER", status="DRAFT", owner="采购部"
         )
 
-        assert fake_audit.records[0]["actor_departments"] is None
+        async def fake_get(*args, **kwargs):
+            return existing
+
+        with patch.object(svc, "getFeature", side_effect=fake_get):
+            with patch.object(svc, "_assertDatasourceExists", new_callable=AsyncMock):
+                actor_multi = CurrentUser(
+                    userId="bob", departments=("采购部", "财务部")
+                )
+                dto = FeatureDefinitionUpdate(featureAlias="Y")
+                try:
+                    await svc.updateFeature(session, 1, dto, actor_multi)
+                except Exception:
+                    pass
+
+        call = next(
+            (c for c in fake_outbox.calls if c["event_type"] == "feature_updated"), None
+        )
+        assert call is not None
+        assert call["actor"] == "bob"
+        assert call["actor_departments"] == ("采购部", "财务部")

@@ -9,10 +9,10 @@ AclService.assertCanModify；create 不接受 client body 声明 owner（DTO 无
 calculation_logic 只读校验：创建/更新时经 _assert_read_only（SqlSafetyError → 400），
 计算时 execute_read_only 二次校验，双重护栏防 SQL 注入。
 
-审计+历史：与 KpiCatalogService 同模式。
-- createFeature：audit.record(CREATE) + history.snapshotFeature(revision=0)
-- updateFeature：audit.record(UPDATE, before+after) + history.snapshotFeature
-- deleteFeature：audit.record(DELETE, before)
+feat-audit-outbox：审计走 outbox（与 KpiCatalogService 同模式）。
+- create/update/deleteFeature 只入队 audit_outbox（同事务）；
+  audit_log / feature_definition_history 由独立 worker 进程消费写入
+  （审计失败不回滚业务）
 """
 
 from __future__ import annotations
@@ -31,8 +31,7 @@ from app.domain.models import DataSource, FeatureDefinition, FeatureValue
 from app.domain.schemas import FeatureDefinitionCreate, FeatureDefinitionUpdate
 from app.infrastructure.business_db_pool import _assert_read_only
 from app.services.acl_service import AclService
-from app.services.audit_service import AuditService
-from app.services.history_service import HistoryService
+from app.services.outbox_service import OutboxService
 from app.services.messages_zh import (
     MSG_FEATURE_DATASOURCE_NOT_FOUND,
     MSG_FEATURE_DUPLICATE_NAME,
@@ -65,12 +64,10 @@ class FeatureDefinitionService:
     def __init__(
         self,
         acl: AclService | None = None,
-        audit: AuditService | None = None,
-        history: HistoryService | None = None,
+        outbox: OutboxService | None = None,
     ) -> None:
         self._acl = acl or AclService()
-        self._audit = audit or AuditService()
-        self._history = history or HistoryService()
+        self._outbox = outbox or OutboxService()
 
     async def listFeatures(self, session: AsyncSession) -> list[FeatureDefinition]:
         """按 feature_name 升序列出全部特征定义。"""
@@ -130,22 +127,15 @@ class FeatureDefinitionService:
         session.add(entity)
         await session.flush()  # 获取 id，audit/history 需要
 
-        # Phase 4.5：audit + history（同一事务，flush 后写入）
-        actor_departments = ",".join(actor.departments) if actor.departments else None
-        await self._audit.record(
-            session=session,
+        # feat-audit-outbox：入队（同一事务，flush 后写入），worker 消费写 audit/history
+        await self._outbox.enqueue(
+            session,
+            event_type="feature_created",
             entity_type="feature_definition",
             entity_id=entity.id,
-            action="CREATE",
             actor=actor.userId,
-            actor_departments=actor_departments,
-            before=None,
-            after=_entityToDict(entity),
-        )
-        await self._history.snapshotFeature(
-            session=session,
-            feature=entity,
-            changed_by=actor.userId,
+            actor_departments=actor.departments,
+            payload={"after": _entityToDict(entity)},
         )
 
         try:
@@ -187,22 +177,15 @@ class FeatureDefinitionService:
                 continue
             setattr(entity, field, value)
 
-        # Phase 4.5：audit + history（commit 前写入）
-        actor_departments = ",".join(actor.departments) if actor.departments else None
-        await self._audit.record(
-            session=session,
+        # feat-audit-outbox：入队（commit 前），worker 消费写 audit/history
+        await self._outbox.enqueue(
+            session,
+            event_type="feature_updated",
             entity_type="feature_definition",
             entity_id=entity.id,
-            action="UPDATE",
             actor=actor.userId,
-            actor_departments=actor_departments,
-            before=before,
-            after=_entityToDict(entity),
-        )
-        await self._history.snapshotFeature(
-            session=session,
-            feature=entity,
-            changed_by=actor.userId,
+            actor_departments=actor.departments,
+            payload={"before": before, "after": _entityToDict(entity)},
         )
 
         try:
@@ -232,21 +215,17 @@ class FeatureDefinitionService:
             entity_code=str(entity.id),
         )
         before = _entityToDict(entity)
-        await session.delete(entity)
-
-        # Phase 4.5：audit（DELETE 不写 history，与 KpiCatalogService 同模式）
-        actor_departments = ",".join(actor.departments) if actor.departments else None
-        await self._audit.record(
-            session=session,
+        # feat-audit-outbox：入队先于 session.delete（保持 entity 属性可访问）
+        await self._outbox.enqueue(
+            session,
+            event_type="feature_deleted",
             entity_type="feature_definition",
             entity_id=id,
-            action="DELETE",
             actor=actor.userId,
-            actor_departments=actor_departments,
-            before=before,
-            after=None,
+            actor_departments=actor.departments,
+            payload={"before": before},
         )
-
+        await session.delete(entity)
         await session.commit()
 
     async def listValues(

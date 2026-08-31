@@ -11,12 +11,19 @@ from fastapi import status
 
 ADMIN_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
 
+async def drainOutbox(dbSession) -> int:
+    """跑一轮 outbox 消费（feat-audit-outbox：审计异步落地）。"""
+    from app.workers.audit_worker import AuditWorker
+
+    return await AuditWorker().drainOnce(dbSession)
+
+
 
 @pytest.mark.asyncio
 class TestKpiHistoryReplayApi:
     """GET /api/v1/kpi-catalog/{id}/history 系列端点。"""
 
-    async def test_list_kpi_history_returns_revisions(self, client) -> None:
+    async def test_list_kpi_history_returns_revisions(self, client, dbSession) -> None:
         """创建 KPI → 更新 → 查 history 有多条记录。"""
         # 创建 KPI（revision=0 的 history 写入）
         kpi_resp = await client.post(
@@ -32,6 +39,7 @@ class TestKpiHistoryReplayApi:
         )
         assert kpi_resp.status_code == status.HTTP_201_CREATED
         kpi_id = kpi_resp.json()["id"]
+        await drainOutbox(dbSession)
 
         # 更新 KPI（revision=1）
         upd_resp = await client.put(
@@ -40,6 +48,7 @@ class TestKpiHistoryReplayApi:
             headers=ADMIN_HEADERS,
         )
         assert upd_resp.status_code == status.HTTP_200_OK
+        await drainOutbox(dbSession)
 
         # 查询历史
         resp = await client.get(
@@ -56,7 +65,7 @@ class TestKpiHistoryReplayApi:
         assert "kpi_name" in rows[0]["snapshotJson"]
         assert rows[0]["snapshotJson"]["kpi_name"] == "历史回放测试-已更新"
 
-    async def test_get_kpi_history_revision_returns_snapshot(self, client) -> None:
+    async def test_get_kpi_history_revision_returns_snapshot(self, client, dbSession) -> None:
         """GET /kpi-catalog/{id}/history/{revision} 返回指定快照。"""
         kpi_resp = await client.post(
             "/api/v1/kpi-catalog",
@@ -71,6 +80,7 @@ class TestKpiHistoryReplayApi:
         )
         assert kpi_resp.status_code == status.HTTP_201_CREATED
         kpi_id = kpi_resp.json()["id"]
+        await drainOutbox(dbSession)
 
         # 查 revision 0
         resp = await client.get(
@@ -83,7 +93,7 @@ class TestKpiHistoryReplayApi:
         # snapshotJson 内部是 DB 原始列名（snake_case）
         assert body["snapshotJson"]["kpi_name"] == "Revision 测试"
 
-    async def test_unknown_kpi_history_returns_404(self, client) -> None:
+    async def test_unknown_kpi_history_returns_404(self, client, dbSession) -> None:
         """不存在的 KPI → history 端点 404。"""
         resp = await client.get(
             "/api/v1/kpi-catalog/999999/history",
@@ -96,7 +106,7 @@ class TestKpiHistoryReplayApi:
 class TestFeatureHistoryReplayApi:
     """GET /api/v1/features/{id}/history 端点。"""
 
-    async def test_list_feature_history_returns_snapshots(self, client) -> None:
+    async def test_list_feature_history_returns_snapshots(self, client, dbSession) -> None:
         """创建 Feature → 更新 → 查 history 有多条。"""
         # 创建 datasource
         ds_resp = await client.post(
@@ -128,6 +138,7 @@ class TestFeatureHistoryReplayApi:
         )
         assert feat_resp.status_code == status.HTTP_201_CREATED
         feat_id = feat_resp.json()["id"]
+        await drainOutbox(dbSession)
 
         # 更新 Feature
         upd_resp = await client.put(
@@ -136,6 +147,7 @@ class TestFeatureHistoryReplayApi:
             headers=ADMIN_HEADERS,
         )
         assert upd_resp.status_code == status.HTTP_200_OK
+        await drainOutbox(dbSession)
 
         # 查 history
         resp = await client.get(
@@ -148,7 +160,7 @@ class TestFeatureHistoryReplayApi:
         # changed_at 倒序；snapshotJson 内部是 DB 原始列名（snake_case）
         assert rows[0]["snapshotJson"]["feature_alias"] == "历史测试特征-已更新"
 
-    async def test_unknown_feature_history_returns_404(self, client) -> None:
+    async def test_unknown_feature_history_returns_404(self, client, dbSession) -> None:
         """不存在的 Feature → history 端点 404。"""
         resp = await client.get(
             "/api/v1/features/999999/history",

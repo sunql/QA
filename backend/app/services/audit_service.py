@@ -52,6 +52,7 @@ class AuditService:
         actor_departments: tuple[str, ...] | None = None,
         before: dict[str, Any] | None = None,
         after: dict[str, Any] | None = None,
+        outbox_id: int | None = None,
     ) -> AuditLog:
         """记录一次变更到 audit_log。
 
@@ -63,6 +64,8 @@ class AuditService:
             actor_departments：用户所属部门（tuple of str），逗号拼接存储
             before：变更前快照（CREATE 为 None，UPDATE 必有，DELETE 必有）
             after：变更后快照（CREATE 必有，UPDATE 必有，DELETE 为 None）
+            outbox_id：outbox 幂等键（feat-audit-outbox，仅 worker 消费路径填写；
+                业务同事务直写路径保持 None）
 
         不会自己 commit — 与调用方事务绑定，避免「业务成功 + 审计失败」的不一致。
         """
@@ -87,6 +90,7 @@ class AuditService:
             actor_departments=depts_str,
             before_json=before,
             after_json=after,
+            outbox_id=outbox_id,
         )
         session.add(row)
         logger.debug(

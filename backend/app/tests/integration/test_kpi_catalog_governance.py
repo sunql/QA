@@ -15,7 +15,8 @@ from __future__ import annotations
 
 from sqlalchemy import delete, select
 
-from app.domain.models import AuditLog, KpiCatalog, KpiCatalogHistory
+from app.domain.models import AuditLog, AuditOutbox, KpiCatalog, KpiCatalogHistory
+from app.workers.audit_worker import AuditWorker
 
 
 # Department tokens（ASCII；HTTP header 安全）。owner 字段存什么 ACL 就比什么。
@@ -37,7 +38,19 @@ class _Helper:
             delete(AuditLog).where(AuditLog.entity_type == "kpi_catalog")
         )
         await dbSession.execute(delete(KpiCatalogHistory))
+        await dbSession.execute(delete(AuditOutbox).where(AuditOutbox.entity_type == "kpi_catalog"))
         await dbSession.commit()
+
+    @staticmethod
+    async def drainOutbox(dbSession) -> int:
+        """跑一轮 worker 消费（feat-audit-outbox：审计异步落地）。
+
+        业务 service 只入队；audit_log / history 由 worker 写入。
+        测试里同步跑一轮 drain 模拟 worker 处理完该事件。
+        """
+        worker = AuditWorker()
+        n = await worker.drainOnce(dbSession)
+        return n
 
 
 class TestKpiAcl:
@@ -153,6 +166,7 @@ class TestKpiAudit:
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
         kpiId = resp.json()["id"]
+        await _Helper.drainOutbox(dbSession)
 
         rows = (
             await dbSession.execute(
@@ -185,6 +199,7 @@ class TestKpiAudit:
             json={"kpiName": "新名"},
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
+        await _Helper.drainOutbox(dbSession)
 
         rows = (
             await dbSession.execute(
@@ -211,6 +226,7 @@ class TestKpiAudit:
             f"/api/v1/kpi-catalog/{kpiId}",
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
+        await _Helper.drainOutbox(dbSession)
 
         rows = (
             await dbSession.execute(
@@ -238,6 +254,7 @@ class TestKpiAudit:
             },
         )
         kpiId = resp.json()["id"]
+        await _Helper.drainOutbox(dbSession)
         rows = (
             await dbSession.execute(
                 select(AuditLog).where(
@@ -266,6 +283,7 @@ class TestKpiHistory:
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
         kpiId = resp.json()["id"]
+        await _Helper.drainOutbox(dbSession)
         rows = (
             await dbSession.execute(
                 select(KpiCatalogHistory).where(KpiCatalogHistory.kpi_id == kpiId)
@@ -291,6 +309,7 @@ class TestKpiHistory:
                 json={"kpiName": newName},
                 headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
             )
+        await _Helper.drainOutbox(dbSession)
 
         rows = (
             await dbSession.execute(
@@ -323,6 +342,8 @@ class TestKpiHistory:
             json={"kpiName": "N-新", "formula": "NEW"},
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
+
+        await _Helper.drainOutbox(dbSession)
 
         # revision=0 是创建时（name="N-原" formula="OLD"）
         rev0 = (
@@ -359,10 +380,14 @@ class TestKpiHistory:
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
         kpiId = resp.json()["id"]
+        # create 事件先消费（worker 及时处理），保证 history 已落地
+        await _Helper.drainOutbox(dbSession)
         await client.delete(
             f"/api/v1/kpi-catalog/{kpiId}",
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
+        # delete 事件再消费
+        await _Helper.drainOutbox(dbSession)
 
         # KPI 已删 → history.kpi_id 应为 NULL，但 snapshot_json 仍含 kpi_code
         rows = (
@@ -398,6 +423,7 @@ class TestKpiAclRollbackOnFailure:
             headers={"X-User-Id": "bob", "X-User-Departments": FINANCE},
         )
         assert putResp.status_code == 403
+        await _Helper.drainOutbox(dbSession)
 
         # audit_log 应只有 CREATE 那一条；不应有 UPDATE
         rows = (

@@ -153,6 +153,33 @@ MSG_SUPPLIER_360_NOT_FOUND = (
     "供应商 enterprise_key={key} 不存在或尚未在 entity_mapping 建档"
 )
 
+# Risk Agent 同样依赖 entity_mapping，复用 Supplier360 的 NotFound 通用消息
+# （与 Phase 4.5 ACL 原则一致：避免「不存在 vs 无权限」侧信道）。
+MSG_SUPPLIER_RISK_NOT_FOUND = MSG_SUPPLIER_360_NOT_FOUND
+
+# 风险等级 → 建议动作（按等级静态生成，Phase 5.4 Round 1 不调 LLM）
+MSG_RISK_ACTIONS_HIGH: tuple[str, ...] = (
+    "暂停新增采购订单",
+    "启动二方现场审核",
+    "收紧付款账期至 30 天内",
+    "通知质量与采购负责人介入",
+)
+MSG_RISK_ACTIONS_MEDIUM: tuple[str, ...] = (
+    "加强来料抽检比例（建议 ≥ 30%）",
+    "缩短付款账期至 45 天内",
+    "下季度安排一次现场评审",
+)
+MSG_RISK_ACTIONS_LOW: tuple[str, ...] = (
+    "维持当前合作模式",
+    "下季度例行复核即可",
+)
+MSG_RISK_ACTIONS_UNKNOWN: tuple[str, ...] = (
+    "暂无可用风险数据，请先在数据治理页触发 feature_value 计算",
+)
+
+# LLM 不可用时按违规 feature 拼装的降级模板（fallback_template）
+MSG_RISK_POINTS_TEMPLATE = "该供应商存在以下风险点：{reasons}"
+
 
 # =============================================================================
 # 模型路由

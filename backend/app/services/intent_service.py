@@ -167,6 +167,19 @@ _SUPPLIER_360_RE = re.compile(
 )
 
 # =============================================================================
+# 供应商风险 Agent（Phase 5.4）：chat 拦截路径，跳过 NL2SQL
+# =============================================================================
+
+# 命中关键词：含「风险 / 风险等级 / 健康度 / 风险评分」任一，且问题上下文中出现
+# 「供应商 X」或「supplier X」。避免与 supplier_360 重叠（不命中 360 / 全貌 等词）。
+# 优先级：与 supplier_360 并列（先 supplier_360 再 supplier_risk）。
+_SUPPLIER_RISK_RE = re.compile(
+    r"(?:供应商|supplier)[^\n。?]*?(?P<key>\d{5,9})[^\n。?]*?(?:风险|健康度|评分)"
+    r"|(?:风险|健康度|评分)[^\n。?]*?(?:供应商|supplier)[^\n。?]*?(?P<key2>\d{5,9})"
+    r"|(?:供应商|supplier)\s*(?P<key3>\d{5,9})\s*的\s*(?:风险|健康度|评分)"
+)
+
+# =============================================================================
 # 斜杠指令（Phase 5）：优先级最高，跳过所有自然语言关键词匹配
 # =============================================================================
 
@@ -245,6 +258,7 @@ class IntentResult:
     target: str | None = None
     formula: str | None = None
     supplierKey: str | None = None
+    # Phase 5.4: SUPPLIER_RISK 复用 supplierKey 字段（与 supplier_360 同语义）。
 
 
 class IntentService:
@@ -283,6 +297,13 @@ class IntentService:
         if supplierKey is not None:
             return IntentResult(
                 intent=IntentType.SUPPLIER_360, supplierKey=supplierKey
+            )
+        # Phase 5.4: supplier-risk 检测（紧跟 supplier_360 之后，避免「供应商 100001 的 360°」
+        # 被 risk 误吸；regex 已限定不含 360/全貌 等词）。
+        riskKey = self._extractSupplierRiskKey(original)
+        if riskKey is not None:
+            return IntentResult(
+                intent=IntentType.SUPPLIER_RISK, supplierKey=riskKey
             )
         if any(kw in normalized for kw in _DEFINE_KEYWORDS):
             name, formula = self._extractDefine(original)
@@ -404,6 +425,23 @@ class IntentService:
         5-9 位数字限制避免误中日期/年份等。
         """
         match = _SUPPLIER_360_RE.search(message)
+        if match is None:
+            return None
+        return match.group("key") or match.group("key2") or match.group("key3")
+
+    def _extractSupplierRiskKey(self, message: str) -> str | None:
+        """从用户问句提取 supplier enterprise_key（Phase 5.4 Risk Agent）。
+
+        匹配模式（_SUPPLIER_RISK_RE）：
+        - 「供应商 100001 的风险等级」
+        - 「supplier 100001 健康度」
+        - 「风险评分 供应商 100001」
+        - 「供应商 100001 的评分」
+
+        与 _extractSupplierKey 同数字边界（5-9 位），使用 ORIGINAL 文本。
+        未命中返回 None。
+        """
+        match = _SUPPLIER_RISK_RE.search(message)
         if match is None:
             return None
         return match.group("key") or match.group("key2") or match.group("key3")

@@ -133,6 +133,8 @@ class IntentType(str, Enum):
     CHITCHAT = "chitchat"
     # Phase 5.3: 供应商 360° 视图（chat 拦截路径，跳过 NL2SQL 走 Supplier360Service）
     SUPPLIER_360 = "supplier_360"
+    # Phase 5.4: 供应商风险 Agent（chat 拦截路径，跳过 NL2SQL 走 SupplierRiskService）
+    SUPPLIER_RISK = "supplier_risk"
 
 
 class LineageLayer(str, Enum):
@@ -280,3 +282,18 @@ class DocEntityRelationType(str, Enum):
     AUDIT_REPORT = "AUDIT_REPORT"
     SPEC = "SPEC"
     SOP = "SOP"
+
+
+class RiskLevel(str, Enum):
+    """供应商风险等级（Phase 5.4 Supplier Risk Agent）。
+
+    - HIGH：建议立即介入（暂停新订单 / 启动二方审核）
+    - MEDIUM：建议加强监控（提高抽检比例 / 缩短付款周期）
+    - LOW：维持当前合作模式
+    - UNKNOWN：所有 4 个 feature 均无最新值，无法判定
+    """
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    UNKNOWN = "unknown"

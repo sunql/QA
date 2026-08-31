@@ -47,6 +47,7 @@ export const enUS = {
       usage: "Usage Dashboard",
       status: "Service Status",
       supplier360: "Supplier 360°",
+      supplierRisk: "Supplier Risk",
     },
     themeToggle: "Toggle dark mode",
     themeDark: "Dark",
@@ -164,6 +165,43 @@ export const enUS = {
   supplier360Page: {
     title: "Supplier 360° Direct Query",
     hint: "Enter enterprise_key (5-9 digit BIGINT) to load master data + cross-system codes + key features. Or ask AIChatService 'show 360° view of supplier X'.",
+    placeholder: "Enter enterprise_key",
+    query: "Query",
+    invalidKey: "Please enter a valid enterprise_key (5-9 digits)",
+    notFound: "Supplier enterprise_key={key} does not exist or is not registered in entity_mapping",
+    requestFailed: "Query failed: {message}",
+  },
+
+  supplierRisk: {
+    cardTitle: "Supplier Risk Assessment",
+    fetchedAt: "Assessed at: {time}",
+    levelSource: "Path: {source}",
+    riskPointsLabel: "Key Risk Points",
+    sourceLlm: "LLM generated",
+    sourceFallback: "Template fallback",
+    cost: "Cost: {amount}",
+    empty: {
+      riskPoints: "No risk points available",
+    },
+    section: {
+      actions: "Recommended Actions",
+      contributions: "Feature Contributions",
+    },
+    contribution: {
+      feature: "Feature",
+      value: "Value",
+      threshold: "Threshold",
+      passed: "Status",
+      passedOk: "Pass",
+      passedFail: "Fail",
+      note: "Note",
+      placeholder: "No data",
+    },
+  },
+
+  supplierRiskPage: {
+    title: "Supplier Risk Agent Direct Query",
+    hint: "Enter enterprise_key (5-9 digit BIGINT) to assess risk level + key risk points + recommended actions. Or ask AIChatService 'risk of supplier X'.",
     placeholder: "Enter enterprise_key",
     query: "Query",
     invalidKey: "Please enter a valid enterprise_key (5-9 digits)",

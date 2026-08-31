@@ -32,6 +32,7 @@ from app.api.v1 import (
     ontology,
     session,
     supplier_360,
+    supplier_risk,
     system,
     term_dictionary,
 )
@@ -124,6 +125,11 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         supplier_360.router,
         prefix="/api/v1/supplier-360",
         tags=["supplier-360"],
+    )
+    testApp.include_router(
+        supplier_risk.router,
+        prefix="/api/v1/supplier-risk",
+        tags=["supplier-risk"],
     )
     testApp.include_router(
         documents.router, prefix="/api/v1/documents", tags=["documents"]

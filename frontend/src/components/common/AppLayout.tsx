@@ -24,6 +24,7 @@ const NAV_KEYS = [
   { key: "/graph", labelKey: "appLayout.menu.graph" },
   { key: "/vectors", labelKey: "appLayout.menu.vectors" },
   { key: "/supplier-360", labelKey: "appLayout.menu.supplier360" },
+  { key: "/supplier-risk", labelKey: "appLayout.menu.supplierRisk" },
 ] as const;
 
 export default function AppLayout() {

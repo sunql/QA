@@ -30,6 +30,7 @@ from app.domain.enums import (
     MatchRule,
     ObjectType,
     RefreshFrequency,
+    RiskLevel,
     RuleType,
     ScoreType,
     Severity,
@@ -119,6 +120,7 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_DQ_BADGE_EVALUATED,
     MSG_SCHEMA_CHAT_DQ_BADGES,
     MSG_SCHEMA_CHAT_SUPPLIER_360,
+    MSG_SCHEMA_CHAT_SUPPLIER_RISK,
     MSG_SCHEMA_DQ_COMPUTE_EVALUATED_RULES,
     MSG_SCHEMA_DQ_COMPUTE_SAVED_SCORES,
     MSG_SCHEMA_DQ_COMPUTE_DURATION_MS,
@@ -708,6 +710,57 @@ class Supplier360Read(CamelModel):
     )
 
 
+# ===========================================================================
+# Phase 5.4: Supplier Risk Agent DTO
+# ===========================================================================
+
+
+class SupplierRiskKpiContribution(CamelModel):
+    """单个 feature 在风险评估中的贡献度（Phase 5.4）。
+
+    一一映射 supplier 360° 的 DEFAULT_SUPPLIER_FEATURES。passed=False 表示
+    该 feature 触发违规（如 OTD < 阈值、DEFECT_RATE > 阈值）；note 给出
+    「85% 低于阈值 90%」类的人类可读描述。
+    """
+
+    feature_name: str
+    feature_alias: str | None = None
+    value: str | None = None  # Decimal → string
+    unit: str | None = None
+    threshold: str | None = None  # 该 feature 在风险规则中的阈值
+    passed: bool = Field(default=True, description="True=未触发违规，False=触发")
+    note: str | None = None
+
+
+class SupplierRiskRead(CamelModel):
+    """供应商风险评估响应（Phase 5.4，外部消费契约）。
+
+    设计原则（plan §5.4）：
+    - 复用 Supplier360Profile（profile 来源不变；风险 Agent 不另查主数据）
+    - 主路径：RISK_SCORE（0-1，越高越优）→ 直接映射 High/Medium/Low
+    - Fallback：其他 3 个 feature 违规计数（≥2 → Medium，3 → High）
+    - risk_points：默认 LLM 生成（自然语言 1-2 句）；LLM 不可用降级到模板
+    - recommended_actions：按等级静态生成（不调 LLM，保持响应稳定）
+    """
+
+    profile: Supplier360Profile
+    level: RiskLevel
+    level_source: str = Field(
+        ..., description="risk_score / fallback_composite / unknown"
+    )
+    contributions: list[SupplierRiskKpiContribution] = Field(default_factory=list)
+    risk_points: str | None = None
+    risk_points_source: str = Field(default="llm", description="llm / fallback_template")
+    recommended_actions: list[str] = Field(default_factory=list)
+    tokens_used: int = Field(default=0, ge=0, description="LLM 调用 token 数；fallback=0")
+    cost: float = Field(default=0.0, ge=0.0, description="LLM 调用成本（CNY）；fallback=0")
+    llm_model_name: str | None = None
+    fetched_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="后端聚合时间",
+    )
+
+
 class FeatureComputeResult(CamelModel):
     """单特征计算结果（Phase 4.3）。rows = 落库/覆盖的特征值行数。"""
 
@@ -1207,6 +1260,11 @@ class ChatResponse(CamelModel):
     supplier360: Supplier360Read | None = Field(
         default=None,
         description=MSG_SCHEMA_CHAT_SUPPLIER_360,
+    )
+    # Phase 5.4：供应商风险 Agent（仅 intent=supplier_risk 时填充；前端按字段存在性路由）
+    supplier_risk: SupplierRiskRead | None = Field(
+        default=None,
+        description=MSG_SCHEMA_CHAT_SUPPLIER_RISK,
     )
 
 

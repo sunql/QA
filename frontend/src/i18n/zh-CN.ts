@@ -55,6 +55,7 @@ export const zhCN = {
       graph: "Neo4j 图库",
       vectors: "Milvus 向量库",
       supplier360: "供应商 360°",
+      supplierRisk: "供应商风险",
     },
     themeToggle: "切换暗色模式",
     themeDark: "暗",
@@ -171,6 +172,43 @@ export const zhCN = {
   supplier360Page: {
     title: "供应商 360° 直接查询",
     hint: "输入 enterprise_key（5-9 位 BIGINT）直接拉取该供应商的主数据 + 跨系统编码 + 关键 Feature。也可在 AIChatService 中问「供应商 X 的 360° 视图」自动触发。",
+    placeholder: "请输入 enterprise_key",
+    query: "查询",
+    invalidKey: "请输入合法的 enterprise_key（5-9 位数字）",
+    notFound: "供应商 enterprise_key={key} 不存在或尚未在 entity_mapping 建档",
+    requestFailed: "查询失败：{message}",
+  },
+
+  supplierRisk: {
+    cardTitle: "供应商风险评估",
+    fetchedAt: "评估时间：{time}",
+    levelSource: "评估路径：{source}",
+    riskPointsLabel: "主要风险点",
+    sourceLlm: "LLM 生成",
+    sourceFallback: "模板生成",
+    cost: "成本：{amount} 元",
+    empty: {
+      riskPoints: "暂无风险点描述",
+    },
+    section: {
+      actions: "建议动作",
+      contributions: "特征贡献明细",
+    },
+    contribution: {
+      feature: "特征",
+      value: "当前值",
+      threshold: "阈值",
+      passed: "合规",
+      passedOk: "正常",
+      passedFail: "违规",
+      note: "说明",
+      placeholder: "暂无数据",
+    },
+  },
+
+  supplierRiskPage: {
+    title: "供应商风险 Agent 直接查询",
+    hint: "输入 enterprise_key（5-9 位 BIGINT）直接评估风险等级 + 主要风险点 + 建议动作。也可在 AIChatService 中问「供应商 X 的风险」自动触发。",
     placeholder: "请输入 enterprise_key",
     query: "查询",
     invalidKey: "请输入合法的 enterprise_key（5-9 位数字）",

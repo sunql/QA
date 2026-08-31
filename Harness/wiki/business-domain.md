@@ -171,3 +171,111 @@ Supplier360Service.get360(supplier_key)
 - Chat：AIChatService 中问「供应商 X 的 360° 视图」
 
 详见 [[Harness/changes/feat-supplier-360-ads/summary.md]]。
+
+## Supplier Risk Agent（Phase 5.4）
+
+基于 Phase 5.3 的 SUPPLIER Feature 层（4 项 KPI）构建最小版风险评估 Agent，按 enterprise_key 实时判定等级（High / Medium / Low / Unknown）并生成结构化建议动作 + LLM 自然语言风险点。**不引入新表**，复用 `entity_mapping`（ACL）+ `feature_definition` + `feature_value` 主路径。
+
+### 等级决策双路径
+
+```
+SupplierRiskService.assess(session, supplier_key)
+   ├─→ Supplier360Service.get360()  ← 复用 Profile + 4 KPI
+   ├─→ contributions = 4 项 KPI → SupplierRiskKpiContribution（+ threshold / passed / note）
+   └─→ _decideLevel(contributions)
+         ├─ 主路径：RISK_SCORE latest=True
+         │     ├─ score < 0.60 → High（level_source="risk_score"）
+         │     ├─ 0.60 ≤ score < 0.80 → Medium
+         │     └─ score ≥ 0.80 → Low
+         ├─ Fallback：RISK_SCORE 缺失 / 禁用 / 无值
+         │     ├─ OTD<90 / DEFECT>5 / PRICE>10 任一为违规
+         │     ├─ 违规=3 → High（level_source="fallback_composite"）
+         │     ├─ 违规=2 → Medium
+         │     └─ 违规≤1 → Low
+         └─ Unknown：4 项 feature 全部 latest=False → level=unknown（不强行判定）
+```
+
+阈值与等级映射硬编码于 `supplier_risk_service.RISK_RULES`（与 `DEFAULT_SUPPLIER_FEATURES` 同模式）。阈值不变更 → 不引入 DB 配置复杂度；Phase 6 Agent 平台可演进为 DB 配置。
+
+### LLM 生成 risk_points（异常隔离）
+
+```
+_generateRiskPoints(profile, contributions, level, *, llm_factory)
+   ├─ llm_factory 为 None（生产未注入）→ fallback_template（按违规 feature 拼装）
+   ├─ 调 llm_factory(None).complete([system_msg, user_msg])
+   ├─ 记录 prompt_tokens + completion_tokens → tokens_used + cost + llm_model_name
+   ├─ 任何异常（网络 / 超时 / 鉴权）→ log.warn + fallback_template（不阻断主响应）
+   └─ 返回 (risk_points, points_source, tokens, cost, model_name)
+```
+
+- **system prompt**：固定中文模板（不允许外部内容注入）。
+- **user content**：仅 `enterprise_code + 4 个 feature value + 阈值 + passed`（不拼接 user 原句，规避 prompt injection）。
+- **降级模板**：`"该供应商存在以下风险点：{reasons}"`，LLM 不可用时仍可读。
+
+### 等级 → 建议动作矩阵（静态文案，不调 LLM）
+
+| 等级 | 触发场景（静态） | 建议动作（节选） |
+|---|---|---|
+| **High** | score<0.60 / 3 违规 | 立即冻结新增订单 / 启动 8D 报告 / 第三方审核 |
+| **Medium** | 0.60-0.80 / 2 违规 | 限定额度 / 制定改进计划 / 月度回顾 |
+| **Low** | ≥0.80 / ≤1 违规 | 维持合作 / 季度回顾 |
+| **Unknown** | 4 项 feature 全部缺失 | 建议补齐数据 / 触发人工评估 |
+
+（详细文案见 `messages_zh.py:MSG_RISK_ACTIONS_*`）
+
+### Chat 拦截与路由
+
+- intent_service 正则 `_SUPPLIER_RISK_RE`：`供应商 X 的风险 / 健康度 / 评分` + 5-9 位 enterprise_key（与 `_SUPPLIER_360_RE` 关键词不重叠，互不误吸）
+- 优先级：`supplier_360` → `supplier_risk` → `DEFINE` / `MAP` / ... → `QUERY`
+- chat_service `_handleSupplierRisk`：
+  - supplierKey 缺失 → `ChatResponse(answer=引导文案, supplier_risk=None)`
+  - `NotFoundError` → `ChatResponse(answer=通用 404 消息, supplier_risk=None)`（Phase 4.5 ACL 原则：不暴露「不存在 vs 无权限」侧信道）
+  - 成功 → `ChatResponse(answer=等级 + 主要风险点 + 首要动作, supplier_risk=完整对象)`
+- 前端 MessageItem 按 `message.supplierRisk` 存在性路由渲染 SupplierRiskCard
+
+### 数据契约增量
+
+```python
+# backend/app/domain/enums.py
+class RiskLevel(str, Enum):
+    HIGH = "high"; MEDIUM = "medium"; LOW = "low"; UNKNOWN = "unknown"
+
+class IntentType(str, Enum):
+    SUPPLIER_RISK = "supplier_risk"  # 紧跟 SUPPLIER_360
+
+# backend/app/domain/schemas.py
+class SupplierRiskKpiContribution(CamelModel):
+    feature_name / feature_alias / value / unit
+    + threshold / passed / note  # 比 KPI 多的字段
+
+class SupplierRiskRead(CamelModel):
+    profile: Supplier360Profile       # 复用 §5.3 Profile
+    level: RiskLevel
+    level_source: str                 # risk_score / fallback_composite / unknown
+    contributions: list[SupplierRiskKpiContribution]   # 4 项一一对应
+    risk_points: str | None
+    risk_points_source: str           # llm / fallback_template
+    recommended_actions: list[str]
+    tokens_used: int; cost: float
+    llm_model_name: str | None
+    fetched_at: datetime
+
+# ChatResponse 新增
+supplier_risk: SupplierRiskRead | None = Field(default=None)
+```
+
+### ACL 与安全
+
+- 仅 `getCurrentUser` 鉴权（与 supplier_360 一致）；底层 `entity_mapping` ACL 隔离；无新增 ACL 注入。
+- NotFound 通用消息（避免「不存在 vs 无权限」侧信道）。
+- DTO 禁止 mass-assignment（沿用 CamelModel `from_attributes=True`，不暴露 Create / Update DTO）。
+- LLM prompt 注入防护：固定 system prompt；user content 仅含结构化数据，不拼 user 原句。
+- Token 计量：每次 LLM 调用记录 prompt_tokens + completion_tokens + cost，fallback 时一律 0。
+- 异常隔离：LLM 调用异常 → `log.warn` + fallback；4 项 feature 缺失 → `Unknown` 而非 500。
+
+### 入口
+
+- 直接 API：`GET /api/v1/supplier-risk/{supplier_key}`（侧栏「供应商风险」入口）
+- Chat：AIChatService 中问「供应商 X 的风险 / 健康度 / 评分」
+
+详见 [[Harness/changes/feat-supplier-risk-agent-mini/summary.md]]。

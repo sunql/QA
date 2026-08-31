@@ -13,7 +13,8 @@ export type IntentType =
   | "define"
   | "map"
   | "metric"
-  | "supplier_360";
+  | "supplier_360"
+  | "supplier_risk";
 
 export type ChartType = "table" | "bar" | "pie" | "line" | "scatter";
 
@@ -136,6 +137,9 @@ export interface ChatResponse {
   // Phase 5.3：供应商 360° ADS 视图（仅 intent=supplier_360 时填充；其余为 null）。
   // 由 MessageItem 按字段存在性路由到 Supplier360Card 渲染。
   supplier360?: import("./supplier").Supplier360Read | null;
+  // Phase 5.4：供应商风险 Agent（仅 intent=supplier_risk 时填充；其余为 null）。
+  // 由 MessageItem 按字段存在性路由到 SupplierRiskCard 渲染。
+  supplierRisk?: import("./supplierRisk").SupplierRiskRead | null;
 }
 
 // 会话亲和性状态：前 N 轮锁定模型 + 剩余轮数（解锁时为 null）
@@ -189,6 +193,8 @@ export interface ChatMessage {
   dataQuality?: DataQualityBadge[] | null;
   // Phase 5.3：供应商 360° 完整对象（仅 intent=supplier_360 时回填，其余 undefined）
   supplier360?: import("./supplier").Supplier360Read | null;
+  // Phase 5.4：供应商风险 Agent 完整对象（仅 intent=supplier_risk 时回填）
+  supplierRisk?: import("./supplierRisk").SupplierRiskRead | null;
   // 后端 SessionMessage 主键（PDF 单条导出需要：chatStore 暂未在 sendMessage
   // 完成后回填，故默认 undefined，全局按钮正常工作，单条入口 disabled）
   dbMessageId?: number;

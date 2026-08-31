@@ -61,13 +61,14 @@ from app.services.datasource_service import DataSourceService
 from app.services.embedding_service import EmbeddingService
 from app.services.intent_service import IntentResult, IntentService
 from app.domain.error_messages import MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING
-from app.services.messages_zh import MSG_SUPPLIER_360_NOT_FOUND
+from app.services.messages_zh import MSG_SUPPLIER_360_NOT_FOUND, MSG_SUPPLIER_RISK_NOT_FOUND
 from app.services.model_router_service import ModelRouterService, RoutingContext
 from app.services.nl2sql_service import Nl2SqlService, SqlResult, _safeSchemaPrefix, _sanitizeContext
 from app.services.ontology_service import OntologyService
 from app.services.step_aggregator import StepAggregator
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.supplier_360_service import Supplier360Service
+from app.services.supplier_risk_service import SupplierRiskService
 from app.services.schema_introspection_service import (
     SchemaIntrospectionService,
     buildDriftWarning,
@@ -347,6 +348,9 @@ class ChatService(ChatStreamOutputMixin):
         # Phase 5.3：供应商 360° 视图（chat 拦截，跳过 NL2SQL）
         if result.intent == IntentType.SUPPLIER_360:
             return await self._handleSupplier360(session, dto, result)
+        # Phase 5.4：供应商风险 Agent（chat 拦截，跳过 NL2SQL）
+        if result.intent == IntentType.SUPPLIER_RISK:
+            return await self._handleSupplierRisk(session, dto, result)
 
         pc = await self._buildPipelineContext(
             session, dto,
@@ -1173,6 +1177,56 @@ class ChatService(ChatStreamOutputMixin):
             answer=answer,
             intent=result.intent.value,
             supplier360=data,
+        )
+
+    async def _handleSupplierRisk(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        result: IntentResult,
+    ) -> ChatResponse:
+        """Phase 5.4：供应商风险 Agent（chat 拦截路径，跳过 NL2SQL）。
+
+        与 _handleSupplier360 同语义：supplierKey 缺失 / 找不到 supplier 都返回 ChatResponse
+        + 友好 answer，supplier_risk=None（前端按字段存在性路由，不渲染卡片）。
+        成功 → answer=等级 + 主要风险点 + 建议动作，supplier_risk=<完整对象>。
+        LLM 不可用由 SupplierRiskService 内部降级到 fallback_template，chat 层无感。
+        """
+        if not result.supplierKey:
+            return ChatResponse(
+                answer=MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING,
+                intent=result.intent.value,
+            )
+        try:
+            supplierKey = int(result.supplierKey)
+        except ValueError:
+            return ChatResponse(
+                answer=MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING,
+                intent=result.intent.value,
+            )
+        try:
+            data = await SupplierRiskService().assess(
+                session, supplierKey, llm_factory=self._llmFactory
+            )
+        except NotFoundError:
+            return ChatResponse(
+                answer=MSG_SUPPLIER_RISK_NOT_FOUND.format(key=supplierKey),
+                intent=result.intent.value,
+            )
+        # answer 拼装：等级 + 主要风险点（截断 80 字）+ 首要建议
+        first_action = data.recommended_actions[0] if data.recommended_actions else "（无建议）"
+        risk_excerpt = (data.risk_points or "").strip()
+        if len(risk_excerpt) > 80:
+            risk_excerpt = risk_excerpt[:77] + "..."
+        answer = (
+            f"供应商 {data.profile.enterprise_code}（{supplierKey}）风险等级：**{data.level.value}**。"
+            f"主要风险点：{risk_excerpt or '（暂无）'}。"
+            f"建议：{first_action}。"
+        )
+        return ChatResponse(
+            answer=answer,
+            intent=result.intent.value,
+            supplier_risk=data,
         )
 
     async def _handleDefineMetric(

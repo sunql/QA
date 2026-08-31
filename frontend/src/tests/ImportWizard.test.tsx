@@ -58,6 +58,8 @@ describe("ImportWizard", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /确认导入/i })).toBeInTheDocument()
     );
+    // 新 UI：未勾选时确认按钮禁用，需先全选当前筛选再确认
+    fireEvent.click(screen.getByRole("button", { name: /全选当前筛选/i }));
     fireEvent.click(screen.getByRole("button", { name: /确认导入/i }));
 
     await waitFor(() =>
@@ -102,6 +104,8 @@ describe("ImportWizard", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /确认导入/i })).toBeInTheDocument()
     );
+    // 新 UI：未勾选时确认按钮禁用，需先全选当前筛选再确认
+    fireEvent.click(screen.getByRole("button", { name: /全选当前筛选/i }));
     fireEvent.click(screen.getByRole("button", { name: /确认导入/i }));
 
     await waitFor(() =>
@@ -111,5 +115,110 @@ describe("ImportWizard", () => {
     expect(screen.getByText("property")).toBeInTheDocument();
     expect(screen.getByText("orders.customer_id")).toBeInTheDocument();
     expect(screen.getByText("NOT NULL violation")).toBeInTheDocument();
+  });
+
+  it("accumulates batch selection across searches and only submits selected subset", async () => {
+    // 清掉前序测试对同一 mock 的调用记录，确保本测试读到自己的调用
+    vi.mocked(api.executeImport).mockClear();
+    vi.mocked(api.getImportPreview).mockResolvedValue({
+      datasourceId: 1,
+      proposedClasses: [
+        {
+          sourceTable: "orders",
+          className: "orders",
+          classAlias: null,
+          description: null,
+          isSelected: true,
+          properties: [],
+        },
+        {
+          sourceTable: "customers",
+          className: "customers",
+          classAlias: null,
+          description: null,
+          isSelected: true,
+          properties: [],
+        },
+        {
+          sourceTable: "suppliers",
+          className: "suppliers",
+          classAlias: null,
+          description: null,
+          isSelected: true,
+          properties: [],
+        },
+      ],
+      proposedJoins: [
+        {
+          sourceTable: "orders",
+          sourceColumns: ["customer_id"],
+          targetTable: "customers",
+          targetColumns: ["id"],
+          joinType: "INNER",
+          relationType: "foreign_key",
+          isSelected: true,
+        },
+        {
+          sourceTable: "orders",
+          sourceColumns: ["supplier_id"],
+          targetTable: "suppliers",
+          targetColumns: ["id"],
+          joinType: "INNER",
+          relationType: "foreign_key",
+          isSelected: true,
+        },
+      ],
+      conflicts: [],
+      filterSuggestions: { recommendedBlacklistPatterns: [], excludedTables: [] },
+      llmUsage: { modelName: null, promptTokens: 0, completionTokens: 0 },
+    });
+    vi.mocked(api.executeImport).mockResolvedValue({
+      success: true,
+      createdClasses: 1,
+      createdProperties: 1,
+      createdJoins: 1,
+      skippedConflicts: 0,
+      overwrittenConflicts: 0,
+      errors: [],
+    });
+
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /下一步/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /确认导入/i })).toBeInTheDocument()
+    );
+
+    // 未勾选任何行时，确认按钮禁用
+    expect(screen.getByRole("button", { name: /确认导入/i })).toBeDisabled();
+
+    // 批次1：搜索 order → 只显示 orders（1 行）→ 全选当前筛选
+    fireEvent.change(screen.getByPlaceholderText(/搜索表名\/类名/i), {
+      target: { value: "order" },
+    });
+    expect(document.querySelectorAll(".ant-table-row")).toHaveLength(1);
+    expect(screen.queryAllByText("customers")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: /全选当前筛选/i }));
+
+    // 批次2：搜索 customer → 只显示 customers（1 行）→ 全选当前筛选（累计，不覆盖批次1）
+    fireEvent.change(screen.getByPlaceholderText(/搜索表名\/类名/i), {
+      target: { value: "customer" },
+    });
+    expect(document.querySelectorAll(".ant-table-row")).toHaveLength(1);
+    expect(screen.queryAllByText("orders")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: /全选当前筛选/i }));
+    // 批次2 全选后应为 已选 2 张表（orders + customers 累计）
+    expect(screen.getByText(/已选 2/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /确认导入/i }));
+
+    await waitFor(() => expect(api.executeImport).toHaveBeenCalled());
+    const request = vi.mocked(api.executeImport).mock.calls[0][1];
+    // 只提交勾选的类；join 只保留两端都在子集内的（orders->suppliers 因 suppliers 未勾选被丢弃）
+    expect(request.confirmedClasses.map((c) => c.sourceTable)).toEqual([
+      "orders",
+      "customers",
+    ]);
+    expect(request.confirmedJoins.map((j) => j.targetTable)).toEqual(["customers"]);
+    expect(request.confirmedClasses[0].isSelected).toBe(true);
   });
 });

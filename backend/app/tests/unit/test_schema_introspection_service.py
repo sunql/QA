@@ -13,6 +13,8 @@ mock 适配器，验证：
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 import app.services.schema_introspection_service as schema_module
@@ -182,7 +184,14 @@ class TestIntrospectionFailure:
         assert "连不上业务库" not in (excInfo.value.detail or "")
         assert "服务端日志" in excInfo.value.detail
 
-    async def test_table_count_over_cap_raises_data_source_error(self) -> None:
+    async def test_table_count_over_cap_raises_data_source_error(self, monkeypatch) -> None:
+        # 上限从 getSettings().schema_max_tables 读取（可配置，env SCHEMA_MAX_TABLES）。
+        # 这里把上限压到 5，塞 6 张表触发 guard，验证超限即拦截。
+        monkeypatch.setattr(
+            schema_module,
+            "getSettings",
+            lambda: SimpleNamespace(schemaMaxTables=5),
+        )
         adapter = _FakeSchemaAdapter(
             columnRows=[
                 {
@@ -192,7 +201,7 @@ class TestIntrospectionFailure:
                     "nullable": 0,
                     "owner": "ZJTH",
                 }
-                for i in range(schema_module.MAX_SCHEMA_TABLES + 1)
+                for i in range(6)
             ],
             pkRows=[],
             fkRows=[],
@@ -200,6 +209,31 @@ class TestIntrospectionFailure:
         with pytest.raises(DataSourceError) as excInfo:
             await _service(adapter).introspect(_datasource())
         assert "超过上限" in excInfo.value.message
+        assert "6" in excInfo.value.message  # 报错中带实际表数
+        assert "5" in excInfo.value.message  # 报错中带上限
+
+    async def test_table_count_within_limit_succeeds(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            schema_module,
+            "getSettings",
+            lambda: SimpleNamespace(schemaMaxTables=5),
+        )
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {
+                    "table_name": f"T{i:04d}",
+                    "column_name": "ID",
+                    "data_type": "NUMBER",
+                    "nullable": 0,
+                    "owner": "ZJTH",
+                }
+                for i in range(5)
+            ],
+            pkRows=[],
+            fkRows=[],
+        )
+        tables = await _service(adapter).introspect(_datasource())
+        assert len(tables) == 5
 
 
 class TestSchemaVersion:

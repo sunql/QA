@@ -24,6 +24,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import getSettings
 from app.domain.enums import DataSourceType
 from app.domain.exceptions import DataSourceError, ValidationError
 from app.domain.models import DataSource, SchemaCache
@@ -50,8 +51,8 @@ logger = logging.getLogger(__name__)
 # Oracle schema owner 字符白名单：用户名规范化后内联为 SQL 字面量，杜绝注入
 _ORACLE_OWNER_PATTERN = re.compile(r"[A-Z0-9_$#]+")
 
-# 单数据源允许发现的表数量上限：避免超大 schema 撑爆缓存/响应体/后续 NL2SQL 提示词
-MAX_SCHEMA_TABLES = 1000
+# 单数据源允许发现的表数量上限在 Settings.schema_max_tables（env SCHEMA_MAX_TABLES，
+# 默认 3000）：避免超大 schema 撑爆 introspection 响应体与缓存，同时可按大型库调高。
 
 # 漂移告警（2-4）注入 NL2SQL system prompt 的文案：明确告知模型不得引用已漂移的表/字段，
 # 避免生成 ORA-00942 类 SQL。告警位于受信的 system prompt（非用户数据），按指令处理。
@@ -125,10 +126,11 @@ class SchemaIntrospectionService:
                 detail=MSG_DATASOURCE_SCHEMA_READ_FAILED_DETAIL,
             ) from exc
         tables = self._assembleTables(merged)
-        if len(tables) > MAX_SCHEMA_TABLES:
+        maxTables = getSettings().schemaMaxTables
+        if len(tables) > maxTables:
             raise DataSourceError(
                 MSG_DATASOURCE_SCHEMA_TABLE_LIMIT_EXCEEDED.format(
-                    datasourceId=ds.id, tableCount=len(tables), maxTables=MAX_SCHEMA_TABLES
+                    datasourceId=ds.id, tableCount=len(tables), maxTables=maxTables
                 ),
                 detail=MSG_DATASOURCE_SCHEMA_TABLE_LIMIT_DETAIL,
             )

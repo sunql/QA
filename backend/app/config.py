@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     # 默认 0：取消"列出所有..."型无范围明细查询的强制 LIMIT 100，由 LLM 自由判断。
     nl2sqlNoScopeRowLimit: int = Field(default=0, alias="NL2SQL_NO_SCOPE_ROW_LIMIT")
 
+    # ===== Schema 发现 =====
+    # 单数据源允许发现的表数量上限：本地导入/元数据发现的硬保护，防止超大 schema
+    # 撑爆 introspection 响应体与缓存。大型 ERP（如 Sage X3 生产库 1600+ 表）可按需调高。
+    # 注意：NL2SQL 提示词使用本体 schema（导入后手工维护的类）而非该 introspection 缓存，
+    # 调高不会撑爆 NL2SQL 提示词，只会让 introspection / 预览响应体变大。
+    schemaMaxTables: int = Field(default=3000, alias="SCHEMA_MAX_TABLES")
+
     # ===== LLM: OpenAI / Azure =====
     openaiApiKey: str = Field(default="", alias="OPENAI_API_KEY")
     openaiBaseUrl: str = Field(default="", alias="OPENAI_BASE_URL")

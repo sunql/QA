@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import __version__
 from app.api.v1 import (
+    agents,
     audit,
     chat,
     data_lineage,
@@ -134,6 +135,7 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(
         documents.router, prefix="/api/v1/documents", tags=["documents"]
     )
+    testApp.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
     testApp.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"])
 

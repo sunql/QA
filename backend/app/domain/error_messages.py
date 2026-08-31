@@ -292,3 +292,33 @@ MSG_SCHEMA_ENTITY_MAPPING_EFFECTIVE_DATE = "生效日期"
 MSG_SCHEMA_ENTITY_MAPPING_EXPIRY_DATE = "失效日期（空表示长期有效）"
 MSG_SCHEMA_ENTITY_MAPPING_CREATED_TIME = "创建时间"
 MSG_SCHEMA_ENTITY_MAPPING_UPDATED_TIME = "更新时间"
+
+# =============================================================================
+# Agent Registry（Phase 6.1）
+# =============================================================================
+
+MSG_SCHEMA_AGENT_CODE = "Agent 唯一编码（全大写下划线，如 SUPPLIER_RISK_AGENT）"
+MSG_SCHEMA_AGENT_NAME = "Agent 名称（中文展示用）"
+MSG_SCHEMA_AGENT_DESCRIPTION = "Agent 用途说明"
+MSG_SCHEMA_AGENT_TRIGGER_TYPE = "触发类型：user_question / scheduled / event"
+MSG_SCHEMA_AGENT_RESPONSE_LATENCY = "响应延迟：realtime / batch"
+MSG_SCHEMA_AGENT_DATA_DOMAINS = "数据域列表（JSONB 数组，如 [\"PROCUREMENT\"]）"
+MSG_SCHEMA_AGENT_DATA_LAYERS = "数据层列表（JSONB 数组，如 [\"FEATURE\",\"DWS\"]）"
+MSG_SCHEMA_AGENT_STATUS = "治理状态：active / draft / deprecated"
+MSG_SCHEMA_AGENT_OWNER = "归属部门（Phase 4.5 ACL 由此派生）"
+MSG_SCHEMA_AGENT_VERSION = "Agent 版本（默认 v1.0；变更需创建新版而非原地覆盖）"
+
+MSG_SCHEMA_AGENT_POLICY_DATA_OBJECT = "数据对象名（如 SUPPLIER / PURCHASE_ORDER）"
+MSG_SCHEMA_AGENT_POLICY_PERMISSION = (
+    "访问权限：read / masked_read / forbidden / forbidden_write"
+)
+MSG_SCHEMA_AGENT_POLICY_DATA_LAYER = "数据层（空表示跨层通用）"
+MSG_SCHEMA_AGENT_POLICY_NOTES = "策略备注"
+
+MSG_AGENT_NOT_FOUND_BY_CODE = "Agent 不存在：code={code}"
+MSG_AGENT_POLICY_NOT_FOUND = "Agent 访问策略不存在：id={id}"
+MSG_AGENT_DUPLICATE_CODE = "Agent 编码已存在：{code}"
+MSG_AGENT_POLICY_DUPLICATE = (
+    "同一 Agent 对同一 data_object + data_layer 已存在策略"
+)
+MSG_AGENT_REGISTRY_FORBIDDEN = "无权修改该 Agent：仅 owner 部门成员或 admin 角色可操作"

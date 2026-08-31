@@ -88,7 +88,7 @@ AI 可信度集成        自动解析              缺失对象建模          
 
 | Change | 工时 | 状态 |
 |---|---|---|
-| `feat-agent-registry` | 1.5-2 周 | 待启动 |
+| `feat-agent-registry` | 1.5-2 周 | ✅ done（2026-08-31） |
 | `feat-semantic-relations` | 2 周 | 待启动 |
 | `feat-graph-traversal-api` | 1.5-2 周 | 待启动 |
 | `feat-agent-runtime-mvp` | 2-3 周 | 待启动 |

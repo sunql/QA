@@ -16,6 +16,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
 from app.domain.enums import (
+    AgentPermission,
+    AgentResponseLatency,
+    AgentStatus,
+    AgentTriggerType,
     ChartType,
     DataSourceType,
     DocumentSecurityLevel,
@@ -125,6 +129,20 @@ from app.domain.error_messages import (
     MSG_SCHEMA_DQ_COMPUTE_SAVED_SCORES,
     MSG_SCHEMA_DQ_COMPUTE_DURATION_MS,
     MSG_SCHEMA_DQ_COMPUTE_SCORES,
+    MSG_SCHEMA_AGENT_CODE,
+    MSG_SCHEMA_AGENT_DATA_DOMAINS,
+    MSG_SCHEMA_AGENT_DATA_LAYERS,
+    MSG_SCHEMA_AGENT_DESCRIPTION,
+    MSG_SCHEMA_AGENT_NAME,
+    MSG_SCHEMA_AGENT_OWNER,
+    MSG_SCHEMA_AGENT_POLICY_DATA_LAYER,
+    MSG_SCHEMA_AGENT_POLICY_DATA_OBJECT,
+    MSG_SCHEMA_AGENT_POLICY_NOTES,
+    MSG_SCHEMA_AGENT_POLICY_PERMISSION,
+    MSG_SCHEMA_AGENT_RESPONSE_LATENCY,
+    MSG_SCHEMA_AGENT_STATUS,
+    MSG_SCHEMA_AGENT_TRIGGER_TYPE,
+    MSG_SCHEMA_AGENT_VERSION,
     MSG_SCHEMA_ENTITY_MAPPING_CREATED_TIME,
     MSG_SCHEMA_ENTITY_MAPPING_EFFECTIVE_DATE,
     MSG_SCHEMA_ENTITY_MAPPING_ENTERPRISE_CODE,
@@ -1812,4 +1830,96 @@ class DocEntityRelationRead(CamelModel):
     entity_type: str
     entity_key: int
     relation_type: DocEntityRelationType
+
+
+class AgentAccessPolicyCreate(CamelModel):
+    """创建 Agent 访问策略请求（Phase 6.1）。"""
+
+    data_object: str = Field(..., min_length=1, max_length=128)
+    permission: AgentPermission = Field(default=AgentPermission.READ)
+    data_layer: str | None = Field(default=None, max_length=32)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class AgentAccessPolicyUpdate(CamelModel):
+    """更新 Agent 访问策略请求（Phase 6.1）。"""
+
+    permission: AgentPermission | None = None
+    data_layer: str | None = Field(default=None, max_length=32)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class AgentAccessPolicyRead(CamelModel):
+    """Agent 访问策略响应（Phase 6.1）。"""
+
+    id: int
+    data_object: str
+    permission: AgentPermission
+    data_layer: str | None = None
+    notes: str | None = None
+    created_time: datetime | None = None
+
+
+class AgentDefinitionCreate(CamelModel):
+    """创建 Agent 注册请求（Phase 6.1）。
+
+    owner 不在 DTO 中：由 actor.departments[0] 派生（entity_mapping 同模式），
+    防止 client 任意声明 owner 越权；actor.departments 为空 → owner=None →
+    仅 admin 可改。
+    """
+
+    agent_code: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Z][A-Z0-9_]*$",
+        description=MSG_SCHEMA_AGENT_CODE,
+    )
+    agent_name: str = Field(..., min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=8000)
+    trigger_type: AgentTriggerType = Field(default=AgentTriggerType.USER_QUESTION)
+    response_latency: AgentResponseLatency = Field(
+        default=AgentResponseLatency.REALTIME
+    )
+    data_domains: list[str] = Field(default_factory=list)
+    data_layers: list[str] = Field(default_factory=list)
+    status: AgentStatus = Field(default=AgentStatus.DRAFT)
+    version: str | None = Field(default=None, max_length=32)
+    policies: list[AgentAccessPolicyCreate] = Field(default_factory=list)
+
+
+class AgentDefinitionUpdate(CamelModel):
+    """更新 Agent 注册请求（Phase 6.1）。
+
+    全部字段可选；exclude_unset 模式下未传字段不动。policies 不在此处更新
+    （走独立 /policies 子端点，便于事务粒度更细）。
+    """
+
+    agent_name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=8000)
+    trigger_type: AgentTriggerType | None = None
+    response_latency: AgentResponseLatency | None = None
+    data_domains: list[str] | None = None
+    data_layers: list[str] | None = None
+    status: AgentStatus | None = None
+    version: str | None = Field(default=None, max_length=32)
+
+
+class AgentDefinitionRead(CamelModel):
+    """Agent 注册响应（Phase 6.1）。"""
+
+    id: int
+    agent_code: str
+    agent_name: str
+    description: str | None = None
+    trigger_type: AgentTriggerType
+    response_latency: AgentResponseLatency
+    data_domains: list[str]
+    data_layers: list[str]
+    status: AgentStatus
+    owner: str | None = None
+    version: str
+    policies: list[AgentAccessPolicyRead] = Field(default_factory=list)
+    created_time: datetime | None = None
+    updated_time: datetime | None = None
     created_time: datetime

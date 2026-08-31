@@ -34,6 +34,10 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.domain.enums import (
+    AgentPermission,
+    AgentResponseLatency,
+    AgentStatus,
+    AgentTriggerType,
     DataSourceType,
     DocumentSecurityLevel,
     DocumentStatus,
@@ -1195,4 +1199,102 @@ class DocumentEntityRelation(Base):
         return (
             f"<DocumentEntityRelation id={self.id} doc={self.document_id} "
             f"entity={self.entity_type}/{self.entity_key}>"
+        )
+
+
+class AgentDefinition(Base, TimestampMixin):
+    """AI Agent 注册表（Phase 6.1）。
+
+    存储可被 Agent Runtime 调度的所有 Agent 的元数据。
+    agent_code 业务唯一（如 SUPPLIER_RISK_AGENT），用于路由识别。
+    data_domains / data_layers 是 JSONB 数组，描述 Agent 关注的业务域
+    （如 ["PROCUREMENT"]）与数据层（如 ["FEATURE", "DWS"]）。
+
+    status 治理：active 运行时可用；deprecated 仅供历史溯源。
+    """
+
+    __tablename__ = "agent_definition"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    agent_code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    agent_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trigger_type: Mapped[AgentTriggerType] = mapped_column(
+        String(30), nullable=False, default=AgentTriggerType.USER_QUESTION
+    )
+    response_latency: Mapped[AgentResponseLatency] = mapped_column(
+        String(30), nullable=False, default=AgentResponseLatency.REALTIME
+    )
+    data_domains: Mapped[list[str]] = mapped_column(
+        postgresql.JSONB, nullable=False, default=list
+    )
+    data_layers: Mapped[list[str]] = mapped_column(
+        postgresql.JSONB, nullable=False, default=list
+    )
+    status: Mapped[AgentStatus] = mapped_column(
+        String(20), nullable=False, default=AgentStatus.DRAFT
+    )
+    owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    version: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="v1.0"
+    )
+
+    policies: Mapped[list["AgentAccessPolicy"]] = relationship(
+        back_populates="agent",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AgentDefinition id={self.id} code={self.agent_code} "
+            f"status={self.status}>"
+        )
+
+
+class AgentAccessPolicy(Base):
+    """Agent 数据访问策略表（Phase 6.1）。
+
+    一行 = 一个（Agent × 数据对象 × 数据层）的访问权限。
+    data_object（如 SUPPLIER / PURCHASE_ORDER / MATERIAL）；data_layer
+    可空（None = 跨层通用策略）。
+
+    唯一约束：同一 Agent 对同一 (data_object, data_layer) 至多一条策略。
+    与 AgentDefinition 一对多；删除 Agent 时级联清理（FK ondelete CASCADE）。
+    """
+
+    __tablename__ = "agent_access_policy"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    agent_id: Mapped[int] = mapped_column(
+        BigIntFk,
+        ForeignKey("agent_definition.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    data_object: Mapped[str] = mapped_column(String(128), nullable=False)
+    permission: Mapped[AgentPermission] = mapped_column(
+        String(30), nullable=False, default=AgentPermission.READ
+    )
+    data_layer: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    agent: Mapped[AgentDefinition] = relationship(back_populates="policies")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id", "data_object", "data_layer",
+            name="uq_agent_policy_object_layer",
+        ),
+        Index("ix_agent_policy_agent", "agent_id"),
+        Index("ix_agent_policy_object", "data_object", "data_layer"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AgentAccessPolicy id={self.id} agent_id={self.agent_id} "
+            f"object={self.data_object} layer={self.data_layer} "
+            f"permission={self.permission}>"
         )

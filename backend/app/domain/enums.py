@@ -297,3 +297,51 @@ class RiskLevel(str, Enum):
     MEDIUM = "medium"
     LOW = "low"
     UNKNOWN = "unknown"
+
+
+class AgentTriggerType(str, Enum):
+    """Agent 触发类型（Phase 6.1 Agent Registry）。
+
+    - USER_QUESTION：用户聊天提问触发（最常见）
+    - SCHEDULED：定时调度触发（Phase 7+ 调度器引入后使用）
+    - EVENT：事件触发（如新订单创建 → 触发风险评估）
+    """
+
+    USER_QUESTION = "user_question"
+    SCHEDULED = "scheduled"
+    EVENT = "event"
+
+
+class AgentResponseLatency(str, Enum):
+    """Agent 响应延迟分类（Phase 6.1）。"""
+
+    REALTIME = "realtime"
+    BATCH = "batch"
+
+
+class AgentStatus(str, Enum):
+    """Agent 治理状态（Phase 6.1）。
+
+    - ACTIVE：已启用，可被运行时调度
+    - DRAFT：草稿中，未对运行时开放
+    - DEPRECATED：已停用，保留供历史溯源
+    """
+
+    ACTIVE = "active"
+    DRAFT = "draft"
+    DEPRECATED = "deprecated"
+
+
+class AgentPermission(str, Enum):
+    """Agent 对数据对象的访问权限（Phase 6.1）。
+
+    - READ：可读全部字段
+    - MASKED_READ：可读但敏感字段需脱敏（PII / 商业机密）
+    - FORBIDDEN：禁止任何访问
+    - FORBIDDEN_WRITE：禁止写入（含审计日志的「仅写不可读」特殊场景）
+    """
+
+    READ = "read"
+    MASKED_READ = "masked_read"
+    FORBIDDEN = "forbidden"
+    FORBIDDEN_WRITE = "forbidden_write"

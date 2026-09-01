@@ -9,14 +9,14 @@
 
 ## 总体策略
 
-| 缺口 | Change 名 | 优先级 | 范围 | 预估改动文件数 |
-|---|---|---|---|---|
-| G1 Neo4j 同步阻塞 | `fix-neo4j-async-traverse` | P1 | 后端 service | 3 |
-| G2 Token 审计拆分 | `feat-token-usage-split` | P1 | 后端 DTO + service | 5 |
-| G3 图遍历 > 2-hop | `feat-graph-traversal-chat-hops` | P2 | 后端 intent + service | 4 |
-| G4 Chat 语义路由 | `feat-agent-semantic-routing` | P2 | 后端 intent + 前端 chat | 6 |
-| G5 批量调度 | `feat-agent-scheduler` | P2 | 后端 model + API + scheduler | 8 |
-| G6 data_layers 防漂移 | `feat-agent-tool-layer-contract` | P1 | 后端 registry + 测试 | 3 |
+| 缺口 | Change 名 | 优先级 | 范围 | 预估改动文件数 | 状态 |
+|---|---|---|---|---|---|
+| G1 Neo4j 同步阻塞 | `fix-neo4j-async-traverse` | P1 | 后端 service | 3 | ✅ 已交付 |
+| G2 Token 审计拆分 | `feat-token-usage-split` | P1 | 后端 DTO + service | 5 | ✅ 已交付 |
+| G3 图遍历 > 2-hop | `feat-graph-traversal-chat-hops` | P2 | 后端 intent + service | 4 | 待实现 |
+| G4 Chat 语义路由 | `feat-agent-semantic-routing` | P2 | 后端 intent + 前端 chat | 6 | 待实现 |
+| G5 批量调度 | `feat-agent-scheduler` | P2 | 后端 model + API + scheduler | 8 | 待实现 |
+| G6 data_layers 防漂移 | `feat-agent-tool-layer-contract` | P1 | 后端 registry + 测试 | 3 | ✅ 已交付 |
 
 交付顺序：**G1 → G2 → G6 → G3 → G4 → G5**（先补基础设施与数据契约，再做智能化与调度）。
 

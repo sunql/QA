@@ -87,7 +87,32 @@ class AgentToolRegistry:
     def register(self, tool: AgentTool) -> None:
         if tool.name in self._tools:
             raise ValueError(f"tool already registered: {tool.name}")
+        self._validate(tool)
         self._tools[tool.name] = tool
+
+    @staticmethod
+    def _validate(tool: AgentTool) -> None:
+        """注册期防漂移校验（Phase 7 G6）：data_object / data_layers 全大写。
+
+        运行时 `_enforcePolicies` 用它们与 `AgentAccessPolicy.data_layer` 做精确
+        比较（策略侧已 `_normalizeDataLayer` 归一化大写），工具侧若大小写不一致，
+        授权会静默 fail-closed（403）或漏判 —— 这里在注册时尽早报错，阻止坏注册。
+        层无关工具允许 `data_layers=()`（回退对象粒度，旧行为兼容）。
+        """
+        if not tool.data_object or tool.data_object != tool.data_object.strip().upper():
+            raise ValueError(
+                f"tool {tool.name}: data_object 必须非空全大写，got {tool.data_object!r}"
+            )
+        for layer in tool.data_layers:
+            if not layer or layer != layer.strip().upper():
+                raise ValueError(
+                    f"tool {tool.name}: data_layers 元素必须非空全大写，got {layer!r}"
+                )
+
+    def validate(self) -> None:
+        """全量自检（构建完成后兜底；register 已逐条校验）。"""
+        for tool in self._tools.values():
+            self._validate(tool)
 
     def get(self, name: str) -> AgentTool | None:
         return self._tools.get(name)
@@ -222,6 +247,7 @@ def _buildRegistry() -> AgentToolRegistry:
             handler=_graphTraverseHandler,
         )
     )
+    registry.validate()  # 构建完成自检：内置工具数据层声明必须合规（G6）
     return registry
 
 

@@ -380,3 +380,16 @@ MSG_SCHEMA_GRAPH_TRAVERSAL = (
 )
 MSG_GRAPH_TRAVERSAL_NOT_FOUND = "业务图中不存在该实体：{label} {key}"
 MSG_GRAPH_TRAVERSAL_EMPTY = "该实体在 {maxHops} 跳内无关联业务实体"
+
+# ===== Phase 6.5：供应商名称解析（SupplierNameResolver） =====
+MSG_SUPPLIER_NAME_NOT_FOUND = (
+    "未在主数据中找到名为 '{name}' 的供应商。"
+    "请用 enterprise_code（如 10105）重试，或检查名称拼写"
+)
+MSG_SUPPLIER_NAME_AMBIGUOUS = (
+    "供应商名 '{name}' 匹配 {n} 条候选，请用 enterprise_code 精确指定：{candidates}"
+)
+MSG_SUPPLIER_NAME_AMBIGUOUS_OVER_LIMIT = (
+    "供应商名 '{name}' 命中候选数过多（≥ {limit} 条），"
+    "请用更具体的关键词缩小范围，或直接用 enterprise_code 精确指定"
+)

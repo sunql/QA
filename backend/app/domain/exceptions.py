@@ -30,7 +30,21 @@ class ConflictError(DomainError):
 
 
 class ValidationError(DomainError):
-    """输入校验失败（领域规则层面）。"""
+    """输入校验失败（领域规则层面）。
+
+    Phase 6.5 扩展：details 携带结构化数据（如供应商名歧义候选列表），
+    由全局 handler 透传到 422 响应体。与 detail（str，折叠展示用）互不影响。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        detail: str | None = None,
+        details: dict | None = None,
+    ) -> None:
+        super().__init__(message, detail=detail)
+        self.details = details
 
 
 class LlmClientError(DomainError):

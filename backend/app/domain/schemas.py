@@ -1448,6 +1448,8 @@ class ErrorResponse(CamelModel):
     success: bool = False
     error: str
     detail: str | None = None
+    # Phase 6.5：结构化错误数据（如供应商名歧义候选列表）；仅部分 ValidationError 携带
+    details: dict | None = None
 
 
 # ===== 聊天会话历史（右侧历史面板）=====

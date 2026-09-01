@@ -274,7 +274,11 @@ def registerExceptionHandlers(app: FastAPI) -> None:
         logger.warning("领域异常 %s: %s (path=%s)", type(exc).__name__, exc.message, request.url.path)
         return JSONResponse(
             status_code=status,
-            content=ErrorResponse(error=exc.message, detail=exc.detail).model_dump(by_alias=True),
+            content=ErrorResponse(
+                error=exc.message,
+                detail=exc.detail,
+                details=getattr(exc, "details", None),
+            ).model_dump(by_alias=True),
         )
 
 

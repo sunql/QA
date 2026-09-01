@@ -128,6 +128,8 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_SUPPLIER_RISK,
     MSG_SCHEMA_GRAPH_HOP,
     MSG_SCHEMA_GRAPH_TRAVERSAL,
+    MSG_SCHEMA_SCHEDULE_CRON,
+    MSG_SCHEMA_SCHEDULE_INPUT,
     MSG_SCHEMA_DQ_COMPUTE_EVALUATED_RULES,
     MSG_SCHEMA_DQ_COMPUTE_SAVED_SCORES,
     MSG_SCHEMA_DQ_COMPUTE_DURATION_MS,
@@ -2050,3 +2052,48 @@ class AgentRunRead(CamelModel):
     cost: float = 0.0
     llm_model_name: str | None = None
     executed_at: datetime
+
+
+class AgentScheduleCreate(CamelModel):
+    """创建 Agent 定时调度（POST /agents/{code}/schedules，Phase 7 G5）。"""
+
+    cron_expression: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description=MSG_SCHEMA_SCHEDULE_CRON,
+    )
+    params: dict = Field(
+        default_factory=dict,
+        description=MSG_SCHEMA_SCHEDULE_INPUT,
+    )
+
+
+class AgentScheduleRead(CamelModel):
+    """Agent 定时调度（Phase 7 G5）。"""
+
+    id: int
+    agent_code: str
+    cron_expression: str
+    params: dict
+    is_active: bool
+    last_run_at: datetime | None = None
+    next_run_at: datetime | None = None
+    created_time: datetime
+    updated_time: datetime
+
+
+class AgentRunLogRead(CamelModel):
+    """Agent 定时调度执行记录（Phase 7 G5）。"""
+
+    id: int
+    schedule_id: int | None = None
+    agent_code: str
+    status: str
+    answer: str | None = None
+    error: str | None = None
+    tokens_used: int = 0
+    cost: float = 0.0
+    actor: str
+    started_at: datetime
+    finished_at: datetime

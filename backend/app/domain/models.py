@@ -28,8 +28,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    text,
+    text as sa_text,
 )
+import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -553,12 +554,12 @@ class AuditOutbox(Base):
         Index(
             "ix_audit_outbox_pending",
             "created_at",
-            postgresql_where=text("processed_at IS NULL"),
+            postgresql_where=sa_text("processed_at IS NULL"),
         ),
         Index(
             "ix_audit_outbox_processed",
             "processed_at",
-            postgresql_where=text("processed_at IS NOT NULL"),
+            postgresql_where=sa_text("processed_at IS NOT NULL"),
         ),
     )
 
@@ -1078,7 +1079,7 @@ class AuditLog(Base):
             "ix_audit_log_outbox",
             "outbox_id",
             unique=True,
-            postgresql_where=text("outbox_id IS NOT NULL"),
+            postgresql_where=sa_text("outbox_id IS NOT NULL"),
         ),
     )
 
@@ -1297,4 +1298,95 @@ class AgentAccessPolicy(Base):
             f"<AgentAccessPolicy id={self.id} agent_id={self.agent_id} "
             f"object={self.data_object} layer={self.data_layer} "
             f"permission={self.permission}>"
+        )
+
+
+class AgentSchedule(Base, TimestampMixin):
+    """Agent 定时调度（Phase 7 G5 feat-agent-scheduler）。
+
+    一行 = 一个 cron 调度：到点由独立 worker 进程（app.workers.agent_scheduler_worker）
+    触发 AgentRuntimeService.run。PG 表即事实源（next_run_at 落库，worker 轮询到期行）。
+
+    cron_expression：5 位（分 时 日 月 周）或 6 位（含秒）标准 cron。
+    params：JSONB，params.input 为传给 Agent 的自然语言输入。
+    next_run_at：worker claim 时条件 UPDATE 前移（防并发双跑）；到点即 last_run_at 置当前。
+
+    与 AgentDefinition 一对多；删除 Agent 时级联清理（FK ondelete CASCADE）。
+    """
+
+    __tablename__ = "agent_schedule"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    agent_id: Mapped[int] = mapped_column(
+        BigIntFk,
+        ForeignKey("agent_definition.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    cron_expression: Mapped[str] = mapped_column(String(64), nullable=False)
+    params: Mapped[dict] = mapped_column(
+        postgresql.JSONB, nullable=False, default=dict
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=sa.text("true")
+    )
+    last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (Index("ix_agent_schedule_next_run", "is_active", "next_run_at"),)
+
+    def __repr__(self) -> str:
+        return (
+            f"<AgentSchedule id={self.id} agent_id={self.agent_id} "
+            f"cron={self.cron_expression} active={self.is_active}>"
+        )
+
+
+class AgentRunLog(Base):
+    """Agent 定时调度执行记录（Phase 7 G5）。
+
+    每次 schedule 触发写一行：结果（answer/error）+ Token 计量（tokens_used/cost）
+    + 归属（actor=scheduler:{schedule_id}）。满足「运行结果与 token 消耗写入 DB」。
+
+    不复用 TimestampMixin：语义是「事件发生时间」更直白（started_at/finished_at），
+    与 SessionTokenUsage 的 created_time 风格一致。删除 schedule 保留历史
+    （FK ondelete SET NULL → schedule_id 可空）。
+    """
+
+    __tablename__ = "agent_run_log"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    schedule_id: Mapped[int | None] = mapped_column(
+        BigIntFk,
+        ForeignKey("agent_schedule.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    agent_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)  # success / error
+    answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost: Mapped[Decimal] = mapped_column(
+        Numeric(14, 6), nullable=False, default=Decimal("0")
+    )
+    actor: Mapped[str] = mapped_column(String(128), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    finished_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_agent_run_log_schedule", "schedule_id"),
+        Index("ix_agent_run_log_agent", "agent_code", "started_at"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AgentRunLog id={self.id} schedule={self.schedule_id} "
+            f"agent={self.agent_code} status={self.status}>"
         )

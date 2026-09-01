@@ -349,6 +349,17 @@ MSG_SCHEMA_CHAT_AGENT_RUN = (
     "Agent 运行时执行结果（仅 intent=agent_run 时填充）；"
     "由 AgentRuntimeService 调度 Tool 生成。前端 MessageItem 按字段存在性路由到 AgentResponseCard"
 )
+MSG_SCHEDULE_INVALID_CRON = (
+    "无效的 cron 表达式：{expression}（支持 5 位或 6 位（含秒）标准 cron，"
+    "如「0 9 * * *」每日 09:00）"
+)
+MSG_SCHEDULE_NOT_FOUND = "定时调度不存在：schedule_id={schedule_id}"
+MSG_SCHEMA_SCHEDULE_CRON = (
+    "cron 表达式（5 位：分 时 日 月 周；或 6 位：秒 分 时 日 月 周）"
+)
+MSG_SCHEMA_SCHEDULE_INPUT = (
+    "调度执行参数：params.input 为传给 Agent 的自然语言输入（如「评估供应商 100001 风险」）"
+)
 
 # =============================================================================
 # Phase 6.3 feat-graph-traversal-api：知识图谱多跳推理

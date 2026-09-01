@@ -17,7 +17,7 @@ ACL：读 - 所有登录用户；写 - admin 或 owner 部门成员（Phase 4.5 
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
@@ -34,6 +34,13 @@ from app.services.agent_registry_service import (
     AgentRegistryService,
     _policyToRead,
     agentToRead,
+)
+from app.infrastructure.rate_limit import limiter, rateLimitValue
+from app.services.agent_scheduler_service import AgentSchedulerService
+from app.domain.schemas import (
+    AgentScheduleCreate,
+    AgentScheduleRead,
+    AgentRunLogRead,
 )
 
 router = APIRouter()
@@ -173,3 +180,93 @@ async def deleteAgentPolicy(
     service: AgentRegistryService = Depends(getAgentRegistryService),
 ) -> None:
     await service.deletePolicy(session, agent_code, policy_id, user)
+
+
+# ---------------------------------------------------------------------------
+# Agent 定时调度（嵌套在 agent 下，Phase 7 G5）
+# ---------------------------------------------------------------------------
+
+
+def getAgentSchedulerService() -> AgentSchedulerService:
+    return AgentSchedulerService()
+
+
+@router.post(
+    "/{agent_code}/schedules",
+    response_model=AgentScheduleRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="创建 Agent 调度（cron 表达式 + 自然语言输入）",
+)
+@limiter.limit(rateLimitValue)
+async def createSchedule(
+    request: Request,
+    agent_code: str,
+    payload: AgentScheduleCreate,
+    user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: AgentSchedulerService = Depends(getAgentSchedulerService),
+) -> AgentScheduleRead:
+    return await service.createSchedule(session, agent_code, payload, user)
+
+
+@router.get(
+    "/{agent_code}/schedules",
+    response_model=list[AgentScheduleRead],
+    summary="列出指定 Agent 的全部调度",
+)
+async def listSchedules(
+    agent_code: str,
+    user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: AgentSchedulerService = Depends(getAgentSchedulerService),
+) -> list[AgentScheduleRead]:
+    return await service.listSchedules(session, agent_code, user)
+
+
+@router.patch(
+    "/{agent_code}/schedules/{schedule_id}/toggle",
+    response_model=AgentScheduleRead,
+    summary="启停调度（is_active 翻转）",
+)
+@limiter.limit(rateLimitValue)
+async def toggleSchedule(
+    request: Request,
+    agent_code: str,
+    schedule_id: int,
+    user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: AgentSchedulerService = Depends(getAgentSchedulerService),
+) -> AgentScheduleRead:
+    return await service.toggleSchedule(session, agent_code, schedule_id, user)
+
+
+@router.get(
+    "/{agent_code}/schedules/logs",
+    response_model=list[AgentRunLogRead],
+    summary="调度运行历史（前端 schedule 面板数据源）",
+)
+async def listRunLogs(
+    agent_code: str,
+    user: CurrentUser = Depends(getCurrentUser),
+    schedule_id: int | None = Query(default=None),
+    session: AsyncSession = Depends(getDb),
+    service: AgentSchedulerService = Depends(getAgentSchedulerService),
+) -> list[AgentRunLogRead]:
+    return await service.listRunLogs(session, agent_code, user, schedule_id=schedule_id)
+
+
+@router.delete(
+    "/{agent_code}/schedules/{schedule_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="删除调度（运行日志保留）",
+)
+@limiter.limit(rateLimitValue)
+async def deleteSchedule(
+    request: Request,
+    agent_code: str,
+    schedule_id: int,
+    user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: AgentSchedulerService = Depends(getAgentSchedulerService),
+) -> None:
+    await service.deleteSchedule(session, agent_code, schedule_id, user)

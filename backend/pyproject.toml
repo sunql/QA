@@ -28,6 +28,7 @@ dependencies = [
     "tenacity>=8.5.0",
     "oracledb>=4.0.0",
     "slowapi>=0.1.9",
+    "croniter>=6.2.4",
 ]
 
 [project.optional-dependencies]

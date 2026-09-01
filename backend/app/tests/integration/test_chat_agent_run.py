@@ -486,6 +486,8 @@ async def test_chat_agent_run_stream_routes_agent_run_and_audits_tokens(
     )).scalars().all()
     assert len(rows) == 1
     assert rows[0].purpose == "agent_run"
+    assert rows[0].prompt_tokens == 1
+    assert rows[0].completion_tokens == 1
     assert rows[0].total_tokens == 2  # _NoopLlm prompt=1 + completion=1
     assert rows[0].model_name == "test-model"
 

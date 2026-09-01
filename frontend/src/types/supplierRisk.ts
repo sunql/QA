@@ -31,6 +31,8 @@ export interface SupplierRiskRead {
   riskPointsSource: string;
   recommendedActions: string[];
   tokensUsed: number;
+  promptTokens: number;
+  completionTokens: number;
   cost: number;
   llmModelName: string | null;
   fetchedAt: string;

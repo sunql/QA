@@ -33,8 +33,20 @@ const RICH_TOOLS = new Set(["supplier_360", "supplier_risk", "graph_traverse"]);
  */
 export default function AgentResponseCard({ data }: AgentResponseCardProps) {
   const { t } = useTranslation();
-  const { agentCode, agentName, agentOwner, tool, result, answer, tokensUsed, cost, llmModelName, executedAt } =
-    data;
+  const {
+    agentCode,
+    agentName,
+    agentOwner,
+    tool,
+    result,
+    answer,
+    tokensUsed,
+    promptTokens,
+    completionTokens,
+    cost,
+    llmModelName,
+    executedAt,
+  } = data;
 
   let richBody: ReactNode = null;
   if (tool === "supplier_360") {
@@ -102,7 +114,9 @@ export default function AgentResponseCard({ data }: AgentResponseCardProps) {
       ) : null}
 
       <Space size={4} wrap style={{ marginTop: 8 }}>
-        <Tag>Tokens: {tokensUsed}</Tag>
+        <Tag>
+          Tokens: {tokensUsed} (P {promptTokens} / C {completionTokens})
+        </Tag>
         <Tag>{t("agentRuntime.cost", { amount: cost.toFixed(6) })}</Tag>
         {llmModelName ? <Tag color="blue">{llmModelName}</Tag> : null}
       </Space>

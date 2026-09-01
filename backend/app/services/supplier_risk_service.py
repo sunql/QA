@@ -109,9 +109,10 @@ class SupplierRiskService:
         contributions = [_toContribution(kpi) for kpi in view.kpis]
         level, level_source = self._decideLevel(contributions)
         actions = _buildActions(level)
-        risk_points, points_source, tokens, cost, model_name = await self._generateRiskPoints(
+        risk_points, points_source, prompt_tokens, completion_tokens, cost, model_name = await self._generateRiskPoints(
             view, contributions, level, llm_factory=llm_factory
         )
+        tokens = prompt_tokens + completion_tokens
         return SupplierRiskRead(
             profile=view.profile,
             level=level,
@@ -121,6 +122,8 @@ class SupplierRiskService:
             risk_points_source=points_source,
             recommended_actions=actions,
             tokens_used=tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             cost=cost,
             llm_model_name=model_name,
         )
@@ -190,15 +193,16 @@ class SupplierRiskService:
         level: RiskLevel,
         *,
         llm_factory: LlmFactory | None,
-    ) -> tuple[str | None, str, int, float, str | None]:
+    ) -> tuple[str | None, str, int, int, float, str | None]:
         """调 LLM 生成自然语言风险点；LLM 不可用时降级到模板。
 
-        返回：(risk_points, source, tokens_used, cost, model_name)
+        返回：(risk_points, source, prompt_tokens, completion_tokens, cost, model_name)
         """
         if llm_factory is None:
             return (
                 _buildFallbackRiskPoints(contributions),
                 "fallback_template",
+                0,
                 0,
                 0.0,
                 None,
@@ -217,6 +221,7 @@ class SupplierRiskService:
             return (
                 _buildFallbackRiskPoints(contributions),
                 "fallback_template",
+                0,
                 0,
                 0.0,
                 None,
@@ -237,7 +242,8 @@ class SupplierRiskService:
         return (
             content,
             "llm",
-            prompt_tokens + completion_tokens,
+            prompt_tokens,
+            completion_tokens,
             cost,
             model_name,
         )

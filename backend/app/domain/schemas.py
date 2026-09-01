@@ -775,6 +775,8 @@ class SupplierRiskRead(CamelModel):
     risk_points_source: str = Field(default="llm", description="llm / fallback_template")
     recommended_actions: list[str] = Field(default_factory=list)
     tokens_used: int = Field(default=0, ge=0, description="LLM 调用 token 数；fallback=0")
+    prompt_tokens: int = Field(default=0, ge=0, description="LLM 调用 prompt token 数；fallback=0")
+    completion_tokens: int = Field(default=0, ge=0, description="LLM 调用 completion token 数；fallback=0")
     cost: float = Field(default=0.0, ge=0.0, description="LLM 调用成本（CNY）；fallback=0")
     llm_model_name: str | None = None
     fetched_at: datetime = Field(
@@ -2024,6 +2026,8 @@ class AgentRunRead(CamelModel):
     result: dict
     answer: str
     tokens_used: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     cost: float = 0.0
     llm_model_name: str | None = None
     executed_at: datetime

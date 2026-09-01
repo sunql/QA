@@ -1262,7 +1262,10 @@ class ChatService(ChatStreamOutputMixin):
         # 审查 MEDIUM#2 同型缺口：风险点 LLM 调用此前只计量不落库，这里补写审计
         await self._recordDirectUsage(
             session, dto.sessionId,
-            tokens_used=data.tokens_used, cost=data.cost, model_name=data.llm_model_name,
+            tokens_used=data.tokens_used,
+            prompt_tokens=data.prompt_tokens,
+            completion_tokens=data.completion_tokens,
+            cost=data.cost, model_name=data.llm_model_name,
             purpose="supplier_risk",
         )
         # answer 拼装复用 buildRiskAnswer（与 Agent Tool 共用同一文案，DRY）
@@ -1344,7 +1347,10 @@ class ChatService(ChatStreamOutputMixin):
         # token_usage 审计（modelConfigId=None：工具路径未透传配置，落已知 modelName + cost）
         await self._recordDirectUsage(
             session, dto.sessionId,
-            tokens_used=run.tokens_used, cost=run.cost, model_name=run.llm_model_name,
+            tokens_used=run.tokens_used,
+            prompt_tokens=run.prompt_tokens,
+            completion_tokens=run.completion_tokens,
+            cost=run.cost, model_name=run.llm_model_name,
             purpose="agent_run",
         )
         await self._storeSessionMessages(
@@ -2644,6 +2650,8 @@ class ChatService(ChatStreamOutputMixin):
         sessionId: str,
         *,
         tokens_used: int,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
         cost: float,
         model_name: str | None,
         purpose: str,
@@ -2653,16 +2661,25 @@ class ChatService(ChatStreamOutputMixin):
         与 _recordUsage 的区别：ModelConfig 未透传到工具内部，无法用配置推算成本，
         直接落工具已计算的 total tokens + cost（modelConfigId=None）。tokens<=0
         （模板降级、无 LLM 调用）时跳过。审查 MEDIUM#2 修复。
+
+        Phase 7 G2：拆分来源显式传 prompt/completion；未拆分来源（None）回退
+        「全量计 prompt」，绝不让拆分量静默丢 0。
         """
         if tokens_used <= 0:
             return
+        effective_prompt = (
+            tokens_used if prompt_tokens is None else prompt_tokens
+        )
+        effective_completion = (
+            0 if completion_tokens is None else completion_tokens
+        )
         await self._tokenUsage.recordUsage(
             session,
             sessionId=sessionId,
             modelConfigId=None,
             modelName=model_name,
-            promptTokens=tokens_used,
-            completionTokens=0,
+            promptTokens=effective_prompt,
+            completionTokens=effective_completion,
             cost=Decimal(str(cost)),
             purpose=purpose,
         )

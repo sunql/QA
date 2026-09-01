@@ -181,8 +181,8 @@ ACL 四项复查（DTO mass-assignment / 403 侧信道 / actor 派生 / 非 admi
 > - 层无关工具（`data_layers=()`）回退对象粒度，对象上任一 FORBIDDEN 仍优先否决。
 > 测试：分层单测 9 + 归一化 4 + 集成 2（含分层不匹配 403 + 通配 READ 被 FORBIDDEN 否决）。
 
-- **Neo4j 同步阻塞**（LOW#4）：`graph_traverse` 同步调用阻塞事件循环；与既有 graph 服务模式一致，MVP 接受。
-- **Token 审计仅存合计**：Agent 工具 DTO 只带 `total_tokens`，prompt/completion 拆分丢失（`_recordDirectUsage` 用合计）；后续扩 DTO 拆分。
+- **Neo4j 同步阻塞**（LOW#4）：~~已修复（commit `fix: neo4j graph traversal runs in thread to avoid blocking event loop`）~~：`GraphTraversalService.traverse/traverseForChat` 用 `asyncio.to_thread()` 包装同步 Neo4j 驱动调用，事件循环不再阻塞。见 `change-fix-neo4j-async-traverse.md`。
+- **Token 审计仅存合计**（LOW#5）：~~已修复（commit `feat: token usage prompt/completion split`）~~：`ToolResult` / `AgentRunRead` / `SupplierRiskRead` 扩展 `prompt_tokens` / `completion_tokens`，`_recordDirectUsage` 透传给 `SessionTokenUsage`。见 `change-feat-token-usage-split.md`。
 - **图遍历仅 2-hop**：GraphTraversal 服务当前限制 max_hops=2，深层推理（>2 跳）留 Phase 7+。
 - **Chat 未指名 Agent 的语义路由**：本期仅「显式指名」触发 agent_run；「根据问题自动选 Agent」（NL2SQL → 多 Agent 编排）为 `PROCUREMENT_COPILOT` 后续工作。
 - **无批量调度**：Agent 仅支持单次触发（REST/Chat）；定时调度（SCHEDULED trigger）依赖外部调度器，符合计划「暂不做调度」决策。

@@ -30,6 +30,8 @@ const supplierRiskResult = {
   riskPointsSource: "fallback_template",
   recommendedActions: ["加大质量抽检频次", "关注交付稳定性"],
   tokensUsed: 0,
+  promptTokens: 0,
+  completionTokens: 0,
   cost: 0,
   llmModelName: null,
   fetchedAt: "2026-08-31T00:00:00Z",
@@ -44,6 +46,8 @@ function makeRun(overrides: Partial<AgentRunRead> = {}): AgentRunRead {
     result: supplierRiskResult,
     answer: "供应商 **SUP000001** 风险等级：high。",
     tokensUsed: 0,
+    promptTokens: 0,
+    completionTokens: 0,
     cost: 0,
     llmModelName: null,
     executedAt: "2026-08-31T00:00:00Z",
@@ -106,7 +110,7 @@ describe("AgentResponseCard", () => {
         />
       </ConfigProvider>
     );
-    expect(screen.getByText("Tokens: 12")).toBeInTheDocument();
+    expect(screen.getByText("Tokens: 12 (P 0 / C 0)")).toBeInTheDocument();
     expect(screen.getByText("成本: $0.000123")).toBeInTheDocument();
     expect(screen.getByText("deepseek-chat")).toBeInTheDocument();
   });

@@ -49,6 +49,8 @@ export default function SupplierRiskCard({ data }: SupplierRiskCardProps) {
     riskPointsSource,
     recommendedActions,
     tokensUsed,
+    promptTokens,
+    completionTokens,
     cost,
     llmModelName,
     fetchedAt,
@@ -182,7 +184,9 @@ export default function SupplierRiskCard({ data }: SupplierRiskCardProps) {
       />
 
       <Space size={4} wrap style={{ marginTop: 8 }}>
-        <Tag>Tokens: {tokensUsed}</Tag>
+        <Tag>
+          Tokens: {tokensUsed} (P {promptTokens} / C {completionTokens})
+        </Tag>
         <Tag>{t("supplierRisk.cost", { amount: cost.toFixed(6) })}</Tag>
         {llmModelName ? <Tag color="blue">{llmModelName}</Tag> : null}
       </Space>

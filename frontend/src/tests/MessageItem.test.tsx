@@ -236,6 +236,8 @@ describe("MessageItem 消息渲染", () => {
         },
         answer: "供应商 **SUP000001** 风险等级：high。",
         tokensUsed: 0,
+        promptTokens: 0,
+        completionTokens: 0,
         cost: 0,
         llmModelName: null,
         executedAt: "2026-08-31T00:00:00Z",

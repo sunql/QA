@@ -168,6 +168,15 @@ class TestChatApi:
         rows = list(result.scalars().all())
         assert len(rows) == 3
         assert sorted(r.purpose for r in rows) == ["answer", "chart", "nl2sql"]
+        by_purpose = {r.purpose: r for r in rows}
+        # ReAct 计划 + SQL 生成两次调用合并到 nl2sql 用途
+        assert by_purpose["nl2sql"].prompt_tokens == 20
+        assert by_purpose["nl2sql"].completion_tokens == 10
+        assert by_purpose["nl2sql"].total_tokens == 30
+        for purpose in ("answer", "chart"):
+            assert by_purpose[purpose].prompt_tokens == 10
+            assert by_purpose[purpose].completion_tokens == 5
+            assert by_purpose[purpose].total_tokens == 15
 
     async def test_query_persists_session_messages(self, client, dbSession, monkeypatch) -> None:
         config, ds = await _seed(dbSession)

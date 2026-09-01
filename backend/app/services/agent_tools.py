@@ -55,6 +55,8 @@ class ToolResult:
     data: dict
     answer: str
     tokens_used: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     cost: float = 0.0
     llm_model_name: str | None = None
 
@@ -141,6 +143,8 @@ async def _supplierRiskHandler(
         data=read.model_dump(mode="json", by_alias=True),
         answer=buildRiskAnswer(read, key),
         tokens_used=read.tokens_used,
+        prompt_tokens=read.prompt_tokens,
+        completion_tokens=read.completion_tokens,
         cost=read.cost,
         llm_model_name=read.llm_model_name,
     )

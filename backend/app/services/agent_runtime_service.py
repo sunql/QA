@@ -120,6 +120,8 @@ class AgentRuntimeService:
             result=result.data,
             answer=result.answer,
             tokens_used=result.tokens_used,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
             cost=result.cost,
             llm_model_name=result.llm_model_name,
             executed_at=datetime.now(timezone.utc),

@@ -14,6 +14,8 @@ export interface AgentRunRead {
   result: Record<string, unknown>;
   answer: string;
   tokensUsed: number;
+  promptTokens: number;
+  completionTokens: number;
   cost: number;
   llmModelName: string | null;
   executedAt: string;

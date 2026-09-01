@@ -146,7 +146,10 @@ def _supplierKeyArgs(raw: str, specialized: Callable[[str], str | None]) -> dict
 async def _supplier360Handler(
     session: AsyncSession, args: dict, ctx: AgentToolContext
 ) -> ToolResult:
-    key = int(args["key"])
+    # Phase 6.x：透传字符串 supplier_code（THBI '10105' 或合成 'SUP000001'），
+    # service 内 _resolveSupplier 同时支持 enterprise_code/enterprise_key 双路查询。
+    # 不再做 int() 强制转换（THBI 业务码 '10105' int() 后变 10105，无法命中 hash）。
+    key = args["key"]
     view = await Supplier360Service().get360(session, key)
     return ToolResult(
         data=view.model_dump(mode="json", by_alias=True),
@@ -160,7 +163,8 @@ async def _supplier360Handler(
 async def _supplierRiskHandler(
     session: AsyncSession, args: dict, ctx: AgentToolContext
 ) -> ToolResult:
-    key = int(args["key"])
+    # Phase 6.x：透传字符串 supplier_code（详见 _supplier360Handler 注释）。
+    key = args["key"]
     read = await SupplierRiskService().assess(
         session, key, llm_factory=ctx.llm_factory
     )
@@ -199,7 +203,13 @@ def _buildRegistry() -> AgentToolRegistry:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "key": {"type": "string", "description": "供应商企业编码"}
+                    "key": {
+                        "type": "string",
+                        "description": (
+                            "供应商企业编码（THBI '10105' 或合成 SUP000001）或"
+                            " BIGINT enterprise_key 代理键（service 自动双路解析）"
+                        ),
+                    }
                 },
                 "required": ["key"],
             },
@@ -219,7 +229,13 @@ def _buildRegistry() -> AgentToolRegistry:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "key": {"type": "string", "description": "供应商企业编码"}
+                    "key": {
+                        "type": "string",
+                        "description": (
+                            "供应商企业编码（THBI '10105' 或合成 SUP000001）或"
+                            " BIGINT enterprise_key 代理键（service 自动双路解析）"
+                        ),
+                    }
                 },
                 "required": ["key"],
             },
@@ -239,7 +255,13 @@ def _buildRegistry() -> AgentToolRegistry:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "key": {"type": "string", "description": "供应商企业编码"}
+                    "key": {
+                        "type": "string",
+                        "description": (
+                            "供应商企业编码或 BIGINT enterprise_key 代理键"
+                            "（service 自动双路解析）"
+                        ),
+                    }
                 },
                 "required": ["key"],
             },
@@ -253,3 +275,16 @@ def _buildRegistry() -> AgentToolRegistry:
 
 # 模块级单例：运行时与测试共享；测试可注入自定义 registry 覆盖内置工具。
 agent_tool_registry = _buildRegistry()
+
+
+# Agent → tool 绑定表（Phase 6.4 SSOT）。
+# 运行时 _enforcePolicies、agent_registry_service.agentToRead（计算 runnable 派生字段）
+# 都依赖此表 → 单一来源放在工具模块，避免与 agent_runtime_service 形成循环 import。
+# 顺序在工具路由内有意义（agent 通常只跑第一个工具）。
+AGENT_TOOLS: dict[str, tuple[str, ...]] = {
+    "SUPPLIER_360_AGENT": ("supplier_360",),
+    "SUPPLIER_RISK_AGENT": ("supplier_risk",),
+    "GRAPH_REASONING_AGENT": ("graph_traverse",),
+    # SUPPLIER_OTD_REPORT / PROCUREMENT_COPILOT 仅注册元数据，未绑定工具 →
+    # 不在此表中 → runnable 派生为 False，前端 Runtime 页自动过滤，避免 409。
+}

@@ -1220,6 +1220,10 @@ class ChatService(ChatStreamOutputMixin):
         「不存在 vs 无权限」侧信道）。
         成功 → answer=中文简短摘要 + supplier360=<完整对象>，前端 MessageItem
         按字段存在性路由到 Supplier360Card 渲染。
+
+        Phase 6.x：result.supplierKey 直接透传 str（THBI '10105' 或 '100001'），
+        service.get360 内部 _resolveSupplier 双路解析（先 enterprise_code 后
+        enterprise_key），不再做 int() 强制转换。
         """
         if not result.supplierKey:
             return ChatResponse(
@@ -1227,21 +1231,14 @@ class ChatService(ChatStreamOutputMixin):
                 intent=result.intent.value,
             )
         try:
-            supplierKey = int(result.supplierKey)
-        except ValueError:
-            return ChatResponse(
-                answer=MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING,
-                intent=result.intent.value,
-            )
-        try:
-            data = await Supplier360Service().get360(session, supplierKey)
+            data = await Supplier360Service().get360(session, result.supplierKey)
         except NotFoundError:
             return ChatResponse(
-                answer=MSG_SUPPLIER_360_NOT_FOUND.format(key=supplierKey),
+                answer=MSG_SUPPLIER_360_NOT_FOUND.format(key=result.supplierKey),
                 intent=result.intent.value,
             )
         answer = (
-            f"供应商 {data.profile.enterprise_code}（{supplierKey}）360° 视图："
+            f"供应商 {data.profile.enterprise_code}（{result.supplierKey}）360° 视图："
             f"已聚合 {len(data.entity_codes)} 条跨系统编码 + "
             f"{len(data.kpis)} 项 SUPPLIER 特征指标。"
         )
@@ -1263,6 +1260,8 @@ class ChatService(ChatStreamOutputMixin):
         + 友好 answer，supplier_risk=None（前端按字段存在性路由，不渲染卡片）。
         成功 → answer=等级 + 主要风险点 + 建议动作，supplier_risk=<完整对象>。
         LLM 不可用由 SupplierRiskService 内部降级到 fallback_template，chat 层无感。
+
+        Phase 6.x：result.supplierKey 直接透传 str（详见 _handleSupplier360 注释）。
         """
         if not result.supplierKey:
             return ChatResponse(
@@ -1270,19 +1269,12 @@ class ChatService(ChatStreamOutputMixin):
                 intent=result.intent.value,
             )
         try:
-            supplierKey = int(result.supplierKey)
-        except ValueError:
-            return ChatResponse(
-                answer=MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING,
-                intent=result.intent.value,
-            )
-        try:
             data = await SupplierRiskService().assess(
-                session, supplierKey, llm_factory=self._llmFactory
+                session, result.supplierKey, llm_factory=self._llmFactory
             )
         except NotFoundError:
             return ChatResponse(
-                answer=MSG_SUPPLIER_RISK_NOT_FOUND.format(key=supplierKey),
+                answer=MSG_SUPPLIER_RISK_NOT_FOUND.format(key=result.supplierKey),
                 intent=result.intent.value,
             )
         # 审查 MEDIUM#2 同型缺口：风险点 LLM 调用此前只计量不落库，这里补写审计
@@ -1295,7 +1287,7 @@ class ChatService(ChatStreamOutputMixin):
             purpose="supplier_risk",
         )
         # answer 拼装复用 buildRiskAnswer（与 Agent Tool 共用同一文案，DRY）
-        answer = buildRiskAnswer(data, supplierKey)
+        answer = buildRiskAnswer(data, result.supplierKey)
         return ChatResponse(
             answer=answer,
             intent=result.intent.value,

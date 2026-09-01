@@ -295,9 +295,9 @@ export const enUS = {
 
   agentRuntimePage: {
     title: "Agent Runtime · Direct Invocation",
-    hint: "Pick an ACTIVE Agent and enter natural language (with supplier enterprise_key) to trigger its tool directly. Or mention the Agent by name in AIChatService (e.g. 'use supplier_risk_agent to assess supplier 100001').",
+    hint: "Pick an Agent with a tool bound (only runnable=true shown) and enter natural language (with supplier enterprise_code or name) to trigger its tool directly. Or mention the Agent by name in AIChatService (e.g. 'use supplier_risk_agent to assess supplier 10105'). Metadata-only Agents (no tool bound, e.g. SUPPLIER_OTD_REPORT) are listed in Agent Registry — see description for phase scheduling.",
     selectPlaceholder: "Select Agent",
-    inputPlaceholder: "e.g. assess the risk of supplier 100001",
+    inputPlaceholder: "e.g. assess the risk of supplier 10105",
     run: "Run",
     loadFailed: "Failed to load Agent list",
     selectAgent: "Please select an Agent first",
@@ -305,7 +305,7 @@ export const enUS = {
     error404: "Agent {code} is not registered",
     error409: "Agent {code} is not runnable (status != ACTIVE or no tool bound)",
     error403: "Agent {code} lacks a read policy for its data object (deny-by-default)",
-    error422: "Could not parse execution args from input (provide a supplier enterprise_key)",
+    error422: "Could not parse execution args from input (provide a supplier enterprise_code, e.g. 'supplier 10105')",
     requestFailed: "Run failed: {message}",
   },
 

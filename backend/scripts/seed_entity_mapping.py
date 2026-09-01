@@ -1,7 +1,12 @@
 """Phase 3.2 跨系统编码映射种子脚本（幂等）。
 
-生成 45 条映射，语义对应采购域 Sheet 04 主数据 + Sheet 05 映射示例：
-- 25 供应商（SUP000001-000010）：ERP/SRM 全量 + QMS 前 5 家，match_rule=MDM_MASTER
+Phase 6.x 重要变更：
+- 供应商不再合成（SUP000001-000010 与 THBI 完全无关）。改用 sync_entity_mapping_from_thbi.py
+  从 THBI.DWD_SUPPLIER 拉取真实 supplier_code + supplier_name（写 entity_mapping.name）。
+- 物料同上：seed 只保留 RM-STEEL 系列作为 ontology 测试 fixture（无生产数据时也能让
+  feature_value 测试有 entity 可挂）；真实物料由 sync 脚本拉 THBI.DWD_MATERIAL。
+
+本 seed 现在只生成：
 - 15 物料（RM-STEEL-001..010）：ERP 全量 + SRM 前 5 个，match_rule=MDM_MASTER
 - 3 采购订单业务键（PO202608001-003）：match_rule=BUSINESS_KEY
 - 2 收货/来料检验业务键（GR202608001 / IQC202608001）：match_rule=BUSINESS_KEY
@@ -57,37 +62,6 @@ def _mapping(
         effective_date=_DEFAULT_EFFECTIVE,
         expiry_date=None,
     )
-
-
-def _supplierMappings() -> list[dict[str, Any]]:
-    """10 家供应商 × {ERP, SRM} + 前 5 家 × QMS = 25 条（MDM 主数据匹配）。"""
-    rows: list[dict[str, Any]] = []
-    for i in range(1, 11):
-        key = 100_000 + i
-        code = f"SUP{i:06d}"
-        for system, prefix in ((SourceSystem.ERP, "V"), (SourceSystem.SRM, "S")):
-            rows.append(
-                _mapping(
-                    EntityType.SUPPLIER,
-                    key,
-                    code,
-                    system,
-                    f"{prefix}{i:06d}",
-                    MatchRule.MDM_MASTER,
-                )
-            )
-        if i <= 5:
-            rows.append(
-                _mapping(
-                    EntityType.SUPPLIER,
-                    key,
-                    code,
-                    SourceSystem.QMS,
-                    f"Q{i:06d}",
-                    MatchRule.MDM_MASTER,
-                )
-            )
-    return rows
 
 
 def _materialMappings() -> list[dict[str, Any]]:
@@ -165,7 +139,7 @@ def _grIqcMappings() -> list[dict[str, Any]]:
 
 
 ALL_MAPPINGS: list[dict[str, Any]] = (
-    _supplierMappings() + _materialMappings() + _poMappings() + _grIqcMappings()
+    _materialMappings() + _poMappings() + _grIqcMappings()
 )
 
 
@@ -181,8 +155,12 @@ async def seedEntityMappings(session: Any) -> int:
         result = await session.execute(
             pg_insert(EntityMapping)
             .values(**m)
-            .on_conflict_do_nothing(
-                index_elements=["entity_type", "enterprise_key", "source_system"]
+            .on_conflict_do_update(
+                index_elements=["entity_type", "enterprise_key", "source_system"],
+                set_={
+                    # seed 仅设 enterprise_code / source_code 等稳定字段；name 由 sync 脚本写
+                    "expiry_date": pg_insert(EntityMapping).excluded.expiry_date,
+                },
             )
         )
         inserted += result.rowcount or 0

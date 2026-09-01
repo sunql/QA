@@ -8,13 +8,15 @@
 - recommended_actions：按等级静态生成（不调 LLM，响应稳定）
 - ACL：与 supplier_360 一致，API 层 `getCurrentUser`，不叠加（底层 entity_mapping ACL 隔离）
 - 异常隔离：LLM 调用失败 → log warn + fallback，绝不阻断主响应
+
+Phase 6.x：`supplier_key` 接受 `str | int` —— 透传 Supplier360Service.get360。
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Union
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -100,11 +102,14 @@ class SupplierRiskService:
     async def assess(
         self,
         session: AsyncSession,
-        supplier_key: int,
+        supplier_key: Union[str, int],
         *,
         llm_factory: LlmFactory | None = None,
     ) -> SupplierRiskRead:
-        """实时评估单供应商风险等级（plan §5.4）。"""
+        """实时评估单供应商风险等级（plan §5.4）。
+
+        supplier_key 同时接受 VARCHAR 业务码（如 '10105'）与 BIGINT 代理键。
+        """
         view = await Supplier360Service().get360(session, supplier_key)
         contributions = [_toContribution(kpi) for kpi in view.kpis]
         level, level_source = self._decideLevel(contributions)

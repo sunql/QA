@@ -27,6 +27,7 @@ const activeAgent: AgentDefinition = {
   owner: "procurement",
   version: "v1.0",
   policies: [],
+  runnable: true,
 };
 
 const draftAgent: AgentDefinition = {
@@ -35,6 +36,17 @@ const draftAgent: AgentDefinition = {
   agentCode: "DRAFT_AGENT",
   agentName: "草稿 Agent",
   status: "draft",
+  runnable: false,
+};
+
+/** Phase 6.4：元数据占位 Agent（如 SUPPLIER_OTD_REPORT）—— status=active 但未绑定工具，
+ *  后端 runnable=false；前端 Runtime 页必须过滤掉，避免用户点出 409。 */
+const metadataOnlyAgent: AgentDefinition = {
+  ...activeAgent,
+  id: 3,
+  agentCode: "SUPPLIER_OTD_REPORT",
+  agentName: "供应商 OTD 报表 Agent",
+  runnable: false,
 };
 
 const runRead: AgentRunRead = {
@@ -85,25 +97,29 @@ function renderPage() {
 
 describe("AgentRuntimePage", () => {
   beforeEach(() => {
-    api.listAgents.mockResolvedValue([activeAgent, draftAgent]);
+    api.listAgents.mockResolvedValue([activeAgent, draftAgent, metadataOnlyAgent]);
     api.runAgent.mockResolvedValue(runRead);
   });
 
-  it("加载 Agent 列表并仅展示 ACTIVE Agent（过滤草稿/停用）", async () => {
+  it("加载 Agent 列表并仅展示 runnable=true Agent（过滤草稿/元数据占位）", async () => {
     renderPage();
     await waitFor(() => expect(api.listAgents).toHaveBeenCalled());
-    // 打开下拉：ACTIVE Agent 在选项中，DRAFT Agent 被过滤
+    // 打开下拉：runnable Agent 在选项中，DRAFT 与 metadata-only 都被过滤
     fireEvent.mouseDown(document.querySelector(".ant-select-selector") as HTMLElement);
     await screen.findByText("SUPPLIER_RISK_AGENT（供应商风险 Agent）");
     expect(screen.queryByText("DRAFT_AGENT（草稿 Agent）")).toBeNull();
+    // 元数据占位 Agent（status=active 但未绑定工具）也被过滤
+    expect(
+      screen.queryByText("SUPPLIER_OTD_REPORT（供应商 OTD 报表 Agent）"),
+    ).toBeNull();
   });
 
   it("未选择 Agent 直接运行 → 提示先选择 Agent", async () => {
     renderPage();
     await waitFor(() => expect(api.listAgents).toHaveBeenCalled());
     fireEvent.change(
-      screen.getByPlaceholderText("如：评估供应商 100001 的风险"),
-      { target: { value: "评估供应商 100001" } },
+      screen.getByPlaceholderText("如：评估供应商 10105 的风险"),
+      { target: { value: "评估供应商 10105" } },
     );
     // antd 对双汉字按钮自动插入空格（autoInsertSpaceInButton → "运 行"），用 role+正则匹配
     fireEvent.click(screen.getByRole("button", { name: /运\s*行/ }));
@@ -120,12 +136,12 @@ describe("AgentRuntimePage", () => {
       await screen.findByText("SUPPLIER_RISK_AGENT（供应商风险 Agent）"),
     );
     fireEvent.change(
-      screen.getByPlaceholderText("如：评估供应商 100001 的风险"),
-      { target: { value: "评估供应商 100001 的风险" } },
+      screen.getByPlaceholderText("如：评估供应商 10105 的风险"),
+      { target: { value: "评估供应商 10105 的风险" } },
     );
     // antd 对双汉字按钮自动插入空格（autoInsertSpaceInButton → "运 行"），用 role+正则匹配
     fireEvent.click(screen.getByRole("button", { name: /运\s*行/ }));
-    await waitFor(() => expect(api.runAgent).toHaveBeenCalledWith("SUPPLIER_RISK_AGENT", "评估供应商 100001 的风险"));
+    await waitFor(() => expect(api.runAgent).toHaveBeenCalledWith("SUPPLIER_RISK_AGENT", "评估供应商 10105 的风险"));
     // AgentResponseCard 头部
     expect(await screen.findByText("供应商风险 Agent")).toBeInTheDocument();
     expect(screen.getByText("supplier_risk")).toBeInTheDocument();
@@ -140,7 +156,7 @@ describe("AgentRuntimePage", () => {
       await screen.findByText("SUPPLIER_RISK_AGENT（供应商风险 Agent）"),
     );
     fireEvent.change(
-      screen.getByPlaceholderText("如：评估供应商 100001 的风险"),
+      screen.getByPlaceholderText("如：评估供应商 10105 的风险"),
       { target: { value: "随便看看" } },
     );
     // antd 对双汉字按钮自动插入空格（autoInsertSpaceInButton → "运 行"），用 role+正则匹配

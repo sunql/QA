@@ -332,3 +332,167 @@ run(session, agent_code, params, *, actor)
 - 幂等 Seed：`scripts/seed_agents.py`（5 个 Agent，3 可运行）
 
 详见 [[Harness/changes/feat-agent-runtime-mvp/summary.md]]。
+
+---
+
+## 四者协同：Agent Registry ↔ Agent Runtime ↔ Supplier 360 ↔ Supplier Risk
+
+> 业务场景：采购员对 AIChat 提问「用 supplier_risk_agent 评估供应商 10105」——
+> 本节梳理这 4 个功能如何与真实 THBI 数据协作，端到端走通「意图 → 调度 → 数据 → 答案」。
+
+### 角色定位
+
+| 功能 | 角色 | 在数据流中的位置 |
+|---|---|---|
+| **Agent Registry** | 元数据目录 | 定义「哪些 Agent 可调用、绑定哪些工具、读哪些数据层」 |
+| **Agent Runtime** | 调度执行器 | 在请求时按 Registry 装载 Agent，做 ACL 拦截 + 工具调用编排 |
+| **Supplier 360** | 只读数据服务 | 聚合「主数据 + 跨系统编码 + 4 项 KPI」，是 supplier_360 tool 的后端 |
+| **Supplier Risk** | LLM 增强服务 | 在 360° 之上叠加风险等级判定 + LLM 自然语言风险点，是 supplier_risk tool 的后端 |
+
+四者是「**注册 → 调度 → 服务 → 服务**」的层级关系：Registry 是配置面，Runtime 是执行面，360/Risk 是被调用的领域服务。
+
+### 端到端数据流（真实业务链路）
+
+```
+采购员：「用 supplier_risk_agent 评估供应商 10105」
+   │
+   ▼
+[前端 / API]  POST /api/v1/agents/SUPPLIER_RISK_AGENT/run
+   │              body: { "input": "...10105..." }
+   ▼
+[Intent Service] classifyResult  →  IntentType.AGENT_RUN
+   │   agent_code = "SUPPLIER_RISK_AGENT"（从问句抽取，最优先领域信号）
+   │   触发条件：用户显式指名 Agent（regex 在 supplier_360/risk/graph 之前）
+   ▼
+[Agent Runtime] run(session, "SUPPLIER_RISK_AGENT", params, actor=user)
+   │
+   │ ① 加载 Agent（来自 Registry / DB）
+   │     - status 非 ACTIVE → 409
+   │     - 无工具绑定     → 409（元数据 Agent：PROCUREMENT_COPILOT 等）
+   │
+   │ ② 工具绑定 + 分层策略拦截（deny-by-default）
+   │     - SUPPLIER_RISK_AGENT → ['supplier_risk']
+   │     - supplier_risk 声明 data_layers = (DIM, FEATURE)
+   │     - AgentAccessPolicy 必须对两层都授权；任一缺失 → 403
+   │
+   │ ③ arg_extractor 抽 key（= "10105"，THBI BPSNUM_0）
+   │
+   ▼
+[Agent Tool: supplier_risk]  handler(session, {"key": "10105"}, ctx)
+   │
+   │   key 不做 int()（THBI '10105' int → 10105 ≠ hash → 404，正是历史坑）
+   │
+   ▼
+[SupplierRiskService.assess(session, "10105")]
+   │
+   │ ├─→ Supplier360Service.get360(session, "10105")
+   │ │     │
+   │ │     │   _resolveSupplier("10105")
+   │ │     │     ├─ Pass 1: WHERE enterprise_code = '10105' → 命中 THBI.DWD_SUPPLIER 同步行
+   │ │     │     │          （entity_mapping 表 sync_entity_mapping_from_thbi.py 写入）
+   │ │     │     │          返回 (enterprise_key=3823452429, enterprise_code='10105')
+   │ │     │     └─ Pass 2（兜底）：WHERE enterprise_key = 10105 → 不命中
+   │ │     │
+   │ │     ├─→ profile        = EntityMapping(DIM)
+   │ │     ├─→ entity_codes   = EntityMapping(DIM) × 全部 source_system
+   │ │     └─→ kpis[4]        = FeatureValue(FEATURE) WHERE entity_key = enterprise_code
+   │ │                          （⚠ entity_key 是 VARCHAR 业务码，绝非 BIGINT hash）
+   │ │
+   │ ├─→ contributions = 4 项 KPI → passed / threshold / note
+   │ ├─→ _decideLevel
+   │ │     ├─ 主路径：RISK_SCORE <0.60 / 0.60-0.80 / ≥0.80 → High/Medium/Low
+   │ │     ├─ Fallback：OTD/DEFECT/PRICE 违规计数
+   │ │     └─ Unknown：4 项 KPI 全 latest=False
+   │ │
+   │ └─→ _generateRiskPoints(level, contributions, llm_factory)
+   │       ├─ LLM 可用 → 1-2 句中文风险点（prompt 注入防护：仅含结构化数据）
+   │       └─ LLM 异常 → fallback_template；tokens_used/cost 落 token_usage 审计
+   │
+   ▼
+[SupplierRiskRead]
+   profile / level / contributions / risk_points / risk_points_source
+   recommended_actions / tokens_used / cost / llm_model_name
+   │
+   ▼
+[Agent Tool]  ToolResult(data=<SupplierRiskRead>, answer="供应商 10105（3823452429）风险等级：**High**…")
+   │
+   ▼
+[Agent Runtime]  组装 AgentRunRead（tokens 聚合 + cost 聚合 + actor=user）
+   │
+   ▼
+[API Response / Chat Stream]
+   → 前端 AgentResponseCard 渲染；chat 流式路由经 /chat/stream 的 _streamInterceptCard
+```
+
+### 与真实数据的对接点
+
+四者最终落地到 4 张表（PG）+ 1 个图库（Neo4j）+ 1 个 Oracle（THBI）：
+
+| 资产 | 来源 | 谁写入 | 谁读取 |
+|---|---|---|---|
+| `entity_mapping`（PG） | THBI.DWD_SUPPLIER / .DWD_MATERIAL 同步 | `sync_entity_mapping_from_thbi.py`（SHA-256 8B hash） | Supplier 360 / Supplier Risk / Agent Runtime（ACL 主题） |
+| `feature_definition`（PG） | seed + 后续 ONTOLOGY 派生 | `seed_features.py` | Supplier 360 / Supplier Risk |
+| `feature_value`（PG） | feature pipeline 计算 | `feature_pipeline/*` | Supplier 360 / Supplier Risk（按 enterprise_code VARCHAR JOIN） |
+| `agent` / `agent_access_policy`（PG） | 元数据 seed | `seed_agents.py` | Agent Runtime |
+| Neo4j（Supplier-PO-GR-IQC 业务图） | 实体映射关系同步 | `seed_graph_relations.py` | Agent Tool `graph_traverse`（不在 4 功能主链） |
+| THBI Oracle（192.168.205.70:1521/X3V71ORA） | 真实业务库 | — | 仅 `sync_entity_mapping_from_thbi.py` 直连（read-only） |
+
+**重要语义**：`feature_value.entity_key` 存的是 `enterprise_code`（VARCHAR，如 `'10105'`），**不是** `enterprise_key`（BIGINT hash，如 3823452429）。Supplier360Service 内部同时持两者——profile 字段回填需要两个，feature_value JOIN 只能用 VARCHAR。这是 Phase 6.x 的双路解析（`str | int` 入参 + Pass-1 code / Pass-2 key 双查询）的根因。
+
+### Registry 与 Runtime 的契约（deny-by-default）
+
+AgentAccessPolicy 决定 Agent 能读哪些数据层：
+
+```python
+# seed_agents.py 默认策略（与 agent_tools.data_layers 一一对应，Phase 7 G6 防漂移）
+{
+  "agent_code": "SUPPLIER_RISK_AGENT",
+  "policies": [
+    { "data_object": "SUPPLIER", "data_layer": "DIM",     "permission": "READ" },
+    { "data_object": "SUPPLIER", "data_layer": "FEATURE", "permission": "READ" },
+  ]
+}
+```
+
+工具侧声明必须与策略侧**精确对齐**：
+
+```python
+# agent_tools.py
+AgentTool(
+    name="supplier_risk",
+    data_object="SUPPLIER",
+    data_layers=("DIM", "FEATURE"),   # ← 与策略一一对应
+    ...
+)
+```
+
+`_enforcePolicies` 逐层检查：工具声明的每一层都必须在策略中找到精确匹配（或 `None` 通配），任一缺失 → 403，绝不静默放行。这是 P0 安全补强（避免「只授 FEATURE 实际读到 DIM」的攻击面）。
+
+### 用户面对的「供应商编码」语义
+
+| 视角 | 编码 | 例子 |
+|---|---|---|
+| **采购员**（业务） | supplier_code（VARCHAR） | `'10105'`（THBI BPSNUM_0） |
+| **实体映射**（系统） | enterprise_code + enterprise_key | `('10105', 3823452429)` |
+| **特征数据**（计算） | entity_key（VARCHAR 业务码） | `'10105'` |
+| **Neo4j 节点 key** | source_code / enterprise_code | `'10105'` 或 ERP/SRM 源侧 |
+
+`Supplier360Service.get360` 与 `SupplierRiskService.assess` 的入参同时接受 VARCHAR 与 BIGINT，是为了让**「业务码用户」与「系统内部 ID 调用」共用同一入口**——前者来自 AutoComplete / Chat，后者来自已有 API / 老 chat 路径。
+
+### 入口汇总
+
+| 入口 | 4 功能在该路径中的角色 |
+|---|---|
+| `GET /api/v1/supplier-360/{supplier_key}` | 直接调 Supplier 360，绕过 Agent Registry / Runtime |
+| `GET /api/v1/supplier-risk/{supplier_key}` | 直接调 Supplier Risk，绕过 Agent Registry / Runtime |
+| `POST /api/v1/agents/SUPPLIER_360_AGENT/run` | 经 Agent Runtime → supplier_360 tool → Supplier 360 Service |
+| `POST /api/v1/agents/SUPPLIER_RISK_AGENT/run` | 经 Agent Runtime → supplier_risk tool → Supplier Risk Service（含 LLM） |
+| Chat「供应商 X 的 360° / 全貌」 | Intent SUPPLIER_360 → chat_service → Supplier 360 Service（不走 Agent Runtime） |
+| Chat「用 supplier_risk_agent 评估供应商 X」 | Intent AGENT_RUN → Agent Runtime → supplier_risk tool → Supplier Risk Service |
+
+**双路径并存的设计意图**：chat「问 360°」是**意图驱动**（轻量，不调 Agent Runtime）；chat「指名 supplier_risk_agent」是**显式调度**（含 ACL + Token 计量 + 工具调用追踪）。前者面向终端用户的自然语言提问，后者面向开发者 / 高级用户的精确控制。
+
+详见 [[Harness/changes/feat-agent-registry/summary.md|Agent Registry]]、
+[[Harness/changes/feat-agent-runtime-mvp/summary.md|Agent Runtime]]、
+[[Harness/changes/feat-supplier-360-ads/summary.md|Supplier 360]]、
+[[Harness/changes/feat-supplier-risk-agent-mini/summary.md|Supplier Risk]]。

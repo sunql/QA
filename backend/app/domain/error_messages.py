@@ -327,7 +327,12 @@ MSG_AGENT_REGISTRY_FORBIDDEN = "无权修改该 Agent：仅 owner 部门成员�
 # Phase 6.4 feat-agent-runtime-mvp：Agent 运行时
 # ---------------------------------------------------------------------------
 
-MSG_AGENT_NOT_RUNNABLE = "Agent 当前不可运行：code={code}（status={status}）"
+MSG_AGENT_NOT_RUNNABLE = "Agent 当前不可运行：code={code}（status={status}）。请在 Agent 注册表中将其状态调整为 ACTIVE"
+MSG_AGENT_NOT_RUNNABLE_NO_TOOL = (
+    "Agent 当前不可运行：code={code}。"
+    "本期仅注册元数据（Registry 可见），未绑定工具，暂不可执行。"
+    "请查阅 Registry 中的 description 字段确认 Phase 排期"
+)
 MSG_AGENT_RUN_DENIED = (
     "无权调用 Agent：code={code}（数据对象 {object} 数据层 {layer} 无读取策略）。"
     "请先在 Agent 注册表中为其添加 READ / MASKED_READ 策略"
@@ -338,7 +343,9 @@ MSG_AGENT_RUN_FORBIDDEN = (
 )
 MSG_AGENT_RUN_BAD_INPUT = (
     "无法从输入中解析执行参数：code={code}（tool={tool}）。"
-    "请提供企业编码，如「供应商 100001」"
+    "请在问题中提供企业编码（VARCHAR 业务码，如「供应商 10105」）"
+    "——以「供应商」/「supplier」开头后接 5-9 位编码即可。"
+    "若不知编码，可先在「供应商 360°」页面用搜索框按名称查找。"
 )
 MSG_AGENT_RUN_FAILED = "Agent 执行失败，请稍后重试"
 MSG_AGENT_RUN_MISSING_CODE = (

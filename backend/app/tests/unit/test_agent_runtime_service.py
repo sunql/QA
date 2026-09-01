@@ -237,7 +237,7 @@ class TestRunFailures:
             entity=_agent(status=status),
             tools={"supplier_risk": _fakeTool("supplier_risk")},
         )
-        with pytest.raises(ConflictError):
+        with pytest.raises(ConflictError, match="状态调整为 ACTIVE"):
             _run(
                 service.run(
                     session=object(),
@@ -247,11 +247,13 @@ class TestRunFailures:
             )
 
     def test_agent_without_tool_binding_raises_conflict(self):
-        """已注册但不在 AGENT_TOOLS 的元数据 Agent（如 SCHEDULED）→ 409。"""
+        """已注册但不在 AGENT_TOOLS 的元数据 Agent（如 SCHEDULED）→ 409，
+        message 明确说「未绑定工具」，避免与「状态非 ACTIVE」混淆。
+        """
         entity = _agent("PROCUREMENT_COPILOT_AGENT")
         assert "PROCUREMENT_COPILOT_AGENT" not in AGENT_TOOLS
         service, _ = _runtime(entity=entity, tools={})
-        with pytest.raises(ConflictError, match="不可运行"):
+        with pytest.raises(ConflictError, match="未绑定工具"):
             _run(
                 service.run(
                     session=object(),

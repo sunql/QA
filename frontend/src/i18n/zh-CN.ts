@@ -300,9 +300,9 @@ export const zhCN = {
 
   agentRuntimePage: {
     title: "Agent 运行时 · 直接调用",
-    hint: "选择已注册的 ACTIVE Agent，输入自然语言（含供应商 enterprise_key）直接触发工具执行。也可在 AIChatService 中指名 Agent（如「用 supplier_risk_agent 评估供应商 100001」）自动触发。",
+    hint: "选择已绑定工具的 Agent（仅展示 runnable=true 的），输入自然语言（含供应商 enterprise_code 或名称）直接触发工具执行。也可在 AIChatService 中指名 Agent（如「用 supplier_risk_agent 评估供应商 10105」）自动触发。元数据占位 Agent（未绑定工具，如 SUPPLIER_OTD_REPORT）请前往「Agent Registry」查阅排期。",
     selectPlaceholder: "选择 Agent",
-    inputPlaceholder: "如：评估供应商 100001 的风险",
+    inputPlaceholder: "如：评估供应商 10105 的风险",
     run: "运行",
     loadFailed: "Agent 列表加载失败",
     selectAgent: "请先选择一个 Agent",
@@ -310,7 +310,7 @@ export const zhCN = {
     error404: "Agent {code} 未注册",
     error409: "Agent {code} 当前不可运行（状态非 ACTIVE 或未绑定工具）",
     error403: "Agent {code} 缺少数据对象读取策略（deny-by-default 拦截）",
-    error422: "输入无法解析出执行参数（请提供供应商 enterprise_key）",
+    error422: "输入无法解析出执行参数（请提供供应商 enterprise_code，如「供应商 10105」）",
     requestFailed: "运行失败：{message}",
   },
 

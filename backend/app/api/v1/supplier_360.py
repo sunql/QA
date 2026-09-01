@@ -37,15 +37,21 @@ def getSupplier360Service() -> Supplier360Service:
     "/{supplier_key}",
     response_model=Supplier360Read,
     status_code=status.HTTP_200_OK,
-    summary="供应商 360° 视图（按 enterprise_key 聚合）",
+    summary="供应商 360° 视图（按 supplier_key 聚合）",
 )
 async def getSupplier360(
-    supplier_key: int,
+    supplier_key: str,
     _user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
     service: Supplier360Service = Depends(getSupplier360Service),
 ) -> Supplier360Read:
-    """按 enterprise_key 取供应商 360° 数据。
+    """按 supplier_key 取供应商 360° 数据。
+
+    supplier_key 同时接受：
+    - VARCHAR 业务码（THBI '10105' 或合成 'SUP000001'）
+    - BIGINT enterprise_key 代理键（如 3823452429）
+
+    service 内部 `_resolveSupplier` 双路查询（先 enterprise_code，后 enterprise_key）。
 
     不存在 → 404（防 typo 静默）；子模块失败 → 整体仍 200 + 该字段空值（plan §5.3）。
     """

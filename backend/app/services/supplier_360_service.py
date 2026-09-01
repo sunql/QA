@@ -6,9 +6,19 @@
   前端按字段渲染空态（如「暂无数据」占位）
 - ACL：service 层不强制（API 层 `AclService.assertCanModify` 处理，
   保持 service 单元可测）
-- 实体键映射：`enterprise_key` (BIGINT, MDM 主数据代理键) → `enterprise_code`
-  (VARCHAR, 业务编码，如 SUP000001)；FeatureValue.entity_key 是 VARCHAR
-  业务编码（见 models.py FeatureDefinition 注释 + SSOT §2）
+- 实体键映射：`enterprise_key` (BIGINT, MDM 主数据代理键 / SHA-256 8B hash) →
+  `enterprise_code` (VARCHAR, 业务编码，如 THBI '10105' / 'SUP000001')；
+  FeatureValue.entity_key 是 VARCHAR 业务编码（见 models.py FeatureDefinition
+  注释 + SSOT §2）。
+
+Phase 6.x：service 入口 `supplierKey` 接受 `str | int` —— 用户面对的"供应商编码"
+是 VARCHAR（THBI BPSNUM_0 = '10105'），而 entity_mapping.enterprise_key 是
+BIGINT 哈希（'10105' → 3823452429）。两个值都合法：
+- 字符串输入：先按 enterprise_code 查（精确匹配业务码），回退 enterprise_key
+- 整数输入：先按 enterprise_key 查（兼容旧路径），回退 enterprise_code
+两条路径都返回 `(enterprise_key, enterprise_code)`，下游分别用于：
+- entity_mapping JOIN → enterprise_key（BIGINT）
+- feature_value JOIN → enterprise_code（VARCHAR）
 
 Round 1 范围：仅接 PG entity_mapping + feature_value；DW ADS view / DW DWS 表
 接入留 Round 2。
@@ -17,6 +27,7 @@ Round 1 范围：仅接 PG entity_mapping + feature_value；DW ADS view / DW DWS
 from __future__ import annotations
 
 import logging
+from typing import Union
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,80 +64,127 @@ class Supplier360Service:
     """
 
     async def get360(
-        self, session: AsyncSession, supplierKey: int
+        self, session: AsyncSession, supplierKey: Union[str, int]
     ) -> Supplier360Read:
-        """实时聚合单供应商 360° 数据（plan §5.3）。"""
-        enterprise_code = await self._loadEnterpriseCodeOr404(
+        """实时聚合单供应商 360° 数据（plan §5.3）。
+
+        supplierKey 同时接受 VARCHAR 业务码（如 THBI '10105'）与 BIGINT
+        MDM 代理键（SHA-256 8B hash，如 3823452429）；详见模块 docstring。
+        """
+        enterprise_key, enterprise_code = await self._resolveSupplier(
             session, supplierKey
         )
         profile = Supplier360Profile(
-            enterprise_key=supplierKey,
+            enterprise_key=enterprise_key,
             enterprise_code=enterprise_code,
             entity_type=EntityType.SUPPLIER,
         )
-        entity_codes = await self._safeLoadEntityCodes(session, supplierKey)
+        entity_codes = await self._safeLoadEntityCodes(session, enterprise_key)
         kpis = await self._safeLoadKpis(session, enterprise_code)
         return Supplier360Read(
             profile=profile, entity_codes=entity_codes, kpis=kpis
         )
 
     # ------------------------------------------------------------------
-    # 内部：enterprise_code 查表（找不到 → 404）
+    # 内部：解析 supplierKey → (enterprise_key, enterprise_code)
     # ------------------------------------------------------------------
 
-    async def _loadEnterpriseCodeOr404(
-        self, session: AsyncSession, supplierKey: int
-    ) -> str:
-        """按 enterprise_key 取任一映射行的 enterprise_code（任意源系统都行）。
+    async def _resolveSupplier(
+        self, session: AsyncSession, supplierKey: Union[str, int]
+    ) -> tuple[int, str]:
+        """统一解析入口：返回 (enterprise_key, enterprise_code) 元组。
 
-        同一 enterprise_key 在不同 source_system 下 enterprise_code 一致（MDM
-        主数据原则）；故只取一条即可。找不到 → 抛 NotFoundError。
+        策略：先按 enterprise_code 查（覆盖 THBI 业务码 / 旧合成 SUP 编码），
+        未命中则按 enterprise_key 查（覆盖 BIGINT hash / 已存 chat 路径）。
+        两条都失败 → NotFoundError。
+
+        接受 str / int 入参；调用方不用关心类型（业务层永远是"业务码"或"代理键"）。
         """
+        # Pass 1：按 enterprise_code 查（字符串输入主路径；整数转换后也可命中）
         try:
-            result = await session.execute(
-                select(EntityMapping.enterprise_code)
-                .where(
-                    EntityMapping.entity_type == EntityType.SUPPLIER,
-                    EntityMapping.enterprise_key == supplierKey,
+            row = (
+                await session.execute(
+                    select(
+                        EntityMapping.enterprise_key,
+                        EntityMapping.enterprise_code,
+                    )
+                    .where(
+                        EntityMapping.entity_type == EntityType.SUPPLIER,
+                        EntityMapping.enterprise_code == str(supplierKey),
+                    )
+                    .limit(1)
                 )
-                .limit(1)
-            )
+            ).first()
         except Exception:
             logger.warning(
-                "Supplier360 entity_mapping 查询失败 supplier_key=%s",
+                "Supplier360 entity_mapping(enterprise_code) 查询失败 supplierKey=%s",
                 supplierKey,
                 exc_info=True,
             )
-            raise NotFoundError(
-                MSG_SUPPLIER_360_NOT_FOUND.format(key=supplierKey)
-            )
+            row = None
 
-        code = result.scalar_one_or_none()
-        if code is None:
-            raise NotFoundError(
-                MSG_SUPPLIER_360_NOT_FOUND.format(key=supplierKey)
-            )
-        return code
+        if row is not None:
+            return int(row[0]), str(row[1])
+
+        # Pass 2：按 enterprise_key 查（整数输入主路径；str 数字仅在 hash 巧合时命中）
+        try:
+            enterprise_key_int = int(supplierKey)
+        except (TypeError, ValueError):
+            enterprise_key_int = None
+        if enterprise_key_int is not None:
+            try:
+                row2 = (
+                    await session.execute(
+                        select(
+                            EntityMapping.enterprise_key,
+                            EntityMapping.enterprise_code,
+                        )
+                        .where(
+                            EntityMapping.entity_type == EntityType.SUPPLIER,
+                            EntityMapping.enterprise_key == enterprise_key_int,
+                        )
+                        .limit(1)
+                    )
+                ).first()
+            except Exception:
+                logger.warning(
+                    "Supplier360 entity_mapping(enterprise_key) 查询失败 supplierKey=%s",
+                    supplierKey,
+                    exc_info=True,
+                )
+                row2 = None
+            if row2 is not None:
+                return int(row2[0]), str(row2[1])
+
+        # 两条都失败 → 404（防 typo 静默）
+        raise NotFoundError(
+            MSG_SUPPLIER_360_NOT_FOUND.format(key=supplierKey)
+        )
 
     # ------------------------------------------------------------------
     # 内部：entity_codes（异常隔离）
     # ------------------------------------------------------------------
 
     async def _safeLoadEntityCodes(
-        self, session: AsyncSession, supplierKey: int
+        self, session: AsyncSession, enterpriseKey: int
     ) -> list[Supplier360EntityCode]:
-        """加载该 supplier 的跨系统编码映射。失败 → 空列表 + WARN 日志。"""
+        """加载该 supplier 的跨系统编码映射。失败 → 空列表 + WARN 日志。
+
+        注：按 enterprise_key 查 —— entity_mapping 唯一键是
+        (entity_type, enterprise_key, source_system)，不能用 enterprise_code 一次性
+        命中所有 source_system。
+        """
         try:
             result = await session.execute(
                 select(EntityMapping).where(
                     EntityMapping.entity_type == EntityType.SUPPLIER,
-                    EntityMapping.enterprise_key == supplierKey,
+                    EntityMapping.enterprise_key == enterpriseKey,
                 )
             )
         except Exception:
             logger.warning(
-                "Supplier360 entity_codes 加载失败 supplier_key=%s",
-                supplierKey,
+                "Supplier360 entity_codes 加载失败 enterprise_key=%s",
+                enterpriseKey,
                 exc_info=True,
             )
             return []

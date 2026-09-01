@@ -41,7 +41,11 @@ from app.domain.schemas import (
     AgentDefinitionUpdate,
 )
 from app.services.acl_service import AclService
+from app.services.agent_tools import AGENT_TOOLS
 
+# Phase 6.4：派生字段 runnable 依赖 AGENT_TOOLS（agent_tools 模块定义，
+# 与 agent_runtime_service 共享 SSOT）。AGENT_TOOLS 不再依赖本模块，
+# 故可直接 import 而无循环风险。
 logger = logging.getLogger(__name__)
 
 
@@ -50,9 +54,19 @@ def _policyToRead(policy: AgentAccessPolicy) -> AgentAccessPolicyRead:
 
 
 def agentToRead(entity: AgentDefinition) -> AgentDefinitionRead:
-    # model_validate + from_attributes=True 让 Pydantic 直接读 ORM 属性
-    # （含 None 字段由 DTO 默认兜底，与 kpi_catalog 模式一致）。
-    return AgentDefinitionRead.model_validate(entity)
+    """ORM → DTO 转换；填充 Phase 6.4 派生字段 ``runnable``。
+
+    ``runnable`` = ``status==ACTIVE AND agent_code 已注册到 AGENT_TOOLS``。
+    Registry 仅展示元数据、未绑定工具的 agent（如 SUPPLIER_OTD_REPORT /
+    PROCUREMENT_COPILOT）即使 status=active 也 runnable=False；
+    前端 Runtime 页用此字段过滤，避免用户点出 409。
+    """
+    read = AgentDefinitionRead.model_validate(entity)
+    read.runnable = (
+        read.status == AgentStatus.ACTIVE
+        and read.agent_code in AGENT_TOOLS
+    )
+    return read
 
 
 class AgentRegistryService:

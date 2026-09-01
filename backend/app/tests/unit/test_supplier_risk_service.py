@@ -327,3 +327,56 @@ async def test_contribution_passed_flag(dbSession: AsyncSession):
     result_high = await SupplierRiskService().assess(dbSession, 100001, llm_factory=None)
     otd_high = next(c for c in result_high.contributions if c.feature_name == "SUPPLIER_OTD_3M")
     assert otd_high.passed is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 6.x：service 入口 str|int 双路解析（与 supplier_360_service 对齐）
+# ---------------------------------------------------------------------------
+
+
+async def test_assess_accepts_str_enterprise_code(dbSession: AsyncSession):
+    """Phase 6.x：用 VARCHAR enterprise_code 调用 SupplierRiskService.assess 应命中。
+
+    这是用户面对的"供应商编码"形态（THBI '10105'）。Agent 工具路径
+    （agent_tools._supplierRiskHandler）现已透传 str 而非 int()，service 必须支持。
+    """
+    await _seedSupplier(dbSession, 100001, "SUP000001")
+    await _seedFeatureAndValue(
+        dbSession, 1, "SUPPLIER_RISK_SCORE", "SUP000001", 0.85, unit="score", window="12M"
+    )
+
+    # str 路径 → _resolveSupplier Pass 1（enterprise_code）命中
+    result = await SupplierRiskService().assess(
+        dbSession, "SUP000001", llm_factory=None
+    )
+
+    assert result.profile.enterprise_code == "SUP000001"
+    assert result.profile.enterprise_key == 100001
+    assert result.level.value == "low"
+
+
+async def test_assess_accepts_int_enterprise_key_backward_compat(
+    dbSession: AsyncSession,
+):
+    """Phase 6.x：向后兼容 BIGINT enterprise_key（chat_service / API 旧调用点）。"""
+    await _seedSupplier(dbSession, 100001, "SUP000001")
+    await _seedFeatureAndValue(
+        dbSession, 1, "SUPPLIER_RISK_SCORE", "SUP000001", 0.50, unit="score", window="12M"
+    )
+
+    result = await SupplierRiskService().assess(
+        dbSession, 100001, llm_factory=None
+    )
+
+    assert result.profile.enterprise_code == "SUP000001"
+    assert result.level.value == "high"
+
+
+async def test_assess_str_not_found_raises(dbSession: AsyncSession):
+    """Phase 6.x：str 入参找不到 → NotFoundError。"""
+    from app.domain.exceptions import NotFoundError
+
+    with pytest.raises(NotFoundError):
+        await SupplierRiskService().assess(
+            dbSession, "DOES_NOT_EXIST", llm_factory=None
+        )

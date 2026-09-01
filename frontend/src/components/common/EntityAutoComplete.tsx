@@ -49,22 +49,27 @@ export default function EntityAutoComplete(props: EntityAutoCompleteProps): JSX.
     autoCompleteProps,
   } = props;
 
-  // 输入框里实际显示的字符串（与 enterprise_key 解耦：选中后才填进去）
-  const [inputText, setInputText] = useState<string>(value ? String(value) : "");
+  // 输入框里实际显示的字符串（与 enterprise_key 解耦：选中后才填进去，显示 name）
+  const [inputText, setInputText] = useState<string>("");
   const [options, setOptions] = useState<AutoCompleteProps["options"]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 记住最近一次发出去的 q，避免 stale 响应覆盖新结果
   const latestQRef = useRef<string>("");
+  // 最近一次选中的 name（外部 value 变化时优先用它回填输入框）
+  const lastDisplayRef = useRef<string>("");
 
-  // 外部 value 改变时（例如上层清空）同步到 inputText
+  // 外部 value 改变时（页面初始化 / 上层清空 / 反向同步）回填输入框
   useEffect(() => {
     if (value === null) {
       setInputText("");
-    } else if (!inputText || inputText !== String(value)) {
-      // 仅在 inputText 不是合法 enterprise_key 字符串时才覆盖（避免用户输入时被打断）
-      setInputText(String(value));
+      lastDisplayRef.current = "";
+      return;
+    }
+    // 首次或用户尚未键入：用最近一次的 display；后续用户键入会自然覆盖
+    if (!inputText) {
+      setInputText(lastDisplayRef.current || String(value));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
@@ -129,7 +134,11 @@ export default function EntityAutoComplete(props: EntityAutoCompleteProps): JSX.
   ): void => {
     const hit = (option as { _hit?: EntityMappingSearchHit })._hit;
     if (!hit) return;
-    setInputText(String(hit.enterpriseKey));
+    // 输入框只显示业务名（无 name 时回退 enterprise_code），不显示 BIGINT key。
+    // onChange 仍传 enterprise_key 给上层（与 entity_mapping 表 JOIN / 调 API 都靠它）。
+    const display = hit.name?.trim() || hit.enterpriseCode;
+    setInputText(display);
+    lastDisplayRef.current = display;
     onChange(hit.enterpriseKey);
     onSelect?.(hit);
     setOpen(false);

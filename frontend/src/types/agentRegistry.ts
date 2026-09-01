@@ -45,6 +45,10 @@ export interface AgentDefinition {
   policies: AgentAccessPolicy[];
   createdTime?: string | null;
   updatedTime?: string | null;
+  /** Phase 6.4 派生字段：SSOT 是否可通过 POST /agents/{code}/run 调用。
+   *  true = status=ACTIVE 且已注册到 AGENT_TOOLS；元数据占位 agent（如
+   *  SUPPLIER_OTD_REPORT / PROCUREMENT_COPILOT）即使 status=active 也为 false。 */
+  runnable?: boolean;
 }
 
 export interface AgentDefinitionCreate {

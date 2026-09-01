@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.enums import AgentPermission, AgentStatus
 from app.domain.error_messages import (
     MSG_AGENT_NOT_RUNNABLE,
+    MSG_AGENT_NOT_RUNNABLE_NO_TOOL,
     MSG_AGENT_RUN_BAD_INPUT,
     MSG_AGENT_RUN_DENIED,
     MSG_AGENT_RUN_FORBIDDEN,
@@ -40,6 +41,7 @@ from app.domain.schemas import AgentRunRead, _normalizeDataLayer
 from app.infrastructure.llm.base_client import BaseLlmClient
 from app.services.agent_registry_service import AgentRegistryService
 from app.services.agent_tools import (
+    AGENT_TOOLS,
     AgentTool,
     AgentToolContext,
     AgentToolRegistry,
@@ -50,13 +52,9 @@ logger = logging.getLogger(__name__)
 
 LlmFactory = Callable[[object], BaseLlmClient]
 
-# agent_code → 可调用工具（顺序即优先级；MVP 每 Agent 绑定 1 个工具）。
-# 不在映射中的已注册 Agent（如 SCHEDULED 元数据 Agent）→ 409 不可运行。
-AGENT_TOOLS: dict[str, tuple[str, ...]] = {
-    "SUPPLIER_360_AGENT": ("supplier_360",),
-    "SUPPLIER_RISK_AGENT": ("supplier_risk",),
-    "GRAPH_REASONING_AGENT": ("graph_traverse",),
-}
+# AGENT_TOOLS 在 agent_tools.py 定义（SSOT）；此模块从那里 import，
+# 避免与 agent_registry_service 形成循环 import（registry 用 AGENT_TOOLS
+# 计算 runnable 派生字段）。
 
 # 策略 permission 分组（_enforcePolicies 判定用）
 _DENY = (
@@ -94,11 +92,20 @@ class AgentRuntimeService:
         entity = await self._agents.getAgent(session, agent_code)  # NotFoundError(404)
 
         tool_names = AGENT_TOOLS.get(agent_code)
-        # entity.status 是 String 列（存枚举 .value）；None 兜底给「无工具绑定」语义
-        status_label = entity.status or "no_tool_binding"
-        if entity.status != AgentStatus.ACTIVE.value or not tool_names:
+        # 拆分两条 409 路径，给用户更明确的引导：
+        # 1) status 非 ACTIVE → 提示去 Registry 调整状态
+        # 2) status=active 但无工具绑定（仅元数据占位，如 SUPPLIER_OTD_REPORT）
+        #    → 明确说"未绑定工具"，避免被误导以为是状态问题
+        if entity.status != AgentStatus.ACTIVE.value:
+            status_label = entity.status or "unknown"
             raise ConflictError(
-                MSG_AGENT_NOT_RUNNABLE.format(code=agent_code, status=status_label)
+                MSG_AGENT_NOT_RUNNABLE.format(
+                    code=agent_code, status=status_label
+                )
+            )
+        if not tool_names:
+            raise ConflictError(
+                MSG_AGENT_NOT_RUNNABLE_NO_TOOL.format(code=agent_code)
             )
 
         tool = self._resolveTool(tool_names[0])

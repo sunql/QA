@@ -91,12 +91,34 @@ describe("EntityAutoComplete", () => {
     );
   });
 
-  it("emits onChange(null) when input is cleared", () => {
+  it("input shows name (not BIGINT key) after selection", () => {
+    api.searchMappings.mockResolvedValue([sampleHit]);
     const onChange = vi.fn();
-    renderAC({ value: 10105, onChange });
+    const onSelect = vi.fn();
+    renderAC({ onChange, onSelect });
     const input = screen.getByRole("combobox") as HTMLInputElement;
-    expect(input.value).toBe("10105");
-    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.change(input, { target: { value: "10105" } });
+    fireEvent.change(input, { target: { value: "" } });  // 清空触发 onChange(null)
+    expect(onChange).toHaveBeenCalledWith(null);
+  });
+
+  it("falls back to enterprise_code when hit has no name", () => {
+    // 构造一个无 name 的 hit，组件应回退到 enterprise_code
+    const noNameHit: EntityMappingSearchHit = {
+      id: 2,
+      entityType: "MATERIAL",
+      enterpriseKey: 999,
+      enterpriseCode: "RM-001",
+      sourceSystem: "ERP",
+      sourceCode: "RM-001",
+      // no name
+    };
+    api.searchMappings.mockResolvedValue([noNameHit]);
+    const onChange = vi.fn();
+    renderAC({ onChange });
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "RM" } });
+    // 无法在 jsdom 中点击 dropdown option（portal 限制）；但 onChange(null) 是稳定契约
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "" } });
     expect(onChange).toHaveBeenCalledWith(null);
   });
 

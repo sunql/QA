@@ -43,8 +43,12 @@ export default function AgentRuntimePage() {
     listAgents()
       .then((rows) => {
         if (!cancelled) {
-          // 仅展示 ACTIVE Agent（运行时门禁：DRAFT/DEPRECATED 不可运行）
-          setAgents(rows.filter((a) => a.status === "active"));
+          // 仅展示 runnable Agent（Phase 6.4 SSOT 派生字段）：
+          // 排除 DRAFT/DEPRECATED，以及元数据占位（status=active 但未绑定工具，
+          // 如 SUPPLIER_OTD_REPORT / PROCUREMENT_COPILOT）—— 它们即使用户选中
+          // 也会撞 409。这里用后端 runnable 字段做首选过滤，前端不再依赖
+          // status 单一维度（status=active 不等于可运行）。
+          setAgents(rows.filter((a) => a.runnable === true));
         }
       })
       .catch(() => {

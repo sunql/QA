@@ -304,3 +304,74 @@ async def test_get_supplier_360_supports_no_entity_codes(dbSession: AsyncSession
     svc = Supplier360Service()
     with pytest.raises(NotFoundError):
         await svc.get360(dbSession, 100001)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6.x：service 入口 str|int 双路解析
+# ---------------------------------------------------------------------------
+
+
+async def test_get_supplier_360_accepts_str_enterprise_code(dbSession: AsyncSession):
+    """Phase 6.x：用 VARCHAR enterprise_code（如 THBI '10105'）调用应命中。
+
+    这是用户面对的"供应商编码"形态（THBI BPSNUM_0 = '10105'，合成种子 SUP000001）。
+    此前 int() 强制转换会把 '10105' 变成 10105，找不到 hash → 404。
+    """
+    await _seedDatasource(dbSession)
+    await _seedSupplierMappings(dbSession, 100001, "SUP000001")
+
+    svc = Supplier360Service()
+    # 字符串 enterprise_code 命中同一条 entity_mapping
+    result = await svc.get360(dbSession, "SUP000001")
+
+    assert result.profile.enterprise_key == 100001
+    assert result.profile.enterprise_code == "SUP000001"
+    assert len(result.entity_codes) == 2  # ERP + SRM
+    assert len(result.kpis) == 4
+
+
+async def test_get_supplier_360_accepts_int_enterprise_key_backward_compat(
+    dbSession: AsyncSession,
+):
+    """Phase 6.x：向后兼容 BIGINT enterprise_key（既有 chat / API 路径）。
+
+    旧 chat_service / API 调用可能仍传 int；_resolveSupplier Pass 2 必须命中。
+    """
+    await _seedDatasource(dbSession)
+    await _seedSupplierMappings(dbSession, 100001, "SUP000001")
+
+    svc = Supplier360Service()
+    result = await svc.get360(dbSession, 100001)
+
+    assert result.profile.enterprise_key == 100001
+    assert result.profile.enterprise_code == "SUP000001"
+
+
+async def test_get_supplier_360_str_joins_feature_value_by_code(
+    dbSession: AsyncSession,
+):
+    """Phase 6.x：str 入参时 feature_value JOIN 仍用 enterprise_code（VARCHAR）。
+
+    验证：即使 str 入参返回的 profile.enterprise_key 是 BIGINT，feature_value 仍按
+    enterprise_code（VARCHAR）JOIN。回归保护 SSOT §2 的 JOIN 语义。
+    """
+    await _seedDatasource(dbSession)
+    await _seedSupplierMappings(dbSession, 100001, "SUP000001")
+    await _seedFeature(dbSession, 1, "SUPPLIER_OTD_3M")
+    await _seedFeatureValue(dbSession, 1, "SUP000001", 95.0, date(2026, 8, 31))
+    # 错误键：int 写法不应被命中（回归保护）
+    await _seedFeatureValue(dbSession, 1, "100001", 50.0, date(2026, 8, 31))
+
+    svc = Supplier360Service()
+    result = await svc.get360(dbSession, "SUP000001")
+    otd = next(k for k in result.kpis if k.feature_name == "SUPPLIER_OTD_3M")
+    assert otd.value == Decimal("95.0")
+
+
+async def test_get_supplier_360_str_not_found_raises(dbSession: AsyncSession):
+    """Phase 6.x：str 入参找不到 → NotFoundError（与 int 路径语义一致）。"""
+    svc = Supplier360Service()
+    with pytest.raises(NotFoundError) as excInfo:
+        await svc.get360(dbSession, "NONEXISTENT_CODE")
+    # key 显示原始输入（不转 int 防误导）
+    assert "NONEXISTENT_CODE" in str(excInfo.value)

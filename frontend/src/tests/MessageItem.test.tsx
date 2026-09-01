@@ -249,6 +249,30 @@ describe("MessageItem 消息渲染", () => {
   });
 
   // =========================================================================
+  // Phase 7 G4：未指名 Agent 语义路由建议卡片
+  // =========================================================================
+
+  it("消息含 suggestedAgent 时渲染 SuggestedAgentCard", () => {
+    renderItem({
+      content: "查询完成。",
+      intent: "query",
+      suggestedAgent: {
+        recommendedAgentCode: "SUPPLIER_RISK_AGENT",
+        confidence: 0.8,
+        reason: "检测到风险评估类诉求，推荐风险健康度评估",
+      },
+    });
+    expect(screen.getByText("建议使用 Agent")).toBeInTheDocument();
+    expect(screen.getByText("SUPPLIER_RISK_AGENT")).toBeInTheDocument();
+    expect(screen.getByText("置信度: 80%")).toBeInTheDocument();
+  });
+
+  it("无 suggestedAgent 时不渲染建议卡片", () => {
+    renderItem({ content: "查询完成。", intent: "query" });
+    expect(screen.queryByText("建议使用 Agent")).toBeNull();
+  });
+
+  // =========================================================================
   // Phase 8：SQL 预览使用只读 Monaco + 自定义复制按钮
   // =========================================================================
 

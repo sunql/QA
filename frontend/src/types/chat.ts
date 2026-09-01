@@ -113,6 +113,13 @@ export interface MultiStepStep {
   error?: string | null;
 }
 
+// Phase 7 G4：未指名 Agent 语义路由建议（中置信命中时随 QUERY/NEW_QUERY 附带）
+export interface AgentSuggestion {
+  recommendedAgentCode: string;
+  confidence: number;
+  reason: string;
+}
+
 // 后端对话响应（chartOption 为 ECharts option JSON）
 export interface ChatResponse {
   answer: string;
@@ -148,6 +155,10 @@ export interface ChatResponse {
   // Phase 6.4：Agent 运行时执行结果（仅 intent=agent_run 时填充；其余为 null）。
   // 由 MessageItem 按字段存在性路由到 AgentResponseCard 渲染（tool 名决定内嵌卡片）。
   agentRun?: import("./agentRuntime").AgentRunRead | null;
+  // Phase 7 G4：未指名 Agent 语义路由建议卡片（仅中置信命中时填充；高置信直接
+  // intent=agent_run，低置信为 null）。由 MessageItem 按字段存在性路由到
+  // SuggestedAgentCard 渲染。
+  suggestedAgent?: AgentSuggestion | null;
 }
 
 // 会话亲和性状态：前 N 轮锁定模型 + 剩余轮数（解锁时为 null）
@@ -207,6 +218,8 @@ export interface ChatMessage {
   graphTraversal?: import("./graphTraversal").GraphTraversalRead | null;
   // Phase 6.4：Agent 运行时执行结果完整对象（仅 intent=agent_run 时回填）
   agentRun?: import("./agentRuntime").AgentRunRead | null;
+  // Phase 7 G4：未指名 Agent 语义路由建议卡片（仅中置信命中时回填，其余 undefined）
+  suggestedAgent?: AgentSuggestion | null;
   // 后端 SessionMessage 主键（PDF 单条导出需要：chatStore 暂未在 sendMessage
   // 完成后回填，故默认 undefined，全局按钮正常工作，单条入口 disabled）
   dbMessageId?: number;

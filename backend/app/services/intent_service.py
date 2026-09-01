@@ -23,6 +23,11 @@ import re
 from dataclasses import dataclass
 
 from app.domain.enums import ChartType, IntentType
+from app.domain.schemas import AgentSuggestion
+from app.services.agent_routing_service import (
+    HIGH_CONFIDENCE,
+    AgentRoutingService,
+)
 from app.services.step_query_planner import StepQueryPlanner
 
 # 命中任一关键词（前缀匹配）即判为闲聊
@@ -308,6 +313,25 @@ def extractSupplierAnyKey(message: str) -> str | None:
         return None
     return match.group("key")
 
+
+# 模块级路由单例（纯关键词评分，无状态）
+_AGENT_ROUTER = AgentRoutingService()
+
+
+def _routeSupplierAgent(message: str) -> AgentSuggestion | None:
+    """未指名 Agent 语义路由入口（Phase 7 G4）。
+
+    门禁（与既有确定性拦截同一语义，防止把 NL2SQL 查询吸走）：
+    - 无供应商编码（``extractSupplierAnyKey``）→ 不路由；
+    - 命中聚合量词（``_SUPPLIER_AGGREGATION_RE``）→ 数值型聚合查询，不路由；
+    - 其余交给 ``AgentRoutingService`` 纯关键词评分，返回建议卡片或 None。
+    """
+    if extractSupplierAnyKey(message) is None:
+        return None
+    if _SUPPLIER_AGGREGATION_RE.search(message) is not None:
+        return None
+    return _AGENT_ROUTER.route(message)
+
 # =============================================================================
 # 斜杠指令（Phase 5）：优先级最高，跳过所有自然语言关键词匹配
 # =============================================================================
@@ -393,6 +417,9 @@ class IntentResult:
     # Phase 7 G3: 仅 GRAPH_REASONING 填充（口语跳数，如「3 跳」→ 3）；
     # None = 未指名，由 service 层默认 2。
     max_hops: int | None = None
+    # Phase 7 G4: 仅 QUERY/NEW_QUERY/FOLLOW_UP 中置信命中时填充（建议卡片）；
+    # AGENT_RUN 高置信命中时填充 agent_code 而非本字段；低置信为 None。
+    suggested_agent: AgentSuggestion | None = None
 
 
 class IntentService:
@@ -466,19 +493,40 @@ class IntentService:
             return self._queryResult(IntentType.REFINE, original)
         if self._isMetricQuery(normalized):
             return IntentResult(intent=IntentType.METRIC)
+        # Phase 7 G4: 未指名 Agent 语义路由（增量：不覆盖既有意图）。
+        # 前序 360/risk/graph/DEFINE/MAP/METRIC 等确定性拦截均未命中，此处尝试
+        # 用关键词评分推断用户隐含的 Agent 诉求：
+        #   置信 ≥ 0.7 → 自动调度 Agent（AGENT_RUN）；
+        #   0.4 ≤ 置信 < 0.7 → 仍走 NL2SQL 但附带 suggested_agent 建议卡片；
+        #   < 0.4（或无供应商编码/命中聚合量词）→ 无建议，纯查询。
+        suggestion = _routeSupplierAgent(original)
+        if suggestion is not None and suggestion.confidence >= HIGH_CONFIDENCE:
+            return IntentResult(
+                intent=IntentType.AGENT_RUN,
+                agent_code=suggestion.recommended_agent_code,
+            )
         if hasPriorState:
             if self._isFollowUp(normalized):
-                return self._queryResult(IntentType.FOLLOW_UP, original)
-            return self._queryResult(IntentType.NEW_QUERY, original)
-        return self._queryResult(IntentType.QUERY, original)
+                return self._queryResult(
+                    IntentType.FOLLOW_UP, original, suggestion=suggestion
+                )
+            return self._queryResult(
+                IntentType.NEW_QUERY, original, suggestion=suggestion
+            )
+        return self._queryResult(IntentType.QUERY, original, suggestion=suggestion)
 
     @staticmethod
-    def _queryResult(intent: IntentType, normalized: str) -> IntentResult:
+    def _queryResult(
+        intent: IntentType,
+        normalized: str,
+        suggestion: AgentSuggestion | None = None,
+    ) -> IntentResult:
         return IntentResult(
             intent=intent,
             dimension=IntentService._extractDimension(normalized),
             metric=IntentService._extractMetric(normalized),
             chartType=IntentService._extractChartType(normalized),
+            suggested_agent=suggestion,
         )
 
     @staticmethod

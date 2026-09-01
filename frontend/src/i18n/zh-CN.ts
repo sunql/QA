@@ -145,6 +145,12 @@ export const zhCN = {
     affinityLocked: "🔒 锁定 {model} · 剩 {turns} 轮",
   },
 
+  suggestedAgent: {
+    title: "建议使用 Agent",
+    confidence: "置信度: {percent}",
+    hint: "可直接输入「用 SUPPLIER_XXX_AGENT …」执行该 Agent",
+  },
+
   supplier360: {
     cardTitle: "供应商 360° 视图",
     fetchedAt: "获取时间：{time}",

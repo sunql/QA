@@ -1281,6 +1281,19 @@ class StepResultRead(CamelModel):
     error: str | None = None
 
 
+class AgentSuggestion(CamelModel):
+    """Chat 未指名 Agent 建议卡片（Phase 7 G4）。
+
+    中置信（0.4 ≤ confidence < 0.7）语义路由命中时，随 QUERY/NEW_QUERY 响应
+    附带，前端渲染「建议使用 X Agent」卡片；高置信（≥ 0.7）直接 AGENT_RUN，
+    不附带此字段。
+    """
+
+    recommended_agent_code: str
+    confidence: float
+    reason: str
+
+
 class ChatResponse(CamelModel):
     answer: str
     intent: str = Field(
@@ -1338,6 +1351,12 @@ class ChatResponse(CamelModel):
     agent_run: AgentRunRead | None = Field(
         default=None,
         description=MSG_SCHEMA_CHAT_AGENT_RUN,
+    )
+    # Phase 7 G4：未指名 Agent 语义路由建议卡片（仅中置信命中时随 QUERY/NEW_QUERY
+    # 附带；高置信直接 intent=agent_run，低置信无此字段；前端按字段存在性渲染）
+    suggested_agent: AgentSuggestion | None = Field(
+        default=None,
+        description="中置信语义路由建议卡片：推荐执行某个 Agent（推荐编码 + 置信度 + 理由）",
     )
 
 

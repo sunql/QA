@@ -268,6 +268,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             supplier360,
             supplierRisk,
             graphTraversal,
+            suggestedAgent,
           }) =>
             set((state) => ({
               messages: finalizeRunningSteps(
@@ -283,6 +284,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   supplier360: supplier360 ?? null,
                   supplierRisk: supplierRisk ?? null,
                   graphTraversal: graphTraversal ?? null,
+                  // Phase 7 G4：中置信语义路由建议卡片随 done 帧回填
+                  suggestedAgent: suggestedAgent ?? null,
                 })
               ),
               loading: false,
@@ -326,6 +329,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             graphTraversal: res.graphTraversal ?? null,
             // Phase 6.4：Agent 运行时执行结果（仅 intent=agent_run 时非 null）
             agentRun: res.agentRun ?? null,
+            // Phase 7 G4：中置信语义路由建议卡片（仅命中时非 null）
+            suggestedAgent: res.suggestedAgent ?? null,
             // 非流式多步：steps 数组均为「已完成」（后端仅回传数据步骤，无汇总步骤）
             steps: res.steps?.map(
               (s): MultiStepStep => ({

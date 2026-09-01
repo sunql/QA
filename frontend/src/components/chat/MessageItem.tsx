@@ -12,6 +12,7 @@ import Supplier360Card from "./Supplier360Card";
 import SupplierRiskCard from "./SupplierRiskCard";
 import GraphTraversalCard from "./GraphTraversalCard";
 import AgentResponseCard from "./AgentResponseCard";
+import SuggestedAgentCard from "./SuggestedAgentCard";
 import type { ChatMessage } from "../../types/chat";
 import { useTranslation } from "../../i18n";
 
@@ -128,6 +129,12 @@ function MessageItem({ message, exporting = false, onExportSingleTurn }: Message
             {message.agentRun ? (
               <div style={{ marginTop: 8 }}>
                 <AgentResponseCard data={message.agentRun} />
+              </div>
+            ) : null}
+            {/* Phase 7 G4：未指名 Agent 语义路由建议卡片（中置信命中时随查询响应回填） */}
+            {message.suggestedAgent ? (
+              <div style={{ marginTop: 8 }}>
+                <SuggestedAgentCard data={message.suggestedAgent} />
               </div>
             ) : null}
             {message.tokensUsed !== undefined ||

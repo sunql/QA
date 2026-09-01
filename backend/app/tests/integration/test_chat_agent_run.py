@@ -44,6 +44,7 @@ from app.domain.models import (
     SessionTokenUsage,
 )
 from app.domain.schemas import AgentAccessPolicyCreate, AgentDefinitionCreate
+from app.infrastructure.llm.base_client import StreamChunk
 from app.services.agent_registry_service import AgentRegistryService
 
 AUTH_HEADERS = {"X-User-Id": "tester", "X-User-Tenant": "default"}
@@ -212,6 +213,16 @@ class _NoopLlm:
         else:
             _Resp.content = "ok"
         return _Resp()
+
+    async def completeStream(self, messages: list, **kwargs):
+        """回答流（G4 中置信建议卡片测试走 _streamQuery）：两段增量 + 末块统计。"""
+        for piece in ("查询完成，", "结果如下。"):
+            yield StreamChunk(
+                content=piece, isDone=False, promptTokens=0, completionTokens=0, modelName="test-model"
+            )
+        yield StreamChunk(
+            content="", isDone=True, promptTokens=1, completionTokens=1, modelName="test-model"
+        )
 
 
 class _RouterForConfig:
@@ -527,3 +538,168 @@ async def test_chat_supplier_risk_stream_routes_card(
     assert risk is not None, f"done 帧缺 supplierRisk: {doneFrames}"
     assert risk["level"] == "high"
     assert doneFrames[0][1].get("agentRun") is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 G4：未指名 Agent 语义路由（增量：不覆盖既有意图）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_chat_semantic_routing_high_confidence_auto_runs_agent(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """「供应商 100001 是否可靠合规」→ 高置信（≥0.7）自动调度 SUPPLIER_RISK_AGENT。
+
+    与显式指名不同，本条不含 _AGENT token；由语义路由在既有确定性拦截
+    （360/risk/graph）均未命中后，经关键词评分提升为 AGENT_RUN。
+    """
+    await _seedDatasource(dbSession)
+    await _seedAgent(dbSession, "SUPPLIER_RISK_AGENT")
+    await _seedSupplier(dbSession, 100001, "SUP000001")
+    await _seedFeatureAndValue(
+        dbSession, 1, "SUPPLIER_RISK_SCORE", "SUP000001", 0.50,
+        unit="score", window="12M",
+    )
+    await _setupChatFakes(monkeypatch, dbSession)
+
+    resp = await client.post(
+        "/api/v1/chat",
+        headers=AUTH_HEADERS,
+        json={
+            "sessionId": "test-agent-run-g4-1",
+            "question": "供应商 100001 是否可靠合规",
+            "datasourceId": _CHAT_DATASOURCE_ID,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["intent"] == "agent_run"
+    run = body["agentRun"]
+    assert run is not None, f"agent_run 卡片缺失: {body}"
+    assert run["agentCode"] == "SUPPLIER_RISK_AGENT"
+    assert run["tool"] == "supplier_risk"
+    # 语义路由高置信路径不会附带建议卡片（已直接调度）
+    assert body.get("suggestedAgent") is None
+
+
+@pytest.mark.asyncio
+async def test_chat_semantic_routing_medium_confidence_suggests_card(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """「供应商 100001 表现怎么样」→ 中置信（0.4）仍走 NL2SQL + suggestedAgent 卡片。
+
+    建议卡片字段（recommendedAgentCode / confidence / reason）随响应透传，
+    前端按字段存在性渲染。
+    """
+    await _seedDatasource(dbSession)
+    await _seedSupplier(dbSession, 100001, "SUP000001")
+    await _setupChatFakes(monkeypatch, dbSession)
+
+    resp = await client.post(
+        "/api/v1/chat",
+        headers=AUTH_HEADERS,
+        json={
+            "sessionId": "test-agent-run-g4-2",
+            "question": "供应商 100001 表现怎么样",
+            "datasourceId": _CHAT_DATASOURCE_ID,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # 中置信不覆盖 NL2SQL：仍是查询意图
+    assert body["intent"] in ("query", "new_query")
+    assert body.get("agentRun") is None
+    suggestion = body.get("suggestedAgent")
+    assert suggestion is not None, f"suggestedAgent 卡片缺失: {body}"
+    assert suggestion["recommendedAgentCode"] == "SUPPLIER_360_AGENT"
+    assert 0.4 <= suggestion["confidence"] < 0.7
+    assert suggestion["reason"]
+
+
+@pytest.mark.asyncio
+async def test_chat_semantic_routing_low_confidence_no_card(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """「供应商 100001 的联系人」→ 无 Agent 关键词 → 无建议卡片（低置信护栏）。"""
+    await _seedDatasource(dbSession)
+    await _seedSupplier(dbSession, 100001, "SUP000001")
+    await _setupChatFakes(monkeypatch, dbSession)
+
+    resp = await client.post(
+        "/api/v1/chat",
+        headers=AUTH_HEADERS,
+        json={
+            "sessionId": "test-agent-run-g4-3",
+            "question": "供应商 100001 的联系人",
+            "datasourceId": _CHAT_DATASOURCE_ID,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["intent"] in ("query", "new_query")
+    assert body.get("agentRun") is None
+    assert body.get("suggestedAgent") is None
+
+
+@pytest.mark.asyncio
+async def test_chat_semantic_routing_aggregation_not_hijacked(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """「供应商 100001 关联的采购订单总金额」→ 聚合量词兜底，纯 NL2SQL 无卡片。
+
+    即使问法含「关联」（GRAPH_REASONING_AGENT 关键词），金额量词使其判为
+    数值型聚合查询，语义路由被门禁拒绝，NL2SQL 不被吸走。
+    """
+    await _seedDatasource(dbSession)
+    await _seedSupplier(dbSession, 100001, "SUP000001")
+    await _setupChatFakes(monkeypatch, dbSession)
+
+    resp = await client.post(
+        "/api/v1/chat",
+        headers=AUTH_HEADERS,
+        json={
+            "sessionId": "test-agent-run-g4-4",
+            "question": "供应商 100001 关联的采购订单总金额是多少",
+            "datasourceId": _CHAT_DATASOURCE_ID,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["intent"] in ("query", "new_query")
+    assert body.get("agentRun") is None
+    assert body.get("suggestedAgent") is None
+
+
+@pytest.mark.asyncio
+async def test_chat_semantic_routing_stream_done_carries_card(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """中置信语义路由建议卡片随 /chat/stream done 帧透传（默认 UI 全走流式）。
+
+    前端依赖 done 帧的 suggestedAgent 字段存在性渲染 SuggestedAgentCard。
+    """
+    await _seedDatasource(dbSession)
+    await _seedSupplier(dbSession, 100001, "SUP000001")
+    await _setupChatFakes(monkeypatch, dbSession)
+
+    resp = await client.post(
+        "/api/v1/chat/stream",
+        headers=AUTH_HEADERS,
+        json={
+            "sessionId": "test-agent-run-g4-stream-1",
+            "question": "供应商 100001 表现怎么样",
+            "datasourceId": _CHAT_DATASOURCE_ID,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    frames = _parseFrames(resp.text)
+    assert frames[0][0] == "meta"
+    assert frames[0][1]["intent"] in ("query", "new_query")
+    doneFrames = [f for f in frames if f[0] == "done"]
+    assert len(doneFrames) == 1
+    suggestion = doneFrames[0][1].get("suggestedAgent")
+    assert suggestion is not None, f"done 帧缺 suggestedAgent: {doneFrames}"
+    assert suggestion["recommendedAgentCode"] == "SUPPLIER_360_AGENT"
+    assert 0.4 <= suggestion["confidence"] < 0.7

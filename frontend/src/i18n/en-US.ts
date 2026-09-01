@@ -140,6 +140,12 @@ export const enUS = {
     affinityLocked: "🔒 Locked to {model} · {turns} turns remaining",
   },
 
+  suggestedAgent: {
+    title: "Suggested Agent",
+    confidence: "Confidence: {percent}",
+    hint: "Type \"use SUPPLIER_XXX_AGENT …\" to run this agent",
+  },
+
   supplier360: {
     cardTitle: "Supplier 360° View",
     fetchedAt: "Fetched at: {time}",

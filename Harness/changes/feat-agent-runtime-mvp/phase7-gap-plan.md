@@ -14,7 +14,7 @@
 | G1 Neo4j 同步阻塞 | `fix-neo4j-async-traverse` | P1 | 后端 service | 3 | ✅ 已交付 |
 | G2 Token 审计拆分 | `feat-token-usage-split` | P1 | 后端 DTO + service | 5 | ✅ 已交付 |
 | G3 图遍历 > 2-hop | `feat-graph-traversal-chat-hops` | P2 | 后端 intent + service | 4 | ✅ 已交付 |
-| G4 Chat 语义路由 | `feat-agent-semantic-routing` | P2 | 后端 intent + 前端 chat | 6 | 待实现 |
+| G4 Chat 语义路由 | `feat-agent-semantic-routing` | P2 | 后端 intent + 前端 chat | 6 | ✅ 已交付 |
 | G5 批量调度 | `feat-agent-scheduler` | P2 | 后端 model + API + scheduler | 8 | 待实现 |
 | G6 data_layers 防漂移 | `feat-agent-tool-layer-contract` | P1 | 后端 registry + 测试 | 3 | ✅ 已交付 |
 
@@ -130,6 +130,10 @@ Chat 图推理问法可携带跳数；无跳数时默认 2，有跳数时按语�
 ---
 
 ## G4：Chat 未指名 Agent 的语义路由
+
+> ✅ **已交付**（commit `feat: chat agent semantic routing`）。SSOT：`change-feat-agent-semantic-routing.md`。
+> 落地偏离：关键词评分（`confidence = 命中数 × 0.4`）替代计划中的分词 + 元数据匹配（零 Token 成本，防漂移）；
+> 建议卡片按字段存在性渲染替代「一键触发」交互（V1 仅展示 + 提示显式指名，交互留作后续）。
 
 ### 问题
 当前只有用户显式写出 `*_AGENT` 才触发 `AGENT_RUN`；普通问法如「评估供应商 100001 风险」仍走 NL2SQL，不会自动调用风险 Agent。

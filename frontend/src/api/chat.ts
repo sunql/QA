@@ -116,6 +116,8 @@ export interface StreamSummary {
   supplier360?: import("../types/supplier").Supplier360Read | null;
   supplierRisk?: import("../types/supplierRisk").SupplierRiskRead | null;
   graphTraversal?: import("../types/graphTraversal").GraphTraversalRead | null;
+  // Phase 7 G4：未指名 Agent 语义路由建议卡片（中置信命中时随 done 帧透传）
+  suggestedAgent?: import("../types/chat").AgentSuggestion | null;
 }
 
 // data_quality 事件负载（Phase 1.4）：每张 selectedClass 对应一条 badge
@@ -247,6 +249,15 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
         cost: typeof d.cost === "number" ? d.cost : 0,
         modelName: typeof d.modelName === "string" ? d.modelName : null,
         affinityStatus: (d.affinityStatus as AffinityStatus | null) ?? null,
+        // Phase 6.4/7 G4：done 帧携带拦截类卡片对象（此前前端解析丢弃全部卡片字段，
+        // 导致默认 streaming UI 下 agent_run/supplier360/risk/graph/suggestedAgent
+        // 卡片从未渲染——G4 审查 HIGH 修复）。与后端 _streamInterceptCard /
+        // _streamQuery done 帧的 model_dump(by_alias) 形状对齐。
+        agentRun: (d.agentRun as StreamSummary["agentRun"]) ?? null,
+        supplier360: (d.supplier360 as StreamSummary["supplier360"]) ?? null,
+        supplierRisk: (d.supplierRisk as StreamSummary["supplierRisk"]) ?? null,
+        graphTraversal: (d.graphTraversal as StreamSummary["graphTraversal"]) ?? null,
+        suggestedAgent: (d.suggestedAgent as StreamSummary["suggestedAgent"]) ?? null,
       });
       break;
     case "error":

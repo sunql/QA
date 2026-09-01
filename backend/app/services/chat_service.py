@@ -52,6 +52,7 @@ from app.domain.multi_step_plan import (
 from app.domain.query_plan import QueryPlan, planToText
 from app.domain.schemas import (
     AffinityStatus,
+    AgentSuggestion,
     ChatRequest,
     ChatResponse,
     DataQualityBadge,
@@ -401,6 +402,28 @@ class ChatService(ChatStreamOutputMixin):
         if result.intent == IntentType.AGENT_RUN:
             return await self._handleAgentRun(session, dto, result, user=user)
 
+        response = await self._handleGenericQuery(session, dto, result, state)
+        # Phase 7 G4：中置信语义路由命中的建议卡片附到响应。仅 QUERY/NEW_QUERY/
+        # FOLLOW_UP 在 classifyResult 中携带 result.suggested_agent；其余意图该
+        # 字段为 None 不附加。model_copy 保持不可变风格（不改原响应对象）。
+        if result.suggested_agent is not None and response.suggested_agent is None:
+            response = response.model_copy(
+                update={"suggested_agent": result.suggested_agent}
+            )
+        return response
+
+    async def _handleGenericQuery(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        result: IntentResult,
+        state: SessionQueryState | None,
+    ) -> ChatResponse:
+        """通用查询流水线（CLARIFY + 多步拆解 + NL2SQL 单步）。
+
+        Phase 7 G4 从 processMessage 抽出：语义路由建议卡片在 processMessage
+        统一附加到响应，避免在多条返回路径上重复拼接。
+        """
         pc = await self._buildPipelineContext(
             session, dto,
             needFewShot=result.intent != IntentType.CLARIFY,
@@ -1615,7 +1638,8 @@ class ChatService(ChatStreamOutputMixin):
                     yield event
                 return
             async for event in self._streamQuery(
-                dto, session, result.intent, state, result.chartType
+                dto, session, result.intent, state, result.chartType,
+                suggestion=result.suggested_agent,
             ):
                 yield event
         except LlmClientError as exc:
@@ -1738,8 +1762,13 @@ class ChatService(ChatStreamOutputMixin):
     async def _streamQuery(
         self, dto: ChatRequest, session: AsyncSession, intent: IntentType, state: SessionQueryState | None,
         intentChartType: ChartType | None = None,
+        suggestion: AgentSuggestion | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """查询意图的流式流水线：plan → sql → chart → token×N → done（含持久化与状态保存）。"""
+        """查询意图的流式流水线：plan → sql → chart → token×N → done（含持久化与状态保存）。
+
+        suggestion（Phase 7 G4）：中置信语义路由命中的建议卡片，随 done 帧透传；
+        前端按字段存在性渲染 SuggestedAgentCard。
+        """
         pc = await self._buildPipelineContext(
             session, dto,
             needFewShot=intent != IntentType.CLARIFY,
@@ -1757,6 +1786,7 @@ class ChatService(ChatStreamOutputMixin):
                     async for event in self._streamMultiStep(
                         dto, session, pc, multi_plan, state,
                         initial_tokens=step_tokens, initial_cost=step_cost,
+                        suggestion=suggestion,
                     ):
                         yield event
                     return
@@ -1770,6 +1800,7 @@ class ChatService(ChatStreamOutputMixin):
                     async for event in self._streamMultiStep(
                         dto, session, pc, multi_plan, state,
                         initial_tokens=step_tokens, initial_cost=step_cost,
+                        suggestion=suggestion,
                     ):
                         yield event
                     return
@@ -1815,6 +1846,11 @@ class ChatService(ChatStreamOutputMixin):
                     # 计划由实际服务模型（可能为降级后的 fallback）生成，如实上报
                     "modelName": affinityConfig.model_name,
                     "affinityStatus": affinityPayload,
+                    "suggestedAgent": (
+                        suggestion.model_dump(mode="json", by_alias=True)
+                        if suggestion is not None
+                        else None
+                    ),
                 },
             )
             return
@@ -1866,6 +1902,11 @@ class ChatService(ChatStreamOutputMixin):
                     "cost": featureResp.cost,
                     "modelName": featureResp.modelName,
                     "affinityStatus": affinityPayload,
+                    "suggestedAgent": (
+                        suggestion.model_dump(mode="json", by_alias=True)
+                        if suggestion is not None
+                        else None
+                    ),
                 },
             )
             return
@@ -1889,6 +1930,7 @@ class ChatService(ChatStreamOutputMixin):
                     async for event in self._streamMultiStep(
                         dto, session, pc, detected.plan, state,
                         initial_tokens=prior_tokens, initial_cost=prior_cost,
+                        suggestion=suggestion,
                     ):
                         yield event
                     return
@@ -1987,6 +2029,11 @@ class ChatService(ChatStreamOutputMixin):
                 "cost": float(totalCost),
                 "modelName": answerModelName,
                 "affinityStatus": affinityPayload,
+                "suggestedAgent": (
+                    suggestion.model_dump(mode="json", by_alias=True)
+                    if suggestion is not None
+                    else None
+                ),
             },
         )
 
@@ -2000,6 +2047,7 @@ class ChatService(ChatStreamOutputMixin):
         *,
         initial_tokens: int = 0,
         initial_cost: Decimal = Decimal("0"),
+        suggestion: AgentSuggestion | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """多步查询的流式事件序列：step_plan/step_result × N → token(汇总) → done。
 
@@ -2009,6 +2057,9 @@ class ChatService(ChatStreamOutputMixin):
 
         initial_tokens/initial_cost：进入多步前已消耗的 token/成本（拆步判定、或
         单步失败回退时已消耗的单步生成），计入 done 事件的 tokensUsed/cost。
+
+        suggestion（Phase 7 G4）：中置信语义路由建议卡片随 done 帧透传，
+        与 _streamQuery 的 done 帧口径一致（G4 审查 MEDIUM 修复）。
         """
         ctx = StepExecutionContext(
             datasource_type=pc.ds.type,
@@ -2093,6 +2144,8 @@ class ChatService(ChatStreamOutputMixin):
                         "modelName": last_model_name,
                         "affinityStatus": affinity_payload,
                         "steps": [_step_result_to_read(s).model_dump(by_alias=True) for s in completed],
+                        "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)
+                        if suggestion is not None else None,
                     },
                 )
                 return
@@ -2167,6 +2220,8 @@ class ChatService(ChatStreamOutputMixin):
                 "tokensUsed": total_tokens,
                 "cost": float(total_cost),
                 "modelName": last_model_name,
+                "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)
+                if suggestion is not None else None,
             },
         )
 

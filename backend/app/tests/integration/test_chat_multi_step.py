@@ -344,3 +344,44 @@ class TestMultiStepChatStreamApi:
         # done 事件携带 steps 数组
         done = frames[-1][1]
         assert len(done["steps"]) == 2
+
+    async def test_stream_multi_step_done_carries_suggested_agent(self, client, dbSession, monkeypatch) -> None:
+        """G4 审查 MEDIUM 修复回归：多步路径 done 帧携带中置信建议卡片。
+
+        中置信语义路由（「表现」单关键词 → SUPPLIER_360_AGENT 0.4）+ 显式分步
+        请求同时命中：意图为 query（非 AGENT_RUN），走 _streamMultiStep，
+        其 done 帧必须随 suggestedAgent 透传，否则前端默认 streaming UI 下
+        建议卡片在多步场景永不渲染。
+        """
+        config, ds = await _seed(dbSession)
+        llm = _MultiStepLlm()
+        adapter = _OkAdapter()
+        _install(monkeypatch, config, llm, adapter)
+
+        resp = await client.post(
+            "/api/v1/chat/stream",
+            json=_payload("请分步查询供应商 100001 近两年的表现并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        frames: list[tuple[str, dict]] = []
+        for block in resp.text.split("\n\n"):
+            if not block.strip():
+                continue
+            event: str | None = None
+            data: dict = {}
+            for line in block.split("\n"):
+                if line.startswith("event: "):
+                    event = line[len("event: "):]
+                elif line.startswith("data: "):
+                    data = json.loads(line[len("data: "):])
+            frames.append((event or "", data))
+
+        events = [e for e, _ in frames]
+        assert events[-1] == EVENT_DONE
+        done = frames[-1][1]
+        # 多步完成帧透传中置信建议卡片（camelCase 别名）
+        suggestion = done.get("suggestedAgent")
+        assert suggestion is not None
+        assert suggestion["recommendedAgentCode"] == "SUPPLIER_360_AGENT"
+        assert suggestion["confidence"] == 0.4

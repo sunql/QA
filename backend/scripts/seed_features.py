@@ -128,11 +128,14 @@ FEATURE_SEEDS: list[dict[str, Any]] = [
         "feature_alias": "物料缺货风险",
         "feature_definition": "物料价格波动率代理的缺货风险（价格波动越大，供应越不稳定）；暂无库存缺料 DWS。",
         "entity_type": EntityType.MATERIAL.value,
+        # HAVING price_line_count>=3 过滤样本不足的物料：12M 全量去重后 39456 个物料_code
+        # 远超 10000 行上限；价格波动率对仅 1-2 条记录的物料无统计意义，过滤后 7089 个。
         "calculation_logic": (
             "SELECT material_code AS entity_key, "
             "AVG((max_net_unit_price - min_net_unit_price) / NULLIF(min_net_unit_price, 0)) AS value "
             f"FROM THBI.DWS_MATERIAL_PRICE_MONTHLY WHERE {_WINDOW_12M} "
-            "GROUP BY material_code"
+            "GROUP BY material_code "
+            "HAVING SUM(price_line_count) >= 3"
         ),
         "window_size": "12M",
         "refresh_frequency": FeatureRefreshFrequency.MONTHLY.value,

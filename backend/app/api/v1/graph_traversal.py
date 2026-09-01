@@ -53,7 +53,7 @@ async def traverse(
             detail=f"Invalid startType: {startType!r}，合法值：{VALID_START_TYPES}",
         )
     try:
-        return service.traverse(startType, startKey, maxHops)
+        return await service.traverse(startType, startKey, maxHops)
     except ValueError as exc:
         # maxHops 越界（Query 校验兜底；service 层二次防御）
         raise HTTPException(status_code=422, detail=str(exc)) from exc

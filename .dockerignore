@@ -1,0 +1,32 @@
+# ===== 宿主机状态污染镜像（关键！）=====
+# 本机 backend/.venv 是 macOS Python 3.14 build 的，
+# 不加这个 .dockerignore 会让 Docker COPY 把它整个拷进镜像，
+# baked venv 软链指向 /opt/homebrew/...，容器里完全不可用。
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.mypy_cache/
+
+# ===== 前端构建产物（不需要塞进 backend 镜像）=====
+frontend/dist/
+frontend/node_modules/
+frontend/coverage/
+
+# ===== git / IDE =====
+.git/
+.idea/
+.vscode/
+.DS_Store
+
+# ===== Harness / docs =====
+Harness/
+docs/
+*.md
+!backend/README.md
+
+# ===== 其他 =====
+node_modules/
+.claude/
+.superpowers/
+migration/
+*.log

@@ -1382,7 +1382,7 @@ class ChatService(ChatStreamOutputMixin):
                 intent=result.intent.value,
             )
         try:
-            traversal = self._graphTraversal.traverseForChat(str(supplierKey))
+            traversal = await self._graphTraversal.traverseForChat(str(supplierKey))
             answer = self._graphTraversal.buildChatAnswer(traversal)
         except NotFoundError:
             return ChatResponse(

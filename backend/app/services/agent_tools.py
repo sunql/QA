@@ -150,7 +150,7 @@ async def _graphTraverseHandler(
     session: AsyncSession, args: dict, ctx: AgentToolContext
 ) -> ToolResult:
     service = GraphTraversalService()
-    traversal = service.traverseForChat(str(args["key"]))
+    traversal = await service.traverseForChat(str(args["key"]))
     return ToolResult(
         data=traversal.model_dump(mode="json", by_alias=True),
         answer=service.buildChatAnswer(traversal),

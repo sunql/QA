@@ -9,6 +9,7 @@
 - intent 检测：图推理问法命中 / 与 360 / 风险问法不冲突。
 
 Neo4j driver 用 mock（同 test_graph_relation_service 模式）。
+Phase 7 G1：traverse / traverseForChat 已 async 化，测试需 await。
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ from __future__ import annotations
 import pytest
 
 import app.infrastructure.neo4j_client as neo4j_module
+import asyncio
+
 from app.domain.exceptions import NotFoundError
 from app.services.graph_traversal_service import GraphTraversalService
 from app.services.intent_service import IntentService
@@ -107,22 +110,22 @@ def mockNeo4j(monkeypatch: pytest.MonkeyPatch) -> _MockDriver:
 
 
 class TestTraverseValidation:
-    def test_rejects_unknown_label(self, mockNeo4j) -> None:
+    async def test_rejects_unknown_label(self, mockNeo4j) -> None:
         with pytest.raises(ValueError, match="Invalid business entity label"):
-            GraphTraversalService().traverse("Class", "100001", 2)
+            await GraphTraversalService().traverse("Class", "100001", 2)
 
-    def test_rejects_max_hops_zero(self, mockNeo4j) -> None:
+    async def test_rejects_max_hops_zero(self, mockNeo4j) -> None:
         with pytest.raises(ValueError, match="maxHops"):
-            GraphTraversalService().traverse("Supplier", "100001", 0)
+            await GraphTraversalService().traverse("Supplier", "100001", 0)
 
-    def test_rejects_max_hops_over_limit(self, mockNeo4j) -> None:
+    async def test_rejects_max_hops_over_limit(self, mockNeo4j) -> None:
         with pytest.raises(ValueError, match="maxHops"):
-            GraphTraversalService().traverse("Supplier", "100001", 6)
+            await GraphTraversalService().traverse("Supplier", "100001", 6)
 
-    def test_node_not_found(self, mockNeo4j) -> None:
+    async def test_node_not_found(self, mockNeo4j) -> None:
         mockNeo4j.nodeExists = False
         with pytest.raises(NotFoundError):
-            GraphTraversalService().traverse("Supplier", "999999", 2)
+            await GraphTraversalService().traverse("Supplier", "999999", 2)
 
 
 # =============================================================================
@@ -131,13 +134,13 @@ class TestTraverseValidation:
 
 
 class TestTraverseResults:
-    def test_hops_and_reachable_types(self, mockNeo4j) -> None:
+    async def test_hops_and_reachable_types(self, mockNeo4j) -> None:
         mockNeo4j.hopRows = [
             _hopRow(1, "100001", "SUPPLIES", "200001", "Material", "RM-STEEL-001"),
             _hopRow(1, "100001", "SIGNED", "DOC-1", "Contract", "DOC-1"),
             _hopRow(2, "100001", "CONTAINS", "300001", "PurchaseOrder", "PO202608001"),
         ]
-        result = GraphTraversalService().traverse("Supplier", "100001", 2)
+        result = await GraphTraversalService().traverse("Supplier", "100001", 2)
         assert len(result.hops) == 3
         assert result.reachable_types == ["Contract", "Material", "PurchaseOrder"]
         assert result.hops[0].rel_type == "SUPPLIES"
@@ -145,9 +148,9 @@ class TestTraverseResults:
         assert result.start_type == "Supplier"
         assert result.max_hops == 2
 
-    def test_empty_hops_no_types(self, mockNeo4j) -> None:
+    async def test_empty_hops_no_types(self, mockNeo4j) -> None:
         mockNeo4j.hopRows = []
-        result = GraphTraversalService().traverse("Supplier", "100001", 2)
+        result = await GraphTraversalService().traverse("Supplier", "100001", 2)
         assert result.hops == []
         assert result.reachable_types == []
 
@@ -158,44 +161,44 @@ class TestTraverseResults:
 
 
 class TestBuildChatAnswer:
-    def test_empty_hops_message(self, mockNeo4j) -> None:
+    async def test_empty_hops_message(self, mockNeo4j) -> None:
         mockNeo4j.hopRows = []
         service = GraphTraversalService()
-        result = service.traverse("Supplier", "100001", 2)
+        result = await service.traverse("Supplier", "100001", 2)
         answer = service.buildChatAnswer(result)
         assert "2 跳内无关联业务实体" in answer
 
-    def test_groups_by_type(self, mockNeo4j) -> None:
+    async def test_groups_by_type(self, mockNeo4j) -> None:
         mockNeo4j.hopRows = [
             _hopRow(1, "100001", "SUPPLIES", "200001", "Material", "RM-STEEL-001"),
             _hopRow(1, "100001", "SUPPLIES", "200002", "Material", "RM-STEEL-002"),
             _hopRow(1, "100001", "SIGNED", "DOC-1", "Contract", "DOC-1"),
         ]
         service = GraphTraversalService()
-        result = service.traverse("Supplier", "100001", 1)
+        result = await service.traverse("Supplier", "100001", 1)
         answer = service.buildChatAnswer(result)
         assert "2 个物料" in answer
         assert "1 个合同" in answer
         assert "RM-STEEL-001" in answer
 
-    def test_dedup_codes_within_type(self, mockNeo4j) -> None:
+    async def test_dedup_codes_within_type(self, mockNeo4j) -> None:
         """同一实体经多条路径可达 -> 计数按去重编码。"""
         mockNeo4j.hopRows = [
             _hopRow(1, "100001", "SUPPLIES", "200001", "Material", "RM-STEEL-001"),
             _hopRow(2, "100001", "CONTAINS", "200001", "Material", "RM-STEEL-001"),
         ]
         service = GraphTraversalService()
-        result = service.traverse("Supplier", "100001", 2)
+        result = await service.traverse("Supplier", "100001", 2)
         answer = service.buildChatAnswer(result)
         assert "1 个物料" in answer
 
-    def test_long_result_truncation_hint(self, mockNeo4j) -> None:
+    async def test_long_result_truncation_hint(self, mockNeo4j) -> None:
         mockNeo4j.hopRows = [
             _hopRow(1, "100001", "SUPPLIES", f"20000{i}", "Material", f"RM-{i}")
             for i in range(25)
         ]
         service = GraphTraversalService()
-        result = service.traverse("Supplier", "100001", 1)
+        result = await service.traverse("Supplier", "100001", 1)
         answer = service.buildChatAnswer(result)
         assert "仅列前 8 个编码" in answer
 
@@ -206,13 +209,34 @@ class TestBuildChatAnswer:
 
 
 class TestTraverseForChat:
-    def test_default_two_hops_supplier_start(self, mockNeo4j) -> None:
+    async def test_default_two_hops_supplier_start(self, mockNeo4j) -> None:
         mockNeo4j.hopRows = [
             _hopRow(1, "100001", "SUPPLIES", "200001", "Material", "RM-STEEL-001"),
         ]
-        result = GraphTraversalService().traverseForChat("100001")
+        result = await GraphTraversalService().traverseForChat("100001")
         assert result.start_type == "Supplier"
         assert result.max_hops == 2
+
+    async def test_traverse_does_not_block_event_loop(self, mockNeo4j) -> None:
+        """G1 回归：Neo4j 同步调用必须经 asyncio.to_thread，不能阻塞事件循环。"""
+        mockNeo4j.hopRows = [
+            _hopRow(1, "100001", "SUPPLIES", "200001", "Material", "RM-STEEL-001"),
+        ]
+        service = GraphTraversalService()
+        other_ran = False
+
+        async def other_task() -> None:
+            nonlocal other_ran
+            other_ran = True
+
+        async def slow_traverse() -> None:
+            return await service.traverse("Supplier", "100001", 2)
+
+        traverse_task = asyncio.create_task(slow_traverse())
+        other = asyncio.create_task(other_task())
+        await asyncio.gather(traverse_task, other)
+        assert other_ran
+        assert traverse_task.result().hops[0].to_key == "200001"
 
     def test_unavailable_message_constant(self) -> None:
         """降级文案非空且含可操作提示（防误删常量）。"""

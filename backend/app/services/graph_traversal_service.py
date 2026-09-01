@@ -15,10 +15,12 @@
 - 空结果：节点存在但无可达边 -> hops=[] + 空结果消息（200 语义，非 404）；
 - Chat 集成：问句抽取 supplierKey -> 从 Supplier 起点 2 跳遍历 -> answer
   由模板合成（列出可达实体类型 + 数量，不调 LLM，保持响应稳定）。
+- 异步化：Neo4j 官方驱动同步调用，用 ``asyncio.to_thread`` 包装，避免阻塞事件循环。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from app.domain.error_messages import (
@@ -39,7 +41,7 @@ _CHAT_DEFAULT_HOPS = 2
 class GraphTraversalService:
     """业务关系图多跳遍历器。"""
 
-    def traverse(
+    async def traverse(
         self, startType: str, startKey: str, maxHops: int = 3
     ) -> GraphTraversalRead:
         """从起始实体做多跳遍历（方向不限）。
@@ -55,14 +57,17 @@ class GraphTraversalService:
             )
 
         # 起点存在性（白名单校验在 getBusinessNode 内，非法 label -> ValueError）
-        node = neo4j.getBusinessNode(startType, startKey)
+        node = await asyncio.to_thread(neo4j.getBusinessNode, startType, startKey)
         if node is None:
             raise NotFoundError(
                 MSG_GRAPH_TRAVERSAL_NOT_FOUND.format(label=startType, key=startKey)
             )
 
-        rows = neo4j.traverseBusinessGraph(
-            startLabel=startType, startKey=startKey, maxHops=maxHops
+        rows = await asyncio.to_thread(
+            neo4j.traverseBusinessGraph,
+            startLabel=startType,
+            startKey=startKey,
+            maxHops=maxHops,
         )
         hops = [GraphTraversalHop(**row) for row in rows]
         reachableTypes = sorted({h.to_type for h in hops})
@@ -75,13 +80,13 @@ class GraphTraversalService:
             reachable_types=reachableTypes,
         )
 
-    def traverseForChat(self, supplierKey: str) -> GraphTraversalRead:
+    async def traverseForChat(self, supplierKey: str) -> GraphTraversalRead:
         """Chat 推理路径：供应商起点、默认 2 跳。
 
         与 traverse 的差异：起点固定 Supplier（问句已抽取 key）、
         深度取 _CHAT_DEFAULT_HOPS（避免深跳导致 answer 冗长）。
         """
-        return self.traverse("Supplier", supplierKey, _CHAT_DEFAULT_HOPS)
+        return await self.traverse("Supplier", supplierKey, _CHAT_DEFAULT_HOPS)
 
     def buildChatAnswer(self, result: GraphTraversalRead) -> str:
         """把遍历结果合成自然语言 answer（模板，不调 LLM）。

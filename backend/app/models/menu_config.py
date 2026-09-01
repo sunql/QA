@@ -60,6 +60,7 @@ class MenuConfig(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_menu_config_parent", "parent_id"),
         Index("ix_menu_config_visible_sort", "visible", "sort_order"),
+        Index("ix_menu_config_parent_sort", "parent_id", "sort_order", "id"),
     )
 
     def __repr__(self) -> str:  # pragma: no cover

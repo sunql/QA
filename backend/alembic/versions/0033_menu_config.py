@@ -63,9 +63,15 @@ def upgrade() -> None:
         "menu_config",
         ["parent_id", "sort_order", "id"],
     )
+    op.create_index(
+        "ix_menu_config_visible_sort",
+        "menu_config",
+        ["visible", "sort_order"],
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("ix_menu_config_visible_sort", table_name="menu_config")
     op.drop_index("ix_menu_config_parent_sort", table_name="menu_config")
     op.drop_index("ix_menu_config_parent", table_name="menu_config")
     op.drop_table("menu_config")

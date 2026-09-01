@@ -47,6 +47,7 @@ from app.services.agent_tools import (
     AgentToolRegistry,
     agent_tool_registry,
 )
+from app.services.supplier_name_resolver import SupplierNameResolver
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +76,11 @@ class AgentRuntimeService:
         *,
         registry: AgentToolRegistry | None = None,
         agentService: AgentRegistryService | None = None,
+        resolver: SupplierNameResolver | None = None,  # Phase 6.5：名字→编码预解析
     ) -> None:
         self._registry = registry or agent_tool_registry
         self._agents = agentService or AgentRegistryService()
+        self._resolver = resolver or SupplierNameResolver()
 
     async def run(
         self,
@@ -110,6 +113,11 @@ class AgentRuntimeService:
 
         tool = self._resolveTool(tool_names[0])
         self._enforcePolicies(entity, tool)
+
+        # Phase 6.5：供应商名→编码预解析（数字未命中时查 entity_mapping.name；
+        # 失败 raise ValidationError → 全局 handler 422 + details.candidates）
+        resolved = await self._resolver.resolve(input_text, session)
+        input_text = self._resolver.apply(input_text, resolved)
 
         args = tool.arg_extractor(input_text)
         if args is None:

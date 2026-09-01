@@ -37,6 +37,7 @@ from app.services.agent_tools import (
     AgentToolRegistry,
     ToolResult,
 )
+from app.services.supplier_name_resolver import ResolvedKey
 
 
 def _run(coro):
@@ -640,6 +641,127 @@ class TestLayerPolicy:
                 session=object(),
                 agent_code="SUPPLIER_RISK_AGENT",
                 input_text="评估供应商 100001",
+            )
+        )
+        assert run.tool == "supplier_risk"
+
+
+class _FakeResolver:
+    """按预设返回/抛错的 resolver 替身（单测不触 DB）。"""
+
+    def __init__(
+        self,
+        resolved: object = None,
+        error: Exception | None = None,
+    ) -> None:
+        self._resolved = resolved
+        self._error = error
+
+    async def resolve(self, message, session):  # noqa: ARG001
+        if self._error is not None:
+            raise self._error
+        return self._resolved
+
+    def apply(self, message, resolved):  # noqa: ARG001
+        if resolved is None or getattr(resolved, "original_name", None) is None:
+            return message
+        return message.replace(resolved.original_name, resolved.key, 1)
+
+
+class TestRunSupplierNamePreResolve:
+    """Phase 6.5：run() 在 arg_extractor 前做名字→编码预解析。"""
+
+    def _runtimeWith(self, resolver, entity=None):
+        registry = AgentToolRegistry()
+        registry.register(_fakeTool("supplier_risk"))
+        return AgentRuntimeService(
+            registry=registry,
+            agentService=_FakeAgentService(entity or _agent("SUPPLIER_RISK_AGENT")),
+            resolver=resolver,
+        )
+
+    def test_name_resolved_to_code_before_extractor(self):
+        resolver = _FakeResolver(
+            resolved=ResolvedKey(
+                key="10105", resolved_by="name_exact",
+                original_name="济南吉利汽车有限公司",
+            )
+        )
+        service = self._runtimeWith(resolver)
+        run = _run(
+            service.run(
+                session=object(),
+                agent_code="SUPPLIER_RISK_AGENT",
+                input_text="评估供应商 济南吉利汽车有限公司 的风险",
+            )
+        )
+        # fakeTool 的 extractor 是 lambda raw: {"key": "100001"}——不足以验证替换；
+        # 用专门 extractor 断言 arg_extractor 收到的已是被替换文本
+        assert run.tool == "supplier_risk"
+
+    def test_replaced_text_reaches_extractor(self):
+        captured: dict = {}
+
+        def extractor(raw: str):
+            captured["raw"] = raw
+            return {"key": "10105"}
+
+        registry = AgentToolRegistry()
+        registry.register(_fakeTool("supplier_risk", extractor=extractor))
+        service = AgentRuntimeService(
+            registry=registry,
+            agentService=_FakeAgentService(_agent("SUPPLIER_RISK_AGENT")),
+            resolver=_FakeResolver(
+                resolved=ResolvedKey(
+                    key="10105", resolved_by="name_exact",
+                    original_name="济南吉利汽车有限公司",
+                )
+            ),
+        )
+        _run(
+            service.run(
+                session=object(),
+                agent_code="SUPPLIER_RISK_AGENT",
+                input_text="评估供应商 济南吉利汽车有限公司 的风险",
+            )
+        )
+        assert captured["raw"] == "评估供应商 10105 的风险"
+
+    def test_resolver_validation_error_propagates(self):
+        from app.domain.error_messages import MSG_SUPPLIER_NAME_AMBIGUOUS
+
+        resolver = _FakeResolver(
+            error=ValidationError(
+                MSG_SUPPLIER_NAME_AMBIGUOUS.format(
+                    name="吉利", n=2, candidates="10105 甲 | 10106 乙"
+                ),
+                details={"candidates": [["10105", "甲"], ["10106", "乙"]]},
+            )
+        )
+        service = self._runtimeWith(resolver)
+        with pytest.raises(ValidationError) as exc_info:
+            _run(
+                service.run(
+                    session=object(),
+                    agent_code="SUPPLIER_RISK_AGENT",
+                    input_text="供应商 吉利",
+                )
+            )
+        assert exc_info.value.details["candidates"][0] == ["10105", "甲"]
+
+    def test_numeric_input_bypasses_resolver_db(self):
+        """数字输入 → resolver 返回 code_regex → apply 原样 → 既有行为回归保护。"""
+        resolver = _FakeResolver(
+            resolved=ResolvedKey(
+                key="10105", resolved_by="code_regex", original_name=None
+            )
+        )
+        service = self._runtimeWith(resolver)
+        run = _run(
+            service.run(
+                session=object(),
+                agent_code="SUPPLIER_RISK_AGENT",
+                input_text="评估供应商 10105 的风险",
             )
         )
         assert run.tool == "supplier_risk"

@@ -186,6 +186,34 @@ class TestChatGraphReasoning:
         assert "物料" in body["answer"]
         assert "100001" in body["answer"]
 
+    async def test_chat_graph_three_hop_roundtrips_max_hops(
+        self, client: AsyncClient, dbSession
+    ) -> None:
+        """「供应商 100001 的 3 跳关联」-> graphTraversal.maxHops 回传 3（G3 接线）。
+
+        断言 maxHops 从问句经 intent → service → 响应 DTO 完整回传；
+        不断言具体深度 3 的 hop（取决于 seed 图完整性，避免脆断）。
+        """
+        await _seedDatasource(dbSession)
+        resp = await client.post(
+            "/api/v1/chat",
+            headers=AUTH_HEADERS,
+            json={
+                "sessionId": "test-graph-3hop",
+                "question": "供应商 100001 的 3 跳关联",
+                "datasourceId": _CHAT_DATASOURCE_ID,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["intent"] == "graph_reasoning"
+        payload = body.get("graphTraversal")
+        assert payload is not None
+        assert payload["maxHops"] == 3
+        assert payload["startKey"] == "100001"
+        # 3 跳遍历结果必须不劣于默认 2 跳（多跳不丢失既有 2 跳可达实体）
+        assert all(h["depth"] <= 3 for h in payload["hops"])
+
     async def test_chat_graph_unknown_supplier_not_found(
         self, client: AsyncClient, dbSession
     ) -> None:

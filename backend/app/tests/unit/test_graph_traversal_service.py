@@ -20,8 +20,11 @@ import app.infrastructure.neo4j_client as neo4j_module
 import asyncio
 
 from app.domain.exceptions import NotFoundError
-from app.services.graph_traversal_service import GraphTraversalService
-from app.services.intent_service import IntentService
+from app.services.graph_traversal_service import (
+    GraphTraversalService,
+    resolveChatMaxHops,
+)
+from app.services.intent_service import IntentService, extractGraphMaxHops
 from app.services.messages_zh import MSG_GRAPH_TRAVERSAL_UNAVAILABLE
 from app.domain.enums import IntentType
 
@@ -256,6 +259,8 @@ class TestGraphReasoningIntent:
         result = self.service.classifyResult("供应商 100001 涉及哪些物料")
         assert result.intent == IntentType.GRAPH_REASONING
         assert result.supplierKey == "100001"
+        # G3：未指名跳数 -> max_hops=None（服务层 resolveChatMaxHops 默认 2）
+        assert result.max_hops is None
 
     def test_relation_question_detected(self) -> None:
         result = self.service.classifyResult("供应商 100001 的关联订单有哪些")
@@ -304,3 +309,99 @@ class TestGraphReasoningIntent:
         """「供应商 100001 相关合同有哪些」无图推理关键词（相关已移除），走普通查询。"""
         result = self.service.classifyResult("供应商 100001 相关合同有哪些")
         assert result.intent in (IntentType.QUERY, IntentType.NEW_QUERY)
+
+
+# =============================================================================
+# 跳数解析（Phase 7 G3：Chat 图遍历支持 >2-hop）
+# =============================================================================
+
+
+class TestGraphHopParsing:
+    def setup_method(self) -> None:
+        self.service = IntentService()
+
+    def test_three_hop_question_detected(self) -> None:
+        """「供应商 100001 的 3 跳关联」-> GRAPH_REASONING + max_hops=3。"""
+        result = self.service.classifyResult("供应商 100001 的 3 跳关联")
+        assert result.intent == IntentType.GRAPH_REASONING
+        assert result.supplierKey == "100001"
+        assert result.max_hops == 3
+
+    def test_deep_five_question_detected(self) -> None:
+        """「供应商 100001 深度 5 的关联」-> max_hops=5。
+
+        注：跳数短语必须伴随图推理关键词（关联/涉及…）才触发图意图；
+        「深度 5」单独出现是普通查询（不吸走 NL2SQL）。
+        """
+        result = self.service.classifyResult("供应商 100001 深度 5 的关联")
+        assert result.intent == IntentType.GRAPH_REASONING
+        assert result.max_hops == 5
+
+    def test_depth_alone_not_hijacked(self) -> None:
+        """「供应商 100001 深度 5」无图推理关键词 -> 走普通查询（不被吸走）。"""
+        result = self.service.classifyResult("供应商 100001 深度 5")
+        assert result.intent in (IntentType.QUERY, IntentType.NEW_QUERY)
+
+    def test_max_three_hops_question_detected(self) -> None:
+        """「供应商 100001 最多 3 跳关联」-> max_hops=3。"""
+        result = self.service.classifyResult("供应商 100001 最多 3 跳关联")
+        assert result.intent == IntentType.GRAPH_REASONING
+        assert result.max_hops == 3
+
+    def test_ten_hop_question_returns_raw(self) -> None:
+        """「供应商 100001 10 跳关联」-> 返回原始值 10，clamp 在 service 层（不抛 500）。"""
+        result = self.service.classifyResult("供应商 100001 10 跳关联")
+        assert result.intent == IntentType.GRAPH_REASONING
+        assert result.max_hops == 10
+
+    def test_chinese_numeral_hops(self) -> None:
+        """「供应商 100001 的三跳关联」-> 中文数字也解析为 3。"""
+        result = self.service.classifyResult("供应商 100001 的三跳关联")
+        assert result.intent == IntentType.GRAPH_REASONING
+        assert result.max_hops == 3
+
+    def test_two_hops_colloquial_numeral(self) -> None:
+        """「供应商 100001 的两跳关联」-> 口语「两」解析为 2。"""
+        result = self.service.classifyResult("供应商 100001 的两跳关联")
+        assert result.intent == IntentType.GRAPH_REASONING
+        assert result.max_hops == 2
+
+    def test_ten_hops_chinese_numeral(self) -> None:
+        """「供应商 100001 的十跳关联」-> 「十」解析为 10（clamp 在 service 层）。"""
+        result = self.service.classifyResult("供应商 100001 的十跳关联")
+        assert result.intent == IntentType.GRAPH_REASONING
+        assert result.max_hops == 10
+
+    def test_hops_with_aggregation_guard_not_hijacked(self) -> None:
+        """含跳数问法的聚合查询仍走 NL2SQL：聚合量词兜底先于跳数提取。
+
+        若实现顺序颠倒（先解析跳数再查聚合量词），本用例会回归暴露。
+        """
+        result = self.service.classifyResult(
+            "供应商 100001 的 3 跳关联订单总金额是多少"
+        )
+        assert result.intent in (IntentType.QUERY, IntentType.NEW_QUERY)
+
+    def test_extract_graph_max_hops_none_when_absent(self) -> None:
+        """无跳数短语 -> None（非图问法也不会误报数字）。"""
+        assert extractGraphMaxHops("供应商 100001 涉及哪些物料") is None
+        assert extractGraphMaxHops("供应商 100001 的关联订单有哪些") is None
+
+
+class TestResolveChatMaxHops:
+    """Chat 跳数服务层解析：None 默认 2，越界 clamp 到 [1, 5]。"""
+
+    def test_none_defaults_to_two(self) -> None:
+        assert resolveChatMaxHops(None) == 2
+
+    def test_explicit_hop_preserved(self) -> None:
+        assert resolveChatMaxHops(3) == 3
+
+    def test_upper_bound_clamped(self) -> None:
+        assert resolveChatMaxHops(10) == 5
+
+    def test_zero_clamped_to_one(self) -> None:
+        assert resolveChatMaxHops(0) == 1
+
+    def test_lower_negative_clamped_to_one(self) -> None:
+        assert resolveChatMaxHops(-3) == 1

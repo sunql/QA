@@ -38,6 +38,17 @@ logger = logging.getLogger(__name__)
 _CHAT_DEFAULT_HOPS = 2
 
 
+def resolveChatMaxHops(max_hops: int | None) -> int:
+    """Chat 图推理跳数解析（Phase 7 G3）：None 默认 2，越界 clamp 到 [1, 5]。
+
+    与 API 层 ``Query(ge=1, le=5)`` 直接拒绝不同，chat 里越界跳数是口语
+    （「10 跳」纯属用户不了解上限），clamp 比 4xx/500 更友好。clamp 后
+    传入 ``traverse`` 必然通过其 ``1 <= maxHops <= _MAX_TRAVERSAL_HOPS`` 校验。
+    """
+    requested = _CHAT_DEFAULT_HOPS if max_hops is None else max_hops
+    return max(1, min(requested, _MAX_TRAVERSAL_HOPS))
+
+
 class GraphTraversalService:
     """业务关系图多跳遍历器。"""
 

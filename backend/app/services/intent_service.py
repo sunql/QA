@@ -202,6 +202,30 @@ _SUPPLIER_AGGREGATION_RE = re.compile(
     r"(?:总金额|金额|总数量|数量|总额|合计|总计|均值|平均数|平均|总数|总价|成本|多少钱|多少元|占比|比例)"
 )
 
+# Phase 7 G3: 口语跳数短语提取（「3 跳」「三跳」「深度 5」「最多 3 跳」→ 数字）。
+# 独立于 _SUPPLIER_GRAPH_RE：是否消费由 GRAPH_REASONING 意图判定把关
+# （非图问法即使含「N 跳」也不提取）。返回原始值，越界由 service 层 clamp。
+# 前缀只收「最多/不超过」这类上限语义：maxHops 是遍历深度上限，「至少 3 跳」
+# 是下限，映射到上限会低估，故不收（code-reviewer LOW，语义倒置）。
+_GRAPH_HOP_RE = re.compile(
+    r"(?:最多|不超过)?\s*(?P<n>\d{1,2}|[一二三四五六七八九十两])\s*(?:跳|层|度)"
+    r"|深度\s*(?P<n2>\d{1,2}|[一二三四五六七八九十两])"
+)
+
+_CN_HOP_NUM = {
+    "一": 1,
+    "两": 2,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+
 # Phase 6.4: Agent 显式指名（如「用 supplier_risk_agent 评估供应商 100001」）。
 # 独立 token + _AGENT 后缀 + 词边界，误中普通问法的概率极低；
 # 匹配后统一大写（Agent 编码约定全大写下划线，见 AgentDefinitionCreate）。
@@ -239,6 +263,23 @@ def extractSupplierGraphKey(message: str) -> str | None:
     if _SUPPLIER_AGGREGATION_RE.search(message) is not None:
         return None
     return match.group("key") or match.group("key2") or match.group("key3")
+
+
+def extractGraphMaxHops(message: str) -> int | None:
+    """口语跳数提取（Phase 7 G3）：「3 跳 / 三跳 / 深度 5 / 最多 3 跳」→ int。
+
+    未命中返回 None（默认值由 service 层决定）；越界值原样返回，
+    在 ``resolveChatMaxHops`` clamp（chat 口语越界比 4xx 友好）。
+    """
+    match = _GRAPH_HOP_RE.search(message)
+    if match is None:
+        return None
+    raw = match.group("n") or match.group("n2")
+    if raw is None:
+        return None
+    if raw in _CN_HOP_NUM:
+        return _CN_HOP_NUM[raw]
+    return int(raw)
 
 
 def extractAgentCode(message: str) -> str | None:
@@ -349,6 +390,9 @@ class IntentResult:
     # Phase 5.4: SUPPLIER_RISK 复用 supplierKey 字段（与 supplier_360 同语义）。
     # Phase 6.4: AGENT_RUN 填充（提取的 agent_code，如 SUPPLIER_RISK_AGENT）。
     agent_code: str | None = None
+    # Phase 7 G3: 仅 GRAPH_REASONING 填充（口语跳数，如「3 跳」→ 3）；
+    # None = 未指名，由 service 层默认 2。
+    max_hops: int | None = None
 
 
 class IntentService:
@@ -405,7 +449,9 @@ class IntentService:
         graphKey = self._extractSupplierGraphKey(original)
         if graphKey is not None:
             return IntentResult(
-                intent=IntentType.GRAPH_REASONING, supplierKey=graphKey
+                intent=IntentType.GRAPH_REASONING,
+                supplierKey=graphKey,
+                max_hops=extractGraphMaxHops(original),
             )
         if any(kw in normalized for kw in _DEFINE_KEYWORDS):
             name, formula = self._extractDefine(original)

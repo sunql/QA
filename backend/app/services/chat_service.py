@@ -79,7 +79,10 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING,
 )
 from app.services.agent_runtime_service import AgentRuntimeService
-from app.services.graph_traversal_service import GraphTraversalService
+from app.services.graph_traversal_service import (
+    GraphTraversalService,
+    resolveChatMaxHops,
+)
 from app.services.messages_zh import (
     MSG_GRAPH_TRAVERSAL_UNAVAILABLE,
     MSG_SUPPLIER_360_NOT_FOUND,
@@ -1388,7 +1391,12 @@ class ChatService(ChatStreamOutputMixin):
                 intent=result.intent.value,
             )
         try:
-            traversal = await self._graphTraversal.traverseForChat(str(supplierKey))
+            # Phase 7 G3：问句可携带跳数（「3 跳关联」→ 3），None 默认 2，
+            # 越界 clamp 到 [1, 5]，不抛 500。
+            maxHops = resolveChatMaxHops(result.max_hops)
+            traversal = await self._graphTraversal.traverse(
+                "Supplier", str(supplierKey), maxHops
+            )
             answer = self._graphTraversal.buildChatAnswer(traversal)
         except NotFoundError:
             return ChatResponse(
@@ -1399,7 +1407,9 @@ class ChatService(ChatStreamOutputMixin):
             )
         except Exception:  # noqa: BLE001 - 图库故障降级，不阻断 chat
             logger.warning(
-                "graph reasoning failed for supplier %s, degrading", supplierKey
+                "graph reasoning failed for supplier %s, degrading",
+                supplierKey,
+                exc_info=True,
             )
             return ChatResponse(
                 answer=MSG_GRAPH_TRAVERSAL_UNAVAILABLE,

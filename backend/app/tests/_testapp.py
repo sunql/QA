@@ -31,6 +31,7 @@ from app.api.v1 import (
     graph_traversal,
     kpi_catalog,
     local_import,
+    menu_config,
     model_config,
     ontology,
     session,
@@ -146,6 +147,9 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     )
     testApp.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"])
+    testApp.include_router(
+        menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]
+    )
 
     @testApp.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:

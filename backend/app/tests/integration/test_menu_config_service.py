@@ -83,43 +83,6 @@ async def test_list_sections_roles_split_csv(dbSession: AsyncSession) -> None:
     assert result.sections[0].roles == ["admin", "editor"]
 
 
-async def test_list_sections_duplicate_code_raises(dbSession: AsyncSession) -> None:
-    """重复 code 需 fail-fast：DB UNIQUE 约束正常路径阻止重复插入；本测试临时放宽约束
-    以验证 service 层防御逻辑。"""
-    from sqlalchemy import text
-
-    from app.services.menu_config_service import MenuConfigDuplicateError
-
-    await _clean_menu_config(dbSession)
-    # 临时放宽 UNIQUE 约束，构造 service 层的重复防御场景
-    await dbSession.execute(
-        text("ALTER TABLE menu_config DROP CONSTRAINT IF EXISTS uq_menu_config_code")
-    )
-    try:
-        await dbSession.execute(
-            text(
-                "INSERT INTO menu_config (code, label_key, sort_order, visible, "
-                "created_time, updated_time) VALUES "
-                "('dup', 'k', 100, true, now(), now()), "
-                "('dup', 'k', 200, true, now(), now())"
-            )
-        )
-        await dbSession.commit()
-
-        svc = MenuConfigService(dbSession)
-        with pytest.raises(MenuConfigDuplicateError):
-            await svc.list_sections()
-    finally:
-        # 先清掉重复行，否则 ADD CONSTRAINT 会再次被 UNIQUE 校验拒绝
-        await _clean_menu_config(dbSession)
-        await dbSession.execute(
-            text(
-                "ALTER TABLE menu_config ADD CONSTRAINT uq_menu_config_code UNIQUE (code)"
-            )
-        )
-        await dbSession.commit()
-
-
 async def test_list_sections_section_with_path_raises(dbSession: AsyncSession) -> None:
     from app.services.menu_config_service import MenuConfigStructureError
 

@@ -95,6 +95,7 @@ from app.services.ontology_service import OntologyService
 from app.services.step_aggregator import StepAggregator
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.supplier_360_service import Supplier360Service
+from app.services.supplier_name_resolver import SupplierNameResolver
 from app.services.supplier_risk_service import SupplierRiskService, buildRiskAnswer
 from app.services.schema_introspection_service import (
     SchemaIntrospectionService,
@@ -337,6 +338,7 @@ class ChatService(ChatStreamOutputMixin):
         dqScoreService: Any | None = None,  # Phase 1.4：数据可信度 badge 查询
         graphTraversalService: GraphTraversalService | None = None,  # Phase 6.3：图推理
         agentRuntimeService: AgentRuntimeService | None = None,  # Phase 6.4：Agent 运行时
+        supplierNameResolver: SupplierNameResolver | None = None,  # Phase 6.5：名字预解析
     ) -> None:
         self._intent = intentService or IntentService()
         self._nl2sql = nl2sqlService or Nl2SqlService()
@@ -360,6 +362,8 @@ class ChatService(ChatStreamOutputMixin):
         self._graphTraversal = graphTraversalService or GraphTraversalService()
         # Phase 6.4：Agent 运行时（注册 → 工具路由 → 策略拦截 → 执行）
         self._agentRuntime = agentRuntimeService or AgentRuntimeService()
+        # Phase 6.5：supplier name → code 预解析（非流式/流式两入口共用）
+        self._supplierNameResolver = supplierNameResolver or SupplierNameResolver()
         # 会话亲和性窗口：前 N 轮锁定模型；None 时按需懒加载 settings
         self._affinityTurns = affinityTurns
 
@@ -379,6 +383,18 @@ class ChatService(ChatStreamOutputMixin):
         user 可选（#207 安全修复）：API 层透传真实调用方，Agent 运行用它作 actor
         归属审计；不传（测试直调）时 actor 回退为 "chat"。
         """
+        # Phase 6.5：supplier name → code 预解析（immutable replace）
+        try:
+            dto = await self._prepareSupplierQuestion(session, dto)
+        except ValidationError as exc:
+            # chat 惯例（与 _handleSupplier360 NotFoundError 同模式）：返回友好
+            # answer（含候选）而非 422；4-4：本轮也持久化消息，历史链不断。
+            preResult = self._intent.classifyResult(dto.question)
+            await self._storeSessionMessages(
+                session, dto.sessionId, dto.question, exc.message, None
+            )
+            return ChatResponse(answer=exc.message, intent=preResult.intent.value)
+
         result, state = await self._classifyMessage(session, dto)
         if result.intent == IntentType.CHITCHAT:
             response = self._chitchatResponse()
@@ -550,6 +566,23 @@ class ChatService(ChatStreamOutputMixin):
     # -------------------------------------------------------------------------
     # Phase C：ReAct 两阶段 + 会话状态 + CLARIFY
     # -------------------------------------------------------------------------
+
+    async def _prepareSupplierQuestion(
+        self, session: AsyncSession, dto: ChatRequest
+    ) -> ChatRequest:
+        """Phase 6.5：supplier name → code 预解析（immutable replace，下游零感知）。
+
+        成功 → 返回替换后的新 dto（model_copy，不原地修改）；
+        无关键词 / 纯数字编码 → 原样返回 dto（零 DB 开销）；
+        解析失败（not_found / ambiguous / over_limit）→ 抛 ValidationError，
+        由两个入口分别转为友好 answer / error 事件（chat 惯例，见 processMessage）。
+        """
+        resolved = await self._supplierNameResolver.resolve(dto.question, session)
+        if resolved is None or resolved.original_name is None:
+            return dto
+        return dto.model_copy(
+            update={"question": self._supplierNameResolver.apply(dto.question, resolved)}
+        )
 
     async def _classifyMessage(
         self, session: AsyncSession, dto: ChatRequest
@@ -1592,6 +1625,36 @@ class ChatService(ChatStreamOutputMixin):
 
         user 可选（#207 安全修复）：API 层透传真实调用方，Agent 运行用它作 actor。
         """
+        # Phase 6.5：supplier name → code 预解析（同 processMessage；流式入口覆盖）
+        try:
+            dto = await self._prepareSupplierQuestion(session, dto)
+        except ValidationError as exc:
+            # 流式惯例（与下方 DomainError 分支同型）：结构化 error 事件
+            await self._storeSessionMessages(
+                session, dto.sessionId, dto.question, exc.message, None
+            )
+            yield StreamEvent(
+                EVENT_ERROR,
+                {
+                    "error": exc.message,
+                    "errorType": ErrorType.DOMAIN.value,
+                    "detail": exc.detail,
+                },
+            )
+            return
+        except Exception as exc:
+            # 非预期失败（DB 连接中断等）：同样以结构化 error 事件结束 SSE，
+            # 避免连接被强行中断（与 processMessageStream 文档保证一致）。
+            logger.exception("supplier name 预解析失败: %s", exc)
+            await self._storeSessionMessages(
+                session, dto.sessionId, dto.question, MSG_INTERNAL_ERROR, None
+            )
+            yield StreamEvent(
+                EVENT_ERROR,
+                {"error": MSG_INTERNAL_ERROR, "errorType": ErrorType.INTERNAL.value},
+            )
+            return
+
         result = self._intent.classifyResult(dto.question)
         yield StreamEvent(EVENT_META, {"intent": result.intent.value})
 

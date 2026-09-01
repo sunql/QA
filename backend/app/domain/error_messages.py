@@ -329,8 +329,12 @@ MSG_AGENT_REGISTRY_FORBIDDEN = "无权修改该 Agent：仅 owner 部门成员�
 
 MSG_AGENT_NOT_RUNNABLE = "Agent 当前不可运行：code={code}（status={status}）"
 MSG_AGENT_RUN_DENIED = (
-    "无权调用 Agent：code={code}（数据对象 {object} 无读取策略）。"
+    "无权调用 Agent：code={code}（数据对象 {object} 数据层 {layer} 无读取策略）。"
     "请先在 Agent 注册表中为其添加 READ / MASKED_READ 策略"
+)
+MSG_AGENT_RUN_FORBIDDEN = (
+    "无权调用 Agent：code={code}（数据对象 {object} 数据层 {layer} 已被 FORBIDDEN 策略禁止）。"
+    "请联系管理员调整 Agent 注册表中的访问策略"
 )
 MSG_AGENT_RUN_BAD_INPUT = (
     "无法从输入中解析执行参数：code={code}（tool={tool}）。"

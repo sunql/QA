@@ -47,6 +47,7 @@ def _fakeTool(
     name: str,
     *,
     data_object: str = "SUPPLIER",
+    data_layers: tuple[str, ...] = (),
     extractor=lambda raw: {"key": "100001"},
 ) -> AgentTool:
     async def handler(session, args, ctx):  # noqa: ARG001
@@ -62,6 +63,7 @@ def _fakeTool(
         name=name,
         description="fake",
         data_object=data_object,
+        data_layers=data_layers,
         input_schema={},
         arg_extractor=extractor,
         handler=handler,
@@ -376,6 +378,260 @@ class TestPolicyAllow:
         )
         service, _ = _runtime(
             entity=entity, tools={"supplier_risk": _fakeTool("supplier_risk")}
+        )
+        run = _run(
+            service.run(
+                session=object(),
+                agent_code="SUPPLIER_RISK_AGENT",
+                input_text="评估供应商 100001",
+            )
+        )
+        assert run.tool == "supplier_risk"
+
+
+def _layerPolicy(
+    *,
+    data_layer: str | None = None,
+    permission: str = AgentPermission.READ.value,
+) -> AgentAccessPolicy:
+    """构造单条 data_layer 策略（分层粒度测试用）。"""
+    return AgentAccessPolicy(
+        data_object="SUPPLIER",
+        permission=permission,
+        data_layer=data_layer,
+        notes=None,
+    )
+
+
+class TestLayerPolicy:
+    """data_layer 策略粒度（Phase 7+ 安全补强）。
+
+    工具声明读取的数据层（data_layers）；运行时要求每层都被授权
+    （策略 data_layer 精确匹配或 None 通配），否则 PermissionDeniedError(403)。
+    """
+
+    def test_layer_exact_match_allows(self):
+        """FEATURE 工具 + FEATURE 策略 → 通过。"""
+        entity = _agent(
+            policies=[
+                _layerPolicy(data_layer="FEATURE"),
+                _layerPolicy(data_layer="DIM"),
+            ]
+        )
+        service, _ = _runtime(
+            entity=entity,
+            tools={"supplier_risk": _fakeTool("supplier_risk", data_layers=("FEATURE",))},
+        )
+        run = _run(
+            service.run(
+                session=object(),
+                agent_code="SUPPLIER_RISK_AGENT",
+                input_text="评估供应商 100001",
+            )
+        )
+        assert run.tool == "supplier_risk"
+
+    def test_layer_none_wildcard_covers_any_layer(self):
+        """data_layer=None 通配策略 → 覆盖工具声明的任意层。"""
+        entity = _agent(
+            policies=[_layerPolicy(data_layer=None)]  # 跨层通用
+        )
+        service, _ = _runtime(
+            entity=entity,
+            tools={"supplier_risk": _fakeTool("supplier_risk", data_layers=("FEATURE", "DIM"))},
+        )
+        run = _run(
+            service.run(
+                session=object(),
+                agent_code="SUPPLIER_RISK_AGENT",
+                input_text="评估供应商 100001",
+            )
+        )
+        assert run.tool == "supplier_risk"
+
+    def test_layer_mismatch_denies(self):
+        """FEATURE 工具 + 仅 DIM 策略 → 403（层粒度生效）。"""
+        entity = _agent(
+            policies=[_layerPolicy(data_layer="DIM")],
+        )
+        service, _ = _runtime(
+            entity=entity,
+            tools={"supplier_risk": _fakeTool("supplier_risk", data_layers=("FEATURE",))},
+        )
+        with pytest.raises(PermissionDeniedError):
+            _run(
+                service.run(
+                    session=object(),
+                    agent_code="SUPPLIER_RISK_AGENT",
+                    input_text="评估供应商 100001",
+                )
+            )
+
+    def test_multi_layer_missing_one_denies(self):
+        """(DIM, FEATURE) 工具 + 仅 DIM 策略 → 403（缺失 FEATURE）。"""
+        entity = _agent(
+            policies=[_layerPolicy(data_layer="DIM")],
+        )
+        service, _ = _runtime(
+            entity=entity,
+            tools={"supplier_risk": _fakeTool("supplier_risk", data_layers=("DIM", "FEATURE"))},
+        )
+        with pytest.raises(PermissionDeniedError, match="FEATURE"):
+            _run(
+                service.run(
+                    session=object(),
+                    agent_code="SUPPLIER_RISK_AGENT",
+                    input_text="评估供应商 100001",
+                )
+            )
+
+    def test_layerless_tool_falls_back_to_object_only(self):
+        """工具不声明层（data_layers=()）→ 回退到 data_object 粒度（旧行为兼容）。"""
+        entity = _agent(
+            policies=[_layerPolicy(data_layer=None)],
+        )
+        service, _ = _runtime(
+            entity=entity,
+            tools={"supplier_risk": _fakeTool("supplier_risk")},  # data_layers=()
+        )
+        run = _run(
+            service.run(
+                session=object(),
+                agent_code="SUPPLIER_RISK_AGENT",
+                input_text="评估供应商 100001",
+            )
+        )
+        assert run.tool == "supplier_risk"
+
+    def test_layer_forbidden_denies_even_with_matching_layer(self):
+        """FORBIDDEN 策略（即使层精确匹配）→ 403。"""
+        entity = _agent(
+            policies=[
+                _layerPolicy(data_layer="FEATURE", permission=AgentPermission.FORBIDDEN.value),
+            ],
+        )
+        service, _ = _runtime(
+            entity=entity,
+            tools={"supplier_risk": _fakeTool("supplier_risk", data_layers=("FEATURE",))},
+        )
+        with pytest.raises(PermissionDeniedError):
+            _run(
+                service.run(
+                    session=object(),
+                    agent_code="SUPPLIER_RISK_AGENT",
+                    input_text="评估供应商 100001",
+                )
+            )
+
+    def test_layer_forbidden_overrides_wildcard_read(self):
+        """HIGH 缺口回归：通配 None READ 不能覆盖层级 FORBIDDEN（显式否决优先）。
+
+        管理员先给 SUPPLIER@None=READ 跨层便利授权，再对 FEATURE 层设 FORBIDDEN
+        （隔离敏感特征数据）——工具读 FEATURE 必须被拒绝。
+        """
+        entity = _agent(
+            policies=[
+                _layerPolicy(data_layer=None),  # 跨层通用 READ（旧种子遗留）
+                _layerPolicy(
+                    data_layer="FEATURE", permission=AgentPermission.FORBIDDEN.value
+                ),
+            ],
+        )
+        service, _ = _runtime(
+            entity=entity,
+            tools={"supplier_risk": _fakeTool("supplier_risk", data_layers=("FEATURE",))},
+        )
+        with pytest.raises(PermissionDeniedError):
+            _run(
+                service.run(
+                    session=object(),
+                    agent_code="SUPPLIER_RISK_AGENT",
+                    input_text="评估供应商 100001",
+                )
+            )
+
+    def test_layer_forbidden_message_is_distinct(self):
+        """显式否决用独立消息（含 FORBIDDEN），区别于「无读取策略」。"""
+        entity = _agent(
+            policies=[
+                _layerPolicy(data_layer=None),
+                _layerPolicy(
+                    data_layer="FEATURE", permission=AgentPermission.FORBIDDEN.value
+                ),
+            ],
+        )
+        service, _ = _runtime(
+            entity=entity,
+            tools={"supplier_risk": _fakeTool("supplier_risk", data_layers=("FEATURE",))},
+        )
+        with pytest.raises(PermissionDeniedError, match="FORBIDDEN"):
+            _run(
+                service.run(
+                    session=object(),
+                    agent_code="SUPPLIER_RISK_AGENT",
+                    input_text="评估供应商 100001",
+                )
+            )
+
+    def test_layerless_tool_forbidden_overrides_wildcard_read(self):
+        """层无关工具 + 通配 READ + 对象上任一层 FORBIDDEN → 403（对象粒度否决优先）。"""
+        entity = _agent(
+            policies=[
+                _layerPolicy(data_layer=None),
+                _layerPolicy(
+                    data_layer="FEATURE", permission=AgentPermission.FORBIDDEN.value
+                ),
+            ],
+        )
+        service, _ = _runtime(
+            entity=entity,
+            tools={"supplier_risk": _fakeTool("supplier_risk")},  # data_layers=()
+        )
+        with pytest.raises(PermissionDeniedError, match="FORBIDDEN"):
+            _run(
+                service.run(
+                    session=object(),
+                    agent_code="SUPPLIER_RISK_AGENT",
+                    input_text="评估供应商 100001",
+                )
+            )
+
+    def test_forbidden_normalizes_non_canonical_layer_at_read_time(self):
+        """MEDIUM 缺口回归：历史非大写 data_layer（如 "feature"）在比较侧被归一化。
+
+        写入边界归一化只保护新数据；直改 DB / 旧 API 写入的小写 FORBIDDEN 若不被识别，
+        会被通配 READ 覆盖（fail-open）——正是本 change 要封堵的可绕过配置。
+        """
+        entity = _agent(
+            policies=[
+                _layerPolicy(data_layer=None),  # 通配 READ
+                _layerPolicy(
+                    data_layer="feature",  # 非规范大小写（历史/直改 DB 行）
+                    permission=AgentPermission.FORBIDDEN.value,
+                ),
+            ],
+        )
+        service, _ = _runtime(
+            entity=entity,
+            tools={"supplier_risk": _fakeTool("supplier_risk", data_layers=("FEATURE",))},
+        )
+        with pytest.raises(PermissionDeniedError, match="FORBIDDEN"):
+            _run(
+                service.run(
+                    session=object(),
+                    agent_code="SUPPLIER_RISK_AGENT",
+                    input_text="评估供应商 100001",
+                )
+            )
+
+    def test_grant_normalizes_non_canonical_layer_at_read_time(self):
+        """非大写 data_layer 的 READ 授予同样在比较侧生效（fail-closed 侧对称修复）。"""
+        entity = _agent(
+            policies=[_layerPolicy(data_layer=" feature ")],
+        )
+        service, _ = _runtime(
+            entity=entity,
+            tools={"supplier_risk": _fakeTool("supplier_risk", data_layers=("FEATURE",))},
         )
         run = _run(
             service.run(

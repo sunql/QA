@@ -96,7 +96,7 @@ Agent Runtime 最小版（MVP）：复用 Phase 6.1 的 Agent Registry 注册资
 | **HIGH（代码）** | 默认 UI 全走 `/chat/stream`，AGENT_RUN 未路由流式路径 | `_streamInteractCard` 拦截 4 类卡片意图统一路由 + 前端 `onDone`/`StreamSummary` 回填 |
 | **MEDIUM#2（计量）** | Agent 内部 LLM 计量不落库；且 `_generateRiskPoints` 读 snake_case 致真实计量恒 0 | `_recordDirectUsage`（purpose=agent_run/supplier_risk）+ `LlmResponse` camelCase 读取修复（真实生产 bug） |
 | **LOW#5（体验）** | 权限拒绝回答 `object="?"` | 改用 `exc.message`（含真实 data_object） |
-| **LOW#3（粒度）** | `data_layer` 策略仅校验存在性，未做粒度判定 | 列入 §10 已知缺口，Phase 7+ 补 |
+| **LOW#3（粒度）** | `data_layer` 策略仅校验存在性，未做粒度判定 | **已修复**（后续 commit `feat: agent data_layer policy granularity`）：`AgentTool.data_layers` 声明读取层，运行时逐层授权（`data_layer=None` 通配 + 精确匹配），缺失任一层 → 403 |
 | **LOW#4（阻塞）** | Neo4j 调用同步阻塞事件循环 | 列入 §10 已知缺口（与既有 graph_traversal 模式一致，不阻断 MVP） |
 
 ACL 四项复查（DTO mass-assignment / 403 侧信道 / actor 派生 / 非 admin 集成测试）全部通过。
@@ -167,7 +167,20 @@ ACL 四项复查（DTO mass-assignment / 403 侧信道 / actor 派生 / 非 admi
 
 ## 10. 已知缺口
 
-- **`data_layer` 策略粒度未生效**（LOW#3）：仅校验策略存在性，未做 DIM/DWD/FEATURE 层级判定。Phase 7+ 按工具元数据补全。
+> LOW#3 `data_layer` 策略粒度已修复（commit `feat: agent data_layer policy granularity`）：
+> 工具声明 `data_layers`（supplier_360/supplier_risk → DIM+FEATURE；graph_traverse → DIM+DWD），
+> 运行时逐层授权（精确匹配或 `data_layer=None` 通配），缺失任一层 → 403。
+> seed_agents 从工具注册表派生显式分层策略（DRY 防漂移），并对既有部署做幂等策略愈合
+> （删除通配 READ → 显式分层，保证分层约束在旧部署上同样生效，非空操作）。
+> 双审（code-reviewer + security-reviewer）补强：
+> - FORBIDDEN / FORBIDDEN_WRITE 为**显式否决**：对象匹配 + 层匹配（或 None 通配）即拒绝，
+>   优先于任何 READ 授予——修复「通配 READ 覆盖层级 FORBIDDEN」可绕过缺口（审查 HIGH）；
+>   独立 403 消息 `MSG_AGENT_RUN_FORBIDDEN`。
+> - `data_layer` 写入边界归一化（`strip().upper()`，空串 → None 通配），防大小写/空白
+>   导致的静默 fail-closed。
+> - 层无关工具（`data_layers=()`）回退对象粒度，对象上任一 FORBIDDEN 仍优先否决。
+> 测试：分层单测 9 + 归一化 4 + 集成 2（含分层不匹配 403 + 通配 READ 被 FORBIDDEN 否决）。
+
 - **Neo4j 同步阻塞**（LOW#4）：`graph_traverse` 同步调用阻塞事件循环；与既有 graph 服务模式一致，MVP 接受。
 - **Token 审计仅存合计**：Agent 工具 DTO 只带 `total_tokens`，prompt/completion 拆分丢失（`_recordDirectUsage` 用合计）；后续扩 DTO 拆分。
 - **图遍历仅 2-hop**：GraphTraversal 服务当前限制 max_hops=2，深层推理（>2 跳）留 Phase 7+。

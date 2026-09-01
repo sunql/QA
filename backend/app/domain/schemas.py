@@ -1885,21 +1885,41 @@ class DocEntityRelationRead(CamelModel):
     relation_type: DocEntityRelationType
 
 
+def _normalizeDataLayer(value: str | None) -> str | None:
+    """data_layer 边界归一化：strip + upper，空串 → None 通配。
+
+    工具声明规范大写层（DIM/DWD/FEATURE…）。大小写/空白不一致会静默 fail-closed
+    （看似授权实则分层匹配失败 → 403，难排查），故在写入边界统一后再比较。
+    """
+    if value is None:
+        return None
+    normalized = value.strip().upper()
+    return normalized or None
+
+
 class AgentAccessPolicyCreate(CamelModel):
     """创建 Agent 访问策略请求（Phase 6.1）。"""
 
     data_object: str = Field(..., min_length=1, max_length=128)
     permission: AgentPermission = Field(default=AgentPermission.READ)
-    data_layer: str | None = Field(default=None, max_length=32)
+    data_layer: str | None = Field(
+        default=None, max_length=32, description="数据层（DIM/DWD/FEATURE…；None=跨层通配）"
+    )
     notes: str | None = Field(default=None, max_length=2000)
+
+    _check_data_layer = field_validator("data_layer")(_normalizeDataLayer)
 
 
 class AgentAccessPolicyUpdate(CamelModel):
     """更新 Agent 访问策略请求（Phase 6.1）。"""
 
     permission: AgentPermission | None = None
-    data_layer: str | None = Field(default=None, max_length=32)
+    data_layer: str | None = Field(
+        default=None, max_length=32, description="数据层（DIM/DWD/FEATURE…；None=跨层通配）"
+    )
     notes: str | None = Field(default=None, max_length=2000)
+
+    _check_data_layer = field_validator("data_layer")(_normalizeDataLayer)
 
 
 class AgentAccessPolicyRead(CamelModel):

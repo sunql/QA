@@ -1291,7 +1291,7 @@ class ChatService(ChatStreamOutputMixin):
         失败语义（不向用户抛领域异常，全部转友好 answer + agent_run=None）：
         - Agent 未注册 → MSG_AGENT_NOT_FOUND_BY_CODE（不泄漏「不存在 vs 无权限」侧信道）
         - 不可运行（DRAFT/DEPRECATED/无工具绑定）→ MSG_AGENT_NOT_RUNNABLE
-        - 策略拦截（403）→ MSG_AGENT_RUN_DENIED（detail 含真实 data_object）
+        - 策略拦截（403）→ MSG_AGENT_RUN_DENIED（detail 含真实 data_object + 缺失 data_layer）
         - 参数解析失败（422）→ MSG_AGENT_RUN_BAD_INPUT
         - 其他未预期异常 → log warning + MSG_AGENT_RUN_FAILED（绝不阻断 chat 主链路）
 

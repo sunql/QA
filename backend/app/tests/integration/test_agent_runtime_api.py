@@ -35,12 +35,43 @@ from app.domain.enums import (
 from app.domain.models import DataSource, EntityMapping, FeatureDefinition, FeatureValue
 from app.domain.schemas import AgentAccessPolicyCreate, AgentDefinitionCreate
 from app.services.agent_registry_service import AgentRegistryService
+from app.services.agent_runtime_service import AGENT_TOOLS
+from app.services.agent_tools import agent_tool_registry
 from app.infrastructure import neo4j_client as neo4j
 
 AUTH_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
 _ADMIN = CurrentUser(userId="test-admin", roles=("admin",))
 
 _neo4jAvailable = neo4j.isNeo4jAvailable()
+
+
+def _defaultPolicies(code: str) -> list[AgentAccessPolicyCreate]:
+    """按 Agent 绑定工具的 data_object + data_layers 生成每层 READ 策略。
+
+    显式分层（非 None 通配）→ 集成测试在真实最小权限策略上验证运行时分层判定。
+    无工具绑定的元数据 Agent → 回退 SUPPLIER@READ 通配（仅展示；运行时在工具门禁 409）。
+    """
+    tool_name = AGENT_TOOLS.get(code, (None,))[0]
+    if tool_name is None:
+        return [
+            AgentAccessPolicyCreate(
+                data_object="SUPPLIER",
+                permission=AgentPermission.READ,
+                data_layer=None,
+                notes="集成测试",
+            )
+        ]
+    tool = agent_tool_registry.get(tool_name)
+    assert tool is not None, f"tool {tool_name} 未注册"
+    return [
+        AgentAccessPolicyCreate(
+            data_object=tool.data_object,
+            permission=AgentPermission.READ,
+            data_layer=layer,
+            notes="集成测试（显式分层）",
+        )
+        for layer in tool.data_layers
+    ]
 
 
 async def _seedAgent(
@@ -50,7 +81,10 @@ async def _seedAgent(
     status: AgentStatus = AgentStatus.ACTIVE,
     policies: list[AgentAccessPolicyCreate] | None = None,
 ) -> None:
-    """用 AgentRegistryService 注册一个 Agent（走 service + 真实 PG，幂等按 code 唯一）。"""
+    """用 AgentRegistryService 注册一个 Agent（走 service + 真实 PG，幂等按 code 唯一）。
+
+    默认策略用 _defaultPolicies（显式分层），显式传 policies 则覆盖。
+    """
     service = AgentRegistryService()
     dto = AgentDefinitionCreate(
         agent_code=code,
@@ -62,16 +96,7 @@ async def _seedAgent(
         data_layers=["FEATURE"],
         status=status,
         version="v1.0",
-        policies=policies
-        if policies is not None
-        else [
-            AgentAccessPolicyCreate(
-                data_object="SUPPLIER",
-                permission=AgentPermission.READ,
-                data_layer=None,
-                notes="集成测试",
-            )
-        ],
+        policies=policies if policies is not None else _defaultPolicies(code),
     )
     await service.createAgent(dbSession, dto, _ADMIN)
 
@@ -291,7 +316,38 @@ class TestRunFailures:
             json={"input": "评估供应商 100001"},
         )
         assert resp.status_code == 403
-        assert "无读取策略" in resp.text
+        assert "FORBIDDEN" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_run_forbidden_overrides_wildcard_read_403(
+        self, client: AsyncClient, dbSession: AsyncSession
+    ) -> None:
+        """HIGH 缺口回归：通配 None READ 不能覆盖层级 FORBIDDEN（显式否决优先）。
+
+        与 test_run_forbidden_policy_403 的「只有 FORBIDDEN」不同，这里 FORBIDDEN 与
+        跨层 READ 并存——正是安全审查指出的可绕过配置（None 通配使分层约束形同虚设）。
+        """
+        await _seedAgent(
+            dbSession,
+            "SUPPLIER_RISK_AGENT",
+            policies=[
+                AgentAccessPolicyCreate(
+                    data_object="SUPPLIER", permission=AgentPermission.READ, data_layer=None
+                ),
+                AgentAccessPolicyCreate(
+                    data_object="SUPPLIER",
+                    permission=AgentPermission.FORBIDDEN,
+                    data_layer="FEATURE",
+                ),
+            ],
+        )
+        resp = await client.post(
+            _run_url("SUPPLIER_RISK_AGENT"),
+            headers=AUTH_HEADERS,
+            json={"input": "评估供应商 100001"},
+        )
+        assert resp.status_code == 403
+        assert "FORBIDDEN" in resp.text
 
     @pytest.mark.asyncio
     async def test_run_missing_policy_deny_by_default_403(
@@ -305,6 +361,31 @@ class TestRunFailures:
             json={"input": "评估供应商 100001"},
         )
         assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_run_layer_mismatch_403(
+        self, client: AsyncClient, dbSession: AsyncSession
+    ) -> None:
+        """分层粒度生效：supplier_risk 读 DIM+FEATURE，仅授 FEATURE（缺 DIM）→ 403 + 消息含缺失层。"""
+        await _seedAgent(
+            dbSession,
+            "SUPPLIER_RISK_AGENT",
+            policies=[
+                AgentAccessPolicyCreate(
+                    data_object="SUPPLIER",
+                    permission=AgentPermission.READ,
+                    data_layer="FEATURE",
+                )
+            ],
+        )
+        resp = await client.post(
+            _run_url("SUPPLIER_RISK_AGENT"),
+            headers=AUTH_HEADERS,
+            json={"input": "评估供应商 100001"},
+        )
+        assert resp.status_code == 403
+        assert "无读取策略" in resp.text
+        assert "DIM" in resp.text
 
     @pytest.mark.asyncio
     async def test_run_bad_input_422(

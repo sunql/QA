@@ -73,6 +73,7 @@ class AgentTool:
     input_schema: dict  # JSON Schema（供未来 LLM function calling 复用）
     arg_extractor: ArgExtractor  # 原始输入 → args dict；解析失败返回 None
     handler: AgentHandler  # 用解析后的 args 执行并返回 ToolResult
+    data_layers: tuple[str, ...] = ()  # 工具读取的数据层（DIM/DWD/FEATURE…）；() = 层无关（回退到对象粒度）
 
 
 class AgentToolRegistry:
@@ -164,6 +165,8 @@ def _buildRegistry() -> AgentToolRegistry:
             name="supplier_360",
             description="查询单供应商 360° 视图（主数据 + 交付/质量/价格表现 + 跨系统编码）",
             data_object="SUPPLIER",
+            # 读 EntityMapping（DIM 主数据）+ FeatureDefinition/FeatureValue（FEATURE 特征层）
+            data_layers=("DIM", "FEATURE"),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -182,6 +185,8 @@ def _buildRegistry() -> AgentToolRegistry:
                 "评估单供应商风险等级（RISK_SCORE 主路径 + 其他 feature fallback + LLM 风险点）"
             ),
             data_object="SUPPLIER",
+            # 经 Supplier360Service.get360 读 EntityMapping（DIM）+ Feature（FEATURE）
+            data_layers=("DIM", "FEATURE"),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -200,6 +205,8 @@ def _buildRegistry() -> AgentToolRegistry:
                 "供应链链路推理：从供应商出发的多跳可达业务实体（物料/订单/收货/问题）"
             ),
             data_object="SUPPLIER",
+            # Neo4j 业务实体子图（DIM 主数据实体 + DWD 业务单据实体）
+            data_layers=("DIM", "DWD"),
             input_schema={
                 "type": "object",
                 "properties": {

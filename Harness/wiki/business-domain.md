@@ -288,11 +288,11 @@ Agent 运行时最小版（MVP）：复用 [[Harness/changes/feat-agent-registry
 
 ### 工具绑定（AGENT_TOOLS）
 
-| Agent | 工具 | 说明 |
-|---|---|---|
-| `SUPPLIER_360_AGENT` | `supplier_360` | 单供应商 360° 视图（只读聚合，无 LLM） |
-| `SUPPLIER_RISK_AGENT` | `supplier_risk` | 风险等级评估 + LLM 风险点 |
-| `GRAPH_REASONING_AGENT` | `graph_traverse` | Neo4j 多跳供应链链路推理 |
+| Agent | 工具 | 数据层（运行时逐层授权） | 说明 |
+|---|---|---|---|
+| `SUPPLIER_360_AGENT` | `supplier_360` | DIM + FEATURE | 单供应商 360° 视图（只读聚合，无 LLM） |
+| `SUPPLIER_RISK_AGENT` | `supplier_risk` | DIM + FEATURE | 风险等级评估 + LLM 风险点 |
+| `GRAPH_REASONING_AGENT` | `graph_traverse` | DIM + DWD | Neo4j 多跳供应链链路推理 |
 
 已注册但未绑定工具的元数据 Agent（`PROCUREMENT_COPILOT` / `SUPPLIER_OTD_REPORT`）→ 409 不可运行，Phase 7+ 排期。
 
@@ -308,7 +308,10 @@ Agent 运行时最小版（MVP）：复用 [[Harness/changes/feat-agent-registry
 run(session, agent_code, params, *, actor)
   → 查注册（404）→ 状态门禁（非 ACTIVE → 不可运行）
   → AGENT_TOOLS 绑定（无绑定 → 不可运行）
-  → deny-by-default 策略拦截（无政策条目 → 拒绝，不静默放行）
+  → deny-by-default 策略拦截：工具声明 data_layers，每层需被授权
+    （AgentAccessPolicy.data_layer 精确匹配或 None 通配；缺失层 → 403，不静默放行）
+  → FORBIDDEN / FORBIDDEN_WRITE 为显式否决：对象匹配 + 层匹配（或 None 通配）即 403，
+    优先于任何 READ 授予（防跨层通配 READ 覆盖层级 FORBIDDEN）
   → arg_extractor 参数提取 → 工具执行 → AgentRunRead
 ```
 

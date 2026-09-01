@@ -352,6 +352,42 @@ class TestPolicies:
             _run(service.deletePolicy(session, "NO_POLICY", 999, _admin()))
 
 
+class TestPolicyDataLayerNormalization:
+    """data_layer 边界归一化（strip + upper，空串 → None 通配）。
+
+    工具声明规范大写层（DIM/DWD/FEATURE），策略写入时若大小写/空白不一致会静默
+    fail-closed（看似授权实则 403，难排查）。在系统边界归一化后比较才良定义。
+    """
+
+    def test_create_normalizes_data_layer(self):
+        dto = AgentAccessPolicyCreate(
+            data_object="SUPPLIER",
+            permission=AgentPermission.READ,
+            data_layer=" feature ",
+        )
+        assert dto.data_layer == "FEATURE"
+
+    def test_create_empty_string_becomes_wildcard(self):
+        dto = AgentAccessPolicyCreate(
+            data_object="SUPPLIER",
+            permission=AgentPermission.READ,
+            data_layer="",
+        )
+        assert dto.data_layer is None
+
+    def test_create_none_stays_wildcard(self):
+        dto = AgentAccessPolicyCreate(
+            data_object="SUPPLIER",
+            permission=AgentPermission.READ,
+            data_layer=None,
+        )
+        assert dto.data_layer is None
+
+    def test_update_normalizes_data_layer(self):
+        dto = AgentAccessPolicyUpdate(data_layer="dim")
+        assert dto.data_layer == "DIM"
+
+
 class TestDtoConversion:
     def test_agent_to_read_roundtrip(self):
         now = datetime.now(UTC)

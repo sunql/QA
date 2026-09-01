@@ -81,8 +81,13 @@ def _mapping(
     code: str,
     *,
     offset: int,
+    name: str | None = None,
 ) -> dict[str, Any]:
-    """一行 SUPPLIER / MATERIAL 映射（不可变：不改入参，返回新 dict）。"""
+    """一行 SUPPLIER / MATERIAL 映射（不可变：不改入参，返回新 dict）。
+
+    name 为可选业务名（供应商 supplier_name / 物料 description_1-3 拼接），
+    写入 entity_mapping.name 列供 AutoComplete 下拉直接展示。
+    """
     return dict(
         entity_type=entity_type,
         enterprise_key=_stableKey(code, offset=offset),
@@ -93,41 +98,66 @@ def _mapping(
         match_rule=MatchRule.MDM_MASTER,
         effective_date=_DEFAULT_EFFECTIVE,
         expiry_date=None,
+        name=(name or None) and name.strip()[:200] or None,  # 去空白 + 截 200 字符
     )
 
 
-async def _fetchSupplierCodes(adapter: Any) -> list[str]:
+async def _fetchSupplierCodes(adapter: Any) -> list[tuple[str, str | None]]:
+    """返回 [(supplier_code, supplier_name)]，按 supplier_code 排序去重。"""
     rows = await adapter.execute_read_only(
-        "SELECT supplier_code FROM THBI.DWD_SUPPLIER ORDER BY supplier_code",
+        "SELECT supplier_code, supplier_name FROM THBI.DWD_SUPPLIER ORDER BY supplier_code",
     )
-    # _OracleAdapter.execute_read_only 已做限速与时间保护；这里仅取唯一非空编码。
-    codes: list[str] = []
+    out: list[tuple[str, str | None]] = []
     seen: set[str] = set()
     for r in rows:
         code = (r.get("SUPPLIER_CODE") or "").strip()
-        if code and code not in seen:
-            seen.add(code)
-            codes.append(code)
-    return codes
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        name = (r.get("SUPPLIER_NAME") or "").strip() or None
+        out.append((code, name))
+    return out
 
 
-async def _fetchMaterialCodes(adapter: Any) -> list[str]:
+async def _fetchMaterialCodes(adapter: Any) -> list[tuple[str, str | None]]:
+    """返回 [(material_code, description)]：description 取 description_1 + 2 + 3 拼接。
+
+    X3 物料通常 description_1 是短名，description_2/3 是补充规格；按非空顺序拼接，
+    给 AutoComplete 完整信息。
+    """
     rows = await adapter.execute_read_only(
-        "SELECT material_code FROM THBI.DWD_MATERIAL ORDER BY material_code",
+        "SELECT material_code, description_1, description_2, description_3 "
+        "FROM THBI.DWD_MATERIAL ORDER BY material_code",
     )
-    codes: list[str] = []
+    out: list[tuple[str, str | None]] = []
     seen: set[str] = set()
     for r in rows:
         code = (r.get("MATERIAL_CODE") or "").strip()
-        if code and code not in seen:
-            seen.add(code)
-            codes.append(code)
-    return codes
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        parts = [
+            (r.get("DESCRIPTION_1") or "").strip(),
+            (r.get("DESCRIPTION_2") or "").strip(),
+            (r.get("DESCRIPTION_3") or "").strip(),
+        ]
+        name = " ".join(p for p in parts if p) or None
+        out.append((code, name))
+    return out
 
 
-def _buildAllRows(supplierCodes: list[str], materialCodes: list[str]) -> list[dict[str, Any]]:
-    rows = [_mapping(EntityType.SUPPLIER, c, offset=_SUPPLIER_KEY_OFFSET) for c in supplierCodes]
-    rows += [_mapping(EntityType.MATERIAL, c, offset=_MATERIAL_KEY_OFFSET) for c in materialCodes]
+def _buildAllRows(
+    suppliers: list[tuple[str, str | None]],
+    materials: list[tuple[str, str | None]],
+) -> list[dict[str, Any]]:
+    rows = [
+        _mapping(EntityType.SUPPLIER, code, offset=_SUPPLIER_KEY_OFFSET, name=name)
+        for code, name in suppliers
+    ]
+    rows += [
+        _mapping(EntityType.MATERIAL, code, offset=_MATERIAL_KEY_OFFSET, name=name)
+        for code, name in materials
+    ]
     return rows
 
 
@@ -142,52 +172,53 @@ async def syncEntityMappings(
     幂等：ON CONFLICT (entity_type, enterprise_key, source_system) DO NOTHING。
     重跑时 supplier_code / material_code 不变 → enterprise_key 不变 → 命中唯一约束直接跳过。
     """
-    supplierCodes = await _fetchSupplierCodes(adapter)
-    materialCodes = await _fetchMaterialCodes(adapter)
-    rows = _buildAllRows(supplierCodes, materialCodes)
+    suppliers = await _fetchSupplierCodes(adapter)
+    materials = await _fetchMaterialCodes(adapter)
+    rows = _buildAllRows(suppliers, materials)
 
     inserted = 0
-    skipped = 0
     if dryRun:
         for m in rows[:10]:
             print(
                 f"  [plan] {m['entity_type'].value} key={m['enterprise_key']} "
-                f"code={m['enterprise_code']}"
+                f"code={m['enterprise_code']} name={m['name']!r}"
             )
         if len(rows) > 10:
             print(f"  ... 其余 {len(rows) - 10} 行略")
         await session.rollback()
         return {
-            "suppliers": len(supplierCodes),
-            "materials": len(materialCodes),
+            "suppliers": len(suppliers),
+            "materials": len(materials),
             "planned": len(rows),
-            "inserted": 0,
-            "skipped": 0,
+            "affected": 0,
         }
 
-    # executemany 一次性下发所有 INSERT 受 asyncpg 32767 参数上限限制（11 列 × 350k 行
+    # executemany 一次性下发所有 INSERT 受 asyncpg 32767 参数上限限制（12 列 × 350k 行
     # 远超），按 _CHUNK_ROWS 行切片，每片走一次 executemany + 单独 commit，保证
     # 单批失败时不丢前面的进度。35w 行预计 < 100 个 batch，秒级完成。
-    inserted = 0
+    # 用 DO UPDATE SET name 而不是 DO NOTHING：重跑时已存在的行也要更新 name
+    # （例如 THBI 修正了供应商名 / 物料描述），其它列保持原值。PG rowcount 对
+    # DO UPDATE 而言是「实际受影响行数」（= insert 数 + 实际变化的 update 数），
+    # 与 name 完全一致时为 0。
+    affected = 0
     for start in range(0, len(rows), _CHUNK_ROWS):
         batch = rows[start : start + _CHUNK_ROWS]
         stmt = (
             pg_insert(EntityMapping)
             .values(batch)
-            .on_conflict_do_nothing(
+            .on_conflict_do_update(
                 index_elements=["entity_type", "enterprise_key", "source_system"],
+                set_={"name": pg_insert(EntityMapping).excluded.name},
             )
         )
         result = await session.execute(stmt)
-        inserted += int(result.rowcount or 0)
+        affected += int(result.rowcount or 0)
         await session.commit()
-    skipped = len(rows) - inserted
     return {
-        "suppliers": len(supplierCodes),
-        "materials": len(materialCodes),
+        "suppliers": len(suppliers),
+        "materials": len(materials),
         "planned": len(rows),
-        "inserted": inserted,
-        "skipped": skipped,
+        "affected": affected,
     }
 
 
@@ -239,7 +270,7 @@ async def main() -> None:
     print(
         f"[sync] mode={mode} "
         f"suppliers={stat['suppliers']} materials={stat['materials']} "
-        f"planned={stat['planned']} inserted={stat['inserted']} skipped={stat['skipped']} "
+        f"planned={stat['planned']} affected={stat['affected']} "
         f"erp_before={totalBefore}"
     )
     print(

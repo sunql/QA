@@ -998,6 +998,8 @@ class EntityMapping(Base, TimestampMixin):
     expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     # 治理字段（Phase 4.5 扩展：3 张表 owner-based ACL）
     owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Phase 6.x：业务名（供应商 supplier_name / 物料 description_1-3 拼接），仅供展示
+    name: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     __table_args__ = (
         # 同一实体 + 同一源系统只允许一条映射；三列均非空，DB 约束即完整兜底。

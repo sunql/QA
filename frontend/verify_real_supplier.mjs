@@ -12,15 +12,17 @@ await page.waitForTimeout(1500);
 const allCombos = page.locator('input[role="combobox"]');
 const acInput = allCombos.nth(await allCombos.count() - 1);
 
-// 类型 10105（THBI 真实供应商编码）
+// 类型 A（1 字符 — 验证去 2 字符门槛 + name 展示）
 await acInput.click();
-await acInput.fill("10105");
+await acInput.fill("A");
 await page.waitForTimeout(700);
 
 const optCount = await page.locator(".ant-select-item-option-content").count();
-const optText = (await page.locator(".ant-select-item-option-content").first().textContent()) || "";
+const optTexts = await page.locator(".ant-select-item-option-content").allTextContents();
 console.log(`dropdown hits: ${optCount}`);
-console.log(`first option: ${optText.replace(/\s+/g, " ").slice(0, 80)}`);
+for (let i = 0; i < Math.min(3, optTexts.length); i++) {
+  console.log(`  [${i}] ${optTexts[i].replace(/\s+/g, " ").slice(0, 90)}`);
+}
 
 await ctx.close();
 await browser.close();

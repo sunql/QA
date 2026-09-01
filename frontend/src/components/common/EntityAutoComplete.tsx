@@ -1,13 +1,13 @@
 /** Phase 6.x：按 enterprise_code/source_code/enterprise_key 模糊搜索的 AutoComplete。
  *
  * 解决「用户不知道 magic 5-9 位 BIGINT」录入 enterprise_key 的痛点：用户输入供应商
- * 名称/编码/部分数字 → 后端 ILIKE → 下拉显示 enterprise_code + source_code + entity_type
+ * 名称/编码/部分数字 → 后端 ILIKE → 下拉显示 name + enterprise_code + entity_type
  * → 选中后通过 `onChange(value: number)` 把 enterprise_key 回传给上层。
  *
  * 设计要点：
  * - 300ms debounce，避免每个按键都打后端
- * - q 长度 < 2 直接不发请求（前端防抖）
- * - 自定义 `notFoundContent`：q 长度足够但无命中 → 友好提示而非空白
+ * - 1 字符即触发（用户已确认需求；后端 enterprise_code/source_code 已建索引）
+ * - 自定义 `notFoundContent`：1+ 字符无命中 → 友好提示而非空白
  * - 受控组件（value + onChange），状态归属上层
  * - typing.ts 的严格规范：props 用 interface，回调签名显式标注
  */
@@ -36,7 +36,6 @@ interface EntityAutoCompleteProps {
 }
 
 const DEBOUNCE_MS = 300;
-const MIN_QUERY_LEN = 2;
 
 export default function EntityAutoComplete(props: EntityAutoCompleteProps): JSX.Element {
   const {
@@ -74,7 +73,7 @@ export default function EntityAutoComplete(props: EntityAutoCompleteProps): JSX.
     () =>
       async (q: string): Promise<void> => {
         const trimmed = q.trim();
-        if (trimmed.length < MIN_QUERY_LEN) {
+        if (trimmed.length === 0) {
           setOptions([]);
           return;
         }
@@ -88,14 +87,18 @@ export default function EntityAutoComplete(props: EntityAutoCompleteProps): JSX.
             hits.map((h) => ({
               value: String(h.enterpriseKey),
               label: (
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                  <span>
-                    <strong>{h.enterpriseCode}</strong>
-                    <span style={{ color: "#999", marginLeft: 8 }}>{h.sourceCode}</span>
-                  </span>
-                  <span style={{ color: "#999", fontSize: 12 }}>
-                    {h.entityType}/{h.sourceSystem}
-                  </span>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                    <strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {h.name || h.enterpriseCode}
+                    </strong>
+                    <span style={{ color: "#999", fontSize: 12, whiteSpace: "nowrap" }}>
+                      {h.entityType}/{h.sourceSystem}
+                    </span>
+                  </div>
+                  <div style={{ color: "#999", fontSize: 12 }}>
+                    {h.name ? h.enterpriseCode : h.sourceCode}
+                  </div>
                 </div>
               ),
               // 把原始 hit 挂在 option 上，onSelect 时取出
@@ -144,11 +147,7 @@ export default function EntityAutoComplete(props: EntityAutoCompleteProps): JSX.
     handleSearch(v);
   };
 
-  const notFoundContent = loading
-    ? "搜索中…"
-    : inputText.trim().length < MIN_QUERY_LEN
-      ? `至少输入 ${MIN_QUERY_LEN} 个字符`
-      : "无匹配实体";
+  const notFoundContent = loading ? "搜索中…" : "无匹配实体";
 
   return (
     <AutoComplete
@@ -160,14 +159,13 @@ export default function EntityAutoComplete(props: EntityAutoCompleteProps): JSX.
       onChange={handleChange}
       onSelect={handleSelect}
       notFoundContent={notFoundContent}
-      style={{ width: 280 }}
+      style={{ width: 320 }}
       disabled={disabled}
       {...autoCompleteProps}
     >
       <Input
         placeholder={placeholder}
         onPressEnter={onPressEnter}
-        inputMode="numeric"
         allowClear
       />
     </AutoComplete>

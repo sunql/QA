@@ -1811,6 +1811,8 @@ class EntityMappingSearchHit(CamelModel):
     enterprise_code: str
     source_system: SourceSystem
     source_code: str
+    # Phase 6.x 扩展：业务名（供应商 supplier_name / 物料 description_1），下拉直接展示
+    name: str | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -45,15 +45,16 @@ export async function deleteMapping(id: number): Promise<void> {
 
 /** Phase 6.x：AutoComplete 模糊搜索。
  *
- * - `q` 长度 < 2 时直接返回 []（避免每个按键都打后端）。
- * - 后端会在 q 为空时也返空，所以这里传空串也是安全的；但前端防抖更友好。
+ * - 1 字符即触发请求（用户已表达需求；后端已对 enterprise_code / source_code 建
+ *   btree 索引，前缀 LIKE 'X%' 走索引，35w 行也能 < 200ms 返回）
+ * - 空串不查（避免误触）
  */
 export async function searchMappings(
   q: string,
   opts: { entityType?: EntityType; limit?: number } = {},
 ): Promise<EntityMappingSearchHit[]> {
   const trimmed = q.trim();
-  if (trimmed.length < 2) return [];
+  if (trimmed.length === 0) return [];
   const res = await httpClient.get<EntityMappingSearchHit[]>(`${BASE}/search`, {
     params: {
       q: trimmed,

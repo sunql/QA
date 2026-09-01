@@ -75,4 +75,6 @@ export interface EntityMappingSearchHit {
   enterpriseCode: string;
   sourceSystem: SourceSystem;
   sourceCode: string;
+  /** 供应商 supplier_name / 物料 description 拼接，下拉直接展示 */
+  name?: string | null;
 }

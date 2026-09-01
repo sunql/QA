@@ -1,8 +1,8 @@
 /** Phase 6.x：EntityAutoComplete 组件单测。
  *
  * 覆盖契约：
- * - q < 2 chars 不发请求
- * - q >= 2 chars 触发 searchMappings，渲染 enterprise_code 命中
+ * - 1 字符即触发 searchMappings（用户已要求去掉 2 字符门槛）
+ * - q 渲染 enterprise_code + name 命中
  * - 选中后 onChange(enterprise_key) + input 同步为数字
  * - 清空输入 → onChange(null)
  *
@@ -33,10 +33,11 @@ function renderAC(props: Partial<React.ComponentProps<typeof EntityAutoComplete>
 const sampleHit: EntityMappingSearchHit = {
   id: 1,
   entityType: "SUPPLIER",
-  enterpriseKey: 100001,
-  enterpriseCode: "SUP000001",
+  enterpriseKey: 10105,
+  enterpriseCode: "10105",
   sourceSystem: "ERP",
-  sourceCode: "V000001",
+  sourceCode: "10105",
+  name: "ACME 供应商",
 };
 
 beforeEach(() => {
@@ -50,13 +51,21 @@ describe("EntityAutoComplete", () => {
     expect(screen.getByPlaceholderText("搜供应商")).toBeInTheDocument();
   });
 
-  it("does not call searchMappings for queries shorter than 2 chars", () => {
+  it("calls searchMappings for single character query (no 2-char floor)", async () => {
+    api.searchMappings.mockResolvedValue([sampleHit]);
     renderAC();
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "1" } });
-    expect(api.searchMappings).not.toHaveBeenCalled();
+    await waitFor(
+      () =>
+        expect(api.searchMappings).toHaveBeenCalledWith(
+          "1",
+          expect.objectContaining({ entityType: undefined, limit: 20 }),
+        ),
+      { timeout: 1000 },
+    );
   });
 
-  it("calls searchMappings after debounce when query is long enough", async () => {
+  it("calls searchMappings after debounce for normal-length query", async () => {
     api.searchMappings.mockResolvedValue([sampleHit]);
     renderAC();
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "SUP" } });
@@ -73,10 +82,10 @@ describe("EntityAutoComplete", () => {
   it("forwards entityType filter to searchMappings", async () => {
     api.searchMappings.mockResolvedValue([]);
     renderAC({ entityType: "SUPPLIER" });
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "SUP" } });
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "1" } });
     await waitFor(() =>
       expect(api.searchMappings).toHaveBeenCalledWith(
-        "SUP",
+        "1",
         expect.objectContaining({ entityType: "SUPPLIER" }),
       ),
     );
@@ -84,9 +93,9 @@ describe("EntityAutoComplete", () => {
 
   it("emits onChange(null) when input is cleared", () => {
     const onChange = vi.fn();
-    renderAC({ value: 100001, onChange });
+    renderAC({ value: 10105, onChange });
     const input = screen.getByRole("combobox") as HTMLInputElement;
-    expect(input.value).toBe("100001");
+    expect(input.value).toBe("10105");
     fireEvent.change(input, { target: { value: "" } });
     expect(onChange).toHaveBeenCalledWith(null);
   });

@@ -5,6 +5,15 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import AppLayout from "../components/common/AppLayout";
+
+// Ensure AppLayout uses fallback nav immediately (no loading spinner).
+// Use vi.hoisted to guarantee the mock factory is evaluated before module hoisting.
+const menuConfigMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ version: "0", sections: [] }),
+);
+vi.mock("../api/menuConfig", () => ({
+  fetchMenuConfig: menuConfigMock,
+}));
 import ChatPage from "../pages/ChatPage";
 import OntologyPage from "../pages/OntologyPage";
 import DatasourcePage from "../pages/DatasourcePage";
@@ -66,6 +75,7 @@ describe("AppLayout 导航", () => {
   it("点击菜单项切换到本体管理页面", async () => {
     const user = userEvent.setup();
     renderWithRouter();
+    await waitFor(() => expect(screen.getByText("本体管理")).toBeInTheDocument());
     await user.click(screen.getByText("本体管理"));
     // 用 Tabs 标签（sidebar + header 都没有）确认页面已切换
     await waitFor(() => {

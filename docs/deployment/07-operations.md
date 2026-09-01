@@ -241,9 +241,45 @@ docker compose exec neo4j cypher-shell -u neo4j -p $NEO4J_PASSWORD "RETURN 1"
 
 ⚠️ **Milvus 大版本**：v2.4 → v2.5 必须先导出全部数据，再装新版，再导入。直接换镜像起不来。
 
----
+### 7.4.4 Agent Scheduler Worker
 
-## 7.5 常见故障
+Agent 定时调度**不是 FastAPI 进程的一部分**，需要独立启动：
+
+```bash
+# 前台运行（开发调试）
+docker compose exec backend \
+  uv run python -m app.workers.agent_scheduler_worker
+
+# 后台运行（systemd）
+# /etc/systemd/system/qa-agent-scheduler.service
+[Unit]
+Description=QA System Agent Scheduler Worker
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/qa-agent-scheduler-start.sh
+Restart=always
+RestartSec=5
+
+# qa-agent-scheduler-start.sh 内容：
+#!/bin/bash
+cd /opt/qa-system/backend
+uv run python -m app.workers.agent_scheduler_worker
+```
+
+**验证**：
+```bash
+docker compose exec backend uv run python -c "
+import asyncio
+from app.workers.agent_scheduler_worker import AgentSchedulerWorker
+w = AgentSchedulerWorker()
+print('poll interval:', w._pollInterval)
+"
+```
+
+⚠️ **Worker 崩溃后不会自动重启**，需配置 systemd/PM2 进程管理。
+
+---
 
 ### 7.5.1 后端 500
 
@@ -267,7 +303,72 @@ curl -fsS http://localhost:8000/api/v1/models | jq '.[] | select(.isActive==true
 # 全部 inactive → 没人响应，去 UI 激活一个
 ```
 
-### 7.5.2 `/ontology/search` 400
+### 7.5.1b Schema Drift：`UndefinedTableError` 端点 500
+
+**根因**：代码新增了 ORM 模型，但 DB 未执行迁移（`alembic upgrade head` 未跑）。
+
+**表现**：
+```
+psycopg2.errors.UndefinedTable: relation "agent_schedule" does not exist
+```
+
+**修复**：
+```bash
+# 在后端容器内执行迁移
+docker compose exec backend uv run alembic upgrade head
+
+# 验证
+docker compose exec backend uv run alembic current
+```
+
+**紧急绕过**（新模型完全不用时，可临时跳过 drift 检查）：
+```bash
+# 在 .env 中加
+SKIP_SCHEMA_CHECK=1
+docker compose up -d backend
+```
+⚠️ 生产环境禁止长期使用，跳过检查后 DB 与代码的一致性无保证。
+
+### 7.5.1c PG 端口 5432 vs 5433
+
+**根因**：本机 Docker 将容器的 5432 映射到宿主机 5433（避免占用宿主机的 5432）。
+
+**现象**：`DATABASE_URL` 用了 `localhost:5432` → 连接被拒绝。
+
+**修复**：所有 `DATABASE_URL` / `TEST_DATABASE_URL` 一律使用 **5433**：
+```bash
+# 正确
+DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata
+TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test
+```
+
+### 7.5.2 Neo4j 不可达（`GraphTraversalService` 返回空）
+
+**根因**：Neo4j 进程崩溃或端口不可达。
+
+**现象**：`POST /chat` 走 graph 推理路径时返回空结果，不报错。
+
+**修复**：
+```bash
+# 验证
+docker compose logs neo4j | grep -i error
+docker compose exec neo4j cypher-shell -u neo4j -p $NEO4J_PASSWORD "RETURN 1"
+
+# 重启
+docker compose restart neo4j
+```
+
+**降级**：当前端点到 graph 推理时会自动 skip（不影响 NL2SQL 路径）。
+
+### 7.5.3 Milvus 不可达（Document RAG 返回空）
+
+**根因**：Milvus 容器 OOM 或版本不兼容。
+
+**现象**：文档上传成功但语义搜索返回空。
+
+**降级**：Milvus 不可达时 Document Service 返回空结果，不阻断对话。
+
+### 7.5.4 `/ontology/search` 400
 
 ```bash
 # 关键字 where_in_list 报错

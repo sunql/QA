@@ -185,6 +185,7 @@ def createApp() -> FastAPI:
         graph_traversal,
         kpi_catalog,
         local_import,
+        menu_config,
         model_config,
         ontology,
         session,
@@ -247,6 +248,9 @@ def createApp() -> FastAPI:
     )
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
+    app.include_router(
+        menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]
+    )
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(graph.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(

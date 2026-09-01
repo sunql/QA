@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +21,12 @@ from app.dependencies import CurrentUser
 from app.domain.enums import EntityType, SourceSystem
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import EntityMapping
-from app.domain.schemas import EntityMappingCreate, EntityMappingRead, EntityMappingUpdate
+from app.domain.schemas import (
+    EntityMappingCreate,
+    EntityMappingRead,
+    EntityMappingSearchHit,
+    EntityMappingUpdate,
+)
 from app.services.acl_service import AclService
 from app.services.messages_zh import (
     MSG_ENTITY_MAPPING_DATE_RANGE,
@@ -93,6 +98,50 @@ class EntityMappingService:
         if entity is None:
             raise NotFoundError(MSG_ENTITY_MAPPING_NOT_FOUND.format(id=id))
         return entity
+
+    async def searchMappings(
+        self,
+        session: AsyncSession,
+        *,
+        q: str,
+        entityType: EntityType | None = None,
+        limit: int = 20,
+    ) -> list[EntityMapping]:
+        """模糊搜索编码映射（Phase 6.x AutoComplete 用）。
+
+        - `q` 空字符串 → 返回空列表（避免无过滤返回全表 + 与前端空查询语义一致）
+        - `q` 全数字 → 同时按 `enterprise_key` 精确匹配；否则按 `enterprise_code` /
+          `source_code` ILIKE `%q%` 模糊匹配
+        - `entityType` 过滤可选
+        - 结果先按 enterprise_key 命中精确排序，再按 id 升序
+        - `limit` 上限 100（防止误调拉全表）
+        """
+        q = (q or "").strip()
+        if not q:
+            return []
+        limit = max(1, min(limit, 100))
+        stmt = select(EntityMapping)
+        conds = []
+        if q.isdigit():
+            conds.append(EntityMapping.enterprise_key == int(q))
+        # 始终加 ILIKE 兜底，让"输错数字也能搜到含此串的 enterprise_code"
+        like = f"%{q}%"
+        conds.append(EntityMapping.enterprise_code.ilike(like))
+        conds.append(EntityMapping.source_code.ilike(like))
+        stmt = stmt.where(or_(*conds))
+        if entityType is not None:
+            stmt = stmt.where(EntityMapping.entity_type == entityType)
+        # 排序：精确 enterprise_key 命中排前（按 q 全数字），其余按 id 稳定
+        if q.isdigit():
+            stmt = stmt.order_by(
+                (EntityMapping.enterprise_key == int(q)).desc(),
+                EntityMapping.id,
+            )
+        else:
+            stmt = stmt.order_by(EntityMapping.id)
+        stmt = stmt.limit(limit)
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
 
     async def createMapping(
         self,
@@ -194,3 +243,12 @@ class EntityMappingService:
 def entityMappingToRead(mapping: EntityMapping) -> EntityMappingRead:
     """ORM -> Read DTO。集中导出便于路由层复用与单测覆盖。"""
     return EntityMappingRead.model_validate(mapping, from_attributes=True)
+
+
+def entityMappingSearchToHit(mapping: EntityMapping) -> EntityMappingSearchHit:
+    """ORM → 搜索结果轻量 DTO（Phase 6.x AutoComplete 用）。
+
+    与 entityMappingToRead 并列放在类外：searchMappings 返回 ORM 列表，
+    路由层统一转 DTO（与既有 listMappings 模式一致）。
+    """
+    return EntityMappingSearchHit.model_validate(mapping, from_attributes=True)

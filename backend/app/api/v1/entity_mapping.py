@@ -15,9 +15,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.enums import EntityType, SourceSystem
-from app.domain.schemas import EntityMappingCreate, EntityMappingRead, EntityMappingUpdate
+from app.domain.schemas import (
+    EntityMappingCreate,
+    EntityMappingRead,
+    EntityMappingSearchHit,
+    EntityMappingUpdate,
+)
 from app.services.entity_mapping_service import (
     EntityMappingService,
+    entityMappingSearchToHit,
     entityMappingToRead,
 )
 
@@ -49,6 +55,22 @@ async def listEntityMappings(
         offset=offset,
     )
     return [entityMappingToRead(m) for m in mappings]
+
+
+@router.get("/search", response_model=list[EntityMappingSearchHit])
+async def searchEntityMappings(
+    q: str = Query(default="", min_length=0, max_length=100, description="搜索关键词：enterprise_code/source_code ILIKE + 全数字时 enterprise_key 精确"),
+    entityType: EntityType | None = Query(default=None, alias="entityType"),
+    limit: int = Query(default=20, ge=1, le=100),
+    _user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: EntityMappingService = Depends(getEntityMappingService),
+) -> list[EntityMappingSearchHit]:
+    """Phase 6.x：AutoComplete 搜索接口。必须在 /{mappingId} 之前注册（FastAPI 路由按顺序匹配）。"""
+    mappings = await service.searchMappings(
+        session, q=q, entityType=entityType, limit=limit,
+    )
+    return [entityMappingSearchToHit(m) for m in mappings]
 
 
 @router.get("/{mappingId}", response_model=EntityMappingRead)

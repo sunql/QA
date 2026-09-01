@@ -240,3 +240,63 @@ class TestEntityMappingApi:
             json=_payload(enterpriseKey=2**63),
         )
         assert resp.status_code == 422
+
+    async def test_search_empty_q_returns_empty(self, client) -> None:
+        """搜索接口：q 空 → 200 + 空列表（不返回全表）。
+
+        路由顺序：/search 必须在 /{mappingId} 之前注册，否则 FastAPI 会把 "search"
+        当作 mappingId=非整数而返回 422。本测试间接确认路由顺序正确。
+        """
+        resp = await client.get("/api/v1/entity-mappings/search?q=")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == []
+
+    async def test_search_matches_enterprise_code(self, client) -> None:
+        """搜索接口：q 模糊匹配 enterprise_code。"""
+        await client.post("/api/v1/entity-mappings", json=_payload())
+        await client.post(
+            "/api/v1/entity-mappings",
+            json=_payload(enterpriseKey=100002, enterpriseCode="SUP000002",
+                          sourceKey="V000002", sourceCode="V000002"),
+        )
+        resp = await client.get("/api/v1/entity-mappings/search?q=SUP000")
+        assert resp.status_code == 200
+        rows = resp.json()
+        assert len(rows) >= 2
+        # 轻量 DTO 不暴露治理字段
+        for r in rows:
+            assert {"id", "entityType", "enterpriseKey", "enterpriseCode",
+                    "sourceSystem", "sourceCode"} <= set(r.keys())
+            assert "owner" not in r
+            assert "effectiveDate" not in r
+
+    async def test_search_digit_q_prefers_exact_key(self, client) -> None:
+        """搜索接口：q 为数字时优先命中 enterprise_key 精确匹配。"""
+        await client.post(
+            "/api/v1/entity-mappings",
+            json=_payload(enterpriseKey=200003, enterpriseCode="SUP200003",
+                          sourceKey="V200003", sourceCode="V200003"),
+        )
+        resp = await client.get("/api/v1/entity-mappings/search?q=200003")
+        assert resp.status_code == 200
+        rows = resp.json()
+        assert len(rows) >= 1
+        # 精确 enterprise_key 命中排第一位
+        assert rows[0]["enterpriseKey"] == 200003
+
+    async def test_search_filters_by_entity_type(self, client) -> None:
+        """搜索接口：entityType 过滤生效。"""
+        await client.post("/api/v1/entity-mappings", json=_payload())  # SUPPLIER
+        await client.post(
+            "/api/v1/entity-mappings",
+            json=_payload(enterpriseKey=200010, enterpriseCode="MAT200010",
+                          sourceKey="V200010", sourceCode="V200010",
+                          entityType="MATERIAL"),
+        )
+        resp = await client.get(
+            "/api/v1/entity-mappings/search?q=MAT&entityType=MATERIAL"
+        )
+        assert resp.status_code == 200
+        rows = resp.json()
+        assert all(r["entityType"] == "MATERIAL" for r in rows)
+        assert len(rows) >= 1

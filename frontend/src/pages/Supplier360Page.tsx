@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
-import { Alert, Button, Card, Input, Space, Typography } from "antd";
+import { Alert, Button, Card, Space, Typography } from "antd";
 import Supplier360Card from "../components/chat/Supplier360Card";
+import EntityAutoComplete from "../components/common/EntityAutoComplete";
 import { getSupplier360 } from "../api/supplier";
 import { useTranslation } from "../i18n";
 import type { Supplier360Read } from "../types/supplier";
@@ -19,14 +20,14 @@ const { Title, Paragraph } = Typography;
  */
 export default function Supplier360Page() {
   const { t } = useTranslation();
-  const [supplierKey, setSupplierKey] = useState("");
+  // Phase 6.x：state 改为 enterprise_key: number | null，由 EntityAutoComplete 维护
+  const [supplierKey, setSupplierKey] = useState<number | null>(null);
   const [data, setData] = useState<Supplier360Read | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleQuery = useCallback(async () => {
-    const trimmed = supplierKey.trim();
-    if (!/^\d{5,9}$/.test(trimmed)) {
+    if (supplierKey === null) {
       setError(t("supplier360Page.invalidKey"));
       setData(null);
       return;
@@ -35,14 +36,14 @@ export default function Supplier360Page() {
     setError(null);
     setData(null);
     try {
-      const result = await getSupplier360(Number(trimmed));
+      const result = await getSupplier360(supplierKey);
       setData(result);
     } catch (e: unknown) {
       // 与 4.5 ACL 通用消息原则一致：not-found / forbidden 统一文案，避免侧信道
       const msg = e instanceof Error ? e.message : String(e);
       setError(
         msg.includes("404") || msg.includes("不存在")
-          ? t("supplier360Page.notFound", { key: trimmed })
+          ? t("supplier360Page.notFound", { key: supplierKey })
           : t("supplier360Page.requestFailed", { message: msg }),
       );
     } finally {
@@ -60,14 +61,13 @@ export default function Supplier360Page() {
           {t("supplier360Page.hint")}
         </Paragraph>
         <Space>
-          <Input
+          {/* Phase 6.x：AutoComplete 替代纯数字 Input，按名称/编码搜索 */}
+          <EntityAutoComplete
             value={supplierKey}
-            onChange={(e) => setSupplierKey(e.target.value)}
-            onPressEnter={handleQuery}
+            onChange={setSupplierKey}
+            entityType="SUPPLIER"
             placeholder={t("supplier360Page.placeholder") as string}
-            style={{ width: 240 }}
-            inputMode="numeric"
-            aria-label={t("supplier360Page.placeholder") as string}
+            onPressEnter={handleQuery}
           />
           <Button type="primary" loading={loading} onClick={handleQuery}>
             {t("supplier360Page.query")}

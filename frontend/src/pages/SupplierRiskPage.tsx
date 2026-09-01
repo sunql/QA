@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
-import { Alert, Button, Card, Input, Space, Typography } from "antd";
+import { Alert, Button, Card, Space, Typography } from "antd";
 import SupplierRiskCard from "../components/chat/SupplierRiskCard";
+import EntityAutoComplete from "../components/common/EntityAutoComplete";
 import { getSupplierRisk } from "../api/supplierRisk";
 import { useTranslation } from "../i18n";
 import type { SupplierRiskRead } from "../types/supplierRisk";
@@ -8,24 +9,25 @@ import type { SupplierRiskRead } from "../types/supplierRisk";
 const { Title, Paragraph } = Typography;
 
 /**
- * 供应商风险 Agent 直接入口页（Phase 5.4）。
+ * 供应商风险 Agent 直接入口页（Phase 5.4 + Phase 6.x）。
  *
  * 用途：
  * - 跳过 Chat NL2SQL，直接通过 /api/v1/supplier-risk/{key} 取风险等级。
- * - 输入 enterprise_key → 拉取并渲染 SupplierRiskCard；失败显示通用 NotFound 消息。
+ * - AutoComplete 按供应商名称/编码搜索 → 选中后填入 enterprise_key → 拉取并渲染
+ *   SupplierRiskCard；失败显示通用 NotFound 消息。
  *
  * 与 Chat 中的 supplierRisk 卡片共享 SupplierRiskCard 组件（保证 UI 一致）。
  */
 export default function SupplierRiskPage() {
   const { t } = useTranslation();
-  const [supplierKey, setSupplierKey] = useState("");
+  // Phase 6.x：state 改为 enterprise_key: number | null
+  const [supplierKey, setSupplierKey] = useState<number | null>(null);
   const [data, setData] = useState<SupplierRiskRead | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleQuery = useCallback(async () => {
-    const trimmed = supplierKey.trim();
-    if (!/^\d{5,9}$/.test(trimmed)) {
+    if (supplierKey === null) {
       setError(t("supplierRiskPage.invalidKey"));
       setData(null);
       return;
@@ -34,13 +36,13 @@ export default function SupplierRiskPage() {
     setError(null);
     setData(null);
     try {
-      const result = await getSupplierRisk(Number(trimmed));
+      const result = await getSupplierRisk(supplierKey);
       setData(result);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(
         msg.includes("404") || msg.includes("不存在")
-          ? t("supplierRiskPage.notFound", { key: trimmed })
+          ? t("supplierRiskPage.notFound", { key: supplierKey })
           : t("supplierRiskPage.requestFailed", { message: msg }),
       );
     } finally {
@@ -58,14 +60,12 @@ export default function SupplierRiskPage() {
           {t("supplierRiskPage.hint")}
         </Paragraph>
         <Space>
-          <Input
+          <EntityAutoComplete
             value={supplierKey}
-            onChange={(e) => setSupplierKey(e.target.value)}
-            onPressEnter={handleQuery}
+            onChange={setSupplierKey}
+            entityType="SUPPLIER"
             placeholder={t("supplierRiskPage.placeholder") as string}
-            style={{ width: 240 }}
-            inputMode="numeric"
-            aria-label={t("supplierRiskPage.placeholder") as string}
+            onPressEnter={handleQuery}
           />
           <Button type="primary" loading={loading} onClick={handleQuery}>
             {t("supplierRiskPage.query")}

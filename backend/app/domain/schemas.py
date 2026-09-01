@@ -1798,6 +1798,21 @@ class EntityMappingRead(CamelModel):
     )
 
 
+class EntityMappingSearchHit(CamelModel):
+    """编码映射搜索结果（Phase 6.x AutoComplete 用）。
+
+    比 EntityMappingRead 轻量：仅含 AutoComplete 下拉需要展示 + 解析的字段，
+    不暴露 source_key/match_rule/owner/有效期 等治理字段（防止 PII / 越权侧信道）。
+    """
+
+    id: int
+    entity_type: EntityType
+    enterprise_key: int
+    enterprise_code: str
+    source_system: SourceSystem
+    source_code: str
+
+
 # ---------------------------------------------------------------------------
 # Phase 4.5: audit_log 查询 API
 # ---------------------------------------------------------------------------

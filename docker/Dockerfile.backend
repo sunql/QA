@@ -20,20 +20,15 @@ RUN printf 'Types: deb\nURIs: https://mirrors.aliyun.com/debian\nSuites: trixie 
     && apt-get install -y --no-install-recommends build-essential curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# 装 uv（Astral 官方静态二进制，按 uname -m 自适应 x86_64 / aarch64）
-RUN set -eux; \
-    case "$(uname -m)" in \
-      x86_64) UV_ARCH=x86_64 ;; \
-      aarch64|arm64) UV_ARCH=aarch64 ;; \
-      *) echo "unsupported arch: $(uname -m)"; exit 1 ;; \
-    esac; \
-    curl -fsSL -o /tmp/uv.tar.gz \
-      "https://github.com/astral-sh/uv/releases/latest/download/uv-${UV_ARCH}-unknown-linux-gnu.tar.gz"; \
-    mkdir -p /tmp/uv-extract; \
-    tar -xzf /tmp/uv.tar.gz -C /tmp/uv-extract --strip-components=1; \
-    mv /tmp/uv-extract/uv /tmp/uv-extract/uvx /usr/local/bin/; \
-    chmod +x /usr/local/bin/uv /usr/local/bin/uvx; \
-    rm -rf /tmp/uv.tar.gz /tmp/uv-extract
+# 装 uv（PyPI 装 wheel，比 GitHub release tarball 稳）。
+# 2026-09-01 命中过 GitHub releases 连续 TLS 中断 + PyPI HTTPSConnectionPool 超时。
+# 切到阿里云 PyPI 镜像 + retry 解决网络抖动。
+RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ \
+    && for i in 1 2 3 4 5; do \
+         pip install --no-cache-dir --default-timeout=60 --upgrade uv \
+         && break; \
+         echo "uv pip install retry $i/5 failed, sleeping 10s"; sleep 10; \
+       done
 
 # 先拷依赖文件以利用缓存（README.md 供 hatchling 构建元数据）
 COPY backend/pyproject.toml backend/uv.lock* backend/README.md ./

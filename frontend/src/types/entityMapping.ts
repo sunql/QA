@@ -61,3 +61,18 @@ export interface EntityMappingListFilter {
   sourceSystem?: SourceSystem;
   enterpriseKey?: number;
 }
+
+/** Phase 6.x：搜索结果轻量 DTO（与后端 EntityMappingSearchHit 对齐）。
+ *
+ * 比 EntityMappingRead 字段少：仅含 AutoComplete 展示 + 解析需要的标识字段，
+ * 故意不暴露 owner / effectiveDate / expiryDate / matchRule 等治理字段，
+ * 防止侧信道泄露。
+ */
+export interface EntityMappingSearchHit {
+  id: number;
+  entityType: EntityType;
+  enterpriseKey: number;
+  enterpriseCode: string;
+  sourceSystem: SourceSystem;
+  sourceCode: string;
+}

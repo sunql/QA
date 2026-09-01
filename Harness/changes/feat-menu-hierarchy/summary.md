@@ -23,7 +23,7 @@
 | `backend/app/schemas/__init__.py` | 导出 schema 类 |
 | `backend/app/services/menu_config_service.py` | MenuConfigService.list_sections + 结构验证 |
 | `backend/app/api/v1/menu_config.py` | GET /api/v1/menu-config 端点 |
-| `backend/app/api/v1/router.py` | 挂载 menuConfigRouter |
+| `backend/app/main.py` | 挂载 menu_config router（`app.include_router(...prefix="/api/v1/menu-config")`）—— Task 11 smoke 补登 |
 | `backend/scripts/seed_menu_config.py` | 幂等 seed 脚本（6 sections + 20 items） |
 | `backend/app/tests/unit/test_menu_config_orm.py` | ORM 单元测试 |
 | `backend/app/tests/unit/test_menu_config_schema.py` | Schema 单元测试 |
@@ -52,3 +52,13 @@
 - 管理界面（拖拽调整 / 增删菜单）
 - 后端按用户角色/权限过滤菜单
 - 菜单变更历史 / 审计
+
+## 验证
+
+- 后端回归：1954 passed / 1 skipped / **93% coverage**（≥80% gate）
+- 前端：tsc clean / build OK / vitest 415 passed（1 个 EntityMappingPage 预存失败与本特性无关）
+- 实时 API smoke（port 8003, real PG 5433）：
+  - `GET /api/v1/menu-config` → **HTTP 200**
+  - `version = "2026-09-01"`, `sections.length = 6`, 总子项 `20`
+  - 顶层 6 类按 sort_order 升序：`section.aiAgent → section.auditSecurity`
+- 浏览器手测未在沙箱执行（需人工）。

@@ -70,12 +70,27 @@ class AuditLogPage(CamelModel):
 
 ### 4.1 `GET /api/v1/audit` 扩展
 
+**过滤契约（现状 → 改后）**：
+
+| 维度 | 现状 | 改后 |
+|---|---|---|
+| `entity_type` 过滤 | exact | exact（不变） |
+| `action` 过滤 | exact | exact（不变） |
+| `actor` 过滤 | exact | **ILIKE 子串 fuzzy**（admin 输"张"匹配"张三"） |
+| `entity_id` 过滤 | 无（前端假装过滤） | **新增**：`CAST(entity_id AS TEXT) ILIKE '%{value}%'`（int 转 text 后子串匹配） |
+| `actor_departments` 过滤 | 无 | **新增**：逗号分隔字符串子串匹配（"采购"匹配"采购部,财务部"） |
+| `created_at` 区间 | 无 | **新增** `since` / `until`（`>=` since，`<` until） |
+| `limit` / `offset` | 1-1000 / ≥0 | 不变 |
+| ACL | `_user: CurrentUser`（任何登录用户） | **`_admin: CurrentUser = Depends(getAdminOnlyActor)`** |
+| Response | `list[AuditLogRead]` | **`AuditLogPage` 包装 `{rows, total}`** |
+
 ```python
 @router.get("", response_model=AuditLogPage)
 async def listAuditLogs(
     entity_type: Annotated[str | None, Query()] = None,       # exact（不变）
     action: Annotated[str | None, Query()] = None,            # exact（不变）
     actor: Annotated[str | None, Query()] = None,             # ILIKE 模糊（变）
+    entity_id: Annotated[str | None, Query()] = None,         # NEW：CAST TEXT ILIKE 子串
     actor_departments: Annotated[str | None, Query()] = None, # NEW：子串
     since: Annotated[datetime | None, Query()] = None,        # NEW：created_at >= since
     until: Annotated[datetime | None, Query()] = None,        # NEW：created_at < until
@@ -132,6 +147,7 @@ async def listAll(
     entity_type: str | None = None,
     action: str | None = None,
     actor: str | None = None,              # 变：模糊 ILIKE '%actor%'
+    entity_id: str | None = None,          # NEW：CAST TEXT ILIKE 子串
     actor_departments: str | None = None,  # NEW
     since: datetime | None = None,         # NEW
     until: datetime | None = None,         # NEW
@@ -143,6 +159,7 @@ async def listAll(
     if entity_type: where.append(AuditLog.entity_type == entity_type)
     if action: where.append(AuditLog.action == action)
     if actor: where.append(AuditLog.actor.ilike(f"%{actor}%"))
+    if entity_id: where.append(cast(AuditLog.entity_id, String).ilike(f"%{entity_id}%"))
     if actor_departments: where.append(AuditLog.actor_departments.ilike(f"%{actor_departments}%"))
     if since: where.append(AuditLog.created_at >= since)
     if until: where.append(AuditLog.created_at < until)

@@ -29,7 +29,9 @@ from app.domain.schemas import (
     AgentDefinitionCreate,
     AgentDefinitionRead,
     AgentDefinitionUpdate,
+    AgentOptionsRead,
 )
+from app.domain.agent_vocabulary import AGENT_DATA_DOMAINS, AGENT_DATA_LAYERS
 from app.services.agent_registry_service import (
     AgentRegistryService,
     _policyToRead,
@@ -73,6 +75,21 @@ async def listAgents(
         offset=offset,
     )
     return [agentToRead(a) for a in agents]
+
+
+@router.get("/options", response_model=AgentOptionsRead)
+async def getAgentOptions(
+    _user: CurrentUser = Depends(getCurrentUser),
+) -> AgentOptionsRead:
+    """Agent 编辑选项（域/层词表）；前端 useAgentOptions() 缓存。
+
+    必须在 GET /{agent_code} 之前注册——否则 "options" 会被路径参数吞成
+    agent_code='options'，触发 getAgent → 404。测试 test_agent_options_api.py 守护。
+    """
+    return AgentOptionsRead(
+        data_domains=list(AGENT_DATA_DOMAINS),
+        data_layers=list(AGENT_DATA_LAYERS),
+    )
 
 
 @router.get("/{agent_code}", response_model=AgentDefinitionRead)

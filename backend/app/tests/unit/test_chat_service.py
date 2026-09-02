@@ -118,6 +118,9 @@ class _FakeSession:
     async def commit(self) -> None:
         pass
 
+    async def flush(self) -> None:
+        pass
+
     async def refresh(self, entity: object) -> None:
         pass
 

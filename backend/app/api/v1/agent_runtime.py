@@ -23,6 +23,7 @@ fallback_template，输出确定性、可测）；chat 路径注入真实 factor
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,8 +34,11 @@ from app.domain.exceptions import DomainError
 from app.domain.schemas import AgentRunRead, AgentRunRequest
 from app.infrastructure.rate_limit import limiter, rateLimitValue
 from app.services.agent_runtime_service import AgentRuntimeService
+from app.services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
+
+_audit = AuditService()
 
 router = APIRouter()
 
@@ -62,15 +66,55 @@ async def runAgent(
 
     调用方身份（_user.userId）透传为 actor，供工具上下文归属审计；
     未预期基础设施异常 → 记录上下文 + 500 友好消息（领域异常仍由全局 handler 映射）。
+    audit-on-finish：finally 确保成功/失败都记录审计（Task 10）。
     """
+    started_at = datetime.now(timezone.utc)
+    actor = _user.userId
+    actor_departments = _user.departments or None
+    run_status = "SUCCESS"
+    run_result: AgentRunRead | None = None
     try:
-        return await service.run(
-            db, agent_code, payload.input, actor=_user.userId,
+        run_result = await service.run(
+            db, agent_code, payload.input, actor=actor,
         )
     except DomainError:
         # 领域异常（404/409/403/422）保持状态码，交由全局 DomainError handler 映射
+        run_status = "FAILED"
+        finished_at = datetime.now(timezone.utc)
+        await _audit.record(
+            db,
+            entity_type="agent_run_log",
+            entity_id=0,
+            action="CREATE",
+            actor=actor,
+            actor_departments=actor_departments,
+            after={
+                "agentCode": agent_code,
+                "status": run_status,
+                "startedAt": started_at.isoformat(),
+                "finishedAt": finished_at.isoformat(),
+                "error": "DOMAIN_ERROR",
+            },
+        )
         raise
     except Exception:  # noqa: BLE001 - 基础设施失败降级为友好 500，不泄漏堆栈
+        run_status = "FAILED"
+        finished_at = datetime.now(timezone.utc)
+        await _audit.record(
+            db,
+            entity_type="agent_run_log",
+            entity_id=0,
+            action="CREATE",
+            actor=actor,
+            actor_departments=actor_departments,
+            after={
+                "agentCode": agent_code,
+                "status": run_status,
+                "startedAt": started_at.isoformat(),
+                "finishedAt": finished_at.isoformat(),
+                "error": "INFRA_ERROR",
+            },
+        )
         logger.exception(
             "agent run failed for %s: %s", agent_code, payload.input[:200],
         )
@@ -78,3 +122,29 @@ async def runAgent(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=MSG_AGENT_RUN_FAILED,
         ) from None
+    finally:
+        if run_result is not None and run_status == "SUCCESS":
+            finished_at = datetime.now(timezone.utc)
+            await _audit.record(
+                db,
+                entity_type="agent_run_log",
+                entity_id=0,
+                action="CREATE",
+                actor=actor,
+                actor_departments=actor_departments,
+                after={
+                    "agentCode": run_result.agent_code,
+                    "agentName": run_result.agent_name,
+                    "tool": run_result.tool,
+                    "status": run_status,
+                    "answer": run_result.answer,
+                    "tokensUsed": run_result.tokens_used,
+                    "promptTokens": run_result.prompt_tokens,
+                    "completionTokens": run_result.completion_tokens,
+                    "cost": run_result.cost,
+                    "llmModelName": run_result.llm_model_name,
+                    "executedAt": run_result.executed_at.isoformat() if run_result.executed_at else None,
+                    "startedAt": started_at.isoformat(),
+                    "finishedAt": finished_at.isoformat(),
+                },
+            )

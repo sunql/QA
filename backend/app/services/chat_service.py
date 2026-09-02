@@ -24,6 +24,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -65,6 +66,7 @@ from app.domain.schemas import (
 from app.infrastructure.business_db_pool import BusinessDbAdapter, get_adapter
 from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage
 from app.infrastructure.llm.factory import createClient
+from app.services.audit_service import AuditService
 from app.services.chart_service import ChartService
 from app.services.chat_stream_output import _ANSWER_SYSTEM_PROMPT, ChatStreamOutputMixin
 from app.services.datasource_service import DataSourceService
@@ -266,6 +268,8 @@ def _summarizeExecutionError(exc: Exception) -> str:
 LlmFactory = Callable[[Any], BaseLlmClient]
 AdapterProvider = Callable[[int, DataSource], BusinessDbAdapter]
 FallbackCaller = Callable[[LlmConfig], Awaitable[Any]]
+
+_audit = AuditService()
 
 
 @dataclass(frozen=True)
@@ -1358,34 +1362,125 @@ class ChatService(ChatStreamOutputMixin):
                 answer=MSG_AGENT_RUN_MISSING_CODE,
                 intent=result.intent.value,
             )
+        # audit-on-finish：finally 确保成功/失败都记录审计（Task 10）
+        started_at = datetime.now(timezone.utc)
+        actor = user.userId if user is not None else "chat"
+        actor_departments = user.departments if user is not None else None
+        run_status = "SUCCESS"
+        run = None
         try:
             run = await self._agentRuntime.run(
                 session, agent_code, dto.question, llm_factory=self._llmFactory,
                 # 真实调用方身份透传为 actor（归属审计；安全审查 HIGH#1 修复）
-                actor=user.userId if user is not None else "chat",
+                actor=actor,
             )
         except NotFoundError:
+            run_status = "FAILED"
+            finished_at = datetime.now(timezone.utc)
+            await _audit.record(
+                session,
+                entity_type="agent_run_log",
+                entity_id=0,
+                action="CREATE",
+                actor=actor,
+                actor_departments=actor_departments,
+                after={
+                    "agentCode": agent_code,
+                    "status": run_status,
+                    "startedAt": started_at.isoformat(),
+                    "finishedAt": finished_at.isoformat(),
+                    "error": "AGENT_NOT_FOUND",
+                },
+            )
             return ChatResponse(
                 answer=MSG_AGENT_NOT_FOUND_BY_CODE.format(code=agent_code),
                 intent=result.intent.value,
             )
         except PermissionDeniedError as exc:
+            run_status = "FAILED"
+            finished_at = datetime.now(timezone.utc)
+            await _audit.record(
+                session,
+                entity_type="agent_run_log",
+                entity_id=0,
+                action="CREATE",
+                actor=actor,
+                actor_departments=actor_departments,
+                after={
+                    "agentCode": agent_code,
+                    "status": run_status,
+                    "startedAt": started_at.isoformat(),
+                    "finishedAt": finished_at.isoformat(),
+                    "error": "PERMISSION_DENIED",
+                },
+            )
             # 用异常自身 message（含真实 data_object），替代硬编码 object="?"（审查 LOW#5）
             return ChatResponse(
                 answer=exc.message,
                 intent=result.intent.value,
             )
         except ConflictError:
+            run_status = "FAILED"
+            finished_at = datetime.now(timezone.utc)
+            await _audit.record(
+                session,
+                entity_type="agent_run_log",
+                entity_id=0,
+                action="CREATE",
+                actor=actor,
+                actor_departments=actor_departments,
+                after={
+                    "agentCode": agent_code,
+                    "status": run_status,
+                    "startedAt": started_at.isoformat(),
+                    "finishedAt": finished_at.isoformat(),
+                    "error": "AGENT_NOT_RUNNABLE",
+                },
+            )
             return ChatResponse(
                 answer=MSG_AGENT_NOT_RUNNABLE.format(code=agent_code, status="inactive"),
                 intent=result.intent.value,
             )
         except ValidationError as exc:
+            run_status = "FAILED"
+            finished_at = datetime.now(timezone.utc)
+            await _audit.record(
+                session,
+                entity_type="agent_run_log",
+                entity_id=0,
+                action="CREATE",
+                actor=actor,
+                actor_departments=actor_departments,
+                after={
+                    "agentCode": agent_code,
+                    "status": run_status,
+                    "startedAt": started_at.isoformat(),
+                    "finishedAt": finished_at.isoformat(),
+                    "error": "BAD_INPUT",
+                },
+            )
             return ChatResponse(
                 answer=exc.message,
                 intent=result.intent.value,
             )
         except Exception:  # noqa: BLE001 - Agent 执行降级，不阻断 chat 主链路
+            run_status = "FAILED"
+            finished_at = datetime.now(timezone.utc)
+            await _audit.record(
+                session,
+                entity_type="agent_run_log",
+                entity_id=0,
+                action="CREATE",
+                actor=actor,
+                actor_departments=actor_departments,
+                after={
+                    "agentCode": agent_code,
+                    "status": run_status,
+                    "startedAt": started_at.isoformat(),
+                    "finishedAt": finished_at.isoformat(),
+                    "error": "UNEXPECTED",
+                },
+            )
             logger.warning(
                 "agent run failed for %s, degrading: %s",
                 agent_code, dto.question, exc_info=True,
@@ -1394,6 +1489,34 @@ class ChatService(ChatStreamOutputMixin):
                 answer=MSG_AGENT_RUN_FAILED,
                 intent=result.intent.value,
             )
+        finally:
+            # audit-on-finish：finally 确保成功/失败都记录审计（Task 10）
+            # 注意：FAILED 分支已在 except 块中记录；此处仅处理 SUCCESS 路径
+            if run is not None and run_status == "SUCCESS":
+                finished_at = datetime.now(timezone.utc)
+                await _audit.record(
+                    session,
+                    entity_type="agent_run_log",
+                    entity_id=0,
+                    action="CREATE",
+                    actor=actor,
+                    actor_departments=actor_departments,
+                    after={
+                        "agentCode": run.agent_code,
+                        "agentName": run.agent_name,
+                        "tool": run.tool,
+                        "status": run_status,
+                        "answer": run.answer,
+                        "tokensUsed": run.tokens_used,
+                        "promptTokens": run.prompt_tokens,
+                        "completionTokens": run.completion_tokens,
+                        "cost": run.cost,
+                        "llmModelName": run.llm_model_name,
+                        "executedAt": run.executed_at.isoformat() if run.executed_at else None,
+                        "startedAt": started_at.isoformat(),
+                        "finishedAt": finished_at.isoformat(),
+                    },
+                )
         # 审查 MEDIUM#2：Agent 内部 LLM 调用（如 supplier_risk 生成风险点）补写
         # token_usage 审计（modelConfigId=None：工具路径未透传配置，落已知 modelName + cost）
         await self._recordDirectUsage(

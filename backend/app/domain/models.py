@@ -1241,6 +1241,14 @@ class AgentDefinition(Base, TimestampMixin):
     version: Mapped[str] = mapped_column(
         String(32), nullable=False, default="v1.0"
     )
+    tool_name: Mapped[str | None] = mapped_column(
+        String(64), nullable=True,
+        doc="绑定的工具名；None = 未绑定（不可运行）",
+    )
+    tool_name_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        doc="tool_name 上次更新时间（用于审计）",
+    )
 
     policies: Mapped[list["AgentAccessPolicy"]] = relationship(
         back_populates="agent",

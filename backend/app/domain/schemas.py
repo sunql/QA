@@ -2039,6 +2039,8 @@ class AgentDefinitionCreate(CamelModel):
     data_layers: list[str] = Field(default_factory=list)
     status: AgentStatus = Field(default=AgentStatus.DRAFT)
     version: str | None = Field(default=None, max_length=32)
+    tool_name: str | None = Field(default=None, max_length=64)
+    tool_name_updated_at: datetime | None = Field(default=None)
     policies: list[AgentAccessPolicyCreate] = Field(default_factory=list)
 
     _check_domains = field_validator("data_domains")(_vocabCheckDomains)
@@ -2060,6 +2062,8 @@ class AgentDefinitionUpdate(CamelModel):
     data_layers: list[str] | None = None
     status: AgentStatus | None = None
     version: str | None = Field(default=None, max_length=32)
+    tool_name: str | None = Field(default=None, max_length=64)
+    tool_name_updated_at: datetime | None = Field(default=None)
 
     @field_validator("data_domains")
     @classmethod
@@ -2101,6 +2105,8 @@ class AgentDefinitionRead(CamelModel):
     created_time: datetime | None = None
     updated_time: datetime | None = None
     created_time: datetime
+    tool_name: str | None = None
+    tool_name_updated_at: datetime | None = None
     runnable: bool = False
 
 

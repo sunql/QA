@@ -404,3 +404,15 @@ MSG_AGENT_LAYER_NOT_IN_VOCAB = (
     "data_layers 含未授权值 '{value}'；合法集：{allowed}。"
     "Agent 层词表仅含 DIM/DWD/FEATURE；血缘层 LineageLayer 不在此范围内。"
 )
+
+# ===== Phase 7：Agent 工具绑定可配置化（feat-agent-tool-binding，写时校验）=====
+MSG_AGENT_TOOL_UNKNOWN = (
+    "tool_name 必须是已注册工具之一（{registered}），收到 {name}"
+)
+MSG_AGENT_TOOL_LAYER_MISMATCH = (
+    "tool_name={tool} 要求的 data_layers 包含 {missing}，"
+    "需在 Agent 的 data_layers 中显式声明"
+)
+MSG_AGENT_TOOL_UNREGISTERED = (
+    "agent_code={code} 绑定的 tool={tool} 在当前代码中未注册（环境漂移）"
+)

@@ -215,6 +215,8 @@ from app.domain.error_messages import (
     MSG_SCHEMA_USAGE_TOTAL_TOKENS,
     MSG_AGENT_DOMAIN_NOT_IN_VOCAB,
     MSG_AGENT_LAYER_NOT_IN_VOCAB,
+    MSG_AGENT_TOOL_UNKNOWN,
+    MSG_AGENT_TOOL_LAYER_MISMATCH,
 )
 
 
@@ -227,6 +229,51 @@ class CamelModel(BaseModel):
         from_attributes=True,
         protected_namespaces=(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 feat-agent-tool-binding：tool_name 跨字段一致性写时校验（Task 4）
+# ---------------------------------------------------------------------------
+#
+# 设计原则：deny-by-default 从运行时移到配置面 —— Pydantic 在 DTO 边界拒绝
+# 非法组合，service 层只接管合法写入。
+# 共享逻辑同时被 AgentDefinitionCreate / AgentDefinitionUpdate 复用。
+#
+# 为什么不在模块顶层 import agent_tool_registry：agent_tools → services →
+# schemas 形成循环依赖。此处用 TYPE_CHECKING 标注静态类型，运行时再延迟
+# 导入避免循环；validator 仅在 Pydantic 实例化时触发，循环时机已解开。
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    pass  # 运行时无需类型标注，agent_tool_registry 仅在 validator 内引用
+
+
+def _validateToolNameShared(v: str | None, info) -> str | None:
+    """Create/Update 共用逻辑：tool_name 必须在 registry 中，
+    且 agent.data_layers 必须完全覆盖 tool.data_layers。
+
+    非法值抛 ValueError（Pydantic 422 拒绝）：
+    - tool 未注册 → MSG_AGENT_TOOL_UNKNOWN
+    - data_layers 未覆盖 → MSG_AGENT_TOOL_LAYER_MISMATCH
+    """
+    if v is None:
+        return v
+    # 延迟导入打破 schemas ↔ agent_tools ↔ services 循环依赖
+    from app.services.agent_tools import agent_tool_registry
+    tool = agent_tool_registry.get(v)
+    if tool is None:
+        registered = ",".join(t.name for t in agent_tool_registry.all())
+        raise ValueError(MSG_AGENT_TOOL_UNKNOWN.format(
+            name=v, registered=registered,
+        ))
+    data_layers = info.data.get("data_layers") or []
+    missing = [layer for layer in tool.data_layers if layer not in data_layers]
+    if missing:
+        raise ValueError(MSG_AGENT_TOOL_LAYER_MISMATCH.format(
+            tool=v, missing=",".join(missing),
+        ))
+    return v
 
 
 # ===== 模型配置 =====
@@ -2046,6 +2093,11 @@ class AgentDefinitionCreate(CamelModel):
     _check_domains = field_validator("data_domains")(_vocabCheckDomains)
     _check_layers = field_validator("data_layers")(_vocabCheckLayers)
 
+    @field_validator("tool_name")
+    @classmethod
+    def _validateToolName(cls, v, info):
+        return _validateToolNameShared(v, info)
+
 
 class AgentDefinitionUpdate(CamelModel):
     """更新 Agent 注册请求（Phase 6.1）。
@@ -2078,6 +2130,11 @@ class AgentDefinitionUpdate(CamelModel):
         if v is None:
             return v
         return _vocabCheckLayers(v)
+
+    @field_validator("tool_name")
+    @classmethod
+    def _validateToolName(cls, v, info):
+        return _validateToolNameShared(v, info)
 
 
 class AgentDefinitionRead(CamelModel):

@@ -123,6 +123,15 @@ class AgentToolRegistry:
     def list(self) -> tuple[AgentTool, ...]:
         return tuple(self._tools.values())
 
+    def all(self) -> list[AgentTool]:
+        """所有已注册工具，按 name 排序。
+
+        Phase 7 feat-agent-tool-binding Task 4：写时 Pydantic 校验需枚举已注册
+        工具名以生成错误消息；list() 返回 tuple 不可变，调用方按名字排序更便于
+        拼接注册表展示。
+        """
+        return [self._tools[k] for k in sorted(self._tools.keys())]
+
 
 # ---------------------------------------------------------------------------
 # 3 个内置工具的 arg_extractor / handler

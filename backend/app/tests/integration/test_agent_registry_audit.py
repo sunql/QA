@@ -95,11 +95,23 @@ class TestAgentRegistryAudit:
         assert any(r["entityId"] == agent_id and r["action"] == "UPDATE" for r in rows)
 
     async def test_delete_agent_not_exposed_in_api(self, client, dbSession) -> None:
-        """deleteAgent service method has no HTTP endpoint — skip in API integration tests.
-        The method exists but is not wired in agents.py (only deprecateAgent is exposed).
-        Covered by unit test if needed.
-        """
-        pass
+        """DELETE on agent endpoint should not be exposed — only deprecate (soft delete) is the API surface."""
+        # Try direct DELETE — should fail with 405 or 404 (not 204/200)
+        create_resp = await client.post(
+            "/api/v1/agents",
+            json={
+                "agentCode": f"AUD_AGENT_NODEL_{id(self)}",
+                "name": "No Delete Agent",
+                "agentType": "CHAT",
+            },
+            headers=ADMIN_HEADERS,
+        )
+        assert create_resp.status_code in (200, 201), f"setup create failed: {create_resp.text}"
+        agent_code = create_resp.json()["agentCode"]
+        del_resp = await client.delete(f"/api/v1/agents/{agent_code}", headers=ADMIN_HEADERS)
+        assert del_resp.status_code in (405, 404), (
+            f"DELETE should not be exposed; got {del_resp.status_code}: {del_resp.text}"
+        )
 
     async def test_create_agent_actor_departments_injected(self, client, dbSession) -> None:
         code = f"AUD_DEPT_{id(self)}"
@@ -179,10 +191,11 @@ class TestAgentRegistryAudit:
         agent_id = create_resp.json()["id"]
         from app.workers.audit_worker import AuditWorker
         await AuditWorker().drainOnce(dbSession)
-        await client.delete(
+        del_resp = await client.delete(
             f"/api/v1/agents/{code}?hard_delete=true",
             headers=ADMIN_HEADERS,
         )
+        assert del_resp.status_code == status.HTTP_200_OK, f"hard delete failed: {del_resp.text}"
         await AuditWorker().drainOnce(dbSession)
         audit_resp = await client.get(
             "/api/v1/audit?entity_type=agent_definition&action=DELETE",

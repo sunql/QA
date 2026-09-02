@@ -6,6 +6,11 @@ import zhCN from "antd/locale/zh_CN";
 import AgentRegistryPage from "../pages/AgentRegistryPage";
 import type { AgentDefinition } from "../types/agentRegistry";
 
+const agentOptionsApi = vi.hoisted(() => ({
+    getAgentOptions: vi.fn(),
+}));
+vi.mock("../api/agentOptions", () => agentOptionsApi);
+
 // 回归背景（ERR_INSUFFICIENT_RESOURCES 请求风暴）：useTranslation 的 t 曾经
 // 每次渲染都是新引用，refresh = useCallback(..., [filterStatus, t]) 随之失效，
 // useEffect(() => refresh(), [refresh]) 每次渲染都重新请求 → 无限循环。
@@ -54,7 +59,18 @@ function renderPage() {
 
 describe("AgentRegistryPage", () => {
   beforeEach(() => {
+    agentOptionsApi.getAgentOptions.mockReset().mockResolvedValue({
+      domains: ["PROCUREMENT", "QUALITY", "LOGISTICS"],
+      layers: ["DIM", "DWD", "FEATURE"],
+    });
     api.listAgents.mockReset().mockResolvedValue([activeAgent]);
+  });
+
+  it("挂载时拉一次 /agents/options（不重复请求）", async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(agentOptionsApi.getAgentOptions).toHaveBeenCalledTimes(1),
+    );
   });
 
   it("挂载后只请求一次列表（t 引用稳定，无请求风暴）", async () => {

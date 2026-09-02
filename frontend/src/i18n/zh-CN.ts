@@ -318,6 +318,11 @@ export const zhCN = {
     empty: "输入问题开始对话",
   },
 
+  agentOptions: {
+    title: "Agent 选项",
+    fetchFailed: "获取 Agent 词表失败：{message}",
+  },
+
   agentRegistry: {
     pageTitle: "Agent Registry",
     pageHint:
@@ -336,6 +341,8 @@ export const zhCN = {
     },
     filter: {
       statusPlaceholder: "按状态过滤",
+      domainPlaceholder: "按域过滤（多选）",
+      layerPlaceholder: "按层过滤（单选）",
     },
     actions: {
       create: "新建 Agent",
@@ -367,6 +374,8 @@ export const zhCN = {
       dataDomains: "数据域（多选）",
       dataLayers: "数据层（多选）",
       version: "版本",
+      dataDomainRule: "请从下拉选择（PROCUREMENT/QUALITY/LOGISTICS）",
+      dataLayerRule: "请从下拉选择（DIM/DWD/FEATURE）",
     },
     detail: {
       code: "编码",

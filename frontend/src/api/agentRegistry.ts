@@ -1,4 +1,5 @@
 import { httpClient } from "./client";
+import qs from "qs";
 import type {
   AgentAccessPolicy,
   AgentAccessPolicyCreate,
@@ -14,12 +15,15 @@ const PREFIX = "/agents";
 
 export async function listAgents(params?: {
   status?: AgentStatus;
-  dataDomain?: string;
+  dataDomain?: string | string[];
 }): Promise<AgentDefinition[]> {
-  const q: Record<string, string> = {};
+  const q: Record<string, string | string[]> = {};
   if (params?.status) q.status = params.status;
   if (params?.dataDomain) q.dataDomain = params.dataDomain;
-  const res = await httpClient.get<AgentDefinition[]>(PREFIX, { params: q });
+  const res = await httpClient.get<AgentDefinition[]>(PREFIX, {
+    params: q,
+    paramsSerializer: (p) => qs.stringify(p, { arrayFormat: "repeat" }),
+  });
   return res.data;
 }
 

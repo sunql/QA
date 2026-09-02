@@ -286,6 +286,11 @@ export const enUS = {
     empty: "No data",
   },
 
+  agentOptions: {
+    title: "Agent Options",
+    fetchFailed: "Failed to fetch agent vocabulary: {message}",
+  },
+
   agentRuntime: {
     owner: "Owner: {owner}",
     executedAt: "Executed: {time}",
@@ -331,6 +336,8 @@ export const enUS = {
     },
     filter: {
       statusPlaceholder: "Filter by status",
+      domainPlaceholder: "Filter by domain (multi)",
+      layerPlaceholder: "Filter by layer (single)",
     },
     actions: {
       create: "New Agent",
@@ -362,6 +369,8 @@ export const enUS = {
       dataDomains: "Data Domains (multi)",
       dataLayers: "Data Layers (multi)",
       version: "Version",
+      dataDomainRule: "Choose from dropdown (PROCUREMENT/QUALITY/LOGISTICS)",
+      dataLayerRule: "Choose from dropdown (DIM/DWD/FEATURE)",
     },
     detail: {
       code: "Code",

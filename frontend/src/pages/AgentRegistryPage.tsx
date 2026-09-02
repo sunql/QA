@@ -14,6 +14,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useTranslation } from "../i18n";
+import { useAgentOptions } from "../hooks/useAgentOptions";
 import {
   addAgentPolicy,
   createAgent,
@@ -81,6 +82,7 @@ export default function AgentRegistryPage() {
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
   const [loading, setLoading] = useState(false);
   const [filterStatus, setFilterStatus] = useState<AgentStatus | undefined>();
+  const [filterDomains, setFilterDomains] = useState<string[]>([]);
   const [detailAgent, setDetailAgent] = useState<AgentDefinition | null>(null);
   const [detailPolicies, setDetailPolicies] = useState<AgentAccessPolicy[]>([]);
   const [editing, setEditing] = useState<AgentDefinition | null>(null);
@@ -91,12 +93,15 @@ export default function AgentRegistryPage() {
   const [editingPolicy, setEditingPolicy] =
     useState<AgentAccessPolicy | null>(null);
 
+  const { domains, layers } = useAgentOptions();
+
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const list = await listAgents(
-        filterStatus ? { status: filterStatus } : undefined,
-      );
+      const params: { status?: AgentStatus; dataDomain?: string[] } = {};
+      if (filterStatus) params.status = filterStatus;
+      if (filterDomains.length > 0) params.dataDomain = filterDomains;
+      const list = await listAgents(params);
       setAgents(list);
     } catch (err: unknown) {
       message.error(
@@ -105,7 +110,7 @@ export default function AgentRegistryPage() {
     } finally {
       setLoading(false);
     }
-  }, [filterStatus, t]);
+  }, [filterStatus, filterDomains, t]);
 
   useEffect(() => {
     void refresh();
@@ -363,6 +368,15 @@ export default function AgentRegistryPage() {
             </Select.Option>
           ))}
         </Select>
+        <Select
+          mode="multiple"
+          allowClear
+          placeholder={t("agentRegistry.filter.domainPlaceholder")}
+          style={{ width: 240 }}
+          value={filterDomains}
+          onChange={(v) => setFilterDomains(v)}
+          options={domains.map((d) => ({ value: d, label: d }))}
+        />
         <Button
           type="primary"
           onClick={() => {
@@ -455,10 +469,18 @@ export default function AgentRegistryPage() {
             </Form.Item>
           </Space>
           <Form.Item name="dataDomains" label={t("agentRegistry.fields.dataDomains")}>
-            <Select mode="tags" placeholder="PROCUREMENT" />
+            <Select
+              mode="multiple"
+              options={domains.map((d) => ({ value: d, label: d }))}
+              placeholder={t("agentRegistry.filter.domainPlaceholder")}
+            />
           </Form.Item>
           <Form.Item name="dataLayers" label={t("agentRegistry.fields.dataLayers")}>
-            <Select mode="tags" placeholder="FEATURE" />
+            <Select
+              mode="multiple"
+              options={layers.map((l) => ({ value: l, label: l }))}
+              placeholder={t("agentRegistry.filter.layerPlaceholder")}
+            />
           </Form.Item>
         </Form>
       </Modal>
@@ -480,10 +502,16 @@ export default function AgentRegistryPage() {
             <Input.TextArea rows={3} />
           </Form.Item>
           <Form.Item name="dataDomains" label={t("agentRegistry.fields.dataDomains")}>
-            <Select mode="tags" />
+            <Select
+              mode="multiple"
+              options={domains.map((d) => ({ value: d, label: d }))}
+            />
           </Form.Item>
           <Form.Item name="dataLayers" label={t("agentRegistry.fields.dataLayers")}>
-            <Select mode="tags" />
+            <Select
+              mode="multiple"
+              options={layers.map((l) => ({ value: l, label: l }))}
+            />
           </Form.Item>
           <Form.Item name="status" label={t("agentRegistry.fields.status")}>
             <Select>
@@ -566,7 +594,11 @@ export default function AgentRegistryPage() {
                   </Select>
                 </Form.Item>
                 <Form.Item name="dataLayer" style={{ width: 140 }}>
-                  <Input placeholder={t("agentRegistry.policies.dataLayerPlaceholder")} />
+                  <Select
+                    allowClear
+                    options={layers.map((l) => ({ value: l, label: l }))}
+                    placeholder={t("agentRegistry.policies.dataLayerPlaceholder")}
+                  />
                 </Form.Item>
                 <Form.Item name="notes" style={{ width: 200 }}>
                   <Input placeholder={t("agentRegistry.policies.notesPlaceholder")} />

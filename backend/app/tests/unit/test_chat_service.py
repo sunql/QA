@@ -104,6 +104,9 @@ class _FakeSession:
             def scalar_one_or_none(self):
                 return None
 
+            def all(self) -> list:
+                return []
+
         return _Result()
 
     def add_all(self, entities: list[object]) -> None:

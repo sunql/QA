@@ -213,7 +213,10 @@ def _buildRegistry() -> AgentToolRegistry:
                 },
                 "required": ["key"],
             },
-            arg_extractor=lambda raw: _keyOrNone(extractSupplierKey(raw)),
+            # 与 risk/graph 一致走 _supplierKeyArgs：显式指名 Agent（Runtime 页）时
+            # 360 意图关键词是冗余的（如「查询供应商 济南吉利汽车有限公司 的情况」，
+            # 名称已被 resolver 预解析成编码），回退通用 supplier key
+            arg_extractor=lambda raw: _supplierKeyArgs(raw, extractSupplierKey),
             handler=_supplier360Handler,
         )
     )

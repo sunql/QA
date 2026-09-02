@@ -85,6 +85,9 @@ class TestBuiltinRegistry:
         但 Agent 已被指名，工具确定——回退 extractSupplierKey 即可执行。
         """
         cases = {
+            # 注意不能用「supplier_360_agent」这类含 360 的 Agent code 做输入——
+            # Agent code 本身含意图关键词，会直接命中专用正则，测不到回退路径
+            "supplier_360": "查询供应商 100001 的情况",
             "supplier_risk": "用 supplier_risk_agent 评估供应商 100001",
             "graph_traverse": "用 graph_reasoning_agent 分析供应商 100001",
         }

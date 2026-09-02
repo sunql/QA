@@ -15,8 +15,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import CurrentUser, getCurrentUser, getDb
-from app.domain.schemas import AuditLogRead
+from app.dependencies import CurrentUser, getAdminOnlyActor, getDb
+from app.domain.schemas import AuditLogPage, AuditLogRead
 from app.services.audit_service import AuditService
 
 router = APIRouter()
@@ -25,28 +25,39 @@ _service = AuditService()
 
 @router.get(
     "",
-    response_model=list[AuditLogRead],
+    response_model=AuditLogPage,
     status_code=status.HTTP_200_OK,
     summary="查询审计日志（全局，支持过滤）",
 )
 async def listAuditLogs(
-    _user: CurrentUser = Depends(getCurrentUser),
+    _admin: CurrentUser = Depends(getAdminOnlyActor),
     db: AsyncSession = Depends(getDb),
     entity_type: Annotated[str | None, Query(description="实体类型过滤")] = None,
     action: Annotated[str | None, Query(description="动作过滤：CREATE/UPDATE/DELETE")] = None,
-    actor: Annotated[str | None, Query(description="用户 ID 过滤")] = None,
+    actor: Annotated[str | None, Query(description="用户 ID 模糊过滤")] = None,
+    entity_id: Annotated[str | None, Query(description="实体 ID 模糊过滤")] = None,
+    actor_departments: Annotated[str | None, Query(description="部门模糊过滤")] = None,
+    since: Annotated[str | None, Query(description="起始时间 ISO8601")] = None,
+    until: Annotated[str | None, Query(description="结束时间 ISO8601")] = None,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
-) -> list[AuditLogRead]:
-    rows = await _service.listAll(
+) -> AuditLogPage:
+    from datetime import datetime, timezone
+    since_dt = datetime.fromisoformat(since) if since else None
+    until_dt = datetime.fromisoformat(until) if until else None
+    rows, total = await _service.listAll(
         db,
         entity_type=entity_type,
         action=action,
         actor=actor,
+        entity_id=entity_id,
+        actor_departments=actor_departments,
+        since=since_dt,
+        until=until_dt,
         limit=limit,
         offset=offset,
     )
-    return [AuditLogRead.model_validate(r) for r in rows]
+    return AuditLogPage(rows=[AuditLogRead.model_validate(r) for r in rows], total=total)
 
 
 @router.get(
@@ -58,7 +69,7 @@ async def listAuditLogs(
 async def listByEntity(
     entity_type: str,
     entity_id: int,
-    _user: CurrentUser = Depends(getCurrentUser),
+    _admin: CurrentUser = Depends(getAdminOnlyActor),
     db: AsyncSession = Depends(getDb),
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -81,7 +92,7 @@ async def listByEntity(
 )
 async def listByActor(
     actor: str,
-    _user: CurrentUser = Depends(getCurrentUser),
+    _admin: CurrentUser = Depends(getAdminOnlyActor),
     db: AsyncSession = Depends(getDb),
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -103,7 +114,7 @@ async def listByActor(
 )
 async def getAuditLog(
     id: int,
-    _user: CurrentUser = Depends(getCurrentUser),
+    _admin: CurrentUser = Depends(getAdminOnlyActor),
     db: AsyncSession = Depends(getDb),
 ) -> AuditLogRead:
     row = await _service.getById(db, id)

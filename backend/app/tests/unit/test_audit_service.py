@@ -229,3 +229,149 @@ class TestAuditServiceRecord:
         callArg = self._session.add.call_args[0][0]
         assert callArg.before_json == {"id": 1}
         assert callArg.after_json is None
+
+
+class TestAuditServiceListAllExtensions:
+    """8 cases: ILIKE fuzzy actor / actor_departments / since/until / total count / iterAll."""
+
+    def setup_method(self):
+        self._svc = AuditService()
+
+    def _mock_session_with_rows(self, rows: list, total: int):
+        """Mock session.execute to return a result with scalars().all() and scalar_one().
+
+        `session` is AsyncMock so `await session.execute(...)` is awaitable.
+        The result and its scalars() chain are plain MagicMock (synchronous).
+        """
+        from unittest.mock import AsyncMock, MagicMock
+        session = AsyncMock()
+        mock_result = MagicMock()
+        mock_scalars = MagicMock()
+        mock_scalars.all.return_value = rows
+        mock_result.scalars.return_value = mock_scalars
+        mock_result.scalar_one.return_value = total
+        session.execute.return_value = mock_result
+        return session
+
+    def test_listAll_actor_ilike_fuzzy(self):
+        """actor filter generates ILIKE '%value%', not exact match."""
+        import asyncio
+
+        session = self._mock_session_with_rows([], 0)
+        asyncio.run(self._svc.listAll(session, actor="张"))
+        call_args = session.execute.call_args[0][0]
+        compiled = str(call_args.compile(compile_kwargs={"literal_binds": True}))
+        # ilike compiles to LIKE + lower() in SQLAlchemy PostgreSQL dialect
+        assert "like" in compiled.lower(), f"Expected LIKE, got: {compiled}"
+        assert "%" in compiled, f"Expected fuzzy %, got: {compiled}"
+
+    def test_listAll_entity_id_cast_text_ilike(self):
+        """entity_id filter casts to TEXT and uses ILIKE '%value%'."""
+        import asyncio
+
+        session = self._mock_session_with_rows([], 0)
+        asyncio.run(self._svc.listAll(session, entity_id="42"))
+        call_args = session.execute.call_args[0][0]
+        compiled = str(call_args.compile(compile_kwargs={"literal_binds": True}))
+        assert "cast" in compiled.lower(), f"Expected CAST, got: {compiled}"
+
+    def test_listAll_actor_departments_ilike(self):
+        """actor_departments filter generates ILIKE '%value%'."""
+        import asyncio
+
+        session = self._mock_session_with_rows([], 0)
+        asyncio.run(self._svc.listAll(session, actor_departments="采购"))
+        call_args = session.execute.call_args[0][0]
+        compiled = str(call_args.compile(compile_kwargs={"literal_binds": True}))
+        assert "like" in compiled.lower()
+
+    def test_listAll_since_filter(self):
+        """since filter generates created_at >= value."""
+        import asyncio
+        from datetime import datetime, timezone
+
+        session = self._mock_session_with_rows([], 0)
+        since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        asyncio.run(self._svc.listAll(session, since=since))
+        call_args = session.execute.call_args[0][0]
+        compiled = str(call_args.compile(compile_kwargs={"literal_binds": True}))
+        assert ">=" in compiled or "ge" in compiled.lower()
+
+    def test_listAll_until_filter(self):
+        """until filter generates created_at < value (exclusive)."""
+        import asyncio
+        from datetime import datetime, timezone
+
+        session = self._mock_session_with_rows([], 0)
+        until = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        asyncio.run(self._svc.listAll(session, until=until))
+        call_args = session.execute.call_args[0][0]
+        compiled = str(call_args.compile(compile_kwargs={"literal_binds": True}))
+        assert "<" in compiled
+
+    def test_listAll_returns_tuple_rows_and_total(self):
+        """listAll returns (rows, total) tuple. (Merged from T1's TestAuditServiceListAll stub.)"""
+        import asyncio
+        from unittest.mock import MagicMock
+
+        mock_row = MagicMock()
+        session = self._mock_session_with_rows([mock_row], 1)
+        rows, total = asyncio.run(self._svc.listAll(session))
+        assert isinstance(rows, list)
+        assert total == 1
+
+    def test_listAll_total_count_from_subquery(self):
+        """total is computed via count subquery, not len(rows)."""
+        import asyncio
+        from unittest.mock import MagicMock
+
+        session = self._mock_session_with_rows([MagicMock()], 42)
+        _, total = asyncio.run(self._svc.listAll(session))
+        assert total == 42
+
+    def test_iterAll_yields_all_rows(self):
+        """iterAll uses session.stream and yields rows one by one."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_row1, mock_row2 = MagicMock(), MagicMock()
+        session = AsyncMock()
+        mock_stream_result = MagicMock()
+        mock_stream_scalars = MagicMock()
+        mock_stream_scalars.__aiter__.return_value = iter([mock_row1, mock_row2])
+        mock_stream_result.scalars.return_value = mock_stream_scalars
+        # session.stream is awaitable, so use AsyncMock
+        async def mock_stream(*args, **kwargs):
+            return mock_stream_result
+        session.stream = AsyncMock(side_effect=mock_stream)
+
+        results = []
+        async def consume():
+            async for row in self._svc.iterAll(session):
+                results.append(row)
+
+        asyncio.run(consume())
+        assert results == [mock_row1, mock_row2]
+
+    def test_iterAll_respects_max_rows(self):
+        """iterAll limits to max_rows and logs warning when exceeded."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        session = AsyncMock()
+        many_rows = [MagicMock() for _ in range(200)]
+        mock_stream_result = MagicMock()
+        mock_stream_scalars = MagicMock()
+        mock_stream_scalars.__aiter__.return_value = iter(many_rows)
+        mock_stream_result.scalars.return_value = mock_stream_scalars
+        async def mock_stream(*args, **kwargs):
+            return mock_stream_result
+        session.stream = AsyncMock(side_effect=mock_stream)
+
+        results = []
+        async def consume():
+            async for row in self._svc.iterAll(session, max_rows=100):
+                results.append(row)
+
+        asyncio.run(consume())
+        assert len(results) == 100  # truncated to max_rows

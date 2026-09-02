@@ -19,9 +19,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from datetime import datetime
+from typing import Any, AsyncIterator
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import AuditLog
@@ -154,21 +155,78 @@ class AuditService:
         entity_type: str | None = None,
         action: str | None = None,
         actor: str | None = None,
+        entity_id: str | None = None,
+        actor_departments: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = _DEFAULT_LIMIT,
         offset: int = 0,
-    ) -> list[AuditLog]:
-        """全局审计记录查询（支持 entity_type / action / actor 过滤，全部可选）。"""
+    ) -> tuple[list[AuditLog], int]:
+        """全局审计记录查询（支持 entity_type/action/actor fuzzy/actor_departments/since/until）。"""
         limit = min(limit, _MAX_LIMIT)
-        stmt = select(AuditLog).order_by(AuditLog.created_at.desc())
+        where = []
         if entity_type:
-            stmt = stmt.where(AuditLog.entity_type == entity_type)
+            where.append(AuditLog.entity_type == entity_type)
         if action:
-            stmt = stmt.where(AuditLog.action == action)
+            where.append(AuditLog.action == action)
         if actor:
-            stmt = stmt.where(AuditLog.actor == actor)
-        stmt = stmt.limit(limit).offset(offset)
-        result = await session.execute(stmt)
-        return list(result.scalars().all())
+            where.append(AuditLog.actor.ilike(f"%{actor}%"))
+        if entity_id:
+            where.append(cast(AuditLog.entity_id, String).ilike(f"%{entity_id}%"))
+        if actor_departments:
+            where.append(AuditLog.actor_departments.ilike(f"%{actor_departments}%"))
+        if since:
+            where.append(AuditLog.created_at >= since)
+        if until:
+            where.append(AuditLog.created_at < until)
+
+        base_stmt = select(AuditLog).where(*where).order_by(AuditLog.created_at.desc())
+        count_stmt = select(func.count()).select_from(base_stmt.subquery())
+        total = (await session.execute(count_stmt)).scalar_one()
+
+        stmt = base_stmt.limit(limit).offset(offset)
+        rows = list((await session.execute(stmt)).scalars().all())
+        return rows, total
+
+    async def iterAll(
+        self,
+        session: AsyncSession,
+        *,
+        entity_type: str | None = None,
+        action: str | None = None,
+        actor: str | None = None,
+        entity_id: str | None = None,
+        actor_departments: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        max_rows: int = 100_000,
+    ) -> AsyncIterator[AuditLog]:
+        """流式 yield 审计记录（session.stream 避免一次加载）。超过 max_rows 截断。"""
+        where = []
+        if entity_type:
+            where.append(AuditLog.entity_type == entity_type)
+        if action:
+            where.append(AuditLog.action == action)
+        if actor:
+            where.append(AuditLog.actor.ilike(f"%{actor}%"))
+        if entity_id:
+            where.append(cast(AuditLog.entity_id, String).ilike(f"%{entity_id}%"))
+        if actor_departments:
+            where.append(AuditLog.actor_departments.ilike(f"%{actor_departments}%"))
+        if since:
+            where.append(AuditLog.created_at >= since)
+        if until:
+            where.append(AuditLog.created_at < until)
+
+        stmt = select(AuditLog).where(*where).order_by(AuditLog.created_at.desc()).limit(max_rows)
+        result = await session.stream(stmt)
+        emitted = 0
+        async for row in result.scalars():
+            yield row
+            emitted += 1
+            if emitted >= max_rows:
+                logger.warning("iterAll emitted %d rows (max_rows=%d) — truncating", emitted, max_rows)
+                break
 
     async def getById(self, session: AsyncSession, id: int) -> AuditLog | None:
         """按 ID 查单条审计记录。"""

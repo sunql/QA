@@ -191,6 +191,80 @@ class TestRegexDelimiterContract:
         assert session.executeCount == 0
 
 
+class TestBareCompanyNameContract:
+    """无「供应商」前缀的裸公司名（带公司后缀）也可解析（后续优化落地）。
+
+    用户实际输入形如「济南吉利汽车有限公司 的情况」——不带前缀。
+    白名单后缀（有限公司/有限责任公司，真实数据 2743/3500 覆盖）把
+    误报率控制在可接受范围：普通中文句子不会恰好以公司后缀结尾。
+    """
+
+    def test_bare_name_with_suffix_resolves(self):
+        session = _FakeSession(
+            exact_rows=[("10105", "济南吉利汽车有限公司")], like_rows=[]
+        )
+        resolved = _run(
+            SupplierNameResolver().resolve("济南吉利汽车有限公司 的情况", session)
+        )
+        assert resolved == ResolvedKey(
+            key="10105",
+            resolved_by="name_exact",
+            original_name="济南吉利汽车有限公司",
+        )
+
+    def test_bare_name_mid_sentence_resolves(self):
+        session = _FakeSession(
+            exact_rows=[("10105", "济南吉利汽车有限公司")], like_rows=[]
+        )
+        resolved = _run(
+            SupplierNameResolver().resolve("查询 济南吉利汽车有限公司 的 360° 视图", session)
+        )
+        assert resolved == ResolvedKey(
+            key="10105",
+            resolved_by="name_exact",
+            original_name="济南吉利汽车有限公司",
+        )
+
+    def test_bare_name_no_suffix_still_requires_prefix(self):
+        """无后缀裸词（如「吉利」）不触发解析——误报率不可控。"""
+        session = _FakeSession(exact_rows=[], like_rows=[])
+        resolved = _run(SupplierNameResolver().resolve("查询 吉利 的情况", session))
+        assert resolved is None
+        assert session.executeCount == 0
+
+    def test_suffix_alone_not_extracted(self):
+        """「有限公司」本身不足以成为公司名——要求后缀前至少 2 个字符。"""
+        session = _FakeSession(exact_rows=[], like_rows=[])
+        resolved = _run(SupplierNameResolver().resolve("什么是有限公司", session))
+        assert resolved is None
+        assert session.executeCount == 0
+
+    def test_bare_name_prefixed_without_delimiter_now_resolves(self):
+        """「供应商{名称}」无分隔符写法（收紧正则后的已知缺口）经裸名路径恢复。"""
+        session = _FakeSession(
+            exact_rows=[("10105", "济南吉利汽车有限公司")], like_rows=[]
+        )
+        resolved = _run(
+            SupplierNameResolver().resolve("评估供应商济南吉利汽车有限公司的风险", session)
+        )
+        assert resolved == ResolvedKey(
+            key="10105",
+            resolved_by="name_exact",
+            original_name="济南吉利汽车有限公司",
+        )
+
+    def test_bare_name_ambiguous_raises_with_candidates(self):
+        rows = [("10105", "济南吉利汽车有限公司"), ("10118", "济南吉利汽车研究开发有限公司")]
+        session = _FakeSession(exact_rows=[], like_rows=rows)
+        with pytest.raises(ValidationError) as exc_info:
+            _run(
+                SupplierNameResolver().resolve(
+                    "济南吉利汽车有限公司 情况不明", session
+                )
+            )
+        assert len(exc_info.value.details["candidates"]) == 2
+
+
 class TestApply:
     def test_none_resolved_returns_original(self):
         r = SupplierNameResolver()
@@ -210,6 +284,36 @@ class TestApply:
         assert (
             r.apply("评估供应商 济南吉利汽车有限公司 的风险", resolved)
             == "评估供应商 10105 的风险"
+        )
+
+    def test_bare_name_replaced_with_canonical_prefix(self):
+        """裸名（前面没有「供应商」前缀）替换为规范形态「供应商 {code}」，
+        保证下游 arg_extractor 的数字正则可命中。"""
+        r = SupplierNameResolver()
+        resolved = ResolvedKey(
+            key="10105", resolved_by="name_exact",
+            original_name="济南吉利汽车有限公司",
+        )
+        assert r.apply("济南吉利汽车有限公司 的情况", resolved) == "供应商 10105 的情况"
+        assert (
+            r.apply("查询 济南吉利汽车有限公司 的 360° 视图", resolved)
+            == "查询 供应商 10105 的 360° 视图"
+        )
+
+    def test_name_directly_after_prefix_replaced_with_bare_key(self):
+        """名称前紧邻「供应商」（无/有分隔符）时只替换为编码，避免「供应商 供应商 10105」。"""
+        r = SupplierNameResolver()
+        resolved = ResolvedKey(
+            key="10105", resolved_by="name_exact",
+            original_name="济南吉利汽车有限公司",
+        )
+        assert (
+            r.apply("评估供应商济南吉利汽车有限公司的风险", resolved)
+            == "评估供应商10105的风险"
+        )
+        assert (
+            r.apply("供应商：济南吉利汽车有限公司", resolved)
+            == "供应商：10105"
         )
 
 

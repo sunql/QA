@@ -6,7 +6,8 @@ ChatService / AgentRuntimeService 顶层共用：在数字正则未命中时，
 
 解析顺序：
 1. 数字正则（extractSupplierAnyKey）→ 命中即返回（零 DB 开销）
-2. 中文名提取（「供应商/supplier」后跟 2-30 字符中文段）
+2. 中文名提取：「供应商/supplier」后跟 2-30 字符中文段；
+   未命中 → 裸公司名回退（以 有限公司/有限责任公司 结尾，后缀前 ≥ 4 字符）
 3. entity_mapping.name 精确匹配（==）
 4. entity_mapping.name 模糊匹配（ilike %name%）
 
@@ -53,6 +54,29 @@ _NAME_EXTRACT_RE = re.compile(
     r"(?P<name>[一-龥][一-龥A-Za-z0-9·\-]{1,29})"
 )
 
+# 裸公司名回退：无「供应商」前缀时，仅当中文段以公司后缀结尾才提取
+# （真实数据 2743/3500 供应商名以 有限公司/有限责任公司 结尾）。
+# 后缀前至少 4 字符为数据驱动的下限（真实供应商名最短前缀 4 字符，
+# 如「华建重工有限公司」），同时过滤「什么是有限公司」这类普通句子。
+# 无后缀裸词（如「吉利」）仍要求带前缀——误报率不可控。
+# 副作用：「供应商{名称}」无分隔符写法（_NAME_EXTRACT_RE 的已知缺口）经此路径恢复
+# （提取后剥离前导 供应商/supplier 关键字）。
+_BARE_NAME_RE = re.compile(
+    r"(?P<name>[一-龥A-Za-z0-9·\-]{4,29}(?:有限公司|有限责任公司))"
+)
+
+
+def _stripSupplierKeyword(name: str) -> str:
+    """剥离裸名提取结果中前导的「供应商/supplier」关键字（无分隔符前缀写法）。"""
+    for keyword in ("供应商", "supplier"):
+        if keyword in name:
+            name = name.rsplit(keyword, 1)[1]
+    return name
+
+
+# apply() 用：名称起点之前是否紧邻「供应商/supplier」（含冒号/空格分隔）
+_PREFIX_BEFORE_NAME_RE = re.compile(r"(?:供应商|supplier)[\s:：]*$")
+
 
 class ResolvedKey(NamedTuple):
     """成功路径的解析结果；失败路径由 resolve() 抛 ValidationError。"""
@@ -86,9 +110,16 @@ class SupplierNameResolver:
 
         # Pass 1：中文名提取；无关键词 → 让下游 pipeline 自行处理
         match = _NAME_EXTRACT_RE.search(message)
-        if match is None:
-            return None
-        name = match.group("name").strip()
+        if match is not None:
+            name = match.group("name").strip()
+        else:
+            # 裸公司名回退（详见 _BARE_NAME_RE 注释）；仍无命中 → 交还下游
+            bare = _BARE_NAME_RE.search(message)
+            if bare is None:
+                return None
+            name = _stripSupplierKeyword(bare.group("name"))
+            if len(name) < len("XX有限公司"):
+                return None
 
         # Pass 2：精确匹配（理论上 (entity_type, name) 唯一；多条属脏数据，按歧义处理）
         exact_rows = (
@@ -154,7 +185,20 @@ class SupplierNameResolver:
         raise ValidationError(MSG_SUPPLIER_NAME_NOT_FOUND.format(name=name))
 
     def apply(self, message: str, resolved: ResolvedKey | None) -> str:
-        """把 message 中 original_name 替换为 key（仅 name 路径；immutable 字符串返回）。"""
+        """把 message 中 original_name 替换为规范形态（仅 name 路径；返回新字符串）。
+
+        名称前紧邻「供应商/supplier」（含冒号/空格分隔）→ 只替换为 key
+        （「评估供应商济南吉利汽车有限公司」→「评估供应商10105」）；
+        否则替换为「供应商 {key}」（「查询 济南吉利…」→「查询 供应商 10105」），
+        保证下游 arg_extractor / 意图正则的数字路径可命中。
+        """
         if resolved is None or resolved.original_name is None:
             return message
-        return message.replace(resolved.original_name, resolved.key, 1)
+        idx = message.find(resolved.original_name)
+        if idx < 0:
+            return message
+        preceded = _PREFIX_BEFORE_NAME_RE.search(message, 0, idx)
+        replacement = resolved.key if preceded else f"供应商 {resolved.key}"
+        return (
+            message[:idx] + replacement + message[idx + len(resolved.original_name):]
+        )

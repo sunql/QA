@@ -58,9 +58,12 @@ Task 6 全量回归时发现并修复两处回归：
    （含 25 供应商）。这导致 7 个 entity_mapping 集成测试 + 依赖其数据的 7 个图测试失败。
 2. **Neo4j 图环境**：`test_run_graph_reasoning_agent_success` 在干净环境即 404，属既有
    环境问题。
-3. **Smoke 用例与 arg_extractor 语义偏差**：runtime 的 supplier_360 tool 使用
-   `extractSupplierKey`，要求输入含 360/全貌/整体/全维度 关键词；Spec 中的无关键词
-   smoke 输入无法通过该 extractor。
+3. ~~**Smoke 用例与 arg_extractor 语义偏差**~~（已修复，commit `6d619de`）：
+   runtime 的 supplier_360 tool 原要求输入含 360/全貌/整体/全维度 关键词。Runtime 页
+   显式指名 Agent 时该要求冗余；已对齐 risk/graph 的 `_supplierKeyArgs` 回退模式
+   （专用正则失败 → `extractSupplierAnyKey`）。用户实报复现：
+   「查询供应商 济南吉利汽车有限公司 的情况」原报误导性「请提供企业编码」错误，
+   修复后 200 + enterpriseCode 10105。
 
 ## 后续优化（最终全分支 review 裁决，均不阻塞）
 

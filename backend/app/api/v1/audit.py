@@ -10,17 +10,68 @@ GET /api/v1/audit/by-actor/{actor}  # 按用户查
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import StreamingResponse
+import json
+from datetime import datetime
 
 from app.dependencies import CurrentUser, getAdminOnlyActor, getDb
 from app.domain.schemas import AuditLogPage, AuditLogRead
 from app.services.audit_service import AuditService
 
 router = APIRouter()
-_service = AuditService()
+_audit = AuditService()
+EXPORT_MAX = 100_000
+
+
+async def _stream_csv(rows_gen) -> StreamingResponse:
+    header = ["id", "created_at", "entity_type", "entity_id", "action", "actor", "actor_departments", "before_json", "after_json"]
+
+    async def gen():
+        yield ",".join(header) + "\n"
+        async for row in rows_gen:
+            yield ",".join([
+                str(row.id),
+                str(row.created_at.isoformat()) if row.created_at else "",
+                row.entity_type or "",
+                str(row.entity_id),
+                row.action or "",
+                row.actor or "",
+                row.actor_departments or "",
+                json.dumps(row.before_json or {}),
+                json.dumps(row.after_json or {}),
+            ]) + "\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="audit.csv"'},
+    )
+
+
+async def _stream_json(rows_gen) -> StreamingResponse:
+    async def gen():
+        async for row in rows_gen:
+            yield json.dumps({
+                "id": row.id,
+                "createdAt": row.created_at.isoformat() if row.created_at else None,
+                "entityType": row.entity_type,
+                "entityId": row.entity_id,
+                "action": row.action,
+                "actor": row.actor,
+                "actorDepartments": row.actor_departments,
+                "beforeJson": row.before_json,
+                "afterJson": row.after_json,
+            }, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="audit.jsonl"'},
+    )
 
 
 @router.get(
@@ -45,7 +96,7 @@ async def listAuditLogs(
     from datetime import datetime, timezone
     since_dt = datetime.fromisoformat(since) if since else None
     until_dt = datetime.fromisoformat(until) if until else None
-    rows, total = await _service.listAll(
+    rows, total = await _audit.listAll(
         db,
         entity_type=entity_type,
         action=action,
@@ -58,6 +109,39 @@ async def listAuditLogs(
         offset=offset,
     )
     return AuditLogPage(rows=[AuditLogRead.model_validate(r) for r in rows], total=total)
+
+
+@router.get(
+    "/export",
+    summary="流式导出审计日志（admin only，最大 100k 行）",
+)
+async def exportAuditLogs(
+    format: Annotated[Literal["csv", "json"], Query()] = "csv",
+    entity_type: Annotated[str | None, Query(description="实体类型过滤")] = None,
+    action: Annotated[str | None, Query(description="动作过滤：CREATE/UPDATE/DELETE")] = None,
+    actor: Annotated[str | None, Query(description="用户 ID 模糊过滤")] = None,
+    actor_departments: Annotated[str | None, Query(description="部门模糊过滤")] = None,
+    since: Annotated[str | None, Query(description="起始时间 ISO8601")] = None,
+    until: Annotated[str | None, Query(description="结束时间 ISO8601")] = None,
+    _admin: CurrentUser = Depends(getAdminOnlyActor),
+    db: AsyncSession = Depends(getDb),
+) -> StreamingResponse:
+    from datetime import datetime
+    since_dt = datetime.fromisoformat(since) if since else None
+    until_dt = datetime.fromisoformat(until) if until else None
+    rows_gen = _audit.iterAll(
+        db,
+        entity_type=entity_type,
+        action=action,
+        actor=actor,
+        actor_departments=actor_departments,
+        since=since_dt,
+        until=until_dt,
+        max_rows=EXPORT_MAX,
+    )
+    if format == "csv":
+        return await _stream_csv(rows_gen)
+    return await _stream_json(rows_gen)
 
 
 @router.get(
@@ -74,7 +158,7 @@ async def listByEntity(
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[AuditLogRead]:
-    rows = await _service.listByEntity(
+    rows = await _audit.listByEntity(
         db,
         entity_type=entity_type,
         entity_id=entity_id,
@@ -97,7 +181,7 @@ async def listByActor(
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[AuditLogRead]:
-    rows = await _service.listByActor(
+    rows = await _audit.listByActor(
         db,
         actor=actor,
         limit=limit,
@@ -117,7 +201,7 @@ async def getAuditLog(
     _admin: CurrentUser = Depends(getAdminOnlyActor),
     db: AsyncSession = Depends(getDb),
 ) -> AuditLogRead:
-    row = await _service.getById(db, id)
+    row = await _audit.getById(db, id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="审计记录不存在")
     return AuditLogRead.model_validate(row)

@@ -1889,6 +1889,19 @@ class AuditLogRead(CamelModel):
     created_at: datetime
 
 
+class AuditLogPage(CamelModel):
+    """审计日志分页响应（feat-audit-history-api Task 1）。
+
+    rows 为当前页 AuditLogRead 列表，total 为满足过滤条件的总条数
+    （独立于 limit/offset，前端用于分页渲染）。
+
+    替代 Phase 4.5 的「裸 list[AuditLogRead]」响应，避免前端拉全表
+    后再客户端分页（N+1 风险 + 大结果集 JSON 序列化成本）。
+    """
+    rows: list["AuditLogRead"]
+    total: int
+
+
 # ---------------------------------------------------------------------------
 # Phase 4.5: history 回放 API
 # ---------------------------------------------------------------------------

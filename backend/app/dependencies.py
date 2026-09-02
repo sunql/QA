@@ -7,7 +7,7 @@ import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
-from fastapi import Depends, Header
+from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, getSettings
@@ -126,3 +126,26 @@ def getSettingsDep() -> Settings:
 async def getSessionDep(session: AsyncSession = Depends(getDb)) -> AsyncIterator[AsyncSession]:
     """FastAPI 依赖：注入数据库会话。"""
     yield session
+
+
+async def getAdminOnlyActor(
+    user: CurrentUser = Depends(getCurrentUser),
+) -> CurrentUser:
+    """admin-only 审计 API 的 actor 派生（feat-audit-history-api Task 1）。
+
+    与 assertCanModify 模式平行：调用方只需 ``_admin: CurrentUser = Depends(getAdminOnlyActor)``，
+    非 admin 直接 403，无需 service 层重复校验。
+
+    设计要点：
+    - 角色检查直接读 ``user.roles``（已由 getCurrentUser 解析 headers 完成），
+      不要再调一次 _buildCurrentUser，避免解析逻辑漂移。
+    - 缺省 stub auth 默认带 admin（DEFAULT_STUB_ROLES），所以 dev/test 默认放行；
+      生产 stub 关闭后由反向代理剥离 X-User-* 头保证安全。
+    - ``user.roles or []`` 兼容手工构造的 CurrentUser(roles=None) 场景。
+    """
+    if "admin" not in (user.roles or []):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅 admin 可访问审计 API",
+        )
+    return user

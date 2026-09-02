@@ -124,6 +124,73 @@ class TestResolve:
         assert exc_info.value.details is None
 
 
+class TestRegexDelimiterContract:
+    """Phase 6.5 Task 6 追加：name 提取正则的分隔符/虚词契约（防止普通问法被误解析为公司名）。"""
+
+    def test_compound_noun_without_delimiter_returns_none(self):
+        """「供应商采购额趋势」中「供应商」是名词修饰语，不是名称前缀 → 不提取。"""
+        session = _FakeSession(exact_rows=[], like_rows=[])
+        resolved = _run(
+            SupplierNameResolver().resolve("查询供应商采购额趋势", session)
+        )
+        assert resolved is None
+        assert session.executeCount == 0
+
+    def test_end_of_string_name_with_space_still_extracted(self):
+        """名称位于句末且无后续分隔符时，仍能正确提取。"""
+        session = _FakeSession(
+            exact_rows=[("10105", "济南吉利汽车有限公司")], like_rows=[]
+        )
+        resolved = _run(
+            SupplierNameResolver().resolve("查询供应商 济南吉利汽车有限公司", session)
+        )
+        assert resolved == ResolvedKey(
+            key="10105",
+            resolved_by="name_exact",
+            original_name="济南吉利汽车有限公司",
+        )
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "供应商:济南吉利汽车有限公司",
+            "供应商：济南吉利汽车有限公司",
+            "supplier 济南吉利汽车有限公司",
+        ],
+    )
+    def test_colon_and_supplier_delimiter_variants_extract_name(self, message):
+        """冒号（半角/全角）及 supplier 关键字后接空格均应正确提取名称。"""
+        session = _FakeSession(
+            exact_rows=[("10105", "济南吉利汽车有限公司")], like_rows=[]
+        )
+        resolved = _run(SupplierNameResolver().resolve(message, session))
+        assert resolved == ResolvedKey(
+            key="10105",
+            resolved_by="name_exact",
+            original_name="济南吉利汽车有限公司",
+        )
+
+    def test_particle_led_phrase_returns_none(self):
+        """「供应商 的收货量怎么样」中「的」是虚词，不应开始名称提取。"""
+        session = _FakeSession(exact_rows=[], like_rows=[])
+        resolved = _run(
+            SupplierNameResolver().resolve("供应商 的收货量怎么样", session)
+        )
+        assert resolved is None
+        assert session.executeCount == 0
+
+    def test_numeric_path_without_space_short_circuits(self):
+        """数字编码与「供应商」之间无空格时，仍走数字正则短路，不触发 name 提取。"""
+        session = _FakeSession(exact_rows=[], like_rows=[])
+        resolved = _run(
+            SupplierNameResolver().resolve("评估供应商10105的风险", session)
+        )
+        assert resolved == ResolvedKey(
+            key="10105", resolved_by="code_regex", original_name=None
+        )
+        assert session.executeCount == 0
+
+
 class TestApply:
     def test_none_resolved_returns_original(self):
         r = SupplierNameResolver()

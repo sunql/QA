@@ -296,6 +296,23 @@ Agent 运行时最小版（MVP）：复用 [[Harness/changes/feat-agent-registry
 
 已注册但未绑定工具的元数据 Agent（`PROCUREMENT_COPILOT` / `SUPPLIER_OTD_REPORT`）→ 409 不可运行，Phase 7+ 排期。
 
+### 词表治理（Phase 7 feat-agent-vocabulary）
+
+2026-09-02 完成（[[Harness/changes/feat-agent-vocabulary/summary.md]]）。
+
+- `AgentDefinition.data_domains` / `data_layers` 的合法词表 SSOT 在 `app/domain/agent_vocabulary.py`：
+  `AGENT_DATA_DOMAINS=(PROCUREMENT, QUALITY, LOGISTICS)`、`AGENT_DATA_LAYERS=(DIM, DWD, FEATURE)`。
+- `AgentDefinitionCreate/Update` 写入边界做归一化（strip+upper）+ 词表校验 + 去重保序，非法值 Pydantic 422。
+- `GET /api/v1/agents/options` 下发词表（路由必须在 `/{agent_code}` 之前注册，集成测试守护）。
+- `listAgents` 支持 `data_layer`（JSONB contains）+ `dataDomain` 多值（JSONB overlap OR 语义；SQLAlchemy 2.0.50
+  无 `.overlap()`，改用 `or_(*[contains([d]) for d in data_domains])` 等价实现）。
+- 前端 `useAgentOptions()` hook（模块级 cache + inflight dedup），4 处 Select 改造（Create/Edit Modal × 2 字段 +
+  策略子表 dataLayer 单值 + 列表页域过滤）。
+- **与 `LineageLayer` 边界**：本表是 Agent 元数据/授权词汇（3 层），`LineageLayer`（enums.py:144）是血缘
+  词汇（7 层 SOURCE_SYSTEM/.../AI），两套独立词汇，勿混。
+- **未来大改动**：`Agent→Tool` 关系入 DB（详见 [[Harness/changes/feat-agent-vocabulary/summary.md|summary]]
+  与大改动关系段），工具的 `handler/data_object/data_layers` 仍留代码（安全关键，不入 DB）。
+
 ### 触发路径
 
 1. **REST**：`POST /api/v1/agents/{agent_code}/run`（确定性测试入口，不注入真实 LLM factory）。

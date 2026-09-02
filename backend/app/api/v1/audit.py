@@ -15,6 +15,8 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
+import csv
+import io
 import json
 from datetime import datetime
 
@@ -28,22 +30,32 @@ EXPORT_MAX = 100_000
 
 
 async def _stream_csv(rows_gen) -> StreamingResponse:
-    header = ["id", "created_at", "entity_type", "entity_id", "action", "actor", "actor_departments", "before_json", "after_json"]
+    """Stream audit logs as CSV. Uses csv.writer for proper RFC 4180 escaping."""
+    header = ["id", "created_at", "entity_type", "entity_id", "action",
+              "actor", "actor_departments", "before_json", "after_json"]
 
     async def gen():
-        yield ",".join(header) + "\n"
+        buf = io.StringIO()
+        writer = csv.writer(buf, lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(header)
+        yield buf.getvalue()
+        buf.seek(0)
+        buf.truncate()
         async for row in rows_gen:
-            yield ",".join([
-                str(row.id),
-                str(row.created_at.isoformat()) if row.created_at else "",
+            writer.writerow([
+                row.id,
+                row.created_at.isoformat() if row.created_at else "",
                 row.entity_type or "",
-                str(row.entity_id),
+                row.entity_id,
                 row.action or "",
                 row.actor or "",
                 row.actor_departments or "",
-                json.dumps(row.before_json or {}),
-                json.dumps(row.after_json or {}),
-            ]) + "\n"
+                json.dumps(row.before_json) if row.before_json is not None else "",
+                json.dumps(row.after_json) if row.after_json is not None else "",
+            ])
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate()
 
     return StreamingResponse(
         gen(),

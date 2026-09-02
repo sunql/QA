@@ -7,6 +7,13 @@ from fastapi import status
 ADMIN_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
 
 
+async def drainOutbox(dbSession) -> int:
+    """跑一轮 outbox 消费（feat-audit-outbox：审计异步落地）。"""
+    from app.workers.audit_worker import AuditWorker
+
+    return await AuditWorker().drainOnce(dbSession)
+
+
 @pytest.mark.asyncio
 class TestAuditExportApi:
 
@@ -57,3 +64,55 @@ class TestAuditExportApi:
             headers={"X-User-Id": "alice", "X-User-Roles": "viewer"},
         )
         assert resp.status_code == status.HTTP_403_FORBIDDEN
+
+    async def test_export_csv_properly_escapes_special_chars(self, client, dbSession) -> None:
+        """Audit row with comma/quote/newline in kpiName must round-trip via csv.reader.
+
+        Regression test for csv escaping bug: prior implementation used
+        ','.join([...]) which corrupted fields containing commas, quotes,
+        or newlines. csv.writer must properly RFC 4180-escape such fields.
+        """
+        import csv
+        import io
+
+        # Create KPI with special chars in kpiName (persisted into after_json → audit_log)
+        kpi_resp = await client.post(
+            "/api/v1/kpi-catalog",
+            json={
+                "kpiCode": f"AUDIT_CSV_{id(self)}",
+                "kpiName": "CSV escape test, with \"quote\" and \nnewline",
+                "formula": "SELECT 1",
+                "entityType": "SUPPLIER",
+                "owner": "采购部",
+            },
+            headers=ADMIN_HEADERS,
+        )
+        assert kpi_resp.status_code == status.HTTP_201_CREATED
+        await drainOutbox(dbSession)
+
+        # Export CSV and round-trip via csv.reader
+        resp = await client.get(
+            "/api/v1/audit/export?format=csv",
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        reader = csv.reader(io.StringIO(resp.text))
+        rows = list(reader)
+        assert len(rows) >= 2, f"Expected header + at least one data row, got {len(rows)} rows"
+        # Header check
+        assert "after_json" in rows[0], f"Missing after_json in header: {rows[0]}"
+        # Find a row whose after_json field contains our special-char string.
+        # after_json column is index 8 (last column).
+        after_json_idx = rows[0].index("after_json")
+        special_row = None
+        for r in rows[1:]:
+            if len(r) > after_json_idx and "CSV escape test" in r[after_json_idx]:
+                special_row = r
+                break
+        assert special_row is not None, (
+            f"Expected row with special-char kpiName in after_json column. "
+            f"Rows: {rows[1:]}"
+        )
+        # Confirm the field round-trips intact: commas, quotes, newlines preserved.
+        # after_json is JSON-serialized, so inner quotes become \" and \n becomes \\n.
+        assert "CSV escape test, with \\\"quote\\\" and \\nnewline" in special_row[after_json_idx]

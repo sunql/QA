@@ -11,7 +11,7 @@ createMapping 接收 actor 并将 owner 设为 actor.departments[0]（防止 cli
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -33,11 +33,30 @@ from app.services.messages_zh import (
     MSG_ENTITY_MAPPING_EXISTS,
     MSG_ENTITY_MAPPING_NOT_FOUND,
 )
+from app.services.outbox_service import OutboxService
 
 # update 中不允许置 NULL 的列（None 语义为「不动」）；日期列允许置 None 以清除。
 _NON_NULL_UPDATE_FIELDS = frozenset(
     {"enterprise_code", "source_key", "source_code", "match_rule"}
 )
+
+
+def _entityToDict(entity: EntityMapping) -> dict:
+    """EntityMapping 实体 → JSON 可序列化 dict（用于 outbox payload）。
+
+    date / datetime 等非 JSON-native 类型在 dict 内原样保留会导致 PG JSONB 写入失败，
+    故在此统一转字符串。
+    """
+    out: dict = {}
+    for col in entity.__table__.columns.keys():
+        v = getattr(entity, col)
+        if hasattr(v, "value"):  # Enum
+            out[col] = v.value
+        elif isinstance(v, (date, datetime)):
+            out[col] = v.isoformat()
+        else:
+            out[col] = v
+    return out
 
 
 def _existsError(dto: EntityMappingCreate) -> ValidationError:
@@ -66,9 +85,10 @@ def _assertDateRange(*, effective_date: date | None, expiry_date: date | None) -
 class EntityMappingService:
     """跨系统编码映射 CRUD。"""
 
-    def __init__(self, acl: AclService | None = None) -> None:
+    def __init__(self, acl: AclService | None = None, outbox: OutboxService | None = None) -> None:
         # 默认实例：service 内部 new；测试可注入 mock
         self._acl = acl or AclService()
+        self._outbox = outbox or OutboxService()
 
     async def listMappings(
         self,
@@ -181,6 +201,17 @@ class EntityMappingService:
             owner=derivedOwner,
         )
         session.add(entity)
+        await session.flush()  # get entity.id for outbox payload
+        # outbox 入队（同一事务绑定）：worker 消费后写 audit_log
+        await self._outbox.enqueue(
+            session,
+            event_type="entity_mapping_created",
+            entity_type="entity_mapping",
+            entity_id=entity.id,
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            payload={"after": _entityToDict(entity)},
+        )
         # 并发场景：两条请求同时越过查重，败者 commit 撞唯一索引 → 转 422 而非裸 500。
         try:
             await session.commit()
@@ -209,12 +240,23 @@ class EntityMappingService:
             entity_label="ENTITY_MAPPING",
             entity_code=str(entity.id),
         )
+        before = _entityToDict(entity)
         changes = dto.model_dump(exclude_unset=True, by_alias=False)
         for field, value in changes.items():
             if value is None and field in _NON_NULL_UPDATE_FIELDS:
                 continue
             setattr(entity, field, value)
         _assertDateRange(effective_date=entity.effective_date, expiry_date=entity.expiry_date)
+        # outbox 入队（同一事务绑定）：worker 消费后写 audit_log
+        await self._outbox.enqueue(
+            session,
+            event_type="entity_mapping_updated",
+            entity_type="entity_mapping",
+            entity_id=entity.id,
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            payload={"before": before, "after": _entityToDict(entity)},
+        )
         await session.commit()
         await session.refresh(entity)
         return entity
@@ -235,6 +277,17 @@ class EntityMappingService:
             entity_owner=entity.owner,
             entity_label="ENTITY_MAPPING",
             entity_code=str(entity.id),
+        )
+        before = _entityToDict(entity)
+        # outbox 入队先于 session.delete（保持 entity 属性可访问），同事务 commit
+        await self._outbox.enqueue(
+            session,
+            event_type="entity_mapping_deleted",
+            entity_type="entity_mapping",
+            entity_id=entity.id,
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            payload={"before": before},
         )
         await session.delete(entity)
         await session.commit()

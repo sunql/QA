@@ -61,6 +61,9 @@ def _makeFakeSession(record: Any):
         async def flush(self):
             pass
 
+        async def add(self, entity):
+            pass
+
         async def commit(self):
             pass
 

@@ -1228,6 +1228,8 @@ export const enUS = {
       allEntityTypes: "All",
       entityId: "Entity ID",
       actor: "Actor",
+      actorDepartments: "Department",
+      action: "Action",
       since: "Since",
       until: "Until",
     },
@@ -1245,5 +1247,11 @@ export const enUS = {
     expandChanges: "Changes",
     noChanges: "No change data",
     total: "{total} records",
+    export: {
+      button: "Export",
+      csv: "Export CSV",
+      json: "Export JSON Lines",
+      loading: "Exporting...",
+    },
   },
 } as const;

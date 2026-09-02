@@ -1,17 +1,38 @@
 /** 审计日志管理页（Phase 4.5 治理 API）。
  *
- * 顶部筛选栏支持 entity_type 下拉 / entity_id 输入 / actor 输入 / since/until 日期范围过滤。
+ * 顶部筛选栏支持 entity_type 下拉 / entity_id 输入 / actor 输入 /
+ * actorDepartments 输入 / action 下拉 / since-until 日期范围（RangePicker）。
  * 下方 Table 展示审计日志列表，支持展开行查看 before_json / after_json 变更明细。
  * 分页由 antd Pagination 组件驱动（limit=20 固定）。
  */
 import { useEffect, useState, useCallback } from "react";
-import { Table, Button, Space, DatePicker, Input, Select, Tag, Tooltip, Pagination } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
-import { listAuditLogs } from "../api/audit";
+import {
+  Table,
+  Button,
+  Space,
+  DatePicker,
+  Input,
+  Select,
+  Tag,
+  Tooltip,
+  Pagination,
+  Dropdown,
+} from "antd";
+import type { MenuProps } from "antd";
+import { ReloadOutlined, DownloadOutlined } from "@ant-design/icons";
+import { listAuditLogs, exportAuditLogs } from "../api/audit";
 import type { AuditLog, AuditLogFilters } from "../types/audit";
 import { useTranslation } from "../i18n";
 
 const PAGE_SIZE = 20;
+
+const ACTION_OPTIONS = [
+  { value: "", label: "" },
+  { value: "CREATE", label: "CREATE" },
+  { value: "UPDATE", label: "UPDATE" },
+  { value: "DELETE", label: "DELETE" },
+  { value: "READ", label: "READ" },
+];
 
 /** 操作类型 Tag 配色。 */
 const ACTION_TAG_COLOR: Record<string, string> = {
@@ -25,6 +46,8 @@ interface FilterValues {
   entityType: string;
   entityId: string;
   actor: string;
+  actorDepartments: string;
+  action: string;
   since: string;
   until: string;
 }
@@ -33,6 +56,8 @@ const EMPTY_FILTERS: FilterValues = {
   entityType: "",
   entityId: "",
   actor: "",
+  actorDepartments: "",
+  action: "",
   since: "",
   until: "",
 };
@@ -57,6 +82,7 @@ export default function AdminAuditPage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [filters, setFilters] = useState<FilterValues>(EMPTY_FILTERS);
+  const [exporting, setExporting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -68,14 +94,14 @@ export default function AdminAuditPage() {
       if (filters.entityType) params.entityType = filters.entityType;
       if (filters.entityId) params.entityId = filters.entityId;
       if (filters.actor) params.actor = filters.actor;
+      if (filters.actorDepartments) params.actorDepartments = filters.actorDepartments;
+      if (filters.action) params.action = filters.action;
       if (filters.since) params.since = filters.since;
       if (filters.until) params.until = filters.until;
 
-      const data = await listAuditLogs(params);
-      setLogs(data);
-      // 后端 limit/offset 查询时假设 total >= data.length；取 header 的 X-Total-Count 需改造 client，
-      // 现阶段用前端记录总数（无 filter 时后端返回完整列表，前端最多显示 1000 条）。
-      setTotal(data.length < PAGE_SIZE ? (page - 1) * PAGE_SIZE + data.length : page * PAGE_SIZE + 1);
+      const res = await listAuditLogs(params);
+      setLogs(res.rows);
+      setTotal(res.total);
     } catch {
       // 错误由 axios 拦截器提示
     } finally {
@@ -96,6 +122,43 @@ export default function AdminAuditPage() {
     setFilters(EMPTY_FILTERS);
     setPage(1);
   };
+
+  const handleExport = async (format: "csv" | "json") => {
+    setExporting(true);
+    try {
+      const params: AuditLogFilters = {};
+      if (filters.entityType) params.entityType = filters.entityType;
+      if (filters.entityId) params.entityId = filters.entityId;
+      if (filters.actor) params.actor = filters.actor;
+      if (filters.actorDepartments) params.actorDepartments = filters.actorDepartments;
+      if (filters.action) params.action = filters.action;
+      if (filters.since) params.since = filters.since;
+      if (filters.until) params.until = filters.until;
+
+      const blob = await exportAuditLogs(params, format);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = format === "csv" ? "audit.csv" : "audit.jsonl";
+      a.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const exportMenuItems: MenuProps["items"] = [
+    {
+      key: "csv",
+      label: t("audit.export.csv"),
+      onClick: () => handleExport("csv"),
+    },
+    {
+      key: "json",
+      label: t("audit.export.json"),
+      onClick: () => handleExport("json"),
+    },
+  ];
 
   const columns = [
     {
@@ -202,6 +265,14 @@ export default function AdminAuditPage() {
     </div>
   );
 
+  const rangePickerProps = {
+    showTime: true as const,
+    onChange: (_val: unknown, dateStrings: [string, string]) => {
+      updateFilter("since", dateStrings[0] ?? "");
+      updateFilter("until", dateStrings[1] ?? "");
+    },
+  };
+
   return (
     <>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
@@ -228,15 +299,25 @@ export default function AdminAuditPage() {
             value={filters.actor}
             onChange={(e) => updateFilter("actor", e.target.value)}
           />
-          <DatePicker
-            placeholder={t("audit.filters.since")}
+          <Input
+            allowClear
+            placeholder={t("audit.filters.actorDepartments")}
             style={{ width: 140 }}
-            onChange={(_, dateString) => updateFilter("since", dateString as string)}
+            value={filters.actorDepartments}
+            onChange={(e) => updateFilter("actorDepartments", e.target.value)}
           />
-          <DatePicker
-            placeholder={t("audit.filters.until")}
-            style={{ width: 140 }}
-            onChange={(_, dateString) => updateFilter("until", dateString as string)}
+          <Select
+            allowClear
+            placeholder={t("audit.filters.action")}
+            style={{ width: 120 }}
+            options={ACTION_OPTIONS}
+            value={filters.action ? filters.action : undefined}
+            onChange={(v) => updateFilter("action", v ?? "")}
+          />
+          <DatePicker.RangePicker
+            {...rangePickerProps}
+            placeholder={[t("audit.filters.since"), t("audit.filters.until")]}
+            style={{ width: 340 }}
           />
           <Button
             icon={<ReloadOutlined />}
@@ -244,6 +325,8 @@ export default function AdminAuditPage() {
               !filters.entityType &&
               !filters.entityId &&
               !filters.actor &&
+              !filters.actorDepartments &&
+              !filters.action &&
               !filters.since &&
               !filters.until
             }
@@ -252,9 +335,16 @@ export default function AdminAuditPage() {
             {t("forms.ontology.filter.reset")}
           </Button>
         </Space>
-        <Button icon={<ReloadOutlined />} onClick={() => void load()}>
-          {t("common.refresh")}
-        </Button>
+        <Space>
+          <Dropdown menu={{ items: exportMenuItems }} trigger={["click"]}>
+            <Button icon={<DownloadOutlined />} loading={exporting}>
+              {t("audit.export.button")}
+            </Button>
+          </Dropdown>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
+            {t("common.refresh")}
+          </Button>
+        </Space>
       </div>
 
       <Table

@@ -1244,6 +1244,8 @@ export const zhCN = {
       allEntityTypes: "全部",
       entityId: "实体 ID",
       actor: "操作人",
+      actorDepartments: "部门",
+      action: "操作",
       since: "开始日期",
       until: "结束日期",
     },
@@ -1261,5 +1263,11 @@ export const zhCN = {
     expandChanges: "变更详情",
     noChanges: "无变更数据",
     total: "共 {total} 条",
+    export: {
+      button: "导出",
+      csv: "导出 CSV",
+      json: "导出 JSON Lines",
+      loading: "导出中...",
+    },
   },
 } as const;

@@ -15,6 +15,11 @@ export interface AuditLog {
   createdAt: string; // ISO datetime string
 }
 
+export interface AuditLogPage {
+  rows: AuditLog[];
+  total: number;
+}
+
 export interface AuditLogFilters {
   entityType?: string;
   entityId?: string;
@@ -23,4 +28,6 @@ export interface AuditLogFilters {
   until?: string; // ISO date string YYYY-MM-DD
   limit?: number;
   offset?: number;
+  actorDepartments?: string;
+  action?: string;
 }

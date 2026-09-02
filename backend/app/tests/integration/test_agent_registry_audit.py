@@ -12,11 +12,11 @@ def _make_payload(code: str = "AUD_AGENT_001", **overrides) -> dict:
         "agentCode": code,
         "agentName": "审计测试Agent",
         "description": "audit test",
-        "triggerType": "USER_QUESTION",
-        "responseLatency": "REALTIME",
+        "triggerType": "user_question",
+        "responseLatency": "realtime",
         "dataDomains": ["PROCUREMENT"],
         "dataLayers": ["FEATURE"],
-        "status": "DRAFT",
+        "status": "draft",
         "version": "v1.0",
         "policies": [],
     }
@@ -99,11 +99,7 @@ class TestAgentRegistryAudit:
         # Try direct DELETE — should fail with 405 or 404 (not 204/200)
         create_resp = await client.post(
             "/api/v1/agents",
-            json={
-                "agentCode": f"AUD_AGENT_NODEL_{id(self)}",
-                "name": "No Delete Agent",
-                "agentType": "CHAT",
-            },
+            json=_make_payload(f"AUD_AGENT_NODEL_{id(self)}"),
             headers=ADMIN_HEADERS,
         )
         assert create_resp.status_code in (200, 201), f"setup create failed: {create_resp.text}"

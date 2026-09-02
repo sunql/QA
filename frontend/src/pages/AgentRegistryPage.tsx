@@ -93,7 +93,7 @@ export default function AgentRegistryPage() {
   const [editingPolicy, setEditingPolicy] =
     useState<AgentAccessPolicy | null>(null);
 
-  const { domains, layers } = useAgentOptions();
+  const { domains, layers, tools } = useAgentOptions();
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -332,6 +332,7 @@ export default function AgentRegistryPage() {
                 dataLayers: row.dataLayers,
                 status: row.status,
                 version: row.version,
+                toolName: row.toolName,
               });
             }}
           >
@@ -482,6 +483,50 @@ export default function AgentRegistryPage() {
               placeholder={t("agentRegistry.filter.layerPlaceholder")}
             />
           </Form.Item>
+          <Form.Item
+            name="toolName"
+            label={t("agentRegistry.fields.toolName")}
+            rules={[
+              {
+                validator: (_: unknown, value: string | undefined) => {
+                  if (!value) return Promise.resolve();
+                  const tool = tools.find((x) => x.name === value);
+                  if (!tool) {
+                    return Promise.reject(
+                      new Error(t("agentRegistry.errors.toolUnknown")),
+                    );
+                  }
+                  const covered = createForm.getFieldValue("dataLayers") || [];
+                  const missing = tool.dataLayers.filter(
+                    (layer) => !covered.includes(layer),
+                  );
+                  if (missing.length > 0) {
+                    return Promise.reject(
+                      new Error(
+                        t("agentRegistry.errors.toolLayerMismatch", {
+                          tool: value,
+                          missing: missing.join(","),
+                        }),
+                      ),
+                    );
+                  }
+                  return Promise.resolve();
+                },
+              },
+            ]}
+          >
+            <Select
+              allowClear
+              placeholder={t("agentRegistry.fields.toolNamePlaceholder")}
+              options={tools.map((tool) => ({
+                value: tool.name,
+                label: `${tool.name} — ${tool.description}`,
+              }))}
+              showSearch
+              optionFilterProp="label"
+              onChange={() => createForm.validateFields(["dataLayers"])}
+            />
+          </Form.Item>
         </Form>
       </Modal>
 
@@ -511,6 +556,50 @@ export default function AgentRegistryPage() {
             <Select
               mode="multiple"
               options={layers.map((l) => ({ value: l, label: l }))}
+            />
+          </Form.Item>
+          <Form.Item
+            name="toolName"
+            label={t("agentRegistry.fields.toolName")}
+            rules={[
+              {
+                validator: (_: unknown, value: string | undefined) => {
+                  if (!value) return Promise.resolve();
+                  const tool = tools.find((x) => x.name === value);
+                  if (!tool) {
+                    return Promise.reject(
+                      new Error(t("agentRegistry.errors.toolUnknown")),
+                    );
+                  }
+                  const covered = editForm.getFieldValue("dataLayers") || [];
+                  const missing = tool.dataLayers.filter(
+                    (layer) => !covered.includes(layer),
+                  );
+                  if (missing.length > 0) {
+                    return Promise.reject(
+                      new Error(
+                        t("agentRegistry.errors.toolLayerMismatch", {
+                          tool: value,
+                          missing: missing.join(","),
+                        }),
+                      ),
+                    );
+                  }
+                  return Promise.resolve();
+                },
+              },
+            ]}
+          >
+            <Select
+              allowClear
+              placeholder={t("agentRegistry.fields.toolNamePlaceholder")}
+              options={tools.map((tool) => ({
+                value: tool.name,
+                label: `${tool.name} — ${tool.description}`,
+              }))}
+              showSearch
+              optionFilterProp="label"
+              onChange={() => editForm.validateFields(["dataLayers"])}
             />
           </Form.Item>
           <Form.Item name="status" label={t("agentRegistry.fields.status")}>
@@ -565,6 +654,12 @@ export default function AgentRegistryPage() {
               <strong>{t("agentRegistry.detail.owner")}:</strong>{" "}
               {detailAgent.owner ?? "unassigned"}
             </div>
+            {detailAgent.toolName && (
+              <div>
+                <strong>{t("agentRegistry.fields.toolName")}:</strong>{" "}
+                <Tag color="blue">{detailAgent.toolName}</Tag>
+              </div>
+            )}
 
             <div>
               <h4>{t("agentRegistry.policies.title")}</h4>

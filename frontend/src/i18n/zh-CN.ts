@@ -376,6 +376,12 @@ export const zhCN = {
       version: "版本",
       dataDomainRule: "请从下拉选择（PROCUREMENT/QUALITY/LOGISTICS）",
       dataLayerRule: "请从下拉选择（DIM/DWD/FEATURE）",
+      toolName: "绑定工具",
+      toolNamePlaceholder: "选择工具（可空，留空为元数据 Agent）",
+    },
+    errors: {
+      toolUnknown: "未知工具，请刷新页面重试",
+      toolLayerMismatch: "工具 {tool} 要求 data_layers 含 {missing}，请先在数据层字段补齐",
     },
     detail: {
       code: "编码",

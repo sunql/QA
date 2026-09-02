@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getAgentOptions } from "../api/agentOptions";
-import type { AgentOptions } from "../types/agentOptions";
+import type { AgentOptions, AgentToolOption } from "../types/agentOptions";
 
 // 模块级缓存：跨组件共享同一份词表，避免每处 Select 都重发请求。
 // 失败时不缓存，下次调用重试。简洁优先——暂不上 React Query（项目无该依赖）。
@@ -16,11 +16,12 @@ export function _resetCache(): void {
 export function useAgentOptions(): {
     domains: string[];
     layers: string[];
+    tools: AgentToolOption[];
     loading: boolean;
     error: string | null;
 } {
     const [data, setData] = useState<AgentOptions>(
-        _cache ?? { domains: [], layers: [] }
+        _cache ?? { domains: [], layers: [], tools: [] }
     );
     const [loading, setLoading] = useState(_cache === null);
     const [error, setError] = useState<string | null>(null);
@@ -60,6 +61,7 @@ export function useAgentOptions(): {
     return {
         domains: data.domains,
         layers: data.layers,
+        tools: data.tools,
         loading,
         error,
     };

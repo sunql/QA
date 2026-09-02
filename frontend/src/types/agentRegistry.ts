@@ -49,6 +49,8 @@ export interface AgentDefinition {
    *  true = status=ACTIVE 且已注册到 AGENT_TOOLS；元数据占位 agent（如
    *  SUPPLIER_OTD_REPORT / PROCUREMENT_COPILOT）即使 status=active 也为 false。 */
   runnable?: boolean;
+  /** Phase 6.4 绑定工具名：来自 useAgentOptions().tools，null 表示元数据占位 Agent。 */
+  toolName?: string | null;
 }
 
 export interface AgentDefinitionCreate {
@@ -62,6 +64,7 @@ export interface AgentDefinitionCreate {
   status?: AgentStatus;
   version?: string | null;
   policies?: AgentAccessPolicyCreate[];
+  toolName?: string | null;
 }
 
 export interface AgentDefinitionUpdate {
@@ -73,4 +76,5 @@ export interface AgentDefinitionUpdate {
   dataLayers?: string[];
   status?: AgentStatus;
   version?: string | null;
+  toolName?: string | null;
 }

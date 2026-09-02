@@ -371,6 +371,12 @@ export const enUS = {
       version: "Version",
       dataDomainRule: "Choose from dropdown (PROCUREMENT/QUALITY/LOGISTICS)",
       dataLayerRule: "Choose from dropdown (DIM/DWD/FEATURE)",
+      toolName: "Bound Tool",
+      toolNamePlaceholder: "Select tool (optional; empty = metadata-only Agent)",
+    },
+    errors: {
+      toolUnknown: "Unknown tool, please refresh the page and retry",
+      toolLayerMismatch: "Tool {tool} requires data_layers to include {missing}; please add them first",
     },
     detail: {
       code: "Code",

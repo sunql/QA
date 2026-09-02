@@ -93,12 +93,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from scripts.seed_agent_tool_bindings import seed_agent_tool_bindings
 
     from app.infrastructure.database import getSessionFactory
+    from app.services.agent_binding_cache import agent_binding_cache
 
     session_factory = getSessionFactory()
     async with session_factory() as session:
         seeded = await seed_agent_tool_bindings(session)
         if seeded:
             logger.info("agent_tool_binding seed: %d new rows", seeded)
+        # Task 6：cache 预热必须在 seed 之后（seed 写入了 tool_name）；
+        # 若 seed 失败（RuntimeError），不继续 warmUp（fail-fast）。
+        await agent_binding_cache.warmUp(session)
     yield
     logger.info("关闭中，释放外部连接...")
     await shutdownCleanup()

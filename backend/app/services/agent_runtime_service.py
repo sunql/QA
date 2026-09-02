@@ -47,6 +47,7 @@ from app.services.agent_tools import (
     AgentToolRegistry,
     agent_tool_registry,
 )
+from app.services.agent_binding_cache import agent_binding_cache
 from app.services.supplier_name_resolver import SupplierNameResolver
 
 logger = logging.getLogger(__name__)
@@ -94,11 +95,23 @@ class AgentRuntimeService:
         """执行一次 Agent 运行（见模块 docstring 完整链路）。"""
         entity = await self._agents.getAgent(session, agent_code)  # NotFoundError(404)
 
-        tool_names = AGENT_TOOLS.get(agent_code)
-        # 拆分两条 409 路径，给用户更明确的引导：
-        # 1) status 非 ACTIVE → 提示去 Registry 调整状态
-        # 2) status=active 但无工具绑定（仅元数据占位，如 SUPPLIER_OTD_REPORT）
-        #    → 明确说"未绑定工具"，避免被误导以为是状态问题
+        # 【CHANGED】Task 6：DB cache 优先，dict fallback
+        # getToolName 在未 warmUp 时抛 RuntimeError（如测试环境 lifespan 未触发）；
+        # 转为 None 以触发 dict fallback（lifespan bug 的安全垫）。
+        try:
+            tool_name = agent_binding_cache.getToolName(agent_code)
+        except RuntimeError:
+            tool_name = None
+        if tool_name is None:
+            # 过渡期 fallback：dict 还在（Task 7 删除）
+            fallback = AGENT_TOOLS.get(agent_code)
+            if fallback:
+                tool_name = fallback[0]
+        if tool_name is None:
+            raise ConflictError(
+                MSG_AGENT_NOT_RUNNABLE_NO_TOOL.format(code=agent_code)
+            )
+
         if entity.status != AgentStatus.ACTIVE.value:
             status_label = entity.status or "unknown"
             raise ConflictError(
@@ -106,12 +119,8 @@ class AgentRuntimeService:
                     code=agent_code, status=status_label
                 )
             )
-        if not tool_names:
-            raise ConflictError(
-                MSG_AGENT_NOT_RUNNABLE_NO_TOOL.format(code=agent_code)
-            )
 
-        tool = self._resolveTool(tool_names[0])
+        tool = self._resolveTool(tool_name)
         self._enforcePolicies(entity, tool)
 
         # Phase 6.5：供应商名→编码预解析（数字未命中时查 entity_mapping.name；

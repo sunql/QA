@@ -41,6 +41,7 @@ from app.domain.schemas import (
     AgentDefinitionUpdate,
 )
 from app.services.acl_service import AclService
+from app.services.agent_binding_cache import agent_binding_cache
 from app.services.agent_tools import AGENT_TOOLS
 
 # Phase 6.4：派生字段 runnable 依赖 AGENT_TOOLS（agent_tools 模块定义，
@@ -56,15 +57,16 @@ def _policyToRead(policy: AgentAccessPolicy) -> AgentAccessPolicyRead:
 def agentToRead(entity: AgentDefinition) -> AgentDefinitionRead:
     """ORM → DTO 转换；填充 Phase 6.4 派生字段 ``runnable``。
 
-    ``runnable`` = ``status==ACTIVE AND agent_code 已注册到 AGENT_TOOLS``。
-    Registry 仅展示元数据、未绑定工具的 agent（如 SUPPLIER_OTD_REPORT /
-    PROCUREMENT_COPILOT）即使 status=active 也 runnable=False；
-    前端 Runtime 页用此字段过滤，避免用户点出 409。
+    ``runnable`` = ``status==ACTIVE AND cache 有 tool_name 绑定``。
+    若 cache 未 warmUp（lifespan bug），视为不可运行（try/except 兜底）。
     """
     read = AgentDefinitionRead.model_validate(entity)
+    try:
+        tool = agent_binding_cache.getToolName(read.agent_code)
+    except RuntimeError:
+        tool = None  # 未 warmUp 视为不可运行
     read.runnable = (
-        read.status == AgentStatus.ACTIVE
-        and read.agent_code in AGENT_TOOLS
+        read.status == AgentStatus.ACTIVE and tool is not None
     )
     return read
 
@@ -165,6 +167,8 @@ class AgentRegistryService:
                 MSG_AGENT_DUPLICATE_CODE.format(code=dto.agent_code)
             ) from exc
         await session.refresh(entity, attribute_names=["policies"])
+        # Task 6：写完立即刷新缓存（tool_name 在 commit 后已落库）
+        await agent_binding_cache.refreshOne(session, entity.agent_code)
         logger.info(
             "注册 Agent code=%s policies=%d owner=%s",
             entity.agent_code,
@@ -196,6 +200,8 @@ class AgentRegistryService:
             setattr(entity, field, value)
         await session.commit()
         await session.refresh(entity, attribute_names=["policies"])
+        # Task 6：更新后刷新缓存（tool_name 可能已改）
+        await agent_binding_cache.refreshOne(session, entity.agent_code)
         return entity
 
     async def deprecateAgent(
@@ -215,7 +221,29 @@ class AgentRegistryService:
         entity.status = AgentStatus.DEPRECATED.value
         await session.commit()
         await session.refresh(entity, attribute_names=["policies"])
+        # Task 6：软删除后 invalidate cache（agent_code 不变，status 变）
+        agent_binding_cache.invalidate(entity.agent_code)
         return entity
+
+    async def deleteAgent(
+        self,
+        session: AsyncSession,
+        agent_code: str,
+        actor: CurrentUser,
+    ) -> None:
+        """硬删除 Agent（含级联策略）。ACL 同 update。"""
+        entity = await self.getAgent(session, agent_code)
+        self._acl.assertCanModify(
+            actor,
+            entity_owner=entity.owner,
+            entity_label="AGENT_REGISTRY",
+            entity_code=entity.agent_code,
+        )
+        code = entity.agent_code
+        await session.delete(entity)
+        await session.commit()
+        # Task 6：删除后 invalidate（硬删不存在回填）
+        agent_binding_cache.invalidate(code)
 
     # -------------------------------------------------------------------------
     # 访问策略（嵌套 CRUD）

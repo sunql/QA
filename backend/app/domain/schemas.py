@@ -15,6 +15,11 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
+from app.domain.agent_vocabulary import (
+    AGENT_DATA_DOMAINS,
+    AGENT_DATA_LAYERS,
+    normalizeAgentDomain,
+)
 from app.domain.enums import (
     AgentPermission,
     AgentResponseLatency,
@@ -208,6 +213,8 @@ from app.domain.error_messages import (
     MSG_SCHEMA_USAGE_TOTAL_REQUESTS,
     MSG_SCHEMA_USAGE_TOTAL_SESSIONS,
     MSG_SCHEMA_USAGE_TOTAL_TOKENS,
+    MSG_AGENT_DOMAIN_NOT_IN_VOCAB,
+    MSG_AGENT_LAYER_NOT_IN_VOCAB,
 )
 
 
@@ -1975,6 +1982,38 @@ class AgentAccessPolicyRead(CamelModel):
     created_time: datetime | None = None
 
 
+def _vocabCheckDomains(values: list[str]) -> list[str]:
+    """域归一化 + 词表校验 + 去重保序；非法值抛 ValueError（Pydantic 422）。"""
+    normalized = [normalizeAgentDomain(x) for x in values]
+    rejected = [x for x in normalized if x not in AGENT_DATA_DOMAINS]
+    if rejected:
+        raise ValueError(MSG_AGENT_DOMAIN_NOT_IN_VOCAB.format(
+            value=",".join(rejected), allowed=",".join(AGENT_DATA_DOMAINS)
+        ))
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for x in normalized:
+        if x not in seen:
+            seen.add(x); deduped.append(x)
+    return deduped
+
+
+def _vocabCheckLayers(values: list[str]) -> list[str]:
+    """层归一化 + 词表校验 + 去重保序；复用既有 `_normalizeDataLayer`（None → None 会被过滤）。"""
+    normalized = [n for n in (_normalizeDataLayer(x) for x in values if x is not None) if n]
+    rejected = [x for x in normalized if x not in AGENT_DATA_LAYERS]
+    if rejected:
+        raise ValueError(MSG_AGENT_LAYER_NOT_IN_VOCAB.format(
+            value=",".join(rejected), allowed=",".join(AGENT_DATA_LAYERS)
+        ))
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for x in normalized:
+        if x not in seen:
+            seen.add(x); deduped.append(x)
+    return deduped
+
+
 class AgentDefinitionCreate(CamelModel):
     """创建 Agent 注册请求（Phase 6.1）。
 
@@ -2002,6 +2041,9 @@ class AgentDefinitionCreate(CamelModel):
     version: str | None = Field(default=None, max_length=32)
     policies: list[AgentAccessPolicyCreate] = Field(default_factory=list)
 
+    _check_domains = field_validator("data_domains")(_vocabCheckDomains)
+    _check_layers = field_validator("data_layers")(_vocabCheckLayers)
+
 
 class AgentDefinitionUpdate(CamelModel):
     """更新 Agent 注册请求（Phase 6.1）。
@@ -2018,6 +2060,20 @@ class AgentDefinitionUpdate(CamelModel):
     data_layers: list[str] | None = None
     status: AgentStatus | None = None
     version: str | None = Field(default=None, max_length=32)
+
+    @field_validator("data_domains")
+    @classmethod
+    def _check_domains_update(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        return _vocabCheckDomains(v)
+
+    @field_validator("data_layers")
+    @classmethod
+    def _check_layers_update(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        return _vocabCheckLayers(v)
 
 
 class AgentDefinitionRead(CamelModel):
@@ -2046,6 +2102,17 @@ class AgentDefinitionRead(CamelModel):
     updated_time: datetime | None = None
     created_time: datetime
     runnable: bool = False
+
+
+class AgentOptionsRead(CamelModel):
+    """Agent 写入选项的可枚举值集合（Phase 7 feat-agent-vocabulary）。
+
+    供前端下拉框渲染。data_domains / data_layers 取自词表常量，
+    由 ``agent_vocabulary`` 模块提供单一数据源。
+    """
+
+    data_domains: tuple[str, ...] = AGENT_DATA_DOMAINS
+    data_layers: tuple[str, ...] = AGENT_DATA_LAYERS
 
 
 class AgentRunRequest(CamelModel):

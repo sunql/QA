@@ -394,3 +394,13 @@ MSG_SUPPLIER_NAME_AMBIGUOUS_OVER_LIMIT = (
     "供应商名 '{name}' 命中候选数过多（≥ {limit} 条），"
     "请用更具体的关键词缩小范围，或直接用 enterprise_code 精确指定"
 )
+
+# ===== Phase 7：Agent 词表治理（feat-agent-vocabulary）=====
+MSG_AGENT_DOMAIN_NOT_IN_VOCAB = (
+    "data_domains 含未授权值 '{value}'；合法集：{allowed}。"
+    "如需新增域，请在 AGENT_DATA_DOMAINS（app/domain/agent_vocabulary.py）补充。"
+)
+MSG_AGENT_LAYER_NOT_IN_VOCAB = (
+    "data_layers 含未授权值 '{value}'；合法集：{allowed}。"
+    "Agent 层词表仅含 DIM/DWD/FEATURE；血缘层 LineageLayer 不在此范围内。"
+)

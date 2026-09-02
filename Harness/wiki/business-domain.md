@@ -315,6 +315,10 @@ run(session, agent_code, params, *, actor)
   → arg_extractor 参数提取 → 工具执行 → AgentRunRead
 ```
 
+- **供应商名称解析（Phase 6.5）**：run 入口支持中文名（entity_mapping.name）与
+  enterprise_code 双路输入；名字→编码预解析在 arg_extractor 之前，歧义返回
+  422 + 候选列表（chat 端转友好 answer）。
+
 ### 审计与计量
 
 - `actor` 从 API 层 `getCurrentUser` 透传（`ChatRequest` 无 user 字段，身份仅存在于 API 层）。

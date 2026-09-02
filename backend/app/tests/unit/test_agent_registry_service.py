@@ -125,6 +125,12 @@ def _fakeSession(
         async def delete(self, entity):
             self.removed.append(entity)
 
+        async def flush(self):
+            for e in self.added:
+                if getattr(e, "id", None) is None:
+                    e.id = self.next_id
+                    self.next_id += 1
+
     return _Session()
 
 

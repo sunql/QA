@@ -42,8 +42,11 @@ from app.domain.schemas import (
 )
 from app.services.acl_service import AclService
 from app.services.agent_binding_cache import agent_binding_cache
+from app.services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
+
+_audit = AuditService()
 
 
 def _policyToRead(policy: AgentAccessPolicy) -> AgentAccessPolicyRead:
@@ -65,6 +68,24 @@ def agentToRead(entity: AgentDefinition) -> AgentDefinitionRead:
         read.status == AgentStatus.ACTIVE and tool is not None
     )
     return read
+
+
+def _agentToDict(entity: AgentDefinition) -> dict:
+    """将 AgentDefinition 模型实例转换为字典（审计用）。"""
+    return {
+        "id": entity.id,
+        "agent_code": entity.agent_code,
+        "agent_name": entity.agent_name,
+        "description": entity.description,
+        "trigger_type": entity.trigger_type.value if hasattr(entity.trigger_type, "value") else entity.trigger_type,
+        "response_latency": entity.response_latency.value if hasattr(entity.response_latency, "value") else entity.response_latency,
+        "data_domains": entity.data_domains,
+        "data_layers": entity.data_layers,
+        "status": entity.status.value if hasattr(entity.status, "value") else entity.status,
+        "owner": entity.owner,
+        "version": entity.version,
+        "tool_name": entity.tool_name,
+    }
 
 
 class AgentRegistryService:
@@ -156,6 +177,16 @@ class AgentRegistryService:
                 )
             )
         session.add(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="agent_definition",
+            entity_id=entity.id,
+            action="CREATE",
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            after=_agentToDict(entity),
+        )
         try:
             await session.commit()
         except IntegrityError as exc:
@@ -189,12 +220,24 @@ class AgentRegistryService:
             entity_label="AGENT_REGISTRY",
             entity_code=entity.agent_code,
         )
+        before_state = _agentToDict(entity)
         changes = dto.model_dump(exclude_unset=True, by_alias=False)
         for field, value in changes.items():
             # enum 字段保持字符串值（ORM 列是 String）
             if field in ("trigger_type", "response_latency", "status") and value is not None:
                 value = value.value if hasattr(value, "value") else value
             setattr(entity, field, value)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="agent_definition",
+            entity_id=entity.id,
+            action="UPDATE",
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            before=before_state,
+            after=_agentToDict(entity),
+        )
         await session.commit()
         await session.refresh(entity, attribute_names=["policies"])
         # Task 6：更新后刷新缓存（tool_name 可能已改）
@@ -215,7 +258,19 @@ class AgentRegistryService:
             entity_label="AGENT_REGISTRY",
             entity_code=entity.agent_code,
         )
+        before_state = _agentToDict(entity)
         entity.status = AgentStatus.DEPRECATED.value
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="agent_definition",
+            entity_id=entity.id,
+            action="UPDATE",
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            before=before_state,
+            after=_agentToDict(entity),
+        )
         await session.commit()
         await session.refresh(entity, attribute_names=["policies"])
         # Task 6：软删除后 invalidate cache（agent_code 不变，status 变）
@@ -236,8 +291,19 @@ class AgentRegistryService:
             entity_label="AGENT_REGISTRY",
             entity_code=entity.agent_code,
         )
+        before_state = _agentToDict(entity)
         code = entity.agent_code
         await session.delete(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="agent_definition",
+            entity_id=entity.id,
+            action="DELETE",
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            before=before_state,
+        )
         await session.commit()
         # Task 6：删除后 invalidate（硬删不存在回填）
         agent_binding_cache.invalidate(code)

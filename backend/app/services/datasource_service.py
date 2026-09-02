@@ -15,6 +15,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
+from app.dependencies import CurrentUser
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import DataSource
 from app.domain.schemas import (
@@ -25,6 +26,7 @@ from app.domain.schemas import (
 )
 from app.infrastructure.business_db_pool import build_adapter, dispose_adapter
 from app.infrastructure.security.crypto import encryptApiKey
+from app.services.audit_service import AuditService
 from app.services.messages_zh import (
     MSG_DATASOURCE_CONNECT_FAILED,
     MSG_DATASOURCE_HOST_ALLOWLIST_DETAIL,
@@ -35,11 +37,19 @@ from app.services.messages_zh import (
 
 logger = logging.getLogger(__name__)
 
+_audit = AuditService()
+
 
 class DataSourceService:
     """数据源管理服务。"""
 
-    async def create(self, session: AsyncSession, dto: DataSourceCreate, createdBy: str | None) -> DataSource:
+    async def create(
+        self,
+        session: AsyncSession,
+        dto: DataSourceCreate,
+        createdBy: str | None,
+        actor: CurrentUser | None = None,
+    ) -> DataSource:
         """创建数据源。name 唯一，主机须在白名单内。"""
         _validateHost(dto.host)
         await _assertNameUnique(session, dto.name)
@@ -61,6 +71,16 @@ class DataSourceService:
             created_by=createdBy,
         )
         session.add(ds)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="data_source",
+            entity_id=ds.id,
+            action="CREATE",
+            actor=actor.userId if actor else createdBy or "anonymous",
+            actor_departments=actor.departments if actor else None,
+            after=_datasourceToDict(ds),
+        )
         await session.commit()
         await session.refresh(ds)
         logger.info("创建数据源 id=%s name=%s type=%s", ds.id, ds.name, ds.type)
@@ -82,10 +102,15 @@ class DataSourceService:
         return ds
 
     async def update(
-        self, session: AsyncSession, datasourceId: int, dto: DataSourceUpdate
+        self,
+        session: AsyncSession,
+        datasourceId: int,
+        dto: DataSourceUpdate,
+        actor: CurrentUser | None = None,
     ) -> DataSource:
         """部分更新。password 非空时重新加密；连接参数变更时释放缓存适配器。"""
         ds = await self.get(session, datasourceId)
+        before_state = _datasourceToDict(ds)
         updates = dto.model_dump(exclude_unset=True)
 
         plainPassword = updates.pop("password", None)
@@ -114,6 +139,17 @@ class DataSourceService:
         if dto.is_default is True:
             await _clearOtherDefaults(session, keepId=datasourceId)
 
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="data_source",
+            entity_id=ds.id,
+            action="UPDATE",
+            actor=actor.userId if actor else "anonymous",
+            actor_departments=actor.departments if actor else None,
+            before=before_state,
+            after=_datasourceToDict(ds),
+        )
         await session.commit()
         await session.refresh(ds)
 
@@ -123,10 +159,26 @@ class DataSourceService:
         logger.info("更新数据源 id=%s fields=%s", datasourceId, list(updates.keys()))
         return ds
 
-    async def delete(self, session: AsyncSession, datasourceId: int) -> None:
+    async def delete(
+        self,
+        session: AsyncSession,
+        datasourceId: int,
+        actor: CurrentUser | None = None,
+    ) -> None:
         """硬删除数据源并释放适配器；若删除的是默认源则提升首个启用源为默认。"""
         ds = await self.get(session, datasourceId)
         wasDefault = ds.is_default
+        before_state = _datasourceToDict(ds)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="data_source",
+            entity_id=ds.id,
+            action="DELETE",
+            actor=actor.userId if actor else "anonymous",
+            actor_departments=actor.departments if actor else None,
+            before=before_state,
+        )
         await session.delete(ds)
         await session.commit()
         await dispose_adapter(datasourceId)
@@ -208,3 +260,21 @@ async def _promoteNextDefault(session: AsyncSession) -> None:
         nextDs.is_default = True
         await session.commit()
         logger.info("提升数据源 id=%s 为默认", nextDs.id)
+
+
+def _datasourceToDict(ds: DataSource) -> dict:
+    """将 DataSource 模型实例转换为字典（审计用，不含密码）。"""
+    return {
+        "id": ds.id,
+        "name": ds.name,
+        "type": ds.type.value if hasattr(ds.type, "value") else ds.type,
+        "host": ds.host,
+        "port": ds.port,
+        "databaseName": ds.database_name,
+        "username": ds.username,
+        "description": ds.description,
+        "isActive": ds.is_active,
+        "isDefault": ds.is_default,
+        "createdBy": ds.created_by,
+        "oracleVersion": ds.oracle_version,
+    }

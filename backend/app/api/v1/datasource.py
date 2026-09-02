@@ -58,7 +58,7 @@ async def createDataSource(
     session: AsyncSession = Depends(getDb),
     currentUser: CurrentUser = Depends(getCurrentUser),
 ) -> DataSourceRead:
-    ds = await _service.create(session, dto, createdBy=currentUser.userId)
+    ds = await _service.create(session, dto, createdBy=currentUser.userId, actor=currentUser)
     return DataSourceRead.model_validate(ds)
 
 
@@ -82,16 +82,19 @@ async def updateDataSource(
     datasourceId: int,
     dto: DataSourceUpdate,
     session: AsyncSession = Depends(getDb),
+    currentUser: CurrentUser = Depends(getCurrentUser),
 ) -> DataSourceRead:
-    ds = await _service.update(session, datasourceId, dto)
+    ds = await _service.update(session, datasourceId, dto, actor=currentUser)
     return DataSourceRead.model_validate(ds)
 
 
 @router.delete("/{datasourceId}", status_code=204)
 async def deleteDataSource(
-    datasourceId: int, session: AsyncSession = Depends(getDb)
+    datasourceId: int,
+    session: AsyncSession = Depends(getDb),
+    currentUser: CurrentUser = Depends(getCurrentUser),
 ) -> Response:
-    await _service.delete(session, datasourceId)
+    await _service.delete(session, datasourceId, actor=currentUser)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

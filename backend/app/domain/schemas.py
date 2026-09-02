@@ -2167,19 +2167,34 @@ class AgentDefinitionRead(CamelModel):
     runnable: bool = False
 
 
-class AgentOptionsRead(CamelModel):
-    """Agent 编辑选项下拉数据（Phase 7 feat-agent-vocabulary）。
+class AgentToolOption(CamelModel):
+    """Agent 可绑定工具的展示选项（Phase 7 feat-agent-tool-binding Task 5）。
 
-    返回 ``AGENT_DATA_DOMAINS`` / ``AGENT_DATA_LAYERS`` 词表常量，
-    由 ``app.domain.agent_vocabulary`` 模块提供单一数据源。
+    来自 ``agent_tool_registry.all()``；前端 tool 下拉数据源。
+    ``data_object`` / ``data_layers`` 用于前端预校验（tool 选择后必须覆盖 tool 层）。
+    """
+
+    name: str
+    description: str
+    data_object: str
+    data_layers: list[str]
+
+
+class AgentOptionsRead(CamelModel):
+    """Agent 编辑选项下拉数据（Phase 7 feat-agent-vocabulary + Task 5 tool binding）。
+
+    返回 ``AGENT_DATA_DOMAINS`` / ``AGENT_DATA_LAYERS`` 词表常量 +
+    ``agent_tool_registry.all()`` 工具列表（按 name 排序），由
+    ``app.domain.agent_vocabulary`` / ``app.services.agent_tools`` 模块分别提供。
     字段名 ``domains`` / ``layers`` 是顶层 options，不带 ``data_`` 前缀
     （避免与嵌套在 AgentDefinition 内的 data_domains/data_layers 混淆）。
-    前端 useAgentOptions() 拉一次缓存；不返回工具列表——工具绑定可配置化
-    属独立 change（Phase 7+ 大改动），本期 YAGNI。
+    前端 useAgentOptions() 拉一次缓存；同时下发 tool 选项，避免前端再请求
+    /agent-tools 单独接口。
     """
 
     domains: list[str]
     layers: list[str]
+    tools: list[AgentToolOption] = Field(default_factory=list)
 
 
 class AgentRunRequest(CamelModel):

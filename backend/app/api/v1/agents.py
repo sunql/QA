@@ -30,6 +30,7 @@ from app.domain.schemas import (
     AgentDefinitionRead,
     AgentDefinitionUpdate,
     AgentOptionsRead,
+    AgentToolOption,
 )
 from app.domain.agent_vocabulary import AGENT_DATA_DOMAINS, AGENT_DATA_LAYERS
 from app.services.agent_registry_service import (
@@ -37,6 +38,7 @@ from app.services.agent_registry_service import (
     _policyToRead,
     agentToRead,
 )
+from app.services.agent_tools import agent_tool_registry
 from app.infrastructure.rate_limit import limiter, rateLimitValue
 from app.services.agent_scheduler_service import AgentSchedulerService
 from app.domain.schemas import (
@@ -83,14 +85,26 @@ async def listAgents(
 async def getAgentOptions(
     _user: CurrentUser = Depends(getCurrentUser),
 ) -> AgentOptionsRead:
-    """Agent 编辑选项（域/层词表）；前端 useAgentOptions() 缓存。
+    """Agent 编辑选项（域/层词表 + 工具列表）；前端 useAgentOptions() 缓存。
 
     必须在 GET /{agent_code} 之前注册——否则 "options" 会被路径参数吞成
     agent_code='options'，触发 getAgent → 404。测试 test_agent_options_api.py 守护。
+
+    tools 来自 ``agent_tool_registry.all()``（按 name 排序）；前端 Agent 表单的
+    tool 下拉数据源，避免额外请求。
     """
     return AgentOptionsRead(
         domains=list(AGENT_DATA_DOMAINS),
         layers=list(AGENT_DATA_LAYERS),
+        tools=[
+            AgentToolOption(
+                name=t.name,
+                description=t.description,
+                data_object=t.data_object,
+                data_layers=list(t.data_layers),
+            )
+            for t in agent_tool_registry.all()
+        ],
     )
 
 

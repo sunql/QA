@@ -39,9 +39,13 @@ from app.domain.schemas import AgentRunLogRead, AgentScheduleCreate, AgentSchedu
 from app.services.acl_service import AclService
 from app.services.agent_registry_service import AgentRegistryService
 from app.services.agent_runtime_service import AgentRuntimeService
+from app.services.audit_service import AuditService
 
 # 运行日志错误信息截断长度（避免把内部路径/堆栈细节暴露给 API）
 _MAX_ERROR_LEN = 500
+
+# Module-level audit singleton (Task 11: audit history API)
+_audit = AuditService()
 
 
 def _scheduleToRead(schedule: AgentSchedule, agent_code: str) -> AgentScheduleRead:
@@ -73,6 +77,19 @@ def _logToRead(log: AgentRunLog) -> AgentRunLogRead:
         started_at=log.started_at,
         finished_at=log.finished_at,
     )
+
+
+def _scheduleToDict(schedule: AgentSchedule) -> dict:
+    """将 AgentSchedule 模型实例转换为字典（审计用）。"""
+    return {
+        "id": schedule.id,
+        "agent_id": schedule.agent_id,
+        "cron_expression": schedule.cron_expression,
+        "params": schedule.params,
+        "is_active": schedule.is_active,
+        "last_run_at": schedule.last_run_at.isoformat() if schedule.last_run_at else None,
+        "next_run_at": schedule.next_run_at.isoformat() if schedule.next_run_at else None,
+    }
 
 
 class AgentSchedulerService:
@@ -136,6 +153,16 @@ class AgentSchedulerService:
             next_run_at=next_run_at,
         )
         session.add(schedule)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="agent_schedule",
+            entity_id=schedule.id,
+            action="CREATE",
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            after=_scheduleToDict(schedule),
+        )
         await session.commit()
         await session.refresh(schedule)
         return _scheduleToRead(schedule, agent_code)
@@ -172,6 +199,7 @@ class AgentSchedulerService:
         self._acl.assertCanModify(actor, entity.owner, "Agent", agent_code)
         schedule = await self._getSchedule(session, entity.id, schedule_id)
 
+        before_state = _scheduleToDict(schedule)
         schedule.is_active = not schedule.is_active
         if schedule.is_active:
             now = datetime.now(timezone.utc)
@@ -179,6 +207,17 @@ class AgentSchedulerService:
                 schedule.next_run_at = self.computeNextRun(
                     schedule.cron_expression, now
                 )
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="agent_schedule",
+            entity_id=schedule.id,
+            action="UPDATE",
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            before=before_state,
+            after=_scheduleToDict(schedule),
+        )
         await session.commit()
         await session.refresh(schedule)
         return _scheduleToRead(schedule, agent_code)
@@ -194,6 +233,16 @@ class AgentSchedulerService:
         entity = await self._agents.getAgent(session, agent_code)  # NotFoundError(404)
         self._acl.assertCanModify(actor, entity.owner, "Agent", agent_code)
         schedule = await self._getSchedule(session, entity.id, schedule_id)
+        before_state = _scheduleToDict(schedule)
+        await _audit.record(
+            session,
+            entity_type="agent_schedule",
+            entity_id=schedule.id,
+            action="DELETE",
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            before=before_state,
+        )
         await session.delete(schedule)
         await session.commit()
 

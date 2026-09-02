@@ -21,6 +21,7 @@ from app.domain.schemas import (
     DocumentRead,
     DocumentUpdate,
 )
+from app.services.audit_service import AuditService
 from app.services.messages_zh import (
     MSG_DOCUMENT_DUPLICATE,
     MSG_DOCUMENT_NOT_FOUND,
@@ -28,12 +29,31 @@ from app.services.messages_zh import (
     MSG_DOCUMENT_REL_NOT_FOUND,
 )
 
+_audit = AuditService()
+
 _DEFAULT_LIMIT = 200
 _MAX_LIMIT = 1000
 
 
 def _duplicateError(document_id: str) -> ConflictError:
     return ConflictError(MSG_DOCUMENT_DUPLICATE.format(document_id=document_id))
+
+
+def _entity_to_dict(entity: DocumentCatalog) -> dict:
+    """Serialize DocumentCatalog ORM object for audit before/after snapshots."""
+    return {
+        "id": entity.id,
+        "document_id": entity.document_id,
+        "document_name": entity.document_name,
+        "document_type": entity.document_type.value if hasattr(entity.document_type, "value") else entity.document_type,
+        "version": entity.version,
+        "status": entity.status.value if hasattr(entity.status, "value") else entity.status,
+        "owner": entity.owner,
+        "effective_date": str(entity.effective_date) if entity.effective_date else None,
+        "security_level": entity.security_level.value if hasattr(entity.security_level, "value") else entity.security_level,
+        "storage_url": entity.storage_url,
+        "content_hash": entity.content_hash,
+    }
 
 
 class DocumentService:
@@ -74,6 +94,7 @@ class DocumentService:
         self,
         session: AsyncSession,
         dto: DocumentCreate,
+        actor: CurrentUser,
     ) -> DocumentCatalog:
         """创建文档；重复 document_id 抛 ConflictError（DB 唯一索引兜底 race）。"""
         existing = await session.execute(
@@ -97,10 +118,20 @@ class DocumentService:
         )
         session.add(entity)
         try:
-            await session.commit()
+            await session.flush()
         except IntegrityError as exc:
             await session.rollback()
             raise _duplicateError(dto.document_id) from exc
+        await _audit.record(
+            session,
+            entity_type="document_catalog",
+            entity_id=entity.id,
+            action="CREATE",
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            after=_entity_to_dict(entity),
+        )
+        await session.commit()
         await session.refresh(entity)
         return entity
 
@@ -109,21 +140,43 @@ class DocumentService:
         session: AsyncSession,
         id: int,
         dto: DocumentUpdate,
+        actor: CurrentUser,
     ) -> DocumentCatalog:
         """更新文档；不存在抛 NotFoundError。"""
         entity = await self.getDocument(session, id)
+        before_state = _entity_to_dict(entity)
         updates = dto.model_dump(exclude_unset=True)
         for key, value in updates.items():
             setattr(entity, key, value)
+        await _audit.record(
+            session,
+            entity_type="document_catalog",
+            entity_id=entity.id,
+            action="UPDATE",
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            before=before_state,
+            after=_entity_to_dict(entity),
+        )
         await session.commit()
         await session.refresh(entity)
         return entity
 
     async def deleteDocument(
-        self, session: AsyncSession, id: int
+        self, session: AsyncSession, id: int, actor: CurrentUser
     ) -> None:
         """删除文档；不存在抛 NotFoundError。级联删 document_entity_relation（ondelete CASCADE）。"""
         entity = await self.getDocument(session, id)
+        before_state = _entity_to_dict(entity)
+        await _audit.record(
+            session,
+            entity_type="document_catalog",
+            entity_id=entity.id,
+            action="DELETE",
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            before=before_state,
+        )
         await session.delete(entity)
         await session.commit()
 

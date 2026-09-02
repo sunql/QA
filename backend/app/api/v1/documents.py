@@ -82,7 +82,7 @@ async def createDocument(
     session: AsyncSession = Depends(getDb),
     service: DocumentService = Depends(getDocumentService),
 ) -> DocumentRead:
-    doc = await service.createDocument(session, payload)
+    doc = await service.createDocument(session, payload, actor=_user)
     return DocumentRead.model_validate(doc)
 
 
@@ -94,7 +94,7 @@ async def updateDocument(
     session: AsyncSession = Depends(getDb),
     service: DocumentService = Depends(getDocumentService),
 ) -> DocumentRead:
-    doc = await service.updateDocument(session, documentId, payload)
+    doc = await service.updateDocument(session, documentId, payload, actor=_user)
     return DocumentRead.model_validate(doc)
 
 
@@ -105,7 +105,7 @@ async def deleteDocument(
     session: AsyncSession = Depends(getDb),
     service: DocumentService = Depends(getDocumentService),
 ) -> None:
-    await service.deleteDocument(session, documentId)
+    await service.deleteDocument(session, documentId, actor=_user)
 
 
 # ---------------------------------------------------------------------------

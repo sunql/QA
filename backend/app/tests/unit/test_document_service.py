@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pytest
 
 from app.domain.enums import (
@@ -26,8 +28,17 @@ from app.domain.schemas import (
 from app.services.document_service import DocumentService
 
 
+@dataclass
+class MockCurrentUser:
+    """Mock CurrentUser for unit tests."""
+    userId: str = "test-user"
+    departments: tuple[str, ...] | None = ("测试部",)
+
+
 class TestDocumentService:
     """DocumentCatalog CRUD。"""
+
+    _actor = MockCurrentUser()
 
     def _make_svc(self) -> DocumentService:
         return DocumentService()
@@ -59,7 +70,7 @@ class TestDocumentService:
     async def test_list_respects_limit_offset(self, dbSession):
         svc = self._make_svc()
         for i in range(5):
-            await svc.createDocument(dbSession, self._doc_dto(document_id=f"DOC-{i}"))
+            await svc.createDocument(dbSession, self._doc_dto(document_id=f"DOC-{i}"), self._actor)
         page = await svc.listDocuments(dbSession, limit=2, offset=1)
         assert len(page) == 2
 
@@ -67,9 +78,9 @@ class TestDocumentService:
     async def test_list_filters_by_type(self, dbSession):
         svc = self._make_svc()
         await svc.createDocument(dbSession, self._doc_dto(
-            document_id="DOC-CONTRACT", document_type=DocumentType.CONTRACT))
+            document_id="DOC-CONTRACT", document_type=DocumentType.CONTRACT), self._actor)
         await svc.createDocument(dbSession, self._doc_dto(
-            document_id="DOC-8D", document_type=DocumentType.REPORT_8D))
+            document_id="DOC-8D", document_type=DocumentType.REPORT_8D), self._actor)
         result = await svc.listDocuments(dbSession, document_type="8D_REPORT")
         assert len(result) == 1
         assert result[0].document_id == "DOC-8D"
@@ -78,9 +89,9 @@ class TestDocumentService:
     async def test_list_filters_by_security_level(self, dbSession):
         svc = self._make_svc()
         await svc.createDocument(dbSession, self._doc_dto(
-            document_id="DOC-L1", security_level=DocumentSecurityLevel.L1))
+            document_id="DOC-L1", security_level=DocumentSecurityLevel.L1), self._actor)
         await svc.createDocument(dbSession, self._doc_dto(
-            document_id="DOC-L3", security_level=DocumentSecurityLevel.L3))
+            document_id="DOC-L3", security_level=DocumentSecurityLevel.L3), self._actor)
         result = await svc.listDocuments(dbSession, security_level="L3")
         assert len(result) == 1
         assert result[0].document_id == "DOC-L3"
@@ -91,7 +102,7 @@ class TestDocumentService:
     async def test_createDocument_persists_and_returns(self, dbSession):
         svc = self._make_svc()
         dto = self._doc_dto()
-        doc = await svc.createDocument(dbSession, dto)
+        doc = await svc.createDocument(dbSession, dto, self._actor)
         assert doc.id is not None
         assert doc.document_id == "DOC-2026-001"
         assert doc.document_name == "供应商框架协议"
@@ -101,16 +112,16 @@ class TestDocumentService:
     @pytest.mark.asyncio
     async def test_createDocument_duplicate_id_raises_ConflictError(self, dbSession):
         svc = self._make_svc()
-        await svc.createDocument(dbSession, self._doc_dto(document_id="DOC-DUP"))
+        await svc.createDocument(dbSession, self._doc_dto(document_id="DOC-DUP"), self._actor)
         with pytest.raises(ConflictError):
-            await svc.createDocument(dbSession, self._doc_dto(document_id="DOC-DUP"))
+            await svc.createDocument(dbSession, self._doc_dto(document_id="DOC-DUP"), self._actor)
 
     # --- getDocument ---
 
     @pytest.mark.asyncio
     async def test_getDocument_returns_doc(self, dbSession):
         svc = self._make_svc()
-        created = await svc.createDocument(dbSession, self._doc_dto())
+        created = await svc.createDocument(dbSession, self._doc_dto(), self._actor)
         fetched = await svc.getDocument(dbSession, created.id)
         assert fetched.id == created.id
         assert fetched.document_name == "供应商框架协议"
@@ -126,9 +137,9 @@ class TestDocumentService:
     @pytest.mark.asyncio
     async def test_updateDocument_updates_fields(self, dbSession):
         svc = self._make_svc()
-        doc = await svc.createDocument(dbSession, self._doc_dto())
+        doc = await svc.createDocument(dbSession, self._doc_dto(), self._actor)
         updated = await svc.updateDocument(
-            dbSession, doc.id, DocumentUpdate(document_name="新名称", version="v2.0")
+            dbSession, doc.id, DocumentUpdate(document_name="新名称", version="v2.0"), self._actor
         )
         assert updated.document_name == "新名称"
         assert updated.version == "v2.0"
@@ -136,8 +147,8 @@ class TestDocumentService:
     @pytest.mark.asyncio
     async def test_updateDocument_none_fields_unchanged(self, dbSession):
         svc = self._make_svc()
-        doc = await svc.createDocument(dbSession, self._doc_dto())
-        await svc.updateDocument(dbSession, doc.id, DocumentUpdate(status=DocumentStatus.ARCHIVED))
+        doc = await svc.createDocument(dbSession, self._doc_dto(), self._actor)
+        await svc.updateDocument(dbSession, doc.id, DocumentUpdate(status=DocumentStatus.ARCHIVED), self._actor)
         fetched = await svc.getDocument(dbSession, doc.id)
         assert fetched.document_name == "供应商框架协议"  # unchanged
         assert fetched.status == DocumentStatus.ARCHIVED
@@ -147,14 +158,16 @@ class TestDocumentService:
     @pytest.mark.asyncio
     async def test_deleteDocument_removes_row(self, dbSession):
         svc = self._make_svc()
-        doc = await svc.createDocument(dbSession, self._doc_dto())
-        await svc.deleteDocument(dbSession, doc.id)
+        doc = await svc.createDocument(dbSession, self._doc_dto(), self._actor)
+        await svc.deleteDocument(dbSession, doc.id, self._actor)
         with pytest.raises(NotFoundError):
             await svc.getDocument(dbSession, doc.id)
 
 
 class TestDocumentEntityRelationService:
     """DocumentEntityRelation CRUD。"""
+
+    _actor = MockCurrentUser()
 
     def _make_svc(self) -> DocumentService:
         return DocumentService()
@@ -166,7 +179,7 @@ class TestDocumentEntityRelationService:
             document_name="测试合同",
             document_type=DocumentType.CONTRACT,
         )
-        return await svc.createDocument(dbSession, dto)
+        return await svc.createDocument(dbSession, dto, self._actor)
 
     def _rel_dto(self, document_id: str, **overrides) -> DocEntityRelationCreate:
         kw = {

@@ -61,7 +61,8 @@ def getAgentRegistryService() -> AgentRegistryService:
 async def listAgents(
     _user: CurrentUser = Depends(getCurrentUser),
     status_: AgentStatus | None = Query(default=None, alias="status"),
-    dataDomain: str | None = Query(default=None, alias="dataDomain"),
+    dataDomain: list[str] | None = Query(default=None, alias="dataDomain"),
+    dataLayer: str | None = Query(default=None, alias="dataLayer"),
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(getDb),
@@ -70,7 +71,8 @@ async def listAgents(
     agents = await service.listAgents(
         session,
         status=status_,
-        data_domain=dataDomain,
+        data_layer=dataLayer,
+        data_domains=dataDomain,
         limit=limit,
         offset=offset,
     )

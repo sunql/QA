@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -80,17 +80,28 @@ class AgentRegistryService:
         session: AsyncSession,
         *,
         status: AgentStatus | None = None,
-        data_domain: str | None = None,
+        data_layer: str | None = None,
+        data_domains: list[str] | None = None,
         limit: int = 200,
         offset: int = 0,
     ) -> list[AgentDefinition]:
-        """按 agent_code 升序列表；支持 status / data_domain 过滤。"""
+        """按 agent_code 升序列表；支持 status / data_layer / data_domains 过滤。
+
+        - data_layer（单值）：JSONB @> 包含
+        - data_domains（多值）：JSONB && 重叠（OR 语义）
+        """
         stmt = select(AgentDefinition).options(selectinload(AgentDefinition.policies))
         if status is not None:
             stmt = stmt.where(AgentDefinition.status == status)
-        # data_domain 是 JSONB 数组字段：用 contains（@>）匹配子集
-        if data_domain is not None:
-            stmt = stmt.where(AgentDefinition.data_domains.contains([data_domain]))
+        if data_layer is not None:
+            # JSONB 数组字段：用 contains（@>）匹配子集
+            stmt = stmt.where(AgentDefinition.data_layers.contains([data_layer]))
+        if data_domains:
+            # JSONB 数组字段：用 contains + OR 做 OR 过滤（任一相交即命中）
+            or_conditions = [
+                AgentDefinition.data_domains.contains([d]) for d in data_domains
+            ]
+            stmt = stmt.where(or_(*or_conditions))
         stmt = stmt.order_by(AgentDefinition.agent_code).limit(limit).offset(offset)
         result = await session.execute(stmt)
         return list(result.scalars().all())

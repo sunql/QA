@@ -366,3 +366,107 @@ class TestAgentRegistryApi:
             "/api/v1/agents/NO_SUCH_AGENT/policies", headers=_admin()
         )
         assert resp.status_code == 404
+
+    async def test_list_filter_by_data_layer_single(self, client) -> None:
+        """GET /agents?dataLayer=DIM 只返回 data_layers 含 DIM 的 Agent。"""
+        # 创建两个 Agent：一个含 DIM，一个只有 FEATURE
+        await client.post(
+            "/api/v1/agents",
+            headers=_admin(),
+            json={
+                "agentCode": "DIM_LAYER_AGENT",
+                "agentName": "DIM层Agent",
+                "triggerType": "user_question",
+                "responseLatency": "realtime",
+                "dataLayers": ["DIM", "FEATURE"],
+                "status": "active",
+            },
+        )
+        await client.post(
+            "/api/v1/agents",
+            headers=_admin(),
+            json={
+                "agentCode": "FEATURE_ONLY_AGENT",
+                "agentName": "仅FEATURE",
+                "triggerType": "user_question",
+                "responseLatency": "realtime",
+                "dataLayers": ["FEATURE"],
+                "status": "active",
+            },
+        )
+        res = await client.get("/api/v1/agents", params={"dataLayer": "DIM"})
+        assert res.status_code == 200
+        codes = [a["agentCode"] for a in res.json()]
+        assert "DIM_LAYER_AGENT" in codes
+        assert "FEATURE_ONLY_AGENT" not in codes
+
+    async def test_list_filter_by_data_domain_multi(self, client) -> None:
+        """GET /agents?dataDomain=A&dataDomain=B 返回 data_domains 与 A 或 B 任一相交的 Agent（OR）。"""
+        await client.post(
+            "/api/v1/agents",
+            headers=_admin(),
+            json={
+                "agentCode": "QUALITY_DOMAIN_AGENT",
+                "agentName": "质量域",
+                "triggerType": "user_question",
+                "responseLatency": "realtime",
+                "dataDomains": ["QUALITY"],
+                "status": "active",
+            },
+        )
+        await client.post(
+            "/api/v1/agents",
+            headers=_admin(),
+            json={
+                "agentCode": "PROCUREMENT_DOMAIN_AGENT",
+                "agentName": "采购域",
+                "triggerType": "user_question",
+                "responseLatency": "realtime",
+                "dataDomains": ["PROCUREMENT"],
+                "status": "active",
+            },
+        )
+        res = await client.get(
+            "/api/v1/agents",
+            params=[("dataDomain", "PROCUREMENT"), ("dataDomain", "QUALITY")],
+        )
+        assert res.status_code == 200
+        codes = [a["agentCode"] for a in res.json()]
+        # OR 语义：含任一域即命中
+        assert "QUALITY_DOMAIN_AGENT" in codes
+        assert "PROCUREMENT_DOMAIN_AGENT" in codes
+
+    async def test_list_filter_combined_status_and_layer(self, client) -> None:
+        """多过滤条件 AND 叠加。"""
+        await client.post(
+            "/api/v1/agents",
+            headers=_admin(),
+            json={
+                "agentCode": "ACTIVE_DWD_AGENT",
+                "agentName": "active且DWD",
+                "triggerType": "user_question",
+                "responseLatency": "realtime",
+                "dataLayers": ["DWD", "DIM"],
+                "status": "active",
+            },
+        )
+        await client.post(
+            "/api/v1/agents",
+            headers=_admin(),
+            json={
+                "agentCode": "DRAFT_DWD_AGENT",
+                "agentName": "draft但DWD",
+                "triggerType": "user_question",
+                "responseLatency": "realtime",
+                "dataLayers": ["DWD"],
+                "status": "draft",
+            },
+        )
+        res = await client.get(
+            "/api/v1/agents",
+            params={"status": "active", "dataLayer": "DWD"},
+        )
+        assert res.status_code == 200
+        codes = [a["agentCode"] for a in res.json()]
+        assert "ACTIVE_DWD_AGENT" in codes
+        assert "DRAFT_DWD_AGENT" not in codes

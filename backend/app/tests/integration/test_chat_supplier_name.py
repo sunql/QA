@@ -150,3 +150,50 @@ async def test_chat_name_ambiguous_returns_candidates_in_answer(
     assert _NAME_SUPPLIER_CODE in body["answer"]
     assert _NAME_AMBIGUOUS_CODE in body["answer"]
     assert "候选" in body["answer"]
+
+
+@pytest.mark.asyncio
+async def test_chat_name_not_found_returns_guidance(
+    client: AsyncClient, dbSession: AsyncSession
+):
+    """0 命中 → 200 + answer 引导用 enterprise_code 重试。"""
+    await _seedDatasource(dbSession)
+    resp = await client.post(
+        "/api/v1/chat",
+        headers=AUTH_HEADERS,
+        json={
+            "sessionId": "test-name-3",
+            "question": "供应商 测试名不存在的公司 的 360° 视图",
+            "datasourceId": 9301,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "10105" in body["answer"]  # 引导文案含示例编码
+    assert "拼写" in body["answer"] or "重试" in body["answer"]
+
+
+@pytest.mark.asyncio
+async def test_chat_numeric_code_unchanged(
+    client: AsyncClient, dbSession: AsyncSession
+):
+    """数字编码回归保护：原行为完全不变。"""
+    await _seedDatasource(dbSession)
+    await _seedNamedSupplier(
+        dbSession, _NAME_SUPPLIER_KEY, _NAME_SUPPLIER_CODE, "测试名精确供应商甲"
+    )
+    await _seedOtdFeature(dbSession, _NAME_SUPPLIER_CODE)
+
+    resp = await client.post(
+        "/api/v1/chat",
+        headers=AUTH_HEADERS,
+        json={
+            "sessionId": "test-name-4",
+            "question": f"供应商 {_NAME_SUPPLIER_CODE} 的 360° 视图",
+            "datasourceId": 9301,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["intent"] == "supplier_360"
+    assert body["supplier360"]["profile"]["enterpriseCode"] == _NAME_SUPPLIER_CODE

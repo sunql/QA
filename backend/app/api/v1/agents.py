@@ -87,8 +87,8 @@ async def getAgentOptions(
     agent_code='options'，触发 getAgent → 404。测试 test_agent_options_api.py 守护。
     """
     return AgentOptionsRead(
-        data_domains=list(AGENT_DATA_DOMAINS),
-        data_layers=list(AGENT_DATA_LAYERS),
+        domains=list(AGENT_DATA_DOMAINS),
+        layers=list(AGENT_DATA_LAYERS),
     )
 
 

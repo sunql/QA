@@ -18,8 +18,8 @@ async def test_get_options_returns_vocabulary(client) -> None:
     res = await client.get("/api/v1/agents/options")
     assert res.status_code == 200
     body = res.json()
-    assert body["dataDomains"] == ["PROCUREMENT", "QUALITY", "LOGISTICS"]
-    assert body["dataLayers"] == ["DIM", "DWD", "FEATURE"]
+    assert body["domains"] == ["PROCUREMENT", "QUALITY", "LOGISTICS"]
+    assert body["layers"] == ["DIM", "DWD", "FEATURE"]
 
 
 @pytest.mark.asyncio

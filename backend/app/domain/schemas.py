@@ -2105,14 +2105,18 @@ class AgentDefinitionRead(CamelModel):
 
 
 class AgentOptionsRead(CamelModel):
-    """Agent 写入选项的可枚举值集合（Phase 7 feat-agent-vocabulary）。
+    """Agent 编辑选项下拉数据（Phase 7 feat-agent-vocabulary）。
 
-    供前端下拉框渲染。data_domains / data_layers 取自词表常量，
-    由 ``agent_vocabulary`` 模块提供单一数据源。
+    返回 ``AGENT_DATA_DOMAINS`` / ``AGENT_DATA_LAYERS`` 词表常量，
+    由 ``app.domain.agent_vocabulary`` 模块提供单一数据源。
+    字段名 ``domains`` / ``layers`` 是顶层 options，不带 ``data_`` 前缀
+    （避免与嵌套在 AgentDefinition 内的 data_domains/data_layers 混淆）。
+    前端 useAgentOptions() 拉一次缓存；不返回工具列表——工具绑定可配置化
+    属独立 change（Phase 7+ 大改动），本期 YAGNI。
     """
 
-    data_domains: tuple[str, ...] = AGENT_DATA_DOMAINS
-    data_layers: tuple[str, ...] = AGENT_DATA_LAYERS
+    domains: list[str]
+    layers: list[str]
 
 
 class AgentRunRequest(CamelModel):

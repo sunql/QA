@@ -146,10 +146,15 @@ async def evaluateBatchDataQualityRules(
 
 @scores_router.post("/compute", response_model=ComputeScoresResponse)
 async def computeDataQualityScores(
+    user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
     service: DataQualityScoreService = Depends(getDataQualityScoreService),
 ) -> ComputeScoresResponse:
-    return await service.computeScores(session)
+    return await service.computeScores(
+        session,
+        actor=user.userId,
+        actor_departments=user.departments,
+    )
 
 
 @scores_router.get("", response_model=list[DataQualityScoreRead])

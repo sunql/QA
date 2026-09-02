@@ -20,8 +20,9 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
+from enum import Enum
 
-from sqlalchemy import bindparam, func, select
+from sqlalchemy import bindparam, func, select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import RuleType, ScoreType
@@ -33,10 +34,13 @@ from app.domain.schemas import (
     DataQualityScoreRead,
     EvaluationResult,
 )
+from app.services.audit_service import AuditService
 from app.services.data_quality_evaluator import DataQualityEvaluatorDispatcher
 from app.services.data_quality_evaluators._common import validate_identifier
 
 logger = logging.getLogger(__name__)
+
+_audit = AuditService()
 
 # rule_type -> score column 名
 _RULE_TYPE_TO_COLUMN: dict[RuleType, str] = {
@@ -76,10 +80,18 @@ class DataQualityScoreService:
     def __init__(self, dispatcher: DataQualityEvaluatorDispatcher | None = None) -> None:
         self._dispatcher = dispatcher or DataQualityEvaluatorDispatcher()
 
-    async def computeScores(self, session: AsyncSession) -> ComputeScoresResponse:
+    async def computeScores(
+        self,
+        session: AsyncSession,
+        actor: str | None = None,
+        actor_departments: tuple[str, ...] | None = None,
+    ) -> ComputeScoresResponse:
         """拉所有 enabled rule → 批量评估 → 按表聚合 + GLOBAL → 落库 → 返回。
 
         空 enabled rule 集合：直接返回空 response，不写库。
+
+        Audit: CREATE for net-new (target_table, score_type) pairs,
+        UPDATE for recompute of existing pairs.
         """
         started = time.perf_counter()
         enabled_rules = await self._listEnabledRules(session)
@@ -89,11 +101,43 @@ class DataQualityScoreService:
             )
         rule_ids = [r.id for r in enabled_rules]
         batch = await self._dispatcher.evaluateBatch(session, rule_ids)
-        # 通过 rule_id 反查 target_table / rule_type
         rule_by_id = {r.id: r for r in enabled_rules}
         aggregated = self._aggregate(batch.results, rule_by_id)
         saved_entities = self._buildEntities(aggregated, started)
+
+        # Audit: query committed existing scores BEFORE add_all (avoids uncommitted data)
+        existing = await self._queryExistingBeforeAdd(session, saved_entities)
+
         session.add_all(saved_entities)
+        await session.flush()  # populate entity ids
+
+        # Record audit after flush (ids available), before commit
+        for score in saved_entities:
+            key = (score.target_table, score.score_type)
+            before_state = existing.get(key)
+            if before_state is not None:
+                await _audit.record(
+                    session,
+                    entity_type="data_quality_score",
+                    entity_id=score.id,
+                    action="UPDATE",
+                    actor=actor or "system",
+                    actor_departments=actor_departments,
+                    before=before_state,
+                    after=_scoreToDict(score),
+                )
+            else:
+                await _audit.record(
+                    session,
+                    entity_type="data_quality_score",
+                    entity_id=score.id,
+                    action="CREATE",
+                    actor=actor or "system",
+                    actor_departments=actor_departments,
+                    before=None,
+                    after=_scoreToDict(score),
+                )
+
         await session.commit()
         for entity in saved_entities:
             await session.refresh(entity)
@@ -282,6 +326,73 @@ class DataQualityScoreService:
         stmt = select(DataQualityScore).where(DataQualityScore.id.in_(latest_ids))
         return list((await session.execute(stmt)).scalars().all())
 
+    async def _queryExistingBeforeAdd(
+        self,
+        session: AsyncSession,
+        new_entities: list[DataQualityScore],
+    ) -> dict[tuple[str, ScoreType], dict]:
+        """Query latest committed scores for the (target_table, score_type) pairs in new_entities.
+
+        Called BEFORE add_all so uncommitted rows are not visible.
+        Uses SELECT DISTINCT ON to get one latest row per (target_table, score_type).
+        Returns empty dict when no prior scores exist (all CREATE).
+        """
+        if not new_entities:
+            return {}
+        keys = [(e.target_table, e.score_type) for e in new_entities]
+        or_conditions = [
+            (DataQualityScore.target_table == tt) & (DataQualityScore.score_type == st)
+            for tt, st in keys
+        ]
+        stmt = (
+            select(DataQualityScore)
+            .where(or_(*or_conditions))
+            .order_by(
+                DataQualityScore.target_table,
+                DataQualityScore.score_type,
+                DataQualityScore.evaluated_at.desc(),
+            )
+        )
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+        # SELECT DISTINCT ON keeps first row per (target_table, score_type) = latest
+        seen: set[tuple[str, ScoreType]] = set()
+        out = {}
+        for e in rows:
+            key = (e.target_table, e.score_type)
+            if key not in seen:
+                seen.add(key)
+                out[key] = _scoreToDict(e)
+        return out
+
+    # DELETE is not exposed via API (scores are immutable history).
+    # Add a deleteScore method for audit completeness.
+    async def deleteScore(
+        self,
+        session: AsyncSession,
+        score_id: int,
+        actor: str | None = None,
+        actor_departments: tuple[str, ...] | None = None,
+    ) -> None:
+        """Hard-delete a score record and write DELETE audit."""
+        score = await session.get(DataQualityScore, score_id)
+        if score is None:
+            return
+        before = _scoreToDict(score)
+        await session.delete(score)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="data_quality_score",
+            entity_id=score_id,
+            action="DELETE",
+            actor=actor or "system",
+            actor_departments=actor_departments,
+            before=before,
+            after=None,
+        )
+        await session.commit()
+
     @staticmethod
     def _aggregate(
         results: list[EvaluationResult],
@@ -393,3 +504,18 @@ def _buildScoreDict(
 def _scoreToRead(score: DataQualityScore) -> DataQualityScoreRead:
     """ORM → Read DTO。"""
     return DataQualityScoreRead.model_validate(score, from_attributes=True)
+
+
+def _scoreToDict(score: DataQualityScore) -> dict:
+    """ORM → plain dict for audit serialization (Decimal/float, datetime ISO, Enum value)."""
+    out = {}
+    for c in score.__table__.columns:
+        val = getattr(score, c.name)
+        if isinstance(val, Decimal):
+            val = float(val)
+        elif isinstance(val, datetime):
+            val = val.isoformat()
+        elif isinstance(val, Enum):
+            val = val.value
+        out[c.name] = val
+    return out

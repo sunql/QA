@@ -29,7 +29,7 @@ Task 6 全量回归时发现并修复两处回归：
 
 ## 验证
 
-- 单测：resolver 13 用例 + runtime 4 用例 + details 4 用例（全绿）
+- 单测：resolver 18 用例（含 5 条正则分隔符/虚词契约）+ runtime 4 用例 + details 4 用例（全绿）
 - 集成：chat 4 用例 + runtime 4 用例（真实 PG 5433）
 - 全量回归：`pytest app/tests/ --cov=app --cov-fail-under=80 -q`
   - 结果：2002 passed / 15 failed / 1 skipped
@@ -61,6 +61,18 @@ Task 6 全量回归时发现并修复两处回归：
 3. **Smoke 用例与 arg_extractor 语义偏差**：runtime 的 supplier_360 tool 使用
    `extractSupplierKey`，要求输入含 360/全貌/整体/全维度 关键词；Spec 中的无关键词
    smoke 输入无法通过该 extractor。
+
+## 后续优化（最终全分支 review 裁决，均不阻塞）
+
+- 带空格复合词（「供应商 采购额」）仍会把名词误提取为候选名 → 可加公司后缀白名单
+  （有限公司/股份有限公司等）或最小长度门槛
+- 「供应商{名称}」无分隔符写法在收紧正则后不再命中 → 需在用户帮助文案中说明
+- chat 端错误仅以文本呈现 candidates，前端无法结构化解析 → 后续可给 ChatResponse
+  加 details 字段
+- chat→agent_runtime 存在幂等双解析（数字短路，无害）→ 可优化跳过
+- LIKE 查询无 ORDER BY，候选顺序理论不稳定 → flake 时补 `ORDER BY enterprise_code`
+- 测试卫生：`_run()` 事件循环未关闭、`_seedAgent` 跨测试文件 import、硬编码 "10105"
+  断言、run() 59 行 → 低优先级重构项
 
 ## 关键决策
 

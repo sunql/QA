@@ -58,6 +58,9 @@ def _makeFakeSession(record: Any):
         async def execute(self, _stmt):
             return _Result()
 
+        async def flush(self):
+            pass
+
         async def commit(self):
             pass
 
@@ -256,7 +259,8 @@ class TestOntologyClassAcl:
                 session=_makeFakeSession(klass),
                 id=1,
                 dto=OntologyClassUpdate(className="改名"),
-                actor=_user(departments=(PROCUREMENT,)),
+                actor=_user(departments=(PROCUREMENT,)).userId,
+                actor_departments=",".join(_user(departments=(PROCUREMENT,)).departments),
             )
         )
 

@@ -47,7 +47,8 @@ async def _createProp(dbSession, service: OntologyService, **extra) -> object:
     cls = await service.createClass(
         dbSession,
         OntologyClassCreate(class_name="PRECEIPT", source_table="ZJTH.PRECEIPT"),
-        actor=_ADMIN,
+        actor=_ADMIN.userId,
+        actor_departments=",".join(_ADMIN.departments) if _ADMIN.departments else None,
     )
     return await service.createProperty(
         dbSession,
@@ -58,6 +59,8 @@ async def _createProp(dbSession, service: OntologyService, **extra) -> object:
             source_column="AMT_0",
             **extra,
         ),
+        actor=_ADMIN.userId,
+        actor_departments=",".join(_ADMIN.departments) if _ADMIN.departments else None,
     )
 
 
@@ -85,7 +88,9 @@ class TestUpdateClears:
         """显式传 None 清空别名/描述，且不影响其他字段（exclude_unset 语义回归点）。"""
         prop = await _createProp(dbSession, service, business_aliases=["营业额"], description="金额")
         await service.updateProperty(
-            dbSession, prop.id, OntologyPropertyUpdate(business_aliases=None, description=None)
+            dbSession, prop.id, OntologyPropertyUpdate(business_aliases=None, description=None),
+            actor=_ADMIN.userId,
+            actor_departments=",".join(_ADMIN.departments) if _ADMIN.departments else None,
         )
         reloaded = await service.getProperty(dbSession, prop.id)
         assert reloaded.business_aliases is None
@@ -99,7 +104,9 @@ class TestUpdateClears:
         """显式传空列表写入 []；渲染侧按 falsy 省略，不产生装饰文本。"""
         prop = await _createProp(dbSession, service, business_aliases=["营业额"])
         await service.updateProperty(
-            dbSession, prop.id, OntologyPropertyUpdate(business_aliases=[])
+            dbSession, prop.id, OntologyPropertyUpdate(business_aliases=[]),
+            actor=_ADMIN.userId,
+            actor_departments=",".join(_ADMIN.departments) if _ADMIN.departments else None,
         )
         reloaded = await service.getProperty(dbSession, prop.id)
         assert reloaded.business_aliases == []

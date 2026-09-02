@@ -32,6 +32,7 @@ from app.domain.schemas import (
     OntologyClassUpdate,
     OntologyJoinCreate,
     OntologyJoinRead,
+    OntologyJoinUpdate,
     OntologyMetricCreate,
     OntologyMetricRead,
     OntologyMetricUpdate,
@@ -81,7 +82,11 @@ async def createClass(
     Phase 4.5：object_owner 由 service 从 actor.departments[0] 派生，DTO
     中不接受该字段（防越权声明）。
     """
-    entity = await _ontologyService.createClass(db, dto, user)
+    entity = await _ontologyService.createClass(
+        db, dto,
+        actor=user.userId,
+        actor_departments=",".join(user.departments) if user.departments else None,
+    )
     return OntologyClassRead.model_validate(entity)
 
 
@@ -120,7 +125,11 @@ async def updateClass(
 
     Phase 4.5 扩展：走 owner-based ACL（object_owner 字段）。
     """
-    entity = await _ontologyService.updateClass(db, id, dto, user)
+    entity = await _ontologyService.updateClass(
+        db, id, dto,
+        actor=user.userId,
+        actor_departments=",".join(user.departments) if user.departments else None,
+    )
     return OntologyClassRead.model_validate(entity)
 
 
@@ -134,7 +143,11 @@ async def deleteClass(
 
     Phase 4.5 扩展：走 owner-based ACL。
     """
-    await _ontologyService.deleteClass(db, id, user)
+    await _ontologyService.deleteClass(
+        db, id,
+        actor=user.userId,
+        actor_departments=",".join(user.departments) if user.departments else None,
+    )
 
 
 # =============================================================================
@@ -167,7 +180,11 @@ async def createProperty(
     db: AsyncSession = Depends(getDb),
 ) -> OntologyPropertyRead:
     """创建本体属性。"""
-    entity = await _ontologyService.createProperty(db, dto)
+    entity = await _ontologyService.createProperty(
+        db, dto,
+        actor=user.userId,
+        actor_departments=",".join(user.departments) if user.departments else None,
+    )
     return OntologyPropertyRead.model_validate(entity)
 
 
@@ -193,20 +210,30 @@ async def getProperty(
 async def updateProperty(
     id: int,
     dto: OntologyPropertyUpdate,
+    user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> OntologyPropertyRead:
     """更新本体属性。"""
-    entity = await _ontologyService.updateProperty(db, id, dto)
+    entity = await _ontologyService.updateProperty(
+        db, id, dto,
+        actor=user.userId,
+        actor_departments=",".join(user.departments) if user.departments else None,
+    )
     return OntologyPropertyRead.model_validate(entity)
 
 
 @router.delete("/properties/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteProperty(
     id: int,
+    user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> None:
     """删除本体属性。"""
-    await _ontologyService.deleteProperty(db, id)
+    await _ontologyService.deleteProperty(
+        db, id,
+        actor=user.userId,
+        actor_departments=",".join(user.departments) if user.departments else None,
+    )
 
 
 # =============================================================================
@@ -230,7 +257,11 @@ async def createMetric(
     db: AsyncSession = Depends(getDb),
 ) -> OntologyMetricRead:
     """创建本体指标。"""
-    entity = await _ontologyService.createMetric(db, dto)
+    entity = await _ontologyService.createMetric(
+        db, dto,
+        actor=user.userId,
+        actor_departments=",".join(user.departments) if user.departments else None,
+    )
     return OntologyMetricRead.model_validate(entity)
 
 
@@ -248,20 +279,30 @@ async def getMetric(
 async def updateMetric(
     id: int,
     dto: OntologyMetricUpdate,
+    user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> OntologyMetricRead:
     """更新本体指标。"""
-    entity = await _ontologyService.updateMetric(db, id, dto)
+    entity = await _ontologyService.updateMetric(
+        db, id, dto,
+        actor=user.userId,
+        actor_departments=",".join(user.departments) if user.departments else None,
+    )
     return OntologyMetricRead.model_validate(entity)
 
 
 @router.delete("/metrics/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteMetric(
     id: int,
+    user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> None:
     """删除本体指标。"""
-    await _ontologyService.deleteMetric(db, id)
+    await _ontologyService.deleteMetric(
+        db, id,
+        actor=user.userId,
+        actor_departments=",".join(user.departments) if user.departments else None,
+    )
 
 
 # =============================================================================
@@ -285,17 +326,42 @@ async def createJoin(
     db: AsyncSession = Depends(getDb),
 ) -> OntologyJoinRead:
     """创建 join 边。"""
-    entity = await _ontologyService.createJoin(db, dto)
+    entity = await _ontologyService.createJoin(
+        db, dto,
+        actor=user.userId,
+        actor_departments=",".join(user.departments) if user.departments else None,
+    )
+    return OntologyJoinRead.model_validate(entity)
+
+
+@router.put("/joins/{id}", response_model=OntologyJoinRead, status_code=status.HTTP_200_OK)
+async def updateJoin(
+    id: int,
+    dto: OntologyJoinUpdate,
+    user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+) -> OntologyJoinRead:
+    """更新 join 边。"""
+    entity = await _ontologyService.updateJoin(
+        db, id, dto,
+        actor=user.userId,
+        actor_departments=",".join(user.departments) if user.departments else None,
+    )
     return OntologyJoinRead.model_validate(entity)
 
 
 @router.delete("/joins/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteJoin(
     id: int,
+    user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> None:
     """删除 join 边。"""
-    await _ontologyService.deleteJoin(db, id)
+    await _ontologyService.deleteJoin(
+        db, id,
+        actor=user.userId,
+        actor_departments=",".join(user.departments) if user.departments else None,
+    )
 
 
 # =============================================================================

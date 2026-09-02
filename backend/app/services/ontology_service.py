@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from neo4j.exceptions import AuthError, ServiceUnavailable
@@ -37,6 +38,7 @@ from app.domain.schemas import (
     OntologyClassCreate,
     OntologyClassUpdate,
     OntologyJoinCreate,
+    OntologyJoinUpdate,
     OntologyMetricCreate,
     OntologyMetricUpdate,
     OntologyPropertyCreate,
@@ -46,6 +48,7 @@ from app.domain.schemas import (
 from app.infrastructure import milvus_client as milvus
 from app.infrastructure import neo4j_client as neo4j
 from app.services.acl_service import AclService
+from app.services.audit_service import AuditService
 from app.services.embedding_service import EmbeddingService
 from app.services.messages_zh import (
     MSG_CLASS_ALREADY_EXPIRED,
@@ -73,6 +76,27 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 logger = logging.getLogger(__name__)
+
+_audit = AuditService()
+
+
+def _entityToDict(entity: Any) -> dict[str, Any]:
+    """Convert a SQLAlchemy model instance to a JSON-serializable dict for audit_log.
+
+    datetime → ISO string; Decimal → float; everything else passed through as-is.
+    This avoids ``Object of type X is not JSON serializable`` when writing to the
+    JSONB ``before_json`` / ``after_json`` columns.
+    """
+    out: dict[str, Any] = {}
+    for col in entity.__table__.columns.keys():
+        v = getattr(entity, col)
+        if isinstance(v, datetime):
+            out[col] = v.isoformat()
+        elif isinstance(v, Decimal):
+            out[col] = float(v)
+        else:
+            out[col] = v
+    return out
 
 
 def _logNeo4jFailure(operation: str, entityId: int, exc: Exception) -> None:
@@ -126,7 +150,12 @@ class OntologyService:
         return self._embedding
 
     async def createClass(
-        self, session: AsyncSession, dto: OntologyClassCreate, actor: CurrentUser
+        self,
+        session: AsyncSession,
+        dto: OntologyClassCreate,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
     ) -> OntologyClass:
         """创建本体类（起始 version=1, validFrom=now, validTo=None）。
 
@@ -152,7 +181,7 @@ class OntologyService:
             if parent is None:
                 raise ValidationError(MSG_PARENT_CLASS_NOT_FOUND.format(id=dto.parent_class_id))
 
-        derivedOwner = actor.departments[0] if actor.departments else None
+        derivedOwner = actor_departments.split(",")[0] if actor_departments else None
         entity = OntologyClass(
             class_name=dto.class_name,
             class_alias=dto.class_alias,
@@ -167,6 +196,16 @@ class OntologyService:
             valid_to=None,
         )
         session.add(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_CLASS",
+            entity_id=entity.id,
+            action="CREATE",
+            actor=actor,
+            actor_departments=actor_departments,
+            after=_entityToDict(entity),
+        )
         await session.commit()
         await session.refresh(entity)
 
@@ -221,7 +260,13 @@ class OntologyService:
         return list(result.scalars().all())
 
     async def updateClass(
-        self, session: AsyncSession, id: int, dto: OntologyClassUpdate, actor: CurrentUser
+        self,
+        session: AsyncSession,
+        id: int,
+        dto: OntologyClassUpdate,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
     ) -> OntologyClass:
         """更新本体类：原地 UPDATE，主键 id 稳定（版本管理已移除）。
 
@@ -240,8 +285,10 @@ class OntologyService:
         返回更新后的同一行（id 与调用方传入一致）。
         """
         existing = await self.getClass(session, id)
+        # ACL 需要 CurrentUser：构造一个临时对象（仅用于 ACL 检查）
+        _acl_user = CurrentUser(userId=actor, departments=list(actor_departments.split(",")) if actor_departments else [])
         self._acl.assertCanModify(
-            actor,
+            _acl_user,
             entity_owner=existing.object_owner,
             entity_label="ONTOLOGY_CLASS",
             entity_code=existing.class_name,
@@ -293,8 +340,20 @@ class OntologyService:
                     raise ValidationError(MSG_INHERIT_CHECK_UNAVAILABLE) from exc
 
         # 原地覆盖字段：id 不变，属性与入边引用保持有效，无需克隆/重映射
+        before = _entityToDict(existing)
         for key, value in updates.items():
             setattr(existing, key, value)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_CLASS",
+            entity_id=existing.id,
+            action="UPDATE",
+            actor=actor,
+            actor_departments=actor_departments,
+            before=before,
+            after=_entityToDict(existing),
+        )
         await session.commit()
         await session.refresh(existing)
 
@@ -316,7 +375,12 @@ class OntologyService:
         return existing
 
     async def deleteClass(
-        self, session: AsyncSession, id: int, actor: CurrentUser
+        self,
+        session: AsyncSession,
+        id: int,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
     ) -> None:
         """软删除本体类：valid_to = now()（墓碑标记），listClasses 默认不再返回。
 
@@ -326,15 +390,27 @@ class OntologyService:
         Phase 4.5 扩展：先 ACL 检查（object_owner 不匹配 + 非 admin → 403）。
         """
         entity = await self.getClass(session, id)
+        _acl_user = CurrentUser(userId=actor, departments=list(actor_departments.split(",")) if actor_departments else [])
         self._acl.assertCanModify(
-            actor,
+            _acl_user,
             entity_owner=entity.object_owner,
             entity_label="ONTOLOGY_CLASS",
             entity_code=entity.class_name,
         )
         if entity.valid_to is not None:
             raise ValidationError(MSG_CLASS_ALREADY_EXPIRED.format(id=id))
+        before = _entityToDict(entity)
         entity.valid_to = _utcnow()
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_CLASS",
+            entity_id=entity.id,
+            action="DELETE",
+            actor=actor,
+            actor_departments=actor_departments,
+            before=before,
+        )
         await session.commit()
         try:
             neo4j.deleteNode("Class", id)
@@ -351,7 +427,12 @@ class OntologyService:
     # =============================================================================
 
     async def createProperty(
-        self, session: AsyncSession, dto: OntologyPropertyCreate
+        self,
+        session: AsyncSession,
+        dto: OntologyPropertyCreate,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
     ) -> OntologyProperty:
         """创建属性：写入 PG + Neo4j 节点 + 建立与 Class 的 HAS_PROPERTY 关系。"""
         # 验证 class 存在并拿到实体，供内存关系维护
@@ -373,6 +454,16 @@ class OntologyService:
         # （只写 class_id FK 不会触发 back_populates）。长事务/批量导入会因此漏读新属性。
         cls.properties.append(entity)
         session.add(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_PROPERTY",
+            entity_id=entity.id,
+            action="CREATE",
+            actor=actor,
+            actor_departments=actor_departments,
+            after=_entityToDict(entity),
+        )
         await session.commit()
         await session.refresh(entity)
 
@@ -412,12 +503,30 @@ class OntologyService:
         return list(result.scalars().all())
 
     async def updateProperty(
-        self, session: AsyncSession, id: int, dto: OntologyPropertyUpdate
+        self,
+        session: AsyncSession,
+        id: int,
+        dto: OntologyPropertyUpdate,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
     ) -> OntologyProperty:
         entity = await self.getProperty(session, id)
+        before = _entityToDict(entity)
         updates = dto.model_dump(exclude_unset=True)
         for key, value in updates.items():
             setattr(entity, key, value)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_PROPERTY",
+            entity_id=entity.id,
+            action="UPDATE",
+            actor=actor,
+            actor_departments=actor_departments,
+            before=before,
+            after=_entityToDict(entity),
+        )
         await session.commit()
         await session.refresh(entity)
 
@@ -445,8 +554,26 @@ class OntologyService:
         logger.info("更新本体属性 id=%d", id)
         return entity
 
-    async def deleteProperty(self, session: AsyncSession, id: int) -> None:
+    async def deleteProperty(
+        self,
+        session: AsyncSession,
+        id: int,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+    ) -> None:
         entity = await self.getProperty(session, id)
+        before = _entityToDict(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_PROPERTY",
+            entity_id=entity.id,
+            action="DELETE",
+            actor=actor,
+            actor_departments=actor_departments,
+            before=before,
+        )
         await session.delete(entity)
         await session.commit()
         try:
@@ -464,7 +591,12 @@ class OntologyService:
     # =============================================================================
 
     async def createMetric(
-        self, session: AsyncSession, dto: OntologyMetricCreate
+        self,
+        session: AsyncSession,
+        dto: OntologyMetricCreate,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
     ) -> OntologyMetric:
         """创建指标：写入 PG + Neo4j 节点 + DERIVED_FROM 关系。"""
         if dto.target_class_id:
@@ -480,6 +612,16 @@ class OntologyService:
             created_by=dto.created_by,
         )
         session.add(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_METRIC",
+            entity_id=entity.id,
+            action="CREATE",
+            actor=actor,
+            actor_departments=actor_departments,
+            after=_entityToDict(entity),
+        )
         await session.commit()
         await session.refresh(entity)
 
@@ -514,12 +656,30 @@ class OntologyService:
         return list(result.scalars().all())
 
     async def updateMetric(
-        self, session: AsyncSession, id: int, dto: OntologyMetricUpdate
+        self,
+        session: AsyncSession,
+        id: int,
+        dto: OntologyMetricUpdate,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
     ) -> OntologyMetric:
         entity = await self.getMetric(session, id)
+        before = _entityToDict(entity)
         updates = dto.model_dump(exclude_unset=True)
         for key, value in updates.items():
             setattr(entity, key, value)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_METRIC",
+            entity_id=entity.id,
+            action="UPDATE",
+            actor=actor,
+            actor_departments=actor_departments,
+            before=before,
+            after=_entityToDict(entity),
+        )
         await session.commit()
         await session.refresh(entity)
 
@@ -541,8 +701,26 @@ class OntologyService:
         logger.info("更新本体指标 id=%d", id)
         return entity
 
-    async def deleteMetric(self, session: AsyncSession, id: int) -> None:
+    async def deleteMetric(
+        self,
+        session: AsyncSession,
+        id: int,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+    ) -> None:
         entity = await self.getMetric(session, id)
+        before = _entityToDict(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_METRIC",
+            entity_id=entity.id,
+            action="DELETE",
+            actor=actor,
+            actor_departments=actor_departments,
+            before=before,
+        )
         await session.delete(entity)
         await session.commit()
         try:
@@ -567,7 +745,12 @@ class OntologyService:
         return list(result.scalars().all())
 
     async def createJoin(
-        self, session: AsyncSession, dto: OntologyJoinCreate
+        self,
+        session: AsyncSession,
+        dto: OntologyJoinCreate,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
     ) -> OntologyJoin:
         """创建 join 边：校验两端类存在、列数一致、去重后写入 PG。
 
@@ -600,6 +783,16 @@ class OntologyService:
             join_key=joinKey,
         )
         session.add(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_JOIN",
+            entity_id=entity.id,
+            action="CREATE",
+            actor=actor,
+            actor_departments=actor_departments,
+            after=_entityToDict(entity),
+        )
         await session.commit()
         await session.refresh(entity)
         logger.info(
@@ -608,11 +801,62 @@ class OntologyService:
         )
         return entity
 
-    async def deleteJoin(self, session: AsyncSession, id: int) -> None:
+    async def updateJoin(
+        self,
+        session: AsyncSession,
+        id: int,
+        dto: OntologyJoinUpdate,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+    ) -> OntologyJoin:
+        """更新 join 边：仅允许更新 join_type / relation_type / description（join_key 不可变）。"""
+        entity = await session.get(OntologyJoin, id)
+        if entity is None:
+            raise NotFoundError(MSG_ONTOLOGY_JOIN_NOT_FOUND.format(id=id))
+        before = _entityToDict(entity)
+        updates = dto.model_dump(exclude_unset=True)
+        for key, value in updates.items():
+            setattr(entity, key, value)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_JOIN",
+            entity_id=entity.id,
+            action="UPDATE",
+            actor=actor,
+            actor_departments=actor_departments,
+            before=before,
+            after=_entityToDict(entity),
+        )
+        await session.commit()
+        await session.refresh(entity)
+        logger.info("更新关联关系 id=%d", id)
+        return entity
+
+    async def deleteJoin(
+        self,
+        session: AsyncSession,
+        id: int,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+    ) -> None:
         """删除 join 边。"""
         entity = await session.get(OntologyJoin, id)
         if entity is None:
             raise NotFoundError(MSG_ONTOLOGY_JOIN_NOT_FOUND.format(id=id))
+        before = _entityToDict(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_JOIN",
+            entity_id=entity.id,
+            action="DELETE",
+            actor=actor,
+            actor_departments=actor_departments,
+            before=before,
+        )
         await session.delete(entity)
         await session.commit()
         logger.info("删除关联关系 id=%d", id)

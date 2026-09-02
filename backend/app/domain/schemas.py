@@ -919,6 +919,12 @@ class OntologyJoinRead(CamelModel):
     updated_time: datetime | None = None
 
 
+class OntologyJoinUpdate(CamelModel):
+    join_type: str | None = None
+    relation_type: str | None = None
+    description: str | None = None
+
+
 class OntologySearchResult(CamelModel):
     id: int
     type: str = Field(..., description="class|property|metric")

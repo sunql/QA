@@ -2142,7 +2142,7 @@ class AgentDefinitionRead(CamelModel):
 
     Phase 6.4 扩展：新增 ``runnable`` 派生字段（SSOT），表示该 Agent
     是否可通过 ``POST /agents/{code}/run`` 调用。判定：
-    ``status == ACTIVE and 已注册到 AGENT_TOOLS``。
+    ``status == ACTIVE and cache has tool_name binding``。
     仅注册元数据、未绑定工具的 Agent（如 SUPPLIER_OTD_REPORT /
     PROCUREMENT_COPILOT）即使 status=active，runnable=False。
     """

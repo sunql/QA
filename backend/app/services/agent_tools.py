@@ -289,14 +289,9 @@ def _buildRegistry() -> AgentToolRegistry:
 agent_tool_registry = _buildRegistry()
 
 
-# Agent → tool 绑定表（Phase 6.4 SSOT）。
-# 运行时 _enforcePolicies、agent_registry_service.agentToRead（计算 runnable 派生字段）
-# 都依赖此表 → 单一来源放在工具模块，避免与 agent_runtime_service 形成循环 import。
-# 顺序在工具路由内有意义（agent 通常只跑第一个工具）。
-AGENT_TOOLS: dict[str, tuple[str, ...]] = {
-    "SUPPLIER_360_AGENT": ("supplier_360",),
-    "SUPPLIER_RISK_AGENT": ("supplier_risk",),
-    "GRAPH_REASONING_AGENT": ("graph_traverse",),
-    # SUPPLIER_OTD_REPORT / PROCUREMENT_COPILOT 仅注册元数据，未绑定工具 →
-    # 不在此表中 → runnable 派生为 False，前端 Runtime 页自动过滤，避免 409。
+# Agent → tool 默认绑定常量（仅作 seed 数据源；运行时 cache 为唯一数据源）。
+AGENT_DEFAULT_BINDINGS: dict[str, str] = {
+    "SUPPLIER_360_AGENT": "supplier_360",
+    "SUPPLIER_RISK_AGENT": "supplier_risk",
+    "GRAPH_REASONING_AGENT": "graph_traverse",
 }

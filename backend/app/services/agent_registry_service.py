@@ -42,11 +42,7 @@ from app.domain.schemas import (
 )
 from app.services.acl_service import AclService
 from app.services.agent_binding_cache import agent_binding_cache
-from app.services.agent_tools import AGENT_TOOLS
 
-# Phase 6.4：派生字段 runnable 依赖 AGENT_TOOLS（agent_tools 模块定义，
-# 与 agent_runtime_service 共享 SSOT）。AGENT_TOOLS 不再依赖本模块，
-# 故可直接 import 而无循环风险。
 logger = logging.getLogger(__name__)
 
 
@@ -147,6 +143,7 @@ class AgentRegistryService:
             status=dto.status.value,
             owner=derived,
             version=dto.version or "v1.0",
+            tool_name=dto.tool_name,
         )
         # 内嵌策略：同时插入。重复 (data_object, data_layer) → IntegrityError → 409。
         for p in dto.policies:

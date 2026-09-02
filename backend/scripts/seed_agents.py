@@ -1,11 +1,11 @@
 """Phase 6.4 Agent 注册种子脚本（幂等）。
 
 5 个 Agent 注册到 Agent Registry：
-- 3 个可运行（绑定 AGENT_TOOLS，Phase 6.4 验收「≥2 个 Agent 端到端可调用」）：
+- 3 个可运行（绑定 AGENT_DEFAULT_BINDINGS，Phase 6.4 验收「≥2 个 Agent 端到端可调用」）：
     SUPPLIER_360_AGENT  → supplier_360 工具
     SUPPLIER_RISK_AGENT → supplier_risk 工具
     GRAPH_REASONING_AGENT → graph_traverse 工具
-- 2 个元数据 Agent（仅注册展示，AGENT_TOOLS 无绑定 → 运行时返回 409 不可运行）：
+- 2 个元数据 Agent（仅注册展示，AGENT_DEFAULT_BINDINGS 无绑定 → 运行时返回 409 不可运行）：
     SUPPLIER_OTD_REPORT / PROCUREMENT_COPILOT
 
 可运行 Agent 带显式分层 READ 策略（按绑定工具的数据层逐层授权，最小权限）；
@@ -46,8 +46,7 @@ from app.domain.schemas import (  # noqa: E402
 )
 from app.infrastructure.database import getSessionFactory  # noqa: E402
 from app.services.agent_registry_service import AgentRegistryService  # noqa: E402
-from app.services.agent_runtime_service import AGENT_TOOLS  # noqa: E402
-from app.services.agent_tools import agent_tool_registry  # noqa: E402
+from app.services.agent_tools import AGENT_DEFAULT_BINDINGS, agent_tool_registry  # noqa: E402
 
 # 种子 actor：admin + 采购部门 → owner 派生 "procurement"
 _SEED_ACTOR = CurrentUser(
@@ -68,13 +67,13 @@ _DEFAULT_POLICIES = [
 def _policiesFor(code: str) -> list[AgentAccessPolicyCreate]:
     """为 Agent 生成显式分层策略（最小权限）。
 
-    可运行 Agent：按 AGENT_TOOLS 绑定工具的 data_object + data_layers 逐层授权
+    可运行 Agent：按 AGENT_DEFAULT_BINDINGS 绑定工具的 data_object + data_layers 逐层授权
     （DIM/FEATURE/DWD 各一条 READ）——与运行时分层校验（Phase 7+ 安全补强）对齐。
     层无关工具（data_layers=()）：回退 _DEFAULT_POLICIES（None 通配），避免零策略
     导致 Agent 永远 403 不可运行。
     元数据 Agent（无工具绑定）：回退 _DEFAULT_POLICIES（仅展示，运行时不可运行）。
     """
-    tool_name = AGENT_TOOLS.get(code, (None,))[0]
+    tool_name = AGENT_DEFAULT_BINDINGS.get(code)
     if tool_name is None:
         return list(_DEFAULT_POLICIES)
     tool = agent_tool_registry.get(tool_name)
@@ -113,7 +112,7 @@ def _agent(
     )
 
 
-# 5 个 Agent 种子（与 AGENT_TOOLS 确定性绑定对齐：仅前 3 个可运行）
+# 5 个 Agent 种子（与 AGENT_DEFAULT_BINDINGS 确定性绑定对齐：仅前 3 个可运行）
 AGENT_SEEDS: list[dict[str, Any]] = [
     _agent(
         "SUPPLIER_360_AGENT",
@@ -158,7 +157,7 @@ async def _reconcileLayeredPolicies(session: Any, code: str) -> tuple[int, int]:
     注意：删除无法区分「种子遗留通配」与「管理员刻意保留的通配」——通配对可运行
     Agent 是多余授权（运行时只按工具声明层判定），删除即分层补强本意，故接受。
     """
-    tool_name = AGENT_TOOLS.get(code, (None,))[0]
+    tool_name = AGENT_DEFAULT_BINDINGS.get(code)
     if tool_name is None:
         return 0, 0
     tool = agent_tool_registry.get(tool_name)
@@ -263,7 +262,7 @@ async def main() -> None:
         )
     runnable = [c for c in total if c in {"SUPPLIER_360_AGENT", "SUPPLIER_RISK_AGENT", "GRAPH_REASONING_AGENT"}]
     print(f"[seed_agents] 本次新增 {inserted} 个，库内共 {len(total)} 个")
-    print(f"[seed_agents] 可运行 Agent（绑定 AGENT_TOOLS）：{len(runnable)} 个 → {sorted(runnable)}")
+    print(f"[seed_agents] 可运行 Agent（绑定 AGENT_DEFAULT_BINDINGS）：{len(runnable)} 个 → {sorted(runnable)}")
     print("✅ Agent 注册种子完成（Phase 6.4 验收 ≥2 个 Agent 端到端可调用已满足）")
 
 

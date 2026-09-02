@@ -31,8 +31,9 @@ from app.domain.exceptions import (
 )
 from app.domain.models import AgentAccessPolicy, AgentDefinition
 from app.services.agent_registry_service import AgentRegistryService
-from app.services.agent_runtime_service import AGENT_TOOLS, AgentRuntimeService
+from app.services.agent_runtime_service import AgentRuntimeService
 from app.services.agent_tools import (
+    AGENT_DEFAULT_BINDINGS,
     AgentTool,
     AgentToolRegistry,
     ToolResult,
@@ -124,6 +125,19 @@ class _FakeAgentService:
         raise NotFoundError(f"Agent 不存在：code={agent_code}")
 
 
+class _FakeBindingCache:
+    """单测用 fake cache：基于 AGENT_DEFAULT_BINDINGS 做确定性映射，无需 warmUp。"""
+
+    def __init__(self, extra: dict[str, str] | None = None) -> None:
+        from app.services.agent_tools import AGENT_DEFAULT_BINDINGS
+        self._map = dict(AGENT_DEFAULT_BINDINGS)
+        if extra:
+            self._map.update(extra)
+
+    def getToolName(self, agent_code: str) -> str | None:
+        return self._map.get(agent_code)
+
+
 def _runtime(
     *,
     entity: AgentDefinition | None = None,
@@ -133,7 +147,9 @@ def _runtime(
     for tool in (tools or {}).values():
         registry.register(tool)
     service = AgentRuntimeService(
-        registry=registry, agentService=_FakeAgentService(entity)
+        registry=registry,
+        agentService=_FakeAgentService(entity),
+        bindingCache=_FakeBindingCache(),
     )
     return service, registry
 
@@ -207,7 +223,9 @@ class TestRunSuccess:
             )
         )
         service = AgentRuntimeService(
-            registry=registry, agentService=_FakeAgentService(_agent())
+            registry=registry,
+            agentService=_FakeAgentService(_agent()),
+            bindingCache=_FakeBindingCache(),
         )
         sentinel = object()
         _run(
@@ -248,11 +266,11 @@ class TestRunFailures:
             )
 
     def test_agent_without_tool_binding_raises_conflict(self):
-        """已注册但不在 AGENT_TOOLS 的元数据 Agent（如 SCHEDULED）→ 409，
+        """已注册但不在 AGENT_DEFAULT_BINDINGS 的元数据 Agent（如 PROCUREMENT_COPILOT）→ 409，
         message 明确说「未绑定工具」，避免与「状态非 ACTIVE」混淆。
         """
         entity = _agent("PROCUREMENT_COPILOT_AGENT")
-        assert "PROCUREMENT_COPILOT_AGENT" not in AGENT_TOOLS
+        assert "PROCUREMENT_COPILOT_AGENT" not in AGENT_DEFAULT_BINDINGS
         service, _ = _runtime(entity=entity, tools={})
         with pytest.raises(ConflictError, match="未绑定工具"):
             _run(
@@ -341,7 +359,9 @@ class TestRunFailures:
             )
         )
         service = AgentRuntimeService(
-            registry=registry, agentService=_FakeAgentService(_agent())
+            registry=registry,
+            agentService=_FakeAgentService(_agent()),
+            bindingCache=_FakeBindingCache(),
         )
         with pytest.raises(ValidationError, match="解析执行参数"):
             _run(
@@ -678,6 +698,7 @@ class TestRunSupplierNamePreResolve:
             registry=registry,
             agentService=_FakeAgentService(entity or _agent("SUPPLIER_RISK_AGENT")),
             resolver=resolver,
+            bindingCache=_FakeBindingCache(),
         )
 
     def test_name_resolved_to_code_before_extractor(self):
@@ -717,6 +738,7 @@ class TestRunSupplierNamePreResolve:
                     original_name="济南吉利汽车有限公司",
                 )
             ),
+            bindingCache=_FakeBindingCache(),
         )
         _run(
             service.run(

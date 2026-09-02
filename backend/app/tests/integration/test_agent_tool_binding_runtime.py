@@ -76,10 +76,14 @@ async def test_run_path_uses_db_binding_via_cache(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_run_409_when_db_binding_missing_dict_fallback_works(
+async def test_run_db_binding_null_cache_miss_raises_409(
     client: AsyncClient, dbSession
 ):
-    """DB binding 清空 → dict fallback 兜底 → 200（过渡期行为）。"""
+    """DB binding 清空（tool_name=None）+ cache miss → 409 MSG_AGENT_NOT_RUNNABLE_NO_TOOL。
+
+    验证 feat-agent-tool-binding 核心变更：dict fallback 已删除，
+    运行时仅查 cache（来自 DB 的 tool_name），cache 无此 agent 即 409。
+    """
     # 清空 tool_name（模拟 DB 未绑定场景）
     await dbSession.execute(
         update(AgentDefinition)
@@ -95,4 +99,6 @@ async def test_run_409_when_db_binding_missing_dict_fallback_works(
         headers={"X-User-Id": "admin", "X-User-Roles": "admin"},
         json={"input": "10105"},
     )
-    assert r.status_code in (200, 422)  # dict fallback 兜底，不是 409
+    # 无 dict fallback，cache 无绑定 → 409（MSG_AGENT_NOT_RUNNABLE_NO_TOOL）
+    assert r.status_code == 409
+    assert "不可运行" in r.text

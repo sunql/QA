@@ -34,9 +34,9 @@ from app.domain.enums import (
 )
 from app.domain.models import DataSource, EntityMapping, FeatureDefinition, FeatureValue
 from app.domain.schemas import AgentAccessPolicyCreate, AgentDefinitionCreate
+from app.services.agent_binding_cache import agent_binding_cache
 from app.services.agent_registry_service import AgentRegistryService
-from app.services.agent_runtime_service import AGENT_TOOLS
-from app.services.agent_tools import agent_tool_registry
+from app.services.agent_tools import AGENT_DEFAULT_BINDINGS, agent_tool_registry
 from app.infrastructure import neo4j_client as neo4j
 
 AUTH_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
@@ -45,13 +45,22 @@ _ADMIN = CurrentUser(userId="test-admin", roles=("admin",))
 _neo4jAvailable = neo4j.isNeo4jAvailable()
 
 
+@pytest.fixture(autouse=True)
+async def warm_binding_cache(dbSession):
+    """每个测试前 warmUp cache（test_agent_tool_binding_runtime.py 风格）。"""
+    agent_binding_cache.invalidate()
+    await agent_binding_cache.warmUp(dbSession)
+    yield
+    agent_binding_cache.invalidate()
+
+
 def _defaultPolicies(code: str) -> list[AgentAccessPolicyCreate]:
     """按 Agent 绑定工具的 data_object + data_layers 生成每层 READ 策略。
 
     显式分层（非 None 通配）→ 集成测试在真实最小权限策略上验证运行时分层判定。
     无工具绑定的元数据 Agent → 回退 SUPPLIER@READ 通配（仅展示；运行时在工具门禁 409）。
     """
-    tool_name = AGENT_TOOLS.get(code, (None,))[0]
+    tool_name = AGENT_DEFAULT_BINDINGS.get(code)
     if tool_name is None:
         return [
             AgentAccessPolicyCreate(
@@ -84,7 +93,14 @@ async def _seedAgent(
     """用 AgentRegistryService 注册一个 Agent（走 service + 真实 PG，幂等按 code 唯一）。
 
     默认策略用 _defaultPolicies（显式分层），显式传 policies 则覆盖。
+    tool_name 写入时从 tool.data_layers 自动推导 data_layers（满足 validator 要求）。
     """
+    tool_name = AGENT_DEFAULT_BINDINGS.get(code)
+    data_layers = ["FEATURE"]
+    if tool_name is not None:
+        tool = agent_tool_registry.get(tool_name)
+        if tool is not None:
+            data_layers = list(tool.data_layers)
     service = AgentRegistryService()
     dto = AgentDefinitionCreate(
         agent_code=code,
@@ -93,9 +109,10 @@ async def _seedAgent(
         trigger_type=AgentTriggerType.USER_QUESTION,
         response_latency=AgentResponseLatency.REALTIME,
         data_domains=["PROCUREMENT"],
-        data_layers=["FEATURE"],
+        data_layers=data_layers,
         status=status,
         version="v1.0",
+        tool_name=tool_name,
         policies=policies if policies is not None else _defaultPolicies(code),
     )
     await service.createAgent(dbSession, dto, _ADMIN)
@@ -286,7 +303,7 @@ class TestRunFailures:
     async def test_run_metadata_agent_without_tool_binding_409(
         self, client: AsyncClient, dbSession: AsyncSession
     ) -> None:
-        """PROCUREMENT_COPILOT_AGENT 无工具绑定（AGENT_TOOLS 无此 key）→ 409。"""
+        """PROCUREMENT_COPILOT_AGENT 无工具绑定（AGENT_DEFAULT_BINDINGS 无此 key）→ 409。"""
         await _seedAgent(dbSession, "PROCUREMENT_COPILOT_AGENT")
         resp = await client.post(
             _run_url("PROCUREMENT_COPILOT_AGENT"),

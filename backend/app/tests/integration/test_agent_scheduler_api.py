@@ -29,7 +29,7 @@ from app.domain.enums import (
 from app.domain.models import AgentRunLog, AgentSchedule
 from app.domain.schemas import AgentDefinitionCreate, AgentScheduleCreate
 from app.services.agent_registry_service import AgentRegistryService
-from app.services.agent_runtime_service import AGENT_TOOLS
+from app.services.agent_tools import AGENT_DEFAULT_BINDINGS
 from app.services.agent_scheduler_service import AgentSchedulerService
 from app.tests.integration.test_agent_runtime_api import (
     _defaultPolicies,

@@ -4,7 +4,7 @@
 
 1. 注册解析：AgentRegistryService.getAgent → 不存在 NotFoundError(404)
 2. 状态门禁：仅 ACTIVE 可运行 → ConflictError(409)
-3. 工具解析：AGENT_TOOLS 绑定（无绑定的元数据 Agent → 409 不可运行）
+3. 工具解析：cache 绑定（无绑定的元数据 Agent → 409 不可运行）
 4. 策略拦截（deny-by-default）：Agent 对 tool.data_object + tool.data_layers
    （每层）需有 READ / MASKED_READ 策略（data_layer=None 通配覆盖任意层）；
    FORBIDDEN / FORBIDDEN_WRITE 为显式否决，优先于任何 READ 授予。否则
@@ -41,7 +41,6 @@ from app.domain.schemas import AgentRunRead, _normalizeDataLayer
 from app.infrastructure.llm.base_client import BaseLlmClient
 from app.services.agent_registry_service import AgentRegistryService
 from app.services.agent_tools import (
-    AGENT_TOOLS,
     AgentTool,
     AgentToolContext,
     AgentToolRegistry,
@@ -53,10 +52,6 @@ from app.services.supplier_name_resolver import SupplierNameResolver
 logger = logging.getLogger(__name__)
 
 LlmFactory = Callable[[object], BaseLlmClient]
-
-# AGENT_TOOLS 在 agent_tools.py 定义（SSOT）；此模块从那里 import，
-# 避免与 agent_registry_service 形成循环 import（registry 用 AGENT_TOOLS
-# 计算 runnable 派生字段）。
 
 # 策略 permission 分组（_enforcePolicies 判定用）
 _DENY = (
@@ -78,10 +73,14 @@ class AgentRuntimeService:
         registry: AgentToolRegistry | None = None,
         agentService: AgentRegistryService | None = None,
         resolver: SupplierNameResolver | None = None,  # Phase 6.5：名字→编码预解析
+        bindingCache=None,  # 测试注入 fake；运行时默认使用模块级单例
     ) -> None:
         self._registry = registry or agent_tool_registry
         self._agents = agentService or AgentRegistryService()
         self._resolver = resolver or SupplierNameResolver()
+        if bindingCache is not None:
+            self._cache = bindingCache
+        # else 使用 run() 中从 module-level singleton 读取（向后兼容）
 
     async def run(
         self,
@@ -95,18 +94,14 @@ class AgentRuntimeService:
         """执行一次 Agent 运行（见模块 docstring 完整链路）。"""
         entity = await self._agents.getAgent(session, agent_code)  # NotFoundError(404)
 
-        # 【CHANGED】Task 6：DB cache 优先，dict fallback
+        # DB cache（唯一数据源）：cache miss → 409（无 dict fallback）。
         # getToolName 在未 warmUp 时抛 RuntimeError（如测试环境 lifespan 未触发）；
-        # 转为 None 以触发 dict fallback（lifespan bug 的安全垫）。
+        # 转为 None 以触发 409（而非 500）。
+        cache = getattr(self, '_cache', None) or agent_binding_cache
         try:
-            tool_name = agent_binding_cache.getToolName(agent_code)
+            tool_name = cache.getToolName(agent_code)
         except RuntimeError:
             tool_name = None
-        if tool_name is None:
-            # 过渡期 fallback：dict 还在（Task 7 删除）
-            fallback = AGENT_TOOLS.get(agent_code)
-            if fallback:
-                tool_name = fallback[0]
         if tool_name is None:
             raise ConflictError(
                 MSG_AGENT_NOT_RUNNABLE_NO_TOOL.format(code=agent_code)

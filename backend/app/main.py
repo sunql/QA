@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "请执行 alembic upgrade head 后重启。"
                 "如紧急回滚可设置 SKIP_SCHEMA_CHECK=1。"
             )
-    # 启动期 seed：把 AGENT_TOOLS dict 中的 binding 写入 agent_definition.tool_name。
+    # 启动期 seed：把 AGENT_DEFAULT_BINDINGS 常量中的 binding 写入 agent_definition.tool_name。
     # 幂等（仅处理 tool_name IS NULL 的行）；失败 fail-fast，由 lifespan 抛 RuntimeError。
     # 置于连接预检 + schema drift 校验之后，享受既有 fail-fast 防线。
     from scripts.seed_agent_tool_bindings import seed_agent_tool_bindings

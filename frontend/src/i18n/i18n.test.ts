@@ -55,4 +55,14 @@ describe("i18n/useTranslation", () => {
     const { result } = render();
     expect(result.current.t("nonexistent.key")).toBe("nonexistent.key");
   });
+
+  it("keeps t referentially stable across re-renders", () => {
+    // 回归契约：t 必须引用稳定。页面普遍把依赖 t 的回调放进 useEffect 依赖
+    // （如 AgentRegistryPage 的 refresh），t 每次渲染变新引用会触发无限
+    // 请求循环 → ERR_INSUFFICIENT_RESOURCES。
+    const { result, rerender } = render();
+    const first = result.current.t;
+    rerender();
+    expect(result.current.t).toBe(first);
+  });
 });

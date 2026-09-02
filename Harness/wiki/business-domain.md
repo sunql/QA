@@ -313,6 +313,22 @@ Agent 运行时最小版（MVP）：复用 [[Harness/changes/feat-agent-registry
 - **未来大改动**：`Agent→Tool` 关系入 DB（详见 [[Harness/changes/feat-agent-vocabulary/summary.md|summary]]
   与大改动关系段），工具的 `handler/data_object/data_layers` 仍留代码（安全关键，不入 DB）。
 
+### 工具绑定可配置化（Phase 7 feat-agent-tool-binding）
+
+2026-09-02 完成（[[Harness/changes/feat-agent-tool-binding/summary.md]]）。
+
+- `agent_definition.tool_name` 列（Alembic 0035）+ 启动 seed 脚本（`AGENT_DEFAULT_BINDINGS` 派生，幂等）
+- `AgentBindingCache`：模块级单例，启动 `warmUp` 全量加载 `status=ACTIVE` 行；写时 `refreshOne/invalidate`
+- 写时跨字段校验（`field_validator("tool_name")`）：tool_name 必须在 `agent_tool_registry` 中；
+  `agent.data_layers` 必须 ⊇ `tool.data_layers`；非法值 Pydantic 422
+- `GET /agents/options` 扩展 `tools` 字段（前端 `useAgentOptions()` 复用零额外请求）
+- Runtime `_resolveTool` 改造：DB cache 优先；DB 无 binding → 409；DB 绑定漂移（代码未注册）→ 409
+- 前端 `AgentRegistryPage` Create/Edit Modal 加 `toolName` Select（实时 layer 覆盖校验）+ Detail Drawer 展示
+- `AGENT_TOOLS` dict 完全删除（仅留 `AGENT_DEFAULT_BINDINGS` 作 seed 数据源）
+- **与 `LineageLayer` / `AGENT_DATA_LAYERS` 边界**：本期复用既有 3 层词表约束，不引入新层
+- **工具定义（`handler/data_object/data_layers`）始终在代码**——handler 与分层授权是 P0 安全防线，不入 DB
+- **未来演进**：1:N 工具绑定（中间表 + 工具选择器）、Redis 共享缓存（多实例）、Tool 自身管理 UI（独立排期）
+
 ### 触发路径
 
 1. **REST**：`POST /api/v1/agents/{agent_code}/run`（确定性测试入口，不注入真实 LLM factory）。

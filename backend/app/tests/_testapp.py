@@ -87,7 +87,11 @@ def buildTestApp(testFactory: Any) -> FastAPI:
             status = 400
         return JSONResponse(
             status_code=status,
-            content=ErrorResponse(error=exc.message, detail=exc.detail).model_dump(by_alias=True),
+            content=ErrorResponse(
+                error=exc.message,
+                detail=exc.detail,
+                details=getattr(exc, "details", None),
+            ).model_dump(by_alias=True),
         )
 
     # 直接挂载子路由（子路由自身已有 prefix，故用 /api/v1 前缀覆盖）

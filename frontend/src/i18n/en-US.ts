@@ -1254,4 +1254,47 @@ export const enUS = {
       loading: "Exporting...",
     },
   },
+
+  agentTools: {
+    title: "Tool Configuration",
+    columns: {
+      name: "Name",
+      description: "Description",
+      dataObject: "Data Object",
+      dataLayers: "Data Layers",
+      handlerKind: "Handler Kind",
+      handlerRef: "Handler Ref",
+      enabled: "Enabled",
+      updatedTime: "Updated",
+    },
+    actions: {
+      create: "Create",
+      edit: "Edit",
+      delete: "Delete",
+      toggle: "Toggle",
+      refresh: "Refresh",
+    },
+    form: {
+      name: "Name (immutable after creation)",
+      description: "Description (max 2000 chars)",
+      dataObject: "Data Object (auto-uppercased on save)",
+      dataLayers: "Data Layers (multi-select)",
+      inputSchema: "Input Schema (JSON)",
+      handlerKind: "Handler Kind",
+      handlerRef: "Handler Ref",
+      argExtractorKind: "Arg Extractor",
+    },
+    messages: {
+      created: "Created",
+      updated: "Updated",
+      deleted: "Deleted",
+      toggled: "Toggled",
+      failed: "Operation failed",
+    },
+    errors: {
+      versionConflict: "Version conflict, please refresh and retry",
+      inUseByAgent: "Tool is referenced by Agent(s) {agentCodes}, cannot delete",
+      nameImmutable: "Tool name cannot be changed after creation",
+    },
+  },
 } as const;

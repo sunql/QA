@@ -1270,4 +1270,47 @@ export const zhCN = {
       loading: "导出中...",
     },
   },
+
+  agentTools: {
+    title: "工具配置管理",
+    columns: {
+      name: "工具名",
+      description: "描述",
+      dataObject: "数据对象",
+      dataLayers: "数据层",
+      handlerKind: "Handler 类型",
+      handlerRef: "Handler 引用",
+      enabled: "启用",
+      updatedTime: "更新时间",
+    },
+    actions: {
+      create: "新建",
+      edit: "编辑",
+      delete: "删除",
+      toggle: "切换",
+      refresh: "刷新",
+    },
+    form: {
+      name: "工具名（创建后不可改）",
+      description: "描述（最多 2000 字符）",
+      dataObject: "数据对象（写入时自动转大写）",
+      dataLayers: "数据层（可多选）",
+      inputSchema: "输入 Schema（JSON）",
+      handlerKind: "Handler 类型",
+      handlerRef: "Handler 引用",
+      argExtractorKind: "参数提取器",
+    },
+    messages: {
+      created: "创建成功",
+      updated: "更新成功",
+      deleted: "删除成功",
+      toggled: "状态已切换",
+      failed: "操作失败",
+    },
+    errors: {
+      versionConflict: "版本冲突，请刷新后重试",
+      inUseByAgent: "该工具被 Agent {agentCodes} 引用，无法删除",
+      nameImmutable: "工具名创建后不可修改",
+    },
+  },
 } as const;

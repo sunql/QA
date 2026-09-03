@@ -349,3 +349,14 @@ class AgentPermission(str, Enum):
     MASKED_READ = "masked_read"
     FORBIDDEN = "forbidden"
     FORBIDDEN_WRITE = "forbidden_write"
+
+
+class AgentToolHandlerKind(str, Enum):
+    """agent_tool_config.handler_kind 枚举（feat-agent-tool-config-db, 2026-09-03）。
+
+    - BUILTIN: 代码内置 handler（supplier_360 / supplier_risk / graph_traverse）。
+    - NL2SQL:  自然语言查询 → NL2SqlService.translate（_assert_read_only SQL 网关）。
+    """
+
+    BUILTIN = "BUILTIN"
+    NL2SQL = "NL2SQL"

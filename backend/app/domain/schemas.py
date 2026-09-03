@@ -2012,6 +2012,20 @@ def _normalizeDataLayer(value: str | None) -> str | None:
     return normalized or None
 
 
+def _normalizeDataObject(value: str | None) -> str:
+    """data_object 边界归一化：strip + upper；空串/None → ValueError（Pydantic 422）。
+
+    与 _normalizeDataLayer 区别：data_object 不允许 None（ACL 主体必填），
+    空串/纯空白视同未提供。
+    """
+    if value is None:
+        raise ValueError("data_object 不能为空")
+    normalized = value.strip().upper()
+    if not normalized:
+        raise ValueError("data_object 不能为空字符串")
+    return normalized
+
+
 class AgentAccessPolicyCreate(CamelModel):
     """创建 Agent 访问策略请求（Phase 6.1）。"""
 

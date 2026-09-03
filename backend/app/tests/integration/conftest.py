@@ -19,6 +19,8 @@ from app.config import getSettings
 from app.infrastructure import database as dbModule
 from app.infrastructure.llm.embedding_provider_factory import resetEmbeddingClientCache
 from app.infrastructure.security import crypto
+from app.services.agent_binding_cache import agent_binding_cache
+from app.services.agent_tool_config_registry import agent_tool_config_registry
 from app.tests import _pg_support
 
 
@@ -38,3 +40,28 @@ async def dbSession(client: AsyncClient) -> AsyncIterator[AsyncSession]:
     factory = dbModule.getSessionFactory()
     async with factory() as session:
         yield session
+
+
+@pytest.fixture(autouse=True)
+async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
+    """每个测试前 warmUp agent_binding_cache + agent_tool_config_registry。
+
+    集成测试无 lifespan（TestClient/TestApp 不触发 startup），原 in-memory
+    registry 不需要 warmUp；DB-backed registry（feat-agent-tool-config-db）必须显式
+    warmUp，否则 runtime 测试会因 'Registry 未 warmUp' 抛 RuntimeError。
+
+    seed_agent_tool_configs（3 个内置工具 upsert）由 lifespan 完成；集成测试
+    走 TRUNCATE+seed 路径，先 upsert 再 warmUp。
+    """
+    from scripts.seed_agent_tool_configs import seedAgentToolConfigs
+
+    await seedAgentToolConfigs(dbSession)
+    await dbSession.commit()
+
+    agent_binding_cache.invalidate()
+    await agent_binding_cache.warmUp(dbSession)
+    agent_tool_config_registry.invalidate()
+    await agent_tool_config_registry.warmUp(dbSession)
+    yield
+    agent_binding_cache.invalidate()
+    agent_tool_config_registry.invalidate()

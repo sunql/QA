@@ -97,12 +97,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     session_factory = getSessionFactory()
     async with session_factory() as session:
+        # seed 顺序：
+        # 1. agent_definition.tool_name（AGENT_DEFAULT_BINDINGS 常量 → DB；既有）
+        # 2. agent_tool_config 元数据（3 个内置工具 upsert；T10）
+        # 3. binding cache warmUp（读 agent_definition.tool_name）
+        # 4. tool config registry warmUp（读 agent_tool_config 元数据 → 装配 AgentTool）
         seeded = await seed_agent_tool_bindings(session)
         if seeded:
             logger.info("agent_tool_binding seed: %d new rows", seeded)
+        from scripts.seed_agent_tool_configs import seedAgentToolConfigs
+        from app.services.agent_tool_config_registry import (
+            agent_tool_config_registry,
+        )
+
+        tool_changed = await seedAgentToolConfigs(session)
+        if tool_changed:
+            logger.info("agent_tool_config seed: %d/%d updated", tool_changed, 3)
         # Task 6：cache 预热必须在 seed 之后（seed 写入了 tool_name）；
         # 若 seed 失败（RuntimeError），不继续 warmUp（fail-fast）。
         await agent_binding_cache.warmUp(session)
+        await agent_tool_config_registry.warmUp(session)
     yield
     logger.info("关闭中，释放外部连接...")
     await shutdownCleanup()

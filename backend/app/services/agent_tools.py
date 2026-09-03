@@ -295,3 +295,97 @@ AGENT_DEFAULT_BINDINGS: dict[str, str] = {
     "SUPPLIER_RISK_AGENT": "supplier_risk",
     "GRAPH_REASONING_AGENT": "graph_traverse",
 }
+
+
+# ---------------------------------------------------------------------------
+# feat-agent-tool-config-db (2026-09-03)：handler dicts + AgentToolAssembly
+# ---------------------------------------------------------------------------
+
+
+async def _nl2sqlDefaultHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """NL2SQL handler：业务人员配的自然语言查询经 NL2SqlService 翻译执行。
+
+    v1 仅暴露入口；完整 NL2SQL 流水线（ontology class 收集 + model 解析 + SQL
+    Guard）由后续 task 接入。当前返回最小 ToolResult，便于 admin 在 UI 配置
+    handler_kind=NL2SQL 的工具且 registry 装配成功；运行时若真正触发会清晰报错。
+    """
+    question = args.get("question", "")
+    logger.info("nl2sql_default handler invoked: question_len=%d actor=%s", len(question), ctx.actor)
+    return ToolResult(
+        data={"question": question, "status": "nl2sql_handler_pending_full_wiring"},
+        answer=(
+            "NL2SQL handler 框架已就位；完整流水线（本体 + LLM + SQL Guard）"
+            "将在后续 task 接入。当前仅验证 registry 装配路径。"
+        ),
+        tokens_used=0,
+        prompt_tokens=0,
+        completion_tokens=0,
+        cost=0.0,
+        llm_model_name=None,
+    )
+
+
+BUILTIN_HANDLERS: dict[str, AgentHandler] = {
+    "supplier_360": _supplier360Handler,
+    "supplier_risk": _supplierRiskHandler,
+    "graph_traverse": _graphTraverseHandler,
+}
+
+NL2SQL_HANDLERS: dict[str, AgentHandler] = {
+    "nl2sql_default": _nl2sqlDefaultHandler,
+}
+
+ARG_EXTRACTORS: dict[str, ArgExtractor] = {
+    "supplier_key": lambda raw: _supplierKeyArgs(raw, extractSupplierKey),
+    "supplier_risk_key": lambda raw: _supplierKeyArgs(raw, extractSupplierRiskKey),
+    "supplier_graph_key": lambda raw: _supplierKeyArgs(raw, extractSupplierGraphKey),
+}
+
+_VALID_HANDLER_REFS: dict[str, frozenset[str]] = {
+    "BUILTIN": frozenset(BUILTIN_HANDLERS.keys()),
+    "NL2SQL": frozenset(NL2SQL_HANDLERS.keys()),
+}
+
+
+class AgentToolAssembly:
+    """DB 行 → AgentTool 装配器（feat-agent-tool-config-db, 2026-09-03）。
+
+    校验 handler_kind/ref/arg_extractor_kind，合并 DB 元数据 + 代码侧 handler。
+    """
+
+    @staticmethod
+    def assemble(config_row) -> AgentTool:
+        from app.domain.models import AgentToolConfig
+        from app.domain.schemas import _normalizeDataObject
+
+        kind = config_row.handler_kind
+        ref = config_row.handler_ref
+        ext_kind = config_row.arg_extractor_kind
+
+        if kind not in _VALID_HANDLER_REFS:
+            raise ValueError(
+                f"agent_tool_config {config_row.name}: handler_kind 不支持: {kind!r}"
+            )
+        if ref not in _VALID_HANDLER_REFS[kind]:
+            raise ValueError(
+                f"agent_tool_config {config_row.name}: handler_ref {ref!r} 不在 {kind} 白名单"
+            )
+        if ext_kind not in ARG_EXTRACTORS:
+            raise ValueError(
+                f"agent_tool_config {config_row.name}: arg_extractor_kind {ext_kind!r} 不存在"
+            )
+
+        handlers: dict[str, AgentHandler] = {**BUILTIN_HANDLERS, **NL2SQL_HANDLERS}
+        return AgentTool(
+            name=config_row.name,
+            description=config_row.description or "",
+            data_object=_normalizeDataObject(config_row.data_object),
+            data_layers=tuple(
+                layer.strip().upper() for layer in (config_row.data_layers or [])
+            ),
+            input_schema=config_row.input_schema or {},
+            arg_extractor=ARG_EXTRACTORS[ext_kind],
+            handler=handlers[ref],
+        )

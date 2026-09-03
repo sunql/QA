@@ -1,4 +1,4 @@
-"""验证 seed_agent_tool_bindings 从 AGENT_DEFAULT_BINDINGS 常量 seed 3 行 + 幂等。"""
+"""验证 seed_agent_tool_bindings 从 _AGENT_DEFAULT_BINDINGS 常量 seed 3 行 + 幂等。"""
 import pytest
 from sqlalchemy import select
 from app.infrastructure.database import getSessionFactory
@@ -12,7 +12,7 @@ from app.dependencies import CurrentUser
 from app.domain.schemas import AgentDefinitionCreate
 from app.services.agent_registry_service import AgentRegistryService
 from scripts.seed_agent_tool_bindings import seed_agent_tool_bindings
-from app.services.agent_tools import AGENT_DEFAULT_BINDINGS
+from scripts.seed_agents import _AGENT_DEFAULT_BINDINGS
 
 _SEED_ACTOR = CurrentUser(userId="seed-test", roles=("admin",), departments=("procurement",))
 
@@ -20,7 +20,7 @@ _SEED_ACTOR = CurrentUser(userId="seed-test", roles=("admin",), departments=("pr
 async def _ensureAgentsExist() -> None:
     """Brief 测试假设 agent_definition 行已存在；pgApiClient TRUNCATE 后需重新创建。
 
-    仅在 AGENT_DEFAULT_BINDINGS 的 key 上注册 Agent（不可运行也能注册 —— 测试只关心 tool_name 列），
+    仅在 _AGENT_DEFAULT_BINDINGS 的 key 上注册 Agent（不可运行也能注册 —— 测试只关心 tool_name 列），
     用 AgentRegistryService 走 service 层（与 seed_agents.py 一致）。
     """
     factory = getSessionFactory()
@@ -29,7 +29,7 @@ async def _ensureAgentsExist() -> None:
             (await session.execute(select(AgentDefinition.agent_code))).scalars().all()
         )
         service = AgentRegistryService()
-        for code in AGENT_DEFAULT_BINDINGS:
+        for code in _AGENT_DEFAULT_BINDINGS:
             if code in existing:
                 continue
             await service.createAgent(
@@ -64,11 +64,11 @@ async def cleanup(client):
 
 
 @pytest.mark.asyncio
-async def test_seed_inserts_three_rows_from_AGENT_DEFAULT_BINDINGS():
+async def test_seed_inserts_three_rows_from_AGENT_BINDINGS():
     factory = getSessionFactory()
     async with factory() as session:
         inserted = await seed_agent_tool_bindings(session)
-    assert inserted == len(AGENT_DEFAULT_BINDINGS)  # 3
+    assert inserted == len(_AGENT_DEFAULT_BINDINGS)  # 3
 
     async with factory() as session:
         rows = await session.execute(
@@ -79,8 +79,8 @@ async def test_seed_inserts_three_rows_from_AGENT_DEFAULT_BINDINGS():
             ).where(AgentDefinition.tool_name.is_not(None))
         )
         result = {r.agent_code: r for r in rows}
-    assert set(result.keys()) == set(AGENT_DEFAULT_BINDINGS.keys())
-    for code, tool_name in AGENT_DEFAULT_BINDINGS.items():
+    assert set(result.keys()) == set(_AGENT_DEFAULT_BINDINGS.keys())
+    for code, tool_name in _AGENT_DEFAULT_BINDINGS.items():
         assert result[code].tool_name == tool_name
         assert result[code].tool_name_updated_at is not None  # 自动戳
 

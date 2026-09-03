@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,7 +30,8 @@ from app.domain.enums import (
 from app.domain.models import AgentRunLog, AgentSchedule
 from app.domain.schemas import AgentDefinitionCreate, AgentScheduleCreate
 from app.services.agent_registry_service import AgentRegistryService
-from app.services.agent_tools import AGENT_DEFAULT_BINDINGS
+from app.services.agent_tool_config_registry import agent_tool_config_registry
+from scripts.seed_agents import _AGENT_DEFAULT_BINDINGS as AGENT_DEFAULT_BINDINGS
 from app.services.agent_scheduler_service import AgentSchedulerService
 from app.tests.integration.test_agent_runtime_api import (
     _defaultPolicies,
@@ -45,11 +47,66 @@ _ADMIN = CurrentUser(userId="test-admin", roles=("admin",))
 _OWNER = CurrentUser(userId="bob", roles=("analyst",), departments=("procurement",))
 
 
+@pytest.fixture(autouse=True)
+async def _warmToolRegistry(dbSession) -> None:
+    """DB-backed registry 需 warmUp；测试用 _defaultPolicies → agent_tool_registry.get + scheduler dispatch。"""
+    from app.services.agent_binding_cache import agent_binding_cache
+    from app.services.agent_tool_config_service import AgentToolConfigService
+
+    service = AgentToolConfigService()
+    for seed in (
+        {
+            "name": "supplier_360",
+            "data_object": "SUPPLIER",
+            "data_layers": ["DIM", "FEATURE"],
+            "handler_kind": "BUILTIN",
+            "handler_ref": "supplier_360",
+            "arg_extractor_kind": "supplier_key",
+        },
+        {
+            "name": "supplier_risk",
+            "data_object": "SUPPLIER",
+            "data_layers": ["DIM", "FEATURE"],
+            "handler_kind": "BUILTIN",
+            "handler_ref": "supplier_risk",
+            "arg_extractor_kind": "supplier_risk_key",
+        },
+        {
+            "name": "graph_traverse",
+            "data_object": "SUPPLIER",
+            "data_layers": ["DIM", "DWD"],
+            "handler_kind": "BUILTIN",
+            "handler_ref": "graph_traverse",
+            "arg_extractor_kind": "supplier_graph_key",
+        },
+    ):
+        await service.upsertSeed(dbSession, seed["name"], seed)
+    await dbSession.commit()
+    from app.services.agent_tool_config_registry import agent_tool_config_registry
+
+    agent_tool_config_registry.invalidate()
+    await agent_tool_config_registry.warmUp(dbSession)
+    agent_binding_cache.invalidate()
+    await agent_binding_cache.warmUp(dbSession)
+    yield
+    agent_tool_config_registry.invalidate()
+    agent_binding_cache.invalidate()
+
+
 async def _seedAgent(dbSession: AsyncSession, code: str, *, status: AgentStatus = AgentStatus.ACTIVE) -> None:
     """用 AgentRegistryService 注册一个 Agent，owner=procurement（非 admin 部门）。
 
     复用 test_agent_runtime_api 的显式分层策略（按工具 data_object + data_layers）。
+    tool_name 走 _AGENT_DEFAULT_BINDINGS（与 lifespan seed_agent_tool_bindings 一致），
+    createAgent 会自动 refresh agent_binding_cache。data_layers 必须覆盖工具声明
+    （schema 写时校验），否则 DTO 422。
     """
+    tool_name = AGENT_DEFAULT_BINDINGS.get(code)
+    data_layers = ["FEATURE"]
+    if tool_name is not None:
+        tool = agent_tool_config_registry.get(tool_name)
+        if tool is not None:
+            data_layers = list(tool.data_layers)
     svc = AgentRegistryService()
     dto = AgentDefinitionCreate(
         agent_code=code,
@@ -58,9 +115,10 @@ async def _seedAgent(dbSession: AsyncSession, code: str, *, status: AgentStatus 
         trigger_type=AgentTriggerType.SCHEDULED,
         response_latency=AgentResponseLatency.BATCH,
         data_domains=["PROCUREMENT"],
-        data_layers=["FEATURE"],
+        data_layers=data_layers,
         status=status,
         version="v1.0",
+        tool_name=tool_name,
         policies=_defaultPolicies(code),
     )
     await svc.createAgent(dbSession, dto, _OWNER)

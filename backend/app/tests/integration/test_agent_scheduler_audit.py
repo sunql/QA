@@ -11,7 +11,7 @@ from app.domain.models import AgentSchedule
 from app.domain.schemas import AgentDefinitionCreate, AgentScheduleCreate
 from app.services.agent_registry_service import AgentRegistryService
 from app.services.agent_scheduler_service import AgentSchedulerService
-from app.services.agent_tools import AGENT_DEFAULT_BINDINGS
+from scripts.seed_agents import _AGENT_DEFAULT_BINDINGS as AGENT_DEFAULT_BINDINGS
 
 AUTH_ADMIN = {"X-User-Id": "audit-sched-admin", "X-User-Roles": "admin"}
 _OWNER = CurrentUser(userId="bob", roles=("analyst",), departments=("procurement",))

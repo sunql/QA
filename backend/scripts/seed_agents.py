@@ -46,7 +46,9 @@ from app.domain.schemas import (  # noqa: E402
 )
 from app.infrastructure.database import getSessionFactory  # noqa: E402
 from app.services.agent_registry_service import AgentRegistryService  # noqa: E402
-from app.services.agent_tools import AGENT_DEFAULT_BINDINGS, agent_tool_registry  # noqa: E402
+from app.services.agent_tool_config_registry import (  # noqa: E402
+    agent_tool_config_registry,
+)
 
 # 种子 actor：admin + 采购部门 → owner 派生 "procurement"
 _SEED_ACTOR = CurrentUser(
@@ -63,22 +65,31 @@ _DEFAULT_POLICIES = [
     )
 ]
 
+# Agent → tool 绑定常量（仅作 seed 元数据；运行时真实绑定来自
+# agent_definition.tool_name + agent_binding_cache，feat-agent-tool-config-db）。
+# 与 seed_agent_tool_bindings.py 共享；不依赖模块单例（agent_tools 已删除 AGENT_DEFAULT_BINDINGS）。
+_AGENT_DEFAULT_BINDINGS: dict[str, str] = {
+    "SUPPLIER_360_AGENT": "supplier_360",
+    "SUPPLIER_RISK_AGENT": "supplier_risk",
+    "GRAPH_REASONING_AGENT": "graph_traverse",
+}
 
-def _policiesFor(code: str) -> list[AgentAccessPolicyCreate]:
+
+async def _policiesFor(session: Any, code: str) -> list[AgentAccessPolicyCreate]:
     """为 Agent 生成显式分层策略（最小权限）。
 
-    可运行 Agent：按 AGENT_DEFAULT_BINDINGS 绑定工具的 data_object + data_layers 逐层授权
-    （DIM/FEATURE/DWD 各一条 READ）——与运行时分层校验（Phase 7+ 安全补强）对齐。
-    层无关工具（data_layers=()）：回退 _DEFAULT_POLICIES（None 通配），避免零策略
-    导致 Agent 永远 403 不可运行。
-    元数据 Agent（无工具绑定）：回退 _DEFAULT_POLICIES（仅展示，运行时不可运行）。
+    可运行 Agent：按 _AGENT_DEFAULT_BINDINGS → agent_tool_config_registry
+    读取 data_object + data_layers，逐层授权（与运行时分层校验对齐）。
+    元数据 Agent（无绑定）或工具未启用 / 层无关 → 回退 _DEFAULT_POLICIES
+    （仅展示，运行时不可运行 / 避免零策略 fail-closed）。
     """
-    tool_name = AGENT_DEFAULT_BINDINGS.get(code)
+    tool_name = _AGENT_DEFAULT_BINDINGS.get(code)
     if tool_name is None:
         return list(_DEFAULT_POLICIES)
-    tool = agent_tool_registry.get(tool_name)
+    tool = agent_tool_config_registry.get(tool_name)
     if tool is None:
-        raise RuntimeError(f"seed_agents: Agent {code} 绑定工具 {tool_name} 未注册")
+        # 工具被禁用或未 seed → 回退通配（旧行为兼容）
+        return list(_DEFAULT_POLICIES)
     if not tool.data_layers:
         return list(_DEFAULT_POLICIES)
     return [
@@ -157,10 +168,10 @@ async def _reconcileLayeredPolicies(session: Any, code: str) -> tuple[int, int]:
     注意：删除无法区分「种子遗留通配」与「管理员刻意保留的通配」——通配对可运行
     Agent 是多余授权（运行时只按工具声明层判定），删除即分层补强本意，故接受。
     """
-    tool_name = AGENT_DEFAULT_BINDINGS.get(code)
+    tool_name = _AGENT_DEFAULT_BINDINGS.get(code)
     if tool_name is None:
         return 0, 0
-    tool = agent_tool_registry.get(tool_name)
+    tool = agent_tool_config_registry.get(tool_name)
     if tool is None or not tool.data_layers:
         return 0, 0
     service = AgentRegistryService()
@@ -231,7 +242,7 @@ async def seedAgents(session: Any) -> int:
             data_layers=seed["layers"],
             status=seed["status"],
             version="v1.0",
-            policies=_policiesFor(seed["agent_code"]),
+            policies=await _policiesFor(session, seed["agent_code"]),
         )
         try:
             await service.createAgent(session, dto, _SEED_ACTOR)

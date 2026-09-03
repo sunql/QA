@@ -25,9 +25,41 @@ from app.domain.enums import (
     SourceSystem,
 )
 from app.domain.models import DataSource, EntityMapping, FeatureDefinition, FeatureValue
-from app.services.agent_tools import AgentToolContext, agent_tool_registry
+from app.services.agent_tools import AgentToolContext
+from app.services.agent_tool_config_registry import agent_tool_config_registry as agent_tool_registry
+from app.services.agent_tool_config_service import AgentToolConfigService
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+async def _warmToolRegistry(dbSession: AsyncSession) -> None:
+    """DB-backed registry 需 warmUp；test fixture 用 TOOL_SEEDS seed + warm。"""
+    service = AgentToolConfigService()
+    for seed in (
+        {
+            "name": "supplier_360",
+            "data_object": "SUPPLIER",
+            "data_layers": ["DIM", "FEATURE"],
+            "handler_kind": "BUILTIN",
+            "handler_ref": "supplier_360",
+            "arg_extractor_kind": "supplier_key",
+        },
+        {
+            "name": "supplier_risk",
+            "data_object": "SUPPLIER",
+            "data_layers": ["DIM", "FEATURE"],
+            "handler_kind": "BUILTIN",
+            "handler_ref": "supplier_risk",
+            "arg_extractor_kind": "supplier_risk_key",
+        },
+    ):
+        await service.upsertSeed(dbSession, seed["name"], seed)
+    await dbSession.commit()
+    agent_tool_registry.invalidate()
+    await agent_tool_registry.warmUp(dbSession)
+    yield
+    agent_tool_registry.invalidate()
 
 # 表 → 层 词汇表（SSOT，与 Harness/wiki 层词汇表对齐）
 _TABLE_LAYER = {

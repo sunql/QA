@@ -62,6 +62,9 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     await agent_binding_cache.warmUp(dbSession)
     agent_tool_config_registry.invalidate()
     await agent_tool_config_registry.warmUp(dbSession)
+    # 关掉 warmUp SELECT 留下的隐式事务：否则 dbSession 持有 AccessShareLock，
+    # 阻塞后续 pgSession/engine B 的 TRUNCATE（feat-agent-tool-config-db 教训）
+    await dbSession.commit()
     yield
     agent_binding_cache.invalidate()
     agent_tool_config_registry.invalidate()

@@ -19,6 +19,7 @@ import SupplierRiskPage from "./pages/SupplierRiskPage";
 import AgentRegistryPage from "./pages/AgentRegistryPage";
 import AgentRuntimePage from "./pages/AgentRuntimePage";
 import AdminAuditPage from "./pages/AdminAuditPage";
+import AdminToolsPage from "./pages/AdminToolsPage";
 import DocumentsPage from "./pages/DocumentsPage";
 
 export default function App() {
@@ -45,6 +46,7 @@ export default function App() {
         <Route path="agents/run" element={<AgentRuntimePage />} />
         <Route path="agents" element={<AgentRegistryPage />} />
         <Route path="admin/audit" element={<AdminAuditPage />} />
+        <Route path="admin/tools" element={<AdminToolsPage />} />
         <Route path="documents" element={<DocumentsPage />} />
       </Route>
     </Routes>

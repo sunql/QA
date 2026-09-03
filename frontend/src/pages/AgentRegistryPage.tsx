@@ -673,7 +673,16 @@ export default function AgentRegistryPage() {
                   rules={[{ required: true }]}
                   style={{ width: 180 }}
                 >
-                  <Input placeholder={t("agentRegistry.policies.dataObjectPlaceholder")} />
+                  <Select
+                    showSearch
+                    allowClear
+                    placeholder={t("agentRegistry.policies.dataObjectPlaceholder")}
+                    options={Array.from(
+                      new Set(tools.map((tool) => tool.dataObject)),
+                    )
+                      .sort()
+                      .map((v) => ({ value: v, label: v }))}
+                  />
                 </Form.Item>
                 <Form.Item
                   name="permission"

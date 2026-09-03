@@ -73,6 +73,7 @@ const ENTITY_TYPE_OPTIONS = [
   { value: "ENTITY_MAPPING", label: "ENTITY_MAPPING" },
   { value: "DATA_SOURCE", label: "DATA_SOURCE" },
   { value: "AGENT_DEFINITION", label: "AGENT_DEFINITION" },
+  { value: "AGENT_TOOL_CONFIG", label: "AGENT_TOOL_CONFIG" },
 ];
 
 export default function AdminAuditPage() {

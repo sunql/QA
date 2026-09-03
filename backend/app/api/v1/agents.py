@@ -38,7 +38,7 @@ from app.services.agent_registry_service import (
     _policyToRead,
     agentToRead,
 )
-from app.services.agent_tools import agent_tool_registry
+from app.services.agent_tool_config_registry import agent_tool_config_registry
 from app.infrastructure.rate_limit import limiter, rateLimitValue
 from app.services.agent_scheduler_service import AgentSchedulerService
 from app.domain.schemas import (
@@ -103,7 +103,7 @@ async def getAgentOptions(
                 data_object=t.data_object,
                 data_layers=list(t.data_layers),
             )
-            for t in agent_tool_registry.all()
+            for t in agent_tool_config_registry.all()
         ],
     )
 

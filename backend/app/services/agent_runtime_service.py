@@ -44,7 +44,10 @@ from app.services.agent_tools import (
     AgentTool,
     AgentToolContext,
     AgentToolRegistry,
-    agent_tool_registry,
+)
+from app.services.agent_tool_config_registry import (
+    AgentToolConfigRegistry,
+    agent_tool_config_registry,
 )
 from app.services.agent_binding_cache import agent_binding_cache
 from app.services.supplier_name_resolver import SupplierNameResolver
@@ -75,7 +78,7 @@ class AgentRuntimeService:
         resolver: SupplierNameResolver | None = None,  # Phase 6.5：名字→编码预解析
         bindingCache=None,  # 测试注入 fake；运行时默认使用模块级单例
     ) -> None:
-        self._registry = registry or agent_tool_registry
+        self._registry: AgentToolConfigRegistry = registry or agent_tool_config_registry
         self._agents = agentService or AgentRegistryService()
         self._resolver = resolver or SupplierNameResolver()
         if bindingCache is not None:

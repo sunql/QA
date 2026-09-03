@@ -261,10 +261,10 @@ def _validateToolNameShared(v: str | None, info) -> str | None:
     if v is None:
         return v
     # 延迟导入打破 schemas ↔ agent_tools ↔ services 循环依赖
-    from app.services.agent_tools import agent_tool_registry
-    tool = agent_tool_registry.get(v)
+    from app.services.agent_tool_config_registry import agent_tool_config_registry
+    tool = agent_tool_config_registry.get(v)
     if tool is None:
-        registered = ",".join(t.name for t in agent_tool_registry.all())
+        registered = ",".join(t.name for t in agent_tool_config_registry.all())
         raise ValueError(MSG_AGENT_TOOL_UNKNOWN.format(
             name=v, registered=registered,
         ))

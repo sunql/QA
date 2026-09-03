@@ -257,7 +257,7 @@ Methods (all write methods take `actor: CurrentUser`):
 
 | Method | Signature | Errors | Audit |
 |---|---|---|---|
-| `listTools` | `(session, *, enabledOnly=False) -> list[AgentToolConfig]` | — | — |
+| `listTools` | `(session, *, enabledOnly=False) -> list[AgentToolConfig]` (ORM 实体；API 层通过 `response_model=AgentToolConfigRead` 转 DTO) | — | — |
 | `getTool` | `(session, name) -> AgentToolConfig` | `NotFoundError(404)` | — |
 | `createTool` | `(session, dto: AgentToolConfigCreate, actor) -> AgentToolConfig` | `ConflictError(409)` on name dup; `ValidationError(422)` on bad handler_kind/ref | outbox `agent_tool_created` |
 | `updateTool` | `(session, name, dto: AgentToolConfigUpdate, actor) -> AgentToolConfig` | `NotFoundError`; `ConflictError(409)` on version mismatch | outbox `agent_tool_updated` |
@@ -268,7 +268,7 @@ Methods (all write methods take `actor: CurrentUser`):
 **Validation rules (service layer)**:
 
 - `name`: pattern `^[a-z][a-z0-9_]*$`; max 64 chars; **immutable** (Update DTO has no `name` field).
-- `data_object`: `len 1-128`; service calls `_normalizeDataObject(value)` (strip + upper).
+- `data_object`: `len 1-128`; service calls `_normalizeDataObject(value)` (strip + upper) — invoked from Pydantic `@field_validator("data_object")` on both `Create` and `Update` DTOs so input is canonical before service entry.
 - `data_layers`: each element must be in `AGENT_DATA_LAYERS` (`("DIM","DWD","FEATURE")`); empty list allowed (layer-agnostic tool, legacy compat).
 - `input_schema`: must be a JSON object (Pydantic `dict` validator).
 - `handler_kind + handler_ref` combo: validated against `_VALID_HANDLER_REFS`:
@@ -566,7 +566,7 @@ async def _policiesFor(session, code) -> list[AgentAccessPolicyCreate]:
 | GET | `/api/v1/agent-tools/{name}` | `getCurrentUser` | Detail |
 | POST | `/api/v1/agent-tools` | `getAdminOnlyActor` | Create |
 | PUT | `/api/v1/agent-tools/{name}` | `getAdminOnlyActor` | Update (with optimistic lock via `If-Match: version=N` header or `version` in body) |
-| DELETE | `/api/v1/agent-tools/{name}` | `getAdminOnlyActor` | Delete (409 if used by AgentDefinition) |
+| DELETE | `/api/v1/agent-tools/{name}` | `getAdminOnlyActor` | Delete (409 with `detail={"referencingAgents": [...]}` if used by AgentDefinition) |
 | POST | `/api/v1/agent-tools/{name}/toggle` | `getAdminOnlyActor` | Toggle enabled |
 
 Register in `backend/app/main.py` alongside existing `agents` router.

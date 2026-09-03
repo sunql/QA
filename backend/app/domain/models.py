@@ -1402,5 +1402,48 @@ class AgentRunLog(Base):
         )
 
 
+class AgentToolConfig(Base):
+    """Agent工具配置表（feat-agent-tool-config-db, 2026-09-03）。
+
+    元数据 SSOT：业务人员通过 /admin/tools UI CRUD；handler 引擎在代码。
+    name 与 AgentDefinition.tool_name 形成 FK-by-name 引用，**不可改**。
+    handler_kind 用 CHECK 约束兜底（service 层校验之外）。
+    """
+
+    __tablename__ = "agent_tool_config"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False,
+        doc="工具名（小写+下划线；与 AgentDefinition.tool_name 对齐；创建后不可改）")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    data_object: Mapped[str] = mapped_column(String(128), nullable=False,
+        doc="ACL 主体；写入时 _normalizeDataObject trim+upper")
+    data_layers: Mapped[list] = mapped_column(postgresql.JSONB, nullable=False, default=list)
+    input_schema: Mapped[dict] = mapped_column(postgresql.JSONB, nullable=False, default=dict,
+        doc="JSON Schema（v1 仅展示；未来 LLM function-calling 复用）")
+    handler_kind: Mapped[str] = mapped_column(String(30), nullable=False,
+        doc="枚举: BUILTIN | NL2SQL（CHECK 约束兜底）")
+    handler_ref: Mapped[str] = mapped_column(String(64), nullable=False,
+        doc="按 handler_kind 白名单校验")
+    arg_extractor_kind: Mapped[str] = mapped_column(String(64), nullable=False, default="supplier_key")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=sa.text("true"))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1,
+        doc="乐观锁；每次 UPDATE +1")
+    created_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "handler_kind IN ('BUILTIN','NL2SQL')",
+            name="ck_agent_tool_config_handler_kind",
+        ),
+        Index("ix_agent_tool_config_enabled", "enabled"),
+        Index("ix_agent_tool_config_data_object", "data_object"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AgentToolConfig id={self.id} name={self.name} handler_kind={self.handler_kind}>"
+
+
 # Re-export MenuConfig so Alembic autogenerate picks it up.
 from app.models.menu_config import MenuConfig  # noqa: E402,F401

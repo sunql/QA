@@ -234,7 +234,7 @@ class AgentToolConfigService:
 
         await self._outbox.enqueue(
             session,
-            event_type="agent_tool_toggled",
+            event_type="agent_tool_updated",
             entity_type="agent_tool_config",
             entity_id=row.id,
             actor=actor.userId,

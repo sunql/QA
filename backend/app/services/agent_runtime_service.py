@@ -118,7 +118,7 @@ class AgentRuntimeService:
                 )
             )
 
-        tool = self._resolveTool(tool_name)
+        tool = await self._resolveTool(session, tool_name)
         self._enforcePolicies(entity, tool)
 
         # Phase 6.5：供应商名→编码预解析（数字未命中时查 entity_mapping.name；
@@ -149,11 +149,20 @@ class AgentRuntimeService:
             executed_at=datetime.now(timezone.utc),
         )
 
-    def _resolveTool(self, name: str) -> AgentTool:
+    async def _resolveTool(self, session: AsyncSession, name: str) -> AgentTool:
+        """按名解析 AgentTool；cache miss 时 reload_one（DB-backed registry）。
+
+        tool 不存在或被禁用 → ConflictError(409 tool_unbound_or_disabled)。
+        """
         tool = self._registry.get(name)
         if tool is None:
+            await self._registry.reload_one(session, name)
+            tool = self._registry.get(name)
+        if tool is None:
             raise ConflictError(
-                MSG_AGENT_NOT_RUNNABLE.format(code=name, status="tool_unbound")
+                MSG_AGENT_NOT_RUNNABLE.format(
+                    code=name, status="tool_unbound_or_disabled"
+                )
             )
         return tool
 

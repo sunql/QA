@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -32,13 +33,17 @@ from app.domain.exceptions import (
 from app.domain.models import AgentAccessPolicy, AgentDefinition
 from app.services.agent_registry_service import AgentRegistryService
 from app.services.agent_runtime_service import AgentRuntimeService
-from app.services.agent_tools import (
-    AGENT_DEFAULT_BINDINGS,
-    AgentTool,
-    AgentToolRegistry,
-    ToolResult,
-)
+from app.services.agent_tool_config_registry import AgentToolConfigRegistry
+from app.services.agent_tools import AgentTool, ToolResult
 from app.services.supplier_name_resolver import ResolvedKey
+
+# Agent → tool 绑定映射（feat-agent-tool-config-db 后此为本地常量，
+# 运行时真实绑定来自 agent_definition.tool_name + agent_binding_cache）。
+_AGENT_DEFAULT_BINDINGS: dict[str, str] = {
+    "SUPPLIER_360_AGENT": "supplier_360",
+    "SUPPLIER_RISK_AGENT": "supplier_risk",
+    "GRAPH_REASONING_AGENT": "graph_traverse",
+}
 
 
 def _run(coro):
@@ -126,11 +131,10 @@ class _FakeAgentService:
 
 
 class _FakeBindingCache:
-    """单测用 fake cache：基于 AGENT_DEFAULT_BINDINGS 做确定性映射，无需 warmUp。"""
+    """单测用 fake cache：基于 _AGENT_DEFAULT_BINDINGS 做确定性映射，无需 warmUp。"""
 
     def __init__(self, extra: dict[str, str] | None = None) -> None:
-        from app.services.agent_tools import AGENT_DEFAULT_BINDINGS
-        self._map = dict(AGENT_DEFAULT_BINDINGS)
+        self._map = dict(_AGENT_DEFAULT_BINDINGS)
         if extra:
             self._map.update(extra)
 
@@ -142,10 +146,14 @@ def _runtime(
     *,
     entity: AgentDefinition | None = None,
     tools: dict[str, AgentTool] | None = None,
-) -> tuple[AgentRuntimeService, AgentToolRegistry]:
-    registry = AgentToolRegistry()
-    for tool in (tools or {}).values():
-        registry.register(tool)
+) -> tuple[AgentRuntimeService, AgentToolConfigRegistry]:
+    """构造 runtime + 预填充的 DB-backed registry（手动 _tools/_loaded，绕开 warmUp）。
+
+    单测不需要真实 DB；直接 set `_loaded=True` + 写 `_tools`，让 get/has/all 工作。
+    """
+    registry = AgentToolConfigRegistry()
+    registry._loaded = True
+    registry._tools = dict(tools or {})
     service = AgentRuntimeService(
         registry=registry,
         agentService=_FakeAgentService(entity),
@@ -211,9 +219,10 @@ class TestRunSuccess:
             captured["actor"] = ctx.actor
             return ToolResult(data={"ok": True}, answer="ok")
 
-        registry = AgentToolRegistry()
-        registry.register(
-            AgentTool(
+        registry = AgentToolConfigRegistry()
+        registry._loaded = True
+        registry._tools = {
+            "supplier_risk": AgentTool(
                 name="supplier_risk",
                 description="fake",
                 data_object="SUPPLIER",
@@ -221,7 +230,7 @@ class TestRunSuccess:
                 arg_extractor=lambda raw: {"key": "100001"},
                 handler=handler,
             )
-        )
+        }
         service = AgentRuntimeService(
             registry=registry,
             agentService=_FakeAgentService(_agent()),
@@ -266,11 +275,11 @@ class TestRunFailures:
             )
 
     def test_agent_without_tool_binding_raises_conflict(self):
-        """已注册但不在 AGENT_DEFAULT_BINDINGS 的元数据 Agent（如 PROCUREMENT_COPILOT）→ 409，
+        """已注册但不在 _AGENT_DEFAULT_BINDINGS 的元数据 Agent（如 PROCUREMENT_COPILOT）→ 409，
         message 明确说「未绑定工具」，避免与「状态非 ACTIVE」混淆。
         """
         entity = _agent("PROCUREMENT_COPILOT_AGENT")
-        assert "PROCUREMENT_COPILOT_AGENT" not in AGENT_DEFAULT_BINDINGS
+        assert "PROCUREMENT_COPILOT_AGENT" not in _AGENT_DEFAULT_BINDINGS
         service, _ = _runtime(entity=entity, tools={})
         with pytest.raises(ConflictError, match="未绑定工具"):
             _run(
@@ -347,9 +356,10 @@ class TestRunFailures:
             called.append(True)
             return ToolResult(data={}, answer="never")
 
-        registry = AgentToolRegistry()
-        registry.register(
-            AgentTool(
+        registry = AgentToolConfigRegistry()
+        registry._loaded = True
+        registry._tools = {
+            "supplier_risk": AgentTool(
                 name="supplier_risk",
                 description="fake",
                 data_object="SUPPLIER",
@@ -357,7 +367,7 @@ class TestRunFailures:
                 arg_extractor=lambda raw: None,
                 handler=handler,
             )
-        )
+        }
         service = AgentRuntimeService(
             registry=registry,
             agentService=_FakeAgentService(_agent()),
@@ -692,8 +702,9 @@ class TestRunSupplierNamePreResolve:
     """Phase 6.5：run() 在 arg_extractor 前做名字→编码预解析。"""
 
     def _runtimeWith(self, resolver, entity=None):
-        registry = AgentToolRegistry()
-        registry.register(_fakeTool("supplier_risk"))
+        registry = AgentToolConfigRegistry()
+        registry._loaded = True
+        registry._tools = {"supplier_risk": _fakeTool("supplier_risk")}
         return AgentRuntimeService(
             registry=registry,
             agentService=_FakeAgentService(entity or _agent("SUPPLIER_RISK_AGENT")),
@@ -727,8 +738,9 @@ class TestRunSupplierNamePreResolve:
             captured["raw"] = raw
             return {"key": "10105"}
 
-        registry = AgentToolRegistry()
-        registry.register(_fakeTool("supplier_risk", extractor=extractor))
+        registry = AgentToolConfigRegistry()
+        registry._loaded = True
+        registry._tools = {"supplier_risk": _fakeTool("supplier_risk", extractor=extractor)}
         service = AgentRuntimeService(
             registry=registry,
             agentService=_FakeAgentService(_agent("SUPPLIER_RISK_AGENT")),
@@ -787,3 +799,57 @@ class TestRunSupplierNamePreResolve:
             )
         )
         assert run.tool == "supplier_risk"
+
+
+# ---------------------------------------------------------------------------
+# feat-agent-tool-config-db (2026-09-03) T9：_resolveTool 异步 + DB-driven cache miss → reload_one
+# ---------------------------------------------------------------------------
+
+
+class TestResolveToolAsync:
+    """_resolveTool 改为 async，cache miss 时 reload_one 后再 get。
+
+    三场景：
+    1. cache hit → 直接返回，不调 reload_one
+    2. cache miss → reload_one，再 get 拿到
+    3. 持续 miss → 409 tool_unbound_or_disabled
+    """
+
+    def _registry_mock(self) -> MagicMock:
+        """spec=AgentToolConfigRegistry：get/all/has 同步，reload_one 异步。"""
+        reg = MagicMock(spec=AgentToolConfigRegistry)
+        reg.reload_one = AsyncMock()
+        return reg
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_returns_tool(self):
+        tool = MagicMock(name="supplier_360", spec_set=["name"])
+        tool.name = "supplier_360"
+        registry = self._registry_mock()
+        registry.get.return_value = tool
+        service = AgentRuntimeService(registry=registry)
+        result = await service._resolveTool(AsyncMock(), "supplier_360")
+        assert result is tool
+        registry.reload_one.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_triggers_reload_one(self):
+        registry = self._registry_mock()
+        reloaded_tool = MagicMock(name="supplier_360", spec_set=["name"])
+        reloaded_tool.name = "supplier_360"
+        # 第一次 get: miss；reload 后第二次 get: hit
+        registry.get.side_effect = [None, reloaded_tool]
+        service = AgentRuntimeService(registry=registry)
+        session = AsyncMock()
+        result = await service._resolveTool(session, "supplier_360")
+        assert result.name == "supplier_360"
+        registry.reload_one.assert_awaited_once_with(session, "supplier_360")
+
+    @pytest.mark.asyncio
+    async def test_missing_tool_raises_conflict(self):
+        registry = self._registry_mock()
+        # 两次 get 都是 None（reload 后仍未命中）
+        registry.get.side_effect = [None, None]
+        service = AgentRuntimeService(registry=registry)
+        with pytest.raises(ConflictError, match="tool_unbound_or_disabled"):
+            await service._resolveTool(AsyncMock(), "ghost")

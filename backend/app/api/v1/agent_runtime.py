@@ -77,6 +77,7 @@ async def runAgent(
         run_result = await service.run(
             db, agent_code, payload.input, actor=actor,
         )
+        return run_result
     except DomainError:
         # 领域异常（404/409/403/422）保持状态码，交由全局 DomainError handler 映射
         run_status = "FAILED"

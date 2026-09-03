@@ -36,22 +36,76 @@ from app.domain.models import DataSource, EntityMapping, FeatureDefinition, Feat
 from app.domain.schemas import AgentAccessPolicyCreate, AgentDefinitionCreate
 from app.services.agent_binding_cache import agent_binding_cache
 from app.services.agent_registry_service import AgentRegistryService
-from app.services.agent_tools import AGENT_DEFAULT_BINDINGS, agent_tool_registry
+from app.services.agent_tool_config_registry import agent_tool_config_registry
+from app.services.agent_tool_config_service import AgentToolConfigService
 from app.infrastructure import neo4j_client as neo4j
 
 AUTH_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
 _ADMIN = CurrentUser(userId="test-admin", roles=("admin",))
 
+# Agent → tool 绑定常量（仅作测试 fixture；运行时真实绑定来自
+# agent_definition.tool_name + agent_binding_cache，feat-agent-tool-config-db）。
+_AGENT_DEFAULT_BINDINGS: dict[str, str] = {
+    "SUPPLIER_360_AGENT": "supplier_360",
+    "SUPPLIER_RISK_AGENT": "supplier_risk",
+    "GRAPH_REASONING_AGENT": "graph_traverse",
+}
+
 _neo4jAvailable = neo4j.isNeo4jAvailable()
+
+
+_TOOL_SEEDS = [
+    {
+        "name": "supplier_360",
+        "description": "查询单供应商 360° 视图",
+        "data_object": "SUPPLIER",
+        "data_layers": ["DIM", "FEATURE"],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "supplier_360",
+        "arg_extractor_kind": "supplier_key",
+        "enabled": True,
+    },
+    {
+        "name": "supplier_risk",
+        "description": "评估单供应商风险等级",
+        "data_object": "SUPPLIER",
+        "data_layers": ["DIM", "FEATURE"],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "supplier_risk",
+        "arg_extractor_kind": "supplier_risk_key",
+        "enabled": True,
+    },
+    {
+        "name": "graph_traverse",
+        "description": "供应链链路推理",
+        "data_object": "SUPPLIER",
+        "data_layers": ["DIM", "DWD"],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "graph_traverse",
+        "arg_extractor_kind": "supplier_graph_key",
+        "enabled": True,
+    },
+]
 
 
 @pytest.fixture(autouse=True)
 async def warm_binding_cache(dbSession):
-    """每个测试前 warmUp cache（test_agent_tool_binding_runtime.py 风格）。"""
+    """每个测试前：seed 工具配置 → warmUp binding cache → warmUp tool registry。
+
+    T10 lifespan 集成后这里可删（lifespan 自动 seed），T9 阶段测试仍需显式 seed。
+    """
+    service = AgentToolConfigService()
+    for seed in _TOOL_SEEDS:
+        await service.upsertSeed(dbSession, seed["name"], seed)
+    await dbSession.commit()
+
     agent_binding_cache.invalidate()
     await agent_binding_cache.warmUp(dbSession)
+    agent_tool_config_registry.invalidate()
+    await agent_tool_config_registry.warmUp(dbSession)
     yield
     agent_binding_cache.invalidate()
+    agent_tool_config_registry.invalidate()
 
 
 def _defaultPolicies(code: str) -> list[AgentAccessPolicyCreate]:
@@ -60,7 +114,7 @@ def _defaultPolicies(code: str) -> list[AgentAccessPolicyCreate]:
     显式分层（非 None 通配）→ 集成测试在真实最小权限策略上验证运行时分层判定。
     无工具绑定的元数据 Agent → 回退 SUPPLIER@READ 通配（仅展示；运行时在工具门禁 409）。
     """
-    tool_name = AGENT_DEFAULT_BINDINGS.get(code)
+    tool_name = _AGENT_DEFAULT_BINDINGS.get(code)
     if tool_name is None:
         return [
             AgentAccessPolicyCreate(
@@ -70,7 +124,7 @@ def _defaultPolicies(code: str) -> list[AgentAccessPolicyCreate]:
                 notes="集成测试",
             )
         ]
-    tool = agent_tool_registry.get(tool_name)
+    tool = agent_tool_config_registry.get(tool_name)
     assert tool is not None, f"tool {tool_name} 未注册"
     return [
         AgentAccessPolicyCreate(
@@ -95,10 +149,10 @@ async def _seedAgent(
     默认策略用 _defaultPolicies（显式分层），显式传 policies 则覆盖。
     tool_name 写入时从 tool.data_layers 自动推导 data_layers（满足 validator 要求）。
     """
-    tool_name = AGENT_DEFAULT_BINDINGS.get(code)
+    tool_name = _AGENT_DEFAULT_BINDINGS.get(code)
     data_layers = ["FEATURE"]
     if tool_name is not None:
-        tool = agent_tool_registry.get(tool_name)
+        tool = agent_tool_config_registry.get(tool_name)
         if tool is not None:
             data_layers = list(tool.data_layers)
     service = AgentRegistryService()
@@ -303,7 +357,7 @@ class TestRunFailures:
     async def test_run_metadata_agent_without_tool_binding_409(
         self, client: AsyncClient, dbSession: AsyncSession
     ) -> None:
-        """PROCUREMENT_COPILOT_AGENT 无工具绑定（AGENT_DEFAULT_BINDINGS 无此 key）→ 409。"""
+        """PROCUREMENT_COPILOT_AGENT 无工具绑定（_AGENT_DEFAULT_BINDINGS 无此 key）→ 409。"""
         await _seedAgent(dbSession, "PROCUREMENT_COPILOT_AGENT")
         resp = await client.post(
             _run_url("PROCUREMENT_COPILOT_AGENT"),

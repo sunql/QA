@@ -22,6 +22,7 @@ from app.domain.agent_vocabulary import (
 )
 from app.domain.enums import (
     AgentPermission,
+    AgentToolHandlerKind,
     AgentResponseLatency,
     AgentStatus,
     AgentTriggerType,
@@ -2306,3 +2307,86 @@ class AgentRunLogRead(CamelModel):
     actor: str
     started_at: datetime
     finished_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# AgentToolConfig DTOs (feat-agent-tool-config-db, 2026-09-03)
+# ---------------------------------------------------------------------------
+
+
+class _UnsetType:
+    """「未提供」哨兵值（区分 PATCH 语义中的「字段未传」与「显式置空/默认值」）。
+
+    模式参考 entity_mapping_service / kpi_catalog_service 的 PATCH DTO：
+    - 默认值 = UNSET（未提供 → 跳过）
+    - 显式赋 None = 清除（仅 nullable 字段允许）
+    - 显式赋非 None = 更新
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        from pydantic_core import core_schema
+
+        return core_schema.no_info_plain_validator_function(
+            lambda v: v, serialization=core_schema.plain_serializer_function_ser_schema(lambda _: None)
+        )
+
+
+UNSET: _UnsetType = _UnsetType()
+
+
+class AgentToolConfigBase(CamelModel):
+    """Agent 工具配置基础字段（Create/Read 共享；Update 由 UnsetType 区分「未提供」）。"""
+
+    description: str | None = Field(default=None, max_length=2000)
+    data_object: str = Field(min_length=1, max_length=128)
+    data_layers: list[str] = Field(default_factory=list)
+    input_schema: dict = Field(default_factory=dict)
+    handler_kind: AgentToolHandlerKind
+    handler_ref: str = Field(min_length=1, max_length=64)
+    arg_extractor_kind: str = Field(default="supplier_key", max_length=64)
+
+
+class AgentToolConfigCreate(AgentToolConfigBase):
+    """创建 Agent 工具配置请求。"""
+
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+
+    _check_data_object = field_validator("data_object")(_normalizeDataObject)
+
+
+class AgentToolConfigUpdate(CamelModel):
+    """更新 Agent 工具配置请求（PATCH 语义；name 不可改，version 必传用于乐观锁）。"""
+
+    description: _UnsetType | str | None = UNSET
+    data_object: _UnsetType | str = UNSET
+    data_layers: _UnsetType | list[str] = UNSET
+    input_schema: _UnsetType | dict = UNSET
+    handler_kind: _UnsetType | AgentToolHandlerKind = UNSET
+    handler_ref: _UnsetType | str = UNSET
+    arg_extractor_kind: _UnsetType | str = UNSET
+    enabled: _UnsetType | bool = UNSET
+    version: int  # required for optimistic lock
+
+    @field_validator("data_object")
+    @classmethod
+    def _v_data_object(cls, v):
+        if isinstance(v, _UnsetType):
+            return v
+        return _normalizeDataObject(v)
+
+
+class AgentToolConfigRead(AgentToolConfigBase):
+    """Agent 工具配置响应。"""
+
+    id: int
+    name: str
+    version: int
+    enabled: bool
+    created_time: datetime
+    updated_time: datetime | None

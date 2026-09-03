@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import __version__
 from app.api.v1 import (
     agent_runtime,
+    agent_tools,
     agents,
     audit,
     chat,
@@ -72,16 +73,24 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # 注册领域异常处理器（与 main.py 一致）
+    # 注册领域异常处理器（与 main.py 一致）：用 isinstance 而非 __class__.__name__，
+    # 支持子类化（如 _ToolInUseConflict(ConflictError)）正确映射 409。
+    from app.domain.exceptions import (
+        ConflictError,
+        NotFoundError,
+        PermissionDeniedError,
+        ValidationError,
+    )
+
     @testApp.exception_handler(DomainError)
     async def handleDomainError(request, exc: DomainError) -> JSONResponse:
-        if exc.__class__.__name__ == "NotFoundError":
+        if isinstance(exc, NotFoundError):
             status = 404
-        elif exc.__class__.__name__ == "ConflictError":
+        elif isinstance(exc, ConflictError):
             status = 409
-        elif exc.__class__.__name__ == "ValidationError":
+        elif isinstance(exc, ValidationError):
             status = 422
-        elif exc.__class__.__name__ == "PermissionDeniedError":
+        elif isinstance(exc, PermissionDeniedError):
             status = 403
         else:
             status = 400
@@ -146,6 +155,7 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(
         agent_runtime.router, prefix="/api/v1/agents", tags=["agents"]
     )
+    testApp.include_router(agent_tools.router, tags=["agent-tools"])
     testApp.include_router(
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"]
     )

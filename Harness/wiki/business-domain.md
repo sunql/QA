@@ -505,6 +505,39 @@ AgentTool(
 
 `_enforcePolicies` 逐层检查：工具声明的每一层都必须在策略中找到精确匹配（或 `None` 通配），任一缺失 → 403，绝不静默放行。这是 P0 安全补强（避免「只授 FEATURE 实际读到 DIM」的攻击面）。
 
+### AgentToolConfig SSOT（DB-backed 注册表，feat-agent-tool-config-db）
+
+工具**元数据**（`dataObject` / `dataLayers` / `handlerKind` / `handlerRef` /
+`argExtractorKind` / `enabled`）从硬编码 Python dict 迁到 PostgreSQL
+`agent_tool_config` 表，handler 引擎函数继续留在代码里（编译期保证存在，
+DB 不存可执行对象）。SSOT = DB，`AgentToolConfigRegistry` 是启动预热 + 写时失效的缓存层。
+
+```
+agent_tool_config (Alembic 0037)
+├── name (PK 文本)
+├── data_object / data_layers (JSONB) / input_schema (JSONB)
+├── handler_kind (BUILTIN | NL2SQL enum) / handler_ref / arg_extractor_kind
+├── enabled / version (乐观锁，每次 UPDATE +1)
+└── created_time / updated_time
+```
+
+冷启动靠 `seed_agent_tool_configs.py`（lifespan 调用）：从代码侧
+`BUILTIN_HANDLERS` + `NL2SQL_HANDLERS` + `ARG_EXTRACTORS` 派生 3 条 seed
+记录（`supplier_360` / `supplier_risk` / `graph_traverse`），按 name 幂等
+（已存在跳过）。**如果 DB 数据被误删，启动自动恢复**。
+
+Admin 写入口：`POST /api/v1/agent-tools` / `PUT` / `DELETE` /
+`POST /{name}/toggle`（admin-only ACL，409 referencingAgents / 409
+versionConflict / 422 validation），前端 `/admin/tools` 页面。
+
+Runtime 集成：`AgentRuntimeService._resolveTool(session, name)` 先查
+`AgentToolConfigRegistry.get(name)`，缓存命中即返回 `AgentToolAssembly`
+组装好的 handler；handler engine 调用方式不变（向后兼容）。
+
+`seed_agents.py._policiesFor(session, code)` 现在 async：从
+`agent_tool_config_registry.get(tool_name)` 派生显式分层策略（DRY，避免
+seed 侧声明的工具 `data_layers` 与 DB 中实际注册的不一致）。
+
 ### 用户面对的「供应商编码」语义
 
 | 视角 | 编码 | 例子 |

@@ -32,7 +32,7 @@ from typing import Union
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import EntityType, FeatureStatus
+from app.domain.enums import BusinessObjectCode, FeatureStatus
 from app.domain.exceptions import NotFoundError
 from app.domain.models import EntityMapping, FeatureDefinition, FeatureValue
 from app.domain.schemas import (
@@ -77,7 +77,7 @@ class Supplier360Service:
         profile = Supplier360Profile(
             enterprise_key=enterprise_key,
             enterprise_code=enterprise_code,
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
         )
         entity_codes = await self._safeLoadEntityCodes(session, enterprise_key)
         kpis = await self._safeLoadKpis(session, enterprise_code)
@@ -109,7 +109,7 @@ class Supplier360Service:
                         EntityMapping.enterprise_code,
                     )
                     .where(
-                        EntityMapping.entity_type == EntityType.SUPPLIER,
+                        EntityMapping.entity_type == "SUPPLIER",
                         EntityMapping.enterprise_code == str(supplierKey),
                     )
                     .limit(1)
@@ -140,7 +140,7 @@ class Supplier360Service:
                             EntityMapping.enterprise_code,
                         )
                         .where(
-                            EntityMapping.entity_type == EntityType.SUPPLIER,
+                            EntityMapping.entity_type == "SUPPLIER",
                             EntityMapping.enterprise_key == enterprise_key_int,
                         )
                         .limit(1)
@@ -177,7 +177,7 @@ class Supplier360Service:
         try:
             result = await session.execute(
                 select(EntityMapping).where(
-                    EntityMapping.entity_type == EntityType.SUPPLIER,
+                    EntityMapping.entity_type == "SUPPLIER",
                     EntityMapping.enterprise_key == enterpriseKey,
                 )
             )
@@ -272,7 +272,7 @@ class Supplier360Service:
         """
         stmt = select(FeatureDefinition).where(
             FeatureDefinition.feature_name.in_(DEFAULT_SUPPLIER_FEATURES),
-            FeatureDefinition.entity_type == EntityType.SUPPLIER,
+            FeatureDefinition.entity_type == "SUPPLIER",
         )
         result = await session.execute(stmt)
         return {fd.feature_name: fd for fd in result.scalars().all()}

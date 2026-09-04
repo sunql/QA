@@ -27,7 +27,7 @@ from typing import Literal, NamedTuple
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import EntityType
+from app.domain.enums import BusinessObjectCode
 from app.domain.error_messages import (
     MSG_SUPPLIER_NAME_AMBIGUOUS,
     MSG_SUPPLIER_NAME_AMBIGUOUS_OVER_LIMIT,
@@ -127,7 +127,7 @@ class SupplierNameResolver:
                 await session.execute(
                     select(EntityMapping.enterprise_code, EntityMapping.name)
                     .where(
-                        EntityMapping.entity_type == EntityType.SUPPLIER,
+                        EntityMapping.entity_type == "SUPPLIER",
                         EntityMapping.name == name,
                     )
                     .limit(2)
@@ -153,7 +153,7 @@ class SupplierNameResolver:
             (
                 await session.execute(
                     select(EntityMapping.enterprise_code, EntityMapping.name).where(
-                        EntityMapping.entity_type == EntityType.SUPPLIER,
+                        EntityMapping.entity_type == "SUPPLIER",
                         EntityMapping.name.ilike(f"%{name}%"),
                     )
                 )

@@ -35,7 +35,6 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import select
 
-from app.domain.enums import EntityType
 from app.domain.models import DocumentCatalog, DocumentEntityRelation, EntityMapping
 from app.infrastructure import neo4j_client as neo4j
 from app.infrastructure.neo4j_client import (
@@ -46,13 +45,13 @@ from app.infrastructure.neo4j_client import (
 logger = logging.getLogger(__name__)
 
 # EntityType -> Neo4j 业务节点 label（Contract 无 EntityType，由文档目录提供）
-ENTITY_TYPE_LABELS: dict[EntityType, str] = {
-    EntityType.SUPPLIER: "Supplier",
-    EntityType.MATERIAL: "Material",
-    EntityType.PO: "PurchaseOrder",
-    EntityType.GR: "GoodsReceipt",
-    EntityType.IQC: "IncomingInspection",
-    EntityType.NCR: "NCR",
+ENTITY_TYPE_LABELS: dict[str, str] = {
+    "SUPPLIER": "Supplier",
+    "MATERIAL": "Material",
+    "PO": "PurchaseOrder",
+    "GR": "GoodsReceipt",
+    "IQC": "IncomingInspection",
+    "NCR": "NCR",
 }
 
 # Sheet 16 演示流转补充实例（entity_mapping 未覆盖的 GR002/GR003/IQC002/NCR001）：
@@ -161,7 +160,7 @@ class GraphRelationService:
     # ------------------------------------------------------------------
 
     def _dedupeByType(
-        self, mappings: list[EntityMapping], entityType: EntityType
+        self, mappings: list[EntityMapping], entityType: str
     ) -> list[EntityMapping]:
         """按 (entity_type, enterprise_key) 去重（同一实体多源系统映射只产一个节点）。"""
         seen: dict[int, EntityMapping] = {}
@@ -189,7 +188,7 @@ class GraphRelationService:
                     == DocumentEntityRelation.document_id,
                 )
                 .where(
-                    DocumentEntityRelation.entity_type == EntityType.SUPPLIER.value
+                    DocumentEntityRelation.entity_type == "SUPPLIER"
                 )
             )
         ).all()

@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
-from app.domain.enums import DocumentStatus, EntityType
+from app.domain.enums import BusinessObjectCode, DocumentStatus
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import DocumentCatalog, DocumentEntityRelation
 from app.domain.schemas import (
@@ -189,7 +189,7 @@ class DocumentService:
         session: AsyncSession,
         *,
         document_id: str | None = None,
-        entity_type: EntityType | None = None,
+        entity_type: BusinessObjectCode | None = None,
         entity_key: int | None = None,
         limit: int = _DEFAULT_LIMIT,
         offset: int = 0,
@@ -233,7 +233,7 @@ class DocumentService:
             raise ConflictError(
                 MSG_DOCUMENT_REL_EXISTS.format(
                     documentId=dto.document_id,
-                    entityType=dto.entity_type.value,
+                    entityType=dto.entity_type,
                     entityKey=dto.entity_key,
                 )
             )
@@ -251,7 +251,7 @@ class DocumentService:
             raise ConflictError(
                 MSG_DOCUMENT_REL_EXISTS.format(
                     documentId=dto.document_id,
-                    entityType=dto.entity_type.value,
+                    entityType=dto.entity_type,
                     entityKey=dto.entity_key,
                 )
             ) from exc

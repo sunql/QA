@@ -381,6 +381,26 @@ class KpiCatalog(Base, TimestampMixin):
         return f"<KpiCatalog id={self.id} code={self.kpi_code} status={self.status}>"
 
 
+class BusinessObject(Base, TimestampMixin):
+    """业务对象注册表 SSOT（Phase 4）。"""
+
+    __tablename__ = "business_object"
+
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    header_class_id: Mapped[int | None] = mapped_column(
+        BigIntFk,
+        ForeignKey("ontology_class.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    graph_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<BusinessObject code={self.code} name={self.name}>"
+
+
 class FeatureDefinition(Base, TimestampMixin):
     """AI 特征定义（Phase 4.3）。
 

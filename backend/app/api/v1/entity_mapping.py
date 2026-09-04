@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
-from app.domain.enums import EntityType, SourceSystem
+from app.domain.enums import BusinessObjectCode, SourceSystem
 from app.domain.schemas import (
     EntityMappingCreate,
     EntityMappingRead,
@@ -38,7 +38,7 @@ def getEntityMappingService() -> EntityMappingService:
 @router.get("", response_model=list[EntityMappingRead])
 async def listEntityMappings(
     _user: CurrentUser = Depends(getCurrentUser),
-    entityType: EntityType | None = Query(default=None, alias="entityType"),
+    entityType: BusinessObjectCode | None = Query(default=None, alias="entityType"),
     sourceSystem: SourceSystem | None = Query(default=None, alias="sourceSystem"),
     enterpriseKey: int | None = Query(default=None, alias="enterpriseKey"),
     limit: int = Query(default=200, ge=1, le=1000),
@@ -60,7 +60,7 @@ async def listEntityMappings(
 @router.get("/search", response_model=list[EntityMappingSearchHit])
 async def searchEntityMappings(
     q: str = Query(default="", min_length=0, max_length=100, description="搜索关键词：enterprise_code/source_code ILIKE + 全数字时 enterprise_key 精确"),
-    entityType: EntityType | None = Query(default=None, alias="entityType"),
+    entityType: BusinessObjectCode | None = Query(default=None, alias="entityType"),
     limit: int = Query(default=20, ge=1, le=100),
     _user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),

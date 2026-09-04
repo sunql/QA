@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
-from app.domain.enums import EntityType, SourceSystem
+from app.domain.enums import BusinessObjectCode, SourceSystem
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import EntityMapping
 from app.domain.schemas import (
@@ -63,7 +63,7 @@ def _existsError(dto: EntityMappingCreate) -> ValidationError:
     """唯一冲突错误：查重命中与并发 commit 失败共用同一消息。"""
     return ValidationError(
         MSG_ENTITY_MAPPING_EXISTS.format(
-            entityType=dto.entity_type.value,
+            entityType=dto.entity_type,
             enterpriseKey=dto.enterprise_key,
             sourceSystem=dto.source_system.value,
         )
@@ -94,7 +94,7 @@ class EntityMappingService:
         self,
         session: AsyncSession,
         *,
-        entityType: EntityType | None = None,
+        entityType: BusinessObjectCode | None = None,
         sourceSystem: SourceSystem | None = None,
         enterpriseKey: int | None = None,
         limit: int = 200,
@@ -124,7 +124,7 @@ class EntityMappingService:
         session: AsyncSession,
         *,
         q: str,
-        entityType: EntityType | None = None,
+        entityType: BusinessObjectCode | None = None,
         limit: int = 20,
     ) -> list[EntityMapping]:
         """模糊搜索编码映射（Phase 6.x AutoComplete 用）。

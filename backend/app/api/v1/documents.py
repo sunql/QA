@@ -117,7 +117,7 @@ async def deleteDocument(
 async def listRelations(
     document_id: str | None = Query(default=None, alias="documentId"),
     entity_type: BusinessObjectCode | None = Query(default=None, alias="entityType"),
-    entity_key: int | None = Query(default=None, alias="entityKey", ge=1),
+    entity_key: str | None = Query(default=None, alias="entityKey", min_length=1, max_length=100),
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     _user=Depends(getCurrentUser),

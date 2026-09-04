@@ -190,7 +190,7 @@ class DocumentService:
         *,
         document_id: str | None = None,
         entity_type: BusinessObjectCode | None = None,
-        entity_key: int | None = None,
+        entity_key: str | None = None,
         limit: int = _DEFAULT_LIMIT,
         offset: int = 0,
     ) -> list[DocumentEntityRelation]:

@@ -1212,7 +1212,7 @@ class DocumentEntityRelation(Base):
         ForeignKey("business_object.code", ondelete="RESTRICT"),
         nullable=False,
     )
-    entity_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    entity_key: Mapped[str] = mapped_column(String(100), nullable=False)
     relation_type: Mapped[DocEntityRelationType] = mapped_column(
         String(30), nullable=False
     )

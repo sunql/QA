@@ -1985,19 +1985,19 @@ class DocumentRead(CamelModel):
 
 
 class DocEntityRelationCreate(CamelModel):
-    """创建文档-实体关联的请求体（Phase 5.1）。"""
+    """创建文档-实体关联的请求体（Phase 5.1 + entity_key VARCHAR）。"""
     document_id: str = Field(..., min_length=1, max_length=50)
     entity_type: BusinessObjectCode = Field(...)
-    entity_key: int = Field(..., gt=0)
+    entity_key: str = Field(..., min_length=1, max_length=100)
     relation_type: DocEntityRelationType = Field(default=DocEntityRelationType.CONTRACT)
 
 
 class DocEntityRelationRead(CamelModel):
-    """文档-实体关联响应（Phase 5.1）。"""
+    """文档-实体关联响应（Phase 5.1 + entity_key VARCHAR）。"""
     id: int
     document_id: str
     entity_type: str
-    entity_key: int
+    entity_key: str
     relation_type: DocEntityRelationType
 
 

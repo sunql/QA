@@ -145,7 +145,7 @@ class BusinessObjectService:
             description=updates.get("description", row.description),
             created_by=row.created_by,
         )
-        session.add(updated)
+        updated = await session.merge(updated)
         await session.commit()
         await session.refresh(updated)
         return updated

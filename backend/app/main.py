@@ -204,6 +204,7 @@ def createApp() -> FastAPI:
         agent_tools,
         agents,
         audit,
+        business_object,
         chat,
         data_lineage,
         data_quality,
@@ -258,6 +259,9 @@ def createApp() -> FastAPI:
     )
     app.include_router(
         kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"]
+    )
+    app.include_router(
+        business_object.router, prefix="/api/v1", tags=["business-object"]
     )
     app.include_router(features.router, prefix="/api/v1/features", tags=["features"])
     app.include_router(
@@ -317,6 +321,7 @@ def registerExceptionHandlers(app: FastAPI) -> None:
 def _statusFor(exc: DomainError) -> int:
     """领域异常 -> HTTP 状态码。"""
     from app.domain.exceptions import (
+        BusinessObjectGraphLabelMismatchError,
         ConflictError,
         NotFoundError,
         PermissionDeniedError,
@@ -328,6 +333,8 @@ def _statusFor(exc: DomainError) -> int:
     if isinstance(exc, ConflictError):
         return 409
     if isinstance(exc, ValidationError):
+        return 422
+    if isinstance(exc, BusinessObjectGraphLabelMismatchError):
         return 422
     if isinstance(exc, PermissionDeniedError):
         return 403

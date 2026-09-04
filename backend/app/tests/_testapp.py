@@ -21,6 +21,7 @@ from app.api.v1 import (
     agent_tools,
     agents,
     audit,
+    business_object,
     chat,
     data_lineage,
     data_quality,
@@ -136,6 +137,9 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     )
     testApp.include_router(
         kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"]
+    )
+    testApp.include_router(
+        business_object.router, prefix="/api/v1", tags=["business-object"]
     )
     testApp.include_router(features.router, prefix="/api/v1/features", tags=["features"])
     testApp.include_router(

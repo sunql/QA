@@ -363,3 +363,14 @@ MSG_GRAPH_TRAVERSAL_UNAVAILABLE = (
     "知识图谱服务暂时不可用，无法执行多跳推理。请稍后重试，"
     "或改用数据查询问法（如「供应商 X 的订单数」）。"
 )
+
+# =============================================================================
+# Phase 4.4 feat-business-object-registry：业务对象注册表
+# =============================================================================
+
+MSG_BUSINESS_OBJECT_NOT_FOUND = "业务对象「{code}」不存在"
+MSG_BUSINESS_OBJECT_CODE_EXISTS = "业务对象代码「{code}」已存在"
+MSG_BUSINESS_OBJECT_GRAPH_LABEL_MISMATCH = (
+    "业务对象「{code}」的 graph_label 与本体类 class_name 不一致"
+)
+MSG_BUSINESS_OBJECT_IN_USE = "业务对象「{code}」正被以下表引用，无法删除：{tables}"

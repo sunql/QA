@@ -26,13 +26,13 @@ from app.domain.enums import (
     AgentResponseLatency,
     AgentStatus,
     AgentTriggerType,
+    BusinessObjectCode,
     ChartType,
     DataSourceType,
     DocumentSecurityLevel,
     DocumentStatus,
     DocumentType,
     DocEntityRelationType,
-    EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
     KpiStatus,
@@ -647,7 +647,7 @@ class FeatureDefinitionCreate(CamelModel):
     feature_name: str = Field(..., min_length=1, max_length=100)
     feature_alias: str | None = Field(default=None, max_length=200)
     feature_definition: str | None = Field(default=None, max_length=8000)
-    entity_type: EntityType
+    entity_type: BusinessObjectCode
     calculation_logic: str = Field(..., min_length=1, max_length=8000)
     window_size: str | None = Field(default=None, max_length=20)
     refresh_frequency: FeatureRefreshFrequency = FeatureRefreshFrequency.DAILY
@@ -668,7 +668,7 @@ class FeatureDefinitionUpdate(CamelModel):
     feature_name: str | None = Field(default=None, min_length=1, max_length=100)
     feature_alias: str | None = Field(default=None, max_length=200)
     feature_definition: str | None = Field(default=None, max_length=8000)
-    entity_type: EntityType | None = None
+    entity_type: BusinessObjectCode | None = None
     calculation_logic: str | None = Field(default=None, min_length=1, max_length=8000)
     window_size: str | None = Field(default=None, max_length=20)
     refresh_frequency: FeatureRefreshFrequency | None = None
@@ -684,7 +684,7 @@ class FeatureDefinitionRead(CamelModel):
     feature_name: str
     feature_alias: str | None = None
     feature_definition: str | None = None
-    entity_type: EntityType
+    entity_type: BusinessObjectCode
     calculation_logic: str
     window_size: str | None = None
     refresh_frequency: FeatureRefreshFrequency
@@ -719,7 +719,7 @@ class FeatureQueryResponse(CamelModel):
     """
 
     feature_name: str
-    entity_type: EntityType
+    entity_type: BusinessObjectCode
     unit: str | None = None
     valid_at: date
     values: list[FeatureValueRead] = Field(default_factory=list)
@@ -740,7 +740,7 @@ class Supplier360Profile(CamelModel):
 
     enterprise_key: int = Field(..., description="企业统一代理键（MDM 主数据）")
     enterprise_code: str = Field(..., description="企业统一编码（如 SUP000001）")
-    entity_type: EntityType
+    entity_type: BusinessObjectCode
 
 
 class Supplier360Kpi(CamelModel):
@@ -1794,7 +1794,7 @@ class EntityMappingCreate(CamelModel):
     为源系统侧原始标识。同一 (entity_type, enterprise_key, source_system) 不允许重复。
     """
 
-    entity_type: EntityType = Field(..., description=MSG_SCHEMA_ENTITY_MAPPING_ENTITY_TYPE)
+    entity_type: BusinessObjectCode = Field(..., description=MSG_SCHEMA_ENTITY_MAPPING_ENTITY_TYPE)
     enterprise_key: int = Field(
         ...,
         gt=0,
@@ -1843,7 +1843,7 @@ class EntityMappingRead(CamelModel):
     """编码映射响应。"""
 
     id: int
-    entity_type: EntityType
+    entity_type: BusinessObjectCode
     enterprise_key: int
     enterprise_code: str
     source_system: SourceSystem
@@ -1869,7 +1869,7 @@ class EntityMappingSearchHit(CamelModel):
     """
 
     id: int
-    entity_type: EntityType
+    entity_type: BusinessObjectCode
     enterprise_key: int
     enterprise_code: str
     source_system: SourceSystem
@@ -1987,7 +1987,7 @@ class DocumentRead(CamelModel):
 class DocEntityRelationCreate(CamelModel):
     """创建文档-实体关联的请求体（Phase 5.1）。"""
     document_id: str = Field(..., min_length=1, max_length=50)
-    entity_type: EntityType = Field(...)
+    entity_type: BusinessObjectCode = Field(...)
     entity_key: int = Field(..., gt=0)
     relation_type: DocEntityRelationType = Field(default=DocEntityRelationType.CONTRACT)
 
@@ -2390,3 +2390,41 @@ class AgentToolConfigRead(AgentToolConfigBase):
     enabled: bool
     created_time: datetime
     updated_time: datetime | None
+
+
+# ===== 业务对象注册表（Phase 4.4） =====
+
+
+class BusinessObjectCreate(CamelModel):
+    """创建业务对象 (Phase 4.4)."""
+
+    code: BusinessObjectCode = Field(...)
+    name: str = Field(..., min_length=1, max_length=100)
+    header_class_id: int | None = None
+    graph_label: str | None = Field(default=None, max_length=100)
+    description: str | None = Field(default=None, max_length=4000)
+
+
+class BusinessObjectUpdate(CamelModel):
+    """更新业务对象 (code 不可改)."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    header_class_id: int | None = None
+    graph_label: str | None = Field(default=None, max_length=100)
+    description: str | None = Field(default=None, max_length=4000)
+
+
+class BusinessObjectRead(CamelModel):
+    """业务对象响应。
+
+    created_time / updated_time 允许缺省（与 LlmConfigRead 同模式）：DTO 也用于
+    未落库的构造场景，时间戳由 TimestampMixin 在持久化时补齐。
+    """
+
+    code: BusinessObjectCode
+    name: str
+    header_class_id: int | None = None
+    graph_label: str | None = None
+    description: str | None = None
+    created_time: datetime | None = None
+    updated_time: datetime | None = None

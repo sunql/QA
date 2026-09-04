@@ -109,3 +109,19 @@ class PermissionDeniedError(DomainError):
     Phase 4.5 governance hardening：当前仅用于 KpiCatalogService 写入路径，
     后续可扩展到其他实体的 PUT/DELETE 检查。
     """
+
+
+class BusinessObjectGraphLabelMismatchError(ValidationError):
+    """graph_label 与 header_class.class_name 不一致 (Phase 4.4)。
+
+    基类取 ValidationError（写时业务规则校验 → 422）；本代码库无 BusinessRuleError。
+    """
+
+    def __init__(self, code: str, graph_label: str, class_name: str) -> None:
+        super().__init__(
+            f"业务对象 {code} 的 graph_label={graph_label!r} 与 "
+            f"本体类 class_name={class_name!r} 不一致"
+        )
+        self.code = code
+        self.graph_label = graph_label
+        self.class_name = class_name

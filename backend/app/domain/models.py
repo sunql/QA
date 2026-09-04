@@ -39,12 +39,12 @@ from app.domain.enums import (
     AgentResponseLatency,
     AgentStatus,
     AgentTriggerType,
+    BusinessObjectCode,
     DataSourceType,
     DocumentSecurityLevel,
     DocumentStatus,
     DocumentType,
     DocEntityRelationType,
-    EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
     KpiStatus,
@@ -421,7 +421,7 @@ class FeatureDefinition(Base, TimestampMixin):
     feature_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     feature_alias: Mapped[str | None] = mapped_column(String(200), nullable=True)
     feature_definition: Mapped[str | None] = mapped_column(Text, nullable=True)
-    entity_type: Mapped[EntityType] = mapped_column(String(20), nullable=False)
+    entity_type: Mapped[BusinessObjectCode] = mapped_column(String(20), nullable=False)
     calculation_logic: Mapped[str] = mapped_column(Text, nullable=False)
     window_size: Mapped[str | None] = mapped_column(String(20), nullable=True)
     refresh_frequency: Mapped[FeatureRefreshFrequency] = mapped_column(
@@ -1005,7 +1005,7 @@ class EntityMapping(Base, TimestampMixin):
     __tablename__ = "entity_mapping"
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
-    entity_type: Mapped[EntityType] = mapped_column(String(20), nullable=False)
+    entity_type: Mapped[BusinessObjectCode] = mapped_column(String(20), nullable=False)
     enterprise_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
     enterprise_code: Mapped[str] = mapped_column(String(100), nullable=False)
     source_system: Mapped[SourceSystem] = mapped_column(String(20), nullable=False)

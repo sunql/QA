@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: E402
 
-from app.domain.enums import EntityType, MatchRule, SourceSystem  # noqa: E402
+from app.domain.enums import MatchRule, SourceSystem  # noqa: E402
 from app.domain.models import EntityMapping  # noqa: E402
 from app.infrastructure.database import getSessionFactory  # noqa: E402
 
@@ -40,7 +40,7 @@ _DEFAULT_EFFECTIVE = date(2026, 1, 1)
 
 
 def _mapping(
-    entity_type: EntityType,
+    entity_type: str,
     enterprise_key: int,
     enterprise_code: str,
     source_system: SourceSystem,
@@ -75,7 +75,7 @@ def _materialMappings() -> list[dict[str, Any]]:
         code = f"RM-STEEL-{i:03d}"
         rows.append(
             _mapping(
-                EntityType.MATERIAL,
+                "MATERIAL",
                 key,
                 code,
                 SourceSystem.ERP,
@@ -86,7 +86,7 @@ def _materialMappings() -> list[dict[str, Any]]:
         if i <= 5:
             rows.append(
                 _mapping(
-                    EntityType.MATERIAL,
+                    "MATERIAL",
                     key,
                     code,
                     SourceSystem.SRM,
@@ -105,7 +105,7 @@ def _poMappings() -> list[dict[str, Any]]:
         po_no = f"PO202608{i:03d}"
         rows.append(
             _mapping(
-                EntityType.PO,
+                "PO",
                 key,
                 po_no,
                 SourceSystem.ERP,
@@ -120,7 +120,7 @@ def _grIqcMappings() -> list[dict[str, Any]]:
     """1 条收货 + 1 条来料检验业务键。"""
     return [
         _mapping(
-            EntityType.GR,
+            "GR",
             400_001,
             "GR202608001",
             SourceSystem.ERP,
@@ -128,7 +128,7 @@ def _grIqcMappings() -> list[dict[str, Any]]:
             MatchRule.BUSINESS_KEY,
         ),
         _mapping(
-            EntityType.IQC,
+            "IQC",
             500_001,
             "IQC202608001",
             SourceSystem.QMS,

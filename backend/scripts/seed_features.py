@@ -29,7 +29,6 @@ from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: E402
 
 from app.domain.enums import (  # noqa: E402
-    EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
 )
@@ -46,7 +45,7 @@ FEATURE_SEEDS: list[dict[str, Any]] = [
         "feature_name": "SUPPLIER_OTD_3M",
         "feature_alias": "供应商3月准时交付率",
         "feature_definition": "供应商最近 3 个月准时交付率的均值（on_time_rate）。",
-        "entity_type": EntityType.SUPPLIER.value,
+        "entity_type": "SUPPLIER",
         "calculation_logic": (
             "SELECT supplier_code AS entity_key, AVG(on_time_rate) AS value "
             f"FROM THBI.DWS_SUPPLIER_DELIVERY_MONTHLY WHERE {_WINDOW_3M} "
@@ -65,7 +64,7 @@ FEATURE_SEEDS: list[dict[str, Any]] = [
         "feature_name": "SUPPLIER_DEFECT_RATE_3M",
         "feature_alias": "供应商3月来料不良率",
         "feature_definition": "供应商最近 3 个月来料检验不良率的均值（reject_rate）。",
-        "entity_type": EntityType.SUPPLIER.value,
+        "entity_type": "SUPPLIER",
         "calculation_logic": (
             "SELECT supplier_code AS entity_key, AVG(reject_rate) AS value "
             f"FROM THBI.DWS_SUPPLIER_QUALITY_MONTHLY WHERE {_WINDOW_3M} "
@@ -84,7 +83,7 @@ FEATURE_SEEDS: list[dict[str, Any]] = [
         "feature_name": "SUPPLIER_PRICE_VARIANCE_3M",
         "feature_alias": "供应商3月价格偏差率",
         "feature_definition": "供应商最近 3 个月物料价格波动率（max-min 相对 min 的均值）。",
-        "entity_type": EntityType.SUPPLIER.value,
+        "entity_type": "SUPPLIER",
         "calculation_logic": (
             "SELECT supplier_code AS entity_key, "
             "AVG((max_net_unit_price - min_net_unit_price) / NULLIF(min_net_unit_price, 0)) AS value "
@@ -104,7 +103,7 @@ FEATURE_SEEDS: list[dict[str, Any]] = [
         "feature_name": "SUPPLIER_RISK_SCORE",
         "feature_alias": "供应商风险评分",
         "feature_definition": "供应商综合风险评分（0-1，越高越优）：OTD 权重 0.6 + 一次合格率权重 0.4。",
-        "entity_type": EntityType.SUPPLIER.value,
+        "entity_type": "SUPPLIER",
         "calculation_logic": (
             "SELECT d.supplier_code AS entity_key, "
             "AVG(d.on_time_rate) * 0.6 + (1 - AVG(q.reject_rate)) * 0.4 AS value "
@@ -127,7 +126,7 @@ FEATURE_SEEDS: list[dict[str, Any]] = [
         "feature_name": "MATERIAL_SHORTAGE_RISK",
         "feature_alias": "物料缺货风险",
         "feature_definition": "物料价格波动率代理的缺货风险（价格波动越大，供应越不稳定）；暂无库存缺料 DWS。",
-        "entity_type": EntityType.MATERIAL.value,
+        "entity_type": "MATERIAL",
         # HAVING price_line_count>=3 过滤样本不足的物料：12M 全量去重后 39456 个物料_code
         # 远超 10000 行上限；价格波动率对仅 1-2 条记录的物料无统计意义，过滤后 7089 个。
         "calculation_logic": (

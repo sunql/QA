@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: E402
 
-from app.domain.enums import DocEntityRelationType, EntityType  # noqa: E402
+from app.domain.enums import DocEntityRelationType  # noqa: E402
 from app.domain.models import DocumentEntityRelation, EntityMapping  # noqa: E402
 from app.infrastructure.database import getSessionFactory  # noqa: E402
 from app.services.graph_relation_service import GraphRelationService  # noqa: E402
@@ -55,7 +55,7 @@ async def _seedDocumentRelations(session) -> int:
             pg_insert(DocumentEntityRelation)
             .values(
                 document_id=docId,
-                entity_type=EntityType.SUPPLIER.value,
+                entity_type="SUPPLIER",
                 entity_key=supplierKey,
                 relation_type=DocEntityRelationType.CONTRACT,
             )

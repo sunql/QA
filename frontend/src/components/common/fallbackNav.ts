@@ -23,6 +23,7 @@ export const FALLBACK_NAV: readonly { key: string; labelKey: string }[] = [
   { key: "/supplier-risk", labelKey: "appLayout.menu.supplierRisk" },
   { key: "/agents/run", labelKey: "appLayout.menu.agentRuntime" },
   { key: "/agents", labelKey: "appLayout.menu.agents" },
+  { key: "/business-objects", labelKey: "appLayout.menu.businessObjects" },
   { key: "/documents", labelKey: "appLayout.menu.documents" },
   { key: "/admin/audit", labelKey: "appLayout.menu.adminAudit" },
 ] as const;

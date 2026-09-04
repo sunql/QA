@@ -52,6 +52,7 @@ export const enUS = {
       supplierRisk: "Supplier Risk",
       agentRuntime: "Agent Runtime",
       agents: "Agent Registry",
+      businessObjects: "Business Objects",
       documents: "Document Center",
       adminAudit: "Audit Logs",
     },
@@ -1295,6 +1296,37 @@ export const enUS = {
       versionConflict: "Version conflict, please refresh and retry",
       inUseByAgent: "Tool is referenced by Agent(s) {agentCodes}, cannot delete",
       nameImmutable: "Tool name cannot be changed after creation",
+    },
+  },
+
+  businessObject: {
+    title: "Business Objects",
+    newButton: "New Business Object",
+    columns: {
+      code: "Code",
+      name: "Name",
+      headerClassId: "Header Class",
+      graphLabel: "Graph Label",
+      description: "Description",
+      updatedTime: "Updated Time",
+    },
+    filters: {
+      code: "Code",
+      name: "Name",
+    },
+    modal: {
+      createTitle: "New Business Object",
+      editTitle: "Edit Business Object",
+      confirmDelete: "Delete business object \"{code}\"?",
+    },
+    messages: {
+      loadFailed: "Failed to load business objects",
+      createSuccess: "Created",
+      updateSuccess: "Updated",
+      deleteSuccess: "Deleted",
+    },
+    placeholders: {
+      selectHeaderClass: "Select header ontology class (optional)",
     },
   },
 } as const;

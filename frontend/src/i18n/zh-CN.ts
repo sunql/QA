@@ -58,6 +58,7 @@ export const zhCN = {
       supplierRisk: "供应商风险",
       agentRuntime: "Agent 运行时",
       agents: "Agent Registry",
+      businessObjects: "业务对象",
       documents: "文档中心",
       adminAudit: "审计日志",
     },
@@ -1311,6 +1312,37 @@ export const zhCN = {
       versionConflict: "版本冲突，请刷新后重试",
       inUseByAgent: "该工具被 Agent {agentCodes} 引用，无法删除",
       nameImmutable: "工具名创建后不可修改",
+    },
+  },
+
+  businessObject: {
+    title: "业务对象",
+    newButton: "新建业务对象",
+    columns: {
+      code: "代码",
+      name: "名称",
+      headerClassId: "头表类",
+      graphLabel: "图标签",
+      description: "描述",
+      updatedTime: "更新时间",
+    },
+    filters: {
+      code: "代码",
+      name: "名称",
+    },
+    modal: {
+      createTitle: "新建业务对象",
+      editTitle: "编辑业务对象",
+      confirmDelete: "确定删除业务对象「{code}」？",
+    },
+    messages: {
+      loadFailed: "加载业务对象失败",
+      createSuccess: "创建成功",
+      updateSuccess: "更新成功",
+      deleteSuccess: "删除成功",
+    },
+    placeholders: {
+      selectHeaderClass: "选择头表本体类（可选）",
     },
   },
 } as const;

@@ -16,7 +16,6 @@ from app.domain.enums import (
     DocumentStatus,
     DocumentType,
     DocEntityRelationType,
-    EntityType,
 )
 from app.domain.exceptions import ConflictError, NotFoundError
 from app.domain.models import DocumentCatalog
@@ -184,7 +183,7 @@ class TestDocumentEntityRelationService:
     def _rel_dto(self, document_id: str, **overrides) -> DocEntityRelationCreate:
         kw = {
             "document_id": document_id,
-            "entity_type": EntityType.SUPPLIER,
+            "entity_type": "SUPPLIER",
             "entity_key": 100001,
             "relation_type": DocEntityRelationType.CONTRACT,
         }

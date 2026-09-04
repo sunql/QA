@@ -19,7 +19,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import (
-    EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
     MatchRule,
@@ -54,7 +53,7 @@ async def _seedDatasource(dbSession: AsyncSession) -> DataSource:
 async def _seedSupplier(dbSession: AsyncSession, key: int, code: str) -> None:
     dbSession.add(
         EntityMapping(
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
             enterprise_key=key,
             enterprise_code=code,
             source_system=SourceSystem.ERP,
@@ -83,7 +82,7 @@ async def _seedFeatureAndValue(
             feature_name=feature_name,
             feature_alias=feature_name,
             feature_definition="auto",
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
             calculation_logic="SELECT 1",
             window_size=window,
             refresh_frequency=FeatureRefreshFrequency.DAILY,

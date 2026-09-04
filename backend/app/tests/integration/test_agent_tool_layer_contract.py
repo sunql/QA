@@ -18,7 +18,6 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import (
-    EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
     MatchRule,
@@ -93,7 +92,7 @@ async def _seed(dbSession: AsyncSession) -> None:
     )
     dbSession.add(
         EntityMapping(
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
             enterprise_key=_SUPPLIER_KEY,
             enterprise_code=_SUPPLIER_CODE,
             source_system=SourceSystem.ERP,
@@ -109,7 +108,7 @@ async def _seed(dbSession: AsyncSession) -> None:
             feature_name="SUPPLIER_RISK_SCORE",
             feature_alias="综合风险评分",
             feature_definition="auto",
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
             calculation_logic="SELECT 1",
             window_size="12M",
             refresh_frequency=FeatureRefreshFrequency.DAILY,

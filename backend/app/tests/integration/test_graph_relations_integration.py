@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.domain.enums import DocEntityRelationType, EntityType
+from app.domain.enums import DocEntityRelationType
 from app.domain.models import DocumentEntityRelation, EntityMapping
 from app.infrastructure import neo4j_client as neo4j
 from app.services.graph_relation_service import GraphRelationService
@@ -143,7 +143,7 @@ class TestSeedGraphRelationsEndToEnd:
         dbSession.add(
             DocumentEntityRelation(
                 document_id="DOC-SMOKE-001",
-                entity_type=EntityType.SUPPLIER.value,
+                entity_type="SUPPLIER",
                 entity_key=100_001,
                 relation_type=DocEntityRelationType.CONTRACT,
             )

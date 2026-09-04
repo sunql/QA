@@ -13,7 +13,6 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import (
-    EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
     MatchRule,
@@ -50,7 +49,7 @@ async def _seedNamedSupplier(
 ) -> None:
     dbSession.add(
         EntityMapping(
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
             enterprise_key=key,
             enterprise_code=code,
             source_system=SourceSystem.ERP,
@@ -71,7 +70,7 @@ async def _seedOtdFeature(dbSession: AsyncSession, code: str) -> None:
             feature_name="SUPPLIER_OTD_3M",
             feature_alias="SUPPLIER_OTD_3M",
             feature_definition="auto",
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
             calculation_logic="SELECT 1",
             window_size="3M",
             refresh_frequency=FeatureRefreshFrequency.DAILY,

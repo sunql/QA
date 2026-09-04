@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 
 import app.infrastructure.neo4j_client as neo4j_module
-from app.domain.enums import EntityType, MatchRule, SourceSystem
+from app.domain.enums import MatchRule, SourceSystem
 from app.services.graph_relation_service import GraphRelationService
 
 # =============================================================================
@@ -88,7 +88,7 @@ def _allQueries(driver: _MockDriver) -> list[tuple[str, dict]]:
 class _FakeMapping:
     """EntityMapping 的最小替身（仅 seedGraphRelations 用到的字段）。"""
 
-    def __init__(self, entityType: EntityType, key: int, code: str) -> None:
+    def __init__(self, entityType: str, key: int, code: str) -> None:
         self.entity_type = entityType
         self.enterprise_key = key
         self.enterprise_code = code
@@ -225,14 +225,14 @@ class TestSheet16Edges:
 def _sampleMappings() -> list[_FakeMapping]:
     """2 供应商（各 2 源系统映射，验证去重）+ 2 物料 + 1 PO + 1 GR + 1 IQC。"""
     return [
-        _FakeMapping(EntityType.SUPPLIER, 100_001, "SUP000001"),
-        _FakeMapping(EntityType.SUPPLIER, 100_001, "SUP000001"),  # SRM 重复源
-        _FakeMapping(EntityType.SUPPLIER, 100_002, "SUP000002"),
-        _FakeMapping(EntityType.MATERIAL, 200_001, "RM-STEEL-001"),
-        _FakeMapping(EntityType.MATERIAL, 200_002, "RM-STEEL-002"),
-        _FakeMapping(EntityType.PO, 300_001, "PO202608001"),
-        _FakeMapping(EntityType.GR, 400_001, "GR202608001"),
-        _FakeMapping(EntityType.IQC, 500_001, "IQC202608001"),
+        _FakeMapping("SUPPLIER", 100_001, "SUP000001"),
+        _FakeMapping("SUPPLIER", 100_001, "SUP000001"),  # SRM 重复源
+        _FakeMapping("SUPPLIER", 100_002, "SUP000002"),
+        _FakeMapping("MATERIAL", 200_001, "RM-STEEL-001"),
+        _FakeMapping("MATERIAL", 200_002, "RM-STEEL-002"),
+        _FakeMapping("PO", 300_001, "PO202608001"),
+        _FakeMapping("GR", 400_001, "GR202608001"),
+        _FakeMapping("IQC", 500_001, "IQC202608001"),
     ]
 
 
@@ -331,9 +331,9 @@ class TestSeedGraphRelations:
         """同一 enterprise_key 多源系统（ERP/SRM/QMS）映射只产一个节点。"""
         service = GraphRelationService()
         mappings = [
-            _FakeMapping(EntityType.SUPPLIER, 100_001, "SUP000001"),
-            _FakeMapping(EntityType.SUPPLIER, 100_001, "SUP000001"),
-            _FakeMapping(EntityType.SUPPLIER, 100_001, "SUP000001"),
+            _FakeMapping("SUPPLIER", 100_001, "SUP000001"),
+            _FakeMapping("SUPPLIER", 100_001, "SUP000001"),
+            _FakeMapping("SUPPLIER", 100_001, "SUP000001"),
         ]
         session = _FakeSession(mappings, [])
         result = await service.seedGraphRelations(session)

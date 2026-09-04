@@ -13,7 +13,6 @@ import pytest
 from pydantic import ValidationError
 
 from app.domain.enums import (
-    EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
 )
@@ -50,7 +49,7 @@ class TestFeatureDefinitionSchemas:
             datasourceId=4,
         )
         assert dto.feature_name == "SUPPLIER_OTD_3M"
-        assert dto.entity_type == EntityType.SUPPLIER
+        assert dto.entity_type == "SUPPLIER"
         # 默认值
         assert dto.status == FeatureStatus.DRAFT
         assert dto.refresh_frequency == FeatureRefreshFrequency.DAILY

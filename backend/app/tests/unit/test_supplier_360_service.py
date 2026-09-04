@@ -18,7 +18,6 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import (
-    EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
     MatchRule,
@@ -62,7 +61,7 @@ async def _seedSupplierMappings(
     """SUP000001 × {ERP, SRM} 两条。"""
     rows = [
         EntityMapping(
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
             enterprise_key=key,
             enterprise_code=code,
             source_system=SourceSystem.ERP,
@@ -72,7 +71,7 @@ async def _seedSupplierMappings(
             owner="procurement",
         ),
         EntityMapping(
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
             enterprise_key=key,
             enterprise_code=code,
             source_system=SourceSystem.SRM,
@@ -100,7 +99,7 @@ async def _seedFeature(
         feature_name=feature_name,
         feature_alias=alias,
         feature_definition="auto seeded for test",
-        entity_type=EntityType.SUPPLIER,
+        entity_type="SUPPLIER",
         calculation_logic="SELECT 1",
         window_size="3M",
         refresh_frequency=FeatureRefreshFrequency.DAILY,
@@ -153,7 +152,7 @@ async def test_get_supplier_360_returns_profile_and_codes(dbSession: AsyncSessio
     assert isinstance(result, Supplier360Read)
     assert result.profile.enterprise_key == 100001
     assert result.profile.enterprise_code == "SUP000001"
-    assert result.profile.entity_type == EntityType.SUPPLIER
+    assert result.profile.entity_type == "SUPPLIER"
     # 2 条 ERP/SRM 映射
     assert len(result.entity_codes) == 2
     sources = {c.source_system for c in result.entity_codes}

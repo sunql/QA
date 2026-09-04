@@ -20,7 +20,6 @@ from typing import Any
 import pytest
 
 import scripts.sync_entity_mapping_from_thbi as sync_mod
-from app.domain.enums import EntityType
 from scripts.sync_entity_mapping_from_thbi import (
     _MATERIAL_KEY_OFFSET,
     _SUPPLIER_KEY_OFFSET,
@@ -175,10 +174,10 @@ class TestBuildAllRows:
 
     def test_mapping_name_normalized(self) -> None:
         # 空白被 strip；None/空串落库为 NULL（不写空字符串）
-        assert _mapping(EntityType.SUPPLIER, "X", offset=800_000, name="   ")["name"] is None
-        assert _mapping(EntityType.SUPPLIER, "X", offset=800_000, name=None)["name"] is None
+        assert _mapping("SUPPLIER", "X", offset=800_000, name="   ")["name"] is None
+        assert _mapping("SUPPLIER", "X", offset=800_000, name=None)["name"] is None
         long = "a" * 300
-        assert len(_mapping(EntityType.SUPPLIER, "X", offset=800_000, name=long)["name"]) == 200
+        assert len(_mapping("SUPPLIER", "X", offset=800_000, name=long)["name"]) == 200
 
     def test_builds_supplier_and_material_rows(self) -> None:
         rows = _buildAllRows(

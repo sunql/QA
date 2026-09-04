@@ -1044,7 +1044,7 @@ class EntityMapping(Base, TimestampMixin):
     def __repr__(self) -> str:
         return (
             f"<EntityMapping id={self.id} "
-            f"{self.entity_type.value} key={self.enterprise_key} "
+            f"{self.entity_type} key={self.enterprise_key} "
             f"via {self.source_system.value}/{self.source_key}>"
         )
 

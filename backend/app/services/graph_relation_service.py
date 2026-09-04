@@ -12,12 +12,12 @@
 
 关系语义（Sheet 16 采购域流转）::
 
-    (:Supplier)-[:SUPPLIES]->(:Material)
-    (:PurchaseOrder)-[:CONTAINS]->(:Material)
-    (:PurchaseOrder)-[:GENERATES]->(:GoodsReceipt)
-    (:GoodsReceipt)-[:INSPECTED_BY]->(:IncomingInspection)
-    (:IncomingInspection)-[:GENERATED]->(:NCR)
+    (:Supplier)-[:SUPPLIES]->(:ItemMaster)
+    (:PurchaseOrder)-[:CONTAINS]->(:ItemMaster)
+    (:PurchaseOrder)-[:GENERATES]->(:Receipt)
+    (:Receipt)-[:INSPECTED_BY]->(:IncomingInspection)
     (:Supplier)-[:SIGNED]->(:Contract)
+    # 注：Phase 4.4 NCR 不入图，GENERATED 边已删除
 
 设计约束：
 - 幂等：节点 MERGE on key、边 MERGE on (两端 + 类型)，重复 seed 不产生重复数据；
@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import select
 
-from app.domain.models import DocumentCatalog, DocumentEntityRelation, EntityMapping
+from app.domain.models import BusinessObject, DocumentCatalog, DocumentEntityRelation, EntityMapping
 from app.infrastructure import neo4j_client as neo4j
 from app.infrastructure.neo4j_client import (
     BUSINESS_ENTITY_LABELS,
@@ -44,24 +44,39 @@ from app.infrastructure.neo4j_client import (
 
 logger = logging.getLogger(__name__)
 
-# EntityType -> Neo4j 业务节点 label（Contract 无 EntityType，由文档目录提供）
-ENTITY_TYPE_LABELS: dict[str, str] = {
-    "SUPPLIER": "Supplier",
-    "MATERIAL": "Material",
-    "PO": "PurchaseOrder",
-    "GR": "GoodsReceipt",
-    "IQC": "IncomingInspection",
-    "NCR": "NCR",
-}
-
 # Sheet 16 演示流转补充实例（entity_mapping 未覆盖的 GR002/GR003/IQC002/NCR001）：
 # 键位与 seed_entity_mapping 的 400_001/500_001 同段位，保证子图键空间一致。
+# Label 使用新名（ItemMaster / Receipt），与 neo4j_client BUSINESS_ENTITY_LABELS 对齐。
 _SHEET16_EXTRA_ENTITIES: tuple[tuple[str, str, str], ...] = (
-    ("GoodsReceipt", "400002", "GR202608002"),
-    ("GoodsReceipt", "400003", "GR202608003"),
+    ("Receipt", "400002", "GR202608002"),
+    ("Receipt", "400003", "GR202608003"),
     ("IncomingInspection", "500002", "IQC202608002"),
-    ("NCR", "600001", "NCR202608001"),
 )
+
+# DB-derived label map cache（启动期一次性加载）
+_LABEL_CACHE: dict[str, str] | None = None
+
+
+async def _loadLabelMap(session) -> dict[str, str]:
+    """启动期一次性读 business_object.graph_label -> 内存 cache。"""
+    global _LABEL_CACHE
+    if _LABEL_CACHE is None:
+        rows = (
+            await session.execute(
+                select(BusinessObject.code, BusinessObject.graph_label).where(
+                    BusinessObject.graph_label.is_not(None)
+                )
+            )
+        ).all()
+        _LABEL_CACHE = {code: label for code, label in rows}
+    return _LABEL_CACHE
+
+
+def _labelFor(code: str, label_map: dict[str, str]) -> str:
+    """code -> Neo4j label；不存在时抛 ValueError。"""
+    if code not in label_map:
+        raise ValueError(f"Unknown business_object code for Neo4j label: {code!r}")
+    return label_map[code]
 
 
 @dataclass(frozen=True)
@@ -82,14 +97,16 @@ class GraphRelationService:
         nodesBySource: dict[str, int] = {}
         edgesByType: dict[str, int] = {}
 
-        # ---- 1. entity_mapping -> 业务实体节点 ------------------------------
+        # ---- 1. entity_mapping -> 业务实体节点（DB-derived label） -------------
+        label_map = await _loadLabelMap(session)
         mappings = (await session.execute(select(EntityMapping))).scalars().all()
-        for entityType, label in ENTITY_TYPE_LABELS.items():
-            rows = self._dedupeByType(mappings, entityType)
+        for code in label_map:
+            label = label_map[code]
+            rows = self._dedupeByKey([m for m in mappings if m.entity_type == code])
             for m in rows:
                 neo4j.upsertBusinessEntityNode(
                     label=label,
-                    key=str(m.enterprise_key),
+                    key=m.enterprise_code,
                     code=m.enterprise_code,
                     name=m.enterprise_code,
                     source="entity_mapping",
@@ -159,13 +176,13 @@ class GraphRelationService:
     # internal helpers
     # ------------------------------------------------------------------
 
-    def _dedupeByType(
-        self, mappings: list[EntityMapping], entityType: str
+    def _dedupeByKey(
+        self, mappings: list[EntityMapping]
     ) -> list[EntityMapping]:
-        """按 (entity_type, enterprise_key) 去重（同一实体多源系统映射只产一个节点）。"""
+        """按 enterprise_key 去重（同一实体多源系统映射只产一个节点）。"""
         seen: dict[int, EntityMapping] = {}
         for m in mappings:
-            if m.entity_type == entityType and m.enterprise_key not in seen:
+            if m.enterprise_key not in seen:
                 seen[m.enterprise_key] = m
         return list(seen.values())
 
@@ -205,40 +222,36 @@ class GraphRelationService:
         - SUPPLIES：供应商 i 供应物料 {(3i-2, 3i-1, 3i) mod 10}，10 供应商 × 3 = 30 条；
         - CONTAINS：PO202608{i} 含物料 3i-2..3i（i=1..3）= 9 条；
         - GENERATES：PO001-003 -> GR001-003 = 3 条；
-        - INSPECTED_BY：GR001/GR002 -> IQC001/IQC002 = 2 条；
-        - GENERATED：IQC001 -> NCR001 = 1 条。
-        共 45 条（加 SIGNED 边后 ≥ Phase 6 验收要求的 30 条）。
+        - INSPECTED_BY：GR001/GR002 -> IQC001/IQC002 = 2 条。
+        共 44 条（加 SIGNED 边后 ≥ Phase 6 验收要求的 30 条）。
+        删除 GENERATED：Phase 4.4 NCR 不入图。
         """
         supplierCount = 10
         materialCount = 10
 
         supplies = [
-            (str(100_000 + i), str(200_000 + materialIndex), "Supplier", "Material")
+            (str(100_000 + i), str(200_000 + materialIndex), "Supplier", "ItemMaster")
             for i in range(1, supplierCount + 1)
             for materialIndex in self._suppliedMaterialIndexes(i, materialCount)
         ]
         contains = [
-            (str(300_000 + i), str(200_000 + m), "PurchaseOrder", "Material")
+            (str(300_000 + i), str(200_000 + m), "PurchaseOrder", "ItemMaster")
             for i in (1, 2, 3)
             for m in (3 * i - 2, 3 * i - 1, 3 * i)
         ]
         poGenerates = [
-            (str(300_000 + i), str(400_000 + i), "PurchaseOrder", "GoodsReceipt")
+            (str(300_000 + i), str(400_000 + i), "PurchaseOrder", "Receipt")
             for i in (1, 2, 3)
         ]
         inspectedBy = [
-            (str(400_000 + i), str(500_000 + i), "GoodsReceipt", "IncomingInspection")
+            (str(400_000 + i), str(500_000 + i), "Receipt", "IncomingInspection")
             for i in (1, 2)
-        ]
-        generated = [
-            (str(500_001), str(600_001), "IncomingInspection", "NCR")
         ]
         return [
             ("SUPPLIES", supplies),
             ("CONTAINS", contains),
             ("GENERATES", poGenerates),
             ("INSPECTED_BY", inspectedBy),
-            ("GENERATED", generated),
         ]
 
     def _suppliedMaterialIndexes(self, supplierIndex: int, materialCount: int) -> list[int]:
@@ -261,17 +274,19 @@ class GraphRelationService:
 
         返回违规项列表（空 = 通过）；防止两边常量漂移。
         """
-        violations = [
-            label
-            for label in ENTITY_TYPE_LABELS.values()
-            if label not in BUSINESS_ENTITY_LABELS
-        ]
+        violations: list[str] = []
+        # DB-derived label map（运行时已缓存）
+        label_map = _LABEL_CACHE or {}
+        for label in label_map.values():
+            if label not in BUSINESS_ENTITY_LABELS:
+                violations.append(label)
+        # Contract 由文档目录提供，需显式检查
         if "Contract" not in BUSINESS_ENTITY_LABELS:
             violations.append("Contract")
         for label, _, _ in _SHEET16_EXTRA_ENTITIES:
             if label not in BUSINESS_ENTITY_LABELS:
                 violations.append(label)
-        for relType in ("SUPPLIES", "CONTAINS", "GENERATES", "INSPECTED_BY", "GENERATED", "SIGNED"):
+        for relType in ("SUPPLIES", "CONTAINS", "GENERATES", "INSPECTED_BY", "SIGNED"):
             if relType not in BUSINESS_RELATION_TYPES:
                 violations.append(relType)
         return violations

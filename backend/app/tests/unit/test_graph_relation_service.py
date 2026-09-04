@@ -107,6 +107,16 @@ class _FakeResult:
         return self._rows
 
 
+# Fake BusinessObject rows for _loadLabelMap
+_BUSINESS_OBJECT_ROWS = [
+    ("SUPPLIER", "Supplier"),
+    ("MATERIAL", "ItemMaster"),
+    ("PO", "PurchaseOrder"),
+    ("GR", "Receipt"),
+    ("IQC", "IncomingInspection"),
+]
+
+
 class _FakeSession:
     """select(...) 按查询对象分发的最小 fake。"""
 
@@ -116,6 +126,8 @@ class _FakeSession:
 
     async def execute(self, query):
         queryText = str(query)
+        if "business_object" in queryText and "graph_label" in queryText:
+            return _FakeResult(_BUSINESS_OBJECT_ROWS)
         if "entity_mapping" in queryText:
             return _FakeResult(self._mappings)
         if "document_entity_relation" in queryText:
@@ -197,9 +209,9 @@ class TestSheet16Edges:
         assert len(edges["CONTAINS"]) == 9
         assert len(edges["GENERATES"]) == 3
         assert len(edges["INSPECTED_BY"]) == 2
-        assert len(edges["GENERATED"]) == 1
+        assert "GENERATED" not in edges  # Phase 4.4: NCR 不入图
         total = sum(len(v) for v in edges.values())
-        assert total == 45  # 30 + 9 + 3 + 2 + 1
+        assert total == 44  # 30 + 9 + 3 + 2
 
     def test_supplier_supplies_exactly_three_materials(self) -> None:
         service = GraphRelationService()
@@ -243,13 +255,13 @@ class TestSeedGraphRelations:
         result = await service.seedGraphRelations(session)
 
         # 去重后：2 supplier + 2 material + 1 PO + 1 GR + 1 IQC = 7
-        # + sheet16_demo 4 个补充节点 + document_catalog 0
+        # + sheet16_demo 3 个补充节点（ItemMaster×0 / Receipt×2 / IQC×1） + document_catalog 0
         assert result.nodesBySource["entity_mapping"] == 7
-        assert result.nodesBySource["sheet16_demo"] == 4
-        assert result.nodeCount == 11
+        assert result.nodesBySource["sheet16_demo"] == 3
+        assert result.nodeCount == 10
         # 全部 Sheet 16 边都会写入（边派生是静态的，与 PG 行数无关）
         assert result.edgesByType["SUPPLIES"] == 30
-        assert result.edgeCount == 45
+        assert result.edgeCount == 44
 
     async def test_node_cql_structure(self, mockNeo4j) -> None:
         service = GraphRelationService()
@@ -269,8 +281,8 @@ class TestSeedGraphRelations:
         assert params["source"] == "entity_mapping"
         # label 经白名单拼接后只能是已知值
         assert any(f"MERGE (b:BusinessEntity:{label}" in cql for cql, _ in nodeQueries
-                   for label in ["Supplier", "Material", "PurchaseOrder",
-                                 "GoodsReceipt", "IncomingInspection", "NCR"])
+                   for label in ["Supplier", "ItemMaster", "PurchaseOrder",
+                                 "Receipt", "IncomingInspection"])
 
     async def test_edge_cql_uses_match_not_merge_for_nodes(
         self, mockNeo4j
@@ -300,7 +312,7 @@ class TestSeedGraphRelations:
 
         assert result.nodesBySource["document_catalog"] == 2
         assert result.edgesByType["SIGNED"] == 2
-        assert result.edgeCount == 47  # 45 + 2 SIGNED
+        assert result.edgeCount == 46  # 44 + 2 SIGNED
 
         # Contract 节点 + SIGNED 边的 CQL 断言
         queries = _allQueries(mockNeo4j)
@@ -321,11 +333,11 @@ class TestSeedGraphRelations:
         """entity_mapping / document 关联全空时仍写入 Sheet 16 演示流。"""
         service = GraphRelationService()
         result = await service.seedGraphRelations(_FakeSession([], []))
-        assert result.nodesBySource["sheet16_demo"] == 4
+        assert result.nodesBySource["sheet16_demo"] == 3
         assert result.nodesBySource.get("entity_mapping", 0) == 0
         assert result.nodesBySource["document_catalog"] == 0
-        assert result.nodeCount == 4
-        assert result.edgeCount == 45
+        assert result.nodeCount == 3
+        assert result.edgeCount == 44
 
     async def test_dedup_multiple_source_systems(self, mockNeo4j) -> None:
         """同一 enterprise_key 多源系统（ERP/SRM/QMS）映射只产一个节点。"""

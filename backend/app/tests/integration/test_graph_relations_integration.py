@@ -144,7 +144,7 @@ class TestSeedGraphRelationsEndToEnd:
             DocumentEntityRelation(
                 document_id="DOC-SMOKE-001",
                 entity_type="SUPPLIER",
-                entity_key=100_001,
+                entity_key="100001",
                 relation_type=DocEntityRelationType.CONTRACT,
             )
         )

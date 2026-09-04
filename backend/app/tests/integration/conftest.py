@@ -57,6 +57,11 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
 
     await seedAgentToolConfigs(dbSession)
     await dbSession.commit()
+    # Seed business_object rows so FK targets exist for entity_mapping /
+    # feature_definition / document_entity_relation tests (Task 8 FK constraint).
+    from scripts.seed_business_objects import seedBusinessObjects
+
+    await seedBusinessObjects(dbSession)
 
     agent_binding_cache.invalidate()
     await agent_binding_cache.warmUp(dbSession)

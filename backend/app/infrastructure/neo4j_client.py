@@ -50,7 +50,6 @@ BUSINESS_RELATION_TYPES = frozenset(
         "CONTAINS",
         "GENERATES",
         "INSPECTED_BY",
-        "GENERATED",
         "SIGNED",
     }
 )

@@ -55,7 +55,6 @@ class TestSeedGraphRelationsEndToEnd:
         assert result.edgesByType["CONTAINS"] == 9
         assert result.edgesByType["GENERATES"] == 3
         assert result.edgesByType["INSPECTED_BY"] == 2
-        assert result.edgesByType["GENERATED"] == 1
 
         # 图内实际计数一致
         assert neo4j.countBusinessNodes() == result.nodeCount

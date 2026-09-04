@@ -12,8 +12,6 @@
 """
 from __future__ import annotations
 
-from typing import Any
-
 from neo4j import Driver
 
 # 标签来自受控常量（非用户输入），CQL 拼接防注入在此上下文中不适用

@@ -1996,7 +1996,7 @@ class DocEntityRelationRead(CamelModel):
     """文档-实体关联响应（Phase 5.1 + entity_key VARCHAR）。"""
     id: int
     document_id: str
-    entity_type: str
+    entity_type: BusinessObjectCode
     entity_key: str
     relation_type: DocEntityRelationType
 

@@ -72,13 +72,6 @@ async def _loadLabelMap(session) -> dict[str, str]:
     return _LABEL_CACHE
 
 
-def _labelFor(code: str, label_map: dict[str, str]) -> str:
-    """code -> Neo4j label；不存在时抛 ValueError。"""
-    if code not in label_map:
-        raise ValueError(f"Unknown business_object code for Neo4j label: {code!r}")
-    return label_map[code]
-
-
 @dataclass(frozen=True)
 class GraphSeedResult:
     """seed 执行结果（不可变）。"""

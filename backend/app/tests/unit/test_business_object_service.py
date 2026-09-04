@@ -10,7 +10,6 @@ from app.domain.exceptions import (
 )
 from app.domain.schemas import (
     BusinessObjectCreate,
-    BusinessObjectUpdate,
 )
 from app.services.business_object_service import BusinessObjectService
 from app.services.messages_zh import (
@@ -79,6 +78,20 @@ async def test_create_object_graph_label_mismatch_raises(
             ),
             actor="alice",
         )
+
+
+# --- updateObject -----------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_update_object_not_found_raises(
+    svc: BusinessObjectService, session: AsyncMock
+) -> None:
+    session.get.return_value = None
+    with pytest.raises(NotFoundError) as exc:
+        await svc.updateObject(
+            session, "UNKNOWN", MagicMock(name="X")  # dto fields don't matter when not found
+        )
+    assert "UNKNOWN" in str(exc.value)
 
 
 # --- deleteObject -----------------------------------------------------------

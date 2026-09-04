@@ -7,8 +7,6 @@ SSOT = business_object 表；Neo4j label 与 ontology_class.class_name 对齐。
 """
 from __future__ import annotations
 
-from typing import Any
-
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -138,11 +136,19 @@ class BusinessObjectService:
             await self._assertGraphLabelMatches(
                 session, code, new_class_id, new_label
             )
-        for field, value in updates.items():
-            setattr(row, field, value)
+        # Construct a new instance instead of mutating the existing row (immutability rule)
+        updated = BusinessObject(
+            code=row.code,
+            name=updates.get("name", row.name),
+            header_class_id=updates.get("header_class_id", row.header_class_id),
+            graph_label=updates.get("graph_label", row.graph_label),
+            description=updates.get("description", row.description),
+            created_by=row.created_by,
+        )
+        session.add(updated)
         await session.commit()
-        await session.refresh(row)
-        return row
+        await session.refresh(updated)
+        return updated
 
     async def deleteObject(
         self, session: AsyncSession, code: str

@@ -10,6 +10,7 @@ import os
 from collections.abc import AsyncIterator
 
 import pytest
+import pytest_asyncio
 import seed_ontology
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -50,6 +51,30 @@ async def seedEngine(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[asy
         yield factory, engine
     finally:
         await engine.dispose()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def warmBusinessObjectRegistry(dbSession: AsyncSession) -> AsyncIterator[None]:
+    """每个 unit 测试前 warmUp businessObjectRegistry。
+
+    Unit 测试不走 lifespan（TestClient/TestApp 不触发 startup），原 in-memory
+    registry 未 warmed；BeforeValidator（_validateBusinessObjectCode）会因
+    'Registry 未 warmUp' 抛 RuntimeError。
+
+    seed_business_objects 先 upsert FK 目标行，确保 registry warmUp 能加载到数据。
+
+    commit() 关掉 warmUp SELECT 留下的隐式事务，避免 AccessShareLock 阻塞
+    并发测试的 TRUNCATE（d01a4e1 教训）。
+    """
+    from app.services.business_object_registry import businessObjectRegistry
+    from scripts.seed_business_objects import seedBusinessObjects
+
+    await seedBusinessObjects(dbSession)
+    businessObjectRegistry.invalidate()
+    await businessObjectRegistry.warmUp(dbSession)
+    await dbSession.commit()
+    yield
+    businessObjectRegistry.invalidate()
 
 
 # 别名：只用 session 的地方注入 dbSession 即可

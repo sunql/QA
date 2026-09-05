@@ -70,7 +70,17 @@ describe("BusinessObjectPage", () => {
     listClassesMock.mockResolvedValue([supplierClass, purchaseOrderClass]);
     const { listBusinessObjects } = await import("../api/businessObject");
     vi.mocked(listBusinessObjects).mockReset();
-    vi.mocked(listBusinessObjects).mockResolvedValue([]);
+    vi.mocked(listBusinessObjects).mockResolvedValue([
+      {
+        code: "SUPPLIER",
+        name: "供应商",
+        graphLabel: "Supplier",
+        headerClassId: null,
+        description: null,
+        createdTime: "2026-09-04T00:00:00Z",
+        updatedTime: "2026-09-04T00:00:00Z",
+      },
+    ]);
   });
 
   it("renders title and new button", async () => {

@@ -1,44 +1,34 @@
-// BusinessObject types (Phase 4.4)
+// BusinessObject types (Phase 4.4 + Phase 4.6 dynamic registry)
 // snake_case DB fields are camelCased by backend CamelModel alias_generator
 
-export type BusinessObjectCode =
-  | "SUPPLIER"
-  | "MATERIAL"
-  | "PO"
-  | "GR"
-  | "IQC"
-  | "NCR";
+/** Business object — DB-backed, codes live in `business_object` table.
+ *  Use string at the type level since codes are now dynamically configurable. */
+export type BusinessObjectCode = string;
 
-export const BUSINESS_OBJECT_OPTIONS: BusinessObjectCode[] = [
-  "SUPPLIER",
-  "MATERIAL",
-  "PO",
-  "GR",
-  "IQC",
-  "NCR",
-];
+/** Read shape returned by GET /api/v1/business-objects. */
+export interface BusinessObject {
+  code: string;
+  name: string;
+  headerClassId?: number | null;
+  graphLabel?: string | null;
+  description?: string | null;
+  createdTime: string;
+  updatedTime: string;
+}
 
-export interface BusinessObjectBase {
+/** Shape for POST /api/v1/business-objects. */
+export interface BusinessObjectCreate {
+  code: string;
   name: string;
   headerClassId?: number | null;
   graphLabel?: string | null;
   description?: string | null;
 }
 
-export interface BusinessObjectCreate extends BusinessObjectBase {
-  code: BusinessObjectCode;
-}
-
+/** Shape for PUT /api/v1/business-objects/{code}. */
 export interface BusinessObjectUpdate {
   name?: string;
   headerClassId?: number | null;
   graphLabel?: string | null;
   description?: string | null;
-}
-
-export interface BusinessObjectRead extends BusinessObjectCreate {
-  /** ISO datetime string; null when DTO is used in unpersisted construction */
-  createdTime?: string;
-  /** ISO datetime string; null when DTO is used in unpersisted construction */
-  updatedTime?: string;
 }

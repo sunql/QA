@@ -13,9 +13,8 @@ import {
 } from "antd";
 import { useTranslation } from "react-i18next";
 import {
-  BUSINESS_OBJECT_OPTIONS,
   type BusinessObjectCreate,
-  type BusinessObjectRead,
+  type BusinessObject,
   type BusinessObjectUpdate,
 } from "../types/businessObject";
 import {
@@ -29,10 +28,10 @@ import type { OntologyClass } from "../types/ontology";
 
 export default function BusinessObjectPage() {
   const { t } = useTranslation();
-  const [rows, setRows] = useState<BusinessObjectRead[]>([]);
+  const [rows, setRows] = useState<BusinessObject[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
-  const [editing, setEditing] = useState<BusinessObjectRead | null>(null);
+  const [editing, setEditing] = useState<BusinessObject | null>(null);
   const [classes, setClasses] = useState<OntologyClass[]>([]);
   const [form] = Form.useForm();
 
@@ -88,7 +87,7 @@ export default function BusinessObjectPage() {
     setModalOpen(true);
   };
 
-  const onEdit = (row: BusinessObjectRead) => {
+  const onEdit = (row: BusinessObject) => {
     setEditing(row);
     // 若已选本体类但 graphLabel 与 className 不一致（历史脏数据），按现规则重新派生
     const linkedClass =
@@ -192,7 +191,7 @@ export default function BusinessObjectPage() {
             {editing ? (
               <Input disabled />
             ) : (
-              <Select options={BUSINESS_OBJECT_OPTIONS.map((c) => ({ value: c, label: c }))} />
+              <Select options={rows.map((bo) => ({ value: bo.code, label: bo.code }))} />
             )}
           </Form.Item>
           <Form.Item name="name" label={t("businessObject.columns.name")} rules={[{ required: true }]}>

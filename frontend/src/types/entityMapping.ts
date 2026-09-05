@@ -8,7 +8,7 @@
  * 仅在 Read DTO 中按响应展示 owner（用于列表展示该实体由哪个部门治理）。
  */
 
-export type EntityType = "SUPPLIER" | "MATERIAL" | "PO" | "GR" | "IQC" | "NCR";
+export type EntityType = string;
 
 export type SourceSystem = "ERP" | "SRM" | "QMS" | "MDM" | "PLM";
 

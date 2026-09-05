@@ -272,3 +272,25 @@ def test_all_generated_expressions_pass_validation():
     for s in sugg:
         assert s.rule_expression is not None
         validate_expression(s.rule_expression)
+
+
+def test_blocked_datetime_property_does_not_generate_consistency():
+    edge = JoinEdgeMeta(target_table="PORDERQ", source_columns=["PO_KEY"],
+                        target_columns=["PO_KEY"], target_date_columns=["RECEIPT_DATE"])
+    sugg, blocked = deriveSuggestions(
+        CTX, [_prop(property_name="ghost_date", source_column="NOPE",
+                    data_type="DATETIME", is_primary_key=False)],
+        [edge], SCHEMA)
+    assert any("NOPE" in b.reason for b in blocked)
+    assert not [s for s in sugg if s.rule_type == RuleType.CONSISTENCY]
+
+
+def test_join_edge_column_mismatch_raises():
+    edge = JoinEdgeMeta(target_table="PORDERQ", source_columns=["PO_KEY"],
+                        target_columns=["PO_KEY", "LINE_NO"],
+                        target_date_columns=["RECEIPT_DATE"])
+    with pytest.raises(ValidationError):
+        deriveSuggestions(
+            CTX, [_prop(property_name="po_date", source_column="PO_DATE",
+                        data_type="DATETIME", is_primary_key=False)],
+            [edge], SCHEMA)

@@ -1,4 +1,4 @@
-"""规则推导引擎（feat-dq-rule-auto-generation spec §3/§5）：纯函数、无 IO。"""
+"""规则推导引擎（feat-dq-rule-auto-generation spec §3/§5)：纯函数、无 IO。"""
 from __future__ import annotations
 
 import hashlib
@@ -31,7 +31,6 @@ class ClassContext:
     source_table: str | None
     object_type: str | None
 
-
 @dataclass(frozen=True)
 class PropertyMeta:
     property_id: int
@@ -44,18 +43,15 @@ class PropertyMeta:
     ref_key_column: str | None = None
     allowed_values: list[str] | None = None
 
-
 @dataclass(frozen=True)
 class ColumnMeta:
     column_name: str
     data_type: str
     nullable: bool
 
-
 @dataclass(frozen=True)
 class SchemaIndex:
     tables: dict[str, dict[str, ColumnMeta]] = field(default_factory=dict)
-
 
 @dataclass(frozen=True)
 class JoinEdgeMeta:
@@ -63,7 +59,6 @@ class JoinEdgeMeta:
     source_columns: list[str]
     target_columns: list[str]
     target_date_columns: list[str]
-
 
 @dataclass(frozen=True)
 class RuleSuggestion:
@@ -80,12 +75,10 @@ class RuleSuggestion:
     confidence: str
     reason: str
 
-
 @dataclass(frozen=True)
 class BlockedProperty:
     property_name: str
     reason: str
-
 
 def buildRuleCode(className: str, propertyName: str, ruleType: RuleType) -> str:
     """DQ_<CLASS>_<PROP>_<TYPE>；超长截断 + sha256 短后缀，保证 pattern 与唯一性倾向。"""
@@ -95,15 +88,12 @@ def buildRuleCode(className: str, propertyName: str, ruleType: RuleType) -> str:
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:7]
     return f"{raw[:_RULE_CODE_MAX - 8]}_{digest}"
 
-
 def _slug(value: str) -> str:
     out = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").upper()
     return out or "X"
 
-
 def _quoteId(value: str) -> str:
     return f'"{value}"'
-
 
 def deriveSuggestions(
     ctx: ClassContext,
@@ -122,6 +112,7 @@ def deriveSuggestions(
 
     suggestions: list[RuleSuggestion] = []
     blocked: list[BlockedProperty] = []
+    resolvedProps: list[PropertyMeta] = []
     for prop in properties:
         if prop.source_column is not None:
             validate_identifier(prop.source_column, role="source_column")
@@ -141,10 +132,10 @@ def deriveSuggestions(
             if prop.ref_key_column is None:
                 blocked.append(BlockedProperty(prop.property_name, "引用类未配置主键列映射"))
                 continue
+        resolvedProps.append(prop)
         suggestions.extend(_deriveForProperty(ctx, prop, col))
-    suggestions.extend(_deriveJoinConsistency(ctx, properties, joinEdges))
+    suggestions.extend(_deriveJoinConsistency(ctx, resolvedProps, joinEdges))
     return suggestions, blocked
-
 
 def _deriveForProperty(
     ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta
@@ -176,7 +167,6 @@ def _deriveForProperty(
 
     return out
 
-
 def _deriveAllowedValues(
     ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta
 ) -> RuleSuggestion:
@@ -192,7 +182,6 @@ def _deriveAllowedValues(
         ctx, prop, RuleType.VALIDITY, DerivationType.ALLOWED_VALUES,
         f"{col.column_name} IN ({quoted})", "HIGH", "固定值域",
     )
-
 
 def _deriveRef(ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta) -> RuleSuggestion:
     ref = prop.ref_class
@@ -210,7 +199,6 @@ def _deriveRef(ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta) -> RuleSu
         ctx, prop, RuleType.REFERENTIAL, DerivationType.FK_DERIVED,
         f"REF {refTable}.{refColumn}", "HIGH", "外键参照",
     )
-
 
 def _deriveTypeRegex(ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta) -> RuleSuggestion | None:
     if not any(family in col.data_type.lower() for family in _PHYSICAL_TEXT_FAMILY):
@@ -233,7 +221,6 @@ def _deriveTypeRegex(ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta) -> 
         expr, "MEDIUM", "类型不匹配正则校验", severity=Severity.LOW,
     )
 
-
 def _deriveJoinConsistency(
     ctx: ClassContext, properties: list[PropertyMeta], joinEdges: list[JoinEdgeMeta]
 ) -> list[RuleSuggestion]:
@@ -241,6 +228,8 @@ def _deriveJoinConsistency(
     table = ctx.source_table or ""
     for edge in joinEdges:
         validate_identifier(edge.target_table, role="target_table")
+        if len(edge.source_columns) != len(edge.target_columns):
+            raise ValidationError("join 边 source_columns 与 target_columns 长度不一致")
         for col in edge.source_columns + edge.target_columns + edge.target_date_columns:
             validate_identifier(col, role="join_column")
         for prop in properties:
@@ -254,7 +243,6 @@ def _deriveJoinConsistency(
                 ))
     return out
 
-
 def _buildJoinExpression(
     sourceTable: str, sourceDate: str, edge: JoinEdgeMeta, targetDate: str
 ) -> str:
@@ -266,7 +254,6 @@ def _buildJoinExpression(
         f"EXISTS (SELECT 1 FROM {_quoteId(edge.target_table)} WHERE {joinCond} "
         f"AND {_quoteId(edge.target_table)}.{_quoteId(targetDate)} >= {_quoteId(sourceTable)}.{_quoteId(sourceDate)})"
     )
-
 
 def _makeSuggestion(
     ctx: ClassContext,

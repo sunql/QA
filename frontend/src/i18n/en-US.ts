@@ -29,6 +29,11 @@ export const enUS = {
     emDash: "—",
     next: "Next",
     prev: "Previous",
+    parse: "Parse",
+    reasoning: "Reasoning",
+    rationale: "Rationale",
+    aiAssistApply: "Apply Suggestions",
+    suggestedThresholds: "Suggested Thresholds",
   },
 
   appLayout: {
@@ -1183,6 +1188,7 @@ export const enUS = {
       policy_description: "Policy Description",
       policyDescriptionPlaceholder: "Natural language description of the rule's business meaning",
       thresholds: "Threshold Config",
+      addThreshold: "Add Threshold",
       version: "Version (Optimistic Lock)",
     },
     messages: {

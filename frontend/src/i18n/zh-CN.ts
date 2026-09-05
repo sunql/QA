@@ -35,6 +35,11 @@ export const zhCN = {
     emDash: "—",
     next: "下一步",
     prev: "上一步",
+    parse: "解析",
+    reasoning: "推理过程",
+    rationale: "理由",
+    aiAssistApply: "应用建议",
+    suggestedThresholds: "建议阈值",
   },
 
   appLayout: {
@@ -1199,6 +1204,7 @@ export const zhCN = {
       policy_description: "策略描述",
       policyDescriptionPlaceholder: "自然语言描述该规则的业务含义",
       thresholds: "阈值配置",
+      addThreshold: "添加阈值",
       version: "版本（乐观锁）",
     },
     messages: {

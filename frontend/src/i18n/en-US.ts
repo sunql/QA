@@ -1326,8 +1326,14 @@ export const enUS = {
       updateSuccess: "Updated",
       deleteSuccess: "Deleted",
     },
+    tooltips: {
+      headerClassId: "Link to an ontology class; graph label is auto-derived from its className",
+      graphLabelAuto: "Auto-derived from the header class; switching the header class updates it",
+    },
     placeholders: {
-      selectHeaderClass: "Select header ontology class (optional)",
+      selectHeaderClass: "Search by class name or alias (optional)",
+      graphLabelAuto: "(auto-filled after picking a header class)",
+      noClass: "No ontology classes available",
     },
   },
 } as const;

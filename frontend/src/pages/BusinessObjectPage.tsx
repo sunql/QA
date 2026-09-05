@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Button,
   Form,
@@ -9,6 +9,7 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
 } from "antd";
 import { useTranslation } from "react-i18next";
 import {
@@ -23,15 +24,8 @@ import {
   listBusinessObjects,
   updateBusinessObject,
 } from "../api/businessObject";
-
-const BUSINESS_ENTITY_LABELS = [
-  "Supplier",
-  "ItemMaster",
-  "PurchaseOrder",
-  "Receipt",
-  "IncomingInspection",
-  "Contract",
-];
+import { listClasses } from "../api/ontology";
+import type { OntologyClass } from "../types/ontology";
 
 export default function BusinessObjectPage() {
   const { t } = useTranslation();
@@ -39,7 +33,31 @@ export default function BusinessObjectPage() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<BusinessObjectRead | null>(null);
+  const [classes, setClasses] = useState<OntologyClass[]>([]);
   const [form] = Form.useForm();
+
+  // 本体类选项（label 含别名，方便模糊匹配时一眼看出）
+  const classOptions = useMemo(
+    () =>
+      classes.map((c) => ({
+        value: c.id,
+        label: c.classAlias ? `${c.className}（${c.classAlias}）` : c.className,
+        data: c,
+      })),
+    [classes],
+  );
+
+  // 自定义过滤：大小写不敏感，对 className + classAlias 做子串匹配
+  const filterClassOption = (input: string, option?: { data?: OntologyClass }) => {
+    const cls = option?.data;
+    if (!cls) return false;
+    const needle = input.trim().toLowerCase();
+    if (!needle) return true;
+    return (
+      (cls.className ?? "").toLowerCase().includes(needle) ||
+      (cls.classAlias ?? "").toLowerCase().includes(needle)
+    );
+  };
 
   const load = async () => {
     setLoading(true);
@@ -50,8 +68,18 @@ export default function BusinessObjectPage() {
     }
   };
 
+  const loadClasses = async () => {
+    try {
+      setClasses(await listClasses());
+    } catch {
+      // 加载失败时允许表单仍然打开（用户只能保存无本体类的业务对象）
+      setClasses([]);
+    }
+  };
+
   useEffect(() => {
     void load();
+    void loadClasses();
   }, []);
 
   const onCreate = () => {
@@ -62,11 +90,17 @@ export default function BusinessObjectPage() {
 
   const onEdit = (row: BusinessObjectRead) => {
     setEditing(row);
+    // 若已选本体类但 graphLabel 与 className 不一致（历史脏数据），按现规则重新派生
+    const linkedClass =
+      row.headerClassId != null
+        ? classes.find((c) => c.id === row.headerClassId)
+        : undefined;
+    const derivedGraphLabel = linkedClass?.className ?? row.graphLabel ?? undefined;
     form.setFieldsValue({
       code: row.code,
       name: row.name,
       headerClassId: row.headerClassId ?? undefined,
-      graphLabel: row.graphLabel ?? undefined,
+      graphLabel: derivedGraphLabel,
       description: row.description ?? undefined,
     });
     setModalOpen(true);
@@ -164,11 +198,39 @@ export default function BusinessObjectPage() {
           <Form.Item name="name" label={t("businessObject.columns.name")} rules={[{ required: true }]}>
             <Input />
           </Form.Item>
-          <Form.Item name="graphLabel" label={t("businessObject.columns.graphLabel")}>
+          <Form.Item
+            name="headerClassId"
+            label={t("businessObject.columns.headerClassId")}
+            tooltip={t("businessObject.tooltips.headerClassId")}
+          >
             <Select
               allowClear
-              options={BUSINESS_ENTITY_LABELS.map((l) => ({ value: l, label: l }))}
+              showSearch
               placeholder={t("businessObject.placeholders.selectHeaderClass")}
+              options={classOptions}
+              filterOption={filterClassOption}
+              optionFilterProp="label"
+              notFoundContent={t("businessObject.placeholders.noClass")}
+              onChange={(_value, option) => {
+                const cls = (option as { data?: OntologyClass } | undefined)?.data;
+                // 选本体类 → 自动派生 graphLabel；清空 → 同步清空 graphLabel
+                form.setFieldsValue({
+                  graphLabel: cls?.className ?? undefined,
+                });
+              }}
+            />
+          </Form.Item>
+          <Form.Item
+            name="graphLabel"
+            label={
+              <Tooltip title={t("businessObject.tooltips.graphLabelAuto")}>
+                {t("businessObject.columns.graphLabel")}
+              </Tooltip>
+            }
+          >
+            <Input
+              disabled
+              placeholder={t("businessObject.placeholders.graphLabelAuto")}
             />
           </Form.Item>
           <Form.Item name="description" label={t("businessObject.columns.description")}>

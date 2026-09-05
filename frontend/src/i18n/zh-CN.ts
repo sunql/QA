@@ -1342,8 +1342,14 @@ export const zhCN = {
       updateSuccess: "更新成功",
       deleteSuccess: "删除成功",
     },
+    tooltips: {
+      headerClassId: "关联到本体类；图标签将按其 className 自动派生",
+      graphLabelAuto: "由头表类自动派生，编辑时切换头表类即可同步",
+    },
     placeholders: {
-      selectHeaderClass: "选择头表本体类（可选）",
+      selectHeaderClass: "搜索类名 / 别名以选择本体类（可选）",
+      graphLabelAuto: "（选本体类后自动填充）",
+      noClass: "暂无本体类",
     },
   },
 } as const;

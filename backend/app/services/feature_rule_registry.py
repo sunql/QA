@@ -116,8 +116,30 @@ class FeatureRuleRegistry:
             if row is None or not row.enabled:
                 self._rules.clear()
                 return
-            # 简化：整组重 warmUp
-            await self.warmUp(session)
+            # Fetch thresholds for this one rule only; inline the single-rule merge.
+            from app.domain.models import FeatureRuleThreshold
+            t_rows = (
+                await session.execute(
+                    select(FeatureRuleThreshold).where(
+                        FeatureRuleThreshold.rule_id == rule_id
+                    )
+                )
+            ).scalars().all()
+            thresholds = tuple(FeatureThresholdReady(
+                severity=t.severity, operator=t.operator,
+                threshold_value=t.threshold_value, unit=t.unit,
+                threshold_order=t.threshold_order,
+            ) for t in t_rows)
+            ready = FeatureRuleReady(
+                id=row.id, code=row.code, data_object=row.data_object,
+                data_layer=row.data_layer, target_level=row.target_level,
+                feature_name=row.feature_name, enabled=row.enabled,
+                priority=row.priority, thresholds=thresholds,
+            )
+            key = (row.data_object, row.data_layer, row.target_level)
+            # Remove the old version of this rule from the bucket (by id), then add new.
+            bucket = self._rules.get(key, [])
+            self._rules[key] = [r for r in bucket if r.id != rule_id] + [ready]
 
 
 feature_rule_registry = FeatureRuleRegistry()

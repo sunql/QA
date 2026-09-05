@@ -2,7 +2,8 @@
 
 约束：
 - 标识符白名单：SQL 标识符必须匹配 ^[A-Za-z_][A-Za-z0-9_]*$，失败抛 ValidationError。
-- 表达式白名单：rule_expression 仅允许字母/数字/下划线 + 比较算术 + 括号 + 小数点。
+- 表达式白名单：rule_expression 允许字母/数字/下划线 + 比较算术 + 括号 + 小数点 +
+  单引号字面量（值域 IN 列表）+ POSIX 正则运算符（~ ^ $ { } [ ] ?）+ :: 转型。
   失败抛 ValidationError。
 - 单条 SQL 走 BusinessDbAdapter.execute_read_only，自动享受只读护栏 + 行数 + 超时。
 
@@ -58,7 +59,8 @@ def validate_identifier(value: str, *, role: str) -> str:
 
 
 def validate_expression(value: str) -> str:
-    """校验 rule_expression 仅含安全 token（标识符 + 比较 + 算术 + 括号）。
+    """校验 rule_expression 仅含安全 token（标识符 + 比较 + 算术 + 括号 + 值域字面量
+    + POSIX 正则运算符 + :: 转型）。
 
     拒绝任何 DDL/DML/UNION/注释关键字。
     """
@@ -66,7 +68,8 @@ def validate_expression(value: str) -> str:
         raise ValidationError("rule_expression 不能为空")
     if not _EXPR_RE.match(value):
         raise ValidationError(
-            f"表达式包含非法字符（仅允许标识符 + 比较 + 算术 + 括号）: {value!r}"
+            f"表达式包含非法字符（仅允许标识符 + 比较 + 算术 + 括号 + "
+            f"单引号字面量 / POSIX 正则 ~ ^ $ {{ }} [ ] ? / :: 转型）: {value!r}"
         )
     upper = value.upper()
     for kw in _FORBIDDEN_KEYWORDS:

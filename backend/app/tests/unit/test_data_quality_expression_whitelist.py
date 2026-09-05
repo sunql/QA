@@ -18,11 +18,11 @@ def test_extended_expressions_pass(expr: str) -> None:
     assert validate_expression(expr) == expr
 
 
-@pytest.mark.parametrize("expr", [
-    "STATUS IN ('A'); DROP TABLE X",   # 含分号（不在白名单）
-    "COL ~ 'x' UNION SELECT 1",        # UNION 黑名单
-    "COL ~ 'x' -- comment",            # 注释
+@pytest.mark.parametrize("expr,reason", [
+    ("STATUS IN ('A'); DROP TABLE X", "非法字符"),   # 分号不在白名单
+    ("COL ~ 'x' UNION SELECT 1", "禁用关键字"),     # UNION 黑名单
+    ("COL ~ 'x' -- comment", "禁用关键字"),         # 注释
 ])
-def test_injection_still_blocked(expr: str) -> None:
-    with pytest.raises(ValidationError):
+def test_injection_still_blocked(expr: str, reason: str) -> None:
+    with pytest.raises(ValidationError, match=reason):
         validate_expression(expr)

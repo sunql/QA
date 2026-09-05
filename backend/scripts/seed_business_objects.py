@@ -85,12 +85,27 @@ def _seed_rows(header_map: dict[str, int]) -> list[dict[str, Any]]:
 
 
 async def seedBusinessObjects(session: AsyncSession) -> int:
-    """幂等 seed 业务对象。返回本次新增行数."""
+    """幂等 seed 业务对象（upsert）。
+
+    行为：每次执行都把 6 行的 name/header_class_id/graph_label/description
+    同步到当前 ontology_class 派生出的值。即使先前以 NULL header_class_id
+    INSERT（如 ontology_class 迁移尚未就绪时），后续重跑会自动回填。
+
+    返回：本次受影响行数（新增 + 更新）。
+    """
     header_map = await _header_class_id_map(session)
     rows = _seed_rows(header_map)
 
     stmt = pg_insert(BusinessObject).values(rows)
-    stmt = stmt.on_conflict_do_nothing(index_elements=["code"])
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["code"],
+        set_={
+            "name": stmt.excluded.name,
+            "header_class_id": stmt.excluded.header_class_id,
+            "graph_label": stmt.excluded.graph_label,
+            "description": stmt.excluded.description,
+        },
+    )
     result = await session.execute(stmt)
     await session.commit()
     return result.rowcount or 0
@@ -100,12 +115,12 @@ async def main() -> None:
     """CLI 入口：连接默认 DB，跑 seed."""
     import asyncio
 
-    from app.infrastructure.database import getAsyncSessionMaker
+    from app.infrastructure.database import getSessionFactory
 
-    session_maker = getAsyncSessionMaker()
+    session_maker = getSessionFactory()
     async with session_maker() as session:
-        inserted = await seedBusinessObjects(session)
-        print(f"[seed_business_objects] 本次新增 {inserted} 条")
+        upserted = await seedBusinessObjects(session)
+        print(f"[seed_business_objects] 本次 upsert {upserted} 条（新增 + 回填）")
 
 
 if __name__ == "__main__":

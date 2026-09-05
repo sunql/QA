@@ -27,6 +27,7 @@ from app.domain.schemas import (
     BusinessObjectCreate,
     BusinessObjectUpdate,
 )
+from app.services.business_object_registry import businessObjectRegistry
 from app.services.messages_zh import (
     MSG_BUSINESS_OBJECT_CODE_EXISTS,
     MSG_BUSINESS_OBJECT_IN_USE,
@@ -120,6 +121,7 @@ class BusinessObjectService:
                 MSG_BUSINESS_OBJECT_CODE_EXISTS.format(code=dto.code)
             ) from exc
         await session.refresh(obj)
+        await businessObjectRegistry.reloadOne(session, dto.code)
         return obj
 
     async def updateObject(
@@ -148,6 +150,7 @@ class BusinessObjectService:
         updated = await session.merge(updated)
         await session.commit()
         await session.refresh(updated)
+        await businessObjectRegistry.reloadOne(session, code)
         return updated
 
     async def deleteObject(
@@ -174,3 +177,4 @@ class BusinessObjectService:
             )
         await session.delete(row)
         await session.commit()
+        await businessObjectRegistry.reloadOne(session, code)

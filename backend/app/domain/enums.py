@@ -197,6 +197,10 @@ BusinessObjectCode = Literal[
 
 取代原 EntityType 枚举（Phase 3.1），后者的硬编码枚举值已由 business_object
 表接管为单点事实。
+
+DEPRECATED: Use BusinessObjectCodeType (Pydantic BeforeValidator) for runtime
+validation against the business_object table. The Literal is kept for static
+type-checker backward compatibility only — it will not reject new codes.
 """
 
 

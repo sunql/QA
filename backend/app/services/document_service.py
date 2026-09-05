@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
-from app.domain.enums import BusinessObjectCode, DocumentStatus
+from app.domain.enums import DocumentStatus
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import DocumentCatalog, DocumentEntityRelation
 from app.domain.schemas import (
@@ -189,7 +189,7 @@ class DocumentService:
         session: AsyncSession,
         *,
         document_id: str | None = None,
-        entity_type: BusinessObjectCode | None = None,
+        entity_type: str | None = None,
         entity_key: str | None = None,
         limit: int = _DEFAULT_LIMIT,
         offset: int = 0,

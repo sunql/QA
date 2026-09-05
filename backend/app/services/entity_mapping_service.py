@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
-from app.domain.enums import BusinessObjectCode, SourceSystem
+from app.domain.enums import SourceSystem
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import EntityMapping
 from app.domain.schemas import (
@@ -94,7 +94,7 @@ class EntityMappingService:
         self,
         session: AsyncSession,
         *,
-        entityType: BusinessObjectCode | None = None,
+        entityType: str | None = None,
         sourceSystem: SourceSystem | None = None,
         enterpriseKey: int | None = None,
         limit: int = 200,
@@ -124,7 +124,7 @@ class EntityMappingService:
         session: AsyncSession,
         *,
         q: str,
-        entityType: BusinessObjectCode | None = None,
+        entityType: str | None = None,
         limit: int = 20,
     ) -> list[EntityMapping]:
         """模糊搜索编码映射（Phase 6.x AutoComplete 用）。

@@ -5,8 +5,8 @@ from fastapi import APIRouter, Depends, Path, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
-from app.domain.enums import BusinessObjectCode
 from app.domain.schemas import (
+    BusinessObjectCodeType,
     BusinessObjectCreate,
     BusinessObjectRead,
     BusinessObjectUpdate,
@@ -35,7 +35,7 @@ async def listBusinessObjects(
 
 @router.get("/{code}", response_model=BusinessObjectRead)
 async def getBusinessObject(
-    code: BusinessObjectCode = Path(...),
+    code: BusinessObjectCodeType = Path(...),
     session: AsyncSession = Depends(getDb),
     service: BusinessObjectService = Depends(getBusinessObjectService),
 ) -> BusinessObjectRead:
@@ -59,7 +59,7 @@ async def createBusinessObject(
 @router.put("/{code}", response_model=BusinessObjectRead)
 async def updateBusinessObject(
     payload: BusinessObjectUpdate,
-    code: BusinessObjectCode = Path(...),
+    code: BusinessObjectCodeType = Path(...),
     session: AsyncSession = Depends(getDb),
     service: BusinessObjectService = Depends(getBusinessObjectService),
 ) -> BusinessObjectRead:
@@ -69,7 +69,7 @@ async def updateBusinessObject(
 
 @router.delete("/{code}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteBusinessObject(
-    code: BusinessObjectCode = Path(...),
+    code: BusinessObjectCodeType = Path(...),
     session: AsyncSession = Depends(getDb),
     service: BusinessObjectService = Depends(getBusinessObjectService),
 ) -> None:

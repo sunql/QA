@@ -1,10 +1,13 @@
 """推导引擎单测（纯函数，无 IO）。"""
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from app.domain.enums import DataType, DerivationType, RuleType, Severity
 from app.domain.exceptions import ValidationError
+from app.services.data_quality_evaluators._common import validate_expression
 from app.services.data_quality_rule_generator import (
     BlockedProperty,
     ClassContext,
@@ -61,7 +64,8 @@ def test_fk_to_non_reference_class_yields_referential():
     ref = ClassContext(class_id=2, class_name="Supplier", source_table="BPSUPPLIER", object_type="Master")
     sugg, _ = deriveSuggestions(CTX, [_prop(
         property_name="supplier_key", source_column="SUPPLIER_KEY",
-        is_primary_key=False, is_foreign_key=True, ref_class=ref)], [], SCHEMA)
+        is_primary_key=False, is_foreign_key=True, ref_class=ref,
+        ref_key_column="SUPPLIER_KEY")], [], SCHEMA)
     ref_rules = [s for s in sugg if s.rule_type == RuleType.REFERENTIAL]
     assert len(ref_rules) == 1
     assert ref_rules[0].rule_expression == "REF BPSUPPLIER.SUPPLIER_KEY"
@@ -72,10 +76,13 @@ def test_ref_to_reference_class_yields_validity_dict_not_referential():
     ref = ClassContext(class_id=3, class_name="PoStatusDict", source_table="PO_STATUS", object_type="Reference")
     sugg, _ = deriveSuggestions(CTX, [_prop(
         property_name="status", source_column="STATUS",
-        is_primary_key=False, is_foreign_key=True, ref_class=ref)], [], SCHEMA)
+        is_primary_key=False, is_foreign_key=True, ref_class=ref,
+        ref_key_column="STATUS")], [], SCHEMA)
     validity = [s for s in sugg if s.rule_type == RuleType.VALIDITY]
     assert len(validity) == 1
-    assert validity[0].rule_expression == "STATUS IN (SELECT STATUS FROM PO_STATUS)"
+    assert validity[0].rule_expression == (
+        '"STATUS" IN (SELECT "STATUS" FROM "PO_STATUS")'
+    )
     assert validity[0].derivation_type == DerivationType.DICT_REF
     assert not [s for s in sugg if s.rule_type == RuleType.REFERENTIAL]
 
@@ -107,8 +114,8 @@ def test_join_edge_yields_consistency():
     c = [s for s in sugg if s.rule_type == RuleType.CONSISTENCY]
     assert len(c) == 1
     assert c[0].rule_expression == (
-        "EXISTS (SELECT 1 FROM PORDERQ WHERE PORDERQ.PO_KEY = PORDER.PO_KEY "
-        "AND PORDERQ.RECEIPT_DATE >= PORDER.PO_DATE)"
+        'EXISTS (SELECT 1 FROM "PORDERQ" WHERE "PORDERQ"."PO_KEY" = "PORDER"."PO_KEY" '
+        'AND "PORDERQ"."RECEIPT_DATE" >= "PORDER"."PO_DATE")'
     )
 
 
@@ -196,13 +203,15 @@ def test_fk_without_ref_class_raises():
             is_primary_key=False, is_foreign_key=True, ref_class=None)], [], SCHEMA)
 
 
-def test_fk_without_ref_source_table_raises():
+def test_fk_without_ref_source_table_is_blocked():
     ref = ClassContext(class_id=2, class_name="Supplier", source_table=None,
                        object_type="Master")
-    with pytest.raises(ValidationError):
-        deriveSuggestions(CTX, [_prop(
-            property_name="supplier_key", source_column="SUPPLIER_KEY",
-            is_primary_key=False, is_foreign_key=True, ref_class=ref)], [], SCHEMA)
+    sugg, blocked = deriveSuggestions(CTX, [_prop(
+        property_name="supplier_key", source_column="SUPPLIER_KEY",
+        is_primary_key=False, is_foreign_key=True, ref_class=ref,
+        ref_key_column="SUPPLIER_KEY")], [], SCHEMA)
+    assert sugg == []
+    assert blocked == [BlockedProperty("supplier_key", "引用类未配置 source_table")]
 
 
 def test_join_edge_skips_non_datetime_property():
@@ -213,3 +222,53 @@ def test_join_edge_skips_non_datetime_property():
                     data_type=DataType.DECIMAL.value, is_primary_key=False)],
         [edge], SCHEMA)
     assert not [s for s in sugg if s.rule_type == RuleType.CONSISTENCY]
+
+
+def test_fk_without_ref_key_column_is_blocked():
+    ref = ClassContext(class_id=2, class_name="Supplier", source_table="BPSUPPLIER",
+                       object_type="Master")
+    sugg, blocked = deriveSuggestions(CTX, [_prop(
+        property_name="supplier_key", source_column="SUPPLIER_KEY",
+        is_primary_key=False, is_foreign_key=True, ref_class=ref,
+        ref_key_column=None)], [], SCHEMA)
+    assert sugg == []
+    assert blocked == [BlockedProperty("supplier_key", "引用类未配置主键列映射")]
+
+
+def test_type_mismatch_severity_is_low():
+    sugg, _ = deriveSuggestions(CTX, [_prop(
+        property_name="amount", source_column="AMOUNT", data_type="DECIMAL",
+        is_primary_key=False)], [], SCHEMA)
+    regex = [s for s in sugg if s.derivation_type == DerivationType.LLM_DERIVED]
+    assert len(regex) == 1
+    assert regex[0].severity == Severity.LOW
+    assert regex[0].threshold == Decimal("95")
+
+
+def test_all_generated_expressions_pass_validation():
+    ref_master = ClassContext(class_id=2, class_name="Supplier", source_table="BPSUPPLIER",
+                              object_type="Master")
+    ref_dict = ClassContext(class_id=3, class_name="PoStatusDict", source_table="PO_STATUS",
+                            object_type="Reference")
+    edge = JoinEdgeMeta(target_table="PORDERQ", source_columns=["PO_KEY"],
+                        target_columns=["PO_KEY"], target_date_columns=["RECEIPT_DATE"])
+    props = [
+        _prop(),
+        _prop(property_name="status", source_column="STATUS", is_primary_key=False,
+              allowed_values=["NEW", "CONFIRMED"]),
+        _prop(property_name="supplier_key", source_column="SUPPLIER_KEY",
+              is_primary_key=False, is_foreign_key=True, ref_class=ref_master,
+              ref_key_column="SUPPLIER_KEY"),
+        _prop(property_name="status", source_column="STATUS",
+              is_primary_key=False, is_foreign_key=True, ref_class=ref_dict,
+              ref_key_column="STATUS"),
+        _prop(property_name="amount", source_column="AMOUNT", data_type="DECIMAL",
+              is_primary_key=False),
+        _prop(property_name="po_date", source_column="PO_DATE", data_type="DATETIME",
+              is_primary_key=False),
+    ]
+    sugg, blocked = deriveSuggestions(CTX, props, [edge], SCHEMA)
+    assert not blocked
+    for s in sugg:
+        assert s.rule_expression is not None
+        validate_expression(s.rule_expression)

@@ -8,13 +8,13 @@ from decimal import Decimal
 
 from app.domain.enums import DataType, DerivationType, ObjectType, RuleType, Severity
 from app.domain.exceptions import ValidationError
-from app.services.data_quality_evaluators._common import validate_identifier
+from app.services.data_quality_evaluators._common import validate_expression, validate_identifier
 
 _RULE_CODE_MAX = 100
 _ALLOWED_VALUE_RE = re.compile(r"^[^']{1,50}$")
 _TYPE_PATTERNS: dict[str, str] = {
     DataType.INT.value: r"^-?[0-9]+$",
-    DataType.DECIMAL.value: r"^-?[0-9]+(\.[0-9]+)?$",
+    DataType.DECIMAL.value: r"^-?[0-9]+([.][0-9]+)?$",
     DataType.DATETIME.value: r"^[0-9]{4}-[0-9]{2}-[0-9]{2}([ T][0-9]{2}:[0-9]{2}(:[0-9]{2})?)?$",
 }
 _PHYSICAL_TEXT_FAMILY = ("char", "text")
@@ -26,13 +26,13 @@ _THRESHOLD_SEVERITY: dict[RuleType, tuple[Decimal, Severity]] = {
     RuleType.UNIQUENESS: (Decimal("100"), Severity.HIGH),
 }
 
-
 @dataclass(frozen=True)
 class ClassContext:
     class_id: int
     class_name: str
     source_table: str | None
     object_type: str | None
+
 
 @dataclass(frozen=True)
 class PropertyMeta:
@@ -43,6 +43,7 @@ class PropertyMeta:
     is_primary_key: bool
     is_foreign_key: bool
     ref_class: ClassContext | None = None
+    ref_key_column: str | None = None
     allowed_values: list[str] | None = None
 
 
@@ -102,6 +103,10 @@ def _slug(value: str) -> str:
     return out or "X"
 
 
+def _quoteId(value: str) -> str:
+    return f'"{value}"'
+
+
 def deriveSuggestions(
     ctx: ClassContext,
     properties: list[PropertyMeta],
@@ -122,7 +127,7 @@ def deriveSuggestions(
     for prop in properties:
         if prop.source_column is not None:
             validate_identifier(prop.source_column, role="source_column")
-        col = _resolveColumn(tableCols, prop.source_column)
+        col = tableCols.get(prop.source_column.upper()) if prop.source_column is not None else None
         if col is None:
             blocked.append(BlockedProperty(
                 prop.property_name,
@@ -131,15 +136,16 @@ def deriveSuggestions(
             ))
             continue
         validate_identifier(col.column_name, role="column")
+        if prop.is_foreign_key and prop.ref_class is not None:
+            if prop.ref_class.source_table is None:
+                blocked.append(BlockedProperty(prop.property_name, "引用类未配置 source_table"))
+                continue
+            if prop.ref_key_column is None:
+                blocked.append(BlockedProperty(prop.property_name, "引用类未配置主键列映射"))
+                continue
         suggestions.extend(_deriveForProperty(ctx, prop, col))
     suggestions.extend(_deriveJoinConsistency(ctx, properties, joinEdges))
     return suggestions, blocked
-
-
-def _resolveColumn(tableCols: dict[str, ColumnMeta], sourceColumn: str | None) -> ColumnMeta | None:
-    if sourceColumn is None:
-        return None
-    return tableCols.get(sourceColumn.upper())
 
 
 def _deriveForProperty(
@@ -194,14 +200,12 @@ def _deriveRef(ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta) -> RuleSu
     ref = prop.ref_class
     if ref is None:
         raise ValidationError("外键属性缺少 ref_class")
-    if ref.source_table is None:
-        raise ValidationError(f"参照类 {ref.class_name} 未配置 source_table")
-    refTable = validate_identifier(ref.source_table, role="ref_table")
-    refColumn = validate_identifier(prop.source_column or col.column_name, role="ref_column")
+    refTable = validate_identifier(ref.source_table or "", role="ref_table")
+    refColumn = validate_identifier(prop.ref_key_column or "", role="ref_key_column")
     if ref.object_type == ObjectType.REFERENCE.value:
         return _makeSuggestion(
             ctx, prop, RuleType.VALIDITY, DerivationType.DICT_REF,
-            f"{col.column_name} IN (SELECT {refColumn} FROM {refTable})",
+            f"{_quoteId(col.column_name)} IN (SELECT {_quoteId(refColumn)} FROM {_quoteId(refTable)})",
             CONFIDENCE_HIGH, "字典参照完整性",
         )
     return _makeSuggestion(
@@ -211,7 +215,7 @@ def _deriveRef(ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta) -> RuleSu
 
 
 def _deriveTypeRegex(ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta) -> RuleSuggestion | None:
-    if not _isTextFamily(col.data_type):
+    if not any(family in col.data_type.lower() for family in _PHYSICAL_TEXT_FAMILY):
         return None
 
     dataType = prop.data_type.upper()
@@ -228,7 +232,7 @@ def _deriveTypeRegex(ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta) -> 
         expr = f"{col.column_name} IS NULL OR {expr}"
     return _makeSuggestion(
         ctx, prop, RuleType.VALIDITY, DerivationType.LLM_DERIVED,
-        expr, CONFIDENCE_MEDIUM, "类型不匹配正则校验",
+        expr, CONFIDENCE_MEDIUM, "类型不匹配正则校验", severity=Severity.LOW,
     )
 
 
@@ -257,18 +261,13 @@ def _buildJoinExpression(
     sourceTable: str, sourceDate: str, edge: JoinEdgeMeta, targetDate: str
 ) -> str:
     joinCond = " AND ".join(
-        f"{edge.target_table}.{t} = {sourceTable}.{s}"
+        f"{_quoteId(edge.target_table)}.{_quoteId(t)} = {_quoteId(sourceTable)}.{_quoteId(s)}"
         for s, t in zip(edge.source_columns, edge.target_columns)
     )
     return (
-        f"EXISTS (SELECT 1 FROM {edge.target_table} WHERE {joinCond} "
-        f"AND {edge.target_table}.{targetDate} >= {sourceTable}.{sourceDate})"
+        f"EXISTS (SELECT 1 FROM {_quoteId(edge.target_table)} WHERE {joinCond} "
+        f"AND {_quoteId(edge.target_table)}.{_quoteId(targetDate)} >= {_quoteId(sourceTable)}.{_quoteId(sourceDate)})"
     )
-
-
-def _isTextFamily(dataType: str) -> bool:
-    lower = dataType.lower()
-    return any(family in lower for family in _PHYSICAL_TEXT_FAMILY)
 
 
 def _makeSuggestion(
@@ -279,8 +278,9 @@ def _makeSuggestion(
     expression: str,
     confidence: str,
     reason: str,
+    severity: Severity | None = None,
 ) -> RuleSuggestion:
-    threshold, severity = _THRESHOLD_SEVERITY.get(
+    threshold, defaultSeverity = _THRESHOLD_SEVERITY.get(
         ruleType, (Decimal("95"), Severity.MEDIUM)
     )
     return RuleSuggestion(
@@ -291,7 +291,7 @@ def _makeSuggestion(
         target_column=prop.source_column,
         rule_expression=expression,
         threshold=threshold,
-        severity=severity,
+        severity=severity if severity is not None else defaultSeverity,
         derivation_type=derivationType,
         source_property_id=prop.property_id,
         confidence=confidence,

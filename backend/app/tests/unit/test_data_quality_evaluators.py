@@ -115,9 +115,9 @@ class TestValidateExpression:
             validate_expression("a; b")
         with pytest.raises(ValidationError):
             validate_expression("a|b")
-        # 单引号（字符串字面量）仍拒绝，避免引入 string context
-        with pytest.raises(ValidationError):
-            validate_expression("a = 'x'")
+        # 单引号（字符串字面量）自 feat-dq-rule-auto-generation 起放行
+        # （值域 IN 列表 / POSIX 正则需要），注入面由黑名单 + 只读 adapter 兜底
+        assert validate_expression("a = 'x'") == "a = 'x'"
 
 
 # ===== COMPLETENESS =====

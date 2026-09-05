@@ -44,6 +44,7 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.bizConfig", "code": "item.entityMapping", "label_key": "menu.item.entityMapping", "icon_code": "code", "sort_order": 340, "path": "/entity-mapping"},
     {"parent": "section.bizConfig", "code": "item.kpiCatalog", "label_key": "menu.item.kpiCatalog", "icon_code": "number", "sort_order": 350, "path": "/kpi-catalog"},
     {"parent": "section.bizConfig", "code": "item.features", "label_key": "menu.item.features", "icon_code": "cluster", "sort_order": 360, "path": "/features"},
+    {"parent": "section.bizConfig", "code": "item.businessObjects", "label_key": "menu.item.businessObjects", "icon_code": "cluster", "sort_order": 370, "path": "/business-objects"},
     # Foundation
     {"parent": "section.foundation", "code": "item.datasource", "label_key": "menu.item.datasource", "icon_code": "database", "sort_order": 410, "path": "/datasource"},
     {"parent": "section.foundation", "code": "item.documents", "label_key": "menu.item.documents", "icon_code": "file", "sort_order": 420, "path": "/documents"},

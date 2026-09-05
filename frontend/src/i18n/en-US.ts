@@ -84,6 +84,7 @@ export const enUS = {
       entityMapping: "Code Mapping",
       kpiCatalog: "KPI Catalog",
       features: "Feature Catalog",
+      businessObjects: "Business Objects",
       datasource: "Data Sources",
       documents: "Document Center",
       usage: "Usage Dashboard",

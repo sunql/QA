@@ -90,6 +90,7 @@ export const zhCN = {
       entityMapping: "编码映射",
       kpiCatalog: "KPI 目录",
       features: "特征目录",
+      businessObjects: "业务对象",
       datasource: "数据源",
       documents: "文档中心",
       usage: "用量看板",

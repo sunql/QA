@@ -87,6 +87,19 @@ class Severity(str, Enum):
     INFO = "INFO"
 
 
+class DerivationType(str, Enum):
+    """数据质量规则来源类型（feat-dq-rule-auto-generation spec §4）。"""
+
+    PK_DERIVED = "PK_DERIVED"
+    FK_DERIVED = "FK_DERIVED"
+    DICT_REF = "DICT_REF"
+    ALLOWED_VALUES = "ALLOWED_VALUES"
+    NOT_NULL = "NOT_NULL"
+    JOIN_CONSISTENCY = "JOIN_CONSISTENCY"
+    LLM_DERIVED = "LLM_DERIVED"
+    MANUAL = "MANUAL"
+
+
 class RuleOperator(str, Enum):
     """Feature Rule 阈值运算符（spec §5.2）。
 

@@ -291,6 +291,11 @@ class OntologyProperty(Base, TimestampMixin):
         BigIntFk, ForeignKey("ontology_class.id"), nullable=True
     )
     source_column: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 值域型字典（feat-dq-rule-auto-generation）：LLM 建议确认后沉淀于此，
+    # 推导引擎据此生成 VALIDITY 规则（表引用型字典仍走 ref_class_id）
+    allowed_values: Mapped[list[str] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
 
     # Relationships
     ontology_class: Mapped[OntologyClass] = relationship(
@@ -832,6 +837,15 @@ class DataQualityRule(Base, TimestampMixin):
     version: Mapped[str] = mapped_column(String(20), nullable=False, default="v1.0")
     owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 溯源（feat-dq-rule-auto-generation）：自动生成规则标记来源；
+    # 存量/手工规则 derivation_type='MANUAL'。
+    # source_class_id / source_property_id 故意不做 FK：业务上允许来源类/属性被删除后
+    # 仍保留规则历史，避免 RESTRICT/SET NULL 语义与治理流程冲突（brief 指定软引用）。
+    source_class_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_property_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    derivation_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="MANUAL"
+    )
 
     __table_args__ = (
         UniqueConstraint("rule_code", name="uq_data_quality_rule_code"),
@@ -839,6 +853,7 @@ class DataQualityRule(Base, TimestampMixin):
         Index("ix_data_quality_rule_type", "rule_type"),
         Index("ix_data_quality_rule_enabled", "is_enabled"),
         Index("ix_data_quality_rule_datasource", "datasource_id"),
+        Index("ix_dq_rule_source_class", "source_class_id"),
         ForeignKeyConstraint(
             ["datasource_id"],
             ["data_source.id"],

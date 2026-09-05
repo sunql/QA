@@ -29,6 +29,7 @@ from app.domain.enums import (
     BusinessObjectCode,
     ChartType,
     DataSourceType,
+    DerivationType,
     DocumentSecurityLevel,
     DocumentStatus,
     DocumentType,
@@ -1655,6 +1656,9 @@ class DataQualityRuleRead(CamelModel):
     version: str
     owner: str | None = None
     description: str | None = None
+    source_class_id: int | None = None
+    source_property_id: int | None = None
+    derivation_type: DerivationType
     created_time: datetime | None = None
     updated_time: datetime | None = None
 

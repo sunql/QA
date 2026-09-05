@@ -49,13 +49,13 @@ def test_feature_rule_update_requires_version() -> None:
 
 
 def test_feature_rule_version_conflict_error_carries_current_version() -> None:
-    err = FeatureRuleVersionConflictError(current_version=3)
+    err = FeatureRuleVersionConflictError("version mismatch", current_version=3)
     assert err.current_version == 3
     assert isinstance(err, Exception)
 
 
 def test_referencing_error_carries_list() -> None:
-    err = FeatureRuleReferencingError(["AgentA", "AgentB"])
+    err = FeatureRuleReferencingError("feature_rule is referenced", referencing=["AgentA", "AgentB"])
     assert err.referencing == ["AgentA", "AgentB"]
 
 

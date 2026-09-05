@@ -139,7 +139,7 @@ class FeatureRuleNotFoundError(NotFoundError):
 class FeatureRuleVersionConflictError(ConflictError):
     """Feature rule 乐观锁版本冲突（spec §9.2）。"""
 
-    def __init__(self, message: str = "", *, current_version: int) -> None:
+    def __init__(self, message: str, *, current_version: int) -> None:
         super().__init__(message)
         self.current_version = current_version
 
@@ -147,7 +147,7 @@ class FeatureRuleVersionConflictError(ConflictError):
 class FeatureRuleReferencingError(ConflictError):
     """Feature rule 被外部引用，无法删除（spec §9.2）。"""
 
-    def __init__(self, referencing: list[str], message: str = "") -> None:
+    def __init__(self, message: str, *, referencing: list[str]) -> None:
         super().__init__(message)
         self.referencing = referencing
 

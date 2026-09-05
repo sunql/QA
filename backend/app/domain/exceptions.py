@@ -158,5 +158,5 @@ class FeatureRuleValidationError(ValidationError):
     """Feature rule 业务校验失败（spec §9.2）。"""
 
 
-class LLMUnavailableError(Exception):
+class LLMUnavailableError(DomainError):
     """LLM 服务不可用（spec §9.2 + §7.3）。"""

@@ -333,6 +333,7 @@ def _statusFor(exc: DomainError) -> int:
     from app.domain.exceptions import (
         BusinessObjectGraphLabelMismatchError,
         ConflictError,
+        LLMUnavailableError,
         NotFoundError,
         PermissionDeniedError,
         ValidationError,
@@ -348,6 +349,8 @@ def _statusFor(exc: DomainError) -> int:
         return 422
     if isinstance(exc, PermissionDeniedError):
         return 403
+    if isinstance(exc, LLMUnavailableError):
+        return 503
     return 400
 
 

@@ -22,9 +22,13 @@ from app.dependencies import CurrentUser, getAdminOnlyActor, getCurrentUser, get
 from app.domain.models import FeatureRule
 from app.domain.schemas import (
     FeatureRuleCreate,
+    FeatureRuleParseDescriptionRequest,
+    FeatureRuleParseDescriptionResponse,
     FeatureRuleRead,
     FeatureRuleUpdate,
 )
+from app.infrastructure.llm.factory import createClient
+from app.services.feature_rule_llm_service import parseFeatureRuleDescription
 from app.services.feature_rule_registry import feature_rule_registry
 from app.services.feature_rule_service import FeatureRuleService
 
@@ -118,3 +122,16 @@ async def toggleFeatureRule(
     await session.commit()
     await feature_rule_registry.reloadOne(session, row.id)
     return FeatureRuleRead.model_validate(row)
+
+
+@router.post("/parse-description", response_model=FeatureRuleParseDescriptionResponse)
+async def parseDescription(
+    payload: FeatureRuleParseDescriptionRequest,
+    _admin: CurrentUser = Depends(getAdminOnlyActor),
+    session: AsyncSession = Depends(getDb),
+) -> FeatureRuleParseDescriptionResponse:
+    """LLM 解析自然语言策略 → 建议阈值（advisory，不持久化）。"""
+    llm_client = createClient(None)
+    return await parseFeatureRuleDescription(
+        session, payload, llm_client, actor=_admin.userId
+    )

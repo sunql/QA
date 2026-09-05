@@ -11,7 +11,7 @@ from app.domain.exceptions import ValidationError
 from app.services.data_quality_evaluators._common import validate_expression, validate_identifier
 
 _RULE_CODE_MAX = 100
-_ALLOWED_VALUE_RE = re.compile(r"^[^']{1,50}$")
+_ALLOWED_VALUE_RE = re.compile(r"^[^\x00-\x1f'\\]{1,50}$")
 _TYPE_PATTERNS: dict[str, str] = {
     DataType.INT.value: r"^-?[0-9]+$",
     DataType.DECIMAL.value: r"^-?[0-9]+([.][0-9]+)?$",
@@ -19,8 +19,6 @@ _TYPE_PATTERNS: dict[str, str] = {
 }
 _PHYSICAL_TEXT_FAMILY = ("char", "text")
 _BOOLEAN_FLAGS = ("true", "false", "t", "f", "1", "0")
-CONFIDENCE_HIGH = "HIGH"
-CONFIDENCE_MEDIUM = "MEDIUM"
 _THRESHOLD_SEVERITY: dict[RuleType, tuple[Decimal, Severity]] = {
     RuleType.COMPLETENESS: (Decimal("100"), Severity.HIGH),
     RuleType.UNIQUENESS: (Decimal("100"), Severity.HIGH),
@@ -157,13 +155,13 @@ def _deriveForProperty(
     if prop.is_primary_key:
         out.append(_makeSuggestion(
             ctx, prop, RuleType.UNIQUENESS, DerivationType.PK_DERIVED,
-            f"UNIQUE({column})", CONFIDENCE_HIGH, "主键唯一性",
+            f"UNIQUE({column})", "HIGH", "主键唯一性",
         ))
 
     if not col.nullable:
         out.append(_makeSuggestion(
             ctx, prop, RuleType.COMPLETENESS, DerivationType.NOT_NULL,
-            f"{column} IS NOT NULL", CONFIDENCE_HIGH, "非空约束",
+            f"{column} IS NOT NULL", "HIGH", "非空约束",
         ))
 
     if prop.allowed_values:
@@ -187,12 +185,12 @@ def _deriveAllowedValues(
         if not _ALLOWED_VALUE_RE.match(value):
             raise ValidationError(
                 f"allowed_values 含非法字符: {value!r}",
-                detail="值域不允许包含单引号且长度需 1-50 字符",
+                detail="值域不允许包含单引号、反斜杠或控制字符，且长度需 1-50 字符",
             )
     quoted = ",".join(f"'{v}'" for v in values)
     return _makeSuggestion(
         ctx, prop, RuleType.VALIDITY, DerivationType.ALLOWED_VALUES,
-        f"{col.column_name} IN ({quoted})", CONFIDENCE_HIGH, "固定值域",
+        f"{col.column_name} IN ({quoted})", "HIGH", "固定值域",
     )
 
 
@@ -206,11 +204,11 @@ def _deriveRef(ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta) -> RuleSu
         return _makeSuggestion(
             ctx, prop, RuleType.VALIDITY, DerivationType.DICT_REF,
             f"{_quoteId(col.column_name)} IN (SELECT {_quoteId(refColumn)} FROM {_quoteId(refTable)})",
-            CONFIDENCE_HIGH, "字典参照完整性",
+            "HIGH", "字典参照完整性",
         )
     return _makeSuggestion(
         ctx, prop, RuleType.REFERENTIAL, DerivationType.FK_DERIVED,
-        f"REF {refTable}.{refColumn}", CONFIDENCE_HIGH, "外键参照",
+        f"REF {refTable}.{refColumn}", "HIGH", "外键参照",
     )
 
 
@@ -232,7 +230,7 @@ def _deriveTypeRegex(ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta) -> 
         expr = f"{col.column_name} IS NULL OR {expr}"
     return _makeSuggestion(
         ctx, prop, RuleType.VALIDITY, DerivationType.LLM_DERIVED,
-        expr, CONFIDENCE_MEDIUM, "类型不匹配正则校验", severity=Severity.LOW,
+        expr, "MEDIUM", "类型不匹配正则校验", severity=Severity.LOW,
     )
 
 
@@ -252,7 +250,7 @@ def _deriveJoinConsistency(
                 expr = _buildJoinExpression(table, prop.source_column, edge, targetDate)
                 out.append(_makeSuggestion(
                     ctx, prop, RuleType.CONSISTENCY, DerivationType.JOIN_CONSISTENCY,
-                    expr, CONFIDENCE_MEDIUM, "join 日期一致性",
+                    expr, "MEDIUM", "join 日期一致性",
                 ))
     return out
 
@@ -283,6 +281,7 @@ def _makeSuggestion(
     threshold, defaultSeverity = _THRESHOLD_SEVERITY.get(
         ruleType, (Decimal("95"), Severity.MEDIUM)
     )
+    validate_expression(expression)
     return RuleSuggestion(
         rule_code=buildRuleCode(ctx.class_name, prop.property_name, ruleType),
         rule_name=f"{prop.property_name} {ruleType.value}",

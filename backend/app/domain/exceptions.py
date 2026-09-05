@@ -142,6 +142,7 @@ class FeatureRuleVersionConflictError(ConflictError):
     def __init__(self, message: str, *, current_version: int) -> None:
         super().__init__(message)
         self.current_version = current_version
+        self.details = {"current_version": current_version}
 
 
 class FeatureRuleReferencingError(ConflictError):
@@ -150,6 +151,7 @@ class FeatureRuleReferencingError(ConflictError):
     def __init__(self, message: str, *, referencing: list[str]) -> None:
         super().__init__(message)
         self.referencing = referencing
+        self.details = {"referencing": referencing}
 
 
 class FeatureRuleValidationError(ValidationError):

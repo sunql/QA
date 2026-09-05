@@ -30,6 +30,7 @@ from app.api.v1 import (
     embedding_provider,
     entity_mapping,
     features,
+    feature_rules,
     graph_traversal,
     kpi_catalog,
     local_import,
@@ -164,6 +165,7 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"]
     )
     testApp.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
+    testApp.include_router(feature_rules.router, tags=["feature-rules"])
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     testApp.include_router(
         menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]

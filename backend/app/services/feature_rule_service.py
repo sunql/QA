@@ -91,15 +91,19 @@ class FeatureRuleService:
     async def listRules(
         self, session: AsyncSession, *, enabledOnly: bool = False
     ) -> list[FeatureRule]:
-        stmt = select(FeatureRule)
+        from sqlalchemy.orm import selectinload
+        stmt = select(FeatureRule).options(selectinload(FeatureRule.thresholds))
         if enabledOnly:
             stmt = stmt.where(FeatureRule.enabled.is_(True))
         result = await session.execute(stmt)
         return list(result.scalars().all())
 
     async def getRule(self, session: AsyncSession, code: str) -> FeatureRule:
+        from sqlalchemy.orm import selectinload
         result = await session.execute(
-            select(FeatureRule).where(FeatureRule.code == code)
+            select(FeatureRule)
+            .options(selectinload(FeatureRule.thresholds))
+            .where(FeatureRule.code == code)
         )
         row = result.scalar_one_or_none()
         if row is None:

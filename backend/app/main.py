@@ -221,6 +221,7 @@ def createApp() -> FastAPI:
         embedding_provider,
         entity_mapping,
         features,
+        feature_rules,
         graph,
         graph_traversal,
         kpi_catalog,
@@ -290,6 +291,7 @@ def createApp() -> FastAPI:
         agent_runtime.router, prefix="/api/v1/agents", tags=["agents"]
     )
     app.include_router(agent_tools.router, tags=["agent-tools"])
+    app.include_router(feature_rules.router, tags=["feature-rules"])
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     app.include_router(

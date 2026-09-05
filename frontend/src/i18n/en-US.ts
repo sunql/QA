@@ -99,6 +99,7 @@ export const enUS = {
       embeddings: "Embedding",
       status: "Service Status",
       adminAudit: "Audit Logs",
+      adminFeatureRules: "Feature Rules",
     },
   },
 

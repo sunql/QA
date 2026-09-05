@@ -20,6 +20,7 @@ import AgentRegistryPage from "./pages/AgentRegistryPage";
 import AgentRuntimePage from "./pages/AgentRuntimePage";
 import AdminAuditPage from "./pages/AdminAuditPage";
 import AdminToolsPage from "./pages/AdminToolsPage";
+import AdminFeatureRulesPage from "./pages/AdminFeatureRulesPage";
 import BusinessObjectPage from "./pages/BusinessObjectPage";
 import DocumentsPage from "./pages/DocumentsPage";
 
@@ -48,6 +49,7 @@ export default function App() {
         <Route path="agents" element={<AgentRegistryPage />} />
         <Route path="admin/audit" element={<AdminAuditPage />} />
         <Route path="admin/tools" element={<AdminToolsPage />} />
+        <Route path="admin/feature-rules" element={<AdminFeatureRulesPage />} />
         <Route path="business-objects" element={<BusinessObjectPage />} />
         <Route path="documents" element={<DocumentsPage />} />
       </Route>

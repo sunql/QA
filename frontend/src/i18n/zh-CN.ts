@@ -105,6 +105,7 @@ export const zhCN = {
       embeddings: "Embedding 服务",
       status: "服务状态",
       adminAudit: "审计日志",
+      adminFeatureRules: "Feature 规则",
     },
   },
 

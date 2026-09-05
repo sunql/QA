@@ -57,6 +57,7 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.systemConfig", "code": "item.status", "label_key": "menu.item.status", "icon_code": "heart", "sort_order": 530, "path": "/status"},
     # Audit & Security
     {"parent": "section.auditSecurity", "code": "item.adminAudit", "label_key": "menu.item.adminAudit", "icon_code": "audit", "sort_order": 610, "path": "/admin/audit"},
+    {"parent": "section.auditSecurity", "code": "item.adminFeatureRules", "label_key": "menu.item.adminFeatureRules", "icon_code": "setting", "sort_order": 615, "path": "/admin/feature-rules"},
 ]
 
 

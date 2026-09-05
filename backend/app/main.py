@@ -117,6 +117,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 若 seed 失败（RuntimeError），不继续 warmUp（fail-fast）。
         await agent_binding_cache.warmUp(session)
         await agent_tool_config_registry.warmUp(session)
+        # Task 6：feature_rule seed + registry warmUp（必须在 tool config warmUp 之后）
+        from scripts.seed_feature_rules import seedFeatureRules
+        from app.services.feature_rule_registry import feature_rule_registry
+
+        rule_changed = await seedFeatureRules(session)
+        if rule_changed:
+            logger.info("feature_rule seed: %d/%d created", rule_changed, 4)
+        await feature_rule_registry.warmUp(session)
     yield
     logger.info("关闭中，释放外部连接...")
     await shutdownCleanup()

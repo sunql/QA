@@ -38,7 +38,6 @@ from app.services.messages_zh import (
     MSG_RISK_POINTS_TEMPLATE,
 )
 from app.services.supplier_360_service import (
-    DEFAULT_SUPPLIER_FEATURES,
     Supplier360Service,
 )
 

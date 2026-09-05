@@ -248,7 +248,7 @@ def _buildJoinExpression(
 ) -> str:
     joinCond = " AND ".join(
         f"{_quoteId(edge.target_table)}.{_quoteId(t)} = {_quoteId(sourceTable)}.{_quoteId(s)}"
-        for s, t in zip(edge.source_columns, edge.target_columns)
+        for s, t in zip(edge.source_columns, edge.target_columns, strict=True)
     )
     return (
         f"EXISTS (SELECT 1 FROM {_quoteId(edge.target_table)} WHERE {joinCond} "

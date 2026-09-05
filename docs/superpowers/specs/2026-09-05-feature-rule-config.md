@@ -315,15 +315,27 @@ class FeatureRuleEvaluator:
         return RuleEvaluation(worst.severity, f"rule:{worst.rule_code}", hits)
 ```
 
-### 6.3 Integration with `SupplierRiskService`
+### 6.3 Integration with `SupplierRiskService` (RISK-priority parity wrapper)
 
 ```python
 async def _decideLevel_via_rules(
     view: Supplier360Read,
     contributions: list[SupplierRiskKpiContribution],
 ) -> tuple[RiskLevel, str]:
-    """New version: delegate to FeatureRuleEvaluator.
-    Behavior equivalent to legacy _decideLevel (proven by parity test).
+    """New version: delegate to FeatureRuleEvaluator with RISK-priority bypass.
+
+    Behavior equivalent to legacy _decideLevel (proven by parity test in
+    test_feature_rule_supplier_risk_parity.py). The wrapper applies the
+    legacy two-stage semantics on top of the generic evaluator:
+
+      1. If RISK_SCORE rule matched any tier → return that tier's severity
+         (bypass MAX aggregation; matches legacy main-path bypass).
+      2. Else if all feature values missing → UNKNOWN.
+      3. Else aggregate MAX severity across the OTHER 3 rules' matched tiers.
+      4. Else (all values present, no rule matched) → LOW.
+
+    The generic evaluator stays untouched (no SupplierRisk-specific logic);
+    parity is enforced in this wrapper, keeping the rule engine reusable.
     """
     values: dict[str, Decimal | None] = {}
     for c in contributions:
@@ -334,31 +346,45 @@ async def _decideLevel_via_rules(
         except (InvalidOperation, ValueError):
             continue  # Skip non-numeric (matches legacy passed=True default)
 
-    eval_result = FeatureRuleEvaluator.evaluate(
-        data_object="SUPPLIER",
-        data_layer="FEATURE",
-        target_level="RISK",
-        feature_values=values,
+    # Evaluate ALL rules, then take per-rule best tier hit
+    rules = feature_rule_registry.getEnabledRules(
+        data_object="SUPPLIER", data_layer="FEATURE", target_level="RISK"
     )
+    rule_hits: dict[str, RuleHit | None] = {}  # rule_code -> best tier hit (None = no match)
+    for rule in rules:
+        value = values.get(rule.feature_name)
+        if value is None:
+            rule_hits[rule.code] = None
+            continue
+        for tier in sorted(rule.thresholds, key=lambda t: _SEVERITY_ORDER[t.severity]):
+            if _OPERATORS[tier.operator](value, tier.threshold_value):
+                rule_hits[rule.code] = RuleHit(
+                    rule_code=rule.code, feature_name=rule.feature_name,
+                    severity=tier.severity, operator=tier.operator,
+                    threshold_value=tier.threshold_value, actual_value=value,
+                )
+                break
+        else:
+            rule_hits[rule.code] = None
 
-    # Map Severity → RiskLevel; None → UNKNOWN
-    if eval_result.matched_severity is None:
-        # All rules OK or all values missing
-        all_missing = all(c.value is None for c in contributions)
-        if all_missing:
-            return RiskLevel.UNKNOWN, "unknown"
-        return RiskLevel.LOW, eval_result.matched_severity_source  # OK = LOW (parity)
+    # Step 1: RISK-priority bypass (RISK_SCORE rule)
+    risk_score_hit = rule_hits.get("supplier_risk_score_main")
+    if risk_score_hit is not None:
+        return _severity_to_risk(risk_score_hit.severity), risk_score_hit.rule_code
 
-    severity_to_risk = {
-        Severity.HIGH: RiskLevel.HIGH,
-        Severity.MEDIUM: RiskLevel.MEDIUM,
-        Severity.LOW: RiskLevel.LOW,
-        Severity.INFO: RiskLevel.LOW,
-    }
-    return (
-        severity_to_risk[eval_result.matched_severity],
-        eval_result.matched_severity_source,
-    )
+    # Step 2: All values missing → UNKNOWN
+    all_missing = all(c.value is None for c in contributions)
+    if all_missing:
+        return RiskLevel.UNKNOWN, "unknown"
+
+    # Step 3: MAX severity across other matched rules
+    other_hits = [h for h in rule_hits.values() if h is not None and h.rule_code != "supplier_risk_score_main"]
+    if other_hits:
+        worst = min(other_hits, key=lambda h: _SEVERITY_ORDER[h.severity])
+        return _severity_to_risk(worst.severity), worst.rule_code
+
+    # Step 4: All values present, no rule matched → LOW
+    return RiskLevel.LOW, "no_match"
 ```
 
 ### 6.4 Integration with `Supplier360Service._safeLoadKpis`
@@ -596,6 +622,8 @@ Idempotent upsert (mirrors `seed_agent_tool_configs.py`):
 ```python
 FEATURE_RULE_SEEDS = [
     {
+        # RISK_SCORE 阶梯：3 个 tier（HIGH 0.60, MEDIUM 0.80, LOW 1.01）
+        # LOW tier 1.01 永远命中（值域 [0,1]），保证 RISK_SCORE ≥ 0.80 时仍能产出 LOW（字节级兼容）
         "code": "supplier_risk_score_main",
         "data_object": "SUPPLIER",
         "data_layer": "FEATURE",
@@ -604,6 +632,7 @@ FEATURE_RULE_SEEDS = [
         "thresholds": [
             {"severity": "HIGH",   "operator": "lt_inverse", "threshold_value": 0.60},
             {"severity": "MEDIUM", "operator": "lt_inverse", "threshold_value": 0.80},
+            {"severity": "LOW",    "operator": "lt_inverse", "threshold_value": 1.01},
         ],
     },
     {

@@ -42,6 +42,7 @@ from app.domain.enums import (
     RefreshFrequency,
     RiskLevel,
     RuleType,
+    RuleOperator,
     ScoreType,
     Severity,
     SourceSystem,
@@ -2428,3 +2429,98 @@ class BusinessObjectRead(CamelModel):
     description: str | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# feat-feature-rule-config (Phase 9): Feature Rule DTOs (spec §9.1)
+# ---------------------------------------------------------------------------
+
+
+class FeatureRuleThresholdRead(CamelModel):
+    severity: Severity
+    operator: RuleOperator
+    threshold_value: Decimal
+    unit: str | None
+    threshold_order: int
+
+
+class FeatureRuleThresholdCreate(CamelModel):
+    severity: Severity
+    operator: RuleOperator
+    threshold_value: Decimal
+    unit: str | None = None
+    threshold_order: int = 1
+
+
+class FeatureRuleThresholdSuggestion(CamelModel):
+    """parse-description LLM 输出（spec §7.1 + §9.1）。"""
+
+    feature_name: str
+    severity: Severity
+    operator: RuleOperator
+    threshold_value: Decimal
+    unit: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    rationale: str
+
+
+class FeatureRuleRead(CamelModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    code: str
+    data_object: str
+    data_layer: str
+    target_level: str
+    feature_name: str
+    enabled: bool
+    priority: int
+    policy_description: str | None
+    version: int
+    thresholds: list[FeatureRuleThresholdRead]
+    created_time: datetime
+    updated_time: datetime | None
+
+
+class FeatureRuleCreate(CamelModel):
+    code: str = Field(min_length=1, max_length=64)
+    data_object: str
+    data_layer: str
+    target_level: str
+    feature_name: str
+    enabled: bool = True
+    priority: int = 100
+    policy_description: str | None = None
+    thresholds: list[FeatureRuleThresholdCreate] = Field(min_length=1)
+
+    @field_validator("thresholds")
+    @classmethod
+    def _uniqueSeverities(cls, v: list[FeatureRuleThresholdCreate]) -> list[FeatureRuleThresholdCreate]:
+        sevs = [t.severity.value for t in v]
+        if len(sevs) != len(set(sevs)):
+            raise ValueError("thresholds 内 severity 必须唯一")
+        return v
+
+
+class FeatureRuleUpdate(CamelModel):
+    """code / data_object / data_layer / target_level / feature_name 不可变。"""
+
+    enabled: bool | _UnsetType = UNSET
+    priority: int | _UnsetType = UNSET
+    policy_description: str | _UnsetType | None = UNSET
+    thresholds: list[FeatureRuleThresholdCreate] | _UnsetType = UNSET
+    version: int  # 必填，乐观锁
+
+
+class FeatureRuleParseDescriptionRequest(CamelModel):
+    data_object: str
+    data_layer: str
+    target_level: str
+    natural_language: str = Field(min_length=10, max_length=4000)
+
+
+class FeatureRuleParseDescriptionResponse(CamelModel):
+    suggested_thresholds: list[FeatureRuleThresholdSuggestion]
+    reasoning: str
+    overall_confidence: float = Field(ge=0.0, le=1.0)
+    warnings: list[str]

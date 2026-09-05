@@ -30,13 +30,13 @@ async def test_seed_inserts_six_sections_and_twenty_items(
 
     factory = dbModule.getSessionFactory()
     count = await seed_menu_config(factory)
-    assert count == 26
+    assert count == 28
 
     svc = MenuConfigService(dbSession)
     result = await svc.list_sections()
     assert len(result.sections) == 6
     total_items = sum(len(s.children) for s in result.sections)
-    assert total_items == 20
+    assert total_items == 22
 
 
 async def test_seed_is_idempotent(
@@ -49,8 +49,8 @@ async def test_seed_is_idempotent(
     await seed_menu_config(factory)
 
     rows = (await dbSession.execute(select(MenuConfig))).scalars().all()
-    assert len(rows) == 26
-    assert len({r.code for r in rows}) == 26
+    assert len(rows) == 28
+    assert len({r.code for r in rows}) == 28
 
 
 async def test_seed_paths_aligned_with_frontend_routes(
@@ -66,9 +66,10 @@ async def test_seed_paths_aligned_with_frontend_routes(
         "/chat", "/agents/run", "/agents",
         "/supplier-360", "/supplier-risk",
         "/ontology", "/data-quality", "/lineage", "/entity-mapping",
-        "/kpi-catalog", "/features",
+        "/kpi-catalog", "/features", "/business-objects",
         "/datasource", "/documents", "/usage", "/graph", "/vectors",
-        "/models", "/embeddings", "/status", "/admin/audit",
+        "/models", "/embeddings", "/status",
+        "/admin/audit", "/admin/feature-rules",
     }
 
     svc = MenuConfigService(dbSession)
@@ -127,5 +128,5 @@ async def test_main_runs_end_to_end_and_disposes_engine(
     await created_engines[0].dispose()
     # 验证种子落库（独立引擎与全局工厂指向同一 URL）
     rows = (await dbSession.execute(select(MenuConfig))).scalars().all()
-    assert len(rows) == 26
-    assert len({r.code for r in rows}) == 26
+    assert len(rows) == 28
+    assert len({r.code for r in rows}) == 28

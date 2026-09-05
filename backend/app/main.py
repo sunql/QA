@@ -125,6 +125,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if rule_changed:
             logger.info("feature_rule seed: %d/%d created", rule_changed, 4)
         await feature_rule_registry.warmUp(session)
+        from app.services.business_object_registry import businessObjectRegistry
+
+        await businessObjectRegistry.warmUp(session)
     yield
     logger.info("关闭中，释放外部连接...")
     await shutdownCleanup()

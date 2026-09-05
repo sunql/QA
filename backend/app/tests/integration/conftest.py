@@ -77,6 +77,12 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     await dbSession.commit()
     feature_rule_registry.invalidate()
     await feature_rule_registry.warmUp(dbSession)
+    # warmUp business_object_registry：DB-backed registry，集成测试无 lifespan
+    # 必须显式 warmUp，否则 runtime 测试会因 'Registry 未 warmUp' 抛 RuntimeError。
+    from app.services.business_object_registry import businessObjectRegistry
+
+    businessObjectRegistry.invalidate()
+    await businessObjectRegistry.warmUp(dbSession)
     # 关掉 warmUp SELECT 留下的隐式事务：否则 dbSession 持有 AccessShareLock，
     # 阻塞后续 pgSession/engine B 的 TRUNCATE（feat-agent-tool-config-db 教训）
     await dbSession.commit()
@@ -84,3 +90,4 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     agent_binding_cache.invalidate()
     agent_tool_config_registry.invalidate()
     feature_rule_registry.invalidate()
+    businessObjectRegistry.invalidate()

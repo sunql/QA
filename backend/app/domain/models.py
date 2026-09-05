@@ -50,6 +50,7 @@ from app.domain.enums import (
     LineageLayer,
     MatchRule,
     RefreshFrequency,
+    RuleOperator,
     RuleType,
     ScoreType,
     Severity,
@@ -189,6 +190,8 @@ __all__ = [
     "SessionQueryState",
     "DataQualityRule",
     "DataQualityScore",
+    "FeatureRule",
+    "FeatureRuleThreshold",
 ]
 
 
@@ -1474,6 +1477,106 @@ class AgentToolConfig(Base):
 
     def __repr__(self) -> str:
         return f"<AgentToolConfig id={self.id} name={self.name} handler_kind={self.handler_kind}>"
+
+
+# =============================================================================
+# Phase 5.4: Feature Rule Config
+# =============================================================================
+
+
+class FeatureRule(Base, TimestampMixin):
+    """Feature 规则元数据（spec §5.1）。
+
+    一行 = 一个 Feature 的启用规则头档，关联 data_object / data_layer /
+    target_level 构成唯一作用域 + code。
+    thresholds 关联多条阈值档（1:N），FK ON DELETE CASCADE。
+    """
+
+    __tablename__ = "feature_rule"
+    __table_args__ = (
+        UniqueConstraint(
+            "data_object", "data_layer", "target_level", "code",
+            name="uq_feature_rule_scope_code",
+        ),
+        Index(
+            "ix_feature_rule_scope_enabled",
+            "data_object", "data_layer", "target_level", "enabled",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    data_object: Mapped[str] = mapped_column(String(64), nullable=False)
+    data_layer: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_level: Mapped[str] = mapped_column(String(16), nullable=False)
+    feature_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=sa_text("true")
+    )
+    priority: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=100, server_default=sa_text("100")
+    )
+    policy_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=sa_text("1")
+    )
+    created_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa_text("now()")
+    )
+    updated_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    thresholds: Mapped[list["FeatureRuleThreshold"]] = relationship(
+        back_populates="rule",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<FeatureRule id={self.id} code={self.code} "
+            f"feature={self.feature_name} enabled={self.enabled}>"
+        )
+
+
+class FeatureRuleThreshold(Base):
+    """单条阈值档位（spec §5.2）。
+
+    一行 = (rule_id, severity) 组合的一条阈值规则，描述单个 severity
+    档位的运算符 + 阈值 + 单位。severity 用字符串而非 Severity 枚举（灵活
+    扩展新档位不需改 schema）。
+    """
+
+    __tablename__ = "feature_rule_threshold"
+    __table_args__ = (
+        UniqueConstraint(
+            "rule_id", "severity",
+            name="uq_feature_rule_threshold_rule_severity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    rule_id: Mapped[int] = mapped_column(
+        BigIntFk,
+        ForeignKey("feature_rule.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    operator: Mapped[str] = mapped_column(String(16), nullable=False)
+    threshold_value: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    unit: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    threshold_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=sa_text("1")
+    )
+
+    rule: Mapped["FeatureRule"] = relationship(back_populates="thresholds")
+
+    def __repr__(self) -> str:
+        return (
+            f"<FeatureRuleThreshold id={self.id} rule_id={self.rule_id} "
+            f"severity={self.severity} op={self.operator} val={self.threshold_value}>"
+        )
 
 
 # Re-export MenuConfig so Alembic autogenerate picks it up.

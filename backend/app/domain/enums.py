@@ -87,6 +87,20 @@ class Severity(str, Enum):
     INFO = "INFO"
 
 
+class RuleOperator(str, Enum):
+    """Feature Rule 阈值运算符（spec §5.2）。
+
+    LT / LTE / GT / GTE：用于 RISK_SCORE（数值越高越差，如 IQR 异常分）。
+    LT_INVERSE：用于 RISK_SCORE 0-1 区间（越低越差，如质量分）。
+    """
+
+    LT = "lt"
+    LTE = "lte"
+    GT = "gt"
+    GTE = "gte"
+    LT_INVERSE = "lt_inverse"  # 0-1 区间 RISK_SCORE（越低越差）
+
+
 class ScoreType(str, Enum):
     """数据质量评分聚合粒度（Phase 1.3）。
 

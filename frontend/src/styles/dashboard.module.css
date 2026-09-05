@@ -1,0 +1,109 @@
+/* Dashboard 通用样式工具（Phase C，截图风格）。
+ *
+ * 提供：
+ * - .statusBadge / .statusBadge-success / -warning / -error / -offline
+ *   圆角 pill 状态徽章，背景半透明 + 文字 100% 不透明（暗背景下高对比）
+ * - .metricCard 顶部 3px 渐变光带（颜色由状态决定）+ 大数字 + 紧凑 padding
+ * - .compactTable 表格紧凑行高（40px）+ 紧凑 padding
+ *
+ * 所有颜色优先引用 CSS 变量（与 theme/cssVariables 保持单色源），
+ * 在变量未就绪时给出合理 fallback。
+ */
+
+/* === 状态徽章 === */
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--border-radius, 2px);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-text, #fff);
+  border: 1px solid transparent;
+}
+
+.statusBadge-success {
+  background: rgba(0, 217, 192, 0.15);
+  color: var(--color-success, #00D9C0);
+  border-color: rgba(0, 217, 192, 0.35);
+}
+
+.statusBadge-warning {
+  background: rgba(255, 140, 66, 0.15);
+  color: var(--color-warning, #FF8C42);
+  border-color: rgba(255, 140, 66, 0.35);
+}
+
+.statusBadge-error {
+  background: rgba(245, 108, 108, 0.15);
+  color: var(--color-error, #F56C6C);
+  border-color: rgba(245, 108, 108, 0.35);
+}
+
+.statusBadge-offline {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--color-text-tertiary, #94a3b8);
+  border-color: rgba(148, 163, 184, 0.25);
+}
+
+/* === 指标卡 === */
+.metricCard {
+  position: relative;
+  padding: 16px 20px;
+  border-radius: var(--border-radius-lg, 4px);
+  background: var(--color-bg-container, #152838);
+  border: 1px solid var(--color-border, #1f3a52);
+  overflow: hidden;
+}
+
+/* 顶部 3px 渐变光带：颜色由 modifier 类决定 */
+.metricCard::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, currentColor, transparent);
+  color: var(--color-primary, #00D9C0);
+}
+
+.metricCard-success::before { color: var(--color-success, #00D9C0); }
+.metricCard-warning::before { color: var(--color-warning, #FF8C42); }
+.metricCard-error::before   { color: var(--color-error, #F56C6C); }
+.metricCard-offline::before { color: var(--color-text-tertiary, #94a3b8); }
+
+.metricCardNumber {
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--color-text, #fff);
+  margin: 0;
+}
+
+.metricCardLabel {
+  font-size: 12px;
+  color: var(--color-text-tertiary, #94a3b8);
+  margin-top: 4px;
+}
+
+.metricCardUnit {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--color-text-tertiary, #94a3b8);
+  margin-left: 4px;
+}
+
+/* === 紧凑表格 === */
+.compactTable :global(.ant-table-tbody > tr > td) {
+  padding: 8px 12px !important;
+}
+
+.compactTable :global(.ant-table-thead > tr > th) {
+  padding: 10px 12px !important;
+  font-weight: 600;
+}

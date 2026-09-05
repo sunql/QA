@@ -204,17 +204,12 @@ describe("BusinessObjectPage", () => {
 
     const modal = await waitFor(() => modalScope());
 
-    // 填 code (Select) — 限定在 modal 内，与 Table 列头隔离
-    const codeItem = within(modal).getByText("代码").closest(".ant-form-item") as HTMLElement;
-    const codeSelect = codeItem.querySelector(".ant-select-selector") as HTMLElement;
-    fireEvent.mouseDown(codeSelect);
-    const supplierOption = await within(document.body).findByText("SUPPLIER", {
-      selector: ".ant-select-item-option-content",
-    });
-    fireEvent.click(supplierOption);
+    // 填 code — 现在是自由输入的 Input（必须能输入新 code，否则无新增 UI）
+    const codeInput = within(modal).getByLabelText("代码") as HTMLInputElement;
+    fireEvent.change(codeInput, { target: { value: "INVOICE" } });
 
     const nameInput = within(modal).getByLabelText("名称") as HTMLInputElement;
-    fireEvent.change(nameInput, { target: { value: "供应商对象" } });
+    fireEvent.change(nameInput, { target: { value: "发票对象" } });
 
     // 选 headerClassId → Supplier
     const headerClassItem = within(modal).getByText("头表类").closest(".ant-form-item") as HTMLElement;
@@ -227,9 +222,58 @@ describe("BusinessObjectPage", () => {
 
     await waitFor(() => expect(createBusinessObject).toHaveBeenCalled());
     const payload = vi.mocked(createBusinessObject).mock.calls[0][0];
-    expect(payload.code).toBe("SUPPLIER");
-    expect(payload.name).toBe("供应商对象");
+    expect(payload.code).toBe("INVOICE");
+    expect(payload.name).toBe("发票对象");
     expect(payload.headerClassId).toBe(11);
     expect(payload.graphLabel).toBe("Supplier");
+  });
+
+  it("新建时 code 字段必须是自由输入（不是已有 code 的下拉），且格式非法时阻止提交", async () => {
+    const { createBusinessObject } = await import("../api/businessObject");
+    vi.mocked(createBusinessObject).mockClear();
+    render(<BusinessObjectPage />, { wrapper });
+    fireEvent.click(screen.getByRole("button", { name: /新建业务对象/ }));
+    await waitFor(() => expect(listClassesMock).toHaveBeenCalled());
+
+    const modal = await waitFor(() => modalScope());
+
+    // code 字段是 <input>，不是 <select>
+    const codeInput = within(modal).getByLabelText("代码") as HTMLInputElement;
+    expect(codeInput.tagName).toBe("INPUT");
+    expect(codeInput.hasAttribute("disabled")).toBe(false);
+
+    // 格式非法（小写 + 含 -）→ 提交时应被前端校验拦截，不调用 API
+    fireEvent.change(codeInput, { target: { value: "bad-code" } });
+    const nameInput = within(modal).getByLabelText("名称") as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "非法 code 测试" } });
+    fireEvent.click(within(modal).getByRole("button", { name: /确\s*定/ }));
+
+    // 等待验证错误出现
+    await waitFor(() => {
+      expect(within(modal).getByText(/代码必须为大写/)).toBeInTheDocument();
+    });
+    expect(createBusinessObject).not.toHaveBeenCalled();
+
+    // 修正为合法 code（INVOICE_2026） → 提交成功
+    fireEvent.change(codeInput, { target: { value: "INVOICE_2026" } });
+    fireEvent.click(within(modal).getByRole("button", { name: /确\s*定/ }));
+    await waitFor(() => expect(createBusinessObject).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createBusinessObject).mock.calls[0][0].code).toBe("INVOICE_2026");
+  });
+
+  it("编辑模式 code 字段被禁用", async () => {
+    render(<BusinessObjectPage />, { wrapper });
+    await waitFor(() => expect(screen.getByText("供应商")).toBeInTheDocument());
+
+    // 限定到表格行内（避免与其他同名按钮冲突）；antd 中文按钮默认字间加空格，用正则匹配
+    const supplierRow = screen.getByText("供应商").closest("tr") as HTMLElement;
+    const editButton = within(supplierRow).getByRole("button", { name: /编\s*辑/ });
+    fireEvent.click(editButton);
+    const modal = await waitFor(() => modalScope());
+
+    const codeInput = within(modal).getByLabelText("代码") as HTMLInputElement;
+    expect(codeInput.tagName).toBe("INPUT");
+    expect(codeInput).toBeDisabled();
+    expect(codeInput.value).toBe("SUPPLIER");
   });
 });

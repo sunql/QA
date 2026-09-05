@@ -1385,6 +1385,7 @@ export const enUS = {
       createSuccess: "Created",
       updateSuccess: "Updated",
       deleteSuccess: "Deleted",
+      submitFailed: "Submit failed: {detail}",
     },
     tooltips: {
       headerClassId: "Link to an ontology class; graph label is auto-derived from its className",
@@ -1394,6 +1395,10 @@ export const enUS = {
       selectHeaderClass: "Search by class name or alias (optional)",
       graphLabelAuto: "(auto-filled after picking a header class)",
       noClass: "No ontology classes available",
+      codeNew: "e.g. INVOICE (uppercase letters, digits, underscore; 1-20 chars)",
+    },
+    validation: {
+      codeFormat: "Code must be uppercase letters, digits, or underscore; 1-20 chars",
     },
   },
 } as const;

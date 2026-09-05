@@ -3,6 +3,7 @@ import {
   Button,
   Form,
   Input,
+  message,
   Modal,
   Popconfirm,
   Select,
@@ -106,27 +107,39 @@ export default function BusinessObjectPage() {
   };
 
   const onSubmit = async () => {
-    const values = await form.validateFields();
-    if (editing) {
-      const payload: BusinessObjectUpdate = {
-        name: values.name,
-        headerClassId: values.headerClassId ?? null,
-        graphLabel: values.graphLabel ?? null,
-        description: values.description ?? null,
-      };
-      await updateBusinessObject(editing.code, payload);
-    } else {
-      const payload: BusinessObjectCreate = {
-        code: values.code,
-        name: values.name,
-        headerClassId: values.headerClassId ?? null,
-        graphLabel: values.graphLabel ?? null,
-        description: values.description ?? null,
-      };
-      await createBusinessObject(payload);
+    let values;
+    try {
+      values = await form.validateFields();
+    } catch {
+      // antd validateFields 在校验失败时 reject；此时表单已经展示错误提示，无需再弹窗
+      return;
     }
-    setModalOpen(false);
-    void load();
+    try {
+      if (editing) {
+        const payload: BusinessObjectUpdate = {
+          name: values.name,
+          headerClassId: values.headerClassId ?? null,
+          graphLabel: values.graphLabel ?? null,
+          description: values.description ?? null,
+        };
+        await updateBusinessObject(editing.code, payload);
+      } else {
+        const payload: BusinessObjectCreate = {
+          code: values.code,
+          name: values.name,
+          headerClassId: values.headerClassId ?? null,
+          graphLabel: values.graphLabel ?? null,
+          description: values.description ?? null,
+        };
+        await createBusinessObject(payload);
+      }
+      setModalOpen(false);
+      void load();
+    } catch (error: unknown) {
+      // 提交失败时保留 modal，让用户看到错误并修正；antd toast 提示错误原因
+      const detail = error instanceof Error ? error.message : String(error);
+      void message.error(t("businessObject.messages.submitFailed", { detail }));
+    }
   };
 
   const onDelete = async (code: string) => {
@@ -186,12 +199,23 @@ export default function BusinessObjectPage() {
           <Form.Item
             name="code"
             label={t("businessObject.columns.code")}
-            rules={[{ required: true }]}
+            // 与后端 _validateBusinessObjectCodeFormat 一致：大写字母 / 数字 / 下划线，1-20 字符
+            rules={[
+              { required: true },
+              {
+                pattern: /^[A-Z0-9_]+$/,
+                message: t("businessObject.validation.codeFormat"),
+              },
+              { max: 20 },
+            ]}
           >
             {editing ? (
               <Input disabled />
             ) : (
-              <Select options={rows.map((bo) => ({ value: bo.code, label: bo.code }))} />
+              <Input
+                placeholder={t("businessObject.placeholders.codeNew")}
+                maxLength={20}
+              />
             )}
           </Form.Item>
           <Form.Item name="name" label={t("businessObject.columns.name")} rules={[{ required: true }]}>

@@ -1401,6 +1401,7 @@ export const zhCN = {
       createSuccess: "创建成功",
       updateSuccess: "更新成功",
       deleteSuccess: "删除成功",
+      submitFailed: "提交失败：{detail}",
     },
     tooltips: {
       headerClassId: "关联到本体类；图标签将按其 className 自动派生",
@@ -1410,6 +1411,10 @@ export const zhCN = {
       selectHeaderClass: "搜索类名 / 别名以选择本体类（可选）",
       graphLabelAuto: "（选本体类后自动填充）",
       noClass: "暂无本体类",
+      codeNew: "例如 INVOICE（仅大写字母、数字、下划线，1-20 字符）",
+    },
+    validation: {
+      codeFormat: "代码必须为大写字母 / 数字 / 下划线，1-20 字符",
     },
   },
 } as const;

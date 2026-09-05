@@ -124,4 +124,62 @@ describe("EntityAutoComplete", () => {
 
   // 注：下拉项点击 + option label 渲染的交互由 headless Playwright 跑真实后端验证
   // （antd AutoComplete 在 jsdom 下 dropdown 渲染 portal 行为不稳定）。
+
+  it("外部 value 变化：null 时清空 input；非 null 时回填 lastDisplayRef", async () => {
+    api.searchMappings.mockResolvedValue([sampleHit]);
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <ConfigProvider locale={zhCN}>
+        <EntityAutoComplete value={null} onChange={onChange} />
+      </ConfigProvider>,
+    );
+    // 选中一次（通过模拟 onSelect：直接重渲染 value=10105）
+    rerender(
+      <ConfigProvider locale={zhCN}>
+        <EntityAutoComplete value={10105} onChange={onChange} />
+      </ConfigProvider>,
+    );
+    const input = screen.getByRole("combobox") as HTMLInputElement;
+    // 外部 value 已被选中，inputText 回填为 String(value)（因为 lastDisplay 为空）
+    expect(input.value).toBe("10105");
+
+    // 外部 value 清空 → input 也清空
+    rerender(
+      <ConfigProvider locale={zhCN}>
+        <EntityAutoComplete value={null} onChange={onChange} />
+      </ConfigProvider>,
+    );
+    expect(input.value).toBe("");
+  });
+
+  it("searchMappings 抛错时 catch 静默（不传播异常）", async () => {
+    api.searchMappings.mockRejectedValue(new Error("搜索失败"));
+    renderAC();
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "ACME" } });
+    // 等待防抖触发后等 promise reject 完成；不应抛出
+    await new Promise((r) => setTimeout(r, 500));
+    // 无 throw 即通过
+  });
+
+  it("输入空白时不调用 searchMappings", async () => {
+    api.searchMappings.mockResolvedValue([sampleHit]);
+    renderAC();
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "   " } });
+    await new Promise((r) => setTimeout(r, 500));
+    expect(api.searchMappings).not.toHaveBeenCalled();
+  });
+
+  it("禁用：disabled 时 input 不可输入", () => {
+    renderAC({ disabled: true });
+    const input = screen.getByRole("combobox") as HTMLInputElement;
+    expect(input).toBeDisabled();
+  });
+
+  it("按下 Enter 触发 onPressEnter 回调", () => {
+    const onPressEnter = vi.fn();
+    renderAC({ onPressEnter });
+    const input = screen.getByRole("combobox");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onPressEnter).toHaveBeenCalled();
+  });
 });

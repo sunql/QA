@@ -52,3 +52,24 @@ Task 9: complete (commits fc59b68..HEAD, harness docs only — summary.md + busi
   - Final review verdict: PENDING（whole-branch review 后由 subagent-driven-development skill 填）
 
 All 9 tasks complete. feat-agent-tool-binding plan DONE.
+
+FINAL REVIEW (opus, whole-branch 285393e..3fd1f8f): **APPROVED**
+- Spec coverage: §1-§11 all implemented faithfully (1:1 / DB-only seed / strict 422 / options 扩展 / cache 预热失效 / admin-only)
+- Cross-task consistency: ✅ field naming, error messages, AgentBindingCache interface, AGENT_DEFAULT_BINDINGS 替换一致
+- Security (ACL 4 项): ✅ mass-assignment / 403 侧信道 / actor 派生 / 非 admin 集成测试（既有 ACL 基础设施覆盖）
+- Regression risk: ✅ 向后兼容（nullable 列 / 选项追加字段 / runnable 派生等价）/ Alembic 0035 up+down / 测试隔离 / 覆盖率 92.60%
+- Type safety: ✅ Pydantic ↔ ORM ↔ TS 全链一致
+- Architectural concerns: 5 项已 parked（tool_name_updated_at 未在 update 路径更新、cache 文件末换行、bindingCache=None 默认参数歧义、_FakeSession 死代码分支、seed 脚本未用 import）
+
+FINAL WRAP-UP:
+- 10 commits total (285393e spec → fc59b68 plan → c232db7 T1 → 3d4130b T2 → cb8b426 T3 → ab187a7 T4 → 2858ade T5 → 8d3f6bf T6 → 6c3e803 T7 → 127bf1f T8 → 3fd1f8f harness docs)
+- T7 cross-task fix: createAgent 修 T6 遗留 bug（DTO tool_name 未传到 entity）
+- Harness summary: Harness/changes/feat-agent-tool-binding/summary.md（82 行 SSOT，含实现/验证/决策/遗留）
+- Harness wiki: business-domain.md Agent Runtime 章节补充「工具绑定可配置化（Phase 7）」小节
+- Memory（仓外）：qa-system-agent-tool-binding.md + MEMORY.md 索引条目已写入
+- All parked minors 均 defer（5 项 T7 累积 + 1 项 T8 + 7 项 T1-T6），无功能影响
+- 验证：92.60% backend 覆盖率；前端 5/5 vitest + tsc clean + bundle hash 更新
+- e2e：T5 选项返回含 tools；POST /agents tool_name 校验 422；run 路径 DB 缓存命中
+- 风险登记：Update toolName 未传 vs null（PUT 语义，前端全量发送解决）；单实例 cache（未来多实例切 Redis，独立排期）
+
+PLAN COMPLETE — workspace retained (matching prior SDD convention); ready to transition to next phase

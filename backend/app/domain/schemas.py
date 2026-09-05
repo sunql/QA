@@ -68,6 +68,25 @@ Replaces the hardcoded Literal. Validation is runtime against the business_objec
 table — adding new business objects requires no code change, only an INSERT.
 """
 
+# format-only validator (no registry check) — used when creating NEW codes
+def _validateBusinessObjectCodeFormat(code: str) -> str:
+    """Format validation for new business object codes (registry check is done by DB constraint)."""
+    if not code or len(code) > 20 or not code.isupper() or not code.replace("_", "").isalnum():
+        raise ValueError(
+            f"Invalid business object code format: {code!r}. "
+            f"Must be uppercase alphanumeric (underscore allowed), max 20 chars."
+        )
+    return code
+
+
+BusinessObjectCodeNew = Annotated[str, BeforeValidator(_validateBusinessObjectCodeFormat)]
+"""Format-only validation for new business object codes in create payloads.
+
+Unlike BusinessObjectCodeType, this does NOT check the registry — a code being
+CREATED is by definition not yet in the registry. DB CHECK constraint (uppercase
+VARCHAR(20)) enforces the rest.
+"""
+
 from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_AFFINITY,
     MSG_SCHEMA_CHAT_CHART_TYPE_EXPLICIT,
@@ -2419,7 +2438,7 @@ class AgentToolConfigRead(AgentToolConfigBase):
 class BusinessObjectCreate(CamelModel):
     """创建业务对象 (Phase 4.4)."""
 
-    code: BusinessObjectCodeType = Field(...)
+    code: BusinessObjectCodeNew = Field(...)
     name: str = Field(..., min_length=1, max_length=100)
     header_class_id: int | None = None
     graph_label: str | None = Field(default=None, max_length=100)

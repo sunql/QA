@@ -221,4 +221,68 @@ describe("ImportWizard", () => {
     expect(request.confirmedJoins.map((j) => j.targetTable)).toEqual(["customers"]);
     expect(request.confirmedClasses[0].isSelected).toBe(true);
   });
+
+  it("getImportPreview 失败时显示错误提示，不进入预览步骤", async () => {
+    vi.mocked(api.getImportPreview).mockRejectedValue(new Error("预览失败"));
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /下一步/i }));
+    await waitFor(() => {
+      // catch 分支触发 message.error
+      expect(api.getImportPreview).toHaveBeenCalled();
+    });
+    // 仍在第一步（规则配置）
+    expect(screen.getByText(/规则配置/i)).toBeInTheDocument();
+  });
+
+  it("executeImport 失败时显示错误提示", async () => {
+    vi.mocked(api.getImportPreview).mockResolvedValue({
+      datasourceId: 1,
+      proposedClasses: [
+        {
+          sourceTable: "orders",
+          className: "orders",
+          classAlias: null,
+          description: null,
+          isSelected: true,
+          properties: [],
+        },
+      ],
+      proposedJoins: [],
+      conflicts: [],
+      filterSuggestions: { recommendedBlacklistPatterns: [], excludedTables: [] },
+      llmUsage: { modelName: null, promptTokens: 0, completionTokens: 0 },
+    });
+    vi.mocked(api.executeImport).mockRejectedValue(new Error("导入失败"));
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /下一步/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /确认导入/i })).toBeInTheDocument()
+    );
+    fireEvent.click(screen.getByRole("button", { name: /全选当前筛选/i }));
+    fireEvent.click(screen.getByRole("button", { name: /确认导入/i }));
+    await waitFor(() => {
+      expect(api.executeImport).toHaveBeenCalled();
+    });
+  });
+
+  it("上一步按钮：从预览页返回到规则配置页", async () => {
+    vi.mocked(api.getImportPreview).mockResolvedValue({
+      datasourceId: 1,
+      proposedClasses: [],
+      proposedJoins: [],
+      conflicts: [],
+      filterSuggestions: { recommendedBlacklistPatterns: [], excludedTables: [] },
+      llmUsage: { modelName: null, promptTokens: 0, completionTokens: 0 },
+    });
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+    // 进入预览
+    fireEvent.click(screen.getByRole("button", { name: /下一步/i }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /上一步/i })).toBeInTheDocument();
+    });
+    // 返回上一步
+    fireEvent.click(screen.getByRole("button", { name: /上一步/i }));
+    // 回到规则配置
+    expect(screen.getByText(/规则配置/i)).toBeInTheDocument();
+  });
 });

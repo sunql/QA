@@ -102,7 +102,13 @@ RuleSuggestionEngine（纯函数，无 IO）
 
 ## 7. 前端向导
 
-`frontend/src/pages/DataQualityRuleGeneratePage.tsx`，路由 `/data-quality/generate`，从 DataQualityPage 加入口按钮（不加新菜单项）。
+`frontend/src/pages/DataQualityRuleGeneratePage.tsx`，路由 `/data-quality/generate`，**独立菜单入口**（不挂在 DataQualityPage 内）。
+
+菜单接入（menu_config DB 驱动，需三处同步）：
+
+- `backend/scripts/seed_menu_config.py` ITEMS 列表新增 `item.dataQualityGenerate`，parent 与数据质量项同分组，`sort_order` 紧随其后，`label_key = "menu.item.dataQualityGenerate"`，幂等 `on_conflict_do_update`
+- i18n：zh-CN / en-US 双份 `menu.item.dataQualityGenerate`（命名空间用 `menu.item`，非 `appLayout.menu`）
+- `frontend/src/components/common/fallbackNav.ts` 离线 fallback 同步
 
 1. **选类**：本体类下拉（复用 ontology API）
 2. **选数据源 + 映射校验**：数据源下拉（复用 data_source API）→ 属性↔物理列映射三态表
@@ -145,4 +151,3 @@ RuleSuggestionEngine（纯函数，无 IO）
 - TIMELINESS 维度（评估器未实现）
 - 调度/定时执行（沿用户既有决策：手动触发）
 - DataQualityScoreService / 评估器改动
-- 新菜单项

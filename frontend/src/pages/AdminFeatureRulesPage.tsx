@@ -146,15 +146,17 @@ export default function AdminFeatureRulesPage(): JSX.Element {
                 await updateFeatureRule(editing.code, payload);
                 void message.success(t("featureRules.messages.updated"));
             } else {
+                // values is FeatureRuleCreate when editing is null
+                const createValues = values as FeatureRuleCreate;
                 const payload: FeatureRuleCreate = {
-                    code: values.code,
-                    data_object: values.data_object,
-                    data_layer: values.data_layer,
-                    target_level: values.target_level,
-                    feature_name: values.feature_name,
-                    enabled: values.enabled ?? true,
-                    priority: values.priority ?? 100,
-                    policy_description: values.policy_description,
+                    code: createValues.code,
+                    data_object: createValues.data_object,
+                    data_layer: createValues.data_layer,
+                    target_level: createValues.target_level,
+                    feature_name: createValues.feature_name,
+                    enabled: createValues.enabled ?? true,
+                    priority: createValues.priority ?? 100,
+                    policy_description: createValues.policy_description,
                     thresholds: thresholds.length > 0 ? thresholds : [],
                 };
                 await createFeatureRule(payload);
@@ -309,7 +311,7 @@ export default function AdminFeatureRulesPage(): JSX.Element {
                         ? t("featureRules.actions.edit")
                         : t("featureRules.actions.create")
                 }
-                onCancel={() => setDrawerOpen(false)}
+                onClose={() => setDrawerOpen(false)}
                 width={640}
                 destroyOnHidden
             >

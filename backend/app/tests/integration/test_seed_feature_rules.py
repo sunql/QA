@@ -1,11 +1,16 @@
 """seed_feature_rules 幂等 upsert + 与 seed_agent_tool_configs 模式一致。"""
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.domain.models import FeatureRule
 from scripts.seed_feature_rules import seedFeatureRules
 
 
 async def test_seed_creates_4_rules(dbSession) -> None:
+    # conftest pre-seeds; truncate to test seed function in isolation
+    await dbSession.execute(text(
+        "TRUNCATE TABLE feature_rule_threshold, feature_rule RESTART IDENTITY CASCADE"
+    ))
+    await dbSession.commit()
     n = await seedFeatureRules(dbSession)
     await dbSession.commit()
     assert n == 4
@@ -18,6 +23,11 @@ async def test_seed_creates_4_rules(dbSession) -> None:
 
 
 async def test_seed_is_idempotent(dbSession) -> None:
+    # conftest pre-seeds; truncate to test seed function in isolation
+    await dbSession.execute(text(
+        "TRUNCATE TABLE feature_rule_threshold, feature_rule RESTART IDENTITY CASCADE"
+    ))
+    await dbSession.commit()
     n1 = await seedFeatureRules(dbSession)
     await dbSession.commit()
     n2 = await seedFeatureRules(dbSession)

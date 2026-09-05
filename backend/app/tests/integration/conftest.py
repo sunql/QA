@@ -69,12 +69,12 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     await agent_tool_config_registry.warmUp(dbSession)
     # warmUp feature_rule_registry（feat-feature-rule-config）：集成测试无
     # lifespan，必须显式 warmUp，否则 runtime 测试会因 'Registry 未 warmUp'
-    # 抛 RuntimeError。deviation from brief Step 1: 不在 conftest 内
-    # seedFeatureRules——test_seed_feature_rules.py 用 dbSession（不走
-    # pgSession 独立 TRUNCATE），pre-seed 会让 n1 == 0 断其断言。测试自身
-    # 按需调 _seed_rules（test_feature_rule_supplier_risk_parity）即可。
+    # 抛 RuntimeError。seedFeatureRules 先行确保运行时测试有规则可评估。
+    from scripts.seed_feature_rules import seedFeatureRules
     from app.services.feature_rule_registry import feature_rule_registry
 
+    await seedFeatureRules(dbSession)
+    await dbSession.commit()
     feature_rule_registry.invalidate()
     await feature_rule_registry.warmUp(dbSession)
     # 关掉 warmUp SELECT 留下的隐式事务：否则 dbSession 持有 AccessShareLock，

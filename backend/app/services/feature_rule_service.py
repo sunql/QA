@@ -8,8 +8,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
@@ -59,8 +60,19 @@ def _ruleRowToDict(row: FeatureRule) -> dict:
     }
 
 
-def _seedThresholds(rule: FeatureRule, threshold_dicts: list[dict]) -> None:
-    """Seed 专用：清空旧阈值 + 重建（spec §5.2 1:N）。"""
+async def _seedThresholds(session: AsyncSession, rule: FeatureRule, threshold_dicts: list[dict]) -> None:
+    """Seed 专用：删旧阈值 + 重建（spec §5.2 1:N）。
+
+    旧阈值来自 selectinload（已 attached）；sync raw DELETE by rule_id 物理删除，
+    flush 时下发，避免 clear()-only 留下 orphan 行触发
+    uq_feature_rule_threshold_rule_severity 唯一约束。
+    """
+    from app.domain.models import FeatureRuleThreshold
+
+    # raw DELETE by rule_id — no ORM-level session coupling needed
+    await session.execute(
+        delete(FeatureRuleThreshold).where(FeatureRuleThreshold.rule_id == rule.id)
+    )
     rule.thresholds.clear()
     for td in threshold_dicts:
         rule.thresholds.append(FeatureRuleThreshold(
@@ -261,7 +273,9 @@ class FeatureRuleService:
         """Seed 专用 upsert（绕过 ACL + audit）。code 命中 → 全量更新元数据；未命中 → 插入。"""
         existing = (
             await session.execute(
-                select(FeatureRule).where(FeatureRule.code == code)
+                select(FeatureRule)
+                .options(selectinload(FeatureRule.thresholds))
+                .where(FeatureRule.code == code)
             )
         ).scalar_one_or_none()
         if existing is None:
@@ -295,7 +309,7 @@ class FeatureRuleService:
         existing.enabled = fields.get("enabled", True)
         existing.priority = fields.get("priority", 100)
         existing.policy_description = fields.get("policy_description")
-        _seedThresholds(existing, fields["thresholds"])
+        await _seedThresholds(session, existing, fields["thresholds"])
         existing.updated_time = datetime.now(timezone.utc)
         await session.flush()
         return existing

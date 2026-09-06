@@ -11,13 +11,16 @@ import type { Severity } from "./dataQuality";
 // 枚举/联合类型（与 dataQuality.ts 保持一致）
 // ---------------------------------------------------------------------------
 
-/** 阈值推导方式。 */
+/** 阈值推导方式（与后端 DerivationType 枚举对齐）。 */
 export type DerivationType =
-  | "MANUAL"
-  | "AUTO_COMPLETENESS"
-  | "AUTO_UNIQUENESS"
-  | "AUTO_VALIDITY"
-  | "AUTO_FREQUENCY";
+  | "PK_DERIVED"
+  | "FK_DERIVED"
+  | "DICT_REF"
+  | "ALLOWED_VALUES"
+  | "NOT_NULL"
+  | "JOIN_CONSISTENCY"
+  | "LLM_DERIVED"
+  | "MANUAL";
 
 export type RuleSuggestionStatus = "NEW" | "EXISTS";
 

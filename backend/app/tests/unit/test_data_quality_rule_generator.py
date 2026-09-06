@@ -34,10 +34,22 @@ SCHEMA = SchemaIndex(tables={
 
 
 def test_build_rule_code_deterministic():
-    assert (
-        buildRuleCode("PurchaseOrder", "po_key", RuleType.UNIQUENESS)
-        == "DQ_PURCHASEORDER_PO_KEY_UNIQUENESS"
-    )
+    code = buildRuleCode("PurchaseOrder", "po_key", RuleType.UNIQUENESS)
+    assert code.startswith("DQ_PURCHASEORDER_PO_KEY_UNIQUENESS_") and len(code.split("_")[-1]) == 7
+
+
+def test_build_rule_code_always_has_hash_suffix():
+    code = buildRuleCode("PurchaseOrder", "po_key", RuleType.UNIQUENESS)
+    # hash suffix is always present even for short names
+    assert "_" in code and len(code.split("_")[-1]) == 7
+
+
+def test_slug_collision_produces_different_codes():
+    # PO-KEY and PO.KEY both slug to PO_KEY; rule codes must still differ
+    # because hash is computed from the original (pre-slug) string.
+    code1 = buildRuleCode("PO", "PO-KEY", RuleType.COMPLETENESS)
+    code2 = buildRuleCode("PO", "PO.KEY", RuleType.COMPLETENESS)
+    assert code1 != code2
 
 
 def test_build_rule_code_truncates_with_hash_suffix():

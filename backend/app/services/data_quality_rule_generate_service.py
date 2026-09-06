@@ -407,7 +407,10 @@ class DataQualityRuleGenerateService:
                 # 并发撞唯一约束 → 记跳过，不失败整批
                 # begin_nested() 创建了 savepoint；rollback 只回滚该 savepoint，
                 # 不影响外层事务和其他已 flush 的规则（正确）。
+                # 同时补进 existing 防止本轮循环重试同一 code（pre-query 的 snapshot
+                # 不含并发插入的记录）。
                 skipped.append(item.rule_code)
+                existing.add(item.rule_code)
                 await session.rollback()
                 continue
 

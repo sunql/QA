@@ -84,12 +84,18 @@ class BlockedProperty:
     reason: str
 
 def buildRuleCode(className: str, propertyName: str, ruleType: RuleType) -> str:
-    """DQ_<CLASS>_<PROP>_<TYPE>；超长截断 + sha256 短后缀，保证 pattern 与唯一性倾向。"""
-    raw = f"DQ_{_slug(className)}_{_slug(propertyName)}_{ruleType.value}"
-    if len(raw) <= _RULE_CODE_MAX:
-        return raw
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:7]
-    return f"{raw[:_RULE_CODE_MAX - 8]}_{digest}"
+    """DQ_<CLASS>_<PROP>_<TYPE>；始终附加 sha256 短后缀，防止 _slug 碰撞。
+
+    hash = sha256(original strings)，与 slug 无关；即 PO-KEY 与 PO.KEY slug 后同，
+    但因原始字符串不同，hash 不同，最终 rule_code 也不同。
+    """
+    slugified = f"DQ_{_slug(className)}_{_slug(propertyName)}_{ruleType.value}"
+    digest = hashlib.sha256(  # noqa: UP012
+        f"{className}\x00{propertyName}\x00{ruleType.value}".encode()
+    ).hexdigest()[:7]
+    if len(slugified) <= _RULE_CODE_MAX - 8:
+        return f"{slugified}_{digest}"
+    return f"{slugified[:_RULE_CODE_MAX - 8]}_{digest}"
 
 def _slug(value: str) -> str:
     out = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").upper()

@@ -24,6 +24,8 @@ _THRESHOLD_SEVERITY: dict[RuleType, tuple[Decimal, Severity]] = {
     RuleType.UNIQUENESS: (Decimal("100"), Severity.HIGH),
 }
 
+class ExpressionUnsafeError(ValidationError):
+    """生成的表达式未通过安全白名单：阻断该属性，而不是让整单预览失败。"""
 @dataclass(frozen=True)
 class ClassContext:
     class_id: int
@@ -132,8 +134,13 @@ def deriveSuggestions(
             if prop.ref_key_column is None:
                 blocked.append(BlockedProperty(prop.property_name, "引用类未配置主键列映射"))
                 continue
+        try:
+            propSuggestions = _deriveForProperty(ctx, prop, col)
+        except ExpressionUnsafeError as exc:
+            blocked.append(BlockedProperty(prop.property_name, exc.message))
+            continue
         resolvedProps.append(prop)
-        suggestions.extend(_deriveForProperty(ctx, prop, col))
+        suggestions.extend(propSuggestions)
     suggestions.extend(_deriveJoinConsistency(ctx, resolvedProps, joinEdges))
     return suggestions, blocked
 
@@ -178,9 +185,16 @@ def _deriveAllowedValues(
                 detail="值域不允许包含单引号、反斜杠或控制字符，且长度需 1-50 字符",
             )
     quoted = ",".join(f"'{v}'" for v in values)
+    expr = f"{col.column_name} IN ({quoted})"
+    try:
+        validate_expression(expr)
+    except ValidationError as exc:
+        raise ExpressionUnsafeError(
+            f"值域生成表达式未过安全校验: {values!r}"
+        ) from exc
     return _makeSuggestion(
         ctx, prop, RuleType.VALIDITY, DerivationType.ALLOWED_VALUES,
-        f"{col.column_name} IN ({quoted})", "HIGH", "固定值域",
+        expr, "HIGH", "固定值域",
     )
 
 def _deriveRef(ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta) -> RuleSuggestion:

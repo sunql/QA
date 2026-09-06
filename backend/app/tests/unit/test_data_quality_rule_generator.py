@@ -274,6 +274,22 @@ def test_all_generated_expressions_pass_validation():
         validate_expression(s.rule_expression)
 
 
+def test_allowed_value_blacklist_keyword_blocks_property_not_all():
+    sugg, blocked = deriveSuggestions(
+        CTX,
+        [
+            _prop(property_name="status", source_column="STATUS", is_primary_key=False,
+                  allowed_values=["A--B"]),
+            _prop(),
+        ],
+        [],
+        SCHEMA,
+    )
+    assert len(blocked) == 1
+    assert "值域生成表达式未过安全校验" in blocked[0].reason
+    assert any(s.rule_type == RuleType.UNIQUENESS for s in sugg)
+
+
 def test_blocked_datetime_property_does_not_generate_consistency():
     edge = JoinEdgeMeta(target_table="PORDERQ", source_columns=["PO_KEY"],
                         target_columns=["PO_KEY"], target_date_columns=["RECEIPT_DATE"])

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import CurrentUser
 from app.domain.enums import DataType, DerivationType, ObjectType, RuleType, Severity
 from app.domain.exceptions import NotFoundError
-from app.domain.models import DataQualityRule, OntologyClass, OntologyJoin, OntologyProperty
+from app.domain.models import DataQualityRule, DataSource, OntologyClass, OntologyJoin, OntologyProperty
 from app.domain.schemas import (
     BlockedPropertyRead,
     DataQualityRuleRead,
@@ -34,7 +34,7 @@ from app.services.data_quality_rule_generator import (
     buildRuleCode,
     deriveSuggestions,
 )
-from app.services.messages_zh import MSG_DQ_GEN_CLASS_NOT_FOUND
+from app.services.messages_zh import MSG_DQ_GEN_CLASS_NOT_FOUND, MSG_DQ_GEN_DATASOURCE_NOT_FOUND
 from app.services.outbox_service import OutboxService
 from app.services.schema_introspection_service import SchemaIntrospectionService
 
@@ -348,6 +348,11 @@ class DataQualityRuleGenerateService:
         Outbox 审计：每条 created 规则对应一条 audit_outbox
         （event_type='data_quality_rule_created'），在 commit 前入队。
         """
+        # 校验 datasource 存在（不存在 → 404，与 preview 的 classId 校验对齐）
+        ds = await session.get(DataSource, payload.datasource_id)
+        if ds is None:
+            raise NotFoundError(MSG_DQ_GEN_DATASOURCE_NOT_FOUND.format(id=payload.datasource_id))
+
         created: list[DataQualityRule] = []
         skipped: list[str] = []
 

@@ -289,7 +289,7 @@ async def test_confirm_invalid_rule_code_422(client: AsyncClient, dbSession: Asy
 
 
 async def test_confirm_datasource_not_found_404(client: AsyncClient) -> None:
-    """不存在的 datasourceId → 404 或落库失败。"""
+    """datasourceId 不存在 → 显式 404（service 层 raise NotFoundError）。"""
     r = await client.post(
         f"{GEN_BASE}/confirm",
         json={
@@ -306,6 +306,6 @@ async def test_confirm_datasource_not_found_404(client: AsyncClient) -> None:
             ],
         },
     )
-    # datasource FK 不存在 → 落库失败（不 404，是 500 或 201 但无 created）
-    # 保守检查：不是 422（格式正确）即可
-    assert r.status_code != 422
+    assert r.status_code == 404, f"expected 404, got {r.status_code}: {r.text}"
+    body = r.json()
+    assert "error" in body or "message" in body

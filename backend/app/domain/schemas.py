@@ -2649,3 +2649,45 @@ class GenerateConfirmResponse(CamelModel):
 
     created: list[DataQualityRuleRead] = Field(default_factory=list)
     skipped_codes: list[str] = Field(default_factory=list)
+
+
+# ===========================================================================
+# 数据质量规则自动生成 LLM advisory（dq-rule-auto-generation Task 6）
+# ===========================================================================
+
+
+class ParseDescriptionsRequest(CamelModel):
+    """parse-descriptions 请求：给定本体类，让 LLM 从属性描述中提取候选约束。"""
+
+    class_id: int = Field(..., gt=0)
+
+
+class PropertyConstraintSuggestionRead(CamelModel):
+    """LLM 返回的单条候选约束建议。"""
+
+    property_id: int
+    property_name: str
+    kind: str  # allowed_values | not_null
+    values: list[str] | None = None
+    confidence: float
+    rationale: str
+
+
+class ParseDescriptionsResponse(CamelModel):
+    """parse-descriptions 响应。"""
+
+    suggestions: list[PropertyConstraintSuggestionRead] = Field(default_factory=list)
+
+
+class ApplySuggestionRequest(CamelModel):
+    """apply-suggestion 请求：采纳 LLM 推荐的 allowed_values，写入 ontology_property。"""
+
+    property_id: int = Field(..., gt=0)
+    allowed_values: list[str] = Field(..., min_length=1, max_length=50)
+
+
+class ApplySuggestionResponse(CamelModel):
+    """apply-suggestion 响应。"""
+
+    property_id: int
+    allowed_values: list[str]

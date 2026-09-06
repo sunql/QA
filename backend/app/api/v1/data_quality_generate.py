@@ -1,26 +1,44 @@
-"""数据质量规则自动生成 API（dq-rule-auto-generation Task 4）。
+"""数据质量规则自动生成 API（dq-rule-auto-generation Task 4-6）。
 
 POST /api/v1/data-quality/rules/generate/preview   预览规则建议
 POST /api/v1/data-quality/rules/generate/confirm   确认并写入（Task 5）
-POST /api/v1/data-quality/rules/generate/apply-suggestion  直接采纳单条（Task 6）
+POST /api/v1/data-quality/rules/generate/parse-descriptions  LLM 解析属性描述（Task 6）
+POST /api/v1/data-quality/rules/generate/apply-suggestion  采纳 LLM 建议写入元数据（Task 6）
 """
 from __future__ import annotations
+
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.schemas import (
+    ApplySuggestionRequest,
+    ApplySuggestionResponse,
     GenerateConfirmRequest,
     GenerateConfirmResponse,
     GeneratePreviewRequest,
     GeneratePreviewResponse,
+    ParseDescriptionsRequest,
+    ParseDescriptionsResponse,
 )
+from app.infrastructure.llm.factory import createClient
 from app.services.data_quality_rule_generate_service import (
     DataQualityRuleGenerateService,
 )
+from app.services.data_quality_rule_llm_service import parsePropertyDescriptions
 
 router = APIRouter(prefix="", tags=["data-quality-generate"])
+
+
+def _getDefaultLlmClient() -> Any:
+    """获取默认 LLM 客户端（支持测试 monkeypatch）。
+
+    优先用 OPENAI_API_KEY 环境变量；若未配置则返回 None
+   （路由层捕获 None → 503 LLMUnavailableError）。
+    """
+    return createClient(None)
 
 
 @router.post("/preview", response_model=GeneratePreviewResponse)
@@ -50,5 +68,48 @@ async def confirmRules(
     每条创建成功的规则会写入一条 audit_outbox 审计事件。
     """
     return await DataQualityRuleGenerateService().confirm(
+        session, payload=payload, actor=user,
+    )
+
+
+@router.post("/parse-descriptions", response_model=ParseDescriptionsResponse)
+async def parseDescriptions(
+    payload: ParseDescriptionsRequest,
+    user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> ParseDescriptionsResponse:
+    """LLM 解析本体类所有属性的 description 字段，推导候选约束建议。
+
+    advisory 只读，不写 outbox。LLM 失败 → 503。
+    """
+    # 先用 service 做 classId 存在性校验（404）
+    from app.domain.models import OntologyClass
+    cls = await session.get(OntologyClass, payload.class_id)
+    if cls is None:
+        from app.domain.exceptions import NotFoundError
+        from app.services.messages_zh import MSG_DQ_GEN_CLASS_NOT_FOUND
+        raise NotFoundError(MSG_DQ_GEN_CLASS_NOT_FOUND.format(id=payload.class_id))
+
+    llm_client = _getDefaultLlmClient()
+    if llm_client is None:
+        from app.domain.exceptions import LLMUnavailableError
+        raise LLMUnavailableError("未配置 LLM，无法进行 AI 辅助分析")
+    return await parsePropertyDescriptions(
+        session, payload=payload, llm_client=llm_client, actor=user,
+    )
+
+
+@router.post("/apply-suggestion", response_model=ApplySuggestionResponse)
+async def applySuggestion(
+    payload: ApplySuggestionRequest,
+    user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> ApplySuggestionResponse:
+    """采纳 LLM 推荐的 allowed_values，写入 ontology_property 并记录 outbox 审计。
+
+    仅值域型约束写入元数据；业务必填类建议不写回。
+    值不允许含单引号（SQL 注入防护）。
+    """
+    return await DataQualityRuleGenerateService().applySuggestion(
         session, payload=payload, actor=user,
     )

@@ -15,9 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
 from app.domain.enums import DataType, DerivationType, ObjectType, RuleType, Severity
-from app.domain.exceptions import NotFoundError
+from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import DataQualityRule, DataSource, OntologyClass, OntologyJoin, OntologyProperty
 from app.domain.schemas import (
+    ApplySuggestionRequest,
+    ApplySuggestionResponse,
     BlockedPropertyRead,
     DataQualityRuleRead,
     GenerateConfirmRequest,
@@ -34,7 +36,7 @@ from app.services.data_quality_rule_generator import (
     buildRuleCode,
     deriveSuggestions,
 )
-from app.services.messages_zh import MSG_DQ_GEN_CLASS_NOT_FOUND, MSG_DQ_GEN_DATASOURCE_NOT_FOUND
+from app.services.messages_zh import MSG_DQ_GEN_BAD_VALUE, MSG_DQ_GEN_CLASS_NOT_FOUND, MSG_DQ_GEN_DATASOURCE_NOT_FOUND, MSG_DQ_GEN_PROPERTY_NOT_FOUND
 from app.services.outbox_service import OutboxService
 from app.services.schema_introspection_service import SchemaIntrospectionService
 
@@ -428,4 +430,49 @@ class DataQualityRuleGenerateService:
                 for r in created
             ],
             skipped_codes=skipped,
+        )
+
+    async def applySuggestion(
+        self,
+        session: AsyncSession,
+        payload: ApplySuggestionRequest,
+        actor: CurrentUser,
+    ) -> ApplySuggestionResponse:
+        """采纳 LLM 推荐的 allowed_values，写入 ontology_property 并记录 outbox 审计。
+
+        仅值域型（allowed_values）写入；业务必填类建议不写回（不沉淀为元数据），
+        仅留 LLM_DERIVED 入 confirm。
+
+        值校验：不允许含单引号（SQL 注入防护），否则 422。
+        """
+        prop = await session.get(OntologyProperty, payload.property_id)
+        if prop is None:
+            raise NotFoundError(MSG_DQ_GEN_PROPERTY_NOT_FOUND.format(id=payload.property_id))
+
+        # 值域安全校验：禁止单引号（SQL 注入防护）
+        for v in payload.allowed_values:
+            if "'" in v:
+                raise ValidationError(MSG_DQ_GEN_BAD_VALUE)
+
+        before = prop.allowed_values
+        prop.allowed_values = payload.allowed_values
+
+        # outbox 审计（event_type 要求 updated）
+        await self._outbox.enqueue(
+            session,
+            event_type="ontology_property_updated",
+            entity_type="ontology_property",
+            entity_id=prop.id,
+            actor=actor.userId,
+            actor_departments=tuple(actor.departments or []),
+            payload={
+                "before": {"allowed_values": before},
+                "after": {"allowed_values": payload.allowed_values},
+            },
+        )
+
+        await session.commit()
+        return ApplySuggestionResponse(
+            property_id=prop.id,
+            allowed_values=payload.allowed_values,
         )

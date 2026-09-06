@@ -19,11 +19,12 @@ from app.infrastructure.security.crypto import decryptApiKey
 _clients: dict[int, BaseLlmClient] = {}
 
 
-def createClient(config: Any, *, settings: Settings | None = None, apiKey: str | None = None) -> BaseLlmClient:
+def createClient(config: Any, *, settings: Settings | None = None, apiKey: str | None = None) -> BaseLlmClient | None:
     """创建或复用 LlmConfig 对应的客户端。
 
     Args:
-        config: LlmConfig（或兼容鸭子类型），需含 id、provider、model_name、api_endpoint、api_key_encrypted
+        config: LlmConfig（或兼容鸭子类型），需含 id、provider、model_name、api_endpoint、api_key_encrypted；
+                传 None 表示无配置（走 OPENAI provider + 环境变量 key）。
         settings: 可选 Settings，默认取单例
         apiKey: 可选明文 key（测试注入）；否则按 provider 从配置密文或环境变量解析
     """
@@ -32,9 +33,30 @@ def createClient(config: Any, *, settings: Settings | None = None, apiKey: str |
     if configId in _clients:
         return _clients[configId]
 
+    # config=None 时默认走 OPENAI provider，从 apiKey 或 settings.openaiApiKey 取 key
+    if config is None or not hasattr(config, "provider"):
+        provider = ProviderType.OPENAI
+        key = apiKey or settings.openaiApiKey
+        if not key:
+            # 无有效 key → 返回 None，调用方应处理（如 503 LLMUnavailableError）
+            return None
+        anon_config = type("AnonLlmConfig", (), {
+            "id": configId,
+            "provider": provider.value,
+            "model_name": getattr(settings, "openaiModel", "gpt-4o-mini"),
+            "api_endpoint": None,
+            "api_key_encrypted": None,
+        })()
+        client: BaseLlmClient = OpenAiClient(
+            anon_config,
+            apiKey=key,
+            provider=provider,
+        )
+        _clients[configId] = client
+        return client
+
     provider = ProviderType(config.provider)
     if provider == ProviderType.OLLAMA:
-        # 优先用各模型配置的 api_endpoint，其次用全局配置
         baseUrl = getattr(config, "api_endpoint", None) or settings.ollamaBaseUrl
         client: BaseLlmClient = OllamaClient(config, baseUrl=baseUrl)
     else:

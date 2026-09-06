@@ -99,6 +99,12 @@ MSG_MAP_PROPERTY_OK = "属性「{property}」已映射到类「{className}」"
 MSG_DQ_RULE_NOT_FOUND = "数据质量规则 id={id} 不存在"
 MSG_DQ_RULE_CODE_EXISTS = "数据质量规则编码「{code}」已存在"
 
+# dq-rule-auto-generation Task 6: LLM advisory
+MSG_DQ_GEN_LLM_UNAVAILABLE = "AI 辅助不可用，请稍后重试或手动填写约束"
+MSG_DQ_GEN_LLM_PARSE_ERROR = "AI 返回格式无法解析，请稍后重试"
+MSG_DQ_GEN_BAD_VALUE = "不允许包含单引号字符"
+MSG_DQ_GEN_PROPERTY_NOT_FOUND = "本体属性 id={id} 不存在"
+
 # Phase 1.2 evaluator
 MSG_DQ_EVAL_INVALID_IDENTIFIER = (
     "数据质量评估 SQL 标识符不合法（仅允许字母/数字/下划线，且不以数字开头）: {value}"

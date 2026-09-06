@@ -44,8 +44,8 @@ def _getDefaultLlmClient() -> Any:
 @router.post("/preview", response_model=GeneratePreviewResponse)
 async def previewRules(
     payload: GeneratePreviewRequest,
-    user: CurrentUser = Depends(getCurrentUser),
-    session: AsyncSession = Depends(getDb),
+    user: CurrentUser = Depends(getCurrentUser),  # noqa: B008
+    session: AsyncSession = Depends(getDb),  # noqa: B008
 ) -> GeneratePreviewResponse:
     """预览指定本体类的数据质量规则建议。
 
@@ -59,8 +59,8 @@ async def previewRules(
 @router.post("/confirm", response_model=GenerateConfirmResponse)
 async def confirmRules(
     payload: GenerateConfirmRequest,
-    user: CurrentUser = Depends(getCurrentUser),
-    session: AsyncSession = Depends(getDb),
+    user: CurrentUser = Depends(getCurrentUser),  # noqa: B008
+    session: AsyncSession = Depends(getDb),  # noqa: B008
 ) -> GenerateConfirmResponse:
     """批量确认并写入自动生成的数据质量规则。
 
@@ -75,8 +75,8 @@ async def confirmRules(
 @router.post("/parse-descriptions", response_model=ParseDescriptionsResponse)
 async def parseDescriptions(
     payload: ParseDescriptionsRequest,
-    user: CurrentUser = Depends(getCurrentUser),
-    session: AsyncSession = Depends(getDb),
+    user: CurrentUser = Depends(getCurrentUser),  # noqa: B008
+    session: AsyncSession = Depends(getDb),  # noqa: B008
 ) -> ParseDescriptionsResponse:
     """LLM 解析本体类所有属性的 description 字段，推导候选约束建议。
 
@@ -102,8 +102,8 @@ async def parseDescriptions(
 @router.post("/apply-suggestion", response_model=ApplySuggestionResponse)
 async def applySuggestion(
     payload: ApplySuggestionRequest,
-    user: CurrentUser = Depends(getCurrentUser),
-    session: AsyncSession = Depends(getDb),
+    user: CurrentUser = Depends(getCurrentUser),  # noqa: B008
+    session: AsyncSession = Depends(getDb),  # noqa: B008
 ) -> ApplySuggestionResponse:
     """采纳 LLM 推荐的 allowed_values，写入 ontology_property 并记录 outbox 审计。
 

@@ -7,14 +7,12 @@ applySuggestion: Task 6（直接采纳单条建议）
 """
 from __future__ import annotations
 
-from decimal import Decimal
-
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
-from app.domain.enums import DataType, DerivationType, ObjectType, RuleType, Severity
+from app.domain.enums import DataType
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import DataQualityRule, DataSource, OntologyClass, OntologyJoin, OntologyProperty
 from app.domain.schemas import (
@@ -33,10 +31,14 @@ from app.services.data_quality_rule_generator import (
     JoinEdgeMeta,
     PropertyMeta,
     SchemaIndex,
-    buildRuleCode,
     deriveSuggestions,
 )
-from app.services.messages_zh import MSG_DQ_GEN_BAD_VALUE, MSG_DQ_GEN_CLASS_NOT_FOUND, MSG_DQ_GEN_DATASOURCE_NOT_FOUND, MSG_DQ_GEN_PROPERTY_NOT_FOUND
+from app.services.messages_zh import (
+    MSG_DQ_GEN_BAD_VALUE,
+    MSG_DQ_GEN_CLASS_NOT_FOUND,
+    MSG_DQ_GEN_DATASOURCE_NOT_FOUND,
+    MSG_DQ_GEN_PROPERTY_NOT_FOUND,
+)
 from app.services.outbox_service import OutboxService
 from app.services.schema_introspection_service import SchemaIntrospectionService
 
@@ -270,7 +272,7 @@ class DataQualityRuleGenerateService:
             targetDateCols: list[str] = []
             if j.target_class_id in targetDateProps:
                 tdates = targetDateProps[j.target_class_id]
-                for propNameUpper, srcCol in sourceDateProps.items():
+                for propNameUpper, _srcCol in sourceDateProps.items():
                     if propNameUpper in tdates:
                         targetDateCols.append(tdates[propNameUpper])
             joinEdges.append(JoinEdgeMeta(
@@ -403,6 +405,8 @@ class DataQualityRuleGenerateService:
                     await session.flush()
             except IntegrityError:
                 # 并发撞唯一约束 → 记跳过，不失败整批
+                # begin_nested() 创建了 savepoint；rollback 只回滚该 savepoint，
+                # 不影响外层事务和其他已 flush 的规则（正确）。
                 skipped.append(item.rule_code)
                 await session.rollback()
                 continue
@@ -455,7 +459,11 @@ class DataQualityRuleGenerateService:
                 raise ValidationError(MSG_DQ_GEN_BAD_VALUE)
 
         before = prop.allowed_values
-        prop.allowed_values = payload.allowed_values
+        await session.execute(
+            update(OntologyProperty)
+            .where(OntologyProperty.id == prop.id)
+            .values(allowed_values=payload.allowed_values)
+        )
 
         # outbox 审计（event_type 要求 updated）
         await self._outbox.enqueue(

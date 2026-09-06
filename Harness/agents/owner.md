@@ -48,6 +48,7 @@
 ### 变更 `changes/`
 - [_template/summary.md](../changes/_template/summary.md) - 变更 SSOT 模板
 - [feat-phase1-model-router](../changes/feat-phase1-model-router/summary.md) - Phase 1：模型路由 + Token 计量（后端 54 测试 89.85% / 前端 23 测试 94.88%）
+- [feat-dq-rule-auto-generation](../changes/feat-dq-rule-auto-generation/summary.md) - 数据质量规则自动生成（COMPLETENESS/CONSISTENCY/VALIDITY/DICT_REF 四维推导 + LLM 辅助）
 
 ### MCP `mcp/`
 - [README.md](../mcp/README.md) - 后续 MCP 集成占位

@@ -374,3 +374,9 @@ MSG_BUSINESS_OBJECT_GRAPH_LABEL_MISMATCH = (
     "业务对象「{code}」的 graph_label 与本体类 class_name 不一致"
 )
 MSG_BUSINESS_OBJECT_IN_USE = "业务对象「{code}」正被以下表引用，无法删除：{tables}"
+
+# =============================================================================
+# 数据质量规则自动生成（dq-rule-auto-generation Task 4）
+# =============================================================================
+
+MSG_DQ_GEN_CLASS_NOT_FOUND = "本体类 id={id} 不存在"

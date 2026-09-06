@@ -25,6 +25,7 @@ from app.api.v1 import (
     chat,
     data_lineage,
     data_quality,
+    data_quality_generate,
     datasource,
     documents,
     embedding_provider,
@@ -126,6 +127,11 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         data_quality.scores_router,
         prefix="/api/v1/data-quality/scores",
         tags=["data-quality"],
+    )
+    testApp.include_router(
+        data_quality_generate.router,
+        prefix="/api/v1/data-quality/rules/generate",
+        tags=["data-quality-generate"],
     )
     testApp.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     testApp.include_router(

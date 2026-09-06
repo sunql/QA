@@ -219,6 +219,7 @@ def createApp() -> FastAPI:
         chat,
         data_lineage,
         data_quality,
+        data_quality_generate,
         datasource,
         documents,
         embedding_provider,
@@ -260,6 +261,11 @@ def createApp() -> FastAPI:
         data_quality.scores_router,
         prefix="/api/v1/data-quality/scores",
         tags=["data-quality"],
+    )
+    app.include_router(
+        data_quality_generate.router,
+        prefix="/api/v1/data-quality/rules/generate",
+        tags=["data-quality-generate"],
     )
     app.include_router(
         data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"]

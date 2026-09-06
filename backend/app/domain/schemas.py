@@ -2567,3 +2567,43 @@ class FeatureRuleParseDescriptionResponse(CamelModel):
     reasoning: str
     overall_confidence: float = Field(ge=0.0, le=1.0)
     warnings: list[str]
+
+
+# ===========================================================================
+# 数据质量规则自动生成（dq-rule-auto-generation Task 4）
+# ===========================================================================
+
+
+class GeneratePreviewRequest(CamelModel):
+    class_id: int = Field(..., gt=0)
+    datasource_id: int = Field(..., gt=0)
+
+
+class RuleSuggestionRead(CamelModel):
+    rule_code: str
+    rule_name: str
+    rule_type: RuleType
+    target_table: str
+    target_column: str | None = None
+    rule_expression: str | None = None
+    threshold: Decimal
+    severity: Severity
+    derivation_type: DerivationType
+    source_property_id: int | None = None
+    confidence: str
+    status: str  # NEW / EXISTS
+    reason: str
+
+
+class BlockedPropertyRead(CamelModel):
+    property_name: str
+    reason: str
+
+
+class GeneratePreviewResponse(CamelModel):
+    class_id: int
+    class_name: str
+    source_table: str | None = None
+    datasource_id: int
+    suggestions: list[RuleSuggestionRead] = Field(default_factory=list)
+    blocked: list[BlockedPropertyRead] = Field(default_factory=list)

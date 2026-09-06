@@ -10,13 +10,18 @@ from __future__ import annotations
 from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies import CurrentUser
 from app.domain.enums import DataType, DerivationType, ObjectType, RuleType, Severity
 from app.domain.exceptions import NotFoundError
 from app.domain.models import DataQualityRule, OntologyClass, OntologyJoin, OntologyProperty
 from app.domain.schemas import (
     BlockedPropertyRead,
+    DataQualityRuleRead,
+    GenerateConfirmRequest,
+    GenerateConfirmResponse,
     GeneratePreviewResponse,
     RuleSuggestionRead,
 )
@@ -30,6 +35,7 @@ from app.services.data_quality_rule_generator import (
     deriveSuggestions,
 )
 from app.services.messages_zh import MSG_DQ_GEN_CLASS_NOT_FOUND
+from app.services.outbox_service import OutboxService
 from app.services.schema_introspection_service import SchemaIntrospectionService
 
 
@@ -111,6 +117,9 @@ def _toJoinEdge(
 
 class DataQualityRuleGenerateService:
     """数据质量规则自动生成服务（preview/confirm/applySuggestion）。"""
+
+    def __init__(self, outbox: OutboxService | None = None) -> None:
+        self._outbox = outbox or OutboxService()
 
     async def preview(
         self,
@@ -302,6 +311,7 @@ class DataQualityRuleGenerateService:
                 severity=s.severity,
                 derivation_type=s.derivation_type,
                 source_property_id=s.source_property_id,
+                source_class_id=s.source_class_id,
                 confidence=s.confidence,
                 status="EXISTS" if s.rule_code in existingCodes else "NEW",
                 reason=s.reason,
@@ -319,4 +329,98 @@ class DataQualityRuleGenerateService:
             datasource_id=datasourceId,
             suggestions=suggestionReads,
             blocked=blockedReads,
+        )
+
+    async def confirm(
+        self,
+        session: AsyncSession,
+        payload: GenerateConfirmRequest,
+        actor: CurrentUser,
+    ) -> GenerateConfirmResponse:
+        """批量确认并写入规则。
+
+        幂等策略：
+        - 预查询 DB 中已存在的 rule_code，命中 → 记入 skippedCodes
+        - 并发撞唯一约束（IntegrityError）→ 记入 skippedCodes，不失败整批
+
+        owner 派生自 actor.departments[0]（与 createRule 同模式）。
+
+        Outbox 审计：每条 created 规则对应一条 audit_outbox
+        （event_type='data_quality_rule_created'），在 commit 前入队。
+        """
+        created: list[DataQualityRule] = []
+        skipped: list[str] = []
+
+        # 预查询已存在的 rule_code
+        rule_codes = [r.rule_code for r in payload.rules]
+        if rule_codes:
+            existing = set(
+                (
+                    await session.execute(
+                        select(DataQualityRule.rule_code).where(
+                            DataQualityRule.rule_code.in_(rule_codes)
+                        )
+                    )
+                ).scalars().all()
+            )
+        else:
+            existing = set()
+
+        for item in payload.rules:
+            if item.rule_code in existing:
+                skipped.append(item.rule_code)
+                continue
+
+            derived_owner = (
+                actor.departments[0] if actor.departments else None
+            )
+            entity = DataQualityRule(
+                rule_name=item.rule_name,
+                rule_code=item.rule_code,
+                datasource_id=payload.datasource_id,
+                target_table=item.target_table,
+                target_column=item.target_column,
+                rule_type=item.rule_type,
+                rule_expression=item.rule_expression,
+                threshold=item.threshold,
+                severity=item.severity,
+                owner=derived_owner,
+                description=item.description,
+                source_class_id=item.source_class_id,
+                source_property_id=item.source_property_id,
+                derivation_type=item.derivation_type.value,
+            )
+            try:
+                async with session.begin_nested():
+                    session.add(entity)
+                    await session.flush()
+            except IntegrityError:
+                # 并发撞唯一约束 → 记跳过，不失败整批
+                skipped.append(item.rule_code)
+                await session.rollback()
+                continue
+
+            # outbox 审计（在 commit 前入队，同事务原子）
+            await self._outbox.enqueue(
+                session,
+                event_type="data_quality_rule_created",
+                entity_type="data_quality_rule",
+                entity_id=entity.id,
+                actor=actor.userId,
+                actor_departments=tuple(actor.departments or []),
+                payload={
+                    "derivation_type": item.derivation_type.value,
+                    "source_class_id": item.source_class_id,
+                },
+            )
+            created.append(entity)
+            existing.add(item.rule_code)
+
+        await session.commit()
+        return GenerateConfirmResponse(
+            created=[
+                DataQualityRuleRead.model_validate(r, from_attributes=True)
+                for r in created
+            ],
+            skipped_codes=skipped,
         )

@@ -76,6 +76,7 @@ class RuleSuggestion:
     source_property_id: int | None
     confidence: str
     reason: str
+    source_class_id: int | None = None
 
 @dataclass(frozen=True)
 class BlockedProperty:
@@ -294,6 +295,7 @@ def _makeSuggestion(
         severity=severity if severity is not None else defaultSeverity,
         derivation_type=derivationType,
         source_property_id=prop.property_id,
+        source_class_id=ctx.class_id,
         confidence=confidence,
         reason=reason,
     )

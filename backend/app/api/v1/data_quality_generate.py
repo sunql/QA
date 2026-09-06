@@ -10,7 +10,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
-from app.domain.schemas import GeneratePreviewRequest, GeneratePreviewResponse
+from app.domain.schemas import (
+    GenerateConfirmRequest,
+    GenerateConfirmResponse,
+    GeneratePreviewRequest,
+    GeneratePreviewResponse,
+)
 from app.services.data_quality_rule_generate_service import (
     DataQualityRuleGenerateService,
 )
@@ -30,4 +35,20 @@ async def previewRules(
     """
     return await DataQualityRuleGenerateService().preview(
         session, classId=payload.class_id, datasourceId=payload.datasource_id,
+    )
+
+
+@router.post("/confirm", response_model=GenerateConfirmResponse)
+async def confirmRules(
+    payload: GenerateConfirmRequest,
+    user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> GenerateConfirmResponse:
+    """批量确认并写入自动生成的数据质量规则。
+
+    幂等写入：rule_code 已存在 → 记入 skippedCodes；并发撞唯一约束同理。
+    每条创建成功的规则会写入一条 audit_outbox 审计事件。
+    """
+    return await DataQualityRuleGenerateService().confirm(
+        session, payload=payload, actor=user,
     )

@@ -380,3 +380,5 @@ MSG_BUSINESS_OBJECT_IN_USE = "业务对象「{code}」正被以下表引用，�
 # =============================================================================
 
 MSG_DQ_GEN_CLASS_NOT_FOUND = "本体类 id={id} 不存在"
+MSG_DQ_GEN_RULE_CREATED = "数据质量规则「{rule_code}」已自动生成"
+MSG_DQ_GEN_RULE_SKIPPED_DUPLICATE = "规则「{rule_code}」已存在，已跳过"

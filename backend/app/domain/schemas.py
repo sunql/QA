@@ -2590,6 +2590,7 @@ class RuleSuggestionRead(CamelModel):
     severity: Severity
     derivation_type: DerivationType
     source_property_id: int | None = None
+    source_class_id: int | None = None
     confidence: str
     status: str  # NEW / EXISTS
     reason: str
@@ -2607,3 +2608,44 @@ class GeneratePreviewResponse(CamelModel):
     datasource_id: int
     suggestions: list[RuleSuggestionRead] = Field(default_factory=list)
     blocked: list[BlockedPropertyRead] = Field(default_factory=list)
+
+
+# ===========================================================================
+# 数据质量规则自动生成 confirm（dq-rule-auto-generation Task 5）
+# ===========================================================================
+
+
+class GenerateRuleItem(CamelModel):
+    """confirm 请求中单条规则条目。"""
+
+    rule_code: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Z][A-Z0-9_]*$",
+    )
+    rule_name: str = Field(..., min_length=1, max_length=100)
+    target_table: str = Field(..., min_length=1, max_length=100)
+    target_column: str | None = Field(default=None, max_length=100)
+    rule_type: RuleType
+    rule_expression: str | None = None
+    threshold: Decimal = Field(default=Decimal("95.00"), ge=0, le=100)
+    severity: Severity = Severity.MEDIUM
+    source_class_id: int | None = None
+    source_property_id: int | None = None
+    derivation_type: DerivationType = DerivationType.MANUAL
+    description: str | None = None
+
+
+class GenerateConfirmRequest(CamelModel):
+    """confirm 批量写入请求。"""
+
+    datasource_id: int = Field(..., gt=0)
+    rules: list[GenerateRuleItem] = Field(..., min_length=1, max_length=500)
+
+
+class GenerateConfirmResponse(CamelModel):
+    """confirm 批量写入响应。"""
+
+    created: list[DataQualityRuleRead] = Field(default_factory=list)
+    skipped_codes: list[str] = Field(default_factory=list)

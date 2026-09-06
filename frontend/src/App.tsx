@@ -18,6 +18,7 @@ import Supplier360Page from "./pages/Supplier360Page";
 import SupplierRiskPage from "./pages/SupplierRiskPage";
 import AgentRegistryPage from "./pages/AgentRegistryPage";
 import AgentRuntimePage from "./pages/AgentRuntimePage";
+import DataQualityRuleGeneratePage from "./pages/DataQualityRuleGeneratePage";
 import AdminAuditPage from "./pages/AdminAuditPage";
 import AdminToolsPage from "./pages/AdminToolsPage";
 import AdminFeatureRulesPage from "./pages/AdminFeatureRulesPage";
@@ -35,6 +36,7 @@ export default function App() {
         <Route path="ontology" element={<OntologyPage />} />
         <Route path="datasource" element={<DatasourcePage />} />
         <Route path="data-quality" element={<DataQualityPage />} />
+        <Route path="data-quality/generate" element={<DataQualityRuleGeneratePage />} />
         <Route path="lineage" element={<LineagePage />} />
         <Route path="entity-mapping" element={<EntityMappingPage />} />
         <Route path="kpi-catalog" element={<KpiCatalogPage />} />

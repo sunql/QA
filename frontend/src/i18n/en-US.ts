@@ -1410,6 +1410,7 @@ export const enUS = {
       loadDatasourcesFailed: "Failed to load data sources",
       previewFailed: "Failed to preview rules",
       confirmFailed: "Failed to create rules",
+      confirmNothingSelected: "Select at least one rule with status NEW (existing rules are already saved)",
       parseFailed: "AI parsing failed",
       applyFailed: "Failed to apply suggestion",
       applied: "Suggestion applied",

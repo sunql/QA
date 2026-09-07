@@ -3,7 +3,7 @@
  * 四步：选本体类 → 选数据源 → 预览规则/采纳AI建议 → 确认落库。
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Button,
   Collapse,
@@ -434,9 +434,21 @@ export default function DataQualityRuleGeneratePage() {
     );
   }, []);
 
+  // 派生「实际能落库的勾选项」：必须同时被勾选且 status="NEW"。
+  // 在 render scope 算一次，让按钮 disabled 与 handleConfirm 用同一份数据；
+  // 避免「selectedIds 有勾选但全是 EXISTS」时按钮亮但 POST 空数组 → 422。
+  const toSubmit = useMemo(
+    () => suggestions.filter((s) => selectedIds.has(s.ruleCode) && s.status === "NEW"),
+    [suggestions, selectedIds],
+  );
+
   const handleConfirm = useCallback(async () => {
     if (!selectedDatasourceId) return;
-    const toSubmit = suggestions.filter((s) => selectedIds.has(s.ruleCode) && s.status === "NEW");
+    if (toSubmit.length === 0) {
+      // 防御：用户可能勾选的都是 EXISTS 规则（已落库），不能空数组 POST。
+      message.warning(t("dataQualityGenerate.messages.confirmNothingSelected"));
+      return;
+    }
     setConfirming(true);
     try {
       const res = await confirmRules(selectedDatasourceId, toSubmit);
@@ -447,7 +459,7 @@ export default function DataQualityRuleGeneratePage() {
     } finally {
       setConfirming(false);
     }
-  }, [selectedDatasourceId, suggestions, selectedIds, t]);
+  }, [selectedDatasourceId, toSubmit, t]);
 
   const blockedColumns: ColumnsType<BlockedProperty> = [
     { title: t("dataQualityGenerate.columns.propertyName"), dataIndex: "propertyName", key: "propertyName" },
@@ -588,6 +600,7 @@ export default function DataQualityRuleGeneratePage() {
                   <Button
                     type="primary"
                     loading={confirming}
+                    disabled={toSubmit.length === 0}
                     onClick={() => void handleConfirm()}
                   >
                     {t("dataQualityGenerate.confirmBtn")}

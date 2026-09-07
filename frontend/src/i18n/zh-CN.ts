@@ -1426,6 +1426,7 @@ export const zhCN = {
       loadDatasourcesFailed: "加载数据源失败",
       previewFailed: "预览规则失败",
       confirmFailed: "确认落库失败",
+      confirmNothingSelected: "请至少勾选一条「新增」状态的规则（已存在的规则无需重复落库）",
       parseFailed: "AI 解析失败",
       applyFailed: "采纳建议失败",
       applied: "已采纳建议",

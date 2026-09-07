@@ -1375,6 +1375,8 @@ export const enUS = {
     blocked: "Not Generated (Blocked)",
     llmPanel: "AI Suggestions (from property descriptions)",
     adopt: "Adopt & Persist",
+    adopted: "Adopted",
+    adoptedHint: "Persisted to ontology property",
     confirmBtn: "Confirm & Create",
     created: "Created",
     skipped: "Skipped",

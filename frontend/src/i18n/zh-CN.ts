@@ -1391,6 +1391,8 @@ export const zhCN = {
     blocked: "未生成（被阻断）",
     llmPanel: "AI 建议（来自属性描述）",
     adopt: "采纳并沉淀",
+    adopted: "已采纳",
+    adoptedHint: "已沉淀到本体属性",
     confirmBtn: "确认落库",
     created: "已创建",
     skipped: "已跳过",

@@ -148,6 +148,9 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<PropertyConstraintSuggestion[]>([]);
   const [collapsed, setCollapsed] = useState(true);
+  // 已采纳的 propertyId 集合：applySuggestion 成功写入 ontology_property 后
+  // 把 id 加入，UI 立即变为 disabled + "已采纳"，避免用户重复点击或不知道已沉淀。
+  const [adoptedIds, setAdoptedIds] = useState<Set<number>>(new Set());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -169,8 +172,16 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
 
   const handleApply = async (item: PropertyConstraintSuggestion) => {
     if (item.kind !== "allowed_values" || !item.values) return;
+    if (adoptedIds.has(item.propertyId)) return;
     try {
       await applySuggestion(item.propertyId, item.values);
+      // 写入成功后立即把 propertyId 加入已采纳集合，
+      // 让 button disabled + label 变为「已采纳」，并显示「已沉淀」提示。
+      setAdoptedIds((prev) => {
+        const next = new Set(prev);
+        next.add(item.propertyId);
+        return next;
+      });
       message.success(t("dataQualityGenerate.messages.applied"));
       onApplied();
     } catch (err) {
@@ -190,40 +201,55 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
             <span>{t("dataQualityGenerate.noSuggestions")}</span>
           ) : (
             <Space direction="vertical" style={{ width: "100%" }}>
-              {items.map((item) => (
-                <div
-                  key={item.propertyId}
-                  style={{
-                    border: "1px solid #d9d9d9",
-                    borderRadius: 4,
-                    padding: "8px 12px",
-                  }}
-                >
-                  <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                    {item.propertyName}
-                    <Tag style={{ marginLeft: 8 }}>{item.kind}</Tag>
-                  </div>
-                  {item.kind === "allowed_values" && item.values && (
-                    <div style={{ marginBottom: 8 }}>
-                      {t("dataQualityGenerate.suggestedValues")}: {item.values.join(", ")}
-                    </div>
-                  )}
-                  <div style={{ color: "#666", marginBottom: 8 }}>
-                    {t("dataQualityGenerate.confidence")}:{" "}
-                    {(item.confidence * 100).toFixed(0)}%
-                  </div>
-                  <div style={{ color: "#666", marginBottom: 8 }}>
-                    {t("dataQualityGenerate.rationale")}: {item.rationale}
-                  </div>
-                  <Button
-                    size="small"
-                    type="primary"
-                    onClick={() => void handleApply(item)}
+              {items.map((item) => {
+                const isAdopted = adoptedIds.has(item.propertyId);
+                return (
+                  <div
+                    key={item.propertyId}
+                    style={{
+                      border: "1px solid #d9d9d9",
+                      borderRadius: 4,
+                      padding: "8px 12px",
+                    }}
                   >
-                    {t("dataQualityGenerate.adopt")}
-                  </Button>
-                </div>
-              ))}
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                      {item.propertyName}
+                      <Tag style={{ marginLeft: 8 }}>{item.kind}</Tag>
+                      {isAdopted && (
+                        <Tag
+                          color="green"
+                          style={{ marginLeft: 8 }}
+                          data-testid={`adopted-hint-${item.propertyId}`}
+                        >
+                          ✓ {t("dataQualityGenerate.adoptedHint")}
+                        </Tag>
+                      )}
+                    </div>
+                    {item.kind === "allowed_values" && item.values && (
+                      <div style={{ marginBottom: 8 }}>
+                        {t("dataQualityGenerate.suggestedValues")}: {item.values.join(", ")}
+                      </div>
+                    )}
+                    <div style={{ color: "#666", marginBottom: 8 }}>
+                      {t("dataQualityGenerate.confidence")}:{" "}
+                      {(item.confidence * 100).toFixed(0)}%
+                    </div>
+                    <div style={{ color: "#666", marginBottom: 8 }}>
+                      {t("dataQualityGenerate.rationale")}: {item.rationale}
+                    </div>
+                    <Button
+                      size="small"
+                      type="primary"
+                      disabled={isAdopted}
+                      onClick={() => void handleApply(item)}
+                    >
+                      {isAdopted
+                        ? `✓ ${t("dataQualityGenerate.adopted")}`
+                        : t("dataQualityGenerate.adopt")}
+                    </Button>
+                  </div>
+                );
+              })}
             </Space>
           ),
         },

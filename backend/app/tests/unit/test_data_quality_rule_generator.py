@@ -170,11 +170,18 @@ def test_schema_missing_column_blocks_property():
     assert any("NOPE" in b.reason for b in blocked)
 
 
-def test_allowed_value_with_quote_rejected():
-    with pytest.raises(ValidationError):
-        deriveSuggestions(CTX, [_prop(
-            property_name="status", source_column="STATUS", is_primary_key=False,
-            allowed_values=["OK'--"])], [], SCHEMA)
+def test_allowed_value_with_quote_rejected_via_blocked():
+    """allowed_values 含非法字符（如单引号）：推导期 ValidationError → blocked，不再 raise。
+    blocked.reason 必须含非法值以便用户定位。
+    """
+    sugg, blocked = deriveSuggestions(CTX, [_prop(
+        property_name="status", source_column="STATUS", is_primary_key=False,
+        allowed_values=["OK'--"])], [], SCHEMA)
+    assert sugg == []
+    assert any(
+        b.property_name == "status" and "OK'--" in b.reason
+        for b in blocked
+    )
 
 
 def test_non_text_column_skips_regex():
@@ -221,18 +228,32 @@ def test_source_table_none_blocks_all():
     assert blocked == [BlockedProperty("po_key", "类未配置 source_table")]
 
 
-def test_allowed_value_too_long_rejected():
-    with pytest.raises(ValidationError):
-        deriveSuggestions(CTX, [_prop(
-            property_name="status", source_column="STATUS", is_primary_key=False,
-            allowed_values=["X" * 51])], [], SCHEMA)
+def test_allowed_value_too_long_rejected_via_blocked():
+    """allowed_values 单项超 50 字符：推导期 ValidationError → blocked。"""
+    sugg, blocked = deriveSuggestions(CTX, [_prop(
+        property_name="status", source_column="STATUS", is_primary_key=False,
+        allowed_values=["X" * 51])], [], SCHEMA)
+    assert sugg == []
+    assert any(
+        b.property_name == "status" and "status" in b.reason
+        for b in blocked
+    )
 
 
-def test_fk_without_ref_class_raises():
-    with pytest.raises(ValidationError):
-        deriveSuggestions(CTX, [_prop(
-            property_name="supplier_key", source_column="SUPPLIER_KEY",
-            is_primary_key=False, is_foreign_key=True, ref_class=None)], [], SCHEMA)
+def test_fk_without_ref_class_is_blocked_with_property_name():
+    """回归：用户报「preview 422 外键属性缺少 ref_class」无定位。
+    修复契约：FK 缺 ref_class 不再 raise，而是进 blocked 列表，
+    reason 必须包含 property_name 让用户能定位到具体属性。
+    """
+    sugg, blocked = deriveSuggestions(CTX, [_prop(
+        property_name="supplier_key", source_column="SUPPLIER_KEY",
+        is_primary_key=False, is_foreign_key=True, ref_class=None)], [], SCHEMA)
+    assert sugg == []
+    assert len(blocked) == 1
+    assert blocked[0].property_name == "supplier_key"
+    # 错误消息必须含 property_name，让前端 blocked 面板能精准定位
+    assert "supplier_key" in blocked[0].reason
+    assert "ref_class" in blocked[0].reason
 
 
 def test_fk_without_ref_source_table_is_blocked():

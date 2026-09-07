@@ -148,3 +148,50 @@ async def test_preview_to_confirm_round_trip_no_422(client, dbSession):
     assert confirm.status_code != 422, (
         f"preview→confirm 出现 422，detail: {confirm.text}"
     )
+
+
+async def test_preview_fk_without_ref_class_returns_blocked_not_422(
+    client: AsyncClient, dbSession: AsyncSession,
+) -> None:
+    """HTTP 端到端：FK 属性缺 ref_class_id 不应让 preview 返 422，
+    而是 200 + blocked[] 列出 property_name，让用户能定位到坏属性。
+
+    回归：用户报 preview 422 '外键属性缺少 ref_class' 无法定位到具体属性。
+    """
+    from app.tests.integration.test_dq_rule_generate_api import (
+        ensureClassWithProperty,
+        ensureDataSourceAndSchema,
+    )
+    from app.domain.models import OntologyProperty
+    from sqlalchemy import select
+
+    classId = await ensureClassWithProperty(dbSession)
+    dsId = await ensureDataSourceAndSchema(
+        dbSession,
+        tables={
+            "PORDER": [
+                ("PO_KEY", "varchar", False),
+                ("SUPPLIER_KEY", "varchar", True),
+            ]
+        },
+    )
+
+    # 加一个 FK=true 但 ref_class_id=NULL 的属性
+    dbSession.add(OntologyProperty(
+        class_id=classId, property_name="supplier_key", source_column="SUPPLIER_KEY",
+        data_type="STRING", is_primary_key=False, is_foreign_key=True, ref_class_id=None,
+    ))
+    await dbSession.commit()
+
+    res = await client.post(
+        f"{GEN_BASE}/preview",
+        json={"classId": classId, "datasourceId": dsId},
+    )
+    assert res.status_code == 200, (
+        f"FK 缺 ref_class 不应让 preview 422；实际 {res.status_code} {res.text}"
+    )
+    body = res.json()
+    assert any(
+        b["propertyName"] == "supplier_key" and "ref_class" in b["reason"]
+        for b in body["blocked"]
+    ), f"blocked 必须包含 supplier_key + ref_class；实际: {body['blocked']}"

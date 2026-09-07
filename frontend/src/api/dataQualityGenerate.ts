@@ -8,7 +8,7 @@ import type {
   GeneratePreviewResponse,
   GenerateConfirmResponse,
   LlmModelOption,
-  PropertyConstraintSuggestion,
+  ParseDescriptionsResponse,
   RuleSuggestion,
 } from "../types/dataQualityGenerate";
 
@@ -74,17 +74,18 @@ export async function listLlmModels(): Promise<LlmModelOption[]> {
 
 /**
  * 解析本体类的属性描述，LLM 推断候选约束（allowed_values / not_null）。
+ * 返回完整 envelope（含 persistedPropertyIds），前端用它初始化 LlmPanel.adoptedIds。
  * `modelId` 可选：传入则路由层走对应 ModelConfig 创建 client，否则走默认 env 路径。
  */
 export async function parseDescriptions(
   classId: number,
   modelId?: number | null,
-): Promise<PropertyConstraintSuggestion[]> {
-  const res = await httpClient.post<{ suggestions: PropertyConstraintSuggestion[] }>(
+): Promise<ParseDescriptionsResponse> {
+  const res = await httpClient.post<ParseDescriptionsResponse>(
     `${BASE}/parse-descriptions`,
     { classId, modelId: modelId ?? null },
   );
-  return res.data.suggestions;
+  return res.data;
 }
 
 /**

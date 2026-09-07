@@ -88,6 +88,17 @@ export interface PropertyConstraintSuggestion {
 }
 
 // ---------------------------------------------------------------------------
+// ParseDescriptionsResponse — parseDescriptions 完整 envelope（含 persistedPropertyIds）
+// ---------------------------------------------------------------------------
+
+export interface ParseDescriptionsResponse {
+  suggestions: PropertyConstraintSuggestion[];
+  /** 当前类下已在 ontology_property 写入 allowed_values 的 propertyId 列表；
+   *  LlmPanel 用它初始化 adoptedIds，实现刷新页面也保持已采纳状态。 */
+  persistedPropertyIds: number[];
+}
+
+// ---------------------------------------------------------------------------
 // LlmModelOption — listLlmModels 返回的最小子集
 // （避免在前端 import 完整 ModelConfig，这里只取向导需要的字段）
 // ---------------------------------------------------------------------------

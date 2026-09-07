@@ -1415,6 +1415,7 @@ export const enUS = {
       applyFailed: "Failed to apply suggestion",
       applied: "Suggestion applied",
       adoptNotApplicable: "This suggestion type (non-value-list constraint) cannot be auto-applied. Please configure it manually in the ontology page.",
+      alreadyAdopted: "This property has already been adopted",
     },
   },
 

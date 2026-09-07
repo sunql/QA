@@ -127,4 +127,17 @@ async def parsePropertyDescriptions(
     for s in suggestions:
         s.property_id = prop_map.get(s.property_name.upper(), 0)
 
-    return ParseDescriptionsResponse(suggestions=suggestions)
+    # 查询当前类下已沉淀 allowed_values 的 propertyId 列表，
+    # 供前端初始化 adoptedIds（刷新页面也保持已采纳状态）。
+    persisted_result = await session.execute(
+        select(OntologyProperty.id).where(
+            OntologyProperty.class_id == payload.class_id,
+            OntologyProperty.allowed_values.isnot(None),
+        )
+    )
+    persisted_property_ids = list(persisted_result.scalars().all())
+
+    return ParseDescriptionsResponse(
+        suggestions=suggestions,
+        persisted_property_ids=persisted_property_ids,
+    )

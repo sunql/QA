@@ -206,7 +206,14 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
       // 这样在 modelsAttempted=true 前面板不会发起请求，避免传 null 触发 503。
       const effectiveModelId = selectedModelId ?? models[0]?.id ?? undefined;
       const result = await parseDescriptions(classId, effectiveModelId);
-      setItems(result);
+      setItems(result.suggestions);
+      // 用后端返回的已沉淀 propertyId 初始化 adoptedIds，
+      // 让刷新页面也保持已采纳状态（不依赖 session-local Set）。
+      setAdoptedIds((prev) => {
+        const next = new Set(prev);
+        for (const id of result.persistedPropertyIds) next.add(id);
+        return next;
+      });
     } catch (err) {
       message.error(t("dataQualityGenerate.messages.parseFailed") + ": " + String(err));
     } finally {
@@ -239,7 +246,11 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
       message.warning(t("dataQualityGenerate.messages.adoptNotApplicable"));
       return;
     }
-    if (adoptedIds.has(item.propertyId)) return;
+    if (adoptedIds.has(item.propertyId)) {
+      // 用户对已采纳项再点：给 info 提示而非静默 return，避免「按钮没反应」的错觉。
+      message.info(t("dataQualityGenerate.messages.alreadyAdopted"));
+      return;
+    }
     try {
       await applySuggestion(item.propertyId, item.values);
       // 写入成功后立即把 propertyId 加入已采纳集合，

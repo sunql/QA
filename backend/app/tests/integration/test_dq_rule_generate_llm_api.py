@@ -195,6 +195,47 @@ async def test_parse_descriptions_accepts_camelcase_model_id(
     )
 
 
+async def test_parse_descriptions_returns_persisted_property_ids(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """parse-descriptions 必须返回 persisted_property_ids：当前类下已有 allowed_values
+    的 OntologyProperty.id 列表。前端用它初始化 adoptedIds，让刷新页面也保持
+    已采纳状态（不依赖 session-local Set）。
+    """
+    from app.tests.integration.test_dq_rule_generate_api import ensureClassWithProperty
+    from app.domain.models import OntologyProperty
+    from sqlalchemy import select
+
+    classId = await ensureClassWithProperty(dbSession)
+
+    # fixture 默认一个属性；给它写 allowed_values
+    prop = (await dbSession.execute(select(OntologyProperty).where(
+        OntologyProperty.class_id == classId))).scalars().one()
+    prop.allowed_values = ["NEW", "CONFIRMED"]
+    await dbSession.commit()
+    await dbSession.refresh(prop)
+
+    fake = _FakeLLMClient(LLM_JSON)
+    with patch(
+        "app.api.v1.data_quality_generate._getDefaultLlmClient",
+        return_value=fake,
+    ):
+        res = await client.post(
+            f"{GEN_BASE}/parse-descriptions",
+            json={"classId": classId},
+            headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+        )
+    assert res.status_code == 200
+    body = res.json()
+    assert "persistedPropertyIds" in body, (
+        f"parse-descriptions 响应必须包含 persistedPropertyIds 字段，实际 keys: {list(body.keys())}"
+    )
+    assert prop.id in body["persistedPropertyIds"], (
+        f"property {prop.id} 已有 allowed_values，应在 persistedPropertyIds 中；"
+        f"实际: {body['persistedPropertyIds']}"
+    )
+
+
 async def test_parse_descriptions_routes_by_model_id(
     client: AsyncClient, dbSession: AsyncSession,
 ) -> None:

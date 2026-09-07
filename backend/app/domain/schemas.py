@@ -2680,6 +2680,9 @@ class ParseDescriptionsResponse(CamelModel):
     """parse-descriptions 响应。"""
 
     suggestions: list[PropertyConstraintSuggestionRead] = Field(default_factory=list)
+    # 当前类下，已在 ontology_property.allowed_values 写入值的 propertyId 列表；
+    # 前端用它初始化 LlmPanel.adoptedIds，让刷新页面也保持已采纳状态。
+    persisted_property_ids: list[int] = Field(default_factory=list)
 
 
 class ApplySuggestionRequest(CamelModel):

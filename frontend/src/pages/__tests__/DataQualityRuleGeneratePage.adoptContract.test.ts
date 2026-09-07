@@ -89,4 +89,23 @@ describe("LlmPanel adopt-and-persist UI feedback", () => {
     expect(zhSrc).toMatch(/adoptNotApplicable|adoptOnlyAllowedValues|adoptKindNotSupported/);
     expect(enSrc).toMatch(/adoptNotApplicable|adoptOnlyAllowedValues|adoptKindNotSupported/);
   });
+
+  it("pre-populates adoptedIds from parse-descriptions persistedPropertyIds (refresh-survives)", () => {
+    // 回归：adoptedIds 初始化为空 Set → 刷新页面清零 → 用户误以为「再操作就不行了」。
+    // 修复契约：load 成功回调必须从 parseDescriptions 返回的 persistedPropertyIds
+    // 把已沉淀的 propertyId 加入 adoptedIds。
+    expect(src).toMatch(/persistedPropertyIds/);
+    // 必须有 setAdoptedIds 派生逻辑，把 result.persistedPropertyIds 加进去
+    expect(src).toMatch(/setAdoptedIds[\s\S]{0,200}persistedPropertyIds/);
+  });
+
+  it("shows message.info when re-adopting an already-adopted item (no silent return)", () => {
+    // 回归：handleApply 早返条件 `adoptedIds.has(item.propertyId)` 是 silent no-op，
+    // 用户再点按钮无任何反馈（按钮 disabled 但点击事件仍触发，无 message）。
+    // 修复契约：早返前必须 message.info(...) + i18n key，且不得 return 静默。
+    expect(src).toMatch(/adoptedIds\.has\(item\.propertyId\)[\s\S]{0,200}message\.info/);
+    // i18n 文本必须存在（zh-CN + en-US 双语）
+    expect(zhSrc).toMatch(/alreadyAdopted:\s*["']此属性已采纳/);
+    expect(enSrc).toMatch(/alreadyAdopted:\s*["']This property has already been adopted["']/);
+  });
 });

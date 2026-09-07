@@ -1431,6 +1431,7 @@ export const zhCN = {
       applyFailed: "采纳建议失败",
       applied: "已采纳建议",
       adoptNotApplicable: "本建议类型（非值域约束）无法自动沉淀，请在本体管理页手动处理",
+      alreadyAdopted: "此属性已采纳，无需重复操作",
     },
   },
 

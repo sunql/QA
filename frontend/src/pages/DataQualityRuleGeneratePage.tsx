@@ -22,6 +22,7 @@ import { listDataSources } from "../api/datasource";
 import {
   applySuggestion,
   confirmRules,
+  listLlmModels,
   parseDescriptions,
   previewRules,
 } from "../api/dataQualityGenerate";
@@ -31,6 +32,7 @@ import type {
   BlockedProperty,
   GenerateConfirmResponse,
   GeneratePreviewResponse,
+  LlmModelOption,
   PropertyConstraintSuggestion,
   RuleSuggestion,
 } from "../types/dataQualityGenerate";
@@ -152,23 +154,82 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
   // 把 id 加入，UI 立即变为 disabled + "已采纳"，避免用户重复点击或不知道已沉淀。
   const [adoptedIds, setAdoptedIds] = useState<Set<number>>(new Set());
 
+  // LLM 模型选择器状态：
+  // - models：可用模型列表（仅取需要的 id/modelName/provider 字段）
+  // - modelsAttempted：listLlmModels 是否已结束（成功或失败），用于 race-safe gate
+  // - modelsLoadFailed：拉取失败时面板内显示红字，不弹全局错误
+  // - selectedModelId：用户当前选择的模型 id；null 表示「未选 / 跟随默认」
+  const [models, setModels] = useState<LlmModelOption[]>([]);
+  const [modelsAttempted, setModelsAttempted] = useState(false);
+  const [modelsLoadFailed, setModelsLoadFailed] = useState(false);
+  const [selectedModelId, setSelectedModelId] = useState<number | null>(null);
+
+  // 挂载时拉取模型列表；默认选第一个非 ollama provider（fallback: 第一个）。
+  // 失败时静默处理，仅把 modelsLoadFailed 置 true，由面板显示错误文案。
+  useEffect(() => {
+    let cancelled = false;
+    listLlmModels()
+      .then((ms) => {
+        if (cancelled) return;
+        setModels(ms);
+        if (ms.length > 0) {
+          // 默认选第一个非 ollama provider（fallback: 第一个），避免走本地模型慢/失败。
+          // 后端返回 provider 大写（如 "OPENAI"/"OLLAMA"），比较时把类型放宽为 string，
+          // 兼容未来后端可能返回小写（契约表达式：provider !== "ollama"）。
+          const preferred = (() => {
+            for (const m of ms) {
+              const provider = m.provider as string;
+              if (provider !== "ollama") return m;
+            }
+            return ms[0];
+          })();
+          setSelectedModelId(preferred.id);
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setModelsLoadFailed(true);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setModelsAttempted(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await parseDescriptions(classId);
+      // race-safe：优先用用户选定，否则取列表第一个；undefined 让后端走默认 env
+      // 这样在 modelsAttempted=true 前面板不会发起请求，避免传 null 触发 503。
+      const effectiveModelId = selectedModelId ?? models[0]?.id ?? undefined;
+      const result = await parseDescriptions(classId, effectiveModelId);
       setItems(result);
     } catch (err) {
       message.error(t("dataQualityGenerate.messages.parseFailed") + ": " + String(err));
     } finally {
       setLoading(false);
     }
-  }, [classId, t]);
+  }, [classId, selectedModelId, models, t]);
 
+  // 仅在模型列表尝试结束后再触发首次 load，避免 listLlmModels race
+  // 导致 selectedModelId=null 时走默认 env 路径 → 503。
   useEffect(() => {
-    if (!collapsed) {
+    if (!collapsed && modelsAttempted) {
       void load();
     }
-  }, [collapsed, load]);
+  }, [collapsed, modelsAttempted, load]);
+
+  const handleModelChange = (id: number) => {
+    setSelectedModelId(id);
+    if (!collapsed) {
+      // 切换模型：先折叠再展开，触发 useEffect 重 load
+      setCollapsed(true);
+      setTimeout(() => setCollapsed(false), 0);
+    }
+  };
 
   const handleApply = async (item: PropertyConstraintSuggestion) => {
     if (item.kind !== "allowed_values" || !item.values) return;
@@ -189,6 +250,23 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
     }
   };
 
+  const headerExtra = (
+    <Select
+      size="small"
+      style={{ width: 240 }}
+      value={selectedModelId ?? undefined}
+      onChange={(v: number) => handleModelChange(v)}
+      placeholder={t("dataQualityGenerate.llmModelSelectPlaceholder")}
+      disabled={models.length === 0}
+      dropdownMatchSelectWidth={false}
+      onClick={(e) => e.stopPropagation()}
+      options={models.map((m) => ({
+        value: m.id,
+        label: `${m.modelName}（${m.provider}）`,
+      }))}
+    />
+  );
+
   return (
     <Collapse
       activeKey={collapsed ? undefined : "panel"}
@@ -197,7 +275,12 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
         {
           key: "panel",
           label: t("dataQualityGenerate.llmPanel"),
-          children: items.length === 0 && !loading ? (
+          extra: headerExtra,
+          children: modelsLoadFailed ? (
+            <span style={{ color: "#ff4d4f" }}>
+              {t("dataQualityGenerate.llmModelsLoadFailed")}
+            </span>
+          ) : items.length === 0 && !loading ? (
             <span>{t("dataQualityGenerate.noSuggestions")}</span>
           ) : (
             <Space direction="vertical" style={{ width: "100%" }}>

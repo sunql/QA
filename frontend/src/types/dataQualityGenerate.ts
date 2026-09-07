@@ -86,3 +86,16 @@ export interface PropertyConstraintSuggestion {
   confidence: number;
   rationale: string;
 }
+
+// ---------------------------------------------------------------------------
+// LlmModelOption — listLlmModels 返回的最小子集
+// （避免在前端 import 完整 ModelConfig，这里只取向导需要的字段）
+// ---------------------------------------------------------------------------
+
+export type LlmProvider = "OPENAI" | "AZURE_OPENAI" | "OPENAI_COMPATIBLE_PROXY" | "OLLAMA";
+
+export interface LlmModelOption {
+  id: number;
+  modelName: string;
+  provider: LlmProvider;
+}

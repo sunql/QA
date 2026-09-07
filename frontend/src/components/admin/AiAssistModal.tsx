@@ -52,10 +52,10 @@ export interface AiAssistModalProps {
 }
 
 interface FormValues {
-    data_object: string;
-    data_layer: string;
-    target_level: string;
-    natural_language: string;
+    dataObject: string;
+    dataLayer: string;
+    targetLevel: string;
+    naturalLanguage: string;
 }
 
 export default function AiAssistModal({
@@ -74,10 +74,10 @@ export default function AiAssistModal({
         setResult(null);
         try {
             const data: FeatureRuleParseDescriptionRequest = {
-                data_object: values.data_object,
-                data_layer: values.data_layer,
-                target_level: values.target_level,
-                natural_language: values.natural_language,
+                dataObject: values.dataObject,
+                dataLayer: values.dataLayer,
+                targetLevel: values.targetLevel,
+                naturalLanguage: values.naturalLanguage,
             };
             const response = await parseFeatureRuleDescription(data);
             setResult(response);
@@ -140,34 +140,34 @@ export default function AiAssistModal({
                     layout="vertical"
                     onFinish={handleSubmit}
                     initialValues={{
-                        data_object: "SUPPLIER",
-                        data_layer: "FEATURE",
-                        target_level: "RISK",
+                        dataObject: "SUPPLIER",
+                        dataLayer: "FEATURE",
+                        targetLevel: "RISK",
                     }}
                 >
                     <Form.Item
-                        name="data_object"
+                        name="dataObject"
                         label={t("featureRules.form.data_object")}
                         rules={[{ required: true }]}
                     >
                         <Select options={DATA_OBJECT_OPTIONS} />
                     </Form.Item>
                     <Form.Item
-                        name="data_layer"
+                        name="dataLayer"
                         label={t("featureRules.form.data_layer")}
                         rules={[{ required: true }]}
                     >
                         <Select options={DATA_LAYER_OPTIONS} />
                     </Form.Item>
                     <Form.Item
-                        name="target_level"
+                        name="targetLevel"
                         label={t("featureRules.form.target_level")}
                         rules={[{ required: true }]}
                     >
                         <Select options={TARGET_LEVEL_OPTIONS} />
                     </Form.Item>
                     <Form.Item
-                        name="natural_language"
+                        name="naturalLanguage"
                         label={t("featureRules.form.policy_description")}
                         rules={[{ required: true }]}
                     >
@@ -193,7 +193,7 @@ export default function AiAssistModal({
                     <Alert
                         type="info"
                         message={`${t("common.confidence", { ns: "common" })}: ${
-                            result.overall_confidence
+                            result.overallConfidence
                         }%`}
                     />
                     {result.warnings.length > 0 && (
@@ -212,23 +212,23 @@ export default function AiAssistModal({
                         {t("common.reasoning", { ns: "common" })}
                     </Text>
                     <Text>{result.reasoning}</Text>
-                    {result.suggested_thresholds.length > 0 && (
+                    {result.suggestedThresholds.length > 0 && (
                         <>
                             <Text strong>
                                 {t("featureRules.form.suggestedThresholds", {
                                     defaultText: "建议阈值",
                                 })}
                             </Text>
-                            {result.suggested_thresholds.map(
+                            {result.suggestedThresholds.map(
                                 (s: FeatureRuleThresholdSuggestion, i: number) => (
                                     <Alert
                                         key={i}
                                         type="success"
                                         message={
                                             <span>
-                                                <strong>{s.feature_name}</strong>{" "}
+                                                <strong>{s.featureName}</strong>{" "}
                                                 — {s.severity} / {s.operator} /{" "}
-                                                {s.threshold_value}
+                                                {s.thresholdValue}
                                                 {s.unit ? ` ${s.unit}` : ""}{" "}
                                                 <br />
                                                 <Text type="secondary">

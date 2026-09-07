@@ -197,6 +197,75 @@ describe("api/chat", () => {
     expect(onStepResult).toHaveBeenCalledTimes(1);
   });
 
+  it("sendMessageStream 分发 plan 事件（合法 query plan）", async () => {
+    const stream = sseStream(
+      'event: plan\ndata: {"plan":{"target":"Order","selectedClasses":["Order"],"selectedProperties":["amount"],"conditions":[],"aggregations":[],"groupBy":[],"joins":[],"sortBy":[],"rowLimit":100}}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: unknown[] = [];
+    await sendMessageStream(makePayload(), {
+      onPlan: (plan) => received.push(plan),
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ target: "Order" });
+  });
+
+  it("sendMessageStream JSON 解析失败时静默丢弃（catch 分支）", async () => {
+    const stream = sseStream('event: meta\ndata: {invalid json}\n\n');
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    // 不应抛错
+    await expect(sendMessageStream(makePayload(), {})).resolves.toBeUndefined();
+  });
+
+  it("sendMessageStream 分发 data_quality 事件（合法 badges）", async () => {
+    const stream = sseStream(
+      'event: data_quality\ndata: {"badges":[{"targetTable":"t_order","evaluated":true,"overallScore":"0.95","evaluatedAt":"2026-09-01T00:00:00Z","rulesCount":5},{"targetTable":"bad","evaluated":false,"overallScore":null,"evaluatedAt":null,"rulesCount":null}]}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: { badges: unknown[] }[] = [];
+    await sendMessageStream(makePayload(), {
+      onDataQuality: (payload) => received.push(payload),
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].badges).toHaveLength(2);
+    expect(received[0].badges[0]).toMatchObject({ targetTable: "t_order" });
+  });
+
+  it("data_quality 中非法 badge 被过滤掉（缺字段）", async () => {
+    const stream = sseStream(
+      'event: data_quality\ndata: {"badges":[{"targetTable":"t_order","evaluated":true,"overallScore":"0.95","evaluatedAt":"2026-09-01T00:00:00Z","rulesCount":5},{"invalid":"shape"}]}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: { badges: unknown[] }[] = [];
+    await sendMessageStream(makePayload(), {
+      onDataQuality: (payload) => received.push(payload),
+    });
+
+    // 只有合法 badge 保留
+    expect(received).toHaveLength(1);
+    expect(received[0].badges).toHaveLength(1);
+  });
+
+  it("data_quality 中 badges 非数组 → 不触发回调", async () => {
+    const stream = sseStream(
+      'event: data_quality\ndata: {"badges":"not an array"}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: { badges: unknown[] }[] = [];
+    await sendMessageStream(makePayload(), {
+      onDataQuality: (payload) => received.push(payload),
+    });
+
+    expect(received).toHaveLength(0);
+  });
+
   it("跨分块截断的多字节 UTF-8 字符仍完整送达", async () => {
     // "全" = E5 85 A8：把 3 字节拆到两个分块，验证流式解码跨块重组不丢字
     const encoder = new TextEncoder();

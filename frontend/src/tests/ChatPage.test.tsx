@@ -428,4 +428,24 @@ describe("ChatPage PDF 导出", () => {
       screen.queryByRole("button", { name: /导出该条问答为 PDF/ })
     ).not.toBeInTheDocument();
   });
+
+  it("点击单条导出按钮 → 调用 exportSessionPdf(sessionId, dbMessageId)", async () => {
+    const user = userEvent.setup();
+    useChatStore.setState({
+      messages: [
+        {
+          id: "m-test-3",
+          role: "assistant",
+          content: "可单条导出的消息",
+          timestamp: Date.now(),
+          dbMessageId: 99,
+        } as unknown as ReturnType<typeof useChatStore.getState>["messages"][number],
+      ],
+    });
+    renderPage();
+    await user.click(screen.getByRole("button", { name: /导出该条问答为 PDF/ }));
+    await waitFor(() =>
+      expect(chatHistoryApi.exportSessionPdf).toHaveBeenCalledWith("s-test", 99),
+    );
+  });
 });

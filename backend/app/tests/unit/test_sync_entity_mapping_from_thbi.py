@@ -20,7 +20,6 @@ from typing import Any
 import pytest
 
 import scripts.sync_entity_mapping_from_thbi as sync_mod
-from app.domain.enums import EntityType
 from scripts.sync_entity_mapping_from_thbi import (
     _MATERIAL_KEY_OFFSET,
     _SUPPLIER_KEY_OFFSET,
@@ -163,8 +162,8 @@ class TestStableKey:
 
 class TestBuildAllRows:
     def test_mapping_fields(self) -> None:
-        row = _mapping(sync_mod.EntityType.SUPPLIER, "ACME-001", offset=800_000, name="Acme Co.")
-        assert row["entity_type"] == sync_mod.EntityType.SUPPLIER
+        row = _mapping("SUPPLIER", "ACME-001", offset=800_000, name="Acme Co.")
+        assert row["entity_type"] == "SUPPLIER"
         assert row["enterprise_code"] == "ACME-001"
         assert row["source_system"] == sync_mod.SourceSystem.ERP
         assert row["source_key"] == "ACME-001"
@@ -175,10 +174,10 @@ class TestBuildAllRows:
 
     def test_mapping_name_normalized(self) -> None:
         # 空白被 strip；None/空串落库为 NULL（不写空字符串）
-        assert _mapping(EntityType.SUPPLIER, "X", offset=800_000, name="   ")["name"] is None
-        assert _mapping(EntityType.SUPPLIER, "X", offset=800_000, name=None)["name"] is None
+        assert _mapping("SUPPLIER", "X", offset=800_000, name="   ")["name"] is None
+        assert _mapping("SUPPLIER", "X", offset=800_000, name=None)["name"] is None
         long = "a" * 300
-        assert len(_mapping(EntityType.SUPPLIER, "X", offset=800_000, name=long)["name"]) == 200
+        assert len(_mapping("SUPPLIER", "X", offset=800_000, name=long)["name"]) == 200
 
     def test_builds_supplier_and_material_rows(self) -> None:
         rows = _buildAllRows(
@@ -187,16 +186,16 @@ class TestBuildAllRows:
         )
         assert len(rows) == 3
         types = [r["entity_type"] for r in rows]
-        assert types.count(sync_mod.EntityType.SUPPLIER) == 2
-        assert types.count(sync_mod.EntityType.MATERIAL) == 1
+        assert types.count("SUPPLIER") == 2
+        assert types.count("MATERIAL") == 1
 
     def test_supplier_and_material_keys_in_distinct_ranges(self) -> None:
         rows = _buildAllRows(
             suppliers=[("S1", None), ("S2", None)],
             materials=[("M1", None), ("M2", None)],
         )
-        supplier_keys = {r["enterprise_key"] for r in rows if r["entity_type"] == sync_mod.EntityType.SUPPLIER}
-        material_keys = {r["enterprise_key"] for r in rows if r["entity_type"] == sync_mod.EntityType.MATERIAL}
+        supplier_keys = {r["enterprise_key"] for r in rows if r["entity_type"] == "SUPPLIER"}
+        material_keys = {r["enterprise_key"] for r in rows if r["entity_type"] == "MATERIAL"}
         # SUPPLIER 区间 [800000, 800000 + 2^32)；MATERIAL 区间偏移 2^32
         supplier_top = 800_000 + (1 << 32)
         material_top = supplier_top + (1 << 32)

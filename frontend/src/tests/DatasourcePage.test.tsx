@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
-import { ConfigProvider } from "antd";
+import { ConfigProvider, message } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import DatasourcePage from "../pages/DatasourcePage";
 import type { DataSource } from "../types/datasource";
@@ -176,5 +176,134 @@ describe("DatasourcePage", () => {
 
     await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: /智能导入到本体/i })).toBeInTheDocument();
+  });
+
+  // ---- Oracle type 切换 + 校验错误 + catch 分支 ----
+
+  it("切换类型为 Oracle 时端口自动填 1521 且显示 Oracle 版本下拉", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
+
+    await user.click(screen.getByText("新增数据源"));
+    // 类型下拉（Modal 内）
+    await user.click(screen.getByRole("combobox", { name: /类型/ }));
+    await user.click(screen.getByText("Oracle", { selector: ".ant-select-item-option-content" }));
+
+    // 端口字段自动填 1521（InputNumber 通过 aria-label 或 spinbutton 定位）
+    await waitFor(() => {
+      const portInput = document.querySelector(
+        'input[role="spinbutton"]',
+      ) as HTMLInputElement | null;
+      expect(portInput?.value).toBe("1521");
+    });
+  });
+
+  it("表单校验失败：必填字段未填写时阻止提交", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
+
+    await user.click(screen.getByText("新增数据源"));
+    // 不填写任何字段直接提交
+    await user.click(screen.getByRole("button", { name: /确\s?定$/ }));
+
+    await waitFor(() => {
+      expect(api.createDataSource).not.toHaveBeenCalled();
+      // antd 校验错误提示出现
+      expect(screen.getAllByText("必填项").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("listDataSources 失败时表格为空（catch 分支）", async () => {
+    api.listDataSources.mockRejectedValue(new Error("服务不可用"));
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("数据源管理")).toBeInTheDocument();
+    });
+    // 错误被 catch 静默，表格为空
+    expect(screen.queryByText("ZJTH-Oracle")).not.toBeInTheDocument();
+  });
+
+  it("createDataSource 失败时 catch 静默，不关闭弹窗", async () => {
+    const user = userEvent.setup();
+    api.createDataSource.mockRejectedValue(new Error("创建失败"));
+    renderPage();
+    await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
+
+    await user.click(screen.getByText("新增数据源"));
+    await user.type(screen.getByPlaceholderText("如 ZJTH-Oracle / RuoYi-MySQL"), "NewDS");
+    await user.type(screen.getByPlaceholderText("IP 或域名"), "host");
+    await user.type(screen.getByPlaceholderText("PG/MySQL 填数据库名，Oracle 填 service_name"), "db");
+    await user.type(screen.getByLabelText("用户名"), "u");
+    await user.type(screen.getByPlaceholderText("连接密码"), "p");
+    await user.click(screen.getByRole("button", { name: /确\s?定$/ }));
+
+    await waitFor(() => {
+      expect(api.createDataSource).toHaveBeenCalled();
+    });
+    // 弹窗因错误未关闭
+    expect(screen.getByRole("button", { name: /确\s?定$/ })).toBeInTheDocument();
+  });
+
+  it("deleteDataSource 失败时 catch 静默不弹错", async () => {
+    const user = userEvent.setup();
+    api.deleteDataSource.mockRejectedValue(new Error("删除失败"));
+    renderPage();
+    await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /删\s?除/ }));
+    const confirmBtns = screen.getAllByRole("button", { name: /确\s?定$/ });
+    await user.click(confirmBtns[confirmBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(api.deleteDataSource).toHaveBeenCalledWith(1);
+    });
+  });
+
+  it("测试连接：非成功响应时调用 message.error", async () => {
+    const user = userEvent.setup();
+    const errorSpy = vi.spyOn(message, "error").mockReturnValue(1 as unknown as ReturnType<typeof message.error>);
+    api.testDataSource.mockResolvedValue({ success: false, message: "认证失败" });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    await user.type(screen.getByPlaceholderText("留空表示不修改"), "secret");
+    await user.click(screen.getByRole("button", { name: "测试连接" }));
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("认证失败"));
+    });
+    errorSpy.mockRestore();
+  });
+
+  it("测试连接：testDataSource 抛错时走 catch 分支", async () => {
+    const user = userEvent.setup();
+    const errorSpy = vi.spyOn(message, "error").mockReturnValue(1 as unknown as ReturnType<typeof message.error>);
+    api.testDataSource.mockRejectedValue(new Error("网络异常"));
+    renderPage();
+    await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    await user.type(screen.getByPlaceholderText("留空表示不修改"), "secret");
+    await user.click(screen.getByRole("button", { name: "测试连接" }));
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("网络异常"));
+    });
+    errorSpy.mockRestore();
+  });
+
+  it("刷新按钮重新调用 listDataSources", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
+    expect(api.listDataSources).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: /刷\s?新/ }));
+    await waitFor(() => {
+      expect(api.listDataSources).toHaveBeenCalledTimes(2);
+    });
   });
 });

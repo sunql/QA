@@ -44,13 +44,13 @@ from app.domain.enums import (
     DocumentStatus,
     DocumentType,
     DocEntityRelationType,
-    EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
     KpiStatus,
     LineageLayer,
     MatchRule,
     RefreshFrequency,
+    RuleOperator,
     RuleType,
     ScoreType,
     Severity,
@@ -190,6 +190,8 @@ __all__ = [
     "SessionQueryState",
     "DataQualityRule",
     "DataQualityScore",
+    "FeatureRule",
+    "FeatureRuleThreshold",
 ]
 
 
@@ -289,6 +291,11 @@ class OntologyProperty(Base, TimestampMixin):
         BigIntFk, ForeignKey("ontology_class.id"), nullable=True
     )
     source_column: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 值域型字典（feat-dq-rule-auto-generation）：LLM 建议确认后沉淀于此，
+    # 推导引擎据此生成 VALIDITY 规则（表引用型字典仍走 ref_class_id）
+    allowed_values: Mapped[list[str] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
 
     # Relationships
     ontology_class: Mapped[OntologyClass] = relationship(
@@ -381,6 +388,26 @@ class KpiCatalog(Base, TimestampMixin):
         return f"<KpiCatalog id={self.id} code={self.kpi_code} status={self.status}>"
 
 
+class BusinessObject(Base, TimestampMixin):
+    """业务对象注册表 SSOT（Phase 4）。"""
+
+    __tablename__ = "business_object"
+
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    header_class_id: Mapped[int | None] = mapped_column(
+        BigIntFk,
+        ForeignKey("ontology_class.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    graph_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<BusinessObject code={self.code} name={self.name}>"
+
+
 class FeatureDefinition(Base, TimestampMixin):
     """AI 特征定义（Phase 4.3）。
 
@@ -401,7 +428,11 @@ class FeatureDefinition(Base, TimestampMixin):
     feature_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     feature_alias: Mapped[str | None] = mapped_column(String(200), nullable=True)
     feature_definition: Mapped[str | None] = mapped_column(Text, nullable=True)
-    entity_type: Mapped[EntityType] = mapped_column(String(20), nullable=False)
+    entity_type: Mapped[str] = mapped_column(
+        String(20),
+        ForeignKey("business_object.code", ondelete="RESTRICT"),
+        nullable=False,
+    )
     calculation_logic: Mapped[str] = mapped_column(Text, nullable=False)
     window_size: Mapped[str | None] = mapped_column(String(20), nullable=True)
     refresh_frequency: Mapped[FeatureRefreshFrequency] = mapped_column(
@@ -806,6 +837,15 @@ class DataQualityRule(Base, TimestampMixin):
     version: Mapped[str] = mapped_column(String(20), nullable=False, default="v1.0")
     owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 溯源（feat-dq-rule-auto-generation）：自动生成规则标记来源；
+    # 存量/手工规则 derivation_type='MANUAL'。
+    # source_class_id / source_property_id 故意不做 FK：业务上允许来源类/属性被删除后
+    # 仍保留规则历史，避免 RESTRICT/SET NULL 语义与治理流程冲突（brief 指定软引用）。
+    source_class_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_property_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    derivation_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="MANUAL"
+    )
 
     __table_args__ = (
         UniqueConstraint("rule_code", name="uq_data_quality_rule_code"),
@@ -813,6 +853,7 @@ class DataQualityRule(Base, TimestampMixin):
         Index("ix_data_quality_rule_type", "rule_type"),
         Index("ix_data_quality_rule_enabled", "is_enabled"),
         Index("ix_data_quality_rule_datasource", "datasource_id"),
+        Index("ix_dq_rule_source_class", "source_class_id"),
         ForeignKeyConstraint(
             ["datasource_id"],
             ["data_source.id"],
@@ -985,7 +1026,11 @@ class EntityMapping(Base, TimestampMixin):
     __tablename__ = "entity_mapping"
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
-    entity_type: Mapped[EntityType] = mapped_column(String(20), nullable=False)
+    entity_type: Mapped[str] = mapped_column(
+        String(20),
+        ForeignKey("business_object.code", ondelete="RESTRICT"),
+        nullable=False,
+    )
     enterprise_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
     enterprise_code: Mapped[str] = mapped_column(String(100), nullable=False)
     source_system: Mapped[SourceSystem] = mapped_column(String(20), nullable=False)
@@ -1017,7 +1062,7 @@ class EntityMapping(Base, TimestampMixin):
     def __repr__(self) -> str:
         return (
             f"<EntityMapping id={self.id} "
-            f"{self.entity_type.value} key={self.enterprise_key} "
+            f"{self.entity_type} key={self.enterprise_key} "
             f"via {self.source_system.value}/{self.source_key}>"
         )
 
@@ -1180,8 +1225,12 @@ class DocumentEntityRelation(Base):
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     document_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
-    entity_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    entity_type: Mapped[str] = mapped_column(
+        String(20),
+        ForeignKey("business_object.code", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    entity_key: Mapped[str] = mapped_column(String(100), nullable=False)
     relation_type: Mapped[DocEntityRelationType] = mapped_column(
         String(30), nullable=False
     )
@@ -1443,6 +1492,106 @@ class AgentToolConfig(Base):
 
     def __repr__(self) -> str:
         return f"<AgentToolConfig id={self.id} name={self.name} handler_kind={self.handler_kind}>"
+
+
+# =============================================================================
+# Phase 5.4: Feature Rule Config
+# =============================================================================
+
+
+class FeatureRule(Base, TimestampMixin):
+    """Feature 规则元数据（spec §5.1）。
+
+    一行 = 一个 Feature 的启用规则头档，关联 data_object / data_layer /
+    target_level 构成唯一作用域 + code。
+    thresholds 关联多条阈值档（1:N），FK ON DELETE CASCADE。
+    """
+
+    __tablename__ = "feature_rule"
+    __table_args__ = (
+        UniqueConstraint(
+            "data_object", "data_layer", "target_level", "code",
+            name="uq_feature_rule_scope_code",
+        ),
+        Index(
+            "ix_feature_rule_scope_enabled",
+            "data_object", "data_layer", "target_level", "enabled",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    data_object: Mapped[str] = mapped_column(String(64), nullable=False)
+    data_layer: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_level: Mapped[str] = mapped_column(String(16), nullable=False)
+    feature_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=sa_text("true")
+    )
+    priority: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=100, server_default=sa_text("100")
+    )
+    policy_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=sa_text("1")
+    )
+    created_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa_text("now()")
+    )
+    updated_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    thresholds: Mapped[list["FeatureRuleThreshold"]] = relationship(
+        back_populates="rule",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<FeatureRule id={self.id} code={self.code} "
+            f"feature={self.feature_name} enabled={self.enabled}>"
+        )
+
+
+class FeatureRuleThreshold(Base):
+    """单条阈值档位（spec §5.2）。
+
+    一行 = (rule_id, severity) 组合的一条阈值规则，描述单个 severity
+    档位的运算符 + 阈值 + 单位。severity 用字符串而非 Severity 枚举（灵活
+    扩展新档位不需改 schema）。
+    """
+
+    __tablename__ = "feature_rule_threshold"
+    __table_args__ = (
+        UniqueConstraint(
+            "rule_id", "severity",
+            name="uq_feature_rule_threshold_rule_severity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    rule_id: Mapped[int] = mapped_column(
+        BigIntFk,
+        ForeignKey("feature_rule.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    operator: Mapped[str] = mapped_column(String(16), nullable=False)
+    threshold_value: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    unit: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    threshold_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=sa_text("1")
+    )
+
+    rule: Mapped["FeatureRule"] = relationship(back_populates="thresholds")
+
+    def __repr__(self) -> str:
+        return (
+            f"<FeatureRuleThreshold id={self.id} rule_id={self.rule_id} "
+            f"severity={self.severity} op={self.operator} val={self.threshold_value}>"
+        )
 
 
 # Re-export MenuConfig so Alembic autogenerate picks it up.

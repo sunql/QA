@@ -74,30 +74,30 @@ def _make_rule(
 
 
 class TestValidateIdentifier:
-    def test_accepts_simple_identifier(self):
+    def test_accepts_simple_identifier(self) -> None:
         assert validate_identifier("PORDER", role="table") == "PORDER"
         assert validate_identifier("_priv", role="table") == "_priv"
         assert validate_identifier("col_1", role="column") == "col_1"
 
     @pytest.mark.parametrize("bad", ["1col", "DROP TABLE", "t;DROP", "a b", "a-b", ""])
-    def test_rejects_invalid(self, bad):
+    def test_rejects_invalid(self, bad) -> None:
         with pytest.raises(ValidationError):
             validate_identifier(bad, role="table")
 
 
 class TestValidateExpression:
-    def test_accepts_simple_predicate(self):
+    def test_accepts_simple_predicate(self) -> None:
         assert validate_expression("ORDER_QTY > 0") == "ORDER_QTY > 0"
         assert validate_expression("A + B * 1.05") == "A + B * 1.05"
 
-    def test_accepts_pg_quoted_identifier(self):
+    def test_accepts_pg_quoted_identifier(self) -> None:
         # PostgreSQL 大小写敏感标识符（如 "ORDERQTY"）必须双引号
         assert validate_expression('"ORDERQTY" > 0') == '"ORDERQTY" > 0'
         assert validate_expression(
             '"PONUM" IN (SELECT "PONUM" FROM "PORDERQ")'
         ) == '"PONUM" IN (SELECT "PONUM" FROM "PORDERQ")'
 
-    def test_rejects_empty(self):
+    def test_rejects_empty(self) -> None:
         with pytest.raises(ValidationError):
             validate_expression("   ")
 
@@ -105,26 +105,28 @@ class TestValidateExpression:
         "bad",
         ["a; DROP TABLE t", "a UNION SELECT *", "--", "/*", "a`b`"],
     )
-    def test_rejects_forbidden_keyword(self, bad):
+    def test_rejects_forbidden_keyword(self, bad) -> None:
         with pytest.raises(ValidationError):
             validate_expression(bad)
 
-    def test_rejects_special_chars(self):
+    def test_rejects_special_chars(self) -> None:
         # 含分号、管道符
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="非法字符"):
             validate_expression("a; b")
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="非法字符"):
             validate_expression("a|b")
-        # 单引号（字符串字面量）仍拒绝，避免引入 string context
-        with pytest.raises(ValidationError):
-            validate_expression("a = 'x'")
+
+    def test_accepts_literal_and_regex_chars(self) -> None:
+        # 单引号（字符串字面量）自 feat-dq-rule-auto-generation 起放行
+        # （值域 IN 列表 / POSIX 正则需要），注入面由黑名单 + 只读 adapter 兜底
+        assert validate_expression("a = 'x'") == "a = 'x'"
 
 
 # ===== COMPLETENESS =====
 
 
 class TestCompleteness:
-    def test_returns_total_and_passed(self):
+    def test_returns_total_and_passed(self) -> None:
         rule = _make_rule(rule_type=RuleType.COMPLETENESS, target_column="ORDER_QTY")
         adapter = _StubAdapter([{"total": 10, "passed": 7}])
         total, passed = _run(compEval(rule, adapter))
@@ -134,7 +136,7 @@ class TestCompleteness:
         assert "FROM \"PORDER\"" in sql
         assert "COUNT(\"ORDER_QTY\")" in sql
 
-    def test_target_column_required(self):
+    def test_target_column_required(self) -> None:
         rule = _make_rule(
             rule_type=RuleType.COMPLETENESS, target_column=None
         )
@@ -146,7 +148,7 @@ class TestCompleteness:
 
 
 class TestValidity:
-    def test_returns_total_and_passed(self):
+    def test_returns_total_and_passed(self) -> None:
         rule = _make_rule(
             rule_type=RuleType.VALIDITY,
             target_column="ORDER_QTY",
@@ -159,7 +161,7 @@ class TestValidity:
         assert "FROM \"PORDER\"" in sql
         assert "CASE WHEN (ORDER_QTY > 0)" in sql
 
-    def test_expression_required(self):
+    def test_expression_required(self) -> None:
         rule = _make_rule(
             rule_type=RuleType.VALIDITY, target_column="ORDER_QTY", rule_expression=None
         )
@@ -171,7 +173,7 @@ class TestValidity:
 
 
 class TestUniqueness:
-    def test_returns_distinct_count(self):
+    def test_returns_distinct_count(self) -> None:
         rule = _make_rule(
             rule_type=RuleType.UNIQUENESS, target_column="ORDER_KEY"
         )
@@ -181,7 +183,7 @@ class TestUniqueness:
         sql = adapter.calls[0]
         assert "COUNT(DISTINCT \"ORDER_KEY\")" in sql
 
-    def test_target_column_required(self):
+    def test_target_column_required(self) -> None:
         rule = _make_rule(
             rule_type=RuleType.UNIQUENESS, target_column=None
         )
@@ -193,7 +195,7 @@ class TestUniqueness:
 
 
 class TestConsistency:
-    def test_returns_total_and_passed(self):
+    def test_returns_total_and_passed(self) -> None:
         rule = _make_rule(
             rule_type=RuleType.CONSISTENCY,
             target_column=None,
@@ -205,7 +207,7 @@ class TestConsistency:
         sql = adapter.calls[0]
         assert "RECEIVED_QTY <= ORDER_QTY * 1.05" in sql
 
-    def test_expression_required(self):
+    def test_expression_required(self) -> None:
         rule = _make_rule(
             rule_type=RuleType.CONSISTENCY, target_column=None, rule_expression=None
         )
@@ -217,7 +219,7 @@ class TestConsistency:
 
 
 class TestReferential:
-    def test_parse_ref_expression_ok(self):
+    def test_parse_ref_expression_ok(self) -> None:
         assert parse_ref_expression("REF SUPPLIER.SUPPLIER_KEY") == (
             "SUPPLIER",
             "SUPPLIER_KEY",
@@ -231,11 +233,11 @@ class TestReferential:
     @pytest.mark.parametrize(
         "bad", ["", "REF SUPPLIER", "REFSUPPLIER.SID", "REF SUPPLIER.SID EXTRA", "DROP TABLE"]
     )
-    def test_parse_ref_expression_invalid(self, bad):
+    def test_parse_ref_expression_invalid(self, bad) -> None:
         with pytest.raises(ValidationError):
             parse_ref_expression(bad)
 
-    def test_evaluate_returns_matched_count(self):
+    def test_evaluate_returns_matched_count(self) -> None:
         rule = _make_rule(
             rule_type=RuleType.REFERENTIAL,
             target_column="SUPPLIER_KEY",
@@ -248,7 +250,7 @@ class TestReferential:
         assert "FROM \"SUPPLIER\"" in sql
         assert "EXISTS" in sql
 
-    def test_evaluate_requires_target_column_and_expression(self):
+    def test_evaluate_requires_target_column_and_expression(self) -> None:
         # 缺 target_column
         rule = _make_rule(
             rule_type=RuleType.REFERENTIAL,
@@ -271,12 +273,12 @@ class TestReferential:
 
 
 class TestEmptyResult:
-    def test_completeness_empty_rows(self):
+    def test_completeness_empty_rows(self) -> None:
         rule = _make_rule(rule_type=RuleType.COMPLETENESS, target_column="X")
         adapter = _StubAdapter([])
         assert _run(compEval(rule, adapter)) == (0, 0)
 
-    def test_validity_empty_rows(self):
+    def test_validity_empty_rows(self) -> None:
         rule = _make_rule(
             rule_type=RuleType.VALIDITY, target_column="X", rule_expression="X > 0"
         )

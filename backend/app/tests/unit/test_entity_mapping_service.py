@@ -23,7 +23,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.dependencies import CurrentUser
-from app.domain.enums import EntityType, SourceSystem, MatchRule
+from app.domain.enums import SourceSystem, MatchRule
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import EntityMapping
 from app.domain.schemas import (
@@ -128,7 +128,7 @@ def _fakeSession(
 
 def _makeCreate(**overrides) -> EntityMappingCreate:
     defaults: dict[str, Any] = {
-        "entity_type": EntityType.SUPPLIER,
+        "entity_type": "SUPPLIER",
         "enterprise_key": 100001,
         "enterprise_code": "SUP000001",
         "source_system": SourceSystem.ERP,
@@ -149,11 +149,11 @@ class TestListMappings:
         assert result == []
 
     def test_returns_all_when_no_filter(self):
-        e1 = EntityMapping(id=1, entity_type=EntityType.SUPPLIER, enterprise_key=100001,
+        e1 = EntityMapping(id=1, entity_type="SUPPLIER", enterprise_key=100001,
                            enterprise_code="SUP000001", source_system=SourceSystem.ERP,
                            source_key="V000001", source_code="V000001",
                            match_rule=MatchRule.MDM_MASTER)
-        e2 = EntityMapping(id=2, entity_type=EntityType.MATERIAL, enterprise_key=100002,
+        e2 = EntityMapping(id=2, entity_type="MATERIAL", enterprise_key=100002,
                            enterprise_code="M000001", source_system=SourceSystem.SRM,
                            source_key="S000001", source_code="S000001",
                            match_rule=MatchRule.MAPPING)
@@ -164,7 +164,7 @@ class TestListMappings:
     def test_default_pagination_applied(self):
         """默认 limit=200 offset=0 不打爆（真实 SQL 过滤在集成测试覆盖）。"""
         session = _fakeSession(records={1: EntityMapping(
-            id=1, entity_type=EntityType.SUPPLIER, enterprise_key=100001,
+            id=1, entity_type="SUPPLIER", enterprise_key=100001,
             enterprise_code="SUP000001", source_system=SourceSystem.ERP,
             source_key="V000001", source_code="V000001",
             match_rule=MatchRule.MDM_MASTER,
@@ -175,7 +175,7 @@ class TestListMappings:
 
 class TestGetMapping:
     def test_returns_mapping_when_found(self):
-        e = EntityMapping(id=42, entity_type=EntityType.SUPPLIER, enterprise_key=100001,
+        e = EntityMapping(id=42, entity_type="SUPPLIER", enterprise_key=100001,
                           enterprise_code="SUP000001", source_system=SourceSystem.ERP,
                           source_key="V000001", source_code="V000001",
                           match_rule=MatchRule.MDM_MASTER)
@@ -195,7 +195,7 @@ class TestCreateMapping:
         dto = _makeCreate()
         entity = _run(EntityMappingService().createMapping(session, dto, _adminActor()))
         assert entity.id is not None
-        assert entity.entity_type == EntityType.SUPPLIER
+        assert entity.entity_type == "SUPPLIER"
         assert entity.enterprise_key == 100001
         assert entity.source_system == SourceSystem.ERP
         assert entity.source_key == "V000001"
@@ -214,7 +214,7 @@ class TestCreateMapping:
     def test_precheck_hit_raises_validation_error(self):
         """service 层唯一性查重命中 → 422，不落库。"""
         session = _fakeSession(records={1: EntityMapping(
-            id=1, entity_type=EntityType.SUPPLIER, enterprise_key=100001,
+            id=1, entity_type="SUPPLIER", enterprise_key=100001,
             enterprise_code="SUP000001", source_system=SourceSystem.ERP,
             source_key="V000001", source_code="V000001",
             match_rule=MatchRule.MDM_MASTER,
@@ -236,7 +236,7 @@ class TestCreateMapping:
 class TestUpdateMapping:
     def _record(self) -> EntityMapping:
         return EntityMapping(
-            id=3, entity_type=EntityType.SUPPLIER, enterprise_key=100001,
+            id=3, entity_type="SUPPLIER", enterprise_key=100001,
             enterprise_code="SUP000001", source_system=SourceSystem.ERP,
             source_key="V000001", source_code="V000001",
             match_rule=MatchRule.MDM_MASTER,
@@ -251,7 +251,7 @@ class TestUpdateMapping:
         updated = _run(EntityMappingService().updateMapping(session, 3, dto, _adminActor()))
         assert updated.source_code == "V000001-X"
         # 未发送字段保留
-        assert updated.entity_type == EntityType.SUPPLIER
+        assert updated.entity_type == "SUPPLIER"
         assert updated.enterprise_key == 100001
         assert updated.match_rule == MatchRule.MDM_MASTER
         assert session.commits == 1
@@ -291,7 +291,7 @@ class TestUpdateMapping:
 class TestDeleteMapping:
     def test_delete_removes_and_commits(self):
         e = EntityMapping(
-            id=4, entity_type=EntityType.SUPPLIER, enterprise_key=100001,
+            id=4, entity_type="SUPPLIER", enterprise_key=100001,
             enterprise_code="SUP000001", source_system=SourceSystem.ERP,
             source_key="V000001", source_code="V000001",
             match_rule=MatchRule.MAPPING,
@@ -309,14 +309,14 @@ class TestDeleteMapping:
 
 class TestEntityMappingToRead:
     def test_roundtrip_snake_case_fields(self):
-        e = EntityMapping(id=5, entity_type=EntityType.SUPPLIER, enterprise_key=100001,
+        e = EntityMapping(id=5, entity_type="SUPPLIER", enterprise_key=100001,
                           enterprise_code="SUP000001", source_system=SourceSystem.ERP,
                           source_key="V000001", source_code="V000001",
                           match_rule=MatchRule.MAPPING)
         read = entityMappingToRead(e)
         assert isinstance(read, EntityMappingRead)
         assert read.id == 5
-        assert read.entity_type == EntityType.SUPPLIER
+        assert read.entity_type == "SUPPLIER"
         assert read.enterprise_key == 100001
         assert read.source_system == SourceSystem.ERP
         assert read.match_rule == MatchRule.MAPPING
@@ -351,19 +351,19 @@ class TestSearchMappings:
 
     def _seed_records(self):
         return [
-            EntityMapping(id=1, entity_type=EntityType.SUPPLIER, enterprise_key=100001,
+            EntityMapping(id=1, entity_type="SUPPLIER", enterprise_key=100001,
                           enterprise_code="SUP000001", source_system=SourceSystem.ERP,
                           source_key="V000001", source_code="V000001",
                           match_rule=MatchRule.MDM_MASTER),
-            EntityMapping(id=2, entity_type=EntityType.SUPPLIER, enterprise_key=100002,
+            EntityMapping(id=2, entity_type="SUPPLIER", enterprise_key=100002,
                           enterprise_code="SUP000002", source_system=SourceSystem.SRM,
                           source_key="S000002", source_code="SRM-SUP-002",
                           match_rule=MatchRule.MAPPING),
-            EntityMapping(id=3, entity_type=EntityType.MATERIAL, enterprise_key=200001,
+            EntityMapping(id=3, entity_type="MATERIAL", enterprise_key=200001,
                           enterprise_code="MAT000001", source_system=SourceSystem.ERP,
                           source_key="V200001", source_code="V200001",
                           match_rule=MatchRule.MDM_MASTER),
-            EntityMapping(id=4, entity_type=EntityType.MATERIAL, enterprise_key=200002,
+            EntityMapping(id=4, entity_type="MATERIAL", enterprise_key=200002,
                           enterprise_code="MAT000002", source_system=SourceSystem.QMS,
                           source_key="Q200002", source_code="QMS-MAT-002",
                           match_rule=MatchRule.BUSINESS_KEY),
@@ -525,7 +525,7 @@ class TestSearchMappings:
         # q="000001" + entity_type=SUPPLIER → 只 id=1
         result = _run(
             EntityMappingService().searchMappings(
-                _FilteringSession(records, "000001", EntityType.SUPPLIER), q="000001"
+                _FilteringSession(records, "000001", "SUPPLIER"), q="000001"
             )
         )
         assert {r.id for r in result} == {1}
@@ -536,11 +536,11 @@ class TestSearchMappings:
         fake 不解析 SQL LIMIT，所以这里只验服务不崩溃 + 返回结果数 == 入库数。
         真实 LIMIT 截断在集成测试（test_entity_mapping_api.py）里覆盖。
         """
-        from app.domain.enums import EntityType as ET, SourceSystem as SS
+        from app.domain.enums import SourceSystem as SS
         from app.domain.enums import MatchRule as MR
 
         records = [
-            EntityMapping(id=i, entity_type=ET.SUPPLIER, enterprise_key=100000 + i,
+            EntityMapping(id=i, entity_type="SUPPLIER", enterprise_key=100000 + i,
                           enterprise_code=f"SUP{i:06d}", source_system=SS.ERP,
                           source_key=f"V{i:06d}", source_code=f"V{i:06d}",
                           match_rule=MR.MDM_MASTER)
@@ -565,7 +565,7 @@ class TestSearchMappings:
 
 class TestEntityMappingSearchToHit:
     def test_dto_only_exposes_search_fields(self):
-        e = EntityMapping(id=5, entity_type=EntityType.SUPPLIER, enterprise_key=100001,
+        e = EntityMapping(id=5, entity_type="SUPPLIER", enterprise_key=100001,
                           enterprise_code="SUP000001", source_system=SourceSystem.ERP,
                           source_key="V000001", source_code="V000001",
                           match_rule=MatchRule.MAPPING, owner="procurement",
@@ -576,7 +576,7 @@ class TestEntityMappingSearchToHit:
         assert hit.enterprise_key == 100001
         assert hit.enterprise_code == "SUP000001"
         assert hit.source_system == SourceSystem.ERP
-        assert hit.entity_type == EntityType.SUPPLIER
+        assert hit.entity_type == "SUPPLIER"
         assert hit.source_code == "V000001"
         # 治理字段不应在 DTO 里：
         assert not hasattr(hit, "owner")

@@ -117,6 +117,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 若 seed 失败（RuntimeError），不继续 warmUp（fail-fast）。
         await agent_binding_cache.warmUp(session)
         await agent_tool_config_registry.warmUp(session)
+        # Task 6：feature_rule seed + registry warmUp（必须在 tool config warmUp 之后）
+        from scripts.seed_feature_rules import seedFeatureRules
+        from app.services.feature_rule_registry import feature_rule_registry
+
+        rule_changed = await seedFeatureRules(session)
+        if rule_changed:
+            logger.info("feature_rule seed: %d/%d created", rule_changed, 4)
+        await feature_rule_registry.warmUp(session)
+        from app.services.business_object_registry import businessObjectRegistry
+
+        await businessObjectRegistry.warmUp(session)
     yield
     logger.info("关闭中，释放外部连接...")
     await shutdownCleanup()
@@ -204,14 +215,17 @@ def createApp() -> FastAPI:
         agent_tools,
         agents,
         audit,
+        business_object,
         chat,
         data_lineage,
         data_quality,
+        data_quality_generate,
         datasource,
         documents,
         embedding_provider,
         entity_mapping,
         features,
+        feature_rules,
         graph,
         graph_traversal,
         kpi_catalog,
@@ -249,6 +263,11 @@ def createApp() -> FastAPI:
         tags=["data-quality"],
     )
     app.include_router(
+        data_quality_generate.router,
+        prefix="/api/v1/data-quality/rules/generate",
+        tags=["data-quality-generate"],
+    )
+    app.include_router(
         data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"]
     )
     app.include_router(
@@ -258,6 +277,9 @@ def createApp() -> FastAPI:
     )
     app.include_router(
         kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"]
+    )
+    app.include_router(
+        business_object.router, prefix="/api/v1", tags=["business-object"]
     )
     app.include_router(features.router, prefix="/api/v1/features", tags=["features"])
     app.include_router(
@@ -278,6 +300,7 @@ def createApp() -> FastAPI:
         agent_runtime.router, prefix="/api/v1/agents", tags=["agents"]
     )
     app.include_router(agent_tools.router, tags=["agent-tools"])
+    app.include_router(feature_rules.router, tags=["feature-rules"])
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     app.include_router(
@@ -317,7 +340,9 @@ def registerExceptionHandlers(app: FastAPI) -> None:
 def _statusFor(exc: DomainError) -> int:
     """领域异常 -> HTTP 状态码。"""
     from app.domain.exceptions import (
+        BusinessObjectGraphLabelMismatchError,
         ConflictError,
+        LLMUnavailableError,
         NotFoundError,
         PermissionDeniedError,
         ValidationError,
@@ -329,8 +354,12 @@ def _statusFor(exc: DomainError) -> int:
         return 409
     if isinstance(exc, ValidationError):
         return 422
+    if isinstance(exc, BusinessObjectGraphLabelMismatchError):
+        return 422
     if isinstance(exc, PermissionDeniedError):
         return 403
+    if isinstance(exc, LLMUnavailableError):
+        return 503
     return 400
 
 

@@ -13,7 +13,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import EntityType, MatchRule, SourceSystem
+from app.domain.enums import MatchRule, SourceSystem
 from app.domain.models import EntityMapping
 
 from app.tests.integration.test_agent_runtime_api import _seedAgent
@@ -31,7 +31,7 @@ async def _seedNamedSupplier(
 ) -> None:
     dbSession.add(
         EntityMapping(
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
             enterprise_key=key,
             enterprise_code=code,
             source_system=SourceSystem.ERP,

@@ -135,7 +135,7 @@ class TestDocumentEntityRelationApi:
         payload = {
             "documentId": doc_id_str,
             "entityType": "SUPPLIER",
-            "entityKey": 100001,
+            "entityKey": "100001",
             "relationType": "CONTRACT",
         }
         resp = await client.post("/api/v1/documents/relations", json=payload)
@@ -143,7 +143,7 @@ class TestDocumentEntityRelationApi:
         body = resp.json()
         assert body["documentId"] == doc_id_str
         assert body["entityType"] == "SUPPLIER"
-        assert body["entityKey"] == 100001
+        assert body["entityKey"] == "100001"
         assert body["relationType"] == "CONTRACT"
         assert body["id"] > 0
 
@@ -158,7 +158,7 @@ class TestDocumentEntityRelationApi:
         payload = {
             "documentId": doc_id_str,
             "entityType": "SUPPLIER",
-            "entityKey": 100001,
+            "entityKey": "100001",
             "relationType": "CONTRACT",
         }
         resp1 = await client.post("/api/v1/documents/relations", json=payload)
@@ -170,10 +170,10 @@ class TestDocumentEntityRelationApi:
         doc_id_str = "DOC-R-LIST"
         await self._create_doc(client, doc_id_str)
         await client.post("/api/v1/documents/relations", json={
-            "documentId": doc_id_str, "entityType": "SUPPLIER", "entityKey": 200001, "relationType": "CONTRACT",
+            "documentId": doc_id_str, "entityType": "SUPPLIER", "entityKey": "200001", "relationType": "CONTRACT",
         })
         await client.post("/api/v1/documents/relations", json={
-            "documentId": doc_id_str, "entityType": "SUPPLIER", "entityKey": 200002, "relationType": "CONTRACT",
+            "documentId": doc_id_str, "entityType": "SUPPLIER", "entityKey": "200002", "relationType": "CONTRACT",
         })
         resp = await client.get(f"/api/v1/documents/relations?documentId={doc_id_str}")
         assert resp.status_code == 200
@@ -184,10 +184,10 @@ class TestDocumentEntityRelationApi:
         doc_id_str = "DOC-R-EKEY"
         await self._create_doc(client, doc_id_str)
         await client.post("/api/v1/documents/relations", json={
-            "documentId": doc_id_str, "entityType": "SUPPLIER", "entityKey": 300001, "relationType": "CONTRACT",
+            "documentId": doc_id_str, "entityType": "SUPPLIER", "entityKey": "300001", "relationType": "CONTRACT",
         })
         await client.post("/api/v1/documents/relations", json={
-            "documentId": doc_id_str, "entityType": "SUPPLIER", "entityKey": 300002, "relationType": "CONTRACT",
+            "documentId": doc_id_str, "entityType": "SUPPLIER", "entityKey": "300002", "relationType": "CONTRACT",
         })
         resp = await client.get("/api/v1/documents/relations?entityKey=300001")
         assert resp.status_code == 200
@@ -197,7 +197,7 @@ class TestDocumentEntityRelationApi:
         doc_id_str = "DOC-R-DEL"
         await self._create_doc(client, doc_id_str)
         create = await client.post("/api/v1/documents/relations", json={
-            "documentId": doc_id_str, "entityType": "SUPPLIER", "entityKey": 400001, "relationType": "CONTRACT",
+            "documentId": doc_id_str, "entityType": "SUPPLIER", "entityKey": "400001", "relationType": "CONTRACT",
         })
         rel_id = create.json()["id"]
         resp = await client.delete(f"/api/v1/documents/relations/{rel_id}")

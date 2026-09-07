@@ -11,6 +11,7 @@ export const FALLBACK_NAV: readonly { key: string; labelKey: string }[] = [
   { key: "/ontology", labelKey: "appLayout.menu.ontology" },
   { key: "/datasource", labelKey: "appLayout.menu.datasource" },
   { key: "/data-quality", labelKey: "appLayout.menu.dataQuality" },
+  { key: "/data-quality/generate", labelKey: "appLayout.menu.dataQualityGenerate" },
   { key: "/lineage", labelKey: "appLayout.menu.lineage" },
   { key: "/entity-mapping", labelKey: "appLayout.menu.entityMapping" },
   { key: "/kpi-catalog", labelKey: "appLayout.menu.kpiCatalog" },
@@ -23,6 +24,7 @@ export const FALLBACK_NAV: readonly { key: string; labelKey: string }[] = [
   { key: "/supplier-risk", labelKey: "appLayout.menu.supplierRisk" },
   { key: "/agents/run", labelKey: "appLayout.menu.agentRuntime" },
   { key: "/agents", labelKey: "appLayout.menu.agents" },
+  { key: "/business-objects", labelKey: "appLayout.menu.businessObjects" },
   { key: "/documents", labelKey: "appLayout.menu.documents" },
   { key: "/admin/audit", labelKey: "appLayout.menu.adminAudit" },
 ] as const;

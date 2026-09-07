@@ -32,7 +32,7 @@ from typing import Union
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import EntityType, FeatureStatus
+from app.domain.enums import BusinessObjectCode, FeatureStatus
 from app.domain.exceptions import NotFoundError
 from app.domain.models import EntityMapping, FeatureDefinition, FeatureValue
 from app.domain.schemas import (
@@ -41,18 +41,23 @@ from app.domain.schemas import (
     Supplier360Profile,
     Supplier360Read,
 )
+from app.services.feature_rule_registry import feature_rule_registry
 from app.services.messages_zh import MSG_SUPPLIER_360_NOT_FOUND
 
 logger = logging.getLogger(__name__)
 
-# Phase 5.3 范围内 4 个 SUPPLIER 特征（与 seed_features.py 对齐）。
-# 顺序在前端展示上有意义（按"交付→质量→价格→风险"逻辑分组）。
-DEFAULT_SUPPLIER_FEATURES: tuple[str, ...] = (
-    "SUPPLIER_OTD_3M",
-    "SUPPLIER_DEFECT_RATE_3M",
-    "SUPPLIER_PRICE_VARIANCE_3M",
-    "SUPPLIER_RISK_SCORE",
-)
+
+def _kpiSlotFeatureNames(
+    data_object: str = "SUPPLIER", data_layer: str = "FEATURE"
+) -> tuple[str, ...]:
+    """聚合所有 enabled 规则的 feature_name（spec §6.4）。"""
+    seen: set[str] = set()
+    for target_level in ("RISK", "QUALITY_SCORE", "CUSTOM"):
+        for rule in feature_rule_registry.getEnabledRules(
+            data_object, data_layer, target_level
+        ):
+            seen.add(rule.feature_name)
+    return tuple(sorted(seen))
 
 
 class Supplier360Service:
@@ -77,7 +82,7 @@ class Supplier360Service:
         profile = Supplier360Profile(
             enterprise_key=enterprise_key,
             enterprise_code=enterprise_code,
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
         )
         entity_codes = await self._safeLoadEntityCodes(session, enterprise_key)
         kpis = await self._safeLoadKpis(session, enterprise_code)
@@ -109,7 +114,7 @@ class Supplier360Service:
                         EntityMapping.enterprise_code,
                     )
                     .where(
-                        EntityMapping.entity_type == EntityType.SUPPLIER,
+                        EntityMapping.entity_type == "SUPPLIER",
                         EntityMapping.enterprise_code == str(supplierKey),
                     )
                     .limit(1)
@@ -140,7 +145,7 @@ class Supplier360Service:
                             EntityMapping.enterprise_code,
                         )
                         .where(
-                            EntityMapping.entity_type == EntityType.SUPPLIER,
+                            EntityMapping.entity_type == "SUPPLIER",
                             EntityMapping.enterprise_key == enterprise_key_int,
                         )
                         .limit(1)
@@ -177,7 +182,7 @@ class Supplier360Service:
         try:
             result = await session.execute(
                 select(EntityMapping).where(
-                    EntityMapping.entity_type == EntityType.SUPPLIER,
+                    EntityMapping.entity_type == "SUPPLIER",
                     EntityMapping.enterprise_key == enterpriseKey,
                 )
             )
@@ -236,7 +241,7 @@ class Supplier360Service:
             all_defs = {}
 
         result: list[Supplier360Kpi] = []
-        for feature_name in DEFAULT_SUPPLIER_FEATURES:
+        for feature_name in _kpiSlotFeatureNames():
             fd = all_defs.get(feature_name)
             if fd is None:
                 # DB 中完全无此 feature → 占位
@@ -265,14 +270,14 @@ class Supplier360Service:
     async def _loadAllDefaultDefinitions(
         self, session: AsyncSession
     ) -> dict[str, FeatureDefinition]:
-        """加载 DEFAULT_SUPPLIER_FEATURES 的全部 FeatureDefinition（不限 is_enabled / status）。
+        """加载 _kpiSlotFeatureNames() 的全部 FeatureDefinition（不限 is_enabled / status）。
 
         调用方根据 is_enabled + status 决定渲染 / 占位 / 跳过；
         SQL 阶段不过滤是必要的，否则无法区分「DB 中无此行」与「DB 中存在但 disabled」。
         """
         stmt = select(FeatureDefinition).where(
-            FeatureDefinition.feature_name.in_(DEFAULT_SUPPLIER_FEATURES),
-            FeatureDefinition.entity_type == EntityType.SUPPLIER,
+            FeatureDefinition.feature_name.in_(_kpiSlotFeatureNames()),
+            FeatureDefinition.entity_type == "SUPPLIER",
         )
         result = await session.execute(stmt)
         return {fd.feature_name: fd for fd in result.scalars().all()}

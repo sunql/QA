@@ -75,6 +75,7 @@ const api = vi.hoisted(() => ({
   createMetric: vi.fn(),
   updateMetric: vi.fn(),
   deleteMetric: vi.fn(),
+  searchOntology: vi.fn(),
 }));
 
 vi.mock("../api/ontology", () => api);
@@ -503,6 +504,121 @@ describe("OntologyPage", () => {
     await userEvent.click(screen.getByRole("tab", { name: /指标/ }));
     await waitFor(() => {
       expect(screen.getByText("本体管理")).toBeInTheDocument();
+    });
+  });
+
+  // ---- 语义搜索（searchOntology） ----
+
+  it("语义搜索：空 query 不调用 searchOntology", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Customer")).toBeInTheDocument());
+    // antd Input.Search 的 enterButton 是 span，直接 click 触发空字符串搜索
+    await userEvent.click(screen.getByRole("button", { name: /搜\s?索/ }));
+    expect(api.searchOntology).not.toHaveBeenCalled();
+  });
+
+  it("语义搜索：成功时弹窗展示结果表格（含类型/别名/描述 Tooltip/评分）", async () => {
+    api.searchOntology.mockResolvedValue([
+      {
+        type: "class",
+        id: 1,
+        name: "Customer",
+        alias: "客户",
+        description: "客户实体描述",
+        score: 0.85,
+      },
+      {
+        type: "property",
+        id: 2,
+        name: "customer_name",
+        alias: null,
+        description: null,
+        score: 0.42,
+      },
+      {
+        type: "metric",
+        id: 3,
+        name: "sales_amount",
+        alias: "销售额",
+        description: "销售总额",
+        score: 0.7,
+      },
+    ]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Customer")).toBeInTheDocument());
+
+    const searchInput = screen.getByPlaceholderText("语义搜索：如 客户销售额");
+    await userEvent.type(searchInput, "客户");
+    await userEvent.click(screen.getByRole("button", { name: /搜\s?索/ }));
+
+    await waitFor(() => {
+      expect(api.searchOntology).toHaveBeenCalledWith("客户", { topK: 15 });
+    });
+    // 弹窗标题
+    expect(screen.getByText("语义检索结果")).toBeInTheDocument();
+    // 三类命中均渲染（Tag 内文本 = i18n 实体类型）；限定到 Modal 内避免与 Tab 标签冲突
+    const modal = screen.getByRole("dialog");
+    expect(modal).toHaveTextContent("类");
+    expect(modal).toHaveTextContent("属性");
+    expect(modal).toHaveTextContent("指标");
+    // 评分百分比 (0.85 -> 85%)
+    expect(screen.getByText("85%")).toBeInTheDocument();
+    expect(screen.getByText("42%")).toBeInTheDocument();
+    // alias=null 时回退到 dash
+    expect(screen.getAllByText("-").length).toBeGreaterThan(0);
+    // 描述字段渲染 Tooltip（fireEvent 触发）
+    fireEvent.mouseEnter(screen.getByText("客户实体描述"));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("客户实体描述");
+  });
+
+  it("语义搜索：失败时不弹窗且不抛错", async () => {
+    api.searchOntology.mockRejectedValue(new Error("向量服务不可用"));
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Customer")).toBeInTheDocument());
+
+    const searchInput = screen.getByPlaceholderText("语义搜索：如 客户销售额");
+    await userEvent.type(searchInput, "客户");
+    await userEvent.click(screen.getByRole("button", { name: /搜\s?索/ }));
+
+    await waitFor(() => {
+      expect(api.searchOntology).toHaveBeenCalledWith("客户", { topK: 15 });
+    });
+    // 错误被 catch 静默，弹窗不打开
+    expect(screen.queryByText("语义检索结果")).not.toBeInTheDocument();
+  });
+
+  it("语义搜索：无结果时弹窗显示空状态", async () => {
+    api.searchOntology.mockResolvedValue([]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Customer")).toBeInTheDocument());
+
+    const searchInput = screen.getByPlaceholderText("语义搜索：如 客户销售额");
+    await userEvent.type(searchInput, "空查询");
+    await userEvent.click(screen.getByRole("button", { name: /搜\s?索/ }));
+
+    await waitFor(() => {
+      expect(api.searchOntology).toHaveBeenCalledWith("空查询", { topK: 15 });
+    });
+    expect(await screen.findByText("未匹配到相关本体。请确认已通过编辑表单或 /embeddings/sync 写入向量。")).toBeInTheDocument();
+  });
+
+  it("语义搜索弹窗关闭按钮可关闭弹窗", async () => {
+    api.searchOntology.mockResolvedValue([
+      { type: "class", id: 1, name: "Customer", alias: null, description: null, score: 0.5 },
+    ]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Customer")).toBeInTheDocument());
+
+    const searchInput = screen.getByPlaceholderText("语义搜索：如 客户销售额");
+    await userEvent.type(searchInput, "客户");
+    await userEvent.click(screen.getByRole("button", { name: /搜\s?索/ }));
+
+    await waitFor(() => expect(screen.getByText("语义检索结果")).toBeInTheDocument());
+
+    // 点击关闭按钮（右上角 X）
+    await userEvent.click(screen.getByRole("button", { name: /Close/ }));
+    await waitFor(() => {
+      expect(screen.queryByText("语义检索结果")).not.toBeInTheDocument();
     });
   });
 });

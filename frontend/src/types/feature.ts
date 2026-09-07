@@ -32,7 +32,9 @@ export const FEATURE_REFRESH_OPTIONS: {
   { value: "MONTHLY", labelKey: "MONTHLY" },
 ];
 
-export const FEATURE_ENTITY_TYPES: EntityType[] = [
+/** Deprecated: entity types are now dynamically sourced.
+ *  Inline values where needed; replace with API fetch when a /entity-types endpoint exists. */
+export const FEATURE_ENTITY_TYPES: string[] = [
   "SUPPLIER",
   "MATERIAL",
   "PO",

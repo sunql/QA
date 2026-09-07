@@ -20,8 +20,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import getCurrentUser, getDb
-from app.domain.enums import DocumentStatus, EntityType
+from app.domain.enums import DocumentStatus
 from app.domain.schemas import (
+    BusinessObjectCodeType,
     DocEntityRelationCreate,
     DocEntityRelationRead,
     DocumentCreate,
@@ -116,8 +117,8 @@ async def deleteDocument(
 @router.get("/relations", response_model=list[DocEntityRelationRead])
 async def listRelations(
     document_id: str | None = Query(default=None, alias="documentId"),
-    entity_type: EntityType | None = Query(default=None, alias="entityType"),
-    entity_key: int | None = Query(default=None, alias="entityKey", ge=1),
+    entity_type: BusinessObjectCodeType | None = Query(default=None, alias="entityType"),
+    entity_key: str | None = Query(default=None, alias="entityKey", min_length=1, max_length=100),
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     _user=Depends(getCurrentUser),

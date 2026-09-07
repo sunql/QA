@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { message } from "antd";
 import React from "react";
 
 // 全局共享的 echarts 实例 mock：暴露 getDataURL，便于断言图表导出路径。
@@ -148,5 +149,34 @@ describe("ChartRenderer", () => {
 
     render(<ChartRenderer chartType="table" data={null} />);
     expect(screen.queryByRole("button", { name: /导出/ })).toBeNull();
+  });
+
+  it("导出 CSV 失败时 message.error 提示", () => {
+    const errorSpy = vi.spyOn(message, "error").mockReturnValue(1 as unknown as ReturnType<typeof message.error>);
+    // createObjectURL 抛错以触发 catch 分支
+    createObjectUrl.mockImplementation(() => {
+      throw new Error("download failed");
+    });
+    render(
+      <ChartRenderer
+        chartType="table"
+        data={[{ A: 1 }]}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: /导出 CSV/ }));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("download failed"));
+    errorSpy.mockRestore();
+  });
+
+  it("导出 PNG 失败时 message.error 提示", () => {
+    const errorSpy = vi.spyOn(message, "error").mockReturnValue(1 as unknown as ReturnType<typeof message.error>);
+    // getDataURL 抛错
+    echartsInstance.getDataURL.mockImplementation(() => {
+      throw new Error("getDataURL failed");
+    });
+    render(<ChartRenderer chartType="bar" chartOption={{ series: [{ type: "bar" }] }} />);
+    fireEvent.click(screen.getByRole("button", { name: /导出 PNG/ }));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("getDataURL failed"));
+    errorSpy.mockRestore();
   });
 });

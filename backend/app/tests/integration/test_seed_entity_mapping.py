@@ -19,7 +19,7 @@ from datetime import date
 
 from sqlalchemy import func, select
 
-from app.domain.enums import EntityType, MatchRule, SourceSystem
+from app.domain.enums import MatchRule, SourceSystem
 from app.domain.models import EntityMapping
 from scripts.seed_entity_mapping import seedEntityMappings
 
@@ -27,12 +27,12 @@ from scripts.seed_entity_mapping import seedEntityMappings
 EXPECTED_EFFECTIVE = date(2026, 1, 1)
 
 EXPECTED_TOTAL = 45
-EXPECTED_BY_TYPE: dict[EntityType, int] = {
-    EntityType.SUPPLIER: 25,
-    EntityType.MATERIAL: 15,
-    EntityType.PO: 3,
-    EntityType.GR: 1,
-    EntityType.IQC: 1,
+EXPECTED_BY_TYPE: dict[str, int] = {
+    "SUPPLIER": 25,
+    "MATERIAL": 15,
+    "PO": 3,
+    "GR": 1,
+    "IQC": 1,
 }
 # 跨系统追溯验收：至少覆盖 ERP / SRM / QMS 三系统
 EXPECTED_SYSTEMS = {SourceSystem.ERP, SourceSystem.SRM, SourceSystem.QMS}
@@ -64,7 +64,7 @@ class TestSeedEntityMapping:
         """预置 1 条与种子重叠的映射 → seed 只补 44 条，总数保持 45。"""
         dbSession.add(
             EntityMapping(
-                entity_type=EntityType.SUPPLIER,
+                entity_type="SUPPLIER",
                 enterprise_key=100001,
                 enterprise_code="SUP000001",
                 source_system=SourceSystem.ERP,
@@ -111,7 +111,7 @@ class TestSeedEntityMapping:
         first = next(
             r
             for r in rows
-            if r.entity_type == EntityType.SUPPLIER
+            if r.entity_type == "SUPPLIER"
             and r.enterprise_key == 100001
             and r.source_system == SourceSystem.ERP
         )
@@ -125,7 +125,7 @@ class TestSeedEntityMapping:
             await dbSession.execute(
                 select(EntityMapping).where(
                     EntityMapping.entity_type.in_(
-                        [EntityType.PO, EntityType.GR, EntityType.IQC]
+                        ["PO", "GR", "IQC"]
                     )
                 )
             )
@@ -139,7 +139,7 @@ class TestSeedEntityMapping:
             await dbSession.execute(
                 select(EntityMapping).where(
                     EntityMapping.entity_type.in_(
-                        [EntityType.SUPPLIER, EntityType.MATERIAL]
+                        ["SUPPLIER", "MATERIAL"]
                     )
                 )
             )

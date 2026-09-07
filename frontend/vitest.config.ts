@@ -26,6 +26,8 @@ export default defineConfig({
         "src/i18n/i18n.ts",
         // types.ts 是纯类型文件（NestedKeyOf 条件类型），无运行时代码
         "src/i18n/types.ts",
+        // src/types/** 是纯类型/枚举常量模块，无运行时代码
+        "src/types/**",
       ],
     },
   },

@@ -40,10 +40,12 @@ ITEMS: list[dict[str, Any]] = [
     # Business Config
     {"parent": "section.bizConfig", "code": "item.ontology", "label_key": "menu.item.ontology", "icon_code": "partition", "sort_order": 310, "path": "/ontology"},
     {"parent": "section.bizConfig", "code": "item.dataQuality", "label_key": "menu.item.dataQuality", "icon_code": "audit", "sort_order": 320, "path": "/data-quality"},
+    {"parent": "section.bizConfig", "code": "item.dataQualityGenerate", "label_key": "menu.item.dataQualityGenerate", "icon_code": "thunderbolt", "sort_order": 325, "path": "/data-quality/generate"},
     {"parent": "section.bizConfig", "code": "item.lineage", "label_key": "menu.item.lineage", "icon_code": "node", "sort_order": 330, "path": "/lineage"},
     {"parent": "section.bizConfig", "code": "item.entityMapping", "label_key": "menu.item.entityMapping", "icon_code": "code", "sort_order": 340, "path": "/entity-mapping"},
     {"parent": "section.bizConfig", "code": "item.kpiCatalog", "label_key": "menu.item.kpiCatalog", "icon_code": "number", "sort_order": 350, "path": "/kpi-catalog"},
     {"parent": "section.bizConfig", "code": "item.features", "label_key": "menu.item.features", "icon_code": "cluster", "sort_order": 360, "path": "/features"},
+    {"parent": "section.bizConfig", "code": "item.businessObjects", "label_key": "menu.item.businessObjects", "icon_code": "cluster", "sort_order": 370, "path": "/business-objects"},
     # Foundation
     {"parent": "section.foundation", "code": "item.datasource", "label_key": "menu.item.datasource", "icon_code": "database", "sort_order": 410, "path": "/datasource"},
     {"parent": "section.foundation", "code": "item.documents", "label_key": "menu.item.documents", "icon_code": "file", "sort_order": 420, "path": "/documents"},
@@ -56,6 +58,7 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.systemConfig", "code": "item.status", "label_key": "menu.item.status", "icon_code": "heart", "sort_order": 530, "path": "/status"},
     # Audit & Security
     {"parent": "section.auditSecurity", "code": "item.adminAudit", "label_key": "menu.item.adminAudit", "icon_code": "audit", "sort_order": 610, "path": "/admin/audit"},
+    {"parent": "section.auditSecurity", "code": "item.adminFeatureRules", "label_key": "menu.item.adminFeatureRules", "icon_code": "setting", "sort_order": 615, "path": "/admin/feature-rules"},
 ]
 
 

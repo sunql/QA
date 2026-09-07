@@ -57,14 +57,37 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
 
     await seedAgentToolConfigs(dbSession)
     await dbSession.commit()
+    # Seed business_object rows so FK targets exist for entity_mapping /
+    # feature_definition / document_entity_relation tests (Task 8 FK constraint).
+    from scripts.seed_business_objects import seedBusinessObjects
+
+    await seedBusinessObjects(dbSession)
 
     agent_binding_cache.invalidate()
     await agent_binding_cache.warmUp(dbSession)
     agent_tool_config_registry.invalidate()
     await agent_tool_config_registry.warmUp(dbSession)
+    # warmUp feature_rule_registry（feat-feature-rule-config）：集成测试无
+    # lifespan，必须显式 warmUp，否则 runtime 测试会因 'Registry 未 warmUp'
+    # 抛 RuntimeError。seedFeatureRules 先行确保运行时测试有规则可评估。
+    from scripts.seed_feature_rules import seedFeatureRules
+    from app.services.feature_rule_registry import feature_rule_registry
+
+    await seedFeatureRules(dbSession)
+    await dbSession.commit()
+    feature_rule_registry.invalidate()
+    await feature_rule_registry.warmUp(dbSession)
+    # warmUp business_object_registry：DB-backed registry，集成测试无 lifespan
+    # 必须显式 warmUp，否则 runtime 测试会因 'Registry 未 warmUp' 抛 RuntimeError。
+    from app.services.business_object_registry import businessObjectRegistry
+
+    businessObjectRegistry.invalidate()
+    await businessObjectRegistry.warmUp(dbSession)
     # 关掉 warmUp SELECT 留下的隐式事务：否则 dbSession 持有 AccessShareLock，
     # 阻塞后续 pgSession/engine B 的 TRUNCATE（feat-agent-tool-config-db 教训）
     await dbSession.commit()
     yield
     agent_binding_cache.invalidate()
     agent_tool_config_registry.invalidate()
+    feature_rule_registry.invalidate()
+    businessObjectRegistry.invalidate()

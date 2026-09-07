@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from decimal import Decimal, InvalidOperation
 from typing import Any, Union
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import RiskLevel
+from app.domain.enums import RiskLevel, Severity
+from app.services.feature_rule_evaluator import RuleHit, _OPERATORS, _SEVERITY_ORDER
+from app.services.feature_rule_registry import feature_rule_registry
 from app.domain.schemas import (
     Supplier360Kpi,
     Supplier360Read,
@@ -35,11 +38,18 @@ from app.services.messages_zh import (
     MSG_RISK_POINTS_TEMPLATE,
 )
 from app.services.supplier_360_service import (
-    DEFAULT_SUPPLIER_FEATURES,
     Supplier360Service,
 )
 
 logger = logging.getLogger(__name__)
+
+# RISK-priority bypass: map Severity str keys (intentional — matches RuleEvaluation.matched_severity.value for legacy paths)
+_SEVERITY_TO_RISK: dict[str, RiskLevel] = {
+    "HIGH": RiskLevel.HIGH,
+    "MEDIUM": RiskLevel.MEDIUM,
+    "LOW": RiskLevel.LOW,
+    "INFO": RiskLevel.LOW,
+}
 
 # LLM factory 签名：与 chatModule._llmFactory 兼容（cfg 参数被忽略，便于复用）
 LlmFactory = Callable[[Any], Any]
@@ -112,7 +122,7 @@ class SupplierRiskService:
         """
         view = await Supplier360Service().get360(session, supplier_key)
         contributions = [_toContribution(kpi) for kpi in view.kpis]
-        level, level_source = self._decideLevel(contributions)
+        level, level_source = await self._decideLevel_via_rules(view, contributions)
         actions = _buildActions(level)
         risk_points, points_source, prompt_tokens, completion_tokens, cost, model_name = await self._generateRiskPoints(
             view, contributions, level, llm_factory=llm_factory
@@ -134,57 +144,81 @@ class SupplierRiskService:
         )
 
     # ------------------------------------------------------------------
-    # 风险等级判定
+    # 风险等级判定（via Feature Rule Engine）
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _decideLevel(
+    async def _decideLevel_via_rules(
+        view: Supplier360Read,
         contributions: list[SupplierRiskKpiContribution],
     ) -> tuple[RiskLevel, str]:
-        """主路径：RISK_SCORE（0-1）三档映射（<0.60 High；0.60-0.80 Medium；≥0.80 Low）。
+        """4-step RISK-priority bypass wrapper (spec §6.3，与 legacy _decideLevel 字节级一致)。
 
-        Fallback：其他 3 个 feature 违规计数（3→High / 2→Medium / ≤1→Low）。
-        Unknown：4 个 feature 全部 missing。
+        Step 1: RISK_SCORE tier matched → return immediately (bypass other violations).
+        Step 2: All values missing → UNKNOWN.
+        Step 3: MAX severity across other matched rules.
+        Step 4: All values present, no rule matched → LOW.
         """
-        risk_score = next(
-            (c for c in contributions if c.feature_name == "SUPPLIER_RISK_SCORE"),
-            None,
-        )
-        if (
-            risk_score is not None
-            and risk_score.value is not None
-            and risk_score.value != ""
-        ):
+        # Build feature values dict from contributions
+        values: dict[str, Decimal | None] = {}
+        for c in contributions:
+            if c.value is None:
+                continue
             try:
-                score = float(risk_score.value)
-            except (TypeError, ValueError):
-                score = None
-            if score is not None:
-                if score < 0.60:
-                    return RiskLevel.HIGH, "risk_score"
-                if score < 0.80:
-                    return RiskLevel.MEDIUM, "risk_score"
-                return RiskLevel.LOW, "risk_score"
+                values[c.feature_name] = Decimal(c.value)
+            except (InvalidOperation, ValueError):
+                continue
 
-        # Fallback：3 个 feature 违规计数
-        fallback_features = {
-            "SUPPLIER_OTD_3M",
-            "SUPPLIER_DEFECT_RATE_3M",
-            "SUPPLIER_PRICE_VARIANCE_3M",
-        }
+        # Fetch enabled rules for SUPPLIER / FEATURE / RISK scope
+        rules = feature_rule_registry.getEnabledRules(
+            data_object="SUPPLIER", data_layer="FEATURE", target_level="RISK",
+        )
+
+        # Evaluate each rule: find the first (most severe) matching tier
+        rule_hits: dict[str, RuleHit | None] = {}
+        for rule in rules:
+            value = values.get(rule.feature_name)
+            if value is None:
+                rule_hits[rule.code] = None
+                continue
+            hit: RuleHit | None = None
+            for tier in sorted(rule.thresholds, key=lambda t: _SEVERITY_ORDER.get(t.severity, 99)):
+                op = _OPERATORS.get(tier.operator)
+                if op is None:
+                    continue
+                if op(value, tier.threshold_value):
+                    hit = RuleHit(
+                        rule_code=rule.code,
+                        feature_name=rule.feature_name,
+                        severity=tier.severity,
+                        operator=tier.operator,
+                        threshold_value=tier.threshold_value,
+                        actual_value=value,
+                    )
+                    break
+            rule_hits[rule.code] = hit
+
+        # Step 1: RISK-priority bypass — RISK_SCORE tier matched → return immediately
+        risk_score_hit = rule_hits.get("supplier_risk_score_main")
+        if risk_score_hit is not None:
+            return _SEVERITY_TO_RISK[risk_score_hit.severity], risk_score_hit.rule_code
+
+        # Step 2: All missing → UNKNOWN
         all_missing = all(c.value is None for c in contributions)
         if all_missing:
             return RiskLevel.UNKNOWN, "unknown"
-        violations = sum(
-            1
-            for c in contributions
-            if c.feature_name in fallback_features and c.passed is False
-        )
-        if violations >= 3:
-            return RiskLevel.HIGH, "fallback_composite"
-        if violations == 2:
-            return RiskLevel.MEDIUM, "fallback_composite"
-        return RiskLevel.LOW, "fallback_composite"
+
+        # Step 3: MAX severity across other matched rules
+        other_hits = [
+            h for h in rule_hits.values()
+            if h is not None and h.rule_code != "supplier_risk_score_main"
+        ]
+        if other_hits:
+            worst = min(other_hits, key=lambda h: _SEVERITY_ORDER.get(h.severity, 99))
+            return _SEVERITY_TO_RISK[worst.severity], worst.rule_code
+
+        # Step 4: All values present, no rule matched → LOW
+        return RiskLevel.LOW, "no_match"
 
 
     # ------------------------------------------------------------------

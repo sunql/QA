@@ -22,9 +22,9 @@ from app.services.agent_tool_config_registry import agent_tool_config_registry
 from app.services.agent_tools import AgentTool
 
 # 表/实体 → 层 词汇表（SSOT，与 Harness/wiki 层词汇表对齐）
-MASTER_ENTITY_LABELS = frozenset({"Supplier", "Material"})  # DIM 主数据
+MASTER_ENTITY_LABELS = frozenset({"Supplier", "ItemMaster"})  # DIM 主数据
 DOCUMENT_ENTITY_LABELS = frozenset(  # DWD 业务单据
-    {"PurchaseOrder", "GoodsReceipt", "IncomingInspection", "NCR", "Contract"}
+    {"PurchaseOrder", "Receipt", "IncomingInspection", "Contract"}
 )
 
 # 内置工具声明契约（SSOT：与 handler 实际读取的数据源一致）

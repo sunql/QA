@@ -30,12 +30,12 @@ _ALLOWED_LABELS = frozenset({"Class", "Property", "Metric"})
 BUSINESS_ENTITY_LABELS = frozenset(
     {
         "Supplier",
-        "Material",
+        "ItemMaster",        # 原 Material（Phase 4.4 统一为 class_name）
         "PurchaseOrder",
-        "GoodsReceipt",
+        "Receipt",            # 原 GoodsReceipt
         "IncomingInspection",
-        "NCR",
-        "Contract",
+        "Contract",           # 由文档目录提供
+        # 删除：Material / GoodsReceipt / NCR（Phase 4.4 NCR 不入图）
     }
 )
 
@@ -50,7 +50,6 @@ BUSINESS_RELATION_TYPES = frozenset(
         "CONTAINS",
         "GENERATES",
         "INSPECTED_BY",
-        "GENERATED",
         "SIGNED",
     }
 )

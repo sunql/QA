@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: E402
 
-from app.domain.enums import EntityType, MatchRule, SourceSystem  # noqa: E402
+from app.domain.enums import MatchRule, SourceSystem  # noqa: E402
 from app.domain.models import DataSource, EntityMapping  # noqa: E402
 from app.infrastructure.business_db_pool import (  # noqa: E402
     dispose_adapter,
@@ -77,7 +77,7 @@ def _stableKey(code: str, *, offset: int) -> int:
 
 
 def _mapping(
-    entity_type: EntityType,
+    entity_type: str,
     code: str,
     *,
     offset: int,
@@ -151,11 +151,11 @@ def _buildAllRows(
     materials: list[tuple[str, str | None]],
 ) -> list[dict[str, Any]]:
     rows = [
-        _mapping(EntityType.SUPPLIER, code, offset=_SUPPLIER_KEY_OFFSET, name=name)
+        _mapping("SUPPLIER", code, offset=_SUPPLIER_KEY_OFFSET, name=name)
         for code, name in suppliers
     ]
     rows += [
-        _mapping(EntityType.MATERIAL, code, offset=_MATERIAL_KEY_OFFSET, name=name)
+        _mapping("MATERIAL", code, offset=_MATERIAL_KEY_OFFSET, name=name)
         for code, name in materials
     ]
     return rows
@@ -180,7 +180,7 @@ async def syncEntityMappings(
     if dryRun:
         for m in rows[:10]:
             print(
-                f"  [plan] {m['entity_type'].value} key={m['enterprise_key']} "
+                f"  [plan] {m['entity_type']} key={m['enterprise_key']} "
                 f"code={m['enterprise_code']} name={m['name']!r}"
             )
         if len(rows) > 10:

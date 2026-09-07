@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 
 class ProviderType(str, Enum):
@@ -84,6 +85,33 @@ class Severity(str, Enum):
     MEDIUM = "MEDIUM"
     LOW = "LOW"
     INFO = "INFO"
+
+
+class DerivationType(str, Enum):
+    """数据质量规则来源类型（feat-dq-rule-auto-generation spec §4）。"""
+
+    PK_DERIVED = "PK_DERIVED"
+    FK_DERIVED = "FK_DERIVED"
+    DICT_REF = "DICT_REF"
+    ALLOWED_VALUES = "ALLOWED_VALUES"
+    NOT_NULL = "NOT_NULL"
+    JOIN_CONSISTENCY = "JOIN_CONSISTENCY"
+    LLM_DERIVED = "LLM_DERIVED"
+    MANUAL = "MANUAL"
+
+
+class RuleOperator(str, Enum):
+    """Feature Rule 阈值运算符（spec §5.2）。
+
+    LT / LTE / GT / GTE：用于 RISK_SCORE（数值越高越差，如 IQR 异常分）。
+    LT_INVERSE：用于 RISK_SCORE 0-1 区间（越低越差，如质量分）。
+    """
+
+    LT = "lt"
+    LTE = "lte"
+    GT = "gt"
+    GTE = "gte"
+    LT_INVERSE = "lt_inverse"  # 0-1 区间 RISK_SCORE（越低越差）
 
 
 class ScoreType(str, Enum):
@@ -172,18 +200,21 @@ class RefreshFrequency(str, Enum):
     WEEKLY = "WEEKLY"
 
 
-class EntityType(str, Enum):
-    """跨系统实体类型（Phase 3.1）。
+BusinessObjectCode = Literal[
+    "SUPPLIER", "MATERIAL", "PO", "GR", "IQC", "NCR"
+]
+"""业务对象代码字面量类型（Phase 4.4 业务对象注册表 SSOT）。
 
-    对应采购域业务对象目录：供应商 / 物料 / 采购订单 / 收货 / 来料检验 / 不合格处理。
-    """
+与 business_object.code 列对齐；DB FK 是权威，本类型仅供 Pydantic 校验。
+新增业务对象需要：1) INSERT 一行 business_object；2) 在此 Literal 追加值。
 
-    SUPPLIER = "SUPPLIER"
-    MATERIAL = "MATERIAL"
-    PO = "PO"
-    GR = "GR"
-    IQC = "IQC"
-    NCR = "NCR"
+取代原 EntityType 枚举（Phase 3.1），后者的硬编码枚举值已由 business_object
+表接管为单点事实。
+
+DEPRECATED: Use BusinessObjectCodeType (Pydantic BeforeValidator) for runtime
+validation against the business_object table. The Literal is kept for static
+type-checker backward compatibility only — it will not reject new codes.
+"""
 
 
 class SourceSystem(str, Enum):

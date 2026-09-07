@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.domain.enums import DocEntityRelationType, EntityType
+from app.domain.enums import DocEntityRelationType
 from app.domain.models import DocumentEntityRelation, EntityMapping
 from app.infrastructure import neo4j_client as neo4j
 from app.services.graph_relation_service import GraphRelationService
@@ -55,7 +55,6 @@ class TestSeedGraphRelationsEndToEnd:
         assert result.edgesByType["CONTAINS"] == 9
         assert result.edgesByType["GENERATES"] == 3
         assert result.edgesByType["INSPECTED_BY"] == 2
-        assert result.edgesByType["GENERATED"] == 1
 
         # 图内实际计数一致
         assert neo4j.countBusinessNodes() == result.nodeCount
@@ -143,8 +142,8 @@ class TestSeedGraphRelationsEndToEnd:
         dbSession.add(
             DocumentEntityRelation(
                 document_id="DOC-SMOKE-001",
-                entity_type=EntityType.SUPPLIER.value,
-                entity_key=100_001,
+                entity_type="SUPPLIER",
+                entity_key="100001",
                 relation_type=DocEntityRelationType.CONTRACT,
             )
         )

@@ -18,7 +18,6 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import (
-    EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
     MatchRule,
@@ -27,10 +26,12 @@ from app.domain.enums import (
 from app.domain.exceptions import NotFoundError
 from app.domain.models import DataSource, EntityMapping, FeatureDefinition, FeatureValue
 from app.domain.schemas import Supplier360Read
+from app.services.feature_rule_registry import feature_rule_registry
 from app.services.supplier_360_service import (
-    DEFAULT_SUPPLIER_FEATURES,
     Supplier360Service,
 )
+from app.services.supplier_360_service import _kpiSlotFeatureNames
+from app.services.feature_rule_registry import FeatureRuleReady, FeatureThresholdReady
 
 pytestmark = pytest.mark.asyncio
 
@@ -62,7 +63,7 @@ async def _seedSupplierMappings(
     """SUP000001 × {ERP, SRM} 两条。"""
     rows = [
         EntityMapping(
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
             enterprise_key=key,
             enterprise_code=code,
             source_system=SourceSystem.ERP,
@@ -72,7 +73,7 @@ async def _seedSupplierMappings(
             owner="procurement",
         ),
         EntityMapping(
-            entity_type=EntityType.SUPPLIER,
+            entity_type="SUPPLIER",
             enterprise_key=key,
             enterprise_code=code,
             source_system=SourceSystem.SRM,
@@ -100,7 +101,7 @@ async def _seedFeature(
         feature_name=feature_name,
         feature_alias=alias,
         feature_definition="auto seeded for test",
-        entity_type=EntityType.SUPPLIER,
+        entity_type="SUPPLIER",
         calculation_logic="SELECT 1",
         window_size="3M",
         refresh_frequency=FeatureRefreshFrequency.DAILY,
@@ -153,7 +154,7 @@ async def test_get_supplier_360_returns_profile_and_codes(dbSession: AsyncSessio
     assert isinstance(result, Supplier360Read)
     assert result.profile.enterprise_key == 100001
     assert result.profile.enterprise_code == "SUP000001"
-    assert result.profile.entity_type == EntityType.SUPPLIER
+    assert result.profile.entity_type == "SUPPLIER"
     # 2 条 ERP/SRM 映射
     assert len(result.entity_codes) == 2
     sources = {c.source_system for c in result.entity_codes}
@@ -161,7 +162,7 @@ async def test_get_supplier_360_returns_profile_and_codes(dbSession: AsyncSessio
     # kpis 4 项 default feature 全部 latest=False
     assert len(result.kpis) == 4
     assert all(k.latest is False for k in result.kpis)
-    assert {k.feature_name for k in result.kpis} == set(DEFAULT_SUPPLIER_FEATURES)
+    assert {k.feature_name for k in result.kpis} == set(_kpiSlotFeatureNames())
 
 
 async def test_get_supplier_360_not_found_raises(dbSession: AsyncSession):
@@ -269,13 +270,21 @@ async def test_get_supplier_360_returns_disabled_feature_with_no_value_marker(
         assert k.valid_at is None
 
 
-async def test_default_supplier_features_constant_is_4_items():
-    """Phase 5.3 范围：固定 4 个 SUPPLIER feature（与 seed_features.py 对齐）。"""
-    assert len(DEFAULT_SUPPLIER_FEATURES) == 4
-    assert "SUPPLIER_OTD_3M" in DEFAULT_SUPPLIER_FEATURES
-    assert "SUPPLIER_DEFECT_RATE_3M" in DEFAULT_SUPPLIER_FEATURES
-    assert "SUPPLIER_PRICE_VARIANCE_3M" in DEFAULT_SUPPLIER_FEATURES
-    assert "SUPPLIER_RISK_SCORE" in DEFAULT_SUPPLIER_FEATURES
+def test_kpi_slot_feature_names_aggregates_from_registry() -> None:
+    """_kpiSlotFeatureNames 聚合自 registry。"""
+    feature_rule_registry._loaded = True
+    feature_rule_registry._rules = {("SUPPLIER", "FEATURE", "RISK"): [
+        FeatureRuleReady(id=1, code="a", data_object="SUPPLIER", data_layer="FEATURE",
+                          target_level="RISK", feature_name="X", enabled=True, priority=100,
+                          thresholds=(FeatureThresholdReady("HIGH", "lt", 10, "%", 1),)),
+        FeatureRuleReady(id=2, code="b", data_object="SUPPLIER", data_layer="FEATURE",
+                          target_level="RISK", feature_name="Y", enabled=True, priority=100,
+                          thresholds=(FeatureThresholdReady("HIGH", "lt", 20, "%", 1),)),
+    ]}
+    names = _kpiSlotFeatureNames()
+    assert set(names) == {"X", "Y"}
+    # sorted alphabetically
+    assert names == ("X", "Y")
 
 
 async def test_get_supplier_360_enterprise_code_used_for_feature_join(

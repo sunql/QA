@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.domain.enums import EntityType, FeatureStatus
+from app.domain.enums import FeatureStatus
 from app.domain.query_plan import QueryPlan
 from app.services.feature_query_service import (
     FeatureQueryService,
@@ -36,7 +36,7 @@ def _feature(
         feature_name=name,
         feature_alias=alias,
         feature_definition="供应商最近 3 个月准时交付率均值",
-        entity_type=EntityType.SUPPLIER,
+        entity_type="SUPPLIER",
         window_size="3M",
         unit="%",
         status=status,

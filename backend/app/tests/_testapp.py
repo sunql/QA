@@ -21,14 +21,17 @@ from app.api.v1 import (
     agent_tools,
     agents,
     audit,
+    business_object,
     chat,
     data_lineage,
     data_quality,
+    data_quality_generate,
     datasource,
     documents,
     embedding_provider,
     entity_mapping,
     features,
+    feature_rules,
     graph_traversal,
     kpi_catalog,
     local_import,
@@ -125,6 +128,11 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         prefix="/api/v1/data-quality/scores",
         tags=["data-quality"],
     )
+    testApp.include_router(
+        data_quality_generate.router,
+        prefix="/api/v1/data-quality/rules/generate",
+        tags=["data-quality-generate"],
+    )
     testApp.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     testApp.include_router(
         data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"]
@@ -136,6 +144,9 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     )
     testApp.include_router(
         kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"]
+    )
+    testApp.include_router(
+        business_object.router, prefix="/api/v1", tags=["business-object"]
     )
     testApp.include_router(features.router, prefix="/api/v1/features", tags=["features"])
     testApp.include_router(
@@ -160,6 +171,7 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"]
     )
     testApp.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
+    testApp.include_router(feature_rules.router, tags=["feature-rules"])
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     testApp.include_router(
         menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]

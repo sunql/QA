@@ -107,6 +107,17 @@ describe("LineagePage", () => {
     errorSpy.mockRestore();
   });
 
+  it("non-Error rejection 走 String(error) 分支（errorMessageOf 兜底）", async () => {
+    const errorSpy = vi.spyOn(message, "error").mockReturnValue(1 as unknown as ReturnType<typeof message.error>);
+    vi.mocked(lineageApi.listEdges).mockRejectedValue("plain string error");
+    render(<LineagePage />);
+    await waitFor(() => {
+      // 错误字符串透传
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("plain string error"));
+    });
+    errorSpy.mockRestore();
+  });
+
   it("renders empty state when no edges", async () => {
     vi.mocked(lineageApi.listEdges).mockResolvedValue([]);
     render(<LineagePage />);

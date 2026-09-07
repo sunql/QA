@@ -26,13 +26,14 @@ from app.domain.enums import (
     AgentResponseLatency,
     AgentStatus,
     AgentTriggerType,
+    BusinessObjectCode,
     ChartType,
     DataSourceType,
+    DerivationType,
     DocumentSecurityLevel,
     DocumentStatus,
     DocumentType,
     DocEntityRelationType,
-    EntityType,
     FeatureRefreshFrequency,
     FeatureStatus,
     KpiStatus,
@@ -42,11 +43,51 @@ from app.domain.enums import (
     RefreshFrequency,
     RiskLevel,
     RuleType,
+    RuleOperator,
     ScoreType,
     Severity,
     SourceSystem,
 )
 from app.domain.exceptions import ConfigError
+from typing import Annotated
+from pydantic import BeforeValidator
+
+from app.services.business_object_registry import businessObjectRegistry
+
+
+def _validateBusinessObjectCode(code: str) -> str:
+    """Runtime validation against business_object table via registry."""
+    if not businessObjectRegistry.isValid(code):
+        raise ValueError(f"Invalid business object code: {code!r}")
+    return code
+
+
+BusinessObjectCodeType = Annotated[str, BeforeValidator(_validateBusinessObjectCode)]
+"""Pydantic annotated type for dynamic BusinessObjectCode validation.
+
+Replaces the hardcoded Literal. Validation is runtime against the business_object
+table — adding new business objects requires no code change, only an INSERT.
+"""
+
+# format-only validator (no registry check) — used when creating NEW codes
+def _validateBusinessObjectCodeFormat(code: str) -> str:
+    """Format validation for new business object codes (registry check is done by DB constraint)."""
+    if not code or len(code) > 20 or not code.isupper() or not code.replace("_", "").isalnum():
+        raise ValueError(
+            f"Invalid business object code format: {code!r}. "
+            f"Must be uppercase alphanumeric (underscore allowed), max 20 chars."
+        )
+    return code
+
+
+BusinessObjectCodeNew = Annotated[str, BeforeValidator(_validateBusinessObjectCodeFormat)]
+"""Format-only validation for new business object codes in create payloads.
+
+Unlike BusinessObjectCodeType, this does NOT check the registry — a code being
+CREATED is by definition not yet in the registry. DB CHECK constraint (uppercase
+VARCHAR(20)) enforces the rest.
+"""
+
 from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_AFFINITY,
     MSG_SCHEMA_CHAT_CHART_TYPE_EXPLICIT,
@@ -647,7 +688,7 @@ class FeatureDefinitionCreate(CamelModel):
     feature_name: str = Field(..., min_length=1, max_length=100)
     feature_alias: str | None = Field(default=None, max_length=200)
     feature_definition: str | None = Field(default=None, max_length=8000)
-    entity_type: EntityType
+    entity_type: BusinessObjectCodeType
     calculation_logic: str = Field(..., min_length=1, max_length=8000)
     window_size: str | None = Field(default=None, max_length=20)
     refresh_frequency: FeatureRefreshFrequency = FeatureRefreshFrequency.DAILY
@@ -668,7 +709,7 @@ class FeatureDefinitionUpdate(CamelModel):
     feature_name: str | None = Field(default=None, min_length=1, max_length=100)
     feature_alias: str | None = Field(default=None, max_length=200)
     feature_definition: str | None = Field(default=None, max_length=8000)
-    entity_type: EntityType | None = None
+    entity_type: BusinessObjectCodeType | None = None
     calculation_logic: str | None = Field(default=None, min_length=1, max_length=8000)
     window_size: str | None = Field(default=None, max_length=20)
     refresh_frequency: FeatureRefreshFrequency | None = None
@@ -684,7 +725,7 @@ class FeatureDefinitionRead(CamelModel):
     feature_name: str
     feature_alias: str | None = None
     feature_definition: str | None = None
-    entity_type: EntityType
+    entity_type: BusinessObjectCodeType
     calculation_logic: str
     window_size: str | None = None
     refresh_frequency: FeatureRefreshFrequency
@@ -719,7 +760,7 @@ class FeatureQueryResponse(CamelModel):
     """
 
     feature_name: str
-    entity_type: EntityType
+    entity_type: BusinessObjectCodeType
     unit: str | None = None
     valid_at: date
     values: list[FeatureValueRead] = Field(default_factory=list)
@@ -740,7 +781,7 @@ class Supplier360Profile(CamelModel):
 
     enterprise_key: int = Field(..., description="企业统一代理键（MDM 主数据）")
     enterprise_code: str = Field(..., description="企业统一编码（如 SUP000001）")
-    entity_type: EntityType
+    entity_type: BusinessObjectCodeType
 
 
 class Supplier360Kpi(CamelModel):
@@ -1615,6 +1656,9 @@ class DataQualityRuleRead(CamelModel):
     version: str
     owner: str | None = None
     description: str | None = None
+    source_class_id: int | None = None
+    source_property_id: int | None = None
+    derivation_type: DerivationType
     created_time: datetime | None = None
     updated_time: datetime | None = None
 
@@ -1794,7 +1838,7 @@ class EntityMappingCreate(CamelModel):
     为源系统侧原始标识。同一 (entity_type, enterprise_key, source_system) 不允许重复。
     """
 
-    entity_type: EntityType = Field(..., description=MSG_SCHEMA_ENTITY_MAPPING_ENTITY_TYPE)
+    entity_type: BusinessObjectCodeType = Field(..., description=MSG_SCHEMA_ENTITY_MAPPING_ENTITY_TYPE)
     enterprise_key: int = Field(
         ...,
         gt=0,
@@ -1843,7 +1887,7 @@ class EntityMappingRead(CamelModel):
     """编码映射响应。"""
 
     id: int
-    entity_type: EntityType
+    entity_type: BusinessObjectCodeType
     enterprise_key: int
     enterprise_code: str
     source_system: SourceSystem
@@ -1869,7 +1913,7 @@ class EntityMappingSearchHit(CamelModel):
     """
 
     id: int
-    entity_type: EntityType
+    entity_type: BusinessObjectCodeType
     enterprise_key: int
     enterprise_code: str
     source_system: SourceSystem
@@ -1985,19 +2029,19 @@ class DocumentRead(CamelModel):
 
 
 class DocEntityRelationCreate(CamelModel):
-    """创建文档-实体关联的请求体（Phase 5.1）。"""
+    """创建文档-实体关联的请求体（Phase 5.1 + entity_key VARCHAR）。"""
     document_id: str = Field(..., min_length=1, max_length=50)
-    entity_type: EntityType = Field(...)
-    entity_key: int = Field(..., gt=0)
+    entity_type: BusinessObjectCodeType = Field(...)
+    entity_key: str = Field(..., min_length=1, max_length=100)
     relation_type: DocEntityRelationType = Field(default=DocEntityRelationType.CONTRACT)
 
 
 class DocEntityRelationRead(CamelModel):
-    """文档-实体关联响应（Phase 5.1）。"""
+    """文档-实体关联响应（Phase 5.1 + entity_key VARCHAR）。"""
     id: int
     document_id: str
-    entity_type: str
-    entity_key: int
+    entity_type: BusinessObjectCodeType
+    entity_key: str
     relation_type: DocEntityRelationType
 
 
@@ -2390,3 +2434,260 @@ class AgentToolConfigRead(AgentToolConfigBase):
     enabled: bool
     created_time: datetime
     updated_time: datetime | None
+
+
+# ===== 业务对象注册表（Phase 4.4） =====
+
+
+class BusinessObjectCreate(CamelModel):
+    """创建业务对象 (Phase 4.4)."""
+
+    code: BusinessObjectCodeNew = Field(...)
+    name: str = Field(..., min_length=1, max_length=100)
+    header_class_id: int | None = None
+    graph_label: str | None = Field(default=None, max_length=100)
+    description: str | None = Field(default=None, max_length=4000)
+
+
+class BusinessObjectUpdate(CamelModel):
+    """更新业务对象 (code 不可改)."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    header_class_id: int | None = None
+    graph_label: str | None = Field(default=None, max_length=100)
+    description: str | None = Field(default=None, max_length=4000)
+
+
+class BusinessObjectRead(CamelModel):
+    """业务对象响应。
+
+    created_time / updated_time 允许缺省（与 LlmConfigRead 同模式）：DTO 也用于
+    未落库的构造场景，时间戳由 TimestampMixin 在持久化时补齐。
+    """
+
+    code: BusinessObjectCodeType
+    name: str
+    header_class_id: int | None = None
+    graph_label: str | None = None
+    description: str | None = None
+    created_time: datetime | None = None
+    updated_time: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# feat-feature-rule-config (Phase 9): Feature Rule DTOs (spec §9.1)
+# ---------------------------------------------------------------------------
+
+
+class FeatureRuleThresholdRead(CamelModel):
+    severity: Severity
+    operator: RuleOperator
+    threshold_value: Decimal
+    unit: str | None
+    threshold_order: int
+
+
+class FeatureRuleThresholdCreate(CamelModel):
+    severity: Severity
+    operator: RuleOperator
+    threshold_value: Decimal
+    unit: str | None = None
+    threshold_order: int = 1
+
+
+class FeatureRuleThresholdSuggestion(CamelModel):
+    """parse-description LLM 输出（spec §7.1 + §9.1）。"""
+
+    feature_name: str
+    severity: Severity
+    operator: RuleOperator
+    threshold_value: Decimal
+    unit: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    rationale: str
+
+
+class FeatureRuleRead(CamelModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    code: str
+    data_object: str
+    data_layer: str
+    target_level: str
+    feature_name: str
+    enabled: bool
+    priority: int
+    policy_description: str | None
+    version: int
+    thresholds: list[FeatureRuleThresholdRead]
+    created_time: datetime
+    updated_time: datetime | None
+
+
+class FeatureRuleCreate(CamelModel):
+    code: str = Field(min_length=1, max_length=64)
+    data_object: str
+    data_layer: str
+    target_level: str
+    feature_name: str
+    enabled: bool = True
+    priority: int = 100
+    policy_description: str | None = None
+    thresholds: list[FeatureRuleThresholdCreate] = Field(min_length=1)
+
+    @field_validator("thresholds")
+    @classmethod
+    def _uniqueSeverities(cls, v: list[FeatureRuleThresholdCreate]) -> list[FeatureRuleThresholdCreate]:
+        sevs = [t.severity.value for t in v]
+        if len(sevs) != len(set(sevs)):
+            raise ValueError("thresholds 内 severity 必须唯一")
+        return v
+
+
+class FeatureRuleUpdate(CamelModel):
+    """code / data_object / data_layer / target_level / feature_name 不可变。"""
+
+    enabled: bool | _UnsetType = UNSET
+    priority: int | _UnsetType = UNSET
+    policy_description: str | _UnsetType | None = UNSET
+    thresholds: list[FeatureRuleThresholdCreate] | _UnsetType = UNSET
+    version: int  # 必填，乐观锁
+
+
+class FeatureRuleParseDescriptionRequest(CamelModel):
+    data_object: str
+    data_layer: str
+    target_level: str
+    natural_language: str = Field(min_length=10, max_length=4000)
+
+
+class FeatureRuleParseDescriptionResponse(CamelModel):
+    suggested_thresholds: list[FeatureRuleThresholdSuggestion]
+    reasoning: str
+    overall_confidence: float = Field(ge=0.0, le=1.0)
+    warnings: list[str]
+
+
+# ===========================================================================
+# 数据质量规则自动生成（dq-rule-auto-generation Task 4）
+# ===========================================================================
+
+
+class GeneratePreviewRequest(CamelModel):
+    class_id: int = Field(..., gt=0)
+    datasource_id: int = Field(..., gt=0)
+
+
+class RuleSuggestionRead(CamelModel):
+    rule_code: str
+    rule_name: str
+    rule_type: RuleType
+    target_table: str
+    target_column: str | None = None
+    rule_expression: str | None = None
+    threshold: Decimal
+    severity: Severity
+    derivation_type: DerivationType
+    source_property_id: int | None = None
+    source_class_id: int | None = None
+    confidence: str
+    status: str  # NEW / EXISTS
+    reason: str
+
+
+class BlockedPropertyRead(CamelModel):
+    property_name: str
+    reason: str
+
+
+class GeneratePreviewResponse(CamelModel):
+    class_id: int
+    class_name: str
+    source_table: str | None = None
+    datasource_id: int
+    suggestions: list[RuleSuggestionRead] = Field(default_factory=list)
+    blocked: list[BlockedPropertyRead] = Field(default_factory=list)
+
+
+# ===========================================================================
+# 数据质量规则自动生成 confirm（dq-rule-auto-generation Task 5）
+# ===========================================================================
+
+
+class GenerateRuleItem(CamelModel):
+    """confirm 请求中单条规则条目。"""
+
+    rule_code: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Z][A-Z0-9_]*$",
+    )
+    rule_name: str = Field(..., min_length=1, max_length=100)
+    target_table: str = Field(..., min_length=1, max_length=100)
+    target_column: str | None = Field(default=None, max_length=100)
+    rule_type: RuleType
+    rule_expression: str | None = None
+    threshold: Decimal = Field(default=Decimal("95.00"), ge=0, le=100)
+    severity: Severity = Severity.MEDIUM
+    source_class_id: int | None = None
+    source_property_id: int | None = None
+    derivation_type: DerivationType = DerivationType.MANUAL
+    description: str | None = None
+
+
+class GenerateConfirmRequest(CamelModel):
+    """confirm 批量写入请求。"""
+
+    datasource_id: int = Field(..., gt=0)
+    rules: list[GenerateRuleItem] = Field(..., min_length=1, max_length=500)
+
+
+class GenerateConfirmResponse(CamelModel):
+    """confirm 批量写入响应。"""
+
+    created: list[DataQualityRuleRead] = Field(default_factory=list)
+    skipped_codes: list[str] = Field(default_factory=list)
+
+
+# ===========================================================================
+# 数据质量规则自动生成 LLM advisory（dq-rule-auto-generation Task 6）
+# ===========================================================================
+
+
+class ParseDescriptionsRequest(CamelModel):
+    """parse-descriptions 请求：给定本体类，让 LLM 从属性描述中提取候选约束。"""
+
+    class_id: int = Field(..., gt=0)
+
+
+class PropertyConstraintSuggestionRead(CamelModel):
+    """LLM 返回的单条候选约束建议。"""
+
+    property_id: int
+    property_name: str
+    kind: str  # allowed_values | not_null
+    values: list[str] | None = None
+    confidence: float
+    rationale: str
+
+
+class ParseDescriptionsResponse(CamelModel):
+    """parse-descriptions 响应。"""
+
+    suggestions: list[PropertyConstraintSuggestionRead] = Field(default_factory=list)
+
+
+class ApplySuggestionRequest(CamelModel):
+    """apply-suggestion 请求：采纳 LLM 推荐的 allowed_values，写入 ontology_property。"""
+
+    property_id: int = Field(..., gt=0)
+    allowed_values: list[str] = Field(..., min_length=1, max_length=50)
+
+
+class ApplySuggestionResponse(CamelModel):
+    """apply-suggestion 响应。"""
+
+    property_id: int
+    allowed_values: list[str]

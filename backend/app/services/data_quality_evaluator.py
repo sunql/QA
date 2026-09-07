@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import RuleType
 from app.domain.exceptions import NotFoundError
-from app.domain.models import DataSource, DataQualityRule
+from app.domain.models import DataQualityRule, DataSource
 from app.domain.schemas import (
     EvaluateBatchResponse,
     EvaluationResult,
@@ -36,7 +36,6 @@ from app.services.messages_zh import (
     MSG_DQ_EVAL_DATASOURCE_NOT_FOUND,
     MSG_DQ_EVAL_RULE_TYPE_UNSUPPORTED,
 )
-
 
 # 评估器签名：async (rule, adapter) -> (total, passed)
 EvaluatorFn = Callable[[DataQualityRule, BusinessDbAdapter], "Any"]
@@ -167,7 +166,7 @@ class DataQualityEvaluatorDispatcher:
             passed_count=0,
             pass_rate=0.0,
             status="ERROR",
-            evaluated_at=datetime.now(timezone.utc),
+            evaluated_at=datetime.now(UTC),
             duration_ms=0,
             message=message,
         )
@@ -175,7 +174,7 @@ class DataQualityEvaluatorDispatcher:
 
 def _utcnow():
     """评估时间戳占位，避免外部循环依赖 datetime；调用方拿到即可转 ISO。"""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _safeRuleType(value: Any) -> RuleType:

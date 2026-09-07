@@ -18,15 +18,14 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
 
-from sqlalchemy import bindparam, func, select, or_
+from sqlalchemy import bindparam, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import RuleType, ScoreType
-from app.domain.exceptions import ValidationError
 from app.domain.models import DataQualityRule, DataQualityScore
 from app.domain.schemas import (
     ComputeScoresResponse,
@@ -437,7 +436,7 @@ class DataQualityScoreService:
     def _buildEntities(aggregated: list[dict], started: float) -> list[DataQualityScore]:
         """把聚合字典转 ORM 实体。"""
         duration_ms = int((time.perf_counter() - started) * 1000)
-        evaluated_at = datetime.now(timezone.utc)
+        evaluated_at = datetime.now(UTC)
         entities: list[DataQualityScore] = []
         for s in aggregated:
             entities.append(

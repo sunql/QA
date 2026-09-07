@@ -2660,6 +2660,9 @@ class ParseDescriptionsRequest(CamelModel):
     """parse-descriptions 请求：给定本体类，让 LLM 从属性描述中提取候选约束。"""
 
     class_id: int = Field(..., gt=0)
+    # 可选 LLM 模型配置 id（前端 modelId）；None 走默认 OPENAI_API_KEY env 路径。
+    # 序列化时通过 to_camel alias 输出 modelId（前端约定）。
+    model_id: int | None = Field(default=None, gt=0, alias="modelId")
 
 
 class PropertyConstraintSuggestionRead(CamelModel):

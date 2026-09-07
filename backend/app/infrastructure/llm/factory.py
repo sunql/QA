@@ -6,6 +6,7 @@ API Key 优先使用配置中的加密 key（解密），否则回退到环境�
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from app.config import Settings, getSettings
@@ -14,6 +15,8 @@ from app.infrastructure.llm.base_client import BaseLlmClient
 from app.infrastructure.llm.ollama_client import OllamaClient
 from app.infrastructure.llm.openai_client import OpenAiClient
 from app.infrastructure.security.crypto import decryptApiKey
+
+logger = logging.getLogger(__name__)
 
 # config_id -> 客户端单例
 _clients: dict[int, BaseLlmClient] = {}
@@ -60,7 +63,18 @@ def createClient(config: Any, *, settings: Settings | None = None, apiKey: str |
         baseUrl = getattr(config, "api_endpoint", None) or settings.ollamaBaseUrl
         client: BaseLlmClient = OllamaClient(config, baseUrl=baseUrl)
     else:
+        # 关键修复：先解析 key，为空时主动 return None 而非让 OpenAI SDK 构造时报
+        # OpenAIError("Missing credentials") — 后者会被 FastAPI 当 500 处理。
+        # 返回 None 让调用方走「未配置 LLM → 503」语义路径。
         key = apiKey or _resolveApiKey(config, provider, settings)
+        if not key:
+            logger.warning(
+                "createClient: config id=%s provider=%s model=%s 无可用 API key "
+                "（config.api_key_encrypted 为空 且 settings.%sApiKey 也为空）",
+                getattr(config, "id", None), provider.value,
+                getattr(config, "model_name", None), provider.value.lower(),
+            )
+            return None
         client = OpenAiClient(config, apiKey=key, provider=provider)
     _clients[configId] = client
     return client

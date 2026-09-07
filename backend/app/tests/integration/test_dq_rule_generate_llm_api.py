@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.domain.exceptions import LLMUnavailableError
+from app.infrastructure.llm.base_client import LlmMessage
 
 pytestmark = pytest.mark.asyncio
 GEN_BASE = "/api/v1/data-quality/rules/generate"
@@ -33,9 +34,17 @@ class _FakeCompletion:
 class _FakeLLMClient:
     def __init__(self, content: str) -> None:
         self._content = content
-        self.calls: list[dict] = []
+        self.calls: list[list[LlmMessage]] = []
 
     async def complete(self, messages):
+        # 回归守卫：service 必须传 LlmMessage 实例。
+        # 真实 OpenAiClient.complete 会迭代 messages 访问 m.role/m.content，
+        # 若 service 误传 dict 会触发 AttributeError → 503。
+        for m in messages:
+            assert isinstance(m, LlmMessage), (
+                f"service must pass LlmMessage instances, got {type(m).__name__}; "
+                f"OpenAiClient.complete iterates messages assuming LlmMessage API."
+            )
         self.calls.append(messages)
         return _FakeCompletion(self._content)
 

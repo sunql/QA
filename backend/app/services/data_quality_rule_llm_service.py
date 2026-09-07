@@ -24,6 +24,7 @@ from app.domain.schemas import (
     ParseDescriptionsResponse,
     PropertyConstraintSuggestionRead,
 )
+from app.infrastructure.llm.base_client import LlmMessage
 from app.services.messages_zh import (
     MSG_DQ_GEN_CLASS_NOT_FOUND,
     MSG_DQ_GEN_LLM_PARSE_ERROR,
@@ -87,11 +88,11 @@ async def parsePropertyDescriptions(
     try:
         response = await llm_client.complete(
             messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": "请分析以上本体类属性，识别候选约束。",
-                },
+                LlmMessage(role="system", content=system_prompt),
+                LlmMessage(
+                    role="user",
+                    content="请分析以上本体类属性，识别候选约束。",
+                ),
             ],
         )
     except Exception as e:

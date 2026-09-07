@@ -88,6 +88,11 @@ export interface OntologyProperty {
   sourceColumn: string | null;
   createdTime: string | null;
   updatedTime: string | null;
+  // 值域（LLM 采纳或人工填入）；null 表示未约束。
+  // 后端 OntologyPropertyRead 已暴露（commit 后 B1 起），管理页用它展示「已沉淀」值。
+  // 设为可选（mock 测试和旧 client 不传不会触发 tsc 报错）；
+  // 生产 API 始终返回该字段（null 或 list[str]）。
+  allowedValues?: string[] | null;
 }
 
 export interface OntologyPropertyCreate {
@@ -109,6 +114,10 @@ export interface OntologyPropertyUpdate {
   isForeignKey?: boolean;
   refClassId?: number;
   sourceColumn?: string;
+  // 说明：让管理页可手动修正 LLM 采纳的值。
+  // null 表示不修改；空数组 视作清空值域；非空数组 写入 ontology_property.allowed_values。
+  allowedValues?: string[] | null;
+  description?: string | null;
 }
 
 // ===== Metric =====

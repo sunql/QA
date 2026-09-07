@@ -1039,3 +1039,98 @@ async def test_ontology_class_owner_dept_can_modify_cross_dept_blocked(
         headers={"X-User-Roles": "admin"},
     )
     assert adminDel.status_code == 204
+
+
+async def testPropertyReadExposesAllowedValues(client: AsyncClient) -> None:
+    """GET /ontology/properties/{id} 必须返回 allowed_values 字段。
+
+    回归：OntologyPropertyRead 当前不含 allowed_values → 前端管理页看不到
+    LLM 采纳的值，用户反馈「我哪里去看」。
+    """
+    cls = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "OrderStatus", "sourceTable": "t_order_status"},
+    )
+    classId = cls.json()["id"]
+    prop = await client.post(
+        "/api/v1/ontology/properties",
+        json={"classId": classId, "propertyName": "status", "dataType": "STRING"},
+    )
+    propId = prop.json()["id"]
+
+    # 直接通过 PUT 设置 allowed_values（后续 testPropertyUpdateAcceptsAllowedValues 验证）
+    await client.put(
+        f"/api/v1/ontology/properties/{propId}",
+        json={"allowedValues": ["NEW", "CONFIRMED", "CLOSED"]},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+    )
+
+    get1 = await client.get(f"/api/v1/ontology/properties/{propId}")
+    assert get1.status_code == 200
+    body = get1.json()
+    assert "allowedValues" in body, (
+        f"OntologyPropertyRead 必须暴露 allowedValues，实际 keys: {list(body.keys())}"
+    )
+    assert body["allowedValues"] == ["NEW", "CONFIRMED", "CLOSED"]
+
+    # listPropertiesByClass 同样要暴露
+    listed = await client.get(f"/api/v1/ontology/classes/{classId}/properties")
+    assert listed.status_code == 200
+    listedBody = listed.json()
+    assert any(p["id"] == propId and p.get("allowedValues") == ["NEW", "CONFIRMED", "CLOSED"] for p in listedBody), (
+        f"listPropertiesByClass 返回也必须含 allowedValues，实际: {listedBody}"
+    )
+
+
+async def testPropertyUpdateAcceptsAllowedValues(client: AsyncClient) -> None:
+    """PUT /ontology/properties/{id} 必须接受 allowedValues 字段。
+
+    让本体属性管理页能手动修正 LLM 采纳的值（含单引号的值必须 422）。
+    """
+    cls = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "ShippingMode", "sourceTable": "t_shipping_mode"},
+    )
+    classId = cls.json()["id"]
+    prop = await client.post(
+        "/api/v1/ontology/properties",
+        json={"classId": classId, "propertyName": "mode", "dataType": "STRING"},
+    )
+    propId = prop.json()["id"]
+
+    # 合法值 → 200
+    ok = await client.put(
+        f"/api/v1/ontology/properties/{propId}",
+        json={"allowedValues": ["AIR", "SEA", "LAND"]},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+    )
+    assert ok.status_code == 200, f"合法 allowedValues 应 200，实际: {ok.status_code} {ok.text}"
+    assert ok.json()["allowedValues"] == ["AIR", "SEA", "LAND"]
+
+    # 单引号 → 422（与 apply-suggestion 一致的 SQL 注入防护）
+    bad = await client.put(
+        f"/api/v1/ontology/properties/{propId}",
+        json={"allowedValues": ["AIR", "CON'TAINED"]},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+    )
+    assert bad.status_code == 422, (
+        f"含单引号的 allowedValues 应 422，实际: {bad.status_code} {bad.text}"
+    )
+
+    # 空数组 → 200（视作清空值域；与 None 不修改不同）
+    empty = await client.put(
+        f"/api/v1/ontology/properties/{propId}",
+        json={"allowedValues": []},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+    )
+    assert empty.status_code == 200
+    assert empty.json()["allowedValues"] == []
+
+    # null → 清空（model_dump exclude_unset 时不传，PUT 其他字段不受影响；显式 null 应允许）
+    clear = await client.put(
+        f"/api/v1/ontology/properties/{propId}",
+        json={"allowedValues": None},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+    )
+    assert clear.status_code == 200, f"清空 allowedValues 应 200，实际: {clear.status_code} {clear.text}"
+    assert clear.json()["allowedValues"] is None

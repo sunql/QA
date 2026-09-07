@@ -67,6 +67,7 @@ export const zhCN = {
       businessObjects: "业务对象",
       documents: "文档中心",
       adminAudit: "审计日志",
+      ontologyProperties: "本体属性管理",
     },
     themeToggle: "切换暗色模式",
     themeDark: "暗",
@@ -98,6 +99,7 @@ export const zhCN = {
       kpiCatalog: "KPI 目录",
       features: "特征目录",
       businessObjects: "业务对象",
+      ontologyProperties: "本体属性管理",
       datasource: "数据源",
       documents: "文档中心",
       usage: "用量看板",
@@ -1432,6 +1434,43 @@ export const zhCN = {
       applied: "已采纳建议",
       adoptNotApplicable: "本建议类型（非值域约束）无法自动沉淀，请在本体管理页手动处理",
       alreadyAdopted: "此属性已采纳，无需重复操作",
+    },
+  },
+
+  ontologyPropertyAdmin: {
+    title: "本体属性管理",
+    subtitle: "查看与编辑 LLM 采纳的 allowed_values（值域），跨类一次性列出所有本体属性。",
+    filter: {
+      all: "全部类",
+    },
+    values: {
+      none: "未约束",
+    },
+    columns: {
+      className: "所属类",
+      propertyName: "属性名",
+      dataType: "数据类型",
+      allowedValues: "值域 (allowed_values)",
+      actions: "操作",
+    },
+    modal: {
+      editTitle: "编辑属性：{{name}}",
+    },
+    form: {
+      description: "描述",
+      descriptionHint: "供 LLM 推断约束时读取的文本说明",
+      descriptionPlaceholder: "例如：业务状态码，取值参见下方值域",
+      allowedValues: "值域",
+      allowedValuesHint: "手动调整 LLM 采纳的值；空数组=清空，null=不修改",
+      allowedValuesPlaceholder: "输入值后按回车或逗号添加",
+      allowedValuesHelp1: "• 每个值不能包含单引号（SQL 注入防护）",
+      allowedValuesHelp2: "• 与 apply-suggestion 行为一致：null 不修改、空数组清空",
+    },
+    messages: {
+      loadFailed: "加载本体属性失败",
+      updated: "已保存",
+      updateFailed: "保存失败",
+      badValue: "值不合法（含单引号或为空）",
     },
   },
 

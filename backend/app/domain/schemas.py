@@ -541,8 +541,22 @@ class OntologyPropertyUpdate(CamelModel):
     is_foreign_key: bool | None = None
     ref_class_id: int | None = None
     source_column: str | None = None
+    # 值域：本体属性管理页可手动调整 LLM 采纳的值；
+    # None 表示不修改；显式空数组 视作清空值域。
+    allowed_values: list[str] | None = Field(default=None, max_length=50)
 
     _check_aliases = field_validator("business_aliases")(_validateBusinessAliases)
+
+    @field_validator("allowed_values")
+    @classmethod
+    def _validateAllowedValuesNoQuotes(cls, v: list[str] | None) -> list[str] | None:
+        """与 apply-suggestion 一致：禁止单引号（SQL 注入防护）。"""
+        if v is None:
+            return v
+        for s in v:
+            if "'" in s:
+                raise ValueError("allowed_values must not contain single quote")
+        return v
 
 
 class OntologyMetricCreate(CamelModel):
@@ -594,6 +608,9 @@ class OntologyPropertyRead(CamelModel):
     is_foreign_key: bool
     ref_class_id: int | None = None
     source_column: str | None = None
+    # 值域（LLM 采纳或人工填入）；null 表示未约束。
+    # 暴露给本体属性管理页（让用户能看到「已沉淀」的值并手动修正）。
+    allowed_values: list[str] | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
 

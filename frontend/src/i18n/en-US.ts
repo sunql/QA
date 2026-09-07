@@ -61,6 +61,7 @@ export const enUS = {
       businessObjects: "Business Objects",
       documents: "Document Center",
       adminAudit: "Audit Logs",
+      ontologyProperties: "Ontology Property Management",
     },
     themeToggle: "Toggle dark mode",
     themeDark: "Dark",
@@ -92,6 +93,7 @@ export const enUS = {
       kpiCatalog: "KPI Catalog",
       features: "Feature Catalog",
       businessObjects: "Business Objects",
+      ontologyProperties: "Ontology Property Management",
       datasource: "Data Sources",
       documents: "Document Center",
       usage: "Usage Dashboard",
@@ -1416,6 +1418,43 @@ export const enUS = {
       applied: "Suggestion applied",
       adoptNotApplicable: "This suggestion type (non-value-list constraint) cannot be auto-applied. Please configure it manually in the ontology page.",
       alreadyAdopted: "This property has already been adopted",
+    },
+  },
+
+  ontologyPropertyAdmin: {
+    title: "Ontology Property Management",
+    subtitle: "View and edit LLM-adopted allowed_values across all ontology classes in one place.",
+    filter: {
+      all: "All classes",
+    },
+    values: {
+      none: "Unconstrained",
+    },
+    columns: {
+      className: "Class",
+      propertyName: "Property",
+      dataType: "Data Type",
+      allowedValues: "Allowed Values",
+      actions: "Actions",
+    },
+    modal: {
+      editTitle: "Edit Property: {{name}}",
+    },
+    form: {
+      description: "Description",
+      descriptionHint: "Text the LLM reads when inferring constraints",
+      descriptionPlaceholder: "e.g. Business status code; see allowed values below",
+      allowedValues: "Allowed Values",
+      allowedValuesHint: "Manually adjust LLM-adopted values; [] = clear, null = no change",
+      allowedValuesPlaceholder: "Type a value and press Enter or comma to add",
+      allowedValuesHelp1: "• Values must not contain single quotes (SQL injection guard)",
+      allowedValuesHelp2: "• Consistent with apply-suggestion: null = no change, [] = clear",
+    },
+    messages: {
+      loadFailed: "Failed to load ontology properties",
+      updated: "Saved",
+      updateFailed: "Save failed",
+      badValue: "Invalid value (contains single quote or is empty)",
     },
   },
 

@@ -24,6 +24,7 @@ import AdminToolsPage from "./pages/AdminToolsPage";
 import AdminFeatureRulesPage from "./pages/AdminFeatureRulesPage";
 import BusinessObjectPage from "./pages/BusinessObjectPage";
 import DocumentsPage from "./pages/DocumentsPage";
+import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
 
 export default function App() {
   return (
@@ -54,6 +55,7 @@ export default function App() {
         <Route path="admin/feature-rules" element={<AdminFeatureRulesPage />} />
         <Route path="business-objects" element={<BusinessObjectPage />} />
         <Route path="documents" element={<DocumentsPage />} />
+        <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />
       </Route>
     </Routes>
   );

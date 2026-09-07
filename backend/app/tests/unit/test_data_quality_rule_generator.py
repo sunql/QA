@@ -38,6 +38,26 @@ def test_build_rule_code_deterministic():
     assert code.startswith("DQ_PURCHASEORDER_PO_KEY_UNIQUENESS_") and len(code.split("_")[-1]) == 7
 
 
+def test_build_rule_code_matches_schema_pattern():
+    """rule_code 必须符合 GenerateRuleItem.rule_code 的 ^[A-Z][A-Z0-9_]*$ 契约。
+
+    否则 preview 返回的 rule_code 被前端原样回传给 confirm 时会被 Pydantic 422 拦截。
+    hexdigest 历史上是 lowercase a-f，会违反此 pattern。
+    """
+    import re
+
+    from app.domain.schemas import GenerateRuleItem
+
+    code = buildRuleCode("PurchaseOrder", "po_key", RuleType.UNIQUENESS)
+    # 直接从 schema 读 pattern，避免硬编码两份字符串
+    pattern = next(
+        meta.pattern
+        for meta in GenerateRuleItem.model_fields["rule_code"].metadata
+        if hasattr(meta, "pattern")
+    )
+    assert re.match(pattern, code), f"rule_code {code!r} violates pattern {pattern!r}"
+
+
 def test_build_rule_code_always_has_hash_suffix():
     code = buildRuleCode("PurchaseOrder", "po_key", RuleType.UNIQUENESS)
     # hash suffix is always present even for short names

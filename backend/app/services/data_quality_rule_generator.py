@@ -92,7 +92,7 @@ def buildRuleCode(className: str, propertyName: str, ruleType: RuleType) -> str:
     slugified = f"DQ_{_slug(className)}_{_slug(propertyName)}_{ruleType.value}"
     digest = hashlib.sha256(  # noqa: UP012
         f"{className}\x00{propertyName}\x00{ruleType.value}".encode()
-    ).hexdigest()[:7]
+    ).hexdigest().upper()[:7]
     if len(slugified) <= _RULE_CODE_MAX - 8:
         return f"{slugified}_{digest}"
     return f"{slugified[:_RULE_CODE_MAX - 8]}_{digest}"

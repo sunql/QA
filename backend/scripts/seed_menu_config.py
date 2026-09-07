@@ -45,6 +45,7 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.bizConfig", "code": "item.entityMapping", "label_key": "menu.item.entityMapping", "icon_code": "code", "sort_order": 340, "path": "/entity-mapping"},
     {"parent": "section.bizConfig", "code": "item.kpiCatalog", "label_key": "menu.item.kpiCatalog", "icon_code": "number", "sort_order": 350, "path": "/kpi-catalog"},
     {"parent": "section.bizConfig", "code": "item.features", "label_key": "menu.item.features", "icon_code": "cluster", "sort_order": 360, "path": "/features"},
+    {"parent": "section.bizConfig", "code": "item.adminFeatureRules", "label_key": "menu.item.adminFeatureRules", "icon_code": "tool", "sort_order": 365, "path": "/admin/feature-rules"},
     {"parent": "section.bizConfig", "code": "item.businessObjects", "label_key": "menu.item.businessObjects", "icon_code": "cluster", "sort_order": 370, "path": "/business-objects"},
     {"parent": "section.bizConfig", "code": "item.ontologyProperties", "label_key": "menu.item.ontologyProperties", "icon_code": "tags", "sort_order": 375, "path": "/ontology-properties"},
     # Foundation
@@ -53,13 +54,14 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.foundation", "code": "item.usage", "label_key": "menu.item.usage", "icon_code": "dashboard", "sort_order": 430, "path": "/usage"},
     {"parent": "section.foundation", "code": "item.graph", "label_key": "menu.item.graph", "icon_code": "apartment", "sort_order": 440, "path": "/graph"},
     {"parent": "section.foundation", "code": "item.vectors", "label_key": "menu.item.vectors", "icon_code": "heart", "sort_order": 450, "path": "/vectors"},
+    # AuditSecurity 下不再有 adminFeatureRules（已搬到 bizConfig 365）
     # System Config
     {"parent": "section.systemConfig", "code": "item.models", "label_key": "menu.item.models", "icon_code": "api", "sort_order": 510, "path": "/models"},
     {"parent": "section.systemConfig", "code": "item.embeddings", "label_key": "menu.item.embeddings", "icon_code": "node", "sort_order": 520, "path": "/embeddings"},
     {"parent": "section.systemConfig", "code": "item.status", "label_key": "menu.item.status", "icon_code": "heart", "sort_order": 530, "path": "/status"},
     # Audit & Security
     {"parent": "section.auditSecurity", "code": "item.adminAudit", "label_key": "menu.item.adminAudit", "icon_code": "audit", "sort_order": 610, "path": "/admin/audit"},
-    {"parent": "section.auditSecurity", "code": "item.adminFeatureRules", "label_key": "menu.item.adminFeatureRules", "icon_code": "setting", "sort_order": 615, "path": "/admin/feature-rules"},
+    # item.adminFeatureRules 已搬到 section.bizConfig sort_order=365（与 item.features 配套）
 ]
 
 

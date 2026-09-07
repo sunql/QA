@@ -4,6 +4,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Button,
   Collapse,
@@ -147,6 +148,7 @@ interface LlmPanelProps {
 }
 
 function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<PropertyConstraintSuggestion[]>([]);
   const [collapsed, setCollapsed] = useState(true);
@@ -318,10 +320,14 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
                       {isAdopted && (
                         <Tag
                           color="green"
-                          style={{ marginLeft: 8 }}
+                          style={{ marginLeft: 8, cursor: "pointer" }}
                           data-testid={`adopted-hint-${item.propertyId}`}
+                          onClick={() =>
+                            navigate(`/ontology-properties?classId=${classId}`)
+                          }
+                          title={t("dataQualityGenerate.adoptedHintNavTitle")}
                         >
-                          ✓ {t("dataQualityGenerate.adoptedHint")}
+                          ✓ {t("dataQualityGenerate.adoptedHint")} →
                         </Tag>
                       )}
                     </div>

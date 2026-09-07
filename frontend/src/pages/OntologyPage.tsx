@@ -97,7 +97,7 @@ export default function OntologyPage() {
   ];
 
   return (
-    <div>
+    <div style={{ padding: "0 24px" }}>
       <div
         style={{
           display: "flex",

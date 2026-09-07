@@ -129,7 +129,7 @@ export default function LineagePage() {
           ) : null}
           <Spin spinning={loading}>
             {filteredEdges.length > 0 ? (
-              <LineageGraph edges={filteredEdges} height={620} />
+              <LineageGraph edges={filteredEdges} height={820} />
             ) : (
               <Empty
                 description={

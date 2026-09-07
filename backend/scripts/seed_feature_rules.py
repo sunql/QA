@@ -25,6 +25,7 @@ FEATURE_RULE_SEEDS: list[dict[str, Any]] = [
         "data_layer": "FEATURE",
         "target_level": "RISK",
         "feature_name": "SUPPLIER_RISK_SCORE",
+        "policy_description": "供应商综合风险评分（0-1，越大越安全；0.60以下=高风险，0.60-0.80=中风险，0.80-1.01=低风险）。上游风控模型产出，作为整体风险等级的主判据；当该规则命中时直接采用其严重度，其他规则仅作兜底参考。",
         "thresholds": [
             {"severity": "HIGH", "operator": "lt_inverse", "threshold_value": 0.60},
             {"severity": "MEDIUM", "operator": "lt_inverse", "threshold_value": 0.80},
@@ -37,6 +38,7 @@ FEATURE_RULE_SEEDS: list[dict[str, Any]] = [
         "data_layer": "FEATURE",
         "target_level": "RISK",
         "feature_name": "SUPPLIER_OTD_3M",
+        "policy_description": "供应商近3个月准时交付率（OTD，On-Time Delivery）。若低于 90%，视为高风险信号，用于主风险评分缺失时的兜底判断。",
         "thresholds": [{"severity": "HIGH", "operator": "lt", "threshold_value": 90, "unit": "%"}],
     },
     {
@@ -45,6 +47,7 @@ FEATURE_RULE_SEEDS: list[dict[str, Any]] = [
         "data_layer": "FEATURE",
         "target_level": "RISK",
         "feature_name": "SUPPLIER_DEFECT_RATE_3M",
+        "policy_description": "供应商近3个月来料缺陷率（Defect Rate）。若高于 5%，视为高风险信号，反映质量管控能力不足；用于主风险评分缺失时的兜底判断。",
         "thresholds": [{"severity": "HIGH", "operator": "gt", "threshold_value": 5, "unit": "%"}],
     },
     {
@@ -53,6 +56,7 @@ FEATURE_RULE_SEEDS: list[dict[str, Any]] = [
         "data_layer": "FEATURE",
         "target_level": "RISK",
         "feature_name": "SUPPLIER_PRICE_VARIANCE_3M",
+        "policy_description": "供应商近3个月采购单价相对基准价的偏差率（Price Variance）。若超过 10%，视为高风险信号，反映价格异常或议价能力缺失；用于主风险评分缺失时的兜底判断。",
         "thresholds": [{"severity": "HIGH", "operator": "gt", "threshold_value": 10, "unit": "%"}],
     },
 ]

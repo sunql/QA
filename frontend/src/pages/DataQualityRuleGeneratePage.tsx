@@ -232,7 +232,13 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
   };
 
   const handleApply = async (item: PropertyConstraintSuggestion) => {
-    if (item.kind !== "allowed_values" || !item.values) return;
+    if (item.kind !== "allowed_values" || !item.values) {
+      // 不能静默 return：用户点击后无任何反馈会以为按钮坏了。
+      // 仅 allowed_values 类型可自动沉淀到 ontology_property.allowed_values；
+      // not_null 等类型需业务方在本体管理页手动处理。
+      message.warning(t("dataQualityGenerate.messages.adoptNotApplicable"));
+      return;
+    }
     if (adoptedIds.has(item.propertyId)) return;
     try {
       await applySuggestion(item.propertyId, item.values);

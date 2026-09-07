@@ -1414,6 +1414,7 @@ export const enUS = {
       parseFailed: "AI parsing failed",
       applyFailed: "Failed to apply suggestion",
       applied: "Suggestion applied",
+      adoptNotApplicable: "This suggestion type (non-value-list constraint) cannot be auto-applied. Please configure it manually in the ontology page.",
     },
   },
 

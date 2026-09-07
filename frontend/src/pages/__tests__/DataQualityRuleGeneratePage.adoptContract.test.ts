@@ -76,4 +76,17 @@ describe("LlmPanel adopt-and-persist UI feedback", () => {
     // onApplied 是把 preview 重新拉一遍的关键，不能因为 UI 反馈而跳过
     expect(src).toMatch(/onApplied\(\)/);
   });
+
+  it("shows explicit warning when clicking adopt on non-applicable item (no silent return)", () => {
+    // 回归：handleApply 早返条件 `kind !== 'allowed_values' || !item.values`
+    // 对 not_null 建议或 values=null 的 allowed_values 建议是 silent no-op，
+    // 用户点击按钮无任何反馈（无 message、无 error、按钮不变），后端也不会被调用。
+    // 修复契约：早返前必须 message.warning(...) + i18n key，且不得 return 静默。
+    expect(src).toMatch(/kind\s*[!=]==\s*["']allowed_values["']/);
+    // 早返前必须有 message.warning 调用（不能 return 静默）
+    expect(src).toMatch(/message\.warning/);
+    // i18n 文本必须存在（zh-CN + en-US 双语）
+    expect(zhSrc).toMatch(/adoptNotApplicable|adoptOnlyAllowedValues|adoptKindNotSupported/);
+    expect(enSrc).toMatch(/adoptNotApplicable|adoptOnlyAllowedValues|adoptKindNotSupported/);
+  });
 });

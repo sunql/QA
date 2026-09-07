@@ -374,7 +374,7 @@ async function handleLocalImportRoutes(route: Route, ctx: RouteCtx): Promise<voi
 
 async function handleDatasourceRoutes(route: Route, ctx: RouteCtx): Promise<void> {
   const { method, path, body, query, backend } = ctx;
-  if (path === "/datasources" && method === "GET") {
+  if (path.startsWith("/datasources") && method === "GET") {
     const activeOnly = query.get("activeOnly") === "true";
     const list = activeOnly
       ? backend.datasources.filter((d) => d.isActive)
@@ -436,10 +436,10 @@ async function handleDatasourceRoutes(route: Route, ctx: RouteCtx): Promise<void
 
 async function handleClassRoutes(route: Route, ctx: RouteCtx): Promise<void> {
   const { method, path, body, backend } = ctx;
-  if (path === "/ontology/classes" && method === "GET") {
+  if (path.startsWith("/ontology/classes") && method === "GET") {
     return respondJson(route, 200, ok(backend.classes));
   }
-  if (path === "/ontology/classes" && method === "POST") {
+  if (path.startsWith("/ontology/classes") && method === "POST") {
     const created: MockClass = {
       id: backend.nextId("class"),
       className: String(body.className ?? ""),
@@ -632,6 +632,110 @@ async function handleLineageRoutes(route: Route, ctx: RouteCtx): Promise<void> {
   return respondJson(route, 404, fail(`模拟后端未实现 ${method} ${path}`));
 }
 
+async function handleMenuConfigRoutes(route: Route, ctx: RouteCtx): Promise<void> {
+  if (ctx.path === "/menu-config" && ctx.method === "GET") {
+    return respondJson(route, 200, {
+      version: "2026-09-01",
+      sections: [
+        {
+          code: "section.dataQuality",
+          labelKey: "menu.section.dataQuality",
+          iconCode: "audit",
+          sortOrder: 300,
+          permissionCode: null,
+          roles: [],
+          path: null,
+          children: [
+            {
+              code: "item.dataQuality",
+              labelKey: "menu.item.dataQuality",
+              iconCode: "audit",
+              sortOrder: 320,
+              permissionCode: null,
+              roles: [],
+              path: "/data-quality",
+            },
+            {
+              code: "item.dataQualityGenerate",
+              labelKey: "menu.item.dataQualityGenerate",
+              iconCode: "thunderbolt",
+              sortOrder: 325,
+              permissionCode: null,
+              roles: [],
+              path: "/data-quality/generate",
+            },
+          ],
+        },
+      ],
+    });
+  }
+  return respondJson(route, 404, fail(`模拟后端未实现 ${ctx.method} ${ctx.path}`));
+}
+
+async function handleDataQualityGenerateRoutes(route: Route, ctx: RouteCtx): Promise<void> {
+  const { method, path } = ctx;
+  const BASE = "/data-quality/rules/generate";
+
+  // GET /data-quality/rules/generate/options  → supported rule types / thresholds
+  if (path === `${BASE}/options` && method === "GET") {
+    return respondJson(route, 200, ok({
+      ruleTypes: ["COMPLETENESS", "CONSISTENCY", "UNIQUENESS", "VALIDITY", "REFERENTIAL"],
+      severities: ["HIGH", "MEDIUM", "LOW"],
+      derivationTypes: ["PK_DERIVED", "FK_DERIVED", "DICT_REF", "ALLOWED_VALUES", "NOT_NULL", "JOIN_CONSISTENCY", "LLM_DERIVED", "MANUAL"],
+    }));
+  }
+
+  // POST /data-quality/rules/generate/preview
+  const previewMatch = path.match(/^\/data-quality\/rules\/generate\/preview$/);
+  if (previewMatch && method === "POST") {
+    return respondJson(route, 200, ok({
+      classId: 1,
+      className: "Order",
+      sourceTable: "t_order",
+      datasourceId: 1,
+      suggestions: [
+        {
+          ruleCode: "ORDER_PK_001",
+          ruleName: "订单主键完整性",
+          ruleType: "COMPLETENESS",
+          targetTable: "t_order",
+          targetColumn: "order_id",
+          ruleExpression: "order_id IS NOT NULL",
+          threshold: 1.0,
+          severity: "HIGH",
+          derivationType: "PK_DERIVED",
+          sourcePropertyId: 1,
+          sourceClassId: 1,
+          confidence: "HIGH",
+          status: "NEW",
+          reason: "主键列不允许为空",
+        },
+      ],
+      blocked: [],
+    }));
+  }
+
+  // POST /data-quality/rules/generate/confirm
+  const confirmMatch = path.match(/^\/data-quality\/rules\/generate\/confirm$/);
+  if (confirmMatch && method === "POST") {
+    return respondJson(route, 200, ok({ created: [], skippedCodes: [] }));
+  }
+
+  // POST /data-quality/rules/generate/parse-descriptions
+  const parseMatch = path.match(/^\/data-quality\/rules\/generate\/parse-descriptions$/);
+  if (parseMatch && method === "POST") {
+    return respondJson(route, 200, ok({ suggestions: [] }));
+  }
+
+  // POST /data-quality/rules/generate/apply-suggestion
+  const applyMatch = path.match(/^\/data-quality\/rules\/generate\/apply-suggestion$/);
+  if (applyMatch && method === "POST") {
+    return respondJson(route, 200, ok(null));
+  }
+
+  return respondJson(route, 404, fail(`模拟后端未实现 ${method} ${path}`));
+}
+
 async function handleChatRoutes(route: Route, ctx: RouteCtx): Promise<void> {
   const question = String(ctx.body.question ?? "");
   if (ctx.path === "/chat/stream" && ctx.method === "POST") {
@@ -690,6 +794,8 @@ async function dispatch(route: Route, backend: MockBackend): Promise<void> {
   if (ctx.path.startsWith("/models")) return handleModelRoutes(route, ctx);
   if (ctx.path.startsWith("/lineage")) return handleLineageRoutes(route, ctx);
   if (ctx.path.startsWith("/chat")) return handleChatRoutes(route, ctx);
+  if (ctx.path.startsWith("/data-quality")) return handleDataQualityGenerateRoutes(route, ctx);
+  if (ctx.path.startsWith("/menu-config")) return handleMenuConfigRoutes(route, ctx);
   return respondJson(route, 404, fail(`模拟后端未实现 ${ctx.method} ${ctx.path}`));
 }
 

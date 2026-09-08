@@ -98,6 +98,14 @@ async def getModelUsage(
 )
 async def listChatHistory(
     session: AsyncSession = Depends(getDb),
+    channel: str = Query(
+        default="chat",
+        pattern="^(chat|doc_qa)$",
+        description=(
+            "渠道隔离过滤：chat（默认，聊天语义）/ doc_qa（文档问答）。"
+            "其他取值由 FastAPI 校验拒绝 422。"
+        ),
+    ),
     limit: int = Query(default=50, ge=1, le=200, description=MSG_HISTORY_LISTING_LIMIT),
     offset: int = Query(default=0, ge=0, description=MSG_HISTORY_LISTING_OFFSET),
 ) -> list[ChatSessionListItem]:
@@ -110,7 +118,9 @@ async def listChatHistory(
     service 层按 tenant_id 过滤，参数预留可在 SessionHistoryService 扩展。
     """
     svc = SessionHistoryService()
-    return await svc.listChatSessions(session, limit=limit, offset=offset)
+    return await svc.listChatSessions(
+        session, limit=limit, offset=offset, channel=channel
+    )
 
 
 @router.get("/{sessionId}/usage", response_model=TokenUsageSummary)

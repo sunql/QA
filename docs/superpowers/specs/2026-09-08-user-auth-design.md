@@ -332,13 +332,24 @@ async def logout(actor, session) -> Response:
 #### `GET /api/v1/auth/me`
 
 ```python
+class UserSummaryRead(CamelModel):
+    """嵌入在 AuthLoginResponse.user 字段；不包含 mustChangePassword（外层已有）。"""
+    id: int
+    username: str
+    displayName: str
+    email: str | None
+    roles: list[str]
+    organizations: list[str]
+
+
 class AuthMeRead(CamelModel):
+    """GET /auth/me 完整响应（包含敏感字段 mustChangePassword / lastLoginAt）。"""
     id: int
     username: str
     displayName: str
     email: str | None
     enabled: bool
-    mustChangePassword: bool          # 仅此处返回
+    mustChangePassword: bool          # 仅此处与 login 响应返回
     roles: list[str]                  # 解析自 user_roles + 兜底
     organizations: list[str]          # 解析自 user_organizations
     tenantId: str
@@ -506,9 +517,10 @@ interface AuthState {
   token: string | null;
   user: AuthMeRead | null;
   mustChangePassword: boolean;
+  rememberMe: boolean;             // 决定 token 存储介质
   
-  login: (username: string, password: string) => Promise<void>;
-  logout: () => Promise<void>;
+  login: (username: string, password: string, rememberMe: boolean) => Promise<void>;
+  logout: () => Promise<void>;     // 静默吞 401（被改密吊销的 token 调 logout 必然 401）
   fetchMe: () => Promise<void>;
   changeOwnPassword: (oldPwd: string, newPwd: string) => Promise<void>;
 }
@@ -516,16 +528,21 @@ interface AuthState {
 export const useAuthStore = create<AuthState>()(
   persist(
     (set, get) => ({
-      token: null, user: null, mustChangePassword: false,
+      token: null, user: null, mustChangePassword: false, rememberMe: false,
       
-      login: async (username, password) => {
+      login: async (username, password, rememberMe) => {
         const res = await authApi.login({ username, password });
-        set({ token: res.accessToken, mustChangePassword: res.mustChangePassword });
+        set({
+          token: res.accessToken,
+          mustChangePassword: res.mustChangePassword,
+          rememberMe,
+        });
         await get().fetchMe();
       },
       
       logout: async () => {
-        try { await authApi.logout(); } catch {}
+        // 静默吞所有错误：改密后当前 token 已被吊销，调用必然 401
+        try { await authApi.logout(); } catch { /* noop */ }
         set({ token: null, user: null, mustChangePassword: false });
         delete apiClient.defaults.headers.common.Authorization;
       },
@@ -536,17 +553,26 @@ export const useAuthStore = create<AuthState>()(
       },
       
       changeOwnPassword: async (oldPwd, newPwd) => {
+        // 后端已吊销该用户所有 session（含当前）；调 logout 会收到 401，静默吞
         await authApi.changeOwnPassword({ oldPassword: oldPwd, newPassword: newPwd });
         await get().logout();
       },
     }),
     {
       name: "qa-system-auth",
-      partialize: (s) => ({ token: s.token, mustChangePassword: s.mustChangePassword }),
+      storage: createJSONStorage(() =>
+        get().rememberMe ? localStorage : sessionStorage
+      ),
+      partialize: (s) => ({ token: s.token, mustChangePassword: s.mustChangePassword, rememberMe: s.rememberMe }),
     }
   )
 );
 ```
+
+**`rememberMe` 语义**：
+- `true` → persist 用 **localStorage**（关闭浏览器后仍保留，最长 1h 后服务端 JWT 过期）
+- `false` → persist 用 **sessionStorage**（关闭标签页即清空）
+- 切换时（如用户后续修改）需重新触发 `persist.rehydrate()`，本期不实现"动态切换"
 
 ### 8.3 axios 拦截器（`frontend/src/api/client.ts`）
 
@@ -955,9 +981,11 @@ npm run build          # 必须无 TS 错误
 
 ### 11.3 测试库 vs 生产库（按用户约束）
 
-- **生产库 `qa_metadata`（5433）**：本期开发、本地手工验证、0048 迁移目标
-- **测试库 `qa_metadata_test`（5433）**：自动化测试（`TEST_DATABASE_URL`），与生产库共用 Alembic 链
-- **本地手工验证**：用生产库 `qa_metadata`，跑 `seed_user_passwords.py` 后用 admin/Admin@123 登录；验证完恢复（必要时 truncate `user_sessions` 表，保留 `users` 表 0048 后的字段）
+按用户明确约束：「**可以直接在生产库进行开发，不要使用测试库**」。
+
+- **生产库 `qa_metadata`（5433）**：本期**全部开发活动**（Alembic 0048 迁移、本地手工验证、`seed_user_passwords.py` 一次性脚本、菜单 seed 重跑、手工 e2e 验证）的目标库
+- **测试库 `qa_metadata_test`（5433）**：**仅供 pytest 自动化测试使用**（`TEST_DATABASE_URL=postgresql+asyncpg://...@localhost:5433/qa_metadata_test`），不参与本期手工开发；Alembic 链与生产库共享
+- **本地手工验证流程**：用生产库 `qa_metadata` → `alembic upgrade head` → `seed_user_passwords.py` → 用 admin/Admin@123 登录 → 验证完**保留**（users 表 0048 后字段不回退，避免下次开发又跑迁移）
 
 ### 11.4 菜单 seed 重跑
 

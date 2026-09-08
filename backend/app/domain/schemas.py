@@ -1382,6 +1382,17 @@ class ChatRequest(CamelModel):
     chartType: ChartType | None = Field(default=None, description=MSG_SCHEMA_CHAT_CHART_TYPE_EXPLICIT)
 
 
+class DocQaRequest(CamelModel):
+    """文档问答请求（与 ChatRequest 解耦）。"""
+
+    session_id: str = Field(..., min_length=1, max_length=64)
+    question: str = Field(..., min_length=1)
+    top_k: int = Field(default=8, ge=1, le=20)
+    security_level: str | None = None
+    document_type: str | None = None
+    model_id: int | None = None
+
+
 class ExtractedEntities(CamelModel):
     """从用户问题中抽取的结构化查询实体（best-effort，任一字段可为空）。"""
 

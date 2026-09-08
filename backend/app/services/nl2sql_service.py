@@ -854,7 +854,7 @@ _TIME_BUCKET_RULE_MYSQL = (
 
 _SQL_DIALECTS_ORACLE_11G = SqlDialect(
     name="Oracle",
-    limitRule="需要限制行数时使用 ROWNUM，例如 SELECT * FROM (SELECT t.*, ROWNUM rn FROM (...) t WHERE ROWNUM <= 100)，不要使用 FETCH FIRST，也不要使用 LIMIT。",
+    limitRule="需要限制行数时使用 ROWNUM，例如 SELECT * FROM (SELECT t.*, ROWNUM rn FROM (...) t WHERE ROWNUM <= 1000)，不要使用 FETCH FIRST，也不要使用 LIMIT。",
     joinTemplate="FROM {schema}PRECEIPTD d JOIN {schema}PRECEIPT h ON h.PTHNUM_0 = d.PTHNUM_0",
     useSchemaPrefix=True,
     sampleLimitSql="SELECT * FROM ({sql}) WHERE ROWNUM <= {n}",

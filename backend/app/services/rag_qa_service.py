@@ -115,6 +115,7 @@ class RagQaService:
         )
         session.add(asst_msg)
         await session.flush()
+        await session.commit()
 
     async def answer_stream(
         self,

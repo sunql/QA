@@ -23,6 +23,7 @@
 - [权限与安全规范](../rules/权限与安全规范.md) - 认证/密钥/SQL Guard/主机白名单
 - [数据与AI治理规范](../rules/数据与AI治理规范.md) - 本体版本/指标审查/路由策略
 - [测试规范](../rules/测试规范.md) - 真实 PG + 完整 API 链路测试（强制，禁 sqlite 内存库）
+- [数据库环境使用规范](../rules/数据库环境使用规范.md) - 表结构/新增表需求直接用 prod qa_metadata（先备份 `<表名>_<YYYYMMDD>`），仅测试走 qa_metadata_test
 
 ### 技能 `skills/`
 - [request-analysis](../skills/request-analysis/SKILL.md) - 需求分析

@@ -391,3 +391,32 @@ class AgentToolHandlerKind(str, Enum):
 
     BUILTIN = "BUILTIN"
     NL2SQL = "NL2SQL"
+
+
+class GrantSubjectType(str, Enum):
+    """permission_grant.subject_type 多态主体类型（feat-rbac-identity, 2026-09-07）。
+
+    - USER：直接授予单个用户（用户维度授权）
+    - ROLE：授予角色（该角色所有成员继承）
+    - ORGANIZATION：授予组织（该组织所有成员继承）
+    三者对同一资源取合集即为用户的有效权限。
+    """
+
+    USER = "USER"
+    ROLE = "ROLE"
+    ORGANIZATION = "ORGANIZATION"
+
+
+class PermissionResourceType(str, Enum):
+    """权限资源类型（feat-rbac-identity，数据权限扩展预留）。
+
+    当前仅 MENU 落地；ONTOLOGY_* / KPI / FEATURE 为后续按本体「类/属性/指标」
+    控制数据权限时的预留枚举值（届时扩展 permission_service 解析逻辑即可，
+    permission_grant.subject 模型与合集语义完全复用）。
+    """
+
+    MENU = "MENU"
+    # ---- 以下为数据权限预留值（未落地，仅占位） ----
+    ONTOLOGY_CLASS = "ONTOLOGY_CLASS"
+    ONTOLOGY_PROPERTY = "ONTOLOGY_PROPERTY"
+    METRIC = "METRIC"

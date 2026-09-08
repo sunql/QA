@@ -1596,3 +1596,15 @@ class FeatureRuleThreshold(Base):
 
 # Re-export MenuConfig so Alembic autogenerate picks it up.
 from app.models.menu_config import MenuConfig  # noqa: E402,F401
+
+# Re-export RBAC identity models so Alembic autogenerate picks them up.
+from app.models.rbac import (  # noqa: E402,F401
+    ADMIN_ROLE_CODE,
+    GRANT_SUBJECT_TYPES,
+    Organization,
+    PermissionGrant,
+    Role,
+    User,
+    UserOrganization,
+    UserRole,
+)

@@ -30,13 +30,16 @@ async def test_seed_inserts_six_sections_and_twenty_items(
 
     factory = dbModule.getSessionFactory()
     count = await seed_menu_config(factory)
-    assert count == 28
+    # 6 sections + 28 items = 34 rows（feat-rbac-identity 追加 adminUsers/Roles/
+    # Organizations/Menus + bizConfig 追加 dataQualityGenerate/ontologyProperties/
+    # businessObjects/adminFeatureRules）
+    assert count == 34
 
     svc = MenuConfigService(dbSession)
     result = await svc.list_sections()
     assert len(result.sections) == 6
     total_items = sum(len(s.children) for s in result.sections)
-    assert total_items == 22
+    assert total_items == 28
 
 
 async def test_seed_is_idempotent(
@@ -49,8 +52,53 @@ async def test_seed_is_idempotent(
     await seed_menu_config(factory)
 
     rows = (await dbSession.execute(select(MenuConfig))).scalars().all()
-    assert len(rows) == 28
-    assert len({r.code for r in rows}) == 28
+    assert len(rows) == 34
+    assert len({r.code for r in rows}) == 34
+
+
+async def test_seed_does_not_overwrite_ui_edited_parent_id(
+    dbSession: AsyncSession, client: object
+) -> None:
+    """回归：菜单管理 UI 把叶子项 parent_id 改到别的 section 后，seed 重跑
+    必须保留 UI 的修改，不强制回滚到静态列表默认 parent。
+
+    场景：adminUsers 默认 parent=systemConfig；模拟 UI 把它改到 bizConfig；
+    再跑 seed，断言 parent 仍是 bizConfig（不被回滚）。
+    """
+    await _clean(dbSession)
+    factory = dbModule.getSessionFactory()
+    await seed_menu_config(factory)
+
+    # 查 adminUsers 当前 parent_id 与 bizConfig 的 id
+    admin_users = (
+        await dbSession.execute(
+            select(MenuConfig).where(MenuConfig.code == "item.adminUsers")
+        )
+    ).scalar_one()
+    biz_section = (
+        await dbSession.execute(
+            select(MenuConfig).where(MenuConfig.code == "section.bizConfig")
+        )
+    ).scalar_one()
+    assert admin_users.parent_id != biz_section.id  # 初始：parent=systemConfig
+
+    # 模拟 UI 编辑
+    admin_users.parent_id = biz_section.id
+    await dbSession.commit()
+
+    # 重跑 seed
+    await seed_menu_config(factory)
+
+    # 断言 parent 仍是 bizSection.id（没被回滚）
+    refreshed = (
+        await dbSession.execute(
+            select(MenuConfig).where(MenuConfig.code == "item.adminUsers")
+        )
+    ).scalar_one()
+    assert refreshed.parent_id == biz_section.id, (
+        "seed 不应覆盖 UI 编辑后的 parent_id；"
+        f"expected={biz_section.id} got={refreshed.parent_id}"
+    )
 
 
 async def test_seed_paths_aligned_with_frontend_routes(
@@ -65,11 +113,14 @@ async def test_seed_paths_aligned_with_frontend_routes(
     frontend_routes = {
         "/chat", "/agents/run", "/agents",
         "/supplier-360", "/supplier-risk",
-        "/ontology", "/data-quality", "/lineage", "/entity-mapping",
-        "/kpi-catalog", "/features", "/business-objects",
+        "/ontology", "/data-quality", "/data-quality/generate",
+        "/lineage", "/entity-mapping",
+        "/kpi-catalog", "/features", "/business-objects", "/ontology-properties",
         "/datasource", "/documents", "/usage", "/graph", "/vectors",
         "/models", "/embeddings", "/status",
         "/admin/audit", "/admin/feature-rules",
+        # feat-rbac-identity：RBAC 管理 4 页（admin 路由统一 /admin/*）
+        "/admin/users", "/admin/roles", "/admin/organizations", "/admin/menus",
     }
 
     svc = MenuConfigService(dbSession)
@@ -128,5 +179,5 @@ async def test_main_runs_end_to_end_and_disposes_engine(
     await created_engines[0].dispose()
     # 验证种子落库（独立引擎与全局工厂指向同一 URL）
     rows = (await dbSession.execute(select(MenuConfig))).scalars().all()
-    assert len(rows) == 28
-    assert len({r.code for r in rows}) == 28
+    assert len(rows) == 34
+    assert len({r.code for r in rows}) == 34

@@ -35,8 +35,7 @@ class TestParseDocument:
 
     @pytest.mark.asyncio
     async def test_pdf_parsing(self) -> None:
-        """PDF 解析：需 pypdf 可用且内容非空。"""
-        pytest.importorskip("pypdf")
+        """PDF 解析：pypdf 必装后必须真跑（之前 importorskip 在没装时静默跳过 = 实际未覆盖）。"""
         # 用已知有效的最小 PDF（单页无内容）
         minimal_pdf = (
             b"%PDF-1.4\n"
@@ -51,8 +50,7 @@ class TestParseDocument:
 
     @pytest.mark.asyncio
     async def test_docx_parsing(self) -> None:
-        """DOCX 解析：需 python-docx 可用且内容非空。"""
-        pytest.importorskip("docx")
+        """DOCX 解析：python-docx 必装后必须真跑。"""
         import zipfile, io
 
         docx_bytes = _make_minimal_docx("Test paragraph content.")
@@ -66,7 +64,6 @@ class TestParseDocument:
     @pytest.mark.asyncio
     async def test_pdf_fallback_by_extension(self) -> None:
         """扩展名可推断类型，即使 MIME type 未知。"""
-        pytest.importorskip("pypdf")
         content = b"dummy pdf content"
         with pytest.raises(DocumentParserError):
             await parse_document(content, "application/octet-stream", "file.pdf")

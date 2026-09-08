@@ -13,7 +13,7 @@ from typing import Annotated
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import getDb
+from app.dependencies import CurrentUser, getDb
 from app.domain.enums import DocumentSecurityLevel
 from app.domain.schemas import DocumentCreate, DocumentUpdate
 from app.domain.exceptions import ConflictError
@@ -62,6 +62,7 @@ class RagService:
         owner: str = "",
         effective_date: str | None = None,
         security_level: str = "L1",
+        actor: CurrentUser,
     ) -> dict:
         """文档入库全流程。
 
@@ -165,6 +166,7 @@ class RagService:
                     storage_url=None,
                     content_hash=None,
                 ),
+                actor=actor,
             )
         else:
             # 更新 storage_url（无实际文件存储 URL，这里记录处理状态）
@@ -196,6 +198,7 @@ class RagService:
         *,
         security_level: str | None = None,
         top_k: int = 5,
+        session: AsyncSession | None = None,
     ) -> list[dict]:
         """语义检索文档 chunks。
 
@@ -203,9 +206,12 @@ class RagService:
             query_text: 自然语言查询
             security_level: 可选，按安全等级过滤
             top_k: 返回数量
+            session: DB session（可选，传入则按 document_id JOIN document_catalog
+                     回填每条 hit 的 document_name；不传则仅返回 Milvus 字段）
 
         Returns:
-            匹配的 chunk 列表，含 document_id, chunk_text, distance
+            匹配的 chunk 列表，含 document_id, chunk_text, chunk_sequence,
+            distance, score；session 存在时还含 document_name（document_id 回退）。
         """
         embedding_service = _getEmbeddingService()
         try:
@@ -218,6 +224,26 @@ class RagService:
             securityLevel=security_level,
             topK=top_k,
         )
+        if not hits:
+            return []
+
+        # 用 Milvus 命中 document_id 反查 document_catalog → document_name，
+        # 前端 DocumentsPage 卡片标题需要；缺则降级回 document_id 本身。
+        name_by_id: dict[str, str] = {}
+        if session is not None:
+            unique_ids = list({h["document_id"] for h in hits if h.get("document_id")})
+            try:
+                rows = await self._doc_svc.listDocuments(
+                    session, document_ids=unique_ids,
+                )
+                name_by_id = {r.document_id: r.document_name for r in rows}
+            except Exception:
+                # 回填失败不应阻塞响应：降级为只有 Milvus 字段
+                logger.warning(
+                    "searchDocuments: 回填 document_name 失败，仅返回 Milvus 字段",
+                    exc_info=True,
+                )
+
         return [
             {
                 "document_id": h["document_id"],
@@ -225,6 +251,14 @@ class RagService:
                 "chunk_text": h["chunk_text"],
                 "chunk_sequence": h["chunk_sequence"],
                 "distance": h["distance"],
+                # Milvus 用 L2 距离（越小越相似）；前端展示需要"相似度"。
+                # 公式 score = 1 / (1 + distance) 把 [0, ∞) 映射到 (0, 1]：
+                #   distance=0 → 1.0（完全相同）；distance=1 → 0.5；distance→∞ → 0。
+                # DocumentsPage.tsx 直接读 item.score 渲染百分比，必须存在。
+                "score": 1.0 / (1.0 + h["distance"]),
+                "document_name": name_by_id.get(
+                    h["document_id"], h["document_id"],
+                ),
             }
             for h in hits
         ]

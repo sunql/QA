@@ -158,10 +158,12 @@ export default function AdminMenusPage(): JSX.Element {
         const type = toSection(rec) ? "section" : "item";
         setEditing(rec);
         setNodeType(type);
+        // 把列表视图同列看到的已解析文案（labelMap.get(code)）写回 labelKey 输入框，
+        // 而不是原始 i18n key——所见即所编辑，用户修改后直接落库为新 labelKey。
         form.setFieldsValue({
             nodeType: type,
             code: rec.code,
-            labelKey: rec.labelKey,
+            labelKey: labelMap.get(rec.code) ?? rec.labelKey,
             iconCode: rec.iconCode ?? undefined,
             sortOrder: rec.sortOrder,
             path: rec.path ?? undefined,

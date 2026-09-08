@@ -66,10 +66,11 @@ class DocumentService:
         document_type: str | None = None,
         security_level: str | None = None,
         status: DocumentStatus | None = None,
+        document_ids: list[str] | None = None,
         limit: int = _DEFAULT_LIMIT,
         offset: int = 0,
     ) -> list[DocumentCatalog]:
-        """列表查询，支持按类型/安全等级/状态过滤。"""
+        """列表查询，支持按类型/安全等级/状态/业务编号过滤。"""
         limit = min(limit, _MAX_LIMIT)
         stmt = select(DocumentCatalog).order_by(DocumentCatalog.id)
         if document_type is not None:
@@ -78,6 +79,12 @@ class DocumentService:
             stmt = stmt.where(DocumentCatalog.security_level == security_level)
         if status is not None:
             stmt = stmt.where(DocumentCatalog.status == status)
+        if document_ids is not None:
+            # 用于 RAG 语义检索结果回填 document_name 时按 ID 精确匹配
+            if not document_ids:
+                # 空列表直接返回，避免 IN () 语法错误
+                return []
+            stmt = stmt.where(DocumentCatalog.document_id.in_(document_ids))
         stmt = stmt.limit(limit).offset(offset)
         result = await session.execute(stmt)
         return list(result.scalars().all())

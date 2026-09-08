@@ -205,3 +205,64 @@ class TestDocumentEntityRelationApi:
         # 已删除
         get_resp = await client.get(f"/api/v1/documents/relations/{rel_id}")
         assert get_resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 枚举契约回归：前端下拉的所有 documentType / relationType 必须被后端 schema 接受。
+# 防止前端新增分类时漏改后端 Pydantic 枚举导致 422。
+# 真实 PG 上的端到端断言：POST 返回 201 + 回读 body[type] == 提交值。
+# ---------------------------------------------------------------------------
+
+import pytest
+
+
+# 与 frontend/src/types/document.ts 保持一致（前端下拉全集）
+ALL_DOCUMENT_TYPES: tuple[str, ...] = (
+    "CONTRACT", "8D_REPORT", "AUDIT_REPORT", "SPEC", "SOP",
+    "QUALITY_AGREEMENT", "INSPECTION_SPEC", "REMEDIATION_REPORT",
+    "PURCHASE_SPEC", "MEETING_MINUTES", "SAFETY_SHEET",
+    "QUALITY", "OTHER",
+)
+
+ALL_RELATION_TYPES: tuple[str, ...] = (
+    "CONTRACT", "8D_REPORT", "AUDIT_REPORT", "SPEC", "SOP",
+    "QUALITY_AGREEMENT", "INSPECTION_SPEC", "REMEDIATION_REPORT", "OTHER",
+)
+
+
+@pytest.mark.parametrize("doc_type", ALL_DOCUMENT_TYPES)
+async def test_all_document_types_accepted_by_api(client, doc_type: str) -> None:
+    """每个前端下拉值都必须能 POST /api/v1/documents 成功（防后端 enum 漂移）。"""
+    payload = {
+        "documentId": f"DOC-T-{doc_type}",
+        "documentName": f"测试-{doc_type}",
+        "documentType": doc_type,
+    }
+    resp = await client.post("/api/v1/documents", json=payload)
+    assert resp.status_code == 201, f"{doc_type} 应被接受，实际 {resp.status_code}: {resp.text}"
+    assert resp.json()["documentType"] == doc_type
+
+
+@pytest.mark.parametrize("rel_type", ALL_RELATION_TYPES)
+async def test_all_relation_types_accepted_by_api(client, rel_type: str) -> None:
+    """每个前端下拉值都必须能 POST /api/v1/documents/relations 成功。"""
+    doc_id_str = f"DOC-RT-{rel_type}"
+    # 复用 doc 工厂：建一个 CONTRACT 类型 doc（任何类型都行，只为承载 relation）
+    doc_resp = await client.post("/api/v1/documents", json={
+        "documentId": doc_id_str,
+        "documentName": f"承载-{rel_type}",
+        "documentType": "CONTRACT",
+    })
+    assert doc_resp.status_code == 201, doc_resp.text
+
+    payload = {
+        "documentId": doc_id_str,
+        "entityType": "SUPPLIER",
+        # 用 rel_type 后缀确保每个 parametrize 用不同 key（key 长度受 String(100) 限制）
+        "entityKey": f"999-{rel_type[:80]}",
+        "relationType": rel_type,
+    }
+    resp = await client.post("/api/v1/documents/relations", json=payload)
+    assert resp.status_code == 201, f"{rel_type} 应被接受，实际 {resp.status_code}: {resp.text}"
+    assert resp.json()["relationType"] == rel_type
+

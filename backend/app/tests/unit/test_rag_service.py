@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.services.rag_service import RagError, RagService
+from app.dependencies import CurrentUser
 
 
 class TestRagServiceSearch:
@@ -48,6 +49,126 @@ class TestRagServiceSearch:
         assert hits[0]["chunk_text"] == "测试文本内容"
         mock_emb_svc.generateEmbedding.assert_called_once_with("测试查询")
         mock_search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_searchDocuments_exposes_score_from_distance(self) -> None:
+        """searchDocuments 必须把 Milvus L2 distance 转成 [0, 1] 的相似度 score。
+
+        公式：score = 1 / (1 + distance)，把 [0, ∞) 映射到 (0, 1]。
+        distance=0 → 1.0；distance=1 → 0.5；distance→∞ → 0。
+
+        契约 — DocumentsPage.tsx 直接读 item.score 并渲染成百分比，
+        缺失 score 时显示 NaN%（item.score * 100 = NaN）。
+        """
+        mock_emb_svc = AsyncMock()
+        mock_emb_svc.generateEmbedding = AsyncMock(return_value=[0.1] * 1024)
+
+        mock_hits = [
+            {
+                "document_id": "DOC-A",
+                "chunk_id": "c0",
+                "chunk_text": "完全相同",
+                "chunk_sequence": 0,
+                "distance": 0.0,
+            },
+            {
+                "document_id": "DOC-B",
+                "chunk_id": "c1",
+                "chunk_text": "中等相似",
+                "chunk_sequence": 1,
+                "distance": 1.0,
+            },
+            {
+                "document_id": "DOC-C",
+                "chunk_id": "c2",
+                "chunk_text": "很不相似",
+                "chunk_sequence": 2,
+                "distance": 9.0,
+            },
+        ]
+
+        with patch(
+            "app.services.rag_service._getEmbeddingService",
+            return_value=mock_emb_svc,
+        ):
+            with patch(
+                "app.services.rag_service.searchDocumentChunks",
+                return_value=mock_hits,
+            ):
+                svc = RagService()
+                hits = await svc.searchDocuments("查询")
+
+        assert len(hits) == 3
+        # distance=0 → score=1.0（最高相似度）
+        assert hits[0]["score"] == pytest.approx(1.0)
+        # distance=1 → score=0.5
+        assert hits[1]["score"] == pytest.approx(0.5)
+        # distance=9 → score=0.1
+        assert hits[2]["score"] == pytest.approx(0.1)
+        # score 字段必须保留原 distance 给调试用
+        assert hits[0]["distance"] == 0.0
+        assert hits[1]["distance"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_searchDocuments_hydrates_document_name_from_catalog(self) -> None:
+        """searchDocuments 必须用 document_id JOIN document_catalog，拿到 document_name。
+
+        契约 — DocumentsPage.tsx 渲染 Card 标题用 item.document_name；
+        没有这字段时显示空白（用户看到的 DOC-xxxx 内部编码变成 — 无意义）。
+        """
+        mock_emb_svc = AsyncMock()
+        mock_emb_svc.generateEmbedding = AsyncMock(return_value=[0.1] * 1024)
+
+        mock_hits = [
+            {
+                "document_id": "DOC-A",
+                "chunk_id": "c0",
+                "chunk_text": "合同条款",
+                "chunk_sequence": 0,
+                "distance": 0.5,
+            },
+            {
+                "document_id": "DOC-B",
+                "chunk_id": "c1",
+                "chunk_text": "另一份",
+                "chunk_sequence": 0,
+                "distance": 1.0,
+            },
+        ]
+
+        # 模拟 document_catalog：DOC-A 有名字；DOC-B 没有（catalog 里被删/导入失败）
+        class _Doc:
+            def __init__(self, document_id: str, document_name: str) -> None:
+                self.document_id = document_id
+                self.document_name = document_name
+
+        catalog_docs = [_Doc("DOC-A", "供应商合同 V2.0")]
+
+        mock_doc_svc = MagicMock()
+        mock_doc_svc.listDocuments = AsyncMock(return_value=catalog_docs)
+
+        with patch(
+            "app.services.rag_service._getEmbeddingService",
+            return_value=mock_emb_svc,
+        ):
+            with patch(
+                "app.services.rag_service.searchDocumentChunks",
+                return_value=mock_hits,
+            ):
+                svc = RagService()
+                svc._doc_svc = mock_doc_svc
+
+                hits = await svc.searchDocuments("查询", session=MagicMock())
+
+        # DOC-A 必须查到名字
+        assert hits[0]["document_name"] == "供应商合同 V2.0"
+        # DOC-B 查不到时降级用 document_id 本身（不返回 undefined）
+        assert hits[1]["document_name"] == "DOC-B"
+        # 调用 listDocuments 时必须带上 document_ids 过滤（避免全表扫）
+        mock_doc_svc.listDocuments.assert_called_once()
+        kwargs = mock_doc_svc.listDocuments.call_args.kwargs
+        assert "document_ids" in kwargs
+        assert set(kwargs["document_ids"]) == {"DOC-A", "DOC-B"}
 
     @pytest.mark.asyncio
     async def test_searchDocuments_empty_result(self) -> None:
@@ -132,6 +253,7 @@ class TestRagServiceIngest:
                             document_id="DOC-TEST-001",
                             document_name="测试文档",
                             document_type="CONTRACT",
+                            actor=CurrentUser(userId="test-user"),
                         )
 
         assert result["document_id"] == "DOC-TEST-001"
@@ -156,6 +278,7 @@ class TestRagServiceIngest:
                     content=b"dummy",
                     filename="file.bin",
                     mime_type="application/octet-stream",
+                    actor=CurrentUser(userId="test-user"),
                 )
 
     @pytest.mark.asyncio
@@ -173,6 +296,7 @@ class TestRagServiceIngest:
                     content=b"",
                     filename="empty.txt",
                     mime_type="text/plain",
+                    actor=CurrentUser(userId="test-user"),
                 )
 
     @pytest.mark.asyncio
@@ -209,4 +333,5 @@ class TestRagServiceIngest:
                                 content=b"test",
                                 filename="test.txt",
                                 mime_type="text/plain",
+                                actor=CurrentUser(userId="test-user"),
                             )

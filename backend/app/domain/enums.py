@@ -282,13 +282,23 @@ class FeatureRefreshFrequency(str, Enum):
 
 
 class DocumentType(str, Enum):
-    """文档类型（Phase 5.1）。"""
+    """文档类型（Phase 5.1）。
+
+    与 frontend/src/types/document.ts DOCUMENT_TYPE_OPTIONS 保持一致；新增值
+    必须同步前端下拉，DB 列 String(30) 容纳全部值。
+    """
 
     CONTRACT = "CONTRACT"
     REPORT_8D = "8D_REPORT"
     AUDIT_REPORT = "AUDIT_REPORT"
     SPEC = "SPEC"
     SOP = "SOP"
+    QUALITY_AGREEMENT = "QUALITY_AGREEMENT"
+    INSPECTION_SPEC = "INSPECTION_SPEC"
+    REMEDIATION_REPORT = "REMEDIATION_REPORT"
+    PURCHASE_SPEC = "PURCHASE_SPEC"
+    MEETING_MINUTES = "MEETING_MINUTES"
+    SAFETY_SHEET = "SAFETY_SHEET"
     QUALITY = "QUALITY"
     OTHER = "OTHER"
 
@@ -310,13 +320,20 @@ class DocumentSecurityLevel(str, Enum):
 
 
 class DocEntityRelationType(str, Enum):
-    """文档-实体关联类型（Phase 5.1）。"""
+    """文档-实体关联类型（Phase 5.1）。
+
+    与 frontend/src/types/document.ts DOC_RELATION_TYPE_OPTIONS 保持一致。
+    """
 
     CONTRACT = "CONTRACT"
     REPORT_8D = "8D_REPORT"
     AUDIT_REPORT = "AUDIT_REPORT"
     SPEC = "SPEC"
     SOP = "SOP"
+    QUALITY_AGREEMENT = "QUALITY_AGREEMENT"
+    INSPECTION_SPEC = "INSPECTION_SPEC"
+    REMEDIATION_REPORT = "REMEDIATION_REPORT"
+    OTHER = "OTHER"
 
 
 class RiskLevel(str, Enum):

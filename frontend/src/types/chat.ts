@@ -223,4 +223,6 @@ export interface ChatMessage {
   // 后端 SessionMessage 主键（PDF 单条导出需要：chatStore 暂未在 sendMessage
   // 完成后回填，故默认 undefined，全局按钮正常工作，单条入口 disabled）
   dbMessageId?: number;
+  // Phase 5.6：知识问答引用列表（citations 事件回填；document_name 由后端 hydration 补全）
+  citations?: import("./document").DocQaCitation[] | null;
 }

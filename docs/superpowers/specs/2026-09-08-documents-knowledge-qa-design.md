@@ -365,6 +365,23 @@ assistant 文本先用正则 `\[(\d+)\]` 拆成 segments：
 
 **红线：** 真实 PG + 完整 API 链路 + 真实数据库对象（禁止 sqlite 内存库 + 直接调 service）。
 
+## 12. 实施落地
+
+- 实施计划：`docs/superpowers/plans/2026-09-08-documents-knowledge-qa.md`
+- Commits（按任务顺序）：
+  - Alembic 0047：`feat(db): session_message + channel/citations/user_id`
+  - DTO + 事件 + Prompt：`feat(rag-qa): DTO + SSE events + prompt module`
+  - RagQaService skeleton：`feat(rag-qa): RagQaService skeleton + history + no-chunks short circuit`
+  - RagQaService LLM 流式：`feat(rag-qa): LLM streaming + persist in RagQaService`
+  - API endpoint：`feat(api): POST /api/v1/documents/qa SSE endpoint`
+  - 历史 channel 过滤：`feat(api): chat-history endpoint accepts channel filter`
+  - 前端三件套：`feat(frontend): DocQa types + SSE client + chatStore channel`
+  - CitationList：`feat(frontend): DocumentQaCitationList renders [n] cards`
+  - MessageList + 解析：`feat(frontend): DocumentQaMessageList with [n] citation parser`
+  - Input + History：`feat(frontend): DocumentQaInput + DocumentQaHistoryPanel`
+  - Panel + Tab 4：`feat(frontend): DocumentQaPanel + DocumentsPage Tab 4`
+- 落地日期：2026-09-08
+
 ## 11. 不在本期范围
 
 - 跨文档多跳推理（多步 RAG / Agent 编排）

@@ -4,10 +4,10 @@ import {
   API_BASE_URL,
   REQUEST_TIMEOUT_MS,
   DEFAULT_TENANT_ID,
-  DEFAULT_USER_ID,
 } from "../config";
 import type { ApiResponse } from "../types/common";
 import { i18n } from "../i18n";
+import { useAuthStore } from "../stores/authStore";
 
 // 创建带默认配置的 axios 实例
 export function createHttpClient(): AxiosInstance {
@@ -17,8 +17,19 @@ export function createHttpClient(): AxiosInstance {
     headers: {
       "Content-Type": "application/json",
       "X-Tenant-Id": DEFAULT_TENANT_ID,
-      "X-User-Id": DEFAULT_USER_ID,
     },
+  });
+
+  // 请求拦截：注入 Bearer token
+  instance.interceptors.request.use((config) => {
+    const token = useAuthStore.getState().token;
+    if (token) {
+      config.headers = config.headers ?? {};
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    config.headers = config.headers ?? {};
+    config.headers["X-Tenant-Id"] ??= DEFAULT_TENANT_ID;
+    return config;
   });
 
   // 响应拦截：解包 ApiResponse 信封，失败时抛出 Error
@@ -35,16 +46,30 @@ export function createHttpClient(): AxiosInstance {
       }
       return response;
     },
-    (error: AxiosError<ApiResponse<unknown>>) => {
+    async (error: AxiosError<ApiResponse<unknown>>) => {
       const status = error.response?.status;
       const apiError = error.response?.data?.error;
       const apiDetail = (error.response?.data as { detail?: unknown } | undefined)?.detail;
+
+      // 401 非 /auth/login → 触发登出
+      if (
+        status === 401 &&
+        !error.config?.url?.includes("/auth/login")
+      ) {
+        const state = useAuthStore.getState();
+        if (state.token) {
+          await state.logout();
+        }
+      }
+
       const errMsg =
         apiError ??
         (status
           ? i18n.t("errors.requestFailedHttp", { status: String(status) })
           : i18n.t("errors.networkError"));
-      void message.error(errMsg);
+      if (status !== 401) {
+        void message.error(errMsg);
+      }
       // 携带领域异常 detail（如 NL2SQL 校验差异），供错误消息折叠展示
       // 携带 HTTP status，便于业务页面按状态分流（如 403 → 权限提示 Modal）
       const err = new Error(errMsg) as Error & { detail?: string; status?: number };
@@ -61,5 +86,7 @@ export function createHttpClient(): AxiosInstance {
   return instance;
 }
 
-// 默认单例
-export const httpClient = createHttpClient();
+// 默认单例（向后兼容：旧 API 文件仍使用 httpClient）
+export const apiClient = createHttpClient();
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export const httpClient = apiClient;

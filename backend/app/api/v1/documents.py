@@ -16,11 +16,15 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
+from collections.abc import AsyncIterator
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import getCurrentUser, getDb
 from app.domain.enums import DocumentStatus
+from app.domain.exceptions import DomainError
 from app.domain.schemas import (
     BusinessObjectCodeType,
     DocEntityRelationCreate,
@@ -28,7 +32,9 @@ from app.domain.schemas import (
     DocumentCreate,
     DocumentRead,
     DocumentUpdate,
+    DocQaRequest,
 )
+from app.infrastructure.rate_limit import limiter, rateLimitValue
 from app.services.document_service import DocumentService
 
 router = APIRouter()
@@ -206,6 +212,7 @@ async def uploadDocument(
             owner=owner,
             effective_date=effective_date,
             security_level=security_level,
+            actor=_user,
         )
         return result
     except RagError as e:
@@ -218,6 +225,7 @@ async def searchDocuments(
     security_level: str | None = Query(default=None, alias="securityLevel"),
     top_k: int = Query(default=5, ge=1, le=50, alias="topK"),
     _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
 ) -> list[dict]:
     """语义检索文档 chunks。"""
     from app.services.rag_service import RagService, RagError
@@ -228,6 +236,73 @@ async def searchDocuments(
             q,
             security_level=security_level,
             top_k=top_k,
+            session=session,
         )
     except RagError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+
+@router.post("/qa")
+@limiter.limit(rateLimitValue)
+async def docQa(
+    request: Request,
+    dto: DocQaRequest,
+    _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> StreamingResponse:
+    """文档问答 SSE 流式端点。
+
+    流程：ownership 守卫 → 加载 LlmConfigs → RagQaService.answer_stream →
+    每个 StreamEvent 走 toSse 序列化。
+    """
+    from app.services.messages_zh import MSG_SESSION_NOT_OWNED
+    from sqlalchemy import select
+    from app.domain.models import SessionMessage
+    from app.services.rag_qa_service import RagQaService
+    from app.services.rag_service import RagError
+    from app.services.stream_events import EVENT_ERROR, StreamEvent
+
+    # ownership 守卫：session 不属于当前用户 → 422
+    # 新 sessions 允许（count==0 → 无已有行）；已有行但 user_id 不匹配 → 拒绝
+    if dto.session_id:
+        stmt = (
+            select(SessionMessage.user_id)
+            .where(
+                SessionMessage.session_id == dto.session_id,
+                SessionMessage.channel == "doc_qa",
+            )
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        existing_user_id = result.scalar()
+        if existing_user_id is not None and existing_user_id != _user.userId:
+            raise HTTPException(status_code=422, detail=MSG_SESSION_NOT_OWNED)
+
+    # 加载可用模型
+    from app.services.model_config_service import ModelConfigService
+    configs = await ModelConfigService().list(session, activeOnly=True)
+
+    svc = RagQaService()
+
+    async def eventSource() -> AsyncIterator[str]:
+        try:
+            async for event in svc.answer_stream(
+                session, dto, actor=_user, configs=configs,
+            ):
+                yield event.toSse()
+        except RagError as exc:
+            yield StreamEvent(
+                EVENT_ERROR,
+                {"error": str(exc), "errorType": "LLM"},
+            ).toSse()
+        except DomainError as exc:
+            yield StreamEvent(
+                EVENT_ERROR,
+                {"error": exc.message, "errorType": "DOMAIN", "detail": exc.detail},
+            ).toSse()
+
+    return StreamingResponse(
+        eventSource(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

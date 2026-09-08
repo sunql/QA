@@ -155,3 +155,31 @@ export interface RagSearchResponse {
   query: string;
   results: RagSearchResult[];
 }
+
+// ---------------------------------------------------------------------------
+// Doc-Qa (documents-knowledge-qa, Task 7)
+// ---------------------------------------------------------------------------
+
+export interface DocQaCitation {
+  id: number;
+  document_id: string;
+  document_name: string;
+  chunk_text: string;
+  score: number;
+}
+
+export type DocQaSseEvent =
+  | { kind: "meta"; intent: "doc_qa" }
+  | { kind: "citations"; citations: DocQaCitation[] }
+  | { kind: "token"; content: string }
+  | { kind: "done"; tokensUsed: number; cost: number; modelName: string | null }
+  | { kind: "error"; error: string; errorType: string };
+
+export interface DocQaRequestPayload {
+  sessionId: string;
+  question: string;
+  topK?: number;
+  securityLevel?: string;
+  documentType?: string;
+  modelId?: number;
+}

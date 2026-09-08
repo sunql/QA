@@ -85,6 +85,8 @@ async def test_answer_stream_no_chunks_returns_template() -> None:
 
     session = MagicMock()
     session.execute = AsyncMock(return_value=MagicMock(scalars=lambda: MagicMock(all=lambda: [])))
+    session.add = MagicMock()
+    session.flush = AsyncMock()
     dto = DocQaRequest(session_id="sess-1", question="abc", top_k=8)
 
     actor = CurrentUser(userId="u-1", departments=[])
@@ -103,3 +105,168 @@ async def test_answer_stream_no_chunks_returns_template() -> None:
     assert "未在已上传文档中找到相关依据" in events[2].data["content"]
     assert events[3].event == EVENT_QA_DONE
     svc._llm_factory.assert_not_called()  # 关键：没调 LLM
+
+
+from decimal import Decimal
+
+from app.infrastructure.llm.base_client import LlmMessage, StreamChunk
+from app.services.stream_events import EVENT_TOKEN
+
+
+def _make_fake_client(chunks_text: list[str], model_name: str = "fake-mdl") -> MagicMock:
+    """构造 fake BaseLlmClient，completeStream 返回给定 chunk 序列。"""
+    client = MagicMock()
+
+    async def _stream(messages, **kwargs):
+        for idx, text in enumerate(chunks_text):
+            is_done = idx == len(chunks_text) - 1
+            yield StreamChunk(
+                content=text,
+                isDone=is_done,
+                promptTokens=10,
+                completionTokens=5 * (idx + 1),
+                modelName=model_name,
+            )
+
+    # wrap so tests can assert call count without making it a Mock
+    _calls: list = []
+
+    async def wrapped_stream(messages, **kwargs):
+        _calls.append((messages, kwargs))
+        async for chunk in _stream(messages, **kwargs):
+            yield chunk
+
+    client.completeStream = wrapped_stream
+    client._calls = _calls
+    return client
+
+
+@pytest.mark.asyncio
+async def test_answer_stream_full_pipeline_emits_meta_citations_tokens_done() -> None:
+    """完整流水线：检索命中 → meta + citations + token×N + done，调用 LLM。"""
+    svc = RagQaService()
+    svc._rag_svc = MagicMock()
+    svc._rag_svc.searchDocuments = AsyncMock(return_value=[
+        {"document_id": "DOC-A", "document_name": "合同", "chunk_text": "条款", "score": 0.85},
+    ])
+
+    fake_client = _make_fake_client(["根据", "合同条款", "..."])
+    svc._llm_factory = MagicMock(return_value=fake_client)
+
+    session = MagicMock()
+    # history 为空
+    session.execute = AsyncMock(
+        return_value=MagicMock(scalars=lambda: MagicMock(all=lambda: []))
+    )
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+
+    dto = DocQaRequest(session_id="sess-1", question="什么是质量协议？", top_k=8)
+    actor = CurrentUser(userId="u-1", departments=[])
+    cfg = MagicMock(id=1, model_name="fake-mdl", cost_per_1k_input=Decimal("0.001"), cost_per_1k_output=Decimal("0.002"),
+                    is_active=True, provider="openai", cost_threshold=Decimal("9999"), weight=1)
+
+    events: list = []
+    async for ev in svc.answer_stream(session, dto, actor=actor, configs=[cfg]):
+        events.append(ev)
+
+    # 序列：1 meta + 1 citations + 3 token + 1 done
+    assert len(events) == 6
+    assert events[0].event == EVENT_QA_META
+    assert events[1].event == "qa_citations"
+    assert events[1].data["citations"][0]["id"] == 1
+    assert events[2].event == EVENT_TOKEN
+    assert events[2].data["content"] == "根据"
+    assert events[3].data["content"] == "合同条款"
+    assert events[4].data["content"] == "..."
+    assert events[5].event == EVENT_QA_DONE
+    # done 携带 token 统计
+    assert events[5].data["modelName"] == "fake-mdl"
+    assert events[5].data["tokensUsed"] > 0
+
+
+@pytest.mark.asyncio
+async def test_answer_stream_passes_history_to_llm_as_plain_text() -> None:
+    """第 2 轮：history 注入到 user message 中，纯文本不含 citations JSON。"""
+    svc = RagQaService()
+    svc._rag_svc = MagicMock()
+    svc._rag_svc.searchDocuments = AsyncMock(return_value=[
+        {"document_id": "DOC-A", "document_name": "合同", "chunk_text": "条款", "score": 0.85},
+    ])
+
+    fake_client = _make_fake_client(["好。"])
+    svc._llm_factory = MagicMock(return_value=fake_client)
+
+    # history 已有 1 轮 user + 1 轮 assistant
+    rows_history = [
+        MagicMock(role="user", content="什么是质量协议？", citations=None, channel="doc_qa"),
+        MagicMock(role="assistant", content="质量协议是...", citations=[{"id":1}], channel="doc_qa"),
+    ]
+    session = MagicMock()
+    # 第 1 次调 execute → history；第 2 次调 execute → persist user 行；第 3 次 → persist assistant
+    session.execute = AsyncMock(side_effect=[
+        MagicMock(scalars=lambda: MagicMock(all=lambda: rows_history)),  # history
+        MagicMock(),  # user 落库
+        MagicMock(),  # assistant 落库
+    ])
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+
+    dto = DocQaRequest(session_id="sess-1", question="更详细说说", top_k=8)
+    actor = CurrentUser(userId="u-1", departments=[])
+    cfg = MagicMock(id=1, model_name="fake-mdl", cost_per_1k_input=Decimal("0.001"), cost_per_1k_output=Decimal("0.002"),
+                    is_active=True, provider="openai", cost_threshold=Decimal("9999"), weight=1)
+
+    async for _ in svc.answer_stream(session, dto, actor=actor, configs=[cfg]):
+        pass
+
+    # 验证 LLM 收到的 messages 含历史纯文本
+    assert len(fake_client._calls) == 1
+    messages_arg = fake_client._calls[0][0]
+    user_msg = next(m for m in messages_arg if m.role == "user")
+    assert "什么是质量协议？" in user_msg.content
+    assert "质量协议是..." in user_msg.content
+    assert "citations" not in user_msg.content  # 不含 JSON
+    assert '{"id"' not in user_msg.content
+
+
+@pytest.mark.asyncio
+async def test_answer_stream_persists_user_and_assistant_with_citations() -> None:
+    """流结束后落库 2 行 session_message：user + assistant（assistant 带 citations）。"""
+    svc = RagQaService()
+    svc._rag_svc = MagicMock()
+    svc._rag_svc.searchDocuments = AsyncMock(return_value=[
+        {"document_id": "DOC-A", "document_name": "合同", "chunk_text": "条款", "score": 0.85},
+    ])
+    fake_client = _make_fake_client(["回答"])
+    svc._llm_factory = MagicMock(return_value=fake_client)
+
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=[
+        MagicMock(scalars=lambda: MagicMock(all=lambda: [])),  # history 空
+        MagicMock(),  # user 落库
+        MagicMock(),  # assistant 落库
+    ])
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+
+    dto = DocQaRequest(session_id="sess-1", question="问题", top_k=8)
+    actor = CurrentUser(userId="u-1", departments=[])
+    cfg = MagicMock(id=1, model_name="fake-mdl", cost_per_1k_input=Decimal("0.001"), cost_per_1k_output=Decimal("0.002"),
+                    is_active=True, provider="openai", cost_threshold=Decimal("9999"), weight=1)
+
+    async for _ in svc.answer_stream(session, dto, actor=actor, configs=[cfg]):
+        pass
+
+    # session.add 必须被调 ≥ 2 次（user + assistant）
+    assert session.add.call_count >= 2
+    added_entities = [c.args[0] for c in session.add.call_args_list]
+    # 找到 user 行（content=dto.question）和 assistant 行（content=回答）
+    user_rows = [e for e in added_entities if e.content == "问题" and e.role == "user"]
+    asst_rows = [e for e in added_entities if e.content == "回答" and e.role == "assistant"]
+    assert len(user_rows) == 1
+    assert len(asst_rows) == 1
+    assert user_rows[0].channel == "doc_qa"
+    assert user_rows[0].user_id == "u-1"
+    assert asst_rows[0].citations is not None
+    assert asst_rows[0].citations[0]["document_id"] == "DOC-A"

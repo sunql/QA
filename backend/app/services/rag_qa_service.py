@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -84,6 +85,37 @@ class RagQaService:
                 break
         return out
 
+    async def _persist(
+        self,
+        session: AsyncSession,
+        dto: DocQaRequest,
+        answer: str,
+        citations: list[dict[str, Any]],
+        *,
+        actor: CurrentUser,
+    ) -> None:
+        """落库 user 行 + assistant 行（doc_qa channel）。"""
+        user_msg = SessionMessage(
+            session_id=dto.session_id,
+            role="user",
+            content=dto.question,
+            channel="doc_qa",
+            user_id=actor.userId,
+        )
+        session.add(user_msg)
+
+        asst_msg = SessionMessage(
+            session_id=dto.session_id,
+            role="assistant",
+            content=answer,
+            question=dto.question,
+            citations=citations or None,
+            channel="doc_qa",
+            user_id=actor.userId,
+        )
+        session.add(asst_msg)
+        await session.flush()
+
     async def answer_stream(
         self,
         session: AsyncSession,
@@ -120,8 +152,66 @@ class RagQaService:
         if not chunks or chunks[0].get("score", 0.0) < _SCORE_THRESHOLD:
             yield StreamEvent(EVENT_TOKEN, {"content": _NO_CHUNKS_TEMPLATE})
             yield StreamEvent(EVENT_QA_DONE, {"tokensUsed": 0, "cost": 0.0, "modelName": None})
+            await self._persist(session, dto, _NO_CHUNKS_TEMPLATE, [], actor=actor)
             return
 
-        # 6. LLM 流式（占位，Task 4 实现）
-        # 此处保留供 Task 4 填充完整 LLM 流式逻辑
-        raise NotImplementedError("Task 4 填充：LLM 流式 + 落库 + done 事件")
+        # 6. 选模型（dto.model_id 优先）
+        if dto.model_id is not None:
+            selected = next((c for c in configs if c.id == dto.model_id), None)
+            if selected is None:
+                from app.services.messages_zh import MSG_MODEL_CONFIG_UNAVAILABLE
+                raise ValueError(MSG_MODEL_CONFIG_UNAVAILABLE.format(id=dto.model_id))
+        else:
+            from app.services.model_router_service import ModelRouterService, RoutingContext
+            router = ModelRouterService()
+            selected = router.selectModel(
+                configs, dto.question,
+                RoutingContext(sessionId=dto.session_id),
+            )
+
+        # 7. 拼 prompt
+        client = self._llm_factory(selected) if self._llm_factory else None
+        if client is None:
+            raise RuntimeError("llm_factory 未配置")
+
+        chunks_json = format_chunks_json(chunks)
+        messages: list[LlmMessage] = [
+            LlmMessage(role="system", content=DOC_QA_SYSTEM_PROMPT.format(chunks_json=chunks_json)),
+            LlmMessage(
+                role="user",
+                content=DOC_QA_USER_TEMPLATE.format(
+                    history_block=history_block, question=dto.question,
+                ),
+            ),
+        ]
+
+        # 8. 流式 LLM
+        full_answer = ""
+        total_pt = 0
+        total_ct = 0
+        async for chunk in client.completeStream(messages, model=selected.model_name):
+            full_answer += chunk.content
+            if chunk.content:
+                yield StreamEvent(EVENT_TOKEN, {"content": chunk.content})
+            if chunk.isDone:
+                total_pt = chunk.promptTokens
+                total_ct = chunk.completionTokens
+
+        # 9. 计算 cost
+        cost = (
+            Decimal(total_pt) * Decimal(str(selected.cost_per_1k_input))
+            + Decimal(total_ct) * Decimal(str(selected.cost_per_1k_output))
+        ) / Decimal(1000)
+
+        # 10. 落库（user + assistant）
+        await self._persist(session, dto, full_answer, citations, actor=actor)
+
+        # 11. done
+        yield StreamEvent(
+            EVENT_QA_DONE,
+            {
+                "tokensUsed": total_pt + total_ct,
+                "cost": float(cost),
+                "modelName": selected.model_name,
+            },
+        )

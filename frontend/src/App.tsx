@@ -1,5 +1,7 @@
 import { Routes, Route, Navigate } from "react-router-dom";
+import RequireAuth from "./components/common/RequireAuth";
 import AppLayout from "./components/common/AppLayout";
+import LoginPage from "./pages/LoginPage";
 import ModelConfigPage from "./pages/ModelConfigPage";
 import EmbeddingProvidersPage from "./pages/EmbeddingProvidersPage";
 import ChatPage from "./pages/ChatPage";
@@ -33,37 +35,40 @@ import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<AppLayout />}>
-        <Route index element={<Navigate to="/models" replace />} />
-        <Route path="models" element={<ModelConfigPage />} />
-        <Route path="embeddings" element={<EmbeddingProvidersPage />} />
-        <Route path="chat" element={<ChatPage />} />
-        <Route path="ontology" element={<OntologyPage />} />
-        <Route path="datasource" element={<DatasourcePage />} />
-        <Route path="data-quality" element={<DataQualityPage />} />
-        <Route path="data-quality/generate" element={<DataQualityRuleGeneratePage />} />
-        <Route path="lineage" element={<LineagePage />} />
-        <Route path="entity-mapping" element={<EntityMappingPage />} />
-        <Route path="kpi-catalog" element={<KpiCatalogPage />} />
-        <Route path="features" element={<FeatureCatalogPage />} />
-        <Route path="usage" element={<UsagePage />} />
-        <Route path="status" element={<ServiceStatusPage />} />
-        <Route path="graph" element={<Neo4jGraphPage />} />
-        <Route path="vectors" element={<MilvusVectorsPage />} />
-        <Route path="supplier-360" element={<Supplier360Page />} />
-        <Route path="supplier-risk" element={<SupplierRiskPage />} />
-        <Route path="agents/run" element={<AgentRuntimePage />} />
-        <Route path="agents" element={<AgentRegistryPage />} />
-        <Route path="admin/audit" element={<AdminAuditPage />} />
-        <Route path="admin/tools" element={<AdminToolsPage />} />
-        <Route path="admin/feature-rules" element={<AdminFeatureRulesPage />} />
-        <Route path="admin/users" element={<AdminUsersPage />} />
-        <Route path="admin/roles" element={<AdminRolesPage />} />
-        <Route path="admin/organizations" element={<AdminOrganizationsPage />} />
-        <Route path="admin/menus" element={<AdminMenusPage />} />
-        <Route path="business-objects" element={<BusinessObjectPage />} />
-        <Route path="documents" element={<DocumentsPage />} />
-        <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />
+      <Route path="/login" element={<LoginPage />} />
+      <Route element={<RequireAuth />}>
+        <Route element={<AppLayout />}>
+          <Route path="/" element={<Navigate to="/chat" replace />} />
+          <Route path="models" element={<ModelConfigPage />} />
+          <Route path="embeddings" element={<EmbeddingProvidersPage />} />
+          <Route path="chat" element={<ChatPage />} />
+          <Route path="ontology" element={<OntologyPage />} />
+          <Route path="datasource" element={<DatasourcePage />} />
+          <Route path="data-quality" element={<DataQualityPage />} />
+          <Route path="data-quality/generate" element={<DataQualityRuleGeneratePage />} />
+          <Route path="lineage" element={<LineagePage />} />
+          <Route path="entity-mapping" element={<EntityMappingPage />} />
+          <Route path="kpi-catalog" element={<KpiCatalogPage />} />
+          <Route path="features" element={<FeatureCatalogPage />} />
+          <Route path="usage" element={<UsagePage />} />
+          <Route path="status" element={<ServiceStatusPage />} />
+          <Route path="graph" element={<Neo4jGraphPage />} />
+          <Route path="vectors" element={<MilvusVectorsPage />} />
+          <Route path="supplier-360" element={<Supplier360Page />} />
+          <Route path="supplier-risk" element={<SupplierRiskPage />} />
+          <Route path="agents/run" element={<AgentRuntimePage />} />
+          <Route path="agents" element={<AgentRegistryPage />} />
+          <Route path="admin/audit" element={<AdminAuditPage />} />
+          <Route path="admin/tools" element={<AdminToolsPage />} />
+          <Route path="admin/feature-rules" element={<AdminFeatureRulesPage />} />
+          <Route path="admin/users" element={<AdminUsersPage />} />
+          <Route path="admin/roles" element={<AdminRolesPage />} />
+          <Route path="admin/organizations" element={<AdminOrganizationsPage />} />
+          <Route path="admin/menus" element={<AdminMenusPage />} />
+          <Route path="business-objects" element={<BusinessObjectPage />} />
+          <Route path="documents" element={<DocumentsPage />} />
+          <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />
+        </Route>
       </Route>
     </Routes>
   );

@@ -8,6 +8,50 @@
  */
 
 export const enUS = {
+  userMenu: {
+    profile: "Profile",
+    changePassword: "Change Password",
+    logout: "Sign Out",
+    changePasswordHint: "Please change your password on first login",
+    displayName: "{displayName} ({username})",
+  },
+  auth: {
+    login: {
+      title: "Sign in to qa-system",
+      username: "Username",
+      password: "Password",
+      rememberMe: "Remember me",
+      submit: "Sign in",
+      forgot: "Forgot password? Contact your admin",
+      invalidCredentials: "Invalid username or password",
+      accountDisabled: "Account disabled, contact your admin",
+      rateLimited: "Too many attempts, please try later",
+      networkError: "Network error, please try again",
+    },
+    changePassword: {
+      title: "Change Password",
+      oldPassword: "Current Password",
+      newPassword: "New Password",
+      confirmPassword: "Confirm New Password",
+      policyHint: "≥8 chars with letters and digits",
+      weak: "Password must be ≥8 chars with letters and digits",
+      mismatch: "Passwords do not match",
+      oldWrong: "Current password is incorrect",
+      success: "Password changed, please sign in again",
+    },
+    profile: {
+      title: "Profile",
+      username: "Username",
+      displayName: "Display Name",
+      email: "Email",
+      roles: "Roles",
+      organizations: "Organizations",
+      lastLogin: "Last Login",
+      tenant: "Tenant",
+      editPassword: "Change Password",
+    },
+  },
+
   common: {
     refresh: "Refresh",
     edit: "Edit",
@@ -108,6 +152,8 @@ export const enUS = {
       adminRoles: "Roles",
       adminOrganizations: "Organizations",
       adminMenus: "Menus",
+      profile: "Profile",
+      changePassword: "Change Password",
     },
   },
 

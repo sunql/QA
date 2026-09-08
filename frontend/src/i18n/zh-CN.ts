@@ -14,6 +14,50 @@
  */
 
 export const zhCN = {
+  userMenu: {
+    profile: "个人信息",
+    changePassword: "修改密码",
+    logout: "登出",
+    changePasswordHint: "首次登录请修改密码",
+    displayName: "{displayName} ({username})",
+  },
+  auth: {
+    login: {
+      title: "登录 qa-system",
+      username: "用户名",
+      password: "密码",
+      rememberMe: "记住我",
+      submit: "登录",
+      forgot: "忘记密码？请联系管理员",
+      invalidCredentials: "用户名或密码错误",
+      accountDisabled: "账号已停用，请联系管理员",
+      rateLimited: "尝试次数过多，请稍后再试",
+      networkError: "网络异常，请稍后重试",
+    },
+    changePassword: {
+      title: "修改密码",
+      oldPassword: "当前密码",
+      newPassword: "新密码",
+      confirmPassword: "确认新密码",
+      policyHint: "≥8 位，含字母和数字",
+      weak: "密码至少 8 位且必须包含字母和数字",
+      mismatch: "两次输入不一致",
+      oldWrong: "当前密码不正确",
+      success: "密码已修改，请重新登录",
+    },
+    profile: {
+      title: "个人信息",
+      username: "用户名",
+      displayName: "显示名",
+      email: "邮箱",
+      roles: "角色",
+      organizations: "所属组织",
+      lastLogin: "上次登录",
+      tenant: "租户",
+      editPassword: "修改密码",
+    },
+  },
+
   common: {
     refresh: "刷新",
     edit: "编辑",
@@ -114,6 +158,8 @@ export const zhCN = {
       adminRoles: "角色管理",
       adminOrganizations: "组织管理",
       adminMenus: "菜单管理",
+      profile: "个人信息",
+      changePassword: "修改密码",
     },
   },
 

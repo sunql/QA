@@ -541,8 +541,22 @@ class OntologyPropertyUpdate(CamelModel):
     is_foreign_key: bool | None = None
     ref_class_id: int | None = None
     source_column: str | None = None
+    # 值域：本体属性管理页可手动调整 LLM 采纳的值；
+    # None 表示不修改；显式空数组 视作清空值域。
+    allowed_values: list[str] | None = Field(default=None, max_length=50)
 
     _check_aliases = field_validator("business_aliases")(_validateBusinessAliases)
+
+    @field_validator("allowed_values")
+    @classmethod
+    def _validateAllowedValuesNoQuotes(cls, v: list[str] | None) -> list[str] | None:
+        """与 apply-suggestion 一致：禁止单引号（SQL 注入防护）。"""
+        if v is None:
+            return v
+        for s in v:
+            if "'" in s:
+                raise ValueError("allowed_values must not contain single quote")
+        return v
 
 
 class OntologyMetricCreate(CamelModel):
@@ -594,6 +608,9 @@ class OntologyPropertyRead(CamelModel):
     is_foreign_key: bool
     ref_class_id: int | None = None
     source_column: str | None = None
+    # 值域（LLM 采纳或人工填入）；null 表示未约束。
+    # 暴露给本体属性管理页（让用户能看到「已沉淀」的值并手动修正）。
+    allowed_values: list[str] | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
 
@@ -1363,6 +1380,17 @@ class ChatRequest(CamelModel):
     modelId: int | None = Field(default=None, description=MSG_SCHEMA_CHAT_MODEL_ID)
     # 用户显式指定的图表类型；None 表示由系统按数据形状自动推荐
     chartType: ChartType | None = Field(default=None, description=MSG_SCHEMA_CHAT_CHART_TYPE_EXPLICIT)
+
+
+class DocQaRequest(CamelModel):
+    """文档问答请求（与 ChatRequest 解耦）。"""
+
+    session_id: str = Field(..., min_length=1, max_length=64)
+    question: str = Field(..., min_length=1)
+    top_k: int = Field(default=8, ge=1, le=20)
+    security_level: str | None = None
+    document_type: str | None = None
+    model_id: int | None = None
 
 
 class ExtractedEntities(CamelModel):
@@ -2660,6 +2688,9 @@ class ParseDescriptionsRequest(CamelModel):
     """parse-descriptions 请求：给定本体类，让 LLM 从属性描述中提取候选约束。"""
 
     class_id: int = Field(..., gt=0)
+    # 可选 LLM 模型配置 id（前端 modelId）；None 走默认 OPENAI_API_KEY env 路径。
+    # 序列化时通过 to_camel alias 输出 modelId（前端约定）。
+    model_id: int | None = Field(default=None, gt=0, alias="modelId")
 
 
 class PropertyConstraintSuggestionRead(CamelModel):
@@ -2677,6 +2708,9 @@ class ParseDescriptionsResponse(CamelModel):
     """parse-descriptions 响应。"""
 
     suggestions: list[PropertyConstraintSuggestionRead] = Field(default_factory=list)
+    # 当前类下，已在 ontology_property.allowed_values 写入值的 propertyId 列表；
+    # 前端用它初始化 LlmPanel.adoptedIds，让刷新页面也保持已采纳状态。
+    persisted_property_ids: list[int] = Field(default_factory=list)
 
 
 class ApplySuggestionRequest(CamelModel):

@@ -92,7 +92,7 @@ def buildRuleCode(className: str, propertyName: str, ruleType: RuleType) -> str:
     slugified = f"DQ_{_slug(className)}_{_slug(propertyName)}_{ruleType.value}"
     digest = hashlib.sha256(  # noqa: UP012
         f"{className}\x00{propertyName}\x00{ruleType.value}".encode()
-    ).hexdigest()[:7]
+    ).hexdigest().upper()[:7]
     if len(slugified) <= _RULE_CODE_MAX - 8:
         return f"{slugified}_{digest}"
     return f"{slugified[:_RULE_CODE_MAX - 8]}_{digest}"
@@ -146,6 +146,11 @@ def deriveSuggestions(
         except ExpressionUnsafeError as exc:
             blocked.append(BlockedProperty(prop.property_name, exc.message))
             continue
+        except ValidationError as exc:
+            # 推导期的数据完整性问题（如 FK 缺 ref_class、allowed_values 含非法字符）—
+            # 进 blocked 而不是 422，让用户看到具体哪个属性需要修，而不是请求级报错。
+            blocked.append(BlockedProperty(prop.property_name, exc.message))
+            continue
         resolvedProps.append(prop)
         suggestions.extend(propSuggestions)
     suggestions.extend(_deriveJoinConsistency(ctx, resolvedProps, joinEdges))
@@ -188,8 +193,8 @@ def _deriveAllowedValues(
     for value in values:
         if not _ALLOWED_VALUE_RE.match(value):
             raise ValidationError(
-                f"allowed_values 含非法字符: {value!r}",
-                detail="值域不允许包含单引号、反斜杠或控制字符，且长度需 1-50 字符",
+                f"属性 {prop.property_name!r} 的 allowed_values 含非法值 {value!r}："
+                f"值不允许包含单引号、反斜杠或控制字符，且长度需 1-50 字符"
             )
     quoted = ",".join(f"'{v}'" for v in values)
     expr = f"{col.column_name} IN ({quoted})"
@@ -207,7 +212,10 @@ def _deriveAllowedValues(
 def _deriveRef(ctx: ClassContext, prop: PropertyMeta, col: ColumnMeta) -> RuleSuggestion:
     ref = prop.ref_class
     if ref is None:
-        raise ValidationError("外键属性缺少 ref_class")
+        raise ValidationError(
+            f"外键属性 {prop.property_name!r} 缺少 ref_class："
+            f"请到本体属性管理页 (/ontology-properties) 设置 ref_class_id 或取消 is_foreign_key"
+        )
     refTable = validate_identifier(ref.source_table or "", role="ref_table")
     refColumn = validate_identifier(prop.ref_key_column or "", role="ref_key_column")
     if ref.object_type == ObjectType.REFERENCE.value:

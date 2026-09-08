@@ -128,6 +128,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.services.business_object_registry import businessObjectRegistry
 
         await businessObjectRegistry.warmUp(session)
+        # 幂等 seed 菜单基线（6 section + 28 item，含 feat-rbac-identity 4 个 RBAC
+        # 管理叶子）；on_conflict_do_update 不会丢已有行，仅刷新可变更列。
+        # 置于其它 seed 之前，确保 `GET /menu-config` 启动即可返回完整菜单。
+        from scripts.seed_menu_config import seed_menu_config as seedMenuConfig
+
+        seeded_n = await seedMenuConfig(session_factory)
+        logger.info("menu_config seed: %d rows upserted", seeded_n)
+        # feat-rbac-identity：幂等 seed RBAC 基线（admin 角色 + admin 用户 + 绑定），
+        # 保证启动后必有超管入口（admin 角色旁路全量菜单权限）。置于 schema drift
+        # 校验与其它 seed 之后。
+        from scripts.seed_rbac import seedRbacBaseline
+
+        await seedRbacBaseline(session)
     yield
     logger.info("关闭中，释放外部连接...")
     await shutdownCleanup()
@@ -233,11 +246,14 @@ def createApp() -> FastAPI:
         menu_config,
         model_config,
         ontology,
+        organizations,
+        roles,
         session,
         supplier_360,
         supplier_risk,
         system,
         term_dictionary,
+        users,
         vectors,
     )
 
@@ -303,6 +319,9 @@ def createApp() -> FastAPI:
     app.include_router(feature_rules.router, tags=["feature-rules"])
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
+    app.include_router(users.router, tags=["users"])
+    app.include_router(roles.router, tags=["roles"])
+    app.include_router(organizations.router, tags=["organizations"])
     app.include_router(
         menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]
     )

@@ -11,8 +11,9 @@ GEN_BASE = "/api/v1/data-quality/rules/generate"
 
 async def ensureClassWithProperty(dbSession: AsyncSession, *, sourceTable: str = "PORDER") -> int:
     """造一个本体类 + 一个 PK 属性，返回 class_id。"""
-    from app.domain.models import OntologyClass, OntologyProperty
     import uuid
+
+    from app.domain.models import OntologyClass, OntologyProperty
     suffix = uuid.uuid4().hex[:8]
     cls = OntologyClass(class_name=f"GenTestClass{suffix}", source_table=sourceTable,
                         object_type="Transaction")
@@ -27,8 +28,9 @@ async def ensureClassWithProperty(dbSession: AsyncSession, *, sourceTable: str =
 
 async def ensureDataSourceAndSchema(dbSession, *, tables: dict) -> int:
     """造数据源 + schema_cache（tables: {表名: [(列名, 类型, nullable)]}）。"""
-    from app.domain.models import DataSource, SchemaCache
     import uuid
+
+    from app.domain.models import DataSource, SchemaCache
     ds = DataSource(name=f"gen-{uuid.uuid4().hex[:8]}", type="POSTGRESQL", host="localhost",
                    port=5433, database_name="qa_metadata_test", username="qa_user",
                    password_encrypted="x")
@@ -102,3 +104,94 @@ async def test_preview_existing_rule_marked_exists(client, dbSession):
     res2 = await client.post(f"{GEN_BASE}/preview", json={"classId": classId, "datasourceId": dsId})
     uniq2 = [s for s in res2.json()["suggestions"] if s["ruleType"] == "UNIQUENESS"][0]
     assert uniq2["status"] == "EXISTS"
+
+
+async def test_preview_to_confirm_round_trip_no_422(client, dbSession):
+    """preview 返回的 rule_code 必须能被 confirm 接受（避免 lowercase hex 422）。
+
+    回归测试：preview 用 buildRuleCode 生成小写 hex 后缀的 rule_code，
+    前端原样回传 → 之前 422 pattern_mismatch。修复后必须 200/201 或预期的 409。
+    """
+    classId = await ensureClassWithProperty(dbSession)
+    dsId = await ensureDataSourceAndSchema(dbSession, tables={
+        "PORDER": [
+            ("PO_KEY", "varchar", False),
+            ("STATUS", "varchar", True),
+        ]
+    })
+    # 把 po_key 标成主键以触发 UNIQUENESS+COMPLETENESS 规则
+    preview = (await client.post(
+        f"{GEN_BASE}/preview",
+        json={"classId": classId, "datasourceId": dsId},
+    )).json()
+    new_rules = [s for s in preview["suggestions"] if s["status"] == "NEW"]
+    assert new_rules, "preview 应至少产生 1 条 NEW 规则"
+    # 关键断言：rule_code 必须符合 schema pattern（防止 lowercase hex 回归）
+    import re
+
+    from app.domain.schemas import GenerateRuleItem
+
+    pattern = next(
+        meta.pattern
+        for meta in GenerateRuleItem.model_fields["rule_code"].metadata
+        if hasattr(meta, "pattern")
+    )
+    for s in new_rules:
+        assert re.match(pattern, s["ruleCode"]), (
+            f"rule_code {s['ruleCode']!r} violates schema pattern"
+        )
+    # 回传 confirm：必须不是 422（200/201 成功，或 409 唯一冲突都可接受）
+    confirm = await client.post(
+        f"{GEN_BASE}/confirm",
+        json={"datasourceId": dsId, "rules": new_rules},
+    )
+    assert confirm.status_code != 422, (
+        f"preview→confirm 出现 422，detail: {confirm.text}"
+    )
+
+
+async def test_preview_fk_without_ref_class_returns_blocked_not_422(
+    client: AsyncClient, dbSession: AsyncSession,
+) -> None:
+    """HTTP 端到端：FK 属性缺 ref_class_id 不应让 preview 返 422，
+    而是 200 + blocked[] 列出 property_name，让用户能定位到坏属性。
+
+    回归：用户报 preview 422 '外键属性缺少 ref_class' 无法定位到具体属性。
+    """
+    from app.tests.integration.test_dq_rule_generate_api import (
+        ensureClassWithProperty,
+        ensureDataSourceAndSchema,
+    )
+    from app.domain.models import OntologyProperty
+    from sqlalchemy import select
+
+    classId = await ensureClassWithProperty(dbSession)
+    dsId = await ensureDataSourceAndSchema(
+        dbSession,
+        tables={
+            "PORDER": [
+                ("PO_KEY", "varchar", False),
+                ("SUPPLIER_KEY", "varchar", True),
+            ]
+        },
+    )
+
+    # 加一个 FK=true 但 ref_class_id=NULL 的属性
+    dbSession.add(OntologyProperty(
+        class_id=classId, property_name="supplier_key", source_column="SUPPLIER_KEY",
+        data_type="STRING", is_primary_key=False, is_foreign_key=True, ref_class_id=None,
+    ))
+    await dbSession.commit()
+
+    res = await client.post(
+        f"{GEN_BASE}/preview",
+        json={"classId": classId, "datasourceId": dsId},
+    )
+    assert res.status_code == 200, (
+        f"FK 缺 ref_class 不应让 preview 422；实际 {res.status_code} {res.text}"
+    )
+    body = res.json()
+    assert any(
+        b["propertyName"] == "supplier_key" and "ref_class" in b["reason"]
+        for b in body["blocked"]
+    ), f"blocked 必须包含 supplier_key + ref_class；实际: {body['blocked']}"

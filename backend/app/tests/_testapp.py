@@ -38,11 +38,14 @@ from app.api.v1 import (
     menu_config,
     model_config,
     ontology,
+    organizations,
+    roles,
     session,
     supplier_360,
     supplier_risk,
     system,
     term_dictionary,
+    users,
 )
 from app.config import getSettings
 from app.dependencies import getDb
@@ -167,6 +170,9 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         agent_runtime.router, prefix="/api/v1/agents", tags=["agents"]
     )
     testApp.include_router(agent_tools.router, tags=["agent-tools"])
+    testApp.include_router(users.router, tags=["users"])
+    testApp.include_router(roles.router, tags=["roles"])
+    testApp.include_router(organizations.router, tags=["organizations"])
     testApp.include_router(
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"]
     )

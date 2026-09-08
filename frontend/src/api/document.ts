@@ -14,6 +14,8 @@ import type {
   DocEntityRelationCreate,
   DocEntityRelationRead,
   RagSearchResult,
+  DocQaRequestPayload,
+  DocQaSseEvent,
 } from "../types/document";
 
 // ---------------------------------------------------------------------------
@@ -154,4 +156,58 @@ export async function searchDocuments(
     {}, // POST body required
   );
   return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Doc-Qa SSE client (documents-knowledge-qa, Task 7)
+// ---------------------------------------------------------------------------
+
+function evTypeToKind(t: string | undefined): DocQaSseEvent["kind"] {
+  switch (t) {
+    case "qa_meta": return "meta";
+    case "qa_citations": return "citations";
+    case "token": return "token";
+    case "qa_done": return "done";
+    case "error": return "error";
+    default: return "error";
+  }
+}
+
+export async function searchDocumentsQa(
+  payload: DocQaRequestPayload,
+  onEvent: (event: DocQaSseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch("/api/v1/documents/qa", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // 按 \n\n 拆 SSE event
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() ?? "";
+    for (const part of parts) {
+      const dataLine = part.split("\n").find((l) => l.startsWith("data: "));
+      if (!dataLine) continue;
+      const dataStr = dataLine.slice("data: ".length);
+      try {
+        const obj = JSON.parse(dataStr);
+        // kind 由 event 字段推断
+        const evType = part.split("\n").find((l) => l.startsWith("event: "))?.slice("event: ".length).trim();
+        onEvent({ ...obj, kind: evTypeToKind(evType) });
+      } catch {
+        // 跳过解析失败
+      }
+    }
+  }
 }

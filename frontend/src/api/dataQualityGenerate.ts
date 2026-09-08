@@ -7,11 +7,13 @@ import { httpClient } from "./client";
 import type {
   GeneratePreviewResponse,
   GenerateConfirmResponse,
-  PropertyConstraintSuggestion,
+  LlmModelOption,
+  ParseDescriptionsResponse,
   RuleSuggestion,
 } from "../types/dataQualityGenerate";
 
 const BASE = "/data-quality/rules/generate";
+const MODELS_BASE = "/models";
 
 // ---------------------------------------------------------------------------
 // Task 4: 预览规则建议
@@ -56,16 +58,34 @@ export async function confirmRules(
 // ---------------------------------------------------------------------------
 
 /**
+ * 列出当前可用的 LLM 模型配置（供向导下拉选择）。
+ * 调用 GET /api/v1/models?activeOnly=true。
+ */
+export async function listLlmModels(): Promise<LlmModelOption[]> {
+  const res = await httpClient.get<LlmModelOption[]>(MODELS_BASE, {
+    params: { active_only: true },
+  });
+  return res.data.map((m) => ({
+    id: m.id,
+    modelName: m.modelName,
+    provider: m.provider,
+  }));
+}
+
+/**
  * 解析本体类的属性描述，LLM 推断候选约束（allowed_values / not_null）。
+ * 返回完整 envelope（含 persistedPropertyIds），前端用它初始化 LlmPanel.adoptedIds。
+ * `modelId` 可选：传入则路由层走对应 ModelConfig 创建 client，否则走默认 env 路径。
  */
 export async function parseDescriptions(
   classId: number,
-): Promise<PropertyConstraintSuggestion[]> {
-  const res = await httpClient.post<{ suggestions: PropertyConstraintSuggestion[] }>(
+  modelId?: number | null,
+): Promise<ParseDescriptionsResponse> {
+  const res = await httpClient.post<ParseDescriptionsResponse>(
     `${BASE}/parse-descriptions`,
-    { classId },
+    { classId, modelId: modelId ?? null },
   );
-  return res.data.suggestions;
+  return res.data;
 }
 
 /**

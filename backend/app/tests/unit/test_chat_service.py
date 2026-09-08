@@ -87,15 +87,31 @@ class _PipelineLlm:
 
 
 class _FakeSession:
-    """最小假会话：查询返回空；add_all/add/commit/refresh 为 no-op 并记录。"""
+    """最小假会话：查询返回空；add_all/add/commit/refresh 为 no-op 并记录。
 
-    def __init__(self) -> None:
+    可选注入 modelConfigs，让 select(LlmConfig) 返回指定列表（默认仍为 []），
+    供「显式 modelId 选取模型」相关用例验证；不注入时与历史行为完全一致。
+    只在语句目标是 LlmConfig 时返回注入项，其他查询维持历史空集行为，避免干扰
+    会话消息 / 数据源 / 本体等查询路径。
+    """
+
+    def __init__(self, modelConfigs: list[LlmConfig] | None = None) -> None:
         self.added: list[object] = []
+        self._modelConfigs: list[LlmConfig] = list(modelConfigs or [])
 
     async def execute(self, stmt):
+        isLlmQuery = any(
+            desc.get("entity") is LlmConfig
+            for desc in getattr(stmt, "column_descriptions", [])
+        )
+        rows: list = list(self._modelConfigs) if isLlmQuery else []
+
         class _Scalars:
             def all(self) -> list:
-                return []
+                return list(rows)
+
+            def first(self):
+                return rows[0] if rows else None
 
         class _Result:
             def scalars(self):
@@ -105,7 +121,7 @@ class _FakeSession:
                 return None
 
             def all(self) -> list:
-                return []
+                return list(rows)
 
         return _Result()
 
@@ -1423,3 +1439,84 @@ class TestAnswerSystemPromptHardConstraint:
 
         assert "禁止反向追问" in _ANSWER_SYSTEM_PROMPT
         assert "需要继续查询" in _ANSWER_SYSTEM_PROMPT or "继续查询吗" in _ANSWER_SYSTEM_PROMPT
+
+
+class TestExplicitModelIdRejectsInactive:
+    """显式 modelId 选取时必须拒绝已停用（is_active=False）的模型。
+
+    Bug repro（2026-09-08 用户反馈）：大模型配置页停用的模型，在 AIChatService
+    中仍可被显式选取并实际调用——_buildPipelineContext 只校验「存在」，
+    未校验「启用」。修复后应抛 NotFoundError(MSG_MODEL_CONFIG_UNAVAILABLE)，
+    该消息已声明「不存在或已禁用」语义。
+    """
+
+    async def test_rejects_inactive_model_when_user_specifies_modelId(self) -> None:
+        from app.services.messages_zh import MSG_MODEL_CONFIG_UNAVAILABLE
+
+        inactive = LlmConfig(
+            id=99,
+            model_name="disabled-model",
+            provider="openai",
+            cost_per_1k_input=Decimal("0.001"),
+            cost_per_1k_output=Decimal("0.002"),
+            is_active=False,
+        )
+        session = _FakeSession(modelConfigs=[inactive])
+        service, _, _, _ = _buildService()
+        dto = ChatRequest(
+            sessionId="s1",
+            question="各供应商的收货数量汇总",
+            datasourceId=1,
+            modelId=99,
+        )
+        with pytest.raises(NotFoundError) as excInfo:
+            await service.processMessage(dto, session)
+        # 复用既有消息「指定的模型配置 {id} 不存在或已禁用」——id 必须出现，禁用语义也必须出现
+        assert str(excInfo.value) == MSG_MODEL_CONFIG_UNAVAILABLE.format(id=99)
+
+    async def test_rejects_unknown_modelId_when_user_specifies_modelId(self) -> None:
+        """显式 modelId 指向不存在的 id 时同样拒绝（覆盖 selected is None 分支）。"""
+        from app.services.messages_zh import MSG_MODEL_CONFIG_UNAVAILABLE
+
+        existing = LlmConfig(
+            id=99,
+            model_name="any-model",
+            provider="openai",
+            cost_per_1k_input=Decimal("0.001"),
+            cost_per_1k_output=Decimal("0.002"),
+            is_active=True,
+        )
+        session = _FakeSession(modelConfigs=[existing])
+        service, _, _, _ = _buildService()
+        dto = ChatRequest(
+            sessionId="s1",
+            question="各供应商的收货数量汇总",
+            datasourceId=1,
+            modelId=999,  # 不存在的 id
+        )
+        with pytest.raises(NotFoundError) as excInfo:
+            await service.processMessage(dto, session)
+        assert str(excInfo.value) == MSG_MODEL_CONFIG_UNAVAILABLE.format(id=999)
+
+    async def test_accepts_active_model_when_user_specifies_modelId(self) -> None:
+        """回归保护：合法（is_active=True）显式选择应正常进入流水线。"""
+        active = LlmConfig(
+            id=1,
+            model_name="test-model",
+            provider="openai",
+            cost_per_1k_input=Decimal("0.001"),
+            cost_per_1k_output=Decimal("0.002"),
+            is_active=True,
+        )
+        session = _FakeSession(modelConfigs=[active])
+        service, llm, _, _ = _buildService()
+        dto = ChatRequest(
+            sessionId="s1",
+            question="各供应商的收货数量汇总",
+            datasourceId=1,
+            modelId=1,
+        )
+        response = await service.processMessage(dto, session)
+        assert response.intent == IntentType.QUERY.value
+        assert response.modelName == "test-model"
+        assert len(llm.calls) == 4  # 完整流水线：计划 + SQL + 图表 + 回答

@@ -38,6 +38,26 @@ def test_build_rule_code_deterministic():
     assert code.startswith("DQ_PURCHASEORDER_PO_KEY_UNIQUENESS_") and len(code.split("_")[-1]) == 7
 
 
+def test_build_rule_code_matches_schema_pattern():
+    """rule_code 必须符合 GenerateRuleItem.rule_code 的 ^[A-Z][A-Z0-9_]*$ 契约。
+
+    否则 preview 返回的 rule_code 被前端原样回传给 confirm 时会被 Pydantic 422 拦截。
+    hexdigest 历史上是 lowercase a-f，会违反此 pattern。
+    """
+    import re
+
+    from app.domain.schemas import GenerateRuleItem
+
+    code = buildRuleCode("PurchaseOrder", "po_key", RuleType.UNIQUENESS)
+    # 直接从 schema 读 pattern，避免硬编码两份字符串
+    pattern = next(
+        meta.pattern
+        for meta in GenerateRuleItem.model_fields["rule_code"].metadata
+        if hasattr(meta, "pattern")
+    )
+    assert re.match(pattern, code), f"rule_code {code!r} violates pattern {pattern!r}"
+
+
 def test_build_rule_code_always_has_hash_suffix():
     code = buildRuleCode("PurchaseOrder", "po_key", RuleType.UNIQUENESS)
     # hash suffix is always present even for short names
@@ -150,11 +170,18 @@ def test_schema_missing_column_blocks_property():
     assert any("NOPE" in b.reason for b in blocked)
 
 
-def test_allowed_value_with_quote_rejected():
-    with pytest.raises(ValidationError):
-        deriveSuggestions(CTX, [_prop(
-            property_name="status", source_column="STATUS", is_primary_key=False,
-            allowed_values=["OK'--"])], [], SCHEMA)
+def test_allowed_value_with_quote_rejected_via_blocked():
+    """allowed_values 含非法字符（如单引号）：推导期 ValidationError → blocked，不再 raise。
+    blocked.reason 必须含非法值以便用户定位。
+    """
+    sugg, blocked = deriveSuggestions(CTX, [_prop(
+        property_name="status", source_column="STATUS", is_primary_key=False,
+        allowed_values=["OK'--"])], [], SCHEMA)
+    assert sugg == []
+    assert any(
+        b.property_name == "status" and "OK'--" in b.reason
+        for b in blocked
+    )
 
 
 def test_non_text_column_skips_regex():
@@ -201,18 +228,32 @@ def test_source_table_none_blocks_all():
     assert blocked == [BlockedProperty("po_key", "类未配置 source_table")]
 
 
-def test_allowed_value_too_long_rejected():
-    with pytest.raises(ValidationError):
-        deriveSuggestions(CTX, [_prop(
-            property_name="status", source_column="STATUS", is_primary_key=False,
-            allowed_values=["X" * 51])], [], SCHEMA)
+def test_allowed_value_too_long_rejected_via_blocked():
+    """allowed_values 单项超 50 字符：推导期 ValidationError → blocked。"""
+    sugg, blocked = deriveSuggestions(CTX, [_prop(
+        property_name="status", source_column="STATUS", is_primary_key=False,
+        allowed_values=["X" * 51])], [], SCHEMA)
+    assert sugg == []
+    assert any(
+        b.property_name == "status" and "status" in b.reason
+        for b in blocked
+    )
 
 
-def test_fk_without_ref_class_raises():
-    with pytest.raises(ValidationError):
-        deriveSuggestions(CTX, [_prop(
-            property_name="supplier_key", source_column="SUPPLIER_KEY",
-            is_primary_key=False, is_foreign_key=True, ref_class=None)], [], SCHEMA)
+def test_fk_without_ref_class_is_blocked_with_property_name():
+    """回归：用户报「preview 422 外键属性缺少 ref_class」无定位。
+    修复契约：FK 缺 ref_class 不再 raise，而是进 blocked 列表，
+    reason 必须包含 property_name 让用户能定位到具体属性。
+    """
+    sugg, blocked = deriveSuggestions(CTX, [_prop(
+        property_name="supplier_key", source_column="SUPPLIER_KEY",
+        is_primary_key=False, is_foreign_key=True, ref_class=None)], [], SCHEMA)
+    assert sugg == []
+    assert len(blocked) == 1
+    assert blocked[0].property_name == "supplier_key"
+    # 错误消息必须含 property_name，让前端 blocked 面板能精准定位
+    assert "supplier_key" in blocked[0].reason
+    assert "ref_class" in blocked[0].reason
 
 
 def test_fk_without_ref_source_table_is_blocked():

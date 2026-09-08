@@ -689,9 +689,12 @@ class DataSource(Base, TimestampMixin):
 
 
 class SessionMessage(Base, TimestampMixin):
-    """会话消息持久化表 - 服务端上下文，供后续轮次 Prompt 注入。
+    """会话消息持久化表。
 
     role 取值：user / assistant。question 与 sql_generated 仅在 assistant 侧回填。
+    channel（0047）：chat / doc_qa 渠道隔离。
+    citations（0047）：仅 doc_qa 的 assistant 行填引用 chunks JSON；chat 恒 NULL。
+    user_id（0047）：doc_qa ownership 守卫必填；chat 存量行 NULL，新行 API 层透传。
     读取按 (session_id, created_time) 索引，保留最近 N 轮作为上下文。
     """
 
@@ -703,11 +706,21 @@ class SessionMessage(Base, TimestampMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     question: Mapped[str | None] = mapped_column(Text, nullable=True)
     sql_generated: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel: Mapped[str] = mapped_column(String(16), default="chat", nullable=False)
+    citations: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
+    )
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
-    __table_args__ = (Index("idx_session_msg_time", "session_id", "created_time"),)
+    __table_args__ = (
+        Index("idx_session_msg_time", "session_id", "created_time"),
+        Index("idx_session_msg_channel_time", "channel", "session_id", "created_time"),
+        Index("idx_session_msg_user_channel_time", "user_id", "channel", "created_time"),
+    )
 
     def __repr__(self) -> str:
-        return f"<SessionMessage id={self.id} session={self.session_id} role={self.role}>"
+        return f"<SessionMessage id={self.id} session={self.session_id} role={self.role} channel={self.channel}>"
 
 
 class SchemaCache(Base, TimestampMixin):
@@ -1596,3 +1609,15 @@ class FeatureRuleThreshold(Base):
 
 # Re-export MenuConfig so Alembic autogenerate picks it up.
 from app.models.menu_config import MenuConfig  # noqa: E402,F401
+
+# Re-export RBAC identity models so Alembic autogenerate picks them up.
+from app.models.rbac import (  # noqa: E402,F401
+    ADMIN_ROLE_CODE,
+    GRANT_SUBJECT_TYPES,
+    Organization,
+    PermissionGrant,
+    Role,
+    User,
+    UserOrganization,
+    UserRole,
+)

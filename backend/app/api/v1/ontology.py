@@ -169,6 +169,19 @@ async def listPropertiesByClass(
     return [OntologyPropertyRead.model_validate(e) for e in entities]
 
 
+@router.get(
+    "/properties",
+    response_model=list[OntologyPropertyRead],
+    status_code=status.HTTP_200_OK,
+)
+async def listAllProperties(
+    db: AsyncSession = Depends(getDb),
+) -> list[OntologyPropertyRead]:
+    """列出全部本体属性（跨类）。本体属性管理页（/ontology-properties）专用。"""
+    entities = await _ontologyService.listAllProperties(db)
+    return [OntologyPropertyRead.model_validate(e) for e in entities]
+
+
 @router.post(
     "/properties",
     response_model=OntologyPropertyRead,

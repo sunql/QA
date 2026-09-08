@@ -625,7 +625,9 @@ class ChatService(ChatStreamOutputMixin):
         if dto.modelId is not None:
             # 用户明确选择模型：直接加载，跳过 router，不参与降级路由
             selected = next((c for c in configs if c.id == dto.modelId), None)
-            if selected is None:
+            # 既不存在（id 不匹配）也已停用（is_active=False）都视为不可用，
+            # 复用既有 MSG_MODEL_CONFIG_UNAVAILABLE 消息（声明「不存在或已禁用」）。
+            if selected is None or not selected.is_active:
                 raise NotFoundError(MSG_MODEL_CONFIG_UNAVAILABLE.format(id=dto.modelId))
         else:
             selected = self._modelRouter.selectModel(configs, dto.question, ctx)

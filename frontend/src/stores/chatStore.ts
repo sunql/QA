@@ -4,6 +4,7 @@ import {
   sendMessageStream,
   type StreamChartData,
 } from "../api/chat";
+import { searchDocumentsQa } from "../api/document";
 import {
   deleteSessionHistory as apiDeleteSession,
   listChatSessions as apiListChatSessions,
@@ -54,6 +55,10 @@ function nextId(): string {
 
 export function generateSessionId(): string {
   return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function makeSessionId(channel: "chat" | "doc_qa"): string {
+  return `${channel === "doc_qa" ? "docqa-" : "chat-"}${crypto.randomUUID()}`;
 }
 
 function toHistory(messages: ChatMessage[]): HistoryMessage[] {
@@ -110,6 +115,10 @@ interface ChatState {
   sessionsLoading: boolean;
   sessionsError: string | null;
   historyPanelOpen: boolean;
+  // Doc-Qa channel（documents-knowledge-qa, Task 7）
+  channel: "chat" | "doc_qa";
+  setChannel: (channel: "chat" | "doc_qa") => void;
+  sendDocQa: (question: string, filters: { securityLevel?: string; documentType?: string }) => Promise<void>;
   setDatasourceId: (id: number | null) => void;
   setSelectedModelId: (id: number | null) => void;
   addMessage: (msg: ChatMessage) => void;
@@ -117,7 +126,7 @@ interface ChatState {
   clearMessages: () => void;
   resetSession: () => void;
   // 历史会话面板 actions
-  loadSessions: () => Promise<void>;
+  loadSessions: (channel?: "chat" | "doc_qa") => Promise<void>;
   loadSessionMessages: (sessionId: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   toggleHistoryPanel: () => void;
@@ -139,6 +148,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   sessionsLoading: false,
   sessionsError: null,
   historyPanelOpen: persisted.historyPanelOpen,
+  channel: "chat",
+
+  setChannel: (c) => {
+    const newId = makeSessionId(c);
+    writePersisted({ lastSessionId: newId });
+    set({ channel: c, sessionId: newId });
+  },
 
   setDatasourceId: (id) => set({ datasourceId: id }),
 
@@ -386,7 +402,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   clearMessages: () => set({ messages: [], error: null }),
 
   resetSession: () => {
-    const newId = generateSessionId();
+    const { channel } = get();
+    const newId = makeSessionId(channel);
     writePersisted({ lastSessionId: newId });
     set({
       messages: [],
@@ -396,12 +413,102 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     });
   },
 
+  sendDocQa: async (question, filters) => {
+    const { sessionId, channel, messages } = get();
+    if (channel !== "doc_qa") return;
+
+    const userMsg: ChatMessage = {
+      id: nextId(),
+      role: "user",
+      content: question,
+      timestamp: Date.now(),
+    };
+    const placeholderMsg: ChatMessage = {
+      id: nextId(),
+      role: "assistant",
+      content: "",
+      timestamp: Date.now(),
+      isStreaming: true,
+    };
+    set((state) => ({
+      messages: [...state.messages, userMsg, placeholderMsg],
+      loading: true,
+      error: null,
+    }));
+
+    try {
+      await searchDocumentsQa(
+        {
+          sessionId,
+          question,
+          topK: 10,
+          securityLevel: filters.securityLevel,
+          documentType: filters.documentType,
+        },
+        (event) => {
+          switch (event.kind) {
+            case "meta":
+              break;
+            case "citations":
+              set((state) => ({
+                messages: patchLastMessage(state.messages, { citations: event.citations }),
+              }));
+              break;
+            case "token":
+              set((state) => {
+                const last = state.messages[state.messages.length - 1];
+                return {
+                  messages: patchLastMessage(state.messages, {
+                    content: (last.content ?? "") + event.content,
+                  }),
+                };
+              });
+              break;
+            case "done":
+              set((state) => ({
+                messages: patchLastMessage(state.messages, {
+                  tokensUsed: event.tokensUsed,
+                  cost: event.cost,
+                  modelName: event.modelName ?? undefined,
+                  isStreaming: false,
+                }),
+                loading: false,
+              }));
+              break;
+            case "error":
+              set((state) => ({
+                messages: patchLastMessage(state.messages, {
+                  content: event.error,
+                  isError: true,
+                  isStreaming: false,
+                }),
+                loading: false,
+                error: event.error,
+              }));
+              break;
+          }
+        },
+      );
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : i18n.t("errors.networkError");
+      set((state) => ({
+        messages: patchLastMessage(state.messages, {
+          content: errMsg,
+          isError: true,
+          isStreaming: false,
+        }),
+        loading: false,
+        error: errMsg,
+      }));
+    }
+  },
+
   // ============ 历史会话面板 actions ============
 
-  loadSessions: async () => {
+  loadSessions: async (channel) => {
     set({ sessionsLoading: true, sessionsError: null });
     try {
-      const sessions = await apiListChatSessions();
+      const sessions = await apiListChatSessions(undefined, undefined, channel);
       set({ sessions, sessionsLoading: false });
     } catch (err) {
       const msg = err instanceof Error ? err.message : i18n.t("errors.networkError");

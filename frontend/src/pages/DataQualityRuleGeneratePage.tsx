@@ -3,7 +3,8 @@
  * 四步：选本体类 → 选数据源 → 预览规则/采纳AI建议 → 确认落库。
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Button,
   Collapse,
@@ -22,6 +23,7 @@ import { listDataSources } from "../api/datasource";
 import {
   applySuggestion,
   confirmRules,
+  listLlmModels,
   parseDescriptions,
   previewRules,
 } from "../api/dataQualityGenerate";
@@ -31,6 +33,7 @@ import type {
   BlockedProperty,
   GenerateConfirmResponse,
   GeneratePreviewResponse,
+  LlmModelOption,
   PropertyConstraintSuggestion,
   RuleSuggestion,
 } from "../types/dataQualityGenerate";
@@ -145,6 +148,7 @@ interface LlmPanelProps {
 }
 
 function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<PropertyConstraintSuggestion[]>([]);
   const [collapsed, setCollapsed] = useState(true);
@@ -152,27 +156,103 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
   // 把 id 加入，UI 立即变为 disabled + "已采纳"，避免用户重复点击或不知道已沉淀。
   const [adoptedIds, setAdoptedIds] = useState<Set<number>>(new Set());
 
+  // LLM 模型选择器状态：
+  // - models：可用模型列表（仅取需要的 id/modelName/provider 字段）
+  // - modelsAttempted：listLlmModels 是否已结束（成功或失败），用于 race-safe gate
+  // - modelsLoadFailed：拉取失败时面板内显示红字，不弹全局错误
+  // - selectedModelId：用户当前选择的模型 id；null 表示「未选 / 跟随默认」
+  const [models, setModels] = useState<LlmModelOption[]>([]);
+  const [modelsAttempted, setModelsAttempted] = useState(false);
+  const [modelsLoadFailed, setModelsLoadFailed] = useState(false);
+  const [selectedModelId, setSelectedModelId] = useState<number | null>(null);
+
+  // 挂载时拉取模型列表；默认选第一个非 ollama provider（fallback: 第一个）。
+  // 失败时静默处理，仅把 modelsLoadFailed 置 true，由面板显示错误文案。
+  useEffect(() => {
+    let cancelled = false;
+    listLlmModels()
+      .then((ms) => {
+        if (cancelled) return;
+        setModels(ms);
+        if (ms.length > 0) {
+          // 默认选第一个非 ollama provider（fallback: 第一个），避免走本地模型慢/失败。
+          // 后端返回 provider 大写（如 "OPENAI"/"OLLAMA"），比较时把类型放宽为 string，
+          // 兼容未来后端可能返回小写（契约表达式：provider !== "ollama"）。
+          const preferred = (() => {
+            for (const m of ms) {
+              const provider = m.provider as string;
+              if (provider !== "ollama") return m;
+            }
+            return ms[0];
+          })();
+          setSelectedModelId(preferred.id);
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setModelsLoadFailed(true);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setModelsAttempted(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await parseDescriptions(classId);
-      setItems(result);
+      // race-safe：优先用用户选定，否则取列表第一个；undefined 让后端走默认 env
+      // 这样在 modelsAttempted=true 前面板不会发起请求，避免传 null 触发 503。
+      const effectiveModelId = selectedModelId ?? models[0]?.id ?? undefined;
+      const result = await parseDescriptions(classId, effectiveModelId);
+      setItems(result.suggestions);
+      // 用后端返回的已沉淀 propertyId 初始化 adoptedIds，
+      // 让刷新页面也保持已采纳状态（不依赖 session-local Set）。
+      setAdoptedIds((prev) => {
+        const next = new Set(prev);
+        for (const id of result.persistedPropertyIds) next.add(id);
+        return next;
+      });
     } catch (err) {
       message.error(t("dataQualityGenerate.messages.parseFailed") + ": " + String(err));
     } finally {
       setLoading(false);
     }
-  }, [classId, t]);
+  }, [classId, selectedModelId, models, t]);
 
+  // 仅在模型列表尝试结束后再触发首次 load，避免 listLlmModels race
+  // 导致 selectedModelId=null 时走默认 env 路径 → 503。
   useEffect(() => {
-    if (!collapsed) {
+    if (!collapsed && modelsAttempted) {
       void load();
     }
-  }, [collapsed, load]);
+  }, [collapsed, modelsAttempted, load]);
+
+  const handleModelChange = (id: number) => {
+    setSelectedModelId(id);
+    if (!collapsed) {
+      // 切换模型：先折叠再展开，触发 useEffect 重 load
+      setCollapsed(true);
+      setTimeout(() => setCollapsed(false), 0);
+    }
+  };
 
   const handleApply = async (item: PropertyConstraintSuggestion) => {
-    if (item.kind !== "allowed_values" || !item.values) return;
-    if (adoptedIds.has(item.propertyId)) return;
+    if (item.kind !== "allowed_values" || !item.values) {
+      // 不能静默 return：用户点击后无任何反馈会以为按钮坏了。
+      // 仅 allowed_values 类型可自动沉淀到 ontology_property.allowed_values；
+      // not_null 等类型需业务方在本体管理页手动处理。
+      message.warning(t("dataQualityGenerate.messages.adoptNotApplicable"));
+      return;
+    }
+    if (adoptedIds.has(item.propertyId)) {
+      // 用户对已采纳项再点：给 info 提示而非静默 return，避免「按钮没反应」的错觉。
+      message.info(t("dataQualityGenerate.messages.alreadyAdopted"));
+      return;
+    }
     try {
       await applySuggestion(item.propertyId, item.values);
       // 写入成功后立即把 propertyId 加入已采纳集合，
@@ -189,6 +269,23 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
     }
   };
 
+  const headerExtra = (
+    <Select
+      size="small"
+      style={{ width: 240 }}
+      value={selectedModelId ?? undefined}
+      onChange={(v: number) => handleModelChange(v)}
+      placeholder={t("dataQualityGenerate.llmModelSelectPlaceholder")}
+      disabled={models.length === 0}
+      dropdownMatchSelectWidth={false}
+      onClick={(e) => e.stopPropagation()}
+      options={models.map((m) => ({
+        value: m.id,
+        label: `${m.modelName}（${m.provider}）`,
+      }))}
+    />
+  );
+
   return (
     <Collapse
       activeKey={collapsed ? undefined : "panel"}
@@ -197,7 +294,12 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
         {
           key: "panel",
           label: t("dataQualityGenerate.llmPanel"),
-          children: items.length === 0 && !loading ? (
+          extra: headerExtra,
+          children: modelsLoadFailed ? (
+            <span style={{ color: "#ff4d4f" }}>
+              {t("dataQualityGenerate.llmModelsLoadFailed")}
+            </span>
+          ) : items.length === 0 && !loading ? (
             <span>{t("dataQualityGenerate.noSuggestions")}</span>
           ) : (
             <Space direction="vertical" style={{ width: "100%" }}>
@@ -218,10 +320,14 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
                       {isAdopted && (
                         <Tag
                           color="green"
-                          style={{ marginLeft: 8 }}
+                          style={{ marginLeft: 8, cursor: "pointer" }}
                           data-testid={`adopted-hint-${item.propertyId}`}
+                          onClick={() =>
+                            navigate(`/ontology-properties?classId=${classId}`)
+                          }
+                          title={t("dataQualityGenerate.adoptedHintNavTitle")}
                         >
-                          ✓ {t("dataQualityGenerate.adoptedHint")}
+                          ✓ {t("dataQualityGenerate.adoptedHint")} →
                         </Tag>
                       )}
                     </div>
@@ -351,9 +457,21 @@ export default function DataQualityRuleGeneratePage() {
     );
   }, []);
 
+  // 派生「实际能落库的勾选项」：必须同时被勾选且 status="NEW"。
+  // 在 render scope 算一次，让按钮 disabled 与 handleConfirm 用同一份数据；
+  // 避免「selectedIds 有勾选但全是 EXISTS」时按钮亮但 POST 空数组 → 422。
+  const toSubmit = useMemo(
+    () => suggestions.filter((s) => selectedIds.has(s.ruleCode) && s.status === "NEW"),
+    [suggestions, selectedIds],
+  );
+
   const handleConfirm = useCallback(async () => {
     if (!selectedDatasourceId) return;
-    const toSubmit = suggestions.filter((s) => selectedIds.has(s.ruleCode) && s.status === "NEW");
+    if (toSubmit.length === 0) {
+      // 防御：用户可能勾选的都是 EXISTS 规则（已落库），不能空数组 POST。
+      message.warning(t("dataQualityGenerate.messages.confirmNothingSelected"));
+      return;
+    }
     setConfirming(true);
     try {
       const res = await confirmRules(selectedDatasourceId, toSubmit);
@@ -364,7 +482,7 @@ export default function DataQualityRuleGeneratePage() {
     } finally {
       setConfirming(false);
     }
-  }, [selectedDatasourceId, suggestions, selectedIds, t]);
+  }, [selectedDatasourceId, toSubmit, t]);
 
   const blockedColumns: ColumnsType<BlockedProperty> = [
     { title: t("dataQualityGenerate.columns.propertyName"), dataIndex: "propertyName", key: "propertyName" },
@@ -505,6 +623,7 @@ export default function DataQualityRuleGeneratePage() {
                   <Button
                     type="primary"
                     loading={confirming}
+                    disabled={toSubmit.length === 0}
                     onClick={() => void handleConfirm()}
                   >
                     {t("dataQualityGenerate.confirmBtn")}

@@ -63,6 +63,7 @@ import type { FilterField } from "../components/ontology/FilterBar";
 import { contains, matchSelect } from "../utils/ontologyFilter";
 import type { FilterValues } from "../utils/ontologyFilter";
 import type { EntityType } from "../types/entityMapping";
+import { DocumentQaPanel } from "../components/documents/DocumentQaPanel";
 
 const { TextArea } = Input;
 const { TabPane } = Tabs;
@@ -615,6 +616,10 @@ export default function DocumentsPage() {
 
         <TabPane tab="语义检索" key="search">
           <RagSearchPanel />
+        </TabPane>
+
+        <TabPane tab="知识问答" key="qa">
+          <DocumentQaPanel />
         </TabPane>
       </Tabs>
 

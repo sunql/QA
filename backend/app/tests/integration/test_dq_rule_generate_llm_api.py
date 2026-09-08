@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.domain.exceptions import LLMUnavailableError
+from app.infrastructure.llm.base_client import LlmMessage
 
 pytestmark = pytest.mark.asyncio
 GEN_BASE = "/api/v1/data-quality/rules/generate"
@@ -33,9 +34,17 @@ class _FakeCompletion:
 class _FakeLLMClient:
     def __init__(self, content: str) -> None:
         self._content = content
-        self.calls: list[dict] = []
+        self.calls: list[list[LlmMessage]] = []
 
     async def complete(self, messages):
+        # 回归守卫：service 必须传 LlmMessage 实例。
+        # 真实 OpenAiClient.complete 会迭代 messages 访问 m.role/m.content，
+        # 若 service 误传 dict 会触发 AttributeError → 503。
+        for m in messages:
+            assert isinstance(m, LlmMessage), (
+                f"service must pass LlmMessage instances, got {type(m).__name__}; "
+                f"OpenAiClient.complete iterates messages assuming LlmMessage API."
+            )
         self.calls.append(messages)
         return _FakeCompletion(self._content)
 
@@ -146,6 +155,123 @@ async def test_parse_descriptions_class_not_found_404(
         headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     assert res.status_code == 404
+
+
+async def test_parse_descriptions_accepts_camelcase_model_id(
+    client: AsyncClient, dbSession: AsyncSession,
+) -> None:
+    """ParseDescriptionsRequest 必须接受 camelCase modelId 字段。
+
+    回归测试：之前 ParseDescriptionsRequest schema 缺 model_id 字段，
+    Pydantic extra="ignore" 静默丢弃 → 路由层 payload.model_id 永远 falsy →
+    永远走默认 env 路径 → 503 LLMUnavailableError。
+    """
+    from app.tests.integration.test_dq_rule_generate_api import ensureClassWithProperty
+    from app.domain.models import OntologyProperty
+    from sqlalchemy import select
+    from app.infrastructure.llm.factory import _clients
+    from app.infrastructure.llm.factory import resetFactory
+
+    classId = await ensureClassWithProperty(dbSession)
+    prop = (await dbSession.execute(select(OntologyProperty).where(
+        OntologyProperty.class_id == classId))).scalars().one()
+    prop.description = "状态字段"
+    await dbSession.commit()
+
+    resetFactory()
+
+    # 用一个 id 必然不存在但合法（schema gt=0 校验通过）→ 触发 404 而不是 422，
+    # 证明 modelId 字段被 Pydantic 接受并传入 payload（不会因为字段缺失落到默认路径）。
+    res = await client.post(
+        f"{GEN_BASE}/parse-descriptions",
+        json={"classId": classId, "modelId": 999999},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+    )
+    # 404 说明 modelId 被 schema 接受，路由进入了 ModelConfigService.get → NotFoundError
+    # 若 modelId 字段缺失会得到 503「未配置 LLM」（走默认 env 路径）
+    assert res.status_code != 422, f"schema 应接受 modelId，实际: {res.text}"
+    assert res.status_code != 503 or "未配置" not in res.text, (
+        f"modelId 字段可能仍被丢弃，触发默认 env 路径 503: {res.text}"
+    )
+
+
+async def test_parse_descriptions_returns_persisted_property_ids(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """parse-descriptions 必须返回 persisted_property_ids：当前类下已有 allowed_values
+    的 OntologyProperty.id 列表。前端用它初始化 adoptedIds，让刷新页面也保持
+    已采纳状态（不依赖 session-local Set）。
+    """
+    from app.tests.integration.test_dq_rule_generate_api import ensureClassWithProperty
+    from app.domain.models import OntologyProperty
+    from sqlalchemy import select
+
+    classId = await ensureClassWithProperty(dbSession)
+
+    # fixture 默认一个属性；给它写 allowed_values
+    prop = (await dbSession.execute(select(OntologyProperty).where(
+        OntologyProperty.class_id == classId))).scalars().one()
+    prop.allowed_values = ["NEW", "CONFIRMED"]
+    await dbSession.commit()
+    await dbSession.refresh(prop)
+
+    fake = _FakeLLMClient(LLM_JSON)
+    with patch(
+        "app.api.v1.data_quality_generate._getDefaultLlmClient",
+        return_value=fake,
+    ):
+        res = await client.post(
+            f"{GEN_BASE}/parse-descriptions",
+            json={"classId": classId},
+            headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+        )
+    assert res.status_code == 200
+    body = res.json()
+    assert "persistedPropertyIds" in body, (
+        f"parse-descriptions 响应必须包含 persistedPropertyIds 字段，实际 keys: {list(body.keys())}"
+    )
+    assert prop.id in body["persistedPropertyIds"], (
+        f"property {prop.id} 已有 allowed_values，应在 persistedPropertyIds 中；"
+        f"实际: {body['persistedPropertyIds']}"
+    )
+
+
+async def test_parse_descriptions_routes_by_model_id(
+    client: AsyncClient, dbSession: AsyncSession,
+) -> None:
+    """parseDescriptions 路由必须按 model_id 分发到 ModelConfigService.get，
+    而不是无脑走默认 env 路径。
+
+    回归：之前路由层直接调 _getDefaultLlmClient()，无视 payload.model_id，
+    导致无论前端选哪个模型都走 env 路径 → 503。
+    """
+    from app.tests.integration.test_dq_rule_generate_api import ensureClassWithProperty
+    from app.domain.models import OntologyProperty
+    from sqlalchemy import select
+    from unittest.mock import patch, AsyncMock
+
+    classId = await ensureClassWithProperty(dbSession)
+    prop = (await dbSession.execute(select(OntologyProperty).where(
+        OntologyProperty.class_id == classId))).scalars().one()
+    prop.description = "状态字段"
+    await dbSession.commit()
+
+    # 监视 ModelConfigService.get 是否被以指定 model_id 调用
+    with patch(
+        "app.services.model_config_service.ModelConfigService.get",
+        new_callable=AsyncMock,
+    ) as mockGet:
+        mockGet.return_value = None  # 触发 NoneType 后续报错
+        res = await client.post(
+            f"{GEN_BASE}/parse-descriptions",
+            json={"classId": classId, "modelId": 1},
+            headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+        )
+        # 关键断言：路由调了 ModelConfigService.get，参数 model_id=1
+        mockGet.assert_awaited_once()
+        args, _ = mockGet.await_args
+        assert args[1] == 1, f"路由应以 model_id=1 调 get，实际: {args}"
+    # 不在意返回码，关键是路由分发了请求
 
 
 # ---------------------------------------------------------------------------

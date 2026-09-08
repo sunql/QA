@@ -65,6 +65,13 @@ export async function listPropertiesByClass(
   return res.data;
 }
 
+/** 跨类列出全部本体属性（本体属性管理页 /ontology-properties 专用）。
+ *  不带任何过滤条件；管理页自己做 className 过滤。 */
+export async function listAllProperties(): Promise<OntologyProperty[]> {
+  const res = await httpClient.get<OntologyProperty[]>(`${BASE}/properties`);
+  return res.data;
+}
+
 export async function getProperty(id: number): Promise<OntologyProperty> {
   const res = await httpClient.get<OntologyProperty>(`${BASE}/properties/${id}`);
   return res.data;

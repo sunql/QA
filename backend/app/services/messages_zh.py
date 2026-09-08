@@ -389,3 +389,9 @@ MSG_DQ_GEN_CLASS_NOT_FOUND = "本体类 id={id} 不存在"
 MSG_DQ_GEN_DATASOURCE_NOT_FOUND = "数据源 id={id} 不存在"
 MSG_DQ_GEN_RULE_CREATED = "数据质量规则「{rule_code}」已自动生成"
 MSG_DQ_GEN_RULE_SKIPPED_DUPLICATE = "规则「{rule_code}」已存在，已跳过"
+
+# =============================================================================
+# 文档问答（Phase 5.6）
+# =============================================================================
+
+MSG_SESSION_NOT_OWNED = "会话不存在或不属于当前用户"

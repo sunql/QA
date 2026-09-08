@@ -502,6 +502,16 @@ class OntologyService:
         )
         return list(result.scalars().all())
 
+    async def listAllProperties(
+        self, session: AsyncSession
+    ) -> list[OntologyProperty]:
+        """跨类列出全部本体属性（本体属性管理页专用）。"""
+        result = await session.execute(
+            select(OntologyProperty)
+            .order_by(OntologyProperty.class_id, OntologyProperty.property_name)
+        )
+        return list(result.scalars().all())
+
     async def updateProperty(
         self,
         session: AsyncSession,

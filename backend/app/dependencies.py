@@ -8,10 +8,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, getSettings
 from app.domain.exceptions import PermissionDeniedError
+from app.domain.models import Organization, Role, User, UserOrganization, UserRole
 from app.infrastructure.database import getDb
 
 logger = logging.getLogger(__name__)
@@ -30,17 +32,22 @@ DEFAULT_STUB_USER_ID = "anonymous"
 
 @dataclass(frozen=True)
 class CurrentUser:
-    """当前用户（MVP stub，后续替换为 JWT/API Key 解析）。
+    """当前用户（stub auth 解析 X-User-* 头 + DB 身份富化，feat-rbac-identity）。
 
     departments 用于 owner-based ACL（Phase 4.5 governance hardening）：
     与 entity.owner 字符串匹配；用户属于多部门时（如「采购+财务」双岗），
     headers 可一次性携带多个部门逗号分隔。
+
+    roles / departments 语义（Phase D 后）：X-User-Id 命中 DB 用户（users.username）
+    时，以 DB 角色/组织为准（头里的 X-User-Roles/X-User-Departments 不再生效，
+    防止伪造）；查无此人时回退桩默认（见 getCurrentUser）。
     """
 
     userId: str = DEFAULT_STUB_USER_ID
     tenantId: str = "default"
     roles: tuple[str, ...] = DEFAULT_STUB_ROLES
     departments: tuple[str, ...] = ()
+    dbUserId: int | None = None
 
 
 async def getCurrentUser(
@@ -48,31 +55,34 @@ async def getCurrentUser(
     xTenantId: str | None = Header(default=None, alias="X-Tenant-Id"),
     xUserRoles: str | None = Header(default=None, alias="X-User-Roles"),
     xUserDepartments: str | None = Header(default=None, alias="X-User-Departments"),
+    session: AsyncSession = Depends(getDb),
 ) -> CurrentUser:
-    """从请求头解析当前用户（stub）。
+    """从请求头解析当前用户（stub + DB 身份富化）。
 
     Headers:
-        X-User-Id：用户 ID（默认 'anonymous'）
+        X-User-Id：用户标识（默认 'anonymous'），Phase D 后优先按
+            users.username 精确匹配真实 DB 用户
         X-Tenant-Id：租户 ID（默认 'default'）
         X-User-Roles：逗号分隔角色（默认 ['user', 'admin']，见 DEFAULT_STUB_ROLES）
         X-User-Departments：逗号分隔部门（默认 []）
 
+    解析策略（feat-rbac-identity Phase D）：
+        1) AUTH_STUB_ENABLED=0（生产）→ 拒绝 stub 头请求（未接入 JWT 前兜底）。
+        2) stub 模式下，X-User-Id 命中 DB users.username（且 enabled）→
+           roles / departments 以 DB 的角色与组织为准（头里的角色/部门头被忽略，
+           防 X-User-Roles=admin 伪造）；dbUserId 记录 DB 主键供权限计算。
+        3) 查无此人（或未启用）→ 回退桩默认：头里 X-User-Roles 生效，缺失时
+           DEFAULT_STUB_ROLES=（user, admin）。dev/test 保持「打开即用」，
+           也保持既有按头模拟非 admin 的集成测试语义（u1 + X-User-Roles: analyst）。
+
     真实生产应由 JWT/IdP 解析并填充 departments；stub 模式保证
     Phase 4.5 ACL 接口稳定，鉴权接入后无需改 ACL 规则。
 
-    默认 admin 设计意图（2026-08-31 与用户对齐）：
-        早期 dev/test 中默认只有 'user' 角色，导致未登录访问
-        /api/v1/features 等有 owner-based ACL 的端点时一律 403，
-        新人易踩坑。改为默认带 admin 让 stub 模式下「打开即用」，
-        显式测试非 admin 路径时通过 X-User-Roles 覆盖即可。
-
     安全护栏（security-reviewer 反馈）：
-        任意客户端可直接伪造 X-User-Roles=admin 绕过 ACL；
-        因此：
+        任意客户端可直接伪造 X-User-Roles=admin 绕过 ACL；因此：
         - 默认 AUTH_STUB_ENABLED=1（dev/test 默认开）
         - 生产部署必须设 AUTH_STUB_ENABLED=0 + 由反向代理剥离 X-User-* 头，
-          或后续接入 JWT 时移除该 stub 函数本身（DEFAULT_STUB_ROLES 此时
-          失效，因为 stub 路径根本不被走到）。
+          或后续接入 JWT 时移除该 stub 函数本身。
         - 应用启动时若 APP_ENV=production 且 stub 仍开启，日志 ERROR 告警。
     """
     if os.environ.get("AUTH_STUB_ENABLED", "1") != "1":
@@ -81,12 +91,65 @@ async def getCurrentUser(
             "Stub auth 未启用：生产环境必须由 JWT/IdP 解析用户身份，"
             "或设置 AUTH_STUB_ENABLED=1（仅 dev/test）"
         )
-    return _buildCurrentUser(
+    base = _buildCurrentUser(
         userId=xUserId,
         tenantId=xTenantId,
         rolesHeader=xUserRoles,
         departmentsHeader=xUserDepartments,
     )
+    dbUser = await _resolveDbUser(session, base.userId)
+    if dbUser is None:
+        return base
+    roles, departments = await _loadDbRolesAndOrgs(session, dbUser.id)
+    return CurrentUser(
+        userId=base.userId,
+        tenantId=base.tenantId,
+        roles=roles,
+        departments=departments,
+        dbUserId=dbUser.id,
+    )
+
+
+async def _resolveDbUser(session: AsyncSession, username: str) -> User | None:
+    """按 users.username 精确匹配；查无此人 / 未启用 / anonymous → None（走桩回退）。"""
+    if not username or username == DEFAULT_STUB_USER_ID:
+        return None
+    row = (
+        await session.execute(select(User).where(User.username == username))
+    ).scalar_one_or_none()
+    if row is None or not row.enabled:
+        return None
+    return row
+
+
+async def _loadDbRolesAndOrgs(
+    session: AsyncSession, user_id: int
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """加载 DB 用户的角色 code 与组织 code（owner-based ACL 的 departments 语义）。"""
+    roles = tuple(
+        (
+            await session.execute(
+                select(Role.code)
+                .join(UserRole, UserRole.role_id == Role.id)
+                .where(UserRole.user_id == user_id)
+                .order_by(Role.id)
+            )
+        ).scalars().all()
+    )
+    orgs = tuple(
+        (
+            await session.execute(
+                select(Organization.code)
+                .join(
+                    UserOrganization,
+                    UserOrganization.organization_id == Organization.id,
+                )
+                .where(UserOrganization.user_id == user_id)
+                .order_by(Organization.id)
+            )
+        ).scalars().all()
+    )
+    return roles, orgs
 
 
 def _splitCsv(headerValue: str | None) -> tuple[str, ...]:

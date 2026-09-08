@@ -139,7 +139,7 @@ export default function AdminFeatureRulesPage(): JSX.Element {
                 const payload: FeatureRuleUpdate = {
                     enabled: values.enabled,
                     priority: values.priority,
-                    policy_description: values.policy_description,
+                    policyDescription: values.policyDescription,
                     thresholds: thresholds.length > 0 ? thresholds : [],
                     version: editing.version,
                 };
@@ -150,13 +150,13 @@ export default function AdminFeatureRulesPage(): JSX.Element {
                 const createValues = values as FeatureRuleCreate;
                 const payload: FeatureRuleCreate = {
                     code: createValues.code,
-                    data_object: createValues.data_object,
-                    data_layer: createValues.data_layer,
-                    target_level: createValues.target_level,
-                    feature_name: createValues.feature_name,
+                    dataObject: createValues.dataObject,
+                    dataLayer: createValues.dataLayer,
+                    targetLevel: createValues.targetLevel,
+                    featureName: createValues.featureName,
                     enabled: createValues.enabled ?? true,
                     priority: createValues.priority ?? 100,
-                    policy_description: createValues.policy_description,
+                    policyDescription: createValues.policyDescription,
                     thresholds: thresholds.length > 0 ? thresholds : [],
                 };
                 await createFeatureRule(payload);
@@ -211,13 +211,13 @@ export default function AdminFeatureRulesPage(): JSX.Element {
     const onAiAssistApply = (
         result: FeatureRuleParseDescriptionResponse,
     ) => {
-        const mapped: FeatureRuleThreshold[] = result.suggested_thresholds.map(
+        const mapped: FeatureRuleThreshold[] = result.suggestedThresholds.map(
             (s, idx) => ({
                 severity: s.severity,
                 operator: s.operator,
-                threshold_value: s.threshold_value,
+                thresholdValue: s.thresholdValue,
                 unit: s.unit ?? null,
-                threshold_order: idx + 1,
+                thresholdOrder: idx + 1,
             }),
         );
         setThresholds(mapped);
@@ -233,19 +233,19 @@ export default function AdminFeatureRulesPage(): JSX.Element {
         },
         {
             title: t("featureRules.columns.data_object"),
-            dataIndex: "data_object",
+            dataIndex: "dataObject",
         },
         {
             title: t("featureRules.columns.data_layer"),
-            dataIndex: "data_layer",
+            dataIndex: "dataLayer",
         },
         {
             title: t("featureRules.columns.target_level"),
-            dataIndex: "target_level",
+            dataIndex: "targetLevel",
         },
         {
             title: t("featureRules.columns.feature_name"),
-            dataIndex: "feature_name",
+            dataIndex: "featureName",
             ellipsis: true,
         },
         {
@@ -342,7 +342,7 @@ export default function AdminFeatureRulesPage(): JSX.Element {
                     </Form.Item>
 
                     <Form.Item
-                        name="data_object"
+                        name="dataObject"
                         label={t("featureRules.form.data_object")}
                         rules={[{ required: true }]}
                     >
@@ -350,7 +350,7 @@ export default function AdminFeatureRulesPage(): JSX.Element {
                     </Form.Item>
 
                     <Form.Item
-                        name="data_layer"
+                        name="dataLayer"
                         label={t("featureRules.form.data_layer")}
                         rules={[{ required: true }]}
                     >
@@ -358,7 +358,7 @@ export default function AdminFeatureRulesPage(): JSX.Element {
                     </Form.Item>
 
                     <Form.Item
-                        name="target_level"
+                        name="targetLevel"
                         label={t("featureRules.form.target_level")}
                         rules={[{ required: true }]}
                     >
@@ -366,7 +366,7 @@ export default function AdminFeatureRulesPage(): JSX.Element {
                     </Form.Item>
 
                     <Form.Item
-                        name="feature_name"
+                        name="featureName"
                         label={t("featureRules.form.feature_name")}
                         rules={[{ required: true }]}
                     >
@@ -389,7 +389,7 @@ export default function AdminFeatureRulesPage(): JSX.Element {
                     </Form.Item>
 
                     <Form.Item
-                        name="policy_description"
+                        name="policyDescription"
                         label={t("featureRules.form.policy_description")}
                     >
                         <TextArea
@@ -455,7 +455,7 @@ export default function AdminFeatureRulesPage(): JSX.Element {
                                                 <Form.Item
                                                     name={[
                                                         name,
-                                                        "threshold_value",
+                                                        "thresholdValue",
                                                     ]}
                                                     style={{
                                                         marginBottom: 0,
@@ -495,8 +495,8 @@ export default function AdminFeatureRulesPage(): JSX.Element {
                                             add({
                                                 severity: "HIGH",
                                                 operator: "gt",
-                                                threshold_value: 0,
-                                                threshold_order:
+                                                thresholdValue: 0,
+                                                thresholdOrder:
                                                     fields.length + 1,
                                             })
                                         }

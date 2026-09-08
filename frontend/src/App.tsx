@@ -22,8 +22,13 @@ import DataQualityRuleGeneratePage from "./pages/DataQualityRuleGeneratePage";
 import AdminAuditPage from "./pages/AdminAuditPage";
 import AdminToolsPage from "./pages/AdminToolsPage";
 import AdminFeatureRulesPage from "./pages/AdminFeatureRulesPage";
+import AdminUsersPage from "./pages/AdminUsersPage";
+import AdminRolesPage from "./pages/AdminRolesPage";
+import AdminOrganizationsPage from "./pages/AdminOrganizationsPage";
+import AdminMenusPage from "./pages/AdminMenusPage";
 import BusinessObjectPage from "./pages/BusinessObjectPage";
 import DocumentsPage from "./pages/DocumentsPage";
+import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
 
 export default function App() {
   return (
@@ -52,8 +57,13 @@ export default function App() {
         <Route path="admin/audit" element={<AdminAuditPage />} />
         <Route path="admin/tools" element={<AdminToolsPage />} />
         <Route path="admin/feature-rules" element={<AdminFeatureRulesPage />} />
+        <Route path="admin/users" element={<AdminUsersPage />} />
+        <Route path="admin/roles" element={<AdminRolesPage />} />
+        <Route path="admin/organizations" element={<AdminOrganizationsPage />} />
+        <Route path="admin/menus" element={<AdminMenusPage />} />
         <Route path="business-objects" element={<BusinessObjectPage />} />
         <Route path="documents" element={<DocumentsPage />} />
+        <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />
       </Route>
     </Routes>
   );

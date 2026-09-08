@@ -24,6 +24,7 @@ from app.domain.schemas import (
     ParseDescriptionsResponse,
     PropertyConstraintSuggestionRead,
 )
+from app.infrastructure.llm.base_client import LlmMessage
 from app.services.messages_zh import (
     MSG_DQ_GEN_CLASS_NOT_FOUND,
     MSG_DQ_GEN_LLM_PARSE_ERROR,
@@ -87,11 +88,11 @@ async def parsePropertyDescriptions(
     try:
         response = await llm_client.complete(
             messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": "请分析以上本体类属性，识别候选约束。",
-                },
+                LlmMessage(role="system", content=system_prompt),
+                LlmMessage(
+                    role="user",
+                    content="请分析以上本体类属性，识别候选约束。",
+                ),
             ],
         )
     except Exception as e:
@@ -126,4 +127,17 @@ async def parsePropertyDescriptions(
     for s in suggestions:
         s.property_id = prop_map.get(s.property_name.upper(), 0)
 
-    return ParseDescriptionsResponse(suggestions=suggestions)
+    # 查询当前类下已沉淀 allowed_values 的 propertyId 列表，
+    # 供前端初始化 adoptedIds（刷新页面也保持已采纳状态）。
+    persisted_result = await session.execute(
+        select(OntologyProperty.id).where(
+            OntologyProperty.class_id == payload.class_id,
+            OntologyProperty.allowed_values.isnot(None),
+        )
+    )
+    persisted_property_ids = list(persisted_result.scalars().all())
+
+    return ParseDescriptionsResponse(
+        suggestions=suggestions,
+        persisted_property_ids=persisted_property_ids,
+    )

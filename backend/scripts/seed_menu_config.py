@@ -3,10 +3,13 @@
 与 AppLayout 的旧 key 一一对应；feat-rbac-identity 追加 4 个 RBAC 管理页
 （用户/角色/组织/菜单）叶子项，零 section 变更（section 数保持 6，测试断言依赖）。
 
-parent_id 保留策略：seed 仅在「当前 DB 行 parent_id 与 seed 默认一致」
-（即未被菜单管理 UI 移动过）时覆盖；UI 调整后的 parent_id 不被回滚。
-其他字段（label_key / icon_code / sort_order / path / visible）每次启动
-仍按 seed 默认强制刷新——这些是「代码态事实」，不应被 UI 覆盖。
+UI 优先策略：本 seed 只在「行不存在」时 INSERT 默认值；行已存在时
+**不覆盖任何 UI 可编辑字段**（label_key / icon_code / path / visible /
+sort_order / parent_id），让 AdminMenusPage 的用户编辑持久化。
+- 字段语义：seed 提供「初始值 / SSOT 起点」，DB 是「运行时真值」。
+- 新加菜单项：把 ITEMS / SECTIONS 追加一行；INSERT 时写入全套 seed 默认。
+- 改菜单文案 / 图标 / URL：去 /admin/menus 改，seed 不回滚。
+- 改 sort_order / 拖动改父级：去 /admin/menus 改，seed 不回滚。
 """
 
 from __future__ import annotations
@@ -85,7 +88,9 @@ async def seed_menu_config(
     行其 parent_id 由菜单管理 UI 维护，seed 不覆盖。
     """
     async with session_factory() as session:
-        # 1) upsert sections
+        # 1) upsert sections：仅在「行不存在」时写入 seed 默认；冲突时 DO NOTHING
+        #    —— 所有 UI 可编辑字段（label_key / icon_code / sort_order / visible）
+        #    一律由 AdminMenusPage 维护，seed 不回滚。
         for s in SECTIONS:
             stmt = (
                 pg_insert(MenuConfig)
@@ -98,15 +103,7 @@ async def seed_menu_config(
                     path=None,
                     visible=True,
                 )
-                .on_conflict_do_update(
-                    index_elements=["code"],
-                    set_={
-                        "label_key": s["label_key"],
-                        "icon_code": s["icon_code"],
-                        "sort_order": s["sort_order"],
-                        "visible": True,
-                    },
-                )
+                .on_conflict_do_nothing(index_elements=["code"])
             )
             await session.execute(stmt)
 
@@ -121,11 +118,8 @@ async def seed_menu_config(
         ).all()
         code_to_id = {code: rid for code, rid in rows}
 
-        # 3) upsert items：parent_id 仅在首次插入时设置；后续仅刷新展示字段。
-        # 理由：菜单管理 UI 允许把叶子项从某个一级类拖到另一个；这种「用户态
-        # 决策」必须被 seed 尊重，否则每次启动都把 adminUsers/Roles/Orgs/Menus
-        # 回滚回 auditSecurity。代码态事实（label/icon/sort/path/visible）由
-        # seed 持续刷新，因为它们属于「代码 ↔ UI 键映射」的 SSOT。
+        # 3) upsert items：仅 INSERT；冲突时 DO NOTHING，让 UI 编辑（label_key /
+        #    icon_code / path / visible / sort_order / parent_id）持久化。
         for it in ITEMS:
             parent_id = code_to_id[it["parent"]]
             stmt = (
@@ -139,16 +133,7 @@ async def seed_menu_config(
                     path=it["path"],
                     visible=True,
                 )
-                .on_conflict_do_update(
-                    index_elements=["code"],
-                    set_={
-                        "label_key": it["label_key"],
-                        "icon_code": it["icon_code"],
-                        "sort_order": it["sort_order"],
-                        "path": it["path"],
-                        "visible": True,
-                    },
-                )
+                .on_conflict_do_nothing(index_elements=["code"])
             )
             await session.execute(stmt)
 

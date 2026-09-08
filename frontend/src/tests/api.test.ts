@@ -58,7 +58,9 @@ describe("api/modelConfig", () => {
     const data = [{ id: 1 }] as ModelConfig[];
     httpMock.get.mockResolvedValue({ data });
     const result = await listModels(true);
-    expect(httpMock.get).toHaveBeenCalledWith("/models", { params: { active_only: true } });
+    // 关键：query 参数名是 camelCase（与 FastAPI kwarg 名一致），
+    // 写 snake_case 会被 FastAPI 静默忽略，过滤永远不生效。
+    expect(httpMock.get).toHaveBeenCalledWith("/models", { params: { activeOnly: true } });
     expect(result).toEqual(data);
   });
 

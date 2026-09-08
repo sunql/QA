@@ -60,10 +60,13 @@ export async function confirmRules(
 /**
  * 列出当前可用的 LLM 模型配置（供向导下拉选择）。
  * 调用 GET /api/v1/models?activeOnly=true。
+ *
+ * 关键：query 参数名是 camelCase（与 FastAPI kwarg 名一致），
+ * 写 snake_case 会被静默忽略，永远拿不到 activeOnly 过滤后的列表。
  */
 export async function listLlmModels(): Promise<LlmModelOption[]> {
   const res = await httpClient.get<LlmModelOption[]>(MODELS_BASE, {
-    params: { active_only: true },
+    params: { activeOnly: true },
   });
   return res.data.map((m) => ({
     id: m.id,

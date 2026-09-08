@@ -101,6 +101,67 @@ async def test_seed_does_not_overwrite_ui_edited_parent_id(
     )
 
 
+async def test_seed_does_not_overwrite_ui_edited_display_fields(
+    dbSession: AsyncSession, client: object
+) -> None:
+    """回归：菜单管理 UI 修改 label_key / icon_code / path / visible /
+    sort_order 后，seed 重跑必须保留 UI 的修改，不强制回滚到 seed 默认。
+
+    设计变更：seed 仅 INSERT 默认值；冲突 DO NOTHING。AdminMenusPage 是这
+    5 个字段的运行时真值。父级 parent_id 由 sibling 测试覆盖。
+    """
+    await _clean(dbSession)
+    factory = dbModule.getSessionFactory()
+    await seed_menu_config(factory)
+
+    # 拿 item.documents 原始 seed 值
+    original = (
+        await dbSession.execute(
+            select(MenuConfig).where(MenuConfig.code == "item.documents")
+        )
+    ).scalar_one()
+    original_label = original.label_key
+    original_icon = original.icon_code
+    original_path = original.path
+    original_sort = original.sort_order
+    original_visible = original.visible
+
+    # 模拟 UI 全部改了
+    original.label_key = "menu.item.documents.custom"
+    original.icon_code = "star"
+    original.path = "/documents-custom"
+    original.sort_order = 9999
+    original.visible = False
+    await dbSession.commit()
+
+    # 重跑 seed
+    await seed_menu_config(factory)
+
+    refreshed = (
+        await dbSession.execute(
+            select(MenuConfig).where(MenuConfig.code == "item.documents")
+        )
+    ).scalar_one()
+    assert refreshed.label_key == "menu.item.documents.custom", (
+        f"seed 不应覆盖 UI 编辑的 label_key；got={refreshed.label_key}"
+    )
+    assert refreshed.icon_code == "star", (
+        f"seed 不应覆盖 UI 编辑的 icon_code；got={refreshed.icon_code}"
+    )
+    assert refreshed.path == "/documents-custom", (
+        f"seed 不应覆盖 UI 编辑的 path；got={refreshed.path}"
+    )
+    assert refreshed.sort_order == 9999, (
+        f"seed 不应覆盖 UI 编辑的 sort_order；got={refreshed.sort_order}"
+    )
+    assert refreshed.visible is False, (
+        f"seed 不应覆盖 UI 编辑的 visible；got={refreshed.visible}"
+    )
+
+    # 防御：seed 默认值确实存在（确保 sanity check 不被 silent pass）
+    assert original_label != "menu.item.documents.custom"
+
+
 async def test_seed_paths_aligned_with_frontend_routes(
     dbSession: AsyncSession, client: object
 ) -> None:

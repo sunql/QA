@@ -126,7 +126,7 @@ interface ChatState {
   clearMessages: () => void;
   resetSession: () => void;
   // 历史会话面板 actions
-  loadSessions: () => Promise<void>;
+  loadSessions: (channel?: "chat" | "doc_qa") => Promise<void>;
   loadSessionMessages: (sessionId: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   toggleHistoryPanel: () => void;
@@ -505,10 +505,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   // ============ 历史会话面板 actions ============
 
-  loadSessions: async () => {
+  loadSessions: async (channel) => {
     set({ sessionsLoading: true, sessionsError: null });
     try {
-      const sessions = await apiListChatSessions();
+      const sessions = await apiListChatSessions(undefined, undefined, channel);
       set({ sessions, sessionsLoading: false });
     } catch (err) {
       const msg = err instanceof Error ? err.message : i18n.t("errors.networkError");

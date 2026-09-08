@@ -159,7 +159,9 @@ class RagQaService:
         # 6. 选模型（dto.model_id 优先）
         if dto.model_id is not None:
             selected = next((c for c in configs if c.id == dto.model_id), None)
-            if selected is None:
+            # 既不存在（id 不匹配）也已停用（is_active=False）都视为不可用，
+            # 复用既有 MSG_MODEL_CONFIG_UNAVAILABLE 消息（声明「不存在或已禁用」）。
+            if selected is None or not getattr(selected, "is_active", True):
                 from app.services.messages_zh import MSG_MODEL_CONFIG_UNAVAILABLE
                 raise ValueError(MSG_MODEL_CONFIG_UNAVAILABLE.format(id=dto.model_id))
         else:

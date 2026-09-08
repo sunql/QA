@@ -270,3 +270,103 @@ async def test_answer_stream_persists_user_and_assistant_with_citations() -> Non
     assert user_rows[0].user_id == "u-1"
     assert asst_rows[0].citations is not None
     assert asst_rows[0].citations[0]["document_id"] == "DOC-A"
+
+
+class TestExplicitModelIdRejectsInactive:
+    """显式 model_id 选取时必须拒绝已停用（is_active=False）的模型。
+
+    Bug repro（2026-09-08 用户反馈）：与 ChatService 同模式 bug——RagQaService.answer_stream
+    在 dto.model_id 指定时仅校验「存在」，未校验「is_active」。修复后应抛
+    ValueError(MSG_MODEL_CONFIG_UNAVAILABLE)。
+    """
+
+    async def test_rejects_inactive_model_when_user_specifies_model_id(self) -> None:
+        from app.services.messages_zh import MSG_MODEL_CONFIG_UNAVAILABLE
+
+        inactive_cfg = MagicMock(
+            id=99,
+            model_name="disabled-mdl",
+            cost_per_1k_input=Decimal("0.001"),
+            cost_per_1k_output=Decimal("0.002"),
+            is_active=False,  # 关键：停用
+            provider="openai",
+            cost_threshold=Decimal("9999"),
+            weight=1,
+        )
+        svc = RagQaService()
+        svc._rag_svc = MagicMock()
+        svc._rag_svc.searchDocuments = AsyncMock(return_value=[
+            {"document_id": "DOC-A", "document_name": "合同", "chunk_text": "条款", "score": 0.85},
+        ])
+        # 若被错误调用会 raise
+        svc._llm_factory = MagicMock()
+
+        session = MagicMock()
+        session.execute = AsyncMock(
+            return_value=MagicMock(scalars=lambda: MagicMock(all=lambda: []))
+        )
+        session.add = MagicMock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()  # 避免 _persist 路径 noise 让 RED 断言更干净
+
+        dto = DocQaRequest(
+            session_id="sess-1", question="什么是质量协议？", top_k=8, model_id=99,
+        )
+        actor = CurrentUser(userId="u-1", departments=[])
+
+        events = []
+        with pytest.raises(ValueError) as excInfo:
+            async for ev in svc.answer_stream(
+                session, dto, actor=actor, configs=[inactive_cfg],
+            ):
+                events.append(ev)
+
+        # 复用既有 MSG_MODEL_CONFIG_UNAVAILABLE 消息（声明「不存在或已禁用」）
+        assert str(excInfo.value) == MSG_MODEL_CONFIG_UNAVAILABLE.format(id=99)
+        # meta + citations 已经发出（先于模型选择），但 LLM 不应被调用
+        assert any(ev.event == EVENT_QA_META for ev in events)
+        svc._llm_factory.assert_not_called()
+
+    async def test_accepts_active_model_when_user_specifies_model_id(self) -> None:
+        """回归保护：合法（is_active=True）显式选择应正常进入 LLM 流式。"""
+        svc = RagQaService()
+        svc._rag_svc = MagicMock()
+        svc._rag_svc.searchDocuments = AsyncMock(return_value=[
+            {"document_id": "DOC-A", "document_name": "合同", "chunk_text": "条款", "score": 0.85},
+        ])
+        fake_client = _make_fake_client(["好。"])
+        svc._llm_factory = MagicMock(return_value=fake_client)
+
+        session = MagicMock()
+        session.execute = AsyncMock(side_effect=[
+            MagicMock(scalars=lambda: MagicMock(all=lambda: [])),  # history 空
+            MagicMock(),  # user 落库
+            MagicMock(),  # assistant 落库
+        ])
+        session.add = MagicMock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+
+        active_cfg = MagicMock(
+            id=1,
+            model_name="fake-mdl",
+            cost_per_1k_input=Decimal("0.001"),
+            cost_per_1k_output=Decimal("0.002"),
+            is_active=True,
+            provider="openai",
+            cost_threshold=Decimal("9999"),
+            weight=1,
+        )
+        dto = DocQaRequest(
+            session_id="sess-1", question="问题", top_k=8, model_id=1,
+        )
+        actor = CurrentUser(userId="u-1", departments=[])
+
+        events: list = []
+        async for ev in svc.answer_stream(session, dto, actor=actor, configs=[active_cfg]):
+            events.append(ev)
+
+        # 正常流水线：meta + citations + token + done
+        assert any(ev.event == EVENT_QA_META for ev in events)
+        assert any(ev.event == EVENT_QA_DONE for ev in events)
+        svc._llm_factory.assert_called_once()

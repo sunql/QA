@@ -31,6 +31,8 @@ import AdminMenusPage from "./pages/AdminMenusPage";
 import BusinessObjectPage from "./pages/BusinessObjectPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
+import ProfilePage from "./pages/ProfilePage";
+import ChangePasswordPage from "./pages/ChangePasswordPage";
 
 export default function App() {
   return (
@@ -68,6 +70,8 @@ export default function App() {
           <Route path="business-objects" element={<BusinessObjectPage />} />
           <Route path="documents" element={<DocumentsPage />} />
           <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />
+          <Route path="/profile" element={<ProfilePage />} />
+          <Route path="/change-password" element={<ChangePasswordPage />} />
         </Route>
       </Route>
     </Routes>

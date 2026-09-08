@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Layout, Menu, Spin, Switch, theme } from "antd";
+import { Layout, Menu, Spin, Switch, Space, theme } from "antd";
 import { useLocation, useNavigate, Outlet } from "react-router-dom";
 import { useThemeStore } from "../../stores/themeStore";
 import { useTranslation } from "../../i18n";
@@ -8,6 +8,7 @@ import type { MenuConfig, MenuItem, MenuSection } from "../../types/menuConfig";
 import { FALLBACK_NAV } from "./fallbackNav";
 import { renderIcon } from "./menuIcons";
 import LanguageSwitch from "./LanguageSwitch";
+import UserMenu from "./UserMenu";
 
 const { Sider, Header, Content } = Layout;
 const { useToken } = theme;
@@ -151,14 +152,17 @@ export default function AppLayout() {
           }}
         >
           <span>{t(selectedItem.labelKey)}</span>
-          <Switch
-            checked={isDark}
-            onChange={toggleTheme}
-            aria-label={t("appLayout.themeToggle")}
-            checkedChildren={t("appLayout.themeDark")}
-            unCheckedChildren={t("appLayout.themeLight")}
-          />
-          <LanguageSwitch />
+          <Space size="middle">
+            <Switch
+              checked={isDark}
+              onChange={toggleTheme}
+              aria-label={t("appLayout.themeToggle")}
+              checkedChildren={t("appLayout.themeDark")}
+              unCheckedChildren={t("appLayout.themeLight")}
+            />
+            <LanguageSwitch />
+            <UserMenu />
+          </Space>
         </Header>
         <Content style={{ margin: 24, background: token.colorBgContainer, borderRadius: 8 }}>
           <Outlet />

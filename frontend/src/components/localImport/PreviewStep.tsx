@@ -41,10 +41,22 @@ export default function PreviewStep({ preview, onExecute }: PreviewStepProps) {
   }, [preview.proposedClasses, searchText]);
 
   // preserveSelectedRowKeys：搜索/翻页移除当前页后，已勾选的行仍保留在选中集合内。
+  // selections 下拉跨页作用于完整 dataSource（过滤后的全部类）。首项复用工具栏
+  // 「全选当前筛选」的累加语义：分批导入时并入当前筛选类，而不像 antd 内置
+  // SELECTION_ALL 那样「替换为当前筛选集」——否则会静默丢掉此前批次勾选的类。
   const rowSelection: TableProps<ProposedClass>["rowSelection"] = {
     selectedRowKeys,
     onChange: (keys) => setSelectedRowKeys(keys.map(String)),
     preserveSelectedRowKeys: true,
+    selections: [
+      {
+        key: "select-all-filtered",
+        text: t("localImport.preview.selectFiltered"),
+        onSelect: () => handleSelectFiltered(),
+      },
+      Table.SELECTION_INVERT,
+      Table.SELECTION_NONE,
+    ],
   };
 
   const columns: TableColumnsType<ProposedClass> = [
@@ -184,7 +196,8 @@ export default function PreviewStep({ preview, onExecute }: PreviewStepProps) {
           dataSource={filteredClasses}
           columns={columns}
           rowSelection={rowSelection}
-          pagination={{ pageSize: 50, showSizeChanger: true }}
+          // defaultPageSize 仅作初始值；受控 pageSize 会让 size changer 改动被 props 压回（no-op）。
+          pagination={{ defaultPageSize: 50, showSizeChanger: true }}
           size="small"
         />
       </div>
@@ -203,7 +216,7 @@ export default function PreviewStep({ preview, onExecute }: PreviewStepProps) {
               dataSource={preview.proposedJoins}
               columns={joinColumns}
               rowSelection={joinRowSelection}
-              pagination={{ pageSize: 50, showSizeChanger: true }}
+              pagination={{ defaultPageSize: 50, showSizeChanger: true }}
               size="small"
             />
           </div>

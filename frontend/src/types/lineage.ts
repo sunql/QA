@@ -51,3 +51,8 @@ export interface LineageEdgeListFilter {
   targetLayer?: LineageLayer;
   activeOnly?: boolean;
 }
+
+/** POST /lineage/edges/extract 响应：本次自动抽取实际新增的血缘边数（幂等，重复调用=0）。 */
+export interface LineageExtractResult {
+  created: number;
+}

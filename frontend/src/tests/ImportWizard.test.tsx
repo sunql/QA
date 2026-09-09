@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import ImportWizard from "../components/localImport/ImportWizard";
 import * as api from "../api/localImport";
 import * as datasourceApi from "../api/datasource";
@@ -24,6 +25,11 @@ function table(name: string, columns: string[]): TableSchema {
 }
 
 // 向导第一步的 schema 源：表名须覆盖各测试 preview 里出现的 sourceTable。
+// 大表集（超过默认每页 50 条）用于验证分页条数切换与跨页全选。
+function manyTables(n: number): TableSchema[] {
+  return Array.from({ length: n }, (_, i) => table(`tbl_${i}`, ["id"]));
+}
+
 const SCHEMA_TABLES: TableSchema[] = [
   table("orders", ["id", "customer_id", "supplier_id"]),
   table("customers", ["id"]),
@@ -96,6 +102,8 @@ const JOIN_ORDERS_SUPPLIERS = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // 默认单 owner（非 Oracle / 仅连接默认）：向导跳过 schema 步直接选表。
+  vi.mocked(datasourceApi.listDatasourceSchemas).mockResolvedValue([]);
   vi.mocked(datasourceApi.getDatasourceSchema).mockResolvedValue(schemaResponse());
   vi.mocked(datasourceApi.introspectDatasource).mockResolvedValue(schemaResponse());
 });
@@ -112,11 +120,28 @@ async function openPreviewStep() {
   );
 }
 
+// 在「选择 Schema」步从 antd Select 中选中一个 owner。
+// 可点击选项是 .ant-select-item-option（title=owner）；role=option 的 a11y 复制层不可点，
+// 故用 findByTitle 精确定位（见 EntityMappingPage.test 的同类注释）。
+async function chooseSchema(owner: string) {
+  const user = userEvent.setup();
+  const select = screen.getByTestId("schemaSelect");
+  await user.click(select.querySelector(".ant-select-selector") as HTMLElement);
+  await user.click(await screen.findByTitle(owner));
+}
+
+// 等到所选 owner 的表加载完成（「下一步」解除禁用）。
+async function waitNextEnabled() {
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /下一步/i })).not.toBeDisabled(),
+  );
+}
+
 describe("ImportWizard", () => {
   it("renders rule config step by default", async () => {
     render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
-    // Steps 标题 + schema 表标题均存在
-    expect(screen.getByText(/规则配置/i)).toBeInTheDocument();
+    // schema 列表解析（空 → 跳过 schema 步）后：Steps 标题 + schema 表标题均存在
+    expect(await screen.findByText(/规则配置/i)).toBeInTheDocument();
     expect(await screen.findByText(/选择要导入的表/i)).toBeInTheDocument();
   });
 
@@ -389,5 +414,207 @@ describe("ImportWizard", () => {
     expect(within(ruleTable).getByText("customers")).toBeInTheDocument();
     expect(within(ruleTable).queryByText("orders")).not.toBeInTheDocument();
     expect(within(ruleTable).queryByText("suppliers")).not.toBeInTheDocument();
+  });
+
+  it("分页条数生效：默认每页 50，切换每页条数后行数随之变化", async () => {
+    vi.mocked(datasourceApi.getDatasourceSchema).mockResolvedValue({
+      tables: manyTables(60),
+      cachedAt: "2026-01-01T00:00:00Z",
+    });
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+    await screen.findByText("tbl_0");
+
+    const ruleTable = screen.getByTestId("ruleTable");
+    // defaultPageSize=50：第一页渲染 50 行（此前固定 pageSize 会让 size changer 失效）
+    expect(ruleTable.querySelectorAll(".ant-table-row")).toHaveLength(50);
+
+    // size changer 切到 20 条/页 → 第一页行数变 20
+    const user = userEvent.setup();
+    const sizeChanger = ruleTable.querySelector(
+      ".ant-pagination-options-size-changer",
+    ) as HTMLElement;
+    await user.click(sizeChanger.querySelector(".ant-select-selector") as HTMLElement);
+    // 在可见下拉里按文本数字前缀选 "20"（label 形如 "20 / page"/"20 条/页"，取决于 antd locale）
+    const sizeOption = await waitFor(() => {
+      const visible = Array.from(
+        document.querySelectorAll(
+          ".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option",
+        ),
+      );
+      const target = visible.find((o) => (o.textContent ?? "").trim().startsWith("20"));
+      expect(target).toBeTruthy();
+      return target as HTMLElement;
+    });
+    await user.click(sizeOption);
+    expect(ruleTable.querySelectorAll(".ant-table-row")).toHaveLength(20);
+  });
+
+  it("表头下拉全选跨页选中全部表（超当前页数量）", async () => {
+    vi.mocked(datasourceApi.getDatasourceSchema).mockResolvedValue({
+      tables: manyTables(60),
+      cachedAt: "2026-01-01T00:00:00Z",
+    });
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+    await screen.findByText("tbl_0");
+
+    const ruleTable = screen.getByTestId("ruleTable");
+    // 对照：表头 checkbox 只勾当前页（50/60）；跨页全选走表头下拉菜单
+    const headerCheckbox = ruleTable.querySelector(
+      ".ant-table-thead input[type=checkbox]",
+    ) as HTMLElement;
+    fireEvent.click(headerCheckbox);
+    expect(screen.getByText(/已选 50 \/ 共 60 张表/)).toBeInTheDocument();
+
+    // 表头下拉（hover 触发）：首项即跨页「全选当前筛选」→ 补齐到全部 60 张。
+    // 按角色取首个菜单项而非其文案，避免依赖 antd 内置 locale（en "Select all data" / zh "全选所有"）。
+    const user = userEvent.setup();
+    const trigger = ruleTable.querySelector(
+      ".ant-table-selection-extra .ant-dropdown-trigger",
+    ) as HTMLElement;
+    fireEvent.mouseEnter(trigger);
+    const menuItems = await screen.findAllByRole("menuitem");
+    await user.click(menuItems[0]);
+    expect(screen.getByText(/已选 60 \/ 共 60 张表/)).toBeInTheDocument();
+  });
+
+  it("「全选当前筛选」按钮在超每页条数时也一次选全部表", async () => {
+    vi.mocked(datasourceApi.getDatasourceSchema).mockResolvedValue({
+      tables: manyTables(60),
+      cachedAt: "2026-01-01T00:00:00Z",
+    });
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+    await screen.findByText("tbl_0");
+
+    fireEvent.click(screen.getByRole("button", { name: /全选当前筛选/i }));
+    expect(screen.getByText(/已选 60 \/ 共 60 张表/)).toBeInTheDocument();
+  });
+});
+
+// =============================================================================
+// 选择 Schema（Oracle owner）步 —— 多 owner 数据源先选 owner 再看其下的表
+// =============================================================================
+
+describe("ImportWizard — schema（Oracle owner）选择步", () => {
+  it("多 owner：先出 schema 步；未选禁用；选后进入选表且预览携带 schema", async () => {
+    vi.mocked(datasourceApi.listDatasourceSchemas).mockResolvedValue(["SYS", "THBI", "ZJTH"]);
+    vi.mocked(api.getImportPreview).mockResolvedValue(previewResponse());
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+
+    expect(await screen.findByText("Schema（Oracle owner）")).toBeInTheDocument();
+    expect(datasourceApi.listDatasourceSchemas).toHaveBeenCalledWith(1);
+
+    // 未选 schema 时「下一步」禁用
+    expect(screen.getByRole("button", { name: /下一步/i })).toBeDisabled();
+
+    // 选择 THBI → 按该 owner 加载表
+    await chooseSchema("THBI");
+    await waitFor(() =>
+      expect(datasourceApi.getDatasourceSchema).toHaveBeenCalledWith(1, "THBI"),
+    );
+    await waitNextEnabled();
+
+    // 进入「规则配置」选表
+    fireEvent.click(screen.getByRole("button", { name: /下一步/i }));
+    await screen.findByText(/选择要导入的表/i);
+    fireEvent.click(screen.getByRole("button", { name: /全选当前筛选/i }));
+    fireEvent.click(screen.getByRole("button", { name: /下一步/i }));
+
+    // 预览请求带 schema owner（后端据此内省 THBI 命名空间）
+    await waitFor(() =>
+      expect(api.getImportPreview).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ schema: "THBI" }),
+      ),
+    );
+  });
+
+  it("按选中 owner 过滤：THBI 只显示其下的表，其他 owner 的表不出现", async () => {
+    vi.mocked(datasourceApi.listDatasourceSchemas).mockResolvedValue(["THBI", "ZJTH"]);
+    vi.mocked(datasourceApi.getDatasourceSchema).mockImplementation(async (_id, owner) => ({
+      tables: owner === "THBI" ? [table("DWD_SALES", ["id"])] : SCHEMA_TABLES,
+      cachedAt: "2026-01-01T00:00:00Z",
+    }));
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+    await screen.findByText("Schema（Oracle owner）");
+
+    await chooseSchema("THBI");
+    await waitFor(() =>
+      expect(datasourceApi.getDatasourceSchema).toHaveBeenCalledWith(1, "THBI"),
+    );
+    await waitNextEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /下一步/i }));
+
+    expect(await screen.findByText("DWD_SALES")).toBeInTheDocument();
+    expect(screen.queryByText("orders")).not.toBeInTheDocument();
+  });
+
+  it("缓存 404 时对所选 owner 触发内省", async () => {
+    vi.mocked(datasourceApi.listDatasourceSchemas).mockResolvedValue(["THBI", "ZJTH"]);
+    vi.mocked(datasourceApi.getDatasourceSchema).mockRejectedValue(
+      Object.assign(new Error("未缓存"), { status: 404 }),
+    );
+    vi.mocked(datasourceApi.introspectDatasource).mockResolvedValue(schemaResponse());
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+    await screen.findByText("Schema（Oracle owner）");
+
+    await chooseSchema("THBI");
+    await waitFor(() =>
+      expect(datasourceApi.introspectDatasource).toHaveBeenCalledWith(1, "THBI"),
+    );
+  });
+
+  it("schema 列表加载失败：显示错误阻断，点「重试」后恢复", async () => {
+    vi.mocked(datasourceApi.listDatasourceSchemas)
+      .mockRejectedValueOnce(new Error("网络错误"))
+      .mockResolvedValueOnce(["THBI", "ZJTH"]);
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+
+    expect(await screen.findByText(/Schema 列表加载失败/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /下一步/i })).not.toBeInTheDocument();
+
+    // antd Button 对两字中文自动加空格 → 重试 匹配 /重\s?试/
+    fireEvent.click(screen.getByRole("button", { name: /重\s?试/ }));
+    expect(await screen.findByText("Schema（Oracle owner）")).toBeInTheDocument();
+  });
+
+  it("切换 schema：清空表选并重新加载新 owner 的表", async () => {
+    vi.mocked(datasourceApi.listDatasourceSchemas).mockResolvedValue(["THBI", "ZJTH"]);
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+    await screen.findByText("Schema（Oracle owner）");
+
+    await chooseSchema("THBI");
+    await waitFor(() =>
+      expect(datasourceApi.getDatasourceSchema).toHaveBeenCalledWith(1, "THBI"),
+    );
+    await waitNextEnabled();
+    await chooseSchema("ZJTH");
+    await waitFor(() =>
+      expect(datasourceApi.getDatasourceSchema).toHaveBeenCalledWith(1, "ZJTH"),
+    );
+  });
+
+  it("选定 owner 加载失败：下一步禁用、选择复位；重选同 owner 重试恢复", async () => {
+    vi.mocked(datasourceApi.listDatasourceSchemas).mockResolvedValue(["THBI", "ZJTH"]);
+    // 首次按 owner 取表失败（非 404），随后恢复
+    vi.mocked(datasourceApi.getDatasourceSchema)
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValue(schemaResponse());
+    render(<ImportWizard open datasourceId={1} onClose={() => {}} />);
+    await screen.findByText("Schema（Oracle owner）");
+
+    await chooseSchema("THBI");
+    await waitFor(() =>
+      expect(datasourceApi.getDatasourceSchema).toHaveBeenCalledWith(1, "THBI"),
+    );
+    // 失败后（schema 未就绪）schema 步「下一步」禁用，不会进入空表步
+    const nextBtn = screen.getByRole("button", { name: /下一步/i });
+    await waitFor(() => expect(nextBtn).toBeDisabled());
+
+    // 选择复位到占位态；重选同一 owner → 重新触发加载并恢复
+    await chooseSchema("THBI");
+    await waitFor(() => expect(datasourceApi.getDatasourceSchema).toHaveBeenCalledTimes(2));
+    await waitNextEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /下一步/i }));
+    expect(await screen.findByText("orders")).toBeInTheDocument();
   });
 });

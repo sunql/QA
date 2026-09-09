@@ -12,7 +12,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 from app.domain.agent_vocabulary import (
@@ -49,7 +49,7 @@ from app.domain.enums import (
     SourceSystem,
 )
 from app.domain.exceptions import ConfigError
-from typing import Annotated
+from typing import Annotated, Literal
 from pydantic import BeforeValidator
 
 from app.services.business_object_registry import businessObjectRegistry
@@ -954,13 +954,15 @@ class FeatureComputeBatchResult(CamelModel):
 
 
 class OntologyJoinCreate(CamelModel):
+    model_config = ConfigDict(extra="forbid")
+
     source_class_id: int
     source_columns: list[str] = Field(..., min_length=1)
     target_class_id: int
     target_columns: list[str] = Field(..., min_length=1)
     join_type: str = Field(default="INNER", max_length=10)
     relation_type: str = Field(default="business", max_length=20)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=1000)
 
 
 class OntologyJoinRead(CamelModel):
@@ -982,6 +984,126 @@ class OntologyJoinUpdate(CamelModel):
     join_type: str | None = None
     relation_type: str | None = None
     description: str | None = None
+
+
+class OntologyRelationCreate(CamelModel):
+    """创建本体「类 × 类」语义关系。relation_type 取值由 service 校验 ClassRelationType。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_class_id: int
+    target_class_id: int
+    relation_type: str = Field(..., max_length=30)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class OntologyRelationRead(CamelModel):
+    id: int
+    source_class_id: int
+    target_class_id: int
+    relation_type: str
+    description: str | None = None
+    created_by: str | None = None
+    created_time: datetime | None = None
+    updated_time: datetime | None = None
+
+
+class RelationBackfillResult(CamelModel):
+    """一键补关系结果：join 全量入图数 + X3 外键 ref_class_id 补全数。"""
+
+    synced_joins: int
+    backfilled_references: int
+
+
+# ===== Ontology Batch Relation Engine（通用批量关系引擎） =====
+
+# 冲突策略：skip=已存在则跳过；overwrite=已存在则覆盖可更新字段（源/目标/列是身份）
+OnConflictPolicy = Literal["skip", "overwrite"]
+
+
+class InferredJoin(CamelModel):
+    """共享列推断出的 join 候选（落库前只读描述；来源区分命名约定/共享列）。"""
+
+    source_class_id: int
+    source_class_name: str
+    source_columns: list[str]
+    target_class_id: int
+    target_class_name: str
+    target_columns: list[str]
+    relation_type: str = "foreign_key"
+    inferred_by: str = "name_convention"  # name_convention | shared_column
+
+
+class RelationManifest(CamelModel):
+    """批量关系清单：joins + relations（与单条创建 schema 一一对应）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    joins: list[OntologyJoinCreate] = Field(default_factory=list)
+    relations: list[OntologyRelationCreate] = Field(default_factory=list)
+
+
+class BatchRowError(CamelModel):
+    """清单单行的错误（index 为该清单内 0-based 行序；message 为原因）。"""
+
+    index: int
+    message: str
+
+
+class BatchCounts(CamelModel):
+    """join/relations 批量应用计数（含行级错误，不 fail-fast）。"""
+
+    created: int = 0
+    skipped: int = 0
+    overwritten: int = 0
+    errors: list[BatchRowError] = Field(default_factory=list)
+
+
+class GraphSyncResult(CamelModel):
+    """syncGraph 本体入图统计（Neo4j 节点/边数）。"""
+
+    classes: int = 0
+    properties: int = 0
+    has_property_edges: int = 0
+    reference_edges: int = 0
+
+
+class BatchRelationRequest(CamelModel):
+    """批量关系引擎请求：可任选其一或多个动作；对已存在关系可选覆盖/跳过。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sync_graph: bool = False
+    infer_joins: bool = False
+    apply_manifest: bool = False
+    on_conflict: OnConflictPolicy = "skip"
+    manifest: RelationManifest | None = None
+
+    @model_validator(mode="after")
+    def _validateAtLeastOneAction(self) -> BatchRelationRequest:
+        if not (self.sync_graph or self.infer_joins or self.apply_manifest):
+            raise ValueError(
+                "batch requires at least one action: syncGraph | inferJoins | applyManifest"
+            )
+        if self.apply_manifest and self.manifest is None:
+            raise ValueError("applyManifest requires a non-null manifest")
+        return self
+
+
+class BatchRelationResult(CamelModel):
+    """批量关系引擎结果（执行或只读预览共用；不可变计数，Neo4j 失败不阻断 PG）。"""
+
+    sync_graph: GraphSyncResult | None = None
+    inferred_joins: list[InferredJoin] = Field(default_factory=list)
+    joins: BatchCounts = Field(default_factory=BatchCounts)
+    relations: BatchCounts = Field(default_factory=BatchCounts)
+
+
+class OntologyCsvParseResult(CamelModel):
+    """CSV 清单解析结果：manifest（按类名反解 id）+ 行级错误（Excel 友好）。"""
+
+    manifest: RelationManifest = Field(default_factory=RelationManifest)
+    errors: list[BatchRowError] = Field(default_factory=list)
 
 
 class OntologySearchResult(CamelModel):
@@ -1274,6 +1396,15 @@ class ImportPreviewRequest(CamelModel):
     selected_columns: dict[str, list[str]] | None = Field(
         default=None,
         description="按表限制预览的属性列子集，如 {\"PORDERQ\": [\"POHNUM_0\", \"QTYUOM_0\"]}",
+    )
+    # 可选：内省目标 Oracle owner 命名空间（如 THBI）；缺省取连接用户默认 owner。
+    # 仅影响表来源（schema 缓存键）；本体 source_table 仍存裸表名。
+    # 字段名取 schema_name 避免与 BaseModel/CamelModel 的 schema 属性冲突；
+    # JSON 契约仍为 schema（显式 alias 覆盖 camelCase 生成器）。
+    schema_name: str | None = Field(
+        default=None,
+        alias="schema",
+        description="要预览的 Oracle owner 命名空间（如 THBI）；缺省连接用户默认 owner",
     )
 
 
@@ -1880,6 +2011,17 @@ class LineageEdgeRead(CamelModel):
     is_active: bool
     created_time: datetime | None = Field(default=None, description=MSG_SCHEMA_LINEAGE_CREATED_TIME)
     updated_time: datetime | None = Field(default=None, description=MSG_SCHEMA_LINEAGE_UPDATED_TIME)
+
+
+class LineageExtractResult(CamelModel):
+    """自动抽取血缘的结果。
+
+    来源与 scripts/lineage_auto_extract.py 一致（OntologyJoin + OntologyMetric.formula
+    + schema introspection）；created = 本次实际写入 data_lineage 的新增边数
+    （幂等：重复调用返回 0）。
+    """
+
+    created: int = Field(..., description="本次实际写入 data_lineage 的新增血缘边数")
 
 
 # ===== 跨系统编码映射（Phase 3.1）=====

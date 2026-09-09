@@ -16,6 +16,7 @@ import { message } from "antd";
 
 vi.mock("../api/lineage", () => ({
   listEdges: vi.fn(),
+  extractLineage: vi.fn(),
 }));
 
 const echartsOptionCapture = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
@@ -199,6 +200,71 @@ describe("LineagePage", () => {
       // 只剩 PORDER → BPSUPPLIER 一条边；ITMMASTER 不再出现
       expect(names).toEqual(["BPSUPPLIER", "PORDER"]);
     });
+  });
+
+  it("extract: created>0 → toast 新增数 + 拉取刷新", async () => {
+    const successSpy = vi
+      .spyOn(message, "success")
+      .mockReturnValue(1 as unknown as ReturnType<typeof message.success>);
+    vi.mocked(lineageApi.listEdges).mockResolvedValue([]);
+    vi.mocked(lineageApi.extractLineage).mockResolvedValue({ created: 3 });
+    render(<LineagePage />);
+    await waitFor(() => {
+      expect(lineageApi.listEdges).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /自动抽取血缘/ }));
+
+    await waitFor(() => {
+      expect(lineageApi.extractLineage).toHaveBeenCalledTimes(1);
+    });
+    expect(successSpy).toHaveBeenCalledWith(expect.stringContaining("3"));
+    // 抽取成功后自动 refresh → 第二次 listEdges
+    await waitFor(() => {
+      expect(lineageApi.listEdges).toHaveBeenCalledTimes(2);
+    });
+    successSpy.mockRestore();
+  });
+
+  it("extract: created=0 → info 提示无新增（幂等）且仍刷新", async () => {
+    const infoSpy = vi
+      .spyOn(message, "info")
+      .mockReturnValue(1 as unknown as ReturnType<typeof message.info>);
+    vi.mocked(lineageApi.listEdges).mockResolvedValue([]);
+    vi.mocked(lineageApi.extractLineage).mockResolvedValue({ created: 0 });
+    render(<LineagePage />);
+    await waitFor(() => {
+      expect(lineageApi.listEdges).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /自动抽取血缘/ }));
+
+    await waitFor(() => {
+      expect(infoSpy).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(lineageApi.listEdges).toHaveBeenCalledTimes(2);
+    });
+    infoSpy.mockRestore();
+  });
+
+  it("extract failure → error toast，不崩溃", async () => {
+    const errorSpy = vi
+      .spyOn(message, "error")
+      .mockReturnValue(1 as unknown as ReturnType<typeof message.error>);
+    vi.mocked(lineageApi.listEdges).mockResolvedValue([]);
+    vi.mocked(lineageApi.extractLineage).mockRejectedValue(new Error("extract boom"));
+    render(<LineagePage />);
+    await waitFor(() => {
+      expect(lineageApi.listEdges).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /自动抽取血缘/ }));
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("extract boom"));
+    });
+    errorSpy.mockRestore();
   });
 
   it("prunes selected objects when their layer is deselected", async () => {

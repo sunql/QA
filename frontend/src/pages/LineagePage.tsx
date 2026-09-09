@@ -10,9 +10,9 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Button, Card, Empty, Space, Spin, message } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { ReloadOutlined, SyncOutlined } from "@ant-design/icons";
 import { useTranslation } from "../i18n";
-import { listEdges } from "../api/lineage";
+import { extractLineage, listEdges } from "../api/lineage";
 import type { LineageEdgeRead, LineageLayer } from "../types/lineage";
 import LayerFilter, { ALL_LAYERS } from "../components/lineage/LayerFilter";
 import ObjectFilter from "../components/lineage/ObjectFilter";
@@ -32,6 +32,7 @@ export default function LineagePage() {
   const { t } = useTranslation();
   const [edges, setEdges] = useState<LineageEdgeRead[]>([]);
   const [loading, setLoading] = useState(false);
+  const [extracting, setExtracting] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedLayers, setSelectedLayers] = useState<Set<LineageLayer>>(
     () => new Set(ALL_LAYERS),
@@ -52,6 +53,25 @@ export default function LineagePage() {
       setLoading(false);
     }
   }, []);
+
+  // 自动抽取：POST /lineage/edges/extract（幂等，来源与 lineage_auto_extract.py 一致），
+  // 成功后 toast 新增数并刷新列表；created=0（已是最新）走 info 而非成功。
+  const handleExtract = useCallback(async () => {
+    setExtracting(true);
+    try {
+      const result = await extractLineage();
+      if (result.created > 0) {
+        message.success(t("lineage.extract.created", { count: result.created }));
+      } else {
+        message.info(t("lineage.extract.noNew"));
+      }
+      await refresh();
+    } catch (error: unknown) {
+      message.error(errorMessageOf(error));
+    } finally {
+      setExtracting(false);
+    }
+  }, [refresh]);
 
   useEffect(() => {
     void refresh();
@@ -92,6 +112,13 @@ export default function LineagePage() {
         title={t("lineage.page.title")}
         extra={
           <Space>
+            <Button
+              icon={<SyncOutlined />}
+              onClick={() => void handleExtract()}
+              loading={extracting}
+            >
+              {t("lineage.extract.button")}
+            </Button>
             <Button
               icon={<ReloadOutlined />}
               onClick={() => void refresh()}

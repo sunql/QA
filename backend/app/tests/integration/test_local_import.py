@@ -28,7 +28,11 @@ from app.services.local_import_service import LocalImportService
 class _FakeSchemaService:
     """不连接业务库的 schema 源，返回固定两表（含外键）供导入。"""
 
-    async def introspectAndCache(self, session, ds):
+    def __init__(self) -> None:
+        self.introspectedOwners: list[str | None] = []
+
+    async def introspectAndCache(self, session, ds, owner: str | None = None):
+        self.introspectedOwners.append(owner)
         return None
 
     def buildResponse(self, cache):
@@ -64,11 +68,11 @@ class _FakeSchemaService:
         )
 
 
-def _useFakeSchema(client) -> None:
-    """把 schema 源替换为 fake，避免连接不可达的业务数据源。"""
-    client._transport.app.state.localImportService = LocalImportService(
-        schema_service=_FakeSchemaService()
-    )
+def _useFakeSchema(client) -> LocalImportService:
+    """把 schema 源替换为 fake，避免连接不可达的业务数据源；返回 service 供断言。"""
+    service = LocalImportService(schema_service=_FakeSchemaService())
+    client._transport.app.state.localImportService = service
+    return service
 
 
 def _create_payload() -> dict:
@@ -255,3 +259,17 @@ async def test_import_execute_respects_is_selected(client, dbSession) -> None:
 
     classCount = await dbSession.scalar(select(func.count()).select_from(OntologyClass))
     assert classCount == 1
+
+
+async def test_import_preview_passes_schema_owner_to_introspection(client) -> None:
+    """ImportPreviewRequest.schema（alias）透传到 introspectAndCache 的 owner。"""
+    fake = _FakeSchemaService()
+    client._transport.app.state.localImportService = LocalImportService(schema_service=fake)
+    ds_id = await _create_datasource(client)
+
+    resp = await client.post(
+        f"/api/v1/datasources/{ds_id}/import-preview",
+        json={"rules": {}, "schema": "THBI"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert fake.introspectedOwners == ["THBI"]

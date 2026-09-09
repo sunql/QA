@@ -44,6 +44,7 @@ async def importPreview(
         payload.rules,
         selected_tables=payload.selected_tables,
         selected_columns=payload.selected_columns,
+        schema=payload.schema_name,
     )
 
 

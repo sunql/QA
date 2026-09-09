@@ -99,7 +99,7 @@ async def _seed_datasource(dbSession: AsyncSession) -> DataSource:
 
 
 def _make_service(schema: SchemaIntrospectResponse) -> LocalImportService:
-    async def _introspect(self, session, ds) -> None:
+    async def _introspect(self, session, ds, owner: str | None = None) -> None:
         return None
 
     schema_svc = type(

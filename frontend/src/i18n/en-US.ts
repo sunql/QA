@@ -10,6 +10,7 @@
 export const enUS = {
   common: {
     refresh: "Refresh",
+    retry: "Retry",
     edit: "Edit",
     delete: "Delete",
     save: "Save",
@@ -729,6 +730,11 @@ export const enUS = {
       noData: "No lineage data yet. Create some via Ontology management or /api/v1/lineage/edges.",
       filteredOut: "No edges match the current filter. Try adjusting the layer or object selection.",
     },
+    extract: {
+      button: "Auto-extract Lineage",
+      created: "Extraction done: {count} new lineage edge(s) added",
+      noNew: "Lineage is up to date — no new edges this run",
+    },
     manage: {
       newButton: "New Edge",
       editTitle: "Edit Edge",
@@ -936,6 +942,7 @@ export const enUS = {
         properties: "Properties",
         metrics: "Metrics",
         joins: "Joins",
+        semanticRelations: "Semantic Relations",
       },
       addClassButton: "Add Class",
       addClassModalTitle: "Add Class",
@@ -1024,6 +1031,94 @@ export const enUS = {
         sourceColumns: "e.g. BPTNUM_0",
         targetColumns: "e.g. BPRNUM_0",
         description: "e.g. receipt supplier no. links to supplier master",
+      },
+      addSemanticRelationButton: "Add Semantic Relation",
+      addSemanticRelationModalTitle: "Add Semantic Relation",
+      backfillRelationsButton: "Backfill Relations",
+      backfillRelationsHint:
+        "Sync all locally-imported JOIN edges into the graph, and backfill ref_class_id for foreign-key properties with no target class, per Sage X3 reference column-name conventions. Idempotent on re-run. Note: manually declared semantic relations are NOT re-synced here — if an edge was lost because Neo4j was unreachable at creation, delete and re-declare it once Neo4j is back.",
+      backfillRelationsConfirm:
+        "Sync all JOINs into the graph and backfill foreign-key target classes. Continue?",
+      backfillRelationsSuccess:
+        "Synced {syncedJoins} JOIN(s), backfilled {backfilledReferences} reference(s)",
+
+      batchRelations: {
+        button: "Batch Relations",
+        modalTitle: "Batch Relation Engine",
+        subtitle:
+          "Build relations in bulk — pick one or more actions; for relations that already exist choose Skip or Overwrite. This only mutates the JOIN / semantic-relation catalog and the graph, never class or property definitions.",
+        syncGraph: "Sync Ontology to Graph",
+        syncGraphHint:
+          "Upsert every live PG class/property as Neo4j Class/Property nodes plus HAS_PROPERTY / REFERENCES edges (idempotent; for graph backfill / reconciliation)",
+        inferJoins: "Infer Physical Joins from Shared Columns",
+        inferJoinsHint:
+          "Infer JOIN candidates from Sage X3 reference column-name conventions plus generic shared columns where at least one side is a primary key; boilerplate columns are skipped. Preview before running.",
+        applyManifest: "Apply Relation Manifest",
+        applyManifestHint:
+          "Add/update JOINs and semantic relations from a manifest; duplicates follow the conflict policy below",
+        onConflictLabel: "Conflict policy (existing relations)",
+        conflictSkip: "Skip (keep as-is)",
+        conflictOverwrite: "Overwrite (update differing fields)",
+        sourceLabel: "Manifest source",
+        jsonLabel: "JSON",
+        csvLabel: "CSV",
+        csvKindLabel: "CSV list kind",
+        jsonPlaceholder:
+          'Paste manifest JSON, e.g. {"joins":[{"sourceClassId":1,"sourceColumns":["A_0"],"targetClassId":2,"targetColumns":["A_0"]}],"relations":[{"sourceClassId":1,"targetClassId":2,"relationType":"SUPPLIES","description":"…"}]}',
+        uploadHint: "Click or drag a CSV file here",
+        uploadExtra:
+          "File must include headers: sourceClassName,targetClassName,relationType,description (or sourceColumns/targetColumns)",
+        templateJoins: "Download JOIN template",
+        templateRelations: "Download semantic-relation template",
+        csvParsed: "Parsed {n} manifest row(s); class names resolved to IDs",
+        csvHasErrors: "CSV has {n} row error(s) (unknown class name, etc.); those rows were skipped",
+        preview: "Preview",
+        execute: "Execute",
+        selectActionFirst: "Select at least one action",
+        manifestRequired: "Apply Manifest requires JSON or an uploaded CSV",
+        jsonInvalid: "Invalid JSON: {detail}",
+        previewTitle: "Preview (read-only)",
+        resultTitle: "Execution result",
+        inferredTitle: "Inferred JOIN candidates",
+        inferredBy: "Inferred by",
+        inferredByConvention: "X3 naming convention",
+        inferredBySharedColumn: "Shared column (one side PK)",
+        colSource: "Source class",
+        colTarget: "Target class",
+        colColumns: "Join columns",
+        emptyInferred: "No shared-column joins matched the inference rules",
+        graphCountsTitle: "Graph sync counts",
+        syncGraphCounts:
+          "Classes {classes} · Properties {properties} · HAS_PROPERTY {hasPropertyEdges} · REFERENCES {referenceEdges}",
+        joinsLabel: "Physical joins",
+        relationsLabel: "Semantic relations",
+        countCreated: "Created {n}",
+        countSkipped: "Skipped {n}",
+        countOverwritten: "Overwritten {n}",
+        emptyCounts: "Nothing to process (all hits were skipped or the manifest is empty)",
+        errorsTitle: "Errors ({n})",
+        successToast: "Batch execution complete",
+        noChangeToast: "Complete: no changes (all were skipped)",
+      },
+
+      semanticRelationColumns: {
+        id: "ID",
+        source: "Source → Target",
+        relationType: "Relation Type",
+        description: "Description",
+        actions: "Actions",
+      },
+
+      semanticRelationLabels: {
+        sourceClassId: "Source Class",
+        targetClassId: "Target Class",
+        relationType: "Relation Type",
+        description: "Description",
+      },
+      semanticRelationPlaceholders: {
+        sourceClassId: "Select source class",
+        targetClassId: "Select target class",
+        description: "e.g. supplier supplies the goods a receipt references",
       },
       searchColumns: {
         type: "Type",
@@ -1142,11 +1237,20 @@ export const enUS = {
 
   localImport: {
     steps: {
+      schema: "Select Schema",
       rule: "Rule Config",
       preview: "Preview & Confirm",
       confirm: "Import Done",
     },
     confirmImport: "Confirm Import",
+    schema: {
+      loading: "Loading schemas…",
+      loadFailed: "Failed to load schemas. Check datasource connectivity and retry.",
+      selectLabel: "Schema (Oracle owner)",
+      placeholder: "Select a schema to browse tables",
+      ownerCount: "{count} schemas total",
+      hint: "Only tables under the selected schema (Oracle owner) are shown; Next stays disabled until one is chosen.",
+    },
     initPage: {
       title: "Local Data Initialization",
       datasourceLabel: "Data Source",
@@ -1417,6 +1521,14 @@ export const enUS = {
       Transaction: "Transaction Document Transaction",
       Reference: "Reference/Config Reference",
       Event: "Event Event",
+    },
+    semanticRelationType: {
+      SUPPLIES: "Supplies SUPPLIES",
+      CONTAINS: "Contains CONTAINS",
+      GENERATES: "Generates GENERATES",
+      INSPECTED_BY: "Inspected By INSPECTED_BY",
+      GENERATED: "Generated GENERATED",
+      RELATED_TO: "Related To RELATED_TO",
     },
     entityType: {
       class: "Class",

@@ -74,10 +74,23 @@ export default function RuleConfigStep({
     onSelectedTablesChange(Array.from(next));
   };
 
+  // selections 下拉跨页作用于完整 dataSource（过滤后的全部表），而非表头 checkbox
+  // 默认的当前页——表多时分页后仍能一键全选。首项复用工具栏「全选当前筛选」的
+  // 累加语义（并入已选，不清掉此前跨页勾选的表），与 antd 内置 SELECTION_ALL 的
+  // 「替换为当前筛选集」区分，避免分批选表时静默丢失已选。
   const rowSelection: TableProps<TableSchema>["rowSelection"] = {
     selectedRowKeys: selectedTables,
     onChange: (keys) => onSelectedTablesChange(keys.map(String)),
     preserveSelectedRowKeys: true,
+    selections: [
+      {
+        key: "select-all-filtered",
+        text: t("localImport.config.selectFiltered"),
+        onSelect: () => handleSelectFiltered(),
+      },
+      Table.SELECTION_INVERT,
+      Table.SELECTION_NONE,
+    ],
   };
 
   const tableColumns: TableColumnsType<TableSchema> = [
@@ -169,7 +182,12 @@ export default function RuleConfigStep({
           dataSource={filteredTables}
           columns={tableColumns}
           rowSelection={rowSelection}
-          pagination={{ pageSize: 8, showSizeChanger: true }}
+          // defaultPageSize 仅作初始值；传受控 pageSize 会让 size changer 的改动每次被 props 压回（no-op）。
+          pagination={{
+            defaultPageSize: 50,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100, 200, 500],
+          }}
           size="small"
         />
       </div>

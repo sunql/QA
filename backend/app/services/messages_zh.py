@@ -248,6 +248,12 @@ MSG_ONTOLOGY_JOIN_COLUMN_COUNT_MISMATCH = (
 )
 MSG_ONTOLOGY_JOIN_DUP = "该关联关系已存在（相同源类/源列 → 目标类/目标列）"
 
+# 语义关系（ontology_relation）错误
+MSG_ONTOLOGY_RELATION_NOT_FOUND = "OntologyRelation id={id} 不存在"
+MSG_ONTOLOGY_RELATION_DUP = "该语义关系已存在（相同源类 → 目标类 → 关系类型）"
+MSG_ONTOLOGY_RELATION_SELF = "源类与目标类不能相同（语义关系必须是两个不同类之间）"
+MSG_ONTOLOGY_RELATION_INVALID_TYPE = "不支持的关系类型: {relationType}"
+
 # 向量检索 / 同步（Milvus）
 MSG_VECTOR_SEARCH_FAILED = "向量检索失败"
 

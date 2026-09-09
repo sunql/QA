@@ -41,14 +41,23 @@ def _datasource(type_: str = "oracle", username: str = "ZJTH") -> DataSource:
 class _FakeSchemaAdapter:
     """按 SQL 内容返回预置行集的伪适配器，记录已执行的 SQL。"""
 
-    def __init__(self, columnRows: list[dict], pkRows: list[dict], fkRows: list[dict]) -> None:
-        self.columnRows = columnRows
-        self.pkRows = pkRows
-        self.fkRows = fkRows
+    def __init__(
+        self,
+        columnRows: list[dict] | None = None,
+        pkRows: list[dict] | None = None,
+        fkRows: list[dict] | None = None,
+        ownerRows: list[dict] | None = None,
+    ) -> None:
+        self.columnRows = columnRows or []
+        self.pkRows = pkRows or []
+        self.fkRows = fkRows or []
+        self.ownerRows = ownerRows or []
         self.executed: list[str] = []
 
     async def execute_read_only(self, sql: str) -> list[dict]:
         self.executed.append(sql)
+        if "ALL_TABLES" in sql:
+            return self.ownerRows
         if "ALL_TAB_COLUMNS" in sql or "information_schema.columns" in sql:
             return self.columnRows
         if "constraint_type = 'P'" in sql or "PRIMARY KEY" in sql:
@@ -245,3 +254,66 @@ class TestSchemaVersion:
         assert schema_module._schemaVersion([{"table_name": "A"}]) != schema_module._schemaVersion(
             [{"table_name": "B"}]
         )
+
+
+class TestOwnerScoping:
+    """Oracle owner 作用域化：显式 owner 内省 / 规范化 / 白名单 / listSchemas。"""
+
+    async def test_introspect_uses_explicit_owner_in_sql(self) -> None:
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {
+                    "table_name": "DWD_M",
+                    "column_name": "ID",
+                    "data_type": "NUMBER",
+                    "nullable": 0,
+                    "owner": "THBI",
+                }
+            ],
+            pkRows=[{"table_name": "DWD_M", "column_name": "ID"}],
+            fkRows=[],
+        )
+        tables = await _service(adapter).introspect(_datasource(), owner="THBI")
+
+        assert tables and tables[0].table_name == "DWD_M"
+        assert tables[0].owner == "THBI"
+        # SQL 内联 owner 为大写字面量 THBI；未回退到连接用户名 ZJTH
+        assert any("owner = 'THBI'" in sql for sql in adapter.executed)
+        assert not any("owner = 'ZJTH'" in sql for sql in adapter.executed)
+
+    async def test_introspect_owner_lowercase_is_normalized(self) -> None:
+        adapter = _FakeSchemaAdapter()
+        await _service(adapter).introspect(_datasource(), owner="thbi")
+        assert any("owner = 'THBI'" in sql for sql in adapter.executed)
+
+    async def test_introspect_invalid_owner_raises_validation(self) -> None:
+        with pytest.raises(ValidationError):
+            await _service(_FakeSchemaAdapter()).introspect(_datasource(), owner="bad;owner")
+
+    async def test_introspect_ignores_owner_for_pg_and_mysql(self) -> None:
+        for type_ in ("postgresql", "mysql"):
+            adapter = _FakeSchemaAdapter()
+            # 显式 owner 在非 Oracle 下被忽略：仍走 information_schema，不抛错
+            tables = await _service(adapter).introspect(_datasource(type_=type_), owner="THBI")
+            assert tables == []
+            assert adapter.executed  # 查询仍发生（information_schema 路径）
+
+    async def test_list_schemas_returns_sorted_filtered_oracle_owners(self) -> None:
+        adapter = _FakeSchemaAdapter(
+            ownerRows=[
+                {"owner": "thbi"},
+                {"owner": "ZJTH"},
+                {"owner": "SYS"},
+                {"owner": "bad;drop"},
+                {"owner": ""},
+            ]
+        )
+        result = await _service(adapter).listSchemas(_datasource())
+        assert result == ["SYS", "THBI", "ZJTH"]
+
+    async def test_list_schemas_empty_for_pg_and_mysql(self) -> None:
+        for type_ in ("postgresql", "mysql"):
+            adapter = _FakeSchemaAdapter()
+            result = await _service(adapter).listSchemas(_datasource(type_=type_))
+            assert result == []
+            assert adapter.executed == []  # 非 Oracle 不触发任何数据字典查询

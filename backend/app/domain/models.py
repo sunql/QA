@@ -39,6 +39,7 @@ from app.domain.enums import (
     AgentResponseLatency,
     AgentStatus,
     AgentTriggerType,
+    ClassRelationType,
     DataSourceType,
     DocumentSecurityLevel,
     DocumentStatus,
@@ -612,7 +613,8 @@ class OntologyJoin(Base, TimestampMixin):
 
     relation_type 标注来源：foreign_key（种子物化自外键标志）| business（curated
     业务流转）。join_key 为幂等去重键（列按配对顺序拼接），跨 PG/SQLite 均可比较。
-    本表仅由 NL2SQL 消费，不写 Neo4j/Milvus。
+    PG 为 SSOT：除 NL2SQL 消费外，Phase 5.6 起同步 (:Class)-[:JOIN]->(:Class)
+    镜像边（join 入图，Neo4j 失败不阻断 PG）。
     """
 
     __tablename__ = "ontology_join"
@@ -646,6 +648,49 @@ class OntologyJoin(Base, TimestampMixin):
         return (
             f"<OntologyJoin id={self.id} {self.source_class_id}->{self.target_class_id} "
             f"type={self.join_type}>"
+        )
+
+
+class OntologyRelation(Base, TimestampMixin):
+    """本体「类 × 类」语义关系表（Phase 5.6 关系重构）。
+
+    一行 = 用户显式声明的 (source_class_id → target_class_id × relation_type)
+    方向性语义关系（如 PRECEIPT-SUPPLIES->BPARTNER）。PG 为 SSOT（audit + 可列出），
+    Neo4j 同步 (:Class)-[:{relation_type}]->(:Class) 镜像边（失败不阻断 PG）。
+
+    与 ontology_join 的分工：join 是按列配对的 NL2SQL JOIN 目录（source_columns /
+    target_columns / join_key，relation_type 仅标注来源）；本表是类级业务语义，
+    无列、无 join_key，按 (source, target, relation_type) 三元组去重。
+    """
+
+    __tablename__ = "ontology_relation"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    source_class_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("ontology_class.id"), nullable=False
+    )
+    target_class_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("ontology_class.id"), nullable=False
+    )
+    relation_type: Mapped[ClassRelationType] = mapped_column(
+        String(30), nullable=False
+    )
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_class_id", "target_class_id", "relation_type",
+            name="uq_ontology_relation_triple",
+        ),
+        Index("idx_relation_source_class", "source_class_id"),
+        Index("idx_relation_target_class", "target_class_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<OntologyRelation id={self.id} "
+            f"{self.source_class_id}-[{self.relation_type}]->{self.target_class_id}>"
         )
 
 
@@ -724,10 +769,12 @@ class SessionMessage(Base, TimestampMixin):
 
 
 class SchemaCache(Base, TimestampMixin):
-    """业务数据源 schema 缓存表（5.7）。
+    """业务数据源 schema 缓存表（5.7，schema 作用域化）。
 
-    datasource_id 唯一；schema_data 为结构化表清单（JSON，生产 PG 落 JSONB），
-    schema_version 为内容 MD5，用于判断 schema 是否变化、是否需要刷新。
+    每个 (datasource_id, schema_name) 唯一：一个数据源可按 Oracle owner 拆成多份
+    schema 缓存（每份 schema_data 只含该 owner 下的表）。非 Oracle 数据源
+    schema_name 恒为 ''（连接默认，保持单份语义）。schema_data 为结构化表清单
+    （JSON，生产 PG 落 JSONB），schema_version 为内容 MD5。
     """
 
     __tablename__ = "schema_cache"
@@ -736,15 +783,24 @@ class SchemaCache(Base, TimestampMixin):
     datasource_id: Mapped[int] = mapped_column(
         BigIntFk, ForeignKey("data_source.id"), nullable=False
     )
+    # Oracle owner 命名空间（如 ZJTH/THBI）；非 Oracle 存 ''（连接默认）
+    schema_name: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     schema_data: Mapped[list[dict[str, Any]]] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=False
     )
     schema_version: Mapped[str] = mapped_column(String(64), nullable=False)
 
-    __table_args__ = (UniqueConstraint("datasource_id", name="uq_schema_cache_datasource"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "datasource_id", "schema_name", name="uq_schema_cache_datasource_schema"
+        ),
+    )
 
     def __repr__(self) -> str:
-        return f"<SchemaCache id={self.id} datasource_id={self.datasource_id} version={self.schema_version}>"
+        return (
+            f"<SchemaCache id={self.id} datasource_id={self.datasource_id} "
+            f"schema_name={self.schema_name!r} version={self.schema_version}>"
+        )
 
 
 class SessionQueryState(Base, TimestampMixin):

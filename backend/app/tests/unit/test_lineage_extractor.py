@@ -17,8 +17,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from app.domain.enums import LineageLayer, RefreshFrequency
 from app.domain.models import DataLineage, OntologyClass, OntologyJoin, OntologyMetric, SchemaCache
@@ -28,8 +27,8 @@ from app.services.lineage_extractor import (
     _loadSchemaTableNames,
     extractEdges,
     layerForSourceTable,
+    persistEdges,
 )
-
 
 # ---- 辅助 fake session ----
 
@@ -231,6 +230,45 @@ class TestExtractFromJoins:
         assert len(edges) == 2
         fields = sorted([(e.source_field, e.target_field) for e in edges])
         assert fields == [("K1", "K1"), ("K2", "K2")]
+
+    async def test_skips_self_join_same_table_same_column(self):
+        """自连接 join（source_class == target_class 且列同名）→ 跳过，不产出自环退化边。
+
+        镜像 DataLineageService.createEdge 的自环校验（extractor 不经过 service，需自查）。
+        """
+        cls_a = _makeClass(1, "A", "TA")
+        join = OntologyJoin(
+            id=10,
+            source_class_id=1,
+            target_class_id=1,  # 自连接
+            source_columns=["K"],
+            target_columns=["K"],
+            join_type="INNER",
+            relation_type="business",
+            join_key="K=K",
+        )
+        session = _FakeSession(classes=[cls_a], joins=[join])
+
+        edges = await extractEdges(session)
+
+        assert edges == []
+
+    async def test_skips_two_classes_sharing_source_table_same_column(self):
+        """两个不同 class 共享同一 source_table + 同名列 → 仍产出自环边，跳过。"""
+        cls_a = _makeClass(1, "A", "TA")
+        cls_b = _makeClass(2, "B", "TA")  # 共享 source_table
+        join = _makeJoin(
+            id=10,
+            src_class=cls_a,
+            tgt_class=cls_b,
+            src_cols=["K"],
+            tgt_cols=["K"],
+        )
+        session = _FakeSession(classes=[cls_a, cls_b], joins=[join])
+
+        edges = await extractEdges(session)
+
+        assert edges == []
 
     async def test_skips_join_with_missing_class(self):
         """JOIN 引用了不存在的 class（数据不一致）：跳过，不抛错。"""
@@ -452,6 +490,64 @@ class TestEdgesFromSystemToOds:
         assert len(edges) == 1
         assert edges[0].source_object == "PORDER"
         assert edges[0].target_object == "ods_porder"
+
+
+# ---- persistEdges：落库 + 并发 IntegrityError 兜底 ----
+
+
+def _makeExtractedEdge(obj: str = "TA", field: str = "K") -> ExtractedEdge:
+    """构造一条待写入的抽取边（默认同表同列，身份非空即可）。"""
+    return ExtractedEdge(
+        source_layer=LineageLayer.SOURCE_SYSTEM,
+        source_system="ERP",
+        source_object=obj,
+        source_field=field,
+        target_layer=LineageLayer.SOURCE_SYSTEM,
+        target_system="ERP",
+        target_object=obj,
+        target_field=field,
+        transformation_rule=None,
+        refresh_frequency=RefreshFrequency.DAILY,
+    )
+
+
+class TestPersistEdges:
+    async def test_persists_all_and_commits_once(self) -> None:
+        session = _FakeSession()
+
+        created = await persistEdges(
+            session,
+            [_makeExtractedEdge("TA", "K1"), _makeExtractedEdge("TA", "K2")],
+        )
+
+        assert created == 2
+        assert len(session.added) == 2
+        assert session.commits == 1
+        assert session.rollbacks == 0
+
+    async def test_empty_edges_returns_zero_without_commit(self) -> None:
+        session = _FakeSession()
+
+        created = await persistEdges(session, [])
+
+        assert created == 0
+        assert session.commits == 0
+
+    async def test_integrity_error_rolls_back_and_returns_zero(self) -> None:
+        """并发竞态：另一 /extract 已先提交相同边 → commit 撞唯一约束 → 回滚 + 视为 0 新增。"""
+
+        class _CommitErrorSession(_FakeSession):
+            async def commit(self) -> None:
+                self.commits += 1
+                raise IntegrityError("stmt", {}, Exception("uq_data_lineage_edge dup"))
+
+        session = _CommitErrorSession()
+
+        created = await persistEdges(session, [_makeExtractedEdge("TA", "K1")])
+
+        assert created == 0
+        assert session.commits == 1
+        assert session.rollbacks == 1
 
 
 # ---- _loadSchemaTableNames：schema introspection 缓存读取的容错 ----

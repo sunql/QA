@@ -16,6 +16,7 @@
 export const zhCN = {
   common: {
     refresh: "刷新",
+    retry: "重试",
     edit: "编辑",
     delete: "删除",
     save: "保存",
@@ -734,6 +735,11 @@ export const zhCN = {
       noData: "暂无血缘数据，请先在本体管理或调用 /api/v1/lineage/edges 创建",
       filteredOut: "当前筛选条件下无血缘边，请调整层级或对象筛选",
     },
+    extract: {
+      button: "自动抽取血缘",
+      created: "自动抽取完成：新增 {count} 条血缘边",
+      noNew: "血缘已是最新，本次无新增边",
+    },
     manage: {
       newButton: "新建血缘边",
       editTitle: "编辑血缘边",
@@ -940,6 +946,7 @@ export const zhCN = {
         properties: "属性",
         metrics: "指标",
         joins: "关联",
+        semanticRelations: "语义关系",
       },
       addClassButton: "新增类",
       addClassModalTitle: "新增类",
@@ -1028,6 +1035,90 @@ export const zhCN = {
         sourceColumns: "如 BPTNUM_0",
         targetColumns: "如 BPRNUM_0",
         description: "如 收货单供应商号关联供应商主数据",
+      },
+      addSemanticRelationButton: "新增语义关系",
+      addSemanticRelationModalTitle: "新增语义关系",
+      backfillRelationsButton: "一键补关系",
+      backfillRelationsHint:
+        "把本地导入生成的 JOIN 关联全量同步为图中的边；并按 Sage X3 引用列名约定，为「已标外来键但未设目标类」的属性补全 ref_class_id。重复执行幂等。注：本页手动声明的语义关系不在此修复范围内——如新建时 Neo4j 不可达导致边缺失，恢复后删除并重新声明即可补建。",
+      backfillRelationsConfirm: "将已有 JOIN 全量入图并补全外来键目标类，是否继续？",
+      backfillRelationsSuccess: "已同步 {syncedJoins} 条 JOIN，补全 {backfilledReferences} 个引用",
+
+      batchRelations: {
+        button: "批量关系",
+        modalTitle: "批量关系引擎",
+        subtitle:
+          "批量建立三种关系，可任选其一或多个；对已存在的关系可选「跳过」或「覆盖」。本页操作只改动 JOIN / 语义关系目录与图，不改动类与属性定义。",
+        syncGraph: "本体入图",
+        syncGraphHint:
+          "把 PG 中全部未删除的类/属性 upsert 为 Neo4j 节点 + HAS_PROPERTY / REFERENCES 边（幂等，用于补图/对账）",
+        inferJoins: "按共享列推断物理关联",
+        inferJoinsHint:
+          "按 X3 引用列命名约定 + 通用共享列（至少一方为主键）推断 JOIN 候选，跳过样板列黑名单；可先「预览」再执行",
+        applyManifest: "应用关系清单",
+        applyManifestHint: "按清单新增/更新 JOIN 与语义关系；重复关系按下方冲突策略处理",
+        onConflictLabel: "冲突策略（已存在的关系）",
+        conflictSkip: "跳过（保留原样）",
+        conflictOverwrite: "覆盖（更新差异字段）",
+        sourceLabel: "清单来源",
+        jsonLabel: "JSON",
+        csvLabel: "CSV",
+        csvKindLabel: "CSV 清单类型",
+        jsonPlaceholder:
+          '粘贴清单 JSON，形如 {"joins":[{"sourceClassId":1,"sourceColumns":["A_0"],"targetClassId":2,"targetColumns":["A_0"]}],"relations":[{"sourceClassId":1,"targetClassId":2,"relationType":"SUPPLIES","description":"…"}]}',
+        uploadHint: "点击或拖拽 CSV 文件到此处",
+        uploadExtra: "文件须含表头：sourceClassName,targetClassName,relationType,description（或 sourceColumns/targetColumns）",
+        templateJoins: "下载 JOIN 模板",
+        templateRelations: "下载语义关系模板",
+        csvParsed: "已解析 {n} 行清单，类名已反解为 ID",
+        csvHasErrors: "CSV 有 {n} 处行错误（未知类名等），已跳过对应行",
+        preview: "预览",
+        execute: "执行",
+        selectActionFirst: "请至少勾选一个动作",
+        manifestRequired: "「应用清单」需先填写 JSON 或上传 CSV",
+        jsonInvalid: "JSON 解析失败：{detail}",
+        previewTitle: "预览结果（不落库）",
+        resultTitle: "执行结果",
+        inferredTitle: "推断 JOIN 候选",
+        inferredBy: "推断方式",
+        inferredByConvention: "X3 命名约定",
+        inferredBySharedColumn: "共享列（一方主键）",
+        colSource: "源类",
+        colTarget: "目标类",
+        colColumns: "关联列",
+        emptyInferred: "无符合推断条件的共享列关联",
+        graphCountsTitle: "本体入图计数",
+        syncGraphCounts:
+          "类 {classes} · 属性 {properties} · HAS_PROPERTY 边 {hasPropertyEdges} · REFERENCES 边 {referenceEdges}",
+        joinsLabel: "物理关联 JOIN",
+        relationsLabel: "语义关系",
+        countCreated: "新建 {n}",
+        countSkipped: "跳过 {n}",
+        countOverwritten: "覆盖 {n}",
+        emptyCounts: "无待处理关系（全部命中跳过或清单为空）",
+        errorsTitle: "错误（{n}）",
+        successToast: "批量执行完成",
+        noChangeToast: "执行完成：无任何变更（全部被跳过）",
+      },
+
+      semanticRelationColumns: {
+        id: "ID",
+        source: "源类 → 目标类",
+        relationType: "关系类型",
+        description: "描述",
+        actions: "操作",
+      },
+
+      semanticRelationLabels: {
+        sourceClassId: "源类",
+        targetClassId: "目标类",
+        relationType: "关系类型",
+        description: "描述",
+      },
+      semanticRelationPlaceholders: {
+        sourceClassId: "请选择源类",
+        targetClassId: "请选择目标类",
+        description: "如 供应商为收货单供应的货物主数据",
       },
 
       versionColumns: {
@@ -1158,11 +1249,20 @@ export const zhCN = {
 
   localImport: {
     steps: {
+      schema: "选择 Schema",
       rule: "规则配置",
       preview: "预览确认",
       confirm: "导入完成",
     },
     confirmImport: "确认导入",
+    schema: {
+      loading: "正在加载 Schema 列表…",
+      loadFailed: "Schema 列表加载失败，请检查数据源后重试。",
+      selectLabel: "Schema（Oracle owner）",
+      placeholder: "请选择要浏览表的 Schema",
+      ownerCount: "共 {count} 个 Schema",
+      hint: "仅展示所选 Schema（Oracle owner）下的表；未选择时不可进入下一步。",
+    },
     initPage: {
       title: "本地数据初始化",
       datasourceLabel: "数据源",
@@ -1431,6 +1531,14 @@ export const zhCN = {
       Transaction: "交易单据 Transaction",
       Reference: "参考配置 Reference",
       Event: "事件 Event",
+    },
+    semanticRelationType: {
+      SUPPLIES: "供货 SUPPLIES",
+      CONTAINS: "包含 CONTAINS",
+      GENERATES: "产生 GENERATES",
+      INSPECTED_BY: "受检于 INSPECTED_BY",
+      GENERATED: "被产生 GENERATED",
+      RELATED_TO: "相关 RELATED_TO",
     },
     entityType: {
       class: "类",

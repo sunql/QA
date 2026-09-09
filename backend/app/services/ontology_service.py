@@ -27,13 +27,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.dependencies import CurrentUser
+from app.domain.enums import ClassRelationType
 from app.domain.exceptions import (
     MilvusError,
     NotFoundError,
     OntologyError,
     ValidationError,
 )
-from app.domain.models import OntologyClass, OntologyJoin, OntologyMetric, OntologyProperty
+from app.domain.models import (
+    OntologyClass,
+    OntologyJoin,
+    OntologyMetric,
+    OntologyProperty,
+    OntologyRelation,
+)
 from app.domain.schemas import (
     OntologyClassCreate,
     OntologyClassUpdate,
@@ -43,6 +50,7 @@ from app.domain.schemas import (
     OntologyMetricUpdate,
     OntologyPropertyCreate,
     OntologyPropertyUpdate,
+    OntologyRelationCreate,
     OntologySearchResult,
 )
 from app.infrastructure import milvus_client as milvus
@@ -50,6 +58,7 @@ from app.infrastructure import neo4j_client as neo4j
 from app.services.acl_service import AclService
 from app.services.audit_service import AuditService
 from app.services.embedding_service import EmbeddingService
+from app.services.join_inference import SAGE_X3_REFERENCE_MAP
 from app.services.messages_zh import (
     MSG_CLASS_ALREADY_EXPIRED,
     MSG_CLASS_INHERIT_CYCLE,
@@ -63,10 +72,17 @@ from app.services.messages_zh import (
     MSG_ONTOLOGY_JOIN_NOT_FOUND,
     MSG_ONTOLOGY_METRIC_NOT_FOUND,
     MSG_ONTOLOGY_PROPERTY_NOT_FOUND,
+    MSG_ONTOLOGY_RELATION_DUP,
+    MSG_ONTOLOGY_RELATION_INVALID_TYPE,
+    MSG_ONTOLOGY_RELATION_NOT_FOUND,
+    MSG_ONTOLOGY_RELATION_SELF,
     MSG_PARENT_CLASS_NOT_FOUND,
     MSG_VECTOR_SEARCH_FAILED,
     MSG_VECTOR_SYNC_FAILED,
 )
+
+# 语义关系类型词表（与 ClassRelationType 对齐；用于 service 层校验，返回友好中文 422）
+_CLASS_RELATION_VALUES = frozenset(rel.value for rel in ClassRelationType)
 
 
 def _utcnow() -> datetime:
@@ -764,7 +780,8 @@ class OntologyService:
     ) -> OntologyJoin:
         """创建 join 边：校验两端类存在、列数一致、去重后写入 PG。
 
-        join 目录仅 NL2SQL 消费，不写 Neo4j/Milvus（join 边不是本体节点/关系）。
+        除 NL2SQL 消费外，同步 (:Class)-[:JOIN]->(:Class) 图边（Phase 5.6 关联入图；
+        best-effort，Neo4j 不可达不阻断 PG，图边留待 backfill 补）。
         """
         # 两端类存在性：复用 getClass，缺失抛 NotFoundError（404）
         await self.getClass(session, dto.source_class_id)
@@ -805,6 +822,10 @@ class OntologyService:
         )
         await session.commit()
         await session.refresh(entity)
+        try:
+            neo4j.linkClassJoin(entity.source_class_id, entity.target_class_id)
+        except Exception as exc:  # noqa: BLE001
+            _logNeo4jFailure("关联入图", entity.id, exc)
         logger.info(
             "创建关联关系 id=%d %d->%d type=%s",
             entity.id, entity.source_class_id, entity.target_class_id, entity.join_type,
@@ -841,6 +862,11 @@ class OntologyService:
         )
         await session.commit()
         await session.refresh(entity)
+        # 幂等 MERGE 自愈：updateJoin 不改端点，但保证 JOIN 边存在
+        try:
+            neo4j.linkClassJoin(entity.source_class_id, entity.target_class_id)
+        except Exception as exc:  # noqa: BLE001
+            _logNeo4jFailure("关联入图", entity.id, exc)
         logger.info("更新关联关系 id=%d", id)
         return entity
 
@@ -852,10 +878,11 @@ class OntologyService:
         actor: str,
         actor_departments: str | None = None,
     ) -> None:
-        """删除 join 边。"""
+        """删除 join 边，并同步删除 (:Class)-[:JOIN]->(:Class) 图边。"""
         entity = await session.get(OntologyJoin, id)
         if entity is None:
             raise NotFoundError(MSG_ONTOLOGY_JOIN_NOT_FOUND.format(id=id))
+        sourceId, targetId = entity.source_class_id, entity.target_class_id
         before = _entityToDict(entity)
         await session.flush()
         await _audit.record(
@@ -869,7 +896,221 @@ class OntologyService:
         )
         await session.delete(entity)
         await session.commit()
+        try:
+            neo4j.deleteClassJoin(sourceId, targetId)
+        except Exception as exc:  # noqa: BLE001
+            _logNeo4jFailure("删除关联图边", id, exc)
         logger.info("删除关联关系 id=%d", id)
+
+    # =============================================================================
+    # Semantic Relation（类 × 类语义关系，ontology_relation）
+    # =============================================================================
+
+    async def listRelations(self, session: AsyncSession) -> list[OntologyRelation]:
+        """列出全部类级语义关系（按 id 升序，供前端语义关系 Tab）。"""
+        result = await session.execute(
+            select(OntologyRelation).order_by(OntologyRelation.id)
+        )
+        return list(result.scalars().all())
+
+    async def createRelation(
+        self,
+        session: AsyncSession,
+        dto: OntologyRelationCreate,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+    ) -> OntologyRelation:
+        """创建类级语义关系：类型词表校验、两端类存在、非自环、三元组去重后写 PG。
+
+        PG 为 SSOT（+ audit）；同步 (:Class)-[:{relation_type}]->(:Class) 图边，
+        best-effort（Neo4j 不可达不阻断 PG）。
+        """
+        if dto.relation_type not in _CLASS_RELATION_VALUES:
+            raise ValidationError(
+                MSG_ONTOLOGY_RELATION_INVALID_TYPE.format(relationType=dto.relation_type)
+            )
+        # 两端类存在性：复用 getClass，缺失抛 NotFoundError（404）
+        await self.getClass(session, dto.source_class_id)
+        await self.getClass(session, dto.target_class_id)
+        if dto.source_class_id == dto.target_class_id:
+            raise ValidationError(MSG_ONTOLOGY_RELATION_SELF)
+
+        existing = await session.execute(
+            select(OntologyRelation).where(
+                OntologyRelation.source_class_id == dto.source_class_id,
+                OntologyRelation.target_class_id == dto.target_class_id,
+                OntologyRelation.relation_type == dto.relation_type,
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            raise ValidationError(MSG_ONTOLOGY_RELATION_DUP)
+
+        entity = OntologyRelation(
+            source_class_id=dto.source_class_id,
+            target_class_id=dto.target_class_id,
+            relation_type=dto.relation_type,
+            description=dto.description,
+        )
+        session.add(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_RELATION",
+            entity_id=entity.id,
+            action="CREATE",
+            actor=actor,
+            actor_departments=actor_departments,
+            after=_entityToDict(entity),
+        )
+        await session.commit()
+        await session.refresh(entity)
+        try:
+            neo4j.linkClassRelation(
+                entity.source_class_id, entity.target_class_id, entity.relation_type
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logNeo4jFailure("语义关系入图", entity.id, exc)
+        logger.info(
+            "创建语义关系 id=%d %d-[%s]->%d",
+            entity.id, entity.source_class_id, entity.relation_type, entity.target_class_id,
+        )
+        return entity
+
+    async def deleteRelation(
+        self,
+        session: AsyncSession,
+        id: int,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+    ) -> None:
+        """删除类级语义关系，并同步删除 (:Class)-[:relType]->(:Class) 图边。"""
+        entity = await session.get(OntologyRelation, id)
+        if entity is None:
+            raise NotFoundError(MSG_ONTOLOGY_RELATION_NOT_FOUND.format(id=id))
+        sourceId, targetId, relType = (
+            entity.source_class_id, entity.target_class_id, entity.relation_type
+        )
+        before = _entityToDict(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_RELATION",
+            entity_id=entity.id,
+            action="DELETE",
+            actor=actor,
+            actor_departments=actor_departments,
+            before=before,
+        )
+        await session.delete(entity)
+        await session.commit()
+        try:
+            neo4j.deleteClassRelation(sourceId, targetId, relType)
+        except Exception as exc:  # noqa: BLE001
+            _logNeo4jFailure("删除语义关系图边", id, exc)
+        logger.info("删除语义关系 id=%d", id)
+
+    async def backfillRelations(
+        self,
+        session: AsyncSession,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+    ) -> dict[str, int]:
+        """一键补关系（幂等修复，供「语义关系」Tab 按钮 + 迁移式调用）：
+
+        ① 把全部 ontology_join 同步为 (:Class)-[:JOIN]->(:Class) 边（幂等 MERGE）；
+        ② 对 is_foreign_key=True 且 ref_class_id IS NULL 的属性，按 SAGE_X3_REFERENCE_MAP
+           用 source_column 反解目标类（source_table 去 schema 前缀后精确匹配），
+           落 ref_class_id + (:Property)-[:REFERENCES]->(:Class) 边。
+
+        actor 归属：② 每次真正补全 ref_class_id 都会写一条 ONTOLOGY_PROPERTY UPDATE
+        审计（before/after），落库谁在何时触发、改了哪些外键引用 —— 批量修复也应可追溯。
+        ① 只镜像 join 到 Neo4j（无 PG 变更），不另记审计。
+
+        返回不可变计数 dict {"synced_joins": n, "backfilled_references": n}。
+        n 语义：synced_joins = 本次参与同步的 join 行数（幂等，行在即在）；
+        backfilled_references = 本次新补的引用数（二次调用为 0，因 ref 已设）。
+        Neo4j 不可达不阻断 PG（仅图边缺失，计数如实返回）。
+        """
+        # ① join 全量入图
+        synced = 0
+        joins = await self.listJoins(session)
+        for join in joins:
+            try:
+                neo4j.linkClassJoin(join.source_class_id, join.target_class_id)
+            except Exception as exc:  # noqa: BLE001
+                _logNeo4jFailure("join 入图", join.id, exc)
+            else:
+                synced += 1
+
+        # ② 补 ref_class_id：仅处理仍缺目标的外键属性
+        missing = (
+            await session.execute(
+                select(OntologyProperty).where(
+                    OntologyProperty.is_foreign_key.is_(True),
+                    OntologyProperty.ref_class_id.is_(None),
+                )
+            )
+        ).scalars().all()
+        if not missing:
+            await session.commit()
+            return {"synced_joins": synced, "backfilled_references": 0}
+
+        # 类级索引：仅未软删除类（valid_to IS NULL），source_table 去「schema.」前缀后小写
+        # → 类 id 列表（首个为确定目标）。排除墓碑（deleteClass 软删）：否则 ref_class_id
+        # 可能指向已删类，或「活类 + 墓碑同表」重导入时误选墓碑（与 listClasses 默认一致）。
+        classByTable: dict[str, list[int]] = {}
+        classes = (
+            await session.execute(
+                select(OntologyClass).where(OntologyClass.valid_to.is_(None))
+            )
+        ).scalars().all()
+        for cls in classes:
+            if not cls.source_table:
+                continue
+            key = cls.source_table.rsplit(".", 1)[-1].lower()
+            classByTable.setdefault(key, []).append(cls.id)
+
+        backfilled = 0
+        for prop in missing:
+            if not prop.source_column:
+                continue
+            ref = SAGE_X3_REFERENCE_MAP.get(prop.source_column.upper())
+            if ref is None:
+                continue
+            targetTable, _targetKey = ref
+            candidates = classByTable.get(targetTable.lower())
+            if not candidates:
+                continue
+            targetClassId = candidates[0]
+            if prop.ref_class_id == targetClassId:
+                continue
+            before = _entityToDict(prop)
+            prop.ref_class_id = targetClassId
+            backfilled += 1
+            await _audit.record(
+                session,
+                entity_type="ONTOLOGY_PROPERTY",
+                entity_id=prop.id,
+                action="UPDATE",
+                actor=actor,
+                actor_departments=actor_departments,
+                before=before,
+                after=_entityToDict(prop),
+            )
+            try:
+                neo4j.linkPropertyReferences(prop.id, targetClassId)
+            except Exception as exc:  # noqa: BLE001
+                _logNeo4jFailure("REFERENCES 边补建", prop.id, exc)
+
+        if backfilled:
+            await session.commit()
+        logger.info(
+            "一键补关系：syncedJoins=%d backfilledReferences=%d", synced, backfilled
+        )
+        return {"synced_joins": synced, "backfilled_references": backfilled}
 
     # =============================================================================
     # Semantic Search (Milvus)

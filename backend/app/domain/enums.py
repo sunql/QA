@@ -437,3 +437,21 @@ class PermissionResourceType(str, Enum):
     ONTOLOGY_CLASS = "ONTOLOGY_CLASS"
     ONTOLOGY_PROPERTY = "ONTOLOGY_PROPERTY"
     METRIC = "METRIC"
+
+
+class ClassRelationType(str, Enum):
+    """本体「类 × 类」语义关系类型（Phase 5.6 关系重构，人工声明）。
+
+    两个本体类之间由用户在语义关系页显式建立的方向性关系，PG ontology_relation
+    为 SSOT、Neo4j (:Class)-[:{TYPE}]->(:Class) 为镜像。初值 6 个，词表可扩展：
+    新增值会被 neo4j_client.CLASS_RELATION_TYPES / service._CLASS_RELATION_VALUES
+    自动继承（两者都由此枚举派生），只需再同步前端
+    SEMANTIC_RELATION_TYPE_OPTIONS + i18n（enums.semanticRelationType.*）。
+    """
+
+    SUPPLIES = "SUPPLIES"
+    CONTAINS = "CONTAINS"
+    GENERATES = "GENERATES"
+    INSPECTED_BY = "INSPECTED_BY"
+    GENERATED = "GENERATED"
+    RELATED_TO = "RELATED_TO"

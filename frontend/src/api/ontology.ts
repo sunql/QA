@@ -1,5 +1,12 @@
+import axios from "axios";
+import { message } from "antd";
 import { httpClient } from "./client";
+import { API_BASE_URL, DEFAULT_TENANT_ID, DEFAULT_USER_ID } from "../config";
+import { i18n } from "../i18n";
 import type {
+  BatchRelationRequest,
+  BatchRelationResult,
+  BatchTemplateKind,
   OntologyClass,
   OntologyClassCreate,
   OntologyClassUpdate,
@@ -11,6 +18,10 @@ import type {
   OntologyMetricUpdate,
   OntologyJoin,
   OntologyJoinCreate,
+  OntologySemanticRelation,
+  OntologySemanticRelationCreate,
+  OntologyCsvParseResult,
+  RelationBackfillResult,
   OntologySearchHit,
 } from "../types/ontology";
 
@@ -141,6 +152,101 @@ export async function createJoin(payload: OntologyJoinCreate): Promise<OntologyJ
 
 export async function deleteJoin(id: number): Promise<void> {
   await httpClient.delete(`${BASE}/joins/${id}`);
+}
+
+// ===== Semantic Relation =====
+
+export async function listSemanticRelations(): Promise<OntologySemanticRelation[]> {
+  const res = await httpClient.get<OntologySemanticRelation[]>(`${BASE}/relations`);
+  return res.data;
+}
+
+export async function createSemanticRelation(
+  payload: OntologySemanticRelationCreate
+): Promise<OntologySemanticRelation> {
+  const res = await httpClient.post<OntologySemanticRelation>(`${BASE}/relations`, payload);
+  return res.data;
+}
+
+export async function deleteSemanticRelation(id: number): Promise<void> {
+  await httpClient.delete(`${BASE}/relations/${id}`);
+}
+
+/** 一键补关系：join 全量入图 + X3 外键补 ref_class_id（幂等修复）。 */
+export async function backfillRelations(): Promise<RelationBackfillResult> {
+  const res = await httpClient.post<RelationBackfillResult>(`${BASE}/relations/backfill`);
+  return res.data;
+}
+
+// ===== Batch Relation Engine（通用批量关系引擎） =====
+
+/** POST /ontology/batch — 执行：syncGraph / inferJoins / applyManifest（任选其一或多个）。 */
+export async function runOntologyBatch(payload: BatchRelationRequest): Promise<BatchRelationResult> {
+  const res = await httpClient.post<BatchRelationResult>(`${BASE}/batch`, payload);
+  return res.data;
+}
+
+/** POST /ontology/batch/preview — 只读预览：推断候选 + 冲突预判计数，不写库。 */
+export async function previewOntologyBatch(
+  payload: BatchRelationRequest
+): Promise<BatchRelationResult> {
+  const res = await httpClient.post<BatchRelationResult>(`${BASE}/batch/preview`, payload);
+  return res.data;
+}
+
+/**
+ * GET /ontology/batch/template?kind=joins|relations
+ * 下载 CSV 模板（UTF-8 BOM，Excel 友好）。
+ */
+export async function downloadBatchTemplate(kind: BatchTemplateKind): Promise<Blob> {
+  const res = await httpClient.get(`${BASE}/batch/template`, {
+    params: { kind },
+    responseType: "blob",
+  });
+  return res.data as unknown as Blob;
+}
+
+/** POST /ontology/batch/parse-csv — 上传 CSV 清单 → 按类名反解为 manifest JSON。
+ *
+ * 走 axios.postForm 而非 httpClient：httpClient 实例默认 `Content-Type: application/json`，
+ * 会让 axios 不自动补 multipart boundary，后端 `request.form()` 读不到 kind/file → 422
+ * missing field（与 document.ts 上传一致绕开 httpClient）。显式携带 auth 头，失败 toast
+ * 文案镜像 httpClient 拦截器，再 rethrow 供调用方兜底。
+ */
+export async function parseBatchCsv(
+  file: File,
+  kind: BatchTemplateKind = "relations"
+): Promise<OntologyCsvParseResult> {
+  const form = new FormData();
+  form.append("kind", kind);
+  form.append("file", file);
+  try {
+    const res = await axios.postForm<OntologyCsvParseResult>(
+      `${API_BASE_URL}${BASE}/batch/parse-csv`,
+      form,
+      {
+        headers: {
+          "X-Tenant-Id": DEFAULT_TENANT_ID,
+          "X-User-Id": DEFAULT_USER_ID,
+        },
+      }
+    );
+    return res.data;
+  } catch (error) {
+    void message.error(_describeUploadError(error));
+    throw error;
+  }
+}
+
+/** 镜像 httpClient 拦截器的错误文案：后端 error/detail 优先，再按 status 兜底。 */
+function _describeUploadError(error: unknown): string {
+  const response = (error as { response?: { status?: number; data?: unknown } }).response;
+  const status = response?.status;
+  const data = response?.data as { error?: string; detail?: unknown } | undefined;
+  if (typeof data?.error === "string" && data.error !== "") return data.error;
+  if (typeof data?.detail === "string") return data.detail;
+  if (typeof status === "number") return i18n.t("errors.requestFailedHttp", { status: String(status) });
+  return i18n.t("errors.networkError");
 }
 
 // ===== Semantic Search =====

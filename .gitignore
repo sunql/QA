@@ -54,3 +54,7 @@ docker/.env
 
 # Docker volumes
 docker/data/
+
+# Backup artifacts (scripts/backup_pg.sh 写入；保留 3 天滚动窗口)
+backups/
+*.dump

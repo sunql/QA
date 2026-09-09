@@ -14,6 +14,7 @@ from urllib.parse import urlparse, urlunparse
 from neo4j import GraphDatabase, Driver
 
 from app.config import getSettings
+from app.domain.enums import ClassRelationType
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,14 @@ BUSINESS_RELATION_TYPES = frozenset(
 _MAX_TRAVERSAL_HOPS = 5
 
 
+# 本体「类 × 类」语义关系类型（Phase 5.6 关系重构）：直接由 ClassRelationType 枚举派生，
+# 枚举是词表单点事实（service 侧 _CLASS_RELATION_VALUES 同源），不会手写漂移。
+# 由用户在本体页「语义关系」Tab 显式声明，Neo4j (:Class)-[:{TYPE}]->(:Class) 为镜像。
+# 与 JOIN 边区分：JOIN 是 ontology_join（按列配对 NL2SQL）的入图边，走 linkClassJoin，
+# 不在此白名单内。CQL 关系类型不可参数化，白名单防注入。
+CLASS_RELATION_TYPES = frozenset(rel.value for rel in ClassRelationType)
+
+
 def _assertBusinessLabel(label: str) -> None:
     """业务节点 label 白名单校验（CQL 拼接前置防御）。"""
     if label not in BUSINESS_ENTITY_LABELS:
@@ -69,6 +78,12 @@ def _assertBusinessRelation(relType: str) -> None:
     """业务关系类型白名单校验（CQL 拼接前置防御）。"""
     if relType not in BUSINESS_RELATION_TYPES:
         raise ValueError(f"Invalid business relation type: {relType!r}")
+
+
+def _assertClassRelation(relType: str) -> None:
+    """类级语义关系类型白名单校验（CQL 拼接前置防御）。"""
+    if relType not in CLASS_RELATION_TYPES:
+        raise ValueError(f"Invalid class relation type: {relType!r}")
 
 
 def _sanitizeUri(uri: str) -> str:
@@ -313,6 +328,131 @@ def detectInheritanceCycle(classId: int, newParentId: int) -> bool:
     with driver.session() as session:
         [record] = session.run(cql, classId=classId, newParentId=newParentId)
         return bool(record["hasCycle"])
+
+
+def linkClassJoin(sourceClassId: int, targetClassId: int) -> None:
+    """Class -[:JOIN]-> Class：关联目录入图（由 ontology_join 同步，幂等 MERGE）。
+
+    JOIN 边与语义关系（linkClassRelation）分开维护：JOIN 由 ontology_join 行驱动，
+    方向为 join 的 source → target；语义关系由 ontology_relation 行驱动。
+    """
+    driver = getDriver()
+    cql = """
+        MATCH (a:Class {id: $sourceId}), (b:Class {id: $targetId})
+        MERGE (a)-[:JOIN]->(b)
+    """
+    with driver.session() as session:
+        session.run(cql, sourceId=sourceClassId, targetId=targetClassId)
+
+
+def deleteClassJoin(sourceClassId: int, targetClassId: int) -> None:
+    """删除 Class -[:JOIN]-> Class 边（对应 ontology_join 行删除）。"""
+    driver = getDriver()
+    cql = """
+        MATCH (a:Class {id: $sourceId})-[r:JOIN]->(b:Class {id: $targetId})
+        DELETE r
+    """
+    with driver.session() as session:
+        session.run(cql, sourceId=sourceClassId, targetId=targetClassId)
+
+
+def linkClassRelation(sourceClassId: int, targetClassId: int, relType: str) -> None:
+    """Class -[:relType]-> Class：语义关系镜像（relType 白名单防注入，幂等 MERGE）。"""
+    _assertClassRelation(relType)
+    driver = getDriver()
+    cql = f"""
+        MATCH (a:Class {{id: $sourceId}}), (b:Class {{id: $targetId}})
+        MERGE (a)-[:{relType}]->(b)
+    """
+    with driver.session() as session:
+        session.run(cql, sourceId=sourceClassId, targetId=targetClassId)
+
+
+def deleteClassRelation(sourceClassId: int, targetClassId: int, relType: str) -> None:
+    """删除 Class -[:relType]-> Class 边（对应 ontology_relation 行删除）。"""
+    _assertClassRelation(relType)
+    driver = getDriver()
+    cql = f"""
+        MATCH (a:Class {{id: $sourceId}})-[r:{relType}]->(b:Class {{id: $targetId}})
+        DELETE r
+    """
+    with driver.session() as session:
+        session.run(cql, sourceId=sourceClassId, targetId=targetClassId)
+
+
+def syncOntologyNodes(
+    classes: list[dict[str, Any]],
+    properties: list[dict[str, Any]],
+) -> dict[str, int]:
+    """把 PG 本体全量 upsert 入 Neo4j（幂等「本体入图」对账，供批量关系引擎 syncGraph）。
+
+    输入约定（由调用方从 PG 组装，字段名与节点属性一致）：
+    - classes:   {"id","name","alias","description","sourceTable"}
+    - properties:{"id","classId","name","alias","dataType","sourceColumn",
+                  "isPrimaryKey","isForeignKey","refClassId"(可空)}
+    同一连接内分 4 段 UNWIND + MERGE，分别 upsert (:Class)/(:Property) 节点、
+    (:Class)-[:HAS_PROPERTY]->(:Property) 与 (:Property)-[:REFERENCES]->(:Class)
+    （refClassId 非空才建）。幂等：重复调用仅对已存在节点 SET、不新增。
+
+    返回本次处理行数计数 {"classes","properties","has_property_edges","reference_edges"}；
+    失败由调用方 fail-open（_logNeo4jFailure），本函数不吞异常。
+    """
+    driver = getDriver()
+    classRows = [c for c in classes if c.get("id") is not None]
+    propRows = [
+        p for p in properties if p.get("id") is not None and p.get("classId") is not None
+    ]
+    refRows = [
+        {"propertyId": p["id"], "refClassId": p["refClassId"]}
+        for p in propRows
+        if p.get("refClassId") is not None
+    ]
+    statements = [
+        (
+            """
+            UNWIND $rows AS r
+            MERGE (c:Class {id: r.id})
+            SET c.name = r.name, c.alias = r.alias,
+                c.description = r.description, c.sourceTable = r.sourceTable
+            """,
+            classRows,
+        ),
+        (
+            """
+            UNWIND $rows AS r
+            MERGE (p:Property {id: r.id})
+            SET p.name = r.name, p.alias = r.alias, p.dataType = r.dataType,
+                p.sourceColumn = r.sourceColumn,
+                p.isPrimaryKey = r.isPrimaryKey, p.isForeignKey = r.isForeignKey
+            """,
+            propRows,
+        ),
+        (
+            """
+            UNWIND $rows AS r
+            MATCH (c:Class {id: r.classId}), (p:Property {id: r.id})
+            MERGE (c)-[:HAS_PROPERTY]->(p)
+            """,
+            propRows,
+        ),
+        (
+            """
+            UNWIND $rows AS r
+            MATCH (p:Property {id: r.propertyId}), (c:Class {id: r.refClassId})
+            MERGE (p)-[:REFERENCES]->(c)
+            """,
+            refRows,
+        ),
+    ]
+    with driver.session() as session:
+        for cql, rows in statements:
+            session.run(cql, rows=rows)
+    return {
+        "classes": len(classRows),
+        "properties": len(propRows),
+        "has_property_edges": len(propRows),
+        "reference_edges": len(refRows),
+    }
 
 
 # =============================================================================

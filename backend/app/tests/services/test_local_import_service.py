@@ -28,7 +28,11 @@ from app.tests.services.conftest import _ADMIN
 
 
 class FakeSchemaService:
-    async def introspectAndCache(self, session, ds):
+    def __init__(self) -> None:
+        self.introspectedOwners: list[str | None] = []
+
+    async def introspectAndCache(self, session, ds, owner: str | None = None):
+        self.introspectedOwners.append(owner)
         return None
 
     def buildResponse(self, cache):

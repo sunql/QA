@@ -11,6 +11,7 @@ vi.mock("../api/localImport");
 
 const api = vi.hoisted(() => ({
   listDataSources: vi.fn(),
+  listDatasourceSchemas: vi.fn(),
   getDatasourceSchema: vi.fn(),
   introspectDatasource: vi.fn(),
 }));
@@ -43,6 +44,8 @@ function schemaResponse(): SchemaIntrospectResponse {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // 默认返回空 schema 列表（非 Oracle 单 owner 语义）→ 向导跳过 schema 步直接选表。
+  api.listDatasourceSchemas.mockResolvedValue([]);
   api.getDatasourceSchema.mockResolvedValue(schemaResponse());
   api.introspectDatasource.mockResolvedValue(schemaResponse());
 });

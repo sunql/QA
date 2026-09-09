@@ -41,15 +41,33 @@ export async function deleteDataSource(id: number): Promise<void> {
   await httpClient.delete(`${BASE}/${id}`);
 }
 
+// 列出数据源可选 schema（Oracle owner 命名空间）；PG/MySQL 返回空数组（单 schema，无需选择）。
+export async function listDatasourceSchemas(id: number): Promise<string[]> {
+  const res = await httpClient.get<string[]>(`${BASE}/${id}/schemas`);
+  return res.data;
+}
+
 // 读取数据源已缓存的 schema；未缓存时后端返回 404（调用方据此触发 introspect）。
-export async function getDatasourceSchema(id: number): Promise<SchemaIntrospectResponse> {
-  const res = await httpClient.get<SchemaIntrospectResponse>(`${BASE}/${id}/schema`);
+// schema 缺省 = 连接用户默认 owner。
+export async function getDatasourceSchema(
+  id: number,
+  schema?: string | null,
+): Promise<SchemaIntrospectResponse> {
+  const res = await httpClient.get<SchemaIntrospectResponse>(`${BASE}/${id}/schema`, {
+    params: schema ? { schema } : undefined,
+  });
   return res.data;
 }
 
 // 触发数据源 schema 发现并写缓存（数据未变化时复用缓存），返回全量 schema。
-export async function introspectDatasource(id: number): Promise<SchemaIntrospectResponse> {
-  const res = await httpClient.post<SchemaIntrospectResponse>(`${BASE}/${id}/introspect`);
+// schema 缺省 = 连接用户默认 owner。
+export async function introspectDatasource(
+  id: number,
+  schema?: string | null,
+): Promise<SchemaIntrospectResponse> {
+  const res = await httpClient.post<SchemaIntrospectResponse>(`${BASE}/${id}/introspect`, undefined, {
+    params: schema ? { schema } : undefined,
+  });
   return res.data;
 }
 

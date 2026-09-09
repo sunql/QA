@@ -59,12 +59,13 @@ class LocalImportService:
         rules: ImportRuleConfig,
         selected_tables: list[str] | None = None,
         selected_columns: dict[str, list[str]] | None = None,
+        schema: str | None = None,
     ) -> ImportPreviewResponse:
         ds = await session.get(DataSource, datasource_id)
         if ds is None:
             raise NotFoundError(f"数据源 {datasource_id} 不存在")
 
-        cache = await self._schema_service.introspectAndCache(session, ds)
+        cache = await self._schema_service.introspectAndCache(session, ds, owner=schema)
         response = self._schema_service.buildResponse(cache)
 
         filtered = self._rule_engine.filter_tables(response.tables, rules.table_filter)

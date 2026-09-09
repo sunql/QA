@@ -8,6 +8,7 @@ DELETE /api/v1/datasources/{datasourceId}   删除
 POST   /api/v1/datasources/test            测试连接
 POST   /api/v1/datasources/{datasourceId}/introspect  触发 schema 发现并缓存
 GET    /api/v1/datasources/{datasourceId}/schema     读取 schema 缓存
+GET    /api/v1/datasources/{datasourceId}/schemas    列出可见 schema（Oracle owner）
 """
 
 from __future__ import annotations
@@ -103,23 +104,45 @@ async def deleteDataSource(
 async def introspectSchema(
     request: Request,
     datasourceId: int,
+    schema: str | None = Query(
+        default=None, description="Oracle owner 命名空间（如 THBI）；缺省取连接用户默认 owner"
+    ),
     session: AsyncSession = Depends(getDb),
 ) -> SchemaIntrospectResponse:
-    """触发业务库 schema 自动发现并写入缓存（数据未变化时复用缓存）。"""
+    """触发业务库 schema 自动发现并写入缓存（数据未变化时复用缓存）。
+
+    可选 schema 指定要内省的 Oracle owner；缺省回退连接用户默认 owner（向后兼容）。
+    """
     ds = await _service.get(session, datasourceId)
-    cache = await _schemaService.introspectAndCache(session, ds)
+    cache = await _schemaService.introspectAndCache(session, ds, owner=schema)
     return _schemaService.buildResponse(cache)
 
 
 @router.get("/{datasourceId}/schema", response_model=SchemaIntrospectResponse)
 async def getCachedSchema(
-    datasourceId: int, session: AsyncSession = Depends(getDb)
+    datasourceId: int,
+    schema: str | None = Query(
+        default=None, description="Oracle owner 命名空间（如 THBI）；缺省取连接用户默认 owner"
+    ),
+    session: AsyncSession = Depends(getDb),
 ) -> SchemaIntrospectResponse:
     """读取数据源已缓存的 schema；未缓存时 404（提示先调用 introspect）。"""
-    cache = await _schemaService.getCached(session, datasourceId)
+    cache = await _schemaService.getCached(session, datasourceId, owner=schema)
     if cache is None:
         raise NotFoundError(MSG_DATASOURCE_SCHEMA_NOT_CACHED.format(datasourceId=datasourceId))
     return _schemaService.buildResponse(cache)
+
+
+@router.get("/{datasourceId}/schemas", response_model=list[str])
+async def listDatasourceSchemas(
+    datasourceId: int, session: AsyncSession = Depends(getDb)
+) -> list[str]:
+    """列出该连接可见的 schema（Oracle owner）命名空间，供导入向导「选择 Schema」。
+
+    PG/MySQL 返回空列表（无显式多 schema 概念，前端据此隐藏 schema 选择步）。
+    """
+    ds = await _service.get(session, datasourceId)
+    return await _schemaService.listSchemas(ds)
 
 
 @router.get("/{datasourceId}/ontology-drift", response_model=OntologyDriftReport)

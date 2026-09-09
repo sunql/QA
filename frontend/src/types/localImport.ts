@@ -35,10 +35,12 @@ export interface ImportRuleConfig {
 
 // 预览请求：规则 + 表名白名单 + 单表部分列白名单。缺省 selectedTables 表示预览全部表；
 // selectedColumns 形如 { PORDERQ: ["POHNUM_0"] }，省略某表表示该表全列导入。
+// schema 为 Oracle owner 命名空间（如 THBI）；缺省由后端取连接用户默认 owner。
 export interface ImportPreviewRequest {
   rules: ImportRuleConfig;
   selectedTables?: string[] | null;
   selectedColumns?: Record<string, string[]> | null;
+  schema?: string | null;
 }
 
 export interface ProposedProperty {

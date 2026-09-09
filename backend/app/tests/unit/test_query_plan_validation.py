@@ -536,3 +536,118 @@ class TestValidatePlan:
         # 不应出现任何针对 TOTAL_QTY 的报错
         assert not any("TOTAL_QTY" in i for i in issues)
         assert issues == []
+
+
+class TestValidatePlanPerGroupTopN:
+    """2026-09-09：partitionBy/perGroupLimit ——「分别/各/每个 X 的 Top N」逐组取前 N 校验。
+
+    语义红线：每组 Top-N 是「分区内排名取前 N」，不是全局 N×组数。校验强制：
+    分区属性真实存在且是分组维、partitionBy 与 perGroupLimit 成对、组内有排序、
+    rowLimit 必须为 null（不得与全局行数叠加产生「前 N×组数」坍缩）。
+    """
+
+    @staticmethod
+    def _matReceiptCls() -> OntologyClass:
+        return _cls(
+            "PRECEIPT", [("BPSNUM", "BPSNUM_0"), ("MATERIAL", "MAT_0"), ("QTY", "QTY_0")]
+        )
+
+    def _valid(self) -> QueryPlan:
+        return QueryPlan(
+            target="三个供应商各自的 Top3 物料",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "MATERIAL", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM", "MATERIAL"),
+            sortBy=(SortSpec(property="TOTAL_QTY", direction="desc"),),
+            partitionBy=("BPSNUM",),
+            perGroupLimit=3,
+        )
+
+    def test_valid_per_group_topn_passes(self) -> None:
+        assert _service().validatePlan(self._valid(), [self._matReceiptCls()]) == []
+
+    def test_partition_property_must_exist(self) -> None:
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "MATERIAL", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM", "MATERIAL"),
+            sortBy=(SortSpec(property="TOTAL_QTY", direction="desc"),),
+            partitionBy=("GHOST",),
+            perGroupLimit=3,
+        )
+        issues = _service().validatePlan(plan, [self._matReceiptCls()])
+        assert any("GHOST" in i and "分区" in i for i in issues)
+
+    def test_partition_property_must_be_in_group_by(self) -> None:
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "MATERIAL", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("MATERIAL",),  # 分区维 BPSNUM 不在分组里 → 无意义
+            sortBy=(SortSpec(property="TOTAL_QTY", direction="desc"),),
+            partitionBy=("BPSNUM",),
+            perGroupLimit=3,
+        )
+        issues = _service().validatePlan(plan, [self._matReceiptCls()])
+        assert any("BPSNUM" in i and "groupBy" in i for i in issues)
+
+    def test_partition_requires_per_group_limit(self) -> None:
+        plan = self._valid()
+        plan = QueryPlan(
+            target=plan.target,
+            selectedClasses=plan.selectedClasses,
+            selectedProperties=plan.selectedProperties,
+            aggregations=plan.aggregations,
+            groupBy=plan.groupBy,
+            sortBy=plan.sortBy,
+            partitionBy=("BPSNUM",),
+            perGroupLimit=None,
+        )
+        issues = _service().validatePlan(plan, [self._matReceiptCls()])
+        assert any("perGroupLimit" in i for i in issues)
+
+    def test_per_group_limit_requires_partition(self) -> None:
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            perGroupLimit=3,
+            partitionBy=(),
+        )
+        issues = _service().validatePlan(plan, [self._matReceiptCls()])
+        assert any("partitionBy" in i and "perGroupLimit" in i for i in issues)
+
+    def test_per_group_limit_conflicts_with_global_row_limit(self) -> None:
+        # 模型此前正是把「3 供应商 × 每供应商 3」折成 rowLimit=9 —— 必须被拦下。
+        plan = self._valid()
+        plan = QueryPlan(
+            target=plan.target,
+            selectedClasses=plan.selectedClasses,
+            selectedProperties=plan.selectedProperties,
+            aggregations=plan.aggregations,
+            groupBy=plan.groupBy,
+            sortBy=plan.sortBy,
+            partitionBy=("BPSNUM",),
+            perGroupLimit=3,
+            rowLimit=9,
+        )
+        issues = _service().validatePlan(plan, [self._matReceiptCls()])
+        assert any("rowLimit" in i and "9" in i for i in issues)
+        assert any("null" in i for i in issues)
+
+    def test_per_group_topn_requires_sort_by(self) -> None:
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "MATERIAL", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM", "MATERIAL"),
+            partitionBy=("BPSNUM",),
+            perGroupLimit=3,
+        )
+        issues = _service().validatePlan(plan, [self._matReceiptCls()])
+        assert any("sortBy" in i for i in issues)

@@ -432,3 +432,58 @@ class TestInterpretationAndDictionary:
         service = Nl2SqlService()
         await service.generateQueryPlan("问题", [_cls("PRECEIPT")], fake, _llmConfig())
         assert "术语词典" not in fake.calls[0][0][1]
+
+
+class TestPerGroupTopNThroughPipeline:
+    """2026-09-09 端到端单测：partitionBy/perGroupLimit 计划经校验 + finalize 存活。
+
+    真实回归：模型把「3 供应商各自的 Top3」折成全局 rowLimit=9（三个供应商总量前 9 物料）。
+    新语义强制 partitionBy/perGroupLimit 表达逐组 Top-N；本测试守 partition JSON 不被
+    finalize（_applyScopeRowLimit 等）清掉，且 SQL 阶段能收到「每组 Top-N」渲染行。
+    """
+
+    def _matClass(self) -> OntologyClass:
+        return _clsWithProps("PRECEIPT", ["BPSNUM", "MATERIAL", "QTY"])
+
+    def _partitionJson(self) -> str:
+        return json.dumps(
+            {
+                "target": "三个供应商各自的 Top3 物料",
+                "selectedClasses": ["PRECEIPT"],
+                "selectedProperties": ["BPSNUM", "MATERIAL", "QTY"],
+                "aggregations": [
+                    {"function": "SUM", "property": "QTY", "alias": "TOTAL_QTY"}
+                ],
+                "groupBy": ["BPSNUM", "MATERIAL"],
+                "sortBy": [{"property": "TOTAL_QTY", "direction": "desc"}],
+                "partitionBy": ["BPSNUM"],
+                "perGroupLimit": 3,
+            },
+            ensure_ascii=False,
+        )
+
+    async def test_partition_survives_validation_and_finalize(self) -> None:
+        fake = _FakeLlm([self._partitionJson()])
+        service = Nl2SqlService()
+        result = await service.generateValidatedPlan(
+            "分别看这三个供应商供货量最大的三种物料", [self._matClass()], fake, _llmConfig(),
+        )
+        assert result.plan.partitionBy == ("BPSNUM",)
+        assert result.plan.perGroupLimit == 3
+        assert result.plan.rowLimit is None
+
+    async def test_partition_renders_in_sql_stage_prompt(self) -> None:
+        planFake = _FakeLlm([self._partitionJson()])
+        service = Nl2SqlService()
+        planResult = await service.generateValidatedPlan(
+            "分别看这三个供应商供货量最大的三种物料", [self._matClass()], planFake, _llmConfig(),
+        )
+        sqlFake = _FakeLlm(["```sql\nSELECT 1 FROM DUAL\n```"])
+        await service.generateSql(
+            "分别看这三个供应商供货量最大的三种物料", [self._matClass()], sqlFake, _llmConfig(),
+            maxRetries=0, plan=planResult.plan,
+        )
+        system = sqlFake.calls[0][0][1]
+        assert "每组 Top-N" in system
+        assert "BPSNUM" in system
+        assert "3" in system

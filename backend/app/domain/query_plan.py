@@ -18,6 +18,20 @@ from typing import Any
 UNANSWERABLE_TARGET = "无法回答"
 
 
+def _coercePositiveInt(value: Any) -> int | None:
+    """把值归一为正整数或 None（与 nl2sql_service._coerceRowLimit 同口径，此处避免导入环）。
+
+    bool/非 int/非纯数字串/<=0 一律返回 None，保证 perGroupLimit 字段类型洁净。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 @dataclass(frozen=True)
 class Aggregation:
     """聚合表达式（不可变）。
@@ -68,6 +82,12 @@ class QueryPlan:
     joins: tuple[JoinSpec, ...] = ()
     sortBy: tuple[SortSpec, ...] = ()
     rowLimit: int | None = None
+    # 「分别/各/每个 X 的 top N」逐组取前 N（2026-09-09）：
+    # partitionBy 为分区维（如 供应商代码），perGroupLimit 为每组保留行数（N）。
+    # 与全局 rowLimit 互斥（validatePlan 强制）；SQL 阶段据此生成
+    # ROW_NUMBER() OVER (PARTITION BY ...) + rn<=N，而不是把 N×组数折成全局 top。
+    partitionBy: tuple[str, ...] = ()
+    perGroupLimit: int | None = None
     interpretation: str | None = None
 
     @property
@@ -98,6 +118,8 @@ class QueryPlan:
             "joins": [_asDict(j) for j in self.joins],
             "sortBy": [_asDict(s) for s in self.sortBy],
             "rowLimit": self.rowLimit,
+            "partitionBy": list(self.partitionBy),
+            "perGroupLimit": self.perGroupLimit,
             "interpretation": self.interpretation,
         }
 
@@ -151,6 +173,8 @@ class QueryPlan:
             joins=_nested(data.get("joins"), set(JoinSpec.__dataclass_fields__), JoinSpec, ("columns",)),
             sortBy=_nested(data.get("sortBy"), set(SortSpec.__dataclass_fields__), SortSpec),
             rowLimit=data.get("rowLimit"),
+            partitionBy=_strings(data.get("partitionBy")),
+            perGroupLimit=_coercePositiveInt(data.get("perGroupLimit")),
             interpretation=interpretation if isinstance(interpretation, str) else None,
         )
 
@@ -202,4 +226,13 @@ def planToText(plan: QueryPlan) -> str:
         lines.append("- 排序：" + "; ".join(_sortText(s) for s in plan.sortBy))
     if plan.rowLimit is not None:
         lines.append(f"- 行数限制：{plan.rowLimit}")
+    if plan.partitionBy and plan.perGroupLimit is not None:
+        # 逐组 Top-N：分区维 + 组内排序（复用 sortBy 文本）+ 每组行数。
+        # SQL 阶段据此生成 ROW_NUMBER() OVER (PARTITION BY ...)，不是全局截断。
+        order = "、".join(_sortText(s) for s in plan.sortBy) if plan.sortBy else ""
+        bullet = f"- 每组 Top-N：按 {'、'.join(plan.partitionBy)} 分区"
+        if order:
+            bullet += f"，组内按 {order} 排序"
+        bullet += f"，每组取前 {plan.perGroupLimit} 行"
+        lines.append(bullet)
     return "\n".join(lines)

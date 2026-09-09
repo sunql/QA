@@ -200,6 +200,67 @@ class TestQueryPlan:
         assert "SUM(收货数量) AS TOTAL_QTY" in text
 
 
+class TestQueryPlanPartitionTopN:
+    """2026-09-09：partitionBy/perGroupLimit ——「分别/各 X 的 Top N」逐组取前 N 槽位。"""
+
+    def test_partition_fields_default_empty(self) -> None:
+        plan = QueryPlan(target="查询")
+        assert plan.partitionBy == ()
+        assert plan.perGroupLimit is None
+
+    def test_partition_fields_roundtrip(self) -> None:
+        plan = QueryPlan(
+            target="三个供应商各自的 Top3 物料",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "MATERIAL", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM", "MATERIAL"),
+            sortBy=(SortSpec(property="TOTAL_QTY", direction="desc"),),
+            partitionBy=("BPSNUM",),
+            perGroupLimit=3,
+        )
+        data = plan.to_dict()
+        assert data["partitionBy"] == ["BPSNUM"]
+        assert data["perGroupLimit"] == 3
+        restored = QueryPlan.from_dict(data)
+        assert restored == plan
+        assert restored.partitionBy == ("BPSNUM",)
+        assert restored.perGroupLimit == 3
+
+    def test_from_dict_tolerates_missing_partition_fields(self) -> None:
+        plan = QueryPlan.from_dict({"target": "简单查询"})
+        assert plan.partitionBy == ()
+        assert plan.perGroupLimit is None
+
+    def test_from_dict_coerces_per_group_limit_to_positive_int(self) -> None:
+        # 数字字符串可解析；0/负数/垃圾一律归一为 None（与 rowLimit 同口径）
+        plan = QueryPlan.from_dict({"target": "x", "partitionBy": ["BPSNUM"], "perGroupLimit": "3"})
+        assert plan.perGroupLimit == 3
+        assert QueryPlan.from_dict({"target": "x", "perGroupLimit": 0}).perGroupLimit is None
+        assert QueryPlan.from_dict({"target": "x", "perGroupLimit": -1}).perGroupLimit is None
+        assert QueryPlan.from_dict({"target": "x", "perGroupLimit": "abc"}).perGroupLimit is None
+
+    def test_plan_to_text_renders_per_group_topn(self) -> None:
+        plan = QueryPlan(
+            target="供应商 Top3",
+            groupBy=("BPSNUM", "MATERIAL"),
+            sortBy=(SortSpec(property="TOTAL_QTY", direction="desc"),),
+            partitionBy=("BPSNUM",),
+            perGroupLimit=3,
+        )
+        text = planToText(plan)
+        assert "每组 Top-N" in text
+        assert "按 BPSNUM 分区" in text
+        assert "TOTAL_QTY desc" in text
+        assert "取前 3 行" in text
+
+    def test_plan_to_text_omits_per_group_when_unset(self) -> None:
+        assert "每组 Top-N" not in planToText(QueryPlan(target="x"))
+        assert "每组 Top-N" not in planToText(
+            QueryPlan(target="x", partitionBy=("BPSNUM",))
+        )
+
+
 class TestQueryPlanInterpretation:
     def test_interpretation_default_none(self) -> None:
         assert QueryPlan(target="查询").interpretation is None

@@ -1197,3 +1197,72 @@ def _buildJoinedClasses():
         system = fake.calls[0][0][1]
         assert "时间粒度" in system
         assert "DATE_FORMAT" in system
+
+
+class TestPerGroupTopNPrompts:
+    """2026-09-09：两阶段对「分别/各/每个 X 的 Top N」的逐组取前 N 引导。
+
+    计划阶段：模型须输出 partitionBy/perGroupLimit 而非全局 rowLimit=N×组数；
+    SQL 阶段：计划含「每组 Top-N」时用 ROW_NUMBER() OVER (PARTITION BY …) 实现。
+    """
+
+    @staticmethod
+    def _cls() -> OntologyClass:
+        return _buildClass(
+            "PRECEIPT",
+            "ZJTH.PRECEIPT",
+            alias="收货单",
+            props=[
+                {"property_name": "BPSNUM", "source_column": "BPSNUM_0"},
+                {"property_name": "MATERIAL", "source_column": "MAT_0"},
+                {"property_name": "QTY", "source_column": "QTY_0"},
+            ],
+        )
+
+    @staticmethod
+    def _partitionPlan() -> QueryPlan:
+        return QueryPlan.from_dict(
+            {
+                "target": "三个供应商各自的 Top3 物料",
+                "selectedClasses": ["PRECEIPT"],
+                "selectedProperties": ["BPSNUM", "MATERIAL", "QTY"],
+                "aggregations": [{"function": "SUM", "property": "QTY", "alias": "TOTAL_QTY"}],
+                "groupBy": ["BPSNUM", "MATERIAL"],
+                "sortBy": [{"property": "TOTAL_QTY", "direction": "desc"}],
+                "partitionBy": ["BPSNUM"],
+                "perGroupLimit": 3,
+            }
+        )
+
+    async def test_plan_prompt_guides_per_group_topn(self) -> None:
+        fake = _FakeLlm(["```json\n{}\n```"])
+        service = Nl2SqlService()
+        await service.generateQueryPlan(
+            "分别看这三个供应商供货量最大的三种物料", [self._cls()], fake, _llmConfig(),
+        )
+        system = fake.calls[0][0][1]
+        # JSON 模板须暴露 partitionBy / perGroupLimit 槽位
+        assert '"partitionBy"' in system
+        assert '"perGroupLimit"' in system
+        # 规则明确：分别/各/每个 X 的 top N → 每组各取前 N；禁止 N×组数近似全局截断
+        assert "每组各取前" in system
+        assert "N×组数" in system
+        assert "ROW_NUMBER() OVER (PARTITION BY" in system
+
+    async def test_sql_prompt_requires_row_number_for_partition_plan(self) -> None:
+        fake = _FakeLlm(["```sql\nSELECT 1 FROM DUAL\n```"])
+        service = Nl2SqlService()
+        plan = self._partitionPlan()
+        await service.generateSql(
+            "分别看这三个供应商供货量最大的三种物料", [self._cls()], fake, _llmConfig(),
+            maxRetries=0, plan=plan,
+        )
+        system = fake.calls[0][0][1]
+        # planToText 渲染的逐组 Top-N 行进入 SQL 阶段 prompt
+        assert "每组 Top-N" in system
+        assert "ROW_NUMBER() OVER (PARTITION BY" in system
+        # 既有行数规则不丢（regression guard）
+        assert "行数限制以查询计划为准" in system
+        assert "不要自行限制行数" in system
+        # 安全红线：不引入 FETCH FIRST N ROWS ONLY 字面量
+        assert "FETCH FIRST N ROWS ONLY" not in system

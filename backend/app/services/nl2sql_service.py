@@ -1513,6 +1513,36 @@ class Nl2SqlService:
                     f"分组属性 {prop} 不属于选定的任何类" + (f"；{hint}" if hint else "")
                 )
 
+        # 「分别/各/每个 X 的 Top N」逐组取前 N 校验（2026-09-09）。
+        # 语义红线：每组 Top-N 是分区内排名（ROW_NUMBER() OVER (PARTITION BY ...)），
+        # 不是全局 N×组数坍缩。强制分区属性真实存在且为分组维、partitionBy 与
+        # perGroupLimit 成对、组内有排序、rowLimit 必须为 null（防模型折出「前 N×组数」）。
+        if bool(plan.partitionBy) != (plan.perGroupLimit is not None):
+            issues.append(
+                "partitionBy 与 perGroupLimit 必须成对设置：partitionBy 给出分区属性时，"
+                "perGroupLimit 填每组取前 N；反之亦然（不要用全局 rowLimit 近似）"
+            )
+        for prop in plan.partitionBy:
+            if prop not in owned:
+                issues.append(f"分区属性 {prop} 不属于选定的任何类")
+            elif prop not in plan.groupBy:
+                issues.append(
+                    f"分区属性 {prop} 不在 groupBy 中：每组 Top-N 须先把分区维与取数维都放进 "
+                    f"groupBy（如 groupBy=[{prop}, 物料]、partitionBy=[{prop}]），再在分区内取前 N"
+                )
+        if plan.partitionBy and plan.perGroupLimit is not None:
+            if plan.rowLimit is not None:
+                issues.append(
+                    f"设置了 partitionBy/perGroupLimit 时 rowLimit 必须为 null"
+                    f"（每组 Top-N 不是全局前 {plan.rowLimit} 行；"
+                    f"把 N×组数折成全局行数是全局 Top-N 坍缩 bug 的根源，严禁）"
+                )
+            if not plan.sortBy:
+                issues.append(
+                    "每组 Top-N 需在 sortBy 指定组内排序（聚合别名 desc，如 TOTAL_QTY desc），"
+                    "供 ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) 使用"
+                )
+
         for sort in plan.sortBy:
             # 排序合法引用 = 类属性引用名 ∪ 聚合别名（ORDER BY alias 在 ANSI SQL 合法，
             # 与 REFINE 捷径 3-5 排序列策略一致）。
@@ -1732,6 +1762,10 @@ class Nl2SqlService:
     _PLAN_ROW_LIMIT_RULE = (
         "行数限制以查询计划为准：计划中给出「行数限制：N」时必须限制为 N 行；"
         "计划中没有「行数限制」这一行时，不要自行限制行数。"
+        "计划中给出「每组 Top-N：…」时（逐组取前 N），必须用窗口函数 "
+        "ROW_NUMBER() OVER (PARTITION BY <分区属性> ORDER BY <组内排序>) 生成组内排名列，"
+        "再包一层在 WHERE 排名列 <= 每组行数 处过滤；禁止用全局 LIMIT / 分页截断词近似，"
+        "也不要按分组数放大成全局行数。"
     )
 
     @staticmethod
@@ -1817,6 +1851,8 @@ class Nl2SqlService:
             '  "groupBy": ["属性"],\n'
             '  "joins": [{"sourceClass": "表A", "targetClass": "表B", "columns": ["连接列"]}],\n'
             '  "sortBy": [{"property": "属性", "direction": "desc"}],\n'
+            '  "partitionBy": [],\n'
+            '  "perGroupLimit": null,\n'
             '  "rowLimit": 100\n'
             "}\n"
             "规则：\n"
@@ -1839,7 +1875,13 @@ class Nl2SqlService:
             "7. rowLimit 是返回行数上限：用户明确要求「前 N 条 / top N」时填 N；"
             "问题限定了时间范围（如 2025 年、上月）或过滤条件（如某供应商、某状态），"
             "或需要完整的聚合/分组结果时填 null（不截断）；"
-            "没有任何范围限定的明细查询（如「列出所有收货记录」）填 100，避免全表返回。"
+            "没有任何范围限定的明细查询（如「列出所有收货记录」）填 100，避免全表返回。\n"
+            "8. 问题含「分别/各/每个/每家 X（供应商、客户、物料…）… 最大/最多的 N 个 / top N」"
+            "这类**每组各取前 N**时，禁止按 rowLimit = N×组数 近似成全局截断，也不要用一个全局 "
+            "rowLimit 替代：应把分区维与取数维都放 groupBy（如 按供应商看每种物料 → "
+            "groupBy=[供应商, 物料]），分区维写进 partitionBy（如 [供应商]），每组保留行数写进 "
+            "perGroupLimit=N，并把 rowLimit 置 null；每组 Top-N 由 SQL 阶段用 "
+            "ROW_NUMBER() OVER (PARTITION BY ...) 实现，不是全局 LIMIT。"
         )
 
     def _buildPlanUserPrompt(self, question: str, errors: list[str]) -> str:

@@ -111,3 +111,26 @@
 - 历史变更：`Harness/changes/fix-multi-step-rule-based-with-execution-plan/summary.md`（2026-08-16，第X步标号规则拆分）
 - 历史变更：`Harness/changes/fix-multi-step-explicit-trigger/summary.md`（2026-08 早期，is_explicit_multi_step 触发逻辑）
 - Wiki：`Harness/wiki/nl2sql-engine.md`（如后续需扩复杂多步判定策略，可补"规则拆分触发条件"小节）
+
+## 10. 后续修复（2026-09-09）：首段锚点被切句器丢弃
+
+### 报障原句
+
+> "先找出公司上半年供货量最大的三个供应商，然后分别看这三个供应商供货量最大的三种物料分别是什么，最后分析供货的情况"
+
+观察：步骤 2 引用"这三个供应商"时无上游结果集，SQL 编造占位供应商代码 → 空结果；聚合层自述"第一步的结果并未在子步骤中呈现"。
+
+### 根因
+
+`_splitByRulePattern` 只保留**每个连接词之后**的片段。该句开头用"先"（不在序数正则内）引出第一指令，正则从"然后/最后"才开始命中，于是"先找出…三个供应商"这段**锚点整段被丢弃**；拆出的步骤 2 因而引用悬空锚点。
+
+### 修复
+
+首个命中标记若为**承接词**（然后/接着/最后/其次…）而非**自我起始标记**（第X步/首先/其一），说明第一指令游离在其前 → 把 `question[:首个标记.start()]` 剥离标点后补为**第一数据步骤**（`_splitByRulePattern`，新增 `_isSelfStartMarker` 判别）。
+
+守约：范围前缀 + 自我起始标记（"2025年数据，首先查A，其次查B"）不把范围补成一步；"第X步"前导范围维持原状。
+
+### 测试
+
+- 单测：`app/tests/unit/test_step_query_planner.py`（回归 2 + 守约 2，全套 47 通过）
+- 集成：`app/tests/integration/test_chat_multi_step.py::TestMultiStepChatApi::test_ordinal_connector_anchor_not_dropped`（真实 PG + 完整 API：3 数据步、首段锚点进入 steps、未调拆步 LLM、usage 3×nl2sql + answer + step_plan）

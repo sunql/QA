@@ -271,6 +271,51 @@ class TestMultiStepChatApi:
         assert step_plan_rows[0].prompt_tokens == 0
         assert step_plan_rows[0].completion_tokens == 0
 
+    async def test_ordinal_connector_anchor_not_dropped(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """2026-09-09 回归：'先找出Top3供应商，然后…三种物料，最后分析'。
+
+        序数承接词规则路径此前把首个连接词之前的锚点子句（"先找出公司上半年供货量
+        最大的三个供应商"）整段丢弃，第二步引用的"这三个供应商"成为悬空锚点 → SQL
+        编造占位符/重查全量。修复后首段补为第一数据步，必须保留进 steps。
+        """
+        config, ds = await _seed(dbSession)
+        llm = _MultiStepLlm()
+        adapter = _OkAdapter()
+        _install(monkeypatch, config, llm, adapter)
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_payload(
+                "先找出公司上半年供货量最大的三个供应商，"
+                "然后分别看这三个供应商供货量最大的三种物料分别是什么，"
+                "最后分析供货的情况",
+                ds.id,
+            ),
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["intent"] == "multi_step"
+        assert body["steps"] is not None
+        # 首段锚点不再被丢弃 → 3 个数据步骤（此前只剩 2 步且首段缺失）
+        assert len(body["steps"]) == 3
+        assert body["steps"][0]["stepIndex"] == 0
+        assert "供货量最大的三个供应商" in body["steps"][0]["subQuestion"]
+        assert body["steps"][0]["sql"] is not None
+        assert body["steps"][0]["error"] is None
+        assert body["steps"][1]["subQuestion"].startswith("分别看这三个供应商")
+        assert body["steps"][2]["subQuestion"].startswith("分析供货的情况")
+        # 序数承接词规则路径命中 → 未调拆步 LLM
+        assert not any("查询拆分器" in m[0][1] for m in llm.calls)
+        # 3 个数据步骤各执行一次数据 SQL
+        assert len(_data_queries(adapter)) == 3
+        # 用量：3×nl2sql + 1×answer + 1×step_plan(0 token)，与「第X步」规则路径同构
+        usages = list((await dbSession.execute(select(SessionTokenUsage))).scalars().all())
+        assert sorted(r.purpose for r in usages) == [
+            "answer", "nl2sql", "nl2sql", "nl2sql", "step_plan",
+        ]
+
     async def test_single_step_renders_execution_plan(
         self, client, dbSession, monkeypatch,
     ) -> None:

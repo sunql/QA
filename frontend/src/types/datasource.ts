@@ -88,3 +88,32 @@ export const ORACLE_VERSION_OPTIONS: { value: OracleVersion; labelKey: "modern" 
   { value: "12c+", labelKey: "modern" },
   { value: "11g", labelKey: "legacy" },
 ];
+
+// ===== schema 发现（introspection）=====
+// 与后端 SchemaIntrospectResponse / TableSchemaRead / ColumnSchemaRead 的
+// camelCase JSON 契约一致（见 backend/app/domain/schemas.py）。
+
+export interface ColumnSchema {
+  columnName: string;
+  dataType: string;
+  nullable: boolean;
+}
+
+export interface ForeignKeySchema {
+  columnName: string;
+  refTable: string;
+  refColumn: string;
+}
+
+export interface TableSchema {
+  tableName: string;
+  owner: string;
+  columns: ColumnSchema[];
+  primaryKeys: string[];
+  foreignKeys: ForeignKeySchema[];
+}
+
+export interface SchemaIntrospectResponse {
+  tables: TableSchema[];
+  cachedAt: string;
+}

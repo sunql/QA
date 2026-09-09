@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useMemo } from "react";
 import {
   Table,
   Button,
+  Checkbox,
   Modal,
   Form,
   Input,
@@ -13,6 +14,7 @@ import {
   message,
   Row,
   Col,
+  Typography,
 } from "antd";
 import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { listJoins, createJoin, deleteJoin } from "../../api/ontology";
@@ -32,6 +34,7 @@ import type { FilterValues } from "../../utils/ontologyFilter";
 import { classOptions } from "./classOptions";
 
 const { TextArea } = Input;
+const { Text } = Typography;
 
 interface JoinFormValues {
   sourceClassId: number;
@@ -87,7 +90,14 @@ export default function JoinTab({ classes }: JoinTabProps) {
     []
   );
   const resetFilters = useCallback(() => setFilters({}), []);
-  const filteredJoins = useMemo(() => filterJoins(joins, filters), [joins, filters]);
+  // 「仅外来键」：只显示 relation_type=foreign_key 的边——这些多由本地导入
+  // （声明外键 / Sage 列名约定）自动推断生成，聚焦核查机器推断是否正确。
+  const [onlyForeignKeys, setOnlyForeignKeys] = useState(false);
+  const filteredJoins = useMemo(() => {
+    const byFilters = filterJoins(joins, filters);
+    if (!onlyForeignKeys) return byFilters;
+    return byFilters.filter((j) => j.relationType === "foreign_key");
+  }, [joins, filters, onlyForeignKeys]);
   const joinClassFilterOptions = classOptions(t, classes).map((o) => ({
     value: String(o.value),
     label: o.label,
@@ -231,7 +241,19 @@ export default function JoinTab({ classes }: JoinTabProps) {
   return (
     <>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
-        <span />
+        <Space size="middle">
+          <Checkbox
+            checked={onlyForeignKeys}
+            onChange={(e) => setOnlyForeignKeys(e.target.checked)}
+          >
+            {t("forms.ontology.joinOnlyForeignKeys")}
+          </Checkbox>
+          <Tooltip title={t("forms.ontology.joinOnlyForeignKeysHint")}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {t("forms.ontology.joinOnlyForeignKeysHint")}
+            </Text>
+          </Tooltip>
+        </Space>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             {t("common.refresh")}

@@ -5,6 +5,7 @@ import EmbeddingProvidersPage from "./pages/EmbeddingProvidersPage";
 import ChatPage from "./pages/ChatPage";
 import OntologyPage from "./pages/OntologyPage";
 import DatasourcePage from "./pages/DatasourcePage";
+import LocalImportInitPage from "./pages/LocalImportInitPage";
 import DataQualityPage from "./pages/DataQualityPage";
 import KpiCatalogPage from "./pages/KpiCatalogPage";
 import FeatureCatalogPage from "./pages/FeatureCatalogPage";
@@ -40,6 +41,7 @@ export default function App() {
         <Route path="chat" element={<ChatPage />} />
         <Route path="ontology" element={<OntologyPage />} />
         <Route path="datasource" element={<DatasourcePage />} />
+        <Route path="local-import" element={<LocalImportInitPage />} />
         <Route path="data-quality" element={<DataQualityPage />} />
         <Route path="data-quality/generate" element={<DataQualityRuleGeneratePage />} />
         <Route path="lineage" element={<LineagePage />} />

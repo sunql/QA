@@ -7,6 +7,7 @@ import type {
   DataSourceTestRequest,
   DataSourceTestResponse,
   DataSourceUpdate,
+  SchemaIntrospectResponse,
 } from "../types/datasource";
 
 const BASE = "/datasources";
@@ -38,6 +39,18 @@ export async function updateDataSource(
 
 export async function deleteDataSource(id: number): Promise<void> {
   await httpClient.delete(`${BASE}/${id}`);
+}
+
+// 读取数据源已缓存的 schema；未缓存时后端返回 404（调用方据此触发 introspect）。
+export async function getDatasourceSchema(id: number): Promise<SchemaIntrospectResponse> {
+  const res = await httpClient.get<SchemaIntrospectResponse>(`${BASE}/${id}/schema`);
+  return res.data;
+}
+
+// 触发数据源 schema 发现并写缓存（数据未变化时复用缓存），返回全量 schema。
+export async function introspectDatasource(id: number): Promise<SchemaIntrospectResponse> {
+  const res = await httpClient.post<SchemaIntrospectResponse>(`${BASE}/${id}/introspect`);
+  return res.data;
 }
 
 // 连接测试返回 { success, message }，其 success 字段与统一信封的 success 冲突：

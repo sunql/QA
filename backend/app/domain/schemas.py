@@ -1178,12 +1178,27 @@ class LlmEnhanceOptions(CamelModel):
     suggest_filters: bool = True
 
 
+class JoinInferenceRules(CamelModel):
+    """关联关系推断开关。
+
+    - infer_declared_fk：按数据字典声明的外键生成 join（PG/MySQL/Oracle 声明 FK）。
+    - infer_name_convention：按列名约定推断 Sage X3（THBI）引用边。THBI 不声明
+      任何 FK/PK 约束，schema 缓存 primary_keys/foreign_keys 为空，只有列名约定
+      能还原主数据/单据头引用（ITMREF_0 → ITMMASTER 等）。对无约定列的小写库
+      无匹配，保持空。注册表见 services/join_inference.py。
+    """
+
+    infer_declared_fk: bool = True
+    infer_name_convention: bool = True
+
+
 class ImportRuleConfig(CamelModel):
-    """本地导入规则配置：表过滤 + 类型映射 + LLM 增强。"""
+    """本地导入规则配置：表过滤 + 类型映射 + LLM 增强 + 关联推断。"""
 
     table_filter: TableFilterRules = Field(default_factory=TableFilterRules)
     type_mapping: TypeMappingRules = Field(default_factory=TypeMappingRules)
     llm_enhance_options: LlmEnhanceOptions = Field(default_factory=LlmEnhanceOptions)
+    join_inference: JoinInferenceRules = Field(default_factory=JoinInferenceRules)
 
 
 class ConflictType(StrEnum):
@@ -1240,6 +1255,11 @@ class ProposedJoin(CamelModel):
     join_type: str = "INNER"
     relation_type: str = "foreign_key"
     is_selected: bool = True
+    # 推断来源，供前端预览标注：declared_fk | name_convention；旧响应为 None。
+    inferred_by: str | None = Field(
+        default=None,
+        description="关联推断来源：declared_fk（声明外键）| name_convention（列名约定）",
+    )
 
 
 class ImportPreviewRequest(CamelModel):
@@ -1249,6 +1269,12 @@ class ImportPreviewRequest(CamelModel):
     # 表名白名单：非空时预览只返回命中该列表的表（用于超大 schema 分批导入）。
     # 与 rules.table_filter 是 AND 关系：先按规则过滤，再仅保留白名单命中的表。
     selected_tables: list[str] | None = None
+    # 可选：按表限制参与导入的属性列子集 {表名: [列名]}；省略表示全列。
+    # 单表「只导入部分属性」场景用（列名匹配大小写不敏感，未知列忽略）。
+    selected_columns: dict[str, list[str]] | None = Field(
+        default=None,
+        description="按表限制预览的属性列子集，如 {\"PORDERQ\": [\"POHNUM_0\", \"QTYUOM_0\"]}",
+    )
 
 
 class FilterSuggestions(CamelModel):

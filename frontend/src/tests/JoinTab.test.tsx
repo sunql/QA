@@ -211,6 +211,55 @@ describe("JoinTab — handleSubmit 验证错误分支", () => {
 });
 
 // =============================================================================
+// 「仅显示外来键」开关：聚焦核查本地导入自动推断的 foreign_key 边
+// =============================================================================
+
+describe("JoinTab — 仅外来键过滤", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const businessJoin: OntologyJoin = {
+    ...mockJoin,
+    id: 20,
+    relationType: "business",
+    description: "业务语义关联",
+  };
+
+  it("开启后仅剩 foreign_key 边，business 边被过滤", async () => {
+    api.listJoins.mockResolvedValue([mockJoin, businessJoin]);
+    const user = userEvent.setup();
+    renderTab();
+
+    // 初始两条都显示
+    expect(await screen.findByText("foreign_key")).toBeInTheDocument();
+    expect(screen.getByText("business")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: /仅显示外来键/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("foreign_key")).toBeInTheDocument();
+      expect(screen.queryByText("business")).not.toBeInTheDocument();
+    });
+  });
+
+  it("再次取消后 business 边恢复显示", async () => {
+    api.listJoins.mockResolvedValue([mockJoin, businessJoin]);
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByText("foreign_key");
+
+    await user.click(screen.getByRole("checkbox", { name: /仅显示外来键/ }));
+    await waitFor(() =>
+      expect(screen.queryByText("business")).not.toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: /仅显示外来键/ }));
+    expect(screen.getByText("business")).toBeInTheDocument();
+  });
+});
+
+// =============================================================================
 // 刷新按钮
 // =============================================================================
 

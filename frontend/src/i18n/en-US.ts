@@ -95,6 +95,7 @@ export const enUS = {
       businessObjects: "Business Objects",
       ontologyProperties: "Ontology Property Management",
       datasource: "Data Sources",
+      localImport: "Local Data Initialization",
       documents: "Document Center",
       usage: "Usage Dashboard",
       graph: "Neo4j Graph DB",
@@ -265,6 +266,7 @@ export const enUS = {
     versionUpdated: "Updated (new version created)",
     previewFailed: "Failed to generate import preview",
     importFailed: "Import failed, see error details",
+    schemaLoadFailed: "Failed to load schema. Check the datasource and retry",
   },
 
   queryPlan: {
@@ -946,6 +948,9 @@ export const enUS = {
       editMetricModalTitle: "Edit Metric",
       addJoinButton: "Add Join",
       addJoinModalTitle: "Add Join",
+      joinOnlyForeignKeys: "Foreign keys only (auto-inferred)",
+      joinOnlyForeignKeysHint:
+        "Edges auto-inferred during local import (declared FK / Sage X3 name convention) are marked as foreign keys. Review, delete, or recreate them here.",
       versionsModalTitle: "Version History: {name}",
       semanticSearchTab: "Semantic Search",
       semanticResultsCardTitle: "Semantic Search Results",
@@ -1142,6 +1147,13 @@ export const enUS = {
       confirm: "Import Done",
     },
     confirmImport: "Confirm Import",
+    initPage: {
+      title: "Local Data Initialization",
+      datasourceLabel: "Data Source",
+      startButton: "Start Import",
+      noDatasource: "No usable data source. Create & test one on the Data Sources page first.",
+      loadFailed: "Failed to load data sources. Please retry later.",
+    },
     confirm: {
       errorTitle: "Import completed with errors",
       errorSummary:
@@ -1157,6 +1169,33 @@ export const enUS = {
       searchPlaceholder: "Search table/class name",
       selectFiltered: "Select all filtered",
       selectedCount: "{count} of {total} tables selected",
+      joinsTitle: "Relationships",
+      joinCount: "{count} selected",
+      joinSource: "Source table.column",
+      joinTarget: "Target table.column",
+      joinType: "Join",
+      relationType: "Relation",
+      inferredBy: "Inferred by",
+      inferredByDeclaredFk: "Declared FK",
+      inferredByNameConvention: "Name convention",
+    },
+    config: {
+      selectTablesTitle: "Select tables to import",
+      tableName: "Table Name",
+      columnCount: "Columns",
+      searchPlaceholder: "Search table name",
+      selectFiltered: "Select all filtered",
+      selectedCount: "{count} of {total} tables selected",
+      noTableHint:
+        "No table selected: check the tables to import above first (searchable). Column-level selection appears when exactly one table is selected.",
+      multiModeHint:
+        "Multiple tables selected: all columns of each table will be imported. To import only some columns, select a single table.",
+      singleModeTitle: "Columns to import from {table}",
+      columnChosenCount: "{chosen} of {total} columns selected",
+      joinInferenceTitle: "Auto-infer relationships",
+      inferDeclaredFk: "Declared foreign keys",
+      inferNameConvention: "Sage X3 name convention",
+      schemaLoadWarn: "Schema failed to load. Check datasource connectivity and retry.",
     },
   },
 

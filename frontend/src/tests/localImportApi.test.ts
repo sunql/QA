@@ -22,6 +22,7 @@ import { getImportPreview, executeImport } from "../api/localImport";
 import type {
   ImportExecuteRequest,
   ImportExecuteResponse,
+  ImportPreviewRequest,
   ImportPreviewResponse,
   ImportRuleConfig,
 } from "../types/localImport";
@@ -31,8 +32,12 @@ describe("api/localImport", () => {
     vi.clearAllMocks();
   });
 
-  it("getImportPreview POST /datasources/:id/import-preview（typeMapping 单数）", async () => {
-    const rules: ImportRuleConfig = { tableFilter: {}, typeMapping: {} };
+  it("getImportPreview POST /datasources/:id/import-preview（整请求体含 joinInference 与列选）", async () => {
+    const rules: ImportRuleConfig = {
+      tableFilter: {},
+      typeMapping: {},
+      joinInference: { inferDeclaredFk: true, inferNameConvention: false },
+    };
     const data: ImportPreviewResponse = {
       datasourceId: 1,
       proposedClasses: [],
@@ -41,11 +46,17 @@ describe("api/localImport", () => {
       filterSuggestions: { recommendedBlacklistPatterns: [], excludedTables: [] },
       llmUsage: { modelName: null, promptTokens: 0, completionTokens: 0 },
     };
+    const request: ImportPreviewRequest = {
+      rules,
+      selectedTables: ["PORDER", "PORDERQ"],
+      selectedColumns: { PORDERQ: ["POHNUM_0", "LIN_0"] },
+    };
     httpMock.post.mockResolvedValue({ data });
-    const result = await getImportPreview(1, rules);
-    expect(httpMock.post).toHaveBeenCalledWith("/datasources/1/import-preview", {
-      rules: { tableFilter: {}, typeMapping: {} },
-    });
+    const result = await getImportPreview(1, request);
+    expect(httpMock.post).toHaveBeenCalledWith(
+      "/datasources/1/import-preview",
+      request,
+    );
     expect(result).toEqual(data);
   });
 

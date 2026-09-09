@@ -1,4 +1,4 @@
-"""seed_menu_config - 幂等 upsert 6 类 28 项菜单。
+"""seed_menu_config - 幂等 upsert 6 类 29 项菜单。
 
 与 AppLayout 的旧 key 一一对应；feat-rbac-identity 追加 4 个 RBAC 管理页
 （用户/角色/组织/菜单）叶子项，零 section 变更（section 数保持 6，测试断言依赖）。
@@ -59,6 +59,8 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.bizConfig", "code": "item.ontologyProperties", "label_key": "menu.item.ontologyProperties", "icon_code": "tags", "sort_order": 375, "path": "/ontology-properties"},
     # Foundation
     {"parent": "section.foundation", "code": "item.datasource", "label_key": "menu.item.datasource", "icon_code": "database", "sort_order": 410, "path": "/datasource"},
+    # feat-local-import-evolution：本地数据初始化独立入口页 /local-import（复用 ImportWizard）
+    {"parent": "section.foundation", "code": "item.localImport", "label_key": "menu.item.localImport", "icon_code": "import", "sort_order": 415, "path": "/local-import"},
     {"parent": "section.foundation", "code": "item.documents", "label_key": "menu.item.documents", "icon_code": "file", "sort_order": 420, "path": "/documents"},
     {"parent": "section.foundation", "code": "item.usage", "label_key": "menu.item.usage", "icon_code": "dashboard", "sort_order": 430, "path": "/usage"},
     {"parent": "section.foundation", "code": "item.graph", "label_key": "menu.item.graph", "icon_code": "apartment", "sort_order": 440, "path": "/graph"},
@@ -81,7 +83,7 @@ ITEMS: list[dict[str, Any]] = [
 async def seed_menu_config(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
-    """幂等 upsert 6 个一级类 + 28 个叶子项。返回总行数。
+    """幂等 upsert 6 个一级类 + 29 个叶子项。返回总行数。
 
     冲突键：`code`（全局唯一）。重复运行不新增行，仅刷新 label_key / icon_code /
     sort_order / path / visible。`parent_id` 仅在首次 INSERT 时设置；已存在的

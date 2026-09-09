@@ -64,7 +64,9 @@ class FakeOntologyService:
     async def listPropertiesByClass(self, session, classId):
         return [p for p in self._properties if p.class_id == classId]
 
-    async def createClass(self, session, dto, actor):
+    async def createClass(
+        self, session, dto, actor=None, actor_departments=None
+    ):
         from app.domain.models import OntologyClass
 
         self._next_id += 1
@@ -76,7 +78,9 @@ class FakeOntologyService:
         self._classes.append(cls)
         return cls
 
-    async def createProperty(self, session, dto, actor=None):
+    async def createProperty(
+        self, session, dto, actor=None, actor_departments=None
+    ):
         from app.domain.models import OntologyProperty
 
         self._next_id += 1
@@ -89,7 +93,7 @@ class FakeOntologyService:
         self._properties.append(prop)
         return prop
 
-    async def createJoin(self, session, dto):
+    async def createJoin(self, session, dto, actor=None, actor_departments=None):
         from app.domain.models import OntologyJoin
 
         self._next_id += 1
@@ -696,7 +700,7 @@ async def test_execute_import_recovers_session_after_property_db_failure(
         async def listPropertiesByClass(self, session, classId):
             return []
 
-        async def createClass(self, session, dto, actor=None):
+        async def createClass(self, session, dto, actor=None, actor_departments=None):
             cls = OntologyClass(class_name=dto.class_name, source_table=dto.source_table)
             session.add(cls)
             await session.commit()
@@ -706,7 +710,9 @@ async def test_execute_import_recovers_session_after_property_db_failure(
             )
             return cls
 
-        async def createProperty(self, session, dto, actor=None):
+        async def createProperty(
+        self, session, dto, actor=None, actor_departments=None
+    ):
             self._property_calls += 1
             if self._property_calls == 2:
                 # property_name=None 违反 NOT NULL：commit 失败后会话进入 pending rollback
@@ -727,7 +733,7 @@ async def test_execute_import_recovers_session_after_property_db_failure(
             await session.commit()
             return prop
 
-        async def createJoin(self, session, dto):
+        async def createJoin(self, session, dto, actor=None, actor_departments=None):
             return None
 
     svc = LocalImportService(

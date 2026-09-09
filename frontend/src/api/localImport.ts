@@ -10,16 +10,16 @@ import type {
   ImportExecuteRequest,
   ImportExecuteResponse,
   ImportPreviewResponse,
-  ImportRuleConfig,
+  ImportPreviewRequest,
 } from "../types/localImport";
 
 export async function getImportPreview(
   datasourceId: number,
-  rules: ImportRuleConfig
+  request: ImportPreviewRequest
 ): Promise<ImportPreviewResponse> {
   const res = await httpClient.post<ImportPreviewResponse>(
     `/datasources/${datasourceId}/import-preview`,
-    { rules }
+    request
   );
   return res.data;
 }

@@ -29,6 +29,7 @@ from app.domain.schemas import (
 from app.services.import_conflict_resolver import ImportConflictResolver
 from app.services.import_llm_enhancer import EnhancedSchemaResult, ImportLlmEnhancer
 from app.services.import_rule_engine import ImportRuleEngine
+from app.services.join_inference import infer_sage_x3_name_convention_joins
 from app.services.ontology_service import OntologyService
 from app.services.schema_introspection_service import SchemaIntrospectionService
 
@@ -57,6 +58,7 @@ class LocalImportService:
         datasource_id: int,
         rules: ImportRuleConfig,
         selected_tables: list[str] | None = None,
+        selected_columns: dict[str, list[str]] | None = None,
     ) -> ImportPreviewResponse:
         ds = await session.get(DataSource, datasource_id)
         if ds is None:
@@ -76,16 +78,17 @@ class LocalImportService:
         )
 
         proposed_classes, proposed_properties, proposed_joins = self._build_proposals(
-            enhanced, rules, filtered
+            enhanced, rules, filtered, selected_columns
         )
-        # 分批导入：只保留两端都在白名单内的 join，避免对未导入的目标表生成悬空关联。
+        # 分批导入：只保留两端都在白名单内的 join，避免对未导入的表生成悬空关联。
         if selected_tables:
             wanted = {t.strip().lower() for t in selected_tables if t and t.strip()}
             if wanted:
                 proposed_joins = [
                     j
                     for j in proposed_joins
-                    if (j.target_table or "").lower() in wanted
+                    if (j.source_table or "").lower() in wanted
+                    and (j.target_table or "").lower() in wanted
                 ]
 
         existing_classes = await self._ontology_service.listClasses(session)
@@ -137,8 +140,10 @@ class LocalImportService:
         enhanced: EnhancedSchemaResult,
         rules: ImportRuleConfig,
         original_tables: Sequence[Any],
+        selected_columns: dict[str, list[str]] | None = None,
     ) -> tuple[list[ProposedClass], list[dict[str, Any]], list[ProposedJoin]]:
         enhanced_by_name = {t.name: t for t in enhanced.tables}
+        col_whitelists = self._normalizeSelectedColumns(selected_columns)
 
         proposed_classes: list[ProposedClass] = []
         proposed_properties: list[dict[str, Any]] = []
@@ -153,9 +158,13 @@ class LocalImportService:
             enhanced_cols = (
                 {c.name: c for c in enhanced_table.columns} if enhanced_table else {}
             )
+            col_whitelist = col_whitelists.get((table_name or "").upper())
 
             properties: list[ProposedProperty] = []
             for col in original.columns:
+                # 单表「部分属性导入」：仅保留白名单命中的列（未知列忽略）
+                if col_whitelist is not None and col.column_name.upper() not in col_whitelist:
+                    continue
                 ec = enhanced_cols.get(col.column_name)
                 mapped = self._rule_engine.map_data_type(
                     col.data_type, rules.type_mapping
@@ -189,17 +198,100 @@ class LocalImportService:
                 )
             )
 
-            for fk in original.foreign_keys or []:
-                proposed_joins.append(
-                    ProposedJoin(
-                        source_table=table_name,
-                        source_columns=[fk.column_name],
-                        target_table=fk.ref_table,
-                        target_columns=[fk.ref_column],
-                    )
-                )
+        proposed_joins = self._pruneJoinsOnUnimportedColumns(
+            self._build_joins(original_tables, rules), col_whitelists
+        )
 
         return proposed_classes, proposed_properties, proposed_joins
+
+    @staticmethod
+    def _pruneJoinsOnUnimportedColumns(
+        joins: list[ProposedJoin],
+        col_whitelists: dict[str, set[str]],
+    ) -> list[ProposedJoin]:
+        """丢弃引用到未导入列的 join（避免指向未落库的 property）。
+
+        表未做列选（不在 whitelist 内）时视为全列导入，不受影响；表做列选时，
+        仅当该 join 的所有 source/target 列都在白名单内才保留。返回新列表，不改输入。
+        """
+        kept: list[ProposedJoin] = []
+        for j in joins:
+            src_white = col_whitelists.get((j.source_table or "").upper())
+            if src_white is not None and not all(
+                c.upper() in src_white for c in (j.source_columns or [])
+            ):
+                continue
+            tgt_white = col_whitelists.get((j.target_table or "").upper())
+            if tgt_white is not None and not all(
+                c.upper() in tgt_white for c in (j.target_columns or [])
+            ):
+                continue
+            kept.append(j)
+        return kept
+
+    @staticmethod
+    def _normalizeSelectedColumns(
+        selected_columns: dict[str, list[str]] | None,
+    ) -> dict[str, set[str]]:
+        """把 selected_columns 归一化为 {表名大写: 列名大写集合}；入参为 None 返回空。
+
+        返回新映射，不改输入。列名校验（大小写不敏感）：未知列名在调用处忽略，
+        空表名/空列表条目剔除。
+        """
+        if not selected_columns:
+            return {}
+        out: dict[str, set[str]] = {}
+        for table, columns in selected_columns.items():
+            key = (table or "").strip().upper()
+            if not key or not columns:
+                continue
+            out[key] = {c.strip().upper() for c in columns if c and c.strip()}
+        return out
+
+    @staticmethod
+    def _build_joins(
+        tables: Sequence[Any],
+        rules: ImportRuleConfig,
+    ) -> list[ProposedJoin]:
+        """生成关联候选：声明外键 + Sage X3 列名约定（按规则开关），去重。
+
+        返回新列表。声明 FK（declared_fk）与列名约定（name_convention）产出同一条
+        边时仅保留首次（先声明后约定，二者等价无歧义）。输入不变。
+        """
+        joins: list[ProposedJoin] = []
+        seen: set[tuple[str, tuple[str, ...], str, tuple[str, ...]]] = set()
+
+        def _add(j: ProposedJoin) -> None:
+            key = (
+                (j.source_table or "").upper(),
+                tuple(c.upper() for c in (j.source_columns or [])),
+                (j.target_table or "").upper(),
+                tuple(c.upper() for c in (j.target_columns or [])),
+            )
+            if key not in seen:
+                seen.add(key)
+                joins.append(j)
+
+        inference = rules.join_inference
+        if inference.infer_declared_fk:
+            for original in tables:
+                for fk in original.foreign_keys or []:
+                    _add(
+                        ProposedJoin(
+                            source_table=original.table_name,
+                            source_columns=[fk.column_name],
+                            target_table=fk.ref_table,
+                            target_columns=[fk.ref_column],
+                            join_type="INNER",
+                            relation_type="foreign_key",
+                            is_selected=True,
+                            inferred_by="declared_fk",
+                        )
+                    )
+        if inference.infer_name_convention:
+            for j in infer_sage_x3_name_convention_joins(list(tables)):
+                _add(j)
+        return joins
 
     async def execute_import(
         self,
@@ -254,7 +346,14 @@ class LocalImportService:
                     join_type=proposed_join.join_type,
                     relation_type=proposed_join.relation_type,
                 )
-                await self._ontology_service.createJoin(session, join_dto)
+                await self._ontology_service.createJoin(
+                    session,
+                    join_dto,
+                    actor=actor.userId,
+                    actor_departments=(
+                        ",".join(actor.departments) if actor.departments else None
+                    ),
+                )
                 created_joins += 1
             except Exception as exc:  # noqa: BLE001
                 await session.rollback()
@@ -308,7 +407,12 @@ class LocalImportService:
         )
         try:
             created_class = await self._ontology_service.createClass(
-                session, class_dto, actor
+                session,
+                class_dto,
+                actor=actor.userId,
+                actor_departments=(
+                    ",".join(actor.departments) if actor.departments else None
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             await session.rollback()
@@ -339,7 +443,14 @@ class LocalImportService:
                     is_foreign_key=prop.is_foreign_key,
                     source_column=prop.source_column,
                 )
-                await self._ontology_service.createProperty(session, prop_dto)
+                await self._ontology_service.createProperty(
+                    session,
+                    prop_dto,
+                    actor=actor.userId,
+                    actor_departments=(
+                        ",".join(actor.departments) if actor.departments else None
+                    ),
+                )
                 props_created += 1
             except Exception as exc:  # noqa: BLE001
                 await session.rollback()

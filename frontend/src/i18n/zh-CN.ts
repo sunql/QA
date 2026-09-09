@@ -101,6 +101,7 @@ export const zhCN = {
       businessObjects: "业务对象",
       ontologyProperties: "本体属性管理",
       datasource: "数据源",
+      localImport: "本地数据初始化",
       documents: "文档中心",
       usage: "用量看板",
       graph: "Neo4j 图库",
@@ -270,6 +271,7 @@ export const zhCN = {
     versionUpdated: "更新成功（新版本已创建）",
     previewFailed: "生成导入预览失败，请稍后重试",
     importFailed: "导入失败，请查看错误详情",
+    schemaLoadFailed: "Schema 加载失败，请检查数据源后重试",
   },
 
   queryPlan: {
@@ -950,6 +952,9 @@ export const zhCN = {
       editMetricModalTitle: "编辑指标",
       addJoinButton: "新增关联",
       addJoinModalTitle: "新增关联",
+      joinOnlyForeignKeys: "仅显示外来键关联（自动推断）",
+      joinOnlyForeignKeysHint:
+        "本地导入按「声明外键 / Sage X3 列名约定」自动推断的关联会标记为外来键，可在此核查、删除或补建。",
       versionsModalTitle: "版本历史：{name}",
       semanticSearchTab: "语义搜索",
       semanticResultsCardTitle: "语义检索结果",
@@ -1158,6 +1163,13 @@ export const zhCN = {
       confirm: "导入完成",
     },
     confirmImport: "确认导入",
+    initPage: {
+      title: "本地数据初始化",
+      datasourceLabel: "数据源",
+      startButton: "开始导入",
+      noDatasource: "暂无可用数据源，请先到「数据源」页创建并测试连通性。",
+      loadFailed: "数据源列表加载失败，请稍后重试。",
+    },
     confirm: {
       errorTitle: "导入未完全成功",
       errorSummary:
@@ -1166,6 +1178,22 @@ export const zhCN = {
       errorName: "名称",
       errorMessage: "错误信息",
     },
+    config: {
+      selectTablesTitle: "选择要导入的表",
+      tableName: "表名",
+      columnCount: "列数",
+      searchPlaceholder: "搜索表名",
+      selectFiltered: "全选当前筛选",
+      selectedCount: "已选 {count} / 共 {total} 张表",
+      noTableHint: "尚未选择表：请先在上方勾选要导入的表（可搜索），单表时下方会出现列级选择。",
+      multiModeHint: "已选多张表：将导入各表的全部列。如需「只导入部分列」，请只勾选一张表。",
+      singleModeTitle: "选择 {table} 要导入的列",
+      columnChosenCount: "已选 {chosen} / 共 {total} 列",
+      joinInferenceTitle: "自动推断关联关系",
+      inferDeclaredFk: "数据字典声明外键",
+      inferNameConvention: "Sage X3 列名约定",
+      schemaLoadWarn: "Schema 加载失败，请检查数据源连通性后重试。",
+    },
     preview: {
       sourceTable: "源表",
       className: "类名",
@@ -1173,6 +1201,15 @@ export const zhCN = {
       searchPlaceholder: "搜索表名/类名",
       selectFiltered: "全选当前筛选",
       selectedCount: "已选 {count} / 共 {total} 张表",
+      joinsTitle: "关联关系",
+      joinCount: "已选 {count} 条",
+      joinSource: "来源表.列",
+      joinTarget: "目标表.列",
+      joinType: "Join",
+      relationType: "关系类型",
+      inferredBy: "推断方式",
+      inferredByDeclaredFk: "声明外键",
+      inferredByNameConvention: "列名约定",
     },
   },
 

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +16,7 @@ import pytest
 from app.domain.enums import DataSourceType
 from app.domain.exceptions import Nl2SqlError
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
-from app.domain.query_plan import QueryPlan
+from app.domain.query_plan import Aggregation, QueryPlan
 from app.services.nl2sql_service import (
     Nl2SqlService,
     _renderStatePart,
@@ -1266,3 +1267,106 @@ class TestPerGroupTopNPrompts:
         assert "不要自行限制行数" in system
         # 安全红线：不引入 FETCH FIRST N ROWS ONLY 字面量
         assert "FETCH FIRST N ROWS ONLY" not in system
+
+
+class TestScopeHintPromptInjection:
+    """主子问题并集注入：主问题的时间/范围限定经 scopeQuestion 落入
+    计划与 SQL 阶段 user prompt，子问题不再丢失「上半年」类条件。
+
+    现有实现（bug）：scopeQuestion 只在 _applyScopeRowLimit 决策行数，
+    从未到达 prompt。修复：user prompt 末尾追加 <scope_hint> 主问原文</scope_hint>
+    段，强指令化"主问的范围限定适用于本步"，并附带 instructions 引导模型把
+    时间/范围条件写入 conditions / WHERE；scopeQuestion=None（单步）则不注入。
+    """
+
+    def _cls(self) -> OntologyClass:
+        return OntologyClass(
+            class_name="PRECEIPT",
+            source_table="T_PRECEIPT",
+            properties=[
+                OntologyProperty(property_name="BPSNUM", source_column="BPSNUM"),
+                OntologyProperty(property_name="QTY", source_column="QTY"),
+                OntologyProperty(property_name="RCPDATE", source_column="RCPDATE"),
+            ],
+        )
+
+    @staticmethod
+    def _validPlanJson() -> str:
+        plan = QueryPlan(
+            target="各供应商收货数量",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM",),
+        )
+        return json.dumps(plan.to_dict(), ensure_ascii=False)
+
+    async def test_plan_user_prompt_includes_scope_hint_block(self) -> None:
+        """scopeQuestion 注入 _buildPlanUserPrompt：主问原文出现在 <scope_hint> 块。
+
+        主问含时间词，子问题未含；prompt 必须显式带主问让模型继承 conditions。
+        """
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "查各供应商收货数量",
+            errors=[],
+            scopeQuestion="公司2025年上半年的采购情况",
+        )
+        assert "<scope_hint>" in prompt
+        assert "</scope_hint>" in prompt
+        assert "公司2025年上半年的采购情况" in prompt
+        assert "主问题" in prompt or "主问" in prompt or "主问题（多步场景）" in prompt
+        # 安全红线：scope 块经转义/框定（数据非指令），不裸注入
+        assert "_sanitizeContext" not in prompt  # 不暴露实现细节字面量
+        # 子问题原文仍存在
+        assert "查各供应商收货数量" in prompt
+
+    async def test_plan_user_prompt_omits_scope_hint_when_unset(self) -> None:
+        """scopeQuestion=None（单步场景）时不注入 <scope_hint>，避免无意义冗余。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt("查各供应商收货数量", errors=[])
+        assert "<scope_hint>" not in prompt
+        assert "</scope_hint>" not in prompt
+
+    async def test_sql_user_prompt_includes_scope_hint_block(self) -> None:
+        """scopeQuestion 注入 _buildUserPrompt（SQL 阶段）。"""
+        service = Nl2SqlService()
+        prompt = service._buildUserPrompt(
+            "查各供应商收货数量",
+            errors=[],
+            executionError=None,
+            scopeQuestion="公司2025年上半年的采购情况",
+        )
+        assert "<scope_hint>" in prompt
+        assert "公司2025年上半年的采购情况" in prompt
+
+    async def test_sql_user_prompt_omits_scope_hint_when_unset(self) -> None:
+        service = Nl2SqlService()
+        prompt = service._buildUserPrompt("查各供应商收货数量", errors=[])
+        assert "<scope_hint>" not in prompt
+
+    async def test_generate_query_plan_threads_scope_question_into_user_prompt(self) -> None:
+        """generateQueryPlan 端到端：scopeQuestion 真正到达 user prompt。"""
+        fake = _FakeLlm([self._validPlanJson()])
+        service = Nl2SqlService()
+        await service.generateQueryPlan(
+            "查各供应商收货数量",
+            [self._cls()], fake, _llmConfig(),
+            scopeQuestion="公司2025年上半年的采购情况",
+        )
+        userContent = fake.calls[0][1][1]  # (role, content) tuples
+        assert "<scope_hint>" in userContent
+        assert "公司2025年上半年的采购情况" in userContent
+
+    async def test_generate_sql_threads_scope_question_into_user_prompt(self) -> None:
+        """generateSql 端到端：scopeQuestion 真正到达 SQL 阶段 user prompt。"""
+        fake = _FakeLlm(["```sql\nSELECT BPSNUM FROM T_PRECEIPT\n```"])
+        service = Nl2SqlService()
+        await service.generateSql(
+            "查各供应商收货数量",
+            [self._cls()], fake, _llmConfig(),
+            scopeQuestion="公司2025年上半年的采购情况",
+        )
+        userContent = fake.calls[0][1][1]
+        assert "<scope_hint>" in userContent
+        assert "公司2025年上半年的采购情况" in userContent

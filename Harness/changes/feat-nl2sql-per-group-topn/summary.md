@@ -112,6 +112,11 @@ Step 2 三家各自 Top3 与旧答案 message-24 中"正确期望"手工表完�
   子问题被切句丢失时间范围后不保证模型从主问/历史补回条件。待单独评估是否把 scopeQuestion 的时间范围并入 prompts。
   （注：2026-09-09 冒烟该问题未复现——Step 2 SQL 自带 `RECEIPT_DATE 2025-01-01~07-01` 过滤；
   但属模型 best-effort 自补，非结构性保证，仍留跟进。）
+  **2026-09-09 更新**：已通过「主子问题并集注入」修复（独立 commit 跟进，本 SSOT 不再挂账）。
+  `_renderScopeHintPart` 把 `scopeQuestion` 渲染为 `<scope_hint>` 段注入计划与
+  SQL 阶段 user prompt，强指令化"主问的时间/范围限定适用于本步"；
+  `generateValidatedPlan` / `generateSql` 已透传该字段。真机冒烟三步 SQL 全部
+  稳定带 `RECEIPT_DATE 2025-01-01~2025-07-01` 过滤，结构性保证。
 
 ## 10. 关联
 

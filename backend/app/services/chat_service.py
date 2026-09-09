@@ -1170,6 +1170,7 @@ class ChatService(ChatStreamOutputMixin):
             context=context, priorState=statePrompt, fewShot=fewShot,
             valueSamples=valueSamples, driftWarning=driftWarning,
             joins=joins,
+            scopeQuestion=scopeQuestion,
         )
         return planResult, sqlResult
 

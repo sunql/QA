@@ -3,7 +3,7 @@
 - **日期**：2026-09-09
 - **作者**：QA System
 - **Phase**：feature（NL2SQL 计划语义补全）
-- **状态**：done（未部署；容器仍跑旧代码）
+- **状态**：done（已部署 + 真机冒烟通过，2026-09-09）
 
 ## 1. 需求
 
@@ -86,13 +86,32 @@ SQL 阶段又被「行数限制以计划为准」（`_PLAN_ROW_LIMIT_RULE`）严
 
 ## 8. 部署验证
 
-未部署。容器 qa-backend 仍跑旧代码（partition 字段不存在）。冒烟待部署后进行。
+2026-09-09 已部署 qa-backend 容器（`docker cp backend/app/. qa-backend:/app/app/` + `docker restart qa-backend`，uvicorn 无 --reload 需重启）。
+容器内新代码核对：`query_plan.py` 含 `perGroupLimit` ×7、`step_query_planner.py` 含 `_ORDINAL_SELF_START_MARKERS` ×2。
+
+真机冒烟（POST /api/v1/chat，datasourceId=1，modelId=1，原始问题"第一步找出公司上半年供货量最大的三个供应商，第二步分别看这三个供应商供货量最大的三种物料分别是什么，第三步最后分析供货的情况"）→ intent=multi_step，3 步：
+
+- **Step 1**：`FETCH FIRST 3 ROWS ONLY` → B125、D1、B019（上半年，带 RECEIPT_DATE 过滤）
+- **Step 2**：`ROW_NUMBER() OVER (PARTITION BY SUPPLIER_CODE ORDER BY SUM(RECEIVED_QTY) DESC NULLS LAST) AS RN` + 外层 `WHERE RN <= 3`，`SUPPLIER_CODE IN ('B125','D1','B019')` —— **不再是全局 FETCH FIRST 9**；返回 9 行 = 3 供应商 × 各自 3 物料
+- **Step 3**：三家明细聚合（773 行）
+
+Step 2 三家各自 Top3 与旧答案 message-24 中"正确期望"手工表完全一致（B125 502011070001=5,308,830 …；B019 5A2100000002=4,846,916 …），证明逐组 Top-N 语义落地。最终 answer 无"全局 Top 9""历史累计口径"等旧告警段落。
+
+### 8.1 冒烟暴露的环境告警（与本特性无关，另立跟进）
+
+不带 `modelId` 调用 chat 直接 500（`AttributeError: 'NoneType' object has no attribute 'complete'`）：
+模型路由按 `weight` 选主模型，`llm_config` 中 Qwen3.8-27B-4bit（weight=12，endpoint=http://localhost:8888/v1，**无 api_key**）权重最高被选中 →
+`createClient` 无可用 key 返回 None，factory 的 None 未被 `_callWithFallback` 捕获（仅捕获 LlmClientError/Nl2SqlError），
+裸 AttributeError 上抛成 500。docqa 会话 msg 5-18 的"服务内部错误"与此吻合。带 `modelId=1`（deepseek，含密文 key）即正常。
+**候选修复**：router 应跳过无法解析 key 的配置；或禁用/删掉无 key 的 Qwen/MiniMax 行；factory 返回 None 处按 503 语义处理而非裸 AttributeError。
 
 ## 9. 已知遗留（另立跟进，不属本次范围）
 
 - **第二步时间范围缺失**：本次 12:38 报障聚合层自述第二步数据无「上半年」过滤（量级为历史累计）。
   `_finalizePlan` 的 `scopeText` 只用于 `_applyScopeRowLimit` 行数判定，未注入计划/SQL prompt 的条件段；
   子问题被切句丢失时间范围后不保证模型从主问/历史补回条件。待单独评估是否把 scopeQuestion 的时间范围并入 prompts。
+  （注：2026-09-09 冒烟该问题未复现——Step 2 SQL 自带 `RECEIPT_DATE 2025-01-01~07-01` 过滤；
+  但属模型 best-effort 自补，非结构性保证，仍留跟进。）
 
 ## 10. 关联
 

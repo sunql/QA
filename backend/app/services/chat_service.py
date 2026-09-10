@@ -496,15 +496,26 @@ class ChatService(ChatStreamOutputMixin):
         if not await self._isL4AgentLoopEnabled(session):
             return None
 
-        # 探索性关键词检测（简单字符串匹配，不过度设计）
+        # 探索性关键词检测（简单 substring，不过度设计；详见 _L4_EXPLORATORY_KEYWORDS 定义处）
         if not any(kw in dto.question for kw in self._L4_EXPLORATORY_KEYWORDS):
             return None
 
-        actor = user.userId if user is not None else "chat"
-        actor_departments = user.departments if user is not None else None
+        result = await self._runL4AgentLoop(session=session, dto=dto, user=user)
+        if result is None or result.terminated_reason == "error" or result.answer_text is None:
+            return None
 
+        return await self._buildL4ChatResponse(session=session, dto=dto, result=result)
+
+    async def _runL4AgentLoop(
+        self,
+        *,
+        session: AsyncSession,
+        dto: ChatRequest,
+        user: CurrentUser | None,
+    ) -> AgentLoopResult | None:
+        """调 AgentRuntimeService.run_agent_loop；异常返回 None（降级）。"""
         try:
-            result: AgentLoopResult = await self._agentRuntime.run_agent_loop(
+            return await self._agentRuntime.run_agent_loop(
                 session=session,
                 user_id=user.userId if user else 0,
                 question=dto.question,
@@ -517,10 +528,14 @@ class ChatService(ChatStreamOutputMixin):
             logger.warning("L4 agent loop failed, falling back to L2/L3", exc_info=True)
             return None
 
-        # L4 正常跑完但无有效答案时也降级
-        if result.terminated_reason == "error" or result.answer_text is None:
-            return None
-
+    async def _buildL4ChatResponse(
+        self,
+        *,
+        session: AsyncSession,
+        dto: ChatRequest,
+        result: AgentLoopResult,
+    ) -> ChatResponse:
+        """把 AgentLoopResult wrap 成 ChatResponse + 持久化 + audit log。"""
         answer_text = f"[L4:{result.terminated_reason}] {result.answer_text}"
         response = ChatResponse(
             answer=answer_text,

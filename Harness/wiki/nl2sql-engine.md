@@ -40,6 +40,152 @@ SSE 新增 `plan` 事件（在 `sql` 之前），携带 `QueryPlan` 字典；前
 - 连接 URL 校验，拒绝 `file://`，可选主机白名单。
 - 审计日志：session、datasource、SQL、耗时。
 
+## 4-Layer Routing Architecture (Phase 5)
+
+NL2SQL requests are dispatched through a 4-layer cascade. Each layer has a specific trigger condition, cost profile, and failure fallback.
+
+### Decision Flow
+
+```
+question
+  │
+  ▼
+L1: KpiSemanticMatchService (Jaccard on kpi_catalog.semantic_keywords)
+  │ match found?
+  │   ├─ YES → return KPI SQL (cost: ~0ms, 0 tokens)
+  │   └─ NO
+  │       ▼
+L2: LLM single SQL (existing ReAct two-phase, optionally CTE)
+  │ execution ok?
+  │   ├─ YES → return
+  │   └─ NO (execution error, timeout, empty result)
+  │       ▼
+L3: ChainedStep CTE chain (prior_cte injection across multiple plans)
+  │ execution ok?
+  │   ├─ YES → return
+  │   └─ NO
+  │       ▼
+L4: LangGraph Agent Loop (5 NL2SQL tools, iterative)
+  │       │
+  │       ▼
+  return best effort or "cannot answer"
+```
+
+### Layer Trigger Conditions
+
+| Layer | Trigger | Cost Profile |
+|-------|---------|--------------|
+| **L1** | `KpiSemanticMatchService.match(question)` Jaccard ≥ threshold | ~0ms, 0 tokens |
+| **L2** | L1 miss; default for all other NL2SQL questions | 1× LLM call (plan + SQL) |
+| **L3** | L2 execution fails; question involves multi-step/CTE composition | 1 + N× LLM calls |
+| **L4** | L2/L3 exhaust all retries; complex multi-join requiring iterative tool use | N× LLM calls + tool overhead |
+
+### Each Layer Detail
+
+#### L1 — KPI Semantic Match (`KpiSemanticMatchService`)
+
+- Jaccard similarity on `kpi_catalog.semantic_keywords` (stored as `TEXT[]` in PG, or JSON array).
+- Keyword extraction: tokenize question, remove stopwords, compute set intersection / union.
+- Match threshold: configurable (default 0.4). Below threshold → L1 miss → fall through to L2.
+- On match: return pre-defined SQL from `kpi_catalog.sql_template` directly.
+- **Code**: `app/services/kpi_semantic_match_service.py`
+
+#### L2 — LLM Single SQL (existing ReAct two-phase)
+
+- Phase 1: `generateValidatedPlan` → `QueryPlan` JSON (target/selectedClasses/selectedProperties/conditions/aggregations/groupBy/joins/sortBy/rowLimit).
+- Phase 2: `generateSql(..., plan)` → SQL string.
+- SQL Guard校验.
+- Optional CTE enhancement: when `plan.requiresCte=True`, injects prior CTE as `WITH prior_cte AS (...)`.
+- **Code**: `app/services/nl2sql_service.py:_planAndGenerateSql`
+
+#### L3 — ChainedStep CTE Chain
+
+- Used when a question requires joining results from multiple plans (e.g., "first query X, then use X's result to filter Y").
+- `prior_cte` is built from the previous step's SQL result and injected as a `WITH` clause into the next step.
+- Each step in the chain is validated independently before chaining.
+- **Code**: `app/services/multi_step_plan.py` (ChainedStep class)
+
+#### L4 — LangGraph Agent Loop
+
+- LangGraph `StateGraph` with `AgentLoopState` (question, generated_sql, tool_calls, iterations, cost_so_far_usd).
+- 5 NL2SQL tools registered: `list_tables`, `describe_table`, `sample_rows`, `execute_sql`, `list_joins`.
+- Each iteration: LLM chooses tool → tool executes → result fed back → next iteration or final answer.
+- Cost cap: `max_cost_usd=5.0` (configurable); loop exits if `cost_so_far_usd >= max_cost_usd`.
+- Final SQL still passes SQL Guard before execution.
+- **Code**: `app/services/agent_loop.py` ( `_runL4AgentLoop`)
+
+### Fallback Chain
+
+```
+L1 miss → L2 → execution error → L3 → execution error → L4 → (best effort | cannot_answer)
+```
+
+Any layer that produces a valid, non-empty result that passes SQL Guard terminates the cascade.
+
+### RoutingMetricsService
+
+Aggregates `session_message.routing_layer` hits per layer for observability:
+
+```python
+# app/services/routing_metrics_service.py
+async def aggregate(session_id: str) -> dict:
+    rows = await db.fetch("""
+        SELECT routing_layer, COUNT(*), AVG(latency_ms), SUM(token_cost_usd)
+        FROM session_message
+        WHERE session_id = $1 AND routing_layer IS NOT NULL
+        GROUP BY routing_layer
+    """, session_id)
+    return {r["routing_layer"]: {...} for r in rows}
+```
+
+### MetricPromotionService (Cold Metric Auto-Promotion)
+
+Scans frequently repeated L2 questions (identical md5 hash ≥ 3× per week), auto-creates `KpiCatalog` entry in `DRAFT` status for admin review:
+
+```python
+# app/services/metric_promotion_service.py
+async def scan_and_promote():
+    frequent = await db.fetch("""
+        SELECT md5(question) as q_hash, question, COUNT(*) as cnt
+        FROM session_message
+        WHERE routing_layer = 'L2' AND created_time > now() - interval '7 days'
+        GROUP BY q_hash, question
+        HAVING COUNT(*) >= 3
+    """)
+    for row in frequent:
+        await kpi_catalog.upsert({
+            "code": f"AUTO_{row['q_hash'][:8]}",
+            "question": row["question"],
+            "status": "DRAFT",
+            ...
+        })
+```
+
+Admin reviews DRAFT KPI in `/admin/kpi-catalog`, approves → status becomes `ACTIVE`, next L1 hit promotes to fast path.
+
+### Migration 0051
+
+New columns on `session_message`:
+
+| Column | Type | Nullable | Description |
+|--------|------|----------|-------------|
+| `routing_layer` | `VARCHAR(10)` | YES | L1/L2/L3/L4 |
+| `latency_ms` | `INTEGER` | YES | End-to-end latency in ms |
+| `token_cost_usd` | `FLOAT` | YES | Token cost in USD |
+
+### Code Locations
+
+| Component | File |
+|-----------|------|
+| Entry | `app/services/chat_service.py:_handleNl2SqlAgent` |
+| L1 | `app/services/kpi_semantic_match_service.py` |
+| L2 | `app/services/nl2sql_service.py:_planAndGenerateSql` |
+| L3 | `app/services/multi_step_plan.py:ChainedStep` |
+| L4 | `app/services/agent_loop.py:_runL4AgentLoop` |
+| Metrics | `app/services/routing_metrics_service.py` |
+| Promotion | `app/services/metric_promotion_service.py` |
+| Migration | `migrations/versions/0051_add_routing_fields.py` |
+
 ## 派生指标 formula 必填硬约束（占比/比率/百分比）
 
 `validatePlan`（`app/services/nl2sql_service.py:1387-1478`）在 aggregation 循环里加一条规则：**alias 命中派生指标关键词 → `formula` 必填**，否则 SQL 不会算百分比，占比沦为列别名，重试耗尽后整步被标"无法回答"被静默收纳（2026-08-17 真实回归：用户问"top10 物料的占比"时 LLM 倾向 `alias="占比"` 但无 formula → Step 失败，Step 3 因依赖被卡）。

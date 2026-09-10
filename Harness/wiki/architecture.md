@@ -4,6 +4,8 @@
 
 智能问答系统：用户用自然语言提问，系统经多模型路由调用 LLM，将意图转为 SQL（NL2SQL），在可配置业务库上执行只读查询，并自动渲染 ECharts 图表。知识沉淀为本体（Ontology）。
 
+NL2SQL 采用**4 层路由架构**（Phase 5）：L1 KPI 语义匹配 → L2 LLM 单 SQL → L3 CTE 链 → L4 LangGraph Agent Loop。详见 `wiki/nl2sql-engine.md#4-layer-routing-architecture-phase-5`。
+
 ## 分层
 
 ```
@@ -32,6 +34,8 @@
 | Token 计数 | `infrastructure/token_counter/` | tiktoken + 启发式 |
 | 本体服务 | `services/ontology_service.py`（Phase 2） | 类/属性/指标 CRUD + 图持久化 |
 | NL2SQL | `services/nl2sql_service.py`（Phase 3） | ReAct 两阶段（计划→验证→SQL）+ REFINE 捷径 + SQL Guard |
+| Agent Loop | `services/agent_loop.py`（Phase 5） | L4 LangGraph 迭代工具调用（5 NL2SQL tools） |
+| Metric Pipeline | `services/metric_promotion_service.py`（Phase 5） | 冷指标自动晋升 DRAFT + 路由层计量聚合 |
 | 图表渲染 | `services/chart_service.py`（Phase 4） | ECharts Option 生成 |
 | 数据源 | `services/datasource_service.py`（Phase 3） | 动态引擎池 + 只读执行 |
 

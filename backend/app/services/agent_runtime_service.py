@@ -242,16 +242,22 @@ class AgentLoopResult:
 
 
 def _to_llm_message(msg) -> "LlmMessage":
-    """把 langchain BaseMessage 转为项目的 LlmMessage。"""
+    """把 langchain BaseMessage 或 dev shim dict 转为项目的 LlmMessage。"""
     from app.infrastructure.llm.base_client import LlmMessage
 
-    if hasattr(msg, "type"):
-        if msg.type == "human":
-            return LlmMessage(role="user", content=msg.content or "")
-        if msg.type == "ai":
-            return LlmMessage(role="assistant", content=msg.content or "")
-        if msg.type == "tool":
-            return LlmMessage(role="tool", content=msg.content or "")
+    # 兼容 langchain 对象与 dev shim dict
+    msg_type = getattr(msg, "type", None)
+    msg_content = getattr(msg, "content", None)
+    if msg_type is None and isinstance(msg, dict):
+        msg_type = msg.get("type")
+        msg_content = msg.get("content")
+
+    if msg_type == "human":
+        return LlmMessage(role="user", content=msg_content or "")
+    if msg_type == "ai":
+        return LlmMessage(role="assistant", content=msg_content or "")
+    if msg_type == "tool":
+        return LlmMessage(role="tool", content=msg_content or "")
     # fallback
     return LlmMessage(role="user", content=str(msg))
 
@@ -277,7 +283,11 @@ def _extract_final_sql(messages: list) -> str | None:
     import re
 
     for msg in reversed(messages):
-        content = getattr(msg, "content", None) or ""
+        # 兼容 langchain AIMessage / ToolMessage 与 dev shim dict
+        content = getattr(msg, "content", None)
+        if content is None and isinstance(msg, dict):
+            content = msg.get("content")
+        content = content or ""
         # 匹配 ```final_sql ... ``` 或 ::final_sql:: ... ::
         match = re.search(
             r"(?:```final_sql|::final_sql::)\s*([\s\S]+?)(?:```|::)", content
@@ -321,9 +331,6 @@ async def _runAgentLoopIteration(
     cumulative_cost: float,
 ) -> _AgentLoopStepResult:
     """单次 LLM 决策迭代：调用 complete_with_tools，检查 cost cap。"""
-    from app.services.agent_tools_nl2sql import TOOL_SCHEMAS
-    from langchain_core.messages import AIMessage
-
     llm_messages = [_to_llm_message(m) for m in messages]
     response = await llm_client.complete_with_tools(
         messages=llm_messages,
@@ -344,13 +351,7 @@ async def _runAgentLoopIteration(
             stop_reason="cost_cap",
         )
 
-    ai_message = AIMessage(
-        content=response.content or "",
-        tool_calls=[
-            {"id": tc.id, "name": tc.name, "args": tc.args}
-            for tc in response.tool_calls
-        ],
-    )
+    ai_message = _buildAiMessage(response)
 
     if not response.tool_calls:
         return _AgentLoopStepResult(
@@ -374,6 +375,29 @@ async def _runAgentLoopIteration(
     )
 
 
+def _buildAiMessage(response) -> Any:
+    """把 LlmResponseWithTools 转 AIMessage（langchain）。dev venv 缺包时降级为 dict。"""
+    try:
+        from langchain_core.messages import AIMessage
+        return AIMessage(
+            content=response.content or "",
+            tool_calls=[
+                {"id": tc.id, "name": tc.name, "args": tc.args}
+                for tc in response.tool_calls
+            ],
+        )
+    except ImportError:
+        return {
+            "role": "assistant",
+            "content": response.content or "",
+            "tool_calls": [
+                {"id": tc.id, "name": tc.name, "args": tc.args}
+                for tc in response.tool_calls
+            ],
+            "type": "ai",
+        }
+
+
 async def _dispatchSingleTool(
     *,
     tc,
@@ -382,7 +406,6 @@ async def _dispatchSingleTool(
 ) -> Any:  # ToolMessage
     """处理单个 tool_call → ToolMessage。"""
     from app.infrastructure.llm.base_client import ToolCall as Tc
-    from langchain_core.messages import ToolMessage
     import json
 
     tc_adapter = Tc(id=tc.id, name=tc.name, args=tc.args)
@@ -407,7 +430,17 @@ async def _dispatchSingleTool(
         result = await dispatch_tool_call(tc_adapter, session=session)
         content = result.content
 
-    return ToolMessage(content=content, tool_call_id=tc.id, name=tc.name)
+    try:
+        from langchain_core.messages import ToolMessage
+        return ToolMessage(content=content, tool_call_id=tc.id, name=tc.name)
+    except ImportError:
+        return {
+            "role": "tool",
+            "content": content,
+            "tool_call_id": tc.id,
+            "name": tc.name,
+            "type": "tool",
+        }
 
 
 async def run_agent_loop(
@@ -432,48 +465,52 @@ async def run_agent_loop(
     """
     from app.services.agent_state import AgentState  # noqa: F401 — future LangGraph upgrade
     from app.services.agent_tools_nl2sql import TOOL_SCHEMAS
-    from langchain_core.messages import HumanMessage
 
+    _logLoopStart(user_id, question)
+
+    state = _initLoopState(question)
+    messages = state["messages"]
+
+    while state["iterations"] < max_iterations:
+        await _runOneStep(state, llm_client, TOOL_SCHEMAS, cost_budget_usd)
+
+        if state["terminated_reason"] in ("answered", "cost_cap"):
+            break
+
+        await _executePendingToolCalls(
+            state=state,
+            session=session,
+            executor=executor,
+        )
+
+    _logLoopEnd(
+        user_id=user_id,
+        terminated_reason=state["terminated_reason"],
+        iterations=state["iterations"],
+        total_cost=state["total_cost"],
+    )
+
+    return AgentLoopResult(
+        final_sql=state["final_sql"],
+        answer_text=state["answer_text"],
+        iterations_used=state["iterations"],
+        tool_calls_made=state["tool_calls_made"],
+        total_cost_usd=round(state["total_cost"], 6),
+        terminated_reason=state["terminated_reason"],
+    )
+
+
+def _logLoopStart(user_id: int, question: str) -> None:
+    """Audit log: loop start."""
     logger.info(
         "agent_loop.start user_id=%s question_len=%d",
         user_id,
         len(question),
     )
 
-    messages: list = [HumanMessage(content=question)]
-    iterations = 0
-    total_cost = 0.0
-    tool_calls_made: list[str] = []
-    terminated_reason = "max_iterations"
-    final_sql: str | None = None
-    answer_text: str | None = None
 
-    while iterations < max_iterations:
-        iterations += 1
-        step = await _runAgentLoopIteration(
-            messages=messages,
-            llm_client=llm_client,
-            tool_schemas=TOOL_SCHEMAS,
-            cost_budget_usd=cost_budget_usd,
-            cumulative_cost=total_cost,
-        )
-        total_cost += step.cost_incurred
-
-        if step.should_stop:
-            terminated_reason = step.stop_reason
-            if step.stop_reason == "answered":
-                messages.append(step.ai_message)
-                answer_text = step.answer_text
-                final_sql = _extract_final_sql(messages)
-            break
-
-        messages.append(step.ai_message)
-
-        for tc in step.tool_calls_to_run:
-            tool_calls_made.append(tc.name)
-            tm = await _dispatchSingleTool(tc=tc, session=session, executor=executor)
-            messages.append(tm)
-
+def _logLoopEnd(*, user_id: int, terminated_reason: str, iterations: int, total_cost: float) -> None:
+    """Audit log: loop end."""
     logger.info(
         "agent_loop.end user_id=%s terminated=%s iterations=%d cost=%.6f",
         user_id,
@@ -482,14 +519,62 @@ async def run_agent_loop(
         total_cost,
     )
 
-    return AgentLoopResult(
-        final_sql=final_sql,
-        answer_text=answer_text,
-        iterations_used=iterations,
-        tool_calls_made=tool_calls_made,
-        total_cost_usd=round(total_cost, 6),
-        terminated_reason=terminated_reason,
+
+def _initLoopState(question: str) -> dict:
+    """初始化 loop 状态。"""
+    try:
+        from langchain_core.messages import HumanMessage
+        messages = [HumanMessage(content=question)]
+    except ImportError:
+        # dev/test venv 可能缺 langchain_core；用 dict shim
+        messages = [{"role": "user", "content": question, "type": "human"}]
+
+    return {
+        "messages": messages,
+        "iterations": 0,
+        "total_cost": 0.0,
+        "tool_calls_made": [],
+        "terminated_reason": "max_iterations",
+        "final_sql": None,
+        "answer_text": None,
+    }
+
+
+async def _runOneStep(
+    state: dict,
+    llm_client,
+    tool_schemas: list[dict],
+    cost_budget_usd: float,
+) -> None:
+    """执行一次 LLM step；in-place 更新 state。"""
+    step = await _runAgentLoopIteration(
+        messages=state["messages"],
+        llm_client=llm_client,
+        tool_schemas=tool_schemas,
+        cost_budget_usd=cost_budget_usd,
+        cumulative_cost=state["total_cost"],
     )
+    state["iterations"] += 1
+    state["total_cost"] += step.cost_incurred
+
+    if step.should_stop:
+        state["terminated_reason"] = step.stop_reason
+        if step.stop_reason == "answered":
+            state["messages"].append(step.ai_message)
+            state["answer_text"] = step.answer_text
+            state["final_sql"] = _extract_final_sql(state["messages"])
+        return
+
+    state["messages"].append(step.ai_message)
+    state["pending_tool_calls"] = step.tool_calls_to_run
+
+
+async def _executePendingToolCalls(*, state: dict, session, executor) -> None:
+    """执行 pending tool_calls；in-place 更新 state.tool_calls_made / messages。"""
+    for tc in state.pop("pending_tool_calls", []):
+        state["tool_calls_made"].append(tc.name)
+        tm = await _dispatchSingleTool(tc=tc, session=session, executor=executor)
+        state["messages"].append(tm)
 
 
 # monkey-patch onto AgentRuntimeService (keeps original class untouched)

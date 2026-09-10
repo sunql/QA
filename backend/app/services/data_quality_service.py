@@ -10,16 +10,20 @@ body 中的 owner（DTO 已移除），防止越权声明 owner。
 
 from __future__ import annotations
 
+from typing import Literal
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
 from app.domain.exceptions import NotFoundError, ValidationError
-from app.domain.models import DataQualityRule
+from app.domain.models import DataQualityRule, DataSource
 from app.domain.schemas import (
     DataQualityRuleCreate,
     DataQualityRuleRead,
     DataQualityRuleUpdate,
+    DatasourceOption,
+    RuleOptionsRead,
 )
 from app.services.acl_service import AclService
 from app.services.messages_zh import MSG_DQ_RULE_CODE_EXISTS, MSG_DQ_RULE_NOT_FOUND
@@ -39,17 +43,79 @@ class DataQualityRuleService:
         ruleType: str | None = None,
         targetTable: str | None = None,
         enabledOnly: bool | None = None,
+        ruleName: str | None = None,
+        datasourceId: int | None = None,
+        severity: str | None = None,
+        enabled: Literal["all", "enabled", "disabled"] | None = None,
     ) -> list[DataQualityRule]:
-        """列表查询，可按 ruleType / targetTable / enabledOnly 过滤。"""
+        """列表查询；支持 6 字段过滤（feat-dq-rule-list-filters）。
+
+        新增：
+        - ruleName: 规则名称 ILIKE 模糊（用户在前端下拉里 showSearch 输入关键字）
+        - datasourceId: 数据源 id 精确
+        - severity: 严重程度精确（HIGH/MEDIUM/LOW/INFO）
+        - enabled: 三态枚举 "all"/"enabled"/"disabled"，替代旧 enabledOnly bool
+
+        targetTable 改为 ILIKE 模糊（兼容旧契约的同时补"PO" → PO_HEADER 语义）。
+        enabledOnly 保留兼容路径（feat 前端若仍在用）：bool true 视为 enabledOnly。
+        """
         stmt = select(DataQualityRule).order_by(DataQualityRule.id)
         if ruleType is not None:
             stmt = stmt.where(DataQualityRule.rule_type == ruleType)
         if targetTable is not None:
-            stmt = stmt.where(DataQualityRule.target_table == targetTable)
-        if enabledOnly:
+            stmt = stmt.where(DataQualityRule.target_table.ilike(f"%{targetTable}%"))
+        if datasourceId is not None:
+            stmt = stmt.where(DataQualityRule.datasource_id == datasourceId)
+        if severity is not None:
+            stmt = stmt.where(DataQualityRule.severity == severity)
+        if ruleName is not None:
+            stmt = stmt.where(DataQualityRule.rule_name.ilike(f"%{ruleName}%"))
+        # enabled 三态优先（feat 后）；enabledOnly bool 兼容旧调用方
+        if enabled == "enabled":
+            stmt = stmt.where(DataQualityRule.is_enabled.is_(True))
+        elif enabled == "disabled":
+            stmt = stmt.where(DataQualityRule.is_enabled.is_(False))
+        elif enabledOnly:
             stmt = stmt.where(DataQualityRule.is_enabled.is_(True))
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    async def listOptions(self, session: AsyncSession) -> RuleOptionsRead:
+        """返回规则列表筛选下拉的全部可选值（feat-dq-rule-list-filters）。
+
+        - ruleNames / targetTables：DISTINCT 自 data_quality_rule 已写入的列
+          （业务方手工 + 自动生成的混合体，下拉从真实使用过的值里选最贴合）
+        - datasourceIds：active 数据源全量（data_source.is_active=true）
+        - severities：静态全集（data_quality_rule.severity 枚举值不动态变化）
+        """
+        # DISTINCT rule_name ORDER BY 1（空值跳过——存量数据可能有 NULL）
+        ruleNamesRows = await session.execute(
+            select(DataQualityRule.rule_name)
+            .where(DataQualityRule.rule_name.isnot(None))
+            .distinct()
+            .order_by(DataQualityRule.rule_name)
+        )
+        # DISTINCT target_table ORDER BY 1
+        targetTablesRows = await session.execute(
+            select(DataQualityRule.target_table)
+            .where(DataQualityRule.target_table.isnot(None))
+            .distinct()
+            .order_by(DataQualityRule.target_table)
+        )
+        # active 数据源全量 ORDER BY name
+        dsRows = await session.execute(
+            select(DataSource.id, DataSource.name)
+            .where(DataSource.is_active.is_(True))
+            .order_by(DataSource.name)
+        )
+        return RuleOptionsRead(
+            rule_names=list(ruleNamesRows.scalars().all()),
+            datasource_ids=[
+                DatasourceOption(id=id_, name=name_) for id_, name_ in dsRows.all()
+            ],
+            target_tables=list(targetTablesRows.scalars().all()),
+            severities=["HIGH", "MEDIUM", "LOW", "INFO"],
+        )
 
     async def getRule(self, session: AsyncSession, id: int) -> DataQualityRule:
         """按 id 取规则；不存在抛 NotFoundError。"""

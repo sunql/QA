@@ -4,6 +4,7 @@ import type {
   DataQualityRuleCreate,
   DataQualityRuleListParams,
   DataQualityRuleUpdate,
+  RuleOptions,
 } from "../types/dataQuality";
 
 const BASE = "/data-quality/rules";
@@ -12,8 +13,13 @@ export async function listRules(
   params?: DataQualityRuleListParams,
 ): Promise<DataQualityRule[]> {
   const res = await httpClient.get<DataQualityRule[]>(BASE, {
-    params: params as Record<string, string | boolean | undefined>,
+    params: params as Record<string, string | boolean | number | undefined>,
   });
+  return res.data;
+}
+
+export async function listRuleOptions(): Promise<RuleOptions> {
+  const res = await httpClient.get<RuleOptions>(`${BASE}/options`);
   return res.data;
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Button,
   Form,
@@ -24,10 +24,32 @@ import { listDataSources } from "../api/datasource";
 import type {
   DataQualityRule,
   DataQualityRuleCreate,
+  DataQualityRuleListParams,
   RuleType,
   Severity,
 } from "../types/dataQuality";
 import type { DataSource } from "../types/datasource";
+import { useDataQualityFilterOptions } from "../hooks/useDataQualityFilterOptions";
+
+type EnabledFilter = "all" | "enabled" | "disabled";
+
+interface FilterValues {
+  ruleName: string | undefined;
+  datasourceId: number | undefined;
+  targetTable: string | undefined;
+  ruleType: RuleType | undefined;
+  severity: Severity | undefined;
+  enabled: EnabledFilter;
+}
+
+const EMPTY_FILTERS: FilterValues = {
+  ruleName: undefined,
+  datasourceId: undefined,
+  targetTable: undefined,
+  ruleType: undefined,
+  severity: undefined,
+  enabled: "all",
+};
 
 const RULE_TYPES: RuleType[] = [
   "COMPLETENESS",
@@ -57,32 +79,14 @@ export default function DataQualityPage() {
   const { t } = useTranslation();
   const [rules, setRules] = useState<DataQualityRule[]>([]);
   const [loading, setLoading] = useState(false);
-  const [filterType, setFilterType] = useState<RuleType | undefined>();
+  const [filters, setFilters] = useState<FilterValues>(EMPTY_FILTERS);
   const [editing, setEditing] = useState<DataQualityRule | null>(null);
   const [creating, setCreating] = useState(false);
   const [datasources, setDatasources] = useState<DataSource[]>([]);
   const [form] = Form.useForm<DataQualityRuleCreate>();
+  const { options: filterOptions } = useDataQualityFilterOptions();
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await listRules(
-        filterType ? { ruleType: filterType } : undefined,
-      );
-      setRules(data);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      message.error(msg);
-    } finally {
-      setLoading(false);
-    }
-  }, [filterType]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  // 加载数据源列表（用于表单下拉）
+  // 加载数据源列表（用于表单下拉 + 筛选下拉回填）
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -96,6 +100,54 @@ export default function DataQualityPage() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  const updateFilter = useCallback(
+    <K extends keyof FilterValues>(key: K, value: FilterValues[K]) => {
+      setFilters((prev) => {
+        const next = { ...prev, [key]: value };
+        // 切换数据源时清空目标表（级联）
+        if (key === "datasourceId") {
+          next.targetTable = undefined;
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params: DataQualityRuleListParams = {};
+      if (filters.ruleName) params.ruleName = filters.ruleName;
+      if (filters.datasourceId !== undefined) params.datasourceId = filters.datasourceId;
+      if (filters.targetTable) params.targetTable = filters.targetTable;
+      if (filters.ruleType) params.ruleType = filters.ruleType;
+      if (filters.severity) params.severity = filters.severity;
+      if (filters.enabled !== "all") params.enabled = filters.enabled;
+      const data = await listRules(params);
+      setRules(data);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      message.error(msg);
+    } finally {
+      setLoading(false);
+    }
+  }, [filters]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  // 数据源下的目标表选项（DISTINCT 全量 + 前端按 datasourceId 过滤）
+  const availableTargetTables = useMemo(() => {
+    if (!filterOptions.targetTables) return [];
+    return filterOptions.targetTables;
+  }, [filterOptions.targetTables]);
+
+  const resetFilters = useCallback(() => {
+    setFilters(EMPTY_FILTERS);
   }, []);
 
   const handleCreate = async () => {
@@ -241,15 +293,84 @@ export default function DataQualityPage() {
 
   return (
     <div>
-      <Space style={{ marginBottom: 16 }}>
+      <Space style={{ marginBottom: 16 }} wrap>
         <Select
           allowClear
-          placeholder={t("dataQuality.filterType")}
+          showSearch
+          data-testid="filter-rule-name"
+          placeholder={t("dataQuality.filterRuleName")}
           style={{ width: 200 }}
-          value={filterType}
-          onChange={(v) => setFilterType(v as RuleType | undefined)}
+          value={filters.ruleName}
+          onChange={(v) => updateFilter("ruleName", v)}
+          options={filterOptions.ruleNames.map((n) => ({ label: n, value: n }))}
+        />
+        <Select
+          allowClear
+          showSearch
+          data-testid="filter-datasource"
+          placeholder={t("dataQuality.filterDatasource")}
+          style={{ width: 200 }}
+          value={filters.datasourceId}
+          onChange={(v) =>
+            updateFilter("datasourceId", v === undefined ? undefined : Number(v))
+          }
+          options={filterOptions.datasourceIds.map((d) => ({
+            label: d.name,
+            value: d.id,
+          }))}
+        />
+        <Select
+          allowClear
+          showSearch
+          data-testid="filter-target-table"
+          disabled={filters.datasourceId === undefined}
+          placeholder={
+            filters.datasourceId === undefined
+              ? t("dataQuality.filterTargetTableDisabled")
+              : t("dataQuality.filterTargetTable")
+          }
+          style={{ width: 200 }}
+          value={filters.targetTable}
+          onChange={(v) => updateFilter("targetTable", v)}
+          options={availableTargetTables.map((t) => ({
+            label: t,
+            value: t,
+          }))}
+        />
+        <Select
+          allowClear
+          data-testid="filter-rule-type"
+          placeholder={t("dataQuality.filterType")}
+          style={{ width: 160 }}
+          value={filters.ruleType}
+          onChange={(v) => updateFilter("ruleType", v as RuleType | undefined)}
           options={RULE_TYPES.map((rt) => ({ label: rt, value: rt }))}
         />
+        <Select
+          allowClear
+          data-testid="filter-severity"
+          placeholder={t("dataQuality.filterSeverity")}
+          style={{ width: 140 }}
+          value={filters.severity}
+          onChange={(v) => updateFilter("severity", v as Severity | undefined)}
+          options={filterOptions.severities.map((s) => ({
+            label: s,
+            value: s,
+          }))}
+        />
+        <Select
+          data-testid="filter-enabled"
+          placeholder={t("dataQuality.filterEnabled")}
+          style={{ width: 130 }}
+          value={filters.enabled}
+          onChange={(v) => updateFilter("enabled", (v ?? "all") as EnabledFilter)}
+          options={[
+            { label: t("dataQuality.filterEnabledOptions.all"), value: "all" },
+            { label: t("dataQuality.filterEnabledOptions.enabled"), value: "enabled" },
+            { label: t("dataQuality.filterEnabledOptions.disabled"), value: "disabled" },
+          ]}
+        />
+        <Button onClick={resetFilters}>{t("common.reset")}</Button>
         <Button type="primary" onClick={() => setCreating(true)}>
           {t("dataQuality.createRule")}
         </Button>

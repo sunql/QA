@@ -277,3 +277,188 @@ class TestDataQualityRuleApi:
             headers={"X-User-Roles": "admin"},
         )
         assert adminPut.status_code == 200, adminPut.text
+
+
+# ---------------------------------------------------------------------------
+# feat-dq-rule-list-filters — listRules 6 字段过滤 + /rules/options 端点
+# ---------------------------------------------------------------------------
+
+
+async def _seedRule(
+    client,
+    *,
+    ruleName: str = "默认规则",
+    ruleCode: str = "DEFAULT_RULE",
+    datasourceId: int,
+    targetTable: str = "T_DEFAULT",
+    targetColumn: str | None = None,
+    ruleType: str = "VALIDITY",
+    ruleExpression: str | None = None,
+    threshold: str | None = None,
+    severity: str = "MEDIUM",
+    isEnabled: bool = True,
+) -> dict[str, Any]:
+    """就地创建一条 data_quality_rule，返回响应 JSON。"""
+    payload: dict[str, Any] = {
+        "ruleName": ruleName,
+        "ruleCode": ruleCode,
+        "datasourceId": datasourceId,
+        "targetTable": targetTable,
+        "ruleType": ruleType,
+        "severity": severity,
+        "isEnabled": isEnabled,
+    }
+    if targetColumn is not None:
+        payload["targetColumn"] = targetColumn
+    if ruleExpression is not None:
+        payload["ruleExpression"] = ruleExpression
+    if threshold is not None:
+        payload["threshold"] = threshold
+    resp = await client.post("/api/v1/data-quality/rules", json=payload)
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+class TestDataQualityRuleFilters:
+    """feat-dq-rule-list-filters：5 字段 + 模糊筛选 + /rules/options 端点。"""
+
+    async def test_list_rules_filter_by_rule_name_ilike(
+        self, client,
+    ) -> None:
+        """ruleName=PO 应只返 name 含 PO 的规则（ILIKE 模糊）。"""
+        ds_id = await _createTestDatasource(client)
+        await _seedRule(client, ruleName="PO订单数量校验", ruleCode="R_PO_1",
+                        datasourceId=ds_id, targetTable="PORDER")
+        await _seedRule(client, ruleName="供应商合规校验", ruleCode="R_SUP_1",
+                        datasourceId=ds_id, targetTable="SPL")
+        resp = await client.get(
+            "/api/v1/data-quality/rules", params={"ruleName": "PO"}
+        )
+        assert resp.status_code == 200
+        names = [r["ruleName"] for r in resp.json()]
+        assert "PO订单数量校验" in names
+        assert "供应商合规校验" not in names
+
+    async def test_list_rules_filter_by_datasource_id(
+        self, client,
+    ) -> None:
+        """datasourceId=X 只返该数据源下的规则。"""
+        ds1 = await _createTestDatasource(client, name="ds-1")
+        ds2 = await _createTestDatasource(client, name="ds-2")
+        await _seedRule(client, ruleCode="R_DS1", datasourceId=ds1)
+        await _seedRule(client, ruleCode="R_DS2", datasourceId=ds2)
+        resp = await client.get(
+            "/api/v1/data-quality/rules", params={"datasourceId": ds1}
+        )
+        codes = [r["ruleCode"] for r in resp.json()]
+        assert codes == ["R_DS1"]
+
+    async def test_list_rules_filter_by_severity(self, client) -> None:
+        """severity=HIGH 只返 HIGH 规则。"""
+        ds_id = await _createTestDatasource(client)
+        await _seedRule(client, ruleCode="R_HIGH", datasourceId=ds_id,
+                        severity="HIGH")
+        await _seedRule(client, ruleCode="R_LOW", datasourceId=ds_id,
+                        severity="LOW")
+        resp = await client.get(
+            "/api/v1/data-quality/rules", params={"severity": "HIGH"}
+        )
+        codes = [r["ruleCode"] for r in resp.json()]
+        assert codes == ["R_HIGH"]
+
+    async def test_list_rules_filter_enabled_three_states(
+        self, client,
+    ) -> None:
+        """enabled 三态：all / enabled / disabled 各自过滤正确。"""
+        ds_id = await _createTestDatasource(client)
+        await _seedRule(client, ruleCode="R_ON", datasourceId=ds_id,
+                        isEnabled=True)
+        await _seedRule(client, ruleCode="R_OFF", datasourceId=ds_id,
+                        isEnabled=False)
+
+        # all：全返
+        allResp = await client.get(
+            "/api/v1/data-quality/rules", params={"enabled": "all"}
+        )
+        codes_all = sorted(r["ruleCode"] for r in allResp.json())
+        assert codes_all == ["R_OFF", "R_ON"]
+
+        # enabled：只返启用
+        onResp = await client.get(
+            "/api/v1/data-quality/rules", params={"enabled": "enabled"}
+        )
+        codes_on = sorted(r["ruleCode"] for r in onResp.json())
+        assert codes_on == ["R_ON"]
+
+        # disabled：只返未启用
+        offResp = await client.get(
+            "/api/v1/data-quality/rules", params={"enabled": "disabled"}
+        )
+        codes_off = sorted(r["ruleCode"] for r in offResp.json())
+        assert codes_off == ["R_OFF"]
+
+    async def test_list_rules_target_table_ilike(self, client) -> None:
+        """targetTable=PO 应 ILIKE 匹配 PORDER / PO_HEADER 等。"""
+        ds_id = await _createTestDatasource(client)
+        await _seedRule(client, ruleCode="R1", datasourceId=ds_id,
+                        targetTable="PORDER")
+        await _seedRule(client, ruleCode="R2", datasourceId=ds_id,
+                        targetTable="PO_HEADER")
+        await _seedRule(client, ruleCode="R3", datasourceId=ds_id,
+                        targetTable="SPL")
+        resp = await client.get(
+            "/api/v1/data-quality/rules", params={"targetTable": "PO"}
+        )
+        codes = sorted(r["ruleCode"] for r in resp.json())
+        assert codes == ["R1", "R2"]
+
+    async def test_list_rules_combined_filters(self, client) -> None:
+        """多条件 AND 叠加。"""
+        ds1 = await _createTestDatasource(client, name="ds-1")
+        ds2 = await _createTestDatasource(client, name="ds-2")
+        await _seedRule(client, ruleName="PO订单HIGH",
+                        ruleCode="R1", datasourceId=ds1,
+                        targetTable="PORDER", severity="HIGH")
+        await _seedRule(client, ruleName="PO订单LOW",
+                        ruleCode="R2", datasourceId=ds1,
+                        targetTable="PORDER", severity="LOW")
+        await _seedRule(client, ruleName="PO订单HIGH别库",
+                        ruleCode="R3", datasourceId=ds2,
+                        targetTable="PORDER", severity="HIGH")
+        resp = await client.get(
+            "/api/v1/data-quality/rules",
+            params={
+                "ruleName": "PO",
+                "datasourceId": ds1,
+                "severity": "HIGH",
+                "targetTable": "PO",
+            },
+        )
+        codes = [r["ruleCode"] for r in resp.json()]
+        assert codes == ["R1"]
+
+    async def test_list_options_returns_distinct_values(
+        self, client,
+    ) -> None:
+        """GET /rules/options 返回 DISTINCT rule_name/target_table + 全量 datasource + 静态 severities。"""
+        ds_id = await _createTestDatasource(client, name="opts-ds")
+        await _seedRule(client, ruleName="订单数量>0", ruleCode="R_OPTS_1",
+                        datasourceId=ds_id, targetTable="PORDER",
+                        severity="HIGH")
+        await _seedRule(client, ruleName="供应商去重", ruleCode="R_OPTS_2",
+                        datasourceId=ds_id, targetTable="SPL",
+                        severity="LOW")
+        resp = await client.get("/api/v1/data-quality/rules/options")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # DISTINCT rule_names
+        assert "订单数量>0" in body["ruleNames"]
+        assert "供应商去重" in body["ruleNames"]
+        # DISTINCT target_tables
+        assert "PORDER" in body["targetTables"]
+        assert "SPL" in body["targetTables"]
+        # 全量 active datasource（至少含 opts-ds）
+        ds_ids = {d["id"] for d in body["datasourceIds"]}
+        assert ds_id in ds_ids
+        # 静态 severities 全集
+        assert set(body["severities"]) == {"HIGH", "MEDIUM", "LOW", "INFO"}

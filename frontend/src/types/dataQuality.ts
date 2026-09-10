@@ -64,4 +64,21 @@ export interface DataQualityRuleListParams {
   ruleType?: RuleType;
   targetTable?: string;
   enabledOnly?: boolean;
+  ruleName?: string;
+  datasourceId?: number;
+  severity?: Severity;
+  enabled?: "all" | "enabled" | "disabled";
+}
+
+/** GET /data-quality/rules/options 响应（feat-dq-rule-list-filters）。 */
+export interface DatasourceOption {
+  id: number;
+  name: string;
+}
+
+export interface RuleOptions {
+  ruleNames: string[];
+  datasourceIds: DatasourceOption[];
+  targetTables: string[];
+  severities: Severity[];
 }

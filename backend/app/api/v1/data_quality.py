@@ -18,6 +18,8 @@ Phase 1.3 评分（scores_router 挂在 /api/v1/data-quality/scores）：
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +34,7 @@ from app.domain.schemas import (
     EvaluateBatchRequest,
     EvaluateBatchResponse,
     EvaluationResult,
+    RuleOptionsRead,
 )
 from app.services.data_quality_evaluator import DataQualityEvaluatorDispatcher
 from app.services.data_quality_score_service import DataQualityScoreService
@@ -61,6 +64,12 @@ async def listDataQualityRules(
     ruleType: str | None = Query(default=None, alias="ruleType"),
     targetTable: str | None = Query(default=None, alias="targetTable"),
     enabledOnly: bool | None = Query(default=None, alias="enabledOnly"),
+    ruleName: str | None = Query(default=None, alias="ruleName"),
+    datasourceId: int | None = Query(default=None, alias="datasourceId"),
+    severity: str | None = Query(default=None, alias="severity"),
+    enabled: Literal["all", "enabled", "disabled"] | None = Query(
+        default=None, alias="enabled"
+    ),
     session: AsyncSession = Depends(getDb),
     service: DataQualityRuleService = Depends(getDataQualityRuleService),
 ) -> list[DataQualityRuleRead]:
@@ -69,8 +78,22 @@ async def listDataQualityRules(
         ruleType=ruleType,
         targetTable=targetTable,
         enabledOnly=enabledOnly,
+        ruleName=ruleName,
+        datasourceId=datasourceId,
+        severity=severity,
+        enabled=enabled,
     )
     return [ruleToRead(r) for r in rules]
+
+
+# 注意：必须注册在 `/{ruleId}` 之前，否则会被路径参数吃掉返回 422。
+@router.get("/options", response_model=RuleOptionsRead)
+async def listRuleFilterOptions(
+    session: AsyncSession = Depends(getDb),
+    service: DataQualityRuleService = Depends(getDataQualityRuleService),
+) -> RuleOptionsRead:
+    """规则列表筛选下拉的可选值（feat-dq-rule-list-filters）。"""
+    return await service.listOptions(session)
 
 
 @router.get("/{ruleId}", response_model=DataQualityRuleRead)

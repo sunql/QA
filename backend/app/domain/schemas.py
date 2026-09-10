@@ -2893,3 +2893,25 @@ class ApplySuggestionResponse(CamelModel):
 
     property_id: int
     allowed_values: list[str]
+
+
+class DatasourceOption(CamelModel):
+    """数据源下拉选项（仅 id + name，轻量）。"""
+
+    id: int
+    name: str
+
+
+class RuleOptionsRead(CamelModel):
+    """GET /data-quality/rules/options 响应：规则列表筛选下拉的所有可选值。
+
+    - ruleNames：data_quality_rule 中已用过的 rule_name DISTINCT
+    - datasourceIds：active 数据源全量
+    - targetTables：data_quality_rule 中已用过的 target_table DISTINCT
+    - severities：静态全集（HIGH/MEDIUM/LOW/INFO）
+    """
+
+    rule_names: list[str] = Field(default_factory=list)
+    datasource_ids: list[DatasourceOption] = Field(default_factory=list)
+    target_tables: list[str] = Field(default_factory=list)
+    severities: list[str] = Field(default_factory=list)

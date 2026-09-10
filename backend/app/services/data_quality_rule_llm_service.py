@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from pydantic import ValidationError
@@ -32,6 +33,27 @@ from app.services.messages_zh import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# 匹配 ```json ... ``` 或 ``` ... ``` 代码块（含可选 json 语言标记）；
+# re.DOTALL 跨行匹配；re.IGNORECASE 兼容 ```JSON``` 大小写。
+# 真实复现：deepseek-chat 返回的 LLM content 普遍被此 fence 包裹，
+# 之前裸 json.loads 失败 → JSONDecodeError → 503 LLMUnavailableError(MSG_DQ_GEN_LLM_PARSE_ERROR)。
+# 与 nl2sql_service._JSON_FENCE_RE 同语义，本服务独立一份避免跨服务耦合。
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+def _stripJsonFence(content: str) -> str:
+    """从 LLM 回复中抽出 JSON 文本：优先 ```json/``` 代码块，否则原样返回。
+
+    返回的字符串不保证可被 json.loads 解析（仍可能不是 JSON）；仅负责剥掉 fence。
+    """
+    if not content:
+        return content
+    match = _JSON_FENCE_RE.search(content)
+    if match:
+        return match.group(1).strip()
+    return content.strip()
 
 
 async def _loadClassProperties(
@@ -100,8 +122,13 @@ async def parsePropertyDescriptions(
         raise LLMUnavailableError(MSG_DQ_GEN_LLM_UNAVAILABLE) from e
 
     content = getattr(response, "content", "") or ""
+    # LLM 几乎都会用 ```json ... ``` 包裹 JSON 输出；
+    # 之前裸 json.loads 失败 → JSONDecodeError → 503 LLMUnavailableError(MSG_DQ_GEN_LLM_PARSE_ERROR)。
+    # _stripJsonFence 优先剥 ```json/``` fence，否则原样；
+    # 仍非 JSON 时由下层 json.JSONDecodeError 兜底（保留 503 契约）。
+    payload_text = _stripJsonFence(content)
     try:
-        parsed = json.loads(content)
+        parsed = json.loads(payload_text)
     except json.JSONDecodeError as e:
         logger.warning("parse-descriptions LLM 输出解析失败: %s", e, exc_info=True)
         raise LLMUnavailableError(MSG_DQ_GEN_LLM_PARSE_ERROR) from e

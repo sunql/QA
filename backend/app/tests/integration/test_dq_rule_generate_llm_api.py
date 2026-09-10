@@ -433,3 +433,106 @@ async def test_apply_suggestion_creates_outbox_event(
         )
     ).scalar()
     assert outboxCount >= 1
+
+
+# ---------------------------------------------------------------------------
+# parse-descriptions fence-stripping regression tests (LLM 输出常被 ```json``` 包裹)
+# ---------------------------------------------------------------------------
+
+
+async def test_parse_descriptions_strips_markdown_json_fence(
+    client: AsyncClient, dbSession: AsyncSession,
+) -> None:
+    """LLM 输出被 ```json ... ``` 包裹时仍需正常解析（之前裸 json.loads 直接挂 → 503）。
+
+    真实复现：deepseek-chat 对 class_id=1 返回的就是带 ```json``` 包裹的 JSON，
+    service 之前无 fence 处理，json.loads 第一字符为 ` → JSONDecodeError →
+    raise LLMUnavailableError("AI 返回格式无法解析，请稍后重试") (HTTP 503)。
+    """
+    from app.tests.integration.test_dq_rule_generate_api import ensureClassWithProperty
+    from app.domain.models import OntologyProperty
+    from sqlalchemy import select
+
+    classId = await ensureClassWithProperty(dbSession)
+    prop = (await dbSession.execute(select(OntologyProperty).where(
+        OntologyProperty.class_id == classId))).scalars().one()
+    prop.description = "状态字段，取值为 NEW、CONFIRMED 两种"
+    await dbSession.commit()
+
+    fenced = "```json\n" + LLM_JSON + "\n```"
+    fake = _FakeLLMClient(fenced)
+    with patch(
+        "app.api.v1.data_quality_generate._getDefaultLlmClient",
+        return_value=fake,
+    ):
+        res = await client.post(
+            f"{GEN_BASE}/parse-descriptions",
+            json={"classId": classId},
+            headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+        )
+    assert res.status_code == 200, (
+        f"fence-stripping 失败: {res.status_code} body={res.text[:300]}"
+    )
+    body = res.json()
+    assert body.get("suggestions"), f"suggestions 应非空: {body}"
+    kinds = [s["kind"] for s in body["suggestions"]]
+    assert "allowed_values" in kinds
+
+
+async def test_parse_descriptions_strips_bare_fence_without_language(
+    client: AsyncClient, dbSession: AsyncSession,
+) -> None:
+    """仅 ``` ... ```（无 json 语言标记）包裹也应正常解析。"""
+    from app.tests.integration.test_dq_rule_generate_api import ensureClassWithProperty
+    from app.domain.models import OntologyProperty
+    from sqlalchemy import select
+
+    classId = await ensureClassWithProperty(dbSession)
+    prop = (await dbSession.execute(select(OntologyProperty).where(
+        OntologyProperty.class_id == classId))).scalars().one()
+    prop.description = "状态字段"
+    await dbSession.commit()
+
+    bare = "```\n" + LLM_JSON + "\n```"
+    fake = _FakeLLMClient(bare)
+    with patch(
+        "app.api.v1.data_quality_generate._getDefaultLlmClient",
+        return_value=fake,
+    ):
+        res = await client.post(
+            f"{GEN_BASE}/parse-descriptions",
+            json={"classId": classId},
+            headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+        )
+    assert res.status_code == 200, (
+        f"bare-fence 处理失败: {res.status_code} body={res.text[:300]}"
+    )
+    assert res.json().get("suggestions")
+
+
+async def test_parse_descriptions_accepts_bare_json_unchanged(
+    client: AsyncClient, dbSession: AsyncSession,
+) -> None:
+    """无 fence 的裸 JSON 仍走原路径（向后兼容：既有用例 LLM_JSON 即此形态）。"""
+    from app.tests.integration.test_dq_rule_generate_api import ensureClassWithProperty
+    from app.domain.models import OntologyProperty
+    from sqlalchemy import select
+
+    classId = await ensureClassWithProperty(dbSession)
+    prop = (await dbSession.execute(select(OntologyProperty).where(
+        OntologyProperty.class_id == classId))).scalars().one()
+    prop.description = "状态字段"
+    await dbSession.commit()
+
+    fake = _FakeLLMClient(LLM_JSON)  # 裸 JSON（既有 LLM_JSON 常量形态）
+    with patch(
+        "app.api.v1.data_quality_generate._getDefaultLlmClient",
+        return_value=fake,
+    ):
+        res = await client.post(
+            f"{GEN_BASE}/parse-descriptions",
+            json={"classId": classId},
+            headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+        )
+    assert res.status_code == 200
+    assert res.json().get("suggestions")

@@ -20,6 +20,7 @@ from app.domain.exceptions import Nl2SqlError, SqlSafetyError
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
 from app.domain.query_plan import Aggregation, JoinSpec, PlanResult, QueryPlan, planToText
 from app.infrastructure.business_db_pool import _assert_read_only
+from app.services.formula_parser import parseFormula
 from app.infrastructure.llm.base_client import LlmMessage
 from app.services.messages_zh import (
     MSG_NL2SQL_PLAN_INVALID,
@@ -1507,9 +1508,15 @@ class Nl2SqlService:
             # 放行同计划内其他聚合的别名（如跨年比价公式 AVG_PRICE_2026 - AVG_PRICE_2025），
             # 与排序校验放行聚合 alias（_aggregationAliases）口径一致；未知引用仍拒绝。
             if agg.formula:
-                for refProp in _extractFormulaProperties(agg.formula):
-                    if refProp not in owned and refProp not in aggAliases:
-                        issues.append(f"公式中的属性 {refProp} 不属于选定的任何类")
+                parsed = parseFormula(agg.formula)
+                # CTE 公式（WITH ... SELECT ... FROM cte_name）：CTE inner SELECT 的
+                # 列名/表名（如 line_ratios.ratio、po_lines）不属于本体类属性，而是
+                # CTE 内部定义。SQL Guard 已校验 CTE 语法，validatePlan 不对 CTE 内部
+                # 的属性名做存在性校验（无法也无意义）；仅保留非 CTE 公式的校验逻辑。
+                if not parsed.is_cte:
+                    for refProp in _extractFormulaProperties(agg.formula):
+                        if refProp not in owned and refProp not in aggAliases:
+                            issues.append(f"公式中的属性 {refProp} 不属于选定的任何类")
 
         for prop in plan.groupBy:
             if prop not in owned:

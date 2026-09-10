@@ -429,6 +429,12 @@ class ChatService(ChatStreamOutputMixin):
         except Exception:  # noqa: BLE001 — L1 异常不阻断，降级到原 LLM 流水线
             logger.warning("L1 KPI match failed, falling back to LLM", exc_info=True)
 
+        # Phase 4.4：L4 Agent Loop 入口（兜底路由）
+        # 插入位置：L1 KPI 拦截之后，_classifyMessage 之前
+        l4_response = await self._handleNl2SqlAgent(session, dto, user=user)
+        if l4_response is not None:
+            return l4_response
+
         result, state = await self._classifyMessage(session, dto)
         if result.intent == IntentType.CHITCHAT:
             response = self._chitchatResponse()
@@ -461,6 +467,97 @@ class ChatService(ChatStreamOutputMixin):
                 update={"suggested_agent": result.suggested_agent}
             )
         return response
+
+    # -------------------------------------------------------------------------
+    # Phase 4.4：L4 Agent Loop 入口
+    # -------------------------------------------------------------------------
+
+    # 探索性关键词：触发起 L4 Agent Loop（而非直接走 L2/L3 NL2SQL）
+    _L4_EXPLORATORY_KEYWORDS = ("为什么", "怎么算", "拆解", "解释", "如何", "是什么",
+                                  "为什么是", "为什么说", "如何计算", "如何分析")
+
+    async def _handleNl2SqlAgent(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        *,
+        user: CurrentUser | None = None,
+    ) -> ChatResponse | None:
+        """L4 入口：判断是否走 Agent Loop（兜底路由）。
+
+        触发条件（同时满足）：
+        1. ENABLE_L4_AGENT_LOOP='true'（system_config 表）
+        2. 问题含探索性关键词（为什么/怎么算/拆解/解释/如何...）
+
+        返回 ChatResponse = 命中 L4（LLM 已跑完）；返回 None = 降级到 L2/L3。
+
+        L4 失败时同样返回 None，确保不阻断主链路（与 L1 KPI 同模式）。
+        """
+        if not await self._isL4AgentLoopEnabled(session):
+            return None
+
+        # 探索性关键词检测（简单字符串匹配，不过度设计）
+        if not any(kw in dto.question for kw in self._L4_EXPLORATORY_KEYWORDS):
+            return None
+
+        actor = user.userId if user is not None else "chat"
+        actor_departments = user.departments if user is not None else None
+
+        try:
+            result: AgentLoopResult = await self._agentRuntime.run_agent_loop(
+                session=session,
+                user_id=user.userId if user else 0,
+                question=dto.question,
+                llm_client=self._llmFactory(None),  # None → router 决定
+                executor=self._adapterProvider(dto.datasourceId, None),  # 懒加载 adapter
+                ontology=self._ontology,
+            )
+        except Exception:
+            # L4 异常不阻断：log warning + 降级 L2/L3（与 L1 同模式）
+            logger.warning("L4 agent loop failed, falling back to L2/L3", exc_info=True)
+            return None
+
+        # L4 正常跑完但无有效答案时也降级
+        if result.terminated_reason == "error" or result.answer_text is None:
+            return None
+
+        answer_text = f"[L4:{result.terminated_reason}] {result.answer_text}"
+        response = ChatResponse(
+            answer=answer_text,
+            intent=IntentType.NEW_QUERY.value,
+            sql=result.final_sql,
+        )
+        await self._storeSessionMessages(
+            session, dto.sessionId, dto.question, response.answer, result.final_sql,
+        )
+        logger.info(
+            "L4 agent loop hit: iterations=%d cost=%.4f tool_calls=%s terminated=%s",
+            result.iterations_used,
+            result.total_cost_usd,
+            result.tool_calls_made,
+            result.terminated_reason,
+        )
+        return response
+
+    async def _isL4AgentLoopEnabled(self, session: AsyncSession) -> bool:
+        """读 system_config 表判断 L4 是否开启。
+
+        查询 SELECT value FROM system_config WHERE key='ENABLE_L4_AGENT_LOOP'。
+        表不存在 / 查不到 / 值为 'false' 时返回 False（安全默认值）。
+        查询失败时也返回 False（不阻断主链路）。
+        """
+        try:
+            from sqlalchemy import text
+
+            query = text(
+                "SELECT value FROM system_config WHERE key = 'ENABLE_L4_AGENT_LOOP'"
+            )
+            row = await session.execute(query)
+            value = row.scalar_one_or_none()
+            return value == "true"
+        except Exception:
+            logger.warning("Failed to read ENABLE_L4_AGENT_LOOP config", exc_info=True)
+            return False
 
     async def _handleGenericQuery(
         self,

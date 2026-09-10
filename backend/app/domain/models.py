@@ -766,6 +766,9 @@ class SessionMessage(Base, TimestampMixin):
         nullable=True,
     )
     user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    routing_layer: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    token_cost_usd: Mapped[float | None] = mapped_column(sa.Float(), nullable=True)
 
     __table_args__ = (
         Index("idx_session_msg_time", "session_id", "created_time"),

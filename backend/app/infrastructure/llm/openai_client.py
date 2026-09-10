@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -21,7 +22,14 @@ from app.domain.error_messages import (
     MSG_LLM_STREAM_FAILED,
 )
 from app.domain.exceptions import LlmClientError
-from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage, LlmResponse, StreamChunk
+from app.infrastructure.llm.base_client import (
+    BaseLlmClient,
+    LlmMessage,
+    LlmResponse,
+    LlmResponseWithTools,
+    StreamChunk,
+    ToolCall,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +188,56 @@ class OpenAiClient(BaseLlmClient):
                 provider=self._provider.value,
                 detail=str(exc),
             ) from exc
+
+    async def complete_with_tools(
+        self,
+        messages: list[LlmMessage],
+        tools: list[dict] | None = None,
+        tool_choice: str | dict = "auto",
+    ) -> LlmResponseWithTools:
+        """支持 tool calling 的 completion，透传 OpenAI tools API。"""
+        payload: dict[str, Any] = {
+            "model": self._modelName,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice
+
+        try:
+            response = await self._client.chat.completions.create(**payload)
+        except Exception as exc:
+            raise LlmClientError(
+                MSG_LLM_CALL_FAILED.format(provider=self._provider.value, exc=exc),
+                provider=self._provider.value,
+                detail=str(exc),
+            ) from exc
+
+        tool_calls: list[ToolCall] = []
+        raw_message = response.choices[0].message
+        if raw_message.tool_calls:
+            for raw_tc in raw_message.tool_calls:
+                tool_calls.append(
+                    ToolCall(
+                        id=raw_tc.id,
+                        name=raw_tc.function.name,
+                        args=json.loads(raw_tc.function.arguments),
+                    )
+                )
+
+        usage = getattr(response, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        return LlmResponseWithTools(
+            content=getattr(raw_message, "content", None),
+            tool_calls=tool_calls,
+            usage={
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+            model=getattr(response, "model", self._modelName) or self._modelName,
+        )
 
     async def close(self) -> None:
         close = getattr(self._client, "close", None)

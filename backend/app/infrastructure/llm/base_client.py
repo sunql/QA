@@ -8,8 +8,27 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """OpenAI tool-call 节点。"""
+
+    id: str
+    name: str
+    args: dict  # JSON-decoded arguments
+
+
+@dataclass(frozen=True)
+class LlmResponseWithTools:
+    """支持 tool calling 的 LLM 调用结果。"""
+
+    content: str | None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: dict | None = None
+    model: str = ""
 
 
 @dataclass(frozen=True)
@@ -80,3 +99,12 @@ class BaseLlmClient(ABC):
     @abstractmethod
     async def close(self) -> None:
         """释放底层连接。"""
+
+    @abstractmethod
+    async def complete_with_tools(
+        self,
+        messages: list[LlmMessage],
+        tools: list[dict] | None = None,
+        tool_choice: str | dict = "auto",
+    ) -> LlmResponseWithTools:
+        """发起支持 tool calling 的补全请求，透传给底层 provider。"""

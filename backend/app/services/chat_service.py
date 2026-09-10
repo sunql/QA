@@ -50,6 +50,11 @@ from app.domain.multi_step_plan import (
     StepPlan,
     StepResult,
 )
+from app.domain.chained_step_plan import (
+    ChainedStep,
+    StepResult as ChainedStepResult,
+    render_prior_cte,
+)
 from app.domain.query_plan import QueryPlan, planToText
 from app.domain.schemas import (
     AffinityStatus,
@@ -1118,6 +1123,82 @@ class ChatService(ChatStreamOutputMixin):
             cost=float(total_cost),
             modelName=last_model_name,
         )
+
+    # =========================================================================
+    # L3 CTE 串联引擎（Task 3.3）
+    # =========================================================================
+
+    async def _executeChainedSteps(
+        self,
+        steps: tuple[ChainedStep, ...],
+        user_id: str,
+        dto: ChatRequest,
+        pc: _PipelineContext,
+        session: AsyncSession,
+    ) -> list[ChainedStepResult]:
+        """执行 ChainedStep 列表，按序串联 CTE。
+
+        异常隔离：单步失败记录 error 但继续执行后续步。
+        最大步数：5（防御 LLM 误生成超长链）。
+        依赖检查：depends_on 必须在前面 step_id 里（按 step_index 顺序执行保证）。
+
+        Parameters
+        ----------
+        steps
+            ChainedStep 元组，按 step_index 升序排列。
+        user_id
+            执行人（审计用）。
+        dto, pc, session
+            流水线上下文（用于 NL2SQL 调用与 DB 执行）。
+
+        Returns
+        -------
+        list[ChainedStepResult]
+            每个 step 一个结果，按 step_index 顺序。
+        """
+        if len(steps) > 5:
+            raise ValueError(f"ChainedStep count must be <= 5, got {len(steps)}")
+
+        results: list[ChainedStepResult] = []
+        for i, step in enumerate(steps):
+            try:
+                # 前序 CTE 渲染（Task 3.2）：仅含 step_index < i 的步骤
+                prior_cte = render_prior_cte(steps, i)
+                # 调用 NL2SQL 生成当前步 SQL（prior_cte 注入支持 CTE 串联）
+                sql_result = await self._nl2sql.generateSql(
+                    question=step.description,
+                    classes=pc.classes,
+                    llmClient=pc.client,
+                    modelConfig=pc.selected,
+                    datasourceType=pc.ds.type,
+                    oracle_version=pc.ds.oracle_version,
+                    schemaPrefix=pc.ds.username,
+                    context=pc.contextPrompt,
+                    prior_cte=prior_cte if prior_cte else None,
+                    maxRetries=0,
+                )
+                if not sql_result.sql:
+                    results.append(ChainedStepResult(
+                        step_id=step.step_id,
+                        success=False,
+                        error="NL2SQL 生成空 SQL",
+                    ))
+                    continue
+                # 执行只读 SQL
+                data = await self._runQuery(pc, dto, sql_result.sql)
+                results.append(ChainedStepResult(
+                    step_id=step.step_id,
+                    success=True,
+                    data=data,
+                ))
+            except Exception as e:
+                logger.warning("Step %s failed: %s", step.step_id, e)
+                results.append(ChainedStepResult(
+                    step_id=step.step_id,
+                    success=False,
+                    error=str(e),
+                ))
+        return results
 
     def _summarizeStepData(self, data: list[dict]) -> str:
         """生成数据的一句话摘要（数值列的 max/min/sum）。空数据返回'（无数据）'。

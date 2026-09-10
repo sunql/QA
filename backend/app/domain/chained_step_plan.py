@@ -38,6 +38,23 @@ class ChainedStep:
             raise ValueError("step_id must be non-empty")
 
 
+@dataclass(frozen=True)
+class StepResult:
+    """Immutable result of a single ChainedStep execution.
+
+    Attributes:
+        step_id:       matches the ChainedStep.step_id that produced this result
+        success:       True if the step executed without throwing
+        data:          rows returned by the SQL query (None on failure)
+        error:         error message string (None on success)
+    """
+
+    step_id: str
+    success: bool
+    data: list[dict] = field(default_factory=list)
+    error: str | None = None
+
+
 def render_prior_cte(
     steps: tuple[ChainedStep, ...],
     current_index: int,

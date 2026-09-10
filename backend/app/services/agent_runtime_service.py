@@ -288,10 +288,126 @@ def _extract_final_sql(messages: list) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# AgentLoop step result (immutable dataclass per iteration)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _AgentLoopStepResult:
+    """单次 LLM 调用的结果。"""
+
+    ai_message: Any  # AIMessage | None
+    tool_calls_to_run: list[Any]  # list[ToolCall]
+    answer_text: str | None
+    final_sql: str | None
+    cost_incurred: float
+    should_stop: bool
+    stop_reason: str  # "answered" | "cost_cap" | "continue"
+
+
+# ---------------------------------------------------------------------------
 # AgentRuntimeService — run_agent_loop
 # ---------------------------------------------------------------------------
 
 QueryExecutor = object  # minimal type hint; the mock in tests has execute_read_only
+
+
+async def _runAgentLoopIteration(
+    *,
+    messages: list,
+    llm_client,
+    tool_schemas: list[dict],
+    cost_budget_usd: float,
+    cumulative_cost: float,
+) -> _AgentLoopStepResult:
+    """单次 LLM 决策迭代：调用 complete_with_tools，检查 cost cap。"""
+    from app.services.agent_tools_nl2sql import TOOL_SCHEMAS
+    from langchain_core.messages import AIMessage
+
+    llm_messages = [_to_llm_message(m) for m in messages]
+    response = await llm_client.complete_with_tools(
+        messages=llm_messages,
+        tools=tool_schemas,
+        tool_choice="auto",
+    )
+    cost_incurred = _estimate_cost(response.usage)
+    new_total = cumulative_cost + cost_incurred
+
+    if new_total > cost_budget_usd:
+        return _AgentLoopStepResult(
+            ai_message=None,
+            tool_calls_to_run=[],
+            answer_text=None,
+            final_sql=None,
+            cost_incurred=cost_incurred,
+            should_stop=True,
+            stop_reason="cost_cap",
+        )
+
+    ai_message = AIMessage(
+        content=response.content or "",
+        tool_calls=[
+            {"id": tc.id, "name": tc.name, "args": tc.args}
+            for tc in response.tool_calls
+        ],
+    )
+
+    if not response.tool_calls:
+        return _AgentLoopStepResult(
+            ai_message=ai_message,
+            tool_calls_to_run=[],
+            answer_text=response.content,
+            final_sql=None,
+            cost_incurred=cost_incurred,
+            should_stop=True,
+            stop_reason="answered",
+        )
+
+    return _AgentLoopStepResult(
+        ai_message=ai_message,
+        tool_calls_to_run=response.tool_calls,
+        answer_text=None,
+        final_sql=None,
+        cost_incurred=cost_incurred,
+        should_stop=False,
+        stop_reason="continue",
+    )
+
+
+async def _dispatchSingleTool(
+    *,
+    tc,
+    session: AsyncSession,
+    executor,
+) -> Any:  # ToolMessage
+    """处理单个 tool_call → ToolMessage。"""
+    from app.infrastructure.llm.base_client import ToolCall as Tc
+    from langchain_core.messages import ToolMessage
+    import json
+
+    tc_adapter = Tc(id=tc.id, name=tc.name, args=tc.args)
+
+    if tc.name == "execute_sql":
+        try:
+            sql = tc.args.get("sql", "")
+            rows = await executor.execute_read_only(sql)
+            content = json.dumps(
+                {"rows": rows, "row_count": len(rows)},
+                ensure_ascii=False,
+                default=str,
+            )
+        except Exception as exc:
+            content = json.dumps(
+                {"error": type(exc).__name__, "detail": str(exc)},
+                ensure_ascii=False,
+            )
+    else:
+        from app.services.agent_tools_nl2sql import dispatch_tool_call
+
+        result = await dispatch_tool_call(tc_adapter, session=session)
+        content = result.content
+
+    return ToolMessage(content=content, tool_call_id=tc.id, name=tc.name)
 
 
 async def run_agent_loop(
@@ -306,110 +422,65 @@ async def run_agent_loop(
     max_iterations: int = 5,
     cost_budget_usd: float = 0.5,
 ) -> AgentLoopResult:
-    """LLM 驱动的 agent loop，自主探索 NL2SQL 答案。
+    """LLM 驱动的 agent loop（纯 Python async while 实现）。
 
-    循环：
-    1. agent_node: 调 LLM 决策（complete_with_tools）
-    2. 若有 tool_calls → dispatch 每个 tool_call
-    3. 终止条件：max_iterations / cost_cap / 无 tool_calls
+    Architecture 偏差说明：本实现用纯 Python async while loop，未采用 LangGraph StateGraph，
+    因为所有 handler 都是 async、StateGraph node 包装复杂且测试 mock 困难。
+    AgentState TypedDict 保留为后续 LangGraph 升级占位（见 agent_state.py）。
 
-    依赖注入（便于测试 mock）：
-    - llm_client.complete_with_tools(messages, tools, tool_choice) -> LlmResponseWithTools
-    - executor.execute_read_only(sql) -> list[dict]  （仅 execute_sql 工具路径用到）
-    - ontology.listTables / describeTable / sampleRows / listJoins
+    终止条件：answered / max_iterations / cost_cap / error
     """
-    from app.infrastructure.llm.base_client import LlmMessage
-    from app.services.agent_tools_nl2sql import TOOL_SCHEMAS, dispatch_tool_call
-    from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+    from app.services.agent_state import AgentState  # noqa: F401 — future LangGraph upgrade
+    from app.services.agent_tools_nl2sql import TOOL_SCHEMAS
+    from langchain_core.messages import HumanMessage
+
+    logger.info(
+        "agent_loop.start user_id=%s question_len=%d",
+        user_id,
+        len(question),
+    )
 
     messages: list = [HumanMessage(content=question)]
     iterations = 0
-    terminated_reason = "error"
+    total_cost = 0.0
+    tool_calls_made: list[str] = []
+    terminated_reason = "max_iterations"
     final_sql: str | None = None
     answer_text: str | None = None
-    tool_calls_made: list[str] = []
-    total_cost = 0.0
 
     while iterations < max_iterations:
         iterations += 1
-
-        # Step 1: 调 LLM
-        llm_messages = [_to_llm_message(m) for m in messages]
-        response = await llm_client.complete_with_tools(
-            messages=llm_messages,
-            tools=TOOL_SCHEMAS,
-            tool_choice="auto",
+        step = await _runAgentLoopIteration(
+            messages=messages,
+            llm_client=llm_client,
+            tool_schemas=TOOL_SCHEMAS,
+            cost_budget_usd=cost_budget_usd,
+            cumulative_cost=total_cost,
         )
-        total_cost += _estimate_cost(response.usage)
+        total_cost += step.cost_incurred
 
-        if total_cost > cost_budget_usd:
-            terminated_reason = "cost_cap"
+        if step.should_stop:
+            terminated_reason = step.stop_reason
+            if step.stop_reason == "answered":
+                messages.append(step.ai_message)
+                answer_text = step.answer_text
+                final_sql = _extract_final_sql(messages)
             break
 
-        # Append AI message
-        ai_msg = AIMessage(
-            content=response.content or "",
-            tool_calls=[
-                {"id": tc.id, "name": tc.name, "args": tc.args}
-                for tc in response.tool_calls
-            ],
-        )
-        messages.append(ai_msg)
+        messages.append(step.ai_message)
 
-        # Step 2: 如果没有 tool_call，结束
-        if not response.tool_calls:
-            terminated_reason = "answered"
-            answer_text = response.content
-            final_sql = _extract_final_sql(messages)
-            break
-
-        # Step 3: 执行工具
-        for tc in response.tool_calls:
+        for tc in step.tool_calls_to_run:
             tool_calls_made.append(tc.name)
+            tm = await _dispatchSingleTool(tc=tc, session=session, executor=executor)
+            messages.append(tm)
 
-            # 把 ToolCall 适配为 dispatch_tool_call 需要的结构
-            from app.infrastructure.llm.base_client import ToolCall as Tc
-
-            tc_adapter = Tc(id=tc.id, name=tc.name, args=tc.args)
-
-            if tc.name == "execute_sql":
-                # execute_sql 经 executor 以支持 mock
-                try:
-                    sql = tc.args.get("sql", "")
-                    rows = await executor.execute_read_only(sql)
-                    import json
-
-                    content = json.dumps(
-                        {"rows": rows, "row_count": len(rows)},
-                        ensure_ascii=False,
-                        default=str,
-                    )
-                except Exception as exc:
-                    import json
-
-                    content = json.dumps(
-                        {"error": type(exc).__name__, "detail": str(exc)},
-                        ensure_ascii=False,
-                    )
-                messages.append(
-                    ToolMessage(content=content, tool_call_id=tc.id, name=tc.name)
-                )
-            else:
-                # 其余工具走 dispatch_tool_call（ontology-backed）
-                result = await dispatch_tool_call(
-                    tc_adapter,
-                    session=session,
-                )
-                messages.append(
-                    ToolMessage(
-                        content=result.content,
-                        tool_call_id=tc.id,
-                        name=tc.name,
-                    )
-                )
-    else:
-        # while 完成但未 break → 超 max_iterations
-        terminated_reason = "max_iterations"
+    logger.info(
+        "agent_loop.end user_id=%s terminated=%s iterations=%d cost=%.6f",
+        user_id,
+        terminated_reason,
+        iterations,
+        total_cost,
+    )
 
     return AgentLoopResult(
         final_sql=final_sql,

@@ -1,11 +1,13 @@
 """LangGraph State 定义 — L4 Agent Loop 用。
 
 Schema reference：Task 4.3 brief
+
+Architecture note: 本实现用纯 Python async while loop，未用 LangGraph StateGraph。
+AgentState TypedDict 保留为后续 LangGraph 升级占位，不引用 langchain_core 以避免
+测试环境额外依赖。
 """
 
-from typing import TypedDict
-
-from langchain_core.messages import BaseMessage
+from typing import TypedDict, Any
 
 
 class AgentState(TypedDict, total=False):
@@ -17,7 +19,7 @@ class AgentState(TypedDict, total=False):
     - error:      异常路径
     """
 
-    messages: list[BaseMessage]
+    messages: list[Any]
     iterations: int
     final_sql: str | None
     error: str | None

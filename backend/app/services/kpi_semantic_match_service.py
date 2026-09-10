@@ -13,10 +13,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.domain.models import KpiCatalog
@@ -157,26 +160,34 @@ class KpiSemanticMatchService:
             return []
 
         results: list[KpiMatchResult] = []
+        seen_codes: set[str] = set()
 
-        # 第一关：精确 alias
-        alias_result = self._matchExactAlias(question)
-        if alias_result is not None:
-            # 从缓存获取 kpi_name
-            all_kpis = {kpi.kpi_code: kpi for kpi in self._cache.getAll()}
-            alias_kpi = all_kpis.get(alias_result.code)
-            alias_result = KpiMatchResult(
-                code=alias_result.code,
-                confidence=alias_result.confidence,
-                layer=alias_result.layer,
-                kpi_name=alias_kpi.kpi_name if alias_kpi else None,
-            )
-            results.append(alias_result)
+        # 第一关：精确 alias（cache 未 warmUp 时跳过，避免 RuntimeError）
+        try:
+            alias_result = self._matchExactAlias(question)
+            if alias_result is not None:
+                # 从缓存获取 kpi_name
+                all_kpis = {kpi.kpi_code: kpi for kpi in self._cache.getAll()}
+                alias_kpi = all_kpis.get(alias_result.code)
+                alias_result = KpiMatchResult(
+                    code=alias_result.code,
+                    confidence=alias_result.confidence,
+                    layer=alias_result.layer,
+                    kpi_name=alias_kpi.kpi_name if alias_kpi else None,
+                )
+                results.append(alias_result)
+                seen_codes.add(alias_result.code)
+        except RuntimeError:
+            # cache 未 warmUp，跳过精确 alias 分支
+            logger.warning("KpiMatchCache not warmUp, skipping exact alias branch")
 
         # 第二关：关键词 Jaccard（所有候选）
         user_kws = self._extractKeywords(question)
         if user_kws:
             candidates = self._cache.findByAnyKeyword(user_kws)
             for kpi in candidates:
+                if kpi.kpi_code in seen_codes:
+                    continue
                 catalog_kws = kpi.semantic_keywords or []
                 if not catalog_kws:
                     continue
@@ -189,16 +200,10 @@ class KpiSemanticMatchService:
                             kpi_name=kpi.kpi_name,
                         )
                     )
+                    seen_codes.add(kpi.kpi_code)
 
-        # 按 confidence 降序，deduplicate（alias 可能与 Jaccard 重复）
-        seen: set[str] = set()
-        unique: list[KpiMatchResult] = []
-        for r in sorted(results, key=lambda x: x.confidence, reverse=True):
-            if r.code not in seen:
-                seen.add(r.code)
-                unique.append(r)
-
-        return unique[:limit]
+        # 按 confidence 降序
+        return sorted(results, key=lambda x: x.confidence, reverse=True)[:limit]
 
     # ------------------------------------------------------------------
     # Exact alias match

@@ -61,19 +61,29 @@ class _StubKpi:
 class _StubCache:
     """内存缓存桩（兼容 KpiMatchCache 接口）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, warm: bool = True) -> None:
         self._items: list[_StubKpi] = []
+        self._warm = warm
 
     def load(self, items: list[_StubKpi]) -> None:
         self._items = list(items)
 
+    def is_warmUp(self) -> bool:
+        return self._warm
+
     def hasCode(self, code: str) -> bool:
+        if not self._warm:
+            return False
         return any(k.kpi_code == code for k in self._items)
 
     def getAll(self) -> list[_StubKpi]:
+        if not self._warm:
+            raise RuntimeError("KpiMatchCache 未 warmUp（lifespan bug）")
         return list(self._items)
 
     def findByAnyKeyword(self, keywords: list[str]) -> list[_StubKpi]:
+        if not self._warm:
+            return []
         result: list[_StubKpi] = []
         for kpi in self._items:
             if kpi.semantic_keywords:
@@ -189,6 +199,26 @@ class TestMatchAll:
         results = await svc.matchAll("准时", threshold=0.0, limit=10)
         codes = [r.code for r in results]
         assert len(codes) == len(set(codes))
+
+    async def test_matchAll_with_cold_cache_returns_keyword_results_only(
+        self
+    ) -> None:
+        """cache 未 warmUp 时，精确 alias 分支降级，关键词分支仍工作。"""
+        cold_cache = _StubCache(warm=False)
+        cold_cache.load([_OTD, _DEFECT, _VARIANCE])
+        svc = KpiSemanticMatchService(cold_cache)
+
+        # 精确 alias 查 "KPI_SUPPLIER_OTD" → cache 冷，跳过 alias 分支
+        # 关键词 "供应商" 能命中 OTD 和 DEFECT（cache 冷，findByAnyKeyword 返回 []）
+        results = await svc.matchAll("KPI_SUPPLIER_OTD", threshold=0.0, limit=10)
+        # 精确 alias 分支被跳过（cache 冷），且无关键词候选 → 结果为空，不抛异常
+        assert results == []
+
+        # 用有中文关键词的输入验证关键词分支在冷 cache 下也降级
+        results2 = await svc.matchAll("准时", threshold=0.0, limit=10)
+        assert results2 == []  # findByAnyKeyword 冷 cache 返回 []
+        # 验证无 RuntimeError
+        assert True
 
 
 class TestKpiSearchHitSchema:

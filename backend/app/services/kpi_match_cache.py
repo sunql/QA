@@ -61,6 +61,10 @@ class KpiMatchCache:
             return False
         return code in self._by_code
 
+    def is_warmUp(self) -> bool:
+        """缓存是否已 warmUp。"""
+        return self._loaded
+
     def findByAnyKeyword(self, keywords: list[str]) -> list["KpiCatalog"]:
         """返回 semantic_keywords 包含任意一个 keyword 的 KPI 列表。
 

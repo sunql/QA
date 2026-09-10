@@ -1161,44 +1161,62 @@ class ChatService(ChatStreamOutputMixin):
 
         results: list[ChainedStepResult] = []
         for i, step in enumerate(steps):
-            try:
-                # 前序 CTE 渲染（Task 3.2）：仅含 step_index < i 的步骤
-                prior_cte = render_prior_cte(steps, i)
-                # 调用 NL2SQL 生成当前步 SQL（prior_cte 注入支持 CTE 串联）
-                sql_result = await self._nl2sql.generateSql(
-                    question=step.description,
-                    classes=pc.classes,
-                    llmClient=pc.client,
-                    modelConfig=pc.selected,
-                    datasourceType=pc.ds.type,
-                    oracle_version=pc.ds.oracle_version,
-                    schemaPrefix=pc.ds.username,
-                    context=pc.contextPrompt,
-                    prior_cte=prior_cte if prior_cte else None,
-                    maxRetries=0,
-                )
-                if not sql_result.sql:
-                    results.append(ChainedStepResult(
-                        step_id=step.step_id,
-                        success=False,
-                        error="NL2SQL 生成空 SQL",
-                    ))
-                    continue
-                # 执行只读 SQL
-                data = await self._runQuery(pc, dto, sql_result.sql)
-                results.append(ChainedStepResult(
-                    step_id=step.step_id,
-                    success=True,
-                    data=data,
-                ))
-            except Exception as e:
-                logger.warning("Step %s failed: %s", step.step_id, e)
-                results.append(ChainedStepResult(
+            result = await self._executeSingleChainedStep(
+                steps=steps,
+                current_index=i,
+                user_id=user_id,
+                dto=dto,
+                pc=pc,
+            )
+            results.append(result)
+        return results
+
+    async def _executeSingleChainedStep(
+        self,
+        steps: tuple[ChainedStep, ...],
+        current_index: int,
+        user_id: str,
+        dto: ChatRequest,
+        pc: _PipelineContext,
+    ) -> ChainedStepResult:
+        """执行单个 ChainedStep（异常隔离）。
+
+        渲染前序 CTE → NL2SQL 生成 SQL → 执行只读 SQL → 返回 StepResult。
+        """
+        step = steps[current_index]
+        try:
+            prior_cte = render_prior_cte(steps, current_index)
+            sql_result = await self._nl2sql.generateSql(
+                question=step.description,
+                classes=pc.classes,
+                llmClient=pc.client,
+                modelConfig=pc.selected,
+                datasourceType=pc.ds.type,
+                oracle_version=pc.ds.oracle_version,
+                schemaPrefix=pc.ds.username,
+                context=pc.contextPrompt,
+                prior_cte=prior_cte if prior_cte else None,
+                maxRetries=0,
+            )
+            if not sql_result.sql:
+                return ChainedStepResult(
                     step_id=step.step_id,
                     success=False,
-                    error=str(e),
-                ))
-        return results
+                    error="NL2SQL 生成空 SQL",
+                )
+            data = await self._runQuery(pc, dto, sql_result.sql, user_id=user_id)
+            return ChainedStepResult(
+                step_id=step.step_id,
+                success=True,
+                data=data,
+            )
+        except Exception as e:
+            logger.warning("Step %s failed: %s", step.step_id, e)
+            return ChainedStepResult(
+                step_id=step.step_id,
+                success=False,
+                error=str(e),
+            )
 
     def _summarizeStepData(self, data: list[dict]) -> str:
         """生成数据的一句话摘要（数值列的 max/min/sum）。空数据返回'（无数据）'。
@@ -2835,7 +2853,14 @@ class ChatService(ChatStreamOutputMixin):
         )
         task.add_done_callback(_logEmbeddingTaskFailure)
 
-    async def _runQuery(self, pc: _PipelineContext, dto: ChatRequest, sql: str) -> list[dict]:
+    async def _runQuery(
+        self,
+        pc: _PipelineContext,
+        dto: ChatRequest,
+        sql: str,
+        *,
+        user_id: str | None = None,
+    ) -> list[dict]:
         adapter = self._adapterProvider(dto.datasourceId, pc.ds)
         return await adapter.execute_read_only(sql)
 

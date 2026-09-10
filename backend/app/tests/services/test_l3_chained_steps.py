@@ -169,7 +169,7 @@ class TestExecuteChainedSteps:
             return resp
 
         # Step 0 成功，Step 1 抛出异常，Step 2 成功
-        async def fake_runQuery(pc, dto, sql):
+        async def fake_runQuery(pc, dto, sql, *, user_id=None):
             nonlocal call_count
             call_count += 1
             if call_count == 2:

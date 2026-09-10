@@ -128,6 +128,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.services.business_object_registry import businessObjectRegistry
 
         await businessObjectRegistry.warmUp(session)
+        # Phase 1 Task 1.3：KpiMatchCache 启动预热，加载所有 PUBLISHED KPI
+        from app.services.kpi_match_cache import kpi_match_cache
+
+        await kpi_match_cache.warmUp(session)
         # 幂等 seed 菜单基线（6 section + 28 item，含 feat-rbac-identity 4 个 RBAC
         # 管理叶子）；on_conflict_do_update 不会丢已有行，仅刷新可变更列。
         # 置于其它 seed 之前，确保 `GET /menu-config` 启动即可返回完整菜单。

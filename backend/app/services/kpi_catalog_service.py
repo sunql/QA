@@ -64,6 +64,13 @@ class KpiCatalogService:
             raise NotFoundError(MSG_KPI_CATALOG_NOT_FOUND.format(id=id))
         return row
 
+    async def get_by_code(self, session: AsyncSession, code: str) -> KpiCatalog | None:
+        """按 kpi_code 查，无则返回 None（用于 idempotency 检查）。"""
+        result = await session.execute(
+            select(KpiCatalog).where(KpiCatalog.kpi_code == code)
+        )
+        return result.scalar_one_or_none()
+
     async def createKpi(
         self,
         session: AsyncSession,
@@ -90,6 +97,8 @@ class KpiCatalogService:
             status=dto.status.value,
             metric_id=dto.metric_id,
             created_by=dto.created_by,
+            semantic_keywords=dto.semantic_keywords,
+            match_threshold=Decimal(str(dto.match_threshold)) if dto.match_threshold is not None else Decimal("0.75"),
         )
         session.add(entity)
         try:

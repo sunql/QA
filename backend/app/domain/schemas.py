@@ -649,6 +649,16 @@ class KpiCatalogCreate(CamelModel):
     status: KpiStatus = KpiStatus.DRAFT
     metric_id: int | None = None
     created_by: str | None = Field(default=None, max_length=50)
+    semantic_keywords: list[str] | None = Field(
+        default=None,
+        description="L1 语义匹配关键词（自动晋升时由 question 提取）",
+    )
+    match_threshold: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="匹配阈值，默认 0.75",
+    )
 
 
 class KpiCatalogUpdate(CamelModel):

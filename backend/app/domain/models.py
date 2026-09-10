@@ -32,6 +32,7 @@ from sqlalchemy import (
 )
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.domain.enums import (
@@ -379,6 +380,14 @@ class KpiCatalog(Base, TimestampMixin):
         BigIntFk, ForeignKey("ontology_metric.id"), nullable=True
     )
     created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # Phase 1 L1 语义匹配层字段
+    semantic_keywords: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String(64)), nullable=True
+    )
+    match_threshold: Mapped[Decimal] = mapped_column(
+        Numeric(3, 2), nullable=False, default=Decimal("0.75")
+    )
 
     # Relationships
     metric: Mapped[OntologyMetric | None] = relationship(

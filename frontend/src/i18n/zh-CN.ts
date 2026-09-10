@@ -1695,7 +1695,7 @@ export const zhCN = {
       parseFailed: "AI 解析失败",
       applyFailed: "采纳建议失败",
       applied: "已采纳建议",
-      adoptNotApplicable: "本建议类型（非值域约束）无法自动沉淀，请在本体管理页手动处理",
+      adoptNotApplicable: "not_null 等非值域约束暂无自动沉淀入口。请联系管理员扩展 ontology_property 字段，或在本体管理页手工配置。",
       alreadyAdopted: "此属性已采纳，无需重复操作",
     },
   },

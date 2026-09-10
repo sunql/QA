@@ -1762,73 +1762,117 @@ class ChatService(ChatStreamOutputMixin):
         match: KpiMatchResult,
         session: AsyncSession,
     ) -> ChatResponse | None:
-        """Phase 1.4：L1 命中时，从 KPI 计算结果构建 ChatResponse。
+        """L1 命中时构建 ChatResponse（不调 LLM）。
 
-        流程：KpiMatchResult.code → KpiCatalog → FeatureDefinition.calculation_logic
-        → 执行只读 SQL → 包装 ChatResponse。
-
-        降级策略：
-        - KPI code 找不到 / 无 calculation_logic / SQL 执行失败 → log warning
-          + 返回 None（调用方继续 LLM 流水线）。
-        - 任何异常均不阻断 chat 主链路（0 LLM 开销，命中即返回；失败即降级）。
-
-        返回 ChatResponse 时 intent="l1_match"，data 含计算结果行，
-        kpiCode/kpiName/confidence 作为额外字段透传。
+        降级策略：任何异常 → log warning → 返回 None（调用方继续 LLM 流水线）。
         """
+        try:
+            kpi = await self._resolveKpiCatalog(match.code, session)
+            if kpi is None:
+                return None
+            kpi_name = kpi.kpi_name or match.code
+            data = await self._executeCalculationLogic(kpi, match.code, session)
+            text = self._buildAnswerText(kpi, data, kpi_name)
+            return self._wrapChatResponse(match, kpi_name, data, text)
+        except Exception:
+            logger.warning(f"L1 build response failed for {match.code}", exc_info=True)
+            return None
+
+    # -------------------------------------------------------------------------
+    async def _resolveKpiCatalog(
+        self,
+        kpi_code: str,
+        session: AsyncSession,
+    ) -> KpiCatalog | None:
+        """查 KpiCatalog；找不到返回 None 并 log warning。"""
         from sqlalchemy import select
 
-        from app.domain.models import FeatureDefinition, KpiCatalog
+        from app.domain.models import KpiCatalog
 
-        # 1. 查 KpiCatalog（获取 calculation_logic 或 formula）
         row = await session.execute(
-            select(KpiCatalog).where(KpiCatalog.kpi_code == match.code)
+            select(KpiCatalog).where(KpiCatalog.kpi_code == kpi_code)
         )
         kpi = row.scalar_one_or_none()
         if kpi is None:
-            logger.warning("L1 match code=%s not found in kpi_catalog", match.code)
+            logger.warning("L1 match code=%s not found in kpi_catalog", kpi_code)
+        return kpi
+
+    # -------------------------------------------------------------------------
+    async def _executeCalculationLogic(
+        self,
+        kpi: KpiCatalog,
+        kpi_code: str,
+        session: AsyncSession,
+    ) -> list[dict] | None:
+        """执行 KPI 的 calculation_logic 关联的 FeatureDefinition。
+
+        无 formula / feat 找不到 / 执行失败 → 返回 None。
+        """
+        if not kpi.formula or not kpi.formula.strip():
             return None
 
-        # 2. 构造 answer 文本（不调 LLM，直接读 business_definition / kpi_name）
-        kpi_name = kpi.kpi_name or match.code
-        answer = f"指标「{kpi_name}」"
+        from sqlalchemy import select
 
-        # 3. 优先用 calculation_logic 执行查询获取实时数据
-        data: list[dict] | None = None
-        if kpi.formula and kpi.formula.strip():
-            # formula 是「读业务库的单条只读 SELECT」；
-            # 先找对应的 FeatureDefinition（entity_key 维度）获取计算逻辑
-            feat_row = await session.execute(
-                select(FeatureDefinition).where(
-                    FeatureDefinition.feature_definition == kpi.formula,
-                    FeatureDefinition.is_enabled.is_(True),
-                )
+        from app.domain.models import FeatureDefinition
+
+        feat_row = await session.execute(
+            select(FeatureDefinition).where(
+                FeatureDefinition.feature_definition == kpi.formula,
+                FeatureDefinition.is_enabled.is_(True),
             )
-            feat = feat_row.scalar_one_or_none()
-            if feat is not None:
-                try:
-                    adapter = self._adapterProvider(feat.datasource_id, feat)
-                    raw = adapter.execute_read_only(feat.calculation_logic)
-                    if raw is not None:
-                        # 标准化为 list[dict]
-                        if isinstance(raw, list):
-                            data = [dict(r) for r in raw]
-                        elif isinstance(raw, (list, tuple)):
-                            data = [dict(raw)]
-                        else:
-                            data = [{"value": raw}]
-                        # 追加指标名到回答
-                        if data:
-                            first_val = str(next((v for v in data[0].values() if v is not None), "—"))
-                            answer += f"：{first_val}"
-                except Exception:
-                    logger.warning("L1 calculation_logic execution failed for %s", match.code, exc_info=True)
-                    answer += f"（{kpi.business_definition or '详见系统'}）"
-            else:
-                answer += f"（{kpi.business_definition or '详见系统'}）"
+        )
+        feat = feat_row.scalar_one_or_none()
+        if feat is None:
+            return None
+
+        try:
+            adapter = self._adapterProvider(feat.datasource_id, feat)
+            raw = adapter.execute_read_only(feat.calculation_logic)
+            if raw is None:
+                return None
+            if isinstance(raw, list):
+                return [dict(r) for r in raw]
+            if isinstance(raw, (list, tuple)):
+                return [dict(raw)]
+            return [{"value": raw}]
+        except Exception:
+            logger.warning(
+                "L1 calculation_logic execution failed for %s", kpi_code, exc_info=True
+            )
+            return None
+
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _buildAnswerText(
+        kpi: KpiCatalog,
+        data: list[dict] | None,
+        kpi_name: str,
+    ) -> str:
+        """格式化 KPI 结果文本。
+
+        规则：
+        - 有 data → 取第一个非 None 值追加到「指标「{kpi_name}」：{value}」
+        - 无 data / 执行失败 → 追加 business_definition 或兜底文案
+        """
+        answer = f"指标「{kpi_name}」"
+        if data:
+            first_val = str(
+                next((v for v in data[0].values() if v is not None), "—")
+            )
+            answer += f"：{first_val}"
         else:
             answer += f"（{kpi.business_definition or '详见系统'}）"
+        return answer
 
-        # 4. 包装 ChatResponse（intent=l1_match，零 token 消耗）
+    # -------------------------------------------------------------------------
+    def _wrapChatResponse(
+        self,
+        match: KpiMatchResult,
+        kpi_name: str,
+        data: list[dict] | None,
+        answer: str,
+    ) -> ChatResponse:
+        """构造 intent=l1_match 的 ChatResponse（零 LLM 消耗）。"""
         return ChatResponse(
             answer=answer,
             intent="l1_match",

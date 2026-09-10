@@ -162,7 +162,7 @@ async def test_get_supplier_360_returns_profile_and_codes(dbSession: AsyncSessio
     # kpis 4 项 default feature 全部 latest=False
     assert len(result.kpis) == 4
     assert all(k.latest is False for k in result.kpis)
-    assert {k.feature_name for k in result.kpis} == set(_kpiSlotFeatureNames())
+    assert {k.feature_name for k in result.kpis} == set(await _kpiSlotFeatureNames())
 
 
 async def test_get_supplier_360_not_found_raises(dbSession: AsyncSession):
@@ -270,7 +270,7 @@ async def test_get_supplier_360_returns_disabled_feature_with_no_value_marker(
         assert k.valid_at is None
 
 
-def test_kpi_slot_feature_names_aggregates_from_registry() -> None:
+async def test_kpi_slot_feature_names_aggregates_from_registry() -> None:
     """_kpiSlotFeatureNames 聚合自 registry。"""
     feature_rule_registry._loaded = True
     feature_rule_registry._rules = {("SUPPLIER", "FEATURE", "RISK"): [
@@ -281,7 +281,7 @@ def test_kpi_slot_feature_names_aggregates_from_registry() -> None:
                           target_level="RISK", feature_name="Y", enabled=True, priority=100,
                           thresholds=(FeatureThresholdReady("HIGH", "lt", 20, "%", 1),)),
     ]}
-    names = _kpiSlotFeatureNames()
+    names = await _kpiSlotFeatureNames()
     assert set(names) == {"X", "Y"}
     # sorted alphabetically
     assert names == ("X", "Y")

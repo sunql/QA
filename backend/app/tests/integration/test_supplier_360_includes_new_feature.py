@@ -175,7 +175,7 @@ async def test_supplier_360_loads_po_completion_rate(
     # 验证 PO_COMPLETION_RATE 的值
     po_kpi = next(k for k in kpis if k["featureName"] == "SUPPLIER_PO_COMPLETION_RATE")
     assert po_kpi["latest"] is True, f"PO_COMPLETION_RATE latest should be True, got {po_kpi['latest']}"
-    assert po_kpi["value"] == "85.0", f"PO_COMPLETION_RATE value should be 85.0, got {po_kpi['value']}"
+    assert po_kpi["value"] == "85.0000000000", f"PO_COMPLETION_RATE value should be 85.0000000000, got {po_kpi['value']}"
     assert po_kpi["unit"] == "%"
     assert po_kpi["featureAlias"] == "采购订单完成率"
 

@@ -107,6 +107,21 @@ class OllamaClient(BaseLlmClient):
             totalTokens=promptTokens + completionTokens,
         )
 
+    async def complete_with_tools(
+        self,
+        messages: list[LlmMessage],
+        tools: list[dict] | None = None,
+        tool_choice: str | dict = "auto",
+    ) -> Any:
+        """Ollama 本地模型不支持 tool calling；显式抛 NotImplementedError 以满足抽象契约。
+
+        调用方应在路由层根据 provider capability 决定是否启用 tool calling。
+        """
+        raise NotImplementedError(
+            "OllamaClient.complete_with_tools: Ollama 本地模型不支持 tool calling；"
+            "请改用 OpenAiClient 或其他支持 tools API 的 provider。"
+        )
+
     async def completeStream(
         self,
         messages: list[LlmMessage],

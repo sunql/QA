@@ -100,7 +100,7 @@ class MetricPromotionService:
         """扫描近 N 天 L2 命中 ≥ min_hits 次的候选。
 
         归一化策略：LOWER(TRIM(question))。
-        数据源：session_message 表（仅 assistant 消息）。
+        数据源：session_message 表（仅 assistant 消息 = LLM 响应）。
         """
         # Step 1: GROUP BY 归一化 question，统计命中次数
         stmt = (
@@ -112,6 +112,7 @@ class MetricPromotionService:
             )
             .where(SessionMessage.created_time >= since)
             .where(SessionMessage.question.isnot(None))
+            .where(SessionMessage.role == "assistant")
             .group_by(func.lower(func.trim(SessionMessage.question)))
             .having(func.count(SessionMessage.id) >= min_hits)
             .order_by(func.count(SessionMessage.id).desc())
@@ -124,28 +125,32 @@ class MetricPromotionService:
         # Step 2: 对每个 norm_q 取一条最新 sample（含 sql_generated）
         candidates: list[PromotionCandidate] = []
         for row in rows:
-            norm_q: str = row.norm_q
-            sample_row = (
-                await self._session.execute(
-                    select(SessionMessage)
-                    .where(func.lower(func.trim(SessionMessage.question)) == norm_q)
-                    .order_by(SessionMessage.created_time.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            if sample_row is None:
+            sample = await self._fetchSampleSessionMessage(norm_q=row.norm_q)
+            if sample is None:
                 continue
 
             candidates.append(PromotionCandidate(
-                semantic_key=_normalize(sample_row.question or ""),
+                semantic_key=_normalize(sample.question or ""),
                 hit_count=row.hits,
-                sample_sql=sample_row.sql_generated,
-                sample_question=sample_row.question or "",
+                sample_sql=sample.sql_generated,
+                sample_question=sample.question or "",
                 first_seen=row.first_seen,
                 last_seen=row.last_seen,
             ))
 
         return candidates
+
+    async def _fetchSampleSessionMessage(self, *, norm_q: str) -> SessionMessage | None:
+        """取最新一条匹配 norm_q 的 SessionMessage（用于 sample SQL）。"""
+        return (
+            await self._session.execute(
+                select(SessionMessage)
+                .where(func.lower(func.trim(SessionMessage.question)) == norm_q)
+                .where(SessionMessage.role == "assistant")
+                .order_by(SessionMessage.created_time.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
 
     async def auto_promote(self, candidate: PromotionCandidate) -> int:
         """把 candidate 写入 KpiCatalog（status=DRAFT）。返回 KpiCatalog.id。
@@ -160,14 +165,13 @@ class MetricPromotionService:
             log.info("kpi %s already exists (id=%d), skipping", code, existing.id)
             return existing.id
 
-        # 写入新 KpiCatalog
+        # 写入新 KpiCatalog（match_threshold 用 schema 默认）
         dto = KpiCatalogCreate(
             kpi_code=code,
             kpi_name=f"Auto: {candidate.sample_question[:80]}",
             formula=candidate.sample_sql or "",
             status=KpiStatus.DRAFT,
             semantic_keywords=_extract_keywords(candidate.sample_question),
-            match_threshold=0.75,
         )
 
         entity = KpiCatalog(
@@ -180,8 +184,7 @@ class MetricPromotionService:
         )
         self._session.add(entity)
         await self._session.flush()
-        await self._session.commit()
-        await self._session.refresh(entity)
+        # 不 commit：caller 管理事务边界（避免破坏外部 tx 包装）
 
         log.info(
             "auto-promote candidate %s -> kpi_catalog id=%d",

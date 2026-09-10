@@ -1781,4 +1781,34 @@ export const enUS = {
       codeFormat: "Code must be uppercase letters, digits, or underscore; 1-20 chars",
     },
   },
+
+  routingMetrics: {
+    title: "Routing Layer Metrics",
+    subtitle: "Hit count, latency and token cost per L1/L2/L3/L4 layer",
+    layer: {
+      L1: "L1 Semantic Match",
+      L2: "L2 LLM Intent Classification",
+      L3: "L3 Multi-step Chain",
+      L4: "L4 LangGraph Agent Loop",
+    },
+    metric: {
+      hitCount: "Hit Count",
+      avgDuration: "Avg Latency",
+      avgTokenCost: "Avg Token Cost",
+    },
+    chart: {
+      pieTitle: "Layer Distribution",
+      lineTitle: "Trend (Last 7 Days)",
+    },
+    timeWindow: {
+      "1d": "Last 1 Day",
+      "7d": "Last 7 Days",
+      "30d": "Last 30 Days",
+    },
+    empty: "No data",
+    error: "Load failed",
+    todo: {
+      apiEndpoint: "TODO: backend must implement GET /api/v1/routing-metrics/snapshot endpoint",
+    },
+  },
 } as const;

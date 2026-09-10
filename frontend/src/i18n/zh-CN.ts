@@ -1791,4 +1791,34 @@ export const zhCN = {
       codeFormat: "代码必须为大写字母 / 数字 / 下划线，1-20 字符",
     },
   },
+
+  routingMetrics: {
+    title: "路由分层指标",
+    subtitle: "L1/L2/L3/L4 各层命中率、延迟与 Token 成本",
+    layer: {
+      L1: "L1 语义匹配",
+      L2: "L2 LLM 意图分类",
+      L3: "L3 多步链式推理",
+      L4: "L4 LangGraph Agent",
+    },
+    metric: {
+      hitCount: "命中次数",
+      avgDuration: "平均延迟",
+      avgTokenCost: "平均 Token 成本",
+    },
+    chart: {
+      pieTitle: "各层命中率占比",
+      lineTitle: "近 7 天各层趋势",
+    },
+    timeWindow: {
+      "1d": "最近 1 天",
+      "7d": "最近 7 天",
+      "30d": "最近 30 天",
+    },
+    empty: "暂无数据",
+    error: "加载失败",
+    todo: {
+      apiEndpoint: "TODO: 待后端实现 /api/v1/routing-metrics/snapshot endpoint",
+    },
+  },
 } as const;

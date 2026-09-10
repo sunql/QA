@@ -33,10 +33,12 @@ class KpiMatchResult:
         code: 命中的 KPI code（如 KPI_SUPPLIER_OTD）。
         confidence: 匹配置信度，精确 alias 为 1.0，关键词 Jaccard 为 (0,1)。
         layer: 固定 "l1_match"，供路由指标记录。
+        kpi_name: KPI 名称（matchAll 时从缓存填充；match 返回 None）。
     """
     code: str
     confidence: float
     layer: str = "l1_match"
+    kpi_name: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +144,62 @@ class KpiSemanticMatchService:
         # 第二关：关键词 Jaccard
         return self._matchByKeywords(question)
 
+    async def matchAll(
+        self, question: str, threshold: float = 0.0, limit: int = 50
+    ) -> list[KpiMatchResult]:
+        """返回所有命中的 KPI，按 confidence 降序排列。
+
+        Task 1.6 /search 端点专用：支持多候选返回 + 阈值过滤 + limit。
+        - 精确 alias 命中 → confidence=1.0
+        - 关键词 Jaccard 命中 → confidence >= match_threshold
+        """
+        if not question or not question.strip():
+            return []
+
+        results: list[KpiMatchResult] = []
+
+        # 第一关：精确 alias
+        alias_result = self._matchExactAlias(question)
+        if alias_result is not None:
+            # 从缓存获取 kpi_name
+            all_kpis = {kpi.kpi_code: kpi for kpi in self._cache.getAll()}
+            alias_kpi = all_kpis.get(alias_result.code)
+            alias_result = KpiMatchResult(
+                code=alias_result.code,
+                confidence=alias_result.confidence,
+                layer=alias_result.layer,
+                kpi_name=alias_kpi.kpi_name if alias_kpi else None,
+            )
+            results.append(alias_result)
+
+        # 第二关：关键词 Jaccard（所有候选）
+        user_kws = self._extractKeywords(question)
+        if user_kws:
+            candidates = self._cache.findByAnyKeyword(user_kws)
+            for kpi in candidates:
+                catalog_kws = kpi.semantic_keywords or []
+                if not catalog_kws:
+                    continue
+                score = jaccard(user_kws, catalog_kws)
+                if score >= threshold and score >= float(kpi.match_threshold):
+                    results.append(
+                        KpiMatchResult(
+                            code=kpi.kpi_code,
+                            confidence=round(score, 4),
+                            kpi_name=kpi.kpi_name,
+                        )
+                    )
+
+        # 按 confidence 降序，deduplicate（alias 可能与 Jaccard 重复）
+        seen: set[str] = set()
+        unique: list[KpiMatchResult] = []
+        for r in sorted(results, key=lambda x: x.confidence, reverse=True):
+            if r.code not in seen:
+                seen.add(r.code)
+                unique.append(r)
+
+        return unique[:limit]
+
     # ------------------------------------------------------------------
     # Exact alias match
     # ------------------------------------------------------------------
@@ -213,4 +271,15 @@ class KpiSemanticMatchService:
 
         return keywords
 
+
+# ---------------------------------------------------------------------------
+# Factory（供 FastAPI Depends 使用）
+# ---------------------------------------------------------------------------
+
+
+def getKpiSemanticMatchService() -> KpiSemanticMatchService:
+    """返回绑定了全局 kpi_match_cache 单例的 service 实例。"""
+    from app.services.kpi_match_cache import kpi_match_cache
+
+    return KpiSemanticMatchService(kpi_match_cache)
 

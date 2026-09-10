@@ -2177,6 +2177,29 @@ class KpiCatalogHistoryRead(CamelModel):
     changed_at: datetime
 
 
+# ---------------------------------------------------------------------------
+# Phase 1 Task 1.6: KPI Catalog Search
+# ---------------------------------------------------------------------------
+
+
+class KpiSearchHit(CamelModel):
+    """KPI 搜索命中结果（Phase 1.6）。
+
+    仅含前端 AutoComplete 下拉需要展示的字段，不暴露 formula / owner 等治理字段。
+    """
+
+    kpi_code: str
+    kpi_name: str
+    confidence: float
+
+
+class KpiSearchResponse(CamelModel):
+    """KPI 搜索响应 envelope。"""
+
+    query: str
+    results: list[KpiSearchHit]
+
+
 class FeatureDefinitionHistoryRead(CamelModel):
     """FeatureDefinition 历史快照记录（Phase 4.5 回放 API）。"""
     id: int

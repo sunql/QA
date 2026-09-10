@@ -20,8 +20,14 @@ from app.domain.schemas import (
     KpiCatalogHistoryRead,
     KpiCatalogRead,
     KpiCatalogUpdate,
+    KpiSearchHit,
+    KpiSearchResponse,
 )
 from app.services.history_service import HistoryService
+from app.services.kpi_semantic_match_service import (
+    KpiSemanticMatchService,
+    getKpiSemanticMatchService,
+)
 from app.services.kpi_catalog_service import KpiCatalogService
 
 router = APIRouter(dependencies=[])
@@ -36,6 +42,40 @@ async def listKpis(
 ) -> list[KpiCatalogRead]:
     """列出所有 KPI（按 kpi_code 升序）。"""
     return [KpiCatalogRead.model_validate(e) for e in await _service.listKpis(db)]
+
+
+# NOTE: /search 必须在 /{id} 之前注册（FastAPI 路由按顺序匹配）
+@router.get(
+    "/search",
+    response_model=KpiSearchResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def searchKpiCatalog(
+    q: str = Query(..., min_length=1, max_length=200),
+    threshold: float = Query(0.75, ge=0.0, le=1.0),
+    limit: int = Query(10, ge=1, le=50),
+    _user: CurrentUser = Depends(getCurrentUser),
+    service: KpiSemanticMatchService = Depends(getKpiSemanticMatchService),
+) -> KpiSearchResponse:
+    """按关键词搜索 KPI 目录（基于 L1 semantic match）。
+
+    返回 confidence >= threshold 的所有 KPI，按 confidence 降序排列。
+    - 精确 alias 命中 → confidence = 1.0
+    - 关键词 Jaccard 命中 → confidence 取决于与 semantic_keywords 的 Jaccard 相似度
+
+    端点注册在 /{id} 之前（FastAPI 路由顺序要求）。
+    """
+    hits = await service.matchAll(question=q, threshold=threshold, limit=limit)
+
+    results = [
+        KpiSearchHit(
+            kpi_code=hit.code,
+            kpi_name=hit.kpi_name or hit.code,
+            confidence=hit.confidence,
+        )
+        for hit in hits
+    ]
+    return KpiSearchResponse(query=q, results=results)
 
 
 @router.post("", response_model=KpiCatalogRead, status_code=status.HTTP_201_CREATED)

@@ -1799,6 +1799,7 @@ export const enUS = {
     chart: {
       pieTitle: "Layer Distribution",
       lineTitle: "Trend (Last 7 Days)",
+      yAxisLabel: "Hit Count",
     },
     timeWindow: {
       "1d": "Last 1 Day",

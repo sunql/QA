@@ -1809,6 +1809,7 @@ export const zhCN = {
     chart: {
       pieTitle: "各层命中率占比",
       lineTitle: "近 7 天各层趋势",
+      yAxisLabel: "命中次数",
     },
     timeWindow: {
       "1d": "最近 1 天",

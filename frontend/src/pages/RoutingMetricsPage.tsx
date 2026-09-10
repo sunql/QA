@@ -36,7 +36,7 @@ const TIME_WINDOW_OPTIONS = [
   { value: "30d", label: "routingMetrics.timeWindow.30d" },
 ] as const;
 
-const LAYER_COLORS: Record<string, string> = {
+const LAYER_COLORS: Record<"L1" | "L2" | "L3" | "L4", string> = {
   L1: "#52c41a",
   L2: "#1890ff",
   L3: "#fa8c16",
@@ -63,7 +63,7 @@ function buildPieOption(snapshot: RoutingMetricsSnapshot): EChartsOption {
 }
 
 /** Mock trend data — TODO: replace with real timeseries endpoint response. */
-function buildLineOption(_snapshot: RoutingMetricsSnapshot): EChartsOption {
+function buildLineOption(_snapshot: RoutingMetricsSnapshot, t: (key: string) => string): EChartsOption {
   const days = 7;
   const date: string[] = [];
   const l1: number[] = [];
@@ -86,7 +86,7 @@ function buildLineOption(_snapshot: RoutingMetricsSnapshot): EChartsOption {
     tooltip: { trigger: "axis" },
     legend: { data: ["L1", "L2", "L3", "L4"], bottom: 0 },
     xAxis: { type: "category", data: date },
-    yAxis: { type: "value", name: "Hit Count" },
+    yAxis: { type: "value", name: t("routingMetrics.chart.yAxisLabel") },
     series: [
       { name: "L1", type: "line", smooth: true, data: l1, itemStyle: { color: LAYER_COLORS.L1 } },
       { name: "L2", type: "line", smooth: true, data: l2, itemStyle: { color: LAYER_COLORS.L2 } },
@@ -215,7 +215,7 @@ export default function RoutingMetricsPage(): JSX.Element {
             <Col xs={24} md={12}>
               <Card size="small" title={t("routingMetrics.chart.lineTitle")}>
                 <ReactECharts
-                  option={buildLineOption(snapshot)}
+                  option={buildLineOption(snapshot, t)}
                   style={{ height: 280 }}
                   opts={{ renderer: "canvas" }}
                 />

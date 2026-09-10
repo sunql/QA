@@ -23,8 +23,6 @@ vi.mock("echarts-for-react", () => ({
   )),
 }));
 
-const LAYER_KEYS = ["L1", "L2", "L3", "L4"] as const;
-
 const mockSnapshot: RoutingMetricsSnapshot = {
   since: "2026-09-01T00:00:00Z",
   until: "2026-09-10T23:59:59Z",

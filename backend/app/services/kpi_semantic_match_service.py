@@ -161,25 +161,22 @@ class KpiSemanticMatchService:
     # ------------------------------------------------------------------
 
     def _matchByKeywords(self, question: str) -> KpiMatchResult | None:
-        """按 brief 算法：提取关键词 → findByAnyKeyword 候选 → coverage 评分。"""
-        keywords = self._extractKeywords(question)
-        if not keywords:
+        """按 brief 算法：提取关键词 → findByAnyKeyword 候选 → Jaccard 评分。"""
+        user_kws = self._extractKeywords(question)
+        if not user_kws:
             return None
 
-        candidates = self._cache.findByAnyKeyword(keywords)
+        candidates = self._cache.findByAnyKeyword(user_kws)
         if not candidates:
             return None
 
-        q_lower = question.lower()
         scored: list[tuple["KpiCatalog", float]] = []
         for kpi in candidates:
-            kws = kpi.semantic_keywords or []
-            if not kws:
+            catalog_kws = kpi.semantic_keywords or []
+            if not catalog_kws:
                 continue
-            # 命中的 catalog keyword 数量 / 总数（coverage 评分）
-            matched = sum(1 for kw in kws if kw.lower() in q_lower)
-            coverage = matched / len(kws)
-            scored.append((kpi, coverage))
+            score = jaccard(user_kws, catalog_kws)
+            scored.append((kpi, score))
 
         if not scored:
             return None
@@ -217,6 +214,3 @@ class KpiSemanticMatchService:
         return keywords
 
 
-def _normalize_keywords(keywords: list[str]) -> list[str]:
-    """keyword 归一化：小写 + 去除空格。"""
-    return [k.lower().strip() for k in keywords]

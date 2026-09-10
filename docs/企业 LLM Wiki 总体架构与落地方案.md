@@ -438,22 +438,22 @@ MAT-100001
 
 建议统一定义关系字典。
 
-|Relation|中文|示例|
-|---|---|---|
-|belongs_to|属于|物料→分类|
-|contains|包含|BOM→物料|
-|used_in|用于|物料→BOM|
-|supplied_by|由...供应|物料→供应商|
-|purchased_by|被采购|物料→采购订单|
-|applies_to|适用于|规则→物料|
-|governed_by|受...管理|采购→制度|
-|defined_by|由...定义|指标→指标口径|
-|derived_from|来源于|Wiki→文档|
-|supersedes|替代|V3.2→V3.1|
-|related_to|关联|知识→知识|
-|depends_on|依赖|流程→数据|
-|produces|产生|采购流程→采购订单|
-|consumes|消耗|生产订单→物料|
+| Relation     | 中文     | 示例        |
+| ------------ | ------ | --------- |
+| belongs_to   | 属于     | 物料→分类     |
+| contains     | 包含     | BOM→物料    |
+| used_in      | 用于     | 物料→BOM    |
+| supplied_by  | 由...供应 | 物料→供应商    |
+| purchased_by | 被采购    | 物料→采购订单   |
+| applies_to   | 适用于    | 规则→物料     |
+| governed_by  | 受...管理 | 采购→制度     |
+| defined_by   | 由...定义 | 指标→指标口径   |
+| derived_from | 来源于    | Wiki→文档   |
+| supersedes   | 替代     | V3.2→V3.1 |
+| related_to   | 关联     | 知识→知识     |
+| depends_on   | 依赖     | 流程→数据     |
+| produces     | 产生     | 采购流程→采购订单 |
+| consumes     | 消耗     | 生产订单→物料   |
 
 ---
 

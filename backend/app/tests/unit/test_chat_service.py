@@ -15,6 +15,7 @@ import asyncio
 import logging
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -1520,3 +1521,76 @@ class TestExplicitModelIdRejectsInactive:
         assert response.intent == IntentType.QUERY.value
         assert response.modelName == "test-model"
         assert len(llm.calls) == 4  # 完整流水线：计划 + SQL + 图表 + 回答
+
+
+class TestChatL1Routing:
+    """Phase 1.4：L1 KPI 语义匹配路由单元测试。
+
+    使用 patch mock _buildL1Response，验证：
+    - L1 命中时 skip LLM（llm.calls == []）
+    - L1 不命中时进入 LLM 流水线（llm.calls >= 1）
+    - L1 异常时降级到 LLM 流水线
+    """
+
+    async def test_l1_hit_skips_llm(self) -> None:
+        """L1 命中时 processMessage 跳过 LLM 调用（llm.calls == []）。"""
+        from app.domain.schemas import ChatResponse
+        from app.services.kpi_semantic_match_service import KpiMatchResult
+
+        hit = KpiMatchResult(code="TEST_KPI", confidence=0.95)
+        fake_l1_resp = ChatResponse(
+            answer="指标「测试指标」",
+            intent="l1_match",
+            kpi_code="TEST_KPI",
+            kpi_name="测试指标",
+            confidence=0.95,
+            tokensUsed=0,
+            cost=0.0,
+        )
+
+        class _FakeKpiMatcher:
+            async def match(self, question: str) -> KpiMatchResult | None:
+                return hit
+
+        service, llm, _, _ = _buildService()
+        service._kpiMatcher = _FakeKpiMatcher()  # type: ignore[assignment]
+
+        # patch _buildL1Response 直接返回假 L1 响应
+        with patch.object(service, "_buildL1Response", return_value=fake_l1_resp):
+            response = await service.processMessage(_dto("测试 KPI"), _FakeSession())
+
+        assert response.intent == "l1_match"
+        assert response.kpi_code == "TEST_KPI"  # type: ignore[attr-defined]
+        assert response.tokensUsed == 0
+        assert llm.calls == []  # LLM 未被调用
+
+    async def test_l1_miss_proceeds_to_llm(self) -> None:
+        """L1 不命中时正常进入 LLM 流水线（llm.calls >= 1）。"""
+
+        class _FakeKpiMatcher:
+            async def match(self, question: str) -> KpiMatchResult | None:
+                return None  # 不命中
+
+        service, llm, _, _ = _buildService()
+        service._kpiMatcher = _FakeKpiMatcher()  # type: ignore[assignment]
+
+        response = await service.processMessage(_dto("各供应商的收货数量汇总"), _FakeSession())
+        assert response.intent == IntentType.QUERY.value
+        assert len(llm.calls) >= 1  # LLM 被调用了
+
+    async def test_l1_exception_falls_back_to_llm(self) -> None:
+        """L1 match 抛异常时降级到 LLM 流水线，不抛 500。"""
+
+        class _FaultyKpiMatcher:
+            async def match(self, question: str) -> KpiMatchResult | None:
+                raise RuntimeError("cache unavailable")
+
+        service, llm, _, _ = _buildService()
+        service._kpiMatcher = _FaultyKpiMatcher()  # type: ignore[assignment]
+
+        response = await service.processMessage(_dto("各供应商的收货数量汇总"), _FakeSession())
+        # 降级到 LLM，流水线继续，不抛异常
+        assert response.intent == IntentType.QUERY.value
+        assert len(llm.calls) >= 1
+
+

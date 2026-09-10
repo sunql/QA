@@ -53,9 +53,12 @@ class KpiMatchCache:
         return list(self._by_code.values())
 
     def hasCode(self, code: str) -> bool:
-        """code 是否存在于缓存中。"""
+        """code 是否存在于缓存中。
+
+        未 warmUp 时返回 False（降级到 LLM 流水线，不阻断用户）。
+        """
         if not self._loaded:
-            raise RuntimeError("KpiMatchCache 未 warmUp（lifespan bug）")
+            return False
         return code in self._by_code
 
     def findByAnyKeyword(self, keywords: list[str]) -> list["KpiCatalog"]:
@@ -63,9 +66,10 @@ class KpiMatchCache:
 
         匹配方式：keyword 是 catalog keyword 的子串（大小写不敏感）。
         返回去重列表（一个 KPI 可能被多个 keyword 命中，只出现一次）。
+        未 warmUp 时返回空列表（降级到 LLM 流水线，不阻断用户）。
         """
         if not self._loaded:
-            raise RuntimeError("KpiMatchCache 未 warmUp（lifespan bug）")
+            return []
         seen: set[int] = set()
         result: list["KpiCatalog"] = []
         for kw in keywords:

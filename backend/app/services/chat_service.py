@@ -70,6 +70,7 @@ from app.services.audit_service import AuditService
 from app.services.chart_service import ChartService
 from app.services.chat_stream_output import _ANSWER_SYSTEM_PROMPT, ChatStreamOutputMixin
 from app.services.datasource_service import DataSourceService
+from app.services.kpi_semantic_match_service import KpiMatchResult, KpiSemanticMatchService
 from app.services.embedding_service import EmbeddingService
 from app.services.intent_service import IntentResult, IntentService
 from app.domain.error_messages import (
@@ -343,6 +344,7 @@ class ChatService(ChatStreamOutputMixin):
         graphTraversalService: GraphTraversalService | None = None,  # Phase 6.3：图推理
         agentRuntimeService: AgentRuntimeService | None = None,  # Phase 6.4：Agent 运行时
         supplierNameResolver: SupplierNameResolver | None = None,  # Phase 6.5：名字预解析
+        kpiMatcher: KpiSemanticMatchService | None = None,  # Phase 1.4：L1 KPI 语义匹配
     ) -> None:
         self._intent = intentService or IntentService()
         self._nl2sql = nl2sqlService or Nl2SqlService()
@@ -360,6 +362,11 @@ class ChatService(ChatStreamOutputMixin):
         self._stepAggregator = stepAggregator or StepAggregator()
         # Phase 1.4：注入 DQ 评分 service（默认懒加载避免循环 import）
         self._dqScoreService = dqScoreService
+        # Phase 1.4：注入 L1 KPI 语义匹配 service（使用模块级单例缓存）
+        self._kpiMatcher = kpiMatcher
+        if self._kpiMatcher is None:
+            from app.services.kpi_match_cache import get_kpi_match_cache
+            self._kpiMatcher = KpiSemanticMatchService(get_kpi_match_cache())
         # Phase 4.4：注入 Feature 查询 service（默认懒加载避免循环 import）
         self._featureQueryService: Any | None = None
         # Phase 6.3：图推理 service（无循环依赖，直接实例化）
@@ -398,6 +405,24 @@ class ChatService(ChatStreamOutputMixin):
                 session, dto.sessionId, dto.question, exc.message, None
             )
             return ChatResponse(answer=exc.message, intent=preResult.intent.value)
+
+        # Phase 1.4：L1 KPI 语义匹配拦截（命中即返回，0 LLM 开销）
+        # 插入在 _classifyMessage 之前：所有意图分类前先过 L1 快车道
+        try:
+            match = await self._kpiMatcher.match(dto.question)
+            if match is not None:
+                l1_response = await self._buildL1Response(match, session)
+                if l1_response is not None:
+                    logger.info(
+                        "L1 KPI hit: code=%s confidence=%s",
+                        match.code, match.confidence,
+                    )
+                    await self._storeSessionMessages(
+                        session, dto.sessionId, dto.question, l1_response.answer, None,
+                    )
+                    return l1_response
+        except Exception:  # noqa: BLE001 — L1 异常不阻断，降级到原 LLM 流水线
+            logger.warning("L1 KPI match failed, falling back to LLM", exc_info=True)
 
         result, state = await self._classifyMessage(session, dto)
         if result.intent == IntentType.CHITCHAT:
@@ -1726,6 +1751,94 @@ class ChatService(ChatStreamOutputMixin):
             return None
         return ExtractedEntities(
             dimension=result.dimension, metric=result.metric, chartType=result.chartType
+        )
+
+    # =========================================================================
+    # Phase 1.4：L1 KPI 语义匹配
+    # =========================================================================
+
+    async def _buildL1Response(
+        self,
+        match: KpiMatchResult,
+        session: AsyncSession,
+    ) -> ChatResponse | None:
+        """Phase 1.4：L1 命中时，从 KPI 计算结果构建 ChatResponse。
+
+        流程：KpiMatchResult.code → KpiCatalog → FeatureDefinition.calculation_logic
+        → 执行只读 SQL → 包装 ChatResponse。
+
+        降级策略：
+        - KPI code 找不到 / 无 calculation_logic / SQL 执行失败 → log warning
+          + 返回 None（调用方继续 LLM 流水线）。
+        - 任何异常均不阻断 chat 主链路（0 LLM 开销，命中即返回；失败即降级）。
+
+        返回 ChatResponse 时 intent="l1_match"，data 含计算结果行，
+        kpiCode/kpiName/confidence 作为额外字段透传。
+        """
+        from sqlalchemy import select
+
+        from app.domain.models import FeatureDefinition, KpiCatalog
+
+        # 1. 查 KpiCatalog（获取 calculation_logic 或 formula）
+        row = await session.execute(
+            select(KpiCatalog).where(KpiCatalog.kpi_code == match.code)
+        )
+        kpi = row.scalar_one_or_none()
+        if kpi is None:
+            logger.warning("L1 match code=%s not found in kpi_catalog", match.code)
+            return None
+
+        # 2. 构造 answer 文本（不调 LLM，直接读 business_definition / kpi_name）
+        kpi_name = kpi.kpi_name or match.code
+        answer = f"指标「{kpi_name}」"
+
+        # 3. 优先用 calculation_logic 执行查询获取实时数据
+        data: list[dict] | None = None
+        if kpi.formula and kpi.formula.strip():
+            # formula 是「读业务库的单条只读 SELECT」；
+            # 先找对应的 FeatureDefinition（entity_key 维度）获取计算逻辑
+            feat_row = await session.execute(
+                select(FeatureDefinition).where(
+                    FeatureDefinition.feature_definition == kpi.formula,
+                    FeatureDefinition.is_enabled.is_(True),
+                )
+            )
+            feat = feat_row.scalar_one_or_none()
+            if feat is not None:
+                try:
+                    adapter = self._adapterProvider(feat.datasource_id, feat)
+                    raw = adapter.execute_read_only(feat.calculation_logic)
+                    if raw is not None:
+                        # 标准化为 list[dict]
+                        if isinstance(raw, list):
+                            data = [dict(r) for r in raw]
+                        elif isinstance(raw, (list, tuple)):
+                            data = [dict(raw)]
+                        else:
+                            data = [{"value": raw}]
+                        # 追加指标名到回答
+                        if data:
+                            first_val = str(next((v for v in data[0].values() if v is not None), "—"))
+                            answer += f"：{first_val}"
+                except Exception:
+                    logger.warning("L1 calculation_logic execution failed for %s", match.code, exc_info=True)
+                    answer += f"（{kpi.business_definition or '详见系统'}）"
+            else:
+                answer += f"（{kpi.business_definition or '详见系统'}）"
+        else:
+            answer += f"（{kpi.business_definition or '详见系统'}）"
+
+        # 4. 包装 ChatResponse（intent=l1_match，零 token 消耗）
+        return ChatResponse(
+            answer=answer,
+            intent="l1_match",
+            data=data,
+            kpi_code=match.code,
+            kpi_name=kpi_name,
+            confidence=match.confidence,
+            tokensUsed=0,
+            cost=0.0,
+            modelName=None,
         )
 
     # =========================================================================

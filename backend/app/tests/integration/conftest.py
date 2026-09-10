@@ -83,6 +83,10 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
 
     businessObjectRegistry.invalidate()
     await businessObjectRegistry.warmUp(dbSession)
+    # Phase 1.4：warmUp kpi_match_cache（L1 匹配依赖）
+    from app.services.kpi_match_cache import kpi_match_cache
+    kpi_match_cache.onKpiChanged()
+    await kpi_match_cache.warmUp(dbSession)
     # 关掉 warmUp SELECT 留下的隐式事务：否则 dbSession 持有 AccessShareLock，
     # 阻塞后续 pgSession/engine B 的 TRUNCATE（feat-agent-tool-config-db 教训）
     await dbSession.commit()
@@ -91,3 +95,5 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     agent_tool_config_registry.invalidate()
     feature_rule_registry.invalidate()
     businessObjectRegistry.invalidate()
+    from app.services.kpi_match_cache import kpi_match_cache
+    kpi_match_cache.onKpiChanged()

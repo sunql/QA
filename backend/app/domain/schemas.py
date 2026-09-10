@@ -1647,6 +1647,19 @@ class ChatResponse(CamelModel):
         default=None,
         description="中置信语义路由建议卡片：推荐执行某个 Agent（推荐编码 + 置信度 + 理由）",
     )
+    # Phase 1.4：L1 KPI 语义匹配命中结果（仅 intent=l1_match 时填充；前端按字段存在性渲染）
+    kpi_code: str | None = Field(
+        default=None,
+        description="L1 命中的 KPI code",
+    )
+    kpi_name: str | None = Field(
+        default=None,
+        description="L1 命中的 KPI 名称",
+    )
+    confidence: float | None = Field(
+        default=None,
+        description="L1 匹配置信度（精确 alias=1.0，关键词 Jaccard∈(0,1]）",
+    )
 
 
 class DataQualityBadge(CamelModel):

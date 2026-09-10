@@ -13,7 +13,7 @@ onKpiChanged() 失效。
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select, event
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -118,18 +118,30 @@ class KpiMatchCache:
             self._loaded = False
             logger.debug("KpiMatchCache 全量失效")
         else:
-            # 单条失效：仅清 _by_code 中该项；_by_keyword 不做精确逆操作（下次 refresh 重建）
-            self._by_code.pop(kpi_code, None)
+            # 单条失效：同时清 _by_code 和 _by_keyword 中该 KPI 的所有引用
+            old = self._by_code.pop(kpi_code, None)
+            if old:
+                for kw in (old.semantic_keywords or []):
+                    lst = self._by_keyword.get(kw)
+                    if lst:
+                        self._by_keyword[kw] = [k for k in lst if k.kpi_code != kpi_code]
+                        if not self._by_keyword[kw]:
+                            del self._by_keyword[kw]
             logger.debug("KpiMatchCache 失效: %s", kpi_code)
 
     async def refreshOne(self, session: AsyncSession, kpi_code: str) -> None:
         """写时刷新单条（update 路径）：重新查询该 KPI 并更新索引。
 
         仅当缓存已 warmUp 时调用；若未 warmUp 则跳过（lifespan 会兜底）。
+
+        先清理该 KPI 在两个索引中的旧条目，再插入新数据。
         """
         if not self._loaded:
             return
         from app.domain.models import KpiCatalog
+
+        # 先清理该 KPI 在两个索引中的旧条目
+        self.onKpiChanged(kpi_code)
 
         row = await session.execute(
             select(KpiCatalog).where(KpiCatalog.kpi_code == kpi_code)
@@ -138,19 +150,12 @@ class KpiMatchCache:
 
         if kpi is None:
             # 该 KPI 已被删除或不存在
-            self._by_code.pop(kpi_code, None)
             return
 
-        self._by_code[kpi_code] = kpi
-
-        # 重建 keyword 索引（简化：清除旧值让 findByAnyKeyword 自行膨胀，下次 full refresh 再精确）
-        # 注意：此处不精确清理旧 keyword 条目，保持实现简单；full refresh 可修正
-        if kpi.semantic_keywords:
-            for kw in kpi.semantic_keywords:
-                if kw not in self._by_keyword:
-                    self._by_keyword[kw] = []
-                if kpi not in self._by_keyword[kw]:
-                    self._by_keyword[kw].append(kpi)
+        if kpi.status == KpiStatus.PUBLISHED.value and kpi.is_enabled:
+            self._by_code[kpi_code] = kpi
+            for kw in (kpi.semantic_keywords or []):
+                self._by_keyword.setdefault(kw, []).append(kpi)
 
 
 # ---------------------------------------------------------------------------
@@ -186,3 +191,8 @@ _setup_kpi_catalog_listeners()
 
 # 模块级单例（供 FastAPI lifespan 使用）
 kpi_match_cache = KpiMatchCache()
+
+
+def get_kpi_match_cache() -> KpiMatchCache:
+    """返回模块级单例（供 KpiCatalogService 等调用写时失效）。"""
+    return kpi_match_cache

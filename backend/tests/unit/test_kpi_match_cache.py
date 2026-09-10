@@ -31,12 +31,14 @@ class _FakeKpiRow:
         semantic_keywords: list[str] | None,
         match_threshold: Decimal,
         status: str,
+        is_enabled: bool = True,
     ) -> None:
         self.kpi_code = kpi_code
         self.kpi_name = kpi_name
         self.semantic_keywords = semantic_keywords
         self.match_threshold = match_threshold
         self.status = status
+        self.is_enabled = is_enabled
 
     def _asdict(self):
         return {
@@ -45,6 +47,7 @@ class _FakeKpiRow:
             "semantic_keywords": self.semantic_keywords,
             "match_threshold": self.match_threshold,
             "status": self.status,
+            "is_enabled": self.is_enabled,
         }
 
 
@@ -67,13 +70,34 @@ class _FakeResult:
     def scalars(self) -> _FakeScalarResult:
         return _FakeScalarResult(self._rows)
 
+    def scalar_one_or_none(self) -> _FakeKpiRow | None:
+        return self._rows[0] if self._rows else None
+
+
+def _where_column_keys(stmt) -> set[str]:
+    """Extract column keys from a SQLAlchemy select statement's whereclause."""
+    result: set[str] = set()
+    wc = stmt.whereclause
+    if wc is None:
+        return result
+    def walk(clause):
+        if hasattr(clause, "left") and hasattr(clause, "right"):
+            left = clause.left
+            if hasattr(left, "key"):
+                result.add(left.key)
+        if hasattr(clause, "clauses"):
+            for c in clause.clauses:
+                walk(c)
+    walk(wc)
+    return result
+
 
 class _FakeSession:
     """Fake AsyncSession：可预设全量行，及单条 update/delete 后的状态。
 
-    默认行为（warmUp 路径）：仅返回 status=PUBLISHED 的行。
-    因为 KpiMatchCache.warmUp() 的查询条件恒为 status=PUBLISHED，
-    这是唯一被调用的查询路径。
+    支持两种查询模式：
+    1. warmUp 路径：status=PUBLISHED 的全量行
+    2. refreshOne 路径：按 kpi_code 精确查询单行
     """
     def __init__(
         self,
@@ -83,25 +107,40 @@ class _FakeSession:
         self._rows: list[_FakeKpiRow] = list(initial_rows)
         # 事件队列（模拟 insert/update/delete 后的变化）
         self._after_events: list[str] = []
+        # refreshOne 注入：模拟更新后的行（code -> row 映射）
+        self._updated_rows: dict[str, _FakeKpiRow] = {}
 
     async def execute(self, stmt):
-        if self._after_events:
-            event = self._after_events.pop(0)
-            if event == "INSERT":
-                pass
-            elif event == "UPDATE":
-                pass
-        # KpiMatchCache.warmUp() 恒查 status=PUBLISHED；返回仅有 PUBLISHED 行
+        # 通过 whereclause 判断查询类型（不用字符串匹配，避免 SELECT 列表干扰）
+        where_keys = _where_column_keys(stmt)
+        # refreshOne：where 条件包含 kpi_code（不含 status）
+        # warmUp：where 条件包含 status
+        if "kpi_code" in where_keys and "status" not in where_keys:
+            # 优先用 _updated_rows 中的版本（反映 update 后的数据）
+            if self._updated_rows:
+                for row in list(self._rows):
+                    if row.kpi_code in self._updated_rows:
+                        found = self._updated_rows[row.kpi_code]
+                        return _FakeResult([found] if found.status == "PUBLISHED" else [])
+            # fallback：原始行
+            for row in list(self._rows):
+                if row.status == "PUBLISHED":
+                    return _FakeResult([row])
+            return _FakeResult([])
+        # warmUp：返回所有 PUBLISHED 行
         return _FakeResult([r for r in self._rows if r.status == "PUBLISHED"])
 
     def simulate_insert(self, row: _FakeKpiRow) -> None:
         """模拟 insert 后该行进入 _rows。"""
         self._rows.append(row)
+        self._updated_rows[row.kpi_code] = row
         self._after_events.append("INSERT")
 
-    def simulate_update(self, kpi_code: str) -> None:
-        """模拟 update 后触发写时失效。"""
+    def simulate_update(self, kpi_code: str, updated_row: _FakeKpiRow | None = None) -> None:
+        """模拟 update 后触发写时失效，并可注入更新后的行数据。"""
         self._after_events.append("UPDATE")
+        if updated_row:
+            self._updated_rows[kpi_code] = updated_row
 
     def simulate_delete(self, kpi_code: str) -> None:
         """模拟 delete 后触发写时失效。"""
@@ -278,4 +317,147 @@ class TestCacheInvalidation:
         # 已从缓存移除
         assert cache.hasCode("KPI_SUPPLIER_OTD") is False
         # 另一条不受影响
+        assert cache.hasCode("KPI_SUPPLIER_DEFECT_RATE") is True
+
+
+class TestOnKpiChangedKeywordCleanup:
+    """onKpiChanged 必须同时清理 _by_code 和 _by_keyword，防止 stale keyword entries。"""
+
+    @pytest.fixture()
+    def cache(self) -> KpiMatchCache:
+        return KpiMatchCache()
+
+    @pytest.mark.asyncio
+    async def test_onKpiChanged_cleans_keyword_index(self, cache: KpiMatchCache) -> None:
+        """更新 KPI 改变 semantic_keywords 后，旧 keyword 索引必须被清除。"""
+        session = _FakeSession(initial_rows=[_KPI_OTD])
+        await cache.warmUp(session)
+
+        # 初始：keyword 索引中有 "准时交付"
+        results = cache.findByAnyKeyword(["准时交付"])
+        assert len(results) == 1
+        assert results[0].kpi_code == "KPI_SUPPLIER_OTD"
+
+        # onKpiChanged 后，_by_code 和 _by_keyword 都应清空该 KPI 的引用
+        cache.onKpiChanged("KPI_SUPPLIER_OTD")
+        results_after = cache.findByAnyKeyword(["准时交付"])
+        assert results_after == []
+
+    @pytest.mark.asyncio
+    async def test_onKpiChanged_cleans_code_index(self, cache: KpiMatchCache) -> None:
+        """onKpiChanged 后 hasCode 应返回 False。"""
+        session = _FakeSession(initial_rows=[_KPI_OTD])
+        await cache.warmUp(session)
+
+        assert cache.hasCode("KPI_SUPPLIER_OTD") is True
+        cache.onKpiChanged("KPI_SUPPLIER_OTD")
+        assert cache.hasCode("KPI_SUPPLIER_OTD") is False
+
+    @pytest.mark.asyncio
+    async def test_refreshOne_removes_old_keywords(self, cache: KpiMatchCache) -> None:
+        """refreshOne 替换 KPI 时，旧的 keyword 索引被清理。"""
+        session = _FakeSession(initial_rows=[_KPI_OTD])
+        await cache.warmUp(session)
+
+        # 初始有 "准时交付"
+        assert len(cache.findByAnyKeyword(["准时交付"])) == 1
+
+        # 模拟 update：同一 code 的 KPI，但 keywords 完全变了
+        updated_kpi = _FakeKpiRow(
+            kpi_code="KPI_SUPPLIER_OTD",
+            kpi_name="供应商准时交付率（更新）",
+            semantic_keywords=["新关键词", "new"],
+            match_threshold=Decimal("0.80"),
+            status="PUBLISHED",
+            is_enabled=True,
+        )
+        session.simulate_update("KPI_SUPPLIER_OTD", updated_kpi)
+        await cache.refreshOne(session, "KPI_SUPPLIER_OTD")
+
+        # 旧 keyword 不再命中
+        assert cache.findByAnyKeyword(["准时交付"]) == []
+        # 新 keyword 命中
+        results = cache.findByAnyKeyword(["新关键词"])
+        assert len(results) == 1
+        assert results[0].kpi_code == "KPI_SUPPLIER_OTD"
+
+
+class TestKpiCatalogServiceWriteInvalidation:
+    """验证 KpiCatalogService.create/update/delete 后 cache 被正确刷新的行为。"""
+
+    @pytest.fixture()
+    def cache(self) -> KpiMatchCache:
+        return KpiMatchCache()
+
+    @pytest.mark.asyncio
+    async def test_service_create_refreshes_cache(self, cache: KpiMatchCache) -> None:
+        """create 后 cache 必须包含新 KPI。"""
+        from app.services.kpi_match_cache import KpiMatchCache as CacheModule
+
+        # 用测试缓存替换模块单例
+        original = CacheModule._test_cache = CacheModule._test_cache if hasattr(CacheModule, '_test_cache') else None
+        CacheModule._test_cache = cache
+
+        try:
+            session = _FakeSession(initial_rows=[_KPI_OTD])
+            await cache.warmUp(session)
+
+            # 模拟创建新 KPI
+            new_kpi = _FakeKpiRow(
+                kpi_code="KPI_NEW_SERVICE",
+                kpi_name="新建指标",
+                semantic_keywords=["新"],
+                match_threshold=Decimal("0.75"),
+                status="PUBLISHED",
+                is_enabled=True,
+            )
+            session.simulate_insert(new_kpi)
+
+            # refreshOne 模拟 createKpi 后的行为
+            await cache.refreshOne(session, "KPI_NEW_SERVICE")
+
+            assert cache.hasCode("KPI_NEW_SERVICE") is True
+            assert len(cache.findByAnyKeyword(["新"])) == 1
+        finally:
+            if original is not None:
+                CacheModule._test_cache = original
+            elif hasattr(CacheModule, '_test_cache'):
+                delattr(CacheModule, '_test_cache')
+
+    @pytest.mark.asyncio
+    async def test_service_update_refreshes_cache(self, cache: KpiMatchCache) -> None:
+        """update 后 cache 必须反映新 keywords。"""
+        session = _FakeSession(initial_rows=[_KPI_OTD])
+        await cache.warmUp(session)
+
+        updated_kpi = _FakeKpiRow(
+            kpi_code="KPI_SUPPLIER_OTD",
+            kpi_name="供应商准时交付率（更新）",
+            semantic_keywords=["changed"],
+            match_threshold=Decimal("0.80"),
+            status="PUBLISHED",
+            is_enabled=True,
+        )
+        session.simulate_update("KPI_SUPPLIER_OTD", updated_kpi)
+        await cache.refreshOne(session, "KPI_SUPPLIER_OTD")
+
+        assert cache.hasCode("KPI_SUPPLIER_OTD") is True
+        # 旧 keyword 已清
+        assert cache.findByAnyKeyword(["准时交付"]) == []
+        # 新 keyword 存在
+        results = cache.findByAnyKeyword(["changed"])
+        assert len(results) == 1
+        assert results[0].kpi_code == "KPI_SUPPLIER_OTD"
+
+    @pytest.mark.asyncio
+    async def test_service_delete_invalidates_cache(self, cache: KpiMatchCache) -> None:
+        """delete 后 cache 必须移除该 KPI。"""
+        session = _FakeSession(initial_rows=[_KPI_OTD, _KPI_DEFECT])
+        await cache.warmUp(session)
+
+        session.simulate_delete("KPI_SUPPLIER_OTD")
+        cache.onKpiChanged("KPI_SUPPLIER_OTD")
+
+        assert cache.hasCode("KPI_SUPPLIER_OTD") is False
+        # 其他 KPI 不受影响
         assert cache.hasCode("KPI_SUPPLIER_DEFECT_RATE") is True

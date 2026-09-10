@@ -253,6 +253,23 @@ def _renderStatePart(priorState: str) -> str:
     )
 
 
+def _renderPriorCtePart(prior_cte: str) -> str:
+    """prior_cte 注入段：多步串联场景下前序 CTE 片段（Task 3.2）。
+
+    prior_cte 来自 render_prior_cte()（chained_step_plan.py），格式为
+    `cte_alias AS (cte_body)` 或 `WITH cte1 AS (...), cte2 AS (...)`。
+    注入 system prompt 使当前步 LLM 知道前序 CTE 的存在与结构，
+    从而能在 formula 中引用（如 `SELECT ... FROM cte_alias`）。
+
+    prior_cte 本身已经在入参处经过 SQL Guard 校验（_assert_read_only），
+    此处仅作 prompt 注入，是数据而非指令。
+    """
+    return (
+        "\n以下前序步骤已生成的 CTE（可直接在当前 SQL 中引用其别名）：\n"
+        f"<prior_cte>\n{prior_cte}\n</prior_cte>\n"
+    )
+
+
 def _sanitizeSchemaField(value: str) -> str:
     """本体配置字段（别名/描述）渲染前的净化：转义尖括号 + 折叠换行。
 
@@ -1674,6 +1691,7 @@ class Nl2SqlService:
         driftWarning: str | None = None,
         joins: list[OntologyJoin] | None = None,
         scopeQuestion: str | None = None,
+        prior_cte: str | None = None,
     ) -> SqlResult:
         """生成 SQL。最多 maxRetries+1 次尝试；失败注入错误重试。
 
@@ -1688,6 +1706,10 @@ class Nl2SqlService:
         driftWarning（2-4）为 schema 漂移告警文本，追加进 schema 小节。
         scopeQuestion 为多步场景下的主问题原文，由 _renderScopeHintPart 转义后
         注入 user prompt；None = 单步场景，不注入。
+        prior_cte 为多步串联场景下前序步骤已生成的 CTE（Task 3.2）：
+        由 LLM 生成或上层显式传入，格式为 `cte_alias AS (cte_body)` 片段，
+        经 SQL Guard 校验后拼装到最终 SQL（`WITH prior_cte SELECT ...`）。
+        同时注入 system prompt 供当前步引用前序 CTE。
         """
         if maxRetries is None:
             maxRetries = getSettings().nl2sqlMaxRetries
@@ -1702,6 +1724,17 @@ class Nl2SqlService:
         errors: list[str] = []
         totalPrompt = 0
         totalCompletion = 0
+        # prior_cte 先行校验（Task 3.2）：来自 LLM 生成或上层显式传入，
+        # 必须经 SQL Guard 确保是只读 CTE（SELECT/WITH），防止注入写操作。
+        if prior_cte:
+            try:
+                _assert_read_only(prior_cte)
+            except SqlSafetyError as exc:
+                raise Nl2SqlError(
+                    MSG_NL2SQL_SQL_INVALID,
+                    detail=f"prior_cte 未通过安全校验（仅允许 SELECT/WITH 只读查询）: {exc}",
+                    tokens=(0, 0),
+                )
         # 截断重试预算：首次为 _NL2SQL_MAX_TOKENS，截断命中后翻倍（有上限）。
         # temperature=0 时同输入必得同输出，若预算不变，截断重试只会反复产出
         # 同一段截断 SQL（且注入的截断提示使输入变长、更易再截断）；翻倍预算让
@@ -1712,6 +1745,7 @@ class Nl2SqlService:
             systemPrompt = self._buildSystemPrompt(
                 schemaText, dialect, schemaPrefix,
                 context=context, priorState=priorState, plan=plan, fewShot=fewShot,
+                prior_cte=prior_cte,
             )
             userPrompt = self._buildUserPrompt(question, errors, executionError, scopeQuestion=scopeQuestion)
             response = await llmClient.complete(
@@ -1745,6 +1779,10 @@ class Nl2SqlService:
                 )
                 maxTokens = min(maxTokens * 2, _NL2SQL_TRUNCATION_BACKOFF)
                 continue
+            # prior_cte 已有先行校验；若有 prior_cte 则将其 prepend 到 LLM SQL，
+            # 再对组合后的完整 SQL 做 SQL Guard（Task 3.2）。
+            if prior_cte:
+                sql = f"WITH {prior_cte}\n{sql}"
             try:
                 _assert_read_only(sql)
             except SqlSafetyError as exc:
@@ -1941,6 +1979,7 @@ class Nl2SqlService:
         priorState: str | None = None,
         plan: QueryPlan | None = None,
         fewShot: str | None = None,
+        prior_cte: str | None = None,
     ) -> str:
         safePrefix = _safeSchemaPrefix(schemaPrefix)
         schemaPart = schemaText if schemaText else "（当前没有可用表结构，请判断问题并直接说明无法回答）"
@@ -1964,6 +2003,7 @@ class Nl2SqlService:
         if priorState:
             # 2026-08-17 修复：强指令化（entity_list / aggregate 分类 + WHERE IN）
             statePart = _renderStatePart(priorState)
+        priorCtePart = _renderPriorCtePart(prior_cte) if prior_cte else ""
         planPart = ""
         if plan is not None:
             planPart = (
@@ -1988,6 +2028,7 @@ class Nl2SqlService:
             f"你是一个专业的数据分析师，负责把用户的自然语言问题转换为 {dialect.name} 数据库 SQL 查询。\n\n"
             f"{contextPart}"
             f"{statePart}"
+            f"{priorCtePart}"
             f"{fewShotPart}"
             "可用的数据表结构（来自企业本体元数据）：\n"
             f"{schemaPart}\n\n"

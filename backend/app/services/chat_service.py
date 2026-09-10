@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -68,7 +69,7 @@ from app.domain.schemas import (
     OntologyMetricCreate,
     OntologyPropertyUpdate,
 )
-from app.infrastructure.business_db_pool import BusinessDbAdapter, get_adapter
+from app.infrastructure.business_db_pool import BusinessDbAdapter, _assert_read_only, get_adapter
 from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage
 from app.infrastructure.llm.factory import createClient
 from app.services.audit_service import AuditService
@@ -422,8 +423,12 @@ class ChatService(ChatStreamOutputMixin):
                         "L1 KPI hit: code=%s confidence=%s",
                         match.code, match.confidence,
                     )
+                    # L1: 0 LLM cost, capture wall-clock latency
+                    _t0 = time.monotonic()
                     await self._storeSessionMessages(
                         session, dto.sessionId, dto.question, l1_response.answer, None,
+                        routing_layer="L1", latency_ms=int((time.monotonic() - _t0) * 1000),
+                        token_cost_usd=0.0,
                     )
                     return l1_response
         except Exception:  # noqa: BLE001 — L1 异常不阻断，降级到原 LLM 流水线
@@ -542,8 +547,12 @@ class ChatService(ChatStreamOutputMixin):
             intent=IntentType.NEW_QUERY.value,
             sql=result.final_sql,
         )
+        _t0 = time.monotonic()
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, response.answer, result.final_sql,
+            routing_layer="L4",
+            latency_ms=int((time.monotonic() - _t0) * 1000),
+            token_cost_usd=float(result.total_cost_usd),
         )
         logger.info(
             "L4 agent loop hit: iterations=%d cost=%.4f tool_calls=%s terminated=%s",
@@ -585,7 +594,9 @@ class ChatService(ChatStreamOutputMixin):
 
         Phase 7 G4 从 processMessage 抽出：语义路由建议卡片在 processMessage
         统一附加到响应，避免在多条返回路径上重复拼接。
+        L2 single-step pipeline; captures wall-clock latency for Phase 5 monitoring.
         """
+        _t0 = time.monotonic()
         pc = await self._buildPipelineContext(
             session, dto,
             needFewShot=result.intent != IntentType.CLARIFY,
@@ -606,6 +617,7 @@ class ChatService(ChatStreamOutputMixin):
                     return await self._executeMultiStep(
                         session, dto, pc, multi_plan, state,
                         initial_tokens=step_tokens, initial_cost=step_cost,
+                        _t0=_t0,
                     )
             # L1.5（2026-08-17 真实回归）：并列复合问题（无显式分步信号但语义多步，
             # 如"查询3月份采购订单数量、Top 10物料占比、Top 10物料在4月份的订单数量"）
@@ -620,12 +632,13 @@ class ChatService(ChatStreamOutputMixin):
                     return await self._executeMultiStep(
                         session, dto, pc, multi_plan, state,
                         initial_tokens=step_tokens, initial_cost=step_cost,
+                        _t0=_t0,
                     )
 
         outcome = await self._planAndGenerateSql(session, dto, pc, result.intent, state)
         if outcome.sql is None:
             # 计划 target=无法回答：不执行 SQL/图表/回答 LLM，直接给出固定友好回答
-            return await self._unanswerableResponse(session, dto, pc, result.intent, outcome)
+            return await self._unanswerableResponse(session, dto, pc, result.intent, outcome, _t0=_t0)
         # Phase 4.4：计划引用了可用 Feature 且特征有值 -> 直接回流特征值，
         # 跳过 SQL 生成与业务库执行（feature_value 在元数据库，非业务库）。
         featureResponse = await self._tryFeatureResponse(session, dto, pc, outcome)
@@ -673,7 +686,14 @@ class ChatService(ChatStreamOutputMixin):
             )
         # 图表/回答用量已在 _chartStep / _recordAnswerUsage 中记录，此处仅汇总展示
         await self._recordAnswerUsage(session, dto, answerConfig, answerResp)
-        await self._storeSessionMessages(session, dto.sessionId, dto.question, answerResp.content, finalSql)
+        # L2: totalCost is Decimal, captured from LLM usage across all stages (SQL + chart + answer)
+        _elapsed_ms = int((time.monotonic() - _t0) * 1000)
+        await self._storeSessionMessages(
+            session, dto.sessionId, dto.question, answerResp.content, finalSql,
+            routing_layer="L2",
+            latency_ms=_elapsed_ms,
+            token_cost_usd=float(totalCost),
+        )
         await self._saveQueryState(
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=finalSql,
@@ -702,6 +722,7 @@ class ChatService(ChatStreamOutputMixin):
             ))],
             tokensUsed=totalTokens,
             cost=float(totalCost),
+            latency_ms=int((time.monotonic() - _t0) * 1000),
             modelName=answerConfig.model_name,
             queryPlan=outcome.plan.to_dict() if outcome.plan else None,
             extractedEntities=self._entitiesFor(result),
@@ -1094,6 +1115,7 @@ class ChatService(ChatStreamOutputMixin):
         *,
         initial_tokens: int = 0,
         initial_cost: Decimal = Decimal("0"),
+        _t0: float,
     ) -> ChatResponse:
         """顺序执行每个子步骤，最后调用 StepAggregator 汇总，返回完整多步响应。
 
@@ -1103,6 +1125,8 @@ class ChatService(ChatStreamOutputMixin):
 
         initial_tokens/initial_cost：进入多步前已消耗的 token/成本（拆步判定、或
         单步失败回退时已消耗的单步生成），计入响应 tokensUsed/cost，保证与审计行一致。
+
+        _t0：调用方传入的计时起点（来自 _handleGenericQuery 入口计时）。
         """
         ctx = StepExecutionContext(
             datasource_type=pc.ds.type,
@@ -1146,6 +1170,9 @@ class ChatService(ChatStreamOutputMixin):
                 )
                 await self._storeSessionMessages(
                     session, dto.sessionId, dto.question, agg_content, None,
+                    routing_layer="L2",
+                    latency_ms=int((time.monotonic() - _t0) * 1000),
+                    token_cost_usd=float(total_cost),
                 )
                 # 保存查询状态：用最后一个数据步骤的 plan/sql，支持下一轮 REFINE/FOLLOW_UP
                 await self._saveQueryState(
@@ -1162,6 +1189,7 @@ class ChatService(ChatStreamOutputMixin):
                     steps=[_step_result_to_read(s) for s in completed],
                     tokensUsed=total_tokens,
                     cost=float(total_cost),
+                    latency_ms=int((time.monotonic() - _t0) * 1000),
                     modelName=last_model_name,
                     affinityStatus=affinity,
                 )
@@ -1233,6 +1261,7 @@ class ChatService(ChatStreamOutputMixin):
             steps=[_step_result_to_read(s) for s in completed],
             tokensUsed=total_tokens,
             cost=float(total_cost),
+            latency_ms=int((time.monotonic() - _t0) * 1000),
             modelName=last_model_name,
         )
 
@@ -2038,6 +2067,7 @@ class ChatService(ChatStreamOutputMixin):
 
         try:
             adapter = self._adapterProvider(feat.datasource_id, feat)
+            _assert_read_only(feat.calculation_logic)
             raw = adapter.execute_read_only(feat.calculation_logic)
             if raw is None:
                 return None
@@ -2186,9 +2216,10 @@ class ChatService(ChatStreamOutputMixin):
                 async for event in self._streamInterceptCard(dto, session, result, user):
                     yield event
                 return
+            _stream_t0 = time.monotonic()
             async for event in self._streamQuery(
                 dto, session, result.intent, state, result.chartType,
-                suggestion=result.suggested_agent,
+                suggestion=result.suggested_agent, _t0=_stream_t0,
             ):
                 yield event
         except LlmClientError as exc:
@@ -2312,12 +2343,16 @@ class ChatService(ChatStreamOutputMixin):
         self, dto: ChatRequest, session: AsyncSession, intent: IntentType, state: SessionQueryState | None,
         intentChartType: ChartType | None = None,
         suggestion: AgentSuggestion | None = None,
+        *,
+        _t0: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """查询意图的流式流水线：plan → sql → chart → token×N → done（含持久化与状态保存）。
 
         suggestion（Phase 7 G4）：中置信语义路由命中的建议卡片，随 done 帧透传；
         前端按字段存在性渲染 SuggestedAgentCard。
+        _t0：可选的流式计时起点（由调用方传入；不传则从本函数开始计时）。
         """
+        _stream_t0 = _t0 if _t0 is not None else time.monotonic()
         pc = await self._buildPipelineContext(
             session, dto,
             needFewShot=intent != IntentType.CLARIFY,
@@ -2335,7 +2370,7 @@ class ChatService(ChatStreamOutputMixin):
                     async for event in self._streamMultiStep(
                         dto, session, pc, multi_plan, state,
                         initial_tokens=step_tokens, initial_cost=step_cost,
-                        suggestion=suggestion,
+                        suggestion=suggestion, _t0=_stream_t0,
                     ):
                         yield event
                     return
@@ -2349,7 +2384,7 @@ class ChatService(ChatStreamOutputMixin):
                     async for event in self._streamMultiStep(
                         dto, session, pc, multi_plan, state,
                         initial_tokens=step_tokens, initial_cost=step_cost,
-                        suggestion=suggestion,
+                        suggestion=suggestion, _t0=_stream_t0,
                     ):
                         yield event
                     return
@@ -2371,7 +2406,12 @@ class ChatService(ChatStreamOutputMixin):
                 data=None,
                 summary="该问题当前数据条件下无法回答",
             ))
-            await self._storeSessionMessages(session, dto.sessionId, dto.question, answer, None)
+            await self._storeSessionMessages(
+                session, dto.sessionId, dto.question, answer, None,
+                routing_layer="L2",
+                latency_ms=int((time.monotonic() - _stream_t0) * 1000),
+                token_cost_usd=float(self._costForSql(outcome, pc.selected)),
+            )
             await self._saveQueryState(
                 session, dto.sessionId,
                 question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
@@ -2394,6 +2434,7 @@ class ChatService(ChatStreamOutputMixin):
                     "cost": float(totalCost),
                     # 计划由实际服务模型（可能为降级后的 fallback）生成，如实上报
                     "modelName": affinityConfig.model_name,
+                    "latency_ms": int((time.monotonic() - _stream_t0) * 1000),
                     "affinityStatus": affinityPayload,
                     "suggestedAgent": (
                         suggestion.model_dump(mode="json", by_alias=True)
@@ -2537,7 +2578,13 @@ class ChatService(ChatStreamOutputMixin):
                 yield StreamEvent(EVENT_TOKEN, {"content": chunk.content})
 
         answer = "".join(answerPieces)
-        await self._storeSessionMessages(session, dto.sessionId, dto.question, answer, finalSql)
+        # L2 streaming: totalCost includes SQL + chart + answer LLM costs
+        await self._storeSessionMessages(
+            session, dto.sessionId, dto.question, answer, finalSql,
+            routing_layer="L2",
+            latency_ms=int((time.monotonic() - _stream_t0) * 1000),
+            token_cost_usd=float(totalCost),
+        )
         await self._saveQueryState(
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=finalSql,
@@ -2577,6 +2624,7 @@ class ChatService(ChatStreamOutputMixin):
                 "tokensUsed": totalTokens,
                 "cost": float(totalCost),
                 "modelName": answerModelName,
+                "latency_ms": int((time.monotonic() - _stream_t0) * 1000),
                 "affinityStatus": affinityPayload,
                 "suggestedAgent": (
                     suggestion.model_dump(mode="json", by_alias=True)
@@ -2597,6 +2645,7 @@ class ChatService(ChatStreamOutputMixin):
         initial_tokens: int = 0,
         initial_cost: Decimal = Decimal("0"),
         suggestion: AgentSuggestion | None = None,
+        _t0: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """多步查询的流式事件序列：step_plan/step_result × N → token(汇总) → done。
 
@@ -2609,7 +2658,10 @@ class ChatService(ChatStreamOutputMixin):
 
         suggestion（Phase 7 G4）：中置信语义路由建议卡片随 done 帧透传，
         与 _streamQuery 的 done 帧口径一致（G4 审查 MEDIUM 修复）。
+
+        _t0：可选的流式计时起点（由调用方传入；不传则从本函数开始计时）。
         """
+        _ms_t0 = _t0 if _t0 is not None else time.monotonic()
         ctx = StepExecutionContext(
             datasource_type=pc.ds.type,
             oracle_version=pc.ds.oracle_version,
@@ -2669,6 +2721,9 @@ class ChatService(ChatStreamOutputMixin):
                 )
                 await self._storeSessionMessages(
                     session, dto.sessionId, dto.question, agg_content, None,
+                    routing_layer="L2",
+                    latency_ms=int((time.monotonic() - _ms_t0) * 1000),
+                    token_cost_usd=float(total_cost),
                 )
                 await self._saveQueryState(
                     session, dto.sessionId,
@@ -2691,6 +2746,7 @@ class ChatService(ChatStreamOutputMixin):
                         "tokensUsed": total_tokens,
                         "cost": float(total_cost),
                         "modelName": last_model_name,
+                        "latency_ms": int((time.monotonic() - _ms_t0) * 1000),
                         "affinityStatus": affinity_payload,
                         "steps": [_step_result_to_read(s).model_dump(by_alias=True) for s in completed],
                         "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)
@@ -2769,6 +2825,7 @@ class ChatService(ChatStreamOutputMixin):
                 "tokensUsed": total_tokens,
                 "cost": float(total_cost),
                 "modelName": last_model_name,
+                "latency_ms": int((time.monotonic() - _ms_t0) * 1000),
                 "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)
                 if suggestion is not None else None,
             },
@@ -2913,6 +2970,8 @@ class ChatService(ChatStreamOutputMixin):
         pc: _PipelineContext,
         intent: IntentType,
         outcome: _SqlOutcome,
+        *,
+        _t0: float,
     ) -> ChatResponse:
         """计划 target=无法回答 时的非流式响应：固定友好回答，不执行 SQL/图表/回答 LLM。
 
@@ -2920,7 +2979,13 @@ class ChatService(ChatStreamOutputMixin):
         前端仍可展示"无法回答"计划卡片解释原因。4-2：回答附带缺表/缺术语建议。
         """
         answer = self._unanswerableAnswerText(dto.question, pc.classes)
-        await self._storeSessionMessages(session, dto.sessionId, dto.question, answer, None)
+        _elapsed_ms = int((time.monotonic() - _t0) * 1000)
+        await self._storeSessionMessages(
+            session, dto.sessionId, dto.question, answer, None,
+            routing_layer="L2",
+            latency_ms=_elapsed_ms,
+            token_cost_usd=float(self._costForSql(outcome, pc.selected)),
+        )
         await self._saveQueryState(
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
@@ -3359,8 +3424,15 @@ class ChatService(ChatStreamOutputMixin):
         question: str,
         answer: str,
         sql: str | None,
+        *,
+        routing_layer: str | None = None,
+        latency_ms: int | None = None,
+        token_cost_usd: float | None = None,
     ) -> None:
         """持久化一轮对话：user + assistant 双写（仅创建新记录，不可变）。
+
+        routing_layer / latency_ms / token_cost_usd：Phase 5 监控埋点，对应 routing_layer
+        枚举值 L1~L4（由调用方从流水线入口传播进来）。
 
         设计说明：Token 计量在每次 LLM 调用后立即提交（见 _recordUsage），故此处也在独立事务提交。
         属"最终一致"设计——即使后续环节失败，已消耗的 Token 与成本仍会被记录，不随本轮回滚。
@@ -3369,7 +3441,13 @@ class ChatService(ChatStreamOutputMixin):
             session_id=sessionId, role="user", content=question, question=question
         )
         assistantMsg = SessionMessage(
-            session_id=sessionId, role="assistant", content=answer, sql_generated=sql
+            session_id=sessionId,
+            role="assistant",
+            content=answer,
+            sql_generated=sql,
+            routing_layer=routing_layer,
+            latency_ms=latency_ms,
+            token_cost_usd=token_cost_usd,
         )
         session.add_all([userMsg, assistantMsg])
         await session.commit()

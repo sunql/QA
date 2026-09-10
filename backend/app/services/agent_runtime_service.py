@@ -40,6 +40,7 @@ from app.domain.error_messages import (
 from app.domain.exceptions import ConflictError, PermissionDeniedError, ValidationError
 from app.domain.models import AgentDefinition
 from app.domain.schemas import AgentRunRead, _normalizeDataLayer
+from app.infrastructure.business_db_pool import _assert_read_only
 from app.infrastructure.llm.base_client import BaseLlmClient
 from app.services.agent_registry_service import AgentRegistryService
 from app.services.agent_tools import (
@@ -413,6 +414,7 @@ async def _dispatchSingleTool(
     if tc.name == "execute_sql":
         try:
             sql = tc.args.get("sql", "")
+            _assert_read_only(sql)
             rows = await executor.execute_read_only(sql)
             content = json.dumps(
                 {"rows": rows, "row_count": len(rows)},

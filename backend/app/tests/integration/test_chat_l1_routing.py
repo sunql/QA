@@ -112,3 +112,57 @@ class TestChatL1Routing:
         assert data.get("confidence") == 1.0, f"expected exact match confidence 1.0, got {data.get('confidence')}"
         assert data.get("tokensUsed", -1) == 0, f"expected 0 tokens, got {data.get('tokensUsed')}"
         assert data.get("cost", -1) == 0.0, f"expected 0 cost, got {data.get('cost')}"
+
+    @pytest.mark.asyncio
+    async def test_chat_l1_writes_routing_layer(self, client, dbSession: AsyncSession) -> None:
+        """L1 命中时 assistant session_message 应写入 routing_layer='L1'。
+
+        Phase 5 监控管道依赖 routing_layer 列，此测试确保 L1 快车道命中时正确埋点。
+        """
+        from sqlalchemy import select
+        from app.domain.models import SessionMessage
+
+        # Arrange
+        await _seedDatasource(dbSession)
+        await _seedKpi(
+            dbSession,
+            kpi_code="KPI_SUPPLIER_OTD",
+            kpi_name="供应商及时交货率",
+            business_definition="供应商按时交货的订单占比",
+            formula="SELECT 0.954 AS otd_rate",
+            semantic_keywords=["otd", "供应商", "交货"],
+        )
+        kpi_match_cache.onKpiChanged()
+        await kpi_match_cache.warmUp(dbSession)
+
+        session_id = f"s-{uuid.uuid4().hex[:8]}"
+
+        # Act
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_chat_payload(
+                question="KPI_SUPPLIER_OTD 这个指标是多少",
+                sessionId=session_id,
+            ),
+        )
+
+        # Assert：请求成功
+        assert resp.status_code == 200, resp.text
+
+        # Assert：assistant 行写入 routing_layer='L1'
+        result = await dbSession.execute(
+            select(SessionMessage).where(
+                SessionMessage.session_id == session_id,
+                SessionMessage.role == "assistant",
+            )
+        )
+        assistant_msg = result.scalar_one_or_none()
+        assert assistant_msg is not None, "assistant message not found in session_message"
+        assert assistant_msg.routing_layer == "L1", (
+            f"expected routing_layer='L1', got {assistant_msg.routing_layer!r}"
+        )
+        assert assistant_msg.token_cost_usd == 0.0, (
+            f"expected token_cost_usd=0.0, got {assistant_msg.token_cost_usd!r}"
+        )
+        assert assistant_msg.latency_ms is not None, "latency_ms should be set for L1"
+        assert assistant_msg.latency_ms >= 0, f"latency_ms should be non-negative, got {assistant_msg.latency_ms}"

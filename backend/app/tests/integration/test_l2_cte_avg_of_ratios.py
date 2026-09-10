@@ -14,38 +14,47 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sqlalchemy import text
 
 from app.domain.models import OntologyClass, OntologyProperty
+from app.infrastructure.llm.base_client import LlmMessage, LlmResponse
 from app.services.nl2sql_service import Nl2SqlService
 
 
 # ---------------------------------------------------------------------------
-# Fake LLM：按阶段返回预设 SQL（复用 unit test 的 _FakeLlm 模式）
+# Fake LLM：按阶段返回预设 SQL（与 unit test 的 _FakeLlm 保持一致）
 # ---------------------------------------------------------------------------
-
-class _Resp:
-    def __init__(self, content: str) -> None:
-        self.content = content
-        self.promptTokens = 10
-        self.completionTokens = 5
 
 
 class _FakeLlm:
-    """按顺序弹出预置回复的假客户端，记录每次调用的消息与 kwargs。"""
+    """按顺序弹出预置回复的假客户端，记录每次调用的消息与 kwargs。
+
+    签名与 BaseLlmClient.complete 一致：messages: list[LlmMessage]。
+    """
 
     def __init__(self, responses: list[str]) -> None:
         self._responses = list(responses)
         self.calls: list[list[tuple[str, str]]] = []
         self.kwargsCalls: list[dict] = []
 
-    async def complete(self, messages: list, **kwargs) -> _Resp:
+    async def complete(
+        self, messages: list[LlmMessage], *, model: str | None = None,
+        temperature: float | None = None, maxTokens: int | None = None,
+        **kwargs: Any,
+    ) -> LlmResponse:
         self.calls.append([(m.role, m.content) for m in messages])
-        self.kwargsCalls.append(kwargs)
+        self.kwargsCalls.append(dict(kwargs))
         content = self._responses.pop(0)
-        return _Resp(content)
+        return LlmResponse(
+            content=content,
+            modelName=model or "test-model",
+            promptTokens=10,
+            completionTokens=5,
+            totalTokens=15,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -55,10 +64,10 @@ class _FakeLlm:
 _PO_LINES_DDL = """
 DROP TABLE IF EXISTS po_lines_sandbox;
 CREATE TABLE po_lines_sandbox (
-    id          SERIAL PRIMARY KEY,
-    supplier_id VARCHAR(50)  NOT NULL,
-    purchase_qty            NUMERIC(18,4) NOT NULL DEFAULT 0,
-    received_qualified_qty  NUMERIC(18,4) NOT NULL DEFAULT 0
+    id                  SERIAL PRIMARY KEY,
+    supplier_id         VARCHAR(50)  NOT NULL,
+    purchase_qty        NUMERIC(18,4) NOT NULL DEFAULT 0,
+    received_qualified_qty NUMERIC(18,4) NOT NULL DEFAULT 0
 );
 -- 正常行：received_qualified_qty > 0
 INSERT INTO po_lines_sandbox (supplier_id, purchase_qty, received_qualified_qty) VALUES
@@ -76,13 +85,34 @@ INSERT INTO po_lines_sandbox (supplier_id, purchase_qty, received_qualified_qty)
 """
 
 
-async def _setup_po_lines(dbSession) -> None:
-    """在 PG 沙箱建表并灌入 mock 数据。"""
-    for stmt in _PO_LINES_DDL.strip().split(";"):
-        stmt = stmt.strip()
-        if stmt:
-            await dbSession.execute(text(stmt))
-    await dbSession.commit()
+# ---------------------------------------------------------------------------
+# Sandbox cleanup fixture（autouse）
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+async def _cleanup_po_lines_sandbox(dbSession):
+    """每个测试前后建表/清表，保证测试隔离。
+
+    使用独立的 po_lines_sandbox 表（不在业务表列表中），不干扰其他集成测试。
+    """
+    from app.infrastructure import database as dbModule
+
+    factory = dbModule.getSessionFactory()
+    async with factory() as session:
+        # 建表（幂等）
+        for stmt in _PO_LINES_DDL.strip().split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                await session.execute(text(stmt))
+        await session.commit()
+
+    yield
+
+    # 测试后清表（保留表结构）
+    async with factory() as session:
+        await session.execute(text("DELETE FROM po_lines_sandbox"))
+        await session.execute(text("ALTER SEQUENCE po_lines_sandbox_id_seq RESTART WITH 1"))
+        await session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -120,22 +150,20 @@ def _make_po_lines_class() -> OntologyClass:
 
 
 # ---------------------------------------------------------------------------
-# 测试：L2 CTE AVG of ratios
+# Test 1：L2 CTE AVG of ratios（完整验证）
 # ---------------------------------------------------------------------------
 
 @pytest.mark.integration
-async def test_l2_generates_cte_sql_for_avg_of_ratios(dbSession):
+async def test_l2_generates_cte_sql_for_avg_of_ratios(client, dbSession):
     """L2 路径生成 PO 完成率 CTE SQL，真实 PG + 假 LLM 跑通。
 
     流程：
-    1. 准备 mock po_lines 表（PG 沙箱）
+    1. _cleanup_po_lines_sandbox 建表并灌入 mock 数据
     2. 构造 po_lines 本体类 + fake LLM（返回预设 CTE SQL）
     3. 调 Nl2SqlService.generateSql()
     4. 验证返回的 SQL 含 WITH + AVG + po_lines 引用
     5. 在 PG 跑 SQL，验证结果 schema 和 completion_rate 范围 [0, 100]
     """
-    await _setup_po_lines(dbSession)
-
     cls = _make_po_lines_class()
     nl2sql = Nl2SqlService()
     llm = _FakeLlm(
@@ -200,7 +228,6 @@ GROUP BY supplier_id
     for row in rows:
         data = row._mapping
         rate = data["completion_rate"]
-        # rate 可能是 None（NULLIF 产生 NULL）
         if rate is not None:
             assert 0 <= float(rate) <= 100, (
                 f"completion_rate {rate} out of range [0, 100]. Row: {data}"
@@ -215,15 +242,31 @@ GROUP BY supplier_id
     assert "S004" not in supplier_ids, "S004 (purchase_qty=0) should not appear"
     assert "S005" not in supplier_ids, "S005 (received_qualified_qty=0) should not appear"
 
+    # 8. 验证具体 completion_rate 值（补强断言）
+    rate_by_supplier = {row._mapping["supplier_id"]: row._mapping["completion_rate"] for row in rows}
+    assert abs(float(rate_by_supplier["S001"]) - 80.0) < 0.01, (
+        f"S001 expected 80%, got {rate_by_supplier['S001']}"
+    )
+    assert abs(float(rate_by_supplier["S002"]) - 30.0) < 0.01, (
+        f"S002 expected 30%, got {rate_by_supplier['S002']}"
+    )
+    assert abs(float(rate_by_supplier["S003"]) - 100.0) < 0.01, (
+        f"S003 expected 100%, got {rate_by_supplier['S003']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 2：多聚合别名场景（验证别名共存不互相干扰）
+# ---------------------------------------------------------------------------
 
 @pytest.mark.integration
-async def test_l2_cte_sql_with_multiple_aggregation_aliases(dbSession):
+async def test_l2_cte_sql_with_multiple_aggregation_aliases(client, dbSession):
     """多聚合别名场景：CTE 内算 ratio，最终 SELECT 用 AVG。
 
-    验证公式支持多个聚合别名共存，不互相干扰。
+    与 Test 1 的区别：SQL 使用更简洁的 CTE 别名（r 而非 line_ratios），
+    验证 NL2SqlService 能处理不同的 CTE 别名命名。
+    断言具体 completion_rate 值，确保 AVG 计算正确。
     """
-    await _setup_po_lines(dbSession)
-
     cls = _make_po_lines_class()
     nl2sql = Nl2SqlService()
     llm = _FakeLlm(
@@ -264,7 +307,24 @@ GROUP BY supplier_id
     assert "AVG(ratio)" in sql.upper() or "AVG(RATIO)" in sql.upper(), (
         f"Expected AVG(ratio), got: {sql}"
     )
+
     # 执行验证
     exec_result = await dbSession.execute(text(sql))
     rows = exec_result.fetchall()
     assert len(rows) == 3, f"Expected 3 suppliers (S001,S002,S003), got {len(rows)}: {rows}"
+
+    # 补强断言：验证具体 completion_rate 值
+    rate_by_supplier = {row._mapping["supplier_id"]: row._mapping["completion_rate"] for row in rows}
+    assert "S001" in rate_by_supplier, f"S001 missing. Got: {rate_by_supplier}"
+    assert "S002" in rate_by_supplier, f"S002 missing. Got: {rate_by_supplier}"
+    assert "S003" in rate_by_supplier, f"S003 missing. Got: {rate_by_supplier}"
+
+    assert abs(float(rate_by_supplier["S001"]) - 80.0) < 0.01, (
+        f"S001 expected 80%, got {rate_by_supplier['S001']}"
+    )
+    assert abs(float(rate_by_supplier["S002"]) - 30.0) < 0.01, (
+        f"S002 expected 30%, got {rate_by_supplier['S002']}"
+    )
+    assert abs(float(rate_by_supplier["S003"]) - 100.0) < 0.01, (
+        f"S003 expected 100%, got {rate_by_supplier['S003']}"
+    )

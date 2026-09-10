@@ -33,6 +33,19 @@ description: NL2SQL Prompt 工程与 SQL Guard 协同
     （AVG / SUM / COUNT / STDDEV / VARIANCE / MEDIAN / PERCENTILE_CONT）且引用 CTE 别名，
     不再受窗口函数结构限制。
 - 派生指标别名关键词：ratio / percent / share / pct / 占比 / 比率 / 百分比 / 完成率 等。
+- 示例（PO 完成率）：
+  ```sql
+  WITH po_ratio AS (
+    SELECT supplier_id,
+           received_qualified_qty / NULLIF(purchase_qty, 0) AS ratio
+    FROM po_lines
+    WHERE received_qualified_qty > 0
+  )
+  SELECT supplier_id,
+         AVG(ratio) AS completion_rate
+  FROM po_ratio
+  GROUP BY supplier_id
+  ```
 
 ## 重试
 - 校验失败带错误反馈重新生成，最多 `NL2SQL_MAX_RETRIES`(2) 次。

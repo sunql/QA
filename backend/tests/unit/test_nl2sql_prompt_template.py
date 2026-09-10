@@ -88,6 +88,21 @@ class TestPromptRule4CteRatio:
             f"as allowed in CTE final SELECT.\nRule 4 text:\n{rule4}"
         )
 
+    def test_prompt_rule_4_includes_po_completion_rate_example(self, nl2sql, minimal_schema_text):
+        """Prompt 规则 4 末尾应包含 PO 完成率具体示例。"""
+        prompt = self._system_prompt(nl2sql, minimal_schema_text)
+        rule4 = self._extract_rule4(prompt)
+        combined = rule4.lower()
+        # Rule 4 should include the PO completion rate example
+        has_example = any(
+            kw in combined
+            for kw in ["po_ratio", "completion_rate", "received_qualified_qty"]
+        )
+        assert has_example, (
+            f"Rule 4 should include PO completion rate example with po_ratio/completion_rate/received_qualified_qty.\n"
+            f"Rule 4 text:\n{rule4}"
+        )
+
     def test_prompt_rule_4_allows_both_window_and_cte_forms(self, nl2sql, minimal_schema_text):
         """Prompt 规则 4 应同时允许窗口函数形式和 CTE 形式（不允许排他性限制）。"""
         prompt = self._system_prompt(nl2sql, minimal_schema_text)

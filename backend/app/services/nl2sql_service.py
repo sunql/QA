@@ -1888,7 +1888,19 @@ class Nl2SqlService:
             "且引用 CTE 别名，不再受窗口函数结构限制。"
             "若要按派生指标排序（如两年价格之差），必须先把它声明为公式聚合并给 alias"
             "（formula 引用其他聚合别名，如 AVG_PRICE_2026 - AVG_PRICE_2025 AS PRICE_DIFF），"
-            "sortBy 只能引用已选类的属性名或聚合别名。\n"
+            "sortBy 只能引用已选类的属性名或聚合别名。"
+            '示例（PO 完成率）：\n'
+            'WITH po_ratio AS (\n'
+            '  SELECT supplier_id,\n'
+            '         received_qualified_qty / NULLIF(purchase_qty, 0) AS ratio\n'
+            '  FROM po_lines\n'
+            '  WHERE received_qualified_qty > 0\n'
+            ')\n'
+            'SELECT supplier_id,\n'
+            '       AVG(ratio) AS completion_rate\n'
+            'FROM po_ratio\n'
+            'GROUP BY supplier_id\n'
+            "\n"
             "5. 问题含「按月/按年/按季度/按周/按天 分组、变化趋势、走势」等时间粒度需求时，"
             "groupBy 必须填选中的 DATE/DATETIME 属性名（如 订单日期），严禁填「月份」「月」「年」"
             "这类粒度词；时间粒度的截断（如按月 TO_CHAR(订单日期,'YYYY-MM')）由后续 SQL 生成阶段完成。\n"

@@ -27,9 +27,6 @@ from app.infrastructure.llm.base_client import ToolCall
 
 log = logging.getLogger(__name__)
 
-# SQL Guard exception alias（与 business_db_pool 保持一致）
-SqlGuardViolationError = SqlSafetyError
-
 
 # =============================================================================
 # ToolResult（frozen dataclass）

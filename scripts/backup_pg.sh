@@ -4,7 +4,7 @@
 # 行为：
 #   1. 用 docker exec qa-postgres pg_dump -Fc 备份 qa_metadata 库
 #   2. 输出 backups/pg/qa_metadata_YYYY-MM-DD_HHMM.dump
-#   3. 删除 3 天前的 .dump 文件（保留窗口 3 天）
+#   3. 删除 14 天前的 .dump 文件（保留窗口 14 天）
 #   4. 全程写日志到 backups/pg/backup.log
 #
 # 设计要点：
@@ -15,7 +15,7 @@
 #   - 锁定文件：避免并发跑（多副本 / 用户手抖）
 #
 # 用法：
-#   ./scripts/backup_pg.sh                   # 默认备份（3 天保留）
+#   ./scripts/backup_pg.sh                   # 默认备份（14 天保留）
 #   ./scripts/backup_pg.sh --keep 7          # 自定义保留天数
 #   ./scripts/backup_pg.sh --container NAME  # 自定义容器名（默认 qa-postgres）
 #   ./scripts/backup_pg.sh --db NAME         # 自定义数据库名（默认 qa_metadata）
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 # ---- 解析参数 ----
-KEEP_DAYS=3
+KEEP_DAYS=14
 CONTAINER="qa-postgres"
 DB_NAME="qa_metadata"
 DB_USER="qa_user"

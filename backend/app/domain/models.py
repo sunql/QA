@@ -1689,3 +1689,8 @@ from app.models.rbac import (  # noqa: E402,F401
     UserOrganization,
     UserRole,
 )
+
+# Re-export SystemConfig 运行时 KV 表（0052 migration）。ORM 模型主要给
+# Schema drift 校验（main.py lifespan）和 alembic autogenerate 用，service 层
+# 仍走 text() 直查以保持零业务耦合 + 失败安全。
+from app.models.system_config import SystemConfig  # noqa: E402,F401

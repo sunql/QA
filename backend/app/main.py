@@ -256,6 +256,7 @@ def createApp() -> FastAPI:
         supplier_360,
         supplier_risk,
         system,
+        system_config,
         term_dictionary,
         users,
         vectors,
@@ -330,6 +331,11 @@ def createApp() -> FastAPI:
         menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]
     )
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
+    app.include_router(
+        system_config.router,
+        prefix="/api/v1/admin/system-config",
+        tags=["system-config"],
+    )
     app.include_router(graph.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"]

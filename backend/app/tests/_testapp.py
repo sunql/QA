@@ -44,6 +44,7 @@ from app.api.v1 import (
     supplier_360,
     supplier_risk,
     system,
+    system_config,
     term_dictionary,
     users,
 )
@@ -179,6 +180,11 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
     testApp.include_router(feature_rules.router, tags=["feature-rules"])
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"])
+    testApp.include_router(
+        system_config.router,
+        prefix="/api/v1/admin/system-config",
+        tags=["system-config"],
+    )
     testApp.include_router(
         menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]
     )

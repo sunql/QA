@@ -2961,3 +2961,28 @@ class RuleOptionsRead(CamelModel):
     datasource_ids: list[DatasourceOption] = Field(default_factory=list)
     target_tables: list[str] = Field(default_factory=list)
     severities: list[str] = Field(default_factory=list)
+
+
+class SystemConfigRead(CamelModel):
+    """system_config 单行读视图（feat-system-config-admin）。
+
+    key 是不可变主键；value 是可编辑字段；description 是元数据（创建时写入，UI 只读）。
+    updated_time 由 DB DEFAULT NOW() 自动维护（每次 UPDATE 也由 ORM 自动刷新）。
+    """
+
+    key: str
+    value: str | None
+    description: str | None
+    updated_time: datetime
+
+
+class SystemConfigUpdate(CamelModel):
+    """system_config 更新 payload：仅 value 字段可改。
+
+    - key：URL path param 单独传；payload 不重（防 mass-assignment 改主键）。
+    - description：元数据，本计划不允许通过 admin API 改（需 DDL 同步才能让种子和
+      UI 一致；见后续 SSOT 治理）。
+    - value：必填字段（即便清空也要显式传 None 而非省略；用 min_length=0 允许空串）。
+    """
+
+    value: str | None = Field(default=None, max_length=4096)

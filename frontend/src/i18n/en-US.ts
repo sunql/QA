@@ -111,6 +111,7 @@ export const enUS = {
       adminRoles: "Roles",
       adminOrganizations: "Organizations",
       adminMenus: "Menus",
+      adminSystemConfig: "System Config",
     },
   },
 
@@ -1644,6 +1645,38 @@ export const enUS = {
       inUseByAgent: "Tool is referenced by Agent(s) {agentCodes}, cannot delete",
       nameImmutable: "Tool name cannot be changed after creation",
     },
+  },
+
+  // System Config admin (feat-system-config-admin)
+  systemConfig: {
+    title: "System Config",
+    columns: {
+      key: "Key",
+      value: "Value",
+      description: "Description",
+      updatedTime: "Updated",
+      actions: "Actions",
+    },
+    actions: {
+      edit: "Edit",
+      refresh: "Refresh",
+      save: "Save",
+      cancel: "Cancel",
+    },
+    modal: {
+      editTitle: "Edit System Config",
+      keyReadonlyHelp: "key is immutable; add new keys via alembic + seed",
+      valuePlaceholder: "Empty / boolean string / JSON-like text supported",
+    },
+    messages: {
+      updated: "Updated",
+    },
+    errors: {
+      loadFailed: "Load failed",
+      updateFailed: "Update failed",
+      valueTooLong: "value must be <= 4096 chars",
+    },
+    empty: "empty",
   },
 
   dataQualityGenerate: {

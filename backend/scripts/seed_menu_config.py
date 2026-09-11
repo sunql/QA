@@ -74,6 +74,7 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.systemConfig", "code": "item.adminRoles", "label_key": "menu.item.adminRoles", "icon_code": "team", "sort_order": 550, "path": "/admin/roles"},
     {"parent": "section.systemConfig", "code": "item.adminOrganizations", "label_key": "menu.item.adminOrganizations", "icon_code": "org", "sort_order": 560, "path": "/admin/organizations"},
     {"parent": "section.systemConfig", "code": "item.adminMenus", "label_key": "menu.item.adminMenus", "icon_code": "menu", "sort_order": 570, "path": "/admin/menus"},
+    {"parent": "section.systemConfig", "code": "item.adminSystemConfig", "label_key": "menu.item.adminSystemConfig", "icon_code": "setting", "sort_order": 580, "path": "/admin/system-config"},
     # Audit & Security（仅保留审计日志）
     {"parent": "section.auditSecurity", "code": "item.adminAudit", "label_key": "menu.item.adminAudit", "icon_code": "audit", "sort_order": 610, "path": "/admin/audit"},
     # item.adminFeatureRules 已搬到 section.bizConfig sort_order=365（与 item.features 配套）

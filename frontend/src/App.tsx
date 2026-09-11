@@ -27,6 +27,7 @@ import AdminUsersPage from "./pages/AdminUsersPage";
 import AdminRolesPage from "./pages/AdminRolesPage";
 import AdminOrganizationsPage from "./pages/AdminOrganizationsPage";
 import AdminMenusPage from "./pages/AdminMenusPage";
+import AdminSystemConfigPage from "./pages/AdminSystemConfigPage";
 import BusinessObjectPage from "./pages/BusinessObjectPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
@@ -63,6 +64,7 @@ export default function App() {
         <Route path="admin/roles" element={<AdminRolesPage />} />
         <Route path="admin/organizations" element={<AdminOrganizationsPage />} />
         <Route path="admin/menus" element={<AdminMenusPage />} />
+        <Route path="admin/system-config" element={<AdminSystemConfigPage />} />
         <Route path="business-objects" element={<BusinessObjectPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />

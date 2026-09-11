@@ -117,6 +117,7 @@ export const zhCN = {
       adminRoles: "角色管理",
       adminOrganizations: "组织管理",
       adminMenus: "菜单管理",
+      adminSystemConfig: "系统参数",
     },
   },
 
@@ -1654,6 +1655,38 @@ export const zhCN = {
       inUseByAgent: "该工具被 Agent {agentCodes} 引用，无法删除",
       nameImmutable: "工具名创建后不可修改",
     },
+  },
+
+  // 系统参数管理（feat-system-config-admin）
+  systemConfig: {
+    title: "系统参数",
+    columns: {
+      key: "参数名",
+      value: "值",
+      description: "说明",
+      updatedTime: "更新时间",
+      actions: "操作",
+    },
+    actions: {
+      edit: "编辑",
+      refresh: "刷新",
+      save: "保存",
+      cancel: "取消",
+    },
+    modal: {
+      editTitle: "编辑系统参数",
+      keyReadonlyHelp: "key 为不可变主键，需新增请走 alembic 迁移 + 种子脚本",
+      valuePlaceholder: "支持空串（清空）、布尔字符串、JSON-like 文本",
+    },
+    messages: {
+      updated: "更新成功",
+    },
+    errors: {
+      loadFailed: "加载失败",
+      updateFailed: "更新失败",
+      valueTooLong: "value 最长 4096 字符",
+    },
+    empty: "空",
   },
 
   dataQualityGenerate: {

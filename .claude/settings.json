@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "project",
+        "tool": "Bash",
+        "script": ".claude/hooks/protect_volumes.sh"
+      }
+    ]
+  }
+}

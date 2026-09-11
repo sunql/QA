@@ -37,6 +37,13 @@ class LlmMessage:
 
     role: str
     content: str
+    # tool_call_id: 当 role='tool' 时必填（OpenAI tool API 要求 tool result message
+    # 引用前一条 assistant 消息的 tool_calls[i].id；缺失会导致 deepseek/openai 400）
+    tool_call_id: str | None = None
+    # tool_calls: 当 role='assistant' 且本轮触发了 tool calling 时携带（list[dict]）
+    tool_calls: tuple[dict, ...] | None = None
+    # name: 当 role='tool' 时可选（部分 provider 要求）
+    name: str | None = None
 
 
 @dataclass(frozen=True)

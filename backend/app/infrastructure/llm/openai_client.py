@@ -196,9 +196,56 @@ class OpenAiClient(BaseLlmClient):
         tool_choice: str | dict = "auto",
     ) -> LlmResponseWithTools:
         """支持 tool calling 的 completion，透传 OpenAI tools API。"""
+        # 序列化消息：tool result 必须带 tool_call_id，assistant 触发了 tool calling
+        # 时必须回传 tool_calls（否则 provider 无法关联 tool_call_id ↔ 调用）。
+        # 历史 bug：仅传 {role, content} 导致深求/多轮 tool 调用 400 'missing field tool_call_id'。
+        # 另：tool_calls 必须是 OpenAI 形状 {id, type:'function', function:{name, arguments(JSON 字符串)}}；
+        # 上游 agent_runtime 可能给 langchain 形状 {id, name, args}，需归一化。
+        def _normalize_tool_calls(raw_calls):
+            out = []
+            for tc in raw_calls:
+                # 已是 OpenAI 形状（带 function 键）
+                if isinstance(tc, dict) and "function" in tc:
+                    out.append({
+                        "id": tc["id"],
+                        "type": tc.get("type", "function"),
+                        "function": {
+                            "name": tc["function"].get("name") if isinstance(tc["function"], dict) else tc.get("name"),
+                            "arguments": (
+                                tc["function"]["arguments"]
+                                if isinstance(tc["function"], dict) and "arguments" in tc["function"]
+                                else json.dumps(tc.get("args", {}), ensure_ascii=False)
+                            ),
+                        },
+                    })
+                else:
+                    # langchain 形状 {id, name, args}
+                    args = tc.get("args", {}) if isinstance(tc, dict) else {}
+                    name = tc.get("name") if isinstance(tc, dict) else None
+                    tc_id = tc.get("id") if isinstance(tc, dict) else None
+                    out.append({
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json.dumps(args, ensure_ascii=False),
+                        },
+                    })
+            return out
+
+        serialized: list[dict[str, Any]] = []
+        for m in messages:
+            item: dict[str, Any] = {"role": m.role, "content": m.content}
+            if m.role == "tool" and m.tool_call_id:
+                item["tool_call_id"] = m.tool_call_id
+                if m.name:
+                    item["name"] = m.name
+            elif m.role == "assistant" and m.tool_calls:
+                item["tool_calls"] = _normalize_tool_calls(m.tool_calls)
+            serialized.append(item)
         payload: dict[str, Any] = {
             "model": self._modelName,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "messages": serialized,
         }
         if tools:
             payload["tools"] = tools

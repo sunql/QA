@@ -519,12 +519,20 @@ class ChatService(ChatStreamOutputMixin):
         user: CurrentUser | None,
     ) -> AgentLoopResult | None:
         """调 AgentRuntimeService.run_agent_loop；异常返回 None（降级）。"""
+        # 先按 dto.modelId / router 解析 LLM 客户端（与 _buildPipelineContext 同模式）。
+        # 历史 bug：传 None 给 createClient 走 OPENAI + env openaiApiKey 路径，本项目未配置
+        # 该 env → 永远 None → agent loop `llm_client.complete_with_tools` 抛 AttributeError
+        # → 全部降级 L2/L3。修复：始终 resolve 出 config 对象再交给工厂。
+        llm_client = await self._resolveL4LlmClient(session, dto)
+        if llm_client is None:
+            logger.warning("L4 skipped: no usable LLM client (modelId=%s)", dto.modelId)
+            return None
         try:
             return await self._agentRuntime.run_agent_loop(
                 session=session,
                 user_id=user.userId if user else 0,
                 question=dto.question,
-                llm_client=self._llmFactory(None),  # None → router 决定
+                llm_client=llm_client,
                 executor=self._adapterProvider(dto.datasourceId, None),  # 懒加载 adapter
                 ontology=self._ontology,
             )
@@ -532,6 +540,25 @@ class ChatService(ChatStreamOutputMixin):
             # L4 异常不阻断：log warning + 降级 L2/L3（与 L1 同模式）
             logger.warning("L4 agent loop failed, falling back to L2/L3", exc_info=True)
             return None
+
+    async def _resolveL4LlmClient(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+    ) -> BaseLlmClient | None:
+        """解析 L4 用的 LLM 客户端：dto.modelId 优先，否则 router 选。
+
+        返回 None = 无可用配置 → L4 不触发（与 _buildPipelineContext 行为一致）。
+        """
+        configs = await self._listModelConfigs(session)
+        if dto.modelId is not None:
+            selected = next((c for c in configs if c.id == dto.modelId), None)
+            if selected is None or not selected.is_active:
+                return None
+        else:
+            ctx = await self._buildRoutingContext(session, dto.sessionId)
+            selected = self._modelRouter.selectModel(configs, dto.question, ctx)
+        return self._llmFactory(selected)
 
     async def _buildL4ChatResponse(
         self,

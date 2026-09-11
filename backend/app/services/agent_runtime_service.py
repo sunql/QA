@@ -22,6 +22,7 @@ AgentRegistryService），便于单测替换为 fake。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -241,6 +242,35 @@ class AgentLoopResult:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+# L4 agent loop 系统提示：引导 LLM 区分"需要查数据的探索性问句"和"无需查数据的解释性
+# 问句"。前者走 tool calling，后者直接文字作答（避免无限循环调工具）。
+# 历史 bug：缺系统提示 → LLM 永远调用 tool_calls 直到 max_iterations → answer_text=None
+# → chat_service 降级到 L2 fallback，L4 路径看似"被降级"实则 LLM 从未进入"answered"分支。
+_L4_SYSTEM_PROMPT = """你是 NL2SQL 数据分析助手。会话可调用以下工具查询数据库：
+- list_tables / describe_table / sample_rows / list_joins：探索 schema
+- execute_sql：执行只读 SELECT 查询
+
+行为规则：
+1. **判断问题类型**：
+   - 需要查数据库才能回答（聚合、明细、筛选、对比、为什么某个数据是这样）→ 调用工具
+   - 概念性问题（什么是 / 解释 / 如何理解领域术语 / 如何使用系统）→ 直接文字作答，无需调工具
+   - 含糊不清 → 先回答"我理解你要问的是 X"，再决定是否需要查数据
+2. **工具调用节制**：调一次 execute_sql 拿到结果后立即总结回答；不要重复查询相同表/相似条件
+3. **回答语言**：与用户问题一致（默认中文）
+4. **结束**：拿到足够信息后直接文字总结，不要继续调工具
+
+若经过 1-2 轮工具调用仍无法获取需要的数据，请基于已有信息给出推断 + 明确说明数据缺口，不要继续调工具。"""
+
+
+def _build_system_message(prompt: str):
+    """构造 system message，兼容 langchain 对象与 dict shim（dev venv 缺 langchain 时）。"""
+    try:
+        from langchain_core.messages import SystemMessage
+
+        return SystemMessage(content=prompt)
+    except ImportError:
+        return {"role": "system", "content": prompt, "type": "system"}
+
 
 def _to_llm_message(msg) -> "LlmMessage":
     """把 langchain BaseMessage 或 dev shim dict 转为项目的 LlmMessage。"""
@@ -256,9 +286,36 @@ def _to_llm_message(msg) -> "LlmMessage":
     if msg_type == "human":
         return LlmMessage(role="user", content=msg_content or "")
     if msg_type == "ai":
-        return LlmMessage(role="assistant", content=msg_content or "")
+        # AI 消息可能带 tool_calls（langchain AIMessage.tool_calls / additional_kwargs）
+        ai_tool_calls = (
+            getattr(msg, "tool_calls", None)
+            or (msg.get("tool_calls") if isinstance(msg, dict) else None)
+        )
+        ai_tool_calls_tup = (
+            tuple(ai_tool_calls) if ai_tool_calls else None
+        )
+        return LlmMessage(
+            role="assistant",
+            content=msg_content or "",
+            tool_calls=ai_tool_calls_tup,
+        )
     if msg_type == "tool":
-        return LlmMessage(role="tool", content=msg_content or "")
+        # ToolMessage 必须保留 tool_call_id（OpenAI tool API 强约束）；
+        # 历史 bug：未传导致 deepseek/openai 返回 400 'missing field tool_call_id'
+        tool_call_id = (
+            getattr(msg, "tool_call_id", None)
+            or (msg.get("tool_call_id") if isinstance(msg, dict) else None)
+        )
+        tool_name = (
+            getattr(msg, "name", None)
+            or (msg.get("name") if isinstance(msg, dict) else None)
+        )
+        return LlmMessage(
+            role="tool",
+            content=msg_content or "",
+            tool_call_id=tool_call_id,
+            name=tool_name,
+        )
     # fallback
     return LlmMessage(role="user", content=str(msg))
 
@@ -295,6 +352,26 @@ def _extract_final_sql(messages: list) -> str | None:
         )
         if match:
             return match.group(1).strip()
+    return None
+
+
+def _extract_last_ai_content(messages: list) -> str | None:
+    """从对话历史倒序寻找最后一条非空 AI 消息 content。
+
+    用于 max_iterations 兜底：即便 LLM 最后一次响应触发了 tool_calls（被视为 continue），
+    也可能伴随自然语言说明（如"基于以上结果..."），作为最终 answer_text 兜底。
+    """
+    for msg in reversed(messages):
+        msg_type = getattr(msg, "type", None)
+        if msg_type is None and isinstance(msg, dict):
+            msg_type = msg.get("type")
+        if msg_type != "ai":
+            continue
+        content = getattr(msg, "content", None)
+        if content is None and isinstance(msg, dict):
+            content = msg.get("content")
+        if content and content.strip():
+            return content
     return None
 
 
@@ -377,7 +454,25 @@ async def _runAgentLoopIteration(
 
 
 def _buildAiMessage(response) -> Any:
-    """把 LlmResponseWithTools 转 AIMessage（langchain）。dev venv 缺包时降级为 dict。"""
+    """把 LlmResponseWithTools 转 AIMessage（langchain）。dev venv 缺包时降级为 dict。
+
+    tool_calls 序列化为 OpenAI 兼容格式（type=function + function.arguments 是 JSON 字符串），
+    否则深求/openai 反序列化报错：messages[i]: unknown variant `tool_call`, expected `function`。
+    AIMessage 用 langchain 的 tool_calls 结构（id/name/args），但其实只走 dict 兜底路径
+    （langchain 只是类型注解占位，最终 _to_llm_message 序列化时按 OpenAI 格式）。
+    """
+    # OpenAI 兼容 tool_calls：{id, type:'function', function:{name, arguments(JSON 字符串)}}
+    openai_tool_calls = [
+        {
+            "id": tc.id,
+            "type": "function",
+            "function": {
+                "name": tc.name,
+                "arguments": json.dumps(tc.args, ensure_ascii=False),
+            },
+        }
+        for tc in response.tool_calls
+    ]
     try:
         from langchain_core.messages import AIMessage
         return AIMessage(
@@ -391,10 +486,7 @@ def _buildAiMessage(response) -> Any:
         return {
             "role": "assistant",
             "content": response.content or "",
-            "tool_calls": [
-                {"id": tc.id, "name": tc.name, "args": tc.args}
-                for tc in response.tool_calls
-            ],
+            "tool_calls": openai_tool_calls,
             "type": "ai",
         }
 
@@ -454,7 +546,7 @@ async def run_agent_loop(
     llm_client,
     executor,
     ontology,
-    max_iterations: int = 5,
+    max_iterations: int = 3,
     cost_budget_usd: float = 0.5,
 ) -> AgentLoopResult:
     """LLM 驱动的 agent loop（纯 Python async while 实现）。
@@ -484,6 +576,17 @@ async def run_agent_loop(
             session=session,
             executor=executor,
         )
+
+    # max_iterations 兜底：若耗尽迭代但 LLM 在最后一轮仍有自然语言输出（即便伴生 tool_calls），
+    # 用该内容作为 answer_text，避免 chat_service 因 answer_text is None 降级到 L2。
+    # 历史 bug：5 次迭代都继续调工具 → answer_text=None → 路由 L2 看似生效实则 L4 失败。
+    if (
+        state["terminated_reason"] == "max_iterations"
+        and state["answer_text"] is None
+    ):
+        fallback = _extract_last_ai_content(state["messages"])
+        if fallback:
+            state["answer_text"] = fallback
 
     _logLoopEnd(
         user_id=user_id,
@@ -526,10 +629,16 @@ def _initLoopState(question: str) -> dict:
     """初始化 loop 状态。"""
     try:
         from langchain_core.messages import HumanMessage
-        messages = [HumanMessage(content=question)]
+        messages = [
+            _build_system_message(_L4_SYSTEM_PROMPT),
+            HumanMessage(content=question),
+        ]
     except ImportError:
         # dev/test venv 可能缺 langchain_core；用 dict shim
-        messages = [{"role": "user", "content": question, "type": "human"}]
+        messages = [
+            _build_system_message(_L4_SYSTEM_PROMPT),
+            {"role": "user", "content": question, "type": "human"},
+        ]
 
     return {
         "messages": messages,

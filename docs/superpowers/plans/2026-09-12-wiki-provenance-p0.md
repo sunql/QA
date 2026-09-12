@@ -1240,7 +1240,8 @@ git commit -m "feat(wiki): Milvus 文档集合加定位符字段 + 集合重建�
 
 **Files:**
 - Create: `backend/app/infrastructure/object_storage.py`
-- Create: `backend/scripts/backup_objects.sh`
+- Create: `scripts/backup_objects.sh`（**仓库根**的 `scripts/`，与 `backup_pg.sh` / `deploy_backend.sh` 同级；
+  脚本内 `BACKUP_DIR` 由 `dirname "$0"/..` 推出 `<repo>/backups/objects`，放 `backend/scripts/` 会落到 `backend/backups/`）
 - Modify: `backend/pyproject.toml`、`backend/uv.lock`
 - Modify: `docker/docker-compose.yml`
 - Modify: `Harness/rules/数据存储防护.md`
@@ -1565,6 +1566,23 @@ git add backend/pyproject.toml backend/uv.lock
 
 > **注意**：端口 9000/9001 在宿主机是空的——`qa-milvus-minio` 不发布任何端口（已验证）。
 > **注意**：宿主机 `.env` 必须提供 `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`，compose 的 `${VAR:?}` 会在缺失时直接拒绝启动，这是有意的（避免默认弱口令）。
+>
+> **这一步必须真做，不是提醒而已。** `docker/.env` 当前**一个 `MINIO_*` 变量都没有**
+> （已核实），不补上，Task 7 的 `docker compose up -d qa-objects backend` 会直接拒绝启动。
+> 先确认确实没有：
+>
+> ```bash
+> grep -in minio docker/.env    # 预期：无输出
+> ```
+>
+> 再用强口令追加（`docker/.env` 已被 `.gitignore` 忽略，**不要提交它**）：
+>
+> ```bash
+> printf '\n# 知识源文件对象存储（qa-objects）。与 milvus-minio 的 minioadmin 无关，勿复用。\nMINIO_ROOT_USER=qa_objects\nMINIO_ROOT_PASSWORD=%s\n' "$(openssl rand -base64 24)" >> docker/.env
+> ```
+>
+> 不要把这两个值以字面量写进 `docker-compose.yml` —— `${VAR:?}` 的意义正是
+> 「缺失就启动失败」，而不是回退到一个默认弱口令。
 
 - [ ] **Step 7: 备份脚本**
 

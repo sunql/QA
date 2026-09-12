@@ -15,6 +15,7 @@ page_id 与改造后算出的不一致，重复项照样入库，而测试全绿
 
 from __future__ import annotations
 
+from app.infrastructure.object_storage import hashContent
 from app.services.wiki_page_service import (
     contentHashOf,
     generatePageId,
@@ -100,6 +101,16 @@ def test_content_hash_is_sha256_lowercase_hex() -> None:
     assert contentHashOf("") == (
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     )
+
+
+def test_content_hash_delegates_to_hashContent() -> None:
+    """``contentHashOf`` 必须转调 ``hashContent``，等价性是结构保证而非约定。
+
+    两处 sha256 若各自演化不会报错、只会让「同 ID 同内容 → 跳过」的比对永远
+    不等、重复项静默入库；故 ``contentHashOf`` 退化为 ``hashContent`` 的薄包装，
+    本断言钉死二者逐字节等价（str → utf-8 bytes）。
+    """
+    assert contentHashOf(_CONTENT) == hashContent(_CONTENT.encode("utf-8"))
 
 
 def test_content_hash_is_not_the_page_id_suffix() -> None:

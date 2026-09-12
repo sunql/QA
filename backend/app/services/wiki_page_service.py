@@ -44,6 +44,7 @@ from app.domain.wiki_models import (
     WikiPage,
 )
 from app.domain.wiki_schemas import WikiPageCreate, WikiPageUpdate
+from app.infrastructure.object_storage import hashContent
 from app.services.audit_service import AuditService
 from app.services.learning.feedback_loop import (
     FeedbackLoop,
@@ -156,14 +157,15 @@ def sanitizePageId(raw: str) -> str:
 
 
 def contentHashOf(content: str) -> str:
-    """正文的 SHA-256 十六进制摘要（小写，恒 64 字符）。
+    """正文的 SHA-256 十六进制摘要（小写，恒 64 字符）——转调 ``hashContent``。
 
-    与 RAG 路径写进 ``document_catalog.content_hash`` 的**同一口径**
-    （``sha256(utf-8 bytes).hexdigest()``），因此两处摘要可直接比对。P0 落地
-    「导入路径也登记 document_catalog」时复用本函数，不要再写第二份实现 ——
-    两份实现迟早会在编码/大小写上漂移，而漂移了不会报错，只会让比对永远不等。
+    与 RAG 路径写进 ``document_catalog.content_hash`` 的**同一实现**
+    （``app.infrastructure.object_storage.hashContent``），因此两处摘要可直接
+    比对。为什么必须转调而不是再写一份：两份 ``sha256`` 实现迟早会在编码/
+    大小写上漂移，而漂移了不会报错，只会让「同 ID 同内容 → 跳过」的比对永远
+    不等、重复项静默入库。这里退化成薄包装，把等价性变成结构保证。
     """
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return hashContent(content.encode("utf-8"))
 
 
 def _identityDigest(sourceRef: str, title: str, content: str) -> str:

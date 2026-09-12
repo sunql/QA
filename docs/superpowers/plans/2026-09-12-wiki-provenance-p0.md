@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让每段入库文本携带页码/章节/段号定位符，并把源文件真实留存到对象存储，使后续证据链有出处可填。
+**Goal:** 让每段入库文本携带页码/章节/段号定位符，并让 `document_catalog` 记下源文件的**确定性存储位置占位**与内容摘要，使后续证据链有出处可填。
 
-**Architecture:** 在摄入链路上补三处丢失点：(1) `parse_document` 从返回扁平 `str` 改为返回带定位的 `list[TextBlock]`；(2) `Chunk` 用既有的未使用 `metadata` 字段承载定位符，落进 Milvus 新字段；(3) 新增 MinIO 客户端把源文件存成内容寻址对象，`document_catalog` 写真实 `storage_url` + `content_hash`。全程无 PG 迁移。
+**Architecture:** 在摄入链路上补三处丢失点：(1) `parse_document` 从返回扁平 `str` 改为返回带定位的 `list[TextBlock]`；(2) `Chunk` 用既有的未使用 `metadata` 字段承载定位符，落进 Milvus 新字段；(3) 新增 `source_locator` **纯函数**模块算好源文件的预留存储键与摘要，`document_catalog` 写 `storage_url`（占位）+ `content_hash`。**源文件字节暂时不存储**（用户 2026-09-12 决定），只落解析后的内容。全程无 PG 迁移、无新增依赖、无新容器。
 
-**Tech Stack:** Python 3.12 / FastAPI / SQLAlchemy 2.0 async / pypdf / python-docx / pymilvus 2.4.6 / MinIO (S3 兼容) / pytest
+**Tech Stack:** Python 3.12 / FastAPI / SQLAlchemy 2.0 async / pypdf / python-docx / pymilvus 2.4.6 / pytest
 
 ## Global Constraints
 
@@ -18,10 +18,12 @@
 - 本计划**包含一次 Milvus 集合重建**。执行前必须复查 `document_embeddings` 仍为空。
 - 文件 200-400 行宜，上限 800；函数 < 50 行；嵌套 ≤ 4 层。
 - 不可变数据：返回新对象，禁止原地修改。
-- **错误不得静默吞掉**：MinIO 不可用必须显式失败（本计划修掉一处既有 `except: pass`）。
+- **错误不得静默吞掉**：本计划修掉一处既有的 `except Exception: pass`（它掩盖了真实故障，见 Task 5）。
 - 注释与 docstring 用中文（与代码库一致）。
 - Conventional Commits。
-- **⚠️ 部署方式变更**：本计划新增 Python 依赖 `minio`。`scripts/deploy_backend.sh` 只 `docker cp` `app/`+`scripts/`+`alembic/`，**不安装依赖** —— 它无法部署本计划。必须走完整镜像重建（见 Task 7）。
+- **源文件字节暂不存储（范围约束，用户 2026-09-12 决定）**：只保存**解析后的内容**（Milvus chunk + `wiki_page.content`），保证可检索、可供 aichat 使用，并可通过 `source_ref` 回溯到本地来源。`document_catalog.storage_url` 写的是**预留键**——`s3://qa-knowledge-sources/sources/<hash>/<name>`，指向一个**当前尚不存在**的对象；`content_hash` 是真实摘要。后续要真正存储时，按同一预留键 PUT 即可，**无需回填、无需迁移**。
+  - **消费者不得假定该 URL 现在可读。** 它不是可下载链接，是「将来会放在这里」的契约。
+  - 本计划**不引入 `minio` 依赖、不新增容器、不新增备份脚本** —— YAGNI：存储能力尚未启用，先不建。
 
 ---
 
@@ -33,20 +35,20 @@
 | `backend/app/services/chunk_splitter.py` | 改 | `split_by_paragraphs` 吃 `list[TextBlock]`；定位符写进 `Chunk.metadata` |
 | `backend/app/infrastructure/milvus_client.py` | 改 | `_documentFields()` 加 3 个定位符字段；`insertDocumentChunks` 对应加列 |
 | `backend/scripts/rebuild_document_collection.py` | 建 | 集合重建（`_ensureCollection` 已存在即早返回，改字段不重建不生效） |
-| `backend/app/infrastructure/object_storage.py` | 建 | MinIO 客户端：`ensureBucket` / `putSourceObject` / `getSourceObject` / `hashContent` / `buildSourceObjectName` |
-| `backend/app/services/rag_service.py` | 改 | 存源文件；写真实 `storage_url` + `content_hash`；消除静默失败 |
+| `backend/app/infrastructure/source_locator.py` | 建 | 纯函数：`hashBytes` / `hashText` / `buildSourceObjectName` / `buildStorageUrl`。算预留存储键，**零 I/O、零依赖** |
+| `backend/app/services/rag_service.py` | 改 | 写预留 `storage_url` + 真实 `content_hash`；修 `except: pass` 与漏传 actor |
 | `backend/app/services/wiki_import_service.py` | 改 | `parseFile` 适配新返回类型；`execute` 登记 `document_catalog` |
 | `backend/app/tests/unit/test_document_parser.py` | 改 | 断言定位符 |
 | `backend/app/tests/unit/test_chunk_splitter.py` | 改 | 签名变更 + 定位符断言 |
 | `backend/app/tests/unit/test_rag_service.py` | 改 | mock 适配新返回类型 |
-| `backend/app/tests/unit/test_object_storage.py` | 建 | 对象存储单测 |
-| `backend/app/tests/integration/test_rag_ingest_provenance.py` | 建 | 端到端：上传 → Milvus 带定位符 → catalog 有真实 url/hash |
-| `backend/pyproject.toml` + `backend/uv.lock` | 改 | 加 `minio` 依赖 |
-| `docker/docker-compose.yml` | 改 | 加 `qa-objects` 服务 + `objects_data` 卷 |
-| `scripts/backup_objects.sh` | 建 | MinIO 数据备份（手动） |
+| `backend/app/tests/unit/test_source_locator.py` | 建 | 预留键与摘要的纯函数单测 |
+| `backend/app/tests/integration/test_rag_ingest_provenance.py` | 建 | 端到端：上传 → Milvus 带定位符 → catalog 有预留 url + 真实 hash |
 | `backend/scripts/wiki_provenance_realdata.py` | 建 | 真实数据验证（Harness 开发门禁） |
 | `Harness/changes/feat-wiki-provenance/summary.md` | 建 | 九段变更记录（SSOT） |
-| `Harness/rules/数据存储防护.md` | 改 | 卷清单加 `objects_data` |
+
+> **不动的文件（相对原设计的删减）**：`backend/pyproject.toml` / `uv.lock`（不装 `minio`）、
+> `docker/docker-compose.yml`（不加 `qa-objects` 服务与 `objects_data` 卷）、
+> `scripts/backup_objects.sh`（无对象存储可备份）、`Harness/rules/数据存储防护.md`（无新卷）。
 
 ---
 
@@ -1097,391 +1099,258 @@ git commit -m "feat(wiki): Milvus 文档集合加定位符字段 + 集合重建�
 
 ---
 
-## Task 4: 对象存储客户端与 minio 依赖
+## Task 4: 源文件存储占位（`source_locator` 纯函数）
 
 **Files:**
-- Create: `backend/app/infrastructure/object_storage.py`
-- Create: `backend/scripts/backup_objects.sh`
-- Modify: `backend/pyproject.toml`、`backend/uv.lock`
-- Modify: `docker/docker-compose.yml`
-- Modify: `Harness/rules/数据存储防护.md`
-- Test: `backend/app/tests/unit/test_object_storage.py`
+- Create: `backend/app/infrastructure/source_locator.py`
+- Test: `backend/app/tests/unit/test_source_locator.py`
 
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `class ObjectStorageError(Exception)`
-  - `def hashContent(content: bytes) -> str` —— sha256 十六进制
+  - `DEFAULT_BUCKET = "qa-knowledge-sources"`
+  - `def hashBytes(content: bytes) -> str` —— sha256 十六进制小写（64 位）
+  - `def hashText(text: str) -> str` —— `hashBytes(text.encode("utf-8"))`，与 P1 的 `contentHashOf` **同口径**
   - `def buildSourceObjectName(contentHash: str, filename: str) -> str` —— `sources/<hash[:2]>/<hash>/<safeName>`
-  - `def ensureBucket(bucket: str = DEFAULT_BUCKET) -> None`
-  - `def putSourceObject(objectName: str, content: bytes, contentType: str, bucket: str = DEFAULT_BUCKET) -> str` —— 返回 `s3://<bucket>/<objectName>`
-  - `def getSourceObject(objectName: str, bucket: str = DEFAULT_BUCKET) -> bytes`
-  - `def _getClient()` —— 可被测试 monkeypatch
+  - `def buildStorageUrl(objectName: str, bucket: str = DEFAULT_BUCKET) -> str` —— `s3://<bucket>/<objectName>`
 
-> **内容寻址**：对象名由内容哈希派生，同一文件重复上传落到同一个 key，天然去重，与 P1 的 `page_id` 内容派生同一思路。
+> ### 为什么是「占位」而不是「存储」
 >
-> **配置缺失必须显式失败**：`MINIO_ENDPOINT` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` 任一缺失即抛 `ObjectStorageError`，**不降级、不静默跳过**。
+> 用户 2026-09-12 决定：**上传的源文档暂时不存储**，但要**预留可以存储到指定位置的占位**，后续可以存储并查看；**只保存解析的内容**，保证可检索、可供 aichat 使用，并**可以与本地关联**。
 >
-> **不复用 `qa-milvus-minio`**：那是 Milvus 私有后端（不发布端口、硬编码 `minioadmin/minioadmin`）。
+> 因此本任务**只算键、不写字节**：
+>
+> - **零 I/O、零新依赖、零新容器** —— 这也是本计划仍可用 `scripts/deploy_backend.sh` 部署的原因（见 Task 7）。
+> - **占位键现在就算好并落库**：后续补传源文件时落在同一个 key，**不需要回填、不需要迁移**。这是「预留」的全部意义 —— 若现在写 `None`，将来补传就必须回填历史行。
+> - **内容寻址** `sources/<hash[:2]>/<hash>/<name>`：同一内容落同一 key，后续补传天然去重；与 P1 的 `page_id` 内容派生同一思路。
+> - **与本地关联**：`wiki_import_task.source_ref`（用户在导入向导填的本地来源名）+ `page_ids` 已构成完整回溯链，**本任务不新增列、不改 schema**。后续真要补传源文件时，正是靠这条链找到本地那份文件。
+> - **消费者不得假定 `storage_url` 现在可读** —— 它是「将来会放在这里」的契约，不是下载链接。
+>
+> **摘要口径**：`hashText` 必须与 P1 的 `contentHashOf` 逐字节一致（`sha256(utf-8).hexdigest()`）。见文末「跨计划协调」第 2 节。
 
 - [ ] **Step 1: 写失败测试**
 
-新建 `backend/app/tests/unit/test_object_storage.py`：
+新建 `backend/app/tests/unit/test_source_locator.py`：
 
 ```python
-"""对象存储客户端单测（P0 溯源地基）。MinIO 客户端被 mock。"""
+"""源文件预留存储键与摘要的纯函数单测（P0 溯源地基）。
 
-from __future__ import annotations
-
-from unittest.mock import MagicMock, patch
-
-import pytest
-
-from app.infrastructure.object_storage import (
-    ObjectStorageError,
-    buildSourceObjectName,
-    hashContent,
-    putSourceObject,
-)
-
-
-class TestHashContent:
-    def test_sha256_known_value(self) -> None:
-        # echo -n "" | sha256sum
-        assert hashContent(b"") == (
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        )
-
-    def test_same_content_same_hash(self) -> None:
-        assert hashContent(b"abc") == hashContent(b"abc")
-
-    def test_different_content_different_hash(self) -> None:
-        assert hashContent(b"abc") != hashContent(b"abd")
-
-
-class TestBuildSourceObjectName:
-    def test_content_addressed_layout(self) -> None:
-        h = hashContent(b"abc")
-        name = buildSourceObjectName(h, "制度.pdf")
-        assert name == f"sources/{h[:2]}/{h}/制度.pdf"
-
-    def test_same_content_same_name_regardless_of_filename(self) -> None:
-        h = hashContent(b"abc")
-        assert buildSourceObjectName(h, "a.pdf") != buildSourceObjectName(h, "b.pdf")
-
-    def test_path_traversal_in_filename_is_neutralized(self) -> None:
-        h = hashContent(b"abc")
-        name = buildSourceObjectName(h, "../../etc/passwd")
-        assert ".." not in name
-        assert name.startswith(f"sources/{h[:2]}/{h}/")
-
-
-class TestPutSourceObject:
-    def test_missing_config_raises(self) -> None:
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(ObjectStorageError, match="MINIO_ENDPOINT"):
-                putSourceObject("sources/aa/x/a.pdf", b"data", "application/pdf")
-
-    def test_returns_s3_url(self) -> None:
-        fake = MagicMock()
-        with patch.dict(
-            "os.environ",
-            {
-                "MINIO_ENDPOINT": "objects:9000",
-                "MINIO_ROOT_USER": "u",
-                "MINIO_ROOT_PASSWORD": "p",
-            },
-        ):
-            with patch(
-                "app.infrastructure.object_storage._getClient", return_value=fake
-            ):
-                url = putSourceObject("sources/aa/x/a.pdf", b"data", "application/pdf")
-        assert url == "s3://qa-knowledge-sources/sources/aa/x/a.pdf"
-        fake.put_object.assert_called_once()
-
-    def test_client_error_wrapped_as_object_storage_error(self) -> None:
-        fake = MagicMock()
-        fake.put_object.side_effect = RuntimeError("connection refused")
-        with patch.dict(
-            "os.environ",
-            {
-                "MINIO_ENDPOINT": "objects:9000",
-                "MINIO_ROOT_USER": "u",
-                "MINIO_ROOT_PASSWORD": "p",
-            },
-        ):
-            with patch(
-                "app.infrastructure.object_storage._getClient", return_value=fake
-            ):
-                with pytest.raises(ObjectStorageError, match="connection refused"):
-                    putSourceObject("sources/aa/x/a.pdf", b"data", "application/pdf")
-```
-
-- [ ] **Step 2: 运行测试确认失败**
-
-```bash
-cd backend && .venv/bin/pytest app/tests/unit/test_object_storage.py -q
-```
-
-Expected: FAIL — `ModuleNotFoundError: No module named 'app.infrastructure.object_storage'`
-
-- [ ] **Step 3: 实现**
-
-新建 `backend/app/infrastructure/object_storage.py`：
-
-```python
-"""对象存储（MinIO）：知识源文件留存。
-
-P0 溯源地基的一部分。此前源文件上传后不留底，``document_catalog.storage_url``
-写的是 ``milvus://N_chunks`` 这种假 URL，``content_hash`` 恒为 None。本模块
-提供真实的对象存储读写，使证据链能回指原始文件。
-
-对象名内容寻址（``sources/<hash[:2]>/<hash>/<name>``）：同一文件重复上传落到
-同一 key，天然去重。
+本模块**不做任何 I/O** —— 用户决定源文件字节暂不存储，只预留位置。
+因此这里没有 mock，全是确定性断言。
 """
 
 from __future__ import annotations
 
 import hashlib
-import logging
-import os
-import re
-from typing import Any
 
-logger = logging.getLogger(__name__)
+from app.infrastructure.source_locator import (
+    DEFAULT_BUCKET,
+    buildSourceObjectName,
+    buildStorageUrl,
+    hashBytes,
+    hashText,
+)
+
+
+class TestHashBytes:
+    def test_sha256_known_value(self) -> None:
+        # echo -n "" | sha256sum
+        assert hashBytes(b"") == (
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        )
+
+    def test_is_lowercase_hex_64(self) -> None:
+        h = hashBytes(b"abc")
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
+
+    def test_same_content_same_hash(self) -> None:
+        assert hashBytes(b"abc") == hashBytes(b"abc")
+
+    def test_different_content_different_hash(self) -> None:
+        assert hashBytes(b"abc") != hashBytes(b"abd")
+
+
+class TestHashText:
+    def test_matches_utf8_bytes_digest(self) -> None:
+        """必须按 UTF-8 编码取字节 —— 中文不能走 locale 编码。"""
+        text = "供应商准入规则：注册资本 >= 1000 万"
+        assert hashText(text) == hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def test_known_value_for_ascii(self) -> None:
+        # echo -n "abc" | sha256sum
+        assert hashText("abc") == (
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+
+    def test_text_and_bytes_agree(self) -> None:
+        """同口径：hashText(s) 必须等于 hashBytes(s.encode("utf-8"))。"""
+        assert hashText("中文") == hashBytes("中文".encode("utf-8"))
+
+
+class TestBuildSourceObjectName:
+    def test_content_addressed_layout(self) -> None:
+        h = hashBytes(b"abc")
+        assert buildSourceObjectName(h, "制度.pdf") == f"sources/{h[:2]}/{h}/制度.pdf"
+
+    def test_same_hash_different_filename_differs(self) -> None:
+        h = hashBytes(b"abc")
+        assert buildSourceObjectName(h, "a.pdf") != buildSourceObjectName(h, "b.pdf")
+
+    def test_path_traversal_in_filename_is_neutralized(self) -> None:
+        h = hashBytes(b"abc")
+        name = buildSourceObjectName(h, "../../etc/passwd")
+        assert ".." not in name
+        assert "/etc/" not in name
+        assert name.startswith(f"sources/{h[:2]}/{h}/")
+
+    def test_empty_filename_falls_back(self) -> None:
+        h = hashBytes(b"abc")
+        assert buildSourceObjectName(h, "") == f"sources/{h[:2]}/{h}/unnamed"
+
+
+class TestBuildStorageUrl:
+    def test_default_bucket(self) -> None:
+        assert buildStorageUrl("sources/aa/x/a.pdf") == (
+            "s3://qa-knowledge-sources/sources/aa/x/a.pdf"
+        )
+
+    def test_custom_bucket(self) -> None:
+        assert buildStorageUrl("sources/aa/x/a.pdf", bucket="b1") == (
+            "s3://b1/sources/aa/x/a.pdf"
+        )
+
+    def test_is_deterministic(self) -> None:
+        assert buildStorageUrl("k") == buildStorageUrl("k")
+
+    def test_does_not_touch_network(self) -> None:
+        """纯函数：构造 URL 不产生任何 I/O（无 mock 也不该抛错）。"""
+        assert buildStorageUrl("k").startswith(f"s3://{DEFAULT_BUCKET}/")
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+```bash
+cd backend && .venv/bin/pytest app/tests/unit/test_source_locator.py -q
+```
+
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.infrastructure.source_locator'`
+
+- [ ] **Step 3: 实现**
+
+新建 `backend/app/infrastructure/source_locator.py`：
+
+```python
+"""源文件的预留存储位置与内容摘要（P0 溯源地基）。
+
+**本模块不做 I/O。** 用户 2026-09-12 决定：上传的源文档暂时不存储，
+但预留一个确定性的存储位置占位，后续可以存储并查看；只保存解析后的
+内容，保证可检索、可供 aichat 使用，并能与本地来源关联。
+
+因此这里只算「键」：
+  - ``hashBytes`` / ``hashText``  —— 内容摘要（与 P1 的 contentHashOf 同口径）
+  - ``buildSourceObjectName``     —— 内容寻址的对象名
+  - ``buildStorageUrl``           —— 预留的 s3:// 位置
+
+占位键现在算好并落库，后续补传源文件时落在同一个 key，无需回填、无需迁移。
+``document_catalog.storage_url`` 因此**当前不可读** —— 它是契约，不是下载链接。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
 
 DEFAULT_BUCKET = "qa-knowledge-sources"
 
 # 文件名里可能带路径分隔符或 ..，落到对象名上会越权，统一净化。
+# 允许：ASCII 字母数字、点、下划线、连字符、CJK 统一表意文字（U+4E00–U+9FFF）。
 _UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._一-鿿-]")
 
 
-class ObjectStorageError(Exception):
-    """对象存储操作失败。
-
-    与「对象不存在」区分：前者是基础设施故障（调用方应上报并中止），
-    后者是正常的查询未命中。
-    """
-    pass
-
-
-def hashContent(content: bytes) -> str:
-    """内容 SHA-256（十六进制小写）。"""
+def hashBytes(content: bytes) -> str:
+    """字节内容的 SHA-256（十六进制小写，64 位）。"""
     return hashlib.sha256(content).hexdigest()
 
 
+def hashText(text: str) -> str:
+    """文本内容的 SHA-256（按 UTF-8 编码取字节后摘要）。
+
+    与 ``hashBytes(text.encode("utf-8"))`` 逐字节等价，也与 P1 的
+    ``contentHashOf`` 同口径 —— 两份计划不得各自漂移（见跨计划协调第 2 节）。
+    """
+    return hashBytes(text.encode("utf-8"))
+
+
 def buildSourceObjectName(contentHash: str, filename: str) -> str:
-    """由内容哈希 + 文件名派生对象名（内容寻址）。"""
+    """由内容哈希 + 文件名派生对象名（内容寻址）。
+
+    同一内容落同一 key，后续补传天然去重。
+    """
     safeName = _UNSAFE_NAME_RE.sub("_", filename.rsplit("/", 1)[-1]).strip("_")
     if not safeName:
         safeName = "unnamed"
     return f"sources/{contentHash[:2]}/{contentHash}/{safeName}"
 
 
-def _getClient() -> Any:
-    """构造 MinIO 客户端。配置缺失即失败，不降级。"""
-    from minio import Minio
+def buildStorageUrl(objectName: str, bucket: str = DEFAULT_BUCKET) -> str:
+    """构造**预留**的存储位置（当前无对应对象）。
 
-    endpoint = os.environ.get("MINIO_ENDPOINT")
-    accessKey = os.environ.get("MINIO_ROOT_USER")
-    secretKey = os.environ.get("MINIO_ROOT_PASSWORD")
-    if not endpoint:
-        raise ObjectStorageError("MINIO_ENDPOINT 未配置")
-    if not accessKey:
-        raise ObjectStorageError("MINIO_ROOT_USER 未配置")
-    if not secretKey:
-        raise ObjectStorageError("MINIO_ROOT_PASSWORD 未配置")
-    return Minio(endpoint, access_key=accessKey, secret_key=secretKey, secure=False)
-
-
-def ensureBucket(bucket: str = DEFAULT_BUCKET) -> None:
-    """幂等创建桶。"""
-    client = _getClient()
-    try:
-        if not client.bucket_exists(bucket):
-            client.make_bucket(bucket)
-            logger.info("Created object storage bucket '%s'", bucket)
-    except ObjectStorageError:
-        raise
-    except Exception as e:
-        raise ObjectStorageError(f"确保桶 {bucket} 存在失败: {e}") from e
-
-
-def putSourceObject(
-    objectName: str,
-    content: bytes,
-    contentType: str,
-    bucket: str = DEFAULT_BUCKET,
-) -> str:
-    """存入源文件，返回 ``s3://<bucket>/<objectName>``。
-
-    Raises:
-        ObjectStorageError: 配置缺失或写入失败
+    消费者不得假定其可读 —— 它标记「将来会放在这里」。
     """
-    import io
-
-    client = _getClient()
-    try:
-        ensureBucket(bucket)
-        client.put_object(
-            bucket,
-            objectName,
-            io.BytesIO(content),
-            length=len(content),
-            content_type=contentType or "application/octet-stream",
-        )
-    except ObjectStorageError:
-        raise
-    except Exception as e:
-        raise ObjectStorageError(f"源文件写入失败 {objectName}: {e}") from e
     return f"s3://{bucket}/{objectName}"
-
-
-def getSourceObject(objectName: str, bucket: str = DEFAULT_BUCKET) -> bytes:
-    """读回源文件。
-
-    Raises:
-        ObjectStorageError: 配置缺失、对象不存在或读取失败
-    """
-    client = _getClient()
-    response = None
-    try:
-        response = client.get_object(bucket, objectName)
-        return response.read()
-    except ObjectStorageError:
-        raise
-    except Exception as e:
-        raise ObjectStorageError(f"源文件读取失败 {objectName}: {e}") from e
-    finally:
-        if response is not None:
-            response.close()
-            response.release_conn()
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
 
 ```bash
-cd backend && .venv/bin/pytest app/tests/unit/test_object_storage.py -q
+cd backend && .venv/bin/pytest app/tests/unit/test_source_locator.py -q
 ```
 
-Expected: PASS（8 个用例）
+Expected: PASS（15 个用例）
 
-- [ ] **Step 5: 加依赖**
+- [ ] **Step 5: 提交**
 
 ```bash
-cd backend && uv add "minio>=7.2.0"
-git add backend/pyproject.toml backend/uv.lock
-```
-
-> 若 `uv add` 因网络失败，手工在 `backend/pyproject.toml` 的 `dependencies` 列表按字母序插入 `"minio>=7.2.0",`，再跑 `cd backend && uv lock`。
-
-- [ ] **Step 6: compose 加服务**
-
-在 `docker/docker-compose.yml` 追加（并确认 `volumes:` 段已声明 `objects_data`）：
-
-```yaml
-  qa-objects:
-    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
-    container_name: qa-objects
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER 必须显式配置}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD 必须显式配置}
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - objects_data:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-```
-
-`volumes:` 段加：
-
-```yaml
-  objects_data:
-```
-
-并把三个 `MINIO_*` 变量（含端点）加到 `qa-backend` 的 `environment`：
-
-```yaml
-      MINIO_ENDPOINT: qa-objects:9000
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER 必须显式配置}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD 必须显式配置}
-```
-
-> **注意**：端口 9000/9001 在宿主机是空的——`qa-milvus-minio` 不发布任何端口（已验证）。
-> **注意**：宿主机 `.env` 必须提供 `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`，compose 的 `${VAR:?}` 会在缺失时直接拒绝启动，这是有意的（避免默认弱口令）。
-
-- [ ] **Step 7: 备份脚本**
-
-新建 `scripts/backup_objects.sh`：
-
-```bash
-#!/usr/bin/env bash
-# 备份 MinIO 源文件卷（qa-knowledge-sources）。
-#
-# ⚠️ 与 backup_pg.sh 一样是**手动**脚本：本机 PG 的备份 cron 已确认静默失效
-# （launchd 契约断裂），用户 2026-09-12 决定维持手动。此缺口记录在
-# Harness/changes/feat-wiki-provenance/summary.md 第 9 段。
-set -euo pipefail
-
-BACKUP_DIR="${BACKUP_DIR:-$(cd "$(dirname "$0")/.." && pwd)/backups/objects}"
-STAMP="$(date +%Y-%m-%d_%H%M)"
-mkdir -p "$BACKUP_DIR"
-
-docker run --rm \
-  -v qa-system_objects_data:/data:ro \
-  -v "$BACKUP_DIR":/backup \
-  alpine:3.20 \
-  tar czf "/backup/objects_data_${STAMP}.tar.gz" -C /data .
-
-echo "已备份到 $BACKUP_DIR/objects_data_${STAMP}.tar.gz"
-```
-
-```bash
-chmod +x scripts/backup_objects.sh
-```
-
-- [ ] **Step 8: 更新防护规则**
-
-在 `Harness/rules/数据存储防护.md` 的卷清单表中新增一行：
-
-```markdown
-| `objects_data` | `qa-system_objects_data` | **知识源文件原件**，MinIO 后端。丢弃后 `document_catalog.storage_url` 全部失效，证据链断头 —— 不可重建（源文件只在用户手里） |
-```
-
-- [ ] **Step 9: 提交**
-
-```bash
-git add backend/app/infrastructure/object_storage.py backend/app/tests/unit/test_object_storage.py \
-        backend/pyproject.toml backend/uv.lock docker/docker-compose.yml \
-        scripts/backup_objects.sh Harness/rules/数据存储防护.md
-git commit -m "feat(wiki): 独立 MinIO 对象存储留存知识源文件 + 备份脚本"
+git add backend/app/infrastructure/source_locator.py backend/app/tests/unit/test_source_locator.py
+git commit -m "feat(wiki): source_locator 纯函数 —— 源文件预留存储键与内容摘要"
 ```
 
 ---
 
-## Task 5: `rag_service` 写真实 `storage_url`/`content_hash`，消除静默失败
+## Task 5: `rag_service` 写预留 `storage_url` 与真实 `content_hash`，消除静默失败
 
 **Files:**
 - Modify: `backend/app/services/rag_service.py:94-180`
 - Test: `backend/app/tests/unit/test_rag_service.py`
 
 **Interfaces:**
-- Consumes: `TextBlock` / `split_by_paragraphs(list[TextBlock])`（Task 1/2）、`milvus insertDocumentChunks` 新字段（Task 3）、`object_storage`（Task 4）
-- Produces: `RagService.ingestDocument(...)` 行为变更 —— 入库前先把源文件写入对象存储；`document_catalog` 记真实 url 与 hash
+- Consumes: `TextBlock` / `split_by_paragraphs(list[TextBlock])`（Task 1/2）、`milvus insertDocumentChunks` 新字段（Task 3）、`source_locator`（Task 4）
+- Produces: `RagService.ingestDocument(...)` 行为变更 —— `document_catalog` 记**预留** `storage_url` + 真实 `content_hash`；返回值新增 `storage_url` / `content_hash` 两键
 
-> **顺序调整**：源文件写入 MinIO 必须发生在 **Milvus 写入之前**。原实现在 Milvus 成功后才更新 catalog，且失败被 `except: pass` 吞掉。新顺序让 MinIO 故障在污染 Milvus 之前就显式失败。
+> ### 本任务顺手修掉两个既有缺陷
 >
-> **行为变更（有意）**：catalog 更新分支的 `except Exception: pass` 被移除。理由见 spec §4.5「MinIO 不可用必须显式失败，不得降级为静默跳过」。这会改变一条既有测试的期望，属预期。
+> 与存储决定无关，是读码时发现的真 bug：
+>
+> 1. **`updateDocument` 漏传 `actor`**：`document_service.py:145` 的签名是
+>    `updateDocument(self, session, id, dto, actor)` —— 四个参数，而 `rag_service.py:174`
+>    只传三个 → `TypeError`。该异常随即被下面的 `except Exception: pass` 吞掉，所以
+>    **「文档已存在」这个分支在生产里从未真正生效过**（每次重传同一文档都静默丢弃元数据更新）。
+> 2. **`except Exception: pass`**：删除，让异常冒泡为 500 并在日志留下上下文。
+>
+> **行为变更（有意）**：这会改变一条既有测试的期望，属预期。
+>
+> ### `storage_url` 语义变更
+>
+> 从假 URL `milvus://N_chunks` 改为 **Task 4 算出的预留 s3 键**。注意它**当前不可读** ——
+> 源文件字节按用户决定暂不存储。这是一个明确的、将来会兑现的契约，好过一个看起来像
+> URL 的假值。消费者不得假定可下载。
 
 - [ ] **Step 1: 改测试**
 
-修改 `backend/app/tests/unit/test_rag_service.py`。找到 patch `parse_document` 返回字符串的两处（约 `:229-237` 与 `:308-316`），把 mock 改成返回 `TextBlock` 列表，并给 `split_by_paragraphs` 的 mock chunk 补 `metadata`：
+修改 `backend/app/tests/unit/test_rag_service.py`。找到 patch `parse_document` 返回字符串的
+两处（约 `:229-237` 与 `:308-316`），把 mock 改成返回 `TextBlock` 列表，并给
+`split_by_paragraphs` 的 mock chunk 补 `metadata`：
 
 ```python
         mock_blocks = [
@@ -1505,19 +1374,21 @@ git commit -m "feat(wiki): 独立 MinIO 对象存储留存知识源文件 + 备�
                 "app.services.rag_service.split_by_paragraphs",
                 return_value=mock_chunks,
             ):
-                with patch(
-                    "app.services.rag_service.putSourceObject",
-                    return_value="s3://qa-knowledge-sources/sources/ab/abc/test.txt",
-                ):
 ```
+
+> **不再 patch `putSourceObject`** —— Task 4 的模块是纯函数，没有 I/O 可 mock。
+> 断言改为直接对**算出来的预留键**取值（用 `hashlib` 独立算出，不调 `source_locator`）。
 
 文件顶部补 import：
 
 ```python
+import hashlib
+
 from app.services.document_parser import TextBlock
 ```
 
-再加三条新用例。**注意裸 `MagicMock` 的 `.metadata.get(...)` 会返回一个 MagicMock**，直接写进 Milvus records 语义不明，所以用下面的 `_mockChunk` 显式给定 metadata：
+再加 `_mockChunk` 辅助与三条用例。**注意裸 `MagicMock` 的 `.metadata.get(...)` 会返回一个 MagicMock**，
+直接写进 Milvus records 语义不明，所以用 `_mockChunk` 显式给定 metadata：
 
 ```python
 def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> MagicMock:
@@ -1528,12 +1399,18 @@ def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> Ma
         sequence=seq,
         metadata={"page_number": page, "section_name": None, "paragraph_no": seq + 1},
     )
+
+
+def _expectedReservedUrl(content: bytes, filename: str) -> str:
+    """独立算出预留键（只依赖标准库，不复用 source_locator，避免自证）。"""
+    h = hashlib.sha256(content).hexdigest()
+    return f"s3://qa-knowledge-sources/sources/{h[:2]}/{h}/{filename}"
 ```
 
 ```python
     @pytest.mark.asyncio
-    async def test_ingest_stores_source_object_and_real_metadata(self) -> None:
-        """源文件必须真存，catalog 记真实 url + hash，不再写假 milvus:// URL。"""
+    async def test_ingest_records_reserved_url_and_real_hash(self) -> None:
+        """catalog 必须记预留 s3 键 + 真实 hash，不再写假 milvus:// URL。"""
         # Arrange
         mock_session = MagicMock()
         mock_emb = AsyncMock()
@@ -1544,6 +1421,7 @@ def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> Ma
             )
         ]
         mock_chunks = [_mockChunk("chunk-0", "这是测试文档内容。", 0, page=18)]
+        expectedUrl = _expectedReservedUrl(b"dummy", "test.txt")
 
         # Act
         with patch(
@@ -1554,9 +1432,6 @@ def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> Ma
             "app.services.rag_service.split_by_paragraphs", return_value=mock_chunks
         ), patch(
             "app.services.rag_service._getEmbeddingService", return_value=mock_emb
-        ), patch(
-            "app.services.rag_service.putSourceObject",
-            return_value="s3://qa-knowledge-sources/sources/ab/abcd/test.txt",
         ), patch(
             "app.services.rag_service.insertDocumentChunks"
         ) as mock_insert:
@@ -1570,15 +1445,19 @@ def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> Ma
                 actor=CurrentUser(userId="test-user"),
             )
 
-        # Assert：返回值带真实 url + hash
-        assert result["storage_url"].startswith("s3://qa-knowledge-sources/")
-        assert result["content_hash"] is not None
-        assert len(result["content_hash"]) == 64
+        # Assert：返回值带预留 url + 真实 hash
+        assert result["storage_url"] == expectedUrl
+        # sha256(b"dummy")，钉死字面量以防摘要口径漂移
+        assert result["content_hash"] == (
+            "b5a2c96250612366ea272ffac6d9744aaf4b45aacd96aa7cfcb931ee3b558259"
+        )
 
         # Assert：落库的 document 元数据是真值
         createdDto = svc._doc_svc.createDocument.await_args.kwargs["dto"]
-        assert createdDto.storage_url == "s3://qa-knowledge-sources/sources/ab/abcd/test.txt"
+        assert createdDto.storage_url == expectedUrl
         assert createdDto.content_hash == result["content_hash"]
+        # 不得再出现假 URL 的形状
+        assert not createdDto.storage_url.startswith("milvus://")
 
         # Assert：定位符进了 Milvus 记录
         record = mock_insert.call_args.args[0][0]
@@ -1587,35 +1466,42 @@ def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> Ma
         assert record["paragraph_no"] == 3
 
     @pytest.mark.asyncio
-    async def test_ingest_fails_loud_when_object_storage_fails(self) -> None:
-        """MinIO 故障必须显式失败，不得静默降级，也不得先污染 Milvus。"""
+    async def test_reserved_url_is_deterministic_across_calls(self) -> None:
+        """同一文件重传必须算出同一个预留键 —— 否则「后续补传」会落到两个位置。"""
         # Arrange
         mock_session = MagicMock()
+        mock_emb = AsyncMock()
+        mock_emb.generateEmbedding = AsyncMock(return_value=[0.1] * 1024)
+        blocks = [TextBlock(text="内容", page_number=1, section_name=None, paragraph_no=1)]
+        chunks = [_mockChunk("chunk-0", "内容", 0)]
+        urls: list[str] = []
 
-        # Act / Assert
-        with patch(
-            "app.services.rag_service.parse_document",
-            new_callable=AsyncMock,
-            return_value=[TextBlock(text="内容", page_number=1, section_name=None, paragraph_no=1)],
-        ), patch(
-            "app.services.rag_service.putSourceObject",
-            side_effect=ObjectStorageError("connection refused"),
-        ), patch(
-            "app.services.rag_service.insertDocumentChunks"
-        ) as mock_insert:
-            svc = RagService()
-            svc._doc_svc = self._mock_doc_svc_with_create()
-            with pytest.raises(RagError, match="源文件存储失败"):
-                await svc.ingestDocument(
+        # Act：连续两次同输入
+        for _ in range(2):
+            with patch(
+                "app.services.rag_service.parse_document",
+                new_callable=AsyncMock,
+                return_value=blocks,
+            ), patch(
+                "app.services.rag_service.split_by_paragraphs", return_value=chunks
+            ), patch(
+                "app.services.rag_service._getEmbeddingService", return_value=mock_emb
+            ), patch(
+                "app.services.rag_service.insertDocumentChunks"
+            ):
+                svc = RagService()
+                svc._doc_svc = self._mock_doc_svc_with_create()
+                res = await svc.ingestDocument(
                     mock_session,
-                    content=b"test",
+                    content=b"dummy",
                     filename="test.txt",
                     mime_type="text/plain",
                     actor=CurrentUser(userId="test-user"),
                 )
+                urls.append(res["storage_url"])
 
-        # 源文件存不下就不该往 Milvus 写
-        mock_insert.assert_not_called()
+        # Assert
+        assert urls[0] == urls[1]
 
     @pytest.mark.asyncio
     async def test_ingest_existing_doc_rewrites_real_metadata(self) -> None:
@@ -1637,9 +1523,6 @@ def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> Ma
         ), patch(
             "app.services.rag_service._getEmbeddingService", return_value=mock_emb
         ), patch(
-            "app.services.rag_service.putSourceObject",
-            return_value="s3://qa-knowledge-sources/sources/ab/abcd/test.txt",
-        ), patch(
             "app.services.rag_service.insertDocumentChunks"
         ):
             svc = RagService()
@@ -1654,11 +1537,13 @@ def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> Ma
                 actor=CurrentUser(userId="test-user"),
             )
 
-        # Assert：走的是 updateDocument，且写的是真实 URL
+        # Assert：走的是 updateDocument，且写的是预留 URL
         docSvc.updateDocument.assert_awaited()
         updateDto = docSvc.updateDocument.await_args.args[2]
-        assert updateDto.storage_url == "s3://qa-knowledge-sources/sources/ab/abcd/test.txt"
-        assert updateDto.content_hash is not None
+        assert updateDto.storage_url == _expectedReservedUrl(b"dummy", "test.txt")
+        assert updateDto.content_hash == (
+            "b5a2c96250612366ea272ffac6d9744aaf4b45aacd96aa7cfcb931ee3b558259"
+        )
         # actor 必须传（原实现漏传 → TypeError → 被 except 吞掉，分支从未生效）
         assert docSvc.updateDocument.await_args.kwargs["actor"] is not None
 
@@ -1687,8 +1572,11 @@ def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> Ma
         mock_insert.assert_not_called()
 ```
 
-> `updateDocument(session, id, dto)` 的位置参数顺序若与 `args[2]` 不符，以 `rag_service.py` 里的实际调用为准调整。
-> 同文件其他用例（Milvus 失败、embedding 失败等）里的 `parse_document` mock 与 `split_by_paragraphs` 返回值**全部**要按上面的形状改（`list[TextBlock]` + 带 metadata 的 chunk），否则签名变更会让它们一起挂掉。
+> `updateDocument(session, id, dto, actor=actor)` 的位置参数顺序若与 `args[2]` 不符，
+> 以 `rag_service.py` 里的实际调用为准调整。
+> 同文件其他用例（Milvus 失败、embedding 失败等）里的 `parse_document` mock 与
+> `split_by_paragraphs` 返回值**全部**要按上面的形状改（`list[TextBlock]` + 带 metadata 的 chunk），
+> 否则签名变更会让它们一起挂掉。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -1703,11 +1591,10 @@ Expected: FAIL — `TypeError: object of type 'list' has no len()` / `AttributeE
 修改 `backend/app/services/rag_service.py`。顶部 import 补：
 
 ```python
-from app.infrastructure.object_storage import (
-    ObjectStorageError,
+from app.infrastructure.source_locator import (
     buildSourceObjectName,
-    hashContent,
-    putSourceObject,
+    buildStorageUrl,
+    hashBytes,
 )
 ```
 
@@ -1723,13 +1610,11 @@ from app.infrastructure.object_storage import (
         if not blocks:
             raise RagError("文档内容为空，无法入库")
 
-        # 2. 源文件留存（内容寻址；失败必须显式，不得静默跳过）
-        contentHash = hashContent(content)
-        objectName = buildSourceObjectName(contentHash, filename)
-        try:
-            storageUrl = putSourceObject(objectName, content, mime_type)
-        except ObjectStorageError as e:
-            raise RagError(f"源文件存储失败: {e}") from e
+        # 2. 源文件预留存储位置（纯计算，不写字节）
+        #    用户决定源文件暂不存储，但把位置现在就算好并落库 ——
+        #    后续补传落在同一个 key，无需回填、无需迁移。
+        contentHash = hashBytes(content)
+        storageUrl = buildStorageUrl(buildSourceObjectName(contentHash, filename))
 
         # 3. 分块
         chunks: list[Chunk] = split_by_paragraphs(blocks)
@@ -1767,7 +1652,7 @@ Milvus 记录构造补齐定位符：
 
 ```python
         else:
-            # 已存在：刷新真实存储信息。
+            # 已存在：刷新预留位置与摘要。
             # 原实现写的是 f"milvus://{len(chunks)}_chunks" 这种假 URL，而且
             # **漏传了 actor** —— updateDocument(session, id, dto, actor) 四个
             # 参数，只传三个必然 TypeError，又被下面的 except Exception: pass
@@ -1780,7 +1665,9 @@ Milvus 记录构造补齐定位符：
             )
 ```
 
-（**删除** 原来的 `try/except Exception: pass`。让异常冒泡为 500 并在日志中留下上下文，胜过一次静默的元数据丢失。已核对该分支的调用签名：`document_service.py:145` 的 `updateDocument(self, session, id, dto, actor)`。）
+（**删除** 原来的 `try/except Exception: pass`。让异常冒泡为 500 并在日志中留下上下文，
+胜过一次静默的元数据丢失。已核对该分支的调用签名：`document_service.py:145` 的
+`updateDocument(self, session, id, dto, actor)`。）
 
 同时把返回值补上两个键，供测试与调用方使用：
 
@@ -1806,7 +1693,7 @@ Expected: PASS
 
 ```bash
 git add backend/app/services/rag_service.py backend/app/tests/unit/test_rag_service.py
-git commit -m "fix(wiki): rag_service 写真实 storage_url/content_hash 并消除静默失败"
+git commit -m "fix(wiki): rag_service 写预留 storage_url + 真实 content_hash，修漏传 actor 与静默吞异常"
 ```
 
 ---
@@ -1818,7 +1705,7 @@ git commit -m "fix(wiki): rag_service 写真实 storage_url/content_hash 并消�
 - Test: `backend/app/tests/integration/test_wiki_import_catalog.py`
 
 **Interfaces:**
-- Consumes: `parse_document` 新返回类型（Task 1）、`object_storage`（Task 4）
+- Consumes: `parse_document` 新返回类型（Task 1）、`source_locator`（Task 4）
 - Produces: `WikiImportService.execute(...)` 在每个成功批次末尾登记/更新一条 `document_catalog`
 
 > ### ⚠️ Spec 修正（必须知悉）
@@ -1830,11 +1717,21 @@ git commit -m "fix(wiki): rag_service 写真实 storage_url/content_hash 并消�
 >
 > 本任务实现**最接近原意且不破坏「预览不落库」不变量**的版本：
 >
-> - 在 `execute` 里以**草稿文本的哈希**作为 `content_hash`（草稿是 execute 实际持有的内容，哈希它对去重与变更检测同样有效）。
-> - `storage_url` 记 `None`（execute 没有文件可指向）—— 这与原本写假 `milvus://` URL 相比是更诚实的表达。
-> - 源文件级别的留存由 **RAG 路径**（Task 5）承担；若将来需要 wiki 路径也存原件，须改造 preview→execute 契约（带上传令牌），那是独立变更，不在 P0 范围。
+> - 在 `execute` 里以**草稿文本的哈希**作为 `content_hash`，用 Task 4 的 `hashText`。
+> - `storage_url` 写 **Task 4 算出的预留位置**（由草稿哈希 + `source_ref` 派生），**不是 `None`** ——
+>   用户 2026-09-12 决定「预留可以存储到指定位置的占位，后续可以存储并查看」。写 `None` 会让
+>   将来的补传必须回填历史行；写占位键则一次算好、永久有效。
 >
-> 若你希望改走「preview 存文件 + execute 引用令牌」的完整方案，请先告知，本任务需重写。
+> **已确认的范围决定（用户 2026-09-12）**：上传的源文档**暂时不存储**，只保存解析的内容，
+> 保证可检索、可供 aichat 使用，并可与本地关联。因此**不改造** preview→execute 契约、
+> **不引入**上传令牌 —— 那是存储能力真正启用时的事，本计划只把位置预留好。
+>
+> ### ⚠️ 已知局限（必须写进变更记录）
+>
+> wiki 路径的 `content_hash` 是**草稿文本**的摘要，不是原始文件的摘要（`execute` 拿不到文件字节）。
+> 因此同一份文件若既走 wiki 导入、又走 RAG 上传，会在 `document_catalog` 里产生**两行**、
+> 两个不同的 `content_hash`。这是路径差异，不是 bug；但 P1 建在 `content_hash` 上的唯一索引
+> **不会**把这两行判为重复，运维排查时须知悉。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1947,8 +1844,11 @@ async def test_execute_registers_document_catalog(
     assert row.content_hash is not None
     assert len(row.content_hash) == 64
     assert all(c in "0123456789abcdef" for c in row.content_hash)
-    # execute 只持有草稿文本，不持有原始文件 —— 这里必须是 None 而不是假 URL
-    assert row.storage_url is None
+    # storage_url 必须是**预留键**：既不是假 URL，也不是 None。
+    # 写 None 会让将来的补传必须回填历史行（见 Task 6 的范围决定）。
+    assert row.storage_url.startswith("s3://qa-knowledge-sources/sources/")
+    assert row.storage_url.endswith("/policy.md")
+    assert "milvus://" not in row.storage_url
     # 不能是 dto.source_type（"MARKDOWN"）——那既不是合法枚举值也语义不符
     assert row.document_type == DocumentType.OTHER
 
@@ -2050,19 +1950,31 @@ Expected: FAIL — catalog 行数为 0
 
 在 `execute` 收尾处（任务台账落库之后）追加：
 
+`wiki_import_service.py` 顶部 import 补：
+
+```python
+from app.infrastructure.source_locator import (
+    buildSourceObjectName,
+    buildStorageUrl,
+    hashText,
+)
+```
+
 ```python
         # P0 溯源：登记 document_catalog，使 wiki 摄入来源可被检索与去重。
-        # 注意 execute 只持有草稿文本，不持有原始文件，故 storage_url 为 None；
-        # hash 的是草稿文本 —— 对去重与变更检测同样有效。
-        # （源文件级留存由 RAG 路径承担，见 rag_service.ingestDocument。）
+        # execute 只持有草稿文本、不持有原始文件，所以：
+        #   - content_hash 是草稿文本的摘要（对去重与变更检测同样有效）
+        #   - storage_url 是**预留**位置：源文件按用户决定暂不存储，
+        #     但位置现在就算好，将来补传落在同一个 key，无需回填、无需迁移。
         draftText = "\n\n".join(d.content for d in dto.drafts if d.content)
         if draftText:
-            contentHash = hashContent(draftText.encode("utf-8"))
+            contentHash = hashText(draftText)
+            reservedName = buildSourceObjectName(contentHash, dto.source_ref or "unnamed")
             await self._catalog.upsertByContentHash(
                 session,
                 document_name=dto.source_ref or "未命名导入",
                 content_hash=contentHash,
-                storage_url=None,
+                storage_url=buildStorageUrl(reservedName),
                 actor=actor,
             )
 ```
@@ -2183,9 +2095,10 @@ git commit -m "feat(wiki): wiki 导入路径登记 document_catalog + parseFile 
 - Consumes: 全部前序任务
 - Produces: Harness 开发门禁所需的真实数据验证脚本与九段变更记录
 
-> **部署方式变更（重要）**：本计划新增了 `minio` 依赖。`scripts/deploy_backend.sh` 只 `docker cp` `app/`+`scripts/`+`alembic/`，**不安装依赖**，因此**不能**用它部署本变更。必须走完整镜像重建。
->
-> 已知风险：Dockerfile 的 base image 拉取曾因 Docker Hub 不可达而失败（Dockerfile 里保留了多处 aliyun 镜像源与重试逻辑，就是这个原因）。若 `docker compose build backend` 失败，先确认 base image 是否已在本地缓存（`docker images | grep python`）。
+> **部署方式不变（好消息）**：本计划**没有新增任何 Python 依赖** —— `pypdf`、`python-docx`、
+> `reportlab` 早已在 `pyproject.toml` 里。所以照常走 `./scripts/deploy_backend.sh`：它会
+> `docker cp` **`app/` + `scripts/` + `alembic/` 三处**（三者必须一起灌，否则容器 CMD 的
+> `alembic upgrade head` 找不到 rev，uvicorn 起不来）。**不需要重建镜像。**
 
 - [ ] **Step 1: 写真实数据验证脚本**
 
@@ -2194,10 +2107,13 @@ git commit -m "feat(wiki): wiki 导入路径登记 document_catalog + parseFile 
 ```python
 """P0 溯源地基真实数据验证（Harness 开发门禁）。
 
-对一个真实 PDF 走完整摄入链路，断言：
-  1. Milvus 中的 chunk 带正确 page_number
-  2. document_catalog 有真实 storage_url + 64 位 content_hash
-  3. MinIO 桶内可读回源文件，且内容与上传字节一致
+对一个真实 PDF 走解析 → 分块 → 预留键计算链路，断言：
+  1. 分块后的 chunk 带正确 page_number
+  2. 预留 storage_url 形状正确且**确定性**（同输入同输出）
+  3. content_hash 是 64 位小写十六进制
+
+**注意**：本脚本**不读写任何对象存储** —— 源文件字节按用户 2026-09-12 的决定
+暂不存储，只预留位置。所以这里没有上传/读回断言，那是存储能力启用后才有的事。
 
 用法：
     docker exec qa-backend python scripts/wiki_provenance_realdata.py
@@ -2206,13 +2122,18 @@ git commit -m "feat(wiki): wiki 导入路径登记 document_catalog + parseFile 
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import sys
+import io
+import re
 
-from app.infrastructure.milvus_client import searchDocumentChunks
-from app.infrastructure.object_storage import getSourceObject, hashContent
-from app.services.document_parser import parse_document
+from app.infrastructure.source_locator import (
+    buildSourceObjectName,
+    buildStorageUrl,
+    hashBytes,
+)
 from app.services.chunk_splitter import split_by_paragraphs
+from app.services.document_parser import parse_document
+
+_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 async def main() -> int:
@@ -2224,7 +2145,9 @@ async def main() -> int:
     if not blocks:
         failures.append("解析结果为空")
     elif any(b.page_number is None for b in blocks):
-        failures.append(f"存在无页码的块：{[b.text[:20] for b in blocks if b.page_number is None]}")
+        failures.append(
+            f"存在无页码的块：{[b.text[:20] for b in blocks if b.page_number is None]}"
+        )
 
     # --- 2. 分块：定位符必须透传 ---
     chunks = split_by_paragraphs(blocks)
@@ -2233,21 +2156,24 @@ async def main() -> int:
     elif any(c.metadata.get("page_number") is None for c in chunks):
         failures.append("存在无页码的 chunk")
 
-    # --- 3. 对象存储：写入后必须可读回且一致 ---
-    from app.infrastructure.object_storage import buildSourceObjectName, putSourceObject
-
-    h = hashContent(content)
-    name = buildSourceObjectName(h, "provenance-sample.pdf")
-    url = putSourceObject(name, content, "application/pdf")
-    readBack = getSourceObject(name)
-    if readBack != content:
-        failures.append("MinIO 读回内容与上传不一致")
-    if not url.startswith("s3://"):
+    # --- 3. 预留键：形状正确且确定性 ---
+    h = hashBytes(content)
+    recomputed = buildStorageUrl(
+        buildSourceObjectName(hashBytes(content), "provenance-sample.pdf")
+    )
+    url = buildStorageUrl(buildSourceObjectName(h, "provenance-sample.pdf"))
+    if not _HASH_RE.match(h):
+        failures.append(f"content_hash 形状不对：{h}")
+    if not url.startswith("s3://qa-knowledge-sources/sources/"):
         failures.append(f"storage_url 形状不对：{url}")
+    if url != recomputed:
+        failures.append("预留键不确定：同输入产出不同 URL")
+    if "/../" in url:
+        failures.append(f"预留键含越权路径段：{url}")
 
     print(f"page_number 序列: {[c.metadata['page_number'] for c in chunks]}")
     print(f"content_hash:     {h}")
-    print(f"storage_url:      {url}")
+    print(f"storage_url:      {url}  （预留位置，当前无对应对象）")
 
     if failures:
         print("\n❌ 失败项：")
@@ -2259,15 +2185,30 @@ async def main() -> int:
 
 
 def _samplePdfBytes() -> bytes:
-    """与测试同源的最小带文本 PDF 构造（见 test_document_parser._make_pdf_with_text）。"""
-    raise NotImplementedError
+    """用 reportlab 生成两页 PDF（与 test_document_parser 的 _makePdf 同源）。
+
+    不用手搓 PDF 字节：xref 偏移量极易写错，而且写错之后 pypdf 读到的是
+    **0 页**而非报错 —— 脚本会以「空结果」的形式静默通过。
+    reportlab 是已声明依赖（`reportlab>=4.2.0`，实机 5.0.0，已验证可导入）。
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    for text in ("第一页：供应商准入需注册资本 >= 1000 万", "第二页：质量协议每年复核一次"):
+        c.drawString(72, 720, text)
+        c.showPage()
+    c.save()
+    return buf.getvalue()
 
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
 ```
 
-> `_samplePdfBytes` 必须补全：直接从 `backend/app/tests/unit/test_document_parser.py` 的 `_make_pdf_with_text` 复制实现（同仓库内，允许重复——测试夹具跨目录 import 会引入不必要的耦合）。
+> 该辅助**有意与 `backend/app/tests/unit/test_document_parser.py` 的 `_makePdf` 重复** ——
+> 脚本跨目录 import 测试夹具会引入不必要的耦合。
 
 - [ ] **Step 2: 跑验证脚本**
 
@@ -2275,36 +2216,45 @@ if __name__ == "__main__":
 docker exec qa-backend python scripts/wiki_provenance_realdata.py
 ```
 
-Expected: 输出页码序列 / hash / url，末尾 `✅ P0 溯源地基真实数据验证通过`
+Expected: 输出页码序列 / hash / 预留 URL，末尾 `✅ P0 溯源地基真实数据验证通过`
 
-- [ ] **Step 3: 重建并部署**
+- [ ] **Step 3: 部署**
 
 ```bash
-cd /path/to/repo
-docker compose -f docker/docker-compose.yml build backend
-docker compose -f docker/docker-compose.yml up -d qa-objects backend
+./scripts/deploy_backend.sh
 docker exec qa-backend alembic current    # 本计划无新迁移，应停在既有 head
 docker exec qa-backend python scripts/rebuild_document_collection.py
 ```
 
-Expected: `qa-objects` 起来且健康；`qa-backend` 健康；集合重建成功
+Expected: 脚本报告灌入 `app/`+`scripts/`+`alembic/` 三处成功且容器健康；集合重建成功
+
+> **集合重建是本计划唯一不可逆的操作**。执行前用 Task 3 的前置检查确认
+> `document_embeddings` 仍为空 —— 空集合重建无数据损失。
 
 - [ ] **Step 4: 验证回滚路径**
 
 ```bash
-docker tag qa-system-backend:latest qa-system-backend:p0-provenance
-# 回滚：git revert 本计划的提交序列后重建镜像
+docker exec qa-backend alembic current   # 记下版本号，回滚后应一致（本计划无迁移）
+./scripts/deploy_backend.sh --rollback   # 从快照目录还原上一版代码
 ```
 
-> P0 无 PG 迁移，回滚不涉及数据。**唯一不可逆项**是 Milvus 集合重建——但重建前该集合为空，故无数据损失。**MinIO 里的源文件不受回滚影响**（保留是好事）。
+> P0 无 PG 迁移，回滚不涉及数据。**唯一不可逆项**是 Milvus 集合重建 —— 但重建前该集合为空，
+> 故无数据损失。`document_catalog` 里的预留 URL 是**纯计算结果、无外部状态**，回滚后仍指向
+> 同一个位置，所以回滚不会让「将来的补传」失效。
 
 - [ ] **Step 5: 写九段变更记录**
 
-新建 `Harness/changes/feat-wiki-provenance/summary.md`，按 `Harness/changes/_template/summary.md` 的九段结构填写。**第 9 段「真实数据验证报告」必须包含 Step 2 的完整实际输出**——照抄终端输出，不得概括。同时必须记录：
+新建 `Harness/changes/feat-wiki-provenance/summary.md`，按 `Harness/changes/_template/summary.md`
+的九段结构填写。**第 9 段「真实数据验证报告」必须包含 Step 2 的完整实际输出** —— 照抄终端输出，
+不得概括。同时必须记录：
 
-- **备份门禁缺口**：PG 备份 cron 已确认静默失效（launchd 契约断裂，根因是 `/etc/crontab` 缺失），用户 2026-09-12 决定维持手动。`scripts/backup_objects.sh` 同样以手动形态交付。此缺口不得粉饰。
-- **spec §4.1 C5 的修正**（见 Task 6 的说明）。
-- **部署方式变更**：本变更不能走 `deploy_backend.sh`。
+- **范围决定**：源文件字节暂不存储，只预留位置（用户 2026-09-12 决定）。必须写明
+  `document_catalog.storage_url` **当前不可读、不是下载链接**，以及后续补传落在同一 key、
+  无需回填。同时写明**删减项**：未引入 `minio` 依赖、未加容器、未加备份脚本。
+- **spec §4.1 C5 的修正**（见 Task 6 的说明）与**已知局限**（同一文件走 wiki 与 RAG 两条路径
+  会产生两行 catalog、两个不同的 `content_hash`，P1 的唯一索引不会判其重复）。
+- **备份门禁缺口**：PG 备份 cron 已确认静默失效（launchd 契约断裂，根因是 `/etc/crontab` 缺失），
+  用户 2026-09-12 决定维持手动 —— 需要备份直接跑 `./scripts/backup_pg.sh`。此缺口不得粉饰。
 
 - [ ] **Step 6: 提交**
 
@@ -2319,12 +2269,17 @@ git commit -m "chore(wiki): P0 真实数据验证脚本 + 变更记录"
 
 | 验收信号 | 由哪个任务交付 |
 |---|---|
-| Milvus chunk 带正确 `page_number` | Task 3 Step 7 |
-| `document_catalog` 有真实 `storage_url` + 非空 `content_hash` | Task 5、Task 6 |
-| MinIO 桶内存有源文件 | Task 4 Step 6、Task 7 Step 2 |
+| Milvus chunk 带正确 `page_number` / `section_name` / `paragraph_no` | Task 2、Task 3 |
+| `document_catalog` 有**预留** `storage_url` + 非空 `content_hash` | Task 5、Task 6 |
+| 预留键确定性（同输入同 URL），形状为 `s3://qa-knowledge-sources/sources/<h[:2]>/<h>/<name>` | Task 4 Step 1、Task 7 Step 2 |
+
+> **原验收信号「MinIO 桶内存有源文件」已删除** —— 用户 2026-09-12 决定源文件字节暂不存储。
+> 验收时**不得**把「桶里有文件」当作通过条件；该项由「预留键确定性」替代。
 
 ## 不做的事（范围边界）
 
+- **不存储源文件字节**（用户 2026-09-12 决定）。只预留位置，`storage_url` **当前不可读**。
+- **不引入 `minio` 依赖 / 不加容器 / 不加备份脚本** —— 存储能力真正启用时再说。
 - **不产生任何 PG 迁移**（spec D2-2）。`content_hash` 唯一约束推到 P1。
 - 不实现 preview→execute 的上传令牌改造（Task 6 已说明理由）。
 - 不改前端。
@@ -2349,28 +2304,24 @@ P1（`2026-09-12-wiki-dedup-p1.md`）的迁移 `0061_wiki_dedup` 会给
 P0 的 `WikiCatalogRegistrar.upsertByContentHash` 用的是 SELECT-then-INSERT，
 **不依赖**唯一约束来保证幂等；P1 的索引落地后它只是多了一层并发兜底。
 
-### 2. 摘要口径必须一致 —— 两份实现，同一算法
-
-P0 与 P1 各有一个摘要函数：
+### 2. 摘要口径必须一致 —— 收敛为**一份实现**
 
 | 计划 | 函数 | 定义 |
 |---|---|---|
-| P0（Task 4） | `object_storage.hashContent(content: bytes) -> str` | `sha256(content).hexdigest()` |
-| P1（Task 1） | `wiki_page_service.contentHashOf(content: str) -> str` | `sha256(content.encode("utf-8")).hexdigest()` |
+| P0（Task 4） | `source_locator.hashBytes(content: bytes) -> str` | `sha256(content).hexdigest()` |
+| P0（Task 4） | `source_locator.hashText(text: str) -> str` | `hashBytes(text.encode("utf-8"))` |
+| P1（Task 1） | `wiki_page_service.contentHashOf(text: str) -> str` | `sha256(text.encode("utf-8")).hexdigest()` |
 
-同一文本经两者得到**同一个值**（`hashContent(s.encode("utf-8")) == contentHashOf(s)`），
-P0 的 Task 6 依赖这一点来写 `document_catalog.content_hash`。
+三者对同一文本产出**同一个值**，P0 的 Task 6 依赖这一点写 `document_catalog.content_hash`。
 
-**执行 P0 时的处理**：
+**收敛动作（先落地的一方负责）**：P0 落地后，把 P1 的 `contentHashOf` 改为
+`from app.infrastructure.source_locator import hashText` 的薄包装（或直接替换调用点）。
+**不要保留两份 `sha256` 实现** —— 它们现在是同一算法，但会各自漂移。
+P0 的 Task 6 不依赖 P1（`hashText` 已满足口径），所以两边可以任意顺序落地。
 
-- 若 **P1 尚未落地** —— 按本计划 Task 6 原样写（`hashContent(draftText.encode("utf-8"))`），
-  并在 `summary.md` 记下「待 P1 落地后统一为 `contentHashOf`」。
-- 若 **P1 已落地** —— Task 6 改为 `from app.services.wiki_page_service import contentHashOf`，
-  用 `contentHashOf(draftText)`，**不要**再走 `hashContent`。P1 的计划已写明
-  「P0 落地时直接复用本函数，不要再写第二份实现」。
-
-无论哪种，Task 6 的测试都要**把 64 位摘要钉成字面量**（而不是只断言长度）。
+无论哪种，两边测试都要**把 64 位摘要钉成字面量**（而不是只断言长度）。
 只断言长度挡不住口径漂移 —— 漂移了不会报错，只会让两侧比对永远不等。
+P0 已在 `test_rag_service.py` 钉死 `sha256(b"dummy")` 的字面量。
 
 ### 3. `wiki_import_service.execute` 是 P0 与 P1 的共同改动点
 
@@ -2387,7 +2338,7 @@ P0 的 Task 6 依赖这一点来写 `document_catalog.content_hash`。
 
 ### 4. `TextBlock` 只属于 P0
 
-P1 与 P3 都**不依赖** `TextBlock` / `Chunk.metadata` / MinIO 管线（P1 计划已显式声明解耦）。
+P1 与 P3 都**不依赖** `TextBlock` / `Chunk.metadata` / `source_locator`（P1 计划已显式声明解耦）。
 P3 的 `evidence` 写入若要填 `page_number` / `section_name` / `paragraph_no`，来源正是 P0 落进
 Milvus 的这三列 —— 那是**数据上的**依赖，不是代码依赖，故 P3 不阻塞于 P0，但 P0 未落地时
 P3 写出的 evidence 定位符只能是空值。这一点在 P3 计划里核对。

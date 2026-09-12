@@ -18,7 +18,7 @@
 1. **不重建 Wiki 子系统**：M1–M8 机制已落地并在产，本文档是补齐其缺口，不是重写。
 2. **不做全自动发布**：知识进入可用状态必须经人工复核（沿用现有 `structure_suggestion` / `knowledge_conflict` 的 HITL 形态）。
 3. **不引入 pgvector / 新向量库**：向量检索继续走 Milvus。
-4. **本期不做知识版本化**：`claim` 的 `valid_from` / `valid_to` 时间维留待后续。
+4. **本期不做知识版本化**：P3 会按选项 C 落下列（`valid_from` / `valid_to` / `status`），但**本期不写入、不消费、不做时效过滤**。列先就位是为了避免将来二次迁移，不是本期功能。
 5. **不做多租户知识隔离**：沿用现有全局共享模型。
 
 ---
@@ -129,6 +129,8 @@ class TextBlock:
 
 async def parse_document(...) -> list[TextBlock]
 ```
+
+**类型对齐（P0 与 P3 必须一致）**：这里 `page_number` / `paragraph_no` 定为 `int`，而 `evidence` 表现存两列是 `VARCHAR(30)`。P3 迁移会把 evidence 两列改为 `INTEGER`（见 7.5），与文档方案一致 —— 数字列可做区间查询、可校验；非数字情形（如"附录A"）归入 `section_name`，不挤进页码列。
 
 **注意保留**：`UnsupportedFileTypeError` 与 `DocumentParserError` 的分裂是**刻意的**，注释已写明理由（"换格式即可" vs "换文件"）。不得合并。
 
@@ -303,6 +305,32 @@ PAGE-<slug(title)>-<sha256(source_ref \x00 title \x00 content)[:8].upper()>
 
 **顺序是强制的**：`evidence.claim_id` 是 `NOT NULL` FK（`0053:91`），所以必须先产出 claim，再为每条 claim 绑 evidence。
 
+#### 双形态产出（D3-1 = 选项 C）
+
+抽取 prompt **一次调用产出两种表示**：
+
+```json
+{
+  "claim_text":   "供应商A因质量问题自2026年1月起暂停采购资格",
+  "claim_type":   "FACT",
+  "subject_id":   "SUPPLIER-A",          // 可为 null
+  "predicate":    "HAS_STATUS",
+  "object_value": "Suspended",
+  "object_type":  "BusinessObject",
+  "confidence":   0.86
+}
+```
+
+- `claim_text` / `claim_type` 必填，沿用现实现有列，语义不变。
+- 三元组各列**可空**：抽得出就写，抽不出留 `NULL`。`subject_id` 允许自由文本，不要求解析成功。
+- 一次调用同时产出两形态，**成本与只产三元组等同** —— 这是选项 C 相对选项 B 没有额外开销的原因。
+
+**双表示一致性规则**（B 没有的新负担，必须显式定）：
+
+三元组**仅在抽取时写入**。人工编辑 `claim_text` 时**不自动重抽**三元组，而是把该 claim 的三元组标记为 stale（新增 `triple_stale BOOLEAN NOT NULL DEFAULT FALSE`），由人工决定是否触发重抽。
+
+理由：自动重抽会把一次人工校对变成一次不可控的 LLM 调用，且可能在用户不知情时改掉已复核的结论。宁可显式标记、批量重抽，也不要静默漂移。
+
 ### 6.4 `selectin` 性能悬崖（本节最重要的发现）
 
 `WikiPage.claims`（`wiki_models.py:163-168`）与 `KnowledgeClaim.evidences`（`:208-213`）**都是 `lazy="selectin"`**。今天两张表是空的，所以完全看不出来。
@@ -420,27 +448,74 @@ CREATE INDEX ix_wiki_token_usage_compile_task ON wiki_token_usage(compile_task_i
 
 ### 7.5 迁移清单
 
-新建 2 表 + `wiki_token_usage` 加 1 列 1 索引。
+| 对象 | 动作 |
+|---|---|
+| `wiki_compile_task` | 新建表 |
+| `wiki_compile_item` | 新建表 |
+| `wiki_token_usage.compile_task_id` | 加列 + FK + 索引 |
+| **`knowledge_claim`** | **加 10 个可空列**（D3-1 选项 C）：`subject_id` / `predicate` / `object_value` / `object_type` / `confidence` / `authority_level` / `status` / `valid_from` / `valid_to` / `triple_stale` |
+| **`evidence`** | **加 2 个可空列**：`content_hash` / `confidence` |
+| **`evidence.page_number`** | **`VARCHAR(30)` → `INTEGER`**（与 P0 的 `TextBlock.page_number: int` 对齐，见 4.1）；现有 0 行，无回填风险 |
 
-按 `数据库环境使用规范.md` 直接改 prod `qa_metadata`，**备份 `wiki_token_usage_20260912`**（唯一被改的既有表）。新表无数据可备份。
+按 `数据库环境使用规范.md` 直接改 prod `qa_metadata`，**备份 `wiki_token_usage_20260912` 与 `knowledge_claim_20260912`**（被改的既有表；两表当前均 0 行，备份是走流程而非救命）。新表无数据可备份。
+
+**为何所有新列均可空**：选项 C 的实质是**扩展而非替换** —— 现有列不动、现有读路径（`GET /claims`）不破，新列为严格超集。`subject_id` 初期大量为 `NULL` 是预期行为，不是缺陷；见 §八。
 
 ---
 
-## 八、与设计文档的偏离声明
+## 八、claim schema 决策：扩展而非替换（选项 C）
 
-原方案文档的 `knowledge_claim` 是三元组形态：`subject_id / predicate / object_value / object_type / confidence / authority_level / status / valid_from / valid_to`，且 `evidence` 挂在 **page** 下。
+### 8.1 两套 schema 的实际差异
 
-实现是：`claim_text / claim_type(FACT/DEFINITION/RULE/STATISTIC) / embedding_ref`，`evidence` 挂在 **claim** 下并带定位符。
+| | 原方案文档 | 当前实现 |
+|---|---|---|
+| claim 主键 | `claim_id` 业务键 | `id` BIGINT 代理键 |
+| **主语** | **`subject_id` + `predicate` + `object_value` + `object_type`** | **无** —— 仅 `claim_text` 自由文本 |
+| claim 挂靠 | `source_id` + `evidence_id` | `page_id` FK → `wiki_page` |
+| evidence 挂靠 | `page_id`（页面锚定，**可被多条 claim 共享**） | `claim_id` NOT NULL FK（claim 子行，**不可共享**） |
+| 置信度 | `confidence DECIMAL(5,4)` | 无 |
+| 权威度位置 | **claim 上** | **page 上**（claim 级不存在） |
+| 时效 | `valid_from` / `valid_to` | 无 |
+| 定位符类型 | `page_number INT` / `paragraph_no INT` | `VARCHAR(30)` / `VARCHAR(30)` |
 
-**决策（D3-1）：保持实现，不向文档收敛。** 理由：
+### 8.2 为何文档的 schema 更贴近远期目标
 
-1. `claim_type` 四值恰好对上 M2 已产出的页面类型。
-2. 带定位符的 evidence 正是 P0 要喂养的东西，与 P0 严丝合缝。
-3. 文档的三元组形态依赖一个**并不存在的本体对象解析器**。现在建它，等于为一个还没有消费者的结构付出"迁移 + 抽取 + 消歧"三重成本。
+关键在 `subject_id`——**它是 Wiki 知识与本体架构的接合键**。文档 §37 自述 Claim 是"真正可验证的知识单元"，例子是 `Supplier-A HAS_STATUS Suspended`。
 
-等真实消费者提出要求时再加列。
+当前实现里 claim 是一句自由文本，**没有可寻址主语**，后果有三：
 
-**这是一处真实的架构偏离，不是等价实现。** 明确记录在此，避免它以"实现即文档"的方式悄悄固化。
+1. **无法按主体检索**：做不到 `WHERE subject_id = 'SUPPLIER-A'`。要回答"这家供应商的全部知识"，只能靠向量相似度近似。
+2. **每次绑定本体都要重新抽取**：claim 与本体之间无持久连接，只能查询时让 LLM 现抽主语。不确定、不可索引、不可校验。
+3. **文档 §39 的检索管线跑不起来**：该管线含显式 `Authority Filtering` 一阶，而权威度现挂在 page 上，claim 级不存在，也没有 `confidence` —— 页级过滤代替不了 claim 级过滤。
+
+**决策（D3-1，修订）：采用选项 C —— 扩展而非替换。**
+
+`claim_text` / `claim_type` / `embedding_ref` 全部保留，**追加可空列**：`subject_id` / `predicate` / `object_value` / `object_type` / `confidence` / `authority_level` / `status` / `valid_from` / `valid_to` / `triple_stale`。
+
+理由：
+
+1. **纯追加迁移**，不动现有列，`GET /claims` 与 `claim_text` 照常工作，无数据丢失。
+2. **P3 本就要写迁移**，加可空列几乎零边际成本 —— 最贵的部分（实体解析层）得以推迟，但**地基方向一次做对**。
+3. **抽取 prompt 只写一次**即产出双形态，永远不会付第二遍 LLM 成本。
+4. `subject_id` **允许为 NULL 与自由文本**，不要求实体层先就位。
+5. **缺口变为可测量**：`SELECT count(*) WHERE subject_id IS NULL` 就是实体解析层的精确待办量 —— 一个真实信号，会驱动 P4/P5 的优先级，优于"以后可能需要"的猜测。
+6. 严格超集：若三元组实践证明 LLM 抽不准，列留空即可，不破坏任何东西。
+
+### 8.3 选项 C 相对选项 B 的真实差异
+
+B（直接上文档三元组）与 C 的**列终态相同**，C 是其超集。但两者有三处非时序性差异：
+
+1. **`claim_text` 的去留**（终态差异）。B 的 claim 就是三元组，原句消失。三元组装不下"因质量问题自 2026-01 起"这类限定与语气，而带引用的问答要展示给人的正是原句；且**三元组可能抽错、原句不会** —— 只留三元组，一次抽取错误即静默污染知识库且无从发现。故即使成熟期，B 的终态在引用质量上是回退。
+2. **实体层依赖**（能力差异）。`subject_id` 解析不到真东西时就只是占位符。**选项 C 不省掉实体层**，省掉的是"盲建"与"重付抽取成本"。实体层落地前，C 在能力上接近现状 —— 但它让未解析的 `subject_id` 值本身成为实体层的需求说明书（B 必须在动手前定死 `subject_id` 指向谁）。
+3. **双表示一致性负担**（C 的新增成本）。有句子又有三元组就有"哪个是真的"问题。规则见 6.3：仅抽取时写入，人工编辑标记 `triple_stale`，不自动重抽。
+
+**关系是 C ⊃ B，不是 C → B。** C 能在实体层落地后收敛到 B（删列）；B 要拿回原句必须重跑全部抽取、再付一遍 LLM 成本。
+
+### 8.4 关于 `evidence` 挂靠方式：保留实现
+
+文档的 `claim → evidence_id`（单数）意味一条 claim 只能引一条证据。当前实现是 `evidences` 列表（一对多），**在引用完整性上反而更好** —— 跨两段综合出的结论能同时引两段。故 **evidence 挂靠方式保留实现**，仅统一类型并补 `content_hash` / `confidence`（见 7.5）。
+
+代价是 `evidence.content` 在一条段落支撑多条 claim 时会重复存储。当前无数据可评估，不预优化；若实测膨胀显著再议。
 
 ---
 
@@ -490,7 +565,7 @@ CREATE INDEX ix_wiki_token_usage_compile_task ON wiki_token_usage(compile_task_i
 |---|---|
 | P0 | 上传一份已知 PDF → Milvus chunk 带正确 `page_number`；`document_catalog` 有真实 `storage_url` + 非空 `content_hash`；MinIO 桶内存有源文件 |
 | P1 | 同一文件导入两次 → `wiki_page` 恰 1 行；`wiki_learning_models.py:172-173` 的声称由测试钉死 |
-| P3 | `knowledge_claim` / `evidence` 非零且 evidence 定位符非空；`wiki_compile_item` 可续跑（杀进程后重跑只处理未完成项）；`wiki_token_usage.compile_task_id` 有值；`explain` 显示 wiki 列表查询不再拖 evidence |
+| P3 | `knowledge_claim` / `evidence` 非零且 evidence 定位符非空；**claim 三元组双形态产出**（`claim_text` 与 `subject_id`/`predicate`/`object_value` 同批非空）；`SELECT count(*) FROM knowledge_claim WHERE subject_id IS NULL` 有确定值（实体层待办量）；`wiki_compile_item` 可续跑（杀进程后重跑只处理未完成项）；`wiki_token_usage.compile_task_id` 有值；`explain` 显示 wiki 列表查询不再拖 evidence |
 
 ---
 
@@ -504,6 +579,9 @@ CREATE INDEX ix_wiki_token_usage_compile_task ON wiki_token_usage(compile_task_i
 | P3 批量 LLM 成本 | 全量页面编译成本不可预估 | 先小批量试跑 + `preflight()` 前置校验；`total_cost_usd` 累积可见 |
 | 软引用幽灵关系 | 覆盖率指标系统性高估 | 3.2 写入侧存在性校验 |
 | `selectin` 降级遗漏端点 | 某处原本依赖自动加载的代码静默失效 | 降级 + 显式 `selectinload`；既有反退化测试兜底 |
+| **三元组抽取准确率未知** | 抽错的主语会污染按主体检索的结果 | 双形态保留原句可比对；`confidence` 列落盘；`subject_id` 允许 NULL，宁可留空不硬猜 |
+| **双表示漂移**（选项 C 特有） | `claim_text` 被人工编辑后三元组与句子不一致 | 6.3 规则：三元组仅抽取时写入，编辑时置 `triple_stale`，不自动重抽 |
+| `evidence.page_number` 改 INT | 若历史数据含非数字页码会迁移失败 | 该表当前 0 行，无回填风险（执行前复查） |
 
 ---
 

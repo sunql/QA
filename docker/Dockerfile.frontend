@@ -1,8 +1,16 @@
 # ===== 构建阶段 =====
 FROM node:20-alpine AS build
 WORKDIR /app
+
+# npm registry。**默认官方源**，保持仓库在任何环境可移植；网络受限环境在构建时覆盖即可：
+#   docker compose build --build-arg NPM_REGISTRY=https://registry.npmmirror.com frontend
+# 用 ARG 而非 ENV：只在构建期可见，不会烘焙进镜像层。
+# （npm 的 replace-registry-host 默认 "npmjs"，会把 lockfile 里 registry.npmjs.org 的
+#   resolved 地址替换成本处配置的 registry，故 --registry 对 npm ci 生效。）
+ARG NPM_REGISTRY=https://registry.npmjs.org
+
 COPY frontend/package*.json ./
-RUN npm ci
+RUN npm ci --registry=${NPM_REGISTRY}
 COPY frontend/ ./
 ARG VITE_API_BASE_URL=http://localhost:8000/api/v1
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}

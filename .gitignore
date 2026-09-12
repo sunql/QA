@@ -58,3 +58,9 @@ docker/data/
 # Backup artifacts (scripts/backup_pg.sh 写入；保留 3 天滚动窗口)
 backups/
 *.dump
+
+# Git worktrees（每台机器本地目录，绝不入库）
+.worktrees/
+
+# superpowers SDD 工作区（每个计划的过程产物，git 历史才是记录）
+.superpowers/

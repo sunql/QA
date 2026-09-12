@@ -58,7 +58,13 @@ from app.domain.wiki_learning_models import (
 from app.domain.wiki_models import WikiPage
 from app.domain.wiki_schemas import WikiImportDraft, WikiImportExecuteRequest
 from app.infrastructure.llm.factory import createClient
+from app.infrastructure.object_storage import (
+    buildSourceObjectName,
+    hashContent,
+    putSourceObject,
+)
 from app.services.document_parser import parse_document
+from app.services.wiki_catalog_registrar import WikiCatalogRegistrar
 from app.services.learning.auto_classifier import AutoClassifier
 from app.services.learning.llm_invoker import LearningLLMInvoker
 from app.services.messages_zh import (
@@ -170,8 +176,14 @@ def _now() -> datetime:
 class WikiImportService:
     """导入任务的编排层。"""
 
-    def __init__(self, *, classifier: AutoClassifier | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        classifier: AutoClassifier | None = None,
+        catalog: WikiCatalogRegistrar | None = None,
+    ) -> None:
         self._classifier = classifier or AutoClassifier()
+        self._catalog = catalog or WikiCatalogRegistrar()
         self._pageService = WikiPageService()
 
     async def listUsableModels(self, session: AsyncSession) -> list[tuple[LlmConfig, bool]]:
@@ -202,8 +214,41 @@ class WikiImportService:
         Raises:
             DocumentParserError: 格式不支持或解析失败（API 层转 422）。
         """
-        text = await parse_document(content, mime_type, filename)
+        blocks = await parse_document(content, mime_type, filename)
+        # 预览仍要扁平文本（前端按段落编辑），由带定位的块拼回。
+        text = "\n\n".join(b.text for b in blocks)
         return text, sourceTypeFromFilename(filename, mime_type)
+
+    async def persistSourceFile(
+        self,
+        session: AsyncSession,
+        *,
+        content: bytes,
+        mime_type: str,
+        filename: str,
+        actor: int | None,
+    ) -> str:
+        """留存源文件并登记 document_catalog，返回 ``storage_url``。
+
+        内容寻址：同一份文件重复上传落到同一对象名，天然去重；catalog 登记
+        再按 ``content_hash`` 幂等一层。两层都不依赖调用方传任何东西进来 ——
+        哈希与 URL 全部由服务端从**真实字节**算出。
+
+        Raises:
+            ObjectStorageError: MinIO 不可用或写入失败（API 层转 503）
+        """
+        contentHash = hashContent(content)
+        objectName = buildSourceObjectName(contentHash, filename)
+        storageUrl = putSourceObject(objectName, content, mime_type)
+        await self._catalog.upsertByContentHash(
+            session,
+            document_name=filename,
+            content_hash=contentHash,
+            storage_url=storageUrl,
+            actor=actor,
+        )
+        await session.commit()
+        return storageUrl
 
     async def listTasks(
         self,

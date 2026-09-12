@@ -345,6 +345,9 @@ MSG_WIKI_IMPORT_FILE_PARSE_FAILED = (
 MSG_WIKI_IMPORT_FILE_TOO_LARGE = (
     "文件过大（{size} MB），单次上传上限 {max} MB"
 )
+MSG_WIKI_IMPORT_SOURCE_STORE_FAILED = (
+    "源文件留存失败，请稍后重试；若持续失败请联系管理员。"
+)
 
 # --- M3：学习闭环反馈 ---
 MSG_WIKI_FEEDBACK_ACTION_INVALID = "反馈动作「{action}」不合法"

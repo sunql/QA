@@ -4,12 +4,17 @@
 
 1. ``GET  /wiki/import/models``       拉可选模型（标出哪些真能调）
 2. ``POST /wiki/import/preview``      贴原文 → 切出草稿（不落库、不调模型）
-3. ``POST /wiki/import/preview-file`` 上传文件 → 纯文本（不落库、不调模型）
+3. ``POST /wiki/import/preview-file`` 上传文件 → 纯文本（**留存源文件**、不调模型）
 4. ``POST /wiki/import/execute``      回传（可编辑的）草稿 → 建 Page + 可选分类
 5. ``GET  /wiki/import/tasks``        导入作业台账
 
 ``preview`` 与 ``preview-file`` 是两条来源入口、**同一套切分**：上传只做
 「文件 → 文本」（PDF/Word 抽取有损，先交用户核对），切分仍是 ``/preview``。
+
+上传路径会把源文件按内容寻址存入对象存储，并登记一行 ``document_catalog``
+（原文件因解析成功才会走到这一步）。因此「预览」在上传路径上是**有副作用**的：
+预览过但未导入的文件同样会留存。这是 2026-09-12 的刻意决定 —— 溯源价值高于
+「预览不留痕」，且内容寻址让重复预览不产生重复对象。
 
 整组路由要求已认证（router 级 ``Depends(getCurrentUser)``），
 ``execute`` 另取当前用户写入 ``created_by_user_id`` 做溯源。
@@ -47,6 +52,7 @@ from app.domain.wiki_schemas import (
     WikiImportTaskListRead,
     WikiImportTaskRead,
 )
+from app.infrastructure.object_storage import ObjectStorageError
 from app.infrastructure.rate_limit import limiter, rateLimitValue
 from app.services.acl_service import ADMIN_ROLE
 from app.services.document_parser import (
@@ -57,6 +63,7 @@ from app.services.messages_zh import (
     MSG_WIKI_IMPORT_FILE_PARSE_FAILED,
     MSG_WIKI_IMPORT_FILE_TOO_LARGE,
     MSG_WIKI_IMPORT_FILE_TYPE_UNSUPPORTED,
+    MSG_WIKI_IMPORT_SOURCE_STORE_FAILED,
 )
 from app.services.wiki_import_service import WikiImportService
 
@@ -117,8 +124,10 @@ async def previewImport(payload: WikiImportPreviewRequest) -> WikiImportPreviewR
 async def previewImportFile(
     request: Request,
     file: UploadFile,
+    user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
 ) -> WikiImportFileParseRead:
-    """上传文件 → 纯文本 + 来源类型（不落库、不调模型）。
+    """上传文件 → 纯文本 + 来源类型（落对象存储与文档目录，不调模型）。
 
     只解析、不切分：抽取出的文本交回用户核对后，再走既有的 ``/preview``
     切分。这样两条来源路径（粘贴 / 上传）共用同一套切分逻辑。
@@ -131,6 +140,7 @@ async def previewImportFile(
     - 超过 ``MAX_UPLOAD_BYTES`` → 413
     - 格式不支持 → 422，提示「换格式」（含支持列表）
     - 解析失败（损坏/加密）→ 422，提示「换文件」
+    - 源文件留存失败（MinIO 不可用）→ 503
 
     **不回显底层异常原文**：``pypdf``/``python-docx`` 的异常会把临时路径、
     库内部状态带进响应，而这些是攻击面信息；前端也不会展示 ``detail``
@@ -160,6 +170,23 @@ async def previewImportFile(
         # 底层原因只进日志（含路径/库内部信息），响应只给可行动的提示。
         logger.exception("知识导入文件解析失败: filename=%s mime=%s", fname, mime)
         raise HTTPException(status_code=422, detail=MSG_WIKI_IMPORT_FILE_PARSE_FAILED) from None
+
+    # 解析成功后才留存：损坏/格式不符的文件不该在对象存储里留下垃圾。
+    # MinIO 故障显式失败（503），不降级为「预览成功但其实没存」。
+    try:
+        await _importService.persistSourceFile(
+            db,
+            content=content,
+            mime_type=mime,
+            filename=fname,
+            actor=user.dbUserId,
+        )
+    except ObjectStorageError:
+        logger.exception("知识导入源文件留存失败: filename=%s mime=%s", fname, mime)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=MSG_WIKI_IMPORT_SOURCE_STORE_FAILED,
+        ) from None
 
     return WikiImportFileParseRead(text=text, source_type=sourceType)
 

@@ -13,7 +13,8 @@ from __future__ import annotations
 import json
 import logging
 from decimal import Decimal
-from unittest.mock import patch
+from typing import Iterator
+from unittest.mock import MagicMock, patch
 
 import pytest
 from httpx import AsyncClient
@@ -55,6 +56,20 @@ _CLASSIFY_JSON = json.dumps(
         "reason": "含准入门槛阈值",
     }
 )
+
+
+@pytest.fixture(autouse=True)
+def fakeMinio() -> Iterator[MagicMock]:
+    """本模块每个用例都不联真实 MinIO。
+
+    ``preview-file`` 自 P0 溯源地基起会留存源文件（解析成功后写对象 + 登记
+    ``document_catalog``），落库是真实链路，但对象存储是外部服务 —— 与假 LLM
+    客户端同思路，用假实现替换，不联外网。
+    """
+    fake = MagicMock()
+    fake.bucket_exists.return_value = True
+    with patch("app.infrastructure.object_storage._getClient", return_value=fake):
+        yield fake
 
 
 class _FakeLlmClient:

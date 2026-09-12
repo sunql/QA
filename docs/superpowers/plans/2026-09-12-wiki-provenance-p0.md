@@ -797,17 +797,31 @@ git commit -m "refactor(wiki): split_by_paragraphs 吃 TextBlock 并把定位符
 
 > **Milvus 标量字段不可为 NULL**（2.4.x 无 nullable 标量）。空值用哨兵：`page_number` / `paragraph_no` 用 `-1`，`section_name` 用 `""`。这是无损的——`-1` 不是合法页码/段号。
 >
-> **`_ensureCollection` 已存在即早返回**（`milvus_client.py:104-113`），所以**只改字段不重建不生效**。且 `CollectionSchema` **未设 `enable_dynamic_field`**（默认 False），无法靠动态字段绕过。本计划执行前已确认该集合为空，重建零成本——**执行前必须再验一次**：
+> **`_ensureCollection` 已存在即早返回**（`milvus_client.py:104-113`），所以**只改字段不重建不生效**。且 `CollectionSchema` **未设 `enable_dynamic_field`**（默认 False），无法靠动态字段绕过。**执行前必须再验集合行数**（宿主机即可：`cd backend && .venv/bin/python` 连 `MILVUS_URI=http://localhost:19530`）。
+>
+> ⚠️ **实测结果推翻了「集合为空」这一前提。** 2026-09-12 执行 Task 3 时实测：集合有
+> **333 行 / 299 个文档**，且是旧 8 字段 schema（无任何定位符字段）。同刻 prod
+> `document_catalog` 是 **0 行**，所以这 333 行**没有任何目录引用，属孤儿数据**
+> （成分：297 个单 `chunk-0` 文档、1 行 `DOC-VERIFY-SMOKE`、2 个各 18 chunk 的文档，
+> 后者内容是真实的供应商能力标准正文）。
+>
+> **处置决定（用户 2026-09-12）：先导快照，再重建。** 快照已由控制器执行并校验：
+>
+> ```
+> backups/milvus/document_embeddings_20260912_1953.json.gz
+> 333 行 / 7 个标量字段 + 1024 维 embedding / 999771 字节
+> sha256 b66d6c849530b4b78fad44e01341ebb1f75e393c7c676e11ba2806e8cbe501e8
+> ```
+>
+> 于是 Task 3 Step 7 的重建以显式标志执行：
 >
 > ```bash
-> docker exec qa-milvus python -c "print('ok')" 2>/dev/null
-> # 或经后端容器：
-> docker exec qa-backend python -c "
-> from pymilvus import Collection, utility, connections
-> connections.connect(alias='d', host='milvus', port='19530')
-> print('rows =', Collection('document_embeddings', using='d').num_entities)"
+> cd backend
+> ALLOW_NONEMPTY_REBUILD=1 .venv/bin/python scripts/rebuild_document_collection.py
 > ```
-> 若 `rows > 0`，**停止**并先与用户确认数据处置方式。
+>
+> 重建后**必须回读 schema 字段核对**（`Collection(...).schema.fields`），不能拿脚本打印的
+> 「已重建集合」当证据 —— 这个闸门存在的全部意义就是「命令跑成功」不等于「schema 是对的」。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1943,17 +1957,39 @@ def fakeMinio(monkeypatch):
     return fake
 
 
+def _writtenBytes(call) -> bytes | None:
+    """从 ``put_object`` 的调用里取出被写入的字节。
+
+    不假设对象流是第几个位置参数：``putSourceObject`` 对 SDK 的调用形状是
+    Task 4 单测的契约，这里只关心「写进去的是不是原始字节」。
+
+    直接写 ``content in call.args`` 是**不成立**的 —— 实现传的是
+    ``io.BytesIO(content)``，与裸 bytes 做身份/相等比较永远为 False，
+    断言会无条件失败（已实测）。
+    """
+    for value in (*call.args, *call.kwargs.values()):
+        if hasattr(value, "getvalue"):
+            return value.getvalue()
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value)
+    return None
+
+
 class TestRagUploadProvenance:
     @pytest.mark.asyncio
     async def test_upload_persists_source_bytes_and_locators(
         self, client, dbSession, fakeMinio, mockEmbeddingService
     ) -> None:
         # Arrange
+        # 夹具用 Markdown 而不是 .txt：TXT/MD 都没有页码，.txt 更连章节都没有，
+        # 那样「定位符接进去了」这条就只能退化成断言 None，等于没验。
+        # 带 `#` 章节的 MD 能同时验到 section_name 的精确透传与段号。
         content = (
+            "# 第一章 供应商准入\n\n"
             "第一段：供应商准入需注册资本不少于一千万。\n\n"
             "第二段：质量协议每年复核一次。"
         ).encode("utf-8")
-        files = {"file": ("provenance.txt", content, "text/plain")}
+        files = {"file": ("provenance.md", content, "text/markdown")}
 
         # Act
         with patch(
@@ -1972,7 +2008,9 @@ class TestRagUploadProvenance:
         assert resp.status_code == 201, resp.text
         assert fakeMinio.put_object.call_count == 1
         putArgs = fakeMinio.put_object.call_args
-        assert content in putArgs.args or content in putArgs.kwargs.values()
+        written = _writtenBytes(putArgs)
+        assert written is not None, "put_object 没收到文件内容流"
+        assert written == content, "写入对象存储的不是原始字节"
 
         body = resp.json()
         assert body["storage_url"].startswith("s3://")
@@ -1992,10 +2030,13 @@ class TestRagUploadProvenance:
         assert not row.storage_url.startswith("milvus://")
 
         # Assert 3：定位符接进了 Milvus 记录
+        # 按 Markdown 的真实语义断言：有章节、有段号、**没有页码**（只有 PDF 有页）。
+        # 哨兵（-1 / ""）是 insertDocumentChunks 的职责，而它在本用例里被替身接管，
+        # 所以这里拿到的是 chunk.metadata 的原样值 —— 那正是本层要验的接线。
         record = mockInsert.call_args.args[0][0]
-        assert record["page_number"] >= 1
-        assert record["paragraph_no"] >= 1
-        assert isinstance(record["section_name"], str)
+        assert record["section_name"] == "第一章 供应商准入"
+        assert record["paragraph_no"] == 1
+        assert record["page_number"] is None
 ```
 
 - [ ] **Step 2: 运行测试确认失败**

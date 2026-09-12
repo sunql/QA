@@ -33,6 +33,7 @@ const api = vi.hoisted(() => ({
   updateDataSource: vi.fn(),
   deleteDataSource: vi.fn(),
   testDataSource: vi.fn(),
+  introspectDatasource: vi.fn(),
 }));
 
 vi.mock("../api/datasource", () => api);
@@ -106,7 +107,8 @@ describe("DatasourcePage", () => {
     renderPage();
     await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
 
-    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    await user.click(screen.getByRole("button", { name: /更\s?多/ }));
+    await user.click(await screen.findByRole("menuitem", { name: /编\s?辑/ }));
     // 模态框打开，名称输入框预填了 ZJTH-Oracle
     expect(screen.getByDisplayValue("ZJTH-Oracle")).toBeInTheDocument();
     // 不填密码即提交（编辑时密码可选，留空表示不修改）
@@ -126,7 +128,8 @@ describe("DatasourcePage", () => {
     renderPage();
     await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
 
-    await user.click(screen.getByRole("button", { name: /删\s?除/ }));
+    await user.click(screen.getByRole("button", { name: /更\s?多/ }));
+    await user.click(await screen.findByRole("menuitem", { name: /删\s?除/ }));
     const confirmBtns = screen.getAllByRole("button", { name: /确\s?定$/ });
     await user.click(confirmBtns[confirmBtns.length - 1]);
 
@@ -142,7 +145,8 @@ describe("DatasourcePage", () => {
     await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
 
     // 打开编辑弹窗，填写密码后点测试连接
-    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    await user.click(screen.getByRole("button", { name: /更\s?多/ }));
+    await user.click(await screen.findByRole("menuitem", { name: /编\s?辑/ }));
     await user.type(screen.getByPlaceholderText("留空表示不修改"), "secret");
     await user.click(screen.getByRole("button", { name: "测试连接" }));
 
@@ -164,7 +168,8 @@ describe("DatasourcePage", () => {
     renderPage();
     await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
 
-    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    await user.click(screen.getByRole("button", { name: /更\s?多/ }));
+    await user.click(await screen.findByRole("menuitem", { name: /编\s?辑/ }));
     await user.click(screen.getByRole("button", { name: "测试连接" }));
 
     expect(api.testDataSource).not.toHaveBeenCalled();
@@ -176,6 +181,23 @@ describe("DatasourcePage", () => {
 
     await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: /智能导入到本体/i })).toBeInTheDocument();
+  });
+
+  it("点击「缓存 Schema」调用 introspectDatasource 并提示成功", async () => {
+    const user = userEvent.setup();
+    api.introspectDatasource.mockResolvedValue({
+      tables: [{ name: "ITMMASTER" }, { name: "PORDER" }],
+      cachedAt: "2026-09-12T00:00:00Z",
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /缓存 Schema/i }));
+
+    await waitFor(() => {
+      expect(api.introspectDatasource).toHaveBeenCalledWith(1);
+    });
+    expect(await screen.findByText(/缓存成功/)).toBeInTheDocument();
   });
 
   // ---- Oracle type 切换 + 校验错误 + catch 分支 ----
@@ -252,7 +274,8 @@ describe("DatasourcePage", () => {
     renderPage();
     await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
 
-    await user.click(screen.getByRole("button", { name: /删\s?除/ }));
+    await user.click(screen.getByRole("button", { name: /更\s?多/ }));
+    await user.click(await screen.findByRole("menuitem", { name: /删\s?除/ }));
     const confirmBtns = screen.getAllByRole("button", { name: /确\s?定$/ });
     await user.click(confirmBtns[confirmBtns.length - 1]);
 
@@ -268,7 +291,8 @@ describe("DatasourcePage", () => {
     renderPage();
     await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
 
-    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    await user.click(screen.getByRole("button", { name: /更\s?多/ }));
+    await user.click(await screen.findByRole("menuitem", { name: /编\s?辑/ }));
     await user.type(screen.getByPlaceholderText("留空表示不修改"), "secret");
     await user.click(screen.getByRole("button", { name: "测试连接" }));
 
@@ -285,7 +309,8 @@ describe("DatasourcePage", () => {
     renderPage();
     await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
 
-    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    await user.click(screen.getByRole("button", { name: /更\s?多/ }));
+    await user.click(await screen.findByRole("menuitem", { name: /编\s?辑/ }));
     await user.type(screen.getByPlaceholderText("留空表示不修改"), "secret");
     await user.click(screen.getByRole("button", { name: "测试连接" }));
 

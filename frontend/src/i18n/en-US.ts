@@ -15,6 +15,7 @@ export const enUS = {
     delete: "Delete",
     save: "Save",
     actions: "Actions",
+    more: "More",
     version: "Version",
     close: "Close",
     cancel: "Cancel",
@@ -276,6 +277,7 @@ export const enUS = {
     previewFailed: "Failed to generate import preview",
     importFailed: "Import failed, see error details",
     schemaLoadFailed: "Failed to load schema. Check the datasource and retry",
+    schemaCached: "Schema cached ({count} tables)",
   },
 
   queryPlan: {
@@ -1436,6 +1438,7 @@ export const enUS = {
 
   datasource: {
     importToOntology: "Import to Ontology",
+    cacheSchema: "Cache Schema",
   },
 
   featureRules: {

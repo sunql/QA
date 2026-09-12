@@ -12,11 +12,14 @@
 2. ``document_catalog.content_hash`` 加**唯一索引** —— spec §4.7 的 D2-2 明确把
    「`content_hash` 唯一约束」推迟到 P1「一并做，只付一次迁移成本」，P1 就是
    现在，故本次补上。实测 prod：该列已存在（`VARCHAR(64) NULL`）、
-   `document_catalog` **0 行**、且**还没有**这个索引 —— 与 `wiki_page` 一样，
-   这是加约束最便宜的时刻（有数据之后要先查重再清理才能建）。
-   **两个库都已实测**：prod `qa_metadata` 与测试库 `qa_metadata_test` 的
-   `document_catalog` 均为 0 行（后者版本号 = `0060_schema_reconcile`），
-   故 `upgrade head` 在两边都不会因重复摘要而失败。
+   `document_catalog` **1 行**（`content_hash` 非空，P0 的上传路径已插入）、
+   且**还没有**这个索引。建索引前先查重：`GROUP BY content_hash HAVING
+   count(*) > 1` 返回 **0 个重复分组** —— 安全建索引的依据是「无重复分组」，
+   而不是「表是空的」。
+   **两个库都已实测**：prod `qa_metadata` 的 `document_catalog` 为 **1 行**
+   （`content_hash` 非空、无重复），测试库 `qa_metadata_test` 为 **0 行**
+   （后者版本号 = `0060_schema_reconcile`），故 `upgrade head` 在两边都不会
+   因重复摘要而失败。
    语义：一条 catalog 行 = 一份源文档，同一份文件重复上传应映射到同一份文档。
    **PostgreSQL 的唯一索引允许多个 NULL**（NULL 互不相等），所以现存/未来的
    `content_hash IS NULL` 行不会被挡 —— 约束只作用于「已经算出了摘要」的行。
@@ -68,7 +71,8 @@ def upgrade() -> None:
     # 源文档，同一份文件重复上传应映射到同一份文档。P1 只建索引，不碰该表其它列，
     # 也不依赖 P0 的任何代码。
     # PostgreSQL 唯一索引允许多个 NULL，故 content_hash IS NULL 的行不受影响。
-    # 目标表实测 0 行 → 无重复可清理，直接建即可；建失败会原子回滚（安全失败）。
+    # 建索引前查重（GROUP BY content_hash HAVING count(*) > 1）返回 0 个重复分组
+    # → 无重复可清理，直接建即可；建失败会原子回滚（安全失败）。
     op.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_document_catalog_content_hash "
         "ON document_catalog (content_hash)"

@@ -1654,6 +1654,7 @@ export const zhCN = {
       status: "状态",
       total: "总条数",
       success: "成功",
+      skipped: "跳过",
       failed: "失败",
       errorMessage: "备注",
     },
@@ -1665,7 +1666,7 @@ export const zhCN = {
       reloadModels: "重新加载",
     },
     resultMessage: "导入任务已完成，状态：{status}",
-    resultCounts: "共 {total} 条，成功 {success} 条，失败 {failed} 条，花费 ${cost}",
+    resultCounts: "共 {total} 条，成功 {success} 条，跳过 {skipped} 条，失败 {failed} 条，花费 ${cost}",
     tasksTitle: "最近导入任务",
     noTasks: "暂无导入任务",
     errors: {

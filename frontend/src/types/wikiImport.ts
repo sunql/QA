@@ -60,6 +60,11 @@ export interface WikiImportTask {
     pageIds: string[] | null;
     totalPages: number;
     successPages: number;
+    /**
+     * P1 起：重复项（同 page_id 且正文一致）计入跳过而非失败。
+     * 与 successPages 分开下发，否则「整批都是重跑」看起来像任务没干活。
+     */
+    skippedPages: number;
     failedPages: number;
     /**
      * 后端是 `DECIMAL`，走 FastAPI 的 `jsonable_encoder` 会出成 JSON number。

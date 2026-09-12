@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { ConfigProvider } from "antd";
 import { I18nextProvider } from "react-i18next";
 import i18next from "i18next";
@@ -64,6 +64,7 @@ i18next.use(initReactI18next).init({
                 "wikiImport.columns.status": "状态",
                 "wikiImport.columns.total": "总条数",
                 "wikiImport.columns.success": "成功",
+                "wikiImport.columns.skipped": "跳过",
                 "wikiImport.columns.failed": "失败",
                 "wikiImport.columns.errorMessage": "备注",
                 "wikiImport.actions.removeDraft": "移除",
@@ -72,7 +73,7 @@ i18next.use(initReactI18next).init({
                 "wikiImport.actions.importAnother": "再导入一批",
                 "wikiImport.resultMessage": "导入任务已完成，状态：{status}",
                 "wikiImport.resultCounts":
-                    "共 {total} 条，成功 {success} 条，失败 {failed} 条，花费 ${cost}",
+                    "共 {total} 条，成功 {success} 条，跳过 {skipped} 条，失败 {failed} 条，花费 ${cost}",
                 "wikiImport.tasksTitle": "最近导入任务",
                 "wikiImport.noTasks": "暂无导入任务",
                 "wikiImport.errors.previewFailed": "切分失败，请检查原文内容",
@@ -129,6 +130,7 @@ const TASK = {
     pageIds: ["p-1", "p-2"],
     totalPages: 2,
     successPages: 2,
+    skippedPages: 0,
     failedPages: 0,
     totalCostUsd: "0.003000",
     errorMessage: null,
@@ -723,5 +725,37 @@ describe("AdminWikiImportPage", () => {
         await screen.findByText("切分失败，请检查原文内容");
         // 仍在选模步（草稿未生成，不跳预览）
         expect(screen.queryByDisplayValue("供应商准入规则")).toBeNull();
+    });
+
+    it("台账展示跳过数（P1：重复 ≠ 失败）", async () => {
+        // Arrange：一条「整批都是重跑」的任务 —— 成功 0 / 跳过 3 / 失败 0。
+        // 这条数据里有两个 0（成功列与失败列都渲染 0），单靠「0 出现了」或
+        // 「3 出现了」都证明不了 3 落在「跳过」这一列；必须按列头定位到
+        // 具体单元格，钉死「跳过=3 / 失败=0」，才防得住两列被写反。
+        api.listImportTasks.mockResolvedValue({
+            rows: [
+                { ...TASK, successPages: 0, skippedPages: 3, failedPages: 0 },
+            ],
+            total: 1,
+        });
+
+        // Act
+        renderPage();
+
+        // Assert：按列头文本求列下标，再按行取单元格（成功/失败两列都是 0，
+        // 若只用 getByText 会撞「多个 0」，若只查「3 出现过」则两列写反也照样过）。
+        const table = await screen.findByRole("table");
+        const headers = within(table)
+            .getAllByRole("columnheader")
+            .map((h) => h.textContent);
+        const skippedIdx = headers.indexOf("跳过");
+        const failedIdx = headers.indexOf("失败");
+        expect(skippedIdx).not.toBe(-1);
+        expect(failedIdx).not.toBe(-1);
+
+        const row = within(table).getAllByRole("row")[1];
+        const cells = within(row).getAllByRole("cell");
+        expect(cells[skippedIdx]).toHaveTextContent("3");
+        expect(cells[failedIdx]).toHaveTextContent("0");
     });
 });

@@ -1647,6 +1647,7 @@ export const enUS = {
       status: "Status",
       total: "Total",
       success: "Succeeded",
+      skipped: "Skipped",
       failed: "Failed",
       errorMessage: "Notes",
     },
@@ -1659,7 +1660,7 @@ export const enUS = {
     },
     resultMessage: "Import task finished with status: {status}",
     resultCounts:
-      "{total} total, {success} succeeded, {failed} failed, cost ${cost}",
+      "{total} total, {success} succeeded, {skipped} skipped, {failed} failed, cost ${cost}",
     tasksTitle: "Recent import tasks",
     noTasks: "No import tasks yet",
     errors: {

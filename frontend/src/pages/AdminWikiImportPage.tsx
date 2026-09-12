@@ -322,6 +322,7 @@ export default function AdminWikiImportPage() {
       },
       { title: t("wikiImport.columns.total"), dataIndex: "totalPages", key: "totalPages", width: 80 },
       { title: t("wikiImport.columns.success"), dataIndex: "successPages", key: "successPages", width: 80 },
+      { title: t("wikiImport.columns.skipped"), dataIndex: "skippedPages", key: "skippedPages", width: 80 },
       { title: t("wikiImport.columns.failed"), dataIndex: "failedPages", key: "failedPages", width: 80 },
       {
         title: t("wikiImport.columns.errorMessage"),
@@ -546,6 +547,7 @@ export default function AdminWikiImportPage() {
                   {t("wikiImport.resultCounts", {
                     total: result.totalPages,
                     success: result.successPages,
+                    skipped: result.skippedPages,
                     failed: result.failedPages,
                     cost: result.totalCostUsd,
                   })}

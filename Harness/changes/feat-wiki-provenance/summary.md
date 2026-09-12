@@ -40,7 +40,8 @@ Milvus chunk 也没有页码/章节/段号定位符。本变更落地三件事�
 ## 4. 接口契约变更
 
 - `RagService.ingestDocument(..., *, actor: CurrentUser) -> dict`：返回值增 `storage_url` / `content_hash`；
-  MinIO 不可用显式抛 `RagError`（不再静默降级）。
+  MinIO 不可用显式抛 `RagSourceStoreError`（`RagError` 子类，API 层**只**把它映射为 503；解析类
+  `RagError` 仍是 422）。不再静默降级。
 - `app/infrastructure/object_storage.py`（新）：`DEFAULT_BUCKET="qa-knowledge-sources"`、
   `hashContent(bytes)->str`、`buildSourceObjectName`、`ensureBucket`、
   `putSourceObject(...)->str`（返回 `s3://<bucket>/<objectName>`）、`getSourceObject(...)->bytes`（同步）。
@@ -184,8 +185,10 @@ chunks = data: [], extra_info: {}
   PDF 的 `section_name` 全为空串（哨兵，符合契约）。
 - ✅ catalog `storage_url` 为真实 `s3://qa-knowledge-sources/...`（非 `milvus://` 假 URL）。
 - ✅ catalog `content_hash` 为 64 位十六进制 sha256，且**与本次 `ingest.content_hash` 及对象名中的
-  hash 段三者一致**（初版门禁只验 64 位形状、不比对取值，已加固 —— 否则日后若有人改成对**文本**
-  而非文件字节求 hash，门禁仍会全绿，而那正是本变更要钉死的口径）。
+  hash 段三者一致**（初版门禁只验 64 位形状、不比对取值，已加固）。该断言钉死的是**三个写入点
+  取值不漂移**（catalog 行 / ingest 返回值 / 对象名）；它**钉不死 hash 的输入口径** —— 三者同出于
+  一次 `hashContent()` 调用，即便有人把实现改成对**文本**而非文件字节求 hash，三个值照样一致、
+  门禁照样全绿。输入口径由 Task 6 单测的「hash 取自文件字节」一项承担（见 §6），门禁不重复承担。
 - ✅ MinIO 读回 2916 字节与上传字节逐字节一致。
 - ✅ 门禁写入在正式库与共享集合零残留。
 
@@ -220,7 +223,9 @@ chunks = data: [], extra_info: {}
 
 ## 11. 关联
 
-- 计划：`.superpowers/sdd/2026-09-12-wiki-provenance-p0/`（task-1~7 brief/report + progress）
+- 计划：`docs/superpowers/plans/2026-09-12-wiki-provenance-p0.md`（7 个任务全文，已提交）
+- 执行台账：`.superpowers/sdd/2026-09-12-wiki-provenance-p0/`（task brief/report + progress）是
+  git-ignored 的执行期临时产物，收尾时已删除；任务全文与结论以上面两份已提交文件为准
 - 姊妹计划：P1 去重（`0061_wiki_dedup`）、P3 编译层（`claim`/`evidence` 写入）
 - 规则：`Harness/rules/开发流程规范.md`（每轮真实数据验证门禁）、`Harness/rules/数据库环境使用规范.md`
 - Wiki：`Harness/wiki/data-model.md`（`document_catalog`）、`Harness/wiki/operations-runbook.md`（端口契约与部署）

@@ -100,6 +100,25 @@ services:
       timeout: 20s
       retries: 3
 
+  # ===== 知识源文件对象存储（独立于 milvus-minio） =====
+  qa-objects:
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    container_name: qa-objects
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER 必须显式配置}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD 必须显式配置}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - objects_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # ===== Demo 业务库（WMS） =====
   mysql-demo:
     image: mysql:8.0
@@ -134,6 +153,10 @@ services:
     # 端口契约详见 Harness/wiki/operations-runbook.md「SSOT 端口契约」段。
     env_file:
       - .env
+    environment:
+      MINIO_ENDPOINT: qa-objects:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER 必须显式配置}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD 必须显式配置}
     extra_hosts:
       # 容器内访问宿主机（host.docker.internal）；Linux Docker 需显式 host-gateway，
       # macOS/Windows Docker Desktop 自动解析，此映射兼容两者。
@@ -169,3 +192,4 @@ volumes:
   milvus_minio:
   milvus_data:
   mysql_data:
+  objects_data:

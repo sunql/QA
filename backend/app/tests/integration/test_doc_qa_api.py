@@ -9,7 +9,7 @@ import io
 from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient
@@ -84,6 +84,8 @@ async def test_doc_qa_e2e_full_flow(
     client: AsyncClient,
     dbSession: AsyncSession,
     monkeypatch,
+    fakeMinio,
+    mockEmbeddingService,
 ) -> None:
     """E2E smoke: upload → qa stream → DB 2 rows → history API visible.
 
@@ -108,17 +110,24 @@ async def test_doc_qa_e2e_full_flow(
     await dbSession.commit()
     await dbSession.refresh(config)
 
-    # ── 1. Upload a small text file (Milvus may be unavailable — tolerate 422) ──
+    # ── 1. Upload a small text file（fakes：MinIO + embedding + Milvus insert）──
+    # 用 fakeMinio/mockEmbeddingService + 替身 insert 让上传确定性 201，并顺带验证
+    # 源文件留存真实发生（storage_url 是 s3:// 而非 milvus:// 假 URL）。若有人把
+    # 留存静默删掉或改回假 URL，这里的断言会当场失败，而不是绿着放过。
     file_content = "供应商绩效评估标准：质量合规、交付及时性、价格竞争力。".encode("utf-8")
     file_stream = io.BytesIO(file_content)
-    upload_resp = await client.post(
-        "/api/v1/documents/upload",
-        files={"file": ("test_supplier.txt", file_stream, "text/plain")},
-        data={"documentType": "CONTRACT", "securityLevel": "L1"},
-        headers={"X-User-Id": TEST_USER},
-    )
-    # Milvus may be down; upload is not the focus of this E2E — proceed regardless
-    assert upload_resp.status_code in (200, 201, 422), f"upload unexpected {upload_resp.status_code}"
+    with patch(
+        "app.services.rag_service._getEmbeddingService",
+        return_value=mockEmbeddingService,
+    ), patch("app.services.rag_service.insertDocumentChunks"):
+        upload_resp = await client.post(
+            "/api/v1/documents/upload",
+            files={"file": ("test_supplier.txt", file_stream, "text/plain")},
+            data={"documentType": "CONTRACT", "securityLevel": "L1"},
+            headers={"X-User-Id": TEST_USER},
+        )
+    assert upload_resp.status_code == 201, f"upload unexpected {upload_resp.status_code}"
+    assert upload_resp.json()["storage_url"].startswith("s3://"), "源文件留存必须落对象存储"
 
     # ── 2. Monkeypatch RagQaService to use fake LLM + fake Milvus search ────────
     import app.services.rag_qa_service as rag_qa_module

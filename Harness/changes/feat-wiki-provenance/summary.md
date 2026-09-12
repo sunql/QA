@@ -114,9 +114,14 @@ $ docker exec qa-backend alembic current
 
 - `qa-objects` 健康（healthcheck `mc ready local` 通过）；`qa-backend` 健康。
 - alembic head 复核 = `0060_schema_reconcile`，**未发生迁移移动**（P0 零迁移）。
-- 回滚路径：`qa-system-backend:pre-p0` = 重建前的旧镜像（`aa0024140182`），
+- 回滚路径（**仅镜像**）：`qa-system-backend:pre-p0` = 重建前的旧镜像（`aa0024140182`），
   `docker tag qa-system-backend:pre-p0 qa-system-backend:latest && docker compose ... up -d backend`
-  即可回滚；P0 无 PG 迁移，回滚不涉及库表数据。
+  可回滚**代码**；P0 无 PG 迁移，`document_catalog` 列结构不变。
+- **集合 schema 无法回滚**：Milvus `document_embeddings` 已被 drop + 重建为 11 字段，
+  旧镜像只认 8 字段 schema。镜像回滚后旧代码对 11 字段集合的 insert/query 会因字段
+  不匹配抛 Milvus `DataNotMatchException`（已实测），**上传在镜像回滚后即坏**。要恢复
+  上传必须同时用 `rebuild_document_collection.py` 把集合重建成旧 8 字段（同样丢弃现有
+  实体、同样不可逆），或干脆只滚代码不滚集合。
 
 ## 9. 真实数据验证报告（2026-09-12）
 
@@ -200,6 +205,9 @@ chunks = data: [], extra_info: {}
    修复：`chunk_splitter.py` 累积时遇页码不同的块先 flush 再另起（chunk 不跨页；`page_number` 为
    `None` 的 DOCX/MD 不切页）；门禁改断言页集合**恰好** `[1, 2]` + PDF 的 `section_name` 为空串。
    修复后门禁打印 `chunk_count = 2` / `page_numbers = [1, 2]`（见 §9.2）。
+7. **DOCX 中文数字样式标题不识别（已知限制，不在 P0 处理）**：中文版 Word 用数字样式
+   ID（`1`/`2`/`3` 对应标题 1/2/3），`document_parser._isHeadingParagraph` 只认
+   `Heading<n>` 形式，这类文档的 `section_name` 退化为 None（页码与段号不受影响）。
 
 ## 11. 关联
 

@@ -3,7 +3,7 @@
 #
 # ⚠️ 与 backup_pg.sh 一样是**手动**脚本：本机 PG 的备份 cron 已确认静默失效
 # （launchd 契约断裂），用户 2026-09-12 决定维持手动。此缺口记录在
-# Harness/changes/feat-wiki-provenance/summary.md 第 9 段。
+# Harness/changes/feat-wiki-provenance/summary.md 第 10 段第 1 条。
 set -euo pipefail
 
 BACKUP_DIR="${BACKUP_DIR:-$(cd "$(dirname "$0")/.." && pwd)/backups/objects}"

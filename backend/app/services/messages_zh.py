@@ -470,6 +470,9 @@ MSG_DOCUMENT_REL_NOT_FOUND = "文档关联 id={id} 不存在"
 MSG_DOCUMENT_REL_EXISTS = (
     "文档「{documentId}」与实体 {entityType}/{entityKey} 的关联已存在"
 )
+MSG_DOCUMENT_SOURCE_STORE_FAILED = (
+    "源文件留存失败，请稍后重试；若持续失败请联系管理员。"
+)
 
 # =============================================================================
 # Phase 6.3 feat-graph-traversal-api：知识图谱多跳推理

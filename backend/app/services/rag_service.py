@@ -48,6 +48,15 @@ class RagError(Exception):
     pass
 
 
+class RagSourceStoreError(RagError):
+    """源文件留存（对象存储）失败。
+
+    与普通 ``RagError``（解析/分块/向量化失败，映射 422）区分：这是基础设施
+    故障，API 层应映射 503 并给可行动提示，而不是 422 的「换文件/换格式」。
+    """
+    pass
+
+
 class RagService:
     """RAG 全链路服务。"""
 
@@ -114,7 +123,7 @@ class RagService:
         try:
             storageUrl = putSourceObject(objectName, content, mime_type)
         except ObjectStorageError as e:
-            raise RagError(f"源文件存储失败: {e}") from e
+            raise RagSourceStoreError(f"源文件存储失败: {e}") from e
 
         # 3. 分块
         chunks: list[Chunk] = split_by_paragraphs(blocks)

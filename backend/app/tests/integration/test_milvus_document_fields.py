@@ -57,6 +57,9 @@ class TestRoundTrip:
         assert hit["section_name"] == "质量管理"
         assert hit["paragraph_no"] == 3
 
+        # 收尾：不给共享集合留残留（与本文件其它用例一致）
+        deleteDocumentChunks("DOC-P0-TEST")
+
     @pytest.mark.integration
     def test_missing_locator_writes_sentinel(self) -> None:
         ensureDocumentCollection()
@@ -79,6 +82,9 @@ class TestRoundTrip:
         assert hit["page_number"] == -1
         assert hit["section_name"] == ""
         assert hit["paragraph_no"] == -1
+
+        # 收尾：不给共享集合留残留
+        deleteDocumentChunks("DOC-P0-TEST")
 
 
     @pytest.mark.integration

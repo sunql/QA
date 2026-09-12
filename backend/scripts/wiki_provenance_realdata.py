@@ -45,83 +45,94 @@ async def main() -> int:
     content = _samplePdfBytes()
     factory = getSessionFactory()
 
-    # --- 1. 走真实摄入链路 ---
-    async with factory() as session:
-        await _purgeGateCatalogRow(session)
-        result = await RagService().ingestDocument(
-            session,
-            content=content,
-            filename=GATE_FILENAME,
-            mime_type="application/pdf",
-            document_id=GATE_DOC_ID,
-            document_name=GATE_FILENAME,
-            document_type="OTHER",
-            actor=CurrentUser(userId="provenance-gate"),
-        )
+    try:
+        # --- 1. 走真实摄入链路 ---
+        async with factory() as session:
+            await _purgeGateCatalogRow(session)
+            result = await RagService().ingestDocument(
+                session,
+                content=content,
+                filename=GATE_FILENAME,
+                mime_type="application/pdf",
+                document_id=GATE_DOC_ID,
+                document_name=GATE_FILENAME,
+                document_type="OTHER",
+                actor=CurrentUser(userId="provenance-gate"),
+            )
 
-    print(f"ingest.chunks       = {result['chunks']}")
-    print(f"ingest.storage_url  = {result['storage_url']}")
-    print(f"ingest.content_hash = {result['content_hash']}")
+        print(f"ingest.chunks       = {result['chunks']}")
+        print(f"ingest.storage_url  = {result['storage_url']}")
+        print(f"ingest.content_hash = {result['content_hash']}")
 
-    # --- 2. Milvus：定位符必须真的落库 ---
-    chunks = queryDocumentChunks(GATE_DOC_ID)
-    print(f"milvus.chunk_count  = {len(chunks)}")
-    if not chunks:
-        failures.append("Milvus 里查不到该文档的 chunk")
-    else:
-        pages = sorted({c["page_number"] for c in chunks})
-        print(f"milvus.page_numbers = {pages}")
-        if any(c["page_number"] < 1 for c in chunks):
-            failures.append("存在没有页码（哨兵 -1）的 chunk")
-        if any(c["paragraph_no"] < 1 for c in chunks):
-            failures.append("存在没有段号（哨兵 -1）的 chunk")
-        # 只查哨兵挡不住三类回归：页码硬编码为 1、页映射整体偏移、第 2 页被静默丢弃。
-        # 样本 PDF 两页都有正文，故页集合必须**恰好**是 {1, 2}。
-        if pages != [1, 2]:
-            failures.append(f"页归属错误：期望 [1, 2]，实际 {pages}")
-        # PDF 按设计没有 section_name（那是 DOCX/MD 的定位符），钉死该契约。
-        if any(c["section_name"] != "" for c in chunks):
-            failures.append("PDF 样本的 section_name 应为空串（哨兵）")
-
-    # --- 3. document_catalog：真实 url + 64 位摘要 ---
-    async with factory() as session:
-        rows = await session.execute(
-            text(
-                "SELECT storage_url, content_hash FROM document_catalog "
-                "WHERE document_id = :d"
-            ),
-            {"d": GATE_DOC_ID},
-        )
-        catalog = rows.first()
-
-    if catalog is None:
-        failures.append("document_catalog 里没有该文档的行")
-    else:
-        print(f"catalog.storage_url = {catalog.storage_url}")
-        print(f"catalog.content_hash= {catalog.content_hash}")
-        if not catalog.storage_url or catalog.storage_url.startswith("milvus://"):
-            failures.append(f"storage_url 不是真实对象存储地址：{catalog.storage_url!r}")
-        elif not catalog.storage_url.startswith("s3://"):
-            failures.append(f"storage_url 形状不对：{catalog.storage_url!r}")
-        if not catalog.content_hash or not re.fullmatch(
-            r"[0-9a-f]{64}", catalog.content_hash
-        ):
-            failures.append(f"content_hash 不是 64 位摘要：{catalog.content_hash!r}")
-
-    # --- 4. MinIO：读回的字节必须与上传一致 ---
-    s3Prefix = f"s3://{DEFAULT_BUCKET}/"
-    if catalog is not None and (catalog.storage_url or "").startswith(s3Prefix):
-        objectName = catalog.storage_url[len(s3Prefix):]
-        readBack = getSourceObject(objectName)
-        if readBack != content:
-            failures.append("MinIO 读回内容与上传字节不一致")
+        # --- 2. Milvus：定位符必须真的落库 ---
+        chunks = queryDocumentChunks(GATE_DOC_ID)
+        print(f"milvus.chunk_count  = {len(chunks)}")
+        if not chunks:
+            failures.append("Milvus 里查不到该文档的 chunk")
         else:
-            print(f"minio.read_back     = {len(readBack)} bytes（与上传一致）")
+            pages = sorted({c["page_number"] for c in chunks})
+            print(f"milvus.page_numbers = {pages}")
+            if any(c["page_number"] < 1 for c in chunks):
+                failures.append("存在没有页码（哨兵 -1）的 chunk")
+            if any(c["paragraph_no"] < 1 for c in chunks):
+                failures.append("存在没有段号（哨兵 -1）的 chunk")
+            # 只查哨兵挡不住三类回归：页码硬编码为 1、页映射整体偏移、第 2 页被静默丢弃。
+            # 样本 PDF 两页都有正文，故页集合必须**恰好**是 {1, 2}。
+            if pages != [1, 2]:
+                failures.append(f"页归属错误：期望 [1, 2]，实际 {pages}")
+            # PDF 按设计没有 section_name（那是 DOCX/MD 的定位符），钉死该契约。
+            if any(c["section_name"] != "" for c in chunks):
+                failures.append("PDF 样本的 section_name 应为空串（哨兵）")
 
-    # --- 5. 自清：门禁不该给正式库留痕 ---
-    deleteDocumentChunks(GATE_DOC_ID)
-    async with factory() as session:
-        await _purgeGateCatalogRow(session)
+        # --- 3. document_catalog：真实 url + 64 位摘要 ---
+        async with factory() as session:
+            rows = await session.execute(
+                text(
+                    "SELECT storage_url, content_hash FROM document_catalog "
+                    "WHERE document_id = :d"
+                ),
+                {"d": GATE_DOC_ID},
+            )
+            catalog = rows.first()
+
+        if catalog is None:
+            failures.append("document_catalog 里没有该文档的行")
+        else:
+            print(f"catalog.storage_url = {catalog.storage_url}")
+            print(f"catalog.content_hash= {catalog.content_hash}")
+            if not catalog.storage_url or catalog.storage_url.startswith("milvus://"):
+                failures.append(f"storage_url 不是真实对象存储地址：{catalog.storage_url!r}")
+            elif not catalog.storage_url.startswith("s3://"):
+                failures.append(f"storage_url 形状不对：{catalog.storage_url!r}")
+            if not catalog.content_hash or not re.fullmatch(
+                r"[0-9a-f]{64}", catalog.content_hash
+            ):
+                failures.append(f"content_hash 不是 64 位摘要：{catalog.content_hash!r}")
+            else:
+                # 摘要要与 ingest 返回一致，且对象名的 <hash> 段就是它（内容寻址不脱节）
+                if catalog.content_hash != result["content_hash"]:
+                    failures.append(
+                        "catalog.content_hash 与 ingest 返回不一致："
+                        f"{catalog.content_hash!r} != {result['content_hash']!r}"
+                    )
+                if result["content_hash"] not in (catalog.storage_url or ""):
+                    failures.append("storage_url 的对象名不含 content_hash（内容寻址脱节）")
+
+        # --- 4. MinIO：读回的字节必须与上传一致 ---
+        s3Prefix = f"s3://{DEFAULT_BUCKET}/"
+        if catalog is not None and (catalog.storage_url or "").startswith(s3Prefix):
+            objectName = catalog.storage_url[len(s3Prefix):]
+            readBack = getSourceObject(objectName)
+            if readBack != content:
+                failures.append("MinIO 读回内容与上传字节不一致")
+            else:
+                print(f"minio.read_back     = {len(readBack)} bytes（与上传一致）")
+    finally:
+        # 自清：门禁不该给正式库留痕。即使断言失败或中途异常，也必须清掉本次写入，
+        # 否则下一次运行会撞上残留（共享集合 + 正式库）。
+        deleteDocumentChunks(GATE_DOC_ID)
+        async with factory() as session:
+            await _purgeGateCatalogRow(session)
 
     if failures:
         print("\n❌ 失败项：")

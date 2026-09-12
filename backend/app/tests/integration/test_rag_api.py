@@ -72,6 +72,30 @@ class TestRagApiUpload:
         assert resp.status_code == 422
         assert "unsupported" in resp.json()["detail"].lower() or "Unsupported" in resp.json()["detail"]
 
+    @pytest.mark.asyncio
+    async def test_upload_object_storage_failure_returns_503(self, client) -> None:
+        """MinIO 不可用 → 503（源文件留存失败），不是 422。
+
+        422 是「换文件/换格式」的用户可行动错误；对象存储故障是基础设施问题，
+        处置动作是「稍后重试」，必须显式区分（对齐 /wiki/import/preview-file）。
+        """
+        from app.infrastructure.object_storage import ObjectStorageError
+
+        files = {"file": ("test.txt", b"content", "text/plain")}
+
+        with patch(
+            "app.services.rag_service.putSourceObject",
+            side_effect=ObjectStorageError("MinIO down"),
+        ):
+            resp = await client.post(
+                "/api/v1/documents/upload",
+                params={"documentType": "CONTRACT", "securityLevel": "L1"},
+                files=files,
+            )
+
+        assert resp.status_code == 503, resp.text
+        assert "源文件留存失败" in resp.json()["detail"]
+
 
 class TestRagApiSearch:
     """POST /api/v1/documents/search 端到端。"""

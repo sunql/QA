@@ -435,10 +435,15 @@ async def test_preview_file_at_exact_limit_is_accepted(
     assert resp.status_code == 200
 
 
-async def test_preview_file_does_not_touch_database(
+async def test_preview_file_writes_catalog_but_no_wiki_tables(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:
-    """文件解析是纯解析：不建 Page、不建任务、不记计量。"""
+    """上传路径留存源文件（写 document_catalog），但不建 Page、不建任务、不记计量。
+
+    「预览」在上传路径上是**有副作用**的：源文件按内容寻址落对象存储并登记一行
+    document_catalog（见 wiki_import.py 模块 docstring 的刻意决定）。但 wiki
+    业务表（Page/任务/计量）保持干净——导入向导的「预览」不该产生这些。
+    """
     await client.post(
         f"{_BASE}/preview-file",
         files={"file": ("a.txt", "## 甲\n\n内容", "text/plain")},

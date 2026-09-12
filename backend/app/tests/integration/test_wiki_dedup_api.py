@@ -342,3 +342,65 @@ async def test_explicit_page_id_with_same_content_is_skipped(
     assert second["failedPages"] == 0
     assert second["status"] == "SUCCEEDED"
     assert await _countPages(dbSession) == 1
+
+
+# ---------------------------------------------------------------------------
+# 钉死 docstring 的声称 / 台账无关性
+# ---------------------------------------------------------------------------
+
+
+async def test_replay_skip_survives_deleted_task_ledger(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """跳过**不依赖** wiki_import_task.page_ids —— 把台账删光后重放仍然跳过。
+
+    spec §5.5 要求「钉死 wiki_learning_models.py:172-173 今天只声称、并不存在
+    的幂等重放」。做法是把台账整行删掉（``page_ids`` 随行消失），再导入同一份
+    文件：
+    - 若跳过靠读 page_ids → 台账没了就跳过不了 → 必落副本 → 断言打红；
+    - 实际实现靠内容派生的 page_id 撞车 → 台账在不在都一样跳过。
+
+    诚实边界：本测试证明的是「跳过的**可观测结果**不依赖台账」，不是某条 SQL
+    的静态不变量（后者用语句级断言更脆）。对「docstring 的声称是否属实」而言，
+    这个强度足够。
+    """
+    drafts = [
+        {"title": "甲", "content": "内容甲"},
+        {"title": "乙", "content": "内容乙"},
+    ]
+    await _execute(client, drafts, sourceRef="ledger-pin.md")
+    assert await _countPages(dbSession) == 2
+
+    # 抹掉台账（page_ids 随之消失）。wiki_page.imported_via_task_id 的 FK 是
+    # ON DELETE SET NULL，行不会被连带删除。
+    await dbSession.execute(text("DELETE FROM wiki_import_task"))
+    await dbSession.commit()
+
+    replay = await _execute(client, drafts, sourceRef="ledger-pin.md")
+
+    assert replay["successPages"] == 0
+    assert replay["skippedPages"] == 2
+    assert await _countPages(dbSession) == 2, (
+        "台账被删后就跳过不了了 —— 说明跳过依赖 page_ids，而它按设计只写不读"
+    )
+
+
+async def test_same_content_different_source_ref_is_two_entries(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """已知边界：sourceRef 参与身份派生，故同内容不同来源 = 两条。
+
+    spec §5.2 的公式写死了 ``sha256(source_ref \\x00 title \\x00 content)``，
+    这里把该公式的**代价**钉成显式行为而不是让它在生产里被偶然发现：用户第一次
+    导入留空 sourceRef、第二次填了文件名，同一份文件会得到两个 ID、两条知识。
+    缓解方式记录在 summary 风险段（向导层统一要求填 sourceRef，或后续把来源
+    归一化为上传文件的内容哈希）。
+    """
+    await _execute(client, [{"title": "模板条款", "content": "同样的话"}], sourceRef="")
+    second = await _execute(
+        client, [{"title": "模板条款", "content": "同样的话"}], sourceRef="dept-b.md"
+    )
+
+    assert second["successPages"] == 1
+    assert second["skippedPages"] == 0
+    assert await _countPages(dbSession) == 2

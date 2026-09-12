@@ -169,8 +169,20 @@ RULE_OPERATORS: tuple[str, ...] = (
 class WikiImportTask(Base):
     """一次知识导入的作业记录（含模型选择与成本汇总）。
 
-    本表是幂等可重放的作业台账：``page_ids`` 记录产出的知识条目业务键，
-    失败重跑时用来跳过已成功项（部分成功 → status=PARTIAL）。
+    **``page_ids`` 是只写的快照，不是幂等依据。** 它记录本次**新建**的条目业务
+    键，供人查看「这批进了哪些条目」；没有任何运行路径读它来决定要不要跳过。
+
+    幂等（重跑同一份文件不落副本）由 ``wiki_page.page_id`` 是**内容派生**的实现
+    保证：同 (source_ref, title, content) 必得同 ID，于是导入路径既有的
+    ``page_id`` 冲突检查与 ``uq_wiki_page_page_id`` 原样命中，重复项根本
+    落不了库（feat-wiki-dedup P1，见 ``wiki_page_service.generatePageId``）。
+    撞车且 ``content_hash`` 相同 = 重跑，计 ``skipped_pages``；撞车但内容不同
+    = 需人工处置的冲突，计 ``failed_pages``。
+
+    这段注释过去写着「``page_ids`` …… 失败重跑时用来跳过已成功项」—— 那是一个
+    从未实现的声称（写入方 3 处、读取方 0 处），P1 把它改成事实描述。
+    ``test_wiki_dedup_api.py::test_replay_skip_survives_deleted_task_ledger``
+    把「跳过不依赖台账」钉成可执行断言，防止这句话再次漂回谎言。
     """
 
     __tablename__ = "wiki_import_task"

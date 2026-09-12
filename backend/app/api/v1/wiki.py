@@ -208,9 +208,18 @@ async def reclassifyPage(
 
 
 @router.delete("/pages/{pageId}", status_code=status.HTTP_204_NO_CONTENT)
-async def deletePage(pageId: str, db: AsyncSession = Depends(getDb)) -> None:
-    """删除条目（DB 级联清理 claim / evidence / relation）。"""
-    await _wikiPageService.deletePage(db, pageId)
+async def deletePage(
+    pageId: str,
+    db: AsyncSession = Depends(getDb),
+    user: CurrentUser = Depends(getCurrentUser),
+) -> None:
+    """删除条目（DB 级联清理 claim / evidence / relation）。
+
+    审计记 ``DELETE`` + ``before`` 快照，actor 取自 ``X-User-Id``。路由级
+    ``Depends(getCurrentUser)`` 已挡住未认证请求，这里再显式注入一次是为了
+    **拿到 user 对象**（``use_cache=True``，不会重复解析 / 查库）。
+    """
+    await _wikiPageService.deletePage(db, pageId, user)
 
 
 @router.post(
@@ -221,11 +230,12 @@ async def deletePage(pageId: str, db: AsyncSession = Depends(getDb)) -> None:
 async def batchDeletePages(
     dto: WikiPageBatchDeleteRequest,
     db: AsyncSession = Depends(getDb),
+    user: CurrentUser = Depends(getCurrentUser),
 ) -> WikiPageBatchDeleteRead:
     """批量删除知识条目（部分成功语义 + 级联报告）。
 
     与 ``DELETE /pages/{pageId}`` **同一套删除语义**（路由级认证、DB 级联、
-    不写审计），区别只在「一批」与「一条」以及由此带来的边界行为：
+    逐条写 DELETE 审计），区别只在「一批」与「一条」以及由此带来的边界行为：
 
     - 重复 id 去重（保序），不算错误；
     - 不存在的 id 进 ``notFound`` 而**不整体失败** —— 并发下别的用户先删了
@@ -242,7 +252,7 @@ async def batchDeletePages(
     **不新起一套**授权机制，否则会出现「单条删得掉、批量删不掉」这类
     两条路径两套规则的分叉。
     """
-    result = await _wikiPageService.deletePages(db, dto.page_ids)
+    result = await _wikiPageService.deletePages(db, dto.page_ids, user)
     return WikiPageBatchDeleteRead(
         requested=result.requested,
         deleted_page_ids=list(result.deletedPageIds),

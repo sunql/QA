@@ -1713,6 +1713,11 @@ export const enUS = {
       saveDimension: "Confirm classification",
       rejectDimension: "Reject classification",
     },
+    // Single delete confirmation. Same tier as bulk delete — both are
+    // irreversible and cascade to relations and artifacts; the only difference
+    // is "one" vs "a batch", so the guardrail shouldn't exist on only one side.
+    deleteConfirm:
+      'Delete "{title}"? Its claims, relations and artifacts are deleted with it.',
     // Bulk delete (multi-select + second confirmation). The cascade hint is the
     // one line this dialog exists to deliver: the user clicks "delete 3 pages",
     // what actually goes away is 3 pages plus their relations and artifacts.

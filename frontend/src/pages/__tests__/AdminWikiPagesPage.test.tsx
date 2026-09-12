@@ -236,6 +236,18 @@ describe("AdminWikiPagesPage", () => {
  * 没选东西不能删、删之前必须确认、删之后必须说清楚「哪些没删掉」。
  */
 describe("AdminWikiPagesPage 批量删除", () => {
+    /**
+     * 必须自己清 mock。
+     *
+     * `vi.clearAllMocks()` 只注册在上面那个 describe 的 beforeEach 里，而
+     * `beforeEach` 不跨 describe 生效 —— 少了这一步，`listWikiPages` 的调用次数会
+     * 从上一个用例累加下来，`toHaveBeenCalledTimes(1)` 这类**前置**断言就随用例
+     * 顺序/是否被 `-t` 过滤而飘（曾表现为单跑绿、全量跑红）。
+     */
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
     function twoRows() {
         api.listWikiPages.mockResolvedValue({
             rows: [
@@ -392,4 +404,116 @@ describe("AdminWikiPagesPage 批量删除", () => {
         // 选中集合保留，用户可以直接重试而不用重新勾
         expect(screen.getByText("已选 1 条")).toBeInTheDocument();
     });
+});
+
+/**
+ * 单条删除的二次确认。
+ *
+ * 删除按钮就在详情抽屉右上角，误点代价是整个条目（连带 claim / 关系 / 产物）。
+ * 批量删除早有确认弹窗，这里钉住「单条不再是无确认的一键删除」。
+ */
+describe("AdminWikiPagesPage 单条删除", () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        api.listWikiPages.mockResolvedValue({ rows: [makePage()], total: 1 });
+        api.getWikiPage.mockResolvedValue(makePage());
+    });
+
+    /** 抽屉 + Popconfirm 是 jsdom 下最重的渲染路径，全量跑（112 个文件抢 CPU）
+     *  会从单跑的 ~2s 涨到 6s+，撞穿 vitest 默认 5s 的 testTimeout。断言没变，
+     *  只是不再把机器负载当成被测行为。 */
+    const FIND_TIMEOUT = 10_000;
+    const TEST_TIMEOUT = 20_000;
+
+    async function openDrawer(): Promise<void> {
+        renderPage();
+        await userEvent.click(await screen.findByText("供应商准入要求"));
+        // antd 会在「两个汉字」的 Button 里插一个空格（可访问名是「删 除」），
+        // 故锚定边界时必须容错 \s*；否则 /^删除$/ 匹配不到，而放宽成 /删除/
+        // 又会同时命中「批量删除」。
+        await screen.findByRole(
+            "button",
+            { name: /^删\s*除$/ },
+            { timeout: FIND_TIMEOUT },
+        );
+    }
+
+    it("does not delete straight away — it asks first", async () => {
+        await openDrawer();
+
+        await userEvent.click(screen.getByRole("button", { name: /^删\s*除$/ }));
+
+        // 关键断言：点击后**没有**发请求，只是弹了确认框
+        expect(api.deleteWikiPage).not.toHaveBeenCalled();
+        expect(
+            await screen.findByText(/确认删除「供应商准入要求」？/, undefined, {
+                timeout: FIND_TIMEOUT,
+            }),
+        ).toBeInTheDocument();
+    }, TEST_TIMEOUT);
+
+    it("deletes only after the confirmation is accepted", async () => {
+        api.deleteWikiPage.mockResolvedValue(undefined);
+        await openDrawer();
+
+        await userEvent.click(screen.getByRole("button", { name: /^删\s*除$/ }));
+        // Popconfirm 的确认按钮文案复用批量删除的「确认删除」，避免两处同义不同词
+        const confirmBtn = await screen.findByRole(
+            "button",
+            { name: /确认删除/ },
+            { timeout: FIND_TIMEOUT },
+        );
+        await userEvent.click(confirmBtn);
+
+        await waitFor(
+            () => {
+                expect(api.deleteWikiPage).toHaveBeenCalledWith("wiki-1");
+            },
+            { timeout: FIND_TIMEOUT },
+        );
+    }, TEST_TIMEOUT);
+
+    it("sends only one request when 确认删除 is clicked again while in flight", async () => {
+        /**
+         * 钉住 `onConfirm={handleDelete}`（直传 async 函数）这个写法。
+         *
+         * antd 的 ActionButton 带 `quitOnNullishReturnValue`：onConfirm 若不返回
+         * thenable，它会在调用后**立刻**关闭弹窗并把防重入标志 clickedRef 清回
+         * false —— 于是请求在途期间第二次点击会真的再发一个请求。第二次要么
+         * 404（首删已提交，getPage 抛 NotFound）弹一句误导性的「删除失败」，
+         * 要么撞 StaleDataError 变 500。
+         *
+         * 这里用一个手动控制落定的 Promise 把「在途」这一瞬固定住：若哪天有人
+         * 又把它写回 `() => void handleDelete()`，断言立刻红。
+         */
+        let release!: () => void;
+        api.deleteWikiPage.mockImplementation(
+            () =>
+                new Promise<void>((resolve) => {
+                    release = () => resolve();
+                }),
+        );
+
+        await openDrawer();
+        await userEvent.click(screen.getByRole("button", { name: /^删\s*除$/ }));
+
+        const confirmBtn = await screen.findByRole(
+            "button",
+            { name: /确认删除/ },
+            { timeout: FIND_TIMEOUT },
+        );
+        await userEvent.click(confirmBtn);
+        // 第一个请求仍在途；此时再点一次不能产生第二个请求
+        await userEvent.click(confirmBtn);
+
+        expect(api.deleteWikiPage).toHaveBeenCalledTimes(1);
+
+        release();
+        await waitFor(
+            () => {
+                expect(api.deleteWikiPage).toHaveBeenCalledTimes(1);
+            },
+            { timeout: FIND_TIMEOUT },
+        );
+    }, TEST_TIMEOUT);
 });

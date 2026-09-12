@@ -18,6 +18,7 @@ import {
     Form,
     Input,
     Modal,
+    Popconfirm,
     Select,
     Space,
     Table,
@@ -490,9 +491,28 @@ export default function AdminWikiPagesPage() {
                 title={detail?.title}
                 extra={
                     detail && (
-                        <Button danger size="small" onClick={() => void handleDelete()}>
-                            {t("common.delete")}
-                        </Button>
+                        // 二次确认：删除是不可逆的（连带清掉 claim / 关系 / 产物），
+                        // 而按钮就在 Drawer 右上角，误点代价是整个条目。批量删除
+                        // 早有确认弹窗，单条不该更宽松。
+                        <Popconfirm
+                            title={t("wikiPages.deleteConfirm", { title: detail.title })}
+                            okText={t("wikiPages.batchDelete.confirm")}
+                            cancelText={t("common.cancel")}
+                            okButtonProps={{ danger: true }}
+                            // 直传 async 函数，**不要**包成 `() => void handleDelete()`。
+                            // antd 的 ActionButton 带 `quitOnNullishReturnValue`：返回值不是
+                            // thenable 时它会立刻关闭弹窗并清掉防重入标志 clickedRef，于是
+                            // 请求在途期间再点一次「确认删除」会真的发出第二个请求（第二次
+                            // 要么 404 报出「删除失败」误导用户，要么撞 StaleDataError 500）。
+                            // 返回 Promise 才会 loading + 保持弹窗 + 锁住重入。
+                            // handleDelete 内部 try/catch 已落定、不会 reject，故不会走到
+                            // ActionButton 的 Promise.reject 分支。
+                            onConfirm={handleDelete}
+                        >
+                            <Button danger size="small">
+                                {t("common.delete")}
+                            </Button>
+                        </Popconfirm>
                     )
                 }
             >

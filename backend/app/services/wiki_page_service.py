@@ -21,11 +21,13 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies import CurrentUser
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.schemas import _UnsetType
 from app.domain.wiki_learning_models import (
@@ -42,6 +44,7 @@ from app.domain.wiki_models import (
     WikiPage,
 )
 from app.domain.wiki_schemas import WikiPageCreate, WikiPageUpdate
+from app.services.audit_service import AuditService
 from app.services.learning.feedback_loop import (
     FeedbackLoop,
     decideClassificationAction,
@@ -55,6 +58,8 @@ from app.services.messages_zh import (
     MSG_WIKI_PAGE_STAGE_INVALID,
     MSG_WIKI_PAGE_STATUS_INVALID,
 )
+
+_audit = AuditService()
 
 # page_id 允许的字符集：大写字母 / 数字 / 连字符 / 下划线。
 # 生成的 ID 面向人读与 URL，故限制为 ASCII 安全子集。
@@ -168,6 +173,36 @@ def _assertStatus(status: str) -> None:
     """生命周期状态白名单校验（与维度同理：挡住脏值污染状态轴统计）。"""
     if status not in WIKI_PAGE_STATUSES:
         raise ValidationError(MSG_WIKI_PAGE_STATUS_INVALID.format(status=status))
+
+
+# 删除审计 ``before`` 快照的字段表（顺序即 dict 顺序，单一事实源）。
+#
+# 三点刻意为之：
+# - **不含 ``content``**：正文是 Markdown、长度上限 ``MAX_CONTENT_CHARS``，落进
+#   ``audit_log.before_json`` 会让审计表随内容膨胀，而它对「谁在什么时候删了
+#   什么」毫无贡献。真要看内容该去历史快照（``history_service``），不是审计。
+# - ``id`` 与 ``page_id`` 都给：前者是 ``audit_log.entity_id`` 的对应物，
+#   后者是人眼与 API 认的业务键。
+# - 这份表同时用于**只取这几列**的 SELECT（见 ``deletePages``）：不能改写成
+#   ``select(WikiPage)`` 再取属性 —— 查整实体会连带触发 ``claims`` /
+#   ``evidence`` 的 ``lazy="selectin"`` 预加载（实测 1 条 SELECT 变 3 条），
+#   等于为了记「删了哪几条」把**即将被删掉的子行**先全读进内存。取消批量
+#   上限之后这条路径没有规模保护，所以必须限定列。
+_SNAPSHOT_FIELDS: tuple[str, ...] = (
+    "id",
+    "page_id",
+    "title",
+    "dimension",
+    "status",
+    "structure_stage",
+    "version",
+    "authority_level",
+)
+
+
+def _wikiPageToDict(page: WikiPage) -> dict[str, Any]:
+    """从已加载的实体取删除审计快照（单条删除路径用）。"""
+    return {field: getattr(page, field) for field in _SNAPSHOT_FIELDS}
 
 
 async def _countCascadeRows(
@@ -493,14 +528,33 @@ class WikiPageService:
         )
         return updated, action
 
-    async def deletePage(self, session: AsyncSession, pageId: str) -> None:
-        """删除 Page（DB 级联清理 claim / evidence / relation）。"""
+    async def deletePage(
+        self, session: AsyncSession, pageId: str, actor: CurrentUser
+    ) -> None:
+        """删除 Page（DB 级联清理 claim / evidence / relation）。
+
+        审计与删除**同一事务**：``AuditService.record`` 只 ``session.add``，
+        commit 由本方法收口 —— 于是不存在「删成功但审计没落」的窗口。
+        快照必须在 ``session.delete`` **之前**取：delete 之后对象进 deleted
+        状态，读属性会触发一次已无意义的刷新。
+        """
         entity = await self.getPage(session, pageId)
+        entityId = entity.id
+        before = _wikiPageToDict(entity)
         await session.delete(entity)
+        await _audit.record(
+            session,
+            entity_type="wiki_page",
+            entity_id=entityId,
+            action="DELETE",
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            before=before,
+        )
         await session.commit()
 
     async def deletePages(
-        self, session: AsyncSession, pageIds: list[str]
+        self, session: AsyncSession, pageIds: list[str], actor: CurrentUser
     ) -> BatchDeleteResult:
         """批量删除知识条目（级联语义与 ``deletePage`` 完全一致）。
 
@@ -520,8 +574,11 @@ class WikiPageService:
           的那些行属于**别的条目**。删掉它们等于替别人静默丢掉一条已确认关系；
           保留后由机制 3 的 GAP 检测标成「悬空引用」，处置权仍在业务专家手里。
           ``deletePage`` 同理，这里保持一致。
-        - **审计**：与 ``deletePage`` 一样不写审计行（wiki 域目前无审计写入），
-          批量删除**不新起一套**审计机制 —— 要加应当两处一起加。
+        - **审计**：与 ``deletePage`` 同款，**逐条**写 DELETE 审计（一条一实体）。
+          ``audit_log`` 是以 ``entity_id`` 建索引的按实体记账表，
+          ``AuditService.record`` 的契约就是「一次一个实体」；合成一条批审计会
+          让「这条条目是谁删的」在按实体查审计时无解。
+          ``notFound`` 的那些**不写** —— 伪造一条未曾发生的删除，审计就不再可信。
 
         返回的 ``cascade`` 是**删除前**统计的行数，供调用方给用户一个交代。
         """
@@ -533,21 +590,36 @@ class WikiPageService:
                 requested=0, deletedPageIds=(), notFound=(), cascade=_CascadeCounts()
             )
 
-        found = set(
-            (
-                await session.execute(
-                    select(WikiPage.page_id).where(WikiPage.page_id.in_(targets))
+        # 审计快照要 id + 各字段，且必须在下面的 bulk DELETE **之前**取
+        # （删完 identity map 里的对象已失效，对象属性也读不出来了）。
+        # 只取 _SNAPSHOT_FIELDS 这几列 —— 理由见该常量的注释（避免 selectin
+        # 把即将被删的 claims/evidence 全读进内存）。
+        snapshotRows = (
+            await session.execute(
+                select(*(getattr(WikiPage, f) for f in _SNAPSHOT_FIELDS)).where(
+                    WikiPage.page_id.in_(targets)
                 )
             )
-            .scalars()
-            .all()
-        )
-        hit = [pageId for pageId in targets if pageId in found]
-        missing = [pageId for pageId in targets if pageId not in found]
+        ).mappings().all()
+        foundById = {row["page_id"]: dict(row) for row in snapshotRows}
+        hit = [pageId for pageId in targets if pageId in foundById]
+        missing = [pageId for pageId in targets if pageId not in foundById]
+        # 保序对齐 targets，保证审计行顺序与用户看到的结果一致。
+        snapshots = [(foundById[pageId]["id"], foundById[pageId]) for pageId in hit]
 
         cascade = await _countCascadeRows(session, hit)
         if hit:
             await session.execute(delete(WikiPage).where(WikiPage.page_id.in_(hit)))
+            for entityId, before in snapshots:
+                await _audit.record(
+                    session,
+                    entity_type="wiki_page",
+                    entity_id=entityId,
+                    action="DELETE",
+                    actor=actor.userId,
+                    actor_departments=actor.departments,
+                    before=before,
+                )
             await session.commit()
 
         return BatchDeleteResult(

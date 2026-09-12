@@ -37,13 +37,31 @@ MAX_SOURCE_CHARS = 1_000_000
 # 单次导入的草稿条数上限。
 MAX_IMPORT_DRAFTS = 200
 
-# 单次批量删除的条目条数上限。
+# 批量删除**不设产品意义上的条数上限**（2026-09-12 决策，原 MAX_BATCH_DELETE_PAGES=100 已删）。
 #
-# 与导入的 N 次 LLM 调用不同，这里的放大是 N 次**级联删除**（每条会连带清掉
-# claim/evidence/relation/建议/规则/流程）。全局 30 req/min 是按请求限流的，
-# 对「一个请求删十万条」无能为力 —— 上限必须落在 DTO 边界。
-# 100 是权衡后的取值：管理页单页 20 条，用户最多翻几页全选，够用且单请求可控。
-MAX_BATCH_DELETE_PAGES = 100
+# 原上限的论据是「DTO 边界挡住单请求放大」——但迁移/清理场景（整批撤销一次导入、
+# 清空某个来源的全部条目）天然是几千条量级，上限只会逼用户分几十次删，每次都要
+# 重新翻页多选，反而更容易误删。破坏性操作的护栏改由**前端二次确认弹窗**
+# （AdminWikiPagesPage，明确列出条数与级联范围）承担，不在传输层设卡。
+#
+# 但**驱动另有硬上限**，不显式挡住就会表现为 500：asyncpg 单条语句的绑定参数
+# 不得超过 32767。SQLAlchemy 的 ``in_()`` 把 page_ids 展开成 N 个独立占位符
+# （**不是**数组参数），超限即抛
+# ``InterfaceError: the number of query arguments cannot exceed 32767`` ——
+# 走的正是本文件 ``WikiPageUpdate`` 记的那类「驱动层拒绝 → 无领域异常映射 →
+# 500」路径。在 DTO 拦成 422，是本模块一贯的「边界校验换可读错误」做法。
+#
+# 实测（2026-09-12，真实 PG）：N=32766 通过、N=32767 通过、N=32768 抛上述
+# InterfaceError —— 边界是**闭区间** 32767，故 maxLength 取满该值而非留余量。
+# 注意 Nginx 的 ``client_max_body_size 100m``（docker/nginx.conf）**挡不住**它：
+# 100MB 约合 140 万个 id，是悬崖的 ~40 倍；且 compose 把 8000 端口直连暴露，
+# 绕开 Nginx 的路径连这层都没有。此前这里写的「由 web server 的请求体上限兜底」
+# 是错的，已按实测更正。
+#
+# 取满 32767 而非留余量：快照 SELECT / 5 个级联 COUNT / 批量 DELETE 携带的参数数
+# 都**恰好**等于 N（无额外参数），故 N=32767 即安全上界。将来若给这些语句再加
+# 绑定参数，此常量须同步下调。
+MAX_BATCH_DELETE_PAGE_IDS = 32_767
 
 # ---------------------------------------------------------------------------
 # Wiki Page
@@ -121,14 +139,18 @@ class WikiPageBatchDeleteRequest(CamelModel):
     跨页保留时很容易带上重复项，为此回 422 等于把去重这件实现细节推给调用方。
 
     ``minLength=1`` 挡住空数组（空数组是调用方 bug，静默成功会让「删了 0 条」
-    看起来像成功），``maxLength`` 挡住超大批次（见 MAX_BATCH_DELETE_PAGES）。
+    看起来像成功）。``maxLength`` 是**驱动硬上限**而非产品上限，理由见本模块
+    顶部注释。
     """
 
     page_ids: list[Annotated[str, Field(max_length=64)]] = Field(
         ...,
         min_length=1,
-        max_length=MAX_BATCH_DELETE_PAGES,
-        description=f"待删除的条目业务键，去重后最多 {MAX_BATCH_DELETE_PAGES} 个",
+        max_length=MAX_BATCH_DELETE_PAGE_IDS,
+        description=(
+            "待删除的条目业务键，去重后即为目标集合。无产品意义上的条数上限，"
+            f"但受 asyncpg 绑定参数限制，最多 {MAX_BATCH_DELETE_PAGE_IDS} 条"
+        ),
     )
 
 

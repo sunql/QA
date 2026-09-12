@@ -42,10 +42,10 @@ def test_page_id_is_not_random() -> None:
 
 def test_page_id_formula_is_pinned_by_literal() -> None:
     """钉死派生公式的**字面输出**（换哈希算法/换分隔符都会打红）。"""
-    assert generatePageId(_TITLE, "", _CONTENT) == "PAGE-UNTITLED-012CA6C8"
+    assert generatePageId(_TITLE, "", _CONTENT) == "PAGE-UNTITLED-7048C5E6"
     assert (
         generatePageId("Supplier Qualification", "", "x")
-        == "PAGE-SUPPLIER-QUALIFICATION-0747A11B"
+        == "PAGE-SUPPLIER-QUALIFICATION-C719B4B7"
     )
 
 
@@ -86,7 +86,7 @@ def test_overlong_title_still_fits_page_id_column() -> None:
     """超长标题截断到 40 字符后，整体长度 = 5 + 40 + 1 + 8 = 54 ≤ VARCHAR(64)。"""
     pageId = generatePageId("x" * 200, "", "c")
     assert len(pageId) == 54
-    assert pageId == f"PAGE-{'X' * 40}-2E3AC84B"
+    assert pageId == f"PAGE-{'X' * 40}-D8379DE3"
 
 
 def test_content_hash_is_sha256_lowercase_hex() -> None:
@@ -115,7 +115,7 @@ def test_content_hash_delegates_to_hashContent() -> None:
 
 def test_content_hash_is_not_the_page_id_suffix() -> None:
     """``content_hash`` 与 page_id 后缀**不同源**：全量 sha256(content) vs
-    身份哈希 sha256(source_ref\\x00title\\x00content) 的前 8 位。
+    身份哈希（长度前缀拼接 source_ref/title/content 后 sha256）的前 8 位。
 
     回归点：把两者混用不会报错，但会让「同 ID 同内容 → 跳过」的判定永远不
     成立（或永远成立），重复项静默入库。

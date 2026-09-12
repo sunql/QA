@@ -264,11 +264,14 @@ _importOne(:316) → generatePageId(title) → 新 ID
 PAGE-<slug(title)>-<sha256(source_ref \x00 title \x00 content)[:8].upper()>
 ```
 
+> **（本公式已作废 / superseded）**：上式 NUL 分隔编码并非单射（U+0000 在 JSON 字符串与 Python `str` 中均合法，可伪造字段边界），实现改用**长度前缀**编码——每字段 UTF-8 编码后前缀 8 字节大端长度再拼接，再 sha256。见 `wiki_page_service._identityDigest`。
+
 同一份文件重跑 → 同 hash → 同 `page_id` → **现有冲突检查与 `uq_wiki_page_page_id` 原样生效，零新机制**。
 
 同时落列 `content_hash VARCHAR(64) NULL` 存原值。它有两个独立用途，不是为派生服务的：
 
-1. 给 P0 的 `document_catalog.content_hash` 提供同源值。
+1. ~~给 P0 的 `document_catalog.content_hash` 提供同源值。~~
+   **（作废 / 不实）**：两列同名同类型同算法，但**输入不同** —— `document_catalog.content_hash` 摘要的是**上传文件字节**（`wiki_import_service.persistSourceFile` → `hashContent(bytes)`），`wiki_page.content_hash` 摘要的是**草稿正文**。它们不存在可比的同源关系，本变更也没有任何路径把一方写进另一方。P1 只落地了 #2。
 2. 让"同标题不同内容"可判定 —— 现在这种情况与"同文件重跑"表现完全一样（都是 ID 冲突），无法区分。
 
 ### 5.3 迁移与门禁

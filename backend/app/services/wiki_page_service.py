@@ -73,11 +73,6 @@ _MAX_SLUG_LEN = 40
 # 内容」的冲突（计失败）而不是跳过。
 _IDENTITY_HASH_LEN = 8
 
-# 身份哈希的字段分隔符。用 NUL 而不是 ``|`` / ``-``：标题与来源里合法出现的
-# 任何字符都不该能伪造出「字段边界」—— ``("ab", "c")`` 与 ``("a", "bc")``
-# 必须哈希不同。
-_IDENTITY_SEPARATOR = "\x00"
-
 # ``dimension`` 的「未提供」哨兵。不能复用 None：显式传 null 是合法入参
 # （= 打回该分类），与「没提这个字段」语义相反。
 _UNSET_DIMENSION: object = object()
@@ -159,23 +154,45 @@ def sanitizePageId(raw: str) -> str:
 def contentHashOf(content: str) -> str:
     """正文的 SHA-256 十六进制摘要（小写，恒 64 字符）——转调 ``hashContent``。
 
-    与 RAG 路径写进 ``document_catalog.content_hash`` 的**同一实现**
-    （``app.infrastructure.object_storage.hashContent``），因此两处摘要可直接
-    比对。为什么必须转调而不是再写一份：两份 ``sha256`` 实现迟早会在编码/
-    大小写上漂移，而漂移了不会报错，只会让「同 ID 同内容 → 跳过」的比对永远
-    不等、重复项静默入库。这里退化成薄包装，把等价性变成结构保证。
+    与 RAG 路径写进 ``document_catalog.content_hash`` 用的是**同一实现**
+    （``app.infrastructure.object_storage.hashContent``），因此两处摘要**同算法、
+    同格式、同列型**（都是 sha256 小写 64 位 hex、``VARCHAR(64)``）；但**输入
+    不同**——``document_catalog`` 哈希的是上传文件的字节，这里哈希的是草稿文本，
+    两处从不相等，也不互相派生。为什么必须转调而不是再写一份：两份 ``sha256``
+    实现迟早会在编码/大小写上漂移，而漂移了不会报错，只会让「同 ID 同内容 →
+    跳过」的比对永远不等、重复项静默入库。这里退化成薄包装，把等价性变成结构
+    保证。
     """
     return hashContent(content.encode("utf-8"))
 
 
 def _identityDigest(sourceRef: str, title: str, content: str) -> str:
-    """身份哈希：``sha256(source_ref \\x00 title \\x00 content)`` 的十六进制。
+    """身份哈希：``sha256(长度前缀拼接(source_ref, title, content))`` 的十六进制。
 
-    用**内容**（而非随机数）回答「这条知识是不是已经在了」。字段以 NUL 分隔，
-    保证 ``("ab", "c")`` 与 ``("a", "bc")`` 不会撞成同一条。
+    用**内容**（而非随机数）回答「这条知识是不是已经在了」。三个字段按
+    ``(sourceRef, title, content)`` 顺序各自 UTF-8 编码，前缀一个 8 字节大端
+    无符号的字节长度，再顺序拼接后 sha256。
+
+    为什么是长度前缀而不是分隔符：长度前缀让拼接**无歧义**（单射 by
+    construction）——无论哪个字段里出现什么字符（含 U+0000），都无法靠移动
+    边界伪造出同一条摘要；``("ab", "c")`` 与 ``("a", "bc")`` 必得不同摘要。
+
+    **与 spec §5.2 的偏差（人工已批准）**：设计文档把公式写成
+    ``sha256(source_ref + NUL + title + NUL + content)``（NUL 分隔），但那不是
+    单射——已实测 title 结尾的 NUL 与 content 开头的 NUL 无法区分（U+0000 在
+    JSON 字符串与 Python str 里都是合法字符），能撞出同一个 ID。本实现改用
+    长度前缀，编码本身即单射，不依赖「字段里不能出现某字符」的巧合（今天 PG
+    恰好拒绝 text 列里的零字节，那是巧合不是设计）。
     """
-    payload = _IDENTITY_SEPARATOR.join((sourceRef, title, content))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    payload = b"".join(
+        len(fieldBytes).to_bytes(8, "big") + fieldBytes
+        for fieldBytes in (
+            sourceRef.encode("utf-8"),
+            title.encode("utf-8"),
+            content.encode("utf-8"),
+        )
+    )
+    return hashlib.sha256(payload).hexdigest()
 
 
 def generatePageId(title: str, sourceRef: str = "", content: str = "") -> str:

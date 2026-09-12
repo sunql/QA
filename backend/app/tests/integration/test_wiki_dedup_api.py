@@ -164,7 +164,12 @@ _CONTENT_HASH = "5dd995a8688226c1fc01cc593b6bce29b2b1b96fcde0feca24ddaab3a13d404
 async def test_create_page_writes_content_hash(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:
-    """POST /wiki/pages 落 content_hash = sha256(content)（可直接与 document_catalog 比对）。"""
+    """POST /wiki/pages 落 content_hash = sha256(content)。
+
+    与 ``document_catalog.content_hash`` **同算法、同格式、同列型**（都是 sha256
+    小写 64 位 hex、``VARCHAR(64)``），但**输入不同**：那里哈希上传文件字节，
+    这里哈希草稿文本，两处从不相等、也不互相派生。
+    """
     resp = await client.post(
         _PAGES, json={"title": "供应商准入规则", "content": _CONTENT}
     )
@@ -181,7 +186,7 @@ async def test_create_page_writes_content_hash(
     ).mappings().one()
     assert stored["content_hash"] == _CONTENT_HASH
     # API 生成的 ID 是确定性的内容派生（不再是随机后缀）
-    assert stored["page_id"] == "PAGE-UNTITLED-012CA6C8"
+    assert stored["page_id"] == "PAGE-UNTITLED-7048C5E6"
 
 
 async def test_patch_content_updates_hash_but_keeps_page_id(
@@ -272,6 +277,12 @@ async def test_replay_same_file_yields_one_row_and_all_skipped(
     assert row["success_pages"] == 0
     assert row["failed_pages"] == 0
     assert row["error_message"] is None
+    # 台账不变量：total == success + skipped + failed。结构上恒成立，但**只在
+    # 跑完的路径上成立**——异常中止（abort）时还有未处理的草稿，等式有意不成立，
+    # 所以这条断言只能放在一条已完成的导入任务上，不能拿去套 _markFailedBestEffort。
+    assert row["total_pages"] == (
+        row["success_pages"] + row["skipped_pages"] + row["failed_pages"]
+    )
 
 
 async def test_replay_id_is_content_derived_not_random(
@@ -286,7 +297,7 @@ async def test_replay_id_is_content_derived_not_random(
     ids = list(
         (await dbSession.execute(text("SELECT page_id FROM wiki_page"))).scalars().all()
     )
-    assert ids == ["PAGE-UNTITLED-840CCA89"]
+    assert ids == ["PAGE-UNTITLED-6B6EF282"]
 
 
 async def test_same_title_different_content_creates_second_entry(
@@ -344,6 +355,50 @@ async def test_explicit_page_id_with_same_content_is_skipped(
     assert await _countPages(dbSession) == 1
 
 
+async def test_null_content_hash_collision_is_never_a_skip(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """历史行 ``content_hash IS NULL`` 撞上再导入 → 必须计失败，不得静默跳过。
+
+    0061 刻意**不回填** ``content_hash``，因此任何在此之前的行都处于「行存在但哈希
+    为 NULL」这一状态，且重导这些内容时必然撞上它 —— 这是升级后**首先**会遇到、
+    也最难自证的一种碰撞形状（不是「历史上最常见」：本表上线以来各库均为 0 行，
+    见 summary §1）。跳过分支的守卫是 ``_importOne`` 里的 ``existingHash is not
+    None``——一旦有人把它当成「自然清理」删掉，NULL 行撞上新导入就会退化成静默
+    skip，悄悄丢弃一份内容从未被比对过的页面，且**没有任何测试打红**。本测试把
+    这条分支钉死。
+    """
+    # Arrange：用 raw SQL 造一条 content_hash 为 NULL 的历史行（显式 page_id）。
+    await dbSession.execute(
+        text(
+            "INSERT INTO wiki_page (page_id, title, content, content_hash) "
+            "VALUES (:pid, :title, :content, NULL)"
+        ),
+        {"pid": "NULLHASH-001", "title": "甲", "content": "旧内容"},
+    )
+    await dbSession.commit()
+
+    # Act/Assert：内容**不同** → 冲突（失败），不是跳过。
+    result = await _execute(
+        client,
+        [{"pageId": "NULLHASH-001", "title": "甲", "content": "新内容"}],
+        sourceRef="n.md",
+    )
+    assert result["skippedPages"] == 0
+    assert result["failedPages"] == 1
+    assert result["status"] == "FAILED"
+
+    # 对称情形：即便内容**完全相同**也必须失败——NULL 不可判定为「重跑」，
+    # 与「同内容 = 跳过」的那条路径不是一回事。
+    again = await _execute(
+        client,
+        [{"pageId": "NULLHASH-001", "title": "甲", "content": "旧内容"}],
+        sourceRef="n.md",
+    )
+    assert again["skippedPages"] == 0
+    assert again["failedPages"] == 1
+
+
 # ---------------------------------------------------------------------------
 # 钉死 docstring 的声称 / 台账无关性
 # ---------------------------------------------------------------------------
@@ -390,9 +445,10 @@ async def test_same_content_different_source_ref_is_two_entries(
 ) -> None:
     """已知边界：sourceRef 参与身份派生，故同内容不同来源 = 两条。
 
-    spec §5.2 的公式写死了 ``sha256(source_ref \\x00 title \\x00 content)``，
-    这里把该公式的**代价**钉成显式行为而不是让它在生产里被偶然发现：用户第一次
-    导入留空 sourceRef、第二次填了文件名，同一份文件会得到两个 ID、两条知识。
+    sourceRef 参与身份派生（spec §5.2 的设计；实现按长度前缀拼接 source_ref/
+    title/content 后 sha256），这里把该设计的**代价**钉成显式行为而不是让它在
+    生产里被偶然发现：用户第一次导入留空 sourceRef、第二次填了文件名，同一份
+    文件会得到两个 ID、两条知识。
     缓解方式记录在 summary 风险段（向导层统一要求填 sourceRef，或后续把来源
     归一化为上传文件的内容哈希）。
     """

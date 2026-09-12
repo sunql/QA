@@ -44,7 +44,7 @@ async def test_create_generates_deterministic_page_id(client: AsyncClient) -> No
     body = await _createPage(client)
 
     # Assert
-    assert body["pageId"] == "PAGE-UNTITLED-012CA6C8"
+    assert body["pageId"] == "PAGE-UNTITLED-7048C5E6"
     assert body["title"] == "供应商准入规则"
     assert body["status"] == "DRAFT"
     assert body["structureStage"] == "MARKDOWN"

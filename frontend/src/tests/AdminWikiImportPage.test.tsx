@@ -734,7 +734,7 @@ describe("AdminWikiImportPage", () => {
         // 具体单元格，钉死「跳过=3 / 失败=0」，才防得住两列被写反。
         api.listImportTasks.mockResolvedValue({
             rows: [
-                { ...TASK, successPages: 0, skippedPages: 3, failedPages: 0 },
+                { ...TASK, totalPages: 3, successPages: 0, skippedPages: 3, failedPages: 0 },
             ],
             total: 1,
         });

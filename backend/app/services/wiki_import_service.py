@@ -377,8 +377,9 @@ class WikiImportService:
                     # 它是 ConflictError 的子类，顺序反了就会走成失败计数，
                     # 失败数依旧虚高，等于没修。
                     logger.info(
-                        "导入第 %d 条为重复内容，跳过: %s",
+                        "导入第 %d 条为重复内容，跳过 page_id=%s: %s",
                         len(pageIds) + skippedPages + failedPages + 1,
+                        e.page_id,
                         e,
                     )
                     skippedPages += 1

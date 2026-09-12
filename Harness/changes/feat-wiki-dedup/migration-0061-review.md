@@ -16,7 +16,7 @@
 |---|---|---|---|
 | 1 | `ALTER TABLE wiki_page ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64)` | 让「同 ID 不同内容」与「同文件重跑」在数据层可判定 | 纯加列，可空无默认 ⇒ 对既有行零影响 |
 | 2 | `CREATE INDEX IF NOT EXISTS ix_wiki_page_content_hash ON wiki_page (content_hash)` | **非唯一**。服务「这份正文还出现在哪些条目里」的排查查询 | 无。刻意不加唯一：同一段正文出现在两条知识里合法（共享模板），加唯一会把正常写入变成 500 |
-| 3 | `CREATE UNIQUE INDEX IF NOT EXISTS uq_document_catalog_content_hash ON document_catalog (content_hash)` | spec §4.7 D2-2 把该唯一约束推迟到 P1「一并做，只付一次迁移成本」，P1 即本次 | **建索引前已查重：两库重复分组均为 0** ⇒ 不会因重复摘要失败。若未来库上有重复，DDL 原子回滚，属安全失败 |
+| 3 | ~~`CREATE UNIQUE INDEX ... uq_document_catalog_content_hash`~~ → **已移出至 0062** | spec §4.7 D2-2 把该唯一约束推迟到 P1「一并做，只付一次迁移成本」，P1 即本次 | **建索引前已查重：两库重复分组均为 0** ⇒ 不会因重复摘要失败。若未来库上有重复，DDL 原子回滚，属安全失败 |
 | 4 | `ALTER TABLE wiki_import_task ADD COLUMN IF NOT EXISTS skipped_pages INTEGER NOT NULL DEFAULT 0` | 重复项不再计失败（spec §5.4）。否则「8 条全是重复」会退化成 `success=0, failed=0` 的第三种状态，运维无法区分「没跑」与「跑了但都已入库」 | `NOT NULL` 带 `DEFAULT 0` ⇒ 既有行自动补 0，安全 |
 
 **幂等性**：四项全用 `IF NOT EXISTS`，与 0053–0060 同模式 —— prod 是从 dump 恢复的，重复执行必须是 no-op。
@@ -94,14 +94,28 @@ prod 的 `alembic_version` 早已是 `0061`（**唯一索引已生效**），而
 
 ## 5. 回滚代价
 
-`0061_wiki_dedup` 的 `downgrade()` 会**一并**执行四项反向操作：
-删 `skipped_pages`、删唯一索引、删 `ix_wiki_page_content_hash`、删 `wiki_page.content_hash`。
+**（本节的初版已过时，2026-09-13 按裁决重写：唯一索引已从 0061 拆到 0062。）**
 
-⚠️ 因此**「只想撤掉唯一索引、保留另外三项」不能靠 `downgrade`**，需手写一条
-`DROP INDEX uq_document_catalog_content_hash`。请先明确要撤到哪一档。
+| 想撤什么 | 怎么做 | 代价 |
+|---|---|---|
+| **只撤唯一索引**（保留另两项） | `alembic downgrade 0062_doc_catalog_hash_unique` | 放开重复上传；`content_hash` 列与 `skipped_pages` 列**原样保留**，不丢任何数据 |
+| 撤到 0061 | `alembic downgrade 0061_wiki_dedup` | 删 `skipped_pages` 列、删 `ix_wiki_page_content_hash`、删 `wiki_page.content_hash` 列 |
 
-数据损失面：`wiki_page` 当前 **0 行** ⇒ 删 `content_hash` 列**不丢任何已回填数据**（本来就没有回填）。
-`document_catalog` 的 1 行是 P0 上传路径写入的，其 `content_hash` 值不因删索引而变。
+**为什么会有这张表**：初版 0062 之前，唯一索引与另两项同在 0061，`downgrade()` 必须
+对称反转 `upgrade()` ⇒ 三项只能一起撤；若硬改成「只撤索引」的不对称 downgrade，库会停在
+**没有任何 revision 描述**的状态（版本号回到 0060 而两列仍在），正是「两库结构漂移」的病根。
+拆开后「撤索引」成了 Alembic 的正式操作，一条命令、只撤一项、版本号如实反映结构。
+
+数据损失面：`wiki_page` 当前 **0 行** ⇒ 撤到 0061 删 `content_hash` 列**不丢任何已回填数据**
+（本来就没有回填）。`document_catalog` 的 1 行是 P0 上传路径写入的，其 `content_hash` 值
+不因删索引而变。
+
+撤索引的语义后果（=§4 那条风险的**手动缓解手段**）：索引一撤，`content_hash` 立刻回到
+「无唯一约束」的良性可写列，§4 的占位阻断随之失效 —— 这也是「保留撤离能力」这个需求
+本身的价值所在。
+
+> 该行为由 `backend/app/tests/integration/test_document_catalog_content_hash_unique_migration.py`
+> 真跑 alembic 钉住（降级后断言唯一索引消失、另三项仍在、随后恢复 head）。
 
 ---
 

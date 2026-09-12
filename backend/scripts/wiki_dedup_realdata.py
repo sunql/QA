@@ -34,7 +34,9 @@
 会被 Alembic 静默忽略（memory: qa-system-alembic-targets-prod），故运行命令必须
 显式传 ``DATABASE_URL``。
 
-运行（宿主机，需先确保 schema 已 ``alembic upgrade head`` 到 0061）：
+运行（宿主机，需先确保 schema 已 ``alembic upgrade head``，即至少到 `0061_wiki_dedup`
+—— 这里刻意不写死具体 head：唯一索引拆到 0062 之后 head 会继续往后走，本脚本的
+前置条件始终是「0061 的那两列在」）：
 
     DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' \\
         .venv/bin/python -m scripts.wiki_dedup_realdata

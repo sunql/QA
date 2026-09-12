@@ -34,14 +34,21 @@
 
 ## 3. 数据模型变更
 
-迁移 `backend/alembic/versions/0061_wiki_dedup.py`，`revision = "0061_wiki_dedup"`，`down_revision = "0060_schema_reconcile"`。四步 DDL，全部幂等（`IF NOT EXISTS`），`downgrade` 对称可逆：
+**两个迁移**，均为幂等 DDL（`IF NOT EXISTS`）、`downgrade` 各自对称可逆：
 
-| DDL | 方向 | 理由 |
-|---|---|---|
-| `wiki_page.content_hash VARCHAR(64) NULL` | 可空 | P1 **不回填**；历史行为 NULL 是正常状态 |
-| `ix_wiki_page_content_hash` | **非唯一** | 一行 = 一条知识，共享模板合法 |
-| `uq_document_catalog_content_hash` | **唯一** | 一行 = 一份源文档（spec §4.7 推迟到 P1 的 D2-2） |
-| `wiki_import_task.skipped_pages INTEGER NOT NULL DEFAULT 0` | — | §5.4 台账语义 |
+- `0061_wiki_dedup.py`（`revision = "0061_wiki_dedup"`，`down_revision = "0060_schema_reconcile"`）
+- `0062_doc_catalog_hash_unique.py`（`revision = "0062_doc_catalog_hash_unique"`，`down_revision = "0061_wiki_dedup"`）
+
+| DDL | 所在迁移 | 方向 | 理由 |
+|---|---|---|---|
+| `wiki_page.content_hash VARCHAR(64) NULL` | 0061 | 可空 | P1 **不回填**；历史行为 NULL 是正常状态 |
+| `ix_wiki_page_content_hash` | 0061 | **非唯一** | 一行 = 一条知识，共享模板合法 |
+| `wiki_import_task.skipped_pages INTEGER NOT NULL DEFAULT 0` | 0061 | — | §5.4 台账语义 |
+| `uq_document_catalog_content_hash` | **0062** | **唯一** | 一行 = 一份源文档（spec §4.7 推迟到 P1 的 D2-2） |
+
+**为什么唯一索引从 0061 拆到 0062（2026-09-13 追加）。** 唯一索引是四项里唯一有**阻断**能力的：留下一行 `content_hash = X` 即永久占住该哈希，后续任何哈希为 X 的合法上传/导入一律 409。运维上因此需要「**只撤唯一索引、保留另外三项**」。而它原先与另三项同在 0061，`downgrade()` 必须对称反转 `upgrade()` ⇒ 三项只能一起撤；若硬改成只撤索引的不对称 downgrade，库会停在**没有任何 revision 描述**的状态（版本号回到 0060 而两列仍在）—— 正是本仓库 `0060_schema_reconcile` 收敛过的漂移病根。拆开后 **撤索引 = `alembic downgrade 0062_doc_catalog_hash_unique`**，一条命令、只撤一项、版本号如实反映结构，且两个迁移的 downgrade 都保持对称。该行为由 `test_document_catalog_content_hash_unique_migration.py` **真跑 alembic** 钉住（降级后断言索引消失、另三项仍在，随后恢复 head），并已写入 `Harness/rules/数据库环境使用规范.md` 的「Alembic 迁移编写约束」。
+
+**踩到的坑：revision id 超长。** 初版 0062 用全拼 `0062_document_catalog_content_hash_unique`（**41** 字符），而 `alembic_version.version_num` 是 `character varying(32)` ⇒ 写版本号时抛 `StringDataRightTruncationError`，**且发生在 DDL 执行之后、版本号落库之前**，库被留在「索引已建、版本没动」的半截状态。已改为 `0062_doc_catalog_hash_unique`（28 字符）。是**测试先打红**发现的，不是部署时。该约束已进规则文件。
 
 **两处同名索引方向相反，不是笔误。** 若把 `wiki_page.content_hash` 也做成唯一：共享模板的正常写入会 500，且「同 ID 同内容 → 跳过」分支**永远走不到**。`document_catalog` 之所以要唯一，是因为其行与源文档一一对应。
 
@@ -53,7 +60,9 @@
 - `backups/pg/wiki_import_task_20260912.sql`（19,649 B —— 含那 8 行）
 - `backups/pg/document_catalog_20260912.sql`（4,215 B）
 
-**drift 校验。** 两个新索引已在 ORM 显式声明（`WikiPage.__table_args__` / `DocumentCatalog`），生成的 DDL 与迁移**逐字节一致**（`Index(unique=True)` 而非 `UniqueConstraint`，因为 0061 建的是 `CREATE UNIQUE INDEX` 不是约束）。drift 检查器不再报这两项；剩余 24 条 `extra_index` 警告是 0061 之前的历史遗留，与本变更无关。
+**drift 校验。** 两个新索引已在 ORM 显式声明（`WikiPage.__table_args__` / `DocumentCatalog`），生成的 DDL 与迁移**逐字节一致**（`Index(unique=True)` 而非 `UniqueConstraint`，因为 0062 建的是 `CREATE UNIQUE INDEX` 不是约束）。drift 检查器不再报这两项；剩余 24 条 `extra_index` 警告是本次变更之前的历史遗留，与本变更无关（拆分后两库复查，警告列表**逐条相同**，见下）。
+
+**0062 拆分后的两库复核（2026-09-13）。** 两库 `alembic_version` 均推进到 `0062_doc_catalog_hash_unique`；drift 检查器在 prod 与测试库上给出的警告列表**完全一致**（同为那 24 条历史索引，无新增阻断项）；两个索引的 `indexdef` 逐字节 diff 为空。撤销测试用的中间态（降级到 0061 再升回）已被 `try/finally` 复原，未在两库留下痕迹。
 
 ## 4. 接口契约变更
 

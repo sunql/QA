@@ -4,7 +4,8 @@
 从 HTTP 入口发起，经路由校验 → service → 真实 PG，数据准备与断言都落在真实行上。
 
 覆盖：
-- 迁移 0061 的三处 DDL 确实生效（两列的列类型/可空 + 两个索引的名字/唯一性方向）
+- 迁移 0061 / 0062 的 DDL 确实生效（两列的列类型/可空 + 两个索引的名字/唯一性方向；
+  其中 ``uq_document_catalog_content_hash`` 由 **0062** 建，0061 不再拥有它）
 - POST /wiki/pages 落 content_hash；PATCH content 后哈希跟着变、page_id 不变
 - 同一份文件导入两次 → wiki_page 恰 N 行，第二次全部计入 skippedPages
 - 同标题不同内容 → 两条（不再撞号）
@@ -122,7 +123,11 @@ async def test_import_task_skipped_pages_column_exists(
 async def test_document_catalog_content_hash_index_is_unique(
     dbSession: AsyncSession,
 ) -> None:
-    """0061 补上 spec §4.7 推迟到 P1 的 ``content_hash`` 唯一约束。
+    """0062 补上 spec §4.7 推迟到 P1 的 ``content_hash`` 唯一约束。
+
+    （这条索引原先由 0061 建出，后拆到 0062 —— 为的是能「只撤索引、保留另两项」，
+    见 ``0062_doc_catalog_hash_unique.py`` 的 docstring 与本目录
+    ``test_document_catalog_content_hash_unique_migration.py``。）
 
     与 ``wiki_page`` 那两个索引方向相反：``document_catalog`` 的行 = 一份源文档，
     同一份文件重复上传必须映射到同一份文档，所以这里**要**唯一。

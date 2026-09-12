@@ -21,6 +21,7 @@ export const zhCN = {
     delete: "删除",
     save: "保存",
     actions: "操作",
+    more: "更多",
     version: "版本",
     close: "关闭",
     cancel: "取消",
@@ -281,6 +282,7 @@ export const zhCN = {
     previewFailed: "生成导入预览失败，请稍后重试",
     importFailed: "导入失败，请查看错误详情",
     schemaLoadFailed: "Schema 加载失败，请检查数据源后重试",
+    schemaCached: "Schema 缓存成功（{count} 张表）",
   },
 
   queryPlan: {
@@ -1446,6 +1448,7 @@ export const zhCN = {
 
   datasource: {
     importToOntology: "智能导入到本体",
+    cacheSchema: "缓存 Schema",
   },
 
   featureRules: {

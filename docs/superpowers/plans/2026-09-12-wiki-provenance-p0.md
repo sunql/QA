@@ -2329,3 +2329,65 @@ git commit -m "chore(wiki): P0 真实数据验证脚本 + 变更记录"
 - 不实现 preview→execute 的上传令牌改造（Task 6 已说明理由）。
 - 不改前端。
 - 不做 `claim`/`evidence` 写入（那是 P3）。
+
+---
+
+## 跨计划协调（与 P1 / P3 的接口）
+
+P0 / P1 / P3 是三份独立计划，**执行顺序未定**。以下是它们之间的接触点，执行任一计划前必须核对。
+
+### 1. `document_catalog.content_hash` 唯一索引 —— P1 建，P0 不建
+
+P1（`2026-09-12-wiki-dedup-p1.md`）的迁移 `0061_wiki_dedup` 会给
+`document_catalog.content_hash` 建**唯一索引** `uq_document_catalog_content_hash`
+（spec §4.7 把该约束明确推迟到 P1「只付一次迁移成本」）。
+
+**P0 的 Task 6 不创建该索引，也不要"顺手"补上。** P1 已实测：当前该列存在、表 0 行、
+尚无唯一索引，所以那个索引由 P1 建成本为零。两处都建会让定义各自漂移 ——
+`IF NOT EXISTS` 会让重复创建静默通过，看起来没事。
+
+P0 的 `WikiCatalogRegistrar.upsertByContentHash` 用的是 SELECT-then-INSERT，
+**不依赖**唯一约束来保证幂等；P1 的索引落地后它只是多了一层并发兜底。
+
+### 2. 摘要口径必须一致 —— 两份实现，同一算法
+
+P0 与 P1 各有一个摘要函数：
+
+| 计划 | 函数 | 定义 |
+|---|---|---|
+| P0（Task 4） | `object_storage.hashContent(content: bytes) -> str` | `sha256(content).hexdigest()` |
+| P1（Task 1） | `wiki_page_service.contentHashOf(content: str) -> str` | `sha256(content.encode("utf-8")).hexdigest()` |
+
+同一文本经两者得到**同一个值**（`hashContent(s.encode("utf-8")) == contentHashOf(s)`），
+P0 的 Task 6 依赖这一点来写 `document_catalog.content_hash`。
+
+**执行 P0 时的处理**：
+
+- 若 **P1 尚未落地** —— 按本计划 Task 6 原样写（`hashContent(draftText.encode("utf-8"))`），
+  并在 `summary.md` 记下「待 P1 落地后统一为 `contentHashOf`」。
+- 若 **P1 已落地** —— Task 6 改为 `from app.services.wiki_page_service import contentHashOf`，
+  用 `contentHashOf(draftText)`，**不要**再走 `hashContent`。P1 的计划已写明
+  「P0 落地时直接复用本函数，不要再写第二份实现」。
+
+无论哪种，Task 6 的测试都要**把 64 位摘要钉成字面量**（而不是只断言长度）。
+只断言长度挡不住口径漂移 —— 漂移了不会报错，只会让两侧比对永远不等。
+
+### 3. `wiki_import_service.execute` 是 P0 与 P1 的共同改动点
+
+| 计划 | 改 `execute` 的什么 |
+|---|---|
+| P0 Task 6 | 在**末尾**（任务台账落库之后）追加 `document_catalog` 登记 |
+| P1 Task 4 | 重写循环体与 `_importOne`，把重复项从「失败」改判为「跳过」，台账加 `skipped_pages` |
+
+两者不冲突，但 P0 的插入位置写的是「任务台账落库之后」这种**位置锚点**，
+而 P1 恰好会改那段台账代码。**后执行的一方必须重新定位锚点**，不要照着行号改。
+
+另一个交互：P1 的导入测试用 `autoClassify: false`（不调 LLM）；P0 的 Task 6 测试传
+`modelId` 并 patch `_INVOKER_CLIENT`。两者各自独立成立，互不影响。
+
+### 4. `TextBlock` 只属于 P0
+
+P1 与 P3 都**不依赖** `TextBlock` / `Chunk.metadata` / MinIO 管线（P1 计划已显式声明解耦）。
+P3 的 `evidence` 写入若要填 `page_number` / `section_name` / `paragraph_no`，来源正是 P0 落进
+Milvus 的这三列 —— 那是**数据上的**依赖，不是代码依赖，故 P3 不阻塞于 P0，但 P0 未落地时
+P3 写出的 evidence 定位符只能是空值。这一点在 P3 计划里核对。

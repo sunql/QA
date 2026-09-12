@@ -690,6 +690,7 @@ export const enUS = {
     computeScore: "Compute Scores",
     evaluateSuccess: "Evaluation complete",
     evaluateBatchSuccess: "Evaluated {total} rules, {passed} passed",
+    evaluateBatchNoEnabled: "No enabled rules in the current list to evaluate",
     computeScoreSuccess: "Computed {count} scores",
     evalResult: {
       title: "Evaluation Result",

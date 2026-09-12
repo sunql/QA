@@ -695,6 +695,7 @@ export const zhCN = {
     computeScore: "计算评分",
     evaluateSuccess: "评估完成",
     evaluateBatchSuccess: "已评估 {total} 条规则，通过 {passed} 条",
+    evaluateBatchNoEnabled: "当前列表没有已启用的规则，无需批量评估",
     computeScoreSuccess: "已计算 {count} 条评分",
     evalResult: {
       title: "评估结果",

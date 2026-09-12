@@ -14,9 +14,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { message } from "antd";
 
+// 必须把页面实际 import 的**每一个**函数都列出来：vi.mock 的工厂是整体替换，
+// 漏掉的具名导出会变成 undefined —— 管理 Tab 一旦渲染就会调用它们。
 vi.mock("../api/lineage", () => ({
   listEdges: vi.fn(),
   extractLineage: vi.fn(),
+  createEdge: vi.fn(),
+  updateEdge: vi.fn(),
+  deleteEdge: vi.fn(),
 }));
 
 const echartsOptionCapture = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
@@ -300,4 +305,110 @@ describe("LineagePage", () => {
       expect(objectFilterProps.current!.value.size).toBe(0);
     });
   });
+});
+
+/**
+ * 管理 Tab（血缘边 CRUD）。
+ *
+ * 页面被 Tab 化之后，这两件事最容易在改动中悄悄丢掉：管理视图要看到**全部**边
+ * （含已停用，否则停用的边再也改不回来），以及删除必须先二次确认。
+ */
+describe("LineagePage 管理 Tab", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    echartsOptionCapture.current = null;
+    objectFilterProps.current = null;
+  });
+
+  /** 渲染 → 等首屏真的落定 → 切到「管理」→ 等管理面板渲染出来。
+   *
+   * 两处 waitFor 都不是「等一等」，而是把异步 setState 收进 act 里：
+   * - 首屏：listEdges 落定后会 setEdges，只等「调用发生」会抢在落定之前，
+   *   React 就会报 GraphTab 的更新未包裹在 act 中；
+   * - 切 Tab：ManageTab 挂载后自己再拉一次，同理。
+   * 本组用例都至少给了一条边，所以「图渲染出来」就是首屏落定的可观测信号。
+   *
+   * 超时全部显式放宽：单跑本文件时这些用例 ~2s，全量跑（112 个文件抢 CPU）会涨到
+   * 6s+，撞穿 vitest 默认的 5s testTimeout，表现为「单跑全绿、全量随机红一条」。
+   * 断言本身没变，只是不再把机器负载当成被测行为。 */
+  const FIND_TIMEOUT = 10_000;
+  const TEST_TIMEOUT = 20_000;
+
+  async function switchToManageTab(): Promise<void> {
+    render(<LineagePage />);
+    await waitFor(
+      () => expect(screen.getByTestId("echarts-mock")).toBeInTheDocument(),
+      { timeout: FIND_TIMEOUT },
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /管\s*理/ }));
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: /新建血缘边/ })).toBeInTheDocument(),
+      { timeout: FIND_TIMEOUT },
+    );
+  }
+
+  it(
+    "管理视图拉的是全部边（不带 activeOnly），不是可视化那份活跃边",
+    async () => {
+      vi.mocked(lineageApi.listEdges).mockResolvedValue([edge({ id: 7 })]);
+      await switchToManageTab();
+
+      // 可视化先拉一次，带 activeOnly
+      expect(lineageApi.listEdges).toHaveBeenCalledWith({ activeOnly: true });
+      // 管理 Tab 再拉一次，**不带** activeOnly —— 已停用的边也要能看见、能改回来
+      await waitFor(() => expect(lineageApi.listEdges).toHaveBeenCalledWith({}), {
+        timeout: FIND_TIMEOUT,
+      });
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "删除一条边要先二次确认，只点「删 除」不发请求",
+    async () => {
+      vi.mocked(lineageApi.listEdges).mockResolvedValue([edge({ id: 9 })]);
+      await switchToManageTab();
+
+      // antd 会在两个汉字之间插空格，可访问名是「删 除」；^$ 锚定避免误命中页面顶部按钮
+      const deleteBtn = await screen.findByRole(
+        "button",
+        { name: /^删\s*除$/ },
+        { timeout: FIND_TIMEOUT },
+      );
+      fireEvent.click(deleteBtn);
+
+      expect(lineageApi.deleteEdge).not.toHaveBeenCalled();
+      expect(
+        await screen.findByText("确认删除该血缘边？", undefined, {
+          timeout: FIND_TIMEOUT,
+        }),
+      ).toBeInTheDocument();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "管理 Tab 加载失败时给出提示且不崩",
+    async () => {
+      const errorSpy = vi
+        .spyOn(message, "error")
+        .mockReturnValue(1 as unknown as ReturnType<typeof message.error>);
+      vi.mocked(lineageApi.listEdges)
+        .mockResolvedValueOnce([edge({ id: 7 })]) // 可视化的首屏
+        .mockRejectedValue(new Error("edges boom")); // 管理 Tab 的拉取
+
+      await switchToManageTab();
+
+      await waitFor(
+        () => {
+          expect(errorSpy).toHaveBeenCalledWith(
+            expect.stringContaining("加载血缘边列表失败"),
+          );
+        },
+        { timeout: FIND_TIMEOUT },
+      );
+      errorSpy.mockRestore();
+    },
+    TEST_TIMEOUT,
+  );
 });

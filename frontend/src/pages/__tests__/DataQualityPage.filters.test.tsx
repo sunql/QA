@@ -21,8 +21,18 @@ const dsApi = vi.hoisted(() => ({
   listDataSources: vi.fn(),
 }));
 
+// 评分 Tab 的 API 也一并 mock：本组用例不碰它，但页面 import 了该模块，
+// 不 mock 就是「测试里躺着一条能发真实 HTTP 的路径」。
+const scoreApi = vi.hoisted(() => ({
+  evaluateRule: vi.fn(),
+  evaluateBatch: vi.fn(),
+  computeScore: vi.fn(),
+  listScores: vi.fn(),
+}));
+
 vi.mock("../../api/dataQuality", () => api);
 vi.mock("../../api/datasource", () => dsApi);
+vi.mock("../../api/dataQualityScore", () => scoreApi);
 
 const mockRule: DataQualityRule = {
   id: 1,
@@ -76,6 +86,7 @@ describe("DataQualityPage — 5 字段筛选（feat-dq-rule-list-filters）", ()
     api.listRules.mockResolvedValue([mockRule]);
     api.listRuleOptions.mockResolvedValue(MOCK_OPTIONS);
     dsApi.listDataSources.mockResolvedValue(MOCK_OPTIONS.datasourceIds);
+    scoreApi.listScores.mockResolvedValue([]);
     // 重置 useDataQualityFilterOptions 模块级缓存，避免跨测试污染
     const { _resetCache } = await import("../../hooks/useDataQualityFilterOptions");
     _resetCache();

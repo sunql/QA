@@ -143,20 +143,27 @@ $ docker exec -e ALLOW_NONEMPTY_REBUILD=1 qa-backend python scripts/rebuild_docu
 ### 9.2 门禁脚本（Step 3，真实输出）
 
 脚本自身的 print 输出逐字如下（容器 SQLAlchemy engine 的 INFO echo 日志与 PyMilvus
-弃用告警被省略，未改动脚本输出内容）：
+弃用告警被省略，未改动脚本输出内容）。**此处的运行是最终交付版脚本**（含后续加固的
+`catalog.content_hash` 与计算值/对象名 hash 段比对断言）：
 
 ```
 ingest.chunks       = 2
-ingest.storage_url  = s3://qa-knowledge-sources/sources/7d/7d04300b888312588d4233dc92ec2041ae10f9eaa24f6b0cc3674dfa4e833994/provenance-sample.pdf
-ingest.content_hash = 7d04300b888312588d4233dc92ec2041ae10f9eaa24f6b0cc3674dfa4e833994
+ingest.storage_url  = s3://qa-knowledge-sources/sources/f3/f319fbad1c1aff8fef9df785c1b5316b8c29cd54b746a7501e975ecda737e9e5/provenance-sample.pdf
+ingest.content_hash = f319fbad1c1aff8fef9df785c1b5316b8c29cd54b746a7501e975ecda737e9e5
 milvus.chunk_count  = 2
 milvus.page_numbers = [1, 2]
-catalog.storage_url = s3://qa-knowledge-sources/sources/7d/7d04300b888312588d4233dc92ec2041ae10f9eaa24f6b0cc3674dfa4e833994/provenance-sample.pdf
-catalog.content_hash= 7d04300b888312588d4233dc92ec2041ae10f9eaa24f6b0cc3674dfa4e833994
+catalog.storage_url = s3://qa-knowledge-sources/sources/f3/f319fbad1c1aff8fef9df785c1b5316b8c29cd54b746a7501e975ecda737e9e5/provenance-sample.pdf
+catalog.content_hash= f319fbad1c1aff8fef9df785c1b5316b8c29cd54b746a7501e975ecda737e9e5
 minio.read_back     = 2916 bytes（与上传一致）
 
 ✅ P0 溯源地基真实数据验证通过（已清理本次写入）
 ```
+
+> **`content_hash` 跨次运行会变，这不是缺陷**：样本 PDF 由 reportlab 生成，而 reportlab 会把
+> `CreationDate` 时间戳写进 PDF，故每次生成的**字节**都不同，sha256 随之不同（另一次运行得到
+> `7d04300b…`）。所以门禁断言的是**同一运行内**的一致性 —— `catalog.content_hash` 等于本次
+> `ingest.content_hash`、也等于对象名中的 hash 段 —— 而不是跨运行的稳定值。若要跨运行稳定，
+> 需要让样本 PDF 字节确定化（例如固定 CreationDate），这不在 P0 范围内。
 
 ### 9.3 自清复核（真实输出）
 
@@ -176,7 +183,9 @@ chunks = data: [], extra_info: {}
 - ✅ Milvus chunk 页集合**恰好**为 `[1, 2]`（两页正文各成 chunk，非哨兵 -1）；`paragraph_no` 非哨兵；
   PDF 的 `section_name` 全为空串（哨兵，符合契约）。
 - ✅ catalog `storage_url` 为真实 `s3://qa-knowledge-sources/...`（非 `milvus://` 假 URL）。
-- ✅ catalog `content_hash` 为 64 位十六进制 sha256。
+- ✅ catalog `content_hash` 为 64 位十六进制 sha256，且**与本次 `ingest.content_hash` 及对象名中的
+  hash 段三者一致**（初版门禁只验 64 位形状、不比对取值，已加固 —— 否则日后若有人改成对**文本**
+  而非文件字节求 hash，门禁仍会全绿，而那正是本变更要钉死的口径）。
 - ✅ MinIO 读回 2916 字节与上传字节逐字节一致。
 - ✅ 门禁写入在正式库与共享集合零残留。
 

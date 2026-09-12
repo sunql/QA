@@ -160,11 +160,6 @@ class RagService:
         if not document_name:
             document_name = filename
 
-        try:
-            existing = await self._doc_svc.getDocument(session, 0)
-        except Exception:
-            existing = None
-
         # 检查 document_id 是否已存在（通过 listDocuments 过滤）
         existing_docs = await self._doc_svc.listDocuments(session, document_type=document_type)
         existing_doc = next(

@@ -242,7 +242,6 @@ class TestRagServiceIngest:
         svc = MagicMock()
         svc.listDocuments = AsyncMock(return_value=[])
         svc.createDocument = AsyncMock()
-        svc.getDocument = AsyncMock(side_effect=Exception("not found"))
         svc.updateDocument = AsyncMock()
         return svc
 

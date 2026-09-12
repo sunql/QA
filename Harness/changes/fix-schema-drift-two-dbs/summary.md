@@ -203,9 +203,8 @@ DB-extra 索引 26 个真噪音 + 132 个约束型假阳性需归一化掉），
 ### 8.2 顺带修掉一个潜伏 bug（HEAD `app/main.py:81`）
 
 HEAD 是 `if issues:` —— **任意** issue 都 `RuntimeError`。旧校验器只产表级 issue，所以没暴露；
-一旦加列/索引粒度，那 24 个遗留索引会**直接把容器打死**（且 `main.py` 与
-`check_schema_drift.py` 是同一份代码里的两半，只灌其一会立刻 break）。
-故本次同时改为按严重级判定。已用真实 lifespan 启动验证：
+一旦加列/索引粒度，那 24 个遗留索引会**直接把容器打死**。故本次同时改为按严重级判定。
+已用真实 lifespan 启动验证：
 
 ```
 WARNING Schema drift（非阻断）: [db:index] ... （24 个聚合成一行）
@@ -242,3 +241,52 @@ RENAME 列 → blocking 且可还原、加列 → warning 且 `--strict` 才失�
 `audit_log.idx_*`、`kpi_catalog.ix_*` 等），说明它们源自迁移链而非测试库特性 ——
 任何新环境都会带上。prod 上 CLI 同样 exit 0 且只报这一个 warning 类别（`blocking=0`）。
 **待决定**：补进 ORM 声明 / 补迁移 / 还是立基线豁免名单（`--strict` 门禁的前置条件）。
+
+### 8.6 消除「两半必须同版本」的部署耦合（搬迁 + 部署脚本）
+
+`app/main.py` 与本校验模块是**一对必须同版本部署的两半**。原先模块在 `scripts/`，
+两者分处两个目录，而《部署》文档的容器更新手法是
+`docker cp backend/app/.` —— 只带 main.py，容器里留下**旧实现**。
+两个方向的错配都实测过（用 `importlib` 分别加载 `426ed76^` 的旧版与新版本比对）：
+
+| 方向 | 实测结果 |
+|---|---|
+| 新 main + 旧模块 | 旧版返回 `list[str]`；注一条旧版真会产出的字符串 issue → `AttributeError: 'str' object has no attribute 'severity'`。且该调用在 `try/except` **之外** —— 连「请执行 alembic upgrade head」都打不出来 |
+| 旧 main + 新模块 | 新模块返回 24 条 warning → 旧 main 的 `if issues:` 为真 → `RuntimeError`，容器起不来 |
+
+方向上「新 main + 旧模块」在 prod 上**今天静默通过纯属侥幸**（prod 表级 issue 恰为 0，
+`_splitBySeverity([])` 的推导式一次都没执行）。
+
+**关键判断**：方向 2 的崩点在**旧 main.py 的代码里**，那份代码已经跑在容器里、改不了 ——
+所以**没有任何「只改新代码」的办法能救它**，治本只能是「保证两者永远一起走」。
+
+**落地**：
+
+1. `git mv scripts/check_schema_drift.py app/infrastructure/schema_drift.py` ——
+   main.py 改为 `from app.infrastructure.schema_drift import ...`。
+   这样 `docker cp backend/app/.` 一次带全两半，错配**结构性不可能**。
+   `scripts/check_schema_drift.py` 保留为薄 shim（转发 + 补 sys.path 以便直接执行），
+   保住既有 CLI 路径、CI 与文档引用；两种调用输出逐字一致。
+   搬迁顺带踩到一个坑：模块内 `_BACKEND_ROOT = parents[N]` 的层级要跟着改
+   （`app/infrastructure/` 下是 `parents[2]`），否则 `_ALEMBIC_VERSIONS_DIR` 指空 →
+   报「迁移链多 head 或无 head」。
+2. 新增 `scripts/deploy_backend.sh` —— 把 `app/` + `scripts/` + `alembic/`
+   **三个目录一次灌齐**、源路径强制带 `/.` 尾斜杠、覆盖前先快照、灌完重启并
+   轮询日志确认 `Application startup complete.`、失败给 `--rollback`。
+   这三条正是历史上分别踩过的坑（嵌套 `/app/app/app`、alembic 没同灌导致
+   uvicorn 起不来、容器跑旧代码），现在写死进脚本而不是靠人记。
+
+**结构性回归断言**：`test_drift_module_lives_inside_app_package` 按**包路径**断言
+（main.py 的 import 必须从 `app.*` 起、实现本体确实在 `app/` 下、不得再从 `scripts.*`
+import），而不是「源码里出现过某个字符串」—— 后者用 shim 就能骗过。
+
+**实跑验证**：`./scripts/deploy_backend.sh` 全流程跑通（快照 6 MB → 灌三目录 → 重启 →
+等到启动成功）。容器随后日志里出现
+
+```
+WARNING:app.main:Schema drift（非阻断）: [db:index] ...（24 个）
+INFO:     Application startup complete.
+```
+
+—— logger 名是 `app.main` 且 warning 被放行，正是新代码在真实运行时的签名；
+`RestartCount=0`，`GET /api/v1/health` → `{"status":"ok"}`。

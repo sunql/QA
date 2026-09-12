@@ -68,7 +68,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError(f"启动失败：无法连接到 {url}。{hint}") from e
     # Schema drift 校验：默认开启，SKIP_SCHEMA_CHECK=1 可关闭（紧急场景）
     if os.environ.get("SKIP_SCHEMA_CHECK") != "1":
-        from scripts.check_schema_drift import _checkDriftAsync, _splitBySeverity
+        # 必须从 app.* 里 import（不是 scripts.*）：本调用与 _splitBySeverity 是
+        # 一对必须同版本部署的两半，同处 app/ 才能被 `docker cp backend/app/.`
+        # 一次带全。放 scripts/ 时该 cp 会留下旧实现 → AttributeError 或起不来。
+        from app.infrastructure.schema_drift import _checkDriftAsync, _splitBySeverity
 
         try:
             issues = await _checkDriftAsync(engine)

@@ -11,9 +11,9 @@
 - 索引级：ORM 声明而 DB 缺失（blocking）/ DB 多出（warning）/ 同名不同列（blocking）
 - happy path：DB 与 head 一致时返回 []
 
-脚本通过 subprocess 调用（独立进程，与 alembic env 解耦），单元测试则通过
-importlib 按文件路径加载解析函数（_parseRevisionFiles / _findHead 纯逻辑），
-避免 pytest sys.path 集合时机的副作用。
+被测模块是 `app/infrastructure/schema_drift.py`（2026-09-12 从 `scripts/` 搬来，
+见其 docstring）。集成用例通过 `python -m` 起独立进程跑（进程边界，与 alembic env
+解耦），纯逻辑用例直接 import 该模块。
 
 **列/索引粒度是 2026-09-12 补的**：那次两库漂移（prod 缺
 `ix_menu_config_visible_sort`、prod `users` 多 4 列）**恰好全在列/索引级**，
@@ -29,7 +29,6 @@ UniqueConstraint 都建支撑索引，而 ORM 侧的 `UniqueConstraint` 是无�
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import subprocess
 import sys
@@ -48,38 +47,28 @@ from sqlalchemy import (
 )
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[3]
-_SCRIPT_PATH = _BACKEND_ROOT / "scripts" / "check_schema_drift.py"
+_MODULE_NAME = "app.infrastructure.schema_drift"
 
+# 2026-09-12：模块从 scripts/ 搬进 app/（与 main.py 同处 app 包，让
+# `docker cp backend/app/.` 一次带全那对必须同版本的两半）。搬进来后它就是一个
+# 正常的 app 子模块，直接 import 即可 —— 原先那套 importlib 按文件路径加载
+# 是外部脚本时代的产物，顺带消掉了它带来的 sys.modules 注册 hack。
+from app.infrastructure import schema_drift as _drift_module  # noqa: E402
 
-def _loadDriftModule():
-    """通过 importlib.util 按文件路径加载，避免 pytest sys.path 副作用。
-
-    **必须把模块注册进 `sys.modules`**：脚本用了 `@dataclass`，而 dataclasses 在
-    解析字符串注解（`from __future__ import annotations`）时要回查
-    `sys.modules[cls.__module__]`，未注册时在 Python 3.14 上直接
-    `AttributeError: 'NoneType' object has no attribute '__dict__'`。
-    """
-    spec = importlib.util.spec_from_file_location(
-        "check_schema_drift", str(_SCRIPT_PATH)
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["check_schema_drift"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_drift_module = _loadDriftModule()
 _parseRevisionFiles = _drift_module._parseRevisionFiles
 _findHead = _drift_module._findHead
 
 
 def _runDriftScript(dbUrl: str, *args: str) -> subprocess.CompletedProcess:
-    """在独立进程里跑 drift 脚本（进程边界，与 alembic env 解耦）。"""
+    """在独立进程里跑 drift 模块（进程边界，与 alembic env 解耦）。
+
+    用 `python -m` 而不是文件路径：`-m` 会把 cwd 放进 sys.path，模块内
+    `from app.domain.models import Base` 才解析得到。
+    """
     env = dict(os.environ)
     env["DATABASE_URL"] = dbUrl
     return subprocess.run(
-        [sys.executable, str(_SCRIPT_PATH), *args],
+        [sys.executable, "-m", _MODULE_NAME, *args],
         cwd=str(_BACKEND_ROOT),
         env=env,
         capture_output=True,
@@ -611,8 +600,37 @@ class TestStartupSeverityPolicy:
         main_py = (_BACKEND_ROOT / "app" / "main.py").read_text(encoding="utf-8")
 
         assert "_splitBySeverity" in main_py, (
-            "app/main.py 必须用 check_schema_drift 的 _splitBySeverity 区分"
+            "app/main.py 必须用 schema_drift 的 _splitBySeverity 区分"
             "blocking / warning，不能对所有 issue 一律 raise"
+        )
+
+    def test_drift_module_lives_inside_app_package(self) -> None:
+        """本模块必须与 main.py 同处 `app/` 包内（2026-09-12 从 scripts/ 搬来的原因）。
+
+        两者是**一对必须同版本部署的两半**。放在 `scripts/` 时，《部署》文档里的
+        `docker cp backend/app/.` 只会带上 main.py，容器里留下旧实现 —— 实测两个
+        错配方向都会让容器起不来：
+
+        - 新 main + 旧模块：旧版返回 `list[str]`，`_splitBySeverity` 读 `.severity`
+          → `AttributeError`，且该调用在 main.py 的 `try/except` 之外，
+          连「请执行 alembic upgrade head」都打不出来
+        - 旧 main + 新模块：旧 main 是 `if issues:`，本模块新增的 DB 多余索引
+          warning 会把它顶成真 → 容器直接起不来
+
+        按**包路径**判定（而非「源码里出现过某个字符串」）：只要 main.py 的 import
+        是 `app.*` 起头、实现本体也确实在 `app/` 下，那一次 cp 就必然带全两半。
+        注意别用 scripts/ 的 shim 来满足这条 —— shim 在 scripts/，同样 cp 不到。
+        """
+        main_py = (_BACKEND_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+
+        assert "from app.infrastructure.schema_drift import" in main_py, (
+            "app/main.py 必须从 app.* import drift 模块，否则 docker cp app/. 会漏"
+        )
+        assert "from scripts.check_schema_drift import" not in main_py, (
+            "不得再从 scripts.* import —— 那正是会造成「两半版本不一致」的路径"
+        )
+        assert (_BACKEND_ROOT / "app" / "infrastructure" / "schema_drift.py").is_file(), (
+            "实现本体必须在 app/ 下；scripts/ 的同名文件只是 CLI shim，cp 不到"
         )
 
     def test_blocking_and_warning_codes_are_disjoint(self) -> None:

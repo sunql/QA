@@ -335,6 +335,12 @@ def searchQueryEmbedding(
 
 
 def _documentFields() -> list[FieldSchema]:
+    """document_embeddings 的字段定义。
+
+    ⚠️ 顺序即契约：``insertDocumentChunks`` 用位置列表写数据，增删字段必须
+    同时改这里与那里的 data 列表。``id`` 是 auto_id 主键，不出现在 data 中。
+    ⚠️ Milvus 2.4 标量字段不支持 NULL，空值用哨兵：页码/段号 -1，章节 ""。
+    """
     return [
         FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
         FieldSchema(name="document_id", dtype=DataType.VARCHAR, max_length=50),
@@ -343,6 +349,9 @@ def _documentFields() -> list[FieldSchema]:
         FieldSchema(name="chunk_sequence", dtype=DataType.INT64),
         FieldSchema(name="effective_date", dtype=DataType.VARCHAR, max_length=20),
         FieldSchema(name="security_level", dtype=DataType.VARCHAR, max_length=10),
+        FieldSchema(name="page_number", dtype=DataType.INT64),
+        FieldSchema(name="section_name", dtype=DataType.VARCHAR, max_length=200),
+        FieldSchema(name="paragraph_no", dtype=DataType.INT64),
         FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=_DIM),
     ]
 
@@ -352,12 +361,21 @@ def ensureDocumentCollection() -> Collection:
     return _ensureCollection(_DOCUMENT_COLLECTION_NAME, _documentFields())
 
 
+def _locatorInt(value: Any) -> int:
+    """Milvus 标量不可为 NULL，缺失定位符写哨兵 -1（非合法页码/段号）。"""
+    return int(value) if value is not None else -1
+
+
 def insertDocumentChunks(records: list[dict[str, Any]]) -> None:
     """批量插入文档 chunk 向量记录。
 
     Args:
-        records: 每条记录包含 document_id, chunk_id, chunk_text, chunk_sequence,
-                 effective_date, security_level, embedding (list[float])
+        records: 每条记录含 document_id, chunk_id, chunk_text, chunk_sequence,
+                 effective_date, security_level, page_number, section_name,
+                 paragraph_no, embedding。
+
+                定位符为 None 时写哨兵（页码/段号 -1，章节 ""）。
+                顺序必须与 ``_documentFields()`` 一致（id 除外）。
     """
     collection = ensureDocumentCollection()
     data = [
@@ -367,6 +385,9 @@ def insertDocumentChunks(records: list[dict[str, Any]]) -> None:
         [r["chunk_sequence"] for r in records],
         [r.get("effective_date") or "" for r in records],
         [r.get("security_level") or "" for r in records],
+        [_locatorInt(r.get("page_number")) for r in records],
+        [(r.get("section_name") or "")[:200] for r in records],
+        [_locatorInt(r.get("paragraph_no")) for r in records],
         [r["embedding"] for r in records],
     ]
     collection.insert(data)
@@ -388,7 +409,11 @@ def searchDocumentChunks(
         topK: 返回条数
 
     Returns:
-        匹配的 chunk 列表，含 document_id, chunk_id, chunk_text, chunk_sequence, distance
+        匹配的 chunk 列表，含 document_id, chunk_id, chunk_text, chunk_sequence,
+        security_level, page_number, section_name, paragraph_no, distance
+
+        注意定位符是**哨兵值**：无页码/段号时为 -1，无章节时为 ""（Milvus 2.4
+        标量字段不支持 NULL），消费方需自行判断，不要直接展示 -1。
     """
     collection = ensureDocumentCollection()
 
@@ -400,7 +425,16 @@ def searchDocumentChunks(
         anns_field="embedding",
         param={"metric_type": "L2", "params": {"n_probe": 10}},
         limit=topK,
-        output_fields=["document_id", "chunk_id", "chunk_text", "chunk_sequence", "security_level"],
+        output_fields=[
+            "document_id",
+            "chunk_id",
+            "chunk_text",
+            "chunk_sequence",
+            "security_level",
+            "page_number",
+            "section_name",
+            "paragraph_no",
+        ],
         expr=expr,
     )
 
@@ -413,9 +447,48 @@ def searchDocumentChunks(
                 "chunk_text": hit.entity.get("chunk_text"),
                 "chunk_sequence": hit.entity.get("chunk_sequence"),
                 "security_level": hit.entity.get("security_level"),
+                "page_number": hit.entity.get("page_number"),
+                "section_name": hit.entity.get("section_name"),
+                "paragraph_no": hit.entity.get("paragraph_no"),
                 "distance": float(hit.distance),
             })
     return hits
+
+
+def deleteDocumentChunks(documentId: str) -> None:
+    """删除指定 document_id 的全部 chunk。
+
+    表达式**必须**带 document_id 过滤：集合是跨调用方共享的，一个没有
+    过滤条件的 ``collection.delete("")`` 会把整个集合清空。
+    """
+    collection = ensureDocumentCollection()
+    collection.delete(f'document_id == "{documentId}"')
+    collection.flush()
+    logger.info("Deleted Milvus document chunks for document_id=%s", documentId)
+
+
+def queryDocumentChunks(documentId: str) -> list[dict[str, Any]]:
+    """按 document_id 查出该文档的全部 chunk（不走向量检索）。
+
+    门禁脚本要检查的是「写进去的定位符对不对」，不是「检索得准不准」。
+    用 ``searchDocumentChunks`` 会因为集合跨调用方共享、topK 截断而漏掉
+    目标行 —— 那会把门禁变成抛硬币。
+    """
+    collection = ensureDocumentCollection()
+    collection.load()
+    return collection.query(
+        expr=f'document_id == "{documentId}"',
+        output_fields=[
+            "document_id",
+            "chunk_id",
+            "chunk_text",
+            "chunk_sequence",
+            "page_number",
+            "section_name",
+            "paragraph_no",
+        ],
+        limit=16384,
+    )
 
 
 def closeConnection() -> None:

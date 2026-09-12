@@ -1,0 +1,240 @@
+导入第 1 条失败: 知识条目 ID「PAGE-1-1-D5269194」已存在
+
+========================================================================
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+P1 去重真实数据验证 —— 目标库 qa_metadata_test@localhost:5433
+=
+
+------------------------------------------------------------------------
+[步骤 1] 生成真实源文件（中文制度汇编，约 75 个 ## 章节）
+------------------------------------------------------------------------
+      文件: /var/folders/44/nq276cxd4rbch6x8tb37cq3m0000gn/T/wiki_dedup_realdata_bxq5udf9/供应商管理制度汇编.md
+      行数: 724（要求 ≥ 300）
+      标题数: 75（要求 ≈ 75）
+      [PASS] 文件 ≥ 300 行（实际 724）
+      [PASS] 标题数 = 75（实际 75）
+
+------------------------------------------------------------------------
+[步骤 2] 真实 HTTP 导入 ×8（preview → execute，autoClassify=false）
+------------------------------------------------------------------------
+      [PASS] preview.total = 75
+      [PASS] preview 标题与本脚本切分一致
+      导入第 1 次: status=SUCCEEDED success=75 skipped=0 failed=0
+      [PASS] 第 1 次 successPages = 75（实际 75）
+      [PASS] 第 1 次 skippedPages = 0（实际 0）
+      [PASS] 第 1 次 failedPages = 0（实际 0）
+      [PASS] 第 1 次落库 pageIds = 75（实际 75）
+      导入第 2 次: status=SUCCEEDED success=0 skipped=75 failed=0
+      [PASS] 第 2 次 successPages = 0（实际 0）
+      [PASS] 第 2 次 skippedPages = 75（实际 75）
+      [PASS] 第 2 次 failedPages = 0（实际 0）
+      导入第 3 次: status=SUCCEEDED success=0 skipped=75 failed=0
+      [PASS] 第 3 次 successPages = 0（实际 0）
+      [PASS] 第 3 次 skippedPages = 75（实际 75）
+      [PASS] 第 3 次 failedPages = 0（实际 0）
+      导入第 4 次: status=SUCCEEDED success=0 skipped=75 failed=0
+      [PASS] 第 4 次 successPages = 0（实际 0）
+      [PASS] 第 4 次 skippedPages = 75（实际 75）
+      [PASS] 第 4 次 failedPages = 0（实际 0）
+      导入第 5 次: status=SUCCEEDED success=0 skipped=75 failed=0
+      [PASS] 第 5 次 successPages = 0（实际 0）
+      [PASS] 第 5 次 skippedPages = 75（实际 75）
+      [PASS] 第 5 次 failedPages = 0（实际 0）
+      导入第 6 次: status=SUCCEEDED success=0 skipped=75 failed=0
+      [PASS] 第 6 次 successPages = 0（实际 0）
+      [PASS] 第 6 次 skippedPages = 75（实际 75）
+      [PASS] 第 6 次 failedPages = 0（实际 0）
+      导入第 7 次: status=SUCCEEDED success=0 skipped=75 failed=0
+      [PASS] 第 7 次 successPages = 0（实际 0）
+      [PASS] 第 7 次 skippedPages = 75（实际 75）
+      [PASS] 第 7 次 failedPages = 0（实际 0）
+      导入第 8 次: status=SUCCEEDED success=0 skipped=75 failed=0
+      [PASS] 第 8 次 successPages = 0（实际 0）
+      [PASS] 第 8 次 skippedPages = 75（实际 75）
+      [PASS] 第 8 次 failedPages = 0（实际 0）
+
+------------------------------------------------------------------------
+[步骤 3] 直接真实 PG 查询（旧实现会得到 600 行）
+------------------------------------------------------------------------
+      SQL: SELECT count(*) FROM wiki_page
+      SQL: SELECT count(DISTINCT title) FROM wiki_page
+      全局上下文（含外来行，不作断言）：total=75 distinct_title=75
+      SQL: SELECT count(*) FROM wiki_page WHERE page_id = ANY(:ids)
+      SQL: SELECT count(DISTINCT title) FROM wiki_page WHERE page_id = ANY(:ids)
+      SQL: SELECT count(*) FROM wiki_page WHERE page_id = ANY(:ids) AND content_hash IS NULL
+      [PASS] 本脚本拥有行数 = 75（实际 75）
+      [PASS] 本脚本拥有行 distinct title = 75（实际 75）
+      [PASS] 本脚本拥有行 content_hash 为 NULL 数 = 0（实际 0）
+
+------------------------------------------------------------------------
+[步骤 4] 真冲突：同 page_id、内容不同 → 计失败（不被误判成重跑）
+------------------------------------------------------------------------
+      [PASS] PATCH 后 page_id 不变
+      SQL: SELECT content_hash FROM wiki_page WHERE page_id = :pid
+      [PASS] PATCH 后 content_hash 已重算（与 contentHashOf 同口径）
+      旧正文再导入: status=FAILED failed=1 skipped=0
+      [PASS] failedPages = 1（实际 1）
+      [PASS] skippedPages = 0（实际 0）
+      [PASS] status = FAILED（实际 FAILED）
+
+------------------------------------------------------------------------
+[步骤 5] 幂等重放（改后）：同 page_id、同内容 → 跳过
+------------------------------------------------------------------------
+      新正文再导入: status=SUCCEEDED failed=0 skipped=1
+      [PASS] skippedPages = 1（实际 1）
+      [PASS] failedPages = 0（实际 0）
+
+------------------------------------------------------------------------
+[步骤 6] 台账无关性：DELETE FROM wiki_import_task 后重放
+------------------------------------------------------------------------
+      SQL: DELETE FROM wiki_import_task
+      删台账后重放: success=0 skipped=75 failed=0
+      [PASS] skippedPages = 75（实际 75）
+      [PASS] successPages = 0（实际 0）
+      SQL: SELECT count(*) FROM wiki_page
+      全局上下文（含外来行，不作断言）：total=75
+      SQL: SELECT count(*) FROM wiki_page WHERE page_id = ANY(:ids)
+      [PASS] 删台账后本脚本拥有行数仍 = 75（实际 75）
+
+REALDATA RESULT: PASS

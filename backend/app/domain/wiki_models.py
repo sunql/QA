@@ -113,6 +113,7 @@ class WikiPage(Base, TimestampMixin):
         UniqueConstraint("page_id", name="uq_wiki_page_page_id"),
         Index("ix_wiki_page_dimension_status", "dimension", "status"),
         Index("ix_wiki_page_structure_stage", "structure_stage"),
+        Index("ix_wiki_page_content_hash", "content_hash"),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)

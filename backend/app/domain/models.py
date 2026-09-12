@@ -1272,6 +1272,11 @@ class DocumentCatalog(Base, TimestampMixin):
     """
 
     __tablename__ = "document_catalog"
+    __table_args__ = (
+        # 0061 迁移建的是 CREATE UNIQUE INDEX（非唯一约束），故用 Index(unique=True)
+        # 而非 UniqueConstraint —— 保持 ORM 与迁移生成的 DDL 形状一致。
+        Index("uq_document_catalog_content_hash", "content_hash", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     document_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)

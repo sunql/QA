@@ -467,6 +467,17 @@ MSG_GOVERNANCE_KPI_NOT_FOUND = "KPI Catalog id={id} 不存在"
 
 MSG_DOCUMENT_NOT_FOUND = "文档 id={id} 不存在"
 MSG_DOCUMENT_DUPLICATE = "文档编号「{document_id}」已存在"
+# content_hash 唯一索引（uq_document_catalog_content_hash）冲突：同一份文件已入库。
+# 与 MSG_DOCUMENT_DUPLICATE 刻意分开 —— 后者是「编号重复」，前者是「内容重复」，
+# 处置动作不同（前者换编号，后者换文件 / 别再传同一份）。
+MSG_DOCUMENT_CONTENT_DUPLICATE = (
+    "文档内容重复：content_hash 命中唯一索引 uq_document_catalog_content_hash，"
+    "同一文件已入库，请勿重复上传"
+)
+MSG_DOCUMENT_CONTENT_EXISTS = (
+    "文档内容重复：该文件已作为文档「{document_id}」入库"
+    "（唯一索引 uq_document_catalog_content_hash），请勿重复上传同一文件"
+)
 MSG_DOCUMENT_REL_NOT_FOUND = "文档关联 id={id} 不存在"
 MSG_DOCUMENT_REL_EXISTS = (
     "文档「{documentId}」与实体 {entityType}/{entityKey} 的关联已存在"

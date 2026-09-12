@@ -17,6 +17,7 @@ from app.dependencies import CurrentUser, getDb
 from app.domain.enums import DocumentSecurityLevel
 from app.domain.schemas import DocumentCreate, DocumentUpdate
 from app.domain.exceptions import ConflictError
+from app.services.messages_zh import MSG_DOCUMENT_CONTENT_EXISTS
 from app.services.document_parser import DocumentParserError, parse_document
 from app.services.chunk_splitter import Chunk, split_by_paragraphs
 from app.services.document_service import DocumentService
@@ -117,8 +118,21 @@ class RagService:
         if not blocks:
             raise RagError("文档内容为空，无法入库")
 
-        # 2. 源文件留存（内容寻址；失败必须显式，不得静默跳过）
+        # 1.5 去重预检：content_hash 命中唯一索引 → 同一份文件已入库。
+        # 必须在 MinIO（putSourceObject）与 Milvus（insertDocumentChunks）
+        # 写入**之前**拦下 —— 否则源对象与 chunk 向量已落盘，但
+        # document_catalog 插入被唯一索引拒绝，留下永久孤儿（且 409 里
+        # 的 DOC-<uuid> 从没进过 catalog）。此处报**已存在**的那个文档编号。
         contentHash = hashContent(content)
+        existing = await self._doc_svc.findByContentHash(session, contentHash)
+        if existing is not None:
+            raise ConflictError(
+                MSG_DOCUMENT_CONTENT_EXISTS.format(
+                    document_id=existing.document_id
+                )
+            )
+
+        # 2. 源文件留存（内容寻址；失败必须显式，不得静默跳过）
         objectName = buildSourceObjectName(contentHash, filename)
         try:
             storageUrl = putSourceObject(objectName, content, mime_type)

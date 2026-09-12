@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.dependencies import CurrentUser
+from app.domain.exceptions import ConflictError
 from app.infrastructure.object_storage import ObjectStorageError
 from app.services.document_parser import TextBlock
 from app.services.rag_service import RagError, RagService
@@ -241,6 +242,7 @@ class TestRagServiceIngest:
         """返回一个正确配置 mock doc_svc（createDocument 幂等）。"""
         svc = MagicMock()
         svc.listDocuments = AsyncMock(return_value=[])
+        svc.findByContentHash = AsyncMock(return_value=None)
         svc.createDocument = AsyncMock()
         svc.updateDocument = AsyncMock()
         return svc
@@ -474,6 +476,45 @@ class TestRagServiceIngest:
                 )
 
         # 源文件存不下就不该往 Milvus 写
+        mock_insert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ingest_content_hash_conflict_short_circuits_before_writes(self) -> None:
+        """content_hash 预检命中 → 在 MinIO/Milvus 写入前抛 ConflictError，报已存在文档编号。
+
+        契约 — 同一份文件的重复上传必须报**已存在**的那个 document_id，
+        而不是新造一个 DOC-<uuid>；且源对象 / chunk 向量一个都不该落盘
+        （否则留下孤儿）。
+        """
+        # Arrange
+        mock_session = MagicMock()
+        existing = MagicMock(document_id="DOC-EXIST-001")
+
+        # Act / Assert
+        with patch(
+            "app.services.rag_service.parse_document",
+            new_callable=AsyncMock,
+            return_value=[TextBlock(text="内容", page_number=1, section_name=None, paragraph_no=1)],
+        ), patch(
+            "app.services.rag_service.putSourceObject",
+        ) as mock_put, patch(
+            "app.services.rag_service.insertDocumentChunks",
+        ) as mock_insert:
+            svc = RagService()
+            docSvc = self._mock_doc_svc_with_create()
+            docSvc.findByContentHash = AsyncMock(return_value=existing)
+            svc._doc_svc = docSvc
+            with pytest.raises(ConflictError, match="DOC-EXIST-001"):
+                await svc.ingestDocument(
+                    mock_session,
+                    content=b"dummy",
+                    filename="test.txt",
+                    mime_type="text/plain",
+                    actor=CurrentUser(userId="test-user"),
+                )
+
+        # 冲突在写入前拦截：MinIO / Milvus 一个都不该碰
+        mock_put.assert_not_called()
         mock_insert.assert_not_called()
 
     @pytest.mark.asyncio

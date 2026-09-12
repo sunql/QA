@@ -206,6 +206,12 @@ class WikiImportTask(Base):
     failed_pages: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # P1 起：重复项（page_id 撞车且 content_hash 相同）计入跳过而非失败。
+    # 与 success_pages 分开记，是因为「这次跑了但一条都没新建」与「这次确实
+    # 新建了 N 条」是两种运维结论，混进一个计数就分不出来。
+    skipped_pages: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     total_cost_usd: Mapped[Decimal] = mapped_column(
         Numeric(12, 6), nullable=False, default=Decimal("0"), server_default="0"
     )

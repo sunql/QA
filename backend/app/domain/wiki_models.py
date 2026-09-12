@@ -120,6 +120,10 @@ class WikiPage(Base, TimestampMixin):
     page_id: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # 正文的 sha256（小写 64 位十六进制），与 document_catalog.content_hash 同口径。
+    # 可空：0061 之前的历史行没有值，且 P1 不做回填 —— 代码必须在 NULL 时退化成
+    # 「不可判定」而不是当成「内容相同」，见 wiki_import_service._importOne。
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # 机制 1 产物：生效维度（默认取 auto_classification 建议，可人工覆盖）
     dimension: Mapped[str | None] = mapped_column(String(30), nullable=True)

@@ -162,6 +162,24 @@ class LLMUnavailableError(DomainError):
     """LLM 服务不可用（spec §9.2 + §7.3）。"""
 
 
+# ---------------------------------------------------------------------------
+# feat-wiki-dedup (P1): 内容重复
+# ---------------------------------------------------------------------------
+
+
+class DuplicatePageError(ConflictError):
+    """同 ``page_id`` 且 ``content_hash`` 相同 —— 确证是同一份知识的重跑。
+
+    刻意继承 ``ConflictError``：如果它意外逃到 API 层，``statusForError`` 仍给出
+    409（语义正确）。但**导入路径必须单独 catch 它**（catch 在 ``ConflictError``
+    之前），否则它会被当成失败计数 —— 那正是 P1 要修的分类学错误。
+    """
+
+    def __init__(self, message: str, *, page_id: str) -> None:
+        super().__init__(message)
+        self.page_id = page_id
+
+
 def statusForError(exc: DomainError) -> int:
     """领域异常 → HTTP 状态码（**唯一**映射源）。
 

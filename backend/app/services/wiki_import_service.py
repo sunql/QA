@@ -47,6 +47,7 @@ from app.dependencies import CurrentUser
 from app.domain.exceptions import (
     ConflictError,
     DomainError,
+    DuplicatePageError,
     ValidationError,
 )
 from app.domain.models import LlmConfig
@@ -77,9 +78,11 @@ from app.services.messages_zh import (
     MSG_WIKI_IMPORT_SOURCE_TYPE_INVALID,
     MSG_WIKI_IMPORT_TASK_TYPE_INVALID,
     MSG_WIKI_PAGE_DUPLICATE,
+    MSG_WIKI_PAGE_DUPLICATE_SKIPPED,
 )
 from app.services.wiki_page_service import (
     WikiPageService,
+    contentHashOf,
     generatePageId,
     sanitizePageId,
 )
@@ -352,6 +355,7 @@ class WikiImportService:
 
         pageIds: list[str] = []
         failedPages = 0
+        skippedPages = 0
         classifiedPages = 0
 
         try:
@@ -367,10 +371,24 @@ class WikiImportService:
                             invoker=invoker,
                             createdByUserId=createdByUserId,
                         )
+                except DuplicatePageError as e:
+                    # 重复 ≠ 失败（P1，spec §5.4）：同一份知识重跑是幂等成功，
+                    # 记进 skipped_pages。**必须排在 ConflictError 之前捕获** ——
+                    # 它是 ConflictError 的子类，顺序反了就会走成失败计数，
+                    # 失败数依旧虚高，等于没修。
+                    logger.info(
+                        "导入第 %d 条为重复内容，跳过: %s",
+                        len(pageIds) + skippedPages + failedPages + 1,
+                        e,
+                    )
+                    skippedPages += 1
+                    continue
                 except (ConflictError, ValidationError) as e:
                     # 单条脏数据不毁整批：记失败、继续
                     logger.warning(
-                        "导入第 %d 条失败: %s", len(pageIds) + failedPages + 1, e
+                        "导入第 %d 条失败: %s",
+                        len(pageIds) + skippedPages + failedPages + 1,
+                        e,
                     )
                     failedPages += 1
                     continue
@@ -385,12 +403,18 @@ class WikiImportService:
             # 的僵尸任务（用户看到 RUNNING，实际早就没人跑了）。
             logger.exception("导入任务 %s 异常中止", task.id)
             await self._markFailedBestEffort(
-                session, task, cause=e, pageIds=pageIds, failedPages=failedPages
+                session,
+                task,
+                cause=e,
+                pageIds=pageIds,
+                skippedPages=skippedPages,
+                failedPages=failedPages,
             )
             raise
 
         task.page_ids = pageIds
         task.success_pages = len(pageIds)
+        task.skipped_pages = skippedPages
         task.failed_pages = failedPages
         # 成本以 wiki_token_usage 台账为准（SUM），不在 Python 里累加：
         # 「调用成功但输出解析失败」这类路径也会留下计量行，靠累加会漏账。
@@ -411,9 +435,11 @@ class WikiImportService:
             task.error_message = MSG_WIKI_IMPORT_CLASSIFY_INCOMPLETE.format(
                 count=classificationGap
             )
+        # skipped 计入「有产出」：整批全是重跑的任务（pageIds 为空）不该落成
+        # FAILED —— 那是旧分类学下的假失败，P1 要修的正是它。
         if failedPages == 0 and classificationGap == 0:
             task.status = "SUCCEEDED"
-        elif pageIds:
+        elif pageIds or skippedPages:
             task.status = "PARTIAL"
         else:
             task.status = "FAILED"
@@ -423,10 +449,11 @@ class WikiImportService:
         await session.refresh(task)
 
         logger.info(
-            "导入任务 %s 完成: status=%s 成功=%d 失败=%d 分类成功=%d 成本=%s",
+            "导入任务 %s 完成: status=%s 新建=%d 跳过=%d 失败=%d 分类成功=%d 成本=%s",
             task.id,
             task.status,
             task.success_pages,
+            task.skipped_pages,
             task.failed_pages,
             classifiedPages,
             task.total_cost_usd,
@@ -440,6 +467,7 @@ class WikiImportService:
         *,
         cause: Exception,
         pageIds: list[str],
+        skippedPages: int,
         failedPages: int,
     ) -> None:
         """尽力把任务标记成 FAILED 落库；失败只记日志，绝不掩盖原始异常。
@@ -463,6 +491,7 @@ class WikiImportService:
             # 像一条都没进去，实际库里躺着一半。
             task.page_ids = pageIds
             task.success_pages = len(pageIds)
+            task.skipped_pages = skippedPages
             task.failed_pages = failedPages
             task.finished_time = _now()
             session.add(task)
@@ -485,18 +514,43 @@ class WikiImportService:
 
         先查 page_id 冲突**再**调模型：撞号是纯本地就能判定的错误，
         不该白烧一次 LLM 调用。
+
+        撞号分两种（P1，spec §5.2 + §5.4）：
+        - **同 content_hash** → ``DuplicatePageError``，导入层计「跳过」。这是
+          同一份知识的重跑，跳过它才是幂等。
+        - **不同 content_hash，或任一侧为 NULL**（0061 之前的历史行）→
+          ``ConflictError``，导入层计「失败」。无法证明是重跑就不能静默丢弃：
+          ``page_id`` 后缀只有 32 bit，截断碰撞会把另一份文档悄悄吃掉。
         """
         title = draft.title
         content = draft.content
+        contentHash = contentHashOf(content)
+        # 台账里的 sourceRef 是归一化输入：None → ""。它是身份的一部分，故必须
+        # 在**同一批导入内稳定** —— 重跑同一份文件时台账记的是同一个来源。
+        sourceRef = task.source_ref or ""
         # 显式 page_id 走与生成 ID 同一套字符集收敛（斜杠会让条目在
         # GET /wiki/pages/{pageId} 里不可达）
         rawPageId = draft.page_id
-        pageId = sanitizePageId(rawPageId) if rawPageId else generatePageId(title)
-
-        existing = await session.execute(
-            select(WikiPage.id).where(WikiPage.page_id == pageId)
+        pageId = (
+            sanitizePageId(rawPageId)
+            if rawPageId
+            else generatePageId(title, sourceRef, content)
         )
-        if existing.scalar_one_or_none() is not None:
+
+        existing = (
+            await session.execute(
+                select(WikiPage.content_hash).where(WikiPage.page_id == pageId)
+            )
+        ).first()
+        if existing is not None:
+            # 注意用 ``is not None`` 判行存在、用值判内容：content_hash 可空，
+            # 「行存在但哈希为 NULL」与「行不存在」在标量结果里都是 None。
+            existingHash = existing[0]
+            if existingHash is not None and existingHash == contentHash:
+                raise DuplicatePageError(
+                    MSG_WIKI_PAGE_DUPLICATE_SKIPPED.format(pageId=pageId),
+                    page_id=pageId,
+                )
             raise ConflictError(MSG_WIKI_PAGE_DUPLICATE.format(pageId=pageId))
 
         suggestion = None
@@ -508,6 +562,7 @@ class WikiImportService:
             page_id=pageId,
             title=title,
             content=content,
+            content_hash=contentHash,
             dimension=suggestion.primary if suggestion else None,
             auto_classification=suggestion.toDict() if suggestion else None,
             status="DRAFT",
@@ -524,6 +579,8 @@ class WikiImportService:
             # 「先查后插」挡不住两个并发请求同时通过检查；第二个 INSERT 会
             # 以用户主键冲突出现在 flush 时。转成 ConflictError 让它走
             # 单条失败的分支（PARTIAL），而不是冒成 500 毁掉整批。
+            # 这里**不判重复**：竞态下读到的既有行不可信，而重复判定宁可漏
+            # （记成失败，人来处置）也不能错（静默丢一份内容不同的文档）。
             raise ConflictError(MSG_WIKI_PAGE_DUPLICATE.format(pageId=pageId)) from e
         return page, suggestion is not None
 

@@ -798,10 +798,14 @@ async def test_execute_invalid_dimension_discards_suggestion(
     assert page.auto_classification is None
 
 
-async def test_execute_duplicate_page_id_yields_partial(
+async def test_execute_duplicate_page_id_same_content_is_skipped(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:
-    """一条 pageId 撞号不影响其余：任务记 PARTIAL。"""
+    """显式 pageId 撞号且正文一致 → 跳过（不是失败），其余条目照常入库。
+
+    语义变更点（feat-wiki-dedup P1，spec §5.4）：旧实现把它记成 failedPages=1
+    + PARTIAL，于是「同一份文件重跑」在运维眼里是失败。
+    """
     modelId = await _seedModel(dbSession)
     # 先占位
     await client.post(
@@ -822,9 +826,10 @@ async def test_execute_duplicate_page_id_yields_partial(
 
     assert resp.status_code == 201
     task = resp.json()
-    assert task["status"] == "PARTIAL"
+    assert task["status"] == "SUCCEEDED"
     assert task["successPages"] == 1
-    assert task["failedPages"] == 1
+    assert task["skippedPages"] == 1
+    assert task["failedPages"] == 0
 
 
 async def test_execute_unexpected_error_marks_task_failed(
@@ -861,6 +866,12 @@ async def test_execute_unexpected_error_marks_task_failed(
 async def test_execute_all_failed_marks_failed(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:
+    """全部条目都是「同 ID 不同内容」的冲突 → FAILED + 错误文案。
+
+    正文用 ``y``（已存在的占位行是 ``x``）：P1 起「同 ID 同内容」是跳过而非
+    失败，只有**内容不可判定为重复**的撞车才计失败 —— 那正是一条都不该放过
+    的人工处置场景。
+    """
     modelId = await _seedModel(dbSession)
     await client.post(
         _PAGES, json={"pageId": "DUP-ALL", "title": "已存在", "content": "x"}
@@ -870,13 +881,15 @@ async def test_execute_all_failed_marks_failed(
         resp = await client.post(
             f"{_BASE}/execute",
             json={
-                "drafts": [{"pageId": "DUP-ALL", "title": "撞号", "content": "x"}],
+                "drafts": [{"pageId": "DUP-ALL", "title": "撞号", "content": "y"}],
                 "modelId": modelId,
             },
         )
 
     task = resp.json()
     assert task["status"] == "FAILED"
+    assert task["skippedPages"] == 0
+    assert task["failedPages"] == 1
     assert task["errorMessage"]
 
 

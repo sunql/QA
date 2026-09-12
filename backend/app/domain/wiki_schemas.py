@@ -367,6 +367,9 @@ class WikiImportTaskRead(CamelModel):
     page_ids: list[str] | None = None
     total_pages: int
     success_pages: int
+    # P1 起：重复项（同 ID 同内容）计入跳过而非失败。与 success 分开下发，
+    # 否则「跑了但一条都没新建」看起来像任务没干活。
+    skipped_pages: int = 0
     failed_pages: int
     total_cost_usd: Decimal
     error_message: str | None = None

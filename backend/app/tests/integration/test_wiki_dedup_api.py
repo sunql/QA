@@ -215,3 +215,130 @@ async def test_patch_content_updates_hash_but_keeps_page_id(
     assert stored == (
         "87fa50ec95c812008c1482260d4ab13894e579bdeeee3a675d663766169a8914"
     )
+
+
+# ---------------------------------------------------------------------------
+# 导入：重复 → 跳过
+# ---------------------------------------------------------------------------
+
+
+async def _execute(
+    client: AsyncClient, drafts: list[dict[str, Any]], *, sourceRef: str
+) -> dict[str, Any]:
+    """跑一次导入（关闭自动分类 → 不调 LLM，把断言集中在去重本身）。"""
+    resp = await client.post(
+        f"{_IMPORT}/execute",
+        json={
+            "drafts": drafts,
+            "sourceRef": sourceRef,
+            "autoClassify": False,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+async def test_replay_same_file_yields_one_row_and_all_skipped(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """验收信号（spec §十 P1）：同一份文件导入两次 → wiki_page 恰 N 行。
+
+    第二次不是「失败」而是「跳过」：运维看到的失败数不该因为重跑而虚高
+    （spec §5.4）。
+    """
+    drafts = [
+        {"title": "甲", "content": "内容甲"},
+        {"title": "乙", "content": "内容乙"},
+    ]
+
+    first = await _execute(client, drafts, sourceRef="policy-v1.md")
+    assert first["successPages"] == 2
+    assert first["skippedPages"] == 0
+    assert first["failedPages"] == 0
+    assert first["status"] == "SUCCEEDED"
+    assert await _countPages(dbSession) == 2
+
+    second = await _execute(client, drafts, sourceRef="policy-v1.md")
+
+    assert second["successPages"] == 0
+    assert second["skippedPages"] == 2
+    assert second["failedPages"] == 0
+    assert second["status"] == "SUCCEEDED"
+    assert second["pageIds"] == []  # 跳过路径不伪造台账条目
+    assert await _countPages(dbSession) == 2, "重跑产生了副本"
+
+    row = await _taskRow(dbSession, second["id"])
+    assert row["skipped_pages"] == 2
+    assert row["success_pages"] == 0
+    assert row["failed_pages"] == 0
+    assert row["error_message"] is None
+
+
+async def test_replay_id_is_content_derived_not_random(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """page_id 是 (sourceRef, title, content) 的函数 —— 重跑算出同一个 ID。
+
+    这条把「为什么重复项落不了库」的机制本身写进断言：不是靠读台账跳过，
+    而是靠 uq_wiki_page_page_id 撞车。
+    """
+    await _execute(client, [{"title": "甲", "content": "内容甲"}], sourceRef="policy-v1.md")
+    ids = list(
+        (await dbSession.execute(text("SELECT page_id FROM wiki_page"))).scalars().all()
+    )
+    assert ids == ["PAGE-UNTITLED-840CCA89"]
+
+
+async def test_same_title_different_content_creates_second_entry(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """同标题不同内容**不是**重复：各自一条（旧实现下两者都表现为 ID 冲突，无法区分）。"""
+    await _execute(client, [{"title": "条款", "content": "甲"}], sourceRef="v.md")
+    second = await _execute(client, [{"title": "条款", "content": "乙"}], sourceRef="v.md")
+
+    assert second["successPages"] == 1, "新内容被当成了重复而跳过"
+    assert second["skippedPages"] == 0
+    assert await _countPages(dbSession) == 2
+
+    hashes = list(
+        (await dbSession.execute(text("SELECT content_hash FROM wiki_page"))).scalars().all()
+    )
+    assert len(set(hashes)) == 2, "两条的 content_hash 必须不同"
+
+
+async def test_explicit_page_id_with_different_content_still_fails(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """显式 pageId 撞车但内容不同 → 仍是冲突（计失败），不得静默跳过。
+
+    这是 D1-1 的守门测试：`[:8]` 只有 32 bit，把「ID 撞车」当作「重复」会
+    静默丢掉另一份文档。内容不可判定时宁可报错。
+    """
+    await _execute(
+        client, [{"pageId": "MANUAL-001", "title": "甲", "content": "x"}], sourceRef="m.md"
+    )
+    second = await _execute(
+        client, [{"pageId": "MANUAL-001", "title": "甲", "content": "y"}], sourceRef="m.md"
+    )
+
+    assert second["skippedPages"] == 0
+    assert second["failedPages"] == 1
+    assert second["status"] == "FAILED"
+    assert second["errorMessage"]
+
+
+async def test_explicit_page_id_with_same_content_is_skipped(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """显式 pageId 撞车且内容一致 → 确证重跑 → 跳过。"""
+    await _execute(
+        client, [{"pageId": "MANUAL-002", "title": "甲", "content": "x"}], sourceRef="m.md"
+    )
+    second = await _execute(
+        client, [{"pageId": "MANUAL-002", "title": "甲", "content": "x"}], sourceRef="m.md"
+    )
+
+    assert second["skippedPages"] == 1
+    assert second["failedPages"] == 0
+    assert second["status"] == "SUCCEEDED"
+    assert await _countPages(dbSession) == 1

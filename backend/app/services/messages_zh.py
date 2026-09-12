@@ -305,6 +305,7 @@ MSG_TERM_DICT_NOT_FOUND = "术语 id={id} 不存在"
 # ---- Wiki 知识管理（feat-wiki-knowledge）----
 MSG_WIKI_PAGE_NOT_FOUND = "知识条目「{pageId}」不存在"
 MSG_WIKI_PAGE_DUPLICATE = "知识条目 ID「{pageId}」已存在"
+MSG_WIKI_PAGE_DUPLICATE_SKIPPED = "知识条目 ID「{pageId}」已存在且正文一致，本次导入跳过"
 MSG_WIKI_PAGE_DIMENSION_INVALID = "知识维度「{dimension}」不合法"
 MSG_WIKI_PAGE_STAGE_INVALID = "知识结构阶段「{stage}」不合法"
 MSG_WIKI_PAGE_STATUS_INVALID = "知识条目状态「{status}」不合法"

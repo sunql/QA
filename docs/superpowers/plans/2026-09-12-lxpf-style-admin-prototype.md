@@ -148,6 +148,13 @@ git commit -m "feat(assets): base reset and global styles"
 **Files:**
 - Create: `~/Projects/lxpf-style-admin-prototype/assets/components.css`
 
+**Files:**
+- Create: `~/Projects/lxpf-style-admin-prototype/assets/components.css`（组件 1-10）
+- Create: `~/Projects/lxpf-style-admin-prototype/assets/components-extra.css`（组件 11-20）
+- Modify: `~/Projects/lxpf-style-admin-prototype/index.html`（追加 components-extra.css link）
+
+> **2026-09-12 修订**：20 组件超 600 行上限，经用户裁决拆为 2 文件。CSS 加载顺序：`base → tokens → components → components-extra → layout-*`
+
 - [ ] Step 1：写 20 个组件样式
 
 按 spec §4 表格实现，组件顺序：

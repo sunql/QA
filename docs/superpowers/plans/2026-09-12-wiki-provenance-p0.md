@@ -219,13 +219,25 @@ def _makePdf(pageTexts: list[str]) -> bytes:
     不用手搓 PDF 字节：xref 偏移量极易写错，而且写错之后 pypdf 读到的是
     **0 页**而非报错 —— 测试会以「空结果」的形式静默通过。reportlab 是
     pyproject.toml 里已声明的正式依赖。
+
+    ⚠️ **必须显式指定 CJK 字体。** reportlab 默认的 Helvetica 编不了中文，
+    它不报错，而是把每个汉字替换成一个豆腐块 —— pypdf 抽出来是 `■■■■■`。
+    于是「夹具画中文、断言比中文」两个动作互相矛盾，任何 `_parsePdf` 实现
+    都过不了这条用例，而失败信息还完全指向不到字体上。
+    `STSong-Light` 是 reportlab 自带的 CID 字体，不需要额外依赖或字体文件。
     """
     from reportlab.lib.pagesizes import A4
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
     from reportlab.pdfgen import canvas
+
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
 
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     for text in pageTexts:
+        # 每页都要重设：showPage() 会重置字体状态，只在循环外设一次不够。
+        c.setFont("STSong-Light", 14)
         c.drawString(72, 720, text)
         c.showPage()
     c.save()
@@ -284,7 +296,7 @@ def _makeDocx(paragraphs: list[str], headingIndexes: set[int] | None = None) -> 
 - [ ] **Step 2: 运行测试确认失败**
 
 ```bash
-cd backend && .venv/bin/pytest app/tests/unit/test_document_parser.py -q
+cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' .venv/bin/pytest app/tests/unit/test_document_parser.py -q
 ```
 
 Expected: FAIL — `ImportError: cannot import name 'TextBlock' from 'app.services.document_parser'`
@@ -489,7 +501,7 @@ def _parseDocx(content: bytes) -> list[TextBlock]:
 - [ ] **Step 4: 运行测试确认通过**
 
 ```bash
-cd backend && .venv/bin/pytest app/tests/unit/test_document_parser.py -q
+cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' .venv/bin/pytest app/tests/unit/test_document_parser.py -q
 ```
 
 Expected: PASS（12 个用例）
@@ -624,7 +636,7 @@ class TestChunkToDict:
 - [ ] **Step 2: 运行测试确认失败**
 
 ```bash
-cd backend && .venv/bin/pytest app/tests/unit/test_chunk_splitter.py -q
+cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' .venv/bin/pytest app/tests/unit/test_chunk_splitter.py -q
 ```
 
 Expected: FAIL — `AttributeError: 'list' object has no attribute 'split'`（旧实现 `text.split("\n")` 收到列表）
@@ -753,7 +765,7 @@ def _make_chunk(blocks: list[TextBlock], seq: int) -> Chunk:
 - [ ] **Step 4: 运行测试确认通过**
 
 ```bash
-cd backend && .venv/bin/pytest app/tests/unit/test_chunk_splitter.py -q
+cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' .venv/bin/pytest app/tests/unit/test_chunk_splitter.py -q
 ```
 
 Expected: PASS（12 个用例）
@@ -1335,7 +1347,7 @@ class TestPutSourceObject:
 - [ ] **Step 2: 运行测试确认失败**
 
 ```bash
-cd backend && .venv/bin/pytest app/tests/unit/test_object_storage.py -q
+cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' .venv/bin/pytest app/tests/unit/test_object_storage.py -q
 ```
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.infrastructure.object_storage'`
@@ -1482,7 +1494,7 @@ def getSourceObject(objectName: str, bucket: str = DEFAULT_BUCKET) -> bytes:
 - [ ] **Step 4: 运行测试确认通过**
 
 ```bash
-cd backend && .venv/bin/pytest app/tests/unit/test_object_storage.py -q
+cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' .venv/bin/pytest app/tests/unit/test_object_storage.py -q
 ```
 
 Expected: PASS（9 个用例）
@@ -1959,13 +1971,13 @@ class TestRagUploadProvenance:
 - [ ] **Step 2: 运行测试确认失败**
 
 ```bash
-cd backend && .venv/bin/pytest app/tests/unit/test_rag_service.py -q
+cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' .venv/bin/pytest app/tests/unit/test_rag_service.py -q
 ```
 
 Expected: FAIL — `TypeError: object of type 'list' has no len()` / `AttributeError: 'list' object has no attribute 'strip'`
 
 ```bash
-cd backend && .venv/bin/pytest app/tests/integration/test_rag_ingest_provenance.py -q
+cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' .venv/bin/pytest app/tests/integration/test_rag_ingest_provenance.py -q
 ```
 
 Expected: FAIL — `assert 0 == 1`（`putSourceObject` 尚未被调用，源文件没留存）
@@ -2069,7 +2081,7 @@ Milvus 记录构造补齐定位符：
 - [ ] **Step 4: 运行测试确认通过**
 
 ```bash
-cd backend && .venv/bin/pytest app/tests/unit/test_rag_service.py app/tests/integration/test_rag_ingest_provenance.py app/tests/integration/test_rag_api.py -q
+cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' .venv/bin/pytest app/tests/unit/test_rag_service.py app/tests/integration/test_rag_ingest_provenance.py app/tests/integration/test_rag_api.py -q
 ```
 
 Expected: PASS（三条都要跑 —— 前两条是本任务的产出，`test_rag_api.py` 是确认 fixture 上移没打断既有用例）
@@ -2686,18 +2698,27 @@ async def _purgeGateCatalogRow(session) -> None:
 
 
 def _samplePdfBytes() -> bytes:
-    """用 reportlab 生成两页 PDF（与 test_document_parser 的 _make_pdf 同源）。
+    """用 reportlab 生成两页 PDF（与 test_document_parser 的 _makePdf 同源）。
 
     不用手搓 PDF 字节：xref 偏移量极易写错，而且写错之后 pypdf 读到的是
     **0 页**而非报错 —— 脚本会以「空结果」的形式静默通过。
     reportlab 是已声明依赖（`reportlab>=4.2.0`，实机 5.0.0，已验证可导入）。
+
+    ⚠️ CJK 字体必须显式指定：默认 Helvetica 编不了中文，reportlab 会静默
+    替换成豆腐块，抽出来是 `■■■■■`。`STSong-Light` 是自带的 CID 字体。
     """
     from reportlab.lib.pagesizes import A4
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
     from reportlab.pdfgen import canvas
+
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
 
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     for text in ("第一页：供应商准入需注册资本 >= 1000 万", "第二页：质量协议每年复核一次"):
+        # 每页都要重设：showPage() 会重置字体状态。
+        c.setFont("STSong-Light", 14)
         c.drawString(72, 720, text)
         c.showPage()
     c.save()

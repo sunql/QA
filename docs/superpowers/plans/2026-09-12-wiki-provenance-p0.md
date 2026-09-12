@@ -1279,9 +1279,12 @@ def buildSourceObjectName(contentHash: str, filename: str) -> str:
 
 
 def _getClient() -> Any:
-    """构造 MinIO 客户端。配置缺失即失败，不降级。"""
-    from minio import Minio
+    """构造 MinIO 客户端。配置缺失即失败，不降级。
 
+    先校验配置，再 import SDK：配置缺失是本模块**自己的**错误，不该被
+    SDK 未安装的 ``ModuleNotFoundError`` 抢在前面掩盖掉 —— 那会把
+    「没配 key」误报成「依赖没装」，排查方向完全错。
+    """
     endpoint = os.environ.get("MINIO_ENDPOINT")
     accessKey = os.environ.get("MINIO_ROOT_USER")
     secretKey = os.environ.get("MINIO_ROOT_PASSWORD")
@@ -1291,6 +1294,9 @@ def _getClient() -> Any:
         raise ObjectStorageError("MINIO_ROOT_USER 未配置")
     if not secretKey:
         raise ObjectStorageError("MINIO_ROOT_PASSWORD 未配置")
+
+    from minio import Minio
+
     return Minio(endpoint, access_key=accessKey, secret_key=secretKey, secure=False)
 
 
@@ -1364,7 +1370,12 @@ def getSourceObject(objectName: str, bucket: str = DEFAULT_BUCKET) -> bytes:
 cd backend && .venv/bin/pytest app/tests/unit/test_object_storage.py -q
 ```
 
-Expected: PASS（8 个用例）
+Expected: PASS（9 个用例）
+
+> 这 9 条单测**不需要 `minio` 已安装**：8 条不触碰 `_getClient`，第 9 条（`test_missing_config_raises`）
+> 走的是 `_getClient` 的配置校验分支，而该函数**先校验配置、后 import SDK**。所以 Step 4
+> 在加依赖（Step 5）之前就能全绿 —— `minio` 依赖是给真实数据脚本（Task 7）和运行时用的，
+> 不是给单测用的。（已实测：既无 `minio` 也全绿。）
 
 - [ ] **Step 5: 加依赖**
 
@@ -2207,6 +2218,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import sys
 
 from app.infrastructure.milvus_client import searchDocumentChunks
@@ -2259,15 +2271,27 @@ async def main() -> int:
 
 
 def _samplePdfBytes() -> bytes:
-    """与测试同源的最小带文本 PDF 构造（见 test_document_parser._make_pdf_with_text）。"""
-    raise NotImplementedError
+    """用 reportlab 生成两页 PDF（与 test_document_parser 的 _make_pdf 同源）。
+
+    不用手搓 PDF 字节：xref 偏移量极易写错，而且写错之后 pypdf 读到的是
+    **0 页**而非报错 —— 脚本会以「空结果」的形式静默通过。
+    reportlab 是已声明依赖（`reportlab>=4.2.0`，实机 5.0.0，已验证可导入）。
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    for text in ("第一页：供应商准入需注册资本 >= 1000 万", "第二页：质量协议每年复核一次"):
+        c.drawString(72, 720, text)
+        c.showPage()
+    c.save()
+    return buf.getvalue()
 
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
 ```
-
-> `_samplePdfBytes` 必须补全：直接从 `backend/app/tests/unit/test_document_parser.py` 的 `_make_pdf_with_text` 复制实现（同仓库内，允许重复——测试夹具跨目录 import 会引入不必要的耦合）。
 
 - [ ] **Step 2: 跑验证脚本**
 

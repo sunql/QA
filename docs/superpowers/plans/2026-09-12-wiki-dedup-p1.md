@@ -92,7 +92,14 @@ spec §5.4 只说「重复 → 成功但跳过」，没说怎么证明「这是�
 | `frontend/src/tests/AdminWikiImportPage.test.tsx` | 改 `:60-80`、`:125-140` | i18n mock 加 key + fixture 加 `skippedPages` |
 | `Harness/changes/feat-wiki-dedup/summary.md` | 新建 | SSOT 九段变更记录 |
 
-> 复用而非新建：`contentHashOf()` 与 P0 的 `document_catalog.content_hash` **同口径**（`sha256(utf-8).hexdigest()`，64 位小写十六进制）。P0 落地时直接 `from app.services.wiki_page_service import contentHashOf`，不要再写第二份摘要实现。
+> 复用而非新建：`contentHashOf()` 与 P0 的 `document_catalog.content_hash` **同口径**（`sha256(utf-8).hexdigest()`，64 位小写十六进制）。
+>
+> **先落地的一方负责收敛为一份实现**：P0 的 `app/infrastructure/object_storage.py` 提供
+> `hashContent(content: bytes) -> str`，与本计划的 `contentHashOf(content: str)` 逐字节等价
+> （`contentHashOf(t) == hashContent(t.encode("utf-8"))`）。收敛口径：以 `hashContent` 为唯一
+> 实现，`contentHashOf` 退化为 `return hashContent(content.encode("utf-8"))` 的薄包装
+> （或直接替换调用点）。**不要保留两份 `sha256` 实现** —— 两份迟早会在编码/大小写上漂移，
+> 而漂移了不会报错，只会让比对永远不等。两边可任意顺序落地，不互相阻塞。
 
 ---
 

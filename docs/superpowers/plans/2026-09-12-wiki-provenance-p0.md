@@ -492,7 +492,7 @@ def _parseDocx(content: bytes) -> list[TextBlock]:
 cd backend && .venv/bin/pytest app/tests/unit/test_document_parser.py -q
 ```
 
-Expected: PASS（11 个用例）
+Expected: PASS（12 个用例）
 
 - [ ] **Step 5: 提交**
 
@@ -627,7 +627,7 @@ class TestChunkToDict:
 cd backend && .venv/bin/pytest app/tests/unit/test_chunk_splitter.py -q
 ```
 
-Expected: FAIL — `TypeError: 'TextBlock' object is not subscriptable`（旧实现 `text.split("\n")` 收到列表）
+Expected: FAIL — `AttributeError: 'list' object has no attribute 'split'`（旧实现 `text.split("\n")` 收到列表）
 
 - [ ] **Step 3: 实现**
 
@@ -756,7 +756,7 @@ def _make_chunk(blocks: list[TextBlock], seq: int) -> Chunk:
 cd backend && .venv/bin/pytest app/tests/unit/test_chunk_splitter.py -q
 ```
 
-Expected: PASS（14 个用例）
+Expected: PASS（12 个用例）
 
 - [ ] **Step 5: 提交**
 
@@ -780,6 +780,8 @@ git commit -m "refactor(wiki): split_by_paragraphs 吃 TextBlock 并把定位符
   - `_documentFields()` 新增 3 个字段：`page_number` (INT64)、`section_name` (VARCHAR 200)、`paragraph_no` (INT64)
   - `insertDocumentChunks(records)` 接受并写入 `page_number` / `section_name` / `paragraph_no`
   - `searchDocumentChunks(..., output_fields=...)` 默认输出这 3 个字段
+  - `deleteDocumentChunks(documentId: str) -> None` —— 按 `document_id` 删除该文档的全部 chunk（供 Task 7 的门禁脚本自清，避免门禁每跑一次就给共享集合留一份垃圾）
+  - `queryDocumentChunks(documentId: str) -> list[dict]` —— 按 `document_id` 直查该文档的 chunk（不经向量检索），供 Task 7 校验定位符
 
 > **Milvus 标量字段不可为 NULL**（2.4.x 无 nullable 标量）。空值用哨兵：`page_number` / `paragraph_no` 用 `-1`，`section_name` 用 `""`。这是无损的——`-1` 不是合法页码/段号。
 >
@@ -811,8 +813,10 @@ import pytest
 
 from app.infrastructure.milvus_client import (
     _documentFields,
+    deleteDocumentChunks,
     ensureDocumentCollection,
     insertDocumentChunks,
+    queryDocumentChunks,
     searchDocumentChunks,
 )
 
@@ -879,6 +883,71 @@ class TestRoundTrip:
         assert hit["page_number"] == -1
         assert hit["section_name"] == ""
         assert hit["paragraph_no"] == -1
+
+
+    @pytest.mark.integration
+    def test_delete_document_chunks_scopes_to_one_document(self) -> None:
+        """按 document_id 删除只带走该文档的 chunk，不是清空集合。"""
+        ensureDocumentCollection()
+        insertDocumentChunks(
+            [
+                {
+                    "document_id": "DOC-P0-DEL",
+                    "chunk_id": "chunk-del-a",
+                    "chunk_text": "待删除",
+                    "chunk_sequence": 0,
+                    "page_number": 1,
+                    "section_name": "",
+                    "paragraph_no": 1,
+                    "embedding": [0.3] * 1024,
+                },
+                {
+                    "document_id": "DOC-P0-KEEP",
+                    "chunk_id": "chunk-del-b",
+                    "chunk_text": "不该被删",
+                    "chunk_sequence": 0,
+                    "page_number": 1,
+                    "section_name": "",
+                    "paragraph_no": 1,
+                    "embedding": [0.4] * 1024,
+                },
+            ]
+        )
+
+        deleteDocumentChunks("DOC-P0-DEL")
+
+        assert _findChunk("chunk-del-a", [0.3] * 1024) is None
+        assert _findChunk("chunk-del-b", [0.4] * 1024) is not None
+
+        # 收尾：本用例同样不该给共享集合留残留
+        deleteDocumentChunks("DOC-P0-KEEP")
+
+    @pytest.mark.integration
+    def test_query_document_chunks_returns_locators(self) -> None:
+        """按 document_id 直查（不经向量检索）也要能拿到定位符。"""
+        ensureDocumentCollection()
+        insertDocumentChunks(
+            [
+                {
+                    "document_id": "DOC-P0-QRY",
+                    "chunk_id": "chunk-qry",
+                    "chunk_text": "直查定位符",
+                    "chunk_sequence": 0,
+                    "page_number": 7,
+                    "section_name": "采购管理",
+                    "paragraph_no": 2,
+                    "embedding": [0.5] * 1024,
+                }
+            ]
+        )
+
+        rows = [r for r in queryDocumentChunks("DOC-P0-QRY") if r["chunk_id"] == "chunk-qry"]
+        assert len(rows) == 1
+        assert rows[0]["page_number"] == 7
+        assert rows[0]["section_name"] == "采购管理"
+        assert rows[0]["paragraph_no"] == 2
+
+        deleteDocumentChunks("DOC-P0-QRY")
 
 
 def _findChunk(chunkId: str, embedding: list[float]) -> dict | None:
@@ -1019,6 +1088,48 @@ def insertDocumentChunks(records: list[dict[str, Any]]) -> None:
         标量字段不支持 NULL），消费方需自行判断，不要直接展示 -1。
 ```
 
+同一文件里再加一个按文档删除的辅助函数（Task 7 的门禁脚本要用它自清）：
+
+```python
+def deleteDocumentChunks(documentId: str) -> None:
+    """删除指定 document_id 的全部 chunk。
+
+    表达式**必须**带 document_id 过滤：集合是跨调用方共享的，一个没有
+    过滤条件的 ``collection.delete("")`` 会把整个集合清空。
+    """
+    collection = ensureDocumentCollection()
+    collection.delete(f'document_id == "{documentId}"')
+    collection.flush()
+    logger.info("Deleted Milvus document chunks for document_id=%s", documentId)
+```
+
+还要一个**按 document_id 直查**的函数（Task 7 的门禁用它读回定位符）：
+
+```python
+def queryDocumentChunks(documentId: str) -> list[dict[str, Any]]:
+    """按 document_id 查出该文档的全部 chunk（不走向量检索）。
+
+    门禁脚本要检查的是「写进去的定位符对不对」，不是「检索得准不准」。
+    用 ``searchDocumentChunks`` 会因为集合跨调用方共享、topK 截断而漏掉
+    目标行 —— 那会把门禁变成抛硬币。
+    """
+    collection = ensureDocumentCollection()
+    collection.load()
+    return collection.query(
+        expr=f'document_id == "{documentId}"',
+        output_fields=[
+            "document_id",
+            "chunk_id",
+            "chunk_text",
+            "chunk_sequence",
+            "page_number",
+            "section_name",
+            "paragraph_no",
+        ],
+        limit=16384,
+    )
+```
+
 - [ ] **Step 6: 建重建脚本**
 
 新建 `backend/scripts/rebuild_document_collection.py`：
@@ -1089,7 +1200,7 @@ cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@loc
   .venv/bin/pytest app/tests/integration/test_milvus_document_fields.py -q
 ```
 
-Expected: 重建脚本输出「已重建集合」；测试 PASS（4 个用例）
+Expected: 重建脚本输出「已重建集合」；测试 PASS（6 个用例）
 
 - [ ] **Step 8: 提交**
 
@@ -1485,6 +1596,9 @@ git commit -m "feat(wiki): 独立 MinIO 对象存储留存知识源文件 + 备�
 **Files:**
 - Modify: `backend/app/services/rag_service.py:94-180`
 - Test: `backend/app/tests/unit/test_rag_service.py`
+- Create: `backend/app/tests/integration/test_rag_ingest_provenance.py`
+- Modify: `backend/app/tests/integration/conftest.py`（上移 `mockEmbeddingService`）
+- Modify: `backend/app/tests/integration/test_rag_api.py`（改为共用 conftest fixture）
 
 **Interfaces:**
 - Consumes: `TextBlock` / `split_by_paragraphs(list[TextBlock])`（Task 1/2）、`milvus insertDocumentChunks` 新字段（Task 3）、`object_storage`（Task 4）
@@ -1535,13 +1649,30 @@ from app.services.document_parser import TextBlock
 再加三条新用例。**注意裸 `MagicMock` 的 `.metadata.get(...)` 会返回一个 MagicMock**，直接写进 Milvus records 语义不明，所以用下面的 `_mockChunk` 显式给定 metadata：
 
 ```python
-def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> MagicMock:
-    """构造带定位符 metadata 的假 chunk。"""
+def _mockChunk(
+    chunkId: str,
+    text: str,
+    seq: int,
+    *,
+    page: int | None = 1,
+    section: str | None = None,
+    para: int | None = None,
+) -> MagicMock:
+    """构造带定位符 metadata 的假 chunk。
+
+    `section` / `para` 必须由调用方显式传入。给个由 `seq` 推导的默认值看似
+    方便，但要断言定位符透传的用例一旦依赖它，测的就成了「mock 的默认值
+    进了 record」——同义反复，删掉实现里的透传也照样绿。
+    """
     return MagicMock(
         chunk_id=chunkId,
         text=text,
         sequence=seq,
-        metadata={"page_number": page, "section_name": None, "paragraph_no": seq + 1},
+        metadata={
+            "page_number": page,
+            "section_name": section,
+            "paragraph_no": para if para is not None else seq + 1,
+        },
     )
 ```
 
@@ -1558,7 +1689,9 @@ def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> Ma
                 text="这是测试文档内容。", page_number=18, section_name="质量管理", paragraph_no=3
             )
         ]
-        mock_chunks = [_mockChunk("chunk-0", "这是测试文档内容。", 0, page=18)]
+        mock_chunks = [
+            _mockChunk("chunk-0", "这是测试文档内容。", 0, page=18, section="质量管理", para=3)
+        ]
 
         # Act
         with patch(
@@ -1591,7 +1724,9 @@ def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> Ma
         assert len(result["content_hash"]) == 64
 
         # Assert：落库的 document 元数据是真值
-        createdDto = svc._doc_svc.createDocument.await_args.kwargs["dto"]
+        # `createDocument(session, dto, actor=...)` 是位置传参，dto 在 args[1]。
+        # 写成 kwargs["dto"] 会 KeyError —— 与下方 updateDocument 的坑同源。
+        createdDto = svc._doc_svc.createDocument.await_args.args[1]
         assert createdDto.storage_url == "s3://qa-knowledge-sources/sources/ab/abcd/test.txt"
         assert createdDto.content_hash == result["content_hash"]
 
@@ -1705,6 +1840,122 @@ def _mockChunk(chunkId: str, text: str, seq: int, *, page: int | None = 1) -> Ma
 > `updateDocument(session, id, dto)` 的位置参数顺序若与 `args[2]` 不符，以 `rag_service.py` 里的实际调用为准调整。
 > 同文件其他用例（Milvus 失败、embedding 失败等）里的 `parse_document` mock 与 `split_by_paragraphs` 返回值**全部**要按上面的形状改（`list[TextBlock]` + 带 metadata 的 chunk），否则签名变更会让它们一起挂掉。
 
+再新建端到端集成测试 `backend/app/tests/integration/test_rag_ingest_provenance.py`（真实 PostgreSQL + 完整 API 链路）。它**不**重复验 Milvus 侧的落库与回读 —— 那是 Task 3 `test_milvus_document_fields` 的职责；这里验的是 `rag_service` 这一层的接线：有没有把 `chunk.metadata` 接进 Milvus 记录、把真实 url/hash 接进 `document_catalog`。
+
+先把 `test_rag_api.py` 里已有的 `mockEmbeddingService` **上移**到 `backend/app/tests/integration/conftest.py`（两个文件共用，不复制第二份），并删掉 `test_rag_api.py` 中的原定义与随之无用的 `AsyncMock` import（若该文件仍在别处使用则保留）：
+
+```python
+@pytest.fixture
+def mockEmbeddingService():
+    """EmbeddingService 的替身，模拟 generateEmbedding。
+
+    向量是固定常数（不是真实 LLM 输出），但保证相同文本得到相同向量，
+    这样 searchDocuments 能用相同 query 命中刚刚 ingest 的文档。
+    """
+    svc = AsyncMock()
+
+    async def fake_embed(text: str) -> list[float]:
+        # 用文本长度作种子，让同一文本生成同一向量（保证 search 能命中）
+        seed = sum(ord(c) for c in text) % 100
+        return [float(seed) / 100.0 + 0.001 * i for i in range(1024)]
+
+    svc.generateEmbedding = fake_embed
+    return svc
+```
+
+（`conftest.py` 顶部需能拿到 `AsyncMock`；没有就补 `from unittest.mock import AsyncMock`。）
+
+新建 `backend/app/tests/integration/test_rag_ingest_provenance.py`：
+
+```python
+"""RAG 上传链路的溯源端到端（P0 溯源地基）。
+
+真实 PostgreSQL + 完整 API 链路：POST /documents/upload → rag_service →
+document_catalog。MinIO 用假客户端（patch 点与 test_wiki_import_catalog
+一致），Milvus 的 insert 用替身捕获 —— 定位符在 Milvus 侧的落库与回读由
+test_milvus_document_fields 负责，本文件只验 rag_service 这层的接线。
+"""
+
+from __future__ import annotations
+
+import re
+from unittest.mock import MagicMock, patch
+
+import pytest
+from sqlalchemy import text
+
+
+@pytest.fixture
+def fakeMinio(monkeypatch):
+    """假 MinIO：不联网络，只记录调用。
+
+    用 MagicMock 而不是替身函数：本用例只关心「写没写、写的是不是原始
+    字节」，不该顺带把 putSourceObject 对 SDK 的调用形状（位置参还是
+    关键字参）钉成测试契约 —— 那是 Task 4 单测的职责。
+    """
+    fake = MagicMock()
+    fake.bucket_exists.return_value = True
+    monkeypatch.setattr(
+        "app.infrastructure.object_storage._getClient", lambda: fake
+    )
+    return fake
+
+
+class TestRagUploadProvenance:
+    @pytest.mark.asyncio
+    async def test_upload_persists_source_bytes_and_locators(
+        self, client, dbSession, fakeMinio, mockEmbeddingService
+    ) -> None:
+        # Arrange
+        content = (
+            "第一段：供应商准入需注册资本不少于一千万。\n\n"
+            "第二段：质量协议每年复核一次。"
+        ).encode("utf-8")
+        files = {"file": ("provenance.txt", content, "text/plain")}
+
+        # Act
+        with patch(
+            "app.services.rag_service._getEmbeddingService",
+            return_value=mockEmbeddingService,
+        ), patch(
+            "app.services.rag_service.insertDocumentChunks"
+        ) as mockInsert:
+            resp = await client.post(
+                "/api/v1/documents/upload",
+                params={"documentType": "CONTRACT", "securityLevel": "L1"},
+                files=files,
+            )
+
+        # Assert 1：源文件真的写进了对象存储，且写的是原始字节
+        assert resp.status_code == 201, resp.text
+        assert fakeMinio.put_object.call_count == 1
+        putArgs = fakeMinio.put_object.call_args
+        assert content in putArgs.args or content in putArgs.kwargs.values()
+
+        body = resp.json()
+        assert body["storage_url"].startswith("s3://")
+
+        # Assert 2：catalog 落的是真实 url + 64 位摘要（不是 milvus://N_chunks）
+        assert re.fullmatch(r"[0-9a-f]{64}", body["content_hash"])
+        rows = await dbSession.execute(
+            text(
+                "SELECT storage_url, content_hash FROM document_catalog "
+                "WHERE document_id = :docId"
+            ),
+            {"docId": body["document_id"]},
+        )
+        row = rows.one()
+        assert row.storage_url == body["storage_url"]
+        assert row.content_hash == body["content_hash"]
+        assert not row.storage_url.startswith("milvus://")
+
+        # Assert 3：定位符接进了 Milvus 记录
+        record = mockInsert.call_args.args[0][0]
+        assert record["page_number"] >= 1
+        assert record["paragraph_no"] >= 1
+        assert isinstance(record["section_name"], str)
+```
+
 - [ ] **Step 2: 运行测试确认失败**
 
 ```bash
@@ -1712,6 +1963,12 @@ cd backend && .venv/bin/pytest app/tests/unit/test_rag_service.py -q
 ```
 
 Expected: FAIL — `TypeError: object of type 'list' has no len()` / `AttributeError: 'list' object has no attribute 'strip'`
+
+```bash
+cd backend && .venv/bin/pytest app/tests/integration/test_rag_ingest_provenance.py -q
+```
+
+Expected: FAIL — `assert 0 == 1`（`putSourceObject` 尚未被调用，源文件没留存）
 
 - [ ] **Step 3: 实现**
 
@@ -1812,15 +2069,15 @@ Milvus 记录构造补齐定位符：
 - [ ] **Step 4: 运行测试确认通过**
 
 ```bash
-cd backend && .venv/bin/pytest app/tests/unit/test_rag_service.py -q
+cd backend && .venv/bin/pytest app/tests/unit/test_rag_service.py app/tests/integration/test_rag_ingest_provenance.py app/tests/integration/test_rag_api.py -q
 ```
 
-Expected: PASS
+Expected: PASS（三条都要跑 —— 前两条是本任务的产出，`test_rag_api.py` 是确认 fixture 上移没打断既有用例）
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add backend/app/services/rag_service.py backend/app/tests/unit/test_rag_service.py
+git add backend/app/services/rag_service.py backend/app/tests/unit/test_rag_service.py backend/app/tests/integration/test_rag_ingest_provenance.py backend/app/tests/integration/conftest.py backend/app/tests/integration/test_rag_api.py
 git commit -m "fix(wiki): rag_service 写真实 storage_url/content_hash 并消除静默失败"
 ```
 
@@ -2298,10 +2555,19 @@ git commit -m "feat(wiki): 上传路径留存源文件 + 登记 document_catalog
 ```python
 """P0 溯源地基真实数据验证（Harness 开发门禁）。
 
-对一个真实 PDF 走完整摄入链路，断言：
-  1. Milvus 中的 chunk 带正确 page_number
-  2. document_catalog 有真实 storage_url + 64 位 content_hash
-  3. MinIO 桶内可读回源文件，且内容与上传字节一致
+走**真实摄入链路**：真实 PDF → parse → chunk → embed → Milvus →
+document_catalog，然后在链路末端逐项断言溯源信息真的留下来了：
+
+  1. Milvus 里该文档的 chunk 带正确 page_number / section_name / paragraph_no
+  2. document_catalog 有真实 storage_url + 64 位 content_hash（不是 milvus://N_chunks）
+  3. MinIO 桶内可读回源文件，且字节与上传完全一致
+
+为什么走真链路而不是只调 parse_document：只验解析器的话，rag_service 把定位
+符丢了、把假 URL 写进 catalog，脚本照样全绿 —— 而那两个恰恰是 P0 要修的东西。
+门禁必须站在被修的东西的**下游**。
+
+自清：固定 document_id，跑完删掉本脚本写入的 Milvus chunk 与 catalog 行，
+反复执行不会给共享集合和正式库留垃圾。
 
 用法：
     docker exec qa-backend python scripts/wiki_provenance_realdata.py
@@ -2310,57 +2576,113 @@ git commit -m "feat(wiki): 上传路径留存源文件 + 登记 document_catalog
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import io
+import re
 import sys
 
-from app.infrastructure.milvus_client import searchDocumentChunks
-from app.infrastructure.object_storage import getSourceObject, hashContent
-from app.services.document_parser import parse_document
-from app.services.chunk_splitter import split_by_paragraphs
+from sqlalchemy import text
+
+from app.dependencies import CurrentUser
+from app.infrastructure.database import getSessionFactory
+from app.infrastructure.milvus_client import deleteDocumentChunks, queryDocumentChunks
+from app.infrastructure.object_storage import DEFAULT_BUCKET, getSourceObject
+from app.services.rag_service import RagService
+
+GATE_DOC_ID = "DOC-P0-PROVENANCE-GATE"
+GATE_FILENAME = "provenance-sample.pdf"
 
 
 async def main() -> int:
     failures: list[str] = []
-
-    # --- 1. 解析：定位符必须存在 ---
     content = _samplePdfBytes()
-    blocks = await parse_document(content, "application/pdf", "provenance-sample.pdf")
-    if not blocks:
-        failures.append("解析结果为空")
-    elif any(b.page_number is None for b in blocks):
-        failures.append(f"存在无页码的块：{[b.text[:20] for b in blocks if b.page_number is None]}")
+    factory = getSessionFactory()
 
-    # --- 2. 分块：定位符必须透传 ---
-    chunks = split_by_paragraphs(blocks)
+    # --- 1. 走真实摄入链路 ---
+    async with factory() as session:
+        await _purgeGateCatalogRow(session)
+        result = await RagService().ingestDocument(
+            session,
+            content=content,
+            filename=GATE_FILENAME,
+            mime_type="application/pdf",
+            document_id=GATE_DOC_ID,
+            document_name=GATE_FILENAME,
+            document_type="OTHER",
+            actor=CurrentUser(userId="provenance-gate"),
+        )
+
+    print(f"ingest.chunks       = {result['chunks']}")
+    print(f"ingest.storage_url  = {result['storage_url']}")
+    print(f"ingest.content_hash = {result['content_hash']}")
+
+    # --- 2. Milvus：定位符必须真的落库 ---
+    chunks = queryDocumentChunks(GATE_DOC_ID)
+    print(f"milvus.chunk_count  = {len(chunks)}")
     if not chunks:
-        failures.append("分块结果为空")
-    elif any(c.metadata.get("page_number") is None for c in chunks):
-        failures.append("存在无页码的 chunk")
+        failures.append("Milvus 里查不到该文档的 chunk")
+    else:
+        print(f"milvus.page_numbers = {sorted(c['page_number'] for c in chunks)}")
+        if any(c["page_number"] < 1 for c in chunks):
+            failures.append("存在没有页码（哨兵 -1）的 chunk")
+        if any(c["paragraph_no"] < 1 for c in chunks):
+            failures.append("存在没有段号（哨兵 -1）的 chunk")
 
-    # --- 3. 对象存储：写入后必须可读回且一致 ---
-    from app.infrastructure.object_storage import buildSourceObjectName, putSourceObject
+    # --- 3. document_catalog：真实 url + 64 位摘要 ---
+    async with factory() as session:
+        rows = await session.execute(
+            text(
+                "SELECT storage_url, content_hash FROM document_catalog "
+                "WHERE document_id = :d"
+            ),
+            {"d": GATE_DOC_ID},
+        )
+        catalog = rows.first()
 
-    h = hashContent(content)
-    name = buildSourceObjectName(h, "provenance-sample.pdf")
-    url = putSourceObject(name, content, "application/pdf")
-    readBack = getSourceObject(name)
-    if readBack != content:
-        failures.append("MinIO 读回内容与上传不一致")
-    if not url.startswith("s3://"):
-        failures.append(f"storage_url 形状不对：{url}")
+    if catalog is None:
+        failures.append("document_catalog 里没有该文档的行")
+    else:
+        print(f"catalog.storage_url = {catalog.storage_url}")
+        print(f"catalog.content_hash= {catalog.content_hash}")
+        if not catalog.storage_url or catalog.storage_url.startswith("milvus://"):
+            failures.append(f"storage_url 不是真实对象存储地址：{catalog.storage_url!r}")
+        elif not catalog.storage_url.startswith("s3://"):
+            failures.append(f"storage_url 形状不对：{catalog.storage_url!r}")
+        if not catalog.content_hash or not re.fullmatch(
+            r"[0-9a-f]{64}", catalog.content_hash
+        ):
+            failures.append(f"content_hash 不是 64 位摘要：{catalog.content_hash!r}")
 
-    print(f"page_number 序列: {[c.metadata['page_number'] for c in chunks]}")
-    print(f"content_hash:     {h}")
-    print(f"storage_url:      {url}")
+    # --- 4. MinIO：读回的字节必须与上传一致 ---
+    s3Prefix = f"s3://{DEFAULT_BUCKET}/"
+    if catalog is not None and (catalog.storage_url or "").startswith(s3Prefix):
+        objectName = catalog.storage_url[len(s3Prefix):]
+        readBack = getSourceObject(objectName)
+        if readBack != content:
+            failures.append("MinIO 读回内容与上传字节不一致")
+        else:
+            print(f"minio.read_back     = {len(readBack)} bytes（与上传一致）")
+
+    # --- 5. 自清：门禁不该给正式库留痕 ---
+    deleteDocumentChunks(GATE_DOC_ID)
+    async with factory() as session:
+        await _purgeGateCatalogRow(session)
 
     if failures:
         print("\n❌ 失败项：")
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("\n✅ P0 溯源地基真实数据验证通过")
+    print("\n✅ P0 溯源地基真实数据验证通过（已清理本次写入）")
     return 0
+
+
+async def _purgeGateCatalogRow(session) -> None:
+    """删掉门禁行，让脚本可重复执行。"""
+    await session.execute(
+        text("DELETE FROM document_catalog WHERE document_id = :d"),
+        {"d": GATE_DOC_ID},
+    )
+    await session.commit()
 
 
 def _samplePdfBytes() -> bytes:
@@ -2386,25 +2708,33 @@ if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
 ```
 
-- [ ] **Step 2: 跑验证脚本**
+- [ ] **Step 2: 重建并部署**
 
-```bash
-docker exec qa-backend python scripts/wiki_provenance_realdata.py
-```
-
-Expected: 输出页码序列 / hash / url，末尾 `✅ P0 溯源地基真实数据验证通过`
-
-- [ ] **Step 3: 重建并部署**
+**必须在跑门禁之前做。** 脚本依赖新的 `object_storage` 模块与 `minio` 包，
+而这两样只有重建镜像后才进得了容器；顺序反了，Step 3 只会得到
+`ModuleNotFoundError`，看上去像脚本写错了。
 
 ```bash
 cd /path/to/repo
 docker compose -f docker/docker-compose.yml build backend
 docker compose -f docker/docker-compose.yml up -d qa-objects backend
+docker exec qa-backend python -c "import minio; print('minio ok')"
 docker exec qa-backend alembic current    # 本计划无新迁移，应停在既有 head
 docker exec qa-backend python scripts/rebuild_document_collection.py
 ```
 
-Expected: `qa-objects` 起来且健康；`qa-backend` 健康；集合重建成功
+Expected: `qa-objects` 起来且健康；`qa-backend` 健康；`minio ok`；集合重建成功
+
+- [ ] **Step 3: 跑验证脚本**
+
+```bash
+docker cp backend/scripts/wiki_provenance_realdata.py qa-backend:/app/scripts/
+docker exec qa-backend python scripts/wiki_provenance_realdata.py
+```
+
+Expected: 打印 `ingest.*` / `milvus.chunk_count` / `milvus.page_numbers` /
+`catalog.storage_url` / `catalog.content_hash` / `minio.read_back`，
+末尾 `✅ P0 溯源地基真实数据验证通过（已清理本次写入）`
 
 - [ ] **Step 4: 验证回滚路径**
 
@@ -2478,32 +2808,36 @@ P0 与 P1 各有一个摘要函数：
 | P0（Task 4） | `object_storage.hashContent(content: bytes) -> str` | `sha256(content).hexdigest()` |
 | P1（Task 1） | `wiki_page_service.contentHashOf(content: str) -> str` | `sha256(content.encode("utf-8")).hexdigest()` |
 
-同一文本经两者得到**同一个值**（`hashContent(s.encode("utf-8")) == contentHashOf(s)`），
-P0 的 Task 6 依赖这一点来写 `document_catalog.content_hash`。
+两者逐字节等价：`contentHashOf(s) == hashContent(s.encode("utf-8"))`。
 
-**执行 P0 时的处理**：
+**归口：以 P0 的 `hashContent(content: bytes)` 为唯一实现。** P1 的 `contentHashOf`
+落地时退化为薄包装 `return hashContent(content.encode("utf-8"))`，不要再留第二份
+`sha256` 调用 —— 两份实现即使当下等价，也会各自漂移，而漂移了不会报错，只会让
+两侧的比对永远不相等。
 
-- 若 **P1 尚未落地** —— 按本计划 Task 6 原样写（`hashContent(draftText.encode("utf-8"))`），
-  并在 `summary.md` 记下「待 P1 落地后统一为 `contentHashOf`」。
-- 若 **P1 已落地** —— Task 6 改为 `from app.services.wiki_page_service import contentHashOf`，
-  用 `contentHashOf(draftText)`，**不要**再走 `hashContent`。P1 的计划已写明
-  「P0 落地时直接复用本函数，不要再写第二份实现」。
+**P0 的 Task 6 摘要的是上传文件的原始字节**（`hashContent(content)`，`content: bytes`），
+与客户端回传的草稿文本无关 —— Task 6 的落点在 `preview-file`（见 `## 不做的事` 起
+的说明），那里能拿到 `UploadFile` 的字节。**PDF/DOCX 的 `hashContent(文件字节)` 与
+`contentHashOf(解析后的文本)` 不是同一个值，这是对的**：源文件的内容寻址本就该按
+字节算。所以 Task 6 不依赖 P1 的函数，两者互不阻塞。
 
-无论哪种，Task 6 的测试都要**把 64 位摘要钉成字面量**（而不是只断言长度）。
-只断言长度挡不住口径漂移 —— 漂移了不会报错，只会让两侧比对永远不等。
+Task 6 的用例已断言「hash 取自文件字节」——保留它。只断言长度挡不住口径漂移。
 
-### 3. `wiki_import_service.execute` 是 P0 与 P1 的共同改动点
+### 3. `wiki_import_service.execute` —— P0 已**不再**是共同改动点
 
-| 计划 | 改 `execute` 的什么 |
-|---|---|
-| P0 Task 6 | 在**末尾**（任务台账落库之后）追加 `document_catalog` 登记 |
-| P1 Task 4 | 重写循环体与 `_importOne`，把重复项从「失败」改判为「跳过」，台账加 `skipped_pages` |
+本节曾提示 P0 与 P1 都要改 `execute`（P0 在任务台账落库之后追加 catalog 登记）。
+**Task 6 改为在 `preview-file` 落库之后，这个接触点消失了**：P0 完全不碰
+`wiki_import_service.execute`，P1 Task 4 可以独立重写它的循环体与 `_importOne`。
+两份计划依然可任意顺序落地。
 
-两者不冲突，但 P0 的插入位置写的是「任务台账落库之后」这种**位置锚点**，
-而 P1 恰好会改那段台账代码。**后执行的一方必须重新定位锚点**，不要照着行号改。
+仍存在的一处**弱**耦合：P0 的 `WikiCatalogRegistrar` 与 P1 都会写 `document_catalog`，
+但写的是不同行 —— P0 按**源文件字节**登记（`preview-file` 路径），P1 按 **wiki 页文本**
+登记。P0 用 SELECT-then-INSERT，不依赖 P1 的唯一索引来保证幂等。
 
-另一个交互：P1 的导入测试用 `autoClassify: false`（不调 LLM）；P0 的 Task 6 测试传
-`modelId` 并 patch `_INVOKER_CLIENT`。两者各自独立成立，互不影响。
+若将来有人把 P0 的登记点移回 `execute`，需重新评估本节。
+
+另一个交互（仍然成立）：P1 的导入测试用 `autoClassify: false`（不调 LLM）；P0 的
+Task 6 测试传 `modelId` 并 patch `_INVOKER_CLIENT`。两者各自独立成立，互不影响。
 
 ### 4. `TextBlock` 只属于 P0
 

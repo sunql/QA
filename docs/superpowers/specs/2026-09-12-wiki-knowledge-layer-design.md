@@ -138,67 +138,43 @@ async def parse_document(...) -> list[TextBlock]
 
 `app/services/chunk_splitter.py` 的 `Chunk` 类**已有 `metadata: dict | None = None` 字段，且完全未被使用** —— 这就是现成的扩展点，无需改类结构。`split_by_paragraphs` 的签名从吃扁平 `str` 改为吃 `list[TextBlock]`，`_make_chunk` 把定位符写进 `metadata`。
 
-**C3 — 新增 `app/infrastructure/source_locator.py`（纯函数，非对象存储客户端）**
+**C3 — 新增 `app/infrastructure/object_storage.py`**
 
-> **2026-09-12 用户决定（替代原设计）**：上传的源文档**暂时不存储**，但**预留可以存储到指定位置的占位**，后续可以存储并查看；**只保存解析的内容**，保证可检索、可供 aichat 使用，并**可以与本地关联**。
+独立 MinIO 容器 `qa-objects`，独立命名卷 `objects_data`（→ `qa-system_objects_data`），端口 9000/9001。
 
-因此 C3 从「建 MinIO 客户端」降级为「算预留键」：
+- 不复用 `qa-milvus-minio`：那是 Milvus 的私有后端，不发布端口，且硬编码 `minioadmin/minioadmin`。
+- 凭证通过 `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` 环境变量注入，**不沿用硬编码模式**。
+- 桶 `qa-knowledge-sources`，由 `ensureBucket()` 幂等创建。
+- 配套 `scripts/backup_objects.sh`。
+- 同步更新 `Harness/rules/数据存储防护.md` 的卷清单。
 
-- `hashBytes` / `hashText` —— 内容摘要，**唯一实现**（P1 的 `contentHashOf` 收敛到它）
-- `buildSourceObjectName` —— 内容寻址对象名 `sources/<hash[:2]>/<hash>/<name>`
-- `buildStorageUrl` —— 预留位置 `s3://qa-knowledge-sources/<objectName>`
+**C4 — 真实 `storage_url` + `content_hash`，并修掉静默失败**
 
-**零 I/O、零新依赖、零新容器。** 原设计的 `qa-objects` 容器、`objects_data` 卷、
-`scripts/backup_objects.sh`、`Harness/rules/数据存储防护.md` 卷清单更新**全部不做** ——
-YAGNI：存储能力尚未启用，先不建。
-
-**为什么现在就要算好**：占位键落库后，将来补传源文件落在同一个 key，**无需回填、无需迁移**。
-若现在写 `None`，历史行将来必须回填 —— 那正是「预留」要避免的。
-
-**与本地关联**：`wiki_import_task.source_ref`（用户在导入向导填的本地来源名）+ `page_ids`
-已构成完整回溯链，**不新增列、不改 schema**。将来补传时正是靠这条链找到本地那份文件。
-
-**C4 — 预留 `storage_url` + 真实 `content_hash`，并修掉静默失败**
-
-`app/services/rag_service.py` 三处问题：
+`app/services/rag_service.py` 两处问题：
 
 - `:167` `content_hash=None` —— 去重键从未写入。
-- `:176` 写的是 `storage_url=f"milvus://{len(chunks)}_chunks"` —— 一个**假 URL**。
-  改为写 C3 算出的**预留**位置。
-- `:176-178` 静默失败，**且漏传 `actor`**（`updateDocument(session, id, dto, actor)` 是四参签名）
-  → 该分支在生产里从未真正生效过：
+- `:176-178` 静默失败：
 
 ```python
 except Exception:
     pass  # 更新失败不影响主流程
 ```
 
-**消费者不得假定 `storage_url` 可读** —— 源文件字节暂不存储，它是「将来会放在这里」的契约，
-不是下载链接。
+且 `:176` 写的是 `storage_url=f"milvus://{len(chunks)}_chunks"` —— 一个**假 URL**。改为写真实对象存储地址。
 
 **C5 — Wiki 导入路径也注册 `document_catalog`**
 
 `wiki_import_service.py` 目前**完全不注册 `document_catalog`**（该表 0 行），只有 RAG 路径注册。两条摄入路径应当共用同一套目录登记。
-
-**实现约束（读码后确认）**：`execute()` 的输入是客户端传来的**纯文本草稿**，**从不接触文件字节**；
-`parse_document` 在 wiki 路径下只在 `parseFile()`（预览路径，docstring 明写「不落库、不调模型」）
-被调用。因此：
-
-- `content_hash` 用**草稿文本**的摘要（草稿是 execute 实际持有的内容，对去重与变更检测同样有效）。
-- `storage_url` 写 C3 算出的**预留位置**（由草稿哈希 + `source_ref` 派生）。
-- **已知局限**：同一份文件若既走 wiki 导入、又走 RAG 上传，会产生**两行** catalog、
-  两个不同的 `content_hash`；7.5 的唯一索引**不会**判其重复。这是路径差异，不是 bug，
-  但运维排查时须知悉。
 
 ### 4.2 数据流
 
 ```
 文件上传
   → parse_document → list[TextBlock]（带页码/章节/段号）
-  → source_locator 算预留 storage_url + content_hash（**不写字节**）
+  → 源文件存入 MinIO qa-objects → 真实 storage_url + content_hash
   → split_by_paragraphs(list[TextBlock]) → Chunk(text, metadata={定位符})
   → embedding → Milvus（collection 需重建，见 4.4）
-  → document_catalog 登记（预留 url + 真实 hash）
+  → document_catalog 登记（真实 url + hash）
 
 Wiki 导入路径：复用同一套 C1/C2/C5
 ```
@@ -220,29 +196,25 @@ Wiki 导入路径：复用同一套 C1/C2/C5
 ### 4.5 错误处理
 
 - 解析层：`UnsupportedFileTypeError` / `DocumentParserError` 分别映射到不同的用户提示。
-- **存储层不再适用**：C3 已降级为纯函数，没有外部调用可失败。原先「MinIO 不可用必须显式失败」
-  的约束随之取消；但**不留静默失败**的原则仍适用于目录登记。
-- 目录登记：沿用既有策略（SELECT-then-INSERT 幂等），失败必须留日志上下文。
-  C4 修掉的 `except Exception: pass` 正是这条的反例 —— 它同时掩盖了漏传 `actor` 的 `TypeError`，
-  让「文档已存在」分支在生产里从未生效。
+- 存储层：MinIO 不可用必须**显式失败**，不得降级为静默跳过（C4 修的就是这个模式）。
+- 目录登记：沿用现有既有策略，但失败必须留日志上下文。
 
 ### 4.6 测试策略
 
 按 `Harness/rules/测试规范.md`：真实 PostgreSQL + 完整 API 链路，禁止 sqlite。
 
 - 解析层：`TextBlock` 定位符正确性 —— PDF 页码连续性、DOCX 段号、MD 章节识别。
-- 预留键层：纯函数单测 —— 摘要口径（UTF-8）、文件名越权净化、**确定性**（同输入同 URL）。
-- 端到端：上传一份已知 PDF → 断言 Milvus 中的 chunk 带正确 `page_number`，
-  且 `document_catalog.storage_url` 是形状正确的**预留键**。
+- 存储层：`ensureBucket` 幂等；上传后 `storage_url` 可回读。
+- 端到端：上传一份已知 PDF → 断言 Milvus 中的 chunk 带正确 `page_number`。
 
 ### 4.7 决策
 
 | # | 决策 | 结论 |
 |---|---|---|
-| D2-1 | 源文件存储形态 | **暂不存储字节，只预留确定性位置**（2026-09-12 用户决定，**替代**原「独立 MinIO 容器 + 独立命名卷」方案）。理由：先保证可检索、可供 aichat 使用、可与本地关联；存储能力后置，届时按同一预留键补传即可 |
+| D2-1 | 对象存储形态 | **独立 MinIO 容器 + 独立命名卷**（已确认） |
 | D2-2 | P0 是否含 PG 迁移 | **零迁移**。`content_hash` 唯一约束推迟到 P1 一并做，只付一次迁移成本 |
 
-**诚实记录**：PG 的备份 cron 当前静默失效（launchd 契约断裂，根因是 `/etc/crontab` 缺失，非早先猜测的 FDA）。用户已于 2026-09-12 决定维持手动备份 —— 需要备份直接跑 `./scripts/backup_pg.sh`。此缺口写入 summary §9，不粉饰。（原设计的 `scripts/backup_objects.sh` 随 D2-1 变更取消：无对象存储可备份。）
+**诚实记录**：PG 的备份 cron 当前静默失效（launchd 契约断裂，根因是 `/etc/crontab` 缺失，非早先猜测的 FDA）。用户已于 2026-09-12 决定维持手动备份。因此 `scripts/backup_objects.sh` 同样以手动形态交付，此缺口写入 summary §9，不粉饰。
 
 ---
 
@@ -581,9 +553,7 @@ B（直接上文档三元组）与 C 的**列终态相同**，C 是其超集。�
 1. **数据模型变更**（P1 加列、P3 建两表）：migration 脚本须人工 review。
 2. **成本阈值变更**：P3 引入批量 LLM 编译，`total_cost_usd` 的量级变化需人工确认。
 
-`security-reviewer` 强制触发场景（已命中）：数据库查询（P1/P3 迁移）、用户输入处理（P0 的
-文件名净化 —— 防路径穿越写进对象名）。**原「外部 API 调用（MinIO）」触发点随 D2-1 变更取消**：
-P0 不再有任何外部存储调用。
+`security-reviewer` 强制触发场景（已命中）：文件系统操作（P0 对象存储）、数据库查询（P1/P3 迁移）、外部 API 调用（MinIO）。
 
 ---
 
@@ -593,7 +563,7 @@ P0 不再有任何外部存储调用。
 
 | 阶段 | 验收信号 |
 |---|---|
-| P0 | 上传一份已知 PDF → Milvus chunk 带正确 `page_number` / `section_name` / `paragraph_no`；`document_catalog` 有**预留** `storage_url`（形状 `s3://qa-knowledge-sources/sources/<h[:2]>/<h>/<name>`）+ 非空 `content_hash`；同一输入重复计算产出同一个预留键。**不检查桶内有文件 —— 源文件暂不存储** |
+| P0 | 上传一份已知 PDF → Milvus chunk 带正确 `page_number`；`document_catalog` 有真实 `storage_url` + 非空 `content_hash`；MinIO 桶内存有源文件 |
 | P1 | 同一文件导入两次 → `wiki_page` 恰 1 行；`wiki_learning_models.py:172-173` 的声称由测试钉死 |
 | P3 | `knowledge_claim` / `evidence` 非零且 evidence 定位符非空；**claim 三元组双形态产出**（`claim_text` 与 `subject_id`/`predicate`/`object_value` 同批非空）；`SELECT count(*) FROM knowledge_claim WHERE subject_id IS NULL` 有确定值（实体层待办量）；`wiki_compile_item` 可续跑（杀进程后重跑只处理未完成项）；`wiki_token_usage.compile_task_id` 有值；`explain` 显示 wiki 列表查询不再拖 evidence |
 

@@ -6,7 +6,7 @@
 
 **Architecture:** 不新建去重机制、不新增去重表、不读 `page_ids` 台账。把随机后缀换成内容派生后缀（一次纯函数改动），P1 的唯一新增机制是**台账分类学修正**：`page_id` 撞车且 `content_hash` 相等 → 计「跳过」而非「失败」。配套一次 Alembic 迁移（三处 DDL）：`wiki_page.content_hash VARCHAR(64) NULL` + 非唯一索引（内容摘要，P0 的 `document_catalog.content_hash` 落地时同源消费）、`document_catalog.content_hash` 唯一索引（spec §4.7 推迟到 P1 的那条）、`wiki_import_task.skipped_pages INTEGER NOT NULL DEFAULT 0`（台账三元计数）。
 
-**P1 与 P0 / P3 解耦**：本计划不依赖 P0 的 `TextBlock` / `source_locator` / `document_catalog` 读写代码，也不依赖 P3 的 `wiki_compile_*` 表。两者只有一个**算法口径**上的约定：本计划的 `contentHashOf()` 与 P0 的 `source_locator.hashText()` 同为 `sha256(utf-8).hexdigest()`，先落地的一方负责把另一份收敛掉（见下方「复用而非新建」callout）。两边可任意顺序落地。
+**P1 与 P0 / P3 解耦**：本计划不依赖 P0 的 `TextBlock` / MinIO 管线 / `document_catalog` 读写代码，也不依赖 P3 的 `wiki_compile_*` 表；P0 落地后可复用本计划的 `contentHashOf()` 取同源摘要（"P0 consumes this when it lands" —— 方向是 P0 消费 P1，不是 P1 依赖 P0）。
 
 唯一的接触点是 **0061 迁移里的一条 DDL**：spec §4.7 的 D2-2 把 `document_catalog.content_hash` 的唯一约束**明确推迟到 P1「一并做，只付一次迁移成本」**，P1 就是现在，所以本次补上（只建索引，不动该表任何列，也不需要 P0 的任何代码）。交接约束：**P0 落地时不得重复创建该索引**（`IF NOT EXISTS` 会让重复创建静默通过，看起来没事，但两处定义会各自漂移）。已实测 prod：该列存在、表 0 行、索引尚未创建 —— 成本为零的窗口。
 
@@ -92,13 +92,7 @@ spec §5.4 只说「重复 → 成功但跳过」，没说怎么证明「这是�
 | `frontend/src/tests/AdminWikiImportPage.test.tsx` | 改 `:60-80`、`:125-140` | i18n mock 加 key + fixture 加 `skippedPages` |
 | `Harness/changes/feat-wiki-dedup/summary.md` | 新建 | SSOT 九段变更记录 |
 
-> 复用而非新建：`contentHashOf()` 与 P0 的 `document_catalog.content_hash` **同口径**（`sha256(utf-8).hexdigest()`，64 位小写十六进制）。
->
-> **先落地的一方负责收敛为一份实现**：P0 的 `app/infrastructure/source_locator.py` 提供了
-> `hashText(text)` —— 与 `contentHashOf` 逐字节等价。P0 落地后，把 `contentHashOf` 改为
-> `from app.infrastructure.source_locator import hashText` 的薄包装（或直接替换调用点），
-> **不要保留两份 `sha256` 实现**。反向亦然：若本计划先落地，P0 落地时收敛到 `hashText`。
-> 两边可以任意顺序落地，不互相阻塞。
+> 复用而非新建：`contentHashOf()` 与 P0 的 `document_catalog.content_hash` **同口径**（`sha256(utf-8).hexdigest()`，64 位小写十六进制）。P0 落地时直接 `from app.services.wiki_page_service import contentHashOf`，不要再写第二份摘要实现。
 
 ---
 

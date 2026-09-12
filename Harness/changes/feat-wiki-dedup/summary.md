@@ -111,21 +111,28 @@
 
 ## 8. 部署验证
 
-**代码尚未部署 —— 容器仍跑 P1 之前的代码。** 部署是独立动作，须人工确认后执行，不得单方面进行。
+**已于 2026-09-13 部署（人工授权后执行）。** 部署前存在一段**危险的中间态**：prod 的 `alembic_version` 早已是 `0061_wiki_dedup`（唯一索引 `uq_document_catalog_content_hash` 已在库上生效），而容器仍跑 P1 之前的代码 —— 旧代码对该唯一索引无任何处理，重复上传会抛未捕获的 `IntegrityError` → 500，且此时 MinIO/Milvus 的副作用已经写下。这正是当时把部署当作优先事项的原因。
 
 | 项 | 状态 |
 |---|---|
-| prod `qa_metadata` `alembic_version` | `0061_wiki_dedup` ✅（已 upgrade） |
+| prod `qa_metadata` `alembic_version` | `0061_wiki_dedup` ✅ |
 | 测试库 `alembic_version` | `0061_wiki_dedup` ✅ |
-| 容器内后端代码 | ❌ 仍是 P1 之前的版本 |
-| `POST /api/v1/wiki/import/execute` 真机冒烟 | ⏳ 未执行（待部署） |
-| 前端 bundle 含新 i18n key | ⏳ 未验证（待部署，用对照探针法） |
+| 容器内后端代码 | ✅ 已更新（`./scripts/deploy_backend.sh`，快照 `backups/container/20260913_010415`，输出「✅ 启动成功」） |
+| 容器内代码保真 | ✅ 5 个文件逐个 md5 host↔容器 一致；容器内 grep 到 `to_bytes(8)`（长度前缀身份编码）与 `uq_document_catalog_content_hash`（约束名分类） |
+| `POST /api/v1/wiki/import/execute` 真机冒烟 | ✅ 见下 |
+| 前端 bundle 含新 i18n key | ✅ 见下 |
 
-部署命令统一走 `./scripts/deploy_backend.sh`（一次灌 `app/` + `scripts/` + `alembic/` + 快照，可 `--rollback`）；前端必须 `docker compose build` 后 `up -d`，裸 `docker build -t` 会因 tag 不匹配而继续跑旧 bundle。
+**后端冒烟（真实栈，同一份文件跑两次）**：第 1 次 → HTTP 201、`successPages=1`、`pageIds=["PAGE-P1-94DF31B3"]`；第 2 次 → HTTP 201、`successPages=0`、`skippedPages=1`、`pageIds=[]`，`wiki_page` 仍为 1 行。冒烟数据已清理（删 `PAGE-P1-94DF31B3` 1 行、`source_ref='smoke-p1.md'` 任务 2 行），prod 复原为 `wiki_page=0 / document_catalog=1 / import_task=8`。
+
+**前端部署**：`docker compose -f docker/docker-compose.yml build --no-cache --build-arg NPM_REGISTRY=https://registry.npmmirror.com frontend` 后 `up -d frontend`（容器 Recreate）。**对照探针法**验证：服务端口是 **5173**（非 80），`index.html` 引用的 entry chunk `assets/index-BflcEfLu.js` 内两个**只在 P1 之后才存在**的片段均命中 —— `skippedPages`（`types/wikiImport.ts`，P1 新增；基线处 grep 计数 **0**）与 `条，跳过`（zh-CN `resultCounts` 模板的新增片段；基线处 **0**）。两段出现在**被服务的** chunk 里即证明新 bundle 已生效。
+
+> 一处**方法更正**（留痕，勿重蹈）：最初用的探针是 `resultCounts`，**该探针无效**。`git log -S"resultCounts"` 只列出 `e52cf9a`，因为 `-S` 比对的是**出现次数**：`e52cf9a` 引入该 key（0→1），而 P1 的 `3fdc5cd` 只改了它的**值**（加 `跳过 {skipped}`），次数不变故不被 `-S` 捕获。基线处该 key 已存在 ⇒ 「bundle 里有 resultCounts」对旧 bundle 同样成立，**不构成对照**。凡探针必须两侧都验：P1 后存在 **且** P1 前不存在。经 nginx 的 `/api/v1/health` 返回 **200**（已验证 nginx 未因后端 IP 变化而 502）。
+
+部署命令统一走 `./scripts/deploy_backend.sh`（一次灌 `app/` + `scripts/` + `alembic/` + 快照，可 `--rollback`）；前端必须 `docker compose build` 后 `up -d`，裸 `docker build -t` 会因 tag 不匹配而继续跑旧 bundle；compose 文件只在 `docker/` 下，仓库根没有。
 
 ## 9. 真实数据验证报告（开发门禁，缺此节即不通过）
 
-**脚本**：`backend/scripts/wiki_dedup_realdata.py`（579 行，未提交）
+**脚本**：`backend/scripts/wiki_dedup_realdata.py`（579 行，已提交 `f5ba422`）
 
 ```bash
 cd backend && PYTHONPATH=$PWD \

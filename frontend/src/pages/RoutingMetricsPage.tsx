@@ -168,7 +168,7 @@ export default function RoutingMetricsPage(): JSX.Element {
             style={{ width: 120 }}
             options={TIME_WINDOW_OPTIONS.map((o) => ({
               value: o.value,
-              label: t(o.label as const),
+              label: t(o.label),
             }))}
           />
           <ReloadOutlined onClick={() => void load()} style={{ fontSize: 16, cursor: "pointer" }} />

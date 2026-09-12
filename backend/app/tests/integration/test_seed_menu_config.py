@@ -23,23 +23,25 @@ async def _clean(pg_session: AsyncSession) -> None:
     await pg_session.commit()
 
 
-async def test_seed_inserts_six_sections_and_twenty_nine_items(
+async def test_seed_inserts_seven_sections_and_thirty_five_items(
     dbSession: AsyncSession, client: object
 ) -> None:
     await _clean(dbSession)
 
     factory = dbModule.getSessionFactory()
     count = await seed_menu_config(factory)
-    # 6 sections + 29 items = 35 rows（feat-rbac-identity 追加 adminUsers/Roles/
-    # Organizations/Menus + bizConfig 追加 dataQualityGenerate/ontologyProperties/
-    # businessObjects/adminFeatureRules + foundation 追加 localImport）
-    assert count == 35
+    # 7 sections + 35 items = 42 rows（feat-rbac-identity 追加 adminUsers/Roles/
+    # Organizations/Menus + adminSystemConfig + bizConfig 追加 dataQualityGenerate/
+    # ontologyProperties/businessObjects/adminFeatureRules + foundation 追加
+    # localImport + feat-wiki-knowledge 追加一级类 enterpriseWiki 与其下 5 项
+    # wikiPages/wikiImport/wikiConflicts/wikiSuggestions/wikiCoverage）
+    assert count == 42
 
     svc = MenuConfigService(dbSession)
     result = await svc.list_sections()
-    assert len(result.sections) == 6
+    assert len(result.sections) == 7
     total_items = sum(len(s.children) for s in result.sections)
-    assert total_items == 29
+    assert total_items == 35
 
 
 async def test_seed_is_idempotent(
@@ -52,8 +54,8 @@ async def test_seed_is_idempotent(
     await seed_menu_config(factory)
 
     rows = (await dbSession.execute(select(MenuConfig))).scalars().all()
-    assert len(rows) == 35
-    assert len({r.code for r in rows}) == 35
+    assert len(rows) == 42
+    assert len({r.code for r in rows}) == 42
 
 
 async def test_seed_does_not_overwrite_ui_edited_parent_id(
@@ -182,6 +184,11 @@ async def test_seed_paths_aligned_with_frontend_routes(
         "/admin/audit", "/admin/feature-rules",
         # feat-rbac-identity：RBAC 管理 4 页（admin 路由统一 /admin/*）
         "/admin/users", "/admin/roles", "/admin/organizations", "/admin/menus",
+        # feat-system-config-admin
+        "/admin/system-config",
+        # feat-wiki-knowledge：企业 Wiki 一级类下的 5 个二级项
+        "/admin/wiki-pages", "/admin/wiki-import", "/admin/wiki-conflicts",
+        "/admin/wiki-suggestions", "/admin/wiki-coverage",
     }
 
     svc = MenuConfigService(dbSession)
@@ -240,5 +247,5 @@ async def test_main_runs_end_to_end_and_disposes_engine(
     await created_engines[0].dispose()
     # 验证种子落库（独立引擎与全局工厂指向同一 URL）
     rows = (await dbSession.execute(select(MenuConfig))).scalars().all()
-    assert len(rows) == 35
-    assert len({r.code for r in rows}) == 35
+    assert len(rows) == 42
+    assert len({r.code for r in rows}) == 42

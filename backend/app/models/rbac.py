@@ -13,9 +13,12 @@ Harness/changes/feat-rbac-identity/）——本次仅落菜单权限。
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    DateTime,
     ForeignKey,
     Index,
     String,
@@ -32,7 +35,19 @@ ADMIN_ROLE_CODE = "admin"
 
 
 class User(Base, TimestampMixin):
-    """系统用户（无密码——当前无登录态，身份来自 X-User-Id 头桩映射）。"""
+    """系统用户。
+
+    **当前没有密码登录**：身份来自 ``X-User-Id`` 头桩映射（见 getCurrentUser）。
+    下面的 4 个凭据 / 登录态字段来自 ``docs/superpowers/plans/2026-09-08-user-auth.md``
+    那次改造 —— 该计划**从未落地**，这 4 列原先只以手工 DDL 的形式存在于 prod，
+    任何迁移与模型都不认识它们。迁移 0060 + 本模型声明把两侧补齐
+    （见 ``Harness/changes/fix-schema-drift-two-dbs/``）。
+
+    声明它们**不是**为了启用密码登录，而是让 ``alembic autogenerate`` 知道这些列
+    是有意存在的 —— 否则每次 autogenerate 都会提议 DROP，而 prod 上唯一 admin 的
+    ``password_hash`` 是非空 bcrypt，删掉就真丢数据。将来真要开密码登录时，
+    这些列已就位，不必再补一次迁移。
+    """
 
     __tablename__ = "users"
 
@@ -44,9 +59,28 @@ class User(Base, TimestampMixin):
         Boolean, nullable=False, default=True, server_default=sa_text("true")
     )
 
+    # 计划中但未启用的凭据 / 登录态字段（见类 docstring）。当前无任何代码读写，
+    # 声明在此仅为与 DB 结构对齐、挡住 autogenerate 的 DROP 提议。
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa_text("false")
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # 45 = IPv6 文本表示的最大长度，与 DB 列宽一致
+    last_login_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+
     __table_args__ = (
         UniqueConstraint("username", name="uq_users_username"),
         Index("ix_users_enabled", "enabled"),
+        # 部分索引：绝大多数行 must_change_password=false，谓词把「待改密用户」
+        # 的查询压到极小的索引上，与「给 bool 列建全表索引」不是一回事。
+        Index(
+            "ix_users_must_change_password",
+            "must_change_password",
+            postgresql_where=sa_text("must_change_password = true"),
+        ),
     )
 
     def __repr__(self) -> str:  # pragma: no cover

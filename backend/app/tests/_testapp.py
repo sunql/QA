@@ -47,6 +47,8 @@ from app.api.v1 import (
     system_config,
     term_dictionary,
     users,
+    wiki,
+    wiki_import,
 )
 from app.config import getSettings
 from app.dependencies import getDb
@@ -82,25 +84,13 @@ def buildTestApp(testFactory: Any) -> FastAPI:
 
     # 注册领域异常处理器（与 main.py 一致）：用 isinstance 而非 __class__.__name__，
     # 支持子类化（如 _ToolInUseConflict(ConflictError)）正确映射 409。
-    from app.domain.exceptions import (
-        ConflictError,
-        NotFoundError,
-        PermissionDeniedError,
-        ValidationError,
-    )
+    # 异常 → 状态码映射复用 main.py 同一份实现（exceptions.statusForError）：
+    # 各写一份会漂移，曾导致测试 app 把 LLMUnavailableError 返成 400。
+    from app.domain.exceptions import statusForError
 
     @testApp.exception_handler(DomainError)
     async def handleDomainError(request, exc: DomainError) -> JSONResponse:
-        if isinstance(exc, NotFoundError):
-            status = 404
-        elif isinstance(exc, ConflictError):
-            status = 409
-        elif isinstance(exc, ValidationError):
-            status = 422
-        elif isinstance(exc, PermissionDeniedError):
-            status = 403
-        else:
-            status = 400
+        status = statusForError(exc)
         return JSONResponse(
             status_code=status,
             content=ErrorResponse(
@@ -188,6 +178,8 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(
         menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]
     )
+    testApp.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
+    testApp.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
 
     @testApp.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:

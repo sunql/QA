@@ -1,7 +1,8 @@
-"""seed_menu_config - 幂等 upsert 6 类 29 项菜单。
+"""seed_menu_config - 幂等 upsert 7 类 35 项菜单（共 42 行）。
 
 与 AppLayout 的旧 key 一一对应；feat-rbac-identity 追加 4 个 RBAC 管理页
-（用户/角色/组织/菜单）叶子项，零 section 变更（section 数保持 6，测试断言依赖）。
+（用户/角色/组织/菜单）叶子项；feat-wiki-knowledge 追加 1 个一级类
+「企业 Wiki」+ 5 个二级项（知识条目/导入/冲突/建议/覆盖度）。
 
 UI 优先策略：本 seed 只在「行不存在」时 INSERT 默认值；行已存在时
 **不覆盖任何 UI 可编辑字段**（label_key / icon_code / path / visible /
@@ -32,6 +33,9 @@ from app.models.menu_config import MenuConfig
 SECTIONS: list[dict[str, Any]] = [
     {"code": "section.aiAgent", "label_key": "menu.section.aiAgent", "icon_code": "robot", "sort_order": 100},
     {"code": "section.analytics", "label_key": "menu.section.analytics", "icon_code": "fund", "sort_order": 200},
+    # feat-wiki-knowledge：知识管理自成一级（240 是本段唯一空闲的百位区间，
+    # 放在「智能分析」之后、「业务配置」之前，不至于被排到侧边栏最底部）
+    {"code": "section.enterpriseWiki", "label_key": "menu.section.enterpriseWiki", "icon_code": "book", "sort_order": 240},
     {"code": "section.bizConfig", "label_key": "menu.section.bizConfig", "icon_code": "setting", "sort_order": 300},
     {"code": "section.foundation", "label_key": "menu.section.foundation", "icon_code": "database", "sort_order": 400},
     {"code": "section.systemConfig", "label_key": "menu.section.systemConfig", "icon_code": "api", "sort_order": 500},
@@ -46,6 +50,14 @@ ITEMS: list[dict[str, Any]] = [
     # Smart Analytics
     {"parent": "section.analytics", "code": "item.supplier360", "label_key": "menu.item.supplier360", "icon_code": "barchart", "sort_order": 210, "path": "/supplier-360"},
     {"parent": "section.analytics", "code": "item.supplierRisk", "label_key": "menu.item.supplierRisk", "icon_code": "alert", "sort_order": 220, "path": "/supplier-risk"},
+    # 企业 Wiki（feat-wiki-knowledge）：二级项 = 机制 1-6 各自的落地面板。
+    # 「知识导入」原挂在 section.systemConfig（590），本次归位到本段的 260 ——
+    # 它一直是 wiki 的功能，只是先有了页面、后有了分组。
+    {"parent": "section.enterpriseWiki", "code": "item.wikiPages", "label_key": "menu.item.wikiPages", "icon_code": "file", "sort_order": 250, "path": "/admin/wiki-pages"},
+    {"parent": "section.enterpriseWiki", "code": "item.wikiImport", "label_key": "menu.item.wikiImport", "icon_code": "import", "sort_order": 260, "path": "/admin/wiki-import"},
+    {"parent": "section.enterpriseWiki", "code": "item.wikiConflicts", "label_key": "menu.item.wikiConflicts", "icon_code": "alert", "sort_order": 270, "path": "/admin/wiki-conflicts"},
+    {"parent": "section.enterpriseWiki", "code": "item.wikiSuggestions", "label_key": "menu.item.wikiSuggestions", "icon_code": "tool", "sort_order": 280, "path": "/admin/wiki-suggestions"},
+    {"parent": "section.enterpriseWiki", "code": "item.wikiCoverage", "label_key": "menu.item.wikiCoverage", "icon_code": "dashboard", "sort_order": 290, "path": "/admin/wiki-coverage"},
     # Business Config
     {"parent": "section.bizConfig", "code": "item.ontology", "label_key": "menu.item.ontology", "icon_code": "partition", "sort_order": 310, "path": "/ontology"},
     {"parent": "section.bizConfig", "code": "item.dataQuality", "label_key": "menu.item.dataQuality", "icon_code": "audit", "sort_order": 320, "path": "/data-quality"},
@@ -84,11 +96,10 @@ ITEMS: list[dict[str, Any]] = [
 async def seed_menu_config(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
-    """幂等 upsert 6 个一级类 + 29 个叶子项。返回总行数。
+    """幂等 upsert 7 个一级类 + 35 个叶子项。返回总行数（42）。
 
-    冲突键：`code`（全局唯一）。重复运行不新增行，仅刷新 label_key / icon_code /
-    sort_order / path / visible。`parent_id` 仅在首次 INSERT 时设置；已存在的
-    行其 parent_id 由菜单管理 UI 维护，seed 不覆盖。
+    冲突键：`code`（全局唯一）。重复运行不新增行，也不刷新任何字段 —— 已存在的行
+    完全交给菜单管理 UI 维护（见文件头「UI 优先策略」）。
     """
     async with session_factory() as session:
         # 1) upsert sections：仅在「行不存在」时写入 seed 默认；冲突时 DO NOTHING

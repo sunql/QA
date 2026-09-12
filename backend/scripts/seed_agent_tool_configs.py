@@ -1,4 +1,4 @@
-"""幂等 upsert 3 个内置工具（feat-agent-tool-config-db, 2026-09-03）。
+"""幂等 upsert 内置工具（feat-agent-tool-config-db, 2026-09-03；M8 起 7 个）。
 
 lifespan 每次启动调用；name 命中 → 比较并更新元数据；未命中 → 插入。
 不做 audit（seed 性质；不算业务写入）。
@@ -54,6 +54,49 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "arg_extractor_kind": "supplier_graph_key",
         "enabled": True,
     },
+    # ---- feat-wiki-knowledge M8：企业 Wiki 知识工具 ----
+    # data_layers 一律为空（层无关）：知识条目不属于 DIM/DWD/FEATURE 任何一层，
+    # 硬塞一个层会得到一个语义错误的授权。ACL 退化为对象粒度（data_object）。
+    {
+        "name": "wiki_search",
+        "description": "检索企业知识条目：按标题/正文模糊匹配，返回摘要与维度",
+        "data_object": "WIKI_PAGE",
+        "data_layers": [],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "wiki_search",
+        "arg_extractor_kind": "wiki_text",
+        "enabled": True,
+    },
+    {
+        "name": "wiki_read",
+        "description": "读取单条知识：全文 + 事实原子 + 已确认关系 + 结构化规则/流程",
+        "data_object": "WIKI_PAGE",
+        "data_layers": [],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "wiki_read",
+        "arg_extractor_kind": "wiki_text",
+        "enabled": True,
+    },
+    {
+        "name": "rule_evaluate",
+        "description": "对知识条目上的可执行业务规则跑 dry-run，报告通过/失败/判不了三态",
+        "data_object": "WIKI_RULE",
+        "data_layers": [],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "rule_evaluate",
+        "arg_extractor_kind": "wiki_text",
+        "enabled": True,
+    },
+    {
+        "name": "coverage_status",
+        "description": "知识覆盖度：矩阵汇总 + 最紧迫缺口 + 未挂业务对象的条目",
+        "data_object": "WIKI_COVERAGE",
+        "data_layers": [],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "coverage_status",
+        "arg_extractor_kind": "wiki_no_args",
+        "enabled": True,
+    },
 ]
 
 
@@ -71,7 +114,7 @@ def _needsUpdate(row: AgentToolConfig, seed: dict) -> bool:
 
 
 async def seedAgentToolConfigs(session: AsyncSession) -> int:
-    """幂等 upsert 3 个工具。返回改动行数（用于 lifespan 日志）。"""
+    """幂等 upsert 全部种子工具。返回改动行数（用于 lifespan 日志）。"""
     service = AgentToolConfigService()
     changed = 0
     for seed in TOOL_SEEDS:

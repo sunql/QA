@@ -82,6 +82,7 @@ export const zhCN = {
     section: {
       aiAgent: "AI Agent",
       analytics: "智能分析",
+      enterpriseWiki: "企业 Wiki",
       bizConfig: "业务配置",
       foundation: "业务基础信息",
       systemConfig: "系统信息配置",
@@ -118,6 +119,11 @@ export const zhCN = {
       adminOrganizations: "组织管理",
       adminMenus: "菜单管理",
       adminSystemConfig: "系统参数",
+      wikiPages: "知识条目",
+      wikiImport: "知识导入",
+      wikiConflicts: "冲突检测",
+      wikiSuggestions: "结构化建议",
+      wikiCoverage: "覆盖度看板",
     },
   },
 
@@ -1611,6 +1617,268 @@ export const zhCN = {
       csv: "导出 CSV",
       json: "导出 JSON Lines",
       loading: "导出中...",
+    },
+  },
+
+  // 知识导入向导（feat-wiki-knowledge M2）
+  wikiImport: {
+    title: "知识导入",
+    steps: {
+      source: "粘贴原文",
+      model: "选择模型",
+      preview: "预览草稿",
+      confirm: "导入结果",
+    },
+    uploadButton: "上传文件",
+    uploadHint: "支持 PDF / Word(.docx) / Markdown / 纯文本，解析结果会填入下方文本框，可先核对再切分",
+    sourceLabel: "原始内容（Markdown，按最浅标题层级切分）",
+    sourcePlaceholder:
+      "粘贴或输入待导入的知识原文，例如：\n\n## 供应商准入规则\n\n注册资本 >= 1000 万。\n\n## 供应商分级规则\n\n按年度采购额分 A/B/C 级。",
+    sourceTypeLabel: "来源类型",
+    sourceRefLabel: "来源出处",
+    sourceRefPlaceholder: "可填文件名、文档编号或链接，便于溯源",
+    autoClassifyLabel: "自动分类",
+    autoClassifyHint: "开启后对每条知识调用模型判断知识维度（可稍后人工调整）",
+    modelLabel: "处理模型",
+    modelPlaceholder: "请选择一个可用的模型",
+    noModels: "暂无可选模型，请先在「模型配置」中添加",
+    modelUnusable: "不可用",
+    fallbackModelLabel: "备用模型（可选）",
+    fallbackModelPlaceholder: "主模型调用失败时自动降级到它",
+    previewSummary: "已切分出 {count} 条知识草稿（上限 {max} 条），可编辑标题与正文后再入库。",
+    draftIndex: "第 {index} 条",
+    columns: {
+      title: "标题",
+      content: "正文",
+      status: "状态",
+      total: "总条数",
+      success: "成功",
+      failed: "失败",
+      errorMessage: "备注",
+    },
+    actions: {
+      removeDraft: "移除",
+      repreview: "重新切分",
+      execute: "确认入库",
+      importAnother: "再导入一批",
+      reloadModels: "重新加载",
+    },
+    resultMessage: "导入任务已完成，状态：{status}",
+    resultCounts: "共 {total} 条，成功 {success} 条，失败 {failed} 条，花费 ${cost}",
+    tasksTitle: "最近导入任务",
+    noTasks: "暂无导入任务",
+    errors: {
+      previewFailed: "切分失败，请检查原文内容",
+      parseFileFailed:
+        "文件解析失败。请确认格式为 PDF / Word(.docx) / Markdown / 纯文本；老式 .doc 需先另存为 .docx。",
+      fileTooLarge: "文件过大（单次上限 10 MB）。请拆分或压缩后重试。",
+      modelUnusable: "所选模型不可用，请重新选择（可在「模型配置」中补齐凭据）",
+      modelsLoadFailed: "模型列表加载失败，选模下拉为空时无法继续",
+      tooManyDrafts:
+        "本次切分出 {count} 条，超过单次上限 {max} 条。请先删除多余草稿，或分批导入。",
+    },
+  },
+
+  // 知识条目（feat-wiki-knowledge M7，机制 1 分类可调整）
+  wikiPages: {
+    title: "知识条目",
+    empty: "暂无知识条目，先点「新建」或到「知识导入」批量入库",
+    undetermined: "未判定",
+    filters: {
+      dimension: "按知识维度过滤",
+      status: "按状态过滤",
+    },
+    columns: {
+      title: "标题",
+      dimension: "知识维度",
+      status: "状态",
+      structureStage: "结构阶段",
+      version: "版本",
+    },
+    dimensions: {
+      OBJECT: "业务对象",
+      RULE: "业务规则",
+      PROCESS: "业务流程",
+      CONCEPT: "业务定义",
+      METRIC: "业务指标",
+      POLICY: "政策制度",
+      DOCUMENT: "文档资料",
+      FAQ: "常见问题",
+    },
+    statuses: {
+      DRAFT: "草稿",
+      REVIEW: "待审",
+      APPROVED: "已审",
+      EFFECTIVE: "生效",
+      EXPIRED: "失效",
+    },
+    actions: {
+      create: "新建条目",
+      saveDimension: "确认分类",
+      rejectDimension: "打回分类",
+    },
+    form: {
+      content: "正文（Markdown）",
+    },
+    detail: {
+      meta: "条目号 {pageId}｜版本 {version}｜结构阶段 {stage}",
+      dimension: "知识维度",
+      noSuggestion: "该条目没有自动分类结论（导入时未开启分类，或模型未返回结果）。",
+      suggestion: "机器建议：{dimension}（置信度 {confidence}）",
+      rejectHint:
+        "「打回分类」表示该条知识不属于任何维度，会记入学习反馈用于修正分类器。",
+      statusTitle: "生命周期状态",
+      content: "正文",
+    },
+    errors: {
+      titleRequired: "请输入标题",
+      contentRequired: "请输入正文",
+      reclassifyFailed: "分类处置失败，请重试",
+      deleteFailed: "删除失败，请重试",
+      statusUpdateFailed: "状态更新失败，请重试",
+    },
+  },
+
+  // 冲突检测（feat-wiki-knowledge M7，机制 3）
+  wikiConflicts: {
+    title: "冲突检测",
+    empty: "没有符合条件的冲突",
+    idSeparator: "、",
+    filters: {
+      status: "按处理状态过滤",
+      severity: "按严重度过滤",
+      type: "按冲突类型过滤",
+    },
+    columns: {
+      type: "类型",
+      severity: "严重度",
+      pageIds: "涉及条目",
+      description: "说明",
+      detectedBy: "发现方式",
+    },
+    types: {
+      CONTRADICTION: "相互矛盾",
+      STALENESS: "内容过时",
+      GAP: "知识缺口",
+      OVERLAP: "内容重复",
+    },
+    severities: {
+      CRITICAL: "严重",
+      HIGH: "高",
+      MEDIUM: "中",
+      LOW: "低",
+    },
+    statuses: {
+      OPEN: "待处理",
+      RESOLVED: "已处理",
+    },
+    detectors: {
+      RULE: "规则",
+      LLM: "模型",
+    },
+    actions: {
+      resolve: "处置",
+      RESOLVED: "已修正",
+      MERGED: "已合并",
+      IGNORED: "误报",
+    },
+    resolvePlaceholder: "选择处置结果",
+    resolveHint:
+      "只有「误报」表示系统判错了。它会记入机制 3 的准确率统计（误报率），所以别随手点。",
+    errors: {
+      alreadyResolved: "这条冲突已被处置（终态不可逆），已为你刷新列表。",
+      resolveFailed: "处置失败，请重试",
+    },
+  },
+
+  // 结构化建议工作台（feat-wiki-knowledge M7，机制 4）
+  wikiSuggestions: {
+    title: "结构化建议",
+    empty: "没有符合条件的建议",
+    orphan: "（条目已不存在：{pageId}）",
+    confirmAccept: "接受后会物化出可执行规则/流程草稿，且不可撤销。确定接受？",
+    confirmReject: "拒绝后该建议进入终态。确定拒绝？",
+    filters: {
+      status: "按状态过滤",
+    },
+    columns: {
+      pageTitle: "知识条目",
+      dimension: "建议维度",
+      structure: "抽取结构",
+      confidence: "置信度",
+      status: "状态",
+    },
+    statuses: {
+      PENDING: "待处置",
+      ACCEPTED: "已接受",
+      REJECTED: "已拒绝",
+    },
+    actions: {
+      generate: "生成建议",
+      accept: "接受",
+      reject: "拒绝",
+    },
+    generatePageLabel: "选择知识条目",
+    generatePagePlaceholder: "搜索条目标题",
+    generateModelLabel: "抽取模型（可选）",
+    generateModelPlaceholder: "不选则只做确定性预筛，不调用模型",
+    generateHint:
+      "不选模型也能跑：确定性预筛会先判断这条知识像哪一类结构化知识，再决定要不要配模型精抽。",
+    errors: {
+      generateFailed: "生成建议失败，请重试",
+      alreadyResolved: "这条建议已被处置（终态不可逆），已为你刷新列表。",
+      resolveFailed: "处置失败，请重试",
+    },
+  },
+
+  // 覆盖度看板（feat-wiki-knowledge M7，机制 6）
+  wikiCoverage: {
+    title: "覆盖度看板",
+    unassigned: "未标业务域",
+    gapsTitle: "知识缺口",
+    noGaps: "没有缺口 —— 每个已标域的本体类都有可用知识",
+    mappingsTitle: "业务域标注",
+    noMappings: "还没有给任何本体类标注业务域",
+    unlinkedTitle: "有 {count} 条知识没有挂到任何已确认的业务对象",
+    unlinkedHint:
+      "这批知识在覆盖度矩阵里看不见（矩阵每格都挂了类），但 Agent 按业务对象检索时也找不到它们。建议补齐关系或调整维度。",
+    pageCounts: "{total} 条 / 已审 {approved} 条",
+    confirmRemove: "摘掉这条域标注后，相关格子会回到「未标业务域」。确定？",
+    classPlaceholder: "搜索本体类",
+    domainPlaceholder: "输入或选择业务域",
+    domainHint:
+      "业务域是分类轴而非固定词表：积累到新领域时直接输入新域即可，不会被锁死。",
+    refreshDone:
+      "已刷新：{cells} 个格子，覆盖 {mapped}/{classes} 个已标域的本体类，清理 {removed} 个失效格。",
+    actions: {
+      refresh: "刷新覆盖度",
+      addMapping: "标注业务域",
+    },
+    summary: {
+      totalCells: "矩阵格数",
+      missing: "完全缺失",
+      // 刻意不写成「已覆盖」：那与 statuses.COMPLETE 同名，同一屏会出现两处
+      // 同文案（统计卡与表格标签），读起来像同一个数字被说了两遍。
+      complete: "已覆盖格数",
+      unassigned: "未标域格数",
+    },
+    statuses: {
+      COMPLETE: "已覆盖",
+      PARTIAL: "部分覆盖",
+      OUTDATED: "待更新",
+      MISSING: "缺失",
+    },
+    columns: {
+      dimension: "知识维度",
+      className: "本体类",
+      domain: "业务域",
+      status: "覆盖状态",
+      pages: "条目数",
+    },
+    errors: {
+      refreshFailed: "刷新失败，请重试",
+      removeFailed: "摘除失败，请重试",
+      mappingGone: "这条标注已经不在了（可能刚被他人摘除），已为你刷新。",
     },
   },
 

@@ -2323,6 +2323,12 @@ class AgentAccessPolicyCreate(CamelModel):
     )
     notes: str | None = Field(default=None, max_length=2000)
 
+    # data_object 必须与 data_layer 一样在边界归一化：运行时按
+    # ``p.data_object == tool.data_object`` **精确比对**（工具侧的值已在
+    # AgentToolAssembly.assemble 归一为 strip+upper）。少这一步，管理员填
+    # "supplier " 会存成原样、策略永不命中，而写入本身毫无报错 —— 授权静默
+    # 失效，最终表现成 403。AgentToolConfigCreate 早就有这个校验器，此处补齐。
+    _check_data_object = field_validator("data_object")(_normalizeDataObject)
     _check_data_layer = field_validator("data_layer")(_normalizeDataLayer)
 
 

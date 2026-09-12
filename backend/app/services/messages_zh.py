@@ -302,6 +302,107 @@ MSG_NL2SQL_SQL_FAILED = "无法生成 SQL"
 MSG_TERM_DICT_TERM_EXISTS = "术语「{term}」已存在"
 MSG_TERM_DICT_NOT_FOUND = "术语 id={id} 不存在"
 
+# ---- Wiki 知识管理（feat-wiki-knowledge）----
+MSG_WIKI_PAGE_NOT_FOUND = "知识条目「{pageId}」不存在"
+MSG_WIKI_PAGE_DUPLICATE = "知识条目 ID「{pageId}」已存在"
+MSG_WIKI_PAGE_DIMENSION_INVALID = "知识维度「{dimension}」不合法"
+MSG_WIKI_PAGE_STAGE_INVALID = "知识结构阶段「{stage}」不合法"
+MSG_WIKI_PAGE_STATUS_INVALID = "知识条目状态「{status}」不合法"
+MSG_WIKI_PAGE_ID_INVALID = "知识条目 ID 不能为空，且仅允许字母、数字、连字符与下划线"
+MSG_WIKI_IMPORT_TASK_TYPE_INVALID = "导入任务类型「{taskType}」不合法"
+MSG_WIKI_IMPORT_SOURCE_TYPE_INVALID = "导入来源类型「{sourceType}」不合法"
+
+# --- M8：Agent 工具（wiki_search / wiki_read / rule_evaluate / coverage_status）---
+MSG_WIKI_AGENT_PAGE_REF_NOT_FOUND = "没有找到与「{ref}」匹配的知识条目"
+MSG_WIKI_AGENT_PAGE_REF_AMBIGUOUS = "「{ref}」匹配到 {count} 条知识，请指明具体条目"
+MSG_WIKI_AGENT_RULE_NO_EXAMPLES = (
+    "知识条目「{pageId}」的规则没有存 dry-run 样例，无法试跑 —— "
+    "请先在条目上补充样例（input + expectedOutput.matched）"
+)
+
+# --- M2：导入任务 + LLM 调用层 ---
+MSG_WIKI_LLM_MODEL_UNUSABLE = "模型「{modelName}」无可用凭据，无法调用"
+MSG_WIKI_LLM_EMPTY_RESPONSE = "AI 返回内容为空，请稍后重试"
+MSG_WIKI_LLM_PARSE_ERROR = "AI 返回格式无法解析，请稍后重试"
+MSG_WIKI_IMPORT_NO_DRAFTS = "未解析出任何可导入的知识条目，请检查内容中的标题层级"
+MSG_WIKI_IMPORT_MODEL_REQUIRED = "开启自动分类时必须指定处理模型（modelId）"
+MSG_WIKI_IMPORT_ALL_FAILED = "全部条目导入失败，请检查草稿内容或 pageId 是否重复"
+MSG_WIKI_IMPORT_ABORTED = "导入过程中发生未预期错误，任务已中止，请查看服务端日志"
+MSG_WIKI_IMPORT_CLASSIFY_INCOMPLETE = (
+    "{count} 条知识未能完成自动分类（已按未分类入库），可稍后批量重分类补做"
+)
+
+# 上传解析（M2 补充）：两条消息刻意分开，因为处置动作不同 ——
+# 「格式不支持」换格式即可，「文件读不出内容」要换文件。合并成一句会让
+# 用户拿着一个损坏的 PDF 反复换扩展名。
+MSG_WIKI_IMPORT_FILE_TYPE_UNSUPPORTED = (
+    "不支持的文件类型「{filename}」，请上传 PDF / Word(.docx) / Markdown / 纯文本。"
+    "老式 .doc 请先另存为 .docx。"
+)
+MSG_WIKI_IMPORT_FILE_PARSE_FAILED = (
+    "文件解析失败，可能是文件已损坏或内容加密。请确认后重试（服务端日志有详细原因）"
+)
+MSG_WIKI_IMPORT_FILE_TOO_LARGE = (
+    "文件过大（{size} MB），单次上传上限 {max} MB"
+)
+
+# --- M3：学习闭环反馈 ---
+MSG_WIKI_FEEDBACK_ACTION_INVALID = "反馈动作「{action}」不合法"
+MSG_WIKI_FEEDBACK_ENTITY_TYPE_INVALID = "反馈目标类型「{entityType}」不合法"
+MSG_WIKI_FEEDBACK_MECHANISM_INVALID = "反馈机制「{mechanism}」不合法"
+MSG_WIKI_FEEDBACK_MODIFICATION_REQUIRED = "反馈动作 MODIFY 必须携带 userModification"
+MSG_WIKI_FEEDBACK_MODIFICATION_UNEXPECTED = (
+    "反馈动作 {action} 不应携带 userModification"
+)
+
+# --- M4：关系发现 ---
+MSG_WIKI_RELATION_NOT_FOUND = "知识关系 id={relationId} 不存在"
+MSG_WIKI_RELATION_REVIEW_ACTION_INVALID = "关系审核动作「{action}」不合法"
+MSG_WIKI_RELATION_ALREADY_REVIEWED = (
+    "知识关系 id={relationId} 已是「{action}」状态，无需重复审核"
+)
+
+# --- M5：冲突检测（机制 3）---
+MSG_WIKI_CONFLICT_NOT_FOUND = "知识冲突 id={conflictId} 不存在"
+MSG_WIKI_CONFLICT_ACTION_INVALID = "冲突处置动作「{action}」不合法"
+MSG_WIKI_CONFLICT_ALREADY_RESOLVED = (
+    "知识冲突 id={conflictId} 已处置（{action}），无需重复处置"
+)
+
+# --- M5：结构化建议（机制 4）---
+MSG_WIKI_SUGGESTION_NOT_FOUND = "结构化建议 id={suggestionId} 不存在"
+MSG_WIKI_SUGGESTION_ALREADY_RESOLVED = (
+    "结构化建议 id={suggestionId} 已处置（{status}），无需重复处置"
+)
+
+# --- M6：可执行规则与渐进结构（机制 5）---
+MSG_WIKI_RULE_NOT_FOUND = "知识条目「{pageId}」还没有可执行规则"
+MSG_WIKI_WORKFLOW_NOT_FOUND = "知识条目「{pageId}」还没有结构化流程"
+MSG_WIKI_RULE_CONDITIONS_REQUIRED = (
+    "规则至少要有一个条件：无条件规则会命中全部记录，不能物化也不能求值"
+)
+MSG_WIKI_RULE_OPERATOR_UNSUPPORTED = (
+    "规则算子「{operator}」系统不认识，无法判定（可用：>= <= > < = != IN、NOT IN）"
+)
+MSG_WIKI_RULE_VALUE_SHAPE_INVALID = (
+    "算子 {operator} 的取值必须是非空数组：写成单值这条规则永远判不了，却看不出坏"
+)
+MSG_WIKI_RULE_EXAMPLE_INVALID = (
+    "dry-run 样例 #{index} 形状不合法：需要 input（对象）与 expectedOutput.matched（布尔）"
+)
+
+
+# --- M7：覆盖度自感知（机制 6）---
+MSG_WIKI_COVERAGE_DOMAIN_EMPTY = "业务域不能为空（空串会让这一格无从归类）"
+MSG_WIKI_COVERAGE_DOMAIN_TOO_LONG = (
+    "业务域「{domain}」超过 {maxLength} 字符，超出列宽会被数据库拒绝"
+)
+MSG_WIKI_COVERAGE_CLASS_NOT_FOUND = "本体类 id={classId} 不存在或已下线"
+MSG_WIKI_COVERAGE_MAPPING_NOT_FOUND = (
+    "本体类 id={classId} 没有标注业务域「{domain}」"
+)
+MSG_WIKI_COVERAGE_STATUS_INVALID = "覆盖度状态「{status}」不合法"
+
 
 # =============================================================================
 # 图表（Chart）

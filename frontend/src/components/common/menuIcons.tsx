@@ -8,6 +8,7 @@ import {
   NumberOutlined, SettingOutlined, ApiOutlined, HeartOutlined,
   SafetyCertificateOutlined, ClusterOutlined, TagsOutlined, ToolOutlined,
   UserOutlined, TeamOutlined, UsergroupAddOutlined, MenuOutlined, ImportOutlined,
+  BookOutlined,
 } from "@ant-design/icons";
 
 // Ant Design icon exports are ForwardRefExoticComponent objects, not plain functions.
@@ -28,6 +29,7 @@ export const ICON_REGISTRY: Record<string, ComponentType> = {
   tags: wrap(TagsOutlined), tool: wrap(ToolOutlined),
   user: wrap(UserOutlined), team: wrap(TeamOutlined), org: wrap(UsergroupAddOutlined),
   menu: wrap(MenuOutlined), import: wrap(ImportOutlined),
+  book: wrap(BookOutlined),
 };
 
 export const renderIcon = (code?: string): ReactNode => {

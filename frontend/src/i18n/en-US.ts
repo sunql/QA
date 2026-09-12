@@ -76,6 +76,7 @@ export const enUS = {
     section: {
       aiAgent: "AI Agent",
       analytics: "Smart Analytics",
+      enterpriseWiki: "Enterprise Wiki",
       bizConfig: "Business Config",
       foundation: "Foundation",
       systemConfig: "System Config",
@@ -112,6 +113,11 @@ export const enUS = {
       adminOrganizations: "Organizations",
       adminMenus: "Menus",
       adminSystemConfig: "System Config",
+      wikiPages: "Knowledge Pages",
+      wikiImport: "Knowledge Import",
+      wikiConflicts: "Conflict Detection",
+      wikiSuggestions: "Structure Suggestions",
+      wikiCoverage: "Coverage Dashboard",
     },
   },
 
@@ -1601,6 +1607,280 @@ export const enUS = {
       csv: "Export CSV",
       json: "Export JSON Lines",
       loading: "Exporting...",
+    },
+  },
+
+  // Knowledge import wizard (feat-wiki-knowledge M2)
+  wikiImport: {
+    title: "Knowledge Import",
+    steps: {
+      source: "Paste Source",
+      model: "Select Model",
+      preview: "Preview Drafts",
+      confirm: "Result",
+    },
+    uploadButton: "Upload file",
+    uploadHint:
+      "Supports PDF / Word (.docx) / Markdown / plain text. The extracted text fills the box below so you can check it before splitting.",
+    sourceLabel: "Raw content (Markdown; split by the shallowest heading level)",
+    sourcePlaceholder:
+      "Paste the knowledge source here, e.g.:\n\n## Supplier Admission Rules\n\nRegistered capital >= 10M.\n\n## Supplier Tiering Rules\n\nA/B/C by annual spend.",
+    sourceTypeLabel: "Source type",
+    sourceRefLabel: "Source reference",
+    sourceRefPlaceholder: "File name, document id, or link — for traceability",
+    autoClassifyLabel: "Auto-classify",
+    autoClassifyHint:
+      "When on, each entry is classified by the model (adjustable later)",
+    modelLabel: "Processing model",
+    modelPlaceholder: "Pick an available model",
+    noModels: "No model available — add one under Model Config first",
+    modelUnusable: "unusable",
+    fallbackModelLabel: "Fallback model (optional)",
+    fallbackModelPlaceholder: "Used automatically when the primary call fails",
+    previewSummary:
+      "{count} draft(s) parsed (limit {max}). Edit titles and content before importing.",
+    draftIndex: "Draft {index}",
+    columns: {
+      title: "Title",
+      content: "Content",
+      status: "Status",
+      total: "Total",
+      success: "Succeeded",
+      failed: "Failed",
+      errorMessage: "Notes",
+    },
+    actions: {
+      removeDraft: "Remove",
+      repreview: "Re-split",
+      execute: "Import",
+      importAnother: "Import another batch",
+      reloadModels: "Reload",
+    },
+    resultMessage: "Import task finished with status: {status}",
+    resultCounts:
+      "{total} total, {success} succeeded, {failed} failed, cost ${cost}",
+    tasksTitle: "Recent import tasks",
+    noTasks: "No import tasks yet",
+    errors: {
+      previewFailed: "Failed to split the source — please check the content",
+      parseFileFailed:
+        "Could not parse the file. Use PDF / Word (.docx) / Markdown / plain text; legacy .doc must be re-saved as .docx.",
+      fileTooLarge: "The file is too large (10 MB per upload). Split or compress it and retry.",
+      modelUnusable:
+        "The selected model is unavailable. Pick another one (add credentials under Model Config).",
+      modelsLoadFailed:
+        "Failed to load the model list. You cannot continue while the model dropdown is empty.",
+      tooManyDrafts:
+        "This source splits into {count} entries, over the {max}-per-import limit. Remove some drafts first, or import in batches.",
+    },
+  },
+
+  // Knowledge pages (feat-wiki-knowledge M7, mechanism 1)
+  wikiPages: {
+    title: "Knowledge Pages",
+    empty: "No knowledge pages yet — create one, or bulk-import under Knowledge Import",
+    undetermined: "Undetermined",
+    filters: {
+      dimension: "Filter by dimension",
+      status: "Filter by status",
+    },
+    columns: {
+      title: "Title",
+      dimension: "Dimension",
+      status: "Status",
+      structureStage: "Structure",
+      version: "Version",
+    },
+    dimensions: {
+      OBJECT: "Business Object",
+      RULE: "Business Rule",
+      PROCESS: "Business Process",
+      CONCEPT: "Business Definition",
+      METRIC: "Business Metric",
+      POLICY: "Policy",
+      DOCUMENT: "Document",
+      FAQ: "FAQ",
+    },
+    statuses: {
+      DRAFT: "Draft",
+      REVIEW: "In review",
+      APPROVED: "Approved",
+      EFFECTIVE: "Effective",
+      EXPIRED: "Expired",
+    },
+    actions: {
+      create: "New page",
+      saveDimension: "Confirm classification",
+      rejectDimension: "Reject classification",
+    },
+    form: {
+      content: "Content (Markdown)",
+    },
+    detail: {
+      meta: "Page {pageId} | v{version} | stage {stage}",
+      dimension: "Dimension",
+      noSuggestion:
+        "No auto-classification for this page (classification was off at import, or the model returned nothing).",
+      suggestion: "Model suggests: {dimension} (confidence {confidence})",
+      rejectHint:
+        "Rejecting means this knowledge belongs to no dimension. It is recorded as learning feedback to correct the classifier.",
+      statusTitle: "Lifecycle status",
+      content: "Content",
+    },
+    errors: {
+      titleRequired: "Title is required",
+      contentRequired: "Content is required",
+      reclassifyFailed: "Failed to record the classification. Please retry.",
+      deleteFailed: "Delete failed. Please retry.",
+      statusUpdateFailed: "Status update failed. Please retry.",
+    },
+  },
+
+  // Conflict detection (feat-wiki-knowledge M7, mechanism 3)
+  wikiConflicts: {
+    title: "Conflict Detection",
+    empty: "No conflicts match the filters",
+    idSeparator: ", ",
+    filters: {
+      status: "Filter by status",
+      severity: "Filter by severity",
+      type: "Filter by type",
+    },
+    columns: {
+      type: "Type",
+      severity: "Severity",
+      pageIds: "Pages",
+      description: "Description",
+      detectedBy: "Detected by",
+    },
+    types: {
+      CONTRADICTION: "Contradiction",
+      STALENESS: "Staleness",
+      GAP: "Gap",
+      OVERLAP: "Overlap",
+    },
+    severities: {
+      CRITICAL: "Critical",
+      HIGH: "High",
+      MEDIUM: "Medium",
+      LOW: "Low",
+    },
+    statuses: {
+      OPEN: "Open",
+      RESOLVED: "Resolved",
+    },
+    detectors: {
+      RULE: "Rule",
+      LLM: "Model",
+    },
+    actions: {
+      resolve: "Resolve",
+      RESOLVED: "Fixed",
+      MERGED: "Merged",
+      IGNORED: "False positive",
+    },
+    resolvePlaceholder: "Choose an outcome",
+    resolveHint:
+      "Only “false positive” means the detector was wrong. It feeds mechanism 3's accuracy stats, so do not pick it casually.",
+    errors: {
+      alreadyResolved:
+        "This conflict was already resolved (terminal state). The list has been refreshed.",
+      resolveFailed: "Resolve failed. Please retry.",
+    },
+  },
+
+  // Structure suggestion workbench (feat-wiki-knowledge M7, mechanism 4)
+  wikiSuggestions: {
+    title: "Structure Suggestions",
+    empty: "No suggestions match the filters",
+    orphan: "(page no longer exists: {pageId})",
+    confirmAccept:
+      "Accepting materializes an executable rule / process draft and cannot be undone. Accept?",
+    confirmReject: "Rejecting moves this suggestion to a terminal state. Reject?",
+    filters: {
+      status: "Filter by status",
+    },
+    columns: {
+      pageTitle: "Knowledge page",
+      dimension: "Suggested dimension",
+      structure: "Extracted structure",
+      confidence: "Confidence",
+      status: "Status",
+    },
+    statuses: {
+      PENDING: "Pending",
+      ACCEPTED: "Accepted",
+      REJECTED: "Rejected",
+    },
+    actions: {
+      generate: "Generate",
+      accept: "Accept",
+      reject: "Reject",
+    },
+    generatePageLabel: "Knowledge page",
+    generatePagePlaceholder: "Search by title",
+    generateModelLabel: "Extraction model (optional)",
+    generateModelPlaceholder: "Leave empty for deterministic pre-screening only",
+    generateHint:
+      "Works without a model: deterministic pre-screening first tells you which kind of structured knowledge this looks like, and you decide whether to spend a model call.",
+    errors: {
+      generateFailed: "Failed to generate suggestions. Please retry.",
+      alreadyResolved:
+        "This suggestion was already resolved (terminal state). The list has been refreshed.",
+      resolveFailed: "Resolve failed. Please retry.",
+    },
+  },
+
+  // Coverage dashboard (feat-wiki-knowledge M7, mechanism 6)
+  wikiCoverage: {
+    title: "Coverage Dashboard",
+    unassigned: "No domain",
+    gapsTitle: "Knowledge gaps",
+    noGaps: "No gaps — every domain-tagged class has usable knowledge",
+    mappingsTitle: "Business domain tags",
+    noMappings: "No ontology class has been tagged with a domain yet",
+    unlinkedTitle: "{count} page(s) are not linked to any confirmed business object",
+    unlinkedHint:
+      "These pages are invisible in the coverage matrix (every cell is tied to a class), and Agents cannot find them when searching by business object either. Link them or fix their dimension.",
+    pageCounts: "{total} total / {approved} approved",
+    confirmRemove:
+      "Removing this tag sends the related cells back to “no domain”. Continue?",
+    classPlaceholder: "Search ontology class",
+    domainPlaceholder: "Type or pick a domain",
+    domainHint:
+      "A domain is a classification axis, not a fixed vocabulary: when knowledge reaches a new area, just type the new domain.",
+    refreshDone:
+      "Refreshed: {cells} cells covering {mapped}/{classes} domain-tagged classes, {removed} stale cell(s) removed.",
+    actions: {
+      refresh: "Refresh coverage",
+      addMapping: "Tag domain",
+    },
+    summary: {
+      totalCells: "Matrix cells",
+      missing: "Fully missing",
+      // Deliberately not "Covered" — that duplicates statuses.COMPLETE on the
+      // same screen (stat card vs. table tag), reading like the same number twice.
+      complete: "Covered cells",
+      unassigned: "Untagged cells",
+    },
+    statuses: {
+      COMPLETE: "Covered",
+      PARTIAL: "Partial",
+      OUTDATED: "Outdated",
+      MISSING: "Missing",
+    },
+    columns: {
+      dimension: "Dimension",
+      className: "Ontology class",
+      domain: "Domain",
+      status: "Coverage",
+      pages: "Pages",
+    },
+    errors: {
+      refreshFailed: "Refresh failed. Please retry.",
+      removeFailed: "Remove failed. Please retry.",
+      mappingGone:
+        "That tag is already gone (someone may have just removed it). The list has been refreshed.",
     },
   },
 

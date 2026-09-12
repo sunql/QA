@@ -28,6 +28,11 @@ import AdminRolesPage from "./pages/AdminRolesPage";
 import AdminOrganizationsPage from "./pages/AdminOrganizationsPage";
 import AdminMenusPage from "./pages/AdminMenusPage";
 import AdminSystemConfigPage from "./pages/AdminSystemConfigPage";
+import AdminWikiImportPage from "./pages/AdminWikiImportPage";
+import AdminWikiPagesPage from "./pages/AdminWikiPagesPage";
+import AdminWikiConflictsPage from "./pages/AdminWikiConflictsPage";
+import AdminWikiSuggestionsPage from "./pages/AdminWikiSuggestionsPage";
+import AdminWikiCoveragePage from "./pages/AdminWikiCoveragePage";
 import BusinessObjectPage from "./pages/BusinessObjectPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
@@ -65,6 +70,11 @@ export default function App() {
         <Route path="admin/organizations" element={<AdminOrganizationsPage />} />
         <Route path="admin/menus" element={<AdminMenusPage />} />
         <Route path="admin/system-config" element={<AdminSystemConfigPage />} />
+        <Route path="admin/wiki-pages" element={<AdminWikiPagesPage />} />
+        <Route path="admin/wiki-import" element={<AdminWikiImportPage />} />
+        <Route path="admin/wiki-conflicts" element={<AdminWikiConflictsPage />} />
+        <Route path="admin/wiki-suggestions" element={<AdminWikiSuggestionsPage />} />
+        <Route path="admin/wiki-coverage" element={<AdminWikiCoveragePage />} />
         <Route path="business-objects" element={<BusinessObjectPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />

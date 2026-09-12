@@ -49,7 +49,7 @@ const emptySnapshot: RoutingMetricsSnapshot = {
   avgTotalDurationMs: 0,
 };
 
-function renderPage(snapshot: RoutingMetricsSnapshot = mockSnapshot) {
+function renderPage(_snapshot: RoutingMetricsSnapshot = mockSnapshot) {
   return render(
     <I18nextProvider i18n={i18n}>
       <ConfigProvider locale={zhCN}>

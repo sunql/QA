@@ -19,12 +19,25 @@ MVP 注册 3 个工具，包装既有领域服务：
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.infrastructure.llm.base_client import BaseLlmClient
+# 类型契约下沉到 agent_tool_types（M8）：agent_tools_wiki 也要构造 ToolResult，
+# 若类型留在本模块，两个 handler 模块就互为导入方 —— 循环。这里 re-export，
+# 既有 `from app.services.agent_tools import ToolResult` 全部照旧可用。
+from app.services.agent_tool_types import (
+    AgentHandler,
+    AgentTool,
+    AgentToolContext,
+    ArgExtractor,
+    LlmFactory,
+    ToolResult,
+)
+from app.services.agent_tools_wiki import (
+    WIKI_ARG_EXTRACTORS,
+    WIKI_HANDLERS,
+)
 from app.services.graph_traversal_service import GraphTraversalService
 from app.services.intent_service import (
     extractSupplierAnyKey,
@@ -37,45 +50,19 @@ from app.services.supplier_risk_service import SupplierRiskService, buildRiskAns
 
 logger = logging.getLogger(__name__)
 
-LlmFactory = Callable[[Any], BaseLlmClient]
-
-
-@dataclass(frozen=True)
-class AgentToolContext:
-    """工具执行上下文（每次 run 注入；不可变）。"""
-
-    llm_factory: LlmFactory | None = None
-    actor: str = "runtime"
-
-
-@dataclass(frozen=True)
-class ToolResult:
-    """工具执行结果。data 必须 JSON-serializable（camelCase alias 对齐 API 契约）。"""
-
-    data: dict
-    answer: str
-    tokens_used: int = 0
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    cost: float = 0.0
-    llm_model_name: str | None = None
-
-
-AgentHandler = Callable[[AsyncSession, dict, AgentToolContext], Awaitable[ToolResult]]
-ArgExtractor = Callable[[str], dict | None]
-
-
-@dataclass(frozen=True)
-class AgentTool:
-    """Agent 可调用的工具（function-calling 风格注册元数据）。"""
-
-    name: str
-    description: str
-    data_object: str  # ACL 主题，与 AgentAccessPolicy.data_object 对齐
-    input_schema: dict  # JSON Schema（供未来 LLM function calling 复用）
-    arg_extractor: ArgExtractor  # 原始输入 → args dict；解析失败返回 None
-    handler: AgentHandler  # 用解析后的 args 执行并返回 ToolResult
-    data_layers: tuple[str, ...] = ()  # 工具读取的数据层（DIM/DWD/FEATURE…）；() = 层无关（回退到对象粒度）
+__all__ = [
+    "ARG_EXTRACTORS",
+    "AgentHandler",
+    "AgentTool",
+    "AgentToolAssembly",
+    "AgentToolContext",
+    "AgentToolRegistry",
+    "ArgExtractor",
+    "BUILTIN_HANDLERS",
+    "LlmFactory",
+    "NL2SQL_HANDLERS",
+    "ToolResult",
+]
 
 
 class AgentToolRegistry:
@@ -233,6 +220,9 @@ BUILTIN_HANDLERS: dict[str, AgentHandler] = {
     "supplier_360": _supplier360Handler,
     "supplier_risk": _supplierRiskHandler,
     "graph_traverse": _graphTraverseHandler,
+    # feat-wiki-knowledge M8：知识工具的实现集中在 agent_tools_wiki，
+    # 这里只做登记（handler 引擎在代码、元数据在 DB 的既有分工）。
+    **WIKI_HANDLERS,
 }
 
 NL2SQL_HANDLERS: dict[str, AgentHandler] = {
@@ -243,6 +233,7 @@ ARG_EXTRACTORS: dict[str, ArgExtractor] = {
     "supplier_key": lambda raw: _supplierKeyArgs(raw, extractSupplierKey),
     "supplier_risk_key": lambda raw: _supplierKeyArgs(raw, extractSupplierRiskKey),
     "supplier_graph_key": lambda raw: _supplierKeyArgs(raw, extractSupplierGraphKey),
+    **WIKI_ARG_EXTRACTORS,
 }
 
 _VALID_HANDLER_REFS: dict[str, frozenset[str]] = {

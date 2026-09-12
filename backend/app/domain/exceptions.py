@@ -160,3 +160,25 @@ class FeatureRuleValidationError(ValidationError):
 
 class LLMUnavailableError(DomainError):
     """LLM 服务不可用（spec §9.2 + §7.3）。"""
+
+
+def statusForError(exc: DomainError) -> int:
+    """领域异常 → HTTP 状态码（**唯一**映射源）。
+
+    生产 app（``main.py``）与测试 app（``tests/_testapp.py``）共用此函数。
+    此前两处各写一份，``LLMUnavailableError`` 只在生产那份里有 → 测试断言
+    503 而测试 app 实际返回 400，断言与真实行为脱节。
+    """
+    if isinstance(exc, NotFoundError):
+        return 404
+    if isinstance(exc, ConflictError):
+        return 409
+    if isinstance(exc, ValidationError):
+        # 一并覆盖子类 BusinessObjectGraphLabelMismatchError /
+        # FeatureRuleValidationError 等
+        return 422
+    if isinstance(exc, PermissionDeniedError):
+        return 403
+    if isinstance(exc, LLMUnavailableError):
+        return 503
+    return 400

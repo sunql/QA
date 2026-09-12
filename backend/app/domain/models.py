@@ -1675,6 +1675,36 @@ class FeatureRuleThreshold(Base):
         )
 
 
+# Re-export Wiki 覆盖度表（0059 = M7 机制 6：class→域映射 + 覆盖度矩阵）。
+# 与 wiki_learning_models 分文件同理由：覆盖度是**派生快照**，生命周期与
+# 知识本体/管线表都不同（可整体重算、可清空重建）。
+from app.domain.wiki_coverage_models import (  # noqa: E402,F401
+    ClassDomainMapping,
+    CoverageCell,
+)
+
+# Re-export Wiki 学习管线表（0054 = M2 导入/计量，0055 = M3 反馈事件流，
+# 0057 = M5 机制 3/4 的冲突与结构化建议，0058 = M6 机制 5 的结构化产物）。
+from app.domain.wiki_learning_models import (  # noqa: E402,F401
+    KnowledgeConflict,
+    LearningFeedback,
+    ProcessWorkflow,
+    StructureSuggestion,
+    WikiImportTask,
+    WikiRuleExecutable,
+    WikiTokenUsage,
+)
+
+# Re-export Wiki 知识管理 4 表（0053 migration，Phase 8 M1）。同样为了让
+# Schema drift 校验与 alembic autogenerate 看到这些表；wiki 模型独立成文件
+# 是为了避免本文件继续膨胀（已 1700+ 行）。
+from app.domain.wiki_models import (  # noqa: E402,F401
+    Evidence,
+    KnowledgeClaim,
+    KnowledgeRelation,
+    WikiPage,
+)
+
 # Re-export MenuConfig so Alembic autogenerate picks it up.
 from app.models.menu_config import MenuConfig  # noqa: E402,F401
 

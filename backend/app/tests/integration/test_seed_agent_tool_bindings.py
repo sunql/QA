@@ -64,7 +64,7 @@ async def cleanup(client):
 
 
 @pytest.mark.asyncio
-async def test_seed_inserts_three_rows_from_AGENT_BINDINGS():
+async def test_seed_inserts_all_rows_from_AGENT_BINDINGS():
     factory = getSessionFactory()
     async with factory() as session:
         inserted = await seed_agent_tool_bindings(session)
@@ -91,5 +91,5 @@ async def test_seed_is_idempotent():
     async with factory() as session:
         first = await seed_agent_tool_bindings(session)
         second = await seed_agent_tool_bindings(session)
-    assert first == 3
+    assert first == len(_AGENT_DEFAULT_BINDINGS)
     assert second == 0  # 第二次无新增

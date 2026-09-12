@@ -51,10 +51,10 @@ async def test_returns_200_with_default_stub_user_when_no_headers(
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["version"] == "2026-09-01"
-    assert len(body["sections"]) == 6
+    assert len(body["sections"]) == 7
 
 
-async def test_authenticated_returns_six_sections_with_expected_shape(
+async def test_authenticated_returns_seven_sections_with_expected_shape(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:
     """admin headers + seed：顶层 envelope + section camelCase 字段。"""
@@ -66,7 +66,7 @@ async def test_authenticated_returns_six_sections_with_expected_shape(
     body = resp.json()
     assert body["version"] == "2026-09-01"
     assert isinstance(body["sections"], list)
-    assert len(body["sections"]) == 6
+    assert len(body["sections"]) == 7
 
     first = body["sections"][0]
     # Pydantic CamelModel 产出的字段名（与 brief 一致）

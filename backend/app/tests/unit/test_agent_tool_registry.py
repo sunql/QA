@@ -63,17 +63,41 @@ class TestBuiltinRegistry:
         )
 
     def test_BUILTIN_HANDLERS_unchanged(self):
-        """handler dicts 仍由代码持有（BUILTIN/NL2SQL），DB 仅存元数据。"""
+        """handler dicts 仍由代码持有（BUILTIN/NL2SQL），DB 仅存元数据。
+
+        M8 起 BUILTIN 含 4 个 Wiki 知识工具（实现在 agent_tools_wiki，
+        这里只登记）；本断言是「注册表表面」的契约，新增工具必须同步。
+        """
         from app.services.agent_tools import BUILTIN_HANDLERS
         assert set(BUILTIN_HANDLERS.keys()) == {
-            "supplier_360", "supplier_risk", "graph_traverse"
+            "supplier_360", "supplier_risk", "graph_traverse",
+            "wiki_search", "wiki_read", "rule_evaluate", "coverage_status",
         }
 
     def test_ARG_EXTRACTORS_unchanged(self):
         from app.services.agent_tools import ARG_EXTRACTORS
         assert set(ARG_EXTRACTORS.keys()) == {
             "supplier_key", "supplier_risk_key", "supplier_graph_key",
+            "wiki_text", "wiki_no_args",
         }
+
+    def test_wiki_extractors_pass_text_through(self):
+        """Wiki 指称没有固定格式：整条输入即检索词，不做正则切分。"""
+        from app.services.agent_tools import ARG_EXTRACTORS
+        assert ARG_EXTRACTORS["wiki_text"]("  供应商准入要求  ") == {
+            "query": "供应商准入要求"
+        }
+
+    def test_wiki_extractors_empty_input_is_422_not_empty_query(self):
+        """空输入必须返回 None（运行时转 422），不能变成「检索空字符串」。"""
+        from app.services.agent_tools import ARG_EXTRACTORS
+        assert ARG_EXTRACTORS["wiki_text"]("   ") is None
+
+    def test_wiki_no_args_extractor_never_blocks(self):
+        """无参工具对任意输入都解析成功——覆盖率查询不该因为一句话为空而 422。"""
+        from app.services.agent_tools import ARG_EXTRACTORS
+        assert ARG_EXTRACTORS["wiki_no_args"]("") == {}
+        assert ARG_EXTRACTORS["wiki_no_args"]("现在的覆盖度如何") == {}
 
     def test_arg_extractors_parse_supplier_key(self):
         """内置 extractor 与 intent_service 正则对齐，中文问句可解析出 key。"""

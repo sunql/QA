@@ -141,7 +141,11 @@ class TestRuntimeResolveTool:
         await agent_tool_config_registry.warmUp(dbSession)
         count2 = len(agent_tool_config_registry.all())
         assert count1 == count2
-        assert count1 == 3  # 3 个 seed 工具
+        # 不断言精确总数：这个库里还有 conftest 的 autouse 种子与其它测试文件
+        # 写入的工具，精确计数是跨文件状态耦合（工具清单一变就误报）。
+        assert {s["name"] for s in _TOOL_SEEDS} <= {
+            t.name for t in agent_tool_config_registry.all()
+        }
 
     async def test_invalidate_full_reload(self, dbSession) -> None:
         """invalidate（无 name）后所有工具从 DB 重读。"""

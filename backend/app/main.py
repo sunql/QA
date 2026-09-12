@@ -19,7 +19,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from app import __version__
 from app.config import getSettings
 from app.domain.error_messages import MSG_API_DESCRIPTION
-from app.domain.exceptions import DomainError
+from app.domain.exceptions import DomainError, statusForError
 from app.domain.schemas import ErrorResponse, HealthResponse
 from app.infrastructure.database import disposeEngine, getEngine
 from app.infrastructure.rate_limit import limiter, rateLimitExceededHandler
@@ -260,6 +260,8 @@ def createApp() -> FastAPI:
         term_dictionary,
         users,
         vectors,
+        wiki,
+        wiki_import,
     )
 
     app.include_router(model_config.router, prefix="/api/v1/models", tags=["models"])
@@ -341,6 +343,8 @@ def createApp() -> FastAPI:
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"]
     )
     app.include_router(vectors.router, prefix="/api/v1/system", tags=["system"])
+    app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
+    app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
 
     @app.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:
@@ -354,7 +358,7 @@ def registerExceptionHandlers(app: FastAPI) -> None:
 
     @app.exception_handler(DomainError)
     async def handleDomainError(request: Request, exc: DomainError) -> JSONResponse:
-        status = _statusFor(exc)
+        status = statusForError(exc)
         logger.warning("领域异常 %s: %s (path=%s)", type(exc).__name__, exc.message, request.url.path)
         return JSONResponse(
             status_code=status,
@@ -364,32 +368,6 @@ def registerExceptionHandlers(app: FastAPI) -> None:
                 details=getattr(exc, "details", None),
             ).model_dump(by_alias=True),
         )
-
-
-def _statusFor(exc: DomainError) -> int:
-    """领域异常 -> HTTP 状态码。"""
-    from app.domain.exceptions import (
-        BusinessObjectGraphLabelMismatchError,
-        ConflictError,
-        LLMUnavailableError,
-        NotFoundError,
-        PermissionDeniedError,
-        ValidationError,
-    )
-
-    if isinstance(exc, NotFoundError):
-        return 404
-    if isinstance(exc, ConflictError):
-        return 409
-    if isinstance(exc, ValidationError):
-        return 422
-    if isinstance(exc, BusinessObjectGraphLabelMismatchError):
-        return 422
-    if isinstance(exc, PermissionDeniedError):
-        return 403
-    if isinstance(exc, LLMUnavailableError):
-        return 503
-    return 400
 
 
 app = createApp()

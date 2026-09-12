@@ -11,6 +11,15 @@ class DocumentParserError(Exception):
     pass
 
 
+class UnsupportedFileTypeError(DocumentParserError):
+    """文件类型不在支持范围内。
+
+    与「文件损坏」分开：前者换格式即可，后者要换文件。调用方要据此给出
+    **不同**的提示，合并成一句会让用户拿着一个损坏的 PDF 反复换扩展名。
+    """
+    pass
+
+
 async def parse_document(content: bytes, mime_type: str, filename: str) -> str:
     """解析文档内容为纯文本。
 
@@ -33,12 +42,15 @@ async def parse_document(content: bytes, mime_type: str, filename: str) -> str:
     if mime_type == "application/pdf" or ext == "pdf":
         return _parse_pdf(content)
 
+    # 只认 docx（OOXML 包），**不含**老式二进制 ``.doc``：python-docx 读不了
+    # 后者，会抛 ``Package not found`` —— 那是个误导性的「解析失败」，真相是
+    # 「这种格式根本不支持」。
     if mime_type in (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ) or ext in ("docx", "doc"):
+    ) or ext == "docx":
         return _parse_docx(content)
 
-    raise DocumentParserError(f"Unsupported file type: {mime_type} ({filename})")
+    raise UnsupportedFileTypeError(f"Unsupported file type: {mime_type} ({filename})")
 
 
 def _parse_pdf(content: bytes) -> str:

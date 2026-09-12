@@ -19,14 +19,20 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.schemas import _UnsetType
+from app.domain.wiki_learning_models import (
+    ProcessWorkflow,
+    StructureSuggestion,
+    WikiRuleExecutable,
+)
 from app.domain.wiki_models import (
     KNOWLEDGE_DIMENSIONS,
     STRUCTURE_STAGES,
@@ -70,6 +76,40 @@ DEFAULT_SEARCH_LIMIT = 10
 # 「指称 → 条目」的候选上限。给候选人看的是「你要找的是哪个」，超过几个就不再是
 # 澄清而是又一次检索了。
 DEFAULT_CANDIDATE_LIMIT = 5
+
+
+@dataclass(frozen=True)
+class _CascadeCounts:
+    """删除前统计到的级联行数（不可变；仅供响应回报，不参与删除决策）。"""
+
+    claims: int = 0
+    relations: int = 0
+    suggestions: int = 0
+    rules: int = 0
+    workflows: int = 0
+
+
+@dataclass(frozen=True)
+class BatchDeleteResult:
+    """批量删除的结果（不可变视图，service 的对外返回类型）。
+
+    ``notFound`` 保序（与入参顺序一致，已去掉重复项），让调用方能原样回显
+    「你没删掉的是这几条」，而不是给一个无序集合让人再去比对。
+    """
+
+    requested: int
+    deletedPageIds: tuple[str, ...]
+    notFound: tuple[str, ...]
+    cascade: _CascadeCounts
+
+
+def _dedupePreservingOrder(values: list[str]) -> list[str]:
+    """保序去重。
+
+    ``dict.fromkeys`` 依赖 Python 3.7+ 的「字典保插入序」保证 —— 用 ``set``
+    去重会打乱顺序，而 ``notFound`` 是要原样回复给用户的清单。
+    """
+    return list(dict.fromkeys(values))
 
 
 def _escapeLike(raw: str) -> str:
@@ -128,6 +168,34 @@ def _assertStatus(status: str) -> None:
     """生命周期状态白名单校验（与维度同理：挡住脏值污染状态轴统计）。"""
     if status not in WIKI_PAGE_STATUSES:
         raise ValidationError(MSG_WIKI_PAGE_STATUS_INVALID.format(status=status))
+
+
+async def _countCascadeRows(
+    session: AsyncSession, pageIds: list[str]
+) -> _CascadeCounts:
+    """统计这 5 张表里将被级联清掉的行数（**删除前**调用）。
+
+    逐表 COUNT 而不是一条带 5 个标量子查询的 SQL：5 张表的过滤列都有索引
+    （claim/relation/建议各有 ix_*，规则/流程是 page_id UNIQUE），
+    展开写更直白，而这是低频管理操作，多 4 次往返无所谓。
+    """
+    if not pageIds:
+        return _CascadeCounts()
+
+    async def _count(model, column) -> int:
+        return (
+            await session.execute(
+                select(func.count()).select_from(model).where(column.in_(pageIds))
+            )
+        ).scalar_one()
+
+    return _CascadeCounts(
+        claims=await _count(KnowledgeClaim, KnowledgeClaim.page_id),
+        relations=await _count(KnowledgeRelation, KnowledgeRelation.upstream_page_id),
+        suggestions=await _count(StructureSuggestion, StructureSuggestion.page_id),
+        rules=await _count(WikiRuleExecutable, WikiRuleExecutable.page_id),
+        workflows=await _count(ProcessWorkflow, ProcessWorkflow.page_id),
+    )
 
 
 class WikiPageService:
@@ -430,6 +498,64 @@ class WikiPageService:
         entity = await self.getPage(session, pageId)
         await session.delete(entity)
         await session.commit()
+
+    async def deletePages(
+        self, session: AsyncSession, pageIds: list[str]
+    ) -> BatchDeleteResult:
+        """批量删除知识条目（级联语义与 ``deletePage`` 完全一致）。
+
+        与单条删除的唯一区别是「一批」以及由此带来的边界行为：
+
+        - **重复 id 去重**（保序），不报错 —— 前端多选跨页保留很容易带重复项。
+        - **部分成功**：不存在的 id 进 ``notFound`` 而**不整体失败**。并发下
+          别的用户先删了同一条是正常情况，为此回滚整批会让用户永远删不掉；
+          失败项也已显式回报，不是静默吞掉。
+        - **级联只靠 DB**：``knowledge_claim`` / ``knowledge_relation`` /
+          ``structure_suggestion`` / ``wiki_rule_executable`` /
+          ``process_workflow`` 的 5 个 FK（迁移已落库）``delete_rule`` 全是
+          ``CASCADE``，``evidence`` 二级挂在 claim 之下。故这里只发一条
+          ``DELETE``，不手工删子行 —— 少 N 次往返，也不会漏表。
+        - **入站关系刻意不删**：``knowledge_relation.downstream_id`` 是
+          **多态业务键**（按 ``downstream_type`` 解释，无 DB 级 FK），指向本条
+          的那些行属于**别的条目**。删掉它们等于替别人静默丢掉一条已确认关系；
+          保留后由机制 3 的 GAP 检测标成「悬空引用」，处置权仍在业务专家手里。
+          ``deletePage`` 同理，这里保持一致。
+        - **审计**：与 ``deletePage`` 一样不写审计行（wiki 域目前无审计写入），
+          批量删除**不新起一套**审计机制 —— 要加应当两处一起加。
+
+        返回的 ``cascade`` 是**删除前**统计的行数，供调用方给用户一个交代。
+        """
+        targets = _dedupePreservingOrder(pageIds)
+        if not targets:
+            # 正常调用被 DTO 的 min_length=1 挡住；这里是内部调用者的兜底：
+            # 返回空结果比「用空 IN 列表去删」安全（后者语义可疑且无意义）。
+            return BatchDeleteResult(
+                requested=0, deletedPageIds=(), notFound=(), cascade=_CascadeCounts()
+            )
+
+        found = set(
+            (
+                await session.execute(
+                    select(WikiPage.page_id).where(WikiPage.page_id.in_(targets))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        hit = [pageId for pageId in targets if pageId in found]
+        missing = [pageId for pageId in targets if pageId not in found]
+
+        cascade = await _countCascadeRows(session, hit)
+        if hit:
+            await session.execute(delete(WikiPage).where(WikiPage.page_id.in_(hit)))
+            await session.commit()
+
+        return BatchDeleteResult(
+            requested=len(targets),
+            deletedPageIds=tuple(hit),
+            notFound=tuple(missing),
+            cascade=cascade,
+        )
 
     async def listClaims(self, session: AsyncSession, pageId: str) -> list[KnowledgeClaim]:
         """列出某 Page 的全部事实原子（含证据，靠 selectin 预取）。"""

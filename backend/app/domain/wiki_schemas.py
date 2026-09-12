@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import Field
 
@@ -36,6 +36,14 @@ MAX_SOURCE_CHARS = 1_000_000
 
 # 单次导入的草稿条数上限。
 MAX_IMPORT_DRAFTS = 200
+
+# 单次批量删除的条目条数上限。
+#
+# 与导入的 N 次 LLM 调用不同，这里的放大是 N 次**级联删除**（每条会连带清掉
+# claim/evidence/relation/建议/规则/流程）。全局 30 req/min 是按请求限流的，
+# 对「一个请求删十万条」无能为力 —— 上限必须落在 DTO 边界。
+# 100 是权衡后的取值：管理页单页 20 条，用户最多翻几页全选，够用且单请求可控。
+MAX_BATCH_DELETE_PAGES = 100
 
 # ---------------------------------------------------------------------------
 # Wiki Page
@@ -104,6 +112,54 @@ class WikiPageListRead(CamelModel):
 
     rows: list[WikiPageRead]
     total: int
+
+
+class WikiPageBatchDeleteRequest(CamelModel):
+    """批量删除知识条目。
+
+    ``pageIds`` **去重后**才是真正的目标集合。重复 id 不算入参错误：前端多选
+    跨页保留时很容易带上重复项，为此回 422 等于把去重这件实现细节推给调用方。
+
+    ``minLength=1`` 挡住空数组（空数组是调用方 bug，静默成功会让「删了 0 条」
+    看起来像成功），``maxLength`` 挡住超大批次（见 MAX_BATCH_DELETE_PAGES）。
+    """
+
+    page_ids: list[Annotated[str, Field(max_length=64)]] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_BATCH_DELETE_PAGES,
+        description=f"待删除的条目业务键，去重后最多 {MAX_BATCH_DELETE_PAGES} 个",
+    )
+
+
+class WikiPageBatchDeleteCascadeRead(CamelModel):
+    """批量删除时被 DB 级联连带清掉的行数（只报数，不回传内容）。
+
+    只统计**直接**引用 ``wiki_page`` 的 5 张表。``evidence`` 挂在 claim 之下
+    （二级级联），随 claim 一起走，不单列 —— 单列会让调用方以为
+    ``claims + evidences`` 是两批互不相干的数据。
+    """
+
+    claims: int
+    relations: int
+    suggestions: int
+    rules: int
+    workflows: int
+
+
+class WikiPageBatchDeleteRead(CamelModel):
+    """批量删除结果。
+
+    刻意**不是 204**：批量操作必须能回答「哪几条没删掉」。
+    ``notFound`` 非空不是错误（并发下别的用户先删了同一条很正常），
+    调用方据它给用户提示，而不是让整批回滚。
+    """
+
+    # 去重后的目标条数。与调用方入参的长度在有重复时不同，故显式回报。
+    requested: int
+    deleted_page_ids: list[str]
+    not_found: list[str]
+    cascade: WikiPageBatchDeleteCascadeRead
 
 
 # ---------------------------------------------------------------------------

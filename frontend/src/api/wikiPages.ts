@@ -7,6 +7,7 @@
  *   GET    /api/v1/wiki/pages/{pageId}                 — 详情
  *   PATCH  /api/v1/wiki/pages/{pageId}                 — 局部更新
  *   DELETE /api/v1/wiki/pages/{pageId}                 — 删除（204）
+ *   POST   /api/v1/wiki/pages/batch-delete             — 批量删除（200 + 逐条结果）
  *   POST   /api/v1/wiki/pages/{pageId}/reclassify      — 调整/确认/打回分类
  *   GET    /api/v1/wiki/pages/{pageId}/relations       — 传出关系
  *   POST   /api/v1/wiki/pages/{pageId}/relations/discover — 机制 2 发现候选
@@ -16,6 +17,7 @@
 import { httpClient } from "./client";
 import type {
     WikiPage,
+    WikiPageBatchDeleteResult,
     WikiPageCreate,
     WikiPageList,
     WikiPageUpdate,
@@ -75,6 +77,25 @@ export async function updateWikiPage(
 
 export async function deleteWikiPage(pageId: string): Promise<void> {
     await httpClient.delete(`${PREFIX}/pages/${pageId}`);
+}
+
+/**
+ * 批量删除知识条目。
+ *
+ * 刻意用 POST 而非 `DELETE` 带 body：DELETE 的请求体在部分代理/客户端上会被
+ * 丢掉，而 pageIds 正是「要删哪些」的全部信息，丢了就变成删错或删不掉。
+ *
+ * 后端是**部分成功**语义（不存在的 id 回在 `notFound` 里，其余照删），
+ * 所以调用方必须读返回值，不能只看 Promise 有没有 reject。
+ */
+export async function batchDeleteWikiPages(
+    pageIds: string[],
+): Promise<WikiPageBatchDeleteResult> {
+    const res = await httpClient.post<WikiPageBatchDeleteResult>(
+        `${PREFIX}/pages/batch-delete`,
+        { pageIds },
+    );
+    return res.data;
 }
 
 /**

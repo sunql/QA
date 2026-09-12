@@ -8,6 +8,7 @@
 - PATCH  /wiki/pages/{pageId}        更新条目（含维度覆盖）
 - POST   /wiki/pages/{pageId}/reclassify  机制 1：调整分类结论（写学习反馈）
 - DELETE /wiki/pages/{pageId}        删除条目（级联清理 claim/relation）
+- POST   /wiki/pages/batch-delete    批量删除条目（部分成功 + 级联报告）
 - GET    /wiki/pages/{pageId}/claims     事实原子 + 证据
 - GET    /wiki/pages/{pageId}/relations  知识关系（confirmedOnly 可选）
 - POST   /wiki/pages/{pageId}/relations/discover  机制 2：发现关系候选
@@ -72,6 +73,9 @@ from app.domain.wiki_schemas import (
     WikiConflictDetectRequest,
     WikiConflictListRead,
     WikiConflictResolveRequest,
+    WikiPageBatchDeleteCascadeRead,
+    WikiPageBatchDeleteRead,
+    WikiPageBatchDeleteRequest,
     WikiPageCreate,
     WikiPageListRead,
     WikiPageRead,
@@ -207,6 +211,50 @@ async def reclassifyPage(
 async def deletePage(pageId: str, db: AsyncSession = Depends(getDb)) -> None:
     """删除条目（DB 级联清理 claim / evidence / relation）。"""
     await _wikiPageService.deletePage(db, pageId)
+
+
+@router.post(
+    "/pages/batch-delete",
+    response_model=WikiPageBatchDeleteRead,
+    status_code=status.HTTP_200_OK,
+)
+async def batchDeletePages(
+    dto: WikiPageBatchDeleteRequest,
+    db: AsyncSession = Depends(getDb),
+) -> WikiPageBatchDeleteRead:
+    """批量删除知识条目（部分成功语义 + 级联报告）。
+
+    与 ``DELETE /pages/{pageId}`` **同一套删除语义**（路由级认证、DB 级联、
+    不写审计），区别只在「一批」与「一条」以及由此带来的边界行为：
+
+    - 重复 id 去重（保序），不算错误；
+    - 不存在的 id 进 ``notFound`` 而**不整体失败** —— 并发下别的用户先删了
+      同一条很常见，回滚整批会让用户永远删不掉。响应显式回报，不是静默吞掉。
+
+    **刻意不是 204**：批量操作必须能回答「哪几条没删掉」。
+
+    路由顺序：``/pages/batch-delete`` 与 ``/pages/{pageId}`` 段数不同
+    （前者 2 段、后者 1 段），且不存在 ``POST /pages/{pageId}``，
+    故不会被动态段吃掉。仍紧邻单条删除排列，便于以后新增参数路由时对照。
+
+    权限：沿用 router 级 ``Depends(getCurrentUser)``（见文件头说明）。
+    本模块的角色细分（谁能删）仍留到策展里程碑，本轮不做 —— 批量入口
+    **不新起一套**授权机制，否则会出现「单条删得掉、批量删不掉」这类
+    两条路径两套规则的分叉。
+    """
+    result = await _wikiPageService.deletePages(db, dto.page_ids)
+    return WikiPageBatchDeleteRead(
+        requested=result.requested,
+        deleted_page_ids=list(result.deletedPageIds),
+        not_found=list(result.notFound),
+        cascade=WikiPageBatchDeleteCascadeRead(
+            claims=result.cascade.claims,
+            relations=result.cascade.relations,
+            suggestions=result.cascade.suggestions,
+            rules=result.cascade.rules,
+            workflows=result.cascade.workflows,
+        ),
+    )
 
 
 @router.get(

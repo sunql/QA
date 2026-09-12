@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError(f"启动失败：无法连接到 {url}。{hint}") from e
     # Schema drift 校验：默认开启，SKIP_SCHEMA_CHECK=1 可关闭（紧急场景）
     if os.environ.get("SKIP_SCHEMA_CHECK") != "1":
-        from scripts.check_schema_drift import _checkDriftAsync
+        from scripts.check_schema_drift import _checkDriftAsync, _splitBySeverity
 
         try:
             issues = await _checkDriftAsync(engine)
@@ -78,9 +78,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "Schema drift 校验失败：无法确认 ORM 与 DB 一致。"
                 "如确认 DB 状态正确可设置 SKIP_SCHEMA_CHECK=1 跳过。"
             ) from e
-        if issues:
-            logger.error("Schema drift 校验失败（%d 项）：", len(issues))
-            for issue in issues:
+        # 只对 blocking 阻断启动。DB 上多出来的列/索引是历史残留（手工 DDL、
+        # 旧迁移遗留），不影响正确性，且删它们有真实丢数据风险 —— 判成阻断
+        # 等于让线上起不来。CLI 的 --strict 才把非阻断项升级为门禁。
+        blocking, warnings = _splitBySeverity(issues)
+        for issue in warnings:
+            logger.warning("Schema drift（非阻断）: %s", issue)
+        if blocking:
+            logger.error("Schema drift 校验失败（%d 类阻断漂移）：", len(blocking))
+            for issue in blocking:
                 logger.error("  - %s", issue)
             raise RuntimeError(
                 "DB schema 与 ORM 不一致，禁止启动。"

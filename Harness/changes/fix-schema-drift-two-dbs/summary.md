@@ -39,8 +39,9 @@ prod 是 **2949 行**。两库**表数相同（各 56 张）**，不存在「tes
   —— 该计划的密码登录**从未落地**（`app/models/rbac.py` 的 `User` 至今无密码字段），
   是手工 DDL 残留，全库 grep 只在计划文档里出现过
 
-**既有防线为何没拦住**：`scripts/check_schema_drift.py` 的比对粒度是**表**，
+**既有防线为何没拦住**：`scripts/check_schema_drift.py` 当时的比对粒度只有**表**，
 不查列与索引（`feat-schema-drift-detector` 的「遗留」章节已预告过这个盲区）。
+→ 该盲区已在 **§8** 消除。
 
 ## 2. 落地：Alembic 0060
 
@@ -171,11 +172,73 @@ RED 3 failed → GREEN 4 passed）。第一条用例断言的是 **ORM 列集合
    「autogenerate 不会把它们 DROP 掉」，两侧合起来才算建档完成
 
 **遗留（未做，待用户决定）**：
-- **`check_schema_drift.py` 仍只比表级**：本次漂移正是列/索引级，
-  建议扩到列 + 索引粒度（`feat-schema-drift-detector` 遗留项）。
+- ~~**`check_schema_drift.py` 仍只比表级**~~ → **已在 §8 完成**（列 + 索引粒度 + 严重级策略）。
+- **24 个 ORM 未声明的遗留索引**：见 §8.5，需决定「补进 ORM / 补迁移 / 建基线豁免」。
 - **`wiki_import_task.page_ids` 只写不读**：模型 docstring 说「失败重跑时用来跳过
   已成功项」，但全后端/前端 grep 无任何读取点。后果是重跑同批次会产出**又一份完整
   副本**（`page_id` 每次重新生成）—— 库里 587 条 `wiki_page` ≈ 同一份 75 条文档的
   7.8 份副本就是反复试导入留下的。#8 的 13 条未处理项若要补齐，目前只能整批重跑。
 - **`entity_mapping` 35 万行不在任何现存备份里**：09-09 那份 dump 本身已是丢数据
   之后的状态，本地备份链无处可寻，要恢复需外部来源。
+
+## 8. drift 校验扩到列 + 索引粒度
+
+**动因**：§1 那两库漂移**全部是列级 + 索引级**，而校验器只比表集合 → 全程静默。
+
+### 8.1 粒度与严重级
+
+新增列级（`information_schema.columns`）与索引级（`pg_index`，取列序 + 唯一性 +
+约束归属）比对。每类漂移带严重级，**`_SEVERITY_BY_CODE` 是单一事实源**，CLI 与 lifespan
+共用 `_splitBySeverity` 切分：
+
+| 严重级 | 判定 | 处置 |
+|---|---|---|
+| **blocking** | `alembic` 版本滞后；ORM 有而 DB 无的**表 / 列 / 索引**；同名索引列序不一致 | `RuntimeError` 阻断启动 |
+| **warning** | DB 有而 ORM 未声明的表 / 列 / 索引 | 仅 WARNING 日志，放行 |
+
+选择 blocking 边界前先用 `/tmp/probe_drift{,2}.py` 在**两个真库上量了实际漂移**
+（列 A/B 双向均 0、ORM-missing 索引 C=0 → 列检查与「缺索引阻断」当下安全；
+DB-extra 索引 26 个真噪音 + 132 个约束型假阳性需归一化掉），而不是拍脑袋定规则。
+
+### 8.2 顺带修掉一个潜伏 bug（HEAD `app/main.py:81`）
+
+HEAD 是 `if issues:` —— **任意** issue 都 `RuntimeError`。旧校验器只产表级 issue，所以没暴露；
+一旦加列/索引粒度，那 24 个遗留索引会**直接把容器打死**（且 `main.py` 与
+`check_schema_drift.py` 是同一份代码里的两半，只灌其一会立刻 break）。
+故本次同时改为按严重级判定。已用真实 lifespan 启动验证：
+
+```
+WARNING Schema drift（非阻断）: [db:index] ... （24 个聚合成一行）
+>>> ✅ lifespan 正常进入（未被 schema drift 阻断）
+```
+
+### 8.3 索引比较的两条归一化规则
+
+不做则产生上百条假阳性，防线当场失效：
+- PG 为每个 PK / `UniqueConstraint` 建支撑索引；ORM 侧 `UniqueConstraint` 通常**无名**
+  （`name=None`）而 DB 叫 `uq_xxx` —— 约束支撑的索引必须**按列集合**匹配
+  （`OrmTableShape.uniqueColumnSets`），不能比名字。
+- 表达式索引（`lower(x)` / `text("x DESC")`）在 `pg_index.indkey` 里 attnum=0，读出哨兵
+  `<expr>` —— 两侧任一为表达式即**跳过列比较**。
+- `pg_constraint.conindid` 一个索引可能匹配多个约束 → 用 ARRAY 子查询，
+  不能 LEFT JOIN（否则索引行重复计数）。
+
+### 8.4 测试（`app/tests/integration/test_check_schema_drift.py`）
+
+新增合成表用例（列 / 索引抽取、表达式索引 → `None`、无名约束按列集合认、干净表零噪音、
+约束支撑索引不算 extra、**唯一非约束索引仍报 extra** 的反过宽匹配守卫、同名异列 →
+blocking）+ 子进程真库用例（真库无列/索引假阳性、DROP 索引 → blocking 且可还原、
+RENAME 列 → blocking 且可还原、加列 → warning 且 `--strict` 才失败、游离索引 → warning）
++ 严重级策略自洽性用例。
+
+- 隔离验证：新建 scratch 库 `qa_drift_check`（`CREATE DATABASE` + `alembic upgrade head`，
+  遵守 `_pg_support.py` 禁用 `Base.metadata.create_all`）→ **34 passed**
+  （32 drift + 2 `test_main`）。
+- 变异的子进程用例**跑完把库还原干净**（`path` 复名、索引重建、探针列/索引已删，已核对）。
+
+### 8.5 新发现：24 个遗留索引是迁移链的产物
+
+在**纯迁移构建的全新库**上同样复现这 24 个 ORM 未声明索引（`agent_definition.ix_*`、
+`audit_log.idx_*`、`kpi_catalog.ix_*` 等），说明它们源自迁移链而非测试库特性 ——
+任何新环境都会带上。prod 上 CLI 同样 exit 0 且只报这一个 warning 类别（`blocking=0`）。
+**待决定**：补进 ORM 声明 / 补迁移 / 还是立基线豁免名单（`--strict` 门禁的前置条件）。

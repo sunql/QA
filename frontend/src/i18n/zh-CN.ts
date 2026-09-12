@@ -1717,6 +1717,21 @@ export const zhCN = {
       saveDimension: "确认分类",
       rejectDimension: "打回分类",
     },
+    // 批量删除（多选 + 二次确认）。级联提示是本操作最需要被读到的一句话：
+    // 用户点的是「删 3 条知识」，实际被清掉的是 3 条知识 + 它们的关系与产物。
+    batchDelete: {
+      action: "批量删除",
+      title: "批量删除知识条目",
+      count: "将删除 {count} 条知识条目。",
+      cascadeHint:
+        "每条知识关联的事实原子、证据、知识关系、结构化建议与可执行规则会一并删除；其他条目指向这些条目的关系会变成悬空引用，可在「冲突检测」中处置。",
+      confirm: "确认删除",
+      selected: "已选 {count} 条",
+      idSeparator: "、",
+      result:
+        "已删除 {deleted} 条，连带清理事实 {claims} 条、关系 {relations} 条、建议 {suggestions} 条、规则 {rules} 条、流程 {workflows} 条。",
+      partialNotFound: "有 {count} 条未删除（条目不存在或已被删除）：{ids}",
+    },
     form: {
       content: "正文（Markdown）",
     },
@@ -1735,6 +1750,7 @@ export const zhCN = {
       contentRequired: "请输入正文",
       reclassifyFailed: "分类处置失败，请重试",
       deleteFailed: "删除失败，请重试",
+      batchDeleteFailed: "批量删除失败，请重试",
       statusUpdateFailed: "状态更新失败，请重试",
     },
   },

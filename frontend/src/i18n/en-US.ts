@@ -1713,6 +1713,22 @@ export const enUS = {
       saveDimension: "Confirm classification",
       rejectDimension: "Reject classification",
     },
+    // Bulk delete (multi-select + second confirmation). The cascade hint is the
+    // one line this dialog exists to deliver: the user clicks "delete 3 pages",
+    // what actually goes away is 3 pages plus their relations and artifacts.
+    batchDelete: {
+      action: "Delete selected",
+      title: "Delete knowledge pages",
+      count: "This will delete {count} knowledge page(s).",
+      cascadeHint:
+        "Claims, evidence, knowledge relations, structure suggestions and executable rules attached to each page are deleted with it. Relations from other pages that point here become dangling references — resolve them under Conflict Detection.",
+      confirm: "Delete",
+      selected: "{count} selected",
+      idSeparator: ", ",
+      result:
+        "Deleted {deleted} page(s); cleaned up {claims} claim(s), {relations} relation(s), {suggestions} suggestion(s), {rules} rule(s), {workflows} workflow(s).",
+      partialNotFound: "{count} page(s) were not deleted (not found or already deleted): {ids}",
+    },
     form: {
       content: "Content (Markdown)",
     },
@@ -1732,6 +1748,7 @@ export const enUS = {
       contentRequired: "Content is required",
       reclassifyFailed: "Failed to record the classification. Please retry.",
       deleteFailed: "Delete failed. Please retry.",
+      batchDeleteFailed: "Bulk delete failed. Please retry.",
       statusUpdateFailed: "Status update failed. Please retry.",
     },
   },

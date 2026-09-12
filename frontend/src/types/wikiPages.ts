@@ -84,6 +84,29 @@ export interface WikiReclassifyResult {
     action: "CONFIRM" | "REJECT" | "MODIFY";
 }
 
+/** 批量删除的连带给删行数（后端删除前统计，只报数不回传内容）。 */
+export interface WikiPageBatchDeleteCascade {
+    claims: number;
+    relations: number;
+    suggestions: number;
+    rules: number;
+    workflows: number;
+}
+
+/**
+ * 批量删除结果。
+ *
+ * `notFound` 非空**不是错误**（并发下别的用户先删了同一条很常见），
+ * 后端也不会为此回滚整批 —— 调用方必须据它给用户提示，不能当成成功吞掉。
+ */
+export interface WikiPageBatchDeleteResult {
+    /** 去重后的目标条数（入参有重复时与数组长度不同）。 */
+    requested: number;
+    deletedPageIds: string[];
+    notFound: string[];
+    cascade: WikiPageBatchDeleteCascade;
+}
+
 /** 关系目标类型：知识条目 / 本体类 / 指标 / 实体映射。 */
 export type RelationTargetType =
     | "PAGE"

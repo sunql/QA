@@ -45,8 +45,11 @@ def split_by_paragraphs(
 ) -> list[Chunk]:
     """按段落切分文本块，块过长则再按固定长度切。
 
-    跨块的 chunk 其定位符取**第一个块**（chunk 的起点）；跨页 chunk 的
-    引用因此是近似的，但方向正确（指向起点页），优于完全不记。
+    **chunk 不跨页**：累积块时遇到页码不同的块，先 flush 再另起，保证任一
+    chunk 的 ``page_number`` 对其全部正文都成立（P3 的 evidence 直接吃这个值，
+    跨页 chunk 被标成起点页等于证据链指错页）。同一页内跨块的 chunk 其定位符
+    仍取**第一个块**（段号取起点段，属可接受近似）。``page_number`` 为 ``None``
+    的格式（DOCX/MD）不做页边界切分，维持原累积逻辑。
 
     Args:
         blocks: 带定位信息的文本块（来自 parse_document）
@@ -71,6 +74,15 @@ def split_by_paragraphs(
 
     for block in blocks:
         blockLen = len(block.text)
+        # 页边界：累积中遇到页码不同的块，先 flush 再另起，保证 chunk 不跨页。
+        # page_number 为 None 的格式（DOCX/MD）不做页边界切分。
+        if (
+            accumulated
+            and block.page_number is not None
+            and accumulated[0].page_number is not None
+            and block.page_number != accumulated[0].page_number
+        ):
+            flush()
         # 单块超过 chunk_size：先 flush 累积，再按固定长度切（带 overlap）
         if blockLen > chunk_size:
             flush()

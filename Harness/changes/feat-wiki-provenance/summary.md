@@ -141,13 +141,13 @@ $ docker exec -e ALLOW_NONEMPTY_REBUILD=1 qa-backend python scripts/rebuild_docu
 弃用告警被省略，未改动脚本输出内容）：
 
 ```
-ingest.chunks       = 1
-ingest.storage_url  = s3://qa-knowledge-sources/sources/0b/0b9e33a279114e6fc4aac031ce9d70c112625cf32125c5cc120e54a3f4695579/provenance-sample.pdf
-ingest.content_hash = 0b9e33a279114e6fc4aac031ce9d70c112625cf32125c5cc120e54a3f4695579
-milvus.chunk_count  = 1
-milvus.page_numbers = [1]
-catalog.storage_url = s3://qa-knowledge-sources/sources/0b/0b9e33a279114e6fc4aac031ce9d70c112625cf32125c5cc120e54a3f4695579/provenance-sample.pdf
-catalog.content_hash= 0b9e33a279114e6fc4aac031ce9d70c112625cf32125c5cc120e54a3f4695579
+ingest.chunks       = 2
+ingest.storage_url  = s3://qa-knowledge-sources/sources/7d/7d04300b888312588d4233dc92ec2041ae10f9eaa24f6b0cc3674dfa4e833994/provenance-sample.pdf
+ingest.content_hash = 7d04300b888312588d4233dc92ec2041ae10f9eaa24f6b0cc3674dfa4e833994
+milvus.chunk_count  = 2
+milvus.page_numbers = [1, 2]
+catalog.storage_url = s3://qa-knowledge-sources/sources/7d/7d04300b888312588d4233dc92ec2041ae10f9eaa24f6b0cc3674dfa4e833994/provenance-sample.pdf
+catalog.content_hash= 7d04300b888312588d4233dc92ec2041ae10f9eaa24f6b0cc3674dfa4e833994
 minio.read_back     = 2916 bytes（与上传一致）
 
 ✅ P0 溯源地基真实数据验证通过（已清理本次写入）
@@ -168,7 +168,8 @@ chunks = data: [], extra_info: {}
 
 ### 9.4 结论
 
-- ✅ Milvus chunk 带真实 `page_number=1`（非哨兵 -1）；`paragraph_no` 同理非哨兵。
+- ✅ Milvus chunk 页集合**恰好**为 `[1, 2]`（两页正文各成 chunk，非哨兵 -1）；`paragraph_no` 非哨兵；
+  PDF 的 `section_name` 全为空串（哨兵，符合契约）。
 - ✅ catalog `storage_url` 为真实 `s3://qa-knowledge-sources/...`（非 `milvus://` 假 URL）。
 - ✅ catalog `content_hash` 为 64 位十六进制 sha256。
 - ✅ MinIO 读回 2916 字节与上传字节逐字节一致。
@@ -193,6 +194,12 @@ chunks = data: [], extra_info: {}
    但那是**偶然耦合**，非强制不变量）。同一字节的两个并发上传可都通过 SELECT 再各自 INSERT。
    修复需 PG 迁移（`uq_document_catalog_content_hash`），而 P0 是零迁移计划，故推迟到 **P1**，
    其 `0061_wiki_dedup` 迁移恰好建该索引。P0 不改代码、不加索引。
+6. **跨页 chunk 定位符缺陷（✅ 已修复，fix round 1）**：初版门禁在两页样本上打印
+   `chunk_count = 1` / `page_numbers = [1]` 却照样通过 —— 暴露了 `split_by_paragraphs` 的跨页合并
+   缺陷：chunk 正文含第 2 页文字却被标成 `page_number: 1`，P3 的 `evidence` 引用会指错页。
+   修复：`chunk_splitter.py` 累积时遇页码不同的块先 flush 再另起（chunk 不跨页；`page_number` 为
+   `None` 的 DOCX/MD 不切页）；门禁改断言页集合**恰好** `[1, 2]` + PDF 的 `section_name` 为空串。
+   修复后门禁打印 `chunk_count = 2` / `page_numbers = [1, 2]`（见 §9.2）。
 
 ## 11. 关联
 

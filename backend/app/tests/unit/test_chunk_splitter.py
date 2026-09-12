@@ -66,11 +66,27 @@ class TestLocators:
             assert c.metadata["page_number"] == 7
             assert c.metadata["paragraph_no"] == 2
 
-    def test_chunk_spanning_blocks_takes_first_locator(self) -> None:
+    def test_chunk_does_not_span_pages(self) -> None:
+        # 跨页必须切开：否则 chunk 正文含第 2 页文字却被标成第 1 页。
+        blocks = [_block("甲", page=1, para=1), _block("乙", page=2, para=1)]
+        chunks = split_by_paragraphs(blocks, chunk_size=500)
+        assert len(chunks) == 2
+        assert [c.metadata["page_number"] for c in chunks] == [1, 2]
+        assert "乙" not in chunks[0].text
+
+    def test_same_page_blocks_still_merge(self) -> None:
+        # 同页内跨块仍合并，取首块定位符（段号近似为起点段）。
         blocks = [_block("甲", page=1, para=1), _block("乙", page=1, para=2)]
         chunks = split_by_paragraphs(blocks, chunk_size=500)
         assert len(chunks) == 1
+        assert chunks[0].metadata["page_number"] == 1
         assert chunks[0].metadata["paragraph_no"] == 1
+
+    def test_page_none_blocks_still_merge(self) -> None:
+        # DOCX/MD：page_number 为 None，不做页边界切分，维持原累积逻辑。
+        blocks = [_block("甲", page=None, para=1), _block("乙", page=None, para=2)]
+        chunks = split_by_paragraphs(blocks, chunk_size=500)
+        assert len(chunks) == 1
 
     def test_to_dict_flattens_locators(self) -> None:
         chunks = split_by_paragraphs([_block("内容", page=5, para=9)])

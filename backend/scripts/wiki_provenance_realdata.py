@@ -3,7 +3,10 @@
 走**真实摄入链路**：真实 PDF → parse → chunk → embed → Milvus →
 document_catalog，然后在链路末端逐项断言溯源信息真的留下来了：
 
-  1. Milvus 里该文档的 chunk 带正确 page_number / section_name / paragraph_no
+  1. Milvus 里该文档的 chunk 带**正确**的 page_number / paragraph_no —— 页集合必须
+     恰好等于样本的 {1, 2}，而不是仅仅「不是哨兵」；并钉死 PDF 的 section_name
+     为空串（哨兵）这一契约。只查哨兵会让「页码硬编码为 1」「页映射整体偏移」
+     「第 2 页被静默丢弃」三类回归全部绿着通过 —— 本门禁初版就是这么漏的。
   2. document_catalog 有真实 storage_url + 64 位 content_hash（不是 milvus://N_chunks）
   3. MinIO 桶内可读回源文件，且字节与上传完全一致
 
@@ -66,11 +69,19 @@ async def main() -> int:
     if not chunks:
         failures.append("Milvus 里查不到该文档的 chunk")
     else:
-        print(f"milvus.page_numbers = {sorted(c['page_number'] for c in chunks)}")
+        pages = sorted({c["page_number"] for c in chunks})
+        print(f"milvus.page_numbers = {pages}")
         if any(c["page_number"] < 1 for c in chunks):
             failures.append("存在没有页码（哨兵 -1）的 chunk")
         if any(c["paragraph_no"] < 1 for c in chunks):
             failures.append("存在没有段号（哨兵 -1）的 chunk")
+        # 只查哨兵挡不住三类回归：页码硬编码为 1、页映射整体偏移、第 2 页被静默丢弃。
+        # 样本 PDF 两页都有正文，故页集合必须**恰好**是 {1, 2}。
+        if pages != [1, 2]:
+            failures.append(f"页归属错误：期望 [1, 2]，实际 {pages}")
+        # PDF 按设计没有 section_name（那是 DOCX/MD 的定位符），钉死该契约。
+        if any(c["section_name"] != "" for c in chunks):
+            failures.append("PDF 样本的 section_name 应为空串（哨兵）")
 
     # --- 3. document_catalog：真实 url + 64 位摘要 ---
     async with factory() as session:

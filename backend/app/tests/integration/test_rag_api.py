@@ -14,27 +14,9 @@ rag_service._getEmbeddingService() 引用了不存在的 getEmbeddingService 工
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-
-
-@pytest.fixture
-def mockEmbeddingService():
-    """提供 EmbeddingService 的 AsyncMock，模拟 generateEmbedding。
-
-    向量是固定常数（不是真实 LLM 输出），但保证相同文本得到相同向量，
-    这样 searchDocuments 能用相同 query 命中刚刚 ingest 的文档。
-    """
-    svc = AsyncMock()
-
-    async def fake_embed(text: str) -> list[float]:
-        # 用文本长度作种子，让同一文本生成同一向量（保证 search 能命中）
-        seed = sum(ord(c) for c in text) % 100
-        return [float(seed) / 100.0 + 0.001 * i for i in range(1024)]
-
-    svc.generateEmbedding = fake_embed
-    return svc
 
 
 class TestRagApiUpload:
@@ -42,7 +24,7 @@ class TestRagApiUpload:
 
     @pytest.mark.asyncio
     async def test_upload_text_file_creates_catalog_and_chunks(
-        self, client, dbSession, mockEmbeddingService
+        self, client, dbSession, fakeMinio, mockEmbeddingService
     ) -> None:
         # 文件内容（多段，确保至少 1 个 chunk）
         content = b"First paragraph about supplier 100001.\n\nSecond paragraph about OTD rate 98%."
@@ -119,7 +101,7 @@ class TestRagApiSearch:
 
     @pytest.mark.asyncio
     async def test_search_after_upload_returns_hits(
-        self, client, dbSession, mockEmbeddingService
+        self, client, dbSession, fakeMinio, mockEmbeddingService
     ) -> None:
         # 先上传
         content = "Supplier 100001 has OTD rate 98% and Grade A certification.".encode("utf-8")
@@ -155,7 +137,7 @@ class TestRagApiSearch:
 
     @pytest.mark.asyncio
     async def test_search_with_security_level_filter(
-        self, client, dbSession, mockEmbeddingService
+        self, client, dbSession, fakeMinio, mockEmbeddingService
     ) -> None:
         content = b"L2 confidential contract content here."
         files = {"file": ("l2.txt", content, "text/plain")}

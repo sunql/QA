@@ -9,8 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.rag_service import RagError, RagService
 from app.dependencies import CurrentUser
+from app.infrastructure.object_storage import ObjectStorageError
+from app.services.document_parser import TextBlock
+from app.services.rag_service import RagError, RagService
 
 
 class TestRagServiceSearch:
@@ -205,6 +207,33 @@ class TestRagServiceSearch:
                 await svc.searchDocuments("测试查询")
 
 
+def _mockChunk(
+    chunkId: str,
+    text: str,
+    seq: int,
+    *,
+    page: int | None = 1,
+    section: str | None = None,
+    para: int | None = None,
+) -> MagicMock:
+    """构造带定位符 metadata 的假 chunk。
+
+    `section` / `para` 必须由调用方显式传入。给个由 `seq` 推导的默认值看似
+    方便，但要断言定位符透传的用例一旦依赖它，测的就成了「mock 的默认值
+    进了 record」——同义反复，删掉实现里的透传也照样绿。
+    """
+    return MagicMock(
+        chunk_id=chunkId,
+        text=text,
+        sequence=seq,
+        metadata={
+            "page_number": page,
+            "section_name": section,
+            "paragraph_no": para if para is not None else seq + 1,
+        },
+    )
+
+
 class TestRagServiceIngest:
     """ingestDocument: 解析 → 分块 → embedding → Milvus → catalog。"""
 
@@ -220,8 +249,21 @@ class TestRagServiceIngest:
     @pytest.mark.asyncio
     async def test_ingestDocument_full_pipeline(self) -> None:
         mock_session = MagicMock()
+        mock_blocks = [
+            TextBlock(
+                text="这是测试文档内容。",
+                page_number=1,
+                section_name=None,
+                paragraph_no=1,
+            )
+        ]
         mock_chunks = [
-            MagicMock(chunk_id="chunk-0", text="这是测试文档内容。", sequence=0),
+            MagicMock(
+                chunk_id="chunk-0",
+                text="这是测试文档内容。",
+                sequence=0,
+                metadata={"page_number": 1, "section_name": None, "paragraph_no": 1},
+            ),
         ]
         mock_emb = AsyncMock()
         mock_emb.generateEmbedding = AsyncMock(return_value=[0.1] * 1024)
@@ -229,32 +271,32 @@ class TestRagServiceIngest:
         with patch(
             "app.services.rag_service.parse_document",
             new_callable=AsyncMock,
-            return_value="这是测试文档内容。",
-        ):
-            with patch(
-                "app.services.rag_service.split_by_paragraphs",
-                return_value=mock_chunks,
-            ):
-                with patch(
-                    "app.services.rag_service._getEmbeddingService",
-                    return_value=mock_emb,
-                ):
-                    with patch(
-                        "app.services.rag_service.insertDocumentChunks",
-                    ) as mock_insert:
-                        svc = RagService()
-                        svc._doc_svc = self._mock_doc_svc_with_create()
+            return_value=mock_blocks,
+        ), patch(
+            "app.services.rag_service.split_by_paragraphs",
+            return_value=mock_chunks,
+        ), patch(
+            "app.services.rag_service._getEmbeddingService",
+            return_value=mock_emb,
+        ), patch(
+            "app.services.rag_service.putSourceObject",
+            return_value="s3://qa-knowledge-sources/sources/ab/abc/test.txt",
+        ), patch(
+            "app.services.rag_service.insertDocumentChunks",
+        ) as mock_insert:
+            svc = RagService()
+            svc._doc_svc = self._mock_doc_svc_with_create()
 
-                        result = await svc.ingestDocument(
-                            mock_session,
-                            content=b"dummy",
-                            filename="test.txt",
-                            mime_type="text/plain",
-                            document_id="DOC-TEST-001",
-                            document_name="测试文档",
-                            document_type="CONTRACT",
-                            actor=CurrentUser(userId="test-user"),
-                        )
+            result = await svc.ingestDocument(
+                mock_session,
+                content=b"dummy",
+                filename="test.txt",
+                mime_type="text/plain",
+                document_id="DOC-TEST-001",
+                document_name="测试文档",
+                document_type="CONTRACT",
+                actor=CurrentUser(userId="test-user"),
+            )
 
         assert result["document_id"] == "DOC-TEST-001"
         assert result["status"] == "ingested"
@@ -287,7 +329,7 @@ class TestRagServiceIngest:
         with patch(
             "app.services.rag_service.parse_document",
             new_callable=AsyncMock,
-            return_value="   \n\t  ",
+            return_value=[],
         ):
             svc = RagService()
             with pytest.raises(RagError, match="文档内容为空"):
@@ -308,30 +350,199 @@ class TestRagServiceIngest:
         with patch(
             "app.services.rag_service.parse_document",
             new_callable=AsyncMock,
-            return_value="测试内容",
+            return_value=[
+                TextBlock(
+                    text="测试内容", page_number=1, section_name=None, paragraph_no=1
+                )
+            ],
+        ), patch(
+            "app.services.rag_service.split_by_paragraphs",
+            return_value=[
+                MagicMock(
+                    chunk_id="c0",
+                    text="测试",
+                    sequence=0,
+                    metadata={"page_number": 1, "section_name": None, "paragraph_no": 1},
+                ),
+            ],
+        ), patch(
+            "app.services.rag_service._getEmbeddingService",
+            return_value=mock_emb,
+        ), patch(
+            "app.services.rag_service.putSourceObject",
+            return_value="s3://qa-knowledge-sources/sources/ab/abc/test.txt",
+        ), patch(
+            "app.services.rag_service.insertDocumentChunks",
+            side_effect=RuntimeError("Milvus unavailable"),
         ):
-            with patch(
-                "app.services.rag_service.split_by_paragraphs",
-                return_value=[
-                    MagicMock(chunk_id="c0", text="测试", sequence=0),
-                ],
-            ):
-                with patch(
-                    "app.services.rag_service._getEmbeddingService",
-                    return_value=mock_emb,
-                ):
-                    with patch(
-                        "app.services.rag_service.insertDocumentChunks",
-                        side_effect=RuntimeError("Milvus unavailable"),
-                    ):
-                        svc = RagService()
-                        svc._doc_svc = self._mock_doc_svc_with_create()
+            svc = RagService()
+            svc._doc_svc = self._mock_doc_svc_with_create()
 
-                        with pytest.raises(RagError, match="Milvus 写入失败"):
-                            await svc.ingestDocument(
-                                mock_session,
-                                content=b"test",
-                                filename="test.txt",
-                                mime_type="text/plain",
-                                actor=CurrentUser(userId="test-user"),
-                            )
+            with pytest.raises(RagError, match="Milvus 写入失败"):
+                await svc.ingestDocument(
+                    mock_session,
+                    content=b"test",
+                    filename="test.txt",
+                    mime_type="text/plain",
+                    actor=CurrentUser(userId="test-user"),
+                )
+
+    @pytest.mark.asyncio
+    async def test_ingest_stores_source_object_and_real_metadata(self) -> None:
+        """源文件必须真存，catalog 记真实 url + hash，不再写假 milvus:// URL。"""
+        # Arrange
+        mock_session = MagicMock()
+        mock_emb = AsyncMock()
+        mock_emb.generateEmbedding = AsyncMock(return_value=[0.1] * 1024)
+        mock_blocks = [
+            TextBlock(
+                text="这是测试文档内容。", page_number=18, section_name="质量管理", paragraph_no=3
+            )
+        ]
+        mock_chunks = [
+            _mockChunk("chunk-0", "这是测试文档内容。", 0, page=18, section="质量管理", para=3)
+        ]
+
+        # Act
+        with patch(
+            "app.services.rag_service.parse_document",
+            new_callable=AsyncMock,
+            return_value=mock_blocks,
+        ), patch(
+            "app.services.rag_service.split_by_paragraphs", return_value=mock_chunks
+        ), patch(
+            "app.services.rag_service._getEmbeddingService", return_value=mock_emb
+        ), patch(
+            "app.services.rag_service.putSourceObject",
+            return_value="s3://qa-knowledge-sources/sources/ab/abcd/test.txt",
+        ), patch(
+            "app.services.rag_service.insertDocumentChunks"
+        ) as mock_insert:
+            svc = RagService()
+            svc._doc_svc = self._mock_doc_svc_with_create()
+            result = await svc.ingestDocument(
+                mock_session,
+                content=b"dummy",
+                filename="test.txt",
+                mime_type="text/plain",
+                actor=CurrentUser(userId="test-user"),
+            )
+
+        # Assert：返回值带真实 url + hash
+        assert result["storage_url"].startswith("s3://qa-knowledge-sources/")
+        assert result["content_hash"] is not None
+        assert len(result["content_hash"]) == 64
+
+        # Assert：落库的 document 元数据是真值
+        # `createDocument(session, dto, actor=...)` 是位置传参，dto 在 args[1]。
+        # 写成 kwargs["dto"] 会 KeyError —— 与下方 updateDocument 的坑同源。
+        createdDto = svc._doc_svc.createDocument.await_args.args[1]
+        assert createdDto.storage_url == "s3://qa-knowledge-sources/sources/ab/abcd/test.txt"
+        assert createdDto.content_hash == result["content_hash"]
+
+        # Assert：定位符进了 Milvus 记录
+        record = mock_insert.call_args.args[0][0]
+        assert record["page_number"] == 18
+        assert record["section_name"] == "质量管理"
+        assert record["paragraph_no"] == 3
+
+    @pytest.mark.asyncio
+    async def test_ingest_fails_loud_when_object_storage_fails(self) -> None:
+        """MinIO 故障必须显式失败，不得静默降级，也不得先污染 Milvus。"""
+        # Arrange
+        mock_session = MagicMock()
+
+        # Act / Assert
+        with patch(
+            "app.services.rag_service.parse_document",
+            new_callable=AsyncMock,
+            return_value=[TextBlock(text="内容", page_number=1, section_name=None, paragraph_no=1)],
+        ), patch(
+            "app.services.rag_service.putSourceObject",
+            side_effect=ObjectStorageError("connection refused"),
+        ), patch(
+            "app.services.rag_service.insertDocumentChunks"
+        ) as mock_insert:
+            svc = RagService()
+            svc._doc_svc = self._mock_doc_svc_with_create()
+            with pytest.raises(RagError, match="源文件存储失败"):
+                await svc.ingestDocument(
+                    mock_session,
+                    content=b"test",
+                    filename="test.txt",
+                    mime_type="text/plain",
+                    actor=CurrentUser(userId="test-user"),
+                )
+
+        # 源文件存不下就不该往 Milvus 写
+        mock_insert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ingest_existing_doc_rewrites_real_metadata(self) -> None:
+        """已存在文档的更新分支也必须写真实值（原实现写的是 milvus://N_chunks 假 URL）。"""
+        # Arrange
+        mock_session = MagicMock()
+        mock_emb = AsyncMock()
+        mock_emb.generateEmbedding = AsyncMock(return_value=[0.1] * 1024)
+        existing = MagicMock(id=7, document_id="DOC-EXIST-001")
+
+        # Act
+        with patch(
+            "app.services.rag_service.parse_document",
+            new_callable=AsyncMock,
+            return_value=[TextBlock(text="内容", page_number=1, section_name=None, paragraph_no=1)],
+        ), patch(
+            "app.services.rag_service.split_by_paragraphs",
+            return_value=[_mockChunk("chunk-0", "内容", 0)],
+        ), patch(
+            "app.services.rag_service._getEmbeddingService", return_value=mock_emb
+        ), patch(
+            "app.services.rag_service.putSourceObject",
+            return_value="s3://qa-knowledge-sources/sources/ab/abcd/test.txt",
+        ), patch(
+            "app.services.rag_service.insertDocumentChunks"
+        ):
+            svc = RagService()
+            docSvc = self._mock_doc_svc_with_create()
+            docSvc.listDocuments = AsyncMock(return_value=[existing])
+            svc._doc_svc = docSvc
+            await svc.ingestDocument(
+                mock_session,
+                content=b"dummy",
+                filename="test.txt",
+                mime_type="text/plain",
+                document_id="DOC-EXIST-001",
+                actor=CurrentUser(userId="test-user"),
+            )
+
+        # Assert：走的是 updateDocument，且写的是真实 URL
+        docSvc.updateDocument.assert_awaited()
+        updateDto = docSvc.updateDocument.await_args.args[2]
+        assert updateDto.storage_url == "s3://qa-knowledge-sources/sources/ab/abcd/test.txt"
+        assert updateDto.content_hash is not None
+        # actor 必须传（原实现漏传 → TypeError → 被 except 吞掉，分支从未生效）
+        assert docSvc.updateDocument.await_args.kwargs["actor"] is not None
+
+    @pytest.mark.asyncio
+    async def test_ingest_empty_document_raises(self) -> None:
+        """解析出空块列表必须显式报错，不能往下走进 Milvus。"""
+        # Arrange
+        mock_session = MagicMock()
+
+        # Act / Assert
+        with patch(
+            "app.services.rag_service.parse_document",
+            new_callable=AsyncMock,
+            return_value=[],
+        ), patch("app.services.rag_service.insertDocumentChunks") as mock_insert:
+            svc = RagService()
+            svc._doc_svc = self._mock_doc_svc_with_create()
+            with pytest.raises(RagError, match="文档内容为空"):
+                await svc.ingestDocument(
+                    mock_session,
+                    content=b"",
+                    filename="empty.txt",
+                    mime_type="text/plain",
+                    actor=CurrentUser(userId="test-user"),
+                )
+        mock_insert.assert_not_called()

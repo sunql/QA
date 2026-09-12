@@ -2808,6 +2808,9 @@ if __name__ == "__main__":
 
 ```bash
 cd /path/to/repo
+# 回滚快照必须在 build **之前** 打：build 之后 `:latest` 已是 P0 新镜像，
+# 再打 tag 只是给新镜像换个名字，回滚时拿不到旧的那份。
+docker tag qa-system-backend:latest qa-system-backend:pre-p0
 docker compose -f docker/docker-compose.yml build backend
 docker compose -f docker/docker-compose.yml up -d qa-objects backend
 docker exec qa-backend python -c "import minio; print('minio ok')"
@@ -2831,11 +2834,18 @@ Expected: 打印 `ingest.*` / `milvus.chunk_count` / `milvus.page_numbers` /
 - [ ] **Step 4: 验证回滚路径**
 
 ```bash
-docker tag qa-system-backend:latest qa-system-backend:p0-provenance
-# 回滚：git revert 本计划的提交序列后重建镜像
+docker image inspect qa-system-backend:pre-p0 --format '{{.Id}}'   # 应为 build 之前的那份
+# 回滚：docker tag qa-system-backend:pre-p0 qa-system-backend:latest && docker compose ... up -d backend
+#       （或 git revert 本计划的提交序列后重建镜像）
 ```
 
-> P0 无 PG 迁移，回滚不涉及数据。**唯一不可逆项**是 Milvus 集合重建——但重建前该集合为空，故无数据损失。**MinIO 里的源文件不受回滚影响**（保留是好事）。
+> P0 无 PG 迁移，回滚不涉及数据。**唯一不可逆项**是 Milvus 集合重建：重建会丢弃
+> 旧 collection 的所有向量，**且重建前该集合并非空**——重建前已实测有 **333** 条
+> entity，并于 2026-09-12 19:53 导出快照到
+> `backups/milvus/document_embeddings_20260912_1953.json.gz`（`num_entities: 333`）。
+> 快照只存了标量字段与向量本身，**恢复需另写导入脚本**，故「有快照」不等于「可一键回滚」。
+> 这一条必须如实写进变更记录，不得写成「无数据损失」。
+> **MinIO 里的源文件不受回滚影响**（保留是好事）。
 
 - [ ] **Step 5: 写九段变更记录**
 
@@ -2844,6 +2854,9 @@ docker tag qa-system-backend:latest qa-system-backend:p0-provenance
 - **备份门禁缺口**：PG 备份 cron 已确认静默失效（launchd 契约断裂，根因是 `/etc/crontab` 缺失），用户 2026-09-12 决定维持手动。`scripts/backup_objects.sh` 同样以手动形态交付。此缺口不得粉饰。
 - **spec §4.1 C5 的修正**（见 Task 6 的说明）。
 - **部署方式变更**：本变更不能走 `deploy_backend.sh`。
+- **Milvus 集合重建的不可逆性**：重建前集合含 333 条 entity（非空），快照在
+  `backups/milvus/document_embeddings_20260912_1953.json.gz`，恢复需另写导入脚本。
+  不得写成「无数据损失」。
 
 - [ ] **Step 6: 提交**
 

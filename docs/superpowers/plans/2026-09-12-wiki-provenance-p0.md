@@ -35,7 +35,11 @@
 | `backend/scripts/rebuild_document_collection.py` | 建 | 集合重建（`_ensureCollection` 已存在即早返回，改字段不重建不生效） |
 | `backend/app/infrastructure/object_storage.py` | 建 | MinIO 客户端：`ensureBucket` / `putSourceObject` / `getSourceObject` / `hashContent` / `buildSourceObjectName` |
 | `backend/app/services/rag_service.py` | 改 | 存源文件；写真实 `storage_url` + `content_hash`；消除静默失败 |
-| `backend/app/services/wiki_import_service.py` | 改 | `parseFile` 适配新返回类型；`execute` 登记 `document_catalog` |
+| `backend/app/api/v1/wiki_import.py` | 改 | `preview-file` 留存源文件（解析成功后）+ 契约 docstring 改写 |
+| `backend/app/services/wiki_import_service.py` | 改 | `parseFile` 适配新返回类型；新增 `persistSourceFile`（留存 + 登记） |
+| `backend/app/services/wiki_catalog_registrar.py` | 建 | 按 `content_hash` 幂等登记 `document_catalog` |
+| `backend/app/services/messages_zh.py` | 改 | 新增 `MSG_WIKI_IMPORT_SOURCE_STORE_FAILED` |
+| `backend/app/tests/integration/test_wiki_import_catalog.py` | 建 | 假 MinIO + 真实 PG：wiki 上传留存与幂等 |
 | `backend/app/tests/unit/test_document_parser.py` | 改 | 断言定位符 |
 | `backend/app/tests/unit/test_chunk_splitter.py` | 改 | 签名变更 + 定位符断言 |
 | `backend/app/tests/unit/test_rag_service.py` | 改 | mock 适配新返回类型 |
@@ -1822,46 +1826,56 @@ git commit -m "fix(wiki): rag_service 写真实 storage_url/content_hash 并消�
 
 ---
 
-## Task 6: Wiki 导入路径登记 `document_catalog`
+## Task 6: Wiki 导入路径留存源文件 + 登记 `document_catalog`
 
 **Files:**
-- Modify: `backend/app/services/wiki_import_service.py`
+- Modify: `backend/app/api/v1/wiki_import.py` — `preview-file` 落库（含两处 docstring 契约改写）
+- Modify: `backend/app/services/wiki_import_service.py` — `parseFile` 适配 `TextBlock` + 新增 `persistSourceFile`
+- Modify: `backend/app/services/messages_zh.py` — 新增 `MSG_WIKI_IMPORT_SOURCE_STORE_FAILED`
+- Create: `backend/app/services/wiki_catalog_registrar.py`
 - Test: `backend/app/tests/integration/test_wiki_import_catalog.py`
 
 **Interfaces:**
 - Consumes: `parse_document` 新返回类型（Task 1）、`object_storage`（Task 4）
-- Produces: `WikiImportService.execute(...)` 在每个成功批次末尾登记/更新一条 `document_catalog`
+- Produces: `WikiImportService.persistSourceFile(session, *, content, mime_type, filename, actor) -> str`（返回 `storage_url`）
 
-> ### ⚠️ Spec 修正（必须知悉）
+> ### ⚠️ 设计决定（2026-09-12 用户选定，本任务据此重写）
 >
-> Spec §4.1 的 **C5 写作「Wiki 导入路径也注册 `document_catalog`」**，暗示在 `execute` 里挂上进目录登记即可。**读码后发现这不可直接实现**：
+> Spec §4.1 的 C5 原文写「Wiki 导入路径也注册 `document_catalog`」，暗示在 `execute` 挂上即可。**读码后确认这不可直接实现**：`execute()` 的输入是 `dto.drafts`（客户端回传的**纯文本草稿**），**从不接触文件字节** —— 拿不到 `content`，就算不出文件哈希、存不了源文件。
 >
-> - `parse_document` 在 wiki 路径下只有一个调用点——`wiki_import_service.py:205`，位于 `parseFile()`，即**预览路径**，其 docstring 明确写「不落库、不调模型」。
-> - `execute()` 的输入是 `dto.drafts`（客户端传来的**纯文本草稿**），**从不接触原始文件字节**。因此 `execute` 拿不到 `content`，无法算文件哈希、无法存源文件。
+> 字节只在 `preview-file` 手里。三个候选方案已提交用户选择，**用户选定「preview-file 就落库」**：
 >
-> 本任务实现**最接近原意且不破坏「预览不落库」不变量**的版本：
+> - 在 `preview-file` 存对象 + 登记 `document_catalog`，`content_hash` 与 `storage_url` **全由服务端计算**。
+> - `execute` **不携带任何溯源字段** —— 零客户端可信数据，`execute` 的职责与签名不变。
+> - 理由：本仓库已有同一原则的先例 —— `WikiImportFileParseRead` 的 docstring 明确写 `source_type` 由后端判定而非前端自报：「让调用方自报等于允许『上传 .pdf 却记成 MARKDOWN』，台账就不可信了」。`content_hash` / `storage_url` 是同一性质的溯源字段，交由客户端回传会犯同一个错。
 >
-> - 在 `execute` 里以**草稿文本的哈希**作为 `content_hash`（草稿是 execute 实际持有的内容，哈希它对去重与变更检测同样有效）。
-> - `storage_url` 记 `None`（execute 没有文件可指向）—— 这与原本写假 `milvus://` URL 相比是更诚实的表达。
-> - 源文件级别的留存由 **RAG 路径**（Task 5）承担；若将来需要 wiki 路径也存原件，须改造 preview→execute 契约（带上传令牌），那是独立变更，不在 P0 范围。
+> **契约变更（必须诚实记录，两处 docstring 都要改）**：模块 docstring 第 3 条与 `previewImportFile` 的 docstring 原写「**不落库**、不调模型」。本任务后它**会落库**（对象存储 + 一行 `document_catalog`），仍**不调模型**。契约与实现背离比改动本身更危险，必须同步。
 >
-> 若你希望改走「preview 存文件 + execute 引用令牌」的完整方案，请先告知，本任务需重写。
+> **代价（已知并接受）**：用户**预览了但没导入**的文件，也会留下一个对象与一行 catalog。内容寻址使重复预览不产生重复对象，catalog 登记再按 `content_hash` 幂等一层。若日后要「预览不留痕」，那是另一个变更。
+
+> **顺序至关重要**：必须**先 `parseFile` 成功、再存对象**。反过来的话，每个损坏/加密/格式不符的文件都会在对象存储里留下一份永远无人引用的垃圾。`MAX_UPLOAD_BYTES` 检查同样排在存之前（它已在最前面）。
+>
+> **MinIO 故障必须显式失败**（spec §4.5）：写对象失败即 503，**不得**降级为「预览成功但其实没存」。代价是预览可用性从此与 MinIO 绑定 —— 这是「预览即持久化」方案的固有代价，接受它。
+
+> **「查看」怎么走**：落库后源文件即出现在既有文档库（`GET /documents` 读 `document_catalog`），**不需要新建查看页面、不需要新建端点**。P0 不新增任何前端。
 
 - [ ] **Step 1: 写失败测试**
 
-新建 `backend/app/tests/integration/test_wiki_import_catalog.py`。fixture 与假 LLM 客户端的写法**照抄** `test_wiki_import_api.py`（同目录，已跑通）：
+新建 `backend/app/tests/integration/test_wiki_import_catalog.py`。`client` / `dbSession` fixture 取自同目录 `conftest.py`（与 `test_wiki_import_api.py` 同一个）：
 
 ```python
-"""Wiki 导入路径登记 document_catalog（P0 溯源地基）。
+"""Wiki 导入路径留存源文件 + 登记 document_catalog（P0 溯源地基）。
 
-真实 PostgreSQL + 完整 API 链路。LLM 走 patch 注入假客户端——不联外网，
-但保留真实调用链（ModelConfigService 查配置 → createClient → complete）。
+真实 PostgreSQL + 完整 API 链路。**MinIO 客户端被替换为假实现** —— 不联外网，
+但保留完整调用链（内容哈希 → 内容寻址对象名 → catalog 写入），与既有集成测试
+替换假 LLM 客户端（``_INVOKER_CLIENT``）是同一思路：外部服务走假实现，
+数据库与 API 链路保持真实。真实 MinIO 的端到端验证由 Task 7 的真实数据脚本承担。
 """
 
 from __future__ import annotations
 
-import json
-from decimal import Decimal
+import hashlib
+from typing import Iterator
 from unittest.mock import patch
 
 import pytest
@@ -1870,172 +1884,156 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import DocumentType
-from app.domain.models import DocumentCatalog, LlmConfig
-from app.infrastructure.llm.base_client import LlmResponse
+from app.domain.models import DocumentCatalog
 
 pytestmark = pytest.mark.asyncio
 
 _BASE = "/api/v1/wiki/import"
-_INVOKER_CLIENT = "app.services.learning.llm_invoker.createClient"
-
-_CLASSIFY_JSON = json.dumps(
-    {
-        "primary": "RULE",
-        "confidence": 0.92,
-        "alternatives": ["POLICY"],
-        "reason": "含准入门槛阈值",
-    }
-)
+_CLIENT = "app.infrastructure.object_storage._getClient"
+_FILE_URL = f"{_BASE}/preview-file"
 
 
-class _FakeLlmClient:
-    """假 LLM 客户端（与 test_wiki_import_api.py 同一形状）。"""
+class _FakeMinio:
+    """记录 put_object 的假客户端（形状对齐 minio.Minio 的被调用面）。"""
 
-    def __init__(self, content: str = _CLASSIFY_JSON) -> None:
-        self._content = content
+    def __init__(self) -> None:
+        self.putCalls: list[dict] = []
 
-    async def complete(self, messages, **kwargs) -> LlmResponse:
-        return LlmResponse(
-            content=self._content,
-            modelName="fake-model",
-            promptTokens=100,
-            completionTokens=50,
+    def bucket_exists(self, bucket: str) -> bool:
+        return True
+
+    def make_bucket(self, bucket: str) -> None:
+        raise AssertionError(f"桶 {bucket} 应已存在，不该被创建")
+
+    def put_object(self, bucket, objectName, data, length=None, content_type=None):
+        self.putCalls.append(
+            {
+                "bucket": bucket,
+                "objectName": objectName,
+                "content": data.read(),
+                "contentType": content_type,
+            }
         )
 
 
-async def _seedModel(
-    dbSession: AsyncSession,
-    *,
-    modelName: str = "catalog-test-model",
-) -> int:
-    """插入一条 llm_config，返回其 id（字段名照抄 test_wiki_import_api.py）。"""
-    config = LlmConfig(
-        model_name=modelName,
-        provider="openai_compatible_proxy",
-        is_active=True,
-        cost_per_1k_input=Decimal("0.001"),
-        cost_per_1k_output=Decimal("0.002"),
-    )
-    dbSession.add(config)
-    await dbSession.commit()
-    await dbSession.refresh(config)
-    return config.id
+@pytest.fixture(autouse=True)
+def fakeMinio() -> Iterator[_FakeMinio]:
+    """模块级 autouse：本模块每个用例都不联真实 MinIO。"""
+    fake = _FakeMinio()
+    with patch(_CLIENT, return_value=fake):
+        yield fake
 
 
-def _drafts(*items: tuple[str, str]) -> list[dict]:
-    return [{"title": t, "content": c} for t, c in items]
+async def _upload(
+    client: AsyncClient, name: str, body: bytes, mime: str = "text/plain"
+):
+    return await client.post(_FILE_URL, files={"file": (name, body, mime)})
 
 
-async def _executeImport(client: AsyncClient, modelId: int, sourceRef: str = "policy.md"):
-    with patch(_INVOKER_CLIENT, return_value=_FakeLlmClient()):
-        return await client.post(
-            f"{_BASE}/execute",
-            json={
-                "drafts": _drafts(("供应商准入规则", "注册资本 >= 1000 万")),
-                "modelId": modelId,
-                "sourceType": "MARKDOWN",
-                "sourceRef": sourceRef,
-            },
-        )
-
-
-async def test_execute_registers_document_catalog(
-    client: AsyncClient, dbSession: AsyncSession
+async def test_preview_file_stores_source_and_registers_catalog(
+    client: AsyncClient, dbSession: AsyncSession, fakeMinio: _FakeMinio
 ) -> None:
-    """导入执行后 document_catalog 新增一行，content_hash 为 64 位 hex。"""
+    """上传后对象已写入，catalog 有一行指向它，且 hash 是**文件字节**的摘要。"""
     # Arrange
-    modelId = await _seedModel(dbSession)
+    body = "## 准入规则\n\n注册资本 >= 1000 万。".encode("utf-8")
+    expectedHash = hashlib.sha256(body).hexdigest()
+    expectedObject = f"sources/{expectedHash[:2]}/{expectedHash}/规则.txt"
 
     # Act
-    resp = await _executeImport(client, modelId)
+    resp = await _upload(client, "规则.txt", body)
 
-    # Assert
-    assert resp.status_code == 201
+    # Assert —— 对象侧
+    assert resp.status_code == 200
+    assert len(fakeMinio.putCalls) == 1
+    assert fakeMinio.putCalls[0]["objectName"] == expectedObject
+    assert fakeMinio.putCalls[0]["content"] == body
+    assert fakeMinio.putCalls[0]["bucket"] == "qa-knowledge-sources"
+
+    # Assert —— 目录侧
     rows = (await dbSession.execute(select(DocumentCatalog))).scalars().all()
     assert len(rows) == 1
     row = rows[0]
-    assert row.document_name == "policy.md"
-    assert row.content_hash is not None
-    assert len(row.content_hash) == 64
-    assert all(c in "0123456789abcdef" for c in row.content_hash)
-    # execute 只持有草稿文本，不持有原始文件 —— 这里必须是 None 而不是假 URL
-    assert row.storage_url is None
-    # 不能是 dto.source_type（"MARKDOWN"）——那既不是合法枚举值也语义不符
+    assert row.document_name == "规则.txt"
+    # 关键：是**文件字节**的摘要，不是草稿文本的摘要（后者是旧方案的妥协）
+    assert row.content_hash == expectedHash
+    assert row.storage_url == f"s3://qa-knowledge-sources/{expectedObject}"
+    # 不能是 source_type（"MARKDOWN"）—— 那既不是合法枚举值也语义不符
     assert row.document_type == DocumentType.OTHER
 
 
-async def test_reimport_same_drafts_does_not_duplicate_catalog(
-    client: AsyncClient, dbSession: AsyncSession
-) -> None:
-    """同一批草稿重复导入，catalog 不应新增第二行。"""
-    # Arrange
-    modelId = await _seedModel(dbSession)
+async def test_response_contract_unchanged(client: AsyncClient) -> None:
+    """响应形状不变：仍是 text + sourceType，**没有新增字段**。
 
+    落库是纯服务端副作用，客户端不需要回传任何东西 —— 这正是选它的理由。
+    若将来给响应加了字段，本用例会失败，逼人回来看这里。
+    """
     # Act
-    first = await _executeImport(client, modelId)
-    second = await _executeImport(client, modelId)
+    resp = await _upload(client, "规则.txt", "## 准入规则\n\n注册资本 >= 1000 万。".encode())
 
     # Assert
-    assert first.status_code == 201
-    assert second.status_code == 201
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {"text", "sourceType"}
+    assert "注册资本 >= 1000 万。" in body["text"]
+    assert body["sourceType"] == "MARKDOWN"
+
+
+async def test_same_file_twice_does_not_duplicate_catalog(
+    client: AsyncClient, dbSession: AsyncSession, fakeMinio: _FakeMinio
+) -> None:
+    """同一份文件重复上传，catalog 不应新增第二行。"""
+    # Arrange
+    body = "# 同一份\n\n同样的内容".encode()
+
+    # Act
+    first = await _upload(client, "same.md", body)
+    second = await _upload(client, "same.md", body)
+
+    # Assert
+    assert first.status_code == 200
+    assert second.status_code == 200
     rows = (await dbSession.execute(select(DocumentCatalog))).scalars().all()
-    assert len(rows) == 1, f"同 hash 重复导入产生了 {len(rows)} 行 catalog"
+    assert len(rows) == 1, f"同 hash 重复上传产生了 {len(rows)} 行 catalog"
 
 
-async def test_different_drafts_produce_separate_catalog_rows(
-    client: AsyncClient, dbSession: AsyncSession
+async def test_different_files_produce_separate_rows(
+    client: AsyncClient, dbSession: AsyncSession, fakeMinio: _FakeMinio
 ) -> None:
-    """不同内容的导入应是两行 —— 否则上面的去重可能是「永远只写一行」的假象。"""
-    # Arrange
-    modelId = await _seedModel(dbSession)
-
+    """不同内容应是两行 —— 否则上面的去重可能只是「永远只写一行」的假象。"""
     # Act
-    with patch(_INVOKER_CLIENT, return_value=_FakeLlmClient()):
-        respA = await client.post(
-            f"{_BASE}/execute",
-            json={
-                "drafts": _drafts(("准入规则", "注册资本 >= 1000 万")),
-                "modelId": modelId,
-                "sourceType": "MARKDOWN",
-                "sourceRef": "a.md",
-            },
-        )
-        respB = await client.post(
-            f"{_BASE}/execute",
-            json={
-                "drafts": _drafts(("验收标准", "抽检合格率 >= 98%")),
-                "modelId": modelId,
-                "sourceType": "MARKDOWN",
-                "sourceRef": "b.md",
-            },
-        )
+    await _upload(client, "a.md", "# a\n\nA 的内容".encode())
+    await _upload(client, "b.md", "# b\n\nB 的内容".encode())
 
     # Assert
-    assert respA.status_code == 201
-    assert respB.status_code == 201
     rows = (await dbSession.execute(select(DocumentCatalog))).scalars().all()
     assert len(rows) == 2
     assert {r.document_name for r in rows} == {"a.md", "b.md"}
 
 
-async def test_preview_file_still_returns_flat_text(client: AsyncClient) -> None:
-    """parseFile 仍返回扁平文本供预览展示（由块列表拼回），接口语义不变。"""
+async def test_rejected_upload_stores_nothing(
+    client: AsyncClient, dbSession: AsyncSession, fakeMinio: _FakeMinio
+) -> None:
+    """被拒绝的文件不留痕：格式不支持 → 422，且对象存储与 catalog 都是空的。
+
+    这条钉死的是**顺序**：留存必须发生在解析成功之后。反过来的实现
+    （先存再解析）会让每个格式不符/损坏的文件都在对象存储里留下垃圾，
+    而其余用例全都照样通过 —— 所以必须有这一条。
+    """
     # Act
-    resp = await client.post(
-        f"{_BASE}/preview-file",
-        files={"file": ("规则.txt", "## 准入规则\n\n注册资本 >= 1000 万。", "text/plain")},
-    )
+    resp = await _upload(client, "note.xyz", b"anything", "application/octet-stream")
 
     # Assert
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "注册资本 >= 1000 万。" in body["text"]
-    assert body["sourceType"] == "MARKDOWN"
+    assert resp.status_code == 422
+    assert fakeMinio.putCalls == []
+    rows = (await dbSession.execute(select(DocumentCatalog))).scalars().all()
+    assert rows == []
 ```
 
-> 四个用例覆盖：登记发生、同内容不重复、**不同内容确实产生两行**、预览路径未被破坏。第三条是必须的——只有前两条时，一个「永远只写一行」的实现也能全绿。
+> 五个用例覆盖：留存发生且 hash 取自文件字节、响应契约未被顺带改宽、同内容幂等、不同内容确实两行、被拒文件不留痕。第四、五条是必须的 —— 少了它们，一个「永远只写一行」的实现、或一个「先存后解析」的实现，都能在其他用例上全绿。
 >
 > 端点路径是 `/preview-file`（连字符，非 `/preview/file`），响应键是 `text` / `sourceType`。以上均取自 `test_wiki_import_api.py` 实际用例，非推测。
+>
+> 本任务**不需要假 LLM**：`preview-file` 从头到尾不调模型（`execute` 才调）。所以这里比 `test_wiki_import_api.py` 简单。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -2044,9 +2042,9 @@ cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@loc
   .venv/bin/pytest app/tests/integration/test_wiki_import_catalog.py -q
 ```
 
-Expected: FAIL — catalog 行数为 0
+Expected: FAIL —— `putCalls` 为空、catalog 行数为 0（实现尚未落库）
 
-- [ ] **Step 3: 适配 `parseFile`**
+- [ ] **Step 3: 适配 `parseFile` 到 `TextBlock`**
 
 `wiki_import_service.py:205` 改为：
 
@@ -2057,25 +2055,41 @@ Expected: FAIL — catalog 行数为 0
         return text, sourceTypeFromFilename(filename, mime_type)
 ```
 
-- [ ] **Step 4: 在 `execute` 末尾登记 catalog**
+- [ ] **Step 4: 新增 `persistSourceFile`**
 
-在 `execute` 收尾处（任务台账落库之后）追加：
+在 `WikiImportService` 里新增（放在 `parseFile` 之后）：
 
 ```python
-        # P0 溯源：登记 document_catalog，使 wiki 摄入来源可被检索与去重。
-        # 注意 execute 只持有草稿文本，不持有原始文件，故 storage_url 为 None；
-        # hash 的是草稿文本 —— 对去重与变更检测同样有效。
-        # （源文件级留存由 RAG 路径承担，见 rag_service.ingestDocument。）
-        draftText = "\n\n".join(d.content for d in dto.drafts if d.content)
-        if draftText:
-            contentHash = hashContent(draftText.encode("utf-8"))
-            await self._catalog.upsertByContentHash(
-                session,
-                document_name=dto.source_ref or "未命名导入",
-                content_hash=contentHash,
-                storage_url=None,
-                actor=actor,
-            )
+    async def persistSourceFile(
+        self,
+        session: AsyncSession,
+        *,
+        content: bytes,
+        mime_type: str,
+        filename: str,
+        actor: int | None,
+    ) -> str:
+        """留存源文件并登记 document_catalog，返回 ``storage_url``。
+
+        内容寻址：同一份文件重复上传落到同一对象名，天然去重；catalog 登记
+        再按 ``content_hash`` 幂等一层。两层都不依赖调用方传任何东西进来 ——
+        哈希与 URL 全部由服务端从**真实字节**算出。
+
+        Raises:
+            ObjectStorageError: MinIO 不可用或写入失败（API 层转 503）
+        """
+        contentHash = hashContent(content)
+        objectName = buildSourceObjectName(contentHash, filename)
+        storageUrl = putSourceObject(objectName, content, mime_type)
+        await self._catalog.upsertByContentHash(
+            session,
+            document_name=filename,
+            content_hash=contentHash,
+            storage_url=storageUrl,
+            actor=actor,
+        )
+        await session.commit()
+        return storageUrl
 ```
 
 并在 `WikiImportService.__init__` 注入 catalog 依赖（沿用 `classifier` 的既有注入风格）：
@@ -2089,9 +2103,85 @@ Expected: FAIL — catalog 行数为 0
     ) -> None:
         self._classifier = classifier or AutoClassifier()
         self._catalog = catalog or WikiCatalogRegistrar()
+        self._pageService = WikiPageService()
 ```
 
-新建 `backend/app/services/wiki_catalog_registrar.py`（保持 `wiki_import_service.py` 不膨胀）：
+模块顶部补 import：
+
+```python
+from app.infrastructure.object_storage import (
+    buildSourceObjectName,
+    hashContent,
+    putSourceObject,
+)
+from app.services.wiki_catalog_registrar import WikiCatalogRegistrar
+```
+
+- [ ] **Step 5: API 层落库 + 契约 docstring 改写**
+
+`wiki_import.py` 的 `previewImportFile` 增加两个依赖（`import` 段补 `ObjectStorageError` 与 `MSG_WIKI_IMPORT_SOURCE_STORE_FAILED`）：
+
+```python
+@router.post("/preview-file", response_model=WikiImportFileParseRead)
+@limiter.limit(rateLimitValue)
+async def previewImportFile(
+    request: Request,
+    file: UploadFile,
+    user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+) -> WikiImportFileParseRead:
+```
+
+成功分支改为（**在 `parseFile` 之后**）：
+
+```python
+    # 解析成功后才留存：损坏/格式不符的文件不该在对象存储里留下垃圾。
+    # MinIO 故障显式失败（503），不降级为「预览成功但其实没存」。
+    try:
+        await _importService.persistSourceFile(
+            db,
+            content=content,
+            mime_type=mime,
+            filename=fname,
+            actor=user.dbUserId,
+        )
+    except ObjectStorageError:
+        logger.exception("知识导入源文件留存失败: filename=%s mime=%s", fname, mime)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=MSG_WIKI_IMPORT_SOURCE_STORE_FAILED,
+        ) from None
+
+    return WikiImportFileParseRead(text=text, source_type=sourceType)
+```
+
+**两处 docstring 必须同改**（契约背离比改动本身危险）：
+
+1. `previewImportFile` 首行：`"""上传文件 → 纯文本 + 来源类型（不落库、不调模型）。` 改为
+   `"""上传文件 → 纯文本 + 来源类型（落对象存储与文档目录，不调模型）。`
+2. 模块 docstring 第 3 条：`3. ``POST /wiki/import/preview-file`` 上传文件 → 纯文本（不落库、不调模型）`
+   改为 `3. ``POST /wiki/import/preview-file`` 上传文件 → 纯文本（**留存源文件**、不调模型）`。
+
+并在模块 docstring 补一段说明留存语义：
+
+```
+上传路径会把源文件按内容寻址存入对象存储，并登记一行 ``document_catalog``
+（原文件因解析成功才会走到这一步）。因此「预览」在上传路径上是**有副作用**的：
+预览过但未导入的文件同样会留存。这是 2026-09-12 的刻意决定 —— 溯源价值高于
+「预览不留痕」，且内容寻址让重复预览不产生重复对象。
+```
+
+`messages_zh.py` 新增（与既有 `MSG_WIKI_IMPORT_*` 同段落）：
+
+```python
+MSG_WIKI_IMPORT_SOURCE_STORE_FAILED = (
+    "源文件留存失败，请稍后重试；若持续失败请联系管理员。"
+)
+```
+
+- [ ] **Step 6: 新建 `wiki_catalog_registrar.py`**
+
+单独成文件而非塞进 `wiki_import_service`：后者已 520 行，接近 800 行上限；登记逻辑与导入编排无共同状态，拆开后各自可测。
 
 ```python
 """Wiki 摄入来源在 document_catalog 的登记。
@@ -2131,7 +2221,7 @@ class WikiCatalogRegistrar:
         """同 hash 已存在则返回既有行，否则新建。
 
         document_type 固定为 ``DocumentType.OTHER``：wiki 导入的是知识条目，
-        不属于 CONTRACT / SOP 等既有文档类别。**不能**透传 dto.source_type
+        不属于 CONTRACT / SOP 等既有文档类别。**不能**透传 source_type
         （那里的取值是 MARKDOWN/PDF 之类的来源格式），它既不是 DocumentType
         的合法值，语义上也完全是另一回事。
         """
@@ -2155,30 +2245,33 @@ class WikiCatalogRegistrar:
 
 > **列约束已核对**（`backend/app/domain/models.py:1265-1288`）：`version` / `status` / `security_level` 有列默认值，可不传；`document_id` 唯一非空、`document_name` 非空、`document_type` 非空且为 `DocumentType` 枚举 —— 上面三处均已显式赋值，无需再补。
 
-- [ ] **Step 5: 运行测试确认通过**
+- [ ] **Step 7: 运行测试确认通过**
 
 ```bash
 cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' \
   .venv/bin/pytest app/tests/integration/test_wiki_import_catalog.py -q
 ```
 
-Expected: PASS
+Expected: PASS（5 个用例）
 
-- [ ] **Step 6: 回归既有 wiki 导入测试**
+- [ ] **Step 8: 回归既有 wiki 导入测试**
 
 ```bash
 cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' \
   .venv/bin/pytest app/tests/ -q -k "wiki_import"
 ```
 
-Expected: PASS（`parseFile` 返回值语义未变，既有预览测试应全绿）
+Expected: PASS
 
-- [ ] **Step 7: 提交**
+> **注意**：既有 `test_wiki_import_api.py` 里凡是打 `/preview-file` 的用例，从本任务起会**真的尝试连 MinIO**。若它们未 patch 客户端，会由「本来就不该联外网」变成失败 —— 这属于预期内的连带影响，不是回归。**修法是在那些用例里一并 patch** `app.infrastructure.object_storage._getClient`（与 `test_wiki_import_catalog.py` 的 autouse fixture 同款），**不要**改成跳过断言。
+
+- [ ] **Step 9: 提交**
 
 ```bash
-git add backend/app/services/wiki_import_service.py backend/app/services/wiki_catalog_registrar.py \
+git add backend/app/api/v1/wiki_import.py backend/app/services/wiki_import_service.py \
+        backend/app/services/wiki_catalog_registrar.py backend/app/services/messages_zh.py \
         backend/app/tests/integration/test_wiki_import_catalog.py
-git commit -m "feat(wiki): wiki 导入路径登记 document_catalog + parseFile 适配 TextBlock"
+git commit -m "feat(wiki): 上传路径留存源文件 + 登记 document_catalog（preview-file 落库）"
 ```
 
 ---
@@ -2344,8 +2437,11 @@ git commit -m "chore(wiki): P0 真实数据验证脚本 + 变更记录"
 | 验收信号 | 由哪个任务交付 |
 |---|---|
 | Milvus chunk 带正确 `page_number` | Task 3 Step 7 |
-| `document_catalog` 有真实 `storage_url` + 非空 `content_hash` | Task 5、Task 6 |
-| MinIO 桶内存有源文件 | Task 4 Step 6、Task 7 Step 2 |
+| `document_catalog` 有真实 `storage_url` + 非空 `content_hash` | Task 5（RAG 路径）、Task 6（wiki 路径） |
+| MinIO 桶内可回读，且内容与上传字节一致 | Task 4 Step 6、Task 7 Step 2 |
+| wiki 上传路径同样留存源文件，`content_hash` 取自**文件字节**（非草稿文本） | Task 6 Step 1 / Step 7 |
+| 同一文件重复上传不产生第二行 catalog | Task 6 Step 1 / Step 7 |
+| 被拒文件（格式不符）在对象存储与 catalog 都不留痕 | Task 6 Step 1 / Step 7 |
 
 ## 不做的事（范围边界）
 

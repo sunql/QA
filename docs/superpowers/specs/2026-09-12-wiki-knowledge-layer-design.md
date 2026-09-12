@@ -162,9 +162,20 @@ except Exception:
 
 且 `:176` 写的是 `storage_url=f"milvus://{len(chunks)}_chunks"` —— 一个**假 URL**。改为写真实对象存储地址。
 
-**C5 — Wiki 导入路径也注册 `document_catalog`**
+**C5 — Wiki 导入路径留存源文件并登记 `document_catalog`**
 
 `wiki_import_service.py` 目前**完全不注册 `document_catalog`**（该表 0 行），只有 RAG 路径注册。两条摄入路径应当共用同一套目录登记。
+
+**落在哪一步（2026-09-12 用户选定）**：`execute()` 的输入是客户端回传的**纯文本草稿**，**从不接触文件字节** —— 它在结构上就存不了源文件，算不出文件哈希。字节只在 `POST /wiki/import/preview-file` 手里。因此：
+
+- **在 `preview-file` 落库**：存对象 + 登记一行 `document_catalog`，`content_hash` 与 `storage_url` **全由服务端从真实字节算出**。
+- `execute` **不携带任何溯源字段** —— 签名与职责不变。
+- **不得让客户端回传 hash / url**：本仓库已有同一原则的先例 —— `WikiImportFileParseRead` 的 docstring 明确写 `source_type` 由后端判定而非前端自报（「让调用方自报等于允许『上传 .pdf 却记成 MARKDOWN』，台账就不可信了」）。`content_hash` / `storage_url` 是同一性质的溯源字段，交由调用方回传会犯同一个错。
+- **留存必须排在解析成功之后**：反过来的话，每个损坏/格式不符的文件都会在对象存储里留下永远无人引用的垃圾。
+
+**契约变更（须诚实记录）**：`preview-file` 的契约原写「不落库、不调模型」，此后为「**落对象存储与文档目录**、不调模型」。模块级与端点级两处 docstring 必须同改 —— 契约背离比改动本身更危险。
+
+**已知代价（接受）**：预览了但未导入的文件同样会留存。内容寻址使重复预览不产生重复对象，catalog 登记再按 `content_hash` 幂等一层。**「查看」走既有文档库**（`GET /documents` 读 `document_catalog`），P0 不新增前端、不新增端点。
 
 ### 4.2 数据流
 
@@ -176,12 +187,13 @@ except Exception:
   → embedding → Milvus（collection 需重建，见 4.4）
   → document_catalog 登记（真实 url + hash）
 
-Wiki 导入路径：复用同一套 C1/C2/C5
+Wiki 导入路径：`preview-file` 走 C1 + C3 + C5（留存源文件 + 登记 catalog，哈希取自**文件字节**）；
+`execute` 只建 Page 与分类，不接触字节，故**不带任何溯源字段**
 ```
 
 ### 4.3 影响面
 
-生产调用方只有 2 处（`rag_service`、`wiki_import_service`），测试文件 3 个。改动可控。
+生产调用方 3 处（`rag_service`、`wiki_import_service`、`api/v1/wiki_import.py`），测试文件 3 个。改动可控。
 
 ### 4.4 Milvus collection 需重建
 
@@ -197,6 +209,8 @@ Wiki 导入路径：复用同一套 C1/C2/C5
 
 - 解析层：`UnsupportedFileTypeError` / `DocumentParserError` 分别映射到不同的用户提示。
 - 存储层：MinIO 不可用必须**显式失败**，不得降级为静默跳过（C4 修的就是这个模式）。
+  在 `preview-file` 上这意味着留存失败即 **503**，**不得**降级为「预览成功但其实没存」；
+  代价是预览可用性从此与 MinIO 绑定 —— 这是「预览即持久化」的固有代价，接受它。
 - 目录登记：沿用现有既有策略，但失败必须留日志上下文。
 
 ### 4.6 测试策略
@@ -204,7 +218,10 @@ Wiki 导入路径：复用同一套 C1/C2/C5
 按 `Harness/rules/测试规范.md`：真实 PostgreSQL + 完整 API 链路，禁止 sqlite。
 
 - 解析层：`TextBlock` 定位符正确性 —— PDF 页码连续性、DOCX 段号、MD 章节识别。
-- 存储层：`ensureBucket` 幂等；上传后 `storage_url` 可回读。
+- 存储层：`ensureBucket` 幂等；上传后 `storage_url` 可回读（真实 MinIO，由 P0 Task 7 真实数据脚本承担）。
+- 集成层（P0 Task 6）：**假 MinIO 客户端 + 真实 PostgreSQL + 完整 API 链路**，覆盖 `preview-file` 留存 ——
+  hash 取自**文件字节**、响应契约不被顺带改宽、同内容幂等、不同内容确实两行、被拒文件不留痕。
+  外部服务走假实现与既有「假 LLM 客户端」（`_INVOKER_CLIENT`）同一思路；真实端到端由 Task 7 承担。
 - 端到端：上传一份已知 PDF → 断言 Milvus 中的 chunk 带正确 `page_number`。
 
 ### 4.7 决策
@@ -553,7 +570,7 @@ B（直接上文档三元组）与 C 的**列终态相同**，C 是其超集。�
 1. **数据模型变更**（P1 加列、P3 建两表）：migration 脚本须人工 review。
 2. **成本阈值变更**：P3 引入批量 LLM 编译，`total_cost_usd` 的量级变化需人工确认。
 
-`security-reviewer` 强制触发场景（已命中）：文件系统操作（P0 对象存储）、数据库查询（P1/P3 迁移）、外部 API 调用（MinIO）。
+`security-reviewer` 强制触发场景（已命中）：文件系统操作（P0 对象存储）、数据库查询（P1/P3 迁移）、外部 API 调用（MinIO）、**用户输入入口的落库副作用**（P0 `preview-file`：上传字节 → 对象存储 + `document_catalog` 写入，含文件名净化以防路径穿越写进对象名）。
 
 ---
 
@@ -563,7 +580,7 @@ B（直接上文档三元组）与 C 的**列终态相同**，C 是其超集。�
 
 | 阶段 | 验收信号 |
 |---|---|
-| P0 | 上传一份已知 PDF → Milvus chunk 带正确 `page_number`；`document_catalog` 有真实 `storage_url` + 非空 `content_hash`；MinIO 桶内存有源文件 |
+| P0 | **RAG 路径**：上传一份已知 PDF → Milvus chunk 带正确 `page_number`；`document_catalog` 有真实 `storage_url` + 非空 `content_hash`；MinIO 桶内可回读且字节一致。**wiki 路径**：`preview-file` 上传同一份文件 → 同样留存源文件并登记 catalog，`content_hash` 取自**文件字节**（非草稿文本）；同一文件重复上传不产生第二行；被拒文件（格式不符）不留任何痕迹 |
 | P1 | 同一文件导入两次 → `wiki_page` 恰 1 行；`wiki_learning_models.py:172-173` 的声称由测试钉死 |
 | P3 | `knowledge_claim` / `evidence` 非零且 evidence 定位符非空；**claim 三元组双形态产出**（`claim_text` 与 `subject_id`/`predicate`/`object_value` 同批非空）；`SELECT count(*) FROM knowledge_claim WHERE subject_id IS NULL` 有确定值（实体层待办量）；`wiki_compile_item` 可续跑（杀进程后重跑只处理未完成项）；`wiki_token_usage.compile_task_id` 有值；`explain` 显示 wiki 列表查询不再拖 evidence |
 

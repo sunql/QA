@@ -32,13 +32,19 @@ async def _createPage(
 # ---------------------------------------------------------------------------
 
 
-async def test_create_generates_page_id_and_defaults(client: AsyncClient) -> None:
-    """未提供 pageId 时自动生成；默认 DRAFT + MARKDOWN 阶段。"""
+async def test_create_generates_deterministic_page_id(client: AsyncClient) -> None:
+    """未提供 pageId 时按**内容**派生；默认 DRAFT + MARKDOWN 阶段。
+
+    回归点（feat-wiki-dedup P1）：生成 ID 的后缀曾是 ``uuid4()[:8]``，同一标题
+    每次都不同 → 导入路径的冲突检查永不命中，同一份文件重跑必落副本
+    （实测 557 行页面只有 75 个不同标题）。这里锁死字面输出，随机后缀一旦
+    回归即打红。
+    """
     # Arrange / Act
     body = await _createPage(client)
 
     # Assert
-    assert body["pageId"].startswith("PAGE-")
+    assert body["pageId"] == "PAGE-UNTITLED-012CA6C8"
     assert body["title"] == "供应商准入规则"
     assert body["status"] == "DRAFT"
     assert body["structureStage"] == "MARKDOWN"

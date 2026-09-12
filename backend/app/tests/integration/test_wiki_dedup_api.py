@@ -151,3 +151,67 @@ async def test_document_catalog_content_hash_index_is_unique(
         "而 P1 不回填历史行，写入会立刻炸"
     )
     assert indexDef.upper().count("(CONTENT_HASH)") == 1
+
+
+# ---------------------------------------------------------------------------
+# 创建 / 更新落 content_hash
+# ---------------------------------------------------------------------------
+
+_CONTENT = "注册资本 >= 1000 万"
+_CONTENT_HASH = "5dd995a8688226c1fc01cc593b6bce29b2b1b96fcde0feca24ddaab3a13d4041"
+
+
+async def test_create_page_writes_content_hash(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """POST /wiki/pages 落 content_hash = sha256(content)（可直接与 document_catalog 比对）。"""
+    resp = await client.post(
+        _PAGES, json={"title": "供应商准入规则", "content": _CONTENT}
+    )
+    assert resp.status_code == 201, resp.text
+    pageId = resp.json()["pageId"]
+
+    stored = (
+        await dbSession.execute(
+            text(
+                "SELECT content_hash, page_id FROM wiki_page WHERE page_id = :pid"
+            ),
+            {"pid": pageId},
+        )
+    ).mappings().one()
+    assert stored["content_hash"] == _CONTENT_HASH
+    # API 生成的 ID 是确定性的内容派生（不再是随机后缀）
+    assert stored["page_id"] == "PAGE-UNTITLED-012CA6C8"
+
+
+async def test_patch_content_updates_hash_but_keeps_page_id(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """PATCH content 后 content_hash 必须重算，page_id 必须**不变**。
+
+    两件事都是刻意的：
+    - 哈希不重算 → 「同 ID 同内容 → 跳过」基于过期值判定，会把真冲突误判成重跑
+      而静默丢知识（或反之）。
+    - page_id 变了 → knowledge_claim / knowledge_relation 的 FK 指向的旧 ID 变成
+      悬空，条目在关系网里直接断链。
+    """
+    created = await client.post(
+        _PAGES, json={"title": "供应商准入规则", "content": _CONTENT}
+    )
+    pageId = created.json()["pageId"]
+
+    resp = await client.patch(
+        f"{_PAGES}/{pageId}", json={"content": "注册资本 >= 2000 万"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["pageId"] == pageId
+
+    stored = (
+        await dbSession.execute(
+            text("SELECT content_hash FROM wiki_page WHERE page_id = :pid"),
+            {"pid": pageId},
+        )
+    ).scalar_one()
+    assert stored == (
+        "87fa50ec95c812008c1482260d4ab13894e579bdeeee3a675d663766169a8914"
+    )

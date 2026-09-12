@@ -460,7 +460,11 @@ class WikiPageService:
         """
         _assertDimension(dto.dimension)
         pageId = (
-            sanitizePageId(dto.page_id) if dto.page_id else generatePageId(dto.title)
+            sanitizePageId(dto.page_id)
+            if dto.page_id
+            # sourceRef 传 ""：单条创建没有导入来源，与「导入时 sourceRef 为空」
+            # 得到同一个 ID，两条路径不会因为参数缺失而算出两种身份。
+            else generatePageId(dto.title, "", dto.content)
         )
 
         existing = await session.execute(
@@ -473,6 +477,7 @@ class WikiPageService:
             page_id=pageId,
             title=dto.title,
             content=dto.content,
+            content_hash=contentHashOf(dto.content),
             dimension=dto.dimension,
             authority_level=dto.authority_level,
             status="DRAFT",
@@ -527,6 +532,14 @@ class WikiPageService:
                 _assertStage(value)
             elif field == "status":
                 _assertStatus(value)
+            elif field == "content":
+                # 正文变了哈希必须跟着变：content_hash 是「这条条目**当前**正文的
+                # 摘要」这一事实，不是「创建时正文的摘要」。不更新会让导入路径的
+                # 「同 ID 同内容 → 跳过」基于过期值判定 —— 要么把真正的冲突误判成
+                # 重跑而静默丢知识，要么把重跑误判成冲突而报假失败。
+                # page_id 刻意**不重算**：它被 knowledge_claim / knowledge_relation
+                # 以 FK 引用，改 ID 会让已确认的关系变成悬空引用。
+                entity.content_hash = contentHashOf(value)
             setattr(entity, field, value)
 
         # 反馈与维度改写同事务：先 flush 再统一 commit，避免「维度改了但反馈没落」

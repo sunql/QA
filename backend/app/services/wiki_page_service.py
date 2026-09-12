@@ -17,8 +17,8 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
-import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -66,6 +66,16 @@ _audit = AuditService()
 _PAGE_ID_SANITIZE = re.compile(r"[^A-Za-z0-9_-]+")
 _MAX_PAGE_ID_LEN = 64
 _MAX_SLUG_LEN = 40
+
+# page_id 后缀的哈希位数（16 进制）。8 位 = 32 bit，对单库万级条目足够；真撞上
+# 时不会静默丢知识 —— _importOne 还会比对 content_hash，不等则判为「同 ID 不同
+# 内容」的冲突（计失败）而不是跳过。
+_IDENTITY_HASH_LEN = 8
+
+# 身份哈希的字段分隔符。用 NUL 而不是 ``|`` / ``-``：标题与来源里合法出现的
+# 任何字符都不该能伪造出「字段边界」—— ``("ab", "c")`` 与 ``("a", "bc")``
+# 必须哈希不同。
+_IDENTITY_SEPARATOR = "\x00"
 
 # ``dimension`` 的「未提供」哨兵。不能复用 None：显式传 null 是合法入参
 # （= 打回该分类），与「没提这个字段」语义相反。
@@ -145,16 +155,48 @@ def sanitizePageId(raw: str) -> str:
     return cleaned[:_MAX_PAGE_ID_LEN]
 
 
-def generatePageId(title: str) -> str:
-    """由标题生成稳定可读的 page_id（业务专家未显式提供时）。
+def contentHashOf(content: str) -> str:
+    """正文的 SHA-256 十六进制摘要（小写，恒 64 字符）。
 
-    形如 ``PAGE-<SLUG>-<8位随机>``：短横线大写 slug 便于人读，
-    随机后缀保证并发创建不撞车（title 可重复，不构成唯一键）。
+    与 RAG 路径写进 ``document_catalog.content_hash`` 的**同一口径**
+    （``sha256(utf-8 bytes).hexdigest()``），因此两处摘要可直接比对。P0 落地
+    「导入路径也登记 document_catalog」时复用本函数，不要再写第二份实现 ——
+    两份实现迟早会在编码/大小写上漂移，而漂移了不会报错，只会让比对永远不等。
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _identityDigest(sourceRef: str, title: str, content: str) -> str:
+    """身份哈希：``sha256(source_ref \\x00 title \\x00 content)`` 的十六进制。
+
+    用**内容**（而非随机数）回答「这条知识是不是已经在了」。字段以 NUL 分隔，
+    保证 ``("ab", "c")`` 与 ``("a", "bc")`` 不会撞成同一条。
+    """
+    payload = _IDENTITY_SEPARATOR.join((sourceRef, title, content))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def generatePageId(title: str, sourceRef: str = "", content: str = "") -> str:
+    """由**内容**派生稳定可读的 page_id（业务专家未显式提供时）。
+
+    形如 ``PAGE-<SLUG>-<8位身份哈希>``。与旧实现（``PAGE-<SLUG>-<8位随机>``）
+    的唯一差别是**幂等**：同一份知识重跑得到同一个 ID，于是导入路径既有的
+    「冲突检查 + ``uq_wiki_page_page_id``」原样生效，重复项根本落不了库 ——
+    不需要引入第二套去重机制，也不需要有人去读 ``wiki_import_task.page_ids``。
+
+    ``sourceRef`` 参与派生：同一标题同一正文但来源不同（两个部门各写了一份
+    同样的模板）是**两条**知识。同一份文件重跑时来源也相同，故仍会合并。
+    调用方负责把 ``None`` 归一成 ``""``（签名是 str，不接受 None）。
+
+    注意 slug 沿用 ``_PAGE_ID_SANITIZE`` 的 ASCII 字符集，故**纯中文标题会折叠
+    成 ``UNTITLED``**：唯一性由哈希后缀保证，可读性在中文场景是净损失。这是
+    刻意保留既有字符集契约（page_id 要能安全放进 ``GET /wiki/pages/{pageId}``
+    的路径段）的结果，不是疏忽。
     """
     slug = _PAGE_ID_SANITIZE.sub("-", title.strip()).strip("-").upper()
     slug = slug[:_MAX_SLUG_LEN].strip("-") or "UNTITLED"
-    suffix = uuid.uuid4().hex[:8].upper()
-    return f"PAGE-{slug}-{suffix}"[:_MAX_PAGE_ID_LEN]
+    digest = _identityDigest(sourceRef, title, content)[:_IDENTITY_HASH_LEN].upper()
+    return f"PAGE-{slug}-{digest}"[:_MAX_PAGE_ID_LEN]
 
 
 def _assertDimension(dimension: str | None) -> None:

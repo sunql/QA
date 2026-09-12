@@ -11,6 +11,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies import CurrentUser
 from app.domain.enums import DocumentType
 from app.domain.models import DocumentCatalog
 
@@ -30,7 +31,7 @@ class WikiCatalogRegistrar:
         document_name: str,
         content_hash: str,
         storage_url: str | None,
-        actor: object | None = None,
+        actor: CurrentUser,
     ) -> DocumentCatalog:
         """同 hash 已存在则返回既有行，否则新建。
 
@@ -38,6 +39,9 @@ class WikiCatalogRegistrar:
         不属于 CONTRACT / SOP 等既有文档类别。**不能**透传 source_type
         （那里的取值是 MARKDOWN/PDF 之类的来源格式），它既不是 DocumentType
         的合法值，语义上也完全是另一回事。
+
+        owner 由 ``actor.departments[0]`` 派生（entity_mapping 同模式），
+        不接受 client 声明，防止越权；``departments`` 为空 → ``owner=None``。
         """
         stmt = select(DocumentCatalog).where(DocumentCatalog.content_hash == content_hash)
         existing = (await session.execute(stmt)).scalars().first()
@@ -45,10 +49,12 @@ class WikiCatalogRegistrar:
             logger.info("document_catalog 已存在同 hash 行，跳过登记: %s", content_hash[:12])
             return existing
 
+        owner = actor.departments[0] if actor.departments else None
         entity = DocumentCatalog(
             document_id=f"{_WIKI_DOC_PREFIX}{content_hash[:12].upper()}",
             document_name=document_name,
             document_type=DocumentType.OTHER,
+            owner=owner,
             storage_url=storage_url,
             content_hash=content_hash,
         )

@@ -179,7 +179,7 @@ async def previewImportFile(
             content=content,
             mime_type=mime,
             filename=fname,
-            actor=user.dbUserId,
+            actor=user,
         )
     except ObjectStorageError:
         logger.exception("知识导入源文件留存失败: filename=%s mime=%s", fname, mime)

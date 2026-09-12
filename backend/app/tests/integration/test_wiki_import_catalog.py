@@ -59,9 +59,15 @@ def fakeMinio() -> Iterator[_FakeMinio]:
 
 
 async def _upload(
-    client: AsyncClient, name: str, body: bytes, mime: str = "text/plain"
+    client: AsyncClient,
+    name: str,
+    body: bytes,
+    mime: str = "text/plain",
+    headers: dict | None = None,
 ):
-    return await client.post(_FILE_URL, files={"file": (name, body, mime)})
+    return await client.post(
+        _FILE_URL, files={"file": (name, body, mime)}, headers=headers
+    )
 
 
 async def test_preview_file_stores_source_and_registers_catalog(
@@ -161,3 +167,34 @@ async def test_rejected_upload_stores_nothing(
     assert fakeMinio.putCalls == []
     rows = (await dbSession.execute(select(DocumentCatalog))).scalars().all()
     assert rows == []
+
+
+async def test_owner_derived_from_actor_departments(
+    client: AsyncClient, dbSession: AsyncSession, fakeMinio: _FakeMinio
+) -> None:
+    """catalog 行的 owner 由 actor.departments[0] 派生（entity_mapping 同模式）。"""
+    # Act
+    resp = await _upload(
+        client,
+        "规则.txt",
+        "## 甲\n\n正文".encode(),
+        headers={"X-User-Departments": "procurement,finance"},
+    )
+
+    # Assert
+    assert resp.status_code == 200
+    row = (await dbSession.execute(select(DocumentCatalog))).scalars().one()
+    assert row.owner == "procurement"
+
+
+async def test_owner_none_when_departments_empty(
+    client: AsyncClient, dbSession: AsyncSession, fakeMinio: _FakeMinio
+) -> None:
+    """departments 为空 → owner=None（不得 IndexError 炸 500）。"""
+    # Act
+    resp = await _upload(client, "规则.txt", "## 甲\n\n正文".encode())
+
+    # Assert
+    assert resp.status_code == 200
+    row = (await dbSession.execute(select(DocumentCatalog))).scalars().one()
+    assert row.owner is None

@@ -43,6 +43,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies import CurrentUser
 from app.domain.exceptions import (
     ConflictError,
     DomainError,
@@ -226,13 +227,14 @@ class WikiImportService:
         content: bytes,
         mime_type: str,
         filename: str,
-        actor: int | None,
+        actor: CurrentUser,
     ) -> str:
         """留存源文件并登记 document_catalog，返回 ``storage_url``。
 
         内容寻址：同一份文件重复上传落到同一对象名，天然去重；catalog 登记
         再按 ``content_hash`` 幂等一层。两层都不依赖调用方传任何东西进来 ——
-        哈希与 URL 全部由服务端从**真实字节**算出。
+        哈希与 URL 全部由服务端从**真实字节**算出。catalog 行的 ``owner`` 由
+        ``actor.departments[0]`` 派生（entity_mapping 同模式）。
 
         Raises:
             ObjectStorageError: MinIO 不可用或写入失败（API 层转 503）

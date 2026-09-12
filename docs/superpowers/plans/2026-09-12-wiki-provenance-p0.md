@@ -1154,8 +1154,12 @@ def queryDocumentChunks(documentId: str) -> list[dict[str, Any]]:
 
 安全闸：集合非空时拒绝执行，除非显式设 ``ALLOW_NONEMPTY_REBUILD=1``。
 
-用法：
-    docker exec qa-backend python scripts/rebuild_document_collection.py
+用法（**在宿主机跑，不要用 docker exec**）：
+    cd backend && .venv/bin/python scripts/rebuild_document_collection.py
+
+必须用本仓库的新代码执行：容器里的 ``app`` 包在部署前仍是旧版，用
+``docker exec qa-backend ...`` 会拿到旧的 ``_documentFields()``，**按旧字段
+重建集合**——而且脚本会照常打印「已重建集合」并返回 0，静默产出错 schema。
 """
 
 from __future__ import annotations
@@ -1207,10 +1211,18 @@ if __name__ == "__main__":
 - [ ] **Step 7: 执行重建并跑测试**
 
 ```bash
-docker exec qa-backend python scripts/rebuild_document_collection.py
-cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' \
+cd backend
+.venv/bin/python scripts/rebuild_document_collection.py
+TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' \
   .venv/bin/pytest app/tests/integration/test_milvus_document_fields.py -q
 ```
+
+> **为什么在宿主机跑**：重建必须由**新代码**执行，否则按旧字段重建且静默成功。
+> 容器里的 `app` 包要到 Task 7 重建镜像后才更新；而且 Task 3 不做部署，
+> `/app/scripts/rebuild_document_collection.py` 此刻在容器里根本不存在。
+> 宿主机这条路是现成的：`backend/.env` 里 `MILVUS_URI=http://localhost:19530`
+> （Milvus 端口已映射），且项目以 editable 方式装进了 `.venv`（hatchling
+> `packages = ["app"]`），`scripts/` 下的既有脚本同样直接 `from app...` 导入。
 
 Expected: 重建脚本输出「已重建集合」；测试 PASS（6 个用例）
 

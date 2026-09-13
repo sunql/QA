@@ -329,7 +329,7 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
         onOk={() => void handleSubmit()}
         onCancel={() => setModalOpen(false)}
         width={480}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" initialValues={EMPTY_CLASS_FORM}>
           <Form.Item

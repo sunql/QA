@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import type { ReactNode } from "react";
-import { ConfigProvider, theme } from "antd";
+import { App as AntdApp, ConfigProvider, theme } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { useThemeStore } from "../../stores/themeStore";
 import { DARK_TOKEN, LIGHT_TOKEN } from "../../theme/tokens";
@@ -15,6 +15,8 @@ interface ThemedRootProps {
 // 业务自定义组件消费（保持单色源 — tokens.ts 同时驱动 antd ConfigProvider
 // 与 cssVariables 模块）。
 // 与 main.tsx 中的 ConfigProvider 逻辑保持单点（DRY），便于测试直接渲染。
+// AntdApp 包裹：让子组件可以通过 App.useApp() 获取 message/notification/modal
+// 实例，避免静态函数无法消费动态主题的警告。
 export default function ThemedRoot({ children }: ThemedRootProps) {
   const isDark = useThemeStore((s) => s.isDark);
   const token = isDark ? DARK_TOKEN : LIGHT_TOKEN;
@@ -34,7 +36,7 @@ export default function ThemedRoot({ children }: ThemedRootProps) {
         algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
       }}
     >
-      {children}
+      <AntdApp>{children}</AntdApp>
     </ConfigProvider>
   );
 }

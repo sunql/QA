@@ -97,13 +97,18 @@ def _resolveApiKey(config: Any, provider: ProviderType, settings: Settings) -> s
         return settings.openaiApiKey
     if provider == ProviderType.AZURE_OPENAI:
         return settings.azureOpenaiApiKey
+    if provider == ProviderType.MOONSHOT:
+        # Moonshot(Kimi) 的 key 存 MOONSHOT_API_KEY 环境变量
+        return getattr(settings, "moonshotApiKey", "") or ""
     if provider == ProviderType.OPENAI_COMPATIBLE_PROXY:
-        # 按模型名启发：deepseek/qwen
+        # 按模型名启发：deepseek/qwen/moonshot
         name = (config.model_name or "").lower()
         if "deepseek" in name:
             return settings.deepseekApiKey
         if "qwen" in name:
             return settings.qwenApiKey
+        if "kimi" in name or "moonshot" in name:
+            return getattr(settings, "moonshotApiKey", "") or ""
         return settings.openaiApiKey
     return ""
 

@@ -11,7 +11,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Modal, Popconfirm, Select, Space, Table, Tag } from "antd";
+import { Alert, Button, message, Modal, Popconfirm, Select, Space, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useTranslation } from "../i18n";
 import {
@@ -113,7 +113,16 @@ export default function AdminWikiSuggestionsPage() {
         setGenerating(true);
         setErrorMsg(null);
         try {
-            await generateWikiSuggestions(generatePageId, generateModelId);
+            // 抽取可能跑几十秒到几分钟（LLM 调用），后端跑完才关弹窗——
+            // 立即关弹窗会让用户以为「什么反应也没有」。
+            const result = await generateWikiSuggestions(generatePageId, generateModelId);
+            const count = result.total ?? result.suggestions?.length ?? 0;
+            const kind = result.triggeredKind ?? "UNKNOWN";
+            if (count > 0) {
+                message.success(t("wikiSuggestions.generated", { count, kind }));
+            } else {
+                message.info(t("wikiSuggestions.generatedNone"));
+            }
             setGenerateOpen(false);
             setGeneratePageId(undefined);
             setGenerateModelId(undefined);

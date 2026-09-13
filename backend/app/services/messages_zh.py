@@ -407,6 +407,11 @@ MSG_WIKI_COVERAGE_MAPPING_NOT_FOUND = (
 )
 MSG_WIKI_COVERAGE_STATUS_INVALID = "覆盖度状态「{status}」不合法"
 
+# --- 事实原子编辑（Task 10）---
+MSG_WIKI_CLAIM_NOT_FOUND = "事实原子不存在：{claimId}"
+MSG_WIKI_COMPILE_TASK_NOT_FOUND = "编译作业不存在：{taskId}"
+MSG_WIKI_COMPILE_SCOPE_INVALID = "不支持的编译范围：{scope}"
+MSG_WIKI_AUTHORITY_LEVEL_INVALID = "权威度等级非法，合法值：{levels}"
 
 # =============================================================================
 # 图表（Chart）

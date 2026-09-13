@@ -383,7 +383,7 @@ export default function FeatureCatalogPage() {
         okText={t("common.confirm")}
         cancelText={t("common.cancel")}
         width={720}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" initialValues={EMPTY_FEATURE_FORM}>
           <Space.Compact style={{ width: "100%" }}>

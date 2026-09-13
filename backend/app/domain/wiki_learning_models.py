@@ -75,6 +75,7 @@ LEARNING_MECHANISMS: tuple[str, ...] = (
     "RELATE",      # 机制 2 关系发现
     "CONFLICT",    # 机制 3 冲突检测
     "STRUCTURE",   # 机制 4 结构化建议
+    "CLAIM",       # 机制 6 事实抽取
 )
 
 # 冲突类型（机制 3）。四类的**检测手段不同**——只有 CONTRADICTION 必须调模型，
@@ -263,6 +264,7 @@ class WikiTokenUsage(Base):
         ForeignKey("wiki_import_task.id", ondelete="SET NULL"),
         nullable=True,
     )
+    compile_task_id: Mapped[int | None] = mapped_column(nullable=True)
     mechanism: Mapped[str] = mapped_column(String(50), nullable=False)
     model_config_id: Mapped[int | None] = mapped_column(
         BigIntFk, ForeignKey("llm_config.id"), nullable=True

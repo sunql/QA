@@ -233,7 +233,7 @@ export default function SemanticRelationTab({ classes }: SemanticRelationTabProp
         onOk={() => void handleSubmit()}
         onCancel={() => setModalOpen(false)}
         width={560}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" initialValues={NEW_RELATION_FORM_DEFAULTS}>
           <Row gutter={12}>

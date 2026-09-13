@@ -92,8 +92,8 @@ _REVISION_LINE = re.compile(
     r"^revision\s*:?\s*[^=]*=\s*[\"'](\w+)[\"']", re.MULTILINE
 )
 _DOWN_REVISION_LINE = re.compile(
-    r"^down_revision\s*:?\s*[^=]*=\s*(.*?)(?=\n[a-zA-Z_]|\n\n|\Z)",
-    re.MULTILINE | re.DOTALL,
+    r'^down_revision\s*:?\s*[^\n]*=\s*"([a-zA-Z0-9_]+)"',
+    re.MULTILINE,
 )
 
 # DB 侧表达式索引在列位置上读不到列名，用这个哨兵占位
@@ -346,11 +346,9 @@ def _parseRevisionFiles(versionsDir: Path) -> tuple[set[str], dict[str, str | No
         down = None
         down_match = _DOWN_REVISION_LINE.search(content)
         if down_match:
-            rhs = down_match.group(1)
-            # rhs 形如 `str | None = "0022_..."` 或 `= "0005_..."` 或 `Union[str, None] = "0014_..."`
-            # 找第一个字符串字面量作为 down 值；找不到则 None
-            str_match = string_lit_re.search(rhs)
-            down = str_match.group(1) if str_match else None
+            down = down_match.group(1).strip('"\'')
+        else:
+            down = None
         graph[rev] = down
     return revisions, graph
 

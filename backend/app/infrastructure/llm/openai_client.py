@@ -98,6 +98,9 @@ class OpenAiClient(BaseLlmClient):
             "messages": [{"role": m.role, "content": m.content} for m in messages],
         }
         if temperature is not None:
+            # Moonshot K3 要求 temperature=1，不接受其他值；强置避免 400
+            if self._provider == ProviderType.MOONSHOT and temperature != 1.0:
+                temperature = 1.0
             payload["temperature"] = temperature
         if maxTokens is not None:
             payload["max_tokens"] = maxTokens
@@ -150,6 +153,9 @@ class OpenAiClient(BaseLlmClient):
             "stream_options": {"include_usage": True},
         }
         if temperature is not None:
+            # Moonshot K3 要求 temperature=1，不接受其他值；强置避免 400
+            if self._provider == ProviderType.MOONSHOT and temperature != 1.0:
+                temperature = 1.0
             payload["temperature"] = temperature
         if maxTokens is not None:
             payload["max_tokens"] = maxTokens

@@ -14,6 +14,7 @@ class ProviderType(str, Enum):
 
     OPENAI = "openai"
     AZURE_OPENAI = "azure_openai"
+    MOONSHOT = "moonshot"
     OPENAI_COMPATIBLE_PROXY = "openai_compatible_proxy"
     OLLAMA = "ollama"
 

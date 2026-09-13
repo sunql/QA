@@ -901,11 +901,13 @@ export const enUS = {
         maxInputTokens: "Max Input Tokens",
         weight: "Routing Weight",
         costThreshold: "Cost Threshold ($)",
+        temperature: "Temperature",
       },
       placeholders: {
         modelName: "e.g. gpt-4o-mini / deepseek-chat / qwen2.5:7b",
         apiEndpoint: "https://api.openai.com/v1 or http://localhost:11434",
         apiKey: "sk-...",
+        temperature: "Leave empty to use default 0.0",
       },
     },
 
@@ -1521,10 +1523,11 @@ export const enUS = {
       legacy: "11g and below (ROWNUM)",
     },
     provider: {
-      OPENAI: "OpenAI",
-      AZURE_OPENAI: "Azure OpenAI",
-      OPENAI_COMPATIBLE_PROXY: "Compatible Proxy (DeepSeek/Qwen)",
-      OLLAMA: "Local Ollama",
+      openai: "OpenAI",
+      azure_openai: "Azure OpenAI",
+      moonshot: "Moonshot (Kimi)",
+      openai_compatible_proxy: "Compatible Proxy (DeepSeek/Qwen)",
+      ollama: "Local Ollama",
     },
     dataType: {
       STRING: "String STRING",
@@ -1624,6 +1627,8 @@ export const enUS = {
       confirm: "Result",
     },
     uploadButton: "Upload file",
+    uploadButtonUploading: "Parsing…",
+    uploadProgress: "Parsing file (PDF scans will run OCR, please wait)…",
     uploadHint:
       "Supports PDF / Word (.docx) / Markdown / plain text. The extracted text fills the box below so you can check it before splitting.",
     sourceLabel: "Raw content (Markdown; split by the shallowest heading level)",
@@ -1635,6 +1640,9 @@ export const enUS = {
     autoClassifyLabel: "Auto-classify",
     autoClassifyHint:
       "When on, each entry is classified by the model (adjustable later)",
+    useTwoStepLabel: "Deep Analysis Mode",
+    useTwoStepHint:
+      "When on, analyzes entities/concepts/ontology links first (higher quality, double cost)",
     modelLabel: "Processing model",
     modelPlaceholder: "Pick an available model",
     noModels: "No model available — add one under Model Config first",
@@ -1695,6 +1703,8 @@ export const enUS = {
       status: "Status",
       structureStage: "Structure",
       version: "Version",
+      pageId: "Page ID",
+      createdAt: "Created At",
     },
     dimensions: {
       OBJECT: "Business Object",
@@ -1741,6 +1751,9 @@ export const enUS = {
     },
     form: {
       content: "Content (Markdown)",
+      dimension: "Dimension",
+      authorityLevel: "Authority Level",
+      authorityLevelPlaceholder: "Select L0–L5",
     },
     detail: {
       meta: "Page {pageId} | v{version} | stage {stage}",
@@ -1752,6 +1765,31 @@ export const enUS = {
         "Rejecting means this knowledge belongs to no dimension. It is recorded as learning feedback to correct the classifier.",
       statusTitle: "Lifecycle status",
       content: "Content",
+      authorityLevel: "Authority Level",
+      saveSuccess: "Saved successfully",
+      tabs: {
+        basic: "Basic Info",
+        claims: "Claims",
+        relations: "Relations",
+        conflicts: "Conflicts",
+      },
+      transitions: {
+        toReview: "Submit for review",
+        toApproved: "Approve",
+        toEffective: "Activate",
+        toExpired: "Expire",
+        backToDraft: "Back to draft",
+        backToReview: "Back to review",
+      },
+      noMoreTransitions: "No further transitions available",
+      statusHint:
+        "Switch freely among all states (DRAFT / REVIEW / APPROVED / EFFECTIVE / EXPIRED). The change time is recorded automatically.",
+      confirm: "Confirm changing status from \"{from}\" to \"{to}\"?",
+      confirmIrreversible:
+        "Confirm changing status from \"{from}\" to \"{to}\"? Once expired, the entry no longer takes effect but the row is retained for audit.",
+      ok: "Confirm",
+      cancel: "Cancel",
+      currentStatus: "Current: {status}",
     },
     errors: {
       titleRequired: "Title is required",
@@ -1760,6 +1798,57 @@ export const enUS = {
       deleteFailed: "Delete failed. Please retry.",
       batchDeleteFailed: "Bulk delete failed. Please retry.",
       statusUpdateFailed: "Status update failed. Please retry.",
+    },
+    // Claims (mechanism 1 output)
+    claims: {
+      empty: "No claims yet",
+      claimText: "Claim",
+      claimType: "Type",
+      evidenceCount: "Evidence",
+      sourceType: "Source Type",
+      sourceId: "Source ID",
+      section: "Section",
+      paragraph: "Paragraph",
+      content: "Content",
+      noEvidence: "No evidence",
+      evidences: "evidence(s)",
+      reExtract: "Re-extract",
+      forceReExtractTitle: "Force re-extract?",
+      forceReExtractDesc: "This will delete the current {count} claim(s) and their evidence, then re-extract with the selected model.",
+      forceReExtractOk: "Delete & re-extract",
+      extractDone: "Extracted {count} claim(s)",
+      extractAlreadyDone: "Claims already extracted for this page",
+      extractFailed: "Extraction failed ({status}), please retry",
+      extractStatus: "Extraction status: {status}",
+    },
+    // Knowledge relations (mechanism 2)
+    relations: {
+      empty: "No relations yet",
+      pending: "Pending",
+      confirmed: "Confirmed",
+      discover: "Discover",
+      discoverTitle: "Discover candidate relations",
+      confirm: "Confirm",
+      reject: "Reject",
+      confirmSuccess: "Relation confirmed",
+      rejectSuccess: "Relation rejected",
+      discovered: "Discovered {count} candidate relation(s)",
+      relationType: "Relation Type",
+      downstreamType: "Downstream Type",
+      downstreamId: "Downstream ID",
+      confidence: "Confidence",
+    },
+    // Conflict detection (mechanism 3) — embedded in detail drawer
+    conflicts: {
+      detect: "Detect conflicts",
+      noneFound: "No conflicts detected",
+      found: "Found {count} conflict(s)",
+      resolve: "Resolve",
+      resolved: "Conflict resolved",
+      type: "Type",
+      severity: "Severity",
+      description: "Description",
+      actions: "Actions",
     },
   },
 
@@ -1850,6 +1939,8 @@ export const enUS = {
     generateModelPlaceholder: "Leave empty for deterministic pre-screening only",
     generateHint:
       "Works without a model: deterministic pre-screening first tells you which kind of structured knowledge this looks like, and you decide whether to spend a model call.",
+    generated: "Generated {count} suggestion(s) ({kind})",
+    generatedNone: "No new suggestions generated",
     errors: {
       generateFailed: "Failed to generate suggestions. Please retry.",
       alreadyResolved:

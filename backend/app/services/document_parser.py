@@ -106,16 +106,147 @@ def _parsePlainText(text: str) -> list[TextBlock]:
 
 
 def _parsePdf(content: bytes) -> list[TextBlock]:
-    """解析 PDF：每页按空行切段，段号在页内重新计数。"""
+    """解析 PDF：每页按空行切段，段号在页内重新计数。
+
+    策略：
+    1. pypdf — 优先（原生文本 PDF 最快）
+    2. pdfplumber — pypdf 文本过少时的 fallback
+    3. pdftoppm + pytesseract OCR — 扫描件/图片型 PDF 的终极 fallback
+
+    每层独立尝试：用本层结果覆盖 blocks，最终用累积 chars 判定。
+    任意一层抛出异常则静默降级，不影响后续层。
+    """
+    blocks: list[TextBlock] = []
+    total_chars = 0
+
+    # Step 1: pypdf
     try:
-        import io
+        blocks = _parsePdfWithPypdf(content)
+        total_chars = sum(len(b.text) for b in blocks)
+    except Exception:
+        pass
 
-        import pypdf
+    # Step 2: pdfplumber（对部分文字型 PDF 效果更好）
+    if total_chars < 20:
+        try:
+            pdfplumber_blocks = _parsePdfWithPdfplumber(content)
+            # pdfplumber 可能与 pypdf 有重叠内容，用字符数多的那个
+            pdfplumber_chars = sum(len(b.text) for b in pdfplumber_blocks)
+            if pdfplumber_chars > total_chars:
+                blocks = pdfplumber_blocks
+                total_chars = pdfplumber_chars
+        except Exception:
+            pass
 
-        reader = pypdf.PdfReader(io.BytesIO(content))
+    # Step 3: OCR fallback（扫描件/图片型 PDF）
+    if total_chars < 20:
+        try:
+            ocr_blocks = _parsePdfWithOcr(content)
+            ocr_chars = sum(len(b.text) for b in ocr_blocks)
+            if ocr_chars > total_chars:
+                blocks = ocr_blocks
+                total_chars = ocr_chars
+        except Exception:
+            pass
+
+    if total_chars < 20:
+        raise DocumentParserError(
+            "PDF 解析完成但未提取到足够文本，可能为扫描件或图片型 PDF"
+        )
+    return blocks
+
+
+def _parsePdfWithPypdf(content: bytes) -> list[TextBlock]:
+    """用 pypdf 解析 PDF。"""
+    import io
+    import pypdf
+    reader = pypdf.PdfReader(io.BytesIO(content))
+    blocks: list[TextBlock] = []
+    for pageIdx, page in enumerate(reader.pages):
+        pageText = page.extract_text() or ""
+        paraNo = 0
+        for para in _splitParagraphs(pageText):
+            paraNo += 1
+            blocks.append(
+                TextBlock(
+                    text=para,
+                    page_number=pageIdx + 1,
+                    section_name=None,
+                    paragraph_no=paraNo,
+                )
+            )
+    return blocks
+
+
+def _parsePdfWithPdfplumber(content: bytes) -> list[TextBlock]:
+    """用 pdfplumber 解析 PDF（pypdf fallback，处理部分文字型 PDF 更鲁棒）。"""
+    import io
+    import pdfplumber
+    blocks: list[TextBlock] = []
+    with pdfplumber.open(io.BytesIO(content)) as pdf:
+        for pageIdx, page in enumerate(pdf.pages):
+            pageText = (page.extract_text() or "").strip()
+            if not pageText:
+                continue
+            paraNo = 0
+            for para in _splitParagraphs(pageText):
+                paraNo += 1
+                blocks.append(
+                    TextBlock(
+                        text=para,
+                        page_number=pageIdx + 1,
+                        section_name=None,
+                        paragraph_no=paraNo,
+                    )
+                )
+    return blocks
+
+
+def _parsePdfWithOcr(content: bytes) -> list[TextBlock]:
+    """用 pdftoppm + pytesseract 对 PDF 页面做 OCR（处理扫描件/图片型 PDF）。
+
+    依赖：poppler-utils（pdftoppm）、tesseract-ocr、tesseract-ocr-chi-sim。
+    """
+    import io
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    # Render PDF pages to JPEG images using pdftoppm
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pdf_path = os.path.join(tmpdir, "doc.pdf")
+        img_prefix = os.path.join(tmpdir, "page")
+        with open(pdf_path, "wb") as f:
+            f.write(content)
+        # -r 150: 150 DPI; -jpeg: output JPEG; -f 1 -l N: first to last page
+        result = subprocess.run(
+            ["pdftoppm", "-r", "150", "-jpeg", "-f", "1", pdf_path, img_prefix],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            raise DocumentParserError(f"pdftoppm failed: {result.stderr}")
+
+        # Collect rendered pages
+        pages_dir = os.path.join(tmpdir, "pages")
+        os.makedirs(pages_dir, exist_ok=True)
+        for fname in sorted(os.listdir(tmpdir)):
+            if fname.startswith("page-") and fname.endswith(".jpg"):
+                shutil.move(os.path.join(tmpdir, fname), pages_dir)
+
+        page_files = sorted(os.listdir(pages_dir))
+        if not page_files:
+            raise DocumentParserError("pdftoppm produced no page images")
+
+        # OCR each page with pytesseract
+        import pytesseract
         blocks: list[TextBlock] = []
-        for pageIdx, page in enumerate(reader.pages):
-            pageText = page.extract_text() or ""
+        for pageIdx, fname in enumerate(page_files):
+            img_path = os.path.join(pages_dir, fname)
+            text = pytesseract.image_to_string(img_path, lang="chi_sim+eng", timeout=60)
+            pageText = text.strip()
+            if not pageText:
+                continue
             paraNo = 0
             for para in _splitParagraphs(pageText):
                 paraNo += 1
@@ -128,8 +259,6 @@ def _parsePdf(content: bytes) -> list[TextBlock]:
                     )
                 )
         return blocks
-    except Exception as e:
-        raise DocumentParserError(f"PDF parsing failed: {e}") from e
 
 
 def _isHeadingParagraph(para: object) -> bool:

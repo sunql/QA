@@ -332,6 +332,7 @@ class LlmConfigCreate(CamelModel):
     weight: int = Field(default=10, ge=0, le=100, description=MSG_SCHEMA_MODEL_WEIGHT)
     cost_threshold: Decimal = Field(default=Decimal("0.05"), ge=0, description=MSG_SCHEMA_MODEL_COST_THRESHOLD)
     is_active: bool = Field(default=True, description=MSG_SCHEMA_MODEL_IS_ACTIVE)
+    temperature: float | None = Field(default=None, description="模型 temperature 值，留空使用默认值 0.0")
 
 
 class LlmConfigUpdate(CamelModel):
@@ -343,6 +344,7 @@ class LlmConfigUpdate(CamelModel):
     weight: int | None = Field(default=None, ge=0, le=100)
     cost_threshold: Decimal | None = Field(default=None, ge=0)
     is_active: bool | None = None
+    temperature: float | None = None
 
 
 class LlmConfigRead(CamelModel):
@@ -356,6 +358,7 @@ class LlmConfigRead(CamelModel):
     weight: int
     cost_threshold: Decimal
     is_active: bool
+    temperature: float | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
 

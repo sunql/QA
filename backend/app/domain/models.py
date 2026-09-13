@@ -109,6 +109,7 @@ class LlmConfig(Base, TimestampMixin):
         Numeric(10, 6), nullable=False, default=Decimal("0.05")
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    temperature: Mapped[float | None] = mapped_column(sa.Float(), nullable=True)
 
     usages: Mapped[list[SessionTokenUsage]] = relationship(
         back_populates="model", lazy="selectin"
@@ -1698,6 +1699,12 @@ from app.domain.wiki_learning_models import (  # noqa: E402,F401
     WikiImportTask,
     WikiRuleExecutable,
     WikiTokenUsage,
+)
+
+# Re-export P3 批量编译器台账表（0063）。
+from app.domain.wiki_compile_models import (  # noqa: E402,F401
+    WikiCompileItem,
+    WikiCompileTask,
 )
 
 # Re-export Wiki 知识管理 4 表（0053 migration，Phase 8 M1）。同样为了让

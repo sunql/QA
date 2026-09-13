@@ -10,6 +10,7 @@
 - DELETE /wiki/pages/{pageId}        删除条目（级联清理 claim/relation）
 - POST   /wiki/pages/batch-delete    批量删除条目（部分成功 + 级联报告）
 - GET    /wiki/pages/{pageId}/claims     事实原子 + 证据
+- POST   /wiki/pages/{pageId}/claims/extract  机制 6：跑一次事实原子抽取（幂等）
 - GET    /wiki/pages/{pageId}/relations  知识关系（confirmedOnly 可选）
 - POST   /wiki/pages/{pageId}/relations/discover  机制 2：发现关系候选
 - POST   /wiki/relations/{relationId}/confirm     审核通过候选（写学习反馈）
@@ -55,6 +56,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.wiki_coverage_models import GAP_UNLINKED
 from app.domain.wiki_schemas import (
+    ClaimExtractRead,
+    ClaimExtractRequest,
     ClassDomainMappingCreate,
     ClassDomainMappingRead,
     CoverageCellRead,
@@ -280,6 +283,37 @@ async def listClaims(
     return [KnowledgeClaimRead.model_validate(e) for e in entities]
 
 
+@router.post(
+    "/pages/{pageId}/claims/extract",
+    response_model=ClaimExtractRead,
+    status_code=status.HTTP_200_OK,
+)
+@limiter.limit(rateLimitValue)
+async def extractClaims(
+    request: Request,
+    pageId: str,
+    dto: ClaimExtractRequest,
+    db: AsyncSession = Depends(getDb),
+) -> ClaimExtractRead:
+    """机制 6：跑一次事实原子抽取。
+
+    幂等：已抽过则返回 ``status=ALREADY_DONE, claim_count=0``，不重复写；
+    ``force=True`` 跳过幂等保护重抽（换模型/内容修订场景）——先由 LLM 产出
+    有效新结果才删旧 claims，LLM 失败/无效时旧数据原样保留。
+    ``modelId`` 为空 = 跳过 LLM 直接返回 SKIPPED，与 detect / discover 同语义。
+    不预检模型可用性 —— 调用失败由 ``ClaimExtractor.extractForPage`` 内部
+    捕获并返回 FAILED，避免一次网络抖动让前端按钮永远转圈。
+
+    **限流**：与 ``detect`` / ``discover`` 同档，这是「用户输入 × LLM 调用」
+    的放大入口。
+    """
+    await _wikiPageService.getPage(db, pageId)  # 404 早失败
+    statusValue, claimCount = await _wikiPageService.extractClaims(
+        db, pageId, dto.model_id, force=dto.force
+    )
+    return ClaimExtractRead(status=statusValue, claim_count=claimCount)
+
+
 @router.get(
     "/pages/{pageId}/relations",
     response_model=list[KnowledgeRelationRead],
@@ -328,6 +362,7 @@ async def discoverRelations(
         candidates=[KnowledgeRelationRead.model_validate(e) for e in result.candidates],
         total=len(result.candidates),
         class_extraction_status=result.classExtractionStatus,
+        dropped_ghosts=list(result.droppedGhosts),
     )
 
 

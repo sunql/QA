@@ -42,7 +42,7 @@ export default function TermDictionaryButton({ initialTerm }: TermDictionaryButt
         onOk={handleSubmit}
         confirmLoading={submitting}
         onCancel={() => setOpen(false)}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" initialValues={{ term: initialTerm }}>
           <Form.Item

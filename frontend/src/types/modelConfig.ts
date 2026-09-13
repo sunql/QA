@@ -1,9 +1,10 @@
-// 模型供应商类型
+// 模型供应商类型（统一用 DB 层小写下划线格式存储，与后端 ProviderType 枚举值对齐）
 export type ProviderType =
-  | "OPENAI"
-  | "AZURE_OPENAI"
-  | "OPENAI_COMPATIBLE_PROXY"
-  | "OLLAMA";
+  | "openai"
+  | "azure_openai"
+  | "moonshot"
+  | "openai_compatible_proxy"
+  | "ollama";
 
 // 模型配置（读取）
 export interface ModelConfig {
@@ -17,6 +18,7 @@ export interface ModelConfig {
   maxInputTokens: number;
   weight: number;
   costThreshold: number | string;
+  temperature?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -32,6 +34,7 @@ export interface ModelConfigCreate {
   maxInputTokens: number;
   weight: number;
   costThreshold: number | string;
+  temperature?: number;
 }
 
 // 更新模型配置（部分字段，apiKey 可选）
@@ -46,12 +49,14 @@ export interface ModelConfigUpdate {
   weight?: number;
   costThreshold?: number;
   isActive?: boolean;
+  temperature?: number;
 }
 
-// 供应商选项（用于下拉）—— labelKey 在组件渲染时通过 t() 解析
-export const PROVIDER_OPTIONS: { value: ProviderType; labelKey: ProviderType }[] = [
-  { value: "OPENAI", labelKey: "OPENAI" },
-  { value: "AZURE_OPENAI", labelKey: "AZURE_OPENAI" },
-  { value: "OPENAI_COMPATIBLE_PROXY", labelKey: "OPENAI_COMPATIBLE_PROXY" },
-  { value: "OLLAMA", labelKey: "OLLAMA" },
+// 供应商选项（用于下拉）—— value 与 DB 层小写下划线格式一致，labelKey 用于 i18n t() 解析
+export const PROVIDER_OPTIONS: { value: ProviderType; labelKey: string }[] = [
+  { value: "openai", labelKey: "enums.provider.openai" },
+  { value: "azure_openai", labelKey: "enums.provider.azure_openai" },
+  { value: "moonshot", labelKey: "enums.provider.moonshot" },
+  { value: "openai_compatible_proxy", labelKey: "enums.provider.openai_compatible_proxy" },
+  { value: "ollama", labelKey: "enums.provider.ollama" },
 ];

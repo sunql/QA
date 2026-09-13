@@ -22,6 +22,7 @@ Pydantic schema 的 alias_generator 负责。
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -58,6 +59,11 @@ KNOWLEDGE_DIMENSIONS: tuple[str, ...] = (
     "DOCUMENT",  # 文档
     "FAQ",       # 问答
 )
+
+# Authority axis: L5 (highest) to L0 (lowest).
+KNOWLEDGE_AUTHORITY_LEVELS: tuple[str, ...] = ("L5", "L4", "L3", "L2", "L1", "L0")
+CLAIM_OBJECT_TYPES: tuple[str, ...] = ("PAGE", "ONTOLOGY_CLASS", "ONTOLOGY_METRIC", "ENTITY_MAPPING", "VALUE")
+CLAIM_STATUSES: tuple[str, ...] = ("ACTIVE", "STALE")
 
 # 知识条目生命周期状态。与 dimension 同理用白名单而非 DB enum：
 # 状态轴是覆盖度/审核看板的聚合维度，脏值会污染统计。
@@ -169,7 +175,7 @@ class WikiPage(Base, TimestampMixin):
         back_populates="page",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        lazy="select",
     )
 
     def __repr__(self) -> str:
@@ -203,6 +209,16 @@ class KnowledgeClaim(Base):
     claim_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     # Milvus 向量引用（知识条目嵌入的稳定 key）
     embedding_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    subject_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    predicate: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    object_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    object_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), nullable=True)
+    authority_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    triple_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="FALSE")
     created_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -214,7 +230,7 @@ class KnowledgeClaim(Base):
         back_populates="claim",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        lazy="select",
     )
 
     def __repr__(self) -> str:
@@ -241,9 +257,11 @@ class Evidence(Base):
     )
     source_type: Mapped[str] = mapped_column(String(30), nullable=False)
     source_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    page_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     section_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    paragraph_no: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    paragraph_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), nullable=True)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow

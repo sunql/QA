@@ -281,7 +281,7 @@ export default function JoinTab({ classes }: JoinTabProps) {
         onOk={() => void handleSubmit()}
         onCancel={() => setModalOpen(false)}
         width={560}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" initialValues={EMPTY_JOIN_FORM}>
           <Row gutter={12}>

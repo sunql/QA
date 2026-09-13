@@ -14,7 +14,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.domain.schemas import UNSET, CamelModel, _UnsetType
 from app.domain.wiki_coverage_models import GAP_UNLINKED
@@ -82,6 +82,21 @@ class WikiPageCreate(CamelModel):
     dimension: str | None = Field(default=None, max_length=30)
     authority_level: str | None = Field(default=None, max_length=10)
 
+    @field_validator("authority_level")
+    @classmethod
+    def _validateAuthorityLevel(cls, value: Any) -> Any:
+        from app.domain.wiki_models import KNOWLEDGE_AUTHORITY_LEVELS
+        if value is None:
+            return None
+        if isinstance(value, str) and value in KNOWLEDGE_AUTHORITY_LEVELS:
+            return value
+        from app.domain.schemas import _UnsetType
+        if isinstance(value, _UnsetType):
+            return value
+        if value is not None and value not in KNOWLEDGE_AUTHORITY_LEVELS:
+            raise ValueError(f"authority_level must be one of {list(KNOWLEDGE_AUTHORITY_LEVELS)}")
+        return value
+
 
 class WikiPageUpdate(CamelModel):
     """更新知识条目（PATCH 语义，未提供的字段跳过）。
@@ -103,6 +118,21 @@ class WikiPageUpdate(CamelModel):
     status: _UnsetType | str = Field(default=UNSET, max_length=20)
     authority_level: _UnsetType | str | None = Field(default=UNSET, max_length=10)
     version: _UnsetType | str = Field(default=UNSET, min_length=1, max_length=30)
+
+    @field_validator("authority_level")
+    @classmethod
+    def _validateAuthorityLevel(cls, value: Any) -> Any:
+        from app.domain.wiki_models import KNOWLEDGE_AUTHORITY_LEVELS
+        if value is None:
+            return None
+        if isinstance(value, str) and value in KNOWLEDGE_AUTHORITY_LEVELS:
+            return value
+        from app.domain.schemas import _UnsetType
+        if isinstance(value, _UnsetType):
+            return value
+        if value is not None and value not in KNOWLEDGE_AUTHORITY_LEVELS:
+            raise ValueError(f"authority_level must be one of {list(KNOWLEDGE_AUTHORITY_LEVELS)}")
+        return value
 
 
 class WikiPageRead(CamelModel):
@@ -196,9 +226,9 @@ class EvidenceRead(CamelModel):
     claim_id: int
     source_type: str
     source_id: str | None = None
-    page_number: str | None = None
+    page_number: int | None = None
     section_name: str | None = None
-    paragraph_no: str | None = None
+    paragraph_no: int | None = None
     content: str | None = None
     created_time: datetime | None = None
 
@@ -261,11 +291,15 @@ class WikiRelationDiscoverRead(CamelModel):
 
     ``class_extraction_status`` 把「没要求跑」与「跑了没成」分开报，避免
     LLM 那次静默失败被读成「这篇文章确实没提到任何本体类」。
+
+    ``dropped_ghosts`` 是在引用检测阶段被过滤掉的 pageId：下游目标在 WikiPage
+    表里已不存在（可能已被删除），不回传它们会让调用方误以为「明明引用了却没有进候选」。
     """
 
     candidates: list[KnowledgeRelationRead]
     total: int
     class_extraction_status: str
+    dropped_ghosts: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +375,10 @@ class WikiImportExecuteRequest(CamelModel):
 
     ``auto_classify`` 默认开启：用户既然在向导里选了模型，默认就用它做
     机制 1 分类；关闭则纯落库（此时 ``modelId`` 可省）。
+
+    ``use_two_step`` 启用 Two-Step CoT 摄取（借鉴 llm_wiki-main）：
+    先深度分析内容（实体/概念/本体关联/冲突），再基于分析结果导入。
+    能显著提升知识抽取质量，但 LLM 调用成本翻倍。
     """
 
     drafts: list[WikiImportDraft] = Field(
@@ -349,6 +387,7 @@ class WikiImportExecuteRequest(CamelModel):
     model_id: int | None = None
     fallback_model_id: int | None = None
     auto_classify: bool = True
+    use_two_step: bool = False  # 新增：是否使用 Two-Step CoT
     source_type: str | None = Field(default=None, max_length=30)
     source_ref: str | None = Field(default=None, max_length=500)
     task_type: str = Field(default="BULK_IMPORT", max_length=30)
@@ -446,6 +485,34 @@ class WikiConflictDetectRead(CamelModel):
     conflicts: list[KnowledgeConflictRead]
     total: int
     llm_status: str
+
+
+class ClaimExtractRequest(CamelModel):
+    """机制 6：跑一次事实原子抽取。
+
+    ``model_id`` 为空则直接返回 SKIPPED（不调模型）；不为空才调 LLM。
+    不预检模型可用性：调用失败由 ``extractForPage`` 内部捕获并返回
+    ``status=FAILED``，避免一次网络抖动让前端按钮永远转圈。
+
+    ``force=True`` 时跳过幂等保护：先由 LLM 产出有效新结果，再删除该 Page
+    已有 claims（evidence 级联清理）并写入新结果；LLM 失败/无效输出时
+    旧数据原样保留。用于「换模型重抽 / 内容修订后重抽」场景。
+    """
+
+    model_id: int | None = None
+    force: bool = False
+
+
+class ClaimExtractRead(CamelModel):
+    """抽取结果。
+
+    ``status`` 同 ``ClaimExtractionResult.status``（SUCCEEDED / ALREADY_DONE /
+    SKIPPED / FAILED / INVALID），``claim_count`` 是本次真正新增的条数；
+    ALREADY_DONE 时为 0（已抽过不重复写）。
+    """
+
+    status: str
+    claim_count: int
 
 
 class WikiConflictResolveRequest(CamelModel):
@@ -779,6 +846,8 @@ __all__ = [
     "WikiConflictListRead",
     "WikiConflictDetectRequest",
     "WikiConflictDetectRead",
+    "ClaimExtractRequest",
+    "ClaimExtractRead",
     "WikiConflictResolveRequest",
     "StructureSuggestionRead",
     "WikiSuggestionListRead",

@@ -1343,7 +1343,7 @@ class Nl2SqlService:
                     LlmMessage(role="user", content=userPrompt),
                 ],
                 model=modelConfig.model_name,
-                temperature=0.0,
+                temperature=modelConfig.temperature if modelConfig and modelConfig.temperature is not None else 0.0,
                 maxTokens=_NL2SQL_MAX_TOKENS,
             )
             totalPrompt += response.promptTokens
@@ -1754,7 +1754,7 @@ class Nl2SqlService:
                     LlmMessage(role="user", content=userPrompt),
                 ],
                 model=modelConfig.model_name,
-                temperature=0.0,
+                temperature=modelConfig.temperature if modelConfig and modelConfig.temperature is not None else 0.0,
                 maxTokens=maxTokens,
             )
             totalPrompt += response.promptTokens

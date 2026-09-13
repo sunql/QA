@@ -285,7 +285,7 @@ export default function KpiCatalogPage() {
         okText={t("common.confirm")}
         cancelText={t("common.cancel")}
         width={640}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" initialValues={EMPTY_KPI_FORM}>
           <Form.Item

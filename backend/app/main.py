@@ -271,6 +271,7 @@ def createApp() -> FastAPI:
         vectors,
         wiki,
         wiki_import,
+        wiki_compile,
     )
 
     app.include_router(model_config.router, prefix="/api/v1/models", tags=["models"])
@@ -354,6 +355,7 @@ def createApp() -> FastAPI:
     app.include_router(vectors.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
+    app.include_router(wiki_compile.router, prefix="/api/v1", tags=["wiki"])
 
     @app.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:

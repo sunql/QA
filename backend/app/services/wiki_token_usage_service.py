@@ -43,6 +43,7 @@ class WikiTokenUsageService:
         cost: Decimal,
         purpose: str | None = None,
         importTaskId: int | None = None,
+        compileTaskId: int | None = None,
     ) -> WikiTokenUsage:
         """写入一条计量记录（add + flush，**不 commit**）。
 
@@ -51,6 +52,7 @@ class WikiTokenUsageService:
         _assertMechanism(mechanism)
         row = WikiTokenUsage(
             import_task_id=importTaskId,
+            compile_task_id=compileTaskId,
             mechanism=mechanism,
             model_config_id=modelConfigId,
             model_name=modelName,

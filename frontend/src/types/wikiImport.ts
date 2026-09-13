@@ -42,6 +42,12 @@ export interface WikiImportExecuteRequest {
     fallbackModelId?: number | null;
     /** 是否对每条跑机制 1 自动分类（默认开启） */
     autoClassify?: boolean;
+    /**
+     * 是否启用 Two-Step CoT 摄取（借鉴 llm_wiki-main）。
+     * 开启后会先深度分析内容（实体/概念/本体关联/冲突），再基于分析结果导入。
+     * 能显著提升知识抽取质量，但 LLM 调用成本翻倍。
+     */
+    useTwoStep?: boolean;
     sourceType?: string | null;
     sourceRef?: string | null;
     taskType?: string;

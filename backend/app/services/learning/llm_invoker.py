@@ -102,6 +102,7 @@ class LearningLLMInvoker:
         # 计量归属的导入任务；构造时还不知道 task.id（预检要先于建任务跑），
         # 故初值为 None，由 bindImportTask 在任务落库后补挂。
         self._importTaskId: int | None = None
+        self._compileTaskId: int | None = None
 
     def bindImportTask(self, taskId: int) -> None:
         """补挂计量归属的任务 id。
@@ -110,6 +111,9 @@ class LearningLLMInvoker:
         任务下，于是构造时还不知道 task.id —— 由调用方在任务落库后补挂一次。
         """
         self._importTaskId = taskId
+
+    def bindCompileTask(self, taskId: int) -> None:
+        self._compileTaskId = taskId
 
     async def preflight(self) -> None:
         """批量调用**前**的可用性预检：primary/fallback 都不可用则立刻抛 503。
@@ -188,6 +192,7 @@ class LearningLLMInvoker:
             cost=cost,
             purpose=purpose,
             importTaskId=self._importTaskId,
+            compileTaskId=self._compileTaskId,
         )
 
         return LearningLlmResult(
@@ -201,7 +206,8 @@ class LearningLLMInvoker:
         )
 
     async def completeJson(
-        self, *, systemPrompt: str, userPrompt: str, mechanism: str, purpose: str
+        self, *, systemPrompt: str, userPrompt: str, mechanism: str, purpose: str,
+        maxTokens: int | None = None,
     ) -> tuple[dict[str, Any], LearningLlmResult]:
         """调用并解析 JSON；解析失败抛 ``LLMUnavailableError``（503）。"""
         result = await self.complete(
@@ -209,6 +215,7 @@ class LearningLLMInvoker:
             userPrompt=userPrompt,
             mechanism=mechanism,
             purpose=purpose,
+            maxTokens=maxTokens,
         )
         if not result.content.strip():
             raise LLMUnavailableError(MSG_WIKI_LLM_EMPTY_RESPONSE)
@@ -246,8 +253,10 @@ class LearningLLMInvoker:
     ) -> tuple[LlmResponse, Any]:
         """解析配置 → 建 client → 调一次。任一环失败都抛异常给上层决定降级。"""
         client, config = await self._resolveClient(configId)
+        effective_max = maxTokens or _DEFAULT_MAX_TOKENS
+        logger.info("LLM invoke: configId=%s model=%s maxTokens=%s (requested=%s)", configId, config.model_name, effective_max, maxTokens)
         response = await client.complete(
-            messages, maxTokens=maxTokens or _DEFAULT_MAX_TOKENS
+            messages, maxTokens=effective_max
         )
         return response, config
 

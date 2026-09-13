@@ -18,12 +18,14 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import AsyncIterator
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,6 +54,7 @@ from app.services.learning.feedback_loop import (
     snapshotPageInput,
 )
 from app.services.messages_zh import (
+    MSG_WIKI_AUTHORITY_LEVEL_INVALID,
     MSG_WIKI_PAGE_DIMENSION_INVALID,
     MSG_WIKI_PAGE_DUPLICATE,
     MSG_WIKI_PAGE_ID_INVALID,
@@ -234,6 +237,16 @@ def _assertStatus(status: str) -> None:
     """生命周期状态白名单校验（与维度同理：挡住脏值污染状态轴统计）。"""
     if status not in WIKI_PAGE_STATUSES:
         raise ValidationError(MSG_WIKI_PAGE_STATUS_INVALID.format(status=status))
+
+
+def _assertKnowledgeAuthorityLevel(value: str | None) -> None:
+    """权威度白名单校验（None 合法，表示沿用默认值或待填）。"""
+    from app.domain.wiki_models import KNOWLEDGE_AUTHORITY_LEVELS
+    if value is None:
+        return
+    if value not in KNOWLEDGE_AUTHORITY_LEVELS:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=MSG_WIKI_AUTHORITY_LEVEL_INVALID.format(levels=list(KNOWLEDGE_AUTHORITY_LEVELS)))
 
 
 # 删除审计 ``before`` 快照的字段表（顺序即 dict 顺序，单一事实源）。
@@ -476,6 +489,7 @@ class WikiPageService:
         entity_mapping_service / feature_rule_service 的写法一致。
         """
         _assertDimension(dto.dimension)
+        _assertKnowledgeAuthorityLevel(dto.authority_level)
         pageId = (
             sanitizePageId(dto.page_id)
             if dto.page_id
@@ -549,6 +563,8 @@ class WikiPageService:
                 _assertStage(value)
             elif field == "status":
                 _assertStatus(value)
+            elif field == "authority_level":
+                _assertKnowledgeAuthorityLevel(value)
             elif field == "content":
                 # 正文变了哈希必须跟着变：content_hash 是「这条条目**当前**正文的
                 # 摘要」这一事实，不是「创建时正文的摘要」。不更新会让导入路径的
@@ -709,9 +725,42 @@ class WikiPageService:
         result = await session.execute(
             select(KnowledgeClaim)
             .where(KnowledgeClaim.page_id == pageId)
+            .options(selectinload(KnowledgeClaim.evidences))
             .order_by(KnowledgeClaim.id)
         )
         return list(result.scalars().all())
+
+    async def extractClaims(
+        self,
+        session: AsyncSession,
+        pageId: str,
+        modelId: int | None = None,
+        *,
+        force: bool = False,
+    ) -> tuple[str, int]:
+        """为指定 page 跑一次 claim 抽取。
+
+        复用 ``ClaimExtractor.extractForPage`` 的幂等逻辑：已抽过则
+        直接返回 ``ALREADY_DONE`` 而不重复写；``force=True`` 时先由 LLM
+        产出有效新结果，再删除旧 claims（evidence 级联清理）写入新结果，
+        LLM 失败/无效输出时旧数据原样保留。``modelId`` 为空 = 跳过 LLM
+        调用（直接返回 SKIPPED，与 detect / discover 同语义）。
+
+        返回 ``(status, claimCount)``。``claimCount`` 是本次**新增**条数
+        （ALREADY_DONE 时为 0），不包含历史数据。
+        """
+        from app.services.learning.claim_extractor import ClaimExtractor
+        from app.services.learning.llm_invoker import LearningLLMInvoker
+
+        invoker = (
+            LearningLLMInvoker(session, primaryModelId=modelId)
+            if modelId is not None
+            else None
+        )
+        ext = ClaimExtractor()
+        result = await ext.extractForPage(session, pageId, invoker=invoker, force=force)
+        await session.commit()
+        return result.status, result.claimCount
 
     async def listRelations(
         self,
@@ -731,3 +780,46 @@ class WikiPageService:
             stmt = stmt.where(KnowledgeRelation.confirmed.is_(True))
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    def _hasTriple(self, claim: KnowledgeClaim) -> bool:
+        """判断事实原子是否已填充三元组核心字段（subject_id / predicate / object_value / object_type）。"""
+        return any(bool(v) for v in (claim.subject_id, claim.predicate, claim.object_value, claim.object_type))
+
+    async def updateClaimText(
+        self, session: AsyncSession, claimId: int, *, dto: Any
+    ) -> KnowledgeClaim:
+        """更新事实原子的 claim_text；若有三元组则标记 triple_stale + status=STALE。"""
+        from app.domain.wiki_models import KnowledgeClaim as KC
+        from app.services.messages_zh import MSG_WIKI_CLAIM_NOT_FOUND
+
+        claim = (await session.execute(select(KC).where(KC.id == claimId))).scalar_one_or_none()
+        if claim is None:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail=MSG_WIKI_CLAIM_NOT_FOUND.format(claimId=claimId))
+        if claim.claim_text == dto.claim_text:
+            return claim
+        claim.claim_text = dto.claim_text
+        if self._hasTriple(claim):
+            claim.triple_stale = True
+            claim.status = "STALE"
+        await session.commit()
+        await session.refresh(claim)
+        return claim
+
+    async def iterPageIds(self, session: AsyncSession, *, dimension: str | None = None, batchSize: int = 200) -> AsyncIterator[str]:
+        """Keyset cursor iteration of all page_ids for full-database compile."""
+        if dimension is not None:
+            _assertDimension(dimension)
+        lastId = 0
+        while True:
+            stmt = select(WikiPage.id, WikiPage.page_id).where(WikiPage.id > lastId)
+            if dimension is not None:
+                stmt = stmt.where(WikiPage.dimension == dimension)
+            rows = (await session.execute(stmt.order_by(WikiPage.id).limit(batchSize))).all()
+            if not rows:
+                return
+            for rowId, pageId in rows:
+                lastId = rowId
+                yield pageId
+            if len(rows) < batchSize:
+                return

@@ -286,7 +286,7 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
         onOk={() => void handleSubmit()}
         onCancel={() => setModalOpen(false)}
         width={520}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical">
           <Form.Item

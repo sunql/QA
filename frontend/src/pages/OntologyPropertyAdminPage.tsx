@@ -249,7 +249,7 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
         onOk={() => void onSubmit()}
         onCancel={closeModal}
         width={560}
-        destroyOnClose
+        destroyOnHidden
         okText={t("common.save")}
       >
         <Form form={form} layout="vertical">

@@ -16,6 +16,7 @@ import {
   Alert,
   Button,
   Input,
+  Progress,
   Select,
   Space,
   Steps,
@@ -101,9 +102,11 @@ function DraftsEditor({ drafts, onChange, onRemove }: DraftsEditorProps) {
               {t("wikiImport.actions.removeDraft")}
             </Button>
           </Space>
+          <div style={{ marginBottom: 4, fontSize: 14, color: "rgba(0, 0, 0, 0.88)" }}>
+            {t("wikiImport.columns.title")}
+          </div>
           <Input
             aria-label={t("wikiImport.columns.title")}
-            addonBefore={t("wikiImport.columns.title")}
             value={draft.title}
             maxLength={200}
             onChange={(e) => onChange(index, { title: e.target.value })}
@@ -138,6 +141,7 @@ export default function AdminWikiImportPage() {
   const [modelId, setModelId] = useState<number | null>(null);
   const [fallbackModelId, setFallbackModelId] = useState<number | null>(null);
   const [autoClassify, setAutoClassify] = useState(true);
+  const [useTwoStep, setUseTwoStep] = useState(false);
 
   const [drafts, setDrafts] = useState<WikiImportDraft[]>([]);
   const [loading, setLoading] = useState(false);
@@ -239,6 +243,7 @@ export default function AdminWikiImportPage() {
         modelId: autoClassify ? modelId : null,
         fallbackModelId,
         autoClassify,
+        useTwoStep,
         sourceType,
         sourceRef: sourceRef.trim() || null,
       });
@@ -265,6 +270,7 @@ export default function AdminWikiImportPage() {
     modelId,
     fallbackModelId,
     autoClassify,
+    useTwoStep,
     sourceType,
     sourceRef,
     t,
@@ -375,9 +381,18 @@ export default function AdminWikiImportPage() {
             }}
           >
             <Button icon={<UploadOutlined />} loading={uploading} style={{ marginBottom: 8 }}>
-              {t("wikiImport.uploadButton")}
+              {uploading ? t("wikiImport.uploadButtonUploading") : t("wikiImport.uploadButton")}
             </Button>
           </Upload>
+          {uploading && (
+            <Alert
+              type="info"
+              showIcon
+              message={t("wikiImport.uploadProgress")}
+              description={<Progress percent={99} status="active" size="small" />}
+              style={{ marginBottom: 8 }}
+            />
+          )}
           <div style={{ color: "#888", marginBottom: 8 }}>
             {t("wikiImport.uploadHint")}
           </div>
@@ -430,6 +445,14 @@ export default function AdminWikiImportPage() {
             <Switch checked={autoClassify} onChange={setAutoClassify} />
             <span style={{ color: "#888" }}>{t("wikiImport.autoClassifyHint")}</span>
           </Space>
+
+          {autoClassify && (
+            <Space style={{ marginBottom: 16 }}>
+              <span>{t("wikiImport.useTwoStepLabel")}</span>
+              <Switch checked={useTwoStep} onChange={setUseTwoStep} />
+              <span style={{ color: "#888" }}>{t("wikiImport.useTwoStepHint")}</span>
+            </Space>
+          )}
 
           {autoClassify && modelsError && (
             <Alert

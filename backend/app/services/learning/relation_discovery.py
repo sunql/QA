@@ -107,10 +107,28 @@ class DiscoveryResult:
 
     ``candidates`` 只含**本次新增**的候选 —— 已存在的三元组被幂等跳过，
     重复点「发现」不会把列表越滚越长，也不会重复计数。
+
+    ``droppedGhosts`` 是在引用检测阶段被过滤掉的 pageId：下游目标在 WikiPage
+    表里不存在（可能已被删）。不回传它们会让前端以为「发现出了 bug，
+    明明引用了却没进候选」——实际上是被静默丢弃的幽灵引用。
     """
 
     candidates: tuple[KnowledgeRelation, ...]
     classExtractionStatus: str
+    droppedGhosts: tuple[str, ...] = ()
+
+
+async def _hasPendingCandidates(session: AsyncSession, pageId: str) -> bool:
+    from sqlalchemy import select
+    from app.domain.wiki_models import KnowledgeRelation
+    result = await session.execute(
+        select(KnowledgeRelation.id).where(
+            KnowledgeRelation.upstream_page_id == pageId,
+            KnowledgeRelation.confirmed.is_(False),
+            KnowledgeRelation.rejected_at.is_(None),
+        )
+    )
+    return result.first() is not None
 
 
 class RelationDiscovery:
@@ -135,6 +153,8 @@ class RelationDiscovery:
         proposals.extend(await self._detectReferences(session, page))
 
         classStatus = CLASS_EXTRACTION_SKIPPED
+        if invoker is not None and await _hasPendingCandidates(session, page.page_id):
+            return DiscoveryResult((), "SKIPPED")
         if invoker is not None:
             try:
                 proposals.extend(await self._extractClasses(session, page, invoker))
@@ -143,8 +163,25 @@ class RelationDiscovery:
                 logger.warning("机制 2 实体抽取失败（引用检测结果保留）: %s", e)
                 classStatus = CLASS_EXTRACTION_FAILED
 
-        created = await self._persistCandidates(session, proposals)
-        return DiscoveryResult(candidates=tuple(created), classExtractionStatus=classStatus)
+        # 引用检测产生的下游目标（pageId）需要验证存在，过滤幽灵引用
+        pageTargetIds = [
+            p["downstream_id"]
+            for p in proposals
+            if p["downstream_type"] == TARGET_TYPE_PAGE
+        ]
+        keptPageIds, droppedGhosts = await self._filterExistingTargets(session, pageTargetIds)
+        keptPageIdSet = set(keptPageIds)
+        filteredProposals = [
+            p for p in proposals
+            if p["downstream_type"] != TARGET_TYPE_PAGE or p["downstream_id"] in keptPageIdSet
+        ]
+
+        created, _ = await self._persistCandidates(session, filteredProposals)
+        return DiscoveryResult(
+            candidates=tuple(created),
+            classExtractionStatus=classStatus,
+            droppedGhosts=tuple(droppedGhosts),
+        )
 
     async def _loadPage(self, session: AsyncSession, pageId: str) -> WikiPage:
         """取待发现的条目（复用 WikiPageService 的 404 语义）。"""
@@ -265,10 +302,27 @@ class RelationDiscovery:
                 catalog.setdefault(normalizeEntityName(alias), className)
         return catalog
 
+    async def _filterExistingTargets(
+        self, session: AsyncSession, targetPageIds: list[str]
+    ) -> tuple[list[str], list[str]]:
+        """把不在 WikiPage 表里的 pageId 过滤掉，返回 (kept, dropped)。
+
+        空列表或全空时直接返回空元组，避免无意义的空查询。
+        """
+        if not targetPageIds:
+            return [], []
+        result = await session.execute(
+            select(WikiPage.page_id).where(WikiPage.page_id.in_(targetPageIds))
+        )
+        existing = {row[0] for row in result.all()}
+        kept = [pid for pid in targetPageIds if pid in existing]
+        dropped = [pid for pid in targetPageIds if pid not in existing]
+        return kept, dropped
+
     async def _persistCandidates(
         self, session: AsyncSession, proposals: list[dict[str, Any]]
-    ) -> list[KnowledgeRelation]:
-        """幂等写入候选，返回**本次真正新增**的行。
+    ) -> tuple[list[KnowledgeRelation], list[str]]:
+        """幂等写入候选，返回**(本次真正新增的行, 被过滤的幽灵 pageId 列表)**。
 
         用 ``ON CONFLICT DO NOTHING`` + ``RETURNING`` 而不是「先查后插」：
         并发两次「发现」时先查后插会双双通过检查，第二条撞唯一约束冒 500；
@@ -311,16 +365,19 @@ class RelationDiscovery:
             ids = list((await session.execute(stmt)).scalars().all())
 
         # 单点提交：候选与计量行同生共死（见 docstring）
+        # 必须是 commit 不是 flush：getDb 依赖只在异常时 rollback，正常路径关闭
+        # 会话时不 commit，没 commit 的 INSERT 在会话关掉时就回滚掉了——前端点了
+        # 「发现关系」返回 id=N，关掉会话后那条候选就消失了。
         await session.commit()
         if not ids:
-            return []
+            return [], []
 
         result = await session.execute(
             select(KnowledgeRelation)
             .where(KnowledgeRelation.id.in_(ids))
             .order_by(KnowledgeRelation.id)
         )
-        return list(result.scalars().all())
+        return list(result.scalars().all()), []
 
 def _candidateRow(
     upstreamPageId: str,

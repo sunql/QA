@@ -408,6 +408,9 @@ class StructureSuggester:
             ids = list((await session.execute(stmt)).scalars().all())
 
         # 单点提交：建议与计量行同生共死（见 docstring）
+        # 必须是 commit 不是 flush：getDb 依赖只在异常时 rollback，正常路径关闭
+        # 会话时不 commit，没 commit 的 INSERT 在会话关掉时就回滚掉了——前端点了
+        # 「生成建议」返回 id=18，关掉会话后 id=18 就消失了（M7 的回归）。
         await session.commit()
         if not ids:
             return []

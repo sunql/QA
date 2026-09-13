@@ -66,6 +66,7 @@ from app.infrastructure.object_storage import (
     putSourceObject,
 )
 from app.services.document_parser import parse_document
+from app.services.learning.import_analyzer import ImportAnalysis, ImportAnalyzer
 from app.services.wiki_catalog_registrar import WikiCatalogRegistrar
 from app.services.learning.auto_classifier import AutoClassifier
 from app.services.learning.llm_invoker import LearningLLMInvoker
@@ -184,9 +185,11 @@ class WikiImportService:
         self,
         *,
         classifier: AutoClassifier | None = None,
+        analyzer: ImportAnalyzer | None = None,
         catalog: WikiCatalogRegistrar | None = None,
     ) -> None:
         self._classifier = classifier or AutoClassifier()
+        self._analyzer = analyzer or ImportAnalyzer()
         self._catalog = catalog or WikiCatalogRegistrar()
         self._pageService = WikiPageService()
 
@@ -370,6 +373,7 @@ class WikiImportService:
                             draft,
                             invoker=invoker,
                             createdByUserId=createdByUserId,
+                            useTwoStep=dto.use_two_step,
                         )
                 except DuplicatePageError as e:
                     # 重复 ≠ 失败（P1，spec §5.4）：同一份知识重跑是幂等成功，
@@ -510,8 +514,9 @@ class WikiImportService:
         *,
         invoker: LearningLLMInvoker | None,
         createdByUserId: int | None,
+        useTwoStep: bool = False,
     ) -> tuple[WikiPage, bool]:
-        """建一条 Page（可选分类）。返回 (page, 是否给出了分类建议)。
+        """建一条 Page（可选分类/分析）。返回 (page, 是否给出了分类建议)。
 
         先查 page_id 冲突**再**调模型：撞号是纯本地就能判定的错误，
         不该白烧一次 LLM 调用。
@@ -522,6 +527,11 @@ class WikiImportService:
         - **不同 content_hash，或任一侧为 NULL**（0061 之前的历史行）→
           ``ConflictError``，导入层计「失败」。无法证明是重跑就不能静默丢弃：
           ``page_id`` 后缀只有 32 bit，截断碰撞会把另一份文档悄悄吃掉。
+
+        **Two-Step CoT 模式**（``useTwoStep=True``）：
+        - Step 1: 调 ``ImportAnalyzer`` 做深度分析（实体/概念/本体关联/冲突）
+        - Step 2: 基于分析结果建 Page，dimension 取分析结果，auto_classification
+          存完整分析快照（含实体、概念、本体关联建议等）
         """
         title = draft.title
         content = draft.content
@@ -555,9 +565,34 @@ class WikiImportService:
             raise ConflictError(MSG_WIKI_PAGE_DUPLICATE.format(pageId=pageId))
 
         suggestion = None
+        analysis: ImportAnalysis | None = None
         modelConfigId: int | None = None
+
         if invoker is not None:
-            suggestion, modelConfigId = await self._classify(invoker, title, content)
+            if useTwoStep:
+                # Two-Step CoT: 先深度分析，再导入
+                analysis, modelConfigId = await self._analyze(invoker, title, content)
+                if analysis:
+                    # 用分析结果的 dimension 作为分类建议
+                    from app.services.learning.auto_classifier import ClassificationSuggestion
+                    suggestion = ClassificationSuggestion(
+                        primary=analysis.dimension,
+                        confidence=analysis.dimension_confidence,
+                        alternatives=analysis.dimension_alternatives,
+                        reason=analysis.dimension_reason,
+                    )
+            else:
+                # 单步分类（原有逻辑）
+                suggestion, modelConfigId = await self._classify(invoker, title, content)
+
+        # 构建 auto_classification 存储内容
+        autoClassificationData = None
+        if analysis:
+            # Two-Step: 存完整分析快照
+            autoClassificationData = analysis.toDict()
+        elif suggestion:
+            # 单步: 存分类建议
+            autoClassificationData = suggestion.toDict()
 
         page = WikiPage(
             page_id=pageId,
@@ -565,7 +600,7 @@ class WikiImportService:
             content=content,
             content_hash=contentHash,
             dimension=suggestion.primary if suggestion else None,
-            auto_classification=suggestion.toDict() if suggestion else None,
+            auto_classification=autoClassificationData,
             status="DRAFT",
             structure_stage="MARKDOWN",
             version="v1.0",
@@ -615,6 +650,29 @@ class WikiImportService:
             return None, None
 
         return suggestion, (result.modelConfigId if suggestion else None)
+
+    async def _analyze(
+        self,
+        invoker: LearningLLMInvoker,
+        title: str,
+        content: str,
+    ) -> tuple[ImportAnalysis | None, int | None]:
+        """跑 Two-Step CoT 分析；失败降级为「无分析」，不让知识入库失败。
+
+        返回 ``(分析结果或 None, 实际生效的模型 id)``。
+
+        与 ``_classify`` 的失败语义一致：分析是增强，不该阻断知识入库。
+        降级时返回 ``(None, None)``，调用方退化为无分类导入。
+        """
+        try:
+            analysis, result = await self._analyzer.analyze(
+                invoker, title=title, content=content
+            )
+        except DomainError as e:
+            logger.warning("Two-Step 分析失败，条目按未分类入库（title=%s）: %s", title, e)
+            return None, None
+
+        return analysis, (result.modelConfigId if analysis else None)
 
 
 __all__ = [

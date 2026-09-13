@@ -906,11 +906,13 @@ export const zhCN = {
         maxInputTokens: "最大输入 Token",
         weight: "路由权重",
         costThreshold: "成本阈值 ($)",
+        temperature: "Temperature",
       },
       placeholders: {
         modelName: "如 gpt-4o-mini / deepseek-chat / qwen2.5:7b",
         apiEndpoint: "https://api.openai.com/v1 或 http://localhost:11434",
         apiKey: "sk-...",
+        temperature: "留空使用默认值 0.0",
       },
     },
 
@@ -1531,10 +1533,11 @@ export const zhCN = {
       legacy: "11g 及以下（ROWNUM）",
     },
     provider: {
-      OPENAI: "OpenAI",
-      AZURE_OPENAI: "Azure OpenAI",
-      OPENAI_COMPATIBLE_PROXY: "兼容代理 (DeepSeek/通义/Qwen)",
-      OLLAMA: "本地 Ollama",
+      openai: "OpenAI",
+      azure_openai: "Azure OpenAI",
+      moonshot: "Moonshot (Kimi)",
+      openai_compatible_proxy: "兼容代理 (DeepSeek/通义/Qwen)",
+      ollama: "本地 Ollama",
     },
     dataType: {
       STRING: "字符串 STRING",
@@ -1634,6 +1637,8 @@ export const zhCN = {
       confirm: "导入结果",
     },
     uploadButton: "上传文件",
+    uploadButtonUploading: "正在解析…",
+    uploadProgress: "正在解析文件（PDF 扫描件会自动 OCR 识别，请稍候）",
     uploadHint: "支持 PDF / Word(.docx) / Markdown / 纯文本，解析结果会填入下方文本框，可先核对再切分",
     sourceLabel: "原始内容（Markdown，按最浅标题层级切分）",
     sourcePlaceholder:
@@ -1643,6 +1648,8 @@ export const zhCN = {
     sourceRefPlaceholder: "可填文件名、文档编号或链接，便于溯源",
     autoClassifyLabel: "自动分类",
     autoClassifyHint: "开启后对每条知识调用模型判断知识维度（可稍后人工调整）",
+    useTwoStepLabel: "深度分析模式",
+    useTwoStepHint: "开启后先分析实体/概念/本体关联，再导入（质量更高，成本翻倍）",
     modelLabel: "处理模型",
     modelPlaceholder: "请选择一个可用的模型",
     noModels: "暂无可选模型，请先在「模型配置」中添加",
@@ -1699,6 +1706,8 @@ export const zhCN = {
       status: "状态",
       structureStage: "结构阶段",
       version: "版本",
+      pageId: "条目号",
+      createdAt: "创建时间",
     },
     dimensions: {
       OBJECT: "业务对象",
@@ -1742,6 +1751,9 @@ export const zhCN = {
     },
     form: {
       content: "正文（Markdown）",
+      dimension: "知识维度",
+      authorityLevel: "权威等级",
+      authorityLevelPlaceholder: "选择 L0-L5",
     },
     detail: {
       meta: "条目号 {pageId}｜版本 {version}｜结构阶段 {stage}",
@@ -1752,6 +1764,33 @@ export const zhCN = {
         "「打回分类」表示该条知识不属于任何维度，会记入学习反馈用于修正分类器。",
       statusTitle: "生命周期状态",
       content: "正文",
+      authorityLevel: "权威等级",
+      saveSuccess: "保存成功",
+      tabs: {
+        basic: "基本信息",
+        claims: "事实原子",
+        relations: "知识关系",
+        conflicts: "冲突检测",
+      },
+      transitions: {
+        toReview: "提交审核",
+        toApproved: "审批通过",
+        toEffective: "生效",
+        toExpired: "失效",
+        backToDraft: "退回草稿",
+        backToReview: "退回待审",
+      },
+      noMoreTransitions: "已是终态，无可用水卡",
+      // 自由切换说明：状态本身不参与学习闭环，强约束的状态机没换来
+      // 等价的可追溯收益；变更时间落在 wiki_page.updated_at 上。
+      statusHint: "可任意切换当前状态（DRAFT / REVIEW / APPROVED / EFFECTIVE / EXPIRED）；变更时间自动记录。",
+      // 旧 ladder 模式残留的 Popconfirm 文案；现用 Select 直接切换，未引用。
+      // 保留以便回退到 ladder 模式时不必再补 key。
+      confirm: "确认将状态从「{from}」变更为「{to}」？",
+      confirmIrreversible: "确认将状态从「{from}」变更为「{to}」？失效后条目不再生效，但保留行供历史溯源。",
+      ok: "确认",
+      cancel: "取消",
+      currentStatus: "当前：{status}",
     },
     errors: {
       titleRequired: "请输入标题",
@@ -1760,6 +1799,57 @@ export const zhCN = {
       deleteFailed: "删除失败，请重试",
       batchDeleteFailed: "批量删除失败，请重试",
       statusUpdateFailed: "状态更新失败，请重试",
+    },
+    // 事实原子（机制 1 的产物）
+    claims: {
+      empty: "暂无事实原子",
+      claimText: "事实内容",
+      claimType: "类型",
+      evidenceCount: "证据",
+      sourceType: "来源类型",
+      sourceId: "来源编号",
+      section: "章节",
+      paragraph: "段落",
+      content: "原文内容",
+      noEvidence: "无证据",
+      evidences: "条证据",
+      reExtract: "重新抽取",
+      forceReExtractTitle: "强制重新抽取？",
+      forceReExtractDesc: "将删除当前 {count} 条事实原子及其证据，并用所选模型重新抽取。",
+      forceReExtractOk: "删除并重抽",
+      extractDone: "已抽取 {count} 条事实原子",
+      extractAlreadyDone: "该条目已抽过事实原子",
+      extractFailed: "抽取失败（{status}），请稍后重试",
+      extractStatus: "抽取状态：{status}",
+    },
+    // 知识关系（机制 2）
+    relations: {
+      empty: "暂无知识关系",
+      pending: "待审核",
+      confirmed: "已确认",
+      discover: "发现关系",
+      discoverTitle: "发现候选关系",
+      confirm: "确认",
+      reject: "打回",
+      confirmSuccess: "关系已确认",
+      rejectSuccess: "关系已打回",
+      discovered: "发现 {count} 个候选关系",
+      relationType: "关系类型",
+      downstreamType: "下游类型",
+      downstreamId: "下游ID",
+      confidence: "置信度",
+    },
+    // 冲突检测（机制 3）— 详情抽屉内嵌版
+    conflicts: {
+      detect: "检测冲突",
+      noneFound: "未发现冲突",
+      found: "发现 {count} 个冲突",
+      resolve: "处置",
+      resolved: "冲突已处置",
+      type: "类型",
+      severity: "严重度",
+      description: "说明",
+      actions: "操作",
     },
   },
 
@@ -1848,6 +1938,8 @@ export const zhCN = {
     generateModelPlaceholder: "不选则只做确定性预筛，不调用模型",
     generateHint:
       "不选模型也能跑：确定性预筛会先判断这条知识像哪一类结构化知识，再决定要不要配模型精抽。",
+    generated: "已生成 {count} 条建议（{kind}）",
+    generatedNone: "未生成新建议",
     errors: {
       generateFailed: "生成建议失败，请重试",
       alreadyResolved: "这条建议已被处置（终态不可逆），已为你刷新列表。",

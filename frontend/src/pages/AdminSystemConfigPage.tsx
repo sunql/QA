@@ -152,7 +152,7 @@ export default function AdminSystemConfigPage(): JSX.Element {
                 onOk={() => form.submit()}
                 okText={t("systemConfig.actions.save")}
                 cancelText={t("systemConfig.actions.cancel")}
-                destroyOnClose
+                destroyOnHidden
             >
                 {editing && (
                     <>

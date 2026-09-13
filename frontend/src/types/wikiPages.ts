@@ -141,3 +141,27 @@ export interface WikiRelationDiscoverResult {
 
 /** 「有维度但没挂到任何已确认业务对象」—— 覆盖度看板用的缺口类型。 */
 export const GAP_UNLINKED = "UNLINKED";
+
+/** Evidence：Claim 的证据 5 元组。 */
+export interface Evidence {
+    id: number;
+    claimId: number;
+    sourceType: string;
+    sourceId: string | null;
+    pageNumber: string | null;
+    sectionName: string | null;
+    paragraphNo: string | null;
+    content: string | null;
+    createdTime: string | null;
+}
+
+/** KnowledgeClaim：从 WikiPage 抽取的事实原子。 */
+export interface KnowledgeClaim {
+    id: number;
+    pageId: string;
+    claimText: string;
+    claimType: string | null;
+    embeddingRef: string | null;
+    createdTime: string | null;
+    evidences: Evidence[];
+}

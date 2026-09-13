@@ -13,8 +13,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
     Alert,
+    App,
     Button,
     Drawer,
+    Empty,
     Form,
     Input,
     Modal,
@@ -22,6 +24,7 @@ import {
     Select,
     Space,
     Table,
+    Tabs,
     Tag,
 } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
@@ -42,6 +45,14 @@ import {
     type WikiPage,
     type WikiPageStatus,
 } from "../types/wikiPages";
+import WikiClaimsPanel from "../components/wiki/WikiClaimsPanel";
+import WikiRelationsPanel from "../components/wiki/WikiRelationsPanel";
+import {
+    detectWikiConflicts,
+    listWikiConflicts,
+    resolveWikiConflict,
+} from "../api/wikiConflicts";
+import type { KnowledgeConflict } from "../types/wikiConflicts";
 
 /** 状态 → antd Tag 颜色（EFFECTIVE 才是真正生效的那一档） */
 const STATUS_COLOR: Record<string, string> = {
@@ -59,11 +70,19 @@ const STAGE_LABEL: Record<string, string> = {
     FULLY_STRUCTURED: "③ 结构化",
 };
 
+// 状态可**自由切换**（不做 ladder 限制）：原设计按 DRAFT→REVIEW→APPROVED→
+// EFFECTIVE→EXPIRED 一档一档推，目的是审计清晰，但业务专家日常用太繁琐——
+// 一条已经 EXPIRED 的条目若想拿回来复用，要点 4 下才行。
+// 现状：status 字段不参与 learning_feedback 写回，所以「跳过中间档」不会污染
+// 学习闭环；历史状态变迁在 wiki_page 表的 updated_at 上有迹可查，
+// 不依赖强约束的状态机来兜底（见 wiki_page_service.updatePage）。
 const PAGE_SIZE = 20;
 
 interface CreateFormValues {
     title: string;
     content: string;
+    dimension?: KnowledgeDimension;
+    authorityLevel?: string;
 }
 
 /** 页面级提示条（成功摘要 / 部分失败）。批量删除是破坏性操作，只 toast 会飘走。 */
@@ -273,6 +292,15 @@ export default function AdminWikiPagesPage() {
     const columns: ColumnsType<WikiPage> = useMemo(
         () => [
             {
+                title: t("wikiPages.columns.pageId"),
+                dataIndex: "pageId",
+                key: "pageId",
+                width: 160,
+                render: (id: string) => (
+                    <code style={{ fontSize: 11 }}>{id}</code>
+                ),
+            },
+            {
                 title: t("wikiPages.columns.title"),
                 dataIndex: "title",
                 key: "title",
@@ -323,6 +351,14 @@ export default function AdminWikiPagesPage() {
                 dataIndex: "version",
                 key: "version",
                 width: 90,
+            },
+            {
+                title: t("wikiPages.columns.createdAt"),
+                dataIndex: "createdTime",
+                key: "createdTime",
+                width: 160,
+                render: (ts: string | null) =>
+                    ts ? new Date(ts).toLocaleString("zh-CN") : "-",
             },
         ],
         [t, openDetail],
@@ -432,7 +468,7 @@ export default function AdminWikiPagesPage() {
                 onOk={() => void handleCreate()}
                 okText={t("common.save")}
                 cancelText={t("common.cancel")}
-                destroyOnClose
+                destroyOnHidden
             >
                 <Form form={createForm} layout="vertical" preserve={false}>
                     <Form.Item
@@ -459,6 +495,29 @@ export default function AdminWikiPagesPage() {
                     >
                         <Input.TextArea autoSize={{ minRows: 6, maxRows: 16 }} />
                     </Form.Item>
+                    <Form.Item
+                        name="dimension"
+                        label={t("wikiPages.form.dimension")}
+                    >
+                        <Select
+                            allowClear
+                            options={dimensionOptions}
+                            placeholder={t("wikiPages.undetermined")}
+                        />
+                    </Form.Item>
+                    <Form.Item
+                        name="authorityLevel"
+                        label={t("wikiPages.form.authorityLevel")}
+                    >
+                        <Select
+                            allowClear
+                            options={["L0","L1","L2","L3","L4","L5"].map((l) => ({
+                                value: l,
+                                label: l,
+                            }))}
+                            placeholder={t("wikiPages.form.authorityLevelPlaceholder")}
+                        />
+                    </Form.Item>
                 </Form>
             </Modal>
 
@@ -471,7 +530,7 @@ export default function AdminWikiPagesPage() {
                 cancelText={t("common.cancel")}
                 okButtonProps={{ danger: true, loading: batchDeleting }}
                 cancelButtonProps={{ disabled: batchDeleting }}
-                destroyOnClose
+                destroyOnHidden
             >
                 <p>
                     {t("wikiPages.batchDelete.count", {
@@ -484,29 +543,18 @@ export default function AdminWikiPagesPage() {
             </Modal>
 
             <Drawer
-                width={640}
+                width={720}
                 open={detail !== null}
                 loading={detailLoading}
                 onClose={() => setDetail(null)}
                 title={detail?.title}
                 extra={
                     detail && (
-                        // 二次确认：删除是不可逆的（连带清掉 claim / 关系 / 产物），
-                        // 而按钮就在 Drawer 右上角，误点代价是整个条目。批量删除
-                        // 早有确认弹窗，单条不该更宽松。
                         <Popconfirm
                             title={t("wikiPages.deleteConfirm", { title: detail.title })}
                             okText={t("wikiPages.batchDelete.confirm")}
                             cancelText={t("common.cancel")}
                             okButtonProps={{ danger: true }}
-                            // 直传 async 函数，**不要**包成 `() => void handleDelete()`。
-                            // antd 的 ActionButton 带 `quitOnNullishReturnValue`：返回值不是
-                            // thenable 时它会立刻关闭弹窗并清掉防重入标志 clickedRef，于是
-                            // 请求在途期间再点一次「确认删除」会真的发出第二个请求（第二次
-                            // 要么 404 报出「删除失败」误导用户，要么撞 StaleDataError 500）。
-                            // 返回 Promise 才会 loading + 保持弹窗 + 锁住重入。
-                            // handleDelete 内部 try/catch 已落定、不会 reject，故不会走到
-                            // ActionButton 的 Promise.reject 分支。
                             onConfirm={handleDelete}
                         >
                             <Button danger size="small">
@@ -517,88 +565,382 @@ export default function AdminWikiPagesPage() {
                 }
             >
                 {detail && (
-                    <div>
-                        <p style={{ color: "#888" }}>
-                            {t("wikiPages.detail.meta", {
-                                pageId: detail.pageId,
-                                version: detail.version,
-                                stage: STAGE_LABEL[detail.structureStage] ?? detail.structureStage,
-                            })}
-                        </p>
-
-                        <h4>{t("wikiPages.detail.dimension")}</h4>
-                        <p style={{ color: "#888" }}>
-                            {detail.autoClassification === null
-                                ? t("wikiPages.detail.noSuggestion")
-                                : t("wikiPages.detail.suggestion", {
-                                      dimension: detail.autoClassification.primary ?? "-",
-                                      confidence:
-                                          detail.autoClassification.confidence ?? 0,
-                                  })}
-                        </p>
-                        <Space wrap style={{ marginBottom: 8 }}>
-                            <Select
-                                aria-label={t("wikiPages.detail.dimension")}
-                                style={{ width: 200 }}
-                                value={currentDimension ?? undefined}
-                                onChange={(v: KnowledgeDimension | undefined) =>
-                                    setPendingDimension(v ?? null)
-                                }
-                                options={dimensionOptions}
-                                placeholder={t("wikiPages.undetermined")}
-                            />
-                            <Button
-                                type="primary"
-                                disabled={!isDimensionDirty}
-                                onClick={() =>
-                                    void handleReclassify(currentDimension)
-                                }
-                            >
-                                {t("wikiPages.actions.saveDimension")}
-                            </Button>
-                            <Button
-                                danger
-                                onClick={() => {
-                                    setPendingDimension(null);
-                                    void handleReclassify(null);
-                                }}
-                            >
-                                {t("wikiPages.actions.rejectDimension")}
-                            </Button>
-                        </Space>
-                        <p style={{ color: "#888", fontSize: 12 }}>
-                            {t("wikiPages.detail.rejectHint")}
-                        </p>
-
-                        <h4>{t("wikiPages.detail.statusTitle")}</h4>
-                        <Select
-                            aria-label={t("wikiPages.detail.statusTitle")}
-                            style={{ width: 200 }}
-                            value={detail.status}
-                            onChange={(v: WikiPageStatus) => {
-                                void updateWikiPage(detail.pageId, { status: v })
-                                    .then((updated) => setDetail(updated))
-                                    .catch(() =>
-                                        setErrorMsg(
-                                            t("wikiPages.errors.statusUpdateFailed"),
-                                        ),
-                                    );
-                            }}
-                            options={WIKI_PAGE_STATUSES.map((s) => ({
-                                value: s,
-                                label: t(`wikiPages.statuses.${s}`),
-                            }))}
-                        />
-
-                        <h4 style={{ marginTop: 24 }}>
-                            {t("wikiPages.detail.content")}
-                        </h4>
-                        <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                            {detail.content}
-                        </pre>
-                    </div>
+                    <Tabs
+                        items={[
+                            {
+                                key: "basic",
+                                label: t("wikiPages.detail.tabs.basic"),
+                                children: (
+                                    <BasicInfoTab
+                                        detail={detail}
+                                        currentDimension={currentDimension}
+                                        isDimensionDirty={isDimensionDirty}
+                                        onDimensionChange={setPendingDimension}
+                                        onReclassify={handleReclassify}
+                                        dimensionOptions={dimensionOptions}
+                                        onRefresh={async () => {
+                                            const updated = await getWikiPage(detail.pageId);
+                                            setDetail(updated);
+                                            void fetchList();
+                                        }}
+                                        errorMsg={errorMsg}
+                                        setErrorMsg={setErrorMsg}
+                                    />
+                                ),
+                            },
+                            {
+                                key: "claims",
+                                label: t("wikiPages.detail.tabs.claims"),
+                                children: (
+                                    <WikiClaimsPanel pageId={detail.pageId} />
+                                ),
+                            },
+                            {
+                                key: "relations",
+                                label: t("wikiPages.detail.tabs.relations"),
+                                children: (
+                                    <WikiRelationsPanel pageId={detail.pageId} />
+                                ),
+                            },
+                            {
+                                key: "conflicts",
+                                label: t("wikiPages.detail.tabs.conflicts"),
+                                children: (
+                                    <ConflictTab pageId={detail.pageId} />
+                                ),
+                            },
+                        ]}
+                    />
                 )}
             </Drawer>
+        </div>
+    );
+}
+
+/* ---------- Sub-components ---------- */
+
+/** 基本信息 Tab：标题/正文/维度/权威等级编辑 + 状态流转按钮 */
+interface BasicInfoTabProps {
+    detail: WikiPage;
+    currentDimension: KnowledgeDimension | null | undefined;
+    isDimensionDirty: boolean;
+    onDimensionChange: (v: KnowledgeDimension | null | undefined) => void;
+    onReclassify: (dimension: KnowledgeDimension | null) => Promise<void>;
+    dimensionOptions: { value: string; label: string }[];
+    onRefresh: () => Promise<void>;
+    errorMsg: string | null;
+    setErrorMsg: (v: string | null) => void;
+}
+
+function BasicInfoTab({
+    detail,
+    currentDimension,
+    isDimensionDirty,
+    onDimensionChange,
+    onReclassify,
+    dimensionOptions,
+    onRefresh,
+    errorMsg,
+    setErrorMsg,
+}: BasicInfoTabProps) {
+    const { t } = useTranslation();
+    const [title, setTitle] = useState(detail.title);
+    const [content, setContent] = useState(detail.content);
+    const [authorityLevel, setAuthorityLevel] = useState<string | null>(
+        detail.authorityLevel,
+    );
+    const [saving, setSaving] = useState(false);
+
+    // 同步 detail 变化到本地 state
+    useEffect(() => {
+        setTitle(detail.title);
+        setContent(detail.content);
+        setAuthorityLevel(detail.authorityLevel);
+    }, [detail]);
+
+    const handleSaveField = async (
+        field: "title" | "content",
+        value: string,
+    ) => {
+        setSaving(true);
+        try {
+            await updateWikiPage(detail.pageId, { [field]: value });
+            void onRefresh();
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleSaveAuthority = async (level: string | null) => {
+        setSaving(true);
+        try {
+            await updateWikiPage(detail.pageId, { authorityLevel: level });
+            setAuthorityLevel(level);
+            void onRefresh();
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleStatusChange = async (next: WikiPageStatus) => {
+        // 选同一个值（无变更）直接跳过 —— Select onChange 在「不动」时也会触发
+        if (next === detail.status) {
+            return;
+        }
+        try {
+            await updateWikiPage(detail.pageId, { status: next });
+            void onRefresh();
+        } catch {
+            setErrorMsg(t("wikiPages.errors.statusUpdateFailed"));
+        }
+    };
+
+    return (
+        <div>
+            {/* 元数据行 */}
+            <p style={{ color: "#888", fontSize: 12, marginBottom: 16 }}>
+                {t("wikiPages.detail.meta", {
+                    pageId: detail.pageId,
+                    version: detail.version,
+                    stage: STAGE_LABEL[detail.structureStage] ?? detail.structureStage,
+                })}
+            </p>
+
+            {/* 标题 */}
+            <h4>{t("wikiPages.columns.title")}</h4>
+            <Input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                onBlur={() => {
+                    if (title !== detail.title) {
+                        void handleSaveField("title", title);
+                    }
+                }}
+                style={{ marginBottom: 12 }}
+                maxLength={200}
+            />
+
+            {/* 正文 */}
+            <h4>{t("wikiPages.detail.content")}</h4>
+            <Input.TextArea
+                value={content}
+                onChange={(e) => setContent(e.target.value)}
+                autoSize={{ minRows: 6, maxRows: 16 }}
+                style={{ marginBottom: 12 }}
+            />
+            <Button
+                size="small"
+                loading={saving}
+                disabled={content === detail.content}
+                onClick={() => void handleSaveField("content", content)}
+                style={{ marginBottom: 16 }}
+            >
+                {t("common.save")}
+            </Button>
+
+            {/* 权威等级 */}
+            <h4>{t("wikiPages.detail.authorityLevel")}</h4>
+            <Space style={{ marginBottom: 16 }}>
+                <Select
+                    allowClear
+                    value={authorityLevel ?? undefined}
+                    onChange={(v) => {
+                        const level = v ?? null;
+                        void handleSaveAuthority(level);
+                    }}
+                    options={["L0","L1","L2","L3","L4","L5"].map((l) => ({
+                        value: l,
+                        label: l,
+                    }))}
+                    style={{ width: 160 }}
+                    placeholder={t("wikiPages.form.authorityLevelPlaceholder")}
+                />
+            </Space>
+
+            {/* 维度 */}
+            <h4>{t("wikiPages.detail.dimension")}</h4>
+            <p style={{ color: "#888", fontSize: 12 }}>
+                {detail.autoClassification === null
+                    ? t("wikiPages.detail.noSuggestion")
+                    : t("wikiPages.detail.suggestion", {
+                          dimension: detail.autoClassification.primary ?? "-",
+                          confidence: detail.autoClassification.confidence ?? 0,
+                      })}
+            </p>
+            <Space wrap style={{ marginBottom: 8 }}>
+                <Select
+                    aria-label={t("wikiPages.detail.dimension")}
+                    style={{ width: 200 }}
+                    value={currentDimension ?? undefined}
+                    onChange={(v: KnowledgeDimension | undefined) =>
+                        onDimensionChange(v ?? null)
+                    }
+                    options={dimensionOptions}
+                    placeholder={t("wikiPages.undetermined")}
+                />
+                <Button
+                    type="primary"
+                    disabled={!isDimensionDirty}
+                    loading={saving}
+                    onClick={() => void onReclassify(currentDimension ?? null)}
+                >
+                    {t("wikiPages.actions.saveDimension")}
+                </Button>
+                <Button
+                    danger
+                    disabled={detail.dimension === null && currentDimension !== null}
+                    onClick={() => void onReclassify(null)}
+                >
+                    {t("wikiPages.actions.rejectDimension")}
+                </Button>
+            </Space>
+            <p style={{ color: "#888", fontSize: 12, marginBottom: 16 }}>
+                {t("wikiPages.detail.rejectHint")}
+            </p>
+
+            {/* 状态流转：自由下拉，不做 ladder 限制。
+             *
+             * 原设计按 DRAFT→REVIEW→APPROVED→EFFECTIVE→EXPIRED 一档一档点
+             * 按钮是为了审计清晰，但日常把条目从 EXPIRED 复用要连点 4 下；
+             * 而且状态变更不写 learning_feedback（见 wiki_page_service.updatePage
+             * 的 dimension 路径才写），强约束的状态机没换来等价的可追溯收益。
+             * 现在直接一个 Select 列出全部 5 档，可任意切换。
+             */}
+            <h4>{t("wikiPages.detail.statusTitle")}</h4>
+            <div style={{ marginBottom: 16 }}>
+                <Select
+                    aria-label={t("wikiPages.detail.statusTitle")}
+                    style={{ width: 200 }}
+                    value={detail.status}
+                    onChange={(v: WikiPageStatus) => void handleStatusChange(v)}
+                    options={WIKI_PAGE_STATUSES.map((s) => ({
+                        value: s,
+                        label: t(`wikiPages.statuses.${s}`),
+                    }))}
+                />
+                <p style={{ color: "#888", fontSize: 12, marginTop: 6, marginBottom: 0 }}>
+                    {t("wikiPages.detail.statusHint")}
+                </p>
+            </div>
+
+            {/* 错误提示 */}
+            {errorMsg && (
+                <Alert
+                    type="error"
+                    showIcon
+                    closable
+                    message={errorMsg}
+                    onClose={() => setErrorMsg(null)}
+                    style={{ marginTop: 8 }}
+                />
+            )}
+        </div>
+    );
+}
+
+/** 冲突检测 Tab */
+interface ConflictTabProps {
+    pageId: string;
+}
+
+function ConflictTab({ pageId }: ConflictTabProps) {
+    const { t } = useTranslation();
+    const { message } = App.useApp();
+    const [detecting, setDetecting] = useState(false);
+    const [conflicts, setConflicts] = useState<KnowledgeConflict[]>([]);
+    const [loadingConflicts, setLoadingConflicts] = useState(false);
+
+    const loadConflicts = useCallback(async () => {
+        setLoadingConflicts(true);
+        try {
+            const data = await listWikiConflicts({ conflictType: undefined });
+            setConflicts(data.rows.filter((c) => c.pageIds.includes(pageId)));
+        } finally {
+            setLoadingConflicts(false);
+        }
+    }, [pageId]);
+
+    useEffect(() => {
+        void loadConflicts();
+    }, [loadConflicts]);
+
+    const handleDetect = async () => {
+        setDetecting(true);
+        try {
+            const result = await detectWikiConflicts(pageId);
+            message.info(
+                result.total > 0
+                    ? t("wikiPages.conflicts.found", { count: result.total })
+                    : t("wikiPages.conflicts.noneFound"),
+            );
+            void loadConflicts();
+        } finally {
+            setDetecting(false);
+        }
+    };
+
+    const handleResolve = async (conflictId: number) => {
+        try {
+            await resolveWikiConflict(conflictId, "RESOLVED");
+            message.success(t("wikiPages.conflicts.resolved"));
+            void loadConflicts();
+        } catch {
+            // 拦截器已 toast
+        }
+    };
+
+    return (
+        <div>
+            <div style={{ marginBottom: 12 }}>
+                <Button onClick={handleDetect} loading={detecting}>
+                    {t("wikiPages.conflicts.detect")}
+                </Button>
+            </div>
+            {loadingConflicts ? (
+                <Alert type="info" message={t("common.loading")} />
+            ) : conflicts.length === 0 ? (
+                <Empty
+                    description={t("wikiPages.conflicts.noneFound")}
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                />
+            ) : (
+                <Table
+                    rowKey="id"
+                    size="small"
+                    dataSource={conflicts}
+                    columns={[
+                        {
+                            title: t("wikiPages.conflicts.type"),
+                            dataIndex: "conflictType",
+                            key: "conflictType",
+                        },
+                        {
+                            title: t("wikiPages.conflicts.severity"),
+                            dataIndex: "severity",
+                            key: "severity",
+                        },
+                        {
+                            title: t("wikiPages.conflicts.description"),
+                            dataIndex: "description",
+                            key: "description",
+                        },
+                        {
+                            title: t("wikiPages.conflicts.actions"),
+                            key: "actions",
+                            render: (_: unknown, record: KnowledgeConflict) =>
+                                !record.resolvedAt ? (
+                                    <Button
+                                        size="small"
+                                        onClick={() => void handleResolve(record.id)}
+                                    >
+                                        {t("wikiPages.conflicts.resolve")}
+                                    </Button>
+                                ) : null,
+                        },
+                    ]}
+                    pagination={false}
+                />
+            )}
         </div>
     );
 }

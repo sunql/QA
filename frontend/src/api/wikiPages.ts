@@ -16,6 +16,7 @@
 
 import { httpClient } from "./client";
 import type {
+    KnowledgeClaim,
     WikiPage,
     WikiPageBatchDeleteResult,
     WikiPageCreate,
@@ -156,6 +157,33 @@ export async function rejectWikiRelation(
 ): Promise<WikiRelation> {
     const res = await httpClient.post<WikiRelation>(
         `${PREFIX}/relations/${relationId}/reject`,
+    );
+    return res.data;
+}
+
+export async function listWikiClaims(pageId: string): Promise<KnowledgeClaim[]> {
+    const res = await httpClient.get<KnowledgeClaim[]>(
+        `${PREFIX}/pages/${pageId}/claims`,
+    );
+    return res.data;
+}
+
+/**
+ * 跑一次事实原子抽取（机制 6，幂等：已抽过则 ALREADY_DONE）。
+ *
+ * 抽取由后端完整负责：含 LLM 调用、evidence 落库、token 计量。
+ * 前端只等结果 + 刷新列表；不传 modelId 表示「本次不跑 LLM」
+ * （实际生产环境一般必传，模型是知识质量的核心）。
+ * force=true 跳过幂等保护：先删除已有 claims 再重抽（换模型/内容修订场景）。
+ */
+export async function extractWikiClaims(
+    pageId: string,
+    modelId?: number,
+    force?: boolean,
+): Promise<{ status: string; claimCount: number }> {
+    const res = await httpClient.post<{ status: string; claimCount: number }>(
+        `${PREFIX}/pages/${pageId}/claims/extract`,
+        { modelId: modelId ?? null, force: force ?? false },
     );
     return res.data;
 }

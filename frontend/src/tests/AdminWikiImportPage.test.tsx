@@ -260,6 +260,7 @@ describe("AdminWikiImportPage", () => {
                 autoClassify: true,
                 sourceType: "MARKDOWN",
                 sourceRef: null,
+                useTwoStep: false,
             });
         });
         // 结果步展示状态

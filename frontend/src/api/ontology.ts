@@ -1,6 +1,5 @@
 import axios from "axios";
-import { message } from "antd";
-import { httpClient } from "./client";
+import { httpClient, showMessageError } from "./client";
 import { API_BASE_URL, DEFAULT_TENANT_ID, DEFAULT_USER_ID } from "../config";
 import { i18n } from "../i18n";
 import type {
@@ -233,7 +232,9 @@ export async function parseBatchCsv(
     );
     return res.data;
   } catch (error) {
-    void message.error(_describeUploadError(error));
+    // 走裸 axios 的请求不经过拦截器 —— 用 client.ts 暴露的出口弹错，
+    // 避免静态 ``message`` 调用脱离 React 上下文触发 antd 警告。
+    showMessageError(_describeUploadError(error));
     throw error;
   }
 }

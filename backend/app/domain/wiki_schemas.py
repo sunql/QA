@@ -118,6 +118,12 @@ class WikiPageUpdate(CamelModel):
     status: _UnsetType | str = Field(default=UNSET, max_length=20)
     authority_level: _UnsetType | str | None = Field(default=UNSET, max_length=10)
     version: _UnsetType | str = Field(default=UNSET, min_length=1, max_length=30)
+    # Phase 5.5：MISSING_DIMENSION 缺口两步预览的「用户确认」落点。
+    # 前端在 Modal 里拿到 LLM 建议后调 PATCH，把完整建议一并写入 ——
+    # 否则 scan 的 MISSING_DIMENSION 判定（dimension IS NULL AND
+    # auto_classification IS NULL）会把已写 dimension 但 auto_classification
+    # 仍为 NULL 的页继续报为缺口。
+    auto_classification: _UnsetType | dict[str, Any] | None = Field(default=UNSET)
 
     @field_validator("authority_level")
     @classmethod
@@ -329,6 +335,74 @@ class WikiReclassifyRead(CamelModel):
     action: str | None = None
 
 
+class WikiClassifyPreviewRead(CamelModel):
+    """Phase 5.5：MISSING_DIMENSION 缺口操作的两步预览结果。
+
+    与 ``WikiReclassifyRequest`` 的区别：**不写库**，只把 LLM 建议
+    返给前端做「预览 → 用户确认」。确认动作由 ``PATCH /pages/{id}``
+    配合 ``dimension`` 字段完成（沿用现有 WikiPageUpdate 通路，不开
+    新的写入端点）。
+
+    ``primary`` 可能为 null —— 模型判定「无法归类」时（如内容过短），
+    前端据此展示「无可建议」文案而不是把 None 当成「清空维度」。
+    """
+
+    primary: str | None = Field(default=None, max_length=30)
+    confidence: float = 0.0
+    alternatives: list[str] = Field(default_factory=list)
+    reason: str = ""
+    rawOutput: str = ""
+
+
+class WikiRelationSuggestCandidate(CamelModel):
+    """Phase 5.5：ISOLATED_PAGE 缺口预览的单个候选（未落库）。"""
+
+    downstream_type: str = Field(..., max_length=30)
+    downstream_id: str = Field(..., max_length=64)
+    downstream_title: str = ""
+    relation_type: str = Field(..., max_length=30)
+    confidence: float = 0.0
+    reason: str = ""
+
+
+class WikiRelationsSuggestRead(CamelModel):
+    """Phase 5.5：ISOLATED_PAGE 缺口的两步预览结果。
+
+    ``candidates`` 是「即将写入但还没写」的提案；前端 Modal 展示给用户
+    确认后，调用现有的 ``POST /pages/{pageId}/relations/discover`` 完成
+    真正落库 —— 复用写入端点，避免出现两套写入语义。
+    """
+
+    candidates: list[WikiRelationSuggestCandidate] = Field(default_factory=list)
+    total: int = 0
+    class_extraction_status: str = "SKIPPED"
+    dropped_ghosts: list[str] = Field(default_factory=list)
+
+
+class WikiCommunityTopicSuggestRead(CamelModel):
+    """Phase 5.5：SPARSE_COMMUNITY 缺口的两步预览结果。
+
+    ``topic`` 为空字符串 = LLM 失败或社区无成员，前端展示「无可建议」。
+    确认动作由 ``PATCH /communities/{communityKey}`` 配合 ``topic`` 字段完成。
+    """
+
+    topic: str = ""
+    page_count: int = 0
+    page_titles: list[str] = Field(default_factory=list)
+
+
+class WikiCommunityUpdateRequest(CamelModel):
+    """社区元数据 PATCH（Phase 5.5：人工/LLM 确认后的 topic 写入）。"""
+
+    topic: str | None = Field(default=None, max_length=200)
+
+
+class WikiCommunityTopicUpdateRead(CamelModel):
+    """``PATCH /communities/{communityKey}`` 返回：当前社区最新状态。"""
+
+    community: KnowledgeCommunityRead
+
+
 # ---------------------------------------------------------------------------
 # 导入（M2）
 # ---------------------------------------------------------------------------
@@ -391,6 +465,8 @@ class WikiImportExecuteRequest(CamelModel):
     source_type: str | None = Field(default=None, max_length=30)
     source_ref: str | None = Field(default=None, max_length=500)
     task_type: str = Field(default="BULK_IMPORT", max_length=30)
+    # Phase 4：失败任务重试关联。指向原始任务 id（nullable）。
+    retry_of_task_id: int | None = None
 
 
 class WikiImportTaskRead(CamelModel):
@@ -415,6 +491,8 @@ class WikiImportTaskRead(CamelModel):
     created_by_user_id: int | None = None
     created_time: datetime | None = None
     finished_time: datetime | None = None
+    # Phase 4：失败任务重试关联。null = 非重试任务。
+    retry_of_task_id: int | None = None
 
 
 class WikiImportTaskListRead(CamelModel):
@@ -822,7 +900,155 @@ class CoverageDomainListRead(CamelModel):
     domains: list[str]
 
 
+# ---------------------------------------------------------------------------
+# 知识图谱分析（Phase 2：4-Signal 相关性 + Louvain 社区）
+# ---------------------------------------------------------------------------
+
+
+class GraphRelevanceRead(CamelModel):
+    """两页相关性的信号分解（权重见 services/knowledge_graph/relevance.py）。"""
+
+    page_a: str
+    page_b: str
+    total: float
+    direct_link: bool
+    source_overlap: bool
+    adamic_adar: float
+    type_affinity: bool
+
+
+class KnowledgeCommunityRead(CamelModel):
+    """Louvain 社区（已落库形态）。"""
+
+    id: int
+    community_key: str
+    name: str
+    cohesion_score: float
+    page_count: int
+    top_pages: list[dict[str, Any]]
+    topic: str | None = None
+    created_time: datetime
+
+
+class CommunityRecomputeRead(CamelModel):
+    """社区重算结果摘要。"""
+
+    community_count: int
+    member_page_count: int
+
+
+class GraphNodeRead(CamelModel):
+    """图可视化节点。``community_key`` 为 None = 不属于任何社区（孤立页）。"""
+
+    page_id: str
+    title: str | None
+    dimension: str | None
+    degree: int
+    community_key: str | None
+
+
+class GraphEdgeRead(CamelModel):
+    """图可视化边：已确认 Page↔Page 关系 + 4-Signal 相关性得分。"""
+
+    source: str
+    target: str
+    relation_type: str
+    score: float
+
+
+class GraphViewRead(CamelModel):
+    """知识图谱可视化载荷（节点 + 边）。规模上限见 API 端 ``_MAX_GRAPH_NODES``。"""
+
+    nodes: list[GraphNodeRead]
+    edges: list[GraphEdgeRead]
+    truncated: bool
+
+
+# ---------------------------------------------------------------------------
+# Graph Insights（Phase 3）
+# ---------------------------------------------------------------------------
+
+
+class SurprisingConnectionRead(CamelModel):
+    """跨社区 / 跨维度已确认关系。"""
+
+    key: str
+    headline: str
+    source_page_id: str
+    source_title: str
+    source_community: str | None
+    source_dimension: str | None
+    target_page_id: str
+    target_title: str
+    target_community: str | None
+    target_dimension: str | None
+    relation_type: str
+    explanation: str
+
+
+class KnowledgeGapRead(CamelModel):
+    """孤立 / 稀疏 / 无维度 三类缺口。"""
+
+    key: str
+    kind: str
+    headline: str
+    explanation: str
+    # SPARSE_COMMUNITY
+    community_key: str | None = None
+    community_name: str | None = None
+    page_count: int | None = None
+    cohesion_score: float | None = None
+    # ISOLATED_PAGE / MISSING_DIMENSION
+    page_id: str | None = None
+    title: str | None = None
+    degree: int | None = None
+    # Phase 5.5.3：SPARSE_COMMUNITY 已有 topic 时回显在 gap 上，便于前端在
+    # Modal 之前就能看到「这条 gap 已经被人命名过 —— 不需要再问 LLM」。
+    topic: str | None = None
+
+
+class BridgeNodeRead(CamelModel):
+    """桥接节点：连接 3+ 个不同社区的页。"""
+
+    key: str
+    page_id: str
+    title: str
+    degree: int
+    communities: list[str]
+    explanation: str
+
+
+class GraphInsightsRead(CamelModel):
+    """图洞察整体载荷。"""
+
+    surprising_connections: list[SurprisingConnectionRead]
+    knowledge_gaps: list[KnowledgeGapRead]
+    bridge_nodes: list[BridgeNodeRead]
+    scanned_at: datetime
+
+
+class GraphInsightsRescanRead(CamelModel):
+    """重算扫描结果摘要。"""
+
+    surprising_count: int
+    gap_count: int
+    bridge_count: int
+    explanation_attempts: int
+    explanation_failures: int
+
+
 __all__ = [
+    "GraphRelevanceRead",
+    "KnowledgeCommunityRead",
+    "CommunityRecomputeRead",
+    "GraphNodeRead",
+    "GraphEdgeRead",
+    "GraphViewRead",
+    "SurprisingConnectionRead",
+    "KnowledgeGapRead",
+    "BridgeNodeRead",
+    "GraphInsightsRead",
+    "GraphInsightsRescanRead",
     "WikiPageCreate",
     "WikiPageUpdate",
     "WikiPageRead",
@@ -834,6 +1060,12 @@ __all__ = [
     "WikiRelationDiscoverRead",
     "WikiReclassifyRequest",
     "WikiReclassifyRead",
+    "WikiClassifyPreviewRead",
+    "WikiRelationSuggestCandidate",
+    "WikiRelationsSuggestRead",
+    "WikiCommunityTopicSuggestRead",
+    "WikiCommunityUpdateRequest",
+    "WikiCommunityTopicUpdateRead",
     "WikiImportDraft",
     "WikiImportPreviewRequest",
     "WikiImportPreviewRead",

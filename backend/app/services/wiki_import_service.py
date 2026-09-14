@@ -171,6 +171,14 @@ def sourceTypeFromFilename(filename: str, mime_type: str = "") -> str:
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     ):
         return "WORD"
+    if ext == "pptx" or mime_type == (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    ):
+        return "PPT"
+    if ext in ("xlsx", "xls") or mime_type == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    ):
+        return "EXCEL"
     return "MARKDOWN"
 
 
@@ -302,6 +310,79 @@ class WikiImportService:
         )
         return rows, total
 
+    async def getTask(
+        self,
+        session: AsyncSession,
+        taskId: int,
+    ) -> WikiImportTask | None:
+        """按 id 读 task，权限校验由 API 层处理。"""
+        return (
+            await session.execute(
+                select(WikiImportTask).where(WikiImportTask.id == taskId)
+            )
+        ).scalar_one_or_none()
+
+    async def retry(
+        self,
+        session: AsyncSession,
+        taskId: int,
+        *,
+        createdByUserId: int | None = None,
+    ) -> WikiImportTask:
+        """基于原 task 的 page_ids 反查 Page → 拼回 drafts → 重跑 execute。
+
+        **为什么不在前端做这件事**：导入向导是一次性的（用户贴完原文 →
+        切分 → 入库），前端不持有原 drafts。retry 时刻页面上根本没有这些
+        drafts。在服务端反查回填才能让「点重试」变成一个真正的单点动作，
+        而不是「打开历史任务 → 找到原 drafts → 重提交」的人工流程。
+
+        ``retry_of_task_id`` 自动关联原任务，前端列表会显示这是某任务的重试。
+        """
+        original = await self.getTask(session, taskId)
+        if original is None:
+            raise ValidationError("原任务不存在")
+        if not original.page_ids:
+            raise ValidationError("原任务无成功条目，无法重试")
+
+        rows = (
+            await session.execute(
+                select(WikiPage).where(WikiPage.page_id.in_(original.page_ids))
+            )
+        ).scalars().all()
+        titleById = {p.page_id: p.title for p in rows}
+        contentById = {p.page_id: p.content for p in rows}
+
+        # page_ids 是按成功顺序追加的，重组 drafts 时按同样顺序保持可读性
+        drafts: list[WikiImportDraft] = []
+        for pid in original.page_ids:
+            if pid not in titleById:
+                # 原 page 已被删除/过期 —— 跳过，不强行占位
+                continue
+            drafts.append(
+                WikiImportDraft(
+                    page_id=pid,
+                    title=titleById[pid],
+                    content=contentById[pid],
+                )
+            )
+        if not drafts:
+            raise ValidationError("原任务条目已全部失效，无法重试")
+
+        dto = WikiImportExecuteRequest(
+            drafts=drafts,
+            model_id=original.selected_model_id,
+            fallback_model_id=original.fallback_model_id,
+            # 分类已在原任务跑过，重跑不该再花钱
+            auto_classify=False,
+            source_type=original.source_type,
+            source_ref=original.source_ref,
+            task_type=original.task_type,
+            retry_of_task_id=original.id,
+        )
+        return await self.execute(
+            session, dto, createdByUserId=createdByUserId
+        )
+
     async def execute(
         self,
         session: AsyncSession,
@@ -348,6 +429,7 @@ class WikiImportService:
             page_ids=[],
             total_pages=len(dto.drafts),
             created_by_user_id=createdByUserId,
+            retry_of_task_id=dto.retry_of_task_id,
         )
         session.add(task)
         await session.commit()

@@ -50,6 +50,7 @@ from app.api.v1 import (
     wiki,
     wiki_import,
     wiki_compile,
+    wiki_graph,
 )
 from app.config import getSettings
 from app.dependencies import getDb
@@ -182,6 +183,7 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
     testApp.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
     testApp.include_router(wiki_compile.router, prefix="/api/v1", tags=["wiki"])
+    testApp.include_router(wiki_graph.router, prefix="/api/v1", tags=["wiki"])
 
     @testApp.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:

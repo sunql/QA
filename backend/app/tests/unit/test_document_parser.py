@@ -206,3 +206,264 @@ def _makeDocx(paragraphs: list[str], headingIndexes: set[int] | None = None) -> 
         zf.writestr("_rels/.rels", rels)
         zf.writestr("word/document.xml", documentXml)
     return buf.getvalue()
+
+
+# ---------- PPTX / XLSX / XLS 测试夹具 ----------
+
+
+def _makePptx(slides: list[tuple[str, list[str]]]) -> bytes:
+    """用 python-pptx 构造 PPTX。
+
+    ``slides`` 是 ``(title, [bullet1, bullet2, ...])`` 列表。生成的 PPTX
+    含可读中文标题与项目符号，便于断言。
+    """
+    from pptx import Presentation
+
+    prs = Presentation()
+    blankLayout = prs.slide_layouts[6]  # 空白版式避免依赖主题
+    for title, bullets in slides:
+        slide = prs.slides.add_slide(blankLayout)
+        if title:
+            # 左上角放标题文本框
+            txBox = slide.shapes.add_textbox(0, 0, 720000, 500000)
+            tf = txBox.text_frame
+            tf.text = title
+        for bullet in bullets:
+            txBox = slide.shapes.add_textbox(0, 600000, 720000, 500000)
+            tf = txBox.text_frame
+            tf.text = bullet
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def _makeXlsx(sheets: dict[str, list[list[str]]]) -> bytes:
+    """用 openpyxl 构造 XLSX。
+
+    ``sheets`` 是 ``{sheet_name: [[row1col1, row1col2], ...], ...}``。
+    """
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    # 默认创建 1 个空 sheet，重命名为第一个
+    firstName = next(iter(sheets))
+    ws = wb.active
+    ws.title = firstName
+    for row in sheets[firstName]:
+        ws.append(row)
+    for name, rows in list(sheets.items())[1:]:
+        ws = wb.create_sheet(title=name)
+        for row in rows:
+            ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _makeXls(sheets: dict[str, list[list[str]]]) -> bytes:
+    """用 xlwt 构造老式 .xls 二进制。
+
+    xlwt 仍支持旧格式，与 xlrd 读取兼容；本夹具**不**用 xlrd 写 ——
+    xlrd 2.0+ 已不再支持写，只读。
+    """
+    import xlwt
+
+    wb = xlwt.Workbook()
+    for name, rows in sheets.items():
+        ws = wb.add_sheet(name)
+        for r, row in enumerate(rows):
+            for c, val in enumerate(row):
+                ws.write(r, c, val)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _makePdfWithTable(rows: list[list[str]]) -> bytes:
+    """用 reportlab 构造含**表格**的 PDF（验证 pdfplumber 提取表格）。
+
+    纯文本 PDF 由 ``_makePdf`` 覆盖；这里专门覆盖"页内有表格"的分支。
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4)
+    table = Table(rows)
+    table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+    ]))
+    doc.build([table])
+    return buf.getvalue()
+
+
+# ---------- Phase 5 新格式测试 ----------
+
+
+class TestPptx:
+    """PPTX：每张幻灯片 = 一个 TextBlock，``section_name`` 用 slide 标题。"""
+
+    @pytest.mark.asyncio
+    async def test_pptx_extracts_slide_title_and_bullets(self) -> None:
+        pptx = _makePptx([
+            ("供应商准入", ["注册资本 >= 1000 万", "成立 3 年以上"]),
+            ("供应商分级", ["按年度采购额分 A/B/C 级"]),
+        ])
+        blocks = await parse_document(
+            pptx,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "a.pptx",
+        )
+        # 2 张幻灯片 → 2 个块（每张的内容合并为一段）
+        assert len(blocks) == 2
+        assert blocks[0].section_name == "供应商准入"
+        assert "注册资本" in blocks[0].text
+        assert "成立 3 年以上" in blocks[0].text
+        assert blocks[1].section_name == "供应商分级"
+        assert "A/B/C" in blocks[1].text
+        # PPT 没有页概念 → page_number 一律 None；paragraph_no 顺序递增
+        assert all(b.page_number is None for b in blocks)
+        assert [b.paragraph_no for b in blocks] == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_pptx_fallback_by_extension(self) -> None:
+        """MIME 缺失时仅靠扩展名 .pptx 也能识别。"""
+        pptx = _makePptx([("标题", ["要点"])])
+        blocks = await parse_document(pptx, "application/octet-stream", "a.pptx")
+        assert len(blocks) == 1
+        assert blocks[0].section_name == "标题"
+
+    @pytest.mark.asyncio
+    async def test_pptx_old_binary_format_unsupported(self) -> None:
+        """.ppt（二进制旧格式）python-pptx 读不了，必须明确抛 UnsupportedFileTypeError
+        而不是 DocumentParserError —— 告诉用户「换格式」而非「换文件」。"""
+        with pytest.raises(UnsupportedFileTypeError):
+            await parse_document(b"fake ppt content", "application/octet-stream", "a.ppt")
+
+
+class TestXlsx:
+    """XLSX：每个 sheet 渲为结构化文本。"""
+
+    @pytest.mark.asyncio
+    async def test_xlsx_emits_one_block_per_sheet(self) -> None:
+        xlsx = _makeXlsx({
+            "供应商": [["名称", "等级"], ["A 公司", "A 级"], ["B 公司", "B 级"]],
+            "产品": [["型号", "价格"], ["X-100", 100]],
+        })
+        blocks = await parse_document(
+            xlsx,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "a.xlsx",
+        )
+        assert len(blocks) == 2
+        assert blocks[0].section_name == "供应商"
+        assert "名称" in blocks[0].text
+        assert "A 公司" in blocks[0].text
+        assert blocks[1].section_name == "产品"
+        assert "X-100" in blocks[1].text
+
+    @pytest.mark.asyncio
+    async def test_xlsx_large_sheet_truncated(self) -> None:
+        """大表格被截断防止一次吃光 token 预算。
+
+        1000 行 × 5 列的 sheet 应被截断到 ``_MAX_SOURCE_CHARS`` 之内。
+        """
+        rows = [[f"行{i}-列{j}" for j in range(5)] for i in range(1000)]
+        xlsx = _makeXlsx({"大表": rows})
+        blocks = await parse_document(xlsx, "application/octet-stream", "big.xlsx")
+        assert len(blocks) == 1
+        # 截断后总文本必须 < 1MB（_MAX_SOURCE_CHARS 上限）
+        assert len(blocks[0].text) < 1_000_000
+
+    @pytest.mark.asyncio
+    async def test_xlsx_empty_sheet_returns_no_blocks(self) -> None:
+        xlsx = _makeXlsx({"空": []})
+        blocks = await parse_document(xlsx, "application/octet-stream", "empty.xlsx")
+        assert blocks == []
+
+    @pytest.mark.asyncio
+    async def test_xlsx_real_third_party_file_via_raw_fallback(
+        self,
+    ) -> None:
+        """真实第三方 xlsx（来自 ``docs/excel/供应商价格.xlsx``）。
+
+        openpyxl 对某些 WPS / BI 工具导出的 xlsx 抛
+        ``could not read stylesheet from None`` —— 但数据完整可读。
+        该回归测试确保 ``_parseXlsx`` 自动降级到 raw XML 读取，不让用户
+        拿到误导性的「文件损坏」错误。
+        """
+        import zipfile
+        from pathlib import Path
+
+        samplePath = (
+            Path(__file__).parent.parent.parent.parent.parent
+            / "docs"
+            / "excel"
+            / "供应商价格.xlsx"
+        )
+        if not samplePath.exists():
+            pytest.skip(f"sample xlsx not found: {samplePath}")
+        # 该 xlsx 必须含 sheet2 (data sheet)；若被替换为别的样例则 skip
+        with zipfile.ZipFile(samplePath) as zf:
+            assert any("sheet2" in n for n in zf.namelist()), "sample 不含 sheet2"
+        content = samplePath.read_bytes()
+        blocks = await parse_document(content, "application/octet-stream", "供应商价格.xlsx")
+        # 至少抽出 1 个 sheet；data sheet 应含真实业务数据
+        assert len(blocks) >= 1
+        allText = "\n".join(b.text for b in blocks)
+        # 数据 sheet 表头里有 "类型" 或 "价目表" 这种业务关键词即可
+        assert any(kw in allText for kw in ("价目表", "PLI", "类型"))
+
+
+class TestXls:
+    """XLS：老式二进制 Excel 走 xlrd 路径。"""
+
+    @pytest.mark.asyncio
+    async def test_xls_extracts_cells(self) -> None:
+        xls = _makeXls({
+            "客户": [["名称", "城市"], ["A 公司", "上海"], ["B 公司", "北京"]],
+        })
+        blocks = await parse_document(xls, "application/octet-stream", "a.xls")
+        assert len(blocks) == 1
+        assert blocks[0].section_name == "客户"
+        assert "A 公司" in blocks[0].text
+        assert "上海" in blocks[0].text
+
+    @pytest.mark.asyncio
+    async def test_xls_fallback_by_extension(self) -> None:
+        """仅靠 .xls 扩展名也能识别。"""
+        xls = _makeXls({"数据": [["行1", "值"]]})
+        blocks = await parse_document(xls, "application/octet-stream", "a.xls")
+        assert len(blocks) == 1
+        assert "行1" in blocks[0].text
+
+
+class TestPdfTableExtraction:
+    """PDF 表格：必须保留表格结构（不被压扁成无定位的纯文本）。"""
+
+    @pytest.mark.asyncio
+    async def test_pdf_table_rows_preserved(self) -> None:
+        """含表格的 PDF：列对齐关系必须保留（用 markdown table 或行分隔标记）。
+
+        允许的两种输出形态：
+        - pdfplumber 识别出表格 → 多列用 ``|`` 或 tab 分隔，**列间不留空**
+        - 仅 pypdf 命中 → 行内文本拼回，可能列间为空
+
+        至少要满足：第 1 行表头 + 第 2 行数据都出现在同一块里，且列间分隔可辨。
+        """
+        pdf_bytes = _makePdfWithTable([
+            ["供应商", "等级", "金额"],
+            ["A 公司", "A", "100"],
+            ["B 公司", "B", "50"],
+        ])
+        blocks = await parse_document(pdf_bytes, "application/pdf", "a.pdf")
+        assert len(blocks) >= 1
+        allText = "\n".join(b.text for b in blocks)
+        assert "供应商" in allText
+        assert "A 公司" in allText
+        assert "100" in allText

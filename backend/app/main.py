@@ -272,6 +272,7 @@ def createApp() -> FastAPI:
         wiki,
         wiki_import,
         wiki_compile,
+        wiki_graph,
     )
 
     app.include_router(model_config.router, prefix="/api/v1/models", tags=["models"])
@@ -356,6 +357,33 @@ def createApp() -> FastAPI:
     app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(wiki_compile.router, prefix="/api/v1", tags=["wiki"])
+    app.include_router(wiki_graph.router, prefix="/api/v1", tags=["wiki"])
+
+    # MCP Server（Phase 6）：HTTP/SSE 端点 `/mcp`，复用 FastAPI app + DB session
+    # + stub auth（MCP 客户端的 stdio 模式走 `python -m app.services.mcp_server`）。
+    # 挂载而非 include_router：MCP 走 streamable-http transport（FastAPI route
+    # 适配不到），用 Starlette Mount 拼到 ASGI 树末端。
+    # **关键**：fastmcp http_app 自带 lifespan（管理 streamable-http session
+    # task group），必须在 FastAPI() 构造时把 lifespan 合并进去 —— 否则
+    # ``StreamableHTTPSessionManager task group was not initialized``。
+    # 因为 createApp() 已经把 lifespan 显式传给 FastAPI()，这里改用
+    # starlette lifespan_context 替换为合并版。
+    from starlette.routing import Mount
+    from app.services.mcp_server import mcp as _mcpServer
+
+    _mcpApp = _mcpServer.http_app(path="/mcp", transport="streamable-http")
+    app.router.routes.append(Mount("", app=_mcpApp))
+
+    # 合并 fastmcp 子 app 的 lifespan 到现有 lifespan（schema drift / 引擎预热）。
+    _origFastapiLifespan = lifespan
+
+    @asynccontextmanager
+    async def _mergedLifespan(fastapiApp: FastAPI) -> AsyncIterator[None]:
+        async with _origFastapiLifespan(fastapiApp):
+            async with _mcpApp.lifespan(_mcpApp):
+                yield
+
+    app.router.lifespan_context = _mergedLifespan
 
     @app.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:

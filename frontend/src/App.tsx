@@ -1,4 +1,8 @@
 import { Routes, Route, Navigate } from "react-router-dom";
+import { App as AntApp } from "antd";
+import { useEffect } from "react";
+// `AntdApp` 由 ThemedRoot 包好（main.tsx → ThemedRoot → AntdApp），
+// 这里只是 useApp() 拿实例来注入到 httpClient 拦截器；不要再嵌套一层。
 import AppLayout from "./components/common/AppLayout";
 import ModelConfigPage from "./pages/ModelConfigPage";
 import EmbeddingProvidersPage from "./pages/EmbeddingProvidersPage";
@@ -33,11 +37,21 @@ import AdminWikiPagesPage from "./pages/AdminWikiPagesPage";
 import AdminWikiConflictsPage from "./pages/AdminWikiConflictsPage";
 import AdminWikiSuggestionsPage from "./pages/AdminWikiSuggestionsPage";
 import AdminWikiCoveragePage from "./pages/AdminWikiCoveragePage";
+import AdminWikiGraphPage from "./pages/AdminWikiGraphPage";
 import BusinessObjectPage from "./pages/BusinessObjectPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
+import { setMessageApi } from "./api/client";
 
 export default function App() {
+  // 把 antd ``App`` 提供的 message 实例注入到 httpClient 拦截器。
+  // 拦截器在 module load 时就生效、不在 React 树里，必须通过这种 holder
+  // 模式让静态调用也能拿到带主题上下文的 message —— 否则 antd 会报
+  // "Static function can not consume context like dynamic theme"。
+  const { message } = AntApp.useApp();
+  useEffect(() => {
+    setMessageApi(message);
+  }, [message]);
   return (
     <Routes>
       <Route path="/" element={<AppLayout />}>
@@ -75,6 +89,7 @@ export default function App() {
         <Route path="admin/wiki-conflicts" element={<AdminWikiConflictsPage />} />
         <Route path="admin/wiki-suggestions" element={<AdminWikiSuggestionsPage />} />
         <Route path="admin/wiki-coverage" element={<AdminWikiCoveragePage />} />
+        <Route path="admin/wiki-graph" element={<AdminWikiGraphPage />} />
         <Route path="business-objects" element={<BusinessObjectPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />

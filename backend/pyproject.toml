@@ -37,6 +37,14 @@ dependencies = [
     "python-docx>=1.0.0",
     "langgraph>=0.2.0",
     "minio>=7.2.0",
+    # 知识图谱分析（Phase 2）：Louvain 社区检测 + Adamic-Adar 相关性信号
+    "networkx>=3.3",
+    "python-louvain>=0.16",
+    "python-pptx>=1.0.2",
+    "openpyxl>=3.1.5",
+    "xlrd>=2.0.2",
+    # MCP Server（Phase 6）：把 qa-system 知识能力暴露给外部 LLM Agent
+    "fastmcp>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -92,3 +100,8 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501"]
+
+[dependency-groups]
+dev = [
+    "xlwt>=1.3.0",
+]

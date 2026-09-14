@@ -51,6 +51,11 @@ export interface WikiImportExecuteRequest {
     sourceType?: string | null;
     sourceRef?: string | null;
     taskType?: string;
+    /**
+     * 重试某个失败/部分失败的任务（Phase 4）：新 task 写入 ``retry_of_task_id``
+     * 关联原 task。content_hash 命中的草稿计入 ``skippedPages`` 而非重跑。
+     */
+    retryOfTaskId?: number | null;
 }
 
 export type WikiImportTaskStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "PARTIAL" | "FAILED";
@@ -82,6 +87,8 @@ export interface WikiImportTask {
     createdByUserId: number | null;
     createdTime: string | null;
     finishedTime: string | null;
+    /** 重试链：本次任务是哪个 taskId 的重跑（Phase 4） */
+    retryOfTaskId: number | null;
 }
 
 export interface WikiImportTaskListResponse {

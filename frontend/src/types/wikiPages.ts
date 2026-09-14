@@ -76,6 +76,8 @@ export interface WikiPageUpdate {
     status?: WikiPageStatus;
     authorityLevel?: string | null;
     version?: string;
+    /** Phase 5.5：MISSING_DIMENSION 缺口确认时把 LLM 预览建议一并写入。 */
+    autoClassification?: Record<string, unknown> | null;
 }
 
 /** 调整分类的结果（action 是本次记录的反馈动作）。 */

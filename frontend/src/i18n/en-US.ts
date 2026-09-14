@@ -119,6 +119,7 @@ export const enUS = {
       wikiConflicts: "Conflict Detection",
       wikiSuggestions: "Structure Suggestions",
       wikiCoverage: "Coverage Dashboard",
+      wikiGraph: "Knowledge Graph",
     },
   },
 
@@ -1630,7 +1631,7 @@ export const enUS = {
     uploadButtonUploading: "Parsing…",
     uploadProgress: "Parsing file (PDF scans will run OCR, please wait)…",
     uploadHint:
-      "Supports PDF / Word (.docx) / Markdown / plain text. The extracted text fills the box below so you can check it before splitting.",
+      "Supports PDF / Word (.docx) / PPT (.pptx) / Excel (.xlsx/.xls) / Markdown / plain text. The extracted text fills the box below so you can check it before splitting.",
     sourceLabel: "Raw content (Markdown; split by the shallowest heading level)",
     sourcePlaceholder:
       "Paste the knowledge source here, e.g.:\n\n## Supplier Admission Rules\n\nRegistered capital >= 10M.\n\n## Supplier Tiering Rules\n\nA/B/C by annual spend.",
@@ -1661,6 +1662,7 @@ export const enUS = {
       skipped: "Skipped",
       failed: "Failed",
       errorMessage: "Notes",
+      actions: "Actions",
     },
     actions: {
       removeDraft: "Remove",
@@ -1668,6 +1670,8 @@ export const enUS = {
       execute: "Import",
       importAnother: "Import another batch",
       reloadModels: "Reload",
+      retry: "Retry",
+      retryTooltip: "Re-run with the same drafts — unchanged entries are skipped automatically",
     },
     resultMessage: "Import task finished with status: {status}",
     resultCounts:
@@ -1677,7 +1681,7 @@ export const enUS = {
     errors: {
       previewFailed: "Failed to split the source — please check the content",
       parseFileFailed:
-        "Could not parse the file. Use PDF / Word (.docx) / Markdown / plain text; legacy .doc must be re-saved as .docx.",
+        "Could not parse the file. Use PDF / Word (.docx) / PPT (.pptx) / Excel (.xlsx/.xls) / Markdown / plain text; legacy .doc/.ppt must be re-saved as .docx/.pptx.",
       fileTooLarge: "The file is too large (10 MB per upload). Split or compress it and retry.",
       modelUnusable:
         "The selected model is unavailable. Pick another one (add credentials under Model Config).",
@@ -1950,6 +1954,51 @@ export const enUS = {
   },
 
   // Coverage dashboard (feat-wiki-knowledge M7, mechanism 6)
+  wikiGraph: {
+    title: "Knowledge Graph",
+    recompute: "Recompute Communities",
+    recomputeDone: "Detected {communities} communities covering {pages} pages",
+    includeIsolated: "Show isolated pages",
+    truncatedHint: "Graph exceeds size limit — showing top 500 nodes by connection count",
+    empty: "No knowledge relations yet — confirm some relation candidates on the Wiki Pages page first",
+    communities: "Communities",
+    noCommunities: "No communities detected yet — click \"Recompute Communities\"",
+    communityMeta: "{pages} pages · cohesion {cohesion}",
+    edgeTooltip: "Relevance score: {score}",
+    insights: {
+      title: "Graph Insights",
+      rescan: "Rescan Insights",
+      rescanning: "Scanning…",
+      rescanDone: "Scan done — surprising {surprising} · gaps {gaps} · bridges {bridges} ({failures} explanation failures)",
+      never: "Never scanned — click \"Rescan Insights\" to analyze the knowledge network",
+      tabSurprising: "Surprising Connections",
+      tabGaps: "Knowledge Gaps",
+      tabBridges: "Bridge Nodes",
+      noExplanation: "(No LLM explanation yet)",
+      gapIsolated: "Isolated",
+      gapMissingDimension: "Missing Dimension",
+      gapSparse: "Sparse Community",
+      surprisingSource: "{comm} · {dim}",
+      // Phase 5.5: action buttons + 3 Modal labels for the gap kinds
+      actionReclassify: "Reclassify",
+      actionFindRelations: "Find Relations",
+      actionSuggestTopic: "Suggest Topic",
+      previewTitleClassify: "Suggested Dimension",
+      previewTitleRelations: "Candidate Relations",
+      previewTitleTopic: "Suggested Topic",
+      primarySuggestion: "Model suggests: {primary}",
+      confidence: "Confidence: {value}",
+      alternatives: "Alternatives: {list}",
+      basedOnTitles: "Based on {count} page titles:",
+      noSuggestion: "Model gave no suggestion",
+      confirm: "Confirm",
+      cancel: "Cancel",
+      successReclassify: "Dimension written: {dimension}",
+      successRelations: "{count} candidate relation(s) written",
+      successTopic: "Community topic written: {topic}",
+      emptyCandidates: "No candidates to confirm",
+    },
+  },
   wikiCoverage: {
     title: "Coverage Dashboard",
     unassigned: "No domain",

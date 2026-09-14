@@ -61,10 +61,13 @@ IMPORT_TASK_STATUSES: tuple[str, ...] = (
 # 导入来源类型。当前 M2 只实现 MARKDOWN（preview 接口直接收原文），
 # PDF/WORD/CSV/API 是 M2 之后解析器的预留位——但**预留不等于放行**：
 # 白名单外的值一律 422，避免库里出现拼错的来源类型无法聚合。
+# PPT/EXCEL（Phase 5）：解析器已落地，与 CSV/API 同样作白名单预留。
 IMPORT_SOURCE_TYPES: tuple[str, ...] = (
     "MARKDOWN",
     "PDF",
     "WORD",
+    "PPT",
+    "EXCEL",
     "CSV",
     "API",
 )
@@ -76,6 +79,9 @@ LEARNING_MECHANISMS: tuple[str, ...] = (
     "CONFLICT",    # 机制 3 冲突检测
     "STRUCTURE",   # 机制 4 结构化建议
     "CLAIM",       # 机制 6 事实抽取
+    "INSIGHT",     # Phase 3 Graph Insights（拓扑告警 + LLM 解读）
+    "ANALYZE",     # Phase 1 Two-Step CoT 的 Step 1（导入前深度分析）
+    "TOPIC",       # Phase 5.5 SPARSE_COMMUNITY gap 主题建议
 )
 
 # 冲突类型（机制 3）。四类的**检测手段不同**——只有 CONTRADICTION 必须调模型，
@@ -195,6 +201,11 @@ class WikiImportTask(Base):
     task_type: Mapped[str] = mapped_column(String(30), nullable=False)
     source_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     source_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase 4：失败任务重试关联。指向原始任务的 id，nullable = 非重试任务。
+    # ondelete=SET NULL：原任务被清掉不影响重试链（台账留重试历史即可）。
+    retry_of_task_id: Mapped[int | None] = mapped_column(
+        BigIntFk, ForeignKey("wiki_import_task.id", ondelete="SET NULL"), nullable=True
+    )
 
     # 用户当次选择的模型：primary 失败时降级到 fallback（可空=不降级）
     selected_model_id: Mapped[int | None] = mapped_column(

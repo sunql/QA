@@ -58,6 +58,8 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.enterpriseWiki", "code": "item.wikiConflicts", "label_key": "menu.item.wikiConflicts", "icon_code": "alert", "sort_order": 270, "path": "/admin/wiki-conflicts"},
     {"parent": "section.enterpriseWiki", "code": "item.wikiSuggestions", "label_key": "menu.item.wikiSuggestions", "icon_code": "tool", "sort_order": 280, "path": "/admin/wiki-suggestions"},
     {"parent": "section.enterpriseWiki", "code": "item.wikiCoverage", "label_key": "menu.item.wikiCoverage", "icon_code": "dashboard", "sort_order": 290, "path": "/admin/wiki-coverage"},
+    # Phase 2 知识图谱：Louvain 社区 + 4-Signal 相关性可视化
+    {"parent": "section.enterpriseWiki", "code": "item.wikiGraph", "label_key": "menu.item.wikiGraph", "icon_code": "node", "sort_order": 295, "path": "/admin/wiki-graph"},
     # Business Config
     {"parent": "section.bizConfig", "code": "item.ontology", "label_key": "menu.item.ontology", "icon_code": "partition", "sort_order": 310, "path": "/ontology"},
     {"parent": "section.bizConfig", "code": "item.dataQuality", "label_key": "menu.item.dataQuality", "icon_code": "audit", "sort_order": 320, "path": "/data-quality"},

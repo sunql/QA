@@ -116,6 +116,8 @@ class DiscoveryResult:
     candidates: tuple[KnowledgeRelation, ...]
     classExtractionStatus: str
     droppedGhosts: tuple[str, ...] = ()
+    # ``dryRun`` 时塞入「即将插入但未插入」的过滤后提案；非 dryRun 模式始终为空。
+    rawProposals: tuple[dict[str, Any], ...] = ()
 
 
 async def _hasPendingCandidates(session: AsyncSession, pageId: str) -> bool:
@@ -140,12 +142,19 @@ class RelationDiscovery:
         pageId: str,
         *,
         invoker: LearningLLMInvoker | None = None,
+        dryRun: bool = False,
     ) -> DiscoveryResult:
         """跑机制 2 并落库候选，返回**新增**的候选。
 
         ``invoker`` 为空则只跑确定性路径（不调模型、不产生 token 成本）。
         LLM 路径失败**不阻断**确定性路径的结果：关系发现是增强，抽不出实体
         只意味着少一路候选，不该让已经算出来的引用关系也一起丢掉。
+
+        ``dryRun=True`` 时跳过落库（``_persistCandidates`` 含 ``commit``），
+        把「即将插入但未插入」的提案放进 ``rawProposals`` —— 给 Phase 5.5
+        的 ``/relations/suggest`` 两步预览用：让用户先看到 LLM 抽到了什么，
+        再决定要不要确认落库。预览会话会随请求关闭而自动回滚，未提交的
+        proposal 不需要手工 cleanup。
         """
         page = await self._loadPage(session, pageId)
 
@@ -153,7 +162,7 @@ class RelationDiscovery:
         proposals.extend(await self._detectReferences(session, page))
 
         classStatus = CLASS_EXTRACTION_SKIPPED
-        if invoker is not None and await _hasPendingCandidates(session, page.page_id):
+        if invoker is not None and not dryRun and await _hasPendingCandidates(session, page.page_id):
             return DiscoveryResult((), "SKIPPED")
         if invoker is not None:
             try:
@@ -175,6 +184,16 @@ class RelationDiscovery:
             p for p in proposals
             if p["downstream_type"] != TARGET_TYPE_PAGE or p["downstream_id"] in keptPageIdSet
         ]
+
+        if dryRun:
+            # 不调 _persistCandidates（它会 commit）；把过滤后的提案塞进
+            # rawProposals，让 API 层拼装成「预览候选」展示给用户。
+            return DiscoveryResult(
+                candidates=(),
+                classExtractionStatus=classStatus,
+                droppedGhosts=tuple(droppedGhosts),
+                rawProposals=tuple(filteredProposals),
+            )
 
         created, _ = await self._persistCandidates(session, filteredProposals)
         return DiscoveryResult(

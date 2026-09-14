@@ -238,3 +238,56 @@ async def listImportTasks(
     return WikiImportTaskListRead(
         rows=[WikiImportTaskRead.model_validate(r) for r in rows], total=total
     )
+
+
+@router.get("/tasks/{task_id}", response_model=WikiImportTaskRead)
+async def getImportTask(
+    task_id: int,
+    user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+) -> WikiImportTaskRead:
+    """单 task 实时状态（Phase 4：执行中任务前端轮询用）。
+
+    权限：任务发起人或 admin 可查。404 早失败：任务不存在或无权访问同语义。
+    """
+    from fastapi import HTTPException
+
+    task = await _importService.getTask(db, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="导入任务不存在")
+    isAdmin = ADMIN_ROLE in (user.roles or ())
+    if not isAdmin and task.created_by_user_id != user.dbUserId:
+        # 与 listTasks 同语义：横向隔离
+        raise HTTPException(status_code=404, detail="导入任务不存在")
+    return WikiImportTaskRead.model_validate(task)
+
+
+@router.post(
+    "/tasks/{task_id}/retry",
+    response_model=WikiImportTaskRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def retryImportTask(
+    task_id: int,
+    user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+) -> WikiImportTaskRead:
+    """基于原任务 page_ids 反查 Page → 重跑（Phase 4 retry 入口）。
+
+    权限：与 ``/tasks/{task_id}`` 同 —— 任务发起人或 admin 才可重试。
+    复用原任务的 sourceType / sourceRef / selectedModelId，新 task 通过
+    ``retry_of_task_id`` 关联原任务。
+    """
+    from fastapi import HTTPException
+
+    original = await _importService.getTask(db, task_id)
+    if original is None:
+        raise HTTPException(status_code=404, detail="导入任务不存在")
+    isAdmin = ADMIN_ROLE in (user.roles or ())
+    if not isAdmin and original.created_by_user_id != user.dbUserId:
+        raise HTTPException(status_code=404, detail="导入任务不存在")
+
+    task = await _importService.retry(
+        db, task_id, createdByUserId=user.dbUserId
+    )
+    return WikiImportTaskRead.model_validate(task)

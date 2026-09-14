@@ -80,3 +80,30 @@ export async function listImportTasks(
     );
     return res.data;
 }
+
+/**
+ * 单 task 实时状态（Phase 4）。执行中的任务用它轮询；终态任务拉一次就够。
+ *
+ * 404 语义：不存在或非本人/非 admin（后端做了横向隔离）。调用方按字面
+ * 404 处理即可，不要在这里去 `listImportTasks` 重查。
+ */
+export async function getImportTask(taskId: number): Promise<WikiImportTask> {
+    const res = await httpClient.get<WikiImportTask>(`${PREFIX}/tasks/${taskId}`);
+    return res.data;
+}
+
+/**
+ * 重试一个失败/部分失败的任务（Phase 4）。
+ *
+ * 服务端从原 task 的 ``page_ids`` 反查 Page → 拼回 drafts → 走 execute。
+ * 新 task 通过 ``retryOfTaskId`` 关联原 task；content_hash 命中的草稿
+ * 计入 skipped（自动去重）。
+ *
+ * 前端不需要持有原 drafts —— 这正是 retry 走服务端的关键。
+ */
+export async function retryImportTask(taskId: number): Promise<WikiImportTask> {
+    const res = await httpClient.post<WikiImportTask>(
+        `${PREFIX}/tasks/${taskId}/retry`,
+    );
+    return res.data;
+}

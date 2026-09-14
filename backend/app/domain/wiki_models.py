@@ -331,6 +331,73 @@ class KnowledgeRelation(Base):
         )
 
 
+class KnowledgeCommunity(Base):
+    """Louvain 社区检测结果（Phase 2）。
+
+    由 ``knowledge_graph.community.recomputeCommunities`` 全量重算：
+    删旧写新，同事务。``community_key`` 是单次重算内的稳定序号
+    （``C001``/``C002``...），跨次重算**不保证**与上次同一社区对应 —
+    Louvain 的社区编号本身不稳定，跨次对齐是另一个问题（YAGNI，先不做）。
+
+    ``top_pages`` 存 [{\"pageId\", \"title\", \"degree\"}]，按度数降序取前 5，
+    给前端社区列表一个「这个社区大致讲什么」的锚点，不用 LLM 起名。
+    """
+
+    __tablename__ = "knowledge_community"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    community_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    cohesion_score: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False)
+    page_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    top_pages: Mapped[list] = mapped_column(JsonColumn, nullable=False, default=list)
+    # Phase 5.5：SPARSE_COMMUNITY gap 的语义描述（人工/LLM 建议后确认）。
+    # ``name`` 是机器编号（C001/C002...），``topic`` 是给前端社区侧栏展示的
+    # 主题描述——两者独立：编号保持稳定（重算时仍是 C001）便于前端 key，
+    # 但每次人工重命名后是「同一个社区在不同语境下被叫做不同主题」。
+    topic: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    members: Mapped[list[KnowledgeCommunityMember]] = relationship(
+        back_populates="community",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="select",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<KnowledgeCommunity {self.community_key} pages={self.page_count} "
+            f"cohesion={self.cohesion_score}>"
+        )
+
+
+class KnowledgeCommunityMember(Base):
+    """社区成员关系：哪个 Page 属于哪个社区（一次重算一代）。"""
+
+    __tablename__ = "knowledge_community_member"
+    __table_args__ = (
+        UniqueConstraint("community_id", "page_id", name="uq_community_member"),
+        Index("ix_community_member_page", "page_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    community_id: Mapped[int] = mapped_column(
+        BigIntFk,
+        ForeignKey("knowledge_community.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    page_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("wiki_page.page_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    community: Mapped[KnowledgeCommunity] = relationship(back_populates="members")
+
+
 __all__ = [
     "JsonColumn",
     "KNOWLEDGE_DIMENSIONS",
@@ -342,4 +409,6 @@ __all__ = [
     "KnowledgeClaim",
     "Evidence",
     "KnowledgeRelation",
+    "KnowledgeCommunity",
+    "KnowledgeCommunityMember",
 ]

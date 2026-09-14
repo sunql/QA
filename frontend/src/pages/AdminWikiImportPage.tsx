@@ -30,10 +30,12 @@ import { UploadOutlined } from "@ant-design/icons";
 import { useTranslation } from "../i18n";
 import {
   executeImport,
+  getImportTask,
   listImportModels,
   listImportTasks,
   previewImport,
   previewImportFile,
+  retryImportTask,
 } from "../api/wikiImport";
 import type {
   WikiImportDraft,
@@ -55,8 +57,10 @@ const SOURCE_TYPES = ["MARKDOWN", "PDF", "WORD", "CSV", "API"] as const;
  * 允许上传的格式。与后端 `document_parser.parse_document` 的白名单一致：
  * CSV/API 已从下拉里保留（历史台账要能显示），但**不支持上传**——CSV 需要
  * 独立的「列 → 标题/正文」映射规则，不是解析器能顺带解决的事。
+ * Phase 5 加 PPTX/XLSX/XLS；老式 .ppt/.xls 二进制格式由后端抛
+ * UnsupportedFileTypeError → 前端提示另存。
  */
-const UPLOAD_ACCEPT = ".pdf,.docx,.txt,.md,.markdown";
+const UPLOAD_ACCEPT = ".pdf,.docx,.pptx,.xlsx,.xls,.txt,.md,.markdown";
 
 /** 任务状态 → antd Tag 颜色 */
 const STATUS_COLOR: Record<string, string> = {
@@ -174,6 +178,70 @@ export default function AdminWikiImportPage() {
     }
   }, []);
 
+  /**
+   * 把 tasks 中仍在跑（PENDING/RUNNING）的项逐个 ``getImportTask`` 拉一遍。
+   * 终态（SUCCEEDED/PARTIAL/FAILED）不再轮询。
+   *
+   * 为什么不直接 ``setInterval(fetchTasks)``：列表里有 N 条 task 时整页
+   * 重拉，N 大起来后带宽/服务负载都涨；而单 task 拉只是几行 JSON。
+   * activeIds 是派生的，useEffect deps 稳定。
+   */
+  const activeIds = useMemo(
+    () =>
+      tasks
+        .filter((tk) => tk.status === "PENDING" || tk.status === "RUNNING")
+        .map((tk) => tk.id),
+    [tasks],
+  );
+
+  useEffect(() => {
+    if (activeIds.length === 0) return undefined;
+    let cancelled = false;
+    const tick = async () => {
+      const updates = await Promise.all(
+        activeIds.map(async (id) => {
+          try {
+            return await getImportTask(id);
+          } catch {
+            // 单 task 拉失败不应打断其他 task 的轮询；下一轮再试
+            return null;
+          }
+        }),
+      );
+      if (cancelled) return;
+      setTasks((prev) =>
+        prev.map((tk) => {
+          const fresh = updates.find((u) => u && u.id === tk.id);
+          return fresh ?? tk;
+        }),
+      );
+    };
+    const handle = window.setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(handle);
+    };
+  }, [activeIds]);
+
+  /**
+   * 点重试：服务端反查 drafts → 重跑。前端不持有原 drafts，这是 retry
+   * 走服务端的关键——避免「打开历史 → 找原 drafts → 重提交」的人工流程。
+   */
+  const handleRetry = useCallback(
+    async (taskId: number) => {
+      setErrorMsg(null);
+      try {
+        const fresh = await retryImportTask(taskId);
+        setTasks((prev) => [fresh, ...prev.filter((tk) => tk.id !== fresh.id)]);
+      } catch (e) {
+        // 拦截器已 toast 错误原文；这里给页面级常驻提示避免消息被清掉
+        const err = e as Error;
+        setErrorMsg(err.message);
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     void fetchModels();
     void fetchTasks();
@@ -221,12 +289,16 @@ export default function AdminWikiImportPage() {
         // 拦截器已 toast。这里给页面级常驻提示，因为上传失败时用户最容易
         // 怀疑「是不是文件本身有问题」，需要一句能行动的指引。
         // 413 单独分流：让用户去「确认格式」是错的指引——他要做的是换个小文件。
-        const err = e as Error & { status?: number };
-        setErrorMsg(
-          err.status === 413
-            ? t("wikiImport.errors.fileTooLarge")
-            : t("wikiImport.errors.parseFileFailed"),
-        );
+        // 其它情况：优先展示后端 detail（带具体原因 + 格式建议），
+        // 仅在没 detail 时退回静态文案兜底。
+        const err = e as Error & { status?: number; detail?: string };
+        if (err.status === 413) {
+          setErrorMsg(t("wikiImport.errors.fileTooLarge"));
+        } else if (err.detail) {
+          setErrorMsg(err.detail);
+        } else {
+          setErrorMsg(t("wikiImport.errors.parseFileFailed"));
+        }
       } finally {
         setUploading(false);
       }
@@ -336,8 +408,30 @@ export default function AdminWikiImportPage() {
         key: "errorMessage",
         render: (v: string | null) => v ?? "-",
       },
+      {
+        title: t("wikiImport.columns.actions"),
+        key: "actions",
+        width: 100,
+        render: (_: unknown, row: WikiImportTask) => {
+          // 仅失败/部分失败的任务可重试 —— SUCCEEDED 重跑没意义，
+          // RUNNING/PENDING 等它跑完再说
+          const canRetry =
+            row.status === "FAILED" || row.status === "PARTIAL";
+          if (!canRetry) return null;
+          return (
+            <Button
+              type="link"
+              size="small"
+              onClick={() => handleRetry(row.id)}
+              title={t("wikiImport.actions.retryTooltip")}
+            >
+              {t("wikiImport.actions.retry")}
+            </Button>
+          );
+        },
+      },
     ],
-    [t],
+    [t, handleRetry],
   );
 
   return (

@@ -337,8 +337,9 @@ MSG_WIKI_IMPORT_CLASSIFY_INCOMPLETE = (
 # 「格式不支持」换格式即可，「文件读不出内容」要换文件。合并成一句会让
 # 用户拿着一个损坏的 PDF 反复换扩展名。
 MSG_WIKI_IMPORT_FILE_TYPE_UNSUPPORTED = (
-    "不支持的文件类型「{filename}」，请上传 PDF / Word(.docx) / Markdown / 纯文本。"
-    "老式 .doc 请先另存为 .docx。"
+    "不支持的文件类型「{filename}」，请上传 PDF / Word(.docx) / PPT(.pptx) / "
+    "Excel(.xlsx/.xls) / Markdown / 纯文本。"
+    "老式 .doc / .ppt 请先另存为 .docx / .pptx。"
 )
 MSG_WIKI_IMPORT_FILE_PARSE_FAILED = (
     "文件解析失败，可能是文件已损坏或内容加密。请确认后重试（服务端日志有详细原因）"

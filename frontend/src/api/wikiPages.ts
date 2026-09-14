@@ -187,3 +187,58 @@ export async function extractWikiClaims(
     );
     return res.data;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5.5：知识缺口的两步预览（preview → confirm）
+// ---------------------------------------------------------------------------
+
+/**
+ * MISSING_DIMENSION 缺口预览（Phase 5.5.1）：调 LLM 分类一次，**不写库**。
+ * 用户在 Modal 选一个维度后调用 {@link updateWikiPage} 写入 dimension。
+ */
+export interface WikiClassifyPreview {
+    primary: string | null;
+    confidence: number;
+    alternatives: string[];
+    reason: string;
+    rawOutput: string;
+}
+
+export async function previewWikiPageClassify(
+    pageId: string,
+): Promise<WikiClassifyPreview> {
+    const res = await httpClient.post<WikiClassifyPreview>(
+        `${PREFIX}/pages/${pageId}/classify/preview`,
+    );
+    return res.data;
+}
+
+/**
+ * ISOLATED_PAGE 缺口预览（Phase 5.5.2）：算候选关系，**不写库**。
+ * 用户确认后调用 {@link discoverWikiRelations} 真正落库。
+ */
+export interface WikiRelationSuggestCandidate {
+    downstreamType: string;
+    downstreamId: string;
+    downstreamTitle: string;
+    relationType: string;
+    confidence: number;
+    reason: string;
+}
+
+export interface WikiRelationsSuggestResult {
+    candidates: WikiRelationSuggestCandidate[];
+    total: number;
+    classExtractionStatus: string;
+    droppedGhosts: string[];
+}
+
+export async function suggestWikiRelations(
+    pageId: string,
+): Promise<WikiRelationsSuggestResult> {
+    const res = await httpClient.post<WikiRelationsSuggestResult>(
+        `${PREFIX}/pages/${pageId}/relations/suggest`,
+        { modelId: null },
+    );
+    return res.data;
+}

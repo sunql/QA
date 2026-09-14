@@ -85,8 +85,11 @@ from app.domain.wiki_schemas import (
     WikiPageUpdate,
     WikiReclassifyRead,
     WikiReclassifyRequest,
+    WikiClassifyPreviewRead,
     WikiRelationDiscoverRead,
     WikiRelationDiscoverRequest,
+    WikiRelationSuggestCandidate,
+    WikiRelationsSuggestRead,
     WikiRuleConditionRead,
     WikiRuleDryRunCaseRead,
     WikiRuleDryRunRead,
@@ -105,6 +108,7 @@ from app.services.learning.coverage_tracker import (
     MAX_GAP_LIMIT,
     CoverageTracker,
 )
+from app.services.learning.auto_classifier import AutoClassifier
 from app.services.learning.llm_invoker import LearningLLMInvoker
 from app.services.learning.relation_discovery import RelationDiscovery
 from app.services.learning.structure_suggester import StructureSuggester
@@ -208,6 +212,75 @@ async def reclassifyPage(
         db, pageId, dimension=dto.dimension, updatedByUserId=user.dbUserId
     )
     return WikiReclassifyRead(page=WikiPageRead.model_validate(entity), action=action)
+
+
+@router.post(
+    "/pages/{pageId}/classify/preview",
+    response_model=WikiClassifyPreviewRead,
+    status_code=status.HTTP_200_OK,
+)
+async def classifyPagePreview(
+    pageId: str,
+    user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+) -> WikiClassifyPreviewRead:
+    """Phase 5.5：MISSING_DIMENSION 缺口的两步预览。
+
+    调 LLM 分类一次、**不写库** —— 把建议维度 + confidence + alternatives
+    返给前端展示，用户在 Modal 里点确认后再走 ``PATCH /pages/{id}``。
+
+    与 ``POST /reclassify`` 的关键差异：
+    - /reclassify 是「用户已决定」的一次性写入 + 学习反馈
+    - /classify/preview 是「让模型先说一句话」的预演，不动 page.dimension
+    """
+    from app.domain.exceptions import LLMUnavailableError
+    from app.services.model_config_service import ModelConfigService
+
+    page = await _wikiPageService.getPage(db, pageId)
+    if page is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="知识条目不存在"
+        )
+    # 不传 model_id 就取第一个 active 配置 —— 与 /reclassify / detect 等
+    # 都强制要求调用方显式选择不同，预览是「让模型说一句话」的兜底入口，
+    # 默认配置即可，避免前端多一个必选字段。
+    activeModels = await ModelConfigService().list(db, activeOnly=True)
+    if not activeModels:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="系统未配置任何可用 LLM 模型",
+        )
+    invoker = LearningLLMInvoker(db, primaryModelId=activeModels[0].id)
+    try:
+        await invoker.preflight()
+    except LLMUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    try:
+        suggestion, _ = await AutoClassifier().classify(
+            invoker, title=page.title, content=page.content
+        )
+    except LLMUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    if suggestion is None:
+        # 模型返了非白名单维度或空内容 —— 前端展示「无可建议」
+        return WikiClassifyPreviewRead(
+            primary=None,
+            confidence=0.0,
+            alternatives=[],
+            reason="模型未给出可信分类建议",
+            rawOutput="",
+        )
+    return WikiClassifyPreviewRead(
+        primary=suggestion.primary,
+        confidence=suggestion.confidence,
+        alternatives=list(suggestion.alternatives),
+        reason=suggestion.reason,
+        rawOutput=suggestion.toDict().get("rawOutput", ""),
+    )
 
 
 @router.delete("/pages/{pageId}", status_code=status.HTTP_204_NO_CONTENT)
@@ -361,6 +434,116 @@ async def discoverRelations(
     return WikiRelationDiscoverRead(
         candidates=[KnowledgeRelationRead.model_validate(e) for e in result.candidates],
         total=len(result.candidates),
+        class_extraction_status=result.classExtractionStatus,
+        dropped_ghosts=list(result.droppedGhosts),
+    )
+
+
+@router.post(
+    "/pages/{pageId}/relations/suggest",
+    response_model=WikiRelationsSuggestRead,
+    status_code=status.HTTP_200_OK,
+)
+@limiter.limit(rateLimitValue)
+async def suggestRelations(
+    request: Request,
+    pageId: str,
+    dto: WikiRelationDiscoverRequest,
+    db: AsyncSession = Depends(getDb),
+) -> WikiRelationsSuggestRead:
+    """Phase 5.5：ISOLATED_PAGE 缺口的两步预览。
+
+    跑 ``discoverForPage(dryRun=True)`` 拿到「即将写入」的提案但**不落库**，
+    把候选关系 + 幽灵引用列表返给前端 Modal；用户确认后再走现有的
+    ``POST /pages/{pageId}/relations/discover`` 完成真正写入。
+
+    与 ``/discover`` 的关键差异：
+    - /discover 一次性 commit、可能重复打 token（连续点两次会各花一次）
+    - /suggest 只读不写、即使连续点也不消耗额外 token 之外的副作用
+      （会话关闭自动回滚未提交的提案 + 计量行）
+
+    **限流**：与 ``/discover`` 同档（同样是「用户输入 × LLM 调用」的放大入口），
+    这里的限流不是为了省钱（preview 路径已经走 LLM 了），而是防滥用 —— 用户
+    短时间内反复点建议按钮会反复触发模型调用。
+    """
+    from sqlalchemy import select
+    from app.domain.models import OntologyClass
+    from app.domain.wiki_models import WikiPage
+
+    invoker = (
+        LearningLLMInvoker(db, primaryModelId=dto.model_id)
+        if dto.model_id is not None
+        else None
+    )
+    result = await _relationDiscovery.discoverForPage(
+        db, pageId, invoker=invoker, dryRun=True
+    )
+    rawProposals = list(result.rawProposals)
+
+    # 批量补上 target title：分两组查，PAGE 走 wiki_page，ONTOLOGY_CLASS 走 ontology_class
+    pageIds = {
+        p["downstream_id"] for p in rawProposals if p["downstream_type"] == "PAGE"
+    }
+    classIds = {
+        p["downstream_id"]
+        for p in rawProposals
+        if p["downstream_type"] == "ONTOLOGY_CLASS"
+    }
+    titleByPageId: dict[str, str] = {}
+    titleByClassId: dict[str, str] = {}
+    if pageIds:
+        rows = (
+            await db.execute(
+                select(WikiPage.page_id, WikiPage.title).where(
+                    WikiPage.page_id.in_(pageIds)
+                )
+            )
+        ).all()
+        titleByPageId = {pid: title for pid, title in rows}
+    if classIds:
+        rows = (
+            await db.execute(
+                select(OntologyClass.id, OntologyClass.class_name).where(
+                    OntologyClass.id.in_([int(x) for x in classIds if x.isdigit()])
+                )
+            )
+        ).all()
+        titleByClassId = {str(cid): name for cid, name in rows}
+
+    def _reasonFor(proposal: dict) -> str:
+        if proposal["relation_type"] == "REFERENCES":
+            title = titleByPageId.get(proposal["downstream_id"], "")
+            return f"正文出现条目《{title}》" if title else "正文引用了其它条目"
+        if proposal["relation_type"] == "DESCRIBES":
+            title = titleByClassId.get(proposal["downstream_id"], "")
+            return f"正文出现本体类《{title}》" if title else "正文描述了某个本体类"
+        return ""
+
+    candidates: list[WikiRelationSuggestCandidate] = []
+    for proposal in rawProposals:
+        downstreamType = proposal["downstream_type"]
+        downstreamId = proposal["downstream_id"]
+        if downstreamType == "PAGE":
+            title = titleByPageId.get(downstreamId, "")
+        elif downstreamType == "ONTOLOGY_CLASS":
+            title = titleByClassId.get(downstreamId, "")
+        else:
+            title = ""
+        confidence = float(proposal.get("confidence") or 0.0)
+        candidates.append(
+            WikiRelationSuggestCandidate(
+                downstream_type=downstreamType,
+                downstream_id=downstreamId,
+                downstream_title=title,
+                relation_type=proposal["relation_type"],
+                confidence=confidence,
+                reason=_reasonFor(proposal),
+            )
+        )
+
+    return WikiRelationsSuggestRead(
+        candidates=candidates,
+        total=len(candidates),
         class_extraction_status=result.classExtractionStatus,
         dropped_ghosts=list(result.droppedGhosts),
     )

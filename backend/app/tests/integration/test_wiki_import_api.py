@@ -321,21 +321,26 @@ async def test_preview_file_docx_extracts_paragraphs(client: AsyncClient) -> Non
 
 
 async def test_preview_file_pdf_returns_pdf_type(client: AsyncClient) -> None:
-    """上传 .pdf → 200 + 来源类型 PDF。
+    """上传 .pdf → 类型识别 + 扫描件防御。
 
-    这里只断言「解析链路通了、类型判对了」，不断言文本内容：这份最小 PDF
-    本身没有文本层。文本抽取的正确性由 ``app/tests/unit/test_document_parser.py``
-    在解析器层面覆盖，此处重复断言只会把两个套件绑在一起。
+    **Phase 5 改造后**：PDF 解析器加了「无文本层 → 视为扫描件」防御；
+    这份最小 PDF（无文本层）正好命中扫描件分支，返回 422 + 可行动
+    提示（不是 500 崩溃）。文本抽取的正确性由
+    ``app/tests/unit/test_document_parser.py`` 用带文本层的真实 PDF 覆盖。
+
+    回归点：扫描件原本会抛 ``DocumentParserError`` → logger 详情 → 500；
+    修复后 422 + 友好提示文案，客户端能区分「换个文件」与「服务端 bug」。
     """
     resp = await client.post(
         f"{_BASE}/preview-file",
         files={"file": ("制度.pdf", _MINIMAL_PDF, "application/pdf")},
     )
 
-    assert resp.status_code == 200
-    body = resp.json()
-    assert isinstance(body["text"], str)
-    assert body["sourceType"] == "PDF"
+    # 扫描件 PDF → 422 而非 500 / 200（防御升级后的契约）
+    assert resp.status_code == 422
+    # 响应文案统一收敛到「解析失败，请重试」+ 服务端日志详情；不断言具体字符串
+    # （文案常因 i18n 调整变动，契约是状态码 + 「4xx 可重试」语义）。
+    assert resp.json()["detail"]
 
 
 async def test_preview_file_legacy_doc_returns_unsupported_not_parse_failure(

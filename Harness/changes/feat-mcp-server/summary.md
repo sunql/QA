@@ -158,9 +158,34 @@ Client('http://127.0.0.1:8765/mcp')
 | `wiki_search 供应商` | **真实数据**：30 结果，含「采购供应商黑名单管理规范」等 |
 | `wiki_graph_insights` | 真实 ISOLATED_PAGE gap 列表 |
 | `wiki_read PAGE-UNTITLED-B145A929` | 完整 page + claims + relations |
-| `wiki_preview_classify nonexistent-id` | 正确返回 `知识条目「nonexistent-id」不存在` |
+| `wiki_preview_classify nonexistent-id` | ToolError ✓（FastMCP 把 NotFoundError 转 is_error=true） |
+| `wiki_preview_community_topic NONE` | ToolError ✓（同上） |
+| `wiki_update_community_topic NONE` | ToolError ✓（同上） |
 
-### 4.3 lifespan + startup 链路
+### 4.3 集成测试（14/14 PASS）
+
+`app/tests/integration/test_mcp_server.py`：
+
+| 测试 | 覆盖 |
+|------|------|
+| `test_openContext_returnsValidSession` | DB session + currentUser 正确建立 |
+| `test_openContextClosesOnError` | async with 异常路径自动 rollback + close |
+| `test_wiki_status_returnsOk` | 状态字段 + authMode |
+| `test_wiki_search_returnsMatches` | 真实 wiki 数据命中 |
+| `test_wiki_read_returnsPageContent` | page + content + claims + relations |
+| `test_wiki_graph_communities_returnsList` | community 列表 |
+| `test_wiki_read_pageNotFound_raisesNotFound` | 错误契约一致（raise DomainError，不返 success JSON） |
+| `test_wiki_preview_classify_pageNotFound_raisesNotFound` | 同上 |
+| `test_wiki_preview_classify_noActiveModel_raisesNotFound` | 无 active LlmConfig 报错 |
+| `test_wiki_preview_community_topic_notFound_raisesNotFound` | community 不存在报错 |
+| `test_wiki_update_community_topic_notFound_raisesNotFound` | update 路径同契约 |
+| `test_wiki_update_dimension_writesAndCommits` | 真持久化（verify_session 重读） |
+| `test_wiki_update_community_topic_writesAndCommits` | 同上 |
+| `test_all_ten_tools_registered` | 10 tools 集合回归保护 |
+
+回归：Phase 5.5 `test_wiki_gap_actions_api.py` 11/11 PASS（无破坏）。
+
+### 4.4 lifespan + startup 链路
 
 启动日志验证 schema drift、seed、agent binding cache、tool config registry、
 feature rule registry、business object registry、KPI cache、menu seed、
@@ -198,12 +223,16 @@ async with Client("http://qa-system.internal:8000/mcp") as client:
   —— MCP `wiki_status` 工具本身用于体检，可作为部署前 smoke test
 - **写工具受限**：所有写入都对应 Phase 5.5 预览流程（preview 工具不写库 →
   update 工具落库），Agent 不能绕过预览直接污染知识网络
+- **错误契约一致**：所有 tool 资源不存在 → 抛 DomainError（NotFoundError）→
+  FastMCP 转 `is_error=true` 的 ToolError 给客户端。**禁止**返回
+  `{"error": "..."}` + `is_error=False` 的混淆 JSON
 - **响应截断**：单次响应 ≤ 50KB，避免 Agent 拖光上下文
 
 ## 7. 改动文件清单
 
 **新增**：
-- `backend/app/services/mcp_server.py` — 10 个工具 + 双 transport 入口（~600 行）
+- `backend/app/services/mcp_server.py` — 10 个工具 + 双 transport 入口（~660 行）
+- `backend/app/tests/integration/test_mcp_server.py` — 14 个集成测试
 - `Harness/changes/feat-mcp-server/summary.md` — 本文档
 
 **修改**：

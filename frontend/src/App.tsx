@@ -11,6 +11,12 @@ import OntologyPage from "./pages/OntologyPage";
 import DatasourcePage from "./pages/DatasourcePage";
 import LocalImportInitPage from "./pages/LocalImportInitPage";
 import DataQualityPage from "./pages/DataQualityPage";
+import DataQualityReportCreatePage from "./pages/DataQualityReportCreatePage";
+import DataQualityReportDetailPage from "./pages/DataQualityReportDetailPage";
+import DataQualityReportComparePage from "./pages/DataQualityReportComparePage";
+import DataQualityReportPublicSharePage from "./pages/DataQualityReportPublicSharePage";
+import DataQualityRuleBatchCreatePage from "./pages/DataQualityRuleBatchCreatePage";
+import { DataQualityRuleParamsPage } from "./pages/DataQualityRuleParamsPage";
 import KpiCatalogPage from "./pages/KpiCatalogPage";
 import FeatureCatalogPage from "./pages/FeatureCatalogPage";
 import LineagePage from "./pages/LineagePage";
@@ -23,7 +29,6 @@ import Supplier360Page from "./pages/Supplier360Page";
 import SupplierRiskPage from "./pages/SupplierRiskPage";
 import AgentRegistryPage from "./pages/AgentRegistryPage";
 import AgentRuntimePage from "./pages/AgentRuntimePage";
-import DataQualityRuleGeneratePage from "./pages/DataQualityRuleGeneratePage";
 import AdminAuditPage from "./pages/AdminAuditPage";
 import AdminToolsPage from "./pages/AdminToolsPage";
 import AdminFeatureRulesPage from "./pages/AdminFeatureRulesPage";
@@ -63,7 +68,16 @@ export default function App() {
         <Route path="datasource" element={<DatasourcePage />} />
         <Route path="local-import" element={<LocalImportInitPage />} />
         <Route path="data-quality" element={<DataQualityPage />} />
-        <Route path="data-quality/generate" element={<DataQualityRuleGeneratePage />} />
+        {/* 旧的独立路由重定向到 tab 参数（页面已下沉为 DataQualityPage 的 4 个 tab）。
+            深链路由（reports/new / compare / share / :id）保留，从 tab 内导航进入。 */}
+        <Route path="data-quality/generate" element={<Navigate to="/data-quality?tab=generate" replace />} />
+        <Route path="data-quality/rules/batch-create" element={<DataQualityRuleBatchCreatePage />} />
+        <Route path="data-quality/rule-params" element={<DataQualityRuleParamsPage />} />
+        <Route path="data-quality/reports" element={<Navigate to="/data-quality?tab=reports" replace />} />
+        <Route path="data-quality/reports/new" element={<DataQualityReportCreatePage />} />
+        <Route path="data-quality/reports/compare" element={<DataQualityReportComparePage />} />
+        <Route path="data-quality/reports/share/:token" element={<DataQualityReportPublicSharePage />} />
+        <Route path="data-quality/reports/:id" element={<DataQualityReportDetailPage />} />
         <Route path="lineage" element={<LineagePage />} />
         <Route path="entity-mapping" element={<EntityMappingPage />} />
         <Route path="kpi-catalog" element={<KpiCatalogPage />} />

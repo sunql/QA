@@ -37,6 +37,7 @@ from app.api.v1 import (
     kpi_catalog,
     local_import,
     menu_config,
+    messages,
     model_config,
     ontology,
     organizations,
@@ -185,6 +186,9 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     )
     testApp.include_router(
         menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]
+    )
+    testApp.include_router(
+        messages.router, prefix="/api/v1/messages", tags=["messages"]
     )
     testApp.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
     testApp.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])

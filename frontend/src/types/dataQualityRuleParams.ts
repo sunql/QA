@@ -20,6 +20,9 @@ export interface RuleParamsReadDto {
   ruleExpression: string | null;
   ruleParams: AnyRuleParams | null;
   configMode: "structured" | "custom";
+  /** 与 data-quality 规则 tab 对齐的治理列（2026-09-15） */
+  isEnabled: boolean;
+  owner: string | null;
 }
 
 export interface RuleParamsCreateDto {

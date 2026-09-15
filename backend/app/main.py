@@ -258,6 +258,7 @@ def createApp() -> FastAPI:
         kpi_catalog,
         local_import,
         menu_config,
+        messages,
         model_config,
         ontology,
         organizations,
@@ -348,6 +349,9 @@ def createApp() -> FastAPI:
     app.include_router(organizations.router, tags=["organizations"])
     app.include_router(
         menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]
+    )
+    app.include_router(
+        messages.router, prefix="/api/v1/messages", tags=["messages"]
     )
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(

@@ -181,6 +181,12 @@ class DataQualityRuleParamsUpdate(_Base):
         return self
 
 
+class DqRuleNextCodeRead(_Base):
+    """DQ-Rule-{YYYYMMDD}-{10位流水} 建议编码响应（只读预览，不锁定）。"""
+    code: str
+    seq: int
+
+
 class DataQualityRuleParamsRead(_Base):
     """结构化模式 read DTO；config_mode 由 rule_params 是否存在派生。"""
     id: int
@@ -195,5 +201,8 @@ class DataQualityRuleParamsRead(_Base):
     rule_expression: str | None
     rule_params: dict | None
     config_mode: Literal["structured", "custom"]
+    # 与 data-quality 规则 tab 对齐的治理列（2026-09-15）
+    is_enabled: bool = True
+    owner: str | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None

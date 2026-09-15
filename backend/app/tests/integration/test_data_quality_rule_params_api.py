@@ -42,6 +42,58 @@ async def _createTestDatasource(client, **overrides) -> int:
 
 
 @pytest.mark.integration
+class TestNextCode:
+    """GET /dq-rule-params/rules/next-code — DQ-Rule-{YYYYMMDD}-{10位流水} 建议编码。
+
+    只读预览，不锁定；createRule 按 uq_data_quality_rule_code 兜底并发冲突。
+    注意路由顺序：/next-code 必须注册在 /{rule_id} 之前。
+    """
+
+    async def test_empty_returns_seq1(self, client) -> None:
+        resp = await client.get("/api/v1/dq-rule-params/rules/next-code")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["seq"] == 1
+        import re
+        assert re.fullmatch(r"DQ-Rule-\d{8}-\d{10}", body["code"]), body["code"]
+
+    async def test_seq_increments_after_create(self, client) -> None:
+        ds_id = await _createTestDatasource(client)
+        first = (await client.get("/api/v1/dq-rule-params/rules/next-code")).json()
+        payload = {
+            "ruleCode": first["code"],
+            "ruleName": "next code seq",
+            "ruleType": "UNIQUENESS",
+            "targetTable": "SUPPLIER",
+            "targetColumn": "SUPPLIER_CODE",
+            "threshold": "100",
+            "severity": "HIGH",
+            "datasourceId": ds_id,
+            "ruleParams": {"kind": "unique"},
+        }
+        create_resp = await client.post("/api/v1/dq-rule-params/rules", json=payload)
+        assert create_resp.status_code == 201, create_resp.text
+
+        second = (await client.get("/api/v1/dq-rule-params/rules/next-code")).json()
+        assert second["seq"] == first["seq"] + 1
+        assert second["code"] != first["code"]
+        assert second["code"].startswith(first["code"][: len(first["code"]) - 10])
+
+    async def test_date_param_honored(self, client) -> None:
+        resp = await client.get(
+            "/api/v1/dq-rule-params/rules/next-code", params={"date": "20260102"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["code"].startswith("DQ-Rule-20260102-")
+
+    async def test_not_shadowed_by_rule_id_route(self, client) -> None:
+        """/next-code 不能被 /{rule_id} 吞掉（路由顺序回归）。"""
+        resp = await client.get("/api/v1/dq-rule-params/rules/next-code")
+        assert resp.status_code == 200
+        assert resp.json()["code"].startswith("DQ-Rule-")
+
+
+@pytest.mark.integration
 class TestCreateStructured:
     """结构化模式 create：params → rule_expression 编译。"""
 
@@ -200,6 +252,10 @@ class TestListAndGet:
         assert list_resp.status_code == 200
         rules = list_resp.json()
         assert any(r["id"] == rule_id for r in rules)
+        # 与 data-quality 规则 tab 对齐的治理列（2026-09-15）
+        listed = next(r for r in rules if r["id"] == rule_id)
+        assert listed["isEnabled"] is True
+        assert listed["owner"] is None
 
         get_resp = await client.get(
             f"/api/v1/dq-rule-params/rules/{rule_id}"
@@ -207,6 +263,8 @@ class TestListAndGet:
         assert get_resp.status_code == 200
         assert get_resp.json()["id"] == rule_id
         assert get_resp.json()["ruleCode"] == "DQ_ROUNDTRIP"
+        assert get_resp.json()["isEnabled"] is True
+        assert get_resp.json()["owner"] is None
 
     async def test_get_404(self, client) -> None:
         resp = await client.get("/api/v1/dq-rule-params/rules/999999")

@@ -14,6 +14,7 @@ def _register() -> None:
     """懒注册各子路由，避免循环导入。"""
     from app.api.v1.documents import router as documentsRouter
     from app.api.v1.menu_config import router as menuConfigRouter
+    from app.api.v1.messages import router as messagesRouter
     from app.api.v1.model_config import router as modelConfigRouter
     from app.api.v1.ontology import router as ontologyRouter
     from app.api.v1.session import router as sessionRouter
@@ -22,6 +23,7 @@ def _register() -> None:
     router.include_router(sessionRouter, prefix="/sessions", tags=["sessions"])
     router.include_router(ontologyRouter, prefix="/ontology", tags=["ontology"])
     router.include_router(documentsRouter, prefix="/documents", tags=["documents"])
+    router.include_router(messagesRouter, prefix="/messages", tags=["messages"])
     router.include_router(
         menuConfigRouter, prefix="/menu-config", tags=["menu-config"]
     )

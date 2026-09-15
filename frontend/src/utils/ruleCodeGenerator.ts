@@ -64,6 +64,16 @@ export const RULE_TYPE_CN: Record<string, string> = {
   TIMELINESS: "时效性",
 };
 
+/** 规则名英文映射（DQ 结构化弹窗自动命名用，不随 UI 语言切换） */
+export const RULE_TYPE_EN: Record<string, string> = {
+  COMPLETENESS: "Completeness",
+  VALIDITY: "Validity",
+  UNIQUENESS: "Uniqueness",
+  CONSISTENCY: "Consistency",
+  REFERENTIAL: "Referential",
+  TIMELINESS: "Timeliness",
+};
+
 export function buildRuleName(args: {
   className: string;
   columnName: string;

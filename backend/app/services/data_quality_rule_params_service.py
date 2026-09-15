@@ -33,6 +33,8 @@ def _toRead(rule: DataQualityRule) -> DataQualityRuleParamsRead:
         rule_expression=rule.rule_expression,
         rule_params=rule.rule_params,
         config_mode="structured" if rule.rule_params else "custom",
+        is_enabled=rule.is_enabled,
+        owner=rule.owner,
     )
 
 
@@ -47,6 +49,30 @@ class DataQualityRuleParamsService:
             stmt = stmt.where(DataQualityRule.datasource_id == datasource_id)
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_toRead(r) for r in rows]
+
+    async def nextCode(self, *, date_yyyymmdd: str | None = None) -> dict:
+        """返回规则编码建议：`DQ-Rule-{YYYYMMDD}-{10位流水}`。
+
+        - 同日 MAX(seq)+1；空表返 1；date_yyyymmdd 不传默认今天（UTC）；
+        - 只读预览不锁定；create() 时按 UniqueConstraint("rule_code") 兜底并发冲突。
+        """
+        if not date_yyyymmdd:
+            from datetime import datetime
+            date_yyyymmdd = datetime.utcnow().strftime("%Y%m%d")
+        prefix = f"DQ-Rule-{date_yyyymmdd}-"
+        stmt = (
+            select(DataQualityRule.rule_code)
+            .where(DataQualityRule.rule_code.like(f"{prefix}%"))
+            .order_by(DataQualityRule.rule_code.desc())
+            .limit(1)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        next_seq = 1
+        if row:
+            tail = row[len(prefix):]
+            if tail.isdigit():
+                next_seq = int(tail) + 1
+        return {"code": f"{prefix}{str(next_seq).zfill(10)}", "seq": next_seq}
 
     async def get(self, rule_id: int) -> DataQualityRuleParamsRead:
         rule = await self._session.get(DataQualityRule, rule_id)

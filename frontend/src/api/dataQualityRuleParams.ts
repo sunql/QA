@@ -38,3 +38,16 @@ export async function updateRule(
 export async function deleteRule(id: number): Promise<void> {
   await httpClient.delete(`${BASE}/${id}`);
 }
+
+export interface DqNextCodeResponse {
+  code: string;
+  seq: number;
+}
+
+/** 建议编码（只读预览，不锁定）；createRule 时按唯一约束兜底并发冲突。 */
+export async function fetchNextRuleCode(date?: string): Promise<DqNextCodeResponse> {
+  const res = await httpClient.get<DqNextCodeResponse>(`${BASE}/next-code`, {
+    params: date ? { date } : undefined,
+  });
+  return res.data;
+}

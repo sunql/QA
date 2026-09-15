@@ -1686,6 +1686,51 @@ class FeatureRuleThreshold(Base):
         )
 
 
+# =============================================================================
+# Phase 7c: In-App Messages (feat-dq-evaluation-report)
+# =============================================================================
+
+
+class InAppMessage(Base):
+    """站内消息收件箱。
+
+    一行 = 一条发给某 user_id 的通知。scheduler 跑出报告后给收件人发
+    「报告已生成」提醒；前端 MessageBell 30s 轮询 unread-count + 列表。
+
+    recipient 与 user.user_id 对齐；按 user 隔离读取，跨用户不可见。
+    created_at 客户端默认 UTC now()（service 层显式传）；read_at 非空 = 已读。
+    """
+
+    __tablename__ = "in_app_message"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    recipient: Mapped[str] = mapped_column(String(50), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    link_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False,
+    )
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+    __table_args__ = (
+        Index("ix_in_app_message_recipient", "recipient"),
+        Index(
+            "ix_in_app_message_unread",
+            "recipient", "read_at",
+            postgresql_where=sa_text("read_at IS NULL"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<InAppMessage id={self.id} recipient={self.recipient!r} "
+            f"title={self.title!r} read={self.read_at is not None}>"
+        )
+
+
 # Re-export Wiki 覆盖度表（0059 = M7 机制 6：class→域映射 + 覆盖度矩阵）。
 # 与 wiki_learning_models 分文件同理由：覆盖度是**派生快照**，生命周期与
 # 知识本体/管线表都不同（可整体重算、可清空重建）。

@@ -66,7 +66,9 @@ export function RuleParamsForm({ ruleType, columns, value, onChange }: Props) {
   }
 
   return (
-    <Form layout="vertical">
+    // 注意：本组件通常嵌在外层 antd Form 的 Form.Item 里，不能再包一层 <Form>（form 嵌套告警）。
+    // Form.Item 在无 name 时只做布局，脱离 Form 上下文可正常渲染。
+    <div>
       {kindOptions.length > 1 && (
         <Form.Item label={t("dqRuleParams.fields.kind")}>
           <Select
@@ -186,6 +188,6 @@ export function RuleParamsForm({ ruleType, columns, value, onChange }: Props) {
           </Form.Item>
         </>
       )}
-    </Form>
+    </div>
   );
 }

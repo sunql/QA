@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.schemas_dq_rule_params import (
     DataQualityRuleParamsCreate, DataQualityRuleParamsRead,
-    DataQualityRuleParamsUpdate,
+    DataQualityRuleParamsUpdate, DqRuleNextCodeRead,
 )
 from app.infrastructure.database import getDb
 from app.services.data_quality_rule_params_service import (
@@ -26,6 +26,17 @@ async def listRules(
     svc: DataQualityRuleParamsService = Depends(_service),
 ) -> list[DataQualityRuleParamsRead]:
     return await svc.list(datasource_id=datasource_id)
+
+
+# 注意：必须注册在 /{rule_id} 之前。新建规则弹窗用：自动生成 DQ-Rule-{date}-{10位流水} 编码。
+@router.get("/next-code", response_model=DqRuleNextCodeRead)
+async def nextCode(
+    date: str | None = Query(default=None, max_length=8),
+    svc: DataQualityRuleParamsService = Depends(_service),
+) -> DqRuleNextCodeRead:
+    """返回规则编码建议：`DQ-Rule-{YYYYMMDD}-{10位流水}`（只读预览，不锁定）。"""
+    result = await svc.nextCode(date_yyyymmdd=date)
+    return DqRuleNextCodeRead(code=result["code"], seq=result["seq"])
 
 
 @router.get("/{rule_id}", response_model=DataQualityRuleParamsRead)

@@ -73,6 +73,9 @@ class _RegexParams(_Base):
     @field_validator("pattern")
     @classmethod
     def _validatePattern(cls, v: str) -> str:
+        for ch in v:
+            if ch in ("'", "\\") or ord(ch) < 0x20:
+                raise ValueError(f"正则表达式含非法字符: {v!r}")
         try:
             re_compile(v)
         except Exception as exc:  # noqa: BLE001

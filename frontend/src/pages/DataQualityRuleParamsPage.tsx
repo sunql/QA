@@ -14,26 +14,24 @@ import {
   Tag,
 } from "antd";
 import type { RuleParamsReadDto } from "../types/dataQualityRuleParams";
-import {
-  listRules,
-  createRule,
-} from "../api/dataQualityRuleParams";
+import { listRules, createRule } from "../api/dataQualityRuleParams";
 import { RuleParamsForm } from "../components/dq/RuleParamsForm";
 import { summarizeRuleParams } from "../utils/ruleParamsSummary";
 
-export function DataQualityRuleParamsPage() {
-  const { t, i18n } = useTranslation();
-  const [rows, setRows] = useState<RuleParamsReadDto[]>([]);
-  const [open, setOpen] = useState(false);
+interface CreateRuleModalProps {
+  open: boolean;
+  onCancel: () => void;
+  onCreated: () => void;
+}
+
+/**
+ * 把 Form.useForm 放在子组件里，避免页面级 useForm 早于 Form 元素挂载
+ * 触发的 "Instance created by useForm is not connected to any Form element" 警告。
+ */
+function CreateRuleModal({ open, onCancel, onCreated }: CreateRuleModalProps) {
+  const { t } = useTranslation();
   const [form] = Form.useForm();
   const [mode, setMode] = useState<"structured" | "custom">("structured");
-
-  async function refresh() {
-    const data = await listRules();
-    setRows(data);
-  }
-
-  useEffect(() => { void refresh(); }, []);
 
   async function onCreate() {
     const v = await form.validateFields();
@@ -49,15 +47,111 @@ export function DataQualityRuleParamsPage() {
       ruleParams: mode === "structured" ? (v.ruleParams ?? null) : null,
       ruleExpression: mode === "custom" ? (v.ruleExpression ?? null) : null,
     });
-    setOpen(false);
     form.resetFields();
-    await refresh();
+    onCreated();
   }
+
+  return (
+    <Modal
+      open={open}
+      onCancel={onCancel}
+      onOk={onCreate}
+      title={t("dqRuleParams.create")}
+      width={720}
+      destroyOnClose
+    >
+      <Space style={{ marginBottom: 16 }}>
+        <span>{t("dqRuleParams.mode.structured")}</span>
+        <Switch
+          checked={mode === "custom"}
+          onChange={(c) => setMode(c ? "custom" : "structured")}
+        />
+        <span>{t("dqRuleParams.mode.custom")}</span>
+      </Space>
+      <Form form={form} layout="vertical">
+        <Form.Item name="ruleCode" label="Code" rules={[{ required: true }]}>
+          <Input />
+        </Form.Item>
+        <Form.Item name="ruleName" label="Name" rules={[{ required: true }]}>
+          <Input />
+        </Form.Item>
+        <Form.Item name="ruleType" label="Type" rules={[{ required: true }]}>
+          <Select
+            options={[
+              "COMPLETENESS",
+              "VALIDITY",
+              "UNIQUENESS",
+              "REFERENTIAL",
+              "CONSISTENCY",
+            ].map((v) => ({ value: v, label: v }))}
+          />
+        </Form.Item>
+        <Form.Item name="targetTable" label="Target Table" rules={[{ required: true }]}>
+          <Input />
+        </Form.Item>
+        <Form.Item name="targetColumn" label="Target Column">
+          <Input />
+        </Form.Item>
+        <Form.Item name="datasourceId" label="Datasource ID" rules={[{ required: true }]}>
+          <InputNumber />
+        </Form.Item>
+        <Form.Item name="threshold" label="Threshold" rules={[{ required: true }]}>
+          <InputNumber min={0} max={100} step={0.01} />
+        </Form.Item>
+        <Form.Item name="severity" label="Severity" rules={[{ required: true }]}>
+          <Select
+            options={["LOW", "MEDIUM", "HIGH"].map((v) => ({ value: v, label: v }))}
+          />
+        </Form.Item>
+        {mode === "structured" ? (
+          <Form.Item name="ruleParams" label="Rule Params">
+            <RuleParamsForm
+              ruleType={form.getFieldValue("ruleType") ?? "VALIDITY"}
+              columns={[
+                { name: "ORDER_QTY" },
+                { name: "RECEIVED_QTY" },
+                { name: "PO_LINE_KEY" },
+              ]}
+              value={null}
+              onChange={(v) => form.setFieldsValue({ ruleParams: v })}
+            />
+          </Form.Item>
+        ) : (
+          <Form.Item
+            name="ruleExpression"
+            label="Rule Expression"
+            rules={[{ required: true }]}
+          >
+            <Input.TextArea rows={3} />
+          </Form.Item>
+        )}
+      </Form>
+    </Modal>
+  );
+}
+
+export function DataQualityRuleParamsPage() {
+  const { t, i18n } = useTranslation();
+  const [rows, setRows] = useState<RuleParamsReadDto[]>([]);
+  const [open, setOpen] = useState(false);
+
+  async function refresh() {
+    const data = await listRules();
+    setRows(data);
+  }
+
+  useEffect(() => {
+    void refresh();
+  }, []);
 
   return (
     <div style={{ padding: 24 }}>
       <h2>{t("dqRuleParams.title")}</h2>
-      <Button type="primary" onClick={() => setOpen(true)} style={{ marginBottom: 16 }}>
+      <Button
+        type="primary"
+        onClick={() => setOpen(true)}
+        style={{ marginBottom: 16 }}
+      >
         {t("dqRuleParams.create")}
       </Button>
       <Table
@@ -88,76 +182,16 @@ export function DataQualityRuleParamsPage() {
           },
         ]}
       />
-      <Modal
-        open={open}
-        onCancel={() => { setOpen(false); form.resetFields(); }}
-        onOk={onCreate}
-        title={t("dqRuleParams.create")}
-        width={720}
-      >
-        <Space style={{ marginBottom: 16 }}>
-          <span>{t("dqRuleParams.mode.structured")}</span>
-          <Switch
-            checked={mode === "custom"}
-            onChange={(c) => setMode(c ? "custom" : "structured")}
-          />
-          <span>{t("dqRuleParams.mode.custom")}</span>
-        </Space>
-        <Form form={form} layout="vertical">
-          <Form.Item name="ruleCode" label="Code" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="ruleName" label="Name" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="ruleType" label="Type" rules={[{ required: true }]}>
-            <Select
-              options={[
-                "COMPLETENESS",
-                "VALIDITY",
-                "UNIQUENESS",
-                "REFERENTIAL",
-                "CONSISTENCY",
-              ].map((v) => ({ value: v, label: v }))}
-            />
-          </Form.Item>
-          <Form.Item name="targetTable" label="Target Table" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="targetColumn" label="Target Column">
-            <Input />
-          </Form.Item>
-          <Form.Item name="datasourceId" label="Datasource ID" rules={[{ required: true }]}>
-            <InputNumber />
-          </Form.Item>
-          <Form.Item name="threshold" label="Threshold" rules={[{ required: true }]}>
-            <InputNumber min={0} max={100} step={0.01} />
-          </Form.Item>
-          <Form.Item name="severity" label="Severity" rules={[{ required: true }]}>
-            <Select
-              options={["LOW", "MEDIUM", "HIGH"].map((v) => ({ value: v, label: v }))}
-            />
-          </Form.Item>
-          {mode === "structured" ? (
-            <Form.Item name="ruleParams" label="Rule Params">
-              <RuleParamsForm
-                ruleType={form.getFieldValue("ruleType") ?? "VALIDITY"}
-                columns={[
-                  { name: "ORDER_QTY" },
-                  { name: "RECEIVED_QTY" },
-                  { name: "PO_LINE_KEY" },
-                ]}
-                value={null}
-                onChange={(v) => form.setFieldsValue({ ruleParams: v })}
-              />
-            </Form.Item>
-          ) : (
-            <Form.Item name="ruleExpression" label="Rule Expression" rules={[{ required: true }]}>
-              <Input.TextArea rows={3} />
-            </Form.Item>
-          )}
-        </Form>
-      </Modal>
+      {open && (
+        <CreateRuleModal
+          open={open}
+          onCancel={() => setOpen(false)}
+          onCreated={() => {
+            setOpen(false);
+            void refresh();
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -25,6 +25,7 @@ def _quote(rule: DataQualityRule, name: str) -> str:
 
     quote_identifier 对 adapter=None 走 PG 双引号默认；Task 4 起按需接收真实
     adapter 做方言感知引号（VALIDITY 等跨库 kind）。
+    rule 参数为 Task 4 方言感知留位，当前未使用。
     """
     validate_identifier(name, role="column")
     return quote_identifier(None, name)
@@ -57,6 +58,7 @@ def compileRuleParams(rule: DataQualityRule, params: dict[str, Any]) -> str:
         raise ValueError(
             f"rule_type={ruleType.value} 不支持 kind={validated.kind}（结构化参数）"
         )
+    # params 为已验证的原始 dict；Task 4 起各 kind 编译函数需访问 typed 字段时改用 validated
     return fn(rule, params)
 
 

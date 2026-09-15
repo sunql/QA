@@ -76,6 +76,13 @@ class TestDispatcher:
         with pytest.raises(ValueError):
             compileRuleParams(rule, {"kind": "bogus"})
 
+    def test_valid_kind_wrong_rule_type_raises_value_error(self):
+        # unique 是合法 kind（过 RuleParams 校验），但 COMPLETENESS 分发表里没有，
+        # 必须命中 dispatcher 自己的 raise ValueError 分支而非 pydantic ValidationError。
+        rule = _rule(RuleType.COMPLETENESS, "PO_LINE_KEY")
+        with pytest.raises(ValueError):
+            compileRuleParams(rule, {"kind": "unique"})
+
     def test_missing_kind_raises(self):
         rule = _rule(RuleType.COMPLETENESS, "PO_LINE_KEY")
         with pytest.raises(ValueError):

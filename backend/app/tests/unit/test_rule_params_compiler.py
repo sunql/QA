@@ -7,9 +7,14 @@ import pytest
 from app.domain.enums import RuleType
 from app.domain.exceptions import ValidationError
 from app.domain.models import DataQualityRule
+from pydantic import ValidationError as PydanticValidationError
 from app.services.data_quality_evaluators._common import validate_expression
 from app.services.data_quality_evaluators.rule_params_compiler import (
+    _compileCompare,
+    _compileInSet,
     _compileNotNull,
+    _compileRange,
+    _compileRegex,
     _compileUnique,
     compileRuleParams,
 )
@@ -87,3 +92,87 @@ class TestDispatcher:
         rule = _rule(RuleType.COMPLETENESS, "PO_LINE_KEY")
         with pytest.raises(ValueError):
             compileRuleParams(rule, {})
+
+
+class TestCompileRange:
+    def test_min_max(self):
+        rule = _rule(RuleType.VALIDITY, "ORDER_QTY")
+        assert _compileRange(rule, {"min": 0, "max": 100}) == '"ORDER_QTY" BETWEEN 0 AND 100'
+
+    def test_min_only(self):
+        rule = _rule(RuleType.VALIDITY, "ORDER_QTY")
+        assert _compileRange(rule, {"min": 0}) == '"ORDER_QTY" >= 0'
+
+    def test_max_only(self):
+        rule = _rule(RuleType.VALIDITY, "ORDER_QTY")
+        assert _compileRange(rule, {"max": 100}) == '"ORDER_QTY" <= 100'
+
+    def test_passes_whitelist(self):
+        rule = _rule(RuleType.VALIDITY, "ORDER_QTY")
+        validate_expression(_compileRange(rule, {"min": 0, "max": 100}))
+
+    def test_missing_column_raises(self):
+        rule = _rule(RuleType.VALIDITY, "")
+        rule.target_column = None
+        with pytest.raises(ValueError):
+            _compileRange(rule, {"min": 0})
+
+
+class TestCompileInSet:
+    def test_basic(self):
+        rule = _rule(RuleType.VALIDITY, "STATUS")
+        out = _compileInSet(rule, {"values": ["A", "B"]})
+        assert out == '"STATUS" IN (\'A\',\'B\')'
+
+    def test_passes_whitelist(self):
+        rule = _rule(RuleType.VALIDITY, "STATUS")
+        validate_expression(_compileInSet(rule, {"values": ["A"]}))
+
+    def test_empty_values_raises(self):
+        rule = _rule(RuleType.VALIDITY, "STATUS")
+        with pytest.raises(PydanticValidationError):
+            _compileInSet(rule, {"values": []})
+
+
+class TestCompileRegex:
+    def test_basic(self):
+        rule = _rule(RuleType.VALIDITY, "ORDER_NO")
+        out = _compileRegex(rule, {"pattern": "^[A-Z0-9]+$"})
+        assert out == "\"ORDER_NO\" ~ '^[A-Z0-9]+$'"
+
+    def test_passes_whitelist(self):
+        rule = _rule(RuleType.VALIDITY, "ORDER_NO")
+        validate_expression(_compileRegex(rule, {"pattern": "^[0-9]+$"}))
+
+    def test_invalid_pattern_raises(self):
+        rule = _rule(RuleType.VALIDITY, "ORDER_NO")
+        with pytest.raises(PydanticValidationError):
+            _compileRegex(rule, {"pattern": "(["})
+
+
+class TestCompileCompare:
+    def test_gt(self):
+        rule = _rule(RuleType.VALIDITY, "PRICE")
+        assert _compileCompare(rule, {"op": ">", "value": 0}) == '"PRICE" > 0'
+
+    def test_ne(self):
+        rule = _rule(RuleType.VALIDITY, "FLAG")
+        assert _compileCompare(rule, {"op": "!=", "value": 0}) == '"FLAG" != 0'
+
+    def test_passes_whitelist(self):
+        rule = _rule(RuleType.VALIDITY, "PRICE")
+        validate_expression(_compileCompare(rule, {"op": ">", "value": 0}))
+
+    def test_illegal_op_raises(self):
+        rule = _rule(RuleType.VALIDITY, "PRICE")
+        with pytest.raises(PydanticValidationError):
+            _compileCompare(rule, {"op": "LIKE", "value": 0})
+
+
+class TestDispatcherValidity:
+    def test_validity_routes(self):
+        rule = _rule(RuleType.VALIDITY, "PRICE")
+        assert "BETWEEN" in compileRuleParams(rule, {"kind": "range", "min": 0, "max": 100})
+        assert "IN (" in compileRuleParams(rule, {"kind": "in_set", "values": ["A"]})
+        assert "~" in compileRuleParams(rule, {"kind": "regex", "pattern": "^x$"})
+        assert "> 0" in compileRuleParams(rule, {"kind": "compare", "op": ">", "value": 0})

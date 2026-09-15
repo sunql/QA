@@ -41,11 +41,63 @@ def _compileUnique(rule: DataQualityRule, params: dict) -> str:
     return f"UNIQUE({col})"
 
 
+def _requireColumn(rule: DataQualityRule) -> str:
+    """VALIDITY kinds 强依赖 target_column：非空校验后走 PG 双引号引用。"""
+    if not rule.target_column:
+        raise ValueError(f"rule_type={rule.rule_type} 需要 target_column")
+    return _quote(rule, rule.target_column)
+
+
+def _validateParams(kind: str, params: dict) -> Any:
+    """params 先过 RuleParams 校验；编译函数只用校验后模型的 typed 字段。
+
+    kind 由编译函数注入（调用方直传 params 时不一定带 kind，分发表已确保
+    (rule_type, kind) 匹配）；params 里的同名字段不覆盖编译函数的 kind。
+    """
+    return RuleParams.model_validate({**params, "kind": kind})
+
+
+def _compileRange(rule: DataQualityRule, params: dict) -> str:
+    p = _validateParams("range", params)
+    col = _requireColumn(rule)
+    lo, hi = p.min, p.max
+    if lo is not None and hi is not None:
+        return f"{col} BETWEEN {lo} AND {hi}"
+    if lo is not None:
+        return f"{col} >= {lo}"
+    return f"{col} <= {hi}"
+
+
+def _compileInSet(rule: DataQualityRule, params: dict) -> str:
+    p = _validateParams("in_set", params)
+    col = _requireColumn(rule)
+    quoted = ",".join(f"'{v}'" for v in p.values)
+    return f"{col} IN ({quoted})"
+
+
+def _compileRegex(rule: DataQualityRule, params: dict) -> str:
+    p = _validateParams("regex", params)
+    col = _requireColumn(rule)
+    return f"{col} ~ '{p.pattern}'"
+
+
+def _compileCompare(rule: DataQualityRule, params: dict) -> str:
+    p = _validateParams("compare", params)
+    col = _requireColumn(rule)
+    return f"{col} {p.op} {p.value}"
+
+
 def _dispatch() -> dict[RuleType, dict[str, Callable[[DataQualityRule, dict], str]]]:
-    """(rule_type, kind) -> 编译函数 路由表。Task 4-5 在此追加新 kind。"""
+    """(rule_type, kind) -> 编译函数 路由表。Task 5 在此追加 ref / cross_column。"""
     return {
         RuleType.COMPLETENESS: {"not_null": _compileNotNull},
         RuleType.UNIQUENESS: {"unique": _compileUnique},
+        RuleType.VALIDITY: {
+            "range": _compileRange,
+            "in_set": _compileInSet,
+            "regex": _compileRegex,
+            "compare": _compileCompare,
+        },
     }
 
 
@@ -58,7 +110,8 @@ def compileRuleParams(rule: DataQualityRule, params: dict[str, Any]) -> str:
         raise ValueError(
             f"rule_type={ruleType.value} 不支持 kind={validated.kind}（结构化参数）"
         )
-    # params 为已验证的原始 dict；Task 4 起各 kind 编译函数需访问 typed 字段时改用 validated
+    # 各编译函数内部以注入 kind 的方式再过一次 RuleParams 校验，拿 typed 字段；
+    # 两次校验成本可忽略（写路径调用，非评估期热路径）。
     return fn(rule, params)
 
 

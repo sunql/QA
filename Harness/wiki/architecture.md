@@ -53,3 +53,49 @@ NL2SQL 采用**4 层路由架构**（Phase 5）：L1 KPI 语义匹配 → L2 LLM
 ## 部署
 
 Docker Compose：PostgreSQL（元数据）+ Neo4j（本体图）+ Milvus（向量）+ MySQL（Demo 业务库）+ backend + frontend。详见 `docker/docker-compose.yml`。
+
+## Phase 9 增量：数据质量评估报告（异步化）
+
+**提交者**：Claude · **日期**：2026-09-15
+**关联变更**：[feat-dq-scores-multiselect](../changes/feat-dq-scores-multiselect/summary.md) · [feat-dq-evaluation-report](../changes/feat-dq-evaluation-report/summary.md) · [feat-dq-evaluation-report-progress](../changes/feat-dq-evaluation-report-progress/summary.md)
+
+### 新增组件
+
+| 组件 | 位置 | 职责 |
+|------|------|------|
+| 评估报告 service | `services/evaluation_report_service.py` | `createReport` 仅写 PENDING 行；`runSnapshotJob` 自管 session 跑 snapshot；`getProgress` 读 JSONB 进度 |
+| 评估报告 API | `api/v1/evaluation_report.py` | 5 个端点 + `GET /reports/{id}/progress`（必须注册在 `/{report_id}` 之前） |
+| BackgroundTasks | FastAPI 依赖 | `createEvaluationReport` 加 `background_tasks.add_task(runSnapshotJob, report.id)` |
+| 数据质量评分 service | `services/data_quality_score_service.py` | scope 字段：单 `datasource_id` + 多 `target_tables: list[str]` + 多 `rule_types: list[RuleType]`；空列表走全量 |
+
+### 状态机
+
+```
+DRAFT ──┐
+        │（创建向导提交）
+        ▼
+     PENDING ──── BackgroundTasks 立即拉起 ────┐
+        │                                    ▼
+        │                                RUNNING
+        │                                    │
+        │                            ┌───────┴───────┐
+        │                            ▼               ▼
+        │                       COMPLETED         FAILED
+        │
+        ▼（regenerate 重新生成）
+     PUBLISHED（业务可见终态）
+```
+
+### 关键设计点
+
+1. **进度 JSONB 列**：`evaluation_report.progress` 存 `{stage, completed, total, current_rule_id, current_rule_code, message, started_at, finished_at}`。每个进度更新独立 commit，不做 per-rule commit（避免 N 次 DB 写）。
+2. **session 自管**：`runSnapshotJob` 内部用 `app.infrastructure.database.getSessionFactory()` 拿新 session，**不**复用请求 session（请求结束后请求 session 会 close）。
+3. **catch-all 兜底**：snapshot 任何异常都写 `status=FAILED + progress.message`，绝不挂后台进程。
+4. **前端轮询**：detail 页 useEffect 监听 status，PENDING/RUNNING 时 `setInterval(1000)`；COMPLETED/FAILED 时拉一次完整 report 后停。
+5. **scope IN 组合**：空列表走 None 短路（避免 SQL `IN ()` 语法错）；AND 组合三条件；scope 命中 0 条规则 → 空响应、不写库。
+
+### 风险门禁（参照 开发流程规范 §真实数据验证）
+
+- 评估耗时受业务库 SQL 计划器影响大；snapshot 异步化后才能上 docker compose 冒烟。
+- `progress` JSONB 内层键不被 Pydantic alias_generator 改写，前端先按 snake_case 读（Phase 4 强类型化时切 camelCase）。
+- CheckConstraint 扩为 6 值（migration 0074）；降级路径已写明，alembic downgrade 即可回滚。

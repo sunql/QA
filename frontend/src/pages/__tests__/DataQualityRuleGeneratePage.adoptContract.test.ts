@@ -108,4 +108,90 @@ describe("LlmPanel adopt-and-persist UI feedback", () => {
     expect(zhSrc).toMatch(/alreadyAdopted:\s*["']此属性已采纳/);
     expect(enSrc).toMatch(/alreadyAdopted:\s*["']This property has already been adopted["']/);
   });
+
+  it("uses composite key (propertyId-kind) for items.map to avoid React duplicate key warning", () => {
+    // 回归：items.map() 用 key={item.propertyId} 时，LLM 给同一 property 输出多条
+    // 不同 kind 的合法建议（not_null + allowed_values）会撞 React "duplicate key" 警告。
+    // 后端已按 (propertyId, kind) 去重，但前端 key 仍必须复合，作为双保险。
+    expect(src).toMatch(/key=\{`\$\{item\.propertyId\}-\$\{item\.kind\}`\}/);
+  });
+
+  // -----------------------------------------------------------------------
+  // feat-ontology-property-constraints: 4 类 kind 派发契约
+  // （plan §改动 4 — handleApply 不再早返回非 allowed_values，按 kind 派发）
+  // -----------------------------------------------------------------------
+
+  it("removes the legacy `kind !== allowed_values` early-return so all 4 kinds are dispatched", () => {
+    // 回归：handleApply 早返条件 `kind !== "allowed_values" || !item.values`
+    // 让 not_null / range / pattern 三类建议被 silent skip。修复后 dispatch
+    // 由 buildApplyPayload 按 kind 派发，原早返条件不再存在。
+    // 注意：源码仍有 `kind === "allowed_values"` 用于渲染分支（line 382 tags 显示），
+    // 所以这里精确校验"handleApply 内"是否还存在 `kind !== "allowed_values"`。
+    const handleApplyMatch = src.match(/const\s+handleApply\s*=\s*async[\s\S]*?^\s*\};/m);
+    expect(handleApplyMatch, "handleApply function literal missing").not.toBeNull();
+    expect(handleApplyMatch![0]).not.toMatch(/kind\s*!==\s*["']allowed_values["']/);
+    // buildApplyPayload 必须在 handleApply 之前/同文件可见位置（不依赖 import）。
+    expect(src).toContain("buildApplyPayload");
+  });
+
+  it("routes not_null kind to applySuggestion with kind:'not_null' and no extra fields", () => {
+    // not_null 派发：payload = { kind: "not_null" }，不传 allowedValues/minValue/maxValue/regexPattern
+    expect(src).toMatch(/kind:\s*["']not_null["']/);
+    // 锚定到 case 结尾的下一个 case（range），避免跨 case 污染
+    const notNullBranch = src.match(
+      /case\s+["']not_null["'][\s\S]*?(?=case\s+["']range["'])/
+    );
+    expect(notNullBranch, "not_null switch case missing").not.toBeNull();
+    // not_null 不带其它约束字段
+    expect(notNullBranch![0]).not.toMatch(/allowedValues|minValue|maxValue|regexPattern/);
+  });
+
+  it("routes range kind to applySuggestion with kind:'range' + minValue + maxValue", () => {
+    // range 派发：payload = { kind: "range", minValue, maxValue }
+    expect(src).toMatch(/kind:\s*["']range["']/);
+    const rangeBranch = src.match(/case\s+["']range["'][\s\S]{0,300}/);
+    expect(rangeBranch, "range switch case missing").not.toBeNull();
+    expect(rangeBranch![0]).toMatch(/minValue/);
+    expect(rangeBranch![0]).toMatch(/maxValue/);
+    // range 必备字段缺失时返回 kind=null（不发送请求）
+    expect(rangeBranch![0]).toMatch(/kind:\s*null/);
+  });
+
+  it("routes pattern kind to applySuggestion with kind:'pattern' + regexPattern", () => {
+    // pattern 派发：payload = { kind: "pattern", regexPattern }
+    expect(src).toMatch(/kind:\s*["']pattern["']/);
+    const patternBranch = src.match(/case\s+["']pattern["'][\s\S]{0,300}/);
+    expect(patternBranch, "pattern switch case missing").not.toBeNull();
+    expect(patternBranch![0]).toMatch(/regexPattern/);
+    // regex_pattern 缺失时返回 kind=null（不发送请求）
+    expect(patternBranch![0]).toMatch(/kind:\s*null/);
+  });
+
+  it("api applySuggestion signature accepts discriminated kind payload (4 kinds)", () => {
+    // 对应 plan §改动 3.3: applySuggestion(propertyId, payload) 的 payload
+    // 是按 kind 派发的 discriminated object，不允许传 null/undefined kind。
+    const apiSrc = readFileSync(
+      join(process.cwd(), "src/api/dataQualityGenerate.ts"),
+      "utf-8"
+    );
+    // payload 字段名匹配 SuggestionKind 联合（至少出现 allowed_values / not_null / range / pattern 4 个）
+    expect(apiSrc).toMatch(/allowed_values/);
+    expect(apiSrc).toMatch(/not_null/);
+    expect(apiSrc).toMatch(/range/);
+    expect(apiSrc).toMatch(/pattern/);
+    // POST body 必须带 propertyId + kind + 命中的额外字段
+    expect(apiSrc).toMatch(/body\.kind/);
+    expect(apiSrc).toMatch(/body\.allowedValues/);
+    expect(apiSrc).toMatch(/body\.minValue/);
+    expect(apiSrc).toMatch(/body\.maxValue/);
+    expect(apiSrc).toMatch(/body\.regexPattern/);
+  });
+
+  it("buildApplyPayload warns via message.warning when LLM output is incomplete (kind=null)", () => {
+    // 派发 payload.kind === null 时必须有 message.warning 提示，不能 silent return
+    // （已有覆盖，但为新派发路径再校验一次：applyFailed 文案 vs adoptNotApplicable 文案）
+    expect(src).toMatch(/payload\.kind\s*===\s*null[\s\S]{0,200}message\.warning/);
+    expect(zhSrc).toMatch(/adoptNotApplicable:\s*["']/);
+    expect(enSrc).toMatch(/adoptNotApplicable:\s*["']/);
+  });
 });

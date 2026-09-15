@@ -411,4 +411,81 @@ describe("LineagePage 管理 Tab", () => {
     },
     TEST_TIMEOUT,
   );
+
+  it(
+    "管理 Tab 分页：showSizeChanger 已挂载，pageSizeOptions 候选全在",
+    async () => {
+      vi.mocked(lineageApi.listEdges).mockResolvedValue([edge({ id: 11 })]);
+      await switchToManageTab();
+
+      // 验证 .ant-pagination-options-size-changer 已挂载（即 showSizeChanger: true）
+      await waitFor(
+        () => {
+          expect(
+            document.querySelector(
+              ".ant-pagination-options-size-changer",
+            ),
+          ).toBeTruthy();
+        },
+        { timeout: FIND_TIMEOUT },
+      );
+      // 同时验证 antd 渲染出来的「共 N 条」summary（showTotal）
+      expect(document.querySelector(".ant-pagination-total-text")).toBeTruthy();
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "管理 Tab 分页：localStorage 记忆 pageSize 切到 50 后刷新仍是 50",
+    async () => {
+      // 预置 localStorage 记忆
+      window.localStorage.setItem("qa.lineage.manage.pageSize", "50");
+
+      vi.mocked(lineageApi.listEdges).mockResolvedValue([edge({ id: 22 })]);
+      await switchToManageTab();
+
+      // 验证 localStorage 值已被读到（pageSize 用 50 不是默认 20）
+      // 间接证据：原值 "50" 在 mount 时被读，且 useEffect 立刻写回（值不变），
+      // 因此 localStorage 仍是 "50"；默认值 20 路径下会是 "20"。
+      await waitFor(
+        () => {
+          expect(
+            window.localStorage.getItem("qa.lineage.manage.pageSize"),
+          ).toBe("50");
+        },
+        { timeout: FIND_TIMEOUT },
+      );
+      // 同时校验：showSizeChanger 渲染中（证明受控 pagination 配置生效）
+      expect(
+        document.querySelector(".ant-pagination-options-size-changer"),
+      ).toBeTruthy();
+
+      // 清理
+      window.localStorage.removeItem("qa.lineage.manage.pageSize");
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "管理 Tab 分页：非法 localStorage 值（不在候选里）回退到默认 20",
+    async () => {
+      window.localStorage.setItem("qa.lineage.manage.pageSize", "999");
+
+      vi.mocked(lineageApi.listEdges).mockResolvedValue([edge({ id: 33 })]);
+      await switchToManageTab();
+
+      // useEffect 把 20 写回去 → 非法值被覆写为默认值
+      await waitFor(
+        () => {
+          expect(
+            window.localStorage.getItem("qa.lineage.manage.pageSize"),
+          ).toBe("20");
+        },
+        { timeout: FIND_TIMEOUT },
+      );
+
+      window.localStorage.removeItem("qa.lineage.manage.pageSize");
+    },
+    TEST_TIMEOUT,
+  );
 });

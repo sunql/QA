@@ -78,7 +78,15 @@ function SuggestionTable({
       ),
     },
     { title: t("dataQualityGenerate.columns.ruleCode"), dataIndex: "ruleCode", key: "ruleCode", width: 220 },
-    { title: t("dataQualityGenerate.columns.ruleType"), dataIndex: "ruleType", key: "ruleType", width: 160 },
+    {
+      title: t("dataQualityGenerate.columns.ruleType"),
+      dataIndex: "ruleType",
+      key: "ruleType",
+      width: 160,
+      // 列表展示走中文文案（与 DataQualityPage 规则列表一致），
+      // value 仍为英文 enum，confirm 时按 enum 发往后端。
+      render: (rt: string) => t(`dataQuality.ruleTypeLabels.${rt}`),
+    },
     {
       title: t("dataQualityGenerate.columns.targetColumn"),
       dataIndex: "targetColumn",
@@ -110,9 +118,18 @@ function SuggestionTable({
           style={{ width: "100%" }}
           onChange={(val) => onSeverityChange(row.ruleCode, val)}
         >
-          <Select.Option value="HIGH">HIGH</Select.Option>
-          <Select.Option value="MEDIUM">MEDIUM</Select.Option>
-          <Select.Option value="LOW">LOW</Select.Option>
+          {/* 展示走 i18n 中文文案，value 保持英文 enum（HIGH/MEDIUM/LOW），
+              confirm 时按 enum 发往后端。INFO 不出现在向导可选项（生成规则
+              只取 HIGH/MEDIUM/LOW 三档）。 */}
+          <Select.Option value="HIGH">
+            {t("dataQuality.severityLabels.HIGH")}
+          </Select.Option>
+          <Select.Option value="MEDIUM">
+            {t("dataQuality.severityLabels.MEDIUM")}
+          </Select.Option>
+          <Select.Option value="LOW">
+            {t("dataQuality.severityLabels.LOW")}
+          </Select.Option>
         </Select>
       ),
     },
@@ -241,20 +258,22 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
   };
 
   const handleApply = async (item: PropertyConstraintSuggestion) => {
-    if (item.kind !== "allowed_values" || !item.values) {
-      // 不能静默 return：用户点击后无任何反馈会以为按钮坏了。
-      // 仅 allowed_values 类型可自动沉淀到 ontology_property.allowed_values；
-      // not_null 等类型需业务方在本体管理页手动处理。
+    // 早返回检查 1：当前 suggestion 类型是否可自动沉淀（按 kind 派发）。
+    // 4 类 kind 全部走 applySuggestion；非值域约束不再走「请联系管理员」文案。
+    const payload = buildApplyPayload(item);
+    if (payload.kind === null) {
+      // LLM 输出残缺（缺 min/max 或 regex_pattern）→ 给 warning 但不报错。
       message.warning(t("dataQualityGenerate.messages.adoptNotApplicable"));
       return;
     }
+    // 早返回检查 2：已采纳项再点。
     if (adoptedIds.has(item.propertyId)) {
       // 用户对已采纳项再点：给 info 提示而非静默 return，避免「按钮没反应」的错觉。
       message.info(t("dataQualityGenerate.messages.alreadyAdopted"));
       return;
     }
     try {
-      await applySuggestion(item.propertyId, item.values);
+      await applySuggestion(item.propertyId, payload.payload);
       // 写入成功后立即把 propertyId 加入已采纳集合，
       // 让 button disabled + label 变为「已采纳」，并显示「已沉淀」提示。
       setAdoptedIds((prev) => {
@@ -269,6 +288,30 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
     }
   };
 
+  /**
+   * 把 PropertyConstraintSuggestion 按 kind 转成 applySuggestion payload。
+   * 返回 kind=null = LLM 输出残缺（缺关键字段），不发送请求。
+   */
+  function buildApplyPayload(item: PropertyConstraintSuggestion):
+    | { kind: "allowed_values"; payload: { kind: "allowed_values"; allowedValues: string[] } }
+    | { kind: "not_null"; payload: { kind: "not_null" } }
+    | { kind: "range"; payload: { kind: "range"; minValue: string; maxValue: string } }
+    | { kind: "pattern"; payload: { kind: "pattern"; regexPattern: string } }
+    | { kind: null } {
+    switch (item.kind) {
+      case "allowed_values":
+        return { kind: "allowed_values", payload: { kind: "allowed_values", allowedValues: item.values ?? [] } };
+      case "not_null":
+        return { kind: "not_null", payload: { kind: "not_null" } };
+      case "range":
+        if (!item.minValue || !item.maxValue) return { kind: null };
+        return { kind: "range", payload: { kind: "range", minValue: item.minValue, maxValue: item.maxValue } };
+      case "pattern":
+        if (!item.regexPattern) return { kind: null };
+        return { kind: "pattern", payload: { kind: "pattern", regexPattern: item.regexPattern } };
+    }
+  }
+
   const headerExtra = (
     <Select
       size="small"
@@ -277,7 +320,7 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
       onChange={(v: number) => handleModelChange(v)}
       placeholder={t("dataQualityGenerate.llmModelSelectPlaceholder")}
       disabled={models.length === 0}
-      dropdownMatchSelectWidth={false}
+      popupMatchSelectWidth={false}
       onClick={(e) => e.stopPropagation()}
       options={models.map((m) => ({
         value: m.id,
@@ -307,7 +350,12 @@ function LlmPanel({ classId, t, onApplied }: LlmPanelProps) {
                 const isAdopted = adoptedIds.has(item.propertyId);
                 return (
                   <div
-                    key={item.propertyId}
+                    // 复合 key：同一 property 可能产生多条不同 kind 的合法建议
+                  // （如 not_null + allowed_values），仅用 propertyId 会撞
+                  // React duplicate key 警告。propertyId-kind 保证唯一。
+                  // 后端 parsePropertyDescriptions 已按 (propertyId, kind) 去重
+                  // 抖动重复，但复合 key 是对未来 / 未覆盖 corner case 的双保险。
+                    key={`${item.propertyId}-${item.kind}`}
                     style={{
                       border: "1px solid #d9d9d9",
                       borderRadius: 4,
@@ -444,6 +492,32 @@ export default function DataQualityRuleGeneratePage() {
       return next;
     });
   }, []);
+
+  // 全选按钮：仅操作 status="NEW" 的建议（EXISTS 规则已落库，不能再确认，
+  // 勾上也没有意义；只对 NEW 操作能避免用户误以为能再次提交）。
+  // 状态机：所有 NEW 都已勾选 → 点击取消；否则 → 全选。
+  const newSuggestions = useMemo(
+    () => suggestions.filter((s) => s.status === "NEW"),
+    [suggestions],
+  );
+  const allNewSelected = useMemo(
+    () => newSuggestions.length > 0 && newSuggestions.every((s) => selectedIds.has(s.ruleCode)),
+    [newSuggestions, selectedIds],
+  );
+  const handleToggleAll = useCallback(() => {
+    setSelectedIds((prev) => {
+      if (allNewSelected) {
+        // 全取消：去掉所有 NEW（保留已存在的 EXISTS 勾选——本来就不该有，
+        // 这里双保险：selectedIds 仅来自 toggle 的合法 row）。
+        const next = new Set(prev);
+        for (const s of newSuggestions) next.delete(s.ruleCode);
+        return next;
+      }
+      const next = new Set(prev);
+      for (const s of newSuggestions) next.add(s.ruleCode);
+      return next;
+    });
+  }, [allNewSelected, newSuggestions]);
 
   const handleThresholdChange = useCallback((code: string, threshold: number) => {
     setSuggestions((prev) =>
@@ -586,8 +660,31 @@ export default function DataQualityRuleGeneratePage() {
               )}
 
               {/* Suggestion table */}
-              <div style={{ fontWeight: 500, marginBottom: 8 }}>
-                {t("dataQualityGenerate.suggestions")}（{suggestions.length}）
+              <div
+                style={{
+                  fontWeight: 500,
+                  marginBottom: 8,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                }}
+              >
+                <span>
+                  {t("dataQualityGenerate.suggestions")}（{suggestions.length}）
+                </span>
+                {/* 全选按钮：仅 NEW 可被确认；EXISTS 已落库，勾上无效。
+                    把按钮放在标题右侧，符合 antd 中「行操作列与表头平齐」惯例。 */}
+                {newSuggestions.length > 0 && (
+                  <Button
+                    size="small"
+                    data-testid="dq-rule-toggle-all"
+                    onClick={handleToggleAll}
+                  >
+                    {allNewSelected
+                      ? t("dataQualityGenerate.deselectAll")
+                      : t("dataQualityGenerate.selectAll")}
+                  </Button>
+                )}
               </div>
               <SuggestionTable
                 suggestions={suggestions}

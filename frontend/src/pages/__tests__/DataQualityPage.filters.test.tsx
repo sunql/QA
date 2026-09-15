@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { ConfigProvider } from "antd";
+import { App, ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { I18nextProvider } from "react-i18next";
 import { i18n } from "../../i18n";
@@ -61,13 +61,19 @@ const MOCK_OPTIONS = {
   ],
   targetTables: ["T_ORDER", "T_SUPPLIER", "PORDER"],
   severities: ["HIGH", "MEDIUM", "LOW", "INFO"],
+  classOptions: [
+    { id: 11, className: "Supplier" },
+    { id: 12, className: "Customer" },
+  ],
 };
 
 function renderPage() {
   return render(
     <I18nextProvider i18n={i18n}>
       <ConfigProvider locale={zhCN}>
-        <DataQualityPage />
+        <App>
+          <DataQualityPage />
+        </App>
       </ConfigProvider>
     </I18nextProvider>,
   );
@@ -192,13 +198,13 @@ describe("DataQualityPage — 5 字段筛选（feat-dq-rule-list-filters）", ()
     expect(initialCall.ruleType).toBeUndefined();
     expect(initialCall.enabled).toBeUndefined();
 
-    // 选规则类型 COMPLETENESS
+    // 选规则类型 COMPLETENESS（列表展示「完整性」，value 仍是英文 enum）
     const rtSelector = getSelect("filter-rule-type").querySelector(
       ".ant-select-selector",
     ) as HTMLElement;
     fireEvent.mouseDown(rtSelector);
     await user.click(
-      await screen.findByText("COMPLETENESS", {
+      await screen.findByText("完整性", {
         selector: ".ant-select-item-option-content",
       }),
     );
@@ -218,7 +224,7 @@ describe("DataQualityPage — 5 字段筛选（feat-dq-rule-list-filters）", ()
     ) as HTMLElement;
     fireEvent.mouseDown(rtSelector);
     await user.click(
-      await screen.findByText("COMPLETENESS", {
+      await screen.findByText("完整性", {
         selector: ".ant-select-item-option-content",
       }),
     );

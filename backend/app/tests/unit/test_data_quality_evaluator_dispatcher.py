@@ -159,3 +159,42 @@ async def test_evaluate_batch_mixed_pass_error(monkeypatch) -> None:
     statuses = {r.rule_id: r.status for r in resp.results}
     assert statuses[1] == "PASS"
     assert statuses[999] == "ERROR"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_fail_status_populates_message_with_reason(monkeypatch) -> None:
+    """feat-eval-fail-reason (2026-09-15)：rate < threshold → status=FAIL + 填 message。
+
+    message 必须含：实际通过率、阈值、总数、通过数。
+    PASS 时 message 仍为 None（保持旧契约）。
+    """
+    rule = _rule(rid=1, threshold="50.00")
+    session = _FakeSession(rules={1: rule}, dss={100: _ds()})
+    # total=10, passed=2 → rate=20% < threshold=50% → FAIL
+    monkeypatch.setattr(
+        "app.services.data_quality_evaluator.get_adapter",
+        lambda did, ds: _StubAdapter(rows=[{"total": 10, "passed": 2}]),
+    )
+    dispatcher = DataQualityEvaluatorDispatcher()
+    result = await dispatcher.evaluate(session, 1)
+
+    assert result.status == "FAIL"
+    assert result.message is not None
+    # 关键子串：实际通过率 / 阈值 / 总数 / 通过数
+    assert "20.00%" in result.message  # passRate
+    assert "50.00" in result.message  # threshold
+    assert "10" in result.message  # total
+    assert "2" in result.message  # passed
+
+    # 回归保护：rate >= threshold 时 message 仍为 None
+    rule_pass = _rule(rid=2, threshold="50.00")
+    session_pass = _FakeSession(
+        rules={2: rule_pass}, dss={100: _ds()}
+    )
+    monkeypatch.setattr(
+        "app.services.data_quality_evaluator.get_adapter",
+        lambda did, ds: _StubAdapter(rows=[{"total": 10, "passed": 9}]),
+    )
+    result_pass = await dispatcher.evaluate(session_pass, 2)
+    assert result_pass.status == "PASS"
+    assert result_pass.message is None  # PASS 时不填 message

@@ -151,10 +151,58 @@ def test_join_edge_yields_consistency():
     )
 
 
+def test_join_edge_with_multiple_target_dates_yields_distinct_codes():
+    """join 边多个 target_date_columns：每个目标日期产一条建议，rule_code 必须互不相同。
+
+    之前的实现 buildRuleCode 只哈希 (className, propertyName, ruleType)，
+    导致同一个 prop 在同一 ruleType 下多个 targetDate 共用同一 rule_code：
+      - 前端 React Table rowKey 冲突 → "Encountered two children with the same key"
+      - 落库侧 DB unique key 也会冲突，后写的会被前面 EXISTS 掉
+
+    期望：每条建议一个独立 rule_code，且 rule_expression 必须包含对应的 targetDate 列。
+    """
+    edge = JoinEdgeMeta(
+        target_table="PORDERQ",
+        source_columns=["PO_KEY"],
+        target_columns=["PO_KEY"],
+        target_date_columns=["RECEIPT_DATE", "PROMISE_DATE"],
+    )
+    sugg, _ = deriveSuggestions(
+        CTX, [_prop(property_name="po_date", source_column="PO_DATE",
+                    data_type="DATETIME", is_primary_key=False)],
+        [edge], SCHEMA)
+    c = [s for s in sugg if s.rule_type == RuleType.CONSISTENCY]
+    assert len(c) == 2
+    codes = [s.rule_code for s in c]
+    assert len(set(codes)) == 2, f"重复 rule_code：{codes}"
+    # 两列必须分别出现在对应建议的表达式里，避免退化成同一条规则换壳
+    exprs = "\n".join(s.rule_expression for s in c if s.rule_expression)
+    assert "RECEIPT_DATE" in exprs
+    assert "PROMISE_DATE" in exprs
+
+
 def test_missing_table_blocks_all():
     sugg, blocked = deriveSuggestions(CTX, [_prop()], [], None)
     assert sugg == []
     assert blocked[0].reason == "数据源 schema 未缓存"
+
+
+def test_schema_cached_but_table_not_found_distinct_message():
+    """schema 已缓存（SchemaIndex 非空），但 source_table 不在缓存表里：
+    旧实现一并归为「未缓存」，掩盖了「表名拼错 / owner 不匹配」的真因。
+    应改为「找不到对应的表 XXX」，让用户能定位是映射问题而不是 introspect 问题。
+    """
+    # 缓存里有别的表但没有 PORDER
+    otherIndex = SchemaIndex(tables={
+        "OTHER_T": {c.upper(): ColumnMeta(column_name=c, data_type="CHAR", nullable=True)
+                    for c in ["X"]},
+    })
+    sugg, blocked = deriveSuggestions(CTX, [_prop()], [], otherIndex)
+    assert sugg == []
+    assert blocked[0].reason == "找不到对应的表 PORDER", (
+        "schema 已缓存但表名不在缓存里时，应明确告知表名拼错/"
+        "owner 不匹配，而不是含糊地报「未缓存」让用户去重跑 introspect。"
+    )
 
 
 def test_missing_column_blocks_property():

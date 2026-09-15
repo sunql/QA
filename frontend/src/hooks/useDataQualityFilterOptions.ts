@@ -19,6 +19,7 @@ const EMPTY: RuleOptions = {
     datasourceIds: [],
     targetTables: [],
     severities: [],
+    classOptions: [],
 };
 
 export function useDataQualityFilterOptions(): {

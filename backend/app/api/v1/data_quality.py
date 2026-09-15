@@ -20,12 +20,13 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Body, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.enums import ScoreType
 from app.domain.schemas import (
+    ComputeScoresRequest,
     ComputeScoresResponse,
     DataQualityRuleCreate,
     DataQualityRuleRead,
@@ -34,6 +35,7 @@ from app.domain.schemas import (
     EvaluateBatchRequest,
     EvaluateBatchResponse,
     EvaluationResult,
+    NextRuleCodeRead,
     RuleOptionsRead,
 )
 from app.services.data_quality_evaluator import DataQualityEvaluatorDispatcher
@@ -63,6 +65,7 @@ def getDataQualityScoreService() -> DataQualityScoreService:
 async def listDataQualityRules(
     ruleType: str | None = Query(default=None, alias="ruleType"),
     targetTable: str | None = Query(default=None, alias="targetTable"),
+    targetTables: list[str] | None = Query(default=None, alias="targetTables"),
     enabledOnly: bool | None = Query(default=None, alias="enabledOnly"),
     ruleName: str | None = Query(default=None, alias="ruleName"),
     datasourceId: int | None = Query(default=None, alias="datasourceId"),
@@ -70,6 +73,7 @@ async def listDataQualityRules(
     enabled: Literal["all", "enabled", "disabled"] | None = Query(
         default=None, alias="enabled"
     ),
+    sourceClassId: int | None = Query(default=None, alias="sourceClassId"),
     session: AsyncSession = Depends(getDb),
     service: DataQualityRuleService = Depends(getDataQualityRuleService),
 ) -> list[DataQualityRuleRead]:
@@ -77,11 +81,13 @@ async def listDataQualityRules(
         session,
         ruleType=ruleType,
         targetTable=targetTable,
+        targetTables=targetTables,
         enabledOnly=enabledOnly,
         ruleName=ruleName,
         datasourceId=datasourceId,
         severity=severity,
         enabled=enabled,
+        sourceClassId=sourceClassId,
     )
     return [ruleToRead(r) for r in rules]
 
@@ -94,6 +100,26 @@ async def listRuleFilterOptions(
 ) -> RuleOptionsRead:
     """规则列表筛选下拉的可选值（feat-dq-rule-list-filters）。"""
     return await service.listOptions(session)
+
+
+# 注意：必须注册在 `/{ruleId}` 之前。批量新建向导用：选类后异步拿建议编码（feat-rule-batch-create）。
+@router.get("/next-code", response_model=NextRuleCodeRead)
+async def nextRuleCode(
+    className: str = Query(..., min_length=1, max_length=100, alias="className"),
+    date: str | None = Query(default=None, max_length=8, alias="date"),
+    session: AsyncSession = Depends(getDb),
+    service: DataQualityRuleService = Depends(getDataQualityRuleService),
+) -> NextRuleCodeRead:
+    """返回规则编码建议：`MU-DQ-{CLASS}-{YYYYMMDD}-{5位流水}`。
+
+    - 前端只用作预览（**不锁定**），createRule() 时按 UniqueConstraint 兜底并发冲突；
+    - date 不传默认今天 UTC；
+    - 类名清洗（保留 [A-Z0-9_]、截断 12）与前端 utils/ruleCodeGenerator 一致。
+    """
+    result = await service.nextRuleCode(
+        session, class_name=className, date_yyyymmdd=date
+    )
+    return NextRuleCodeRead(code=result["code"], seq=result["seq"])
 
 
 @router.get("/{ruleId}", response_model=DataQualityRuleRead)
@@ -169,14 +195,23 @@ async def evaluateBatchDataQualityRules(
 
 @scores_router.post("/compute", response_model=ComputeScoresResponse)
 async def computeDataQualityScores(
+    payload: ComputeScoresRequest = Body(default=ComputeScoresRequest()),
     user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
     service: DataQualityScoreService = Depends(getDataQualityScoreService),
 ) -> ComputeScoresResponse:
+    """触发评分计算。可选 scope 过滤（datasourceId / targetTable / ruleType）。
+
+    Body 缺省 = 全量计算（旧行为，向向后兼容）。
+    三条件 AND 组合；scope 命中 0 条规则时返回空响应、不写库、不写 GLOBAL。
+    """
     return await service.computeScores(
         session,
         actor=user.userId,
         actor_departments=user.departments,
+        datasource_id=payload.datasource_id,
+        target_tables=payload.target_tables,
+        rule_types=payload.rule_types,
     )
 
 

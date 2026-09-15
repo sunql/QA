@@ -23,6 +23,8 @@ import {
   message,
   Typography,
   Popover,
+  Switch,
+  InputNumber,
 } from "antd";
 import {
   ReloadOutlined,
@@ -48,6 +50,11 @@ const { TextArea } = Input;
 interface EditFormValues {
   description: string;
   allowedValues: string[];
+  // 约束字段（feat-ontology-property-constraints）：任一非空表示已设置约束。
+  isNotNull: boolean;
+  minValue: number | null;
+  maxValue: number | null;
+  regexPattern: string | null;
 }
 
 export default function OntologyPropertyAdminPage(): JSX.Element {
@@ -95,9 +102,20 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
 
   const openEdit = (rec: OntologyProperty) => {
     setEditing(rec);
+    // minValue/maxValue 是 String（兼容日期 / 数字）；前端用 InputNumber 时先尝试数字转换，
+    // 失败则置 null 让用户重填。regexPattern 直接字符串。
+    const toNum = (s: string | null | undefined): number | null => {
+      if (s === null || s === undefined || s === "") return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
     form.setFieldsValue({
-      description: "", // 后端 OntologyPropertyRead 当前不返回 description（不影响编辑：默认空，submit 时不修改）
+      description: "",
       allowedValues: rec.allowedValues ?? [],
+      isNotNull: rec.isNotNull ?? false,
+      minValue: toNum(rec.minValue),
+      maxValue: toNum(rec.maxValue),
+      regexPattern: rec.regexPattern ?? null,
     });
     setModalOpen(true);
   };
@@ -120,9 +138,18 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
     if (!editing) return;
     try {
       const values = await form.validateFields();
+      // 数值字段：null → 显式清空；数字 → 字符串存（后端是 VARCHAR(50)）
+      const numToStr = (n: number | null | undefined): string | null => {
+        if (n === null || n === undefined) return null;
+        return String(n);
+      };
       const payload: OntologyPropertyUpdate = {
         allowedValues: values.allowedValues ?? [],
         description: values.description || null,
+        isNotNull: values.isNotNull,
+        minValue: numToStr(values.minValue),
+        maxValue: numToStr(values.maxValue),
+        regexPattern: values.regexPattern || null,
       };
       await updateProperty(editing.id, payload);
       message.success(t("ontologyPropertyAdmin.messages.updated"));
@@ -261,6 +288,46 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
             <TextArea
               rows={3}
               placeholder={t("ontologyPropertyAdmin.form.descriptionPlaceholder")}
+            />
+          </Form.Item>
+          {/* 约束字段（feat-ontology-property-constraints）：
+              与 description + allowedValues 同级编辑；任一非空都视作已沉淀约束。 */}
+          <Form.Item
+            name="isNotNull"
+            label={t("ontologyPropertyAdmin.form.isNotNull")}
+            tooltip={t("ontologyPropertyAdmin.form.isNotNullHint")}
+            valuePropName="checked"
+          >
+            <Switch />
+          </Form.Item>
+          <Form.Item
+            name="minValue"
+            label={t("ontologyPropertyAdmin.form.minValue")}
+            tooltip={t("ontologyPropertyAdmin.form.minValueHint")}
+          >
+            <InputNumber
+              style={{ width: "100%" }}
+              placeholder={t("ontologyPropertyAdmin.form.minValuePlaceholder")}
+            />
+          </Form.Item>
+          <Form.Item
+            name="maxValue"
+            label={t("ontologyPropertyAdmin.form.maxValue")}
+            tooltip={t("ontologyPropertyAdmin.form.maxValueHint")}
+          >
+            <InputNumber
+              style={{ width: "100%" }}
+              placeholder={t("ontologyPropertyAdmin.form.maxValuePlaceholder")}
+            />
+          </Form.Item>
+          <Form.Item
+            name="regexPattern"
+            label={t("ontologyPropertyAdmin.form.regexPattern")}
+            tooltip={t("ontologyPropertyAdmin.form.regexPatternHint")}
+          >
+            <Input
+              allowClear
+              placeholder={t("ontologyPropertyAdmin.form.regexPatternPlaceholder")}
             />
           </Form.Item>
           <Form.Item

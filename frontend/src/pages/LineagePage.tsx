@@ -76,6 +76,11 @@ const REFRESH_FREQUENCIES: RefreshFrequency[] = [
 const REFRESH_OPTIONS: { label: string; value: RefreshFrequency }[] =
   REFRESH_FREQUENCIES.map((f) => ({ label: f, value: f }));
 
+// 管理 tab 分页 localStorage key（feat-lineage-pagination-bug，2026-09-15）
+const PAGE_SIZE_STORAGE_KEY = "qa.lineage.manage.pageSize";
+const DEFAULT_PAGE_SIZE = 20;
+const PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500];
+
 function isActiveColor(active: boolean): string {
   return active ? "green" : "default";
 }
@@ -179,6 +184,30 @@ function ManageTab() {
   const [editing, setEditing] = useState<LineageEdgeRead | null>(null);
   const [creating, setCreating] = useState(false);
   const [form] = Form.useForm<LineageEdgeCreate>();
+
+  // feat-lineage-pagination-bug (2026-09-15)：分页数量修复。
+  // 受控 pageSize + localStorage 记忆，刷新后保留。
+  const [pageSize, setPageSize] = useState<number>(() => {
+    if (typeof window === "undefined") return DEFAULT_PAGE_SIZE;
+    try {
+      const stored = window.localStorage.getItem(PAGE_SIZE_STORAGE_KEY);
+      if (stored) {
+        const n = parseInt(stored, 10);
+        if (PAGE_SIZE_OPTIONS.includes(n)) return n;
+      }
+    } catch {
+      // localStorage 不可用（隐私模式 / 异常），用默认值
+    }
+    return DEFAULT_PAGE_SIZE;
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(pageSize));
+    } catch {
+      // 写入失败不阻断主流程
+    }
+  }, [pageSize]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -402,7 +431,15 @@ function ManageTab() {
         loading={loading}
         columns={columns}
         dataSource={edges}
-        pagination={{ pageSize: 20 }}
+        pagination={{
+          pageSize,
+          pageSizeOptions: PAGE_SIZE_OPTIONS,
+          showSizeChanger: true,
+          showTotal: (total) => t("common.totalItems", { total }),
+          onChange: (_nextPage, nextSize) => {
+            setPageSize(nextSize);
+          },
+        }}
         scroll={{ x: 1500 }}
       />
 

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import {
   Table,
   Button,
@@ -10,7 +10,7 @@ import {
   Tag,
   Tooltip,
   Popconfirm,
-  message,
+  App,
 } from "antd";
 import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
@@ -74,6 +74,10 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<OntologyClass | null>(null);
   const [form] = Form.useForm<ClassFormValues>();
+  // 动态主题：App.useApp() 返回的 message 能跟随 ConfigProvider theme/消息样式，
+  // 替代从 antd 顶层 import 的静态 message（5.x 起会有"Static function can not
+  // consume context"的运行时警告）。
+  const { message } = App.useApp();
   // 版本管理（Phase 6）：版本切换弹窗
   const [versionsModalOpen, setVersionsModalOpen] = useState(false);
   const [versions, setVersions] = useState<OntologyClass[]>([]);
@@ -108,15 +112,21 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
     void load();
   }, [load]);
 
+  // 把「写入表单的值」缓存到 ref，写入时机放到 Modal.afterOpenChange(true) 里。
+  // 同步 setFieldsValue 在 Modal destroyOnHidden 重挂载时序里会触发 antd 警告
+  // "Instance created by useForm is not connected to any Form element"——
+  // jsdom 不复现，但真机会在 setTimeout 里抛 warn。
+  const pendingFormValues = useRef<Partial<ClassFormValues> | null>(null);
+
   const openCreate = () => {
     setEditing(null);
-    void form.setFieldsValue(EMPTY_CLASS_FORM);
+    pendingFormValues.current = EMPTY_CLASS_FORM;
     setModalOpen(true);
   };
 
   const openEdit = (record: OntologyClass) => {
     setEditing(record);
-    void form.setFieldsValue({
+    pendingFormValues.current = {
       className: record.className,
       classAlias: record.classAlias ?? "",
       description: record.description ?? "",
@@ -124,7 +134,7 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
       parentClassId: record.parentClassId ?? undefined,
       objectType: record.objectType ?? undefined,
       objectOwner: record.objectOwner ?? "",
-    });
+    };
     setModalOpen(true);
   };
 
@@ -330,6 +340,14 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
         onCancel={() => setModalOpen(false)}
         width={480}
         destroyOnHidden
+        afterOpenChange={(open) => {
+          // 弹窗完全打开后再写值——此时 Form 子组件已挂载，
+          // setFieldsValue 不会再触发 "useForm not connected" 警告。
+          if (open && pendingFormValues.current) {
+            void form.setFieldsValue(pendingFormValues.current);
+            pendingFormValues.current = null;
+          }
+        }}
       >
         <Form form={form} layout="vertical" initialValues={EMPTY_CLASS_FORM}>
           <Form.Item

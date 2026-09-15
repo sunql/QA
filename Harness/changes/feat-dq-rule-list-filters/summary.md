@@ -195,3 +195,4 @@ cd docker && docker compose -f docker-compose.yml build frontend && docker compo
 - 后置：可被 `feat-coverage-remediation` 跟踪（前端 functions 覆盖率仍受其他 feature 文件拖累，本次未引入新 0% funcs 文件）
 - 关联：`Harness/wiki/data-quality.md`（如未来存在）
 - 规则：`Harness/rules/开发流程规范.md` §10 阶段；TDD 强制 RED → GREEN → IMPROVE
+- **后续**：`feat-dq-multi-select-batch-eval`（2026-09-14）在本次基础上加 `targetTables` 多值 IN + `sourceClassId` 类过滤 + 行 checkbox 多选批量评估；详见同目录 sibling 文档

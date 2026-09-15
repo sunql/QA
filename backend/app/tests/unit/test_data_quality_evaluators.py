@@ -15,7 +15,10 @@ import pytest
 from app.domain.enums import RuleType, Severity
 from app.domain.exceptions import ValidationError
 from app.domain.models import DataQualityRule
+from app.infrastructure.business_db_pool import _OracleAdapter, _SqlaAdapter
 from app.services.data_quality_evaluators._common import (
+    quote_identifier,
+    quote_qualified_name,
     validate_expression,
     validate_identifier,
 )
@@ -34,6 +37,48 @@ class _StubAdapter:
 
     def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
         self.rows = rows or []
+        self.calls: list[str] = []
+
+    async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
+        self.calls.append(sql)
+        return self.rows
+
+
+class _FakeOracleAdapter(_OracleAdapter):
+    """绕开 __init__ 的轻量 stub：直接构造 isinstance 判定需要的字段。"""
+
+    def __init__(self) -> None:  # noqa: D401 - test stub
+        # 不调父类 __init__（避免连真 DSN / 用户名），仅保留 isinstance 链
+        self.dialect = "oracle"
+
+
+class _FakeMysqlAdapter(_SqlaAdapter):
+    """SQLAlchemy MySQL adapter stub：保留 isinstance 链 + 暴露 dialect='mysql'。
+
+    不调父类 __init__（避免创建真 async engine），并 override execute_read_only
+    用预设 rows 响应——否则 _SqlaAdapter._ensureEngine() 会在没有 _engine 时抛
+    AttributeError，evaluator 跑不下去。
+    """
+
+    def __init__(self) -> None:  # noqa: D401 - test stub
+        # 不调父类 __init__（避免创建真 async engine）
+        self._url = "mysql+aiomysql://u:p@h:3306/db"
+        self.dialect = "mysql"
+        self.rows: list[dict[str, Any]] = []
+        self.calls: list[str] = []
+
+    async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
+        self.calls.append(sql)
+        return self.rows
+
+
+class _FakePostgresAdapter(_SqlaAdapter):
+    """SQLAlchemy PG adapter stub（同 MySQL stub 模式：跳过 engine 初始化）。"""
+
+    def __init__(self) -> None:  # noqa: D401 - test stub
+        self._url = "postgresql+asyncpg://u:p@h:5432/db"
+        self.dialect = "postgresql"
+        self.rows: list[dict[str, Any]] = []
         self.calls: list[str] = []
 
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
@@ -122,6 +167,43 @@ class TestValidateExpression:
         assert validate_expression("a = 'x'") == "a = 'x'"
 
 
+# ===== quote_identifier（feat-dialect-quoting）=====
+#
+# 衍生 bug：data_quality_evaluators 早期硬编码 f'FROM "{table}"'，对 Oracle/PG 合法，
+# 对 MySQL 触发 pymysql 1064（"mdmtoerp" 被当字符串字面量）。修法：按 adapter dialect
+# 决定引号——Oracle/PG 双引号、MySQL 反引号。参见 [[silent-failure-hunter]] 复盘。
+
+
+class TestQuoteIdentifier:
+    def test_oracle_uses_double_quotes(self) -> None:
+        assert quote_identifier(_FakeOracleAdapter(), "PORDER") == '"PORDER"'
+
+    def test_mysql_uses_backticks(self) -> None:
+        assert quote_identifier(_FakeMysqlAdapter(), "PORDER") == "`PORDER`"
+        assert quote_identifier(_FakeMysqlAdapter(), "ORDER_QTY") == "`ORDER_QTY`"
+
+    def test_postgres_uses_double_quotes(self) -> None:
+        assert (
+            quote_identifier(_FakePostgresAdapter(), "PORDER") == '"PORDER"'
+        )
+
+    def test_unknown_adapter_falls_back_to_pg_style(self) -> None:
+        # 测试 stub（如 _StubAdapter）非 Oracle/PG/MySQL → 默认双引号（不破坏旧单测）
+        assert quote_identifier(_StubAdapter(), "PORDER") == '"PORDER"'
+
+    def test_qualified_name_uses_matching_quotes(self) -> None:
+        # MySQL：每段都用反引号
+        assert (
+            quote_qualified_name(_FakeMysqlAdapter(), "t1", "c1")
+            == "`t1`.`c1`"
+        )
+        # Oracle/PG：每段都用双引号
+        assert (
+            quote_qualified_name(_FakeOracleAdapter(), "t1", "c1")
+            == '"t1"."c1"'
+        )
+
+
 # ===== COMPLETENESS =====
 
 
@@ -133,8 +215,22 @@ class TestCompleteness:
         assert (total, passed) == (10, 7)
         # SQL 应使用 COUNT(col) 且包含正确表名
         sql = adapter.calls[0]
-        assert "FROM \"PORDER\"" in sql
-        assert "COUNT(\"ORDER_QTY\")" in sql
+        assert 'FROM "PORDER"' in sql
+        assert 'COUNT("ORDER_QTY")' in sql
+
+    def test_mysql_adapter_uses_backticks(self) -> None:
+        """回归：MySQL adapter 必须输出反引号，否则 pymysql 报 1064。
+        复现 [[silent-failure-hunter]] 里 13 条 COMPLETENESS 规则全 ERROR 的根因。"""
+        rule = _make_rule(rule_type=RuleType.COMPLETENESS, target_column="ORDER_QTY")
+        adapter = _FakeMysqlAdapter()
+        adapter.rows = [{"total": 5, "passed": 3}]
+        adapter.calls = []
+        _run(compEval(rule, adapter))
+        sql = adapter.calls[0]
+        assert "FROM `PORDER`" in sql, f"MySQL 应该用反引号，got: {sql}"
+        assert "COUNT(`ORDER_QTY`)" in sql
+        # 反向断言：不应再用双引号
+        assert '"PORDER"' not in sql
 
     def test_target_column_required(self) -> None:
         rule = _make_rule(

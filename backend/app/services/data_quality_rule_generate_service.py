@@ -445,30 +445,83 @@ class DataQualityRuleGenerateService:
         payload: ApplySuggestionRequest,
         actor: CurrentUser,
     ) -> ApplySuggestionResponse:
-        """采纳 LLM 推荐的 allowed_values，写入 ontology_property 并记录 outbox 审计。
+        """按 kind 派发写入 ontology_property，并记录 outbox 审计。
 
-        仅值域型（allowed_values）写入；业务必填类建议不写回（不沉淀为元数据），
-        仅留 LLM_DERIVED 入 confirm。
+        支持的 kind：
+        - allowed_values → 写 allowed_values（值域）
+        - not_null       → 写 is_not_null=true（必填）
+        - range          → 同时写 min_value + max_value（区间）
+        - pattern        → 写 regex_pattern（正则）
 
-        值校验：不允许含单引号（SQL 注入防护），否则 422。
+        字段级校验：
+        - allowed_values 不允许含单引号（SQL 注入防护）
+        - range 必须同时有 min_value 和 max_value，且 min ≤ max
+        - pattern 必须能 compile
+        - kind 不在白名单内 422
+
+        outbox payload 记录 5 字段 before/after + kind，便于审计回溯。
         """
         prop = await session.get(OntologyProperty, payload.property_id)
         if prop is None:
             raise NotFoundError(MSG_DQ_GEN_PROPERTY_NOT_FOUND.format(id=payload.property_id))
 
-        # 值域安全校验：禁止单引号（SQL 注入防护）
-        for v in payload.allowed_values:
-            if "'" in v:
-                raise ValidationError(MSG_DQ_GEN_BAD_VALUE)
+        # —— 按 kind 做字段级校验，并构造 update_values ——
+        update_values: dict = {}
+        if payload.kind == "allowed_values":
+            if not payload.allowed_values:
+                raise ValidationError("allowed_values 不能为空")
+            for v in payload.allowed_values:
+                if "'" in v:
+                    raise ValidationError(MSG_DQ_GEN_BAD_VALUE)
+            update_values["allowed_values"] = payload.allowed_values
+        elif payload.kind == "not_null":
+            update_values["is_not_null"] = True
+        elif payload.kind == "range":
+            if not payload.min_value or not payload.max_value:
+                raise ValidationError("range 需同时传 min_value 和 max_value")
+            # best-effort 数值校验：仅当两边都能 float 化时才比较；
+            # 否则是日期/字典序/混型，不强行校验（让规则引擎在 preview 时解释）。
+            try:
+                if float(payload.min_value) > float(payload.max_value):
+                    raise ValidationError("min_value 不能大于 max_value")
+            except (TypeError, ValueError):
+                pass
+            update_values["min_value"] = payload.min_value
+            update_values["max_value"] = payload.max_value
+        elif payload.kind == "pattern":
+            if not payload.regex_pattern:
+                raise ValidationError("pattern 需传 regex_pattern")
+            import re
+            try:
+                re.compile(payload.regex_pattern)
+            except re.error as e:
+                raise ValidationError(f"regex_pattern 编译失败：{e}") from e
+            update_values["regex_pattern"] = payload.regex_pattern
+        # kind 白名单校验已由 Pydantic field_validator 处理；此处不必重复。
 
-        before = prop.allowed_values
+        # —— 记录 before —— 必须 flush 之前取，否则读到的是 session cache 旧值
+        before = {
+            "allowed_values": prop.allowed_values,
+            "is_not_null": prop.is_not_null,
+            "min_value": prop.min_value,
+            "max_value": prop.max_value,
+            "regex_pattern": prop.regex_pattern,
+        }
         await session.execute(
             update(OntologyProperty)
             .where(OntologyProperty.id == prop.id)
-            .values(allowed_values=payload.allowed_values)
+            .values(**update_values)
         )
+        await session.flush()
+        after = {
+            "allowed_values": prop.allowed_values,
+            "is_not_null": prop.is_not_null,
+            "min_value": prop.min_value,
+            "max_value": prop.max_value,
+            "regex_pattern": prop.regex_pattern,
+        }
 
-        # outbox 审计（event_type 要求 updated）
+        # outbox 审计（event_type 保持 updated；payload 含 kind + 全字段 diff）
         await self._outbox.enqueue(
             session,
             event_type="ontology_property_updated",
@@ -476,14 +529,16 @@ class DataQualityRuleGenerateService:
             entity_id=prop.id,
             actor=actor.userId,
             actor_departments=tuple(actor.departments or []),
-            payload={
-                "before": {"allowed_values": before},
-                "after": {"allowed_values": payload.allowed_values},
-            },
+            payload={"before": before, "after": after, "kind": payload.kind},
         )
 
         await session.commit()
         return ApplySuggestionResponse(
             property_id=prop.id,
-            allowed_values=payload.allowed_values,
+            kind=payload.kind,
+            allowed_values=after["allowed_values"],
+            is_not_null=after["is_not_null"],
+            min_value=after["min_value"],
+            max_value=after["max_value"],
+            regex_pattern=after["regex_pattern"],
         )

@@ -106,6 +106,23 @@ class TestDataQualityRuleApi:
         resp = await client.post("/api/v1/data-quality/rules", json=payload)
         assert resp.status_code == 422
 
+    async def test_create_code_with_hyphen_accepted(self, client) -> None:
+        """批量新建（feat-rule-batch-create）的 MU-DQ-CLASS-YYYYMMDD-NNNNN 编码格式
+        必须被后端接受：原 regex ^[A-Z][A-Z0-9_]*$ 不允许 -，须改为 ^[A-Z][A-Z0-9_-]*$。
+        """
+        ds_id = await _createTestDatasource(client)
+        payload = {
+            "ruleName": "MU-DQ 批量新建编码带连字符应被接受",
+            "ruleCode": "MU-DQ-PURCHASE_ORDER-20260915-00001",
+            "datasourceId": ds_id,
+            "targetTable": "PURCHASE_ORDER",
+            "ruleType": "COMPLETENESS",
+        }
+        resp = await client.post("/api/v1/data-quality/rules", json=payload)
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["ruleCode"] == "MU-DQ-PURCHASE_ORDER-20260915-00001"
+
     async def test_create_threshold_out_of_range_rejected(self, client) -> None:
         """threshold > 100 应被 Pydantic 拒绝。"""
         ds_id = await _createTestDatasource(client)
@@ -462,3 +479,117 @@ class TestDataQualityRuleFilters:
         assert ds_id in ds_ids
         # 静态 severities 全集
         assert set(body["severities"]) == {"HIGH", "MEDIUM", "LOW", "INFO"}
+
+
+# ---------------------------------------------------------------------------
+# dq-multi-select-batch-eval — targetTables 多值 IN 过滤 + sourceClassId 类过滤
+# ---------------------------------------------------------------------------
+
+
+class TestDataQualityRuleMultiFilters:
+    """dq-multi-select-batch-eval：targetTables 多选 + 类名过滤。"""
+
+    async def test_list_rules_target_tables_in(self, client) -> None:
+        """targetTables=[T1,T2] 应精确 IN 匹配这两条；T3 不在结果里。"""
+        ds_id = await _createTestDatasource(client)
+        await _seedRule(client, ruleCode="R_T1", datasourceId=ds_id,
+                        targetTable="PORDER")
+        await _seedRule(client, ruleCode="R_T2", datasourceId=ds_id,
+                        targetTable="PO_HEADER")
+        await _seedRule(client, ruleCode="R_T3", datasourceId=ds_id,
+                        targetTable="SPL")
+        # 注意 FastAPI 接收 list[str] 的两种写法：重复同名 query 或逗号分隔。
+        # 这里走 httpx 的 params=list 自动展开成重复同名参数。
+        resp = await client.get(
+            "/api/v1/data-quality/rules",
+            params=[("targetTables", "PORDER"), ("targetTables", "PO_HEADER")],
+        )
+        assert resp.status_code == 200
+        codes = sorted(r["ruleCode"] for r in resp.json())
+        assert codes == ["R_T1", "R_T2"]
+
+    async def test_list_rules_target_tables_combined_with_other(
+        self, client,
+    ) -> None:
+        """targetTables 多值 + datasourceId 单值复合条件 AND。"""
+        ds1 = await _createTestDatasource(client, name="ds-A")
+        ds2 = await _createTestDatasource(client, name="ds-B")
+        await _seedRule(client, ruleCode="A1", datasourceId=ds1,
+                        targetTable="PORDER")
+        await _seedRule(client, ruleCode="A2", datasourceId=ds1,
+                        targetTable="PO_HEADER")
+        await _seedRule(client, ruleCode="B1", datasourceId=ds2,
+                        targetTable="PORDER")
+        resp = await client.get(
+            "/api/v1/data-quality/rules",
+            params=[
+                ("targetTables", "PORDER"),
+                ("targetTables", "PO_HEADER"),
+                ("datasourceId", str(ds1)),
+            ],
+        )
+        codes = sorted(r["ruleCode"] for r in resp.json())
+        assert codes == ["A1", "A2"]
+
+    async def test_list_rules_filter_by_source_class_id(
+        self, client, dbSession,
+    ) -> None:
+        """sourceClassId=X 只返该本体类下的规则。
+
+        source_class_id 由 wizard 写入；公开 create API 不接受该字段，所以这里
+        通过 ORM 直写 dbSession 设值，覆盖 listRules 的精确过滤路径。
+        """
+        from app.domain.models import DataQualityRule as Rule, OntologyClass
+
+        ds_id = await _createTestDatasource(client)
+
+        # 建两个 active 本体类（valid_to=NULL）
+        supplier = OntologyClass(class_name="Supplier", source_table="ODS_BPSUPPLIER")
+        customer = OntologyClass(class_name="Customer", source_table="ODS_BPCUSTOMER")
+        dbSession.add_all([supplier, customer])
+        await dbSession.flush()
+        # 业务库为单库共享，supplier/customer id 在整个测试会话内单调递增；
+        # 此处直接捕获用于后续断言。
+        s_id = supplier.id
+        c_id = customer.id
+
+        # 两条规则，公开 API 不接受 source_class_id，ORM 直写
+        r1 = Rule(
+            rule_name="R-SUP", rule_code="R_SUP", datasource_id=ds_id,
+            target_table="ODS_BPSUPPLIER", rule_type="COMPLETENESS",
+            severity="MEDIUM", source_class_id=s_id,
+        )
+        r2 = Rule(
+            rule_name="R-CUS", rule_code="R_CUS", datasource_id=ds_id,
+            target_table="ODS_BPCUSTOMER", rule_type="COMPLETENESS",
+            severity="MEDIUM", source_class_id=c_id,
+        )
+        dbSession.add_all([r1, r2])
+        await dbSession.commit()
+
+        resp = await client.get(
+            "/api/v1/data-quality/rules", params={"sourceClassId": s_id}
+        )
+        assert resp.status_code == 200
+        codes = [r["ruleCode"] for r in resp.json()]
+        assert codes == ["R_SUP"]
+
+    async def test_list_options_includes_class_options(self, client, dbSession) -> None:
+        """GET /rules/options 的 classOptions 包含 active 本体类。"""
+        from app.domain.models import OntologyClass
+
+        # 一个 active、一个墓碑（valid_to 非 NULL）
+        alive = OntologyClass(class_name="Supplier", source_table="ODS_BPSUPPLIER")
+        tomb = OntologyClass(
+            class_name="OldClass", source_table="X",
+            valid_to=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+        )
+        dbSession.add_all([alive, tomb])
+        await dbSession.commit()
+
+        resp = await client.get("/api/v1/data-quality/rules/options")
+        assert resp.status_code == 200
+        names = [c["className"] for c in resp.json()["classOptions"]]
+        assert "Supplier" in names
+        # 墓碑类不在下拉里
+        assert "OldClass" not in names

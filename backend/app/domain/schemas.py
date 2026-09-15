@@ -49,7 +49,7 @@ from app.domain.enums import (
     SourceSystem,
 )
 from app.domain.exceptions import ConfigError
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from pydantic import BeforeValidator
 
 from app.services.business_object_registry import businessObjectRegistry
@@ -547,6 +547,12 @@ class OntologyPropertyUpdate(CamelModel):
     # 值域：本体属性管理页可手动调整 LLM 采纳的值；
     # None 表示不修改；显式空数组 视作清空值域。
     allowed_values: list[str] | None = Field(default=None, max_length=50)
+    # 约束字段（feat-ontology-property-constraints）：本体管理页可手工维护，
+    # 也可被 LLM 采纳并沉淀。None = 不修改该字段；显式 false / "" 视作清空。
+    is_not_null: bool | None = None
+    min_value: str | None = Field(default=None, max_length=50)
+    max_value: str | None = Field(default=None, max_length=50)
+    regex_pattern: str | None = Field(default=None, max_length=255)
 
     _check_aliases = field_validator("business_aliases")(_validateBusinessAliases)
 
@@ -559,6 +565,19 @@ class OntologyPropertyUpdate(CamelModel):
         for s in v:
             if "'" in s:
                 raise ValueError("allowed_values must not contain single quote")
+        return v
+
+    @field_validator("regex_pattern")
+    @classmethod
+    def _validateRegexPattern(cls, v: str | None) -> str | None:
+        """regex_pattern 必须能 compile；否则 service 层 catch 后 422。"""
+        if v is None or v == "":
+            return v
+        import re
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"regex_pattern 编译失败：{e}") from e
         return v
 
 
@@ -614,6 +633,12 @@ class OntologyPropertyRead(CamelModel):
     # 值域（LLM 采纳或人工填入）；null 表示未约束。
     # 暴露给本体属性管理页（让用户能看到「已沉淀」的值并手动修正）。
     allowed_values: list[str] | None = None
+    # 约束字段（feat-ontology-property-constraints）：前端管理页展示 + wizard
+    # 初始化 adoptedIds（persisted_property_ids）。
+    is_not_null: bool | None = None
+    min_value: str | None = None
+    max_value: str | None = None
+    regex_pattern: str | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
 
@@ -1819,7 +1844,9 @@ class DataQualityRuleCreate(CamelModel):
         ...,
         min_length=1,
         max_length=100,
-        pattern=r"^[A-Z][A-Z0-9_]*$",
+        # feat-rule-batch-create：MU-DQ-CLASS-YYYYMMDD-NNNNN 编码含连字符，
+        # 原 ^[A-Z][A-Z0-9_]*$ 拒绝 -。放开到允许连字符；下划线/纯字母编码仍合法。
+        pattern=r"^[A-Z][A-Z0-9_-]*$",
         description=MSG_SCHEMA_DQ_RULE_CODE,
     )
     datasource_id: int = Field(..., gt=0, description=MSG_SCHEMA_DQ_DATASOURCE_ID)
@@ -1886,6 +1913,11 @@ class EvaluationResult(CamelModel):
 
     rule_id: int = Field(..., description=MSG_SCHEMA_DQ_EVAL_RULE_ID)
     rule_code: str = Field(..., description=MSG_SCHEMA_DQ_EVAL_RULE_CODE)
+    # feat-report-rules-zh-name (2026-09-15)：前端报告「规则明细」表展示给业务用户，
+    # 用 rule_name（业务可读名）而非 rule_code（系统唯一码）；severity 让严重级别列不再永远空。
+    # 两个字段都 optional，避免破坏旧客户端（早期 evaluator 不带这俩字段）。
+    rule_name: str | None = Field(default=None, description="规则名称（业务可读）")
+    severity: str | None = Field(default=None, description="严重级别（HIGH/MEDIUM/LOW/INFO）")
     rule_type: RuleType = Field(..., description=MSG_SCHEMA_DQ_EVAL_RULE_TYPE)
     datasource_id: int | None = Field(default=None, description=MSG_SCHEMA_DQ_EVAL_DATASOURCE_ID)
     total_count: int = Field(default=0, ge=0, description=MSG_SCHEMA_DQ_EVAL_TOTAL_COUNT)
@@ -1966,6 +1998,32 @@ class ComputeScoresResponse(CamelModel):
     duration_ms: int = Field(default=0, ge=0, description=MSG_SCHEMA_DQ_COMPUTE_DURATION_MS)
     scores: list[DataQualityScoreRead] = Field(
         default_factory=list, description=MSG_SCHEMA_DQ_COMPUTE_SCORES
+    )
+
+
+class ComputeScoresRequest(CamelModel):
+    """计算评分请求（feat-dq-scores-scope，2026-09-15；feat-dq-scores-multiselect）。
+
+    三个 scope 字段全 optional；不传 = 现有全量行为。
+    target_tables 与 rule_types 支持多选（list），多条用 IN 组合；
+    与 datasource_id（仍单选）AND 组合。
+    scope 命中 0 条规则时直接返回空响应、不写库、不写 GLOBAL。
+
+    字段优先级：
+    - target_tables 非空 ⇒ IN；target_tables 为 None/空 ⇒ 全表（向后兼容）
+    - rule_types 非空 ⇒ IN；rule_types 为 None/空 ⇒ 全规则类型
+    """
+
+    datasource_id: int | None = Field(
+        default=None, gt=0, description=MSG_SCHEMA_DQ_DATASOURCE_ID
+    )
+    target_tables: list[str] | None = Field(
+        default=None,
+        description="多选目标表（feat-dq-scores-multiselect，2026-09-15）。",
+    )
+    rule_types: list[RuleType] | None = Field(
+        default=None,
+        description="多选规则类型枚举（feat-dq-scores-multiselect，2026-09-15）。",
     )
 
 
@@ -2921,8 +2979,12 @@ class PropertyConstraintSuggestionRead(CamelModel):
 
     property_id: int
     property_name: str
-    kind: str  # allowed_values | not_null
+    kind: str  # allowed_values | not_null | range | pattern
     values: list[str] | None = None
+    # range / pattern 专用字段；allowed_values / not_null 时为 None。
+    min_value: str | None = None
+    max_value: str | None = None
+    regex_pattern: str | None = None
     confidence: float
     rationale: str
 
@@ -2937,17 +2999,70 @@ class ParseDescriptionsResponse(CamelModel):
 
 
 class ApplySuggestionRequest(CamelModel):
-    """apply-suggestion 请求：采纳 LLM 推荐的 allowed_values，写入 ontology_property。"""
+    """apply-suggestion 请求：按 kind 派发写入 ontology_property。
+
+    仅 kind 命中的字段会被 service 写入；其它字段即便传也忽略。
+    kind 取值：
+    - allowed_values → allowed_values 列表
+    - not_null       → 仅写 is_not_null=true
+    - range          → min_value + max_value 同时存在
+    - pattern        → regex_pattern
+    """
 
     property_id: int = Field(..., gt=0)
-    allowed_values: list[str] = Field(..., min_length=1, max_length=50)
+    # 默认 allowed_values 兼容旧 client（feat-ontology-property-constraints 之前
+    # 的 client 只传 propertyId + allowedValues）。whitelist 在 _validateKind。
+    kind: str = Field(
+        default="allowed_values",
+        description="allowed_values | not_null | range | pattern",
+    )
+    allowed_values: list[str] | None = Field(default=None, min_length=1, max_length=50)
+    min_value: str | None = Field(default=None, max_length=50)
+    max_value: str | None = Field(default=None, max_length=50)
+    regex_pattern: str | None = Field(default=None, max_length=255)
+
+    @field_validator("kind")
+    @classmethod
+    def _validateKind(cls, v: str) -> str:
+        allowed = {"allowed_values", "not_null", "range", "pattern"}
+        if v not in allowed:
+            raise ValueError(f"kind 必须是 {sorted(allowed)} 之一")
+        return v
+
+    @field_validator("regex_pattern")
+    @classmethod
+    def _validateRegexPattern(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return v
+        import re
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"regex_pattern 编译失败：{e}") from e
+        return v
+
+    @field_validator("allowed_values")
+    @classmethod
+    def _validateAllowedValuesNoQuotes(cls, v: list[str] | None) -> list[str] | None:
+        """与 OntologyPropertyUpdate 一致：禁止单引号（SQL 注入防护）。"""
+        if v is None:
+            return v
+        for s in v:
+            if "'" in s:
+                raise ValueError("allowed_values must not contain single quote")
+        return v
 
 
 class ApplySuggestionResponse(CamelModel):
-    """apply-suggestion 响应。"""
+    """apply-suggestion 响应：回写当前所有约束字段，client 可据此刷新。"""
 
     property_id: int
-    allowed_values: list[str]
+    kind: str
+    allowed_values: list[str] | None = None
+    is_not_null: bool | None = None
+    min_value: str | None = None
+    max_value: str | None = None
+    regex_pattern: str | None = None
 
 
 class DatasourceOption(CamelModel):
@@ -2957,6 +3072,13 @@ class DatasourceOption(CamelModel):
     name: str
 
 
+class ClassOption(CamelModel):
+    """本体类下拉选项（id + class_name 轻量）。"""
+
+    id: int
+    class_name: str
+
+
 class RuleOptionsRead(CamelModel):
     """GET /data-quality/rules/options 响应：规则列表筛选下拉的所有可选值。
 
@@ -2964,12 +3086,25 @@ class RuleOptionsRead(CamelModel):
     - datasourceIds：active 数据源全量
     - targetTables：data_quality_rule 中已用过的 target_table DISTINCT
     - severities：静态全集（HIGH/MEDIUM/LOW/INFO）
+    - classOptions：active 本体类全量（class_name 去重过滤场景下拉）
     """
 
     rule_names: list[str] = Field(default_factory=list)
     datasource_ids: list[DatasourceOption] = Field(default_factory=list)
     target_tables: list[str] = Field(default_factory=list)
     severities: list[str] = Field(default_factory=list)
+    class_options: list[ClassOption] = Field(default_factory=list)
+
+
+class NextRuleCodeRead(CamelModel):
+    """GET /data-quality/rules/next-code 响应（feat-rule-batch-create）。
+
+    前端批量新建向导用：选完类后异步拿建议编码（前端只展示，**不实际占用**）。
+    后端在 createRule() 时按 DB 真实 MAX+1 二次校验防并发冲突。
+    """
+
+    code: str
+    seq: int
 
 
 class SystemConfigRead(CamelModel):
@@ -2995,3 +3130,238 @@ class SystemConfigUpdate(CamelModel):
     """
 
     value: str | None = Field(default=None, max_length=4096)
+
+
+# ===========================================================================
+# Phase 1.5: Evaluation Report (feat-dq-evaluation-report)
+# ===========================================================================
+
+
+class EvaluationReportCreate(CamelModel):
+    """创建评估报告请求。
+
+    class_ids / rule_ids 至少各 1 个（联合约束在 service 层做，因为需要查 DB 验证
+    id 真实存在 + 启用）。time_window 必填：开始 ≤ 结束；与 evaluator 的 WHERE
+    子句配合（Phase 2 改造）。
+    """
+
+    name: str = Field(..., min_length=1, max_length=200)
+    description: str | None = Field(default=None)
+    class_ids: list[int] = Field(..., min_length=1)
+    rule_ids: list[int] = Field(..., min_length=1)
+    time_window_start: datetime
+    time_window_end: datetime
+    tags: list[str] = Field(default_factory=list)
+    status: str = Field(default="PUBLISHED")
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, v: str) -> str:
+        if v not in {"DRAFT", "PUBLISHED"}:
+            raise ValueError(f"unsupported status: {v}")
+        return v
+
+    @field_validator("time_window_end")
+    @classmethod
+    def _validate_window(cls, v: datetime, info) -> datetime:
+        start = info.data.get("time_window_start")
+        if start is not None and v < start:
+            raise ValueError("time_window_end must be >= time_window_start")
+        return v
+
+
+class EvaluationReportUpdate(CamelModel):
+    """更新报告元数据（仅 name/description/tags/status 可改，class/rule/window 不可改）。
+
+    修改 class/rule/window 必须走 regenerate_snapshot（重新评估并替换 snapshot）。
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None)
+    tags: list[str] | None = Field(default=None)
+    status: str | None = Field(default=None)
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if v not in {"DRAFT", "PUBLISHED"}:
+            raise ValueError(f"unsupported status: {v}")
+        return v
+
+
+class EvaluationReportProgress(CamelModel):
+    """异步评估进度（feat-dq-evaluation-report-progress，2026-09-15）。
+
+    字段语义：
+    - stage: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED"
+    - completed / total: 已完成规则数 / 总规则数；total=0 表示尚未开始
+    - current_rule_id / current_rule_code: 当前正在评估的规则（用于 UI 提示）
+    - message: 失败原因或阶段性文字
+    - started_at / finished_at: ISO datetime
+    """
+
+    stage: str = "PENDING"
+    completed: int = 0
+    total: int = 0
+    current_rule_id: int | None = None
+    current_rule_code: str | None = None
+    message: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class EvaluationReportRead(CamelModel):
+    """评估报告读模型：含完整 snapshot。
+
+    snapshot 字段直接渲染，详情页零延迟。前端按 snapshot.schema_version 分支渲染。
+    progress 字段在异步评估场景下非空；前端轮询 progress 字段拿到当前阶段。
+    """
+
+    id: int
+    name: str
+    description: str | None
+    class_ids: list[int]
+    rule_ids: list[int]
+    time_window_start: datetime
+    time_window_end: datetime
+    status: str
+    tags: list[str]
+    snapshot: dict[str, Any]
+    snapshot_version: int
+    progress: EvaluationReportProgress | None = None
+    owner: str | None
+    created_by: str
+    created_time: datetime
+    updated_time: datetime
+    deleted_at: datetime | None
+
+
+class EvaluationReportListRead(CamelModel):
+    """报告列表分页响应（不含 snapshot，省带宽）。"""
+
+    rows: list[EvaluationReportRead]
+    total: int
+
+
+class ViolationSampleRead(CamelModel):
+    """违规样本读模型。
+
+    feat-sampling-error-visible (2026-09-15)：加 samplingError 字段。
+    None = 采样成功或 0 命中；非 None = 异常文本（≤500 chars），前端在 PK 列显式
+    提示「采样失败: <msg>」。
+    """
+
+    id: int
+    report_id: int
+    rule_id: int
+    datasource_id: int
+    target_table: str
+    target_column: str | None
+    total_violations: int
+    sample_size: int
+    sample_pk_values: list[dict[str, Any]]
+    sampling_error: str | None = None
+    captured_at: datetime
+
+
+class RuleDeltaRead(CamelModel):
+    """对比两份报告时，单规则的差异。"""
+
+    rule_id: int
+    rule_code: str
+    pass_rate_left: float | None
+    pass_rate_right: float | None
+    delta: float | None
+    status_change: str  # "IMPROVED" | "REGRESSED" | "UNCHANGED" | "ADDED" | "REMOVED"
+
+
+class DimensionDeltaRead(CamelModel):
+    """对比两份报告时，单维度的差异。"""
+
+    name: str  # completeness/validity/...
+    left: float | None
+    right: float | None
+    delta: float | None
+
+
+class EvaluationReportCompareRead(CamelModel):
+    """对比两份报告的完整响应。"""
+
+    left_id: int
+    right_id: int
+    overall_left: float | None
+    overall_right: float | None
+    overall_delta: float | None
+    dimension_deltas: list[DimensionDeltaRead]
+    rule_deltas: list[RuleDeltaRead]
+    rules_in_left_only: list[int]
+    rules_in_right_only: list[int]
+
+
+class EvaluationReportShareCreate(CamelModel):
+    """创建分享 token 请求。"""
+
+    expires_in_days: int = Field(default=7, ge=1, le=30)
+
+
+class EvaluationReportShareRead(CamelModel):
+    """分享 token 读模型（创建时返回 token + url；解析时返回 report）。"""
+
+    id: int
+    report_id: int
+    share_token: str
+    share_url: str | None = None  # 仅创建时返回；解析时为 None
+    expires_at: datetime
+    access_count: int
+    created_by: str
+    created_at: datetime
+
+
+class EvaluationReportScheduleCreate(CamelModel):
+    """创建定时报告配置。"""
+
+    name: str = Field(..., min_length=1, max_length=200)
+    cron_expression: str = Field(..., min_length=1, max_length=100)
+    class_ids: list[int] = Field(..., min_length=1)
+    rule_ids: list[int] = Field(..., min_length=1)
+    time_window_type: str = Field(...)  # LAST_7D|LAST_30D|LAST_RUN
+    recipients: list[str] = Field(default_factory=list)  # user_id[]
+    enabled: bool = Field(default=True)
+
+    @field_validator("time_window_type")
+    @classmethod
+    def _validate_window_type(cls, v: str) -> str:
+        if v not in {"LAST_7D", "LAST_30D", "LAST_RUN"}:
+            raise ValueError(f"unsupported time_window_type: {v}")
+        return v
+
+
+class EvaluationReportScheduleUpdate(CamelModel):
+    """更新定时配置（cron / enabled / recipients 等可改；class/rule/window_type 不允许改，要重建）。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    cron_expression: str | None = Field(default=None, min_length=1, max_length=100)
+    recipients: list[str] | None = Field(default=None)
+    enabled: bool | None = Field(default=None)
+
+
+class EvaluationReportScheduleRead(CamelModel):
+    """定时配置读模型。"""
+
+    id: int
+    name: str
+    cron_expression: str
+    class_ids: list[int]
+    rule_ids: list[int]
+    time_window_type: str
+    recipients: list[str]
+    enabled: bool
+    next_run_at: datetime | None
+    last_run_at: datetime | None
+    last_report_id: int | None
+    owner: str | None
+    created_by: str
+    created_time: datetime
+    updated_time: datetime

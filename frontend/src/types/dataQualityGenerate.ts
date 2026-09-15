@@ -24,7 +24,7 @@ export type DerivationType =
 
 export type RuleSuggestionStatus = "NEW" | "EXISTS";
 
-export type ConstraintKind = "allowed_values" | "not_null";
+export type ConstraintKind = "allowed_values" | "not_null" | "range" | "pattern";
 
 // ---------------------------------------------------------------------------
 // RuleSuggestion — GeneratorService.preview 返回的单条建议
@@ -83,6 +83,11 @@ export interface PropertyConstraintSuggestion {
   propertyName: string;
   kind: ConstraintKind;
   values: string[] | null;
+  // range / pattern 专用字段（feat-ontology-property-constraints）。
+  // allowed_values / not_null 时为 undefined。
+  minValue?: string | null;
+  maxValue?: string | null;
+  regexPattern?: string | null;
   confidence: number;
   rationale: string;
 }

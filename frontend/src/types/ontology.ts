@@ -93,6 +93,12 @@ export interface OntologyProperty {
   // 设为可选（mock 测试和旧 client 不传不会触发 tsc 报错）；
   // 生产 API 始终返回该字段（null 或 list[str]）。
   allowedValues?: string[] | null;
+  // 约束字段（feat-ontology-property-constraints）：管理页展示 + wizard 初始化
+  // adoptedIds。任一字段非空视为已沉淀约束。
+  isNotNull?: boolean | null;
+  minValue?: string | null;
+  maxValue?: string | null;
+  regexPattern?: string | null;
 }
 
 export interface OntologyPropertyCreate {
@@ -118,6 +124,13 @@ export interface OntologyPropertyUpdate {
   // null 表示不修改；空数组 视作清空值域；非空数组 写入 ontology_property.allowed_values。
   allowedValues?: string[] | null;
   description?: string | null;
+  // 约束字段（feat-ontology-property-constraints）：管理页手工配置。
+  // undefined = 不修改；null = 显式清空（适用 string 类型）。
+  // isNotNull 是 boolean；undefined 不修改，false 显式清空，true 写 True。
+  isNotNull?: boolean | null;
+  minValue?: string | null;
+  maxValue?: string | null;
+  regexPattern?: string | null;
 }
 
 // ===== Metric =====

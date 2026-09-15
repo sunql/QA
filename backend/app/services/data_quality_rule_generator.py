@@ -83,15 +83,31 @@ class BlockedProperty:
     property_name: str
     reason: str
 
-def buildRuleCode(className: str, propertyName: str, ruleType: RuleType) -> str:
-    """DQ_<CLASS>_<PROP>_<TYPE>；始终附加 sha256 短后缀，防止 _slug 碰撞。
+def buildRuleCode(
+    className: str,
+    propertyName: str,
+    ruleType: RuleType,
+    extraSlugParts: list[str] | None = None,
+    extraHashParts: list[str] | None = None,
+) -> str:
+    """DQ_<CLASS>_<PROP>_<TYPE>[_<EXTRA>...]；始终附加 sha256 短后缀，防止 _slug 碰撞。
 
     hash = sha256(original strings)，与 slug 无关；即 PO-KEY 与 PO.KEY slug 后同，
     但因原始字符串不同，hash 不同，最终 rule_code 也不同。
+
+    extraSlugParts / extraHashParts：用于同一 (class, prop, ruleType) 下需要拆出多条
+    建议的场景（如 join 一致性规则按 target_table + target_date 拆条）。
+    两者必须成对提供；只填其中之一会让 slug 与 hash 不一致——不允许。
     """
-    slugified = f"DQ_{_slug(className)}_{_slug(propertyName)}_{ruleType.value}"
+    if (extraSlugParts is None) != (extraHashParts is None):
+        raise ValueError("extraSlugParts / extraHashParts 必须同时提供或同时省略")
+    baseSlug = f"DQ_{_slug(className)}_{_slug(propertyName)}_{ruleType.value}"
+    extraSlug = "_".join(_slug(p) for p in (extraSlugParts or []))
+    slugified = f"{baseSlug}_{extraSlug}" if extraSlug else baseSlug
+    hashParts = [className, propertyName, ruleType.value]
+    hashParts.extend(extraHashParts or [])
     digest = hashlib.sha256(  # noqa: UP012
-        f"{className}\x00{propertyName}\x00{ruleType.value}".encode()
+        "\x00".join(hashParts).encode()
     ).hexdigest().upper()[:7]
     if len(slugified) <= _RULE_CODE_MAX - 8:
         return f"{slugified}_{digest}"
@@ -115,9 +131,18 @@ def deriveSuggestions(
         return [], [BlockedProperty(p.property_name, "类未配置 source_table") for p in properties]
     validate_identifier(ctx.source_table, role="source_table")
 
-    tableCols = schemaIndex.tables.get(ctx.source_table.upper()) if schemaIndex else None
-    if tableCols is None:
+    if schemaIndex is None:
+        # 真没缓存：数据源没 introspect 过。提示「未缓存」让用户去调 introspect。
         return [], [BlockedProperty(p.property_name, "数据源 schema 未缓存") for p in properties]
+    tableCols = schemaIndex.tables.get(ctx.source_table.upper())
+    if tableCols is None:
+        # 缓存了但表名不在里面：常见于源表名拼错、或 owner/schema 选错（Oracle
+        # 不同 schema 同名表互不可见）。明确告知表名，避免让用户误以为要去重跑
+        # introspect，实则是映射配置问题。
+        return [], [
+            BlockedProperty(p.property_name, f"找不到对应的表 {ctx.source_table}")
+            for p in properties
+        ]
 
     suggestions: list[RuleSuggestion] = []
     blocked: list[BlockedProperty] = []
@@ -269,6 +294,8 @@ def _deriveJoinConsistency(
                 out.append(_makeSuggestion(
                     ctx, prop, RuleType.CONSISTENCY, DerivationType.JOIN_CONSISTENCY,
                     expr, "MEDIUM", "join 日期一致性",
+                    extraSlugParts=[edge.target_table, targetDate],
+                    extraHashParts=[edge.target_table, targetDate],
                 ))
     return out
 
@@ -293,13 +320,19 @@ def _makeSuggestion(
     confidence: str,
     reason: str,
     severity: Severity | None = None,
+    extraSlugParts: list[str] | None = None,
+    extraHashParts: list[str] | None = None,
 ) -> RuleSuggestion:
     threshold, defaultSeverity = _THRESHOLD_SEVERITY.get(
         ruleType, (Decimal("95"), Severity.MEDIUM)
     )
     validate_expression(expression)
     return RuleSuggestion(
-        rule_code=buildRuleCode(ctx.class_name, prop.property_name, ruleType),
+        rule_code=buildRuleCode(
+            ctx.class_name, prop.property_name, ruleType,
+            extraSlugParts=extraSlugParts,
+            extraHashParts=extraHashParts,
+        ),
         rule_name=f"{prop.property_name} {ruleType.value}",
         rule_type=ruleType,
         target_table=ctx.source_table or "",

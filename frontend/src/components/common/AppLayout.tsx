@@ -8,6 +8,7 @@ import type { MenuConfig, MenuItem, MenuSection } from "../../types/menuConfig";
 import { FALLBACK_NAV } from "./fallbackNav";
 import { renderIcon } from "./menuIcons";
 import LanguageSwitch from "./LanguageSwitch";
+import MessageBell from "../MessageBell";
 
 const { Sider, Header, Content } = Layout;
 const { useToken } = theme;
@@ -159,6 +160,7 @@ export default function AppLayout() {
             unCheckedChildren={t("appLayout.themeLight")}
           />
           <LanguageSwitch />
+          <MessageBell />
         </Header>
         <Content style={{ margin: 24, background: token.colorBgContainer, borderRadius: 8 }}>
           <Outlet />

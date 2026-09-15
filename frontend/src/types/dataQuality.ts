@@ -25,6 +25,9 @@ export interface DataQualityRule {
   version: string;
   owner: string | null;
   description: string | null;
+  /** 后端 DataQualityRuleRead.source_class_id，nullable（历史/无对象归属规则） */
+  sourceClassId?: number | null;
+  sourcePropertyId?: number | null;
   createdTime: string | null;
   updatedTime: string | null;
 }
@@ -63,11 +66,13 @@ export interface DataQualityRuleUpdate {
 export interface DataQualityRuleListParams {
   ruleType?: RuleType;
   targetTable?: string;
+  targetTables?: string[];
   enabledOnly?: boolean;
   ruleName?: string;
   datasourceId?: number;
   severity?: Severity;
   enabled?: "all" | "enabled" | "disabled";
+  sourceClassId?: number;
 }
 
 /** GET /data-quality/rules/options 响应（feat-dq-rule-list-filters）。 */
@@ -76,9 +81,15 @@ export interface DatasourceOption {
   name: string;
 }
 
+export interface ClassOption {
+  id: number;
+  className: string;
+}
+
 export interface RuleOptions {
   ruleNames: string[];
   datasourceIds: DatasourceOption[];
   targetTables: string[];
   severities: Severity[];
+  classOptions: ClassOption[];
 }

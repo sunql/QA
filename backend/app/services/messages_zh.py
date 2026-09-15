@@ -123,6 +123,12 @@ MSG_DQ_EVAL_TARGET_COLUMN_REQUIRED = (
 )
 MSG_DQ_EVAL_DATASOURCE_NOT_FOUND = "评估 DQ 规则 {ruleId} 找不到关联业务数据源"
 MSG_DQ_EVAL_RULE_TYPE_UNSUPPORTED = "不支持的数据质量规则类型: {ruleType}"
+# feat-eval-fail-reason (2026-09-15)：FAIL 时填 message，让前端能看到「为什么没通过」。
+# 模板：实际通过率 < 阈值；总 N 条 / 通过 M 条
+MSG_DQ_EVAL_FAIL_REASON = (
+    "未通过：实际通过率 {passRate}% < 阈值 {threshold}%"
+    "（总 {total} 条，通过 {passed} 条）"
+)
 
 
 # =============================================================================
@@ -526,3 +532,13 @@ MSG_DQ_GEN_RULE_SKIPPED_DUPLICATE = "规则「{rule_code}」已存在，已跳�
 # =============================================================================
 
 MSG_SESSION_NOT_OWNED = "会话不存在或不属于当前用户"
+
+# =============================================================================
+# 数据质量评估报告（feat-dq-evaluation-report）
+# =============================================================================
+
+MSG_DQ_EVAL_REPORT_NOT_FOUND = "评估报告 id={id} 不存在"
+MSG_DQ_EVAL_REPORT_NAME_EXISTS = "评估报告名称「{name}」已存在"
+MSG_DQ_EVAL_REPORT_CLASS_NOT_FOUND = "本体类 id={id} 不存在"
+MSG_DQ_EVAL_REPORT_RULE_NOT_FOUND = "数据质量规则 id={id} 不存在"
+MSG_DQ_EVAL_REPORT_NAME_TOO_LONG = "评估报告名称长度不能超过 {max} 字符"

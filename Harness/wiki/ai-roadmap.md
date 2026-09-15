@@ -47,6 +47,9 @@ AI 可信度集成        自动解析              缺失对象建模          
 | `feat-data-quality-rule-model` | 1.5-2 周 | 完成（2026-08-29） |
 | `feat-data-quality-evaluator` | 1.5-2 周 | 完成（2026-08-30） |
 | `feat-data-quality-score-model` | 0.5 周 | 完成（2026-08-30） |
+| `feat-dq-rule-list-filters` | 0.5 周 | 完成（2026-09-10） |
+| `feat-dq-multi-select-batch-eval` | 0.3 周 | 完成（2026-09-14） |
+| `feat-llm-panel-dedup-key` | 0.1 周 | 完成（2026-09-14 bugfix） |
 | `feat-nl2sql-quality-integration` | 1 周 | 待启动 |
 
 ### Phase 2 — L3 数据治理：数据血缘（P0）

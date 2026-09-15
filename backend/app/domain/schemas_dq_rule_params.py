@@ -5,10 +5,12 @@
 """
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from re import compile as re_compile
 from typing import Annotated, Any, Literal, Union
 
+from app.domain.enums import RuleType, Severity
 from pydantic import (
     BaseModel, Discriminator, Field, TypeAdapter, field_validator, model_validator,
 )
@@ -120,3 +122,64 @@ class RuleParamsRead(BaseModel):
     """响应里回显的 params 形态：kind + 原始 payload（前端回填用）。"""
     kind: str
     raw: dict
+
+
+class DataQualityRuleParamsCreate(BaseModel):
+    """结构化模式 create DTO；service 写入时编译 params → rule_expression。"""
+    rule_code: str = Field(min_length=1, max_length=200)
+    rule_name: str = Field(min_length=1, max_length=200)
+    rule_type: RuleType
+    target_table: str = Field(pattern=_IDENT_PATTERN)
+    target_column: str | None = Field(default=None, pattern=_IDENT_PATTERN)
+    threshold: Decimal
+    severity: Severity
+    datasource_id: int
+    rule_params: dict | None = None
+    rule_expression: str | None = None
+
+    @model_validator(mode="after")
+    def _mutex(self) -> "DataQualityRuleParamsCreate":
+        params = self.rule_params
+        expr = self.rule_expression
+        if self.rule_type in (RuleType.VALIDITY, RuleType.CONSISTENCY, RuleType.REFERENTIAL):
+            if params is None and expr is None:
+                raise ValueError(
+                    f"{self.rule_type.value} 规则必须提供 rule_params 或 rule_expression"
+                )
+        if params is not None and expr is not None:
+            raise ValueError("结构化模式忽略客户端 rule_expression；不要两者同时提供")
+        return self
+
+
+class DataQualityRuleParamsUpdate(BaseModel):
+    """结构化模式 update DTO；互斥规则同 create。"""
+    rule_name: str | None = Field(default=None, min_length=1, max_length=200)
+    threshold: Decimal | None = None
+    severity: Severity | None = None
+    target_column: str | None = Field(default=None, pattern=_IDENT_PATTERN)
+    rule_params: dict | None = None
+    rule_expression: str | None = None
+
+    @model_validator(mode="after")
+    def _mutex(self) -> "DataQualityRuleParamsUpdate":
+        if self.rule_params is not None and self.rule_expression is not None:
+            raise ValueError("结构化模式忽略客户端 rule_expression；不要两者同时提供")
+        return self
+
+
+class DataQualityRuleParamsRead(BaseModel):
+    """结构化模式 read DTO；config_mode 由 rule_params 是否存在派生。"""
+    id: int
+    rule_code: str
+    rule_name: str
+    rule_type: RuleType
+    target_table: str
+    target_column: str | None
+    threshold: Decimal
+    severity: Severity
+    datasource_id: int
+    rule_expression: str | None
+    rule_params: dict | None
+    config_mode: Literal["structured", "custom"]
+    created_time: datetime | None = None
+    updated_time: datetime | None = None

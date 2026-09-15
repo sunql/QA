@@ -909,6 +909,11 @@ class DataQualityRule(Base, TimestampMixin):
     target_column: Mapped[str | None] = mapped_column(String(100), nullable=True)
     rule_type: Mapped[RuleType] = mapped_column(String(20), nullable=False)
     rule_expression: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # feat-dq-rule-params v1：结构化规则参数；与 rule_expression 二选一（NULL=自定义模式）。
+    # 写时由 data_quality_rule_params_service 编译填值；evaluator 不读此列。
+    rule_params: Mapped[dict[str, Any] | None] = mapped_column(
+        postgresql.JSONB(astext_type=sa.Text()), nullable=True,
+    )
     threshold: Mapped[Decimal] = mapped_column(
         Numeric(5, 2), nullable=False, default=Decimal("95.00")
     )

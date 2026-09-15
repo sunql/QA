@@ -87,8 +87,26 @@ def _compileCompare(rule: DataQualityRule, params: dict) -> str:
     return f"{col} {p.op} {p.value}"
 
 
+def _compileRef(rule: DataQualityRule, params: dict) -> str:
+    p = _validateParams("ref", params)
+    ref_table = validate_identifier(p.ref_table, role="ref_table")
+    ref_column = validate_identifier(p.ref_column, role="ref_column")
+    return f"REF {ref_table}.{ref_column}"
+
+
+def _compileCrossColumn(rule: DataQualityRule, params: dict) -> str:
+    p = _validateParams("cross_column", params)
+    left = validate_identifier(p.left, role="left")
+    right = validate_identifier(p.right, role="right")
+    left_q = quote_identifier(None, left)
+    right_q = quote_identifier(None, right)
+    if p.factor is not None:
+        return f"{left_q} {p.op} {right_q} * {p.factor}"
+    return f"{left_q} {p.op} {right_q}"
+
+
 def _dispatch() -> dict[RuleType, dict[str, Callable[[DataQualityRule, dict], str]]]:
-    """(rule_type, kind) -> 编译函数 路由表。Task 5 在此追加 ref / cross_column。"""
+    """(rule_type, kind) -> 编译函数 路由表。Task 5 已加 ref / cross_column。"""
     return {
         RuleType.COMPLETENESS: {"not_null": _compileNotNull},
         RuleType.UNIQUENESS: {"unique": _compileUnique},
@@ -98,11 +116,16 @@ def _dispatch() -> dict[RuleType, dict[str, Callable[[DataQualityRule, dict], st
             "regex": _compileRegex,
             "compare": _compileCompare,
         },
+        RuleType.REFERENTIAL: {"ref": _compileRef},
+        RuleType.CONSISTENCY: {"cross_column": _compileCrossColumn},
     }
 
 
 def compileRuleParams(rule: DataQualityRule, params: dict[str, Any]) -> str:
-    """按 (rule_type, kind) 路由到 _compile<Kind>；params 先过 RuleParams 校验。"""
+    """按 (rule_type, kind) 路由到 _compile<Kind>；params 先过 RuleParams 校验。
+
+    kind 必传（schema-as-SSOT）；调用方应传完整 params（kind + kind 对应字段）。
+    """
     ruleType = RuleType(rule.rule_type)
     validated = RuleParams.model_validate(params)
     fn = _dispatch().get(ruleType, {}).get(validated.kind)

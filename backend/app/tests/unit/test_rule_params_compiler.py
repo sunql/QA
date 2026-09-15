@@ -11,9 +11,11 @@ from pydantic import ValidationError as PydanticValidationError
 from app.services.data_quality_evaluators._common import validate_expression
 from app.services.data_quality_evaluators.rule_params_compiler import (
     _compileCompare,
+    _compileCrossColumn,
     _compileInSet,
     _compileNotNull,
     _compileRange,
+    _compileRef,
     _compileRegex,
     _compileUnique,
     compileRuleParams,
@@ -176,3 +178,76 @@ class TestDispatcherValidity:
         assert "IN (" in compileRuleParams(rule, {"kind": "in_set", "values": ["A"]})
         assert "~" in compileRuleParams(rule, {"kind": "regex", "pattern": "^x$"})
         assert "> 0" in compileRuleParams(rule, {"kind": "compare", "op": ">", "value": 0})
+
+
+class TestCompileRef:
+    def test_basic(self):
+        rule = _rule(RuleType.REFERENTIAL, "SUPPLIER_KEY")
+        out = _compileRef(rule, {"ref_table": "SUPPLIER", "ref_column": "SUPPLIER_KEY"})
+        assert out == "REF SUPPLIER.SUPPLIER_KEY"
+
+    def test_whitelist(self):
+        rule = _rule(RuleType.REFERENTIAL, "SUPPLIER_KEY")
+        validate_expression(_compileRef(rule, {"ref_table": "SUPPLIER", "ref_column": "SUPPLIER_KEY"}))
+
+    def test_invalid_identifier_raises(self):
+        rule = _rule(RuleType.REFERENTIAL, "SUPPLIER_KEY")
+        with pytest.raises(Exception):
+            _compileRef(rule, {"ref_table": "1BAD", "ref_column": "X"})
+
+
+class TestCompileCrossColumn:
+    def test_no_factor(self):
+        rule = _rule(RuleType.CONSISTENCY, "RECEIVED_QTY")
+        out = _compileCrossColumn(rule, {
+            "left": "RECEIVED_QTY", "op": "<=", "right": "ORDER_QTY",
+        })
+        assert out == '"RECEIVED_QTY" <= "ORDER_QTY"'
+
+    def test_with_factor(self):
+        rule = _rule(RuleType.CONSISTENCY, "RECEIVED_QTY")
+        out = _compileCrossColumn(rule, {
+            "left": "RECEIVED_QTY", "op": "<=", "right": "ORDER_QTY", "factor": 1.05,
+        })
+        assert out == '"RECEIVED_QTY" <= "ORDER_QTY" * 1.05'
+
+    def test_whitelist(self):
+        rule = _rule(RuleType.CONSISTENCY, "RECEIVED_QTY")
+        validate_expression(_compileCrossColumn(rule, {
+            "left": "RECEIVED_QTY", "op": "<=", "right": "ORDER_QTY", "factor": 1.05,
+        }))
+
+
+class TestDispatcherFull:
+    def test_referential(self):
+        rule = _rule(RuleType.REFERENTIAL, "SUPPLIER_KEY")
+        out = compileRuleParams(rule, {
+            "kind": "ref", "ref_table": "SUPPLIER", "ref_column": "SUPPLIER_KEY",
+        })
+        assert out.startswith("REF ")
+
+    def test_consistency(self):
+        rule = _rule(RuleType.CONSISTENCY, "RECEIVED_QTY")
+        out = compileRuleParams(rule, {
+            "kind": "cross_column",
+            "left": "RECEIVED_QTY", "op": "<=", "right": "ORDER_QTY", "factor": 1.05,
+        })
+        assert "RECEIVED_QTY" in out and "ORDER_QTY" in out
+
+
+@pytest.mark.parametrize("ruleType,params", [
+    (RuleType.COMPLETENESS, {"kind": "not_null"}),
+    (RuleType.UNIQUENESS, {"kind": "unique"}),
+    (RuleType.VALIDITY, {"kind": "range", "min": 0, "max": 100}),
+    (RuleType.VALIDITY, {"kind": "in_set", "values": ["A", "B"]}),
+    (RuleType.VALIDITY, {"kind": "regex", "pattern": "^[0-9]+$"}),
+    (RuleType.VALIDITY, {"kind": "compare", "op": ">", "value": 0}),
+    (RuleType.REFERENTIAL, {"kind": "ref", "ref_table": "SUPPLIER", "ref_column": "SUPPLIER_KEY"}),
+    (RuleType.CONSISTENCY, {"kind": "cross_column",
+                            "left": "A", "op": "<=", "right": "B", "factor": 1.05}),
+])
+def test_all_kinds_pass_whitelist(ruleType, params):
+    rule = _rule(ruleType, "PO_LINE_KEY")
+    out = compileRuleParams(rule, params)
+    validate_expression(out)
+

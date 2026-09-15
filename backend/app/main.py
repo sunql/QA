@@ -246,6 +246,7 @@ def createApp() -> FastAPI:
         data_lineage,
         data_quality,
         data_quality_generate,
+        data_quality_rule_params,
         datasource,
         documents,
         embedding_provider,
@@ -290,6 +291,11 @@ def createApp() -> FastAPI:
     app.include_router(local_import.router, prefix="/api/v1/datasources", tags=["datasources"])
     app.include_router(
         data_quality.router, prefix="/api/v1/data-quality/rules", tags=["data-quality"]
+    )
+    app.include_router(
+        data_quality_rule_params.router,
+        prefix="/api/v1",
+        tags=["dq-rule-params"],
     )
     app.include_router(
         data_quality.scores_router,

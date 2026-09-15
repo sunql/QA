@@ -74,6 +74,7 @@ class DataQualityRuleParamsService:
         self._session.add(rule)
         await self._session.flush()
         await self._session.refresh(rule)
+        await self._session.commit()
         return _toRead(rule)
 
     async def update(self, rule_id: int, dto: DataQualityRuleParamsUpdate) -> DataQualityRuleParamsRead:
@@ -98,6 +99,7 @@ class DataQualityRuleParamsService:
             rule.rule_expression = dto.rule_expression
         await self._session.flush()
         await self._session.refresh(rule)
+        await self._session.commit()
         return _toRead(rule)
 
     async def delete(self, rule_id: int) -> None:
@@ -106,6 +108,7 @@ class DataQualityRuleParamsService:
             raise NotFoundError(f"规则 id={rule_id} 不存在")
         await self._session.delete(rule)
         await self._session.flush()
+        await self._session.commit()
 
     @staticmethod
     def _compileIfStructured(params: dict, ruleType: RuleType, targetColumn: str | None) -> str:

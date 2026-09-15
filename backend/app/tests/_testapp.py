@@ -26,6 +26,7 @@ from app.api.v1 import (
     data_lineage,
     data_quality,
     data_quality_generate,
+    data_quality_rule_params,
     datasource,
     documents,
     embedding_provider,
@@ -123,6 +124,11 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         data_quality.scores_router,
         prefix="/api/v1/data-quality/scores",
         tags=["data-quality"],
+    )
+    testApp.include_router(
+        data_quality_rule_params.router,
+        prefix="/api/v1",
+        tags=["dq-rule-params"],
     )
     testApp.include_router(
         data_quality_generate.router,

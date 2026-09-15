@@ -12,22 +12,33 @@ from typing import Annotated, Any, Literal, Union
 
 from app.domain.enums import RuleType, Severity
 from pydantic import (
-    BaseModel, Discriminator, Field, TypeAdapter, field_validator, model_validator,
+    BaseModel, ConfigDict, Discriminator, Field, TypeAdapter,
+    field_validator, model_validator,
 )
+from pydantic.alias_generators import to_camel
+
+
+class _Base(BaseModel):
+    """DTO 基类：snake_case 字段名 + camelCase JSON 别名，与项目其他 DTO 对齐。"""
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        from_attributes=True,
+    )
 
 _IDENT_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
 _ALLOWED_OPS = (">", ">=", "<", "<=", "=", "!=")
 
 
-class _NotNullParams(BaseModel):
+class _NotNullParams(_Base):
     kind: Literal["not_null"]
 
 
-class _UniqueParams(BaseModel):
+class _UniqueParams(_Base):
     kind: Literal["unique"]
 
 
-class _RangeParams(BaseModel):
+class _RangeParams(_Base):
     kind: Literal["range"]
     min: Decimal | None = None
     max: Decimal | None = None
@@ -39,7 +50,7 @@ class _RangeParams(BaseModel):
         return self
 
 
-class _InSetParams(BaseModel):
+class _InSetParams(_Base):
     kind: Literal["in_set"]
     values: list[str] = Field(min_length=1)
 
@@ -55,7 +66,7 @@ class _InSetParams(BaseModel):
         return v
 
 
-class _RegexParams(BaseModel):
+class _RegexParams(_Base):
     kind: Literal["regex"]
     pattern: str = Field(min_length=1, max_length=500)
 
@@ -69,19 +80,19 @@ class _RegexParams(BaseModel):
         return v
 
 
-class _CompareParams(BaseModel):
+class _CompareParams(_Base):
     kind: Literal["compare"]
     op: Literal[">", ">=", "<", "<=", "=", "!="]
     value: Decimal
 
 
-class _RefParams(BaseModel):
+class _RefParams(_Base):
     kind: Literal["ref"]
     ref_table: str = Field(pattern=_IDENT_PATTERN)
     ref_column: str = Field(pattern=_IDENT_PATTERN)
 
 
-class _CrossColumnParams(BaseModel):
+class _CrossColumnParams(_Base):
     kind: Literal["cross_column"]
     left: str = Field(pattern=_IDENT_PATTERN)
     op: Literal[">", ">=", "<", "<=", "=", "!="]
@@ -118,13 +129,13 @@ class RuleParams:
         return _adapter.validate_python(obj)
 
 
-class RuleParamsRead(BaseModel):
+class RuleParamsRead(_Base):
     """响应里回显的 params 形态：kind + 原始 payload（前端回填用）。"""
     kind: str
     raw: dict
 
 
-class DataQualityRuleParamsCreate(BaseModel):
+class DataQualityRuleParamsCreate(_Base):
     """结构化模式 create DTO；service 写入时编译 params → rule_expression。"""
     rule_code: str = Field(min_length=1, max_length=200)
     rule_name: str = Field(min_length=1, max_length=200)
@@ -151,7 +162,7 @@ class DataQualityRuleParamsCreate(BaseModel):
         return self
 
 
-class DataQualityRuleParamsUpdate(BaseModel):
+class DataQualityRuleParamsUpdate(_Base):
     """结构化模式 update DTO；互斥规则同 create。"""
     rule_name: str | None = Field(default=None, min_length=1, max_length=200)
     threshold: Decimal | None = None
@@ -167,7 +178,7 @@ class DataQualityRuleParamsUpdate(BaseModel):
         return self
 
 
-class DataQualityRuleParamsRead(BaseModel):
+class DataQualityRuleParamsRead(_Base):
     """结构化模式 read DTO；config_mode 由 rule_params 是否存在派生。"""
     id: int
     rule_code: str

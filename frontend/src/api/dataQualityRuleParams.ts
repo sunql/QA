@@ -10,8 +10,9 @@ import type {
 const BASE = "/dq-rule-params/rules";
 
 export async function listRules(datasourceId?: number): Promise<RuleParamsReadDto[]> {
+  // Query param name stays snake_case to match FastAPI Query("datasource_id")
   const res = await httpClient.get<RuleParamsReadDto[]>(BASE, {
-    params: datasourceId !== undefined ? { datasourceId } : undefined,
+    params: datasourceId !== undefined ? { datasource_id: datasourceId } : undefined,
   });
   return res.data;
 }

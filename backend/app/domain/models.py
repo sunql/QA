@@ -52,6 +52,7 @@ from app.domain.enums import (
     LineageLayer,
     MatchRule,
     RefreshFrequency,
+    ReportTimeWindowType,
     RuleOperator,
     RuleType,
     ScoreType,
@@ -1902,7 +1903,12 @@ class EvaluationReportSchedule(Base, TimestampMixin):
 
     __table_args__ = (
         CheckConstraint(
-            "time_window_type IN ('LAST_7D','LAST_30D','LAST_RUN')",
+            # IN 列表从 ReportTimeWindowType 枚举派生，避免加第四个值时漏改 schema / ORM / scheduler / models 四处。
+            (
+                "time_window_type IN ("
+                + ",".join(f"'{t.value}'" for t in ReportTimeWindowType)
+                + ")"
+            ),
             name="ck_evaluation_report_schedule_window",
         ),
         Index(

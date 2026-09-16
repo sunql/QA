@@ -41,6 +41,7 @@ from app.domain.enums import (
     MatchRule,
     ObjectType,
     RefreshFrequency,
+    ReportTimeWindowType,
     RiskLevel,
     RuleType,
     RuleOperator,
@@ -3349,16 +3350,20 @@ class EvaluationReportScheduleCreate(CamelModel):
     cron_expression: str = Field(..., min_length=1, max_length=100)
     class_ids: list[int] = Field(..., min_length=1)
     rule_ids: list[int] = Field(..., min_length=1)
-    time_window_type: str = Field(...)  # LAST_7D|LAST_30D|LAST_RUN
+    time_window_type: ReportTimeWindowType
     recipients: list[str] = Field(default_factory=list)  # user_id[]
     enabled: bool = Field(default=True)
 
-    @field_validator("time_window_type")
+    @field_validator("time_window_type", mode="before")
     @classmethod
-    def _validate_window_type(cls, v: str) -> str:
-        if v not in {"LAST_7D", "LAST_30D", "LAST_RUN"}:
-            raise ValueError(f"unsupported time_window_type: {v}")
-        return v
+    def _coerce_window_type(cls, v: Any) -> ReportTimeWindowType:
+        # 入参可能是 ORM Enum 实例 / 字符串，统一走枚举校验：
+        # schema 接受 3 个枚举值（LAST_7D / LAST_30D / LAST_RUN），
+        # 不再裸定义字符串集合（避免加第四个值时漏改）。
+        try:
+            return ReportTimeWindowType(v)
+        except ValueError as e:
+            raise ValueError(f"unsupported time_window_type: {v}") from e
 
 
 class EvaluationReportScheduleUpdate(CamelModel):

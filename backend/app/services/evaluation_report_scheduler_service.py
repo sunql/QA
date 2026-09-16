@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
+from app.domain.enums import ReportStatus, ReportTimeWindowType
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import EvaluationReport, EvaluationReportSchedule
 from app.domain.schemas import (
@@ -29,25 +30,27 @@ from app.services.evaluation_report_service import EvaluationReportService
 logger = logging.getLogger(__name__)
 
 
-_WINDOW_OFFSETS = {
-    "LAST_7D": timedelta(days=7),
-    "LAST_30D": timedelta(days=30),
+_WINDOW_OFFSETS: dict[ReportTimeWindowType, timedelta] = {
+    ReportTimeWindowType.LAST_7D: timedelta(days=7),
+    ReportTimeWindowType.LAST_30D: timedelta(days=30),
     # LAST_RUN：从上一次 last_run_at 到 now；首次跑取 7 天兜底
 }
 
 
 def _resolve_window(
-    window_type: str,
+    window_type: ReportTimeWindowType,
     last_run_at: datetime | None,
 ) -> tuple[datetime, datetime]:
     """根据 window_type 算本次评估的 [start, end]。end = now()，start 按 type 倒推。"""
     end = datetime.now(UTC)
-    if window_type == "LAST_RUN" and last_run_at is not None:
+    if window_type == ReportTimeWindowType.LAST_RUN and last_run_at is not None:
         start = last_run_at
-    elif window_type == "LAST_RUN":
-        start = end - _WINDOW_OFFSETS["LAST_7D"]
+    elif window_type == ReportTimeWindowType.LAST_RUN:
+        start = end - _WINDOW_OFFSETS[ReportTimeWindowType.LAST_7D]
     else:
-        start = end - _WINDOW_OFFSETS.get(window_type, _WINDOW_OFFSETS["LAST_7D"])
+        start = end - _WINDOW_OFFSETS.get(
+            window_type, _WINDOW_OFFSETS[ReportTimeWindowType.LAST_7D]
+        )
     return start, end
 
 
@@ -264,7 +267,7 @@ class EvaluationReportSchedulerService:
                 time_window_start=start,
                 time_window_end=end,
                 tags=["scheduler"],
-                status="PUBLISHED",
+                status=ReportStatus.PUBLISHED.value,
             )
             actor = CurrentUser(
                 userId=f"scheduler:{schedule.id}",

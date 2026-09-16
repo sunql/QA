@@ -37,6 +37,7 @@ import AdminRolesPage from "./pages/AdminRolesPage";
 import AdminOrganizationsPage from "./pages/AdminOrganizationsPage";
 import AdminMenusPage from "./pages/AdminMenusPage";
 import AdminSystemConfigPage from "./pages/AdminSystemConfigPage";
+import { ProfilePage } from "./pages/ProfilePage";
 import AdminWikiImportPage from "./pages/AdminWikiImportPage";
 import AdminWikiPagesPage from "./pages/AdminWikiPagesPage";
 import AdminWikiConflictsPage from "./pages/AdminWikiConflictsPage";
@@ -107,6 +108,7 @@ export default function App() {
         <Route path="business-objects" element={<BusinessObjectPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />
+        <Route path="profile" element={<ProfilePage />} />
       </Route>
     </Routes>
   );

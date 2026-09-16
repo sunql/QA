@@ -64,4 +64,18 @@ describe("Neo4jGraphPage — Segmented 切换", () => {
       expect(document.body.textContent).toContain("业务图");
     });
   });
+
+  it("切换到 业务图 Tab → 不带 label=业务图 调 listGraphNodes（后端白名单外会 422）", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() =>
+      expect(api.listGraphNodes).toHaveBeenCalledWith("Class", ""),
+    );
+
+    await user.click(screen.getByText(/业务图/));
+
+    // 等一拍，确认没有新增带「业务图」label 的请求
+    await new Promise((r) => setTimeout(r, 50));
+    expect(api.listGraphNodes).toHaveBeenCalledTimes(1);
+  });
 });

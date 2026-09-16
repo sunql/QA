@@ -125,6 +125,20 @@ def _logNeo4jFailure(operation: str, entityId: int, exc: Exception) -> None:
         logger.warning("Neo4j %s 失败 id=%d: %s", operation, entityId, exc)
 
 
+def _classEmbeddingText(cls: OntologyClass) -> str:
+    """类向量文本：类名 + 别名 + 描述（与 backfill_milvus_embeddings.py 同口径）。
+
+    中英文混合召回：类名保英文命中（PurchaseOrder），别名/描述保中文命中（采购订单）。
+    """
+    return " ".join(
+        x for x in (cls.class_name, cls.class_alias, cls.description) if x
+    )
+
+
+# 自动同步后台任务的强引用集合（create_task 弱引用会被 GC，需持握防丢失）
+_PENDING_SYNC_TASKS: set[asyncio.Task] = set()
+
+
 def makeJoinKey(
     sourceClassId: int,
     sourceColumns: list[str],
@@ -240,6 +254,11 @@ class OntologyService:
             _logNeo4jFailure("节点创建", entity.id, exc)
 
         logger.info("创建本体类 id=%d name=%s version=1", entity.id, entity.class_name)
+
+        # Milvus 类向量自动同步（best-effort，与 Neo4j 同策略：
+        # 向量缺失会让 chat 类召回裁剪看不到该类——历史事故见 backfill_milvus_embeddings.py）
+        await self._syncClassEmbeddingBestEffort(entity)
+
         return entity
 
     async def getClass(self, session: AsyncSession, id: int) -> OntologyClass:
@@ -388,6 +407,10 @@ class OntologyService:
             _logNeo4jFailure("节点更新", existing.id, exc)
 
         logger.info("更新本体类 id=%d name=%s", existing.id, existing.class_name)
+
+        # Milvus 类向量自动重同步（id 不变，先删后插幂等覆盖旧向量）
+        await self._syncClassEmbeddingBestEffort(existing)
+
         return existing
 
     async def deleteClass(
@@ -1188,3 +1211,123 @@ class OntologyService:
         except Exception as exc:  # noqa: BLE001
             logger.error("Milvus embedding 同步失败 id=%d: %s", ontologyId, exc)
             raise OntologyError(MSG_VECTOR_SYNC_FAILED.format(exc=exc)) from exc
+
+    async def syncClassEmbedding(self, session: AsyncSession, id: int) -> None:
+        """手动同步单个类的向量：以 PG 当前数据重新生成 embedding 并覆盖 Milvus。
+
+        类不存在时抛 NotFoundError（404）。
+        """
+        entity = await self.getClass(session, id)
+        vec = await self._ensureEmbedding().generateEmbedding(
+            _classEmbeddingText(entity)
+        )
+        self.syncEmbedding(
+            ontologyId=entity.id,
+            type="class",
+            name=entity.class_name,
+            alias=entity.class_alias,
+            description=entity.description,
+            embedding=vec,
+        )
+
+    async def syncMissingClassEmbeddings(
+        self, session: AsyncSession
+    ) -> dict[str, Any]:
+        """向量对账：为 PG 有而 Milvus 无向量 未软删的类补生成向量。
+
+        以 PG 为唯一真源（与 scripts/backfill_milvus_embeddings.py --cleanup 同口径）。
+        缺失实体无需先 delete，直接整批插入（单次 flush）——逐条 syncEmbedding
+        在当前 Milvus 部署下单条可达 10-25s，批量场景必须整批。单条向量生成
+        失败不中断，错误聚合进 failures。
+        返回对账摘要（total/missing/synced/failed）。
+        """
+        classes = await self.listClasses(session)
+        rows = milvus.listAllEmbeddings()
+        presentClassIds = {
+            r["ontology_id"] for r in rows if r.get("type") == "class"
+        }
+        missing = [c for c in classes if c.id not in presentClassIds]
+
+        records: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        for cls in missing:
+            try:
+                vec = await self._ensureEmbedding().generateEmbedding(
+                    _classEmbeddingText(cls)
+                )
+                records.append({
+                    "ontology_id": cls.id,
+                    "type": "class",
+                    "name": cls.class_name,
+                    "alias": cls.class_alias,
+                    "description": cls.description,
+                    "embedding": vec,
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "缺失类向量生成失败 id=%d name=%s: %s",
+                    cls.id, cls.class_name, exc,
+                )
+                failures.append({
+                    "classId": cls.id,
+                    "className": cls.class_name,
+                    "error": str(exc),
+                })
+
+        if records:
+            try:
+                milvus.insertEmbeddings(records)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("缺失类向量整批插入失败 %d 条: %s", len(records), exc)
+                failures.extend(
+                    {
+                        "classId": r["ontology_id"],
+                        "className": r["name"],
+                        "error": str(exc),
+                    }
+                    for r in records
+                )
+                records = []
+
+        logger.info(
+            "类向量对账完成 total=%d missing=%d synced=%d failed=%d",
+            len(classes), len(missing), len(records), len(failures),
+        )
+        return {
+            "totalClasses": len(classes),
+            "missingCount": len(missing),
+            "syncedCount": len(records),
+            "failedCount": len(failures),
+            "failures": failures,
+        }
+
+    async def _syncClassEmbeddingBestEffort(self, entity: OntologyClass) -> None:
+        """类向量自动同步（best-effort，后台执行）：失败仅告警，不影响 CRUD。
+
+        后台任务原因：syncEmbedding 的 delete+insert+flush 在当前 Milvus 部署
+        下单次可达 10-25s，await 会把类的新增/保存响应拖到同一量级。向量晚
+        数十秒落地对语义召回无感（chat 检索同样容忍 Neo4j/向量的最终一致）。
+        任务引用挂到模块级集合防 GC，完成即回收。
+        """
+        task = asyncio.create_task(self._syncClassEmbeddingNow(entity))
+        _PENDING_SYNC_TASKS.add(task)
+        task.add_done_callback(_PENDING_SYNC_TASKS.discard)
+
+    async def _syncClassEmbeddingNow(self, entity: OntologyClass) -> None:
+        try:
+            vec = await self._ensureEmbedding().generateEmbedding(
+                _classEmbeddingText(entity)
+            )
+            self.syncEmbedding(
+                ontologyId=entity.id,
+                type="class",
+                name=entity.class_name,
+                alias=entity.class_alias,
+                description=entity.description,
+                embedding=vec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Milvus 类向量自动同步失败 id=%d name=%s: %s",
+                entity.id, entity.class_name, exc,
+            )

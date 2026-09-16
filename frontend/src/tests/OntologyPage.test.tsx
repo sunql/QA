@@ -85,6 +85,8 @@ const api = vi.hoisted(() => ({
   downloadBatchTemplate: vi.fn(),
   parseBatchCsv: vi.fn(),
   searchOntology: vi.fn(),
+  syncClassEmbedding: vi.fn(),
+  syncMissingEmbeddings: vi.fn(),
 }));
 
 vi.mock("../api/ontology", () => api);
@@ -121,6 +123,40 @@ describe("OntologyPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Customer")).toBeInTheDocument();
       expect(screen.getByText("客户")).toBeInTheDocument();
+    });
+  });
+
+  it("类行「同步向量」按钮点击后调用 syncClassEmbedding", async () => {
+    const user = userEvent.setup();
+    api.syncClassEmbedding.mockResolvedValue(undefined);
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Customer")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /同步向量/ }));
+    await waitFor(() => {
+      expect(api.syncClassEmbedding).toHaveBeenCalledWith(1);
+    });
+  });
+
+  it("头部「补同步缺失向量」按钮点击后调用 syncMissingEmbeddings", async () => {
+    const user = userEvent.setup();
+    api.syncMissingEmbeddings.mockResolvedValue({
+      totalClasses: 96,
+      missingCount: 69,
+      syncedCount: 69,
+      failedCount: 0,
+      failures: [],
+    });
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Customer")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /补同步缺失向量/ }));
+    await waitFor(() => {
+      expect(api.syncMissingEmbeddings).toHaveBeenCalledTimes(1);
     });
   });
 

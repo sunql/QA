@@ -756,6 +756,44 @@ async def syncEmbedding(payload: EmbeddingSyncRequest) -> None:
     )
 
 
+class EmbeddingSyncFailure(BaseModel):
+    """对账补同步单条失败记录。"""
+
+    classId: int
+    className: str
+    error: str
+
+
+class EmbeddingSyncMissingResult(BaseModel):
+    """类向量对账摘要：以 PG 为真源补齐 Milvus 缺失的类向量。"""
+
+    totalClasses: int
+    missingCount: int
+    syncedCount: int
+    failedCount: int
+    failures: list[EmbeddingSyncFailure]
+
+
+@router.post(
+    "/embeddings/sync-missing",
+    response_model=EmbeddingSyncMissingResult,
+    status_code=status.HTTP_200_OK,
+)
+async def syncMissingEmbeddings(db: AsyncSession = Depends(getDb)) -> EmbeddingSyncMissingResult:
+    """向量对账：为 PG 有而 Milvus 缺失的未软删类补生成向量（批量人工同步入口）。"""
+    result = await _ontologyService.syncMissingClassEmbeddings(db)
+    return EmbeddingSyncMissingResult(**result)
+
+
+@router.post("/classes/{id}/embedding", status_code=status.HTTP_204_NO_CONTENT)
+async def syncClassEmbedding(
+    id: int,
+    db: AsyncSession = Depends(getDb),
+) -> None:
+    """手动同步单个类向量：服务端按 PG 当前数据重新生成 embedding 并覆盖 Milvus。"""
+    await _ontologyService.syncClassEmbedding(db, id)
+
+
 @router.get(
     "/search",
     response_model=list[OntologySearchResult],

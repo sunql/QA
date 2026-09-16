@@ -57,6 +57,8 @@ export default function Neo4jGraphPage() {
   }, [search]);
 
   const load = useCallback(async () => {
+    // 「业务图」tab 无节点列表可加载，后端 label 白名单只认 Class/Property/Metric
+    if (activeLabel === "业务图") return;
     setLoading(true);
     try {
       const data = await listGraphNodes(activeLabel, debouncedSearch);
@@ -146,7 +148,7 @@ export default function Neo4jGraphPage() {
             }}
           />
         </Space>
-        <Card bodyStyle={{ padding: 16 }} style={{ overflow: "hidden" }}>
+        <Card styles={{ body: { padding: 16 } }} style={{ overflow: "hidden" }}>
           <GraphTraversalPanel />
         </Card>
       </div>
@@ -179,7 +181,7 @@ export default function Neo4jGraphPage() {
         </Space.Compact>
       </Space>
 
-      <Card bodyStyle={{ padding: 0 }} style={{ overflow: "hidden" }}>
+      <Card styles={{ body: { padding: 0 } }} style={{ overflow: "hidden" }}>
         <Table
           rowKey="id"
           loading={loading}

@@ -12,12 +12,14 @@ import {
   Popconfirm,
   App,
 } from "antd";
-import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { PlusOutlined, ReloadOutlined, SyncOutlined } from "@ant-design/icons";
 import {
   createClass,
   updateClass,
   deleteClass,
   listClassVersions,
+  syncClassEmbedding,
+  syncMissingEmbeddings,
 } from "../../api/ontology";
 import type {
   ObjectType,
@@ -90,6 +92,54 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
   );
   const resetFilters = useCallback(() => setFilters({}), []);
   const filteredClasses = useMemo(() => filterClasses(classes, filters), [classes, filters]);
+  // 向量同步：单条进行中的类 id 集合 + 批量对账进行中标记
+  const [syncingIds, setSyncingIds] = useState<number[]>([]);
+  const [batchSyncing, setBatchSyncing] = useState(false);
+
+  const handleSyncEmbedding = useCallback(
+    async (record: OntologyClass) => {
+      setSyncingIds((prev) => [...prev, record.id]);
+      try {
+        await syncClassEmbedding(record.id);
+        message.success(
+          t("forms.ontology.syncEmbeddingSuccess", { name: record.className })
+        );
+      } catch {
+        // 错误已由拦截器提示
+      } finally {
+        setSyncingIds((prev) => prev.filter((id) => id !== record.id));
+      }
+    },
+    [message, t]
+  );
+
+  const handleSyncMissing = useCallback(async () => {
+    setBatchSyncing(true);
+    try {
+      const result = await syncMissingEmbeddings();
+      if (result.missingCount === 0) {
+        message.info(t("forms.ontology.syncMissingNone", { total: result.totalClasses }));
+      } else if (result.failedCount === 0) {
+        message.success(
+          t("forms.ontology.syncMissingSuccess", {
+            synced: result.syncedCount,
+            total: result.totalClasses,
+          })
+        );
+      } else {
+        message.warning(
+          t("forms.ontology.syncMissingPartial", {
+            synced: result.syncedCount,
+            failed: result.failedCount,
+          })
+        );
+      }
+    } catch {
+      // 错误已由拦截器提示
+    } finally {
+      setBatchSyncing(false);
+    }
+  }, [message, t]);
   const classFilterFields: FilterField[] = [
     { key: "className", label: t("forms.ontology.classLabels.className") },
     { key: "classAlias", label: t("forms.ontology.classLabels.classAlias") },
@@ -291,7 +341,7 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
     },
     {
       title: t("forms.ontology.classColumns.actions"),
-      width: 160,
+      width: 230,
       render: (_: unknown, record: OntologyClass) => (
         <Space>
           <Button size="small" onClick={() => openEdit(record)}>
@@ -299,6 +349,14 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
           </Button>
           <Button size="small" onClick={() => void openVersions(record)}>
             {t("common.version")}
+          </Button>
+          <Button
+            size="small"
+            icon={<SyncOutlined />}
+            loading={syncingIds.includes(record.id)}
+            onClick={() => void handleSyncEmbedding(record)}
+          >
+            {t("forms.ontology.syncEmbedding")}
           </Button>
           <Popconfirm
             title={t("forms.ontology.deleteConfirm")}
@@ -318,6 +376,13 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
         <span />
         <Space>
+          <Button
+            icon={<SyncOutlined />}
+            loading={batchSyncing}
+            onClick={() => void handleSyncMissing()}
+          >
+            {t("forms.ontology.syncMissingEmbeddings")}
+          </Button>
           <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             {t("common.refresh")}
           </Button>

@@ -48,6 +48,8 @@ import {
   previewOntologyBatch,
   downloadBatchTemplate,
   parseBatchCsv,
+  syncClassEmbedding,
+  syncMissingEmbeddings,
 } from "../api/ontology";
 
 // =============================================================================
@@ -367,5 +369,33 @@ describe("api/ontology — Batch Relation Engine", () => {
     axiosMock.postForm.mockRejectedValue({ response: { status: 422, data: { detail } } });
     await expect(parseBatchCsv(file, "relations")).rejects.toBeTruthy();
     expect(antdSpies.error).toHaveBeenCalledTimes(1);
+  });
+});
+
+// =============================================================================
+// Embedding 手动同步（向量对账）
+// =============================================================================
+
+describe("api/ontology — embedding 手动同步", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it("syncClassEmbedding POST /ontology/classes/{id}/embedding", async () => {
+    httpMock.post.mockResolvedValue({ data: null });
+    await syncClassEmbedding(20);
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/classes/20/embedding");
+  });
+
+  it("syncMissingEmbeddings POST /ontology/embeddings/sync-missing 并返回摘要", async () => {
+    const data = {
+      totalClasses: 96,
+      missingCount: 69,
+      syncedCount: 69,
+      failedCount: 0,
+      failures: [],
+    };
+    httpMock.post.mockResolvedValue({ data });
+    const result = await syncMissingEmbeddings();
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/embeddings/sync-missing");
+    expect(result).toEqual(data);
   });
 });

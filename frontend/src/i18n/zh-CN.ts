@@ -130,6 +130,8 @@ export const zhCN = {
       wikiCoverage: "覆盖度看板",
       wikiGraph: "知识图谱",
       dataQualityRuleParams: "数据质量 / 规则配置(结构化)",
+      profile: "个人中心",
+      changePassword: "修改密码",
     },
   },
 
@@ -1240,6 +1242,12 @@ export const zhCN = {
       semanticResultsCardTitle: "语义检索结果",
       semanticSearchPlaceholder: "语义搜索：如 客户销售额",
       deleteConfirm: "确认删除？",
+      syncEmbedding: "同步向量",
+      syncMissingEmbeddings: "补同步缺失向量",
+      syncEmbeddingSuccess: "类「{name}」向量已同步",
+      syncMissingNone: "全部 {total} 个类的向量已齐全，无需补同步",
+      syncMissingSuccess: "补同步完成：本次补 {synced} 条（共 {total} 个类）",
+      syncMissingPartial: "补同步完成：成功 {synced} 条，失败 {failed} 条（详情见后端日志）",
 
       classColumns: {
         id: "ID",
@@ -2600,5 +2608,20 @@ export const zhCN = {
       name: "名称",
       nameAutoHint: "自动生成：数据源名称-类名-规则名（英文）",
     },
+  },
+  profile: {
+    title: "个人中心",
+    authModeStubNotice:
+      "当前系统使用桩认证（X-User-Id 请求头），未接入真实登录；以下身份由请求头与数据库用户匹配解析。",
+    fields: {
+      userId: "用户标识",
+      displayName: "显示名称",
+      email: "邮箱",
+      roles: "角色",
+      departments: "所属组织",
+      identitySource: "身份来源",
+    },
+    identityDb: "数据库用户",
+    identityStub: "桩回退（未命中数据库用户）",
   },
 } as const;

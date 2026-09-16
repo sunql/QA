@@ -19,9 +19,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.rbac_grant import replaceSubjectMenuGrants
-from app.dependencies import CurrentUser, getAdminOnlyActor, getDb
+from app.dependencies import CurrentUser, getAdminOnlyActor, getCurrentUser, getDb
 from app.domain.enums import GrantSubjectType
-from app.domain.models import Organization, Role, UserOrganization, UserRole
+from app.domain.models import Organization, Role, User, UserOrganization, UserRole
 from app.schemas.rbac import (
     GrantSource,
     MenuCodesUpdate,
@@ -29,6 +29,7 @@ from app.schemas.rbac import (
     RoleIdsUpdate,
     UserCreate,
     UserEffectivePermissionsRead,
+    UserMeRead,
     UserRead,
     UserUpdate,
 )
@@ -108,6 +109,35 @@ async def listUsers(
     user_ids = [r.id for r in rows]
     roles, orgs = await _assoc_maps(session, user_ids)
     return [_to_user_read(r, roles[r.id], orgs[r.id]) for r in rows]
+
+
+# 注意：必须注册在 /{user_id} 之前。个人中心页（/profile）用。
+@router.get("/me", response_model=UserMeRead)
+async def getCurrentUserInfo(
+    user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> UserMeRead:
+    """当前调用方身份（非 admin-only）。
+
+    - X-User-Id 命中 DB 用户 → displayName/email 取 users 行，
+      roles/departments 已由 getCurrentUser 以 DB 为准富化；
+    - 桩回退 → dbUserId=null，displayName 回退 userId。
+    """
+    display_name = user.userId
+    email: str | None = None
+    if user.dbUserId is not None:
+        row = await session.get(User, user.dbUserId)
+        if row is not None:
+            display_name = row.display_name
+            email = row.email
+    return UserMeRead(
+        user_id=user.userId,
+        display_name=display_name,
+        email=email,
+        role_codes=list(user.roles or ()),
+        department_codes=list(user.departments or ()),
+        db_user_id=user.dbUserId,
+    )
 
 
 @router.post("", response_model=UserRead, status_code=status.HTTP_201_CREATED)

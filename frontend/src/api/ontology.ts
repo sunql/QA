@@ -22,6 +22,7 @@ import type {
   OntologyCsvParseResult,
   RelationBackfillResult,
   OntologySearchHit,
+  EmbeddingSyncMissingResult,
 } from "../types/ontology";
 
 const BASE = "/ontology";
@@ -259,5 +260,20 @@ export async function searchOntology(
   const res = await httpClient.get<OntologySearchHit[]>(`${BASE}/search`, {
     params: { q, topK: options?.topK, type: options?.type },
   });
+  return res.data;
+}
+
+// ===== Embedding 手动同步（向量对账） =====
+
+/** 手动同步单个类向量：服务端重新生成 embedding 并覆盖 Milvus。 */
+export async function syncClassEmbedding(id: number): Promise<void> {
+  await httpClient.post(`${BASE}/classes/${id}/embedding`);
+}
+
+/** 向量对账：为 PG 有而 Milvus 缺失的类补生成向量，返回摘要。 */
+export async function syncMissingEmbeddings(): Promise<EmbeddingSyncMissingResult> {
+  const res = await httpClient.post<EmbeddingSyncMissingResult>(
+    `${BASE}/embeddings/sync-missing`
+  );
   return res.data;
 }

@@ -221,6 +221,22 @@ def deleteByOntologyId(ontologyId: int, type: str) -> None:
     logger.info("Deleted Milvus records for ontology_id=%d type=%s", ontologyId, type)
 
 
+def deleteByOntologyIds(ontologyIds: list[int], type: str) -> None:
+    """批量删除多个 ontology_id 的同类型向量（对账脚本批量重生成用，单次 flush）。
+
+    type 作用域理由同 deleteByOntologyId：ontology_id 跨类型不唯一。
+    """
+    if type not in VALID_EMBEDDING_TYPES:
+        raise ValueError(f"unknown embedding type: {type!r}")
+    if not ontologyIds:
+        return
+    collection = ensureCollection()
+    expr = f'ontology_id in {ontologyIds} and type == "{type}"'
+    collection.delete(expr)
+    collection.flush()
+    logger.info("Deleted Milvus records for %d ontology_ids type=%s", len(ontologyIds), type)
+
+
 def listAllEmbeddings() -> list[dict[str, Any]]:
     """返回 ontology_embeddings 全量行（含 id/ontology_id/type/name/alias/description/embedding）。
 

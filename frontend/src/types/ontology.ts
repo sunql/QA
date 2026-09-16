@@ -356,3 +356,19 @@ export interface OntologySearchHit {
   description: string | null;
   score: number; // 0~1，越高越相似
 }
+
+// ===== Embedding 手动同步（向量对账） =====
+
+export interface EmbeddingSyncFailure {
+  classId: number;
+  className: string;
+  error: string;
+}
+
+export interface EmbeddingSyncMissingResult {
+  totalClasses: number;
+  missingCount: number;
+  syncedCount: number;
+  failedCount: number;
+  failures: EmbeddingSyncFailure[];
+}

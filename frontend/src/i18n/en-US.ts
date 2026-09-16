@@ -124,6 +124,8 @@ export const enUS = {
       wikiCoverage: "Coverage Dashboard",
       wikiGraph: "Knowledge Graph",
       dataQualityRuleParams: "Data Quality / Rule Config (Structured)",
+      profile: "Profile",
+      changePassword: "Change Password",
     },
   },
 
@@ -1224,6 +1226,12 @@ export const enUS = {
       semanticResultsCardTitle: "Semantic Search Results",
       semanticSearchPlaceholder: "Semantic search: e.g. Customer Revenue",
       deleteConfirm: "Are you sure you want to delete?",
+      syncEmbedding: "Sync Vector",
+      syncMissingEmbeddings: "Backfill Missing Vectors",
+      syncEmbeddingSuccess: "Vector synced for class \"{name}\"",
+      syncMissingNone: "All {total} classes already have vectors, nothing to backfill",
+      syncMissingSuccess: "Backfill complete: {synced} added (of {total} classes)",
+      syncMissingPartial: "Backfill complete: {synced} succeeded, {failed} failed (see backend logs)",
       classColumns: {
         id: "ID",
         className: "Class Name",
@@ -2592,5 +2600,20 @@ export const enUS = {
       name: "Name",
       nameAutoHint: "Auto-generated: Datasource-Class-RuleType (English)",
     },
+  },
+  profile: {
+    title: "Profile",
+    authModeStubNotice:
+      "This system currently uses stub auth (X-User-Id header) with no real login; identity below is resolved by matching the header against database users.",
+    fields: {
+      userId: "User ID",
+      displayName: "Display Name",
+      email: "Email",
+      roles: "Roles",
+      departments: "Organizations",
+      identitySource: "Identity Source",
+    },
+    identityDb: "Database user",
+    identityStub: "Stub fallback (no database user matched)",
   },
 } as const;

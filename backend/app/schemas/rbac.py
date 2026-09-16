@@ -37,6 +37,21 @@ class UserUpdate(CamelModel):
     enabled: bool | None = None
 
 
+class UserMeRead(CamelModel):
+    """当前调用方身份（GET /users/me，个人中心页用，非 admin-only）。
+
+    - DB 命中：display_name/email 取 users 行，roles/departments 以 DB 为准；
+    - 桩回退（X-User-Id 未命中 DB 用户）：dbUserId=null，displayName 回退 userId。
+    """
+
+    user_id: str
+    display_name: str
+    email: str | None = None
+    role_codes: list[str] = Field(default_factory=list)
+    department_codes: list[str] = Field(default_factory=list)
+    db_user_id: int | None = None
+
+
 class UserRead(CamelModel):
     """用户视图（含角色 / 组织编码，供管理列表一屏可见）。"""
 

@@ -83,6 +83,11 @@ def _propertyText(prop: OntologyProperty) -> str:
     )
 
 
+def _rowDetails(row: dict) -> tuple[str, str, str]:
+    """Milvus 行的 (name, alias, description)；None 归一为 ""（与 PG 比对口径一致）。"""
+    return (row.get("name") or "", row.get("alias") or "", row.get("description") or "")
+
+
 async def _backfill(
     dryRun: bool, sources: set[str] | None, skipClasses: bool
 ) -> int:
@@ -156,6 +161,11 @@ async def _cleanup(dryRun: bool) -> int:
     读取当前全部向量，按 (ontology_id, type) 去重保留最新，对 PG 有而 Milvus 无的
     实体补生成向量，然后删集、重建空集合、一次性插入全部去重行——不依赖批量 delete。
 
+    内容过期检测：历史 id 漂移（旧版 updateClass 的 INSERT 新行策略）会留下
+    「ontology_id 指向了改换语义的类」的陈旧向量（如 id=18 旧名 PurchaseOrder、
+    现名 SupplierPriceDetail）。此类向量 key 存在但内容错误，仅按 key 对账会漏掉；
+    故对已有向量逐一比对 name/alias/description 与 PG 当前值，不一致即重新生成。
+
     指标（metric）不参与：本体指标只删不插（见 deleteMetric），本不产生向量。
     """
     svc = OntologyService()
@@ -172,6 +182,11 @@ async def _cleanup(dryRun: bool) -> int:
     expected = {(c.id, "class") for c in classes} | {
         (p.id, "property") for p in properties
     }
+    # key -> PG 当前 (name, alias, description)，用于内容过期比对（与插入口径一致：None 归一为 ""）
+    expectedDetails: dict[tuple[int, str], tuple[str, str, str]] = {
+        **{(c.id, "class"): (c.class_name, c.class_alias or "", c.description or "") for c in classes},
+        **{(p.id, "property"): (p.property_name, p.property_alias or "", p.description or "") for p in properties},
+    }
     print(f"PG 期望: {len(classes)} 类 + {len(properties)} 属性 = {len(expected)}")
 
     # 2) Milvus 现状
@@ -180,11 +195,14 @@ async def _cleanup(dryRun: bool) -> int:
     print(f"Milvus 当前: {len(rows)} 行")
 
     # 3) 补缺失（PG 有而 Milvus 无；如被手删的 oid=1 属性）
+    #    先批量生成向量再一次性整批插入：逐条 syncEmbedding（delete+insert+flush）
+    #    在当前 Milvus 部署下单条可达 10-25s，批量场景必须整批一次 flush。
     missingKeys = sorted(expected - present)
     if missingKeys:
         print(f"补缺失 {len(missingKeys)} 个实体: {missingKeys}")
         classById = {c.id: c for c in classes}
         propById = {p.id: p for p in properties}
+        records: list[dict] = []
         for oid, typ in missingKeys:
             # 分支取具体类型对象，避免 union-attr；text 与 _backfill 文本构造一致
             if typ == "class":
@@ -209,19 +227,21 @@ async def _cleanup(dryRun: bool) -> int:
                 )
             try:
                 vec = await embedding.generateEmbedding(text)
-                if not dryRun:
-                    svc.syncEmbedding(
-                        ontologyId=oid,
-                        type=typ,
-                        name=name,
-                        alias=alias,
-                        description=description,
-                        embedding=vec,
-                    )
+                records.append({
+                    "ontology_id": oid,
+                    "type": typ,
+                    "name": name,
+                    "alias": alias,
+                    "description": description,
+                    "embedding": vec,
+                })
                 print(f"  ok 重生成 oid={oid} type={typ} {name} dim={len(vec)}")
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 print(f"  FAIL 重生成 oid={oid} type={typ}: {exc}")
+        if records and not dryRun:
+            milvus.insertEmbeddings(records)
+            print(f"  整批插入 {len(records)} 条（单次 flush）")
         if not dryRun:
             rows = milvus.listAllEmbeddings()
             print(f"补缺失后 Milvus: {len(rows)} 行")
@@ -232,6 +252,54 @@ async def _cleanup(dryRun: bool) -> int:
         key = (r["ontology_id"], r["type"])
         if key in expected and (key not in best or r["id"] > best[key]["id"]):
             best[key] = r
+
+    # 4.5) 内容过期检测：name/alias/description 与 PG 不一致（历史 id 漂移遗留）→ 重生成。
+    #      key 存在但内容错误仅靠 key 对账抓不到，必须比字段（id=18 旧名 PurchaseOrder 即此症）。
+    #      批量执行：按 type 批量 delete + 整批 insert，避免逐条 flush（单次 10-25s）。
+    staleKeys = sorted(
+        key
+        for key, row in best.items()
+        if _rowDetails(row) != expectedDetails[key]
+    )
+    if staleKeys:
+        print(f"内容过期 {len(staleKeys)} 条，重生成: {staleKeys}")
+        classById = {c.id: c for c in classes}
+        propById = {p.id: p for p in properties}
+        records: list[dict] = []
+        for oid, typ in staleKeys:
+            try:
+                if typ == "class":
+                    entity, text = classById[oid], _classText(classById[oid])
+                    name, alias, description = (
+                        entity.class_name, entity.class_alias, entity.description,
+                    )
+                else:
+                    entity, text = propById[oid], _propertyText(propById[oid])
+                    name, alias, description = (
+                        entity.property_name, entity.property_alias, entity.description,
+                    )
+                vec = await embedding.generateEmbedding(text)
+                records.append({
+                    "ontology_id": oid, "type": typ, "name": name,
+                    "alias": alias or "", "description": description or "",
+                    "embedding": vec,
+                })
+                print(f"  ok 过期重生成 oid={oid} type={typ} {name} dim={len(vec)}")
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                print(f"  FAIL 过期重生成 oid={oid} type={typ}: {exc}")
+        if records and not dryRun:
+            for typ in ("class", "property"):
+                ids = [r["ontology_id"] for r in records if r["type"] == typ]
+                milvus.deleteByOntologyIds(ids, typ)
+            milvus.insertEmbeddings(records)
+            print(f"  过期批量替换 {len(records)} 条（批量 delete + 整批 insert）")
+        for r in records:
+            best[(r["ontology_id"], r["type"])] = {
+                "id": float("inf"),
+                **r,
+            }
+
     deduped = list(best.values())
     print(
         f"去重后: {len(deduped)} = "
@@ -257,12 +325,18 @@ async def _cleanup(dryRun: bool) -> int:
         for r in deduped
     ])
 
-    # 6) 校验：收敛到期望集合，无缺失、无陈旧、无重复
+    # 6) 校验：收敛到期望集合，无缺失、无陈旧 key、无重复、内容不过期
     finalRows = milvus.listAllEmbeddings()
     finalKeys = {(r["ontology_id"], r["type"]) for r in finalRows}
     stillMissing = sorted(expected - finalKeys)
     stale = sorted(finalKeys - expected)
     hasDuplicates = len(finalRows) != len(finalKeys)
+    contentStale = sorted(
+        (r["ontology_id"], r["type"])
+        for r in finalRows
+        if (r["ontology_id"], r["type"]) in expectedDetails
+        and _rowDetails(r) != expectedDetails[(r["ontology_id"], r["type"])]
+    )
     print(f"重建后: {len(finalRows)} 行（期望 {len(expected)}）")
     if hasDuplicates:
         failed += 1
@@ -273,8 +347,11 @@ async def _cleanup(dryRun: bool) -> int:
     if stale:
         failed += 1
         print(f"  FAIL 残留陈旧: {stale}")
+    if contentStale:
+        failed += 1
+        print(f"  FAIL 内容过期: {contentStale}")
     if not failed:
-        print("Milvus ontology_embeddings 已收敛（无重复、无缺失、无陈旧）。")
+        print("Milvus ontology_embeddings 已收敛（无重复、无缺失、无陈旧 key、内容与 PG 一致）。")
     return failed
 
 

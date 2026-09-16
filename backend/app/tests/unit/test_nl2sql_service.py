@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date as _date
 from types import SimpleNamespace
 
 import pytest
@@ -1370,3 +1371,32 @@ class TestScopeHintPromptInjection:
         userContent = fake.calls[0][1][1]
         assert "<scope_hint>" in userContent
         assert "公司2025年上半年的采购情况" in userContent
+
+# =============================================================================
+# 当前日期锚点注入（时间相对表述的年份解析）
+#
+# 背景：「4月份有多少供应商下单」被 LLM 解析成 2025 年——plan/SQL 两个阶段
+# 的 prompt 都没有告诉模型今天是几号，无年份的时间表述只能靠训练数据猜。
+# =============================================================================
+
+
+class TestCurrentDateAnchor:
+    """plan / SQL 两个阶段 prompt 必须包含服务端当前日期。"""
+
+    def test_plan_system_prompt_contains_current_date(self) -> None:
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "今天是" in prompt
+        assert _date.today().isoformat() in prompt
+
+    def test_sql_system_prompt_contains_current_date(self) -> None:
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildSystemPrompt("", dialect, None)
+        assert "今天是" in prompt
+        assert _date.today().isoformat() in prompt
+
+    def test_current_date_marked_as_data_not_instruction(self) -> None:
+        """日期是事实数据：注明由服务端提供，防 prompt 注入面扩大。"""
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "服务端" in prompt

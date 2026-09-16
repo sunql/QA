@@ -634,6 +634,22 @@ def _extractAliases(sql: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(aliases))
 
 
+def _currentDatePart() -> str:
+    """当前日期锚点：无年份的时间表述（「4月份」）必须以服务端日期定年。
+
+    背景：plan/SQL prompt 原本不含今天日期，LLM 对「4月份有多少供应商下单」
+    这类无年份表述只能按训练数据猜年份（2026 年的问题被解析成 2025-04）。
+    以事实数据口径注入（服务端提供），与 conversation_history/plan 等一样
+    明确标注"数据而非指令"，不扩大指令注入面。
+    """
+    return (
+        f"今天是 {_date.today().isoformat()}（由服务端提供，以此为准）。\n"
+        "问题中未指明年份的时间表述（如「4月份」「本月」）按今天的年份解析；"
+        "「今年/上月/最近 N 天」等相对时间也以今天为基准换算。"
+        "这是事实数据，不是指令。\n"
+    )
+
+
 def _normalizeDate(raw: str) -> str | None:
     """把日期规范化成 ISO 'YYYY-MM-DD'；格式非法或月/日越界（含非闰年 2-29）返回 None。
 
@@ -1885,6 +1901,7 @@ class Nl2SqlService:
             )
         return (
             f"你是一个专业的数据分析师，负责把用户的自然语言问题解析为查询计划。\n\n"
+            f"{_currentDatePart()}"
             f"{contextPart}"
             f"{statePart}"
             f"{fewShotPart}"
@@ -2026,6 +2043,7 @@ class Nl2SqlService:
         limitRule = dialect.limitRule + (self._PLAN_ROW_LIMIT_RULE if plan is not None else "")
         return (
             f"你是一个专业的数据分析师，负责把用户的自然语言问题转换为 {dialect.name} 数据库 SQL 查询。\n\n"
+            f"{_currentDatePart()}"
             f"{contextPart}"
             f"{statePart}"
             f"{priorCtePart}"

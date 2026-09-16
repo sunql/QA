@@ -1092,6 +1092,14 @@ export const zhCN = {
     owner: "责任部门",
     ownerTooltip: "空表示仅 admin 可改；填部门后该部门成员可改",
     ownerPlaceholder: "例如：procurement",
+    bulkImport: "批量导入",
+    bulkImportTitle: "批量导入编码映射",
+    bulkImportEmpty: "没有可导入的有效行",
+    bulkImportTooLarge: "单批最多 1000 行",
+    bulkImportSample: "加载示例",
+    bulkImportClear: "清空",
+    bulkImportSubmit: "导入",
+    bulkImportImporting: "导入中",
   },
 
   forms: {

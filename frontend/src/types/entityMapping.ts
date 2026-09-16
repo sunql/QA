@@ -25,6 +25,7 @@ export interface EntityMappingBase {
   effectiveDate: string | null; // YYYY-MM-DD
   expiryDate: string | null; // YYYY-MM-DD，空表示长期有效
   owner: string | null; // 服务端按 actor.departments[0] 派生，前端只读
+  name: string | null; // 业务名（供应商 supplier_name / 物料描述拼接），仅展示用
 }
 
 export interface EntityMappingCreate {
@@ -37,6 +38,7 @@ export interface EntityMappingCreate {
   matchRule?: MatchRule;
   effectiveDate?: string | null;
   expiryDate?: string | null;
+  name?: string | null;
   // owner 故意不暴露给创建表单：服务端从登录用户部门派生
 }
 
@@ -77,4 +79,28 @@ export interface EntityMappingSearchHit {
   sourceCode: string;
   /** 供应商 supplier_name / 物料 description 拼接，下拉直接展示 */
   name?: string | null;
+}
+
+/** 批量导入单行结果（feat-entity-mapping-bulk-import 2026-09-16）。
+ *  - row: 1-based 行号（含表头）；用户对照原始 CSV 用
+ *  - status: inserted / updated / skipped / failed
+ */
+export interface EntityMappingBulkResultRow {
+  row: number;
+  status: "inserted" | "updated" | "skipped" | "failed";
+  entityType: EntityType | null;
+  enterpriseCode: string | null;
+  id: number | null;
+  changedFields?: string[] | null;
+  reason?: string | null;
+  error?: string | null;
+}
+
+export interface EntityMappingBulkResult {
+  total: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  results: EntityMappingBulkResultRow[];
 }

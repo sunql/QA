@@ -204,6 +204,7 @@ from app.domain.error_messages import (
     MSG_SCHEMA_ENTITY_MAPPING_ENTITY_TYPE,
     MSG_SCHEMA_ENTITY_MAPPING_EXPIRY_DATE,
     MSG_SCHEMA_ENTITY_MAPPING_MATCH_RULE,
+    MSG_SCHEMA_ENTITY_MAPPING_NAME,
     MSG_SCHEMA_ENTITY_MAPPING_SOURCE_CODE,
     MSG_SCHEMA_ENTITY_MAPPING_SOURCE_KEY,
     MSG_SCHEMA_ENTITY_MAPPING_SOURCE_SYSTEM,
@@ -2170,6 +2171,11 @@ class EntityMappingCreate(CamelModel):
     expiry_date: date | None = Field(
         default=None, description=MSG_SCHEMA_ENTITY_MAPPING_EXPIRY_DATE
     )
+    # Phase 6.x：业务名（供应商 supplier_name / 物料 description_1-3 拼接），仅展示用。
+    # 单条 create 一直未对外暴露，bulk 导入需要这个字段（运营按 CSV 录实体名）。
+    name: str | None = Field(
+        default=None, max_length=200, description=MSG_SCHEMA_ENTITY_MAPPING_NAME
+    )
 
 
 class EntityMappingUpdate(CamelModel):
@@ -2201,12 +2207,64 @@ class EntityMappingRead(CamelModel):
     effective_date: date | None = None
     expiry_date: date | None = None
     owner: str | None = None
+    name: str | None = None
     created_time: datetime | None = Field(
         default=None, description=MSG_SCHEMA_ENTITY_MAPPING_CREATED_TIME
     )
     updated_time: datetime | None = Field(
         default=None, description=MSG_SCHEMA_ENTITY_MAPPING_UPDATED_TIME
     )
+
+
+class EntityMappingBulkImportItem(CamelModel):
+    """批量导入单行请求 DTO（feat-entity-mapping-bulk-import 2026-09-16）。
+
+    与 EntityMappingCreate 的差异：
+    - enterprise_key 可省略（默认 0 表示「按 enterprise_code + entity_type 派生」）；
+      这是 bulk 的核心简化（前端不用算 SHA-256 + offset）。
+    - 单条 create 仍走 EntityMappingCreate（强制 enterprise_key 必填非零，
+      防止「前端误填 0 静默派生错 key」）。
+    """
+
+    entity_type: BusinessObjectCodeType
+    enterprise_key: int = Field(default=0, ge=0, le=2**63 - 1)
+    enterprise_code: str = Field(..., min_length=1, max_length=100)
+    source_system: SourceSystem
+    source_key: str = Field(..., min_length=1, max_length=100)
+    source_code: str = Field(..., min_length=1, max_length=100)
+    match_rule: MatchRule = Field(default=MatchRule.MAPPING)
+    effective_date: date | None = None
+    expiry_date: date | None = None
+    name: str | None = Field(default=None, max_length=200)
+
+
+class EntityMappingBulkResultRow(CamelModel):
+    """批量导入单行结果。
+
+    row: 1-based 行号（含表头），便于用户对照原始 CSV
+    status: inserted / updated / skipped / failed
+    changed_fields: 当 status=updated 时填，其它为空
+    """
+
+    row: int
+    status: Literal["inserted", "updated", "skipped", "failed"]
+    entity_type: BusinessObjectCodeType | None = None
+    enterprise_code: str | None = None
+    id: int | None = None
+    changed_fields: list[str] | None = None
+    reason: str | None = None
+    error: str | None = None
+
+
+class EntityMappingBulkResult(CamelModel):
+    """批量导入聚合结果。"""
+
+    total: int
+    inserted: int
+    updated: int
+    skipped: int
+    failed: int
+    results: list[EntityMappingBulkResultRow]
 
 
 class EntityMappingSearchHit(CamelModel):

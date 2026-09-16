@@ -1,0 +1,47 @@
+# 跨系统编码映射批量导入模板
+#
+# 用法：
+#   1. 在 /entity-mapping 页面点「批量导入」按钮
+#   2. 把本文件内容复制到弹窗的 TSV/CSV 输入区（按"实际分隔符"切换 Tab/逗号）
+#   3. 点「校验」预览每行解析结果，再点「导入」入库
+#
+# 列定义（逗号分隔；如内容含逗号请用双引号包裹）：
+#   entity_type       必填，企业实体类型：SUPPLIER / MATERIAL / PO / GR / IQC / NCR
+#                            必须是 business_object.code 表里已注册的值，否则 422
+#   enterprise_code   必填，企业统一编码（可读），如 SUP000001 / MAT000045
+#                            同一 entity_type 内必须唯一；重名入库时会报错
+#                            字符集：英文 / 数字 / _ - ，长度 1-100
+#   source_system     必填，源系统枚举：ERP / SRM / QMS / MDM / PLM
+#   source_code       必填，源系统原始业务码
+#                            字符集同 enterprise_code，长度 1-100
+#   match_rule        选填，默认 MAPPING
+#                            MAPPING=人工/规则映射；MDM_MASTER=MDM 主数据权威源；
+#                            BUSINESS_KEY=业务键匹配（如 PO 号+行号）
+#   name              选填，业务名（仅展示，不参与匹配）
+#                            例：供应商名 "北京XX有限公司"、物料描述 "螺栓 M8x20"
+#                            长度 ≤ 200
+#   effective_date    选填，YYYY-MM-DD；映射生效日
+#   expiry_date       选填，YYYY-MM-DD；映射失效日；空=长期有效
+#
+# 自动派生字段（不要手填）：
+#   enterprise_key  =  按 (entity_type, enterprise_code) 唯一派生
+#                     算法：SHA-256(enterprise_code) 前 8 字节 → uint64 → % 2^32
+#                           + entity_type 偏移量（SUPPLIER=800000 / MATERIAL=4295767296 ...）
+#                     同 enterprise_code 永远派生同一 key → 幂等
+#   id / created_at / updated_at  数据库自填
+#
+# 幂等性：
+#   唯一键 = (entity_type, enterprise_key, source_system)
+#   重跑同一文件：未变化行无副作用；name 字段如有变更会自动 UPDATE
+#
+# 注意：
+#   - 首行是列头，必须保留；首行起视为数据
+#   - 不要有空行；最后一行不要留空
+#   - 中文 / 全角字符务必确保文件编码为 UTF-8（无 BOM）
+#
+# 示例：3 条新接入 SRM 的供应商映射 + 1 条 SAP 物料映射
+entity_type,enterprise_code,source_system,source_code,match_rule,name,effective_date,expiry_date
+SUPPLIER,SUP000001,SRM,SRM-2024-001,MDM_MASTER,北京XX有限公司,2026-01-01,
+SUPPLIER,SUP000002,SRM,SRM-2024-002,BUSINESS_KEY,上海YY贸易,2026-01-01,
+SUPPLIER,SUP000003,SRM,SRM-2024-003,MAPPING,深圳ZZ供应链,2026-01-01,
+MATERIAL,MAT000001,ERP,M-1001,MDM_MASTER,螺栓 M8x20,2026-01-01,

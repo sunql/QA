@@ -154,6 +154,8 @@ MSG_ENTITY_MAPPING_EXISTS = (
     "{entityType} enterprise_key={enterpriseKey} source_system={sourceSystem}"
 )
 MSG_ENTITY_MAPPING_DATE_RANGE = "生效日期不得晚于失效日期: {effectiveDate} > {expiryDate}"
+MSG_ENTITY_MAPPING_BULK_TOO_LARGE = "批量导入单次最多 {maxRows} 行，实际 {actualRows} 行"
+MSG_ENTITY_MAPPING_BULK_EMPTY = "批量导入请求体为空"
 
 
 # =============================================================================

@@ -1075,6 +1075,14 @@ export const enUS = {
     owner: "Owner Dept.",
     ownerTooltip: "Empty = admin only; otherwise the listed dept can modify",
     ownerPlaceholder: "e.g. procurement",
+    bulkImport: "Bulk Import",
+    bulkImportTitle: "Bulk Import Entity Mappings",
+    bulkImportEmpty: "No valid rows to import",
+    bulkImportTooLarge: "Max 1000 rows per batch",
+    bulkImportSample: "Load sample",
+    bulkImportClear: "Clear",
+    bulkImportSubmit: "Import",
+    bulkImportImporting: "Importing",
   },
 
   forms: {

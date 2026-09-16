@@ -10,6 +10,7 @@ const httpMock = vi.hoisted(() => ({
 vi.mock("../api/client", () => ({ httpClient: httpMock }));
 
 import {
+  bulkImportMappings,
   createMapping,
   deleteMapping,
   getMapping,
@@ -30,6 +31,7 @@ const mapping: EntityMappingRead = {
   effectiveDate: "2026-01-01",
   expiryDate: "2099-12-31",
   owner: "procurement", // 服务端按 actor.departments[0] 派生，仅展示用
+  name: "北京XX有限公司",
   createdTime: "2026-08-30T00:00:00Z",
   updatedTime: "2026-08-30T00:00:00Z",
 };
@@ -95,5 +97,40 @@ describe("api/entityMapping", () => {
     httpMock.delete.mockResolvedValue({ data: undefined });
     await deleteMapping(1);
     expect(httpMock.delete).toHaveBeenCalledWith("/entity-mappings/1");
+  });
+
+  it("bulkImportMappings POST /entity-mappings/bulk with array", async () => {
+    const items: EntityMappingCreate[] = [
+      {
+        entityType: "SUPPLIER",
+        enterpriseKey: 0, // 由后端按 enterprise_code 派生
+        enterpriseCode: "SUP000010",
+        sourceSystem: "SRM",
+        sourceKey: "SRM-001",
+        sourceCode: "SRM-001",
+        matchRule: "MDM_MASTER",
+      },
+    ];
+    const mockResp = {
+      total: 1,
+      inserted: 1,
+      updated: 0,
+      skipped: 0,
+      failed: 0,
+      results: [
+        {
+          row: 2,
+          status: "inserted" as const,
+          entityType: "SUPPLIER",
+          enterpriseCode: "SUP000010",
+          id: 100,
+        },
+      ],
+    };
+    httpMock.post.mockResolvedValue({ data: mockResp });
+    const result = await bulkImportMappings(items);
+    expect(httpMock.post).toHaveBeenCalledWith("/entity-mappings/bulk", items);
+    expect(result.inserted).toBe(1);
+    expect(result.results[0].status).toBe("inserted");
   });
 });

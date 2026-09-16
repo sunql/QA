@@ -20,6 +20,7 @@ import {
   listMappings,
   updateMapping,
 } from "../api/entityMapping";
+import BulkImportModal from "../components/entity-mapping/BulkImportModal";
 import type {
   EntityMappingCreate,
   EntityMappingRead,
@@ -74,6 +75,7 @@ export default function EntityMappingPage() {
   const [filterType, setFilterType] = useState<EntityType | undefined>();
   const [editing, setEditing] = useState<EntityMappingRead | null>(null);
   const [creating, setCreating] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
   const [form] = Form.useForm<EntityMappingCreate>();
 
   const refresh = useCallback(async () => {
@@ -270,6 +272,9 @@ export default function EntityMappingPage() {
         <Button type="primary" onClick={() => setCreating(true)}>
           {t("entityMapping.createMapping")}
         </Button>
+        <Button onClick={() => setBulkOpen(true)}>
+          批量导入
+        </Button>
         <Button onClick={() => void refresh()}>
           {t("common.refresh")}
         </Button>
@@ -376,6 +381,12 @@ export default function EntityMappingPage() {
           </Form.Item>
         </Form>
       </Modal>
+
+      <BulkImportModal
+        open={bulkOpen}
+        onClose={() => setBulkOpen(false)}
+        onSuccess={() => void refresh()}
+      />
     </div>
   );
 }

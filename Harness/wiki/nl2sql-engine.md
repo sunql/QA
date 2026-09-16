@@ -221,6 +221,28 @@ New columns on `session_message`:
 
 详见 `changes/fix-nl2sql-derived-metric-formula-required/summary.md`。
 
+## 跨类属性引用校验补可操作 hint（属性归属 + schema 不存在）
+
+`validatePlan`（`app/services/nl2sql_service.py`）的三个分支（`selectedProperties` / `aggregations` else / `groupBy` 兜底）共用同款可操作重试 hint：`_propertyOwnerHint(prop, propsByClass)`。背景是 2026-09-16 真实回归：用户问「近五个月供货量最大的供应商」时偶发报"选中的属性 供应商名称 不属于选定的任何类"，复现确认是低概率上下文相关 LLM 偏差（上一轮是 PurchaseOrder COUNT → 意图被判为 FOLLOW_UP → statePrompt 注入不相关上轮 → 模型偶发引用跨类属性），旧反馈只说"不属于选定的任何类"无可操作指引，重试两次仍犯同错 → `maxPlanAttempts=2` 耗尽 → 整轮失败。
+
+hint 真源为 `propsByClass`（已经 `_classRefNames` 展开过的业务名 + 别名 + 物理列 + 表限定名 + 类限定名），口径与属性/分组/JOIN 列校验一致：
+
+- 属性在 schema 中**有归属类** → 列出归属类（截断到 `_OWNER_HINT_MAX_CLASSES=3`，避免 schema 类多时提示过长挤占重试 token），引导"把对应类加入 selectedClasses 并按 JOIN 目录关联后再引用"
+- 属性在 schema 中**完全不存在**（含别名/物理列口径比对）→ 如实说明防 LLM 重试继续幻觉同一属性名
+
+`groupBy` 分支优先取 `_timeBucketGroupHint`（粒度词命中），命中不到才走 `_propertyOwnerHint`，与粒度词提示保持正交；`aggregations` 的 `formula` 分支保留 2026-08-14 的"property 应填真实属性 / 别名引用写在 formula 内"风格，不重复插入，避免覆盖原有可操作指引。
+
+反例守约：
+
+- `selectedProperties=("供应商名称",)`、`selectedClasses=("ReceiptDetail",)`、`classes=[Receipt, ReceiptDetail, Supplier, PurchaseOrder, PurchaseInvoice]` → 反馈含 `BPSUPPLIER / PurchaseOrder / PurchaseInvoice`，引导把对应类加入 selectedClasses + JOIN 关联（生产回归：用户问「供货量最大供应商」时偶发失败场景）
+- `selectedProperties=("NONEXISTENT",)`、`classes` 中无任何类含该属性 → 反馈如实说明含"本体 schema 中不存在"
+- `groupBy=("供应商名称",)` 同 selectedProperties 路径，分组属性同样带 hint
+- 普通聚合 `SUM("收货数量")`、`groupBy=("订单日期",)` → 不触发 hint
+
+测试守约：`test_query_plan_validation.py` 48 用例（含 3 新增）全过；NL2SQL 单测 161 + chat 集成 102 合计 263 回归全绿；已通过 `deploy_backend.sh` 部署。
+
+详见 `changes/fix-cross-class-property-owner-hint/summary.md`。
+
 ## 范围感知行数限制（scope-aware row limit）
 
 `_finalizePlan` 出口处对 `plan.rowLimit` 做最后一次覆盖（frozen dataclass `replace`），按问题范围决定行数（详见 changes/feat-scope-aware-row-limit/summary.md）：

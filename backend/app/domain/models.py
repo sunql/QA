@@ -1731,6 +1731,236 @@ class InAppMessage(Base):
         )
 
 
+# =============================================================================
+# Phase 5.4/Phase 9: 数据质量评估报告（feat-dq-evaluation-report + progress）
+#
+# 历史背景：alembic 0072 创建 4 张表（evaluation_report / violation_sample /
+# schedule / share）；0074 扩 status CheckConstraint + 加 progress 列。ORM 类
+# 一直未合入 models.py，导致 backend 容器中 evaluation_report_service /
+# data_quality_violation_sample_service / 等模块从 import 阶段就失败，
+# evaluation_report.router 始终未被 main.py include。本块一次性补齐 4 个类，
+# 与 alembic 0072+0074 完全对齐（DDL 已固化）。
+# =============================================================================
+
+
+class EvaluationReport(Base, TimestampMixin):
+    """数据质量评估报告主表。
+
+    - 配置 + 快照合一：class_ids/rule_ids/time_window 为配置列；snapshot 为
+      评估完成后的结构化结果（含 per-rule 命中数、KPI、维度分布等）。
+    - status 6 值 CheckConstraint：DRAFT / PUBLISHED / PENDING / RUNNING /
+      COMPLETED / FAILED（feat-dq-evaluation-report-progress 扩 4 值）。
+    - 软删：deleted_at 非空表示已删除；列表查询过滤 deleted_at IS NULL。
+    - progress：异步化阶段写入（0074 新列），存 {stage, completed, total,
+      current_rule_id, current_rule_code, message, started_at, finished_at}。
+    """
+
+    __tablename__ = "evaluation_report"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    class_ids: Mapped[list[Any]] = mapped_column(
+        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    rule_ids: Mapped[list[Any]] = mapped_column(
+        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    time_window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    time_window_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=sa_text("'PUBLISHED'")
+    )
+    tags: Mapped[list[Any]] = mapped_column(
+        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, server_default=sa_text("'{}'::jsonb")
+    )
+    snapshot_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=sa_text("1")
+    )
+    owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(50), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    progress: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('DRAFT','PUBLISHED','PENDING','RUNNING','COMPLETED','FAILED')",
+            name="ck_evaluation_report_status",
+        ),
+        Index("ix_evaluation_report_class_gin", "class_ids", postgresql_using="gin"),
+        Index("ix_evaluation_report_rule_gin", "rule_ids", postgresql_using="gin"),
+        Index("ix_evaluation_report_created_by", "created_by"),
+        Index(
+            "ix_evaluation_report_status_running",
+            "status",
+            postgresql_where=sa_text("status IN ('PENDING','RUNNING')"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<EvaluationReport id={self.id} name={self.name!r} "
+            f"status={self.status!r}>"
+        )
+
+
+class DataQualityViolationSample(Base):
+    """评估违规样本（feat-dq-evaluation-report，Phase 4）。
+
+    - 一份报告的每条规则最多落 1 行（按 report_id + rule_id 逻辑去重）；样本
+      内容存 sample_pk_values（list[{pk: ...}]）。
+    - sampling_error 非空时表示采样失败，前端在违规样本表显式提示「采样失败: ...」。
+    - FK ON DELETE CASCADE：报告硬删时样本自动清。
+    """
+
+    __tablename__ = "data_quality_violation_sample"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    report_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("evaluation_report.id", ondelete="CASCADE"), nullable=False
+    )
+    rule_id: Mapped[int] = mapped_column(BigIntFk, nullable=False)
+    datasource_id: Mapped[int] = mapped_column(BigIntFk, nullable=False)
+    target_table: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_column: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    total_violations: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_pk_values: Mapped[list[Any]] = mapped_column(
+        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    sampling_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_dq_violation_sample_report_rule", "report_id", "rule_id"),
+        Index("ix_dq_violation_sample_table", "target_table"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataQualityViolationSample id={self.id} report_id={self.report_id} "
+            f"rule_id={self.rule_id} samples={self.sample_size}>"
+        )
+
+
+class EvaluationReportSchedule(Base, TimestampMixin):
+    """评估报告定时生成配置（feat-dq-evaluation-report Phase 6）。
+
+    - cron_expression：标准 5 字段 cron（"分 时 日 月 周"），由 scheduler worker
+      定期扫描 next_run_at <= now() 的行触发。
+    - time_window_type CheckConstraint：LAST_7D / LAST_30D / LAST_RUN 三选一，
+      决定单次生成报告时 time_window_start/end 的取法。
+    - last_report_id FK ON DELETE SET NULL：报告删除不影响 schedule 配置。
+    - 部分索引 ix_evaluation_report_schedule_due：WHERE enabled=true 用于
+      worker 轮询扫描，避免扫描已禁用行。
+    """
+
+    __tablename__ = "evaluation_report_schedule"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    cron_expression: Mapped[str] = mapped_column(String(100), nullable=False)
+    class_ids: Mapped[list[Any]] = mapped_column(
+        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    rule_ids: Mapped[list[Any]] = mapped_column(
+        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    time_window_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    recipients: Mapped[list[Any]] = mapped_column(
+        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa_text("true")
+    )
+    next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_report_id: Mapped[int | None] = mapped_column(
+        BigIntFk,
+        ForeignKey("evaluation_report.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "time_window_type IN ('LAST_7D','LAST_30D','LAST_RUN')",
+            name="ck_evaluation_report_schedule_window",
+        ),
+        Index(
+            "ix_evaluation_report_schedule_due",
+            "next_run_at",
+            postgresql_where=sa_text("enabled = true"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<EvaluationReportSchedule id={self.id} name={self.name!r} "
+            f"enabled={self.enabled}>"
+        )
+
+
+class EvaluationReportShare(Base):
+    """评估报告分享链接 token 表（feat-dq-evaluation-report Phase 5）。
+
+    - share_token：UUID 唯一，由 /reports/{id}/shares POST 生成，附在 URL 中
+      给非登录用户访问（公开分享页 DataQualityReportPublicSharePage）。
+    - expires_at：链接过期时间，过期后查询直接 404。
+    - access_count：访问计数（每次公开分享页渲染 +1）。
+    - FK ON DELETE CASCADE：报告硬删时分享 token 自动失效。
+    """
+
+    __tablename__ = "evaluation_report_share"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    report_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("evaluation_report.id", ondelete="CASCADE"), nullable=False
+    )
+    share_token: Mapped[str] = mapped_column(
+        postgresql.UUID(as_uuid=False), nullable=False, unique=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    access_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=sa_text("0")
+    )
+    created_by: Mapped[str] = mapped_column(String(50), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_evaluation_report_share_expires", "expires_at"),
+        UniqueConstraint("share_token", name="uq_evaluation_report_share_token"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<EvaluationReportShare id={self.id} report_id={self.report_id} "
+            f"token={self.share_token!r}>"
+        )
+
+
 # Re-export Wiki 覆盖度表（0059 = M7 机制 6：class→域映射 + 覆盖度矩阵）。
 # 与 wiki_learning_models 分文件同理由：覆盖度是**派生快照**，生命周期与
 # 知识本体/管线表都不同（可整体重算、可清空重建）。

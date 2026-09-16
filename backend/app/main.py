@@ -251,6 +251,7 @@ def createApp() -> FastAPI:
         documents,
         embedding_provider,
         entity_mapping,
+        evaluation_report,
         features,
         feature_rules,
         graph,
@@ -307,6 +308,11 @@ def createApp() -> FastAPI:
         data_quality_generate.router,
         prefix="/api/v1/data-quality/rules/generate",
         tags=["data-quality-generate"],
+    )
+    app.include_router(
+        evaluation_report.router,
+        prefix="/api/v1/data-quality/reports",
+        tags=["data-quality"],
     )
     app.include_router(
         data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"]

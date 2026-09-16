@@ -15,6 +15,58 @@
 - `data_source`：数据源，`type`、`connection_url`、`encrypted_password`、`is_read_only`、`is_default`。
 - `session_message`（Phase 5）：会话消息持久化，`session_id`、`role`(user/assistant)、`content`、`question`(assistant 回填)、`sql_generated`(assistant 回填)、时间戳。索引 `(session_id, created_time)`。用于 NL2SQL 前注入最近 5 轮上下文；服务端无记录时回退到客户端 `history` 字段。**Migration 0051** 新增字段：`routing_layer`（VARCHAR(10)，L1/L2/L3/L4）、`latency_ms`（INTEGER，毫秒）、`token_cost_usd`（FLOAT，美元）。
 
+### entity_mapping（跨系统编码映射 SSOT）
+
+**日期**：2026-09-16 · **变更**：[fix-entity-mapping-sync-bootstrap](../changes/fix-entity-mapping-sync-bootstrap/summary.md)
+
+- 列：`id`、`entity_type`(FK → `business_object.code`，枚举 SUPPLIER/MATERIAL/PO/GR/IQC)、
+  `enterprise_key`(BIGINT)、`enterprise_code`、`source_system`(枚举 ERP/SRM/QMS/MDM/PLM)、
+  `source_key`、`source_code`、`match_rule`(枚举 MDM_MASTER/BUSINESS_KEY/MAPPING)、
+  `effective_date`、`expiry_date`、`name`(业务名，仅 SUPPLIER/MATERIAL 同步脚本写入)、
+  `owner`、时间戳
+- 唯一索引：`uq_entity_mapping_entity_source` `(entity_type, enterprise_key, source_system)`
+- 业务用法：把多个源系统的同物编码统一映射到平台级 `enterprise_key`，供 360° / 风险 /
+  AutoComplete 等直接入口按平台级 key 查询
+
+**enterprise_key 区间分配**（避免碰撞）：
+
+| entity_type | 区间 | 来源 |
+|---|---|---|
+| MATERIAL（demo） | 200001–200010 | `seed_entity_mapping.py` 测试 fixture（10 个 RM-STEEL-***） |
+| PO（demo） | 300001–300003 | `seed_entity_mapping.py` 测试 fixture |
+| GR（demo） | 400001 | 同上 |
+| IQC（demo） | 500001 | 同上 |
+| SUPPLIER（真实） | 800000–4295767295 | `sync_entity_mapping_from_thbi.py` SHA-256 前 8 字节 + offset 800000 |
+| MATERIAL（真实） | 4295767296–8591534591 | 同上 + MATERIAL offset |
+
+**维护契约**：
+
+| 场景 | 工具 | 幂等 |
+|---|---|---|
+| 部署后初始化 demo 数据 | `seed_entity_mapping.py` | ✅ ON CONFLICT DO UPDATE 仅写 `expiry_date` |
+| 从 THBI 数仓拉真实主数据 | `sync_entity_mapping_from_thbi.py`（`--dry-run` 预览，正式跑写入） | ✅ ON CONFLICT DO UPDATE SET name（重跑时刷新业务名） |
+| 临时补缺 | AdminUI `/admin/entity-mappings` 手工 CRUD（`POST/PUT/DELETE /api/v1/entity-mappings`） | — |
+
+**同步脚本调用契约**（2026-09-16 修复后）：
+
+```bash
+docker exec \
+  -e DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@postgres:5432/qa_metadata' \
+  -e QUERY_TIMEOUT_SECONDS=600 \
+  qa-backend python scripts/sync_entity_mapping_from_thbi.py [--dry-run]
+```
+
+- `QUERY_TIMEOUT_SECONDS` 必须 ≥ 600（DWD_MATERIAL 35w 行 SELECT + fetchmany 全程 > 30s 默认值）
+- 脚本按 `(is_default=true, is_active=true)` 查数据源，**不硬编码 name** — 避免「重命名即失配」
+- 拉取列名按小写键读取（adapter `execute_read_only` 统一下沉小写）
+- 部署：仅需 `docker cp` 单文件到 `/app/scripts/`，无需重启 uvicorn
+
+**待办（不在本 fix 范围）**：
+
+- `entity_mapping_service.searchMappings` 增加 `EntityMapping.name.ilike(like)` 子句，使 AutoComplete 支持中文名搜索
+- 周期性同步任务（launchd / scheduler）
+- Prometheus 指标 + Alertmanager 行数告警
+
 ## 本体图（Neo4j）
 
 ```

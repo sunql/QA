@@ -273,3 +273,89 @@ async def test_import_preview_passes_schema_owner_to_introspection(client) -> No
     )
     assert resp.status_code == 200, resp.text
     assert fake.introspectedOwners == ["THBI"]
+
+
+# =============================================================================
+# 批量导入完成后自动补齐类向量（整批对账，单次 flush）
+#
+# 背景：导入 N 个类若走逐类后台同步（createClass 默认路径），N 个任务并发
+# flush（单次 8-25s）会拖垮 Milvus；改为导入完成后一次性 syncMissing。
+# =============================================================================
+
+
+def _waitFor(check, timeout: float = 10.0):
+    """后台任务轮询等待（与 test_ontology_api 同款）。"""
+    import asyncio
+    import time
+
+    async def _run() -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if check():
+                return True
+            await asyncio.sleep(0.1)
+        return check()
+
+    return _run()
+
+
+async def test_import_execute_batches_embedding_sync(client, dbSession) -> None:
+    import app.api.v1.ontology as ontology_api
+    import app.services.ontology_service as ontology_module
+    from app.services.ontology_service import OntologyService
+
+    texts: list[str] = []
+
+    async def fakeGenerateEmbedding(text: str) -> list[float]:
+        texts.append(text)
+        return [0.1] * 1024
+
+    monkey_target = ontology_api._embeddingService
+    monkey_target.generateEmbedding = fakeGenerateEmbedding
+
+    insertCalls: list[list[dict]] = []
+    ontology_module.milvus.insertEmbeddings = lambda rows: insertCalls.append(rows)
+    ontology_module.milvus.listAllEmbeddings = lambda: []
+
+    # 注入共享 embedding service 的 OntologyService，避免测试连真实 LLM
+    service = LocalImportService(
+        schema_service=_FakeSchemaService(),
+        ontology_service=OntologyService(embeddingService=monkey_target),
+    )
+    client._transport.app.state.localImportService = service
+    ds_id = await _create_datasource(client)
+
+    try:
+        preview = await client.post(
+            f"/api/v1/datasources/{ds_id}/import-preview",
+            json={"rules": {}},
+        )
+        assert preview.status_code == 200, preview.text
+        body = preview.json()
+
+        # 不传 syncEmbeddings → 默认 True（自动补齐）
+        resp = await client.post(
+            f"/api/v1/datasources/{ds_id}/import",
+            json={
+                "confirmedClasses": body["proposedClasses"],
+                "confirmedJoins": body["proposedJoins"],
+                "conflictResolutions": [],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        result = resp.json()
+        assert result["success"] is True
+        assert result["createdClasses"] == 2
+
+        # 整批补齐在后台落地：2 个类向量、恰好一次整批 insert（单次 flush）
+        def rows() -> list[dict]:
+            return [r for call in insertCalls for r in call]
+
+        assert await _waitFor(lambda: len(rows()) == 2), (
+            f"导入后应整批补齐 2 条类向量，实际 {len(rows())}"
+        )
+        assert len(insertCalls) == 1, "2 条向量应合并为一次整批 insert"
+        assert {r["type"] for r in rows()} == {"class"}
+        assert len(texts) == 2
+    finally:
+        del monkey_target.generateEmbedding

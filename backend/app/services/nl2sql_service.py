@@ -176,6 +176,33 @@ def _timeBucketGroupHint(token: str, classes: list[OntologyClass]) -> str:
     )
 
 
+# 属性归属提示最多列出的拥有类数量（避免 schema 类多时提示过长挤占重试 token）
+_OWNER_HINT_MAX_CLASSES = 3
+
+
+def _propertyOwnerHint(prop: str, propsByClass: dict[str, set[str]]) -> str:
+    """属性不在选定类时的可操作提示：说明归属或如实告知不存在。
+
+    生产回归（2026-09-16）：LLM 引用跨类属性（「供应商名称」属于供应商主表，
+    但 selectedClasses 只选了收货明细类），原「不属于选定的任何类」无指引，
+    重试两次仍犯同错 → 整轮失败。有归属类时列出（截断到 _OWNER_HINT_MAX_CLASSES），
+    引导把类加入 selectedClasses 并经 JOIN 目录关联；schema 中完全不存在时如实
+    说明（含别名/物理列口径），避免重试继续幻觉同一属性名。
+    """
+    owners = sorted(cn for cn, refs in propsByClass.items() if prop in refs)
+    if not owners:
+        return (
+            "本体 schema 中不存在该属性（已比对全部类的业务名/别名/物理列），"
+            "请改用选中类的已有属性或修正命名"
+        )
+    shown = ", ".join(owners[:_OWNER_HINT_MAX_CLASSES])
+    more = f" 等 {len(owners)} 个类" if len(owners) > _OWNER_HINT_MAX_CLASSES else ""
+    return (
+        f"该属性属于类 {shown}{more}（均已在 schema 中），"
+        f"请把对应类加入 selectedClasses 并按 JOIN 目录关联后再引用"
+    )
+
+
 def _extractFormulaProperties(formula: str) -> set[str]:
     """从公式中提取候选属性名，供 validatePlan 做存在性校验。
 
@@ -1511,7 +1538,7 @@ class Nl2SqlService:
 
         for prop in plan.selectedProperties:
             if prop not in owned:
-                issues.append(f"选中的属性 {prop} 不属于选定的任何类")
+                issues.append(f"选中的属性 {prop} 不属于选定的任何类；{_propertyOwnerHint(prop, propsByClass)}")
 
         for agg in plan.aggregations:
             if agg.property not in owned:
@@ -1525,7 +1552,10 @@ class Nl2SqlService:
                         f"引用其他聚合别名应写在 formula 内（{agg.property} 是聚合别名，不是类属性）"
                     )
                 else:
-                    issues.append(f"聚合属性 {agg.property} 不属于选定的任何类")
+                    issues.append(
+                        f"聚合属性 {agg.property} 不属于选定的任何类；"
+                        f"{_propertyOwnerHint(agg.property, propsByClass)}"
+                    )
             # 派生指标硬约束（2026-08-17 真实回归）：alias 命中占比/比率/百分比
             # 等关键词时必须 formula（窗口函数 SUM(x)/SUM(SUM(x)) OVER ()），
             # 否则 SQL 不会算百分比，占比沦为列别名，重试耗尽后整步被标"无法回答"。
@@ -1553,7 +1583,7 @@ class Nl2SqlService:
 
         for prop in plan.groupBy:
             if prop not in owned:
-                hint = _timeBucketGroupHint(prop, classes)
+                hint = _timeBucketGroupHint(prop, classes) or _propertyOwnerHint(prop, propsByClass)
                 issues.append(
                     f"分组属性 {prop} 不属于选定的任何类" + (f"；{hint}" if hint else "")
                 )
@@ -1970,7 +2000,12 @@ class Nl2SqlService:
             "rowLimit 替代：应把分区维与取数维都放 groupBy（如 按供应商看每种物料 → "
             "groupBy=[供应商, 物料]），分区维写进 partitionBy（如 [供应商]），每组保留行数写进 "
             "perGroupLimit=N，并把 rowLimit 置 null；每组 Top-N 由 SQL 阶段用 "
-            "ROW_NUMBER() OVER (PARTITION BY ...) 实现，不是全局 LIMIT。"
+            "ROW_NUMBER() OVER (PARTITION BY ...) 实现，不是全局 LIMIT。\n"
+            "9. 结果涉及业务实体（供应商、客户、物料、承运人、用户等）时，selectedProperties "
+            "必须**同时包含该实体的编码列与名称列**（如 供应商编号 + 供应商名称），让结果可直接阅读；"
+            "只输出编码会让用户无法辨认。名称列与数据列不在同一张表时，使用「JOIN 关系」段落中"
+            "列出的表.列对关联到实体主表再取名称列（仍受 JOIN 目录约束，禁止编造连接）。"
+            "纯 COUNT 计数类问题不受此条约束。"
         )
 
     def _buildPlanUserPrompt(

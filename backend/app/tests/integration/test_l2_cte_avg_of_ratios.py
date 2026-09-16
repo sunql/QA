@@ -193,7 +193,7 @@ GROUP BY supplier_id
 ```""",
         ]
     )
-    model_config = SimpleNamespace(model_name="test-model")
+    model_config = SimpleNamespace(model_name="test-model", temperature=0.0)
 
     result = await nl2sql.generateSql(
         question="供应商 PO 完成率",
@@ -292,7 +292,7 @@ GROUP BY supplier_id
 ```""",
         ]
     )
-    model_config = SimpleNamespace(model_name="test-model")
+    model_config = SimpleNamespace(model_name="test-model", temperature=0.0)
 
     result = await nl2sql.generateSql(
         question="各供应商 PO 完成率是多少",

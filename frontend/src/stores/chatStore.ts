@@ -266,6 +266,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 dataQuality: payload.badges,
               }),
             })),
+          // 类召回诊断（2026-09-16）：截断/降级时 MessageItem 渲染提示
+          onClassRecall: (info) =>
+            set((state) => ({
+              messages: patchLastMessage(state.messages, {
+                classRecall: info,
+              }),
+            })),
           onToken: (content) =>
             set((state) => {
               const last = state.messages[state.messages.length - 1];
@@ -337,6 +344,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             affinityStatus: res.affinityStatus ?? null,
             // Phase 1.4：DQ 可信度 badge（顺序对齐 queryPlan.selectedClasses）
             dataQuality: res.dataQuality ?? null,
+            // 类召回诊断（2026-09-16）：truncated/fallback 时渲染提示
+            classRecall: res.classRecall ?? null,
             // 拦截路径卡片对象（非流式响应回填，MessageItem 按字段存在性渲染）。
             // 修复：Phase 5.3/5.4/6.3 曾只读不写，导致 supplier360/supplierRisk/
             // graphTraversal 卡片在真实 chat 流中从未渲染（#206 审查发现）。

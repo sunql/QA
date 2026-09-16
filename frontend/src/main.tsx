@@ -22,13 +22,11 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ThemedRoot>
       <BrowserRouter
+        // react-router 6.30 起 BrowserRouter 仅支持这两个 flag，其余 v7_* 行为
+        // 已成默认并从 FutureConfig 类型移除——保留会触发 TS2353 阻断 npm run build
         future={{
           v7_startTransition: true,
           v7_relativeSplatPath: true,
-          v7_fetcherPersist: true,
-          v7_partialHydration: true,
-          v7_normalizeFormMethod: true,
-          v7_skipActionErrorRevalidation: true,
         }}
       >
         <App />

@@ -329,6 +329,8 @@ export const zhCN = {
     typing: "正在输入",
     validationDetail: "校验失败详情",
     affinityLocked: "🔒 锁定 {model} · 剩 {turns} 轮",
+    classRecallTruncated: "本次命中的数据表已达上限（{total} 张），部分相关表可能未被纳入查询，可尝试更具体的表述或联系管理员调整召回窗口。",
+    classRecallFallback: "数据表智能召回暂不可用，本次已加载全部数据表，回答准确性可能受影响。",
   },
 
   suggestedAgent: {

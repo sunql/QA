@@ -55,6 +55,43 @@ class TestValidatePlan:
         issues = _service().validatePlan(plan, [_receiptCls()])
         assert any("NONEXISTENT" in i for i in issues)
 
+    def test_cross_class_property_hint_lists_owner_classes(self) -> None:
+        # 真实回归（2026-09-16）：「供货量最大供应商」问题中 LLM 用了「供应商名称」
+        # 但 selectedClasses 只选了收货明细类（该列只存在于供应商主表）。
+        # 原报错「不属于选定的任何类」未说明属性属于哪些类，重试两次仍犯同错
+        # → 整轮失败。报错须列出 schema 中拥有该属性的类，引导把类加入
+        # selectedClasses 并经 JOIN 关联，让重试可自愈。
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("NAME",),
+            groupBy=("NAME",),
+        )
+        issues = _service().validatePlan(plan, [_receiptCls(), _supplierCls()])
+        assert any("NAME" in i and "BPSUPPLIER" in i and "selectedClasses" in i for i in issues)
+        # 选中与分组两处都要带可操作指引
+        assert any("分组属性" in i and "BPSUPPLIER" in i for i in issues)
+
+    def test_property_nowhere_in_schema_says_so(self) -> None:
+        # 属性在本体 schema 中完全不存在（含别名/物理列）时，须如实说明而非
+        # 只说「不属于选定的任何类」，避免重试继续幻觉同一属性名。
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("NONEXISTENT",),
+        )
+        issues = _service().validatePlan(plan, [_receiptCls(), _supplierCls()])
+        assert any("NONEXISTENT" in i and "本体 schema" in i for i in issues)
+
+    def test_aggregation_cross_class_property_hint_lists_owner_classes(self) -> None:
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            aggregations=(Aggregation(function="SUM", property="NAME"),),
+        )
+        issues = _service().validatePlan(plan, [_receiptCls(), _supplierCls()])
+        assert any("聚合属性" in i and "BPSUPPLIER" in i for i in issues)
+
     def test_aggregation_property_must_exist(self) -> None:
         plan = QueryPlan(
             target="x",

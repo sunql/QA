@@ -324,6 +324,10 @@ class LocalImportService:
                 created_classes += 1
                 created_class_by_table[proposed.source_table] = class_id
 
+        # 整批补齐类向量：单次对账 + 单次 flush，best-effort 不阻塞导入响应
+        if request.sync_embeddings and created_classes:
+            self._ontology_service.syncMissingClassEmbeddingsBestEffort()
+
         class_id_by_table = await self._build_table_to_class_id_map(
             session, created_class_by_table
         )
@@ -407,6 +411,8 @@ class LocalImportService:
             created_by=created_by,
         )
         try:
+            # sync_embedding=False：抑制逐类后台向量同步（逐条 flush 10-25s），
+            # 类循环结束后由 syncMissingClassEmbeddingsBestEffort 整批补齐
             created_class = await self._ontology_service.createClass(
                 session,
                 class_dto,
@@ -414,6 +420,7 @@ class LocalImportService:
                 actor_departments=(
                     ",".join(actor.departments) if actor.departments else None
                 ),
+                sync_embedding=False,
             )
         except Exception as exc:  # noqa: BLE001
             await session.rollback()

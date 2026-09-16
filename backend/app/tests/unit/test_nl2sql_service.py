@@ -34,7 +34,9 @@ def _buildClass(
 
 
 def _llmConfig() -> SimpleNamespace:
-    return SimpleNamespace(model_name="test-model")
+    # temperature：生产代码 generateQueryPlan/generateSQL 会读 modelConfig.temperature
+    # （LLM 模型选择器改动起），桩必须带齐契约字段，否则 AttributeError。
+    return SimpleNamespace(model_name="test-model", temperature=0.0)
 
 
 def _makeJoin(
@@ -1400,3 +1402,23 @@ class TestCurrentDateAnchor:
         dialect = Nl2SqlService.resolveDialect(None)
         prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
         assert "服务端" in prompt
+
+
+class TestEntityNameColumnRule:
+    """plan prompt 应引导 LLM 对实体列同时选出中文名称列（编码+名称都展示）。
+
+    背景：订单明细表只有供应商编号 FK，名称在供应商主表（需 JOIN）；
+    无引导时模型走最短路径只选编码列，结果可读性差。
+    """
+
+    def test_plan_prompt_guides_selecting_entity_name_column(self) -> None:
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "名称列" in prompt
+        assert "供应商" in prompt
+
+    def test_plan_prompt_requires_join_only_from_directory(self) -> None:
+        """补名称的 JOIN 仍受目录约束：提示语须重申只用 JOIN 关系段落。"""
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "JOIN 关系" in prompt

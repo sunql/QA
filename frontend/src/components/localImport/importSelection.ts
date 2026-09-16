@@ -154,6 +154,7 @@ export function buildExecuteRequest(
     confirmedClasses,
     confirmedJoins,
     conflictResolutions: [],
-    syncEmbeddings: false,
+    // 导入完成后由后端整批补齐类向量（单次 flush），无需人工再点「补同步缺失向量」
+    syncEmbeddings: true,
   };
 }

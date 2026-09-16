@@ -1621,6 +1621,24 @@ class AgentSuggestion(CamelModel):
     reason: str
 
 
+class ClassRecallInfo(CamelModel):
+    """类召回诊断（每次 QUERY 附带；前端据此在截断/降级时向用户提示）。
+
+    mode:
+      - recall:   纯向量召回（无邻居可扩边）
+      - expanded: 召回 + JOIN 目录 1-hop 扩边
+      - fallback: 检索不可用/无命中，回退全量类（schema 未裁剪）
+    truncated: 扩边达到 _CLASS_FILTER_MAX_CLASSES 上限被截断，
+    可能存在相关表未进入本次 schema。
+    详见 Harness/wiki/nl2sql-engine.md「类召回窗口与规模化风险」。
+    """
+
+    mode: str
+    hitCount: int = 0
+    classCount: int = 0
+    truncated: bool = False
+
+
 class ChatResponse(CamelModel):
     answer: str
     intent: str = Field(
@@ -1678,6 +1696,11 @@ class ChatResponse(CamelModel):
     agent_run: AgentRunRead | None = Field(
         default=None,
         description=MSG_SCHEMA_CHAT_AGENT_RUN,
+    )
+    # 类召回诊断（2026-09-16）：仅 QUERY/NEW_QUERY/multi_step 填充；其余意图为 None
+    classRecall: ClassRecallInfo | None = Field(
+        default=None,
+        description="类召回诊断：mode(recall|expanded|fallback)/hitCount/classCount/truncated",
     )
     # Phase 7 G4：未指名 Agent 语义路由建议卡片（仅中置信命中时随 QUERY/NEW_QUERY
     # 附带；高置信直接 intent=agent_run，低置信无此字段；前端按字段存在性渲染）

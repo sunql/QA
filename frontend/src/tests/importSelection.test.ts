@@ -205,7 +205,7 @@ describe("buildExecuteRequest", () => {
     ]);
     expect(request.confirmedClasses.every((c) => c.isSelected)).toBe(true);
     expect(request.confirmedJoins).toEqual([{ ...j1, isSelected: true }]);
-    expect(request.syncEmbeddings).toBe(false);
+    expect(request.syncEmbeddings).toBe(true);
     expect(request.conflictResolutions).toEqual([]);
   });
 });

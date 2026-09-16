@@ -186,6 +186,7 @@ class OntologyService:
         *,
         actor: str,
         actor_departments: str | None = None,
+        sync_embedding: bool = True,
     ) -> OntologyClass:
         """创建本体类（起始 version=1, validFrom=now, validTo=None）。
 
@@ -257,7 +258,10 @@ class OntologyService:
 
         # Milvus 类向量自动同步（best-effort，与 Neo4j 同策略：
         # 向量缺失会让 chat 类召回裁剪看不到该类——历史事故见 backfill_milvus_embeddings.py）
-        await self._syncClassEmbeddingBestEffort(entity)
+        # 批量导入路径传 sync_embedding=False 抑制逐类后台同步，改由导入完成后
+        # 一次性整批补齐（syncMissingClassEmbeddingsBestEffort，单次 flush）
+        if sync_embedding:
+            await self._syncClassEmbeddingBestEffort(entity)
 
         return entity
 
@@ -1331,3 +1335,28 @@ class OntologyService:
                 "Milvus 类向量自动同步失败 id=%d name=%s: %s",
                 entity.id, entity.class_name, exc,
             )
+
+    def syncMissingClassEmbeddingsBestEffort(self) -> None:
+        """批量路径（导入向导等）的向量补齐：后台整批对账，单次 flush。
+
+        与逐类 _syncClassEmbeddingBestEffort 的区别：N 个类只做一次
+        listClasses/listAllEmbeddings 对账 + 一次整批 insert（单次 flush），
+        避免 N 个后台任务并发 flush（单次 flush 8-25s）拖垮 Milvus。
+        best-effort：失败仅告警，不影响调用方响应。
+        """
+        task = asyncio.create_task(self._syncMissingClassEmbeddingsNow())
+        _PENDING_SYNC_TASKS.add(task)
+        task.add_done_callback(_PENDING_SYNC_TASKS.discard)
+
+    async def _syncMissingClassEmbeddingsNow(self) -> None:
+        from app.infrastructure.database import getSessionFactory
+
+        try:
+            factory = getSessionFactory()
+            async with factory() as session:
+                summary = await self.syncMissingClassEmbeddings(session)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("批量类向量补齐失败: %s", exc)
+            return
+        if summary["failedCount"]:
+            logger.warning("批量类向量补齐部分失败: %s", summary)

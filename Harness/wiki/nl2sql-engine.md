@@ -376,3 +376,40 @@ plan 与 sql 两个阶段共用 `_renderStatePart(priorState)` 模块级函数�
 
 - 注入数据库 ER 图描述（从 Ontology Service 动态拉取）。
 - 初期限单表查询（SELECT...WHERE...GROUP BY），NL2SQL 通过测试后再放开 JOIN。
+
+## 类召回窗口与规模化风险（已知限制，待优化）
+
+> 记录于 2026-09-16。背景：ReceiptDetail 召回落榜事件（详见 memory `qa-system-milvus-ontology-vector-drift`）暴露的机制性限制，当前规模（96 类）实测够用，**类库增长到数百个后需要升级**。
+
+### 机制（现状）
+
+`chat_service._selectRelevantClasses` 每次提问独立执行（窗口是**每问一次**的，不是全局的）：
+
+1. **向量召回 topK=15**（`_CLASS_FILTER_TOP_K`）：从全部类中按语义相似度挑 15 个候选；
+2. **1-hop 扩边**（`_expandByJoinNeighbors`）：命中类沿 JOIN 目录把相邻表拉进来；
+3. **上限 30**（`_CLASS_FILTER_MAX_CLASSES`）：命中 + 邻居合计截断，截断时记日志 `类召回扩边截断`。
+
+窗口大小不随类库增长，但**挑选竞争加剧**。
+
+### 风险表（类库增长后）
+
+| 风险 | 机制 | 当前缓解 |
+|---|---|---|
+| 召回漏选 | topK 固定 15，类库越大相关表挤不进前 15 的概率越高 | 无（ReceiptDetail 事件即此类的实例） |
+| 孤立漏选无法扩边 | 扩边只补「被命中类的邻居」；头表与明细表都落榜时无从谈起 | 无 |
+| 扩边截断 | 命中 15 + 邻居稠密时达 30 上限被截 | 有日志（类召回扩边截断） |
+
+### 升级路径（按成本从低到高，出现真实漏选案例后再做，勿提前）
+
+1. **调大常量**：`_CLASS_FILTER_TOP_K` / `_CLASS_FILTER_MAX_CLASSES`（改两个常量，注意 prompt 长度代价）；
+2. **多路召回**：问题改写为 2-3 个子查询分别召回再合并去重（对「供货量→收货明细+到货明细」类问题有效）；
+3. **两阶段检索**：宽召回（topK≈50）后用 LLM/cross-encoder 精排到 30。
+
+### 验证方法
+
+出现「问了 A 却没看到表 B」时，先看后端日志 `类召回扩边 hits=X expanded=Y total=Z`：
+
+- `Z=30` → 截断问题（调上限即可）；
+- 相关表不在 15 个 hits 里 → 召回问题（走多路召回）。
+
+配套可观测性：`/chat` 响应已带 `classRecall` 诊断字段（mode/hitCount/classCount/truncated），前端在截断/降级时向用户展示提示（2026-09-16 落地）。

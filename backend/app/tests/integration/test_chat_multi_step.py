@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from app.domain.models import LlmConfig, SessionMessage, SessionQueryState, SessionTokenUsage
 from app.services.stream_events import (
+    EVENT_CLASS_RECALL,
     EVENT_DONE,
     EVENT_META,
     EVENT_MULTI_STEP_PLAN,
@@ -367,25 +368,26 @@ class TestMultiStepChatStreamApi:
             frames.append((event or "", data))
 
         events = [e for e, _ in frames]
-        # 序列：meta → multi_step_plan(完整计划) → step_plan/step_result ×2 → step_plan(汇总) → token → done
+        # 序列：meta → class_recall → multi_step_plan(完整计划) → step_plan/step_result ×2 → step_plan(汇总) → token → done
         assert events[0] == EVENT_META
-        assert events[1] == EVENT_MULTI_STEP_PLAN
-        assert events[2] == EVENT_STEP_PLAN
-        assert events[3] == EVENT_STEP_RESULT
-        assert events[4] == EVENT_STEP_PLAN
-        assert events[5] == EVENT_STEP_RESULT
-        assert events[6] == EVENT_STEP_PLAN  # 汇总步骤开始前的 step_plan
-        assert events[7] == EVENT_TOKEN
+        assert events[1] == EVENT_CLASS_RECALL
+        assert events[2] == EVENT_MULTI_STEP_PLAN
+        assert events[3] == EVENT_STEP_PLAN
+        assert events[4] == EVENT_STEP_RESULT
+        assert events[5] == EVENT_STEP_PLAN
+        assert events[6] == EVENT_STEP_RESULT
+        assert events[7] == EVENT_STEP_PLAN  # 汇总步骤开始前的 step_plan
+        assert events[8] == EVENT_TOKEN
         assert events[-1] == EVENT_DONE
         # multi_step_plan 事件携带完整计划概览（含 aggregationOnly 标记）
-        overview = frames[1][1]
+        overview = frames[2][1]
         assert len(overview["steps"]) == 3
         assert [s["stepIndex"] for s in overview["steps"]] == [0, 1, 2]
         assert [s["aggregationOnly"] for s in overview["steps"]] == [False, False, True]
         # step_result 事件携带子步骤 SQL
-        assert frames[3][1]["sql"] is not None
+        assert frames[4][1]["sql"] is not None
         # 汇总 step_plan 的 stepIndex 与聚合步一致
-        assert frames[6][1]["stepIndex"] == 2
+        assert frames[7][1]["stepIndex"] == 2
         # done 事件携带 steps 数组
         done = frames[-1][1]
         assert len(done["steps"]) == 2

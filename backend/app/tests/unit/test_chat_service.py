@@ -25,6 +25,7 @@ from app.domain.models import (
     DataSource,
     LlmConfig,
     OntologyClass,
+    OntologyJoin,
     OntologyMetric,
     OntologyProperty,
 )
@@ -160,10 +161,12 @@ class _FakeOntologyService:
         classes: list[OntologyClass] | None = None,
         metrics: list[OntologyMetric] | None = None,
         searchHits: list | None = None,
+        joins: list | None = None,
     ) -> None:
         self._classes = classes or []
         self._metrics = metrics or []
         self.searchHits = searchHits or []
+        self.joins = joins or []
         self.createdMetrics: list[OntologyMetricCreate] = []
         self.createdClasses: list = []
         self.updatedProperties: list[tuple[int, OntologyPropertyUpdate]] = []
@@ -180,7 +183,7 @@ class _FakeOntologyService:
 
     async def listJoins(self, session) -> list:
         # join 目录（运行时 JOIN 唯一真源）；单测默认无 join 边
-        return []
+        return self.joins
 
     async def createMetric(self, session, dto: OntologyMetricCreate) -> OntologyMetric:
         self.createdMetrics.append(dto)
@@ -904,7 +907,7 @@ class TestChatService:
 
         service, _, _, _ = _buildService(ontology=_BoomSearchOntology(self._classes(1)))
         with caplog.at_level(logging.INFO, logger="app.services.chat_service"):
-            result = await service._selectRelevantClasses(_FakeSession(), "收货数量", self._classes(1))
+            result, recall = await service._selectRelevantClasses(_FakeSession(), "收货数量", self._classes(1))
         assert [c.id for c in result] == [1]  # 回退全量
         assert "reason=search_error total=1" in caplog.text
 
@@ -913,7 +916,7 @@ class TestChatService:
         classes = self._classes(1, 2)
         service, _, _, _ = _buildService(ontology=_FakeOntologyService(classes))
         with caplog.at_level(logging.INFO, logger="app.services.chat_service"):
-            result = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
+            result, recall = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
         assert result == classes
         assert "reason=no_hits total=2" in caplog.text
 
@@ -923,7 +926,7 @@ class TestChatService:
         ontology = _FakeOntologyService(classes, searchHits=[SimpleNamespace(id=999)])
         service, _, _, _ = _buildService(ontology=ontology)
         with caplog.at_level(logging.INFO, logger="app.services.chat_service"):
-            result = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
+            result, recall = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
         assert result == classes
         assert "reason=no_match hits=1 total=2" in caplog.text
 
@@ -933,7 +936,7 @@ class TestChatService:
         ontology = _FakeOntologyService(classes, searchHits=[SimpleNamespace(id=2)])
         service, _, _, _ = _buildService(ontology=ontology)
         with caplog.at_level(logging.INFO, logger="app.services.chat_service"):
-            result = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
+            result, recall = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
         assert [c.id for c in result] == [2]
         assert "本体类裁剪完成 pruned=1 total=2 hits=1" in caplog.text
 
@@ -948,7 +951,7 @@ class TestChatService:
         )
         service, _, _, _ = _buildService(ontology=ontology)
         with caplog.at_level(logging.INFO, logger="app.services.chat_service"):
-            result = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
+            result, recall = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
         assert [c.id for c in result] == [1]
         assert "本体类裁剪命中率过低 hits=4 matched=1 ratio=0.25" in caplog.text
 
@@ -1594,3 +1597,217 @@ class TestChatL1Routing:
         assert len(llm.calls) >= 1
 
 
+
+
+# =============================================================================
+# 类召回扩边（1-hop JOIN 邻接）
+#
+# 背景：「供应商供货量最大，供了什么物料」召回命中 Receipt(收货单) 但明细表
+# ReceiptDetail 落榜 → schema 里没有明细类 → LLM 编造类名，校验必拒。
+# 头表/明细表/名称主表是成对使用的，召回后需沿 JOIN 目录自动扩边。
+# =============================================================================
+
+
+def _join(source: int, target: int) -> OntologyJoin:
+    return OntologyJoin(
+        source_class_id=source,
+        source_columns=[f"C{source}"],
+        target_class_id=target,
+        target_columns=[f"C{target}"],
+        join_key=f"{source}|C{source}->{target}|C{target}",
+    )
+
+
+class TestClassFilterJoinExpansion:
+    def _service(self, classes, *, hits, joins):
+        ontology = _FakeOntologyService(
+            classes, searchHits=[SimpleNamespace(id=i) for i in hits], joins=joins
+        )
+        return _buildService(ontology=ontology)[0]
+
+    @pytest.mark.asyncio
+    async def test_expands_join_neighbor_of_hit(self) -> None:
+        """命中 Receipt(2) → 1-hop 扩边带上明细类 ReceiptDetail(3)。"""
+        classes = [
+            OntologyClass(id=i, class_name=f"C{i}", class_alias=None, description=None,
+                          source_table=f"T{i}", properties=[])
+            for i in (1, 2, 3)
+        ]
+        service = self._service(classes, hits=[2], joins=[_join(2, 3)])
+        result, recall = await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
+        assert sorted(c.id for c in result) == [2, 3]
+        assert result[0].id == 2  # 命中类在前
+
+    @pytest.mark.asyncio
+    async def test_expansion_is_bidirectional_and_no_duplicates(self) -> None:
+        """明细命中 → 头表/主表也要带上；双向边不产生重复。"""
+        classes = [
+            OntologyClass(id=i, class_name=f"C{i}", class_alias=None, description=None,
+                          source_table=f"T{i}", properties=[])
+            for i in (1, 2, 3)
+        ]
+        service = self._service(classes, hits=[3], joins=[_join(2, 3)])
+        result, recall = await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
+        assert sorted(c.id for c in result) == [2, 3]
+
+    @pytest.mark.asyncio
+    async def test_expansion_skips_neighbors_outside_all_classes(self) -> None:
+        """JOIN 邻接指向软删/不存在类时跳过，不报错。"""
+        classes = [
+            OntologyClass(id=2, class_name="C2", class_alias=None, description=None,
+                          source_table="T2", properties=[])
+        ]
+        service = self._service(classes, hits=[2], joins=[_join(2, 999)])
+        result, recall = await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
+        assert [c.id for c in result] == [2]
+
+    @pytest.mark.asyncio
+    async def test_expansion_capped_at_max_classes(self) -> None:
+        """扩边受总量上限约束，防止 schema 文本被撑爆。"""
+        import app.services.chat_service as chat_module
+
+        cap = chat_module._CLASS_FILTER_MAX_CLASSES
+        classes = [
+            OntologyClass(id=i, class_name=f"C{i}", class_alias=None, description=None,
+                          source_table=f"T{i}", properties=[])
+            for i in range(1, cap + 10)
+        ]
+        # 命中 1 个类，其邻居铺满整个上限
+        service = self._service(
+            classes, hits=[1], joins=[_join(1, i) for i in range(2, cap + 10)]
+        )
+        result, recall = await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
+        assert len(result) == cap
+        assert result[0].id == 1
+
+    @pytest.mark.asyncio
+    async def test_join_load_failure_returns_hits_only(self) -> None:
+        """JOIN 目录加载失败 → 退化为纯召回结果（不扩边、不报错）。"""
+        classes = [
+            OntologyClass(id=i, class_name=f"C{i}", class_alias=None, description=None,
+                          source_table=f"T{i}", properties=[])
+            for i in (1, 2, 3)
+        ]
+        ontology = _FakeOntologyService(
+            classes, searchHits=[SimpleNamespace(id=2)], joins=[]
+        )
+        async def boom(session):
+            raise RuntimeError("join 目录不可用")
+        ontology.listJoins = boom
+        service = _buildService(ontology=ontology)[0]
+        result, recall = await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
+        assert [c.id for c in result] == [2]
+
+
+# =============================================================================
+# 类召回诊断（classRecall）
+#
+# 背景：类库增长后固定窗口（topK=15 + 扩边 30）会出现召回漏选/截断；
+# 诊断信息随响应透出，前端在截断/降级时向用户提示，避免"看起来正常但
+# schema 缺表"的静默失败。字段语义见 Harness/wiki/nl2sql-engine.md。
+# =============================================================================
+
+
+class TestClassRecallDiagnostics:
+    def _classes(self, *ids: int) -> list[OntologyClass]:
+        return [
+            OntologyClass(id=i, class_name=f"C{i}", class_alias=None, description=None,
+                          source_table=f"T{i}", properties=[])
+            for i in ids
+        ]
+
+    def _service(self, classes, *, hits=None, joins=None):
+        ontology = _FakeOntologyService(
+            classes,
+            searchHits=[SimpleNamespace(id=i) for i in (hits or [])],
+            joins=joins or [],
+        )
+        return _buildService(ontology=ontology)[0]
+
+    @pytest.mark.asyncio
+    async def test_recall_mode_when_no_expansion(self) -> None:
+        """纯召回（无邻居可扩）：mode=recall，计数如实。"""
+        classes = self._classes(1, 2)
+        service = self._service(classes, hits=[2])
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert [c.id for c in result] == [2]
+        assert recall.mode == "recall"
+        assert recall.hitCount == 1
+        assert recall.classCount == 1
+        assert recall.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_expanded_mode_without_truncation(self) -> None:
+        """扩边发生且未触顶：mode=expanded，truncated=False。"""
+        classes = self._classes(1, 2, 3)
+        service = self._service(classes, hits=[2], joins=[_join(2, 3)])
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert sorted(c.id for c in result) == [2, 3]
+        assert recall.mode == "expanded"
+        assert recall.hitCount == 1
+        assert recall.classCount == 2
+        assert recall.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_truncated_flag_when_cap_reached(self) -> None:
+        """扩边触顶：truncated=True，classCount=上限。"""
+        import app.services.chat_service as chat_module
+
+        cap = chat_module._CLASS_FILTER_MAX_CLASSES
+        classes = self._classes(*range(1, cap + 10))
+        service = self._service(
+            classes, hits=[1], joins=[_join(1, i) for i in range(2, cap + 10)]
+        )
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert len(result) == cap
+        assert recall.mode == "expanded"
+        assert recall.classCount == cap
+        assert recall.truncated is True
+
+    @pytest.mark.asyncio
+    async def test_fallback_on_search_error(self) -> None:
+        """检索抛错回退全量：mode=fallback，hitCount=0，classCount=全量。"""
+        class _BoomSearchOntology(_FakeOntologyService):
+            async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+                raise RuntimeError("Milvus 不可用")
+
+        classes = self._classes(1, 2)
+        service = _buildService(ontology=_BoomSearchOntology(classes))[0]
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert len(result) == 2
+        assert recall.mode == "fallback"
+        assert recall.hitCount == 0
+        assert recall.classCount == 2
+        assert recall.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_fallback_on_no_hits(self) -> None:
+        """检索无命中回退全量：mode=fallback。"""
+        classes = self._classes(1, 2)
+        service = self._service(classes)
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert len(result) == 2
+        assert recall.mode == "fallback"
+        assert recall.classCount == 2
+
+    @pytest.mark.asyncio
+    async def test_response_carries_class_recall(self) -> None:
+        """非流式 ChatResponse 附带 classRecall（pipeline 上下文透传）。"""
+        service, _, _, _ = _buildService()
+        response = await service.processMessage(
+            _dto("各供应商的收货数量汇总"), _FakeSession()
+        )
+        assert response.intent == IntentType.QUERY.value
+        # 默认 fake 无召回命中 → 回退全量，诊断仍需透出
+        assert response.classRecall is not None
+        assert response.classRecall.mode in ("fallback", "recall", "expanded")

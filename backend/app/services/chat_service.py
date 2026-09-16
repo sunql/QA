@@ -62,6 +62,7 @@ from app.domain.schemas import (
     AgentSuggestion,
     ChatRequest,
     ChatResponse,
+    ClassRecallInfo,
     DataQualityBadge,
     ExtractedEntities,
     HistoryMessage,
@@ -114,6 +115,7 @@ from app.services.term_dictionary_service import TermDictionaryService
 from app.services.stream_events import (
     ErrorType,
     EVENT_CHART,
+    EVENT_CLASS_RECALL,
     EVENT_DATA_QUALITY,
     EVENT_DONE,
     EVENT_ERROR,
@@ -168,6 +170,7 @@ _FEW_SHOT_SIMILARITY_MIN = 0.6  # 1-2：相似度低于该值的命中视为噪�
 _FEW_SHOT_EXAMPLE_LIMIT = 400  # 1-2：单条示例的 question/sql 字符上限（few-shot 每阶段重复注入）
 _CLASS_FILTER_TOP_K = 15  # 1-1：类裁剪的向量检索 topK
 _CLASS_FILTER_HIT_MATCH_MIN = 0.5  # 1-1：命中中可解析为真实类的比例低于该值时告警（防检索漂移导致裁剪失效）
+_CLASS_FILTER_MAX_CLASSES = 30  # 召回扩边后的 schema 类总量上限（防 schema 文本无界膨胀）
 _CLARIFY_SYSTEM_PROMPT = (
     "你是一名企业数据分析助手。用户正在询问某个业务概念/术语的含义，"
     "请结合提供的本体元数据用简洁的中文解释，不要编造、不要输出 SQL。"
@@ -304,6 +307,8 @@ class _PipelineContext:
     joins: list[Any] = field(default_factory=list)
     # 用户是否明确选择了模型（而非自动路由）；明确时跳过模型降级
     forcedModel: bool = False
+    # 类召回诊断（2026-09-16）：截断/降级透出到响应，前端据此提示
+    recall: ClassRecallInfo | None = None
 
 
 @dataclass(frozen=True)
@@ -690,6 +695,7 @@ class ChatService(ChatStreamOutputMixin):
                     return await self._executeMultiStep(
                         session, dto, pc, detected.plan, state,
                         initial_tokens=prior_tokens, initial_cost=prior_cost,
+                        _t0=_t0,
                     )
             raise
         self._spawnEmbedding(dto, finalSql)
@@ -755,6 +761,7 @@ class ChatService(ChatStreamOutputMixin):
             extractedEntities=self._entitiesFor(result),
             affinityStatus=affinity,
             dataQuality=dqBadges,
+            classRecall=pc.recall,
         )
 
     # -------------------------------------------------------------------------
@@ -808,7 +815,9 @@ class ChatService(ChatStreamOutputMixin):
         """
         ds = await self._datasource.get(session, dto.datasourceId)
         allClasses = await self._ontology.listClasses(session)
-        classes = await self._selectRelevantClasses(session, dto.question, allClasses)
+        classes, recallInfo = await self._selectRelevantClasses(
+            session, dto.question, allClasses
+        )
         joins = await self._ontology.listJoins(session)
         ctx = await self._buildRoutingContext(session, dto.sessionId)
         configs = await self._listModelConfigs(session)
@@ -834,6 +843,7 @@ class ChatService(ChatStreamOutputMixin):
             fewShot=fewShot, valueSamples=valueSamples, driftWarning=driftWarning,
             dictionaryText=dictionaryText, joins=joins, forcedModel=forcedModel,
             featureCatalogText=featureCatalogText,
+            recall=recallInfo,
         )
 
     async def _buildDriftWarning(
@@ -923,10 +933,15 @@ class ChatService(ChatStreamOutputMixin):
         可观测性（1-1）：每次回退都记 warning，reason= 区分场景（search_error /
         no_hits / no_match），供回退率聚合；命中中可解析为真实类的比例低于阈值时
         同样告警，避免检索漂移让裁剪在生产上悄悄失效。
+
+        返回 (类列表, ClassRecallInfo 诊断)：诊断随 ChatResponse.classRecall 透出，
+        前端在 truncated/fallback 时向用户提示（避免"看起来正常但 schema 缺表"）。
         """
         total = len(allClasses)
         if total == 0:
-            return list(allClasses)
+            return list(allClasses), ClassRecallInfo(
+                mode="recall", hitCount=0, classCount=0,
+            )
         try:
             hits = await self._ontology.searchByKeyword(
                 question, topK=_CLASS_FILTER_TOP_K, typeFilter="class"
@@ -935,10 +950,14 @@ class ChatService(ChatStreamOutputMixin):
             logger.warning(
                 "本体类裁剪回退到全量类 reason=search_error total=%d", total, exc_info=True
             )
-            return list(allClasses)
+            return list(allClasses), ClassRecallInfo(
+                mode="fallback", hitCount=0, classCount=total,
+            )
         if not hits:
             logger.warning("本体类裁剪回退到全量类 reason=no_hits total=%d", total)
-            return list(allClasses)
+            return list(allClasses), ClassRecallInfo(
+                mode="fallback", hitCount=0, classCount=total,
+            )
         hitIds = {hit.id for hit in hits}
         relevant = [cls for cls in allClasses if cls.id in hitIds]
         if not relevant:
@@ -946,7 +965,9 @@ class ChatService(ChatStreamOutputMixin):
                 "本体类裁剪回退到全量类 reason=no_match hits=%d total=%d",
                 len(hits), total,
             )
-            return list(allClasses)
+            return list(allClasses), ClassRecallInfo(
+                mode="fallback", hitCount=0, classCount=total,
+            )
         matchedRatio = len(relevant) / len(hits)
         if matchedRatio < _CLASS_FILTER_HIT_MATCH_MIN:
             logger.warning(
@@ -958,7 +979,70 @@ class ChatService(ChatStreamOutputMixin):
                 "本体类裁剪完成 pruned=%d total=%d hits=%d",
                 len(relevant), total, len(hits),
             )
-        return relevant
+        expanded, truncated = await self._expandByJoinNeighbors(
+            session, relevant, allClasses
+        )
+        recall = ClassRecallInfo(
+            mode="expanded" if len(expanded) > len(relevant) else "recall",
+            hitCount=len(relevant),
+            classCount=len(expanded),
+            truncated=truncated,
+        )
+        return expanded, recall
+
+    async def _expandByJoinNeighbors(
+        self, session: AsyncSession, relevant: list[Any], allClasses: list[Any]
+    ) -> tuple[list[Any], bool]:
+        """召回结果沿本体 JOIN 目录 1-hop 扩边，返回 (新列表, 是否截断)（不改动入参）。
+
+        背景：向量召回会把「成对使用」的类拆散——「供货量」问题命中 Receipt（收货单）
+        但明细表 ReceiptDetail 落榜，schema 里没有明细类时 LLM 会编造类名/属性名，
+        计划校验必拒（且数量/物料等列恰恰都在明细表）。头表↔明细表↔名称主表经
+        JOIN 目录相连，命中的类自动带上 1-hop 邻居即可成对进 schema。
+
+        顺序：命中类在前（保持召回相关性排序），邻居按命中顺序追加；总量超
+        _CLASS_FILTER_MAX_CLASSES 截断（截断标志随诊断透出）。JOIN 目录加载失败时
+        退化为纯召回结果（扩边是增强而非硬依赖，与检索降级同口径）。
+        """
+        try:
+            joins = await self._ontology.listJoins(session)
+        except Exception:
+            logger.warning("JOIN 目录加载失败，跳过类召回扩边", exc_info=True)
+            return relevant, False
+        neighbors: dict[int, set[int]] = {}
+        for join in joins:
+            src, tgt = join.source_class_id, join.target_class_id
+            if src is None or tgt is None:
+                continue
+            neighbors.setdefault(src, set()).add(tgt)
+            neighbors.setdefault(tgt, set()).add(src)
+        classById = {cls.id: cls for cls in allClasses if cls.id is not None}
+        expandedIds: list[int] = [cls.id for cls in relevant if cls.id is not None]
+        seen = set(expandedIds)
+        truncated = False
+        for cid in expandedIds:
+            for nb in sorted(neighbors.get(cid, ())):
+                if nb in seen or nb not in classById:
+                    continue
+                seen.add(nb)
+                expandedIds.append(nb)
+                if len(expandedIds) >= _CLASS_FILTER_MAX_CLASSES:
+                    truncated = True
+                    logger.info(
+                        "类召回扩边截断 total=%d cap=%d",
+                        len(expandedIds), _CLASS_FILTER_MAX_CLASSES,
+                    )
+                    break
+            if len(expandedIds) >= _CLASS_FILTER_MAX_CLASSES:
+                break
+        if len(expandedIds) == len(relevant):
+            return relevant, False
+        expanded = [classById[i] for i in expandedIds]
+        logger.info(
+            "类召回扩边 hits=%d expanded=%d total=%d",
+            len(relevant), len(expanded) - len(relevant), len(expanded),
+        )
+        return expanded, truncated
 
     async def _buildFewShot(self, dto: ChatRequest) -> str | None:
         """检索语义相似的历史成功查询，构造 few-shot 示例注入 NL2SQL prompt（1-2）。
@@ -1219,6 +1303,7 @@ class ChatService(ChatStreamOutputMixin):
                     latency_ms=int((time.monotonic() - _t0) * 1000),
                     modelName=last_model_name,
                     affinityStatus=affinity,
+                    classRecall=pc.recall,
                 )
 
             # 数据查询步骤：复用两阶段流水线
@@ -2386,6 +2471,13 @@ class ChatService(ChatStreamOutputMixin):
             needSamples=intent != IntentType.CLARIFY,
             needDrift=intent != IntentType.CLARIFY,
         )
+        # 类召回诊断（2026-09-16）：单步/多步共用此 pc，事件一次性下发；
+        # 前端在 truncated/fallback 时向用户提示（静默缺表是可见性盲区）
+        if pc.recall is not None:
+            yield StreamEvent(
+                EVENT_CLASS_RECALL,
+                pc.recall.model_dump(mode="json", by_alias=True),
+            )
         # L1 多步：单步优先策略——明确要求分步 → 直接多步；其余先单步，
         # SQL 执行失败时回退多步拆解（与 processMessage 同口径）。
         if intent in (IntentType.NEW_QUERY, IntentType.QUERY):

@@ -28,7 +28,8 @@ def _clsWithProps(name: str, props: list[str]) -> OntologyClass:
 
 
 def _llmConfig() -> SimpleNamespace:
-    return SimpleNamespace(model_name="test-model")
+    # temperature：生产代码会读 modelConfig.temperature，桩须带齐契约字段
+    return SimpleNamespace(model_name="test-model", temperature=0.0)
 
 
 class _Resp:

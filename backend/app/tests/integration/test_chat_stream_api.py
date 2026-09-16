@@ -15,6 +15,7 @@ import json
 from app.infrastructure.llm.base_client import StreamChunk
 from app.services.stream_events import (
     EVENT_CHART,
+    EVENT_CLASS_RECALL,
     EVENT_DONE,
     EVENT_ERROR,
     EVENT_META,
@@ -107,14 +108,15 @@ class TestChatStreamApi:
         frames = _parseFrames(resp.text)
         events = [e for e, _ in frames]
         # 2026-08-16：单步查询也下发执行计划事件：
-        # meta → multi_step_plan → step_plan → plan → sql → chart → token×2 → step_result → done
+        # meta → class_recall → multi_step_plan → step_plan → plan → sql → chart → token×2 → step_result → done
         assert events[0] == EVENT_META
-        assert events[1] == EVENT_MULTI_STEP_PLAN
-        assert frames[1][1]["steps"][0]["stepIndex"] == 0
-        assert events[2] == EVENT_STEP_PLAN
-        assert events[3] == EVENT_PLAN
-        assert events[4] == EVENT_SQL
-        assert events[5] == EVENT_CHART
+        assert events[1] == EVENT_CLASS_RECALL
+        assert events[2] == EVENT_MULTI_STEP_PLAN
+        assert frames[2][1]["steps"][0]["stepIndex"] == 0
+        assert events[3] == EVENT_STEP_PLAN
+        assert events[4] == EVENT_PLAN
+        assert events[5] == EVENT_SQL
+        assert events[6] == EVENT_CHART
         assert events[-1] == EVENT_DONE
         # step_result 在 done 之前（携带 sql/数据/摘要）
         stepResultFrames = [f for f in frames if f[0] == EVENT_STEP_RESULT]
@@ -125,9 +127,9 @@ class TestChatStreamApi:
 
         metaData = dict(frames[0][1])
         assert metaData["intent"] == "query"
-        assert frames[3][1]["plan"]["target"] == "各供应商的收货数量汇总"
-        assert "PRECEIPT" in frames[4][1]["sql"]
-        chartData = frames[5][1]
+        assert frames[4][1]["plan"]["target"] == "各供应商的收货数量汇总"
+        assert "PRECEIPT" in frames[5][1]["sql"]
+        chartData = frames[6][1]
         assert chartData["chartType"] == "pie"
         assert chartData["chartOption"] is not None
         assert len(chartData["data"]) == 2

@@ -1666,7 +1666,7 @@ class TestClassFilterJoinExpansion:
         """扩边受总量上限约束，防止 schema 文本被撑爆。"""
         import app.services.chat_service as chat_module
 
-        cap = chat_module._CLASS_FILTER_MAX_CLASSES
+        cap = chat_module._CLASS_FILTER_MAX_CLASSES_DEFAULT
         classes = [
             OntologyClass(id=i, class_name=f"C{i}", class_alias=None, description=None,
                           source_table=f"T{i}", properties=[])
@@ -1757,7 +1757,7 @@ class TestClassRecallDiagnostics:
         """扩边触顶：truncated=True，classCount=上限。"""
         import app.services.chat_service as chat_module
 
-        cap = chat_module._CLASS_FILTER_MAX_CLASSES
+        cap = chat_module._CLASS_FILTER_MAX_CLASSES_DEFAULT
         classes = self._classes(*range(1, cap + 10))
         service = self._service(
             classes, hits=[1], joins=[_join(1, i) for i in range(2, cap + 10)]
@@ -1787,6 +1787,52 @@ class TestClassRecallDiagnostics:
         assert recall.hitCount == 0
         assert recall.classCount == 2
         assert recall.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_get_class_filter_max_classes_uses_db_value(self) -> None:
+        """_getClassFilterMaxClasses 读 system_config；admin 改值后立即对新问句生效。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)  # 绕开 __init__，只测 helper
+        # mock session：返回 "50"
+        sentinel_value = {"value": "50"}
+
+        class _FakeSessionRead50:
+            async def execute(self, stmt):
+                class _R:
+                    def scalar_one_or_none(self_inner):
+                        return sentinel_value["value"]
+                return _R()
+
+        assert await svc._getClassFilterMaxClasses(_FakeSessionRead50()) == 50
+
+    @pytest.mark.asyncio
+    async def test_get_class_filter_max_classes_falls_back_on_missing(self) -> None:
+        """system_config 行缺席/为 NULL/格式错 → 返 _DEFAULT，不阻断主链路。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+
+        for bad_raw in [None, "", "not-an-int", "   "]:
+            class _FakeSession:
+                async def execute(self, stmt):
+                    class _R:
+                        def scalar_one_or_none(self_inner):
+                            return bad_raw
+                    return _R()
+
+            got = await svc._getClassFilterMaxClasses(_FakeSession())
+            assert got == 30, f"raw={bad_raw!r} got={got}"
+
+    @pytest.mark.asyncio
+    async def test_get_class_filter_max_classes_falls_back_on_db_error(self) -> None:
+        """DB 不可用（表缺失、连接断）→ 返 _DEFAULT（与 _isL4AgentLoopEnabled 同口径）。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+
+        class _FakeSessionBoom:
+            async def execute(self, stmt):
+                raise RuntimeError("UndefinedTableError: system_config")
+
+        assert await svc._getClassFilterMaxClasses(_FakeSessionBoom()) == 30
 
     @pytest.mark.asyncio
     async def test_fallback_on_no_hits(self) -> None:

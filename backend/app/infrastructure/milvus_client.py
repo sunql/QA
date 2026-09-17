@@ -95,11 +95,15 @@ def _ensureEmbeddingIndex(collection: Collection) -> None:
     """
     if _hasEmbeddingIndex(collection):
         return
+    # HNSW 而非 IVF_FLAT：实测本体/查询集合体量在数百~数千条，IVF_FLAT
+    # 的 nlist=128 把向量分到 128 桶、搜索 nprobe=10 只扫 10 桶——很多向量
+    # 落进未搜桶被完全错过（dist=0.85 的真正最佳匹配返 dist=1.25 的错配类），
+    # 表现为 chat 召回落 fallback。HNSW 自适应数据规模、无桶分布问题。
     collection.create_index(
         "embedding",
-        index_params={"index_type": "IVF_FLAT", "metric_type": "L2", "params": {"nlist": 128}},
+        index_params={"index_type": "HNSW", "metric_type": "L2", "params": {"M": 16, "efConstruction": 200}},
     )
-    logger.info("Milvus collection '%s' 补齐 embedding 索引", collection.name)
+    logger.info("Milvus collection '%s' 补齐 embedding 索引 (HNSW)", collection.name)
 
 
 def _ensureCollection(name: str, fields: list[FieldSchema]) -> Collection:
@@ -186,7 +190,7 @@ def searchByEmbedding(
     results = collection.search(
         data=[queryEmbedding],
         anns_field="embedding",
-        param={"metric_type": "L2", "params": {"nprobe": 10}},
+        param={"metric_type": "L2", "params": {"ef": 64}},
         limit=topK,
         output_fields=["ontology_id", "type", "name", "alias", "description"],
         expr=expr,
@@ -328,7 +332,7 @@ def searchQueryEmbedding(
     results = collection.search(
         data=[queryEmbedding],
         anns_field="embedding",
-        param={"metric_type": "L2", "params": {"nprobe": 10}},
+        param={"metric_type": "L2", "params": {"ef": 64}},
         limit=topK,
         output_fields=["session_id", "question", "sql"],
         expr=expr,
@@ -440,7 +444,7 @@ def searchDocumentChunks(
     results = collection.search(
         data=[queryEmbedding],
         anns_field="embedding",
-        param={"metric_type": "L2", "params": {"n_probe": 10}},
+        param={"metric_type": "L2", "params": {"ef": 64}},
         limit=topK,
         output_fields=[
             "document_id",
@@ -593,7 +597,7 @@ def searchWikiPageChunks(
     results = collection.search(
         data=[queryEmbedding],
         anns_field="embedding",
-        param={"metric_type": "L2", "params": {"n_probe": 10}},
+        param={"metric_type": "L2", "params": {"ef": 64}},
         limit=topK,
         output_fields=[
             "page_id",

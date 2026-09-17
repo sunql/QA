@@ -1630,7 +1630,7 @@ class ClassRecallInfo(CamelModel):
       - recall:   纯向量召回（无邻居可扩边）
       - expanded: 召回 + JOIN 目录 1-hop 扩边
       - fallback: 检索不可用/无命中，回退全量类（schema 未裁剪）
-    truncated: 扩边达到 _CLASS_FILTER_MAX_CLASSES 上限被截断，
+    truncated: 扩边达到 system_config.CLASS_FILTER_MAX_CLASSES 上限被截断，
     可能存在相关表未进入本次 schema。
     详见 Harness/wiki/nl2sql-engine.md「类召回窗口与规模化风险」。
     """

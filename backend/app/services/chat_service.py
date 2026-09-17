@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
@@ -170,7 +170,7 @@ _FEW_SHOT_SIMILARITY_MIN = 0.6  # 1-2：相似度低于该值的命中视为噪�
 _FEW_SHOT_EXAMPLE_LIMIT = 400  # 1-2：单条示例的 question/sql 字符上限（few-shot 每阶段重复注入）
 _CLASS_FILTER_TOP_K = 15  # 1-1：类裁剪的向量检索 topK
 _CLASS_FILTER_HIT_MATCH_MIN = 0.5  # 1-1：命中中可解析为真实类的比例低于该值时告警（防检索漂移导致裁剪失效）
-_CLASS_FILTER_MAX_CLASSES = 30  # 召回扩边后的 schema 类总量上限（防 schema 文本无界膨胀）
+_CLASS_FILTER_MAX_CLASSES_DEFAULT = 30  # 召回扩边后的 schema 类总量上限；运行期从 system_config.CLASS_FILTER_MAX_CLASSES 读，缺席用此值
 _CLARIFY_SYSTEM_PROMPT = (
     "你是一名企业数据分析助手。用户正在询问某个业务概念/术语的含义，"
     "请结合提供的本体元数据用简洁的中文解释，不要编造、不要输出 SQL。"
@@ -603,8 +603,6 @@ class ChatService(ChatStreamOutputMixin):
         查询失败时也返回 False（不阻断主链路）。
         """
         try:
-            from sqlalchemy import text
-
             query = text(
                 "SELECT value FROM system_config WHERE key = 'ENABLE_L4_AGENT_LOOP'"
             )
@@ -614,6 +612,33 @@ class ChatService(ChatStreamOutputMixin):
         except Exception:
             logger.warning("Failed to read ENABLE_L4_AGENT_LOOP config", exc_info=True)
             return False
+
+    async def _getClassFilterMaxClasses(self, session: AsyncSession) -> int:
+        """读 system_config.CLASS_FILTER_MAX_CLASSES；缺席/格式错返 _DEFAULT。
+
+        与 ``_isL4AgentLoopEnabled`` 同口径：读失败不阻断主链路，返硬编码默认。
+        admin 改值后立即对新问句生效（每次扩边都现读，无缓存）。
+        """
+        try:
+            row = await session.execute(
+                text("SELECT value FROM system_config WHERE key = 'CLASS_FILTER_MAX_CLASSES'")
+            )
+            raw = row.scalar_one_or_none()
+            if raw is None or raw == "":
+                return _CLASS_FILTER_MAX_CLASSES_DEFAULT
+            return int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "CLASS_FILTER_MAX_CLASSES 值非法 %r，返默认值 %d",
+                raw, _CLASS_FILTER_MAX_CLASSES_DEFAULT,
+            )
+            return _CLASS_FILTER_MAX_CLASSES_DEFAULT
+        except Exception:
+            logger.warning(
+                "读取 CLASS_FILTER_MAX_CLASSES 失败，返默认值 %d",
+                _CLASS_FILTER_MAX_CLASSES_DEFAULT, exc_info=True,
+            )
+            return _CLASS_FILTER_MAX_CLASSES_DEFAULT
 
     async def _handleGenericQuery(
         self,
@@ -1001,9 +1026,12 @@ class ChatService(ChatStreamOutputMixin):
         JOIN 目录相连，命中的类自动带上 1-hop 邻居即可成对进 schema。
 
         顺序：命中类在前（保持召回相关性排序），邻居按命中顺序追加；总量超
-        _CLASS_FILTER_MAX_CLASSES 截断（截断标志随诊断透出）。JOIN 目录加载失败时
-        退化为纯召回结果（扩边是增强而非硬依赖，与检索降级同口径）。
+        ``system_config.CLASS_FILTER_MAX_CLASSES`` 截断（截断标志随诊断透出）。
+        上限 admin 可调，运行期每次扩边现读——改值后立即对新问句生效。JOIN 目录
+        加载失败时退化为纯召回结果（扩边是增强而非硬依赖，与检索降级同口径）。
         """
+        # admin 可调上限：缺席/格式错走默认（与 _isL4AgentLoopEnabled 同口径）
+        maxClasses = await self._getClassFilterMaxClasses(session)
         try:
             joins = await self._ontology.listJoins(session)
         except Exception:
@@ -1026,14 +1054,14 @@ class ChatService(ChatStreamOutputMixin):
                     continue
                 seen.add(nb)
                 expandedIds.append(nb)
-                if len(expandedIds) >= _CLASS_FILTER_MAX_CLASSES:
+                if len(expandedIds) >= maxClasses:
                     truncated = True
                     logger.info(
                         "类召回扩边截断 total=%d cap=%d",
-                        len(expandedIds), _CLASS_FILTER_MAX_CLASSES,
+                        len(expandedIds), maxClasses,
                     )
                     break
-            if len(expandedIds) >= _CLASS_FILTER_MAX_CLASSES:
+            if len(expandedIds) >= maxClasses:
                 break
         if len(expandedIds) == len(relevant):
             return relevant, False

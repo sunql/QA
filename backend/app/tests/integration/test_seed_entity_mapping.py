@@ -5,11 +5,12 @@
 每测试 TRUNCATE 隔离。
 
 覆盖 `scripts/seed_entity_mapping.py::seedEntityMappings` 的契约：
-1. 首次运行插入全部 45 条（25 供应商 + 15 物料 + 3 PO + 2 GR/IQC）
-2. 再次运行幂等（按唯一键 (entity_type, enterprise_key, source_system) 查重，新增 0 条）
+1. 首次运行写入全部 20 条（15 物料 + 3 PO + 2 GR/IQC；SUPPLIER 不再由 seed
+   合成——THBI 真实数据对齐，供应商映射由 bootstrap 同步脚本写入）
+2. 再次运行幂等（唯一键 ON CONFLICT DO UPDATE：刷新既有行、不产生新行）
 3. 按实体类型分布正确
 4. 覆盖 ERP / SRM / QMS 三源系统（跨系统追溯验收）
-5. PO/GR/IQC 用 BUSINESS_KEY 匹配规则；SUPPLIER/MATERIAL 用 MDM_MASTER
+5. PO/GR/IQC 用 BUSINESS_KEY 匹配规则；MATERIAL 用 MDM_MASTER
 6. 种子数据可通过 HTTP API 列表查询到（完整 API 链路）
 """
 
@@ -26,9 +27,8 @@ from scripts.seed_entity_mapping import seedEntityMappings
 # 种子默认有效期（与脚本 _DEFAULT_EFFECTIVE 对齐）
 EXPECTED_EFFECTIVE = date(2026, 1, 1)
 
-EXPECTED_TOTAL = 45
+EXPECTED_TOTAL = 20
 EXPECTED_BY_TYPE: dict[str, int] = {
-    "SUPPLIER": 25,
     "MATERIAL": 15,
     "PO": 3,
     "GR": 1,
@@ -38,8 +38,8 @@ EXPECTED_BY_TYPE: dict[str, int] = {
 EXPECTED_SYSTEMS = {SourceSystem.ERP, SourceSystem.SRM, SourceSystem.QMS}
 # 业务键匹配：PO(3) + GR(1) + IQC(1) = 5
 EXPECTED_BUSINESS_KEY_COUNT = 5
-# MDM 主数据匹配：SUPPLIER(25) + MATERIAL(15) = 40
-EXPECTED_MDM_MASTER_COUNT = 40
+# MDM 主数据匹配：MATERIAL(15)（SUPPLIER 由 bootstrap 写入，不在 seed 清单）
+EXPECTED_MDM_MASTER_COUNT = 15
 
 
 class TestSeedEntityMapping:
@@ -54,14 +54,15 @@ class TestSeedEntityMapping:
         assert await self._count_rows(dbSession) == EXPECTED_TOTAL
 
     async def test_second_run_is_idempotent(self, dbSession) -> None:
+        """DO UPDATE 幂等：重复执行刷新既有行（rowcount 含被刷新行），不产生新行。"""
         await seedEntityMappings(dbSession)
         inserted = await seedEntityMappings(dbSession)
-        assert inserted == 0
-        # 显式断言总数不变（不只依赖返回值的 0）
+        assert inserted == EXPECTED_TOTAL
+        # 显式断言总数不变（幂等的关键是不产生重复行）
         assert await self._count_rows(dbSession) == EXPECTED_TOTAL
 
     async def test_partial_pre_existing_state_inserts_only_missing(self, dbSession) -> None:
-        """预置 1 条与种子重叠的映射 → seed 只补 44 条，总数保持 45。"""
+        """预置 1 条 seed 清单外的映射（SUPPLIER）→ seed 写满 20 条，预置行保留。"""
         dbSession.add(
             EntityMapping(
                 entity_type="SUPPLIER",
@@ -77,8 +78,8 @@ class TestSeedEntityMapping:
         )
         await dbSession.commit()
         inserted = await seedEntityMappings(dbSession)
-        assert inserted == EXPECTED_TOTAL - 1
-        assert await self._count_rows(dbSession) == EXPECTED_TOTAL
+        assert inserted == EXPECTED_TOTAL
+        assert await self._count_rows(dbSession) == EXPECTED_TOTAL + 1
 
     async def test_row_counts_by_entity_type(self, dbSession) -> None:
         await seedEntityMappings(dbSession)
@@ -107,17 +108,17 @@ class TestSeedEntityMapping:
         ).scalars().all()
         assert all(r.effective_date == EXPECTED_EFFECTIVE for r in rows)
         assert all(r.expiry_date is None for r in rows)
-        # 抽查：第 1 家供应商 ERP 映射的源键形态
+        # 抽查：第 1 个物料 ERP 映射的源键形态（ERP 源侧即物料编码本身）
         first = next(
             r
             for r in rows
-            if r.entity_type == "SUPPLIER"
-            and r.enterprise_key == 100001
+            if r.entity_type == "MATERIAL"
+            and r.enterprise_key == 200001
             and r.source_system == SourceSystem.ERP
         )
-        assert first.source_key == "V000001"
-        assert first.source_code == "V000001"
-        assert first.enterprise_code == "SUP000001"
+        assert first.source_key == "RM-STEEL-001"
+        assert first.source_code == "RM-STEEL-001"
+        assert first.enterprise_code == "RM-STEEL-001"
 
     async def test_po_gr_iqc_use_business_key_rule(self, dbSession) -> None:
         await seedEntityMappings(dbSession)
@@ -138,9 +139,7 @@ class TestSeedEntityMapping:
         rows = (
             await dbSession.execute(
                 select(EntityMapping).where(
-                    EntityMapping.entity_type.in_(
-                        ["SUPPLIER", "MATERIAL"]
-                    )
+                    EntityMapping.entity_type.in_(["MATERIAL"])
                 )
             )
         ).scalars().all()
@@ -148,17 +147,17 @@ class TestSeedEntityMapping:
         assert all(m.match_rule == MatchRule.MDM_MASTER for m in rows)
 
     async def test_api_list_returns_seeded_rows(self, client, dbSession) -> None:
-        """完整 API 链路：种子写入后，HTTP 列表能查到 45 条。"""
+        """完整 API 链路：种子写入后，HTTP 列表能查到 20 条。"""
         await seedEntityMappings(dbSession)
         resp = await client.get("/api/v1/entity-mappings")
         assert resp.status_code == 200
         rows = resp.json()
         assert len(rows) == EXPECTED_TOTAL
-        # 抽查：10 条供应商 × ERP，每条的 enterpriseCode 满足 SUP 前缀
-        supplier_erp = [
+        # 抽查：10 条物料 × ERP，每条的 enterpriseCode 满足 RM-STEEL 前缀
+        material_erp = [
             r
             for r in rows
-            if r["entityType"] == "SUPPLIER" and r["sourceSystem"] == "ERP"
+            if r["entityType"] == "MATERIAL" and r["sourceSystem"] == "ERP"
         ]
-        assert len(supplier_erp) == 10
-        assert all(r["enterpriseCode"].startswith("SUP") for r in supplier_erp)
+        assert len(material_erp) == 10
+        assert all(r["enterpriseCode"].startswith("RM-STEEL") for r in material_erp)

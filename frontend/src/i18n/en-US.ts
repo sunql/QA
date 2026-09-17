@@ -123,6 +123,7 @@ export const enUS = {
       wikiSuggestions: "Structure Suggestions",
       wikiCoverage: "Coverage Dashboard",
       wikiGraph: "Knowledge Graph",
+      wikiChat: "Wiki Chat",
       dataQualityRuleParams: "Data Quality / Rule Config (Structured)",
       profile: "Profile",
       changePassword: "Change Password",
@@ -1951,8 +1952,17 @@ export const enUS = {
     empty: "No knowledge pages yet — create one, or bulk-import under Knowledge Import",
     undetermined: "Undetermined",
     filters: {
+      search: "Search title / content",
       dimension: "Filter by dimension",
       status: "Filter by status",
+    },
+    search: {
+      semantic: "Semantic",
+      keyword: "Keyword",
+      score: "Score",
+      snippet: "Matched snippet",
+      noHits: "No semantically matched knowledge pages",
+      fallbackNotice: "Vector search unavailable — fell back to keyword search",
     },
     columns: {
       title: "Title",
@@ -2204,6 +2214,15 @@ export const enUS = {
         "This suggestion was already resolved (terminal state). The list has been refreshed.",
       resolveFailed: "Resolve failed. Please retry.",
     },
+  },
+
+  // Wiki Chat: conversational QA over Enterprise Wiki semantic retrieval (feat-wiki-chat)
+  wikiChat: {
+    title: "Wiki Chat",
+    suggestionsTitle: "Try asking:",
+    send: "Send",
+    inputPlaceholder: "Ask a question — answers are synthesized from Enterprise Wiki semantic retrieval...",
+    noHits: "No relevant knowledge found in the Enterprise Wiki.",
   },
 
   // Coverage dashboard (feat-wiki-knowledge M7, mechanism 6)

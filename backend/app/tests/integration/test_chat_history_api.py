@@ -300,3 +300,34 @@ class TestChatHistoryAuth:
         # —— 若未来强制鉴权，此测试需改为断言 401
         resp = await client.get("/api/v1/sessions/chat-history")
         assert resp.status_code in (200, 401)
+
+class TestWikiQaChannelFilter:
+    """channel=wiki_qa（feat-wiki-chat）：历史面板按渠道隔离。"""
+
+    async def test_wiki_qa_channel_lists_only_wiki_qa_sessions(self, client, dbSession) -> None:
+        now = datetime.now(UTC)
+        for sid, role, content in [
+            ("wc-1", "user", "厂家合作有什么门槛"),
+            ("wc-1", "assistant", "根据企业 Wiki…"),
+            ("chat-1", "user", "普通聊天问题"),
+            ("doc-1", "user", "文档问答问题"),
+        ]:
+            channel = {"wc-1": "wiki_qa", "chat-1": "chat", "doc-1": "doc_qa"}[sid]
+            dbSession.add(SessionMessage(
+                session_id=sid, role=role, content=content,
+                channel=channel, user_id="u1",
+                created_time=now, updated_time=now,
+            ))
+        await dbSession.commit()
+
+        resp = await client.get("/api/v1/sessions/chat-history", params={"channel": "wiki_qa"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert [row["sessionId"] for row in body] == ["wc-1"]
+        assert body[0]["lastQuestion"] == "厂家合作有什么门槛"
+
+    async def test_wiki_qa_channel_rejects_unknown_value(self, client) -> None:
+        resp = await client.get(
+            "/api/v1/sessions/chat-history", params={"channel": "bogus"}
+        )
+        assert resp.status_code == 422

@@ -32,8 +32,20 @@ def test_create_accepts_valid_code() -> None:
 
 
 def test_create_rejects_invalid_code() -> None:
+    """BusinessObjectCodeNew 为 format-only 校验（feat-business-object-dynamic）：
+    registry 检查交给 DB 约束——「存在性未知」的 code 允许创建，只有格式非法才拒。"""
+    # 小写 → 拒
     with pytest.raises(ValidationError):
-        BusinessObjectCreate(code="UNKNOWN", name="X")  # type: ignore[arg-type]
+        BusinessObjectCreate(code="unknown", name="X")
+    # 含空格/特殊字符 → 拒
+    with pytest.raises(ValidationError):
+        BusinessObjectCreate(code="HAS SPACE", name="X")
+    # 超 20 字符 → 拒
+    with pytest.raises(ValidationError):
+        BusinessObjectCreate(code="X" * 21, name="X")
+    # 格式合法但 registry 不存在 → 允许（创建语义本身）
+    dto = BusinessObjectCreate(code="UNKNOWN", name="X")
+    assert dto.code == "UNKNOWN"
 
 
 def test_create_rejects_oversized_name() -> None:

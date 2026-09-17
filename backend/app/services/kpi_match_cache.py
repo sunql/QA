@@ -160,7 +160,9 @@ class KpiMatchCache:
             # 该 KPI 已被删除或不存在
             return
 
-        if kpi.status == KpiStatus.PUBLISHED.value and kpi.is_enabled:
+        # 与 warmUp 同口径：仅 status=PUBLISHED 入索引。曾误引 kpi.is_enabled
+        # （85907cb）——kpi_catalog 无此列，读即 AttributeError。
+        if kpi.status == KpiStatus.PUBLISHED.value:
             self._by_code[kpi_code] = kpi
             for kw in (kpi.semantic_keywords or []):
                 self._by_keyword.setdefault(kw, []).append(kpi)

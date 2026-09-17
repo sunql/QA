@@ -10,11 +10,12 @@ import type {
 const BASE = "/sessions";
 
 // 列出有消息的聊天会话（按最后活跃时间倒序）。limit 默认 50，与后端 controller 一致
-// channel 区分知识问答（doc_qa）和普通聊天（chat）会话历史；不提供时后端默认 chat
+// channel 区分普通聊天（chat）、知识问答（doc_qa）、Wiki Chat（wiki_qa）会话历史；
+// 不提供时后端默认 chat
 export async function listChatSessions(
   limit = 50,
   offset = 0,
-  channel?: "chat" | "doc_qa",
+  channel?: "chat" | "doc_qa" | "wiki_qa",
 ): Promise<ChatSession[]> {
   const params: Record<string, number | string> = { limit, offset };
   if (channel !== undefined) {

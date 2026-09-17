@@ -6,7 +6,7 @@
 
 ## 四个工具
 
-- ``wiki_search``     —— 按标题/正文模糊检索（纯读，无 LLM）
+- ``wiki_search``     —— 知识检索：语义优先（embedding，故障降级关键词）
 - ``wiki_read``       —— 读单条知识全文 + 事实原子 + 已确认关系 + 结构化产物
 - ``rule_evaluate``   —— 对条目的可执行规则跑 dry-run，报告三态结果
 - ``coverage_status`` —— 覆盖度汇总 + 最紧迫缺口 + 未挂业务对象的条目
@@ -17,10 +17,11 @@
 CRUD 链路（那条路上有审核、有学习反馈）；Agent 能改知识的话，「谁在什么时候
 把这条规则改错了」就查不清了。
 
-**2. 不调用 LLM，故 Token 计量恒为 0。** 这不是省事——``ToolResult`` 的
-tokens/cost 字段默认 0 已表达「本次没有 LLM 调用」。若将来某个 wiki 工具
-引入了模型调用，必须同时把用量落到 ``wiki_token_usage``（项目硬约束），
-不能只改这里的返回值。
+**2. 尽量不调用 LLM；唯一的例外是 ``wiki_search`` 的语义路径。** 语义检索
+调 embedding（bge-m3 级模型），其 token 用量在 ``WikiVectorService`` 内落
+``wiki_token_usage``（机制 RETRIEVE，独立 session）；``ToolResult`` 的
+tokens 字段保持 0 以免与计量台账双口径。embedding 故障时降级纯关键词路径
+（零模型调用）。其余三个工具依旧完全不碰模型。
 
 **3. 指称解析失败要**说清楚**，不能静默挑一条。** 用户说「供应商准入要求」，
 可能精确命中一条、可能模糊命中八条、也可能一条都没有。后两种只能由调用方
@@ -157,15 +158,81 @@ def _ambiguousResult(ref: str, candidates: list[WikiPage]) -> ToolResult:
 async def _wikiSearchHandler(
     session: AsyncSession, args: dict, ctx: AgentToolContext
 ) -> ToolResult:
-    """按标题/正文模糊检索知识条目。"""
+    """检索知识条目：语义优先（向量相似度），Milvus/embedding 故障降级关键词。
+
+    语义路径调 embedding（模型调用）——token 用量在
+    ``WikiVectorService.searchSemantic`` 内落 ``wiki_token_usage``（机制
+    RETRIEVE，独立 session），并回填到 ``ToolResult`` 的 tokens 字段，满足
+    项目核心约束 #3。降级路径（纯 PG ILIKE）无模型调用，tokens 恒 0。
+    """
     query = args["query"]
+
+    # ---- 语义优先 ----
+    try:
+        from app.services.wiki_vector_service import (
+            WikiVectorError,
+            WikiVectorService,
+        )
+
+        hits = await WikiVectorService().searchSemantic(
+            session, query, topK=AGENT_SEARCH_LIMIT
+        )
+    except WikiVectorError:
+        logger.warning("wiki_search 语义检索失败，降级关键词", exc_info=True)
+        hits = None  # None = 语义路径失败（区别于空列表 = 语义检索成功但无命中）
+    except Exception:
+        logger.warning("wiki_search 语义检索异常，降级关键词", exc_info=True)
+        hits = None
+
+    if hits is not None:
+        # 同一条目多 chunk 命中只保留最高分（与关键词路径「一条目一行」对齐）
+        bestByPage: dict[str, dict[str, Any]] = {}
+        for h in hits:
+            pid = h["pageId"]
+            if pid not in bestByPage or h["score"] > bestByPage[pid]["score"]:
+                bestByPage[pid] = h
+        deduped = sorted(bestByPage.values(), key=lambda h: h["score"], reverse=True)
+
+        if not deduped:
+            return ToolResult(
+                data={"query": query, "total": 0, "mode": "semantic", "items": []},
+                answer=f"没有检索到与「{query}」相关的知识条目。",
+            )
+        items = [
+            {
+                "pageId": h["pageId"],
+                "title": h["title"],
+                "dimension": h["dimension"],
+                "status": h["status"],
+                "score": round(h["score"], 4),
+                "snippet": _snippet(h.get("chunkText") or ""),
+            }
+            for h in deduped
+        ]
+        answer = (
+            f"「{query}」语义检索到 {len(items)} 条知识（按相似度排序）："
+            + "；".join(
+                f"{h['title']}（{h['dimension'] or '未分类'}/{h['status']}，"
+                f"相似度 {h['score'] * 100:.0f}%）"
+                for h in items
+            )
+        )
+        return ToolResult(
+            data={"query": query, "total": len(items), "mode": "semantic", "items": items},
+            answer=answer,
+            # tokens 恒 0：embedding 用量已在 WikiVectorService.searchSemantic
+            # 内落 wiki_token_usage（SSOT），这里再填会造成 Agent 运行时报表
+            # 与计量台账双口径。
+        )
+
+    # ---- 关键词降级（PG ILIKE，零模型调用）----
     rows, total = await WikiPageService().searchPages(
         session, query=query, limit=AGENT_SEARCH_LIMIT
     )
 
     if not rows:
         return ToolResult(
-            data={"query": query, "total": 0, "items": []},
+            data={"query": query, "total": 0, "mode": "keyword", "items": []},
             answer=f"没有检索到与「{query}」相关的知识条目。",
         )
 
@@ -179,6 +246,7 @@ async def _wikiSearchHandler(
         data={
             "query": query,
             "total": total,
+            "mode": "keyword",
             "items": [{**_pageBrief(p), "snippet": _snippet(p.content)} for p in rows],
         },
         answer=answer,

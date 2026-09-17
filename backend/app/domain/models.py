@@ -300,6 +300,14 @@ class OntologyProperty(Base, TimestampMixin):
     allowed_values: Mapped[list[str] | None] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
     )
+    # 约束字段（feat-ontology-property-constraints，migration 0071）：
+    # None = 未约束；is_not_null=True 推导 COMPLETENESS 规则，min/max 推导 RANGE，
+    # regex_pattern 推导 PATTERN。此前仅 migration + schema 落地、ORM 类漏提交
+    # （eval-report zombie 同款），读写路径整体 AttributeError。
+    is_not_null: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    min_value: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    max_value: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    regex_pattern: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Relationships
     ontology_class: Mapped[OntologyClass] = relationship(
@@ -1761,11 +1769,14 @@ class EvaluationReport(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # DB 列实为 jsonb（server_default '::jsonb'）；必须声明 postgresql.JSONB
+    # —— 泛型 JSON 的 .contains() 退化为字符串 LIKE，PG 上直接报
+    # `operator does not exist: jsonb ~~ text`（evaluation_report 过滤曾因此 500）
     class_ids: Mapped[list[Any]] = mapped_column(
-        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+        postgresql.JSONB, nullable=False, server_default=sa_text("'[]'::jsonb")
     )
     rule_ids: Mapped[list[Any]] = mapped_column(
-        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+        postgresql.JSONB, nullable=False, server_default=sa_text("'[]'::jsonb")
     )
     time_window_start: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -1777,10 +1788,10 @@ class EvaluationReport(Base, TimestampMixin):
         String(16), nullable=False, server_default=sa_text("'PUBLISHED'")
     )
     tags: Mapped[list[Any]] = mapped_column(
-        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+        postgresql.JSONB, nullable=False, server_default=sa_text("'[]'::jsonb")
     )
     snapshot: Mapped[dict[str, Any]] = mapped_column(
-        JSON, nullable=False, server_default=sa_text("'{}'::jsonb")
+        postgresql.JSONB, nullable=False, server_default=sa_text("'{}'::jsonb")
     )
     snapshot_version: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=sa_text("1")
@@ -1791,7 +1802,7 @@ class EvaluationReport(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     progress: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON, nullable=True
+        postgresql.JSONB, nullable=True
     )
 
     __table_args__ = (
@@ -1874,15 +1885,18 @@ class EvaluationReportSchedule(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     cron_expression: Mapped[str] = mapped_column(String(100), nullable=False)
+    # DB 列实为 jsonb（server_default '::jsonb'）；必须声明 postgresql.JSONB
+    # —— 泛型 JSON 的 .contains() 退化为字符串 LIKE，PG 上直接报
+    # `operator does not exist: jsonb ~~ text`（evaluation_report 过滤曾因此 500）
     class_ids: Mapped[list[Any]] = mapped_column(
-        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+        postgresql.JSONB, nullable=False, server_default=sa_text("'[]'::jsonb")
     )
     rule_ids: Mapped[list[Any]] = mapped_column(
-        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+        postgresql.JSONB, nullable=False, server_default=sa_text("'[]'::jsonb")
     )
     time_window_type: Mapped[str] = mapped_column(String(32), nullable=False)
     recipients: Mapped[list[Any]] = mapped_column(
-        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+        postgresql.JSONB, nullable=False, server_default=sa_text("'[]'::jsonb")
     )
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=sa_text("true")

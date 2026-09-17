@@ -223,7 +223,7 @@ async def test_chat_supplier_risk_intent_returns_payload(
     assert payload is not None
     assert payload["profile"]["enterpriseKey"] == 100001
     assert payload["level"] == "high"
-    assert payload["levelSource"] == "risk_score"
+    assert payload["levelSource"] == "supplier_risk_score_main"  # 规则路径契约（feat-feature-rule-config，与 parity 集成测试一致）
     assert len(payload["contributions"]) == 4
 
 

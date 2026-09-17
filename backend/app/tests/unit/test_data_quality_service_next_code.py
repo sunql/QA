@@ -30,9 +30,10 @@ def _makeFakeSession(existing_codes: list[str]) -> SimpleNamespace:
     这里把 execute() 返回的 result 替换为 SimpleNamespace(scalar_one_or_none=...)。
     """
 
-    def fake_execute(stmt: Any) -> SimpleNamespace:
+    async def fake_execute(stmt: Any) -> SimpleNamespace:
         # 解析 stmt.where(...).limit(1) 的 where 条件里 like 后面的字面量。
         # 我们只关心 LIKE 前缀；ORM 不便直接取字面量，用 try/except 提取。
+        # service 是 await session.execute(stmt)，fake 必须 async。
         prefix = _extractLikePrefix(stmt)
         if prefix is None:
             return SimpleNamespace(scalar_one_or_none=lambda: None)
@@ -51,24 +52,22 @@ def _makeFakeSession(existing_codes: list[str]) -> SimpleNamespace:
 def _extractLikePrefix(stmt: Any) -> str | None:
     """从 ORM stmt 里尽力提取 LIKE 前缀；ORM 内部结构不稳，失败兜 None。
 
-    DataQualityRule.rule_code.like(f"{prefix}%") 在 SQLAlchemy 2.x 里
-    通过 _whereclause 暴露，遍历 BinaryExpression 找 Like 节点。
+    SQLAlchemy 2.x Select 的 where 条件在 `_where_criteria`（tuple）里；
+    `col.like(f"{prefix}%")` 生成 BinaryExpression（operator=like_op），
+    right 是 BindParameter（.value 即 'PREFIX%' 字面量）。
     """
     try:
-        # SQLAlchemy 2.x: stmt.whereclauses 是 list[ColumnElement]
-        where = getattr(stmt, "whereclauses", None)
-        if not where:
-            return None
-        for expr in where:
+        criteria = getattr(stmt, "_where_criteria", None) or ()
+        for expr in criteria:
             op = getattr(expr, "operator", None)
-            if op is not None and "like" in op.__name__.lower():
-                right = expr.right
-                # right 是 ParameterizedTyped 通常有 .value/effective_value
-                val = getattr(right, "value", None) or getattr(
-                    right, "effective_value", None
-                )
-                if isinstance(val, str) and val.endswith("%"):
-                    return val[:-1]
+            if op is None or "like" not in str(op).lower():
+                continue
+            right = getattr(expr, "right", None)
+            val = getattr(right, "value", None) or getattr(
+                right, "effective_value", None
+            )
+            if isinstance(val, str) and val.endswith("%"):
+                return val[:-1]
         return None
     except Exception:
         return None
@@ -98,23 +97,23 @@ async def test_nextRuleCode_empty_returns_1():
     r = await svc.nextRuleCode(
         session, class_name="PURCHASE_ORDER", date_yyyymmdd="20260915"
     )
-    assert r["code"] == "MU-DQ-PURCHASE_ORDER-20260915-00001"
+    assert r["code"] == "MU-DQ-PURCHASE_ORD-20260915-00001"
     assert r["seq"] == 1
 
 
 @pytest.mark.asyncio
 async def test_nextRuleCode_existing_returns_max_plus_one():
     existing = [
-        "MU-DQ-PURCHASE_ORDER-20260915-00001",
-        "MU-DQ-PURCHASE_ORDER-20260915-00002",
-        "MU-DQ-PURCHASE_ORDER-20260915-00003",
+        "MU-DQ-PURCHASE_ORD-20260915-00001",
+        "MU-DQ-PURCHASE_ORD-20260915-00002",
+        "MU-DQ-PURCHASE_ORD-20260915-00003",
     ]
     session = _makeFakeSession(existing)
     svc = DataQualityRuleService()
     r = await svc.nextRuleCode(
         session, class_name="PURCHASE_ORDER", date_yyyymmdd="20260915"
     )
-    assert r["code"] == "MU-DQ-PURCHASE_ORDER-20260915-00004"
+    assert r["code"] == "MU-DQ-PURCHASE_ORD-20260915-00004"
     assert r["seq"] == 4
 
 
@@ -122,15 +121,15 @@ async def test_nextRuleCode_existing_returns_max_plus_one():
 async def test_nextRuleCode_cross_day_resets():
     """同类的另一日 → 重新计数。"""
     existing = [
-        "MU-DQ-PURCHASE_ORDER-20260915-00001",
-        "MU-DQ-PURCHASE_ORDER-20260915-00002",
+        "MU-DQ-PURCHASE_ORD-20260915-00001",
+        "MU-DQ-PURCHASE_ORD-20260915-00002",
     ]
     session = _makeFakeSession(existing)
     svc = DataQualityRuleService()
     r = await svc.nextRuleCode(
         session, class_name="PURCHASE_ORDER", date_yyyymmdd="20260916"
     )
-    assert r["code"] == "MU-DQ-PURCHASE_ORDER-20260916-00001"
+    assert r["code"] == "MU-DQ-PURCHASE_ORD-20260916-00001"
     assert r["seq"] == 1
 
 
@@ -146,7 +145,7 @@ async def test_nextRuleCode_other_class_does_not_pollute():
     r = await svc.nextRuleCode(
         session, class_name="PURCHASE_ORDER", date_yyyymmdd="20260915"
     )
-    assert r["code"] == "MU-DQ-PURCHASE_ORDER-20260915-00001"
+    assert r["code"] == "MU-DQ-PURCHASE_ORD-20260915-00001"
     assert r["seq"] == 1
 
 
@@ -166,7 +165,7 @@ async def test_nextRuleCode_sanitizes_class_name():
     r2 = await svc.nextRuleCode(
         session, class_name="Purchase Order", date_yyyymmdd="20260915"
     )
-    assert r2["class_name"] == "PURCHASE_ORDER"
+    assert r2["class_name"] == "PURCHASE_ORD"  # 14 字符截断到 12
 
     # 超长截断到 12 字符
     r3 = await svc.nextRuleCode(

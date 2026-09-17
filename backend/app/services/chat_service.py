@@ -1772,6 +1772,8 @@ class ChatService(ChatStreamOutputMixin):
                     "error": "AGENT_NOT_FOUND",
                 },
             )
+            # FAILED 分支不经 persist：审计必须自行提交，否则请求结束随事务回滚丢失
+            await session.commit()
             return ChatResponse(
                 answer=MSG_AGENT_NOT_FOUND_BY_CODE.format(code=agent_code),
                 intent=result.intent.value,
@@ -1794,12 +1796,14 @@ class ChatService(ChatStreamOutputMixin):
                     "error": "PERMISSION_DENIED",
                 },
             )
+            # FAILED 分支不经 persist：审计必须自行提交，否则请求结束随事务回滚丢失
+            await session.commit()
             # 用异常自身 message（含真实 data_object），替代硬编码 object="?"（审查 LOW#5）
             return ChatResponse(
                 answer=exc.message,
                 intent=result.intent.value,
             )
-        except ConflictError:
+        except ConflictError as exc:
             run_status = "FAILED"
             finished_at = datetime.now(timezone.utc)
             await _audit.record(
@@ -1817,8 +1821,12 @@ class ChatService(ChatStreamOutputMixin):
                     "error": "AGENT_NOT_RUNNABLE",
                 },
             )
+            # FAILED 分支不经 persist：审计必须自行提交，否则请求结束随事务回滚丢失
+            await session.commit()
+            # 用异常自身 message（含真实原因：无工具绑定 / 状态非 ACTIVE），
+            # 替代硬编码 status="inactive"（与上方 PERMISSION_DENIED 分支同口径）
             return ChatResponse(
-                answer=MSG_AGENT_NOT_RUNNABLE.format(code=agent_code, status="inactive"),
+                answer=exc.message,
                 intent=result.intent.value,
             )
         except ValidationError as exc:
@@ -1839,6 +1847,8 @@ class ChatService(ChatStreamOutputMixin):
                     "error": "BAD_INPUT",
                 },
             )
+            # FAILED 分支不经 persist：审计必须自行提交，否则请求结束随事务回滚丢失
+            await session.commit()
             return ChatResponse(
                 answer=exc.message,
                 intent=result.intent.value,
@@ -1861,6 +1871,8 @@ class ChatService(ChatStreamOutputMixin):
                     "error": "UNEXPECTED",
                 },
             )
+            # FAILED 分支不经 persist：审计必须自行提交，否则请求结束随事务回滚丢失
+            await session.commit()
             logger.warning(
                 "agent run failed for %s, degrading: %s",
                 agent_code, dto.question, exc_info=True,

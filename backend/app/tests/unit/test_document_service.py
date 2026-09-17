@@ -184,7 +184,7 @@ class TestDocumentEntityRelationService:
         kw = {
             "document_id": document_id,
             "entity_type": "SUPPLIER",
-            "entity_key": 100001,
+            "entity_key": "100001",
             "relation_type": DocEntityRelationType.CONTRACT,
         }
         kw.update(overrides)
@@ -199,7 +199,7 @@ class TestDocumentEntityRelationService:
         rel = await svc.createRelation(dbSession, self._rel_dto(doc.document_id))
         assert rel.id is not None
         assert rel.entity_type == "SUPPLIER"
-        assert rel.entity_key == 100001
+        assert rel.entity_key == "100001"
 
     @pytest.mark.asyncio
     async def test_createRelation_duplicate_raises_ConflictError(self, dbSession):
@@ -215,8 +215,8 @@ class TestDocumentEntityRelationService:
     async def test_listRelations_filters_by_document(self, dbSession):
         doc = await self._setup_doc(dbSession)
         svc = self._make_svc()
-        await svc.createRelation(dbSession, self._rel_dto(doc.document_id, entity_key=100002))
-        await svc.createRelation(dbSession, self._rel_dto(doc.document_id, entity_key=100003))
+        await svc.createRelation(dbSession, self._rel_dto(doc.document_id, entity_key="100002"))
+        await svc.createRelation(dbSession, self._rel_dto(doc.document_id, entity_key="100003"))
         result = await svc.listRelations(dbSession, document_id=doc.document_id)
         assert len(result) == 2
 
@@ -224,9 +224,9 @@ class TestDocumentEntityRelationService:
     async def test_listRelations_filters_by_entity(self, dbSession):
         doc = await self._setup_doc(dbSession)
         svc = self._make_svc()
-        await svc.createRelation(dbSession, self._rel_dto(doc.document_id, entity_key=200001))
-        await svc.createRelation(dbSession, self._rel_dto(doc.document_id, entity_key=200002))
-        result = await svc.listRelations(dbSession, entity_key=200001)
+        await svc.createRelation(dbSession, self._rel_dto(doc.document_id, entity_key="200001"))
+        await svc.createRelation(dbSession, self._rel_dto(doc.document_id, entity_key="200002"))
+        result = await svc.listRelations(dbSession, entity_key="200001")
         assert len(result) == 1
 
     # --- deleteRelation ---

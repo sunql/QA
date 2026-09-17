@@ -6,6 +6,7 @@ import { DocumentQaHistoryPanel } from "../components/documents/DocumentQaHistor
 interface SessionSummary {
   sessionId: string;
   title?: string;
+  lastQuestion?: string | null;
   updatedAt?: string;
 }
 
@@ -34,6 +35,20 @@ describe("DocumentQaHistoryPanel", () => {
     expect(screen.getByText("质量协议问答")).toBeInTheDocument();
     // 无 title 时显示 sessionId.slice(0, 16)
     expect(screen.getByText("long-session-id-")).toBeInTheDocument();
+  });
+
+  it("prefers lastQuestion over sessionId slice when title is absent", () => {
+    render(
+      <DocumentQaHistoryPanel
+        sessions={[makeSession({ sessionId: "wikicha-abc", lastQuestion: "厂家合作有什么门槛" })]}
+        currentSessionId={null}
+        loading={false}
+        onSelect={vi.fn()}
+        onNew={vi.fn()}
+      />
+    );
+    expect(screen.getByText("厂家合作有什么门槛")).toBeInTheDocument();
+    expect(screen.queryByText("wikicha-abc")).not.toBeInTheDocument();
   });
 
   it("highlights current session with primary tint background", () => {
@@ -91,5 +106,43 @@ describe("DocumentQaHistoryPanel", () => {
     );
     await user.click(screen.getByRole("button", { name: /新对话/ }));
     expect(onNew).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows no delete button when onDelete is not provided", () => {
+    const { container } = render(
+      <DocumentQaHistoryPanel
+        sessions={[makeSession({ sessionId: "s1", title: "会话一" })]}
+        currentSessionId={null}
+        loading={false}
+        onSelect={vi.fn()}
+        onNew={vi.fn()}
+      />
+    );
+    expect(container.querySelectorAll(".wiki-history-delete").length).toBe(0);
+  });
+
+  it("delete requires confirm and calls onDelete with sessionId (not onSelect)", async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    const onSelect = vi.fn();
+    render(
+      <DocumentQaHistoryPanel
+        sessions={[makeSession({ sessionId: "s-del", title: "待删会话" })]}
+        currentSessionId={null}
+        loading={false}
+        onSelect={onSelect}
+        onNew={vi.fn()}
+        onDelete={onDelete}
+      />
+    );
+    // 点垃圾桶图标 → Popconfirm → 点确认按钮（注意与 aria-label="删除" 的
+    // 垃圾桶按钮区分，用 Popconfirm 内部的 primary 按钮定位）
+    await user.click(document.querySelector(".wiki-history-delete") as HTMLElement);
+    await user.click(
+      document.querySelector(".ant-popconfirm-buttons .ant-btn-primary") as HTMLElement,
+    );
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(onDelete).toHaveBeenCalledWith("s-del");
+    expect(onSelect).not.toHaveBeenCalled();
   });
 });

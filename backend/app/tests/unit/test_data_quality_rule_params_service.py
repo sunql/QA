@@ -25,6 +25,10 @@ def session():
         # Mock ORM refresh: assign a deterministic id for downstream assertions
         if getattr(obj, "id", None) is None:
             obj.id = 1
+        # 模拟真实 flush 的列 default：DataQualityRule.is_enabled default=True
+        # （否则内存 ORM 对象为 None，_toRead 的 Pydantic bool 校验会拒）
+        if getattr(obj, "is_enabled", None) is None:
+            obj.is_enabled = True
     s.refresh = _refresh
     return s
 

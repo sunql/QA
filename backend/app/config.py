@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # ===== Milvus 向量库 =====
     milvusUri: str = Field(default="http://localhost:19530", alias="MILVUS_URI")
     milvusCollection: str = Field(default="ontology_embeddings", alias="MILVUS_COLLECTION")
+    # wiki 知识条目向量同步总开关（feat-wiki-semantic-search）：关闭后写路径
+    # 跳过向量 upsert/delete，语义检索仍可用（针对已回填的向量）。测试环境
+    # 与无 embedding provider 的部署可设 false，避免每次 CRUD 等待超时。
+    wikiVectorSyncEnabled: bool = Field(default=True, alias="WIKI_VECTOR_SYNC_ENABLED")
 
     # ===== 安全与限流 =====
     secretKey: str = Field(default="development-insecure-key-change-me", alias="SECRET_KEY")

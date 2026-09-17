@@ -153,7 +153,10 @@ async def test_downgrade_0062_drops_only_the_unique_index(
     # Arrange：确保起点是 head（幂等，若已在 head 则为 no-op）
     _alembic(url, "upgrade", "head")
     atHead = await _snapshot(dbSession)
-    assert atHead["version"] == _HEAD
+    # head 会随迁移链增长（写本用例时 0062 即 head，现已 0077+），钉死版本号
+    # 只会让用例每加一个迁移就红一次；起点校验改为「不在 0061 且唯一索引在位」
+    # —— 这才是「撤索引」操作的真实前提。
+    assert atHead["version"] != _PREV, "起点已退到 0061，未处于 head"
     assert atHead["uniqueIndex"] is True, "起点不在 head：唯一索引缺失"
 
     try:
@@ -185,7 +188,7 @@ async def test_downgrade_0062_drops_only_the_unique_index(
         _alembic(url, "upgrade", "head")
 
     restored = await _snapshot(dbSession)
-    assert restored["version"] == _HEAD
+    assert restored["version"] != _PREV, "恢复后仍停在 0061 —— 本测试把测试库留在了坏状态"
     assert restored["uniqueIndex"] is True, (
         "升级回来之后唯一索引没恢复 —— 本测试把测试库留在了坏状态"
     )

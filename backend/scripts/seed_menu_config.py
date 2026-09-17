@@ -53,6 +53,9 @@ ITEMS: list[dict[str, Any]] = [
     # 企业 Wiki（feat-wiki-knowledge）：二级项 = 机制 1-6 各自的落地面板。
     # 「知识导入」原挂在 section.systemConfig（590），本次归位到本段的 260 ——
     # 它一直是 wiki 的功能，只是先有了页面、后有了分组。
+    # feat-wiki-chat：Wiki Chat 对话入口放组内第一位（245 < 250）——
+    # 知识消费（对话问答）是使用者的第一入口，管理面板跟在后面。
+    {"parent": "section.enterpriseWiki", "code": "item.wikiChat", "label_key": "menu.item.wikiChat", "icon_code": "message", "sort_order": 245, "path": "/wiki-chat"},
     {"parent": "section.enterpriseWiki", "code": "item.wikiPages", "label_key": "menu.item.wikiPages", "icon_code": "file", "sort_order": 250, "path": "/admin/wiki-pages"},
     {"parent": "section.enterpriseWiki", "code": "item.wikiImport", "label_key": "menu.item.wikiImport", "icon_code": "import", "sort_order": 260, "path": "/admin/wiki-import"},
     {"parent": "section.enterpriseWiki", "code": "item.wikiConflicts", "label_key": "menu.item.wikiConflicts", "icon_code": "alert", "sort_order": 270, "path": "/admin/wiki-conflicts"},

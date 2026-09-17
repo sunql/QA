@@ -387,7 +387,8 @@ describe("OntologyPage", () => {
     await waitFor(() => expect(screen.getByText("Customer")).toBeInTheDocument());
 
     await userEvent.click(screen.getByRole("button", { name: /编\s?辑/ }));
-    const nameInput = screen.getByDisplayValue("Customer");
+    // 预填在 afterOpenChange（弹窗动画结束）时写入 —— 异步，需 waitFor
+    const nameInput = await screen.findByDisplayValue("Customer");
     expect(nameInput).toBeInTheDocument();
     await user.clear(nameInput);
     await user.type(nameInput, "Customer_v2");

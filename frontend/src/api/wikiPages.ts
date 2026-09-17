@@ -3,7 +3,9 @@
  *
  * 端点：
  *   GET    /api/v1/wiki/pages                          — 分页列表（dimension/status 过滤）
- *   POST   /api/v1/wiki/pages                          — 新建条目
+ *   GET    /api/v1/wiki/pages/search                   — 全文检索（query 必填，total=命中数）
+ *   GET    /api/v1/wiki/pages/semantic-search          — 语义检索（Milvus 向量相似度）
+ *   POST   /api/v1/wiki/vector-sync                    — 全量回填向量（admin-only）
  *   GET    /api/v1/wiki/pages/{pageId}                 — 详情
  *   PATCH  /api/v1/wiki/pages/{pageId}                 — 局部更新
  *   DELETE /api/v1/wiki/pages/{pageId}                 — 删除（204）
@@ -50,6 +52,64 @@ export async function listWikiPages(
             offset: params.offset ?? 0,
         },
     });
+    return res.data;
+}
+
+export interface SearchWikiPagesParams {
+    query: string;
+    dimension?: KnowledgeDimension;
+    limit?: number;
+    offset?: number;
+}
+
+/**
+ * 全文检索（feat-wiki-search）：ILIKE 标题+正文，total 是「命中数」而非总量。
+ * 对应后端 GET /api/v1/wiki/pages/search —— 路由声明在 /pages/{pageId} 之前。
+ */
+export async function searchWikiPages(
+    params: SearchWikiPagesParams,
+): Promise<WikiPageList> {
+    const res = await httpClient.get<WikiPageList>(`${PREFIX}/pages/search`, {
+        params: {
+            query: params.query,
+            dimension: params.dimension,
+            limit: params.limit ?? 20,
+            offset: params.offset ?? 0,
+        },
+    });
+    return res.data;
+}
+
+/** 语义检索命中的单条结果（feat-wiki-semantic-search）。 */
+export interface WikiSemanticHit {
+    pageId: string;
+    title: string;
+    status: string;
+    dimension: string | null;
+    chunkText: string;
+    chunkSequence: number | null;
+    distance: number;
+    /** 1/(1+L2 distance)，(0,1]；DocumentsPage 同口径按百分比渲染 */
+    score: number;
+}
+
+/**
+ * 语义检索（feat-wiki-semantic-search）：Milvus 向量相似度，按 score 降序。
+ * Milvus / embedding 故障时后端返回 503，调用方应降级关键词检索。
+ */
+export async function semanticSearchWikiPages(
+    params: { query: string; dimension?: KnowledgeDimension; topK?: number },
+): Promise<WikiSemanticHit[]> {
+    const res = await httpClient.get<WikiSemanticHit[]>(
+        `${PREFIX}/pages/semantic-search`,
+        {
+            params: {
+                query: params.query,
+                dimension: params.dimension,
+                topK: params.topK ?? 10,
+            },
+        },
+    );
     return res.data;
 }
 

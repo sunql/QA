@@ -87,6 +87,7 @@ async def test_answer_stream_no_chunks_returns_template() -> None:
     session.execute = AsyncMock(return_value=MagicMock(scalars=lambda: MagicMock(all=lambda: [])))
     session.add = MagicMock()
     session.flush = AsyncMock()
+    session.commit = AsyncMock()  # _persist 收尾提交（缺它此前必红）
     dto = DocQaRequest(session_id="sess-1", question="abc", top_k=8)
 
     actor = CurrentUser(userId="u-1", departments=[])
@@ -160,6 +161,7 @@ async def test_answer_stream_full_pipeline_emits_meta_citations_tokens_done() ->
     )
     session.add = MagicMock()
     session.flush = AsyncMock()
+    session.commit = AsyncMock()  # _persist 收尾提交（缺它此前必红）
 
     dto = DocQaRequest(session_id="sess-1", question="什么是质量协议？", top_k=8)
     actor = CurrentUser(userId="u-1", departments=[])
@@ -211,6 +213,7 @@ async def test_answer_stream_passes_history_to_llm_as_plain_text() -> None:
     ])
     session.add = MagicMock()
     session.flush = AsyncMock()
+    session.commit = AsyncMock()  # _persist 收尾提交（缺它此前必红）
 
     dto = DocQaRequest(session_id="sess-1", question="更详细说说", top_k=8)
     actor = CurrentUser(userId="u-1", departments=[])
@@ -249,6 +252,7 @@ async def test_answer_stream_persists_user_and_assistant_with_citations() -> Non
     ])
     session.add = MagicMock()
     session.flush = AsyncMock()
+    session.commit = AsyncMock()  # _persist 收尾提交（缺它此前必红）
 
     dto = DocQaRequest(session_id="sess-1", question="问题", top_k=8)
     actor = CurrentUser(userId="u-1", departments=[])
@@ -307,6 +311,7 @@ class TestExplicitModelIdRejectsInactive:
         )
         session.add = MagicMock()
         session.flush = AsyncMock()
+        session.commit = AsyncMock()  # _persist 收尾提交（缺它此前必红）
         session.commit = AsyncMock()  # 避免 _persist 路径 noise 让 RED 断言更干净
 
         dto = DocQaRequest(
@@ -345,6 +350,7 @@ class TestExplicitModelIdRejectsInactive:
         ])
         session.add = MagicMock()
         session.flush = AsyncMock()
+        session.commit = AsyncMock()  # _persist 收尾提交（缺它此前必红）
         session.commit = AsyncMock()
 
         active_cfg = MagicMock(

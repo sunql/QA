@@ -938,10 +938,10 @@ function RulesTab() {
         footer={
           <Space>
             <Button
-              disabled={!batchResult || batchResult.results.length === 0}
+              disabled={!batchResult || (batchResult.results ?? []).length === 0}
               onClick={() => {
                 if (!batchResult) return;
-                const rows = batchResult.results.map((r) => ({
+                const rows = (batchResult.results ?? []).map((r) => ({
                   ruleCode: r.ruleCode,
                   ruleType: r.ruleType,
                   status: r.status,

@@ -6,7 +6,12 @@ const httpMock = vi.hoisted(() => ({
   put: vi.fn(),
   delete: vi.fn(),
 }));
-vi.mock("../api/client", () => ({ httpClient: httpMock }));
+// parseBatchCsv 等裸 axios 路径的失败 toast 走 client.showMessageError（mock 成 spy 断言）
+const showMessageErrorSpy = vi.hoisted(() => vi.fn());
+vi.mock("../api/client", () => ({
+  httpClient: httpMock,
+  showMessageError: showMessageErrorSpy,
+}));
 
 // parseBatchCsv 必须走 axios.postForm（multipart 让浏览器补 boundary），
 // 而非 httpClient（其实例默认 Content-Type: application/json 会把表单 422 掉）。
@@ -362,13 +367,13 @@ describe("api/ontology — Batch Relation Engine", () => {
     expect(result).toEqual(data);
   });
 
-  it("parseBatchCsv 失败：镜像拦截器 toast（detail/status 文案）后 rethrow", async () => {
+  it("parseBatchCsv 失败：showMessageError 走 React 上下文 messageApi 弹错后 rethrow", async () => {
     const file = new File(["a"], "relations.csv", { type: "text/csv" });
     // FastAPI 422 detail 形如数组
     const detail = [{ type: "missing", loc: ["body", "file"], msg: "Field required", input: null }];
     axiosMock.postForm.mockRejectedValue({ response: { status: 422, data: { detail } } });
     await expect(parseBatchCsv(file, "relations")).rejects.toBeTruthy();
-    expect(antdSpies.error).toHaveBeenCalledTimes(1);
+    expect(showMessageErrorSpy).toHaveBeenCalledTimes(1);
   });
 });
 

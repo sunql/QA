@@ -161,8 +161,7 @@ async def updateClass(
     """
     entity = await _ontologyService.updateClass(
         db, id, dto,
-        actor=user.userId,
-        actor_departments=",".join(user.departments) if user.departments else None,
+        actor=user,
     )
     return OntologyClassRead.model_validate(entity)
 
@@ -179,8 +178,7 @@ async def deleteClass(
     """
     await _ontologyService.deleteClass(
         db, id,
-        actor=user.userId,
-        actor_departments=",".join(user.departments) if user.departments else None,
+        actor=user,
     )
 
 

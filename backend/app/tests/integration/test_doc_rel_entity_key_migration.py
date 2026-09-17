@@ -27,7 +27,16 @@ INDEX_SQL = (
 
 @pytest.fixture
 async def supplier_bo(dbSession):
-    """确保 business_object 中存在 SUPPLIER 记录（Task 8 FK 依赖）."""
+    """确保 business_object 中存在 SUPPLIER 记录（Task 8 FK 依赖）.
+
+    幂等：SELECT-then-INSERT——conftest autouse 也会插 SUPPLIER（business_object
+    测试套件需要 6 行种子），本 fixture 与之并行不冲突。
+    """
+    existing = (await dbSession.execute(
+        select(BusinessObject).where(BusinessObject.code == "SUPPLIER")
+    )).scalar_one_or_none()
+    if existing is not None:
+        return existing
     bo = BusinessObject(code="SUPPLIER", name="供应商", description="供应商")
     dbSession.add(bo)
     await dbSession.flush()

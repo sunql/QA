@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import AsyncIterator
 import re
 from dataclasses import dataclass
@@ -64,6 +65,67 @@ from app.services.messages_zh import (
 )
 
 _audit = AuditService()
+
+# ---------------------------------------------------------------------------
+# 向量同步挂钩（feat-wiki-semantic-search）
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
+
+# 影响 Milvus 向量/快照的字段：任一被 PATCH 即触发 upsert（embedding 输入是
+# title+content；dimension/status 是 Milvus 里的过滤快照）。其余字段不重嵌。
+_VECTOR_FIELDS = frozenset({"title", "content", "status", "dimension"})
+
+_vectorService: Any | None = None
+
+
+def _getVectorSvc():
+    """WikiVectorService 懒单例（向量链路延迟到首次写操作才初始化）。"""
+    global _vectorService
+    if _vectorService is None:
+        from app.services.wiki_vector_service import WikiVectorService
+
+        _vectorService = WikiVectorService()
+    return _vectorService
+
+
+def _vectorSyncEnabled() -> bool:
+    """向量同步总开关（WIKI_VECTOR_SYNC_ENABLED，默认开）。
+
+    测试环境 / 无 embedding provider 的部署设 false：否则每次条目 CRUD 都在
+    best-effort 里等 provider 超时（实测拖慢集成套件 20 倍）。
+    """
+    from app.config import getSettings
+
+    return getSettings().wikiVectorSyncEnabled
+
+
+async def _syncVectorBestEffort(page: WikiPage) -> None:
+    """向量 upsert，best-effort：失败仅告警，不阻断条目 CRUD。
+
+    向量库与主库是两套基础设施，主库提交成功后向量挂了不该把 200 变 500；
+    漂移由 POST /wiki/vector-sync 的 backfill 对账自愈。
+    """
+    if not _vectorSyncEnabled():
+        return
+    try:
+        await _getVectorSvc().syncPage(page)
+    except Exception:
+        logger.warning(
+            "wiki 向量同步失败（best-effort）page_id=%s", page.page_id, exc_info=True
+        )
+
+
+async def _deleteVectorBestEffort(pageId: str) -> None:
+    """向量删除，best-effort：语义同 :func:`_syncVectorBestEffort`。"""
+    if not _vectorSyncEnabled():
+        return
+    try:
+        await _getVectorSvc().deletePageVectors(pageId)
+    except Exception:
+        logger.warning(
+            "wiki 向量删除失败（best-effort）page_id=%s", pageId, exc_info=True
+        )
 
 # page_id 允许的字符集：大写字母 / 数字 / 连字符 / 下划线。
 # 生成的 ID 面向人读与 URL，故限制为 ASCII 安全子集。
@@ -523,6 +585,7 @@ class WikiPageService:
             await session.rollback()
             raise ConflictError(MSG_WIKI_PAGE_DUPLICATE.format(pageId=pageId)) from e
         await session.refresh(entity)
+        await _syncVectorBestEffort(entity)
         return entity
 
     async def updatePage(
@@ -589,6 +652,9 @@ class WikiPageService:
         entity.updated_time = datetime.now(UTC)
         await session.commit()
         await session.refresh(entity)
+        # 向量快照字段有变更才重嵌（embedding 是真金白银的 LLM 调用）
+        if _VECTOR_FIELDS & dto.model_fields_set:
+            await _syncVectorBestEffort(entity)
         return entity
 
     async def reclassify(
@@ -642,6 +708,7 @@ class WikiPageService:
             before=before,
         )
         await session.commit()
+        await _deleteVectorBestEffort(pageId)
 
     async def deletePages(
         self, session: AsyncSession, pageIds: list[str], actor: CurrentUser
@@ -711,6 +778,8 @@ class WikiPageService:
                     before=before,
                 )
             await session.commit()
+            for pageId in hit:
+                await _deleteVectorBestEffort(pageId)
 
         return BatchDeleteResult(
             requested=len(targets),

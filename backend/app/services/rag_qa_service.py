@@ -172,10 +172,16 @@ class RagQaService:
                 RoutingContext(sessionId=dto.session_id),
             )
 
-        # 7. 拼 prompt
-        client = self._llm_factory(selected) if self._llm_factory else None
+        # 7. 拼 prompt（注入 factory 优先；缺省走 createClient——
+        #    旧实现 factory 缺省 None，prod 直跑必 RuntimeError，feat-wiki-chat 同步修正）
+        factory = self._llm_factory
+        if factory is None:
+            from app.infrastructure.llm.factory import createClient
+            factory = createClient
+        client = factory(selected)
         if client is None:
-            raise RuntimeError("llm_factory 未配置")
+            from app.domain.exceptions import LLMUnavailableError
+            raise LLMUnavailableError("未配置可用的 LLM，无法进行文档问答")
 
         chunks_json = format_chunks_json(chunks)
         messages: list[LlmMessage] = [

@@ -3,6 +3,10 @@
 知识条目的增删改查 + 事实原子 / 关系读取：
 
 - GET    /wiki/pages                 分页列表（可按 dimension/status 过滤）
+- GET    /wiki/pages/search          关键词检索（ILIKE 标题+正文，total=命中数）
+- GET    /wiki/pages/semantic-search 语义检索（Milvus 向量相似度，feat-wiki-semantic-search）
+- POST   /wiki/chat                  Wiki Chat 问答（SSE 流式，语义检索上下文 + LLM 合成，feat-wiki-chat）
+- POST   /wiki/vector-sync           全量回填向量（admin-only，幂等对账自愈）
 - POST   /wiki/pages                 创建条目
 - GET    /wiki/pages/{pageId}        条目详情
 - PATCH  /wiki/pages/{pageId}        更新条目（含维度覆盖）
@@ -47,13 +51,27 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Query, Request, status
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import CurrentUser, getCurrentUser, getDb
+from app.dependencies import CurrentUser, getCurrentUser, getAdminOnlyActor, getDb
+from app.services.wiki_vector_service import WikiVectorError, WikiVectorService
+
+logger = logging.getLogger(__name__)
 from app.domain.wiki_coverage_models import GAP_UNLINKED
 from app.domain.wiki_schemas import (
     ClaimExtractRead,
@@ -76,6 +94,7 @@ from app.domain.wiki_schemas import (
     WikiConflictDetectRequest,
     WikiConflictListRead,
     WikiConflictResolveRequest,
+    WikiChatRequest,
     WikiPageBatchDeleteCascadeRead,
     WikiPageBatchDeleteRead,
     WikiPageBatchDeleteRequest,
@@ -165,6 +184,65 @@ async def createPage(
         db, dto, createdByUserId=user.dbUserId
     )
     return WikiPageRead.model_validate(entity)
+
+
+@router.get(
+    "/pages/search",
+    response_model=WikiPageListRead,
+    status_code=status.HTTP_200_OK,
+)
+async def searchPages(
+    query: str = Query(min_length=1, description="标题/正文检索词"),
+    dimension: str | None = Query(default=None, description="按知识维度过滤"),
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(getDb),
+) -> WikiPageListRead:
+    """全文模糊检索（ILIKE 标题+正文）。
+
+    独立端点而非给 listPages 加可选 query：两个 total 语义不同——
+    listPages 的 total 是「全部条目数」（分页器用），这里的 total 是
+    「命中数」（检索结果用）。该路由**必须**声明在 ``/pages/{pageId}``
+    之前，否则会被路径参数吞掉。
+    """
+    if not query.strip():
+        raise RequestValidationError(  # type: ignore[no-untyped-call]
+            [{"loc": ["query", "query"], "msg": "must not be blank", "type": "value_error"}]
+        )
+    rows, total = await _wikiPageService.searchPages(
+        db, query=query, dimension=dimension, limit=limit, offset=offset
+    )
+    return WikiPageListRead(
+        rows=[WikiPageRead.model_validate(r) for r in rows], total=total
+    )
+
+
+@router.get("/pages/semantic-search", status_code=status.HTTP_200_OK)
+async def semanticSearchPages(
+    query: str = Query(min_length=1, description="自然语言查询（语义检索）"),
+    dimension: str | None = Query(default=None, description="按知识维度过滤"),
+    topK: int = Query(default=10, ge=1, le=50),
+    db: AsyncSession = Depends(getDb),
+) -> list[dict]:
+    """知识条目语义检索（Milvus 向量相似度，feat-wiki-semantic-search）。
+
+    与 ``/pages/search``（ILIKE 关键词）互补：语义检索按含义匹配并带相似度
+    得分排序。Milvus / embedding 基础设施故障映射 **503**（换部署问题），
+    而非 422（换请求问题）。路由必须声明在 ``/pages/{pageId}`` 之前。
+    """
+    if not query.strip():
+        raise RequestValidationError(  # type: ignore[no-untyped-call]
+            [{"loc": ["query", "query"], "msg": "must not be blank", "type": "value_error"}]
+        )
+    try:
+        return await WikiVectorService().searchSemantic(
+            db, query, dimension=dimension, topK=topK
+        )
+    except WikiVectorError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"向量检索暂不可用（Milvus / embedding 故障）：{e}",
+        ) from e
 
 
 @router.get("/pages/{pageId}", response_model=WikiPageRead, status_code=status.HTTP_200_OK)
@@ -1095,6 +1173,25 @@ async def deleteDomainMapping(
     await _coverageTracker.removeDomain(db, ontologyClassId, domain)
 
 
+@router.post("/vector-sync", status_code=status.HTTP_200_OK)
+async def vectorSync(
+    _admin: CurrentUser = Depends(getAdminOnlyActor),
+    db: AsyncSession = Depends(getDb),
+) -> dict[str, int]:
+    """全量回填知识条目向量（admin-only 维护动作，feat-wiki-semantic-search）。
+
+    幂等（upsert 语义）：写路径挂钩 best-effort 失败造成的漂移靠它对账自愈。
+    条目多时耗时较长（逐条 embedding），前端应给进度提示或后台执行。
+    """
+    try:
+        return await WikiVectorService().backfill(db)
+    except WikiVectorError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"向量回填失败（Milvus / embedding 故障）：{e}",
+        ) from e
+
+
 async def _gatherOverview(
     db: AsyncSession,
     *,
@@ -1123,3 +1220,73 @@ async def _classNameOf(db: AsyncSession, ontologyClassId: int) -> str:
         )
     ).scalar_one_or_none()
     return name or f"#{ontologyClassId}"
+
+
+# ---------------------------------------------------------------------------
+# Wiki Chat（feat-wiki-chat）：语义知识库对话问答（SSE 流式）
+# ---------------------------------------------------------------------------
+
+
+@router.post("/chat")
+@limiter.limit(rateLimitValue)
+async def wikiChat(
+    request: Request,
+    dto: WikiChatRequest,
+    _user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+) -> StreamingResponse:
+    """Wiki Chat SSE 流式问答。
+
+    流程：ownership 守卫 → 加载 LlmConfigs → WikiQaService.answer_stream →
+    每个 StreamEvent 走 toSse 序列化。
+    """
+    from collections.abc import AsyncIterator
+
+    from app.domain.exceptions import DomainError
+    from app.domain.models import SessionMessage
+    from app.services.messages_zh import MSG_SESSION_NOT_OWNED
+    from app.services.model_config_service import ModelConfigService
+    from app.services.stream_events import EVENT_ERROR, StreamEvent
+    from app.services.wiki_qa_service import WikiQaService
+
+    # ownership 守卫：session 已有 wiki_qa 消息但 user_id 不匹配 → 422
+    # （新 session 无行 → 放行；照 documents.py docQa 同模式）
+    stmt = (
+        select(SessionMessage.user_id)
+        .where(
+            SessionMessage.session_id == dto.session_id,
+            SessionMessage.channel == "wiki_qa",
+        )
+        .limit(1)
+    )
+    existing_user_id = (await db.execute(stmt)).scalar()
+    if existing_user_id is not None and existing_user_id != _user.userId:
+        raise HTTPException(status_code=422, detail=MSG_SESSION_NOT_OWNED)
+
+    configs = await ModelConfigService().list(db, activeOnly=True)
+    svc = WikiQaService()
+
+    async def eventSource() -> AsyncIterator[str]:
+        try:
+            async for event in svc.answer_stream(db, dto, actor=_user, configs=configs):
+                yield event.toSse()
+        except WikiVectorError as exc:
+            # 向量链路（embedding/Milvus）不可用：LLM/依赖类错误
+            yield StreamEvent(
+                EVENT_ERROR, {"error": str(exc), "errorType": "LLM"},
+            ).toSse()
+        except DomainError as exc:
+            yield StreamEvent(
+                EVENT_ERROR,
+                {"error": exc.message, "errorType": "DOMAIN", "detail": exc.detail},
+            ).toSse()
+        except Exception:  # noqa: BLE001 — SSE 已开始，兜底不能裸断连
+            logger.exception("wiki chat 未预期异常 session=%s", dto.session_id)
+            yield StreamEvent(
+                EVENT_ERROR,
+                {"error": "服务内部错误，请稍后重试", "errorType": "INTERNAL"},
+            ).toSse()
+
+    return StreamingResponse(
+        eventSource(), media_type="text/event-stream",
+    )

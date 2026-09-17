@@ -109,9 +109,9 @@ async def test_0076_adds_rule_params_jsonb_column(dbSession: AsyncSession) -> No
     atHead = await _columnInfo(dbSession)
     version = await _versionNum(dbSession)
 
-    # Assert
-    assert version == _HEAD, (
-        f"alembic_version = {version!r}，期望 {_HEAD!r} —— 迁移没有成为 head"
+    # Assert：head 会随迁移链增长（0076 写用例时即 head，现已 0077+），不钉版本号
+    assert version != _PREV, (
+        f"alembic_version = {version!r} 已退到 {_PREV!r} —— 迁移没有成为 head"
     )
     assert atHead is not None, (
         f"upgrade head 后 {_TABLE}.{_COLUMN} 列不存在 —— 迁移未生效"
@@ -156,7 +156,7 @@ async def test_0076_downgrade_drops_column_and_upgrade_restores(
 
     restored = await _columnInfo(dbSession)
     restoredVersion = await _versionNum(dbSession)
-    assert restoredVersion == _HEAD
+    assert restoredVersion != _PREV, "恢复后仍停在 0075 —— 本测试把测试库留在了坏状态"
     assert restored is not None, (
         "升级回来之后 rule_params 列没恢复 —— 本测试把测试库留在了坏状态"
     )

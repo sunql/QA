@@ -193,9 +193,9 @@ describe("AdminWikiPagesPage", () => {
         await userEvent.click(await screen.findByText("供应商准入要求"));
         await userEvent.click(await screen.findByRole("button", { name: /打回分类/ }));
 
-        expect(
-            await screen.findByText("分类处置失败，请重试"),
-        ).toBeInTheDocument();
+        // 页面级 Alert + message toast 可能同时渲染同一文案 → getAllByText 断言至少出现一次
+        const alerts = await screen.findAllByText("分类处置失败，请重试");
+        expect(alerts.length).toBeGreaterThan(0);
     });
 
     it("falls back to an explanatory line when the page was never auto-classified", async () => {

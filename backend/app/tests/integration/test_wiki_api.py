@@ -362,3 +362,277 @@ async def test_list_relations_confirmed_filter(
 async def test_list_claims_page_not_found_returns_404(client: AsyncClient) -> None:
     resp = await client.get(f"{_BASE}/NO-SUCH-PAGE/claims")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 全文检索（feat-wiki-search：把 searchPages 暴露为独立检索端点）
+# ---------------------------------------------------------------------------
+
+_SEARCH = f"{_BASE}/search"
+
+
+async def test_search_hits_title_and_returns_hit_count_total(
+    client: AsyncClient,
+) -> None:
+    """标题命中；total 是「命中数」而非分页容量（与 listPages 的 total 语义不同）。"""
+    # Arrange
+    await _createPage(client, title="供应商准入规则", body="注册资本 >= 1000 万")
+    await _createPage(client, title="物料编码规范", body="M 开头为物料")
+
+    # Act
+    resp = await client.get(_SEARCH, params={"query": "供应商"})
+
+    # Assert
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["rows"][0]["title"] == "供应商准入规则"
+
+
+async def test_search_hits_content_not_only_title(client: AsyncClient) -> None:
+    """正文命中（ILIKE 覆盖 content 列）。"""
+    # Arrange
+    await _createPage(client, title="准入规则", body="注册资本门槛是 1000 万元")
+
+    # Act
+    resp = await client.get(_SEARCH, params={"query": "注册资本门槛"})
+
+    # Assert
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 1
+
+
+async def test_search_blank_query_returns_422(client: AsyncClient) -> None:
+    """空/纯空白 query 是请求级错误（422），不静默返回全量。"""
+    assert (await client.get(_SEARCH)).status_code == 422
+    assert (await client.get(_SEARCH, params={"query": "  "})).status_code == 422
+
+
+async def test_search_dimension_filter(client: AsyncClient) -> None:
+    """dimension 过滤与 listPages 同白名单；非法值 422。"""
+    # Arrange
+    await client.post(
+        _BASE,
+        json={
+            "pageId": "SEARCH-DIM-RULE",
+            "title": "规则条目",
+            "content": "关键词重叠",
+            "dimension": "RULE",
+        },
+    )
+    await client.post(
+        _BASE,
+        json={
+            "pageId": "SEARCH-DIM-FAQ",
+            "title": "问答条目",
+            "content": "关键词重叠",
+            "dimension": "FAQ",
+        },
+    )
+
+    # Act
+    ruleResp = await client.get(
+        _SEARCH, params={"query": "关键词重叠", "dimension": "RULE"}
+    )
+
+    # Assert
+    assert ruleResp.status_code == 200
+    assert ruleResp.json()["total"] == 1
+    assert ruleResp.json()["rows"][0]["pageId"] == "SEARCH-DIM-RULE"
+    badResp = await client.get(
+        _SEARCH, params={"query": "关键词重叠", "dimension": "NOPE"}
+    )
+    assert badResp.status_code == 422
+
+
+async def test_search_pagination_total_is_hit_count(client: AsyncClient) -> None:
+    """limit/offset 翻页时 total 仍为全部命中数。"""
+    # Arrange：造 3 条都命中
+    for i in range(3):
+        await _createPage(client, title=f"分页命中 {i}", body="共同关键词XYZ")
+
+    # Act
+    page1 = await client.get(
+        _SEARCH, params={"query": "共同关键词XYZ", "limit": 2, "offset": 0}
+    )
+    page2 = await client.get(
+        _SEARCH, params={"query": "共同关键词XYZ", "limit": 2, "offset": 2}
+    )
+
+    # Assert
+    assert page1.status_code == 200
+    assert page1.json()["total"] == 3
+    assert len(page1.json()["rows"]) == 2
+    assert page2.json()["total"] == 3
+    assert len(page2.json()["rows"]) == 1
+
+
+async def test_search_no_match_returns_empty(client: AsyncClient) -> None:
+    resp = await client.get(_SEARCH, params={"query": "绝不可能命中的词组zzzz"})
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 0
+    assert resp.json()["rows"] == []
+
+
+# ---------------------------------------------------------------------------
+# 语义检索 + 向量回填（feat-wiki-semantic-search）
+# ---------------------------------------------------------------------------
+
+_SEM = f"{_BASE}/semantic-search"
+
+
+async def test_semantic_search_blank_query_returns_422(client: AsyncClient) -> None:
+    """空/纯空白 query 是请求级错误（422），先于任何向量调用。"""
+    assert (await client.get(_SEM)).status_code == 422
+    assert (await client.get(_SEM, params={"query": "  "})).status_code == 422
+
+
+async def test_semantic_search_topk_out_of_range_returns_422(
+    client: AsyncClient,
+) -> None:
+    for bad in ("0", "51"):
+        resp = await client.get(_SEM, params={"query": "供应商", "topK": bad})
+        assert resp.status_code == 422, f"topK={bad} 应 422"
+
+
+async def test_semantic_search_maps_service_hits(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """端点透传 service 结果（契约：pageId/title/score 等 camelCase 字段）。"""
+    from app.services import wiki_vector_service as wvs
+
+    async def fakeSearch(self, session, query, *, dimension=None, topK=10):
+        return [
+            {
+                "pageId": "PAGE-SEM-1",
+                "title": "准入规则",
+                "status": "EFFECTIVE",
+                "dimension": "RULE",
+                "chunkText": "注册资本一千万",
+                "chunkSequence": 0,
+                "distance": 0.5,
+                "score": 1.0 / 1.5,
+            }
+        ]
+
+    monkeypatch.setattr(wvs.WikiVectorService, "searchSemantic", fakeSearch)
+    resp = await client.get(_SEM, params={"query": "供应商门槛"})
+    assert resp.status_code == 200
+    hits = resp.json()
+    assert hits[0]["pageId"] == "PAGE-SEM-1"
+    assert hits[0]["score"] == pytest.approx(2 / 3)
+
+
+async def test_semantic_search_embedding_failure_maps_503(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """embedding/Milvus 故障是基础设施错误 → 503（非 422/500）。"""
+    from app.services import wiki_vector_service as wvs
+
+    async def boom(self, session, query, *, dimension=None, topK=10):
+        raise wvs.WikiVectorError("embedding provider down")
+
+    monkeypatch.setattr(wvs.WikiVectorService, "searchSemantic", boom)
+    resp = await client.get(_SEM, params={"query": "供应商门槛"})
+    assert resp.status_code == 503
+
+
+async def test_vector_sync_requires_admin(client: AsyncClient) -> None:
+    """vector-sync 是 admin-only 维护动作；非 admin 角色 → 403。"""
+    resp = await client.post(
+        "/api/v1/wiki/vector-sync",
+        headers={"X-User-Id": "alice", "X-User-Roles": "viewer"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_vector_sync_returns_counts(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import wiki_vector_service as wvs
+
+    async def fakeBackfill(self, session):
+        return {"pages": 2, "chunks": 7}
+
+    monkeypatch.setattr(wvs.WikiVectorService, "backfill", fakeBackfill)
+    resp = await client.post(
+        "/api/v1/wiki/vector-sync", headers={"X-User-Roles": "admin"}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"pages": 2, "chunks": 7}
+
+
+# ---------------------------------------------------------------------------
+# Wiki Chat（feat-wiki-chat）：POST /wiki/chat SSE 问答
+# ---------------------------------------------------------------------------
+
+_CHAT = "/api/v1/wiki/chat"
+
+
+async def test_wiki_chat_blank_question_422(client: AsyncClient) -> None:
+    resp = await client.post(_CHAT, json={"sessionId": "s1", "question": "   "})
+    assert resp.status_code == 422
+
+
+async def test_wiki_chat_sse_passthrough(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """端点把 service 的 StreamEvent 序列化为 SSE 帧透传。"""
+    from app.services import wiki_qa_service as wqs
+    from app.services.stream_events import StreamEvent
+
+    async def fakeAnswerStream(self, session, dto, *, actor, configs):
+        yield StreamEvent("qa_meta", {"intent": "wiki_qa"})
+        yield StreamEvent("qa_citations", {"citations": []})
+        yield StreamEvent("token", {"content": "答"})
+        yield StreamEvent("qa_done", {"tokensUsed": 0, "cost": 0.0, "modelName": None})
+
+    monkeypatch.setattr(wqs.WikiQaService, "answer_stream", fakeAnswerStream)
+    resp = await client.post(_CHAT, json={"sessionId": "s1", "question": "门槛"})
+    assert resp.status_code == 200
+    assert "text/event-stream" in resp.headers["content-type"]
+    body = resp.text
+    assert "event: qa_meta" in body
+    assert "event: qa_citations" in body
+    assert "event: token" in body
+    assert "event: qa_done" in body
+
+
+async def test_wiki_chat_vector_error_maps_to_error_event(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WikiVectorError（向量链路不可用）→ SSE error 事件而非 500。"""
+    from app.services import wiki_qa_service as wqs
+    from app.services.wiki_vector_service import WikiVectorError
+
+    async def fakeAnswerStream(self, session, dto, *, actor, configs):
+        yield StreamEvent("qa_meta", {"intent": "wiki_qa"})
+        raise WikiVectorError("embedding provider down")
+
+    monkeypatch.setattr(wqs.WikiQaService, "answer_stream", fakeAnswerStream)
+    resp = await client.post(_CHAT, json={"sessionId": "s1", "question": "门槛"})
+    assert resp.status_code == 200  # SSE 已开始，错误走事件
+    assert "event: error" in resp.text
+
+
+async def test_wiki_chat_session_not_owned_422(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """ownership 守卫：已有 wiki_qa 消息的 session 属于别人 → 422。"""
+    from app.domain.models import SessionMessage
+
+    dbSession.add(SessionMessage(
+        session_id="s-owned",
+        role="user",
+        content="别人的问题",
+        channel="wiki_qa",
+        user_id="someone-else",
+    ))
+    await dbSession.commit()
+
+    resp = await client.post(
+        _CHAT,
+        json={"sessionId": "s-owned", "question": "门槛"},
+        headers={"X-User-Id": "intruder", "X-User-Roles": "user"},
+    )
+    assert resp.status_code == 422

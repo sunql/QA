@@ -11,6 +11,10 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/tests/setup.ts"],
+    // antd 重组件（Table/Modal/Select）在 jsdom + 并行 worker 下渲染耗时波动大，
+    // 默认 5s 在全量跑时常被负载顶穿（单文件跑全绿、全量跑随机超时）→ 提到 15s
+    testTimeout: 15_000,
+    hookTimeout: 10_000,
     // 排除 Playwright E2E（e2e/*.spec.ts），避免被 vitest 默认 include 捡入 jsdom 环境
     exclude: ["e2e/**", "node_modules/**", "dist/**"],
     coverage: {

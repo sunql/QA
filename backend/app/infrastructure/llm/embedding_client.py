@@ -133,6 +133,16 @@ class EmbeddingClient:
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """批量生成文本向量，返回顺序与输入一致。"""
+        vectors, _ = await self.embedWithUsage(texts)
+        return vectors
+
+    async def embedWithUsage(self, texts: list[str]) -> tuple[list[list[float]], int]:
+        """批量生成向量并返回 ``(向量列表, prompt_tokens)``。
+
+        token 数取 provider 返回的 ``usage.prompt_tokens``（OpenAI 兼容语义，
+        embeddings 无 completion 概念）；provider 未报 usage 时回 0——计量
+        侧宁可记 0 也不编造估算值。调用方负责决定 0 是否可接受。
+        """
         try:
             response = await self._ensureClient().embeddings.create(
                 model=self._model, input=texts
@@ -146,7 +156,14 @@ class EmbeddingClient:
             ) from exc
 
         data = sorted(response.data, key=lambda item: item.index)
-        return [list(item.embedding) for item in data]
+        usage = getattr(response, "usage", None)
+        promptTokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        return [list(item.embedding) for item in data], promptTokens
+
+    @property
+    def modelName(self) -> str:
+        """当前 embedding 模型名（计量落库用）。"""
+        return self._model
 
     async def close(self) -> None:
         close = getattr(self._client, "close", None)

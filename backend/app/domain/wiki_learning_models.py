@@ -82,6 +82,8 @@ LEARNING_MECHANISMS: tuple[str, ...] = (
     "INSIGHT",     # Phase 3 Graph Insights（拓扑告警 + LLM 解读）
     "ANALYZE",     # Phase 1 Two-Step CoT 的 Step 1（导入前深度分析）
     "TOPIC",       # Phase 5.5 SPARSE_COMMUNITY gap 主题建议
+    "RETRIEVE",    # feat-wiki-semantic-search：embedding 向量化/语义检索计量
+    "QA",          # feat-wiki-chat：Wiki Chat 问答答案生成计量
 )
 
 # 冲突类型（机制 3）。四类的**检测手段不同**——只有 CONTRADICTION 必须调模型，

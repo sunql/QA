@@ -89,9 +89,13 @@ async def _seedAgent(
         trigger_type=AgentTriggerType.USER_QUESTION,
         response_latency=AgentResponseLatency.REALTIME,
         data_domains=["PROCUREMENT"],
-        data_layers=["FEATURE"],
+        # supplier_risk 工具要求 data_layers 含 DIM（写时跨字段校验）
+        data_layers=["DIM", "FEATURE"],
         status=status,
         version="v1.0",
+        # feat-agent-tool-binding：tool_name DB 化后运行时必查 agent_definition.tool_name，
+        # 缺省 → no-tool ConflictError（409）
+        tool_name="supplier_risk",
         policies=policies
         if policies is not None
         else [
@@ -315,7 +319,7 @@ async def test_chat_agent_run_intent_returns_payload(
     assert run["agentCode"] == "SUPPLIER_RISK_AGENT"
     assert run["tool"] == "supplier_risk"
     assert run["result"]["level"] == "high"
-    assert run["result"]["levelSource"] == "risk_score"
+    assert run["result"]["levelSource"] == "supplier_risk_score_main"  # 规则路径契约
     # chat 注入真实 llm_factory（_NoopLlm）→ risk_points 由 LLM 生成
     assert run["result"]["riskPointsSource"] == "llm"
 

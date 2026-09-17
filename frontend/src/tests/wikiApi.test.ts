@@ -28,6 +28,8 @@ import {
     listWikiRelations,
     reclassifyWikiPage,
     rejectWikiRelation,
+    searchWikiPages,
+    semanticSearchWikiPages,
     updateWikiPage,
 } from "../api/wikiPages";
 import {
@@ -84,6 +86,46 @@ describe("wikiPages API", () => {
                 limit: 50,
                 offset: 100,
             },
+        });
+    });
+
+    it("searchWikiPages hits the /pages/search route with query + paging", async () => {
+        httpClient.get.mockResolvedValueOnce(resolvesWith({ rows: [], total: 0 }));
+
+        await searchWikiPages({ query: "供应商", dimension: "RULE", limit: 50, offset: 10 });
+
+        expect(httpClient.get).toHaveBeenCalledWith("/wiki/pages/search", {
+            params: { query: "供应商", dimension: "RULE", limit: 50, offset: 10 },
+        });
+    });
+
+    it("searchWikiPages omits optional filters", async () => {
+        httpClient.get.mockResolvedValueOnce(resolvesWith({ rows: [], total: 0 }));
+
+        await searchWikiPages({ query: "供应商" });
+
+        expect(httpClient.get).toHaveBeenCalledWith("/wiki/pages/search", {
+            params: { query: "供应商", dimension: undefined, limit: 20, offset: 0 },
+        });
+    });
+
+    it("semanticSearchWikiPages hits /pages/semantic-search with query + topK", async () => {
+        httpClient.get.mockResolvedValueOnce(resolvesWith([]));
+
+        await semanticSearchWikiPages({ query: "供应商门槛", dimension: "RULE", topK: 30 });
+
+        expect(httpClient.get).toHaveBeenCalledWith("/wiki/pages/semantic-search", {
+            params: { query: "供应商门槛", dimension: "RULE", topK: 30 },
+        });
+    });
+
+    it("semanticSearchWikiPages omits optional filters", async () => {
+        httpClient.get.mockResolvedValueOnce(resolvesWith([]));
+
+        await semanticSearchWikiPages({ query: "门槛" });
+
+        expect(httpClient.get).toHaveBeenCalledWith("/wiki/pages/semantic-search", {
+            params: { query: "门槛", dimension: undefined, topK: 10 },
         });
     });
 

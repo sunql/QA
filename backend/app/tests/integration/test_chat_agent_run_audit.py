@@ -29,9 +29,13 @@ from app.domain.enums import (
 from app.domain.schemas import AgentAccessPolicyCreate, AgentDefinitionCreate
 from app.infrastructure import database as dbModule
 from app.services.agent_registry_service import AgentRegistryService
+from app.services.acl_service import ADMIN_ROLE
 from app.workers.audit_worker import AuditWorker
+from app.dependencies import CurrentUser
 
 _ADMIN = {"X-User-Id": "audit-chat-agent-run", "X-User-Tenant": "default"}
+# service 层 actor 收 CurrentUser（含 roles）；_ADMIN 是 HTTP headers dict，勿混用
+_ADMIN_USER = CurrentUser(userId="audit-chat-agent-run", roles=(ADMIN_ROLE,))
 
 _CHAT_DATASOURCE_ID = 9602
 
@@ -67,7 +71,8 @@ async def _seedAgent(
         trigger_type=AgentTriggerType.USER_QUESTION,
         response_latency=AgentResponseLatency.REALTIME,
         data_domains=["PROCUREMENT"],
-        data_layers=["FEATURE"],
+        data_layers=["DIM", "FEATURE"],  # supplier_risk 工具要求 data_layers 含 DIM
+        tool_name="supplier_risk",
         status=status,
         version="v1.0",
         policies=policies
@@ -81,7 +86,7 @@ async def _seedAgent(
             )
         ],
     )
-    await service.createAgent(dbSession, dto, _ADMIN)
+    await service.createAgent(dbSession, dto, _ADMIN_USER)
 
 
 async def _seedSupplier(dbSession: AsyncSession, key: int, code: str) -> None:
@@ -219,7 +224,8 @@ class TestChatAgentRunAudit:
 
         resp = await client.post(
             "/api/v1/chat",
-            headers={**_ADMIN, "X-User-Departments": "采购部,研发部"},
+            # HTTP header 必须 ASCII（httpx 拒发非 ASCII header 值）
+            headers={**_ADMIN, "X-User-Departments": "PROCUREMENT,RESEARCH"},
             json={
                 "sessionId": "test-audit-success",
                 "question": "用 supplier_risk_agent 评估供应商 100001",
@@ -264,7 +270,7 @@ class TestChatAgentRunAudit:
 
         resp = await client.post(
             "/api/v1/chat",
-            headers={**_ADMIN, "X-User-Departments": "财务部"},
+            headers={**_ADMIN, "X-User-Departments": "FINANCE"},
             json={
                 "sessionId": "test-audit-failure",
                 "question": "用 draft_agent 评估供应商 100001",
@@ -310,7 +316,7 @@ class TestChatAgentRunAudit:
         )
         await _setupChatFakes(monkeypatch, dbSession)
 
-        headers = {**_ADMIN, "X-User-Departments": "采购部,财务部,研发部"}
+        headers = {**_ADMIN, "X-User-Departments": "PROCUREMENT,FINANCE,RESEARCH"}
         resp = await client.post(
             "/api/v1/chat",
             headers=headers,
@@ -332,10 +338,10 @@ class TestChatAgentRunAudit:
         matching = [
             r for r in rows
             if r.get("actor") == "audit-chat-agent-run"
-            and "采购" in (r.get("actorDepartments") or "")
+            and "PROCUREMENT" in (r.get("actorDepartments") or "")
         ]
         assert len(matching) >= 1, (
-            f"No audit record with actor=audit-chat-agent-run and departments containing 采购. "
+            f"No audit record with actor=audit-chat-agent-run and departments containing PROCUREMENT. "
             f"Available rows: {rows}"
         )
 

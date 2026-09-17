@@ -900,6 +900,24 @@ class CoverageDomainListRead(CamelModel):
     domains: list[str]
 
 
+class WikiChatRequest(CamelModel):
+    """Wiki Chat 问答请求（feat-wiki-chat，与 DocQaRequest 解耦）。"""
+
+    session_id: str = Field(..., min_length=1, max_length=64)
+    question: str = Field(..., min_length=1)
+    top_k: int = Field(default=8, ge=1, le=20)
+    dimension: str | None = None
+    model_id: int | None = None
+
+    @field_validator("question")
+    @classmethod
+    def _questionNotBlank(cls, v: str) -> str:
+        """min_length=1 拦不住纯空白（"  "），显式 strip 校验。"""
+        if not v.strip():
+            raise ValueError("question 不能为空白")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # 知识图谱分析（Phase 2：4-Signal 相关性 + Louvain 社区）
 # ---------------------------------------------------------------------------
@@ -1102,4 +1120,5 @@ __all__ = [
     "ClassDomainMappingRead",
     "ClassDomainMappingCreate",
     "CoverageDomainListRead",
+    "WikiChatRequest",
 ]

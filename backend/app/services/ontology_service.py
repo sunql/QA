@@ -304,8 +304,7 @@ class OntologyService:
         id: int,
         dto: OntologyClassUpdate,
         *,
-        actor: str,
-        actor_departments: str | None = None,
+        actor: CurrentUser,
     ) -> OntologyClass:
         """更新本体类：原地 UPDATE，主键 id 稳定（版本管理已移除）。
 
@@ -324,10 +323,10 @@ class OntologyService:
         返回更新后的同一行（id 与调用方传入一致）。
         """
         existing = await self.getClass(session, id)
-        # ACL 需要 CurrentUser：构造一个临时对象（仅用于 ACL 检查）
-        _acl_user = CurrentUser(userId=actor, departments=list(actor_departments.split(",")) if actor_departments else [])
+        # ACL 用端点传入的真实 CurrentUser（含 roles）。此前从 actor str 重建
+        # CurrentUser 会落入 DEFAULT_STUB_ROLES（含 admin）→ ACL 恒通过（越权洞）。
         self._acl.assertCanModify(
-            _acl_user,
+            actor,
             entity_owner=existing.object_owner,
             entity_label="ONTOLOGY_CLASS",
             entity_code=existing.class_name,
@@ -388,8 +387,8 @@ class OntologyService:
             entity_type="ONTOLOGY_CLASS",
             entity_id=existing.id,
             action="UPDATE",
-            actor=actor,
-            actor_departments=actor_departments,
+            actor=actor.userId,
+            actor_departments=actor.departments,
             before=before,
             after=_entityToDict(existing),
         )
@@ -422,8 +421,7 @@ class OntologyService:
         session: AsyncSession,
         id: int,
         *,
-        actor: str,
-        actor_departments: str | None = None,
+        actor: CurrentUser,
     ) -> None:
         """软删除本体类：valid_to = now()（墓碑标记），listClasses 默认不再返回。
 
@@ -433,9 +431,9 @@ class OntologyService:
         Phase 4.5 扩展：先 ACL 检查（object_owner 不匹配 + 非 admin → 403）。
         """
         entity = await self.getClass(session, id)
-        _acl_user = CurrentUser(userId=actor, departments=list(actor_departments.split(",")) if actor_departments else [])
+        # ACL 用端点传入的真实 CurrentUser（含 roles）——同 updateClass 越权洞修复
         self._acl.assertCanModify(
-            _acl_user,
+            actor,
             entity_owner=entity.object_owner,
             entity_label="ONTOLOGY_CLASS",
             entity_code=entity.class_name,
@@ -450,8 +448,8 @@ class OntologyService:
             entity_type="ONTOLOGY_CLASS",
             entity_id=entity.id,
             action="DELETE",
-            actor=actor,
-            actor_departments=actor_departments,
+            actor=actor.userId,
+            actor_departments=actor.departments,
             before=before,
         )
         await session.commit()

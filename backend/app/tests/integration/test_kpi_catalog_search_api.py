@@ -89,8 +89,11 @@ class TestKpiCatalogSearchApi:
         # 不应报错（使用默认参数）
         assert isinstance(body["results"], list)
 
-    async def test_search_requires_auth(self, client) -> None:
-        """不带认证 header 返回 401/403。"""
+    async def test_search_requires_auth(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """关掉 stub auth（模拟生产）→ 未认证的搜索 403（同 wiki requires_auth 惯例）。"""
+        monkeypatch.setenv("AUTH_STUB_ENABLED", "0")
         resp = await client.get("/api/v1/kpi-catalog/search?q=准时")
         assert resp.status_code in (401, 403)
 

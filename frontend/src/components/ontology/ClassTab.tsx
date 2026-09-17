@@ -170,7 +170,9 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
 
   const openCreate = () => {
     setEditing(null);
-    pendingFormValues.current = EMPTY_CLASS_FORM;
+    // destroyOnHidden 下每次打开都是全新表单（initialValues 已是空），
+    // 不再经 afterOpenChange 重置——否则动画期间用户已输入的字符会被抹掉
+    pendingFormValues.current = null;
     setModalOpen(true);
   };
 

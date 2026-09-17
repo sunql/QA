@@ -293,7 +293,7 @@ class TestRunSuccess:
         assert body["agentCode"] == "SUPPLIER_RISK_AGENT"
         assert body["tool"] == "supplier_risk"
         assert body["result"]["level"] == "high"
-        assert body["result"]["levelSource"] == "risk_score"
+        assert body["result"]["levelSource"] == "supplier_risk_score_main"  # 规则路径契约（feat-feature-rule-config）
         # llm_factory=None（REST run）→ fallback_template，无 LLM 消耗
         assert body["result"]["riskPointsSource"] == "fallback_template"
         assert body["tokensUsed"] == 0
@@ -310,6 +310,34 @@ class TestRunSuccess:
 
         await _seedAgent(dbSession, "GRAPH_REASONING_AGENT")
         await seedEntityMappings(dbSession)
+        # seed_entity_mapping 不再合成供应商（与 THBI 真实数据对齐的刻意变更），
+        # 但 Sheet16 演示边键位是 Supplier 100001 → ItemMaster 200001-200003；
+        # linkBusinessRelation 是 MATCH 非 MERGE（防孤立节点），键位对不上边静默
+        # 丢弃 → 本测试自种键位对齐的映射行，保证 seedGraphRelations 出边。
+        dbSession.add_all(
+            [
+                EntityMapping(
+                    entity_type="SUPPLIER",
+                    enterprise_key=100001,
+                    enterprise_code="100001",
+                    source_system=SourceSystem.ERP,
+                    source_key="100001",
+                    source_code="100001",
+                    match_rule=MatchRule.MDM_MASTER,
+                ),
+            ]
+        )
+        await dbSession.commit()
+        # 物料键位（200001-200003）与 seedEntityMappings 的 MDM 编码（RM-STEEL-xxx）
+        # 撞唯一约束，改用直插图节点（ItemMaster）补齐 Sheet16 边的 toKey 端
+        for i in (1, 2, 3):
+            neo4j.upsertBusinessEntityNode(
+                label="ItemMaster",
+                key=str(200_000 + i),
+                code=str(200_000 + i),
+                name=f"物料{200_000 + i}",
+                source="test_fixture",
+            )
         service = GraphRelationService()
         await service.seedGraphRelations(dbSession)
         try:

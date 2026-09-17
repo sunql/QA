@@ -21,6 +21,7 @@ import {
     Input,
     Modal,
     Popconfirm,
+    Segmented,
     Select,
     Space,
     Table,
@@ -36,7 +37,10 @@ import {
     getWikiPage,
     listWikiPages,
     reclassifyWikiPage,
+    searchWikiPages,
+    semanticSearchWikiPages,
     updateWikiPage,
+    type WikiSemanticHit,
 } from "../api/wikiPages";
 import {
     KNOWLEDGE_DIMENSIONS,
@@ -93,6 +97,7 @@ interface Notice {
 
 export default function AdminWikiPagesPage() {
     const { t } = useTranslation();
+    const { message } = App.useApp();
 
     const [rows, setRows] = useState<WikiPage[]>([]);
     const [total, setTotal] = useState(0);
@@ -103,6 +108,13 @@ export default function AdminWikiPagesPage() {
         KnowledgeDimension | undefined
     >();
     const [statusFilter, setStatusFilter] = useState<WikiPageStatus | undefined>();
+    /** 搜索框当前输入（未提交）；searchQuery 才是已生效的检索词 */
+    const [searchInput, setSearchInput] = useState("");
+    const [searchQuery, setSearchQuery] = useState("");
+    /** 检索模式：语义（Milvus 向量）| 关键词（ILIKE）；语义失败自动降级关键词 */
+    const [searchMode, setSearchMode] = useState<"semantic" | "keyword">("semantic");
+    /** 语义检索命中（非 null 表示当前展示语义结果视图，表格/分页与列表模式不同） */
+    const [semanticHits, setSemanticHits] = useState<WikiSemanticHit[] | null>(null);
 
     const [createOpen, setCreateOpen] = useState(false);
     const [createForm] = Form.useForm<CreateFormValues>();
@@ -124,12 +136,40 @@ export default function AdminWikiPagesPage() {
     const fetchList = useCallback(async () => {
         setLoading(true);
         try {
-            const res = await listWikiPages({
-                dimension: dimensionFilter,
-                status: statusFilter,
-                limit: PAGE_SIZE,
-                offset: page * PAGE_SIZE,
-            });
+            const effectiveQuery = searchQuery.trim();
+            // 语义模式 + 有关键词 → 走向量检索；503（Milvus/embedding 故障）
+            // 自动降级关键词检索，不把基础设施故障直接甩用户脸上。
+            if (searchMode === "semantic" && effectiveQuery) {
+                try {
+                    const hits = await semanticSearchWikiPages({
+                        query: effectiveQuery,
+                        dimension: dimensionFilter,
+                    });
+                    setSemanticHits(hits);
+                    return;
+                } catch {
+                    message.warning(t("wikiPages.search.fallbackNotice"));
+                    setSemanticHits(null);
+                    // 落入下方关键词检索继续执行
+                }
+            } else {
+                setSemanticHits(null);
+            }
+            // 关键词检索生效时走 /pages/search（total=命中数）；状态过滤不被
+            // 检索端点支持，故检索期间禁用状态下拉（见 JSX），互斥不叠加。
+            const res = effectiveQuery
+                ? await searchWikiPages({
+                      query: effectiveQuery,
+                      dimension: dimensionFilter,
+                      limit: PAGE_SIZE,
+                      offset: page * PAGE_SIZE,
+                  })
+                : await listWikiPages({
+                      dimension: dimensionFilter,
+                      status: statusFilter,
+                      limit: PAGE_SIZE,
+                      offset: page * PAGE_SIZE,
+                  });
             setRows(res.rows);
             setTotal(res.total);
         } catch {
@@ -138,7 +178,7 @@ export default function AdminWikiPagesPage() {
         } finally {
             setLoading(false);
         }
-    }, [dimensionFilter, statusFilter, page]);
+    }, [dimensionFilter, statusFilter, page, searchQuery, searchMode, message, t]);
 
     useEffect(() => {
         void fetchList();
@@ -289,6 +329,59 @@ export default function AdminWikiPagesPage() {
         [t],
     );
 
+    // 语义检索结果列（feat-wiki-semantic-search）：与列表列不同——
+    // 有相似度得分与命中片段；同一页多 chunk 命中各自成行。
+    const semanticColumns: ColumnsType<WikiSemanticHit> = useMemo(
+        () => [
+            {
+                title: t("wikiPages.columns.title"),
+                dataIndex: "title",
+                key: "title",
+                render: (title: string, hit) => (
+                    <a onClick={() => void openDetail(hit.pageId)}>{title}</a>
+                ),
+            },
+            {
+                title: t("wikiPages.columns.dimension"),
+                dataIndex: "dimension",
+                key: "dimension",
+                width: 110,
+                render: (dimension: string | null) =>
+                    dimension === null ? (
+                        <Tag>{t("wikiPages.undetermined")}</Tag>
+                    ) : (
+                        <Tag>{t(`wikiPages.dimensions.${dimension}`)}</Tag>
+                    ),
+            },
+            {
+                title: t("wikiPages.columns.status"),
+                dataIndex: "status",
+                key: "status",
+                width: 90,
+                render: (status: string) =>
+                    status ? <Tag>{t(`wikiPages.statuses.${status}`)}</Tag> : null,
+            },
+            {
+                title: t("wikiPages.search.score"),
+                dataIndex: "score",
+                key: "score",
+                width: 90,
+                render: (score: number) => (
+                    <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                        {(score * 100).toFixed(1)}%
+                    </span>
+                ),
+            },
+            {
+                title: t("wikiPages.search.snippet"),
+                dataIndex: "chunkText",
+                key: "chunkText",
+                ellipsis: true,
+            },
+        ],
+        [t, openDetail],
+    );
+
     const columns: ColumnsType<WikiPage> = useMemo(
         () => [
             {
@@ -397,6 +490,30 @@ export default function AdminWikiPagesPage() {
             )}
 
             <Space style={{ marginBottom: 16 }} wrap>
+                <Segmented
+                    value={searchMode}
+                    onChange={(v) => {
+                        setSearchMode(v as "semantic" | "keyword");
+                        setPage(0);
+                        setSemanticHits(null);
+                    }}
+                    options={[
+                        { value: "semantic", label: t("wikiPages.search.semantic") },
+                        { value: "keyword", label: t("wikiPages.search.keyword") },
+                    ]}
+                />
+                <Input.Search
+                    allowClear
+                    aria-label={t("wikiPages.filters.search")}
+                    style={{ width: 260 }}
+                    placeholder={t("wikiPages.filters.search")}
+                    value={searchInput}
+                    onChange={(e) => setSearchInput(e.target.value)}
+                    onSearch={(v) => {
+                        setPage(0);
+                        setSearchQuery(v);
+                    }}
+                />
                 <Select
                     allowClear
                     aria-label={t("wikiPages.filters.dimension")}
@@ -411,6 +528,7 @@ export default function AdminWikiPagesPage() {
                 />
                 <Select
                     allowClear
+                    disabled={searchQuery.trim().length > 0}
                     aria-label={t("wikiPages.filters.status")}
                     style={{ width: 160 }}
                     placeholder={t("wikiPages.filters.status")}
@@ -444,22 +562,34 @@ export default function AdminWikiPagesPage() {
                 )}
             </Space>
 
-            <Table
-                rowKey="pageId"
-                size="small"
-                loading={loading}
-                columns={columns}
-                rowSelection={rowSelection}
-                dataSource={rows}
-                pagination={{
-                    current: page + 1,
-                    pageSize: PAGE_SIZE,
-                    total,
-                    showSizeChanger: false,
-                    onChange: (p) => setPage(p - 1),
-                }}
-                locale={{ emptyText: t("wikiPages.empty") }}
-            />
+            {semanticHits !== null ? (
+                <Table<WikiSemanticHit>
+                    rowKey={(h) => `${h.pageId}:${h.chunkSequence ?? 0}`}
+                    size="small"
+                    loading={loading}
+                    columns={semanticColumns}
+                    dataSource={semanticHits}
+                    pagination={false}
+                    locale={{ emptyText: t("wikiPages.search.noHits") }}
+                />
+            ) : (
+                <Table
+                    rowKey="pageId"
+                    size="small"
+                    loading={loading}
+                    columns={columns}
+                    rowSelection={rowSelection}
+                    dataSource={rows}
+                    pagination={{
+                        current: page + 1,
+                        pageSize: PAGE_SIZE,
+                        total,
+                        showSizeChanger: false,
+                        onChange: (p) => setPage(p - 1),
+                    }}
+                    locale={{ emptyText: t("wikiPages.empty") }}
+                />
+            )}
 
             <Modal
                 title={t("wikiPages.actions.create")}

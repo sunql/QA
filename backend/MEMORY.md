@@ -1,0 +1,1 @@
+- [P0 收尾批修五模式](qa-system-p0-backlog-migration-fixes.md) — 0077 补建 wiki_compile 僵尸表（prod 是手工建的要 stamp）；泛型 JSON.contains() 报 jsonb~~text 必须 JSONB；flush 须进 try；agent hard_delete 端点接线；迁移测试禁钉 _HEAD

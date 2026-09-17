@@ -24,6 +24,7 @@ from app.infrastructure.llm.base_client import StreamChunk
 from app.services.chat_service import ChatService
 from app.services.stream_events import (
     EVENT_CHART,
+    EVENT_CLASS_RECALL,
     EVENT_DONE,
     EVENT_ERROR,
     EVENT_META,
@@ -206,18 +207,20 @@ class TestStreamingPipeline:
 
         assert types[0] == EVENT_META
         assert events[0][1]["intent"] == "query"
+        # 2026-09-16 类召回诊断（e028ec6）：query 流先下发 class_recall，再进执行计划
+        assert types[1] == EVENT_CLASS_RECALL
         # 2026-08-16：单步查询也下发执行计划事件（multi_step_plan → step_plan → plan → sql → ... → step_result）
-        assert types[1] == EVENT_MULTI_STEP_PLAN
-        assert events[1][1]["steps"][0]["stepIndex"] == 0
-        assert types[2] == EVENT_STEP_PLAN
-        assert types[3] == EVENT_PLAN
-        assert events[3][1]["plan"]["target"] == "各供应商的收货数量汇总"
-        assert types[4] == EVENT_SQL
-        assert "PRECEIPT" in events[4][1]["sql"]
-        assert types[5] == EVENT_CHART
-        assert events[5][1]["chartType"] == "pie"
-        assert events[5][1]["chartOption"] is not None
-        assert len(events[5][1]["data"]) == 2
+        assert types[2] == EVENT_MULTI_STEP_PLAN
+        assert events[2][1]["steps"][0]["stepIndex"] == 0
+        assert types[3] == EVENT_STEP_PLAN
+        assert types[4] == EVENT_PLAN
+        assert events[4][1]["plan"]["target"] == "各供应商的收货数量汇总"
+        assert types[5] == EVENT_SQL
+        assert "PRECEIPT" in events[5][1]["sql"]
+        assert types[6] == EVENT_CHART
+        assert events[6][1]["chartType"] == "pie"
+        assert events[6][1]["chartOption"] is not None
+        assert len(events[6][1]["data"]) == 2
 
         tokenContents = [d["content"] for t, d in events if t == EVENT_TOKEN]
         assert tokenContents == ["查询完成，", "共 2 条记录。"]
@@ -231,7 +234,7 @@ class TestStreamingPipeline:
         assert [r["purpose"] for r in tokenUsage.records] == ["nl2sql", "chart", "answer"]
         # 查询向量后台存储（fire-and-forget）已记录
         assert len(embedding.stored) == 1
-        assert embedding.stored[0]["sql"] == events[4][1]["sql"]
+        assert embedding.stored[0]["sql"] == events[5][1]["sql"]
         assert embedding.stored[0]["sessionId"] == "s1"
 
     async def test_stream_chart_type_from_intent_keyword(self) -> None:
@@ -530,14 +533,16 @@ class TestUnanswerablePlanStream:
         types = [e for e, _ in events]
 
         assert types[0] == EVENT_META
+        # 2026-09-16 类召回诊断（e028ec6）：class_recall 先于执行计划下发
+        assert types[1] == EVENT_CLASS_RECALL
         # 2026-08-16：单步不可答也下发执行计划事件（multi_step_plan → step_plan → plan → token → step_result）
-        assert types[1] == EVENT_MULTI_STEP_PLAN
-        assert events[1][1]["steps"][0]["description"] == "无法回答"
-        assert types[2] == EVENT_STEP_PLAN
-        assert types[3] == EVENT_PLAN
-        assert events[3][1]["plan"]["target"] == "无法回答"
-        assert types[4] == EVENT_TOKEN
-        assert "无法回答" in events[4][1]["content"]
+        assert types[2] == EVENT_MULTI_STEP_PLAN
+        assert events[2][1]["steps"][0]["description"] == "无法回答"
+        assert types[3] == EVENT_STEP_PLAN
+        assert types[4] == EVENT_PLAN
+        assert events[4][1]["plan"]["target"] == "无法回答"
+        assert types[5] == EVENT_TOKEN
+        assert "无法回答" in events[5][1]["content"]
         # step_result 在 done 之前（带 error 字段）
         stepResultTypes = [t for t in types if t == EVENT_STEP_RESULT]
         assert len(stepResultTypes) == 1

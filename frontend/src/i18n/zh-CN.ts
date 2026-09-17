@@ -129,6 +129,7 @@ export const zhCN = {
       wikiSuggestions: "结构化建议",
       wikiCoverage: "覆盖度看板",
       wikiGraph: "知识图谱",
+      wikiChat: "Wiki Chat",
       dataQualityRuleParams: "数据质量 / 规则配置(结构化)",
       profile: "个人中心",
       changePassword: "修改密码",
@@ -1966,8 +1967,17 @@ export const zhCN = {
     empty: "暂无知识条目，先点「新建」或到「知识导入」批量入库",
     undetermined: "未判定",
     filters: {
+      search: "搜索标题 / 正文",
       dimension: "按知识维度过滤",
       status: "按状态过滤",
+    },
+    search: {
+      semantic: "语义",
+      keyword: "关键词",
+      score: "相似度",
+      snippet: "命中片段",
+      noHits: "没有语义命中的知识条目",
+      fallbackNotice: "向量检索暂不可用，已降级为关键词检索",
     },
     columns: {
       title: "标题",
@@ -2214,6 +2224,15 @@ export const zhCN = {
       alreadyResolved: "这条建议已被处置（终态不可逆），已为你刷新列表。",
       resolveFailed: "处置失败，请重试",
     },
+  },
+
+  // Wiki Chat：基于企业 Wiki 语义检索的对话问答（feat-wiki-chat）
+  wikiChat: {
+    title: "Wiki Chat",
+    suggestionsTitle: "试试这样问：",
+    send: "发送",
+    inputPlaceholder: "输入问题，基于企业 Wiki 语义检索并合成答案...",
+    noHits: "未在企业 Wiki 中找到相关知识，无法回答该问题。",
   },
 
   // 覆盖度看板（feat-wiki-knowledge M7，机制 6）

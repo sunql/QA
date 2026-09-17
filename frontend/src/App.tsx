@@ -40,6 +40,7 @@ import AdminSystemConfigPage from "./pages/AdminSystemConfigPage";
 import { ProfilePage } from "./pages/ProfilePage";
 import AdminWikiImportPage from "./pages/AdminWikiImportPage";
 import AdminWikiPagesPage from "./pages/AdminWikiPagesPage";
+import WikiChatPage from "./pages/WikiChatPage";
 import AdminWikiConflictsPage from "./pages/AdminWikiConflictsPage";
 import AdminWikiSuggestionsPage from "./pages/AdminWikiSuggestionsPage";
 import AdminWikiCoveragePage from "./pages/AdminWikiCoveragePage";
@@ -99,6 +100,7 @@ export default function App() {
         <Route path="admin/organizations" element={<AdminOrganizationsPage />} />
         <Route path="admin/menus" element={<AdminMenusPage />} />
         <Route path="admin/system-config" element={<AdminSystemConfigPage />} />
+        <Route path="wiki-chat" element={<WikiChatPage />} />
         <Route path="admin/wiki-pages" element={<AdminWikiPagesPage />} />
         <Route path="admin/wiki-import" element={<AdminWikiImportPage />} />
         <Route path="admin/wiki-conflicts" element={<AdminWikiConflictsPage />} />

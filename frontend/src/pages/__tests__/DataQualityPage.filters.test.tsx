@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App, ConfigProvider } from "antd";
+import { MemoryRouter } from "react-router-dom";
 import zhCN from "antd/locale/zh_CN";
 import { I18nextProvider } from "react-i18next";
 import { i18n } from "../../i18n";
@@ -71,9 +72,13 @@ function renderPage() {
   return render(
     <I18nextProvider i18n={i18n}>
       <ConfigProvider locale={zhCN}>
-        <App>
-          <DataQualityPage />
-        </App>
+        {/* DataQualityPage 用 useNavigate/useSearchParams（跳转/筛选持久化），
+            测试需 Router 上下文 */}
+        <MemoryRouter>
+          <App>
+            <DataQualityPage />
+          </App>
+        </MemoryRouter>
       </ConfigProvider>
     </I18nextProvider>,
   );

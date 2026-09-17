@@ -1,43 +1,59 @@
 """Alembic 0039 应向 ontology_class 插入 IncomingInspection 结构性建模行.
 
-迁移为结构性建模（0 行），断言 ontology_class 中存在且仅存在 1 行
-class_name='IncomingInspection'。本测试是「外部 alembic upgrade head」触发的：
-每个测试运行前 integration/conftest.py 的 autouse warmAgentCaches 会清库，
-但 ontology_class 在 migration 之后重新由 alembic 写入（迁移即种子），所以
-本测试的「外部前置步骤」是 alembic upgrade 0039_incoming_inspection_class。
+自含种子重放：集成套件的其他用例会 TRUNCATE 全库（清掉 0039 的种子行），
+而 alembic 已在 head、upgrade 是 no-op 不会恢复数据行。故 module fixture 直接
+重放 0039 的种子 INSERT（与迁移逐字同 SQL、同 WHERE NOT EXISTS 幂等守卫），
+再断言行存在与幂等。
 
-为避免 integration/conftest.py 的 autouse warmAgentCaches 在本测试中也强制
-TRUNCATE ontology_class 而把迁移行抹掉，本文件定义同名 fixture 覆盖：
-warmAgentCaches (autouse=False) + 无操作的 client/dbSession，
-仅当测试未显式调用它们时使用 no-op 占位，避免 warmUp 流程强制清空 ontology_class。
-
-本测试本身不需要 agent 缓存或 HTTP 链路，纯 SQL 校验即可。
+本测试不需要 agent 缓存或 HTTP 链路，纯 SQL 校验即可。
 """
 
 from __future__ import annotations
-
-from collections.abc import AsyncIterator
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
-@pytest.fixture(autouse=False)
-async def warmAgentCaches() -> AsyncIterator[None]:
-    """覆盖 integration/conftest.py 的同名 autouse 缓存预热。
+_TEST_URL = "postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test"
 
-    原 autouse=True 触发 client fixture → pgApiClient → _truncateAll，把迁移写入
-    的 ontology_class 行清掉；本测试仅做 SQL 校验，不需要 agent 缓存，覆盖为 no-op。
-    """
+# 与 alembic/versions/0039_incoming_inspection_class.py upgrade() 逐字对齐
+_SEED_SQL = """
+    INSERT INTO ontology_class (
+            class_name, source_table, description, object_type,
+            version, valid_from, created_by,
+            created_time, updated_time
+        )
+    SELECT 'IncomingInspection',
+           'DWD_INCOMING_INSPECTION',
+           '来料检验（结构性建模，0 行；详见 docs/data-knowledge/采购域.md）',
+           'Transaction',
+           1,
+           now(),
+           'seed',
+           now(),
+           now()
+    WHERE NOT EXISTS (
+        SELECT 1 FROM ontology_class WHERE class_name = 'IncomingInspection'
+    )
+"""
+
+
+@pytest.fixture(autouse=True)
+async def _migrationSeeds(client,):
+    """重放 0039 种子行依赖 client fixture：conftest 每测试 TRUNCATE 后重放，保证顺序在截断之后。"""
+    engine = create_async_engine(_TEST_URL)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(_SEED_SQL))
+    finally:
+        await engine.dispose()
     yield
 
 
 @pytest.mark.asyncio
 async def test_incoming_inspection_class_inserted():
-    engine = create_async_engine(
-        "postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test"
-    )
+    engine = create_async_engine(_TEST_URL)
     async with engine.connect() as conn:
         row = (await conn.execute(text("""
             SELECT class_name, source_table, object_type, version
@@ -49,16 +65,18 @@ async def test_incoming_inspection_class_inserted():
         assert row[1] == "DWD_INCOMING_INSPECTION"
         assert row[2] == "Transaction"
         assert row[3] == 1
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
 async def test_incoming_inspection_is_idempotent():
-    """重复运行 0039 不会重复插入（前置检查覆盖）."""
-    engine = create_async_engine(
-        "postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test"
-    )
-    async with engine.connect() as conn:
+    """重复重放种子不产生重复行（WHERE NOT EXISTS 守卫）."""
+    engine = create_async_engine(_TEST_URL)
+    async with engine.begin() as conn:
+        # 再重放一次：幂等是本测试的被测行为
+        await conn.execute(text(_SEED_SQL))
         rows = (await conn.execute(text("""
             SELECT COUNT(*) FROM ontology_class WHERE class_name = 'IncomingInspection'
         """))).scalar()
         assert rows == 1
+    await engine.dispose()

@@ -535,6 +535,20 @@ class WikiImportService:
         await session.commit()
         await session.refresh(task)
 
+        # 向量同步（feat-wiki-semantic-search）：导入直插 ORM 绕过了
+        # WikiPageService 的挂钩，任务成功收尾时统一补。best-effort：
+        # 向量失败不回滚已落库的导入成果，靠 backfill 对账自愈。
+        if pageIds and task.status in ("SUCCEEDED", "PARTIAL"):
+            from app.config import getSettings
+
+            if getSettings().wikiVectorSyncEnabled:
+                from app.services.wiki_vector_service import WikiVectorService
+
+                await WikiVectorService().syncPagesBestEffort(session, pageIds)
+            from app.services.wiki_vector_service import WikiVectorService
+
+            await WikiVectorService().syncPagesBestEffort(session, pageIds)
+
         logger.info(
             "导入任务 %s 完成: status=%s 新建=%d 跳过=%d 失败=%d 分类成功=%d 成本=%s",
             task.id,

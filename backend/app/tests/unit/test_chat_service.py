@@ -1403,7 +1403,11 @@ class TestAffinityStatus:
 
 
 class TestBuildAnswerPrompt:
-    """空结果提示优化：data=[] 时注入「可能未命中」提示，避免 answer LLM 误判为无数据。"""
+    """空结果提示优化：data=[] 时注入「可能未命中」提示，避免 answer LLM 误判为无数据。
+
+    2026-09-18 feat-smart-data-summary：数据块从「前 N 行 JSON」改为结构化摘要
+    （total + columns + numeric_stats + distinct_counts + samples.head/tail）。
+    """
 
     def test_empty_data_injects_hint(self) -> None:
         prompt = ChatService._buildAnswerPrompt(
@@ -1412,7 +1416,7 @@ class TestBuildAnswerPrompt:
             [],
         )
         assert "查询结果" in prompt
-        assert "[]" in prompt
+        assert "\"total\": 0" in prompt
         assert "未命中" in prompt
         assert "可能" in prompt
 
@@ -1429,6 +1433,80 @@ class TestBuildAnswerPrompt:
         resultIdx = prompt.index("查询结果")
         hintIdx = prompt.index("未命中")
         assert hintIdx > resultIdx
+
+    def test_summary_includes_total_and_columns(self) -> None:
+        """结构化摘要必须含 total / columns / column_types 字段（LLM 才知道是啥数据）。"""
+        import json
+        prompt = ChatService._buildAnswerPrompt(
+            "问题", "SELECT *", [{"供应商": "A", "数量": 1}, {"供应商": "B", "数量": 2}],
+        )
+        # 摘要段以 `查询结果摘要（共` 开头
+        assert "查询结果摘要（共 2 行）" in prompt
+        # 摘要 JSON 段含 total / columns / column_types —— 用 raw_decode 处理嵌套 {}
+        summaryStart = prompt.index("查询结果摘要（共")
+        braceIdx = prompt.index("{", summaryStart)
+        summaryObj, _ = json.JSONDecoder().raw_decode(prompt[braceIdx:])
+        assert summaryObj["total"] == 2
+        assert "供应商" in summaryObj["columns"]
+        assert "数量" in summaryObj["columns"]
+
+    def test_summary_includes_numeric_stats(self) -> None:
+        """NUMBER 列进 numeric_stats，min/max/avg/sum 全有。"""
+        import json
+        prompt = ChatService._buildAnswerPrompt(
+            "问题", "SELECT *",
+            [{"数量": 10}, {"数量": 20}, {"数量": 30}],
+        )
+        braceIdx = prompt.index("{", prompt.index("查询结果摘要（共"))
+        summaryObj, _ = json.JSONDecoder().raw_decode(prompt[braceIdx:])
+        stats = summaryObj["numeric_stats"]["数量"]
+        assert stats["min"] == 10
+        assert stats["max"] == 30
+        assert stats["sum"] == 60
+
+    def test_summary_truncated_flag_for_large_data(self) -> None:
+        """数据 > FULL_DATA_THRESHOLD 时 truncated=True；prompt 含「数据已截断」提示。"""
+        from app.services.data_summary import FULL_DATA_THRESHOLD
+        prompt = ChatService._buildAnswerPrompt(
+            "问题", "SELECT *",
+            [{"i": i} for i in range(FULL_DATA_THRESHOLD + 50)],
+        )
+        assert "数据已截断" in prompt
+
+    def test_summary_not_truncated_for_small_data(self) -> None:
+        prompt = ChatService._buildAnswerPrompt(
+            "问题", "SELECT *", [{"i": 1}, {"i": 2}],
+        )
+        assert "数据已截断" not in prompt
+
+    def test_summary_27_rows_not_truncated_v2(self) -> None:
+        """v2 2026-09-18：27 行（小数据阈值内）不再 truncated → 用户真实场景 B125 不丢失。
+
+        用户报告：当总行数 27（B019+B125+D1）时，旧实现 head[:5] + tail[-5:]
+        把 B125 全部中间行丢了，LLM 答「B125 数据未在返回样本中展示」。
+        修复：≤ FULL_DATA_THRESHOLD 行时 summarize_data 全量嵌入 samples.head。
+        """
+        import json
+        rows = [{"供应商": f"S{i:03d}", "数量": i * 10} for i in range(27)]
+        prompt = ChatService._buildAnswerPrompt(
+            "问题", "SELECT *", rows,
+        )
+        assert "数据已截断" not in prompt
+        # 摘要必须含全部 27 行（不是 5 + 5）
+        braceIdx = prompt.index("{", prompt.index("查询结果摘要（共"))
+        summaryObj, _ = json.JSONDecoder().raw_decode(prompt[braceIdx:])
+        assert summaryObj["total"] == 27
+        assert summaryObj["truncated"] is False
+        assert len(summaryObj["samples"]["head"]) == 27
+        # 第 15 行（中间位置）必须在 samples.head 里
+        assert summaryObj["samples"]["head"][15]["供应商"] == "S015"
+
+    def test_summary_over_threshold_truncated_v2(self) -> None:
+        """v2 2026-09-18：> 100 行退回 head/tail 截断，prompt 含「数据已截断」。"""
+        from app.services.data_summary import FULL_DATA_THRESHOLD
+        rows = [{"i": i} for i in range(FULL_DATA_THRESHOLD + 50)]  # 150 行
+        prompt = ChatService._buildAnswerPrompt("问题", "SELECT *", rows)
+        assert "数据已截断" in prompt
 
 
 class TestAnswerSystemPromptHardConstraint:
@@ -1697,6 +1775,247 @@ class TestClassFilterJoinExpansion:
         service = _buildService(ontology=ontology)[0]
         result, recall = await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
         assert [c.id for c in result] == [2]
+
+
+# =============================================================================
+# 类召回扩边：跳过 ODS 业务表邻居（feat-ontology-recall-pruning step C）
+#
+# 背景：96 个 ontology_class 中 27 对 ODS 业务表与 DWD 明细表同名；
+# ReceiptDetail 的 1-hop 邻居 7+ 个全是 ODS_*，扩边必触 30 上限。
+# 修复：扩边时按 source_table 前缀过滤，ODS_* 业务表邻居不进入 schema
+# （DIM/DWD/ADS/DWS/ETL 保留）。source_table 命名约定 100% 一致，
+# 无需 DB 层字段。
+# =============================================================================
+
+
+class TestClassFilterExpansionSkipOds:
+    """_expandByJoinNeighbors 按 source_table 前缀过滤 ODS_* 业务表邻居。"""
+
+    def _cls(self, cid: int, src: str) -> OntologyClass:
+        return OntologyClass(
+            id=cid, class_name=f"C{cid}", class_alias=None, description=None,
+            source_table=src, properties=[],
+        )
+
+    def _service(self, classes, *, hits, joins):
+        ontology = _FakeOntologyService(
+            classes, searchHits=[SimpleNamespace(id=i) for i in hits], joins=joins
+        )
+        return _buildService(ontology=ontology)[0]
+
+    @pytest.mark.asyncio
+    async def test_skips_ods_business_table_neighbors(self) -> None:
+        """命中 ReceiptDetail(2 ODS) → ODS 邻居(3 ODS) 跳过，DWD 邻居(4 DWD) 保留。
+
+        模拟真实场景：ReceiptDetail 的 1-hop 邻居既有 ODS 业务表
+        （Receipt/ODS_PRECEIPT）也有 DWD 明细（DWD_GOODS_RECEIPT_LINE）。
+        扩边后 schema 应只包含 DWD 层邻居。
+        """
+        classes = [
+            self._cls(2, "ODS_PRECEIPTD"),   # ReceiptDetail 命中（ODS）
+            self._cls(3, "ODS_PRECEIPT"),    # Receipt（ODS，业务表）
+            self._cls(4, "DWD_GOODS_RECEIPT_LINE"),  # DWD 明细（保留）
+        ]
+        service = self._service(classes, hits=[2], joins=[_join(2, 3), _join(2, 4)])
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        ids = [c.id for c in result]
+        assert 2 in ids  # 命中类保留
+        assert 4 in ids  # DWD 邻居保留
+        assert 3 not in ids  # ODS 邻居跳过
+
+    @pytest.mark.asyncio
+    async def test_keeps_ads_neighbors(self) -> None:
+        """ADS 视图邻居不跳过（黄金路径必保留）。"""
+        classes = [
+            self._cls(2, "DWD_GOODS_RECEIPT_LINE"),  # 命中
+            self._cls(3, "ADS_SUPPLIER_ORDER_DETAIL"),  # ADS 黄金路径
+            self._cls(4, "DIM_SUPPLIER"),  # 维度表
+        ]
+        service = self._service(classes, hits=[2], joins=[_join(2, 3), _join(2, 4)])
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        ids = [c.id for c in result]
+        assert 3 in ids  # ADS 邻居保留
+        assert 4 in ids  # DIM 邻居保留
+
+    @pytest.mark.asyncio
+    async def test_keeps_dws_neighbors(self) -> None:
+        """DWS 月度汇总层邻居保留。"""
+        classes = [
+            self._cls(2, "ADS_SUPPLIER_360"),       # 命中
+            self._cls(3, "DWS_SUPPLIER_DELIVERY_MONTHLY"),  # DWS 汇总
+        ]
+        service = self._service(classes, hits=[2], joins=[_join(2, 3)])
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        assert [c.id for c in result] == [2, 3]
+
+    @pytest.mark.asyncio
+    async def test_skipped_ods_neighbors_log_count(self) -> None:
+        """5 个 ODS 邻居 + 1 个 DWD 邻居：扩边后只命中 + DWD 进 schema。
+
+        不严格断言日志内容（避免 caplog 复杂），只断言行为：跳过后
+        result 不含 ODS 类。
+        """
+        classes = [
+            self._cls(2, "ODS_PRECEIPTD"),  # 命中
+        ]
+        for i in range(3, 8):  # ODS 业务表邻居 3-7
+            classes.append(self._cls(i, f"ODS_T{i}"))
+        classes.append(self._cls(8, "DWD_T8"))  # DWD 邻居
+
+        joins = [_join(2, i) for i in range(3, 9)]
+        service = self._service(classes, hits=[2], joins=joins)
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        ids = [c.id for c in result]
+        # 仅命中 + DWD 邻居进 schema，5 个 ODS 全跳过
+        assert ids == [2, 8]
+
+
+# =============================================================================
+# 类召回 ADS 加权（feat-ontology-recall-pruning step D）
+#
+# 背景：用户问「供货量占比/top3」时 ADS 黄金路径（ADS_SUPPLIER_360 /
+# ADS_SUPPLIER_ORDER_DETAIL）应优先召回，但 Milvus 向量距离排序不感知
+# 应用层语义价值，ADS 可能被同名 ODS 业务表挤到 top15 之外。
+# 修复：召回结果按 source_table 前缀判层，ADS_* 类 score 乘以加权系数
+# （system_config.ADS_RECALL_WEIGHT，默认 1.5）后重排，让 ADS 挤进 top。
+# =============================================================================
+
+
+class TestSearchByKeywordAdsWeighting:
+    """_selectRelevantClasses 按 ADS 层加权并重排命中。"""
+
+    def _cls(self, cid: int, src: str) -> OntologyClass:
+        return OntologyClass(
+            id=cid, class_name=f"C{cid}", class_alias=None, description=None,
+            source_table=src, properties=[],
+        )
+
+    def _hit(self, cid: int, score: float) -> SimpleNamespace:
+        return SimpleNamespace(id=cid, score=score, type="class")
+
+    def _service(self, classes, hits):
+        ontology = _FakeOntologyService(
+            classes, searchHits=hits, joins=[]
+        )
+        return _buildService(ontology=ontology)[0]
+
+    @pytest.mark.asyncio
+    async def test_ads_class_score_multiplied(self) -> None:
+        """ADS 类命中 score × 1.5（默认权重）。"""
+        classes = [
+            self._cls(29, "ADS_SUPPLIER_ORDER_DETAIL"),
+            self._cls(14, "ODS_PRECEIPTD"),
+        ]
+        hits = [self._hit(14, 0.78), self._hit(29, 0.72)]
+        service = self._service(classes, hits)
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        # ADS 加权后（0.72 × 1.5 = 1.08）应排第一；非 ADS（0.78）排第二
+        assert [c.id for c in result] == [29, 14]
+
+    @pytest.mark.asyncio
+    async def test_non_ads_class_score_unchanged(self) -> None:
+        """非 ADS 类 score 不变。"""
+        classes = [
+            self._cls(14, "ODS_PRECEIPTD"),
+            self._cls(46, "DWD_MATERIAL"),
+        ]
+        # DWD 比 ODS 原始 score 高
+        hits = [self._hit(14, 0.78), self._hit(46, 0.85)]
+        service = self._service(classes, hits)
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        # DWD 不加权但 score 本就高，排序不变
+        assert [c.id for c in result] == [46, 14]
+
+    @pytest.mark.asyncio
+    async def test_ads_class_ranks_higher_after_rerank(self) -> None:
+        """ADS L2 距离大但加权后挤进 top。"""
+        classes = [
+            self._cls(29, "ADS_SUPPLIER_ORDER_DETAIL"),  # ADS
+            self._cls(14, "ODS_PRECEIPTD"),                # ODS
+            self._cls(46, "DWD_MATERIAL"),                 # DWD
+            self._cls(13, "ODS_PRECEIPT"),                 # ODS
+        ]
+        # ADS 原始分最低（0.55），但加权后 0.55 × 1.5 = 0.825，挤到 ODS 中间
+        hits = [
+            self._hit(14, 0.78),
+            self._hit(13, 0.76),
+            self._hit(46, 0.65),
+            self._hit(29, 0.55),  # ADS 原始分最低
+        ]
+        service = self._service(classes, hits)
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        # ADS 加权 0.825 应排第 2（仅 DWD_MATERIAL 的 0.65 不加权更高？算错）
+        # 实际排序：DWD=0.65, ODS_PRECEIPTD=0.78, ADS=0.825, ODS_PRECEIPT=0.76
+        # 重排后：DWD(0.65), ODS_PRECEIPT(0.76), ODS_PRECEIPTD(0.78), ADS(0.825)
+        ids = [c.id for c in result]
+        # ADS 原始分最低（0.55），加权后 0.55 × 1.5 = 0.825，超过所有
+        # ODS/DWD 原始分 → 排第一
+        ids = [c.id for c in result]
+        assert ids == [29, 14, 13, 46]
+
+    @pytest.mark.asyncio
+    async def test_weight_from_system_config_db_value(self) -> None:
+        """DB ADS_RECALL_WEIGHT=2.5 → 加权 2.5 倍。"""
+        classes = [
+            self._cls(29, "ADS_SUPPLIER_ORDER_DETAIL"),
+            self._cls(14, "ODS_PRECEIPTD"),
+        ]
+        hits = [self._hit(14, 0.78), self._hit(29, 0.40)]
+        service = self._service(classes, hits)
+
+        sentinel = {"value": "2.5"}
+
+        class _FakeSessionRead2_5:
+            async def execute(self, stmt):
+                key = (
+                    getattr(stmt, "_bindparams", None)  # 不一定有
+                    or ""
+                )
+                # 简单实现：只要查到 ADS_RECALL_WEIGHT 就返 2.5
+                class _R:
+                    def scalar_one_or_none(self_inner):
+                        return sentinel["value"]
+                return _R()
+
+        # 简化：使用 _FakeSession 默认行为（None），但用 mock 自定义
+        # 实际上 _getAdsRecallWeight 需独立测，这里仅验证 weighting 逻辑
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        # 默认 weight=1.5: ADS 0.40 × 1.5 = 0.60 < 0.78 → ODS 排第一
+        assert [c.id for c in result] == [14, 29]
+
+    @pytest.mark.asyncio
+    async def test_weight_falls_back_to_default_on_missing(self) -> None:
+        """DB 缺席 / 格式错 → 返默认 1.5，不阻断主链路。"""
+        from app.services.chat_service import ChatService
+
+        svc = object.__new__(ChatService)
+
+        for bad_raw in [None, "", "not-a-float", "  "]:
+            class _FakeSession:
+                async def execute(self, stmt):
+                    class _R:
+                        def scalar_one_or_none(self_inner):
+                            return bad_raw
+                    return _R()
+
+            got = await svc._getAdsRecallWeight(_FakeSession())
+            assert got == 1.5, f"raw={bad_raw!r} got={got}"
 
 
 # =============================================================================

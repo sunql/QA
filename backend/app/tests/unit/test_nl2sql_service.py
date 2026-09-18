@@ -1422,3 +1422,54 @@ class TestEntityNameColumnRule:
         dialect = Nl2SqlService.resolveDialect(None)
         prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
         assert "JOIN 关系" in prompt
+
+
+# =============================================================================
+# 聚合类问题 schema 选择建议（feat-ontology-recall-pruning step E）
+#
+# 背景：用户问"占比 / 排名 / TOP3 / 总数"时，LLM 在 DWD/ODS 明细表层做除法
+# 或漏掉窗口函数公式 → SQL 不算百分比 / 错把供货期内的 D1 后几年裁掉。
+# 修复：用户问题命中聚合关键词时，在 plan user prompt 追加「Schema 选择建议」
+# 段落，引导 LLM 优先选用 ADS 黄金路径视图（ADS_SUPPLIER_360 /
+# ADS_SUPPLIER_ORDER_DETAIL）以及窗口函数 SUM(x)/SUM(SUM(x)) OVER() 而非
+# CROSS JOIN 笛卡尔积。这是软约束，配合 D 步 ADS 加权召回更稳。
+# =============================================================================
+
+
+class TestAggregateSchemaHint:
+    """plan user prompt 在聚合类问题下追加 schema 选择建议段（仅文本注入）。"""
+
+    def test_plan_user_prompt_injects_schema_hint_when_question_has_占比(self) -> None:
+        """占比 → 注入「Schema 选择建议」段，提及 ADS 视图与窗口函数。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "B019、B125、D1 三家供应商 3 月供货量 top3 物料占比", errors=[],
+        )
+        assert "Schema 选择建议" in prompt
+        assert "ADS" in prompt
+        # 关键算法提示：窗口函数而非笛卡尔积
+        assert "SUM(SUM" in prompt or "OVER" in prompt
+
+    def test_plan_user_prompt_injects_schema_hint_for_topN_keyword(self) -> None:
+        """TOP3 排名类问题也触发（不只占比）。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "TOP3 物料名称", errors=[],
+        )
+        assert "Schema 选择建议" in prompt
+
+    def test_plan_user_prompt_omits_schema_hint_when_no_aggregate_keyword(self) -> None:
+        """纯主数据查询（无占比 / 排名 / total 等）不注入，避免无意义冗余。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "B019 圣特供应商编号是多少", errors=[],
+        )
+        assert "Schema 选择建议" not in prompt
+
+    def test_plan_user_prompt_injects_schema_hint_for_total_keyword(self) -> None:
+        """total 英文关键词也触发（大小写不敏感）。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "suppliers total orders per month", errors=[],
+        )
+        assert "Schema 选择建议" in prompt

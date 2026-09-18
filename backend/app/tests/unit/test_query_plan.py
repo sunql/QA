@@ -199,6 +199,39 @@ class TestQueryPlan:
         text = planToText(plan)
         assert "SUM(收货数量) AS TOTAL_QTY" in text
 
+    def test_plan_to_text_strips_compound_form_selected_properties(self) -> None:
+        # 真实回归（2026-09-18）：LLM 偶尔把 schema 渲染格式 '业务名 (alias)' 原样
+        # 抄进 property_name，state 持久化后 planToText 回灌进 prompt 会诱导下一轮
+        # LLM 持续使用复合形式。planToText 渲染时必须拆括号、丢弃别名，仅保留
+        # 业务名，避免污染下一轮 prompt。
+        plan = QueryPlan(
+            target="TOP3",
+            selectedProperties=("供应商 (BPSNUM_0)", "物料编号 (ITMREF_0)"),
+            groupBy=("供应商 (BPSNUM_0)",),
+            partitionBy=("供应商 (BPSNUM_0)",),
+        )
+        text = planToText(plan)
+        # 业务名保留
+        assert "供应商" in text
+        assert "物料编号" in text
+        # ASCII 括号复合形式不再出现
+        assert "供应商 (BPSNUM_0)" not in text
+        assert "物料编号 (ITMREF_0)" not in text
+
+    def test_plan_to_text_strips_compound_form_aggregation(self) -> None:
+        plan = QueryPlan(
+            target="汇总",
+            aggregations=(Aggregation(function="SUM", property="收货数量 (QTYUOM_0)", alias="TOTAL"),),
+            sortBy=(SortSpec(property="收货数量 (QTYUOM_0)", direction="desc"),),
+        )
+        text = planToText(plan)
+        # SUM(prop) 中 prop 已是业务名
+        assert "SUM(收货数量) AS TOTAL" in text
+        # 排序也是纯业务名
+        assert "收货数量 desc" in text
+        # 复合形式剥离
+        assert "收货数量 (QTYUOM_0)" not in text
+
 
 class TestQueryPlanPartitionTopN:
     """2026-09-09：partitionBy/perGroupLimit ——「分别/各 X 的 Top N」逐组取前 N 槽位。"""

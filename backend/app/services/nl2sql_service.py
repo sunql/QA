@@ -126,6 +126,74 @@ def _classRefNames(cls: OntologyClass) -> set[str]:
     return names
 
 
+# 复合形式 '业务名 (alias)' 拆分（仅匹配一对 ASCII 括号；中文括号（）不算）
+_COMPOUND_REF_RE = re.compile(r"^(.*?)\s*\(([^()]+)\)\s*$")
+
+
+def _splitCompoundRef(prop: str) -> tuple[str, str | None]:
+    """拆 '业务名 (alias)' → (业务名, alias)；无括号返回 (原值, None)。
+
+    LLM 偶尔从 schema 渲染文本（业务名 (alias): 类型 (column=物理列)）原样抄
+    property_name；校验按单 token 严格匹配必拒，统一在此处把复合形式还原成单 token。
+    空字符串 / 非字符串 / 中文括号 / 嵌套括号均原样保留（不在本函数改造范围）。
+    """
+    if not isinstance(prop, str):
+        return (prop, None)
+    m = _COMPOUND_REF_RE.match(prop.strip())
+    if not m:
+        return (prop.strip(), None)
+    return (m.group(1).strip(), m.group(2).strip())
+
+
+def _normalizePlanProperties(
+    plan: QueryPlan,
+    classes: list[OntologyClass],
+) -> QueryPlan:
+    """把 plan 里所有 prop 字段中的复合形式 'name (alias)' 替换成首个合法 token。
+
+    合法 token 取自 _classRefNames(classes)（业务名/别名/物理列/限定形式）。
+    优先业务名（拆出前半段），都不在则原样保留交 validatePlan 报错。
+    返回新 plan（frozen dataclass 不允许原地修改）；空 classes 时直接返回。
+
+    触发场景：LLM 偶尔把 schema 渲染格式 '供应商 (BPSNUM_0)' 原样抄进 property_name，
+    validatePlan 严格 token 匹配永远 false → 整轮失败；本函数在 _parsePlanFromResponse
+    之后 / SQL 生成之前替换，让后续链路不感知复合形式（2026-09-18 真实回归）。
+    """
+    if not classes:
+        return plan
+    refs = set().union(*(_classRefNames(c) for c in classes))
+    if not refs:
+        return plan
+
+    def _pick(token: str, alias: str | None) -> str:
+        if token in refs:
+            return token
+        if alias and alias in refs:
+            return alias
+        return token  # 双都不在：保留业务名，原有错误链路接管
+
+    def _normProp(p: str) -> str:
+        token, alias = _splitCompoundRef(p)
+        return _pick(token, alias)
+
+    return replace(
+        plan,
+        selectedProperties=tuple(_normProp(p) for p in plan.selectedProperties),
+        aggregations=tuple(
+            replace(a, property=_normProp(a.property)) for a in plan.aggregations
+        ),
+        groupBy=tuple(_normProp(p) for p in plan.groupBy),
+        partitionBy=tuple(_normProp(p) for p in plan.partitionBy),
+        sortBy=tuple(
+            replace(s, property=_normProp(s.property)) for s in plan.sortBy
+        ),
+        joins=tuple(
+            replace(j, columns=tuple(_normProp(c) for c in j.columns))
+            for j in plan.joins
+        ),
+    )
+
+
 def _aggregationAliases(aggregations: list[Aggregation]) -> set[str]:
     """聚合别名集合（含派生公式别名），供 ORDER BY alias 排序校验。"""
     return {agg.alias for agg in aggregations if agg.alias}
@@ -234,6 +302,46 @@ _DERIVED_METRIC_ALIAS_KEYWORDS: tuple[str, ...] = (
     "share",
     "pct",
 )
+
+# 聚合类问题关键词（feat-ontology-recall-pruning step E）：用户问题命中时
+# 在 plan user prompt 追加「Schema 选择建议」段，引导 LLM 优先 ADS 黄金路径
+# 视图与窗口函数（占比 / 排名 / 总数 / 汇总 等）。与 _DERIVED_METRIC_ALIAS_KEYWORDS
+# 不重复但语义相邻——后者是「聚合 alias 必须 formula」，前者是「整段 schema 选择建议」。
+# 中英文都覆盖。英文关键词比对时 lower() 后命中。
+_AGGREGATE_HINT_KEYWORDS: tuple[str, ...] = (
+    "占比",
+    "比例",
+    "百分比",
+    "排名",
+    "TOP",
+    "Top",
+    "top",
+    "汇总",
+    "total",
+    "pct",
+    "share",
+)
+
+_AGGREGATE_SCHEMA_HINT_TEXT = (
+    "\n\n【Schema 选择建议】问题涉及占比/排名/汇总等聚合指标时：\n"
+    "1. 优先选用 ADS 层应用视图（如 ADS_SUPPLIER_360、ADS_SUPPLIER_ORDER_DETAIL），"
+    "其预聚合字段可直接 SELECT，无需在明细层做除法。\n"
+    "2. 如必须从 DWD 层聚合，使用窗口函数 SUM(x)/SUM(SUM(x)) OVER() 而非"
+    "CROSS JOIN 笛卡尔积（占比 = 该供应商 topN 物料数量 / 该供应商全月数量）。\n"
+    "3. 涉及 3+ 种语义相近表（DWD_*/ODS_* 同主题）时，优先选盘型而非堆型，"
+    "避免把订单日期/未税金额误当数量字段。"
+)
+
+
+def _shouldInjectAggregateSchemaHint(question: str | None) -> bool:
+    """聚合类问题关键词命中时返回 True。
+
+    大小写不敏感：英文关键词 lower() 后比对。question 为 None/空 → False（不注入）。
+    """
+    if not question:
+        return False
+    lowered = question.lower()
+    return any(kw.lower() in lowered for kw in _AGGREGATE_HINT_KEYWORDS)
 
 
 def _aliasRequiresFormula(alias: str | None) -> bool:
@@ -1457,9 +1565,16 @@ class Nl2SqlService:
         # 多步子问题常丢失主问题的时间范围（如主问「2025 年采购情况」，
         # 子问题只剩「查各供应商采购额」）→ 并集判定，宁可不限也不误限。
         scopeText = question if scopeQuestion is None else f"{scopeQuestion}\n{question}"
+        # 复合形式 property 归一化：LLM 偶尔从 schema 渲染文本 '业务名 (alias)'
+        # 原样抄进 property_name，validatePlan 严格 token 匹配必拒；归一化在
+        # 每次 generateQueryPlan 返回后都跑一次（首次 + 重试），确保 validatePlan
+        # 看到的永远是清洗后的 plan（2026-09-18 真实回归 + code-review HIGH 修复）。
         planResult = await self.generateQueryPlan(
             question, classes, llmClient, modelConfig,
             scopeQuestion=scopeQuestion, **common,
+        )
+        planResult = replace(
+            planResult, plan=_normalizePlanProperties(planResult.plan, classes),
         )
         for _ in range(maxPlanAttempts - 1):
             issues = self.validatePlan(planResult.plan, classes)
@@ -1468,6 +1583,9 @@ class Nl2SqlService:
             planResult = await self.generateQueryPlan(
                 question, classes, llmClient, modelConfig,
                 initialErrors=issues, scopeQuestion=scopeQuestion, **common,
+            )
+            planResult = replace(
+                planResult, plan=_normalizePlanProperties(planResult.plan, classes),
             )
         issues = self.validatePlan(planResult.plan, classes)
         if issues:
@@ -2015,6 +2133,11 @@ class Nl2SqlService:
         scopePart = _renderScopeHintPart(scopeQuestion)
         if scopePart:
             prompt += scopePart
+        # feat-ontology-recall-pruning step E：聚合类问题（占比/排名/汇总等）
+        # 在 user prompt 末尾追加「Schema 选择建议」段，引导 LLM 优先 ADS
+        # 黄金路径与窗口函数；不命中时保持原 prompt 不变（避免无意义冗余）。
+        if _shouldInjectAggregateSchemaHint(question):
+            prompt += _AGGREGATE_SCHEMA_HINT_TEXT
         if errors:
             snippet = "；".join(errors)
             if len(snippet) > _ERROR_SNIPPET_LIMIT:

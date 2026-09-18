@@ -140,5 +140,35 @@ class TestStepAggregatorPrompt:
         prompt = agg._build_prompt(plan.original_question, plan, steps, "")
         assert "无数据步骤" in prompt
 
+    def test_step_data_uses_structured_summary(self) -> None:
+        """2026-09-18 feat-smart-data-summary：步骤数据块从「前 N 行」改为结构化摘要。
+
+        验证：步骤 data > 10 行时 prompt 含 numeric_stats、distinct_counts、
+        samples.head/tail 等结构化字段；不再含「数据：[前 20 行 JSON 数组]」。
+        """
+        import json
+        agg = self._make_aggregator()
+        plan = self._make_plan()
+        steps = [
+            StepResult(
+                step_index=0,
+                description="数据步骤",
+                sub_question="查询",
+                sql="SELECT *",
+                data=[
+                    {"供应商": f"BPS{i:03d}", "数量": i * 10}
+                    for i in range(20)
+                ],
+            ),
+        ]
+        prompt = agg._build_prompt(plan.original_question, plan, steps, "")
+        # 结构化摘要关键字段
+        assert "\"total\": 20" in prompt
+        assert "numeric_stats" in prompt
+        assert "distinct_counts" in prompt
+        assert "samples" in prompt
+        assert "truncated" in prompt
+        assert "数据摘要" in prompt
+
 
 from decimal import Decimal

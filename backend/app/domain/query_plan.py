@@ -11,11 +11,31 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
 # 模型无法从本体匹配到任何表时的 target 约定值（见 nl2sql _buildPlanSystemPrompt 规则 2）
 UNANSWERABLE_TARGET = "无法回答"
+
+# 复合形式 '业务名 (alias)' 拆分（与 nl2sql_service._splitCompoundRef 同口径，
+# 此处复刻以避免 query_plan 反向依赖 nl2sql_service 形成循环导入）。
+_COMPOUND_REF_RE = re.compile(r"^(.*?)\s*\(([^()]+)\)\s*$")
+
+
+def _stripCompoundRef(prop: str) -> str:
+    """拆 'name (alias)' → name（取业务名）；无括号 / 中文括号 / 嵌套括号原样保留。
+
+    用于 planToText 渲染：剥离复合形式以防 state 回灌 prompt 时诱导 LLM 持续使用
+    复合写法（2026-09-18 真实回归）。无 ontology 上下文，无法判别哪个 token 合法，
+    一律取拆出的业务名作为人类可读 token。
+    """
+    if not isinstance(prop, str):
+        return prop
+    m = _COMPOUND_REF_RE.match(prop.strip())
+    if not m:
+        return prop.strip()
+    return m.group(1).strip()
 
 
 def _coercePositiveInt(value: Any) -> int | None:
@@ -192,6 +212,9 @@ def planToText(plan: QueryPlan) -> str:
     """将查询计划渲染为 prompt 中的人类可读段落。
 
     嵌套元素可能是 frozen dataclass 或 dict（防御性兼容），统一取值。
+    prop 字段（selectedProperties/groupBy/partitionBy/aggregations/sortBy/joins）
+    经 _stripCompoundRef 拆分，去掉 'name (alias)' 复合形式的括号与别名部分，
+    只保留业务名，避免 state 回灌 prompt 时诱导 LLM 持续使用复合写法。
     """
 
     def _aggText(a: Any) -> str:
@@ -201,13 +224,13 @@ def planToText(plan: QueryPlan) -> str:
             # 派生指标：直接渲染公式（如 SUM(数量) / SUM(SUM(数量)) OVER ()）
             alias = d.get("alias")
             return f"{formula} AS {alias}" if alias else str(formula)
-        text = f"{d.get('function', '?')}({d.get('property', '?')})"
+        text = f"{d.get('function', '?')}({_stripCompoundRef(d.get('property', '?'))})"
         alias = d.get("alias")
         return f"{text} AS {alias}" if alias else text
 
     def _sortText(s: Any) -> str:
         d = s.__dict__ if not isinstance(s, dict) else s
-        return f"{d.get('property', '?')} {d.get('direction', 'asc')}"
+        return f"{_stripCompoundRef(d.get('property', '?'))} {d.get('direction', 'asc')}"
 
     lines = [f"- 目标：{plan.target or '（未描述）'}"]
     if plan.interpretation:
@@ -215,13 +238,13 @@ def planToText(plan: QueryPlan) -> str:
     if plan.selectedClasses:
         lines.append(f"- 涉及表：{', '.join(plan.selectedClasses)}")
     if plan.selectedProperties:
-        lines.append(f"- 涉及列：{', '.join(plan.selectedProperties)}")
+        lines.append(f"- 涉及列：{', '.join(_stripCompoundRef(p) for p in plan.selectedProperties)}")
     if plan.conditions:
         lines.append(f"- 过滤条件：{'; '.join(plan.conditions)}")
     if plan.aggregations:
         lines.append("- 聚合：" + "; ".join(_aggText(a) for a in plan.aggregations))
     if plan.groupBy:
-        lines.append(f"- 分组：{', '.join(plan.groupBy)}")
+        lines.append(f"- 分组：{', '.join(_stripCompoundRef(p) for p in plan.groupBy)}")
     if plan.sortBy:
         lines.append("- 排序：" + "; ".join(_sortText(s) for s in plan.sortBy))
     if plan.rowLimit is not None:
@@ -230,7 +253,7 @@ def planToText(plan: QueryPlan) -> str:
         # 逐组 Top-N：分区维 + 组内排序（复用 sortBy 文本）+ 每组行数。
         # SQL 阶段据此生成 ROW_NUMBER() OVER (PARTITION BY ...)，不是全局截断。
         order = "、".join(_sortText(s) for s in plan.sortBy) if plan.sortBy else ""
-        bullet = f"- 每组 Top-N：按 {'、'.join(plan.partitionBy)} 分区"
+        bullet = f"- 每组 Top-N：按 {'、'.join(_stripCompoundRef(p) for p in plan.partitionBy)} 分区"
         if order:
             bullet += f"，组内按 {order} 排序"
         bullet += f"，每组取前 {plan.perGroupLimit} 行"

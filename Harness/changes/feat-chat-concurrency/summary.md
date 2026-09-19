@@ -152,6 +152,82 @@ AFTER bootstrap:
 
 ## 后续（follow-up）
 
-1. **DB pool 调大**：production 50 并发时 35 请求排队，调 `DB_POOL_SIZE=20/DB_MAX_OVERFLOW=10`，PG `max_connections=200`。需要用户拍板 PG 容器重启。
+1. **DB pool 调大**：production 50 并发时 35 请求排队，调 `DB_POOL_SIZE=20/DB_MAX_OVERFLOW=10`，PG `max_connections=200`。需要用户拍板 PG 容器重启。 ✅ **2026-09-19 落地**（见下文 follow-up 1 落地段）
 2. **多 worker 部署评估**：当前单 worker 跑 50 人靠 async I/O 多路复用；如需垂直扩展到 2-4 worker，需 Redis semaphore 共享 LLM 闸。
 3. **熔断器**（pybreaker 或自实现）：当前 tenacity 仅做退避，未做半开/全开状态机；可观察 LLM 持续故障 30s 后短路所有请求直接 503。
+
+---
+
+## follow-up 1 落地（2026-09-19，DB pool + PG max_connections）
+
+### 触发
+50 并发场景下旧配置 `pool_size=5, max_overflow=10`（max 15 连接）会排队 35 个请求，
+latency spike。PG 默认 `max_connections=100`，元库池满后还可能撞 `remaining connection slots` 错。
+
+### 变更
+
+#### `docker/docker-compose.yml`
+- `postgres` service 增 `command: ["postgres", "-c", "max_connections=200"]`
+- 注释明示 PG 容器需重启生效 + 数据保留 + 回退方法（删 command 行）
+
+#### `backend/app/config.py`
+- `dbPoolSize` 默认 5 → **20**
+- 注释追加「2026-09-19 bump」说明 + 配合 `0081` + `docker-compose` 协同
+
+#### `backend/alembic/versions/0081_db_pool_size_tune.py`（新建）
+- 幂等 UPDATE：`system_config WHERE key='DB_POOL_SIZE' AND value='5'` → 设为 '20'
+- 同时把 description 字面量「默认: 5」刷成「默认: 20」（`replace()` 文本替换）
+- 对称 downgrade：value='20' → '5'，description 反向
+- 仅当行还是旧默认时才动 → 不覆盖任何手动调整
+
+#### `backend/alembic/versions/0079_chat_concurrency_params.py`（**未改**）
+历史 seed 不动；只动 `0081` 的 UPDATE 路径
+
+### 部署步骤
+
+```bash
+# 1. PG 容器重建（max_connections 必须重启生效；数据保留）
+docker compose -f docker/docker-compose.yml up -d postgres
+
+# 2. 备份（手动跑）
+./scripts/backup_pg.sh
+./scripts/backup_pg.sh --db qa_metadata_test
+
+# 3. 迁移（prod + test 都跑；幂等）
+cd backend
+DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata' python -m alembic upgrade head
+DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' python -m alembic upgrade head
+
+# 4. 重建后端镜像（config.py 默认变了）
+docker compose -f docker/docker-compose.yml up -d --build backend
+```
+
+### 验证
+
+- `SHOW max_connections;` → `200` ✓
+- 启动日志：`DB_POOL_SIZE=20 DB_MAX_OVERFLOW=10 RATE_LIMIT_KEY_STRATEGY=ip LLM_CONCURRENCY_LIMIT=20` ✓
+- `app.infrastructure.database.get_db_pool_config()` → `{'pool_size': 20, 'max_overflow': 10}` ✓
+- `LLMConcurrencyManager._semaphore._value` → 20 ✓
+- 50 并发 GET `/api/v1/menu-config` → **50/50 200, 0.38s** ✓
+- 50 并发 GET `/api/v1/admin/system-config` → **50/50 200, 0.19s** ✓
+- 50 并发后 `pg_stat_activity WHERE datname='qa_metadata'` → 22 idle connections（pool 20 + 2 overflow 自然保留）✓
+
+### 风险
+
+| 风险 | 缓解 |
+|---|---|
+| PG `max_connections=200` 占用更多 shared memory | 默认 `shared_buffers` + `max_connections=200` 资源充足；如未来再调高，需同步调 `shared_buffers` |
+| 容器重建期间 PG 短暂不可用 | healthcheck + `depends_on: condition: service_healthy`，后端自动重连；前端 1-2s 闪断 |
+| alembic 0081 误覆盖手工调整 | UPDATE WHERE `value='5'` 严格限定；描述也用 replace 不重写整字段 |
+| 配置默认改了但旧 admin-PUT 行仍是 5 | bootstrap 优先读 system_config 行；若 admin 已 PUT 过 5，需手动 PUT 到 20 |
+
+### 50 并发预估（最终）
+
+| 机制 | 效果 |
+|---|---|
+| `DB_POOL_SIZE=20` + `max_overflow=10` = 30 max | 50 请求 → 30 in-flight + 20 排队；远超单 PG 连接开销预算 |
+| `PG max_connections=200` | 30 元库 + 业务 DB × N + alembic 临时连接 + admin < 100，留出 100 余量 |
+| `LLM_CONCURRENCY_LIMIT=20` Semaphore | 50 请求 → 20 LLM in-flight + 30 排队等闸 |
+| fallback 退避 1s~4s | 429 不再立即重打备选模型 |
+
+**之前担心的 50 人瓶颈（DB pool 排队）已落地解除。**

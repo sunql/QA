@@ -6,6 +6,11 @@ services:
     image: postgres:16-alpine
     container_name: qa-postgres
     restart: unless-stopped
+    # max_connections=200：覆盖 PG 默认 100，给后端连接池（5/10 → 20/10）留余量，
+    # 以及 alembic migration 临时连接、admin 页面等额外占用。
+    # max_connections 必须重启 PG 才能生效（reload 不行），数据保留。
+    # 改回 100：删掉 command 行后 `docker compose up -d postgres` 即可。
+    command: ["postgres", "-c", "max_connections=200"]
     environment:
       POSTGRES_DB: qa_metadata
       POSTGRES_USER: qa_user

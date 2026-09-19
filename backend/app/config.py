@@ -74,7 +74,10 @@ class Settings(BaseSettings):
     # ``DB_POOL_SIZE`` / ``DB_MAX_OVERFLOW`` 覆盖（main.py lifespan 启动期一次性
     # 读取后注入 ``app.infrastructure.database._db_pool_config``）。两者仅作默认值：
     # 容器内如需自定义可通过 env var 覆盖，admin 通过 system_config 页面调则需重启。
-    dbPoolSize: int = Field(default=5, alias="DB_POOL_SIZE")
+    # 2026-09-19 bump：50 并发场景下旧默认 5/10=15 max 会导致 35 请求排队。
+    # 20/10=30 max 给 DB 留出 headroom，配合 PG max_connections=200（docker-compose）。
+    # 配合 migration 0081 把已 seed 的旧默认 5 升到 20（幂等：仅 value='5' 时改）。
+    dbPoolSize: int = Field(default=20, alias="DB_POOL_SIZE")
     dbMaxOverflow: int = Field(default=10, alias="DB_MAX_OVERFLOW")
 
     # ===== LLM 并发上限（feat-chat-concurrency）=====

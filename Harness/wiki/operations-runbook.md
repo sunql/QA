@@ -172,3 +172,93 @@ fi
 1. 写本节「迁移与端口映射」，避免下次重复踩。
 2. 启动 backend 之前必跑 `alembic upgrade head`（见上文强制流程）。
 3. 排查端点 500 时，先看 `uvicorn` 日志的首个 traceback，再换端点 —— **不要只换端点不查日志**。
+
+---
+
+## 并发与韧性备忘（2026-09-19）
+
+> **目的**：下次遇到「50/100 人并发降级」「LLM 持续故障」「要不要多 worker」等同类问题时，
+> 先看本节确认当时是怎么定的、为什么不动、什么时候该动。
+> 详细 SSOT 在 `Harness/changes/feat-chat-concurrency/summary.md`。
+
+### 当前实测基线（2026-09-19，feat-chat-concurrency 落地后）
+
+| 维度 | 配置 | 实测 |
+|---|---|---|
+| DB pool | `pool_size=20, max_overflow=10`（max 30） | 50 并发 GET /menu-config → 50/50 200, 0.38s |
+| PG | `max_connections=200` | 50 并发后 idle 22 连接，自然保留 |
+| LLM 闸 | `LLM_CONCURRENCY_LIMIT=20`（asyncio.Semaphore） | 50 人 → 20 in-flight + 30 排队等闸 |
+| 限流 key | `RATE_LIMIT_KEY_STRATEGY=ip`（默认）/ `user_id`（50 人同一 NAT 改这个） | admin PUT 立即生效 |
+| Fallback 退避 | tenacity `stop=2 wait_exponential(1,4)` + 429→retry / 401/403/400→直接抛 | 详见 `feat-chat-concurrency/summary.md` §chat_service |
+
+### 决策一：多 worker 部署 → **暂不动**
+
+**何时触发重新评估**：日活并发 ≥ **100 人** 或单 worker 进程 CPU/内存饱和。
+
+**为什么现在不动**：
+
+- 当前单 worker 跑 50 人实测 50/50 200 + 0.19s，还有 ~3 倍余量
+- 多 worker → 进程内 `asyncio.Semaphore` **不再共享**（每 worker 独立），需要外部限流（Redis semaphore 或网关层限流）
+- 多 worker → Alembic migration 并发抢锁风险（要加 advisory lock 或排他升级）
+- 多 worker → 日志/指标/middleware 单例失效（如 `_bootstrapChatConcurrencyConfig` 跑 N 次）
+- 多 worker → 内存占用 ×N（每个 worker ~150MB）
+
+**如未来需要多 worker，步骤**：
+
+1. 引入 Redis semaphore（如 `redis.asyncio.Semaphore` 或 `aiocache`），替换 `app/infrastructure/llm/concurrency.py` 的 `LLMConcurrencyManager`
+2. DB pool 同步缩到 `pool_size / worker_count`（PG max_connections 上限保护）
+3. alembic migration 加 advisory lock 或单独 worker 跑迁移
+4. 日志格式加 worker_id 字段（uvicorn `--worker-id` + `logging` filter）
+5. nginx 改 upstream 为 `least_conn` 或 `ip_hash`（已有 resolver 变量，见 `qa-system-nginx-upstream-ip-stale`）
+
+**不要做**：
+- ❌ 把 uvicorn workers 加到 4 但仍用进程内 Semaphore → 上限虚高 4 倍、LLM provider 必 429
+- ❌ 加 gunicorn `--worker-class=uvicorn.workers.UvicornWorker` 但忘了设 `worker_tmpdir` → macOS /tmp 太小报错
+
+### 决策二：熔断器 → **暂不引入**
+
+**何时触发重新评估**：
+
+- LLM provider 持续 5xx / 429 超过 **30 秒**
+- fallback 也连挂（多层全断）
+- 需要「保护上游」「自动恢复（半开探针）」而不是仅「延迟重试」
+
+**为什么现在不动**：
+
+- 当前 fallback 退避（tenacity 指数 1s~4s × 2 次）已覆盖「请求级瞬时故障」
+- 熔断器（pybreaker / resilience4j / 自实现）解决的是「进程级状态机」（closed/open/half-open），需要持续观察 LLM 失败率
+- 当前没有 LLM 失败率指标 → 熔断阈值（多少 % 失败开闸）拍脑袋没意义
+- 多 worker 部署会让熔断状态机同步问题复杂化（先解 worker 再解 breaker）
+
+**如未来需要熔断，步骤**：
+
+1. 先加指标：`llm_request_total`, `llm_request_failed_total{provider,status}`（prometheus client）
+2. 写一个滑动窗口失败率计算器（如 30s 内失败率 ≥ 50% 开启）
+3. 用 `pybreaker` 包装 `_callWithFallback` 入口；或自实现 `CircuitBreaker`（避免额外依赖）
+4. 状态持久化到 Redis（多 worker 共享）；单 worker 阶段用内存即可
+5. 半开探针：开闸 30s 后放 1 个请求，成功 → 关闭，失败 → 重新开闸
+
+**当前已有什么**：
+
+- ✅ tenacity 退避（429/5xx 重试 + 指数退避 + reraise）
+- ✅ fallback（按 weight 选备选模型，已在 `chat_service._callWithFallback`）
+- ✅ Semaphore（LLM 并发上限）
+- ❌ 熔断器（无）
+- ❌ 失败率指标（无）
+
+### 决策三：DB pool 调参 → **已动**（2026-09-19）
+
+详见 `Harness/changes/feat-chat-concurrency/summary.md` §follow-up 1。
+
+- `DB_POOL_SIZE`: 5 → **20**
+- `DB_MAX_OVERFLOW`: 10 → **10**（不变）
+- PG `max_connections`: 100 → **200**（docker-compose.yml `postgres.command`）
+- migration `0081` 幂等 UPDATE 已 seed 的旧默认 5 → 20
+
+### 出问题时的排查顺序
+
+1. **看 `docker logs qa-backend 2>&1 | grep -E "并发配置|LLM_CONCURRENCY|max_conn"`** → 确认启动期读到的实际值
+2. **`pg_stat_activity`** 看连接池是否打满（active 数 ≥ pool_size+max_overflow = 30 → 间隙）
+3. **`curl /api/v1/admin/system-config`** 看 system_config 当前值与启动期值是否一致
+4. **50 并发复现**（`python3 -c "import asyncio, aiohttp..."` 见 `feat-chat-concurrency/summary.md`）
+5. **不要先调 LLM_CONCURRENCY_LIMIT** — 当前不是 LLM 闸问题，先看 DB pool / fallback 是否抛错

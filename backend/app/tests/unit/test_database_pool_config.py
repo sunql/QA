@@ -42,11 +42,15 @@ class TestModuleDefaults:
         assert database._db_pool_config["pool_size"] == settings.dbPoolSize
         assert database._db_pool_config["max_overflow"] == settings.dbMaxOverflow
 
-    def test_settings_default_pool_size_is_5(self) -> None:
-        """基线默认 5（与原硬编码一致；环境变量可覆盖但本测试场景无 env）。"""
-        # 只在没设过 env var 的干净环境下恒为 5；测试 conftest 通常不设
+    def test_settings_default_pool_size_is_20(self) -> None:
+        """基线默认 20（2026-09-19 从 5 提升以支撑 50 人并发；环境变量可覆盖但本测试场景无 env）。
+
+        改动记录见 ``Harness/changes/feat-chat-concurrency/summary.md`` §follow-up 1：
+        50 并发时旧默认 5 + overflow10 = 15 max 会让 35 请求排队；改 20+10=30 max。
+        """
+        # 只在没设过 env var 的干净环境下恒为 20；测试 conftest 通常不设
         settings = getSettings()
-        assert settings.dbPoolSize == 5
+        assert settings.dbPoolSize == 20
         assert settings.dbMaxOverflow == 10
 
 

@@ -46,6 +46,7 @@ import {
 } from "../types/feature";
 import type { EntityType } from "../types/entityMapping";
 import { useTranslation } from "../i18n";
+import { useTablePagination } from "../utils/useTablePagination";
 import FilterBar from "../components/ontology/FilterBar";
 import type { FilterField } from "../components/ontology/FilterBar";
 import { contains, matchSelect } from "../utils/ontologyFilter";
@@ -90,6 +91,7 @@ const EMPTY_FEATURE_FORM: FeatureFormValues = {
 
 export default function FeatureCatalogPage() {
   const { t } = useTranslation();
+  const { pagination } = useTablePagination();
   const [features, setFeatures] = useState<FeatureDefinition[]>([]);
   const [datasources, setDatasources] = useState<DataSource[]>([]);
   const [loading, setLoading] = useState(false);
@@ -374,7 +376,7 @@ export default function FeatureCatalogPage() {
         onChange={updateFilter}
         onReset={resetFilters}
       />
-      <Table rowKey="id" loading={loading} dataSource={filtered} columns={columns} />
+      <Table rowKey="id" loading={loading} dataSource={filtered} columns={columns} pagination={pagination} />
       <Modal
         title={editing ? t("feature.editTitle") : t("feature.createTitle")}
         open={modalOpen}

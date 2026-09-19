@@ -665,7 +665,7 @@ export const enUS = {
     editRule: "Edit Rule",
     ruleCode: "Rule Code",
     // feat-rule-create-form-autofill (2026-09-15): auto-suggested code + manual override hint
-    ruleCodeAutoHint: "Auto-suggested code: {{code}} (you may edit)",
+    ruleCodeAutoHint: "Auto-suggested code: {code} (you may edit)",
     ruleName: "Rule Name",
     sourceClass: "Source Class",
     sourceClassPlaceholder: "Optional: pick class to auto-suggest rule code",
@@ -2466,6 +2466,7 @@ export const enUS = {
     subtitle: "View and edit LLM-adopted allowed_values across all ontology classes in one place.",
     filter: {
       all: "All classes",
+      keywordPlaceholder: "Search property name / alias / column / description (case-insensitive)",
     },
     values: {
       none: "Unconstrained",
@@ -2478,7 +2479,7 @@ export const enUS = {
       actions: "Actions",
     },
     modal: {
-      editTitle: "Edit Property: {{name}}",
+      editTitle: "Edit Property: {name}",
     },
     form: {
       description: "Description",

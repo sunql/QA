@@ -247,7 +247,7 @@ class AgentLoopResult:
 # 历史 bug：缺系统提示 → LLM 永远调用 tool_calls 直到 max_iterations → answer_text=None
 # → chat_service 降级到 L2 fallback，L4 路径看似"被降级"实则 LLM 从未进入"answered"分支。
 _L4_SYSTEM_PROMPT = """你是 NL2SQL 数据分析助手。会话可调用以下工具查询数据库：
-- list_tables / describe_table / sample_rows / list_joins：探索 schema
+- list_tables / describe_table / sample_rows / list_joins：探索 schema（**仅在确实需要时**）
 - execute_sql：执行只读 SELECT 查询
 
 行为规则：
@@ -255,11 +255,15 @@ _L4_SYSTEM_PROMPT = """你是 NL2SQL 数据分析助手。会话可调用以下�
    - 需要查数据库才能回答（聚合、明细、筛选、对比、为什么某个数据是这样）→ 调用工具
    - 概念性问题（什么是 / 解释 / 如何理解领域术语 / 如何使用系统）→ 直接文字作答，无需调工具
    - 含糊不清 → 先回答"我理解你要问的是 X"，再决定是否需要查数据
-2. **工具调用节制**：调一次 execute_sql 拿到结果后立即总结回答；不要重复查询相同表/相似条件
+2. **迭代预算**（硬约束）：
+   - 探索阶段（list_tables / list_joins / describe_table / sample_rows）**最多 1 轮**且并发执行；同轮内可同时发出多个工具调用
+   - 拿到 schema 立即写 execute_sql，**不要反复 describe 同一表**
+   - 多步骤问题（topN + 子分析 + 聚合）**必须用一次 execute_sql + CTE/子查询合并**，不要拆成多次单 SQL 依次查询
 3. **回答语言**：与用户问题一致（默认中文）
-4. **结束**：拿到足够信息后直接文字总结，不要继续调工具
+4. **结束**：拿到足够信息后必须直接文字总结（**不要再发任何 tool_call**），纯文本响应即终止
+5. **放弃条件**：若 1 轮探索 + 1 次 execute_sql 仍未拿到数据，请基于已有信息给出推断 + 明确说明数据缺口，**立即文字总结**，不要再调工具
 
-若经过 1-2 轮工具调用仍无法获取需要的数据，请基于已有信息给出推断 + 明确说明数据缺口，不要继续调工具。"""
+历史反例：曾因 LLM 反复 describe_table 而耗尽 max_iterations，请严守上述预算。"""
 
 
 def _build_system_message(prompt: str):
@@ -546,7 +550,7 @@ async def run_agent_loop(
     llm_client,
     executor,
     ontology,
-    max_iterations: int = 3,
+    max_iterations: int = 5,
     cost_budget_usd: float = 0.5,
 ) -> AgentLoopResult:
     """LLM 驱动的 agent loop（纯 Python async while 实现）。

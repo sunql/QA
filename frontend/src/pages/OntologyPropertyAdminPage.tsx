@@ -31,6 +31,7 @@ import {
   EditOutlined,
   PlusOutlined,
   CheckOutlined,
+  SearchOutlined,
 } from "@ant-design/icons";
 import {
   listAllProperties,
@@ -43,6 +44,7 @@ import type {
   OntologyClass,
 } from "../types/ontology";
 import { useTranslation } from "../i18n";
+import { useTablePagination } from "../utils/useTablePagination";
 
 const { Title } = Typography;
 const { TextArea } = Input;
@@ -59,10 +61,14 @@ interface EditFormValues {
 
 export default function OntologyPropertyAdminPage(): JSX.Element {
   const { t } = useTranslation();
+  const { pagination, setPage } = useTablePagination();
   const [classes, setClasses] = useState<OntologyClass[]>([]);
   const [properties, setProperties] = useState<OntologyProperty[]>([]);
   const [loading, setLoading] = useState(false);
   const [classFilter, setClassFilter] = useState<number | "all">("all");
+  // 关键字过滤（feat-ontology-property-search）：对属性名 / 别名 / 物理列名 / 描述
+  // 做大小写不敏感的子串匹配；空串视为无过滤。命中数从 N 跳到 M 时强制回到第 1 页。
+  const [keyword, setKeyword] = useState("");
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<OntologyProperty | null>(null);
@@ -96,9 +102,26 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
   }, [load]);
 
   const filtered = useMemo(() => {
-    if (classFilter === "all") return properties;
-    return properties.filter((p) => p.classId === classFilter);
-  }, [properties, classFilter]);
+    const kw = keyword.trim().toLowerCase();
+    return properties.filter((p) => {
+      if (classFilter !== "all" && p.classId !== classFilter) return false;
+      if (kw) {
+        // 多字段 OR 命中：propertyName / propertyAlias / sourceColumn / description。
+        // 任一字段包含关键字即视为命中（前端模糊搜，不是后端 ILIKE）。
+        const haystack = [
+          p.propertyName,
+          p.propertyAlias,
+          p.sourceColumn,
+          p.description,
+        ]
+          .filter((s): s is string => Boolean(s))
+          .join("")
+          .toLowerCase();
+        if (!haystack.includes(kw)) return false;
+      }
+      return true;
+    });
+  }, [properties, classFilter, keyword]);
 
   // 弹窗 destroyOnHidden 下，Modal 关闭态时 Form 未挂载，直接 setFieldsValue
   // 真机会触发 "useForm is not connected" 警告且回填可能被丢弃（jsdom 不复现）。
@@ -266,15 +289,31 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
           flexWrap: "wrap",
         }}
       >
-        <Select
-          value={classFilter}
-          onChange={(v) => setClassFilter(v as number | "all")}
-          style={{ minWidth: 240 }}
-          options={[
-            { value: "all", label: t("ontologyPropertyAdmin.filter.all") },
-            ...classes.map((c) => ({ value: c.id, label: c.className })),
-          ]}
-        />
+        <Space wrap>
+          <Select
+            value={classFilter}
+            onChange={(v) => {
+              setClassFilter(v as number | "all");
+              setPage(1);
+            }}
+            style={{ minWidth: 240 }}
+            options={[
+              { value: "all", label: t("ontologyPropertyAdmin.filter.all") },
+              ...classes.map((c) => ({ value: c.id, label: c.className })),
+            ]}
+          />
+          <Input
+            allowClear
+            value={keyword}
+            onChange={(e) => {
+              setKeyword(e.target.value);
+              setPage(1);
+            }}
+            placeholder={t("ontologyPropertyAdmin.filter.keywordPlaceholder")}
+            prefix={<SearchOutlined />}
+            style={{ minWidth: 280 }}
+          />
+        </Space>
         <Button icon={<ReloadOutlined />} onClick={() => void load()}>
           {t("common.refresh")}
         </Button>
@@ -285,7 +324,7 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
         dataSource={filtered}
         columns={columns}
         size="middle"
-        pagination={{ pageSize: 20, showSizeChanger: true }}
+        pagination={pagination}
       />
       <Modal
         title={

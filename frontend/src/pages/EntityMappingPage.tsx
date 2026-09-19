@@ -14,6 +14,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useTranslation } from "../i18n";
+import { useTablePagination } from "../utils/useTablePagination";
 import {
   createMapping,
   deleteMapping,
@@ -70,6 +71,7 @@ function matchRuleColor(rule: MatchRule): string {
 
 export default function EntityMappingPage() {
   const { t } = useTranslation();
+  const { pagination } = useTablePagination();
   const [mappings, setMappings] = useState<EntityMappingRead[]>([]);
   const [loading, setLoading] = useState(false);
   const [filterType, setFilterType] = useState<EntityType | undefined>();
@@ -285,7 +287,7 @@ export default function EntityMappingPage() {
         loading={loading}
         columns={columns}
         dataSource={mappings}
-        pagination={{ pageSize: 20 }}
+        pagination={pagination}
       />
 
       <Modal

@@ -44,7 +44,7 @@ from app.domain.exceptions import (
     PermissionDeniedError,
     ValidationError,
 )
-from app.domain.models import DataSource, LlmConfig, SessionMessage, SessionQueryState
+from app.domain.models import DataSource, LlmConfig, OntologyClass, SessionMessage, SessionQueryState
 from app.domain.multi_step_plan import (
     MultiStepPlan,
     StepExecutionContext,
@@ -192,6 +192,85 @@ def _isOdsBusinessTable(cls: Any) -> bool:
     if src.startswith("ODS_DIM"):
         return False
     return True
+
+
+# feat-layer-priority: 按 source_table 前缀识别层 + 显式 ODS 请求判定 + 维度词触发。
+# 层排序规则：ADS > DWS > DWD > DIM > ODS_DICT > ODS_BUSINESS > UNKNOWN。
+_LAYER_RANK = {
+    "ADS": 0,
+    "DWS": 1,
+    "DWD": 2,
+    "DIM": 3,
+    "ODS_DICT": 4,
+    "ODS_BUSINESS": 5,
+    "UNKNOWN": 6,
+}
+
+
+def _getClassLayer(cls: Any) -> str:
+    """按 source_table 前缀识别层。
+
+    返回值（按优先级升序）：
+    - ADS: 应用视图层
+    - DWS: 数据汇总层
+    - DWD: 明细层
+    - DIM: 维度层
+    - ODS_DICT: ODS 字典表（如 ODS_DIM_*）
+    - ODS_BUSINESS: ODS 业务原始表
+    - UNKNOWN: 未识别
+    """
+    src = (getattr(cls, "source_table", "") or "").upper()
+    if src.startswith("ADS_"):
+        return "ADS"
+    if src.startswith("DWS_"):
+        return "DWS"
+    if src.startswith("DWD_"):
+        return "DWD"
+    if src.startswith("DIM_"):
+        return "DIM"
+    if src.startswith("ODS_DIM_"):
+        return "ODS_DICT"
+    if src.startswith("ODS_"):
+        return "ODS_BUSINESS"
+    return "UNKNOWN"
+
+
+_ODS_TABLE_PATTERN = re.compile(r"\bODS_[A-Z][A-Z0-9_]*\b")
+
+
+def _isExplicitOdsRequest(question: str) -> bool:
+    """显式 ODS 请求判定：问题文本含 ODS_<UPPER_NAME> 表名。
+
+    适用于「ODS_BPARTNER 里有什么」类直接指定原始表名的问法。
+    """
+    return bool(_ODS_TABLE_PATTERN.search((question or "").upper()))
+
+
+_DIMENSION_HINTS = (
+    "维度",
+    "属性",
+    "分类",
+    "描述",
+    "名称",
+    "编号",
+    "供应商编号",
+    "物料描述",
+    "物料编码",
+    "供应商名称",
+    "物料名称",
+    "物料分类",
+    "供应商分类",
+)
+
+
+def _isDimensionHint(question: str) -> bool:
+    """维度词触发：问题含维度/属性/分类/编号/描述等关键词。
+
+    触发后 DIM 类全部纳入候选，即使 score 低。
+    """
+    return any(kw in (question or "") for kw in _DIMENSION_HINTS)
+
+
 _CLARIFY_SYSTEM_PROMPT = (
     "你是一名企业数据分析助手。用户正在询问某个业务概念/术语的含义，"
     "请结合提供的本体元数据用简洁的中文解释，不要编造、不要输出 SQL。"
@@ -990,6 +1069,49 @@ class ChatService(ChatStreamOutputMixin):
             logger.warning("值域采样整体失败，回退无采样", exc_info=True)
             return {}
 
+    async def _rankByLayer(
+        self,
+        classes: list,
+        *,
+        dimension_hint: bool,
+        session: AsyncSession,
+    ) -> list:
+        """按层优先排序：DIM 拉满（DIM 层按 dimension_hint 决定是否全拉）。
+
+        Returns: 排序后的新 list（不修改输入）。
+        """
+        merged = list(classes)
+        if dimension_hint:
+            dim_classes = await self._fetchAllDimClasses(session)
+            # 去重（按 id）
+            seen = {c.id for c in merged if c.id is not None}
+            for c in dim_classes:
+                if c.id not in seen:
+                    merged.append(c)
+                    seen.add(c.id)
+
+        def _key(cls):
+            return _LAYER_RANK.get(_getClassLayer(cls), _LAYER_RANK["UNKNOWN"])
+
+        return sorted(merged, key=_key)
+
+
+    async def _fetchAllDimClasses(self, session: AsyncSession) -> list:
+        """拉全量 DIM_<NAME> 类（DIM 维度词触发时使用）。"""
+        from sqlalchemy import select
+
+        from app.domain.models import OntologyClass
+
+        rows = (
+            await session.execute(
+                select(OntologyClass).where(
+                    OntologyClass.source_table.like("DIM_%"),
+                    OntologyClass.valid_to.is_(None),
+                )
+            )
+        ).scalars().all()
+        return list(rows)
+
     async def _selectRelevantClasses(
         self, session: AsyncSession, question: str, allClasses: list[Any]
     ) -> list[Any]:
@@ -1070,10 +1192,11 @@ class ChatService(ChatStreamOutputMixin):
                 for _, cls in classByIdResolved if cls is not None
             )
         )
+        explicit_ods_recall = _isExplicitOdsRequest(question)
         weightedHits = [
             (h, s) for h, s in weightedHits
             if (cls := classByIdForWeight.get(h.id)) is not None
-            and not _isOdsBusinessTable(cls)
+            and (not _isOdsBusinessTable(cls) or explicit_ods_recall)
         ]
         relevant = [
             classByIdForWeight[h.id] for h, _ in weightedHits
@@ -1120,9 +1243,23 @@ class ChatService(ChatStreamOutputMixin):
                 "本体类裁剪完成 pruned=%d total=%d hits=%d",
                 len(relevant), total, len(hits),
             )
-        expanded, truncated = await self._expandByJoinNeighbors(
-            session, relevant, allClasses
+        # 层优先排序（feat-layer-priority）
+        explicit_ods = _isExplicitOdsRequest(question)
+        dimension_hint = _isDimensionHint(question)
+
+        # 按层排序
+        relevant = await self._rankByLayer(
+            relevant, dimension_hint=dimension_hint, session=session
         )
+
+        # 截取 top K
+        max_classes = await self._getClassFilterMaxClasses(session)
+        selected = relevant[:max_classes]
+        pre_expand_truncated = len(relevant) > max_classes
+        expanded, truncated_from_expand = await self._expandByJoinNeighbors(
+            session, selected, allClasses
+        )
+        truncated = pre_expand_truncated or truncated_from_expand
         recall = ClassRecallInfo(
             mode="expanded" if len(expanded) > len(relevant) else "recall",
             hitCount=len(relevant),

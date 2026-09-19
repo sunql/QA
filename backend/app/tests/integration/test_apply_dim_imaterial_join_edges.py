@@ -61,6 +61,10 @@ async def _seedClasses(session, *, omit: str | None = None) -> dict[str, int]:
     names = {n for e in EDGES for n in (e["sourceClass"], e["targetClass"])} | {DIM_CLASS_NAME}
     if omit:
         names.discard(omit)
+    # 按 EDGES 找每个源类该用什么列名（_DTL 用 ITEM_CODE，其他用 MATERIAL_CODE）
+    colsPerSrc: dict[str, str] = {
+        e["sourceClass"]: e["sourceColumn"] for e in EDGES
+    }
     ids: dict[str, int] = {}
     for name in sorted(names):
         cls = OntologyClass(
@@ -69,7 +73,10 @@ async def _seedClasses(session, *, omit: str | None = None) -> dict[str, int]:
         )
         session.add(cls)
         await session.flush()
-        cols = [MATERIAL_COLUMN] if name != DIM_CLASS_NAME else [DIM_CODE_COLUMN]
+        if name == DIM_CLASS_NAME:
+            cols = [DIM_CODE_COLUMN]
+        else:
+            cols = [colsPerSrc[name]] if name in colsPerSrc else [MATERIAL_COLUMN]
         for col in cols:
             session.add(
                 OntologyProperty(

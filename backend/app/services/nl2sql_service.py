@@ -332,6 +332,20 @@ _AGGREGATE_SCHEMA_HINT_TEXT = (
     "避免把订单日期/未税金额误当数量字段。"
 )
 
+# feat-layer-priority：默认层优先级提示，与 _AGGREGATE_SCHEMA_HINT_TEXT 不冲突但更基础
+# —— 后者是「聚合场景」专用段，本段对所有事实表选择都生效。无条件追加，
+# 由 _buildPlanUserPrompt 在 schema 段后、errors 反馈前注入。
+_LAYER_PRIORITY_HINT = """
+【Schema 选表优先级】
+默认按以下顺序选择事实表：
+1. ADS_ 应用视图（预聚合，最快）
+2. DWS_ 汇总表
+3. DWD_ 明细表
+4. DIM_ 维度表（仅用于 JOIN 关联获取属性，不作主事实表）
+ODS_ 业务原始表仅在问题显式要求访问 ODS_* 表时使用。
+如存在 ADS / DWS 视图，应优先使用而非 DWD 明细。
+"""
+
 
 def _shouldInjectAggregateSchemaHint(question: str | None) -> bool:
     """聚合类问题关键词命中时返回 True。
@@ -2140,6 +2154,9 @@ class Nl2SqlService:
         # 黄金路径与窗口函数；不命中时保持原 prompt 不变（避免无意义冗余）。
         if _shouldInjectAggregateSchemaHint(question):
             prompt += _AGGREGATE_SCHEMA_HINT_TEXT
+        # feat-layer-priority: 注入层优先级提示（无条件；与 _AGGREGATE_SCHEMA_HINT_TEXT
+        # 不冲突——后者是聚合场景专用，本段对所有事实表选择生效）。
+        prompt += _LAYER_PRIORITY_HINT
         if errors:
             snippet = "；".join(errors)
             if len(snippet) > _ERROR_SNIPPET_LIMIT:

@@ -27,6 +27,7 @@ import type {
 } from "../types/kpiCatalog";
 import { KPI_STATUS_OPTIONS } from "../types/kpiCatalog";
 import { useTranslation } from "../i18n";
+import { useTablePagination } from "../utils/useTablePagination";
 import FilterBar from "../components/ontology/FilterBar";
 import type { FilterField } from "../components/ontology/FilterBar";
 import { contains, matchSelect } from "../utils/ontologyFilter";
@@ -71,6 +72,7 @@ const EMPTY_KPI_FORM: KpiFormValues = {
 
 export default function KpiCatalogPage() {
   const { t } = useTranslation();
+  const { pagination } = useTablePagination();
   const [kpis, setKpis] = useState<KpiCatalog[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -272,7 +274,7 @@ export default function KpiCatalogPage() {
         onChange={updateFilter}
         onReset={resetFilters}
       />
-      <Table rowKey="id" loading={loading} dataSource={filtered} columns={columns} />
+      <Table rowKey="id" loading={loading} dataSource={filtered} columns={columns} pagination={pagination} />
       <Modal
         title={
           editing

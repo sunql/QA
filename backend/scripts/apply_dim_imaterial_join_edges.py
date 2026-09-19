@@ -10,10 +10,14 @@
     DIM_IMATERIAL.ITMREF_0 (350922) ↔ DWD_PURCHASE_ORDER_LINE.MATERIAL_CODE     100%
     DIM_IMATERIAL.ITMREF_0 (350922) ↔ DWD_ARRIVAL_NOTICE_LINE.MATERIAL_CODE     100%
     DIM_IMATERIAL.ITMREF_0 (350922) ↔ DWD_GOODS_RECEIPT_LINE.MATERIAL_CODE      100%
+    DIM_IMATERIAL.ITMREF_0 (350922) ↔ DWD_GOODS_RECEIPT_DTL.ITEM_CODE          100%  (2026-09-19 后加)
 
 物料列只存在于明细行（单据头无物料维度，属正常）；DWD_ITEM_FACILITY 是
 现网 JOIN 枢纽（FACILITY/MATERIAL_CODE 双向主键），建它也保证其他
-BOM/发票/询价类表经枢纽可达物料维。
+BOM/发票/询价类表经枢纽可达物料维。2026-09-19 增加 DWD_GOODS_RECEIPT_DTL：
+DTL 是 DWD_GOODS_RECEIPT 的明细表（单据头一行 + DTL 多行），DTL 上有
+ITEM_CODE，补边后「3月供货量最多的供应商 + 各供应商 top3 物料」类问题
+可直接走 DWD_GOODS_RECEIPT_DTL → DIM_IMATERIAL 拿物料描述。
 
 实现要点同 apply_supplier_join_edges.py / apply_isolated_join_edges.py：
 走 OntologyService.createJoin（PG + audit + Neo4j 入图），join_key 预查幂等。
@@ -43,6 +47,7 @@ from app.services.ontology_service import OntologyService, makeJoinKey  # noqa: 
 DIM_CLASS_NAME = "DIM_IMATERIAL"
 DIM_CODE_COLUMN = "ITMREF_0"
 MATERIAL_COLUMN = "MATERIAL_CODE"
+ITEM_COLUMN = "ITEM_CODE"  # DWD_GOODS_RECEIPT_DTL 用 ITEM_CODE（与 _LINE 的 MATERIAL_CODE 是同一语义不同名）
 
 # 边方向与现网一致：source=明细行表，target=维度表
 EDGES: list[dict[str, str]] = [
@@ -52,6 +57,13 @@ EDGES: list[dict[str, str]] = [
         "targetClass": DIM_CLASS_NAME,
         "targetColumn": DIM_CODE_COLUMN,
         "description": "采购订单行→物料维（MATERIAL_CODE=ITMREF_0）",
+    },
+    {
+        "sourceClass": "DWD_PURCHASE_ORDER_DTL",
+        "sourceColumn": ITEM_COLUMN,
+        "targetClass": DIM_CLASS_NAME,
+        "targetColumn": DIM_CODE_COLUMN,
+        "description": "采购订单 DTL 明细→物料维（ITEM_CODE=ITMREF_0）",
     },
     {
         "sourceClass": "DWD_ARRIVAL_NOTICE_LINE",
@@ -66,6 +78,13 @@ EDGES: list[dict[str, str]] = [
         "targetClass": DIM_CLASS_NAME,
         "targetColumn": DIM_CODE_COLUMN,
         "description": "收货明细→物料维（MATERIAL_CODE=ITMREF_0）",
+    },
+    {
+        "sourceClass": "DWD_GOODS_RECEIPT_DTL",
+        "sourceColumn": ITEM_COLUMN,
+        "targetClass": DIM_CLASS_NAME,
+        "targetColumn": DIM_CODE_COLUMN,
+        "description": "收货 DTL 明细→物料维（ITEM_CODE=ITMREF_0）",
     },
     {
         "sourceClass": "DWD_ITEM_FACILITY",

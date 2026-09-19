@@ -36,7 +36,13 @@ from app.domain.schemas import (
     OntologyMetricCreate,
     OntologyPropertyUpdate,
 )
-from app.services.chat_service import ChatService
+from app.services.chat_service import (
+    ChatService,
+    _getClassLayer,
+    _isDimensionHint,
+    _isExplicitOdsRequest,
+    _LAYER_RANK,
+)
 from app.services.unanswerable_suggestion import _buildUnanswerableSuggestion
 from app.services.nl2sql_service import SqlResult
 from app.services.step_query_planner import MultiStepPlan, StepPlan, StepQueryPlanner
@@ -2251,3 +2257,60 @@ class TestClassFilterHitSkipOds:
         assert recall.mode == "fallback"
         assert recall.hitCount == 0
         assert {c.id for c in result} == {2, 3}
+
+
+def _mk_class(*, id, source_table):
+    """构造测试用 OntologyClass（绕开 SQLAlchemy 初始化，仅用于纯函数单测）。"""
+    from app.domain.models import OntologyClass
+
+    return OntologyClass(
+        id=id,
+        class_name=f"cls_{id}",
+        class_alias=None,
+        description=None,
+        source_table=source_table,
+        properties=[],
+    )
+
+
+class TestClassLayerSelection:
+    """feat-layer-priority: 层优先排序 + ODS 显式请求 + DIM 维度词触发。"""
+
+    def test_ads_layer_ranked_first(self) -> None:
+        cls_ads = _mk_class(id=80, source_table="ADS_X")
+        cls_dws = _mk_class(id=70, source_table="DWS_Y")
+        cls_dwd = _mk_class(id=60, source_table="DWD_Z")
+        cls_dim = _mk_class(id=50, source_table="DIM_W")
+        cls_ods_business = _mk_class(id=40, source_table="ODS_V")
+        classes = [cls_ods_business, cls_dwd, cls_dim, cls_dws, cls_ads]
+
+        ranked = sorted(classes, key=lambda c: _LAYER_RANK[_getClassLayer(c)])
+
+        assert [_getClassLayer(c) for c in ranked] == [
+            "ADS",
+            "DWS",
+            "DWD",
+            "DIM",
+            "ODS_BUSINESS",
+        ]
+
+    def test_ods_excluded_by_default(self) -> None:
+        # question="B019 供应商编号" — 非显式 ODS
+        question = "B019 供应商编号"
+        explicit = _isExplicitOdsRequest(question)
+        assert explicit is False
+        assert _isDimensionHint(question) is True  # "编号" 触发 DIM 关联
+
+    def test_ods_included_when_explicit_request(self) -> None:
+        question = "ODS_BPARTNER 里有什么供应商"
+        assert _isExplicitOdsRequest(question) is True
+        assert _isDimensionHint(question) is False
+
+    def test_dimension_hint_trigger_keywords(self) -> None:
+        for q in ("物料描述是什么", "供应商名称", "物料编码", "维度信息"):
+            assert _isDimensionHint(q) is True, q
+
+    def test_ods_dict_kept_by_default(self) -> None:
+        # ODS_DIM_* 是字典表，应保留
+        cls = _mk_class(id=99, source_table="ODS_DIM_SUPPLIER")
+        assert _getClassLayer(cls) == "ODS_DICT"

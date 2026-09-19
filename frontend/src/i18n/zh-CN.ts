@@ -670,7 +670,7 @@ export const zhCN = {
     editRule: "编辑规则",
     ruleCode: "规则编码",
     // feat-rule-create-form-autofill（2026-09-15）：编码自动建议 + 手动覆盖提示
-    ruleCodeAutoHint: "已根据所选类自动建议编码：{{code}}（可手动修改）",
+    ruleCodeAutoHint: "已根据所选类自动建议编码：{code}（可手动修改）",
     ruleName: "规则名称",
     sourceClass: "所属类",
     sourceClassPlaceholder: "可选：选类后自动建议规则编码",
@@ -2474,6 +2474,7 @@ export const zhCN = {
     subtitle: "查看与编辑 LLM 采纳的 allowed_values（值域），跨类一次性列出所有本体属性。",
     filter: {
       all: "全部类",
+      keywordPlaceholder: "搜索属性名 / 别名 / 物理列 / 描述（不区分大小写）",
     },
     values: {
       none: "未约束",
@@ -2486,7 +2487,7 @@ export const zhCN = {
       actions: "操作",
     },
     modal: {
-      editTitle: "编辑属性：{{name}}",
+      editTitle: "编辑属性：{name}",
     },
     form: {
       description: "描述",

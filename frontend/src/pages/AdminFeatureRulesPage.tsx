@@ -30,6 +30,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useTranslation } from "react-i18next";
+import { useTablePagination } from "../utils/useTablePagination";
 import {
     listFeatureRules,
     createFeatureRule,
@@ -86,6 +87,7 @@ const OPERATOR_OPTIONS = [
 
 export default function AdminFeatureRulesPage(): JSX.Element {
     const { t } = useTranslation();
+    const { pagination } = useTablePagination();
     const [rules, setRules] = useState<FeatureRule[]>([]);
     const [loading, setLoading] = useState(false);
     const [drawerOpen, setDrawerOpen] = useState(false);
@@ -301,7 +303,7 @@ export default function AdminFeatureRulesPage(): JSX.Element {
                 loading={loading}
                 dataSource={rules}
                 columns={columns}
-                pagination={{ pageSize: 20 }}
+                pagination={pagination}
             />
 
             <Drawer

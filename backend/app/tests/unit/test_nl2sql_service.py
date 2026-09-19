@@ -1473,3 +1473,28 @@ class TestAggregateSchemaHint:
             "suppliers total orders per month", errors=[],
         )
         assert "Schema 选择建议" in prompt
+
+
+class TestSchemaLayerPriorityHint:
+    """feat-layer-priority: NL2SQL plan user prompt 注入层优先级段。
+
+    验证 `_LAYER_PRIORITY_HINT` 在 `_buildPlanUserPrompt` 末尾无条件追加——
+    不论问题是聚合类还是主数据类，只要走 chat pipeline 都会看到「Schema 选表优先级」段。
+    """
+
+    def test_layer_priority_hint_injected(self) -> None:
+        """聚合类问题：层优先级段必须含 ADS_/DWD_/ODS 显式访问说明等关键串。"""
+        service = Nl2SqlService()
+        question = "3 月供货量最多的三种物料"
+        prompt = service._buildPlanUserPrompt(question, errors=[])
+        assert "Schema 选表优先级" in prompt
+        assert "ADS_" in prompt
+        assert "DWD_" in prompt
+        assert "ODS_ 业务原始表仅在问题显式要求访问" in prompt
+
+    def test_layer_priority_hint_present_for_supplier_query(self) -> None:
+        """主数据类问题（B019 供应商编号）也必须含层优先级段——无条件注入。"""
+        service = Nl2SqlService()
+        question = "B019 圣特供应商编号是多少"
+        prompt = service._buildPlanUserPrompt(question, errors=[])
+        assert "Schema 选表优先级" in prompt

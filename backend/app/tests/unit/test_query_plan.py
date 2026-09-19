@@ -317,3 +317,79 @@ class TestQueryPlanInterpretation:
 
     def test_plan_to_text_omits_empty_interpretation(self) -> None:
         assert "理解" not in planToText(QueryPlan(target="占比"))
+
+
+class TestJoinColumnNormalization:
+    """join.columns 归一化：LLM 偶发把 join.columns 写成 "A = B" 等式字符串，
+    而契约是列名数组。from_dict 出口一次性拆分，让校验与 SQL 生成自愈。"""
+
+    def test_from_dict_splits_equation_with_spaces(self) -> None:
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{
+                "sourceClass": "A",
+                "targetClass": "B",
+                "columns": ["SUPPLIER_CODE = PARTNER_CODE"],
+            }],
+        })
+        assert plan.joins[0].columns == ("SUPPLIER_CODE", "PARTNER_CODE")
+
+    def test_from_dict_splits_equation_without_spaces(self) -> None:
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{
+                "sourceClass": "A",
+                "targetClass": "B",
+                "columns": ["SUPPLIER_CODE=PARTNER_CODE"],
+            }],
+        })
+        assert plan.joins[0].columns == ("SUPPLIER_CODE", "PARTNER_CODE")
+
+    def test_plain_columns_untouched(self) -> None:
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{
+                "sourceClass": "A",
+                "targetClass": "B",
+                "columns": ["SUPPLIER_CODE", "PARTNER_CODE"],
+            }],
+        })
+        assert plan.joins[0].columns == ("SUPPLIER_CODE", "PARTNER_CODE")
+
+    def test_mixed_list_normalizes_only_equation_tokens(self) -> None:
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{
+                "sourceClass": "A",
+                "targetClass": "B",
+                "columns": ["GOODS_CODE", "SUPPLIER_CODE = PARTNER_CODE"],
+            }],
+        })
+        assert plan.joins[0].columns == ("GOODS_CODE", "SUPPLIER_CODE", "PARTNER_CODE")
+
+    def test_unsplittable_equation_kept_for_validation(self) -> None:
+        # 缺一侧 / 多个等号：无法安全拆分 → 保留原 token，交给 validatePlan 拒绝
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{
+                "sourceClass": "A",
+                "targetClass": "B",
+                "columns": ["= PARTNER_CODE", "A = B = C"],
+            }],
+        })
+        assert plan.joins[0].columns == ("= PARTNER_CODE", "A = B = C")
+
+    def test_non_equation_with_equals_inside_name_untouched(self) -> None:
+        # 极端：列名本身含 "="（现实中不存在）且无法拆出两侧非空 → 原样保留
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{"sourceClass": "A", "targetClass": "B", "columns": ["WEIRD="]}],
+        })
+        assert plan.joins[0].columns == ("WEIRD=",)
+
+    def test_roundtrip_stays_normalized(self) -> None:
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{"sourceClass": "A", "targetClass": "B", "columns": ["A1 = B1"]}],
+        })
+        assert QueryPlan.from_dict(plan.to_dict()) == plan

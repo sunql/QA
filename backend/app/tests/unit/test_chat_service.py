@@ -1810,9 +1810,13 @@ class TestClassFilterExpansionSkipOds:
         模拟真实场景：ReceiptDetail 的 1-hop 邻居既有 ODS 业务表
         （Receipt/ODS_PRECEIPT）也有 DWD 明细（DWD_GOODS_RECEIPT_LINE）。
         扩边后 schema 应只包含 DWD 层邻居。
+
+        2026-09-19 ODS_BPARTNER 事故后：召回入口 hits 同样过滤 ODS 业务表
+        （TestClassFilterHitSkipOds），命中本身也只保留非 ODS；扩边语义保持：
+        邻居里的 ODS 业务表继续跳过。命中改为 DWD_RECEIPT_DETAIL 以匹配新策略。
         """
         classes = [
-            self._cls(2, "ODS_PRECEIPTD"),   # ReceiptDetail 命中（ODS）
+            self._cls(2, "DWD_RECEIPT_DETAIL"),  # ReceiptDetail 命中（DWD）
             self._cls(3, "ODS_PRECEIPT"),    # Receipt（ODS，业务表）
             self._cls(4, "DWD_GOODS_RECEIPT_LINE"),  # DWD 明细（保留）
         ]
@@ -1859,10 +1863,10 @@ class TestClassFilterExpansionSkipOds:
         """5 个 ODS 邻居 + 1 个 DWD 邻居：扩边后只命中 + DWD 进 schema。
 
         不严格断言日志内容（避免 caplog 复杂），只断言行为：跳过后
-        result 不含 ODS 类。
+        result 不含 ODS 类。命中改成 DWD 以匹配召回层过滤策略（2026-09-19）。
         """
         classes = [
-            self._cls(2, "ODS_PRECEIPTD"),  # 命中
+            self._cls(2, "DWD_RECEIPT_DETAIL"),  # 命中（DWD）
         ]
         for i in range(3, 8):  # ODS 业务表邻居 3-7
             classes.append(self._cls(i, f"ODS_T{i}"))
@@ -1912,7 +1916,7 @@ class TestSearchByKeywordAdsWeighting:
         """ADS 类命中 score × 1.5（默认权重）。"""
         classes = [
             self._cls(29, "ADS_SUPPLIER_ORDER_DETAIL"),
-            self._cls(14, "ODS_PRECEIPTD"),
+            self._cls(14, "DWD_RECEIPT_DETAIL"),
         ]
         hits = [self._hit(14, 0.78), self._hit(29, 0.72)]
         service = self._service(classes, hits)
@@ -1926,7 +1930,7 @@ class TestSearchByKeywordAdsWeighting:
     async def test_non_ads_class_score_unchanged(self) -> None:
         """非 ADS 类 score 不变。"""
         classes = [
-            self._cls(14, "ODS_PRECEIPTD"),
+            self._cls(14, "DWD_RECEIPT_DETAIL"),
             self._cls(46, "DWD_MATERIAL"),
         ]
         # DWD 比 ODS 原始 score 高
@@ -1943,9 +1947,9 @@ class TestSearchByKeywordAdsWeighting:
         """ADS L2 距离大但加权后挤进 top。"""
         classes = [
             self._cls(29, "ADS_SUPPLIER_ORDER_DETAIL"),  # ADS
-            self._cls(14, "ODS_PRECEIPTD"),                # ODS
+            self._cls(14, "DWD_RECEIPT_DETAIL"),  # DWD
             self._cls(46, "DWD_MATERIAL"),                 # DWD
-            self._cls(13, "ODS_PRECEIPT"),                 # ODS
+            self._cls(13, "DWD_RECEIPT"),  # DWD
         ]
         # ADS 原始分最低（0.55），但加权后 0.55 × 1.5 = 0.825，挤到 ODS 中间
         hits = [
@@ -1972,7 +1976,7 @@ class TestSearchByKeywordAdsWeighting:
         """DB ADS_RECALL_WEIGHT=2.5 → 加权 2.5 倍。"""
         classes = [
             self._cls(29, "ADS_SUPPLIER_ORDER_DETAIL"),
-            self._cls(14, "ODS_PRECEIPTD"),
+            self._cls(14, "DWD_RECEIPT_DETAIL"),
         ]
         hits = [self._hit(14, 0.78), self._hit(29, 0.40)]
         service = self._service(classes, hits)
@@ -2176,3 +2180,74 @@ class TestClassRecallDiagnostics:
         # 默认 fake 无召回命中 → 回退全量，诊断仍需透出
         assert response.classRecall is not None
         assert response.classRecall.mode in ("fallback", "recall", "expanded")
+
+
+class TestClassFilterHitSkipOds:
+    """_selectRelevantClasses 召回入口 hits 过滤 ODS 业务表（2026-09-19 ODS_BPARTNER 事故）。
+
+    现有 TestClassFilterExpansionSkipOds 只覆盖「扩边时跳过 ODS 邻居」——
+    召回入口（Milvus 直接命中的 ODS_BPARTNER 等备份表）此前不过滤。
+    LLM 拿到 ODS_BPARTNER 没有 SUPPLIER_CODE 等列就会幻觉属性名。
+    """
+
+    def _cls(self, cid: int, src: str) -> OntologyClass:
+        return OntologyClass(
+            id=cid, class_name=f"C{cid}", class_alias=None, description=None,
+            source_table=src, properties=[],
+        )
+
+    def _service(self, classes, *, hits, joins=None):
+        if joins is None:
+            joins = []
+        ontology = _FakeOntologyService(
+            classes, searchHits=[SimpleNamespace(id=i) for i in hits], joins=joins
+        )
+        return _buildService(ontology=ontology)[0]
+
+    @pytest.mark.asyncio
+    async def test_ods_hit_filtered_out_at_recall(self) -> None:
+        """hits 含 ODS_BPARTNER(2 ODS) + DWD_GOODS_RECEIPT_LINE(4 DWD)：
+        ODS_BPARTNER 在 result 中必须不存在，DWD 类保留。
+        """
+        classes = [
+            self._cls(2, "ODS_BPARTNER"),
+            self._cls(4, "DWD_GOODS_RECEIPT_LINE"),
+        ]
+        service = self._service(classes, hits=[2, 4])
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        ids = [c.id for c in result]
+        assert 4 in ids
+        assert 2 not in ids
+
+    @pytest.mark.asyncio
+    async def test_ods_dim_hit_kept(self) -> None:
+        """ODS_DIM_* 是字典表（与 ODS_BPARTNER 这种业务备份表不同），保留。"""
+        classes = [
+            self._cls(2, "ODS_DIM_PAYMENT_TERM"),
+            self._cls(4, "DWD_GOODS_RECEIPT_LINE"),
+        ]
+        service = self._service(classes, hits=[2, 4])
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        ids = [c.id for c in result]
+        assert 2 in ids
+        assert 4 in ids
+
+    @pytest.mark.asyncio
+    async def test_all_ods_hits_filtered_returns_empty_relevant_fallback(self) -> None:
+        """全部 hits 是 ODS：相关类应为空，按现有 no_match 路径回退全量（不误伤）。"""
+        classes = [
+            self._cls(2, "ODS_BPARTNER"),
+            self._cls(3, "ODS_BPSUPPLIER"),
+        ]
+        service = self._service(classes, hits=[2, 3])
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        # 全部被过滤 → relevant 为空 → 走 no_match 回退全量，不报错
+        assert recall.mode == "fallback"
+        assert recall.hitCount == 0
+        assert {c.id for c in result} == {2, 3}

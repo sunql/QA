@@ -1047,10 +1047,60 @@ class ChatService(ChatStreamOutputMixin):
         if adsWeight != 1.0:
             # weight != 1 时按加权 score 降序排，让 ADS 挤前
             weightedHits.sort(key=lambda x: x[1], reverse=True)
+        # 2026-09-19 ODS_BPARTNER 事故：召回入口 hits 同样过滤 ODS 业务表。
+        # 此前扩边阶段已用 _isOdsBusinessTable 跳过 ODS 邻居（TestClassFilterExpansionSkipOds），
+        # 但召回入口直接命中的 ODS_BPARTNER 没被过滤，LLM 在没有 SUPPLIER_CODE
+        # 等业务列的备份表上幻觉属性名。ODS_DIM_* 字典表保留（_isOdsBusinessTable 兜底）。
+        #
+        # 三态区分（不能合并）：
+        #   (1) hits 解析到 classById 但全是 ODS 业务表 → ods_only_hits 回退
+        #   (2) hits 解析不到任何 classById → 原 no_match 全量回退（保留旧测试）
+        #   (3) 部分命中部分 ODS 过滤 → 走正常裁剪，ODS 类的部分丢弃
+        classByIdResolved = [
+            (h, classByIdForWeight.get(h.id))
+            for h in hits
+        ]
+        validHitsCount = sum(
+            1 for _, cls in classByIdResolved if cls is not None
+        )
+        allResolvedOdsOnly = (
+            validHitsCount > 0
+            and all(
+                _isOdsBusinessTable(cls)
+                for _, cls in classByIdResolved if cls is not None
+            )
+        )
+        weightedHits = [
+            (h, s) for h, s in weightedHits
+            if (cls := classByIdForWeight.get(h.id)) is not None
+            and not _isOdsBusinessTable(cls)
+        ]
         relevant = [
             classByIdForWeight[h.id] for h, _ in weightedHits
             if h.id in classByIdForWeight
         ]
+        # 全解析为 ODS 业务表的场景：退而使用「非 ODS 业务表的全量类」，避免
+        # ODS_BPARTNER 等备份表再次通过全量回退进 LLM schema。
+        if not relevant and allResolvedOdsOnly:
+            odsFiltered = [
+                cls for cls in allClasses
+                if cls.id is not None and not _isOdsBusinessTable(cls)
+            ]
+            if not odsFiltered:
+                logger.warning(
+                    "本体类裁剪回退到全量类 reason=no_match_ods_filtered total=%d",
+                    len(allClasses),
+                )
+                return list(allClasses), ClassRecallInfo(
+                    mode="fallback", hitCount=0, classCount=len(allClasses),
+                )
+            logger.warning(
+                "本体类召回命中全为 ODS 业务表 reason=ods_only_hits total=%d filtered=%d",
+                len(allClasses), len(odsFiltered),
+            )
+            return odsFiltered, ClassRecallInfo(
+                mode="fallback", hitCount=0, classCount=len(odsFiltered),
+            )
         if not relevant:
             logger.warning(
                 "本体类裁剪回退到全量类 reason=no_match hits=%d total=%d",

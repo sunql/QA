@@ -93,6 +93,8 @@ export interface OntologyProperty {
   // 设为可选（mock 测试和旧 client 不传不会触发 tsc 报错）；
   // 生产 API 始终返回该字段（null 或 list[str]）。
   allowedValues?: string[] | null;
+  // 列含义描述：后端 OntologyPropertyRead 始终返回；管理页编辑回填 + 列展示用。
+  description?: string | null;
   // 约束字段（feat-ontology-property-constraints）：管理页展示 + wizard 初始化
   // adoptedIds。任一字段非空视为已沉淀约束。
   isNotNull?: boolean | null;
@@ -365,10 +367,46 @@ export interface EmbeddingSyncFailure {
   error: string;
 }
 
+export interface EmbeddingPropertySyncFailure {
+  propertyId: number;
+  propertyName: string;
+  error: string;
+}
+
 export interface EmbeddingSyncMissingResult {
   totalClasses: number;
   missingCount: number;
   syncedCount: number;
   failedCount: number;
   failures: EmbeddingSyncFailure[];
+  totalProperties: number;
+  missingPropertyCount: number;
+  syncedPropertyCount: number;
+  failedPropertyCount: number;
+  propertyFailures: EmbeddingPropertySyncFailure[];
+}
+
+// ===== Neo4j 图谱对账（补图信息） =====
+
+export interface GraphSyncFailure {
+  entityType: string;
+  entityId: number;
+  error: string;
+}
+
+export interface GraphSyncMissingResult {
+  totalClasses: number;
+  missingClassCount: number;
+  syncedClassCount: number;
+  totalProperties: number;
+  missingPropertyCount: number;
+  syncedPropertyCount: number;
+  totalJoins: number;
+  missingJoinCount: number;
+  syncedJoinCount: number;
+  totalRelations: number;
+  missingRelationCount: number;
+  syncedRelationCount: number;
+  failedCount: number;
+  failures: GraphSyncFailure[];
 }

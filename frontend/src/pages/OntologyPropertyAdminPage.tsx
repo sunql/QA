@@ -10,7 +10,7 @@
  *   这两个字段是「LLM 采纳并沉淀」闭环的核心元数据。
  * - 列表来源：GET /ontology/properties（一次性返回全部，避免 N+1）。
  */
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   Table,
   Button,
@@ -100,6 +100,11 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
     return properties.filter((p) => p.classId === classFilter);
   }, [properties, classFilter]);
 
+  // 弹窗 destroyOnHidden 下，Modal 关闭态时 Form 未挂载，直接 setFieldsValue
+  // 真机会触发 "useForm is not connected" 警告且回填可能被丢弃（jsdom 不复现）。
+  // 与 ClassTab 同款：把写值时机挪到 Modal.afterOpenChange(true)。
+  const pendingFormValues = useRef<Partial<EditFormValues> | null>(null);
+
   const openEdit = (rec: OntologyProperty) => {
     setEditing(rec);
     // minValue/maxValue 是 String（兼容日期 / 数字）；前端用 InputNumber 时先尝试数字转换，
@@ -109,14 +114,15 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
       const n = Number(s);
       return Number.isFinite(n) ? n : null;
     };
-    form.setFieldsValue({
-      description: "",
+    pendingFormValues.current = {
+      // 回填现有描述：硬编码空串会让用户「保存成功后重开仍为空」，误判为保存失败
+      description: rec.description ?? "",
       allowedValues: rec.allowedValues ?? [],
       isNotNull: rec.isNotNull ?? false,
       minValue: toNum(rec.minValue),
       maxValue: toNum(rec.maxValue),
       regexPattern: rec.regexPattern ?? null,
-    });
+    };
     setModalOpen(true);
   };
 
@@ -124,6 +130,7 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
     setModalOpen(false);
     setEditing(null);
     setAllowedValuesInput("");
+    pendingFormValues.current = null;
     form.resetFields();
   };
 
@@ -185,6 +192,20 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
       title: t("ontologyPropertyAdmin.columns.dataType"),
       dataIndex: "dataType",
       width: 110,
+    },
+    {
+      // 描述列：保存结果对用户可见（此前只有弹窗里能看，重开还是空串误判保存失败）
+      title: t("ontologyPropertyAdmin.form.description"),
+      dataIndex: "description",
+      ellipsis: { showTitle: false },
+      render: (v: string | null) =>
+        v ? (
+          <Popover content={<div style={{ maxWidth: 360 }}>{v}</div>} trigger="hover">
+            {v}
+          </Popover>
+        ) : (
+          <Tag color="default">{t("ontologyPropertyAdmin.values.none")}</Tag>
+        ),
     },
     {
       title: t("ontologyPropertyAdmin.columns.allowedValues"),
@@ -277,6 +298,14 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
         onCancel={closeModal}
         width={560}
         destroyOnHidden
+        afterOpenChange={(open) => {
+          // 弹窗完全打开、Form 子组件已挂载后再写值，避免 destroyOnHidden
+          // 重挂载时序丢回填（同 ClassTab 的处理）
+          if (open && pendingFormValues.current) {
+            void form.setFieldsValue(pendingFormValues.current);
+            pendingFormValues.current = null;
+          }
+        }}
         okText={t("common.save")}
       >
         <Form form={form} layout="vertical">

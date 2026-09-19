@@ -347,15 +347,18 @@ async def test_import_execute_batches_embedding_sync(client, dbSession) -> None:
         assert result["success"] is True
         assert result["createdClasses"] == 2
 
-        # 整批补齐在后台落地：2 个类向量、恰好一次整批 insert（单次 flush）
+        # 整批补齐在后台落地：2 个类 + 全部属性向量、恰好一次整批 insert（单次 flush）。
+        # 2026-09-18 起对账扩展为类+属性双覆盖（此前只补类，属性缺口只能靠 backfill 脚本）。
         def rows() -> list[dict]:
             return [r for call in insertCalls for r in call]
 
-        assert await _waitFor(lambda: len(rows()) == 2), (
-            f"导入后应整批补齐 2 条类向量，实际 {len(rows())}"
+        assert await _waitFor(lambda: len(rows()) == 5), (
+            f"导入后应整批补齐 2 类 + 3 属性共 5 条向量，实际 {len(rows())}"
         )
-        assert len(insertCalls) == 1, "2 条向量应合并为一次整批 insert"
-        assert {r["type"] for r in rows()} == {"class"}
-        assert len(texts) == 2
+        assert len(insertCalls) == 1, "5 条向量应合并为一次整批 insert"
+        assert {r["type"] for r in rows()} == {"class", "property"}
+        assert sum(1 for r in rows() if r["type"] == "class") == 2
+        assert sum(1 for r in rows() if r["type"] == "property") == 3
+        assert len(texts) == 5
     finally:
         del monkey_target.generateEmbedding

@@ -135,6 +135,20 @@ def _classEmbeddingText(cls: OntologyClass) -> str:
     )
 
 
+def _propertyEmbeddingText(prop: OntologyProperty) -> str:
+    """属性向量文本：属性名 + 业务别名 + 描述（与 backfill_milvus_embeddings.py 同口径）。"""
+    return " ".join(
+        filter(
+            None,
+            [
+                prop.property_name,
+                *(prop.business_aliases or []),
+                prop.description or "",
+            ],
+        )
+    )
+
+
 # 自动同步后台任务的强引用集合（create_task 弱引用会被 GC，需持握防丢失）
 _PENDING_SYNC_TASKS: set[asyncio.Task] = set()
 
@@ -603,6 +617,12 @@ class OntologyService:
             _logNeo4jFailure("更新", id, exc)
 
         logger.info("更新本体属性 id=%d", id)
+
+        # 属性向量自动重同步（best-effort，后台执行）：description/business_aliases
+        # 是 _propertyEmbeddingText 的组成部分，不重刷则语义检索永远拿到旧含义
+        # （2026-09-18 报障：编辑属性描述后「没办法生成向量信息」）。
+        await self._syncPropertyEmbeddingBestEffort(entity)
+
         return entity
 
     async def deleteProperty(
@@ -1235,13 +1255,14 @@ class OntologyService:
     async def syncMissingClassEmbeddings(
         self, session: AsyncSession
     ) -> dict[str, Any]:
-        """向量对账：为 PG 有而 Milvus 无向量 未软删的类补生成向量。
+        """向量对账：为 PG 有而 Milvus 无向量 未软删的类与属性补生成向量。
 
         以 PG 为唯一真源（与 scripts/backfill_milvus_embeddings.py --cleanup 同口径）。
         缺失实体无需先 delete，直接整批插入（单次 flush）——逐条 syncEmbedding
         在当前 Milvus 部署下单条可达 10-25s，批量场景必须整批。单条向量生成
-        失败不中断，错误聚合进 failures。
-        返回对账摘要（total/missing/synced/failed）。
+        失败不中断，错误聚合进 failures/propertyFailures。
+        返回对账摘要（类：total/missing/synced/failed；属性：totalProperties/
+        missingPropertyCount/syncedPropertyCount/failedPropertyCount）。
         """
         classes = await self.listClasses(session)
         rows = milvus.listAllEmbeddings()
@@ -1276,11 +1297,49 @@ class OntologyService:
                     "error": str(exc),
                 })
 
+        # 属性对账：类之后补齐（属性向量此前只能靠 backfill 脚本手工收敛）
+        props = list(
+            (await session.execute(select(OntologyProperty))).scalars().all()
+        )
+        presentPropIds = {
+            r["ontology_id"] for r in rows if r.get("type") == "property"
+        }
+        missingProps = [p for p in props if p.id not in presentPropIds]
+
+        propertyFailures: list[dict[str, Any]] = []
+        for prop in missingProps:
+            try:
+                vec = await self._ensureEmbedding().generateEmbedding(
+                    _propertyEmbeddingText(prop)
+                )
+                records.append({
+                    "ontology_id": prop.id,
+                    "type": "property",
+                    "name": prop.property_name,
+                    "alias": prop.property_alias,
+                    "description": prop.description,
+                    "embedding": vec,
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "缺失属性向量生成失败 id=%d name=%s: %s",
+                    prop.id, prop.property_name, exc,
+                )
+                propertyFailures.append({
+                    "propertyId": prop.id,
+                    "propertyName": prop.property_name,
+                    "error": str(exc),
+                })
+
+        syncedClasses = 0
+        syncedProps = 0
         if records:
             try:
                 milvus.insertEmbeddings(records)
+                syncedClasses = sum(1 for r in records if r["type"] == "class")
+                syncedProps = sum(1 for r in records if r["type"] == "property")
             except Exception as exc:  # noqa: BLE001
-                logger.warning("缺失类向量整批插入失败 %d 条: %s", len(records), exc)
+                logger.warning("缺失向量整批插入失败 %d 条: %s", len(records), exc)
                 failures.extend(
                     {
                         "classId": r["ontology_id"],
@@ -1288,17 +1347,163 @@ class OntologyService:
                         "error": str(exc),
                     }
                     for r in records
+                    if r["type"] == "class"
+                )
+                propertyFailures.extend(
+                    {
+                        "propertyId": r["ontology_id"],
+                        "propertyName": r["name"],
+                        "error": str(exc),
+                    }
+                    for r in records
+                    if r["type"] == "property"
                 )
                 records = []
 
         logger.info(
-            "类向量对账完成 total=%d missing=%d synced=%d failed=%d",
-            len(classes), len(missing), len(records), len(failures),
+            "向量对账完成 total=%d missing=%d synced=%d failed=%d;"
+            " 属性 total=%d missing=%d synced=%d failed=%d",
+            len(classes), len(missing), syncedClasses + syncedProps, len(failures),
+            len(props), len(missingProps),
+            syncedProps, len(propertyFailures),
         )
         return {
             "totalClasses": len(classes),
             "missingCount": len(missing),
-            "syncedCount": len(records),
+            "syncedCount": syncedClasses + syncedProps,
+            "failedCount": len(failures),
+            "failures": failures,
+            "totalProperties": len(props),
+            "missingPropertyCount": len(missingProps),
+            "syncedPropertyCount": syncedProps,
+            "failedPropertyCount": len(propertyFailures),
+            "propertyFailures": propertyFailures,
+        }
+
+    async def syncMissingGraph(self, session: AsyncSession) -> dict[str, Any]:
+        """Neo4j 图谱对账：以 PG 为真源补齐缺失的节点与边。
+
+        背景：直写 PG 的修补脚本（手工 id）与导入失败重试会绕过 createClass/
+        createProperty/createJoin 的 best-effort 入图，图库留下缺口。本方法
+        diff PG 与 Neo4j 的 id/边集合，只补缺失（幂等 upsert/MERGE，不删陈旧）。
+        单条写入失败不中断，错误聚合进 failures（entityType/entityId/error）。
+        """
+        classes = await self.listClasses(session)
+        props = list(
+            (await session.execute(select(OntologyProperty))).scalars().all()
+        )
+        joins = await self.listJoins(session)
+        relations = await self.listRelations(session)
+
+        existingClassIds = neo4j.getClassIds()
+        existingPropIds = neo4j.getPropertyIds()
+        existingJoinPairs = neo4j.getJoinPairs()
+        existingRelTriples = neo4j.getRelationTriples()
+
+        failures: list[dict[str, Any]] = []
+        syncedClasses = 0
+        for cls in classes:
+            if cls.id in existingClassIds:
+                continue
+            try:
+                neo4j.upsertClassNode(
+                    cls.id, cls.class_name, cls.class_alias,
+                    cls.description, cls.source_table,
+                )
+                neo4j.reconcileClassSubclassOf(cls.id, cls.parent_class_id)
+                syncedClasses += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "图对账：类入图失败 id=%d name=%s: %s",
+                    cls.id, cls.class_name, exc,
+                )
+                failures.append({
+                    "entityType": "class", "entityId": cls.id, "error": str(exc),
+                })
+
+        syncedProps = 0
+        for prop in props:
+            if prop.id in existingPropIds:
+                continue
+            try:
+                neo4j.upsertPropertyNode(
+                    prop.id, prop.property_name, prop.property_alias,
+                    prop.data_type, prop.source_column,
+                    bool(prop.is_primary_key), bool(prop.is_foreign_key),
+                )
+                neo4j.linkClassHasProperty(prop.class_id, prop.id)
+                if prop.ref_class_id:
+                    neo4j.linkPropertyReferences(prop.id, prop.ref_class_id)
+                syncedProps += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "图对账：属性入图失败 id=%d name=%s: %s",
+                    prop.id, prop.property_name, exc,
+                )
+                failures.append({
+                    "entityType": "property", "entityId": prop.id, "error": str(exc),
+                })
+
+        joinPairs = {
+            (j.source_class_id, j.target_class_id) for j in joins
+        }
+        missingJoinPairs = joinPairs - existingJoinPairs
+        for sourceId, targetId in sorted(missingJoinPairs):
+            try:
+                neo4j.linkClassJoin(sourceId, targetId)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "图对账：JOIN 边入图失败 %d->%d: %s", sourceId, targetId, exc,
+                )
+                failures.append({
+                    "entityType": "join", "entityId": sourceId, "error": str(exc),
+                })
+
+        syncedRelations = 0
+        for rel in relations:
+            relType = (
+                rel.relation_type.value
+                if hasattr(rel.relation_type, "value")
+                else str(rel.relation_type)
+            )
+            triple = (rel.source_class_id, rel.target_class_id, relType)
+            if triple in existingRelTriples:
+                continue
+            try:
+                neo4j.linkClassRelation(*triple)
+                syncedRelations += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "图对账：语义关系入图失败 id=%d %s: %s", rel.id, triple, exc,
+                )
+                failures.append({
+                    "entityType": "relation", "entityId": rel.id, "error": str(exc),
+                })
+
+        logger.info(
+            "图对账完成 类 missing=%d/%d JOIN missing=%d/%d"
+            " 属性 missing=%d/%d 关系 missing=%d/%d failed=%d",
+            syncedClasses, len(classes),
+            len(missingJoinPairs), len(joinPairs),
+            syncedProps, len(props),
+            syncedRelations, len(relations),
+            len(failures),
+        )
+        failedJoins = sum(1 for f in failures if f["entityType"] == "join")
+        failedRelations = sum(1 for f in failures if f["entityType"] == "relation")
+        return {
+            "totalClasses": len(classes),
+            "missingClassCount": syncedClasses,
+            "syncedClassCount": syncedClasses,
+            "totalProperties": len(props),
+            "missingPropertyCount": syncedProps,
+            "syncedPropertyCount": syncedProps,
+            "totalJoins": len(joinPairs),
+            "missingJoinCount": len(missingJoinPairs),
+            "syncedJoinCount": len(missingJoinPairs) - failedJoins,
+            "totalRelations": len(relations),
+            "missingRelationCount": syncedRelations + failedRelations,
+            "syncedRelationCount": syncedRelations,
             "failedCount": len(failures),
             "failures": failures,
         }
@@ -1332,6 +1537,35 @@ class OntologyService:
             logger.warning(
                 "Milvus 类向量自动同步失败 id=%d name=%s: %s",
                 entity.id, entity.class_name, exc,
+            )
+
+    async def _syncPropertyEmbeddingBestEffort(self, entity: OntologyProperty) -> None:
+        """属性向量自动同步（best-effort，后台执行）：与类同款，失败仅告警。
+
+        embedding 文本口径 = property_name + business_aliases + description
+        （与 backfill_milvus_embeddings.py 同口径）。
+        """
+        task = asyncio.create_task(self._syncPropertyEmbeddingNow(entity))
+        _PENDING_SYNC_TASKS.add(task)
+        task.add_done_callback(_PENDING_SYNC_TASKS.discard)
+
+    async def _syncPropertyEmbeddingNow(self, entity: OntologyProperty) -> None:
+        try:
+            vec = await self._ensureEmbedding().generateEmbedding(
+                _propertyEmbeddingText(entity)
+            )
+            self.syncEmbedding(
+                ontologyId=entity.id,
+                type="property",
+                name=entity.property_name,
+                alias=entity.property_alias,
+                description=entity.description,
+                embedding=vec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Milvus 属性向量自动同步失败 id=%d name=%s: %s",
+                entity.id, entity.property_name, exc,
             )
 
     def syncMissingClassEmbeddingsBestEffort(self) -> None:

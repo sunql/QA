@@ -38,6 +38,22 @@ def _stripCompoundRef(prop: str) -> str:
     return m.group(1).strip()
 
 
+def _normalizeJoinColumnToken(token: str) -> tuple[str, ...]:
+    """把 "A = B" 等式 token 拆成 (A, B)；普通列名原样返回单元素 tuple。
+
+    LLM 偶发把 join.columns 写成等式字符串（如 "SUPPLIER_CODE = PARTNER_CODE"），
+    而契约是列名数组（2026-09-18 真实回归：等式整体不匹配任何属性 → 校验必挂）。
+    在 from_dict 解析出口一次性自愈：仅当恰好一个 "=" 且两侧 strip 后均非空才拆分，
+    其余（缺一侧、多个等号）保留原 token 交由 validatePlan 拒绝并提示正确写法。
+    """
+    if "=" not in token:
+        return (token,)
+    parts = [p.strip() for p in token.split("=")]
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return (parts[0], parts[1])
+    return (token,)
+
+
 def _coercePositiveInt(value: Any) -> int | None:
     """把值归一为正整数或 None（与 nl2sql_service._coerceRowLimit 同口径，此处避免导入环）。
 
@@ -175,6 +191,15 @@ class QueryPlan:
                 for tf in tupleFields:
                     if tf in filtered and isinstance(filtered[tf], list):
                         filtered[tf] = tuple(filtered[tf])
+                # join.columns 契约是列名数组，但 LLM 偶发写成 "A = B" 等式 ——
+                # 解析出口一次性拆分自愈（详见 _normalizeJoinColumnToken）
+                if factory is JoinSpec and "columns" in filtered:
+                    filtered["columns"] = tuple(
+                        part
+                        for token in filtered["columns"]
+                        if isinstance(token, str)
+                        for part in _normalizeJoinColumnToken(token)
+                    )
                 try:
                     out.append(factory(**filtered))
                 except TypeError:

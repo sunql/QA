@@ -37,6 +37,7 @@ from app.domain.models import OntologyClass
 from app.domain.schemas import (
     BatchRelationRequest,
     BatchRelationResult,
+    JoinHealthReport,
     BatchRowError,
     OntologyClassCreate,
     OntologyClassRead,
@@ -725,6 +726,29 @@ async def parseOntologyBatchCsv(
     )
 
 
+@router.get("/health/joins", response_model=JoinHealthReport)
+async def joinHealth(
+    probe: bool = False,
+    db: AsyncSession = Depends(getDb),
+) -> JoinHealthReport:
+    """JOIN 关系健康巡检（三层保障第 2 层：主动巡检，2026-09-18 孤岛事故产物）。
+
+    - 孤岛类：零 JOIN 边（标注数仓分层 + FK 语义列，导入闸门/人工补边用）
+    - probe=true 时追加死边检测：对默认数据源跑连接键值域探针，
+      重叠率 0（含空列）的边即死边（validatePlan 会放行但查询全空）
+    """
+    from app.services.ontology_join_health_service import (
+        _defaultRunQuery,
+        buildJoinHealthReport,
+        probeDeadEdges,
+    )
+
+    report = await buildJoinHealthReport(db)
+    if probe:
+        report["deadEdges"] = await probeDeadEdges(db, _defaultRunQuery)
+    return JoinHealthReport(**report)
+
+
 # =============================================================================
 # Semantic Search — Milvus
 # =============================================================================
@@ -762,14 +786,50 @@ class EmbeddingSyncFailure(BaseModel):
     error: str
 
 
+class EmbeddingPropertySyncFailure(BaseModel):
+    propertyId: int
+    propertyName: str
+    error: str
+
+
 class EmbeddingSyncMissingResult(BaseModel):
-    """类向量对账摘要：以 PG 为真源补齐 Milvus 缺失的类向量。"""
+    """向量对账摘要：以 PG 为真源补齐 Milvus 缺失的类与属性向量。"""
 
     totalClasses: int
     missingCount: int
     syncedCount: int
     failedCount: int
     failures: list[EmbeddingSyncFailure]
+    totalProperties: int
+    missingPropertyCount: int
+    syncedPropertyCount: int
+    failedPropertyCount: int
+    propertyFailures: list[EmbeddingPropertySyncFailure]
+
+
+class GraphSyncFailure(BaseModel):
+    entityType: str
+    entityId: int
+    error: str
+
+
+class GraphSyncMissingResult(BaseModel):
+    """Neo4j 图谱对账摘要：以 PG 为真源补齐缺失节点与边。"""
+
+    totalClasses: int
+    missingClassCount: int
+    syncedClassCount: int
+    totalProperties: int
+    missingPropertyCount: int
+    syncedPropertyCount: int
+    totalJoins: int
+    missingJoinCount: int
+    syncedJoinCount: int
+    totalRelations: int
+    missingRelationCount: int
+    syncedRelationCount: int
+    failedCount: int
+    failures: list[GraphSyncFailure]
 
 
 @router.post(
@@ -778,9 +838,20 @@ class EmbeddingSyncMissingResult(BaseModel):
     status_code=status.HTTP_200_OK,
 )
 async def syncMissingEmbeddings(db: AsyncSession = Depends(getDb)) -> EmbeddingSyncMissingResult:
-    """向量对账：为 PG 有而 Milvus 缺失的未软删类补生成向量（批量人工同步入口）。"""
+    """向量对账：为 PG 有而 Milvus 缺失的未软删类与属性补生成向量（批量人工同步入口）。"""
     result = await _ontologyService.syncMissingClassEmbeddings(db)
     return EmbeddingSyncMissingResult(**result)
+
+
+@router.post(
+    "/graph/sync-missing",
+    response_model=GraphSyncMissingResult,
+    status_code=status.HTTP_200_OK,
+)
+async def syncMissingGraph(db: AsyncSession = Depends(getDb)) -> GraphSyncMissingResult:
+    """图谱对账：以 PG 为真源补齐 Neo4j 缺失的 Class/Property 节点与 JOIN/语义关系边。"""
+    result = await _ontologyService.syncMissingGraph(db)
+    return GraphSyncMissingResult(**result)
 
 
 @router.post("/classes/{id}/embedding", status_code=status.HTTP_204_NO_CONTENT)

@@ -1131,12 +1131,50 @@ class BatchRelationRequest(CamelModel):
 
 
 class BatchRelationResult(CamelModel):
-    """批量关系引擎结果（执行或只读预览共用；不可变计数，Neo4j 失败不阻断 PG）。"""
+    """批量关系引擎结果（执行或只读预览共用；不可变计数，Neo4j 失败不阻断 PG）。
+
+    warnings（导入闸门，2026-09-18 孤岛事故产物）：批量执行后扫描出的
+    「有 FK 语义列但零 JOIN 边」类清单——不阻断，提示补边。
+    """
 
     sync_graph: GraphSyncResult | None = None
     inferred_joins: list[InferredJoin] = Field(default_factory=list)
     joins: BatchCounts = Field(default_factory=BatchCounts)
     relations: BatchCounts = Field(default_factory=BatchCounts)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class IsolatedClass(CamelModel):
+    """零 JOIN 边的本体类（孤岛），标注数仓分层与 FK 语义列。"""
+
+    class_id: int
+    class_name: str
+    source_table: str | None
+    layer: str
+    fk_like_columns: list[str] = Field(default_factory=list)
+
+
+class DeadEdge(CamelModel):
+    """值域探针判定为死的 JOIN 边（重叠率 0，含任一侧空列）。"""
+
+    join_id: int
+    join_index: int
+    source_class: str
+    source_column: str
+    target_class: str
+    target_column: str
+    overlap_ratio: float
+    source_distinct: int
+    target_distinct: int
+
+
+class JoinHealthReport(CamelModel):
+    """GET /ontology/health/joins 报告：孤岛清单 +（可选）死边清单。"""
+
+    total_classes: int
+    total_joins: int
+    isolated: list[IsolatedClass] = Field(default_factory=list)
+    dead_edges: list[DeadEdge] | None = None
 
 
 class OntologyCsvParseResult(CamelModel):

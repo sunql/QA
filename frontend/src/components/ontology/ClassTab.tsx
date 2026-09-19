@@ -12,7 +12,12 @@ import {
   Popconfirm,
   App,
 } from "antd";
-import { PlusOutlined, ReloadOutlined, SyncOutlined } from "@ant-design/icons";
+import {
+  ApiOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  SyncOutlined,
+} from "@ant-design/icons";
 import {
   createClass,
   updateClass,
@@ -20,6 +25,7 @@ import {
   listClassVersions,
   syncClassEmbedding,
   syncMissingEmbeddings,
+  syncMissingGraph,
 } from "../../api/ontology";
 import type {
   ObjectType,
@@ -95,6 +101,7 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
   // 向量同步：单条进行中的类 id 集合 + 批量对账进行中标记
   const [syncingIds, setSyncingIds] = useState<number[]>([]);
   const [batchSyncing, setBatchSyncing] = useState(false);
+  const [graphSyncing, setGraphSyncing] = useState(false);
 
   const handleSyncEmbedding = useCallback(
     async (record: OntologyClass) => {
@@ -117,20 +124,26 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
     setBatchSyncing(true);
     try {
       const result = await syncMissingEmbeddings();
-      if (result.missingCount === 0) {
-        message.info(t("forms.ontology.syncMissingNone", { total: result.totalClasses }));
-      } else if (result.failedCount === 0) {
+      const missingTotal = result.missingCount + result.missingPropertyCount;
+      if (missingTotal === 0) {
+        message.info(
+          t("forms.ontology.syncMissingNone", {
+            total: result.totalClasses,
+            propTotal: result.totalProperties,
+          })
+        );
+      } else if (result.failedCount === 0 && result.failedPropertyCount === 0) {
         message.success(
           t("forms.ontology.syncMissingSuccess", {
-            synced: result.syncedCount,
-            total: result.totalClasses,
+            classSynced: result.missingCount,
+            propSynced: result.missingPropertyCount,
           })
         );
       } else {
         message.warning(
           t("forms.ontology.syncMissingPartial", {
             synced: result.syncedCount,
-            failed: result.failedCount,
+            failed: result.failedCount + result.failedPropertyCount,
           })
         );
       }
@@ -138,6 +151,41 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
       // 错误已由拦截器提示
     } finally {
       setBatchSyncing(false);
+    }
+  }, [message, t]);
+
+  const handleSyncGraph = useCallback(async () => {
+    setGraphSyncing(true);
+    try {
+      const result = await syncMissingGraph();
+      const missingTotal =
+        result.missingClassCount +
+        result.missingPropertyCount +
+        result.missingJoinCount +
+        result.missingRelationCount;
+      if (missingTotal === 0) {
+        message.info(t("forms.ontology.syncGraphNone"));
+      } else if (result.failedCount === 0) {
+        message.success(
+          t("forms.ontology.syncGraphSuccess", {
+            classes: result.missingClassCount,
+            properties: result.missingPropertyCount,
+            edges:
+              result.missingJoinCount + result.missingRelationCount,
+          })
+        );
+      } else {
+        message.warning(
+          t("forms.ontology.syncGraphPartial", {
+            synced: missingTotal - result.failedCount,
+            failed: result.failedCount,
+          })
+        );
+      }
+    } catch {
+      // 错误已由拦截器提示
+    } finally {
+      setGraphSyncing(false);
     }
   }, [message, t]);
   const classFilterFields: FilterField[] = [
@@ -384,6 +432,13 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
             onClick={() => void handleSyncMissing()}
           >
             {t("forms.ontology.syncMissingEmbeddings")}
+          </Button>
+          <Button
+            icon={<ApiOutlined />}
+            loading={graphSyncing}
+            onClick={() => void handleSyncGraph()}
+          >
+            {t("forms.ontology.syncGraphButton")}
           </Button>
           <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             {t("common.refresh")}

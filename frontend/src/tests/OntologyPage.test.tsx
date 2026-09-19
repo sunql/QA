@@ -87,6 +87,7 @@ const api = vi.hoisted(() => ({
   searchOntology: vi.fn(),
   syncClassEmbedding: vi.fn(),
   syncMissingEmbeddings: vi.fn(),
+  syncMissingGraph: vi.fn(),
 }));
 
 vi.mock("../api/ontology", () => api);
@@ -148,6 +149,11 @@ describe("OntologyPage", () => {
       syncedCount: 69,
       failedCount: 0,
       failures: [],
+      totalProperties: 4078,
+      missingPropertyCount: 73,
+      syncedPropertyCount: 73,
+      failedPropertyCount: 0,
+      propertyFailures: [],
     });
     renderPage();
     await waitFor(() => {
@@ -157,6 +163,35 @@ describe("OntologyPage", () => {
     await user.click(screen.getByRole("button", { name: /补同步缺失向量/ }));
     await waitFor(() => {
       expect(api.syncMissingEmbeddings).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("头部「补图信息」按钮点击后调用 syncMissingGraph", async () => {
+    const user = userEvent.setup();
+    api.syncMissingGraph.mockResolvedValue({
+      totalClasses: 54,
+      missingClassCount: 2,
+      syncedClassCount: 2,
+      totalProperties: 54,
+      missingPropertyCount: 1,
+      syncedPropertyCount: 1,
+      totalJoins: 35,
+      missingJoinCount: 0,
+      syncedJoinCount: 0,
+      totalRelations: 3,
+      missingRelationCount: 1,
+      syncedRelationCount: 1,
+      failedCount: 0,
+      failures: [],
+    });
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Customer")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /补图信息/ }));
+    await waitFor(() => {
+      expect(api.syncMissingGraph).toHaveBeenCalledTimes(1);
     });
   });
 

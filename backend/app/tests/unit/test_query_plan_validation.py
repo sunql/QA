@@ -388,6 +388,19 @@ class TestValidatePlan:
         issues = _service().validatePlan(plan, [_receiptCls(), _supplierCls()])
         assert any("MAGIC" in i for i in issues)
 
+    def test_join_column_equation_token_reports_array_hint(self) -> None:
+        # LLM 偶发把 join.columns 写成 "A = B" 等式（2026-09-18 真实回归）：
+        # 重试反馈必须指出 join.columns 是列名数组、给出正确写法。
+        plan = QueryPlan(
+            target="x",
+            joins=(JoinSpec(sourceClass="PRECEIPT", targetClass="BPSUPPLIER", columns=("MAGIC",)),),
+        )
+        issues = _service().validatePlan(plan, [_receiptCls(), _supplierCls()])
+        joinIssue = next(i for i in issues if "MAGIC" in i)
+        assert "join.columns" in joinIssue
+        assert "数组" in joinIssue
+        assert "不要写" in joinIssue
+
     def test_valid_cross_class_join_column_passes(self) -> None:
         plan = QueryPlan(
             target="x",

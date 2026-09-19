@@ -55,6 +55,7 @@ import {
   parseBatchCsv,
   syncClassEmbedding,
   syncMissingEmbeddings,
+  syncMissingGraph,
 } from "../api/ontology";
 
 // =============================================================================
@@ -397,10 +398,38 @@ describe("api/ontology — embedding 手动同步", () => {
       syncedCount: 69,
       failedCount: 0,
       failures: [],
+      totalProperties: 4078,
+      missingPropertyCount: 73,
+      syncedPropertyCount: 73,
+      failedPropertyCount: 0,
+      propertyFailures: [],
     };
     httpMock.post.mockResolvedValue({ data });
     const result = await syncMissingEmbeddings();
     expect(httpMock.post).toHaveBeenCalledWith("/ontology/embeddings/sync-missing");
+    expect(result).toEqual(data);
+  });
+
+  it("syncMissingGraph POST /ontology/graph/sync-missing 并返回对账摘要", async () => {
+    const data = {
+      totalClasses: 54,
+      missingClassCount: 2,
+      syncedClassCount: 2,
+      totalProperties: 54,
+      missingPropertyCount: 1,
+      syncedPropertyCount: 1,
+      totalJoins: 35,
+      missingJoinCount: 0,
+      syncedJoinCount: 0,
+      totalRelations: 3,
+      missingRelationCount: 1,
+      syncedRelationCount: 1,
+      failedCount: 0,
+      failures: [],
+    };
+    httpMock.post.mockResolvedValue({ data });
+    const result = await syncMissingGraph();
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/graph/sync-missing");
     expect(result).toEqual(data);
   });
 });

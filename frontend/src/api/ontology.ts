@@ -23,6 +23,7 @@ import type {
   RelationBackfillResult,
   OntologySearchHit,
   EmbeddingSyncMissingResult,
+  GraphSyncMissingResult,
 } from "../types/ontology";
 
 const BASE = "/ontology";
@@ -270,10 +271,18 @@ export async function syncClassEmbedding(id: number): Promise<void> {
   await httpClient.post(`${BASE}/classes/${id}/embedding`);
 }
 
-/** 向量对账：为 PG 有而 Milvus 缺失的类补生成向量，返回摘要。 */
+/** 向量对账：为 PG 有而 Milvus 缺失的类与属性补生成向量，返回摘要。 */
 export async function syncMissingEmbeddings(): Promise<EmbeddingSyncMissingResult> {
   const res = await httpClient.post<EmbeddingSyncMissingResult>(
     `${BASE}/embeddings/sync-missing`
+  );
+  return res.data;
+}
+
+/** 图谱对账：以 PG 为真源补齐 Neo4j 缺失的类/属性节点与边，返回摘要。 */
+export async function syncMissingGraph(): Promise<GraphSyncMissingResult> {
+  const res = await httpClient.post<GraphSyncMissingResult>(
+    `${BASE}/graph/sync-missing`
   );
   return res.data;
 }

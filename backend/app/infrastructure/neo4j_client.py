@@ -132,6 +132,53 @@ def closeDriver() -> None:
 # =============================================================================
 
 
+def getClassIds() -> set[int]:
+    """读全部 Class 节点 id（对账用：PG 真源 diff 出缺失集）。"""
+    driver = getDriver()
+    with driver.session() as session:
+        return {
+            int(record["id"])
+            for record in session.run("MATCH (c:Class) RETURN c.id AS id")
+        }
+
+
+def getPropertyIds() -> set[int]:
+    """读全部 Property 节点 id（对账用）。"""
+    driver = getDriver()
+    with driver.session() as session:
+        return {
+            int(record["id"])
+            for record in session.run("MATCH (p:Property) RETURN p.id AS id")
+        }
+
+
+def getJoinPairs() -> set[tuple[int, int]]:
+    """读全部 JOIN 边 (sourceId, targetId)（对账用；MERGE 折叠后天然去重）。"""
+    driver = getDriver()
+    with driver.session() as session:
+        return {
+            (int(record["sourceId"]), int(record["targetId"]))
+            for record in session.run(
+                "MATCH (a:Class)-[:JOIN]->(b:Class) "
+                "RETURN a.id AS sourceId, b.id AS targetId"
+            )
+        }
+
+
+def getRelationTriples() -> set[tuple[int, int, str]]:
+    """读全部语义关系边 (sourceId, targetId, relType)（对账用）。"""
+    driver = getDriver()
+    with driver.session() as session:
+        return {
+            (int(record["sourceId"]), int(record["targetId"]), record["relType"])
+            for record in session.run(
+                "MATCH (a:Class)-[r]->(b:Class) "
+                "WHERE type(r) <> 'JOIN' "
+                "RETURN a.id AS sourceId, b.id AS targetId, type(r) AS relType"
+            )
+        }
+
+
 def deleteNode(label: str, nodeId: int) -> int:
     """删除指定 label 和 id 的节点（同时删除关联关系）。返回删除的节点数。
 

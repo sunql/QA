@@ -1256,9 +1256,13 @@ export const zhCN = {
       syncEmbedding: "同步向量",
       syncMissingEmbeddings: "补同步缺失向量",
       syncEmbeddingSuccess: "类「{name}」向量已同步",
-      syncMissingNone: "全部 {total} 个类的向量已齐全，无需补同步",
-      syncMissingSuccess: "补同步完成：本次补 {synced} 条（共 {total} 个类）",
+      syncMissingNone: "类与属性向量已齐全（{total} 类 / {propTotal} 属性），无需补同步",
+      syncMissingSuccess: "补同步完成：类 {classSynced} 条、属性 {propSynced} 条",
       syncMissingPartial: "补同步完成：成功 {synced} 条，失败 {failed} 条（详情见后端日志）",
+      syncGraphButton: "补图信息",
+      syncGraphNone: "图谱与本体数据已一致，无需补充",
+      syncGraphSuccess: "图谱补充完成：类 {classes} 个、属性 {properties} 个、边 {edges} 条",
+      syncGraphPartial: "图谱补充完成：成功 {synced} 项，失败 {failed} 项（详情见后端日志）",
 
       classColumns: {
         id: "ID",

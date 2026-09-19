@@ -1765,7 +1765,9 @@ class Nl2SqlService:
             for column in join.columns:
                 if column not in sourceProps and column not in targetProps:
                     issues.append(
-                        f"JOIN 列 {column} 不属于 {join.sourceClass} 或 {join.targetClass} 的任何属性"
+                        f"JOIN 列 {column} 不属于 {join.sourceClass} 或 {join.targetClass} 的任何属性；"
+                        "提示：join.columns 是列名数组（如 [\"SUPPLIER_CODE\", \"PARTNER_CODE\"]），"
+                        "不要写 \"A = B\" 等式"
                     )
 
         return issues

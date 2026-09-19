@@ -231,14 +231,65 @@ class OntologyBatchService:
                     self._mirrorRelation(row)
                 else:
                     self._mirrorJoin(row)
+        # 导入闸门（2026-09-18 DIM_SUPPLIER 孤岛事故产物）：后置检查不阻断
+        result.warnings = await self._joinGapWarnings(session)
         return result
 
     async def preview(
         self, session: AsyncSession, request: BatchRelationRequest
     ) -> BatchRelationResult:
         """只读预览：推断候选 + 冲突预判计数 + 图统计，不写库不 commit。"""
-        return await self._execute(session, request, mirrors=[], write=False,
-                                   actor="preview")
+        result = await self._execute(session, request, mirrors=[], write=False,
+                                     actor="preview")
+        result.warnings = await self._joinGapWarnings(session)
+        return result
+
+    # 导入闸门告警上限：孤岛类可能很多（如全部 ODS_*），逐条列举会淹没响应
+    _MAX_JOIN_GAP_WARNINGS = 20
+
+    async def _joinGapWarnings(self, session: AsyncSession) -> list[str]:
+        """扫描「有 FK 语义列但零 JOIN 边」的类，返回告警文案（截断到上限）。
+
+        FK 语义列 = is_foreign_key 标记或 *_CODE 命名（与巡检端点同口径）。
+        """
+        from app.services.ontology_join_health_service import isFkLikeColumn
+
+        classes = (await session.execute(select(OntologyClass))).scalars().all()
+        joins = (await session.execute(select(OntologyJoin))).scalars().all()
+        connectedIds: set[int] = set()
+        for j in joins:
+            connectedIds.add(j.source_class_id)
+            connectedIds.add(j.target_class_id)
+
+        propRows = await session.execute(
+            select(
+                OntologyProperty.class_id,
+                OntologyProperty.property_name,
+                OntologyProperty.is_foreign_key,
+            )
+        )
+        fkLikeByClass: dict[int, list[str]] = {}
+        for classId, propName, isFk in propRows.all():
+            if isFkLikeColumn(propName, bool(isFk)):
+                fkLikeByClass.setdefault(classId, []).append(propName)
+
+        messages = []
+        for c in classes:
+            if c.id in connectedIds:
+                continue
+            cols = fkLikeByClass.get(c.id)
+            if not cols:
+                continue
+            messages.append(
+                f"类 {c.class_name} 有 FK 语义列（{', '.join(cols)}）但无 JOIN 边，"
+                "NL2SQL 将无法通过关联路径连通——请通过中间表补边"
+            )
+        messages.sort()
+        if len(messages) > self._MAX_JOIN_GAP_WARNINGS:
+            rest = len(messages) - self._MAX_JOIN_GAP_WARNINGS
+            messages = messages[: self._MAX_JOIN_GAP_WARNINGS]
+            messages.append(f"……另有 {rest} 个类存在同样的 JOIN 缺口（GET /ontology/health/joins 查看全部）")
+        return messages
 
     # ------------------------------------------------------------------
     # internal

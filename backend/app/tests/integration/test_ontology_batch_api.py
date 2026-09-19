@@ -555,3 +555,119 @@ class TestBatchCsv:
         body = resp.json()
         assert len(body["errors"]) == 1
         assert len(body["manifest"]["joins"]) == 1
+
+
+class TestBatchJoinGapWarnings:
+    """导入闸门（2026-09-18 DIM_SUPPLIER 孤岛事故产物）：batch 后置检查。
+
+    执行/预览后扫描「有 FK 语义列（isForeignKey 或 *_CODE）但零 JOIN 边」的类，
+    以 warnings 返回（不阻断）；已被本次建边连通的类不误报。
+    """
+
+    async def _seedGateClasses(self, client: AsyncClient) -> tuple[int, int, int, int]:
+        # dimG：带 PK，会被建边连通；factG：带 *_CODE 列且保持孤岛（应告警）
+        # bareG：孤岛但无 FK 语义列（不应告警）；linkS：join 的 source 侧
+        dimG = await _createClass(client, "GATE_DIM", "GATE_DIM")
+        await _createProperty(
+            client, dimG, "GATE_ID", sourceColumn="GATE_ID", isPrimaryKey=True
+        )
+        factG = await _createClass(client, "GATE_FACT", "GATE_FACT")
+        await _createProperty(client, factG, "GATE_CODE", sourceColumn="GATE_CODE")
+        bareG = await _createClass(client, "GATE_BARE", "GATE_BARE")
+        await _createProperty(client, bareG, "NOTE", sourceColumn="NOTE")
+        linkS = await _createClass(client, "GATE_LINK_SRC", "GATE_LINK_SRC")
+        await _createProperty(client, linkS, "L_CODE", sourceColumn="L_CODE")
+        return dimG, factG, bareG, linkS
+
+    async def test_apply_manifest_warns_for_fk_like_islands(
+        self, client: AsyncClient, dbSession: AsyncSession
+    ) -> None:
+        dimG, factG, bareG, linkS = await self._seedGateClasses(client)
+
+        resp = await client.post(
+            "/api/v1/ontology/batch",
+            json={
+                "applyManifest": True,
+                "onConflict": "skip",
+                "manifest": {
+                    "joins": [
+                        {
+                            "sourceClassId": linkS,
+                            "sourceColumns": ["L_CODE"],
+                            "targetClassId": dimG,
+                            "targetColumns": ["GATE_ID"],
+                        }
+                    ],
+                    "relations": [],
+                },
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["joins"]["created"] == 1
+        # GATE_FACT 入告警；GATE_LINK_SRC 已被本次建边连通不误报；GATE_BARE 无 FK 列不告警
+        assert any("GATE_FACT" in w for w in body["warnings"]), body["warnings"]
+        assert not any("GATE_LINK_SRC" in w for w in body["warnings"])
+        assert not any("GATE_BARE" in w for w in body["warnings"])
+        await dbSession.commit()
+
+    async def test_preview_also_reports_warnings(self, client: AsyncClient) -> None:
+        _, factG, _, _ = await self._seedGateClasses(client)
+
+        resp = await client.post(
+            "/api/v1/ontology/batch/preview",
+            json={"inferJoins": True, "onConflict": "skip"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert any("GATE_FACT" in w for w in resp.json()["warnings"])
+
+    async def test_no_warnings_when_all_fk_like_classes_connected(
+        self, client: AsyncClient
+    ) -> None:
+        dimG, _, _, linkS = await self._seedGateClasses(client)
+
+        resp = await client.post(
+            "/api/v1/ontology/batch",
+            json={
+                "applyManifest": True,
+                "onConflict": "skip",
+                "manifest": {
+                    "joins": [
+                        {
+                            "sourceClassId": linkS,
+                            "sourceColumns": ["L_CODE"],
+                            "targetClassId": dimG,
+                            "targetColumns": ["GATE_ID"],
+                        },
+                        {
+                            "sourceClassId": linkS,
+                            "sourceColumns": ["L_CODE"],
+                            "targetClassId": dimG,
+                            "targetColumns": ["GATE_ID"],
+                        },
+                    ],
+                    "relations": [],
+                },
+            },
+        )
+        assert resp.status_code == 200
+        warnings = resp.json()["warnings"]
+        # linkS 与 dimG 已连通；仅 GATE_FACT 剩余告警与 FK 列相关
+        assert not any("GATE_DIM" in w for w in warnings)
+        assert not any("GATE_LINK_SRC" in w for w in warnings)
+
+    async def test_warnings_capped_at_20(self, client: AsyncClient) -> None:
+        for i in range(25):
+            clsId = await _createClass(client, f"GATE_CAP_{i}", f"GATE_CAP_T_{i}")
+            await _createProperty(client, clsId, "C_CODE", sourceColumn="C_CODE")
+
+        resp = await client.post(
+            "/api/v1/ontology/batch/preview",
+            json={"inferJoins": True, "onConflict": "skip"},
+        )
+        assert resp.status_code == 200
+        warnings = resp.json()["warnings"]
+        gateWarnings = [w for w in warnings if "GATE_CAP" in w or "另有" in w]
+        # 20 条告警上限 + 1 条「另有 N 个」汇总
+        assert len(gateWarnings) <= 21
+        assert any("另有" in w for w in gateWarnings)

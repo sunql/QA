@@ -30,6 +30,7 @@ from app.infrastructure.llm.base_client import (
     StreamChunk,
     ToolCall,
 )
+from app.infrastructure.llm.factory import acquire_llm_concurrency
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,8 @@ class OpenAiClient(BaseLlmClient):
         payload.update(kwargs)
 
         try:
-            response = await self._client.chat.completions.create(**payload)
+            async with acquire_llm_concurrency():
+                response = await self._client.chat.completions.create(**payload)
         except Exception as exc:
             raise LlmClientError(
                 MSG_LLM_CALL_FAILED.format(provider=self._provider.value, exc=exc),
@@ -165,29 +167,30 @@ class OpenAiClient(BaseLlmClient):
         completionTokens = 0
         modelName = self._modelName
         try:
-            stream = await self._client.chat.completions.create(**payload)
-            async for chunk in stream:
-                usage = getattr(chunk, "usage", None)
-                if usage is not None:
-                    promptTokens = getattr(usage, "prompt_tokens", 0) or 0
-                    completionTokens = getattr(usage, "completion_tokens", 0) or 0
-                    continue
-                choices = getattr(chunk, "choices", None)
-                if not choices:
-                    continue
-                delta = getattr(choices[0].delta, "content", None)
-                if delta:
-                    modelName = getattr(chunk, "model", modelName) or modelName
-                    yield StreamChunk(
-                        content=delta, isDone=False, promptTokens=0, completionTokens=0, modelName=modelName
-                    )
-            yield StreamChunk(
-                content="",
-                isDone=True,
-                promptTokens=promptTokens,
-                completionTokens=completionTokens,
-                modelName=modelName,
-            )
+            async with acquire_llm_concurrency():
+                stream = await self._client.chat.completions.create(**payload)
+                async for chunk in stream:
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        promptTokens = getattr(usage, "prompt_tokens", 0) or 0
+                        completionTokens = getattr(usage, "completion_tokens", 0) or 0
+                        continue
+                    choices = getattr(chunk, "choices", None)
+                    if not choices:
+                        continue
+                    delta = getattr(choices[0].delta, "content", None)
+                    if delta:
+                        modelName = getattr(chunk, "model", modelName) or modelName
+                        yield StreamChunk(
+                            content=delta, isDone=False, promptTokens=0, completionTokens=0, modelName=modelName
+                        )
+                yield StreamChunk(
+                    content="",
+                    isDone=True,
+                    promptTokens=promptTokens,
+                    completionTokens=completionTokens,
+                    modelName=modelName,
+                )
         except Exception as exc:
             raise LlmClientError(
                 MSG_LLM_STREAM_FAILED.format(provider=self._provider.value, exc=exc),
@@ -258,7 +261,8 @@ class OpenAiClient(BaseLlmClient):
             payload["tool_choice"] = tool_choice
 
         try:
-            response = await self._client.chat.completions.create(**payload)
+            async with acquire_llm_concurrency():
+                response = await self._client.chat.completions.create(**payload)
         except Exception as exc:
             raise LlmClientError(
                 MSG_LLM_CALL_FAILED.format(provider=self._provider.value, exc=exc),

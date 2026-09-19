@@ -2,6 +2,11 @@
 
 根据 LlmConfig 的 provider 创建对应客户端，并按配置 id 缓存单例。
 API Key 优先使用配置中的加密 key（解密），否则回退到环境变量。
+
+feat-chat-concurrency: 并发闸 ``LLMConcurrencyManager`` 在独立的
+``app.infrastructure.llm.concurrency`` 模块（避开工厂与客户端的循环依赖）。
+本模块只 re-export 公共 API，保留 ``from app.infrastructure.llm.factory import
+acquire_llm_concurrency`` 的旧 import 路径以减少扩散。
 """
 
 from __future__ import annotations
@@ -12,6 +17,13 @@ from typing import Any
 from app.config import Settings, getSettings
 from app.domain.enums import ProviderType
 from app.infrastructure.llm.base_client import BaseLlmClient
+from app.infrastructure.llm.concurrency import (  # noqa: F401  re-export
+    LLMConcurrencyManager,
+    acquire_llm_concurrency,
+    get_llm_concurrency_manager,
+    reload_llm_concurrency_limit,
+    reset_llm_concurrency_manager,
+)
 from app.infrastructure.llm.ollama_client import OllamaClient
 from app.infrastructure.llm.openai_client import OpenAiClient
 from app.infrastructure.security.crypto import decryptApiKey

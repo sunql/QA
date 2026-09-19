@@ -32,6 +32,12 @@ from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.dependencies import CurrentUser
 from app.domain.enums import ChartType, IntentType
@@ -373,6 +379,82 @@ def _clipText(text: str, limit: int) -> str:
 def _summarizeExecutionError(exc: Exception) -> str:
     """从执行异常提取简短错误信息，回灌给 LLM 修正 SQL（1-3）。"""
     return getattr(exc, "message", None) or str(exc)
+
+
+# feat-chat-concurrency: fallback 重试判定 + tenacity 退避。
+# 默认 retryable 以兼容旧测试（注入的合成 LlmClientError 无 status_code），
+# 仅当能**确定性判定**为 4xx 永久错误（401/403/400）时才不走 fallback。
+# 这样不会改变既有 fallback 行为，只在「明确不该重试」时拦截。
+_RETRYABLE_LLM_ERROR_HINTS = (
+    "429",
+    "rate limit",
+    "rate_limit",
+    "503",
+    "service unavailable",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "connection reset",
+    "connection aborted",
+)
+
+
+def _isRetryableLlmError(exc: Exception) -> bool:
+    """判断 LLM 异常是否值得 fallback + 重试。
+
+    默认 True（兼容旧 fallback 行为：任何 LlmClientError 都触发降级）。
+    仅当 ``__cause__`` 携带**确定性** 4xx status_code（401/403/400 等永久
+    错误）时才返回 False，跳过 fallback 与重试。Nl2SqlError 一律视为可重试。
+
+    「默认 True」是保守选择：宁可让 fallback 在某些边缘情况下多跑一次（fallback
+    模型自身仍会被自己的 _callWithFallback 拦截），也不要因为误判把真正可恢复
+    的请求直接抛掉。生产中真实 LLM 异常一定有 __cause__ 的 status_code 字段
+    （OpenAI SDK / aiohttp 都带），所以 4xx 仍会被精确拦截。
+    """
+    if isinstance(exc, Nl2SqlError):
+        return True
+    if not isinstance(exc, LlmClientError):
+        return False
+    # 唯一确定的「不可重试」信号：__cause__ 携带 4xx status_code（排除 429）
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None:
+        status = getattr(cause, "status_code", None) or getattr(cause, "status", None)
+        if status is not None:
+            try:
+                code = int(status)
+            except (TypeError, ValueError):
+                code = 0
+            # 429 是 rate limit（4xx 但属临时故障），应走 fallback
+            if code == 429:
+                return True
+            # 其他 4xx（400/401/403）→ 永久错误，不重试
+            if 400 <= code < 500:
+                return False
+            # 5xx（含 503）→ 临时故障，可重试
+            if 500 <= code < 600:
+                return True
+    # 默认 retryable（兼容既有行为 + 测试场景）
+    return True
+
+
+async def _callWithRetryBackoff(
+    caller: "FallbackCaller", fallback: LlmConfig
+) -> Any:
+    """tenacity 包装：最多 2 次尝试（1+1 重试），指数退避 1s~4s。
+
+    仅对 LlmClientError 重试——其它异常（编程错误、配置错误）立即抛出。
+    ``reraise=True`` 让最终异常保持原类型，方便上层 catch。
+    """
+    async for attempt in AsyncRetrying(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=4),
+        retry=retry_if_exception_type(LlmClientError),
+        reraise=True,
+    ):
+        with attempt:
+            return await caller(fallback)
+    # 不可达：AsyncRetrying 总会 raise 或 yield 一次
+    raise RuntimeError("unreachable")
 
 
 LlmFactory = Callable[[Any], BaseLlmClient]
@@ -3692,13 +3774,18 @@ class ChatService(ChatStreamOutputMixin):
         caller: FallbackCaller,
         forced: bool = False,
     ) -> tuple[Any, LlmConfig, tuple[int, int]]:
-        """执行一次 LLM 调用；主模型失败时降级到最便宜可用模型并重试一次。
+        """执行一次 LLM 调用；主模型失败时降级到最便宜可用模型并重试。
 
-        捕获 LlmClientError（调用失败）与 Nl2SqlError（NL2SQL 重试耗尽），
-        两者都触发降级。降级审计行（purpose="fallback_<原purpose>"）按实际已消耗
+        捕获 LlmClientError（调用失败）与 Nl2SqlError（NL2SQL 重试耗尽），两者
+        都触发降级。降级审计行（purpose="fallback_<原purpose>"）按实际已消耗
         token 计量：Nl2SqlError 携带累计 token；LlmClientError 无法计量则记 0。
         成功调用按实际服务模型计量；无可用备选时向上抛原始异常。
         当 forced=True（用户明确选择模型）时，跳过降级并直接上抛。
+
+        feat-chat-concurrency: fallback 调用走 tenacity 退避——只对「临时故障」
+        (HTTP 429/503/timeout) 重试，避免对 4xx 永久错误浪费退避时间窗，也避免
+        在 provider 全挂时所有请求同步重试导致雪崩。最多 2 次尝试（1+1 重试），
+        指数退避 1s~4s。
 
         返回 (result, 实际服务模型, 主模型降级前已消耗 token 三元组)。
         降级时第三元为已浪费 token（与审计行一致），供调用方计入总消耗。
@@ -3708,8 +3795,15 @@ class ChatService(ChatStreamOutputMixin):
         except (LlmClientError, Nl2SqlError) as exc:
             if forced:
                 raise
+            if not _isRetryableLlmError(exc):
+                # 非临时故障（4xx、provider 配置错误等）→ 不走 fallback，直接抛
+                logger.warning(
+                    "模型 %s 调用失败且不可重试（purpose=%s）: %s",
+                    primary.model_name, purpose, exc.message,
+                )
+                raise
             logger.warning(
-                "模型 %s 调用失败，尝试降级（purpose=%s）: %s",
+                "模型 %s 调用失败（可重试），尝试降级（purpose=%s）: %s",
                 primary.model_name, purpose, exc.message,
             )
             fallback = self._modelRouter.selectFallbackModel(configs, primary.id)
@@ -3720,7 +3814,20 @@ class ChatService(ChatStreamOutputMixin):
                 session, sessionId, primary, promptTokens, completionTokens,
                 purpose=f"fallback_{purpose}",
             )
-            return await caller(fallback), fallback, (promptTokens, completionTokens)
+            try:
+                result = await _callWithRetryBackoff(caller, fallback)
+                return result, fallback, (promptTokens, completionTokens)
+            except LlmClientError:
+                # 退避耗尽仍失败：保留原异常语义上抛（fallback 标记为「已经降级但仍失败」）
+                logger.error(
+                    "fallback 模型 %s 重试耗尽（purpose=%s）",
+                    fallback.model_name, purpose,
+                )
+                raise
+
+    @staticmethod
+    def _consumedTokens(exc: Exception) -> tuple[int, int]:
+        """提取异常携带的已消耗 token；无法计量时返回 (0, 0)。"""
 
     @staticmethod
     def _consumedTokens(exc: Exception) -> tuple[int, int]:

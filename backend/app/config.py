@@ -69,6 +69,20 @@ class Settings(BaseSettings):
     # 调高不会撑爆 NL2SQL 提示词，只会让 introspection / 预览响应体变大。
     schemaMaxTables: int = Field(default=3000, alias="SCHEMA_MAX_TABLES")
 
+    # ===== PG 连接池（feat-chat-concurrency-params）=====
+    # 元数据库 engine 创建时的 pool_size / max_overflow；运行时由 system_config 行
+    # ``DB_POOL_SIZE`` / ``DB_MAX_OVERFLOW`` 覆盖（main.py lifespan 启动期一次性
+    # 读取后注入 ``app.infrastructure.database._db_pool_config``）。两者仅作默认值：
+    # 容器内如需自定义可通过 env var 覆盖，admin 通过 system_config 页面调则需重启。
+    dbPoolSize: int = Field(default=5, alias="DB_POOL_SIZE")
+    dbMaxOverflow: int = Field(default=10, alias="DB_MAX_OVERFLOW")
+
+    # ===== LLM 并发上限（feat-chat-concurrency）=====
+    # 全局 ``asyncio.Semaphore`` 的 limit，控制同时 in-flight 的 LLM HTTP 调用数。
+    # 运行时由 system_config 行 ``LLM_CONCURRENCY_LIMIT`` 覆盖（lifespan 启动期注入
+    # + admin PUT 主动 reload）。env 可覆盖默认值，但 admin 在线调整无需重启。
+    llmConcurrencyLimit: int = Field(default=20, alias="LLM_CONCURRENCY_LIMIT")
+
     # ===== LLM: OpenAI / Azure =====
     openaiApiKey: str = Field(default="", alias="OPENAI_API_KEY")
     openaiBaseUrl: str = Field(default="", alias="OPENAI_BASE_URL")

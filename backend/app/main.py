@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app import __version__
 from app.config import getSettings
@@ -25,6 +26,129 @@ from app.infrastructure.database import disposeEngine, getEngine
 from app.infrastructure.rate_limit import limiter, rateLimitExceededHandler
 
 logger = logging.getLogger(__name__)
+
+
+async def _bootstrapChatConcurrencyConfig() -> None:
+    """feat-chat-concurrency-params: 启动期一次性读 system_config 三 key。
+
+    一次性用一个临时引擎（默认 pool）读 ``DB_POOL_SIZE / DB_MAX_OVERFLOW /
+    RATE_LIMIT_KEY_STRATEGY`` 三行，写入 module-level 缓存：
+
+    - ``app.infrastructure.database._db_pool_config`` → 后续 ``getEngine()`` 创建
+      engine 时用最终 pool_size / max_overflow。
+    - ``app.infrastructure.rate_limit._rate_limit_strategy_cache`` → 请求路径
+      ``_dynamic_key`` 直接读 dict，无 IO。
+
+    失败策略：DB 不可达 / 值非法 → logger.warning 后回退到 Settings 默认值
+    （env 可覆盖），**不阻塞启动**。这是配置项而非 hard deps,生产偶发抖动
+    不应让 uvicorn 拉不起来。
+    """
+    from sqlalchemy import text
+
+    from app.config import getSettings
+    from app.infrastructure.database import init_db_pool_config
+    from app.infrastructure.rate_limit import set_rate_limit_strategy
+
+    settings = getSettings()
+    bootstrap_engine = create_async_engine(settings.databaseUrl, pool_pre_ping=False)
+    try:
+        async with bootstrap_engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT key, value FROM system_config "
+                        "WHERE key = ANY(:keys)"
+                    ),
+                    {
+                        "keys": [
+                            "DB_POOL_SIZE",
+                            "DB_MAX_OVERFLOW",
+                            "RATE_LIMIT_KEY_STRATEGY",
+                            "LLM_CONCURRENCY_LIMIT",
+                        ]
+                    },
+                )
+            ).fetchall()
+    except Exception:
+        logger.exception(
+            "启动期读 system_config 三 key 失败，使用 Settings 默认值 "
+            "(pool_size=%d, max_overflow=%d, strategy='ip', llm_concurrency=%d)",
+            settings.dbPoolSize,
+            settings.dbMaxOverflow,
+            settings.llmConcurrencyLimit,
+        )
+        return
+    finally:
+        await bootstrap_engine.dispose()
+
+    row_map = {r.key: r.value for r in rows}
+    pool_size = settings.dbPoolSize
+    raw_pool = row_map.get("DB_POOL_SIZE")
+    if raw_pool not in (None, ""):
+        try:
+            candidate = int(raw_pool)
+            if candidate < 1:
+                raise ValueError("must be positive")
+            pool_size = candidate
+        except (TypeError, ValueError):
+            logger.warning(
+                "system_config[DB_POOL_SIZE]=%r 非法，回退默认值 %d",
+                raw_pool,
+                pool_size,
+            )
+
+    max_overflow = settings.dbMaxOverflow
+    raw_overflow = row_map.get("DB_MAX_OVERFLOW")
+    if raw_overflow not in (None, ""):
+        try:
+            candidate = int(raw_overflow)
+            if candidate < 0:
+                raise ValueError("must be non-negative")
+            max_overflow = candidate
+        except (TypeError, ValueError):
+            logger.warning(
+                "system_config[DB_MAX_OVERFLOW]=%r 非法，回退默认值 %d",
+                raw_overflow,
+                max_overflow,
+            )
+
+    strategy = row_map.get("RATE_LIMIT_KEY_STRATEGY") or "ip"
+
+    llm_concurrency_limit = settings.llmConcurrencyLimit
+    raw_llm_limit = row_map.get("LLM_CONCURRENCY_LIMIT")
+    if raw_llm_limit not in (None, ""):
+        try:
+            candidate = int(raw_llm_limit)
+            if candidate < 1:
+                raise ValueError("must be positive")
+            llm_concurrency_limit = candidate
+        except (TypeError, ValueError):
+            logger.warning(
+                "system_config[LLM_CONCURRENCY_LIMIT]=%r 非法，回退默认值 %d",
+                raw_llm_limit,
+                llm_concurrency_limit,
+            )
+
+    init_db_pool_config(pool_size=pool_size, max_overflow=max_overflow)
+    set_rate_limit_strategy(strategy)
+    try:
+        from app.infrastructure.llm.factory import reload_llm_concurrency_limit
+
+        reload_llm_concurrency_limit(llm_concurrency_limit)
+    except Exception:
+        logger.exception(
+            "LLMConcurrencyManager 初始化失败；limit 保持首次懒加载时的默认值"
+        )
+
+    logger.info(
+        "chat 并发配置（system_config 覆盖生效）: "
+        "DB_POOL_SIZE=%d DB_MAX_OVERFLOW=%d RATE_LIMIT_KEY_STRATEGY=%s "
+        "LLM_CONCURRENCY_LIMIT=%d",
+        pool_size,
+        max_overflow,
+        strategy,
+        llm_concurrency_limit,
+    )
 
 
 @asynccontextmanager
@@ -46,6 +170,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "生产部署前必须：AUTH_STUB_ENABLED=0 + 反向代理剥离 X-User-* 头，"
             "或接入 JWT/IdP 替换 getCurrentUser。"
         )
+    # feat-chat-concurrency-params: 启动期一次性读 system_config 三个 key
+    # （DB_POOL_SIZE / DB_MAX_OVERFLOW / RATE_LIMIT_KEY_STRATEGY），注入到对应
+    # module-level 缓存，让 getEngine() 创建的 engine pool 走最终值。失败用
+    # Settings 默认值（env 可覆盖），启动期不可阻塞。
+    await _bootstrapChatConcurrencyConfig()
     engine = getEngine()
     logger.info("元数据库引擎已就绪: %s", engine.url.render_as_string(hide_password=True))
 

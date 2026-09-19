@@ -127,6 +127,49 @@ def _mergeRows(columnRows: list[dict], pkRows: list[dict], fkRows: list[dict]) -
     return tables
 
 
+def _annotateComments(
+    merged: dict[str, dict],
+    tableComments: list[dict],
+    colComments: list[dict],
+) -> None:
+    """就地给 merged 的表/列注 comment（feat-ontology-import-comment）。
+
+    行为约定：
+    - 表 comment 写到 `merged[name]["comment"]`，列 comment 写到
+      `merged[name]["columns"][i]["comment"]`。直接修改 dict，调用方拿同一引用。
+    - 空串 / None / 仅空白视为「无注释」：不写 key（避免把 None 与缺字段混淆）。
+      Oracle ALL_TAB_COMMENTS 没有 comment 的行返回 None；PG pg_description LEFT JOIN
+      未命中时返回 ''；MySQL 无注释时返回 ''。三路统一处理。
+    - key 一律 .upper() 归一（Oracle 表名默认大写，PG/MySQL 连接默认小写也能命中）。
+    - 不存在的表/列键会被静默忽略（表注释不存在时对应表就不参与注入）。
+
+    入参为 list[dict]，dict 内字段语义：
+      tableComments: [{table_name, comment}, ...]
+      colComments:   [{table_name, column_name, comment}, ...]
+    """
+    tableMap: dict[str, str] = {}
+    for row in tableComments:
+        raw = row.get("comment") or ""
+        if raw and raw.strip():
+            tableMap[row["table_name"].upper()] = raw.strip()
+
+    colMap: dict[tuple[str, str], str] = {}
+    for row in colComments:
+        raw = row.get("comment") or ""
+        if raw and raw.strip():
+            key = (row["table_name"].upper(), row["column_name"].upper())
+            colMap[key] = raw.strip()
+
+    for name, info in merged.items():
+        upper = name.upper()
+        if upper in tableMap:
+            info["comment"] = tableMap[upper]
+        for col in info["columns"]:
+            key = (upper, col["column_name"].upper())
+            if key in colMap:
+                col["comment"] = colMap[key]
+
+
 class SchemaIntrospectionService:
     """业务数据源 schema 发现与缓存。"""
 
@@ -203,6 +246,9 @@ class SchemaIntrospectionService:
 
         owner 仅 Oracle 生效：显式传 owner 时按其规范化（大写 + 白名单，杜绝注入），
         缺省回退连接用户默认 owner，向后兼容既有行为。PG/MySQL 恒查连接默认 schema。
+
+        feat-ontology-import-comment：三数据源都额外查表/列注释并 merge 到 merged dict。
+        无注释时 _annotateComments 不写 key（等价 comment=None），向后兼容。
         """
         try:
             dsType = DataSourceType(ds.type)
@@ -213,11 +259,27 @@ class SchemaIntrospectionService:
             columnRows = await adapter.execute_read_only(_ORACLE_COLUMNS_SQL.format(owner=sqlOwner))
             pkRows = await adapter.execute_read_only(_ORACLE_PK_SQL.format(owner=sqlOwner))
             fkRows = await adapter.execute_read_only(_ORACLE_FK_SQL.format(owner=sqlOwner))
-            return _mergeRows(columnRows, pkRows, fkRows)
+            tableCommentRows = await adapter.execute_read_only(
+                _ORACLE_TABLE_COMMENT_SQL.format(owner=sqlOwner)
+            )
+            colCommentRows = await adapter.execute_read_only(
+                _ORACLE_COL_COMMENT_SQL.format(owner=sqlOwner)
+            )
+            merged = _mergeRows(columnRows, pkRows, fkRows)
+            _annotateComments(merged, tableCommentRows, colCommentRows)
+            return merged
         if dsType is DataSourceType.POSTGRESQL:
-            return await self._fetchInfoSchema(adapter, _PG_SQL)
+            merged = await self._fetchInfoSchema(adapter, _PG_SQL)
+            tableComments = await adapter.execute_read_only(_PG_TABLE_COMMENT_SQL)
+            colComments = await adapter.execute_read_only(_PG_COL_COMMENT_SQL)
+            _annotateComments(merged, tableComments, colComments)
+            return merged
         if dsType is DataSourceType.MYSQL:
-            return await self._fetchInfoSchema(adapter, _MYSQL_SQL)
+            merged = await self._fetchInfoSchema(adapter, _MYSQL_SQL)
+            tableComments = await adapter.execute_read_only(_MYSQL_TABLE_COMMENT_SQL)
+            colComments = await adapter.execute_read_only(_MYSQL_COL_COMMENT_SQL)
+            _annotateComments(merged, tableComments, colComments)
+            return merged
         raise ValidationError(MSG_DATASOURCE_TYPE_NOT_SUPPORTED.format(dsType=ds.type))
 
     @staticmethod
@@ -236,6 +298,9 @@ class SchemaIntrospectionService:
                 columns=[ColumnSchemaRead(**c) for c in info["columns"]],
                 primary_keys=info["primary_keys"],
                 foreign_keys=[ForeignKeySchemaRead(**fk) for fk in info["foreign_keys"]],
+                # feat-ontology-import-comment：DB 表注释透传；空表（无 _annotateComments 调用）
+                # 时 info["comment"] 缺 key，Pydantic 默认 None，向后兼容老数据源。
+                comment=info.get("comment"),
             )
             for name, info in sorted(merged.items())
         ]
@@ -540,6 +605,65 @@ WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = {schemaExpr}
 ORDER BY tc.table_name, kcu.ordinal_position
 """,
     }
+
+
+# =============================================================================
+# 表/列注释查询（feat-ontology-import-comment）
+# 所有 SQL 均为只读 SELECT，经 SQL Guard 校验；owner 由 _oracleOwner 白名单后内联。
+# =============================================================================
+
+# Oracle：ALL_TAB_COMMENTS 返回 NULL 的行表示该对象未设注释（与 PG/空串统一处理）
+_ORACLE_TABLE_COMMENT_SQL = """
+SELECT table_name AS "table_name", comments AS "comment"
+FROM ALL_TAB_COMMENTS
+WHERE owner = '{owner}' AND table_name IS NOT NULL AND comments IS NOT NULL
+"""
+
+# Oracle：ALL_COL_COMMENTS 返回 NULL 的行表示该字段未设注释
+_ORACLE_COL_COMMENT_SQL = """
+SELECT table_name AS "table_name", column_name AS "column_name", comments AS "comment"
+FROM ALL_COL_COMMENTS
+WHERE owner = '{owner}' AND table_name IS NOT NULL AND comments IS NOT NULL
+"""
+
+# PostgreSQL：pg_description.objsubid=0 是表级注释，>0 是列注释（attnum）。
+# LEFT JOIN：未设注释的对象返回 NULL（统一在 _annotateComments 里 strip 过滤）。
+# CURRENT_SCHEMA() 与列查询保持一致（连接默认 schema），不引入额外 schema 漂移。
+_PG_TABLE_COMMENT_SQL = """
+SELECT c.relname AS table_name, d.description AS comment
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+WHERE n.nspname = CURRENT_SCHEMA() AND c.relkind = 'r'
+  AND d.description IS NOT NULL
+"""
+
+# PostgreSQL：列注释 objsubid = a.attnum（attnum 从 1 开始；系统列 attnum<0 自动被 AND a.attnum > 0 过滤）。
+# 排除 attnum=0（已用于表注释）+ 排除已 drop 的列（attisdropped）。
+_PG_COL_COMMENT_SQL = """
+SELECT c.relname AS table_name, a.attname AS column_name, d.description AS comment
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = a.attnum
+WHERE n.nspname = CURRENT_SCHEMA() AND c.relkind = 'r'
+  AND d.description IS NOT NULL
+ORDER BY c.relname, a.attnum
+"""
+
+# MySQL：information_schema.tables.table_comment 为空串表示未设注释
+_MYSQL_TABLE_COMMENT_SQL = """
+SELECT table_name AS table_name, table_comment AS comment
+FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_comment <> ''
+"""
+
+# MySQL：information_schema.columns.column_comment 为空串表示未设注释
+_MYSQL_COL_COMMENT_SQL = """
+SELECT table_name AS table_name, column_name AS column_name, column_comment AS comment
+FROM information_schema.columns
+WHERE table_schema = DATABASE() AND column_comment <> ''
+"""
 
 
 _PG_SQL = _buildInfoSchemaQueries("CURRENT_SCHEMA()")

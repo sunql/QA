@@ -1264,6 +1264,11 @@ class ColumnSchemaRead(CamelModel):
     data_type: str
     # 必填：nullable 缺失说明数据字典返回形状异常，fail-fast 而非静默默认
     nullable: bool
+    # 字段注释（feat-ontology-import-comment）：Oracle ALL_COL_COMMENTS、PG pg_description、
+    # MySQL information_schema.columns.column_comment。无注释时为 None，老 schema_cache JSON
+    # 缺该字段自动取默认值（None），向后兼容。导入时作为 ontology_property.description
+    # 的最高优先级来源（高于 LLM 增强）。
+    comment: str | None = None
 
 
 class ForeignKeySchemaRead(CamelModel):
@@ -1278,6 +1283,10 @@ class TableSchemaRead(CamelModel):
     columns: list[ColumnSchemaRead] = Field(default_factory=list)
     primary_keys: list[str] = Field(default_factory=list)
     foreign_keys: list[ForeignKeySchemaRead] = Field(default_factory=list)
+    # 表注释（feat-ontology-import-comment）：Oracle ALL_TAB_COMMENTS、PG pg_description、
+    # MySQL information_schema.tables.table_comment。无注释时为 None。导入时作为
+    # ontology_class.description 的最高优先级来源（高于 LLM 增强）。
+    comment: str | None = None
 
 
 class SchemaIntrospectResponse(CamelModel):

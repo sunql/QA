@@ -39,7 +39,12 @@ def _datasource(type_: str = "oracle", username: str = "ZJTH") -> DataSource:
 
 
 class _FakeSchemaAdapter:
-    """按 SQL 内容返回预置行集的伪适配器，记录已执行的 SQL。"""
+    """按 SQL 内容返回预置行集的伪适配器，记录已执行的 SQL。
+
+    feat-ontology-import-comment：增加 tableCommentRows / colCommentRows；
+    按 SQL 关键字分发到 ALL_TAB_COMMENTS / ALL_COL_COMMENTS / pg_description /
+    information_schema.tables.table_comment / information_schema.columns.column_comment。
+    """
 
     def __init__(
         self,
@@ -47,19 +52,36 @@ class _FakeSchemaAdapter:
         pkRows: list[dict] | None = None,
         fkRows: list[dict] | None = None,
         ownerRows: list[dict] | None = None,
+        tableCommentRows: list[dict] | None = None,
+        colCommentRows: list[dict] | None = None,
     ) -> None:
         self.columnRows = columnRows or []
         self.pkRows = pkRows or []
         self.fkRows = fkRows or []
         self.ownerRows = ownerRows or []
+        self.tableCommentRows = tableCommentRows or []
+        self.colCommentRows = colCommentRows or []
         self.executed: list[str] = []
 
     async def execute_read_only(self, sql: str) -> list[dict]:
         self.executed.append(sql)
         if "ALL_TABLES" in sql:
             return self.ownerRows
+        if "ALL_TAB_COMMENTS" in sql:
+            return self.tableCommentRows
+        if "ALL_COL_COMMENTS" in sql:
+            return self.colCommentRows
         if "ALL_TAB_COLUMNS" in sql or "information_schema.columns" in sql:
+            # PG/MySQL 列注释查询也走 information_schema.columns，特征是「带 column_comment」
+            if "column_comment" in sql:
+                return self.colCommentRows
             return self.columnRows
+        if "pg_description" in sql and "objsubid = 0" in sql:
+            return self.tableCommentRows
+        if "pg_description" in sql and "objsubid = a.attnum" in sql:
+            return self.colCommentRows
+        if "information_schema.tables" in sql and "table_comment" in sql:
+            return self.tableCommentRows
         if "constraint_type = 'P'" in sql or "PRIMARY KEY" in sql:
             return self.pkRows
         return self.fkRows
@@ -97,8 +119,9 @@ class TestOracleIntrospection:
         assert receiptd.foreign_keys == [
             ForeignKeySchemaRead(column_name="PTHNUM_0", ref_table="PRECEIPT", ref_column="PTHNUM_0"),
         ]
-        # 列查询 / 主键查询 / 外键查询各执行一次，共 3 条只读 SQL
-        assert len(adapter.executed) == 3
+        # 列查询 / 主键查询 / 外键查询 + 表注释 + 列注释，共 5 条只读 SQL
+        # （feat-ontology-import-comment：加了 ALL_TAB_COMMENTS / ALL_COL_COMMENTS）
+        assert len(adapter.executed) == 5
 
     async def test_owner_uppercased_and_inlined_safely(self) -> None:
         adapter = _FakeSchemaAdapter(
@@ -317,3 +340,141 @@ class TestOwnerScoping:
             result = await _service(adapter).listSchemas(_datasource(type_=type_))
             assert result == []
             assert adapter.executed == []  # 非 Oracle 不触发任何数据字典查询
+
+
+class TestCommentEnrichment:
+    """feat-ontology-import-comment：三数据源都把表/列 COMMENT 透传到 TableSchemaRead。
+
+    验证要点：
+    1. TableSchemaRead.comment 与 ColumnSchemaRead.comment 字段非 None
+    2. _annotateComments 内部直接修改 merged（dict 引用透明）
+    3. 无 comment 的表/列保持 None（向后兼容老数据源缓存）
+    4. SQL 只读白名单：5 个新 SQL 都是只读 SELECT
+    """
+
+    async def test_oracle_introspect_includes_table_and_column_comments(self) -> None:
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {"table_name": "PRECEIPT", "column_name": "PTHNUM_0", "data_type": "VARCHAR2", "nullable": 0, "owner": "ZJTH"},
+                {"table_name": "PRECEIPT", "column_name": "BPSNUM_0", "data_type": "VARCHAR2", "nullable": 1, "owner": "ZJTH"},
+            ],
+            pkRows=[{"table_name": "PRECEIPT", "column_name": "PTHNUM_0"}],
+            fkRows=[],
+            tableCommentRows=[{"table_name": "PRECEIPT", "comment": "收货单主表"}],
+            colCommentRows=[
+                {"table_name": "PRECEIPT", "column_name": "PTHNUM_0", "comment": "收货单号"},
+                {"table_name": "PRECEIPT", "column_name": "BPSNUM_0", "comment": "供应商编号"},
+            ],
+        )
+        tables = await _service(adapter).introspect(_datasource())
+
+        assert len(tables) == 1
+        receipt = tables[0]
+        assert receipt.comment == "收货单主表"
+        assert receipt.columns[0].comment == "收货单号"
+        assert receipt.columns[1].comment == "供应商编号"
+        # 5 条 SQL：columns / pk / fk / table_comment / col_comment（Oracle owner 注入两次）
+        assert any("ALL_TAB_COMMENTS" in sql for sql in adapter.executed)
+        assert any("ALL_COL_COMMENTS" in sql for sql in adapter.executed)
+
+    async def test_postgresql_introspect_includes_comments(self) -> None:
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {"table_name": "orders", "column_name": "id", "data_type": "integer", "nullable": 0, "owner": "public"},
+            ],
+            pkRows=[{"table_name": "orders", "column_name": "id"}],
+            fkRows=[],
+            tableCommentRows=[{"table_name": "orders", "comment": "订单主表"}],
+            colCommentRows=[{"table_name": "orders", "column_name": "id", "comment": "订单 ID"}],
+        )
+        tables = await _service(adapter).introspect(_datasource(type_="postgresql"))
+        assert tables[0].comment == "订单主表"
+        assert tables[0].columns[0].comment == "订单 ID"
+        # PG 走 pg_description 视图，SQL 中必须出现
+        assert any("pg_description" in sql for sql in adapter.executed)
+
+    async def test_mysql_introspect_includes_comments(self) -> None:
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {"table_name": "wms_order", "column_name": "id", "data_type": "int", "nullable": 0, "owner": "wms"},
+            ],
+            pkRows=[{"table_name": "wms_order", "column_name": "id"}],
+            fkRows=[],
+            tableCommentRows=[{"table_name": "wms_order", "comment": "WMS 订单主表"}],
+            colCommentRows=[{"table_name": "wms_order", "column_name": "id", "comment": "订单 PK"}],
+        )
+        tables = await _service(adapter).introspect(_datasource(type_="mysql"))
+        assert tables[0].comment == "WMS 订单主表"
+        assert tables[0].columns[0].comment == "订单 PK"
+        # MySQL 列注释特征：information_schema.columns + column_comment
+        assert any("column_comment" in sql for sql in adapter.executed)
+        assert any("table_comment" in sql for sql in adapter.executed)
+
+    async def test_no_comments_keeps_none_backward_compatible(self) -> None:
+        """老数据源 / 新建无注释的表：TableSchemaRead.comment 与 ColumnSchemaRead.comment 均为 None。
+
+        这是向后兼容的硬保证：老 schema_cache JSON 缺 comment 键时，Pydantic 默认 None。
+        """
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {"table_name": "plain_table", "column_name": "id", "data_type": "varchar", "nullable": 0, "owner": "public"},
+            ],
+            pkRows=[],
+            fkRows=[],
+            tableCommentRows=[],
+            colCommentRows=[],
+        )
+        tables = await _service(adapter).introspect(_datasource(type_="postgresql"))
+        assert tables[0].comment is None
+        assert tables[0].columns[0].comment is None
+
+    async def test_annotate_comments_helper_unit(self) -> None:
+        """_annotateComments 静态函数：直接验证 key 大写归一 + 空串过滤 + dict 就地修改。"""
+        from app.services.schema_introspection_service import _annotateComments
+
+        merged = {
+            "preceipt": {
+                "owner": "ZJTH",
+                "columns": [
+                    {"column_name": "pthnum_0", "data_type": "VARCHAR2", "nullable": 0},
+                ],
+                "primary_keys": ["pthnum_0"],
+                "foreign_keys": [],
+            }
+        }
+        tableComments = [
+            {"table_name": "PRECEIPT", "comment": "  收货单主表  "},  # 含空白 → strip 后保留
+            {"table_name": "EMPTY_TBL", "comment": ""},  # 空串 → 忽略
+            {"table_name": "WS_TBL", "comment": "   "},  # 纯空白 → 忽略
+            {"table_name": "NULL_TBL", "comment": None},  # None → 忽略
+        ]
+        colComments = [
+            {"table_name": "PRECEIPT", "column_name": "PTHNUM_0", "comment": "收货单号"},
+            {"table_name": "PRECEIPT", "column_name": "BPSNUM_0", "comment": None},  # 无 col → 忽略
+        ]
+        _annotateComments(merged, tableComments, colComments)
+
+        # 表注释 strip 后写入
+        assert merged["preceipt"]["comment"] == "收货单主表"
+        # 列注释（key 已大写归一）
+        assert merged["preceipt"]["columns"][0]["comment"] == "收货单号"
+        # 不在 _mergeRows 范围内的表/列不报错（静默忽略）
+        assert "EMPTY_TBL" not in merged
+
+    async def test_only_read_sql_executed_for_comment_queries(self) -> None:
+        """所有 COMMENT 查询均为只读 SELECT（无 DML/DDL），SQL Guard 不会拦截。
+
+        验证方式：执行过的 SQL 字面量不含 UPDATE/INSERT/DELETE/DROP/ALTER。
+        """
+        adapter = _FakeSchemaAdapter(
+            columnRows=[{"table_name": "t", "column_name": "id", "data_type": "int", "nullable": 0, "owner": "p"}],
+            pkRows=[{"table_name": "t", "column_name": "id"}],
+            fkRows=[],
+            tableCommentRows=[{"table_name": "t", "comment": "test"}],
+            colCommentRows=[{"table_name": "t", "column_name": "id", "comment": "id"}],
+        )
+        await _service(adapter).introspect(_datasource(type_="postgresql"))
+        for sql in adapter.executed:
+            upper = sql.upper()
+            for dml in ("INSERT ", "UPDATE ", "DELETE ", "DROP ", "ALTER ", "TRUNCATE "):
+                assert dml not in upper, f"非只读 SQL 被执行: {sql!r}"

@@ -170,11 +170,25 @@ class LocalImportService:
                 mapped = self._rule_engine.map_data_type(
                     col.data_type, rules.type_mapping
                 )
+                # feat-ontology-import-comment：description 优先级
+                #   1. LLM 增强（开了 generate_descriptions 时更丰富/更准）
+                #   2. DB 字段注释（col.comment，Oracle/PG/MySQL 都覆盖）
+                #   3. None（兜底空，落到本体后用户可在属性管理页补）
+                # 老的导入流程只取 LLM；现在 DB 自带中文/英文注释时无需 LLM 也能拿到
+                # 语义信息，显著降低 LLM 调用成本 + 减少 LLM 跑偏。
+                # 与 SchemaIntrospectionService._annotateComments 行为对齐：纯空白/None/空串都视为无。
+                prop_description: str | None = None
+                if ec and getattr(ec, "description", None):
+                    prop_description = ec.description
+                else:
+                    raw_col_comment = getattr(col, "comment", None)
+                    if raw_col_comment and raw_col_comment.strip():
+                        prop_description = raw_col_comment.strip()
                 prop = ProposedProperty(
                     source_column=col.column_name,
                     property_name=col.column_name,
                     property_alias=ec.alias if ec else None,
-                    description=ec.description if ec else None,
+                    description=prop_description,
                     data_type=mapped.value,
                     is_primary_key=col.column_name in pk_set,
                     is_foreign_key=col.column_name in fk_cols,
@@ -189,12 +203,22 @@ class LocalImportService:
                     }
                 )
 
+            # 类 description 同款优先级（feat-ontology-import-comment）：
+            # LLM 增强 > DB 表注释 > None。
+            # 与 _annotateComments 对齐：纯空白/None/空串视为无，避免把 "   " 当成有效描述写入本体。
+            class_description: str | None = None
+            if enhanced_table and getattr(enhanced_table, "description", None):
+                class_description = enhanced_table.description
+            else:
+                raw_tbl_comment = getattr(original, "comment", None)
+                if raw_tbl_comment and raw_tbl_comment.strip():
+                    class_description = raw_tbl_comment.strip()
             proposed_classes.append(
                 ProposedClass(
                     source_table=table_name,
                     class_name=table_name,
                     class_alias=enhanced_table.alias if enhanced_table else None,
-                    description=enhanced_table.description if enhanced_table else None,
+                    description=class_description,
                     properties=properties,
                 )
             )

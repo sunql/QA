@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from fastapi import Depends, Header, HTTPException, status
+from jwt import InvalidTokenError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, getSettings
 from app.domain.exceptions import PermissionDeniedError
 from app.domain.models import Organization, Role, User, UserOrganization, UserRole
+from app.domain.error_messages import (
+    MSG_AUTH_REQUIRED,
+    MSG_TOKEN_INVALID,
+    MSG_TOKEN_REVOKED,
+)
 from app.infrastructure.database import getDb
+from app.services.jwt_codec import decode_jwt
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +38,25 @@ DEFAULT_STUB_USER_ID = "anonymous"
 
 @dataclass(frozen=True)
 class CurrentUser:
-    """当前用户（stub auth 解析 X-User-* 头 + DB 身份富化，feat-rbac-identity）。
+    """当前用户（feat-user-auth，2026-09-20）。
 
-    departments 用于 owner-based ACL（Phase 4.5 governance hardening）：
-    与 entity.owner 字符串匹配；用户属于多部门时（如「采购+财务」双岗），
-    headers 可一次性携带多个部门逗号分隔。
+    **三种解析路径**（按优先级）：
+    1) Bearer JWT（``Authorization: Bearer <token>``）：decode 后查
+       ``user_sessions`` 表验证 jti 未吊销 → DB 加载用户 + roles + orgs。
+       填 ``jti`` / ``tokenExp`` 字段供后续登出 / 改密吊销用。
+    2) Stub header（``X-User-Id`` + ``X-User-Roles`` + ``X-User-Departments``）：
+       X-User-Id 命中 DB enabled 用户 → DB roles/departments；查无此人 →
+       DEFAULT_STUB_ROLES 默认（dev 兜底）。
+    3) ``anonymous`` 兜底：仅 stub 模式生效。
 
-    roles / departments 语义（Phase D 后）：X-User-Id 命中 DB 用户（users.username）
-    时，以 DB 角色/组织为准（头里的 X-User-Roles/X-User-Departments 不再生效，
-    防止伪造）；查无此人时回退桩默认（见 getCurrentUser）。
+    ``dbUserId`` 字段：Bearer 路径恒为 DB 主键；stub 路径命中时也是 DB 主键，
+    查无此人时为 ``None``。ACL / 审计都用 ``dbUserId`` 而非 ``userId`` 字符串
+    （防「X-User-Id 任意字符串」伪造）。
+
+    AUTH_MODE 开关（``app.config.Settings.authMode``）：
+    - ``stub``（默认）：三种路径都可走
+    - ``real``：仅 Bearer 路径有效；stub 头默认拒绝
+      （``ALLOW_STUB_WHEN_REAL=true`` 允许过渡期并存）
     """
 
     userId: str = DEFAULT_STUB_USER_ID
@@ -48,49 +64,108 @@ class CurrentUser:
     roles: tuple[str, ...] = DEFAULT_STUB_ROLES
     departments: tuple[str, ...] = ()
     dbUserId: int | None = None
+    jti: str | None = None
+    tokenExp: int | None = None
 
 
 async def getCurrentUser(
+    authorization: str | None = Header(default=None, alias="Authorization"),
     xUserId: str | None = Header(default=None, alias="X-User-Id"),
     xTenantId: str | None = Header(default=None, alias="X-Tenant-Id"),
     xUserRoles: str | None = Header(default=None, alias="X-User-Roles"),
     xUserDepartments: str | None = Header(default=None, alias="X-User-Departments"),
     session: AsyncSession = Depends(getDb),
 ) -> CurrentUser:
-    """从请求头解析当前用户（stub + DB 身份富化）。
+    """从请求头解析当前用户（feat-user-auth 改造后）。
 
     Headers:
-        X-User-Id：用户标识（默认 'anonymous'），Phase D 后优先按
-            users.username 精确匹配真实 DB 用户
+        Authorization: ``Bearer <jwt>`` 优先解析（real 模式强制）
+        X-User-Id / X-User-Roles / X-User-Departments：stub 模式兜底
         X-Tenant-Id：租户 ID（默认 'default'）
-        X-User-Roles：逗号分隔角色（默认 ['user', 'admin']，见 DEFAULT_STUB_ROLES）
-        X-User-Departments：逗号分隔部门（默认 []）
 
-    解析策略（feat-rbac-identity Phase D）：
-        1) AUTH_STUB_ENABLED=0（生产）→ 拒绝 stub 头请求（未接入 JWT 前兜底）。
-        2) stub 模式下，X-User-Id 命中 DB users.username（且 enabled）→
-           roles / departments 以 DB 的角色与组织为准（头里的角色/部门头被忽略，
-           防 X-User-Roles=admin 伪造）；dbUserId 记录 DB 主键供权限计算。
-        3) 查无此人（或未启用）→ 回退桩默认：头里 X-User-Roles 生效，缺失时
-           DEFAULT_STUB_ROLES=（user, admin）。dev/test 保持「打开即用」，
-           也保持既有按头模拟非 admin 的集成测试语义（u1 + X-User-Roles: analyst）。
+    解析顺序（feat-user-auth，2026-09-20）：
 
-    真实生产应由 JWT/IdP 解析并填充 departments；stub 模式保证
-    Phase 4.5 ACL 接口稳定，鉴权接入后无需改 ACL 规则。
+    1) ``Authorization: Bearer <jwt>`` 解析：
+       - decode JWT（验签+exp+iss+aud）
+       - 同步查 ``user_sessions`` 表：``jti`` 命中 + ``revoked_at IS NULL``
+         + ``expires_at > now()`` → 命中才放行（fail-closed）
+       - 查 DB users 表（``enabled=True`` 才放行）
+       - 加载 roles / organizations 列表
 
-    安全护栏（security-reviewer 反馈）：
-        任意客户端可直接伪造 X-User-Roles=admin 绕过 ACL；因此：
-        - 默认 AUTH_STUB_ENABLED=1（dev/test 默认开）
-        - 生产部署必须设 AUTH_STUB_ENABLED=0 + 由反向代理剥离 X-User-* 头，
-          或后续接入 JWT 时移除该 stub 函数本身。
-        - 应用启动时若 APP_ENV=production 且 stub 仍开启，日志 ERROR 告警。
+    2) AUTH_MODE=real 时，无 Bearer → 403（拒绝 stub 头）
+       AUTH_MODE=stub 时，回退 stub 头解析（保持原有 dev 体验）
+
+    3) ``anonymous`` 兜底：仅 stub 模式且 AUTH_STUB_ENABLED=1 时。
+
+    安全护栏：
+        - 启动期 main.py 校验：APP_ENV=production 时 AUTH_MODE=real 且
+          JWT_SECRET ≥ 32 字节，否则 ERROR 日志告警（fail-soft，不阻塞启动）
+        - 反向代理（nginx）剥离客户端传来的 ``Authorization`` / ``X-User-*`` 头
     """
-    if os.environ.get("AUTH_STUB_ENABLED", "1") != "1":
-        # 真实生产应拒绝任何 stub 头请求（未接入 JWT 前的安全兜底）
+    settings = getSettings()
+
+    # 优先级 1: Bearer JWT（两种模式都尝试解析）
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        try:
+            payload = decode_jwt(token)
+        except InvalidTokenError as exc:
+            logger.warning("JWT 解析失败: %s", exc)
+            raise PermissionDeniedError(MSG_TOKEN_INVALID) from exc
+
+        jti = payload.get("jti", "")
+        sub = payload.get("sub", "")
+        if not jti or not sub:
+            raise PermissionDeniedError(MSG_TOKEN_INVALID)
+
+        # 同步查 user_sessions 验证 session 未吊销（fail-closed）
+        from app.models.rbac import UserSession  # 避免循环依赖
+
+        session_row = (
+            await session.execute(
+                select(UserSession).where(
+                    UserSession.jti == jti,
+                    UserSession.revoked_at.is_(None),
+                    UserSession.expires_at > __import__("datetime").datetime.now(
+                        __import__("datetime").timezone.utc
+                    ),
+                )
+            )
+        ).scalar_one_or_none()
+        if session_row is None:
+            raise PermissionDeniedError(MSG_TOKEN_REVOKED)
+
+        # 查 DB user
+        try:
+            user_id = int(sub)
+        except ValueError as exc:
+            raise PermissionDeniedError(MSG_TOKEN_INVALID) from exc
+        user = await session.get(User, user_id)
+        if user is None or not user.enabled:
+            raise PermissionDeniedError(MSG_AUTH_REQUIRED)
+
+        roles, departments = await _loadDbRolesAndOrgs(session, user_id)
+        return CurrentUser(
+            userId=user.username,
+            tenantId=xTenantId or "default",
+            roles=roles,
+            departments=departments,
+            dbUserId=user_id,
+            jti=jti,
+            tokenExp=payload.get("exp"),
+        )
+
+    # 优先级 2: stub 头解析
+    if settings.authMode == "real" and not settings.allowStubWhenReal:
+        # real 模式强制要求 Bearer
+        raise PermissionDeniedError(MSG_AUTH_REQUIRED)
+
+    if not settings.authStubEnabled:
         raise PermissionDeniedError(
             "Stub auth 未启用：生产环境必须由 JWT/IdP 解析用户身份，"
             "或设置 AUTH_STUB_ENABLED=1（仅 dev/test）"
         )
+
     base = _buildCurrentUser(
         userId=xUserId,
         tenantId=xTenantId,

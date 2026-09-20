@@ -1,13 +1,9 @@
 import axios, { AxiosError, AxiosInstance, AxiosResponse } from "axios";
 import type { MessageInstance } from "antd/es/message/interface";
-import {
-  API_BASE_URL,
-  REQUEST_TIMEOUT_MS,
-  DEFAULT_TENANT_ID,
-  DEFAULT_USER_ID,
-} from "../config";
+import { API_BASE_URL, REQUEST_TIMEOUT_MS, DEFAULT_TENANT_ID } from "../config";
 import type { ApiResponse } from "../types/common";
 import { i18n } from "../i18n";
+import { useAuthStore } from "../stores/authStore";
 
 /**
  * antd message 实例的 holder。
@@ -48,8 +44,17 @@ export function createHttpClient(): AxiosInstance {
     headers: {
       "Content-Type": "application/json",
       "X-Tenant-Id": DEFAULT_TENANT_ID,
-      "X-User-Id": DEFAULT_USER_ID,
     },
+  });
+
+  // 请求拦截：注入 Authorization: Bearer <token>（feat-user-auth）
+  // token 不存在时不注入 —— stub 模式 / 登录页 / 公开端点。
+  instance.interceptors.request.use((config) => {
+    const token = useAuthStore.getState().token;
+    if (token) {
+      config.headers.set("Authorization", `Bearer ${token}`);
+    }
+    return config;
   });
 
   // 响应拦截：解包 ApiResponse 信封，失败时抛出 Error
@@ -70,12 +75,22 @@ export function createHttpClient(): AxiosInstance {
       const status = error.response?.status;
       const apiError = error.response?.data?.error;
       const apiDetail = (error.response?.data as { detail?: unknown } | undefined)?.detail;
+
+      // 401：token 失效 / 未登录 → 清 store 触发重定向到 /login
+      // 不弹 toast（避免每次跳转都弹"登录已失效"，已经准备重定向了）
+      if (status === 401) {
+        useAuthStore.getState().clear();
+      }
+
       const errMsg =
         apiError ??
         (status
           ? i18n.t("errors.requestFailedHttp", { status: String(status) })
           : i18n.t("errors.networkError"));
-      showError(errMsg);
+      // 401 不弹 toast —— 由 RequireAuth 或登录页处理
+      if (status !== 401) {
+        showError(errMsg);
+      }
       // 携带领域异常 detail（如 NL2SQL 校验差异），供错误消息折叠展示
       // 携带 HTTP status，便于业务页面按状态分流（如 403 → 权限提示 Modal）
       const err = new Error(errMsg) as Error & { detail?: string; status?: number };

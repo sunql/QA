@@ -62,6 +62,29 @@ class Settings(BaseSettings):
     # 默认 0：取消"列出所有..."型无范围明细查询的强制 LIMIT 100，由 LLM 自由判断。
     nl2sqlNoScopeRowLimit: int = Field(default=0, alias="NL2SQL_NO_SCOPE_ROW_LIMIT")
 
+    # ===== 认证模式（feat-user-auth，2026-09-20）=====
+    # ``stub``（默认）：保持原有 stub header 行为；``X-User-Id`` 头继续生效，便于
+    # 本地/自动化测试。生产部署必须设 ``real``，并由反向代理（nginx）剥离客户端
+    # 传来的 ``Authorization`` / ``X-User-*`` 头保证安全（详见 Harness/wiki/operations-runbook.md）。
+    # ``real``：所有 API 强制 ``Authorization: Bearer <jwt>``；无 Bearer → 403。
+    # 启动期会校验 APP_ENV=production 是否误配 stub，是则 ERROR 日志告警。
+    authMode: str = Field(default="stub", alias="AUTH_MODE")
+    # 是否仍允许 stub 头解析（与 authMode 解耦）：``real`` 模式下也允许 stub 头，
+    # 方便过渡期两套并存；生产部署时由反向代理 + APP_ENV 双重保险。
+    authStubEnabled: bool = Field(default=True, alias="AUTH_STUB_ENABLED")
+    # 当 authMode=real 时，stub 头是否仍允许（默认 false；测试或过渡期可设 true）
+    allowStubWhenReal: bool = Field(default=False, alias="ALLOW_STUB_WHEN_REAL")
+    # JWT HS256 配置（authMode=real 时必须 ≥32 字节；启动期校验）
+    jwtSecret: str = Field(default="", alias="JWT_SECRET")
+    jwtAlgorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+    jwtTtlSeconds: int = Field(default=3600, alias="JWT_TTL_SECONDS")
+    jwtIssuer: str = Field(default="qa-system", alias="JWT_ISSUER")
+    jwtAudience: str = Field(default="qa-system-web", alias="JWT_AUDIENCE")
+    # bcrypt rounds：12（OWASP 推荐上限，登录 ~250ms）
+    bcryptRounds: int = Field(default=12, alias="BCRYPT_ROUNDS")
+    # 防时间侧信道：登录失败时统一延迟（毫秒）
+    authMinDelayMs: int = Field(default=200, alias="AUTH_MIN_DELAY_MS")
+
     # ===== Schema 发现 =====
     # 单数据源允许发现的表数量上限：本地导入/元数据发现的硬保护，防止超大 schema
     # 撑爆 introspection 响应体与缓存。大型 ERP（如 Sage X3 生产库 1600+ 表）可按需调高。

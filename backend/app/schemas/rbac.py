@@ -21,12 +21,15 @@ _CODE_PATTERN = r"^[a-z][a-zA-Z0-9_]*(?:\.[a-z][a-zA-Z0-9_]*)*$"
 
 
 class UserCreate(CamelModel):
-    """新增用户。username 不可变（作为 X-User-Id 映射键）。"""
+    """新增用户。username 不可变（作为 X-User-Id 映射键）。
+    password 必填——admin 创建时必须给初始密码（feat-admin-user-password）。
+    """
 
     username: str = Field(min_length=1, max_length=64, pattern=_USERNAME_PATTERN)
     display_name: str = Field(min_length=1, max_length=128)
     email: str | None = Field(default=None, max_length=255)
     enabled: bool = True
+    password: str = Field(min_length=8, max_length=128)
 
 
 class UserUpdate(CamelModel):

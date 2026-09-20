@@ -1,6 +1,7 @@
 import axios from "axios";
 import { httpClient, showMessageError } from "./client";
-import { API_BASE_URL, DEFAULT_TENANT_ID, DEFAULT_USER_ID } from "../config";
+import { API_BASE_URL } from "../config";
+import { authHeaders } from "./authHeaders";
 import { i18n } from "../i18n";
 import type {
   BatchRelationRequest,
@@ -226,10 +227,7 @@ export async function parseBatchCsv(
       `${API_BASE_URL}${BASE}/batch/parse-csv`,
       form,
       {
-        headers: {
-          "X-Tenant-Id": DEFAULT_TENANT_ID,
-          "X-User-Id": DEFAULT_USER_ID,
-        },
+        headers: authHeaders(),
       }
     );
     return res.data;

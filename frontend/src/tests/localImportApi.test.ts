@@ -13,7 +13,10 @@ vi.mock("../api/client", () => ({ httpClient: httpMock }));
 const axiosPost = vi.hoisted(() => vi.fn());
 vi.mock("axios", () => ({
   default: {
-    create: () => ({ post: axiosPost }),
+    create: () => ({
+      post: axiosPost,
+      interceptors: { request: { use: vi.fn() } },
+    }),
     __esModule: true,
   },
 }));

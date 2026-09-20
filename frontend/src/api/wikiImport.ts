@@ -1,10 +1,7 @@
 import axios from "axios";
 import { httpClient } from "./client";
-import {
-    API_BASE_URL,
-    DEFAULT_TENANT_ID,
-    DEFAULT_USER_ID,
-} from "../config";
+import { API_BASE_URL } from "../config";
+import { authHeaders } from "./authHeaders";
 import type {
     WikiImportExecuteRequest,
     WikiImportFileParseResponse,
@@ -50,10 +47,7 @@ export async function previewImportFile(
         `${API_BASE_URL}${PREFIX}/preview-file`,
         form,
         {
-            headers: {
-                "X-Tenant-Id": DEFAULT_TENANT_ID,
-                "X-User-Id": DEFAULT_USER_ID,
-            },
+            headers: authHeaders(),
         },
     );
     return res.data;

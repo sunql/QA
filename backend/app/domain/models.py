@@ -1187,7 +1187,7 @@ class AuditLog(Base):
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
     entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
     actor: Mapped[str] = mapped_column(String(100), nullable=False)
     actor_departments: Mapped[str | None] = mapped_column(String(500), nullable=True)
     before_json: Mapped[dict[str, Any] | None] = mapped_column(
@@ -1208,7 +1208,9 @@ class AuditLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "action IN ('CREATE','UPDATE','DELETE')",
+            "action IN ('CREATE','UPDATE','DELETE',"
+            "'auth.login','auth.login_failed','auth.logout',"
+            "'auth.password_changed','user.password_reset')",
             name="ck_audit_log_action",
         ),
         Index(

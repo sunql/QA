@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,7 @@ from app.api.v1.rbac_grant import replaceSubjectMenuGrants
 from app.dependencies import CurrentUser, getAdminOnlyActor, getCurrentUser, getDb
 from app.domain.enums import GrantSubjectType
 from app.domain.models import Organization, Role, User, UserOrganization, UserRole
+from app.schemas.auth import AdminResetPasswordRequest
 from app.schemas.rbac import (
     GrantSource,
     MenuCodesUpdate,
@@ -33,6 +34,7 @@ from app.schemas.rbac import (
     UserRead,
     UserUpdate,
 )
+from app.services.auth_service import AuthService
 from app.services.identity_service import IdentityService
 from app.services.menu_config_service import MenuConfigService
 from app.services.permission_service import EffectivePermissions, PermissionService
@@ -288,3 +290,26 @@ async def getUserEffectivePermissions(
         session, user_id, all_menu_codes=visible
     )
     return _to_effective_read(eff)
+
+
+# 注意：必须注册在 /{user_id} 之前。admin 重置密码端点（feat-user-auth）。
+@router.put("/{user_id}/password", status_code=204)
+async def adminResetPassword(
+    user_id: int,
+    payload: AdminResetPasswordRequest,
+    actor: CurrentUser = Depends(getAdminOnlyActor),
+    session: AsyncSession = Depends(getDb),
+) -> Response:
+    """admin 重置用户密码（feat-user-auth）。
+
+    - admin only（``getAdminOnlyActor`` 强制 roles 含 admin）
+    - 自动吊销目标用户所有未过期 session（即时踢出，无需等 JWT TTL 过期）
+    - ``force_change_on_next_login`` 控制是否下次登录强制改密
+    """
+    await AuthService.admin_reset_password(
+        target_user_id=user_id,
+        payload=payload,
+        actor=actor,
+        session=session,
+    )
+    return Response(status_code=204)

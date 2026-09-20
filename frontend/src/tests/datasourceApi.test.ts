@@ -12,7 +12,12 @@ const rawPost = vi.hoisted(() => vi.fn());
 
 vi.mock("../api/client", () => ({ httpClient: httpMock }));
 vi.mock("axios", () => ({
-  default: { create: () => ({ post: rawPost }) },
+  default: {
+    create: () => ({
+      post: rawPost,
+      interceptors: { request: { use: vi.fn() } },
+    }),
+  },
 }));
 
 import {

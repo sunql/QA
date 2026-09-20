@@ -111,6 +111,14 @@ class PermissionDeniedError(DomainError):
     """
 
 
+class AuthFailedError(DomainError):
+    """登录 / 认证失败（feat-user-auth，2026-09-20）。
+
+    统一文案防枚举：登录失败（用户名不存在 / 密码错 / 账号禁用）均抛此错，
+    HTTP 层统一映射 401 + ``MSG_INVALID_CREDENTIALS``。
+    """
+
+
 class BusinessObjectGraphLabelMismatchError(ValidationError):
     """graph_label 与 header_class.class_name 不一致 (Phase 4.4)。
 
@@ -195,6 +203,8 @@ def statusForError(exc: DomainError) -> int:
         # 一并覆盖子类 BusinessObjectGraphLabelMismatchError /
         # FeatureRuleValidationError 等
         return 422
+    if isinstance(exc, AuthFailedError):
+        return 401
     if isinstance(exc, PermissionDeniedError):
         return 403
     if isinstance(exc, LLMUnavailableError):

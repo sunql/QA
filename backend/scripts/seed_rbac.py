@@ -5,13 +5,22 @@ lifespan 每次启动调用，保证至少有可用的超管入口（admin 角�
 
 绑定 user_roles 用 ON CONFLICT DO UPDATE 空 set：幂等但不吞行（见
 seed-upsert 约定：不允许 do_nothing）。
+
+feat-user-auth（2026-09-20）：admin 用户默认设 ``password_hash``（bcrypt
+cost=12，密码 = ``SEED_ADMIN_PASSWORD`` env 或 "Admin@123"）并标记
+``must_change_password=true``，首次登录强制改密。``password_hash`` /
+``must_change_password`` 不在 on_conflict_do_update 的 set 里 ——
+幂等不覆盖已生效的密码字段（运维跑过 seed_user_passwords.py 后再跑
+seed_rbac.py 不会把 admin 的 hash 退回成 "Admin@123"）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
+import bcrypt
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,12 +30,19 @@ from app.models.rbac import ADMIN_ROLE_CODE
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_ADMIN_PASSWORD = os.environ.get("SEED_ADMIN_PASSWORD", "Admin@123")
+SEED_BCRYPT_ROUNDS = 12
+
 ADMIN_USER_SEED = {
     "username": "admin",
     "display_name": "系统管理员",
     "email": None,
     "enabled": True,
 }
+
+
+def _hash_seed_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=SEED_BCRYPT_ROUNDS)).decode("utf-8")
 
 
 async def seedRbacBaseline(session: AsyncSession) -> int:
@@ -53,7 +69,11 @@ async def seedRbacBaseline(session: AsyncSession) -> int:
     )
     await session.execute(role_stmt)
 
-    # 2) admin 用户
+    # 2) admin 用户（feat-user-auth：默认密码 + must_change_password=true）
+    # 幂等 upsert：password_hash 与 must_change_password 不在 on_conflict_do_update
+    # set 中 → 已有 admin 用户首次 seed 后不再被覆盖（运维改过密码后无副作用）。
+    # 新装（admin 行不存在）才写入 "Admin@123"。
+    admin_password_hash = _hash_seed_password(DEFAULT_ADMIN_PASSWORD)
     user_stmt = (
         pg_insert(User)
         .values(
@@ -61,6 +81,8 @@ async def seedRbacBaseline(session: AsyncSession) -> int:
             display_name=ADMIN_USER_SEED["display_name"],
             email=ADMIN_USER_SEED["email"],
             enabled=ADMIN_USER_SEED["enabled"],
+            password_hash=admin_password_hash,
+            must_change_password=True,
         )
         .on_conflict_do_update(
             index_elements=["username"],

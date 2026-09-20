@@ -78,6 +78,10 @@ export const zhCN = {
     themeDark: "暗",
     themeLight: "亮",
     languageSwitch: "切换语言",
+    // feat-user-onboarding（2026-09-20）：删 FALLBACK_NAV 兜底后
+    // /menu-config 失败/空时显式提示，不再静默走扁平菜单。
+    menuLoadFailed: "菜单加载失败",
+    menuEmpty: "暂无授权菜单",
   },
 
   // 菜单层级（Phase X 新增，旧 appLayout.menu.* 保留兼容期）
@@ -187,6 +191,10 @@ export const zhCN = {
       directGrant: "直接授权（用户维度）",
       roleGrant: "角色来源",
       orgGrant: "组织来源",
+      // feat-admin-user-password（2026-09-20）：admin 创建/编辑用户时的密码字段
+      password: "密码",
+      passwordPlaceholder: "编辑时留空表示不修改密码",
+      passwordStrengthHint: "至少 8 位，须含字母与数字",
     },
     role: {
       code: "角色代码",
@@ -258,6 +266,51 @@ export const zhCN = {
     networkError: "网络异常，请稍后重试",
     unknownError: "未知错误",
     noStreamSupport: "当前浏览器不支持流式响应",
+  },
+
+  // 认证（feat-user-auth，2026-09-20）
+  auth: {
+    login: {
+      title: "登录",
+      username: "用户名",
+      password: "密码",
+      rememberMe: "记住我",
+      submit: "登录",
+      loggingIn: "登录中…",
+      policyHint: "密码至少 8 位，必须包含字母和数字",
+      mustChangeNotice: "首次登录或密码被重置后请修改密码",
+    },
+    profile: {
+      title: "个人信息",
+      username: "用户名",
+      displayName: "显示名称",
+      email: "邮箱",
+      enabled: "账号状态",
+      mustChangePassword: "待修改密码",
+      roles: "角色",
+      organizations: "所属组织",
+      lastLoginAt: "最后登录时间",
+      tenantId: "租户",
+      none: "（无）",
+    },
+    changePassword: {
+      title: "修改密码",
+      oldPassword: "当前密码",
+      newPassword: "新密码",
+      confirmPassword: "确认新密码",
+      submit: "提交",
+      submitting: "提交中…",
+      mismatch: "两次输入的新密码不一致",
+      success: "密码已修改，请重新登录",
+      policyHint: "密码至少 8 位，必须包含字母和数字",
+    },
+  },
+
+  userMenu: {
+    profile: "个人信息",
+    changePassword: "修改密码",
+    logout: "退出登录",
+    changePasswordBadge: "待修改",
   },
 
   pages: {

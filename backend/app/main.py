@@ -482,6 +482,12 @@ def createApp() -> FastAPI:
     app.include_router(users.router, tags=["users"])
     app.include_router(roles.router, tags=["roles"])
     app.include_router(organizations.router, tags=["organizations"])
+    # 认证端点（feat-user-auth）：login/me/logout/me-password/password-policy
+    from app.api.v1 import auth as authRouter
+
+    app.include_router(
+        authRouter.router, prefix="/api/v1/auth", tags=["auth"]
+    )
     app.include_router(
         menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]
     )

@@ -417,3 +417,20 @@ MSG_AGENT_TOOL_LAYER_MISMATCH = (
 MSG_AGENT_TOOL_UNREGISTERED = (
     "agent_code={code} 绑定的 tool={tool} 在当前代码中未注册（环境漂移）"
 )
+
+# ===== 用户登录与身份验证（feat-user-auth，2026-09-20）=====
+# 登录失败统一文案「MSG_INVALID_CREDENTIALS」用于用户名不存在/密码错/账号禁用三种场景，
+# 防止外部枚举用户存在性 + 响应时间均匀（无 bcrypt 也跑 dummy hash + sleep）。
+MSG_INVALID_CREDENTIALS = "用户名或密码错误"
+MSG_OLD_PASSWORD_INCORRECT = "当前密码不正确"
+MSG_PASSWORD_TOO_WEAK = "密码至少 8 位且必须包含字母和数字"
+MSG_TOKEN_INVALID = "登录已失效，请重新登录"
+MSG_TOKEN_EXPIRED = "登录已过期，请重新登录"
+MSG_TOKEN_REVOKED = "登录已失效（密码已修改或被吊销），请重新登录"
+MSG_AUTH_REQUIRED = "请先登录"
+MSG_PASSWORD_CHANGED_LOGOUT = "密码已修改，请重新登录"
+MSG_ACCOUNT_DISABLED = "账号已停用，请联系管理员"
+MSG_JWT_SECRET_TOO_SHORT = (
+    "AUTH_MODE=real 时 JWT_SECRET 必须 ≥ 32 字节（当前 {len}），"
+    "用 `python -c 'import secrets; print(secrets.token_urlsafe(48))>'` 生成"
+)

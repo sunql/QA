@@ -7,6 +7,7 @@ import type {
   RoleIdsUpdatePayload,
   OrganizationIdsUpdatePayload,
   MenuCodesUpdatePayload,
+  AdminResetPasswordPayload,
 } from "../types/rbac";
 
 const PREFIX = "/users";
@@ -55,6 +56,15 @@ export async function setUserPermissions(
   payload: MenuCodesUpdatePayload,
 ): Promise<void> {
   await httpClient.put(`${PREFIX}/${userId}/permissions`, payload);
+}
+
+/** admin 重置用户密码（feat-admin-user-password）。
+ * 走已有 PUT /users/{id}/password；后端自动吊销目标用户所有 session。 */
+export async function adminResetPassword(
+  userId: number,
+  payload: AdminResetPasswordPayload,
+): Promise<void> {
+  await httpClient.put(`${PREFIX}/${userId}/password`, payload);
 }
 
 /** 用户有效权限视图（需求 #4）：三来源合集 + 拆分。 */

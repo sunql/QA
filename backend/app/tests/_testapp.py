@@ -179,6 +179,12 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(users.router, tags=["users"])
     testApp.include_router(roles.router, tags=["roles"])
     testApp.include_router(organizations.router, tags=["organizations"])
+    # 认证端点（feat-user-auth）：login/me/logout/me-password/password-policy
+    from app.api.v1 import auth as authRouter
+
+    testApp.include_router(
+        authRouter.router, prefix="/api/v1/auth", tags=["auth"]
+    )
     testApp.include_router(
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"]
     )

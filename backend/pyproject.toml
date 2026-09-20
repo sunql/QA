@@ -45,6 +45,8 @@ dependencies = [
     "xlrd>=2.0.2",
     # MCP Server（Phase 6）：把 qa-system 知识能力暴露给外部 LLM Agent
     "fastmcp>=2.0.0",
+    "bcrypt>=5.0.0",
+    "pyjwt>=2.14.0",
 ]
 
 [project.optional-dependencies]

@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -211,4 +212,54 @@ class PermissionGrant(Base, TimestampMixin):
         return (
             f"<PermissionGrant id={self.id} "
             f"{self.subject_type}:{self.subject_id} menu={self.menu_code!r}>"
+        )
+
+
+class UserSession(Base):
+    """登录会话记录（feat-user-auth，2026-09-20）。
+
+    写入时机：``AuthService.login`` 成功时插入一行（``revoked_at=NULL``）。
+    ``getCurrentUser`` 每次同步查该表验证 ``jti`` 对应的 session 未被吊销
+    且未过期——支持「密码已修改」「admin 重置密码」即时吊销所有 session
+    （无需等待 JWT TTL 自然过期）。
+
+    ``revoked_reason`` 枚举（约定字符串，非 DB enum）：
+    - ``"logout"`` — 用户主动登出
+    - ``"password_changed"`` — 用户自己改密
+    - ``"admin_reset"`` — admin 重置用户密码
+    """
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    jti: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa_text("now()")
+    )
+
+    __table_args__ = (
+        Index("ix_user_sessions_jti", "jti", unique=True),
+        Index("ix_user_sessions_user_id", "user_id"),
+        Index("ix_user_sessions_active", "user_id", "revoked_at"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<UserSession id={self.id} user={self.user_id} jti={self.jti!r} "
+            f"revoked={self.revoked_at is not None}>"
         )

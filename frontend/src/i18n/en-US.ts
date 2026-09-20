@@ -72,6 +72,10 @@ export const enUS = {
     themeDark: "Dark",
     themeLight: "Light",
     languageSwitch: "Switch Language",
+    // feat-user-onboarding (2026-09-20): FALLBACK_NAV removed — /menu-config
+    // failure or empty result must be surfaced, not silently shown as flat nav.
+    menuLoadFailed: "Menu failed to load",
+    menuEmpty: "No authorized menus",
   },
 
   // Menu hierarchy (Phase X — legacy appLayout.menu.* preserved for backward compatibility)
@@ -181,6 +185,10 @@ export const enUS = {
       directGrant: "Direct grants (user)",
       roleGrant: "Via roles",
       orgGrant: "Via organizations",
+      // feat-admin-user-password (2026-09-20): admin password fields on create/edit
+      password: "Password",
+      passwordPlaceholder: "Leave blank to keep current password",
+      passwordStrengthHint: "Min 8 chars, must contain letter and digit",
     },
     role: {
       code: "Role Code",
@@ -252,6 +260,51 @@ export const enUS = {
     networkError: "Network error, please try again later",
     unknownError: "Unknown error",
     noStreamSupport: "Current browser does not support streaming responses",
+  },
+
+  // Authentication (feat-user-auth, 2026-09-20)
+  auth: {
+    login: {
+      title: "Sign In",
+      username: "Username",
+      password: "Password",
+      rememberMe: "Remember me",
+      submit: "Sign in",
+      loggingIn: "Signing in…",
+      policyHint: "Password must be at least 8 characters and contain a letter and a digit",
+      mustChangeNotice: "Please change your password on first sign-in or after a reset",
+    },
+    profile: {
+      title: "Profile",
+      username: "Username",
+      displayName: "Display Name",
+      email: "Email",
+      enabled: "Status",
+      mustChangePassword: "Password change required",
+      roles: "Roles",
+      organizations: "Organizations",
+      lastLoginAt: "Last sign-in",
+      tenantId: "Tenant",
+      none: "(none)",
+    },
+    changePassword: {
+      title: "Change Password",
+      oldPassword: "Current password",
+      newPassword: "New password",
+      confirmPassword: "Confirm new password",
+      submit: "Submit",
+      submitting: "Submitting…",
+      mismatch: "The two passwords do not match",
+      success: "Password updated, please sign in again",
+      policyHint: "Password must be at least 8 characters and contain a letter and a digit",
+    },
+  },
+
+  userMenu: {
+    profile: "Profile",
+    changePassword: "Change password",
+    logout: "Sign out",
+    changePasswordBadge: "Required",
   },
 
   pages: {

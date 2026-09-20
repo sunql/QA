@@ -363,7 +363,9 @@ describe("api/ontology — Batch Relation Engine", () => {
     expect(formData.get("kind")).toBe("relations");
     expect(formData.get("file")).toBe(file);
     expect(config.headers["X-Tenant-Id"]).toBeDefined();
-    expect(config.headers["X-User-Id"]).toBeDefined();
+    // feat-user-auth: 不再注入 X-User-Id，由 Authorization: Bearer 替代
+    expect(config.headers["X-User-Id"]).toBeUndefined();
+    expect(config.headers["Authorization"]).toBeUndefined();
     expect(config.headers["Content-Type"]).toBeUndefined();
     expect(result).toEqual(data);
   });

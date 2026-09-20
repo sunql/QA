@@ -112,7 +112,10 @@ describe("api/document", () => {
     const call = axiosMock.postForm.mock.calls[0];
     expect(call[0]).toMatch(/\/documents\/upload$/);
     expect(call[2].headers["X-Tenant-Id"]).toBeDefined();
-    expect(call[2].headers["X-User-Id"]).toBeDefined();
+    // feat-user-auth: 不再注入 X-User-Id，由 Authorization: Bearer 替代
+    expect(call[2].headers["X-User-Id"]).toBeUndefined();
+    // 没有登录态时也不应有 Authorization —— 测试环境裸 axios 直调
+    expect(call[2].headers["Authorization"]).toBeUndefined();
     expect(result).toEqual({ documentId: "5", chunks: 3 });
   });
 

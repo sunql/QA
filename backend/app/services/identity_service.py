@@ -14,9 +14,11 @@ import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import delete, func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import getSettings
 from app.dependencies import CurrentUser
 from app.domain.enums import GrantSubjectType
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
@@ -85,11 +87,22 @@ class IdentityService:
     async def create_user(
         self, session: AsyncSession, dto: UserCreate, actor: CurrentUser
     ) -> User:
+        from app.services.auth_service import _hash_password
+        from app.services.password_policy import validate_password
+
+        # 服务端强校验（前端 schema 仅 min_length=8，复杂策略服务端再校验）
+        ok, err = validate_password(dto.password)
+        if not ok:
+            raise ValidationError(err or "密码至少 8 位且必须包含字母和数字")
+
+        settings = getSettings()
         row = User(
             username=dto.username,
             display_name=dto.display_name,
             email=dto.email,
             enabled=dto.enabled,
+            password_hash=_hash_password(dto.password, settings.bcryptRounds),
+            must_change_password=True,  # 初始密码强制下次登录改
         )
         session.add(row)
         try:
@@ -99,6 +112,26 @@ class IdentityService:
             if "uq_users_username" in str(e.orig):
                 raise ConflictError(f"用户名已存在: {dto.username}")
             raise
+
+        # feat-user-onboarding（2026-09-20）：新建用户默认授予「个人中心」菜单。
+        # 业务背景：admin 创建的用户通常没归属组织/角色 → PermissionService.
+        # computeEffective 的三维度合集（direct ∪ role ∪ org）全空 →
+        # /menu-config 返回空 → 前端触发 fallback（用户看不到任何菜单）。
+        # 直接 grant item.profile（USER 主体）保证新用户登入即有 1 个可用菜单，
+        # 后续 admin 可在 /admin/users 改归属组织或直接补 grant 扩展权限。
+        # on_conflict_do_nothing 是安全网：理论上 row.id 全新，但重复场景下不抛错。
+        await session.execute(
+            pg_insert(PermissionGrant)
+            .values(
+                subject_type=GrantSubjectType.USER.value,
+                subject_id=row.id,
+                menu_code="item.profile",
+            )
+            .on_conflict_do_nothing(
+                index_elements=["menu_code", "subject_type", "subject_id"],
+            )
+        )
+
         await self._outbox.enqueue(
             session,
             event_type="user_created",

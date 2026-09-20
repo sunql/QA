@@ -6,10 +6,64 @@ import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import AppLayout from "../components/common/AppLayout";
 
-// Ensure AppLayout uses fallback nav immediately (no loading spinner).
-// Use vi.hoisted to guarantee the mock factory is evaluated before module hoisting.
+// Provide a real menu config so AppLayout (which no longer falls back to
+// FALLBACK_NAV since feat-user-onboarding 2026-09-20) can render the items
+// the test clicks (「本体管理」/「数据源」).
 const menuConfigMock = vi.hoisted(() =>
-  vi.fn().mockResolvedValue({ version: "0", sections: [] }),
+  vi.fn().mockResolvedValue({
+    version: "2026-09-20",
+    sections: [
+      {
+        code: "section.aiAgent",
+        labelKey: "menu.section.aiAgent",
+        iconCode: "robot",
+        sortOrder: 100,
+        permissionCode: null,
+        roles: [],
+        path: null,
+        children: [
+          {
+            code: "item.chat",
+            labelKey: "menu.item.chat",
+            iconCode: "message",
+            sortOrder: 110,
+            permissionCode: null,
+            roles: [],
+            path: "/chat",
+          },
+        ],
+      },
+      {
+        code: "section.bizConfig",
+        labelKey: "menu.section.bizConfig",
+        iconCode: "setting",
+        sortOrder: 300,
+        permissionCode: null,
+        roles: [],
+        path: null,
+        children: [
+          {
+            code: "item.ontology",
+            labelKey: "menu.item.ontology",
+            iconCode: "partition",
+            sortOrder: 310,
+            permissionCode: null,
+            roles: [],
+            path: "/ontology",
+          },
+          {
+            code: "item.datasource",
+            labelKey: "menu.item.datasource",
+            iconCode: "database",
+            sortOrder: 320,
+            permissionCode: null,
+            roles: [],
+            path: "/datasource",
+          },
+        ],
+      },
+    ],
+  }),
 );
 vi.mock("../api/menuConfig", () => ({
   fetchMenuConfig: menuConfigMock,
@@ -64,6 +118,11 @@ function renderWithRouter(initial = "/") {
 describe("AppLayout 导航", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // 清理 openKeys — feat-user-onboarding-ext (2026-09-20)：AppLayout 不再
+    // 从 localStorage 读初始 openKeys（每次 mount reset 到
+    // DEFAULT_OPENED_SECTIONS = [section.aiAgent]）。本测试在 render 后
+    // 主动点开「业务配置」section 来确保子项可点击。
+    localStorage.removeItem("menu.openKeys");
   });
 
   it("默认显示侧边栏与首页占位", () => {
@@ -75,6 +134,8 @@ describe("AppLayout 导航", () => {
   it("点击菜单项切换到本体管理页面", async () => {
     const user = userEvent.setup();
     renderWithRouter();
+    // 默认只有 AI Agent 展开；先点开「业务配置」section 让子项「本体管理」可见
+    await user.click(await screen.findByText("业务配置"));
     await waitFor(() => expect(screen.getByText("本体管理")).toBeInTheDocument());
     await user.click(screen.getByText("本体管理"));
     // 用 Tabs 标签（sidebar + header 都没有）确认页面已切换
@@ -82,6 +143,7 @@ describe("AppLayout 导航", () => {
       expect(screen.getByRole("tab", { name: /类/ })).toBeInTheDocument();
       expect(screen.getByRole("tab", { name: /属性/ })).toBeInTheDocument();
     });
+    // 再点开「数据源」（之前点过业务配置已经展开，「数据源」仍可见）
     await user.click(screen.getByText("数据源"));
     await waitFor(() => {
       expect(screen.getByText("数据源管理")).toBeInTheDocument();

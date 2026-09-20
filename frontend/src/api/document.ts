@@ -6,7 +6,9 @@
 
 import axios from "axios";
 import { httpClient } from "./client";
-import { API_BASE_URL, DEFAULT_TENANT_ID, DEFAULT_USER_ID } from "../config";
+import { API_BASE_URL } from "../config";
+import { authHeaders } from "./authHeaders";
+import { useAuthStore } from "../stores/authStore";
 import type {
   DocumentCreate,
   DocumentRead,
@@ -131,10 +133,7 @@ export async function uploadDocument(
     `${API_BASE_URL}${BASE}/upload`,
     form,
     {
-      headers: {
-        "X-Tenant-Id": DEFAULT_TENANT_ID,
-        "X-User-Id": DEFAULT_USER_ID,
-      },
+      headers: authHeaders(),
     },
   );
   return res.data;
@@ -178,10 +177,16 @@ export async function searchDocumentsQa(
   onEvent: (event: DocQaSseEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  // SSE 流式 —— 走裸 fetch。手动注入 Authorization（feat-user-auth）。
+  const token = useAuthStore.getState().token;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
   const res = await fetch("/api/v1/documents/qa", {
     method: "POST",
     credentials: "include",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(payload),
     signal,
   });

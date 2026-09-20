@@ -4,6 +4,9 @@ import { useEffect } from "react";
 // `AntdApp` 由 ThemedRoot 包好（main.tsx → ThemedRoot → AntdApp），
 // 这里只是 useApp() 拿实例来注入到 httpClient 拦截器；不要再嵌套一层。
 import AppLayout from "./components/common/AppLayout";
+import { RequireAuth } from "./components/common/RequireAuth";
+import LoginPage from "./pages/LoginPage";
+import ChangePasswordPage from "./pages/ChangePasswordPage";
 import ModelConfigPage from "./pages/ModelConfigPage";
 import EmbeddingProvidersPage from "./pages/EmbeddingProvidersPage";
 import ChatPage from "./pages/ChatPage";
@@ -61,8 +64,19 @@ export default function App() {
   }, [message]);
   return (
     <Routes>
-      <Route path="/" element={<AppLayout />}>
-        <Route index element={<Navigate to="/models" replace />} />
+      {/* 公开路由：登录页不进 AppLayout */}
+      <Route path="/login" element={<LoginPage />} />
+
+      {/* 受保护路由：所有 AppLayout 子路由都被 RequireAuth 守卫 */}
+      <Route
+        path="/"
+        element={
+          <RequireAuth>
+            <AppLayout />
+          </RequireAuth>
+        }
+      >
+        <Route index element={<Navigate to="/chat" replace />} />
         <Route path="models" element={<ModelConfigPage />} />
         <Route path="embeddings" element={<EmbeddingProvidersPage />} />
         <Route path="chat" element={<ChatPage />} />
@@ -111,6 +125,7 @@ export default function App() {
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />
         <Route path="profile" element={<ProfilePage />} />
+        <Route path="change-password" element={<ChangePasswordPage />} />
       </Route>
     </Routes>
   );

@@ -54,3 +54,4 @@ docker/.env
 
 # Docker volumes
 docker/data/
+.worktrees/

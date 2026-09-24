@@ -103,8 +103,18 @@ class Settings(BaseSettings):
     rateLimitWindow: str = Field(default="minute", alias="RATE_LIMIT_WINDOW")
 
     # ===== CORS =====
+    # 默认值覆盖常见 dev 来源：localhost / 127.0.0.1 / 局域网子网 192.168.x.x /
+    # 10.0.x.x / 172.16-31.x.x（Docker Desktop 主机回环 192.168.65.x 兼容）。
+    # 显式 allowlist（非 "*"）的原因：allow_credentials=True 与 "*" 组合违反 CORS 规范，
+    # 浏览器会拒绝 SSE 等跨域请求。
+    # 生产仍走 isProduction 分支返回 []，由 Nginx 反代同源承载。
     corsOrigins: str = Field(
-        default="http://localhost:5173,http://127.0.0.1:5173", alias="CORS_ORIGINS"
+        default=(
+            "http://localhost:5173,"
+            "http://127.0.0.1:5173,"
+            "http://192.168.50.26:5173"
+        ),
+        alias="CORS_ORIGINS",
     )
 
     # ===== RBAC / Auth (feat-user-auth) =====

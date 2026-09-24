@@ -29,6 +29,7 @@ from app.domain.schemas import (
 from app.services.import_conflict_resolver import ImportConflictResolver
 from app.services.import_llm_enhancer import EnhancedSchemaResult, ImportLlmEnhancer
 from app.services.import_rule_engine import ImportRuleEngine
+from app.services.join_inference import infer_sage_x3_name_convention_joins
 from app.services.ontology_service import OntologyService
 from app.services.schema_introspection_service import SchemaIntrospectionService
 
@@ -57,12 +58,14 @@ class LocalImportService:
         datasource_id: int,
         rules: ImportRuleConfig,
         selected_tables: list[str] | None = None,
+        selected_columns: dict[str, list[str]] | None = None,
+        schema: str | None = None,
     ) -> ImportPreviewResponse:
         ds = await session.get(DataSource, datasource_id)
         if ds is None:
             raise NotFoundError(f"数据源 {datasource_id} 不存在")
 
-        cache = await self._schema_service.introspectAndCache(session, ds)
+        cache = await self._schema_service.introspectAndCache(session, ds, owner=schema)
         response = self._schema_service.buildResponse(cache)
 
         filtered = self._rule_engine.filter_tables(response.tables, rules.table_filter)
@@ -76,16 +79,17 @@ class LocalImportService:
         )
 
         proposed_classes, proposed_properties, proposed_joins = self._build_proposals(
-            enhanced, rules, filtered
+            enhanced, rules, filtered, selected_columns
         )
-        # 分批导入：只保留两端都在白名单内的 join，避免对未导入的目标表生成悬空关联。
+        # 分批导入：只保留两端都在白名单内的 join，避免对未导入的表生成悬空关联。
         if selected_tables:
             wanted = {t.strip().lower() for t in selected_tables if t and t.strip()}
             if wanted:
                 proposed_joins = [
                     j
                     for j in proposed_joins
-                    if (j.target_table or "").lower() in wanted
+                    if (j.source_table or "").lower() in wanted
+                    and (j.target_table or "").lower() in wanted
                 ]
 
         existing_classes = await self._ontology_service.listClasses(session)
@@ -137,8 +141,10 @@ class LocalImportService:
         enhanced: EnhancedSchemaResult,
         rules: ImportRuleConfig,
         original_tables: Sequence[Any],
+        selected_columns: dict[str, list[str]] | None = None,
     ) -> tuple[list[ProposedClass], list[dict[str, Any]], list[ProposedJoin]]:
         enhanced_by_name = {t.name: t for t in enhanced.tables}
+        col_whitelists = self._normalizeSelectedColumns(selected_columns)
 
         proposed_classes: list[ProposedClass] = []
         proposed_properties: list[dict[str, Any]] = []
@@ -153,18 +159,36 @@ class LocalImportService:
             enhanced_cols = (
                 {c.name: c for c in enhanced_table.columns} if enhanced_table else {}
             )
+            col_whitelist = col_whitelists.get((table_name or "").upper())
 
             properties: list[ProposedProperty] = []
             for col in original.columns:
+                # 单表「部分属性导入」：仅保留白名单命中的列（未知列忽略）
+                if col_whitelist is not None and col.column_name.upper() not in col_whitelist:
+                    continue
                 ec = enhanced_cols.get(col.column_name)
                 mapped = self._rule_engine.map_data_type(
                     col.data_type, rules.type_mapping
                 )
+                # feat-ontology-import-comment：description 优先级
+                #   1. LLM 增强（开了 generate_descriptions 时更丰富/更准）
+                #   2. DB 字段注释（col.comment，Oracle/PG/MySQL 都覆盖）
+                #   3. None（兜底空，落到本体后用户可在属性管理页补）
+                # 老的导入流程只取 LLM；现在 DB 自带中文/英文注释时无需 LLM 也能拿到
+                # 语义信息，显著降低 LLM 调用成本 + 减少 LLM 跑偏。
+                # 与 SchemaIntrospectionService._annotateComments 行为对齐：纯空白/None/空串都视为无。
+                prop_description: str | None = None
+                if ec and getattr(ec, "description", None):
+                    prop_description = ec.description
+                else:
+                    raw_col_comment = getattr(col, "comment", None)
+                    if raw_col_comment and raw_col_comment.strip():
+                        prop_description = raw_col_comment.strip()
                 prop = ProposedProperty(
                     source_column=col.column_name,
                     property_name=col.column_name,
                     property_alias=ec.alias if ec else None,
-                    description=ec.description if ec else None,
+                    description=prop_description,
                     data_type=mapped.value,
                     is_primary_key=col.column_name in pk_set,
                     is_foreign_key=col.column_name in fk_cols,
@@ -179,27 +203,120 @@ class LocalImportService:
                     }
                 )
 
+            # 类 description 同款优先级（feat-ontology-import-comment）：
+            # LLM 增强 > DB 表注释 > None。
+            # 与 _annotateComments 对齐：纯空白/None/空串视为无，避免把 "   " 当成有效描述写入本体。
+            class_description: str | None = None
+            if enhanced_table and getattr(enhanced_table, "description", None):
+                class_description = enhanced_table.description
+            else:
+                raw_tbl_comment = getattr(original, "comment", None)
+                if raw_tbl_comment and raw_tbl_comment.strip():
+                    class_description = raw_tbl_comment.strip()
             proposed_classes.append(
                 ProposedClass(
                     source_table=table_name,
                     class_name=table_name,
                     class_alias=enhanced_table.alias if enhanced_table else None,
-                    description=enhanced_table.description if enhanced_table else None,
+                    description=class_description,
                     properties=properties,
                 )
             )
 
-            for fk in original.foreign_keys or []:
-                proposed_joins.append(
-                    ProposedJoin(
-                        source_table=table_name,
-                        source_columns=[fk.column_name],
-                        target_table=fk.ref_table,
-                        target_columns=[fk.ref_column],
-                    )
-                )
+        proposed_joins = self._pruneJoinsOnUnimportedColumns(
+            self._build_joins(original_tables, rules), col_whitelists
+        )
 
         return proposed_classes, proposed_properties, proposed_joins
+
+    @staticmethod
+    def _pruneJoinsOnUnimportedColumns(
+        joins: list[ProposedJoin],
+        col_whitelists: dict[str, set[str]],
+    ) -> list[ProposedJoin]:
+        """丢弃引用到未导入列的 join（避免指向未落库的 property）。
+
+        表未做列选（不在 whitelist 内）时视为全列导入，不受影响；表做列选时，
+        仅当该 join 的所有 source/target 列都在白名单内才保留。返回新列表，不改输入。
+        """
+        kept: list[ProposedJoin] = []
+        for j in joins:
+            src_white = col_whitelists.get((j.source_table or "").upper())
+            if src_white is not None and not all(
+                c.upper() in src_white for c in (j.source_columns or [])
+            ):
+                continue
+            tgt_white = col_whitelists.get((j.target_table or "").upper())
+            if tgt_white is not None and not all(
+                c.upper() in tgt_white for c in (j.target_columns or [])
+            ):
+                continue
+            kept.append(j)
+        return kept
+
+    @staticmethod
+    def _normalizeSelectedColumns(
+        selected_columns: dict[str, list[str]] | None,
+    ) -> dict[str, set[str]]:
+        """把 selected_columns 归一化为 {表名大写: 列名大写集合}；入参为 None 返回空。
+
+        返回新映射，不改输入。列名校验（大小写不敏感）：未知列名在调用处忽略，
+        空表名/空列表条目剔除。
+        """
+        if not selected_columns:
+            return {}
+        out: dict[str, set[str]] = {}
+        for table, columns in selected_columns.items():
+            key = (table or "").strip().upper()
+            if not key or not columns:
+                continue
+            out[key] = {c.strip().upper() for c in columns if c and c.strip()}
+        return out
+
+    @staticmethod
+    def _build_joins(
+        tables: Sequence[Any],
+        rules: ImportRuleConfig,
+    ) -> list[ProposedJoin]:
+        """生成关联候选：声明外键 + Sage X3 列名约定（按规则开关），去重。
+
+        返回新列表。声明 FK（declared_fk）与列名约定（name_convention）产出同一条
+        边时仅保留首次（先声明后约定，二者等价无歧义）。输入不变。
+        """
+        joins: list[ProposedJoin] = []
+        seen: set[tuple[str, tuple[str, ...], str, tuple[str, ...]]] = set()
+
+        def _add(j: ProposedJoin) -> None:
+            key = (
+                (j.source_table or "").upper(),
+                tuple(c.upper() for c in (j.source_columns or [])),
+                (j.target_table or "").upper(),
+                tuple(c.upper() for c in (j.target_columns or [])),
+            )
+            if key not in seen:
+                seen.add(key)
+                joins.append(j)
+
+        inference = rules.join_inference
+        if inference.infer_declared_fk:
+            for original in tables:
+                for fk in original.foreign_keys or []:
+                    _add(
+                        ProposedJoin(
+                            source_table=original.table_name,
+                            source_columns=[fk.column_name],
+                            target_table=fk.ref_table,
+                            target_columns=[fk.ref_column],
+                            join_type="INNER",
+                            relation_type="foreign_key",
+                            is_selected=True,
+                            inferred_by="declared_fk",
+                        )
+                    )
+        if inference.infer_name_convention:
+            for j in infer_sage_x3_name_convention_joins(list(tables)):
+                _add(j)
+        return joins
 
     async def execute_import(
         self,
@@ -231,6 +348,10 @@ class LocalImportService:
                 created_classes += 1
                 created_class_by_table[proposed.source_table] = class_id
 
+        # 整批补齐类向量：单次对账 + 单次 flush，best-effort 不阻塞导入响应
+        if request.sync_embeddings and created_classes:
+            self._ontology_service.syncMissingClassEmbeddingsBestEffort()
+
         class_id_by_table = await self._build_table_to_class_id_map(
             session, created_class_by_table
         )
@@ -254,7 +375,14 @@ class LocalImportService:
                     join_type=proposed_join.join_type,
                     relation_type=proposed_join.relation_type,
                 )
-                await self._ontology_service.createJoin(session, join_dto)
+                await self._ontology_service.createJoin(
+                    session,
+                    join_dto,
+                    actor=actor.userId,
+                    actor_departments=(
+                        ",".join(actor.departments) if actor.departments else None
+                    ),
+                )
                 created_joins += 1
             except Exception as exc:  # noqa: BLE001
                 await session.rollback()
@@ -307,8 +435,16 @@ class LocalImportService:
             created_by=created_by,
         )
         try:
+            # sync_embedding=False：抑制逐类后台向量同步（逐条 flush 10-25s），
+            # 类循环结束后由 syncMissingClassEmbeddingsBestEffort 整批补齐
             created_class = await self._ontology_service.createClass(
-                session, class_dto, actor
+                session,
+                class_dto,
+                actor=actor.userId,
+                actor_departments=(
+                    ",".join(actor.departments) if actor.departments else None
+                ),
+                sync_embedding=False,
             )
         except Exception as exc:  # noqa: BLE001
             await session.rollback()
@@ -339,7 +475,14 @@ class LocalImportService:
                     is_foreign_key=prop.is_foreign_key,
                     source_column=prop.source_column,
                 )
-                await self._ontology_service.createProperty(session, prop_dto)
+                await self._ontology_service.createProperty(
+                    session,
+                    prop_dto,
+                    actor=actor.userId,
+                    actor_departments=(
+                        ",".join(actor.departments) if actor.departments else None
+                    ),
+                )
                 props_created += 1
             except Exception as exc:  # noqa: BLE001
                 await session.rollback()

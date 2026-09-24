@@ -40,7 +40,7 @@ describe("api/dataQualityScore", () => {
   it("computeScore POST /data-quality/scores/compute", async () => {
     httpMock.post.mockResolvedValue({ data: { computedAt: "2026-09-02T10:00:00Z" } });
     await computeScore();
-    expect(httpMock.post).toHaveBeenCalledWith("/data-quality/scores/compute");
+    expect(httpMock.post).toHaveBeenCalledWith("/data-quality/scores/compute", {});
   });
 
   it("listScores GET /data-quality/scores（无 filters）", async () => {

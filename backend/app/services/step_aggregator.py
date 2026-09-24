@@ -12,10 +12,9 @@ from typing import Any
 
 from app.domain.multi_step_plan import MultiStepPlan, StepResult
 from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage
+from app.services.data_summary import summarize_data
 
 logger = logging.getLogger(__name__)
-
-_DATA_SAMPLE_LIMIT = 20  # 与 chat_service._DATA_SAMPLE_LIMIT 保持一致
 
 _STEP_AGGREGATOR_SYSTEM_PROMPT = (
     "你是企业数据分析助手。用户提出复合问题，系统已按子步骤执行多个查询并产出结果。"
@@ -66,14 +65,18 @@ class StepAggregator:
             "\n各子步骤结果：",
         ]
         for r in completed_steps:
+            # 结构化摘要（feat-smart-data-summary，2026-09-18）：替代旧的 data[:20] 截断，
+            # 让汇总 LLM 拿到全量统计 + 关键样本，能基于真实数据生成对比结论。
+            data_summary = summarize_data(r.data)
             data_snippet = json.dumps(
-                r.data[:_DATA_SAMPLE_LIMIT], ensure_ascii=False, default=str
+                data_summary, ensure_ascii=False, default=str
             )
             parts.append(
                 f"\n步骤 {r.step_index + 1}：{_sanitize(r.description)}\n"
                 f"  子问题：{_sanitize(r.sub_question)}\n"
                 f"  SQL：{r.sql or '（未执行）'}\n"
-                f"  数据：{data_snippet}\n"
+                f"  数据摘要（共 {len(r.data)} 行，truncated={data_summary['truncated']}）：\n"
+                f"  {data_snippet}\n"
                 f"  摘要：{_sanitize(r.summary or '（无）')}"
             )
             if r.error:

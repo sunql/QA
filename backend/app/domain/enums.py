@@ -14,6 +14,7 @@ class ProviderType(str, Enum):
 
     OPENAI = "openai"
     AZURE_OPENAI = "azure_openai"
+    MOONSHOT = "moonshot"
     OPENAI_COMPATIBLE_PROXY = "openai_compatible_proxy"
     OLLAMA = "ollama"
 
@@ -282,13 +283,23 @@ class FeatureRefreshFrequency(str, Enum):
 
 
 class DocumentType(str, Enum):
-    """文档类型（Phase 5.1）。"""
+    """文档类型（Phase 5.1）。
+
+    与 frontend/src/types/document.ts DOCUMENT_TYPE_OPTIONS 保持一致；新增值
+    必须同步前端下拉，DB 列 String(30) 容纳全部值。
+    """
 
     CONTRACT = "CONTRACT"
     REPORT_8D = "8D_REPORT"
     AUDIT_REPORT = "AUDIT_REPORT"
     SPEC = "SPEC"
     SOP = "SOP"
+    QUALITY_AGREEMENT = "QUALITY_AGREEMENT"
+    INSPECTION_SPEC = "INSPECTION_SPEC"
+    REMEDIATION_REPORT = "REMEDIATION_REPORT"
+    PURCHASE_SPEC = "PURCHASE_SPEC"
+    MEETING_MINUTES = "MEETING_MINUTES"
+    SAFETY_SHEET = "SAFETY_SHEET"
     QUALITY = "QUALITY"
     OTHER = "OTHER"
 
@@ -310,13 +321,20 @@ class DocumentSecurityLevel(str, Enum):
 
 
 class DocEntityRelationType(str, Enum):
-    """文档-实体关联类型（Phase 5.1）。"""
+    """文档-实体关联类型（Phase 5.1）。
+
+    与 frontend/src/types/document.ts DOC_RELATION_TYPE_OPTIONS 保持一致。
+    """
 
     CONTRACT = "CONTRACT"
     REPORT_8D = "8D_REPORT"
     AUDIT_REPORT = "AUDIT_REPORT"
     SPEC = "SPEC"
     SOP = "SOP"
+    QUALITY_AGREEMENT = "QUALITY_AGREEMENT"
+    INSPECTION_SPEC = "INSPECTION_SPEC"
+    REMEDIATION_REPORT = "REMEDIATION_REPORT"
+    OTHER = "OTHER"
 
 
 class RiskLevel(str, Enum):
@@ -420,8 +438,7 @@ class PermissionResourceType(str, Enum):
     ONTOLOGY_CLASS = "ONTOLOGY_CLASS"
     ONTOLOGY_PROPERTY = "ONTOLOGY_PROPERTY"
     METRIC = "METRIC"
-# === Container-only enums (reverse-synced) ===
-# Source: image sha256:defd2ac80f0b (2026-09-20)
+
 
 class ClassRelationType(str, Enum):
     """本体「类 × 类」语义关系类型（Phase 5.6 关系重构，人工声明）。
@@ -439,6 +456,7 @@ class ClassRelationType(str, Enum):
     INSPECTED_BY = "INSPECTED_BY"
     GENERATED = "GENERATED"
     RELATED_TO = "RELATED_TO"
+
 
 class ReportStatus(str, Enum):
     """评估报告状态（feat-dq-evaluation-report；progress 2026-09-15）。
@@ -458,6 +476,7 @@ class ReportStatus(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
+
 class ReportTimeWindowType(str, Enum):
     """定时报告的时间窗口类型（feat-dq-evaluation-report）。
 
@@ -470,9 +489,9 @@ class ReportTimeWindowType(str, Enum):
     LAST_30D = "LAST_30D"
     LAST_RUN = "LAST_RUN"
 
+
 class ExportFormat(str, Enum):
     """评估报告导出格式（feat-dq-evaluation-report）。"""
 
     PDF = "pdf"
     EXCEL = "excel"
-

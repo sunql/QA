@@ -147,7 +147,7 @@ export default function GraphTraversalPanel() {
           value={maxHops}
           onChange={(v) => setMaxHops(v ?? DEFAULT_MAX_HOPS)}
           style={{ width: 90 }}
-          addonAfter={t("graphTraversalPage.maxHops")}
+          suffix={t("graphTraversalPage.maxHops")}
         />
         <Button
           type="primary"

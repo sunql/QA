@@ -197,7 +197,9 @@ class TestOracleAdapterExecute:
         # Act
         rows = await adapter.execute_read_only("SELECT NAME, QTY FROM T")
         # Assert
-        assert rows == [{"NAME": "A", "QTY": 1}, {"NAME": "B", "QTY": 2}]
+        # 列名统一小写（Oracle cursor.description 大写 → lower()，与 SQLAlchemy 适配器
+        # 及 5 个 DQ evaluator 的小写键取值对齐，见 business_db_pool.py 注释）
+        assert rows == [{"name": "A", "qty": 1}, {"name": "B", "qty": 2}]
         assert captured["user"] == "u"
         assert captured["dsn"] == "h:1521/svc"
         # 同步 cursor.close() 被调用、异步 conn.close() 被 await
@@ -264,8 +266,8 @@ class TestOracleAdapterExecute:
         rows = await adapter.execute_read_only("SELECT K, V FROM T")
         # Assert
         assert len(rows) == 2500
-        assert rows[0] == {"K": "K0", "V": 0}
-        assert rows[-1] == {"K": "K2499", "V": 2499}
+        assert rows[0] == {"k": "K0", "v": 0}  # 列名统一小写（同上）
+        assert rows[-1] == {"k": "K2499", "v": 2499}  # 列名统一小写（同上）
         assert conn.closed is True
 
     async def test_execute_read_only_positive_limit_uses_single_fetchmany(self, monkeypatch) -> None:

@@ -177,17 +177,19 @@ class AgentRegistryService:
                 )
             )
         session.add(entity)
-        await session.flush()
-        await _audit.record(
-            session,
-            entity_type="agent_definition",
-            entity_id=entity.id,
-            action="CREATE",
-            actor=actor.userId,
-            actor_departments=actor.departments,
-            after=_agentToDict(entity),
-        )
+        # flush 必须与 commit 同在 try 内：agent_code 重复在 flush 即抛
+        # IntegrityError，包不到就是裸 500 而非 409
         try:
+            await session.flush()
+            await _audit.record(
+                session,
+                entity_type="agent_definition",
+                entity_id=entity.id,
+                action="CREATE",
+                actor=actor.userId,
+                actor_departments=actor.departments,
+                after=_agentToDict(entity),
+            )
             await session.commit()
         except IntegrityError as exc:
             await session.rollback()

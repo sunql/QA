@@ -16,13 +16,18 @@ Supplier360Page 的 360° 视图对不上 THBI DWS 表的 supplier_code。
 - 仅写 entity_mapping；不动 entity 主表、不动 ontology、不动 feature_values
 
 依赖：
-- 需先跑过 `rebind_ontology_thbi.py` 注册 THBI-Oracle 数据源（id=4，is_default=true）
+- data_source 表里已注册默认活跃 THBI 数据源（is_default=true, is_active=true）
 - 密码由 DataSource.password_encrypted 提供，启动时 `decryptApiKey` 解密
 - 需 PG 元数据库可达（默认 DATABASE_URL）
+- THBI-Oracle 端需 DWD_SUPPLIER / DWD_MATERIAL 表有数据
 
 用法：
     python -m scripts.sync_entity_mapping_from_thbi --dry-run     # 只打印计划
     python -m scripts.sync_entity_mapping_from_thbi               # 真写（幂等）
+
+环境：
+    QUERY_TIMEOUT_SECONDS=600  # DWD_MATERIAL 35w 行默认 30s 不够，
+                              # 同步必须显式拉大到 ≥600；小查询可省略。
 """
 
 from __future__ import annotations
@@ -103,18 +108,24 @@ def _mapping(
 
 
 async def _fetchSupplierCodes(adapter: Any) -> list[tuple[str, str | None]]:
-    """返回 [(supplier_code, supplier_name)]，按 supplier_code 排序去重。"""
+    """返回 [(supplier_code, supplier_name)]，按 supplier_code 排序去重。
+
+    adapter.execute_read_only 统一把列名转小写（business_db_pool.py:422），
+    所以这里取 r.get('supplier_code') 而不是 r.get('SUPPLIER_CODE')。
+    2026-09-16 复盘：曾因大写键读取而所有 supplier 被空 code 过滤掉，
+    表现为 dry-run 显示 suppliers=0 / materials=0（实测 DWD_SUPPLIER 有 3500 行）。
+    """
     rows = await adapter.execute_read_only(
         "SELECT supplier_code, supplier_name FROM THBI.DWD_SUPPLIER ORDER BY supplier_code",
     )
     out: list[tuple[str, str | None]] = []
     seen: set[str] = set()
     for r in rows:
-        code = (r.get("SUPPLIER_CODE") or "").strip()
+        code = (r.get("supplier_code") or "").strip()
         if not code or code in seen:
             continue
         seen.add(code)
-        name = (r.get("SUPPLIER_NAME") or "").strip() or None
+        name = (r.get("supplier_name") or "").strip() or None
         out.append((code, name))
     return out
 
@@ -123,7 +134,7 @@ async def _fetchMaterialCodes(adapter: Any) -> list[tuple[str, str | None]]:
     """返回 [(material_code, description)]：description 取 description_1 + 2 + 3 拼接。
 
     X3 物料通常 description_1 是短名，description_2/3 是补充规格；按非空顺序拼接，
-    给 AutoComplete 完整信息。
+    给 AutoComplete 完整信息。列名取小写键（与 _fetchSupplierCodes 同源）。
     """
     rows = await adapter.execute_read_only(
         "SELECT material_code, description_1, description_2, description_3 "
@@ -132,14 +143,14 @@ async def _fetchMaterialCodes(adapter: Any) -> list[tuple[str, str | None]]:
     out: list[tuple[str, str | None]] = []
     seen: set[str] = set()
     for r in rows:
-        code = (r.get("MATERIAL_CODE") or "").strip()
+        code = (r.get("material_code") or "").strip()
         if not code or code in seen:
             continue
         seen.add(code)
         parts = [
-            (r.get("DESCRIPTION_1") or "").strip(),
-            (r.get("DESCRIPTION_2") or "").strip(),
-            (r.get("DESCRIPTION_3") or "").strip(),
+            (r.get("description_1") or "").strip(),
+            (r.get("description_2") or "").strip(),
+            (r.get("description_3") or "").strip(),
         ]
         name = " ".join(p for p in parts if p) or None
         out.append((code, name))
@@ -223,17 +234,30 @@ async def syncEntityMappings(
 
 
 async def _loadThbiDatasource(session: Any) -> DataSource:
+    """按 (is_default=true, is_active=true) 取当前默认活跃数据源。
+
+    不再硬编码 name：2026-09-16 复盘发现脚本查 'THBI-Oracle'（连字符），
+    但 data_source 表实际注册名是 'THBI Oracle'（空格），导致脚本每次
+    跑都抛 RuntimeError，SUPPLIER 同步从未真实运行过。改为按业务属性
+    (default+active) 查，name 仍记入断言日志方便人眼核对。
+    """
     ds = (
         await session.execute(
-            select(DataSource).where(DataSource.name == "THBI-Oracle"),
+            select(DataSource).where(
+                DataSource.is_default == True,  # noqa: E712
+                DataSource.is_active == True,  # noqa: E712
+            ),
         )
     ).scalars().first()
     if ds is None:
         raise RuntimeError(
-            "未找到 THBI-Oracle 数据源；请先执行 scripts/rebind_ontology_thbi.py 注册 THBI"
+            "未找到默认活跃数据源（is_default=true AND is_active=true）；"
+            "请到 /admin/datasources 把 THBI Oracle 设为默认并激活"
         )
     if not ds.is_active:
-        raise RuntimeError("THBI-Oracle 数据源已禁用（is_active=false）")
+        raise RuntimeError(f"默认数据源 {ds.name!r} 已禁用（is_active=false）")
+    # name 仅做断言日志（人眼核对），不再作为查询键
+    print(f"[sync] 使用默认活跃数据源: name={ds.name!r} id={ds.id} host={ds.host}")
     return ds
 
 

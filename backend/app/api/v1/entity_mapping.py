@@ -2,10 +2,14 @@
 
 挂在 /api/v1/entity-mappings：
   GET    /api/v1/entity-mappings                列表（按 entityType / sourceSystem / enterpriseKey 过滤）
+  GET    /api/v1/entity-mappings/search         AutoComplete 搜索
   GET    /api/v1/entity-mappings/{id}           详情
   POST   /api/v1/entity-mappings                创建（201）
+  POST   /api/v1/entity-mappings/bulk           批量导入（feat-entity-mapping-bulk-import）
   PUT    /api/v1/entity-mappings/{id}           更新
   DELETE /api/v1/entity-mappings/{id}           删除（204）
+
+bulk 端点必须在 /{mappingId} 之前注册（FastAPI 路由按顺序匹配）。
 """
 
 from __future__ import annotations
@@ -17,6 +21,8 @@ from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.enums import SourceSystem
 from app.domain.schemas import (
     BusinessObjectCodeType,
+    EntityMappingBulkImportItem,
+    EntityMappingBulkResult,
     EntityMappingCreate,
     EntityMappingRead,
     EntityMappingSearchHit,
@@ -94,6 +100,25 @@ async def createEntityMapping(
 ) -> EntityMappingRead:
     mapping = await service.createMapping(session, payload, user)
     return entityMappingToRead(mapping)
+
+
+@router.post("/bulk", response_model=EntityMappingBulkResult)
+async def bulkImportEntityMappings(
+    items: list[EntityMappingBulkImportItem],
+    user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: EntityMappingService = Depends(getEntityMappingService),
+) -> EntityMappingBulkResult:
+    """批量导入跨系统编码映射（feat-entity-mapping-bulk-import 2026-09-16）。
+
+    请求体：JSON 数组，元素为 EntityMappingBulkImportItem schema；上限 1000 行。
+    enterprise_key 可省略（默认 0 → 后端按 enterprise_code + entity_type 派生）。
+
+    响应：每行 1 条 EntityMappingBulkResultRow，含 status（inserted/updated/skipped/failed）。
+
+    路由顺序：本端点必须在 /{mappingId} 之前注册（FastAPI 按声明顺序匹配）。
+    """
+    return await service.bulkImportMappings(session, items, user)
 
 
 @router.put("/{mappingId}", response_model=EntityMappingRead)

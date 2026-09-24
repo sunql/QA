@@ -306,6 +306,10 @@ class _SqlaAdapter:
     def __init__(self, url: str) -> None:
         self._url = url
         self._engine: AsyncEngine | None = None
+        # 给 evaluator / 报表工具按 dialect 选 SQL 引号（[[feat-dialect-quoting]]）：
+        # MySQL 默认反引号 `` `tbl` ``，PG 默认双引号 `"tbl"`。识别靠 URL 前缀
+        # （postgresql+asyncpg / mysql+aiomysql），新驱动前缀请同步更新。
+        self.dialect: str = "postgresql" if url.startswith("postgresql") else "mysql"
 
     def _ensureEngine(self) -> AsyncEngine:
         if self._engine is None:
@@ -402,6 +406,13 @@ class _OracleAdapter:
                 cursor = conn.cursor()
                 await cursor.execute(sql)
                 columns = [desc[0] for desc in cursor.description] if cursor.description else []
+                # Oracle cursor.description 返回的是 Oracle 标识符字面大小写（默认大写），
+                # 与 SQLAlchemy 适配器走 result.mappings() 返回小写键不一致。evaluator
+                # 内部全部以小写键（"total"/"passed"）取值，统一规范成小写让 5 个
+                # evaluator（completeness/uniqueness/consistency/validity/referential）
+                # 不用逐个适配 Oracle。否则 row.get("total") 在大写键下命中 None
+                # 回退 0，导致 total=0/passed=0/passRate=0/FAIL 的假阴性。
+                columns = [c.lower() if isinstance(c, str) else c for c in columns]
                 if limit > 0:
                     fetched = await cursor.fetchmany(limit)
                 else:

@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import json
+from datetime import date as _date
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +17,7 @@ import pytest
 from app.domain.enums import DataSourceType
 from app.domain.exceptions import Nl2SqlError
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
-from app.domain.query_plan import QueryPlan
+from app.domain.query_plan import Aggregation, QueryPlan
 from app.services.nl2sql_service import (
     Nl2SqlService,
     _renderStatePart,
@@ -32,7 +34,9 @@ def _buildClass(
 
 
 def _llmConfig() -> SimpleNamespace:
-    return SimpleNamespace(model_name="test-model")
+    # temperature：生产代码 generateQueryPlan/generateSQL 会读 modelConfig.temperature
+    # （LLM 模型选择器改动起），桩必须带齐契约字段，否则 AttributeError。
+    return SimpleNamespace(model_name="test-model", temperature=0.0)
 
 
 def _makeJoin(
@@ -429,6 +433,243 @@ class TestBuildSchemaText:
         text = Nl2SqlService().buildSchemaText([cls])
         assert "漂移" not in text
         assert "警告" not in text
+
+
+class TestSchemaCriticalColumnsDigest:
+    """关键过滤列口径摘要（feat-schema-digest, 2026-09-21）。
+
+    schema 文本 28K 字符 / 13 类,TCLCOD_0 这种非 PK 的 description 易被 LLM
+    注意力漏读(2026-09-21 用户场景:C079 外协误入供货量 Top3)。本节在
+    buildSchemaText 顶部插入「关键过滤口径」摘要,把带 description 的关键
+    业务列集中前置,让 LLM 第一眼看见口径。
+    """
+
+    def test_digest_renders_substantive_descriptions_at_top(self) -> None:
+        """有 description 的属性(>=20 字符)进摘要,顶部渲染、原文仍保留。"""
+        cls = _buildClass(
+            "DIM_IMATERIAL",
+            "ZJTH.DIM_IMATERIAL",
+            props=[
+                {
+                    "property_name": "TCLCOD_0",
+                    "data_type": "STRING",
+                    "source_column": "TCLCOD_0",
+                    "description": (
+                        "TCLCOD_0 的值是 'A02','A03','A04','A05' 的为生产型物料;"
+                        "其余为低值易耗/零星物料。统计供货量默认仅生产型物料。"
+                    ),
+                },
+                {
+                    "property_name": "ITMREF_0",
+                    "data_type": "STRING",
+                    "source_column": "ITMREF_0",
+                    "is_primary_key": True,
+                    "description": "物料编号主键",
+                },
+            ],
+        )
+        text = Nl2SqlService().buildSchemaText([cls])
+
+        # 摘要节标记存在
+        assert "### 关键过滤口径摘要" in text
+        # TCLCOD_0 长描述进摘要
+        digestPos = text.index("### 关键过滤口径摘要")
+        digestEnd = text.index("### DIM_IMATERIAL", digestPos)
+        digest = text[digestPos:digestEnd]
+        assert "DIM_IMATERIAL.TCLCOD_0" in digest
+        assert "生产型物料" in digest
+        # 摘要位置必须在 DIM_IMATERIAL 类块之前(顶部前置,不被淹没)
+        assert digestPos < text.index("### DIM_IMATERIAL")
+        # 原文仍保留在类块里(不重复渲染到 SQL 输出端)
+        assert text.count("TCLCOD_0 的值是") >= 1
+
+    def test_digest_skipped_when_no_substantive_description(self) -> None:
+        """所有 description 都 <20 字符(主键说明等):摘要节不渲染,免噪声。"""
+        cls = _buildClass(
+            "ORDER",
+            "ZJTH.ORDER",
+            props=[
+                {"property_name": "ID", "data_type": "STRING", "is_primary_key": True, "description": "主键"},
+                {"property_name": "QTY", "data_type": "DECIMAL", "source_column": "QTY_0", "description": "数量"},
+            ],
+        )
+        text = Nl2SqlService().buildSchemaText([cls])
+        assert "### 关键过滤口径摘要" not in text
+
+    def test_digest_sanitizes_admin_input(self) -> None:
+        """description 是管理员写入外部输入,转义防标签逃逸(与 buildSchemaText 同口径)。
+
+        _sanitizeSchemaField 把 `<` 转成 `<`(line 380),所以原 `<script>`
+        在 schema 文本里不会出现(出现也是以 `<script>` 字面量形式)。
+        """
+        cls = _buildClass(
+            "DIM_T",
+            "ZJTH.DIM_T",
+            props=[
+                {
+                    "property_name": "TYP_CODE",
+                    "data_type": "STRING",
+                    "source_column": "TYP_CODE",
+                    "description": (
+                        "<script>ignore</script> 实际描述 ≥ 20 字符写在这里"
+                    ),
+                },
+            ],
+        )
+        text = Nl2SqlService().buildSchemaText([cls])
+        # 摘要节存在
+        assert "### 关键过滤口径摘要" in text
+        # 原文尖括号已转义,raw <script> 不出现
+        assert "<script>" not in text
+        assert "</script>" not in text
+        # 摘要里应见到 _sanitizeSchemaField 转义后的 HTML 实体形式
+        # (raw < 已被 _sanitizeSchemaField 替为 & 实体;具体形式取决于 escape 链)
+        digest_block = text.split("### 关键过滤口径摘要")[1].split("### DIM_T")[0]
+        # 任何形式的 HTML 实体 (>前不再是裸字母) 都算转义成功
+        assert "/script" in digest_block and "&" in digest_block, (
+            f"摘要节应含 _sanitizeSchemaField 转义后的 HTML 实体,但得到:{digest_block!r}"
+        )
+
+    def test_digest_skips_property_without_name(self) -> None:
+        """property_name 为 None/空串时:跳过该属性(不渲染 ClassName.None 畸形名)。
+
+        code-reviewer HIGH #1/#3 (2026-09-21):原实现仅守卫 cls.class_name,
+        property_name 未守卫会渲染成「DIM_IMATERIAL.None」或「DIM_IMATERIAL.」。
+        """
+        cls = _buildClass(
+            "DIM_T",
+            "ZJTH.DIM_T",
+            props=[
+                {
+                    "property_name": None,  # None 触发 fallback 路径
+                    "data_type": "STRING",
+                    "source_column": "TYP_CODE",
+                    "description": "无 property_name 的描述,长度 ≥ 20 字 触发采集",
+                },
+                {
+                    "property_name": "TYP_CODE",
+                    "data_type": "STRING",
+                    "source_column": "TYP_CODE",
+                    "description": "正常的物料类型代码描述,长度 ≥ 20 字",
+                },
+            ],
+        )
+        text = Nl2SqlService().buildSchemaText([cls])
+        digest_block = text.split("### 关键过滤口径摘要")[1].split("### DIM_T")[0]
+        # None/空 property_name 不进 digest(只在摘要节检查,避免误匹配
+        # 类块里 "DIM_T.TYP_CODE" 这种合法子串)
+        assert "DIM_T.None" not in digest_block
+        # 摘要行格式严格匹配 "- ClassName.PropertyName: desc",
+        # 不应出现 "- DIM_T.: ..." 这种尾部点号的畸形名
+        import re as _re
+        malformed = _re.findall(r"^- DIM_T\.[^A-Za-z_]+: ", digest_block, _re.MULTILINE)
+        assert not malformed, f"摘要含畸形属性名:{malformed!r}"
+        # 正常 property_name 进 digest
+        assert "DIM_T.TYP_CODE" in digest_block
+
+    def test_digest_renders_in_deterministic_order(self) -> None:
+        """摘要顺序按 (class_name, property_name) 字典序:同输入任意顺序输出一致。
+
+        code-reviewer HIGH #2 (2026-09-21):原实现按类/属性 list 迭代顺序追加,
+        同一组类以不同列表序传入会得到不同 digest → 不可重现 prompt + 测试
+        flakiness。修复后排序稳定。
+        """
+        propA = {
+            "property_name": "ZZZ_CODE",
+            "data_type": "STRING",
+            "source_column": "ZZZ_CODE",
+            "description": "Z 类代码描述,长度 ≥ 20 字 触发采集",
+        }
+        propB = {
+            "property_name": "AAA_CODE",
+            "data_type": "STRING",
+            "source_column": "AAA_CODE",
+            "description": "A 类代码描述,长度 ≥ 20 字 触发采集",
+        }
+        clsX = _buildClass("DIM_X", "ZJTH.DIM_X", props=[propA, propB])
+        clsY = _buildClass("DIM_Y", "ZJTH.DIM_Y", props=[propA, propB])
+
+        # 顺序 1: [X, Y]
+        text1 = Nl2SqlService().buildSchemaText([clsX, clsY])
+        # 顺序 2: [Y, X], propA/propB 顺序也交换
+        text2 = Nl2SqlService().buildSchemaText(
+            [
+                _buildClass("DIM_Y", "ZJTH.DIM_Y", props=[propB, propA]),
+                _buildClass("DIM_X", "ZJTH.DIM_X", props=[propB, propA]),
+            ]
+        )
+        # 提取摘要部分
+        digest1 = text1.split("### 关键过滤口径摘要")[1].split("### DIM_")[0]
+        digest2 = text2.split("### 关键过滤口径摘要")[1].split("### DIM_")[0]
+        assert digest1 == digest2, (
+            f"digest 顺序依赖输入顺序 → 不可重现 prompt。\n"
+            f"  顺序1: {digest1!r}\n  顺序2: {digest2!r}"
+        )
+        # 字典序:DIM_X.AAA_CODE 早于 DIM_X.ZZZ_CODE,DIM_Y.*
+        assert digest1.index("DIM_X.AAA_CODE") < digest1.index("DIM_X.ZZZ_CODE")
+        assert digest1.index("DIM_X.ZZZ_CODE") < digest1.index("DIM_Y.AAA_CODE")
+
+    def test_digest_caps_item_count(self) -> None:
+        """条目数硬封顶 50(security-reviewer MEDIUM)。
+
+        防恶意管理员堆 description 撑爆 schema prompt:仅渲染前 50 条,
+        超量触发 logger.warning(测试里不强制断言日志,只验证数量上限生效)。
+        """
+        # 造 60 个不同 property,都命中关键词
+        many_classes = [
+            _buildClass(
+                f"DIM_{i:02d}",
+                f"ZJTH.DIM_{i:02d}",
+                props=[
+                    {
+                        "property_name": "TYP_CODE",
+                        "data_type": "STRING",
+                        "source_column": "TYP_CODE",
+                        "description": f"类型代码描述 {i},长度 ≥ 20 字 触发采集",
+                    }
+                ],
+            )
+            for i in range(60)
+        ]
+        text = Nl2SqlService().buildSchemaText(many_classes)
+        # 摘要节存在
+        assert "### 关键过滤口径摘要" in text
+        # 摘要里最多 50 行 "- ClassName.PropertyName: ..." 格式
+        import re as _re
+        item_lines = _re.findall(r"^- DIM_\d{2}\.TYP_CODE: ", text, _re.MULTILINE)
+        assert len(item_lines) == 50, (
+            f"摘要条数应被封顶在 50,实际 {len(item_lines)}"
+        )
+
+    def test_digest_truncates_long_descriptions(self) -> None:
+        """单条 description 长度硬封顶 200 字(security-reviewer MEDIUM)。
+
+        真实场景下 ontology_property.description Pydantic schema 层有 500 字 cap,
+        但攻击者可绕过 schema 走 DB 直写;渲染层硬封顶作为防御纵深。
+        """
+        long_desc = "A" * 500  # 远超 200 字封顶
+        cls = _buildClass(
+            "DIM_T",
+            "ZJTH.DIM_T",
+            props=[
+                {
+                    "property_name": "TYP_CODE",
+                    "data_type": "STRING",
+                    "source_column": "TYP_CODE",
+                    "description": long_desc,
+                }
+            ],
+        )
+        text = Nl2SqlService().buildSchemaText([cls])
+        # 摘要里的 description 长度 <= 200 + "…"(1 字符)
+        digest_block = text.split("### 关键过滤口径摘要")[1].split("### DIM_T")[0]
+        # 取 - DIM_T.TYP_CODE: 后面的内容
+        line = digest_block.split("- DIM_T.TYP_CODE: ", 1)[1].split("\n", 1)[0]
+        assert len(line) <= 201, (
+            f"摘要单条 description 应 ≤ 200 字 + '…',实际 {len(line)} 字:{line!r}"
+        )
+        # 截断标记 "…" 存在
+        assert line.endswith("…")
 
 
 class TestParseSqlFromResponse:
@@ -1197,3 +1438,300 @@ def _buildJoinedClasses():
         system = fake.calls[0][0][1]
         assert "时间粒度" in system
         assert "DATE_FORMAT" in system
+
+
+class TestPerGroupTopNPrompts:
+    """2026-09-09：两阶段对「分别/各/每个 X 的 Top N」的逐组取前 N 引导。
+
+    计划阶段：模型须输出 partitionBy/perGroupLimit 而非全局 rowLimit=N×组数；
+    SQL 阶段：计划含「每组 Top-N」时用 ROW_NUMBER() OVER (PARTITION BY …) 实现。
+    """
+
+    @staticmethod
+    def _cls() -> OntologyClass:
+        return _buildClass(
+            "PRECEIPT",
+            "ZJTH.PRECEIPT",
+            alias="收货单",
+            props=[
+                {"property_name": "BPSNUM", "source_column": "BPSNUM_0"},
+                {"property_name": "MATERIAL", "source_column": "MAT_0"},
+                {"property_name": "QTY", "source_column": "QTY_0"},
+            ],
+        )
+
+    @staticmethod
+    def _partitionPlan() -> QueryPlan:
+        return QueryPlan.from_dict(
+            {
+                "target": "三个供应商各自的 Top3 物料",
+                "selectedClasses": ["PRECEIPT"],
+                "selectedProperties": ["BPSNUM", "MATERIAL", "QTY"],
+                "aggregations": [{"function": "SUM", "property": "QTY", "alias": "TOTAL_QTY"}],
+                "groupBy": ["BPSNUM", "MATERIAL"],
+                "sortBy": [{"property": "TOTAL_QTY", "direction": "desc"}],
+                "partitionBy": ["BPSNUM"],
+                "perGroupLimit": 3,
+            }
+        )
+
+    async def test_plan_prompt_guides_per_group_topn(self) -> None:
+        fake = _FakeLlm(["```json\n{}\n```"])
+        service = Nl2SqlService()
+        await service.generateQueryPlan(
+            "分别看这三个供应商供货量最大的三种物料", [self._cls()], fake, _llmConfig(),
+        )
+        system = fake.calls[0][0][1]
+        # JSON 模板须暴露 partitionBy / perGroupLimit 槽位
+        assert '"partitionBy"' in system
+        assert '"perGroupLimit"' in system
+        # 规则明确：分别/各/每个 X 的 top N → 每组各取前 N；禁止 N×组数近似全局截断
+        assert "每组各取前" in system
+        assert "N×组数" in system
+        assert "ROW_NUMBER() OVER (PARTITION BY" in system
+
+    async def test_sql_prompt_requires_row_number_for_partition_plan(self) -> None:
+        fake = _FakeLlm(["```sql\nSELECT 1 FROM DUAL\n```"])
+        service = Nl2SqlService()
+        plan = self._partitionPlan()
+        await service.generateSql(
+            "分别看这三个供应商供货量最大的三种物料", [self._cls()], fake, _llmConfig(),
+            maxRetries=0, plan=plan,
+        )
+        system = fake.calls[0][0][1]
+        # planToText 渲染的逐组 Top-N 行进入 SQL 阶段 prompt
+        assert "每组 Top-N" in system
+        assert "ROW_NUMBER() OVER (PARTITION BY" in system
+        # 既有行数规则不丢（regression guard）
+        assert "行数限制以查询计划为准" in system
+        assert "不要自行限制行数" in system
+        # 安全红线：不引入 FETCH FIRST N ROWS ONLY 字面量
+        assert "FETCH FIRST N ROWS ONLY" not in system
+
+
+class TestScopeHintPromptInjection:
+    """主子问题并集注入：主问题的时间/范围限定经 scopeQuestion 落入
+    计划与 SQL 阶段 user prompt，子问题不再丢失「上半年」类条件。
+
+    现有实现（bug）：scopeQuestion 只在 _applyScopeRowLimit 决策行数，
+    从未到达 prompt。修复：user prompt 末尾追加 <scope_hint> 主问原文</scope_hint>
+    段，强指令化"主问的范围限定适用于本步"，并附带 instructions 引导模型把
+    时间/范围条件写入 conditions / WHERE；scopeQuestion=None（单步）则不注入。
+    """
+
+    def _cls(self) -> OntologyClass:
+        return OntologyClass(
+            class_name="PRECEIPT",
+            source_table="T_PRECEIPT",
+            properties=[
+                OntologyProperty(property_name="BPSNUM", source_column="BPSNUM"),
+                OntologyProperty(property_name="QTY", source_column="QTY"),
+                OntologyProperty(property_name="RCPDATE", source_column="RCPDATE"),
+            ],
+        )
+
+    @staticmethod
+    def _validPlanJson() -> str:
+        plan = QueryPlan(
+            target="各供应商收货数量",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM",),
+        )
+        return json.dumps(plan.to_dict(), ensure_ascii=False)
+
+    async def test_plan_user_prompt_includes_scope_hint_block(self) -> None:
+        """scopeQuestion 注入 _buildPlanUserPrompt：主问原文出现在 <scope_hint> 块。
+
+        主问含时间词，子问题未含；prompt 必须显式带主问让模型继承 conditions。
+        """
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "查各供应商收货数量",
+            errors=[],
+            scopeQuestion="公司2025年上半年的采购情况",
+        )
+        assert "<scope_hint>" in prompt
+        assert "</scope_hint>" in prompt
+        assert "公司2025年上半年的采购情况" in prompt
+        assert "主问题" in prompt or "主问" in prompt or "主问题（多步场景）" in prompt
+        # 安全红线：scope 块经转义/框定（数据非指令），不裸注入
+        assert "_sanitizeContext" not in prompt  # 不暴露实现细节字面量
+        # 子问题原文仍存在
+        assert "查各供应商收货数量" in prompt
+
+    async def test_plan_user_prompt_omits_scope_hint_when_unset(self) -> None:
+        """scopeQuestion=None（单步场景）时不注入 <scope_hint>，避免无意义冗余。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt("查各供应商收货数量", errors=[])
+        assert "<scope_hint>" not in prompt
+        assert "</scope_hint>" not in prompt
+
+    async def test_sql_user_prompt_includes_scope_hint_block(self) -> None:
+        """scopeQuestion 注入 _buildUserPrompt（SQL 阶段）。"""
+        service = Nl2SqlService()
+        prompt = service._buildUserPrompt(
+            "查各供应商收货数量",
+            errors=[],
+            executionError=None,
+            scopeQuestion="公司2025年上半年的采购情况",
+        )
+        assert "<scope_hint>" in prompt
+        assert "公司2025年上半年的采购情况" in prompt
+
+    async def test_sql_user_prompt_omits_scope_hint_when_unset(self) -> None:
+        service = Nl2SqlService()
+        prompt = service._buildUserPrompt("查各供应商收货数量", errors=[])
+        assert "<scope_hint>" not in prompt
+
+    async def test_generate_query_plan_threads_scope_question_into_user_prompt(self) -> None:
+        """generateQueryPlan 端到端：scopeQuestion 真正到达 user prompt。"""
+        fake = _FakeLlm([self._validPlanJson()])
+        service = Nl2SqlService()
+        await service.generateQueryPlan(
+            "查各供应商收货数量",
+            [self._cls()], fake, _llmConfig(),
+            scopeQuestion="公司2025年上半年的采购情况",
+        )
+        userContent = fake.calls[0][1][1]  # (role, content) tuples
+        assert "<scope_hint>" in userContent
+        assert "公司2025年上半年的采购情况" in userContent
+
+    async def test_generate_sql_threads_scope_question_into_user_prompt(self) -> None:
+        """generateSql 端到端：scopeQuestion 真正到达 SQL 阶段 user prompt。"""
+        fake = _FakeLlm(["```sql\nSELECT BPSNUM FROM T_PRECEIPT\n```"])
+        service = Nl2SqlService()
+        await service.generateSql(
+            "查各供应商收货数量",
+            [self._cls()], fake, _llmConfig(),
+            scopeQuestion="公司2025年上半年的采购情况",
+        )
+        userContent = fake.calls[0][1][1]
+        assert "<scope_hint>" in userContent
+        assert "公司2025年上半年的采购情况" in userContent
+
+# =============================================================================
+# 当前日期锚点注入（时间相对表述的年份解析）
+#
+# 背景：「4月份有多少供应商下单」被 LLM 解析成 2025 年——plan/SQL 两个阶段
+# 的 prompt 都没有告诉模型今天是几号，无年份的时间表述只能靠训练数据猜。
+# =============================================================================
+
+
+class TestCurrentDateAnchor:
+    """plan / SQL 两个阶段 prompt 必须包含服务端当前日期。"""
+
+    def test_plan_system_prompt_contains_current_date(self) -> None:
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "今天是" in prompt
+        assert _date.today().isoformat() in prompt
+
+    def test_sql_system_prompt_contains_current_date(self) -> None:
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildSystemPrompt("", dialect, None)
+        assert "今天是" in prompt
+        assert _date.today().isoformat() in prompt
+
+    def test_current_date_marked_as_data_not_instruction(self) -> None:
+        """日期是事实数据：注明由服务端提供，防 prompt 注入面扩大。"""
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "服务端" in prompt
+
+
+class TestEntityNameColumnRule:
+    """plan prompt 应引导 LLM 对实体列同时选出中文名称列（编码+名称都展示）。
+
+    背景：订单明细表只有供应商编号 FK，名称在供应商主表（需 JOIN）；
+    无引导时模型走最短路径只选编码列，结果可读性差。
+    """
+
+    def test_plan_prompt_guides_selecting_entity_name_column(self) -> None:
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "名称列" in prompt
+        assert "供应商" in prompt
+
+    def test_plan_prompt_requires_join_only_from_directory(self) -> None:
+        """补名称的 JOIN 仍受目录约束：提示语须重申只用 JOIN 关系段落。"""
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "JOIN 关系" in prompt
+
+
+# =============================================================================
+# 聚合类问题 schema 选择建议（feat-ontology-recall-pruning step E）
+#
+# 背景：用户问"占比 / 排名 / TOP3 / 总数"时，LLM 在 DWD/ODS 明细表层做除法
+# 或漏掉窗口函数公式 → SQL 不算百分比 / 错把供货期内的 D1 后几年裁掉。
+# 修复：用户问题命中聚合关键词时，在 plan user prompt 追加「Schema 选择建议」
+# 段落，引导 LLM 优先选用 ADS 黄金路径视图（ADS_SUPPLIER_360 /
+# ADS_SUPPLIER_ORDER_DETAIL）以及窗口函数 SUM(x)/SUM(SUM(x)) OVER() 而非
+# CROSS JOIN 笛卡尔积。这是软约束，配合 D 步 ADS 加权召回更稳。
+# =============================================================================
+
+
+class TestAggregateSchemaHint:
+    """plan user prompt 在聚合类问题下追加 schema 选择建议段（仅文本注入）。"""
+
+    def test_plan_user_prompt_injects_schema_hint_when_question_has_占比(self) -> None:
+        """占比 → 注入「Schema 选择建议」段，提及 ADS 视图与窗口函数。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "B019、B125、D1 三家供应商 3 月供货量 top3 物料占比", errors=[],
+        )
+        assert "Schema 选择建议" in prompt
+        assert "ADS" in prompt
+        # 关键算法提示：窗口函数而非笛卡尔积
+        assert "SUM(SUM" in prompt or "OVER" in prompt
+
+    def test_plan_user_prompt_injects_schema_hint_for_topN_keyword(self) -> None:
+        """TOP3 排名类问题也触发（不只占比）。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "TOP3 物料名称", errors=[],
+        )
+        assert "Schema 选择建议" in prompt
+
+    def test_plan_user_prompt_omits_schema_hint_when_no_aggregate_keyword(self) -> None:
+        """纯主数据查询（无占比 / 排名 / total 等）不注入，避免无意义冗余。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "B019 圣特供应商编号是多少", errors=[],
+        )
+        assert "Schema 选择建议" not in prompt
+
+    def test_plan_user_prompt_injects_schema_hint_for_total_keyword(self) -> None:
+        """total 英文关键词也触发（大小写不敏感）。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "suppliers total orders per month", errors=[],
+        )
+        assert "Schema 选择建议" in prompt
+
+
+class TestSchemaLayerPriorityHint:
+    """feat-layer-priority: NL2SQL plan user prompt 注入层优先级段。
+
+    验证 `_LAYER_PRIORITY_HINT` 在 `_buildPlanUserPrompt` 末尾无条件追加——
+    不论问题是聚合类还是主数据类，只要走 chat pipeline 都会看到「Schema 选表优先级」段。
+    """
+
+    def test_layer_priority_hint_injected(self) -> None:
+        """聚合类问题：层优先级段必须含 ADS_/DWD_/ODS 显式访问说明等关键串。"""
+        service = Nl2SqlService()
+        question = "3 月供货量最多的三种物料"
+        prompt = service._buildPlanUserPrompt(question, errors=[])
+        assert "Schema 选表优先级" in prompt
+        assert "ADS_" in prompt
+        assert "DWD_" in prompt
+        assert "ODS_ 业务原始表仅在问题显式要求访问" in prompt
+
+    def test_layer_priority_hint_present_for_supplier_query(self) -> None:
+        """主数据类问题（B019 供应商编号）也必须含层优先级段——无条件注入。"""
+        service = Nl2SqlService()
+        question = "B019 圣特供应商编号是多少"
+        prompt = service._buildPlanUserPrompt(question, errors=[])
+        assert "Schema 选表优先级" in prompt

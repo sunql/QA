@@ -2,26 +2,47 @@ import "@testing-library/jest-dom";
 import { createElement } from "react";
 import { vi } from "vitest";
 
-// react-i18next 默认 mock：useTranslation 返回 key 自身（测试只断言 key 出现即可）。
-// initReactI18next 必须在 mock 中返回合法的「3rdParty 模块」对象 —— 否则 stores/api 里
-// 间接 import ../i18n → ./i18n.ts → i18n.use(initReactI18next) 会抛「wrong module」。
-// 任何返回 { type } 的对象都会被 i18next 接受；这里返回 type:"3rdParty" 占位即可。
-vi.mock("react-i18next", () => ({
-  useTranslation: () => ({ t: (k: string) => k }),
-  initReactI18next: () => ({ type: "3rdParty" }),
-  Trans: ({ children }: { children?: React.ReactNode }) => children,
-}));
+// 强制加载 i18n.ts 触发 i18n.use(initReactI18next).init({resources: {zh-CN, en-US}, ...})
+// —— 大量页面（AdminToolsPage/AdminMenusPage/...）直接 `import { useTranslation }
+// from "react-i18next"`，不经 ../i18n wrapper。如果测试只 import 那些页面，
+// i18n.ts 顶层 init 永远不跑 → t(key) 返回 key 自身。这里副作用加载确保
+// resources 进 i18next instance + setI18n(instance) 被调用。
+import "../i18n";
 
-// 同步 mock ../i18n 模块：完全替换为 stub，**不调用 importOriginal**，否则 i18n.ts 模块顶层
-// 的 i18n.use(...).init(...) 会先于 mock 工厂执行，触发「wrong module」。
-// 组件用 useTranslation hook 走 react-i18next（已 mock），api/stores 用 i18n.t
-// 在测试里也只需返回 key 字符串即可。
-vi.mock("../i18n", () => ({
-  useTranslation: () => ({ t: (k: string) => k }),
-  zhCN: {},
-  enUS: {},
-  i18n: { t: (k: string) => k, use: () => undefined, init: () => undefined },
-}));
+// react-i18next 默认 mock：useTranslation 直接走真实 i18next 实例（已被 ../i18n 初始化
+// 注入 zh-CN/en-US 资源），所以 t(key) 会返回真实中文文案 —— 这样既保证 i18n.ts
+// 顶层 i18n.use(initReactI18next).init(...) 不报「wrong module」，也保证现有测试断言
+// 真实中文文案不挂。
+// 注意：真实 initReactI18next 是对象 { type: '3rdParty', init(i){} }，i18n.ts 直接
+// i18n.use(initReactI18next) 传它本身；不能用 () => ({type:'3rdParty'}) 函数替身，
+// 否则函数没有 .type，触发 i18next「You are passing a wrong module!」。
+//
+// 但 init(i){} 不能空实现 —— 必须把 instance 注入到 react-i18next 的全局 i18n
+// 引用里（setI18n），否则 useTranslation/useI18nextTranslation 拿不到资源返回 key。
+// 这里偷懒通过 i18next 自身的 react 模块设引用；react-i18next 提供 setI18n 导出。
+vi.mock("react-i18next", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-i18next")>();
+  return {
+    ...actual,
+    initReactI18next: {
+      type: "3rdParty",
+      init(instance: import("i18next").i18n) {
+        // 委托真实 init 副作用：把 instance 注入 react-i18next 内部状态，
+        // useTranslation 才能读到资源。直接 import 真实 setI18n 避免依赖。
+        const reactI18next = actual as unknown as {
+          setI18n?: (i: import("i18next").i18n) => void;
+        };
+        reactI18next.setI18n?.(instance);
+      },
+    },
+    Trans: ({ children }: { children?: React.ReactNode }) => children,
+  };
+});
+
+// 不 mock ../i18n —— i18n.ts 顶层 i18n.use(...).init(...) 会通过被 mock 的
+// initReactI18next（返回 {type:"3rdParty"}）安全通过 init，资源完整加载。
+// 这样 useTranslation/useI18nextTranslation 走真实 i18next 实例返回翻译文本，
+// 现有断言真实文案的测试（RoutingMetricsPage、useTablePagination 等）直接复用。
 
 // Monaco Editor mock（Phase 8）：jsdom 中加载 monaco 会触发 worker 请求，
 // 用占位 div 代替；与 echarts-for-react mock 同模式。

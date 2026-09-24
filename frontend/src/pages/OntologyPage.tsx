@@ -7,8 +7,10 @@ import {
   Table,
   Tooltip,
   Typography,
+  Button,
+  Space,
 } from "antd";
-import { SearchOutlined } from "@ant-design/icons";
+import { SearchOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { listClasses, searchOntology } from "../api/ontology";
 import type { OntologyClass, OntologySearchHit } from "../types/ontology";
 import { useTranslation } from "../i18n";
@@ -16,6 +18,8 @@ import ClassTab from "../components/ontology/ClassTab";
 import PropertyTab from "../components/ontology/PropertyTab";
 import MetricTab from "../components/ontology/MetricTab";
 import JoinTab from "../components/ontology/JoinTab";
+import SemanticRelationTab from "../components/ontology/SemanticRelationTab";
+import BatchRelationModal from "../components/ontology/BatchRelationModal";
 
 const { Title } = Typography;
 
@@ -31,6 +35,7 @@ export default function OntologyPage() {
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<OntologySearchHit[]>([]);
   const [searchModalOpen, setSearchModalOpen] = useState(false);
+  const [batchModalOpen, setBatchModalOpen] = useState(false);
 
   const loadClasses = useCallback(async () => {
     try {
@@ -109,18 +114,23 @@ export default function OntologyPage() {
         <Title level={4} style={{ margin: 0 }}>
           {t("pages.ontology")}
         </Title>
-        <Input.Search
-          placeholder={t("forms.ontology.semanticSearchPlaceholder")}
-          enterButton={
-            <span>
-              <SearchOutlined /> {t("semanticSearchButton")}
-            </span>
-          }
-          style={{ width: 340 }}
-          loading={searching}
-          onSearch={(q) => void handleSearch(q)}
-          allowClear
-        />
+        <Space>
+          <Button icon={<ThunderboltOutlined />} onClick={() => setBatchModalOpen(true)}>
+            {t("forms.ontology.batchRelations.button")}
+          </Button>
+          <Input.Search
+            placeholder={t("forms.ontology.semanticSearchPlaceholder")}
+            enterButton={
+              <span>
+                <SearchOutlined /> {t("semanticSearchButton")}
+              </span>
+            }
+            style={{ width: 340 }}
+            loading={searching}
+            onSearch={(q) => void handleSearch(q)}
+            allowClear
+          />
+        </Space>
       </div>
       <Tabs
         defaultActiveKey="class"
@@ -144,6 +154,11 @@ export default function OntologyPage() {
             key: "join",
             label: t("forms.ontology.tabs.joins"),
             children: <JoinTab classes={classes} />,
+          },
+          {
+            key: "semanticRelation",
+            label: t("forms.ontology.tabs.semanticRelations"),
+            children: <SemanticRelationTab classes={classes} />,
           },
         ]}
       />
@@ -169,6 +184,10 @@ export default function OntologyPage() {
           />
         )}
       </Modal>
+      <BatchRelationModal
+        open={batchModalOpen}
+        onClose={() => setBatchModalOpen(false)}
+      />
     </div>
   );
 }

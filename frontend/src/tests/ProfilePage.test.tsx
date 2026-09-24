@@ -1,10 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import ProfilePage from "../pages/ProfilePage";
 import { useAuthStore } from "../stores/authStore";
 
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
+// react-i18next 全局 mock 在 setup.ts
 
 describe("ProfilePage", () => {
   beforeEach(() => {

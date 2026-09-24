@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -33,9 +34,25 @@ from app.domain.models import Base, BigIntFk, BigIntPk, TimestampMixin
 GRANT_SUBJECT_TYPES = ("USER", "ROLE", "ORGANIZATION")
 ADMIN_ROLE_CODE = "admin"
 
+# feat-user-onboarding：新建用户默认授予的菜单 code（个人中心）。
+# 集中定义避免散落魔法字符串——seed_menu_config 改了 menu code 时只需改这里。
+DEFAULT_NEW_USER_MENU_CODE = "item.profile"
+
 
 class User(Base, TimestampMixin):
-    """系统用户（无密码——当前无登录态，身份来自 X-User-Id 头桩映射）。"""
+    """系统用户。
+
+    **当前没有密码登录**：身份来自 ``X-User-Id`` 头桩映射（见 getCurrentUser）。
+    下面的 4 个凭据 / 登录态字段来自 ``docs/superpowers/plans/2026-09-08-user-auth.md``
+    那次改造 —— 该计划**从未落地**，这 4 列原先只以手工 DDL 的形式存在于 prod，
+    任何迁移与模型都不认识它们。迁移 0060 + 本模型声明把两侧补齐
+    （见 ``Harness/changes/fix-schema-drift-two-dbs/``）。
+
+    声明它们**不是**为了启用密码登录，而是让 ``alembic autogenerate`` 知道这些列
+    是有意存在的 —— 否则每次 autogenerate 都会提议 DROP，而 prod 上唯一 admin 的
+    ``password_hash`` 是非空 bcrypt，删掉就真丢数据。将来真要开密码登录时，
+    这些列已就位，不必再补一次迁移。
+    """
 
     __tablename__ = "users"
 
@@ -60,6 +77,13 @@ class User(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("username", name="uq_users_username"),
         Index("ix_users_enabled", "enabled"),
+        # 部分索引：绝大多数行 must_change_password=false，谓词把「待改密用户」
+        # 的查询压到极小的索引上，与「给 bool 列建全表索引」不是一回事。
+        Index(
+            "ix_users_must_change_password",
+            "must_change_password",
+            postgresql_where=sa_text("must_change_password = true"),
+        ),
     )
 
     def __repr__(self) -> str:  # pragma: no cover

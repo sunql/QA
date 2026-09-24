@@ -29,14 +29,6 @@ class ConflictError(DomainError):
     """资源冲突（唯一约束 / 业务规则不允许重复等）。"""
 
 
-class DuplicatePageError(ConflictError):
-    """wiki 导入时 pageId 重复（feat-wiki-knowledge M2）。
-
-    区别于通用 ConflictError：重复是幂等成功路径（skipped_pages）而非错误，
-    业务层捕获后转记 skipped，不抛 409。本类仅用于跨层语义传达「这是重复」。
-    """
-
-
 class ValidationError(DomainError):
     """输入校验失败（领域规则层面）。
 
@@ -120,10 +112,10 @@ class PermissionDeniedError(DomainError):
 
 
 class AuthFailedError(DomainError):
-    """认证失败（feat-user-auth）。
+    """登录 / 认证失败（feat-user-auth，2026-09-20）。
 
-    区别于 PermissionDeniedError（403，已认证但无权）：这里表示**未通过
-    身份验证**——密码错、token 过期、缺失 token 等。映射到 HTTP 401。
+    统一文案防枚举：登录失败（用户名不存在 / 密码错 / 账号禁用）均抛此错，
+    HTTP 层统一映射 401 + ``MSG_INVALID_CREDENTIALS``。
     """
 
 
@@ -176,3 +168,45 @@ class FeatureRuleValidationError(ValidationError):
 
 class LLMUnavailableError(DomainError):
     """LLM 服务不可用（spec §9.2 + §7.3）。"""
+
+
+# ---------------------------------------------------------------------------
+# feat-wiki-dedup (P1): 内容重复
+# ---------------------------------------------------------------------------
+
+
+class DuplicatePageError(ConflictError):
+    """同 ``page_id`` 且 ``content_hash`` 相同 —— 确证是同一份知识的重跑。
+
+    刻意继承 ``ConflictError``：如果它意外逃到 API 层，``statusForError`` 仍给出
+    409（语义正确）。但**导入路径必须单独 catch 它**（catch 在 ``ConflictError``
+    之前），否则它会被当成失败计数 —— 那正是 P1 要修的分类学错误。
+    """
+
+    def __init__(self, message: str, *, page_id: str) -> None:
+        super().__init__(message)
+        self.page_id = page_id
+
+
+def statusForError(exc: DomainError) -> int:
+    """领域异常 → HTTP 状态码（**唯一**映射源）。
+
+    生产 app（``main.py``）与测试 app（``tests/_testapp.py``）共用此函数。
+    此前两处各写一份，``LLMUnavailableError`` 只在生产那份里有 → 测试断言
+    503 而测试 app 实际返回 400，断言与真实行为脱节。
+    """
+    if isinstance(exc, NotFoundError):
+        return 404
+    if isinstance(exc, ConflictError):
+        return 409
+    if isinstance(exc, ValidationError):
+        # 一并覆盖子类 BusinessObjectGraphLabelMismatchError /
+        # FeatureRuleValidationError 等
+        return 422
+    if isinstance(exc, AuthFailedError):
+        return 401
+    if isinstance(exc, PermissionDeniedError):
+        return 403
+    if isinstance(exc, LLMUnavailableError):
+        return 503
+    return 400

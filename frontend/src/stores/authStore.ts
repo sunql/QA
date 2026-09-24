@@ -60,7 +60,17 @@ export const useAuthStore = create<AuthState>()(
       name: "qa-system-auth",
       // 持久化用 localStorage（sessionStorage 在 tab 关闭后丢失，dev 调试体验差）。
       // rememberMe 字段仍保留在 state 上，供后续按需扩展（按 tab 而非全局隔离）。
-      storage: createJSONStorage(() => localStorage),
+      //
+      // createJSONStorage 在调用时同步执行 getStorage() 取一次 storage 实例。
+      // 包装为 try/throwing：测试环境（jsdom）若 localStorage 尚未挂载（setup.ts 跑得比
+      // 模块顶层 import 晚），访问会抛 ReferenceError，createJSONStorage 内部 try/catch
+      // 捕获后返回 undefined → persist 走「无 storage」分支（仅 warn 不抛错）。
+      storage: createJSONStorage(() => {
+        // 主动用 typeof 探测而非直接引用，避免 TS「未使用变量」+ ReferenceError 双重命中
+        const ls = typeof window !== "undefined" ? window.localStorage : undefined;
+        if (!ls) throw new Error("localStorage unavailable");
+        return ls;
+      }),
       partialize: (s) => ({
         token: s.token,
         mustChangePassword: s.mustChangePassword,

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -21,7 +22,15 @@ from app.domain.error_messages import (
     MSG_LLM_STREAM_FAILED,
 )
 from app.domain.exceptions import LlmClientError
-from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage, LlmResponse, StreamChunk
+from app.infrastructure.llm.base_client import (
+    BaseLlmClient,
+    LlmMessage,
+    LlmResponse,
+    LlmResponseWithTools,
+    StreamChunk,
+    ToolCall,
+)
+from app.infrastructure.llm.factory import acquire_llm_concurrency
 
 logger = logging.getLogger(__name__)
 
@@ -90,13 +99,17 @@ class OpenAiClient(BaseLlmClient):
             "messages": [{"role": m.role, "content": m.content} for m in messages],
         }
         if temperature is not None:
+            # Moonshot K3 要求 temperature=1，不接受其他值；强置避免 400
+            if self._provider == ProviderType.MOONSHOT and temperature != 1.0:
+                temperature = 1.0
             payload["temperature"] = temperature
         if maxTokens is not None:
             payload["max_tokens"] = maxTokens
         payload.update(kwargs)
 
         try:
-            response = await self._client.chat.completions.create(**payload)
+            async with acquire_llm_concurrency():
+                response = await self._client.chat.completions.create(**payload)
         except Exception as exc:
             raise LlmClientError(
                 MSG_LLM_CALL_FAILED.format(provider=self._provider.value, exc=exc),
@@ -142,6 +155,9 @@ class OpenAiClient(BaseLlmClient):
             "stream_options": {"include_usage": True},
         }
         if temperature is not None:
+            # Moonshot K3 要求 temperature=1，不接受其他值；强置避免 400
+            if self._provider == ProviderType.MOONSHOT and temperature != 1.0:
+                temperature = 1.0
             payload["temperature"] = temperature
         if maxTokens is not None:
             payload["max_tokens"] = maxTokens
@@ -151,35 +167,134 @@ class OpenAiClient(BaseLlmClient):
         completionTokens = 0
         modelName = self._modelName
         try:
-            stream = await self._client.chat.completions.create(**payload)
-            async for chunk in stream:
-                usage = getattr(chunk, "usage", None)
-                if usage is not None:
-                    promptTokens = getattr(usage, "prompt_tokens", 0) or 0
-                    completionTokens = getattr(usage, "completion_tokens", 0) or 0
-                    continue
-                choices = getattr(chunk, "choices", None)
-                if not choices:
-                    continue
-                delta = getattr(choices[0].delta, "content", None)
-                if delta:
-                    modelName = getattr(chunk, "model", modelName) or modelName
-                    yield StreamChunk(
-                        content=delta, isDone=False, promptTokens=0, completionTokens=0, modelName=modelName
-                    )
-            yield StreamChunk(
-                content="",
-                isDone=True,
-                promptTokens=promptTokens,
-                completionTokens=completionTokens,
-                modelName=modelName,
-            )
+            async with acquire_llm_concurrency():
+                stream = await self._client.chat.completions.create(**payload)
+                async for chunk in stream:
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        promptTokens = getattr(usage, "prompt_tokens", 0) or 0
+                        completionTokens = getattr(usage, "completion_tokens", 0) or 0
+                        continue
+                    choices = getattr(chunk, "choices", None)
+                    if not choices:
+                        continue
+                    delta = getattr(choices[0].delta, "content", None)
+                    if delta:
+                        modelName = getattr(chunk, "model", modelName) or modelName
+                        yield StreamChunk(
+                            content=delta, isDone=False, promptTokens=0, completionTokens=0, modelName=modelName
+                        )
+                yield StreamChunk(
+                    content="",
+                    isDone=True,
+                    promptTokens=promptTokens,
+                    completionTokens=completionTokens,
+                    modelName=modelName,
+                )
         except Exception as exc:
             raise LlmClientError(
                 MSG_LLM_STREAM_FAILED.format(provider=self._provider.value, exc=exc),
                 provider=self._provider.value,
                 detail=str(exc),
             ) from exc
+
+    async def complete_with_tools(
+        self,
+        messages: list[LlmMessage],
+        tools: list[dict] | None = None,
+        tool_choice: str | dict = "auto",
+    ) -> LlmResponseWithTools:
+        """支持 tool calling 的 completion，透传 OpenAI tools API。"""
+        # 序列化消息：tool result 必须带 tool_call_id，assistant 触发了 tool calling
+        # 时必须回传 tool_calls（否则 provider 无法关联 tool_call_id ↔ 调用）。
+        # 历史 bug：仅传 {role, content} 导致深求/多轮 tool 调用 400 'missing field tool_call_id'。
+        # 另：tool_calls 必须是 OpenAI 形状 {id, type:'function', function:{name, arguments(JSON 字符串)}}；
+        # 上游 agent_runtime 可能给 langchain 形状 {id, name, args}，需归一化。
+        def _normalize_tool_calls(raw_calls):
+            out = []
+            for tc in raw_calls:
+                # 已是 OpenAI 形状（带 function 键）
+                if isinstance(tc, dict) and "function" in tc:
+                    out.append({
+                        "id": tc["id"],
+                        "type": tc.get("type", "function"),
+                        "function": {
+                            "name": tc["function"].get("name") if isinstance(tc["function"], dict) else tc.get("name"),
+                            "arguments": (
+                                tc["function"]["arguments"]
+                                if isinstance(tc["function"], dict) and "arguments" in tc["function"]
+                                else json.dumps(tc.get("args", {}), ensure_ascii=False)
+                            ),
+                        },
+                    })
+                else:
+                    # langchain 形状 {id, name, args}
+                    args = tc.get("args", {}) if isinstance(tc, dict) else {}
+                    name = tc.get("name") if isinstance(tc, dict) else None
+                    tc_id = tc.get("id") if isinstance(tc, dict) else None
+                    out.append({
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json.dumps(args, ensure_ascii=False),
+                        },
+                    })
+            return out
+
+        serialized: list[dict[str, Any]] = []
+        for m in messages:
+            item: dict[str, Any] = {"role": m.role, "content": m.content}
+            if m.role == "tool" and m.tool_call_id:
+                item["tool_call_id"] = m.tool_call_id
+                if m.name:
+                    item["name"] = m.name
+            elif m.role == "assistant" and m.tool_calls:
+                item["tool_calls"] = _normalize_tool_calls(m.tool_calls)
+            serialized.append(item)
+        payload: dict[str, Any] = {
+            "model": self._modelName,
+            "messages": serialized,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice
+
+        try:
+            async with acquire_llm_concurrency():
+                response = await self._client.chat.completions.create(**payload)
+        except Exception as exc:
+            raise LlmClientError(
+                MSG_LLM_CALL_FAILED.format(provider=self._provider.value, exc=exc),
+                provider=self._provider.value,
+                detail=str(exc),
+            ) from exc
+
+        tool_calls: list[ToolCall] = []
+        raw_message = response.choices[0].message
+        if raw_message.tool_calls:
+            for raw_tc in raw_message.tool_calls:
+                tool_calls.append(
+                    ToolCall(
+                        id=raw_tc.id,
+                        name=raw_tc.function.name,
+                        args=json.loads(raw_tc.function.arguments),
+                    )
+                )
+
+        usage = getattr(response, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        return LlmResponseWithTools(
+            content=getattr(raw_message, "content", None),
+            tool_calls=tool_calls,
+            usage={
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+            model=getattr(response, "model", self._modelName) or self._modelName,
+        )
 
     async def close(self) -> None:
         close = getattr(self._client, "close", None)

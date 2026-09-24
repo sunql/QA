@@ -4,7 +4,7 @@
 pgSession fixture 每测试 TRUNCATE 隔离。
 
 覆盖：
-1. 首次 seed：3 个内置工具入库（supplier_360 / supplier_risk / graph_traverse）
+1. 首次 seed：TOOL_SEEDS 全部入库（3 个供应链工具 + 4 个 M8 知识工具）
 2. 重复 seed 幂等：count=0（无变化）
 3. seed 元数据变更 → upsert 更新
 
@@ -44,13 +44,13 @@ async def pgSession() -> AsyncIterator[AsyncSession]:
 
 
 @pytest.mark.asyncio
-async def test_seed_inserts_three_tools_on_empty_db(pgSession: AsyncSession) -> None:
-    """空 DB → seed 后 3 个工具入库；name 集合与 TOOL_SEEDS 一致。"""
+async def test_seed_inserts_all_tools_on_empty_db(pgSession: AsyncSession) -> None:
+    """空 DB → seed 后 TOOL_SEEDS 全部入库；name 集合与 TOOL_SEEDS 一致。"""
     count = await seedAgentToolConfigs(pgSession)
     await pgSession.commit()
-    assert count == 3
+    assert count == len(TOOL_SEEDS)
     rows = (await pgSession.execute(select(AgentToolConfig))).scalars().all()
-    assert len(rows) == 3
+    assert len(rows) == len(TOOL_SEEDS)
     assert {r.name for r in rows} == {s["name"] for s in TOOL_SEEDS}
 
 

@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 _COLLECTION_NAME = "ontology_embeddings"
 _QUERY_COLLECTION_NAME = "query_embeddings"
 _DOCUMENT_COLLECTION_NAME = "document_embeddings"
+_WIKI_PAGE_COLLECTION_NAME = "wiki_page_embeddings"
 _DIM = 1024  # 默认 embedding 维度（bge-m3 输出 1024 维；改模型需同步重建集合，见 scripts/backfill_milvus_embeddings.py）
 
 # 合法 embedding 类型。ontology_id 在 Milvus 中非跨类型唯一（类/属性共用 id 序列），
@@ -94,11 +95,15 @@ def _ensureEmbeddingIndex(collection: Collection) -> None:
     """
     if _hasEmbeddingIndex(collection):
         return
+    # HNSW 而非 IVF_FLAT：实测本体/查询集合体量在数百~数千条，IVF_FLAT
+    # 的 nlist=128 把向量分到 128 桶、搜索 nprobe=10 只扫 10 桶——很多向量
+    # 落进未搜桶被完全错过（dist=0.85 的真正最佳匹配返 dist=1.25 的错配类），
+    # 表现为 chat 召回落 fallback。HNSW 自适应数据规模、无桶分布问题。
     collection.create_index(
         "embedding",
-        index_params={"index_type": "IVF_FLAT", "metric_type": "L2", "params": {"nlist": 128}},
+        index_params={"index_type": "HNSW", "metric_type": "L2", "params": {"M": 16, "efConstruction": 200}},
     )
-    logger.info("Milvus collection '%s' 补齐 embedding 索引", collection.name)
+    logger.info("Milvus collection '%s' 补齐 embedding 索引 (HNSW)", collection.name)
 
 
 def _ensureCollection(name: str, fields: list[FieldSchema]) -> Collection:
@@ -185,7 +190,7 @@ def searchByEmbedding(
     results = collection.search(
         data=[queryEmbedding],
         anns_field="embedding",
-        param={"metric_type": "L2", "params": {"nprobe": 10}},
+        param={"metric_type": "L2", "params": {"ef": 64}},
         limit=topK,
         output_fields=["ontology_id", "type", "name", "alias", "description"],
         expr=expr,
@@ -219,6 +224,22 @@ def deleteByOntologyId(ontologyId: int, type: str) -> None:
     collection.delete(expr)
     collection.flush()
     logger.info("Deleted Milvus records for ontology_id=%d type=%s", ontologyId, type)
+
+
+def deleteByOntologyIds(ontologyIds: list[int], type: str) -> None:
+    """批量删除多个 ontology_id 的同类型向量（对账脚本批量重生成用，单次 flush）。
+
+    type 作用域理由同 deleteByOntologyId：ontology_id 跨类型不唯一。
+    """
+    if type not in VALID_EMBEDDING_TYPES:
+        raise ValueError(f"unknown embedding type: {type!r}")
+    if not ontologyIds:
+        return
+    collection = ensureCollection()
+    expr = f'ontology_id in {ontologyIds} and type == "{type}"'
+    collection.delete(expr)
+    collection.flush()
+    logger.info("Deleted Milvus records for %d ontology_ids type=%s", len(ontologyIds), type)
 
 
 def listAllEmbeddings() -> list[dict[str, Any]]:
@@ -311,7 +332,7 @@ def searchQueryEmbedding(
     results = collection.search(
         data=[queryEmbedding],
         anns_field="embedding",
-        param={"metric_type": "L2", "params": {"nprobe": 10}},
+        param={"metric_type": "L2", "params": {"ef": 64}},
         limit=topK,
         output_fields=["session_id", "question", "sql"],
         expr=expr,
@@ -335,6 +356,12 @@ def searchQueryEmbedding(
 
 
 def _documentFields() -> list[FieldSchema]:
+    """document_embeddings 的字段定义。
+
+    ⚠️ 顺序即契约：``insertDocumentChunks`` 用位置列表写数据，增删字段必须
+    同时改这里与那里的 data 列表。``id`` 是 auto_id 主键，不出现在 data 中。
+    ⚠️ Milvus 2.4 标量字段不支持 NULL，空值用哨兵：页码/段号 -1，章节 ""。
+    """
     return [
         FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
         FieldSchema(name="document_id", dtype=DataType.VARCHAR, max_length=50),
@@ -343,6 +370,9 @@ def _documentFields() -> list[FieldSchema]:
         FieldSchema(name="chunk_sequence", dtype=DataType.INT64),
         FieldSchema(name="effective_date", dtype=DataType.VARCHAR, max_length=20),
         FieldSchema(name="security_level", dtype=DataType.VARCHAR, max_length=10),
+        FieldSchema(name="page_number", dtype=DataType.INT64),
+        FieldSchema(name="section_name", dtype=DataType.VARCHAR, max_length=200),
+        FieldSchema(name="paragraph_no", dtype=DataType.INT64),
         FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=_DIM),
     ]
 
@@ -352,12 +382,21 @@ def ensureDocumentCollection() -> Collection:
     return _ensureCollection(_DOCUMENT_COLLECTION_NAME, _documentFields())
 
 
+def _locatorInt(value: Any) -> int:
+    """Milvus 标量不可为 NULL，缺失定位符写哨兵 -1（非合法页码/段号）。"""
+    return int(value) if value is not None else -1
+
+
 def insertDocumentChunks(records: list[dict[str, Any]]) -> None:
     """批量插入文档 chunk 向量记录。
 
     Args:
-        records: 每条记录包含 document_id, chunk_id, chunk_text, chunk_sequence,
-                 effective_date, security_level, embedding (list[float])
+        records: 每条记录含 document_id, chunk_id, chunk_text, chunk_sequence,
+                 effective_date, security_level, page_number, section_name,
+                 paragraph_no, embedding。
+
+                定位符为 None 时写哨兵（页码/段号 -1，章节 ""）。
+                顺序必须与 ``_documentFields()`` 一致（id 除外）。
     """
     collection = ensureDocumentCollection()
     data = [
@@ -367,6 +406,9 @@ def insertDocumentChunks(records: list[dict[str, Any]]) -> None:
         [r["chunk_sequence"] for r in records],
         [r.get("effective_date") or "" for r in records],
         [r.get("security_level") or "" for r in records],
+        [_locatorInt(r.get("page_number")) for r in records],
+        [(r.get("section_name") or "")[:200] for r in records],
+        [_locatorInt(r.get("paragraph_no")) for r in records],
         [r["embedding"] for r in records],
     ]
     collection.insert(data)
@@ -388,7 +430,11 @@ def searchDocumentChunks(
         topK: 返回条数
 
     Returns:
-        匹配的 chunk 列表，含 document_id, chunk_id, chunk_text, chunk_sequence, distance
+        匹配的 chunk 列表，含 document_id, chunk_id, chunk_text, chunk_sequence,
+        security_level, page_number, section_name, paragraph_no, distance
+
+        注意定位符是**哨兵值**：无页码/段号时为 -1，无章节时为 ""（Milvus 2.4
+        标量字段不支持 NULL），消费方需自行判断，不要直接展示 -1。
     """
     collection = ensureDocumentCollection()
 
@@ -398,9 +444,18 @@ def searchDocumentChunks(
     results = collection.search(
         data=[queryEmbedding],
         anns_field="embedding",
-        param={"metric_type": "L2", "params": {"n_probe": 10}},
+        param={"metric_type": "L2", "params": {"ef": 64}},
         limit=topK,
-        output_fields=["document_id", "chunk_id", "chunk_text", "chunk_sequence", "security_level"],
+        output_fields=[
+            "document_id",
+            "chunk_id",
+            "chunk_text",
+            "chunk_sequence",
+            "security_level",
+            "page_number",
+            "section_name",
+            "paragraph_no",
+        ],
         expr=expr,
     )
 
@@ -413,27 +468,62 @@ def searchDocumentChunks(
                 "chunk_text": hit.entity.get("chunk_text"),
                 "chunk_sequence": hit.entity.get("chunk_sequence"),
                 "security_level": hit.entity.get("security_level"),
+                "page_number": hit.entity.get("page_number"),
+                "section_name": hit.entity.get("section_name"),
+                "paragraph_no": hit.entity.get("paragraph_no"),
                 "distance": float(hit.distance),
             })
     return hits
 
 
-# ---------------------------------------------------------------------------
-# Wiki page embeddings 集合（feat-wiki-semantic-search）
-#
-# 第四套 Milvus collection：wiki_page_embeddings。WikiChat 召回源。
-# 字段契约（字段顺序 = insert 位置列序）见 _wikiPageFields。
-# 默认 status_exclude=("EXPIRED",)：已过期条目不出现在语义召回里，
-# 调用方可显式 statusExclude=() 绕过。
-# ---------------------------------------------------------------------------
-_WIKI_PAGE_COLLECTION_NAME = "wiki_page_embeddings"
+def deleteDocumentChunks(documentId: str) -> None:
+    """删除指定 document_id 的全部 chunk。
+
+    表达式**必须**带 document_id 过滤：集合是跨调用方共享的，一个没有
+    过滤条件的 ``collection.delete("")`` 会把整个集合清空。
+    """
+    collection = ensureDocumentCollection()
+    collection.delete(f'document_id == "{documentId}"')
+    collection.flush()
+    logger.info("Deleted Milvus document chunks for document_id=%s", documentId)
+
+
+def queryDocumentChunks(documentId: str) -> list[dict[str, Any]]:
+    """按 document_id 查出该文档的全部 chunk（不走向量检索）。
+
+    门禁脚本要检查的是「写进去的定位符对不对」，不是「检索得准不准」。
+    用 ``searchDocumentChunks`` 会因为集合跨调用方共享、topK 截断而漏掉
+    目标行 —— 那会把门禁变成抛硬币。
+    """
+    collection = ensureDocumentCollection()
+    collection.load()
+    return collection.query(
+        expr=f'document_id == "{documentId}"',
+        output_fields=[
+            "document_id",
+            "chunk_id",
+            "chunk_text",
+            "chunk_sequence",
+            "page_number",
+            "section_name",
+            "paragraph_no",
+        ],
+        limit=16384,
+    )
+
+
+# =============================================================================
+# feat-wiki-semantic-search: wiki_page_embeddings（知识条目向量）
+# =============================================================================
 
 
 def _wikiPageFields() -> list[FieldSchema]:
-    """wiki_page_embeddings 字段定义。
+    """wiki_page_embeddings 的字段定义。
 
-    字段顺序即 insert 位置列序（除 id/embedding 外）：
-    page_id / chunk_id / chunk_text / chunk_sequence / title / dimension / status。
+    ⚠️ 顺序即契约：``insertWikiPageChunks`` 用位置列表写数据，增删字段必须
+    同时改这里与那里的 data 列表。``id`` 是 auto_id 主键，不出现在 data 中。
+    title/dimension/status 是写入时的快照副本，仅作检索过滤与降级展示；
+    展示层的 SSOT 始终是 PG wiki_page（回查覆盖）。
     """
     return [
         FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
@@ -441,9 +531,9 @@ def _wikiPageFields() -> list[FieldSchema]:
         FieldSchema(name="chunk_id", dtype=DataType.VARCHAR, max_length=64),
         FieldSchema(name="chunk_text", dtype=DataType.VARCHAR, max_length=4000),
         FieldSchema(name="chunk_sequence", dtype=DataType.INT64),
-        FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=256),
-        FieldSchema(name="dimension", dtype=DataType.VARCHAR, max_length=32),
-        FieldSchema(name="status", dtype=DataType.VARCHAR, max_length=16),
+        FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=200),
+        FieldSchema(name="dimension", dtype=DataType.VARCHAR, max_length=30),
+        FieldSchema(name="status", dtype=DataType.VARCHAR, max_length=10),
         FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=_DIM),
     ]
 
@@ -454,12 +544,9 @@ def ensureWikiPageCollection() -> Collection:
 
 
 def insertWikiPageChunks(records: list[dict[str, Any]]) -> None:
-    """批量插入 Wiki 页面 chunk 向量记录。
+    """批量插入知识条目 chunk 向量记录。
 
-    Args:
-        records: 每条记录包含 page_id, chunk_id, chunk_text, chunk_sequence,
-                 title, dimension, status, embedding (list[float])。
-                 chunk_text 会被截断到 4000 字符（与 schema max_length 对齐）。
+    顺序必须与 ``_wikiPageFields()`` 一致（id 除外）。
     """
     collection = ensureWikiPageCollection()
     data = [
@@ -467,9 +554,9 @@ def insertWikiPageChunks(records: list[dict[str, Any]]) -> None:
         [r["chunk_id"] for r in records],
         [r["chunk_text"][:4000] for r in records],  # truncate to max_length
         [r["chunk_sequence"] for r in records],
-        [r.get("title") or "" for r in records],
-        [r.get("dimension") or "" for r in records],
-        [r.get("status") or "" for r in records],
+        [(r.get("title") or "")[:200] for r in records],
+        [(r.get("dimension") or "")[:30] for r in records],
+        [(r.get("status") or "")[:10] for r in records],
         [r["embedding"] for r in records],
     ]
     collection.insert(data)
@@ -481,38 +568,36 @@ def searchWikiPageChunks(
     queryEmbedding: list[float],
     *,
     dimension: str | None = None,
-    topK: int = 10,
     statusExclude: tuple[str, ...] = ("EXPIRED",),
+    topK: int = 10,
 ) -> list[dict[str, Any]]:
-    """向量相似度检索 Wiki 页面 chunks。
+    """向量相似度检索知识条目 chunks。
 
     Args:
-        queryEmbedding: 查询向量（与 schema _DIM 维度一致）
-        dimension: 可选，按维度过滤（RULE/FACT/...）
+        queryEmbedding: 查询向量
+        dimension: 可选，按知识维度过滤
+        statusExclude: 排除的生命周期状态（默认排除 EXPIRED——过期知识不参与检索，
+                       与知识图谱 graph_data.py 的口径一致）
         topK: 返回条数
-        statusExclude: 排除的 status 值；默认 ("EXPIRED",) 隐式过滤。
-                       传空 tuple 不过滤。
 
     Returns:
-        匹配的 chunk 列表，含 page_id, chunk_id, chunk_text, chunk_sequence,
-        title, dimension, status, distance。
+        匹配 chunk 列表，含 page_id, chunk_id, chunk_text, chunk_sequence,
+        title, dimension, status, distance
     """
     collection = ensureWikiPageCollection()
 
-    # Milvus 表达式：AND 拼接多个过滤条件；空值不加
-    clauses: list[str] = []
-    if dimension:
-        clauses.append(f'dimension == "{dimension}"')
+    exprParts = []
     if statusExclude:
-        # in [...] 不支持 tuple 拼接 → 手工构造
-        quoted = ", ".join(f'"{s}"' for s in statusExclude)
-        clauses.append(f"status not in [{quoted}]")
-    expr = " and ".join(clauses) if clauses else None
+        quoted = ",".join(f'"{s}"' for s in statusExclude)
+        exprParts.append(f"status not in [{quoted}]")
+    if dimension is not None:
+        exprParts.append(f'dimension == "{dimension}"')
+    expr = " and ".join(exprParts) or None
 
     results = collection.search(
         data=[queryEmbedding],
         anns_field="embedding",
-        param={"metric_type": "L2", "params": {"n_probe": 10}},
+        param={"metric_type": "L2", "params": {"ef": 64}},
         limit=topK,
         output_fields=[
             "page_id",
@@ -537,18 +622,28 @@ def searchWikiPageChunks(
                 "title": hit.entity.get("title"),
                 "dimension": hit.entity.get("dimension"),
                 "status": hit.entity.get("status"),
-                "distance": float(hit.distance),
+                "distance": hit.distance,
             })
     return hits
 
 
-def queryWikiPageChunks(pageId: str) -> list[dict[str, Any]]:
-    """按 page_id 过滤取该页所有 wiki chunks（不依赖向量）。
+def deleteWikiPageChunks(pageId: str) -> None:
+    """删除指定 page_id 的全部 chunk（upsert 的 delete 半边）。
 
-    用于删除前对账、admin 回查等纯过滤场景。
+    表达式**必须**带 page_id 过滤：集合是跨调用方共享的，一个没有
+    过滤条件的 ``collection.delete("")`` 会把整个集合清空。
     """
     collection = ensureWikiPageCollection()
-    results = collection.query(
+    collection.delete(f'page_id == "{pageId}"')
+    collection.flush()
+    logger.info("Deleted Milvus wiki page chunks for page_id=%s", pageId)
+
+
+def queryWikiPageChunks(pageId: str) -> list[dict[str, Any]]:
+    """按 page_id 直查该条目的全部 chunk（不走向量检索，对账/门禁用）。"""
+    collection = ensureWikiPageCollection()
+    collection.load()
+    return collection.query(
         expr=f'page_id == "{pageId}"',
         output_fields=[
             "page_id",
@@ -559,17 +654,8 @@ def queryWikiPageChunks(pageId: str) -> list[dict[str, Any]]:
             "dimension",
             "status",
         ],
+        limit=16384,
     )
-    return list(results)
-
-
-def deleteWikiPageChunks(pageId: str) -> None:
-    """按 page_id 删除该页所有 wiki 向量记录。"""
-    collection = ensureWikiPageCollection()
-    expr = f'page_id == "{pageId}"'
-    collection.delete(expr)
-    collection.flush()
-    logger.info("Deleted wiki page chunks for page_id=%s", pageId)
 
 
 def closeConnection() -> None:

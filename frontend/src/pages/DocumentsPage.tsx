@@ -632,7 +632,7 @@ export default function DocumentsPage() {
         okText={t("common.confirm")}
         cancelText={t("common.cancel")}
         width={640}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={docForm} layout="vertical">
           <Space.Compact style={{ width: "100%" }}>
@@ -699,7 +699,7 @@ export default function DocumentsPage() {
         okText={t("common.confirm")}
         cancelText={t("common.cancel")}
         width={560}
-        destroyOnClose
+        destroyOnHidden
         confirmLoading={uploading}
       >
         <Form form={uploadForm} layout="vertical">
@@ -763,7 +763,7 @@ export default function DocumentsPage() {
         okText={t("common.confirm")}
         cancelText={t("common.cancel")}
         width={480}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={relForm} layout="vertical">
           <Form.Item

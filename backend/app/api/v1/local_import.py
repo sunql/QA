@@ -39,7 +39,12 @@ async def importPreview(
     service: LocalImportService = Depends(getLocalImportService),
 ) -> ImportPreviewResponse:
     return await service.build_preview(
-        session, datasourceId, payload.rules, selected_tables=payload.selected_tables
+        session,
+        datasourceId,
+        payload.rules,
+        selected_tables=payload.selected_tables,
+        selected_columns=payload.selected_columns,
+        schema=payload.schema_name,
     )
 
 

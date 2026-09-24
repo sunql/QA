@@ -37,6 +37,7 @@ import {
     setUserOrganizations,
     setUserPermissions,
     getUserEffectivePermissions,
+    adminResetPassword,
 } from "../api/users";
 import { listRoles } from "../api/roles";
 import { listOrganizations } from "../api/organizations";
@@ -120,6 +121,7 @@ export default function AdminUsersPage(): JSX.Element {
             const roleIds = (values.roleIds as number[] | undefined) ?? [];
             const organizationIds =
                 (values.organizationIds as number[] | undefined) ?? [];
+            const newPassword = (values.password as string | undefined)?.trim() ?? "";
             if (editing) {
                 const payload: UserUpdatePayload = {
                     displayName: values.displayName as string,
@@ -127,6 +129,13 @@ export default function AdminUsersPage(): JSX.Element {
                     enabled: values.enabled as boolean,
                 };
                 await updateUser(editing.id, payload);
+                // 密码可选：填了才走 adminResetPassword（feat-admin-user-password）
+                if (newPassword) {
+                    await adminResetPassword(editing.id, {
+                        newPassword,
+                        forceChangeOnNextLogin: true,
+                    });
+                }
                 await setUserRoles(editing.id, { roleIds });
                 await setUserOrganizations(editing.id, { organizationIds });
                 message.success(t("rbac.messages.updated"));
@@ -137,6 +146,7 @@ export default function AdminUsersPage(): JSX.Element {
                     displayName: values.displayName as string,
                     email: values.email as string | undefined,
                     enabled: (values.enabled as boolean | undefined) ?? true,
+                    password: newPassword,
                 };
                 const created = await createUser(payload);
                 // createUser 已成功 → 后续关联失败不能让弹窗停留（重试会 409 重复用户名）。
@@ -331,6 +341,22 @@ export default function AdminUsersPage(): JSX.Element {
                     </Form.Item>
                     <Form.Item name="email" label={t("rbac.user.email")}>
                         <Input />
+                    </Form.Item>
+                    <Form.Item
+                        name="password"
+                        label={t("rbac.user.password")}
+                        rules={
+                            editing
+                                ? []
+                                : [{ required: true, message: t("rbac.user.password") }]
+                        }
+                        extra={
+                            editing
+                                ? t("rbac.user.passwordPlaceholder")
+                                : t("rbac.user.passwordStrengthHint")
+                        }
+                    >
+                        <Input.Password autoComplete="new-password" />
                     </Form.Item>
                     <Form.Item
                         name="enabled"

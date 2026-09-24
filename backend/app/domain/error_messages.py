@@ -290,6 +290,7 @@ MSG_SCHEMA_ENTITY_MAPPING_SOURCE_CODE = "源系统原始编码"
 MSG_SCHEMA_ENTITY_MAPPING_MATCH_RULE = "匹配规则：MDM_MASTER/BUSINESS_KEY/MAPPING"
 MSG_SCHEMA_ENTITY_MAPPING_EFFECTIVE_DATE = "生效日期"
 MSG_SCHEMA_ENTITY_MAPPING_EXPIRY_DATE = "失效日期（空表示长期有效）"
+MSG_SCHEMA_ENTITY_MAPPING_NAME = "业务名（仅展示用，如供应商名/物料描述）"
 MSG_SCHEMA_ENTITY_MAPPING_CREATED_TIME = "创建时间"
 MSG_SCHEMA_ENTITY_MAPPING_UPDATED_TIME = "更新时间"
 
@@ -417,10 +418,19 @@ MSG_AGENT_TOOL_UNREGISTERED = (
     "agent_code={code} 绑定的 tool={tool} 在当前代码中未注册（环境漂移）"
 )
 
-# ===== Phase 6.5：RBAC 身份认证（feat-user-auth）=====
-MSG_AUTH_REQUIRED = "需要登录才能访问"
+# ===== 用户登录与身份验证（feat-user-auth，2026-09-20）=====
+# 登录失败统一文案「MSG_INVALID_CREDENTIALS」用于用户名不存在/密码错/账号禁用三种场景，
+# 防止外部枚举用户存在性 + 响应时间均匀（无 bcrypt 也跑 dummy hash + sleep）。
 MSG_INVALID_CREDENTIALS = "用户名或密码错误"
-MSG_OLD_PASSWORD_INCORRECT = "原密码不正确"
-MSG_PASSWORD_TOO_WEAK = (
-    "密码强度不足：至少 8 位，且必须包含字母和数字"
+MSG_OLD_PASSWORD_INCORRECT = "当前密码不正确"
+MSG_PASSWORD_TOO_WEAK = "密码至少 8 位且必须包含字母和数字"
+MSG_TOKEN_INVALID = "登录已失效，请重新登录"
+MSG_TOKEN_EXPIRED = "登录已过期，请重新登录"
+MSG_TOKEN_REVOKED = "登录已失效（密码已修改或被吊销），请重新登录"
+MSG_AUTH_REQUIRED = "请先登录"
+MSG_PASSWORD_CHANGED_LOGOUT = "密码已修改，请重新登录"
+MSG_ACCOUNT_DISABLED = "账号已停用，请联系管理员"
+MSG_JWT_SECRET_TOO_SHORT = (
+    "AUTH_MODE=real 时 JWT_SECRET 必须 ≥ 32 字节（当前 {len}），"
+    "用 `python -c 'import secrets; print(secrets.token_urlsafe(48))>'` 生成"
 )

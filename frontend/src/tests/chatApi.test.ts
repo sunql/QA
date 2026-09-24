@@ -285,3 +285,39 @@ describe("api/chat", () => {
     expect(contents).toEqual(["完全"]);
   });
 });
+
+describe("sendMessageStream class_recall 事件", () => {
+  it("分发 class_recall 事件（合法诊断对象）", async () => {
+    const stream = sseStream(
+      'event: class_recall\ndata: {"mode":"expanded","hitCount":3,"classCount":12,"truncated":true}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: unknown[] = [];
+    await sendMessageStream(makePayload(), {
+      onClassRecall: (info) => received.push(info),
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({
+      mode: "expanded",
+      hitCount: 3,
+      classCount: 12,
+      truncated: true,
+    });
+  });
+
+  it("class_recall 非法负载（缺 mode）不触发回调", async () => {
+    const stream = sseStream(
+      'event: class_recall\ndata: {"hitCount":3}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: unknown[] = [];
+    await sendMessageStream(makePayload(), {
+      onClassRecall: (info) => received.push(info),
+    });
+
+    expect(received).toHaveLength(0);
+  });
+});

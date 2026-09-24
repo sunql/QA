@@ -21,8 +21,7 @@ const persist = vi.hoisted(() => ({
 }));
 vi.mock("../stores/persistChatUiState", () => persist);
 
-import { useChatStore, generateSessionId as _generateSessionId } from "../stores/chatStore";
-void _generateSessionId; // 保留导出以备未来用例使用；本测试暂未调用（避免 TS6133）。
+import { useChatStore } from "../stores/chatStore";
 
 function resetStore() {
   useChatStore.setState({

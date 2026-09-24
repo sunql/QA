@@ -17,7 +17,7 @@ ACL：读 - 所有登录用户；写 - admin 或 owner 部门成员（Phase 4.5 
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
@@ -142,13 +142,22 @@ async def updateAgent(
     return agentToRead(entity)
 
 
-@router.delete("/{agent_code}", response_model=AgentDefinitionRead)
+@router.delete("/{agent_code}", response_model=None)
 async def deprecateAgent(
     agent_code: str,
+    hard_delete: bool = Query(False, description="true=硬删除（含级联策略，写 DELETE 审计）"),
     user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
     service: AgentRegistryService = Depends(getAgentRegistryService),
-) -> AgentDefinitionRead:
+) -> AgentDefinitionRead | Response:
+    """DELETE = 软删除（status → deprecated）；`?hard_delete=true` = 硬删除。
+
+    hard_delete 接线 service.deleteAgent（此前 service 方法存在但端点忽略该
+    参数 → 审计永远查不到 DELETE 行）。
+    """
+    if hard_delete:
+        await service.deleteAgent(session, agent_code, user)
+        return Response(status_code=status.HTTP_200_OK)
     entity = await service.deprecateAgent(session, agent_code, user)
     return agentToRead(entity)
 

@@ -150,29 +150,50 @@ describe("AppLayout menu fetch + fallback", () => {
     expect(screen.getByText("智能分析")).toBeInTheDocument();
   });
 
-  it("falls back to static nav when fetch rejects", async () => {
+  it("shows error alert when fetch rejects (no flat fallback)", async () => {
+    // feat-user-onboarding (2026-09-20): /menu-config 失败必须显式提示，
+    // 永远不再回退 FALLBACK_NAV（避免出现与权限不符的扁平菜单误导用户）。
     vi.mocked(fetchMenuConfig).mockRejectedValue(new Error("network error"));
     renderLayout("/chat");
 
-    // Fallback: flat list items (t keys from FALLBACK_NAV)
-    // FALLBACK_NAV[0] = { key: "/models", labelKey: "appLayout.menu.models" } → "模型配置"
-    expect(await screen.findByText("模型配置")).toBeInTheDocument();
-    expect(screen.getByText("Embedding 服务")).toBeInTheDocument();
+    // antd Alert 渲染 role="alert"，其文本被拆到 icon + message + description
+    // 多 text node → 不能用 getByText；改用 role 匹配。test i18n 默认 zh-CN。
+    const alert = await screen.findByRole("alert");
+    expect(alert).toBeInTheDocument();
+    expect(alert.textContent).toContain("菜单加载失败");
+    // 扁平菜单的兜底项绝对不能再渲染
+    expect(screen.queryByText("模型配置")).not.toBeInTheDocument();
+    expect(screen.queryByText("Embedding 服务")).not.toBeInTheDocument();
   });
 
-  it("persists openKeys to localStorage on submenu expand", async () => {
+  it("shows empty-state when DB returns no sections", async () => {
+    // 合法场景：admin 没给某 user 任何 menu grant → 后端返回 sections=[]。
+    // 此时显示「暂无授权菜单」+ 不再有扁平兜底；用户应去 /admin/users 或
+    // /admin/menus 让 admin 给自己补授权。
+    vi.mocked(fetchMenuConfig).mockResolvedValue({ version: "0", sections: [] });
+    renderLayout("/chat");
+
+    expect(await screen.findByText("暂无授权菜单")).toBeInTheDocument();
+    expect(screen.queryByText("模型配置")).not.toBeInTheDocument();
+  });
+
+  it("默认仅 AI Agent 展开：用户手动展开其它 section 会写入 localStorage", async () => {
+    // feat-user-onboarding-ext (2026-09-20 调整)：默认只展开 AI Agent
+    // （默认页 /chat = AIChatService）。其他 section 起始折叠；用户手动
+    // 点击展开其它 section 后，本次 session 内会写入 localStorage。
     vi.mocked(fetchMenuConfig).mockResolvedValue(twoSectionConfig);
     const user = userEvent.setup();
     renderLayout("/chat");
 
-    // Open the "AI Agent" submenu by clicking its title
-    const aiAgentItem = await screen.findByText("AI Agent");
-    await user.click(aiAgentItem);
+    // 默认 AI Agent 已展开；点击「智能分析」section 标题展开它
+    const analyticsHeader = await screen.findByText("智能分析");
+    await user.click(analyticsHeader);
 
     const stored = localStorage.getItem("menu.openKeys");
     expect(stored).not.toBeNull();
     const parsed = JSON.parse(stored!);
     expect(parsed).toContain("section.aiAgent");
+    expect(parsed).toContain("section.analytics");
   });
 
   it("selected key matches current path", async () => {
@@ -181,5 +202,60 @@ describe("AppLayout menu fetch + fallback", () => {
 
     // The data-quality child item should be reachable and rendered
     expect(await screen.findByText("数据质量")).toBeInTheDocument();
+  });
+
+  it("系统信息配置（section.systemConfig）始终折叠：localStorage 残留也过滤", async () => {
+    // feat-user-onboarding-ext (2026-09-20)：系统信息配置 menu 默认折叠。
+    // 即使用户之前点开过（localStorage 残留），下次登录读到 state 时也过滤掉。
+    // 加 systemConfig 到 fixture，并预设 localStorage 残留 → 验证渲染后
+    // section.systemConfig 不在 ant-menu-submenu-open 列表里。
+    const withSystemConfig = {
+      version: "2026-09-20",
+      sections: [
+        ...twoSectionConfig.sections,
+        {
+          code: "section.systemConfig",
+          labelKey: "menu.section.systemConfig",
+          iconCode: "api",
+          sortOrder: 500,
+          permissionCode: null,
+          roles: [],
+          path: null,
+          children: [
+            {
+              code: "item.models",
+              labelKey: "menu.item.models",
+              iconCode: "robot",
+              sortOrder: 510,
+              permissionCode: null,
+              roles: [],
+              path: "/models",
+            },
+          ],
+        },
+      ],
+    };
+    localStorage.setItem(
+      "menu.openKeys",
+      JSON.stringify(["section.systemConfig", "section.aiAgent"]),
+    );
+    vi.mocked(fetchMenuConfig).mockResolvedValue(withSystemConfig);
+    renderLayout("/chat");
+
+    // 等到「系统信息配置」标题出现，再检查它的展开状态。
+    expect(await screen.findByText("系统信息配置")).toBeInTheDocument();
+    // 找到包含「系统信息配置」文字的 ant-menu-submenu 节点，断言无 open className。
+    const sysCfgSubmenus = Array.from(
+      document.querySelectorAll(".ant-menu-submenu"),
+    ).filter((el) => (el.textContent ?? "").includes("系统信息配置"));
+    expect(sysCfgSubmenus.length).toBeGreaterThan(0);
+    sysCfgSubmenus.forEach((el) => {
+      expect(el.classList.contains("ant-menu-submenu-open")).toBe(false);
+    });
+    // 同时确认「AI Agent」section 因 localStorage 残留确实展开（不受误伤）
+    const aiAgentOpened = Array.from(
+      document.querySelectorAll(".ant-menu-submenu-open"),
+    ).some((el) => (el.textContent ?? "").includes("AI Agent"));
+    expect(aiAgentOpened).toBe(true);
   });
 });

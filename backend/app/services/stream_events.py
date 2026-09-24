@@ -26,6 +26,7 @@ EVENT_MULTI_STEP_PLAN = "multi_step_plan"  # 多步：拆解出的完整计划�
 EVENT_STEP_PLAN = "step_plan"    # 多步：每个子步骤的计划（含 description / sub_question）
 EVENT_STEP_RESULT = "step_result"  # 多步：每个子步骤的执行结果（sql + data + summary）
 EVENT_DATA_QUALITY = "data_quality"  # Phase 1.4：目标表的可信度 badge 列表（每张 selectedClass 一条）
+EVENT_CLASS_RECALL = "class_recall"  # 类召回诊断（2026-09-16）：截断/降级时前端提示
 
 
 class ErrorType(str, Enum):

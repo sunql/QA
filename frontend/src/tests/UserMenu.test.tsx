@@ -16,8 +16,8 @@ describe("UserMenu", () => {
     useAuthStore.setState({ mustChangePassword: true });
     render(<MemoryRouter><UserMenu /></MemoryRouter>);
     await userEvent.click(screen.getByText("alice"));
-    // i18n mock 返回 key：userMenu.changePassword（中文应在 i18n 资源里校验，不在组件测试里）
-    expect(screen.getByText("userMenu.changePassword")).toBeTruthy();
+    // setup.ts 修复后 useTranslation 走真实 i18next，返回中文
+    expect(screen.getByText("修改密码")).toBeTruthy();
     // Badge.dot 渲染出 .ant-badge-dot
     expect(document.querySelector(".ant-badge-dot")).toBeTruthy();
   });

@@ -84,8 +84,11 @@ class TestEnsureCollection:
         assert result is fake
         assert fake.released  # 已加载集合需先 release 再建索引
         assert fake.createdIndexFields == ["embedding"]
-        assert fake.createdIndexParams[0]["index_type"] == "IVF_FLAT"
+        # HNSW 而非 IVF_FLAT：nlist=128 对数百~数千向量桶分布失效，最佳匹配
+        # 落进未搜桶被错过（dist=0.85 真匹配 → 返 dist=1.25 错配类）
+        assert fake.createdIndexParams[0]["index_type"] == "HNSW"
         assert fake.createdIndexParams[0]["metric_type"] == "L2"  # 与 searchByEmbedding 一致
+        assert fake.createdIndexParams[0]["params"]["M"] == 16
         assert fake.loaded
 
     def test_existing_collection_with_index_skips_create(self, fakeEnv) -> None:

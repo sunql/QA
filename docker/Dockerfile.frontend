@@ -1,10 +1,23 @@
 # ===== 构建阶段 =====
 FROM node:20-alpine AS build
 WORKDIR /app
+
+# npm registry。**默认官方源**，保持仓库在任何环境可移植；网络受限环境在构建时覆盖即可：
+#   docker compose build --build-arg NPM_REGISTRY=https://registry.npmmirror.com frontend
+# 用 ARG 而非 ENV：只在构建期可见，不会烘焙进镜像层。
+# （npm 的 replace-registry-host 默认 "npmjs"，会把 lockfile 里 registry.npmjs.org 的
+#   resolved 地址替换成本处配置的 registry，故 --registry 对 npm ci 生效。）
+ARG NPM_REGISTRY=https://registry.npmjs.org
+
 COPY frontend/package*.json ./
-RUN npm ci
+RUN npm ci --registry=${NPM_REGISTRY}
 COPY frontend/ ./
-ARG VITE_API_BASE_URL=http://localhost:8000/api/v1
+# VITE_API_BASE_URL 留空 → 前端走同源相对路径 /api/v1（经 nginx 反代），
+# 127.0.0.1 / localhost / 局域网 IP / 域名访问全部自动可用。
+# 禁止在此写死绝对地址：Vite 编译期注入会烤进 JS bundle，部署换地址即全挂
+# （2026-09-21 Windows 迁移实踩）。规范见 Harness/rules/部署与访问规范.md §一；
+# 确有特殊部署要绝对地址时显式 --build-arg VITE_API_BASE_URL=... 覆盖并记录理由。
+ARG VITE_API_BASE_URL=
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 RUN npm run build
 

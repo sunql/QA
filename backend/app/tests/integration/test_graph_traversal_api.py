@@ -17,7 +17,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models import DataSource
+from app.domain.models import DataSource, EntityMapping
 from app.infrastructure import neo4j_client as neo4j
 from app.services.graph_relation_service import GraphRelationService
 from scripts.seed_entity_mapping import seedEntityMappings
@@ -54,8 +54,25 @@ async def _seedDatasource(dbSession: AsyncSession) -> DataSource:
 
 @pytest.fixture(autouse=True)
 async def seededGraph(dbSession):
-    """保证业务图有种子数据（幂等重放）；用例结束后清场防污染。"""
+    """保证业务图有种子数据（幂等重放）；用例结束后清场防污染。
+
+    另自备 10 家演示供应商映射：seed_entity_mapping 已按 THBI 真实数据对齐、
+    不再合成供应商，而 SUPPLIES 演示边端点是数字键位 100001..100010。
+    """
     await seedEntityMappings(dbSession)
+    for i in range(1, 11):
+        dbSession.add(
+            EntityMapping(
+                entity_type="SUPPLIER",
+                enterprise_key=100_000 + i,
+                enterprise_code=str(100_000 + i),
+                source_system="ERP",
+                source_key=f"V{i:06d}",
+                source_code=f"V{i:06d}",
+                match_rule="MDM_MASTER",
+            )
+        )
+    await dbSession.commit()
     service = GraphRelationService()
     await service.seedGraphRelations(dbSession)
     yield
@@ -84,8 +101,8 @@ class TestGraphTraverseApi:
         hop = body["hops"][0]
         assert {"depth", "fromKey", "fromCode", "fromType", "relType",
                 "toKey", "toCode", "toType"} <= set(hop)
-        # 可达类型包含 Material（供应商 -> 物料主链路）
-        assert "Material" in body["reachableTypes"]
+        # 可达类型包含 ItemMaster（供应商 -> 物料主链路；物料的 graph_label 为 ItemMaster）
+        assert "ItemMaster" in body["reachableTypes"]
 
     async def test_traverse_invalid_label_422(self, client: AsyncClient) -> None:
         resp = await client.get(
@@ -119,16 +136,20 @@ class TestGraphTraverseApi:
     async def test_traverse_three_hop_chain_complete(
         self, client: AsyncClient
     ) -> None:
-        """3 跳链路验收（Phase 6 验收标准）：验证完整供应链链路可达。"""
+        """3 跳链路验收（Phase 6 验收标准）：验证完整供应链链路可达。
+
+        PO 节点 key = 种子语义编码 PO202608001（曾用旧数字键 300001，seed
+        换语义编码后该键不存在）。
+        """
         resp = await client.get(
             "/api/v1/graph/traverse",
-            params={"startType": "PurchaseOrder", "startKey": "300001", "maxHops": 3},
+            params={"startType": "PurchaseOrder", "startKey": "PO202608001", "maxHops": 3},
             headers=AUTH_HEADERS,
         )
         assert resp.status_code == 200
         body = resp.json()
-        # PO -> Material / GR / IQC / Supplier 链路
-        assert "GoodsReceipt" in body["reachableTypes"]
+        # PO -> Material / GR / IQC / Supplier 链路（GR 的 graph_label 为 Receipt）
+        assert "Receipt" in body["reachableTypes"]
         assert "IncomingInspection" in body["reachableTypes"]
         # depth 值合法（1..3）
         assert all(1 <= h["depth"] <= 3 for h in body["hops"])
@@ -136,15 +157,19 @@ class TestGraphTraverseApi:
     async def test_traverse_empty_result_returns_200(
         self, client: AsyncClient, dbSession
     ) -> None:
-        """孤立节点（无任何边）-> 200 + hops=[]（非 404）。"""
+        """孤立节点（无任何边）-> 200 + hops=[]（非 404）。
+
+        NCR 已移出业务图（Phase 4.4），改用白名单内 Contract（无 SIGNED 关联
+        即孤立）。
+        """
         from app.infrastructure import neo4j_client
 
         neo4j_client.upsertBusinessEntityNode(
-            label="NCR", key="600099", code="NCR-ORPHAN", name="孤立NCR", source="test"
+            label="Contract", key="DOC-ORPHAN", code="DOC-ORPHAN", name="孤立合同", source="test"
         )
         resp = await client.get(
             "/api/v1/graph/traverse",
-            params={"startType": "NCR", "startKey": "600099", "maxHops": 2},
+            params={"startType": "Contract", "startKey": "DOC-ORPHAN", "maxHops": 2},
             headers=AUTH_HEADERS,
         )
         assert resp.status_code == 200
@@ -182,8 +207,8 @@ class TestChatGraphReasoning:
         assert payload["startKey"] == "100001"
         assert payload["maxHops"] == 2
         assert len(payload["hops"]) > 0
-        # answer 是可达实体摘要（含类型分组）
-        assert "物料" in body["answer"]
+        # answer 是可达实体摘要（含类型分组，分组名用 graph_label：ItemMaster 即物料）
+        assert "ItemMaster" in body["answer"]
         assert "100001" in body["answer"]
 
     async def test_chat_graph_three_hop_roundtrips_max_hops(

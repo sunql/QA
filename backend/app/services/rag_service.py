@@ -13,14 +13,21 @@ from typing import Annotated
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import getDb
+from app.dependencies import CurrentUser, getDb
 from app.domain.enums import DocumentSecurityLevel
 from app.domain.schemas import DocumentCreate, DocumentUpdate
 from app.domain.exceptions import ConflictError
+from app.services.messages_zh import MSG_DOCUMENT_CONTENT_EXISTS
 from app.services.document_parser import DocumentParserError, parse_document
 from app.services.chunk_splitter import Chunk, split_by_paragraphs
 from app.services.document_service import DocumentService
 from app.infrastructure.milvus_client import insertDocumentChunks, searchDocumentChunks
+from app.infrastructure.object_storage import (
+    ObjectStorageError,
+    buildSourceObjectName,
+    hashContent,
+    putSourceObject,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +46,15 @@ def _getEmbeddingService():
 
 class RagError(Exception):
     """RAG 处理失败。"""
+    pass
+
+
+class RagSourceStoreError(RagError):
+    """源文件留存（对象存储）失败。
+
+    与普通 ``RagError``（解析/分块/向量化失败，映射 422）区分：这是基础设施
+    故障，API 层应映射 503 并给可行动提示，而不是 422 的「换文件/换格式」。
+    """
     pass
 
 
@@ -62,14 +78,16 @@ class RagService:
         owner: str = "",
         effective_date: str | None = None,
         security_level: str = "L1",
+        actor: CurrentUser,
     ) -> dict:
         """文档入库全流程。
 
-        1. 解析文本
-        2. 切分 chunk
-        3. 生成 embedding
-        4. 写入 Milvus
-        5. 写入 document_catalog（若 document_id 未存在）
+        1. 解析文本（返回带定位符的文本块）
+        2. 源文件留存（对象存储，内容寻址）
+        3. 切分 chunk
+        4. 生成 embedding
+        5. 写入 Milvus
+        6. 写入 document_catalog（若 document_id 未存在）
 
         Args:
             session: DB session
@@ -85,26 +103,48 @@ class RagService:
             security_level: L1/L2/L3
 
         Returns:
-            {"document_id": ..., "chunks": 数量, "status": "ingested"}
+            {"document_id": ..., "chunks": 数量, "status": "ingested",
+             "storage_url": ..., "content_hash": ...}
 
         Raises:
             RagError: 处理链中任何一步失败
         """
-        # 1. 解析
+        # 1. 解析（返回带定位符的文本块）
         try:
-            text = await parse_document(content, mime_type, filename)
+            blocks = await parse_document(content, mime_type, filename)
         except DocumentParserError as e:
             raise RagError(f"文档解析失败: {e}") from e
 
-        if not text.strip():
+        if not blocks:
             raise RagError("文档内容为空，无法入库")
 
-        # 2. 分块
-        chunks: list[Chunk] = split_by_paragraphs(text)
+        # 1.5 去重预检：content_hash 命中唯一索引 → 同一份文件已入库。
+        # 必须在 MinIO（putSourceObject）与 Milvus（insertDocumentChunks）
+        # 写入**之前**拦下 —— 否则源对象与 chunk 向量已落盘，但
+        # document_catalog 插入被唯一索引拒绝，留下永久孤儿（且 409 里
+        # 的 DOC-<uuid> 从没进过 catalog）。此处报**已存在**的那个文档编号。
+        contentHash = hashContent(content)
+        existing = await self._doc_svc.findByContentHash(session, contentHash)
+        if existing is not None:
+            raise ConflictError(
+                MSG_DOCUMENT_CONTENT_EXISTS.format(
+                    document_id=existing.document_id
+                )
+            )
+
+        # 2. 源文件留存（内容寻址；失败必须显式，不得静默跳过）
+        objectName = buildSourceObjectName(contentHash, filename)
+        try:
+            storageUrl = putSourceObject(objectName, content, mime_type)
+        except ObjectStorageError as e:
+            raise RagSourceStoreError(f"源文件存储失败: {e}") from e
+
+        # 3. 分块
+        chunks: list[Chunk] = split_by_paragraphs(blocks)
         if not chunks:
             raise RagError("分块结果为空")
 
-        # 3. 生成 embedding（逐条调用 EmbeddingService.generateEmbedding）
+        # 4. 生成 embedding（逐条调用 EmbeddingService.generateEmbedding）
         embedding_service = _getEmbeddingService()
         try:
             embeddings = [await embedding_service.generateEmbedding(c.text) for c in chunks]
@@ -116,7 +156,7 @@ class RagService:
                 f"Embedding 数量不匹配: {len(embeddings)} vs {len(chunks)} chunks"
             )
 
-        # 4. 写入 Milvus
+        # 5. 写入 Milvus
         doc_id = document_id or f"DOC-{uuid.uuid4().hex[:12].upper()}"
         effective_str = effective_date or ""
         records: list[dict] = []
@@ -128,6 +168,9 @@ class RagService:
                 "chunk_sequence": chunk.sequence,
                 "effective_date": effective_str,
                 "security_level": security_level,
+                "page_number": chunk.metadata.get("page_number"),
+                "section_name": chunk.metadata.get("section_name"),
+                "paragraph_no": chunk.metadata.get("paragraph_no"),
                 "embedding": emb,
             })
 
@@ -136,14 +179,9 @@ class RagService:
         except Exception as e:
             raise RagError(f"Milvus 写入失败: {e}") from e
 
-        # 5. 写入 document_catalog（幂等：若已存在则更新，否则创建）
+        # 6. 写入 document_catalog（幂等：若已存在则更新，否则创建）
         if not document_name:
             document_name = filename
-
-        try:
-            existing = await self._doc_svc.getDocument(session, 0)
-        except Exception:
-            existing = None
 
         # 检查 document_id 是否已存在（通过 listDocuments 过滤）
         existing_docs = await self._doc_svc.listDocuments(session, document_type=document_type)
@@ -162,20 +200,23 @@ class RagService:
                     owner=owner,
                     effective_date=effective_date,
                     security_level=security_level,
-                    storage_url=None,
-                    content_hash=None,
+                    storage_url=storageUrl,
+                    content_hash=contentHash,
                 ),
+                actor=actor,
             )
         else:
-            # 更新 storage_url（无实际文件存储 URL，这里记录处理状态）
-            try:
-                await self._doc_svc.updateDocument(
-                    session,
-                    existing_doc.id,
-                    DocumentUpdate(storage_url=f"milvus://{len(chunks)}_chunks"),
-                )
-            except Exception:
-                pass  # 更新失败不影响主流程
+            # 已存在：刷新真实存储信息。
+            # 原实现写的是 f"milvus://{len(chunks)}_chunks" 这种假 URL，而且
+            # 漏传了 actor —— updateDocument(session, id, dto, actor) 四个
+            # 参数，只传三个必然 TypeError，又被下面的 except Exception: pass
+            # 吞掉，所以这个分支在生产里从未真正生效过。两处一起修。
+            await self._doc_svc.updateDocument(
+                session,
+                existing_doc.id,
+                DocumentUpdate(storage_url=storageUrl, content_hash=contentHash),
+                actor=actor,
+            )
 
         logger.info(
             "RAG ingest done: doc=%s, filename=%s, chunks=%d",
@@ -188,6 +229,8 @@ class RagService:
             "filename": filename,
             "chunks": len(chunks),
             "status": "ingested",
+            "storage_url": storageUrl,
+            "content_hash": contentHash,
         }
 
     async def searchDocuments(
@@ -196,6 +239,7 @@ class RagService:
         *,
         security_level: str | None = None,
         top_k: int = 5,
+        session: AsyncSession | None = None,
     ) -> list[dict]:
         """语义检索文档 chunks。
 
@@ -203,9 +247,12 @@ class RagService:
             query_text: 自然语言查询
             security_level: 可选，按安全等级过滤
             top_k: 返回数量
+            session: DB session（可选，传入则按 document_id JOIN document_catalog
+                     回填每条 hit 的 document_name；不传则仅返回 Milvus 字段）
 
         Returns:
-            匹配的 chunk 列表，含 document_id, chunk_text, distance
+            匹配的 chunk 列表，含 document_id, chunk_text, chunk_sequence,
+            distance, score；session 存在时还含 document_name（document_id 回退）。
         """
         embedding_service = _getEmbeddingService()
         try:
@@ -218,6 +265,26 @@ class RagService:
             securityLevel=security_level,
             topK=top_k,
         )
+        if not hits:
+            return []
+
+        # 用 Milvus 命中 document_id 反查 document_catalog → document_name，
+        # 前端 DocumentsPage 卡片标题需要；缺则降级回 document_id 本身。
+        name_by_id: dict[str, str] = {}
+        if session is not None:
+            unique_ids = list({h["document_id"] for h in hits if h.get("document_id")})
+            try:
+                rows = await self._doc_svc.listDocuments(
+                    session, document_ids=unique_ids,
+                )
+                name_by_id = {r.document_id: r.document_name for r in rows}
+            except Exception:
+                # 回填失败不应阻塞响应：降级为只有 Milvus 字段
+                logger.warning(
+                    "searchDocuments: 回填 document_name 失败，仅返回 Milvus 字段",
+                    exc_info=True,
+                )
+
         return [
             {
                 "document_id": h["document_id"],
@@ -225,6 +292,14 @@ class RagService:
                 "chunk_text": h["chunk_text"],
                 "chunk_sequence": h["chunk_sequence"],
                 "distance": h["distance"],
+                # Milvus 用 L2 距离（越小越相似）；前端展示需要"相似度"。
+                # 公式 score = 1 / (1 + distance) 把 [0, ∞) 映射到 (0, 1]：
+                #   distance=0 → 1.0（完全相同）；distance=1 → 0.5；distance→∞ → 0。
+                # DocumentsPage.tsx 直接读 item.score 渲染百分比，必须存在。
+                "score": 1.0 / (1.0 + h["distance"]),
+                "document_name": name_by_id.get(
+                    h["document_id"], h["document_id"],
+                ),
             }
             for h in hits
         ]

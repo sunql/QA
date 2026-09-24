@@ -72,3 +72,13 @@ describe("OntologyPropertyAdminPage wiring", () => {
     expect(enSrc).toMatch(/loadFailed:\s*["']Failed to load ontology properties["']/);
   });
 });
+describe("OntologyPropertyAdminPage 编辑回填与描述可见性", () => {
+  it("openEdit 必须回填现有 description（硬编码空串会让用户以为保存失败）", () => {
+    // 2026-09-18 报障：编辑弹窗打开永远为空 → 用户保存成功后重开仍为空 → 以为没存上
+    expect(src).toMatch(/description:\s*rec\.description/);
+  });
+
+  it("表格必须渲染 description 列（保存结果对用户可见）", () => {
+    expect(src).toMatch(/dataIndex:\s*"description"/);
+  });
+});

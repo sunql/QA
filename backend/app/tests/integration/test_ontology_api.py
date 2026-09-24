@@ -9,6 +9,8 @@ Neo4j 和 Milvus 通过 monkeypatch mock，测试不依赖外部服务；
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from httpx import AsyncClient
 
@@ -95,6 +97,16 @@ def mockNeo4jAndMilvus(monkeypatch: pytest.MonkeyPatch) -> None:
 # =============================================================================
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _waitFor(check, timeout: float = 10.0) -> bool:
+    """轮询等待后台向量同步任务落地（自动同步为 fire-and-forget 后台任务）。"""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if check():
+            return True
+        await asyncio.sleep(0.05)
+    return check()
 
 
 async def testListClassesEmpty(client: AsyncClient) -> None:
@@ -1134,3 +1146,181 @@ async def testPropertyUpdateAcceptsAllowedValues(client: AsyncClient) -> None:
     )
     assert clear.status_code == 200, f"清空 allowedValues 应 200，实际: {clear.status_code} {clear.text}"
     assert clear.json()["allowedValues"] is None
+
+# =============================================================================
+# Embedding 自动同步（createClass/updateClass）+ 手动同步 API（向量对账）
+#
+# 背景：Milvus 类向量与 PG 本体长期漂移（96 类仅 27 条向量，PurchaseOrder 缺失），
+# chat 链路 _selectRelevantClasses 按向量召回裁剪 schema，向量缺失 = 类对问答不可见。
+# =============================================================================
+
+
+def _patchEmbeddingGen(
+    monkeypatch: pytest.MonkeyPatch, texts: list[str]
+) -> None:
+    """stub 掉 API 模块共享 EmbeddingService 的向量生成（记录输入文本）。"""
+    import app.api.v1.ontology as ontology_api
+
+    async def fakeGenerateEmbedding(text: str) -> list[float]:
+        texts.append(text)
+        return [0.1] * 1024
+
+    monkeypatch.setattr(
+        ontology_api._embeddingService, "generateEmbedding", fakeGenerateEmbedding
+    )
+
+
+def _recordMilvus(
+    monkeypatch: pytest.MonkeyPatch,
+    inserted: list[dict],
+) -> None:
+    import app.services.ontology_service as ontology_module
+
+    monkeypatch.setattr(
+        ontology_module.milvus,
+        "insertEmbeddings",
+        lambda rows: inserted.extend(rows),
+    )
+
+
+async def testCreateClassAutoSyncsEmbedding(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    texts: list[str] = []
+    inserted: list[dict] = []
+    _patchEmbeddingGen(monkeypatch, texts)
+    _recordMilvus(monkeypatch, inserted)
+
+    resp = await client.post(
+        "/api/v1/ontology/classes",
+        json={
+            "className": "AutoSyncCls",
+            "classAlias": "自动同步类",
+            "description": "创建时自动同步向量",
+            "sourceTable": "t_auto_sync",
+        },
+    )
+    assert resp.status_code == 201
+    classId = resp.json()["id"]
+
+    # 自动同步是后台任务：轮询等待落地
+    assert await _waitFor(lambda: len(inserted) == 1), (
+        f"创建后应同步 1 条类向量，实际 {len(inserted)}"
+    )
+    row = inserted[0]
+    assert row["ontology_id"] == classId
+    assert row["type"] == "class"
+    assert row["name"] == "AutoSyncCls"
+    assert len(texts) == 1
+    # 向量文本含类名/别名/描述（与 backfill 脚本同口径）
+    assert "AutoSyncCls" in texts[0]
+    assert "自动同步类" in texts[0]
+
+
+async def testUpdateClassAutoSyncsEmbedding(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    texts: list[str] = []
+    inserted: list[dict] = []
+    _patchEmbeddingGen(monkeypatch, texts)
+    _recordMilvus(monkeypatch, inserted)
+
+    create = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "UpdSyncCls", "sourceTable": "t_upd_sync"},
+    )
+    assert create.status_code == 201
+    classId = create.json()["id"]
+
+    inserted.clear()
+    texts.clear()
+    resp = await client.put(
+        f"/api/v1/ontology/classes/{classId}",
+        json={"classAlias": "更新后别名", "description": "更新后描述"},
+    )
+    assert resp.status_code == 200
+    assert await _waitFor(lambda: len(inserted) == 1), "更新后应重新同步类向量"
+    assert inserted[0]["ontology_id"] == classId
+    assert "更新后别名" in texts[0]
+
+
+async def testCreateClassEmbeddingFailureIsBestEffort(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.api.v1.ontology as ontology_api
+
+    async def boom(text: str) -> list[float]:
+        raise RuntimeError("embedding service down")
+
+    monkeypatch.setattr(ontology_api._embeddingService, "generateEmbedding", boom)
+
+    resp = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "SyncFailCls", "sourceTable": "t_sync_fail"},
+    )
+    # 向量同步失败不阻塞本体创建（与 Neo4j best-effort 同策略）
+    assert resp.status_code == 201
+
+
+async def testSyncClassEmbeddingManually(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    texts: list[str] = []
+    inserted: list[dict] = []
+    _patchEmbeddingGen(monkeypatch, texts)
+    _recordMilvus(monkeypatch, inserted)
+
+    create = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "ManualSyncCls", "sourceTable": "t_manual_sync"},
+    )
+    classId = create.json()["id"]
+
+    inserted.clear()
+    resp = await client.post(f"/api/v1/ontology/classes/{classId}/embedding")
+    assert resp.status_code == 204
+    assert len(inserted) == 1
+    assert inserted[0]["ontology_id"] == classId
+
+
+async def testSyncClassEmbeddingNotFound(client: AsyncClient) -> None:
+    resp = await client.post("/api/v1/ontology/classes/999999/embedding")
+    assert resp.status_code == 404
+
+
+async def testSyncMissingEmbeddings(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    texts: list[str] = []
+    inserted: list[dict] = []
+    _patchEmbeddingGen(monkeypatch, texts)
+    _recordMilvus(monkeypatch, inserted)
+
+    classA = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "MissingSyncA", "sourceTable": "t_ms_a"},
+    )
+    classB = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "MissingSyncB", "sourceTable": "t_ms_b"},
+    )
+    idA, idB = classA.json()["id"], classB.json()["id"]
+
+    # 模拟 Milvus 现状：A 有向量、B 缺失
+    import app.services.ontology_service as ontology_module
+
+    monkeypatch.setattr(
+        ontology_module.milvus,
+        "listAllEmbeddings",
+        lambda: [{"ontology_id": idA, "type": "class", "id": 1}],
+    )
+
+    inserted.clear()
+    resp = await client.post("/api/v1/ontology/embeddings/sync-missing")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["missingCount"] == 1
+    assert data["syncedCount"] == 1
+    assert data["failedCount"] == 0
+    assert len(inserted) == 1
+    assert inserted[0]["ontology_id"] == idB

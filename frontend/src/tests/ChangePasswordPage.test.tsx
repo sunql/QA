@@ -16,24 +16,24 @@ describe("ChangePasswordPage", () => {
   it("不匹配显示 mismatch", async () => {
     const user = userEvent.setup();
     render(<MemoryRouter><ChangePasswordPage /></MemoryRouter>);
-    await user.type(screen.getByLabelText("auth.changePassword.oldPassword"), "OldPwd1");
-    await user.type(screen.getByLabelText("auth.changePassword.newPassword"), "NewPwd1234");
-    await user.type(screen.getByLabelText("auth.changePassword.confirmPassword"), "Different1234");
-    await user.click(screen.getByRole("button", { name: "auth.changePassword.title" }));
+    await user.type(screen.getByLabelText("当前密码"), "OldPwd1");
+    await user.type(screen.getByLabelText("新密码"), "NewPwd1234");
+    await user.type(screen.getByLabelText("确认新密码"), "Different1234");
+    await user.click(screen.getByRole("button", { name: "修改密码" }));
     await waitFor(() => {
-      expect(screen.getByText("auth.changePassword.mismatch")).toBeTruthy();
+      expect(screen.getByText("两次输入不一致")).toBeTruthy();
     });
   });
 
   it("弱密码显示 weak", async () => {
     const user = userEvent.setup();
     render(<MemoryRouter><ChangePasswordPage /></MemoryRouter>);
-    await user.type(screen.getByLabelText("auth.changePassword.oldPassword"), "OldPwd1");
-    await user.type(screen.getByLabelText("auth.changePassword.newPassword"), "weak");
-    await user.type(screen.getByLabelText("auth.changePassword.confirmPassword"), "weak");
-    await user.click(screen.getByRole("button", { name: "auth.changePassword.title" }));
+    await user.type(screen.getByLabelText("当前密码"), "OldPwd1");
+    await user.type(screen.getByLabelText("新密码"), "weak");
+    await user.type(screen.getByLabelText("确认新密码"), "weak");
+    await user.click(screen.getByRole("button", { name: "修改密码" }));
     await waitFor(() => {
-      expect(screen.getByText("auth.changePassword.weak")).toBeTruthy();
+      expect(screen.getByText("密码至少 8 位且必须包含字母和数字")).toBeTruthy();
     });
   });
 });

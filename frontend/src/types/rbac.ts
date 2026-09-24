@@ -23,12 +23,19 @@ export interface UserCreatePayload {
     displayName: string;
     email?: string | null;
     enabled?: boolean;
+    /** admin 创建必填（feat-admin-user-password，2026-09-20）。 */
+    password: string;
 }
 
 export interface UserUpdatePayload {
     displayName?: string;
     email?: string | null;
     enabled?: boolean;
+}
+
+export interface AdminResetPasswordPayload {
+    newPassword: string;
+    forceChangeOnNextLogin: boolean;
 }
 
 export interface RoleIdsUpdatePayload {

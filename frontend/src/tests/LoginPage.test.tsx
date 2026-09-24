@@ -7,7 +7,7 @@ import { useAuthStore } from "../stores/authStore";
 import { authApi } from "../api/auth";
 
 vi.mock("../api/auth");
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
+// react-i18next 全局 mock 在 setup.ts
 
 describe("LoginPage", () => {
   beforeEach(() => {
@@ -28,9 +28,9 @@ describe("LoginPage", () => {
     });
     const user = userEvent.setup();
     render(<MemoryRouter><LoginPage /></MemoryRouter>);
-    await user.type(screen.getByLabelText("auth.login.username"), "admin");
-    await user.type(screen.getByLabelText("auth.login.password"), "Admin@123");
-    await user.click(screen.getByRole("button", { name: "auth.login.submit" }));
+    await user.type(screen.getByLabelText("用户名"), "admin");
+    await user.type(screen.getByLabelText("密码"), "Admin@123");
+    await user.click(screen.getByRole("button", { name: /登\s?录/ }));
     await waitFor(() => {
       expect(useAuthStore.getState().token).toBe("t1");
     });
@@ -42,11 +42,11 @@ describe("LoginPage", () => {
     });
     const user = userEvent.setup();
     render(<MemoryRouter><LoginPage /></MemoryRouter>);
-    await user.type(screen.getByLabelText("auth.login.username"), "admin");
-    await user.type(screen.getByLabelText("auth.login.password"), "wrong");
-    await user.click(screen.getByRole("button", { name: "auth.login.submit" }));
+    await user.type(screen.getByLabelText("用户名"), "admin");
+    await user.type(screen.getByLabelText("密码"), "wrong");
+    await user.click(screen.getByRole("button", { name: /登\s?录/ }));
     await waitFor(() => {
-      expect(screen.getByText("auth.login.invalidCredentials")).toBeTruthy();
+      expect(screen.getByText("用户名或密码错误")).toBeTruthy();
     });
   });
 });

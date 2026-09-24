@@ -26,16 +26,19 @@ from app.api.v1 import (
     data_lineage,
     data_quality,
     data_quality_generate,
+    data_quality_rule_params,
     datasource,
     documents,
     embedding_provider,
     entity_mapping,
+    evaluation_report,
     features,
     feature_rules,
     graph_traversal,
     kpi_catalog,
     local_import,
     menu_config,
+    messages,
     model_config,
     ontology,
     organizations,
@@ -44,8 +47,13 @@ from app.api.v1 import (
     supplier_360,
     supplier_risk,
     system,
+    system_config,
     term_dictionary,
     users,
+    wiki,
+    wiki_import,
+    wiki_compile,
+    wiki_graph,
 )
 from app.config import getSettings
 from app.dependencies import getDb
@@ -81,25 +89,13 @@ def buildTestApp(testFactory: Any) -> FastAPI:
 
     # 注册领域异常处理器（与 main.py 一致）：用 isinstance 而非 __class__.__name__，
     # 支持子类化（如 _ToolInUseConflict(ConflictError)）正确映射 409。
-    from app.domain.exceptions import (
-        ConflictError,
-        NotFoundError,
-        PermissionDeniedError,
-        ValidationError,
-    )
+    # 异常 → 状态码映射复用 main.py 同一份实现（exceptions.statusForError）：
+    # 各写一份会漂移，曾导致测试 app 把 LLMUnavailableError 返成 400。
+    from app.domain.exceptions import statusForError
 
     @testApp.exception_handler(DomainError)
     async def handleDomainError(request, exc: DomainError) -> JSONResponse:
-        if isinstance(exc, NotFoundError):
-            status = 404
-        elif isinstance(exc, ConflictError):
-            status = 409
-        elif isinstance(exc, ValidationError):
-            status = 422
-        elif isinstance(exc, PermissionDeniedError):
-            status = 403
-        else:
-            status = 400
+        status = statusForError(exc)
         return JSONResponse(
             status_code=status,
             content=ErrorResponse(
@@ -132,9 +128,19 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         tags=["data-quality"],
     )
     testApp.include_router(
+        data_quality_rule_params.router,
+        prefix="/api/v1",
+        tags=["dq-rule-params"],
+    )
+    testApp.include_router(
         data_quality_generate.router,
         prefix="/api/v1/data-quality/rules/generate",
         tags=["data-quality-generate"],
+    )
+    testApp.include_router(
+        evaluation_report.router,
+        prefix="/api/v1/data-quality/reports",
+        tags=["data-quality"],
     )
     testApp.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     testApp.include_router(
@@ -173,6 +179,12 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(users.router, tags=["users"])
     testApp.include_router(roles.router, tags=["roles"])
     testApp.include_router(organizations.router, tags=["organizations"])
+    # 认证端点（feat-user-auth）：login/me/logout/me-password/password-policy
+    from app.api.v1 import auth as authRouter
+
+    testApp.include_router(
+        authRouter.router, prefix="/api/v1/auth", tags=["auth"]
+    )
     testApp.include_router(
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"]
     )
@@ -180,8 +192,20 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(feature_rules.router, tags=["feature-rules"])
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     testApp.include_router(
+        system_config.router,
+        prefix="/api/v1/admin/system-config",
+        tags=["system-config"],
+    )
+    testApp.include_router(
         menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]
     )
+    testApp.include_router(
+        messages.router, prefix="/api/v1/messages", tags=["messages"]
+    )
+    testApp.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
+    testApp.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
+    testApp.include_router(wiki_compile.router, prefix="/api/v1", tags=["wiki"])
+    testApp.include_router(wiki_graph.router, prefix="/api/v1", tags=["wiki"])
 
     @testApp.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:

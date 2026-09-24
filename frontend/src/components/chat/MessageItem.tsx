@@ -71,6 +71,22 @@ function MessageItem({ message, exporting = false, onExportSingleTurn }: Message
           </>
         ) : (
           <div>
+            {/* 类召回诊断（2026-09-16）：截断/降级时提示，避免"看起来正常但 schema 缺表"的静默失败 */}
+            {message.classRecall && (message.classRecall.truncated || message.classRecall.mode === "fallback") ? (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 8 }}
+                message={
+                  message.classRecall.mode === "fallback"
+                    ? t("messageItem.classRecallFallback")
+                    : t("messageItem.classRecallTruncated", {
+                        // 避开 i18next 保留变量 count（会触发复数 key 解析）
+                        total: message.classRecall.classCount,
+                      })
+                }
+              />
+            ) : null}
             {message.isStreaming ? (
               // 流式期间行高与 markdown 渲染对齐（1.7），完成后切换渲染无视觉跳动（审查 LOW-2）
               <Paragraph style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.7 }}>

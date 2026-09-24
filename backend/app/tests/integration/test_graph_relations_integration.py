@@ -35,8 +35,31 @@ async def cleanBusinessGraph(dbSession):
     """每用例前后清空业务子图（本体图不受影响），并保证 entity_mapping 有种子。"""
     neo4j.deleteBusinessGraph()
     await seedEntityMappings(dbSession)
+    await _seedDemoSuppliers(dbSession)
     yield
     neo4j.deleteBusinessGraph()
+
+
+async def _seedDemoSuppliers(dbSession) -> None:
+    """补 10 家演示供应商映射（SUPPLIES 边端点，数字键位 100001..100010）。
+
+    seed_entity_mapping 已按 THBI 真实数据对齐、不再合成供应商（真实数据由
+    bootstrap 同步脚本写入）；图演示链路需要数字键位供应商节点，测试内自备。
+    enterprise_code 必须等于 str(enterprise_key)——图节点 key 取 enterprise_code。
+    """
+    for i in range(1, 11):
+        dbSession.add(
+            EntityMapping(
+                entity_type="SUPPLIER",
+                enterprise_key=100_000 + i,
+                enterprise_code=str(100_000 + i),
+                source_system="ERP",
+                source_key=f"V{i:06d}",
+                source_code=f"V{i:06d}",
+                match_rule="MDM_MASTER",
+            )
+        )
+    await dbSession.commit()
 
 
 class TestSeedGraphRelationsEndToEnd:
@@ -44,10 +67,11 @@ class TestSeedGraphRelationsEndToEnd:
         service = GraphRelationService()
         result = await service.seedGraphRelations(dbSession)
 
-        # entity_mapping 45 条映射去重后 25 实体（10 SUP + 10 MAT + 3 PO + 1 GR + 1 IQC）
+        # entity_mapping：seed 20 条（15 物料实体去重 + 3 PO + 1 GR + 1 IQC）
+        # + fixture 自备 10 家演示供应商 = 25 实体
         assert result.nodesBySource["entity_mapping"] == 25
-        assert result.nodesBySource["sheet16_demo"] == 4
-        assert result.nodeCount >= 29
+        assert result.nodesBySource["sheet16_demo"] == 3
+        assert result.nodeCount >= 28
 
         # Phase 6 验收线：业务关系 >= 30 条
         assert result.edgeCount >= 30
@@ -107,12 +131,12 @@ class TestSeedGraphRelationsEndToEnd:
             (e["fromKey"], e["toKey"]) for e in snapshot["edges"]
             if e["relType"] == "GENERATES" and e["fromType"] == "PurchaseOrder"
         }
-        assert ("300001", "400001") in poToGr
+        assert ("PO202608001", "GR202608001") in poToGr
         grToIqc = {
             (e["fromKey"], e["toKey"]) for e in snapshot["edges"]
             if e["relType"] == "INSPECTED_BY"
         }
-        assert ("400001", "500001") in grToIqc
+        assert ("GR202608001", "IQC202608001") in grToIqc
 
     async def test_signed_edges_require_pg_relation(self, dbSession) -> None:
         """SIGNED 边仅来自 document_entity_relation（无关联 -> 0 条）。"""
@@ -160,13 +184,13 @@ class TestSeedGraphRelationsEndToEnd:
         assert contractNodes[0]["name"] == "测试合同"
 
     async def test_node_dedup_across_source_systems(self, dbSession) -> None:
-        """entity_mapping 45 条（含同实体多源）-> 去重后 25 个实体节点。"""
+        """entity_mapping 30 条（含同实体多源）-> 去重后 25 个实体节点。"""
         service = GraphRelationService()
         mappings = (await dbSession.execute(
             __import__("sqlalchemy").select(EntityMapping)
         )).scalars().all()
-        # seed_entity_mapping 45 条：25 SUP + 15 MAT + 3 PO + 1 GR + 1 IQC
-        assert len(mappings) == 45
+        # seed 20 条（15 MAT + 3 PO + 1 GR + 1 IQC）+ fixture 10 家供应商
+        assert len(mappings) == 30
 
         await service.seedGraphRelations(dbSession)
         supplierNodes = [

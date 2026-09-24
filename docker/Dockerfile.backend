@@ -53,8 +53,15 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# OCR（扫描件 PDF）+ PDF 渲染（pdftoppm）
+RUN apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout=30 \
+    && apt-get install -y --no-install-recommends \
+        tesseract-ocr \
+        tesseract-ocr-chi-sim \
+        poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 # 从 builder 复制 venv + 源码 + uv 二进制
-# runtime 不再 apt-get：python:3.12-slim 自带 curl + ca-certificates，省一次镜像源拉取（deb 源经常 502）
 COPY --from=builder /app /app
 COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=builder /usr/local/bin/uvx /usr/local/bin/uvx

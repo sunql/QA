@@ -128,3 +128,114 @@ class TestSchemaCache:
         fresh = await _service(adapter2).getCached(dbSession, ds.id)
         assert fresh is not None and fresh.schema_version == second.schema_version
         assert len(fresh.schema_data[0]["columns"]) == 2
+
+
+class TestSchemaCacheOwnerScoping:
+    """Oracle owner 作用域化：同数据源多份 schema 缓存互不覆盖。"""
+
+    async def test_two_owners_coexist_and_are_keyed_by_schema(self, dbSession) -> None:
+        ds = await _persistDatasource(dbSession, "oracle")  # username ZJTH
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {"table_name": "T", "column_name": "ID", "data_type": "NUMBER", "nullable": 0, "owner": "ZJTH"},
+            ],
+            pkRows=[{"table_name": "T", "column_name": "ID"}],
+            fkRows=[],
+        )
+        svc = _service(adapter)
+
+        defaultRow = await svc.introspectAndCache(dbSession, ds)  # 默认 owner = ZJTH
+        thbiRow = await svc.introspectAndCache(dbSession, ds, owner="THBI")
+
+        assert defaultRow.schema_name == "ZJTH"
+        assert thbiRow.schema_name == "THBI"
+        assert thbiRow.id != defaultRow.id
+        count = await dbSession.execute(select(func.count()).select_from(SchemaCache))
+        assert count.scalar_one() == 2
+
+        # 缺省读取命中默认 owner 行；显式 owner 命中各自行
+        cachedDefault = await svc.getCached(dbSession, ds.id)
+        assert cachedDefault is not None and cachedDefault.schema_name == "ZJTH"
+        cachedThbi = await svc.getCached(dbSession, ds.id, owner="THBI")
+        assert cachedThbi is not None and cachedThbi.schema_name == "THBI"
+
+    async def test_default_read_resolves_oracle_owner_from_datasource(self, dbSession) -> None:
+        ds = await _persistDatasource(dbSession, "oracle")  # username ZJTH
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {"table_name": "T", "column_name": "ID", "data_type": "NUMBER", "nullable": 0, "owner": "ZJTH"},
+            ],
+            pkRows=[{"table_name": "T", "column_name": "ID"}],
+            fkRows=[],
+        )
+        svc = _service(adapter)
+        await svc.introspectAndCache(dbSession, ds)
+
+        # 只传 datasource_id（无 ds 对象）：getCached 回查 data_source 解析默认 owner
+        fresh = await SchemaIntrospectionService().getCached(dbSession, ds.id)
+        assert fresh is not None and fresh.schema_name == "ZJTH"
+
+    async def test_owner_is_normalized_before_cache_key_and_lookup(self, dbSession) -> None:
+        """小写/带空白的 owner 在写缓存键与读缓存前归一为规范 owner（防重复行）。"""
+        ds = await _persistDatasource(dbSession, "oracle")  # username ZJTH
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {"table_name": "T", "column_name": "ID", "data_type": "NUMBER", "nullable": 0, "owner": "THBI"},
+            ],
+            pkRows=[{"table_name": "T", "column_name": "ID"}],
+            fkRows=[],
+        )
+        svc = _service(adapter)
+
+        lower = await svc.introspectAndCache(dbSession, ds, owner="thbi")
+        assert lower.schema_name == "THBI"
+        # 内省 SQL 字面量按规范化 owner 执行（非小写）
+        assert any("owner = 'THBI'" in sql for sql in adapter.executed)
+
+        # 大小写不同的读取命中同一行；再按大写内省复用同一行（不产生第二份缓存）
+        cached = await svc.getCached(dbSession, ds.id, owner="thbi")
+        assert cached is not None and cached.id == lower.id and cached.schema_name == "THBI"
+        upper = await svc.introspectAndCache(dbSession, ds, owner="THBI")
+        assert upper.id == lower.id
+        count = await dbSession.execute(select(func.count()).select_from(SchemaCache))
+        assert count.scalar_one() == 1
+
+    async def test_empty_owner_string_keys_to_default_oracle_owner(self, dbSession) -> None:
+        """Oracle 空串 owner 等同缺省 → 键为 UPPER(username)，而非 ''（'' 是非 Oracle 语义）。"""
+        ds = await _persistDatasource(dbSession, "oracle")  # username ZJTH
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {"table_name": "T", "column_name": "ID", "data_type": "NUMBER", "nullable": 0, "owner": "ZJTH"},
+            ],
+            pkRows=[{"table_name": "T", "column_name": "ID"}],
+            fkRows=[],
+        )
+        svc = _service(adapter)
+
+        row = await svc.introspectAndCache(dbSession, ds, owner="")
+        assert row.schema_name == "ZJTH"
+        cached = await svc.getCached(dbSession, ds.id, owner="")
+        assert cached is not None and cached.schema_name == "ZJTH"
+        count = await dbSession.execute(select(func.count()).select_from(SchemaCache))
+        assert count.scalar_one() == 1
+
+    async def test_non_oracle_ignores_owner_in_cache_key(self, dbSession) -> None:
+        """PG/MySQL 即使显式传 owner，缓存键恒为 ''（连接默认），与 _queryByType 忽略 owner 对齐。"""
+        ds = await _persistDatasource(dbSession, "postgresql")
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {"table_name": "t", "column_name": "id", "data_type": "integer", "nullable": 1},
+            ],
+            pkRows=[],
+            fkRows=[],
+        )
+        svc = _service(adapter)
+
+        row = await svc.introspectAndCache(dbSession, ds, owner="THBI")
+        assert row.schema_name == ""
+        cached = await svc.getCached(dbSession, ds.id, owner="THBI")
+        assert cached is not None and cached.id == row.id
+        default = await svc.getCached(dbSession, ds.id)
+        assert default is not None and default.id == row.id
+        count = await dbSession.execute(select(func.count()).select_from(SchemaCache))
+        assert count.scalar_one() == 1

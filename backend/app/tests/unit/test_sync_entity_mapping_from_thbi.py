@@ -111,17 +111,19 @@ class _FakeAdapter:
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
         up = sql.upper()
         if "DWD_SUPPLIER" in up:
+            # 适配器下沉小写列键（与生产 sync_entity_mapping_from_thbi.py 同口径；
+            # scripts/sync_entity_mapping_from_thbi.py:114 注释明示）。
             return [
-                {"SUPPLIER_CODE": c, "SUPPLIER_NAME": n}
+                {"supplier_code": c, "supplier_name": n}
                 for c, n in self._suppliers
             ]
         if "DWD_MATERIAL" in up:
             return [
                 {
-                    "MATERIAL_CODE": c,
-                    "DESCRIPTION_1": n,
-                    "DESCRIPTION_2": None,
-                    "DESCRIPTION_3": None,
+                    "material_code": c,
+                    "description_1": n,
+                    "description_2": None,
+                    "description_3": None,
                 }
                 for c, n in self._materials
             ]
@@ -292,11 +294,12 @@ class TestFetchDedup:
         class _MAdapter(_FakeAdapter):
             async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
                 if "DWD_MATERIAL" in sql.upper():
+                    # 适配器下沉小写列键，与生产口径一致
                     return [
-                        {"MATERIAL_CODE": "M1", "DESCRIPTION_1": "Steel", "DESCRIPTION_2": "AISI 304", "DESCRIPTION_3": None},
-                        {"MATERIAL_CODE": "M2", "DESCRIPTION_1": "Copper", "DESCRIPTION_2": None, "DESCRIPTION_3": "wire"},
-                        {"MATERIAL_CODE": "M3", "DESCRIPTION_1": None, "DESCRIPTION_2": None, "DESCRIPTION_3": None},
-                        {"MATERIAL_CODE": "M1", "DESCRIPTION_1": "dup", "DESCRIPTION_2": None, "DESCRIPTION_3": None},
+                        {"material_code": "M1", "description_1": "Steel", "description_2": "AISI 304", "description_3": None},
+                        {"material_code": "M2", "description_1": "Copper", "description_2": None, "description_3": "wire"},
+                        {"material_code": "M3", "description_1": None, "description_2": None, "description_3": None},
+                        {"material_code": "M1", "description_1": "dup", "description_2": None, "description_3": None},
                     ]
                 return await super().execute_read_only(sql)
         out = _run(sync_mod._fetchMaterialCodes(_MAdapter()))

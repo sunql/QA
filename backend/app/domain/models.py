@@ -32,6 +32,7 @@ from sqlalchemy import (
 )
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.domain.enums import (
@@ -39,21 +40,19 @@ from app.domain.enums import (
     AgentResponseLatency,
     AgentStatus,
     AgentTriggerType,
-    ClassRelationType,  # noqa: E402,F401 -- added 2026-09-24 to support OntologyRelation ORM
+    ClassRelationType,
     DataSourceType,
     DocumentSecurityLevel,
     DocumentStatus,
     DocumentType,
     DocEntityRelationType,
-    ExportFormat,  # noqa: E402,F401 -- added 2026-09-24 to support EvaluationReportShare ORM
     FeatureRefreshFrequency,
     FeatureStatus,
     KpiStatus,
     LineageLayer,
     MatchRule,
     RefreshFrequency,
-    ReportStatus,  # noqa: E402,F401 -- added 2026-09-24 to support EvaluationReport ORM
-    ReportTimeWindowType,  # noqa: E402,F401 -- added 2026-09-24 to support EvaluationReport ORM
+    ReportTimeWindowType,
     RuleOperator,
     RuleType,
     ScoreType,
@@ -111,6 +110,7 @@ class LlmConfig(Base, TimestampMixin):
         Numeric(10, 6), nullable=False, default=Decimal("0.05")
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    temperature: Mapped[float | None] = mapped_column(sa.Float(), nullable=True)
 
     usages: Mapped[list[SessionTokenUsage]] = relationship(
         back_populates="model", lazy="selectin"
@@ -300,6 +300,14 @@ class OntologyProperty(Base, TimestampMixin):
     allowed_values: Mapped[list[str] | None] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
     )
+    # 约束字段（feat-ontology-property-constraints，migration 0071）：
+    # None = 未约束；is_not_null=True 推导 COMPLETENESS 规则，min/max 推导 RANGE，
+    # regex_pattern 推导 PATTERN。此前仅 migration + schema 落地、ORM 类漏提交
+    # （eval-report zombie 同款），读写路径整体 AttributeError。
+    is_not_null: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    min_value: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    max_value: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    regex_pattern: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Relationships
     ontology_class: Mapped[OntologyClass] = relationship(
@@ -382,6 +390,14 @@ class KpiCatalog(Base, TimestampMixin):
         BigIntFk, ForeignKey("ontology_metric.id"), nullable=True
     )
     created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # Phase 1 L1 语义匹配层字段
+    semantic_keywords: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String(64)), nullable=True
+    )
+    match_threshold: Mapped[Decimal] = mapped_column(
+        Numeric(3, 2), nullable=False, default=Decimal("0.75")
+    )
 
     # Relationships
     metric: Mapped[OntologyMetric | None] = relationship(
@@ -616,7 +632,8 @@ class OntologyJoin(Base, TimestampMixin):
 
     relation_type 标注来源：foreign_key（种子物化自外键标志）| business（curated
     业务流转）。join_key 为幂等去重键（列按配对顺序拼接），跨 PG/SQLite 均可比较。
-    本表仅由 NL2SQL 消费，不写 Neo4j/Milvus。
+    PG 为 SSOT：除 NL2SQL 消费外，Phase 5.6 起同步 (:Class)-[:JOIN]->(:Class)
+    镜像边（join 入图，Neo4j 失败不阻断 PG）。
     """
 
     __tablename__ = "ontology_join"
@@ -650,6 +667,49 @@ class OntologyJoin(Base, TimestampMixin):
         return (
             f"<OntologyJoin id={self.id} {self.source_class_id}->{self.target_class_id} "
             f"type={self.join_type}>"
+        )
+
+
+class OntologyRelation(Base, TimestampMixin):
+    """本体「类 × 类」语义关系表（Phase 5.6 关系重构）。
+
+    一行 = 用户显式声明的 (source_class_id → target_class_id × relation_type)
+    方向性语义关系（如 PRECEIPT-SUPPLIES->BPARTNER）。PG 为 SSOT（audit + 可列出），
+    Neo4j 同步 (:Class)-[:{relation_type}]->(:Class) 镜像边（失败不阻断 PG）。
+
+    与 ontology_join 的分工：join 是按列配对的 NL2SQL JOIN 目录（source_columns /
+    target_columns / join_key，relation_type 仅标注来源）；本表是类级业务语义，
+    无列、无 join_key，按 (source, target, relation_type) 三元组去重。
+    """
+
+    __tablename__ = "ontology_relation"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    source_class_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("ontology_class.id"), nullable=False
+    )
+    target_class_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("ontology_class.id"), nullable=False
+    )
+    relation_type: Mapped[ClassRelationType] = mapped_column(
+        String(30), nullable=False
+    )
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_class_id", "target_class_id", "relation_type",
+            name="uq_ontology_relation_triple",
+        ),
+        Index("idx_relation_source_class", "source_class_id"),
+        Index("idx_relation_target_class", "target_class_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<OntologyRelation id={self.id} "
+            f"{self.source_class_id}-[{self.relation_type}]->{self.target_class_id}>"
         )
 
 
@@ -716,6 +776,9 @@ class SessionMessage(Base, TimestampMixin):
         nullable=True,
     )
     user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    routing_layer: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    token_cost_usd: Mapped[float | None] = mapped_column(sa.Float(), nullable=True)
 
     __table_args__ = (
         Index("idx_session_msg_time", "session_id", "created_time"),
@@ -728,10 +791,12 @@ class SessionMessage(Base, TimestampMixin):
 
 
 class SchemaCache(Base, TimestampMixin):
-    """业务数据源 schema 缓存表（5.7）。
+    """业务数据源 schema 缓存表（5.7，schema 作用域化）。
 
-    datasource_id 唯一；schema_data 为结构化表清单（JSON，生产 PG 落 JSONB），
-    schema_version 为内容 MD5，用于判断 schema 是否变化、是否需要刷新。
+    每个 (datasource_id, schema_name) 唯一：一个数据源可按 Oracle owner 拆成多份
+    schema 缓存（每份 schema_data 只含该 owner 下的表）。非 Oracle 数据源
+    schema_name 恒为 ''（连接默认，保持单份语义）。schema_data 为结构化表清单
+    （JSON，生产 PG 落 JSONB），schema_version 为内容 MD5。
     """
 
     __tablename__ = "schema_cache"
@@ -740,15 +805,24 @@ class SchemaCache(Base, TimestampMixin):
     datasource_id: Mapped[int] = mapped_column(
         BigIntFk, ForeignKey("data_source.id"), nullable=False
     )
+    # Oracle owner 命名空间（如 ZJTH/THBI）；非 Oracle 存 ''（连接默认）
+    schema_name: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     schema_data: Mapped[list[dict[str, Any]]] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=False
     )
     schema_version: Mapped[str] = mapped_column(String(64), nullable=False)
 
-    __table_args__ = (UniqueConstraint("datasource_id", name="uq_schema_cache_datasource"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "datasource_id", "schema_name", name="uq_schema_cache_datasource_schema"
+        ),
+    )
 
     def __repr__(self) -> str:
-        return f"<SchemaCache id={self.id} datasource_id={self.datasource_id} version={self.schema_version}>"
+        return (
+            f"<SchemaCache id={self.id} datasource_id={self.datasource_id} "
+            f"schema_name={self.schema_name!r} version={self.schema_version}>"
+        )
 
 
 class SessionQueryState(Base, TimestampMixin):
@@ -844,6 +918,11 @@ class DataQualityRule(Base, TimestampMixin):
     target_column: Mapped[str | None] = mapped_column(String(100), nullable=True)
     rule_type: Mapped[RuleType] = mapped_column(String(20), nullable=False)
     rule_expression: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # feat-dq-rule-params v1：结构化规则参数；与 rule_expression 二选一（NULL=自定义模式）。
+    # 写时由 data_quality_rule_params_service 编译填值；evaluator 不读此列。
+    rule_params: Mapped[dict[str, Any] | None] = mapped_column(
+        postgresql.JSONB(astext_type=sa.Text()), nullable=True,
+    )
     threshold: Mapped[Decimal] = mapped_column(
         Numeric(5, 2), nullable=False, default=Decimal("95.00")
     )
@@ -1108,7 +1187,7 @@ class AuditLog(Base):
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
     entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
     actor: Mapped[str] = mapped_column(String(100), nullable=False)
     actor_departments: Mapped[str | None] = mapped_column(String(500), nullable=True)
     before_json: Mapped[dict[str, Any] | None] = mapped_column(
@@ -1129,7 +1208,9 @@ class AuditLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "action IN ('CREATE','UPDATE','DELETE')",
+            "action IN ('CREATE','UPDATE','DELETE',"
+            "'auth.login','auth.login_failed','auth.logout',"
+            "'auth.password_changed','user.password_reset')",
             name="ck_audit_log_action",
         ),
         Index(
@@ -1208,6 +1289,11 @@ class DocumentCatalog(Base, TimestampMixin):
     """
 
     __tablename__ = "document_catalog"
+    __table_args__ = (
+        # 0061 迁移建的是 CREATE UNIQUE INDEX（非唯一约束），故用 Index(unique=True)
+        # 而非 UniqueConstraint —— 保持 ORM 与迁移生成的 DDL 形状一致。
+        Index("uq_document_catalog_content_hash", "content_hash", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     document_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
@@ -1611,71 +1697,10 @@ class FeatureRuleThreshold(Base):
         )
 
 
-# Re-export MenuConfig so Alembic autogenerate picks it up.
-from app.models.menu_config import MenuConfig  # noqa: E402,F401
-
-# Re-export RBAC identity models so Alembic autogenerate picks them up.
-from app.models.rbac import (  # noqa: E402,F401
-    ADMIN_ROLE_CODE,
-    GRANT_SUBJECT_TYPES,
-    Organization,
-    PermissionGrant,
-    Role,
-    User,
-    UserOrganization,
-    UserRole,
-    UserSession,
-)
-# === Container-only ORM classes (reverse-synced from running qa-backend) ===
-# Source: image sha256:defd2ac80f0b (2026-09-20 build)
-# These 6 classes are required so schema_drift check sees all DB tables.
-
-class OntologyRelation(Base, TimestampMixin):
-    """本体「类 × 类」语义关系表（Phase 5.6 关系重构）。
-
-    一行 = 用户显式声明的 (source_class_id → target_class_id × relation_type)
-    方向性语义关系（如 PRECEIPT-SUPPLIES->BPARTNER）。PG 为 SSOT（audit + 可列出），
-    Neo4j 同步 (:Class)-[:{relation_type}]->(:Class) 镜像边（失败不阻断 PG）。
-
-    与 ontology_join 的分工：join 是按列配对的 NL2SQL JOIN 目录（source_columns /
-    target_columns / join_key，relation_type 仅标注来源）；本表是类级业务语义，
-    无列、无 join_key，按 (source, target, relation_type) 三元组去重。
-    """
-
-    __tablename__ = "ontology_relation"
-
-    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
-    source_class_id: Mapped[int] = mapped_column(
-        BigIntFk, ForeignKey("ontology_class.id"), nullable=False
-    )
-    target_class_id: Mapped[int] = mapped_column(
-        BigIntFk, ForeignKey("ontology_class.id"), nullable=False
-    )
-    relation_type: Mapped[ClassRelationType] = mapped_column(
-        String(30), nullable=False
-    )
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
-
-    __table_args__ = (
-        UniqueConstraint(
-            "source_class_id", "target_class_id", "relation_type",
-            name="uq_ontology_relation_triple",
-        ),
-        Index("idx_relation_source_class", "source_class_id"),
-        Index("idx_relation_target_class", "target_class_id"),
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"<OntologyRelation id={self.id} "
-            f"{self.source_class_id}-[{self.relation_type}]->{self.target_class_id}>"
-        )
-
-
 # =============================================================================
-# Phase 3: DataSource
+# Phase 7c: In-App Messages (feat-dq-evaluation-report)
 # =============================================================================
+
 
 class InAppMessage(Base):
     """站内消息收件箱。
@@ -1727,6 +1752,7 @@ class InAppMessage(Base):
 # evaluation_report.router 始终未被 main.py include。本块一次性补齐 4 个类，
 # 与 alembic 0072+0074 完全对齐（DDL 已固化）。
 # =============================================================================
+
 
 class EvaluationReport(Base, TimestampMixin):
     """数据质量评估报告主表。
@@ -1802,6 +1828,7 @@ class EvaluationReport(Base, TimestampMixin):
             f"status={self.status!r}>"
         )
 
+
 class DataQualityViolationSample(Base):
     """评估违规样本（feat-dq-evaluation-report，Phase 4）。
 
@@ -1841,6 +1868,7 @@ class DataQualityViolationSample(Base):
             f"<DataQualityViolationSample id={self.id} report_id={self.report_id} "
             f"rule_id={self.rule_id} samples={self.sample_size}>"
         )
+
 
 class EvaluationReportSchedule(Base, TimestampMixin):
     """评估报告定时生成配置（feat-dq-evaluation-report Phase 6）。
@@ -1911,6 +1939,7 @@ class EvaluationReportSchedule(Base, TimestampMixin):
             f"<EvaluationReportSchedule id={self.id} name={self.name!r} "
             f"enabled={self.enabled}>"
         )
+
 
 class EvaluationReportShare(Base):
     """评估报告分享链接 token 表（feat-dq-evaluation-report Phase 5）。
@@ -2003,74 +2032,9 @@ from app.models.rbac import (  # noqa: E402,F401
     User,
     UserOrganization,
     UserRole,
-    UserSession,
 )
 
 # Re-export SystemConfig 运行时 KV 表（0052 migration）。ORM 模型主要给
 # Schema drift 校验（main.py lifespan）和 alembic autogenerate 用，service 层
 # 仍走 text() 直查以保持零业务耦合 + 失败安全。
 from app.models.system_config import SystemConfig  # noqa: E402,F401
-
-# Re-export Wiki 知识图谱洞察表（0064 = Phase 3 拓扑信号 + LLM 解读缓存）。
-from app.domain.wiki_graph_insight import WikiGraphInsight  # noqa: E402,F401
-
-# === Container-only ORM re-exports ===
-# Re-export Wiki 覆盖度表（0059 = M7 机制 6：class→域映射 + 覆盖度矩阵）。
-# 与 wiki_learning_models 分文件同理由：覆盖度是**派生快照**，生命周期与
-# 知识本体/管线表都不同（可整体重算、可清空重建）。
-from app.domain.wiki_coverage_models import (  # noqa: E402,F401
-    ClassDomainMapping,
-    CoverageCell,
-)
-
-# Re-export Wiki 学习管线表（0054 = M2 导入/计量，0055 = M3 反馈事件流，
-# 0057 = M5 机制 3/4 的冲突与结构化建议，0058 = M6 机制 5 的结构化产物）。
-from app.domain.wiki_learning_models import (  # noqa: E402,F401
-    KnowledgeConflict,
-    LearningFeedback,
-    ProcessWorkflow,
-    StructureSuggestion,
-    WikiImportTask,
-    WikiRuleExecutable,
-    WikiTokenUsage,
-)
-
-# Re-export P3 批量编译器台账表（0063）。
-from app.domain.wiki_compile_models import (  # noqa: E402,F401
-    WikiCompileItem,
-    WikiCompileTask,
-)
-
-# Re-export Wiki 知识管理 4 表（0053 migration，Phase 8 M1）。同样为了让
-# Schema drift 校验与 alembic autogenerate 看到这些表；wiki 模型独立成文件
-# 是为了避免本文件继续膨胀（已 1700+ 行）。
-from app.domain.wiki_models import (  # noqa: E402,F401
-    Evidence,
-    KnowledgeClaim,
-    KnowledgeRelation,
-    WikiPage,
-)
-
-# Re-export MenuConfig so Alembic autogenerate picks it up.
-from app.models.menu_config import MenuConfig  # noqa: E402,F401
-
-# Re-export RBAC identity models so Alembic autogenerate picks them up.
-from app.models.rbac import (  # noqa: E402,F401
-    ADMIN_ROLE_CODE,
-    GRANT_SUBJECT_TYPES,
-    Organization,
-    PermissionGrant,
-    Role,
-    User,
-    UserOrganization,
-    UserRole,
-    UserSession,
-)
-
-# Re-export SystemConfig 运行时 KV 表（0052 migration）。ORM 模型主要给
-# Schema drift 校验（main.py lifespan）和 alembic autogenerate 用，service 层
-# 仍走 text() 直查以保持零业务耦合 + 失败安全。
-from app.models.system_config import SystemConfig  # noqa: E402,F401
-
-# Re-export Wiki 知识图谱洞察表（0064 = Phase 3 拓扑信号 + LLM 解读缓存）。
-from app.domain.wiki_graph_insight import WikiGraphInsight  # noqa: E402,F401

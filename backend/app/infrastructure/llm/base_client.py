@@ -8,8 +8,27 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """OpenAI tool-call 节点。"""
+
+    id: str
+    name: str
+    args: dict  # JSON-decoded arguments
+
+
+@dataclass(frozen=True)
+class LlmResponseWithTools:
+    """支持 tool calling 的 LLM 调用结果。"""
+
+    content: str | None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: dict | None = None
+    model: str = ""
 
 
 @dataclass(frozen=True)
@@ -18,6 +37,13 @@ class LlmMessage:
 
     role: str
     content: str
+    # tool_call_id: 当 role='tool' 时必填（OpenAI tool API 要求 tool result message
+    # 引用前一条 assistant 消息的 tool_calls[i].id；缺失会导致 deepseek/openai 400）
+    tool_call_id: str | None = None
+    # tool_calls: 当 role='assistant' 且本轮触发了 tool calling 时携带（list[dict]）
+    tool_calls: tuple[dict, ...] | None = None
+    # name: 当 role='tool' 时可选（部分 provider 要求）
+    name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,3 +106,12 @@ class BaseLlmClient(ABC):
     @abstractmethod
     async def close(self) -> None:
         """释放底层连接。"""
+
+    @abstractmethod
+    async def complete_with_tools(
+        self,
+        messages: list[LlmMessage],
+        tools: list[dict] | None = None,
+        tool_choice: str | dict = "auto",
+    ) -> LlmResponseWithTools:
+        """发起支持 tool calling 的补全请求，透传给底层 provider。"""

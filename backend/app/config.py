@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # ===== Milvus 向量库 =====
     milvusUri: str = Field(default="http://localhost:19530", alias="MILVUS_URI")
     milvusCollection: str = Field(default="ontology_embeddings", alias="MILVUS_COLLECTION")
+    # wiki 知识条目向量同步总开关（feat-wiki-semantic-search）：关闭后写路径
+    # 跳过向量 upsert/delete，语义检索仍可用（针对已回填的向量）。测试环境
+    # 与无 embedding provider 的部署可设 false，避免每次 CRUD 等待超时。
+    wikiVectorSyncEnabled: bool = Field(default=True, alias="WIKI_VECTOR_SYNC_ENABLED")
 
     # ===== 安全与限流 =====
     secretKey: str = Field(default="development-insecure-key-change-me", alias="SECRET_KEY")
@@ -58,12 +62,52 @@ class Settings(BaseSettings):
     # 默认 0：取消"列出所有..."型无范围明细查询的强制 LIMIT 100，由 LLM 自由判断。
     nl2sqlNoScopeRowLimit: int = Field(default=0, alias="NL2SQL_NO_SCOPE_ROW_LIMIT")
 
+    # ===== 认证模式（feat-user-auth，2026-09-20）=====
+    # ``stub``（默认）：保持原有 stub header 行为；``X-User-Id`` 头继续生效，便于
+    # 本地/自动化测试。生产部署必须设 ``real``，并由反向代理（nginx）剥离客户端
+    # 传来的 ``Authorization`` / ``X-User-*`` 头保证安全（详见 Harness/wiki/operations-runbook.md）。
+    # ``real``：所有 API 强制 ``Authorization: Bearer <jwt>``；无 Bearer → 403。
+    # 启动期会校验 APP_ENV=production 是否误配 stub，是则 ERROR 日志告警。
+    authMode: str = Field(default="stub", alias="AUTH_MODE")
+    # 是否仍允许 stub 头解析（与 authMode 解耦）：``real`` 模式下也允许 stub 头，
+    # 方便过渡期两套并存；生产部署时由反向代理 + APP_ENV 双重保险。
+    authStubEnabled: bool = Field(default=True, alias="AUTH_STUB_ENABLED")
+    # 当 authMode=real 时，stub 头是否仍允许（默认 false；测试或过渡期可设 true）
+    allowStubWhenReal: bool = Field(default=False, alias="ALLOW_STUB_WHEN_REAL")
+    # JWT HS256 配置（authMode=real 时必须 ≥32 字节；启动期校验）
+    jwtSecret: str = Field(default="", alias="JWT_SECRET")
+    jwtAlgorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+    jwtTtlSeconds: int = Field(default=3600, alias="JWT_TTL_SECONDS")
+    jwtIssuer: str = Field(default="qa-system", alias="JWT_ISSUER")
+    jwtAudience: str = Field(default="qa-system-web", alias="JWT_AUDIENCE")
+    # bcrypt rounds：12（OWASP 推荐上限，登录 ~250ms）
+    bcryptRounds: int = Field(default=12, alias="BCRYPT_ROUNDS")
+    # 防时间侧信道：登录失败时统一延迟（毫秒）
+    authMinDelayMs: int = Field(default=200, alias="AUTH_MIN_DELAY_MS")
+
     # ===== Schema 发现 =====
     # 单数据源允许发现的表数量上限：本地导入/元数据发现的硬保护，防止超大 schema
     # 撑爆 introspection 响应体与缓存。大型 ERP（如 Sage X3 生产库 1600+ 表）可按需调高。
     # 注意：NL2SQL 提示词使用本体 schema（导入后手工维护的类）而非该 introspection 缓存，
     # 调高不会撑爆 NL2SQL 提示词，只会让 introspection / 预览响应体变大。
     schemaMaxTables: int = Field(default=3000, alias="SCHEMA_MAX_TABLES")
+
+    # ===== PG 连接池（feat-chat-concurrency-params）=====
+    # 元数据库 engine 创建时的 pool_size / max_overflow；运行时由 system_config 行
+    # ``DB_POOL_SIZE`` / ``DB_MAX_OVERFLOW`` 覆盖（main.py lifespan 启动期一次性
+    # 读取后注入 ``app.infrastructure.database._db_pool_config``）。两者仅作默认值：
+    # 容器内如需自定义可通过 env var 覆盖，admin 通过 system_config 页面调则需重启。
+    # 2026-09-19 bump：50 并发场景下旧默认 5/10=15 max 会导致 35 请求排队。
+    # 20/10=30 max 给 DB 留出 headroom，配合 PG max_connections=200（docker-compose）。
+    # 配合 migration 0081 把已 seed 的旧默认 5 升到 20（幂等：仅 value='5' 时改）。
+    dbPoolSize: int = Field(default=20, alias="DB_POOL_SIZE")
+    dbMaxOverflow: int = Field(default=10, alias="DB_MAX_OVERFLOW")
+
+    # ===== LLM 并发上限（feat-chat-concurrency）=====
+    # 全局 ``asyncio.Semaphore`` 的 limit，控制同时 in-flight 的 LLM HTTP 调用数。
+    # 运行时由 system_config 行 ``LLM_CONCURRENCY_LIMIT`` 覆盖（lifespan 启动期注入
+    # + admin PUT 主动 reload）。env 可覆盖默认值，但 admin 在线调整无需重启。
+    llmConcurrencyLimit: int = Field(default=20, alias="LLM_CONCURRENCY_LIMIT")
 
     # ===== LLM: OpenAI / Azure =====
     openaiApiKey: str = Field(default="", alias="OPENAI_API_KEY")

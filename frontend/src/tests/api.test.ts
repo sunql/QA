@@ -12,7 +12,10 @@ vi.mock("../api/client", () => ({ httpClient: httpMock }));
 const axiosPost = vi.hoisted(() => vi.fn());
 vi.mock("axios", () => ({
   default: {
-    create: () => ({ post: axiosPost }),
+    create: () => ({
+      post: axiosPost,
+      interceptors: { request: { use: vi.fn() } },
+    }),
     __esModule: true,
   },
 }));
@@ -58,7 +61,9 @@ describe("api/modelConfig", () => {
     const data = [{ id: 1 }] as ModelConfig[];
     httpMock.get.mockResolvedValue({ data });
     const result = await listModels(true);
-    expect(httpMock.get).toHaveBeenCalledWith("/models", { params: { active_only: true } });
+    // 关键：query 参数名是 camelCase（与 FastAPI kwarg 名一致），
+    // 写 snake_case 会被 FastAPI 静默忽略，过滤永远不生效。
+    expect(httpMock.get).toHaveBeenCalledWith("/models", { params: { activeOnly: true } });
     expect(result).toEqual(data);
   });
 
@@ -72,7 +77,7 @@ describe("api/modelConfig", () => {
   it("createModel 发起 POST 并返回新模型", async () => {
     const payload: ModelConfigCreate = {
       modelName: "gpt-4o",
-      provider: "OPENAI",
+      provider: "openai",
       apiEndpoint: "https://api.openai.com/v1",
       apiKey: "sk-x",
       costPer1KInput: 0.005,

@@ -22,8 +22,9 @@ describe("api/dataQuality — rules", () => {
   it("listRules GET /data-quality/rules（无 params）", async () => {
     httpMock.get.mockResolvedValue({ data: [] });
     await listRules();
+    // params 展平后固定传 { params: flat }（无参 → 空对象）
     expect(httpMock.get).toHaveBeenCalledWith("/data-quality/rules", {
-      params: undefined,
+      params: {},
     });
   });
 

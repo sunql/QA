@@ -47,6 +47,20 @@ _RULE_DESCRIPTION_LIMIT = 20
 _RULE_AGG_HINT = "请基于前序步骤结果汇总对比"
 _RULE_STRIP_CHARS = "，,。、：； 　"  # 全角逗号/句号/顿号/冒号/分号 + 全角空格 + 半角空格
 
+# 可自我起始枚举、内容跟随其后的标记词。首个命中若为此类，其前的文本是
+# 范围/上下文（如"2025年数据，首先查A"），不是被丢弃的第一指令，不应补成一步。
+_ORDINAL_SELF_START_MARKERS = frozenset({"首先", "其一"})
+
+
+def _isSelfStartMarker(mark: str) -> bool:
+    """该标记是否自带步骤起始（第X步/首先/其一）；否则视为承接词（然后/接着/最后等）。
+
+    承接词作首个命中时，说明问题的第一指令不带可识别标号、游离在它之前，
+    应由 _splitByRulePattern 补为首个数据步骤（见 2026-09-09 首段锚点回归）。
+    """
+    return bool(_RULE_STEP_PATTERN.fullmatch(mark)) or mark in _ORDINAL_SELF_START_MARKERS
+
+
 _STEP_PLANNER_SYSTEM_PROMPT = (
     "你是查询拆分器。判定用户问题是否需要拆成多个子查询。\n"
     "若需要，返回 JSON: {\"isMultiStep\": true, "
@@ -68,7 +82,13 @@ def _splitByRulePattern(
     if len(matches) < 2:
         return None
 
-    parts: list[str] = []
+    # 首段锚点保留（2026-09-09 回归）：首个命中标记若为承接词（然后/接着/最后/其次…）
+    # 而非自我起始标记（第X步/首先/其一），说明问题的第一指令未带可识别标号、游离在
+    # 首个连接词之前。此前该段被整段丢弃，后续步骤便引用悬空锚点（如"这三个供应商"
+    # 无定义 → SQL 编造占位符）。这里把该段补为第一数据步骤。
+    leading = question[:matches[0].start()].strip(_RULE_STRIP_CHARS)
+    parts = [leading] if (leading and not _isSelfStartMarker(matches[0].group())) else []
+
     for i, m in enumerate(matches):
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(question)

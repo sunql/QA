@@ -40,6 +40,152 @@ SSE 新增 `plan` 事件（在 `sql` 之前），携带 `QueryPlan` 字典；前
 - 连接 URL 校验，拒绝 `file://`，可选主机白名单。
 - 审计日志：session、datasource、SQL、耗时。
 
+## 4-Layer Routing Architecture (Phase 5)
+
+NL2SQL requests are dispatched through a 4-layer cascade. Each layer has a specific trigger condition, cost profile, and failure fallback.
+
+### Decision Flow
+
+```
+question
+  │
+  ▼
+L1: KpiSemanticMatchService (Jaccard on kpi_catalog.semantic_keywords)
+  │ match found?
+  │   ├─ YES → return KPI SQL (cost: ~0ms, 0 tokens)
+  │   └─ NO
+  │       ▼
+L2: LLM single SQL (existing ReAct two-phase, optionally CTE)
+  │ execution ok?
+  │   ├─ YES → return
+  │   └─ NO (execution error, timeout, empty result)
+  │       ▼
+L3: ChainedStep CTE chain (prior_cte injection across multiple plans)
+  │ execution ok?
+  │   ├─ YES → return
+  │   └─ NO
+  │       ▼
+L4: LangGraph Agent Loop (5 NL2SQL tools, iterative)
+  │       │
+  │       ▼
+  return best effort or "cannot answer"
+```
+
+### Layer Trigger Conditions
+
+| Layer | Trigger | Cost Profile |
+|-------|---------|--------------|
+| **L1** | `KpiSemanticMatchService.match(question)` Jaccard ≥ threshold | ~0ms, 0 tokens |
+| **L2** | L1 miss; default for all other NL2SQL questions | 1× LLM call (plan + SQL) |
+| **L3** | L2 execution fails; question involves multi-step/CTE composition | 1 + N× LLM calls |
+| **L4** | L2/L3 exhaust all retries; complex multi-join requiring iterative tool use | N× LLM calls + tool overhead |
+
+### Each Layer Detail
+
+#### L1 — KPI Semantic Match (`KpiSemanticMatchService`)
+
+- Jaccard similarity on `kpi_catalog.semantic_keywords` (stored as `TEXT[]` in PG, or JSON array).
+- Keyword extraction: tokenize question, remove stopwords, compute set intersection / union.
+- Match threshold: configurable (default 0.4). Below threshold → L1 miss → fall through to L2.
+- On match: return pre-defined SQL from `kpi_catalog.sql_template` directly.
+- **Code**: `app/services/kpi_semantic_match_service.py`
+
+#### L2 — LLM Single SQL (existing ReAct two-phase)
+
+- Phase 1: `generateValidatedPlan` → `QueryPlan` JSON (target/selectedClasses/selectedProperties/conditions/aggregations/groupBy/joins/sortBy/rowLimit).
+- Phase 2: `generateSql(..., plan)` → SQL string.
+- SQL Guard校验.
+- Optional CTE enhancement: when `plan.requiresCte=True`, injects prior CTE as `WITH prior_cte AS (...)`.
+- **Code**: `app/services/nl2sql_service.py:_planAndGenerateSql`
+
+#### L3 — ChainedStep CTE Chain
+
+- Used when a question requires joining results from multiple plans (e.g., "first query X, then use X's result to filter Y").
+- `prior_cte` is built from the previous step's SQL result and injected as a `WITH` clause into the next step.
+- Each step in the chain is validated independently before chaining.
+- **Code**: `app/services/multi_step_plan.py` (ChainedStep class)
+
+#### L4 — LangGraph Agent Loop
+
+- LangGraph `StateGraph` with `AgentLoopState` (question, generated_sql, tool_calls, iterations, cost_so_far_usd).
+- 5 NL2SQL tools registered: `list_tables`, `describe_table`, `sample_rows`, `execute_sql`, `list_joins`.
+- Each iteration: LLM chooses tool → tool executes → result fed back → next iteration or final answer.
+- Cost cap: `max_cost_usd=5.0` (configurable); loop exits if `cost_so_far_usd >= max_cost_usd`.
+- Final SQL still passes SQL Guard before execution.
+- **Code**: `app/services/agent_loop.py` ( `_runL4AgentLoop`)
+
+### Fallback Chain
+
+```
+L1 miss → L2 → execution error → L3 → execution error → L4 → (best effort | cannot_answer)
+```
+
+Any layer that produces a valid, non-empty result that passes SQL Guard terminates the cascade.
+
+### RoutingMetricsService
+
+Aggregates `session_message.routing_layer` hits per layer for observability:
+
+```python
+# app/services/routing_metrics_service.py
+async def aggregate(session_id: str) -> dict:
+    rows = await db.fetch("""
+        SELECT routing_layer, COUNT(*), AVG(latency_ms), SUM(token_cost_usd)
+        FROM session_message
+        WHERE session_id = $1 AND routing_layer IS NOT NULL
+        GROUP BY routing_layer
+    """, session_id)
+    return {r["routing_layer"]: {...} for r in rows}
+```
+
+### MetricPromotionService (Cold Metric Auto-Promotion)
+
+Scans frequently repeated L2 questions (identical md5 hash ≥ 3× per week), auto-creates `KpiCatalog` entry in `DRAFT` status for admin review:
+
+```python
+# app/services/metric_promotion_service.py
+async def scan_and_promote():
+    frequent = await db.fetch("""
+        SELECT md5(question) as q_hash, question, COUNT(*) as cnt
+        FROM session_message
+        WHERE routing_layer = 'L2' AND created_time > now() - interval '7 days'
+        GROUP BY q_hash, question
+        HAVING COUNT(*) >= 3
+    """)
+    for row in frequent:
+        await kpi_catalog.upsert({
+            "code": f"AUTO_{row['q_hash'][:8]}",
+            "question": row["question"],
+            "status": "DRAFT",
+            ...
+        })
+```
+
+Admin reviews DRAFT KPI in `/admin/kpi-catalog`, approves → status becomes `ACTIVE`, next L1 hit promotes to fast path.
+
+### Migration 0051
+
+New columns on `session_message`:
+
+| Column | Type | Nullable | Description |
+|--------|------|----------|-------------|
+| `routing_layer` | `VARCHAR(10)` | YES | L1/L2/L3/L4 |
+| `latency_ms` | `INTEGER` | YES | End-to-end latency in ms |
+| `token_cost_usd` | `FLOAT` | YES | Token cost in USD |
+
+### Code Locations
+
+| Component | File |
+|-----------|------|
+| Entry | `app/services/chat_service.py:_handleNl2SqlAgent` |
+| L1 | `app/services/kpi_semantic_match_service.py` |
+| L2 | `app/services/nl2sql_service.py:_planAndGenerateSql` |
+| L3 | `app/services/multi_step_plan.py:ChainedStep` |
+| L4 | `app/services/agent_loop.py:_runL4AgentLoop` |
+| Metrics | `app/services/routing_metrics_service.py` |
+| Promotion | `app/services/metric_promotion_service.py` |
+| Migration | `migrations/versions/0051_add_routing_fields.py` |
+
 ## 派生指标 formula 必填硬约束（占比/比率/百分比）
 
 `validatePlan`（`app/services/nl2sql_service.py:1387-1478`）在 aggregation 循环里加一条规则：**alias 命中派生指标关键词 → `formula` 必填**，否则 SQL 不会算百分比，占比沦为列别名，重试耗尽后整步被标"无法回答"被静默收纳（2026-08-17 真实回归：用户问"top10 物料的占比"时 LLM 倾向 `alias="占比"` 但无 formula → Step 失败，Step 3 因依赖被卡）。
@@ -74,6 +220,28 @@ SSE 新增 `plan` 事件（在 `sql` 之前），携带 `QueryPlan` 字典；前
 - `alias="两年价格之差"`（语义派生但命名非典型）→ 不在关键词集合 → 不被拦；由 sortBy 派生规则守约（2026-08-14）
 
 详见 `changes/fix-nl2sql-derived-metric-formula-required/summary.md`。
+
+## 跨类属性引用校验补可操作 hint（属性归属 + schema 不存在）
+
+`validatePlan`（`app/services/nl2sql_service.py`）的三个分支（`selectedProperties` / `aggregations` else / `groupBy` 兜底）共用同款可操作重试 hint：`_propertyOwnerHint(prop, propsByClass)`。背景是 2026-09-16 真实回归：用户问「近五个月供货量最大的供应商」时偶发报"选中的属性 供应商名称 不属于选定的任何类"，复现确认是低概率上下文相关 LLM 偏差（上一轮是 PurchaseOrder COUNT → 意图被判为 FOLLOW_UP → statePrompt 注入不相关上轮 → 模型偶发引用跨类属性），旧反馈只说"不属于选定的任何类"无可操作指引，重试两次仍犯同错 → `maxPlanAttempts=2` 耗尽 → 整轮失败。
+
+hint 真源为 `propsByClass`（已经 `_classRefNames` 展开过的业务名 + 别名 + 物理列 + 表限定名 + 类限定名），口径与属性/分组/JOIN 列校验一致：
+
+- 属性在 schema 中**有归属类** → 列出归属类（截断到 `_OWNER_HINT_MAX_CLASSES=3`，避免 schema 类多时提示过长挤占重试 token），引导"把对应类加入 selectedClasses 并按 JOIN 目录关联后再引用"
+- 属性在 schema 中**完全不存在**（含别名/物理列口径比对）→ 如实说明防 LLM 重试继续幻觉同一属性名
+
+`groupBy` 分支优先取 `_timeBucketGroupHint`（粒度词命中），命中不到才走 `_propertyOwnerHint`，与粒度词提示保持正交；`aggregations` 的 `formula` 分支保留 2026-08-14 的"property 应填真实属性 / 别名引用写在 formula 内"风格，不重复插入，避免覆盖原有可操作指引。
+
+反例守约：
+
+- `selectedProperties=("供应商名称",)`、`selectedClasses=("ReceiptDetail",)`、`classes=[Receipt, ReceiptDetail, Supplier, PurchaseOrder, PurchaseInvoice]` → 反馈含 `BPSUPPLIER / PurchaseOrder / PurchaseInvoice`，引导把对应类加入 selectedClasses + JOIN 关联（生产回归：用户问「供货量最大供应商」时偶发失败场景）
+- `selectedProperties=("NONEXISTENT",)`、`classes` 中无任何类含该属性 → 反馈如实说明含"本体 schema 中不存在"
+- `groupBy=("供应商名称",)` 同 selectedProperties 路径，分组属性同样带 hint
+- 普通聚合 `SUM("收货数量")`、`groupBy=("订单日期",)` → 不触发 hint
+
+测试守约：`test_query_plan_validation.py` 48 用例（含 3 新增）全过；NL2SQL 单测 161 + chat 集成 102 合计 263 回归全绿；已通过 `deploy_backend.sh` 部署。
+
+详见 `changes/fix-cross-class-property-owner-hint/summary.md`。
 
 ## 范围感知行数限制（scope-aware row limit）
 
@@ -230,3 +398,40 @@ plan 与 sql 两个阶段共用 `_renderStatePart(priorState)` 模块级函数�
 
 - 注入数据库 ER 图描述（从 Ontology Service 动态拉取）。
 - 初期限单表查询（SELECT...WHERE...GROUP BY），NL2SQL 通过测试后再放开 JOIN。
+
+## 类召回窗口与规模化风险（已知限制，待优化）
+
+> 记录于 2026-09-16。背景：ReceiptDetail 召回落榜事件（详见 memory `qa-system-milvus-ontology-vector-drift`）暴露的机制性限制，当前规模（96 类）实测够用，**类库增长到数百个后需要升级**。
+
+### 机制（现状）
+
+`chat_service._selectRelevantClasses` 每次提问独立执行（窗口是**每问一次**的，不是全局的）：
+
+1. **向量召回 topK=15**（`_CLASS_FILTER_TOP_K`）：从全部类中按语义相似度挑 15 个候选；
+2. **1-hop 扩边**（`_expandByJoinNeighbors`）：命中类沿 JOIN 目录把相邻表拉进来；
+3. **上限 30**（`_CLASS_FILTER_MAX_CLASSES`）：命中 + 邻居合计截断，截断时记日志 `类召回扩边截断`。
+
+窗口大小不随类库增长，但**挑选竞争加剧**。
+
+### 风险表（类库增长后）
+
+| 风险 | 机制 | 当前缓解 |
+|---|---|---|
+| 召回漏选 | topK 固定 15，类库越大相关表挤不进前 15 的概率越高 | 无（ReceiptDetail 事件即此类的实例） |
+| 孤立漏选无法扩边 | 扩边只补「被命中类的邻居」；头表与明细表都落榜时无从谈起 | 无 |
+| 扩边截断 | 命中 15 + 邻居稠密时达 30 上限被截 | 有日志（类召回扩边截断） |
+
+### 升级路径（按成本从低到高，出现真实漏选案例后再做，勿提前）
+
+1. **调大常量**：`_CLASS_FILTER_TOP_K` / `_CLASS_FILTER_MAX_CLASSES`（改两个常量，注意 prompt 长度代价）；
+2. **多路召回**：问题改写为 2-3 个子查询分别召回再合并去重（对「供货量→收货明细+到货明细」类问题有效）；
+3. **两阶段检索**：宽召回（topK≈50）后用 LLM/cross-encoder 精排到 30。
+
+### 验证方法
+
+出现「问了 A 却没看到表 B」时，先看后端日志 `类召回扩边 hits=X expanded=Y total=Z`：
+
+- `Z=30` → 截断问题（调上限即可）；
+- 相关表不在 15 个 hits 里 → 召回问题（走多路召回）。
+
+配套可观测性：`/chat` 响应已带 `classRecall` 诊断字段（mode/hitCount/classCount/truncated），前端在截断/降级时向用户展示提示（2026-09-16 落地）。

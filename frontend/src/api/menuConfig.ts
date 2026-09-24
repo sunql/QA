@@ -7,13 +7,19 @@ import type {
   MenuUpdatePayload,
 } from "../types/menuConfig";
 
-// 用相对路径（httpClient.baseURL 已含 /api/v1）；不要拼 `${API_BASE}/menu-config`，
-// 否则 axios 会拼出 `/api/v1/api/v1/menu-config` → 404 → AppLayout 退回扁平 FALLBACK_NAV。
+/** 调用方可见菜单（一级类 + 叶子项）。
+ *
+ * 走 httpClient（feat-user-auth，2026-09-20）—— 之前用裸 fetch 漏掉
+ * Authorization: Bearer 注入，nginx 也不补（保留合法 JWT），后端
+ * ``getCurrentUser`` 在 AUTH_MODE=real 下无 Bearer → 403 → 前端退回
+ * FALLBACK_NAV（菜单少了 + 无分组）。已修复：改 httpClient 后由其
+ * 拦截器注入 ``Authorization: Bearer <token>``。
+ *
+ * 路径：``/menu-config``（不带 /api/v1 前缀 —— httpClient 的 baseURL
+ * 已是 ``/api/v1``，加前缀会导致双层叠加成 /api/v1/api/v1/menu-config
+ * 在 nginx SPA fallback 下被吞成 404）。
+ */
 export async function fetchMenuConfig(): Promise<MenuConfig> {
-  // 用 httpClient 而非裸 fetch：保证带上 X-Tenant-Id / X-User-Id 默认头。
-  // 后端 AUTH_STUB_ENABLED=1（开发模式）依赖这两个头识别 actor，
-  // 裸 fetch 漏头会得到 403 → AppLayout 退回 FALLBACK_NAV（扁平 22 项）。
-  // 响应拦截器已解包 ApiResponse 信封，res.data 即 MenuConfig。
   const res = await httpClient.get<MenuConfig>("/menu-config");
   return res.data;
 }

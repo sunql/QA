@@ -1,13 +1,40 @@
 import axios, { AxiosError, AxiosInstance, AxiosResponse } from "axios";
-import { message } from "antd";
-import {
-  API_BASE_URL,
-  REQUEST_TIMEOUT_MS,
-  DEFAULT_TENANT_ID,
-} from "../config";
+import type { MessageInstance } from "antd/es/message/interface";
+import { API_BASE_URL, REQUEST_TIMEOUT_MS, DEFAULT_TENANT_ID } from "../config";
 import type { ApiResponse } from "../types/common";
 import { i18n } from "../i18n";
 import { useAuthStore } from "../stores/authStore";
+
+/**
+ * antd message 实例的 holder。
+ *
+ * 拦截器在 module load 时就生效，不在 React 树里 —— 静态 ``import { message }
+ * from "antd"`` 拿不到 App 上下文（动态主题），会在控制台报
+ * "Static function can not consume context like dynamic theme"。
+ *
+ * 解法：把 ``messageApi`` 留成 holder，由 ``<App>`` 内部调 ``App.useApp()``
+ * 拿到真实实例后，通过 ``setMessageApi`` 注入。Holder 在 App 挂载前是
+ * ``null``，期间不弹提示以避免静默丢错；首屏请求靠调用方自己处理 toast。
+ */
+let messageApi: MessageInstance | null = null;
+
+export function setMessageApi(api: MessageInstance): void {
+  messageApi = api;
+}
+
+function showError(content: string): void {
+  if (messageApi) {
+    void messageApi.error(content);
+  }
+}
+
+/**
+ * 给非 httpClient 路径（裸 axios.postForm 等）用的 toast 出口。
+ * 这些路径不经过拦截器，要自己手动弹错。
+ */
+export function showMessageError(content: string): void {
+  showError(content);
+}
 
 // 创建带默认配置的 axios 实例
 export function createHttpClient(): AxiosInstance {
@@ -20,15 +47,14 @@ export function createHttpClient(): AxiosInstance {
     },
   });
 
-  // 请求拦截：注入 Bearer token
+  // 请求拦截：注入 Authorization: Bearer <token>（feat-user-auth）
+  // token 不存在时不注入 —— stub 模式 / 登录页 / 公开端点。
   instance.interceptors.request.use((config) => {
     const token = useAuthStore.getState().token;
     if (token) {
       config.headers = config.headers ?? {};
       config.headers.Authorization = `Bearer ${token}`;
     }
-    config.headers = config.headers ?? {};
-    config.headers["X-Tenant-Id"] ??= DEFAULT_TENANT_ID;
     return config;
   });
 
@@ -39,27 +65,27 @@ export function createHttpClient(): AxiosInstance {
       if (body && typeof body === "object" && "success" in body) {
         if (!body.success) {
           const errMsg = body.error ?? i18n.t("errors.requestFailed");
-          void message.error(errMsg);
+          showError(errMsg);
           return Promise.reject(new Error(errMsg));
         }
         return { ...response, data: body.data };
       }
       return response;
     },
-    async (error: AxiosError<ApiResponse<unknown>>) => {
+    (error: AxiosError<ApiResponse<unknown>>) => {
       const status = error.response?.status;
       const apiError = error.response?.data?.error;
       const apiDetail = (error.response?.data as { detail?: unknown } | undefined)?.detail;
 
-      // 401 非 /auth/login → 触发登出
-      if (
-        status === 401 &&
-        !error.config?.url?.includes("/auth/login")
-      ) {
-        const state = useAuthStore.getState();
-        if (state.token) {
-          await state.logout();
-        }
+      // 401：token 失效 / 未登录 → 清 store 触发重定向到 /login
+      // 不弹 toast（避免每次跳转都弹"登录已失效"，已经准备重定向了）
+      // 直接 setState 而非 logout()：拦截器是同步路径，不需要异步调 API
+      if (status === 401) {
+        useAuthStore.setState({
+          token: null,
+          user: null,
+          mustChangePassword: false,
+        });
       }
 
       const errMsg =
@@ -67,8 +93,9 @@ export function createHttpClient(): AxiosInstance {
         (status
           ? i18n.t("errors.requestFailedHttp", { status: String(status) })
           : i18n.t("errors.networkError"));
+      // 401 不弹 toast —— 由 RequireAuth 或登录页处理
       if (status !== 401) {
-        void message.error(errMsg);
+        showError(errMsg);
       }
       // 携带领域异常 detail（如 NL2SQL 校验差异），供错误消息折叠展示
       // 携带 HTTP status，便于业务页面按状态分流（如 403 → 权限提示 Modal）
@@ -86,7 +113,8 @@ export function createHttpClient(): AxiosInstance {
   return instance;
 }
 
-// 默认单例（向后兼容：旧 API 文件仍使用 httpClient）
-export const apiClient = createHttpClient();
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export const httpClient = apiClient;
+// 默认单例
+export const httpClient = createHttpClient();
+// 别名：feat-user-auth 的 auth.ts / authStore.ts 习惯用 apiClient；
+// 旧 API（feature/kpi/dq 等）继续用 httpClient，指向同一实例。
+export const apiClient = httpClient;

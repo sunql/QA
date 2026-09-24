@@ -27,13 +27,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.dependencies import CurrentUser
+from app.domain.enums import ClassRelationType
 from app.domain.exceptions import (
     MilvusError,
     NotFoundError,
     OntologyError,
     ValidationError,
 )
-from app.domain.models import OntologyClass, OntologyJoin, OntologyMetric, OntologyProperty
+from app.domain.models import (
+    OntologyClass,
+    OntologyJoin,
+    OntologyMetric,
+    OntologyProperty,
+    OntologyRelation,
+)
 from app.domain.schemas import (
     OntologyClassCreate,
     OntologyClassUpdate,
@@ -43,6 +50,7 @@ from app.domain.schemas import (
     OntologyMetricUpdate,
     OntologyPropertyCreate,
     OntologyPropertyUpdate,
+    OntologyRelationCreate,
     OntologySearchResult,
 )
 from app.infrastructure import milvus_client as milvus
@@ -50,6 +58,7 @@ from app.infrastructure import neo4j_client as neo4j
 from app.services.acl_service import AclService
 from app.services.audit_service import AuditService
 from app.services.embedding_service import EmbeddingService
+from app.services.join_inference import SAGE_X3_REFERENCE_MAP
 from app.services.messages_zh import (
     MSG_CLASS_ALREADY_EXPIRED,
     MSG_CLASS_INHERIT_CYCLE,
@@ -63,10 +72,17 @@ from app.services.messages_zh import (
     MSG_ONTOLOGY_JOIN_NOT_FOUND,
     MSG_ONTOLOGY_METRIC_NOT_FOUND,
     MSG_ONTOLOGY_PROPERTY_NOT_FOUND,
+    MSG_ONTOLOGY_RELATION_DUP,
+    MSG_ONTOLOGY_RELATION_INVALID_TYPE,
+    MSG_ONTOLOGY_RELATION_NOT_FOUND,
+    MSG_ONTOLOGY_RELATION_SELF,
     MSG_PARENT_CLASS_NOT_FOUND,
     MSG_VECTOR_SEARCH_FAILED,
     MSG_VECTOR_SYNC_FAILED,
 )
+
+# 语义关系类型词表（与 ClassRelationType 对齐；用于 service 层校验，返回友好中文 422）
+_CLASS_RELATION_VALUES = frozenset(rel.value for rel in ClassRelationType)
 
 
 def _utcnow() -> datetime:
@@ -107,6 +123,34 @@ def _logNeo4jFailure(operation: str, entityId: int, exc: Exception) -> None:
         logger.error("Neo4j 不可达 %s id=%d: %s（图谱同步已跳过）", operation, entityId, exc)
     else:
         logger.warning("Neo4j %s 失败 id=%d: %s", operation, entityId, exc)
+
+
+def _classEmbeddingText(cls: OntologyClass) -> str:
+    """类向量文本：类名 + 别名 + 描述（与 backfill_milvus_embeddings.py 同口径）。
+
+    中英文混合召回：类名保英文命中（PurchaseOrder），别名/描述保中文命中（采购订单）。
+    """
+    return " ".join(
+        x for x in (cls.class_name, cls.class_alias, cls.description) if x
+    )
+
+
+def _propertyEmbeddingText(prop: OntologyProperty) -> str:
+    """属性向量文本：属性名 + 业务别名 + 描述（与 backfill_milvus_embeddings.py 同口径）。"""
+    return " ".join(
+        filter(
+            None,
+            [
+                prop.property_name,
+                *(prop.business_aliases or []),
+                prop.description or "",
+            ],
+        )
+    )
+
+
+# 自动同步后台任务的强引用集合（create_task 弱引用会被 GC，需持握防丢失）
+_PENDING_SYNC_TASKS: set[asyncio.Task] = set()
 
 
 def makeJoinKey(
@@ -156,6 +200,7 @@ class OntologyService:
         *,
         actor: str,
         actor_departments: str | None = None,
+        sync_embedding: bool = True,
     ) -> OntologyClass:
         """创建本体类（起始 version=1, validFrom=now, validTo=None）。
 
@@ -224,6 +269,14 @@ class OntologyService:
             _logNeo4jFailure("节点创建", entity.id, exc)
 
         logger.info("创建本体类 id=%d name=%s version=1", entity.id, entity.class_name)
+
+        # Milvus 类向量自动同步（best-effort，与 Neo4j 同策略：
+        # 向量缺失会让 chat 类召回裁剪看不到该类——历史事故见 backfill_milvus_embeddings.py）
+        # 批量导入路径传 sync_embedding=False 抑制逐类后台同步，改由导入完成后
+        # 一次性整批补齐（syncMissingClassEmbeddingsBestEffort，单次 flush）
+        if sync_embedding:
+            await self._syncClassEmbeddingBestEffort(entity)
+
         return entity
 
     async def getClass(self, session: AsyncSession, id: int) -> OntologyClass:
@@ -265,8 +318,7 @@ class OntologyService:
         id: int,
         dto: OntologyClassUpdate,
         *,
-        actor: str,
-        actor_departments: str | None = None,
+        actor: CurrentUser,
     ) -> OntologyClass:
         """更新本体类：原地 UPDATE，主键 id 稳定（版本管理已移除）。
 
@@ -285,10 +337,10 @@ class OntologyService:
         返回更新后的同一行（id 与调用方传入一致）。
         """
         existing = await self.getClass(session, id)
-        # ACL 需要 CurrentUser：构造一个临时对象（仅用于 ACL 检查）
-        _acl_user = CurrentUser(userId=actor, departments=list(actor_departments.split(",")) if actor_departments else [])
+        # ACL 用端点传入的真实 CurrentUser（含 roles）。此前从 actor str 重建
+        # CurrentUser 会落入 DEFAULT_STUB_ROLES（含 admin）→ ACL 恒通过（越权洞）。
         self._acl.assertCanModify(
-            _acl_user,
+            actor,
             entity_owner=existing.object_owner,
             entity_label="ONTOLOGY_CLASS",
             entity_code=existing.class_name,
@@ -349,8 +401,8 @@ class OntologyService:
             entity_type="ONTOLOGY_CLASS",
             entity_id=existing.id,
             action="UPDATE",
-            actor=actor,
-            actor_departments=actor_departments,
+            actor=actor.userId,
+            actor_departments=actor.departments,
             before=before,
             after=_entityToDict(existing),
         )
@@ -372,6 +424,10 @@ class OntologyService:
             _logNeo4jFailure("节点更新", existing.id, exc)
 
         logger.info("更新本体类 id=%d name=%s", existing.id, existing.class_name)
+
+        # Milvus 类向量自动重同步（id 不变，先删后插幂等覆盖旧向量）
+        await self._syncClassEmbeddingBestEffort(existing)
+
         return existing
 
     async def deleteClass(
@@ -379,8 +435,7 @@ class OntologyService:
         session: AsyncSession,
         id: int,
         *,
-        actor: str,
-        actor_departments: str | None = None,
+        actor: CurrentUser,
     ) -> None:
         """软删除本体类：valid_to = now()（墓碑标记），listClasses 默认不再返回。
 
@@ -390,9 +445,9 @@ class OntologyService:
         Phase 4.5 扩展：先 ACL 检查（object_owner 不匹配 + 非 admin → 403）。
         """
         entity = await self.getClass(session, id)
-        _acl_user = CurrentUser(userId=actor, departments=list(actor_departments.split(",")) if actor_departments else [])
+        # ACL 用端点传入的真实 CurrentUser（含 roles）——同 updateClass 越权洞修复
         self._acl.assertCanModify(
-            _acl_user,
+            actor,
             entity_owner=entity.object_owner,
             entity_label="ONTOLOGY_CLASS",
             entity_code=entity.class_name,
@@ -407,8 +462,8 @@ class OntologyService:
             entity_type="ONTOLOGY_CLASS",
             entity_id=entity.id,
             action="DELETE",
-            actor=actor,
-            actor_departments=actor_departments,
+            actor=actor.userId,
+            actor_departments=actor.departments,
             before=before,
         )
         await session.commit()
@@ -562,6 +617,12 @@ class OntologyService:
             _logNeo4jFailure("更新", id, exc)
 
         logger.info("更新本体属性 id=%d", id)
+
+        # 属性向量自动重同步（best-effort，后台执行）：description/business_aliases
+        # 是 _propertyEmbeddingText 的组成部分，不重刷则语义检索永远拿到旧含义
+        # （2026-09-18 报障：编辑属性描述后「没办法生成向量信息」）。
+        await self._syncPropertyEmbeddingBestEffort(entity)
+
         return entity
 
     async def deleteProperty(
@@ -764,7 +825,8 @@ class OntologyService:
     ) -> OntologyJoin:
         """创建 join 边：校验两端类存在、列数一致、去重后写入 PG。
 
-        join 目录仅 NL2SQL 消费，不写 Neo4j/Milvus（join 边不是本体节点/关系）。
+        除 NL2SQL 消费外，同步 (:Class)-[:JOIN]->(:Class) 图边（Phase 5.6 关联入图；
+        best-effort，Neo4j 不可达不阻断 PG，图边留待 backfill 补）。
         """
         # 两端类存在性：复用 getClass，缺失抛 NotFoundError（404）
         await self.getClass(session, dto.source_class_id)
@@ -805,6 +867,10 @@ class OntologyService:
         )
         await session.commit()
         await session.refresh(entity)
+        try:
+            neo4j.linkClassJoin(entity.source_class_id, entity.target_class_id)
+        except Exception as exc:  # noqa: BLE001
+            _logNeo4jFailure("关联入图", entity.id, exc)
         logger.info(
             "创建关联关系 id=%d %d->%d type=%s",
             entity.id, entity.source_class_id, entity.target_class_id, entity.join_type,
@@ -841,6 +907,11 @@ class OntologyService:
         )
         await session.commit()
         await session.refresh(entity)
+        # 幂等 MERGE 自愈：updateJoin 不改端点，但保证 JOIN 边存在
+        try:
+            neo4j.linkClassJoin(entity.source_class_id, entity.target_class_id)
+        except Exception as exc:  # noqa: BLE001
+            _logNeo4jFailure("关联入图", entity.id, exc)
         logger.info("更新关联关系 id=%d", id)
         return entity
 
@@ -852,10 +923,11 @@ class OntologyService:
         actor: str,
         actor_departments: str | None = None,
     ) -> None:
-        """删除 join 边。"""
+        """删除 join 边，并同步删除 (:Class)-[:JOIN]->(:Class) 图边。"""
         entity = await session.get(OntologyJoin, id)
         if entity is None:
             raise NotFoundError(MSG_ONTOLOGY_JOIN_NOT_FOUND.format(id=id))
+        sourceId, targetId = entity.source_class_id, entity.target_class_id
         before = _entityToDict(entity)
         await session.flush()
         await _audit.record(
@@ -869,7 +941,221 @@ class OntologyService:
         )
         await session.delete(entity)
         await session.commit()
+        try:
+            neo4j.deleteClassJoin(sourceId, targetId)
+        except Exception as exc:  # noqa: BLE001
+            _logNeo4jFailure("删除关联图边", id, exc)
         logger.info("删除关联关系 id=%d", id)
+
+    # =============================================================================
+    # Semantic Relation（类 × 类语义关系，ontology_relation）
+    # =============================================================================
+
+    async def listRelations(self, session: AsyncSession) -> list[OntologyRelation]:
+        """列出全部类级语义关系（按 id 升序，供前端语义关系 Tab）。"""
+        result = await session.execute(
+            select(OntologyRelation).order_by(OntologyRelation.id)
+        )
+        return list(result.scalars().all())
+
+    async def createRelation(
+        self,
+        session: AsyncSession,
+        dto: OntologyRelationCreate,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+    ) -> OntologyRelation:
+        """创建类级语义关系：类型词表校验、两端类存在、非自环、三元组去重后写 PG。
+
+        PG 为 SSOT（+ audit）；同步 (:Class)-[:{relation_type}]->(:Class) 图边，
+        best-effort（Neo4j 不可达不阻断 PG）。
+        """
+        if dto.relation_type not in _CLASS_RELATION_VALUES:
+            raise ValidationError(
+                MSG_ONTOLOGY_RELATION_INVALID_TYPE.format(relationType=dto.relation_type)
+            )
+        # 两端类存在性：复用 getClass，缺失抛 NotFoundError（404）
+        await self.getClass(session, dto.source_class_id)
+        await self.getClass(session, dto.target_class_id)
+        if dto.source_class_id == dto.target_class_id:
+            raise ValidationError(MSG_ONTOLOGY_RELATION_SELF)
+
+        existing = await session.execute(
+            select(OntologyRelation).where(
+                OntologyRelation.source_class_id == dto.source_class_id,
+                OntologyRelation.target_class_id == dto.target_class_id,
+                OntologyRelation.relation_type == dto.relation_type,
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            raise ValidationError(MSG_ONTOLOGY_RELATION_DUP)
+
+        entity = OntologyRelation(
+            source_class_id=dto.source_class_id,
+            target_class_id=dto.target_class_id,
+            relation_type=dto.relation_type,
+            description=dto.description,
+        )
+        session.add(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_RELATION",
+            entity_id=entity.id,
+            action="CREATE",
+            actor=actor,
+            actor_departments=actor_departments,
+            after=_entityToDict(entity),
+        )
+        await session.commit()
+        await session.refresh(entity)
+        try:
+            neo4j.linkClassRelation(
+                entity.source_class_id, entity.target_class_id, entity.relation_type
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logNeo4jFailure("语义关系入图", entity.id, exc)
+        logger.info(
+            "创建语义关系 id=%d %d-[%s]->%d",
+            entity.id, entity.source_class_id, entity.relation_type, entity.target_class_id,
+        )
+        return entity
+
+    async def deleteRelation(
+        self,
+        session: AsyncSession,
+        id: int,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+    ) -> None:
+        """删除类级语义关系，并同步删除 (:Class)-[:relType]->(:Class) 图边。"""
+        entity = await session.get(OntologyRelation, id)
+        if entity is None:
+            raise NotFoundError(MSG_ONTOLOGY_RELATION_NOT_FOUND.format(id=id))
+        sourceId, targetId, relType = (
+            entity.source_class_id, entity.target_class_id, entity.relation_type
+        )
+        before = _entityToDict(entity)
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_RELATION",
+            entity_id=entity.id,
+            action="DELETE",
+            actor=actor,
+            actor_departments=actor_departments,
+            before=before,
+        )
+        await session.delete(entity)
+        await session.commit()
+        try:
+            neo4j.deleteClassRelation(sourceId, targetId, relType)
+        except Exception as exc:  # noqa: BLE001
+            _logNeo4jFailure("删除语义关系图边", id, exc)
+        logger.info("删除语义关系 id=%d", id)
+
+    async def backfillRelations(
+        self,
+        session: AsyncSession,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+    ) -> dict[str, int]:
+        """一键补关系（幂等修复，供「语义关系」Tab 按钮 + 迁移式调用）：
+
+        ① 把全部 ontology_join 同步为 (:Class)-[:JOIN]->(:Class) 边（幂等 MERGE）；
+        ② 对 is_foreign_key=True 且 ref_class_id IS NULL 的属性，按 SAGE_X3_REFERENCE_MAP
+           用 source_column 反解目标类（source_table 去 schema 前缀后精确匹配），
+           落 ref_class_id + (:Property)-[:REFERENCES]->(:Class) 边。
+
+        actor 归属：② 每次真正补全 ref_class_id 都会写一条 ONTOLOGY_PROPERTY UPDATE
+        审计（before/after），落库谁在何时触发、改了哪些外键引用 —— 批量修复也应可追溯。
+        ① 只镜像 join 到 Neo4j（无 PG 变更），不另记审计。
+
+        返回不可变计数 dict {"synced_joins": n, "backfilled_references": n}。
+        n 语义：synced_joins = 本次参与同步的 join 行数（幂等，行在即在）；
+        backfilled_references = 本次新补的引用数（二次调用为 0，因 ref 已设）。
+        Neo4j 不可达不阻断 PG（仅图边缺失，计数如实返回）。
+        """
+        # ① join 全量入图
+        synced = 0
+        joins = await self.listJoins(session)
+        for join in joins:
+            try:
+                neo4j.linkClassJoin(join.source_class_id, join.target_class_id)
+            except Exception as exc:  # noqa: BLE001
+                _logNeo4jFailure("join 入图", join.id, exc)
+            else:
+                synced += 1
+
+        # ② 补 ref_class_id：仅处理仍缺目标的外键属性
+        missing = (
+            await session.execute(
+                select(OntologyProperty).where(
+                    OntologyProperty.is_foreign_key.is_(True),
+                    OntologyProperty.ref_class_id.is_(None),
+                )
+            )
+        ).scalars().all()
+        if not missing:
+            await session.commit()
+            return {"synced_joins": synced, "backfilled_references": 0}
+
+        # 类级索引：仅未软删除类（valid_to IS NULL），source_table 去「schema.」前缀后小写
+        # → 类 id 列表（首个为确定目标）。排除墓碑（deleteClass 软删）：否则 ref_class_id
+        # 可能指向已删类，或「活类 + 墓碑同表」重导入时误选墓碑（与 listClasses 默认一致）。
+        classByTable: dict[str, list[int]] = {}
+        classes = (
+            await session.execute(
+                select(OntologyClass).where(OntologyClass.valid_to.is_(None))
+            )
+        ).scalars().all()
+        for cls in classes:
+            if not cls.source_table:
+                continue
+            key = cls.source_table.rsplit(".", 1)[-1].lower()
+            classByTable.setdefault(key, []).append(cls.id)
+
+        backfilled = 0
+        for prop in missing:
+            if not prop.source_column:
+                continue
+            ref = SAGE_X3_REFERENCE_MAP.get(prop.source_column.upper())
+            if ref is None:
+                continue
+            targetTable, _targetKey = ref
+            candidates = classByTable.get(targetTable.lower())
+            if not candidates:
+                continue
+            targetClassId = candidates[0]
+            if prop.ref_class_id == targetClassId:
+                continue
+            before = _entityToDict(prop)
+            prop.ref_class_id = targetClassId
+            backfilled += 1
+            await _audit.record(
+                session,
+                entity_type="ONTOLOGY_PROPERTY",
+                entity_id=prop.id,
+                action="UPDATE",
+                actor=actor,
+                actor_departments=actor_departments,
+                before=before,
+                after=_entityToDict(prop),
+            )
+            try:
+                neo4j.linkPropertyReferences(prop.id, targetClassId)
+            except Exception as exc:  # noqa: BLE001
+                _logNeo4jFailure("REFERENCES 边补建", prop.id, exc)
+
+        if backfilled:
+            await session.commit()
+        logger.info(
+            "一键补关系：syncedJoins=%d backfilledReferences=%d", synced, backfilled
+        )
+        return {"synced_joins": synced, "backfilled_references": backfilled}
 
     # =============================================================================
     # Semantic Search (Milvus)
@@ -947,3 +1233,362 @@ class OntologyService:
         except Exception as exc:  # noqa: BLE001
             logger.error("Milvus embedding 同步失败 id=%d: %s", ontologyId, exc)
             raise OntologyError(MSG_VECTOR_SYNC_FAILED.format(exc=exc)) from exc
+
+    async def syncClassEmbedding(self, session: AsyncSession, id: int) -> None:
+        """手动同步单个类的向量：以 PG 当前数据重新生成 embedding 并覆盖 Milvus。
+
+        类不存在时抛 NotFoundError（404）。
+        """
+        entity = await self.getClass(session, id)
+        vec = await self._ensureEmbedding().generateEmbedding(
+            _classEmbeddingText(entity)
+        )
+        self.syncEmbedding(
+            ontologyId=entity.id,
+            type="class",
+            name=entity.class_name,
+            alias=entity.class_alias,
+            description=entity.description,
+            embedding=vec,
+        )
+
+    async def syncMissingClassEmbeddings(
+        self, session: AsyncSession
+    ) -> dict[str, Any]:
+        """向量对账：为 PG 有而 Milvus 无向量 未软删的类与属性补生成向量。
+
+        以 PG 为唯一真源（与 scripts/backfill_milvus_embeddings.py --cleanup 同口径）。
+        缺失实体无需先 delete，直接整批插入（单次 flush）——逐条 syncEmbedding
+        在当前 Milvus 部署下单条可达 10-25s，批量场景必须整批。单条向量生成
+        失败不中断，错误聚合进 failures/propertyFailures。
+        返回对账摘要（类：total/missing/synced/failed；属性：totalProperties/
+        missingPropertyCount/syncedPropertyCount/failedPropertyCount）。
+        """
+        classes = await self.listClasses(session)
+        rows = milvus.listAllEmbeddings()
+        presentClassIds = {
+            r["ontology_id"] for r in rows if r.get("type") == "class"
+        }
+        missing = [c for c in classes if c.id not in presentClassIds]
+
+        records: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        for cls in missing:
+            try:
+                vec = await self._ensureEmbedding().generateEmbedding(
+                    _classEmbeddingText(cls)
+                )
+                records.append({
+                    "ontology_id": cls.id,
+                    "type": "class",
+                    "name": cls.class_name,
+                    "alias": cls.class_alias,
+                    "description": cls.description,
+                    "embedding": vec,
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "缺失类向量生成失败 id=%d name=%s: %s",
+                    cls.id, cls.class_name, exc,
+                )
+                failures.append({
+                    "classId": cls.id,
+                    "className": cls.class_name,
+                    "error": str(exc),
+                })
+
+        # 属性对账：类之后补齐（属性向量此前只能靠 backfill 脚本手工收敛）
+        props = list(
+            (await session.execute(select(OntologyProperty))).scalars().all()
+        )
+        presentPropIds = {
+            r["ontology_id"] for r in rows if r.get("type") == "property"
+        }
+        missingProps = [p for p in props if p.id not in presentPropIds]
+
+        propertyFailures: list[dict[str, Any]] = []
+        for prop in missingProps:
+            try:
+                vec = await self._ensureEmbedding().generateEmbedding(
+                    _propertyEmbeddingText(prop)
+                )
+                records.append({
+                    "ontology_id": prop.id,
+                    "type": "property",
+                    "name": prop.property_name,
+                    "alias": prop.property_alias,
+                    "description": prop.description,
+                    "embedding": vec,
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "缺失属性向量生成失败 id=%d name=%s: %s",
+                    prop.id, prop.property_name, exc,
+                )
+                propertyFailures.append({
+                    "propertyId": prop.id,
+                    "propertyName": prop.property_name,
+                    "error": str(exc),
+                })
+
+        syncedClasses = 0
+        syncedProps = 0
+        if records:
+            try:
+                milvus.insertEmbeddings(records)
+                syncedClasses = sum(1 for r in records if r["type"] == "class")
+                syncedProps = sum(1 for r in records if r["type"] == "property")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("缺失向量整批插入失败 %d 条: %s", len(records), exc)
+                failures.extend(
+                    {
+                        "classId": r["ontology_id"],
+                        "className": r["name"],
+                        "error": str(exc),
+                    }
+                    for r in records
+                    if r["type"] == "class"
+                )
+                propertyFailures.extend(
+                    {
+                        "propertyId": r["ontology_id"],
+                        "propertyName": r["name"],
+                        "error": str(exc),
+                    }
+                    for r in records
+                    if r["type"] == "property"
+                )
+                records = []
+
+        logger.info(
+            "向量对账完成 total=%d missing=%d synced=%d failed=%d;"
+            " 属性 total=%d missing=%d synced=%d failed=%d",
+            len(classes), len(missing), syncedClasses + syncedProps, len(failures),
+            len(props), len(missingProps),
+            syncedProps, len(propertyFailures),
+        )
+        return {
+            "totalClasses": len(classes),
+            "missingCount": len(missing),
+            "syncedCount": syncedClasses + syncedProps,
+            "failedCount": len(failures),
+            "failures": failures,
+            "totalProperties": len(props),
+            "missingPropertyCount": len(missingProps),
+            "syncedPropertyCount": syncedProps,
+            "failedPropertyCount": len(propertyFailures),
+            "propertyFailures": propertyFailures,
+        }
+
+    async def syncMissingGraph(self, session: AsyncSession) -> dict[str, Any]:
+        """Neo4j 图谱对账：以 PG 为真源补齐缺失的节点与边。
+
+        背景：直写 PG 的修补脚本（手工 id）与导入失败重试会绕过 createClass/
+        createProperty/createJoin 的 best-effort 入图，图库留下缺口。本方法
+        diff PG 与 Neo4j 的 id/边集合，只补缺失（幂等 upsert/MERGE，不删陈旧）。
+        单条写入失败不中断，错误聚合进 failures（entityType/entityId/error）。
+        """
+        classes = await self.listClasses(session)
+        props = list(
+            (await session.execute(select(OntologyProperty))).scalars().all()
+        )
+        joins = await self.listJoins(session)
+        relations = await self.listRelations(session)
+
+        existingClassIds = neo4j.getClassIds()
+        existingPropIds = neo4j.getPropertyIds()
+        existingJoinPairs = neo4j.getJoinPairs()
+        existingRelTriples = neo4j.getRelationTriples()
+
+        failures: list[dict[str, Any]] = []
+        syncedClasses = 0
+        for cls in classes:
+            if cls.id in existingClassIds:
+                continue
+            try:
+                neo4j.upsertClassNode(
+                    cls.id, cls.class_name, cls.class_alias,
+                    cls.description, cls.source_table,
+                )
+                neo4j.reconcileClassSubclassOf(cls.id, cls.parent_class_id)
+                syncedClasses += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "图对账：类入图失败 id=%d name=%s: %s",
+                    cls.id, cls.class_name, exc,
+                )
+                failures.append({
+                    "entityType": "class", "entityId": cls.id, "error": str(exc),
+                })
+
+        syncedProps = 0
+        for prop in props:
+            if prop.id in existingPropIds:
+                continue
+            try:
+                neo4j.upsertPropertyNode(
+                    prop.id, prop.property_name, prop.property_alias,
+                    prop.data_type, prop.source_column,
+                    bool(prop.is_primary_key), bool(prop.is_foreign_key),
+                )
+                neo4j.linkClassHasProperty(prop.class_id, prop.id)
+                if prop.ref_class_id:
+                    neo4j.linkPropertyReferences(prop.id, prop.ref_class_id)
+                syncedProps += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "图对账：属性入图失败 id=%d name=%s: %s",
+                    prop.id, prop.property_name, exc,
+                )
+                failures.append({
+                    "entityType": "property", "entityId": prop.id, "error": str(exc),
+                })
+
+        joinPairs = {
+            (j.source_class_id, j.target_class_id) for j in joins
+        }
+        missingJoinPairs = joinPairs - existingJoinPairs
+        for sourceId, targetId in sorted(missingJoinPairs):
+            try:
+                neo4j.linkClassJoin(sourceId, targetId)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "图对账：JOIN 边入图失败 %d->%d: %s", sourceId, targetId, exc,
+                )
+                failures.append({
+                    "entityType": "join", "entityId": sourceId, "error": str(exc),
+                })
+
+        syncedRelations = 0
+        for rel in relations:
+            relType = (
+                rel.relation_type.value
+                if hasattr(rel.relation_type, "value")
+                else str(rel.relation_type)
+            )
+            triple = (rel.source_class_id, rel.target_class_id, relType)
+            if triple in existingRelTriples:
+                continue
+            try:
+                neo4j.linkClassRelation(*triple)
+                syncedRelations += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "图对账：语义关系入图失败 id=%d %s: %s", rel.id, triple, exc,
+                )
+                failures.append({
+                    "entityType": "relation", "entityId": rel.id, "error": str(exc),
+                })
+
+        logger.info(
+            "图对账完成 类 missing=%d/%d JOIN missing=%d/%d"
+            " 属性 missing=%d/%d 关系 missing=%d/%d failed=%d",
+            syncedClasses, len(classes),
+            len(missingJoinPairs), len(joinPairs),
+            syncedProps, len(props),
+            syncedRelations, len(relations),
+            len(failures),
+        )
+        failedJoins = sum(1 for f in failures if f["entityType"] == "join")
+        failedRelations = sum(1 for f in failures if f["entityType"] == "relation")
+        return {
+            "totalClasses": len(classes),
+            "missingClassCount": syncedClasses,
+            "syncedClassCount": syncedClasses,
+            "totalProperties": len(props),
+            "missingPropertyCount": syncedProps,
+            "syncedPropertyCount": syncedProps,
+            "totalJoins": len(joinPairs),
+            "missingJoinCount": len(missingJoinPairs),
+            "syncedJoinCount": len(missingJoinPairs) - failedJoins,
+            "totalRelations": len(relations),
+            "missingRelationCount": syncedRelations + failedRelations,
+            "syncedRelationCount": syncedRelations,
+            "failedCount": len(failures),
+            "failures": failures,
+        }
+
+    async def _syncClassEmbeddingBestEffort(self, entity: OntologyClass) -> None:
+        """类向量自动同步（best-effort，后台执行）：失败仅告警，不影响 CRUD。
+
+        后台任务原因：syncEmbedding 的 delete+insert+flush 在当前 Milvus 部署
+        下单次可达 10-25s，await 会把类的新增/保存响应拖到同一量级。向量晚
+        数十秒落地对语义召回无感（chat 检索同样容忍 Neo4j/向量的最终一致）。
+        任务引用挂到模块级集合防 GC，完成即回收。
+        """
+        task = asyncio.create_task(self._syncClassEmbeddingNow(entity))
+        _PENDING_SYNC_TASKS.add(task)
+        task.add_done_callback(_PENDING_SYNC_TASKS.discard)
+
+    async def _syncClassEmbeddingNow(self, entity: OntologyClass) -> None:
+        try:
+            vec = await self._ensureEmbedding().generateEmbedding(
+                _classEmbeddingText(entity)
+            )
+            self.syncEmbedding(
+                ontologyId=entity.id,
+                type="class",
+                name=entity.class_name,
+                alias=entity.class_alias,
+                description=entity.description,
+                embedding=vec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Milvus 类向量自动同步失败 id=%d name=%s: %s",
+                entity.id, entity.class_name, exc,
+            )
+
+    async def _syncPropertyEmbeddingBestEffort(self, entity: OntologyProperty) -> None:
+        """属性向量自动同步（best-effort，后台执行）：与类同款，失败仅告警。
+
+        embedding 文本口径 = property_name + business_aliases + description
+        （与 backfill_milvus_embeddings.py 同口径）。
+        """
+        task = asyncio.create_task(self._syncPropertyEmbeddingNow(entity))
+        _PENDING_SYNC_TASKS.add(task)
+        task.add_done_callback(_PENDING_SYNC_TASKS.discard)
+
+    async def _syncPropertyEmbeddingNow(self, entity: OntologyProperty) -> None:
+        try:
+            vec = await self._ensureEmbedding().generateEmbedding(
+                _propertyEmbeddingText(entity)
+            )
+            self.syncEmbedding(
+                ontologyId=entity.id,
+                type="property",
+                name=entity.property_name,
+                alias=entity.property_alias,
+                description=entity.description,
+                embedding=vec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Milvus 属性向量自动同步失败 id=%d name=%s: %s",
+                entity.id, entity.property_name, exc,
+            )
+
+    def syncMissingClassEmbeddingsBestEffort(self) -> None:
+        """批量路径（导入向导等）的向量补齐：后台整批对账，单次 flush。
+
+        与逐类 _syncClassEmbeddingBestEffort 的区别：N 个类只做一次
+        listClasses/listAllEmbeddings 对账 + 一次整批 insert（单次 flush），
+        避免 N 个后台任务并发 flush（单次 flush 8-25s）拖垮 Milvus。
+        best-effort：失败仅告警，不影响调用方响应。
+        """
+        task = asyncio.create_task(self._syncMissingClassEmbeddingsNow())
+        _PENDING_SYNC_TASKS.add(task)
+        task.add_done_callback(_PENDING_SYNC_TASKS.discard)
+
+    async def _syncMissingClassEmbeddingsNow(self) -> None:
+        from app.infrastructure.database import getSessionFactory
+
+        try:
+            factory = getSessionFactory()
+            async with factory() as session:
+                summary = await self.syncMissingClassEmbeddings(session)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("批量类向量补齐失败: %s", exc)
+            return
+        if summary["failedCount"]:
+            logger.warning("批量类向量补齐部分失败: %s", summary)

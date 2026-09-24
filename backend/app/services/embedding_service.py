@@ -67,6 +67,22 @@ class EmbeddingService:
         vectors = await (await self._ensureClient()).embed([text])
         return list(vectors[0])
 
+    async def embedWithUsage(
+        self, texts: list[str]
+    ) -> tuple[list[list[float]], int, str | None]:
+        """批量生成向量 + ``(向量, prompt_tokens, 模型名)`` 计量三元组。
+
+        门面版 embedWithUsage：client 层支持 usage 的直接透传；旧 client
+        （或测试注入的替身）没有该方法时回退逐条 embed，token 记 0——
+        计量侧宁可 0 也不编造。模型名供 wiki_token_usage 落库。
+        """
+        client = await self._ensureClient()
+        if hasattr(type(client), "embedWithUsage"):
+            vectors, promptTokens = await client.embedWithUsage(texts)
+            return vectors, promptTokens, client.modelName
+        raw = await client.embed(texts)
+        return [list(v) for v in raw], 0, getattr(client, "modelName", None)
+
     async def storeQueryEmbedding(
         self,
         *,

@@ -267,3 +267,102 @@ class TestDataQualityScoreApi:
         rows = lr.json()
         assert len(rows) == 1
         assert rows[0]["scoreType"] == "GLOBAL"
+
+    # ===== feat-dq-scores-scope (2026-09-15) =====
+    # 端到端验证 compute 端点接 scope body 过滤 + 空 body = 旧行为（回归保护）。
+
+    async def test_compute_endpoint_with_scope_body(
+        self, client, monkeypatch
+    ) -> None:
+        """POST 带 scope body → 只 evaluate 命中规则；savedScores 反映 scoped 结果。"""
+        ds_id = await _createTestDatasource(client)
+        # PORDER 2 条 enabled rule + SUPPLIER 1 条 enabled rule
+        await _create_rule(
+            client,
+            ds_id,
+            ruleCode="SCOPE_PO_C",
+            targetTable="PORDER",
+            targetColumn="X",
+            ruleType="COMPLETENESS",
+            threshold="0.00",
+        )
+        await _create_rule(
+            client,
+            ds_id,
+            ruleCode="SCOPE_PO_V",
+            targetTable="PORDER",
+            targetColumn="Y",
+            ruleType="VALIDITY",
+            ruleExpression="Y > 0",
+            threshold="0.00",
+        )
+        await _create_rule(
+            client,
+            ds_id,
+            ruleCode="SCOPE_SUPPL",
+            targetTable="SUPPLIER",
+            targetColumn="Z",
+            ruleType="COMPLETENESS",
+            threshold="0.00",
+        )
+        adapter = _FakeAdapter(rows_by_marker={"COUNT(": [{"total": 10, "passed": 10}]})
+        _installFakeAdapter(monkeypatch, adapter)
+
+        # 只跑 PORDER 范围
+        resp = await client.post(
+            "/api/v1/data-quality/scores/compute",
+            json={"targetTables": ["PORDER"]},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # 命中 PORDER 的 2 条规则
+        assert body["evaluatedRules"] == 2
+        # PORDER 1 条 TABLE + 1 GLOBAL（scoped）= 2 条；SUPPLIER 不会被 evaluate
+        assert body["savedScores"] == 2
+        tables = {s["targetTable"] for s in body["scores"]}
+        assert "SUPPLIER" not in tables
+        assert tables == {"PORDER", "*"}
+
+    async def test_compute_endpoint_no_body_runs_all(
+        self, client, monkeypatch
+    ) -> None:
+        """POST 不带 body / 空 body = 现有全量行为（向后兼容回归保护）。"""
+        ds_id = await _createTestDatasource(client)
+        await _create_rule(
+            client,
+            ds_id,
+            ruleCode="ALL_PO",
+            targetTable="PORDER",
+            targetColumn="X",
+            ruleType="COMPLETENESS",
+            threshold="0.00",
+        )
+        await _create_rule(
+            client,
+            ds_id,
+            ruleCode="ALL_SUPPL",
+            targetTable="SUPPLIER",
+            targetColumn="Y",
+            ruleType="COMPLETENESS",
+            threshold="0.00",
+        )
+        adapter = _FakeAdapter(rows_by_marker={"COUNT(": [{"total": 10, "passed": 10}]})
+        _installFakeAdapter(monkeypatch, adapter)
+
+        # 空 body
+        resp_empty = await client.post(
+            "/api/v1/data-quality/scores/compute", json={}
+        )
+        assert resp_empty.status_code == 200, resp_empty.text
+        body_empty = resp_empty.json()
+        # 全量：2 条 TABLE + 1 GLOBAL = 3
+        assert body_empty["evaluatedRules"] == 2
+        assert body_empty["savedScores"] == 3
+
+        # 不带 body（None）— 验证 Body(default=...) 兜底也跑全量
+        resp_none = await client.post("/api/v1/data-quality/scores/compute")
+        assert resp_none.status_code == 200, resp_none.text
+        body_none = resp_none.json()
+        # 第一次 compute 后已经有 3 条；第二次再 compute = 又写 3 条（都 UPDATE）
+        assert body_none["evaluatedRules"] == 2
+        assert body_none["savedScores"] == 3

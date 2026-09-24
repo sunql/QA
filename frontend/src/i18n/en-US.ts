@@ -54,10 +54,12 @@ export const enUS = {
 
   common: {
     refresh: "Refresh",
+    retry: "Retry",
     edit: "Edit",
     delete: "Delete",
     save: "Save",
     actions: "Actions",
+    more: "More",
     version: "Version",
     close: "Close",
     cancel: "Cancel",
@@ -65,11 +67,13 @@ export const enUS = {
     send: "Send",
     copy: "Copy",
     copied: "Copied",
+    reset: "Reset",
     enabled: "Enabled",
     disabled: "Disabled",
     active: "Active",
     none: "(None)",
     dash: "-",
+    totalItems: "{total} total",
     emDash: "—",
     next: "Next",
     prev: "Previous",
@@ -90,6 +94,7 @@ export const enUS = {
       datasource: "Data Sources",
       dataQuality: "Data Quality",
       dataQualityGenerate: "Rule Generation Wizard",
+      dataQualityReport: "Evaluation Reports",
       lineage: "Data Lineage",
       entityMapping: "Code Mapping",
       kpiCatalog: "KPI Catalog",
@@ -111,6 +116,10 @@ export const enUS = {
     themeDark: "Dark",
     themeLight: "Light",
     languageSwitch: "Switch Language",
+    // feat-user-onboarding (2026-09-20): FALLBACK_NAV removed — /menu-config
+    // failure or empty result must be surfaced, not silently shown as flat nav.
+    menuLoadFailed: "Menu failed to load",
+    menuEmpty: "No authorized menus",
   },
 
   // Menu hierarchy (Phase X — legacy appLayout.menu.* preserved for backward compatibility)
@@ -118,6 +127,7 @@ export const enUS = {
     section: {
       aiAgent: "AI Agent",
       analytics: "Smart Analytics",
+      enterpriseWiki: "Enterprise Wiki",
       bizConfig: "Business Config",
       foundation: "Foundation",
       systemConfig: "System Config",
@@ -132,6 +142,7 @@ export const enUS = {
       ontology: "Ontology",
       dataQuality: "Data Quality",
       dataQualityGenerate: "Rule Generation Wizard",
+      dataQualityReport: "Evaluation Reports",
       lineage: "Data Lineage",
       entityMapping: "Code Mapping",
       kpiCatalog: "KPI Catalog",
@@ -139,6 +150,7 @@ export const enUS = {
       businessObjects: "Business Objects",
       ontologyProperties: "Ontology Property Management",
       datasource: "Data Sources",
+      localImport: "Local Data Initialization",
       documents: "Document Center",
       usage: "Usage Dashboard",
       graph: "Neo4j Graph DB",
@@ -152,6 +164,15 @@ export const enUS = {
       adminRoles: "Roles",
       adminOrganizations: "Organizations",
       adminMenus: "Menus",
+      adminSystemConfig: "System Config",
+      wikiPages: "Knowledge Pages",
+      wikiImport: "Knowledge Import",
+      wikiConflicts: "Conflict Detection",
+      wikiSuggestions: "Structure Suggestions",
+      wikiCoverage: "Coverage Dashboard",
+      wikiGraph: "Knowledge Graph",
+      wikiChat: "Wiki Chat",
+      dataQualityRuleParams: "Data Quality / Rule Config (Structured)",
       profile: "Profile",
       changePassword: "Change Password",
     },
@@ -208,6 +229,10 @@ export const enUS = {
       directGrant: "Direct grants (user)",
       roleGrant: "Via roles",
       orgGrant: "Via organizations",
+      // feat-admin-user-password (2026-09-20): admin password fields on create/edit
+      password: "Password",
+      passwordPlaceholder: "Leave blank to keep current password",
+      passwordStrengthHint: "Min 8 chars, must contain letter and digit",
     },
     role: {
       code: "Role Code",
@@ -311,6 +336,8 @@ export const enUS = {
     versionUpdated: "Updated (new version created)",
     previewFailed: "Failed to generate import preview",
     importFailed: "Import failed, see error details",
+    schemaLoadFailed: "Failed to load schema. Check the datasource and retry",
+    schemaCached: "Schema cached ({count} tables)",
   },
 
   queryPlan: {
@@ -350,6 +377,8 @@ export const enUS = {
     typing: "Typing…",
     validationDetail: "Validation details",
     affinityLocked: "🔒 Locked to {model} · {turns} turns remaining",
+    classRecallTruncated: "This query hit the recall window limit ({total} tables); some related tables may be excluded. Try a more specific question or ask an admin to adjust the recall window.",
+    classRecallFallback: "Table recall is temporarily unavailable; all tables were loaded for this query, which may affect answer accuracy.",
   },
 
   suggestedAgent: {
@@ -687,11 +716,17 @@ export const enUS = {
     createRule: "New Rule",
     editRule: "Edit Rule",
     ruleCode: "Rule Code",
+    // feat-rule-create-form-autofill (2026-09-15): auto-suggested code + manual override hint
+    ruleCodeAutoHint: "Auto-suggested code: {code} (you may edit)",
     ruleName: "Rule Name",
+    sourceClass: "Source Class",
+    sourceClassPlaceholder: "Optional: pick class to auto-suggest rule code",
     datasource: "Datasource",
     datasourcePlaceholder: "Select a datasource",
     targetTable: "Target Table",
+    targetTablePlaceholder: "Select a data source first",
     targetColumn: "Target Column",
+    targetColumnPlaceholder: "Select a table first",
     ruleType: "Rule Type",
     ruleExpression: "Rule Expression",
     threshold: "Threshold (%)",
@@ -700,6 +735,36 @@ export const enUS = {
     owner: "Owner",
     description: "Description",
     filterType: "Filter by Rule Type",
+    // Rule type enum → display label; value stays as the enum (Select/column
+    // renders map via toLowerCase() lookups; here keys are uppercase enums).
+    ruleTypeLabels: {
+      COMPLETENESS: "Completeness",
+      VALIDITY: "Validity",
+      UNIQUENESS: "Uniqueness",
+      CONSISTENCY: "Consistency",
+      REFERENTIAL: "Referential",
+      TIMELINESS: "Timeliness",
+    },
+    // Severity enum → display label; value stays as the enum.
+    severityLabels: {
+      HIGH: "High",
+      MEDIUM: "Medium",
+      LOW: "Low",
+      INFO: "Info",
+    },
+    // feat-dq-rule-list-filters — 5-field cascade filter
+    filterRuleName: "Filter by rule name",
+    filterDatasource: "Filter by datasource",
+    filterClassName: "Filter by class name",
+    filterTargetTable: "Filter by target table",
+    filterTargetTableDisabled: "Please select a datasource first",
+    filterSeverity: "Filter by severity",
+    filterEnabled: "Filter by enabled status",
+    filterEnabledOptions: {
+      all: "All",
+      enabled: "Enabled",
+      disabled: "Disabled",
+    },
     ruleCodePattern: "Code must start with uppercase letter; uppercase letters / digits / underscore only",
     createSuccess: "Rule created",
     updateSuccess: "Rule updated",
@@ -710,9 +775,13 @@ export const enUS = {
     },
     evaluate: "Evaluate",
     evaluateBatch: "Batch Evaluate",
+    evaluateBatchSelected: "Batch Evaluate ({count} selected)",
     computeScore: "Compute Scores",
     evaluateSuccess: "Evaluation complete",
     evaluateBatchSuccess: "Evaluated {total} rules, {passed} passed",
+    evaluateBatchNoEnabled: "No enabled rules in the current list to evaluate",
+    evaluateBatchNoSelection: "Please select rules to batch evaluate",
+    evaluateBatchHasDisabled: "Skipped {count} disabled rules",
     computeScoreSuccess: "Computed {count} scores",
     evalResult: {
       title: "Evaluation Result",
@@ -726,6 +795,37 @@ export const enUS = {
       message: "Detail",
       pass: "PASS",
       fail: "FAIL",
+    },
+    // feat-eval-batch-result (2026-09-15): batch evaluation result modal + history drawer
+    batchResult: {
+      title: "Batch Evaluation Results",
+      exportCsv: "Export CSV",
+      saveToHistory: "Save to History",
+      savedToHistory: "Saved to history",
+      saveFailed: "Save failed (localStorage unavailable)",
+      summary: {
+        total: "Total",
+        passed: "Passed",
+        failed: "Failed",
+        errored: "Errored",
+      },
+      columns: {
+        ruleCode: "Rule Code",
+        ruleType: "Rule Type",
+        status: "Status",
+        passRate: "Pass Rate",
+        total: "Total",
+        passed: "Passed",
+        duration: "Duration",
+        message: "Failure Reason",
+      },
+      history: {
+        button: "History",
+        title: "Batch Evaluation History",
+        countTitle: "Saved batch evaluation count",
+        empty: "No history yet",
+        open: "Open",
+      },
     },
     scores: {
       title: "Quality Scores",
@@ -744,13 +844,186 @@ export const enUS = {
       evaluatedAt: "Evaluated At",
       duration: "Duration",
       table: "TABLE",
-      database: "DATABASE",
-      column: "COLUMN",
+      global: "GLOBAL",
     },
     scoresFilter: {
       table: "Filter by Table",
       scoreType: "Filter by Score Type",
       latestOnly: "Latest Only",
+      // feat-dq-scores-scope (2026-09-15): 3 scope filters that gate compute
+      scopeDatasource: "Scope: Datasource",
+      scopeTargetTable: "Scope: Target Table",
+      scopeRuleType: "Scope: Rule Type",
+      scopeHint: "Leave empty = full compute; 3 fields AND-composed; no match → no write",
+    },
+    // feat-dq-evaluation-report — Phase 5
+    reports: {
+      title: "Evaluation Reports",
+      newReport: "New Report",
+      empty: "No reports yet",
+      columns: {
+        name: "Name",
+        classCount: "Classes",
+        ruleCount: "Rules",
+        status: "Status",
+        createdBy: "Created By",
+        timeWindow: "Time Window",
+        createdTime: "Created Time",
+        actions: "Actions",
+      },
+      filter: {
+        name: "Filter by name",
+        classId: "Filter by class",
+        ruleId: "Filter by rule",
+        createdBy: "Filter by creator",
+        dateRange: "Filter by created time",
+      },
+      actions: {
+        view: "View",
+        regenerate: "Regenerate",
+        delete: "Delete",
+        confirmDelete: "Delete report {name}?",
+        deleteSuccess: "Report deleted",
+        regenerateSuccess: "Snapshot regenerated",
+        loadFailed: "Failed to load reports",
+      },
+      statusLabels: {
+        DRAFT: "Draft",
+        PUBLISHED: "Published",
+        PENDING: "Queued",
+        RUNNING: "Evaluating",
+        COMPLETED: "Completed",
+        FAILED: "Failed",
+      },
+      create: {
+        title: "New Evaluation Report",
+        name: "Report Name",
+        nameRequired: "Name is required",
+        description: "Description",
+        classes: "Classes",
+        classesRequired: "At least one class required",
+        rules: "Rules",
+        rulesRequired: "At least one rule required",
+        timeWindow: "Time Window",
+        tags: "Tags",
+        status: "Status",
+        submit: "Create",
+        success: "Report created",
+        failed: "Failed to create report",
+      },
+      detail: {
+        title: "Report Detail",
+        backToList: "Back to list",
+        sections: {
+          basic: "Basic Info",
+          summary: "Summary",
+          rules: "Rules",
+          samples: "Violation Samples",
+        },
+        fields: {
+          id: "Report ID",
+          name: "Name",
+          description: "Description",
+          status: "Status",
+          classes: "Classes",
+          rules: "Rules",
+          timeWindow: "Time Window",
+          createdBy: "Created By",
+          createdTime: "Created Time",
+          owner: "Owner",
+          tags: "Tags",
+          evaluatedAt: "Evaluated At",
+          overallScore: "Overall Score",
+        },
+        overallStatusLabels: {
+          PASS: "Pass",
+          FAIL: "Fail",
+          PENDING: "Pending",
+        },
+        kpi: {
+          overallScore: "Overall Score",
+          ruleCount: "Rule Count",
+          passCount: "Pass Count",
+          failCount: "Fail Count",
+        },
+        samplesTable: {
+          ruleId: "Rule ID",
+          targetTable: "Target Table",
+          targetColumn: "Target Column",
+          // feat-violation-sample-display (2026-09-15): render actual PK values.
+          // feat-sampling-error-visible (2026-09-15): when sampler fails, show
+          // red "Sampling Failed" tag with full error in tooltip.
+          totalViolations: "Total Violations",
+          sampleSize: "Sample Size",
+          samplePkValues: "Sample PKs",
+          samplingFailed: "Sampling Failed",
+          moreSamples: "+{count} more",
+          capturedAt: "Captured At",
+          empty: "No violation samples",
+        },
+        // feat-report-rules-zh-name (2026-09-15)：report rule-detail table headers i18n
+        // feat-report-kpi-data-count (2026-09-15)：fallback hint keys for old snapshots
+        // without rule_name field.
+        ruleTable: {
+          rule: "Rule",
+          type: "Type",
+          target: "Target",
+          severity: "Severity",
+          passRate: "Pass Rate",
+          status: "Status",
+          ruleFallbackBadge: "System Code",
+          ruleFallbackTooltip:
+            "Rule name unavailable (old snapshot has no rule_name field). Regenerate the report to refresh.",
+        },
+        // Phase 6 chart titles
+        charts: {
+          dimensionBar: "Dimension Scores",
+          passFailPie: "Rule Pass / Fail",
+          trendLine: "Overall Score Trend",
+          empty: "No data",
+          trendUnavailable: "No historical trend",
+        },
+      },
+    },
+    // Bulk create rules (feat-rule-batch-create, 2026-09-15): standalone full-screen page
+    batchCreate: {
+      pageTitle: "Bulk Create Rules",
+      pageSubtitle:
+        "Configure rules for multiple columns of a class in one go — auto-generate code / name / simple expressions",
+      enterButton: "Bulk Create",
+      step1: "Basics",
+      step2: "Columns & Rules",
+      step3: "Review",
+      datasourcePlaceholder: "Select datasource",
+      classPlaceholder: "Select ontology class",
+      tablePlaceholder: "Select target table (fuzzy search)",
+      loadingSchema: "Loading datasource schema…",
+      loadedSchema: "Loaded N tables",
+      selectColumns: "N columns in table, M selected",
+      noColumns: "No column info — check datasource connection",
+      noTemplateHint: "No auto template — manual input required",
+      customBadge: "Custom",
+      autoBadge: "Auto",
+      previewTitle: "Preview N rules",
+      globalEnabled: "Enable all",
+      globalThreshold: "Threshold (%)",
+      globalSeverity: "Severity",
+      globalOwner: "Owner",
+      globalDescription: "Description",
+      ownerRequired: "Owner is required",
+      back: "Back",
+      next: "Next",
+      cancel: "Cancel",
+      save: "Save N",
+      saving: "Saving…",
+      saveSuccess: "N rules created",
+      savePartial: "N created, M failed (see red rows)",
+      saveFailed: "Save failed",
+      duplicateName: "Duplicate rule name",
+      duplicateCode: "Rule code already exists — regenerate",
+      invalidExpression: "Expression validation failed",
+      goStep2: "Next: pick columns",
+      goStep3: "Next: review",
     },
   },
 
@@ -772,6 +1045,11 @@ export const enUS = {
     empty: {
       noData: "No lineage data yet. Create some via Ontology management or /api/v1/lineage/edges.",
       filteredOut: "No edges match the current filter. Try adjusting the layer or object selection.",
+    },
+    extract: {
+      button: "Auto-extract Lineage",
+      created: "Extraction done: {count} new lineage edge(s) added",
+      noNew: "Lineage is up to date — no new edges this run",
     },
     manage: {
       newButton: "New Edge",
@@ -850,6 +1128,14 @@ export const enUS = {
     owner: "Owner Dept.",
     ownerTooltip: "Empty = admin only; otherwise the listed dept can modify",
     ownerPlaceholder: "e.g. procurement",
+    bulkImport: "Bulk Import",
+    bulkImportTitle: "Bulk Import Entity Mappings",
+    bulkImportEmpty: "No valid rows to import",
+    bulkImportTooLarge: "Max 1000 rows per batch",
+    bulkImportSample: "Load sample",
+    bulkImportClear: "Clear",
+    bulkImportSubmit: "Import",
+    bulkImportImporting: "Importing",
   },
 
   forms: {
@@ -916,11 +1202,13 @@ export const enUS = {
         maxInputTokens: "Max Input Tokens",
         weight: "Routing Weight",
         costThreshold: "Cost Threshold ($)",
+        temperature: "Temperature",
       },
       placeholders: {
         modelName: "e.g. gpt-4o-mini / deepseek-chat / qwen2.5:7b",
         apiEndpoint: "https://api.openai.com/v1 or http://localhost:11434",
         apiKey: "sk-...",
+        temperature: "Leave empty to use default 0.0",
       },
     },
 
@@ -980,6 +1268,7 @@ export const enUS = {
         properties: "Properties",
         metrics: "Metrics",
         joins: "Joins",
+        semanticRelations: "Semantic Relations",
       },
       addClassButton: "Add Class",
       addClassModalTitle: "Add Class",
@@ -992,11 +1281,24 @@ export const enUS = {
       editMetricModalTitle: "Edit Metric",
       addJoinButton: "Add Join",
       addJoinModalTitle: "Add Join",
+      joinOnlyForeignKeys: "Foreign keys only (auto-inferred)",
+      joinOnlyForeignKeysHint:
+        "Edges auto-inferred during local import (declared FK / Sage X3 name convention) are marked as foreign keys. Review, delete, or recreate them here.",
       versionsModalTitle: "Version History: {name}",
       semanticSearchTab: "Semantic Search",
       semanticResultsCardTitle: "Semantic Search Results",
       semanticSearchPlaceholder: "Semantic search: e.g. Customer Revenue",
       deleteConfirm: "Are you sure you want to delete?",
+      syncEmbedding: "Sync Vector",
+      syncMissingEmbeddings: "Backfill Missing Vectors",
+      syncEmbeddingSuccess: "Vector synced for class \"{name}\"",
+      syncMissingNone: "Class and property vectors are complete ({total} classes / {propTotal} properties), nothing to backfill",
+      syncMissingSuccess: "Backfill complete: {classSynced} classes, {propSynced} properties",
+      syncMissingPartial: "Backfill complete: {synced} succeeded, {failed} failed (see backend logs)",
+      syncGraphButton: "Backfill Graph",
+      syncGraphNone: "Graph is consistent with ontology data, nothing to backfill",
+      syncGraphSuccess: "Graph backfill complete: {classes} classes, {properties} properties, {edges} edges",
+      syncGraphPartial: "Graph backfill complete: {synced} succeeded, {failed} failed (see backend logs)",
       classColumns: {
         id: "ID",
         className: "Class Name",
@@ -1065,6 +1367,94 @@ export const enUS = {
         sourceColumns: "e.g. BPTNUM_0",
         targetColumns: "e.g. BPRNUM_0",
         description: "e.g. receipt supplier no. links to supplier master",
+      },
+      addSemanticRelationButton: "Add Semantic Relation",
+      addSemanticRelationModalTitle: "Add Semantic Relation",
+      backfillRelationsButton: "Backfill Relations",
+      backfillRelationsHint:
+        "Sync all locally-imported JOIN edges into the graph, and backfill ref_class_id for foreign-key properties with no target class, per Sage X3 reference column-name conventions. Idempotent on re-run. Note: manually declared semantic relations are NOT re-synced here — if an edge was lost because Neo4j was unreachable at creation, delete and re-declare it once Neo4j is back.",
+      backfillRelationsConfirm:
+        "Sync all JOINs into the graph and backfill foreign-key target classes. Continue?",
+      backfillRelationsSuccess:
+        "Synced {syncedJoins} JOIN(s), backfilled {backfilledReferences} reference(s)",
+
+      batchRelations: {
+        button: "Batch Relations",
+        modalTitle: "Batch Relation Engine",
+        subtitle:
+          "Build relations in bulk — pick one or more actions; for relations that already exist choose Skip or Overwrite. This only mutates the JOIN / semantic-relation catalog and the graph, never class or property definitions.",
+        syncGraph: "Sync Ontology to Graph",
+        syncGraphHint:
+          "Upsert every live PG class/property as Neo4j Class/Property nodes plus HAS_PROPERTY / REFERENCES edges (idempotent; for graph backfill / reconciliation)",
+        inferJoins: "Infer Physical Joins from Shared Columns",
+        inferJoinsHint:
+          "Infer JOIN candidates from Sage X3 reference column-name conventions plus generic shared columns where at least one side is a primary key; boilerplate columns are skipped. Preview before running.",
+        applyManifest: "Apply Relation Manifest",
+        applyManifestHint:
+          "Add/update JOINs and semantic relations from a manifest; duplicates follow the conflict policy below",
+        onConflictLabel: "Conflict policy (existing relations)",
+        conflictSkip: "Skip (keep as-is)",
+        conflictOverwrite: "Overwrite (update differing fields)",
+        sourceLabel: "Manifest source",
+        jsonLabel: "JSON",
+        csvLabel: "CSV",
+        csvKindLabel: "CSV list kind",
+        jsonPlaceholder:
+          'Paste manifest JSON, e.g. {"joins":[{"sourceClassId":1,"sourceColumns":["A_0"],"targetClassId":2,"targetColumns":["A_0"]}],"relations":[{"sourceClassId":1,"targetClassId":2,"relationType":"SUPPLIES","description":"…"}]}',
+        uploadHint: "Click or drag a CSV file here",
+        uploadExtra:
+          "File must include headers: sourceClassName,targetClassName,relationType,description (or sourceColumns/targetColumns)",
+        templateJoins: "Download JOIN template",
+        templateRelations: "Download semantic-relation template",
+        csvParsed: "Parsed {n} manifest row(s); class names resolved to IDs",
+        csvHasErrors: "CSV has {n} row error(s) (unknown class name, etc.); those rows were skipped",
+        preview: "Preview",
+        execute: "Execute",
+        selectActionFirst: "Select at least one action",
+        manifestRequired: "Apply Manifest requires JSON or an uploaded CSV",
+        jsonInvalid: "Invalid JSON: {detail}",
+        previewTitle: "Preview (read-only)",
+        resultTitle: "Execution result",
+        inferredTitle: "Inferred JOIN candidates",
+        inferredBy: "Inferred by",
+        inferredByConvention: "X3 naming convention",
+        inferredBySharedColumn: "Shared column (one side PK)",
+        colSource: "Source class",
+        colTarget: "Target class",
+        colColumns: "Join columns",
+        emptyInferred: "No shared-column joins matched the inference rules",
+        graphCountsTitle: "Graph sync counts",
+        syncGraphCounts:
+          "Classes {classes} · Properties {properties} · HAS_PROPERTY {hasPropertyEdges} · REFERENCES {referenceEdges}",
+        joinsLabel: "Physical joins",
+        relationsLabel: "Semantic relations",
+        countCreated: "Created {n}",
+        countSkipped: "Skipped {n}",
+        countOverwritten: "Overwritten {n}",
+        emptyCounts: "Nothing to process (all hits were skipped or the manifest is empty)",
+        errorsTitle: "Errors ({n})",
+        successToast: "Batch execution complete",
+        noChangeToast: "Complete: no changes (all were skipped)",
+      },
+
+      semanticRelationColumns: {
+        id: "ID",
+        source: "Source → Target",
+        relationType: "Relation Type",
+        description: "Description",
+        actions: "Actions",
+      },
+
+      semanticRelationLabels: {
+        sourceClassId: "Source Class",
+        targetClassId: "Target Class",
+        relationType: "Relation Type",
+        description: "Description",
+      },
+      semanticRelationPlaceholders: {
+        sourceClassId: "Select source class",
+        targetClassId: "Select target class",
+        description: "e.g. supplier supplies the goods a receipt references",
       },
       searchColumns: {
         type: "Type",
@@ -1183,11 +1573,27 @@ export const enUS = {
 
   localImport: {
     steps: {
+      schema: "Select Schema",
       rule: "Rule Config",
       preview: "Preview & Confirm",
       confirm: "Import Done",
     },
     confirmImport: "Confirm Import",
+    schema: {
+      loading: "Loading schemas…",
+      loadFailed: "Failed to load schemas. Check datasource connectivity and retry.",
+      selectLabel: "Schema (Oracle owner)",
+      placeholder: "Select a schema to browse tables",
+      ownerCount: "{count} schemas total",
+      hint: "Only tables under the selected schema (Oracle owner) are shown; Next stays disabled until one is chosen.",
+    },
+    initPage: {
+      title: "Local Data Initialization",
+      datasourceLabel: "Data Source",
+      startButton: "Start Import",
+      noDatasource: "No usable data source. Create & test one on the Data Sources page first.",
+      loadFailed: "Failed to load data sources. Please retry later.",
+    },
     confirm: {
       errorTitle: "Import completed with errors",
       errorSummary:
@@ -1203,6 +1609,33 @@ export const enUS = {
       searchPlaceholder: "Search table/class name",
       selectFiltered: "Select all filtered",
       selectedCount: "{count} of {total} tables selected",
+      joinsTitle: "Relationships",
+      joinCount: "{count} selected",
+      joinSource: "Source table.column",
+      joinTarget: "Target table.column",
+      joinType: "Join",
+      relationType: "Relation",
+      inferredBy: "Inferred by",
+      inferredByDeclaredFk: "Declared FK",
+      inferredByNameConvention: "Name convention",
+    },
+    config: {
+      selectTablesTitle: "Select tables to import",
+      tableName: "Table Name",
+      columnCount: "Columns",
+      searchPlaceholder: "Search table name",
+      selectFiltered: "Select all filtered",
+      selectedCount: "{count} of {total} tables selected",
+      noTableHint:
+        "No table selected: check the tables to import above first (searchable). Column-level selection appears when exactly one table is selected.",
+      multiModeHint:
+        "Multiple tables selected: all columns of each table will be imported. To import only some columns, select a single table.",
+      singleModeTitle: "Columns to import from {table}",
+      columnChosenCount: "{chosen} of {total} columns selected",
+      joinInferenceTitle: "Auto-infer relationships",
+      inferDeclaredFk: "Declared foreign keys",
+      inferNameConvention: "Sage X3 name convention",
+      schemaLoadWarn: "Schema failed to load. Check datasource connectivity and retry.",
     },
   },
 
@@ -1318,6 +1751,7 @@ export const enUS = {
 
   datasource: {
     importToOntology: "Import to Ontology",
+    cacheSchema: "Cache Schema",
   },
 
   featureRules: {
@@ -1400,10 +1834,11 @@ export const enUS = {
       legacy: "11g and below (ROWNUM)",
     },
     provider: {
-      OPENAI: "OpenAI",
-      AZURE_OPENAI: "Azure OpenAI",
-      OPENAI_COMPATIBLE_PROXY: "Compatible Proxy (DeepSeek/Qwen)",
-      OLLAMA: "Local Ollama",
+      openai: "OpenAI",
+      azure_openai: "Azure OpenAI",
+      moonshot: "Moonshot (Kimi)",
+      openai_compatible_proxy: "Compatible Proxy (DeepSeek/Qwen)",
+      ollama: "Local Ollama",
     },
     dataType: {
       STRING: "String STRING",
@@ -1424,6 +1859,14 @@ export const enUS = {
       Transaction: "Transaction Document Transaction",
       Reference: "Reference/Config Reference",
       Event: "Event Event",
+    },
+    semanticRelationType: {
+      SUPPLIES: "Supplies SUPPLIES",
+      CONTAINS: "Contains CONTAINS",
+      GENERATES: "Generates GENERATES",
+      INSPECTED_BY: "Inspected By INSPECTED_BY",
+      GENERATED: "Generated GENERATED",
+      RELATED_TO: "Related To RELATED_TO",
     },
     entityType: {
       class: "Class",
@@ -1485,6 +1928,457 @@ export const enUS = {
     },
   },
 
+  // Knowledge import wizard (feat-wiki-knowledge M2)
+  wikiImport: {
+    title: "Knowledge Import",
+    steps: {
+      source: "Paste Source",
+      model: "Select Model",
+      preview: "Preview Drafts",
+      confirm: "Result",
+    },
+    uploadButton: "Upload file",
+    uploadButtonUploading: "Parsing…",
+    uploadProgress: "Parsing file (PDF scans will run OCR, please wait)…",
+    uploadHint:
+      "Supports PDF / Word (.docx) / PPT (.pptx) / Excel (.xlsx/.xls) / Markdown / plain text. The extracted text fills the box below so you can check it before splitting.",
+    sourceLabel: "Raw content (Markdown; split by the shallowest heading level)",
+    sourcePlaceholder:
+      "Paste the knowledge source here, e.g.:\n\n## Supplier Admission Rules\n\nRegistered capital >= 10M.\n\n## Supplier Tiering Rules\n\nA/B/C by annual spend.",
+    sourceTypeLabel: "Source type",
+    sourceRefLabel: "Source reference",
+    sourceRefPlaceholder: "File name, document id, or link — for traceability",
+    autoClassifyLabel: "Auto-classify",
+    autoClassifyHint:
+      "When on, each entry is classified by the model (adjustable later)",
+    useTwoStepLabel: "Deep Analysis Mode",
+    useTwoStepHint:
+      "When on, analyzes entities/concepts/ontology links first (higher quality, double cost)",
+    modelLabel: "Processing model",
+    modelPlaceholder: "Pick an available model",
+    noModels: "No model available — add one under Model Config first",
+    modelUnusable: "unusable",
+    fallbackModelLabel: "Fallback model (optional)",
+    fallbackModelPlaceholder: "Used automatically when the primary call fails",
+    previewSummary:
+      "{count} draft(s) parsed (limit {max}). Edit titles and content before importing.",
+    draftIndex: "Draft {index}",
+    columns: {
+      title: "Title",
+      content: "Content",
+      status: "Status",
+      total: "Total",
+      success: "Succeeded",
+      skipped: "Skipped",
+      failed: "Failed",
+      errorMessage: "Notes",
+      actions: "Actions",
+    },
+    actions: {
+      removeDraft: "Remove",
+      repreview: "Re-split",
+      execute: "Import",
+      importAnother: "Import another batch",
+      reloadModels: "Reload",
+      retry: "Retry",
+      retryTooltip: "Re-run with the same drafts — unchanged entries are skipped automatically",
+    },
+    resultMessage: "Import task finished with status: {status}",
+    resultCounts:
+      "{total} total, {success} succeeded, {skipped} skipped, {failed} failed, cost ${cost}",
+    tasksTitle: "Recent import tasks",
+    noTasks: "No import tasks yet",
+    errors: {
+      previewFailed: "Failed to split the source — please check the content",
+      parseFileFailed:
+        "Could not parse the file. Use PDF / Word (.docx) / PPT (.pptx) / Excel (.xlsx/.xls) / Markdown / plain text; legacy .doc/.ppt must be re-saved as .docx/.pptx.",
+      fileTooLarge: "The file is too large (10 MB per upload). Split or compress it and retry.",
+      modelUnusable:
+        "The selected model is unavailable. Pick another one (add credentials under Model Config).",
+      modelsLoadFailed:
+        "Failed to load the model list. You cannot continue while the model dropdown is empty.",
+      tooManyDrafts:
+        "This source splits into {count} entries, over the {max}-per-import limit. Remove some drafts first, or import in batches.",
+    },
+  },
+
+  // Knowledge pages (feat-wiki-knowledge M7, mechanism 1)
+  wikiPages: {
+    title: "Knowledge Pages",
+    empty: "No knowledge pages yet — create one, or bulk-import under Knowledge Import",
+    undetermined: "Undetermined",
+    filters: {
+      search: "Search title / content",
+      dimension: "Filter by dimension",
+      status: "Filter by status",
+    },
+    search: {
+      semantic: "Semantic",
+      keyword: "Keyword",
+      score: "Score",
+      snippet: "Matched snippet",
+      noHits: "No semantically matched knowledge pages",
+      fallbackNotice: "Vector search unavailable — fell back to keyword search",
+    },
+    columns: {
+      title: "Title",
+      dimension: "Dimension",
+      status: "Status",
+      structureStage: "Structure",
+      version: "Version",
+      pageId: "Page ID",
+      createdAt: "Created At",
+    },
+    dimensions: {
+      OBJECT: "Business Object",
+      RULE: "Business Rule",
+      PROCESS: "Business Process",
+      CONCEPT: "Business Definition",
+      METRIC: "Business Metric",
+      POLICY: "Policy",
+      DOCUMENT: "Document",
+      FAQ: "FAQ",
+    },
+    statuses: {
+      DRAFT: "Draft",
+      REVIEW: "In review",
+      APPROVED: "Approved",
+      EFFECTIVE: "Effective",
+      EXPIRED: "Expired",
+    },
+    actions: {
+      create: "New page",
+      saveDimension: "Confirm classification",
+      rejectDimension: "Reject classification",
+    },
+    // Single delete confirmation. Same tier as bulk delete — both are
+    // irreversible and cascade to relations and artifacts; the only difference
+    // is "one" vs "a batch", so the guardrail shouldn't exist on only one side.
+    deleteConfirm:
+      'Delete "{title}"? Its claims, relations and artifacts are deleted with it.',
+    // Bulk delete (multi-select + second confirmation). The cascade hint is the
+    // one line this dialog exists to deliver: the user clicks "delete 3 pages",
+    // what actually goes away is 3 pages plus their relations and artifacts.
+    batchDelete: {
+      action: "Delete selected",
+      title: "Delete knowledge pages",
+      count: "This will delete {count} knowledge page(s).",
+      cascadeHint:
+        "Claims, evidence, knowledge relations, structure suggestions and executable rules attached to each page are deleted with it. Relations from other pages that point here become dangling references — resolve them under Conflict Detection.",
+      confirm: "Delete",
+      selected: "{count} selected",
+      idSeparator: ", ",
+      result:
+        "Deleted {deleted} page(s); cleaned up {claims} claim(s), {relations} relation(s), {suggestions} suggestion(s), {rules} rule(s), {workflows} workflow(s).",
+      partialNotFound: "{count} page(s) were not deleted (not found or already deleted): {ids}",
+    },
+    form: {
+      content: "Content (Markdown)",
+      dimension: "Dimension",
+      authorityLevel: "Authority Level",
+      authorityLevelPlaceholder: "Select L0–L5",
+    },
+    detail: {
+      meta: "Page {pageId} | v{version} | stage {stage}",
+      dimension: "Dimension",
+      noSuggestion:
+        "No auto-classification for this page (classification was off at import, or the model returned nothing).",
+      suggestion: "Model suggests: {dimension} (confidence {confidence})",
+      rejectHint:
+        "Rejecting means this knowledge belongs to no dimension. It is recorded as learning feedback to correct the classifier.",
+      statusTitle: "Lifecycle status",
+      content: "Content",
+      authorityLevel: "Authority Level",
+      saveSuccess: "Saved successfully",
+      tabs: {
+        basic: "Basic Info",
+        claims: "Claims",
+        relations: "Relations",
+        conflicts: "Conflicts",
+      },
+      transitions: {
+        toReview: "Submit for review",
+        toApproved: "Approve",
+        toEffective: "Activate",
+        toExpired: "Expire",
+        backToDraft: "Back to draft",
+        backToReview: "Back to review",
+      },
+      noMoreTransitions: "No further transitions available",
+      statusHint:
+        "Switch freely among all states (DRAFT / REVIEW / APPROVED / EFFECTIVE / EXPIRED). The change time is recorded automatically.",
+      confirm: "Confirm changing status from \"{from}\" to \"{to}\"?",
+      confirmIrreversible:
+        "Confirm changing status from \"{from}\" to \"{to}\"? Once expired, the entry no longer takes effect but the row is retained for audit.",
+      ok: "Confirm",
+      cancel: "Cancel",
+      currentStatus: "Current: {status}",
+    },
+    errors: {
+      titleRequired: "Title is required",
+      contentRequired: "Content is required",
+      reclassifyFailed: "Failed to record the classification. Please retry.",
+      deleteFailed: "Delete failed. Please retry.",
+      batchDeleteFailed: "Bulk delete failed. Please retry.",
+      statusUpdateFailed: "Status update failed. Please retry.",
+    },
+    // Claims (mechanism 1 output)
+    claims: {
+      empty: "No claims yet",
+      claimText: "Claim",
+      claimType: "Type",
+      evidenceCount: "Evidence",
+      sourceType: "Source Type",
+      sourceId: "Source ID",
+      section: "Section",
+      paragraph: "Paragraph",
+      content: "Content",
+      noEvidence: "No evidence",
+      evidences: "evidence(s)",
+      reExtract: "Re-extract",
+      forceReExtractTitle: "Force re-extract?",
+      forceReExtractDesc: "This will delete the current {count} claim(s) and their evidence, then re-extract with the selected model.",
+      forceReExtractOk: "Delete & re-extract",
+      extractDone: "Extracted {count} claim(s)",
+      extractAlreadyDone: "Claims already extracted for this page",
+      extractFailed: "Extraction failed ({status}), please retry",
+      extractStatus: "Extraction status: {status}",
+    },
+    // Knowledge relations (mechanism 2)
+    relations: {
+      empty: "No relations yet",
+      pending: "Pending",
+      confirmed: "Confirmed",
+      discover: "Discover",
+      discoverTitle: "Discover candidate relations",
+      confirm: "Confirm",
+      reject: "Reject",
+      confirmSuccess: "Relation confirmed",
+      rejectSuccess: "Relation rejected",
+      discovered: "Discovered {count} candidate relation(s)",
+      relationType: "Relation Type",
+      downstreamType: "Downstream Type",
+      downstreamId: "Downstream ID",
+      confidence: "Confidence",
+    },
+    // Conflict detection (mechanism 3) — embedded in detail drawer
+    conflicts: {
+      detect: "Detect conflicts",
+      noneFound: "No conflicts detected",
+      found: "Found {count} conflict(s)",
+      resolve: "Resolve",
+      resolved: "Conflict resolved",
+      type: "Type",
+      severity: "Severity",
+      description: "Description",
+      actions: "Actions",
+    },
+  },
+
+  // Conflict detection (feat-wiki-knowledge M7, mechanism 3)
+  wikiConflicts: {
+    title: "Conflict Detection",
+    empty: "No conflicts match the filters",
+    idSeparator: ", ",
+    filters: {
+      status: "Filter by status",
+      severity: "Filter by severity",
+      type: "Filter by type",
+    },
+    columns: {
+      type: "Type",
+      severity: "Severity",
+      pageIds: "Pages",
+      description: "Description",
+      detectedBy: "Detected by",
+    },
+    types: {
+      CONTRADICTION: "Contradiction",
+      STALENESS: "Staleness",
+      GAP: "Gap",
+      OVERLAP: "Overlap",
+    },
+    severities: {
+      CRITICAL: "Critical",
+      HIGH: "High",
+      MEDIUM: "Medium",
+      LOW: "Low",
+    },
+    statuses: {
+      OPEN: "Open",
+      RESOLVED: "Resolved",
+    },
+    detectors: {
+      RULE: "Rule",
+      LLM: "Model",
+    },
+    actions: {
+      resolve: "Resolve",
+      RESOLVED: "Fixed",
+      MERGED: "Merged",
+      IGNORED: "False positive",
+    },
+    resolvePlaceholder: "Choose an outcome",
+    resolveHint:
+      "Only “false positive” means the detector was wrong. It feeds mechanism 3's accuracy stats, so do not pick it casually.",
+    errors: {
+      alreadyResolved:
+        "This conflict was already resolved (terminal state). The list has been refreshed.",
+      resolveFailed: "Resolve failed. Please retry.",
+    },
+  },
+
+  // Structure suggestion workbench (feat-wiki-knowledge M7, mechanism 4)
+  wikiSuggestions: {
+    title: "Structure Suggestions",
+    empty: "No suggestions match the filters",
+    orphan: "(page no longer exists: {pageId})",
+    confirmAccept:
+      "Accepting materializes an executable rule / process draft and cannot be undone. Accept?",
+    confirmReject: "Rejecting moves this suggestion to a terminal state. Reject?",
+    filters: {
+      status: "Filter by status",
+    },
+    columns: {
+      pageTitle: "Knowledge page",
+      dimension: "Suggested dimension",
+      structure: "Extracted structure",
+      confidence: "Confidence",
+      status: "Status",
+    },
+    statuses: {
+      PENDING: "Pending",
+      ACCEPTED: "Accepted",
+      REJECTED: "Rejected",
+    },
+    actions: {
+      generate: "Generate",
+      accept: "Accept",
+      reject: "Reject",
+    },
+    generatePageLabel: "Knowledge page",
+    generatePagePlaceholder: "Search by title",
+    generateModelLabel: "Extraction model (optional)",
+    generateModelPlaceholder: "Leave empty for deterministic pre-screening only",
+    generateHint:
+      "Works without a model: deterministic pre-screening first tells you which kind of structured knowledge this looks like, and you decide whether to spend a model call.",
+    generated: "Generated {count} suggestion(s) ({kind})",
+    generatedNone: "No new suggestions generated",
+    errors: {
+      generateFailed: "Failed to generate suggestions. Please retry.",
+      alreadyResolved:
+        "This suggestion was already resolved (terminal state). The list has been refreshed.",
+      resolveFailed: "Resolve failed. Please retry.",
+    },
+  },
+
+  // Wiki Chat: conversational QA over Enterprise Wiki semantic retrieval (feat-wiki-chat)
+  wikiChat: {
+    title: "Wiki Chat",
+    suggestionsTitle: "Try asking:",
+    send: "Send",
+    inputPlaceholder: "Ask a question — answers are synthesized from Enterprise Wiki semantic retrieval...",
+    noHits: "No relevant knowledge found in the Enterprise Wiki.",
+  },
+
+  // Coverage dashboard (feat-wiki-knowledge M7, mechanism 6)
+  wikiGraph: {
+    title: "Knowledge Graph",
+    recompute: "Recompute Communities",
+    recomputeDone: "Detected {communities} communities covering {pages} pages",
+    includeIsolated: "Show isolated pages",
+    truncatedHint: "Graph exceeds size limit — showing top 500 nodes by connection count",
+    empty: "No knowledge relations yet — confirm some relation candidates on the Wiki Pages page first",
+    communities: "Communities",
+    noCommunities: "No communities detected yet — click \"Recompute Communities\"",
+    communityMeta: "{pages} pages · cohesion {cohesion}",
+    edgeTooltip: "Relevance score: {score}",
+    insights: {
+      title: "Graph Insights",
+      rescan: "Rescan Insights",
+      rescanning: "Scanning…",
+      rescanDone: "Scan done — surprising {surprising} · gaps {gaps} · bridges {bridges} ({failures} explanation failures)",
+      never: "Never scanned — click \"Rescan Insights\" to analyze the knowledge network",
+      tabSurprising: "Surprising Connections",
+      tabGaps: "Knowledge Gaps",
+      tabBridges: "Bridge Nodes",
+      noExplanation: "(No LLM explanation yet)",
+      gapIsolated: "Isolated",
+      gapMissingDimension: "Missing Dimension",
+      gapSparse: "Sparse Community",
+      surprisingSource: "{comm} · {dim}",
+      // Phase 5.5: action buttons + 3 Modal labels for the gap kinds
+      actionReclassify: "Reclassify",
+      actionFindRelations: "Find Relations",
+      actionSuggestTopic: "Suggest Topic",
+      previewTitleClassify: "Suggested Dimension",
+      previewTitleRelations: "Candidate Relations",
+      previewTitleTopic: "Suggested Topic",
+      primarySuggestion: "Model suggests: {primary}",
+      confidence: "Confidence: {value}",
+      alternatives: "Alternatives: {list}",
+      basedOnTitles: "Based on {count} page titles:",
+      noSuggestion: "Model gave no suggestion",
+      confirm: "Confirm",
+      cancel: "Cancel",
+      successReclassify: "Dimension written: {dimension}",
+      successRelations: "{count} candidate relation(s) written",
+      successTopic: "Community topic written: {topic}",
+      emptyCandidates: "No candidates to confirm",
+    },
+  },
+  wikiCoverage: {
+    title: "Coverage Dashboard",
+    unassigned: "No domain",
+    gapsTitle: "Knowledge gaps",
+    noGaps: "No gaps — every domain-tagged class has usable knowledge",
+    mappingsTitle: "Business domain tags",
+    noMappings: "No ontology class has been tagged with a domain yet",
+    unlinkedTitle: "{count} page(s) are not linked to any confirmed business object",
+    unlinkedHint:
+      "These pages are invisible in the coverage matrix (every cell is tied to a class), and Agents cannot find them when searching by business object either. Link them or fix their dimension.",
+    pageCounts: "{total} total / {approved} approved",
+    confirmRemove:
+      "Removing this tag sends the related cells back to “no domain”. Continue?",
+    classPlaceholder: "Search ontology class",
+    domainPlaceholder: "Type or pick a domain",
+    domainHint:
+      "A domain is a classification axis, not a fixed vocabulary: when knowledge reaches a new area, just type the new domain.",
+    refreshDone:
+      "Refreshed: {cells} cells covering {mapped}/{classes} domain-tagged classes, {removed} stale cell(s) removed.",
+    actions: {
+      refresh: "Refresh coverage",
+      addMapping: "Tag domain",
+    },
+    summary: {
+      totalCells: "Matrix cells",
+      missing: "Fully missing",
+      // Deliberately not "Covered" — that duplicates statuses.COMPLETE on the
+      // same screen (stat card vs. table tag), reading like the same number twice.
+      complete: "Covered cells",
+      unassigned: "Untagged cells",
+    },
+    statuses: {
+      COMPLETE: "Covered",
+      PARTIAL: "Partial",
+      OUTDATED: "Outdated",
+      MISSING: "Missing",
+    },
+    columns: {
+      dimension: "Dimension",
+      className: "Ontology class",
+      domain: "Domain",
+      status: "Coverage",
+      pages: "Pages",
+    },
+    errors: {
+      refreshFailed: "Refresh failed. Please retry.",
+      removeFailed: "Remove failed. Please retry.",
+      mappingGone:
+        "That tag is already gone (someone may have just removed it). The list has been refreshed.",
+    },
+  },
+
   agentTools: {
     title: "Tool Configuration",
     columns: {
@@ -1528,6 +2422,38 @@ export const enUS = {
     },
   },
 
+  // System Config admin (feat-system-config-admin)
+  systemConfig: {
+    title: "System Config",
+    columns: {
+      key: "Key",
+      value: "Value",
+      description: "Description",
+      updatedTime: "Updated",
+      actions: "Actions",
+    },
+    actions: {
+      edit: "Edit",
+      refresh: "Refresh",
+      save: "Save",
+      cancel: "Cancel",
+    },
+    modal: {
+      editTitle: "Edit System Config",
+      keyReadonlyHelp: "key is immutable; add new keys via alembic + seed",
+      valuePlaceholder: "Empty / boolean string / JSON-like text supported",
+    },
+    messages: {
+      updated: "Updated",
+    },
+    errors: {
+      loadFailed: "Load failed",
+      updateFailed: "Update failed",
+      valueTooLong: "value must be <= 4096 chars",
+    },
+    empty: "empty",
+  },
+
   dataQualityGenerate: {
     title: "Rule Generation Wizard",
     stepClass: "Select Ontology Class",
@@ -1565,6 +2491,8 @@ export const enUS = {
     },
     selectClassPlaceholder: "Select an ontology class",
     selectDatasourcePlaceholder: "Select a data source",
+    selectAll: "Select all new",
+    deselectAll: "Deselect all",
     noSuggestions: "No AI suggestions available",
     suggestedValues: "Suggested Values",
     confidence: "Confidence",
@@ -1580,7 +2508,7 @@ export const enUS = {
       parseFailed: "AI parsing failed",
       applyFailed: "Failed to apply suggestion",
       applied: "Suggestion applied",
-      adoptNotApplicable: "This suggestion type (non-value-list constraint) cannot be auto-applied. Please configure it manually in the ontology page.",
+      adoptNotApplicable: "not_null and other non-value-list constraints have no auto-apply path yet. Please contact the administrator to extend ontology_property fields, or configure it manually on the ontology page.",
       alreadyAdopted: "This property has already been adopted",
     },
   },
@@ -1590,6 +2518,7 @@ export const enUS = {
     subtitle: "View and edit LLM-adopted allowed_values across all ontology classes in one place.",
     filter: {
       all: "All classes",
+      keywordPlaceholder: "Search property name / alias / column / description (case-insensitive)",
     },
     values: {
       none: "Unconstrained",
@@ -1602,7 +2531,7 @@ export const enUS = {
       actions: "Actions",
     },
     modal: {
-      editTitle: "Edit Property: {{name}}",
+      editTitle: "Edit Property: {name}",
     },
     form: {
       description: "Description",
@@ -1613,6 +2542,18 @@ export const enUS = {
       allowedValuesPlaceholder: "Type a value and press Enter or comma to add",
       allowedValuesHelp1: "• Values must not contain single quotes (SQL injection guard)",
       allowedValuesHelp2: "• Consistent with apply-suggestion: null = no change, [] = clear",
+      // Constraint fields (feat-ontology-property-constraints): sibling to allowedValues.
+      isNotNull: "Not Null (is_not_null)",
+      isNotNullHint: "Toggle on to mark this column as required; rule engine derives COMPLETENESS rules",
+      minValue: "Min (min_value)",
+      minValueHint: "Range lower bound; pairs with max_value. For non-numeric (dates, lexicographic), use the backend API instead.",
+      minValuePlaceholder: "e.g. 0",
+      maxValue: "Max (max_value)",
+      maxValueHint: "Range upper bound; pairs with min_value",
+      maxValuePlaceholder: "e.g. 100",
+      regexPattern: "Regex (regex_pattern)",
+      regexPatternHint: "Regular expression; rule engine derives PATTERN rules; must compile",
+      regexPatternPlaceholder: "e.g. ^[A-Z]{2}-\\d+$",
     },
     messages: {
       loadFailed: "Failed to load ontology properties",
@@ -1662,5 +2603,103 @@ export const enUS = {
     validation: {
       codeFormat: "Code must be uppercase letters, digits, or underscore; 1-20 chars",
     },
+  },
+
+  routingMetrics: {
+    title: "Routing Layer Metrics",
+    subtitle: "Hit count, latency and token cost per L1/L2/L3/L4 layer",
+    layer: {
+      L1: "L1 Semantic Match",
+      L2: "L2 LLM Intent Classification",
+      L3: "L3 Multi-step Chain",
+      L4: "L4 LangGraph Agent Loop",
+    },
+    metric: {
+      hitCount: "Hit Count",
+      avgDuration: "Avg Latency",
+      avgTokenCost: "Avg Token Cost",
+    },
+    chart: {
+      pieTitle: "Layer Distribution",
+      lineTitle: "Trend (Last 7 Days)",
+      yAxisLabel: "Hit Count",
+    },
+    timeWindow: {
+      "1d": "Last 1 Day",
+      "7d": "Last 7 Days",
+      "30d": "Last 30 Days",
+    },
+    empty: "No data",
+    error: "Load failed",
+    todo: {
+      apiEndpoint: "TODO: backend must implement GET /api/v1/routing-metrics/snapshot endpoint",
+    },
+  },
+  dqRuleParams: {
+    title: "Rule Config (Structured)",
+    create: "New Structured Rule",
+    mode: {
+      structured: "Structured",
+      custom: "Custom SQL",
+    },
+    fields: {
+      kind: "Constraint",
+      min: "Min",
+      max: "Max",
+      values: "Allowed Values",
+      pattern: "Pattern",
+      op: "Operator",
+      value: "Value",
+      left: "Left Column",
+      right: "Right Column",
+      factor: "Factor",
+      refTable: "Reference Table",
+      refColumn: "Reference Column",
+    },
+    table: {
+      code: "Code",
+      name: "Name",
+      type: "Rule Type",
+      mode: "Mode",
+      params: "Rule Params",
+      modeStructured: "Structured",
+      modeCustom: "Custom",
+      yes: "Yes",
+      no: "No",
+      editTitle: "Edit Rule",
+    },
+    form: {
+      datasource: "Datasource",
+      datasourcePlaceholder: "Select a datasource (auto-located when class picked first)",
+      className: "Class",
+      classPlaceholder: "Select an ontology class (auto-locates datasource & table)",
+      targetTable: "Target Table",
+      tablePlaceholder: "Select a target table",
+      loadingSchema: "Loading schema…",
+      ruleType: "Rule Type",
+      targetColumn: "Target Column",
+      threshold: "Threshold (pass rate %)",
+      severity: "Severity",
+      ruleExpression: "Rule Expression",
+      code: "Code",
+      codeAutoHint: "Auto-generated: DQ-Rule-YYYYMMDD-10-digit serial",
+      name: "Name",
+      nameAutoHint: "Auto-generated: Datasource-Class-RuleType (English)",
+    },
+  },
+  profile: {
+    title: "Profile",
+    authModeStubNotice:
+      "This system currently uses stub auth (X-User-Id header) with no real login; identity below is resolved by matching the header against database users.",
+    fields: {
+      userId: "User ID",
+      displayName: "Display Name",
+      email: "Email",
+      roles: "Roles",
+      departments: "Organizations",
+      identitySource: "Identity Source",
+    },
+    identityDb: "Database user",
+    identityStub: "Stub fallback (no database user matched)",
   },
 } as const;

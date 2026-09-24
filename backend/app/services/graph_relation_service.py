@@ -44,13 +44,14 @@ from app.infrastructure.neo4j_client import (
 
 logger = logging.getLogger(__name__)
 
-# Sheet 16 演示流转补充实例（entity_mapping 未覆盖的 GR002/GR003/IQC002/NCR001）：
-# 键位与 seed_entity_mapping 的 400_001/500_001 同段位，保证子图键空间一致。
-# Label 使用新名（ItemMaster / Receipt），与 neo4j_client BUSINESS_ENTITY_LABELS 对齐。
+# Sheet 16 演示流转补充实例：entity_mapping 种子只含 1 条 GR / 1 条 IQC，
+# 这里补 GR002/GR003/IQC002 节点供 GENERATES/INSPECTED_BY 演示边挂靠。
+# key 必须等于种子语义编码（enterprise_code）——linkBusinessRelation 用 MATCH
+# 按 key 找端点，键位对不上边会静默丢失（曾按旧数字键 400002 派生全断）。
 _SHEET16_EXTRA_ENTITIES: tuple[tuple[str, str, str], ...] = (
-    ("Receipt", "400002", "GR202608002"),
-    ("Receipt", "400003", "GR202608003"),
-    ("IncomingInspection", "500002", "IQC202608002"),
+    ("Receipt", "GR202608002", "GR202608002"),
+    ("Receipt", "GR202608003", "GR202608003"),
+    ("IncomingInspection", "IQC202608002", "IQC202608002"),
 )
 
 # DB-derived label map cache（启动期一次性加载）
@@ -210,12 +211,15 @@ class GraphRelationService:
     def _sheet16Edges(
         self,
     ) -> list[tuple[str, list[tuple[str, str, str, str]]]]:
-        """Sheet 16 流转边派生（确定性，键位与 seed_entity_mapping 对齐）。
+        """Sheet 16 流转边派生（确定性，键位与 seed_entity_mapping 语义编码对齐）。
+
+        节点 key = entity_mapping.enterprise_code（供应商由 bootstrap 同步写入，
+        key 为数字串 "100001"..；物料/PO/GR/IQC 用 seed 的语义编码）。
 
         - SUPPLIES：供应商 i 供应物料 {(3i-2, 3i-1, 3i) mod 10}，10 供应商 × 3 = 30 条；
-        - CONTAINS：PO202608{i} 含物料 3i-2..3i（i=1..3）= 9 条；
-        - GENERATES：PO001-003 -> GR001-003 = 3 条；
-        - INSPECTED_BY：GR001/GR002 -> IQC001/IQC002 = 2 条。
+        - CONTAINS：PO202608{i} 含物料 RM-STEEL-{3i-2..3i}（i=1..3）= 9 条；
+        - GENERATES：PO202608{i} -> GR202608{i}（i=1..3）= 3 条；
+        - INSPECTED_BY：GR202608{i} -> IQC202608{i}（i=1..2）= 2 条。
         共 44 条（加 SIGNED 边后 ≥ Phase 6 验收要求的 30 条）。
         删除 GENERATED：Phase 4.4 NCR 不入图。
         """
@@ -223,21 +227,21 @@ class GraphRelationService:
         materialCount = 10
 
         supplies = [
-            (str(100_000 + i), str(200_000 + materialIndex), "Supplier", "ItemMaster")
+            (str(100_000 + i), f"RM-STEEL-{materialIndex:03d}", "Supplier", "ItemMaster")
             for i in range(1, supplierCount + 1)
             for materialIndex in self._suppliedMaterialIndexes(i, materialCount)
         ]
         contains = [
-            (str(300_000 + i), str(200_000 + m), "PurchaseOrder", "ItemMaster")
+            (f"PO202608{i:03d}", f"RM-STEEL-{m:03d}", "PurchaseOrder", "ItemMaster")
             for i in (1, 2, 3)
             for m in (3 * i - 2, 3 * i - 1, 3 * i)
         ]
         poGenerates = [
-            (str(300_000 + i), str(400_000 + i), "PurchaseOrder", "Receipt")
+            (f"PO202608{i:03d}", f"GR202608{i:03d}", "PurchaseOrder", "Receipt")
             for i in (1, 2, 3)
         ]
         inspectedBy = [
-            (str(400_000 + i), str(500_000 + i), "Receipt", "IncomingInspection")
+            (f"GR202608{i:03d}", f"IQC202608{i:03d}", "Receipt", "IncomingInspection")
             for i in (1, 2)
         ]
         return [

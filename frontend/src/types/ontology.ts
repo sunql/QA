@@ -93,6 +93,14 @@ export interface OntologyProperty {
   // 设为可选（mock 测试和旧 client 不传不会触发 tsc 报错）；
   // 生产 API 始终返回该字段（null 或 list[str]）。
   allowedValues?: string[] | null;
+  // 列含义描述：后端 OntologyPropertyRead 始终返回；管理页编辑回填 + 列展示用。
+  description?: string | null;
+  // 约束字段（feat-ontology-property-constraints）：管理页展示 + wizard 初始化
+  // adoptedIds。任一字段非空视为已沉淀约束。
+  isNotNull?: boolean | null;
+  minValue?: string | null;
+  maxValue?: string | null;
+  regexPattern?: string | null;
 }
 
 export interface OntologyPropertyCreate {
@@ -118,6 +126,13 @@ export interface OntologyPropertyUpdate {
   // null 表示不修改；空数组 视作清空值域；非空数组 写入 ontology_property.allowed_values。
   allowedValues?: string[] | null;
   description?: string | null;
+  // 约束字段（feat-ontology-property-constraints）：管理页手工配置。
+  // undefined = 不修改；null = 显式清空（适用 string 类型）。
+  // isNotNull 是 boolean；undefined 不修改，false 显式清空，true 写 True。
+  isNotNull?: boolean | null;
+  minValue?: string | null;
+  maxValue?: string | null;
+  regexPattern?: string | null;
 }
 
 // ===== Metric =====
@@ -204,6 +219,131 @@ export interface OntologyJoinCreate {
   description?: string;
 }
 
+// ===== Semantic Relation（类 × 类语义关系） =====
+
+/** 类级语义关系类型（值域与后端 ClassRelationType 对齐；扩展需同步后端 + i18n）。 */
+export type SemanticRelationType =
+  | "SUPPLIES"
+  | "CONTAINS"
+  | "GENERATES"
+  | "INSPECTED_BY"
+  | "GENERATED"
+  | "RELATED_TO";
+
+/**
+ * 语义关系类型下拉选项（与后端枚举顺序一致）。
+ * labelKey 与 value 一致；组件经 ``t(`enums.semanticRelationType.${labelKey}`)`` 解析。
+ */
+export const SEMANTIC_RELATION_TYPE_OPTIONS: {
+  value: SemanticRelationType;
+  labelKey: SemanticRelationType;
+}[] = [
+  { value: "SUPPLIES", labelKey: "SUPPLIES" },
+  { value: "CONTAINS", labelKey: "CONTAINS" },
+  { value: "GENERATES", labelKey: "GENERATES" },
+  { value: "INSPECTED_BY", labelKey: "INSPECTED_BY" },
+  { value: "GENERATED", labelKey: "GENERATED" },
+  { value: "RELATED_TO", labelKey: "RELATED_TO" },
+];
+
+export interface OntologySemanticRelation {
+  id: number;
+  sourceClassId: number;
+  targetClassId: number;
+  relationType: SemanticRelationType;
+  description: string | null;
+  createdBy: string | null;
+  createdTime: string | null;
+  updatedTime: string | null;
+}
+
+export interface OntologySemanticRelationCreate {
+  sourceClassId: number;
+  targetClassId: number;
+  relationType: SemanticRelationType;
+  description?: string;
+}
+
+/** 一键补关系结果（POST /ontology/relations/backfill）。 */
+export interface RelationBackfillResult {
+  syncedJoins: number;
+  backfilledReferences: number;
+}
+
+// ===== Batch Relation Engine（通用批量关系引擎） =====
+
+/** 已存在关系的冲突处理策略。 */
+export type OnConflictPolicy = "skip" | "overwrite";
+
+/** 推断来源：X3 命名约定 or 通用共享列（一方主键）。 */
+export type InferBy = "name_convention" | "shared_column";
+
+/** 系统按共享列推断出的物理关联 join 候选。 */
+export interface InferredJoin {
+  sourceClassId: number;
+  sourceClassName: string;
+  sourceColumns: string[];
+  targetClassId: number;
+  targetClassName: string;
+  targetColumns: string[];
+  relationType: string;
+  inferredBy: InferBy;
+}
+
+/** 清单（joins + relations），新增/更新关系的载体（JSON 或 CSV 解析产物）。 */
+export interface RelationManifest {
+  joins: OntologyJoinCreate[];
+  relations: OntologySemanticRelationCreate[];
+}
+
+/** 批量请求：syncGraph / inferJoins / applyManifest 任选其一或多个。 */
+export interface BatchRelationRequest {
+  syncGraph?: boolean;
+  inferJoins?: boolean;
+  applyManifest?: boolean;
+  onConflict: OnConflictPolicy;
+  manifest?: RelationManifest;
+}
+
+/** 行级错误（applyManifest / CSV 解析用）。 */
+export interface BatchRowError {
+  index: number;
+  message: string;
+}
+
+/** 某类关系（joins / relations）的处理计数汇总。 */
+export interface BatchCounts {
+  created: number;
+  skipped: number;
+  overwritten: number;
+  errors: BatchRowError[];
+}
+
+/** 本体入图（PG → Neo4j）节点/边计数。 */
+export interface GraphSyncResult {
+  classes: number;
+  properties: number;
+  hasPropertyEdges: number;
+  referenceEdges: number;
+}
+
+/** 批量执行 / 只读预览的统一返回（预览不写库）。 */
+export interface BatchRelationResult {
+  syncGraph: GraphSyncResult | null;
+  inferredJoins: InferredJoin[];
+  joins: BatchCounts;
+  relations: BatchCounts;
+}
+
+/** CSV 清单解析产物（POST /ontology/batch/parse-csv）。 */
+export interface OntologyCsvParseResult {
+  manifest: RelationManifest;
+  errors: BatchRowError[];
+}
+
+/** CSV 模板类型（joins / relations）。 */
+export type BatchTemplateKind = "joins" | "relations";
+
 // ===== Semantic Search =====
 
 // 本体实体类型（语义检索命中项的 type 字段）
@@ -217,4 +357,56 @@ export interface OntologySearchHit {
   alias: string | null;
   description: string | null;
   score: number; // 0~1，越高越相似
+}
+
+// ===== Embedding 手动同步（向量对账） =====
+
+export interface EmbeddingSyncFailure {
+  classId: number;
+  className: string;
+  error: string;
+}
+
+export interface EmbeddingPropertySyncFailure {
+  propertyId: number;
+  propertyName: string;
+  error: string;
+}
+
+export interface EmbeddingSyncMissingResult {
+  totalClasses: number;
+  missingCount: number;
+  syncedCount: number;
+  failedCount: number;
+  failures: EmbeddingSyncFailure[];
+  totalProperties: number;
+  missingPropertyCount: number;
+  syncedPropertyCount: number;
+  failedPropertyCount: number;
+  propertyFailures: EmbeddingPropertySyncFailure[];
+}
+
+// ===== Neo4j 图谱对账（补图信息） =====
+
+export interface GraphSyncFailure {
+  entityType: string;
+  entityId: number;
+  error: string;
+}
+
+export interface GraphSyncMissingResult {
+  totalClasses: number;
+  missingClassCount: number;
+  syncedClassCount: number;
+  totalProperties: number;
+  missingPropertyCount: number;
+  syncedPropertyCount: number;
+  totalJoins: number;
+  missingJoinCount: number;
+  syncedJoinCount: number;
+  totalRelations: number;
+  missingRelationCount: number;
+  syncedRelationCount: number;
+  failedCount: number;
+  failures: GraphSyncFailure[];
 }

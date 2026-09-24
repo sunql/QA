@@ -23,7 +23,7 @@ from sqlalchemy import select  # noqa: E402
 
 from app.domain.models import DataLineage  # noqa: E402
 from app.infrastructure.database import getSessionFactory  # noqa: E402
-from app.services.lineage_extractor import ExtractedEdge, extractEdges  # noqa: E402
+from app.services.lineage_extractor import extractEdges, persistEdges  # noqa: E402
 
 
 async def _countExisting(session) -> int:
@@ -31,29 +31,6 @@ async def _countExisting(session) -> int:
     stmt = select(DataLineage)
     result = await session.execute(stmt)
     return len(list(result.scalars().all()))
-
-
-async def _persistEdges(session, edges: list[ExtractedEdge]) -> int:
-    """把抽取出的边写入 data_lineage 表；返回实际新增条数。"""
-    added = 0
-    for edge in edges:
-        entity = DataLineage(
-            source_layer=edge.source_layer,
-            source_system=edge.source_system,
-            source_object=edge.source_object,
-            source_field=edge.source_field,
-            target_layer=edge.target_layer,
-            target_system=edge.target_system,
-            target_object=edge.target_object,
-            target_field=edge.target_field,
-            transformation_rule=edge.transformation_rule,
-            refresh_frequency=edge.refresh_frequency,
-            is_active=True,
-        )
-        session.add(entity)
-        added += 1
-    await session.commit()
-    return added
 
 
 async def main() -> None:
@@ -66,7 +43,7 @@ async def main() -> None:
         print(f"[2/2] 抽取到 {len(edges)} 条新血缘边 ...")
 
         if edges:
-            added = await _persistEdges(session, edges)
+            added = await persistEdges(session, edges)  # 与 POST /extract 共用落库逻辑
             print(f"  新增写入: {added}")
             after = await _countExisting(session)
             print(f"  data_lineage 现总行数: {after}")

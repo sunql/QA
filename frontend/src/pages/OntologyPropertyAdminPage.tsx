@@ -10,7 +10,7 @@
  *   这两个字段是「LLM 采纳并沉淀」闭环的核心元数据。
  * - 列表来源：GET /ontology/properties（一次性返回全部，避免 N+1）。
  */
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   Table,
   Button,
@@ -23,12 +23,15 @@ import {
   message,
   Typography,
   Popover,
+  Switch,
+  InputNumber,
 } from "antd";
 import {
   ReloadOutlined,
   EditOutlined,
   PlusOutlined,
   CheckOutlined,
+  SearchOutlined,
 } from "@ant-design/icons";
 import {
   listAllProperties,
@@ -41,6 +44,7 @@ import type {
   OntologyClass,
 } from "../types/ontology";
 import { useTranslation } from "../i18n";
+import { useTablePagination } from "../utils/useTablePagination";
 
 const { Title } = Typography;
 const { TextArea } = Input;
@@ -48,14 +52,23 @@ const { TextArea } = Input;
 interface EditFormValues {
   description: string;
   allowedValues: string[];
+  // 约束字段（feat-ontology-property-constraints）：任一非空表示已设置约束。
+  isNotNull: boolean;
+  minValue: number | null;
+  maxValue: number | null;
+  regexPattern: string | null;
 }
 
 export default function OntologyPropertyAdminPage(): JSX.Element {
   const { t } = useTranslation();
+  const { pagination, setPage } = useTablePagination();
   const [classes, setClasses] = useState<OntologyClass[]>([]);
   const [properties, setProperties] = useState<OntologyProperty[]>([]);
   const [loading, setLoading] = useState(false);
   const [classFilter, setClassFilter] = useState<number | "all">("all");
+  // 关键字过滤（feat-ontology-property-search）：对属性名 / 别名 / 物理列名 / 描述
+  // 做大小写不敏感的子串匹配；空串视为无过滤。命中数从 N 跳到 M 时强制回到第 1 页。
+  const [keyword, setKeyword] = useState("");
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<OntologyProperty | null>(null);
@@ -89,16 +102,50 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
   }, [load]);
 
   const filtered = useMemo(() => {
-    if (classFilter === "all") return properties;
-    return properties.filter((p) => p.classId === classFilter);
-  }, [properties, classFilter]);
+    const kw = keyword.trim().toLowerCase();
+    return properties.filter((p) => {
+      if (classFilter !== "all" && p.classId !== classFilter) return false;
+      if (kw) {
+        // 多字段 OR 命中：propertyName / propertyAlias / sourceColumn / description。
+        // 任一字段包含关键字即视为命中（前端模糊搜，不是后端 ILIKE）。
+        const haystack = [
+          p.propertyName,
+          p.propertyAlias,
+          p.sourceColumn,
+          p.description,
+        ]
+          .filter((s): s is string => Boolean(s))
+          .join("")
+          .toLowerCase();
+        if (!haystack.includes(kw)) return false;
+      }
+      return true;
+    });
+  }, [properties, classFilter, keyword]);
+
+  // 弹窗 destroyOnHidden 下，Modal 关闭态时 Form 未挂载，直接 setFieldsValue
+  // 真机会触发 "useForm is not connected" 警告且回填可能被丢弃（jsdom 不复现）。
+  // 与 ClassTab 同款：把写值时机挪到 Modal.afterOpenChange(true)。
+  const pendingFormValues = useRef<Partial<EditFormValues> | null>(null);
 
   const openEdit = (rec: OntologyProperty) => {
     setEditing(rec);
-    form.setFieldsValue({
-      description: "", // 后端 OntologyPropertyRead 当前不返回 description（不影响编辑：默认空，submit 时不修改）
+    // minValue/maxValue 是 String（兼容日期 / 数字）；前端用 InputNumber 时先尝试数字转换，
+    // 失败则置 null 让用户重填。regexPattern 直接字符串。
+    const toNum = (s: string | null | undefined): number | null => {
+      if (s === null || s === undefined || s === "") return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+    pendingFormValues.current = {
+      // 回填现有描述：硬编码空串会让用户「保存成功后重开仍为空」，误判为保存失败
+      description: rec.description ?? "",
       allowedValues: rec.allowedValues ?? [],
-    });
+      isNotNull: rec.isNotNull ?? false,
+      minValue: toNum(rec.minValue),
+      maxValue: toNum(rec.maxValue),
+      regexPattern: rec.regexPattern ?? null,
+    };
     setModalOpen(true);
   };
 
@@ -106,6 +153,7 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
     setModalOpen(false);
     setEditing(null);
     setAllowedValuesInput("");
+    pendingFormValues.current = null;
     form.resetFields();
   };
 
@@ -120,9 +168,18 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
     if (!editing) return;
     try {
       const values = await form.validateFields();
+      // 数值字段：null → 显式清空；数字 → 字符串存（后端是 VARCHAR(50)）
+      const numToStr = (n: number | null | undefined): string | null => {
+        if (n === null || n === undefined) return null;
+        return String(n);
+      };
       const payload: OntologyPropertyUpdate = {
         allowedValues: values.allowedValues ?? [],
         description: values.description || null,
+        isNotNull: values.isNotNull,
+        minValue: numToStr(values.minValue),
+        maxValue: numToStr(values.maxValue),
+        regexPattern: values.regexPattern || null,
       };
       await updateProperty(editing.id, payload);
       message.success(t("ontologyPropertyAdmin.messages.updated"));
@@ -158,6 +215,20 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
       title: t("ontologyPropertyAdmin.columns.dataType"),
       dataIndex: "dataType",
       width: 110,
+    },
+    {
+      // 描述列：保存结果对用户可见（此前只有弹窗里能看，重开还是空串误判保存失败）
+      title: t("ontologyPropertyAdmin.form.description"),
+      dataIndex: "description",
+      ellipsis: { showTitle: false },
+      render: (v: string | null) =>
+        v ? (
+          <Popover content={<div style={{ maxWidth: 360 }}>{v}</div>} trigger="hover">
+            {v}
+          </Popover>
+        ) : (
+          <Tag color="default">{t("ontologyPropertyAdmin.values.none")}</Tag>
+        ),
     },
     {
       title: t("ontologyPropertyAdmin.columns.allowedValues"),
@@ -218,15 +289,31 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
           flexWrap: "wrap",
         }}
       >
-        <Select
-          value={classFilter}
-          onChange={(v) => setClassFilter(v as number | "all")}
-          style={{ minWidth: 240 }}
-          options={[
-            { value: "all", label: t("ontologyPropertyAdmin.filter.all") },
-            ...classes.map((c) => ({ value: c.id, label: c.className })),
-          ]}
-        />
+        <Space wrap>
+          <Select
+            value={classFilter}
+            onChange={(v) => {
+              setClassFilter(v as number | "all");
+              setPage(1);
+            }}
+            style={{ minWidth: 240 }}
+            options={[
+              { value: "all", label: t("ontologyPropertyAdmin.filter.all") },
+              ...classes.map((c) => ({ value: c.id, label: c.className })),
+            ]}
+          />
+          <Input
+            allowClear
+            value={keyword}
+            onChange={(e) => {
+              setKeyword(e.target.value);
+              setPage(1);
+            }}
+            placeholder={t("ontologyPropertyAdmin.filter.keywordPlaceholder")}
+            prefix={<SearchOutlined />}
+            style={{ minWidth: 280 }}
+          />
+        </Space>
         <Button icon={<ReloadOutlined />} onClick={() => void load()}>
           {t("common.refresh")}
         </Button>
@@ -237,7 +324,7 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
         dataSource={filtered}
         columns={columns}
         size="middle"
-        pagination={{ pageSize: 20, showSizeChanger: true }}
+        pagination={pagination}
       />
       <Modal
         title={
@@ -249,7 +336,15 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
         onOk={() => void onSubmit()}
         onCancel={closeModal}
         width={560}
-        destroyOnClose
+        destroyOnHidden
+        afterOpenChange={(open) => {
+          // 弹窗完全打开、Form 子组件已挂载后再写值，避免 destroyOnHidden
+          // 重挂载时序丢回填（同 ClassTab 的处理）
+          if (open && pendingFormValues.current) {
+            void form.setFieldsValue(pendingFormValues.current);
+            pendingFormValues.current = null;
+          }
+        }}
         okText={t("common.save")}
       >
         <Form form={form} layout="vertical">
@@ -261,6 +356,46 @@ export default function OntologyPropertyAdminPage(): JSX.Element {
             <TextArea
               rows={3}
               placeholder={t("ontologyPropertyAdmin.form.descriptionPlaceholder")}
+            />
+          </Form.Item>
+          {/* 约束字段（feat-ontology-property-constraints）：
+              与 description + allowedValues 同级编辑；任一非空都视作已沉淀约束。 */}
+          <Form.Item
+            name="isNotNull"
+            label={t("ontologyPropertyAdmin.form.isNotNull")}
+            tooltip={t("ontologyPropertyAdmin.form.isNotNullHint")}
+            valuePropName="checked"
+          >
+            <Switch />
+          </Form.Item>
+          <Form.Item
+            name="minValue"
+            label={t("ontologyPropertyAdmin.form.minValue")}
+            tooltip={t("ontologyPropertyAdmin.form.minValueHint")}
+          >
+            <InputNumber
+              style={{ width: "100%" }}
+              placeholder={t("ontologyPropertyAdmin.form.minValuePlaceholder")}
+            />
+          </Form.Item>
+          <Form.Item
+            name="maxValue"
+            label={t("ontologyPropertyAdmin.form.maxValue")}
+            tooltip={t("ontologyPropertyAdmin.form.maxValueHint")}
+          >
+            <InputNumber
+              style={{ width: "100%" }}
+              placeholder={t("ontologyPropertyAdmin.form.maxValuePlaceholder")}
+            />
+          </Form.Item>
+          <Form.Item
+            name="regexPattern"
+            label={t("ontologyPropertyAdmin.form.regexPattern")}
+            tooltip={t("ontologyPropertyAdmin.form.regexPatternHint")}
+          >
+            <Input
+              allowClear
+              placeholder={t("ontologyPropertyAdmin.form.regexPatternPlaceholder")}
             />
           </Form.Item>
           <Form.Item

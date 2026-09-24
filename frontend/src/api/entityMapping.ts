@@ -1,5 +1,6 @@
 import { httpClient } from "./client";
 import type {
+  EntityMappingBulkResult,
   EntityMappingCreate,
   EntityMappingListFilter,
   EntityMappingRead,
@@ -41,6 +42,21 @@ export async function updateMapping(
 
 export async function deleteMapping(id: number): Promise<void> {
   await httpClient.delete(`${BASE}/${id}`);
+}
+
+/** 批量导入（feat-entity-mapping-bulk-import 2026-09-16）。
+ *  - 上限 1000 行/请求（后端硬限）
+ *  - 单事务；返回每行 EntityMappingBulkResultRow
+ *  - 失败行不阻塞其它行
+ */
+export async function bulkImportMappings(
+  items: EntityMappingCreate[],
+): Promise<EntityMappingBulkResult> {
+  const res = await httpClient.post<EntityMappingBulkResult>(
+    `${BASE}/bulk`,
+    items,
+  );
+  return res.data;
 }
 
 /** Phase 6.x：AutoComplete 模糊搜索。

@@ -245,6 +245,7 @@ def createApp() -> FastAPI:
         kpi_catalog,
         local_import,
         menu_config,
+        messages,
         model_config,
         ontology,
         organizations,
@@ -335,6 +336,7 @@ def createApp() -> FastAPI:
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"]
     )
     app.include_router(vectors.router, prefix="/api/v1/system", tags=["system"])
+    app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"])
 
     @app.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:

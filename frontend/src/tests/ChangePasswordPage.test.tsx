@@ -4,7 +4,6 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import ChangePasswordPage from "../pages/ChangePasswordPage";
 import { useAuthStore } from "../stores/authStore";
-import { authApi } from "../api/auth";
 
 vi.mock("../api/auth");
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (k: string) => k }) }));

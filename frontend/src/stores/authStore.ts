@@ -58,9 +58,9 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: "qa-system-auth",
-      storage: createJSONStorage(() =>
-        get().rememberMe ? localStorage : sessionStorage,
-      ),
+      // 持久化用 localStorage（sessionStorage 在 tab 关闭后丢失，dev 调试体验差）。
+      // rememberMe 字段仍保留在 state 上，供后续按需扩展（按 tab 而非全局隔离）。
+      storage: createJSONStorage(() => localStorage),
       partialize: (s) => ({
         token: s.token,
         mustChangePassword: s.mustChangePassword,

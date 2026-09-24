@@ -6,7 +6,7 @@
 
 import axios from "axios";
 import { httpClient } from "./client";
-import { API_BASE_URL, DEFAULT_TENANT_ID, DEFAULT_USER_ID } from "../config";
+import { API_BASE_URL, DEFAULT_TENANT_ID } from "../config";
 import type {
   DocumentCreate,
   DocumentRead,
@@ -131,10 +131,8 @@ export async function uploadDocument(
     `${API_BASE_URL}${BASE}/upload`,
     form,
     {
-      headers: {
-        "X-Tenant-Id": DEFAULT_TENANT_ID,
-        "X-User-Id": DEFAULT_USER_ID,
-      },
+      // 不再硬编码 X-User-Id：身份由后端 stub 路径或 JWT/IdP 接管（#60 件1）。
+      headers: { "X-Tenant-Id": DEFAULT_TENANT_ID },
     },
   );
   return res.data;

@@ -3,7 +3,6 @@ import { useNavigate } from "react-router-dom";
 import { Form, Input, Button, Card, message, Progress } from "antd";
 import { useTranslation } from "../i18n";
 import { useAuthStore } from "../stores/authStore";
-import { authApi } from "../api/auth";
 
 const POLICY = /^(?=.*[A-Za-z])(?=.*\d).{8,}$/;
 

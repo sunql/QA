@@ -4,7 +4,6 @@ import {
   API_BASE_URL,
   REQUEST_TIMEOUT_MS,
   DEFAULT_TENANT_ID,
-  DEFAULT_USER_ID,
 } from "../config";
 import type {
   ImportExecuteRequest,
@@ -28,13 +27,13 @@ export async function getImportPreview(
 // 若走 httpClient，拦截器会把 success=false 当作失败信封并 reject，丢失真实 errors 数组。
 // 故使用独立原始 axios 实例（对齐 datasource.ts 的 testDataSource），不做信封解包，
 // 由调用方根据 success / errors 展示结果。
+// 不再硬编码 X-User-Id：身份由后端 stub 路径或 JWT/IdP 接管（#60 件1）。
 const rawClient = axios.create({
   baseURL: API_BASE_URL,
   timeout: REQUEST_TIMEOUT_MS,
   headers: {
     "Content-Type": "application/json",
     "X-Tenant-Id": DEFAULT_TENANT_ID,
-    "X-User-Id": DEFAULT_USER_ID,
   },
 });
 

@@ -3,7 +3,6 @@ import { useNavigate, useLocation, Navigate } from "react-router-dom";
 import { Form, Input, Button, Checkbox, message } from "antd";
 import { useTranslation } from "react-i18next";
 import { useAuthStore } from "../stores/authStore";
-import { authApi } from "../api/auth";
 
 export default function LoginPage() {
   const { t } = useTranslation();

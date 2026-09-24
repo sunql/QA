@@ -10,14 +10,12 @@ import type {
 const API_BASE = "/api/v1";
 
 export async function fetchMenuConfig(): Promise<MenuConfig> {
-  const resp = await fetch(`${API_BASE}/menu-config`, {
-    headers: { Accept: "application/json" },
-    credentials: "include",
-  });
-  if (!resp.ok) {
-    throw new Error(`fetchMenuConfig failed: ${resp.status} ${resp.statusText}`);
-  }
-  return (await resp.json()) as MenuConfig;
+  // 用 httpClient 而非裸 fetch：保证带上 X-Tenant-Id / X-User-Id 默认头。
+  // 后端 AUTH_STUB_ENABLED=1（开发模式）依赖这两个头识别 actor，
+  // 裸 fetch 漏头会得到 403 → AppLayout 退回 FALLBACK_NAV（扁平 22 项）。
+  // 响应拦截器已解包 ApiResponse 信封，res.data 即 MenuConfig。
+  const res = await httpClient.get<MenuConfig>(`${API_BASE}/menu-config`);
+  return res.data;
 }
 
 /** 管理面常量：菜单管理路由共享 PREFIX（router 无内部前缀，挂 /api/v1/menu-config）。 */

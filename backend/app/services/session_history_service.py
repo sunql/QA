@@ -58,9 +58,9 @@ class SessionHistoryService:
         只包含 session_message 表中至少一行的 sessionId（无消息的纯 Token 用量
         会话不展示 —— 用量看板已覆盖，见 SessionListItem）。
 
-        channel 取值 ``chat`` / ``doc_qa``，用于按渠道隔离历史面板；默认 ``chat``
-        保持既有聊天行为不变。controller 边界用 ``Query(pattern=...)`` 拦截
-        非法值。
+        channel 取值 ``chat`` / ``doc_qa`` / ``wiki_qa``，用于按渠道隔离历史面板；
+        默认 ``chat`` 保持既有聊天行为不变。controller 边界用 ``Query(pattern=...)``
+        拦截非法值。
 
         limit/offset 在 controller 边界做 1-200/0+ clamp，service 层信任入参。
         """

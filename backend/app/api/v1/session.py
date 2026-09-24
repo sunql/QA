@@ -100,10 +100,10 @@ async def listChatHistory(
     session: AsyncSession = Depends(getDb),
     channel: str = Query(
         default="chat",
-        pattern="^(chat|doc_qa)$",
+        pattern="^(chat|doc_qa|wiki_qa)$",
         description=(
-            "渠道隔离过滤：chat（默认，聊天语义）/ doc_qa（文档问答）。"
-            "其他取值由 FastAPI 校验拒绝 422。"
+            "渠道隔离过滤：chat（默认，聊天语义）/ doc_qa（文档问答）/ "
+            "wiki_qa（Wiki 对话问答）。其他取值由 FastAPI 校验拒绝 422。"
         ),
     ),
     limit: int = Query(default=50, ge=1, le=200, description=MSG_HISTORY_LISTING_LIMIT),

@@ -30,8 +30,8 @@ def getEngine() -> AsyncEngine:
             settings.databaseUrl,
             echo=not settings.isProduction,
             pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=10,
+            pool_size=settings.dbPoolSize,
+            max_overflow=settings.dbMaxOverflow,
         )
     return _engine
 

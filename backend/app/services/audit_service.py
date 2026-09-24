@@ -29,7 +29,20 @@ from app.domain.models import AuditLog
 
 logger = logging.getLogger(__name__)
 
-_VALID_ACTIONS = frozenset({"CREATE", "UPDATE", "DELETE"})
+_VALID_ACTIONS = frozenset(
+    {
+        # 通用 CRUD（Phase 5 起一直保留）
+        "CREATE",
+        "UPDATE",
+        "DELETE",
+        # RBAC 身份 / 鉴权（feat-user-auth / 0083 audit_log 放宽 CHECK 约束）
+        "auth.login",
+        "auth.login_failed",
+        "auth.logout",
+        "auth.password_changed",
+        "user.password_reset",
+    }
+)
 
 # 查询默认上限（防止一次拉太多）
 _DEFAULT_LIMIT = 100

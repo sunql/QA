@@ -107,6 +107,26 @@ class Settings(BaseSettings):
         default="http://localhost:5173,http://127.0.0.1:5173", alias="CORS_ORIGINS"
     )
 
+    # ===== RBAC / Auth (feat-user-auth) =====
+    authMinDelayMs: int = Field(default=200, alias="AUTH_MIN_DELAY_MS")
+    """登录失败时的等长延迟（毫秒），用于拖慢枚举攻击；0=禁用。"""
+    bcryptRounds: int = Field(default=10, alias="BCRYPT_ROUNDS")
+    """bcrypt 哈希轮数；每轮 ~50ms 慢哈希；生产建议 ≥ 12。"""
+    jwtTtlSeconds: int = Field(default=86400, alias="JWT_TTL_SECONDS")
+    """access token 有效期（秒）；默认 24h。"""
+    jwtSecret: str = Field(default="development-jwt-secret-change-me", alias="JWT_SECRET")
+    """JWT 签名密钥（HS256/HS512）；生产必须 ≥ 32 字节随机串。"""
+    jwtAlgorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+    """JWT 签名算法；HS256/HS384/HS512。"""
+    jwtIssuer: str = Field(default="qa-system", alias="JWT_ISSUER")
+    """JWT iss claim。"""
+    jwtAudience: str = Field(default="qa-system", alias="JWT_AUDIENCE")
+    """JWT aud claim。"""
+    dbPoolSize: int = Field(default=20, alias="DB_POOL_SIZE")
+    """SQLAlchemy 连接池 size（feat-db-pool-size-tune / 0081）。"""
+    dbMaxOverflow: int = Field(default=10, alias="DB_MAX_OVERFLOW")
+    """SQLAlchemy 连接池 max_overflow（feat-db-pool-size-tune / 0081）。"""
+
     @field_validator("rateLimitRequests")
     @classmethod
     def _validateRateLimitRequests(cls, value: int) -> int:

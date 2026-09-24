@@ -257,6 +257,7 @@ def createApp() -> FastAPI:
         term_dictionary,
         users,
         vectors,
+        wiki,
         wiki_import,
     )
 
@@ -323,6 +324,7 @@ def createApp() -> FastAPI:
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
     app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
     app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
+    app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     app.include_router(users.router, tags=["users"])
     app.include_router(roles.router, tags=["roles"])
@@ -365,6 +367,7 @@ def registerExceptionHandlers(app: FastAPI) -> None:
 def _statusFor(exc: DomainError) -> int:
     """领域异常 -> HTTP 状态码。"""
     from app.domain.exceptions import (
+        AuthFailedError,
         BusinessObjectGraphLabelMismatchError,
         ConflictError,
         LLMUnavailableError,
@@ -383,6 +386,10 @@ def _statusFor(exc: DomainError) -> int:
         return 422
     if isinstance(exc, PermissionDeniedError):
         return 403
+    if isinstance(exc, AuthFailedError):
+        # 401 Unauthorized：未通过身份验证（密码错 / token 过期 / 缺失）。
+        # 区别于 403 PermissionDeniedError（已认证但无权）。
+        return 401
     if isinstance(exc, LLMUnavailableError):
         return 503
     return 400

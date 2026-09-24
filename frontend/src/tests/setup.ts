@@ -1,8 +1,27 @@
 import "@testing-library/jest-dom";
 import { createElement } from "react";
 import { vi } from "vitest";
-// 初始化 react-i18next 全局实例，确保所有组件测试在 i18n 就绪后运行
-import "../i18n";
+
+// react-i18next 默认 mock：useTranslation 返回 key 自身（测试只断言 key 出现即可）。
+// initReactI18next 必须在 mock 中返回合法的「3rdParty 模块」对象 —— 否则 stores/api 里
+// 间接 import ../i18n → ./i18n.ts → i18n.use(initReactI18next) 会抛「wrong module」。
+// 任何返回 { type } 的对象都会被 i18next 接受；这里返回 type:"3rdParty" 占位即可。
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({ t: (k: string) => k }),
+  initReactI18next: () => ({ type: "3rdParty" }),
+  Trans: ({ children }: { children?: React.ReactNode }) => children,
+}));
+
+// 同步 mock ../i18n 模块：完全替换为 stub，**不调用 importOriginal**，否则 i18n.ts 模块顶层
+// 的 i18n.use(...).init(...) 会先于 mock 工厂执行，触发「wrong module」。
+// 组件用 useTranslation hook 走 react-i18next（已 mock），api/stores 用 i18n.t
+// 在测试里也只需返回 key 字符串即可。
+vi.mock("../i18n", () => ({
+  useTranslation: () => ({ t: (k: string) => k }),
+  zhCN: {},
+  enUS: {},
+  i18n: { t: (k: string) => k, use: () => undefined, init: () => undefined },
+}));
 
 // Monaco Editor mock（Phase 8）：jsdom 中加载 monaco 会触发 worker 请求，
 // 用占位 div 代替；与 echarts-for-react mock 同模式。

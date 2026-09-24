@@ -1,11 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import UserMenu from "../components/common/UserMenu";
 import { useAuthStore } from "../stores/authStore";
 
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
+// react-i18next 全局 mock 在 setup.ts（vi.mock hoisted 会覆盖本地 mock，故不在此处重复）
 
 describe("UserMenu", () => {
   beforeEach(() => {
@@ -16,8 +16,8 @@ describe("UserMenu", () => {
     useAuthStore.setState({ mustChangePassword: true });
     render(<MemoryRouter><UserMenu /></MemoryRouter>);
     await userEvent.click(screen.getByText("alice"));
-    // Dropdown renders Chinese "修改密码" (i18n mock returns key, which antd's Menu renders)
-    expect(screen.getByText("修改密码")).toBeTruthy();
+    // i18n mock 返回 key：userMenu.changePassword（中文应在 i18n 资源里校验，不在组件测试里）
+    expect(screen.getByText("userMenu.changePassword")).toBeTruthy();
     // Badge.dot 渲染出 .ant-badge-dot
     expect(document.querySelector(".ant-badge-dot")).toBeTruthy();
   });

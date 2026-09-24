@@ -414,7 +414,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   sendDocQa: async (question, filters) => {
-    const { sessionId, channel, messages } = get();
+    const { sessionId, channel } = get();
     if (channel !== "doc_qa") return;
 
     const userMsg: ChatMessage = {

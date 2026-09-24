@@ -153,6 +153,13 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.frontend
+      # 必须把 VITE_API_BASE_URL 传进 build 阶段：Dockerfile 用 ARG 接收默认值，
+      # 仅在 runtime environment 声明是无效的（Vite 把 import.meta.env 在 build 时
+      # 固化进 bundle，runtime 改不了）。
+      # 默认 docker/.env 写的是 http://localhost:5173/api/v1（走 nginx 反代同源，
+      # 对 192.168.x.x / 10.x.x.x LAN IP 也安全 —— 同源策略自动放行）。
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:5173/api/v1}
     container_name: qa-frontend
     restart: unless-stopped
     environment:

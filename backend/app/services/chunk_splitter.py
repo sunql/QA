@@ -5,6 +5,22 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+
+@dataclass
+class TextBlock:
+    """Markdown 段落级分块（feat-wiki-semantic-search / wiki_vector_service 产出）。
+
+    区别于通用 Chunk（含 chunk_id/sequence）：TextBlock 只携带语义信息
+    （页码 + 章节名 + 段落号），供 wiki 向量检索复用。
+    """
+
+    text: str
+    page_number: int | None
+    section_name: str
+    paragraph_no: int
+
 
 class Chunk:
     """单个文本块。"""

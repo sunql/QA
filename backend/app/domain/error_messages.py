@@ -416,3 +416,11 @@ MSG_AGENT_TOOL_LAYER_MISMATCH = (
 MSG_AGENT_TOOL_UNREGISTERED = (
     "agent_code={code} 绑定的 tool={tool} 在当前代码中未注册（环境漂移）"
 )
+
+# ===== Phase 6.5：RBAC 身份认证（feat-user-auth）=====
+MSG_AUTH_REQUIRED = "需要登录才能访问"
+MSG_INVALID_CREDENTIALS = "用户名或密码错误"
+MSG_OLD_PASSWORD_INCORRECT = "原密码不正确"
+MSG_PASSWORD_TOO_WEAK = (
+    "密码强度不足：至少 8 位，且必须包含字母和数字"
+)

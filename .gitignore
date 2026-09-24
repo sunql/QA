@@ -55,3 +55,8 @@ docker/.env
 # Docker volumes
 docker/data/
 .worktrees/
+
+# Local backup snapshots (deploy_backend.sh / reverse-sync)
+backups/
+backups/container/
+backups/container-pre-sync/

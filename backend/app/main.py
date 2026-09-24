@@ -228,6 +228,7 @@ def createApp() -> FastAPI:
         agent_tools,
         agents,
         audit,
+        auth,
         business_object,
         chat,
         data_lineage,
@@ -255,6 +256,7 @@ def createApp() -> FastAPI:
         term_dictionary,
         users,
         vectors,
+        wiki_import,
     )
 
     app.include_router(model_config.router, prefix="/api/v1/models", tags=["models"])
@@ -318,6 +320,8 @@ def createApp() -> FastAPI:
     app.include_router(agent_tools.router, tags=["agent-tools"])
     app.include_router(feature_rules.router, tags=["feature-rules"])
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
+    app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+    app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
     app.include_router(users.router, tags=["users"])
     app.include_router(roles.router, tags=["roles"])

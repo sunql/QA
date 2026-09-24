@@ -13,9 +13,12 @@ Harness/changes/feat-rbac-identity/）——本次仅落菜单权限。
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    DateTime,
     ForeignKey,
     Index,
     String,
@@ -43,6 +46,16 @@ class User(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=sa_text("true")
     )
+    # 0060 / 0082：登录 + 强制改密相关字段（DB 已有列，ORM 同步声明以避免
+    # 列差异在 alembic autogenerate 中触发 phantom diff）。
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa_text("false")
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_login_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("username", name="uq_users_username"),
@@ -51,6 +64,46 @@ class User(Base, TimestampMixin):
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<User id={self.id} username={self.username!r}>"
+
+
+class UserSession(Base):
+    """用户会话表（feat-user-auth / 0082）。
+
+    每条 Bearer token 写入一行 ``jti`` + ``revoked_at``；``getCurrentUser``
+    每次同步查该表验证 session 未被吊销。``revoked_reason`` 三种：
+    ``logout`` / ``password_changed`` / ``admin_reset``。
+    """
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    jti: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa_text("now()")
+    )
+
+    __table_args__ = (
+        Index("ix_user_sessions_jti", "jti", unique=True),
+        Index("ix_user_sessions_user_id", "user_id"),
+        Index("ix_user_sessions_active", "user_id", "revoked_at"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<UserSession id={self.id} jti={self.jti!r} "
+            f"user_id={self.user_id} revoked={self.revoked_at!r}>"
+        )
 
 
 class Role(Base, TimestampMixin):

@@ -164,13 +164,35 @@ async def _checkDriftAsync(engine) -> list[str]:
 
     extra_in_db = db_tables - orm_tables
     if extra_in_db:
-        issues.append(
-            "[orm] DB 存在但 ORM 未声明的表："
-            + ", ".join(sorted(extra_in_db))
-            + "。可能为旧迁移残留；如确认无用可手动 DROP，否则检查模型是否遗漏声明。"
-        )
+        # 白名单：DB 有但 ORM 未声明的表。多数是容器独有的影子表/历史快照，
+        # 不是 ORM 该声明的对象（业务查询走 text() 直查，避免 ORM 关联）。
+        # 新增白名单项前先确认：不是 ORM 应有而是漏掉的真模型。
+        extra_in_db -= _ORM_DECLARED_EXCEPTIONS
+        if extra_in_db:
+            issues.append(
+                "[orm] DB 存在但 ORM 未声明的表："
+                + ", ".join(sorted(extra_in_db))
+                + "。可能为旧迁移残留；如确认无用可手动 DROP，否则检查模型是否遗漏声明。"
+            )
 
     return issues
+
+
+# ORM 模型声明豁免清单：DB 中存在但 ORM 不声明的表。
+# 注意：仅用于 schema drift 校验跳过，不影响实际业务行为。补 ORM 类后应从此
+# 清单移除。来源：
+# - BPSUPPLIER / PORDER / PORDERQ：Oracle 同步过来的大写影子表，业务查询走
+#   text()，避免 ORM 命名/大小写耦合。
+# - ontology_class_pre_pruning_20260918：2026-09-18 本体回滚前的快照表，
+#   一次性备份，正常路径不需要。
+_ORM_DECLARED_EXCEPTIONS: frozenset[str] = frozenset(
+    {
+        "BPSUPPLIER",
+        "PORDER",
+        "PORDERQ",
+        "ontology_class_pre_pruning_20260918",
+    }
+)
 
 
 # 同步包装（lifespan 中调用），复用 main 的 event loop

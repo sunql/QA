@@ -420,3 +420,59 @@ class PermissionResourceType(str, Enum):
     ONTOLOGY_CLASS = "ONTOLOGY_CLASS"
     ONTOLOGY_PROPERTY = "ONTOLOGY_PROPERTY"
     METRIC = "METRIC"
+# === Container-only enums (reverse-synced) ===
+# Source: image sha256:defd2ac80f0b (2026-09-20)
+
+class ClassRelationType(str, Enum):
+    """本体「类 × 类」语义关系类型（Phase 5.6 关系重构，人工声明）。
+
+    两个本体类之间由用户在语义关系页显式建立的方向性关系，PG ontology_relation
+    为 SSOT、Neo4j (:Class)-[:{TYPE}]->(:Class) 为镜像。初值 6 个，词表可扩展：
+    新增值会被 neo4j_client.CLASS_RELATION_TYPES / service._CLASS_RELATION_VALUES
+    自动继承（两者都由此枚举派生），只需再同步前端
+    SEMANTIC_RELATION_TYPE_OPTIONS + i18n（enums.semanticRelationType.*）。
+    """
+
+    SUPPLIES = "SUPPLIES"
+    CONTAINS = "CONTAINS"
+    GENERATES = "GENERATES"
+    INSPECTED_BY = "INSPECTED_BY"
+    GENERATED = "GENERATED"
+    RELATED_TO = "RELATED_TO"
+
+class ReportStatus(str, Enum):
+    """评估报告状态（feat-dq-evaluation-report；progress 2026-09-15）。
+
+    DRAFT: 草稿态，不出现在列表（除非查询时显式带 status 过滤）；可继续编辑。
+    PUBLISHED: 已发布，对所有登录用户可见，可被分享/定时生成。
+    PENDING: 已创建但评估任务尚未开始（后台调度中）。
+    RUNNING: 评估进行中；前端轮询 GET /reports/{id}/progress 拿当前进度。
+    COMPLETED: 评估成功完成，snapshot 字段已写完。
+    FAILED: 评估异常，snapshot 内含错误信息，前端 progress.message 展示。
+    """
+
+    DRAFT = "DRAFT"
+    PUBLISHED = "PUBLISHED"
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+class ReportTimeWindowType(str, Enum):
+    """定时报告的时间窗口类型（feat-dq-evaluation-report）。
+
+    LAST_7D: 取最近 7 天数据；LAST_30D: 最近 30 天；LAST_RUN: 上次 evaluate 之后
+    的新数据（首次运行 = 全表扫描，后续增量）。本枚举仅用于定时 schedule，
+    单次报告直接传 time_window_start/end 即可。
+    """
+
+    LAST_7D = "LAST_7D"
+    LAST_30D = "LAST_30D"
+    LAST_RUN = "LAST_RUN"
+
+class ExportFormat(str, Enum):
+    """评估报告导出格式（feat-dq-evaluation-report）。"""
+
+    PDF = "pdf"
+    EXCEL = "excel"
+

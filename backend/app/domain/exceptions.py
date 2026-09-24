@@ -29,6 +29,14 @@ class ConflictError(DomainError):
     """资源冲突（唯一约束 / 业务规则不允许重复等）。"""
 
 
+class DuplicatePageError(ConflictError):
+    """wiki 导入时 pageId 重复（feat-wiki-knowledge M2）。
+
+    区别于通用 ConflictError：重复是幂等成功路径（skipped_pages）而非错误，
+    业务层捕获后转记 skipped，不抛 409。本类仅用于跨层语义传达「这是重复」。
+    """
+
+
 class ValidationError(DomainError):
     """输入校验失败（领域规则层面）。
 
@@ -108,6 +116,14 @@ class PermissionDeniedError(DomainError):
 
     Phase 4.5 governance hardening：当前仅用于 KpiCatalogService 写入路径，
     后续可扩展到其他实体的 PUT/DELETE 检查。
+    """
+
+
+class AuthFailedError(DomainError):
+    """认证失败（feat-user-auth）。
+
+    区别于 PermissionDeniedError（403，已认证但无权）：这里表示**未通过
+    身份验证**——密码错、token 过期、缺失 token 等。映射到 HTTP 401。
     """
 
 

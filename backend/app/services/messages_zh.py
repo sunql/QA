@@ -395,3 +395,161 @@ MSG_DQ_GEN_RULE_SKIPPED_DUPLICATE = "规则「{rule_code}」已存在，已跳�
 # =============================================================================
 
 MSG_SESSION_NOT_OWNED = "会话不存在或不属于当前用户"
+
+# =============================================================================
+# Wiki 覆盖度（Phase 5.5）
+# =============================================================================
+
+MSG_WIKI_COVERAGE_CLASS_NOT_FOUND = "本体类 id={classId} 不存在"
+MSG_WIKI_COVERAGE_DOMAIN_EMPTY = "领域不能为空"
+MSG_WIKI_COVERAGE_DOMAIN_TOO_LONG = (
+    "领域「{domain}」超过 {maxLen} 字符限制，请缩短后重试"
+)
+MSG_WIKI_COVERAGE_MAPPING_NOT_FOUND = (
+    "领域「{domain}」→ 本体类映射不存在；请先在「领域映射」中创建"
+)
+
+# =============================================================================
+# Wiki Agent 工具（feat-wiki-knowledge M8）
+# =============================================================================
+
+MSG_WIKI_AGENT_PAGE_REF_AMBIGUOUS = (
+    "匹配到多条候选 wiki_page，无法确定唯一结果：{candidates}。"
+    "请补充更明确的 page_id 或别名。"
+)
+MSG_WIKI_AGENT_PAGE_REF_NOT_FOUND = (
+    "未找到对应的 wiki_page（ref={ref}）；请先在知识库中创建或换用别名。"
+)
+MSG_WIKI_AGENT_RULE_NO_EXAMPLES = (
+    "规则「{rule_code}」在 demo 阶段没有可执行样例，无法 evaluate。"
+)
+MSG_AGENT_RUN_BAD_INPUT = (
+    "Agent「{code}」调用工具「{tool}」时参数非法；请检查入参是否符合工具 schema。"
+)
+
+# =============================================================================
+# Wiki 知识管理（feat-wiki-knowledge M1~M8）
+# =============================================================================
+
+MSG_MODEL_CONFIG_UNAVAILABLE = "模型 id={id} 不存在或被禁用"
+
+MSG_WIKI_AUTHORITY_LEVEL_INVALID = (
+    "权威等级非法：{levels}；请从允许集合中选一个。"
+)
+MSG_WIKI_CLAIM_NOT_FOUND = "知识主张 claimId={claimId} 不存在"
+MSG_WIKI_CONFLICT_ACTION_INVALID = (
+    "冲突处理动作「{action}」非法；请使用 KEEP_BOTH / KEEP_NEW / KEEP_OLD。"
+)
+MSG_WIKI_CONFLICT_ALREADY_RESOLVED = (
+    "冲突 {conflictId} 已处理过；不能重复 resolve。"
+)
+MSG_WIKI_CONFLICT_NOT_FOUND = "冲突 conflictId={conflictId} 不存在"
+MSG_WIKI_FEEDBACK_ACTION_INVALID = (
+    "反馈动作「{action}」非法；请使用 approve / reject / modify / split。"
+)
+MSG_WIKI_FEEDBACK_ENTITY_TYPE_INVALID = (
+    "实体类型「{entityType}」非法；当前仅支持 PAGE / RELATION / CLAIM / RULE。"
+)
+MSG_WIKI_FEEDBACK_MECHANISM_INVALID = (
+    "反馈机制「{mechanism}」非法；请使用 1~6 之一。"
+)
+MSG_WIKI_FEEDBACK_MODIFICATION_REQUIRED = (
+    "修改动作必须给出 modification 字段；当前为空。"
+)
+MSG_WIKI_FEEDBACK_MODIFICATION_UNEXPECTED = (
+    "非 modify 动作不应带 modification 字段（action={action}）。"
+)
+
+# =============================================================================
+# Wiki 导入向导（feat-wiki-knowledge M2 / 0054）
+# =============================================================================
+
+MSG_WIKI_IMPORT_ABORTED = "导入任务已中止"
+MSG_WIKI_IMPORT_ALL_FAILED = (
+    "所有 draft 在导入阶段都失败；请检查 LLM 模型与日志后重试。"
+)
+MSG_WIKI_IMPORT_CLASSIFY_INCOMPLETE = (
+    "分类未完成（已处理 {done}/{total} 项）；请等待或中止后重试。"
+)
+MSG_WIKI_IMPORT_MODEL_REQUIRED = "导入向导需要选择 LLM 模型才能分类"
+MSG_WIKI_IMPORT_NO_DRAFTS = "当前没有可导入的 draft；请先走「草稿生成」阶段"
+MSG_WIKI_IMPORT_SOURCE_TYPE_INVALID = (
+    "导入来源类型「{sourceType}」非法；仅支持 TEXT / DOCUMENT。"
+)
+MSG_WIKI_IMPORT_TASK_TYPE_INVALID = (
+    "导入任务类型「{taskType}」非法；请使用 INGEST / CLASSIFY / COMPILE。"
+)
+MSG_WIKI_IMPORT_FILE_PARSE_FAILED = "文件解析失败：{detail}"
+MSG_WIKI_IMPORT_FILE_TOO_LARGE = (
+    "文件超过 {maxMb}MB 上限（{filename}={sizeMb}MB）；请压缩后重试。"
+)
+MSG_WIKI_IMPORT_FILE_TYPE_UNSUPPORTED = (
+    "不支持的文件类型 {mimeType}（{filename}）；目前仅支持 .txt/.md/.pdf/.docx。"
+)
+MSG_WIKI_IMPORT_SOURCE_STORE_FAILED = (
+    "源文件存储失败：{detail}；请稍后重试，或联系管理员检查对象存储。"
+)
+
+# =============================================================================
+# Wiki LLM 调用（learning.llm_invoker）
+# =============================================================================
+
+MSG_WIKI_LLM_EMPTY_RESPONSE = "LLM 返回内容为空"
+MSG_WIKI_LLM_MODEL_UNUSABLE = (
+    "模型「{modelName}」不可用（未启用或已禁用）；请换一个模型。"
+)
+MSG_WIKI_LLM_PARSE_ERROR = "LLM 输出无法解析为预期结构"
+
+# =============================================================================
+# Wiki Page Service
+# =============================================================================
+
+MSG_WIKI_PAGE_DIMENSION_INVALID = (
+    "知识维度「{dimension}」非法；请使用 KNOWLEDGE_DIMENSIONS 中的合法值。"
+)
+MSG_WIKI_PAGE_DUPLICATE = (
+    "wiki_page pageId={pageId} 已存在；如需替换请先删除。"
+)
+MSG_WIKI_PAGE_DUPLICATE_SKIPPED = (
+    "wiki_page pageId={pageId} 已存在，本次导入跳过。"
+)
+MSG_WIKI_PAGE_ID_INVALID = "wiki_page 编号格式非法（应为 W-XXXX）"
+MSG_WIKI_PAGE_NOT_FOUND = "wiki_page pageId={pageId} 不存在"
+MSG_WIKI_PAGE_STAGE_INVALID = (
+    "wiki_page 阶段「{stage}」非法；请使用 DRAFT / IN_REVIEW / PUBLISHED。"
+)
+MSG_WIKI_PAGE_STATUS_INVALID = (
+    "wiki_page 状态「{status}」非法；请使用 DRAFT / ACTIVE / DEPRECATED。"
+)
+
+# =============================================================================
+# Wiki Relation / Suggestion / Rule / Workflow
+# =============================================================================
+
+MSG_WIKI_RELATION_ALREADY_REVIEWED = (
+    "wiki_relation {relationId} 已 review 过；不能重复处理。"
+)
+MSG_WIKI_RELATION_NOT_FOUND = "wiki_relation relationId={relationId} 不存在"
+MSG_WIKI_RELATION_REVIEW_ACTION_INVALID = (
+    "wiki_relation 评审动作「{action}」非法；请使用 APPROVE / REJECT / DEFER。"
+)
+
+MSG_WIKI_RULE_CONDITIONS_REQUIRED = (
+    "规则必须至少有一条 condition；当前为空。"
+)
+MSG_WIKI_RULE_EXAMPLE_INVALID = "规则样例第 {index} 条格式非法"
+MSG_WIKI_RULE_NOT_FOUND = "wiki_rule pageId={pageId} 不存在"
+MSG_WIKI_RULE_OPERATOR_UNSUPPORTED = (
+    "规则 operator「{operator}」不支持；当前仅支持 EQ/NEQ/GT/GTE/LT/LTE/IN/CONTAINS。"
+)
+MSG_WIKI_RULE_VALUE_SHAPE_INVALID = (
+    "规则 operator「{operator}」要求的 value 形状不匹配"
+)
+
+MSG_WIKI_SUGGESTION_ALREADY_RESOLVED = (
+    "structure_suggestion {suggestionId} 已处理过；不能重复操作。"
+)
+MSG_WIKI_SUGGESTION_NOT_FOUND = (
+    "structure_suggestion suggestionId={suggestionId} 不存在"
+)
+MSG_WIKI_WORKFLOW_NOT_FOUND = "process_workflow pageId={pageId} 不存在"

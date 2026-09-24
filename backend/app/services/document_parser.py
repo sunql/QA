@@ -11,6 +11,11 @@ class DocumentParserError(Exception):
     pass
 
 
+class UnsupportedFileTypeError(DocumentParserError):
+    """不支持的文件类型（MIME / 扩展名均未命中已知格式）。"""
+    pass
+
+
 async def parse_document(content: bytes, mime_type: str, filename: str) -> str:
     """解析文档内容为纯文本。
 
@@ -38,7 +43,7 @@ async def parse_document(content: bytes, mime_type: str, filename: str) -> str:
     ) or ext in ("docx", "doc"):
         return _parse_docx(content)
 
-    raise DocumentParserError(f"Unsupported file type: {mime_type} ({filename})")
+    raise UnsupportedFileTypeError(f"Unsupported file type: {mime_type} ({filename})")
 
 
 def _parse_pdf(content: bytes) -> str:

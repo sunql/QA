@@ -39,17 +39,21 @@ from app.domain.enums import (
     AgentResponseLatency,
     AgentStatus,
     AgentTriggerType,
+    ClassRelationType,  # noqa: E402,F401 -- added 2026-09-24 to support OntologyRelation ORM
     DataSourceType,
     DocumentSecurityLevel,
     DocumentStatus,
     DocumentType,
     DocEntityRelationType,
+    ExportFormat,  # noqa: E402,F401 -- added 2026-09-24 to support EvaluationReportShare ORM
     FeatureRefreshFrequency,
     FeatureStatus,
     KpiStatus,
     LineageLayer,
     MatchRule,
     RefreshFrequency,
+    ReportStatus,  # noqa: E402,F401 -- added 2026-09-24 to support EvaluationReport ORM
+    ReportTimeWindowType,  # noqa: E402,F401 -- added 2026-09-24 to support EvaluationReport ORM
     RuleOperator,
     RuleType,
     ScoreType,
@@ -1620,4 +1624,453 @@ from app.models.rbac import (  # noqa: E402,F401
     User,
     UserOrganization,
     UserRole,
+    UserSession,
 )
+# === Container-only ORM classes (reverse-synced from running qa-backend) ===
+# Source: image sha256:defd2ac80f0b (2026-09-20 build)
+# These 6 classes are required so schema_drift check sees all DB tables.
+
+class OntologyRelation(Base, TimestampMixin):
+    """本体「类 × 类」语义关系表（Phase 5.6 关系重构）。
+
+    一行 = 用户显式声明的 (source_class_id → target_class_id × relation_type)
+    方向性语义关系（如 PRECEIPT-SUPPLIES->BPARTNER）。PG 为 SSOT（audit + 可列出），
+    Neo4j 同步 (:Class)-[:{relation_type}]->(:Class) 镜像边（失败不阻断 PG）。
+
+    与 ontology_join 的分工：join 是按列配对的 NL2SQL JOIN 目录（source_columns /
+    target_columns / join_key，relation_type 仅标注来源）；本表是类级业务语义，
+    无列、无 join_key，按 (source, target, relation_type) 三元组去重。
+    """
+
+    __tablename__ = "ontology_relation"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    source_class_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("ontology_class.id"), nullable=False
+    )
+    target_class_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("ontology_class.id"), nullable=False
+    )
+    relation_type: Mapped[ClassRelationType] = mapped_column(
+        String(30), nullable=False
+    )
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_class_id", "target_class_id", "relation_type",
+            name="uq_ontology_relation_triple",
+        ),
+        Index("idx_relation_source_class", "source_class_id"),
+        Index("idx_relation_target_class", "target_class_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<OntologyRelation id={self.id} "
+            f"{self.source_class_id}-[{self.relation_type}]->{self.target_class_id}>"
+        )
+
+
+# =============================================================================
+# Phase 3: DataSource
+# =============================================================================
+
+class InAppMessage(Base):
+    """站内消息收件箱。
+
+    一行 = 一条发给某 user_id 的通知。scheduler 跑出报告后给收件人发
+    「报告已生成」提醒；前端 MessageBell 30s 轮询 unread-count + 列表。
+
+    recipient 与 user.user_id 对齐；按 user 隔离读取，跨用户不可见。
+    created_at 客户端默认 UTC now()（service 层显式传）；read_at 非空 = 已读。
+    """
+
+    __tablename__ = "in_app_message"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    recipient: Mapped[str] = mapped_column(String(50), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    link_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False,
+    )
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+    __table_args__ = (
+        Index("ix_in_app_message_recipient", "recipient"),
+        Index(
+            "ix_in_app_message_unread",
+            "recipient", "read_at",
+            postgresql_where=sa_text("read_at IS NULL"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<InAppMessage id={self.id} recipient={self.recipient!r} "
+            f"title={self.title!r} read={self.read_at is not None}>"
+        )
+
+
+# =============================================================================
+# Phase 5.4/Phase 9: 数据质量评估报告（feat-dq-evaluation-report + progress）
+#
+# 历史背景：alembic 0072 创建 4 张表（evaluation_report / violation_sample /
+# schedule / share）；0074 扩 status CheckConstraint + 加 progress 列。ORM 类
+# 一直未合入 models.py，导致 backend 容器中 evaluation_report_service /
+# data_quality_violation_sample_service / 等模块从 import 阶段就失败，
+# evaluation_report.router 始终未被 main.py include。本块一次性补齐 4 个类，
+# 与 alembic 0072+0074 完全对齐（DDL 已固化）。
+# =============================================================================
+
+class EvaluationReport(Base, TimestampMixin):
+    """数据质量评估报告主表。
+
+    - 配置 + 快照合一：class_ids/rule_ids/time_window 为配置列；snapshot 为
+      评估完成后的结构化结果（含 per-rule 命中数、KPI、维度分布等）。
+    - status 6 值 CheckConstraint：DRAFT / PUBLISHED / PENDING / RUNNING /
+      COMPLETED / FAILED（feat-dq-evaluation-report-progress 扩 4 值）。
+    - 软删：deleted_at 非空表示已删除；列表查询过滤 deleted_at IS NULL。
+    - progress：异步化阶段写入（0074 新列），存 {stage, completed, total,
+      current_rule_id, current_rule_code, message, started_at, finished_at}。
+    """
+
+    __tablename__ = "evaluation_report"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # DB 列实为 jsonb（server_default '::jsonb'）；必须声明 postgresql.JSONB
+    # —— 泛型 JSON 的 .contains() 退化为字符串 LIKE，PG 上直接报
+    # `operator does not exist: jsonb ~~ text`（evaluation_report 过滤曾因此 500）
+    class_ids: Mapped[list[Any]] = mapped_column(
+        postgresql.JSONB, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    rule_ids: Mapped[list[Any]] = mapped_column(
+        postgresql.JSONB, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    time_window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    time_window_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=sa_text("'PUBLISHED'")
+    )
+    tags: Mapped[list[Any]] = mapped_column(
+        postgresql.JSONB, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    snapshot: Mapped[dict[str, Any]] = mapped_column(
+        postgresql.JSONB, nullable=False, server_default=sa_text("'{}'::jsonb")
+    )
+    snapshot_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=sa_text("1")
+    )
+    owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(50), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    progress: Mapped[dict[str, Any] | None] = mapped_column(
+        postgresql.JSONB, nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('DRAFT','PUBLISHED','PENDING','RUNNING','COMPLETED','FAILED')",
+            name="ck_evaluation_report_status",
+        ),
+        Index("ix_evaluation_report_class_gin", "class_ids", postgresql_using="gin"),
+        Index("ix_evaluation_report_rule_gin", "rule_ids", postgresql_using="gin"),
+        Index("ix_evaluation_report_created_by", "created_by"),
+        Index(
+            "ix_evaluation_report_status_running",
+            "status",
+            postgresql_where=sa_text("status IN ('PENDING','RUNNING')"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<EvaluationReport id={self.id} name={self.name!r} "
+            f"status={self.status!r}>"
+        )
+
+class DataQualityViolationSample(Base):
+    """评估违规样本（feat-dq-evaluation-report，Phase 4）。
+
+    - 一份报告的每条规则最多落 1 行（按 report_id + rule_id 逻辑去重）；样本
+      内容存 sample_pk_values（list[{pk: ...}]）。
+    - sampling_error 非空时表示采样失败，前端在违规样本表显式提示「采样失败: ...」。
+    - FK ON DELETE CASCADE：报告硬删时样本自动清。
+    """
+
+    __tablename__ = "data_quality_violation_sample"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    report_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("evaluation_report.id", ondelete="CASCADE"), nullable=False
+    )
+    rule_id: Mapped[int] = mapped_column(BigIntFk, nullable=False)
+    datasource_id: Mapped[int] = mapped_column(BigIntFk, nullable=False)
+    target_table: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_column: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    total_violations: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_pk_values: Mapped[list[Any]] = mapped_column(
+        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    sampling_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_dq_violation_sample_report_rule", "report_id", "rule_id"),
+        Index("ix_dq_violation_sample_table", "target_table"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataQualityViolationSample id={self.id} report_id={self.report_id} "
+            f"rule_id={self.rule_id} samples={self.sample_size}>"
+        )
+
+class EvaluationReportSchedule(Base, TimestampMixin):
+    """评估报告定时生成配置（feat-dq-evaluation-report Phase 6）。
+
+    - cron_expression：标准 5 字段 cron（"分 时 日 月 周"），由 scheduler worker
+      定期扫描 next_run_at <= now() 的行触发。
+    - time_window_type CheckConstraint：LAST_7D / LAST_30D / LAST_RUN 三选一，
+      决定单次生成报告时 time_window_start/end 的取法。
+    - last_report_id FK ON DELETE SET NULL：报告删除不影响 schedule 配置。
+    - 部分索引 ix_evaluation_report_schedule_due：WHERE enabled=true 用于
+      worker 轮询扫描，避免扫描已禁用行。
+    """
+
+    __tablename__ = "evaluation_report_schedule"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    cron_expression: Mapped[str] = mapped_column(String(100), nullable=False)
+    # DB 列实为 jsonb（server_default '::jsonb'）；必须声明 postgresql.JSONB
+    # —— 泛型 JSON 的 .contains() 退化为字符串 LIKE，PG 上直接报
+    # `operator does not exist: jsonb ~~ text`（evaluation_report 过滤曾因此 500）
+    class_ids: Mapped[list[Any]] = mapped_column(
+        postgresql.JSONB, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    rule_ids: Mapped[list[Any]] = mapped_column(
+        postgresql.JSONB, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    time_window_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    recipients: Mapped[list[Any]] = mapped_column(
+        postgresql.JSONB, nullable=False, server_default=sa_text("'[]'::jsonb")
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa_text("true")
+    )
+    next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_report_id: Mapped[int | None] = mapped_column(
+        BigIntFk,
+        ForeignKey("evaluation_report.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            # IN 列表从 ReportTimeWindowType 枚举派生，避免加第四个值时漏改 schema / ORM / scheduler / models 四处。
+            (
+                "time_window_type IN ("
+                + ",".join(f"'{t.value}'" for t in ReportTimeWindowType)
+                + ")"
+            ),
+            name="ck_evaluation_report_schedule_window",
+        ),
+        Index(
+            "ix_evaluation_report_schedule_due",
+            "next_run_at",
+            postgresql_where=sa_text("enabled = true"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<EvaluationReportSchedule id={self.id} name={self.name!r} "
+            f"enabled={self.enabled}>"
+        )
+
+class EvaluationReportShare(Base):
+    """评估报告分享链接 token 表（feat-dq-evaluation-report Phase 5）。
+
+    - share_token：UUID 唯一，由 /reports/{id}/shares POST 生成，附在 URL 中
+      给非登录用户访问（公开分享页 DataQualityReportPublicSharePage）。
+    - expires_at：链接过期时间，过期后查询直接 404。
+    - access_count：访问计数（每次公开分享页渲染 +1）。
+    - FK ON DELETE CASCADE：报告硬删时分享 token 自动失效。
+    """
+
+    __tablename__ = "evaluation_report_share"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    report_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("evaluation_report.id", ondelete="CASCADE"), nullable=False
+    )
+    share_token: Mapped[str] = mapped_column(
+        postgresql.UUID(as_uuid=False), nullable=False, unique=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    access_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=sa_text("0")
+    )
+    created_by: Mapped[str] = mapped_column(String(50), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_evaluation_report_share_expires", "expires_at"),
+        UniqueConstraint("share_token", name="uq_evaluation_report_share_token"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<EvaluationReportShare id={self.id} report_id={self.report_id} "
+            f"token={self.share_token!r}>"
+        )
+
+
+# Re-export Wiki 覆盖度表（0059 = M7 机制 6：class→域映射 + 覆盖度矩阵）。
+# 与 wiki_learning_models 分文件同理由：覆盖度是**派生快照**，生命周期与
+# 知识本体/管线表都不同（可整体重算、可清空重建）。
+from app.domain.wiki_coverage_models import (  # noqa: E402,F401
+    ClassDomainMapping,
+    CoverageCell,
+)
+
+# Re-export Wiki 学习管线表（0054 = M2 导入/计量，0055 = M3 反馈事件流，
+# 0057 = M5 机制 3/4 的冲突与结构化建议，0058 = M6 机制 5 的结构化产物）。
+from app.domain.wiki_learning_models import (  # noqa: E402,F401
+    KnowledgeConflict,
+    LearningFeedback,
+    ProcessWorkflow,
+    StructureSuggestion,
+    WikiImportTask,
+    WikiRuleExecutable,
+    WikiTokenUsage,
+)
+
+# Re-export P3 批量编译器台账表（0063）。
+from app.domain.wiki_compile_models import (  # noqa: E402,F401
+    WikiCompileItem,
+    WikiCompileTask,
+)
+
+# Re-export Wiki 知识管理 4 表（0053 migration，Phase 8 M1）。同样为了让
+# Schema drift 校验与 alembic autogenerate 看到这些表；wiki 模型独立成文件
+# 是为了避免本文件继续膨胀（已 1700+ 行）。
+from app.domain.wiki_models import (  # noqa: E402,F401
+    Evidence,
+    KnowledgeClaim,
+    KnowledgeRelation,
+    WikiPage,
+)
+
+# Re-export MenuConfig so Alembic autogenerate picks it up.
+from app.models.menu_config import MenuConfig  # noqa: E402,F401
+
+# Re-export RBAC identity models so Alembic autogenerate picks them up.
+from app.models.rbac import (  # noqa: E402,F401
+    ADMIN_ROLE_CODE,
+    GRANT_SUBJECT_TYPES,
+    Organization,
+    PermissionGrant,
+    Role,
+    User,
+    UserOrganization,
+    UserRole,
+    UserSession,
+)
+
+# Re-export SystemConfig 运行时 KV 表（0052 migration）。ORM 模型主要给
+# Schema drift 校验（main.py lifespan）和 alembic autogenerate 用，service 层
+# 仍走 text() 直查以保持零业务耦合 + 失败安全。
+from app.models.system_config import SystemConfig  # noqa: E402,F401
+
+# Re-export Wiki 知识图谱洞察表（0064 = Phase 3 拓扑信号 + LLM 解读缓存）。
+from app.domain.wiki_graph_insight import WikiGraphInsight  # noqa: E402,F401
+
+# === Container-only ORM re-exports ===
+# Re-export Wiki 覆盖度表（0059 = M7 机制 6：class→域映射 + 覆盖度矩阵）。
+# 与 wiki_learning_models 分文件同理由：覆盖度是**派生快照**，生命周期与
+# 知识本体/管线表都不同（可整体重算、可清空重建）。
+from app.domain.wiki_coverage_models import (  # noqa: E402,F401
+    ClassDomainMapping,
+    CoverageCell,
+)
+
+# Re-export Wiki 学习管线表（0054 = M2 导入/计量，0055 = M3 反馈事件流，
+# 0057 = M5 机制 3/4 的冲突与结构化建议，0058 = M6 机制 5 的结构化产物）。
+from app.domain.wiki_learning_models import (  # noqa: E402,F401
+    KnowledgeConflict,
+    LearningFeedback,
+    ProcessWorkflow,
+    StructureSuggestion,
+    WikiImportTask,
+    WikiRuleExecutable,
+    WikiTokenUsage,
+)
+
+# Re-export P3 批量编译器台账表（0063）。
+from app.domain.wiki_compile_models import (  # noqa: E402,F401
+    WikiCompileItem,
+    WikiCompileTask,
+)
+
+# Re-export Wiki 知识管理 4 表（0053 migration，Phase 8 M1）。同样为了让
+# Schema drift 校验与 alembic autogenerate 看到这些表；wiki 模型独立成文件
+# 是为了避免本文件继续膨胀（已 1700+ 行）。
+from app.domain.wiki_models import (  # noqa: E402,F401
+    Evidence,
+    KnowledgeClaim,
+    KnowledgeRelation,
+    WikiPage,
+)
+
+# Re-export MenuConfig so Alembic autogenerate picks it up.
+from app.models.menu_config import MenuConfig  # noqa: E402,F401
+
+# Re-export RBAC identity models so Alembic autogenerate picks them up.
+from app.models.rbac import (  # noqa: E402,F401
+    ADMIN_ROLE_CODE,
+    GRANT_SUBJECT_TYPES,
+    Organization,
+    PermissionGrant,
+    Role,
+    User,
+    UserOrganization,
+    UserRole,
+    UserSession,
+)
+
+# Re-export SystemConfig 运行时 KV 表（0052 migration）。ORM 模型主要给
+# Schema drift 校验（main.py lifespan）和 alembic autogenerate 用，service 层
+# 仍走 text() 直查以保持零业务耦合 + 失败安全。
+from app.models.system_config import SystemConfig  # noqa: E402,F401
+
+# Re-export Wiki 知识图谱洞察表（0064 = Phase 3 拓扑信号 + LLM 解读缓存）。
+from app.domain.wiki_graph_insight import WikiGraphInsight  # noqa: E402,F401

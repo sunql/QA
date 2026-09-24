@@ -25,6 +25,7 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.llm.base_client import BaseLlmClient
+from app.services.agent_tools_wiki import WIKI_HANDLERS
 from app.services.graph_traversal_service import GraphTraversalService
 from app.services.intent_service import (
     extractSupplierAnyKey,
@@ -248,6 +249,7 @@ ARG_EXTRACTORS: dict[str, ArgExtractor] = {
 _VALID_HANDLER_REFS: dict[str, frozenset[str]] = {
     "BUILTIN": frozenset(BUILTIN_HANDLERS.keys()),
     "NL2SQL": frozenset(NL2SQL_HANDLERS.keys()),
+    "WIKI": frozenset(WIKI_HANDLERS.keys()),
 }
 
 
@@ -279,7 +281,11 @@ class AgentToolAssembly:
                 f"agent_tool_config {config_row.name}: arg_extractor_kind {ext_kind!r} 不存在"
             )
 
-        handlers: dict[str, AgentHandler] = {**BUILTIN_HANDLERS, **NL2SQL_HANDLERS}
+        handlers: dict[str, AgentHandler] = {
+            **BUILTIN_HANDLERS,
+            **NL2SQL_HANDLERS,
+            **WIKI_HANDLERS,
+        }
         return AgentTool(
             name=config_row.name,
             description=config_row.description or "",

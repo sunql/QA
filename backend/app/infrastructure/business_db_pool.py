@@ -17,6 +17,7 @@ import oracledb
 import sqlparse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlparse import tokens as T
 
 from app.config import getSettings
 from app.domain.enums import DataSourceType
@@ -56,7 +57,11 @@ _FORBIDDEN_VERBS = {
 }
 
 # 危险函数名（即便包在只读 SELECT 里也属写/侧信道）：序列推进、跨库执行、
-# 大对象文件 I/O、服务器文件读写/列目录。命中即拒，仅当 token 为 Name（函数名）。
+# 大对象文件 I/O、服务器文件读写/列目录。
+#
+# 匹配口径 = **裸名 + 不看形态**（这些名字没有合法的同名标识符用法，凡出现即拒），
+# 且**引号归一后同判**：`"nextval"('s')` / `` `nextval`('s') `` 是合法可执行的函数
+# 调用（复审 HIGH：改前因 `Literal.String.Symbol` 走字面量跳过而漏）。
 _FORBIDDEN_FUNCTIONS = {
     "NEXTVAL",
     "SETVAL",
@@ -69,6 +74,80 @@ _FORBIDDEN_FUNCTIONS = {
     "PG_READ_BINARY_FILE",
     "PG_WRITE_BINARY_FILE",
     "PG_LS_DIR",
+}
+
+# 侧信道函数（M1）：包在只读 SELECT 里也构成危害 —— 时序侧信道（拖住连接 =
+# DoS + 盲注探测）、跨库/出网（把数据带出或访问内网）、文件 I/O、进程与配置控制。
+#
+# 与 _FORBIDDEN_FUNCTIONS 分开，因为**匹配口径不同**：这些名字本身是普通词
+# （sleep / benchmark / load_file），裸匹配会把同名的列、别名、表名一并杀掉
+# （`SELECT COUNT(*) AS sleep` 很常见）。故只认「**调用形态**」：名字后紧跟 ``(``。
+#
+# 反面教训（复审 MEDIUM）：`SLEEP` 这类纯函数**只可能以 `(` 调用**，若同时允许
+# 「点号形态」（把 `.` 也当命中），`SELECT sleep.col FROM foo sleep`（把黑名单词当
+# 表别名）就会被误杀。故「点号形态」收紧到只给**包/类型**用，见 _FORBIDDEN_PACKAGES。
+# 三个集合按约定保持互不重叠（同名不放两处），避免读代码时误以为口径相同。
+_FORBIDDEN_CALLS = {
+    # 时序 / 锁 / DoS
+    "PG_SLEEP",
+    "PG_SLEEP_FOR",
+    "PG_SLEEP_UNTIL",
+    "PG_ADVISORY_LOCK",
+    "PG_ADVISORY_LOCK_SHARED",
+    "PG_ADVISORY_XACT_LOCK",
+    "PG_ADVISORY_XACT_LOCK_SHARED",
+    "PG_TRY_ADVISORY_LOCK",
+    "PG_TRY_ADVISORY_LOCK_SHARED",
+    "SLEEP",
+    "BENCHMARK",
+    "GET_LOCK",
+    "RELEASE_LOCK",
+    "MASTER_POS_WAIT",
+    "SOURCE_POS_WAIT",
+    "WAIT_FOR_EXECUTED_GTID_SET",
+    "WAIT_UNTIL_SQL_THREAD_AFTER_GTIDS",
+    # 跨库 / 出网
+    "DBLINK",
+    "DBLINK_CONNECT",
+    "DBLINK_CONNECT_NAMED",
+    "DBLINK_OPEN",
+    "DBLINK_FETCH",
+    "HTTPURITYPE",
+    "PG_NOTIFY",
+    # 文件 I/O（大对象写：lo_export/lo_import 在 _FORBIDDEN_FUNCTIONS，此处补齐同类）
+    "LOAD_FILE",
+    "PG_STAT_FILE",
+    "PG_LS_WALDIR",
+    "PG_LS_LOGDIR",
+    "PG_LS_TMPDIR",
+    "LO_PUT",
+    "LO_CREATE",
+    "LO_UNLINK",
+    "LOWRITE",
+    # 进程 / 配置控制
+    "PG_TERMINATE_BACKEND",
+    "PG_CANCEL_BACKEND",
+    "PG_RELOAD_CONF",
+    "PG_ROTATE_LOGFILE",
+}
+
+# 包 / 类型（M1）：以「**包名形态**」（名字后紧跟 ``.``）命中，如 UTL_HTTP.REQUEST、
+# DBMS_LOCK.SLEEP、DBMS_LOB.LOADFROMFILE。这些名字在 Oracle 里是包名、在 PG 里是
+# schema 段（`pg_catalog.pg_sleep` 的 `pg_sleep` 仍按调用形态命中，故 `PG_CATALOG`
+# 本身不必入表），**不会以裸列名/别名出现**，故点号形态不会误杀。
+_FORBIDDEN_PACKAGES = {
+    "UTL_HTTP",
+    "UTL_INADDR",
+    "UTL_TCP",
+    "UTL_SMTP",
+    "UTL_MAIL",
+    "UTL_FILE",
+    "DBMS_LOCK",
+    "DBMS_PIPE",
+    "DBMS_LOB",
+    "DBMS_LDAP",
+    "DBMS_SCHEDULER",
+    "DBMS_NETWORK_ACL_ADMIN",
 }
 
 _adapters: dict[int, "BusinessDbAdapter"] = {}
@@ -125,6 +204,46 @@ def _assert_read_only(sql: str) -> None:
     _assertNoHiddenWrites(stmt, sql)
 
 
+_IDENTIFIER_QUOTES = {'"': '"', "`": "`", "[": "]"}
+
+
+def _unquoteIdentifier(raw: str) -> str:
+    """剥离标识符引号（"x" / `x` / [x]），便于与黑名单按裸名比对。
+
+    只用于「函数名/包名」判定：字符串字面量的单引号不在此列（调用形态判定
+    本身已把字面量排除在外）。
+    """
+    closer = _IDENTIFIER_QUOTES.get(raw[:1])
+    if closer is not None and len(raw) >= 2 and raw.endswith(closer):
+        return raw[1:-1]
+    return raw
+
+
+def _callShape(flat: list[sqlparse.sql.Token], idx: int) -> str | None:
+    """返回 flat[idx] 之后（跳过空白与注释）紧跟的形态：``"call"`` / ``"package"`` / None。
+
+    - ``"call"``：紧跟 ``(`` —— 函数调用（`pg_sleep(5)`）；
+    - ``"package"``：紧跟 ``.`` —— 包名段（`UTL_HTTP.REQUEST`）；
+    - 其余（含 `(pg_sleep)(5)` 这种名字被括号包裹、后面才跟参数的写法）返回 None。
+
+    `pg_sleep /*c*/ (5)` 这类注释夹在中间的写法必须也能命中，否则黑名单形同虚设。
+
+    为什么两种形态要分开返回：**纯函数名只可能以 `(` 调用**，若允许 `.` 命中，
+    「黑名单词恰好作表别名」的正常查询（`SELECT sleep.col FROM foo sleep`）会被误杀。
+    """
+    for nxt in flat[idx + 1:]:
+        if nxt.is_whitespace or nxt.ttype in T.Comment:
+            continue
+        if nxt.ttype is not T.Punctuation:
+            return None
+        if nxt.value == "(":
+            return "call"
+        if nxt.value == ".":
+            return "package"
+        return None
+    return None
+
+
 def _assertNoHiddenWrites(stmt: sqlparse.sql.Statement, sql: str) -> None:
     """深度扫描已通过白名单首 token 的语句，拦截隐藏写操作。
 
@@ -136,19 +255,35 @@ def _assertNoHiddenWrites(stmt: sqlparse.sql.Statement, sql: str) -> None:
       归为 Name，故不单独判）；
     - `SELECT ... FOR UPDATE` / `FOR SHARE`（PG 行锁）与 `LOCK IN SHARE MODE`
       （MySQL）—— UPDATE 已入 _FORBIDDEN_VERBS，SHARE 是 Keyword 需单独判；
-    - `SELECT nextval('seq')` / `pg_read_file(...)` 等危险函数 —— Name token
-      命中 _FORBIDDEN_FUNCTIONS。
+    - `SELECT nextval('seq')` / `pg_read_file(...)` 等危险函数 —— 命中
+      _FORBIDDEN_FUNCTIONS（**裸名 + 不看形态 + 引号归一**，见该集合注释）；
+    - `SELECT pg_sleep(5)` 等侧信道函数 —— 命中 _FORBIDDEN_CALLS（**须为调用形态**）；
+    - `SELECT UTL_HTTP.REQUEST('…')` / `DBMS_LOB.LOADFROMFILE(…)` 等包
+      —— 命中 _FORBIDDEN_PACKAGES（**须为包名形态**，即名字后紧跟 `.`）。
 
     字符串/数字字面量（Token.Literal）整段跳过，避免把 `'DELETE FROM x'` 这类
-    文本误判为写操作；注释亦跳过。
+    文本误判为写操作；注释亦跳过。但**引号包裹的标识符**
+    （`T.Literal.String.Symbol`）语义上是引用名而非字面量，`"pg_sleep"(5)` /
+    `"nextval"('s')` 都是**真实可执行的函数调用**，必须与裸名同判，故它提前于
+    Literal 跳过被检查（复审 HIGH：改前该形态整族绕过）。
     """
-    from sqlparse import tokens as T
-
-    for tok in stmt.flatten():
+    flat = list(stmt.flatten())
+    for idx, tok in enumerate(flat):
         if tok.is_whitespace:
             continue
         ttype = tok.ttype
-        if ttype in T.Comment or ttype in T.Literal:
+        if ttype in T.Comment:
+            continue
+        if ttype is T.Name or ttype is T.Literal.String.Symbol:
+            bare = _unquoteIdentifier(tok.value).upper()
+            if bare in _FORBIDDEN_FUNCTIONS:
+                raise SqlSafetyError(MSG_SQL_FORBIDDEN_OPERATION.format(verb=bare), sql=sql)
+            shape = _callShape(flat, idx)
+            if shape == "call" and bare in _FORBIDDEN_CALLS:
+                raise SqlSafetyError(MSG_SQL_FORBIDDEN_OPERATION.format(verb=bare), sql=sql)
+            if shape == "package" and bare in _FORBIDDEN_PACKAGES:
+                raise SqlSafetyError(MSG_SQL_FORBIDDEN_OPERATION.format(verb=bare), sql=sql)
+        if ttype in T.Literal:
             continue
         upper = tok.value.upper()
         if ttype in (T.Keyword.DML, T.Keyword.DDL) and upper in _FORBIDDEN_VERBS:
@@ -157,8 +292,8 @@ def _assertNoHiddenWrites(stmt: sqlparse.sql.Statement, sql: str) -> None:
             raise SqlSafetyError(MSG_SQL_FORBIDDEN_OPERATION.format(verb="INTO"), sql=sql)
         if ttype is T.Keyword and upper == "SHARE":
             raise SqlSafetyError(MSG_SQL_FORBIDDEN_OPERATION.format(verb="SHARE"), sql=sql)
-        if ttype is T.Name and upper in _FORBIDDEN_FUNCTIONS:
-            raise SqlSafetyError(MSG_SQL_FORBIDDEN_OPERATION.format(verb=upper), sql=sql)
+        # 注：_FORBIDDEN_FUNCTIONS 的判定已上移到「引号归一」分支（覆盖 Name 与
+        # Literal.String.Symbol），此处不再重复判 T.Name，避免两套口径再次分叉
 
 
 # Oracle 标识符字符集：数字/字母/下划线 + CJK 统一表意文字（含扩展 A）

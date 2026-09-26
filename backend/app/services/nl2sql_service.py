@@ -2074,9 +2074,12 @@ class Nl2SqlService:
             try:
                 _assert_read_only(sql)
             except SqlSafetyError as exc:
-                # 只回显拒绝原因，不回显被拒 SQL 文本（避免把失败模式喂回给模型迭代）
+                # 回注拒绝原因（str(exc) 只有原因：被拒 SQL 存在 exc.sql 里，不进消息体），
+                # 否则模型只看到「未通过安全校验」而不知违规点，只能盲重试（M2）。
+                # 仍不回显被拒 SQL 文本本身，避免把失败模式喂回给模型迭代。
                 errors.append(
-                    f"第 {attempt + 1} 次尝试生成的 SQL 未通过安全校验（仅允许 SELECT/WITH 只读查询）"
+                    f"第 {attempt + 1} 次尝试生成的 SQL 未通过安全校验"
+                    f"（仅允许 SELECT/WITH 只读查询）: {exc}"
                 )
                 logger.warning("NL2SQL 安全校验失败 attempt=%d: %s", attempt + 1, exc)
                 continue
@@ -2380,7 +2383,12 @@ class Nl2SqlService:
             snippet = "；".join(errors)
             if len(snippet) > _ERROR_SNIPPET_LIMIT:
                 snippet = snippet[:_ERROR_SNIPPET_LIMIT] + "..."
-            prompt += f"\n\n之前的尝试失败，请修正后重新生成 SQL。错误信息：{snippet}"
+            # 与上方 executionError 段同口径消毒（该段含 SQL Guard 的拒绝原因，
+            # 其中「收到的首 token」取自模型生成的 SQL，理论上可携带尖括号伪造标签）
+            prompt += (
+                "\n\n之前的尝试失败，请修正后重新生成 SQL。"
+                f"错误信息：{_sanitizeContext(snippet)}"
+            )
         return prompt
 
 

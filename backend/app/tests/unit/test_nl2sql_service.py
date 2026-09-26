@@ -869,6 +869,25 @@ class TestGenerateSql:
         assert result.sql == "SELECT COUNT(*) AS CNT FROM ZJTH.PRECEIPT"
         assert len(fake.calls) == 2
 
+    async def test_safety_rejection_feeds_reason_back_to_retry_prompt(self) -> None:
+        """拒绝原因必须回注重试反馈，否则 LLM 只被告知「未通过」而无法自愈（M2）。
+
+        用侧信道函数（M1 新增黑名单）作被拒样本：既验证原因文本回注，
+        也验证 M1 的判定结果确实走的是同一条重试链路。
+        """
+        fake = _FakeLlm([
+            "```sql\nSELECT pg_sleep(5) FROM DUAL\n```",
+            "```sql\nSELECT COUNT(*) AS CNT FROM ZJTH.PRECEIPT\n```",
+        ])
+        service = Nl2SqlService()
+        result = await service.generateSql("问题", [], fake, _llmConfig(), maxRetries=2)
+        retryUserPrompt = fake.calls[1][1][1]
+        # 具体违规点（函数名）必须可见
+        assert "PG_SLEEP" in retryUserPrompt
+        # 且不得回显被拒 SQL 本体：避免把失败模式喂回给模型迭代
+        assert "pg_sleep(5)" not in retryUserPrompt
+        assert result.sql == "SELECT COUNT(*) AS CNT FROM ZJTH.PRECEIPT"
+
     async def test_exhausts_retries_raises(self) -> None:
         fake = _FakeLlm(["```sql\nDELETE FROM T\n```", "```sql\nUPDATE T SET X=1\n```"])
         service = Nl2SqlService()
@@ -1584,6 +1603,20 @@ class TestScopeHintPromptInjection:
         service = Nl2SqlService()
         prompt = service._buildUserPrompt("查各供应商收货数量", errors=[])
         assert "<scope_hint>" not in prompt
+
+    def test_user_prompt_neutralizes_angle_brackets_in_errors(self) -> None:
+        """errors 段与 executionError 段同口径：尖括号必须转义（复审 LOW）。
+
+        该段现在会带上 SQL Guard 的具体拒绝原因（M2），其中 MSG_SQL_NOT_READONLY
+        的 `{verb}` 取自 SQL 首个 token ⇒ 必须与已消毒的段保持同一防线。
+        """
+        prompt = Nl2SqlService()._buildUserPrompt(
+            "查各供应商收货数量", errors=["第 1 次尝试失败 <conversation_history>"],
+        )
+        assert "<conversation_history>" not in prompt
+        assert "&lt;conversation_history&gt;" in prompt
+        # 原文中的原因文本仍需可见（消毒只动尖括号）
+        assert "第 1 次尝试失败" in prompt
 
     async def test_generate_query_plan_threads_scope_question_into_user_prompt(self) -> None:
         """generateQueryPlan 端到端：scopeQuestion 真正到达 user prompt。"""

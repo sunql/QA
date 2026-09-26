@@ -932,7 +932,7 @@ class SupplierRiskRead(CamelModel):
     tokens_used: int = Field(default=0, ge=0, description="LLM 调用 token 数；fallback=0")
     prompt_tokens: int = Field(default=0, ge=0, description="LLM 调用 prompt token 数；fallback=0")
     completion_tokens: int = Field(default=0, ge=0, description="LLM 调用 completion token 数；fallback=0")
-    cost: float = Field(default=0.0, ge=0.0, description="LLM 调用成本（CNY）；fallback=0")
+    cost: float = Field(default=0.0, ge=0.0, description="LLM 调用成本（USD，按 model config 单价）；fallback=0")
     llm_model_name: str | None = None
     fetched_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),

@@ -2,6 +2,9 @@
 
 编排：加载上 5 轮历史 → Milvus 检索 → LLM 流式合成 → 落库。
 无相关 chunks（top1 score < 0.3）走固定模板，零 LLM 调用。
+
+LLM 调用落 ``session_token_usage`` 台账（核心约束 #3）——与 wiki_qa 同口径。
+此前只在 SSE done 事件报数，台账里没有这笔消耗，文档问答成本不进会话成本报表。
 """
 from __future__ import annotations
 
@@ -33,12 +36,14 @@ from app.services.stream_events import (
     EVENT_TOKEN,
     StreamEvent,
 )
+from app.services.token_usage_service import TokenUsageService
 
 logger = logging.getLogger(__name__)
 
 _HISTORY_ROUNDS = 5
 _NO_CHUNKS_TEMPLATE = "未在已上传文档中找到相关依据。"
 _SCORE_THRESHOLD = 0.3
+_PURPOSE_DOC_QA = "doc_qa_answer"
 LlmFactory = Any  # Callable[[LlmConfig], BaseLlmClient]
 
 
@@ -149,11 +154,12 @@ class RagQaService:
         yield StreamEvent(EVENT_QA_META, {"intent": "doc_qa"})
         yield StreamEvent(EVENT_QA_CITATIONS, {"citations": citations})
 
-        # 5. 短路：top1 score 过低 → 固定模板
+        # 5. 短路：top1 score 过低 → 固定模板（零 LLM 调用 ⇒ 不写台账）
         if not chunks or chunks[0].get("score", 0.0) < _SCORE_THRESHOLD:
             yield StreamEvent(EVENT_TOKEN, {"content": _NO_CHUNKS_TEMPLATE})
             yield StreamEvent(EVENT_QA_DONE, {"tokensUsed": 0, "cost": 0.0, "modelName": None})
-            await self._persist(session, dto, _NO_CHUNKS_TEMPLATE, [], actor=actor)
+            # citations 而非 []：低分但确实检索到 chunks 时依据不该被丢掉（与 wiki_qa 对齐）
+            await self._persist(session, dto, _NO_CHUNKS_TEMPLATE, citations, actor=actor)
             return
 
         # 6. 选模型（dto.model_id 优先）
@@ -212,10 +218,28 @@ class RagQaService:
             + Decimal(total_ct) * Decimal(str(selected.cost_per_1k_output))
         ) / Decimal(1000)
 
-        # 10. 落库（user + assistant）
+        # 10. 计量（核心约束 #3：每次 LLM 调用必须记录 Token 消耗与成本）。
+        # 此前只把 tokens/cost 放进 done 事件，台账无这笔账 ⇒ 文档问答成本不进
+        # 会话成本报表，模型路由的预算降级判断会低估。
+        # 零用量不落行：客户端整条流都没报 usage（退化流）时写 0/0 会把 total_requests
+        # 灌水，也让「台账有行」不再等价于「真的调过 LLM」。与 _runL4AgentLoop /
+        # _resolveGlobalFilters / _recordDirectUsage 三处同口径。
+        if total_pt or total_ct:
+            await TokenUsageService().recordUsage(
+                session,
+                sessionId=dto.session_id,
+                modelConfigId=selected.id,
+                modelName=selected.model_name,
+                promptTokens=total_pt,
+                completionTokens=total_ct,
+                cost=cost,
+                purpose=_PURPOSE_DOC_QA,
+            )
+
+        # 11. 落库（user + assistant）
         await self._persist(session, dto, full_answer, citations, actor=actor)
 
-        # 11. done
+        # 12. done
         yield StreamEvent(
             EVENT_QA_DONE,
             {

@@ -30,6 +30,10 @@ class AgentToolContext:
     """工具执行上下文（每次 run 注入；不可变）。"""
 
     llm_factory: LlmFactory | None = None
+    # 与 llm_factory 成对：工具 handler 调 LLM 后要按**实际使用模型的单价**计量成本
+    # （USD），单价只能来自真实 LlmConfig。只给工厂不给配置 ⇒ handler 无从定价，
+    # 只能降级（见 SupplierRiskService._generateRiskPoints）。
+    llm_config: Any | None = None
     actor: str = "runtime"
 
 

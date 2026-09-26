@@ -715,32 +715,62 @@ class ChatService(ChatStreamOutputMixin):
         # 历史 bug：传 None 给 createClient 走 OPENAI + env openaiApiKey 路径，本项目未配置
         # 该 env → 永远 None → agent loop `llm_client.complete_with_tools` 抛 AttributeError
         # → 全部降级 L2/L3。修复：始终 resolve 出 config 对象再交给工厂。
-        llm_client = await self._resolveL4LlmClient(session, dto)
-        if llm_client is None:
+        resolved = await self._resolveChatLlmClient(session, dto)
+        if resolved is None:
             logger.warning("L4 skipped: no usable LLM client (modelId=%s)", dto.modelId)
             return None
+        llm_client, llm_config = resolved
         try:
-            return await self._agentRuntime.run_agent_loop(
+            result = await self._agentRuntime.run_agent_loop(
                 session=session,
                 user_id=user.userId if user else 0,
                 question=dto.question,
                 llm_client=llm_client,
                 executor=self._adapterProvider(dto.datasourceId, None),  # 懒加载 adapter
                 ontology=self._ontology,
+                # 单价的唯一来源是本次实际使用的 model config：agent loop 内部
+                # 无从得知用了哪个模型（历史实现硬编码 gpt-4o-mini 参考价，与实际
+                # config 单价脱钩，监控埋点上的 L4 成本随之失真）。
+                cost_per_1k_input=float(llm_config.cost_per_1k_input),
+                cost_per_1k_output=float(llm_config.cost_per_1k_output),
             )
         except Exception:
             # L4 异常不阻断：log warning + 降级 L2/L3（与 L1 同模式）
             logger.warning("L4 agent loop failed, falling back to L2/L3", exc_info=True)
             return None
 
-    async def _resolveL4LlmClient(
+        # 计量（核心约束 #3）：L4 是全项目最后一条「花钱不记账」的路径。此前
+        # AgentLoopResult 只有一个 USD 数字、token 数无处承载 ⇒ 台账零记录，L4 的
+        # 消耗不进会话成本报表，模型路由的预算降级判断也随之低估。
+        # 记账不管调用方是否采纳本轮结果——tokens 已经花掉了，即便随后因
+        # answer_text 为空而降级 L2，这笔账也必须留在台账上。
+        if result.prompt_tokens or result.completion_tokens:
+            await self._recordUsage(
+                session,
+                dto.sessionId,
+                llm_config,
+                result.prompt_tokens,
+                result.completion_tokens,
+                purpose="l4_agent_loop",
+            )
+        return result
+
+    async def _resolveChatLlmClient(
         self,
         session: AsyncSession,
         dto: ChatRequest,
-    ) -> BaseLlmClient | None:
-        """解析 L4 用的 LLM 客户端：dto.modelId 优先，否则 router 选。
+    ) -> tuple[BaseLlmClient, Any] | None:
+        """解析「单次 LLM 调用」用的客户端 + 配置：dto.modelId 优先，否则 router 选。
 
-        返回 None = 无可用配置 → L4 不触发（与 _buildPipelineContext 行为一致）。
+        供**不带流水线上下文**的分支使用（L4 agent loop / 供应商风险点 / Agent 运行时）
+        ——这些分支拿不到 ``_PipelineContext.selected``，又都需要「客户端」和「真实单价」
+        两样东西，故一次解析一并返回。
+
+        返回 ``(client, config)``：config 必须交回调用方，因为下游的计量（token 台账、
+        监控埋点的 USD 成本）只能由它的 ``id`` / ``cost_per_1k_*`` 提供。
+
+        返回 None = 无可用配置 → 调用方自行降级（L4 → L2/L3，供应商风险 → 模板文案）。
+        自动路由同样收窄到可用池，避免降级分支选中无 key 的配置。
         """
         configs = await self._listModelConfigs(session)
         if dto.modelId is not None:
@@ -748,9 +778,26 @@ class ChatService(ChatStreamOutputMixin):
             if selected is None or not selected.is_active:
                 return None
         else:
+            candidates = self._usableModelConfigs(configs)
+            if not candidates:
+                # LlmConfig 表为空（未 seed / 全停用）：自动路由的 selectModel([]) 会抛
+                # NoAvailableModelError。本方法对三个调用方都是**可降级**契约，不能让
+                # 「没有模型配置」把一条本来能友好作答的请求打成 400——返回 None 交调用方
+                # 决定降级（L4 → L2/L3，供应商风险 → 模板文案）。
+                return None
             ctx = await self._buildRoutingContext(session, dto.sessionId)
-            selected = self._modelRouter.selectModel(configs, dto.question, ctx)
-        return self._llmFactory(selected)
+            selected = self._modelRouter.selectModel(candidates, dto.question, ctx)
+        try:
+            client = self._llmFactory(selected)
+        except ConfigError as exc:
+            # 本方法是**可降级**路径（契约：无可用配置 → 返回 None 交调用方降级），
+            # 密文损坏不应把整轮请求打成 400。
+            logger.warning(
+                "可降级路径 skipped: 模型配置 id=%s 不可用（%s）",
+                getattr(selected, "id", None), exc,
+            )
+            return None
+        return client, selected
 
     async def _buildL4ChatResponse(
         self,
@@ -2164,9 +2211,21 @@ class ChatService(ChatStreamOutputMixin):
                 answer=MSG_SCHEMA_CHAT_SUPPLIER_KEY_MISSING,
                 intent=result.intent.value,
             )
+        # H9：客户端与单价都必须来自真实 model config。
+        # 历史实现只传工厂、服务内部 `llm_factory(None)`：本项目未配置 openaiApiKey
+        # 环境变量 ⇒ createClient(None) 恒 None ⇒ 下一行 AttributeError 被 except 吞
+        # ⇒ 风险点在生产上从未真正由 LLM 生成过；而那条「活着」的成本分支又硬编码
+        # CNY 单价，与台账里其余 USD 行不同口径。两处一并修。
+        # 解析失败（无可用配置）→ 两者皆 None ⇒ 服务显式降级到模板且不记账。
+        resolved = await self._resolveChatLlmClient(session, dto)
+        llm_factory = self._llmFactory if resolved is not None else None
+        llm_config = resolved[1] if resolved is not None else None
         try:
             data = await SupplierRiskService().assess(
-                session, result.supplierKey, llm_factory=self._llmFactory
+                session,
+                result.supplierKey,
+                llm_factory=llm_factory,
+                llm_config=llm_config,
             )
         except NotFoundError:
             return ChatResponse(
@@ -2227,9 +2286,16 @@ class ChatService(ChatStreamOutputMixin):
         actor_departments = user.departments if user is not None else None
         run_status = "SUCCESS"
         run = None
+        # H9：工具 handler（supplier_risk）需要「工厂 + 真实 config」才能调 LLM 并按
+        # config 单价计价。只传工厂时 handler 内部拿不到 config，只能降级模板。
+        resolved = await self._resolveChatLlmClient(session, dto)
         try:
             run = await self._agentRuntime.run(
-                session, agent_code, dto.question, llm_factory=self._llmFactory,
+                session,
+                agent_code,
+                dto.question,
+                llm_factory=self._llmFactory if resolved is not None else None,
+                llm_config=resolved[1] if resolved is not None else None,
                 # 真实调用方身份透传为 actor（归属审计；安全审查 HIGH#1 修复）
                 actor=actor,
             )

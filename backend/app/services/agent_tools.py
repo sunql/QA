@@ -162,7 +162,7 @@ async def _supplierRiskHandler(
     # Phase 6.x：透传字符串 supplier_code（详见 _supplier360Handler 注释）。
     key = args["key"]
     read = await SupplierRiskService().assess(
-        session, key, llm_factory=ctx.llm_factory
+        session, key, llm_factory=ctx.llm_factory, llm_config=ctx.llm_config
     )
     return ToolResult(
         data=read.model_dump(mode="json", by_alias=True),

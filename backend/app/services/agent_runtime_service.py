@@ -26,6 +26,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -96,6 +97,7 @@ class AgentRuntimeService:
         input_text: str,
         *,
         llm_factory: LlmFactory | None = None,
+        llm_config: Any | None = None,
         actor: str = "runtime",
     ) -> AgentRunRead:
         """执行一次 Agent 运行（见模块 docstring 完整链路）。"""
@@ -136,7 +138,9 @@ class AgentRuntimeService:
                 MSG_AGENT_RUN_BAD_INPUT.format(code=agent_code, tool=tool.name)
             )
 
-        ctx = AgentToolContext(llm_factory=llm_factory, actor=actor)
+        ctx = AgentToolContext(
+            llm_factory=llm_factory, llm_config=llm_config, actor=actor
+        )
         result = await tool.handler(session, args, ctx)
         return AgentRunRead(
             agent_code=entity.agent_code,
@@ -236,6 +240,11 @@ class AgentLoopResult:
     tool_calls_made: list[str]
     total_cost_usd: float
     terminated_reason: str  # "answered" | "max_iterations" | "cost_cap" | "error"
+    # 各轮 complete_with_tools 的用量累加值。调用方据此落 session_token_usage
+    # 台账（核心约束 #3）——此前 Result 只有一个 USD 数字，token 数无从承载，
+    # L4 的消耗因此整条游离在台账之外。
+    prompt_tokens: int
+    completion_tokens: int
 
 
 # ---------------------------------------------------------------------------
@@ -324,16 +333,36 @@ def _to_llm_message(msg) -> "LlmMessage":
     return LlmMessage(role="user", content=str(msg))
 
 
-def _estimate_cost(usage: dict | None) -> float:
-    """根据 token 用量估算 cost（USD）。
+def _usage_tokens(usage: dict | None) -> tuple[int, int]:
+    """从 ``LlmResponseWithTools.usage`` 取 ``(promptTokens, completionTokens)``。
 
-    使用 openai gpt-4o-mini 参考价：$0.15/1M input, $0.6/1M output。
+    缺失 / 非数值一律回 0（provider 未返回 usage 时不能凭空编数）。
     """
     if not usage:
-        return 0.0
-    prompt = usage.get("prompt_tokens", 0) or 0
-    completion = usage.get("completion_tokens", 0) or 0
-    return (prompt * 0.15 / 1_000_000) + (completion * 0.6 / 1_000_000)
+        return 0, 0
+    return (
+        int(usage.get("prompt_tokens", 0) or 0),
+        int(usage.get("completion_tokens", 0) or 0),
+    )
+
+
+def _cost_for_usage(
+    prompt_tokens: int,
+    completion_tokens: int,
+    *,
+    cost_per_1k_input: float,
+    cost_per_1k_output: float,
+) -> Decimal:
+    """按 model config 单价算 USD 成本（与 chat_service._costFor 同公式同口径）。
+
+    单价由调用方从**真实 model config** 传入——agent loop 内部无从得知用的是哪个
+    模型，此前硬编码 gpt-4o-mini 参考价的写法会让监控埋点上的 L4 成本与
+    llm_config 里的单价脱钩（换模型后数字系统性失真，H2/H9 同类问题）。
+    """
+    return (
+        Decimal(prompt_tokens) * Decimal(str(cost_per_1k_input))
+        + Decimal(completion_tokens) * Decimal(str(cost_per_1k_output))
+    ) / Decimal(1000)
 
 
 def _extract_final_sql(messages: list) -> str | None:
@@ -395,6 +424,10 @@ class _AgentLoopStepResult:
     cost_incurred: float
     should_stop: bool
     stop_reason: str  # "answered" | "cost_cap" | "continue"
+    # 本轮用量：即便 cost 撞上限（cost_cap 提前 return）也必须带出来——
+    # 那一轮的钱已经花了，会计上不能因为「本轮没产出答案」就把它抹掉。
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +444,8 @@ async def _runAgentLoopIteration(
     tool_schemas: list[dict],
     cost_budget_usd: float,
     cumulative_cost: float,
+    cost_per_1k_input: float,
+    cost_per_1k_output: float,
 ) -> _AgentLoopStepResult:
     """单次 LLM 决策迭代：调用 complete_with_tools，检查 cost cap。"""
     llm_messages = [_to_llm_message(m) for m in messages]
@@ -419,7 +454,15 @@ async def _runAgentLoopIteration(
         tools=tool_schemas,
         tool_choice="auto",
     )
-    cost_incurred = _estimate_cost(response.usage)
+    prompt_tokens, completion_tokens = _usage_tokens(response.usage)
+    cost_incurred = float(
+        _cost_for_usage(
+            prompt_tokens,
+            completion_tokens,
+            cost_per_1k_input=cost_per_1k_input,
+            cost_per_1k_output=cost_per_1k_output,
+        )
+    )
     new_total = cumulative_cost + cost_incurred
 
     if new_total > cost_budget_usd:
@@ -431,6 +474,8 @@ async def _runAgentLoopIteration(
             cost_incurred=cost_incurred,
             should_stop=True,
             stop_reason="cost_cap",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
 
     ai_message = _buildAiMessage(response)
@@ -444,6 +489,8 @@ async def _runAgentLoopIteration(
             cost_incurred=cost_incurred,
             should_stop=True,
             stop_reason="answered",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
 
     return _AgentLoopStepResult(
@@ -454,6 +501,8 @@ async def _runAgentLoopIteration(
         cost_incurred=cost_incurred,
         should_stop=False,
         stop_reason="continue",
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )
 
 
@@ -552,12 +601,18 @@ async def run_agent_loop(
     ontology,
     max_iterations: int = 5,
     cost_budget_usd: float = 0.5,
+    cost_per_1k_input: float = 0.0,
+    cost_per_1k_output: float = 0.0,
 ) -> AgentLoopResult:
     """LLM 驱动的 agent loop（纯 Python async while 实现）。
 
     Architecture 偏差说明：本实现用纯 Python async while loop，未采用 LangGraph StateGraph，
     因为所有 handler 都是 async、StateGraph node 包装复杂且测试 mock 困难。
     AgentState TypedDict 保留为后续 LangGraph 升级占位（见 agent_state.py）。
+
+    ``cost_per_1k_input`` / ``cost_per_1k_output``：来自**调用方解析出的 model config**，
+    本函数无从得知实际用哪个模型，故单价必须由外部传入。二者为 0（默认）时
+    ``total_cost_usd`` 恒为 0——调用方须显式传真实单价，否则 L4 成本会被静默低估。
 
     终止条件：answered / max_iterations / cost_cap / error
     """
@@ -570,16 +625,38 @@ async def run_agent_loop(
     messages = state["messages"]
 
     while state["iterations"] < max_iterations:
-        await _runOneStep(state, llm_client, TOOL_SCHEMAS, cost_budget_usd)
+        try:
+            await _runOneStep(
+                state,
+                llm_client,
+                TOOL_SCHEMAS,
+                cost_budget_usd,
+                cost_per_1k_input=cost_per_1k_input,
+                cost_per_1k_output=cost_per_1k_output,
+            )
 
-        if state["terminated_reason"] in ("answered", "cost_cap"):
+            if state["terminated_reason"] in ("answered", "cost_cap"):
+                break
+
+            await _executePendingToolCalls(
+                state=state,
+                session=session,
+                executor=executor,
+            )
+        except Exception:
+            # 终止原因 error：中途失败（限流 / 超时 / 工具派发异常）时，**前面若干轮
+            # 的钱已经花了**。这里必须收敛成「带累计 token 的正常返回」，而不是让
+            # 异常穿出去——调用方（chat_service._runL4AgentLoop）的 except 在
+            # _recordUsage 之前 return，异常一穿出去累计值就随之丢失，L4 的这部分
+            # 花费既不在台账、也不在监控埋点里（核心约束 #3）。
+            # 行为不变：结果 terminated_reason="error" → answer_text 为 None →
+            # _maybeRunL4AgentLoop 照旧降级 L2/L3。
+            logger.warning(
+                "agent_loop 迭代失败，按 error 终止（保留已消耗 token 以落台账）",
+                exc_info=True,
+            )
+            state["terminated_reason"] = "error"
             break
-
-        await _executePendingToolCalls(
-            state=state,
-            session=session,
-            executor=executor,
-        )
 
     # max_iterations 兜底：若耗尽迭代但 LLM 在最后一轮仍有自然语言输出（即便伴生 tool_calls），
     # 用该内容作为 answer_text，避免 chat_service 因 answer_text is None 降级到 L2。
@@ -606,6 +683,8 @@ async def run_agent_loop(
         tool_calls_made=state["tool_calls_made"],
         total_cost_usd=round(state["total_cost"], 6),
         terminated_reason=state["terminated_reason"],
+        prompt_tokens=state["prompt_tokens"],
+        completion_tokens=state["completion_tokens"],
     )
 
 
@@ -648,6 +727,8 @@ def _initLoopState(question: str) -> dict:
         "messages": messages,
         "iterations": 0,
         "total_cost": 0.0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
         "tool_calls_made": [],
         "terminated_reason": "max_iterations",
         "final_sql": None,
@@ -660,6 +741,9 @@ async def _runOneStep(
     llm_client,
     tool_schemas: list[dict],
     cost_budget_usd: float,
+    *,
+    cost_per_1k_input: float,
+    cost_per_1k_output: float,
 ) -> None:
     """执行一次 LLM step；in-place 更新 state。"""
     step = await _runAgentLoopIteration(
@@ -668,9 +752,13 @@ async def _runOneStep(
         tool_schemas=tool_schemas,
         cost_budget_usd=cost_budget_usd,
         cumulative_cost=state["total_cost"],
+        cost_per_1k_input=cost_per_1k_input,
+        cost_per_1k_output=cost_per_1k_output,
     )
     state["iterations"] += 1
     state["total_cost"] += step.cost_incurred
+    state["prompt_tokens"] += step.prompt_tokens
+    state["completion_tokens"] += step.completion_tokens
 
     if step.should_stop:
         state["terminated_reason"] = step.stop_reason

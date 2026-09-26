@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -280,20 +281,30 @@ async def test_llm_unavailable_falls_back_to_template(dbSession: AsyncSession):
 
 
 async def test_llm_success_records_tokens_and_cost(dbSession: AsyncSession):
-    """LLM 可用 → risk_points_source=llm + tokens_used > 0 + cost > 0 + llm_model_name 非空。"""
+    """LLM 可用 → source=llm + tokens + cost 按**传入 config 单价**（USD）算。
+
+    H9 前该分支硬编码「0.001/0.002 CNY per 1k token」：这里用明显不同的单价
+    （0.5 / 1.5）钉住「成本来自 config，而不是写死在服务里的常数」。
+    """
     fake = _FakeLlm()
     await _seedSupplier(dbSession, 100001, "SUP000001")
     await _seedFeatureAndValue(dbSession, 1, "SUPPLIER_RISK_SCORE", "SUP000001", 0.50, unit="score", window="12M")
+    config = type("Cfg", (), {
+        "id": 7,
+        "cost_per_1k_input": Decimal("0.5"),
+        "cost_per_1k_output": Decimal("1.5"),
+    })()
 
     result = await SupplierRiskService().assess(
-        dbSession, 100001, llm_factory=lambda cfg: fake  # noqa: ARG005
+        dbSession, 100001, llm_factory=lambda cfg: fake, llm_config=config,
     )
 
     assert result.risk_points_source == "llm"
     assert result.tokens_used == 180  # 120 + 60
-    assert result.cost > 0
     assert result.llm_model_name == "fake-risk-model"
     assert result.risk_points == "LLM 生成的风险描述"
+    # 120*0.5/1000 + 60*1.5/1000 = 0.15（USD）；旧硬编码会给出 0.00024
+    assert result.cost == pytest.approx(0.15)
 
 
 async def test_actions_per_level(dbSession: AsyncSession):

@@ -28,6 +28,7 @@ from app.domain.models import (
     OntologyJoin,
     OntologyMetric,
     OntologyProperty,
+    SessionQueryState,
 )
 from app.domain.query_plan import PlanResult, QueryPlan
 from app.domain.schemas import (
@@ -38,6 +39,7 @@ from app.domain.schemas import (
 )
 from app.services.chat_service import (
     ChatService,
+    _statePlan,
     _getClassLayer,
     _isDimensionHint,
     _isExplicitOdsRequest,
@@ -2624,3 +2626,49 @@ class TestClassLayerSelection:
         # ODS_DIM_* 是字典表，应保留
         cls = _mk_class(id=99, source_table="ODS_DIM_SUPPLIER")
         assert _getClassLayer(cls) == "ODS_DICT"
+
+
+class TestStatePlanObservability:
+    """M3：历史查询计划（DB JSONB）解析降级必须可观测，但**不收紧口径**。
+
+    历史 JSONB 可能来自旧版本或被直写破坏；收紧会让历史会话整段失败，
+    故只记 reason= 日志，并保持「返回计划（而非 None）」的既有语义——
+    REFINE 直写闸门看 `plan is None` 判成败，误判会把成功的重写判死。
+    """
+
+    @staticmethod
+    def _state(lastPlan: dict | None) -> SessionQueryState:
+        return SessionQueryState(
+            session_id="s1",
+            last_question="上一轮问题",
+            last_plan=lastPlan,
+            last_sql="SELECT 1",
+        )
+
+    def test_corrupt_history_plan_renders_and_logs_single_reason(self, caplog) -> None:
+        service, _, _, _ = _buildService()
+        state = self._state({"target": "查询", "joins": "A=B"})
+        with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+            prompt = service._buildStatePrompt(state, IntentType.REFINE)
+        assert "上一轮查询计划" in prompt
+        reasonLines = [r for r in caplog.records if "reason=" in r.getMessage()]
+        assert len(reasonLines) == 1
+        assert "reason=PLAN_HISTORY_DEGRADED" in reasonLines[0].getMessage()
+        assert "joins:PLAN_FIELD_NOT_A_LIST(str)" in reasonLines[0].getMessage()
+
+    def test_corrupt_history_plan_is_not_treated_as_none(self) -> None:
+        service, _, _, _ = _buildService()
+        plan = _statePlan(self._state({"target": "查询", "joins": "A=B"}))
+        assert plan is not None
+        assert plan.target == "查询"
+
+    def test_clean_history_plan_logs_nothing(self, caplog) -> None:
+        service, _, _, _ = _buildService()
+        with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+            service._buildStatePrompt(self._state({"target": "查询"}), IntentType.REFINE)
+        assert "reason=" not in caplog.text
+
+    def test_absent_last_plan_returns_none_without_logging(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+            assert _statePlan(self._state(None)) is None
+        assert "reason=" not in caplog.text

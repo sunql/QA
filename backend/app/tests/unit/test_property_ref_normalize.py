@@ -1,7 +1,7 @@
 """复合形式 property 名（'业务名 (alias)'）归一化的单元测试。
 
 触发场景：LLM 偶尔从 schema 渲染文本（业务名 (alias): 类型 (column=物理列)）原样
-抄 property_name，validatePlan 严格 token 匹配必拒。归一化在 _parsePlanFromResponse
+抄 property_name，validatePlan 严格 token 匹配必拒。归一化在 _parsePlanOutcome
 之后 / validatePlan 之前用本体合法引用集合把 'name (alias)' 替换成首个合法 token，
 让后续链路不感知复合形式。本测试覆盖拆分与归一化两个 helper 的所有行为分支。
 """

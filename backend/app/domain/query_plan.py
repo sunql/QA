@@ -7,6 +7,8 @@
 - 所有 dataclass frozen=True，杜绝原地修改。
 - from_dict 容忍缺失字段、非列表值、未知键与损坏的嵌套对象，
   保证读取历史状态（DB JSONB）或解析 LLM 回复时绝不抛错。
+- from_dictWithReport 与之语义相同，额外返回被丢弃片段的分类报告（M3）：
+  domain 层仍无日志 / 无 IO，由调用方决定怎么记。
 """
 
 from __future__ import annotations
@@ -14,6 +16,20 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any
+
+from app.domain.plan_drop import (
+    DROP_FIELD_NOT_A_LIST,
+    DROP_INTERPRETATION_NOT_STR,
+    DROP_ITEM_NOT_STR,
+    DROP_NESTED_INVALID,
+    DROP_NESTED_NOT_A_DICT,
+    DROP_NOT_A_DICT,
+    DROP_POSITIVE_INT_INVALID,
+    DROP_TARGET_NOT_STR,
+    PAYLOAD_FIELD,
+    PlanDrop,
+    PlanDropKey,
+)
 
 # 模型无法从本体匹配到任何表时的 target 约定值（见 nl2sql _buildPlanSystemPrompt 规则 2）
 UNANSWERABLE_TARGET = "无法回答"
@@ -101,6 +117,28 @@ class SortSpec:
     direction: str = "asc"  # asc | desc
 
 
+class _DropCollector:
+    """按 (field, reason, rawType) 聚合丢弃计数。
+
+    有意的可变累加器：生命周期仅限单次 from_dictWithReport 调用，不跨调用共享，
+    聚合是为了让日志单行且不随垃圾条目数量膨胀（LLM 返回 50 条垃圾 → 一行 x50）。
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[PlanDropKey, int] = {}
+
+    def record(self, field: str, reason: str, value: Any) -> _DropCollector:
+        key = (field, reason, type(value).__name__)
+        self._counts[key] = self._counts.get(key, 0) + 1
+        return self
+
+    def freeze(self) -> tuple[PlanDrop, ...]:
+        return tuple(
+            PlanDrop(field=field, reason=reason, rawType=rawType, count=count)
+            for (field, reason, rawType), count in self._counts.items()
+        )
+
+
 @dataclass(frozen=True)
 class QueryPlan:
     """NL2SQL 查询计划（ReAct 推理阶段的产物，不可变）。
@@ -160,31 +198,59 @@ class QueryPlan:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "QueryPlan":
-        """从 dict 反序列化，容忍一切损坏输入，绝不抛错。
+    def from_dict(cls, data: dict[str, Any]) -> QueryPlan:
+        """从 dict 反序列化，容忍一切损坏输入，绝不抛错（丢弃细节见 from_dictWithReport）。"""
+        plan, _ = cls.from_dictWithReport(data)
+        return plan
 
-        - 非 dict 输入 → 空计划
-        - 非列表值 → 空集合；列表中的非字符串 → 过滤
-        - 嵌套对象：仅取已知字段，缺必填字段或类型不符 → 跳过该条目
+    @classmethod
+    def from_dictWithReport(
+        cls, data: dict[str, Any]
+    ) -> tuple[QueryPlan, tuple[PlanDrop, ...]]:
+        """同 from_dict，但额外返回**被丢弃片段**的分类报告（M3）。
+
+        语义与 from_dict 完全一致（同一实现，from_dict 只是丢弃报告），报告供调用方
+        单点写日志：静默丢弃掩盖根因，而抛错会破坏「历史 JSONB 可读」的既有契约，
+        故取「照旧容错 + 分类上报」而非二选一。
+
+        - 非 dict 输入 → 空计划 + 一条整载荷丢弃
+        - 非列表值 → 空集合 + 丢弃记录；列表中的非字符串 → 过滤并按类型聚合计数
+        - 嵌套对象：仅取已知字段，非 dict / 缺必填字段 → 跳过该条目 + 丢弃记录
         """
+        drops = _DropCollector()
         if not isinstance(data, dict):
-            return cls(target="")
+            return cls(target=""), drops.record(
+                PAYLOAD_FIELD, DROP_NOT_A_DICT, data
+            ).freeze()
 
-        def _list(raw: Any) -> list[Any]:
-            return raw if isinstance(raw, list) else []
+        def _list(key: str) -> list[Any]:
+            raw = data.get(key)
+            if raw is None:
+                return []
+            if not isinstance(raw, list):
+                drops.record(key, DROP_FIELD_NOT_A_LIST, raw)
+                return []
+            return raw
 
-        def _strings(raw: Any) -> tuple[str, ...]:
-            return tuple(s for s in _list(raw) if isinstance(s, str))
+        def _strings(key: str) -> tuple[str, ...]:
+            out: list[str] = []
+            for item in _list(key):
+                if isinstance(item, str):
+                    out.append(item)
+                else:
+                    drops.record(key, DROP_ITEM_NOT_STR, item)
+            return tuple(out)
 
         def _nested(
-            raw: Any,
-            fieldNames: set[str],
+            key: str,
             factory: type,
             tupleFields: tuple[str, ...] = (),
         ) -> tuple[Any, ...]:
+            fieldNames = set(factory.__dataclass_fields__)
             out: list[Any] = []
-            for entry in _list(raw):
+            for entry in _list(key):
                 if not isinstance(entry, dict):
+                    drops.record(key, DROP_NESTED_NOT_A_DICT, entry)
                     continue
                 filtered = {k: v for k, v in entry.items() if k in fieldNames}
                 # 元组类型字段：JSON 里是 list，统一转 tuple 以保持类型契约
@@ -192,7 +258,8 @@ class QueryPlan:
                     if tf in filtered and isinstance(filtered[tf], list):
                         filtered[tf] = tuple(filtered[tf])
                 # join.columns 契约是列名数组，但 LLM 偶发写成 "A = B" 等式 ——
-                # 解析出口一次性拆分自愈（详见 _normalizeJoinColumnToken）
+                # 解析出口一次性拆分自愈（详见 _normalizeJoinColumnToken；
+                # 这是归一不是丢弃，故不上报）
                 if factory is JoinSpec and "columns" in filtered:
                     filtered["columns"] = tuple(
                         part
@@ -203,25 +270,37 @@ class QueryPlan:
                 try:
                     out.append(factory(**filtered))
                 except TypeError:
+                    drops.record(key, DROP_NESTED_INVALID, None)
                     continue  # 缺必填字段等：跳过损坏条目
             return tuple(out)
 
         target = data.get("target", "")
+        if not isinstance(target, str):
+            drops.record("target", DROP_TARGET_NOT_STR, target)
         interpretation = data.get("interpretation")
-        return cls(
+        if interpretation is not None and not isinstance(interpretation, str):
+            drops.record("interpretation", DROP_INTERPRETATION_NOT_STR, interpretation)
+        perGroupLimit = _coercePositiveInt(data.get("perGroupLimit"))
+        if perGroupLimit is None and data.get("perGroupLimit") is not None:
+            drops.record("perGroupLimit", DROP_POSITIVE_INT_INVALID, data["perGroupLimit"])
+
+        plan = cls(
             target=target if isinstance(target, str) else "",
-            selectedClasses=_strings(data.get("selectedClasses")),
-            selectedProperties=_strings(data.get("selectedProperties")),
-            conditions=_strings(data.get("conditions")),
-            aggregations=_nested(data.get("aggregations"), set(Aggregation.__dataclass_fields__), Aggregation),
-            groupBy=_strings(data.get("groupBy")),
-            joins=_nested(data.get("joins"), set(JoinSpec.__dataclass_fields__), JoinSpec, ("columns",)),
-            sortBy=_nested(data.get("sortBy"), set(SortSpec.__dataclass_fields__), SortSpec),
+            selectedClasses=_strings("selectedClasses"),
+            selectedProperties=_strings("selectedProperties"),
+            conditions=_strings("conditions"),
+            aggregations=_nested("aggregations", Aggregation),
+            groupBy=_strings("groupBy"),
+            joins=_nested("joins", JoinSpec, ("columns",)),
+            sortBy=_nested("sortBy", SortSpec),
+            # rowLimit 不做类型校验是既有设计：下游 _coerceRowLimit 会归一化
+            # （nl2sql_service.py:926 明示依赖此契约），故这里既不过滤也不上报。
             rowLimit=data.get("rowLimit"),
-            partitionBy=_strings(data.get("partitionBy")),
-            perGroupLimit=_coercePositiveInt(data.get("perGroupLimit")),
+            partitionBy=_strings("partitionBy"),
+            perGroupLimit=perGroupLimit,
             interpretation=interpretation if isinstance(interpretation, str) else None,
         )
+        return plan, drops.freeze()
 
 
 @dataclass(frozen=True)

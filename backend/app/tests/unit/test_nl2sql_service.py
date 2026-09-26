@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date as _date
 from types import SimpleNamespace
 
@@ -1001,7 +1002,7 @@ class TestGenerateSql:
 
     async def test_plan_prompt_contains_row_limit_rule(self) -> None:
         """18：计划阶段 system prompt 必须引导模型按"是否有范围"填 rowLimit。"""
-        fake = _FakeLlm(["```json\n{} \n```"])
+        fake = _FakeLlm(['{"target": "查询"}'])
         service = Nl2SqlService()
         cls = _buildClass("PRECEIPT", "ZJTH.PRECEIPT", alias="收货单")
         await service.generateQueryPlan("列出所有收货记录", [cls], fake, _llmConfig())
@@ -1104,7 +1105,7 @@ class TestPriorStateDirectiveForEntityList:
 
     async def test_plan_prompt_injects_strong_directive_when_prior_state(self) -> None:
         """plan 阶段在 priorState 非空时注入 WHERE IN 强指令。"""
-        fake = _FakeLlm(["{}"])
+        fake = _FakeLlm(['{"target": "查询"}'])
         service = Nl2SqlService()
         cls = _buildClass("PRECEIPT", "ZJTH.PRECEIPT", alias="收货单")
         prior = "<entity_list>\nMATERIAL_ID: M001, M002\n</entity_list>"
@@ -1135,7 +1136,7 @@ class TestPriorStateDirectiveForEntityList:
 
     async def test_plan_prompt_no_prior_state_block(self) -> None:
         """priorState 为空时 plan prompt 不含 <previous_query_state> 段（不污染单步路径）。"""
-        fake = _FakeLlm(["{}"])
+        fake = _FakeLlm(['{"target": "查询"}'])
         service = Nl2SqlService()
         cls = _buildClass("PRECEIPT", "ZJTH.PRECEIPT", alias="收货单")
         await service.generateValidatedPlan(
@@ -1146,7 +1147,7 @@ class TestPriorStateDirectiveForEntityList:
 
     async def test_plan_and_sql_prompts_share_directive_text(self) -> None:
         """plan 与 sql prompt 的强指令段文案必须一致（_renderStatePart 共享）。"""
-        fakePlan = _FakeLlm(["{}"])
+        fakePlan = _FakeLlm(['{"target": "查询"}'])
         service = Nl2SqlService()
         cls = _buildClass("PRECEIPT", "ZJTH.PRECEIPT", alias="收货单")
         prior = "<entity_list>\nMATERIAL_ID: M001, M002\n</entity_list>"
@@ -1495,7 +1496,7 @@ class TestPerGroupTopNPrompts:
         )
 
     async def test_plan_prompt_guides_per_group_topn(self) -> None:
-        fake = _FakeLlm(["```json\n{}\n```"])
+        fake = _FakeLlm(['{"target": "查询"}'])
         service = Nl2SqlService()
         await service.generateQueryPlan(
             "分别看这三个供应商供货量最大的三种物料", [self._cls()], fake, _llmConfig(),
@@ -1846,3 +1847,136 @@ class TestGlobalConstraintsPromptInjection:
         userContent = fake.calls[0][1][1]
         assert "[global_constraints]" in userContent
         assert "TCLCOD_0" in userContent
+
+
+class TestPlanParseObservability:
+    """M3：计划解析按原因分类可观测 + 全空计划判失败。
+
+    - 解析失败（空候选 / 无 JSON / JSON 坏 / 非对象 / **全空计划**）各有独立 reason
+    - 内容级丢弃（字段类型损坏）不失败但上报 reason=+drops=
+    - 全空计划必须走重试路径，不得直接进 SQL 生成（模型会自由编造表名）
+    """
+
+    def _cls(self) -> OntologyClass:
+        return _buildClass(
+            "PRECEIPT",
+            "ZJTH.PRECEIPT",
+            props=[
+                {"property_name": "BPSNUM", "source_column": "BPSNUM"},
+                {"property_name": "QTY", "source_column": "QTY"},
+            ],
+        )
+
+    # ---- 全空计划判失败 ----
+
+    def test_empty_json_object_is_parse_failure(self) -> None:
+        service = Nl2SqlService()
+        assert service._parsePlanOutcome("{}").plan is None
+
+    def test_whitespace_target_is_parse_failure(self) -> None:
+        service = Nl2SqlService()
+        assert service._parsePlanOutcome('{"target": "   "}').plan is None
+
+    def test_plan_with_only_interpretation_is_parse_failure(self) -> None:
+        """只有解释没有查询意图：不是计划（interpretation 不算可查目标）。"""
+        service = Nl2SqlService()
+        assert service._parsePlanOutcome('{"interpretation": "用户想查收货量"}').plan is None
+
+    def test_minimal_plan_with_target_is_accepted(self) -> None:
+        service = Nl2SqlService()
+        outcome = service._parsePlanOutcome('{"target": "查询"}')
+        assert outcome.plan is not None
+        assert outcome.reason is None
+
+    def test_plan_with_references_but_blank_target_is_accepted(self) -> None:
+        """引用非空的计划不属于「全空」——判定取最窄口径，避免误杀。"""
+        service = Nl2SqlService()
+        outcome = service._parsePlanOutcome('{"target": "", "selectedClasses": ["PRECEIPT"]}')
+        assert outcome.plan is not None
+
+    def test_unanswerable_plan_is_not_treated_as_empty(self) -> None:
+        """target=无法回答 是**合法**空计划（模型判定超范围），必须放行。"""
+        service = Nl2SqlService()
+        outcome = service._parsePlanOutcome(json.dumps({"target": "无法回答"}))
+        assert outcome.plan is not None
+        assert outcome.plan.isUnanswerable is True
+
+    # ---- 失败原因分类 ----
+
+    @pytest.mark.parametrize(
+        ("content", "reason"),
+        [
+            ("", "PLAN_REPLY_EMPTY"),
+            ("抱歉，我无法回答这个问题。", "PLAN_REPLY_NO_JSON"),
+            # 顶层数组同样没有 JSON 对象 → NO_JSON（解析器裁剪后必然以 '{' 开头，
+            # 「JSON 合法但非对象」分支不可达，故无独立 reason）
+            ('["不是对象"]', "PLAN_REPLY_NO_JSON"),
+            ("{不是合法 JSON}", "PLAN_REPLY_JSON_INVALID"),
+            ("{" + "x" * (64 * 1024 + 1), "PLAN_REPLY_TOO_LARGE"),
+            ("{}", "PLAN_EMPTY"),
+        ],
+    )
+    def test_each_failure_path_has_a_distinct_reason(self, content: str, reason: str) -> None:
+        outcome = Nl2SqlService()._parsePlanOutcome(content)
+        assert outcome.plan is None
+        assert outcome.reason == reason
+
+    # ---- 内容级丢弃上报（不失败）----
+
+    def test_corrupt_field_is_reported_without_failing(self) -> None:
+        outcome = Nl2SqlService()._parsePlanOutcome(
+            '{"target": "查询", "selectedClasses": "PRECEIPT"}'
+        )
+        assert outcome.plan is not None
+        assert [d.reason for d in outcome.drops] == ["PLAN_FIELD_NOT_A_LIST"]
+        assert outcome.drops[0].field == "selectedClasses"
+
+    def test_clean_plan_has_no_drops(self) -> None:
+        outcome = Nl2SqlService()._parsePlanOutcome('{"target": "查询"}')
+        assert outcome.drops == ()
+
+    # ---- 端到端：重试与日志 ----
+
+    async def test_empty_plan_retries_and_succeeds_on_second_attempt(self) -> None:
+        fake = _FakeLlm(["{}", '{"target": "查询"}'])
+        service = Nl2SqlService()
+        result = await service.generateQueryPlan("收货数量", [self._cls()], fake, _llmConfig())
+        assert result.plan.target == "查询"
+        assert len(fake.calls) == 2
+        # 重试反馈沿用既有文案（"未能从回复中解析出查询计划"）
+        assert "解析" in fake.calls[1][1][1]
+
+    async def test_empty_plan_exhausts_retries_and_raises(self) -> None:
+        fake = _FakeLlm(["{}"])
+        service = Nl2SqlService()
+        with pytest.raises(Nl2SqlError):
+            await service.generateQueryPlan(
+                "收货数量", [self._cls()], fake, _llmConfig(), maxRetries=0
+            )
+
+    async def test_parse_failure_logs_single_reason_line(self, caplog) -> None:
+        """一次失败恰好一条 reason= 行（供按原因聚合失败率）。"""
+        fake = _FakeLlm(["抱歉，我无法回答。"])
+        service = Nl2SqlService()
+        with (
+            caplog.at_level(logging.WARNING, logger="app.services.nl2sql_service"),
+            pytest.raises(Nl2SqlError),
+        ):
+            await service.generateQueryPlan(
+                "收货数量", [self._cls()], fake, _llmConfig(), maxRetries=0
+            )
+        reasonLines = [r for r in caplog.records if "reason=" in r.getMessage()]
+        assert len(reasonLines) == 1
+        assert "reason=PLAN_REPLY_NO_JSON" in reasonLines[0].getMessage()
+
+    async def test_degraded_plan_logs_reason_and_drops(self, caplog) -> None:
+        fake = _FakeLlm(['{"target": "查询", "groupBy": "BPSNUM"}'])
+        service = Nl2SqlService()
+        with caplog.at_level(logging.WARNING, logger="app.services.nl2sql_service"):
+            result = await service.generateQueryPlan(
+                "收货数量", [self._cls()], fake, _llmConfig()
+            )
+        assert result.plan.target == "查询"
+        text = caplog.text
+        assert "reason=PLAN_DEGRADED" in text
+        assert "groupBy:PLAN_FIELD_NOT_A_LIST(str)" in text

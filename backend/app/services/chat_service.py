@@ -65,6 +65,7 @@ from app.domain.chained_step_plan import (
     StepResult as ChainedStepResult,
     render_prior_cte,
 )
+from app.domain.plan_drop import formatPlanDrops
 from app.domain.query_plan import QueryPlan, planToText
 from app.domain.schemas import (
     AffinityStatus,
@@ -183,6 +184,11 @@ _CONTEXT_PROMPT_CHAR_BUDGET = 4000
 # 3-4：recent_rounds 保留的"更早轮次"快照上限（不含当前 last_*）。新到旧排列，
 # 超限丢弃最旧。取与 _CONTEXT_ROUNDS 一致的量级，保持跨轮回溯与历史注入口径相同。
 _RECENT_ROUNDS_LIMIT = 5
+
+# M3：历史查询计划（session_query_state.last_plan JSONB）解析出现内容级丢弃时的
+# 日志 reason。历史可能来自旧版本或被直写破坏 —— 只上报，**不收紧**解析口径：
+# 收紧会让历史会话整段失败（_buildStatePrompt 拿不到计划、REFINE 直写被误判失败）。
+_REASON_PLAN_HISTORY_DEGRADED = "PLAN_HISTORY_DEGRADED"
 
 # feat-follow-up-cascade C 兜底：触发追问重试的短句上限。省略式追问（"4月份呢？"）
 # 是短句特征；长句不可回答更可能是真正的新问题（N6 权衡），重试只会空耗 token。
@@ -353,10 +359,22 @@ def _speakerFor(role: str) -> str:
 
 
 def _statePlan(state: SessionQueryState) -> QueryPlan | None:
-    """解析上一轮查询计划；last_plan 缺失返回 None（from_dict 对损坏输入全容错）。"""
+    """解析上一轮查询计划；last_plan 缺失返回 None（对损坏输入全容错）。
+
+    M3：内容级丢弃（字段类型损坏等）单点记一条 reason= 日志。**不收紧**口径——
+    返回空计划而非 None：调用点（REFINE 直写闸门 `plan is None`）以 None 判成败，
+    收紧会把成功的重写判死；历史 JSONB 也可能来自旧版本。
+    """
     if not state.last_plan:
         return None
-    return QueryPlan.from_dict(state.last_plan)
+    plan, drops = QueryPlan.from_dictWithReport(state.last_plan)
+    if drops:
+        logger.warning(
+            "历史查询计划解析降级 reason=%s drops=%s",
+            _REASON_PLAN_HISTORY_DEGRADED,
+            formatPlanDrops(drops),
+        )
+    return plan
 
 
 def _snapshotRound(state: SessionQueryState) -> dict[str, Any]:

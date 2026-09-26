@@ -18,6 +18,7 @@ from app.config import getSettings
 from app.domain.enums import DataSourceType
 from app.domain.exceptions import Nl2SqlError, SqlSafetyError
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
+from app.domain.plan_drop import PlanDrop, formatPlanDrops
 from app.domain.query_plan import Aggregation, JoinSpec, PlanResult, QueryPlan, planToText
 from app.infrastructure.business_db_pool import _assert_read_only
 from app.services.formula_parser import parseFormula
@@ -41,6 +42,53 @@ _ERROR_SNIPPET_LIMIT = 200
 
 # 查询计划 JSON 最大长度（字符），防止异常大响应耗尽内存
 _MAX_PLAN_JSON_BYTES = 64 * 1024
+
+# ---------------------------------------------------------------------------
+# 计划解析观测性（M3）：失败原因分类。
+# 每类失败沿日志单点输出 `reason=<常量>`，供按原因聚合失败率；常量即日志契约，
+# 改名等于改监控口径，新增原因须同步 test_nl2sql_service.TestPlanParseObservability。
+# ---------------------------------------------------------------------------
+REASON_PLAN_REPLY_EMPTY = "PLAN_REPLY_EMPTY"  # 回复里没有可解析内容
+REASON_PLAN_REPLY_NO_JSON = "PLAN_REPLY_NO_JSON"  # 回复里找不到 JSON 起始
+REASON_PLAN_REPLY_TOO_LARGE = "PLAN_REPLY_TOO_LARGE"  # JSON 超过大小上限
+REASON_PLAN_REPLY_JSON_INVALID = "PLAN_REPLY_JSON_INVALID"  # JSON 语法坏
+REASON_PLAN_EMPTY = "PLAN_EMPTY"  # 解析成功但计划全空（判失败，走重试）
+REASON_PLAN_DEGRADED = "PLAN_DEGRADED"  # 解析成功但有内容级丢弃（不失败，仅上报）
+
+
+def _isEmptyPlan(plan: QueryPlan) -> bool:
+    """计划是否「全空」：无 target、无任何引用/条件/聚合/分组/排序/限制。
+
+    全空计划能通过 validatePlan（没有任何可校验的引用），随后被送进 SQL 生成，
+    模型得以自由编造表名（结果报错被包装成"服务内部错误"）。故判为解析失败走重试，
+    用尽后落到"无法回答"。
+
+    判定取**最窄口径**（所有字段都空才算空），且 `target="无法回答"` 的合法空计划
+    不受影响（isUnanswerable 走自己的短路路径）。interpretation 不计入：它只是解释，
+    不是可查询目标。
+    """
+    return not (
+        plan.target.strip()
+        or plan.selectedClasses
+        or plan.selectedProperties
+        or plan.conditions
+        or plan.aggregations
+        or plan.groupBy
+        or plan.joins
+        or plan.sortBy
+        or plan.partitionBy
+        or plan.rowLimit is not None
+        or plan.perGroupLimit is not None
+    )
+
+
+@dataclass(frozen=True)
+class _PlanParseOutcome:
+    """计划解析结果（不可变）：plan 为 None 时 reason 必非空。"""
+
+    plan: QueryPlan | None
+    reason: str | None = None
+    drops: tuple[PlanDrop, ...] = ()
 
 # schema 前缀（数据源用户名）仅允许合法标识符，防止提示注入
 _SCHEMA_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -163,7 +211,7 @@ def _normalizePlanProperties(
     返回新 plan（frozen dataclass 不允许原地修改）；空 classes 时直接返回。
 
     触发场景：LLM 偶尔把 schema 渲染格式 '供应商 (BPSNUM_0)' 原样抄进 property_name，
-    validatePlan 严格 token 匹配永远 false → 整轮失败；本函数在 _parsePlanFromResponse
+    validatePlan 严格 token 匹配永远 false → 整轮失败；本函数在 _parsePlanOutcome
     之后 / SQL 生成之前替换，让后续链路不感知复合形式（2026-09-18 真实回归）。
     """
     if not classes:
@@ -1616,12 +1664,24 @@ class Nl2SqlService:
             )
             totalPrompt += response.promptTokens
             totalCompletion += response.completionTokens
-            plan = self._parsePlanFromResponse(response.content)
-            if plan is None:
+            outcome = self._parsePlanOutcome(response.content)
+            if outcome.plan is None:
+                # 单点 reason= 日志：按原因聚合失败率（M3 观测性）
+                logger.warning(
+                    "NL2SQL 计划解析失败 attempt=%d reason=%s", attempt + 1, outcome.reason
+                )
                 errors.append(f"第 {attempt + 1} 次尝试未能从回复中解析出查询计划")
-                logger.warning("NL2SQL 计划解析失败 attempt=%d", attempt + 1)
                 continue
-            return PlanResult(plan=plan, promptTokens=totalPrompt, completionTokens=totalCompletion)
+            if outcome.drops:
+                logger.warning(
+                    "NL2SQL 计划解析降级 attempt=%d reason=%s drops=%s",
+                    attempt + 1,
+                    REASON_PLAN_DEGRADED,
+                    formatPlanDrops(outcome.drops),
+                )
+            return PlanResult(
+                plan=outcome.plan, promptTokens=totalPrompt, completionTokens=totalCompletion
+            )
 
         raise Nl2SqlError(
             MSG_NL2SQL_PLAN_INVALID,
@@ -1931,33 +1991,36 @@ class Nl2SqlService:
             return [f"以下表无法通过关联路径连通：{', '.join(disconnected)}，请通过中间表建立 JOIN"]
         return []
 
-    def _parsePlanFromResponse(self, content: str) -> QueryPlan | None:
-        """从 LLM 回复解析查询计划：优先 ```json fence，其次裸 JSON 对象。"""
+    def _parsePlanOutcome(self, content: str) -> _PlanParseOutcome:
+        """从 LLM 回复解析查询计划：优先 ```json fence，其次裸 JSON 对象。
+
+        失败不再静默：每种失败各有独立 reason，由调用方（重试循环）单点写日志。
+        全空计划视为失败（see _isEmptyPlan）：它能通过 validatePlan，会直接进 SQL
+        生成让模型自由编造表名。
+        """
         match = _JSON_FENCE_RE.search(content)
         candidate = match.group(1) if match else content.strip()
         if not candidate:
-            return None
+            return _PlanParseOutcome(None, REASON_PLAN_REPLY_EMPTY)
         if not candidate.startswith("{"):
             # 尝试定位 JSON 起始
             brace = candidate.find("{")
             if brace == -1:
-                return None
+                return _PlanParseOutcome(None, REASON_PLAN_REPLY_NO_JSON)
             candidate = candidate[brace:]
         if len(candidate.encode("utf-8")) > _MAX_PLAN_JSON_BYTES:
-            logger.warning("查询计划 JSON 超过大小上限，拒绝解析")
-            return None
+            return _PlanParseOutcome(None, REASON_PLAN_REPLY_TOO_LARGE)
         try:
             data = json.loads(candidate)
         except (json.JSONDecodeError, TypeError):
-            return None
-        if not isinstance(data, dict):
-            return None
-        try:
-            return QueryPlan.from_dict(data)
-        except (TypeError, ValueError):
-            # 计划结构损坏（如嵌套对象缺必填字段）：视为解析失败，走重试
-            logger.warning("查询计划结构损坏，解析失败")
-            return None
+            return _PlanParseOutcome(None, REASON_PLAN_REPLY_JSON_INVALID)
+        # 注：这里不需要 isinstance(data, dict) 兜底——上面的候选裁剪保证 candidate
+        # 必以 '{' 开头，而 JSON 里以 '{' 开头的合法值只能是对象（数组是 '['）。
+        # 该分支确为不可达死代码，2026-09-26 随 M3 观测性改造删除。
+        plan, drops = QueryPlan.from_dictWithReport(data)
+        if _isEmptyPlan(plan):
+            return _PlanParseOutcome(None, REASON_PLAN_EMPTY, drops)
+        return _PlanParseOutcome(plan, None, drops)
 
     async def generateSql(
         self,

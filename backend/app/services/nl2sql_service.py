@@ -23,6 +23,7 @@ from app.domain.query_plan import Aggregation, JoinSpec, PlanResult, QueryPlan, 
 from app.infrastructure.business_db_pool import _assert_read_only
 from app.services.formula_parser import parseFormula
 from app.infrastructure.llm.base_client import LlmMessage
+from app.services.llm_retry_policy import completeWithTransientRetry
 from app.services.messages_zh import (
     MSG_NL2SQL_PLAN_INVALID,
     MSG_NL2SQL_PLAN_VALIDATION_FAILED,
@@ -1691,7 +1692,8 @@ class Nl2SqlService:
                 scopeQuestion=scopeQuestion,
                 globalFiltersText=globalFiltersText,
             )
-            response = await llmClient.complete(
+            response = await completeWithTransientRetry(
+                llmClient,
                 messages=[
                     LlmMessage(role="system", content=systemPrompt),
                     LlmMessage(role="user", content=userPrompt),
@@ -1699,6 +1701,10 @@ class Nl2SqlService:
                 model=modelConfig.model_name,
                 temperature=modelConfig.temperature if modelConfig and modelConfig.temperature is not None else 0.0,
                 maxTokens=_NL2SQL_MAX_TOKENS,
+                # M4：仅首轮允许额外一次同模型重试（预算 (maxRetries+1)+1），
+                # 并把此前各轮已累加的用量挂到任何逃逸的异常上。
+                allowRetry=attempt == 0,
+                consumedTokenCounts=(totalPrompt, totalCompletion),
             )
             totalPrompt += response.promptTokens
             totalCompletion += response.completionTokens
@@ -2071,7 +2077,6 @@ class Nl2SqlService:
         # 满足「结构损坏 → 重试」。⚠️ 若日后给 QueryPlan 加必填字段或 __post_init__
         # 校验，这个不变量会失效、异常将穿透重试循环（2026-09-26 code-reviewer 提示）。
         plan, drops = QueryPlan.from_dictWithReport(data)
-        plan, drops = QueryPlan.from_dictWithReport(data)
         if _isEmptyPlan(plan):
             return _PlanParseOutcome(None, REASON_PLAN_EMPTY, drops)
         return _PlanParseOutcome(plan, None, drops)
@@ -2149,7 +2154,8 @@ class Nl2SqlService:
                 prior_cte=prior_cte,
             )
             userPrompt = self._buildUserPrompt(question, errors, executionError, scopeQuestion=scopeQuestion)
-            response = await llmClient.complete(
+            response = await completeWithTransientRetry(
+                llmClient,
                 messages=[
                     LlmMessage(role="system", content=systemPrompt),
                     LlmMessage(role="user", content=userPrompt),
@@ -2157,6 +2163,9 @@ class Nl2SqlService:
                 model=modelConfig.model_name,
                 temperature=modelConfig.temperature if modelConfig and modelConfig.temperature is not None else 0.0,
                 maxTokens=maxTokens,
+                # M4：同计划阶段——仅首轮额外一次重试，逃逸异常带已累加用量。
+                allowRetry=attempt == 0,
+                consumedTokenCounts=(totalPrompt, totalCompletion),
             )
             totalPrompt += response.promptTokens
             totalCompletion += response.completionTokens

@@ -32,12 +32,6 @@ from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from tenacity import (
-    AsyncRetrying,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from app.dependencies import CurrentUser
 from app.domain.enums import ChartType, IntentType
@@ -106,6 +100,17 @@ from app.services.messages_zh import (
     MSG_SUPPLIER_RISK_NOT_FOUND,
 )
 from app.services.model_router_service import ModelRouterService, RoutingContext
+# M4：重试判定 / 退避 / 用量携带通道的 SSOT 在叶子模块 `llm_retry_policy`
+# （`nl2sql_service` 也要用，放进本模块会成环）。这里按**既有私有名**重新导出：
+# 模块内的消费点与 `test_fallback_backoff.py` / `test_chat_step_error_text.py`
+# 的引用都不用改。⚠️ 别在本模块另写一份判定（一个库两条重试策略是腐化起点）。
+from app.services.llm_retry_policy import (
+    attachRetryGenTokens as _attachRetryGenTokens,
+    callWithRetryBackoff as _callWithRetryBackoff,
+    consumedTokens,
+    isRetryableLlmError as _isRetryableLlmError,
+    retryGenTokens as _retryGenTokens,
+)
 from app.services.nl2sql_service import Nl2SqlService, SqlResult, _safeSchemaPrefix, _sanitizeContext
 from app.services.ontology_service import OntologyService
 from app.services.step_aggregator import StepAggregator
@@ -486,27 +491,8 @@ def _stepFailedError(exc: Exception, prefix: str) -> str:
     return prefix + _clipText(text, _STEP_FAILED_ERROR_LIMIT)
 
 
-# 挂在异常上的私有属性名：携带「重试生成已消耗」的 token（见 _attachRetryGenTokens）
-_RETRY_GEN_TOKENS_ATTR = "_retryGenTokens"
-
-
-def _attachRetryGenTokens(exc: Exception, tokens: tuple[int, int]) -> None:
-    """把「重试生成已花掉」的 token 挂到上抛的执行异常上。
-
-    两个分支都要挂：重试生成成功但重试执行又失败（用 `SqlResult` 带的用量），以及
-    重试生成**自己**失败（用 `_consumedTokens(genErr)` 取 `Nl2SqlError.tokens`）——
-    两种情形都真的调了 LLM，都必须在失败路径上留账。
-
-    只挂私有属性，**不改异常类型与消息**（API 层按类型映射 HTTP 状态，改类型会连带
-    改变对外错误契约），调用方用 `_retryGenTokens` 取回记账。与 `_consumedTokens`
-    对 `Nl2SqlError.tokens` 的处理同一思路。
-    """
-    setattr(exc, _RETRY_GEN_TOKENS_ATTR, tokens)
-
-
-def _retryGenTokens(exc: Exception) -> tuple[int, int]:
-    """提取异常携带的「重试生成」token；无法计量时返回 (0, 0)。"""
-    return getattr(exc, _RETRY_GEN_TOKENS_ATTR, (0, 0)) or (0, 0)
+# 「重试生成已消耗」的 token 挂在异常上传递：实现与属性名见 `llm_retry_policy`
+# （`_attachRetryGenTokens` / `_retryGenTokens` 由该模块重新导出，见文件头 import）。
 
 
 # M7：回灌重试的**二次失败**详情。此前只进一行服务端日志，用户可见的步骤文案只报
@@ -584,80 +570,10 @@ def _hasDataStepResult(completed: list[StepResult]) -> bool:
     return any(r.sql is not None for r in completed)
 
 
-# feat-chat-concurrency: fallback 重试判定 + tenacity 退避。
-# 默认 retryable 以兼容旧测试（注入的合成 LlmClientError 无 status_code），
-# 仅当能**确定性判定**为 4xx 永久错误（401/403/400）时才不走 fallback。
-# 这样不会改变既有 fallback 行为，只在「明确不该重试」时拦截。
-_RETRYABLE_LLM_ERROR_HINTS = (
-    "429",
-    "rate limit",
-    "rate_limit",
-    "503",
-    "service unavailable",
-    "timeout",
-    "timed out",
-    "temporarily unavailable",
-    "connection reset",
-    "connection aborted",
-)
-
-
-def _isRetryableLlmError(exc: Exception) -> bool:
-    """判断 LLM 异常是否值得 fallback + 重试。
-
-    默认 True（兼容旧 fallback 行为：任何 LlmClientError 都触发降级）。
-    仅当 ``__cause__`` 携带**确定性** 4xx status_code（401/403/400 等永久
-    错误）时才返回 False，跳过 fallback 与重试。Nl2SqlError 一律视为可重试。
-
-    「默认 True」是保守选择：宁可让 fallback 在某些边缘情况下多跑一次（fallback
-    模型自身仍会被自己的 _callWithFallback 拦截），也不要因为误判把真正可恢复
-    的请求直接抛掉。生产中真实 LLM 异常一定有 __cause__ 的 status_code 字段
-    （OpenAI SDK / aiohttp 都带），所以 4xx 仍会被精确拦截。
-    """
-    if isinstance(exc, Nl2SqlError):
-        return True
-    if not isinstance(exc, LlmClientError):
-        return False
-    # 唯一确定的「不可重试」信号：__cause__ 携带 4xx status_code（排除 429）
-    cause = getattr(exc, "__cause__", None)
-    if cause is not None:
-        status = getattr(cause, "status_code", None) or getattr(cause, "status", None)
-        if status is not None:
-            try:
-                code = int(status)
-            except (TypeError, ValueError):
-                code = 0
-            # 429 是 rate limit（4xx 但属临时故障），应走 fallback
-            if code == 429:
-                return True
-            # 其他 4xx（400/401/403）→ 永久错误，不重试
-            if 400 <= code < 500:
-                return False
-            # 5xx（含 503）→ 临时故障，可重试
-            if 500 <= code < 600:
-                return True
-    # 默认 retryable（兼容既有行为 + 测试场景）
-    return True
-
-
-async def _callWithRetryBackoff(
-    caller: "FallbackCaller", fallback: LlmConfig
-) -> Any:
-    """tenacity 包装：最多 2 次尝试（1+1 重试），指数退避 1s~4s。
-
-    仅对 LlmClientError 重试——其它异常（编程错误、配置错误）立即抛出。
-    ``reraise=True`` 让最终异常保持原类型，方便上层 catch。
-    """
-    async for attempt in AsyncRetrying(
-        stop=stop_after_attempt(2),
-        wait=wait_exponential(multiplier=1, min=1, max=4),
-        retry=retry_if_exception_type(LlmClientError),
-        reraise=True,
-    ):
-        with attempt:
-            return await caller(fallback)
-    # 不可达：AsyncRetrying 总会 raise 或 yield 一次
-    raise RuntimeError("unreachable")
+# feat-chat-concurrency: fallback 重试判定 + tenacity 退避的实现已移到
+# `llm_retry_policy`（M4：nl2sql 的同模型重试必须用同一套判定与退避）。
+# 本模块按私有名重新导入：`_isRetryableLlmError`（本文件 `_callWithFallback`
+# 在降级前过滤永久错误）、`_callWithRetryBackoff`（降级模型的重试包装）。
 
 
 LlmFactory = Callable[[Any], BaseLlmClient]
@@ -4544,10 +4460,13 @@ class ChatService(ChatStreamOutputMixin):
 
     @staticmethod
     def _consumedTokens(exc: Exception) -> tuple[int, int]:
-        """提取异常携带的已消耗 token；无法计量时返回 (0, 0)。"""
-        if isinstance(exc, Nl2SqlError) and exc.tokens is not None:
-            return exc.tokens
-        return 0, 0
+        """提取异常携带的已消耗 token；无法计量时返回 (0, 0)。
+
+        委托 `llm_retry_policy.consumedTokens`（SSOT）：`Nl2SqlError.tokens` 之外
+        还读「逃逸异常上补挂的累计用量」（M4）—— 否则多轮生成中途抛错时，
+        前几轮已测得的 token 会静默消失。
+        """
+        return consumedTokens(exc)
 
     async def _recordUsage(
         self,

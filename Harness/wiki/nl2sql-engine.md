@@ -8,6 +8,18 @@
 4. SQL Guard 校验合法性（仅 SELECT/WITH，无 DDL/DML，无多语句、无侧信道函数），且对只读有双重保障（`_assert_read_only`）。
 5. 返回 SQL 与计划；执行成功后把计划/SQL/结果列持久化到会话状态。
 
+### 计划解析契约（2026-09-26，M3）
+
+`QueryPlan.from_dict` 依旧是「**绝不抛错**」的容错解析（历史 JSONB / LLM 回复都可能损坏），但不再静默：
+
+- `QueryPlan.from_dictWithReport(payload) -> (plan, drops)`：语义与 `from_dict` **逐字节相同**（`from_dict` 内部即委托给它），额外返回 `tuple[PlanDrop, ...]`——按 `(字段, 原因, 原始类型)` 聚合的丢弃报告，`PlanDrop` 是 frozen dataclass 且**不存原始值**（避免把模型输出带进日志）。`from_dict` 仍是唯一被业务代码调用的入口除了下面两个观测点。
+- 原因常量集中在 `app/domain/plan_drop.py`（`DROP_*`），domain 层保持无日志、无 IO；格式化单点在 `formatPlanDrops`（单行、同类聚合计数如 `selectedProperties:DROP_ITEM_NOT_STR(int)x2`）。
+- 两个调用点各写**一条** `reason=` 日志（沿用 `_fallbackRecall` 的单点日志风格）：
+  - `nl2sql_service._parsePlanOutcome`：失败原因分类为 `PLAN_REPLY_EMPTY` / `PLAN_REPLY_NO_JSON` / `PLAN_REPLY_TOO_LARGE` / `PLAN_REPLY_JSON_INVALID` / `PLAN_EMPTY`；成功但有内容级丢弃 → `PLAN_DEGRADED`（**不失败**）。
+  - `chat_service._statePlan`（DB JSONB 历史路径）：`PLAN_HISTORY_DEGRADED`，**只上报不收紧**——历史计划可能来自旧版本，收紧会让历史会话整段失败。
+- **全空计划判失败（行为变更）**：`target`（strip 后）为空、且 selectedClasses/selectedProperties/conditions/aggregations/groupBy/joins/sortBy/partitionBy/rowLimit/perGroupLimit 全空 ⇒ 视同解析失败进入既有重试，重试耗尽后落到「无法回答」。判据取**最窄口径**，且 `target="无法回答"` 的合法空计划不受影响。判定在 service 调用点（`_isEmptyPlan`）而非 domain，故不影响 `_statePlan`（`chat_service` 的 REFINE 直写闸门以 `plan is None` 判成败，不能被误判死）。
+- 动因：空计划无任何引用可校验 ⇒ 能通过 `validatePlan` ⇒ 直接进 SQL 生成，模型可自由编造表名（报错被包装成「服务内部错误」）；此前它既不入重试也不写日志，是观测与重试的**双重旁路**。
+
 ## 多轮对话状态（Phase C）
 
 - `session_query_state` 表（JSONB）：`last_question / last_plan / last_sql / last_result_columns / turn_count`，每次成功查询后 UPSERT。

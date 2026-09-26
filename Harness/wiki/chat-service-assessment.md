@@ -25,7 +25,10 @@
 > 两条带触发条件记录，见 §12 复审）。
 > **§2.1（CRITICAL）已全部清零；§3 的 P0 路线图亦已清空**。
 > §2.3 的 **M1 / M2**（SQL Guard 侧信道黑名单 + 拒绝原因回注重试反馈）已于 2026-09-26 修复（见 §13）。
-> **仍待处理**：§2.2 的 H4 / H6 / H7、§2.3 的 M3–M6、M8–M10、以及 §2.4 / §2.5 全部。
+> §2.2 的 **H6**（四处 score 公式口径不一）、§2.3 的 **M3**（计划解析静默吞错 + 空计划旁路）
+> 与 **M6**（`chart_service` 重复方法与其同文件死代码）已于 2026-09-26 修复（见 §14），
+> §3 P1 第 8、9、12 项同时闭合。
+> **仍待处理**：§2.2 的 H4 / H7、§2.3 的 M4 / M5、M8–M10、以及 §2.4 / §2.5 全部。
 > **已立项待排期**：§13「残差」第 1 条（库侧只读兜底）已转为提案文件。
 
 ---
@@ -137,7 +140,7 @@
 | H3 | **历史注入无 token/字符预算**。`_buildContextPrompt` 全文拼接 `session_message.content` + `[SQL:...]`，无截断；一条超长 SQL/答案会无限膨胀后续每次 NL2SQL + answer prompt。 | ✅ **已修复**（2026-09-26，见 §12） | `chat_service.py:4124-4144` |
 | H4 | **客户端断连无处理**。`CancelledError`（`BaseException`）不被任何 `except` 捕获；`_storeSessionMessages` 只在流尾执行，断连即丢整轮（无部分答案、无历史落库）。 | ⬜ 待处理 | `chat.py:59-67`、`chat_service.py:2904-2922`、`3303` |
 | H5 | **向量失败静默降级到全 schema**。类召回异常回退 `return list(allClasses)`，**不过滤 ODS、不截断 max**——正是召回剪枝要解决的老问题在 Milvus/embedding 挂掉时原样回来。 | ✅ **已修复**（2026-09-26，见 §12） | `chat_service.py:1269-1280`、`1352-1359` |
-| H6 | **3 处 score 公式不一致（DRY 违反）**。`embedding_service`/`ontology_service` 有 `round(,4)` + `max(0)`；`wiki_vector_service` 无 round；`rag_service` 无 `max(0)` 无 round——负距离得 score>1，缺 `distance` 键直接 `KeyError`。 | ⬜ 待处理 | `embedding_service.py:29-31`、`ontology_service.py:1198`、`wiki_vector_service.py:264`、`rag_service.py:299` |
+| H6 | **3 处 score 公式不一致（DRY 违反）**。`embedding_service`/`ontology_service` 有 `round(,4)` + `max(0)`；`wiki_vector_service` 无 round；`rag_service` 无 `max(0)` 无 round——负距离得 score>1，缺 `distance` 键直接 `KeyError`。 | ✅ **已修复**（2026-09-26，见 §14） | `embedding_service.py:29-31`、`ontology_service.py:1198`、`wiki_vector_service.py:264`、`rag_service.py:299` |
 | H7 | **provider_type 死元数据**。`embedding_provider_factory` 从不读 `provider_type`，全部当 OpenAI 兼容；维度守卫只对 DB-provider 路径生效，env 回退路径不校验。 | ⬜ 待处理 | `embedding_provider_factory.py:48-61` |
 | H8 | **doc_qa 不写 token ledger**（wiki_qa 写），违反「每次 LLM 调用必须计量」约束；且无命中时 doc_qa 存 `citations=[]` 而 wiki_qa 存真实 citations，行为不一致。 | ✅ **已修复**（2026-09-26，见 §8） | `wiki_qa_service.py:215-224` vs `rag_qa_service.py:161-162` |
 | H9 | **成本单位不一致**。`supplier_risk_service._generateRiskPoints` 用硬编码 **CNY** 0.001/0.002，系统其余用 config 的 **USD**。 | ✅ **已修复**（2026-09-26，见 §8） | `supplier_risk_service.py:275-280` |
@@ -157,10 +160,10 @@
 |---|---|---|
 | M1 | ~~**SQL Guard 侧信道函数未覆盖**：缺 `pg_sleep`/`pg_advisory_lock`/`dblink`/`SLEEP`/`BENCHMARK`/`LOAD_FILE`/`UTL_HTTP`；sqlparse 跳过 `Literal/Comment` 的隐患。~~ ✅ **已修复（2026-09-26，见 §13）**。<br>⚠️ **同行的「`INTO` 过度拦截（含良性 `SELECT…INTO`）」经实测修正**：四种 `INTO` 子句形态（PG 建表 / MySQL `OUTFILE` / 变量赋值 / 尾随）全部**应当拒**；唯一被误拒的合法形态是「未加引号的 `AS into` 别名」（PG 实测接受），属安全闸门应有的过拦偏向，**不改**（见 §13 决策原则）。 | `business_db_pool.py` |
 | M2 | ~~**SQL Guard 拒绝反馈不具体**：LLM 只见「未通过安全校验」，无法自愈守卫违规。~~ ✅ **已修复（2026-09-26，见 §13）**。 | `nl2sql_service.py:2076-2082` |
-| M3 | **`QueryPlan.from_dict` 吞所有解析错误**：损坏输入静默变空 tuple，掩盖根因（文档明言「绝不抛错」）。 | `query_plan.py:203-206` |
+| M3 | ~~**`QueryPlan.from_dict` 吞所有解析错误**：损坏输入静默变空 tuple，掩盖根因（文档明言「绝不抛错」）。~~ ✅ **已修复**（2026-09-26，见 §14）。**并额外修掉一个真实旁路**：返回非 None 的空计划既不入重试也不写日志，直接进 `generateSql`（空计划无引用可校验 ⇒ 能过 `validatePlan` ⇒ 模型可自由编造表名）。 | `query_plan.py:203-206` |
 | M4 | **无同模型瞬态重试**：`generateQueryPlan`/`generateSql` 内部不捕获瞬态 LLM 异常，只靠模型 fallback（换模型≠同模型重试）。 | `nl2sql_service.py:1608`、`2039` |
 | M5 | **L3 CTE 引擎是死代码**：`_executeChainedSteps`/`_executeSingleChainedStep` 仅测试引用，无生产接线，且含未计量 LLM 调用。 | `chat_service.py:1935-2023` |
-| M6 | **重复定义**：`_buildOptionPrompt` 两次（`chart_service.py:121/226`，同名同签名同注释，后者静默覆盖前者——前一份是死代码）。<br>⚠️ **2026-09-26 复核修正**：本行原写「`_consumedTokens` 两次（`chat_service.py:4048/4052`）」**不成立**——当前只剩一个定义（`chat_service.py:4249`），行号也对不上；评估当日应是笔误或事后已清理。 | ⬜ 待处理 | `chart_service.py:121`、`226` |
+| M6 | **重复定义**：`_buildOptionPrompt` 两次（`chart_service.py:121/226`，同名同签名同注释，后者静默覆盖前者——前一份是死代码）。<br>⚠️ **2026-09-26 复核修正**：本行原写「`_consumedTokens` 两次（`chat_service.py:4048/4052`）」**不成立**——当前只剩一个定义（`chat_service.py:4249`），行号也对不上；评估当日应是笔误或事后已清理。 | ✅ **已修复**（2026-09-26，见 §14）。同文件死代码：2 处 F401 未用导入 + 零调用的 `_inferColumnType`（单数；活的是复数 `_inferColumnTypes`）+ I001；**并新增常驻 AST 守卫**（Python 对类体重复方法零告警，这类腐化只能靠守卫拦住）。 | `chart_service.py:121`、`226` |
 | M7 | ~~**`_runQueryWithRetry` 丢弃第二次错误详情**~~ ✅ **已修复（2026-09-26，见 §11）**。修复分两批：①C3/C4 批（见 §9）让重试的**新错误**进日志、重试生成的 token 在多步路径落账；②本批把二次失败**详情与用量挂到上抛异常私有属性**上（`_attachRetryFailure` / `_attachRetryGenTokens`，不改异常类型/消息），单步两条路径 + 多步路径都落账，用户可见步骤文案改为「首次：…；重试…：…」（两段各自脱敏 + 各自限量）。**同时闭合了复审发现的第三个漏点**：重试**生成自己失败**时 `Nl2SqlError.tokens` 此前无人取用 ⇒ 该次调用白花。 | `chat_service.py` `_runQueryWithRetry` / `_stepFailedError` / `_accountRetryGenUsage` |
 | M8 | **`prior_cte` 契约不一致**：docstring 说可无 `WITH`，但 `_assert_read_only` 会拒绝无 `WITH` 形式（当前仅 `render_prior_cte` 输出可过，潜伏）。 | `nl2sql_service.py:414-416` vs `business_db_pool.py` |
 | M9 | **Milvus 16384 上限**：`listAllEmbeddings` 截 16384，超量后对账 diff 会算错（无 guard）。 | `milvus_client.py:245-265` |
@@ -216,10 +219,14 @@
    是头裁，而这里要保的是**最新**轮次（追问锚点），头裁会把最新一轮切掉 —— 改为「单条限量
    + 从最新往回保留整块」。
 7. **H4 断连处理**：捕获 `CancelledError`，持久化已产出的部分答案与消息，落库后再退出。
-8. **H6 score 公式统一**：抽一个 `distanceToSimilarity(d)` 单源函数，四处复用；
-   缺 score 键时显式按 0 处理并记日志（消除 NaN%/静默 not-found）。
-9. **M1/M2/M3 SQL 安全加固**：补侧信道函数黑名单；守卫拒绝把具体原因注入重试反馈；
-   `QueryPlan.from_dict` 改为严格解析（损坏即抛，让上层重试而非静默丢弃）。
+8. ~~**H6 score 公式统一**：抽一个 `distanceToSimilarity(d)` 单源函数，四处复用；~~
+   ✅ **已完成（2026-09-26）**，见 §14。**未采纳本行的「缺 score 键时显式按 0 处理」**：
+   `distance` 缺失是上游契约违背（Milvus hit 必带距离），按 0 兜底会算成 `score=1.0` 的
+   "完美命中"并静默污染排序 —— 决策为**保持 `h["distance"]` 硬下标快速失败**（用户口径）。
+9. ~~**M1/M2/M3 SQL 安全加固**~~：M1/M2 已完成（见 §13）；**M3 已完成（2026-09-26）**，见 §14。
+   **未采纳本行的「改为严格解析（损坏即抛）」**：`from_dict` 还承担「历史 JSONB 永不致命」
+   的契约，抛错会让旧会话整段失败 —— 改为「照旧容错 + 分类上报 `PlanDrop`」，
+   并把**真正该失败**的情形（全空计划）单独判失败。
 
 ### P2 —— 可维护性（清理欠账）
 
@@ -228,8 +235,9 @@
     重复字段定义。
 11. **M5 死代码清理**：L3 CTE 引擎要么接线（承接 `requiresCte` 场景）要么删除，
     避免带未计量 LLM 调用的死代码长期驻留。
-12. **M6 重复定义清理**：只剩 `_buildOptionPrompt` 一处（`_consumedTokens` 经 2026-09-26 复核
-    已无重复，见 §2.3 M6 修正）。
+12. ~~**M6 重复定义清理**：只剩 `_buildOptionPrompt` 一处（`_consumedTokens` 经 2026-09-26 复核
+    已无重复，见 §2.3 M6 修正）。~~ ✅ **已完成（2026-09-26）**，见 §14（含同文件死代码与
+    常驻 AST 守卫 `test_no_duplicate_methods.py`）。
 13. **拆大文件/大函数**：`chat_service.py`(4353)、`nl2sql_service.py`(2431) 远超 800 行；
     `_streamQuery`(335)、`_handleAgentRun`(216)、`validatePlan`(143) 等按职责拆。
 14. **魔数治理**：把 topK/max classes/char 上限/阈值等编译期常量下沉 `system_config`，
@@ -913,7 +921,8 @@ ACCEPT  SELECT "into" FROM t / SELECT into_col FROM t            ← 引号标�
    顺带纠正 `nl2sql-engine.md` 原写的「连接级 `statement_timeout`」（不存在）与 `sql_guard.py` 路径漂移。
 2. **`(pg_sleep)(5)` 放行**（security LOW）：三方言下 `(func)(args)` 均非合法调用语法（不会执行），`_callShape` 已注明。
 3. **安全校验失败日志不截断**（code LOW）：`logger.warning(…, exc)` 受 LLM `max_tokens` 上界约束，低危，记录待清理。
-4. **M3 仍未做**：`QueryPlan.from_dict` 吞解析错误（§3 P1 第 9 项本批只完成 M1/M2 两项）。
+4. ~~**M3 仍未做**：`QueryPlan.from_dict` 吞解析错误（§3 P1 第 9 项本批只完成 M1/M2 两项）。~~
+   ✅ **已做（2026-09-26）**，见 §14（H6 + M6 + M3 批次），§3 P1 第 9 项就此闭合。
 
 ### 部署验证（2026-09-26）
 
@@ -929,3 +938,66 @@ ACCEPT  SELECT "into" FROM t / SELECT into_col FROM t            ← 引号标�
   集成切片 6 文件 **45 passed**；`ruff` 与 HEAD 同集合（delta=0）。
 - ⚠️ 前置：全量 unit 跑完会把测试库 `ontology_class` 截空（既有 truncate 陷阱），
   集成前需 `DROP SCHEMA public CASCADE` + `DATABASE_URL=<test> alembic upgrade head` 恢复。
+
+---
+
+## 14. 修复记录：H6 + M6 + M3（2026-09-26）
+
+批次范围：§2.2 **H6**（score 公式四处口径不一）、§2.3 **M6**（重复方法 + 同文件死代码）、
+§2.3 **M3**（计划解析静默吞错 + 空计划旁路）。**§3 P1 第 8、9、12 项同时闭合。**
+
+### 三条已定口径（用户决策，实现严格照此）
+
+1. **M3 = 观测性 + 空计划判失败**（后者是**有意的行为变更**：全空计划由「静默直达 SQL 生成」改为走既有重试 → 用尽后「无法回答」）；
+2. **H6 = 缺 `distance` 时保持 `KeyError` 快速失败**，**不**改 `.get(…, 0.0)`——`0.0` 会被换算成 `score = 1.0`（假完美命中）并静默污染排序；
+3. **M6 = 只删「重复方法 + 同文件死代码」**，不顺手改行为。
+
+### 根因与修法
+
+| 项 | 根因 | 修法 | SSOT |
+|---|---|---|---|
+| H6 | 同一公式四处手抄，**已漂移出三种口径**：wiki 路径无 `round(,4)`，rag 路径既无 `max(0)` 也无 `round` ⇒ 负距离产出 `score > 1`（前端直接渲染百分比） | 新增单源纯函数 `app/services/vector_similarity.py::distanceToSimilarity`，四处调用点复用；私有 `_distanceToSimilarity` 删除；**源码级守卫**禁止再出现内联 `"1.0 / (1.0 +"` | [`refactor-score-ssot`](../changes/refactor-score-ssot/summary.md) |
+| M6 | `ChartService._buildOptionPrompt` 定义两遍（`:121`/`:226`，同装饰器同签名同函数体），Python 对**类体重复方法零告警**，后者静默覆盖前者 | 删掉被覆盖的那份 + 同文件 2 处 F401、零调用 `_inferColumnType`、I001；**新增常驻 AST 守卫** `test_no_duplicate_methods.py` 扫 `app/` 全树 | [`chore-chart-service-deadcode`](../changes/chore-chart-service-deadcode/summary.md) |
+| M3 | `QueryPlan.from_dict` 11 个静默丢弃点；`_parsePlanFromResponse` 4 条 `return None` 只有 1 条写日志；**且返回非 `None` 的「全空计划」既不入重试也不写日志**，直接进 `generateSql`（空计划无引用可校验 ⇒ 能过 `validatePlan`） | `from_dictWithReport(payload) -> (QueryPlan, tuple[PlanDrop, ...])`（`from_dict` 改为纯委托，语义逐字节不变）；`PlanDrop` 只存 `field/reason/rawType/count`（**不存原始值**，避免把模型输出带进日志）；出口按 `reason=` 单点聚合失败率；全空计划判失败入重试 | [`fix-plan-drop-observability`](../changes/fix-plan-drop-observability/summary.md) |
+
+### 审查（code-reviewer + security-reviewer 独立送审）
+
+两位审查**独立命中同一条**：半空计划（`{"rowLimit": 100}` / `{"conditions": [...]}` / 仅 `target` 非空）
+在 M3 之后仍可直达 `generateSql`。当场处置 4 项 + 记 1 项：
+
+| # | 审查发现 | 处置 |
+|---|---|---|
+| 1 | equivalence 测试**恒真**（拿 `from_dict` 当基准比对，而它现在**就是** `from_dictWithReport(data)[0]` 的纯委托） | 换成用 **M3 之前的实现**（`aefabd3`，分离 worktree 实测取得）机械生成的**黄金快照**（`dataclasses.astuple`，24 例带内联注释），并附复现配方 |
+| 2 | `PLAN_EMPTY` 走失败分支时**丢弃详情**（只记 reason，`drops` 丢失） | 失败分支补 `drops=` 聚合，新增测试锁定「恰一条 `reason=PLAN_EMPTY` 且含 `target:PLAN_TARGET_NOT_STR(int)`」 |
+| 3 | `nan` / `±inf` 穿透 `[0,1]` 值域（`max(nan, 0.0)` 返回 `nan`；`-inf` 被算成 `1.0` = 假完美命中） | 入口 `if not math.isfinite(value): return 0.0`（取「最不相似」，不猜值也不中断检索），RED/GREEN 各留证 |
+| 4 | AST 守卫**漏检** `match` case 体内的同名方法、**误报** `@overload` + 实现的合法形态 | 改为按**重定义角色**判定（`overload`/`getter`/`setter`/`deleter`）+ 下钻 `stmt.cases[*].body`；并配「两个 `@property` + 一个实现仍照报」的**反放宽**用例 |
+| 5 | 半空计划可直达 SQL 生成（两位审查各自命中） | **未在本批强改**（口径变更，会推翻既有「target 非空即合法」的用例）⇒ 转提案 [`2026-09-26-plan-scope-gate-proposal.md`](../changes/2026-09-26-plan-scope-gate-proposal.md) |
+
+**教训两条**（已入 memory）：
+①**「等价性」测试若拿被测对象自己当基准就是恒真** —— 必须用**实现之前的版本**机械生成快照，
+并做**变异探针**证明新断言真的会红；②**Python 允许类体重复方法静默覆盖**，
+这类腐化读码读不出来，只能靠常驻 AST 守卫拦。
+
+### 部署验证（2026-09-26）
+
+- **镜像重建**（非 `docker cp`）：`docker compose build backend && docker compose up -d backend`；
+- **镜像级证据**（排除「容器里是 cp 残留」这一可能）：用镜像 `sha256:b6694892e89e…` 起一次性容器 ⇒
+  `app/services/vector_similarity.py`、`app/domain/plan_drop.py` **在镜像内存在**，
+  `grep -c "def _buildOptionPrompt" app/services/chart_service.py` = **1**，
+  `app/domain/query_plan.py` md5 `6225dfff3d96c6cb8f9f41640d755936` 与仓库**一致**；
+- 仓库 ↔ 容器 12 个文件 **12/12 MATCH**；容器内真机探针 **21 项全 PASS**（H6 值域/非有限/四调用点单源、M6 唯一性、M3 边界与报告）；
+- 网关：`8000` 直连与经 nginx `5173` 的 `/api/v1/health` **均 200**；
+- **测试**：全量 unit（最终 hash `3309a71`）**`2 failed, 2411 passed, 1 skipped`**，两条失败与 §13 记录**同名同因**（预存）⇒ delta=0；
+  集成切片 **94 例 `2 failed / 92 passed`**；`ruff` 与基线同集合 **46 → 42（净 -4）**，新增 5 文件全通过。
+- **对两条集成失败的判别实验（不靠推测）**：把用例跑在**本批之前**的 `7a8ce7d`（分离 worktree，实测该版本仍含 `_distanceToSimilarity` ⇒ 确为旧代码）上——**旧代码同样失败**，`assert 5 == 1`，
+  且计数按**每跑一次 +1** 单调增长（3 → 4 → 5）、每次生成新的自增 id ⇒ 属
+  **残留累积 + Milvus 删除可见性滞后 + 用例不自清理**（本批只改 score 数值口径、不写 Milvus），**非本批回归**。
+  ⚠️ 这条要如实标注为**既有缺陷**（不是「flaky 所以忽略」）：用例用固定业务 id 写入、删除不可见即不自清理，
+  跑够次数后必然失败，值得单独修（当前挂账，不在本批范围）。
+- ⚠️ 顺序：全量 unit 会 truncate 测试库 ⇒ **先集成切片、再全量 unit**；恢复需 `DROP SCHEMA public CASCADE` + `DATABASE_URL=<test>` alembic upgrade head。
+
+### 残差
+
+1. **半空计划闸门**（见上表 #5）⇒ 提案文件，未排期；
+2. `logger.warning(…, exc)` 不截断（§13 残差第 3 条，LOW）仍挂账；
+3. Milvus 两个 round-trip 用例的自清理缺陷（本批实测出，见上）。

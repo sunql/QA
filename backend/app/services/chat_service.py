@@ -26,7 +26,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import datetime, timezone
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
@@ -174,6 +174,10 @@ _CONTEXT_MESSAGE_LIMIT = _CONTEXT_ROUNDS * 2
 # 3-4：recent_rounds 保留的"更早轮次"快照上限（不含当前 last_*）。新到旧排列，
 # 超限丢弃最旧。取与 _CONTEXT_ROUNDS 一致的量级，保持跨轮回溯与历史注入口径相同。
 _RECENT_ROUNDS_LIMIT = 5
+
+# feat-follow-up-cascade C 兜底：触发追问重试的短句上限。省略式追问（"4月份呢？"）
+# 是短句特征；长句不可回答更可能是真正的新问题（N6 权衡），重试只会空耗 token。
+_FOLLOW_UP_RETRY_MAX_LEN = 20
 # 3-4：单条历史快照的 q/s 字符上限，防止超长问题或 SQL 撑爆 NL2SQL prompt（LOW-2）。
 _STATE_HISTORY_FIELD_LIMIT = 500
 _FEW_SHOT_TOP_K = 3  # 1-2：历史相似 SQL few-shot 的检索条数（注入即 token 成本，取小值）
@@ -957,7 +961,42 @@ class ChatService(ChatStreamOutputMixin):
                         global_filters=global_filters,
                     )
 
+        # B（feat-follow-up-cascade）：FOLLOW_UP 且上一轮是多步 → LLM 改写回完整
+        # 多步问题并重跑（改写/拆步失败退回下方单轮状态注入，行为与单步上一轮一致）。
+        if result.intent == IntentType.FOLLOW_UP and state is not None:
+            prepared = await self._prepareFollowUpMultiStep(session, dto, pc, state)
+            if prepared is not None:
+                dto2, multiPlan, msTokens, msCost = prepared
+                # 重写后问题可能改变口径约束，重新抽取一次（保证 B 层与该多步问题对齐）
+                gf2 = await self._resolveGlobalFilters(session, dto2, pc)
+                return await self._executeMultiStep(
+                    session, dto2, pc, multiPlan, state,
+                    initial_tokens=msTokens, initial_cost=msCost, _t0=_t0,
+                    global_filters=gf2,
+                )
+
         outcome = await self._planAndGenerateSql(session, dto, pc, result.intent, state)
+        if outcome.sql is None and self._isFollowUpRetryCandidate(
+            dto.question, result.intent, state,
+        ):
+            # C：短句新查询计划不可回答 → 升级追问重试一次（先 B 多步重跑，再退回
+            # 单轮 FOLLOW_UP 状态注入；仍不可回答则走下方固定兜底文案）。
+            logger.info("不可回答短句升级追问重试: %s", dto.question)
+            # _isFollowUpRetryCandidate 已保证 state 非空，此处可直接传入
+            prepared = await self._prepareFollowUpMultiStep(session, dto, pc, state)
+            if prepared is not None:
+                dto2, multiPlan, msTokens, msCost = prepared
+                return await self._executeMultiStep(
+                    session, dto2, pc, multiPlan, state,
+                    initial_tokens=msTokens, initial_cost=msCost, _t0=_t0,
+                )
+            outcome = await self._planAndGenerateSql(
+                session, dto, pc, IntentType.FOLLOW_UP, state
+            )
+            if outcome.sql is not None:
+                # 重试成功：意图如实升级为追问（IntentResult 是 frozen dataclass，
+                # replace 保持不可变风格）
+                result = replace(result, intent=IntentType.FOLLOW_UP)
         if outcome.sql is None:
             # 计划 target=无法回答：不执行 SQL/图表/回答 LLM，直接给出固定友好回答
             return await self._unanswerableResponse(session, dto, pc, result.intent, outcome, _t0=_t0)
@@ -1699,6 +1738,117 @@ class ChatService(ChatStreamOutputMixin):
             pc.selected, detected.prompt_tokens, detected.completion_tokens,
         )
         return detected.plan, step_tokens, step_cost
+
+    # =========================================================================
+    # feat-follow-up-cascade：追问级联（B 多步重跑 / C 兜底重试）
+    # =========================================================================
+
+    @staticmethod
+    def _isFollowUpRetryCandidate(
+        question: str, intent: IntentType, state: SessionQueryState | None,
+    ) -> bool:
+        """C 兜底谓词：NEW_QUERY/QUERY 计划不可回答 + 有历史 + 短句 → 升级追问重试。
+
+        约束逐项是独立闸门：非新查询意图（REFINE/FOLLOW_UP 已有自己的状态注入路径，
+        再重试只是重复）/ 上一轮无成功 SQL（追问没有可锚定的查询）/ 长句（守 N6：
+        长句更可能是真正的新问题）均不重试。
+        """
+        if intent not in (IntentType.NEW_QUERY, IntentType.QUERY):
+            return False
+        if state is None or not (state.last_question or "").strip() or not state.last_sql:
+            return False
+        normalized = question.strip()
+        if len(normalized) > _FOLLOW_UP_RETRY_MAX_LEN:
+            return False
+        return not StepQueryPlanner.is_explicit_multi_step(normalized)
+
+    async def _rewriteFollowUpQuestion(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        pc: _PipelineContext,
+        state: SessionQueryState,
+    ) -> tuple[str, int, int] | None:
+        """B 改写：把省略式追问合并进上一轮完整问题。
+
+        返回 (改写后问题, promptTokens, completionTokens)。LLM 调用失败 / 回复
+        不可解析 / 改写无效（空串，或只是回显追问本身）时返回 None，由调用方
+        退回单轮 FOLLOW_UP 状态注入。已发生的 token 无论成败都计量（purpose=
+        "follow_up_rewrite"），与用户输入经 StepQueryPlanner._sanitize 转义。
+
+        与上一轮逐字相同的改写是**有效**结果（追问合并后并未改变原问题，例如用
+        户在上一轮失败后原样重发同一追问）——此时应把上一轮多步问题重跑一遍，
+        而非判为无效退回。旧守卫把这一情形一并丢弃，导致重发追问必然退化成
+        4 字短句单轮查询 → LLM 判无有效查询计划 → "无法回答"。
+        """
+        prior = (state.last_question or "").strip()
+        prompt = (
+            "你是问题改写器。用户上一轮完整问题：\n"
+            f"{StepQueryPlanner._sanitize(prior)}\n\n"
+            "用户现在的追问：\n"
+            f"{StepQueryPlanner._sanitize(dto.question.strip())}\n\n"
+            "把追问里的改动（如时间/条件替换）合并进上一轮完整问题，保持原有步骤"
+            "结构，只应用追问的改动。输出 JSON：{\"question\": \"改写后的完整问题\"}；"
+            "若追问无法合并进上一轮问题，输出 {\"question\": \"\"}。"
+        )
+        try:
+            resp = await pc.client.complete(
+                messages=[
+                    LlmMessage(role="system", content="你是问题改写器，只输出 JSON。"),
+                    LlmMessage(role="user", content=prompt),
+                ],
+                model=pc.selected.model_name,
+            )
+        except Exception:
+            logger.warning("追问改写 LLM 调用失败，退回单轮注入: %s", dto.question, exc_info=True)
+            return None
+        await self._recordUsage(
+            session, dto.sessionId, pc.selected,
+            resp.promptTokens, resp.completionTokens, purpose="follow_up_rewrite",
+        )
+        data = StepQueryPlanner._extract_json(resp.content or "")
+        if not data:
+            return None
+        rewritten = data.get("question")
+        if not isinstance(rewritten, str):
+            return None
+        rewritten = rewritten.strip()
+        # 只丢弃「空串」与「回显追问本身」（合并未发生）两种无效改写；
+        # 与 prior 相同视为有效——含义是"照上一轮的问题重跑一遍"。
+        if not rewritten or rewritten == dto.question.strip():
+            return None
+        return rewritten, resp.promptTokens, resp.completionTokens
+
+    async def _prepareFollowUpMultiStep(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        pc: _PipelineContext,
+        state: SessionQueryState,
+    ) -> tuple[ChatRequest, MultiStepPlan, int, Decimal] | None:
+        """B 共享前置：上一轮是多步问题时，改写追问并拆出多步计划。
+
+        返回 (改写后 dto, 多步计划, 累计 tokens（改写+拆步）, 累计 cost)；
+        非多步上一轮 / 改写失败 / 拆不出多步 → None，调用方退回单轮 FOLLOW_UP。
+        非流式（_handleGenericQuery）与流式（_streamQuery）两入口共用本方法，
+        保证级联口径一致。
+        """
+        prior = (state.last_question or "").strip()
+        if not self._stepPlanner.is_explicit_multi_step(prior):
+            return None
+        rewritten = await self._rewriteFollowUpQuestion(session, dto, pc, state)
+        if rewritten is None:
+            return None
+        question, rwPt, rwCt = rewritten
+        dto2 = dto.model_copy(update={"question": question})
+        multiPlan, stepTokens, stepCost = await self._resolveExplicitMultiStep(
+            session, dto2, pc,
+        )
+        if multiPlan is None:
+            return None
+        totalTokens = stepTokens + rwPt + rwCt
+        totalCost = stepCost + self._costFor(pc.selected, rwPt, rwCt)
+        return dto2, multiPlan, totalTokens, totalCost
 
     async def _resolveGlobalFilters(
         self, session: AsyncSession, dto: ChatRequest, pc: _PipelineContext,
@@ -3112,7 +3262,42 @@ class ChatService(ChatStreamOutputMixin):
                     ):
                         yield event
                     return
+        # B（feat-follow-up-cascade）：FOLLOW_UP 且上一轮是多步 → 改写 + 多步重跑
+        # （失败退回单轮状态注入，与 _handleGenericQuery 同口径）。
+        if intent == IntentType.FOLLOW_UP and state is not None:
+            prepared = await self._prepareFollowUpMultiStep(session, dto, pc, state)
+            if prepared is not None:
+                dto2, multiPlan, msTokens, msCost = prepared
+                gf2 = await self._resolveGlobalFilters(session, dto2, pc)
+                async for event in self._streamMultiStep(
+                    dto2, session, pc, multiPlan, state,
+                    initial_tokens=msTokens, initial_cost=msCost,
+                    suggestion=suggestion, _t0=_stream_t0,
+                    global_filters=gf2,
+                ):
+                    yield event
+                return
         outcome = await self._planAndGenerateSql(session, dto, pc, intent, state)
+        if outcome.sql is None and self._isFollowUpRetryCandidate(dto.question, intent, state):
+            # C：短句新查询计划不可回答 → 升级追问重试一次（先 B 多步重跑，再退回
+            # 单轮 FOLLOW_UP 状态注入；仍不可回答则走下方固定兜底文案）。
+            logger.info("不可回答短句升级追问重试: %s", dto.question)
+            # _isFollowUpRetryCandidate 已保证 state 非空，此处可直接传入
+            prepared = await self._prepareFollowUpMultiStep(session, dto, pc, state)
+            if prepared is not None:
+                dto2, multiPlan, msTokens, msCost = prepared
+                async for event in self._streamMultiStep(
+                    dto2, session, pc, multiPlan, state,
+                    initial_tokens=msTokens, initial_cost=msCost,
+                    suggestion=suggestion, _t0=_stream_t0,
+                ):
+                    yield event
+                return
+            outcome = await self._planAndGenerateSql(
+                session, dto, pc, IntentType.FOLLOW_UP, state
+            )
+            if outcome.sql is not None:
+                intent = IntentType.FOLLOW_UP
         if outcome.sql is None:
             # 计划 target=无法回答：plan + 固定友好回答 + done，不生成 sql/chart，不执行查询
             answer = self._unanswerableAnswerText(dto.question, pc.classes)

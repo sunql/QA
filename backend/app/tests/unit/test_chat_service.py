@@ -103,11 +103,16 @@ class _FakeSession:
     供「显式 modelId 选取模型」相关用例验证；不注入时与历史行为完全一致。
     只在语句目标是 LlmConfig 时返回注入项，其他查询维持历史空集行为，避免干扰
     会话消息 / 数据源 / 本体等查询路径。
+
+    `info` 不是假会话的额外装饰：SQLAlchemy `Session.info` 是恒存在的公开字典，
+    H4 断连兜底状态就挂在它上面（`attachStreamPersistState`）。省掉它等于让假会话说
+    「真实会话没有这个属性」，流式用例会整体报 AttributeError 而非测出行为差异。
     """
 
     def __init__(self, modelConfigs: list[LlmConfig] | None = None) -> None:
         self.added: list[object] = []
         self._modelConfigs: list[LlmConfig] = list(modelConfigs or [])
+        self.info: dict = {}
 
     async def execute(self, stmt):
         isLlmQuery = any(

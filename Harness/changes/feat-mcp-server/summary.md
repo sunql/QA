@@ -92,6 +92,12 @@ app.router.lifespan_context = _mergedLifespan
   `_AsyncGeneratorContextManager` 的 callable，必须传 `_mcpApp` 实例参数
 - `app.router.lifespan_context = ...` 必须在 `createApp()` 内部赋值
   （uvicorn 启动时读取 `app.router.lifespan_context`）
+- **挂载顺序不变量（2026-09-26 补）**：`Mount("")` 的 `path=""` 是**全能前缀匹配**，
+  而 Starlette 按**注册顺序**逐条匹配、命中即停 —— 因此 **MCP mount 必须是路由表
+  最后一条**，它之后注册的任何路由都永久不可达（请求一律落到 MCP 子 app，返回纯文本
+  404）。`/api/v1/health` 曾因写在 mount 之后而自 2026-09-25 起静默 404 数日。
+  守卫：`app/tests/integration/test_app_wiring.py`；根因与修复详见
+  [fix-health-route-shadowed-by-mcp-mount](../fix-health-route-shadowed-by-mcp-mount/summary.md)。
 
 ### 3.2 stub auth 上下文
 

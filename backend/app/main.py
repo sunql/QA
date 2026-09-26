@@ -515,6 +515,14 @@ def createApp() -> FastAPI:
     app.include_router(wiki_compile.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(wiki_graph.router, prefix="/api/v1", tags=["wiki"])
 
+    # 健康检查。**必须注册在下方 MCP 挂载之前**：MCP 用 `Mount("")` 挂到 ASGI 树
+    # 末端，而 Starlette 按注册顺序匹配 —— catch-all Mount 之后注册的路由永远不会
+    # 被命中（2026-09-25 起 /api/v1/health 因此静默 404，直到真机探活才发现）。
+    # 新增路由一律加在本行以上；不变量守卫见 tests/integration/test_app_wiring.py。
+    @app.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
+    async def health() -> HealthResponse:
+        return HealthResponse(status="ok", version=__version__, appEnv=settings.appEnv)
+
     # MCP Server（Phase 6）：HTTP/SSE 端点 `/mcp`，复用 FastAPI app + DB session
     # + stub auth（MCP 客户端的 stdio 模式走 `python -m app.services.mcp_server`）。
     # 挂载而非 include_router：MCP 走 streamable-http transport（FastAPI route
@@ -540,10 +548,6 @@ def createApp() -> FastAPI:
                 yield
 
     app.router.lifespan_context = _mergedLifespan
-
-    @app.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
-    async def health() -> HealthResponse:
-        return HealthResponse(status="ok", version=__version__, appEnv=settings.appEnv)
 
     return app
 

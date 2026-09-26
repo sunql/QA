@@ -21,6 +21,7 @@ from app.services.messages_zh import MSG_DOCUMENT_CONTENT_EXISTS
 from app.services.document_parser import DocumentParserError, parse_document
 from app.services.chunk_splitter import Chunk, split_by_paragraphs
 from app.services.document_service import DocumentService
+from app.services.vector_similarity import distanceToSimilarity
 from app.infrastructure.milvus_client import insertDocumentChunks, searchDocumentChunks
 from app.infrastructure.object_storage import (
     ObjectStorageError,
@@ -292,11 +293,9 @@ class RagService:
                 "chunk_text": h["chunk_text"],
                 "chunk_sequence": h["chunk_sequence"],
                 "distance": h["distance"],
-                # Milvus 用 L2 距离（越小越相似）；前端展示需要"相似度"。
-                # 公式 score = 1 / (1 + distance) 把 [0, ∞) 映射到 (0, 1]：
-                #   distance=0 → 1.0（完全相同）；distance=1 → 0.5；distance→∞ → 0。
+                # Milvus 用 L2 距离（越小越相似）；口径单源：services/vector_similarity.py。
                 # DocumentsPage.tsx 直接读 item.score 渲染百分比，必须存在。
-                "score": 1.0 / (1.0 + h["distance"]),
+                "score": distanceToSimilarity(h["distance"]),
                 "document_name": name_by_id.get(
                     h["document_id"], h["document_id"],
                 ),

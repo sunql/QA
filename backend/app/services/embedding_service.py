@@ -19,16 +19,12 @@ from pymilvus.exceptions import MilvusException
 from app.domain.exceptions import DomainError, MilvusError
 from app.domain.schemas import SimilarQuery
 from app.services.messages_zh import MSG_VECTOR_SEARCH_FAILED
+from app.services.vector_similarity import distanceToSimilarity
 from app.infrastructure.llm.embedding_client import EmbeddingClient
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TOP_K = 5
-
-
-def _distanceToSimilarity(distance: float) -> float:
-    """Milvus L2 距离 → [0,1] 相似度（距离越小越相似；负数按 0 处理防除零）。"""
-    return round(1.0 / (1.0 + max(float(distance), 0.0)), 4)
 
 
 class EmbeddingService:
@@ -128,7 +124,7 @@ class EmbeddingService:
             SimilarQuery(
                 question=h["question"],
                 sql=h.get("sql"),
-                similarity=_distanceToSimilarity(h["distance"]),
+                similarity=distanceToSimilarity(h["distance"]),
             )
             for h in hits
         ]

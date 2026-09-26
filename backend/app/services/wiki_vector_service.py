@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.wiki_models import WikiPage
 from app.infrastructure import milvus_client as milvus
 from app.services.chunk_splitter import TextBlock, split_by_paragraphs
+from app.services.vector_similarity import distanceToSimilarity
 
 logger = logging.getLogger(__name__)
 
@@ -260,8 +261,8 @@ class WikiVectorService:
                 "chunkText": h.get("chunk_text") or "",
                 "chunkSequence": h.get("chunk_sequence"),
                 "distance": h["distance"],
-                # 与 rag_service.searchDocuments 同口径：L2 距离越小越相似
-                "score": 1.0 / (1.0 + max(float(h["distance"]), 0.0)),
+                # L2 距离越小越相似（口径单源：services/vector_similarity.py）
+                "score": distanceToSimilarity(h["distance"]),
             })
         return results
 

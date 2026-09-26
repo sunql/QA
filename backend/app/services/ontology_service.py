@@ -80,6 +80,7 @@ from app.services.messages_zh import (
     MSG_VECTOR_SEARCH_FAILED,
     MSG_VECTOR_SYNC_FAILED,
 )
+from app.services.vector_similarity import distanceToSimilarity
 
 # 语义关系类型词表（与 ClassRelationType 对齐；用于 service 层校验，返回友好中文 422）
 _CLASS_RELATION_VALUES = frozenset(rel.value for rel in ClassRelationType)
@@ -1187,7 +1188,7 @@ class OntologyService:
         except (MilvusException, OSError) as exc:
             raise MilvusError(MSG_VECTOR_SEARCH_FAILED, detail=str(exc)) from exc
 
-        # L2 距离 -> [0,1] 相似度（距离越小越相似；与 embedding_service 同口径）
+        # L2 距离 -> [0,1] 相似度（口径单源：services/vector_similarity.py）
         return [
             OntologySearchResult(
                 id=h["ontology_id"],
@@ -1195,7 +1196,7 @@ class OntologyService:
                 name=h["name"],
                 alias=h.get("alias") or None,
                 description=h.get("description") or None,
-                score=round(1.0 / (1.0 + max(float(h["distance"]), 0.0)), 4),
+                score=distanceToSimilarity(h["distance"]),
             )
             for h in hits
         ]

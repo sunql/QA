@@ -61,6 +61,19 @@ def test_distance_to_similarity_rounds_to_four_decimals() -> None:
     assert distanceToSimilarity(2.0) == 0.3333
 
 
+@pytest.mark.parametrize("distance", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_distance_maps_to_least_similar(distance: float) -> None:
+    """非有限输入必须落回值域内，不得穿透。
+
+    - `NaN`：`max(nan, 0.0)` 返回 `nan` ⇒ score 变 `NaN`，前端渲染 `NaN%`，且任何
+      含 NaN 的排序顺序不确定（可能把不相关文档排到前排）。
+    - `-inf`：会被算成 `1.0`，即把"无限远"当成"完全相同"（假完美命中）。
+    """
+    score = distanceToSimilarity(distance)
+    assert score == 0.0
+    assert 0.0 <= score <= 1.0
+
+
 def test_all_call_sites_reference_the_single_source_function() -> None:
     missing = [name for name in _CALL_SITES if "distanceToSimilarity" not in _readSource(name)]
     assert missing == [], f"这些调用点未复用单源函数: {missing}"

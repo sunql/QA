@@ -1969,6 +1969,27 @@ class TestPlanParseObservability:
         assert len(reasonLines) == 1
         assert "reason=PLAN_REPLY_NO_JSON" in reasonLines[0].getMessage()
 
+    async def test_empty_plan_failure_log_keeps_drops(self, caplog) -> None:
+        """PLAN_EMPTY 的成因就是「字段被丢光」⇒ 失败日志必须带上丢了什么。
+
+        否则运维只看到 reason=PLAN_EMPTY，看不到「为什么空」—— 正是 M3 要消灭的
+        那种无声降级（drops 被构造出来又被丢弃）。
+        """
+        fake = _FakeLlm(['{"target": 123}'])
+        service = Nl2SqlService()
+        with (
+            caplog.at_level(logging.WARNING, logger="app.services.nl2sql_service"),
+            pytest.raises(Nl2SqlError),
+        ):
+            await service.generateQueryPlan(
+                "收货数量", [self._cls()], fake, _llmConfig(), maxRetries=0
+            )
+        reasonLines = [r for r in caplog.records if "reason=" in r.getMessage()]
+        assert len(reasonLines) == 1
+        msg = reasonLines[0].getMessage()
+        assert "reason=PLAN_EMPTY" in msg
+        assert "target:PLAN_TARGET_NOT_STR(int)" in msg
+
     async def test_degraded_plan_logs_reason_and_drops(self, caplog) -> None:
         fake = _FakeLlm(['{"target": "查询", "groupBy": "BPSNUM"}'])
         service = Nl2SqlService()

@@ -294,7 +294,7 @@ class QueryPlan:
             joins=_nested("joins", JoinSpec, ("columns",)),
             sortBy=_nested("sortBy", SortSpec),
             # rowLimit 不做类型校验是既有设计：下游 _coerceRowLimit 会归一化
-            # （nl2sql_service.py:926 明示依赖此契约），故这里既不过滤也不上报。
+            # （nl2sql_service.py 的 _coerceRowLimit 明示依赖此契约），故这里既不过滤也不上报。
             rowLimit=data.get("rowLimit"),
             partitionBy=_strings("partitionBy"),
             perGroupLimit=perGroupLimit,

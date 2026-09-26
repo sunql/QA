@@ -2,16 +2,21 @@
 
 覆盖：
 - from_dictWithReport 对每一类损坏输入的丢弃报告（按原因分类）
-- **语义不变**：from_dictWithReport 的 plan 与 from_dict 完全一致（逐例参数化）
+- **语义不变**：plan 与 M3 之前的实现逐字段相同（黄金快照，见 _GOLDEN_SEMANTICS）
 - 报告本身：不可变、单行格式化、同类条目聚合计数
 
 背景：from_dict 有 11 处静默丢弃点（"绝不抛错" 是刻意契约），静默到无法诊断
 「模型说了什么、被丢掉了什么」，故补一份**报告**而非改成抛错。
+
+⚠️ 语义不变的守卫为什么不是「与 from_dict 对比」：from_dict 现在**就是**
+`from_dictWithReport(data)[0]`（纯委托），拿它当基准等于自己跟自己比，恒真 —— 一条
+永远通过的断言。故改为在 M3 之前**机械导出**的黄金快照（见下），基准取自旧实现而非
+新实现，任何解析漂移都会被逐字段钉住。
 """
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, astuple
 
 import pytest
 
@@ -53,6 +58,91 @@ _BROKEN_PAYLOADS: list[dict | list | str | None] = [
 ]
 
 
+# 有效 / 混合载荷：黄金快照必须同时钉住「保留」的一侧，否则只验证了「坏字段被丢」
+_VALID_PAYLOADS: list[dict] = [
+    {
+        "target": "各供应商收货数量",
+        "selectedClasses": ["PRECEIPT"],
+        "selectedProperties": ["BPSNUM", "QTY"],
+        "conditions": ["BPSNUM 不为空"],
+        "aggregations": [{"function": "SUM", "property": "QTY", "alias": "TOTAL"}],
+        "groupBy": ["BPSNUM"],
+        "joins": [{"sourceClass": "A", "targetClass": "B", "columns": ["A1 = B1"]}],
+        "sortBy": [{"property": "TOTAL", "direction": "desc"}],
+        "rowLimit": 100,
+        "partitionBy": ["BPSNUM"],
+        "perGroupLimit": 3,
+        "interpretation": "按供应商汇总",
+    },
+    {"target": "查采购", "selectedClasses": ["DIM_SUPPLIER"], "selectedProperties": "BAD"},
+    {"target": "  ", "selectedClasses": []},
+    {"joins": [{"sourceClass": "A", "targetClass": "B", "columns": "A1 = B1"}]},
+    {
+        "aggregations": [{"function": "SUM", "property": "QTY"}],
+        "groupBy": ["QTY"],
+        "sortBy": [1, {"property": "QTY", "direction": "asc"}],
+    },
+    {
+        "aggregations": [
+            {"function": "SUM", "property": "QTY"},
+            {"function": "AVG", "property": "PRICE", "alias": "P"},
+        ],
+        "rowLimit": 7,
+    },
+]
+
+_GOLDEN_PAYLOADS: list[object] = [*_BROKEN_PAYLOADS, *_VALID_PAYLOADS]
+
+# ── 黄金快照：由 M3 **之前**的实现（aefabd3 的 from_dict）机械导出 ────────────────
+# 导出方式（可复现）：
+#   git worktree add --detach /tmp/pre aefabd3
+#   python -c 'import dataclasses as d, app.domain.query_plan as q;
+#              print(repr(d.astuple(q.QueryPlan.from_dict(PAYLOAD))))'
+# 基准取**旧实现**，不取新实现 ⇒ 不可能是恒真断言。
+# 元组字段顺序 = QueryPlan 定义顺序：
+#   target, selectedClasses, selectedProperties, conditions, aggregations, groupBy,
+#   joins, sortBy, rowLimit, partitionBy, perGroupLimit, interpretation
+_GOLDEN_SEMANTICS: list[tuple] = [
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # None
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # "不是 dict"
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # ["也不是"]
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # {}
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # target 非 str
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # selectedClasses 非列表
+    ("", (), ("BPSNUM",), (), (), (), (), (), None, (), None, None),  # 混入 42/None → 只留 str
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # conditions 非列表
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # aggregations 条目非 dict
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # aggregations 缺必填
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # joins 缺必填
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # sortBy 条目非 dict
+    ("", (), (), (), (), ("BPSNUM",), (), (), None, (), None, None),  # groupBy 混入 1 → 只留 str
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # perGroupLimit "abc"
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # perGroupLimit 0（非正）
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # perGroupLimit True（bool 拒收）
+    ("", (), (), (), (), (), (), (), None, (), None, None),  # interpretation 非 str
+    ("查询", (), (), (), (), (), (), (), {"bad": 1}, (), None, None),  # rowLimit 不校验，原样透传
+    (
+        "各供应商收货数量", ("PRECEIPT",), ("BPSNUM", "QTY"), ("BPSNUM 不为空",),
+        (("SUM", "QTY", "TOTAL", None),), ("BPSNUM",), (("A", "B", ("A1", "B1")),),
+        (("TOTAL", "desc"),), 100, ("BPSNUM",), 3, "按供应商汇总",
+    ),  # 全部有效字段
+    ("查采购", ("DIM_SUPPLIER",), (), (), (), (), (), (), None, (), None, None),  # 一半有效一半坏
+    ("  ", (), (), (), (), (), (), (), None, (), None, None),  # 纯空白 target 原样保留
+    (
+        "", (), (), (), (), (), (("A", "B", ("A", "1", " ", "=", " ", "B", "1")),),
+        (), None, (), None, None,
+    ),  # join.columns 传 str → 按字符拆（既有归一行为，非丢弃）
+    (
+        "", (), (), (), (("SUM", "QTY", None, None),), ("QTY",), (),
+        (("QTY", "asc"),), None, (), None, None,
+    ),  # 有效聚合 + 无效 sortBy 条目被过滤
+    (
+        "", (), (), (), (("SUM", "QTY", None, None), ("AVG", "PRICE", "P", None)),
+        (), (), (), 7, (), None, None,
+    ),  # 两个聚合条目保序
+]
+
+
 def _dropsFor(payload: object) -> tuple[PlanDrop, ...]:
     _, drops = QueryPlan.from_dictWithReport(payload)  # type: ignore[arg-type]
     return drops
@@ -65,11 +155,19 @@ def _reasonsByField(drops: tuple[PlanDrop, ...]) -> dict[str, set[str]]:
     return out
 
 
-@pytest.mark.parametrize("payload", _BROKEN_PAYLOADS)
-def test_from_dict_with_report_keeps_from_dict_semantics(payload: object) -> None:
-    """本批只加观测，**不得**改变解析语义：plan 必须与 from_dict 逐字节相同。"""
+@pytest.mark.parametrize(
+    ("payload", "golden"),
+    zip(_GOLDEN_PAYLOADS, _GOLDEN_SEMANTICS, strict=True),
+)
+def test_from_dict_with_report_matches_pre_m3_golden(payload: object, golden: tuple) -> None:
+    """本批只加观测，**不得**改变解析语义：plan 必须与 M3 之前的实现逐字段相同。"""
     plan, _ = QueryPlan.from_dictWithReport(payload)  # type: ignore[arg-type]
-    assert plan == QueryPlan.from_dict(payload)  # type: ignore[arg-type]
+    assert astuple(plan) == golden
+
+
+def test_golden_snapshot_covers_every_payload() -> None:
+    """载荷表与黄金表必须等长 —— 防「加了载荷忘了黄金」这种两边悄悄错位。"""
+    assert len(_GOLDEN_PAYLOADS) == len(_GOLDEN_SEMANTICS)
 
 
 def test_clean_payload_reports_no_drops() -> None:

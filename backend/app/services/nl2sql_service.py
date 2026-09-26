@@ -1667,9 +1667,19 @@ class Nl2SqlService:
             outcome = self._parsePlanOutcome(response.content)
             if outcome.plan is None:
                 # 单点 reason= 日志：按原因聚合失败率（M3 观测性）
-                logger.warning(
-                    "NL2SQL 计划解析失败 attempt=%d reason=%s", attempt + 1, outcome.reason
-                )
+                if outcome.drops:
+                    # PLAN_EMPTY 的成因往往就是「字段被丢光」⇒ 必须一并输出丢了什么，
+                    # 否则只知道"空了"、不知道"为什么空"（drops 会被构造出来又丢弃）
+                    logger.warning(
+                        "NL2SQL 计划解析失败 attempt=%d reason=%s drops=%s",
+                        attempt + 1,
+                        outcome.reason,
+                        formatPlanDrops(outcome.drops),
+                    )
+                else:
+                    logger.warning(
+                        "NL2SQL 计划解析失败 attempt=%d reason=%s", attempt + 1, outcome.reason
+                    )
                 errors.append(f"第 {attempt + 1} 次尝试未能从回复中解析出查询计划")
                 continue
             if outcome.drops:
@@ -2017,6 +2027,12 @@ class Nl2SqlService:
         # 注：这里不需要 isinstance(data, dict) 兜底——上面的候选裁剪保证 candidate
         # 必以 '{' 开头，而 JSON 里以 '{' 开头的合法值只能是对象（数组是 '['）。
         # 该分支确为不可达死代码，2026-09-26 随 M3 观测性改造删除。
+        #
+        # 刻意不套 try/except：from_dictWithReport 与 from_dict 同一契约，**绝不抛错**
+        # （历史 JSONB 不能让会话失败的前提），输入损坏一律转成 drops。故此调用点天然
+        # 满足「结构损坏 → 重试」。⚠️ 若日后给 QueryPlan 加必填字段或 __post_init__
+        # 校验，这个不变量会失效、异常将穿透重试循环（2026-09-26 code-reviewer 提示）。
+        plan, drops = QueryPlan.from_dictWithReport(data)
         plan, drops = QueryPlan.from_dictWithReport(data)
         if _isEmptyPlan(plan):
             return _PlanParseOutcome(None, REASON_PLAN_EMPTY, drops)

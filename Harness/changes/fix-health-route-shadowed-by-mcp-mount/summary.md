@@ -134,22 +134,34 @@ reviewer 的核验方式（逐项查证 + 反证实验，非抽样）：
 
 ## 8. 部署验证
 
-已部署（用户要求「重新打包并启动」）：
+已部署（用户要求「重新打包并启动」，commit `345cb3a`）：
 
 ```bash
 cd docker && docker compose build backend && docker compose up -d backend
 ```
 
-真机验证：
+真机验证（**同一条 curl 的修复前后对照**）：
+
+| 检查 | 修复前 | 修复后 |
+|---|---|---|
+| `curl -s localhost:8000/api/v1/health`（后端直连） | `Not Found` [404] | **200** `{"status":"ok","version":"0.1.0","appEnv":"development"}` |
+| `curl -s localhost:5173/api/v1/health`（经 nginx） | `Not Found` [404] | **200**（同上 body） |
+| `route count`（进程内探测） | 51，catch-all Mount 在第 49 条之后仍留 health | 51，catch-all Mount 为最后一条 |
+
+其它检查：
 
 | 检查 | 结果 |
 |---|---|
-| `curl -s localhost:8000/api/v1/health`（后端直连） | **200** `{"status":"ok","version":"0.1.0","appEnv":"development"}` |
-| `curl -s localhost:5173/api/v1/health`（经 nginx） | 200 |
-| 端点抽样（真实 app 内进程探测） | `auth/password-policy` 200、`menu-config` 200、`ontology/health/joins` 200、`chat/models` 404（该路径本就不存在，非遮蔽）、`/mcp` 400（子 app 活着） |
-| 容器代码一致性 | `chat_service.py` / `main.py` repo md5 == 容器 md5 |
+| 启动日志 | `Application startup complete.` + `Uvicorn running on http://0.0.0.0:8000` |
+| 端点抽样（经 nginx） | `auth/password-policy` 200、`ontology/health/joins` 200、`menu-config` 403（鉴权闸正常） |
+| MCP 子 app | `/mcp` → 400（sub-app 存活，未被本次改动影响） |
+| 容器代码一致性 | `app/main.py` 与 `app/services/chat_service.py` repo md5 == 容器 md5（MATCH） |
 
-> 无前端改动 ⇒ 不重建前端镜像。
+**附带确认了一条既有修复仍然有效**：本次后端容器被重建（IP 变更），重建后经 nginx 的所有
+请求仍正常（无 502）⇒ `fix-nginx-upstream-stale-ip` 的 `resolver` + 变量 `proxy_pass`
+确实解掉了「nginx 只在启动时解析一次 upstream」的老问题。
+
+> 无前端改动 ⇒ 未重建前端镜像（前端容器仍跑本轮早先构建的 `qa-system-frontend:latest`）。
 
 **修复前后同一个探活的对照**是本次最有价值的一条证据：同一句 `curl` 从
 `404 Not Found` 变为 `200`，且 `route count 51` 未变（只挪位置、无增删路由）。

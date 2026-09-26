@@ -104,6 +104,7 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_COUNT,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CREATED_TIME,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_ID,
+    MSG_SCHEMA_CHAT_HISTORY_MESSAGE_INTERRUPTED,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_QUESTION,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_ROLE,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_SQL,
@@ -1895,6 +1896,9 @@ class ChatMessageRead(CamelModel):
     question: str | None = Field(default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_QUESTION)
     sql: str | None = Field(default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_SQL)
     created_time: datetime = Field(..., description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CREATED_TIME)
+    interrupted: bool = Field(
+        default=False, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_INTERRUPTED
+    )
 
 
 class SessionMessagesResponse(CamelModel):

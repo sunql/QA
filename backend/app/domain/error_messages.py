@@ -233,6 +233,9 @@ MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CONTENT = "消息文本内容"
 MSG_SCHEMA_CHAT_HISTORY_MESSAGE_QUESTION = "user 行：原始问题；assistant 行：null"
 MSG_SCHEMA_CHAT_HISTORY_MESSAGE_SQL = "assistant 行：生成的 SQL；user 行：null"
 MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CREATED_TIME = "消息时间戳（带 tz）"
+MSG_SCHEMA_CHAT_HISTORY_MESSAGE_INTERRUPTED = (
+    "assistant 行：是否由断连兜底写入（内容可能是半截回答）；user 行：恒 false"
+)
 MSG_SCHEMA_CHAT_HISTORY_MESSAGES = "按时间正序排列的消息流（user → assistant 交错）"
 MSG_HISTORY_LISTING_LIMIT = "返回条数上限（1-200，默认 50）"
 MSG_HISTORY_LISTING_OFFSET = "分页偏移（默认 0）"

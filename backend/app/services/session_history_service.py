@@ -176,6 +176,7 @@ class SessionHistoryService:
                 SessionMessage.question,
                 SessionMessage.sql_generated,
                 SessionMessage.created_time,
+                SessionMessage.interrupted,
             )
             .where(SessionMessage.session_id == sessionId)
             .order_by(SessionMessage.id.asc())
@@ -193,6 +194,8 @@ class SessionHistoryService:
                 question=r.question if r.role == "user" else None,
                 sql=r.sql_generated if r.role == "assistant" else None,
                 created_time=r.created_time,
+                # H4：断连兜底写入的半截回答，前端据此渲染「（已中断）」
+                interrupted=bool(r.interrupted),
             )
             for r in rows
         ]

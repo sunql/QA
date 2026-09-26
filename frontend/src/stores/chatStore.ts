@@ -113,6 +113,8 @@ function toChatMessage(read: ChatMessageRead): ChatMessage {
     timestamp: Number.isFinite(ts) ? ts : Date.now(),
     sql: read.sql,
     isStreaming: false,
+    // H4：断连兜底写入的半截回答，UI 据此提示「内容不完整」
+    interrupted: read.interrupted,
   };
 }
 

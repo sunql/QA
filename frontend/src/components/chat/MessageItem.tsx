@@ -87,6 +87,15 @@ function MessageItem({ message, exporting = false, onExportSingleTurn }: Message
                 }
               />
             ) : null}
+            {/* H4 断连兜底：内容可能是半截回答（服务端已按 interrupted 标记），必须说清楚 */}
+            {message.interrupted ? (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 8 }}
+                message={t("messageItem.interrupted")}
+              />
+            ) : null}
             {message.isStreaming ? (
               // 流式期间行高与 markdown 渲染对齐（1.7），完成后切换渲染无视觉跳动（审查 LOW-2）
               <Paragraph style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.7 }}>

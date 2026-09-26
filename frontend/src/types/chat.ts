@@ -212,6 +212,8 @@ export interface ChatMessage {
   extractedEntities?: ExtractedEntities | null;
   // 流式输出中：占位消息正在接收 token（UI 显示打字光标）
   isStreaming?: boolean;
+  // H4 断连兜底：该 assistant 行是客户端断连后由服务端补写的（content 可能不完整）
+  interrupted?: boolean;
   // NL2SQL 校验失败的具体差异（error 事件透传 detail）
   errorDetail?: string | null;
   // 会话亲和性状态（done 事件回填；解锁时为 null/undefined）

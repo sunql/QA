@@ -96,6 +96,7 @@ from app.services.graph_traversal_service import (
 )
 from app.services.messages_zh import (
     MSG_GRAPH_TRAVERSAL_UNAVAILABLE,
+    MSG_STREAM_INTERRUPTED_EMPTY,
     MSG_SUPPLIER_360_NOT_FOUND,
     MSG_SUPPLIER_RISK_NOT_FOUND,
 )
@@ -644,6 +645,59 @@ class _StepRun:
     cost: Decimal = Decimal("0")
     modelName: str | None = None
     plan: QueryPlan | None = None
+
+
+# 断连兜底状态在 session.info 上的槽位键（H4）。用会话自身当载体，是因为
+# 「生成器」与「响应收尾的 background 任务」必须看到**同一个**可变对象 ——
+# 走形参就得给 processMessageStream/_streamQuery/_streamMultiStep 全加一遍签名。
+_STREAM_PERSIST_KEY = "_streamPersistState"
+
+
+@dataclass
+class StreamPersistState:
+    """一轮流式请求「已下发给客户端但尚未落库」的产出快照（H4 断连兜底）。
+
+    生命周期（单发标志，保证只写一次）：
+    - `pending`：`processMessageStream` 一进入就置 True（此后任何 yield 都可能已被
+      客户端看到）；**任何一次成功的 `_storeSessionMessages` 都会置回 False** ——
+      落库点即解除点，所以「哪些路径先落库后 yield」不需要逐个记住；
+    - 断连时生成器多半停在 `yield` 上（不在任务栈上，`finally` 不触发），`pending`
+      仍为 True ⇒ `StreamingResponse(background=...)` 用本快照补写。
+
+    例外说明（不可变规则）：本类是**每请求可变持有器**，字段就地赋值是刻意的 ——
+    它必须按引用与 background 任务共享，返回新副本就失去了意义。字段写全是廉价
+    赋值（追加字符串 / 赋标量），不涉及 IO。
+    """
+
+    pending: bool = False
+    # 已下发给客户端的回答片段（与 _streamQuery 的 answerPieces 同一个列表对象）
+    answerPieces: list[str] = field(default_factory=list)
+    sql: str | None = None
+    plan: QueryPlan | None = None
+    resultColumns: list[str] = field(default_factory=list)
+    # 已**测得**的成本（计划/SQL/图表/已完成的调用）；断连时答复 token 还没到，
+    # 故这是下界，不是真实成本 —— 兜底行的 token_cost_usd 沿用此值
+    totalCostUsd: float = 0.0
+    # 本轮起点（monotonic），兜底行 latency_ms 与正常落库同口径
+    startedAt: float = 0.0
+
+
+def attachStreamPersistState(session: AsyncSession) -> StreamPersistState:
+    """取（必要时新建）本请求的断连兜底状态，挂在请求作用域 session 上。
+
+    session 与 background 任务同寿命（FastAPI 的依赖 teardown 在响应体发完之后），
+    故请求内是同一个实例、同一个 `info` 字典。
+    """
+    state = session.info.get(_STREAM_PERSIST_KEY)
+    if state is None:
+        state = StreamPersistState()
+        session.info[_STREAM_PERSIST_KEY] = state
+    return state
+
+
+def streamPersistStateOf(session: AsyncSession) -> StreamPersistState | None:
+    """读取本请求的断连兜底状态；非流式请求（未 attach）返回 None。"""
+    return session.info.get(_STREAM_PERSIST_KEY)
 
 
 class ChatService(ChatStreamOutputMixin):
@@ -3183,7 +3237,15 @@ class ChatService(ChatStreamOutputMixin):
         始终以结构化事件结束。4-4：闲聊/出错轮也持久化消息，历史链不断。
 
         user 可选（#207 安全修复）：API 层透传真实调用方，Agent 运行用它作 actor。
+
+        H4：函数入口即武装断连兜底（`StreamPersistState.pending = True`）。客户端在
+        任何一次 yield 之后断连都可能已经看到内容，而断连时生成器停在 `yield` 上时
+        `finally` 不会触发 ⇒ 只有响应收尾的 background 钩子能补写（见
+        `persistInterruptedStream`）。任何一次成功落库都会自动解除（不会重复写）。
         """
+        persistState = attachStreamPersistState(session)
+        persistState.pending = True
+        persistState.startedAt = time.monotonic()
         # Phase 6.5：supplier name → code 预解析（同 processMessage；流式入口覆盖）
         try:
             dto = await self._prepareSupplierQuestion(session, dto)
@@ -3646,6 +3708,15 @@ class ChatService(ChatStreamOutputMixin):
 
         # 回答流式输出（失败降级：仅当主模型未产出任何 token 时）
         answerPieces: list[str] = []
+        # H4 断连兜底：把将要在 yield 之前产生的内容登记到快照上（此后客户端看到的
+        # 任何片段都已在快照里）。answerPieces 是同一个列表引用 ⇒ 追加即对兜底可见。
+        persistState = streamPersistStateOf(session)
+        if persistState is not None:
+            persistState.answerPieces = answerPieces
+            persistState.sql = finalSql
+            persistState.plan = outcome.plan
+            persistState.resultColumns = self._columns(data)
+            persistState.totalCostUsd = float(totalCost)
         # 默认取主模型名：即使流异常地零块完成，done 事件仍报告一个合理的模型名
         answerModelName: str | None = pc.selected.model_name
         async for chunk, answerConfig, (wastedPt, wastedCt) in self._streamAnswerWithFallback(
@@ -3661,6 +3732,8 @@ class ChatService(ChatStreamOutputMixin):
                     session, dto.sessionId, answerConfig,
                     chunk.promptTokens, chunk.completionTokens, purpose="answer",
                 )
+                if persistState is not None:
+                    persistState.totalCostUsd = float(totalCost)
             if chunk.content:
                 # 独立 if 而非 elif：即使 isDone 块携带内容也不丢失
                 answerPieces.append(chunk.content)
@@ -4588,6 +4661,59 @@ class ChatService(ChatStreamOutputMixin):
         """客户端 history → (role, content, sql) 列表，仅取最近 N 条。客户端无 SQL 记录。"""
         return [(m.role, m.content, None) for m in history[-_CONTEXT_MESSAGE_LIMIT:]]
 
+    async def persistInterruptedStream(
+        self, dto: ChatRequest, session: AsyncSession
+    ) -> None:
+        """断连兜底落库（H4）：把已下发给客户端的部分产出写进历史并标记中断。
+
+        由 API 层在 SSE 响应收尾时经 `StreamingResponse(background=...)` 调用：该钩子
+        在 Starlette 的收敛任务组**之外** await（断连时确定会跑到），因此不需要分离任务。
+
+        `session`（请求作用域）**只用来读本轮快照**，写入走**独立会话** —— 实测结论，
+        不是防御性写法：取消是在最近一个 await 上打进来的（实测落在本轮 `_recordUsage`
+        的 `commit() → flush()` 中途），请求会话随即被标成 needs-rollback（直接写抛
+        `PendingRollbackError`）；即便先 `rollback()` 复原，底层 asyncpg 连接也已被关掉
+        而 SQLAlchemy 并未察觉（探针实测 `pg_closed=True` 同时 `invalidated=False`），
+        下一条语句即整条失败于 `InterfaceError: connection is closed`。注意这不是
+        `pool_pre_ping` 能兜住的场景：连接是在**被持有期间**死掉的，pre_ping 只在签出时
+        检查。请求会话在取消之后**不是可靠的写入通道**，故不复用：多一条连接，换兜底必达。
+
+        首行短路：本轮已落库（`pending=False`）⇒ 什么都不写（单发标志去重）。正常跑完
+        的请求、以及「先落库后 yield」的各条路径（闲聊/澄清/领域命令/卡片/多步）都在
+        落库时已解除标记，故本方法对它们是空操作。
+
+        计量的诚实性：答复 token 只随 `isDone` 终块到达（非终块发 0/0）⇒ 断连时刻部分
+        答案的 token 数**根本不存在**，不做回填、不写假账。`token_cost_usd` 只含已测得
+        的部分（计划/SQL/图表/已完成的调用），是真实成本的下界；断连那一轮的答复用量行
+        随被取消的 flush 一起没了（它本就未提交），SSOT 已注明这是下界而非测得值。
+        """
+        state = streamPersistStateOf(session)
+        if state is None or not state.pending:
+            return
+        state.pending = False  # 兜底自身也只写一次（background 重复调用/并发都安全）
+        answer = "".join(state.answerPieces) or MSG_STREAM_INTERRUPTED_EMPTY
+
+        from app.infrastructure.database import getSessionFactory
+
+        async with getSessionFactory()() as fallbackSession:
+            await self._storeSessionMessages(
+                fallbackSession, dto.sessionId, dto.question, answer, state.sql,
+                routing_layer="L2",
+                latency_ms=int((time.monotonic() - state.startedAt) * 1000),
+                token_cost_usd=state.totalCostUsd,
+                interrupted=True,
+            )
+            # 查询状态照常保存：否则下一轮的追问（REFINE/FOLLOW_UP）失去锚点
+            await self._saveQueryState(
+                fallbackSession, dto.sessionId,
+                question=dto.question, plan=state.plan, sql=state.sql,
+                resultColumns=state.resultColumns,
+            )
+        logger.info(
+            "流式断连兜底落库: session=%s 已下发片段=%d 内容长度=%d",
+            dto.sessionId, len(state.answerPieces), len(answer),
+        )
+
     async def _storeSessionMessages(
         self,
         session: AsyncSession,
@@ -4599,14 +4725,23 @@ class ChatService(ChatStreamOutputMixin):
         routing_layer: str | None = None,
         latency_ms: int | None = None,
         token_cost_usd: float | None = None,
+        interrupted: bool = False,
     ) -> None:
         """持久化一轮对话：user + assistant 双写（仅创建新记录，不可变）。
 
         routing_layer / latency_ms / token_cost_usd：Phase 5 监控埋点，对应 routing_layer
         枚举值 L1~L4（由调用方从流水线入口传播进来）。
 
+        interrupted（H4）：该 assistant 行是否由断连兜底写入（内容可能是半截回答）。
+        默认 False ⇒ 既有调用点（27 处）语义不变。
+
         设计说明：Token 计量在每次 LLM 调用后立即提交（见 _recordUsage），故此处也在独立事务提交。
         属"最终一致"设计——即使后续环节失败，已消耗的 Token 与成本仍会被记录，不随本轮回滚。
+
+        H4 顺带职责：本方法是一轮对话的**唯一落库点**，提交成功即解除该轮的断连兜底
+        （`pending = False`）—— 唯一写入点即唯一解除点，这样「哪条路径先落库后 yield」
+        不必逐个记住也不会重复写。取消只会在 await 点投递，提交返回到解除之间没有挂起
+        点 ⇒ 这个解除相对取消是原子的（提交过程本身被取消是明确不保证的竞态，见 SSOT）。
         """
         userMsg = SessionMessage(
             session_id=sessionId, role="user", content=question, question=question
@@ -4619,9 +4754,13 @@ class ChatService(ChatStreamOutputMixin):
             routing_layer=routing_layer,
             latency_ms=latency_ms,
             token_cost_usd=token_cost_usd,
+            interrupted=interrupted,
         )
         session.add_all([userMsg, assistantMsg])
         await session.commit()
+        persistState = streamPersistStateOf(session)
+        if persistState is not None:
+            persistState.pending = False
 
     # =========================================================================
     # 会话查询状态（ReAct 多轮，Phase C）

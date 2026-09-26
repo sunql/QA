@@ -406,8 +406,8 @@ describe("chatStore", () => {
     useChatStore.setState({ messages: [{ id: "old", role: "user", content: "old", timestamp: 1 }] });
 
     const historyMessages: ChatMessageRead[] = [
-      { id: 1, role: "user", content: "历史 Q1", question: "历史 Q1", sql: null, createdTime: "2026-01-01T00:00:00Z" },
-      { id: 2, role: "assistant", content: "历史 A1", question: null, sql: "SELECT 1", createdTime: "2026-01-01T00:01:00Z" },
+      { id: 1, role: "user", content: "历史 Q1", question: "历史 Q1", sql: null, createdTime: "2026-01-01T00:00:00Z", interrupted: false },
+      { id: 2, role: "assistant", content: "历史 A1", question: null, sql: "SELECT 1", createdTime: "2026-01-01T00:01:00Z", interrupted: false },
     ];
     historyApi.loadSessionMessages.mockResolvedValue({
       sessionId: "s-history",
@@ -427,6 +427,21 @@ describe("chatStore", () => {
     expect(state.messages.find((m) => m.id === "old")).toBeUndefined();
     // 错误清空
     expect(state.error).toBeNull();
+  });
+
+  it("loadSessionMessages 透传 interrupted（H4 断连兜底写入的半截回答）", async () => {
+    const historyMessages: ChatMessageRead[] = [
+      { id: 1, role: "user", content: "历史 Q1", question: "历史 Q1", sql: null, createdTime: "2026-01-01T00:00:00Z", interrupted: false },
+      { id: 2, role: "assistant", content: "半截回答", question: null, sql: "SELECT 1", createdTime: "2026-01-01T00:01:00Z", interrupted: true },
+      { id: 3, role: "assistant", content: "完整回答", question: null, sql: null, createdTime: "2026-01-01T00:02:00Z", interrupted: false },
+    ];
+    historyApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-history", messages: historyMessages });
+
+    await useChatStore.getState().loadSessionMessages("s-history");
+
+    const messages = useChatStore.getState().messages;
+    expect(messages[1].interrupted).toBe(true);
+    expect(messages[2].interrupted).toBe(false);
   });
 
   it("loadSessionMessages 不影响 datasourceId/selectedModelId", async () => {

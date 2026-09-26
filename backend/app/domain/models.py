@@ -779,6 +779,12 @@ class SessionMessage(Base, TimestampMixin):
     routing_layer: Mapped[str | None] = mapped_column(String(10), nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     token_cost_usd: Mapped[float | None] = mapped_column(sa.Float(), nullable=True)
+    # interrupted（0085，H4）：assistant 行是否由「客户端断连兜底」写入。
+    # 内容可能是半截回答（也可能一个 token 都没产出，见 MSG_STREAM_INTERRUPTED_EMPTY）
+    # ⇒ 历史面板据此渲染「（已中断）」，下游不得把它当完整回答消费。
+    interrupted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa.text("false")
+    )
 
     __table_args__ = (
         Index("idx_session_msg_time", "session_id", "created_time"),

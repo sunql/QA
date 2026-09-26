@@ -364,3 +364,18 @@ describe("MessageItem 类召回诊断提示", () => {
     expect(screen.queryByText(/智能召回暂不可用/)).not.toBeInTheDocument();
   });
 });
+
+describe("MessageItem 中断回答提示（H4 断连兜底）", () => {
+  it("interrupted=true 渲染中断提示（内容可能是半截）", () => {
+    renderItem({ content: "查询完成，", interrupted: true });
+    expect(screen.getByText(/已中断/)).toBeInTheDocument();
+  });
+
+  it("interrupted 缺省/为 false 不渲染提示", () => {
+    renderItem({ content: "查询完成。" });
+    expect(screen.queryByText(/已中断/)).not.toBeInTheDocument();
+
+    renderItem({ content: "查询完成。", interrupted: false });
+    expect(screen.queryByText(/已中断/)).not.toBeInTheDocument();
+  });
+});

@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     # 设置后 EmbeddingClient 将 base_url 中的 localhost/127.0.0.1 改写为该值，registry
     # 激活 provider 与 env 回退两条路径一致生效。宿主机直接部署时留空。
     embeddingHostOverride: str = Field(default="", alias="EMBEDDING_HOST_OVERRIDE")
+    # env 回退路径的输出维度**声明**（H7）：env 路径没有 registry 那样的 dimension
+    # 元数据，只有模型名，而「模型名 → 维度」无可靠映射 ⇒ 不猜。声明后 resolver 才会
+    # 与 Milvus 集合维度比对并 fail-fast；不声明则仅记 warning（不静默）。
+    embeddingDimension: int | None = Field(default=None, alias="EMBEDDING_DIMENSION")
 
     # ===== 限流（Phase 5.5）=====
     rateLimitEnabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")

@@ -234,8 +234,15 @@ MSG_EMBEDDING_PROVIDER_ACTIVE_CONFLICT = "同时存在多个待激活的 embeddi
 # 运行时维度守卫：激活的 embedding 服务输出维度必须与 Milvus 集合一致，否则语义检索
 # 插入/查询会静默错乱。提示走重建 + 回填流程（scripts/backfill_milvus_embeddings.py）。
 MSG_EMBEDDING_PROVIDER_DIMENSION_MISMATCH = (
-    "embedding 服务 {name} 输出维度 {dimension} 与 Milvus 集合维度 {milvusDimension} 不一致；"
+    "embedding 服务 {name}（来源 {source}）输出维度 {dimension} 与 Milvus 集合维度 {milvusDimension} 不一致；"
     "请重建集合为 {dimension} 维并回填（scripts/backfill_milvus_embeddings.py）"
+)
+# provider_type 守卫（H7）：该列此前是死元数据（工厂从不读，任何值都按 OpenAI 兼容
+# 处理）。已知集合 = KNOWN_PROVIDER_TYPES，与前端 types/embeddingProvider.ts 一致。
+MSG_EMBEDDING_PROVIDER_TYPE_UNKNOWN = (
+    "embedding 服务 {name}（id={id}）的 provider_type={providerType} 不在已知集合内"
+    "（已知：{known}）；未知类型不再静默按 OpenAI 兼容处理，请改为已知值"
+    "（前端下拉与后端 KNOWN_PROVIDER_TYPES 需同步扩展）"
 )
 
 

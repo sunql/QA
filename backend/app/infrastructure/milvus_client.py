@@ -34,6 +34,11 @@ _DOCUMENT_COLLECTION_NAME = "document_embeddings"
 _WIKI_PAGE_COLLECTION_NAME = "wiki_page_embeddings"
 _DIM = 1024  # 默认 embedding 维度（bge-m3 输出 1024 维；改模型需同步重建集合，见 scripts/backfill_milvus_embeddings.py）
 
+# Milvus `query` 的 limit 服务端上限，同时用作 query_iterator 的批大小（M9）。
+# 超过该值的 `query(limit=...)` 会被服务端**静默截断**（不报错）⇒ 任何「取全量」的读取
+# 必须走 query_iterator 分批；`query` 只用于 expr 已收敛到小结果集的读取。
+_MILVUS_QUERY_PAGE = 16384
+
 # 合法 embedding 类型。ontology_id 在 Milvus 中非跨类型唯一（类/属性共用 id 序列），
 # 删除与检索均须按 type 作用域，非法值在拼接表达式前 fail-fast。
 VALID_EMBEDDING_TYPES = frozenset(("class", "property", "metric"))
@@ -243,16 +248,22 @@ def deleteByOntologyIds(ontologyIds: list[int], type: str) -> None:
 
 
 def listAllEmbeddings() -> list[dict[str, Any]]:
-    """返回 ontology_embeddings 全量行（含 id/ontology_id/type/name/alias/description/embedding）。
+    """返回 ontology_embeddings **全量**行（含 id/ontology_id/type/name/alias/description/embedding）。
 
-    供一次性数据修复（scripts/backfill_milvus_embeddings.py --cleanup）做全量
-    去重后删集重建。query 的 limit 上限为 16384，本集合量级远低于此。
+    供一次性数据修复（scripts/backfill_milvus_embeddings.py --cleanup）做全量去重后
+    删集重建，也是 ontology_service 对账的读取入口。
+
+    ⚠️ 必须走分批迭代（M9）：原实现 `query(limit=16384)` 在行数超过 `_MILVUS_QUERY_PAGE`
+    时被服务端**静默截断**，而截断结果拿去「删集重建」会**永久丢掉**窗口外的向量
+    （对账又把仍在的行反复判为缺失、永不收敛）。`query_iterator` 的 limit 默认
+    UNLIMITED，一直取到 `next()` 返回空为止。
     """
     collection = ensureCollection()
     collection.load()
-    return collection.query(
+    return _queryAllRows(
+        collection,
         expr="id >= 0",
-        output_fields=[
+        outputFields=[
             "id",
             "ontology_id",
             "type",
@@ -261,8 +272,52 @@ def listAllEmbeddings() -> list[dict[str, Any]]:
             "description",
             "embedding",
         ],
-        limit=16384,
     )
+
+
+def _queryAllRows(
+    collection: Collection,
+    *,
+    expr: str,
+    outputFields: list[str],
+    iteratorFactory: Any | None = None,
+) -> list[dict[str, Any]]:
+    """用 `query_iterator` 分批取全量行并拼成一个列表（不截断）。
+
+    iteratorFactory 是**可注入接缝**（默认 `collection.query_iterator`）：该迭代器在本
+    模块属净新用法，单测用假迭代器验证跨批次不丢行/不乱序，不依赖真 Milvus。
+
+    `close()` 必须调用（放 finally）：迭代器持有 iterator cache 与游标 checkpoint 文件，
+    `next()` 抛错时不 close 会泄漏 —— 服务端进程内尤其明显。返回空列表即表示取尽。
+
+    pymilvus 3.x 把 ORM 风格 API 标了 deprecated（推荐 MilvusClient.query_iterator）；
+    此处沿用 Collection 以与模块其余部分（connections/utility/ORM 集合）一致，迁移
+    属独立改动。
+    """
+    makeIterator = iteratorFactory or collection.query_iterator
+    iterator = makeIterator(
+        batch_size=_MILVUS_QUERY_PAGE,
+        expr=expr,
+        output_fields=outputFields,
+    )
+    rows: list[dict[str, Any]] = []
+    try:
+        while True:
+            batch = iterator.next()
+            if not batch:
+                break
+            rows.extend(batch)
+    finally:
+        iterator.close()
+    if rows and len(rows) % _MILVUS_QUERY_PAGE == 0:
+        logger.warning(
+            "Milvus 全量读取累计 %d 行恰为批大小 %d 的整数倍，疑似在分页边界提前收尾"
+            "（expr=%s）；请核对集合实际行数",
+            len(rows),
+            _MILVUS_QUERY_PAGE,
+            expr,
+        )
+    return rows
 
 
 def dropCollection() -> None:
@@ -494,6 +549,10 @@ def queryDocumentChunks(documentId: str) -> list[dict[str, Any]]:
     门禁脚本要检查的是「写进去的定位符对不对」，不是「检索得准不准」。
     用 ``searchDocumentChunks`` 会因为集合跨调用方共享、topK 截断而漏掉
     目标行 —— 那会把门禁变成抛硬币。
+
+    单个 document 的 chunk 数远低于 ``_MILVUS_QUERY_PAGE``，故仍用单次 query
+    （超出该上限会被静默截断；真有单文档超限的一天，需与 listAllEmbeddings 一样
+    改走 ``_queryAllRows``）。
     """
     collection = ensureDocumentCollection()
     collection.load()
@@ -508,7 +567,7 @@ def queryDocumentChunks(documentId: str) -> list[dict[str, Any]]:
             "section_name",
             "paragraph_no",
         ],
-        limit=16384,
+        limit=_MILVUS_QUERY_PAGE,
     )
 
 
@@ -654,7 +713,7 @@ def queryWikiPageChunks(pageId: str) -> list[dict[str, Any]]:
             "dimension",
             "status",
         ],
-        limit=16384,
+        limit=_MILVUS_QUERY_PAGE,
     )
 
 

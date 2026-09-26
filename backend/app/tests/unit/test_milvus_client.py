@@ -9,6 +9,7 @@ ontology_embeddings：0 实体、indexes=[]）不建索引，搜索时抛 index 
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,7 @@ class FakeCollection:
         self.released = False
         self.deletedExprs: list[str] = []
         self.queryResults: list[dict] = []
+        self.iteratorKwargs: dict = {}
         self.dropped = False
 
     @property
@@ -54,6 +56,11 @@ class FakeCollection:
 
     def query(self, expr: str, output_fields: list[str], limit: int) -> list[dict]:
         return self.queryResults
+
+    def query_iterator(self, **kwargs) -> _FakeQueryIterator:
+        """listAllEmbeddings 走分批迭代取全量（M9）；返回单批假迭代器。"""
+        self.iteratorKwargs = kwargs
+        return _FakeQueryIterator([self.queryResults])
 
     def drop(self) -> None:
         self.dropped = True
@@ -151,8 +158,32 @@ class TestSearchByEmbeddingTypeFilter:
             milvus_client.searchByEmbedding([0.0], topK=5, typeFilter="other")
 
 
+class _FakeQueryIterator:
+    """假 `query_iterator`：按预置批次逐次吐出，取尽后返回空列表。"""
+
+    def __init__(self, batches: list[list[dict]]) -> None:
+        self._batches = [list(b) for b in batches]
+        self.nextCalls = 0
+        self.closed = False
+        self.error: Exception | None = None
+
+    def next(self) -> list[dict]:
+        self.nextCalls += 1
+        if self.error is not None:
+            raise self.error
+        return self._batches.pop(0) if self._batches else []
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class TestListAllEmbeddings:
-    """listAllEmbeddings 全量读取（cleanup 去重重建的前置）。"""
+    """listAllEmbeddings 全量读取（cleanup 去重重建的前置）。
+
+    M9：单次 `query(limit=16384)` 的服务端上限是**静默截断** —— 截断结果拿去
+    `--cleanup` 删集重建会永久丢掉窗口外的向量，而对账把仍在的行反复判为缺失、
+    永不收敛。故全量读取改走 `query_iterator` 分批。
+    """
 
     def test_returns_full_rows_with_embedding(self, fakeEnv) -> None:
         fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
@@ -165,6 +196,110 @@ class TestListAllEmbeddings:
         assert len(rows) == 2
         assert rows[0]["ontology_id"] == 10
         assert rows[0]["type"] == "property"
+
+    def test_iterates_every_batch_without_loss_or_reorder(self, fakeEnv) -> None:
+        """跨批次取全量：行数与顺序都不丢（正是截断会破坏的两件事）。"""
+        fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
+        fakeEnv.setattr(milvus_client, "ensureCollection", lambda: fake)
+        batches = [
+            [{"id": 1, "ontology_id": 10}, {"id": 2, "ontology_id": 11}],
+            [{"id": 3, "ontology_id": 12}],
+            [{"id": 4, "ontology_id": 13}, {"id": 5, "ontology_id": 14}],
+        ]
+        iterator = _FakeQueryIterator(batches)
+        fakeEnv.setattr(
+            milvus_client, "ensureCollection", lambda: _IteratorCollection(iterator)
+        )
+        rows = milvus_client.listAllEmbeddings()
+        assert [r["id"] for r in rows] == [1, 2, 3, 4, 5]
+        assert iterator.closed, "迭代器必须 close（否则泄漏 cache 与游标 checkpoint 文件）"
+
+    def test_iterator_contract_expr_fields_and_batch_size(self, fakeEnv) -> None:
+        """契约不变：仍是「全量」expr + 同一字段集；批大小为具名常量（非散落字面量）。"""
+        iterator = _FakeQueryIterator([[{"id": 1}]])
+        collection = _IteratorCollection(iterator)
+        fakeEnv.setattr(milvus_client, "ensureCollection", lambda: collection)
+        milvus_client.listAllEmbeddings()
+        assert collection.kwargs["expr"] == "id >= 0"
+        assert collection.kwargs["output_fields"] == [
+            "id",
+            "ontology_id",
+            "type",
+            "name",
+            "alias",
+            "description",
+            "embedding",
+        ]
+        assert collection.kwargs["batch_size"] == milvus_client._MILVUS_QUERY_PAGE
+
+    def test_empty_collection_returns_empty_list(self, fakeEnv) -> None:
+        iterator = _FakeQueryIterator([[]])
+        fakeEnv.setattr(
+            milvus_client, "ensureCollection", lambda: _IteratorCollection(iterator)
+        )
+        assert milvus_client.listAllEmbeddings() == []
+        assert iterator.closed
+
+    def test_closes_iterator_when_next_raises(self, fakeEnv) -> None:
+        """`next()` 抛错也要 close（服务端进程内不泄漏游标资源）。"""
+        from pymilvus.exceptions import MilvusException
+
+        iterator = _FakeQueryIterator([[{"id": 1}]])
+        iterator.error = MilvusException(message="boom")
+        fakeEnv.setattr(
+            milvus_client, "ensureCollection", lambda: _IteratorCollection(iterator)
+        )
+        with pytest.raises(MilvusException):
+            milvus_client.listAllEmbeddings()
+        assert iterator.closed
+
+    def test_warns_when_row_count_is_exact_page_multiple(
+        self, fakeEnv, monkeypatch, caplog
+    ) -> None:
+        """总行数恰为批大小整数倍 → 记 warning（可能是巧合，也可能是分页边界提前收尾）。"""
+        monkeypatch.setattr(milvus_client, "_MILVUS_QUERY_PAGE", 2)
+        iterator = _FakeQueryIterator([[{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}]])
+        fakeEnv.setattr(
+            milvus_client, "ensureCollection", lambda: _IteratorCollection(iterator)
+        )
+        with caplog.at_level(logging.WARNING, logger="app.infrastructure.milvus_client"):
+            rows = milvus_client.listAllEmbeddings()
+        assert len(rows) == 4
+        assert any("整数倍" in r.getMessage() for r in caplog.records), [
+            r.getMessage() for r in caplog.records
+        ]
+
+    def test_no_warning_when_row_count_is_not_page_multiple(
+        self, fakeEnv, monkeypatch, caplog
+    ) -> None:
+        monkeypatch.setattr(milvus_client, "_MILVUS_QUERY_PAGE", 2)
+        iterator = _FakeQueryIterator([[{"id": 1}, {"id": 2}], [{"id": 3}]])
+        fakeEnv.setattr(
+            milvus_client, "ensureCollection", lambda: _IteratorCollection(iterator)
+        )
+        with caplog.at_level(logging.WARNING, logger="app.infrastructure.milvus_client"):
+            assert len(milvus_client.listAllEmbeddings()) == 3
+        assert not [r for r in caplog.records if "整数倍" in r.getMessage()]
+
+    def test_batch_size_constant_is_the_milvus_query_cap(self) -> None:
+        """常量即 Milvus `query` 的 limit 服务端上限（16384），三处读取共用同一来源。"""
+        assert milvus_client._MILVUS_QUERY_PAGE == 16384
+
+
+class _IteratorCollection:
+    """只提供 query_iterator 的最小集合替身（记录调用 kwargs）。"""
+
+    def __init__(self, iterator: _FakeQueryIterator) -> None:
+        self._iterator = iterator
+        self.kwargs: dict = {}
+        self.loaded = False
+
+    def load(self) -> None:
+        self.loaded = True
+
+    def query_iterator(self, **kwargs) -> _FakeQueryIterator:
+        self.kwargs = kwargs
+        return self._iterator
 
 
 class TestDropCollection:

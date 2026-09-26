@@ -458,20 +458,58 @@ def _renderStatePart(priorState: str) -> str:
 
 
 def _renderPriorCtePart(prior_cte: str) -> str:
-    """prior_cte 注入段：多步串联场景下前序 CTE 片段（Task 3.2）。
+    """prior_cte 注入段：前序步骤已生成的 WITH-less CTE 片段（Task 3.2 / M8）。
 
-    prior_cte 来自 render_prior_cte()（chained_step_plan.py），格式为
-    `cte_alias AS (cte_body)` 或 `WITH cte1 AS (...), cte2 AS (...)`。
-    注入 system prompt 使当前步 LLM 知道前序 CTE 的存在与结构，
-    从而能在 formula 中引用（如 `SELECT ... FROM cte_alias`）。
+    prior_cte 来自 render_prior_cte()（chained_step_plan.py），**唯一合法形态**
+    是 WITH-less 片段 `cte_alias AS (cte_body), ...`（不带前导 `WITH` —— 前导
+    `WITH` 由 generateSql 统一补一次）。注入 system prompt 使当前步 LLM 知道
+    前序 CTE 的存在与结构，从而能在 SQL 中引用（如 `SELECT ... FROM cte_alias`）。
 
-    prior_cte 本身已经在入参处经过 SQL Guard 校验（_assert_read_only），
-    此处仅作 prompt 注入，是数据而非指令。
+    prior_cte 在入参处经 `_assertPriorCteSafe` 校验（拒绝自带 `WITH` + 按拼接后
+    形态做只读校验），此处仅作 prompt 注入，是数据而非指令。
     """
     return (
         "\n以下前序步骤已生成的 CTE（可直接在当前 SQL 中引用其别名）：\n"
         f"<prior_cte>\n{prior_cte}\n</prior_cte>\n"
     )
+
+
+_MSG_PRIOR_CTE_LEADING_WITH = (
+    "prior_cte 不得自带 `WITH`：只允许 WITH-less 片段 "
+    "`cte_alias AS (cte_body), ...`，前导 `WITH` 由 generateSql 统一补上。"
+    "两边各拼一次会得到 `WITH WITH ...`，SQL Guard 只看首个 token（`WITH` 在白名单）"
+    "故放行，直到数据库才报语法错。"
+)
+
+_LEADING_WITH_RE = re.compile(r"^WITH\b", re.IGNORECASE)
+
+
+def _assertPriorCteSafe(prior_cte: str) -> None:
+    """校验 prior_cte 片段：拒绝自带 `WITH`，并按**拼接后的真实形态**做只读校验。
+
+    为什么不能直接 `_assert_read_only(prior_cte)`：WITH-less 片段的首个 token 是
+    标识符（如 `ratio_cte`），不是 `SELECT`/`WITH`，会被白名单判定为「非只读」
+    ⇒ 拒绝**一切**合法入参。片段只会被拼进 `WITH <片段> <SELECT ...>`，因此按该
+    形态校验：既保留「CTE body 内不得有写操作 / 不得多语句」的防护，又不误杀。
+
+    抛 Nl2SqlError（请求级配置错误），调用方在**调 LLM 之前**快速失败。
+    """
+    stripped = prior_cte.strip()
+    if _LEADING_WITH_RE.match(stripped):
+        raise Nl2SqlError(
+            MSG_NL2SQL_SQL_INVALID,
+            detail=_MSG_PRIOR_CTE_LEADING_WITH,
+            tokens=(0, 0),
+        )
+    try:
+        # 尾部 `SELECT 1` 是语法占位：目的是让 Guard 看到真实拼接形态。
+        _assert_read_only(f"WITH {stripped}\nSELECT 1")
+    except SqlSafetyError as exc:
+        raise Nl2SqlError(
+            MSG_NL2SQL_SQL_INVALID,
+            detail=f"prior_cte 未通过安全校验（仅允许只读 CTE）: {exc}",
+            tokens=(0, 0),
+        ) from exc
 
 
 def _sanitizeSchemaField(value: str) -> str:
@@ -2073,10 +2111,12 @@ class Nl2SqlService:
         driftWarning（2-4）为 schema 漂移告警文本，追加进 schema 小节。
         scopeQuestion 为多步场景下的主问题原文，由 _renderScopeHintPart 转义后
         注入 user prompt；None = 单步场景，不注入。
-        prior_cte 为多步串联场景下前序步骤已生成的 CTE（Task 3.2）：
-        由 LLM 生成或上层显式传入，格式为 `cte_alias AS (cte_body)` 片段，
-        经 SQL Guard 校验后拼装到最终 SQL（`WITH prior_cte SELECT ...`）。
+        prior_cte 为多步串联场景下前序步骤已生成的 CTE（Task 3.2 / M8）：
+        **唯一合法形态是 WITH-less 片段** `cte_alias AS (cte_body), ...`
+        （由 render_prior_cte 产出）。经 `_assertPriorCteSafe` 校验后，本方法补上
+        **唯一一个**前导 `WITH` 拼装到最终 SQL（`WITH prior_cte <sql>`），
         同时注入 system prompt 供当前步引用前序 CTE。
+        入参自带前导 `WITH` 会被**立即拒绝**（否则拼成 `WITH WITH`，见 M8）。
         """
         if maxRetries is None:
             maxRetries = getSettings().nl2sqlMaxRetries
@@ -2091,17 +2131,11 @@ class Nl2SqlService:
         errors: list[str] = []
         totalPrompt = 0
         totalCompletion = 0
-        # prior_cte 先行校验（Task 3.2）：来自 LLM 生成或上层显式传入，
-        # 必须经 SQL Guard 确保是只读 CTE（SELECT/WITH），防止注入写操作。
+        # prior_cte 先行校验（Task 3.2 / M8）：来自 LLM 生成或上层显式传入。
+        # 契约 = WITH-less 片段（前导 WITH 由本方法补），故先拒绝自带 WITH 的入参，
+        # 再按拼接后的真实形态做只读校验（见 _assertPriorCteSafe）。
         if prior_cte:
-            try:
-                _assert_read_only(prior_cte)
-            except SqlSafetyError as exc:
-                raise Nl2SqlError(
-                    MSG_NL2SQL_SQL_INVALID,
-                    detail=f"prior_cte 未通过安全校验（仅允许 SELECT/WITH 只读查询）: {exc}",
-                    tokens=(0, 0),
-                )
+            _assertPriorCteSafe(prior_cte)
         # 截断重试预算：首次为 _NL2SQL_MAX_TOKENS，截断命中后翻倍（有上限）。
         # temperature=0 时同输入必得同输出，若预算不变，截断重试只会反复产出
         # 同一段截断 SQL（且注入的截断提示使输入变长、更易再截断）；翻倍预算让

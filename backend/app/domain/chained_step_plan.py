@@ -11,9 +11,15 @@
 #   - output_alias  : CTE name used in subsequent steps (e.g. "ratio_cte")
 #
 # render_prior_cte() takes a tuple of ChainedSteps and a current_index, then
-# emits a "WITH cte1 AS (...), cte2 AS (...)" string containing all steps whose
-# step_index < current_index.  This string is injected into Nl2SqlService as
+# emits a WITH-less "cte1 AS (...), cte2 AS (...)" fragment containing all steps
+# whose step_index < current_index.  This string is injected into Nl2SqlService as
 # prior_cte so that the current step's formula can reference prior CTEs.
+#
+# CONTRACT (M8): the fragment MUST NOT carry a leading "WITH".  Nl2SqlService
+# prepends exactly one `WITH` when splicing (`f"WITH {prior_cte}\n{sql}"`); a
+# fragment that also carried one produced `WITH WITH ...`, which passed SQL Guard
+# (it only inspects the first token, and `WITH` is whitelisted) and failed only at
+# the database — swallowed upstream as a bare success=False.
 
 from __future__ import annotations
 
@@ -60,10 +66,14 @@ def render_prior_cte(
     current_index: int,
 ) -> str:
     """
-    Render all ChainedSteps whose step_index < current_index as a
-    ``WITH cte1 AS (formula1), cte2 AS (formula2), ...`` SQL clause.
+    Render all ChainedSteps whose step_index < current_index as a **WITH-less**
+    ``cte1 AS (formula1), cte2 AS (formula2), ...`` fragment.
 
     Returns an empty string when current_index <= 0 (nothing to chain).
+
+    The fragment deliberately has no leading ``WITH``: the consumer
+    (``Nl2SqlService.generateSql``) adds exactly one when splicing.  See the
+    module header for why a self-carrying ``WITH`` is a defect, not a style choice.
 
     Parameters
     ----------
@@ -76,8 +86,8 @@ def render_prior_cte(
     Returns
     -------
     str
-        ``WITH alias1 AS (...), alias2 AS (...)`` or ``""`` when there are
-        no prior steps.
+        ``alias1 AS (...), alias2 AS (...)`` or ``""`` when there are no prior
+        steps.
     """
     if current_index <= 0:
         return ""
@@ -91,4 +101,4 @@ def render_prior_cte(
     if not parts:
         return ""
 
-    return "WITH " + ", ".join(parts)
+    return ", ".join(parts)

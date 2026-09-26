@@ -54,6 +54,7 @@ from app.domain.exceptions import (
 )
 from app.domain.models import DataSource, LlmConfig, OntologyClass, SessionMessage, SessionQueryState
 from app.domain.multi_step_plan import (
+    GlobalFilters,
     MultiStepPlan,
     StepExecutionContext,
     StepPlan,
@@ -1065,9 +1066,7 @@ class ChatService(ChatStreamOutputMixin):
         if result.intent == IntentType.FOLLOW_UP and state is not None:
             prepared = await self._prepareFollowUpMultiStep(session, dto, pc, state)
             if prepared is not None:
-                dto2, multiPlan, msTokens, msCost = prepared
-                # 重写后问题可能改变口径约束，重新抽取一次（保证 B 层与该多步问题对齐）
-                gf2 = await self._resolveGlobalFilters(session, dto2, pc)
+                dto2, multiPlan, msTokens, msCost, gf2 = prepared
                 return await self._executeMultiStep(
                     session, dto2, pc, multiPlan, state,
                     initial_tokens=msTokens, initial_cost=msCost, _t0=_t0,
@@ -1084,10 +1083,11 @@ class ChatService(ChatStreamOutputMixin):
             # _isFollowUpRetryCandidate 已保证 state 非空，此处可直接传入
             prepared = await self._prepareFollowUpMultiStep(session, dto, pc, state)
             if prepared is not None:
-                dto2, multiPlan, msTokens, msCost = prepared
+                dto2, multiPlan, msTokens, msCost, gf2 = prepared
                 return await self._executeMultiStep(
                     session, dto2, pc, multiPlan, state,
                     initial_tokens=msTokens, initial_cost=msCost, _t0=_t0,
+                    global_filters=gf2,
                 )
             outcome = await self._planAndGenerateSql(
                 session, dto, pc, IntentType.FOLLOW_UP, state
@@ -1924,13 +1924,21 @@ class ChatService(ChatStreamOutputMixin):
         dto: ChatRequest,
         pc: _PipelineContext,
         state: SessionQueryState,
-    ) -> tuple[ChatRequest, MultiStepPlan, int, Decimal] | None:
-        """B 共享前置：上一轮是多步问题时，改写追问并拆出多步计划。
+    ) -> tuple[ChatRequest, MultiStepPlan, int, Decimal, GlobalFilters | None] | None:
+        """B 共享前置：上一轮是多步问题时，改写追问、拆出多步计划、抽取全局约束。
 
-        返回 (改写后 dto, 多步计划, 累计 tokens（改写+拆步）, 累计 cost)；
-        非多步上一轮 / 改写失败 / 拆不出多步 → None，调用方退回单轮 FOLLOW_UP。
+        返回 (改写后 dto, 多步计划, 累计 tokens（改写+拆步）, 累计 cost,
+        改写后问题的全局约束)。非多步上一轮 / 改写失败 / 拆不出多步 → None，
+        调用方退回单轮 FOLLOW_UP。
+
         非流式（_handleGenericQuery）与流式（_streamQuery）两入口共用本方法，
         保证级联口径一致。
+
+        **全局约束在此抽取（而非各调用方自取）**：多步执行需要的是「改写后问题」
+        的口径约束，与多步计划同源，故与计划一起产出。此前由每个入口各写一次
+        `_resolveGlobalFilters(dto2)` —— 结果 C 兜底入口（非流式/流式）漏写，
+        同一段多步代码因入口不同丢掉全局 WHERE（P0 对称缺口）。收敛到 SSOT 后，
+        新增入口不可能再漏。
         """
         prior = (state.last_question or "").strip()
         if not self._stepPlanner.is_explicit_multi_step(prior):
@@ -1945,9 +1953,11 @@ class ChatService(ChatStreamOutputMixin):
         )
         if multiPlan is None:
             return None
+        # 重写后问题可能改变口径约束：按 dto2 重抽（而非沿用 dto 的）
+        globalFilters = await self._resolveGlobalFilters(session, dto2, pc)
         totalTokens = stepTokens + rwPt + rwCt
         totalCost = stepCost + self._costFor(pc.selected, rwPt, rwCt)
-        return dto2, multiPlan, totalTokens, totalCost
+        return dto2, multiPlan, totalTokens, totalCost, globalFilters
 
     async def _resolveGlobalFilters(
         self, session: AsyncSession, dto: ChatRequest, pc: _PipelineContext,
@@ -3430,8 +3440,7 @@ class ChatService(ChatStreamOutputMixin):
         if intent == IntentType.FOLLOW_UP and state is not None:
             prepared = await self._prepareFollowUpMultiStep(session, dto, pc, state)
             if prepared is not None:
-                dto2, multiPlan, msTokens, msCost = prepared
-                gf2 = await self._resolveGlobalFilters(session, dto2, pc)
+                dto2, multiPlan, msTokens, msCost, gf2 = prepared
                 async for event in self._streamMultiStep(
                     dto2, session, pc, multiPlan, state,
                     initial_tokens=msTokens, initial_cost=msCost,
@@ -3448,11 +3457,12 @@ class ChatService(ChatStreamOutputMixin):
             # _isFollowUpRetryCandidate 已保证 state 非空，此处可直接传入
             prepared = await self._prepareFollowUpMultiStep(session, dto, pc, state)
             if prepared is not None:
-                dto2, multiPlan, msTokens, msCost = prepared
+                dto2, multiPlan, msTokens, msCost, gf2 = prepared
                 async for event in self._streamMultiStep(
                     dto2, session, pc, multiPlan, state,
                     initial_tokens=msTokens, initial_cost=msCost,
                     suggestion=suggestion, _t0=_stream_t0,
+                    global_filters=gf2,
                 ):
                     yield event
                 return

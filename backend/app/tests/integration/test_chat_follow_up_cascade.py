@@ -13,6 +13,7 @@ LLM/路由/embedding/业务库适配器为 fake（同 test_chat_service_state.py
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,16 +51,21 @@ class _CascadeLlm:
         *,
         rewritten: str | None = None,
         planResponses: list[str] | None = None,
+        globalFilters: str | None = None,
     ) -> None:
         self.calls: list[list[tuple[str, str]]] = []
         self.rewritten = rewritten
         # 计划阶段应答队列（pop(0)）；为空时返回默认可回答计划
         self.planResponses = planResponses or []
+        # 全局过滤提取器应答；None → 返回空 JSON（等价于「无跨步骤约束」）
+        self.globalFilters = globalFilters
 
     async def complete(self, messages: list, **kwargs) -> _Resp:
         self.calls.append([(m.role, m.content) for m in messages])
         system = messages[0].content
         user = messages[1].content
+        if "全局过滤提取器" in system:
+            return _Resp(self.globalFilters or "{}")
         if "问题改写器" in system:
             if self.rewritten is None:
                 return _Resp('无法改写')
@@ -184,6 +190,14 @@ _REWRITTEN_QUESTION = (
     "第一步，查询4月份供货量最多的三家供应商；"
     "第二步，查询这三家供应商各自供货量前三的物料"
 )
+
+_GLOBAL_FILTERS_JSON = json.dumps({
+    "global": [
+        {"table": "DWD_PURCHASE_ORDER_DTL", "column": "INTER_COM_CODE",
+         "op": "=", "value": "1"},
+    ],
+    "step_overrides": [],
+})
 
 
 def _buildService(
@@ -421,6 +435,51 @@ class TestCascadeEdges:
         # 多步每步都标 failed（_executeMultiStep 失败隔离），最终由聚合生成回答
         for step in resp.steps:
             assert step.error is not None
+
+    async def test_c_multistep_rerun_inherits_global_filters(
+        self, dbSession,
+    ) -> None:
+        """C→B 多步重跑必须按**改写后的问题**抽一次全局约束（对称缺口修复）。
+
+        B 分支（非流式 / 流式）都调 `_resolveGlobalFilters(dto2)`，C 分支经
+        `_prepareFollowUpMultiStep` 走多步时却把 dto2 直接交给 `_executeMultiStep`
+        ——同一段多步代码，只因入口不同就丢掉「外购/内外贸/站点」这类跨步口径约束，
+        用户看到的每步 SQL 会漏掉全局 WHERE。
+        """
+        llm = _CascadeLlm(
+            rewritten=_REWRITTEN_QUESTION,
+            globalFilters=_GLOBAL_FILTERS_JSON,
+            planResponses=[
+                '{"target":"无法回答"}',
+                '{"target":"无法回答"}',
+                '{"target":"无法回答"}',
+            ],
+        )
+        service, _, tokenUsage, _ = _buildService(llm=llm)
+        await _seedMultiStepState(service, dbSession)
+
+        resp = await service.processMessage(_dto("火星人口"), dbSession)
+
+        assert resp.intent == "multi_step"
+        planCalls = [c for c in llm.calls if "解析为查询计划" in c[0][1]]
+        # 1 次 C 首轮（不可回答）+ 2 次改写后多步数据步
+        assert len(planCalls) == 3, f"计划调用次数异常：{len(planCalls)}"
+        # 负向对照：C 首轮是单步计划，本就不该有全局约束块（否则「哪里都有块」也算过）
+        assert "[global_constraints]" not in planCalls[0][1][1]
+        # 第 1 次是单步首轮（本就不该有全局约束），只有多步重跑的两步必须有
+        for idx, planCall in enumerate(planCalls[1:], start=1):
+            userPrompt = planCall[1][1]
+            assert "[global_constraints]" in userPrompt, (
+                f"C→B 重跑的第 {idx} 步 plan prompt 缺少 [global_constraints] 块"
+            )
+            assert "INTER_COM_CODE" in userPrompt
+        # 抽取针对改写后的问题（不是用户原话「火星人口」）
+        extractCalls = [c for c in llm.calls if "全局过滤提取器" in c[0][1]]
+        assert len(extractCalls) == 1
+        assert _REWRITTEN_QUESTION in extractCalls[0][1][1]
+        # 抽取 token 如实落台账（核心约束 #3）
+        purposes = [r.get("purpose") for r in tokenUsage.records]
+        assert "multistep_global_filter" in purposes
 
     async def test_c_retry_also_unanswerable_returns_fixed_answer(
         self, dbSession,

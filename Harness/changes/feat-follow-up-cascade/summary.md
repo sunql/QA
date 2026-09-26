@@ -212,6 +212,12 @@ test_rewrite_equal_to_prior_reruns_prior_multi_step`（先 RED：`'follow_up' ==
 
 三轮回答均不含「抱歉」，`last_question` 收尾为完整 4 月三步问题（下一轮追问仍可级联）。
 
+**后续修复（2026-09-26）**：
+[fix-c-fallback-global-filters](../fix-c-fallback-global-filters/summary.md) —— 本特性的 C 兜底分支
+（`_isFollowUpRetryCandidate` → `_prepareFollowUpMultiStep` → 多步重跑）漏传 `global_filters`，
+而同级 B 分支传了 ⇒ 同一段多步代码因入场点不同而丢掉跨步口径约束（非流式/流式对称缺口）。
+修法：把全局约束抽取收敛进共享前置 `_prepareFollowUpMultiStep`（4 个入场点只透传）。
+
 **相邻缺陷（已另行修复）**：本次排查顺带发现两个独立缺陷，已由
 [fix-chat-llm-keyless-and-degrade](../fix-chat-llm-keyless-and-degrade/summary.md) 修复——
 

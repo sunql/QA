@@ -17,9 +17,11 @@
 > **修复进度**：§2.1 的 C1（流式 TypeError）已于 2026-09-25 修复（见 §6）；
 > LLM 可用性两个缺陷 D1/D2 与多步降级收尾 D3 已于 2026-09-26 修复并部署（见 §7）；
 > §2.2 的 H1 / H2 / H8 / H9（四处「直调 LLM 绕过计量收口」）已于 2026-09-26 修复（见 §8）；
-> §2.1 的 **C3 / C4**（多步硬失败隔离 + 重试上下文）已于 2026-09-26 修复（见 §9）。
-> **§2.1（CRITICAL）已全部清零**。
-> **仍待处理**：§2.2 的 H3–H7，以及 §2.4 / §2.5 全部。
+> §2.1 的 **C3 / C4**（多步硬失败隔离 + 重试上下文）已于 2026-09-26 修复（见 §9）；
+> §3 的 **P0 第 5 项**（C 兜底分支的 global_filters 对称缺口）已于 2026-09-26 修复（见 §10）。
+> **§2.1（CRITICAL）已全部清零；§3 的 P0 路线图亦已清空**。
+> **仍待处理**：§2.2 的 H3–H7、§2.3 的 **M7**（重试错误只剩第一次，与本主题最相关的下一项）、
+> 以及 §2.4 / §2.5 全部。
 
 ---
 
@@ -187,10 +189,13 @@
 4. ~~**补齐 H1/H2 计量**（`extract_global_filters` 返回 token 数并落 `session_token_usage`；
    `run_agent_loop` 返回 token 数、按实际模型 config 计价；统一 H9 成本单位为 USD）~~
    ✅ **已完成（2026-09-26）**，连同 H8 一次修完（四处同一根因），见 §8。
-5. **补 C 兜底分支的 global_filters 对称缺口**（P0 唯一剩余项）：流式/非流式
+5. ~~**补 C 兜底分支的 global_filters 对称缺口**（P0 唯一剩余项）：流式/非流式
    `_isFollowUpRetryCandidate` 命中后经 `_prepareFollowUpMultiStep` 走多步的路径均未传
-   `global_filters`（两侧现状一致，属对称缺口）。抽一次 `_resolveGlobalFilters(dto2)` 即补齐。
-   ⚠️ 与本批同源的 **M7**（重试错误只剩第一次；C3 已让它变成用户可见文案）建议同批处理。
+   `global_filters`（两侧现状一致，属对称缺口）。抽一次 `_resolveGlobalFilters(dto2)` 即补齐。~~
+   ✅ **已完成（2026-09-26）**，见 §10。修法比本行原建议更彻底：抽取收敛进共享前置
+   `_prepareFollowUpMultiStep`（4 个入场点改为纯透传）—— 根因是「同一份多步前置知识被复制到
+   4 个入场点、靠人记得传参」，而它已经漏过两次（C1/C2 流式那次 + 本次 C 兜底两侧）。
+   ⚠️ 与本批同源的 **M7**（重试错误只剩第一次；C3 已让它变成用户可见文案）**仍待处理**，见 §9 遗留 1。
 
 ### P1 —— 健壮性（本季度）
 
@@ -567,8 +572,69 @@ HEAD 工作树不含本轮之前若干未提交批次（`MSG_MULTI_STEP_DEGRADE_
    该路径记账（且要小心与 `_callWithFallback` 已写的 `fallback_sql` 行重复计数）。
    另一个相关事实：C3 只报**第一次**执行错误，重试后的新错误看不到（失败细节仍在服务端日志）。
 2. `_callWithFallback` 全模型失败时的浪费 token 同属预存缺口。
-3. **C 路径（`_isFollowUpRetryCandidate` 兜底）的 `global_filters` 对称缺口**仍未补
-   （`chat_service.py` 非流式与流式两处，前一批遗留）。
+3. ~~**C 路径（`_isFollowUpRetryCandidate` 兜底）的 `global_filters` 对称缺口**仍未补
+   （`chat_service.py` 非流式与流式两处，前一批遗留）。~~ ✅ **已完成（2026-09-26）**，见 §10。
 4. **单步流水线的硬失败仍直接抛给 API 层 —— 这是有意的**：单步失败会先回退多步拆解，两条都失败
    才对外报错；C3 只承诺「多步序列内部的失败隔离」。注意 `except Exception` **不捕获**
    `asyncio.CancelledError`（BaseException），故本批隔离不覆盖客户端断连（H4 仍待处理）。
+
+---
+
+## 10. 修复记录：C 兜底分支的 global_filters 对称缺口（2026-09-26）
+
+**SSOT**：`Harness/changes/fix-c-fallback-global-filters/summary.md`（§3 P0 第 5 项，修复前的 P0 唯一剩余）。
+
+### 根因
+
+C 兜底分支（`_isFollowUpRetryCandidate` 命中 → `_prepareFollowUpMultiStep` → 多步重跑）不传
+`global_filters`，而同级 B 分支（FOLLOW_UP 且上一轮多步）传 —— 非流式与流式**两侧同样缺失**。
+用户可见后果：上一轮是带跨步口径约束的多步问题时，一句省略式追问若先进 C 兜底，
+改写后重跑的每一步 SQL 都丢掉 `[global_constraints]`（外购/内外贸/站点等），
+口径与上一轮不一致且无报错。
+
+真正的根因不是「漏写一行」，而是**同一份多步前置知识被复制到 4 个入场点、靠人记得传参** ——
+这个模式已漏过两次（C1/C2 流式那次 + 本次 C 兜底两侧）。
+
+### 修复（`app/services/chat_service.py`）
+
+抽取收敛进共享前置 `_prepareFollowUpMultiStep`（SSOT）：返回元组 4 → **5**，末位
+`GlobalFilters | None`；4 个调用点（非流式 B/C、流式 B/C）改为纯透传。抽取点 **4 → 1**，
+结构上不可能再漏。不变式：抽取仍只在「改写成功且已拆出多步计划」之后发生；抽取 token 仍由
+`_resolveGlobalFilters` 内部落 `multistep_global_filter` 台账、不进 `initial_tokens`（避免重复计价）。
+
+附带：`GlobalFilters` 在 5 处用作注解却从未 import（`from __future__ import annotations` 掩盖了
+运行时错误），一并补上。
+
+### 验证（TDD：先 RED 后 GREEN）
+
+3 个新用例（cascade 非流式 C / global-filter 文件非流式 C + 流式 C）。RED 时三条都停在
+`[global_constraints]` 缺失（且「3 次计划调用」已成立 ⇒ 链路走到了，缺的确实是约束注入）。
+
+有意为之的两条断言设计：① 只查 `planCalls[1:]` —— 第 1 次是 C 首轮**单步**，本就不该有块；
+reviewer 建议的负向对照（`not in planCalls[0]`）也已补上，防「过度注入」回归；
+② 断言提取器输入含**改写后的问题** —— 这是「按 dto2 抽取」与「按 dto 抽取」的分野。
+
+### 回归
+
+- 两套件 **20 passed**；
+- 相邻套件（multi_step / service_state / l1_routing / stream_api / model_routing_fallback）**54 passed**；
+- 全部 chat 集成套件（`test_chat_*.py`，12 文件）**130 passed**；
+- chat 相关单元套件 **254 passed, 1 failed**（失败为预存 ADS 加权重排死代码用例，与本批无关）。
+
+### code-reviewer 复审
+
+**APPROVE**：0 CRITICAL / 0 HIGH / 0 MEDIUM / 2 LOW。
+
+| 级别 | 问题 | 处理 |
+|---|---|---|
+| LOW | 用例缺负向对照（未断言 C 首轮单步**无**约束块） | 当场补 3 处断言 |
+| LOW | 窄路径下 L1.5（`:1051`，结果被丢弃）与 C 兜底（`:1956`）可能各抽一次 | 预存行为、非本次引入；两次是不同问题且各自独立计量（无重复计一笔、无丢账）⇒ 记 backlog |
+
+### 遗留
+
+1. **M7「重试错误只剩第一次」仍未处理**（§2.3；§9 遗留 1 已记录其部分修复）。当前用户可见文案
+   只报首次执行错误（有意：那是病因），重试的新错误仅在服务端日志。**这是 P0 列表清空后
+   与本主题最相关的下一项**（属健壮性/可观测性，非正确性）。
+2. L1.5 的「先抽取后判能否拆步」（`:1051`）在拆步失败时白花一次 LLM 调用 —— 预存，
+   与本次同源（抽取点位置不当），可考虑一并收敛到「拆步成功后再抽」。
+3. 同类注解未 import 的预存隐患 6 处（`StepResultRead` / `AgentLoopResult` / `KpiCatalog`）。

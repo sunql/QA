@@ -87,6 +87,23 @@ class _GlobalFilterLlm:
         return _Resp("查询完成。")
 
 
+class _CFallbackLlm(_GlobalFilterLlm):
+    """C 兜底链路：首次计划「无法回答」（触发升级追问重试），其余同基类。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._firstPlanUnanswerable = True
+
+    async def complete(self, messages, **kwargs):
+        if "解析为查询计划" in messages[0].content and self._firstPlanUnanswerable:
+            self._firstPlanUnanswerable = False
+            self.calls.append([(m.role, m.content) for m in messages])
+            return _Resp(
+                '{"target":"无法回答","selectedClasses":[],"selectedProperties":[]}'
+            )
+        return await super().complete(messages, **kwargs)
+
+
 class _FakeDatasourceService:
     def __init__(self, ds: DataSource) -> None:
         self._ds = ds
@@ -302,6 +319,76 @@ class TestMultistepGlobalFilterStreaming:
             "流式追问多步不应产生 error 事件（TypeError 回归）"
         )
         assert any(ev.event == EVENT_DONE for ev in events)
+
+
+class TestMultistepGlobalFilterCascadeFallback:
+    """C 兜底分支（_isFollowUpRetryCandidate 命中 → B 多步重跑）的全局约束对称性。"""
+
+    async def test_c_fallback_multistep_inherits_global_constraints(
+        self, dbSession,
+    ):
+        """非流式 C 兜底：多步重跑的每步 plan prompt 必须含 [global_constraints]。"""
+        llm = _CFallbackLlm()
+        service, _, tokenUsage, _ = _build_service(llm)
+        await service._saveQueryState(
+            dbSession, "s1",
+            question=_MULTI_STEP_QUESTION,
+            plan=QueryPlan(target="t"),
+            sql="SELECT 1 FROM DUAL",
+            resultColumns=["C"],
+        )
+
+        resp = await service.processMessage(_dto("火星人口"), dbSession)
+
+        assert resp.intent == "multi_step"
+        planCalls = [c for c in llm.calls if "解析为查询计划" in c[0][1]]
+        # 1 次 C 首轮（不可回答）+ 2 次改写后多步数据步
+        assert len(planCalls) == 3, f"计划调用次数异常：{len(planCalls)}"
+        # 负向对照：C 首轮是单步计划，本就不该有全局约束块
+        assert "[global_constraints]" not in planCalls[0][1][1]
+        for idx, planCall in enumerate(planCalls[1:], start=1):
+            assert "[global_constraints]" in planCall[1][1], (
+                f"C 兜底重跑的第 {idx} 步 plan prompt 缺少 [global_constraints] 块"
+            )
+            assert "TCLCOD_0" in planCall[1][1]
+        purposes = [r.get("purpose") for r in tokenUsage.records]
+        assert "multistep_global_filter" in purposes
+
+    async def test_stream_c_fallback_multistep_inherits_global_constraints(
+        self, dbSession,
+    ):
+        """流式 C 兜底：与非流式同口径注入（对称缺口的两侧各一例）。"""
+        llm = _CFallbackLlm()
+        service, _, tokenUsage, _ = _build_service(llm)
+        await service._saveQueryState(
+            dbSession, "s1",
+            question=_MULTI_STEP_QUESTION,
+            plan=QueryPlan(target="t"),
+            sql="SELECT 1 FROM DUAL",
+            resultColumns=["C"],
+        )
+
+        events = [
+            ev async for ev in service.processMessageStream(
+                _dto("火星人口"), dbSession,
+            )
+        ]
+
+        assert not [ev for ev in events if ev.event == EVENT_ERROR], (
+            "流式 C 兜底多步不应产生 error 事件"
+        )
+        assert any(ev.event == EVENT_DONE for ev in events)
+        planCalls = [c for c in llm.calls if "解析为查询计划" in c[0][1]]
+        assert len(planCalls) == 3, f"计划调用次数异常：{len(planCalls)}"
+        # 负向对照：C 首轮是单步计划，本就不该有全局约束块
+        assert "[global_constraints]" not in planCalls[0][1][1]
+        for idx, planCall in enumerate(planCalls[1:], start=1):
+            assert "[global_constraints]" in planCall[1][1], (
+                f"流式 C 兜底重跑的第 {idx} 步 plan prompt 缺少 [global_constraints] 块"
+            )
+            assert "TCLCOD_0" in planCall[1][1]
+        purposes = [r.get("purpose") for r in tokenUsage.records]
+        assert "multistep_global_filter" in purposes
 
 
 class TestMultistepGlobalFilterFailure:

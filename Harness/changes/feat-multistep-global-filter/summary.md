@@ -124,6 +124,10 @@ A+B 已覆盖用户场景（步骤 1 与后续步骤口径一致），不再做 
 
 ## Backlog
 
+- **追问入场点已收敛（2026-09-26）**：本文件 §实现要点写的「6 处多步入场点统一调用
+  `_resolveGlobalFilters`」现已变为「4 处显式调用 + 追问前置 SSOT 1 处」——B/C 两个追问入场点
+  的抽取收敛进 `_prepareFollowUpMultiStep`，因为其中 C 那处曾漏传（见
+  [fix-c-fallback-global-filters](../fix-c-fallback-global-filters/summary.md)）。
 - Step 1 plan prompt 已有 `[global_constraints]`，但 SQL 阶段（生成 SQL 时）尚未单独
   验证。当前 system prompt 透传机制使 step 1 SQL 也看到了该块（`_renderStatePart` 包裹
   在 `<previous_query_state>` 内），但渲染位置不同——后续可统一为「user prompt 段」

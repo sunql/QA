@@ -5,7 +5,7 @@
 1. 从会话上下文加载已绑定的本体（Class/Property/Metric）与数据源。
 2. **第一阶段——生成查询计划**：`generateValidatedPlan` 调 LLM 产出结构化 `QueryPlan` JSON（target/selectedClasses/selectedProperties/conditions/aggregations/groupBy/joins/sortBy/rowLimit）；`validatePlan`（纯代码，不调 LLM）校验引用是否在本体 schema 中，失败时注入具体差异（"表 X 不在本体"）让模型重试，最多 `maxPlanAttempts=2` 次；`_finalizePlan`（统一出口）补充 JOIN + 校验连通性 + 应用**范围感知行数限制**（见下）。
 3. **第二阶段——生成 SQL**：`generateSql(..., plan)` 把已校验的计划注入 System Prompt，模型仅按计划产出 SQL，避免单次生成+盲重试的语义漂移。
-4. SQL Guard 校验合法性（仅 SELECT，无 DDL/DML，无多语句），且对只读有双重保障（`_assert_read_only`）。
+4. SQL Guard 校验合法性（仅 SELECT/WITH，无 DDL/DML，无多语句、无侧信道函数），且对只读有双重保障（`_assert_read_only`）。
 5. 返回 SQL 与计划；执行成功后把计划/SQL/结果列持久化到会话状态。
 
 ## 多轮对话状态（Phase C）
@@ -29,16 +29,26 @@
 
 SSE 新增 `plan` 事件（在 `sql` 之前），携带 `QueryPlan` 字典；前端流式路径 `onPlan` 回填 `queryPlan`，完成后配合 `isStreaming=false` 展示可折叠 `QueryPlanCard`。非流式响应在 `ChatResponse.queryPlan` 字段下发。
 
-## SQL Guard（`infrastructure/security/sql_guard.py`）
+## SQL Guard（`infrastructure/business_db_pool.py`）
 
-- `sqlparse` 解析。
-- 仅允许首 token 为 `SELECT`。
-- 黑名单：`INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/TRUNCATE/EXEC/UNION`。
-- 拒绝多语句（`;`）。
+> 更正（2026-09-26）：本节此前写的位置 `infrastructure/security/sql_guard.py` **不存在**，
+> 且「仅允许首 token 为 `SELECT`」「连接级 `statement_timeout`」两条与代码不符。以下是按
+> 代码核对后的版本；`architecture.md` / `agent-loop.md` 的同源漂移仍见 §P2-10。
+
+- `sqlparse` 解析；**仅允许首 token 为 `SELECT` / `WITH`**。
+- 黑名单（分三类，口径不同，**不可合并**）：
+  - 动词：`INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/TRUNCATE/GRANT/REVOKE/MERGE/CALL/EXEC/EXECUTE`；
+  - 写/文件函数（`_FORBIDDEN_FUNCTIONS`，**裸名 + 引号归一 + 不看形态**）：`nextval/setval/dblink_exec/dblink_send_query/lo_export/lo_import/pg_read_file/pg_write_file/pg_read_binary_file/pg_write_binary_file/pg_ls_dir`；
+  - 侧信道函数（`_FORBIDDEN_CALLS`，**须为调用形态**，即名字后紧跟 `(`）：`pg_sleep`/`pg_sleep_for`/`pg_sleep_until`/`pg_advisory_*`/`sleep`/`benchmark`/`get_lock`/`master_pos_wait`/`dblink*`/`httpuritype`/`pg_notify`/`load_file`/`pg_stat_file`/`pg_ls_*dir`/`lo_put`/`lo_create`/`lo_unlink`/`lowrite`/`pg_terminate_backend`/`pg_cancel_backend`/`pg_reload_conf`/`pg_rotate_logfile`；
+  - 侧信道包（`_FORBIDDEN_PACKAGES`，**须为包名形态**，即名字后紧跟 `.`）：`utl_http/utl_inaddr/utl_tcp/utl_smtp/utl_mail/utl_file/dbms_lock/dbms_pipe/dbms_lob/dbms_ldap/dbms_scheduler/dbms_network_acl_admin`。
+  - 「调用形态 vs 包名形态」必须分开：纯函数名只会以 `(` 调用，若把 `.` 也算命中，`SELECT sleep.col FROM foo sleep`（黑名单词作表别名）会被误杀。
+  - 引号包裹的标识符（`"pg_sleep"(5)` / `` `nextval`('s') ``）与名字和括号间夹注释（`pg_sleep /*c*/ (5)`）都是**真实可执行的调用**，故判定前先剥引号、前瞻时跳过注释。
+- 拒绝 `INTO`（PG 建表 / MySQL 写文件、变量赋值）与 `SHARE`（PG 行锁 / MySQL `LOCK IN SHARE MODE`）；拒绝多语句（`;`）。
 - **行数兜底：`fetchmany(queryRowLimit=5000)` 上限**（实际值见 `QUERY_ROW_LIMIT`），并非 SQL 字符串改写——这一点对 SQL Guard 边界很重要。
-- 连接级 `statement_timeout`。
+- **超时只有客户端**：`asyncio.wait_for(queryTimeoutSeconds)`（默认 30s）；**没有**连接级/服务端 `statement_timeout`，也没有库侧只读账号 —— 即解析层黑名单是当前唯一闸门，属枚举式防御，见提案 `changes/2026-09-26-sql-guard-db-side-readonly-proposal.md`。
 - 连接 URL 校验，拒绝 `file://`，可选主机白名单。
 - 审计日志：session、datasource、SQL、耗时。
+- **拒绝原因回注重试反馈（2026-09-26，M2）**：NL2SQL 重试循环把 `SqlSafetyError` 的原因文本（`str(exc)`，**不含被拒 SQL 本体**）拼进下一轮 `errors` 段，模型据此改写成合法 SQL 而非盲重试；该段与既有 `executionError` 段同做 `_sanitizeContext` 消毒并受 `_ERROR_SNIPPET_LIMIT` 截断。
 
 ## 4-Layer Routing Architecture (Phase 5)
 

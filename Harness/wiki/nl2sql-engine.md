@@ -411,6 +411,13 @@ plan 与 sql 两个阶段共用 `_renderStatePart(priorState)` 模块级函数�
 2. **1-hop 扩边**（`_expandByJoinNeighbors`）：命中类沿 JOIN 目录把相邻表拉进来；
 3. **上限 30**（`_CLASS_FILTER_MAX_CLASSES`）：命中 + 邻居合计截断，截断时记日志 `类召回扩边截断`。
 
+**降级路径同口径（H5，2026-09-26）**：检索不可用/无命中时走 `_fallbackRecall`
+（`mode=fallback`），同样 ODS 过滤 → 层优先排序 → 上限截断，日志 `本体类回退降级
+reason=… total=… kept=… odsFiltered=… truncated=…`。此前降级是 `return list(allClasses)`
+裸回退，Milvus/embedding 一挂就把 2026-09-19 ODS_BPARTNER 事故（LLM 在贴源备份表上
+幻觉属性名）连同「表越多越选错」原样放回来 —— 降级保的是「不报错」，不是「放弃裁剪」。
+唯一例外：全库只有 ODS 业务表时保留原列表（空 schema 会让所有问题变成「无法回答」）。
+
 窗口大小不随类库增长，但**挑选竞争加剧**。
 
 ### 风险表（类库增长后）

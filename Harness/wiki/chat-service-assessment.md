@@ -20,8 +20,12 @@
 > §2.1 的 **C3 / C4**（多步硬失败隔离 + 重试上下文）已于 2026-09-26 修复（见 §9）；
 > §3 的 **P0 第 5 项**（C 兜底分支的 global_filters 对称缺口）已于 2026-09-26 修复（见 §10）；
 > §2.3 的 **M7**（回灌重试的二次失败详情 + 该次生成的用量）已于 2026-09-26 修复（见 §11）。
+> §2.2 的 **H3 / H5**（历史注入预算 + 向量失败降级同口径）已于 2026-09-26 修复（见 §12），
+> §3 P1 第 5、6 项同时闭合；收口 code-reviewer 复审 **APPROVE-WITH-NITS**（0/0/0/2 LOW，
+> 两条带触发条件记录，见 §12 复审）。
 > **§2.1（CRITICAL）已全部清零；§3 的 P0 路线图亦已清空**。
-> **仍待处理**：§2.2 的 H3–H7、以及 §2.4 / §2.5 全部。
+> **仍待处理**：§2.2 的 H4 / H6 / H7、§2.3 的 M1–M6、M8–M10、以及 §2.4 / §2.5 全部。
+> **进行中**：§2.3 的 **M1 / M2**（SQL Guard 侧信道黑名单 + 拒绝原因回注重试反馈，2026-09-26 起）。
 
 ---
 
@@ -129,9 +133,9 @@
 |---|---|---|---|
 | H1 | **全局过滤抽取 LLM 调用不计量**。`extract_global_filters` 直调 `client.complete` 但只返回 `GlobalFilters`（无 token 数）；`_resolveGlobalFilters` 写 0-token 假 marker，注释「token 已计到 plan/split 路径」**与实际不符**。 | ✅ **已修复**（2026-09-26，见 §8） | `step_query_planner.py:201-214`、`chat_service.py:1879` |
 | H2 | **L4 Agent Loop 不写 session_token_usage**。`run_agent_loop` 每次迭代 `complete_with_tools` 不计量，只用**硬编码 gpt-4o-mini 价格**估算 USD，token 数丢失。 | ✅ **已修复**（2026-09-26，见 §8） | `agent_runtime_service.py:327-336`、`chat_service.py:758` |
-| H3 | **历史注入无 token/字符预算**。`_buildContextPrompt` 全文拼接 `session_message.content` + `[SQL:...]`，无截断；一条超长 SQL/答案会无限膨胀后续每次 NL2SQL + answer prompt。 | ⬜ 待处理 | `chat_service.py:4124-4144` |
+| H3 | **历史注入无 token/字符预算**。`_buildContextPrompt` 全文拼接 `session_message.content` + `[SQL:...]`，无截断；一条超长 SQL/答案会无限膨胀后续每次 NL2SQL + answer prompt。 | ✅ **已修复**（2026-09-26，见 §12） | `chat_service.py:4124-4144` |
 | H4 | **客户端断连无处理**。`CancelledError`（`BaseException`）不被任何 `except` 捕获；`_storeSessionMessages` 只在流尾执行，断连即丢整轮（无部分答案、无历史落库）。 | ⬜ 待处理 | `chat.py:59-67`、`chat_service.py:2904-2922`、`3303` |
-| H5 | **向量失败静默降级到全 schema**。类召回异常回退 `return list(allClasses)`，**不过滤 ODS、不截断 max**——正是召回剪枝要解决的老问题在 Milvus/embedding 挂掉时原样回来。 | ⬜ 待处理 | `chat_service.py:1269-1280`、`1352-1359` |
+| H5 | **向量失败静默降级到全 schema**。类召回异常回退 `return list(allClasses)`，**不过滤 ODS、不截断 max**——正是召回剪枝要解决的老问题在 Milvus/embedding 挂掉时原样回来。 | ✅ **已修复**（2026-09-26，见 §12） | `chat_service.py:1269-1280`、`1352-1359` |
 | H6 | **3 处 score 公式不一致（DRY 违反）**。`embedding_service`/`ontology_service` 有 `round(,4)` + `max(0)`；`wiki_vector_service` 无 round；`rag_service` 无 `max(0)` 无 round——负距离得 score>1，缺 `distance` 键直接 `KeyError`。 | ⬜ 待处理 | `embedding_service.py:29-31`、`ontology_service.py:1198`、`wiki_vector_service.py:264`、`rag_service.py:299` |
 | H7 | **provider_type 死元数据**。`embedding_provider_factory` 从不读 `provider_type`，全部当 OpenAI 兼容；维度守卫只对 DB-provider 路径生效，env 回退路径不校验。 | ⬜ 待处理 | `embedding_provider_factory.py:48-61` |
 | H8 | **doc_qa 不写 token ledger**（wiki_qa 写），违反「每次 LLM 调用必须计量」约束；且无命中时 doc_qa 存 `citations=[]` 而 wiki_qa 存真实 citations，行为不一致。 | ✅ **已修复**（2026-09-26，见 §8） | `wiki_qa_service.py:215-224` vs `rag_qa_service.py:161-162` |
@@ -200,10 +204,16 @@
 
 ### P1 —— 健壮性（本季度）
 
-5. **H5 向量失败降级**：类召回异常回退时仍应用 ODS 过滤 + `CLASS_FILTER_MAX_CLASSES`
-   截断，并记 warning（当前是全量裸返回）。
-6. **H3 历史预算**：`_buildContextPrompt` 增加 token/字符截断（如 `_clip_text` 复用），
-   防止长轮次膨胀 prompt。
+5. ~~**H5 向量失败降级**：类召回异常回退时仍应用 ODS 过滤 + `CLASS_FILTER_MAX_CLASSES`
+   截断，并记 warning（当前是全量裸返回）。~~
+   ✅ **已完成（2026-09-26）**，见 §12。修法比本行建议更进一步：五个回退分支收敛进单一
+   `_fallbackRecall`（一个出口 = 一处不变量），且**排序先于截断**（入参是库表顺序，直接
+   截前缀等于随机丢表）。
+6. ~~**H3 历史预算**：`_buildContextPrompt` 增加 token/字符截断（如 `_clip_text` 复用），
+   防止长轮次膨胀 prompt。~~
+   ✅ **已完成（2026-09-26）**，见 §12。**未采纳本行的 `_clip_text` 复用建议**：`_clipText`
+   是头裁，而这里要保的是**最新**轮次（追问锚点），头裁会把最新一轮切掉 —— 改为「单条限量
+   + 从最新往回保留整块」。
 7. **H4 断连处理**：捕获 `CancelledError`，持久化已产出的部分答案与消息，落库后再退出。
 8. **H6 score 公式统一**：抽一个 `distanceToSimilarity(d)` 单源函数，四处复用；
    缺 score 键时显式按 0 处理并记日志（消除 NaN%/静默 not-found）。
@@ -709,3 +719,121 @@ GREEN：单元 16 passed、`test_chat_multi_step.py` 24 passed、chat 集成切�
    若日后真的观测到回显，对该段非 `Nl2SqlError` 的异常改走固定文案即可（不改契约）。
 5. **既有行为**：`retryErr` 经 `%s` 格式化会把 `[parameters: {…}]` 的**参数值**写进服务端日志
    （旧代码早已如此，本批未扩大）；属服务端日志留存/脱敏策略议题，见 §2.4 同类项。
+
+---
+
+## 12. 修复记录：H5 向量失败降级 + H3 历史预算（2026-09-26）
+
+**SSOT**：`Harness/changes/fix-chat-recall-fallback-and-context-budget/summary.md`（§2.2 H5 / H3；同时闭合 §3 P1 第 5、6 项）。
+
+### 问题（§2.2 H5 / H3 的完整形态）
+
+**H5 —— 降级路径不是免检路径。** `_selectRelevantClasses` 的**五个**回退分支（检索异常 /
+无命中 / 命中全被 ODS 过滤 / 命中全为 ODS / 命中解析不出真实类）一律
+`return list(allClasses)`：不过滤 ODS、不截 `CLASS_FILTER_MAX_CLASSES`。于是
+2026-09-19 ODS_BPARTNER 事故（LLM 在贴源备份表上幻觉属性名）**只要 Milvus/embedding
+挂掉就原样复现**，而且挂掉是静默的（用户只看到答得差）；更糟的是本系统的规模化闸门
+（上限 30）在最需要它的时刻失效 —— 表越多越选错，降级时反而全量灌进 prompt。
+
+**H3 —— 计了量但没控量。** `_buildContextPrompt` 的返回值被注入 plan / SQL / answer /
+聚合各阶段共 9 处 prompt（`grep -c contextPrompt`），却对长度零约束。一条超长答案或长
+CTE 会**逐轮重复注入**：轮次一长，每轮 prompt 成本随历史线性膨胀（钱与延迟同时涨）。
+
+### 修复（`app/services/chat_service.py`）
+
+- **`_fallbackRecall`（H5）**：五个分支收敛到唯一出口 —— ODS 过滤（显式点名 ODS 表的问题
+  除外）→ `_rankByLayer(dimension_hint=False)` → `[:CLASS_FILTER_MAX_CLASSES]` → 单点
+  warning → `ClassRecallInfo(mode="fallback", truncated=…)`。
+  - **排序必须先于截断**：入参是库表顺序（DB 自然序），直接截前缀 = 随机丢表；
+  - `dimension_hint=False` 是刻意的：入参本就是全量类（DIM 已在其中），DIM 补拉是给召回
+    子集用的，会引入一次 DB 读取；`False` 让该 helper 成为**纯排序、不可能抛错**（降级
+    路径的首要性质）；
+  - 退化场景（全库皆 ODS）保留原列表而非返回空 schema（空 schema 会让所有问题变成
+    「无法回答」），单独记一行；
+  - **日志单点出口**：回退率按「含 `reason=` 的行」聚合，同一事件两行就翻倍 ⇒ 调用方一律
+    不打 `reason=`；退化那行用 `scene=`（场景名仍可见，紧随其后的主行带同 `total` 可对齐）。
+- **`_fitPartsToBudget` + 三个常量（H3）**：单条正文 500 / 历史 SQL 500（**分开限量**，
+  合并限量会让一条长答案把同轮的 SQL 整段挤掉，而追问靠历史 SQL 复用）+ 拼接总预算 4000。
+  超预算**丢最旧的整块**（绝不裁最新一轮 —— 它是 REFINE/FOLLOW_UP 的锚点）；最新块自身
+  超预算才裁它，保证任何配置下总长恒有界。
+  > **未采纳本评估文档 §3 P1 第 6 项的原建议（复用 `_clipText`）**：`_clipText` 是头裁，
+  > 而这里要保的是**最新**轮次 —— 头裁会每轮都保留最老的 5 轮、永远看不到最新一轮的 SQL。
+- **`_getClassFilterMaxClasses`**：非正值（0/负）按非法处理返默认 30 —— 0 会让闸门**静默
+  失效**（`ranked[:0]` 返空、`ranked[:-5]` 返「除末位以外全部」、`truncated` 判定同时失真），
+  而它是正常裁剪与 H5 降级路径**共用的唯一闸门**。
+- **前端文案**：`classRecallFallback` 由「本次已加载**全部**数据表」改为「已按数仓**分层顺序**
+  选取数据表（张数受召回窗口上限约束）」—— 旧文案在 H5 之后是**假话**，属必须同步的
+  用户可见契约（i18n 编译期注入 ⇒ 必须重建前端镜像）。
+
+### 验证（TDD：RED 证据）
+
+部署后用**反向探针**重放修复前形态（`_fallbackRecall` 改回 `list(allClasses)`、
+`_buildContextPrompt` 改回不裁剪），10 failed / 5 passed：
+
+```
+E  AssertionError: assert 5069 <= 4000          ← H3 无预算
+E  AssertionError: assert 'msg8' not in '用户：msg8-…'   ← H3 丢的是最新而非最旧
+E  assert 2 not in {2, 4}                        ← H5 ODS 未过滤
+E  assert {2,4} == {4} / {2,3,5} == {5}          ← H5 未截断
+E  assert 37 == 30                               ← H5 降级返回全量
+```
+
+收口期**真机探针**又发现同一根因的第三处：退化分支那行也带 `reason=` ⇒ 该场景回退率会
+被算成 2 倍（改用 `scene=` 后闭合，并补断言 `caplog.text.count("reason=search_error") == 1`）。
+
+GREEN：新用例 15 passed；`test_chat_service.py` + `test_chat_step_error_text.py` 146 passed
+（唯一失败是预存的 ADS 死代码用例）；chat 集成切片 82 passed；全量 unit 2273 passed /
+2 项预存失败；前端 `MessageItem.test.tsx` 25 passed；ruff 诊断与 HEAD 逐条一致（零新增）。
+
+### 部署验证
+
+镜像重建（后端 22.1s + 前端 `--no-cache` 走 npmmirror）后：后端 `chat_service.py` md5
+与仓库一致；容器内行为探针确认 —— 截断后留下的全是 ADS（**证明排序在截断之前**：截前缀
+本会留下 DWD）、显式 ODS 请求保留贴源表、cap 守卫 `0→30 / -5→30 / 7→7`、全 ODS 退化不返空、
+H3 端到端 3049 ≤ 4000 且「留最新/丢最旧/`[SQL:` 标记完整」；前端 bundle 新串命中、旧串 0 残留；
+`/api/v1/health` 直连与经 nginx 均 200。
+
+### 复审
+
+| 轮次 | 结论 |
+|---|---|
+| security-reviewer（实现后） | **PASS-WITH-WARNINGS** — 0 CRITICAL / 0 HIGH / 0 MEDIUM / 2 LOW（1 条当场修） |
+| code-reviewer（收口复审，本批最终形态） | **APPROVE-WITH-NITS** — 0 CRITICAL / 0 HIGH / 0 MEDIUM / 2 LOW（两条「不改但记录」） |
+
+收口复审对四条不变量做了**对抗式**核对（不改代码、不跑 pytest，逐行读 diff + 最终形态）：
+
+1. **降级路径不可能抛错** —— `_rankByLayer(dimension_hint=False)` 的 `if dimension_hint:` 分支
+   确实跳过 `_fetchAllDimClasses`（无 DB 读）；唯一剩下的 `system_config` 读取被
+   `_getClassFilterMaxClasses` 的 `except (TypeError, ValueError)` + 兜底 `except Exception`
+   双重包裹。
+2. **`_fitPartsToBudget` 的长度核算无差一** —— `extra = len(part) + (1 if kept else 0)` 恰对应
+   `"\n".join` 的 `sum(len) + (n-1)`；且「兜底裁最新」分支只可能在 `kept` 单元素时触发（若最新块
+   已超预算，第二轮必然 `break`），与注释一致。函数纯净：只写局部 `kept`，入参 `parts` 不动。
+3. **回退率聚合口径** —— 五个场景下每个降级事件**恰好一行**含 `reason=`；`search_error` 的堆栈行
+   与退化分支的 `scene=` 行均刻意不含。`truncated = len(ranked) > max_classes` 在 fallback 模式下
+   现在才有意义（此前恒 False）。
+4. **前端契约** —— `MessageItem.tsx:75-87` 是唯一消费者，`mode === "fallback"` 覆盖截断提示；
+   无任何消费者假设「fallback ⇒ 已加载全部表」。
+
+同时确认两条测试**不是假绿**：`test_fallback_ranks_by_layer_before_truncation` 把 ADS/DWD 放在输入
+**尾部**，截前缀必挂（真断言）；ODS 过滤用例对旧 `return list(allClasses)` 必红（真回归覆盖）。
+
+**两条 LOW 均为「不改但记录」**（完整理由见 SSOT §7 末两行）：负预算下 `_clipText` 的负索引切片会让
+「恒有界」断言失真（当前预算硬编码 4000，不可达；**触发器**：一旦改成可配置就必须加 `max(budget, 0)`），
+以及退化分支日志措辞「保留原列表」在类数 > 上限时与事实不符（真实意图是「绝不返回空 schema」，
+措辞歧义由紧随其后带同 `total` 的主行消除；**触发器**：若运维需单看该行判断则改写措辞）。
+两者都不改代码的**共同理由**：任何改动（哪怕只改注释）都会让 §8 的 `md5 MATCH` 失效，而那是
+「容器 == 仓库」的唯一凭据，留一处不匹配会给下次部署留下「是否跑了旧代码」的假信号。
+
+### 遗留
+
+1. **`_clipText` 按码点切片可能切开代理对**（security LOW，跨切面）：9+ 调用方，应单独一批
+   统一加固；本批新调用点与既有调用点风险同构，未**扩大**暴露面。
+2. **显式点名 ODS 表即可豁免过滤**（security LOW）：这是**质量闸门**而非安全边界（安全边界
+   是 SQL Guard 的只读校验）；收紧会让「ODS_BPARTNER 里有什么」这类正当问题无法回答。保留。
+3. **`StepExecutionContext.context` 死接线**（security INFO）：设置于 `chat_service` 两处、
+   `step_query_planner` 从不读取 —— 预存，与本批无关。
+4. **未做端到端「真实降级」演练**：需停 Milvus / embedding provider，会影响同时在用的会话；
+   行为等价性由容器内探针（真机代码跑真实过滤/排序/截断/预算逻辑）+ 15 个单元用例覆盖。
+5. **两条有待触发条件的 LOW**（收口复审，见上）：负预算的 `_clipText` 负索引切片、退化分支日志措辞
+   —— 均带明确触发条件，触发时**必须**与代码改动同批处理（改代码即需重新部署并重录 md5 证据）。

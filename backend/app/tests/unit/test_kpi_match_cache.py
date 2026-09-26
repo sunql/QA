@@ -7,9 +7,10 @@
 两处静默偏离（`""` 空关键词语义、写路径不重建索引导致陈旧命中 + 顺序漂移），
 500×30 字实测 +42.3 MB 不 scale。
 
-本条目真正缺的是**覆盖**：现有测试用的都是**自行重写了一套不同算法的桩**
-（`test_kpi_semantic_match_service.py::_StubCache`、`test_kpi_catalog_api.py` 的 fake
-都是外层遍历 KPI、命中即 `break`，按目录序），而真实实现的顺序是
+本条目真正缺的是**覆盖**：现有测试用的是**自行重写了一套不同算法的桩**
+（`test_kpi_semantic_match_service.py::_StubCache`：外层遍历 KPI、命中即 `break`，
+按目录序；全树只有这一处关键词匹配桩 —— 计划里并列引用的 `test_kpi_catalog_api.py`
+经复核与该匹配路径无关，属笔误，本注释已更正），而真实实现的顺序是
 「**用户关键词外层 × `_by_keyword` 插入序内层**」⇒ **真实顺序零覆盖**。
 
 本文件对真实 `KpiMatchCache` 做**差分**校验：测试侧用朴素实现独立复算「文档化的

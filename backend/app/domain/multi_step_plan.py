@@ -251,6 +251,16 @@ class StepExecutionContext:
         if global_block:
             lines.append(global_block)
         for r in prior:
+            if r.sql is None:
+                # 失败步骤（C3 失败隔离）：无 SQL 即无数据。必须显式说「无数据」而不是
+                # 照常渲染空数据块——空摘要（`[]` / `（无数据）`）会被下游 LLM 读成
+                # 「该查询结果为 0」，据此生成错误的 WHERE IN / 对比结论。
+                lines.append(
+                    f"步骤 {r.step_index + 1}：{_sanitizeContext(r.description)}\n"
+                    f"  子问题：{_sanitizeContext(r.sub_question)}\n"
+                    f"  该步骤无数据可注入（{_sanitizeContext(r.error or '未执行')}）"
+                )
+                continue
             shape = _detect_step_data_shape(r.data)
             if shape == "ENTITY_LIST":
                 per_item = self.injection_char_limit_entity

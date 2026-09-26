@@ -65,6 +65,16 @@ class StepAggregator:
             "\n各子步骤结果：",
         ]
         for r in completed_steps:
+            if r.sql is None:
+                # 失败步骤（C3 失败隔离）：不能给「0 行数据摘要」——LLM 会把它读成
+                # 真实结论（"2025 年销售额为 0"）继续对比。显式声明无数据 + 禁止推测。
+                parts.append(
+                    f"\n步骤 {r.step_index + 1}：{_sanitize(r.description)}\n"
+                    f"  子问题：{_sanitize(r.sub_question)}\n"
+                    f"  该步骤无数据（{_sanitize(r.error or '未执行')}），"
+                    "不得为其推测或编造结果，也不要把它当作 0 值参与对比"
+                )
+                continue
             # 结构化摘要（feat-smart-data-summary，2026-09-18）：替代旧的 data[:20] 截断，
             # 让汇总 LLM 拿到全量统计 + 关键样本，能基于真实数据生成对比结论。
             data_summary = summarize_data(r.data)

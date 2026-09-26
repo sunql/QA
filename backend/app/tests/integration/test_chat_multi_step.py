@@ -13,12 +13,15 @@ LLM / 业务库 adapter 为外部依赖，注入 test double；数据层（消�
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
 
 from app.domain.models import LlmConfig, SessionMessage, SessionQueryState, SessionTokenUsage
+from app.services.messages_zh import MSG_MULTI_STEP_DEGRADE_FAILED
 from app.services.stream_events import (
     EVENT_CLASS_RECALL,
     EVENT_DONE,
@@ -31,6 +34,9 @@ from app.services.stream_events import (
 from app.tests.integration.test_chat_api import _RouterFor, _StubEmbeddingService, _seed
 
 ROWS = [{"NAME": "A", "QTY": Decimal(10)}, {"NAME": "B", "QTY": Decimal(20)}]
+
+# 第二步 SQL 的专属失败标记（仅 C4 用例用）：让「某一 SQL 定向失败」可构造。
+STEP2_FAIL_MARKER = "QTY_STEP2_FAIL"
 
 # 拆步 LLM 返回的多步计划（2 数据步 + 1 汇总步）
 _MULTI_STEP_PLAN_JSON = (
@@ -75,6 +81,79 @@ class _MultiStepLlm:
         return _Resp()
 
 
+class _PerStepLlm(_MultiStepLlm):
+    """第二步（子问题含 2025）的 SQL 带专属标记，供 adapter 定向失败。
+
+    按**子问题原文**而非「含 2025」判定：SQL 阶段 user prompt 里的 `<scope_hint>`
+    是原始复合问题（"…2024 和 2025 年的销售额…"），宽匹配会把第一步的 SQL 也打上
+    标记，于是第一步也失败，用例就构造不出「一步成功一步失败」。
+
+    其余行为全同 `_MultiStepLlm`（含 calls 记录）。
+    """
+
+    async def complete(self, messages: list, **kwargs) -> object:
+        resp = await super().complete(messages, **kwargs)
+        isSqlStage = "生成 SQL 时必须" in messages[0].content
+        isStep2 = "2025年的销售额是多少" in messages[1].content
+        if isSqlStage and isStep2:
+            resp.content = (
+                f"```sql\nSELECT NAME, SUM({STEP2_FAIL_MARKER}) AS TOTAL_QTY "
+                "FROM ZJTH.PRECEIPT GROUP BY NAME\n```"
+            )
+        return resp
+
+
+def _parseFrames(resp) -> list[tuple[str, dict]]:
+    """把 SSE 响应体解析为 (event, data) 帧列表。"""
+    frames: list[tuple[str, dict]] = []
+    for block in resp.text.split("\n\n"):
+        if not block.strip():
+            continue
+        event: str | None = None
+        data: dict = {}
+        for line in block.split("\n"):
+            if line.startswith("event: "):
+                event = line[len("event: "):]
+            elif line.startswith("data: "):
+                data = json.loads(line[len("data: "):])
+        frames.append((event or "", data))
+    return frames
+
+
+@dataclass(frozen=True)
+class _SqlCall:
+    """一次 generateSql 调用的上下文参数（C4 断言用）。"""
+
+    question: str
+    priorState: str | None
+    scopeQuestion: str | None
+    executionError: str | None
+
+
+def _spyGenerateSql(monkeypatch) -> list[_SqlCall]:
+    """包装 Nl2SqlService.generateSql：记录调用参数后委托真实实现。
+
+    在类上打补丁（而非实例）——monkeypatch 对实例打补丁时 teardown 会把原 bound
+    method 落成实例属性，虽然行为等价但会残留。
+    """
+    from app.services.nl2sql_service import Nl2SqlService
+
+    original = Nl2SqlService.generateSql
+    calls: list[_SqlCall] = []
+
+    async def _spy(self, question, classes, llmClient, modelConfig, **kwargs):
+        calls.append(_SqlCall(
+            question=question,
+            priorState=kwargs.get("priorState"),
+            scopeQuestion=kwargs.get("scopeQuestion"),
+            executionError=kwargs.get("executionError"),
+        ))
+        return await original(self, question, classes, llmClient, modelConfig, **kwargs)
+
+    monkeypatch.setattr(Nl2SqlService, "generateSql", _spy)
+    return calls
+
+
 class _OkAdapter:
     """记录每次执行的 SQL，固定返回 ROWS。"""
 
@@ -110,6 +189,40 @@ class _FlakyThenOkAdapter:
 def _data_queries(adapter: _OkAdapter | _FlakyThenOkAdapter) -> list[str]:
     """过滤出数据查询 SQL（含 SUM(QTY)），排除值域采样（SELECT DISTINCT ...）。"""
     return [s for s in adapter.executed if "SUM(QTY)" in s]
+
+
+class _DataQueryFailAdapter:
+    """第 `fail_from_query` 个数据查询起全部失败（含回灌重试那一次）。
+
+    按「数据查询序号」而非 SQL 内容判定：回灌重试会**重新生成**一条 SQL，内容随
+    C4 是否修复而变（修复前退回原始复合问题，内容与第一步相同），内容匹配无法同时
+    覆盖两种情形；序号判定与测试无关的 SQL 内容解耦。
+
+    数据查询用 `SUM(QTY)` 识别（值域采样是 SELECT DISTINCT，不占序号）。
+    """
+
+    def __init__(
+        self,
+        *,
+        fail_from_query: int,
+        exc_factory: Callable[[], Exception] | None = None,
+    ) -> None:
+        self.fail_from_query = fail_from_query
+        # 失败异常可注入：默认裸 RuntimeError；脱敏用例注入真实 SQLAlchemy 语句异常
+        # （`str()` 会在驱动原因后追加 `[SQL: ...]` / `[parameters: ...]`）
+        self.exc_factory = exc_factory or (lambda: RuntimeError("ORA-00942: 表或视图不存在"))
+        self.data_queries = 0
+        self.failed = 0
+        self.executed: list[str] = []
+
+    async def execute_read_only(self, sql: str) -> list[dict]:
+        self.executed.append(sql)
+        if "SUM(QTY)" in sql:
+            self.data_queries += 1
+            if self.data_queries >= self.fail_from_query:
+                self.failed += 1
+                raise self.exc_factory()
+        return ROWS
 
 
 def _install(monkeypatch, config: LlmConfig, llm: _MultiStepLlm, adapter) -> None:
@@ -366,18 +479,7 @@ class TestMultiStepChatStreamApi:
         assert resp.status_code == 200, resp.text
         assert resp.headers["content-type"].startswith("text/event-stream")
 
-        frames: list[tuple[str, dict]] = []
-        for block in resp.text.split("\n\n"):
-            if not block.strip():
-                continue
-            event: str | None = None
-            data: dict = {}
-            for line in block.split("\n"):
-                if line.startswith("event: "):
-                    event = line[len("event: "):]
-                elif line.startswith("data: "):
-                    data = json.loads(line[len("data: "):])
-            frames.append((event or "", data))
+        frames = _parseFrames(resp)
 
         events = [e for e, _ in frames]
         # 序列：meta → class_recall → multi_step_plan(完整计划) → step_plan/step_result ×2 → step_plan(汇总) → token → done
@@ -423,18 +525,7 @@ class TestMultiStepChatStreamApi:
         )
         assert resp.status_code == 200, resp.text
 
-        frames: list[tuple[str, dict]] = []
-        for block in resp.text.split("\n\n"):
-            if not block.strip():
-                continue
-            event: str | None = None
-            data: dict = {}
-            for line in block.split("\n"):
-                if line.startswith("event: "):
-                    event = line[len("event: "):]
-                elif line.startswith("data: "):
-                    data = json.loads(line[len("data: "):])
-            frames.append((event or "", data))
+        frames = _parseFrames(resp)
 
         events = [e for e, _ in frames]
         assert events[-1] == EVENT_DONE
@@ -546,3 +637,211 @@ class TestNoAggregationStepDegrade:
         assert state.last_sql is not None
 
 
+class TestStepFailureIsolation:
+    """C3：单个数据步骤硬失败（SQL 执行 + 回灌重试均失败）不再中止整条多步序列。
+
+    此前异常从 `_executeMultiStep` / `_streamMultiStep` 穿透到 API 层：已完成步骤的
+    数据与用量全部作废，对外是 500（非流式）/ internal 错误事件（流式）。
+    """
+
+    _QUESTION = "请分步查询 2024 和 2025 年的销售额并对比"
+
+    @staticmethod
+    async def _post(
+        client, dbSession, monkeypatch, *, stream: bool, fail_from_query: int,
+        exc_factory: Callable[[], Exception] | None = None,
+    ):
+        """注入「第 N 个数据查询起全部失败」的依赖后发一轮请求。
+
+        步骤 2 的 SQL 执行 + 回灌重试 = 第 2、3 个数据查询，故 fail_from_query=2
+        恰好表达「第二步执行与重试均失败」；=1 则所有数据步骤均失败。
+        """
+        config, ds = await _seed(dbSession)
+        llm = _MultiStepLlm()
+        adapter = _DataQueryFailAdapter(
+            fail_from_query=fail_from_query, exc_factory=exc_factory,
+        )
+        _install(monkeypatch, config, llm, adapter)
+        path = "/api/v1/chat/stream" if stream else "/api/v1/chat"
+        resp = await client.post(path, json=_payload(TestStepFailureIsolation._QUESTION, ds.id))
+        return resp, llm, adapter
+
+    async def test_non_stream_step_failure_isolated(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """非流式：第二步硬失败 → 200 + 该步 error + 第一步与汇总照常完成。"""
+        resp, llm, adapter = await self._post(
+            client, dbSession, monkeypatch, stream=False, fail_from_query=2,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["intent"] == "multi_step"
+        assert len(body["steps"]) == 2
+        # 第一步照常完成（SQL + 数据都在）——已完成步骤不因后续步骤失败而作废
+        assert body["steps"][0]["error"] is None
+        assert body["steps"][0]["sql"] is not None
+        assert body["steps"][0]["data"]
+        # 第二步记步骤级错误（sql/data 双双为空），序列继续
+        assert body["steps"][1]["error"] is not None
+        assert body["steps"][1]["sql"] is None
+        assert body["steps"][1]["data"] is None
+        assert adapter.failed == 2  # 首次执行 + 回灌重试各失败一次
+        # 汇总步骤照常执行（拿到 1 成功 + 1 失败）
+        assert any("企业数据分析助手" in m[0][1] for m in llm.calls)
+        # 三个 nl2sql 行 = 两步首次生成 + 第二步的**回灌重试生成**。后者是本用例的关键：
+        # 重试生成成功、重试执行又失败，那次生成同样花了钱，不能随异常丢失（核心约束 #3）。
+        usages = list((await dbSession.execute(select(SessionTokenUsage))).scalars().all())
+        assert sorted(r.purpose for r in usages) == [
+            "answer", "multistep_global_filter", "nl2sql", "nl2sql", "nl2sql", "step_plan",
+        ]
+        assert all(r.prompt_tokens > 0 for r in usages if r.purpose == "nl2sql")
+        # 落库 + 查询状态锚定**成功**的第一步（失败步骤没有 SQL，不能成为追问锚点）
+        msgs = list(
+            (await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id)))
+            .scalars()
+            .all()
+        )
+        assert [m.role for m in msgs] == ["user", "assistant"]
+        state = (await dbSession.execute(select(SessionQueryState))).scalar_one()
+        assert state.last_sql == body["steps"][0]["sql"]
+
+    async def test_step_error_text_hides_sql_and_parameters(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """用户可见的步骤错误只留驱动原因：SQL 全文与查询参数不得外泄。
+
+        `StepResult.error` 会原样进非流式响应与流式 `step_result` 事件（前端直接渲染），
+        而 DB 驱动异常经 SQLAlchemy 包装后 `str()` 会追加 `[SQL: ...]`（内部表/列名）与
+        `[parameters: ...]`（查询字面量，可能含业务数据）。
+        """
+        from sqlalchemy.exc import ProgrammingError
+
+        def _leaky() -> Exception:
+            # 真实语句异常的格式：驱动原因 + [SQL: ...] + [parameters: ...]
+            return ProgrammingError(
+                "SELECT SECRET_COL FROM APP.SECRET_TABLE WHERE CUST_NAME=:n",
+                {"n": "ACME-机密客户"},
+                RuntimeError("ORA-00942: 表或视图不存在"),
+            )
+
+        calls = _spyGenerateSql(monkeypatch)
+        resp, _, _ = await self._post(
+            client, dbSession, monkeypatch, stream=False, fail_from_query=1,
+            exc_factory=_leaky,
+        )
+        assert resp.status_code == 200, resp.text
+        error = resp.json()["steps"][0]["error"]
+        assert error is not None
+        # 驱动给的原因保留（用户据此才能自查/反馈），其余一律不出现
+        assert "ORA-00942" in error
+        for leaked in (
+            "SELECT SECRET_COL", "SECRET_TABLE", "ACME-机密客户", "[SQL:", "[parameters:",
+        ):
+            assert leaked not in error, f"用户可见文案泄漏了 {leaked}：{error}"
+        # 正向对照：回灌给 LLM 的重试反馈仍带细节（脱敏只针对用户可见出口，不是一刀切）
+        feedback = [c.executionError for c in calls if c.executionError]
+        assert feedback and all("SECRET_TABLE" in f for f in feedback)
+
+    async def test_stream_step_failure_isolated(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """流式：同一分支（两条路径此前实现不对称，这里一并钉住）。"""
+        resp, llm, adapter = await self._post(
+            client, dbSession, monkeypatch, stream=True, fail_from_query=2,
+        )
+        assert resp.status_code == 200, resp.text
+        frames = _parseFrames(resp)
+        events = [e for e, _ in frames]
+        # 关键：不是 error 事件（此前异常穿透 → internal 错误事件）
+        assert "error" not in events
+        assert events[-1] == EVENT_DONE
+        stepResults = [d for e, d in frames if e == EVENT_STEP_RESULT]
+        assert len(stepResults) == 2
+        assert stepResults[0]["error"] is None
+        assert stepResults[0]["sql"] is not None
+        assert stepResults[1]["error"] is not None
+        assert stepResults[1]["sql"] is None
+        # 第三步（汇总）的 step_plan 事件照常下发 → 汇总未被跳过
+        aggPlan = [d for e, d in frames if e == EVENT_STEP_PLAN and d["stepIndex"] == 2]
+        assert len(aggPlan) == 1
+        assert any("企业数据分析助手" in m[0][1] for m in llm.calls)
+
+    async def test_non_stream_all_steps_failed_skips_aggregation(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """所有数据步骤都失败 → 不进汇总（汇总 LLM 只见错误行，会编造结论）。"""
+        resp, llm, _ = await self._post(
+            client, dbSession, monkeypatch, stream=False, fail_from_query=1,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["intent"] == "multi_step"
+        assert [s["error"] is not None for s in body["steps"]] == [True, True]
+        # 汇总 LLM 未被调用（调用即意味着它只能基于错误行作答）
+        assert not any("企业数据分析助手" in m[0][1] for m in llm.calls)
+        assert body["answer"] == MSG_MULTI_STEP_DEGRADE_FAILED
+
+    async def test_stream_all_steps_failed_skips_aggregation(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """流式同分支：文案与「不调汇总 LLM」两条都要成立。"""
+        resp, llm, _ = await self._post(
+            client, dbSession, monkeypatch, stream=True, fail_from_query=1,
+        )
+        assert resp.status_code == 200, resp.text
+        frames = _parseFrames(resp)
+        assert [e for e, _ in frames][-1] == EVENT_DONE
+        assert "error" not in [e for e, _ in frames]
+        tokenText = "".join(str(d.get("content", "")) for e, d in frames if e == EVENT_TOKEN)
+        assert MSG_MULTI_STEP_DEGRADE_FAILED in tokenText
+        assert not any("企业数据分析助手" in m[0][1] for m in llm.calls)
+
+        # 汇总步骤虽被跳过，但计划概览已把它下发过（初始「待执行」）⇒ 必须补一个终态事件，
+        # 否则前端汇总步永远停在「待执行」（末帧 steps 只含数据步骤，不会自愈）。
+        assert [d for e, d in frames if e == EVENT_STEP_PLAN and d["stepIndex"] == 2] == []
+        stepResults = [d for e, d in frames if e == EVENT_STEP_RESULT]
+        assert len(stepResults) == 3
+        assert stepResults[2]["stepIndex"] == 2
+        assert stepResults[2]["error"] is not None
+        assert stepResults[2]["sql"] is None
+
+
+class TestStepRetryContext:
+    """C4：多步场景下执行失败重试必须用子问题 + 跨步注入，而非原始复合问题。
+
+    此前 `_runQueryWithRetry` 恒用 `dto.question`（原始复合问题）且 `priorState=None`：
+    重试生成的 SQL 会丢掉子问题范围与「前序步骤结果」约束（如第二步引用的
+    「这三个供应商」），与首次生成（子问题 + 注入）口径不一致。
+    """
+
+    _QUESTION = "请分步查询 2024 和 2025 年的销售额并对比"
+
+    async def test_retry_uses_sub_question_and_prior_injection(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        llm = _PerStepLlm()
+        # 只让第二步的 SQL 失败一次 → 触发一次回灌重试（重试后成功）
+        adapter = _FlakyThenOkAdapter(fail_substring=STEP2_FAIL_MARKER, fail_count=1)
+        _install(monkeypatch, config, llm, adapter)
+        calls = _spyGenerateSql(monkeypatch)
+
+        resp = await client.post(
+            "/api/v1/chat", json=_payload(self._QUESTION, ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+        steps = resp.json()["steps"]
+        assert steps[1]["error"] is None  # 重试后成功
+        assert adapter.failed == 1
+
+        retries = [c for c in calls if c.executionError is not None]
+        assert len(retries) == 1
+        retry = retries[0]
+        # 子问题（而非原始复合问题）：重试若不带上「2025 年」范围，SQL 会重新对齐成
+        # 「对比 2024 和 2025」，与已生成的第一步结果口径不一致
+        assert retry.question == steps[1]["subQuestion"]
+        assert retry.question != self._QUESTION
+        # 跨步注入文本（第一步结果）必须随重试带上
+        assert "前序步骤结果" in (retry.priorState or "")
+        # 主问题仍作为 scopeQuestion 透传（范围感知行数限制的并集判定）
+        assert retry.scopeQuestion == self._QUESTION

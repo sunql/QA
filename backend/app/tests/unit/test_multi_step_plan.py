@@ -166,6 +166,35 @@ class TestStepExecutionContext:
         assert "2024" in result
         assert "2025" in result
 
+    def test_inject_to_prompt_marks_failed_step_without_data_block(self) -> None:
+        """失败步骤（C3）：显式告知「无数据」，不得渲染成「该查询返回 0 行」。
+
+        此前失败步骤与成功步骤同形渲染（同样输出 [aggregate] + 空数据摘要），
+        后续步骤的 LLM 会把它读成「查询结果为 0」，据此生成错误的 WHERE IN / 对比结论。
+        """
+        ctx = StepExecutionContext(
+            datasource_type="postgresql",
+            oracle_version=None,
+            schema_prefix="public",
+            context="",
+            completed_steps=(
+                StepResult(
+                    step_index=0,
+                    description="2024年销售额",
+                    sub_question="2024年销售额是多少",
+                    sql=None,
+                    data=[],
+                    error="该步骤执行失败：ORA-00942 表或视图不存在",
+                ),
+            ),
+        )
+        result = ctx.inject_to_prompt(1)
+        assert "该步骤执行失败" in result
+        assert "ORA-00942" in result
+        # 无数据块：闭合标签只出现在数据块里（头部说明文字里含有标签名，不能直接断言标签名）
+        assert "[/aggregate]" not in result
+        assert "[/entity_list]" not in result
+
     def test_with_step_returns_new_instance(self) -> None:
         ctx = StepExecutionContext(
             datasource_type="mysql",

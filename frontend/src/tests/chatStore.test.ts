@@ -143,6 +143,42 @@ describe("chatStore", () => {
     expect(state.messages[1].isError).toBe(true);
   });
 
+  it("非流式多步：失败步骤（error 非空）标记为 error 而非 done（C3 失败隔离）", async () => {
+    chatApi.sendMessage.mockResolvedValue({
+      answer: "多步执行失败：0/2 步完成",
+      intent: "multi_step",
+      tokensUsed: 10,
+      cost: 0.00001,
+      steps: [
+        {
+          stepIndex: 0,
+          description: "2024 销售额",
+          subQuestion: "2024年的销售额是多少",
+          sql: "SELECT 1",
+          summary: "1000",
+          error: null,
+        },
+        {
+          stepIndex: 1,
+          description: "2025 销售额",
+          subQuestion: "2025年的销售额是多少",
+          sql: null,
+          summary: null,
+          error: "该步骤执行失败：ORA-00942: 表或视图不存在",
+        },
+      ],
+    });
+    useChatStore.getState().setDatasourceId(1);
+    await useChatStore.getState().sendMessage("分步查询 2024 和 2025 的销售额并对比");
+
+    const steps = useChatStore.getState().messages[1].steps;
+    expect(steps?.[0]).toMatchObject({ status: "done", sql: "SELECT 1" });
+    expect(steps?.[1]).toMatchObject({
+      status: "error",
+      error: "该步骤执行失败：ORA-00942: 表或视图不存在",
+    });
+  });
+
   // =========================================================================
   // 流式输出（5.6）
   // =========================================================================

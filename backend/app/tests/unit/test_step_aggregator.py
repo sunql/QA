@@ -124,6 +124,38 @@ class TestStepAggregatorPrompt:
         prompt = agg._build_prompt(plan.original_question, plan, steps, "")
         assert "数据源连接失败" in prompt
 
+    def test_build_prompt_failed_step_marked_not_fabricable(self) -> None:
+        """失败步骤（C3）：不给「0 行数据摘要」，显式禁止汇总 LLM 为其推测。
+
+        此前失败步骤只多一行「错误：…」，数据块照旧渲染成 `共 0 行`，
+        LLM 很容易把「0 行」当成真实结论（"2025 年销售额为 0"）继续对比。
+        """
+        agg = self._make_aggregator()
+        plan = self._make_plan()
+        steps = [
+            StepResult(
+                step_index=0,
+                description="2024年销售额",
+                sub_question="2024年销售额是多少",
+                sql="SELECT year, SUM(amount) FROM sales WHERE year=2024 GROUP BY year",
+                data=[{"year": 2024, "amount": Decimal("1000")}],
+                summary="2024年销售额1000万",
+            ),
+            StepResult(
+                step_index=1,
+                description="2025年销售额",
+                sub_question="2025年销售额是多少",
+                sql=None,
+                data=[],
+                error="该步骤执行失败：ORA-00942 表或视图不存在",
+            ),
+        ]
+        prompt = agg._build_prompt(plan.original_question, plan, steps, "")
+        assert "该步骤执行失败" in prompt
+        assert "不得为其推测" in prompt
+        # 失败步骤不得出现数据摘要块（`共 0 行` 会被读成真实结论）
+        assert "共 0 行" not in prompt
+
     def test_build_prompt_empty_data(self) -> None:
         """步骤 data=[] 时 prompt 应能正常处理（不抛异常）。"""
         agg = self._make_aggregator()

@@ -172,6 +172,14 @@ logger = logging.getLogger(__name__)
 
 _CONTEXT_ROUNDS = 5  # 注入上下文的历史轮数（每轮 user + assistant 各一条）
 _CONTEXT_MESSAGE_LIMIT = _CONTEXT_ROUNDS * 2
+# H3：历史上下文预算。contextPrompt 会被注入 plan / SQL / answer 各阶段的 prompt
+# （见 _buildContextPrompt 的调用点），一条超长答案或长 CTE 会被逐轮重复注入 ——
+# 只限轮数不限长度时长轮次下每轮 prompt 成本线性膨胀。两道闸：单条限量 + 拼接总预算。
+_CONTEXT_CONTENT_SEGMENT_LIMIT = 500  # 单条消息正文上限
+_CONTEXT_SQL_SEGMENT_LIMIT = 500  # 单条消息携带的历史 SQL 上限（与正文分开限量）
+# 总预算应 ≥ 单块上限之和（正文 + SQL + 说话人前缀），否则每次只剩最新一块；
+# 调得比单块还小时 _fitPartsToBudget 会再把最新一块裁进来，保证总量始终有界。
+_CONTEXT_PROMPT_CHAR_BUDGET = 4000
 # 3-4：recent_rounds 保留的"更早轮次"快照上限（不含当前 last_*）。新到旧排列，
 # 超限丢弃最旧。取与 _CONTEXT_ROUNDS 一致的量级，保持跨轮回溯与历史注入口径相同。
 _RECENT_ROUNDS_LIMIT = 5
@@ -384,6 +392,29 @@ def _clipText(text: str, limit: int) -> str:
     if len(text) > limit:
         return text[:limit] + "..."
     return text
+
+
+def _fitPartsToBudget(parts: list[str], budget: int) -> list[str]:
+    """按预算从最新往回保留整块历史，返回新列表（不改动入参）。
+
+    入参按「旧 → 新」排列。超预算时丢最旧的**整块**而不是截掉最新内容：最新一轮是
+    追问（REFINE / FOLLOW_UP）的锚点，宁可少几轮旧上下文。至少保留最新一块 —— 预算
+    被误调得过小时表现为「只剩最新一轮」，而不是清空历史；此时再把最新一块（kept[-1]）
+    裁进预算，保证返回文本总长恒有界（预算 + 省略号）。
+    """
+    kept: list[str] = []
+    used = 0
+    for part in reversed(parts):
+        extra = len(part) + (1 if kept else 0)  # "\n" 分隔符
+        if kept and used + extra > budget:
+            break
+        kept.append(part)
+        used += extra
+    kept.reverse()
+    # 循环保证「多块留存时每块都在预算内」，故此处只可能对唯一留存的最新块生效
+    if kept and len(kept[-1]) > budget:
+        kept[-1] = _clipText(kept[-1], budget)
+    return kept
 
 
 def _summarizeExecutionError(exc: Exception) -> str:
@@ -1020,10 +1051,14 @@ class ChatService(ChatStreamOutputMixin):
             return False
 
     async def _getClassFilterMaxClasses(self, session: AsyncSession) -> int:
-        """读 system_config.CLASS_FILTER_MAX_CLASSES；缺席/格式错返 _DEFAULT。
+        """读 system_config.CLASS_FILTER_MAX_CLASSES；缺席/格式错/非正返 _DEFAULT。
 
         与 ``_isL4AgentLoopEnabled`` 同口径：读失败不阻断主链路，返硬编码默认。
         admin 改值后立即对新问句生效（每次扩边都现读，无缓存）。
+
+        非正值同样按非法处理：0/负数不是「截得更狠」而是闸门静默失效
+        （``ranked[:0]`` 返空、``ranked[:-5]`` 返「除末位以外全部」，truncated
+        判定同时失真）。上限是正常裁剪与 H5 降级路径共用的唯一闸门。
         """
         try:
             row = await session.execute(
@@ -1032,7 +1067,14 @@ class ChatService(ChatStreamOutputMixin):
             raw = row.scalar_one_or_none()
             if raw is None or raw == "":
                 return _CLASS_FILTER_MAX_CLASSES_DEFAULT
-            return int(raw)
+            value = int(raw)
+            if value <= 0:
+                logger.warning(
+                    "CLASS_FILTER_MAX_CLASSES 非正值 %r，返默认值 %d",
+                    raw, _CLASS_FILTER_MAX_CLASSES_DEFAULT,
+                )
+                return _CLASS_FILTER_MAX_CLASSES_DEFAULT
+            return value
         except (TypeError, ValueError):
             logger.warning(
                 "CLASS_FILTER_MAX_CLASSES 值非法 %r，返默认值 %d",
@@ -1526,12 +1568,14 @@ class ChatService(ChatStreamOutputMixin):
         仅把相关子集送入 plan/SQL 阶段。
 
         检索是增强而非硬依赖：Milvus/embedding 未就绪、或测试桩未实现
-        searchByKeyword 时，回退到全量类，保证检索降级时仍能回答而非报错。
+        searchByKeyword 时，回退到 ``_fallbackRecall``（同样过滤 ODS + 截断上限，
+        见 H5）——降级保的是「不报错」，不是「放弃裁剪」。
         返回新列表，不改动入参 allClasses。
 
         可观测性（1-1）：每次回退都记 warning，reason= 区分场景（search_error /
-        no_hits / no_match），供回退率聚合；命中中可解析为真实类的比例低于阈值时
-        同样告警，避免检索漂移让裁剪在生产上悄悄失效。
+        no_hits / no_match / no_match_ods_filtered / ods_only_hits），供回退率聚合；
+        降级实际做的过滤/截断由 ``_fallbackRecall`` 另记一行；命中中可解析为真实类的
+        比例低于阈值时同样告警，避免检索漂移让裁剪在生产上悄悄失效。
 
         返回 (类列表, ClassRecallInfo 诊断)：诊断随 ChatResponse.classRecall 透出，
         前端在 truncated/fallback 时向用户提示（避免"看起来正常但 schema 缺表"）。
@@ -1546,16 +1590,14 @@ class ChatService(ChatStreamOutputMixin):
                 question, topK=_CLASS_FILTER_TOP_K, typeFilter="class"
             )
         except Exception:
-            logger.warning(
-                "本体类裁剪回退到全量类 reason=search_error total=%d", total, exc_info=True
-            )
-            return list(allClasses), ClassRecallInfo(
-                mode="fallback", hitCount=0, classCount=total,
+            # 只留堆栈：reason=/计数由 _fallbackRecall 单点透出，避免回退率翻倍
+            logger.warning("本体类裁剪检索失败，进入降级路径", exc_info=True)
+            return await self._fallbackRecall(
+                session, question, allClasses, reason="search_error"
             )
         if not hits:
-            logger.warning("本体类裁剪回退到全量类 reason=no_hits total=%d", total)
-            return list(allClasses), ClassRecallInfo(
-                mode="fallback", hitCount=0, classCount=total,
+            return await self._fallbackRecall(
+                session, question, allClasses, reason="no_hits"
             )
         hitIds = {hit.id for hit in hits}
         # feat-ontology-recall-pruning step D：按 ADS 层加权召回。
@@ -1614,27 +1656,15 @@ class ChatService(ChatStreamOutputMixin):
                 if cls.id is not None and not _isOdsBusinessTable(cls)
             ]
             if not odsFiltered:
-                logger.warning(
-                    "本体类裁剪回退到全量类 reason=no_match_ods_filtered total=%d",
-                    len(allClasses),
+                return await self._fallbackRecall(
+                    session, question, allClasses, reason="no_match_ods_filtered"
                 )
-                return list(allClasses), ClassRecallInfo(
-                    mode="fallback", hitCount=0, classCount=len(allClasses),
-                )
-            logger.warning(
-                "本体类召回命中全为 ODS 业务表 reason=ods_only_hits total=%d filtered=%d",
-                len(allClasses), len(odsFiltered),
-            )
-            return odsFiltered, ClassRecallInfo(
-                mode="fallback", hitCount=0, classCount=len(odsFiltered),
+            return await self._fallbackRecall(
+                session, question, allClasses, reason="ods_only_hits"
             )
         if not relevant:
-            logger.warning(
-                "本体类裁剪回退到全量类 reason=no_match hits=%d total=%d",
-                len(hits), total,
-            )
-            return list(allClasses), ClassRecallInfo(
-                mode="fallback", hitCount=0, classCount=total,
+            return await self._fallbackRecall(
+                session, question, allClasses, reason="no_match", hitCount=len(hits)
             )
         matchedRatio = len(relevant) / len(hits)
         if matchedRatio < _CLASS_FILTER_HIT_MATCH_MIN:
@@ -1671,6 +1701,69 @@ class ChatService(ChatStreamOutputMixin):
             truncated=truncated,
         )
         return expanded, recall
+
+    async def _fallbackRecall(
+        self,
+        session: AsyncSession,
+        question: str,
+        allClasses: list[Any],
+        *,
+        reason: str,
+        hitCount: int | None = None,
+    ) -> tuple[list[Any], ClassRecallInfo]:
+        """召回不可用时的统一降级：ODS 过滤 + 层优先排序 + max 截断（H5）。
+
+        降级不是免检：此前各回退分支直接 ``return list(allClasses)``，等于在
+        Milvus/embedding 挂掉时把 2026-09-19 ODS_BPARTNER 事故（LLM 在贴源备份表上
+        幻觉属性名）连同「表越多越选错」原样放回来。此处与正常裁剪同口径：
+        ODS 过滤（显式点名 ODS 表的问题除外）→ 层优先排序 → 截到
+        ``system_config.CLASS_FILTER_MAX_CLASSES``。排序不可省：入参是库表顺序，
+        直接截前缀等于随机丢表。
+
+        退化场景（全库只有 ODS 业务表）保留原样而非返回空列表：空 schema 会让所有
+        问题都变成「无法回答」，而 ODS 表至少还能试 —— 该分支单独打 warning。
+
+        日志是**唯一**的 reason= 出口（回退率按行聚合，多打一行就翻倍）：调用方不得
+        再另打 reason= 行；本函数内退化分支那行也用 scene= 而非 reason=，同一事件
+        只可能有一行带 reason=。hitCount 只在「取到 hits 但解析不出类」的场景有值。
+        返回新列表，不改动入参。
+        """
+        total = len(allClasses)
+        explicit_ods = _isExplicitOdsRequest(question)
+        candidates = [
+            cls for cls in allClasses
+            if cls.id is not None
+            and (not _isOdsBusinessTable(cls) or explicit_ods)
+        ]
+        odsFiltered = total - len(candidates)
+        if not candidates:
+            # 本行刻意用 scene= 而非 reason=：回退率按「含 reason= 的行」聚合，
+            # 同一事件打两行就翻倍；场景名由紧随其后的主行给出（同 total 可对齐）。
+            logger.warning(
+                "本体类回退降级无可用非 ODS 类，保留原列表 scene=%s total=%d",
+                reason, total,
+            )
+            candidates = list(allClasses)
+            odsFiltered = 0
+        # dimension_hint=False：入参本就是全量类，DIM 已在其中（_rankByLayer 的 DIM
+        # 补拉是给召回子集用的），降级路径也不再引入一次 DB 读取。
+        ranked = await self._rankByLayer(candidates, dimension_hint=False, session=session)
+        max_classes = await self._getClassFilterMaxClasses(session)
+        selected = ranked[:max_classes]
+        truncated = len(ranked) > max_classes
+        # hits= 只在本场景有值（NO_MATCH 才看得到命中数）；其余场景省略该段，
+        # 以保持「reason=<场景> total=<全量>」这段 token 相邻（既有聚合/断言口径）。
+        hitDetail = "" if hitCount is None else f" hits={hitCount}"
+        logger.warning(
+            "本体类回退降级 reason=%s%s total=%d kept=%d odsFiltered=%d truncated=%s",
+            reason, hitDetail, total, len(selected), odsFiltered, truncated,
+        )
+        return selected, ClassRecallInfo(
+            mode="fallback",
+            hitCount=0,
+            classCount=len(selected),
+            truncated=truncated,
+        )
 
     async def _expandByJoinNeighbors(
         self, session: AsyncSession, relevant: list[Any], allClasses: list[Any]
@@ -4608,6 +4701,9 @@ class ChatService(ChatStreamOutputMixin):
         """构建历史上下文文本：优先服务端持久化消息，其次客户端 history。
 
         两者皆为空时返回空串（不注入上下文）。返回新字符串，不改动入参。
+
+        H3：注入点覆盖 plan/SQL/answer 各阶段，故在源头按「单条上限 + 总预算」收口
+        （见 _fitPartsToBudget），避免一条超长答案或长 CTE 逐轮推高每次 prompt 成本。
         """
         rounds = await self._loadRecentRounds(session, sessionId)
         if not rounds:
@@ -4618,11 +4714,20 @@ class ChatService(ChatStreamOutputMixin):
         # 便于多轮追问（REFINE/FOLLOW_UP）时复用或微调。客户端 history 无 SQL 记录。
         parts: list[str] = []
         for role, content, sql in rounds:
-            text = content
+            text = _clipText(content, _CONTEXT_CONTENT_SEGMENT_LIMIT)
             if role == "assistant" and sql:
-                text = f"{content} [SQL: {sql}]"
+                # SQL 与正文分开限量：正文被裁不影响历史 SQL 的可见性（追问 REFINE 靠它）
+                text = f"{text} [SQL: {_clipText(sql, _CONTEXT_SQL_SEGMENT_LIMIT)}]"
             parts.append(f"{_speakerFor(role)}：{text}")
-        return "\n".join(parts)
+        kept = _fitPartsToBudget(parts, _CONTEXT_PROMPT_CHAR_BUDGET)
+        if len(kept) < len(parts):
+            logger.info(
+                "历史上下文按预算裁剪 kept=%d/%d chars=%d budget=%d",
+                len(kept), len(parts),
+                sum(len(p) for p in kept) + max(len(kept) - 1, 0),
+                _CONTEXT_PROMPT_CHAR_BUDGET,
+            )
+        return "\n".join(kept)
 
     async def _loadRecentRounds(
         self, session: AsyncSession, sessionId: str

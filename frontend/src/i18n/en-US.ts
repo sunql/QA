@@ -378,7 +378,7 @@ export const enUS = {
     validationDetail: "Validation details",
     affinityLocked: "🔒 Locked to {model} · {turns} turns remaining",
     classRecallTruncated: "This query hit the recall window limit ({total} tables); some related tables may be excluded. Try a more specific question or ask an admin to adjust the recall window.",
-    classRecallFallback: "Table recall is temporarily unavailable; all tables were loaded for this query, which may affect answer accuracy.",
+    classRecallFallback: "Table recall is temporarily unavailable; tables were picked by warehouse layer order (bounded by the recall window limit), which may affect answer accuracy.",
   },
 
   suggestedAgent: {

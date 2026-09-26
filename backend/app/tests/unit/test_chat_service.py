@@ -1079,6 +1079,139 @@ class TestSessionContext:
         assert "以下是用户之前的对话历史" not in systemContent
 
 
+class TestContextPromptBudget:
+    """H3：历史上下文按「单条上限 + 总量预算」收口（聊天上下文 5.2）。
+
+    contextPrompt 会注入 plan / SQL / answer 各阶段的 prompt（见 _buildContextPrompt
+    的调用点），一条超长答案或长 CTE 会被逐轮重复注入 —— 不设预算时，长轮次下
+    每轮 prompt 成本线性膨胀。
+    """
+
+    def _service(self) -> ChatService:
+        return _buildService()[0]
+
+    @staticmethod
+    def _historyMessage(role: str, content: str) -> HistoryMessage:
+        return HistoryMessage(role=role, content=content)
+
+    @pytest.mark.asyncio
+    async def test_short_history_is_passed_through_unchanged(self) -> None:
+        """预算内的短历史逐字保留（不得因加预算改变既有内容）。"""
+        service = self._service()
+        history = [
+            self._historyMessage("user", "上月销量"),
+            self._historyMessage("assistant", "上月销量为 1000"),
+        ]
+        text = await service._buildContextPrompt(_FakeSession(), "s1", history)
+        assert text == "用户：上月销量\n助手：上月销量为 1000"
+
+    @pytest.mark.asyncio
+    async def test_long_history_stays_within_budget_and_keeps_newest(self) -> None:
+        """长轮次：总量受预算约束，保留最新、丢弃最旧（追问依赖最新一轮）。"""
+        import app.services.chat_service as chat_module
+
+        service = self._service()
+        history = [
+            self._historyMessage(
+                "user" if i % 2 == 0 else "assistant", f"msg{i}-" + "x" * 2000
+            )
+            for i in range(10)
+        ]
+        text = await service._buildContextPrompt(_FakeSession(), "s1", history)
+        assert len(text) <= chat_module._CONTEXT_PROMPT_CHAR_BUDGET
+        assert "msg9" in text
+        assert "msg0" not in text
+
+    @pytest.mark.asyncio
+    async def test_single_oversized_message_is_clipped(self) -> None:
+        """单条超长消息自身被截断（带省略号），不把预算一个人吃光后再溢出。"""
+        import app.services.chat_service as chat_module
+
+        service = self._service()
+        history = [self._historyMessage("assistant", "y" * 50000)]
+        text = await service._buildContextPrompt(_FakeSession(), "s1", history)
+        assert len(text) <= chat_module._CONTEXT_PROMPT_CHAR_BUDGET
+        assert text.endswith("...")
+
+    @pytest.mark.asyncio
+    async def test_over_budget_keeps_newest_round_even_with_tiny_budget(
+        self, monkeypatch
+    ) -> None:
+        """预算被调得过小时也不清空历史：至少留最新一轮（否则追问直接失忆）。"""
+        import app.services.chat_service as chat_module
+
+        monkeypatch.setattr(chat_module, "_CONTEXT_PROMPT_CHAR_BUDGET", 10)
+        service = self._service()
+        history = [
+            self._historyMessage("user", "msg8-" + "x" * 300),
+            self._historyMessage("assistant", "msg9-" + "x" * 300),
+        ]
+        text = await service._buildContextPrompt(_FakeSession(), "s1", history)
+        assert "msg9" in text
+        assert "msg8" not in text
+        assert len(text) <= 10 + 3  # 只剩最新一块时也会被裁进预算（省略号 3 字符）
+
+    @pytest.mark.asyncio
+    async def test_oversized_sql_is_clipped_but_marker_kept(self) -> None:
+        """服务端持久化轮次的历史 SQL 单独限量：正文被裁也要留住 SQL（REFINE 靠它）。"""
+        import app.services.chat_service as chat_module
+        from app.domain.models import SessionMessage
+
+        # 注入顺序与真实查询一致（created_time desc → 新在前，_loadRecentRounds 再反转）
+        rows = [
+            SessionMessage(
+                session_id="s1", role="assistant", content="上月的收货量如下",
+                question=None, sql_generated="SELECT " + "c" * 9000,
+            ),
+            SessionMessage(
+                session_id="s1", role="user", content="上月收货量",
+                question="上月收货量", sql_generated=None,
+            ),
+        ]
+        service = self._service()
+        text = await service._buildContextPrompt(_StoredRoundsSession(rows), "s1", [])
+        assert len(text) <= chat_module._CONTEXT_PROMPT_CHAR_BUDGET
+        assert "[SQL:" in text
+        assert text.endswith("]")  # SQL 段整体被保留（内部被截断但括号闭合）
+
+    @pytest.mark.asyncio
+    async def test_clipping_is_logged(self, caplog) -> None:
+        """裁剪可观测（丢的是用户上下文，不能静默）。"""
+        service = self._service()
+        history = [
+            self._historyMessage("user", f"msg{i}-" + "x" * 2000) for i in range(10)
+        ]
+        with caplog.at_level(logging.INFO):
+            await service._buildContextPrompt(_FakeSession(), "s1", history)
+        assert "历史上下文按预算裁剪" in caplog.text
+
+
+class _StoredRoundsSession:
+    """只服务 _loadRecentRounds 的假会话：select(SessionMessage) 返回注入行。
+
+    其他查询（如 system_config）返回空 —— 与 _FakeSession 同口径，不触真实库。
+    """
+
+    def __init__(self, rows: list) -> None:
+        self._rows = rows
+
+    async def execute(self, stmt):
+        rows = self._rows
+
+        class _Scalars:
+            def all(self_inner) -> list:
+                return list(rows)
+
+        class _Result:
+            def scalars(self_inner):
+                return _Scalars()
+
+            def scalar_one_or_none(self_inner):
+                return None
+
+        return _Result()
+
+
 class TestUnanswerablePlan:
     """模型判定问题超出本体范围（计划 target=无法回答）时，流水线短路为友好回答。"""
 
@@ -2164,6 +2297,32 @@ class TestClassRecallDiagnostics:
         assert await svc._getClassFilterMaxClasses(_FakeSessionBoom()) == 30
 
     @pytest.mark.asyncio
+    async def test_get_class_filter_max_classes_rejects_non_positive(self) -> None:
+        """0/负数视同非法值 → 返默认。
+
+        非正值不是「截得很狠」而是静默失效：`ranked[:0]`/`ranked[:-5]` 会返回空或
+        「除末位以外全部」，truncated 判定（len > max）同时失真 —— 上限是 H5 降级
+        路径与正常裁剪共用的唯一闸门，admin 填错不能让闸门消失。
+        """
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+
+        def _sessionReturning(raw: str):
+            class _Session:
+                async def execute(self, stmt):
+                    class _R:
+                        def scalar_one_or_none(self_inner):
+                            return raw
+
+                    return _R()
+
+            return _Session()
+
+        for bad_raw in ("0", "-5"):
+            got = await svc._getClassFilterMaxClasses(_sessionReturning(bad_raw))
+            assert got == 30, f"raw={bad_raw!r} got={got}"
+
+    @pytest.mark.asyncio
     async def test_fallback_on_no_hits(self) -> None:
         """检索无命中回退全量：mode=fallback。"""
         classes = self._classes(1, 2)
@@ -2257,6 +2416,157 @@ class TestClassFilterHitSkipOds:
         assert recall.mode == "fallback"
         assert recall.hitCount == 0
         assert {c.id for c in result} == {2, 3}
+
+
+class TestClassRecallFallbackAppliesPruning:
+    """H5：召回不可用时的降级必须与召回剪枝同口径（ODS 过滤 + max 截断）。
+
+    此前降级是 `return list(allClasses)` 裸回退：Milvus/embedding 一挂，
+    2026-09-19 ODS_BPARTNER 事故（LLM 在没有业务列的贴源备份表上幻觉属性名）
+    连同「表越多越选错」原样回来 —— 降级路径不是免检路径。
+    """
+
+    def _cls(self, cid: int, src: str) -> OntologyClass:
+        return OntologyClass(
+            id=cid, class_name=f"C{cid}", class_alias=None, description=None,
+            source_table=src, properties=[],
+        )
+
+    def _service(self, classes, *, boom=False, hits=None, joins=None):
+        if boom:
+            class _BoomSearchOntology(_FakeOntologyService):
+                async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+                    raise RuntimeError("Milvus 不可用")
+
+            ontology = _BoomSearchOntology(classes)
+        else:
+            ontology = _FakeOntologyService(
+                classes,
+                searchHits=[SimpleNamespace(id=i) for i in (hits or [])],
+                joins=joins or [],
+            )
+        return _buildService(ontology=ontology)[0]
+
+    @pytest.mark.asyncio
+    async def test_search_error_fallback_filters_ods_business_tables(self) -> None:
+        """检索抛错降级：ODS 业务表仍须被过滤（旧实现原样放回全量）。"""
+        classes = [self._cls(2, "ODS_BPARTNER"), self._cls(4, "DWD_GOODS_RECEIPT_LINE")]
+        service = self._service(classes, boom=True)
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        ids = {c.id for c in result}
+        assert 4 in ids
+        assert 2 not in ids
+        assert recall.mode == "fallback"
+        assert recall.classCount == 1
+
+    @pytest.mark.asyncio
+    async def test_no_hits_fallback_filters_ods_business_tables(self) -> None:
+        """检索无命中降级：同样过滤 ODS 业务表（另一处回退分支）。"""
+        classes = [self._cls(2, "ODS_BPARTNER"), self._cls(4, "DWD_GOODS_RECEIPT_LINE")]
+        service = self._service(classes)
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert {c.id for c in result} == {4}
+        assert recall.mode == "fallback"
+
+    @pytest.mark.asyncio
+    async def test_no_match_fallback_filters_ods_business_tables(self) -> None:
+        """命中解析不到任何类（no_match）降级：同样过滤 ODS 业务表。"""
+        classes = [self._cls(2, "ODS_BPARTNER"), self._cls(4, "DWD_GOODS_RECEIPT_LINE")]
+        service = self._service(classes, hits=[999])
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert {c.id for c in result} == {4}
+        assert recall.mode == "fallback"
+
+    @pytest.mark.asyncio
+    async def test_explicit_ods_request_keeps_ods_table_in_fallback(self) -> None:
+        """显式点名 ODS 表（问题里带表名）：降级也不过过滤，与正常召回同口径。"""
+        classes = [self._cls(2, "ODS_BPARTNER"), self._cls(4, "DWD_GOODS_RECEIPT_LINE")]
+        service = self._service(classes, boom=True)
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "ODS_BPARTNER 里有哪些供应商", classes
+        )
+        assert {c.id for c in result} == {2, 4}
+
+    @pytest.mark.asyncio
+    async def test_fallback_ranks_by_layer_before_truncation(self) -> None:
+        """降级也要截到 CLASS_FILTER_MAX_CLASSES，且截断按层优先而非取输入前缀。"""
+        import app.services.chat_service as chat_module
+
+        cap = chat_module._CLASS_FILTER_MAX_CLASSES_DEFAULT
+        classes = [
+            self._cls(100 + i, f"UNKNOWN_T{i}") for i in range(cap + 5)
+        ] + [
+            self._cls(1, "ADS_ORDER_SUMMARY"),
+            self._cls(2, "DWD_GOODS_RECEIPT_LINE"),
+        ]
+        service = self._service(classes, boom=True)
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert len(result) == cap
+        assert recall.classCount == cap
+        assert recall.truncated is True
+        # 高优先层（ADS/DWD）在输入尾部，仍须进保留集 —— 证明截断前有层排序
+        assert {1, 2} <= {c.id for c in result}
+
+    @pytest.mark.asyncio
+    async def test_fallback_is_not_truncated_when_under_cap(self) -> None:
+        """未触顶时 truncated=False（诊断不能误报截断）。"""
+        classes = [self._cls(4, "DWD_GOODS_RECEIPT_LINE")]
+        service = self._service(classes, boom=True)
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert [c.id for c in result] == [4]
+        assert recall.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_ods_only_hits_branch_falls_back_filtered(self) -> None:
+        """命中全为 ODS 但库里还有非 ODS 类：降级给非 ODS 子集，而不是全量。"""
+        classes = [
+            self._cls(2, "ODS_BPARTNER"),
+            self._cls(3, "ODS_BPSUPPLIER"),
+            self._cls(5, "DWD_GOODS_RECEIPT_LINE"),
+        ]
+        service = self._service(classes, hits=[2, 3])
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert {c.id for c in result} == {5}
+        assert recall.mode == "fallback"
+
+    @pytest.mark.asyncio
+    async def test_fallback_logs_reason_and_pruning(self, caplog) -> None:
+        """降级日志同时给出「为什么降级」与「降级后做了什么」（过滤/截断）供聚合。"""
+        classes = [self._cls(2, "ODS_BPARTNER"), self._cls(4, "DWD_GOODS_RECEIPT_LINE")]
+        service = self._service(classes, boom=True)
+        with caplog.at_level(logging.WARNING):
+            await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
+        assert "reason=search_error" in caplog.text  # 既有口径不变（回退率聚合用）
+        assert "本体类回退降级" in caplog.text
+        assert "odsFiltered=1" in caplog.text
+        # 回退率按行聚合：每个降级事件只能有一行带 reason=（否则倍率翻倍）
+        assert caplog.text.count("reason=search_error") == 1
+
+    @pytest.mark.asyncio
+    async def test_all_ods_ontology_keeps_list_instead_of_empty(self, caplog) -> None:
+        """退化场景（全库只有 ODS 业务表）：宁可保留原样，也不能给出空 schema。"""
+        classes = [self._cls(2, "ODS_BPARTNER"), self._cls(3, "ODS_BPSUPPLIER")]
+        service = self._service(classes, boom=True)
+        with caplog.at_level(logging.WARNING):
+            result, recall = await service._selectRelevantClasses(
+                _FakeSession(), "供货量", classes
+            )
+        assert {c.id for c in result} == {2, 3}
+        assert recall.mode == "fallback"
+        # 退化分支自己也带 reason= 的话，该场景的回退率会被算成 2 倍（见 1-1 聚合口径）
+        assert caplog.text.count("reason=search_error") == 1
 
 
 def _mk_class(*, id, source_table):

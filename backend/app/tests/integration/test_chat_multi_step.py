@@ -432,3 +432,105 @@ class TestMultiStepChatStreamApi:
         assert suggestion is not None
         assert suggestion["recommendedAgentCode"] == "SUPPLIER_360_AGENT"
         assert suggestion["confidence"] == 0.4
+
+
+class TestNoAggregationStepDegrade:
+    """防御分支：计划里没有汇总步（aggregation_only）时的降级收尾。
+
+    两处 `MultiStepPlan` 构造点（step_query_planner.rule_based_split 与 LLM 拆步）
+    目前**都**会补一个汇总步，故该分支在生产路径上不可达——它是防「计划被上层
+    改坏 / 未来新增构造点漏补汇总步」的兜底。既有的兜底只返回文案、**不写状态**：
+    assistant 消息缺失（历史出现悬空 user 轮），`last_question`/`last_sql` 停在
+    上一轮 → 下一轮追问锚到更早的问题（静默答错）或退化成无锚点的单轮查询。
+    两条路径（流式 / 非流式）此前实现还不对称，这里一并钉住。
+    """
+
+    @staticmethod
+    def _planWithoutAggregation(question: str):
+        """规则拆步的替身：两个数据步骤，**不补**汇总步。"""
+        from app.domain.multi_step_plan import MultiStepPlan, StepPlan
+
+        return MultiStepPlan(
+            steps=(
+                StepPlan(index=0, description="2024 年销售额", sub_question="2024年的销售额是多少"),
+                StepPlan(index=1, description="2025 年销售额", sub_question="2025年的销售额是多少"),
+            ),
+            aggregation_hint="对比两年销售额",
+            original_question=question,
+        )
+
+    async def test_non_stream_saves_state_and_reports_progress(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """非流式：数据步已成功 → 落 assistant 消息 + 保存查询状态。"""
+        from app.services.step_query_planner import StepQueryPlanner
+
+        config, ds = await _seed(dbSession)
+        adapter = _OkAdapter()
+        _install(monkeypatch, config, _MultiStepLlm(), adapter)
+        monkeypatch.setattr(
+            StepQueryPlanner, "rule_based_split", staticmethod(self._planWithoutAggregation)
+        )
+
+        question = "第一步，查 2024 年销售额；第二步，查 2025 年销售额"
+        resp = await client.post("/api/v1/chat", json=_payload(question, ds.id))
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["intent"] == "multi_step"
+        # 两个数据步都真的执行了 SQL（不是「什么都没做成」）
+        assert len(_data_queries(adapter)) == 2
+        # 文案如实反映「数据步完成、汇总失败」，而不是笼统的「执行异常」
+        assert "2/2" in body["answer"]
+
+        # 落库：user + assistant 双写（此前 assistant 缺失 → 历史悬空）
+        msgs = list(
+            (await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id)))
+            .scalars()
+            .all()
+        )
+        assert [m.role for m in msgs] == ["user", "assistant"]
+        # 查询状态锚定本轮问题 + 最后一个成功数据步的 SQL（追问可继续级联）
+        state = (
+            await dbSession.execute(select(SessionQueryState))
+        ).scalar_one()
+        assert state.last_question == question
+        assert state.last_sql is not None
+
+    async def test_stream_saves_state_and_reports_progress(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """流式：同一分支也要落库 + 保存状态（两条路径此前实现不对称）。"""
+        from app.services.step_query_planner import StepQueryPlanner
+
+        config, ds = await _seed(dbSession)
+        adapter = _OkAdapter()
+        _install(monkeypatch, config, _MultiStepLlm(), adapter)
+        monkeypatch.setattr(
+            StepQueryPlanner, "rule_based_split", staticmethod(self._planWithoutAggregation)
+        )
+
+        question = "第一步，查 2024 年销售额；第二步，查 2025 年销售额"
+        resp = await client.post("/api/v1/chat/stream", json=_payload(question, ds.id))
+        assert resp.status_code == 200, resp.text
+
+        frames = _parseFrames(resp)
+
+        assert frames[-1][0] == EVENT_DONE
+        token_text = "".join(
+            str(d.get("content", "")) for e, d in frames if e == EVENT_TOKEN
+        )
+        assert "2/2" in token_text
+
+        msgs = list(
+            (await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id)))
+            .scalars()
+            .all()
+        )
+        assert [m.role for m in msgs] == ["user", "assistant"]
+        state = (
+            await dbSession.execute(select(SessionQueryState))
+        ).scalar_one()
+        assert state.last_question == question
+        assert state.last_sql is not None
+
+

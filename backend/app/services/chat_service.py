@@ -42,8 +42,10 @@ from tenacity import (
 from app.dependencies import CurrentUser
 from app.domain.enums import ChartType, IntentType
 from app.domain.exceptions import (
+    ConfigError,
     ConflictError,
     DomainError,
+    LLMUnavailableError,
     LlmClientError,
     Nl2SqlError,
     NotFoundError,
@@ -150,6 +152,7 @@ from app.services.messages_zh import (
     MSG_DEFINE_METRIC_GUIDE_EXAMPLE,
     MSG_DEFINE_METRIC_GUIDE_PREFIX,
     MSG_INTERNAL_ERROR,
+    MSG_LLM_UNAVAILABLE,
     MSG_MAP_PROPERTY_GUIDE,
     MSG_MAP_PROPERTY_NOT_FOUND,
     MSG_MAP_PROPERTY_OK,
@@ -157,6 +160,8 @@ from app.services.messages_zh import (
     MSG_METRIC_DEFINED,
     MSG_METRIC_LIST_HEADER,
     MSG_MODEL_CONFIG_UNAVAILABLE,
+    MSG_MULTI_STEP_DEGRADE_FAILED,
+    MSG_MULTI_STEP_DEGRADE_PARTIAL,
     MSG_NO_METRICS_DEFINED,
     MSG_SPEAKER_ASSISTANT,
     MSG_SPEAKER_USER,
@@ -1056,14 +1061,28 @@ class ChatService(ChatStreamOutputMixin):
         ctx = await self._buildRoutingContext(session, dto.sessionId)
         configs = await self._listModelConfigs(session)
         if dto.modelId is not None:
-            # 用户明确选择模型：直接加载，跳过 router，不参与降级路由
+            # 用户明确选择模型：直接加载，跳过 router，不参与降级路由。
+            # 注意：显式选择按**全量**配置查找（不限可用池），否则「配置存在但
+            # 无 API key」会退化成误导性的 404「配置不存在或已禁用」。
             selected = next((c for c in configs if c.id == dto.modelId), None)
             # 既不存在（id 不匹配）也已停用（is_active=False）都视为不可用，
             # 复用既有 MSG_MODEL_CONFIG_UNAVAILABLE 消息（声明「不存在或已禁用」）。
             if selected is None or not selected.is_active:
                 raise NotFoundError(MSG_MODEL_CONFIG_UNAVAILABLE.format(id=dto.modelId))
+            routeCandidates = configs
         else:
-            selected = self._modelRouter.selectModel(configs, dto.question, ctx)
+            # 自动路由：只在「能真正构造出客户端」的配置里挑，否则超预算降级
+            # 分支的 _cheapest 会选中无 key 的最便宜配置 → 整轮失败。
+            routeCandidates = self._usableModelConfigs(configs)
+            selected = self._modelRouter.selectModel(routeCandidates, dto.question, ctx)
+        client = self._llmFactory(selected)
+        if client is None:
+            # 选中的配置无可用 API key（含各 provider 的 env 回退）：
+            # createClient 返回 None 是「无 key」的 SSOT。此前裸传给下游 →
+            # AttributeError 500；与 doc_qa（rag_qa_service）/ wiki_qa 同口径抛
+            # LLMUnavailableError（503）。流式由 processMessageStream 的
+            # DomainError 分支转结构化 error 事件。
+            raise LLMUnavailableError(MSG_LLM_UNAVAILABLE)
         contextPrompt = await self._buildContextPrompt(session, dto.sessionId, dto.history)
         fewShot = await self._buildFewShot(dto) if needFewShot else None
         valueSamples = await self._sampleValueDomains(ds, classes) if needSamples else {}
@@ -1072,13 +1091,52 @@ class ChatService(ChatStreamOutputMixin):
         featureCatalogText = await self._loadFeatureCatalogText(session)
         forcedModel = dto.modelId is not None
         return _PipelineContext(
-            ds=ds, classes=classes, configs=configs, selected=selected,
-            client=self._llmFactory(selected), contextPrompt=contextPrompt,
+            # configs 用作降级候选池（_callWithFallback）：自动路由时一并收窄到
+            # 可用池，避免主模型失败后降级到同样无 key 的配置。
+            ds=ds, classes=classes, configs=routeCandidates, selected=selected,
+            client=client, contextPrompt=contextPrompt,
             fewShot=fewShot, valueSamples=valueSamples, driftWarning=driftWarning,
             dictionaryText=dictionaryText, joins=joins, forcedModel=forcedModel,
             featureCatalogText=featureCatalogText,
             recall=recallInfo,
         )
+
+    def _usableModelConfigs(self, configs: list[LlmConfig]) -> list[LlmConfig]:
+        """筛掉无法构造客户端的配置，供**自动路由**使用。
+
+        判据复用 ``createClient``（`api_key_encrypted` 解密 → 各 provider 的 env
+        回退链的 SSOT），不二次实现 key 解析。若全部不可用则回退原列表——让
+        调用方的 None 兜底给出明确错误（503），而不是 NoAvailableModelError。
+        注意：不覆盖「key 合法但 endpoint 不可达」（如本地 ollama 未起），那类
+        失败由 `_callWithFallback` 的降级重试处理。
+
+        **逐配置隔离异常**：`createClient` 在密文非法时抛 `ConfigError`
+        （`crypto.decryptApiKey`）。本方法会遍历**每一个**配置（改动前只解密被
+        选中的那一个），若不隔离，DB 里单条密文损坏的配置（跨环境 restore 导致
+        FERNET key 不匹配、手工改库等）就会让整条自动路由路径失败——而「解不开
+        的密文」本身正是「不可用」，应当被筛掉而非抛出。
+        """
+        usable: list[LlmConfig] = []
+        unusable = 0
+        for config in configs:
+            try:
+                if self._llmFactory(config) is None:
+                    unusable += 1
+                    continue
+            except ConfigError as exc:
+                unusable += 1
+                logger.warning(
+                    "自动路由跳过配置 id=%s model=%s：%s",
+                    getattr(config, "id", None), getattr(config, "model_name", None), exc,
+                )
+                continue
+            usable.append(config)
+        if unusable:
+            logger.info(
+                "自动路由剔除 %d 个不可用的模型配置（候选 %d → %d）",
+                unusable, len(configs), len(usable),
+            )
+        return usable or configs
 
     async def _buildDriftWarning(
         self, session: AsyncSession, ds: DataSource, classes: list[Any],
@@ -1737,9 +1795,13 @@ class ChatService(ChatStreamOutputMixin):
             last_data = data
 
         # 所有步骤都不是 aggregation_only（异常），降级为普通回答
-        logger.warning("多步执行异常：无可用的 aggregation 步骤，降级走单步回答")
+        answer = await self._finalizeMultiStepDegrade(
+            session, dto, completed,
+            last_plan=last_plan, last_sql=last_sql, last_data=last_data,
+            total_cost=total_cost, _t0=_t0,
+        )
         return ChatResponse(
-            answer="多步查询执行过程中出现异常，请重试或简化您的问题。",
+            answer=answer,
             intent="multi_step",
             steps=[_step_result_to_read(s) for s in completed],
             tokensUsed=total_tokens,
@@ -1747,6 +1809,52 @@ class ChatService(ChatStreamOutputMixin):
             latency_ms=int((time.monotonic() - _t0) * 1000),
             modelName=last_model_name,
         )
+
+    async def _finalizeMultiStepDegrade(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        completed: list[StepResult],
+        *,
+        last_plan: QueryPlan | None,
+        last_sql: str | None,
+        last_data: list[dict],
+        total_cost: Decimal,
+        _t0: float,
+    ) -> str:
+        """无汇总步骤时的降级收尾：落库 + 保存查询状态，返回给用户的文案。
+
+        流式（`_streamMultiStep`）与非流式（`_executeMultiStep`）共用，避免再次
+        出现「只改一条路径」的偏差。
+
+        此前两条路径都只返回文案、**不写状态**：assistant 消息缺失（历史里留下
+        悬空的 user 轮），`last_question`/`last_sql` 停在上一轮 → 下一轮追问会
+        锚到更早的问题（静默答错）或退化成无锚点的单轮查询。文案也如实区分
+        「数据步已成功、只差汇总」与「整体失败」，前者不该说成「执行异常」。
+        """
+        succeeded = [r for r in completed if r.sql is not None]
+        if succeeded:
+            answer = MSG_MULTI_STEP_DEGRADE_PARTIAL.format(
+                done=len(succeeded), total=len(completed),
+            )
+        else:
+            answer = MSG_MULTI_STEP_DEGRADE_FAILED
+        logger.warning(
+            "多步执行异常：无可用的 aggregation 步骤，降级收尾（完成 %d/%d 步）",
+            len(succeeded), len(completed),
+        )
+        await self._storeSessionMessages(
+            session, dto.sessionId, dto.question, answer, last_sql,
+            routing_layer="L2",
+            latency_ms=int((time.monotonic() - _t0) * 1000),
+            token_cost_usd=float(total_cost),
+        )
+        await self._saveQueryState(
+            session, dto.sessionId,
+            question=dto.question, plan=last_plan, sql=last_sql,
+            resultColumns=self._columns(last_data),
+        )
+        return answer
 
     # =========================================================================
     # L3 CTE 串联引擎（Task 3.3）
@@ -3269,58 +3377,13 @@ class ChatService(ChatStreamOutputMixin):
                 sub_question=step_plan.sub_question, injection_text=injection_text,
             )
 
-            step_tokens = outcome.promptTokens + outcome.completionTokens
-            step_wasted = outcome.wasted[0] + outcome.wasted[1]
-            total_tokens += step_tokens + step_wasted
-            total_cost += self._costForSql(outcome, pc.selected)
-            last_model_name = (outcome.sqlConfig or pc.selected).model_name
-
-            if outcome.sql is None or outcome.plan is None or outcome.plan.isUnanswerable:
-                result = StepResult(
-                    step_index=step_plan.index,
-                    description=step_plan.description,
-                    sub_question=step_plan.sub_question,
-                    sql=None,
-                    error="无法回答（LLM 判定无有效查询计划）",
-                )
-                completed.append(result)
-                ctx = ctx.with_step(result)
-                yield self._stepResultEvent(result)
-                continue
-
-            data, final_sql, retry_tokens = await self._runQueryWithRetry(
-                session, dto, pc, outcome,
-            )
-            if retry_tokens[0] or retry_tokens[1]:
-                retry_cfg = outcome.sqlConfig or pc.selected
-                total_tokens += retry_tokens[0] + retry_tokens[1]
-                total_cost += self._costFor(retry_cfg, retry_tokens[0], retry_tokens[1])
-                await self._recordUsage(
-                    session, dto.sessionId, retry_cfg,
-                    retry_tokens[0], retry_tokens[1], purpose="nl2sql",
-                )
-                last_model_name = retry_cfg.model_name
-
-            self._spawnEmbedding(dto, final_sql, question=step_plan.sub_question)
-            summary = self._summarizeStepData(data)
-            result = StepResult(
-                step_index=step_plan.index,
-                description=step_plan.description,
-                sub_question=step_plan.sub_question,
-                sql=final_sql,
-                data=data,
-                summary=summary,
-            )
-            completed.append(result)
-            ctx = ctx.with_step(result)
-            last_plan = outcome.plan
-            last_sql = final_sql
-            last_data = data
-            yield self._stepResultEvent(result)
-
-        # 异常降级：所有步骤都不是 aggregation_only
-        logger.warning("多步执行异常：无可用的 aggregation 步骤，降级走单步回答")
-        yield StreamEvent(EVENT_TOKEN, {"content": "多步查询执行过程中出现异常，请重试或简化您的问题。"})
+        # 异常降级：所有步骤都不是 aggregation_only（与非流式共用收尾逻辑）
+        degrade_answer = await self._finalizeMultiStepDegrade(
+            session, dto, completed,
+            last_plan=last_plan, last_sql=last_sql, last_data=last_data,
+            total_cost=total_cost, _t0=_ms_t0,
+        )
+        yield StreamEvent(EVENT_TOKEN, {"content": degrade_answer})
         yield StreamEvent(
             EVENT_DONE,
             {
@@ -3824,10 +3887,6 @@ class ChatService(ChatStreamOutputMixin):
                     fallback.model_name, purpose,
                 )
                 raise
-
-    @staticmethod
-    def _consumedTokens(exc: Exception) -> tuple[int, int]:
-        """提取异常携带的已消耗 token；无法计量时返回 (0, 0)。"""
 
     @staticmethod
     def _consumedTokens(exc: Exception) -> tuple[int, int]:

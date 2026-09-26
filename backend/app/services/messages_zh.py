@@ -26,6 +26,16 @@ user-facing 中文字面量集中。本模块**仅含字面量**，不引入 i18
 # =============================================================================
 
 MSG_INTERNAL_ERROR = "服务内部错误，请稍后重试"
+# 解析出的模型配置无法构造 LLM 客户端（无 API key，含各 provider 的 env 回退）
+# 时抛 LLMUnavailableError（503）的文案，与 doc_qa/wiki_qa 同口径。
+MSG_LLM_UNAVAILABLE = "未配置可用的 LLM，无法回答该问题"
+
+# 多步查询降级收尾（无汇总步骤）：有数据步骤成功 / 全部失败。`{done}`/`{total}`
+# 为本轮完成的数据步骤数与总步骤数，用 str.format 注入。
+MSG_MULTI_STEP_DEGRADE_PARTIAL = (
+    "多步查询已完成 {done}/{total} 个数据步骤，但汇总分析失败，请重试或简化您的问题。"
+)
+MSG_MULTI_STEP_DEGRADE_FAILED = "多步查询执行过程中出现异常，请重试或简化您的问题。"
 # MSG_RATE_LIMITED 在 app/domain/error_messages.py（基础设施层）
 
 # 消息角色 → 中文说话人标签（MessageList 渲染使用）

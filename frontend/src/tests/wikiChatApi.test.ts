@@ -3,6 +3,8 @@
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { sendWikiChat } from "../api/wikiChat";
+import { useAuthStore } from "../stores/authStore";
+import { DEFAULT_TENANT_ID } from "../config";
 import type { WikiChatSseEvent } from "../types/wikiChat";
 
 function sseResponse(frames: string[]): Response {
@@ -22,6 +24,32 @@ function sseResponse(frames: string[]): Response {
 describe("sendWikiChat SSE parsing", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    useAuthStore.setState({ token: null });
+  });
+
+  it("登录态注入 SSOT auth headers（Authorization + X-Tenant-Id）", async () => {
+    useAuthStore.setState({ token: "test-jwt" });
+    const fetchMock = vi.fn().mockResolvedValue(sseResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await sendWikiChat({ sessionId: "s1", question: "q" }, () => undefined);
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.headers).toMatchObject({
+      Authorization: "Bearer test-jwt",
+      "X-Tenant-Id": DEFAULT_TENANT_ID,
+    });
+  });
+
+  it("未登录时不注入 Authorization", async () => {
+    useAuthStore.setState({ token: null });
+    const fetchMock = vi.fn().mockResolvedValue(sseResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await sendWikiChat({ sessionId: "s1", question: "q" }, () => undefined);
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
   });
 
   it("parses qa_meta / qa_citations / token / qa_done frames in order", async () => {

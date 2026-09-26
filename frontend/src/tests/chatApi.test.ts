@@ -9,6 +9,8 @@ const httpMock = vi.hoisted(() => ({
 vi.mock("../api/client", () => ({ httpClient: httpMock }));
 
 import { sendMessage, sendMessageStream } from "../api/chat";
+import { useAuthStore } from "../stores/authStore";
+import { DEFAULT_TENANT_ID } from "../config";
 import type { ChatRequest, ChatResponse } from "../types/chat";
 
 function sseStream(...frames: string[]): ReadableStream<Uint8Array> {
@@ -38,6 +40,21 @@ describe("api/chat", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    useAuthStore.setState({ token: null });
+  });
+
+  it("sendMessageStream 登录态注入 SSOT auth headers（Authorization + X-Tenant-Id）", async () => {
+    useAuthStore.setState({ token: "test-jwt" });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, body: sseStream() });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await sendMessageStream(makePayload(), {});
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers).toMatchObject({
+      Authorization: "Bearer test-jwt",
+      "X-Tenant-Id": DEFAULT_TENANT_ID,
+    });
   });
 
   it("sendMessage 发送到 /chat 并返回响应", async () => {

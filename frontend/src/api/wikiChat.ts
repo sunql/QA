@@ -6,6 +6,7 @@
  */
 
 import type { WikiChatEventKind, WikiChatRequestPayload, WikiChatSseEvent } from "../types/wikiChat";
+import { authHeaders } from "./authHeaders";
 
 const API_ENDPOINT = "/api/v1/wiki/chat";
 
@@ -31,10 +32,13 @@ export async function sendWikiChat(
   onEvent: (event: WikiChatSseEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  // SSE 走裸 fetch（axios 不支持流式），不经 httpClient 拦截器，
+  // 故用 authHeaders()（SSOT）注入 Authorization + X-Tenant-Id。
+  // 初版漏了这层 → 线上 POST /wiki/chat 403。
   const res = await fetch(API_ENDPOINT, {
     method: "POST",
     credentials: "include",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
     signal,
   });

@@ -77,3 +77,23 @@ useEffect(() => {
 - `datasource_id` 仍是单选（业务上下文粒度）。
 - `targetTables` / `ruleTypes` 改 `mode="multiple"` + `maxTagCount="responsive"`。
 - payload 仅在非空时传 `targetTables` / `ruleTypes` 字段；空数组走全量（后端处理）。
+
+## SSE 鉴权头 SSOT（fix-frontend-sse-auth-header）
+
+**SSOT**：`src/api/authHeaders.ts` 的 `authHeaders(extra?)` —— 有 token 时注入 `Authorization: Bearer <token>`，同时恒定注入 `X-Tenant-Id`；axios 拦截器（`src/api/client.ts`）用的是同一个函数。
+
+**为什么需要它**：SSE 是流式响应，axios 不擅长，三条链路都走**裸 `fetch`**，因此**绕过了 `httpClient` 拦截器** —— 头必须显式注入，忘记就 403。
+
+| 链路 | 调用点 |
+|---|---|
+| Chat 对话流 | `src/api/chat.ts` `sendMessageStream` |
+| 文档问答流 | `src/api/document.ts` `searchDocumentsQa` |
+| Wiki 问答流 | `src/api/wikiChat.ts` `sendWikiChat` |
+
+**用法规约**：
+
+- 新增任何 SSE 端点，一律 `headers: authHeaders({ "Content-Type": "application/json" })`，不要手写 `Authorization`。
+- 未登录（token 空）→ 只发 `X-Tenant-Id`，不发 `Authorization`（与拦截器一致）。
+- **必须有用例断言请求头**（`expect(init.headers).toMatchObject({ Authorization: ..., "X-Tenant-Id": ... })`）：`wikiChat` 当初正是因为没有任何头断言，才把「完全没注入」的 403 带到线上。
+
+**遗留**：`api/chatHistory.ts` 仍发死值 `X-User-Id`；`datasource` / `localImport` 有重复拦截器；`RoutingMetricsPage` 不发鉴权头。

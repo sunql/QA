@@ -2,7 +2,7 @@ import { httpClient } from "./client";
 import { API_BASE_URL } from "../config";
 import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, QueryPlan, SimilarQuery } from "../types/chat";
 import { i18n } from "../i18n";
-import { useAuthStore } from "../stores/authStore";
+import { authHeaders } from "./authHeaders";
 
 const BASE = "/chat";
 
@@ -168,16 +168,11 @@ export async function sendMessageStream(
   payload: ChatRequest,
   handlers: StreamEventHandlers
 ): Promise<void> {
-  // 走裸 fetch（SSE 流式 axios 不友好）；手动注入 Authorization
-  // （feat-user-auth，2026-09-20）—— 不走 httpClient 拦截器。
-  const token = useAuthStore.getState().token;
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
+  // 走裸 fetch（SSE 流式 axios 不友好）—— 不经 httpClient 拦截器，
+  // 故用 authHeaders()（SSOT）手动注入 Authorization + X-Tenant-Id。
   const response = await fetch(`${API_BASE_URL}${BASE}/stream`, {
     method: "POST",
-    headers,
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   });
 

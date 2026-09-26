@@ -28,8 +28,12 @@
 > §2.2 的 **H6**（四处 score 公式口径不一）、§2.3 的 **M3**（计划解析静默吞错 + 空计划旁路）
 > 与 **M6**（`chart_service` 重复方法与其同文件死代码）已于 2026-09-26 修复（见 §14），
 > §3 P1 第 8、9、12 项同时闭合。
-> **仍待处理**：§2.2 的 H4 / H7、§2.3 的 M4 / M5、M8–M10、以及 §2.4 / §2.5 全部。
-> **已立项待排期**：§13「残差」第 1 条（库侧只读兜底）已转为提案文件。
+> §2.2 的 **H4 / H7**、§2.3 的 **M4 / M5 / M8 / M9 / M10** 已于 2026-09-27 全部处理完毕
+> （见 §15，七项目六份 SSOT）；§3 P1 第 7 项、P2 第 11 项、P3 第 16–18 项同时闭合或改判。
+> **仍待处理**：§2.4 LOW 全部、§2.5 文档漂移的其余条目、P2 第 10 项（`config.py` 重复字段）、
+> P2 第 13/14 项（拆大文件、魔数治理）、P3 第 18 项的后半（**真正支持非 OpenAI 兼容协议** —— 本批仅落地守卫）。
+> **已立项待排期**：§13「残差」第 1 条（库侧只读兜底）已转为提案文件；§15 末尾新登记三项
+> （KPI 关键词索引的正确结构、空关键词语义判定、失败尝试的 LLM 用量采集）。
 
 ---
 
@@ -64,7 +68,7 @@
 | 能力 | 实现 |
 |---|---|
 | 两阶段生成 | 计划 → `validatePlan` 纯代码校验（`maxPlanAttempts=2`）→ SQL |
-| 4 层路由 | L1 KPI → L2 单 SQL → L3 CTE 链 → L4 Agent Loop（5 工具迭代） |
+| 路由（**3 条路径，非 4 层链**） | L1 KPI 语义匹配 → L2 LLM 单 SQL；多步子问题走独立 `_executeMultiStep`（同记 `routing_layer="L2"`）；L4 Agent Loop（5 工具迭代）由 `IntentType.AGENT_RUN` **单独触发**。~~L3 CTE 链~~ **不存在**（2026-09-27 删；2026-09-27 前也从未接线） |
 | SQL Guard | `business_db_pool._assert_read_only` + `_assertNoHiddenWrites`，仅 SELECT/WITH |
 | 派生指标 | formula 必填校验（占比/比率/ratio/percent…） |
 | 范围感知行数 | `_applyScopeRowLimit`：有范围不截断、无范围兜底 100 |
@@ -138,10 +142,10 @@
 | H1 | **全局过滤抽取 LLM 调用不计量**。`extract_global_filters` 直调 `client.complete` 但只返回 `GlobalFilters`（无 token 数）；`_resolveGlobalFilters` 写 0-token 假 marker，注释「token 已计到 plan/split 路径」**与实际不符**。 | ✅ **已修复**（2026-09-26，见 §8） | `step_query_planner.py:201-214`、`chat_service.py:1879` |
 | H2 | **L4 Agent Loop 不写 session_token_usage**。`run_agent_loop` 每次迭代 `complete_with_tools` 不计量，只用**硬编码 gpt-4o-mini 价格**估算 USD，token 数丢失。 | ✅ **已修复**（2026-09-26，见 §8） | `agent_runtime_service.py:327-336`、`chat_service.py:758` |
 | H3 | **历史注入无 token/字符预算**。`_buildContextPrompt` 全文拼接 `session_message.content` + `[SQL:...]`，无截断；一条超长 SQL/答案会无限膨胀后续每次 NL2SQL + answer prompt。 | ✅ **已修复**（2026-09-26，见 §12） | `chat_service.py:4124-4144` |
-| H4 | **客户端断连无处理**。`CancelledError`（`BaseException`）不被任何 `except` 捕获；`_storeSessionMessages` 只在流尾执行，断连即丢整轮（无部分答案、无历史落库）。 | ⬜ 待处理 | `chat.py:59-67`、`chat_service.py:2904-2922`、`3303` |
+| H4 | **客户端断连无处理**。`CancelledError`（`BaseException`）不被任何 `except` 捕获；`_storeSessionMessages` 只在流尾执行，断连即丢整轮（无部分答案、无历史落库）。 | ✅ **已修复**（2026-09-27，见 §15） | 实际位置：SSE 路由 `app/api/v1/chat.py:46`（`StreamingResponse` 在 `:80`）；生成器 `chat_service.py:3222`（`processMessageStream`）→ `:3439`（`_streamQuery`）；流内落库点 `:3744`/`:3750`（单步）与 `:3902`/`:3908`（多步）；`_storeSessionMessages:4717`。**原行号（`2904-2922`/`3303`）已过期** |
 | H5 | **向量失败静默降级到全 schema**。类召回异常回退 `return list(allClasses)`，**不过滤 ODS、不截断 max**——正是召回剪枝要解决的老问题在 Milvus/embedding 挂掉时原样回来。 | ✅ **已修复**（2026-09-26，见 §12） | `chat_service.py:1269-1280`、`1352-1359` |
 | H6 | **3 处 score 公式不一致（DRY 违反）**。`embedding_service`/`ontology_service` 有 `round(,4)` + `max(0)`；`wiki_vector_service` 无 round；`rag_service` 无 `max(0)` 无 round——负距离得 score>1，缺 `distance` 键直接 `KeyError`。 | ✅ **已修复**（2026-09-26，见 §14） | `embedding_service.py:29-31`、`ontology_service.py:1198`、`wiki_vector_service.py:264`、`rag_service.py:299` |
-| H7 | **provider_type 死元数据**。`embedding_provider_factory` 从不读 `provider_type`，全部当 OpenAI 兼容；维度守卫只对 DB-provider 路径生效，env 回退路径不校验。 | ⬜ 待处理 | `embedding_provider_factory.py:48-61` |
+| H7 | **provider_type 死元数据**。`embedding_provider_factory` 从不读 `provider_type`，全部当 OpenAI 兼容；维度守卫只对 DB-provider 路径生效，env 回退路径不校验。 | ✅ **已修复**（2026-09-27，见 §15）。⚠️ **含一处已知残留**：当前生产 `.env` **未声明** `EMBEDDING_DIMENSION` ⇒ env 回退路径的维度守卫在生产现状下**仍不生效**，只记 warning（「不猜测模型维度」口径的必然代价，`.env.example` 已给出声明位） | `embedding_provider_factory.py:140-200`（`_assertProviderTypeKnown:140` / `_assertDimensionMatches:160` / `_assertEnvFallbackDimension:180`）；**原行号 `48-61` 已过期** |
 | H8 | **doc_qa 不写 token ledger**（wiki_qa 写），违反「每次 LLM 调用必须计量」约束；且无命中时 doc_qa 存 `citations=[]` 而 wiki_qa 存真实 citations，行为不一致。 | ✅ **已修复**（2026-09-26，见 §8） | `wiki_qa_service.py:215-224` vs `rag_qa_service.py:161-162` |
 | H9 | **成本单位不一致**。`supplier_risk_service._generateRiskPoints` 用硬编码 **CNY** 0.001/0.002，系统其余用 config 的 **USD**。 | ✅ **已修复**（2026-09-26，见 §8） | `supplier_risk_service.py:275-280` |
 
@@ -161,13 +165,13 @@
 | M1 | ~~**SQL Guard 侧信道函数未覆盖**：缺 `pg_sleep`/`pg_advisory_lock`/`dblink`/`SLEEP`/`BENCHMARK`/`LOAD_FILE`/`UTL_HTTP`；sqlparse 跳过 `Literal/Comment` 的隐患。~~ ✅ **已修复（2026-09-26，见 §13）**。<br>⚠️ **同行的「`INTO` 过度拦截（含良性 `SELECT…INTO`）」经实测修正**：四种 `INTO` 子句形态（PG 建表 / MySQL `OUTFILE` / 变量赋值 / 尾随）全部**应当拒**；唯一被误拒的合法形态是「未加引号的 `AS into` 别名」（PG 实测接受），属安全闸门应有的过拦偏向，**不改**（见 §13 决策原则）。 | `business_db_pool.py` |
 | M2 | ~~**SQL Guard 拒绝反馈不具体**：LLM 只见「未通过安全校验」，无法自愈守卫违规。~~ ✅ **已修复（2026-09-26，见 §13）**。 | `nl2sql_service.py:2076-2082` |
 | M3 | ~~**`QueryPlan.from_dict` 吞所有解析错误**：损坏输入静默变空 tuple，掩盖根因（文档明言「绝不抛错」）。~~ ✅ **已修复**（2026-09-26，见 §14）。**并额外修掉一个真实旁路**：返回非 None 的空计划既不入重试也不写日志，直接进 `generateSql`（空计划无引用可校验 ⇒ 能过 `validatePlan` ⇒ 模型可自由编造表名）。 | `query_plan.py:203-206` |
-| M4 | **无同模型瞬态重试**：`generateQueryPlan`/`generateSql` 内部不捕获瞬态 LLM 异常，只靠模型 fallback（换模型≠同模型重试）。 | `nl2sql_service.py:1608`、`2039` |
-| M5 | **L3 CTE 引擎是死代码**：`_executeChainedSteps`/`_executeSingleChainedStep` 仅测试引用，无生产接线，且含未计量 LLM 调用。 | `chat_service.py:1935-2023` |
+| M4 | ~~**无同模型瞬态重试**：`generateQueryPlan`/`generateSql` 内部不捕获瞬态 LLM 异常，只靠模型 fallback（换模型≠同模型重试）。~~ ✅ **已修复（2026-09-27，见 §15）**。判定逻辑抽出叶子模块 `app/services/llm_retry_policy.py`（不得 import `chat_service`，否则成环），两个方法在**各自现有的 `for attempt` 循环内**接 `_completeWithTransientRetry`；**并顺带修掉一个比原文更严重的计量盲区**：瞬态异常从循环**裸逃逸**时，前几轮**已累加**的 token 被静默丢弃（第 1 轮成功 3000/500 + 第 2 轮抛出 ⇒ 3500 凭空消失）—— 现改为把已累加用量挂到逃逸异常上。预算按实测收敛为**仅首轮允许额外一次**（`allowRetry = attempt == 0`），最坏 `(maxRetries+1)+1 = 4`，不再「每轮翻倍」。 | 实际接缝 = `nl2sql_service.py:1695`（plan）、`:2157`（sql）两处 `completeWithTransientRetry(...)`（模块 `app/services/llm_retry_policy.py`）；**原行号 `1608`/`2039` 已过期** |
+| M5 | ~~**L3 CTE 引擎是死代码**：`_executeChainedSteps`/`_executeSingleChainedStep` 仅测试引用，无生产接线，且含未计量 LLM 调用。~~ ✅ **已删除（2026-09-27，见 §15）**。按用户口径只删引擎、**保留 `prior_cte` 能力**（`chained_step_plan.py` 的 `render_prior_cte` 留作纯函数工具，契约定为 **WITH-less 片段**，见 M8）；同时保留活代码 `_summarizeStepData`（现 `:2416`，调用点 `:1282`/`:2238`/`:3781`）。**未采纳「接线」那半句**：该引擎唯一的能力（跨步 CTE 串联）已由 `prior_cte` 注入承担，接线是重复实现。 | 删除前位置 `chat_service.py:2455-2495`（`_executeChainedSteps`）、`:2498-2543`（`_executeSingleChainedStep`）（**现已不存在**）；**原行号 `1935-2023` 已过期**；同批删除 `app/tests/services/test_l3_chained_steps.py` 与三处导入 |
 | M6 | **重复定义**：`_buildOptionPrompt` 两次（`chart_service.py:121/226`，同名同签名同注释，后者静默覆盖前者——前一份是死代码）。<br>⚠️ **2026-09-26 复核修正**：本行原写「`_consumedTokens` 两次（`chat_service.py:4048/4052`）」**不成立**——当前只剩一个定义（`chat_service.py:4249`），行号也对不上；评估当日应是笔误或事后已清理。 | ✅ **已修复**（2026-09-26，见 §14）。同文件死代码：2 处 F401 未用导入 + 零调用的 `_inferColumnType`（单数；活的是复数 `_inferColumnTypes`）+ I001；**并新增常驻 AST 守卫**（Python 对类体重复方法零告警，这类腐化只能靠守卫拦住）。 | `chart_service.py:121`、`226` |
 | M7 | ~~**`_runQueryWithRetry` 丢弃第二次错误详情**~~ ✅ **已修复（2026-09-26，见 §11）**。修复分两批：①C3/C4 批（见 §9）让重试的**新错误**进日志、重试生成的 token 在多步路径落账；②本批把二次失败**详情与用量挂到上抛异常私有属性**上（`_attachRetryFailure` / `_attachRetryGenTokens`，不改异常类型/消息），单步两条路径 + 多步路径都落账，用户可见步骤文案改为「首次：…；重试…：…」（两段各自脱敏 + 各自限量）。**同时闭合了复审发现的第三个漏点**：重试**生成自己失败**时 `Nl2SqlError.tokens` 此前无人取用 ⇒ 该次调用白花。 | `chat_service.py` `_runQueryWithRetry` / `_stepFailedError` / `_accountRetryGenUsage` |
-| M8 | **`prior_cte` 契约不一致**：docstring 说可无 `WITH`，但 `_assert_read_only` 会拒绝无 `WITH` 形式（当前仅 `render_prior_cte` 输出可过，潜伏）。 | `nl2sql_service.py:414-416` vs `business_db_pool.py` |
-| M9 | **Milvus 16384 上限**：`listAllEmbeddings` 截 16384，超量后对账 diff 会算错（无 guard）。 | `milvus_client.py:245-265` |
-| M10 | **KPI 缓存线性扫描**：`findByAnyKeyword` O(keywords×catalog) 无倒排索引，随目录增长退化。 | `kpi_match_cache.py:79-87` |
+| M8 | ~~**`prior_cte` 契约不一致**：docstring 说可无 `WITH`，但 `_assert_read_only` 会拒绝无 `WITH` 形式（当前仅 `render_prior_cte` 输出可过，潜伏）。~~ ✅ **已修复（2026-09-27，见 §15）**。⚠️ **本行原文的因果方向是反的**（实测更正）：不是「拒绝无 `WITH` 形式」，而是**放过重复 `WITH`** —— `render_prior_cte` 产出带前导 `WITH` 的片段，`generateSql` 又拼一次 `f"WITH {prior_cte}"` ⇒ `WITH WITH ...`；`_assert_read_only` **只看首个 token**（`WITH` 在白名单）故**放行**，到库侧才报语法错，再被 `chat_service` 的宽 `except Exception` 吞成 `success=False`（用户只看到「查不出来」）。修法：**WITH-less 片段**成为唯一合法形态（`render_prior_cte` 不再自带头 `WITH`），入口 `_assertPriorCteSafe` **显式拒绝**带前导 `WITH` 的入参；`_assert_read_only` **无法**复用于该片段（无 `WITH` 时首 token 是 CTE 别名），故单独校验（`WITH <片段> SELECT 1` 试跑）。 | 实际位置 `nl2sql_service.py:2195`（唯一 `WITH` 拼装点）、`_assertPriorCteSafe:488`（调用点 `:2142`）、`_renderPriorCtePart:461`（docstring）、`chained_step_plan.py:64`（`render_prior_cte`）；**原行号 `414-416` 已过期** |
+| M9 | ~~**Milvus 16384 上限**：`listAllEmbeddings` 截 16384，超量后对账 diff 会算错（无 guard）。~~ ✅ **已修复（2026-09-27，见 §15）**。⚠️ **本行原文低估了破坏力**（实测更正）：截断结果有两个**破坏性**消费者 —— ① `scripts/backfill_milvus_embeddings.py --cleanup` 走**删集重建**，从截断结果重建 ⇒ 窗口外向量**永久丢失**（不是少读一次，是删掉且不再写入）；② `ontology_service` 对账把窗口内外的「仍存在」判为缺失并反复插入 ⇒ **永不收敛**。改 `Collection.query_iterator` 迭代取全量（签名与字段集不变，两个消费者零改动）。**规模实测（诚实标注）：四个集合当前 7264 / 561 / 17 / 43，全都远低于 16384** ⇒ 本项修的是**潜伏的悬崖，不是正在发生的事故**；但 7264 距 16384 已不远、修复成本低、破坏力大，故按真缺陷处理。 | 实际位置 `milvus_client.py:250`（`listAllEmbeddings`）、`:278`（新增 `_queryAllRows`，整数倍 warning 在 `:312`）、`:40`（`_MILVUS_QUERY_PAGE`）；**原行号 `245-265` 已过期**；兄弟函数 `:570`/`:716` 的 `limit=` 属 **expr 受限的合法护栏**（已用代码骨架计数复验），保留 |
+| M10 | ~~**KPI 缓存线性扫描**：`findByAnyKeyword` O(keywords×catalog) 无倒排索引，随目录增长退化。~~ ✅ **已处理（2026-09-27，见 §15）—— 改判：放弃倒排索引实现，改为对真实实现的差分属性测试**。**准入前压测推翻本行的前提**（三条实测）：① **收益为零** —— 真实目录只有 **13 个 KPI / 约 50 个关键词**，线性扫描本就亚毫秒级，买不到任何**可测**收益；② **代价是两处静默偏离** —— 空关键词 `""`（`"" in s` 恒真）旧实现命中**全部** KPI，子串索引永远不含 `""` ⇒ 恒返回 `[]`；`refreshOne`/`onKpiChanged` 只改 `_by_keyword`、索引**不重建** ⇒ 改动过的关键词**漏匹配** + 未改动的关键词**顺序漂移**；③ **不 scale** —— 500 关键词 × 30 字实测 **+42.3 MB** 纯索引开销（5,000 关键词约 420 MB）。本条目下**真正缺的是覆盖**：现有测试用的全是**自行重写另一套算法的桩**（`test_kpi_semantic_match_service.py::_StubCache`：外层遍历 KPI、命中即 `break`，按目录序），而真实顺序是「用户关键词外层 × `_by_keyword` **插入序**内层」⇒ **真实顺序零覆盖** —— 这才是该修的风险（下游 `kpi_semantic_match_service` 按 Jaccard 排序，同分时**顺序即结果**）。**prod 校准**：`kpi_catalog` 12 个 KPI 的 `semantic_keywords` **全为 NULL** ⇒ 该快路径在生产上目前**是惰性的**（任何关键词查询命中 0 条）。**未采纳的两项**：不改任何生产代码（纯 `test:`）；不顺手改「`[""]` 命中全部」这个怪癖（属**语义判定**，需产品判断，已登记为独立条目）。 | 实际位置 `kpi_match_cache.py:68-87`（`findByAnyKeyword`）、`:116-138`（`onKpiChanged`）、`:140-169`（`refreshOne`）；**原行号 `79-87` 是函数中段**；新增测试 `app/tests/unit/test_kpi_match_cache.py`（363 行，17 例） |
 
 ### 2.4 LOW —— 优化项
 
@@ -183,7 +187,9 @@
 | `nl2sql-engine.md` 写「5 类活跃意图」 | 实际 `IntentType` 已 13 类（新增 supplier_360/risk/graph_reasoning/agent_run 等 4 条领域拦截路径） |
 | `IntentType` docstring 写「DEFINE/MAP/METRIC 暂未接入流水线」 | 实际已接入 `_handleDefineMetric/_handleDefineClass/_handleShowMetric/_handleMapProperty` |
 | `config.py` Settings 字段重复定义 | `bcryptRounds`(12 vs 10)、`jwtSecret`、`jwtTtlSeconds`(3600 vs 86400)、`dbPoolSize`、`authMinDelayMs` 均定义两次且默认值不同，后者覆盖前者 |
-| `nl2sql-engine.md` 4 层路由「L3 有触发条件」 | 实际 L3 `_executeChainedSteps` 无生产调用者，是死代码 |
+| ~~`nl2sql-engine.md` 4 层路由「L3 有触发条件」~~ | ✅ **已更正（2026-09-27，见 §15）**。原文「L3 `_executeChainedSteps` 无生产调用者」属实，但结论应是**删掉它**而不是「补触发条件」：该引擎已随 M5 删除（引擎整段 + 其测试），**保留**的是跨步 CTE 的**能力**——由 `prior_cte` 片段注入承担（契约见 §2.3 M8）。现状：L1 意图路由 / L2 单步 plan / L4 Agent Loop 活跃，**L3「CTE 串联引擎」不再作为独立层存在**，`nl2sql-engine.md` 与 `architecture.md` 已同步改写 |
+| **`routing_layer` 从不写 `L3`**（本批复核发现，与上一行同源） | 生产代码只写 `L1`（`chat_service.py:808`）/ `L2`（多处）/ `L4`（`:1005`）⇒ `RoutingMetricsPage` 的 **L3 桶恒为 0**，而前端 i18n 仍把它标成「L3 多步链式推理」（`frontend/src/i18n/zh-CN.ts:2623`）、`types/routingMetrics.ts:9` 仍注释为 `ChainedStep CTE multi-step chain`。**多步链实际记在 `L2`**（`_executeMultiStep` 路径）。属**产品可见**的展示漂移：本批**只记录不改**（改前端需重建镜像，超出本批范围，已登记 §15 残差） |
+| **`nl2sql-engine.md` 的「L2 可选 CTE 增强：`plan.requiresCte=True`」** | **代码中不存在**（`requiresCte` 全树零命中）——设计文档遗留。真实的 `prior_cte` 是**显式形参**，契约见 §2.3 M8。同批更正的还有：`app/services/agent_loop.py` **不存在**（实为 `agent_runtime_service.py:593`）、迁移文件名应为 `0051_add_routing_metrics_fields.py`、`multi_step_plan.py` 的真实路径是 **`app/domain/multi_step_plan.py`**（`services/` 下无此文件） |
 
 ---
 
@@ -218,7 +224,11 @@
    ✅ **已完成（2026-09-26）**，见 §12。**未采纳本行的 `_clip_text` 复用建议**：`_clipText`
    是头裁，而这里要保的是**最新**轮次（追问锚点），头裁会把最新一轮切掉 —— 改为「单条限量
    + 从最新往回保留整块」。
-7. **H4 断连处理**：捕获 `CancelledError`，持久化已产出的部分答案与消息，落库后再退出。
+7. ~~**H4 断连处理**：捕获 `CancelledError`，持久化已产出的部分答案与消息，落库后再退出。~~
+   ✅ **已完成（2026-09-27）**，见 §15。**未采纳本行的「捕获 `CancelledError`」**：运行时实验证明**主情形（断连时生成器停在 `yield` 上）根本不进生成器帧** ——
+   `except CancelledError` 与 `finally` **都不触发**（推迟到 asyncgen 终结器）；且 anyio 取消是**电平触发**，
+   `await asyncio.shield(...)` 必立刻抛 ⇒ shield 也不行。改落在 **Starlette 现成的确定性钩子**
+   `StreamingResponse(background=...)`（它在收敛任务组**之外**被 await），配**单发标志**去重。
 8. ~~**H6 score 公式统一**：抽一个 `distanceToSimilarity(d)` 单源函数，四处复用；~~
    ✅ **已完成（2026-09-26）**，见 §14。**未采纳本行的「缺 score 键时显式按 0 处理」**：
    `distance` 缺失是上游契约违背（Milvus hit 必带距离），按 0 兜底会算成 `score=1.0` 的
@@ -233,8 +243,17 @@
 10. **文档-代码对齐**（§2.5 全部）：更新 `nl2sql-engine.md`/`architecture.md`/`agent-loop.md`
     的 `sql_guard.py` 引用与 13 类意图；修正 `IntentType` docstring；收敛 `config.py`
     重复字段定义。
-11. **M5 死代码清理**：L3 CTE 引擎要么接线（承接 `requiresCte` 场景）要么删除，
-    避免带未计量 LLM 调用的死代码长期驻留。
+    ⏳ **部分完成（2026-09-27，见 §15）**：本次 docs 提交修掉 `nl2sql-engine.md` 的 L3 行、
+    **对不存在的 `app/services/multi_step_plan.py` 的引用**、`prior_cte` 契约，
+    以及 `architecture.md` 的 4 层路由现状。
+    **仍挂账**：`config.py` 重复字段定义（`bcryptRounds`/`jwtSecret`/`jwtTtlSeconds`/`dbPoolSize`/
+    `authMinDelayMs` 各定义两次且默认值不同、后者覆盖前者）；`sql_guard.py` 引用与
+    `IntentType` docstring 未在本批复核（未确认是否仍漂移）。
+11. ~~**M5 死代码清理**：L3 CTE 引擎要么接线（承接 `requiresCte` 场景）要么删除，
+    避免带未计量 LLM 调用的死代码长期驻留。~~
+    ✅ **已完成（2026-09-27）**，见 §15（用户口径：**删引擎、保能力**）。**未采纳「接线」那半句**：
+    跨步 CTE 能力已由 `prior_cte` 注入承担，接线等于重复实现；且该引擎含未计量 LLM 调用，
+    接线会把计量盲区一起复活。
 12. ~~**M6 重复定义清理**：只剩 `_buildOptionPrompt` 一处（`_consumedTokens` 经 2026-09-26 复核
     已无重复，见 §2.3 M6 修正）。~~ ✅ **已完成（2026-09-26）**，见 §14（含同文件死代码与
     常驻 AST 守卫 `test_no_duplicate_methods.py`）。
@@ -247,9 +266,23 @@
 
 15. **类召回升级**（`nl2sql-engine.md` 已记录，勿提前）：调大 topK / 多路召回 /
     两阶段检索（宽召回 50 → LLM/cross-encoder 精排 30）。
-16. **M9 Milvus 16384 上限**：分页对账或加 guard 断言。
-17. **M10 KPI 倒排索引**：catalog 增长后 `findByAnyKeyword` 换倒排。
-18. **H7 provider_type 生效**：真正支持非 OpenAI 兼容 embedding provider。
+16. ~~**M9 Milvus 16384 上限**：分页对账或加 guard 断言。~~
+    ✅ **已完成（2026-09-27）**，见 §15（提前完成）。**未采纳「加 guard 断言」**：断言只能让截断
+    **可见**，不能修正结果 —— 而截断结果的消费者之一会**删集重建**（窗口外向量永久丢失）⇒
+    必须改成**迭代取全量**。规模实测四个集合 7264 / 561 / 17 / 43 均远低于上限 ⇒
+    修的是**潜伏的悬崖**（已在 §2.3 M9 标注）。
+17. ~~**M10 KPI 倒排索引**：catalog 增长后 `findByAnyKeyword` 换倒排。~~
+    ✅ **已改判关闭（2026-09-27）**，见 §15。压测推翻前提（13 KPI 无可测收益 / 两处静默偏离 /
+    500×30 字 +42.3 MB 不 scale）⇒ 改为对**真实 `KpiMatchCache`** 的差分属性测试
+    （补的才是真缺口：真实候选项顺序零覆盖）。若将来目录规模真的上来，正确结构是
+    **Aho-Corasick / 后缀自动机**，不是子串枚举（最小正确形态已存档于 SSOT §6）。
+18. ~~**H7 provider_type 生效**：真正支持非 OpenAI 兼容 embedding provider。~~
+    ✅ **已改判关闭（2026-09-27）**，见 §15 —— **前半已修、后半明确不做**：
+    「未知 `provider_type` 静默当 OpenAI 兼容」这个**静默腐化**已修（已知集合校验 + fail-fast +
+    维度守卫覆盖 env 回退）；而「**真正支持**非 OpenAI 兼容协议」按用户口径**不做** ——
+    没有可验证的端点与协议文档时实现出来是猜的（**不发明协议**），该限制已写进模块 docstring
+    与 `ConfigError` 文案。**残留**：生产未声明 `EMBEDDING_DIMENSION` ⇒ env 路径守卫仍只记 warning
+    （见 §2.3 H7 状态列）。
 
 ---
 
@@ -1001,3 +1034,104 @@ ACCEPT  SELECT "into" FROM t / SELECT into_col FROM t            ← 引号标�
 1. **半空计划闸门**（见上表 #5）⇒ 提案文件，未排期；
 2. `logger.warning(…, exc)` 不截断（§13 残差第 3 条，LOW）仍挂账；
 3. Milvus 两个 round-trip 用例的自清理缺陷（本批实测出，见上）。
+
+---
+
+## 15. 修复记录：H4 + M4 + M5/M8 + H7 + M9 + M10（2026-09-27）
+
+本批**一次做完评估剩余的全部 7 项**（用户指定范围）：§2.2 **H4**（断连落库）、**H7**（嵌入
+provider 守卫）、§2.3 **M4**（同模型瞬态重试）、**M5**（L3 死代码）、**M8**（`prior_cte` 契约）、
+**M9**（Milvus 全量读）、**M10**（KPI 缓存）。**§3 P1 第 7 项、P2 第 11 项、P3 第 16–18 项同时
+闭合或改判**（见 §3 各项内的说明）。
+
+### 四条已定口径（用户决策，实现严格照此）
+
+1. **M5 边界 = 删引擎、保能力**：删 `_executeChainedSteps` / `_executeSingleChainedStep` + 其测试，
+   **保留** `prior_cte` 能力并按「契约 = WITH-less 片段」修（即 M8 的修法）；
+2. **H4 语义 = 落「已产出的部分答案」+ 标记中断**（新增 `session_message.interrupted`）；
+3. **M4 接缝 = 放在 `generateQueryPlan` / `generateSql` 各自现有的 `for attempt` 循环内**；
+4. **H7 深度 = 守卫 + 未知类型 fail-fast，不发明无法验证的协议**。
+
+### 三项准入前压测结论（推翻/更正了评估原文）
+
+| # | 评估原文的说法 | 压测实测 |
+|---|---|---|
+| 1 | H4「捕获 `CancelledError`，落库后再退出」 | **抓不到主情形**：断连时生成器多数**停在 `yield` 上**，取消根本**不进生成器帧** ⇒ `except CancelledError` 与 `finally` **都不触发**；且 anyio 取消是**电平触发**，`await asyncio.shield(...)` 必立刻抛（shield 保护内层任务，不是你 await 它的能力）⇒ 改落在 `StreamingResponse(background=…)` |
+| 2 | M8「`_assert_read_only` 会拒绝无 `WITH` 形式」 | **因果方向是反的**：实际是**放过重复 `WITH`** —— `render_prior_cte` 自带前导 `WITH`、`generateSql` 又拼一次 ⇒ `WITH WITH …`；`_assert_read_only` 只看首个 token（`WITH` 在白名单）故放行 → 库侧语法错 → 被宽 `except Exception` 吞成 `success=False` |
+| 3 | M10「随目录增长退化，换倒排索引」 | **前提不成立**：真实目录 13 KPI / 约 50 关键词，线性扫描亚毫秒 ⇒ 无可测收益；索引反而引入两处**静默偏离**（`""` 语义、写路径不重建）+ 500×30 字 **+42.3 MB** ⇒ **改判**为差分属性测试 |
+
+另有两处**比评估原文更严重**的发现，本批一并处置：**M4 的计量盲区**（瞬态异常裸逃逸时，
+前几轮**已累加**的 token 被静默丢弃 —— 第 1 轮成功 3000/500 + 第 2 轮抛出 ⇒ 3500 凭空消失）；
+**M9 的破坏力被低估**（截断结果驱动 `--cleanup` 的**删集重建** ⇒ 窗口外向量永久丢失；
+驱动对账 ⇒ 永不收敛）。
+
+### 根因与修法
+
+| 项 | 根因 | 修法 | SSOT |
+|---|---|---|---|
+| H4 | `_storeSessionMessages` 只在流尾执行；断连走「生成器不在任务栈上」的路径，**任何 `except`/`finally` 都抓不到** | `StreamPersistState` 每请求持有器（挂 `session.info`，状态变化处**就地赋值**）+ **单发标志**（成功落库后置位）；SSE 路由改 `StreamingResponse(background=BackgroundTask(persistIfInterrupted))`（在收敛任务组**之外**被 await，断连时确定跑到，且此时请求 session 仍开着）；新迁移 `0085_session_message_interrupted`（`interrupted BOOLEAN NOT NULL DEFAULT false`，历史行天然 false；`_storeSessionMessages` 以**关键字专用参数**扩展 ⇒ 27 个调用点零改动） | [`fix-chat-disconnect-persistence`](../changes/fix-chat-disconnect-persistence/summary.md) |
+| M4 | 瞬态异常从 `for attempt` 循环**裸逃逸**，已累加用量无人取用；判定逻辑散落在 `chat_service` 内 | 抽叶子模块 `app/services/llm_retry_policy.py`（**不得 import `chat_service`**，否则经 `nl2sql_service` 成环；AST 探针验证 imports 集合）；两个方法接 `_completeWithTransientRetry(…, allowRetry=attempt == 0)`，**逃逸前把已累加用量挂到异常上**；既有契约（`_callWithRetryBackoff` 重试**任何** `LlmClientError`，由调用方过滤）**原样保持** | [`fix-llm-transient-retry`](../changes/fix-llm-transient-retry/summary.md) |
+| M5 | L3 CTE 引擎无生产接线，且含**未计量** LLM 调用 | 删引擎两函数 + 段注释 + 三处导入 + 整份 `test_l3_chained_steps.py`；**保留** `_summarizeStepData`（活代码）与 `chained_step_plan.py`（`render_prior_cte` 留作纯函数工具）。⚠️ 如实标注：删除后 `prior_cte` 形参**也无生产调用者**（唯一调用方就是被删的引擎）⇒ 保留的是**能力**而非**层**，由 `test_prior_cte_contract.py` 钉死契约（见 §15 残差第 1 条） | [`chore-l3-deadcode-and-prior-cte-contract`](../changes/chore-l3-deadcode-and-prior-cte-contract/summary.md) |
+| M8 | 契约自相矛盾 ⇒ `WITH WITH` 地雷，且守卫**放行**（首 token 白名单） | WITH-less 成为**唯一**合法形态：`render_prior_cte` 去掉前导 `WITH`；入口 `_assertPriorCteSafe` **显式拒绝**带 `WITH` 的入参（可操作消息）；docstring 二义表述删除；新增守卫测试（拼装后**恰好一个**前导 `WITH` + `not "WITH WITH"`） | 同上 |
+| H7 | `provider_type` 是**死元数据**；维度守卫只覆盖 DB 路径，env 回退分支**在守卫之前 `return`** | `KNOWN_PROVIDER_TYPES`（取**前端枚举**为源）→ 未知/空值 `ConfigError`；`_assertDimensionMatches(*, name, declaredDimension, source)` 提为两条路径共用；env 未声明时 `logger.warning`（**不猜测**模型维度 —— 猜错会拦下正确部署） | [`fix-embedding-provider-type-guard`](../changes/fix-embedding-provider-type-guard/summary.md) |
+| M9 | `query(limit=16384)` 超限**静默截断**，两个消费者都把它当「全量」 | `_queryAllRows` 走 `Collection.query_iterator`（`close()` 在 `finally`，累计行数**恰为批大小整数倍**时 warning 留痕）；常量收敛 `_MILVUS_QUERY_PAGE`；**可注入 `iteratorFactory`** 让单测不依赖真 Milvus | [`fix-milvus-list-all-pagination`](../changes/fix-milvus-list-all-pagination/summary.md) |
+| M10 | **改判**（见上）：真缺口是「真实实现的候选顺序**零覆盖**」 | 对**真实** `KpiMatchCache` 建**差分**校验（测试侧朴素实现独立复算匹配规则 + 顺序规则再逐条比对，**不是**把缓存输出抄成期望值）；钉死两条现状语义（`[""]` 命中全部、`refreshOne` 尾移怪癖）；**零生产代码改动** | [`test-kpi-match-cache-ordering`](../changes/test-kpi-match-cache-ordering/summary.md) |
+
+### H4 的诚实边界（写进 SSOT，不作为验收项）
+
+- **不做 token 回填**：答复 token 只在 `isDone` 终块上有（非终块由 `openai_client` 发
+  `promptTokens=0, completionTokens=0`）⇒ 断连时刻**部分答案的 token 数根本不存在**，
+  「补记」等于编数。中断轮的用量按**未知**处理（成本是**诚实的下界**），不伪造 0；
+- **明确不保证**：进程被杀/容器停止**中途**的写入；客户端「中断后立刻重试」与后台写入的**竞态**
+  —— 幂等性**不得**建立在「取消时的写入一定已落库」之上。
+
+### 验证（全部可复现，2026-09-27）
+
+- **真机断连验证（H4 唯一不能只靠单测的一项）**：真实 SSE 请求中途断连 ⇒ 库中该轮 user +
+  assistant 行存在、`interrupted = true`、`query_state` 已写；**对照正常跑完的一轮**：
+  `interrupted = false` 且**无重复行**（单发标志生效）。迁移时回填 636 行，现共 640 行、
+  1 行为 `interrupted`；
+- **容器内真机探针**（跑在**部署物**上，非本地）：综合 `probe_batch.py` **28/28**（含 H4 段与
+  H7 的 9 项）、`probe_m4.py` **12/12**（含「逃逸异常必须带 3000/500 而非 0/0」）、
+  `probe_m9_diff.py` **4/4**（`listAllEmbeddings` vs `batch_size=7` 两条独立路径**逐行等集等序**）、
+  `probe_m10.py` **15/15**；
+- **测试**：全量 unit + services **`2 failed, 2522 passed, 1 skipped`**（两条为**预存**失败，
+  用 `git worktree add --detach` 在基线复现判别 ⇒ **delta = 0**）；集成切片 **120 passed** +
+  3 例环境耦合（导出 `DATABASE_URL` 后 3/3 通过）；前端 **58 passed** + 新 bundle `index-suiR3M4D.js`；
+- **静态检查**：本批 22 文件 ruff **与基线逐行一致**（唯一 F841 为**基线既有**，未顺手修）；
+- **部署一致性**：`./scripts/deploy_backend.sh`（含 `alembic/`）⇒ 仓库 ↔ 容器 md5
+  **22/22 现存文件 MATCH**，1 处 DIFF 是**有意删除**的 `test_l3_chained_steps.py`；
+  网关 `8000` 直连与经 nginx `5173` 的 `/api/v1/health` **均 200**。
+- ⚠️ 顺序：**先集成切片、再全量 unit**（全量会 truncate 测试库）。
+
+### 探针自身的缺陷（同一根因踩了三次，记入教训）
+
+三个探针首跑各有 FAIL，**全部是断言缺陷而非产品缺陷**，且根因同一个：
+**「文档提到旧写法」≠「代码还在用旧写法」** —— 对源文件做**子串计数**会把
+**注释/docstring 里对被删模式的说明**判成违规（M4 命中新模块 docstring 里自己写的禁令；
+M9 先命中兄弟函数的合法 `limit=`，再命中函数体内**正在解释这条改动**的 docstring）。
+修法一律改对**代码骨架**断言（AST 取函数体 + `tokenize` 剥离 STRING/COMMENT）。
+另有一处是**数据不符**：M10 探针假设「prod 目录有关键词」，而实际 `semantic_keywords` **全为 NULL**
+⇒ 改为数据感知断言并显式标注「本项在 prod 数据上不可判」。**三处 FAIL 的原始输出都留在各自 SSOT 里**。
+
+### 残差与后续（本批新登记，**不在本批做**）
+
+1. **`prior_cte` 能力当前无生产调用者**（M5 的直接后果）：`render_prior_cte` 与 `generateSql(prior_cte=…)`
+   只被契约测试驱动。保留是**用户口径**（删引擎、保能力），但**若长期不接线**，应连同
+   `app/domain/chained_step_plan.py` 一并评估删除 —— 否则等于把 M5 删掉的死代码换了个位置留着；
+2. **L3 展示漂移**（§2.5 新行）：`routing_layer` 从不写 `L3` ⇒ 监控页 L3 桶恒 0，而前端仍把 L3 标为
+   「多步链式推理」。改前端需 `docker compose build --no-cache frontend`，超本批范围，**只记录**；
+3. **KPI 关键词索引**（若目录规模真的上来）：正确结构是 **Aho-Corasick / 后缀自动机**，不是子串
+   枚举；且必须与 `_by_keyword` 写路径**同生命周期**（最小正确形态存档于
+   [`test-kpi-match-cache-ordering`](../changes/test-kpi-match-cache-ordering/summary.md) §6）；
+4. **空关键词语义**（`findByAnyKeyword([""])` 现命中全部 KPI）**是否算缺陷** —— 需产品判断，
+   本批只钉死现状**不偷偷改**；
+5. **失败尝试的 LLM 用量采集**：需 `openai_client` 的**失败路径也带 usage**（当前只有成功响应有）
+   才谈得上「失败路径也计量」；
+6. **H7 残留**：生产 `.env` 未声明 `EMBEDDING_DIMENSION` ⇒ env 回退路径的维度守卫**仍只记 warning**
+   （「不猜测」口径的必然代价；`.env.example` 已给出声明位）；
+7. **M9 残留**：仍用 ORM 风格 `Collection` API（pymilvus 3.x 已标 deprecated），迁
+   `MilvusClient.query_iterator` 属独立改动；
+8. 本批之外仍挂账：§2.4 LOW 全部、§2.5 其余漂移（**`config.py` 重复字段定义**）、
+   P2 第 13/14 项（拆大文件、魔数治理）、M1 半空计划闸门提案、库侧只读兜底提案、
+   `logger.warning(…, exc)` 截断、Milvus 两个 round-trip 用例的残留累积（§14 残差第 3 条）。

@@ -4,7 +4,11 @@
 
 智能问答系统：用户用自然语言提问，系统经多模型路由调用 LLM，将意图转为 SQL（NL2SQL），在可配置业务库上执行只读查询，并自动渲染 ECharts 图表。知识沉淀为本体（Ontology）。
 
-NL2SQL 采用**4 层路由架构**（Phase 5）：L1 KPI 语义匹配 → L2 LLM 单 SQL → L3 CTE 链 → L4 LangGraph Agent Loop。详见 `wiki/nl2sql-engine.md#4-layer-routing-architecture-phase-5`。
+NL2SQL 的**实际路由**（Phase 5）有三条路径：**L1** KPI 语义匹配 →（未命中）**L2** LLM 单 SQL；
+多步子问题由独立的 `_executeMultiStep` 承担（同样记 `routing_layer="L2"`）；**L4** LangGraph Agent Loop
+由 `IntentType.AGENT_RUN` 意图**单独触发**（**不是** L2 失败后自动升级）。⚠️ 设计里的「**L3 CTE 链**」
+作为独立层**从未在生产接线**，已于 **2026-09-27 删除**（仅保留 `prior_cte` 片段能力）。
+详见 `wiki/nl2sql-engine.md`（4 层路由章节）。
 
 ## 分层
 

@@ -82,16 +82,16 @@ L2: LLM single SQL (existing ReAct two-phase, optionally CTE)
   │   ├─ YES → return
   │   └─ NO (execution error, timeout, empty result)
   │       ▼
-L3: ChainedStep CTE chain (prior_cte injection across multiple plans)
-  │ execution ok?
-  │   ├─ YES → return
-  │   └─ NO
-  │       ▼
 L4: LangGraph Agent Loop (5 NL2SQL tools, iterative)
   │       │
   │       ▼
   return best effort or "cannot answer"
 ```
+
+> ⚠️ **L3 已于 2026-09-27 删除**（M5，见 `chat-service-assessment.md` §2.3 / §15）：
+> 它作为**独立层**从未被生产调用（`_executeChainedSteps` 零调用者），且含**未计量** LLM 调用。
+> 保留下来的是**能力**而非层 —— `prior_cte`（WITH-less CTE 片段）注入路径，见下方
+> 「L3 —— 已删除，仅保留 `prior_cte` 能力」。
 
 ### Layer Trigger Conditions
 
@@ -99,8 +99,8 @@ L4: LangGraph Agent Loop (5 NL2SQL tools, iterative)
 |-------|---------|--------------|
 | **L1** | `KpiSemanticMatchService.match(question)` Jaccard ≥ threshold | ~0ms, 0 tokens |
 | **L2** | L1 miss; default for all other NL2SQL questions | 1× LLM call (plan + SQL) |
-| **L3** | L2 execution fails; question involves multi-step/CTE composition | 1 + N× LLM calls |
-| **L4** | L2/L3 exhaust all retries; complex multi-join requiring iterative tool use | N× LLM calls + tool overhead |
+| **~~L3~~** | ~~L2 execution fails; question involves multi-step/CTE composition~~ **该层不存在**（2026-09-27 删；见下） | — |
+| **L4** | **由意图触发**：`IntentType.AGENT_RUN` → `_handleAgentRun` → `_runL4AgentLoop`（`chat_service.py:842`/`:886`）。⚠️ **不是**「L2/L3 耗尽后自动升级」——生产代码里**没有**从 L2 失败升到 L4 的路径（本行原文有误，2026-09-27 更正）。多步链由 `_executeMultiStep` 承担，与 L4 无关 | N× LLM calls + tool overhead |
 
 ### Each Layer Detail
 
@@ -117,32 +117,47 @@ L4: LangGraph Agent Loop (5 NL2SQL tools, iterative)
 - Phase 1: `generateValidatedPlan` → `QueryPlan` JSON (target/selectedClasses/selectedProperties/conditions/aggregations/groupBy/joins/sortBy/rowLimit).
 - Phase 2: `generateSql(..., plan)` → SQL string.
 - SQL Guard校验.
-- Optional CTE enhancement: when `plan.requiresCte=True`, injects prior CTE as `WITH prior_cte AS (...)`.
+- ⚠️ **本行原文的「`plan.requiresCte=True` 时注入 prior CTE」是设计文档遗留、代码中不存在**（`requiresCte` 全树零命中）。真实的 `prior_cte` 是一条**显式形参**：`generateSql(..., prior_cte=...)`，契约见下一节。
 - **Code**: `app/services/nl2sql_service.py:_planAndGenerateSql`
 
-#### L3 — ChainedStep CTE Chain
+#### L3 —— 已删除，仅保留 `prior_cte` 能力（2026-09-27）
 
-- Used when a question requires joining results from multiple plans (e.g., "first query X, then use X's result to filter Y").
-- `prior_cte` is built from the previous step's SQL result and injected as a `WITH` clause into the next step.
-- Each step in the chain is validated independently before chaining.
-- **Code**: `app/services/multi_step_plan.py` (ChainedStep class)
+- **已删除**：`ChatService._executeChainedSteps` / `_executeSingleChainedStep`（原 `chat_service.py:2455-2495` / `:2498-2543`）及其整份测试 `test_l3_chained_steps.py`。删除理由：**零生产调用者**（唯一引用是它自己的测试）+ **含未计量 LLM 调用**（违反核心约束 #3），见 `chat-service-assessment.md` §2.3 M5 / §15。
+- **保留的是能力，不是层**：`prior_cte` 形参（`nl2sql_service.py:2104`）接受一段 **WITH-less** 的 CTE 片段
+  （形如 `cte1 AS (SELECT …), cte2 AS (SELECT …)`），校验后由 `generateSql` **补上唯一一个**前导 `WITH`
+  （`:2195` `f"WITH {prior_cte}\n{sql}"`）；纯函数 `render_prior_cte`（`app/domain/chained_step_plan.py:64`）负责渲染该片段。
+- **契约（唯一合法形态，2026-09-27 钉死）**：
+  1. **WITH-less** —— 片段**不得自带** `WITH`，否则拼装出 `WITH WITH …`（曾是一条真地雷：`_assert_read_only` 只看首个 token，`WITH` 在白名单 ⇒ **放行**，到库侧才报语法错，再被宽 `except Exception` 吞成「查不出来」）；
+  2. 入参经 `_assertPriorCteSafe`（`nl2sql_service.py:488`）校验：**拒绝**自带 `WITH` + 按**拼接后的真实形态**做只读校验
+     （不能复用 `_assert_read_only(prior_cte)` —— WITH-less 片段的首个 token 是 CTE 别名，不是 `WITH`）；
+  3. 常量 `MSG_PRIOR_CTE_SELF_WITH`（`:479`）给出可操作消息。
+- **当前状态（如实标注）**：`prior_cte` 的调用方已随 L3 引擎一并删除 ⇒ **本能力当前无生产调用者**，由契约测试
+  `app/tests/unit/test_prior_cte_contract.py` 钉死。保留是**刻意决策**（用户口径：删引擎、保能力）；
+  若长期不接线，应连同 `app/domain/chained_step_plan.py` 一并评估删除。
+- **Code**: `app/services/nl2sql_service.py`（`_renderPriorCtePart:461`、`_assertPriorCteSafe:488`、`generateSql:2084`）+ `app/domain/chained_step_plan.py`（`render_prior_cte:64`）
 
 #### L4 — LangGraph Agent Loop
 
+- **触发**：`IntentType.AGENT_RUN`（显式意图），非「L2 失败升级」。
 - LangGraph `StateGraph` with `AgentLoopState` (question, generated_sql, tool_calls, iterations, cost_so_far_usd).
 - 5 NL2SQL tools registered: `list_tables`, `describe_table`, `sample_rows`, `execute_sql`, `list_joins`.
 - Each iteration: LLM chooses tool → tool executes → result fed back → next iteration or final answer.
 - Cost cap: `max_cost_usd=5.0` (configurable); loop exits if `cost_so_far_usd >= max_cost_usd`.
 - Final SQL still passes SQL Guard before execution.
-- **Code**: `app/services/agent_loop.py` ( `_runL4AgentLoop`)
+- **Code**: `app/services/agent_runtime_service.py:593`（`run_agent_loop`），由 `chat_service.py:892 _runL4AgentLoop` 调用
 
 ### Fallback Chain
 
 ```
-L1 miss → L2 → execution error → L3 → execution error → L4 → (best effort | cannot_answer)
+L1 miss → L2（含同模型瞬态重试，M4）→ 多步链 `_executeMultiStep`（独立路径，写 routing_layer="L2"）
+L4 由 `IntentType.AGENT_RUN` 单独触发（无自动升级）
 ```
 
-Any layer that produces a valid, non-empty result that passes SQL Guard terminates the cascade.
+任何一层产出「非空且过 SQL Guard」的结果即终止。
+
+⚠️ **`routing_layer` 实际只会写 L1 / L2 / L4 三个值**（`chat_service.py:808` L1、多处 L2、`:1005` L4）——
+**从不写 `L3`** ⇒ 监控页的 L3 桶恒为 0（前端仍把 L3 标为「多步链式推理」，属待清理的展示漂移，
+见 `chat-service-assessment.md` §2.5）。
 
 ### RoutingMetricsService
 
@@ -199,14 +214,14 @@ New columns on `session_message`:
 
 | Component | File |
 |-----------|------|
-| Entry | `app/services/chat_service.py:_handleNl2SqlAgent` |
+| Entry | `app/services/chat_service.py:_handleNl2SqlAgent`（`:862`，由 `:817` 调用） |
 | L1 | `app/services/kpi_semantic_match_service.py` |
 | L2 | `app/services/nl2sql_service.py:_planAndGenerateSql` |
-| L3 | `app/services/multi_step_plan.py:ChainedStep` |
-| L4 | `app/services/agent_loop.py:_runL4AgentLoop` |
+| ~~L3~~ | **已删除**（2026-09-27）；仅保留 `prior_cte` 能力：`app/services/nl2sql_service.py`（`generateSql:2084`、`_assertPriorCteSafe:488`）+ `app/domain/chained_step_plan.py:render_prior_cte:64` |
+| L4 | `app/services/agent_runtime_service.py:593`（`run_agent_loop`；**不是在 `app/services/agent_loop.py`，该文件不存在**），由 `chat_service.py:892 _runL4AgentLoop` 调用 |
 | Metrics | `app/services/routing_metrics_service.py` |
 | Promotion | `app/services/metric_promotion_service.py` |
-| Migration | `migrations/versions/0051_add_routing_fields.py` |
+| Migration | `alembic/versions/0051_add_routing_metrics_fields.py`（**原文写 `migrations/…:0051_add_routing_fields.py`，路径与文件名均已更正**） |
 
 ## 派生指标 formula 必填硬约束（占比/比率/百分比）
 
@@ -337,9 +352,9 @@ L1 走纯规则（节省 LLM 成本），L1.5 调 plan() LLM。两者复用同�
 
 ## 多步上下文强注入（实体列表作为筛选条件）
 
-`StepExecutionContext.inject_to_prompt`（`multi_step_plan.py`）把前序 `StepResult` 渲染为可注入 plan + sql 两个阶段 prompt 的文本片段。2026-08-17 修复 Bug 4（Step N 引用 Step N-1 实体列表作为 WHERE IN 筛选条件）后，渲染按数据类型自动分档 + plan/sql prompt 共用 WHERE IN 强指令（详见 `changes/fix-multistep-context-strong-injection/summary.md`）。
+`StepExecutionContext.inject_to_prompt`（**`app/domain/multi_step_plan.py:197`** —— 原文写的 `multi_step_plan.py` / `app/services/multi_step_plan.py` **两处路径都不对**，该模块在 `app/domain/` 下）把前序 `StepResult` 渲染为可注入 plan + sql 两个阶段 prompt 的文本片段。2026-08-17 修复 Bug 4（Step N 引用 Step N-1 实体列表作为 WHERE IN 筛选条件）后，渲染按数据类型自动分档 + plan/sql prompt 共用 WHERE IN 强指令（详见 `changes/fix-multistep-context-strong-injection/summary.md`）。
 
-### 渲染分档（`multi_step_plan.py`）
+### 渲染分档（`app/domain/multi_step_plan.py`）
 
 | 形态 | 判定 | 渲染策略 | 单项字符上限 |
 |---|---|---|---|
@@ -374,7 +389,7 @@ plan 与 sql 两个阶段共用 `_renderStatePart(priorState)` 模块级函数�
 
 **显式分步问题不得判为 REFINE/FOLLOW_UP**（2026-08-17 第三轮复测修复）：含 "top10" 的多步问题命中 `_REFINE_LIMIT_RE`（`top\s*\d`），在会话有历史状态时被误判为 REFINE，整体绕过多步入口（ChatService 多步入口仅 NEW_QUERY/QUERY 触发）。`IntentService._isRefine` / `_isFollowUp` 顶部有 `_isExplicitMultiStep` 守卫（复用 `StepQueryPlanner.rule_based_split`，≥2 个「第X步」/序数副词标号才命中）--显式分步一律 NEW_QUERY。单标号引用（"把第一步的结果按金额降序排序"）仍是 REFINE。守约：`test_intent_service.py::test_explicit_multi_step_not_refine_even_with_topn` 等 4 条。
 
-**为什么不用"仅作参考"？**——`multi_step_plan.py:155` 旧措辞"仅作参考数据"是 REFINE/FOLLOW_UP 语境的语义（"上一轮状态只作上下文"）。**多步语境下语义完全相反**：子问题用"这top10物料"指代前序 ID 时，前序结果数据**必须**作为 WHERE IN 筛选值。强指令文案明确"WHERE IN 必填"。
+**为什么不用"仅作参考"？**——`app/domain/multi_step_plan.py` 的旧措辞"仅作参考数据"是 REFINE/FOLLOW_UP 语境的语义（"上一轮状态只作上下文"）。（原文引的 `multi_step_plan.py:155` 路径与行号**均已失效**；该措辞现已从代码中移除，`app/domain/multi_step_plan.py:209` 的 docstring 记录了这次改法。）**多步语境下语义完全相反**：子问题用"这top10物料"指代前序 ID 时，前序结果数据**必须**作为 WHERE IN 筛选值。强指令文案明确"WHERE IN 必填"。
 
 ### 渲染示例
 

@@ -368,3 +368,126 @@ class TestRuleBasedSplit:
         result = await planner.plan_explicit("对比 2024 和 2025 年的销售额")
         assert result.plan is None
         assert result.prompt_tokens == 0
+
+
+# =============================================================================
+# feat-multistep-global-filter: B 层 LLM 全局过滤抽取（2026-09-25）
+# =============================================================================
+
+class _Resp:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.modelName = "test-model"
+        self.promptTokens = 10
+        self.completionTokens = 5
+
+
+class _GlobalFilterLlm:
+    """按 system prompt 路由：抽取全局过滤 / 拆步 / 其他。"""
+
+    def __init__(self, response: str = "{}") -> None:
+        self.calls: list[list[tuple[str, str]]] = []
+        self.response = response
+
+    async def complete(self, messages, **kwargs):
+        self.calls.append([(m.role, m.content) for m in messages])
+        return _Resp(self.response)
+
+
+class TestExtractGlobalFilters:
+    """StepQueryPlanner.extract_global_filters：从多步问题中识别跨步骤共享的范围类约束。"""
+
+    async def test_happy_path_returns_global_filters(self) -> None:
+        from app.domain.multi_step_plan import GlobalFilters
+        from app.services.step_query_planner import StepQueryPlanner
+
+        payload = (
+            '{"global": ['
+            '{"table":"DWD_PURCHASE_ORDER_DTL","column":"TCLCOD_0",'
+            '"op":"IN","value":"A02,A03,A04,A05"},'
+            '{"table":"DWD_PURCHASE_ORDER_DTL","column":"INTER_COM_CODE",'
+            '"op":"=","value":"1"},'
+            '{"table":"DWD_PURCHASE_ORDER_DTL","column":"INTER_SITE_CODE",'
+            '"op":"=","value":"1"}'
+            '],"step_overrides": []}'
+        )
+        llm = _GlobalFilterLlm(response=payload)
+        planner = StepQueryPlanner()
+        result, _, _ = await planner.extract_global_filters(
+            "第一步 查询3月供货量最多3家供应商（外购+内贸+境内）...",
+            classes=[],
+            client=llm,
+            model_name="test-model",
+        )
+        assert result is not None
+        assert result.source == "llm"
+        assert "TCLCOD_0" in result.text
+        assert "INTER_COM_CODE" in result.text
+        assert len(result.constraints) >= 3
+
+    async def test_empty_global_returns_empty_filters(self) -> None:
+        """LLM 明确返回无全局约束 → 返回空 GlobalFilters（非 None，便于注入空块）。"""
+        from app.domain.multi_step_plan import GlobalFilters
+        from app.services.step_query_planner import StepQueryPlanner
+
+        llm = _GlobalFilterLlm(response='{"global": [],"step_overrides": []}')
+        planner = StepQueryPlanner()
+        result, _, _ = await planner.extract_global_filters(
+            "对比2024和2025年销售额", classes=[], client=llm, model_name="test-model",
+        )
+        assert result is not None
+        assert result.constraints == ()
+        assert result.text == ""
+
+    async def test_llm_raises_returns_none(self) -> None:
+        """LLM 调用失败 → filters 为 None（降级：仅靠 A 的措辞）；用量未知 → 0/0。"""
+        from app.services.step_query_planner import StepQueryPlanner
+
+        class _BoomLlm:
+            async def complete(self, messages, **kwargs):
+                raise RuntimeError("LLM 不可用")
+
+        planner = StepQueryPlanner()
+        filters, promptTokens, completionTokens = await planner.extract_global_filters(
+            "第一步...", classes=[], client=_BoomLlm(), model_name="test-model",
+        )
+        assert filters is None
+        assert (promptTokens, completionTokens) == (0, 0)
+
+    async def test_llm_invalid_json_returns_none(self) -> None:
+        from app.services.step_query_planner import StepQueryPlanner
+
+        llm = _GlobalFilterLlm(response="not json")
+        planner = StepQueryPlanner()
+        result = await planner.extract_global_filters(
+            "第一步...", classes=[], client=llm, model_name="test-model",
+        )
+        assert result[0] is None
+
+    async def test_returns_token_counts_for_metering(self) -> None:
+        """H1：抽取本身是一次 LLM 调用，tokens 必须交回调用方落台账（核心约束 #3）。
+
+        此前只返回 GlobalFilters，token 数在方法内被丢弃 → 调用方只能写 0/0 假审计行。
+        返回形状与同类的 ``_plan_by_llm`` 一致（(结果, promptTokens, completionTokens)）。
+        """
+        from app.services.step_query_planner import StepQueryPlanner
+
+        llm = _GlobalFilterLlm(response='{"global": [], "step_overrides": []}')
+        planner = StepQueryPlanner()
+        filters, promptTokens, completionTokens = await planner.extract_global_filters(
+            "对比2024和2025年销售额", classes=[], client=llm, model_name="test-model",
+        )
+        assert filters is not None
+        assert (promptTokens, completionTokens) == (10, 5)
+
+    async def test_token_counts_survive_parse_failure(self) -> None:
+        """H1：LLM 调成功了但解析失败（返回 None），token 仍须交回——钱已经花了。"""
+        from app.services.step_query_planner import StepQueryPlanner
+
+        llm = _GlobalFilterLlm(response="not json")
+        planner = StepQueryPlanner()
+        filters, promptTokens, completionTokens = await planner.extract_global_filters(
+            "第一步...", classes=[], client=llm, model_name="test-model",
+        )
+        assert filters is None
+        assert (promptTokens, completionTokens) == (10, 5)

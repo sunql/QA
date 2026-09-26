@@ -928,6 +928,7 @@ class ChatService(ChatStreamOutputMixin):
         # 明确要求分步 → 直接多步；其余先单步，SQL 执行失败时回退多步拆解。
         if result.intent in (IntentType.NEW_QUERY, IntentType.QUERY):
             if self._stepPlanner.is_explicit_multi_step(dto.question):
+                global_filters = await self._resolveGlobalFilters(session, dto, pc)
                 multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
@@ -936,6 +937,7 @@ class ChatService(ChatStreamOutputMixin):
                         session, dto, pc, multi_plan, state,
                         initial_tokens=step_tokens, initial_cost=step_cost,
                         _t0=_t0,
+                        global_filters=global_filters,
                     )
             # L1.5（2026-08-17 真实回归）：并列复合问题（无显式分步信号但语义多步，
             # 如"查询3月份采购订单数量、Top 10物料占比、Top 10物料在4月份的订单数量"）
@@ -943,6 +945,7 @@ class ChatService(ChatStreamOutputMixin):
             # 编造"Step 2/3 暂无数据 + 询问是否继续"的拟人化回复（详见
             # changes/fix-compound-question-implicit-decomposition/summary.md）。
             elif _looks_like_compound_question(dto.question):
+                global_filters = await self._resolveGlobalFilters(session, dto, pc)
                 multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
@@ -951,6 +954,7 @@ class ChatService(ChatStreamOutputMixin):
                         session, dto, pc, multi_plan, state,
                         initial_tokens=step_tokens, initial_cost=step_cost,
                         _t0=_t0,
+                        global_filters=global_filters,
                     )
 
         outcome = await self._planAndGenerateSql(session, dto, pc, result.intent, state)
@@ -1554,6 +1558,7 @@ class ChatService(ChatStreamOutputMixin):
         self, session: AsyncSession, dto: ChatRequest, pc: _PipelineContext,
         intent: IntentType, state: SessionQueryState | None,
         *, sub_question: str | None = None, injection_text: str | None = None,
+        global_filters: GlobalFilters | None = None,
     ) -> _SqlOutcome:
         """ReAct 两阶段（计划→校验→SQL）+ REFINE 捷径 + 降级 + 用量记录。
 
@@ -1596,6 +1601,9 @@ class ChatService(ChatStreamOutputMixin):
                 scopeQuestion=dto.question if sub_question is not None else None,
                 # Phase 4.4：Feature 目录注入计划 prompt（空目录时为 None 不注入）
                 featureCatalogText=pc.featureCatalogText,
+                # feat-multistep-global-filter B 层：跨步骤共享范围类约束文本注入
+                # 计划 user prompt 的 [global_constraints] 块（None = 不注入）。
+                globalFiltersText=global_filters.text if global_filters else None,
             ),
             forced=pc.forcedModel,
         )
@@ -1692,6 +1700,36 @@ class ChatService(ChatStreamOutputMixin):
         )
         return detected.plan, step_tokens, step_cost
 
+    async def _resolveGlobalFilters(
+        self, session: AsyncSession, dto: ChatRequest, pc: _PipelineContext,
+    ) -> GlobalFilters | None:
+        """B 层（feat-multistep-global-filter）：预抽取多步问题的全局范围类约束。
+
+        调用一次 LLM（purpose="multistep_global_filter"），失败降级返回 None——
+        仅靠 A 的措辞兜底，不阻断多步执行。被抽取的约束将注入每一步 prompt
+        的 [global_constraints] 块，强指令 LLM 沿用。
+
+        **计量**（H1）：抽取本身是一次 LLM 调用，token 由 ``extract_global_filters``
+        如实交回（此前该方法丢弃 tokens、这里写 0/0 假审计行，且注释谎称「token 已计到
+        plan/split 路径」）。只要真的花掉了 token 就落台账——即便解析失败导致 gf 为
+        None，钱也已经花了。
+        """
+        try:
+            gf, promptTokens, completionTokens = await self._stepPlanner.extract_global_filters(
+                dto.question, pc.classes, pc.client, pc.selected.model_name,
+            )
+        except Exception:
+            logger.warning(
+                "全局过滤抽取异常，降级仅靠措辞: %s", dto.question, exc_info=True,
+            )
+            return None
+        if promptTokens or completionTokens:
+            await self._recordUsage(
+                session, dto.sessionId, pc.selected, promptTokens, completionTokens,
+                purpose="multistep_global_filter",
+            )
+        return gf
+
     async def _executeMultiStep(
         self,
         session: AsyncSession,
@@ -1703,6 +1741,7 @@ class ChatService(ChatStreamOutputMixin):
         initial_tokens: int = 0,
         initial_cost: Decimal = Decimal("0"),
         _t0: float,
+        global_filters: GlobalFilters | None = None,
     ) -> ChatResponse:
         """顺序执行每个子步骤，最后调用 StepAggregator 汇总，返回完整多步响应。
 
@@ -1720,6 +1759,7 @@ class ChatService(ChatStreamOutputMixin):
             oracle_version=pc.ds.oracle_version,
             schema_prefix=pc.ds.username,
             context=pc.contextPrompt,
+            global_filters=global_filters,
         )
         completed: list[StepResult] = []
         total_tokens = initial_tokens
@@ -2042,6 +2082,7 @@ class ChatService(ChatStreamOutputMixin):
         joins: list[Any] | None = None,
         scopeQuestion: str | None = None,
         featureCatalogText: str | None = None,
+        globalFiltersText: str | None = None,
     ) -> tuple[Any, Any]:
         """两阶段 LLM 调用：先生成并校验查询计划，再基于计划生成 SQL。
 
@@ -2054,6 +2095,8 @@ class ChatService(ChatStreamOutputMixin):
         scopeQuestion：多步场景下的"主问题"，用于范围感知行数限制的并集判定
         （参见 _applyScopeRowLimit 与 changes/feat-scope-aware-row-limit/summary.md）。
         None = 单步场景，使用 question 本身判定范围。
+        globalFiltersText（feat-multistep-global-filter B 层）：多步共享范围类约束，
+        透传进计划阶段渲染进 user prompt 的 [global_constraints] 块；None = 不注入。
         """
         planResult = await self._nl2sql.generateValidatedPlan(
             question, classes, client, cfg,
@@ -2063,6 +2106,7 @@ class ChatService(ChatStreamOutputMixin):
             dictionaryText=dictionaryText, joins=joins,
             scopeQuestion=scopeQuestion,
             featureCatalogText=featureCatalogText,
+            globalFiltersText=globalFiltersText,
         )
         if planResult.plan.isUnanswerable:
             return planResult, SqlResult(sql="", promptTokens=0, completionTokens=0)
@@ -3039,6 +3083,7 @@ class ChatService(ChatStreamOutputMixin):
         # SQL 执行失败时回退多步拆解（与 processMessage 同口径）。
         if intent in (IntentType.NEW_QUERY, IntentType.QUERY):
             if self._stepPlanner.is_explicit_multi_step(dto.question):
+                global_filters = await self._resolveGlobalFilters(session, dto, pc)
                 multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
@@ -3047,12 +3092,14 @@ class ChatService(ChatStreamOutputMixin):
                         dto, session, pc, multi_plan, state,
                         initial_tokens=step_tokens, initial_cost=step_cost,
                         suggestion=suggestion, _t0=_stream_t0,
+                        global_filters=global_filters,
                     ):
                         yield event
                     return
             # L1.5（2026-08-17 真实回归）：并列复合问题启发式触发拆步前置。
             # 与 processMessage 同口径；详见 _looks_like_compound_question。
             elif _looks_like_compound_question(dto.question):
+                global_filters = await self._resolveGlobalFilters(session, dto, pc)
                 multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
@@ -3061,6 +3108,7 @@ class ChatService(ChatStreamOutputMixin):
                         dto, session, pc, multi_plan, state,
                         initial_tokens=step_tokens, initial_cost=step_cost,
                         suggestion=suggestion, _t0=_stream_t0,
+                        global_filters=global_filters,
                     ):
                         yield event
                     return
@@ -3322,6 +3370,7 @@ class ChatService(ChatStreamOutputMixin):
         initial_cost: Decimal = Decimal("0"),
         suggestion: AgentSuggestion | None = None,
         _t0: float | None = None,
+        global_filters: GlobalFilters | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """多步查询的流式事件序列：step_plan/step_result × N → token(汇总) → done。
 
@@ -3336,6 +3385,11 @@ class ChatService(ChatStreamOutputMixin):
         与 _streamQuery 的 done 帧口径一致（G4 审查 MEDIUM 修复）。
 
         _t0：可选的流式计时起点（由调用方传入；不传则从本函数开始计时）。
+
+        global_filters（feat-multistep-global-filter B 层）：跨步骤共享的范围类
+        约束，与非流式 _executeMultiStep 同口径注入 StepExecutionContext；调用方
+        经 _resolveGlobalFilters 抽取后透传（C1/C2 修复：此前流式路径缺此形参，
+        导致追问多步抛 TypeError 且显式/复合多步从不注入全局约束）。
         """
         _ms_t0 = _t0 if _t0 is not None else time.monotonic()
         ctx = StepExecutionContext(
@@ -3343,6 +3397,7 @@ class ChatService(ChatStreamOutputMixin):
             oracle_version=pc.ds.oracle_version,
             schema_prefix=pc.ds.username,
             context=pc.contextPrompt,
+            global_filters=global_filters,
         )
         completed: list[StepResult] = []
         total_tokens = initial_tokens

@@ -1735,3 +1735,81 @@ class TestSchemaLayerPriorityHint:
         question = "B019 圣特供应商编号是多少"
         prompt = service._buildPlanUserPrompt(question, errors=[])
         assert "Schema 选表优先级" in prompt
+
+
+# =============================================================================
+# feat-multistep-global-filter B 层：plan user prompt 注入 [global_constraints]
+#
+# Step N-1 抽出的范围类过滤条件要落到 plan user prompt（不只 system prompt），
+# 让 LLM 在选表/选列/写条件时直接看到，避免「无实体列也照搬」的盲继承。
+# =============================================================================
+
+
+class TestGlobalConstraintsPromptInjection:
+    """[global_constraints] 块在 _buildPlanUserPrompt 渲染。"""
+
+    def _cls(self) -> OntologyClass:
+        return OntologyClass(
+            class_name="PRECEIPT",
+            source_table="T_PRECEIPT",
+            properties=[
+                OntologyProperty(property_name="BPSNUM", source_column="BPSNUM"),
+                OntologyProperty(property_name="QTY", source_column="QTY"),
+            ],
+        )
+
+    @staticmethod
+    def _validPlanJson() -> str:
+        plan = QueryPlan(
+            target="各供应商收货数量",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM",),
+        )
+        return json.dumps(plan.to_dict(), ensure_ascii=False)
+
+    def test_plan_user_prompt_renders_global_constraints_block(self) -> None:
+        """globalFiltersText 非空时渲染成对 [global_constraints] 标签块。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "查3月份供货量最多的三家供应商",
+            errors=[],
+            globalFiltersText="- TCLCOD_0 IN A02,A03,A04,A05\n- INTER_COM_CODE=1",
+        )
+        assert "[global_constraints]" in prompt
+        assert "[/global_constraints]" in prompt
+        assert "TCLCOD_0 IN A02,A03,A04,A05" in prompt
+        assert "INTER_COM_CODE=1" in prompt
+
+    def test_plan_user_prompt_omits_global_constraints_when_unset(self) -> None:
+        """globalFiltersText 为 None/空时不应渲染约束块（与 inject_to_prompt 口径一致）。"""
+        service = Nl2SqlService()
+        prompt_none = service._buildPlanUserPrompt("查供应商", errors=[], globalFiltersText=None)
+        prompt_empty = service._buildPlanUserPrompt("查供应商", errors=[], globalFiltersText="")
+        for p in (prompt_none, prompt_empty):
+            assert "[global_constraints]\n" not in p
+            assert "[/global_constraints]" not in p
+
+    def test_plan_user_prompt_renders_global_constraints_before_layer_priority(self) -> None:
+        """[global_constraints] 块在层优先级提示之前渲染（紧贴问题，远离 schema 段）。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "查3月份供货量最多的三家供应商",
+            errors=[],
+            globalFiltersText="- TCLCOD_0 IN A02,A03,A04,A05",
+        )
+        assert prompt.index("[global_constraints]") < prompt.index("Schema 选表优先级")
+
+    async def test_generate_query_plan_threads_global_filters_into_user_prompt(self) -> None:
+        """generateQueryPlan 端到端：globalFiltersText 真正到达 user prompt。"""
+        fake = _FakeLlm([self._validPlanJson()])
+        service = Nl2SqlService()
+        await service.generateQueryPlan(
+            "查3月份供货量最多的三家供应商",
+            [self._cls()], fake, _llmConfig(),
+            globalFiltersText="- TCLCOD_0 IN A02,A03,A04,A05",
+        )
+        userContent = fake.calls[0][1][1]
+        assert "[global_constraints]" in userContent
+        assert "TCLCOD_0" in userContent

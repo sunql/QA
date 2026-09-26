@@ -383,7 +383,7 @@ class TestInjectToPromptEntityListRendering:
         assert "[entity_list]\n" not in result
 
     def test_header_text_updated(self) -> None:
-        """注入产物头部文案更新为「可作为筛选条件使用」。"""
+        """注入产物头部文案已强化为「必须沿用」前序范围类 WHERE（feat-multistep-global-filter A）。"""
         ctx = StepExecutionContext(
             datasource_type="postgresql",
             oracle_version=None,
@@ -392,9 +392,9 @@ class TestInjectToPromptEntityListRendering:
             completed_steps=(self._make_top10_result(),),
         )
         result = ctx.inject_to_prompt(2)
-        # 头部应提示这是可作为筛选条件的数据
-        assert "可作为" in result and "筛选条件" in result
-        # 不再使用旧的"仅作参考数据"
+        assert "必须" in result and "沿用" in result
+        assert "范围类" in result  # 明确指出哪些类过滤必须沿用
+        # 不再使用旧的「仅作参考数据」
         assert "仅作参考" not in result
 
 
@@ -426,3 +426,84 @@ class TestStepExecutionContextDefaults:
         """_MAX_ENTITY_LIST_ROWS=50 守约（>50 行强制 AGGREGATE）。"""
         assert _MAX_ENTITY_LIST_ROWS == 50
 
+
+
+# =============================================================================
+# feat-multistep-global-filter: A+B 跨步过滤继承（2026-09-25）
+# =============================================================================
+
+class TestGlobalFiltersWording:
+    """A 层：注入产物头部措辞从「可作为」强化为「必须沿用」。"""
+
+    def test_header_mandates_filter_inheritance(self) -> None:
+        """头部文案必须使用强制性动词，沿用前序范围类 WHERE 条件。"""
+        ctx = StepExecutionContext(
+            datasource_type="postgresql",
+            oracle_version=None,
+            schema_prefix="public",
+            context="",
+            completed_steps=(self._dummy_step(),),
+        )
+        result = ctx.inject_to_prompt(2)
+        assert "必须" in result or "沿用" in result
+        # 旧的「可作为」应不再作为主推措辞出现（保留作 fallback 不强制）
+        assert "可作为后续步骤的筛选条件使用" not in result
+
+    def _dummy_step(self) -> StepResult:
+        return StepResult(
+            step_index=1,
+            description="步骤1",
+            sub_question="查询3月份供货量最多3家供应商",
+            sql="SELECT SUPPLIER_CODE, SUM(QTY) FROM ZJTH.PRECEIPT "
+                "WHERE TCLCOD_0 IN ('A02','A03','A04','A05') "
+                "AND INTER_COM_CODE='1' AND INTER_SITE_CODE='1' "
+                "GROUP BY SUPPLIER_CODE ORDER BY SUM(QTY) DESC FETCH FIRST 3 ROWS ONLY",
+            data=[{"SUPPLIER_CODE": f"S{i}"} for i in range(3)],
+            summary="Top 3 供应商 S0/S1/S2",
+        )
+
+
+class TestGlobalFiltersRendering:
+    """B 层：StepExecutionContext.global_filters 渲染进 injection 产物。"""
+
+    def _dummy_step(self) -> StepResult:
+        return StepResult(
+            step_index=1, description="步骤1", sub_question="子问题1",
+            sql="SELECT 1", data=[{"A": 1}], summary="摘要",
+        )
+
+    def test_no_global_filters_renders_no_block(self) -> None:
+        ctx = StepExecutionContext(
+            datasource_type="postgresql", oracle_version=None,
+            schema_prefix="public", context="",
+            completed_steps=(self._dummy_step(),),
+        )
+        result = ctx.inject_to_prompt(2)
+        # global_filters=None 时不应渲染约束块（header 内的标签说明文案允许提到名称）
+        assert "[global_constraints]\n" not in result
+        assert "[/global_constraints]" not in result
+
+    def test_global_filters_renders_block_before_entity_list(self) -> None:
+        """global_filters 非空时在 [entity_list] 之前渲染 [global_constraints] 块。"""
+        from app.domain.multi_step_plan import GlobalFilters
+        gf = GlobalFilters(
+            text="- TCLCOD_0 IN ('A02','A03','A04','A05')\n"
+                 "- INTER_COM_CODE='1'\n- INTER_SITE_CODE='1'",
+            constraints=(
+                "TCLCOD_0 IN ('A02','A03','A04','A05')",
+                "INTER_COM_CODE='1'",
+                "INTER_SITE_CODE='1'",
+            ),
+            source="llm",
+        )
+        ctx = StepExecutionContext(
+            datasource_type="postgresql", oracle_version=None,
+            schema_prefix="public", context="",
+            completed_steps=(self._dummy_step(),),
+            global_filters=gf,
+        )
+        result = ctx.inject_to_prompt(2)
+        assert "[global_constraints]" in result
+        assert "TCLCOD_0" in result
+        # 块应在前序步骤结果之前出现，提示这是「全局」约束
+        assert result.index("[global_constraints]") < result.index("步骤 2")

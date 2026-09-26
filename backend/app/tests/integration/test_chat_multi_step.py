@@ -158,8 +158,16 @@ class TestMultiStepChatApi:
         state_rows = list(state.scalars().all())
         assert len(state_rows) == 1
         usages = list((await dbSession.execute(select(SessionTokenUsage))).scalars().all())
-        # 拆步判定(step_plan) + 2×计划/SQL(nl2sql) + 汇总(answer) 均计量
-        assert sorted(r.purpose for r in usages) == ["answer", "nl2sql", "nl2sql", "step_plan"]
+        # 拆步判定(step_plan) + 2×计划/SQL(nl2sql) + 汇总(answer) + 全局过滤抽取
+        # (multistep_global_filter) 均计量。全局过滤抽取是 B 层的独立 LLM 调用
+        # （H1 后才把 token 如实落台账，此前写 0-token 假审计行），故它是第 5 行。
+        assert sorted(r.purpose for r in usages) == [
+            "answer", "multistep_global_filter", "nl2sql", "nl2sql", "step_plan",
+        ]
+        # 抽取确实花了 token（不是 0/0 占位行）——H1 的验收点
+        gf_rows = [u for u in usages if u.purpose == "multistep_global_filter"]
+        assert gf_rows[0].prompt_tokens > 0
+        assert gf_rows[0].completion_tokens > 0
 
     @pytest.mark.parametrize(
         "question",
@@ -263,9 +271,12 @@ class TestMultiStepChatApi:
         assert len(body["steps"]) == 3  # 3 数据步（汇总步不进 steps）
         # 规则路径：未调拆步 LLM
         assert not any("查询拆分器" in m[0][1] for m in llm.calls)
-        # 用量：3×nl2sql + 1×answer + 1×step_plan(0 token)，与 LLM 拆步路径同 purpose 集合
+        # 用量：3×nl2sql + 1×answer + 1×step_plan(0 token) + 1×multistep_global_filter，
+        # 与 LLM 拆步路径同 purpose 集合（规则路径省掉的是拆步 LLM，全局过滤抽取照跑）
         usages = list((await dbSession.execute(select(SessionTokenUsage))).scalars().all())
-        assert sorted(r.purpose for r in usages) == ["answer", "nl2sql", "nl2sql", "nl2sql", "step_plan"]
+        assert sorted(r.purpose for r in usages) == [
+            "answer", "multistep_global_filter", "nl2sql", "nl2sql", "nl2sql", "step_plan",
+        ]
         # 规则路径的 step_plan 用量为 0（无 LLM 调用），便于按 purpose 区分规则/LLM 拆步
         step_plan_rows = [u for u in usages if u.purpose == "step_plan"]
         assert len(step_plan_rows) == 1
@@ -311,10 +322,11 @@ class TestMultiStepChatApi:
         assert not any("查询拆分器" in m[0][1] for m in llm.calls)
         # 3 个数据步骤各执行一次数据 SQL
         assert len(_data_queries(adapter)) == 3
-        # 用量：3×nl2sql + 1×answer + 1×step_plan(0 token)，与「第X步」规则路径同构
+        # 用量：3×nl2sql + 1×answer + 1×step_plan(0 token) + 1×multistep_global_filter，
+        # 与「第X步」规则路径同构
         usages = list((await dbSession.execute(select(SessionTokenUsage))).scalars().all())
         assert sorted(r.purpose for r in usages) == [
-            "answer", "nl2sql", "nl2sql", "nl2sql", "step_plan",
+            "answer", "multistep_global_filter", "nl2sql", "nl2sql", "nl2sql", "step_plan",
         ]
 
     async def test_single_step_renders_execution_plan(

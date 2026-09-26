@@ -17,7 +17,13 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from app.domain.multi_step_plan import MAX_MULTI_STEP, MultiStepPlan, StepPlan, _clip_text
+from app.domain.multi_step_plan import (
+    MAX_MULTI_STEP,
+    GlobalFilters,
+    MultiStepPlan,
+    StepPlan,
+    _clip_text,
+)
 from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage
 
 logger = logging.getLogger(__name__)
@@ -166,6 +172,89 @@ class StepQueryPlanner:
             logger.info("拆步规则命中（第X步标号），跳过 LLM 判定: %s", question)
             return StepPlanResult(plan=rule_plan)
         return StepPlanResult(plan=None)
+
+    # =========================================================================
+    # feat-multistep-global-filter B 层：跨步范围类约束抽取
+    # =========================================================================
+
+    _EXTRACT_GLOBAL_FILTERS_SYSTEM_PROMPT = (
+        "你是全局过滤提取器。从用户的多步复合问题中识别跨步骤共享的范围类"
+        "WHERE 条件（外购/内外贸/站点/物料类别/财年等口径约束）。\n"
+        "返回 JSON：{\"global\": [{\"table\": \"...\", \"column\": \"...\","
+        "\"op\": \"IN|=|>=\"|\"value\": \"...\"}], \"step_overrides\": []}\n"
+        "若问题无明显跨步骤口径约束，返回 {\"global\": [], \"step_overrides\": []}。"
+    )
+
+    async def extract_global_filters(
+        self,
+        question: str,
+        classes: list[Any],
+        client: BaseLlmClient,
+        model_name: str,
+    ) -> tuple[GlobalFilters | None, int, int]:
+        """调用 LLM 抽取多步问题的全局范围类约束。
+
+        返回 ``(filters, promptTokens, completionTokens)``——形状与同类的
+        ``_plan_by_llm`` 一致。**tokens 必须原样交回调用方**：本方法此前只返回
+        ``GlobalFilters``，把 ``resp.promptTokens/completionTokens`` 直接丢弃，
+        调用方只能写 0/0 假审计行，违反核心约束 #3「每次 LLM 调用必须记录 Token
+        消耗与成本」。
+
+        失败（LLM 异常 / 解析失败 / 返回非 dict）→ filters 为 None（降级：仅靠 A
+        措辞，不阻断多步执行）。**解析失败时 tokens 仍如实返回**——LLM 已调用、
+        钱已花，会计上不能凭空消失。异常路径无从得知用量，返回 0/0。
+        成功但无约束 → 空 GlobalFilters（上层选择不注入空块以减少 prompt 噪声）。
+        """
+        try:
+            resp = await client.complete(
+                messages=[
+                    LlmMessage(
+                        role="system",
+                        content=self._EXTRACT_GLOBAL_FILTERS_SYSTEM_PROMPT,
+                    ),
+                    LlmMessage(
+                        role="user",
+                        content=self._sanitize(question),
+                    ),
+                ],
+                model=model_name,
+            )
+        except Exception:
+            logger.warning("全局过滤抽取 LLM 调用失败，降级仅靠措辞: %s", question, exc_info=True)
+            return None, 0, 0
+
+        promptTokens = int(getattr(resp, "promptTokens", 0) or 0)
+        completionTokens = int(getattr(resp, "completionTokens", 0) or 0)
+
+        data = self._extract_json(resp.content or "")
+        if not data:
+            return None, promptTokens, completionTokens
+        global_list = data.get("global") or []
+        if not isinstance(global_list, list):
+            return None, promptTokens, completionTokens
+
+        constraints: list[str] = []
+        lines: list[str] = []
+        for entry in global_list:
+            if not isinstance(entry, dict):
+                continue
+            table = entry.get("table") or "*"
+            column = entry.get("column") or ""
+            op = entry.get("op") or "="
+            value = entry.get("value") or ""
+            if not column:
+                continue
+            constraints.append(f"{table}.{column} {op} {value}")
+            lines.append(f"- {table}.{column} {op} {value}")
+        return (
+            GlobalFilters(
+                text="\n".join(lines),
+                constraints=tuple(constraints),
+                source="llm",
+            ),
+            promptTokens,
+            completionTokens,
+        )
 
     @staticmethod
     def rule_based_split(question: str) -> MultiStepPlan | None:

@@ -18,10 +18,10 @@
 > LLM 可用性两个缺陷 D1/D2 与多步降级收尾 D3 已于 2026-09-26 修复并部署（见 §7）；
 > §2.2 的 H1 / H2 / H8 / H9（四处「直调 LLM 绕过计量收口」）已于 2026-09-26 修复（见 §8）；
 > §2.1 的 **C3 / C4**（多步硬失败隔离 + 重试上下文）已于 2026-09-26 修复（见 §9）；
-> §3 的 **P0 第 5 项**（C 兜底分支的 global_filters 对称缺口）已于 2026-09-26 修复（见 §10）。
+> §3 的 **P0 第 5 项**（C 兜底分支的 global_filters 对称缺口）已于 2026-09-26 修复（见 §10）；
+> §2.3 的 **M7**（回灌重试的二次失败详情 + 该次生成的用量）已于 2026-09-26 修复（见 §11）。
 > **§2.1（CRITICAL）已全部清零；§3 的 P0 路线图亦已清空**。
-> **仍待处理**：§2.2 的 H3–H7、§2.3 的 **M7**（重试错误只剩第一次，与本主题最相关的下一项）、
-> 以及 §2.4 / §2.5 全部。
+> **仍待处理**：§2.2 的 H3–H7、以及 §2.4 / §2.5 全部。
 
 ---
 
@@ -156,7 +156,7 @@
 | M4 | **无同模型瞬态重试**：`generateQueryPlan`/`generateSql` 内部不捕获瞬态 LLM 异常，只靠模型 fallback（换模型≠同模型重试）。 | `nl2sql_service.py:1608`、`2039` |
 | M5 | **L3 CTE 引擎是死代码**：`_executeChainedSteps`/`_executeSingleChainedStep` 仅测试引用，无生产接线，且含未计量 LLM 调用。 | `chat_service.py:1935-2023` |
 | M6 | **重复定义**：`_buildOptionPrompt` 两次（`chart_service.py:121/226`，同名同签名同注释，后者静默覆盖前者——前一份是死代码）。<br>⚠️ **2026-09-26 复核修正**：本行原写「`_consumedTokens` 两次（`chat_service.py:4048/4052`）」**不成立**——当前只剩一个定义（`chat_service.py:4249`），行号也对不上；评估当日应是笔误或事后已清理。 | ⬜ 待处理 | `chart_service.py:121`、`226` |
-| M7 | **`_runQueryWithRetry` 丢弃第二次错误详情**：重试失败 re-raise `firstErr`，实际最终错误被丢。⚠️ **2026-09-26 部分修复**（C3/C4 批，见 §9）：重试的**生成 token** 已随异常交回并落账、重试的**新错误**已 `logger.warning` 留痕（此前是裸 `except` 静默吞掉）；**用户可见文案仍只报第一次错误**（有意：那是本步骤首次 SQL 的病因），单步路径仍未取 token 记账。 | `chat_service.py` `_runQueryWithRetry` |
+| M7 | ~~**`_runQueryWithRetry` 丢弃第二次错误详情**~~ ✅ **已修复（2026-09-26，见 §11）**。修复分两批：①C3/C4 批（见 §9）让重试的**新错误**进日志、重试生成的 token 在多步路径落账；②本批把二次失败**详情与用量挂到上抛异常私有属性**上（`_attachRetryFailure` / `_attachRetryGenTokens`，不改异常类型/消息），单步两条路径 + 多步路径都落账，用户可见步骤文案改为「首次：…；重试…：…」（两段各自脱敏 + 各自限量）。**同时闭合了复审发现的第三个漏点**：重试**生成自己失败**时 `Nl2SqlError.tokens` 此前无人取用 ⇒ 该次调用白花。 | `chat_service.py` `_runQueryWithRetry` / `_stepFailedError` / `_accountRetryGenUsage` |
 | M8 | **`prior_cte` 契约不一致**：docstring 说可无 `WITH`，但 `_assert_read_only` 会拒绝无 `WITH` 形式（当前仅 `render_prior_cte` 输出可过，潜伏）。 | `nl2sql_service.py:414-416` vs `business_db_pool.py` |
 | M9 | **Milvus 16384 上限**：`listAllEmbeddings` 截 16384，超量后对账 diff 会算错（无 guard）。 | `milvus_client.py:245-265` |
 | M10 | **KPI 缓存线性扫描**：`findByAnyKeyword` O(keywords×catalog) 无倒排索引，随目录增长退化。 | `kpi_match_cache.py:79-87` |
@@ -195,7 +195,8 @@
    ✅ **已完成（2026-09-26）**，见 §10。修法比本行原建议更彻底：抽取收敛进共享前置
    `_prepareFollowUpMultiStep`（4 个入场点改为纯透传）—— 根因是「同一份多步前置知识被复制到
    4 个入场点、靠人记得传参」，而它已经漏过两次（C1/C2 流式那次 + 本次 C 兜底两侧）。
-   ⚠️ 与本批同源的 **M7**（重试错误只剩第一次；C3 已让它变成用户可见文案）**仍待处理**，见 §9 遗留 1。
+   ⚠️ 与本批同源的 **M7**（重试错误只剩第一次；C3 已让它变成用户可见文案）~~仍待处理~~ ✅
+   **已于 2026-09-26 修复**，见 §11（连同复审发现的「重试生成自己失败时 token 丢账」一并闭合）。
 
 ### P1 —— 健壮性（本季度）
 
@@ -566,11 +567,13 @@ HEAD 工作树不含本轮之前若干未提交批次（`MSG_MULTI_STEP_DEGRADE_
 
 ### 遗留
 
-1. ~~**「重试执行也失败」时重试生成的 token 仍会丢账**~~ ✅ **复审中已修**（见上）。仍未覆盖的边角：
-   **单步**路径的两处 `_runQueryWithRetry` 调用拿到异常后直接抛给 API 层，未取 `_retryGenTokens`
-   记账（单步失败即整轮失败，影响小于多步）；**重试生成本身抛错**时 `Nl2SqlError.tokens` 仍未在
-   该路径记账（且要小心与 `_callWithFallback` 已写的 `fallback_sql` 行重复计数）。
-   另一个相关事实：C3 只报**第一次**执行错误，重试后的新错误看不到（失败细节仍在服务端日志）。
+1. ~~**「重试执行也失败」时重试生成的 token 仍会丢账**~~ ✅ **复审中已修**（见上）。
+   ~~**单步**路径的两处 `_runQueryWithRetry` 调用未取 `_retryGenTokens` 记账~~、
+   ~~**重试生成本身抛错**时 `Nl2SqlError.tokens` 未记账~~、
+   ~~C3 只报**第一次**执行错误，重试后的新错误看不到~~ —— 三项均 ✅ **已完成（2026-09-26）**，见 §11。
+   当年提示「要小心与 `_callWithFallback` 已写的 `fallback_sql` 行重复计数」已核验为**不适用**：
+   重试生成那次调用**不走** `_callWithFallback`（它直接 `self._nl2sql.generateSql(self._llmFactory(cfg), …)`），
+   而 `fallback_<purpose>` 行只在 `_callWithFallback` 内部降级时才写 ⇒ 无重叠（见 §11 §7）。
 2. `_callWithFallback` 全模型失败时的浪费 token 同属预存缺口。
 3. ~~**C 路径（`_isFollowUpRetryCandidate` 兜底）的 `global_filters` 对称缺口**仍未补
    （`chat_service.py` 非流式与流式两处，前一批遗留）。~~ ✅ **已完成（2026-09-26）**，见 §10。
@@ -632,9 +635,77 @@ reviewer 建议的负向对照（`not in planCalls[0]`）也已补上，防「�
 
 ### 遗留
 
-1. **M7「重试错误只剩第一次」仍未处理**（§2.3；§9 遗留 1 已记录其部分修复）。当前用户可见文案
-   只报首次执行错误（有意：那是病因），重试的新错误仅在服务端日志。**这是 P0 列表清空后
-   与本主题最相关的下一项**（属健壮性/可观测性，非正确性）。
+1. ~~**M7「重试错误只剩第一次」仍未处理**~~ ✅ **已于 2026-09-26 修复**，见 §11
+   （连同单步路径的用量漏账、重试生成失败的 `Nl2SqlError.tokens` 漏账一并闭合）。
 2. L1.5 的「先抽取后判能否拆步」（`:1051`）在拆步失败时白花一次 LLM 调用 —— 预存，
    与本次同源（抽取点位置不当），可考虑一并收敛到「拆步成功后再抽」。
 3. 同类注解未 import 的预存隐患 6 处（`StepResultRead` / `AgentLoopResult` / `KpiCatalog`）。
+
+---
+
+## 11. 修复记录：M7 回灌重试的二次失败详情与用量（2026-09-26）
+
+**SSOT**：`Harness/changes/fix-chat-retry-failure-details/summary.md`（§2.3 M7；也是 §9 遗留 1 与 §10 遗留 1 的收口）。
+
+### 问题（§2.3 M7 的完整形态）
+
+`_runQueryWithRetry` 首次执行失败后把错误回灌给 `generateSql` 重试一次。二次失败
+（重试生成失败 / 重试执行仍失败）此前只有一行日志，三件事同时丢失：
+
+1. **用户可见文案只报第一次错误** —— 用户读「该步骤执行失败：ORA-00942 表或视图不存在」，
+   结论是「这条 SQL 一上来就写错了」；真相是「首次错了、回灌重试**同样**错」。排查方向完全不同。
+2. **重试那条 SQL 全文无处可查**（重试会重新生成 SQL，与首次那条可能不同）。
+3. **用量漏账**（核心约束 #3 在失败路径上不成立），且不止一处：
+   - 重试生成成功但重试执行失败 → 多步路径 C3 那批已修、**单步两条路径（非流式/流式）未修**；
+   - 重试**生成自己失败** → `Nl2SqlError.tokens` 两条路径**都没人取用**（复审新发现）。
+
+### 修复（`app/services/chat_service.py`）
+
+沿用「挂私有属性、不改异常类型/消息」的既定模式（API 层按异常类型映射 HTTP 状态）：
+
+- `_attachRetryFailure` / `_retryFailure`（`_RetryFailure(stageLabel, error)`）：二次失败详情；
+- `_attachRetryGenTokens` / `_retryGenTokens`：重试生成用量，**两个分支都挂**
+  （生成成功用 `SqlResult` 用量；生成失败用 `self._consumedTokens(genErr)` 读 `Nl2SqlError.tokens`）；
+- `_stepFailedError`：文案改为「首次：…；重试{stageLabel}：…」，**两段各自**经
+  `_userFacingErrorText` 脱敏（剥 `[SQL:` / `[parameters:` + 兜底）并**各自**限量 90 字，
+  再套总上限 200 —— 整体尾部截断会让长首次原因把重试原因整段挤掉（实测，见 SSOT §2.3）；
+- `_accountRetryGenUsage`：取用量 → 落账 → 返回增量，**单步两处 + 多步一处共用一个入口**；
+- 重试执行仍失败时把**重试 SQL** 打进服务端日志（截 2000 字）。
+
+### 验证（TDD：3 处行为级 RED）
+
+| RED | 触发方式 | 红灯原文（摘要） |
+|---|---|---|
+| 文案缺重试那一步 | 临时移除唯一一行 `_attachRetryFailure` | `未交代重试这一步：该步骤执行失败：ORA-00942: 表或视图不存在` |
+| 重试生成失败漏账 | 新用例（回灌提示词命中 → 回复无 ```sql 围栏） | `nl2sql 台账行数不符：[(20,10),(20,10),(20,10)] / assert 3 == 4` |
+| 长首次原因挤掉重试原因 | 首次原因 500 字 | 拼接结果里重试原因整段消失 |
+
+GREEN：单元 16 passed、`test_chat_multi_step.py` 24 passed、chat 集成切片 126 passed。
+
+### 复审
+
+`code-reviewer` 第一轮 APPROVE（0 CRITICAL / 0 HIGH / 2 MEDIUM / 3 LOW），两条 MEDIUM 当场修完
+（重试生成失败的 token 漏账；**类 docstring 的因果判断被证伪**）+ 一条 LOW（两段各自限量）；
+第二轮 APPROVE（**0 / 0 / 0 / 1**，唯一 LOW 是 `setattr` 与「不可变」规则的形式性偏离，经论证不改）。
+`security-reviewer` **PASS-WITH-WARNINGS**（0 / 0 / 0 / 2）。详见 SSOT §7。
+
+> ⚠️ **被证伪的假设（值得单独记）**：本批初稿断言「非流式硬失败会因 `getDb` 回滚而丢掉
+> 台账行，故不必断言该路径」。**错**：`TokenUsageService.recordUsage` 每次调用都
+> `session.add()` + `await session.commit()`，台账行在每次 LLM 调用后即已提交，
+> `rollback()` 只能回滚未提交的工作。据此改正了 docstring，并补上此前**完全缺失**的
+> 非流式硬失败用例（该用例同时钉住：非流式硬失败是异常穿透 ASGI 重抛，不是 500 响应）。
+> 教训：**「已提交」与「事务内」的区别必须回到代码确认**，别由 `getDb` 有 rollback 就外推。
+
+### 遗留
+
+1. L1.5「先抽取后判能否拆步」（`:1051`）与窄路径下被丢弃的一次抽取 —— 预存，见 §10 遗留 2。
+2. 单步回退多步时不解析/不传 `global_filters`（显式多步路径 `:1090` 有传）—— 预存的不对称，
+   与 §10 同族（「同一份多步前置知识被复制到多个入口」），本次未动。
+3. 两条 `B904`（`raise firstErr` 未带 `from`）保留：服务端日志已 `exc_info=True` 打全链，
+   显式 `__cause__` 会改变异常链在 API 层的呈现路径，超出本批「只挂私有属性」的边界。
+4. **新增披露面（security LOW-1，待观测再修）**：重试**生成失败**时首次把 `genErr` 文案带给用户；
+   若 `genErr` 是 `LlmClientError`，其 `.message` 内嵌底层 provider 异常的 `str(exc)`。当前无观测
+   证据表明 provider 错误体会回显请求内容（脱敏契约针对的是 SQLAlchemy 的**确定性**泄漏），故不猜着修；
+   若日后真的观测到回显，对该段非 `Nl2SqlError` 的异常改走固定文案即可（不改契约）。
+5. **既有行为**：`retryErr` 经 `%s` 格式化会把 `[parameters: {…}]` 的**参数值**写进服务端日志
+   （旧代码早已如此，本批未扩大）；属服务端日志留存/脱敏策略议题，见 §2.4 同类项。

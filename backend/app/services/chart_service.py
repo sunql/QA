@@ -14,16 +14,13 @@ from typing import Any
 
 from app.domain.enums import ChartType
 from app.infrastructure.llm.base_client import LlmMessage
-from app.services.messages_zh import MSG_CHART_TITLE_PIE, MSG_CHART_TITLE_RESULT
 from app.services.data_summary import FULL_DATA_THRESHOLD
+from app.services.messages_zh import MSG_CHART_TITLE_PIE, MSG_CHART_TITLE_RESULT
 from app.utils.column_types import (
     COLUMN_TYPE_NUMBER,
     COLUMN_TYPE_STRING,
     COLUMN_TYPE_TIME,
-    infer_column_type,
     infer_column_types,
-    is_number,
-    looks_like_datetime,
     to_json_number,
 )
 
@@ -117,34 +114,6 @@ class ChartService:
             return option
         return _walkAndNormalizeFormatters(option)
 
-    @staticmethod
-    def _buildOptionPrompt(
-        chartType: ChartType, columns: list[str], data: list[dict], question: str
-    ) -> str:
-        # v2 2026-09-18：数据量小（≤ FULL_DATA_THRESHOLD 行）时全量嵌入 prompt，
-        # 让 LLM 生成的 ECharts option 与前端 EVENT_CHART.data 一致。
-        # 否则截 data[:20]，与原行为一致（图表只看数据形状）。
-        if len(data) <= FULL_DATA_THRESHOLD:
-            sample = json.dumps(data, ensure_ascii=False, default=str)
-            sampleLabel = f"数据（共 {len(data)} 行）："
-        else:
-            sample = json.dumps(data[:20], ensure_ascii=False, default=str)
-            sampleLabel = "数据样本（最多 20 行）："
-        return (
-            "你是一名前端数据可视化专家，请根据查询结果生成一份 ECharts 配置。\n"
-            f"图表类型：{chartType.value}\n"
-            f"列：{columns}\n"
-            f"{sampleLabel}\n{sample}\n"
-            f"原始问题：{question}\n\n"
-            "要求：\n"
-            "1. 只返回一个合法的 JSON 对象（ECharts option），不要包含 markdown 代码块或额外文字。\n"
-            "2. option 必须包含 title、tooltip、series，且 series[0].type 与指定图表类型一致。\n"
-            "3. 数值统一为 JSON 数字类型。\n"
-            "4. 若图表类型为 table，返回 {\"columns\": [...], \"rows\": [...]}。\n"
-            "5. label / tooltip 的 formatter 若用字符串模板，柱图/线图/散点用 `{c}`（数值）或 "
-            "`{b}`（类目），不要用 `{d}`（仅饼图百分比）。"
-        )
-
     # =========================================================================
     # 规则 fallback
     # =========================================================================
@@ -200,10 +169,6 @@ class ChartService:
     def _inferColumnTypes(self, columns: list[str], data: list[dict]) -> dict[str, str]:
         # 委托给 SSOT（app/utils/column_types.infer_column_types），避免双份逻辑
         return infer_column_types(columns, data)
-
-    def _inferColumnType(self, values: list[Any]) -> str:
-        # 同上，单列版
-        return infer_column_type(values)
 
     # =========================================================================
     # LLM 解析

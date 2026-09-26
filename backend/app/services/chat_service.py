@@ -396,6 +396,10 @@ def _summarizeExecutionError(exc: Exception) -> str:
 _STEP_GEN_FAILED_PREFIX = "该步骤查询生成失败："
 _STEP_EXEC_FAILED_PREFIX = "该步骤执行失败："
 _STEP_FAILED_ERROR_LIMIT = 200  # 步骤错误文案字符上限（避免把整段堆栈塞进响应）
+# 两段（首次 / 重试）各自的上限：只做整体尾部截断的话，一段超长的首次原因会把
+# 「重试为什么也没救回来」整段挤掉 —— 那恰恰是 M7 要暴露的信息（实测 500 字首次原因
+# 下重试原因完全消失）。两段各自限量后，两段之和仍受 _STEP_FAILED_ERROR_LIMIT 约束。
+_STEP_FAILED_SEGMENT_LIMIT = 90
 # 软失败（LLM 判定无有效查询计划）：非硬异常，纯步骤级隔离
 _MSG_STEP_UNANSWERABLE = "无法回答（LLM 判定无有效查询计划）"
 # 汇总步骤被跳过（前置数据步骤全失败）：非失败、非成功，如实说「未执行」
@@ -418,8 +422,24 @@ def _userFacingErrorText(exc: Exception) -> str:
 
 
 def _stepFailedError(exc: Exception, prefix: str) -> str:
-    """把步骤级硬异常收敛为可展示的步骤错误文案（截断，不含堆栈）。"""
-    return prefix + _clipText(_userFacingErrorText(exc), _STEP_FAILED_ERROR_LIMIT)
+    """把步骤级硬异常收敛为可展示的步骤错误文案（截断，不含堆栈）。
+
+    M7：回灌重试也失败时，二次失败原因一并展示（「首次：… ；重试…：…」）。此前
+    只报首次错误，用户看到「这一步的 SQL 一开始就是错的」，而真相是「首次错了、
+    回灌重试同样错」—— 两句话对应的排查方向完全不同。两段各自走
+    `_userFacingErrorText`（SQL 全文与参数字面量一律剥掉，且各自有兜底文案），
+    并**各自**限量（`_STEP_FAILED_SEGMENT_LIMIT`）后拼接，最后再套总上限。
+    """
+    text = _userFacingErrorText(exc)
+    retryFailure = _retryFailure(exc)
+    if retryFailure is not None:
+        retryText = _userFacingErrorText(retryFailure.error)
+        text = (
+            f"首次：{_clipText(text, _STEP_FAILED_SEGMENT_LIMIT)}；"
+            f"重试{retryFailure.stageLabel}："
+            f"{_clipText(retryText, _STEP_FAILED_SEGMENT_LIMIT)}"
+        )
+    return prefix + _clipText(text, _STEP_FAILED_ERROR_LIMIT)
 
 
 # 挂在异常上的私有属性名：携带「重试生成已消耗」的 token（见 _attachRetryGenTokens）
@@ -428,6 +448,10 @@ _RETRY_GEN_TOKENS_ATTR = "_retryGenTokens"
 
 def _attachRetryGenTokens(exc: Exception, tokens: tuple[int, int]) -> None:
     """把「重试生成已花掉」的 token 挂到上抛的执行异常上。
+
+    两个分支都要挂：重试生成成功但重试执行又失败（用 `SqlResult` 带的用量），以及
+    重试生成**自己**失败（用 `_consumedTokens(genErr)` 取 `Nl2SqlError.tokens`）——
+    两种情形都真的调了 LLM，都必须在失败路径上留账。
 
     只挂私有属性，**不改异常类型与消息**（API 层按类型映射 HTTP 状态，改类型会连带
     改变对外错误契约），调用方用 `_retryGenTokens` 取回记账。与 `_consumedTokens`
@@ -439,6 +463,50 @@ def _attachRetryGenTokens(exc: Exception, tokens: tuple[int, int]) -> None:
 def _retryGenTokens(exc: Exception) -> tuple[int, int]:
     """提取异常携带的「重试生成」token；无法计量时返回 (0, 0)。"""
     return getattr(exc, _RETRY_GEN_TOKENS_ATTR, (0, 0)) or (0, 0)
+
+
+# M7：回灌重试的**二次失败**详情。此前只进一行服务端日志，用户可见的步骤文案只报
+# 首次错误 —— 「重试为什么也没救回来」在对外视野里彻底消失（看起来像 SQL 一上来就
+# 写错了，排查方向完全不同）。与 `_RETRY_GEN_TOKENS_ATTR` 同思路：挂私有属性，
+# 不改异常类型与消息（API 层按类型映射 HTTP 状态与错误码）。
+_RETRY_FAILURE_ATTR = "_retryFailure"
+
+
+@dataclass(frozen=True)
+class _RetryFailure:
+    """回灌重试二次失败的原地留痕。
+
+    `stageLabel` 会直接拼进用户可见文案（「… ；重试{stageLabel}：…」），因此是
+    面向用户的中文短语，不是内部枚举名。
+    """
+
+    stageLabel: str
+    error: Exception
+
+
+def _attachRetryFailure(exc: Exception, stageLabel: str, error: Exception) -> None:
+    """把二次失败详情挂到上抛的首次异常上（只挂私有属性，不改类型/消息）。"""
+    setattr(exc, _RETRY_FAILURE_ATTR, _RetryFailure(stageLabel=stageLabel, error=error))
+
+
+def _retryFailure(exc: Exception) -> _RetryFailure | None:
+    """提取异常携带的二次失败详情；未携带时返回 None。"""
+    return getattr(exc, _RETRY_FAILURE_ATTR, None)
+
+
+# 重试 SQL 写进服务端日志时的字符上限（自诊断用）：重试执行仍失败时，这条 SQL 是
+# 「为什么重试也没救回来」唯一的证据，但它此前没被记在任何地方。截断只为避免超长
+# SQL 刷屏；服务端日志本就含执行错误的 `[parameters: ...]` 细节，不改变既有边界。
+_RETRY_SQL_LOG_LIMIT = 2000
+
+
+@dataclass(frozen=True)
+class _RetryGenUsage:
+    """回灌重试**生成**阶段已消耗的用量增量（供调用方累加进总额与台账）。"""
+
+    tokens: int
+    cost: Decimal
+    modelName: str
 
 
 def _failedStepResult(step_plan: StepPlan, error: str) -> StepResult:
@@ -1106,12 +1174,16 @@ class ChatService(ChatStreamOutputMixin):
             return featureResponse
         try:
             data, finalSql, retryTokens = await self._runQueryWithRetry(session, dto, pc, outcome)
-        except Exception:
+        except Exception as exc:
+            # 双失败时「重试生成」的 token 随异常交回：无论随后回退多步还是原样上抛都
+            # 必须落账（核心约束 #3——失败路径也是计量路径；单步两处此前都漏了）
+            retryUsage = await self._accountRetryGenUsage(session, dto, exc, pc, outcome)
             # 单步执行失败：回退多步拆解（可拆出 ≥2 数据步时走多步；否则重抛原错误）
             if result.intent in (IntentType.NEW_QUERY, IntentType.QUERY):
                 detected = await self._detectMultiStep(session, dto, pc)
                 if detected is not None and detected.plan is not None:
-                    # 单步已消耗的生成 token/成本 + 拆步判定消耗，一并计入多步响应总额
+                    # 单步已消耗的生成 token/成本 + 拆步判定消耗（+ 重试生成，见上）
+                    # 一并计入多步响应总额
                     prior_tokens = (
                         outcome.promptTokens + outcome.completionTokens
                         + outcome.wasted[0] + outcome.wasted[1]
@@ -1120,6 +1192,9 @@ class ChatService(ChatStreamOutputMixin):
                     prior_cost = self._costForSql(outcome, pc.selected) + self._costFor(
                         pc.selected, detected.prompt_tokens, detected.completion_tokens,
                     )
+                    if retryUsage is not None:
+                        prior_tokens += retryUsage.tokens
+                        prior_cost += retryUsage.cost
                     return await self._executeMultiStep(
                         session, dto, pc, detected.plan, state,
                         initial_tokens=prior_tokens, initial_cost=prior_cost,
@@ -2055,15 +2130,11 @@ class ChatService(ChatStreamOutputMixin):
             )
             # 回灌重试的**生成** token 也随异常交回：重试生成成功、重试执行又失败时，
             # 那次生成同样花了钱，必须落账并计入总量（核心约束 #3——失败路径也是计量路径）
-            rpt, rct = _retryGenTokens(exc)
-            if rpt or rct:
-                retry_cfg = outcome.sqlConfig or pc.selected
-                tokens += rpt + rct
-                cost += self._costFor(retry_cfg, rpt, rct)
-                await self._recordUsage(
-                    session, dto.sessionId, retry_cfg, rpt, rct, purpose="nl2sql",
-                )
-                model_name = retry_cfg.model_name
+            retryUsage = await self._accountRetryGenUsage(session, dto, exc, pc, outcome)
+            if retryUsage is not None:
+                tokens += retryUsage.tokens
+                cost += retryUsage.cost
+                model_name = retryUsage.modelName
             return _StepRun(
                 result=_failedStepResult(step_plan, _stepFailedError(exc, _STEP_EXEC_FAILED_PREFIX)),
                 tokens=tokens, cost=cost, modelName=model_name,
@@ -3585,12 +3656,17 @@ class ChatService(ChatStreamOutputMixin):
 
         try:
             data, finalSql, retryTokens = await self._runQueryWithRetry(session, dto, pc, outcome)
-        except Exception:
+        except Exception as exc:
+            # 双失败时「重试生成」的 token 随异常交回：无论随后回退多步还是原样上抛都
+            # 必须落账。流式尤其关键：上抛会被收敛成 error 事件后正常收尾（HTTP 200、
+            # 事务提交），漏记就是永久缺口（核心约束 #3——失败路径也是计量路径）
+            retryUsage = await self._accountRetryGenUsage(session, dto, exc, pc, outcome)
             # 单步执行失败：回退多步拆解（可拆出 ≥2 数据步时走多步；否则重抛原错误）
             if intent in (IntentType.NEW_QUERY, IntentType.QUERY):
                 detected = await self._detectMultiStep(session, dto, pc)
                 if detected is not None and detected.plan is not None:
-                    # 单步已消耗的生成 token/成本 + 拆步判定消耗，一并计入多步响应总额
+                    # 单步已消耗的生成 token/成本 + 拆步判定消耗（+ 重试生成，见上）
+                    # 一并计入多步响应总额
                     prior_tokens = (
                         outcome.promptTokens + outcome.completionTokens
                         + outcome.wasted[0] + outcome.wasted[1]
@@ -3599,6 +3675,9 @@ class ChatService(ChatStreamOutputMixin):
                     prior_cost = self._costForSql(outcome, pc.selected) + self._costFor(
                         pc.selected, detected.prompt_tokens, detected.completion_tokens,
                     )
+                    if retryUsage is not None:
+                        prior_tokens += retryUsage.tokens
+                        prior_cost += retryUsage.cost
                     async for event in self._streamMultiStep(
                         dto, session, pc, detected.plan, state,
                         initial_tokens=prior_tokens, initial_cost=prior_cost,
@@ -4132,8 +4211,9 @@ class ChatService(ChatStreamOutputMixin):
         整个复合问题。单步场景三个参数都不传（保持旧行为）：question=None → 用
         dto.question、priorState=None、scopeQuestion=None。
 
-        重试**生成**成功但重试执行仍失败时，重试生成的 token 由异常携带交回调用方
-        （见 `_attachRetryGenTokens`），避免「花了钱但失败路径不记账」。
+        重试**生成**成功但重试执行仍失败、以及重试**生成自己**失败，这两种情形下重试
+        那次调用的 token 都由异常携带交回调用方（见 `_attachRetryGenTokens`），避免
+        「花了钱但失败路径不记账」。
         """
         retry_question = question if question is not None else dto.question
         try:
@@ -4155,23 +4235,63 @@ class ChatService(ChatStreamOutputMixin):
                     joins=pc.joins, scopeQuestion=scope_question,
                 )
             except Exception as genErr:
-                # 重试生成本身失败：抛原始执行错误（行为与旧实现一致），但必须留痕——
-                # 否则「重试为什么也没救回来」在日志里无从查证（对外仍只报首次错误）
-                logger.warning("回灌重试的 SQL 生成失败: %s", genErr)
+                # 重试生成本身失败：抛原始执行错误（异常类型与消息不变，行为与旧实现
+                # 一致），但必须留痕，否则「重试为什么也没救回来」在日志里无从查证
+                # （对外仍只报首次错误）。这次生成**确实调了 LLM**：generateSql 把
+                # 已消耗的 token 挂在 Nl2SqlError 上交回（它自己不落账），所以不仅要
+                # 记下失败原因，还要把用量一并交出（核心约束 #3——失败路径也是计量路径）
+                logger.warning("回灌重试的 SQL 生成失败: %s", genErr, exc_info=True)
+                _attachRetryFailure(firstErr, "生成失败", genErr)
+                _attachRetryGenTokens(firstErr, self._consumedTokens(genErr))
                 raise firstErr
             try:
                 data = await self._runQuery(pc, dto, retryResult.sql)
             except Exception as retryErr:
-                # 重试后仍执行失败：抛原始执行错误（对外行为与旧实现一致），但把这次
-                # 重试生成已消耗的 token 挂上去，由调用方落账（核心约束 #3）；
-                # 重试的**新错误**也必须留痕，不能静默吞掉
-                logger.warning("回灌重试后仍执行失败: %s", retryErr)
+                # 重试后仍执行失败：抛原始执行错误（对外异常类型与消息保持旧实现口径，
+                # 不动 API 层的状态映射），但必须把三件事带出去，不能只进一行日志：
+                # ①这次重试生成已消耗的 token（调用方落账，核心约束 #3）；
+                # ②二次失败详情（用户可见的步骤文案要给出两段原因，M7）；
+                # ③重试 SQL —— 它是「重试为什么也没救回来」唯一的证据，此前无处可查
+                logger.warning(
+                    "回灌重试后仍执行失败: %s（重试 SQL: %s）",
+                    retryErr,
+                    _clipText(retryResult.sql or "", _RETRY_SQL_LOG_LIMIT),
+                    exc_info=True,
+                )
+                _attachRetryFailure(firstErr, "后仍执行失败", retryErr)
                 _attachRetryGenTokens(
                     firstErr,
                     (retryResult.promptTokens, retryResult.completionTokens),
                 )
                 raise firstErr
             return data, retryResult.sql, (retryResult.promptTokens, retryResult.completionTokens)
+
+    async def _accountRetryGenUsage(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        exc: Exception,
+        pc: _PipelineContext,
+        outcome: _SqlOutcome,
+    ) -> _RetryGenUsage | None:
+        """把 `_runQueryWithRetry` 二次失败时随异常交回的「重试生成」用量落账。
+
+        两种二次失败都覆盖：重试生成成功但重试执行又失败（用 `SqlResult` 的用量），
+        以及重试生成自己就失败（用 `Nl2SqlError.tokens`）。两种情形都真的调了 LLM、
+        都花了钱，必须写台账并计入总量（核心约束 #3 —— 失败路径也是计量路径）。
+        返回用量增量供调用方累加；异常未携带用量（压根没走到重试，或该异常不带
+        可计量信息）时返回 None，调用方无需判断。不改动入参。
+
+        调用时机是「执行失败后、决定回退/上抛之前」（单步）或「隔离步骤时」（多步）：
+        异常已在此收口，任何分支都不会重复落账。
+        """
+        pt, ct = _retryGenTokens(exc)
+        if not (pt or ct):
+            return None
+        cfg = outcome.sqlConfig or pc.selected
+        cost = self._costFor(cfg, pt, ct)
+        await self._recordUsage(session, dto.sessionId, cfg, pt, ct, purpose="nl2sql")
+        return _RetryGenUsage(tokens=pt + ct, cost=cost, modelName=cfg.model_name)
 
     @staticmethod
     def _columns(data: list[dict]) -> list[str]:

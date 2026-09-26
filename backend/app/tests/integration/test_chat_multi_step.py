@@ -25,6 +25,7 @@ from app.services.messages_zh import MSG_MULTI_STEP_DEGRADE_FAILED
 from app.services.stream_events import (
     EVENT_CLASS_RECALL,
     EVENT_DONE,
+    EVENT_ERROR,
     EVENT_META,
     EVENT_MULTI_STEP_PLAN,
     EVENT_STEP_PLAN,
@@ -79,6 +80,37 @@ class _MultiStepLlm:
         else:
             _Resp.content = "查询完成。"
         return _Resp()
+
+
+class _NoDecomposeLlm(_MultiStepLlm):
+    """拆步 LLM 一律答「不需要多步」→ 单步失败后无多步回退，异常直接上抛。
+
+    用于构造「单步硬失败」终局（`_detectMultiStep` 返回 None），这是唯一能让
+    上抛路径的用量留痕被观测到的形态（见 TestSingleStepRetryMetering）。
+    """
+
+    async def complete(self, messages: list, **kwargs) -> object:
+        resp = await super().complete(messages, **kwargs)
+        if "查询拆分器" in messages[0].content:
+            resp.content = '{"isMultiStep": false, "steps": []}'
+        return resp
+
+
+class _RetryGenFailsLlm(_MultiStepLlm):
+    """单步首次 SQL 执行失败后，**回灌重试的那次生成**也失败（回复里没有 SQL 围栏）。
+
+    真实语义：`Nl2SqlService.generateSql` 解析不出 SQL 时抛 `Nl2SqlError`，并在异常上
+    携带本次调用的 token；`_runQueryWithRetry` 的重试生成分支此前把这些 token 整段
+    丢弃（既没落账、也没随异常交回）。识别方式用回灌提示词里的固定句
+    （见 `Nl2SqlService._buildUserPrompt` 的 executionError 分支）——比按调用序号判定
+    稳，且不影响其它阶段（拆步/计划/汇总）与多步回退后的各步生成。
+    """
+
+    async def complete(self, messages: list, **kwargs) -> object:
+        resp = await super().complete(messages, **kwargs)
+        if "上一次生成的 SQL 在数据库执行时报错" in messages[1].content:
+            resp.content = "抱歉，我无法修正这条 SQL。"  # 无 ```sql 围栏 → 解析失败
+        return resp
 
 
 class _PerStepLlm(_MultiStepLlm):
@@ -742,6 +774,34 @@ class TestStepFailureIsolation:
         feedback = [c.executionError for c in calls if c.executionError]
         assert feedback and all("SECRET_TABLE" in f for f in feedback)
 
+    async def test_step_error_text_carries_retry_failure(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """M7：步骤文案要同时给出「首次」与「重试后仍失败」两段原因。
+
+        只报首次错误会让用户（和排查的人）以为「这一步的 SQL 一上来就写错了」，
+        而真相是首次错了、回灌重试**同样**错 —— 后者才是「为什么没救回来」的答案。
+        两段用不同 ORA 码以便区分「都出现了」与「只出现了首次那条」。
+        """
+        seen = {"n": 0}
+
+        def _sequential() -> Exception:
+            seen["n"] += 1
+            code = "ORA-00942: 表或视图不存在" if seen["n"] == 1 else "ORA-00904: 标识符无效"
+            return RuntimeError(code)
+
+        resp, _, adapter = await self._post(
+            client, dbSession, monkeypatch, stream=False, fail_from_query=2,
+            exc_factory=_sequential,
+        )
+        assert resp.status_code == 200, resp.text
+        assert adapter.failed == 2  # 首次执行 + 回灌重试各失败一次
+        error = resp.json()["steps"][1]["error"]
+
+        assert "ORA-00942" in error, f"首次失败原因缺失：{error}"
+        assert "重试后仍执行失败" in error, f"未交代重试这一步：{error}"
+        assert "ORA-00904" in error, f"重试的失败原因缺失（M7 的整段丢失）：{error}"
+
     async def test_stream_step_failure_isolated(
         self, client, dbSession, monkeypatch,
     ) -> None:
@@ -845,3 +905,140 @@ class TestStepRetryContext:
         assert "前序步骤结果" in (retry.priorState or "")
         # 主问题仍作为 scopeQuestion 透传（范围感知行数限制的并集判定）
         assert retry.scopeQuestion == self._QUESTION
+
+
+class TestSingleStepRetryMetering:
+    """M7：单步路径下「重试生成」的 token 也必须落账。
+
+    核心约束 #3 的失败路径同样是计量路径。此前只有多步 `_executeDataStep` 落了账，
+    单步两条路径（流式/非流式）都漏：重试生成的那次调用的 token 白花 —— 请求继续
+    （回退多步）时响应总额少算且台账缺行。两个分支各漏一次：
+    ①重试生成成功、重试执行又失败（`_attachRetryGenTokens`）；
+    ②重试生成**自己**就失败（`Nl2SqlError.tokens`，此前既没落账也没随异常交回）。
+
+    **关于非流式硬失败**（此前本文档写「异常穿透触发 getDb 整体回滚、故不断言」，那是
+    **错的**）：`TokenUsageService.recordUsage` 每次调用都 `session.add()` +
+    `await session.commit()`（见 `token_usage_service.py`），台账行在每次 LLM 调用后
+    即已提交；`getDb` 的 `rollback()` 只能回滚未提交的工作，撤不掉已提交的行。因此
+    四种组合（流式/非流式 × 回退多步/硬失败）**都会**留下台账行，全部断言。
+    """
+
+    _QUESTION = "对比 2024 和 2025 年的销售额"
+
+    @staticmethod
+    async def _nl2sqlRows(dbSession) -> list[SessionTokenUsage]:
+        usages = list((await dbSession.execute(select(SessionTokenUsage))).scalars().all())
+        return [u for u in usages if u.purpose == "nl2sql"]
+
+    async def test_non_stream_fallback_records_single_step_retry_gen(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """单步（首次 + 回灌重试）双失败 → 回退多步：单步那次重试生成也要有台账行。"""
+        config, ds = await _seed(dbSession)
+        llm = _MultiStepLlm()
+        adapter = _FlakyThenOkAdapter(fail_substring="SUM(QTY)", fail_count=2)
+        _install(monkeypatch, config, llm, adapter)
+
+        resp = await client.post("/api/v1/chat", json=_payload(self._QUESTION, ds.id))
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["intent"] == "multi_step"
+
+        rows = await self._nl2sqlRows(dbSession)
+        # 4 行 = 单步首次生成 + **单步回灌重试生成** + 多步两个数据步骤的首次生成
+        # 不变量：每次 `generateSql` 恰好落一行 nl2sql（无论该次调用成功与否，
+        # 失败路径由异常携带 token 交回）⇒ 行数 == 本次请求实际发生的生成调用次数
+        assert len(rows) == 4, f"nl2sql 台账行数不符：{[(r.prompt_tokens, r.completion_tokens) for r in rows]}"
+        assert all(r.prompt_tokens > 0 for r in rows)
+
+    async def test_retry_generation_failure_records_its_tokens(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """重试**生成**自己失败：那次调用的 token 同样必须落账。
+
+        `generateSql` 解析不出 SQL 时抛 `Nl2SqlError`，token 挂在异常上；重试生成分支
+        此前把它整段丢弃 —— 请求随后照常回退多步并成功收尾（HTTP 200），于是这些
+        token 既不在台账里、也不在响应总额里，是一次「查不到的费用」。
+        """
+        config, ds = await _seed(dbSession)
+        llm = _RetryGenFailsLlm()
+        # 首次数据查询失败一次即够：重试不会执行（生成就失败了），多步回退的各步可用
+        adapter = _FlakyThenOkAdapter(fail_substring="SUM(QTY)", fail_count=1)
+        _install(monkeypatch, config, llm, adapter)
+
+        resp = await client.post("/api/v1/chat", json=_payload(self._QUESTION, ds.id))
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["intent"] == "multi_step"  # 重试生成失败 → 回退多步
+
+        rows = await self._nl2sqlRows(dbSession)
+        # 4 行 = 单步首次生成 + **单步重试生成（解析失败的那次）** + 多步两步的首次生成
+        assert len(rows) == 4, f"nl2sql 台账行数不符：{[(r.prompt_tokens, r.completion_tokens) for r in rows]}"
+        assert all(r.prompt_tokens > 0 for r in rows)
+
+    async def test_stream_fallback_records_single_step_retry_gen(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """流式同分支（两条路径此前实现不对称，这里一并钉住）。"""
+        config, ds = await _seed(dbSession)
+        llm = _MultiStepLlm()
+        adapter = _FlakyThenOkAdapter(fail_substring="SUM(QTY)", fail_count=2)
+        _install(monkeypatch, config, llm, adapter)
+
+        resp = await client.post(
+            "/api/v1/chat/stream", json=_payload(self._QUESTION, ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+        events = [e for e, _ in _parseFrames(resp)]
+        assert EVENT_ERROR not in events  # 回退多步成功，用户看不到错误
+        assert events[-1] == EVENT_DONE
+
+        rows = await self._nl2sqlRows(dbSession)
+        assert len(rows) == 4, f"nl2sql 台账行数不符：{[(r.prompt_tokens, r.completion_tokens) for r in rows]}"
+        assert all(r.prompt_tokens > 0 for r in rows)
+
+    async def test_stream_hard_failure_records_single_step_retry_gen(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """单步双失败且无多步回退（拆步 LLM 判定不需要多步）：用量同样要留下。
+
+        流式路径把异常收敛成 error 事件后正常收尾（HTTP 200），事务提交 —— 这一刻
+        台账就是这次请求唯一的成本记录，重试生成那行不能丢。
+        """
+        config, ds = await _seed(dbSession)
+        llm = _NoDecomposeLlm()
+        adapter = _DataQueryFailAdapter(fail_from_query=1)
+        _install(monkeypatch, config, llm, adapter)
+
+        resp = await client.post(
+            "/api/v1/chat/stream", json=_payload(self._QUESTION, ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+        frames = _parseFrames(resp)
+        assert [e for e, _ in frames][-1] == EVENT_ERROR  # 单步失败直接上抛 → error 事件
+
+        rows = await self._nl2sqlRows(dbSession)
+        # 2 行 = 单步首次生成 + **单步回灌重试生成**（后者此前整段丢失）
+        assert len(rows) == 2, f"nl2sql 台账行数不符：{[(r.prompt_tokens, r.completion_tokens) for r in rows]}"
+        assert all(r.prompt_tokens > 0 for r in rows)
+
+    async def test_non_stream_hard_failure_records_single_step_retry_gen(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """非流式硬失败：异常穿透到 ASGI 层，但已提交的台账行不受影响。
+
+        非流式把异常原样上抛（`_processQuery` 末尾 `raise`，非 DomainError ⇒ 无 500
+        处理器 ⇒ `ASGITransport` 默认把异常重新抛给调用方）。`getDb` 的 `rollback()`
+        只回滚**未提交**的工作：`recordUsage` 在每次 LLM 调用后即 `commit()`，因此
+        这里的两行是提交过的、撤不掉（此前本文档误以为它们会随回滚消失）。
+        """
+        config, ds = await _seed(dbSession)
+        llm = _NoDecomposeLlm()
+        adapter = _DataQueryFailAdapter(fail_from_query=1)
+        _install(monkeypatch, config, llm, adapter)
+
+        with pytest.raises(RuntimeError, match="ORA-00942"):
+            await client.post("/api/v1/chat", json=_payload(self._QUESTION, ds.id))
+
+        rows = await self._nl2sqlRows(dbSession)
+        # 2 行 = 单步首次生成 + 单步回灌重试生成（均已在各自调用后提交）
+        assert len(rows) == 2, f"nl2sql 台账行数不符：{[(r.prompt_tokens, r.completion_tokens) for r in rows]}"
+        assert all(r.prompt_tokens > 0 for r in rows)

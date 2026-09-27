@@ -472,14 +472,31 @@ class _SqlaAdapter:
         # 只返回 1 行，导致 MySQL 数据源 introspection 每个查询只取到首行。无限行必须显式 all()。
         limit = getSettings().queryRowLimit
         timeout = getSettings().queryTimeoutSeconds
+        # 库侧只读兜底：解析层黑名单（M1/M2 批）之外，事务级只读是结构性防御——
+        # 同一事务中所有写入都会被数据库引擎拒绝，与解析层无关。
+        # PG：`SET TRANSACTION READ ONLY`（事务级，会随事务结束释放）；
+        # MySQL 8.0+：`SET SESSION TRANSACTION READ ONLY`（会话级，不需要 SUPER 权限）。
+        # 必须在 `begin()` 之后执行：PG 的 `SET TRANSACTION` 会隐式提交当前事务，
+        # 裸执行会落到一个独立小事务里、立即 commit，丢失只读设置。
+        readonly_sql = (
+            "SET TRANSACTION READ ONLY"
+            if self.dialect == "postgresql"
+            else "SET SESSION TRANSACTION READ ONLY"
+        )
 
         async def _run() -> list[dict[str, Any]]:
             engine = self._ensureEngine()
-            async with engine.connect() as conn:
-                result = await conn.execute(text(sql))
-                mappings = result.mappings()
-                rows = mappings.all() if limit <= 0 else mappings.fetchmany(limit)
-                return [dict(r) for r in rows]
+            # 嵌套 `async with` 是 PG 约束：必须先 begin() 再 SET TRANSACTION READ ONLY
+            # （PG 的 SET TRANSACTION 会隐式提交当前事务，裸执行会丢失只读设置）。
+            # SQLAlchemy 的 `conn.begin()` 返回 AsyncTransaction context manager，
+            # 不能与 `engine.connect()` 合并到同一行（合并写法对异步 tx 无效）。
+            async with engine.connect() as conn:  # noqa: SIM117
+                async with conn.begin():
+                    await conn.execute(text(readonly_sql))
+                    result = await conn.execute(text(sql))
+                    mappings = result.mappings()
+                    rows = mappings.all() if limit <= 0 else mappings.fetchmany(limit)
+                    return [dict(r) for r in rows]
 
         return await asyncio.wait_for(_run(), timeout)
 
@@ -538,7 +555,12 @@ class _OracleAdapter:
                 dsn=self._dsn,
             )
             try:
+                # 库侧只读兜底：Oracle 12c+ 支持 `ALTER SESSION SET READ ONLY`（会话级只读）。
+                # 与 PG/MySQL 不同：Oracle 没有事务级 `SET TRANSACTION READ ONLY`，
+                # 唯一可由应用层触发的只读模式是会话级，且需要 DB 12c+。
+                # 旧版本 Oracle 需依赖库侧授权兜底（见 scripts/db-readonly-account-setup.sql）。
                 cursor = conn.cursor()
+                await cursor.execute("ALTER SESSION SET READ ONLY")
                 await cursor.execute(sql)
                 columns = [desc[0] for desc in cursor.description] if cursor.description else []
                 # Oracle cursor.description 返回的是 Oracle 标识符字面大小写（默认大写），

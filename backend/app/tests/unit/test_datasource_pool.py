@@ -298,7 +298,12 @@ class TestOracleAdapterExecute:
         adapter = pool._OracleAdapter("h", 1521, "svc", "u", "p")
         sql = "SELECT t.2025采购量 FROM (SELECT SUM(QTY) AS 2025采购量 FROM T) t"
         await adapter.execute_read_only(sql)
-        assert conn.executed == ['SELECT t."2025采购量" FROM (SELECT SUM(QTY) AS "2025采购量" FROM T) t']
+        # 库侧只读兜底（fix-sql-guard-db-side-readonly 批）：第一步先
+        # ALTER SESSION SET READ ONLY（Oracle 12c+ 会话级只读），再原 SQL。
+        assert conn.executed == [
+            "ALTER SESSION SET READ ONLY",
+            'SELECT t."2025采购量" FROM (SELECT SUM(QTY) AS "2025采购量" FROM T) t',
+        ]
 
     async def test_execute_read_only_injects_nulls_last(self, monkeypatch) -> None:
         """集成：裸 ORDER BY ... DESC 在执行前被补 NULLS LAST，消除跨年 top-N 抓 NULL 行。"""
@@ -315,10 +320,12 @@ class TestOracleAdapterExecute:
             "WHERE ROWNUM <= 10"
         )
         await adapter.execute_read_only(sql)
+        # 库侧只读兜底（fix-sql-guard-db-side-readonly 批）：前置 ALTER SESSION SET READ ONLY
         assert conn.executed == [
+            "ALTER SESSION SET READ ONLY",
             "SELECT * FROM (SELECT ITMREF_0, SUM(QTYUOM_0) AS TOTAL_QTY_2025 "
             "FROM ZJTH.PORDERQ GROUP BY ITMREF_0 ORDER BY TOTAL_QTY_2025 DESC NULLS LAST) "
-            "WHERE ROWNUM <= 10"
+            "WHERE ROWNUM <= 10",
         ]
 
     async def test_execute_read_only_no_limit_drains_full_streaming_result(self, monkeypatch) -> None:
@@ -636,8 +643,24 @@ class _FakeConn:
     async def __aexit__(self, *exc: object) -> bool:
         return False
 
+    def begin(self) -> _FakeTx:
+        # 库侧只读兜底（fix-sql-guard-db-side-readonly 批）：execute_read_only 现在
+        # 在 `async with conn.begin():` 内执行原 SQL。_FakeTx 作为最简 context manager
+        # 透传：SET TRANSACTION READ ONLY 与原 SQL 都跑在同一事务内（事务边界无 IO 差异）。
+        return _FakeTx()
+
     async def execute(self, sql: str) -> _FakeResult:
         return self._result
+
+
+class _FakeTx:
+    """`_FakeConn.begin()` 返回的伪 AsyncTransaction：仅作 context manager 透传。"""
+
+    async def __aenter__(self) -> _FakeTx:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
 
 
 class _FakeEngine:

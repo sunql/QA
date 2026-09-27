@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from app.infrastructure.milvus_client import (
@@ -34,12 +36,14 @@ class TestWikiPageFields:
 class TestRoundTrip:
     @pytest.mark.integration
     def test_metadata_survives_insert_and_search(self) -> None:
+        page_id = uuid.uuid4().hex[:16]
+        chunk_id = uuid.uuid4().hex[:16]
         ensureWikiPageCollection()
         insertWikiPageChunks(
             [
                 {
-                    "page_id": "PAGE-WIKI-VEC-TEST",
-                    "chunk_id": "wc-0",
+                    "page_id": page_id,
+                    "chunk_id": chunk_id,
                     "chunk_text": "供应商准入门槛",
                     "chunk_sequence": 0,
                     "title": "准入规则",
@@ -50,24 +54,26 @@ class TestRoundTrip:
             ]
         )
         hits = searchWikiPageChunks([0.1] * 1024, topK=10)
-        hit = next((h for h in hits if h["chunk_id"] == "wc-0"), None)
+        hit = next((h for h in hits if h["chunk_id"] == chunk_id), None)
         assert hit is not None
-        assert hit["page_id"] == "PAGE-WIKI-VEC-TEST"
+        assert hit["page_id"] == page_id
         assert hit["title"] == "准入规则"
         assert hit["dimension"] == "RULE"
         assert hit["status"] == "EFFECTIVE"
         assert hit["distance"] >= 0.0
 
-        deleteWikiPageChunks("PAGE-WIKI-VEC-TEST")
+        deleteWikiPageChunks(page_id)
 
     @pytest.mark.integration
     def test_status_exclude_filters_expired(self) -> None:
+        page_id = uuid.uuid4().hex[:16]
+        chunk_id = uuid.uuid4().hex[:16]
         ensureWikiPageCollection()
         insertWikiPageChunks(
             [
                 {
-                    "page_id": "PAGE-WIKI-VEC-EXP",
-                    "chunk_id": "wc-exp",
+                    "page_id": page_id,
+                    "chunk_id": chunk_id,
                     "chunk_text": "已过期条目",
                     "chunk_sequence": 0,
                     "title": "过期",
@@ -78,23 +84,27 @@ class TestRoundTrip:
             ]
         )
         hits = searchWikiPageChunks([0.2] * 1024, topK=50)
-        assert all(h["page_id"] != "PAGE-WIKI-VEC-EXP" for h in hits), (
+        assert all(h["page_id"] != page_id for h in hits), (
             "EXPIRED 默认被排除"
         )
         # 显式不过滤时能查到
         hitsAll = searchWikiPageChunks([0.2] * 1024, statusExclude=(), topK=50)
-        assert any(h["chunk_id"] == "wc-exp" for h in hitsAll)
+        assert any(h["chunk_id"] == chunk_id for h in hitsAll)
 
-        deleteWikiPageChunks("PAGE-WIKI-VEC-EXP")
+        deleteWikiPageChunks(page_id)
 
     @pytest.mark.integration
     def test_delete_scopes_to_one_page(self) -> None:
+        page_id_del = uuid.uuid4().hex[:16]
+        chunk_id_del = uuid.uuid4().hex[:16]
+        page_id_keep = uuid.uuid4().hex[:16]
+        chunk_id_keep = uuid.uuid4().hex[:16]
         ensureWikiPageCollection()
         insertWikiPageChunks(
             [
                 {
-                    "page_id": "PAGE-WIKI-VEC-DEL",
-                    "chunk_id": "wc-del",
+                    "page_id": page_id_del,
+                    "chunk_id": chunk_id_del,
                     "chunk_text": "待删除",
                     "chunk_sequence": 0,
                     "title": "",
@@ -103,8 +113,8 @@ class TestRoundTrip:
                     "embedding": [0.3] * 1024,
                 },
                 {
-                    "page_id": "PAGE-WIKI-VEC-KEEP",
-                    "chunk_id": "wc-keep",
+                    "page_id": page_id_keep,
+                    "chunk_id": chunk_id_keep,
                     "chunk_text": "不该被删",
                     "chunk_sequence": 0,
                     "title": "",
@@ -115,11 +125,11 @@ class TestRoundTrip:
             ]
         )
 
-        deleteWikiPageChunks("PAGE-WIKI-VEC-DEL")
+        deleteWikiPageChunks(page_id_del)
 
-        assert not queryWikiPageChunks("PAGE-WIKI-VEC-DEL")
+        assert not queryWikiPageChunks(page_id_del)
         assert any(
-            r["chunk_id"] == "wc-keep" for r in queryWikiPageChunks("PAGE-WIKI-VEC-KEEP")
+            r["chunk_id"] == chunk_id_keep for r in queryWikiPageChunks(page_id_keep)
         )
 
-        deleteWikiPageChunks("PAGE-WIKI-VEC-KEEP")
+        deleteWikiPageChunks(page_id_keep)

@@ -177,7 +177,7 @@
 |---|---|---|
 | M1 | ~~**SQL Guard 侧信道函数未覆盖**：缺 `pg_sleep`/`pg_advisory_lock`/`dblink`/`SLEEP`/`BENCHMARK`/`LOAD_FILE`/`UTL_HTTP`；sqlparse 跳过 `Literal/Comment` 的隐患。~~ ✅ **已修复（2026-09-26，见 §13）**。<br>⚠️ **同行的「`INTO` 过度拦截（含良性 `SELECT…INTO`）」经实测修正**：四种 `INTO` 子句形态（PG 建表 / MySQL `OUTFILE` / 变量赋值 / 尾随）全部**应当拒**；唯一被误拒的合法形态是「未加引号的 `AS into` 别名」（PG 实测接受），属安全闸门应有的过拦偏向，**不改**（见 §13 决策原则）。 | `business_db_pool.py` |
 | M2 | ~~**SQL Guard 拒绝反馈不具体**：LLM 只见「未通过安全校验」，无法自愈守卫违规。~~ ✅ **已修复（2026-09-26，见 §13）**。 | `nl2sql_service.py:2076-2082` |
-| M3 | ~~**`QueryPlan.from_dict` 吞所有解析错误**：损坏输入静默变空 tuple，掩盖根因（文档明言「绝不抛错」）。~~ ✅ **已修复**（2026-09-26，见 §14）。**并额外修掉一个真实旁路**：返回非 None 的空计划既不入重试也不写日志，直接进 `generateSql`（空计划无引用可校验 ⇒ 能过 `validatePlan` ⇒ 模型可自由编造表名）。 | `query_plan.py:203-206` |
+| M3 | ~~**`QueryPlan.from_dict` 吞所有解析错误**：损坏输入静默变空 tuple，掩盖根因（文档明言「绝不抛错」）。~~ ✅ **已修复**（2026-09-26，见 §14）。**并额外修掉一个真实旁路**：返回非 None 的空计划既不入重试也不写日志，直接进 `generateSql`（空计划无引用可校验 ⇒ 能过 `validatePlan` ⇒ 模型可自由编造表名）。**半空计划方案 A 已堵（2026-09-27）**：`{"rowLimit": 100}` 这种「仅有限制无引用」的半空计划从 `_isEmptyPlan` 判定中移除 rowLimit/perGroupLimit 两个「仅限制」字段，进重试。`{"target": ...}` / `{"conditions": [...]}` / `{"aggregations": [strings]}` 三种形态由 prompt 引导避免出现频次低，未在本批覆盖（**方案 B/C 留作后续**，见 `2026-09-26-plan-scope-gate-proposal.md`）。SSOT `fix-plan-scope-gate-and-trigram/summary.md`。 | `query_plan.py:203-206`、`nl2sql_service.py:60` |
 | M4 | ~~**无同模型瞬态重试**：`generateQueryPlan`/`generateSql` 内部不捕获瞬态 LLM 异常，只靠模型 fallback（换模型≠同模型重试）。~~ ✅ **已修复（2026-09-27，见 §15）**。判定逻辑抽出叶子模块 `app/services/llm_retry_policy.py`（不得 import `chat_service`，否则成环），两个方法在**各自现有的 `for attempt` 循环内**接 `_completeWithTransientRetry`；**并顺带修掉一个比原文更严重的计量盲区**：瞬态异常从循环**裸逃逸**时，前几轮**已累加**的 token 被静默丢弃（第 1 轮成功 3000/500 + 第 2 轮抛出 ⇒ 3500 凭空消失）—— 现改为把已累加用量挂到逃逸异常上。预算按实测收敛为**仅首轮允许额外一次**（`allowRetry = attempt == 0`），最坏 `(maxRetries+1)+1 = 4`，不再「每轮翻倍」。 | 实际接缝 = `nl2sql_service.py:1695`（plan）、`:2157`（sql）两处 `completeWithTransientRetry(...)`（模块 `app/services/llm_retry_policy.py`）；**原行号 `1608`/`2039` 已过期** |
 | M5 | ~~**L3 CTE 引擎是死代码**：`_executeChainedSteps`/`_executeSingleChainedStep` 仅测试引用，无生产接线，且含未计量 LLM 调用。~~ ✅ **已删除（2026-09-27，见 §15）**。按用户口径只删引擎、**保留 `prior_cte` 能力**（`chained_step_plan.py` 的 `render_prior_cte` 留作纯函数工具，契约定为 **WITH-less 片段**，见 M8）；同时保留活代码 `_summarizeStepData`（现 `:2416`，调用点 `:1282`/`:2238`/`:3781`）。**未采纳「接线」那半句**：该引擎唯一的能力（跨步 CTE 串联）已由 `prior_cte` 注入承担，接线是重复实现。 | 删除前位置 `chat_service.py:2455-2495`（`_executeChainedSteps`）、`:2498-2543`（`_executeSingleChainedStep`）（**现已不存在**）；**原行号 `1935-2023` 已过期**；同批删除 `app/tests/services/test_l3_chained_steps.py` 与三处导入 |
 | M6 | **重复定义**：`_buildOptionPrompt` 两次（`chart_service.py:121/226`，同名同签名同注释，后者静默覆盖前者——前一份是死代码）。<br>⚠️ **2026-09-26 复核修正**：本行原写「`_consumedTokens` 两次（`chat_service.py:4048/4052`）」**不成立**——当前只剩一个定义（`chat_service.py:4249`），行号也对不上；评估当日应是笔误或事后已清理。 | ✅ **已修复**（2026-09-26，见 §14）。同文件死代码：2 处 F401 未用导入 + 零调用的 `_inferColumnType`（单数；活的是复数 `_inferColumnTypes`）+ I001；**并新增常驻 AST 守卫**（Python 对类体重复方法零告警，这类腐化只能靠守卫拦住）。 | `chart_service.py:121`、`226` |
@@ -188,7 +188,7 @@
 
 ### 2.4 LOW —— 优化项
 
-- 供应商名 `ilike %name%` 无 trigram 索引（3500 行 seq scan，`supplier_name_resolver.py:151`）。
+- ✅ **supplier name trigram 索引**（3500 行 seq scan，`supplier_name_resolver.py:151`）—— **已修复（2026-09-27）**，alembic 0086 `idx_entity_mapping_supplier_name_trgm` GIN trigram + partial `WHERE entity_type='SUPPLIER'`。EXPLAIN 待 prod 真机探针验证（部署门禁建议）。
 - `_callWithRetryBackoff` 末尾 `raise RuntimeError("unreachable")`（死分支）。
 - 大量编译期魔数（topK=15、max=30、2000/600 char、阈值 0.3、5 轮等），仅部分已 `system_config` 化。
 

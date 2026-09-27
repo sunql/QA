@@ -58,7 +58,7 @@ REASON_PLAN_DEGRADED = "PLAN_DEGRADED"  # 解析成功但有内容级丢弃（�
 
 
 def _isEmptyPlan(plan: QueryPlan) -> bool:
-    """计划是否「全空」：无 target、无任何引用/条件/聚合/分组/排序/限制。
+    """计划是否「无可查询引用」：无 target、无任何引用/条件/聚合/分组/排序。
 
     全空计划能通过 validatePlan（没有任何可校验的引用），随后被送进 SQL 生成，
     模型得以自由编造表名（结果报错被包装成"服务内部错误"）。故判为解析失败走重试，
@@ -67,6 +67,10 @@ def _isEmptyPlan(plan: QueryPlan) -> bool:
     判定取**最窄口径**（所有字段都空才算空），且 `target="无法回答"` 的合法空计划
     不受影响（isUnanswerable 走自己的短路路径）。interpretation 不计入：它只是解释，
     不是可查询目标。
+
+    半空计划闸门（方案A）：`rowLimit` / `perGroupLimit` 单独存在不再视为「有内容」。
+    `{"rowLimit": 100}` 这种只有行数限制、无任何引用的计划曾能过 validatePlan
+    → 进 generateSql 让模型自由选表/编表名，现纳入失败重试。
     """
     return not (
         plan.target.strip()
@@ -78,8 +82,6 @@ def _isEmptyPlan(plan: QueryPlan) -> bool:
         or plan.joins
         or plan.sortBy
         or plan.partitionBy
-        or plan.rowLimit is not None
-        or plan.perGroupLimit is not None
     )
 
 

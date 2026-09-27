@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from app.infrastructure.milvus_client import (
@@ -90,12 +92,16 @@ class TestRoundTrip:
     @pytest.mark.integration
     def test_delete_document_chunks_scopes_to_one_document(self) -> None:
         """按 document_id 删除只带走该文档的 chunk，不是清空集合。"""
+        doc_id_del = uuid.uuid4().hex[:16]
+        chunk_id_a = uuid.uuid4().hex[:16]
+        doc_id_keep = uuid.uuid4().hex[:16]
+        chunk_id_b = uuid.uuid4().hex[:16]
         ensureDocumentCollection()
         insertDocumentChunks(
             [
                 {
-                    "document_id": "DOC-P0-DEL",
-                    "chunk_id": "chunk-del-a",
+                    "document_id": doc_id_del,
+                    "chunk_id": chunk_id_a,
                     "chunk_text": "待删除",
                     "chunk_sequence": 0,
                     "page_number": 1,
@@ -104,8 +110,8 @@ class TestRoundTrip:
                     "embedding": [0.3] * 1024,
                 },
                 {
-                    "document_id": "DOC-P0-KEEP",
-                    "chunk_id": "chunk-del-b",
+                    "document_id": doc_id_keep,
+                    "chunk_id": chunk_id_b,
                     "chunk_text": "不该被删",
                     "chunk_sequence": 0,
                     "page_number": 1,
@@ -116,23 +122,25 @@ class TestRoundTrip:
             ]
         )
 
-        deleteDocumentChunks("DOC-P0-DEL")
+        deleteDocumentChunks(doc_id_del)
 
-        assert _findChunk("chunk-del-a", [0.3] * 1024) is None
-        assert _findChunk("chunk-del-b", [0.4] * 1024) is not None
+        assert _findChunk(chunk_id_a, [0.3] * 1024) is None
+        assert _findChunk(chunk_id_b, [0.4] * 1024) is not None
 
         # 收尾：本用例同样不该给共享集合留残留
-        deleteDocumentChunks("DOC-P0-KEEP")
+        deleteDocumentChunks(doc_id_keep)
 
     @pytest.mark.integration
     def test_query_document_chunks_returns_locators(self) -> None:
         """按 document_id 直查（不经向量检索）也要能拿到定位符。"""
+        doc_id = uuid.uuid4().hex[:16]
+        chunk_id = uuid.uuid4().hex[:16]
         ensureDocumentCollection()
         insertDocumentChunks(
             [
                 {
-                    "document_id": "DOC-P0-QRY",
-                    "chunk_id": "chunk-qry",
+                    "document_id": doc_id,
+                    "chunk_id": chunk_id,
                     "chunk_text": "直查定位符",
                     "chunk_sequence": 0,
                     "page_number": 7,
@@ -143,13 +151,13 @@ class TestRoundTrip:
             ]
         )
 
-        rows = [r for r in queryDocumentChunks("DOC-P0-QRY") if r["chunk_id"] == "chunk-qry"]
+        rows = [r for r in queryDocumentChunks(doc_id) if r["chunk_id"] == chunk_id]
         assert len(rows) == 1
         assert rows[0]["page_number"] == 7
         assert rows[0]["section_name"] == "采购管理"
         assert rows[0]["paragraph_no"] == 2
 
-        deleteDocumentChunks("DOC-P0-QRY")
+        deleteDocumentChunks(doc_id)
 
 
 def _findChunk(chunkId: str, embedding: list[float]) -> dict | None:

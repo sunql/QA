@@ -96,6 +96,18 @@ L3 CTE 引擎已于 2026-09-27 删除（M5 批），但**前端展示**仍把 L3
 - **后端无需 rebuild**：本批无 Python 改动；
 - **网关**：`/api/v1/health` 直连 8000 与 nginx 5173 均 200（前端改动不影响后端）。
 
+> ⚠️ **更正（2026-09-27 二次执行）**：本节首次写入时**部署并未实际执行**——运行中镜像
+> 停留在 2026-09-26 16:19（早于修复 commit `ac94416` 的 2026-09-27 10:07），旧 bundle
+> `index-suiR3M4D.js` 仍含「L3 多步链式推理」。2026-09-27 实际执行：
+> ```
+> docker compose -f docker/docker-compose.yml build --no-cache \
+>   --build-arg NPM_REGISTRY=https://registry.npmmirror.com frontend
+> docker compose -f docker/docker-compose.yml up -d frontend
+> ```
+> 实测：新 bundle `index-CrZz1sMZ.js`（hash 已变），旧 L3 字符串 **0 命中**、
+> 「L2 LLM NL2SQL」**1 命中**，nginx `/` 与 `/api/v1/health` 均 200。
+> **教训：部署验证段必须在真跑之后写，禁止先写结论后补执行。**
+
 ## 9. 关联
 
 - commit：

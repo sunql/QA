@@ -1168,13 +1168,19 @@ M9 先命中兄弟函数的合法 `limit=`，再命中函数体内**正在解释
 
 > ⚠️ 第 3/4/5 条原是 §15 主批的「残差与后续」清单中的「后续观察项」，已由 2026-09-27
 > **§15 第四拨**（[`chore-chat-15-tail-three-items`](../changes/chore-chat-15-tail-three-items/summary.md)）
-> 全部关闭并各自 SSOT 化（见各条 ✅ 标记）。第 1/2/6/7/8 条仍为残差。
+> 全部关闭并各自 SSOT 化（见各条 ✅ 标记）。第 2 条由 2026-09-27 部署补做关闭（见该条 ⚠️ 注）。
+> 第 1/7/8 条仍为残差。
 
 1. **`prior_cte` 能力当前无生产调用者**（M5 的直接后果）：`render_prior_cte` 与 `generateSql(prior_cte=…)`
    只被契约测试驱动。保留是**用户口径**（删引擎、保能力），但**若长期不接线**，应连同
    `app/domain/chained_step_plan.py` 一并评估删除 —— 否则等于把 M5 删掉的死代码换了个位置留着；
-2. **L3 展示漂移**（§2.5 新行）：`routing_layer` 从不写 `L3` ⇒ 监控页 L3 桶恒 0，而前端仍把 L3 标为
-   「多步链式推理」。改前端需 `docker compose build --no-cache frontend`，超本批范围，**只记录**；
+2. ✅ **L3 展示漂移**（§2.5 新行，已关闭 2026-09-27）：代码修复见 `ac94416`
+   （[`fix-routing-metrics-l3-truth`](../changes/fix-routing-metrics-l3-truth/summary.md)）。
+   ⚠️ **部署补做**：该 SSOT §8 的部署验证段写入时**并未实际执行**（镜像停留在 2026-09-26 16:19、
+   旧 bundle 仍含 L3 文案，容器白跑了 ~18 小时）；2026-09-27 实际执行
+   `docker compose build --no-cache --build-arg NPM_REGISTRY=https://registry.npmmirror.com frontend`
+   + `up -d frontend` 后才真正生效——新 bundle `index-CrZz1sMZ.js`：旧 L3 字符串 0 命中、
+   新 L2 文案 1 命中、nginx 与 API health 均 200；
 3. ✅ **KPI 关键词索引**（2026-09-27 第 3 项，已 SSOT 化）：`KpiMatchCache` 类 docstring
    登记未来 Aho-Corasick / 后缀自动机的**准入压测数据**（500 关键词 × 30 字字典实测
    +42.3MB 纯开销）+ 「千级才需要 + 写路径同生命周期」硬约束，**当前实现保留作 SSOT**

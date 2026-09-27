@@ -71,17 +71,22 @@ _CLAUSE_LIMIT = re.compile(r"\bLIMIT\s+\d+(?:\s*,\s*\d+)?", re.IGNORECASE)
 # （MEDIUM-2：标识符直接拼入 SQL，需强制为标识符字符。3-5 起放行中文字符——CJK 无法
 #  闭合字符串/注释上下文——但分隔符、引号、空白仍拒绝。）
 _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_㐀-鿿][A-Za-z0-9_㐀-鿿]*$")
-# REFINE 行数上限：钳制超大 LIMIT/FETCH，避免拖慢查询规划（LOW-3）
-_REFINE_MAX_LIMIT = 1000
+# REFINE 行数上限：钳制超大 LIMIT/FETCH，避免拖慢查询规划（LOW-3）。
+# 运行期从 system_config.REFINE_MAX_LIMIT 现读（魔数治理 Phase 2 hard tier），
+# 缺席/格式错返 _DEFAULT。
+_REFINE_MAX_LIMIT_DEFAULT = 1000
 
 
-def _extractLimit(question: str) -> int | None:
-    """从问题中提取行数并钳制到上限；无法识别返回 None。"""
+def _extractLimit(question: str, maxLimit: int = _REFINE_MAX_LIMIT_DEFAULT) -> int | None:
+    """从问题中提取行数并钳制到上限；无法识别返回 None。
+
+    maxLimit 运行期从 system_config.REFINE_MAX_LIMIT 现读（魔数治理 Phase 2）。
+    """
     match = _REFINE_LIMIT_RE.search(question)
     if not match:
         return None
     raw = match.group(1) or match.group(2)
-    return min(int(raw), _REFINE_MAX_LIMIT)
+    return min(int(raw), maxLimit)
 
 
 def _rewriteLimit(sql: str, n: int) -> str | None:
@@ -338,7 +343,9 @@ def _rewriteWhere(sql: str, cond: str) -> str:
     return f"{sql.rstrip()} WHERE {cond}"
 
 
-def applyRefineDirect(sql: str, plan: QueryPlan | None, question: str) -> str | None:
+def applyRefineDirect(
+    sql: str, plan: QueryPlan | None, question: str, *, maxLimit: int = _REFINE_MAX_LIMIT_DEFAULT
+) -> str | None:
     """REFINE 捷径：纯代码改写上一轮 SQL（行数/排序/筛选），不调 LLM。
 
     返回改写后的 SQL；无法安全识别时返回 None（流水线退回 LLM 两阶段）。
@@ -349,6 +356,8 @@ def applyRefineDirect(sql: str, plan: QueryPlan | None, question: str) -> str | 
     3-5：排序列额外允许顶层 SELECT 别名（ORDER BY alias 在 ANSI SQL 合法），
     让 "按总额降序" 命中 `SUM(金额) AS 总额`；筛选列仍只取计划列（WHERE 引用
     聚合别名非法）。列名匹配对大小写不敏感。
+
+    maxLimit 运行期从 system_config.REFINE_MAX_LIMIT 现读（魔数治理 Phase 2）。
     """
     if not sql or not question:
         return None
@@ -360,7 +369,7 @@ def applyRefineDirect(sql: str, plan: QueryPlan | None, question: str) -> str | 
     sortColumns = planColumns + _extractAliases(sql)
     transformed = False
 
-    limit = _extractLimit(question)
+    limit = _extractLimit(question, maxLimit)
     if limit is not None:
         rewritten = _rewriteLimit(sql, limit)
         if rewritten is not None:

@@ -26,6 +26,9 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any
 
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.config import getSettings
 from app.domain.enums import DataSourceType
 from app.domain.exceptions import Nl2SqlError, SqlSafetyError
@@ -51,8 +54,8 @@ from app.services.nl2sql_plan import (
     _finalizePlan,
     _parsePlanOutcome,
     _isEmptyPlan,
-    _NL2SQL_MAX_TOKENS,
-    _NL2SQL_TRUNCATION_BACKOFF,
+    _NL2SQL_MAX_TOKENS_DEFAULT,
+    _NL2SQL_TRUNCATION_BACKOFF_DEFAULT,
 )
 from app.services.nl2sql_prompts import (
     _buildPlanSystemPrompt,
@@ -64,10 +67,11 @@ from app.services.nl2sql_prompts import (
 )
 from app.services.nl2sql_refine import (
     applyRefineDirect,
-    _REFINE_MAX_LIMIT,
+    _REFINE_MAX_LIMIT_DEFAULT,
     _normalizeDate,
 )
 from app.services.nl2sql_refs import (
+    _OWNER_HINT_MAX_CLASSES_DEFAULT,
     _normalizePlanProperties,
     _splitCompoundRef,
 )
@@ -81,6 +85,9 @@ from app.services.nl2sql_schema import (
     _buildJoinGraph,
     _findJoinPath,
     _resolveRefTable,
+    _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT,
+    _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
+    _VALUE_SAMPLE_VALUE_MAX_DEFAULT,
 )
 from app.services.nl2sql_scope import (
     _applyScopeRowLimit,
@@ -102,6 +109,85 @@ class SqlResult:
     sql: str
     promptTokens: int
     completionTokens: int
+
+
+# ---------------------------------------------------------------------------
+# 魔数治理 Phase 2 hard tier：system_config 现读 getter（门面实例方法）。
+# 与 chat_recall/chat_context 的 `_getXxx(session)` 同口径：不缓存、失败不阻断、
+# int getter 非正返默认、text() 直写 key 不走 ORM。
+# ---------------------------------------------------------------------------
+
+
+async def _readIntConfig(session: AsyncSession, key: str, default: int) -> int:
+    """读 system_config 的 int 配置；缺席/格式错/非正/异常返 default。
+
+    与 ``ChatService._getClassFilterMaxClasses`` 同口径（SSOT），读失败不阻断主链路。
+    """
+    raw: str | None = None
+    try:
+        row = await session.execute(
+            text(f"SELECT value FROM system_config WHERE key = '{key}'")
+        )
+        raw = row.scalar_one_or_none()
+        if raw is None or raw == "":
+            return default
+        value = int(raw)
+        if value <= 0:
+            logger.warning(
+                "%s 非正值 %r，返默认值 %d", key, raw, default,
+            )
+            return default
+        return value
+    except (TypeError, ValueError):
+        logger.warning(
+            "%s 值非法 %r，返默认值 %d", key, raw, default,
+        )
+        return default
+    except Exception:
+        logger.warning(
+            "读取 %s 失败，返默认值 %d", key, default, exc_info=True,
+        )
+        return default
+
+
+async def _readSchemaConfig(session: AsyncSession) -> dict[str, int]:
+    """在编排层一次性现读 schema 渲染 3 阈值 + token 上限（NL2SQL_MAX_TOKENS）。
+
+    单事务同 session 读 4 个 key，避免 generateSql / generateValidatedPlan 内多次
+    往返 DB；缺席/格式错/非正逐 key 返 _DEFAULT（单 key 失败不影响其他 key）。
+    """
+    return {
+        "digestMaxItems": await _readIntConfig(
+            session, "CRITICAL_DIGEST_MAX_ITEMS", _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT
+        ),
+        "digestMaxDescChars": await _readIntConfig(
+            session, "CRITICAL_DIGEST_MAX_DESC_CHARS", _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT
+        ),
+        "valueSampleValueMax": await _readIntConfig(
+            session, "VALUE_SAMPLE_VALUE_MAX", _VALUE_SAMPLE_VALUE_MAX_DEFAULT
+        ),
+        "maxTokens": await _readIntConfig(
+            session, "NL2SQL_MAX_TOKENS", _NL2SQL_MAX_TOKENS_DEFAULT
+        ),
+    }
+
+
+async def _readPlanConfig(session: AsyncSession) -> dict[str, int]:
+    """在编排层一次性现读 validatePlan 的 OWNER_HINT_MAX_CLASSES。"""
+    return {
+        "ownerHintMaxClasses": await _readIntConfig(
+            session, "OWNER_HINT_MAX_CLASSES", _OWNER_HINT_MAX_CLASSES_DEFAULT
+        ),
+    }
+
+
+async def _readRefineConfig(session: AsyncSession) -> dict[str, int]:
+    """在编排层一次性现读 REFINE_MAX_LIMIT。"""
+    return {
+        "maxLimit": await _readIntConfig(
+            session, "REFINE_MAX_LIMIT", _REFINE_MAX_LIMIT_DEFAULT
+        ),
+    }
 
 
 class Nl2SqlService:
@@ -187,9 +273,17 @@ class Nl2SqlService:
             featureCatalogText=featureCatalogText,
         )
 
-    def validatePlan(self, plan: QueryPlan, classes: list[OntologyClass]) -> list[str]:
-        """纯代码校验计划引用是否在本体 schema 中。空列表 = 通过。"""
-        return validatePlan(plan, classes)
+    def validatePlan(
+        self, plan: QueryPlan, classes: list[OntologyClass],
+        *, ownerHintMaxClasses: int = _OWNER_HINT_MAX_CLASSES_DEFAULT,
+    ) -> list[str]:
+        """纯代码校验计划引用是否在本体 schema 中。空列表 = 通过。
+
+        ownerHintMaxClasses 为魔数治理 Phase 2 hard tier 注入参数：默认 _DEFAULT，
+        编排层（generateValidatedPlan）传 system_config 现读值；直接调本方法时
+        缺省为默认值（既有调用零改动）。
+        """
+        return validatePlan(plan, classes, ownerHintMaxClasses=ownerHintMaxClasses)
 
     def _buildPlanUserPrompt(
         self, question: str, errors: list[str], *,
@@ -239,6 +333,35 @@ class Nl2SqlService:
         """ReAct 推理阶段：生成结构化查询计划。"""
         return await generateQueryPlan(question, classes, llmClient, modelConfig, **kwargs)
 
+    async def _readPlanConfigOrDefault(
+        self, session: AsyncSession | None,
+    ) -> dict[str, int]:
+        """魔数治理：session 提供时现读 plan 配置，缺席时落默认值。"""
+        if session is None:
+            return {"ownerHintMaxClasses": _OWNER_HINT_MAX_CLASSES_DEFAULT}
+        return await _readPlanConfig(session)
+
+    async def _readRefineConfigOrDefault(
+        self, session: AsyncSession | None,
+    ) -> dict[str, int]:
+        """魔数治理：session 提供时现读 refine 配置，缺席时落默认值。"""
+        if session is None:
+            return {"maxLimit": _REFINE_MAX_LIMIT_DEFAULT}
+        return await _readRefineConfig(session)
+
+    async def _readSchemaConfigOrDefault(
+        self, session: AsyncSession | None,
+    ) -> dict[str, int]:
+        """魔数治理：session 提供时现读 schema 配置，缺席时落默认值。"""
+        if session is None:
+            return {
+                "digestMaxItems": _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT,
+                "digestMaxDescChars": _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
+                "valueSampleValueMax": _VALUE_SAMPLE_VALUE_MAX_DEFAULT,
+                "maxTokens": _NL2SQL_MAX_TOKENS_DEFAULT,
+            }
+        return await _readSchemaConfig(session)
+
     async def generateValidatedPlan(
         self,
         question: str,
@@ -261,6 +384,7 @@ class Nl2SqlService:
         scopeQuestion: str | None = None,
         featureCatalogText: str | None = None,
         globalFiltersText: str | None = None,
+        session: AsyncSession | None = None,
     ) -> Any:
         """生成并通过本体 schema 校验的查询计划（ReAct 两阶段流水线阶段一）。
 
@@ -299,8 +423,12 @@ class Nl2SqlService:
         planResult = replace(
             planResult, plan=_normalizePlanProperties(planResult.plan, classes),
         )
+        # 魔数治理 Phase 2 hard tier：编排层现读 validatePlan 配置（session 缺席落默认）。
+        planCfg = await self._readPlanConfigOrDefault(session)
         for _ in range(maxPlanAttempts - 1):
-            issues = self.validatePlan(planResult.plan, classes)
+            issues = self.validatePlan(
+                planResult.plan, classes, ownerHintMaxClasses=planCfg["ownerHintMaxClasses"]
+            )
             if not issues:
                 return self._finalizePlan(planResult, classes, joins, scopeText)
             planResult = await self.generateQueryPlan(
@@ -310,7 +438,9 @@ class Nl2SqlService:
             planResult = replace(
                 planResult, plan=_normalizePlanProperties(planResult.plan, classes),
             )
-        issues = self.validatePlan(planResult.plan, classes)
+        issues = self.validatePlan(
+            planResult.plan, classes, ownerHintMaxClasses=planCfg["ownerHintMaxClasses"]
+        )
         if issues:
             raise Nl2SqlError(
                 MSG_NL2SQL_PLAN_VALIDATION_FAILED,
@@ -321,9 +451,16 @@ class Nl2SqlService:
         return self._finalizePlan(planResult, classes, joins, scopeText)
 
     @staticmethod
-    def applyRefineDirect(sql: str, plan: QueryPlan | None, question: str) -> str | None:
-        """REFINE 捷径：纯代码改写上一轮 SQL（行数/排序/筛选），不调 LLM。"""
-        return applyRefineDirect(sql, plan, question)
+    def applyRefineDirect(
+        sql: str, plan: QueryPlan | None, question: str, *, maxLimit: int = _REFINE_MAX_LIMIT_DEFAULT
+    ) -> str | None:
+        """REFINE 捷径：纯代码改写上一轮 SQL（行数/排序/筛选），不调 LLM。
+
+        maxLimit 为魔数治理 Phase 2 hard tier 注入参数：默认 _DEFAULT，
+        编排层（generateSql）传 system_config 现读值；直接调本方法时
+        缺省为默认值（既有调用零改动）。
+        """
+        return applyRefineDirect(sql, plan, question, maxLimit=maxLimit)
 
     # ------------------------------------------------------------------
     # 编排入口（保留在门面）：流式 SQL 解析 + SQL 生成。
@@ -362,6 +499,7 @@ class Nl2SqlService:
         joins: list[OntologyJoin] | None = None,
         scopeQuestion: str | None = None,
         prior_cte: str | None = None,
+        session: AsyncSession | None = None,
     ) -> SqlResult:
         """生成 SQL。最多 maxRetries+1 次尝试；失败注入错误重试。
 
@@ -382,9 +520,15 @@ class Nl2SqlService:
         **唯一一个**前导 `WITH` 拼装到最终 SQL（`WITH prior_cte <sql>`），
         同时注入 system prompt 供当前步引用前序 CTE。
         入参自带前导 `WITH` 会被**立即拒绝**（否则拼成 `WITH WITH`，见 M8）。
+
+        session 为可选魔数治理注入：提供时同步现读 schema 渲染阈值 +
+        NL2SQL_MAX_TOKENS + REFINE_MAX_LIMIT；缺席时全部落默认值（既有调用零改动）。
         """
         if maxRetries is None:
             maxRetries = getSettings().nl2sqlMaxRetries
+        # 魔数治理 Phase 2 hard tier：session 提供时现读 schema/token/refine 配置。
+        schemaCfg = await self._readSchemaConfigOrDefault(session)
+        refineCfg = await self._readRefineConfigOrDefault(session)
         dialect = resolveDialect(datasourceType, oracle_version)
         schemaText = buildSchemaText(
             classes,
@@ -392,6 +536,9 @@ class Nl2SqlService:
             valueSamples=valueSamples,
             driftWarning=driftWarning,
             joins=joins,
+            digestMaxItems=schemaCfg["digestMaxItems"],
+            digestMaxDescChars=schemaCfg["digestMaxDescChars"],
+            valueSampleValueMax=schemaCfg["valueSampleValueMax"],
         )
         errors: list[str] = []
         totalPrompt = 0
@@ -401,11 +548,13 @@ class Nl2SqlService:
         # 再按拼接后的真实形态做只读校验（见 _assertPriorCteSafe）。
         if prior_cte:
             _assertPriorCteSafe(prior_cte)
-        # 截断重试预算：首次为 _NL2SQL_MAX_TOKENS，截断命中后翻倍（有上限）。
+        # 截断重试预算：首次为 maxTokens（system_config.NL2SQL_MAX_TOKENS 或默认），
+        # 截断命中后翻倍（有上限）。
         # temperature=0 时同输入必得同输出，若预算不变，截断重试只会反复产出
         # 同一段截断 SQL（且注入的截断提示使输入变长、更易再截断）；翻倍预算让
         # 确定性输出有机会续完（0-2 交互修复）。
-        maxTokens = _NL2SQL_MAX_TOKENS
+        maxTokens = schemaCfg["maxTokens"]
+        truncationBackoff = maxTokens * 2
 
         for attempt in range(maxRetries + 1):
             systemPrompt = _buildSystemPrompt(
@@ -443,7 +592,7 @@ class Nl2SqlService:
                 errors.append(
                     f"第 {attempt + 1} 次尝试的回复达到 token 上限，SQL 可能被截断"
                 )
-                maxTokens = min(maxTokens * 2, _NL2SQL_TRUNCATION_BACKOFF)
+                maxTokens = min(maxTokens * 2, truncationBackoff)
                 continue
             # prior_cte 已有先行校验；若有 prior_cte 则将其 prepend 到 LLM SQL，
             # 再对组合后的完整 SQL 做 SQL Guard（Task 3.2）。
@@ -472,3 +621,24 @@ class Nl2SqlService:
             detail="; ".join(errors),
             tokens=(totalPrompt, totalCompletion),
         )
+
+
+# ---------------------------------------------------------------------------
+# re-export：被测试/生产直接 import 的私有名（门面模式，保证 30+ 处既有 import 零改动）
+# ---------------------------------------------------------------------------
+from app.services.nl2sql_plan import (
+    _NL2SQL_MAX_TOKENS_DEFAULT as _NL2SQL_MAX_TOKENS_DEFAULT,
+    _NL2SQL_TRUNCATION_BACKOFF_DEFAULT as _NL2SQL_TRUNCATION_BACKOFF_DEFAULT,
+)
+from app.services.nl2sql_refine import (
+    _REFINE_MAX_LIMIT_DEFAULT as _REFINE_MAX_LIMIT_DEFAULT,
+    _normalizeDate as _normalizeDate,
+)
+from app.services.nl2sql_refs import (
+    _OWNER_HINT_MAX_CLASSES_DEFAULT as _OWNER_HINT_MAX_CLASSES_DEFAULT,
+)
+from app.services.nl2sql_schema import (
+    _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT as _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT,
+    _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT as _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
+    _VALUE_SAMPLE_VALUE_MAX_DEFAULT as _VALUE_SAMPLE_VALUE_MAX_DEFAULT,
+)

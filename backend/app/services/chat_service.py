@@ -854,6 +854,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                 # feat-multistep-global-filter B 层：跨步骤共享范围类约束文本注入
                 # 计划 user prompt 的 [global_constraints] 块（None = 不注入）。
                 globalFiltersText=global_filters.text if global_filters else None,
+                # 魔数治理 Phase 2 hard tier：session 传入让 nl2sql 编排层现读阈值。
+                session=session,
             ),
             forced=pc.forcedModel,
         )
@@ -915,6 +917,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         scopeQuestion: str | None = None,
         featureCatalogText: str | None = None,
         globalFiltersText: str | None = None,
+        session: Any = None,
     ) -> tuple[Any, Any]:
         """两阶段 LLM 调用：先生成并校验查询计划，再基于计划生成 SQL。
 
@@ -929,6 +932,9 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         None = 单步场景，使用 question 本身判定范围。
         globalFiltersText（feat-multistep-global-filter B 层）：多步共享范围类约束，
         透传进计划阶段渲染进 user prompt 的 [global_constraints] 块；None = 不注入。
+        session：可选 DB 会话（魔数治理 Phase 2 hard tier），传入时
+        generateValidatedPlan / generateSql 现读 system_config 阈值；
+        缺席时落默认值（既有调用零改动）。
         """
         planResult = await self._nl2sql.generateValidatedPlan(
             question, classes, client, cfg,
@@ -939,6 +945,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             scopeQuestion=scopeQuestion,
             featureCatalogText=featureCatalogText,
             globalFiltersText=globalFiltersText,
+            session=session,
         )
         if planResult.plan.isUnanswerable:
             return planResult, SqlResult(sql="", promptTokens=0, completionTokens=0)
@@ -950,6 +957,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             valueSamples=valueSamples, driftWarning=driftWarning,
             joins=joins,
             scopeQuestion=scopeQuestion,
+            session=session,
         )
         return planResult, sqlResult
 

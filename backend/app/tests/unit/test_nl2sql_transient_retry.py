@@ -219,9 +219,9 @@ class TestGenerateSqlTransientRetry:
 
     async def test_truncation_backoff_budget_not_disturbed_by_inner_retry(self) -> None:
         """截断扩容（maxTokens 翻倍）在每轮调用前算一次，内层重试不改它。"""
-        from app.services.nl2sql_service import _NL2SQL_MAX_TOKENS
+        from app.services.nl2sql_service import _NL2SQL_MAX_TOKENS_DEFAULT
 
-        truncated = _Resp(_VALID_SQL, 10, _NL2SQL_MAX_TOKENS)
+        truncated = _Resp(_VALID_SQL, 10, _NL2SQL_MAX_TOKENS_DEFAULT)
         fake = _ScriptedLlm([_retryable(), truncated, _Resp(_VALID_SQL, 10, 5)])
         service = Nl2SqlService()
         result = await service.generateSql(
@@ -229,7 +229,7 @@ class TestGenerateSqlTransientRetry:
         )
         assert result.sql
         # 第 1 轮的两次调用（原始 + 内层重试）共用同一轮预算
-        assert fake.calls[0]["maxTokens"] == _NL2SQL_MAX_TOKENS
-        assert fake.calls[1]["maxTokens"] == _NL2SQL_MAX_TOKENS
+        assert fake.calls[0]["maxTokens"] == _NL2SQL_MAX_TOKENS_DEFAULT
+        assert fake.calls[1]["maxTokens"] == _NL2SQL_MAX_TOKENS_DEFAULT
         # 截断命中后翻倍只影响后续轮次
-        assert fake.calls[2]["maxTokens"] == _NL2SQL_MAX_TOKENS * 2
+        assert fake.calls[2]["maxTokens"] == _NL2SQL_MAX_TOKENS_DEFAULT * 2

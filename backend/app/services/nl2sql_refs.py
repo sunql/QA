@@ -176,18 +176,27 @@ def _timeBucketGroupHint(token: str, classes: list[OntologyClass]) -> str:
     )
 
 
-# 属性归属提示最多列出的拥有类数量（避免 schema 类多时提示过长挤占重试 token）
-_OWNER_HINT_MAX_CLASSES = 3
+# 属性归属提示最多列出的拥有类数量（避免 schema 类多时提示过长挤占重试 token）。
+# 运行期从 system_config.OWNER_HINT_MAX_CLASSES 现读（魔数治理 Phase 2 hard tier），
+# 缺席/格式错返 _DEFAULT。
+_OWNER_HINT_MAX_CLASSES_DEFAULT = 3
 
 
-def _propertyOwnerHint(prop: str, propsByClass: dict[str, set[str]]) -> str:
+def _propertyOwnerHint(
+    prop: str,
+    propsByClass: dict[str, set[str]],
+    *,
+    maxClasses: int = _OWNER_HINT_MAX_CLASSES_DEFAULT,
+) -> str:
     """属性不在选定类时的可操作提示：说明归属或如实告知不存在。
 
     生产回归（2026-09-16）：LLM 引用跨类属性（「供应商名称」属于供应商主表，
     但 selectedClasses 只选了收货明细类），原「不属于选定的任何类」无指引，
-    重试两次仍犯同错 → 整轮失败。有归属类时列出（截断到 _OWNER_HINT_MAX_CLASSES），
+    重试两次仍犯同错 → 整轮失败。有归属类时列出（截断到 maxClasses），
     引导把类加入 selectedClasses 并经 JOIN 目录关联；schema 中完全不存在时如实
     说明（含别名/物理列口径），避免重试继续幻觉同一属性名。
+
+    maxClasses 运行期从 system_config.OWNER_HINT_MAX_CLASSES 现读（魔数治理 Phase 2）。
     """
     owners = sorted(cn for cn, refs in propsByClass.items() if prop in refs)
     if not owners:
@@ -195,8 +204,8 @@ def _propertyOwnerHint(prop: str, propsByClass: dict[str, set[str]]) -> str:
             "本体 schema 中不存在该属性（已比对全部类的业务名/别名/物理列），"
             "请改用选中类的已有属性或修正命名"
         )
-    shown = ", ".join(owners[:_OWNER_HINT_MAX_CLASSES])
-    more = f" 等 {len(owners)} 个类" if len(owners) > _OWNER_HINT_MAX_CLASSES else ""
+    shown = ", ".join(owners[:maxClasses])
+    more = f" 等 {len(owners)} 个类" if len(owners) > maxClasses else ""
     return (
         f"该属性属于类 {shown}{more}（均已在 schema 中），"
         f"请把对应类加入 selectedClasses 并按 JOIN 目录关联后再引用"

@@ -20,8 +20,13 @@ from app.domain.exceptions import Nl2SqlError
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
 from app.domain.query_plan import Aggregation, QueryPlan
 from app.services.nl2sql_service import (
-    _NL2SQL_MAX_TOKENS,
-    _NL2SQL_TRUNCATION_BACKOFF,
+    _NL2SQL_MAX_TOKENS_DEFAULT,
+    _NL2SQL_TRUNCATION_BACKOFF_DEFAULT,
+    _REFINE_MAX_LIMIT_DEFAULT,
+    _OWNER_HINT_MAX_CLASSES_DEFAULT,
+    _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT,
+    _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
+    _VALUE_SAMPLE_VALUE_MAX_DEFAULT,
     Nl2SqlService,
     _renderStatePart,
 )
@@ -733,7 +738,7 @@ class TestGenerateSql:
         cls = _buildClass("PRECEIPT", "PRECEIPT")
         await service.generateSql("收货数量", [cls], fake, _llmConfig(), maxRetries=0)
         assert fake.kwargsCalls[0]["temperature"] == 0.0
-        assert fake.kwargsCalls[0]["maxTokens"] == _NL2SQL_MAX_TOKENS
+        assert fake.kwargsCalls[0]["maxTokens"] == _NL2SQL_MAX_TOKENS_DEFAULT
 
     async def test_retries_when_response_truncated(self) -> None:
         """0-2：回复达到 token 上限（可能截断）时注入错误重试，不执行截断 SQL。"""
@@ -746,7 +751,7 @@ class TestGenerateSql:
                 self.calls.append([(m.role, m.content) for m in messages])
                 if len(self.calls) == 1:
                     resp = _Resp("```sql\nSELECT NAME FROM PRECEIPT\n```")  # 截断的 SQL
-                    resp.completionTokens = _NL2SQL_MAX_TOKENS
+                    resp.completionTokens = _NL2SQL_MAX_TOKENS_DEFAULT
                     return resp
                 return _Resp("```sql\nSELECT NAME FROM PRECEIPT GROUP BY NAME\n```")
 
@@ -773,7 +778,7 @@ class TestGenerateSql:
                 self.kwargsCalls.append(kwargs)
                 if len(self.calls) == 1:
                     resp = _Resp("```sql\nSELECT NAME FROM PRECEIPT\n```")
-                    resp.completionTokens = _NL2SQL_MAX_TOKENS
+                    resp.completionTokens = _NL2SQL_MAX_TOKENS_DEFAULT
                     return resp
                 return _Resp("```sql\nSELECT NAME FROM PRECEIPT GROUP BY NAME\n```")
 
@@ -782,8 +787,8 @@ class TestGenerateSql:
         fake = _TruncatedOnceLlm()
         result = await service.generateSql("收货数量", [cls], fake, _llmConfig(), maxRetries=1)
         assert result.sql == "SELECT NAME FROM PRECEIPT GROUP BY NAME"
-        assert fake.kwargsCalls[0]["maxTokens"] == _NL2SQL_MAX_TOKENS
-        assert fake.kwargsCalls[1]["maxTokens"] == _NL2SQL_TRUNCATION_BACKOFF  # 重试预算翻倍
+        assert fake.kwargsCalls[0]["maxTokens"] == _NL2SQL_MAX_TOKENS_DEFAULT
+        assert fake.kwargsCalls[1]["maxTokens"] == _NL2SQL_TRUNCATION_BACKOFF_DEFAULT  # 重试预算翻倍
 
     async def test_truncation_budget_caps_at_double(self) -> None:
         """0-2 交互修复：连续截断时重试预算封顶为两倍上限，不无界增长。"""
@@ -809,7 +814,7 @@ class TestGenerateSql:
             await service.generateSql("收货数量", [cls], fake, _llmConfig(), maxRetries=2)
         # 预算 2048 → 4096 → 4096（封顶），不随重试次数无界增长
         assert [c["maxTokens"] for c in fake.kwargsCalls] == [
-            _NL2SQL_MAX_TOKENS, _NL2SQL_TRUNCATION_BACKOFF, _NL2SQL_TRUNCATION_BACKOFF,
+            _NL2SQL_MAX_TOKENS_DEFAULT, _NL2SQL_TRUNCATION_BACKOFF_DEFAULT, _NL2SQL_TRUNCATION_BACKOFF_DEFAULT,
         ]
 
     async def test_generate_sql_injects_execution_error(self) -> None:
@@ -2036,3 +2041,111 @@ class TestPlanParseObservability:
         text = caplog.text
         assert "reason=PLAN_DEGRADED" in text
         assert "groupBy:PLAN_FIELD_NOT_A_LIST(str)" in text
+
+
+class TestNl2SqlConfigGetter:
+    """魔数治理 Phase 2 hard tier：nl2sql 门面 getter 读 system_config 现读。
+
+    与 chat_recall/chat_context 的 `_getXxx(session)` 同口径：
+    不缓存 / 失败不阻断 / int getter 非正返默认 / `text()` 直写 key。
+    编排层 session 缺席时全部落默认值（既有调用零改动）。
+    """
+
+    @staticmethod
+    def _fakeSessionReturning(raw: str | None):
+        class _R:
+            def scalar_one_or_none(self_inner):
+                return raw
+
+        class _Session:
+            async def execute(self, stmt):
+                return _R()
+
+        return _Session()
+
+    @staticmethod
+    def _fakeSessionBoom():
+        class _SessionBoom:
+            async def execute(self, stmt):
+                raise RuntimeError("UndefinedTableError: system_config")
+
+        return _SessionBoom()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "cfg_key,getter,default",
+        [
+            ("digestMaxItems", "_readSchemaConfig", _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT),
+            ("digestMaxDescChars", "_readSchemaConfig", _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT),
+            ("valueSampleValueMax", "_readSchemaConfig", _VALUE_SAMPLE_VALUE_MAX_DEFAULT),
+            ("maxTokens", "_readSchemaConfig", _NL2SQL_MAX_TOKENS_DEFAULT),
+            ("ownerHintMaxClasses", "_readPlanConfig", _OWNER_HINT_MAX_CLASSES_DEFAULT),
+            ("maxLimit", "_readRefineConfig", _REFINE_MAX_LIMIT_DEFAULT),
+        ],
+    )
+    async def test_config_getter_uses_db_value(self, cfg_key: str, getter: str, default: int) -> None:
+        """session 提供时现读 system_config，admin 改值后立即生效。"""
+        from app.services.nl2sql_service import _readIntConfig
+
+        service = Nl2SqlService()
+        session = self._fakeSessionReturning("42")
+        if getter == "_readSchemaConfig":
+            cfg = await service._readSchemaConfigOrDefault(session)
+        elif getter == "_readPlanConfig":
+            cfg = await service._readPlanConfigOrDefault(session)
+        else:
+            cfg = await service._readRefineConfigOrDefault(session)
+        assert cfg[cfg_key] == 42
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "cfg_key,getter,default",
+        [
+            ("digestMaxItems", "_readSchemaConfig", _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT),
+            ("digestMaxDescChars", "_readSchemaConfig", _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT),
+            ("valueSampleValueMax", "_readSchemaConfig", _VALUE_SAMPLE_VALUE_MAX_DEFAULT),
+            ("maxTokens", "_readSchemaConfig", _NL2SQL_MAX_TOKENS_DEFAULT),
+            ("ownerHintMaxClasses", "_readPlanConfig", _OWNER_HINT_MAX_CLASSES_DEFAULT),
+            ("maxLimit", "_readRefineConfig", _REFINE_MAX_LIMIT_DEFAULT),
+        ],
+    )
+    async def test_config_getter_falls_back_on_invalid(self, cfg_key: str, getter: str, default: int) -> None:
+        """缺席/NULL/格式错/非正 → 返 _DEFAULT，不阻断主链路。"""
+        service = Nl2SqlService()
+        for bad_raw in [None, "", "not-an-int", "0", "-5"]:
+            session = self._fakeSessionReturning(bad_raw)
+            if getter == "_readSchemaConfig":
+                cfg = await service._readSchemaConfigOrDefault(session)
+            elif getter == "_readPlanConfig":
+                cfg = await service._readPlanConfigOrDefault(session)
+            else:
+                cfg = await service._readRefineConfigOrDefault(session)
+            assert cfg[cfg_key] == default, f"raw={bad_raw!r}"
+
+    @pytest.mark.asyncio
+    async def test_config_getter_falls_back_on_db_error(self) -> None:
+        """DB 不可用（表缺失/连接断）→ 全部返 _DEFAULT。"""
+        service = Nl2SqlService()
+        boom = self._fakeSessionBoom()
+        schema_cfg = await service._readSchemaConfigOrDefault(boom)
+        assert schema_cfg == {
+            "digestMaxItems": _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT,
+            "digestMaxDescChars": _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
+            "valueSampleValueMax": _VALUE_SAMPLE_VALUE_MAX_DEFAULT,
+            "maxTokens": _NL2SQL_MAX_TOKENS_DEFAULT,
+        }
+        plan_cfg = await service._readPlanConfigOrDefault(boom)
+        assert plan_cfg == {"ownerHintMaxClasses": _OWNER_HINT_MAX_CLASSES_DEFAULT}
+        refine_cfg = await service._readRefineConfigOrDefault(boom)
+        assert refine_cfg == {"maxLimit": _REFINE_MAX_LIMIT_DEFAULT}
+
+    @pytest.mark.asyncio
+    async def test_config_getter_falls_back_when_session_none(self) -> None:
+        """session=None（既有调用路径）→ 全部落默认值，零改动。"""
+        service = Nl2SqlService()
+        schema_cfg = await service._readSchemaConfigOrDefault(None)
+        assert schema_cfg["maxTokens"] == _NL2SQL_MAX_TOKENS_DEFAULT
+        plan_cfg = await service._readPlanConfigOrDefault(None)
+        assert plan_cfg["ownerHintMaxClasses"] == _OWNER_HINT_MAX_CLASSES_DEFAULT
+        refine_cfg = await service._readRefineConfigOrDefault(None)
+        assert refine_cfg["maxLimit"] == _REFINE_MAX_LIMIT_DEFAULT

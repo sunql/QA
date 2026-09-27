@@ -1,13 +1,13 @@
-# 变更：魔数治理 Phase 2 实施批（9 项 → system_config，0087 + 0088）
+# 变更：魔数治理 Phase 2 实施批（15 项全完成，0087 + 0088 + 0089）
 
 - **日期**：2026-09-28
 - **作者**：Claude (with user direction 启琳)
 - **Phase**：§2.4 LOW 魔数治理（Phase 2）
-- **状态**：done（easy tier 5 + medium tier 4；hard tier 6 项 nl2sql 常量未做，见 §7）
+- **状态**：done（easy tier 5 + medium tier 4 + hard tier 6 = 15/15）
 - **关联**：规范批 `chore-magic-number-governance-spec`（三档决策 + 14 项清单）、
   `chore-chat-service-file-split`（Phase 1.2，常量随 mixin 落位）、
   `Harness/rules/魔数治理.md`、`Harness/wiki/chat-service-assessment.md` §2.4 LOW 行
-- **迁移版本**：`0087_magic_number_config` + `0088_magic_number_config_medium`
+- **迁移版本**：`0087_magic_number_config` + `0088_magic_number_config_medium` + `0089_magic_number_config_hard`
 
 ---
 
@@ -91,23 +91,61 @@
 `TestStatePlanObservability` 2 例 + `test_chat_service_state.py` 7 例仍用旧 2-arg 调用，
 运行时 TypeError → 通过 stash diff 精准定位并逐个补第三参 `_STATE_HISTORY_FIELD_LIMIT_DEFAULT`。
 
-## 7. 剩余（hard tier，未做）
+## 7. hard tier（6 项，已完成 → 0089）
 
-6 项 nl2sql 常量 usage site 在**无状态的模块函数管线**里，需把 session 穿透进
-`nl2sql_service` 门面 → 各模块函数（`buildSchemaText`/`generateQueryPlan`/REFINE 直写等）：
+hard tier 的难点是：usage site 在**无状态 nl2sql 模块函数管线**里，模块函数
+无 `self._xxx`，无法直接读 `system_config`。方案：session 只穿透到 **async 编排层**
+（`generateSql` / `generateValidatedPlan`），在编排层现读阈值，然后把解析后的值
+作为**可选参数**传给纯函数 `buildSchemaText` / `validatePlan` / `_extractLimit`。
+既有调用（不传新参数）自动落默认值，700+ 测试零回归。
 
-| 常量 | 默认 | 所在模块 |
-|---|---|---|
-| `_REFINE_MAX_LIMIT` | 1000 | nl2sql_refine.py |
-| `_OWNER_HINT_MAX_CLASSES` | 3 | nl2sql_refs.py |
-| `_CRITICAL_DIGEST_MAX_ITEMS` | 50 | nl2sql_schema.py |
-| `_CRITICAL_DIGEST_MAX_DESC_CHARS` | 200 | nl2sql_schema.py |
-| `_VALUE_SAMPLE_VALUE_MAX` | 30 | nl2sql_schema.py |
-| `_NL2SQL_MAX_TOKENS` | 2048 | nl2sql_plan.py |
+| key | 默认 | getter | 透传路径 |
+|---|---|---|---|
+| `REFINE_MAX_LIMIT` | 1000 | `_readRefineConfig` | `generateSql` → `applyRefineDirect(maxLimit=)` |
+| `OWNER_HINT_MAX_CLASSES` | 3 | `_readPlanConfig` | `generateValidatedPlan` → `validatePlan(ownerHintMaxClasses=)` |
+| `CRITICAL_DIGEST_MAX_ITEMS` | 50 | `_readSchemaConfig` | `generateSql` → `buildSchemaText(digestMaxItems=)` |
+| `CRITICAL_DIGEST_MAX_DESC_CHARS` | 200 | `_readSchemaConfig` | 同上 |
+| `VALUE_SAMPLE_VALUE_MAX` | 30 | `_readSchemaConfig` | 同上 |
+| `NL2SQL_MAX_TOKENS` | 2048 | `_readSchemaConfig` | `generateSql` 内部 `maxTokens` 变量 |
 
-**难点**：与 ChatService 的 mixin 不同，Nl2SqlService 无状态，模块函数无 `self._xxx`，
-session 需作为参数穿过 5+ 层调用（门面 → plan/schema/refine），改动面大、回归风险高。
-建议单独立批，逐模块穿透 + stash 基线 diff 验收。
+**改动文件**（9 文件，+414/−68）：
+- `nl2sql_schema.py`：3 常量改 `_DEFAULT`；`buildSchemaText` / `_formatSampleValue` /
+  `_buildCriticalColumnsDigest` 加可选参数。
+- `nl2sql_refs.py`：`_OWNER_HINT_MAX_CLASSES` → `_DEFAULT`；`_propertyOwnerHint` 加 `maxClasses`。
+- `nl2sql_refine.py`：`_REFINE_MAX_LIMIT` → `_DEFAULT`；`_extractLimit` / `applyRefineDirect` 加 `maxLimit`。
+- `nl2sql_plan.py`：`_NL2SQL_MAX_TOKENS` / `_NL2SQL_TRUNCATION_BACKOFF` → `_DEFAULT`；
+  `generateQueryPlan` 加 `maxTokens` + `ownerHintMaxClasses`；`validatePlan` 加 `ownerHintMaxClasses`。
+- `nl2sql_service.py`：新增 `_readIntConfig` / `_readSchemaConfig` / `_readPlanConfig` /
+  `_readRefineConfig` + 3 个 `_readXxxConfigOrDefault` 门面实例方法；`generateSql` /
+  `generateValidatedPlan` 加 `session` 参数；`validatePlan` / `applyRefineDirect` 门面方法加透传。
+  门面 474 → 644 行（仍在 800 内）；末尾新增 re-export 块。
+- `chat_service.py`：`_twoStageGenerate` 加 `session` 参数；`_planAndGenerateSql` 的
+  `_twoStageGenerate` 调用点传 `session=session`。
+
+**测试更新**：
+- `test_nl2sql_service.py`：import 改名 + 新增 `TestNl2SqlConfigGetter` 14 例
+  （6 参数化 DB 值 + 6 参数化 fallback + DB 错 + session=None）。
+- `test_nl2sql_transient_retry.py`：`_NL2SQL_MAX_TOKENS` → `_DEFAULT`（5 处）。
+- `test_refine_shortcuts.py`：`_REFINE_MAX_LIMIT` → `_DEFAULT`（import + 1 断言）。
+
+**关键设计决策**：
+- `_NL2SQL_TRUNCATION_BACKOFF` 是**派生常量**（`_NL2SQL_MAX_TOKENS * 2`），不单独
+  配置；`generateSql` 内部 `truncationBackoff = maxTokens * 2`，随 NL2SQL_MAX_TOKENS
+  自动翻倍。
+- `validatePlan` / `buildSchemaText` / `applyRefineDirect` 的既有测试调用
+  （700+ 处，经 `Nl2SqlService()` 或模块函数）**零改动**——新参数全是可选 keyword，
+  默认落 `_DEFAULT`。
+- `generateValidatedPlan` / `generateSql` 的 `session` 参数默认 `None`，
+  测试不传时走默认值路径（与生产 session 传入时行为分离）。
+
+**回归判定（git stash 基线 diff）**：
+- `test_chat_service.py`（36 失败）/ `test_chat_service_state.py`（9 失败）/
+  `test_chat_service_stream.py`（10 失败）失败集**完全不变**。
+- `test_nl2sql_service.py` 122 → 136 passed（新增 14 getter 测试全绿）。
+- `test_query_plan_validation.py`（49）/ `test_refine_shortcuts.py`（59）/
+  `test_nl2sql_transient_retry.py`（11）/ `test_scope_row_limit.py`（41）/
+  `test_property_ref_normalize.py`（22）/ `test_join_graph.py`（31）**全绿零回归**。
+- 349 例 nl2sql 相关单测全绿（69s）。
 
 ## 8. 部署验证
 

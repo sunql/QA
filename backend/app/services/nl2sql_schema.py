@@ -153,11 +153,13 @@ _UNMAPPED_COLUMN_MARKER = "未映射"
 # 防恶意管理员堆 description 把 schema prompt 撑爆：单次调用渲染的摘要条数与
 # 单条描述长度都做硬封顶（security-reviewer MEDIUM）。
 # 实测生产 PG 有 1731 个属性，仅 10 条带 description，50/200 远超现状。
-_CRITICAL_DIGEST_MAX_ITEMS = 50
-_CRITICAL_DIGEST_MAX_DESC_CHARS = 200
+# 运行期从 system_config 现读（魔数治理 Phase 2 hard tier），缺席/格式错返 _DEFAULT。
+_CRITICAL_DIGEST_MAX_ITEMS_DEFAULT = 50
+_CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT = 200
 
-# 值域采样（2-1）：单值在 schema 文本中的字符上限，超长截断防止 prompt 膨胀
-_VALUE_SAMPLE_VALUE_MAX = 30
+# 值域采样（2-1）：单值在 schema 文本中的字符上限，超长截断防止 prompt 膨胀。
+# 运行期从 system_config 现读（魔数治理 Phase 2 hard tier）。
+_VALUE_SAMPLE_VALUE_MAX_DEFAULT = 30
 
 
 def _sampleValuesFor(
@@ -169,15 +171,16 @@ def _sampleValuesFor(
     return valueSamples.get((table, prop.source_column))
 
 
-def _formatSampleValue(value: Any) -> str:
+def _formatSampleValue(value: Any, valueMax: int = _VALUE_SAMPLE_VALUE_MAX_DEFAULT) -> str:
     """格式化单个采样值为 SQL 字面量提示：截断 + 转义引号/尖括号（防误导与数据注入）。
 
     内嵌单引号按 SQL 标准加倍（O'Brien → O''Brien），否则 LLM 照抄会写出断裂的字面量。
     尖括号经 _sanitizeContext 转义，DB 数据无法构造标签逃逸出包装。
+    valueMax 运行期从 system_config.VALUE_SAMPLE_VALUE_MAX 现读（魔数治理 Phase 2）。
     """
     text = str(value).strip()
-    if len(text) > _VALUE_SAMPLE_VALUE_MAX:
-        text = text[:_VALUE_SAMPLE_VALUE_MAX] + "…"
+    if len(text) > valueMax:
+        text = text[:valueMax] + "…"
     text = text.replace("'", "''")
     return f"'{_sanitizeContext(text)}'"
 
@@ -189,6 +192,9 @@ def buildSchemaText(
     valueSamples: dict[tuple[str, str], list[str]] | None = None,
     driftWarning: str | None = None,
     joins: list[OntologyJoin] | None = None,
+    digestMaxItems: int = _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT,
+    digestMaxDescChars: int = _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
+    valueSampleValueMax: int = _VALUE_SAMPLE_VALUE_MAX_DEFAULT,
 ) -> str:
     """将本体类列表渲染为 LLM 可读的 schema 文本（含外键 JOIN 关系与继承层级）。
 
@@ -209,7 +215,11 @@ def buildSchemaText(
     # 漏读（真实事故：TCLCOD_0 的「生产型物料」描述全文入 prompt 但 LLM
     # 仍把外协 C079 算入供货量 Top3）。把带 description 的属性集中前置，
     # 让 LLM 第一眼看见口径约束。原文仍保留在下方类块中，不影响 SQL 渲染端。
-    digest = _buildCriticalColumnsDigest(ordered)
+    digest = _buildCriticalColumnsDigest(
+        ordered,
+        maxItems=digestMaxItems,
+        maxDescChars=digestMaxDescChars,
+    )
     if digest:
         blocks.extend(digest)
 
@@ -254,7 +264,7 @@ def buildSchemaText(
             # 2-1：关键列注入值域采样（WHERE 值不再写错）；值经去重/截断/转义
             samples = _sampleValuesFor(prop, cls.source_table, valueSamples)
             if prop.source_column and samples:
-                line += f" 值域示例: [{', '.join(_formatSampleValue(v) for v in samples)}]"
+                line += f" 值域示例: [{', '.join(_formatSampleValue(v, valueSampleValueMax) for v in samples)}]"
             blocks.append(line)
 
     if joins:
@@ -360,7 +370,10 @@ def _resolveParent(
 
 
 def _buildCriticalColumnsDigest(
-    classes: list[OntologyClass]
+    classes: list[OntologyClass],
+    *,
+    maxItems: int = _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT,
+    maxDescChars: int = _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
 ) -> list[str]:
     """汇总关键过滤口径摘要：收集带非平凡 description 的属性集中前置。
 
@@ -424,18 +437,18 @@ def _buildCriticalColumnsDigest(
     # 防止恶意管理员写海量长 description 把 prompt 撑爆（实测 schema 已 28K+ 字，
     # 再叠 100 条 500 字 ≈ 65K token，会让 plan 阶段输入直接超限）。
     # 真实生产 1731 个属性里只有 10 条带 description，50/200 远高于现状。
-    truncated_items = items[:_CRITICAL_DIGEST_MAX_ITEMS]
-    if len(items) > _CRITICAL_DIGEST_MAX_ITEMS:
+    truncated_items = items[:maxItems]
+    if len(items) > maxItems:
         logger.warning(
             "_buildCriticalColumnsDigest 截断: 共 %d 条, 仅保留前 %d 条",
             len(items),
-            _CRITICAL_DIGEST_MAX_ITEMS,
+            maxItems,
         )
     lines = ["### 关键过滤口径摘要（管理员维护的业务口径，生成查询时必须遵循）"]
     for qualified, desc in truncated_items:
         # 单条描述截断（防单条 500 字被全文灌入摘要）
-        if len(desc) > _CRITICAL_DIGEST_MAX_DESC_CHARS:
-            desc = desc[:_CRITICAL_DIGEST_MAX_DESC_CHARS] + "…"
+        if len(desc) > maxDescChars:
+            desc = desc[:maxDescChars] + "…"
         lines.append(f"- {qualified}: {desc}")
     return lines
 

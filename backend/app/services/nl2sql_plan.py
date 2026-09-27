@@ -32,6 +32,7 @@ from app.services.messages_zh import (
 from app.services.nl2sql_dialects import resolveDialect
 from app.services.nl2sql_prompts import _buildPlanSystemPrompt, _buildPlanUserPrompt
 from app.services.nl2sql_refs import (
+    _OWNER_HINT_MAX_CLASSES_DEFAULT,
     _aggregationAliases,
     _aliasRequiresFormula,
     _classRefNames,
@@ -55,11 +56,14 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECAS
 _MAX_PLAN_JSON_BYTES = 64 * 1024
 
 # NL2SQL 单次 LLM 调用的 token 上限。回复达到上限时 SQL 可能被截断，
-# 检测到后注入错误并重试，避免执行被截断的 SQL（0-2）
-_NL2SQL_MAX_TOKENS = 2048
+# 检测到后注入错误并重试，避免执行被截断的 SQL（0-2）。
+# 运行期从 system_config.NL2SQL_MAX_TOKENS 现读（魔数治理 Phase 2 hard tier），
+# 缺席/格式错返 _DEFAULT。
+_NL2SQL_MAX_TOKENS_DEFAULT = 2048
 # 截断重试预算封顶：temperature=0 时确定性输出被 2048 截断会反复产出同一段截断 SQL，
-# 故截断后翻倍预算让输出有机会续完；翻倍有上限，防止无界增长（0-2 交互修复）
-_NL2SQL_TRUNCATION_BACKOFF = _NL2SQL_MAX_TOKENS * 2
+# 故截断后翻倍预算让输出有机会续完；翻倍有上限，防止无界增长（0-2 交互修复）。
+# 封顶值随 NL2SQL_MAX_TOKENS 同步翻倍（派生常量，不单独配置）。
+_NL2SQL_TRUNCATION_BACKOFF_DEFAULT = _NL2SQL_MAX_TOKENS_DEFAULT * 2
 
 # ---------------------------------------------------------------------------
 # 计划解析观测性（M3）：失败原因分类。
@@ -182,6 +186,8 @@ async def generateQueryPlan(
     featureCatalogText: str | None = None,
     scopeQuestion: str | None = None,
     globalFiltersText: str | None = None,
+    maxTokens: int = _NL2SQL_MAX_TOKENS_DEFAULT,
+    ownerHintMaxClasses: int = _OWNER_HINT_MAX_CLASSES_DEFAULT,
 ) -> PlanResult:
     """ReAct 推理阶段：生成结构化查询计划。
 
@@ -196,6 +202,10 @@ async def generateQueryPlan(
     范围类约束（外购/内外贸/站点/物料类别/财年等），渲染进 user prompt 的
     [global_constraints] 块；None = 单步场景，不注入。
     返回不可变 PlanResult。
+
+    maxTokens 与 ownerHintMaxClasses 为魔数治理 Phase 2 hard tier 注入参数：
+    默认 _DEFAULT，编排层（generateValidatedPlan）传 system_config 现读值；
+    直接调本模块函数时缺省为默认值（既有调用零改动）。
     """
     if maxRetries is None:
         maxRetries = getSettings().nl2sqlMaxRetries
@@ -231,7 +241,7 @@ async def generateQueryPlan(
             ],
             model=modelConfig.model_name,
             temperature=modelConfig.temperature if modelConfig and modelConfig.temperature is not None else 0.0,
-            maxTokens=_NL2SQL_MAX_TOKENS,
+            maxTokens=maxTokens,
             # M4：仅首轮允许额外一次同模型重试（预算 (maxRetries+1)+1），
             # 并把此前各轮已累加的用量挂到任何逃逸的异常上。
             allowRetry=attempt == 0,
@@ -314,12 +324,21 @@ def _finalizePlan(
     )
 
 
-def validatePlan(plan: QueryPlan, classes: list[OntologyClass]) -> list[str]:
+def validatePlan(
+    plan: QueryPlan,
+    classes: list[OntologyClass],
+    *,
+    ownerHintMaxClasses: int = _OWNER_HINT_MAX_CLASSES_DEFAULT,
+) -> list[str]:
     """纯代码校验计划引用是否在本体 schema 中。空列表 = 通过。
 
     不调 LLM，杜绝幻觉：检查选中的类、以及各类属性/聚合/分组/排序
     是否属于选定的类，JOIN 源/目标类与连接列是否存在。
     返回具体差异供重试反馈。
+
+    ownerHintMaxClasses 为魔数治理 Phase 2 hard tier 注入参数：
+    默认 _DEFAULT，编排层（generateValidatedPlan）传 system_config 现读值；
+    直接调本模块函数时缺省为默认值（既有调用零改动）。
     """
     issues: list[str] = []
     classesById = {cls.class_name: cls for cls in classes}
@@ -343,7 +362,10 @@ def validatePlan(plan: QueryPlan, classes: list[OntologyClass]) -> list[str]:
 
     for prop in plan.selectedProperties:
         if prop not in owned:
-            issues.append(f"选中的属性 {prop} 不属于选定的任何类；{_propertyOwnerHint(prop, propsByClass)}")
+            issues.append(
+                f"选中的属性 {prop} 不属于选定的任何类；"
+                f"{_propertyOwnerHint(prop, propsByClass, maxClasses=ownerHintMaxClasses)}"
+            )
 
     for agg in plan.aggregations:
         if agg.property not in owned:
@@ -359,7 +381,7 @@ def validatePlan(plan: QueryPlan, classes: list[OntologyClass]) -> list[str]:
             else:
                 issues.append(
                     f"聚合属性 {agg.property} 不属于选定的任何类；"
-                    f"{_propertyOwnerHint(agg.property, propsByClass)}"
+                    f"{_propertyOwnerHint(agg.property, propsByClass, maxClasses=ownerHintMaxClasses)}"
                 )
         # 派生指标硬约束（2026-08-17 真实回归）：alias 命中占比/比率/百分比
         # 等关键词时必须 formula（窗口函数 SUM(x)/SUM(SUM(x)) OVER ()），
@@ -388,7 +410,9 @@ def validatePlan(plan: QueryPlan, classes: list[OntologyClass]) -> list[str]:
 
     for prop in plan.groupBy:
         if prop not in owned:
-            hint = _timeBucketGroupHint(prop, classes) or _propertyOwnerHint(prop, propsByClass)
+            hint = _timeBucketGroupHint(prop, classes) or _propertyOwnerHint(
+                prop, propsByClass, maxClasses=ownerHintMaxClasses
+            )
             issues.append(
                 f"分组属性 {prop} 不属于选定的任何类" + (f"；{hint}" if hint else "")
             )

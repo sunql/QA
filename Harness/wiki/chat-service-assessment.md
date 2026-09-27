@@ -1187,11 +1187,15 @@ M9 先命中兄弟函数的合法 `limit=`，再命中函数体内**正在解释
 > ⚠️ 第 3/4/5 条原是 §15 主批的「残差与后续」清单中的「后续观察项」，已由 2026-09-27
 > **§15 第四拨**（[`chore-chat-15-tail-three-items`](../changes/chore-chat-15-tail-three-items/summary.md)）
 > 全部关闭并各自 SSOT 化（见各条 ✅ 标记）。第 2 条由 2026-09-27 部署补做关闭（见该条 ⚠️ 注）。
-> 第 1/7/8 条仍为残差。
+> 第 1/7/8 条已由 2026-09-28 **§15 残差评估**（[`chore-chat-15-residuals-assessment`](../changes/chore-chat-15-residuals-assessment/summary.md)）
+> 逐项评估并决定保留/挂账/关闭。
 
-1. **`prior_cte` 能力当前无生产调用者**（M5 的直接后果）：`render_prior_cte` 与 `generateSql(prior_cte=…)`
-   只被契约测试驱动。保留是**用户口径**（删引擎、保能力），但**若长期不接线**，应连同
-   `app/domain/chained_step_plan.py` 一并评估删除 —— 否则等于把 M5 删掉的死代码换了个位置留着；
+1. ✅ **`prior_cte` 能力保留决策**（2026-09-28 评估，**保留**）：`render_prior_cte` 与
+   `chained_step_plan.py` 虽无生产调用者，但 12 例契约测试钉死 WITH-less 契约（产出端
+   `render_prior_cte` + 入口 `_assertPriorCteSafe` + 唯一拼装点 `generateSql`），是未来
+   L3 串联引擎接线的 SSOT。代码量 104 行纯函数 + 1 数据类 + 12 例测试，开销可忽略。
+   **挂账信号**：6 个月内仍无接线需重新评估；接入触发 = `chat_multistep.py` 提到「串联 CTE」
+   或「前步 SQL 复用」时立即接线。
 2. ✅ **L3 展示漂移**（§2.5 新行，已关闭 2026-09-27）：代码修复见 `ac94416`
    （[`fix-routing-metrics-l3-truth`](../changes/fix-routing-metrics-l3-truth/summary.md)）。
    ⚠️ **部署补做**：该 SSOT §8 的部署验证段写入时**并未实际执行**（镜像停留在 2026-09-26 16:19、
@@ -1213,8 +1217,18 @@ M9 先命中兄弟函数的合法 `limit=`，再命中函数体内**正在解释
    `openai_client` ↔ `factory` 潜在 circular import（直导 `concurrency` 叶子模块）
    —— 见 [`chore-chat-15-tail-three-items`](../changes/chore-chat-15-tail-three-items/summary.md) §5.3；
 6. ✅ **H7 残留**（2026-09-27 补关）：`docker/.env` + `backend/.env` 实际写入 `EMBEDDING_DIMENSION=1024`；env 回退路径维度守卫现**生效**——3 探针验证：active 路径返回 `bge-m3-mlx-8bit`、env fallback 1024 通过、env fallback 768 抛 ConfigError（见 §2.3 H7 状态列）；
-7. **M9 残留**：仍用 ORM 风格 `Collection` API（pymilvus 3.x 已标 deprecated），迁
-   `MilvusClient.query_iterator` 属独立改动；
-8. 本批之外仍挂账：§2.4 LOW 全部、§2.5 其余漂移（**`config.py` 重复字段定义**）、
-   P2 第 13/14 项（拆大文件、魔数治理）、M1 半空计划闸门提案、库侧只读兜底提案、
-   `logger.warning(…, exc)` 截断、Milvus 两个 round-trip 用例的残留累积（§14 残差第 3 条）。
+7. ⏸️ **M9 残留**（2026-09-28 评估，**挂账 P2**）：仍用 ORM 风格 `Collection` API
+   （pymilvus 3.x 已标 deprecated 但未移除，runtime 仍可用）。§15 主批已修 **`query(limit=16384)`
+   截断真缺陷**（改 `_queryAllRows` + `query_iterator`），两个破坏性消费者（`--cleanup`
+   删集重建、`ontology_service` 对账永不收敛）已不再触发。迁 `MilvusClient` API 改动面
+   大（12 处 `Collection` + `CollectionSchema` + `FieldSchema` 重写），收益仅换皮不治根；
+   **强制升级点**：下次 pymilvus 升级窗口（预期半年内）一起迁。
+8. ✅ **`logger.warning(…, exc)` 截断评估**（2026-09-28 评估，**关闭**）：全仓 grep 33 处，
+   三类形态全部合法：(a) `exc_info=True` 23 处走标准堆栈渲染无截断；(b) `%s + exc`/`exc.message`
+   7 处走标准 string-formatting 单行打印完整对象；(c) 无 f-string 风格调用（ruff G004 已开）。
+   **截断隐患不存在**。
+9. ✅ **Milvus round-trip 残留累积评估**（2026-09-28 评估，**关闭**）：random id 改造
+   （2026-09-27 `7e0a0b1`）已修**跨轮累加**（3→4→5 单调增长）。**单次跑偶发失败** 是
+   Milvus 服务端 `Collection.flush()` 不保证查询端 delete buffer 已应用（2.4.6 per-request
+   Strong 一致性不生效），属集成测试环境依赖，与产品代码无关。production 同源风险
+   `wiki_vector_service.syncPage` 已挂账 memory，prod 未见事故报告即不处理。

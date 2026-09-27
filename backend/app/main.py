@@ -170,6 +170,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "生产部署前必须：AUTH_STUB_ENABLED=0 + 反向代理剥离 X-User-* 头，"
             "或接入 JWT/IdP 替换 getCurrentUser。"
         )
+    # config 重复字段批：jwtSecret 曾有两份声明（旧块 default="" 被占位符覆盖），
+    # 漏配时静默用公开已知的开发密钥；旧注释承诺的「启动期校验」当时从未实现，此处补上。
+    from app.config import jwtSecretInsecurityReason
+
+    _jwtReason = jwtSecretInsecurityReason(settings.jwtSecret)
+    if _jwtReason:
+        logger.warning("⚠️ JWT 密钥自检：%s", _jwtReason)
     # feat-chat-concurrency-params: 启动期一次性读 system_config 三个 key
     # （DB_POOL_SIZE / DB_MAX_OVERFLOW / RATE_LIMIT_KEY_STRATEGY），注入到对应
     # module-level 缓存，让 getEngine() 创建的 engine pool 走最终值。失败用

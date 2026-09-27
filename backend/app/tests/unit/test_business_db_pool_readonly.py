@@ -112,8 +112,14 @@ async def test_mysql_execute_read_only_uses_session_readonly() -> None:
 
 
 @pytest.mark.asyncio
-async def test_oracle_execute_read_only_sets_session_readonly() -> None:
-    """Oracle 12c+：`ALTER SESSION SET READ ONLY`（会话级只读），不走 PG 语法。"""
+async def test_oracle_execute_read_only_sets_transaction_readonly() -> None:
+    """Oracle 19c：`SET TRANSACTION READ ONLY`（事务级只读），不走 PG 语法。
+
+    历史：本测试早期用 `ALTER SESSION SET READ ONLY`，但 2026-09-27 生产真机探针确认
+    THBI 实例下 `ALTER SESSION SET READ ONLY` 抛 ORA-02248（invalid option for ALTER SESSION），
+    即使用户已 `GRANT ALTER SESSION` 也被拒——非权限问题，是实例配置问题。
+    改用 `SET TRANSACTION READ ONLY`（事务级），单 cursor.execute 的 SELECT 自动落在 readonly tx 内。
+    """
     adapter = _OracleAdapter(
         host="host", port=1521, service_name="svc", username="u", password="p"
     )
@@ -145,9 +151,9 @@ async def test_oracle_execute_read_only_sets_session_readonly() -> None:
             rows = await adapter.execute_read_only("SELECT 1 FROM dual")
 
     assert rows == []
-    # 顺序：先 ALTER SESSION SET READ ONLY，再原 SQL
-    assert len(executed) == 2, f"期望 SET + SELECT 两步，实际 {executed}"
-    assert executed[0] == "ALTER SESSION SET READ ONLY"
+    # 顺序：先 SET TRANSACTION READ ONLY，再原 SQL
+    assert len(executed) == 2, f"期望 SET TX + SELECT 两步，实际 {executed}"
+    assert executed[0] == "SET TRANSACTION READ ONLY"
     assert executed[1] == "SELECT 1 FROM dual"
 
 
@@ -175,21 +181,24 @@ async def test_readonly_guard_does_not_break_existing_row_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_oracle_alter_session_failure_does_not_block_query() -> None:
-    """Oracle 实例拒绝 ALTER SESSION（如 ORA-02248 / 旧版本 / 受限 PDB）时，
-    原 SQL 必须照常执行 + 返回正确行。这是纵深防御关键：解析层黑名单 + 只读账号权限仍是防线，
-    会话级 readonly 是 best-effort，失败不可阻塞业务查询。
+async def test_oracle_set_transaction_failure_does_not_block_query() -> None:
+    """Oracle 实例拒绝 SET TRANSACTION READ ONLY（如 ORA-01536 / ORA-02248 / <12c /
+    受限 PDB）时，原 SQL 必须照常执行 + 返回正确行。这是纵深防御关键：
+    解析层黑名单 + 只读账号权限仍是防线，事务级 readonly 是 best-effort，失败不可阻塞业务查询。
+
+    复现路径：2026-09-27 生产 THBI 19c 实测，`ALTER SESSION SET READ ONLY` 抛 ORA-02248，
+    已改用 `SET TRANSACTION READ ONLY`（事务级）。本测试覆盖 SET TRANSACTION 失败兜底路径。
     """
     adapter = _OracleAdapter(
         host="host", port=1521, service_name="svc", username="u", password="p"
     )
 
     executed: list[str] = []
-    ORA_02248 = Exception("ORA-02248: 无效的 ALTER SESSION 选项")
+    ORA_GENERIC = Exception("ORA-01536: snapshot too old or simulated SET TRANSACTION failure")
 
     async def fake_cursor_execute(sql_text):
-        if "ALTER SESSION" in sql_text:
-            raise ORA_02248
+        if "SET TRANSACTION" in sql_text:
+            raise ORA_GENERIC
         executed.append(sql_text)
 
     fake_cursor = MagicMock()
@@ -222,7 +231,7 @@ async def test_oracle_alter_session_failure_does_not_block_query() -> None:
             rows = await adapter.execute_read_only("SELECT 1 FROM dual")
 
     # 关键断言：原 SQL 仍执行，且返回行
-    assert rows == [{"dummy": 1}], f"ALTER SESSION 失败后原 SQL 应正常返回行，实际 {rows}"
+    assert rows == [{"dummy": 1}], f"SET TRANSACTION 失败后原 SQL 应正常返回行，实际 {rows}"
     assert executed == ["SELECT 1 FROM dual"], (
-        f"ALTER SESSION 失败时不应进入 executed 列表，原 SQL 必须独立执行；实际 {executed}"
+        f"SET TRANSACTION 失败时不应进入 executed 列表，原 SQL 必须独立执行；实际 {executed}"
     )

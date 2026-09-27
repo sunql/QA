@@ -555,26 +555,35 @@ class _OracleAdapter:
                 dsn=self._dsn,
             )
             try:
-                # 库侧只读兜底：Oracle 12c+ 支持 `ALTER SESSION SET READ ONLY`（会话级只读）。
-                # 与 PG/MySQL 不同：Oracle 没有事务级 `SET TRANSACTION READ ONLY`，
-                # 唯一可由应用层触发的只读模式是会话级，且需要 DB 12c+。
-                # 旧版本 Oracle 需依赖库侧授权兜底（见 scripts/db-readonly-account-setup.sql）。
+                # 库侧只读兜底：Oracle 19c 在某些实例配置（受限 PDB / Oracle Connection Manager /
+                # 受限 instance）下 `ALTER SESSION SET READ ONLY` 会抛 ORA-02248（invalid option），
+                # 即使 DBA 已 `GRANT ALTER SESSION TO <USER>` 也会被拒——这不是权限问题，
+                # 而是数据库实例不接受该选项。生产真机探针（2026-09-27 THBI 实例）确认：
+                #   - ALTER SESSION SET NLS_LANGUAGE  ✅ 通过
+                #   - ALTER SESSION SET READ ONLY     ❌ ORA-02248
+                #   - SET TRANSACTION READ ONLY       ✅ 通过
+                # 改用 `SET TRANSACTION READ ONLY`（事务级只读）做兜底，对**单语句 SELECT** 同样有效。
+                # PG/MySQL/Oracle 三方言统一为「事务级只读」：
+                #   PG    `SET TRANSACTION READ ONLY`（在 begin() 后的同一只读事务中执行）
+                #   MySQL `SET SESSION TRANSACTION READ ONLY`（会话级只读事务）
+                #   Oracle `SET TRANSACTION READ ONLY`（事务级只读；单 cursor.execute 后下一条
+                #          SELECT 自动落在该 readonly 事务内）
+                # 旧版本 Oracle（<12c 无此语法）应用层完全无解，必须靠层 1+2 兜底。
                 cursor = conn.cursor()
-                # best-effort：实例拒绝 ALTER SESSION（ORA-02248 / <12c / 受限 PDB）时
-                # 必须降级到「仅靠 SQL Guard + 只读账号权限」，不可阻塞业务查询。
-                # 纵深防御三层（任一即可兜底）：
+                # best-effort：实例拒绝 SET TRANSACTION（任何 reason）时降级到「仅靠 SQL Guard
+                # + 只读账号权限」，不阻塞业务查询。纵深防御三层（任一即可兜底）：
                 #   1) SQL Guard 解析层黑名单（M1/M2）
                 #   2) DBA 维护的只读账号 + 撤销敏感权限（scripts/db-readonly-account-setup.sql）
-                #   3) 本次 ALTER SESSION 会话级只读（best-effort）
+                #   3) 本次 SET TRANSACTION READ ONLY（best-effort）
                 # 若 (3) 失败，仅记 warning，继续执行原 SQL；不动 (1)(2)。
                 try:
-                    await cursor.execute("ALTER SESSION SET READ ONLY")
-                except Exception as alter_exc:  # noqa: BLE001 - best-effort 降级路径
+                    await cursor.execute("SET TRANSACTION READ ONLY")
+                except Exception as tx_exc:  # noqa: BLE001 - best-effort 降级路径
                     logger.warning(
-                        "Oracle 会话级只读注入失败 reason=%s exc=%s "
+                        "Oracle 事务级只读注入失败 reason=%s exc=%s "
                         "降级到 SQL Guard + 只读账号双层防线，原 SQL 继续执行",
-                        "ALTER_SESSION_REJECTED",
-                        alter_exc,
+                        "SET_TRANSACTION_REJECTED",
+                        tx_exc,
                     )
                 await cursor.execute(sql)
                 columns = [desc[0] for desc in cursor.description] if cursor.description else []

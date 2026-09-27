@@ -79,13 +79,13 @@ def _report(section: str, status: str, detail: str) -> None:
 def probe_version(conn: oracledb.Connection) -> bool:
     """§2 Oracle 版本（<12c ⇒ ALTER SESSION SET READ ONLY 永久无效）。"""
     cur = conn.cursor()
-    cur.execute("SELECT BANNER, VERSION FROM V$INSTANCE WHERE ROWNUM = 1")
-    banner, version = cur.fetchone()
+    # V$INSTANCE.VERSION 形如 '19.0.0.0.0'；V$VERSION.BANNER 含完整产品名（如 'Oracle Database 19c...'）。
+    cur.execute("SELECT VERSION FROM V$INSTANCE WHERE ROWNUM = 1")
+    (version,) = cur.fetchone()
     cur.close()
-    # version 形如 '19.0.0.0.0' 或 '12.2.0.1.0'
     major = int(version.split(".")[0])
     if major >= 12:
-        _report("2", "PASS", f"Oracle 版本支持 ALTER SESSION SET READ ONLY（{major}c >= 12c），banner={banner}")
+        _report("2", "PASS", f"Oracle 版本支持 ALTER SESSION SET READ ONLY（{major}c >= 12c），version={version}")
         return True
     _report("2", "FAIL", f"Oracle {major}c < 12c，ALTER SESSION SET READ ONLY 永久无效；必须依赖只读账号兜底")
     return False

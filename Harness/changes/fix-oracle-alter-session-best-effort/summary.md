@@ -130,6 +130,21 @@ await cursor.execute(sql)
 - `/api/v1/health` 双通道 200
 - 对话链路恢复：Oracle 数据源 SQL 查询不再因 ORA-02248 阻塞
 
+### DBA 真机探针脚本（2026-09-27 补充）
+
+为验证生产只读账号的 Oracle 权限是否齐全（层 3 防御能否生效），新增：
+
+- `backend/scripts/probe_oracle_readonly_privilege.py`：6 段式探针（§1 连接 / §2 版本 / §3 ALTER SESSION 权限 / §4 SELECT ANY TABLE / §5 业务 SELECT / §6 写入拒绝）
+- 跑法：
+  ```bash
+  ORACLE_DSN=<host:port/service_name> \
+  ORACLE_USER=<qa_readonly> \
+  ORACLE_PASSWORD=<strong_random> \
+  python scripts/probe_oracle_readonly_privilege.py
+  ```
+- §3 失败 = ORA-02248 风险存在；§6 失败 = 账号根本不是只读账号（CRITICAL，禁止用于业务链路）
+- DBA 跑通后改 §3 报告应为 PASS，业务 SQL 之前不应再看到 `ALTER_SESSION_REJECTED` warning
+
 ---
 
 ## 9. 关联

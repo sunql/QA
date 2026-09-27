@@ -231,11 +231,11 @@
 
 - ✅ **supplier name trigram 索引**（3500 行 seq scan，`supplier_name_resolver.py:151`）—— **已修复（2026-09-27）**，alembic 0086 `idx_entity_mapping_supplier_name_trgm` GIN trigram + partial `WHERE entity_type='SUPPLIER'`。EXPLAIN 待 prod 真机探针验证（部署门禁建议）。
 - ✅ **`_callWithRetryBackoff` 末尾 unreachable**（死分支）—— **已修复（2026-09-27）**，`llm_retry_policy.py:171` 改 `raise RuntimeError("unreachable") # noqa: B008` + 注释说明意图（tenacity AsyncRetrying 始终 raise 或 yield，分支不可达；`assert False` 会被 ruff 当生产 `-O` 模式剥离误报）。
-- ⏳ **§2.4 LOW 拆分/魔数治理（2026-09-28 启动，Phase 1 切分待续）**：
+- ⏳ **§2.4 LOW 拆分/魔数治理（2026-09-28 启动，Phase 1 拆分已完成，Phase 2 治理待续）**：
   - **魔数治理规范已落地**（2026-09-28，[`Harness/rules/魔数治理.md`](../../rules/魔数治理.md)）——三档决策（治理 / 不改 / 判别不清）+ 14 项候选常量清单 + 复刻现有 `_getClassFilterMaxClasses` / `_getAdsRecallWeight` 模式 + 种子 upsert 模板 + 3 例测试要求。SSOT 是 chat_service 已治理的 3 项（`ENABLE_L4_AGENT_LOOP` / `CLASS_FILTER_MAX_CLASSES` / `ADS_RECALL_WEIGHT`）。
-  - **Phase 1 文件拆分未启动**（chat_service 4916 行 + nl2sql_service 2589 行）；30+ 处既有 import 路径不可破坏 ⇒ 拆分策略须为「类壳保留 + 顶层 helper 抽出」，下次会话从 nl2sql_service 顶部 helper（`_SQL_FENCE_RE`…`SqlDialect` 段）开始 POC。
-  - **Phase 2 治理项**候选：`_CLASS_FILTER_TOP_K`(15) / `_CLASS_FILTER_HIT_MATCH_MIN`(0.5) / `_FEW_SHOT_*`(3/0.6/400) / `_CONTEXT_*_LIMIT`(500/500/4000) / `_STATE_HISTORY_FIELD_LIMIT`(500) / `_REFINE_MAX_LIMIT`(1000) / `_VALUE_SAMPLE_VALUE_MAX`(30) / `_OWNER_HINT_MAX_CLASSES`(3) / `_CRITICAL_DIGEST_MAX_*`(50/200) / `_NL2SQL_MAX_TOKENS`(2048)。
-  - ⚠️ **本次会话只交付「规范文档 + 候选清单 SSOT 化」**；其余三阶段留待后续会话按计划执行。
+  - ✅ **Phase 1.1 nl2sql_service.py 拆分已完成（2026-09-28）**——2589 → 8 文件（`nl2sql_dialects`/`scope`/`refs`/`refine`/`prompts`/`schema`/`plan`/门面），门面 re-export 21 私有名，nl2sql 单测 402 passed。SSOT：`Harness/changes/chore-nl2sql-service-file-split/summary.md`。
+  - ✅ **Phase 1.2 chat_service.py 拆分已完成（2026-09-28）**——4916 → 基类 1443 行 + 7 mixin + 1 helper（`chat_recall`/`chat_multistep`/`chat_context`/`chat_usage`/`chat_stream`/`chat_domain`/`chat_l4`/`chat_helpers`），方法名/签名零改动，MRO 无冲突，55 核心 + 9 领域集成失败集逐行 IDENTICAL（零回归）。SSOT：`Harness/changes/chore-chat-service-file-split/summary.md`。
+  - **Phase 2 治理项（实施待续）**：`_CLASS_FILTER_TOP_K`(15) / `_CLASS_FILTER_HIT_MATCH_MIN`(0.5) / `_FEW_SHOT_*`(3/0.6/400) / `_CONTEXT_*_LIMIT`(500/500/4000) / `_STATE_HISTORY_FIELD_LIMIT`(500) / `_REFINE_MAX_LIMIT`(1000) / `_VALUE_SAMPLE_VALUE_MAX`(30) / `_OWNER_HINT_MAX_CLASSES`(3) / `_CRITICAL_DIGEST_MAX_*`(50/200) / `_NL2SQL_MAX_TOKENS`(2048)——常量已随 mixin 落位，下一步在各模块内新增 `_getXxx(session)` 读取方法 + `seed_system_config.py`。
   - 完整计划见 `/Users/sunql/.claude/plans/rosy-beaming-phoenix.md`（§2.4 LOW 文件拆分 + 魔数治理 + §15 残差 3 阶段）。
 
 ### 2.5 文档-代码漂移（独立成节，因影响后续开发）

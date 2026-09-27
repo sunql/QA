@@ -1125,7 +1125,7 @@ class TestContextPromptBudget:
             for i in range(10)
         ]
         text = await service._buildContextPrompt(_FakeSession(), "s1", history)
-        assert len(text) <= chat_module._CONTEXT_PROMPT_CHAR_BUDGET
+        assert len(text) <= chat_module._CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT
         assert "msg9" in text
         assert "msg0" not in text
 
@@ -1137,7 +1137,7 @@ class TestContextPromptBudget:
         service = self._service()
         history = [self._historyMessage("assistant", "y" * 50000)]
         text = await service._buildContextPrompt(_FakeSession(), "s1", history)
-        assert len(text) <= chat_module._CONTEXT_PROMPT_CHAR_BUDGET
+        assert len(text) <= chat_module._CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT
         assert text.endswith("...")
 
     @pytest.mark.asyncio
@@ -1147,7 +1147,7 @@ class TestContextPromptBudget:
         """预算被调得过小时也不清空历史：至少留最新一轮（否则追问直接失忆）。"""
         import app.services.chat_context as ctx_module
 
-        monkeypatch.setattr(ctx_module, "_CONTEXT_PROMPT_CHAR_BUDGET", 10)
+        monkeypatch.setattr(ctx_module, "_CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT", 10)
         service = self._service()
         history = [
             self._historyMessage("user", "msg8-" + "x" * 300),
@@ -1177,7 +1177,7 @@ class TestContextPromptBudget:
         ]
         service = self._service()
         text = await service._buildContextPrompt(_StoredRoundsSession(rows), "s1", [])
-        assert len(text) <= chat_module._CONTEXT_PROMPT_CHAR_BUDGET
+        assert len(text) <= chat_module._CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT
         assert "[SQL:" in text
         assert text.endswith("]")  # SQL 段整体被保留（内部被截断但括号闭合）
 
@@ -2328,6 +2328,101 @@ class TestClassRecallDiagnostics:
         for bad_raw in ("0", "-5"):
             got = await svc._getClassFilterMaxClasses(_sessionReturning(bad_raw))
             assert got == 30, f"raw={bad_raw!r} got={got}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "getter,default",
+        [
+            ("_getClassFilterTopK", 15),
+            ("_getContextContentSegmentLimit", 500),
+            ("_getContextSqlSegmentLimit", 500),
+            ("_getContextPromptCharBudget", 4000),
+        ],
+    )
+    async def test_int_config_getter_uses_db_value(self, getter: str, default: int) -> None:
+        """魔数治理（Phase 2）：int getter 读 system_config，admin 改值后立即生效。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+        sentinel = {"value": "42"}
+
+        class _FakeSessionRead42:
+            async def execute(self, stmt):
+                class _R:
+                    def scalar_one_or_none(self_inner):
+                        return sentinel["value"]
+                return _R()
+
+        assert await getattr(svc, getter)(_FakeSessionRead42()) == 42
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "getter,default",
+        [
+            ("_getClassFilterTopK", 15),
+            ("_getContextContentSegmentLimit", 500),
+            ("_getContextSqlSegmentLimit", 500),
+            ("_getContextPromptCharBudget", 4000),
+        ],
+    )
+    async def test_int_config_getter_falls_back_on_missing_or_invalid(
+        self, getter: str, default: int
+    ) -> None:
+        """魔数治理（Phase 2）：缺席/NULL/格式错/非正 → 返 _DEFAULT，不阻断主链路。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+        for bad_raw in [None, "", "not-an-int", "   ", "0", "-5"]:
+            class _FakeSession:
+                async def execute(self, stmt):
+                    class _R:
+                        def scalar_one_or_none(self_inner):
+                            return bad_raw
+                    return _R()
+            got = await getattr(svc, getter)(_FakeSession())
+            assert got == default, f"{getter} raw={bad_raw!r} got={got}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "getter,default",
+        [
+            ("_getClassFilterTopK", 15),
+            ("_getClassFilterHitMatchMin", 0.5),
+            ("_getContextContentSegmentLimit", 500),
+            ("_getContextSqlSegmentLimit", 500),
+            ("_getContextPromptCharBudget", 4000),
+        ],
+    )
+    async def test_config_getter_falls_back_on_db_error(
+        self, getter: str, default: float
+    ) -> None:
+        """魔数治理（Phase 2）：DB 不可用（表缺失/连接断）→ 返 _DEFAULT。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+
+        class _FakeSessionBoom:
+            async def execute(self, stmt):
+                raise RuntimeError("UndefinedTableError: system_config")
+
+        assert await getattr(svc, getter)(_FakeSessionBoom()) == default
+
+    @pytest.mark.asyncio
+    async def test_float_config_getter_hit_match_min(self) -> None:
+        """魔数治理（Phase 2）：float getter 读 system_config；0.0 是合法值（恒不告警）。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+
+        def _sessionReturning(raw: str):
+            class _Session:
+                async def execute(self, stmt):
+                    class _R:
+                        def scalar_one_or_none(self_inner):
+                            return raw
+                    return _R()
+            return _Session()
+
+        assert await svc._getClassFilterHitMatchMin(_sessionReturning("2.5")) == 2.5
+        assert await svc._getClassFilterHitMatchMin(_sessionReturning("0.0")) == 0.0
+        assert await svc._getClassFilterHitMatchMin(_sessionReturning("not-a-float")) == 0.5
+        assert await svc._getClassFilterHitMatchMin(_sessionReturning(None)) == 0.5
 
     @pytest.mark.asyncio
     async def test_fallback_on_no_hits(self) -> None:

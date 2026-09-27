@@ -217,9 +217,9 @@ from app.services.chat_helpers import (
 from app.services.chat_recall import (
     RecallMixin,
     _ADS_RECALL_WEIGHT_DEFAULT,
-    _CLASS_FILTER_HIT_MATCH_MIN,
+    _CLASS_FILTER_HIT_MATCH_MIN_DEFAULT,
     _CLASS_FILTER_MAX_CLASSES_DEFAULT,
-    _CLASS_FILTER_TOP_K,
+    _CLASS_FILTER_TOP_K_DEFAULT,
     _DIMENSION_HINTS,
     _FEW_SHOT_EXAMPLE_LIMIT,
     _FEW_SHOT_SIMILARITY_MIN,
@@ -234,9 +234,9 @@ from app.services.chat_recall import (
 from app.services.chat_multistep import _FOLLOW_UP_RETRY_MAX_LEN, MultiStepMixin
 # 会话上下文 mixin：方法经 MRO 合并进 ChatService；常量 re-export 给既有测试
 # （test_chat_service_state.py 直接 import _RECENT_ROUNDS_LIMIT / _STATE_HISTORY_FIELD_LIMIT，
-#  test_chat_service.py 读 _CONTEXT_PROMPT_CHAR_BUDGET 断言）。
+#  test_chat_service.py 读 _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT 断言）。
 from app.services.chat_context import (
-    _CONTEXT_PROMPT_CHAR_BUDGET,
+    _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT,
     _RECENT_ROUNDS_LIMIT,
     _STATE_HISTORY_FIELD_LIMIT,
     ContextMixin,

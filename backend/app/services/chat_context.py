@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import IntentType
@@ -32,11 +32,11 @@ _CONTEXT_MESSAGE_LIMIT = _CONTEXT_ROUNDS * 2
 # H3：历史上下文预算。contextPrompt 会被注入 plan / SQL / answer 各阶段的 prompt
 # （见 _buildContextPrompt 的调用点），一条超长答案或长 CTE 会被逐轮重复注入 ——
 # 只限轮数不限长度时长轮次下每轮 prompt 成本线性膨胀。两道闸：单条限量 + 拼接总预算。
-_CONTEXT_CONTENT_SEGMENT_LIMIT = 500  # 单条消息正文上限
-_CONTEXT_SQL_SEGMENT_LIMIT = 500  # 单条消息携带的历史 SQL 上限（与正文分开限量）
+_CONTEXT_CONTENT_SEGMENT_LIMIT_DEFAULT = 500  # 单条消息正文上限；运行期从 system_config.CONTEXT_CONTENT_SEGMENT_LIMIT 读
+_CONTEXT_SQL_SEGMENT_LIMIT_DEFAULT = 500  # 单条消息携带的历史 SQL 上限（与正文分开限量）；运行期从 system_config.CONTEXT_SQL_SEGMENT_LIMIT 读
 # 总预算应 ≥ 单块上限之和（正文 + SQL + 说话人前缀），否则每次只剩最新一块；
 # 调得比单块还小时 _fitPartsToBudget 会再把最新一块裁进来，保证总量始终有界。
-_CONTEXT_PROMPT_CHAR_BUDGET = 4000
+_CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT = 4000  # 运行期从 system_config.CONTEXT_PROMPT_CHAR_BUDGET 读
 # 3-4：recent_rounds 保留的"更早轮次"快照上限（不含当前 last_*）。新到旧排列，
 # 超限丢弃最旧。取与 _CONTEXT_ROUNDS 一致的量级，保持跨轮回溯与历史注入口径相同。
 _RECENT_ROUNDS_LIMIT = 5
@@ -67,24 +67,120 @@ class ContextMixin:
             rounds = self._roundsFromClientHistory(history)
         if not rounds:
             return ""
+        contentLimit = await self._getContextContentSegmentLimit(session)
+        sqlLimit = await self._getContextSqlSegmentLimit(session)
+        charBudget = await self._getContextPromptCharBudget(session)
         # 助手消息附带上一轮 SQL（1-4）：让模型看到历史回答对应的结构化查询，
         # 便于多轮追问（REFINE/FOLLOW_UP）时复用或微调。客户端 history 无 SQL 记录。
         parts: list[str] = []
         for role, content, sql in rounds:
-            text = _clipText(content, _CONTEXT_CONTENT_SEGMENT_LIMIT)
+            text = _clipText(content, contentLimit)
             if role == "assistant" and sql:
                 # SQL 与正文分开限量：正文被裁不影响历史 SQL 的可见性（追问 REFINE 靠它）
-                text = f"{text} [SQL: {_clipText(sql, _CONTEXT_SQL_SEGMENT_LIMIT)}]"
+                text = f"{text} [SQL: {_clipText(sql, sqlLimit)}]"
             parts.append(f"{_speakerFor(role)}：{text}")
-        kept = _fitPartsToBudget(parts, _CONTEXT_PROMPT_CHAR_BUDGET)
+        kept = _fitPartsToBudget(parts, charBudget)
         if len(kept) < len(parts):
             logger.info(
                 "历史上下文按预算裁剪 kept=%d/%d chars=%d budget=%d",
                 len(kept), len(parts),
                 sum(len(p) for p in kept) + max(len(kept) - 1, 0),
-                _CONTEXT_PROMPT_CHAR_BUDGET,
+                charBudget,
             )
         return "\n".join(kept)
+
+    async def _getContextContentSegmentLimit(self, session: AsyncSession) -> int:
+        """读 system_config.CONTEXT_CONTENT_SEGMENT_LIMIT；缺席/格式错/非正返 _DEFAULT。
+
+        与 ``_getClassFilterMaxClasses`` 同口径：读失败不阻断主链路，返硬编码默认。
+        """
+        try:
+            row = await session.execute(
+                text("SELECT value FROM system_config WHERE key = 'CONTEXT_CONTENT_SEGMENT_LIMIT'")
+            )
+            raw = row.scalar_one_or_none()
+            if raw is None or raw == "":
+                return _CONTEXT_CONTENT_SEGMENT_LIMIT_DEFAULT
+            value = int(raw)
+            if value <= 0:
+                logger.warning(
+                    "CONTEXT_CONTENT_SEGMENT_LIMIT 非正值 %r，返默认值 %d",
+                    raw, _CONTEXT_CONTENT_SEGMENT_LIMIT_DEFAULT,
+                )
+                return _CONTEXT_CONTENT_SEGMENT_LIMIT_DEFAULT
+            return value
+        except (TypeError, ValueError):
+            logger.warning(
+                "CONTEXT_CONTENT_SEGMENT_LIMIT 值非法 %r，返默认值 %d",
+                raw, _CONTEXT_CONTENT_SEGMENT_LIMIT_DEFAULT,
+            )
+            return _CONTEXT_CONTENT_SEGMENT_LIMIT_DEFAULT
+        except Exception:
+            logger.warning(
+                "读取 CONTEXT_CONTENT_SEGMENT_LIMIT 失败，返默认值 %d",
+                _CONTEXT_CONTENT_SEGMENT_LIMIT_DEFAULT, exc_info=True,
+            )
+            return _CONTEXT_CONTENT_SEGMENT_LIMIT_DEFAULT
+
+    async def _getContextSqlSegmentLimit(self, session: AsyncSession) -> int:
+        """读 system_config.CONTEXT_SQL_SEGMENT_LIMIT；缺席/格式错/非正返 _DEFAULT。"""
+        try:
+            row = await session.execute(
+                text("SELECT value FROM system_config WHERE key = 'CONTEXT_SQL_SEGMENT_LIMIT'")
+            )
+            raw = row.scalar_one_or_none()
+            if raw is None or raw == "":
+                return _CONTEXT_SQL_SEGMENT_LIMIT_DEFAULT
+            value = int(raw)
+            if value <= 0:
+                logger.warning(
+                    "CONTEXT_SQL_SEGMENT_LIMIT 非正值 %r，返默认值 %d",
+                    raw, _CONTEXT_SQL_SEGMENT_LIMIT_DEFAULT,
+                )
+                return _CONTEXT_SQL_SEGMENT_LIMIT_DEFAULT
+            return value
+        except (TypeError, ValueError):
+            logger.warning(
+                "CONTEXT_SQL_SEGMENT_LIMIT 值非法 %r，返默认值 %d",
+                raw, _CONTEXT_SQL_SEGMENT_LIMIT_DEFAULT,
+            )
+            return _CONTEXT_SQL_SEGMENT_LIMIT_DEFAULT
+        except Exception:
+            logger.warning(
+                "读取 CONTEXT_SQL_SEGMENT_LIMIT 失败，返默认值 %d",
+                _CONTEXT_SQL_SEGMENT_LIMIT_DEFAULT, exc_info=True,
+            )
+            return _CONTEXT_SQL_SEGMENT_LIMIT_DEFAULT
+
+    async def _getContextPromptCharBudget(self, session: AsyncSession) -> int:
+        """读 system_config.CONTEXT_PROMPT_CHAR_BUDGET；缺席/格式错/非正返 _DEFAULT。"""
+        try:
+            row = await session.execute(
+                text("SELECT value FROM system_config WHERE key = 'CONTEXT_PROMPT_CHAR_BUDGET'")
+            )
+            raw = row.scalar_one_or_none()
+            if raw is None or raw == "":
+                return _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT
+            value = int(raw)
+            if value <= 0:
+                logger.warning(
+                    "CONTEXT_PROMPT_CHAR_BUDGET 非正值 %r，返默认值 %d",
+                    raw, _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT,
+                )
+                return _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT
+            return value
+        except (TypeError, ValueError):
+            logger.warning(
+                "CONTEXT_PROMPT_CHAR_BUDGET 值非法 %r，返默认值 %d",
+                raw, _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT,
+            )
+            return _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT
+        except Exception:
+            logger.warning(
+                "读取 CONTEXT_PROMPT_CHAR_BUDGET 失败，返默认值 %d",
+                _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT, exc_info=True,
+            )
+            return _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT
 
     async def _loadRecentRounds(
         self, session: AsyncSession, sessionId: str

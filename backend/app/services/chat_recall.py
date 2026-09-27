@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 _FEW_SHOT_TOP_K = 3  # 1-2：历史相似 SQL few-shot 的检索条数（注入即 token 成本，取小值）
 _FEW_SHOT_SIMILARITY_MIN = 0.6  # 1-2：相似度低于该值的命中视为噪音，不注入
 _FEW_SHOT_EXAMPLE_LIMIT = 400  # 1-2：单条示例的 question/sql 字符上限（few-shot 每阶段重复注入）
-_CLASS_FILTER_TOP_K = 15  # 1-1：类裁剪的向量检索 topK
-_CLASS_FILTER_HIT_MATCH_MIN = 0.5  # 1-1：命中中可解析为真实类的比例低于该值时告警（防检索漂移导致裁剪失效）
+_CLASS_FILTER_TOP_K_DEFAULT = 15  # 1-1：类裁剪的向量检索 topK；运行期从 system_config.CLASS_FILTER_TOP_K 读，缺席用此值
+_CLASS_FILTER_HIT_MATCH_MIN_DEFAULT = 0.5  # 1-1：命中中可解析为真实类的比例低于该值时告警；运行期从 system_config.CLASS_FILTER_HIT_MATCH_MIN 读
 _CLASS_FILTER_MAX_CLASSES_DEFAULT = 30  # 召回扩边后的 schema 类总量上限；运行期从 system_config.CLASS_FILTER_MAX_CLASSES 读，缺席用此值
 _ADS_RECALL_WEIGHT_DEFAULT = 1.5  # feat-ontology-recall-pruning step D：ADS 层类 score 加权系数
 # 运行期从 system_config.ADS_RECALL_WEIGHT 读；缺席/格式错返此值。提高此值让
@@ -193,6 +193,67 @@ class RecallMixin:
             )
             return _ADS_RECALL_WEIGHT_DEFAULT
 
+    async def _getClassFilterTopK(self, session: AsyncSession) -> int:
+        """读 system_config.CLASS_FILTER_TOP_K；缺席/格式错/非正返 _DEFAULT。
+
+        与 ``_getClassFilterMaxClasses`` 同口径：读失败不阻断主链路。非正值视同
+        非法——topK=0 会让检索恒空 → 永远走全量回退（裁剪静默失效）。
+        """
+        try:
+            row = await session.execute(
+                text("SELECT value FROM system_config WHERE key = 'CLASS_FILTER_TOP_K'")
+            )
+            raw = row.scalar_one_or_none()
+            if raw is None or raw == "":
+                return _CLASS_FILTER_TOP_K_DEFAULT
+            value = int(raw)
+            if value <= 0:
+                logger.warning(
+                    "CLASS_FILTER_TOP_K 非正值 %r，返默认值 %d",
+                    raw, _CLASS_FILTER_TOP_K_DEFAULT,
+                )
+                return _CLASS_FILTER_TOP_K_DEFAULT
+            return value
+        except (TypeError, ValueError):
+            logger.warning(
+                "CLASS_FILTER_TOP_K 值非法 %r，返默认值 %d",
+                raw, _CLASS_FILTER_TOP_K_DEFAULT,
+            )
+            return _CLASS_FILTER_TOP_K_DEFAULT
+        except Exception:
+            logger.warning(
+                "读取 CLASS_FILTER_TOP_K 失败，返默认值 %d",
+                _CLASS_FILTER_TOP_K_DEFAULT, exc_info=True,
+            )
+            return _CLASS_FILTER_TOP_K_DEFAULT
+
+    async def _getClassFilterHitMatchMin(self, session: AsyncSession) -> float:
+        """读 system_config.CLASS_FILTER_HIT_MATCH_MIN；缺席/格式错返 _DEFAULT。
+
+        与 ``_getAdsRecallWeight`` 同口径（float）：0.0 是合法配置（恒不告警），
+        故不做非正拒绝。
+        """
+        try:
+            row = await session.execute(
+                text("SELECT value FROM system_config WHERE key = 'CLASS_FILTER_HIT_MATCH_MIN'")
+            )
+            raw = row.scalar_one_or_none()
+            if raw is None or raw == "":
+                return _CLASS_FILTER_HIT_MATCH_MIN_DEFAULT
+            return float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "CLASS_FILTER_HIT_MATCH_MIN 值非法 %r，返默认值 %.2f",
+                raw, _CLASS_FILTER_HIT_MATCH_MIN_DEFAULT,
+            )
+            return _CLASS_FILTER_HIT_MATCH_MIN_DEFAULT
+        except Exception:
+            logger.warning(
+                "读取 CLASS_FILTER_HIT_MATCH_MIN 失败，返默认值 %.2f",
+                _CLASS_FILTER_HIT_MATCH_MIN_DEFAULT, exc_info=True,
+            )
+            return _CLASS_FILTER_HIT_MATCH_MIN_DEFAULT
+
     async def _rankByLayer(
         self,
         classes: list,
@@ -262,9 +323,10 @@ class RecallMixin:
             return list(allClasses), ClassRecallInfo(
                 mode="recall", hitCount=0, classCount=0,
             )
+        topK = await self._getClassFilterTopK(session)
         try:
             hits = await self._ontology.searchByKeyword(
-                question, topK=_CLASS_FILTER_TOP_K, typeFilter="class"
+                question, topK=topK, typeFilter="class"
             )
         except Exception:
             # 只留堆栈：reason=/计数由 _fallbackRecall 单点透出，避免回退率翻倍
@@ -344,7 +406,8 @@ class RecallMixin:
                 session, question, allClasses, reason="no_match", hitCount=len(hits)
             )
         matchedRatio = len(relevant) / len(hits)
-        if matchedRatio < _CLASS_FILTER_HIT_MATCH_MIN:
+        hitMatchMin = await self._getClassFilterHitMatchMin(session)
+        if matchedRatio < hitMatchMin:
             logger.warning(
                 "本体类裁剪命中率过低 hits=%d matched=%d ratio=%.2f",
                 len(hits), len(relevant), matchedRatio,

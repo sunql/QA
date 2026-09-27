@@ -148,7 +148,7 @@ class IntentType(str, Enum):
     QUERY / NEW_QUERY：全新查询（NEW_QUERY 表示有历史状态时开启的新一轮）。
     REFINE / FOLLOW_UP：多轮意图，需存在会话查询状态（见 intent_service）。
     CLARIFY：询问概念含义，不进 NL2SQL 流水线。
-    DEFINE / MAP / METRIC：设计稿保留意图，暂未接入流水线。
+    DEFINE / MAP / METRIC：已接入流水线（本体治理指令，含指标/类/属性创建与查询）。
     """
 
     QUERY = "query"

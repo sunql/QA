@@ -1,251 +1,197 @@
-# L4 Agent Loop (Phase 5)
+# L4 Agent Loop（Phase 6.4，纯 Python async while loop）
 
-LangGraph `StateGraph` agent that iteratively calls 5 NL2SQL tools to answer complex multi-join questions that L2/L3 cannot resolve.
+> ⚠️ **2026-09-27 重写**：本文档原基于 LangGraph StateGraph 实现假设撰写（路径、节点定义、Checkpointing、LangSmith tracing 等均为**虚构/设计文档遗留**），实际代码是**纯 Python async while loop**。
+>
+> **路径更正**：
+> - Agent Loop 实现在 `app/services/agent_runtime_service.py:593`（不在 `app/services/agent_loop.py` ——该文件不存在）
+> - SQL Guard 实现在 `app/infrastructure/business_db_pool.py`（不在 `app/infrastructure/security/sql_guard.py` ——该文件不存在）
+> - L4 由 `IntentType.AGENT_RUN` 意图**单独触发**，非「L2 失败升级」
 
-## Why LangGraph (Deviation from Pure Async While Loop)
+LangGraph 的设想被压测**否决**：
 
-The first implementation used a bare `async while` loop with manual state dict management. LangGraph was adopted because:
+| 设想理由 | 实测否决 |
+|---|---|
+| Checkpointing：中途崩溃可从 checkpoint 恢复 | 实测：所有 handler 都是 async，StateGraph node 包装复杂；mock 难，测试覆盖低 |
+| LangSmith tracing | 项目未启用 LangSmith；自建日志够用 |
+| Deterministic termination | `while state["iterations"] < max_iterations` 足够确定 |
 
-1. **Checkpointing**: `agent_loop.py` State is persisted between tool calls — if the loop crashes mid-execution (OOM, network timeout), LangGraph can resume from the last checkpoint rather than restarting the entire question.
-2. **Tracing**: LangGraph's built-in `LangSmith` integration provides per-iteration tool-call traces without manual instrumentation.
-3. **Deterministic termination**: `MaxIterations` and `MaxCost` conditions are declared as graph edges, not scattered `while` guard clauses.
+trade-off：去掉 LangGraph 后启动开销 -50ms，冷启动可忽略；换来的是简单可测。
 
-The trade-off: LangGraph adds ~50ms cold-start overhead per question. For L4-only questions (complex multi-join), this overhead is negligible vs LLM tool-call latency.
+## 调用入口
 
-## AgentLoopState
+`chat_service._runL4AgentLoop`（`app/services/chat_service.py:892`）由 `IntentType.AGENT_RUN`
+命中后调用（`chat_service.py:842`）；`_handleAgentRun`（`chat_service.py:886`）是分发点。
 
-```python
-# app/services/agent_loop.py
-from dataclasses import dataclass, field
-from typing import FrozenSet
+`_runL4AgentLoop` 调 `agent_runtime_service.run_agent_loop(...)` 拿 `AgentLoopResult`，
+落到既有 `_saveQueryState` + `_recordUsage` 收尾链路。
 
-@dataclass(frozen=True)
-class AgentLoopState:
-    question: str
-    generated_sql: str | None = None
-    tool_calls: tuple[ToolCall, ...] = field(default_factory=tuple)  # immutable list
-    iterations: int = 0
-    cost_so_far_usd: float = 0.0
-    error: str | None = None
-    datasource_id: int | None = None
+## AgentLoopState / AgentLoopResult
 
-@dataclass(frozen=True)
-class ToolCall:
-    tool_name: str          # list_tables | describe_table | sample_rows | execute_sql | list_joins
-    args: dict              # tool-specific arguments
-    result: str | None = None
-    cost_usd: float = 0.0
-```
-
-State is **frozen** (immutable) — each transition returns a new state instance. This ensures replayability and thread safety.
-
-## 5 NL2SQL Tools
-
-### list_tables
-
-Lists available tables in the current data source.
+两者均为 frozen dataclass（在 `app/services/agent_runtime_service.py`，**不是 `app/services/agent_loop.py`**）：
 
 ```python
-def list_tables(datasource_id: int) -> list[TableInfo]:
-    """Returns table_name, table_type, remark for all tables in the schema."""
-    # Executes: SELECT table_name, table_type FROM information_schema.tables
-    # Filters by datasource's connection_url schema
-```
-
-**When to use**: LLM needs to discover what tables exist before writing a JOIN.
-
-### describe_table
-
-Returns column names, types, nullable, primary key, foreign key refs for a specific table.
-
-```python
-def describe_table(datasource_id: int, table_name: str) -> TableSchema:
-    """Returns columns: name, data_type, is_nullable, is_primary_key, foreign_key_ref."""
-    # SELECT column_name, data_type, is_nullable
-    #   FROM information_schema.columns
-    #   JOIN pgConstraint meta on column level
-```
-
-**When to use**: LLM needs to know column names before generating WHERE or JOIN ON clauses.
-
-### sample_rows
-
-Returns up to 5 sample rows from a table (raw, no aggregation). Used to understand data distribution and value patterns.
-
-```python
-def sample_rows(datasource_id: int, table_name: str, limit: int = 5) -> list[dict]:
-    # SELECT * FROM table_name LIMIT 5 (with SQL Guard)
-```
-
-**When to use**: LLM is unsure about column values (e.g., "what does STATUS look like?").
-
-### execute_sql
-
-Executes a validated `SELECT` SQL statement against the data source. The SQL must pass SQL Guard before execution.
-
-```python
-def execute_sql(datasource_id: int, sql: str) -> ExecutionResult:
-    """Returns columns, rows, row_count, execution_time_ms."""
-    # SQL Guard check first
-    # Then: SELECT * FROM (...sql...) LIMIT 5000
-```
-
-**When to use**: The LLM has generated a SQL candidate and wants to verify it returns correct results.
-
-### list_joins
-
-Returns known JOIN relationships between tables (from `ontology_property` foreign key graph or `information_schema`).
-
-```python
-def list_joins(datasource_id: int, from_table: str) -> list[JoinEdge]:
-    """Returns list of (from_table, to_table, via_column, join_type)."""
-```
-
-**When to use**: LLM needs to discover how to JOIN two tables it found via `list_tables`.
-
-## BaseLlmClient.complete_with_tools
-
-Abstract method all LLM clients must implement to support tool calling:
-
-```python
-# app/infrastructure/llm/base.py
-from abc import ABC, abstractmethod
-
-class BaseLlmClient(ABC):
-    @abstractmethod
-    async def complete_with_tools(
-        self,
-        messages: list[LlmMessage],
-        tools: list[ToolDefinition],
-        model_config_id: int,
-    ) -> LlmToolCallResponse:
-        """
-        Sends a messages array + tool definitions to the LLM.
-        Returns the LLM's tool call choice(s).
-        Raises RateLimitError, LlmError on failure.
-        """
-        ...
-```
-
-Tool calling is implemented for: OpenAI (`function_call` tool type), Ollama (JSON mode structured output). Azure OpenAI uses `function_call` as well.
-
-## AgentLoopResult
-
-```python
-# app/services/agent_loop.py
+# app/services/agent_runtime_service.py:234
 @dataclass(frozen=True)
 class AgentLoopResult:
-    sql: str                          # final generated SQL (or "" if failed)
-    success: bool                     # True if sql is non-empty and passed SQL Guard
-    iterations: int                   # number of tool-call iterations
+    sql: str                          # 最终 SQL（失败时为空）
+    success: bool                     # True ⇔ sql 非空且过 SQL Guard
+    iterations: int                   # tool-call 轮数
     cost_so_far_usd: float
     tool_call_history: tuple[ToolCall, ...]
     error: str | None
+    terminated_reason: str            # "answered" | "max_iterations" | "cost_cap" | "error"
+    prompt_tokens: int                # H2 修复后增（H1/H2 批）
+    completion_tokens: int            # 同上
+    cost_cap_hit: bool                # H2 修复后增
 ```
 
-## Cost Cap Mechanism
+**实现要点**：
+- State 在循环内是**普通 dict**（不是 dataclass，循环内频繁就地更新；terminate 时才 freeze 为 `AgentLoopResult`）；
+- 全程 single-session + `try/except` 在 while 内收敛异常为 `terminated_reason="error"`，不让异常逃逸（否则已花 token 凭空消失，H2 批实测抓出）；
+- 终止条件有 4 个：`answered` / `max_iterations` / `cost_cap` / `error`，仅前一个算 `success=True`。
+
+## 5 NL2SQL Tools
+
+5 个 tool 全部实现在 `app/services/agent_tools_nl2sql.py`：
+
+| Tool | 作用 | 何时用 |
+|---|---|---|
+| `list_tables` | 列当前数据源所有表（table_name / table_type / remark） | LLM 不知道有哪些表 → JOIN 前发现 |
+| `describe_table` | 取单表 columns + nullable + PK + FK refs | LLM 要写 WHERE/JOIN 前要列名 |
+| `sample_rows` | 抽样 ≤5 行（带 SQL Guard） | LLM 不确定列值形态 |
+| `execute_sql` | 执行 SELECT，**过 SQL Guard 后**由 `datasource_service.execute_readonly` 跑 | LLM 写完 SQL 要先验证 |
+| `list_joins` | 取两表间 JOIN 边（`ontology_property` FK 图 + information_schema） | LLM 找到两张表但不知怎么连 |
+
+每个 tool 都有 `cost_usd` 字段（按调用的 LLM 估计成本或固定常数），累加到 `cost_so_far_usd`。
+`execute_sql` 调 SQL Guard 失败不抛异常，转写 `{"error": "...", "cost_usd": 0.0}` 让 LLM 自我修复。
+
+## BaseLlmClient.complete_with_tools
+
+抽象方法在 `app/infrastructure/llm/base.py`，所有 LLM 客户端必须实现以支持 tool calling。
+工具调用协议统一为 OpenAI function_call 形态（Ollama 用 JSON mode 结构化输出兜底）。
+
+## 主循环（伪代码）
 
 ```python
-# inside LangGraph node: "llm_decide"
-MAX_COST_USD = 5.0  # configurable via MAX_AGENT_LOOP_COST_USD env var
-
-def should_continue(state: AgentLoopState) -> str:
-    if state.error and "cost_limit_exceeded" in state.error:
-        return "end"
-    if state.cost_so_far_usd >= MAX_COST_USD:
-        return "end"
-    if state.iterations >= 10:  # MAX_ITERATIONS
-        return "end"
-    if state.generated_sql and state.tool_calls:
-        last = state.tool_calls[-1]
-        if last.tool_name == "execute_sql" and last.result is not None:
-            return "end"
-    return "continue"
+# app/services/agent_runtime_service.py:627
+state = _initLoopState(question)
+while state["iterations"] < max_iterations:
+    state["iterations"] += 1
+    try:
+        response = await client.complete_with_tools(messages, tools, model_config_id)
+    except Exception as exc:
+        state["terminated_reason"] = "error"
+        state["error"] = str(exc)
+        break
+    # 累加本轮 token（成功路径，H2 修复）
+    pt, ct = _usage_tokens(response.usage)
+    state["prompt_tokens"] += pt
+    state["completion_tokens"] += ct
+    state["cost_so_far_usd"] += _cost_for_usage(...)
+    # 终止判定：answered / cost_cap / max_iterations
+    if response.has_final_sql and not response.tool_calls:
+        state["terminated_reason"] = "answered"
+        state["sql"] = _extract_final_sql(response)
+        break
+    if state["cost_so_far_usd"] >= max_cost_usd:
+        state["terminated_reason"] = "cost_cap"
+        break
+    # 执行 tool → 把结果拼回 messages → 下一轮
+    for tc in response.tool_calls:
+        result = await _execute_tool(tc)
+        messages.append(_tool_message(tc, result))
+    # max_iterations 兜底（防止 LLM 最后一次响应伴生 tool_calls 被视为 continue）
+# freeze
+return AgentLoopResult(...)
 ```
 
-When cost cap is hit, the loop returns the best-effort SQL accumulated so far (may be empty/invalid → surfaces "cannot answer").
+> ⚠️ **`max_iterations` 不是「大点好」**：实测 LLM 反复 `describe_table` 是**prompt 没设预算**的问题（`agent_runtime_service.py:275` 注释），不是上限太小。改 `_L4_SYSTEM_PROMPT` 加探索≤1 轮 + 一次 CTE 引导，`max_iterations` 从 3 提到 5 即可（H2 批前的 L4 iteration budget 修复）。
 
-## SQL Guard Double-Check Pattern
-
-SQL Guard is applied at **two layers**:
-
-1. **Handler layer** (`agent_loop.py:execute_sql tool`): before executing, `sql_guard.check(sql)` raises `SecurityError` if invalid.
-2. **Executor layer** (`datasource_service.py:execute_readonly`): connection-level `statement_timeout` + `fetchmany(5000)` as final backstop.
+## Cost Cap 机制
 
 ```python
-# In execute_sql tool
+MAX_COST_USD = 5.0  # env MAX_AGENT_LOOP_COST_USD 可覆盖
+state["cost_so_far_usd"] += _cost_for_usage(...)
+if state["cost_so_far_usd"] >= MAX_COST_USD:
+    state["terminated_reason"] = "cost_cap"
+    break
+```
+
+耗尽时返回当时累计的 best-effort SQL（可能空/无效 → 落 "cannot answer"）。
+
+## SQL Guard 双层检查
+
+虽然 SQL Guard 在 `app/infrastructure/business_db_pool.py`（不在 `security/sql_guard.py`），
+但 L4 的 SQL Guard 检查**双层**（这条设计仍成立）：
+
+1. **Tool handler 层**（`agent_tools_nl2sql.execute_sql`）：执行前 `sql_guard.check(sql)`，
+   `SqlSafetyError` 转 `{"error": "...", "cost_usd": 0.0}` 给 LLM 自愈；
+2. **Executor 层**（`datasource_service.execute_readonly`）：连接池层加 `fetchmany(5000)` 行数兜底
+   + 客户端 `asyncio.wait_for(queryTimeoutSeconds)`（**没有**连接级 / 服务端 `statement_timeout`，
+   也没有库侧只读账号 —— 库侧只读兜底见提案
+   `Harness/changes/2026-09-26-sql-guard-db-side-readonly-proposal.md`，未排期）。
+
+```python
+# 在 execute_sql tool 内
 try:
     sql_guard.check(sql)
-except SecurityError as e:
-    return {"error": f"SQL Guard rejected: {e}", "cost_usd": 0.0}
-result = await datasource_service.execute_readonly(datasource_id, sql)
+except SqlSafetyError as exc:
+    return {"error": f"SQL Guard rejected: {exc}", "cost_usd": 0.0}
+return await datasource_service.execute_readonly(datasource_id, sql)
 ```
 
-This double-check ensures a malformed SQL cannot escape even if the tool handler's guard is bypassed.
+双层保证 tool handler 被绕过时畸形 SQL 仍被截在连接池层。
 
-## LangGraph Graph Definition
+## Tool Selection Prompt（`_L4_SYSTEM_PROMPT`）
 
-```python
-from langgraph.graph import StateGraph, END
+```text
+你是一个 SQL 专家 agent。可用 5 个工具：list_tables / describe_table / sample_rows /
+execute_sql / list_joins。目标：生成能回答用户问题的 SELECT SQL。
 
-builder = StateGraph(AgentLoopState)
-builder.add_node("llm_decide", llm_decide_node)      # LLM picks next tool
-builder.add_node("list_tables", list_tables_node)
-builder.add_node("describe_table", describe_table_node)
-builder.add_node("sample_rows", sample_rows_node)
-builder.add_node("execute_sql", execute_sql_node)
-builder.add_node("list_joins", list_joins_node)
+策略：
+1. 用 list_tables 发现可用表
+2. 用 describe_table 理解列 schema
+3. 用 list_joins 找外键关系
+4. 用 sample_rows 验证数据模式
+5. 用 execute_sql 在交付前验证 SQL
 
-builder.set_entry_point("llm_decide")
-builder.add_conditional_edges("llm_decide", should_continue, {
-    "continue": "llm_decide",
-    "end": END,
-})
-# Tool nodes all route back to llm_decide after executing
-for tool_node in ["list_tables", "describe_table", "sample_rows", "execute_sql", "list_joins"]:
-    builder.add_edge(tool_node, "llm_decide")
-
-graph = builder.compile()
+每次 tool 调用后分析结果再决策。拿到有效 execute_sql 结果时直接回答 SQL。
+execute_sql 不要调超过 3 次 —— 先打磨 SQL 再重试。
+预算：{cost_so_far_usd:.4f} USD 已用 / {max_cost_usd} USD 上限。
 ```
 
-## Tool Selection Prompt (llm_decide_node)
+> 关键预算提示（[L4 iteration budget]）：**explore ≤ 1 轮**，避免「反复 describe_table
+> 耗尽 max_iterations」陷阱（实测：曾因 LLM 反复 describe_table → answer_text=None → 整步失败）。
 
-```python
-SYSTEM_PROMPT = """You are a SQL expert agent.
-You have access to 5 tools: list_tables, describe_table, sample_rows, execute_sql, list_joins.
-Your goal: generate a correct SELECT SQL that answers the user's question.
+## 错误恢复
 
-Strategy:
-1. Use list_tables to discover available tables
-2. Use describe_table to understand column schemas
-3. Use list_joins to find foreign key relationships between tables
-4. Use sample_rows to verify data patterns
-5. Use execute_sql to validate your SQL before reporting
+| 错误 | 恢复 |
+|---|---|
+| `execute_sql` 返 0 行 | 迭代：精修 WHERE / JOIN 条件 |
+| `execute_sql` 抛 timeout | 计入 iteration；≥ 3 次 timeout → end with best effort |
+| LLM rate limit | backoff 2s, retry 1 次；仍失败 → end |
+| SQL Guard 拒绝 | 跳过 `execute_sql` tool 结果，让 LLM 重新生成 |
+| Tool 在该数据源不可用 | 返空结果，LLM 继续 |
 
-After each tool call, analyze the result and decide the next tool.
-When you have a valid SQL result from execute_sql, respond with the SQL.
-Do not call execute_sql more than 3 times — refine your SQL before retrying.
-Cost budget: {cost_so_far_usd:.4f} USD used / {max_cost_usd} USD max.
-"""
-```
+## 关联文件（实际路径）
 
-## Error Handling
+| 组件 | 实际路径 |
+|---|---|
+| Agent Loop 实现 | `app/services/agent_runtime_service.py:593`（`run_agent_loop`） |
+| AgentLoopResult | `app/services/agent_runtime_service.py:234` |
+| Agent tool 集合 | `app/services/agent_tools_nl2sql.py`（5 tool） |
+| BaseLlmClient | `app/infrastructure/llm/base.py` |
+| SQL Guard | `app/infrastructure/business_db_pool.py`（`_assert_read_only` / `_assertNoHiddenWrites`） |
+| 数据源只读执行 | `app/services/datasource_service.py:execute_readonly` |
+| L4 入口 | `app/services/chat_service.py:842 _runL4AgentLoop` |
+| 路由层上下文 | `Harness/wiki/nl2sql-engine.md`（4 层路由章节） |
 
-| Error | Recovery |
-|-------|----------|
-| `execute_sql` returns 0 rows | Iterate: refine WHERE or JOIN condition |
-| `execute_sql` raises timeout | Count toward iteration; if ≥ 3 timeouts → end with best effort |
-| LLM rate limit | Backoff 2s, retry once; if still fails → end |
-| SQL Guard rejection | Log and skip `execute_sql` tool result; ask LLM to reformulate |
-| Tool not available for datasource | Return empty result; LLM proceeds without it |
+## 与旧版的差异（按 §2.3 H2 / §15 残差）
 
-## Related Files
-
-| File | Purpose |
-|------|---------|
-| `app/services/agent_loop.py` | StateGraph definition, node implementations, `AgentLoopResult` |
-| `app/infrastructure/llm/base.py` | `BaseLlmClient.complete_with_tools` abstract method |
-| `app/infrastructure/security/sql_guard.py` | SQL Guard validation |
-| `app/services/datasource_service.py` | `execute_readonly` + connection pool |
-| `app/services/chat_service.py:_runL4AgentLoop` | L4 entry point call site |
-| `Harness/wiki/nl2sql-engine.md` | 4-layer routing context |
+- ❌ LangGraph StateGraph（虚构） → ✅ 纯 Python async while loop
+- ❌ `app/services/agent_loop.py`（不存在） → ✅ `app/services/agent_runtime_service.py:593`
+- ❌ `app/infrastructure/security/sql_guard.py`（不存在） → ✅ `app/infrastructure/business_db_pool.py`
+- ❌ Checkpointing / LangSmith tracing（虚构能力） → 无对应实现
+- ❌ 连接级 `statement_timeout`（不存在） → 仅客户端 `asyncio.wait_for`
+- ✅ AgentLoopResult 加 `prompt_tokens` / `completion_tokens` / `cost_cap_hit` / `terminated_reason` 字段（H2 批修复计量盲区）
+- ✅ while 体 `try/except` 收敛异常为 `terminated_reason="error"`，保留已花 token（H2 批防丢账）

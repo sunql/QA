@@ -23,7 +23,7 @@
 ## 多轮对话状态（Phase C）
 
 - `session_query_state` 表（JSONB）：`last_question / last_plan / last_sql / last_result_columns / turn_count`，每次成功查询后 UPSERT。
-- **意图识别**：5 类活跃意图 `query / new_query / refine / follow_up / clarify / chitchat`，规则匹配（不调 LLM）；`REFINE`/`FOLLOW_UP` 需上一轮已有状态（`hasPriorState`）。后端枚举另预留 `define/map/metric` 未接入。
+- **意图识别**：13 类意图 `query / new_query / refine / follow_up / clarify / chitchat / define / map / metric / supplier_360 / supplier_risk / graph_reasoning / agent_run`，规则匹配（不调 LLM）；`REFINE`/`FOLLOW_UP` 需上一轮已有状态（`hasPriorState`）。`DEFINE / MAP / METRIC` 已接入流水线（`chat_service._handleDefineClass / _handleDefineMetric / _handleShowMetric / _handleMapProperty`，详见 `chat_service.py:2551-2568`）；`SUPPLIER_360 / SUPPLIER_RISK / GRAPH_REASONING / AGENT_RUN` 是 4 条领域拦截路径，跳过 NL2SQL 走专项服务。
 - REFINE/FOLLOW_UP 轮次把上一轮状态经 `_sanitizeContext` 转义后包成 `<previous_query_state>` 注入两阶段 prompt，实现跨轮上下文传递。
 
 ## REFINE 捷径（Phase D）

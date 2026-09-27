@@ -4,11 +4,12 @@
 
 智能问答系统：用户用自然语言提问，系统经多模型路由调用 LLM，将意图转为 SQL（NL2SQL），在可配置业务库上执行只读查询，并自动渲染 ECharts 图表。知识沉淀为本体（Ontology）。
 
-NL2SQL 的**实际路由**（Phase 5）有三条路径：**L1** KPI 语义匹配 →（未命中）**L2** LLM 单 SQL；
-多步子问题由独立的 `_executeMultiStep` 承担（同样记 `routing_layer="L2"`）；**L4** LangGraph Agent Loop
-由 `IntentType.AGENT_RUN` 意图**单独触发**（**不是** L2 失败后自动升级）。⚠️ 设计里的「**L3 CTE 链**」
-作为独立层**从未在生产接线**，已于 **2026-09-27 删除**（仅保留 `prior_cte` 片段能力）。
-详见 `wiki/nl2sql-engine.md`（4 层路由章节）。
+NL2SQL 的**实际路由**（Phase 6.4）有三条路径：**L1** KPI 语义匹配 →（未命中）**L2** LLM 单 SQL；
+多步子问题由独立的 `_executeMultiStep` 承担（同样记 `routing_layer="L2"`）；**L4** Agent Loop
+由 `IntentType.AGENT_RUN` 意图**单独触发**（**不是** L2 失败后自动升级），实现在
+`app/services/agent_runtime_service.py`（纯 Python async while loop，非 LangGraph）。
+⚠️ 设计里的「**L3 CTE 链**」作为独立层**从未在生产接线**，已于 **2026-09-27 删除**
+（仅保留 `prior_cte` 片段能力）。详见 `wiki/nl2sql-engine.md`（4 层路由章节）。
 
 ## 分层
 
@@ -38,7 +39,7 @@ NL2SQL 的**实际路由**（Phase 5）有三条路径：**L1** KPI 语义匹配
 | Token 计数 | `infrastructure/token_counter/` | tiktoken + 启发式 |
 | 本体服务 | `services/ontology_service.py`（Phase 2） | 类/属性/指标 CRUD + 图持久化 |
 | NL2SQL | `services/nl2sql_service.py`（Phase 3） | ReAct 两阶段（计划→验证→SQL）+ REFINE 捷径 + SQL Guard |
-| Agent Loop | `services/agent_loop.py`（Phase 5） | L4 LangGraph 迭代工具调用（5 NL2SQL tools） |
+| Agent Loop | `app/services/agent_runtime_service.py:593`（Phase 6.4） | L4 纯 Python async while loop 工具调用（5 NL2SQL tools），非 LangGraph |
 | Metric Pipeline | `services/metric_promotion_service.py`（Phase 5） | 冷指标自动晋升 DRAFT + 路由层计量聚合 |
 | 图表渲染 | `services/chart_service.py`（Phase 4） | ECharts Option 生成 |
 | 数据源 | `services/datasource_service.py`（Phase 3） | 动态引擎池 + 只读执行 |

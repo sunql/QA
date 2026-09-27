@@ -963,7 +963,12 @@ ACCEPT  SELECT "into" FROM t / SELECT into_col FROM t            ← 引号标�
    `pg_sleep_for`、`DBMS_LOB.LOADFROMFILE`、`MASTER_POS_WAIT`、`lo_put` 等漏项），解析层永远追不上
    方言/自定义/未来新增函数。真正的闸门应是**库侧只读角色 + 服务端 `statement_timeout`**
    （实测 `grep statement_timeout|READ ONLY` 在 `business_db_pool.py`/`config.py` **零命中**）。
-   已转独立提案：`Harness/changes/2026-09-26-sql-guard-db-side-readonly-proposal.md`。
+   ✅ **应用层已修（2026-09-27，见 fix-sql-guard-db-side-readonly）**——PG `SET TRANSACTION READ ONLY`
+   + MySQL `SET SESSION TRANSACTION READ ONLY` + Oracle `ALTER SESSION SET READ ONLY` 在事务级/
+   会话级强制只读；详见 [fix-sql-guard-db-side-readonly](../changes/fix-sql-guard-db-side-readonly/summary.md)。
+   ⏳ **库侧授权（DBA 部分）等运维执行**：脚本就绪于
+   [`scripts/db-readonly-account-setup.sql`](../../scripts/db-readonly-account-setup.sql)，含三方言
+   只读账号 + 敏感函数/包撤销 + Resource Manager 配置。
    顺带纠正 `nl2sql-engine.md` 原写的「连接级 `statement_timeout`」（不存在）与 `sql_guard.py` 路径漂移。
 2. **`(pg_sleep)(5)` 放行**（security LOW）：三方言下 `(func)(args)` 均非合法调用语法（不会执行），`_callShape` 已注明。
 3. **安全校验失败日志不截断**（code LOW）：`logger.warning(…, exc)` 受 LLM `max_tokens` 上界约束，低危，记录待清理。

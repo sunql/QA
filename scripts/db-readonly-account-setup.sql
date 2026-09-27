@@ -1,0 +1,140 @@
+-- =============================================================================
+-- 业务库只读账号配置（库侧只读兜底，fix-sql-guard-db-side-readonly 批）
+-- =============================================================================
+--
+-- 背景：SQL Guard 黑名单是**枚举式**防御（M1/M2 批补到极致），永远追不上方言扩展/
+-- 自定义函数/未来新增函数。应用层兜底（`SET TRANSACTION READ ONLY` / `ALTER SESSION
+-- SET READ ONLY`）只能挡「同一事务里写」的漏过；**库侧只读账号 + 撤销敏感权限**才是
+-- 真闸门：本批应用层 + 本文件库侧 = 纵深防御。
+--
+-- 用法（运维执行）：
+--   1. 复制对应方言的 SQL 段到 DBA 终端；
+--   2. 把 `qa_readonly` 密码占位符换成强随机串（≥32 字节随机）；
+--   3. 在测试环境（qa_metadata_test / 业务库的测试 schema）先跑通，再上 prod；
+--   4. 应用侧把 datasource 的 connectionUrl 切到 `qa_readonly` 账号；
+--   5. 真机探针：用该账号 `INSERT` / `UPDATE` / `DELETE` 应被库拒绝，
+--      而 `SELECT` 应正常。
+--
+-- ⚠️ 这是给 DBA 的清单，**应用层自动执行**：不会在应用启动时执行，本文件不被自动 import。
+-- =============================================================================
+
+
+-- -----------------------------------------------------------------------------
+-- PostgreSQL
+-- -----------------------------------------------------------------------------
+--
+-- PG 应用层兜底：`SET TRANSACTION READ ONLY`（在 `begin()` 之后）
+-- 库侧兜底：只读账号 + `default_transaction_read_only = on`
+--
+-- 关键：撤销 PUBLIC 默认权限里漏过 SELECT 边界的函数（pg_sleep / pg_read_file 等），
+-- 否则即使只读账号，函数调用也能拖连接 / 读服务器文件。
+
+-- CREATE ROLE qa_readonly LOGIN PASSWORD '<STRONG_RANDOM_PASSWORD>';
+-- GRANT CONNECT ON DATABASE qa_metadata TO qa_readonly;
+-- GRANT USAGE ON SCHEMA public TO qa_readonly;
+-- GRANT SELECT ON ALL TABLES IN SCHEMA public TO qa_readonly;
+-- ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO qa_readonly;
+--
+-- 会话级默认只读（即使应用层忘记 begin() + SET，DB 也拒绝写）
+-- ALTER ROLE qa_readonly SET default_transaction_read_only = on;
+-- ALTER ROLE qa_readonly SET statement_timeout = '30s';
+--
+-- 撤销敏感函数的 PUBLIC 默认执行权限（防止 pg_sleep 拖连接 / pg_read_file 读文件）
+-- REVOKE EXECUTE ON FUNCTION pg_sleep FROM PUBLIC;
+-- REVOKE EXECUTE ON FUNCTION pg_sleep_for FROM PUBLIC;
+-- REVOKE EXECUTE ON FUNCTION pg_sleep_until FROM PUBLIC;
+-- REVOKE EXECUTE ON FUNCTION pg_read_file FROM PUBLIC;
+-- REVOKE EXECUTE ON FUNCTION pg_read_binary_file FROM PUBLIC;
+-- REVOKE EXECUTE ON FUNCTION pg_ls_dir FROM PUBLIC;
+-- REVOKE EXECUTE ON FUNCTION pg_stat_file FROM PUBLIC;
+-- REVOKE EXECUTE ON FUNCTION lo_import FROM PUBLIC;
+-- REVOKE EXECUTE ON FUNCTION lo_export FROM PUBLIC;
+-- REVOKE EXECUTE ON FUNCTION dblink_connect_u FROM PUBLIC;
+-- REVOKE EXECUTE ON FUNCTION dblink_connect FROM PUBLIC;
+-- REVOKE EXECUTE ON FUNCTION dblink FROM PUBLIC;
+--
+-- 真机探针：
+-- \c qa_metadata qa_readonly
+-- SELECT 1;  -- 应成功
+-- INSERT INTO <any_table> DEFAULT VALUES;  -- 应 ERROR: permission denied
+
+
+-- -----------------------------------------------------------------------------
+-- MySQL 8.0+
+-- -----------------------------------------------------------------------------
+--
+-- MySQL 应用层兜底：`SET SESSION TRANSACTION READ ONLY`
+-- 库侧兜底：只读账号 + 全局 read_only（**注意：会让所有非 superuser 连接只读**）
+--
+-- 如果用同一个 MySQL 实例跑多个 app，全局 read_only 会一并把所有账号锁住 ⇒
+-- 推荐用「只读账号 + 仅该用户授予 SELECT」的隔离方案，不开全局 read_only。
+
+-- CREATE USER IF NOT EXISTS 'qa_readonly'@'%' IDENTIFIED BY '<STRONG_RANDOM_PASSWORD>';
+-- GRANT SELECT ON qa_metadata.* TO 'qa_readonly'@'%';
+-- REVOKE INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES
+--   ON qa_metadata.* FROM 'qa_readonly'@'%';
+--
+-- 可选：会话级默认只读（应用层忘了 SET SESSION 时兜底）
+-- ALTER USER 'qa_readonly'@'%' WITH MAX_EXECUTION_TIME 30000;
+--
+-- 真机探针：
+-- mysql -u qa_readonly -p qa_metadata
+-- SELECT 1;  -- 应成功
+-- INSERT INTO <any_table> VALUES (...);  -- 应 ERROR: INSERT command denied
+
+
+-- -----------------------------------------------------------------------------
+-- Oracle 12c+（THBI 等业务库）
+-- -----------------------------------------------------------------------------
+--
+-- Oracle 应用层兜底：`ALTER SESSION SET READ ONLY`（会话级，只对 12c+ 生效）
+-- Oracle 没有 PG 那种事务级 `SET TRANSACTION READ ONLY` 语法，**库侧授权是唯一的真闸门**。
+-- 旧版本 Oracle（<12c）应用层完全无解，必须靠下面这套账号方案。
+
+-- CREATE USER qa_readonly IDENTIFIED BY "<STRONG_RANDOM_PASSWORD>";
+-- GRANT CREATE SESSION TO qa_readonly;
+-- GRANT SELECT ANY TABLE TO qa_readonly;
+-- GRANT SELECT ANY SEQUENCE TO qa_readonly;
+--
+-- 撤销敏感包的执行权限（UTL_HTTP / UTL_FILE / DBMS_LOB 等用于出网 / 读文件）
+-- REVOKE EXECUTE ON UTL_HTTP FROM qa_readonly;
+-- REVOKE EXECUTE ON UTL_TCP FROM qa_readonly;
+-- REVOKE EXECUTE ON UTL_SMTP FROM qa_readonly;
+-- REVOKE EXECUTE ON UTL_MAIL FROM qa_readonly;
+-- REVOKE EXECUTE ON UTL_FILE FROM qa_readonly;
+-- REVOKE EXECUTE ON UTL_INADDR FROM qa_readonly;
+-- REVOKE EXECUTE ON DBMS_LOB FROM qa_readonly;
+-- REVOKE EXECUTE ON DBMS_PIPE FROM qa_readonly;
+-- REVOKE EXECUTE ON DBMS_LOCK FROM qa_readonly;
+-- REVOKE EXECUTE ON DBMS_SCHEDULER FROM qa_readonly;
+-- REVOKE EXECUTE ON DBMS_NETWORK_ACL_ADMIN FROM qa_readonly;
+-- REVOKE EXECUTE ON DBMS_LDAP FROM qa_readonly;
+--
+-- 可选 Resource Manager 限制 CPU / 连接数 / 执行时间
+-- BEGIN
+--   DBMS_RESOURCE_MANAGER.CREATE_PENDING_AREA();
+--   DBMS_RESOURCE_MANAGER.CREATE_CONSUMER_GROUP(
+--     consumer_group => 'qa_readonly_grp',
+--     comment        => 'Read-only accounts for LLM-generated queries'
+--   );
+--   DBMS_RESOURCE_MANAGER.CREATE_PLAN(
+--     plan    => 'qa_readonly_plan',
+--     comment => 'Restrict qa_readonly CPU and I/O'
+--   );
+--   DBMS_RESOURCE_MANAGER.CREATE_PLAN_DIRECTIVE(
+--     plan              => 'qa_readonly_plan',
+--     group_or_subplan  => 'qa_readonly_grp',
+--     cpu_p1            => 50,         -- CPU 配额 50%
+--     active_sess_pool_p1 => 5,        -- 最多 5 个活跃会话
+--     max_exec_time     => 30000       -- 单查询 30s 上限
+--   );
+--   DBMS_RESOURCE_MANAGER.SUBMIT_PENDING_AREA();
+--   DBMS_RESOURCE_MANAGER.VALIDATE_PENDING_AREA();
+--   DBMS_RESOURCE_MANAGER.APPLY_PENDING_AREA();
+-- END;
+-- /
+--
+-- 真机探针：
+-- sqlplus qa_readonly/<pwd>@<dsn>
+-- SELECT 1 FROM dual;  -- 应成功
+-- INSERT INTO <any_table> VALUES (...);  -- 应 ERROR: insufficient privileges

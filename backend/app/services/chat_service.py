@@ -221,9 +221,9 @@ from app.services.chat_recall import (
     _CLASS_FILTER_MAX_CLASSES_DEFAULT,
     _CLASS_FILTER_TOP_K_DEFAULT,
     _DIMENSION_HINTS,
-    _FEW_SHOT_EXAMPLE_LIMIT,
-    _FEW_SHOT_SIMILARITY_MIN,
-    _FEW_SHOT_TOP_K,
+    _FEW_SHOT_EXAMPLE_LIMIT_DEFAULT,
+    _FEW_SHOT_SIMILARITY_MIN_DEFAULT,
+    _FEW_SHOT_TOP_K_DEFAULT,
     _LAYER_RANK,
     _ODS_TABLE_PATTERN,
     _getClassLayer,
@@ -233,12 +233,12 @@ from app.services.chat_recall import (
 )
 from app.services.chat_multistep import _FOLLOW_UP_RETRY_MAX_LEN, MultiStepMixin
 # 会话上下文 mixin：方法经 MRO 合并进 ChatService；常量 re-export 给既有测试
-# （test_chat_service_state.py 直接 import _RECENT_ROUNDS_LIMIT / _STATE_HISTORY_FIELD_LIMIT，
+# （test_chat_service_state.py 直接 import _RECENT_ROUNDS_LIMIT / _STATE_HISTORY_FIELD_LIMIT_DEFAULT，
 #  test_chat_service.py 读 _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT 断言）。
 from app.services.chat_context import (
     _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT,
     _RECENT_ROUNDS_LIMIT,
-    _STATE_HISTORY_FIELD_LIMIT,
+    _STATE_HISTORY_FIELD_LIMIT_DEFAULT,
     ContextMixin,
 )
 from app.services.chat_usage import UsageMixin
@@ -680,7 +680,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             # DomainError 分支转结构化 error 事件。
             raise LLMUnavailableError(MSG_LLM_UNAVAILABLE)
         contextPrompt = await self._buildContextPrompt(session, dto.sessionId, dto.history)
-        fewShot = await self._buildFewShot(dto) if needFewShot else None
+        fewShot = await self._buildFewShot(dto, session) if needFewShot else None
         valueSamples = await self._sampleValueDomains(ds, classes) if needSamples else {}
         driftWarning = await self._buildDriftWarning(session, ds, classes) if needDrift else None
         dictionaryText = await self._loadDictionaryText(session)
@@ -827,11 +827,10 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             if rewritten is not None:
                 return _SqlOutcome(plan=_statePlan(state), sql=rewritten, sqlConfig=None)
 
-        statePrompt = (
-            self._buildStatePrompt(state, intent)
-            if state is not None and intent in (IntentType.REFINE, IntentType.FOLLOW_UP)
-            else None
-        )
+        statePrompt = None
+        if state is not None and intent in (IntentType.REFINE, IntentType.FOLLOW_UP):
+            fieldLimit = await self._getStateHistoryFieldLimit(session)
+            statePrompt = self._buildStatePrompt(state, intent, fieldLimit)
         # 前序步骤结果注入：拼到 statePrompt 末尾（与历史状态注入同口径）
         if injection_text:
             statePrompt = (statePrompt + "\n\n" + injection_text) if statePrompt else injection_text

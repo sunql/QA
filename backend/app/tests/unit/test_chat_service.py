@@ -43,6 +43,7 @@ from app.services.chat_service import (
     _getClassLayer,
     _isDimensionHint,
     _isExplicitOdsRequest,
+    _STATE_HISTORY_FIELD_LIMIT_DEFAULT,
     _LAYER_RANK,
 )
 from app.services.unanswerable_suggestion import _buildUnanswerableSuggestion
@@ -2337,6 +2338,9 @@ class TestClassRecallDiagnostics:
             ("_getContextContentSegmentLimit", 500),
             ("_getContextSqlSegmentLimit", 500),
             ("_getContextPromptCharBudget", 4000),
+            ("_getFewShotTopK", 3),
+            ("_getFewShotExampleLimit", 400),
+            ("_getStateHistoryFieldLimit", 500),
         ],
     )
     async def test_int_config_getter_uses_db_value(self, getter: str, default: int) -> None:
@@ -2362,6 +2366,9 @@ class TestClassRecallDiagnostics:
             ("_getContextContentSegmentLimit", 500),
             ("_getContextSqlSegmentLimit", 500),
             ("_getContextPromptCharBudget", 4000),
+            ("_getFewShotTopK", 3),
+            ("_getFewShotExampleLimit", 400),
+            ("_getStateHistoryFieldLimit", 500),
         ],
     )
     async def test_int_config_getter_falls_back_on_missing_or_invalid(
@@ -2389,6 +2396,10 @@ class TestClassRecallDiagnostics:
             ("_getContextContentSegmentLimit", 500),
             ("_getContextSqlSegmentLimit", 500),
             ("_getContextPromptCharBudget", 4000),
+            ("_getFewShotTopK", 3),
+            ("_getFewShotSimilarityMin", 0.6),
+            ("_getFewShotExampleLimit", 400),
+            ("_getStateHistoryFieldLimit", 500),
         ],
     )
     async def test_config_getter_falls_back_on_db_error(
@@ -2423,6 +2434,26 @@ class TestClassRecallDiagnostics:
         assert await svc._getClassFilterHitMatchMin(_sessionReturning("0.0")) == 0.0
         assert await svc._getClassFilterHitMatchMin(_sessionReturning("not-a-float")) == 0.5
         assert await svc._getClassFilterHitMatchMin(_sessionReturning(None)) == 0.5
+
+    @pytest.mark.asyncio
+    async def test_float_config_getter_few_shot_similarity_min(self) -> None:
+        """魔数治理（Phase 2）：float getter 读 system_config；0.0 合法（关闭过滤不告警）。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+
+        def _sessionReturning(raw):
+            class _Session:
+                async def execute(self, stmt):
+                    class _R:
+                        def scalar_one_or_none(self_inner):
+                            return raw
+                    return _R()
+            return _Session()
+
+        assert await svc._getFewShotSimilarityMin(_sessionReturning("0.9")) == 0.9
+        assert await svc._getFewShotSimilarityMin(_sessionReturning("0.0")) == 0.0
+        assert await svc._getFewShotSimilarityMin(_sessionReturning("not-a-float")) == 0.6
+        assert await svc._getFewShotSimilarityMin(_sessionReturning(None)) == 0.6
 
     @pytest.mark.asyncio
     async def test_fallback_on_no_hits(self) -> None:
@@ -2749,7 +2780,7 @@ class TestStatePlanObservability:
         service, _, _, _ = _buildService()
         state = self._state({"target": "查询", "joins": "A=B"})
         with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
-            prompt = service._buildStatePrompt(state, IntentType.REFINE)
+            prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         assert "上一轮查询计划" in prompt
         reasonLines = [r for r in caplog.records if "reason=" in r.getMessage()]
         assert len(reasonLines) == 1
@@ -2765,7 +2796,9 @@ class TestStatePlanObservability:
     def test_clean_history_plan_logs_nothing(self, caplog) -> None:
         service, _, _, _ = _buildService()
         with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
-            service._buildStatePrompt(self._state({"target": "查询"}), IntentType.REFINE)
+            service._buildStatePrompt(
+                self._state({"target": "查询"}), IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT
+            )
         assert "reason=" not in caplog.text
 
     def test_absent_last_plan_returns_none_without_logging(self, caplog) -> None:

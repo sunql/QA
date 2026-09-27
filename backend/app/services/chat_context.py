@@ -42,7 +42,8 @@ _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT = 4000  # 运行期从 system_config.CONTEXT
 _RECENT_ROUNDS_LIMIT = 5
 
 # 3-4：单条历史快照的 q/s 字符上限，防止超长问题或 SQL 撑爆 NL2SQL prompt（LOW-2）。
-_STATE_HISTORY_FIELD_LIMIT = 500
+# 运行期从 system_config.STATE_HISTORY_FIELD_LIMIT 读，缺席/格式错返此值。
+_STATE_HISTORY_FIELD_LIMIT_DEFAULT = 500
 
 
 class ContextMixin:
@@ -182,6 +183,39 @@ class ContextMixin:
             )
             return _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT
 
+    async def _getStateHistoryFieldLimit(self, session: AsyncSession) -> int:
+        """读 system_config.STATE_HISTORY_FIELD_LIMIT；缺席/格式错/非正返 _DEFAULT。
+
+        与 ``_getClassFilterMaxClasses`` 同口径：读失败不阻断主链路，返硬编码默认。
+        """
+        try:
+            row = await session.execute(
+                text("SELECT value FROM system_config WHERE key = 'STATE_HISTORY_FIELD_LIMIT'")
+            )
+            raw = row.scalar_one_or_none()
+            if raw is None or raw == "":
+                return _STATE_HISTORY_FIELD_LIMIT_DEFAULT
+            value = int(raw)
+            if value <= 0:
+                logger.warning(
+                    "STATE_HISTORY_FIELD_LIMIT 非正值 %r，返默认值 %d",
+                    raw, _STATE_HISTORY_FIELD_LIMIT_DEFAULT,
+                )
+                return _STATE_HISTORY_FIELD_LIMIT_DEFAULT
+            return value
+        except (TypeError, ValueError):
+            logger.warning(
+                "STATE_HISTORY_FIELD_LIMIT 值非法 %r，返默认值 %d",
+                raw, _STATE_HISTORY_FIELD_LIMIT_DEFAULT,
+            )
+            return _STATE_HISTORY_FIELD_LIMIT_DEFAULT
+        except Exception:
+            logger.warning(
+                "读取 STATE_HISTORY_FIELD_LIMIT 失败，返默认值 %d",
+                _STATE_HISTORY_FIELD_LIMIT_DEFAULT, exc_info=True,
+            )
+            return _STATE_HISTORY_FIELD_LIMIT_DEFAULT
+
     async def _loadRecentRounds(
         self, session: AsyncSession, sessionId: str
     ) -> list[tuple[str, str, str | None]]:
@@ -312,7 +346,9 @@ class ContextMixin:
         return state
 
     @staticmethod
-    def _buildStatePrompt(state: SessionQueryState, intent: IntentType) -> str:
+    def _buildStatePrompt(
+        state: SessionQueryState, intent: IntentType, field_limit: int,
+    ) -> str:
         """将上一轮查询状态渲染为结构化上下文文本（REFINE/FOLLOW_UP 注入用）。
 
         3-4：recent_rounds 渲染"更早查询"小节，支持跨多轮回溯。last_question 与
@@ -336,8 +372,8 @@ class ContextMixin:
                 # 可能产生非 dict 项，跳过坏项而非整段崩溃（MEDIUM-1）。
                 if not isinstance(round_, dict):
                     continue
-                q = _clipText(round_.get("q") or "", _STATE_HISTORY_FIELD_LIMIT)
-                s = _clipText(round_.get("s") or "", _STATE_HISTORY_FIELD_LIMIT)
+                q = _clipText(round_.get("q") or "", field_limit)
+                s = _clipText(round_.get("s") or "", field_limit)
                 historyLines.append(f"- {q}：{s}")
             # 仅当至少有一条合法历史时才追加小节，避免空标题（LOW：清理）
             if len(historyLines) > 1:

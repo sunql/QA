@@ -19,9 +19,9 @@ from app.services.chat_helpers import _clipText
 
 logger = logging.getLogger(__name__)
 
-_FEW_SHOT_TOP_K = 3  # 1-2：历史相似 SQL few-shot 的检索条数（注入即 token 成本，取小值）
-_FEW_SHOT_SIMILARITY_MIN = 0.6  # 1-2：相似度低于该值的命中视为噪音，不注入
-_FEW_SHOT_EXAMPLE_LIMIT = 400  # 1-2：单条示例的 question/sql 字符上限（few-shot 每阶段重复注入）
+_FEW_SHOT_TOP_K_DEFAULT = 3  # 1-2：历史相似 SQL few-shot 的检索条数；运行期从 system_config.FEW_SHOT_TOP_K 读
+_FEW_SHOT_SIMILARITY_MIN_DEFAULT = 0.6  # 1-2：相似度低于该值的命中视为噪音；运行期从 system_config.FEW_SHOT_SIMILARITY_MIN 读
+_FEW_SHOT_EXAMPLE_LIMIT_DEFAULT = 400  # 1-2：单条示例的 question/sql 字符上限；运行期从 system_config.FEW_SHOT_EXAMPLE_LIMIT 读
 _CLASS_FILTER_TOP_K_DEFAULT = 15  # 1-1：类裁剪的向量检索 topK；运行期从 system_config.CLASS_FILTER_TOP_K 读，缺席用此值
 _CLASS_FILTER_HIT_MATCH_MIN_DEFAULT = 0.5  # 1-1：命中中可解析为真实类的比例低于该值时告警；运行期从 system_config.CLASS_FILTER_HIT_MATCH_MIN 读
 _CLASS_FILTER_MAX_CLASSES_DEFAULT = 30  # 召回扩边后的 schema 类总量上限；运行期从 system_config.CLASS_FILTER_MAX_CLASSES 读，缺席用此值
@@ -253,6 +253,85 @@ class RecallMixin:
                 _CLASS_FILTER_HIT_MATCH_MIN_DEFAULT, exc_info=True,
             )
             return _CLASS_FILTER_HIT_MATCH_MIN_DEFAULT
+
+    async def _getFewShotTopK(self, session: AsyncSession) -> int:
+        """读 system_config.FEW_SHOT_TOP_K；缺席/格式错/非正返 _DEFAULT。"""
+        try:
+            row = await session.execute(
+                text("SELECT value FROM system_config WHERE key = 'FEW_SHOT_TOP_K'")
+            )
+            raw = row.scalar_one_or_none()
+            if raw is None or raw == "":
+                return _FEW_SHOT_TOP_K_DEFAULT
+            value = int(raw)
+            if value <= 0:
+                logger.warning(
+                    "FEW_SHOT_TOP_K 非正值 %r，返默认值 %d", raw, _FEW_SHOT_TOP_K_DEFAULT,
+                )
+                return _FEW_SHOT_TOP_K_DEFAULT
+            return value
+        except (TypeError, ValueError):
+            logger.warning(
+                "FEW_SHOT_TOP_K 值非法 %r，返默认值 %d", raw, _FEW_SHOT_TOP_K_DEFAULT,
+            )
+            return _FEW_SHOT_TOP_K_DEFAULT
+        except Exception:
+            logger.warning(
+                "读取 FEW_SHOT_TOP_K 失败，返默认值 %d", _FEW_SHOT_TOP_K_DEFAULT, exc_info=True,
+            )
+            return _FEW_SHOT_TOP_K_DEFAULT
+
+    async def _getFewShotSimilarityMin(self, session: AsyncSession) -> float:
+        """读 system_config.FEW_SHOT_SIMILARITY_MIN；缺席/格式错返 _DEFAULT（float）。"""
+        try:
+            row = await session.execute(
+                text("SELECT value FROM system_config WHERE key = 'FEW_SHOT_SIMILARITY_MIN'")
+            )
+            raw = row.scalar_one_or_none()
+            if raw is None or raw == "":
+                return _FEW_SHOT_SIMILARITY_MIN_DEFAULT
+            return float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "FEW_SHOT_SIMILARITY_MIN 值非法 %r，返默认值 %.2f",
+                raw, _FEW_SHOT_SIMILARITY_MIN_DEFAULT,
+            )
+            return _FEW_SHOT_SIMILARITY_MIN_DEFAULT
+        except Exception:
+            logger.warning(
+                "读取 FEW_SHOT_SIMILARITY_MIN 失败，返默认值 %.2f",
+                _FEW_SHOT_SIMILARITY_MIN_DEFAULT, exc_info=True,
+            )
+            return _FEW_SHOT_SIMILARITY_MIN_DEFAULT
+
+    async def _getFewShotExampleLimit(self, session: AsyncSession) -> int:
+        """读 system_config.FEW_SHOT_EXAMPLE_LIMIT；缺席/格式错/非正返 _DEFAULT。"""
+        try:
+            row = await session.execute(
+                text("SELECT value FROM system_config WHERE key = 'FEW_SHOT_EXAMPLE_LIMIT'")
+            )
+            raw = row.scalar_one_or_none()
+            if raw is None or raw == "":
+                return _FEW_SHOT_EXAMPLE_LIMIT_DEFAULT
+            value = int(raw)
+            if value <= 0:
+                logger.warning(
+                    "FEW_SHOT_EXAMPLE_LIMIT 非正值 %r，返默认值 %d",
+                    raw, _FEW_SHOT_EXAMPLE_LIMIT_DEFAULT,
+                )
+                return _FEW_SHOT_EXAMPLE_LIMIT_DEFAULT
+            return value
+        except (TypeError, ValueError):
+            logger.warning(
+                "FEW_SHOT_EXAMPLE_LIMIT 值非法 %r，返默认值 %d", raw, _FEW_SHOT_EXAMPLE_LIMIT_DEFAULT,
+            )
+            return _FEW_SHOT_EXAMPLE_LIMIT_DEFAULT
+        except Exception:
+            logger.warning(
+                "读取 FEW_SHOT_EXAMPLE_LIMIT 失败，返默认值 %d",
+                _FEW_SHOT_EXAMPLE_LIMIT_DEFAULT, exc_info=True,
+            )
+            return _FEW_SHOT_EXAMPLE_LIMIT_DEFAULT
 
     async def _rankByLayer(
         self,
@@ -570,7 +649,7 @@ class RecallMixin:
         )
         return expanded, truncated
 
-    async def _buildFewShot(self, dto: ChatRequest) -> str | None:
+    async def _buildFewShot(self, dto: ChatRequest, session: AsyncSession) -> str | None:
         """检索语义相似的历史成功查询，构造 few-shot 示例注入 NL2SQL prompt（1-2）。
 
         复用 embedding_service.searchSimilarQueries（原仅 /suggest 联想端点使用），
@@ -581,20 +660,26 @@ class RecallMixin:
         丢弃；单条示例文本设长度上限，避免历史长 SQL 无界放大每次 NL2SQL 调用的
         输入 token（few-shot 会在计划/SQL/重试各阶段重复注入）。返回新字符串，
         不改动入参。返回内容仅为示例拼接，"数据而非指令"的框定由渲染方承担。
+
+        检索条数/相似度阈值/单条上限均从 system_config 现读（魔数治理 Phase 2），
+        admin 改值后立即生效。
         """
+        topK = await self._getFewShotTopK(session)
+        similarityMin = await self._getFewShotSimilarityMin(session)
+        exampleLimit = await self._getFewShotExampleLimit(session)
         try:
             hits = await self._embedding.searchSimilarQueries(
-                dto.question, topK=_FEW_SHOT_TOP_K, datasourceId=dto.datasourceId,
+                dto.question, topK=topK, datasourceId=dto.datasourceId,
             )
         except Exception:
             logger.warning("历史相似查询检索不可用，跳过 few-shot", exc_info=True)
             return None
         examples: list[str] = []
         for hit in hits:
-            if not hit.sql or hit.similarity < _FEW_SHOT_SIMILARITY_MIN:
+            if not hit.sql or hit.similarity < similarityMin:
                 continue
-            question = _clipText(hit.question, _FEW_SHOT_EXAMPLE_LIMIT)
-            sql = _clipText(hit.sql, _FEW_SHOT_EXAMPLE_LIMIT)
+            question = _clipText(hit.question, exampleLimit)
+            sql = _clipText(hit.sql, exampleLimit)
             examples.append(f"示例 {len(examples) + 1}：\n问题：{question}\nSQL：\n{sql}")
         if not examples:
             return None

@@ -163,6 +163,6 @@ L1 has zero token cost (pure Python Jaccard, no LLM call). L3/L4 costs accumulat
 | `app/services/metric_promotion_service.py` | Scan + DRAFT upsert logic |
 | `app/services/routing_metrics_service.py` | Aggregation queries |
 | `app/services/kpi_semantic_match_service.py` | L1 Jaccard match + keyword tokenization |
-| `migrations/versions/0051_add_routing_fields.py` | session_message routing columns |
+| `migrations/versions/0051_add_routing_metrics_fields.py` | session_message routing columns（**原文写 `0051_add_routing_fields.py`，文件名已更正**） |
 | `Harness/wiki/nl2sql-engine.md` | 4-layer routing overview |
-| `Harness/wiki/agent-loop.md` | L4 LangGraph Agent Loop detail |
+| `Harness/wiki/agent-loop.md` | L4 纯 Python async while loop Agent detail（**原文写「L4 LangGraph」，agent-loop.md 整篇已重写为 async while loop**） |

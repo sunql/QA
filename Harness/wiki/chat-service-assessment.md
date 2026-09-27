@@ -60,6 +60,14 @@
 > 继续执行原 SQL；纵深防御三层（解析层黑名单 + 只读账号 + ALTER SESSION）保留前两层的兜底。DBA 任务
 > （确认版本 / 补 `ALTER SESSION` 权限）登记待执行，不在本批。
 
+> **2026-09-27 第三拨补**（doc-drift 第三拨，`fix-oracle-set-transition-best-effort` 顺带清扫）：
+> §2.5 评估文档中两条 ✅ 状态尚未落到表格行（`5 类活跃意图` 行的 doc 早被 chore-doc-drift-cleanup 修
+> 为 13 类但表格未打 ✅；`L2 可选 CTE 增强：plan.requiresCte=True` 行的 doc 早被 chore-doc-drift-cleanup-b
+> 加 ⚠️ 更正注但表格未打 ✅）——本拨在 §2.5 表里给两行补 ✅ 标记；同时主动巡检发现
+> `metric-pipeline.md:166,168` 两处漂移：迁移文件名 `0051_add_routing_fields.py` → `0051_add_routing_metrics_fields.py`
+> （缺 `_metrics`），`agent-loop.md` 描述「L4 LangGraph Agent Loop」→「L4 纯 Python async while loop Agent」
+> （agent-loop.md 整篇已重写，不再是 LangGraph）。**至此 §2.5 表格 7 行全部 ✅ 关闭**。
+
 ---
 
 ## 1. 能力全景（已具备）
@@ -209,12 +217,12 @@
 | 漂移点 | 现状 |
 |---|---|
 | 文档引用 `sql_guard.py` | ✅ **已修复（2026-09-27，见 chore-doc-drift-cleanup）**——`architecture.md:41` Agent Loop 路径修正；`agent-loop.md` 整篇重写（删除不存在的 `agent_loop.py` 与 `security/sql_guard.py` 引用，标注实现在 `agent_runtime_service.py:593` 与 `business_db_pool.py`）；`nl2sql-engine.md:26` 意图数从「5 类」更正为「13 类」 |
-| `nl2sql-engine.md` 写「5 类活跃意图」 | 实际 `IntentType` 已 13 类（新增 supplier_360/risk/graph_reasoning/agent_run 等 4 条领域拦截路径） |
+| `nl2sql-engine.md` 写「5 类活跃意图」 | ✅ **已修复（2026-09-27，见 chore-doc-drift-cleanup）**——`nl2sql-engine.md:26` 已重写为「13 类意图」（含 supplier_360/risk/graph_reasoning/agent_run 4 条领域拦截路径），原 `query/new_query/refine/follow_up/clarify/chitchat/define/map/metric` 9 类 + 4 条新路径 = 13 类全列 |
 | `IntentType` docstring 写「DEFINE/MAP/METRIC 暂未接入流水线」 | ✅ **已修复（2026-09-27，见 chore-doc-drift-cleanup）**——`chat_service._handleDefineClass / _handleDefineMetric / _handleShowMetric / _handleMapProperty` 全部已接线（`chat_service.py:2551-2568`）。docstring 改为「已接入流水线（本体治理指令）」 |
 | ~~`config.py` Settings 字段重复定义~~ | ✅ **已修复（2026-09-27）**，见 [chore-config-duplicate-fields](../changes/chore-config-duplicate-fields/summary.md)。9 组重复声明（后者静默覆盖前者）已删，含 `jwtTtlSeconds`(3600/86400)、`bcryptRounds`(12/10)、`jwtSecret`(`""`/开发占位符)、`jwtAudience`、`dbPoolSize` 等；**生效默认值零变化**（51 字段快照 diff 为空）。全树 AST 扫描顺带查出并修复 `AgentDefinitionRead.created_time`（Optional 声明被非 Optional 覆盖的「怪胎」形态）。同批新增：类体重复字段 AST 守卫（`test_no_duplicate_fields.py`，M6 方法版的姊妹守卫）+ `jwtSecret` 启动自检 warning（空值/开发占位符大声告警；用户拍板：**不 fail-fast**、`bcryptRounds` **维持 10**） |
 | ~~`nl2sql-engine.md` 4 层路由「L3 有触发条件」~~ | ✅ **已更正（2026-09-27，见 §15）**。原文「L3 `_executeChainedSteps` 无生产调用者」属实，但结论应是**删掉它**而不是「补触发条件」：该引擎已随 M5 删除（引擎整段 + 其测试），**保留**的是跨步 CTE 的**能力**——由 `prior_cte` 片段注入承担（契约见 §2.3 M8）。现状：L1 意图路由 / L2 单步 plan / L4 Agent Loop 活跃，**L3「CTE 串联引擎」不再作为独立层存在**，`nl2sql-engine.md` 与 `architecture.md` 已同步改写 |
 | **`routing_layer` 从不写 `L3`**（本批复核发现，与上一行同源） | ✅ **已修复前端（2026-09-27，见 fix-routing-metrics-l3-truth）**。生产代码只写 `L1`/`L2`/`L4`，前端 `types/routingMetrics.ts` 联合类型去掉 L3、`LAYER_COLORS` 去掉 L3、折线图 mock 去掉 L3 series；i18n 「L3 多步链式推理」改为废弃文案。多步链实际记在 `L2`（`_executeMultiStep` 路径）已在 i18n 「L2 LLM NL2SQL（含多步拆解）」中反映 |
-| **`nl2sql-engine.md` 的「L2 可选 CTE 增强：`plan.requiresCte=True`」** | **代码中不存在**（`requiresCte` 全树零命中）——设计文档遗留。真实的 `prior_cte` 是**显式形参**，契约见 §2.3 M8。同批更正的还有：`app/services/agent_loop.py` **不存在**（实为 `agent_runtime_service.py:593`）、迁移文件名应为 `0051_add_routing_metrics_fields.py`、`multi_step_plan.py` 的真实路径是 **`app/domain/multi_step_plan.py`**（`services/` 下无此文件） |
+| **`nl2sql-engine.md` 的「L2 可选 CTE 增强：`plan.requiresCte=True`」** | ✅ **已修复（2026-09-27，见 chore-doc-drift-cleanup-b + 本批 third-pick）**：`nl2sql-engine.md:120` 该 bullet 已替换为 ⚠️ 更正注（明示「`plan.requiresCte=True` 是设计文档遗留、代码中不存在」），并指向 §「L3 —— 已删除，仅保留 `prior_cte` 能力」段落看真实契约。同批顺带校正：`app/services/agent_loop.py` → `app/services/agent_runtime_service.py:593`（agent-loop.md 整篇重写）、迁移 `0051_add_routing_metrics_fields.py`（`metric-pipeline.md:166`）、`multi_step_plan.py` → `app/domain/multi_step_plan.py`（`nl2sql-engine.md:357,359,394`） |
 
 ---
 

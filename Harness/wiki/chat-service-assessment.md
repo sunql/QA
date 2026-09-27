@@ -76,6 +76,19 @@
 > 字段 + `consumedTokens` 第二档优先级 + `completeStream` 累计挂上 + `complete_with_tools` 后处理失败挂上
 > + 顺手修 `openai_client` ↔ `factory` 潜在 circular import）。单测 46/46 全绿。**§15 末尾三项至此全部 ✅ 闭合**。
 
+> **2026-09-28 §2.4 LOW 启动**（仅 SSOT 化 + 规范落地，**无代码改动**）：本次会话授权继续
+> §2.4 LOW（文件拆分 + 魔数治理）后即用户切回「只做评估文档 + 规范」最小方案——
+> - **魔数治理规范**：[`Harness/rules/魔数治理.md`](../../rules/魔数治理.md)，含三档决策（治理/不改/判别不清）
+>   + 14 项候选常量清单（`_CLASS_FILTER_TOP_K`(15) / `_FEW_SHOT_*`(3/0.6/400) / `_CONTEXT_*_LIMIT`(500/500/4000)
+>   / `_STATE_HISTORY_FIELD_LIMIT`(500) / `_REFINE_MAX_LIMIT`(1000) / `_VALUE_SAMPLE_VALUE_MAX`(30)
+>   / `_OWNER_HINT_MAX_CLASSES`(3) / `_CRITICAL_DIGEST_MAX_*`(50/200) / `_NL2SQL_MAX_TOKENS`(2048)），
+>   复用 chat_service 现有 `_getClassFilterMaxClasses` / `_getAdsRecallWeight` / `_isL4AgentLoopEnabled` 三例
+>   模式（不缓存 + 失败不阻断 + 非正抛错 + 就近读取）；
+> - **§2.4 LOW 行**改为 ⏳「规范已落地，14 项候选清单已 SSOT 化，Phase 1 拆分 + Phase 2 治理下次会话」；
+> - **完整 3 阶段计划**：`/Users/sunql/.claude/plans/rosy-beaming-phoenix.md`（拆分 / 治理 / §15 残差收尾）。
+> ⚠️ **本批零代码风险**——只写两份新文档 + 评估文档 §2.4 行一改 + §0 新增 1 段，**未触任何源码文件**；
+> 前端本次也不需要 rebuild（无 i18n 改动）。
+
 ---
 
 ## 1. 能力全景（已具备）
@@ -218,7 +231,12 @@
 
 - ✅ **supplier name trigram 索引**（3500 行 seq scan，`supplier_name_resolver.py:151`）—— **已修复（2026-09-27）**，alembic 0086 `idx_entity_mapping_supplier_name_trgm` GIN trigram + partial `WHERE entity_type='SUPPLIER'`。EXPLAIN 待 prod 真机探针验证（部署门禁建议）。
 - ✅ **`_callWithRetryBackoff` 末尾 unreachable**（死分支）—— **已修复（2026-09-27）**，`llm_retry_policy.py:171` 改 `raise RuntimeError("unreachable") # noqa: B008` + 注释说明意图（tenacity AsyncRetrying 始终 raise 或 yield，分支不可达；`assert False` 会被 ruff 当生产 `-O` 模式剥离误报）。
-- 大量编译期魔数（topK=15、max=30、2000/600 char、阈值 0.3、5 轮等），仅部分已 `system_config` 化。
+- ⏳ **§2.4 LOW 拆分/魔数治理（2026-09-28 启动，Phase 1 切分待续）**：
+  - **魔数治理规范已落地**（2026-09-28，[`Harness/rules/魔数治理.md`](../../rules/魔数治理.md)）——三档决策（治理 / 不改 / 判别不清）+ 14 项候选常量清单 + 复刻现有 `_getClassFilterMaxClasses` / `_getAdsRecallWeight` 模式 + 种子 upsert 模板 + 3 例测试要求。SSOT 是 chat_service 已治理的 3 项（`ENABLE_L4_AGENT_LOOP` / `CLASS_FILTER_MAX_CLASSES` / `ADS_RECALL_WEIGHT`）。
+  - **Phase 1 文件拆分未启动**（chat_service 4916 行 + nl2sql_service 2589 行）；30+ 处既有 import 路径不可破坏 ⇒ 拆分策略须为「类壳保留 + 顶层 helper 抽出」，下次会话从 nl2sql_service 顶部 helper（`_SQL_FENCE_RE`…`SqlDialect` 段）开始 POC。
+  - **Phase 2 治理项**候选：`_CLASS_FILTER_TOP_K`(15) / `_CLASS_FILTER_HIT_MATCH_MIN`(0.5) / `_FEW_SHOT_*`(3/0.6/400) / `_CONTEXT_*_LIMIT`(500/500/4000) / `_STATE_HISTORY_FIELD_LIMIT`(500) / `_REFINE_MAX_LIMIT`(1000) / `_VALUE_SAMPLE_VALUE_MAX`(30) / `_OWNER_HINT_MAX_CLASSES`(3) / `_CRITICAL_DIGEST_MAX_*`(50/200) / `_NL2SQL_MAX_TOKENS`(2048)。
+  - ⚠️ **本次会话只交付「规范文档 + 候选清单 SSOT 化」**；其余三阶段留待后续会话按计划执行。
+  - 完整计划见 `/Users/sunql/.claude/plans/rosy-beaming-phoenix.md`（§2.4 LOW 文件拆分 + 魔数治理 + §15 残差 3 阶段）。
 
 ### 2.5 文档-代码漂移（独立成节，因影响后续开发）
 

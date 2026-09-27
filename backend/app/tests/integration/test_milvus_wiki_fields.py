@@ -15,6 +15,7 @@ from app.infrastructure.milvus_client import (
     ensureWikiPageCollection,
     insertWikiPageChunks,
     queryWikiPageChunks,
+    refreshWikiCollection,
     searchWikiPageChunks,
 )
 
@@ -127,9 +128,13 @@ class TestRoundTrip:
 
         deleteWikiPageChunks(page_id_del)
 
+        # release + load 强制 QueryNode 刷新 delta binlog
+        # （per-request Strong 一致性在 Bounded collection 5s 窗口内不生效）
+        refreshWikiCollection()
         assert not queryWikiPageChunks(page_id_del)
         assert any(
-            r["chunk_id"] == chunk_id_keep for r in queryWikiPageChunks(page_id_keep)
+            r["chunk_id"] == chunk_id_keep
+            for r in queryWikiPageChunks(page_id_keep)
         )
 
         deleteWikiPageChunks(page_id_keep)

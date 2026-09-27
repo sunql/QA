@@ -167,8 +167,10 @@ async def _retryWithBackoff(
     ):
         with attempt:
             return await caller(fallback)
-    # 不可达：AsyncRetrying 总会 raise 或 yield 一次
-    raise RuntimeError("unreachable")
+    # 不可达：AsyncRetrying 总会 raise 或 yield 一次。
+    # noqa: B008 —— 不是函数调用，是给 mypy 的 NoReturn marker，
+    # 此分支实际不会执行（tenacity 契约：始终 raise 或 yield）。
+    raise RuntimeError("unreachable")  # noqa: B008
 
 
 async def callWithRetryBackoff(

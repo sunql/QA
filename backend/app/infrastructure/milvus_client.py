@@ -476,6 +476,7 @@ def searchDocumentChunks(
     *,
     securityLevel: str | None = None,
     topK: int = 5,
+    consistencyLevel: str | None = None,
 ) -> list[dict[str, Any]]:
     """向量相似度检索文档 chunks。
 
@@ -483,6 +484,8 @@ def searchDocumentChunks(
         queryEmbedding: 查询向量
         securityLevel: 可选，按安全等级过滤（L1/L2/L3）
         topK: 返回条数
+        consistencyLevel: 可选覆盖（``"Strong"`` 等）；见 ``queryWikiPageChunks`` 注释。
+            生产检索路径不传；测试在 delete 后立即验证时传 ``"Strong"``。
 
     Returns:
         匹配的 chunk 列表，含 document_id, chunk_id, chunk_text, chunk_sequence,
@@ -496,12 +499,12 @@ def searchDocumentChunks(
     expr = None
     if securityLevel is not None:
         expr = f'security_level == "{securityLevel}"'
-    results = collection.search(
-        data=[queryEmbedding],
-        anns_field="embedding",
-        param={"metric_type": "L2", "params": {"ef": 64}},
-        limit=topK,
-        output_fields=[
+    searchKwargs: dict[str, Any] = {
+        "data": [queryEmbedding],
+        "anns_field": "embedding",
+        "param": {"metric_type": "L2", "params": {"ef": 64}},
+        "limit": topK,
+        "output_fields": [
             "document_id",
             "chunk_id",
             "chunk_text",
@@ -511,8 +514,11 @@ def searchDocumentChunks(
             "section_name",
             "paragraph_no",
         ],
-        expr=expr,
-    )
+        "expr": expr,
+    }
+    if consistencyLevel is not None:
+        searchKwargs["consistency_level"] = consistencyLevel
+    results = collection.search(**searchKwargs)
 
     hits: list[dict[str, Any]] = []
     for result in results:
@@ -543,7 +549,10 @@ def deleteDocumentChunks(documentId: str) -> None:
     logger.info("Deleted Milvus document chunks for document_id=%s", documentId)
 
 
-def queryDocumentChunks(documentId: str) -> list[dict[str, Any]]:
+def queryDocumentChunks(
+    documentId: str,
+    consistency_level: str | None = None,
+) -> list[dict[str, Any]]:
     """按 document_id 查出该文档的全部 chunk（不走向量检索）。
 
     门禁脚本要检查的是「写进去的定位符对不对」，不是「检索得准不准」。
@@ -553,9 +562,15 @@ def queryDocumentChunks(documentId: str) -> list[dict[str, Any]]:
     单个 document 的 chunk 数远低于 ``_MILVUS_QUERY_PAGE``，故仍用单次 query
     （超出该上限会被静默截断；真有单文档超限的一天，需与 listAllEmbeddings 一样
     改走 ``_queryAllRows``）。
+
+    `consistency_level`：见 `queryWikiPageChunks` 注释；测试场景在 delete 后
+    立即回读验证时传 ``"Strong"``。
     """
     collection = ensureDocumentCollection()
     collection.load()
+    kwargs: dict[str, Any] = {"limit": _MILVUS_QUERY_PAGE}
+    if consistency_level is not None:
+        kwargs["consistency_level"] = consistency_level
     return collection.query(
         expr=f'document_id == "{documentId}"',
         output_fields=[
@@ -567,7 +582,7 @@ def queryDocumentChunks(documentId: str) -> list[dict[str, Any]]:
             "section_name",
             "paragraph_no",
         ],
-        limit=_MILVUS_QUERY_PAGE,
+        **kwargs,
     )
 
 
@@ -698,10 +713,28 @@ def deleteWikiPageChunks(pageId: str) -> None:
     logger.info("Deleted Milvus wiki page chunks for page_id=%s", pageId)
 
 
-def queryWikiPageChunks(pageId: str) -> list[dict[str, Any]]:
-    """按 page_id 直查该条目的全部 chunk（不走向量检索，对账/门禁用）。"""
+def queryWikiPageChunks(
+    pageId: str,
+    consistency_level: str | None = None,
+) -> list[dict[str, Any]]:
+    """按 page_id 直查该条目的全部 chunk（不走向量检索，对账/门禁用）。
+
+    `consistency_level`：可选覆盖（``"Strong"`` / ``"Bounded"`` / ``"Session"`` /
+    ``"Eventually"`` 或 0/1/2/3）。**默认 None**（沿用 collection 级默认 Bounded），
+    适用于生产检索路径。
+
+    **实测提示（2026-09-27）**：PyMilvus 2.4.6 在 collection 已配 Bounded 时，
+    per-request ``consistency_level="Strong"`` **在 delete 后的 0~5s 窗口内仍可能
+    返回残留行**（Bounded 默认 5s 容忍窗口覆盖），并未真正等到 delete 落地。
+    测试场景的可靠写法：delete → ``refreshWikiCollection()``（release + reload
+    强制 QueryNode 刷新 delta binlog）→ query。参数**保留**以便服务端未来支持
+    per-request 时立即生效，且若 collection 配 Strong 可零成本用上。
+    """
     collection = ensureWikiPageCollection()
     collection.load()
+    kwargs: dict[str, Any] = {"limit": _MILVUS_QUERY_PAGE}
+    if consistency_level is not None:
+        kwargs["consistency_level"] = consistency_level
     return collection.query(
         expr=f'page_id == "{pageId}"',
         output_fields=[
@@ -713,8 +746,37 @@ def queryWikiPageChunks(pageId: str) -> list[dict[str, Any]]:
             "dimension",
             "status",
         ],
-        limit=_MILVUS_QUERY_PAGE,
+        **kwargs,
     )
+
+
+def refreshWikiCollection() -> None:
+    """测试专用：release + load 强制 QueryNode 刷新 wiki collection。
+
+    Milvus delete buffer 走 ``Proxy → DML channel → DataNode → QueryNode``
+    三段异步管道；``flush()`` 仅持久化（Growing → Sealed → 对象存储），
+    不保证 QueryNode 已加载并应用 delta binlog。**实测在 collection 默认
+    Bounded（5s 容忍窗口）下，per-request ``consistency_level="Strong"`` 不能
+    立即看到 delete 后状态**。
+
+    **release + load** 强制 QueryNode 重新装载 segment + delta binlog，
+    delete 立即对后续 query 可见（实测 < 3s 完成）。
+
+    **生产对账不要用** —— 2-3s 延迟过大。仅集成测试 delete-then-query 验证场景。
+    """
+    collection = ensureWikiPageCollection()
+    collection.release()
+    collection.load()
+
+
+def refreshDocumentCollection() -> None:
+    """测试专用：release + load 强制 QueryNode 刷新 document collection。
+
+    见 ``refreshWikiCollection`` 注释；语义一致，仅用于 document 集合。
+    """
+    collection = ensureDocumentCollection()
+    collection.release()
+    collection.load()
 
 
 def closeConnection() -> None:

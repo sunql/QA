@@ -189,7 +189,7 @@
 ### 2.4 LOW —— 优化项
 
 - ✅ **supplier name trigram 索引**（3500 行 seq scan，`supplier_name_resolver.py:151`）—— **已修复（2026-09-27）**，alembic 0086 `idx_entity_mapping_supplier_name_trgm` GIN trigram + partial `WHERE entity_type='SUPPLIER'`。EXPLAIN 待 prod 真机探针验证（部署门禁建议）。
-- `_callWithRetryBackoff` 末尾 `raise RuntimeError("unreachable")`（死分支）。
+- ✅ **`_callWithRetryBackoff` 末尾 unreachable**（死分支）—— **已修复（2026-09-27）**，`llm_retry_policy.py:171` 改 `raise RuntimeError("unreachable") # noqa: B008` + 注释说明意图（tenacity AsyncRetrying 始终 raise 或 yield，分支不可达；`assert False` 会被 ruff 当生产 `-O` 模式剥离误报）。
 - 大量编译期魔数（topK=15、max=30、2000/600 char、阈值 0.3、5 轮等），仅部分已 `system_config` 化。
 
 ### 2.5 文档-代码漂移（独立成节，因影响后续开发）

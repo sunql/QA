@@ -15,6 +15,7 @@ from app.infrastructure.milvus_client import (
     ensureDocumentCollection,
     insertDocumentChunks,
     queryDocumentChunks,
+    refreshDocumentCollection,
     searchDocumentChunks,
 )
 
@@ -124,6 +125,9 @@ class TestRoundTrip:
 
         deleteDocumentChunks(doc_id_del)
 
+        # release + load 强制 QueryNode 刷新 delta binlog
+        refreshDocumentCollection()
+        # 验证删除生效：reload 后 _findChunk 走 search 应查不到 DEL 的 chunk
         assert _findChunk(chunk_id_a, [0.3] * 1024) is None
         assert _findChunk(chunk_id_b, [0.4] * 1024) is not None
 
@@ -164,6 +168,9 @@ def _findChunk(chunkId: str, embedding: list[float]) -> dict | None:
     """按 chunk_id 在检索结果里定位，避免依赖排序位置。
 
     集合是跨用例共享的，topK=1 取到的未必是本用例刚写的那条。
+    **前置**：调用方必须先 ``refreshDocumentCollection()``（delete 后
+    release + load 强制 QueryNode 刷新 delta binlog），否则刚 delete 的
+    chunk 仍可能命中 search 结果。
     """
     for hit in searchDocumentChunks(embedding, topK=10):
         if hit["chunk_id"] == chunkId:

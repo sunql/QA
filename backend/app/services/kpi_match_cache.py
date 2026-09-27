@@ -35,6 +35,16 @@ class KpiMatchCache:
     - _by_keyword：keyword 子串 → list[KpiCatalog]
 
     写入时 onKpiChanged(kpi_code) 失效对应条目，下次查询时触发 lazy rebuild。
+
+    ⚠️ **未来扩展示例**（`chat-service-assessment.md` §15 末尾第 1 项登记，
+    当前未启用）：如果目录规模真的上来（千级 KPI / 万级关键词），正确结构是
+    **Aho-Corasick / 后缀自动机**（多模式子串匹配的线性时间算法）而不是
+    子串枚举 —— 现行 `_by_keyword` 字典查找的复杂度是 O(keywords × catalog_keywords)，
+    在千级场景下会从亚毫秒退化到毫秒级。换索引时必须与 `_by_keyword` **写路径同生命周期**
+    （`onKpiChanged` / `refreshOne` 必须重建自动机），否则会复现倒排索引那次的
+    静默偏离（写路径漏改、读路径命中陈旧数据）。**准入压测**（500 关键词 × 30 字
+    字典 + 倒排子串索引实测 +42.3 MB 纯开销）是当初否决该方案的真实数据，禁止
+    凭直觉「越大越需要索引」—— 实测收益在当前规模下为零。当前实现保留作为 SSOT。
     """
 
     def __init__(self) -> None:
@@ -66,17 +76,26 @@ class KpiMatchCache:
         return self._loaded
 
     def findByAnyKeyword(self, keywords: list[str]) -> list["KpiCatalog"]:
-        """返回 semantic_keywords 包含任意一个 keyword 的 KPI 列表。
+        """返回 semantic_keywords 包含任意一个**非空** keyword 的 KPI 列表。
 
         匹配方式：keyword 是 catalog keyword 的子串（大小写不敏感）。
         返回去重列表（一个 KPI 可能被多个 keyword 命中，只出现一次）。
         未 warmUp 时返回空列表（降级到 LLM 流水线，不阻断用户）。
+
+        **空串关键词显式跳过**（2026-09-27 第五批，`chat-service-assessment.md` §15 末尾
+        第 2 项）：`"" in s` 在 substring 语义里恒真，会命中全部 KPI —— 这是副作用
+        而非设计意图（合法调用路径 `_extractKeywords` 仅产出 2+ 字 ngram + 调用前
+        `if user_kws:` 守卫，不会产生 `[""]`）。本批判定为缺陷并修复：「空 needle
+        在 substring 搜索里应是 no-op」，返回**空集合**而非全量。详见
+        `test_kpi_match_cache.py::test_empty_string_keyword_is_skipped`。
         """
         if not self._loaded:
             return []
         seen: set[int] = set()
         result: list["KpiCatalog"] = []
         for kw in keywords:
+            if not kw:
+                continue  # 空串跳过（防御：空 needle 不应触发「匹配全部」副作用）
             kw_lower = kw.lower()
             for cat_kw, kpis in self._by_keyword.items():
                 if kw_lower in cat_kw.lower():

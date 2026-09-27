@@ -62,13 +62,17 @@ def _catalogKeywordOrder(specs: tuple[_KpiSpec, ...]) -> dict[str, list[str]]:
 
 
 def _expectedHitSet(specs: tuple[_KpiSpec, ...], keywords: list[str]) -> set[str]:
-    """复算**集合**语义：任一用户关键词是任一目录关键词的子串（大小写不敏感）。
+    """复算**集合**语义：任一**非空**用户关键词是任一目录关键词的子串（大小写不敏感）。
 
     纯集合（不带顺序），因此不含任何实现细节假设 —— 现有桩若语义写错（例如漏掉
     大小写归一化、或按整词而非子串匹配），这里立刻暴露。
+
+    空串关键词**显式跳过**（2026-09-27 第五批与 `findByAnyKeyword` 一致）：
+    substring 语义里 `"" in s` 恒真，命中全部是副作用；与生产实现**一致跳过**才能
+    让 `_assertMatchesByRule` 在空串场景下不与被测实现分裂。
     """
     byKeyword = _catalogKeywordOrder(specs)
-    lowered = [kw.lower() for kw in keywords]
+    lowered = [kw.lower() for kw in keywords if kw]  # 空串跳过
     hits: set[str] = set()
     for catKw, codes in byKeyword.items():
         if any(query in catKw.lower() for query in lowered):
@@ -80,11 +84,14 @@ def _expectedOrder(specs: tuple[_KpiSpec, ...], keywords: list[str]) -> list[str
     """复算**顺序**语义：用户关键词顺序外层 × `_by_keyword` 插入序内层，按 code 去重。
 
     与 `findByAnyKeyword` 的循环结构同构，但跑在测试自己的 spec 列表上 ⇒ 非自证。
+    空串关键词**显式跳过**（与 `_expectedHitSet` 同口径）。
     """
     byKeyword = _catalogKeywordOrder(specs)
     seen: set[str] = set()
     ordered: list[str] = []
     for kw in keywords:
+        if not kw:
+            continue  # 空串跳过
         kwLower = kw.lower()
         for catKw, codes in byKeyword.items():
             if kwLower in catKw.lower():
@@ -220,22 +227,34 @@ class TestFindByAnyKeyword:
         assert cache.hasCode("KPI_WIP") is False
         assert _assertMatchesByRule(cache, specs, ["销售额"]) == ["KPI_LIVE"]
 
-    async def test_empty_keyword_matches_every_published_kpi(
+    async def test_empty_string_keyword_is_skipped(
         self, dbSession: AsyncSession
     ) -> None:
-        """**钉死当前语义**：空字符串是任意字符串的子串 ⇒ 命中全部 PUBLISHED KPI。
+        """空串关键词是**任何**字符串的子串 ⇒ 当前实现的 `"" in s` 恒真，会命中全部 KPI。
+        这是 substring 语义的副作用而非设计意图：所有合法调用路径（`KpiSemanticMatchService._extractKeywords`
+        仅产出 2+ 字 ngram）都不会产生 `[""]`，且 `if user_kws:` 守卫再筛一遍空列表。
 
-        这是既有行为而不是本次判定 —— 若将来判定为缺陷（用户传 `[""]` 不该等同于
-        “全量”），需另开条目显式改，**不要顺手改**：改它等于改 `findByAnyKeyword`
-        对空词的契约，而 `KpiSemanticMatchService` 的调用方依赖当前语义做降级。
+        本批（2026-09-27 第五批，chat-service-assessment §15 末尾第 2 项）判定为**缺陷**并修复：
+        空串关键词应被忽略，返回**空集合**而非全量 —— 与「空 needle 在 substring 搜索里
+        应当是 no-op」的常识一致。
+
+        兼容性核验（同一调用栈没有依赖 `[""]` 返回全量的代码路径）：
+        - `_extractKeywords`：ngram 长度 2-4，不可能产生空串
+        - `kpi_semantic_match_service.py:186` / `:230`：调用前都有 `if user_kws:` 守卫
+        - 全树唯一可能传 `[""]` 的入口是测试或未来重构 ⇒ 此批加防御性跳过后无回归。
         """
         cache = await _warmUp(dbSession, _OVERLAP)
-        assert _assertMatchesByRule(cache, _OVERLAP, [""]) == _expectedOrder(_OVERLAP, [""])
-        assert set(_codes(cache.findByAnyKeyword([""]))) == {
+        # 单独 `[""]` ⇒ 空集合（不命中任何 KPI）
+        assert _codes(cache.findByAnyKeyword([""])) == []
+        # 混合空串与有效词 ⇒ 仅按有效词匹配
+        assert _codes(cache.findByAnyKeyword(["", "供应商"])) == ["KPI_OTD"]
+        # 多空串 + 1 有效词 ⇒ 仅按有效词匹配
+        assert _codes(cache.findByAnyKeyword(["", "", "销售额"])) == [
             "KPI_GROWTH",
             "KPI_SALES",
-            "KPI_OTD",
-        }
+        ]
+        # 全部空串 ⇒ 空集合
+        assert _codes(cache.findByAnyKeyword(["", ""])) == []
 
     async def test_never_returns_the_same_instance_twice(
         self, dbSession: AsyncSession

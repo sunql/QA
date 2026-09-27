@@ -48,11 +48,26 @@ class ValidationError(DomainError):
 
 
 class LlmClientError(DomainError):
-    """LLM 调用失败。"""
+    """LLM 调用失败。
 
-    def __init__(self, message: str, *, provider: str | None = None, detail: str | None = None) -> None:
+    tokens 携带已消耗的 (promptTokens, completionTokens)（流式失败时为部分用量，
+    post-response 处理失败时为已读取的响应 usage；其它失败场景通常为 None）——
+    失败路径也是计量路径（核心约束 #3，`chat-service-assessment.md` §15 末尾第 3 项），
+    调用方用 `consumedTokens()` 取回。`consumedTokens` 取值优先级：
+    `LlmClientError.tokens` > `retryGenTokens`（携带通道）。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        detail: str | None = None,
+        tokens: tuple[int, int] | None = None,
+    ) -> None:
         super().__init__(message, detail=detail)
         self.provider = provider
+        self.tokens = tokens
 
 
 class NoAvailableModelError(DomainError):

@@ -30,7 +30,7 @@ from app.infrastructure.llm.base_client import (
     StreamChunk,
     ToolCall,
 )
-from app.infrastructure.llm.factory import acquire_llm_concurrency
+from app.infrastructure.llm.concurrency import acquire_llm_concurrency
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +147,12 @@ class OpenAiClient(BaseLlmClient):
 
         部分兼容代理不支持 include_usage（不返回 usage 块）时，末块 token 记为 0，
         与 complete() 的近似计量语义一致。
+
+        **失败路径用量携带**（§15 末尾第 3 项）：流式迭代中途出错（连接重置 / SDK 抛错
+        / 用量终块之后又触发的异常）时，已累计的 `promptTokens` / `completionTokens`
+        会挂在抛出的 `LlmClientError.tokens` 上 —— 调用方 `consumedTokens()` 读得到，
+        降级审计行能如实计量已消耗的 token。若流本身没建起来（`create(...)` 抛错），
+        tokens 为 None（不伪造 0，避免被解读为"零消耗"）。
         """
         payload: dict[str, Any] = {
             "model": model or self._modelName,
@@ -192,10 +198,15 @@ class OpenAiClient(BaseLlmClient):
                     modelName=modelName,
                 )
         except Exception as exc:
+            # 失败路径用量：已累计的 promptTokens/completionTokens 若非 0/0 则挂上。
+            # 流没建立起来时 promptTokens/completionTokens 仍为初始值 0/0 ⇒ 不挂
+            # （不伪造"零消耗"，与 create() 失败时 tokens=None 语义一致）。
+            accumulated = (promptTokens, completionTokens) if (promptTokens or completionTokens) else None
             raise LlmClientError(
                 MSG_LLM_STREAM_FAILED.format(provider=self._provider.value, exc=exc),
                 provider=self._provider.value,
                 detail=str(exc),
+                tokens=accumulated,
             ) from exc
 
     async def complete_with_tools(
@@ -264,27 +275,43 @@ class OpenAiClient(BaseLlmClient):
             async with acquire_llm_concurrency():
                 response = await self._client.chat.completions.create(**payload)
         except Exception as exc:
+            # create() 失败：响应没收到，无 usage 可记 ⇒ tokens=None（不伪造）
             raise LlmClientError(
                 MSG_LLM_CALL_FAILED.format(provider=self._provider.value, exc=exc),
                 provider=self._provider.value,
                 detail=str(exc),
             ) from exc
 
-        tool_calls: list[ToolCall] = []
-        raw_message = response.choices[0].message
-        if raw_message.tool_calls:
-            for raw_tc in raw_message.tool_calls:
-                tool_calls.append(
-                    ToolCall(
-                        id=raw_tc.id,
-                        name=raw_tc.function.name,
-                        args=json.loads(raw_tc.function.arguments),
-                    )
-                )
-
+        # 失败路径用量携带（§15 末尾第 3 项）：tool_calls 解析失败（function.arguments
+        # 非合法 JSON / choices 为空等）时，**已读取**的响应 usage 必须挂在异常上。
+        # 故先把 usage 取出，再做易出错的解析；解析阶段失败 ⇒ 用 `LlmClientError.tokens`
+        # 把这段 usage 携带上抛，调用方 `consumedTokens()` 读得到。
         usage = getattr(response, "usage", None)
         prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
         completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        response_tokens = (prompt_tokens, completion_tokens)
+
+        try:
+            tool_calls: list[ToolCall] = []
+            raw_message = response.choices[0].message
+            if raw_message.tool_calls:
+                for raw_tc in raw_message.tool_calls:
+                    tool_calls.append(
+                        ToolCall(
+                            id=raw_tc.id,
+                            name=raw_tc.function.name,
+                            args=json.loads(raw_tc.function.arguments),
+                        )
+                    )
+        except Exception as exc:
+            # post-response 解析失败：响应已收到，usage 已读出，挂在异常上
+            raise LlmClientError(
+                MSG_LLM_CALL_FAILED.format(provider=self._provider.value, exc=exc),
+                provider=self._provider.value,
+                detail=f"post-response 解析失败：{exc}",
+                tokens=response_tokens,
+            ) from exc
+
         return LlmResponseWithTools(
             content=getattr(raw_message, "content", None),
             tool_calls=tool_calls,

@@ -36,8 +36,9 @@
 > **2026-09-27 追加批次**：「声明值 ≠ 生效值」批（[chore-config-duplicate-fields](../changes/chore-config-duplicate-fields/summary.md)）
 > 关闭 P2 第 10 项的 `config.py` 半——9 组重复声明删除（生效默认值零变化）+ `AgentDefinitionRead.created_time` 怪胎修复
 > + AST 类体字段守卫 + `jwtSecret` 启动自检 warning。
-> **已立项待排期**：§13「残差」第 1 条（库侧只读兜底）已转为提案文件；§15 末尾新登记三项
-> （KPI 关键词索引的正确结构、空关键词语义判定、失败尝试的 LLM 用量采集）。
+> **已立项待排期**：§13「残差」第 1 条（库侧只读兜底）已转为提案文件；
+> ~~§15 末尾新登记三项~~（KPI 关键词索引的正确结构、空关键词语义判定、失败尝试的 LLM 用量采集）
+> —— **2026-09-27 §15 第四拨已全部关闭**（[`chore-chat-15-tail-three-items`](../changes/chore-chat-15-tail-three-items/summary.md)）。
 > **2026-09-27 追加批次**：`chore-doc-drift-cleanup`（详见
 > [chore-doc-drift-cleanup](../changes/chore-doc-drift-cleanup/summary.md)）关闭 §2.5 剩余条目：
 > `IntentType` docstring「DEFINE/MAP/METRIC 暂未接入」与 `sql_guard.py` 引用两条；同批重写
@@ -63,10 +64,17 @@
 > **2026-09-27 第三拨补**（doc-drift 第三拨，`fix-oracle-set-transition-best-effort` 顺带清扫）：
 > §2.5 评估文档中两条 ✅ 状态尚未落到表格行（`5 类活跃意图` 行的 doc 早被 chore-doc-drift-cleanup 修
 > 为 13 类但表格未打 ✅；`L2 可选 CTE 增强：plan.requiresCte=True` 行的 doc 早被 chore-doc-drift-cleanup-b
-> 加 ⚠️ 更正注但表格未打 ✅）——本拨在 §2.5 表里给两行补 ✅ 标记；同时主动巡检发现
+> 加 ⚠️ 更更正注但表格未打 ✅）——本拨在 §2.5 表里给两行补 ✅ 标记；同时主动巡检发现
 > `metric-pipeline.md:166,168` 两处漂移：迁移文件名 `0051_add_routing_fields.py` → `0051_add_routing_metrics_fields.py`
 > （缺 `_metrics`），`agent-loop.md` 描述「L4 LangGraph Agent Loop」→「L4 纯 Python async while loop Agent」
 > （agent-loop.md 整篇已重写，不再是 LangGraph）。**至此 §2.5 表格 7 行全部 ✅ 关闭**。
+
+> **2026-09-27 第四拨**（§15 末尾三项）：[`chore-chat-15-tail-three-items`](../changes/chore-chat-15-tail-three-items/summary.md)
+> 三项落地——①KPI 关键词索引结构（SSOT 化进 `KpiMatchCache` 类 docstring，登记未来 Aho-Corasick + 准入
+> 压测数据 +42.3MB / 500 关键词 / 30 字字典）②空关键词语义（`findByAnyKeyword` 加 `if not kw: continue`
+> 防御，substring `""` 副作用 → no-op）③失败尝试 LLM 用量（`LlmClientError.tokens: tuple[int, int] | None`
+> 字段 + `consumedTokens` 第二档优先级 + `completeStream` 累计挂上 + `complete_with_tools` 后处理失败挂上
+> + 顺手修 `openai_client` ↔ `factory` 潜在 circular import）。单测 46/46 全绿。**§15 末尾三项至此全部 ✅ 闭合**。
 
 ---
 
@@ -1156,20 +1164,30 @@ M9 先命中兄弟函数的合法 `limit=`，再命中函数体内**正在解释
 另有一处是**数据不符**：M10 探针假设「prod 目录有关键词」，而实际 `semantic_keywords` **全为 NULL**
 ⇒ 改为数据感知断言并显式标注「本项在 prod 数据上不可判」。**三处 FAIL 的原始输出都留在各自 SSOT 里**。
 
-### 残差与后续（本批新登记，**不在本批做**）
+### 残差与后续（§15 主批新登记，**不在主批做**；第 3/4/5 条已由 §15 第四拨关闭）
+
+> ⚠️ 第 3/4/5 条原是 §15 主批的「残差与后续」清单中的「后续观察项」，已由 2026-09-27
+> **§15 第四拨**（[`chore-chat-15-tail-three-items`](../changes/chore-chat-15-tail-three-items/summary.md)）
+> 全部关闭并各自 SSOT 化（见各条 ✅ 标记）。第 1/2/6/7/8 条仍为残差。
 
 1. **`prior_cte` 能力当前无生产调用者**（M5 的直接后果）：`render_prior_cte` 与 `generateSql(prior_cte=…)`
    只被契约测试驱动。保留是**用户口径**（删引擎、保能力），但**若长期不接线**，应连同
    `app/domain/chained_step_plan.py` 一并评估删除 —— 否则等于把 M5 删掉的死代码换了个位置留着；
 2. **L3 展示漂移**（§2.5 新行）：`routing_layer` 从不写 `L3` ⇒ 监控页 L3 桶恒 0，而前端仍把 L3 标为
    「多步链式推理」。改前端需 `docker compose build --no-cache frontend`，超本批范围，**只记录**；
-3. **KPI 关键词索引**（若目录规模真的上来）：正确结构是 **Aho-Corasick / 后缀自动机**，不是子串
-   枚举；且必须与 `_by_keyword` 写路径**同生命周期**（最小正确形态存档于
-   [`test-kpi-match-cache-ordering`](../changes/test-kpi-match-cache-ordering/summary.md) §6）；
-4. **空关键词语义**（`findByAnyKeyword([""])` 现命中全部 KPI）**是否算缺陷** —— 需产品判断，
-   本批只钉死现状**不偷偷改**；
-5. **失败尝试的 LLM 用量采集**：需 `openai_client` 的**失败路径也带 usage**（当前只有成功响应有）
-   才谈得上「失败路径也计量」；
+3. ✅ **KPI 关键词索引**（2026-09-27 第 3 项，已 SSOT 化）：`KpiMatchCache` 类 docstring
+   登记未来 Aho-Corasick / 后缀自动机的**准入压测数据**（500 关键词 × 30 字字典实测
+   +42.3MB 纯开销）+ 「千级才需要 + 写路径同生命周期」硬约束，**当前实现保留作 SSOT**
+   —— 见 [`chore-chat-15-tail-three-items`](../changes/chore-chat-15-tail-three-items/summary.md) §5.1；
+4. ✅ **空关键词语义**（2026-09-27 第 2 项，已修）：`findByAnyKeyword` 加 `if not kw: continue`
+   防御（`"" in s` 恒真的 substring 副作用 → no-op）；既有合法调用路径 `_extractKeywords`
+   不产 `[""]`，本批为防御性 —— 见 [`chore-chat-15-tail-three-items`](../changes/chore-chat-15-tail-three-items/summary.md) §5.2；
+5. ✅ **失败尝试的 LLM 用量采集**（2026-09-27 第 1 项，已落地）：`LlmClientError` 扩
+   `tokens: tuple[int, int] | None` 字段；`completeStream` 累计挂上终块 usage（异常时
+   携带 `(1500, 200)` 等真实数字）；`complete_with_tools` 后处理失败挂上响应 usage；
+   `consumedTokens` 第二档优先级 `LlmClientError.tokens > retryGenTokens`；顺手修
+   `openai_client` ↔ `factory` 潜在 circular import（直导 `concurrency` 叶子模块）
+   —— 见 [`chore-chat-15-tail-three-items`](../changes/chore-chat-15-tail-three-items/summary.md) §5.3；
 6. **H7 残留**：生产 `.env` 未声明 `EMBEDDING_DIMENSION` ⇒ env 回退路径的维度守卫**仍只记 warning**
    （「不猜测」口径的必然代价；`.env.example` 已给出声明位）；
 7. **M9 残留**：仍用 ORM 风格 `Collection` API（pymilvus 3.x 已标 deprecated），迁

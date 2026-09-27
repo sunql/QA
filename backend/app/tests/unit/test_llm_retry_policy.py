@@ -135,6 +135,29 @@ class TestConsumedTokens:
     def test_unattached_generic_exception_is_zero(self) -> None:
         assert consumedTokens(RuntimeError("boom")) == (0, 0)
 
+    def test_llm_error_with_builtin_tokens_wins_over_channel(self) -> None:
+        """失败路径 LLM 用量（§15 末尾第 3 项）：`openai_client` 流式 / post-response
+        失败时把已测得的部分用量挂到 `LlmClientError.tokens`，优先级**高于**携带通道
+        —— 真实消耗的数字不会因为通道晚挂或重写而被覆盖。
+        """
+        exc = LlmClientError("流式中断", provider="qwen", detail="连接重置", tokens=(1500, 200))
+        # 即使通道也挂了一个值，builtin tokens 优先
+        attachRetryGenTokens(exc, (9999, 9999))
+        assert consumedTokens(exc) == (1500, 200)
+
+    def test_llm_error_with_builtin_tokens_no_channel_fallback(self) -> None:
+        """builtin tokens 存在时，不回退到通道（即使通道有值）。"""
+        exc = LlmClientError("LLM 调用失败", provider="qwen", detail="503", tokens=(42, 7))
+        assert consumedTokens(exc) == (42, 7)
+
+    def test_llm_error_without_builtin_tokens_falls_back_to_channel(self) -> None:
+        """builtin tokens 为 None 时，按既有契约回退到携带通道（M4 路径）。"""
+        exc = LlmClientError("LLM 调用失败", provider="qwen", detail="超时")
+        # tokens 缺省为 None
+        assert exc.tokens is None
+        attachRetryGenTokens(exc, (300, 50))
+        assert consumedTokens(exc) == (300, 50)
+
 
 class TestCompleteWithTransientRetry:
     """同模型瞬态重试：预算、过滤、用量携带。"""

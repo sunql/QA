@@ -77,14 +77,19 @@ def retryGenTokens(exc: Exception) -> tuple[int, int]:
 def consumedTokens(exc: Exception) -> tuple[int, int]:
     """提取异常携带的已消耗 token；无法计量时返回 (0, 0)。
 
-    取值优先级：`Nl2SqlError.tokens`（终态累计值）> 携带通道（`retryGenTokens`）。
+    取值优先级：
+    1. `Nl2SqlError.tokens`（终态累计值）
+    2. `LlmClientError.tokens`（基础设施层实测用量，流式 / post-response 失败时挂）
+    3. 携带通道 `retryGenTokens`（多轮中途失败时上层累计值，M4 路径）
 
-    第二档是 M4 补的：多轮调用**中途**抛出的异常（如第 2 轮 `complete()` 抛
-    `LlmClientError`）此前不带任何用量，前几轮已累加的 token 就此静默消失。
-    现在 `nl2sql_service` 会把累计值挂上去，本函数读得到 ⇒ 降级审计行与总消耗
-    都能如实计量（核心约束 #3 —— 失败路径也是计量路径）。
+    第二档是 §15 末尾第 3 项（2026-09-27 第五批）补的：`openai_client` 流式中断
+    或 `complete_with_tools` 后处理失败时，把已测得的用量（部分 prompt/completion
+    tokens 或完整响应 usage）直接挂在 `LlmClientError.tokens`，本函数读得到 ⇒
+    降级审计行与总消耗都能如实计量（核心约束 #3 —— 失败路径也是计量路径）。
     """
     if isinstance(exc, Nl2SqlError) and exc.tokens is not None:
+        return exc.tokens
+    if isinstance(exc, LlmClientError) and exc.tokens is not None:
         return exc.tokens
     return retryGenTokens(exc)
 

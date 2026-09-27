@@ -8,7 +8,7 @@
 
 ## 核心约束（不可违反）
 
-1. **SQL 安全**：业务查询仅允许只读 `SELECT`，经 `app/infrastructure/security/sql_guard.py` 校验；禁止 DDL/DML/多语句。
+1. **SQL 安全**：业务查询仅允许只读 `SELECT`，经 `app/infrastructure/business_db_pool.py` 校验（不在 `app/infrastructure/security/sql_guard.py` —— 该文件不存在）；禁止 DDL/DML/多语句。
 2. **Token 计量**：每次 LLM 调用必须经 `TokenUsageService.recordUsage` 记录消耗与成本。
 3. **不可变数据**：领域逻辑创建新对象而非原地修改（ORM 持久化例外）。
 4. **TDD**：先写测试（RED）-> 实现（GREEN）-> 重构（IMPROVE），覆盖率 ≥ 80%。

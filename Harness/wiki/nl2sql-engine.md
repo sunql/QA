@@ -82,7 +82,7 @@ L2: LLM single SQL (existing ReAct two-phase, optionally CTE)
   │   ├─ YES → return
   │   └─ NO (execution error, timeout, empty result)
   │       ▼
-L4: LangGraph Agent Loop (5 NL2SQL tools, iterative)
+L4: Pure Python async while loop Agent (5 NL2SQL tools, iterative)
   │       │
   │       ▼
   return best effort or "cannot answer"
@@ -136,13 +136,15 @@ L4: LangGraph Agent Loop (5 NL2SQL tools, iterative)
   若长期不接线，应连同 `app/domain/chained_step_plan.py` 一并评估删除。
 - **Code**: `app/services/nl2sql_service.py`（`_renderPriorCtePart:461`、`_assertPriorCteSafe:488`、`generateSql:2084`）+ `app/domain/chained_step_plan.py`（`render_prior_cte:64`）
 
-#### L4 — LangGraph Agent Loop
+#### L4 — Pure Python async while loop Agent
+
+> ⚠️ **更正（2026-09-27）**：本文节原写「LangGraph `StateGraph`」是设计文档遗留，**实际代码是纯 Python async while loop**（`agent_runtime_service.py:601` 注释明示否决 LangGraph）。`AgentState` TypedDict 保留为 LangGraph 升级占位（`agent_state.py`）。
 
 - **触发**：`IntentType.AGENT_RUN`（显式意图），非「L2 失败升级」。
-- LangGraph `StateGraph` with `AgentLoopState` (question, generated_sql, tool_calls, iterations, cost_so_far_usd).
+- 纯 Python `while state["iterations"] < max_iterations` 循环；`AgentLoopState` 是 TypedDict（保留为 LangGraph 升级占位）。终止条件 4 类：`answered` / `max_iterations` / `cost_cap` / `error`。
 - 5 NL2SQL tools registered: `list_tables`, `describe_table`, `sample_rows`, `execute_sql`, `list_joins`.
-- Each iteration: LLM chooses tool → tool executes → result fed back → next iteration or final answer.
-- Cost cap: `max_cost_usd=5.0` (configurable); loop exits if `cost_so_far_usd >= max_cost_usd`.
+- Each iteration: LLM chooses tool → tool executes (`_executePendingToolCalls`) → result fed back → next iteration or final answer.
+- Cost cap: `cost_budget_usd=0.5`（默认；调用方覆盖）；`cost_per_1k_input` / `cost_per_1k_output` 由调用方传入（**默认 0 会让成本被静默低估**，见 `agent_runtime_service.py:599` 注释）。loop exits if `total_cost_usd >= cost_budget_usd`.
 - Final SQL still passes SQL Guard before execution.
 - **Code**: `app/services/agent_runtime_service.py:593`（`run_agent_loop`），由 `chat_service.py:892 _runL4AgentLoop` 调用
 

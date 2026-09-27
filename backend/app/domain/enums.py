@@ -143,12 +143,25 @@ class ObjectType(str, Enum):
 
 
 class IntentType(str, Enum):
-    """用户意图类型。
+    """用户意图类型（13 类，全量接入流水线，2026-09-27 文档与代码对齐）。
 
-    QUERY / NEW_QUERY：全新查询（NEW_QUERY 表示有历史状态时开启的新一轮）。
-    REFINE / FOLLOW_UP：多轮意图，需存在会话查询状态（见 intent_service）。
-    CLARIFY：询问概念含义，不进 NL2SQL 流水线。
-    DEFINE / MAP / METRIC：已接入流水线（本体治理指令，含指标/类/属性创建与查询）。
+    NL2SQL 主路径（5 类）：
+    - QUERY / NEW_QUERY：全新查询（NEW_QUERY 表示有历史状态时开启的新一轮）。
+    - REFINE / FOLLOW_UP：多轮意图，需存在会话查询状态（见 intent_service）。
+
+    不进 NL2SQL（1 类）：
+    - CLARIFY：询问概念含义。
+
+    本体治理指令（3 类，已接入，`chat_service._handleDefineClass / _handleDefineMetric /
+      _handleShowMetric / _handleMapProperty`，详见 chat_service.py:2551-2568）：
+    - DEFINE / MAP / METRIC：指标/类/属性创建与查询。
+
+    领域拦截路径（4 类，跳过 NL2SQL 走专项服务）：
+    - CHITCHAT：闲聊，直接对话模板回复。
+    - SUPPLIER_360：供应商 360° 视图（Phase 5.3，Supplier360Service）。
+    - SUPPLIER_RISK：供应商风险 Agent（Phase 5.4，SupplierRiskService）。
+    - GRAPH_REASONING：知识图谱多跳推理（Phase 6.3，GraphTraversalService）。
+    - AGENT_RUN：Agent 运行时（Phase 6.4，AgentRuntimeService.run_agent_loop）。
     """
 
     QUERY = "query"

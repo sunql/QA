@@ -43,6 +43,12 @@
 > `IntentType` docstring「DEFINE/MAP/METRIC 暂未接入」与 `sql_guard.py` 引用两条；同批重写
 > `agent-loop.md` 整篇（删除虚构 LangGraph 实现 + 不存在路径引用）；`architecture.md:41`
 > Agent Loop 路径更正；`nl2sql-engine.md:26` 意图数从 5 类更正为 13 类。
+> **2026-09-27 第二拨**：`chore-doc-drift-cleanup-b`（详见
+> [chore-doc-drift-cleanup-b](../changes/chore-doc-drift-cleanup-b/summary.md)）关闭上批漏掉的 3 处：
+> `nl2sql-engine.md:85,139,142` L4 段「LangGraph StateGraph」更正为「Pure Python async while loop」+
+> 4 类终止条件 + cost cap 默认值风险；`enums.py:146` IntentType docstring 补全 13 类四档分述
+> （NL2SQL 主路径 / 不进 NL2SQL / 本体治理 / 领域拦截）；`owner.md:11` SQL Guard 引用
+> `business_db_pool.py` 而非不存在的 `security/sql_guard.py`。
 > 另：`fix-routing-metrics-l3-truth`（详见
 > [fix-routing-metrics-l3-truth](../changes/fix-routing-metrics-l3-truth/summary.md)）
 > 关闭 §2.5 `routing_layer` 从不写 `L3` 前端展示漂移——类型联合、`LAYER_COLORS`、折线图 mock、i18n 全部
@@ -260,8 +266,12 @@
     **对不存在的 `app/services/multi_step_plan.py` 的引用**、`prior_cte` 契约，
     以及 `architecture.md` 的 4 层路由现状；**`config.py` 重复字段批（2026-09-27）**删除 9 组重复声明
     （生效默认值零变化）并新增 AST 字段守卫 + `jwtSecret` 启动自检。
-    **仍挂账**：`sql_guard.py` 引用与
-    `IntentType` docstring 未在本批复核（未确认是否仍漂移）。
+    ✅ **2026-09-27 关闭**（见 [chore-doc-drift-cleanup](../changes/chore-doc-drift-cleanup/summary.md) +
+    [chore-doc-drift-cleanup-b](../changes/chore-doc-drift-cleanup-b/summary.md)）：
+    上批修 `IntentType` docstring「DEFINE/MAP/METRIC 已接入」+ `architecture.md` Agent Loop 路径 +
+    `agent-loop.md` 整篇重写 + `nl2sql-engine.md` 意图数 5→13；本批补 3 处漏网——
+    `nl2sql-engine.md:85,139,142` L4 段「LangGraph StateGraph」更正 + `enums.py:146`
+    IntentType docstring 补全 13 类四档分述 + `owner.md:11` SQL Guard 引用 `business_db_pool.py`。
 11. ~~**M5 死代码清理**：L3 CTE 引擎要么接线（承接 `requiresCte` 场景）要么删除，
     避免带未计量 LLM 调用的死代码长期驻留。~~
     ✅ **已完成（2026-09-27）**，见 §15（用户口径：**删引擎、保能力**）。**未采纳「接线」那半句**：

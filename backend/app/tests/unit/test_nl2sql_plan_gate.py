@@ -41,12 +41,13 @@ class TestRowLimitOnlyIsEmpty:
 
 class TestNormalPlanStillValid:
     def test_target_only_plan_is_not_empty(self) -> None:
-        """target 非空的合法计划仍放行（不动既有口径）。"""
+        """方案B 后：仅有 target 无引用的计划视为「无可查询引用」，判失败。
+        （注：上批方案A 当时该用例期望合法；方案B 改为失败——本批文档化口径变更）"""
         service = Nl2SqlService()
         plan_dict = {"target": "查询采购情况"}
         outcome = service._parsePlanOutcome(json.dumps(plan_dict))
-        assert outcome.plan is not None
-        assert not _isEmptyPlan(outcome.plan)
+        assert outcome.plan is None
+        assert outcome.reason == "PLAN_EMPTY"
 
     def test_selected_classes_plan_is_not_empty(self) -> None:
         """有 selectedClasses 的计划非空。"""
@@ -63,6 +64,48 @@ class TestNormalPlanStillValid:
         outcome = service._parsePlanOutcome(json.dumps(plan_dict))
         assert outcome.plan is not None
         assert outcome.plan.isUnanswerable is True
+
+    def test_target_plus_conditions_is_not_empty(self) -> None:
+        """target + conditions：conditions 是可查询引用，判非空合法。"""
+        service = Nl2SqlService()
+        plan_dict = {"target": "查询", "conditions": ["INTER_COM_CODE=1"]}
+        outcome = service._parsePlanOutcome(json.dumps(plan_dict))
+        assert outcome.plan is not None
+        assert not _isEmptyPlan(outcome.plan)
+
+    def test_target_plus_aggregations_is_not_empty(self) -> None:
+        """target + aggregations：aggregations 是可查询引用，判非空合法。
+
+        aggregations 是结构化对象，但只要 schema 接受即可（这里用 plain
+        property 字符串列表近似，避免与 dataclass 字段类型耦合）。
+        """
+        service = Nl2SqlService()
+        plan_dict = {
+            "target": "查询",
+            "aggregations": [{"function": "SUM", "property": "AMOUNT"}],
+        }
+        outcome = service._parsePlanOutcome(json.dumps(plan_dict))
+        assert outcome.plan is not None
+        assert not _isEmptyPlan(outcome.plan)
+
+    def test_target_plus_groupBy_is_not_empty(self) -> None:
+        """target + groupBy 合法（groupBy 是可查询引用）。"""
+        service = Nl2SqlService()
+        plan_dict = {"target": "查询", "groupBy": ["SUPPLIER_CODE"]}
+        outcome = service._parsePlanOutcome(json.dumps(plan_dict))
+        assert outcome.plan is not None
+        assert not _isEmptyPlan(outcome.plan)
+
+    def test_conditions_only_is_not_empty(self) -> None:
+        """仅有 conditions（多步追问常见：模型把前序范围复述到 conditions）：合法。"""
+        service = Nl2SqlService()
+        plan_dict = {
+            "target": "",
+            "conditions": ["INTER_COM_CODE=1"],
+        }
+        outcome = service._parsePlanOutcome(json.dumps(plan_dict))
+        assert outcome.plan is not None
+        assert not _isEmptyPlan(outcome.plan)
 
 
 class TestUnitGateDirectly:

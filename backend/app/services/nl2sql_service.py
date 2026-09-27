@@ -21,8 +21,8 @@ from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
 from app.domain.plan_drop import PlanDrop, formatPlanDrops
 from app.domain.query_plan import Aggregation, JoinSpec, PlanResult, QueryPlan, planToText
 from app.infrastructure.business_db_pool import _assert_read_only
-from app.services.formula_parser import parseFormula
 from app.infrastructure.llm.base_client import LlmMessage
+from app.services.formula_parser import parseFormula
 from app.services.llm_retry_policy import completeWithTransientRetry
 from app.services.messages_zh import (
     MSG_NL2SQL_PLAN_INVALID,
@@ -58,23 +58,31 @@ REASON_PLAN_DEGRADED = "PLAN_DEGRADED"  # 解析成功但有内容级丢弃（�
 
 
 def _isEmptyPlan(plan: QueryPlan) -> bool:
-    """计划是否「无可查询引用」：无 target、无任何引用/条件/聚合/分组/排序。
+    """计划是否「无可查询引用」：无 selectedClasses/conditions/aggregations 等
+    任何可在本体 schema 中校验的真实引用。
 
-    全空计划能通过 validatePlan（没有任何可校验的引用），随后被送进 SQL 生成，
+    半空计划能通过 validatePlan（没有任何可校验的引用），随后被送进 SQL 生成，
     模型得以自由编造表名（结果报错被包装成"服务内部错误"）。故判为解析失败走重试，
     用尽后落到"无法回答"。
 
-    判定取**最窄口径**（所有字段都空才算空），且 `target="无法回答"` 的合法空计划
-    不受影响（isUnanswerable 走自己的短路路径）。interpretation 不计入：它只是解释，
-    不是可查询目标。
+    判定取**最窄口径**：
+    - 仅 ``target`` 不算合法内容（target 是模型对意图的**描述**，不是可查询引用）
+    - 仅 ``rowLimit`` / ``perGroupLimit`` 不算合法内容（限制不是引用）
+    - 仅 ``interpretation`` 不算（解释不是可查询目标）
+    - ``selectedClasses`` / ``selectedProperties`` / ``conditions`` /
+      ``aggregations`` / ``groupBy`` / ``joins`` / ``sortBy`` / ``partitionBy``
+      任一非空即合法（这些是 plan 在本体 schema 中可被 validatePlan 校验的真实引用）
 
-    半空计划闸门（方案A）：`rowLimit` / `perGroupLimit` 单独存在不再视为「有内容」。
-    `{"rowLimit": 100}` 这种只有行数限制、无任何引用的计划曾能过 validatePlan
-    → 进 generateSql 让模型自由选表/编表名，现纳入失败重试。
+    ``target="无法回答"`` 的合法空计划不受影响（isUnanswerable 走自己的短路路径，
+    _parsePlanOutcome 在更上层判空前放过）。
+
+    半空计划闸门（方案A，2026-09-27）：``rowLimit`` / ``perGroupLimit`` 单独存在
+    不再视为「有内容」。方案B（2026-09-27，本批）：``target`` 单独存在也不再视为
+    「有内容」。这堵住 ``{"rowLimit": 100}`` / ``{"target": "查询XX"}`` 两条旁路，
+    避免模型进 SQL 生成阶段自由选表/编表名。
     """
     return not (
-        plan.target.strip()
-        or plan.selectedClasses
+        plan.selectedClasses
         or plan.selectedProperties
         or plan.conditions
         or plan.aggregations
@@ -1722,11 +1730,20 @@ class Nl2SqlService:
                         outcome.reason,
                         formatPlanDrops(outcome.drops),
                     )
+                    # 重试反馈带上具体丢失字段，让 LLM 下次知道补什么（前置核对 D）：
+                    # 否则 LLM 反复补 target 而忽略 selectedClasses/conditions 等真实缺口。
+                    dropsHint = ";".join(
+                        f"{d.field}:{d.reason}" for d in outcome.drops
+                    )
+                    errors.append(
+                        f"第 {attempt + 1} 次尝试未能解析出有效查询计划"
+                        f"（丢失字段：{dropsHint}）"
+                    )
                 else:
                     logger.warning(
                         "NL2SQL 计划解析失败 attempt=%d reason=%s", attempt + 1, outcome.reason
                     )
-                errors.append(f"第 {attempt + 1} 次尝试未能从回复中解析出查询计划")
+                    errors.append(f"第 {attempt + 1} 次尝试未能从回复中解析出查询计划")
                 continue
             if outcome.drops:
                 logger.warning(
@@ -2079,6 +2096,11 @@ class Nl2SqlService:
         # 满足「结构损坏 → 重试」。⚠️ 若日后给 QueryPlan 加必填字段或 __post_init__
         # 校验，这个不变量会失效、异常将穿透重试循环（2026-09-26 code-reviewer 提示）。
         plan, drops = QueryPlan.from_dictWithReport(data)
+        if plan.isUnanswerable:
+            # ``target="无法回答"`` 是模型判定的合法空计划（语义：超出本体范围/答不了），
+            # 必须在 _isEmptyPlan 之前短路——方案B 后 _isEmptyPlan 不再考虑 target 字段，
+            # 否则 isUnanswerable 也会被当成 PLAN_EMPTY 走重试，浪费预算。
+            return _PlanParseOutcome(plan, None, drops)
         if _isEmptyPlan(plan):
             return _PlanParseOutcome(None, REASON_PLAN_EMPTY, drops)
         return _PlanParseOutcome(plan, None, drops)
@@ -2375,6 +2397,10 @@ class Nl2SqlService:
             "只输出编码会让用户无法辨认。名称列与数据列不在同一张表时，使用「JOIN 关系」段落中"
             "列出的表.列对关联到实体主表再取名称列（仍受 JOIN 目录约束，禁止编造连接）。"
             "纯 COUNT 计数类问题不受此条约束。"
+            "10. 计划**不得「半空」**——仅 target / 仅 rowLimit / 仅 perGroupLimit 等"
+            "无可查询引用的形态都会被拒（重试也不会被接受）。"
+            "selectedClasses / selectedProperties / conditions / aggregations / groupBy / joins / sortBy "
+            "至少填一项；若真的匹配不到任何表，用 target=\"无法回答\"。"
         )
 
     def _buildPlanUserPrompt(

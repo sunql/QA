@@ -1145,9 +1145,9 @@ class TestContextPromptBudget:
         self, monkeypatch
     ) -> None:
         """预算被调得过小时也不清空历史：至少留最新一轮（否则追问直接失忆）。"""
-        import app.services.chat_service as chat_module
+        import app.services.chat_context as ctx_module
 
-        monkeypatch.setattr(chat_module, "_CONTEXT_PROMPT_CHAR_BUDGET", 10)
+        monkeypatch.setattr(ctx_module, "_CONTEXT_PROMPT_CHAR_BUDGET", 10)
         service = self._service()
         history = [
             self._historyMessage("user", "msg8-" + "x" * 300),

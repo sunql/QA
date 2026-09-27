@@ -186,7 +186,7 @@
 | H4 | **客户端断连无处理**。`CancelledError`（`BaseException`）不被任何 `except` 捕获；`_storeSessionMessages` 只在流尾执行，断连即丢整轮（无部分答案、无历史落库）。 | ✅ **已修复**（2026-09-27，见 §15） | 实际位置：SSE 路由 `app/api/v1/chat.py:46`（`StreamingResponse` 在 `:80`）；生成器 `chat_service.py:3222`（`processMessageStream`）→ `:3439`（`_streamQuery`）；流内落库点 `:3744`/`:3750`（单步）与 `:3902`/`:3908`（多步）；`_storeSessionMessages:4717`。**原行号（`2904-2922`/`3303`）已过期** |
 | H5 | **向量失败静默降级到全 schema**。类召回异常回退 `return list(allClasses)`，**不过滤 ODS、不截断 max**——正是召回剪枝要解决的老问题在 Milvus/embedding 挂掉时原样回来。 | ✅ **已修复**（2026-09-26，见 §12） | `chat_service.py:1269-1280`、`1352-1359` |
 | H6 | **3 处 score 公式不一致（DRY 违反）**。`embedding_service`/`ontology_service` 有 `round(,4)` + `max(0)`；`wiki_vector_service` 无 round；`rag_service` 无 `max(0)` 无 round——负距离得 score>1，缺 `distance` 键直接 `KeyError`。 | ✅ **已修复**（2026-09-26，见 §14） | `embedding_service.py:29-31`、`ontology_service.py:1198`、`wiki_vector_service.py:264`、`rag_service.py:299` |
-| H7 | **provider_type 死元数据**。`embedding_provider_factory` 从不读 `provider_type`，全部当 OpenAI 兼容；维度守卫只对 DB-provider 路径生效，env 回退路径不校验。 | ✅ **已修复**（2026-09-27，见 §15）。⚠️ **含一处已知残留**：当前生产 `.env` **未声明** `EMBEDDING_DIMENSION` ⇒ env 回退路径的维度守卫在生产现状下**仍不生效**，只记 warning（「不猜测模型维度」口径的必然代价，`.env.example` 已给出声明位） | `embedding_provider_factory.py:140-200`（`_assertProviderTypeKnown:140` / `_assertDimensionMatches:160` / `_assertEnvFallbackDimension:180`）；**原行号 `48-61` 已过期** |
+| H7 | **provider_type 死元数据**。`embedding_provider_factory` 从不读 `provider_type`，全部当 OpenAI 兼容；维度守卫只对 DB-provider 路径生效，env 回退路径不校验。 | ✅ **已修复**（2026-09-27，见 §15）。⚠️ **2026-09-27 补充关闭**：`docker/.env` + `backend/.env` 实际写入 `EMBEDDING_DIMENSION=1024`（与 active provider id=2 oMLX bge-m3 8bit 一致），env 回退路径的维度守卫**现已生效**：声明正确（1024=Milvus 集合维度）⇒ 静默通过；声明错误（768 vs 1024 实测）⇒ `ConfigError` fail-fast。验证 3 探针：active 路径返回 `bge-m3-mlx-8bit`、env fallback 1024 通过、env fallback 768 抛 ConfigError。SSOT 写在 `.env` 注释里（与 `_assertEnvFallbackDimension` docstring 同口径）。 | `embedding_provider_factory.py:140-200`（`_assertProviderTypeKnown:140` / `_assertDimensionMatches:160` / `_assertEnvFallbackDimension:180`）；**原行号 `48-61` 已过期** |
 | H8 | **doc_qa 不写 token ledger**（wiki_qa 写），违反「每次 LLM 调用必须计量」约束；且无命中时 doc_qa 存 `citations=[]` 而 wiki_qa 存真实 citations，行为不一致。 | ✅ **已修复**（2026-09-26，见 §8） | `wiki_qa_service.py:215-224` vs `rag_qa_service.py:161-162` |
 | H9 | **成本单位不一致**。`supplier_risk_service._generateRiskPoints` 用硬编码 **CNY** 0.001/0.002，系统其余用 config 的 **USD**。 | ✅ **已修复**（2026-09-26，见 §8） | `supplier_risk_service.py:275-280` |
 
@@ -1188,8 +1188,7 @@ M9 先命中兄弟函数的合法 `limit=`，再命中函数体内**正在解释
    `consumedTokens` 第二档优先级 `LlmClientError.tokens > retryGenTokens`；顺手修
    `openai_client` ↔ `factory` 潜在 circular import（直导 `concurrency` 叶子模块）
    —— 见 [`chore-chat-15-tail-three-items`](../changes/chore-chat-15-tail-three-items/summary.md) §5.3；
-6. **H7 残留**：生产 `.env` 未声明 `EMBEDDING_DIMENSION` ⇒ env 回退路径的维度守卫**仍只记 warning**
-   （「不猜测」口径的必然代价；`.env.example` 已给出声明位）；
+6. ✅ **H7 残留**（2026-09-27 补关）：`docker/.env` + `backend/.env` 实际写入 `EMBEDDING_DIMENSION=1024`；env 回退路径维度守卫现**生效**——3 探针验证：active 路径返回 `bge-m3-mlx-8bit`、env fallback 1024 通过、env fallback 768 抛 ConfigError（见 §2.3 H7 状态列）；
 7. **M9 残留**：仍用 ORM 风格 `Collection` API（pymilvus 3.x 已标 deprecated），迁
    `MilvusClient.query_iterator` 属独立改动；
 8. 本批之外仍挂账：§2.4 LOW 全部、§2.5 其余漂移（**`config.py` 重复字段定义**）、

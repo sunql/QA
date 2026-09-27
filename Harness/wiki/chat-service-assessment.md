@@ -53,6 +53,12 @@
 > [fix-routing-metrics-l3-truth](../changes/fix-routing-metrics-l3-truth/summary.md)）
 > 关闭 §2.5 `routing_layer` 从不写 `L3` 前端展示漂移——类型联合、`LAYER_COLORS`、折线图 mock、i18n 全部
 > 去掉 L3，多步语义并入 L2。
+> **2026-09-27 第三拨**：`fix-oracle-alter-session-best-effort`（详见
+> [fix-oracle-alter-session-best-effort](../changes/fix-oracle-alter-session-best-effort/summary.md)）热修
+> 生产故障：Oracle 实例拒绝 `ALTER SESSION SET READ ONLY`（ORA-02248 / <12c / 受限 PDB）时，对话链路
+> 全部瘫痪（原代码直接抛错，无降级路径）。本批把 ALTER SESSION 包 try/except，失败记 warning + reason
+> 继续执行原 SQL；纵深防御三层（解析层黑名单 + 只读账号 + ALTER SESSION）保留前两层的兜底。DBA 任务
+> （确认版本 / 补 `ALTER SESSION` 权限）登记待执行，不在本批。
 
 ---
 

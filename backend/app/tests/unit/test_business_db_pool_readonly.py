@@ -147,8 +147,8 @@ async def test_oracle_execute_read_only_sets_session_readonly() -> None:
     assert rows == []
     # 顺序：先 ALTER SESSION SET READ ONLY，再原 SQL
     assert len(executed) == 2, f"期望 SET + SELECT 两步，实际 {executed}"
-    assert "ALTER SESSION SET READ ONLY" == executed[0]
-    assert "SELECT 1 FROM dual" == executed[1]
+    assert executed[0] == "ALTER SESSION SET READ ONLY"
+    assert executed[1] == "SELECT 1 FROM dual"
 
 
 @pytest.mark.asyncio
@@ -172,3 +172,57 @@ async def test_readonly_guard_does_not_break_existing_row_limit() -> None:
     # 只读注入后只查了一次原 SQL，且 mappings.fetchmany(100) 被调用过
     assert "SET TRANSACTION READ ONLY" in executed[0]
     assert executed[1] == "SELECT 1"
+
+
+@pytest.mark.asyncio
+async def test_oracle_alter_session_failure_does_not_block_query() -> None:
+    """Oracle 实例拒绝 ALTER SESSION（如 ORA-02248 / 旧版本 / 受限 PDB）时，
+    原 SQL 必须照常执行 + 返回正确行。这是纵深防御关键：解析层黑名单 + 只读账号权限仍是防线，
+    会话级 readonly 是 best-effort，失败不可阻塞业务查询。
+    """
+    adapter = _OracleAdapter(
+        host="host", port=1521, service_name="svc", username="u", password="p"
+    )
+
+    executed: list[str] = []
+    ORA_02248 = Exception("ORA-02248: 无效的 ALTER SESSION 选项")
+
+    async def fake_cursor_execute(sql_text):
+        if "ALTER SESSION" in sql_text:
+            raise ORA_02248
+        executed.append(sql_text)
+
+    fake_cursor = MagicMock()
+    fake_cursor.execute = fake_cursor_execute
+    fake_cursor.description = [("DUMMY", None, None, None, None, None, None)]
+    # fetchmany 返回一次数据后返回空（让 while 循环退出，避免无限循环）。
+    # 行用 tuple（与 Oracle AsyncCursor 一致），让 columns 与 zip 后产出 {"col": value}。
+    fetchCallCount = [0]
+
+    async def fake_fetchmany(size):
+        fetchCallCount[0] += 1
+        if fetchCallCount[0] == 1:
+            return [(1,)]
+        return []
+
+    fake_cursor.fetchmany = fake_fetchmany
+    fake_cursor.close = MagicMock()
+    fake_conn = MagicMock()
+    fake_conn.cursor = MagicMock(return_value=fake_cursor)
+    fake_conn.ping = AsyncMock()
+    fake_conn.close = AsyncMock()
+
+    async def fake_connect_async(*args, **kwargs):
+        return fake_conn
+
+    with patch.object(pool.oracledb, "connect_async", side_effect=fake_connect_async):
+        async def _passthrough_wait_for(coro, _timeout):
+            return await coro
+        with patch.object(pool.asyncio, "wait_for", side_effect=_passthrough_wait_for):
+            rows = await adapter.execute_read_only("SELECT 1 FROM dual")
+
+    # 关键断言：原 SQL 仍执行，且返回行
+    assert rows == [{"dummy": 1}], f"ALTER SESSION 失败后原 SQL 应正常返回行，实际 {rows}"
+    assert executed == ["SELECT 1 FROM dual"], (
+        f"ALTER SESSION 失败时不应进入 executed 列表，原 SQL 必须独立执行；实际 {executed}"
+    )

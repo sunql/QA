@@ -150,7 +150,7 @@ _FORBIDDEN_PACKAGES = {
     "DBMS_NETWORK_ACL_ADMIN",
 }
 
-_adapters: dict[int, "BusinessDbAdapter"] = {}
+_adapters: dict[int, BusinessDbAdapter] = {}
 
 # Oracle 取消行数上限时的循环 fetchmany 批量大小（避免一次性巨大数组）
 _UNLIMITED_BATCH_SIZE = 1000
@@ -560,7 +560,22 @@ class _OracleAdapter:
                 # 唯一可由应用层触发的只读模式是会话级，且需要 DB 12c+。
                 # 旧版本 Oracle 需依赖库侧授权兜底（见 scripts/db-readonly-account-setup.sql）。
                 cursor = conn.cursor()
-                await cursor.execute("ALTER SESSION SET READ ONLY")
+                # best-effort：实例拒绝 ALTER SESSION（ORA-02248 / <12c / 受限 PDB）时
+                # 必须降级到「仅靠 SQL Guard + 只读账号权限」，不可阻塞业务查询。
+                # 纵深防御三层（任一即可兜底）：
+                #   1) SQL Guard 解析层黑名单（M1/M2）
+                #   2) DBA 维护的只读账号 + 撤销敏感权限（scripts/db-readonly-account-setup.sql）
+                #   3) 本次 ALTER SESSION 会话级只读（best-effort）
+                # 若 (3) 失败，仅记 warning，继续执行原 SQL；不动 (1)(2)。
+                try:
+                    await cursor.execute("ALTER SESSION SET READ ONLY")
+                except Exception as alter_exc:  # noqa: BLE001 - best-effort 降级路径
+                    logger.warning(
+                        "Oracle 会话级只读注入失败 reason=%s exc=%s "
+                        "降级到 SQL Guard + 只读账号双层防线，原 SQL 继续执行",
+                        "ALTER_SESSION_REJECTED",
+                        alter_exc,
+                    )
                 await cursor.execute(sql)
                 columns = [desc[0] for desc in cursor.description] if cursor.description else []
                 # Oracle cursor.description 返回的是 Oracle 标识符字面大小写（默认大写），

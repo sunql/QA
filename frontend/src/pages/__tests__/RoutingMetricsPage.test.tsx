@@ -2,6 +2,8 @@
  *
  * RED phase: tests define the expected UI behavior.
  * Mock fetch returns RoutingMetricsSnapshot shape; no real backend needed.
+ *
+ * 2026-09-27 update: L3 removed (M5 批，多步由 L2 承担)。LayerDistribution 由 4 桶 → 3 桶。
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -28,8 +30,7 @@ const mockSnapshot: RoutingMetricsSnapshot = {
   until: "2026-09-10T23:59:59Z",
   layerDistribution: [
     { layer: "L1", hitCount: 4200, avgDurationMs: 12.5, avgTokenCost: 0.001 },
-    { layer: "L2", hitCount: 2800, avgDurationMs: 145.3, avgTokenCost: 0.018 },
-    { layer: "L3", hitCount: 800, avgDurationMs: 532.1, avgTokenCost: 0.067 },
+    { layer: "L2", hitCount: 3600, avgDurationMs: 145.3, avgTokenCost: 0.018 },
     { layer: "L4", hitCount: 200, avgDurationMs: 1820.0, avgTokenCost: 0.245 },
   ],
   totalQueries: 8000,
@@ -42,7 +43,6 @@ const emptySnapshot: RoutingMetricsSnapshot = {
   layerDistribution: [
     { layer: "L1", hitCount: 0, avgDurationMs: 0, avgTokenCost: 0 },
     { layer: "L2", hitCount: 0, avgDurationMs: 0, avgTokenCost: 0 },
-    { layer: "L3", hitCount: 0, avgDurationMs: 0, avgTokenCost: 0 },
     { layer: "L4", hitCount: 0, avgDurationMs: 0, avgTokenCost: 0 },
   ],
   totalQueries: 0,
@@ -70,17 +70,18 @@ describe("RoutingMetricsPage", () => {
     );
   });
 
-  it("renders 4 layer cards (L1/L2/L3/L4) with hit counts", async () => {
+  it("renders 3 layer cards (L1/L2/L4) with hit counts — L3 已废弃", async () => {
     renderPage();
     // Exact i18n labels for each layer (text is wrapped in react-i18next <span>)
-    const layerLabels = ["L1 语义匹配", "L2 LLM 意图分类", "L3 多步链式推理", "L4 LangGraph Agent"];
+    const layerLabels = ["L1 语义匹配", "L2 LLM NL2SQL（含多步拆解）", "L4 Agent Loop"];
     for (const label of layerLabels) {
       expect(await screen.findByText(label)).toBeInTheDocument();
     }
+    // L3 label 不应再出现（已删除）
+    expect(screen.queryByText("L3 多步链式推理")).not.toBeInTheDocument();
     // Hit counts from mock snapshot (layer card numbers)
     expect(await screen.findByText("4,200")).toBeInTheDocument(); // L1
-    expect(await screen.findByText("2,800")).toBeInTheDocument(); // L2
-    expect(await screen.findByText("800")).toBeInTheDocument();   // L3
+    expect(await screen.findByText("3,600")).toBeInTheDocument(); // L2
     expect(await screen.findByText("200")).toBeInTheDocument();   // L4
   });
 
@@ -111,8 +112,8 @@ describe("RoutingMetricsPage", () => {
     );
     renderPage(emptySnapshot);
     await waitFor(() => {
-      // Empty state: all layer cards show 0
-      expect(screen.getAllByText(/\b0\b/).length).toBeGreaterThanOrEqual(4);
+      // Empty state: 3 layer cards each render "0"
+      expect(screen.getAllByText(/\b0\b/).length).toBeGreaterThanOrEqual(3);
     });
   });
 

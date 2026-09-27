@@ -1,7 +1,8 @@
 /** RoutingMetricsPage — 路由分层指标监控面板（Task 5.3 — feat-complex-metric-pipeline）。
  *
  * UI:
- * - 4 个统计卡片：L1/L2/L3/L4 hit count + avg duration
+ * - 3 个统计卡片（按后端实际返回动态渲染）：L1 / L2 / L4 hit count + avg duration
+ *   （L3 已于 2026-09-27 删除，多步由 L2 承担，故不在前端呈现）
  * - ECharts 饼图：各层命中率占比
  * - ECharts 折线图：时间趋势（mock 数据，TODO: 真实 timeseries endpoint）
  * - 时间窗口选择器：1d / 7d / 30d（UI 占位，不驱动真实过滤）
@@ -36,10 +37,9 @@ const TIME_WINDOW_OPTIONS = [
   { value: "30d", label: "routingMetrics.timeWindow.30d" },
 ] as const;
 
-const LAYER_COLORS: Record<"L1" | "L2" | "L3" | "L4", string> = {
+const LAYER_COLORS: Record<"L1" | "L2" | "L4", string> = {
   L1: "#52c41a",
   L2: "#1890ff",
-  L3: "#fa8c16",
   L4: "#f5222d",
 };
 
@@ -68,7 +68,6 @@ function buildLineOption(_snapshot: RoutingMetricsSnapshot, t: (key: string) => 
   const date: string[] = [];
   const l1: number[] = [];
   const l2: number[] = [];
-  const l3: number[] = [];
   const l4: number[] = [];
 
   for (let i = days - 1; i >= 0; i--) {
@@ -77,20 +76,18 @@ function buildLineOption(_snapshot: RoutingMetricsSnapshot, t: (key: string) => 
     // Mock: slight random variation per day
     const base = 1000 + Math.floor(Math.random() * 200);
     l1.push(Math.floor(base * 0.52));
-    l2.push(Math.floor(base * 0.35));
-    l3.push(Math.floor(base * 0.09));
+    l2.push(Math.floor(base * 0.44));
     l4.push(Math.floor(base * 0.04));
   }
 
   return {
     tooltip: { trigger: "axis" },
-    legend: { data: ["L1", "L2", "L3", "L4"], bottom: 0 },
+    legend: { data: ["L1", "L2", "L4"], bottom: 0 },
     xAxis: { type: "category", data: date },
     yAxis: { type: "value", name: t("routingMetrics.chart.yAxisLabel") },
     series: [
       { name: "L1", type: "line", smooth: true, data: l1, itemStyle: { color: LAYER_COLORS.L1 } },
       { name: "L2", type: "line", smooth: true, data: l2, itemStyle: { color: LAYER_COLORS.L2 } },
-      { name: "L3", type: "line", smooth: true, data: l3, itemStyle: { color: LAYER_COLORS.L3 } },
       { name: "L4", type: "line", smooth: true, data: l4, itemStyle: { color: LAYER_COLORS.L4 } },
     ],
   };
@@ -192,7 +189,7 @@ export default function RoutingMetricsPage(): JSX.Element {
       {/* Content */}
       {!loading && error === null && snapshot !== null && (
         <>
-          {/* 4 layer cards */}
+          {/* layer cards (dynamic — driven by snapshot.layerDistribution, no L3 in current schema) */}
           <Row gutter={[12, 12]} style={{ marginBottom: 20 }}>
             {snapshot.layerDistribution.map((layer) => (
               <Col key={layer.layer} xs={12} sm={12} md={6}>

@@ -43,6 +43,10 @@
 > `IntentType` docstring「DEFINE/MAP/METRIC 暂未接入」与 `sql_guard.py` 引用两条；同批重写
 > `agent-loop.md` 整篇（删除虚构 LangGraph 实现 + 不存在路径引用）；`architecture.md:41`
 > Agent Loop 路径更正；`nl2sql-engine.md:26` 意图数从 5 类更正为 13 类。
+> 另：`fix-routing-metrics-l3-truth`（详见
+> [fix-routing-metrics-l3-truth](../changes/fix-routing-metrics-l3-truth/summary.md)）
+> 关闭 §2.5 `routing_layer` 从不写 `L3` 前端展示漂移——类型联合、`LAYER_COLORS`、折线图 mock、i18n 全部
+> 去掉 L3，多步语义并入 L2。
 
 ---
 
@@ -197,7 +201,7 @@
 | `IntentType` docstring 写「DEFINE/MAP/METRIC 暂未接入流水线」 | ✅ **已修复（2026-09-27，见 chore-doc-drift-cleanup）**——`chat_service._handleDefineClass / _handleDefineMetric / _handleShowMetric / _handleMapProperty` 全部已接线（`chat_service.py:2551-2568`）。docstring 改为「已接入流水线（本体治理指令）」 |
 | ~~`config.py` Settings 字段重复定义~~ | ✅ **已修复（2026-09-27）**，见 [chore-config-duplicate-fields](../changes/chore-config-duplicate-fields/summary.md)。9 组重复声明（后者静默覆盖前者）已删，含 `jwtTtlSeconds`(3600/86400)、`bcryptRounds`(12/10)、`jwtSecret`(`""`/开发占位符)、`jwtAudience`、`dbPoolSize` 等；**生效默认值零变化**（51 字段快照 diff 为空）。全树 AST 扫描顺带查出并修复 `AgentDefinitionRead.created_time`（Optional 声明被非 Optional 覆盖的「怪胎」形态）。同批新增：类体重复字段 AST 守卫（`test_no_duplicate_fields.py`，M6 方法版的姊妹守卫）+ `jwtSecret` 启动自检 warning（空值/开发占位符大声告警；用户拍板：**不 fail-fast**、`bcryptRounds` **维持 10**） |
 | ~~`nl2sql-engine.md` 4 层路由「L3 有触发条件」~~ | ✅ **已更正（2026-09-27，见 §15）**。原文「L3 `_executeChainedSteps` 无生产调用者」属实，但结论应是**删掉它**而不是「补触发条件」：该引擎已随 M5 删除（引擎整段 + 其测试），**保留**的是跨步 CTE 的**能力**——由 `prior_cte` 片段注入承担（契约见 §2.3 M8）。现状：L1 意图路由 / L2 单步 plan / L4 Agent Loop 活跃，**L3「CTE 串联引擎」不再作为独立层存在**，`nl2sql-engine.md` 与 `architecture.md` 已同步改写 |
-| **`routing_layer` 从不写 `L3`**（本批复核发现，与上一行同源） | 生产代码只写 `L1`（`chat_service.py:808`）/ `L2`（多处）/ `L4`（`:1005`）⇒ `RoutingMetricsPage` 的 **L3 桶恒为 0**，而前端 i18n 仍把它标成「L3 多步链式推理」（`frontend/src/i18n/zh-CN.ts:2623`）、`types/routingMetrics.ts:9` 仍注释为 `ChainedStep CTE multi-step chain`。**多步链实际记在 `L2`**（`_executeMultiStep` 路径）。属**产品可见**的展示漂移：本批**只记录不改**（改前端需重建镜像，超出本批范围，已登记 §15 残差） |
+| **`routing_layer` 从不写 `L3`**（本批复核发现，与上一行同源） | ✅ **已修复前端（2026-09-27，见 fix-routing-metrics-l3-truth）**。生产代码只写 `L1`/`L2`/`L4`，前端 `types/routingMetrics.ts` 联合类型去掉 L3、`LAYER_COLORS` 去掉 L3、折线图 mock 去掉 L3 series；i18n 「L3 多步链式推理」改为废弃文案。多步链实际记在 `L2`（`_executeMultiStep` 路径）已在 i18n 「L2 LLM NL2SQL（含多步拆解）」中反映 |
 | **`nl2sql-engine.md` 的「L2 可选 CTE 增强：`plan.requiresCte=True`」** | **代码中不存在**（`requiresCte` 全树零命中）——设计文档遗留。真实的 `prior_cte` 是**显式形参**，契约见 §2.3 M8。同批更正的还有：`app/services/agent_loop.py` **不存在**（实为 `agent_runtime_service.py:593`）、迁移文件名应为 `0051_add_routing_metrics_fields.py`、`multi_step_plan.py` 的真实路径是 **`app/domain/multi_step_plan.py`**（`services/` 下无此文件） |
 
 ---

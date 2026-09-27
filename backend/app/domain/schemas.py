@@ -2680,7 +2680,6 @@ class AgentDefinitionRead(CamelModel):
     owner: str | None = None
     version: str
     policies: list[AgentAccessPolicyRead] = Field(default_factory=list)
-    created_time: datetime | None = None
     updated_time: datetime | None = None
     created_time: datetime
     tool_name: str | None = None

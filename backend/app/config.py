@@ -74,34 +74,12 @@ class Settings(BaseSettings):
     authStubEnabled: bool = Field(default=True, alias="AUTH_STUB_ENABLED")
     # 当 authMode=real 时，stub 头是否仍允许（默认 false；测试或过渡期可设 true）
     allowStubWhenReal: bool = Field(default=False, alias="ALLOW_STUB_WHEN_REAL")
-    # JWT HS256 配置（authMode=real 时必须 ≥32 字节；启动期校验）
-    jwtSecret: str = Field(default="", alias="JWT_SECRET")
-    jwtAlgorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
-    jwtTtlSeconds: int = Field(default=3600, alias="JWT_TTL_SECONDS")
-    jwtIssuer: str = Field(default="qa-system", alias="JWT_ISSUER")
-    jwtAudience: str = Field(default="qa-system-web", alias="JWT_AUDIENCE")
-    # bcrypt rounds：12（OWASP 推荐上限，登录 ~250ms）
-    bcryptRounds: int = Field(default=12, alias="BCRYPT_ROUNDS")
-    # 防时间侧信道：登录失败时统一延迟（毫秒）
-    authMinDelayMs: int = Field(default=200, alias="AUTH_MIN_DELAY_MS")
-
     # ===== Schema 发现 =====
     # 单数据源允许发现的表数量上限：本地导入/元数据发现的硬保护，防止超大 schema
     # 撑爆 introspection 响应体与缓存。大型 ERP（如 Sage X3 生产库 1600+ 表）可按需调高。
     # 注意：NL2SQL 提示词使用本体 schema（导入后手工维护的类）而非该 introspection 缓存，
     # 调高不会撑爆 NL2SQL 提示词，只会让 introspection / 预览响应体变大。
     schemaMaxTables: int = Field(default=3000, alias="SCHEMA_MAX_TABLES")
-
-    # ===== PG 连接池（feat-chat-concurrency-params）=====
-    # 元数据库 engine 创建时的 pool_size / max_overflow；运行时由 system_config 行
-    # ``DB_POOL_SIZE`` / ``DB_MAX_OVERFLOW`` 覆盖（main.py lifespan 启动期一次性
-    # 读取后注入 ``app.infrastructure.database._db_pool_config``）。两者仅作默认值：
-    # 容器内如需自定义可通过 env var 覆盖，admin 通过 system_config 页面调则需重启。
-    # 2026-09-19 bump：50 并发场景下旧默认 5/10=15 max 会导致 35 请求排队。
-    # 20/10=30 max 给 DB 留出 headroom，配合 PG max_connections=200（docker-compose）。
-    # 配合 migration 0081 把已 seed 的旧默认 5 升到 20（幂等：仅 value='5' 时改）。
-    dbPoolSize: int = Field(default=20, alias="DB_POOL_SIZE")
-    dbMaxOverflow: int = Field(default=10, alias="DB_MAX_OVERFLOW")
 
     # ===== LLM 并发上限（feat-chat-concurrency）=====
     # 全局 ``asyncio.Semaphore`` 的 limit，控制同时 in-flight 的 LLM HTTP 调用数。
@@ -169,7 +147,8 @@ class Settings(BaseSettings):
     authMinDelayMs: int = Field(default=200, alias="AUTH_MIN_DELAY_MS")
     """登录失败时的等长延迟（毫秒），用于拖慢枚举攻击；0=禁用。"""
     bcryptRounds: int = Field(default=10, alias="BCRYPT_ROUNDS")
-    """bcrypt 哈希轮数；每轮 ~50ms 慢哈希；生产建议 ≥ 12。"""
+    """bcrypt 哈希轮数；当前默认 10（生效值，与本文件唯一声明一致）；生产建议 ≥ 12，
+    抬升需显式设 BCRYPT_ROUNDS（bcrypt 校验自带成本参数，旧哈希不受影响）。"""
     jwtTtlSeconds: int = Field(default=86400, alias="JWT_TTL_SECONDS")
     """access token 有效期（秒）；默认 24h。"""
     jwtSecret: str = Field(default="development-jwt-secret-change-me", alias="JWT_SECRET")
@@ -181,9 +160,13 @@ class Settings(BaseSettings):
     jwtAudience: str = Field(default="qa-system", alias="JWT_AUDIENCE")
     """JWT aud claim。"""
     dbPoolSize: int = Field(default=20, alias="DB_POOL_SIZE")
-    """SQLAlchemy 连接池 size（feat-db-pool-size-tune / 0081）。"""
+    """SQLAlchemy 连接池 size（feat-db-pool-size-tune / 0081）。运行时由 system_config
+    行 ``DB_POOL_SIZE`` 覆盖（main.py lifespan 启动期一次性读取后注入
+    ``app.infrastructure.database._db_pool_config``）；此处仅作 env 未设时的默认。
+    2026-09-19 bump：50 并发下旧默认 5/10=15 max 会排队，20/10=30 给 DB 留 headroom
+    （配合 PG max_connections=200；0081 已把已 seed 的旧默认 5 幂等升到 20）。"""
     dbMaxOverflow: int = Field(default=10, alias="DB_MAX_OVERFLOW")
-    """SQLAlchemy 连接池 max_overflow（feat-db-pool-size-tune / 0081）。"""
+    """SQLAlchemy 连接池 max_overflow（同上，system_config ``DB_MAX_OVERFLOW`` 运行时覆盖）。"""
 
     @field_validator("rateLimitRequests")
     @classmethod
@@ -219,6 +202,32 @@ class Settings(BaseSettings):
         if self.isProduction:
             return []
         return [origin.strip() for origin in self.corsOrigins.split(",") if origin.strip()]
+
+
+# 开发占位 JWT 密钥。Settings.jwtSecret 的默认值就是它：dev 便利与「漏配即暴露」之间的
+# 妥协——缺省构造可跑，但启动自检（jwtSecretInsecurityReason，main.py lifespan 接线）
+# 会对空值/占位符大声 warning。生产部署必须显式设置 JWT_SECRET（≥32 字节随机串）。
+DEV_JWT_SECRET_PLACEHOLDER = "development-jwt-secret-change-me"
+
+
+def jwtSecretInsecurityReason(secret: str) -> str | None:
+    """返回 JWT 密钥的不安全原因；安全则返回 None（纯函数，启动自检用）。
+
+    只判两种已知不安全形态（空 = 旧块曾声明的意图；占位符 = 缺省默认值），
+    不发明「长度不足」等启发式——长度策略属于 authMode=real 的 fail-fast 范畴，另议。
+    """
+    if not secret:
+        return (
+            "JWT_SECRET 未设置（空字符串）：JWT 将无法签名/校验，"
+            "authMode=real 下所有请求都会 401。请显式设置 JWT_SECRET。"
+        )
+    if secret == DEV_JWT_SECRET_PLACEHOLDER:
+        return (
+            "JWT_SECRET 仍用开发占位密钥（development-jwt-secret-change-me，公开已知）："
+            "任何能连到服务的人都能伪造任意用户 token。生产必须显式设置 "
+            "JWT_SECRET（≥32 字节随机串）。"
+        )
+    return None
 
 
 @lru_cache

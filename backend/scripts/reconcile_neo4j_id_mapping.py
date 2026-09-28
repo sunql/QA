@@ -208,7 +208,9 @@ async def _main() -> int:
             f"error={report.error_count}"
         )
         for row in report.rows:
-            print(row)
+            # Redact `error` (PG internal detail) on stdout; report object keeps it for tests/JSON.
+            sanitized = {k: v for k, v in row.items() if k != "error"}
+            print(sanitized)
         return report.exit_code
     finally:
         driver.close()

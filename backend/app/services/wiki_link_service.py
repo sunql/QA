@@ -68,6 +68,10 @@ class WikiLinkService:
             raise ValidationError(f"ontology_type must be one of {_VALID_ONTOLOGY_TYPES}")
         if not (Decimal("0") <= weight <= Decimal("1")):
             raise ValidationError("weight must be between 0 and 1")
+        if getattr(actor, "dbUserId", None) is None:
+            raise ValidationError(
+                "actor must have a dbUserId; stub auth not allowed for wiki-link audit"
+            )
         row = WikiOntologyLink(
             page_id=page_id,
             chunk_id=chunk_id,
@@ -75,7 +79,7 @@ class WikiLinkService:
             ontology_id=ontology_id,
             weight=weight,
             note=note,
-            created_by=actor.dbUserId if actor.dbUserId is not None else 1,
+            created_by=actor.dbUserId,
         )
         session.add(row)
         try:

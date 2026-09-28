@@ -8,21 +8,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 pytestmark = pytest.mark.asyncio
 
-AUTH_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
+AUTH_HEADERS = {"X-User-Id": "admin", "X-User-Roles": "admin"}
 
 
 @pytest.fixture(autouse=True)
 async def seed_wiki_page(client: AsyncClient, dbSession: AsyncSession) -> None:
-    """Seed wiki_page row for wiki_ontology_link FK constraint (per-test, after TRUNCATE).
+    """Seed RBAC baseline and wiki_page for wiki_ontology_link FK + admin role.
 
     Depends on client (pgApiClient sets up factory) and dbSession (per-test session).
     """
     from app.domain.wiki_models import WikiPage
+    from scripts.seed_rbac import seedRbacBaseline
     from sqlalchemy import select
-    row = (await dbSession.execute(select(WikiPage).where(WikiPage.page_id == "p001"))).scalar_one_or_none()
-    if row is None:
+    # Seed RBAC baseline (admin role + admin user + binding)
+    await seedRbacBaseline(dbSession)
+    # Seed wiki_page row for FK constraint
+    page_row = (await dbSession.execute(select(WikiPage).where(WikiPage.page_id == "p001"))).scalar_one_or_none()
+    if page_row is None:
         dbSession.add(WikiPage(page_id="p001", title="Test Page", content="Test content", status="published"))
-        await dbSession.commit()
+    await dbSession.commit()
 
 
 async def test_list_wiki_links_returns_empty(client: AsyncClient) -> None:

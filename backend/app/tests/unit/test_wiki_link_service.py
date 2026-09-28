@@ -30,8 +30,8 @@ async def _seed_page(dbSession: AsyncSession, page_id: str = "p001") -> None:
     await dbSession.flush()
 
 
-async def _actor(userId: int = 42):
-    return type("Actor", (), {"userId": userId})()
+async def _actor(userId: int = 42, dbUserId: int | None = 42):
+    return type("Actor", (), {"userId": userId, "dbUserId": dbUserId})()
 
 
 async def test_create_link_persists_row(dbSession):

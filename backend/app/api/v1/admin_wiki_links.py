@@ -34,7 +34,7 @@ def _row_to_out(r: WikiLinkRow) -> dict:
     return WikiLinkOut(
         id=r.id, page_id=r.page_id, chunk_id=r.chunk_id,
         ontology_type=r.ontology_type, ontology_id=r.ontology_id,
-        weight=r.weight, note=r.note, created_by=r.created_by,
+        weight=float(r.weight), note=r.note, created_by=r.created_by,
         revoked_time=r.revoked_time,
     ).model_dump(mode="json")
 

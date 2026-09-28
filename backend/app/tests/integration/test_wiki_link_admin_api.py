@@ -92,8 +92,9 @@ async def test_update_wiki_link_weight(client: AsyncClient) -> None:
         json={"weight": 0.5},
     )
     assert resp.status_code == 200
-    # Decimal serializes as string in JSON
-    assert resp.json()["weight"] == "0.5"
+    # weight must serialize as a JSON number (not string) for frontend contract
+    assert isinstance(resp.json()["weight"], (int, float))
+    assert resp.json()["weight"] == 0.5
 
 
 async def test_list_linkable_targets_filters_by_type(client: AsyncClient) -> None:

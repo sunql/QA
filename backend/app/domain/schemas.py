@@ -3515,7 +3515,7 @@ class WikiLinkOut(BaseModel):
     chunk_id: str | None
     ontology_type: str
     ontology_id: int
-    weight: Decimal
+    weight: float
     note: str | None
     created_by: int
     revoked_time: datetime | None

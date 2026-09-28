@@ -6,6 +6,7 @@ import pytest
 
 from app.domain.multi_step_plan import (
     MAX_MULTI_STEP,
+    MAX_PLAN_DATA_STEPS,
     MultiStepPlan,
     StepExecutionContext,
     StepPlan,
@@ -221,6 +222,15 @@ class TestStepExecutionContext:
 
     def test_max_multi_step_constant(self) -> None:
         assert MAX_MULTI_STEP == 5
+
+    def test_max_plan_data_steps_derives_from_max_multi_step(self) -> None:
+        """数据步上限必须**派生**自 MAX_MULTI_STEP，不得另写一个字面量。
+
+        两个上限语义不同（含/不含汇总步）却都等于 5 时，很容易被后人「统一」
+        成一个常量——那样要么放行 5 个数据步（+汇总=6 步，突破防循环上限），
+        要么把汇总步算进额度。断言派生关系把这个陷阱钉死。
+        """
+        assert MAX_PLAN_DATA_STEPS == MAX_MULTI_STEP - 1 == 4
 
 
 from decimal import Decimal

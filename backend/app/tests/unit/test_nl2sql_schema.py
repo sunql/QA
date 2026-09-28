@@ -12,9 +12,9 @@
 
 from __future__ import annotations
 
-from app.domain.models import OntologyClass
+from app.domain.models import OntologyClass, OntologyProperty
 from app.domain.query_plan import JoinSpec, QueryPlan
-from app.services.nl2sql_schema import _pruneClassesForSql
+from app.services.nl2sql_schema import _pruneClassesForSql, buildSchemaText
 
 
 def _cls(name: str, cls_id: int) -> OntologyClass:
@@ -78,3 +78,116 @@ class TestPruneClassesForSql:
         pruned = _pruneClassesForSql(plan, classes)
         assert pruned[0] is classes[0]
         assert pruned[0].id == 1
+
+
+def _propClass(props: list[dict]) -> OntologyClass:
+    """构造带属性的类，用于列行渲染契约测试。"""
+    return OntologyClass(
+        id=1,
+        class_name="T",
+        source_table="THBI.T",
+        properties=[OntologyProperty(**p) for p in props],
+    )
+
+
+class TestColumnEchoElision:
+    """`(column=X)` 只在左侧 token 读不出物理列时渲染（feat-token-prune，2026-09-28）。
+
+    实测依据：全库 3163 条活属性 `source_column` 恒等于 `property_name`（无 NULL / 空串 /
+    偏离）；容器内 dump 的 636/636 渲染行，其物理列都能从 nameToken 读出
+    （`TSICOD_0: STRING (column=TSICOD_0)`）→ 该标注是零信息量回声，占 schema 文本
+    **39.0%**，且计划阶段与 SQL 阶段各投一遍。
+
+    与方案 A 的差别：这不是「子集裁剪」而是「等价重编码」，不丢任何信息；唯一需要
+    保住的是 `column=未映射`（`nl2sql_prompts` 三处规则引用它），故按「X 读不出来才渲染」
+    的口径它天然保留。
+    """
+
+    def test_omits_echo_when_column_equals_property_name(self) -> None:
+        text = buildSchemaText(
+            [
+                _propClass(
+                    [
+                        {
+                            "property_name": "STATUS",
+                            "data_type": "STRING",
+                            "source_column": "STATUS",
+                        }
+                    ]
+                )
+            ]
+        )
+        assert "STATUS: STRING" in text
+        assert "(column=STATUS)" not in text
+
+    def test_omits_echo_when_column_equals_alias(self) -> None:
+        # 单别名渲染在名称位（`BPSNUM (BPSNUM_0)`）——物理列已在括号里，无需再回声。
+        text = buildSchemaText(
+            [
+                _propClass(
+                    [
+                        {
+                            "property_name": "BPSNUM",
+                            "property_alias": "BPSNUM_0",
+                            "data_type": "STRING",
+                            "source_column": "BPSNUM_0",
+                        }
+                    ]
+                )
+            ]
+        )
+        assert "BPSNUM (BPSNUM_0): STRING" in text
+        assert "(column=BPSNUM_0)" not in text
+
+    def test_keeps_column_when_it_differs_from_name_and_alias(self) -> None:
+        # 名字与别名都读不出物理列 → 标注是唯一来源，必须保留（未来启用别名映射时靠这条兜底）。
+        text = buildSchemaText(
+            [
+                _propClass(
+                    [
+                        {
+                            "property_name": "PTHNUM",
+                            "property_alias": "订单号",
+                            "data_type": "STRING",
+                            "source_column": "PTHNUM_0",
+                        }
+                    ]
+                )
+            ]
+        )
+        assert "PTHNUM (订单号): STRING (column=PTHNUM_0)" in text
+
+    def test_keeps_unmapped_marker(self) -> None:
+        # `column=未映射` 是承重信号（prompt 规则禁止选中/引用未映射属性），恒保留。
+        text = buildSchemaText(
+            [
+                _propClass(
+                    [
+                        {
+                            "property_name": "QTY",
+                            "data_type": "DECIMAL",
+                            "source_column": None,
+                        }
+                    ]
+                )
+            ]
+        )
+        assert "QTY: DECIMAL (column=未映射)" in text
+
+    def test_markers_still_render_after_elision(self) -> None:
+        # 省略 column 标注后，PK/FK 标记的拼接不能少空格、不能丢。
+        text = buildSchemaText(
+            [
+                _propClass(
+                    [
+                        {
+                            "property_name": "STATUS",
+                            "data_type": "STRING",
+                            "source_column": "STATUS",
+                            "is_primary_key": True,
+                        }
+                    ]
+                )
+            ]
+        )
+        assert "STATUS: STRING [PK]" in text

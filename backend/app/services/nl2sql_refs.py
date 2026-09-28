@@ -20,7 +20,8 @@ def _propertyRefNames(prop: OntologyProperty) -> set[str]:
     """单个属性的全部合法引用名：业务名、别名、物理列、近义词别名。
 
     schema 文本把这些都呈现给 LLM（`属性名 (别名): 类型 (column=物理列)` +
-    `业务别名: [...]`），LLM 可能写任一合法引用名（如"到货行号"命中"行号"的别名）；
+    `业务别名: [...]`，其中 column 段仅在物理列无法从左侧 token 读出时渲染），
+    LLM 可能写任一合法引用名（如"到货行号"命中"行号"的别名）；
     校验只按业务名会误杀正确计划。source_column/property_alias/business_aliases
     可空，过滤空串。
     """
@@ -41,7 +42,7 @@ def _classRefNames(cls: OntologyClass) -> set[str]:
 
     除未限定名（业务名/别名/物理列/近义词）外，额外收纳表限定与类名限定形式
     （`表.列` / `类.列` / `表.属性` / `类.属性`）。schema 以 `### 类名 (别名): table=表名`
-    呈现类、以 `属性名 (别名): 类型 (column=物理列)` 呈现列，LLM 在 groupBy / JOIN 列
+    呈现类、以 `属性名 (别名): 类型` 呈现列，LLM 在 groupBy / JOIN 列
     等位置常写 `PORDERQ.ITMREF_0` 这类完整限定名，只按未限定名校验会误杀正确计划
     （真实回归 2026-08-15）。
     """
@@ -65,7 +66,7 @@ _COMPOUND_REF_RE = re.compile(r"^(.*?)\s*\(([^()]+)\)\s*$")
 def _splitCompoundRef(prop: str) -> tuple[str, str | None]:
     """拆 '业务名 (alias)' → (业务名, alias)；无括号返回 (原值, None)。
 
-    LLM 偶尔从 schema 渲染文本（业务名 (alias): 类型 (column=物理列)）原样抄
+    LLM 偶尔从 schema 渲染文本（业务名 (alias): 类型）原样抄
     property_name；校验按单 token 严格匹配必拒，统一在此处把复合形式还原成单 token。
     空字符串 / 非字符串 / 中文括号 / 嵌套括号均原样保留（不在本函数改造范围）。
     """

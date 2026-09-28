@@ -287,7 +287,14 @@ def buildSchemaText(
             nameToken = prop.property_name
             if prop.property_alias:
                 nameToken += f" ({_sanitizeSchemaField(prop.property_alias)})"
-            line = f"    {nameToken}: {prop.data_type} (column={column}){markerText}"
+            # 2-5（feat-token-prune，2026-09-28）：column 标注只在左侧 token 读不出物理列时
+            # 渲染。实测全库 3163 条活属性 source_column 恒等于 property_name，容器 dump 的
+            # 636/636 渲染行其物理列都能从 nameToken 读出 → `(column=X)` 是零信息量回声，
+            # 占 schema 文本 39%，且计划阶段与 SQL 阶段各投一遍。这是等价重编码（非子集
+            # 裁剪），不丢信息；`column=未映射` 读不出来故天然保留（prompt 三处规则引用它）。
+            columnEchoed = column == prop.property_name or column == prop.property_alias
+            columnText = "" if columnEchoed else f" (column={column})"
+            line = f"    {nameToken}: {prop.data_type}{columnText}{markerText}"
             if prop.business_aliases:
                 line += (
                     " 业务别名: ["

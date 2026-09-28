@@ -297,7 +297,9 @@ class TestBuildSchemaText:
             ],
         )
         text = Nl2SqlService().buildSchemaText([cls])
-        assert "AMT_0 (金额): DECIMAL (column=AMT_0)" in text
+        # 2-5（feat-token-prune）：source_column 与 property_name 相同 → column 回声省略。
+        assert "AMT_0 (金额): DECIMAL" in text
+        assert "(column=AMT_0)" not in text
         assert "业务别名: [营业额, 收入]" in text
         assert "说明: 订单实收金额" in text
 

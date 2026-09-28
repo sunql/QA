@@ -120,6 +120,12 @@ class OpenAiClient(BaseLlmClient):
         usage = getattr(response, "usage", None)
         promptTokens = getattr(usage, "prompt_tokens", 0) or 0
         completionTokens = getattr(usage, "completion_tokens", 0) or 0
+        # 4-1（feat-token-cache）：DeepSeek prompt cache 命中 token 数。None =
+        # 字段缺失（OpenAI/MOONSHOT/AZURE 不支持）。getattr + 0：服务端偶发返
+        # None 时回退为 0（视作未命中，全额计费，符合保底契约）。
+        cachedTokens = getattr(usage, "cached_tokens", None)
+        if cachedTokens is not None:
+            cachedTokens = cachedTokens or 0
         content = ""
         choices = getattr(response, "choices", None)
         if choices:
@@ -132,6 +138,7 @@ class OpenAiClient(BaseLlmClient):
             promptTokens=promptTokens,
             completionTokens=completionTokens,
             totalTokens=promptTokens + completionTokens,
+            cachedTokens=cachedTokens,
         )
 
     async def completeStream(
@@ -171,6 +178,7 @@ class OpenAiClient(BaseLlmClient):
 
         promptTokens = 0
         completionTokens = 0
+        cachedTokens = None
         modelName = self._modelName
         try:
             async with acquire_llm_concurrency():
@@ -180,6 +188,9 @@ class OpenAiClient(BaseLlmClient):
                     if usage is not None:
                         promptTokens = getattr(usage, "prompt_tokens", 0) or 0
                         completionTokens = getattr(usage, "completion_tokens", 0) or 0
+                        # 4-1（feat-token-cache）：流式末块 usage 也读 cached_tokens。
+                        ct = getattr(usage, "cached_tokens", None)
+                        cachedTokens = (ct or 0) if ct is not None else None
                         continue
                     choices = getattr(chunk, "choices", None)
                     if not choices:
@@ -196,6 +207,7 @@ class OpenAiClient(BaseLlmClient):
                     promptTokens=promptTokens,
                     completionTokens=completionTokens,
                     modelName=modelName,
+                    cachedTokens=cachedTokens,
                 )
         except Exception as exc:
             # 失败路径用量：已累计的 promptTokens/completionTokens 若非 0/0 则挂上。

@@ -236,7 +236,11 @@ class UsageMixin:
         """SQL 阶段成本：捷径零消耗；两阶段按实际服务模型 + 主模型浪费分别计费。"""
         cost = Decimal("0")
         if outcome.sqlConfig is not None:
-            cost += self._costFor(outcome.sqlConfig, outcome.promptTokens, outcome.completionTokens)
+            # 4-1（feat-token-cache）：两阶段 cached_tokens 合并计入成本修正。
+            cost += self._costFor(
+                outcome.sqlConfig, outcome.promptTokens, outcome.completionTokens,
+                cachedTokens=outcome.cachedTokens,
+            )
         cost += self._costFor(primary, outcome.wasted[0], outcome.wasted[1])
         return cost
 
@@ -273,7 +277,12 @@ class UsageMixin:
         completionTokens: int,
         *,
         purpose: str,
+        cachedTokens: int | None = None,
     ) -> None:
+        # 4-1（feat-token-cache）：cachedTokens 透传进成本计算（_costFor 按差额计）。
+        cost = self._costFor(
+            config, promptTokens, completionTokens, cachedTokens=cachedTokens,
+        )
         await self._tokenUsage.recordUsage(
             session,
             sessionId=sessionId,
@@ -281,7 +290,7 @@ class UsageMixin:
             modelName=config.model_name,
             promptTokens=promptTokens,
             completionTokens=completionTokens,
-            cost=self._costFor(config, promptTokens, completionTokens),
+            cost=cost,
             purpose=purpose,
         )
 
@@ -326,7 +335,28 @@ class UsageMixin:
         )
 
     @staticmethod
-    def _costFor(config: Any, promptTokens: int, completionTokens: int) -> Decimal:
-        inputCost = Decimal(promptTokens) * config.cost_per_1k_input / Decimal(1000)
-        outputCost = Decimal(completionTokens) * config.cost_per_1k_output / Decimal(1000)
+    def _costFor(
+        config: Any,
+        promptTokens: int,
+        completionTokens: int,
+        cachedTokens: int | None = None,
+    ) -> Decimal:
+        """按 model 单价计费。
+
+        4-1（feat-token-cache，2026-09-28）：DeepSeek prompt cache 命中时
+        cached_tokens 非零，对应部分不计 input 成本（按差额计费）。None 或 0
+        → 全额按 prompt 计；cached >= prompt → input cost = 0。
+        """
+        if cachedTokens is not None and cachedTokens > 0:
+            billablePrompt = max(0, promptTokens - cachedTokens)
+        else:
+            billablePrompt = promptTokens
+        # 4-1：单价来自 ORM Numeric 列但在测试里传 float；显式 str() 走
+        # Decimal 路径，避免与 Decimal * float 的 TypeError。
+        inputCost = (
+            Decimal(billablePrompt) * Decimal(str(config.cost_per_1k_input)) / Decimal(1000)
+        )
+        outputCost = (
+            Decimal(completionTokens) * Decimal(str(config.cost_per_1k_output)) / Decimal(1000)
+        )
         return inputCost + outputCost

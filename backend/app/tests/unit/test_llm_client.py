@@ -34,6 +34,9 @@ class FakeChatCompletions:
             prompt_tokens = usage.get("prompt_tokens", 0)
             completion_tokens = usage.get("completion_tokens", 0)
             total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+            # 4-1（feat-token-cache）：mock 与生产 DeepSeek 响应同形。
+            # 不在 usage dict 中时该属性缺失，getattr(usage, 'cached_tokens', None) → None。
+            cached_tokens = usage.get("cached_tokens")
 
         class _Choice:
             class _Message:
@@ -99,6 +102,39 @@ class TestOpenAiClient:
         assert resp.completionTokens == 5
         assert resp.totalTokens == 15
         assert resp.modelName == "gpt-4o"
+
+    @pytest.mark.asyncio
+    async def test_complete_parses_cached_tokens_when_present(self) -> None:
+        """DeepSeek prompt cache 命中时 response 应携带 cachedTokens。
+
+        服务端基于 prefix matching 自动命中，usage.cached_tokens > 0。
+        """
+        # Arrange
+        fake = FakeChatCompletions(
+            responseContent="hi",
+            usage={"prompt_tokens": 1000, "completion_tokens": 5, "cached_tokens": 800},
+        )
+        client = OpenAiClient(FakeLlmConfigModel(), apiKey="sk-test", client=FakeOpenAi(fake))
+        # Act
+        resp = await client.complete([LlmMessage(role="user", content="hi")])
+        # Assert
+        assert resp.cachedTokens == 800
+        assert resp.promptTokens == 1000  # 原始值不变
+        assert resp.totalTokens == 1005
+
+    @pytest.mark.asyncio
+    async def test_complete_omits_cached_tokens_when_absent(self) -> None:
+        """非 DeepSeek provider（无 cached_tokens 字段）cachedTokens 应为 None。"""
+        # Arrange
+        fake = FakeChatCompletions(
+            responseContent="hi",
+            usage={"prompt_tokens": 100, "completion_tokens": 5},  # 无 cached_tokens
+        )
+        client = OpenAiClient(FakeLlmConfigModel(), apiKey="sk-test", client=FakeOpenAi(fake))
+        # Act
+        resp = await client.complete([LlmMessage(role="user", content="hi")])
+        # Assert
+        assert resp.cachedTokens is None
 
     @pytest.mark.asyncio
     async def test_complete_passes_model_and_messages(self) -> None:

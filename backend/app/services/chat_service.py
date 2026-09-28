@@ -859,11 +859,21 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             ),
             forced=pc.forcedModel,
         )
+        # 4-1（feat-token-cache，2026-09-28）：合并两阶段 cached_tokens。
+        # DeepSeek prompt cache 服务端基于 prefix matching 自动命中，命中
+        # 部分不计 input 成本。prompt_tokens 仍按原始累计值记录（台账审计
+        # 完整性），cost 由 _costFor 按差额算出（见 chat_usage.UsageMixin._costFor）。
+        mergedCachedTokens = (
+            (planResult.cachedTokens or 0) + (sqlResult.cachedTokens or 0)
+            if (planResult.cachedTokens is not None or sqlResult.cachedTokens is not None)
+            else None
+        )
         await self._recordUsage(
             session, dto.sessionId, sqlConfig,
             planResult.promptTokens + sqlResult.promptTokens,
             planResult.completionTokens + sqlResult.completionTokens,
             purpose="nl2sql",
+            cachedTokens=mergedCachedTokens,
         )
         if not sqlResult.sql:
             # 计划 target=无法回答：未生成 SQL（哨兵），sql 置 None 交由调用方短路。
@@ -875,6 +885,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                 promptTokens=planResult.promptTokens,
                 completionTokens=planResult.completionTokens,
                 wasted=(wastedPt, wastedCt),
+                cachedTokens=planResult.cachedTokens,
             )
         return _SqlOutcome(
             plan=planResult.plan,
@@ -883,6 +894,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             promptTokens=planResult.promptTokens + sqlResult.promptTokens,
             completionTokens=planResult.completionTokens + sqlResult.completionTokens,
             wasted=(wastedPt, wastedCt),
+            cachedTokens=mergedCachedTokens,
         )
 
     def _tryRefineDirect(self, state: SessionQueryState, question: str) -> str | None:

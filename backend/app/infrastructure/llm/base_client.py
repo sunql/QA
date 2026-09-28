@@ -55,6 +55,10 @@ class LlmResponse:
     promptTokens: int
     completionTokens: int
     totalTokens: int
+    # 4-1（feat-token-cache，2026-09-28）：DeepSeek prompt cache 命中 token 数。
+    # 服务端基于 prefix matching 自动命中，命中部分不计 input 成本。
+    # 非 DeepSeek provider（OpenAI/MOONSHOT/AZURE 等）此字段为 None，按全额计费。
+    cachedTokens: int | None = None
 
     @property
     def isApproximateUsage(self) -> bool:
@@ -74,6 +78,9 @@ class StreamChunk:
     promptTokens: int
     completionTokens: int
     modelName: str
+    # 4-1（feat-token-cache）：流式末块携带 DeepSeek cached_tokens（与
+    # LlmResponse.cachedTokens 同语义，None = 字段缺失/不支持）。
+    cachedTokens: int | None = None
 
 
 class BaseLlmClient(ABC):

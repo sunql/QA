@@ -343,6 +343,9 @@ class _SqlOutcome:
     promptTokens: int = 0
     completionTokens: int = 0
     wasted: tuple[int, int] = (0, 0)
+    # 4-1（feat-token-cache）：DeepSeek prompt cache 命中 token 数。None =
+    # 未读/不支持。_costForSql 用它按差额计费（命中部分不计 input）。
+    cachedTokens: int | None = None
 
 
 @dataclass(frozen=True)

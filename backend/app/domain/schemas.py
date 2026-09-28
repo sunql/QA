@@ -3527,3 +3527,39 @@ class WikiLinkableTargetOut(BaseModel):
     name: str
     alias: str | None
     description: str | None
+
+
+# =============================================================================
+# M0 Unified ID（v3.1 架构升级）
+# =============================================================================
+
+
+class IdMappingCreate(CamelModel):
+    """创建 id_mapping 的请求体。"""
+    business_object: str = Field(..., min_length=1, max_length=32)
+    external_id: str = Field(..., min_length=1, max_length=128)
+    pg_table: str | None = Field(default=None, max_length=64)
+    pg_id: str | None = Field(default=None, max_length=128)
+
+
+class IdMappingUpdate(CamelModel):
+    """更新 id_mapping 的请求体（partial）。"""
+    pg_table: str | None = Field(default=None, max_length=64)
+    pg_id: str | None = Field(default=None, max_length=128)
+    neo4j_node_id: str | None = Field(default=None, max_length=128)
+    milvus_collection: str | None = Field(default=None, max_length=64)
+    milvus_id: str | None = Field(default=None, max_length=128)
+
+
+class IdMappingRead(CamelModel):
+    """id_mapping 响应体。"""
+    unified_id: str
+    business_object: str
+    external_id: str
+    pg_table: str | None
+    pg_id: str | None
+    neo4j_node_id: str | None
+    milvus_collection: str | None
+    milvus_id: str | None
+    created_time: datetime
+    updated_time: datetime

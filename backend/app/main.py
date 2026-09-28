@@ -390,6 +390,7 @@ def createApp() -> FastAPI:
         entity_mapping,
         evaluation_report,
         evidences,
+        id_mapping,
         features,
         feature_rules,
         graph,
@@ -425,6 +426,7 @@ def createApp() -> FastAPI:
     app.include_router(session.router, prefix="/api/v1/sessions", tags=["sessions"])
     app.include_router(ontology.router, prefix="/api/v1", tags=["ontology"])
     app.include_router(evidences.router, prefix="/api/v1", tags=["evidences"])
+    app.include_router(id_mapping.router, prefix="/api/v1", tags=["id-mapping"])
     app.include_router(
         term_dictionary.router, prefix="/api/v1", tags=["term-dictionary"]
     )

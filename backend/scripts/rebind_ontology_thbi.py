@@ -41,6 +41,7 @@ from app.domain.models import (
 from app.infrastructure import neo4j_client as neo4j
 from app.infrastructure.database import getEngine, getSessionFactory
 from app.infrastructure.security.crypto import encryptApiKey
+from app.services.id_mapping_service import IdMappingCreate, IdMappingService
 from app.services.ontology_service import makeJoinKey
 
 from scripts.dwd_spec import dumpSpec, parseDwdFiles
@@ -617,9 +618,46 @@ async def run(args) -> None:
 
         await session.commit()
 
-        # ---- Neo4j 同步（阻塞 I/O 移线程） ----
+        # ---- 解析 unified_id（session 仍open，趁 commit 后落库状态可查）----
+        id_mapping_svc = IdMappingService()
+        class_uids: dict[int, str] = {}
+        prop_uids: dict[int, str] = {}
+        for c in classes:
+            uid_row = await id_mapping_svc.resolveByExternal(session, "CLASS", str(c.id))
+            if uid_row:
+                class_uids[c.id] = uid_row.unified_id
+            else:
+                mapping = await id_mapping_svc.register(
+                    session,
+                    IdMappingCreate(
+                        business_object="CLASS",
+                        external_id=str(c.id),
+                        pg_table="ontology_class",
+                        pg_id=str(c.id),
+                    ),
+                )
+                class_uids[c.id] = mapping.unified_id
         fresh_props = (await session.execute(select(OntologyProperty))).scalars().all()
-        await asyncio.to_thread(_syncNeo4j, classes, fresh_props, metrics)
+        for p in fresh_props:
+            uid_row = await id_mapping_svc.resolveByExternal(session, "PROPERTY", str(p.id))
+            if uid_row:
+                prop_uids[p.id] = uid_row.unified_id
+            else:
+                mapping = await id_mapping_svc.register(
+                    session,
+                    IdMappingCreate(
+                        business_object="PROPERTY",
+                        external_id=str(p.id),
+                        pg_table="ontology_property",
+                        pg_id=str(p.id),
+                    ),
+                )
+                prop_uids[p.id] = mapping.unified_id
+
+        # ---- Neo4j 同步（阻塞 I/O 移线程）----
+        await asyncio.to_thread(
+            _syncNeo4j, class_uids, prop_uids, classes, fresh_props, metrics,
+        )
 
         logger.info("完成：数据源/类/属性/join/metric 已 rebind，Neo4j 已同步")
         logger.info("下一步：uv run python scripts/backfill_milvus_embeddings.py --cleanup")
@@ -629,19 +667,25 @@ async def run(args) -> None:
 
 
 def _syncNeo4j(
+    class_uids: dict[int, str],
+    prop_uids: dict[int, str],
     classes: list[OntologyClass],
     props: list[OntologyProperty],
     metrics: list[OntologyMetric],
 ) -> None:
     """Neo4j 同步：upsert 类/属性/指标 + HAS_PROPERTY/REFERENCES/DERIVED_FROM。
 
+    unified_id 由调用方在 async 上下文中解析后传入（session 不可跨线程）。
     单个节点失败只跳过并告警（PG 已就绪，可重跑补齐）。
     """
-    classById = {c.id: c for c in classes}
     for c in classes:
+        uid = class_uids.get(c.id)
+        if uid is None:
+            logger.warning("Neo4j 跳过 Class %s: 无 unified_id", c.class_name)
+            continue
         try:
             neo4j.upsertClassNode(
-                id=c.id,
+                unified_id=uid,
                 name=c.class_name,
                 alias=c.class_alias,
                 description=c.description,
@@ -650,9 +694,14 @@ def _syncNeo4j(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Neo4j 同步失败 Class %s: %s", c.class_name, exc)
     for p in props:
+        uid = prop_uids.get(p.id)
+        if uid is None:
+            logger.warning("Neo4j 跳过属性 %s: 无 unified_id", p.property_name)
+            continue
+        class_uid = class_uids.get(p.class_id)
         try:
             neo4j.upsertPropertyNode(
-                id=p.id,
+                unified_id=uid,
                 name=p.property_name,
                 alias=p.property_alias,
                 dataType=p.data_type,
@@ -660,21 +709,25 @@ def _syncNeo4j(
                 isPrimaryKey=p.is_primary_key,
                 isForeignKey=p.is_foreign_key,
             )
-            neo4j.linkClassHasProperty(p.class_id, p.id)
-            neo4j.reconcilePropertyReferences(p.id, p.ref_class_id)
+            if class_uid:
+                neo4j.linkClassHasProperty(class_uid, uid)
+            ref_class_uid = class_uids.get(p.ref_class_id) if p.ref_class_id else None
+            neo4j.reconcilePropertyReferences(uid, ref_class_uid)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Neo4j 同步失败属性 %s: %s", p.property_name, exc)
     for m in metrics:
         try:
             neo4j.upsertMetricNode(
-                id=m.id,
+                unified_id=f"obj:METRIC:{m.id}",
                 name=m.metric_name,
                 alias=m.metric_alias,
                 formula=m.formula,
                 aggFunction=m.agg_function,
             )
             if m.target_class_id:
-                neo4j.linkMetricDerivedFrom(m.id, m.target_class_id)
+                tgt_uid = class_uids.get(m.target_class_id)
+                if tgt_uid:
+                    neo4j.linkMetricDerivedFrom(f"obj:METRIC:{m.id}", tgt_uid)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Neo4j 同步失败指标 %s: %s", m.metric_name, exc)
 

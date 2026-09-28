@@ -2133,6 +2133,7 @@ class TestNl2SqlConfigGetter:
             "digestMaxDescChars": _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
             "valueSampleValueMax": _VALUE_SAMPLE_VALUE_MAX_DEFAULT,
             "maxTokens": _NL2SQL_MAX_TOKENS_DEFAULT,
+            "pruneSchema": 1,
         }
         plan_cfg = await service._readPlanConfigOrDefault(boom)
         assert plan_cfg == {"ownerHintMaxClasses": _OWNER_HINT_MAX_CLASSES_DEFAULT}
@@ -2145,7 +2146,42 @@ class TestNl2SqlConfigGetter:
         service = Nl2SqlService()
         schema_cfg = await service._readSchemaConfigOrDefault(None)
         assert schema_cfg["maxTokens"] == _NL2SQL_MAX_TOKENS_DEFAULT
+        assert schema_cfg["pruneSchema"] is True
         plan_cfg = await service._readPlanConfigOrDefault(None)
         assert plan_cfg["ownerHintMaxClasses"] == _OWNER_HINT_MAX_CLASSES_DEFAULT
         refine_cfg = await service._readRefineConfigOrDefault(None)
         assert refine_cfg["maxLimit"] == _REFINE_MAX_LIMIT_DEFAULT
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("0", False), ("false", False), ("FALSE", False), ("off", False),
+            ("no", False),
+            ("1", True), ("true", True), ("ON", True), ("yes", True),
+            ("42", True),
+        ],
+    )
+    async def test_bool_config_reads_explicit_off(self, raw: str, expected: bool) -> None:
+        """布尔开关必须能表达「关闭」。
+
+        真实踩坑（2026-09-28 方案 A 的 A/B）：初版用 ``_readIntConfig`` 读
+        NL2SQL_SQL_SCHEMA_PRUNING，而该 helper 的契约是「非正返默认」——写 0 被当成
+        非法值回落默认 1，**开关永远关不掉**，A/B 两臂实际都是开启态，导致
+        「裁剪前后 token 逐字相同」的假象。
+        """
+        from app.services.nl2sql_service import _readBoolConfig
+
+        session = self._fakeSessionReturning(raw)
+        assert await _readBoolConfig(session, "K", True) is expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw", [None, "", "not-a-bool"])
+    async def test_bool_config_falls_back_to_default(self, raw: str | None) -> None:
+        """缺席 / 空 / 非法值 → 返默认值；DB 异常同样不阻断。"""
+        from app.services.nl2sql_service import _readBoolConfig
+
+        assert await _readBoolConfig(self._fakeSessionReturning(raw), "K", True) is True
+        assert await _readBoolConfig(self._fakeSessionReturning(raw), "K", False) is False
+        assert await _readBoolConfig(self._fakeSessionBoom(), "K", False) is False
+        assert await _readBoolConfig(self._fakeSessionBoom(), "K", True) is True

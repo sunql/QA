@@ -185,6 +185,41 @@ def _formatSampleValue(value: Any, valueMax: int = _VALUE_SAMPLE_VALUE_MAX_DEFAU
     return f"'{_sanitizeContext(text)}'"
 
 
+def _pruneClassesForSql(
+    plan: QueryPlan | None,
+    classes: list[OntologyClass],
+) -> list[OntologyClass]:
+    """SQL 阶段 schema 裁剪：只保留 plan 实际引用的类（feat-token-prune，2026-09-28）。
+
+    只裁 SQL 阶段的 schema 文本——`generateSql` 里 `classes` 仅用于
+    `buildSchemaText`（plan 校验 / SQL Guard / planToText 都不碰它），故本函数
+    是纯收益、不动语义。
+
+    口径 = `plan.selectedClasses` ∪ `plan.joins[].sourceClass/targetClass`。
+    joins 那一半不可省：`supplementJoinPath` 补的中间 hop 类**只写进 plan.joins、
+    不进 selectedClasses**，而 SQL 阶段获取 JOIN 知识的唯一来源是 schema 文本的
+    「### JOIN 关系」段（planToText 不渲染 joins），漏掉 hop 类就会漏 JOIN 行。
+    引用名一律是 class_name（与 validatePlan 的 `{cls.class_name: cls}` 同口径）。
+
+    fail-closed：plan 为 None、无任何引用、或**有引用名反查不到类**时原样返回
+    全量 classes。因为 `buildSchemaText` 对缺类只做**静默降级**（JOIN 行跳过、
+    继承标注丢失、FK 退化裸 FK），缺表既不报错也不告警，只会生成错 SQL——
+    宁可多投 token，不裁出一个缺表的 schema。
+    """
+    if plan is None or not classes:
+        return classes
+    needed: set[str] = set(plan.selectedClasses or ())
+    for join in plan.joins or ():
+        needed.add(join.sourceClass)
+        needed.add(join.targetClass)
+    if not needed:
+        return classes
+    pruned = [cls for cls in classes if cls.class_name in needed]
+    if len(pruned) < len(needed):
+        return classes
+    return pruned
+
+
 def buildSchemaText(
     classes: list[OntologyClass],
     *,

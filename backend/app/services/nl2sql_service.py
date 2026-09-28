@@ -78,6 +78,7 @@ from app.services.nl2sql_refs import (
 from app.services.nl2sql_schema import (
     buildSchemaText,
     supplementJoinPath,
+    _pruneClassesForSql,
     _buildIndirectJoinHints,
     _sanitizeContext,
     _sanitizeSchemaField,
@@ -150,6 +151,45 @@ async def _readIntConfig(session: AsyncSession, key: str, default: int) -> int:
         return default
 
 
+# 布尔开关的显式假值/真值字面量（大小写不敏感）。
+_FALSY_CONFIG_VALUES: frozenset[str] = frozenset({"0", "false", "off", "no"})
+_TRUTHY_CONFIG_VALUES: frozenset[str] = frozenset({"1", "true", "on", "yes"})
+
+
+async def _readBoolConfig(session: AsyncSession, key: str, default: bool) -> bool:
+    """读 system_config 的布尔开关；缺席/非法/异常返 default。
+
+    与 `_readIntConfig` **刻意分开**：后者的契约是「非正返默认」，因此无法表达
+    「0 = 关闭」——真实踩坑（2026-09-28 方案 A 的 A/B）：回滚开关初版用 `_readIntConfig`
+    读，运维写 0 会被当成非法值回落默认 1，**开关永远关不掉**，A/B 两臂实际都是开启态，
+    据此得出的「裁剪前后 token 逐字相同」是假象。
+
+    可识别假值 "0"/"false"/"off"/"no"、真值 "1"/"true"/"on"/"yes"（大小写不敏感）；
+    其他非空值按 int 解析（>0 为真，与 `_readIntConfig` 口径一致）。
+    """
+    raw: str | None = None
+    try:
+        row = await session.execute(
+            text(f"SELECT value FROM system_config WHERE key = '{key}'")
+        )
+        raw = row.scalar_one_or_none()
+    except Exception:
+        logger.warning("读取 %s 失败，返默认值 %s", key, default, exc_info=True)
+        return default
+    if raw is None or raw == "":
+        return default
+    token = str(raw).strip().lower()
+    if token in _FALSY_CONFIG_VALUES:
+        return False
+    if token in _TRUTHY_CONFIG_VALUES:
+        return True
+    try:
+        return int(token) > 0
+    except (TypeError, ValueError):
+        logger.warning("%s 值非法 %r，返默认值 %s", key, raw, default)
+        return default
+
+
 async def _readSchemaConfig(session: AsyncSession) -> dict[str, int]:
     """在编排层一次性现读 schema 渲染 3 阈值 + token 上限（NL2SQL_MAX_TOKENS）。
 
@@ -168,6 +208,12 @@ async def _readSchemaConfig(session: AsyncSession) -> dict[str, int]:
         ),
         "maxTokens": await _readIntConfig(
             session, "NL2SQL_MAX_TOKENS", _NL2SQL_MAX_TOKENS_DEFAULT
+        ),
+        # feat-token-prune：1=SQL 阶段按 plan 裁剪 schema（默认），0=退回全量
+        # （回滚阀门——裁剪落在 SQL 正确性关键路径，留一个可即时关闭的开关）。
+        # 用 _readBoolConfig 而非 _readIntConfig：后者非正返默认，表达不了「0=关」。
+        "pruneSchema": await _readBoolConfig(
+            session, "NL2SQL_SQL_SCHEMA_PRUNING", True
         ),
     }
 
@@ -359,6 +405,7 @@ class Nl2SqlService:
                 "digestMaxDescChars": _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
                 "valueSampleValueMax": _VALUE_SAMPLE_VALUE_MAX_DEFAULT,
                 "maxTokens": _NL2SQL_MAX_TOKENS_DEFAULT,
+                "pruneSchema": True,
             }
         return await _readSchemaConfig(session)
 
@@ -530,8 +577,17 @@ class Nl2SqlService:
         schemaCfg = await self._readSchemaConfigOrDefault(session)
         refineCfg = await self._readRefineConfigOrDefault(session)
         dialect = resolveDialect(datasourceType, oracle_version)
+        # SQL 阶段 schema 裁剪（feat-token-prune，2026-09-28）：计划阶段必须看全量
+        # 召回类才能选类，但 SQL 阶段手上已有 plan——没有理由再投一遍全部 13~30 个类。
+        # 实测（13 类召回 / 选中 2 类）：SQL 阶段 prompt 15,750 → 8,224 tokens，
+        # 每步合计 33,126 → 25,600（−22.7%，nl2sql 占全部 token 94.9%）。
+        # 裁剪只影响本函数的 buildSchemaText 入参（classes 在本函数无其它消费点），
+        # fail-closed 语义见 _pruneClassesForSql 文档。
+        schemaClasses = (
+            _pruneClassesForSql(plan, classes) if schemaCfg["pruneSchema"] else classes
+        )
         schemaText = buildSchemaText(
-            classes,
+            schemaClasses,
             schemaPrefix=schemaPrefix if dialect.useSchemaPrefix else None,
             valueSamples=valueSamples,
             driftWarning=driftWarning,

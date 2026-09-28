@@ -176,3 +176,70 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     businessObjectRegistry.invalidate()
     from app.services.kpi_match_cache import kpi_match_cache
     kpi_match_cache.onKpiChanged()
+
+
+# ---------------------------------------------------------------------------
+# Milvus fixtures（M0 Unified ID：3-collection 重构）
+# 约定：
+#   - sync fixtures（Milvus client 本身是 sync API，不是 asyncio）
+#   - 真实 Milvus 容器 qa-milvus:19530，不 mock
+#   - embedding 维度恒为 1024（_DIM），与 bge-m3 模型一致
+#   - Task M2 落地后需扩展 _dropOntologyCollections 以 drop 3 个新集合
+# ---------------------------------------------------------------------------
+
+_EMBEDDING_DIM = 1024
+
+
+def _dropOntologyCollections() -> None:
+    """删除全部已知本体 Milvus 集合（idempotent；集合不存在 no-op）。
+
+    当前只 drop ontology_embeddings；Task M2 落地后需追加
+    ontology_class_embeddings / ontology_property_embeddings /
+    ontology_metric_embeddings 三个新集合。
+    """
+    from app.infrastructure.milvus_client import dropCollection
+
+    try:
+        dropCollection()  # drops _COLLECTION_NAME = "ontology_embeddings"
+    except Exception:
+        pass  # 集合不存在或 drop 失败视为幂等，不阻塞测试
+
+
+@pytest.fixture
+def milvusCleanClient():
+    """真实 Milvus 清空夹具：测试前后各 drop 一次 ontology_embeddings。
+
+    后置 drop 保证下一轮测试拿到干净状态。
+    """
+    _dropOntologyCollections()
+    yield
+    _dropOntologyCollections()
+
+
+@pytest.fixture
+def milvusSeedOntology(milvusCleanClient):
+    """种入 3 条 ontology 行（type='class'）：供应商 / 物料 / 客户。"""
+    from app.infrastructure.milvus_client import insertEmbeddings
+
+    insertEmbeddings([
+        {"ontology_id": 1001, "type": "class", "name": "供应商", "alias": "supplier", "description": "", "embedding": [0.0] * _EMBEDDING_DIM},
+        {"ontology_id": 1002, "type": "class", "name": "物料", "alias": "material", "description": "", "embedding": [0.0] * _EMBEDDING_DIM},
+        {"ontology_id": 1003, "type": "class", "name": "客户", "alias": "customer", "description": "", "embedding": [0.0] * _EMBEDDING_DIM},
+    ])
+    return {"seeded": 3}
+
+
+@pytest.fixture
+def milvusSeedAllTypes(milvusCleanClient):
+    """种入 3 条跨类型 ontology 行：1 class + 1 property + 1 metric。
+
+    用于验证类型过滤（typeFilter=class/property/metric）的检索收敛。
+    """
+    from app.infrastructure.milvus_client import insertEmbeddings
+
+    insertEmbeddings([
+        {"ontology_id": 2001, "type": "class", "name": "Class1", "alias": "", "description": "", "embedding": [0.1] * _EMBEDDING_DIM},
+        {"ontology_id": 2002, "type": "property", "name": "Property1", "alias": "", "description": "", "embedding": [0.2] * _EMBEDDING_DIM},
+        {"ontology_id": 2003, "type": "metric", "name": "Metric1", "alias": "", "description": "", "embedding": [0.3] * _EMBEDDING_DIM},
+    ])
+    return {"seeded": 3}

@@ -2044,3 +2044,128 @@ from app.models.rbac import (  # noqa: E402,F401
 # Schema drift 校验（main.py lifespan）和 alembic autogenerate 用，service 层
 # 仍走 text() 直查以保持零业务耦合 + 失败安全。
 from app.models.system_config import SystemConfig  # noqa: E402,F401
+
+
+# =============================================================================
+# feat-wiki-ontology-link：wiki ↔ ontology 链接 + NL2SQL 规则注入埋点
+# =============================================================================
+
+
+class WikiOntologyLink(Base):
+    """Wiki 知识条目 ↔ 本体类/属性的多对多链接（feat-wiki-ontology-link，Task 1）。
+
+    一行 = "某个 wiki 页面（或 page 下某 chunk）说明某个 ontology class/property"。
+
+    关键约束：
+    - ``revoked_time IS NULL`` 视为活动关系；撤销（软删）后再插相同 key 走
+      partial unique + 撤销复活，必须重建一行而不是原地 UPDATE（保持活动历史
+      可追溯）。
+    - ``chunk_id`` 可空：NULL = page 级语义；非空 = chunk 级定位。
+    - ``ontology_type`` 由 ``chk_link_type`` CHECK 约束为 'class'/'property' 二选一；
+      与 ontology_class.id / ontology_property.id 没有 FK（本体类属性可任意修改
+      / 重命名，硬 FK 会拖累回滚）。Service 层在写入时校验目标存在。
+
+    表与索引设计严格对齐 alembic migration 0091。三 partial 索引都
+    ``WHERE revoked_time IS NULL``，撤销记录不占主键空间、不参与去重。
+    """
+
+    __tablename__ = "wiki_ontology_link"
+    __table_args__ = (
+        Index(
+            "ix_wol_ontology",
+            "ontology_type",
+            "ontology_id",
+            postgresql_where=sa_text("revoked_time IS NULL"),
+        ),
+        Index(
+            "ix_wol_page",
+            "page_id",
+            postgresql_where=sa_text("revoked_time IS NULL"),
+        ),
+        Index(
+            "uq_wol_active",
+            "page_id",
+            "chunk_id",
+            "ontology_type",
+            "ontology_id",
+            unique=True,
+            postgresql_where=sa_text("revoked_time IS NULL"),
+        ),
+        CheckConstraint(
+            "ontology_type IN ('class','property')",
+            name="chk_link_type",
+        ),
+        CheckConstraint(
+            "weight >= 0 AND weight <= 1",
+            name="chk_link_weight",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    page_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("wiki_page.page_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chunk_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ontology_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    ontology_id: Mapped[int] = mapped_column(BigIntPk, nullable=False)
+    weight: Mapped[Decimal] = mapped_column(
+        Numeric(3, 2), nullable=False, default=Decimal("1.00")
+    )
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_by: Mapped[int] = mapped_column(BigIntPk, nullable=False)
+    created_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    revoked_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<WikiOntologyLink page={self.page_id} chunk={self.chunk_id} "
+            f"{self.ontology_type}#id={self.ontology_id} weight={self.weight}>"
+        )
+
+
+class Nl2sqlWikiTrace(Base):
+    """NL2SQL 调用注入 wiki ontology 规则的埋点行（feat-wiki-ontology-link，Task 1）。
+
+    一行 = 一次 NL2SQL 生成中某条 ontology 业务规则被注入 prompt 的事实。
+
+    设计意图：
+    - 无 FK 指向 wiki_page/ontology_*：trace 是 snapshot，源被删后仍要留账供
+      归因分析。Service 层在写入时校验目标存在，但不强制 DB 级 FK（已在 review
+      中记下：本体表删除需走软删路径，不会物理删除）。
+    - ``(session_id, created_at)`` 复合索引供会话回放 + 窗口聚合（最近 N 天）。
+    - ``created_at`` 不走 TimestampMixin：trace 是只写一行的事实记录，没有
+      updated_time 语义（一旦写入不再修改）。
+
+    表与索引严格对齐 alembic migration 0091。
+    """
+
+    __tablename__ = "nl2sql_wiki_trace"
+    __table_args__ = (
+        Index("ix_nlwt_session", "session_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    ontology_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    ontology_id: Mapped[int] = mapped_column(BigIntPk, nullable=False)
+    page_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunk_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_position: Mapped[str] = mapped_column(String(32), nullable=False)
+    injected_chars: Mapped[int] = mapped_column(Integer, nullable=False)
+    score: Mapped[Decimal] = mapped_column(Numeric(5, 3), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Nl2sqlWikiTrace session={self.session_id} "
+            f"{self.ontology_type}#id={self.ontology_id} page={self.page_id}>"
+        )

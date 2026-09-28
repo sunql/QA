@@ -524,7 +524,7 @@ class OntologyService:
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点删除", id, exc)
         try:
-            milvus.deleteByOntologyId(id, "class")
+            milvus.deleteByOntologyIdDual(id, "class")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Milvus 记录删除失败 id=%d: %s", id, exc)
         logger.info("软删除本体类 id=%d（valid_to=%s）", id, entity.valid_to)
@@ -749,7 +749,7 @@ class OntologyService:
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点删除", id, exc)
         try:
-            milvus.deleteByOntologyId(id, "property")
+            milvus.deleteByOntologyIdDual(id, "property")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Milvus 记录删除失败 id=%d: %s", id, exc)
         logger.info("删除本体属性 id=%d", id)
@@ -929,7 +929,7 @@ class OntologyService:
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点删除", id, exc)
         try:
-            milvus.deleteByOntologyId(id, "metric")
+            milvus.deleteByOntologyIdDual(id, "metric")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Milvus 记录删除失败 id=%d: %s", id, exc)
         logger.info("删除本体指标 id=%d", id)
@@ -1362,6 +1362,9 @@ class OntologyService:
         """
         embedding = await self._ensureEmbedding().generateEmbedding(query)
         try:
+            # TODO: M12+ — switch to type-routed search after old collection dropped.
+            # During dual-write window, searchByEmbedding on old collection returns
+            # complete data because dual-write keeps old in sync with new.
             hits = await asyncio.to_thread(
                 milvus.searchByEmbedding, embedding, topK, typeFilter
             )
@@ -1388,6 +1391,9 @@ class OntologyService:
         typeFilter: str | None = None,
     ) -> list[dict[str, Any]]:
         """向量相似度搜索（embedding 由调用方通过 LLM 生成）。"""
+        # TODO: M12+ — switch to type-routed search after old collection dropped.
+        # During dual-write window, searchByEmbedding on old collection returns
+        # complete data because dual-write keeps old in sync with new.
         return milvus.searchByEmbedding(queryEmbedding, topK, typeFilter)
 
     def syncEmbedding(
@@ -1401,8 +1407,8 @@ class OntologyService:
     ) -> None:
         """同步单条 embedding 到 Milvus（新建或覆盖）。"""
         try:
-            milvus.deleteByOntologyId(ontologyId, type)
-            milvus.insertEmbeddings([{
+            milvus.deleteByOntologyIdDual(ontologyId, type)
+            milvus.insertEmbeddingsDual([{
                 "ontology_id": ontologyId,
                 "type": type,
                 "name": name,
@@ -1446,7 +1452,7 @@ class OntologyService:
         missingPropertyCount/syncedPropertyCount/failedPropertyCount）。
         """
         classes = await self.listClasses(session)
-        rows = milvus.listAllEmbeddings()
+        rows = milvus.listEmbeddingsAcross3Collections()
         presentClassIds = {
             r["ontology_id"] for r in rows if r.get("type") == "class"
         }
@@ -1516,7 +1522,7 @@ class OntologyService:
         syncedProps = 0
         if records:
             try:
-                milvus.insertEmbeddings(records)
+                milvus.insertEmbeddingsDual(records)
                 syncedClasses = sum(1 for r in records if r["type"] == "class")
                 syncedProps = sum(1 for r in records if r["type"] == "property")
             except Exception as exc:  # noqa: BLE001
@@ -1839,7 +1845,7 @@ class OntologyService:
         """批量路径（导入向导等）的向量补齐：后台整批对账，单次 flush。
 
         与逐类 _syncClassEmbeddingBestEffort 的区别：N 个类只做一次
-        listClasses/listAllEmbeddings 对账 + 一次整批 insert（单次 flush），
+        listClasses/listEmbeddingsAcross3Collections 对账 + 一次整批 insert（单次 flush），
         避免 N 个后台任务并发 flush（单次 flush 8-25s）拖垮 Milvus。
         best-effort：失败仅告警，不影响调用方响应。
         """

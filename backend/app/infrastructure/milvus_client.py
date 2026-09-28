@@ -933,3 +933,54 @@ def closeConnection() -> None:
     """断开 Milvus 连接（幂等；未连接时 no-op）。"""
     if connections.has_connection(_connAlias()):
         connections.disconnect(alias=_connAlias())
+
+
+def deleteByOntologyIdDual(ontologyId: int, type: str) -> None:
+    """Dual-delete: 从 old collection 与 type-routed 新 collection 同时删除。
+
+    双写窗口期必须双删：仅删 old 会在新 collection 留幻影行，
+    下一次 insertEmbeddingsDual 又会重建 old，但新 collection 的孤立行
+    导致 reconcile 报 placeholder_failed。
+
+    type 作用域理由同 deleteByOntologyId：ontology_id 跨类型不唯一。
+    """
+    if type not in VALID_EMBEDDING_TYPES:
+        raise ValueError(f"unknown embedding type: {type!r}")
+
+    # Old collection
+    deleteByOntologyId(ontologyId, type)
+
+    # Type-routed new collection
+    name_to_ensure = {
+        "class": ensureClassCollection,
+        "property": ensurePropertyCollection,
+        "metric": ensureMetricCollection,
+    }[type]
+    new_collection = name_to_ensure()
+    new_collection.delete(f"ontology_id == {ontologyId}")
+    new_collection.flush()
+    logger.info(
+        "Dual-deleted Milvus records for ontology_id=%d type=%s",
+        ontologyId, type,
+    )
+
+
+def listEmbeddingsAcross3Collections() -> list[dict[str, Any]]:
+    """读取 3 个新 type-specific collection 全量，合并返回。
+
+    与 listAllEmbeddings() 的差别：读 ontology_class_embeddings /
+    ontology_property_embeddings / ontology_metric_embeddings，而非旧
+    ontology_embeddings。M7 backfill 后 3 个新 collection 数据与旧一致；
+    M12+ 旧 collection 丢弃后，此函数成为唯一读取入口。
+
+    适用：诊断/统计 API（vectors.py 等）。
+    """
+    _connect()
+    rows: list[dict[str, Any]] = []
+    for query_fn in (
+        queryClassEmbeddings,
+        queryPropertyEmbeddings,
+        queryMetricEmbeddings,
+    ):
+        rows.extend(query_fn())
+    return rows

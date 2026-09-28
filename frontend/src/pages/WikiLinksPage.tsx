@@ -21,6 +21,7 @@ import {
   message,
 } from "antd";
 import type { DataNode } from "antd/es/tree";
+import { useTranslation } from "../i18n";
 import {
   createWikiLink,
   listLinkableTargets,
@@ -48,9 +49,7 @@ const STUB_PAGES: DataNode[] = [
   {
     title: "质量管理",
     key: "page-002",
-    children: [
-      { title: "IQC 来料检验", key: "page-002-01" },
-    ],
+    children: [{ title: "IQC 来料检验", key: "page-002-01" }],
   },
   {
     title: "仓储物流",
@@ -66,6 +65,7 @@ const STUB_PAGES: DataNode[] = [
 // Component
 // ---------------------------------------------------------------------------
 export function WikiLinksPage() {
+  const { t } = useTranslation();
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [linkType, setLinkType] = useState<WikiLinkType>("class");
   const [links, setLinks] = useState<WikiLink[]>([]);
@@ -84,9 +84,9 @@ export function WikiLinksPage() {
       const rows = await listWikiLinks({ page_id: selectedPageId });
       setLinks(rows);
     } catch {
-      message.error("加载链接失败");
+      message.error(t("wikiLinks.loadFailed"));
     }
-  }, [selectedPageId]);
+  }, [selectedPageId, t]);
 
   useEffect(() => {
     refresh();
@@ -99,7 +99,7 @@ export function WikiLinksPage() {
       setLinkables(targets);
       setModalOpen(true);
     } catch {
-      message.error("加载可链接目标失败");
+      message.error(t("wikiLinks.loadTargetsFailed"));
     }
   };
 
@@ -113,15 +113,16 @@ export function WikiLinksPage() {
         ontology_type: linkType,
         ontology_id: values.ontology_id as number,
         weight: values.weight as number,
-        chunk_id: values.scope === "chunk" ? (values.chunk_id as string) : null,
+        chunk_id:
+          values.scope === "chunk" ? (values.chunk_id as string) : null,
         note: (values.note as string) || null,
       });
-      message.success("添加成功");
+      message.success(t("wikiLinks.addSuccess"));
       setModalOpen(false);
       form.resetFields();
       refresh();
     } catch {
-      message.error("添加失败");
+      message.error(t("wikiLinks.addFailed"));
     } finally {
       setSubmitting(false);
     }
@@ -131,10 +132,10 @@ export function WikiLinksPage() {
   const revoke = async (id: number) => {
     try {
       await revokeWikiLink(id);
-      message.success("已撤销");
+      message.success(t("wikiLinks.revokeSuccess"));
       refresh();
     } catch {
-      message.error("撤销失败");
+      message.error(t("wikiLinks.revokeFailed"));
     }
   };
 
@@ -142,12 +143,14 @@ export function WikiLinksPage() {
 
   return (
     <div style={{ padding: 24 }}>
-      <h2>Wiki ↔ Ontology 链接管理</h2>
+      <h2>{t("wikiLinks.title")}</h2>
       <div style={{ display: "flex", gap: 16, marginTop: 16 }}>
         {/* Left: wiki page tree */}
         <div style={{ width: 280, border: "1px solid #f0f0f0", padding: 8 }}>
-          <div style={{ marginBottom: 8, color: "#666", fontSize: 12 }}>
-            请选择 Wiki 页面
+          <div
+            style={{ marginBottom: 8, color: "#666", fontSize: 12 }}
+          >
+            {t("wikiLinks.pageTreeLabel")}
           </div>
           <Tree
             treeData={STUB_PAGES}
@@ -175,13 +178,15 @@ export function WikiLinksPage() {
               onClick={openAddModal}
               disabled={!selectedPageId}
             >
-              + 添加绑定
+              + {t("wikiLinks.addBinding")}
             </Button>
           </Space>
 
           {filteredLinks.length === 0 ? (
             <div style={{ color: "#999", padding: "24px 0" }}>
-              {selectedPageId ? "暂无链接" : "请先选择左侧 Wiki 页面"}
+              {selectedPageId
+                ? t("wikiLinks.noLinks")
+                : t("wikiLinks.selectPageHint")}
             </div>
           ) : (
             filteredLinks.map((link) => (
@@ -203,7 +208,9 @@ export function WikiLinksPage() {
                   weight={link.weight.toFixed(2)}
                 </span>
                 {link.note && (
-                  <span style={{ color: "#999", fontSize: 12 }}>{link.note}</span>
+                  <span style={{ color: "#999", fontSize: 12 }}>
+                    {link.note}
+                  </span>
                 )}
                 <Button
                   danger
@@ -211,7 +218,7 @@ export function WikiLinksPage() {
                   style={{ marginLeft: "auto" }}
                   onClick={() => revoke(link.id)}
                 >
-                  撤销
+                  {t("wikiLinks.revoke")}
                 </Button>
               </div>
             ))
@@ -221,7 +228,7 @@ export function WikiLinksPage() {
 
       {/* Add link modal */}
       <Modal
-        title="添加绑定"
+        title={t("wikiLinks.addBinding")}
         open={modalOpen}
         onCancel={() => {
           setModalOpen(false);
@@ -230,14 +237,10 @@ export function WikiLinksPage() {
         footer={null}
       >
         <Form form={form} onFinish={submit} layout="vertical">
-          <Form.Item
-            name="scope"
-            label="作用范围"
-            initialValue="page"
-          >
+          <Form.Item name="scope" label={t("wikiLinks.scopeLabel")} initialValue="page">
             <Radio.Group>
-              <Radio value="page">覆盖全页</Radio>
-              <Radio value="chunk">仅限此段落</Radio>
+              <Radio value="page">{t("wikiLinks.scopePage")}</Radio>
+              <Radio value="chunk">{t("wikiLinks.scopeChunk")}</Radio>
             </Radio.Group>
           </Form.Item>
 
@@ -249,10 +252,12 @@ export function WikiLinksPage() {
               getFieldValue("scope") === "chunk" ? (
                 <Form.Item
                   name="chunk_id"
-                  label="段落 ID"
-                  rules={[{ required: true, message: "请输入段落 ID" }]}
+                  label={t("wikiLinks.chunkIdLabel")}
+                  rules={[
+                    { required: true, message: t("wikiLinks.chunkIdRequired") },
+                  ]}
                 >
-                  <Input placeholder="请输入 chunk_id" />
+                  <Input placeholder={t("wikiLinks.chunkIdPlaceholder")} />
                 </Form.Item>
               ) : null
             }
@@ -260,15 +265,17 @@ export function WikiLinksPage() {
 
           <Form.Item
             name="ontology_id"
-            label="本体对象"
-            rules={[{ required: true, message: "请选择本体对象" }]}
+            label={t("wikiLinks.ontologyObject")}
+            rules={[
+              { required: true, message: t("wikiLinks.ontologyRequired") },
+            ]}
           >
             <Select
-              options={linkables.map((t) => ({
-                value: t.id,
-                label: `${t.name}${t.alias ? ` (${t.alias})` : ""}`,
+              options={linkables.map((tgt) => ({
+                value: tgt.id,
+                label: `${tgt.name}${tgt.alias ? ` (${tgt.alias})` : ""}`,
               }))}
-              placeholder="搜索或选择本体对象"
+              placeholder={t("wikiLinks.ontologyPlaceholder")}
               showSearch
               filterOption={(input, option) =>
                 (option?.label ?? "")
@@ -278,22 +285,22 @@ export function WikiLinksPage() {
             />
           </Form.Item>
 
-          <Form.Item name="weight" label="权重" initialValue={1.0}>
+          <Form.Item
+            name="weight"
+            label={t("wikiLinks.weight")}
+            initialValue={1.0}
+          >
             <Slider min={0} max={1} step={0.1} />
           </Form.Item>
 
-          <Form.Item name="note" label="备注">
+          <Form.Item name="note" label={t("wikiLinks.note")}>
             <Input.TextArea maxLength={200} rows={3} />
           </Form.Item>
 
           <Form.Item style={{ marginBottom: 0 }}>
             <Space>
-              <Button
-                type="primary"
-                htmlType="submit"
-                loading={submitting}
-              >
-                提交
+              <Button type="primary" htmlType="submit" loading={submitting}>
+                {t("wikiLinks.submit")}
               </Button>
               <Button
                 onClick={() => {
@@ -301,7 +308,7 @@ export function WikiLinksPage() {
                   form.resetFields();
                 }}
               >
-                取消
+                {t("wikiLinks.cancel")}
               </Button>
             </Space>
           </Form.Item>

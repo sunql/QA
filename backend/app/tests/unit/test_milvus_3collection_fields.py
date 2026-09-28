@@ -41,7 +41,7 @@ class TestMetricFields:
 
 
 class TestEnsureFunctions:
-    """ensure*Collection() 应只注册函数，不实际连接 Milvus。"""
+    """仅校验 ensure*Collection() 是可调用对象；callable() 不触发实际 Milvus 连接。"""
 
     def test_ensure_class_collection_is_callable(self) -> None:
         assert callable(ensureClassCollection)

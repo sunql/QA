@@ -19,6 +19,8 @@ from app.domain.wiki_models import Evidence, KnowledgeClaim
 
 pytestmark = pytest.mark.integration
 
+USER_HEADERS = {"X-User-Id": "test-user"}
+
 
 async def _seedClaimAndEvidences(
     session: AsyncSession, client: AsyncClient
@@ -64,7 +66,7 @@ async def test_list_filters_by_session_id(
     client: AsyncClient, dbSession: AsyncSession
 ):
     _, [_, e2, _] = await _seedClaimAndEvidences(dbSession, client)
-    resp = await client.get("/api/v1/evidences", params={"session_id": "chat-abc"})
+    resp = await client.get("/api/v1/evidences", params={"session_id": "chat-abc"}, headers=USER_HEADERS)
     assert resp.status_code == 200
     body = resp.json()
     assert body["total"] == 1
@@ -80,6 +82,7 @@ async def test_list_filters_by_source_type_and_claim_id(
     resp = await client.get(
         "/api/v1/evidences",
         params={"claim_id": claim_id, "source_type": "METRIC_RESULT"},
+        headers=USER_HEADERS,
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -88,12 +91,12 @@ async def test_list_filters_by_source_type_and_claim_id(
 
 
 async def test_list_blank_session_id_422(client: AsyncClient):
-    resp = await client.get("/api/v1/evidences", params={"session_id": "   "})
+    resp = await client.get("/api/v1/evidences", params={"session_id": "   "}, headers=USER_HEADERS)
     assert resp.status_code == 422
 
 
 async def test_list_invalid_source_type_422(client: AsyncClient):
-    resp = await client.get("/api/v1/evidences", params={"source_type": "BOGUS"})
+    resp = await client.get("/api/v1/evidences", params={"source_type": "BOGUS"}, headers=USER_HEADERS)
     assert resp.status_code == 422
 
 
@@ -101,7 +104,7 @@ async def test_get_by_id_returns_evidence(
     client: AsyncClient, dbSession: AsyncSession
 ):
     _, [_, e2, _] = await _seedClaimAndEvidences(dbSession, client)
-    resp = await client.get(f"/api/v1/evidences/{e2}")
+    resp = await client.get(f"/api/v1/evidences/{e2}", headers=USER_HEADERS)
     assert resp.status_code == 200
     body = resp.json()
     assert body["id"] == e2
@@ -109,7 +112,7 @@ async def test_get_by_id_returns_evidence(
 
 
 async def test_get_by_id_404_when_missing(client: AsyncClient):
-    resp = await client.get("/api/v1/evidences/999999")
+    resp = await client.get("/api/v1/evidences/999999", headers=USER_HEADERS)
     assert resp.status_code == 404
 
 
@@ -122,7 +125,7 @@ async def test_by_session_route_not_shadowed_by_id_route(
     try to parse 'by-session' as int and return 422 (not 200).
     """
     _, [_, _, _] = await _seedClaimAndEvidences(dbSession, client)
-    resp = await client.get("/api/v1/evidences/by-session/chat-abc")
+    resp = await client.get("/api/v1/evidences/by-session/chat-abc", headers=USER_HEADERS)
     assert resp.status_code == 200
     body = resp.json()
     assert body["total"] == 1
@@ -130,6 +133,6 @@ async def test_by_session_route_not_shadowed_by_id_route(
 
 
 async def test_list_does_not_break_when_no_evidences(client: AsyncClient):
-    resp = await client.get("/api/v1/evidences")
+    resp = await client.get("/api/v1/evidences", headers=USER_HEADERS)
     assert resp.status_code == 200
     assert resp.json() == {"items": [], "total": 0}

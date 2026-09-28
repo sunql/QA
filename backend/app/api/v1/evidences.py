@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import getDb
+from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.wiki_schemas import (
     EvidenceListOut,
     EvidenceQuery,
@@ -43,6 +43,7 @@ async def _evidencesSession() -> AsyncIterator[AsyncSession]:
     summary="按 chat session 列出证据",
 )
 async def listBySession(
+    _user: CurrentUser = Depends(getCurrentUser),
     sid: str = Path(..., min_length=1, max_length=64),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -61,6 +62,7 @@ async def listBySession(
     summary="列出 evidence（按 session_id / claim_id / source_type 过滤）",
 )
 async def listEvidence(
+    _user: CurrentUser = Depends(getCurrentUser),
     q: EvidenceQuery = Depends(),
     session: AsyncSession = Depends(_evidencesSession),
 ) -> EvidenceListOut:
@@ -77,6 +79,7 @@ async def listEvidence(
     summary="查 evidence 详情",
 )
 async def getEvidence(
+    _user: CurrentUser = Depends(getCurrentUser),
     evidence_id: int = Path(..., ge=1),
     session: AsyncSession = Depends(_evidencesSession),
 ) -> EvidenceRead:

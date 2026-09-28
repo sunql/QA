@@ -369,6 +369,25 @@ class MultiStepMixin:
         """
         return len(plan.data_steps) > MAX_PLAN_DATA_STEPS
 
+    @staticmethod
+    def _oversizedStepResult(dto: ChatRequest) -> StepResult:
+        """超限拒收的**唯一**单步卡片定义，流式与非流式共用。
+
+        两条路径都必须给出这张卡（而非空 steps）：前端 MultiStepPlanCard 仅在
+        steps 非空时挂载，留空会把固定文案渲染成一段没有归属的裸文字；而非流式
+        「无法回答」分支（chat_service `_unanswerableResponse`）早已为同一理由
+        填卡。抽成一处是因为两侧文案一旦各写一份，就是本项目反复出现的
+        「流式/非流式漂移」缺陷类型。
+        """
+        return StepResult(
+            step_index=0,
+            description="超出步数上限",
+            sub_question=dto.question,
+            sql=None,
+            data=None,
+            summary="该问题需要的步骤数超出上限",
+        )
+
     async def _rejectOversizedPlan(
         self,
         session: AsyncSession,
@@ -439,7 +458,9 @@ class MultiStepMixin:
             return ChatResponse(
                 answer=answer,
                 intent="multi_step",
-                steps=[],
+                # 一张拒收卡，不是空 steps：与流式路径、与「无法回答」分支同型
+                # （理由见 _oversizedStepResult）。
+                steps=[_step_result_to_read(self._oversizedStepResult(dto))],
                 tokensUsed=initial_tokens,
                 cost=float(initial_cost),
                 latency_ms=int((time.monotonic() - _t0) * 1000),

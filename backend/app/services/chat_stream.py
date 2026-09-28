@@ -720,14 +720,7 @@ class StreamMixin:
             yield self._singleStepOverview("超出步数上限", dto.question)
             yield self._singleStepStart("超出步数上限", dto.question)
             yield StreamEvent(EVENT_TOKEN, {"content": answer})
-            yield self._stepResultEvent(StepResult(
-                step_index=0,
-                description="超出步数上限",
-                sub_question=dto.question,
-                sql=None,
-                data=None,
-                summary="该问题需要的步骤数超出上限",
-            ))
+            yield self._stepResultEvent(self._oversizedStepResult(dto))
             yield StreamEvent(
                 EVENT_DONE,
                 {

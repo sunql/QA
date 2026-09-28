@@ -528,7 +528,7 @@ class TestOversizedPlanRejected:
     _QUESTION = "请分步查询华东销售下降的所有原因并逐项分析"
 
     async def test_oversized_plan_is_rejected_with_hint(self, client, dbSession, monkeypatch) -> None:
-        """6 步计划 → 提示含真实步数与上限，steps 为空，一条 SQL 都没执行。"""
+        """6 步计划 → 提示含真实步数与上限，steps 为**一张**拒收卡，一条 SQL 都没执行。"""
         config, ds = await _seed(dbSession)
         adapter = _OkAdapter()
         _install(monkeypatch, config, _OversizedLlm(), adapter)
@@ -538,7 +538,13 @@ class TestOversizedPlanRejected:
         body = resp.json()
         assert body["answer"] == MSG_PLAN_TOO_MANY_STEPS.format(steps=6, limit=4)
         assert body["intent"] == "multi_step"
-        assert body["steps"] == []
+        # steps 必须给出**一张**卡，且与流式路径同型（流式下发同一份 step_result）。
+        # 留空则前端 MultiStepPlanCard 不渲染（只在 steps 非空时挂载），用户看到的
+        # 是一段没有归属的裸文字；而非流式「无法回答」分支（chat_service
+        # _unanswerableResponse）正是为同一理由填了一张卡。两条路径一个形状。
+        assert len(body["steps"]) == 1
+        assert body["steps"][0]["description"] == "超出步数上限"
+        assert body["steps"][0]["sql"] is None
         # 没有执行任何**数据步** SQL。注意不能断言 `adapter.executed == []`：
         # 值域采样（SELECT DISTINCT …）是流水线构造 _PipelineContext 时做的准备，
         # 先于多步决策，且由模块级 _VALUE_SAMPLE_CACHE 决定是否真落到 adapter——
@@ -583,7 +589,7 @@ class TestOversizedPlanRejected:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["answer"] == MSG_PLAN_TOO_MANY_STEPS.format(steps=5, limit=4)
-        assert body["steps"] == []
+        assert [s["description"] for s in body["steps"]] == ["超出步数上限"]
         assert _data_queries(adapter) == []
         # 规则路径本就零拆步 LLM 消耗，拒收不改变这一点
         assert not any("查询拆分器" in m[0][1] for m in llm.calls)

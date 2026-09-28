@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from neo4j import Driver  # noqa: E402
 from sqlalchemy import text  # noqa: E402
+from sqlalchemy.exc import IntegrityError  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from app.config import getSettings  # noqa: E402
@@ -30,7 +31,7 @@ from app.infrastructure.database import getSessionFactory  # noqa: E402
 class ReconcileReport:
     """对账报告（不可变）。
 
-    diff_count：差异总数（error + warning，不含 placeholder）
+    diff_count：差异总数（= len(rows)，含 placeholder / warning / error）
     exit_code：0=通过 / 1=有错误
     rows：逐条对账明细，供 CLI 打印或前端展示
     placeholder_count：补写入 PG 的占位行数
@@ -120,22 +121,38 @@ async def reconcile(session: AsyncSession, driver: Driver) -> ReconcileReport:
                 )
                 error_count += 1
         elif neo4j_uids:
-            # 仅 Neo4j：写 PG 占位
+            # 仅 Neo4j：写 PG 占位（每行用 savepoint 隔离失败，避免一行报错
+            # 污染整 session 的 INSERT 序列；异常时 rollback 到 savepoint，前
+            # 面的成功行仍会随函数末尾 commit 落库）
             for uid in neo4j_uids:
-                await session.execute(
-                    text(
-                        "INSERT INTO id_mapping "
-                        "(unified_id, business_object, external_id, "
-                        "created_time, updated_time) "
-                        "VALUES (:uid, :bo, :ext, now(), now()) "
-                        "ON CONFLICT (business_object, external_id) DO NOTHING"
-                    ),
-                    {
-                        "uid": uid,
-                        "bo": bo,
-                        "ext": _externalIdFromUnifiedId(uid),
-                    },
-                )
+                sp = await session.begin_nested()
+                try:
+                    await session.execute(
+                        text(
+                            "INSERT INTO id_mapping "
+                            "(unified_id, business_object, external_id, "
+                            "created_time, updated_time) "
+                            "VALUES (:uid, :bo, :ext, now(), now()) "
+                            "ON CONFLICT (business_object, external_id) DO NOTHING"
+                        ),
+                        {
+                            "uid": uid,
+                            "bo": bo,
+                            "ext": _externalIdFromUnifiedId(uid),
+                        },
+                    )
+                    await sp.commit()
+                except IntegrityError as exc:
+                    await sp.rollback()
+                    rows.append(
+                        {
+                            "kind": "placeholder_failed",
+                            "business_object": bo,
+                            "unified_id": uid,
+                            "error": str(exc.orig)[:200],
+                        }
+                    )
+                    continue
                 rows.append(
                     {
                         "kind": "placeholder_written",
@@ -158,7 +175,7 @@ async def reconcile(session: AsyncSession, driver: Driver) -> ReconcileReport:
 
     await session.commit()
 
-    diff_count = error_count + warning_count
+    diff_count = len(rows)
     exit_code = 1 if error_count > 0 else 0
 
     return ReconcileReport(

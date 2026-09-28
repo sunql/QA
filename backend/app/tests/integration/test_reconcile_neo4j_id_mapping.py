@@ -70,6 +70,14 @@ async def test_reconcile_writes_placeholder_when_neo4j_has_node_but_pg_missing(
 
     assert report.exit_code == 0
     assert report.placeholder_count >= 1
+    # 验证 PG 真有占位行（fix loop M3：不仅计数，要落库可查）
+    pg_uid_row = (
+        await dbSession.execute(
+            text("SELECT unified_id FROM id_mapping WHERE external_id = 'S001'")
+        )
+    ).first()
+    assert pg_uid_row is not None, "占位行未写入 PG"
+    assert pg_uid_row[0] == "obj:supplier:S001"
 
 
 async def test_reconcile_warns_when_pg_has_mapping_but_neo4j_missing(

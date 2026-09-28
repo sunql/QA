@@ -51,6 +51,7 @@
 - [supplier-receipt-workflow](../wiki/supplier-receipt-workflow.md) - 供应商收货工作流
 - [audit-log-system](../wiki/audit-log-system.md) - 审计日志系统
 - [ai-roadmap](../wiki/ai-roadmap.md) - AI 路线图
+- [wiki-ontology-link](../wiki/wiki-ontology-link.md) - wiki ↔ ontology 链接管理 + NL2SQL 业务规则注入
 - [api-reference](../wiki/api-reference.md) - API 契约
 - [config-reference](../wiki/config-reference.md) - 环境变量
 - [operations-runbook](../wiki/operations-runbook.md) - 运维手册（部署 / 监控 / 备份 / 恢复）
@@ -104,6 +105,6 @@
 | §2.4 LOW 魔数治理 Phase 2 | 15 项迁 `system_config`（0087/0088/0089） | ✅ 完成（15/15） |
 | §15 残差 | 7 项主批 + 4 项残差评估 | ✅ 完成（评估 4 项：保留 prior_cte / 挂账 M9 / 关闭 logger.warning / 关闭 Milvus round-trip） |
 | 文档-代码漂移清扫 | §2.5 + 三拨 doc-drift-cleanup（b/c 系列） | ✅ 完成（7 行 ✅） |
-| 配置重复字段治理 | `config.py` Settings 9 组重复 + `created_time` 怪胎 | 🔁 在途（chore-config-duplicate-fields 已建档） |
+| 配置重复字段治理 | `config.py` Settings 9 组重复 + `created_time` 怪胎 | ✅ 完成（2026-09-27） |
 
 **完整 SSOT**：`Harness/wiki/chat-service-assessment.md`（§2.4 + §15）+ `Harness/changes/`（每个变更单点 SSOT）。

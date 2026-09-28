@@ -28,6 +28,7 @@ from app.services.stream_events import (
     EVENT_ERROR,
     EVENT_META,
     EVENT_MULTI_STEP_PLAN,
+    EVENT_SQL,
     EVENT_STEP_PLAN,
     EVENT_STEP_RESULT,
     EVENT_TOKEN,
@@ -605,6 +606,44 @@ class TestOversizedPlanRejected:
         assert body["intent"] == "multi_step"
         assert len(body["steps"]) == 4
         assert len(_data_queries(adapter)) == 4
+
+    async def test_streaming_oversized_yields_hint_without_data_steps(self, client, dbSession, monkeypatch) -> None:
+        """流式同口径：只下发固定提示，不出现任何数据步事件。
+
+        与非流式共用 `_rejectOversizedPlan`，否则两条路径必然漂移（本文件的
+        TestNoAggregationStepDegrade / TestStepFailureIsolation 就是为此存在）。
+        前端若收到 6 个 step_plan，会渲染出 6 张「待执行」卡片。
+        """
+        config, ds = await _seed(dbSession)
+        adapter = _OkAdapter()
+        _install(monkeypatch, config, _OversizedLlm(), adapter)
+
+        resp = await client.post(
+            "/api/v1/chat/stream", json=_payload(self._QUESTION, ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        frames = _parseFrames(resp)
+        events = [e for e, _ in frames]
+        assert EVENT_ERROR not in events
+        assert events[-1] == EVENT_DONE
+        tokenText = "".join(
+            str(d.get("content", "")) for e, d in frames if e == EVENT_TOKEN
+        )
+        assert tokenText == MSG_PLAN_TOO_MANY_STEPS.format(steps=6, limit=4)
+        # 没有任何数据步被执行：不生成 SQL、不执行 SQL
+        assert EVENT_SQL not in events
+        assert _data_queries(adapter) == []
+        # 计划概览只有 1 步（拒收说明），不是 6 步
+        overview = [d for e, d in frames if e == EVENT_MULTI_STEP_PLAN]
+        assert len(overview) == 1
+        assert len(overview[0]["steps"]) == 1
+        assert overview[0]["steps"][0]["description"] == "超出步数上限"
+        # 概览下发过就必须收成终态，否则该步永远停在「待执行」
+        stepResults = [d for e, d in frames if e == EVENT_STEP_RESULT]
+        assert len(stepResults) == 1
+        assert stepResults[0]["stepIndex"] == 0
+        assert stepResults[0]["sql"] is None
 
 
 class TestMultiStepChatStreamApi:

@@ -704,6 +704,46 @@ class StreamMixin:
         导致追问多步抛 TypeError 且显式/复合多步从不注入全局约束）。
         """
         _ms_t0 = _t0 if _t0 is not None else time.monotonic()
+        if self._isOversizedPlan(multiStepPlan):
+            # 与非流式 _executeMultiStep 同口径，共用 _rejectOversizedPlan（落库 +
+            # 存状态），两条路径不会各写一份文案。放在读 cache multiplier 之前：
+            # 拒收不需要它，省一次 DB 读。
+            #
+            # 事件序列照抄本文件「计划 target=无法回答」分支（同为「不给数据步、
+            # 只给固定回答」）：单步概览 + 起始 → token → step_result 收尾。
+            # step_result 不能省——概览已把它下发为「待执行」，不收尾则前端那张
+            # 卡片永远转圈（见 TestStepFailureIsolation 的汇总步同款教训）。
+            answer = await self._rejectOversizedPlan(
+                session, dto, multiStepPlan,
+                total_cost=initial_cost, _t0=_ms_t0,
+            )
+            yield self._singleStepOverview("超出步数上限", dto.question)
+            yield self._singleStepStart("超出步数上限", dto.question)
+            yield StreamEvent(EVENT_TOKEN, {"content": answer})
+            yield self._stepResultEvent(StepResult(
+                step_index=0,
+                description="超出步数上限",
+                sub_question=dto.question,
+                sql=None,
+                data=None,
+                summary="该问题需要的步骤数超出上限",
+            ))
+            yield StreamEvent(
+                EVENT_DONE,
+                {
+                    "tokensUsed": initial_tokens,
+                    "cost": float(initial_cost),
+                    "modelName": None,
+                    "latency_ms": int((time.monotonic() - _ms_t0) * 1000),
+                    "affinityStatus": None,
+                    "suggestedAgent": (
+                        suggestion.model_dump(mode="json", by_alias=True)
+                        if suggestion is not None
+                        else None
+                    ),
+                },
+            )
+            return
         # 4-1（feat-token-cache）：与 _streamQuery 同口径，入口一次性读 multiplier。
         cacheHitMultiplier = await _readFloatConfig(
             session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,

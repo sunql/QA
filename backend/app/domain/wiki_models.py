@@ -36,8 +36,10 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.domain.models import Base, BigIntFk, BigIntPk, TimestampMixin, _utcnow
@@ -297,15 +299,21 @@ class KnowledgeClaim(Base):
 
 
 class Evidence(Base):
-    """Claim 的证据出处（来源 5 元组 + 原文内容）。
+    """Claim 的证据出处（M1' 扩展：新增 payload JSONB + session_id）。
 
     source_type/source_id 指向外部来源（文档目录 / 工单 / 邮件）；
     page_number/section_name/paragraph_no 为原文定位，便于回链与审计。
+    M1' 新增 payload（SQL_QUERY / METRIC_RESULT 数据）与 session_id（chat session 关联）。
     """
 
     __tablename__ = "evidence"
     __table_args__ = (
         Index("ix_evidence_claim", "claim_id"),
+        Index(
+            "ix_evidence_session",
+            "session_id",
+            postgresql_where=text("session_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
@@ -322,6 +330,8 @@ class Evidence(Base):
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), nullable=True)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

@@ -6,6 +6,7 @@
   Step 2: 对已有 unified_id 的节点 → 仅 INSERT PG（确保 PG↔Neo4j 对齐）
 
 幂等：第二次跑无新写入（所有节点已对齐，PG ON CONFLICT DO NOTHING 生效）。
+中断恢复：mid-iteration 失败后可直接重跑（操作幂等），无需人工清理部分写入。
 
 CQL 安全：label 来自 _ALLOWED_LABELS 白名单（frozenset({Class, Property, Metric}），
 模板查表而非 f-string 拼接，避免任何注入路径（即使白名单被绕过）。
@@ -74,11 +75,12 @@ async def backfill(session: AsyncSession, driver: Driver, batch_size: int = 500)
         if not batch:
             break
 
+        actually_written = 0
         for node in batch:
             label = node["label"]
             legacy_id = node["legacy_id"]
             if legacy_id is None:
-                # 无 id 属性的节点无法生成 unified_id，跳过
+                # 无 id 属性的节点无法生成 unified_id，跳过（不计 written）
                 continue
             if label not in _ALLOWED_LABELS:
                 # 防御性校验：即使上游异常，label 必须在白名单内
@@ -108,9 +110,11 @@ async def backfill(session: AsyncSession, driver: Driver, batch_size: int = 500)
             cql = _SET_UNIFIED_ID_CQL[label]
             with driver.session() as ns2:
                 ns2.run(cql, legacy_id=legacy_id, unified_id=unified_id)
+            # 仅当 Neo4j SET 实际执行后才计入 written（排除 legacy_id 为 None 等跳过路径）
+            actually_written += 1
 
         await session.commit()
-        written += len(batch)
+        written += actually_written
 
     # Step 2: 为已有 unified_id 的节点写 PG 占位（确保 PG↔Neo4j 对齐）
     with driver.session() as ns:

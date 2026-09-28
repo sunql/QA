@@ -68,7 +68,13 @@ export interface MockMetric {
   updatedTime: string | null;
 }
 
-type EntityKind = "datasource" | "class" | "property" | "metric" | "lineageEdge";
+type EntityKind =
+  | "datasource"
+  | "class"
+  | "property"
+  | "metric"
+  | "lineageEdge"
+  | "wikiLink";
 
 // 后端暴露给 spec 断言/构造的内存存储（每个 page 独立实例）
 export interface MockLineageEdge {
@@ -90,6 +96,18 @@ export interface MockLineageEdge {
   updatedTime: string | null;
 }
 
+export interface MockWikiLink {
+  id: number;
+  page_id: string;
+  chunk_id: string | null;
+  ontology_type: "class" | "property";
+  ontology_id: number;
+  weight: number;
+  note: string | null;
+  created_by: number;
+  revoked_time: string | null;
+}
+
 export interface MockBackend {
   page: Page;
   datasources: MockDatasource[];
@@ -97,6 +115,7 @@ export interface MockBackend {
   properties: MockProperty[];
   metrics: MockMetric[];
   lineageEdges: MockLineageEdge[];
+  wikiLinks: MockWikiLink[];
   nextId: (kind: EntityKind) => number;
 }
 
@@ -221,6 +240,22 @@ const SEED_LINEAGE_EDGES: MockLineageEdge[] = [
   },
 ];
 
+const SEED_WIKI_LINKS: MockWikiLink[] = [
+  // page-001「采购管理」已有 1 条 class 链接，page-002/003 空 — 让 spec 验证
+  // 「选中不同页面 listWikiLinks 列表变化」与「撤销后端立即生效」两个差异点
+  {
+    id: 1,
+    page_id: "page-001",
+    chunk_id: null,
+    ontology_type: "class",
+    ontology_id: 1,
+    weight: 0.8,
+    note: "种子：采购 → 供应商类",
+    created_by: 1,
+    revoked_time: null,
+  },
+];
+
 function seed() {
   return {
     datasources: SEED_DATASOURCES.map((d) => ({ ...d })),
@@ -228,6 +263,7 @@ function seed() {
     properties: SEED_PROPERTIES.map((p) => ({ ...p })),
     metrics: SEED_METRICS.map((m) => ({ ...m })),
     lineageEdges: SEED_LINEAGE_EDGES.map((e) => ({ ...e })),
+    wikiLinks: SEED_WIKI_LINKS.map((w) => ({ ...w })),
   };
 }
 
@@ -483,6 +519,85 @@ async function handleClassRoutes(route: Route, ctx: RouteCtx): Promise<void> {
     return respondJson(route, 200, ok(target));
   }
   return respondJson(route, 404, fail("类不存在"));
+}
+
+async function handleWikiLinkRoutes(route: Route, ctx: RouteCtx): Promise<void> {
+  const { method, path, query, body, backend } = ctx;
+  // 链接目标搜索（type 必填，q 可选）—— 必须早于 /admin/wiki-links/:id 匹配
+  const linkablesMatch = path === "/admin/wiki-links/linkables";
+  if (linkablesMatch && method === "GET") {
+    const type = query.get("type") === "property" ? "property" : "class";
+    // 复用 ontology class/property 种子做「可选目标」—— 与真后端 listLinkableTargets
+    // 同源：class 用 backend.classes，property 用 backend.properties
+    const targets =
+      type === "class"
+        ? backend.classes.map((c) => ({
+            id: c.id,
+            type: "class" as const,
+            name: c.className,
+            alias: c.classAlias,
+            description: c.description,
+          }))
+        : backend.properties.map((p) => ({
+            id: p.id,
+            type: "property" as const,
+            name: p.propertyName,
+            alias: p.propertyAlias,
+            description: null,
+          }));
+    // 注意：真后端 list_linkables 返回 raw array（无信封），前端 api 客户端不
+    // 解包，page 直接 setLinkables(targets)。mock 必须跟真后端契约一致。
+    return respondJson(route, 200, targets);
+  }
+
+  // 列表 + 创建共享 /admin/wiki-links 路径前缀
+  if (path === "/admin/wiki-links" && method === "GET") {
+    const pageIdRaw = query.get("page_id");
+    const pageId = pageIdRaw ? String(pageIdRaw) : null;
+    const filtered = pageId
+      ? backend.wikiLinks.filter((w) => w.page_id === pageId)
+      : backend.wikiLinks;
+    // 真后端 list_links 返回 raw array，无信封
+    return respondJson(route, 200, filtered);
+  }
+  if (path === "/admin/wiki-links" && method === "POST") {
+    const created: MockWikiLink = {
+      id: backend.nextId("wikiLink"),
+      page_id: String(body.page_id ?? ""),
+      chunk_id: body.chunk_id ? String(body.chunk_id) : null,
+      ontology_type: body.ontology_type === "property" ? "property" : "class",
+      ontology_id: Number(body.ontology_id ?? 0),
+      weight: typeof body.weight === "number" ? body.weight : 1,
+      note: body.note ? String(body.note) : null,
+      created_by: 1,
+      revoked_time: null,
+    };
+    backend.wikiLinks = [...backend.wikiLinks, created];
+    return respondJson(route, 200, created);
+  }
+
+  // 撤销 / 更新：/admin/wiki-links/:id
+  const idMatch = path.match(/^\/admin\/wiki-links\/(\d+)$/);
+  if (!idMatch) return;
+  const id = Number(idMatch[1]);
+  const target = backend.wikiLinks.find((w) => w.id === id);
+  if (method === "DELETE") {
+    if (!target) return respondJson(route, 404, fail("链接不存在"));
+    backend.wikiLinks = backend.wikiLinks.map((w) =>
+      w.id === id ? { ...w, revoked_time: NOW } : w,
+    );
+    return respondJson(route, 200, { ...target, revoked_time: NOW });
+  }
+  if (method === "PATCH" && target) {
+    const updated: MockWikiLink = {
+      ...target,
+      weight: typeof body.weight === "number" ? body.weight : target.weight,
+      note: body.note !== undefined ? (body.note ? String(body.note) : null) : target.note,
+    };
+    backend.wikiLinks = backend.wikiLinks.map((w) => (w.id === id ? updated : w));
+    return respondJson(route, 200, updated);
+  }
+  return respondJson(route, 404, fail("wiki-link 路由不匹配"));
 }
 
 async function handlePropertyRoutes(route: Route, ctx: RouteCtx): Promise<void> {
@@ -796,6 +911,7 @@ async function dispatch(route: Route, backend: MockBackend): Promise<void> {
   if (ctx.path.startsWith("/chat")) return handleChatRoutes(route, ctx);
   if (ctx.path.startsWith("/data-quality")) return handleDataQualityGenerateRoutes(route, ctx);
   if (ctx.path.startsWith("/menu-config")) return handleMenuConfigRoutes(route, ctx);
+  if (ctx.path.startsWith("/admin/wiki-links")) return handleWikiLinkRoutes(route, ctx);
   return respondJson(route, 404, fail(`模拟后端未实现 ${ctx.method} ${ctx.path}`));
 }
 
@@ -807,6 +923,7 @@ export async function mockApi(page: Page): Promise<MockBackend> {
     property: 100,
     metric: 100,
     lineageEdge: 100,
+    wikiLink: 100,
   };
   const backend: MockBackend = {
     page,

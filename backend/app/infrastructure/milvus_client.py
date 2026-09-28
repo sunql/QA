@@ -779,6 +779,54 @@ def refreshDocumentCollection() -> None:
     collection.load()
 
 
+# =============================================================================
+# M0-P0.4: 3-collection schema with external_id field (class/property/metric)
+# =============================================================================
+
+_CLASS_COLLECTION_NAME = "ontology_class_embeddings"
+_PROPERTY_COLLECTION_NAME = "ontology_property_embeddings"
+_METRIC_COLLECTION_NAME = "ontology_metric_embeddings"
+
+
+def _classFields() -> list[FieldSchema]:
+    """Class ontology embedding schema (includes external_id field)."""
+    return _ontologyFields() + [
+        FieldSchema(name="external_id", dtype=DataType.VARCHAR, max_length=128,
+                    description="M0 unified_id, e.g. obj:class:1001"),
+    ]
+
+
+def _propertyFields() -> list[FieldSchema]:
+    """Property ontology embedding schema (includes external_id field)."""
+    return _ontologyFields() + [
+        FieldSchema(name="external_id", dtype=DataType.VARCHAR, max_length=128,
+                    description="M0 unified_id, e.g. obj:property:2001"),
+    ]
+
+
+def _metricFields() -> list[FieldSchema]:
+    """Metric ontology embedding schema (includes external_id field)."""
+    return _ontologyFields() + [
+        FieldSchema(name="external_id", dtype=DataType.VARCHAR, max_length=128,
+                    description="M0 unified_id, e.g. obj:metric:3001"),
+    ]
+
+
+def ensureClassCollection() -> Collection:
+    """Ensure ontology_class_embeddings collection exists (creates if absent)."""
+    return _ensureCollection(_CLASS_COLLECTION_NAME, _classFields())
+
+
+def ensurePropertyCollection() -> Collection:
+    """Ensure ontology_property_embeddings collection exists (creates if absent)."""
+    return _ensureCollection(_PROPERTY_COLLECTION_NAME, _propertyFields())
+
+
+def ensureMetricCollection() -> Collection:
+    """Ensure ontology_metric_embeddings collection exists (creates if absent)."""
+    return _ensureCollection(_METRIC_COLLECTION_NAME, _metricFields())
+
+
 def closeConnection() -> None:
     """断开 Milvus 连接（幂等；未连接时 no-op）。"""
     if connections.has_connection(_connAlias()):

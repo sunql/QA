@@ -237,11 +237,19 @@ _FORMULA_FUNC_CALL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*\(")
 
 # SQL 关键字/函数名集合：公式引用属性校验时忽略这些 token，避免把 SUM/OVER 等误判为属性。
 # 大写存放，匹配时对 token 大写化比较。含裸用（不带括号）的日期伪列/关键字。
+#
+# 不变式（2026-09-28 线上 400 回归）：本集合必须**覆盖** formula_parser._SQL_KEYWORDS
+# ——两处都回答同一个问题「公式里出现的这个词是 SQL 词还是属性」。曾经 ASC/DESC 只在
+# formula_parser 那侧存在，导致公式 OVER (ORDER BY SUM(x) DESC) 里的 DESC 被当成属性上报
+# （「公式中的属性 DESC 不属于选定的任何类」），排名/累计占比类问题整轮 400。
+# 守卫测试：test_query_plan_validation.py::TestSqlKeywordSetsStayInSync。
 _FORMULA_SQL_KEYWORDS: frozenset[str] = frozenset({
     "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "BETWEEN", "LIKE", "IS", "NULL",
+    "ANY", "SOME", "EXISTS",
     "AS", "BY", "GROUP", "ORDER", "HAVING", "JOIN", "ON", "LEFT", "RIGHT", "INNER", "OUTER",
     "CROSS", "FULL", "UNION", "ALL", "DISTINCT", "LIMIT", "FETCH", "ROWNUM", "WITH",
-    "CASE", "WHEN", "THEN", "ELSE", "END", "CAST", "COALESCE", "NULLIF",
+    "ASC", "DESC",
+    "CASE", "WHEN", "THEN", "ELSE", "END", "CAST", "COALESCE", "NULLIF", "IF", "CONVERT",
     "ABS", "ROUND", "FLOOR", "CEIL", "CEILING", "MOD", "CONCAT", "SUBSTR", "SUBSTRING",
     "TRUNC", "TRUNCATE", "LENGTH", "LEAST", "GREATEST",
     "DATE", "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND",

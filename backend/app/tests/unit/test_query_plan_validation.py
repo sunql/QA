@@ -286,6 +286,34 @@ class TestValidatePlan:
         issues = _service().validatePlan(plan, [_receiptCls()])
         assert any("GHOSTFIELD" in i and "公式中的属性" in i for i in issues)
 
+    def test_formula_window_order_by_direction_not_treated_as_property(self) -> None:
+        # 真实回归（2026-09-28）：排名/累计占比类问题中 LLM 在 formula 内写
+        # OVER (ORDER BY SUM(QTY) DESC)；ASC/DESC 是排序方向关键字而非属性，不得误报
+        # 「公式中的属性 DESC 不属于选定的任何类」。
+        # 线上表现：问「每个供应商采购金额占前 5 名合计的比例」稳定 400（plan 校验不过 →
+        # 重试同错 → 整轮失败）；而带空窗口 OVER () 的占比问题恰好绕过，故只在需要排序的
+        # 占比/排名问题暴露。根因是 nl2sql_refs._FORMULA_SQL_KEYWORDS 缺 ASC/DESC
+        # （formula_parser._SQL_KEYWORDS 有），两套关键字集合漂移。
+        for direction in ("DESC", "ASC"):
+            plan = QueryPlan(
+                target="每个供应商采购金额占前 5 名合计的比例",
+                selectedClasses=("PRECEIPT",),
+                selectedProperties=("QTY",),
+                aggregations=(
+                    Aggregation(
+                        function="SUM",
+                        property="QTY",
+                        alias="占比",
+                        formula=(
+                            "SUM(QTY) / SUM(SUM(QTY)) OVER "
+                            f"(ORDER BY SUM(QTY) {direction})"
+                        ),
+                    ),
+                ),
+            )
+            issues = _service().validatePlan(plan, [_receiptCls()])
+            assert issues == [], f"{direction} 被误判为属性: {issues}"
+
     def test_join_references_existing_class(self) -> None:
         plan = QueryPlan(
             target="x",
@@ -701,3 +729,24 @@ class TestValidatePlanPerGroupTopN:
         )
         issues = _service().validatePlan(plan, [self._matReceiptCls()])
         assert any("sortBy" in i for i in issues)
+
+
+class TestSqlKeywordSetsStayInSync:
+    """两套 SQL 关键字集合的一致性守卫（2026-09-28 线上 400 回归）。
+
+    formula_parser._SQL_KEYWORDS 用于「不把关键字当裸列名」，
+    nl2sql_refs._FORMULA_SQL_KEYWORDS 用于「不把关键字当公式属性」。
+    二者服务于同一件事（都是「公式里出现的 SQL 词不是属性」），一旦漂移就会出现
+    「同一 token 在一处被当关键字、在另一处被当属性」——ASC/DESC 缺失导致排名占比
+    问题整轮 400 即由此而来。
+    """
+
+    def test_formula_parser_keywords_are_covered_by_refs_keywords(self) -> None:
+        from app.services.formula_parser import _SQL_KEYWORDS
+        from app.services.nl2sql_refs import _FORMULA_SQL_KEYWORDS
+
+        missing = sorted(_SQL_KEYWORDS - _FORMULA_SQL_KEYWORDS)
+        assert missing == [], (
+            f"nl2sql_refs._FORMULA_SQL_KEYWORDS 缺少 {missing}；"
+            f"这些 token 会被 _extractFormulaProperties 当作属性上报"
+        )

@@ -109,3 +109,62 @@ async def test_reconcile_errors_when_unified_ids_mismatch(
 
     assert report.error_count >= 1
     assert report.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# Backfill（v3.1 M0-P0.2：Neo4j 无 unified_id 节点 → PG 占位 + Neo4j 回填）
+# 注意：以下 3 个测试当前 RED（scripts.backfill_neo4j_external_id 待 Task 5 实现）
+# ---------------------------------------------------------------------------
+
+
+async def test_backfill_writes_pg_and_neo4j_for_unaligned_nodes(
+    neo4jSeedClasses, dbSession: AsyncSession
+):
+    """Neo4j 节点无 unified_id → backfill 后 PG + Neo4j 都有 obj:Class:{id}。"""
+    from scripts.backfill_neo4j_external_id import backfill
+
+    await _truncate_id_mapping(dbSession)
+
+    written = await backfill(dbSession, neo4jSeedClasses, batch_size=500)
+
+    assert written == 2  # 仅 2 个无 unified_id 的节点被回填（id=100, id=101）
+    row = (
+        await dbSession.execute(
+            text("SELECT unified_id FROM id_mapping WHERE external_id = '100'")
+        )
+    ).first()
+    assert row is not None
+    assert row[0] == "obj:Class:100"
+
+
+async def test_backfill_is_idempotent(
+    neo4jSeedClasses, dbSession: AsyncSession
+):
+    """重复跑 backfill 不产生重复映射。"""
+    from scripts.backfill_neo4j_external_id import backfill
+
+    await _truncate_id_mapping(dbSession)
+    await backfill(dbSession, neo4jSeedClasses)
+    written2 = await backfill(dbSession, neo4jSeedClasses)
+
+    assert written2 == 0  # 第二次无新写入
+    rows = (
+        await dbSession.execute(
+            text("SELECT COUNT(*) FROM id_mapping WHERE external_id LIKE '10%'")
+        )
+    ).scalar()
+    assert rows == 2  # 仅 2 条
+
+
+async def test_backfill_then_reconcile_yields_zero_diff(
+    neo4jSeedClasses, dbSession: AsyncSession
+):
+    """backfill 完成后 reconcile 必须 diff=0。"""
+    from scripts.backfill_neo4j_external_id import backfill
+    from scripts.reconcile_neo4j_id_mapping import reconcile
+
+    await _truncate_id_mapping(dbSession)
+    await backfill(dbSession, neo4jSeedClasses)
+    report = await reconcile(dbSession, neo4jSeedClasses)
+
+    assert report.diff_count == 0, f"diff after backfill: {report.rows}"

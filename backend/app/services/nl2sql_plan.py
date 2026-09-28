@@ -254,8 +254,10 @@ async def generateQueryPlan(
         totalPrompt += response.promptTokens
         totalCompletion += response.completionTokens
         # 4-1（feat-token-cache）：任一轮 cached_tokens=None → 整体记 None。
-        if response.cachedTokens is not None:
-            totalCached = (totalCached or 0) + response.cachedTokens
+        # getattr 兜底：测试 _Resp 替身未必带 cachedTokens 字段（旧 mock 兼容）。
+        responseCached = getattr(response, "cachedTokens", None)
+        if responseCached is not None:
+            totalCached = (totalCached or 0) + responseCached
         outcome = _parsePlanOutcome(response.content)
         if outcome.plan is None:
             # 单点 reason= 日志：按原因聚合失败率（M3 观测性）

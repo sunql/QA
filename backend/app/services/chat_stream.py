@@ -32,6 +32,10 @@ from app.domain.multi_step_plan import (
 from app.domain.query_plan import QueryPlan
 from app.domain.schemas import AgentSuggestion, ChatRequest
 from app.services.intent_service import IntentResult
+# 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER，
+# 与 chat_service.processMessage 同口径——在 _streamQuery 入口一次性读一次，
+# 整条流水线复用，避免每段 _costFor 调用都查 DB。
+from app.services.nl2sql_service import _readFloatConfig
 from app.services.stream_events import (
     ErrorType,
     EVENT_CHART,
@@ -307,6 +311,11 @@ class StreamMixin:
             needSamples=intent != IntentType.CLARIFY,
             needDrift=intent != IntentType.CLARIFY,
         )
+        # 4-1（feat-token-cache）：cache hit multiplier 入口一次性读，透传到
+        # 整条流式流水线的 _costFor / _costForSql 调用。与 chat_service 同口径。
+        cacheHitMultiplier = await _readFloatConfig(
+            session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
+        )
         # 类召回诊断（2026-09-16）：单步/多步共用此 pc，事件一次性下发；
         # 前端在 truncated/fallback 时向用户提示（静默缺表是可见性盲区）
         if pc.recall is not None:
@@ -404,14 +413,14 @@ class StreamMixin:
                 session, dto.sessionId, dto.question, answer, None,
                 routing_layer="L2",
                 latency_ms=int((time.monotonic() - _stream_t0) * 1000),
-                token_cost_usd=float(self._costForSql(outcome, pc.selected)),
+                token_cost_usd=float(self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)),
             )
             await self._saveQueryState(
                 session, dto.sessionId,
                 question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
             )
             totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
-            totalCost = self._costForSql(outcome, pc.selected)
+            totalCost = self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)
             affinityConfig = outcome.sqlConfig or pc.selected
             affinity = await self._buildAffinityStatus(
                 session, dto.sessionId, affinityConfig.id, affinityConfig.model_name,
@@ -439,7 +448,7 @@ class StreamMixin:
             )
             return
         totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
-        totalCost = self._costForSql(outcome, pc.selected)
+        totalCost = self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)
         # 单步执行计划：统一展示 MultiStepPlanCard（2026-08-16）。description 取计划
         # target（ReAct 阶段产出的核心实体），plan 为 None 时退化为问题截断。
         stepDesc = _clipText(
@@ -513,8 +522,9 @@ class StreamMixin:
                         + outcome.wasted[0] + outcome.wasted[1]
                         + detected.prompt_tokens + detected.completion_tokens
                     )
-                    prior_cost = self._costForSql(outcome, pc.selected) + self._costFor(
+                    prior_cost = self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier) + self._costFor(
                         pc.selected, detected.prompt_tokens, detected.completion_tokens,
+                        cacheHitMultiplier=cacheHitMultiplier,
                     )
                     if retryUsage is not None:
                         prior_tokens += retryUsage.tokens
@@ -535,17 +545,23 @@ class StreamMixin:
         if retryTokens[0] or retryTokens[1]:
             retryCfg = outcome.sqlConfig or pc.selected
             totalTokens += retryTokens[0] + retryTokens[1]
-            totalCost += self._costFor(retryCfg, retryTokens[0], retryTokens[1])
+            totalCost += self._costFor(retryCfg, retryTokens[0], retryTokens[1], cacheHitMultiplier=cacheHitMultiplier)
             await self._recordUsage(
                 session, dto.sessionId, retryCfg,
                 retryTokens[0], retryTokens[1], purpose="nl2sql",
             )
 
-        chartType, option, chartPt, chartCt = await self._chartStep(
+        chartType, option, chartPt, chartCt, chartCached = await self._chartStep(
             session, dto, pc, data, intentChartType
         )
         totalTokens += chartPt + chartCt
-        totalCost += self._costFor(pc.selected, chartPt, chartCt)
+        # 4-2（feat-token-cache 续）：chart 阶段 cachedTokens 透传到流式汇总的
+        # _costFor 调用，与非流式路径同口径。multiplier 由 _streamQuery 入口
+        # 一次性读 _LLM_CACHE_HIT_MULTIPLIER，沿用 cacheHitMultiplier 局部变量。
+        totalCost += self._costFor(
+            pc.selected, chartPt, chartCt,
+            cachedTokens=chartCached, cacheHitMultiplier=cacheHitMultiplier,
+        )
         yield StreamEvent(EVENT_CHART, {"chartType": chartType.value, "chartOption": option, "data": data})
 
         # Phase 1.4：拉取目标表的可信度 badge 并通过 SSE 单独下发（前端订阅后渲染）
@@ -577,8 +593,15 @@ class StreamMixin:
             answerModelName = answerConfig.model_name
             if chunk.isDone:
                 totalTokens += chunk.promptTokens + chunk.completionTokens + wastedPt + wastedCt
-                totalCost += self._costFor(answerConfig, chunk.promptTokens, chunk.completionTokens)
-                totalCost += self._costFor(pc.selected, wastedPt, wastedCt)
+                totalCost += self._costFor(
+                    answerConfig, chunk.promptTokens, chunk.completionTokens,
+                    cacheHitMultiplier=cacheHitMultiplier,
+                )
+                # wasted 是降级前主模型已消耗 token（Nl2SqlError.tokens 或 0），
+                # 无成功响应 → 不带 cachedTokens，保持 None（与 chat_usage 同口径）。
+                totalCost += self._costFor(
+                    pc.selected, wastedPt, wastedCt, cacheHitMultiplier=cacheHitMultiplier,
+                )
                 await self._recordUsage(
                     session, dto.sessionId, answerConfig,
                     chunk.promptTokens, chunk.completionTokens, purpose="answer",
@@ -681,6 +704,10 @@ class StreamMixin:
         导致追问多步抛 TypeError 且显式/复合多步从不注入全局约束）。
         """
         _ms_t0 = _t0 if _t0 is not None else time.monotonic()
+        # 4-1（feat-token-cache）：与 _streamQuery 同口径，入口一次性读 multiplier。
+        cacheHitMultiplier = await _readFloatConfig(
+            session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
+        )
         ctx = StepExecutionContext(
             datasource_type=pc.ds.type,
             oracle_version=pc.ds.oracle_version,
@@ -741,10 +768,19 @@ class StreamMixin:
                 agg_config = agg_resp[1]
                 agg_pt = agg_resp[0].promptTokens
                 agg_ct = agg_resp[0].completionTokens
+                agg_cached = getattr(agg_resp[0], "cachedTokens", None)
                 wasted_pt, wasted_ct = agg_resp[2]
                 total_tokens += agg_pt + agg_ct + wasted_pt + wasted_ct
-                total_cost += self._costFor(agg_config, agg_pt, agg_ct)
-                total_cost += self._costFor(pc.selected, wasted_pt, wasted_ct)
+                # 4-2（feat-token-cache 续）：多步聚合 answer cachedTokens 透传，
+                # 与单步 _summarizeUsage 同口径。
+                total_cost += self._costFor(
+                    agg_config, agg_pt, agg_ct,
+                    cachedTokens=agg_cached, cacheHitMultiplier=cacheHitMultiplier,
+                )
+                total_cost += self._costFor(
+                    pc.selected, wasted_pt, wasted_ct,
+                    cacheHitMultiplier=cacheHitMultiplier,
+                )
                 last_model_name = agg_config.model_name
                 await self._recordUsage(
                     session, dto.sessionId, agg_config,

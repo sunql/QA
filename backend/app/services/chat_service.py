@@ -534,7 +534,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                     )
             raise
         self._spawnEmbedding(dto, finalSql)
-        chartType, option, chartPt, chartCt = await self._chartStep(
+        chartType, option, chartPt, chartCt, chartCached = await self._chartStep(
             session, dto, pc, data, result.chartType
         )
         answerResp, answerConfig, wastedAnswer = await self._generateAnswer(
@@ -547,7 +547,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         )
         totalTokens, totalCost = self._summarizeUsage(
             outcome, chartPt, chartCt, answerResp, answerConfig, wastedAnswer, pc.selected,
-            cacheHitMultiplier=cacheHitMultiplier,
+            cacheHitMultiplier=cacheHitMultiplier, chartCached=chartCached,
         )
         # 执行错误回灌重试额外消耗计入总量并审计（1-3）
         if retryTokens[0] or retryTokens[1]:

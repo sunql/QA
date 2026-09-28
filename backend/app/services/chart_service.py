@@ -61,15 +61,23 @@ class ChartService:
         question: str,
         llmClient: Any,
         modelConfig: Any,
-    ) -> tuple[dict, int, int]:
-        """生成 ECharts option。TABLE 走规则；其余类型 LLM 生成，失败回退规则。"""
+    ) -> tuple[dict, int, int, int | None]:
+        """生成 ECharts option。TABLE 走规则；其余类型 LLM 生成，失败回退规则。
+
+        4-2（feat-token-cache，2026-09-28）：返回 4-tuple `(option, promptTokens,
+        completionTokens, cachedTokens)`；cachedTokens 从 LlmResponse 透传，
+        用于 chart 阶段的 _costFor 差额计费（DeepSeek prompt cache 命中部分
+        按 miss×multiplier 计）。TABLE / LLM 失败 / LLM 抛异常 三条非 happy
+        路径均 cachedTokens=0（无 LLM 调用或调用失败无响应）。
+        """
         if chartType == ChartType.TABLE:
-            return self._fallbackOption(chartType, columns, data), 0, 0
+            return self._fallbackOption(chartType, columns, data), 0, 0, 0
 
         prompt = self._buildOptionPrompt(chartType, columns, data, question)
         parsed: dict | None = None
         promptTokens = 0
         completionTokens = 0
+        cachedTokens: int | None = 0
         try:
             response = await llmClient.complete(
                 messages=[
@@ -80,6 +88,7 @@ class ChartService:
             )
             promptTokens = response.promptTokens
             completionTokens = response.completionTokens
+            cachedTokens = getattr(response, "cachedTokens", None)
             parsed = self._parseOptionJson(response.content)
         except Exception as exc:  # noqa: BLE001 - 图表失败应优雅降级
             logger.warning("图表 option 生成失败，回退到规则: %s", exc)
@@ -91,7 +100,7 @@ class ChartService:
             # v3 2026-09-18：归一化 LLM 偶发写错的 ECharts 模板变量 `{d}`（仅 pie 百分比）
             # → 非 pie 场景下替换为 `{c}`（数值），防止柱图/线图显示字面量 `{d}%`。
             parsed = self._normalizeOptionFormatters(parsed, chartType)
-        return parsed, promptTokens, completionTokens
+        return parsed, promptTokens, completionTokens, cachedTokens
 
     @staticmethod
     def _normalizeOptionFormatters(option: dict, chartType: ChartType) -> dict:

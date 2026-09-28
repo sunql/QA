@@ -20,11 +20,12 @@ def _llmConfig() -> SimpleNamespace:
 
 
 class _Resp:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, *, cachedTokens: int | None = None) -> None:
         self.content = content
         self.modelName = "test-model"
         self.promptTokens = 7
         self.completionTokens = 3
+        self.cachedTokens = cachedTokens
 
 
 class _FakeLlm:
@@ -104,18 +105,42 @@ class TestFallbackOption:
 class TestGenerateChartOption:
     async def test_llm_success_returns_parsed_option(self) -> None:
         fake = _FakeLlm('{"series": [{"type": "bar", "data": [1]}]}')
-        option, promptTokens, completionTokens = await ChartService().generateChartOption(
+        option, promptTokens, completionTokens, cachedTokens = await ChartService().generateChartOption(
             ChartType.BAR, ["NAME", "QTY"], _rows(["A"], [1]), "问题", fake, _llmConfig()
         )
         assert option["series"][0]["type"] == "bar"
         assert promptTokens == 7
         assert completionTokens == 3
+        assert cachedTokens is None
+
+    async def test_llm_success_propagates_cached_tokens(self) -> None:
+        """4-2（feat-token-cache）：cachedTokens 必须在 4-tuple 返回里透传。"""
+        # 重新构造一个返回 cachedTokens=5 的 fake
+        class _FakeLlmWithCache(_FakeLlm):
+            pass
+
+        class _RespWithCache(_Resp):
+            def __init__(self, content: str) -> None:
+                super().__init__(content, cachedTokens=5)
+
+        fake = _FakeLlmWithCache('{"series": [{"type": "bar", "data": [1]}]}')
+        # 替换 _FakeLlm.complete 的返回类型
+        async def _complete_with_cache(messages, **kwargs):
+            fake.calls.append([(m.role, m.content) for m in messages])
+            return _RespWithCache(fake._content)
+        fake.complete = _complete_with_cache  # type: ignore[method-assign]
+
+        option, promptTokens, completionTokens, cachedTokens = await ChartService().generateChartOption(
+            ChartType.BAR, ["NAME", "QTY"], _rows(["A"], [1]), "问题", fake, _llmConfig()
+        )
+        assert option["series"][0]["type"] == "bar"
+        assert cachedTokens == 5, f"cachedTokens 应透传=5, 实际 {cachedTokens}"
 
     async def test_llm_non_json_falls_back(self) -> None:
         fake = _FakeLlm("抱歉，我不能生成图表配置。")
         service = ChartService()
         data = _rows(["A", "B"], [1, 2])
-        option, _, _ = await service.generateChartOption(
+        option, _, _, _ = await service.generateChartOption(
             ChartType.BAR, ["NAME", "QTY"], data, "问题", fake, _llmConfig()
         )
         assert option["series"][0]["type"] == "bar"
@@ -124,7 +149,7 @@ class TestGenerateChartOption:
     async def test_llm_json_without_series_falls_back(self) -> None:
         fake = _FakeLlm('{"title": {"text": "no series"}}')
         data = _rows(["A"], [1])
-        option, _, _ = await ChartService().generateChartOption(
+        option, _, _, _ = await ChartService().generateChartOption(
             ChartType.PIE, ["NAME", "QTY"], data, "问题", fake, _llmConfig()
         )
         assert option["series"][0]["type"] == "pie"
@@ -132,7 +157,7 @@ class TestGenerateChartOption:
     async def test_llm_raises_falls_back(self) -> None:
         fake = _FakeLlm("", raises=True)
         data = _rows(["A"], [1])
-        option, _, _ = await ChartService().generateChartOption(
+        option, _, _, _ = await ChartService().generateChartOption(
             ChartType.LINE, ["D", "QTY"], [{"D": "2026-08-01", "QTY": Decimal(1)}], "问题", fake, _llmConfig()
         )
         assert option["series"][0]["type"] == "line"
@@ -140,7 +165,7 @@ class TestGenerateChartOption:
     async def test_table_skips_llm_when_falls_back(self) -> None:
         fake = _FakeLlm("garbage")
         data = _rows(["A"], [1])
-        option, _, _ = await ChartService().generateChartOption(
+        option, _, _, _ = await ChartService().generateChartOption(
             ChartType.TABLE, ["NAME", "QTY"], data, "问题", fake, _llmConfig()
         )
         assert option["columns"] == ["NAME", "QTY"]
@@ -259,7 +284,7 @@ class TestGenerateChartOptionNormalizeIntegration:
                         '"yAxis": {"type": "value"}, '
                         '"series": [{"type": "bar", "data": [10, 20], '
                         '"label": {"show": true, "formatter": "{d}%"}}]}')
-        option, _, _ = await ChartService().generateChartOption(
+        option, _, _, _ = await ChartService().generateChartOption(
             ChartType.BAR, ["name", "value"], _rows(["A", "B"], [10, 20]),
             "占比", fake, _llmConfig(),
         )

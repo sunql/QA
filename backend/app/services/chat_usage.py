@@ -180,11 +180,15 @@ class UsageMixin:
         pc: _PipelineContext,
         data: list[dict],
         intentChartType: ChartType | None = None,
-    ) -> tuple[Any, dict, int, int]:
+    ) -> tuple[Any, dict, int, int, int | None]:
         """图表类型推荐 + option 生成（失败自动回退规则 option），有消耗时记录用量。
 
         优先级：客户端显式 dto.chartType > 意图抽取 intentChartType（3-3，"换成柱状图"）
-        > 按数据形状自动推荐。返回 (chartType, option, promptTokens, completionTokens)。
+        > 按数据形状自动推荐。
+
+        返回 5-tuple (chartType, option, promptTokens, completionTokens, cachedTokens)；
+        4-2（feat-token-cache）：cachedTokens 由 chart_service 透传，供 _summarizeUsage
+        按差额计费（chart 阶段占 token ~3%，但 bill 必须准确）。
         """
         columns = self._columns(data)
         chartType = (
@@ -194,11 +198,13 @@ class UsageMixin:
             if intentChartType is not None
             else self._chart.recommendChartType(columns, data)
         )
-        option, chartPt, chartCt = await self._chart.generateChartOption(
+        option, chartPt, chartCt, chartCached = await self._chart.generateChartOption(
             chartType, columns, data, dto.question, pc.client, pc.selected,
         )
-        await self._recordChartUsage(session, dto, pc.selected, chartPt, chartCt)
-        return chartType, option, chartPt, chartCt
+        await self._recordChartUsage(
+            session, dto, pc.selected, chartPt, chartCt, chartCached,
+        )
+        return chartType, option, chartPt, chartCt, chartCached
 
     async def _generateAnswer(
         self, session: AsyncSession, dto: ChatRequest, pc: _PipelineContext,
@@ -228,12 +234,18 @@ class UsageMixin:
         answerResp: Any, answerConfig: LlmConfig, wastedAnswer: tuple[int, int],
         primary: LlmConfig,
         cacheHitMultiplier: float = 0.0,
+        chartCached: int | None = None,
     ) -> tuple[int, Decimal]:
         """汇总本轮全部 LLM 消耗（含降级前浪费），与 DB 审计行一致。返回 (tokens, cost)。
 
         cacheHitMultiplier（4-1，feat-token-cache）：DeepSeek cache hit 部分
         按 miss 单价 × 该比例计费（默认 0 = 命中免费；上线后默认 0.25 对齐 DeepSeek 当前价）。
         由调用方在 chat_service 入口一次性读 system_config.LLM_CACHE_HIT_MULTIPLIER 透传。
+
+        chartCached（4-2，feat-token-cache 续）：chart 阶段的 cachedTokens 透传到
+        _costFor；answer 阶段直接从 answerResp.cachedTokens 读。
+        wasted 路径无成功响应（Nl2SqlError 携带累计 token，无 cachedTokens），
+        保持 cachedTokens=None。
         """
         total = (
             outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
@@ -241,9 +253,14 @@ class UsageMixin:
             + answerResp.promptTokens + answerResp.completionTokens + wastedAnswer[0] + wastedAnswer[1]
         )
         cost = self._costForSql(outcome, primary, cacheHitMultiplier=cacheHitMultiplier)
-        cost += self._costFor(primary, chartPt, chartCt, cacheHitMultiplier=cacheHitMultiplier)
+        # 4-2：chart / answer cachedTokens 透传到 _costFor。
+        cost += self._costFor(
+            primary, chartPt, chartCt,
+            cachedTokens=chartCached, cacheHitMultiplier=cacheHitMultiplier,
+        )
         cost += self._costFor(
             answerConfig, answerResp.promptTokens, answerResp.completionTokens,
+            cachedTokens=getattr(answerResp, "cachedTokens", None),
             cacheHitMultiplier=cacheHitMultiplier,
         )
         cost += self._costFor(primary, wastedAnswer[0], wastedAnswer[1])
@@ -269,17 +286,27 @@ class UsageMixin:
         return cost
 
     async def _recordChartUsage(
-        self, session: AsyncSession, dto: ChatRequest, config: Any, chartPt: int, chartCt: int,
+        self,
+        session: AsyncSession, dto: ChatRequest, config: Any,
+        chartPt: int, chartCt: int, chartCached: int | None = None,
     ) -> None:
+        # 4-2（feat-token-cache）：chart 阶段 cachedTokens 透传到 _recordUsage →
+        # _costFor 差额计费（chart LLM 也有 prompt cache 命中可能）。
         if chartPt + chartCt > 0:
-            await self._recordUsage(session, dto.sessionId, config, chartPt, chartCt, purpose="chart")
+            await self._recordUsage(
+                session, dto.sessionId, config, chartPt, chartCt,
+                purpose="chart", cachedTokens=chartCached,
+            )
 
     async def _recordAnswerUsage(
         self, session: AsyncSession, dto: ChatRequest, config: Any, resp: Any,
     ) -> None:
+        # 4-2（feat-token-cache）：从 LlmResponse 读 cachedTokens 透传到 _recordUsage →
+        # _costFor 差额计费。answer 阶段 schema prefix 同样命中 DeepSeek cache。
         await self._recordUsage(
             session, dto.sessionId, config,
-            resp.promptTokens, resp.completionTokens, purpose="answer",
+            resp.promptTokens, resp.completionTokens,
+            purpose="answer", cachedTokens=getattr(resp, "cachedTokens", None),
         )
 
     @staticmethod

@@ -74,7 +74,9 @@ type EntityKind =
   | "property"
   | "metric"
   | "lineageEdge"
-  | "wikiLink";
+  | "wikiLink"
+  | "wikiCategory"
+  | "wikiPage";
 
 // 后端暴露给 spec 断言/构造的内存存储（每个 page 独立实例）
 export interface MockLineageEdge {
@@ -108,6 +110,27 @@ export interface MockWikiLink {
   revoked_time: string | null;
 }
 
+/** feat-wiki-category：分类树节点（递归）。mock 端保持与后端 WikiCategoryRead 形状一致。 */
+export interface MockWikiCategory {
+  id: number;
+  parent_id: number | null;
+  sort_order: number;
+  name: string;
+  description: string | null;
+  page_id: string | null;
+  children: MockWikiCategory[];
+}
+
+/** feat-wiki-category：wiki_page 简化 mock（mockApi 不关心 content 等大字段）。 */
+export interface MockWikiPage {
+  id: number;
+  page_id: string;
+  title: string;
+  dimension: string | null;
+  status: string;
+  category_id: number | null;
+}
+
 export interface MockBackend {
   page: Page;
   datasources: MockDatasource[];
@@ -116,6 +139,8 @@ export interface MockBackend {
   metrics: MockMetric[];
   lineageEdges: MockLineageEdge[];
   wikiLinks: MockWikiLink[];
+  wikiCategories: MockWikiCategory[];
+  wikiPages: MockWikiPage[];
   nextId: (kind: EntityKind) => number;
 }
 
@@ -256,6 +281,145 @@ const SEED_WIKI_LINKS: MockWikiLink[] = [
   },
 ];
 
+/** feat-wiki-category：seed 分类树（3 根 + 5 子，与后端 migration 0093 seed 对齐）。 */
+const SEED_WIKI_CATEGORIES: MockWikiCategory[] = [
+  {
+    id: 1,
+    parent_id: null,
+    sort_order: 0,
+    name: "采购管理",
+    description: null,
+    page_id: null,
+    children: [
+      {
+        id: 4,
+        parent_id: 1,
+        sort_order: 0,
+        name: "供应商准入流程",
+        description: null,
+        page_id: "page-001-01",
+        children: [],
+      },
+      {
+        id: 5,
+        parent_id: 1,
+        sort_order: 1,
+        name: "采购订单执行",
+        description: null,
+        page_id: "page-001-02",
+        children: [],
+      },
+    ],
+  },
+  {
+    id: 2,
+    parent_id: null,
+    sort_order: 1,
+    name: "质量管理",
+    description: null,
+    page_id: null,
+    children: [
+      {
+        id: 6,
+        parent_id: 2,
+        sort_order: 0,
+        name: "IQC 来料检验",
+        description: null,
+        page_id: "page-002-01",
+        children: [],
+      },
+    ],
+  },
+  {
+    id: 3,
+    parent_id: null,
+    sort_order: 2,
+    name: "仓储物流",
+    description: null,
+    page_id: null,
+    children: [
+      {
+        id: 7,
+        parent_id: 3,
+        sort_order: 0,
+        name: "入库作业",
+        description: null,
+        page_id: "page-003-01",
+        children: [],
+      },
+      {
+        id: 8,
+        parent_id: 3,
+        sort_order: 1,
+        name: "出库配送",
+        description: null,
+        page_id: "page-003-02",
+        children: [],
+      },
+    ],
+  },
+];
+
+/** feat-wiki-category：seed wiki_pages（与原 stub page_id 对齐）。 */
+const SEED_WIKI_PAGES: MockWikiPage[] = [
+  {
+    id: 101,
+    page_id: "page-001",
+    title: "采购管理（顶层 page）",
+    dimension: "PROCESS",
+    status: "EFFECTIVE",
+    category_id: 1,
+  },
+  {
+    id: 102,
+    page_id: "page-001-01",
+    title: "供应商准入流程",
+    dimension: "PROCESS",
+    status: "EFFECTIVE",
+    category_id: 4,
+  },
+  {
+    id: 103,
+    page_id: "page-001-02",
+    title: "采购订单执行",
+    dimension: "PROCESS",
+    status: "EFFECTIVE",
+    category_id: 5,
+  },
+  {
+    id: 104,
+    page_id: "page-002",
+    title: "质量管理（顶层 page）",
+    dimension: "PROCESS",
+    status: "EFFECTIVE",
+    category_id: 2,
+  },
+  {
+    id: 105,
+    page_id: "page-002-01",
+    title: "IQC 来料检验",
+    dimension: "PROCESS",
+    status: "EFFECTIVE",
+    category_id: 6,
+  },
+  {
+    id: 106,
+    page_id: "page-003-01",
+    title: "入库作业",
+    dimension: "PROCESS",
+    status: "EFFECTIVE",
+    category_id: 7,
+  },
+  {
+    id: 107,
+    page_id: "page-003-02",
+    title: "出库配送",
+    dimension: "PROCESS",
+    status: "EFFECTIVE",
+    category_id: 8,
+  },
+];
+
 function seed() {
   return {
     datasources: SEED_DATASOURCES.map((d) => ({ ...d })),
@@ -264,6 +428,15 @@ function seed() {
     metrics: SEED_METRICS.map((m) => ({ ...m })),
     lineageEdges: SEED_LINEAGE_EDGES.map((e) => ({ ...e })),
     wikiLinks: SEED_WIKI_LINKS.map((w) => ({ ...w })),
+    wikiCategories: SEED_WIKI_CATEGORIES.map(deepCloneCategory),
+    wikiPages: SEED_WIKI_PAGES.map((p) => ({ ...p })),
+  };
+}
+
+function deepCloneCategory(c: MockWikiCategory): MockWikiCategory {
+  return {
+    ...c,
+    children: c.children.map(deepCloneCategory),
   };
 }
 
@@ -519,6 +692,86 @@ async function handleClassRoutes(route: Route, ctx: RouteCtx): Promise<void> {
     return respondJson(route, 200, ok(target));
   }
   return respondJson(route, 404, fail("类不存在"));
+}
+
+async function handleWikiCategoryRoutes(route: Route, ctx: RouteCtx): Promise<void> {
+  const { method, path, body, backend } = ctx;
+
+  // GET /wiki/categories/tree —— 全量分类树
+  if (path === "/wiki/categories/tree" && method === "GET") {
+    return respondJson(route, 200, backend.wikiCategories.map(deepCloneCategory));
+  }
+
+  const idMatch = path.match(/^\/wiki\/categories\/(\d+)$/);
+  if (idMatch) {
+    const id = Number(idMatch[1]);
+    if (method === "PATCH") {
+      const idx = backend.wikiCategories.findIndex((c) => c.id === id);
+      if (idx < 0) return respondJson(route, 404, fail(`category ${id} not found`));
+      const patch = (body ?? {}) as Partial<MockWikiCategory>;
+      const updated: MockWikiCategory = {
+        ...backend.wikiCategories[idx],
+        ...patch,
+        id: backend.wikiCategories[idx].id,  // id 不可改
+      };
+      backend.wikiCategories = backend.wikiCategories.map((c) =>
+        c.id === id ? updated : c,
+      );
+      return respondJson(route, 200, updated);
+    }
+    if (method === "DELETE") {
+      backend.wikiCategories = backend.wikiCategories.filter((c) => c.id !== id);
+      return route.fulfill({ status: 204, body: "" });
+    }
+  }
+
+  if (path === "/wiki/categories" && method === "POST") {
+    const payload = (body ?? {}) as Partial<MockWikiCategory>;
+    const created: MockWikiCategory = {
+      id: backend.nextId("wikiCategory"),
+      parent_id: payload.parent_id ?? null,
+      sort_order: payload.sort_order ?? 0,
+      name: payload.name ?? "",
+      description: payload.description ?? null,
+      page_id: payload.page_id ?? null,
+      children: [],
+    };
+    backend.wikiCategories = [...backend.wikiCategories, created];
+    return respondJson(route, 201, created);
+  }
+
+  return respondJson(route, 404, fail(`mockApi: 未实现 ${method} ${path}`));
+}
+
+async function handleWikiPageRoutes(route: Route, ctx: RouteCtx): Promise<void> {
+  const { method, path, query, body, backend } = ctx;
+
+  // GET /wiki/pages —— 分页列表（mock 不分页，全量返回）
+  if (path === "/wiki/pages" && method === "GET") {
+    const limit = Number(query.get("limit") ?? "50");
+    const rows = backend.wikiPages.slice(0, limit);
+    return respondJson(route, 200, { rows, total: backend.wikiPages.length });
+  }
+
+  // PATCH /wiki/pages/{pageId} —— mock 只更新 category_id
+  const idMatch = path.match(/^\/wiki\/pages\/([^/]+)$/);
+  if (idMatch && method === "PATCH") {
+    const pageId = idMatch[1];
+    const idx = backend.wikiPages.findIndex((p) => p.page_id === pageId);
+    if (idx < 0) return respondJson(route, 404, fail(`page ${pageId} not found`));
+    const patch = (body ?? {}) as Partial<MockWikiPage>;
+    const updated: MockWikiPage = {
+      ...backend.wikiPages[idx],
+      ...patch,
+      page_id: backend.wikiPages[idx].page_id,  // 主键不可改
+    };
+    backend.wikiPages = backend.wikiPages.map((p) =>
+      p.page_id === pageId ? updated : p,
+    );
+    return respondJson(route, 200, updated);
+  }
+
+  return respondJson(route, 404, fail(`mockApi: 未实现 ${method} ${path}`));
 }
 
 async function handleWikiLinkRoutes(route: Route, ctx: RouteCtx): Promise<void> {
@@ -912,6 +1165,8 @@ async function dispatch(route: Route, backend: MockBackend): Promise<void> {
   if (ctx.path.startsWith("/data-quality")) return handleDataQualityGenerateRoutes(route, ctx);
   if (ctx.path.startsWith("/menu-config")) return handleMenuConfigRoutes(route, ctx);
   if (ctx.path.startsWith("/admin/wiki-links")) return handleWikiLinkRoutes(route, ctx);
+  if (ctx.path.startsWith("/wiki/categories")) return handleWikiCategoryRoutes(route, ctx);
+  if (ctx.path.startsWith("/wiki/pages")) return handleWikiPageRoutes(route, ctx);
   return respondJson(route, 404, fail(`模拟后端未实现 ${ctx.method} ${ctx.path}`));
 }
 
@@ -924,6 +1179,8 @@ export async function mockApi(page: Page): Promise<MockBackend> {
     metric: 100,
     lineageEdge: 100,
     wikiLink: 100,
+    wikiCategory: 100,
+    wikiPage: 100,
   };
   const backend: MockBackend = {
     page,

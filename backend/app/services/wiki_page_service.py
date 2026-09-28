@@ -552,6 +552,13 @@ class WikiPageService:
         """
         _assertDimension(dto.dimension)
         _assertKnowledgeAuthorityLevel(dto.authority_level)
+        # feat-wiki-category：category_id 预校验，避免 IntegrityError 兜底变 500。
+        # null 是合法值（不挂分类），跳过校验。
+        if dto.category_id is not None:
+            from app.services.wiki_category_service import WikiCategoryService
+            await WikiCategoryService().getCategory(
+                session, category_id=dto.category_id
+            )
         pageId = (
             sanitizePageId(dto.page_id)
             if dto.page_id
@@ -573,6 +580,7 @@ class WikiPageService:
             content_hash=contentHashOf(dto.content),
             dimension=dto.dimension,
             authority_level=dto.authority_level,
+            category_id=dto.category_id,
             status="DRAFT",
             structure_stage="MARKDOWN",
             version="v1.0",
@@ -636,6 +644,14 @@ class WikiPageService:
                 # page_id 刻意**不重算**：它被 knowledge_claim / knowledge_relation
                 # 以 FK 引用，改 ID 会让已确认的关系变成悬空引用。
                 entity.content_hash = contentHashOf(value)
+            elif field == "category_id":
+                # feat-wiki-category：预校验 category 存在再写，避免 FK 失败
+                # 走到 IntegrityError（500）。None 表示「脱钩」，跳过校验。
+                if value is not None:
+                    from app.services.wiki_category_service import (
+                        CategoryNotFoundError, WikiCategoryService,
+                    )
+                    await WikiCategoryService().getCategory(session, category_id=value)
             setattr(entity, field, value)
 
         # 反馈与维度改写同事务：先 flush 再统一 commit，避免「维度改了但反馈没落」

@@ -38,6 +38,7 @@ import AdminFeatureRulesPage from "./pages/AdminFeatureRulesPage";
 import AdminUsersPage from "./pages/AdminUsersPage";
 import AdminRolesPage from "./pages/AdminRolesPage";
 import AdminOrganizationsPage from "./pages/AdminOrganizationsPage";
+import AdminWikiCategoriesPage from "./pages/AdminWikiCategoriesPage";
 import AdminMenusPage from "./pages/AdminMenusPage";
 import AdminSystemConfigPage from "./pages/AdminSystemConfigPage";
 import ProfilePage from "./pages/ProfilePage";
@@ -117,6 +118,7 @@ export default function App() {
         <Route path="admin/wiki-coverage" element={<AdminWikiCoveragePage />} />
         <Route path="admin/wiki-graph" element={<AdminWikiGraphPage />} />
         <Route path="admin/wiki-links" element={<WikiLinksPage />} />
+        <Route path="admin/wiki-categories" element={<AdminWikiCategoriesPage />} />
         <Route path="business-objects" element={<BusinessObjectPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />

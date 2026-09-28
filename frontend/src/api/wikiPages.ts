@@ -19,6 +19,7 @@
 import { httpClient } from "./client";
 import type {
     KnowledgeClaim,
+    WikiCategoryNode,
     WikiPage,
     WikiPageBatchDeleteResult,
     WikiPageCreate,
@@ -301,4 +302,51 @@ export async function suggestWikiRelations(
         { modelId: null },
     );
     return res.data;
+}
+
+// ---------------------------------------------------------------------------
+// Wiki Category（feat-wiki-category）
+// ---------------------------------------------------------------------------
+
+/**
+ * 全量分类树（root 级 array + 递归 children）。
+ *
+ * 用作 WikiLinksPage 左侧目录树、AdminWikiPagesPage 的分类选择器。
+ */
+export async function listWikiCategoryTree(): Promise<WikiCategoryNode[]> {
+    const res = await httpClient.get<WikiCategoryNode[]>(`${PREFIX}/categories/tree`);
+    return res.data;
+}
+
+export interface WikiCategoryCreatePayload {
+    name: string;
+    parentId?: number | null;
+    sortOrder?: number;
+    description?: string | null;
+    pageId?: string | null;
+}
+
+export async function createWikiCategory(
+    payload: WikiCategoryCreatePayload,
+): Promise<WikiCategoryNode> {
+    const res = await httpClient.post<WikiCategoryNode>(
+        `${PREFIX}/categories`,
+        payload,
+    );
+    return res.data;
+}
+
+export async function updateWikiCategory(
+    categoryId: number,
+    payload: Partial<WikiCategoryCreatePayload>,
+): Promise<WikiCategoryNode> {
+    const res = await httpClient.patch<WikiCategoryNode>(
+        `${PREFIX}/categories/${categoryId}`,
+        payload,
+    );
+    return res.data;
+}
+
+export async function deleteWikiCategory(categoryId: number): Promise<void> {
+    await httpClient.delete(`${PREFIX}/categories/${categoryId}`);
 }

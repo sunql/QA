@@ -61,6 +61,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     status,
 )
 from fastapi.exceptions import RequestValidationError
@@ -69,6 +70,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getAdminOnlyActor, getDb
+from app.domain.schemas import UNSET
 from app.services.wiki_vector_service import WikiVectorError, WikiVectorService
 
 logger = logging.getLogger(__name__)
@@ -102,6 +104,9 @@ from app.domain.wiki_schemas import (
     WikiPageListRead,
     WikiPageRead,
     WikiPageUpdate,
+    WikiCategoryCreate,
+    WikiCategoryRead,
+    WikiCategoryUpdate,
     WikiReclassifyRead,
     WikiReclassifyRequest,
     WikiClassifyPreviewRead,
@@ -135,6 +140,12 @@ from app.services.wiki_conflict_service import WikiConflictService
 from app.services.wiki_page_service import WikiPageService
 from app.services.wiki_relation_service import WikiRelationService
 from app.services.wiki_structure_service import WikiStructureService
+from app.services.wiki_category_service import (
+    CategoryNotFoundError,
+    CycleError,
+    WikiCategoryService,
+    WikiCategoryNode,
+)
 from app.services.wiki_suggestion_service import WikiSuggestionService
 
 router = APIRouter(
@@ -154,6 +165,117 @@ _structureSuggester = StructureSuggester()
 _wikiSuggestionService = WikiSuggestionService()
 _wikiStructureService = WikiStructureService()
 _coverageTracker = CoverageTracker()
+_wikiCategoryService = WikiCategoryService()
+
+
+# ---------------------------------------------------------------------------
+# Wiki Category（feat-wiki-category）
+# ---------------------------------------------------------------------------
+
+
+def _categoryToDict(node: WikiCategoryNode) -> dict:
+    """WikiCategoryNode → WikiCategoryRead.model_dump 形状（递归）。"""
+    return {
+        "id": node.id,
+        "parent_id": node.parent_id,
+        "sort_order": node.sort_order,
+        "name": node.name,
+        "description": node.description,
+        "page_id": node.page_id,
+        "children": [_categoryToDict(c) for c in node.children],
+    }
+
+
+@router.get(
+    "/categories/tree",
+    response_model=list[WikiCategoryRead],
+    status_code=status.HTTP_200_OK,
+)
+async def listCategoriesTree(
+    db: AsyncSession = Depends(getDb),
+) -> list[WikiCategoryRead]:
+    """全量分类树（root 级 array，递归 children）。"""
+    nodes = await _wikiCategoryService.listCategoriesTree(db)
+    return [WikiCategoryRead.model_validate(_categoryToDict(n)) for n in nodes]
+
+
+@router.post(
+    "/categories",
+    response_model=WikiCategoryRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def createCategory(
+    dto: WikiCategoryCreate,
+    user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+) -> WikiCategoryRead:
+    """创建分类（admin 维护，created_by 取自当前用户）。"""
+    try:
+        row = await _wikiCategoryService.createCategory(
+            db,
+            name=dto.name,
+            parent_id=dto.parent_id,
+            sort_order=dto.sort_order,
+            description=dto.description,
+            page_id=dto.page_id,
+        )
+    except CategoryNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    await db.commit()
+    node = await _wikiCategoryService.getCategory(db, category_id=row.id)
+    return WikiCategoryRead.model_validate(_categoryToDict(node))
+
+
+@router.patch(
+    "/categories/{categoryId}",
+    response_model=WikiCategoryRead,
+    status_code=status.HTTP_200_OK,
+)
+async def updateCategory(
+    categoryId: int,
+    dto: WikiCategoryUpdate,
+    user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+) -> WikiCategoryRead:
+    """更新分类（含 parent 调整 + sort_order）。"""
+    kwargs: dict[str, Any] = {"category_id": categoryId}
+    if dto.name is not UNSET:
+        kwargs["name"] = dto.name
+    if dto.parent_id is not UNSET:
+        kwargs["parent_id"] = dto.parent_id
+    if dto.sort_order is not UNSET:
+        kwargs["sort_order"] = dto.sort_order
+    if dto.description is not UNSET:
+        kwargs["description"] = dto.description
+    if dto.page_id is not UNSET:
+        kwargs["page_id"] = dto.page_id
+    try:
+        row = await _wikiCategoryService.updateCategory(db, **kwargs)
+    except CategoryNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except CycleError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    await db.commit()
+    node = await _wikiCategoryService.getCategory(db, category_id=row.id)
+    return WikiCategoryRead.model_validate(_categoryToDict(node))
+
+
+@router.delete(
+    "/categories/{categoryId}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def deleteCategory(
+    categoryId: int,
+    user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+) -> Response:
+    """删除分类（ON DELETE SET NULL 让子分类 parent 自动升级为根）。"""
+    try:
+        await _wikiCategoryService.deleteCategory(db, category_id=categoryId)
+    except CategoryNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/pages", response_model=WikiPageListRead, status_code=status.HTTP_200_OK)

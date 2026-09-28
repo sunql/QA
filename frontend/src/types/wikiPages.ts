@@ -56,6 +56,8 @@ export interface WikiPage {
     validTo: string | null;
     createdTime: string | null;
     updatedTime: string | null;
+    /** feat-wiki-category：page 归属分类（前端树按它分组到对应分类节点下）。 */
+    categoryId: number | null;
 }
 
 export interface WikiPageList {
@@ -66,6 +68,8 @@ export interface WikiPageList {
 export interface WikiPageCreate {
     title: string;
     content: string;
+    /** feat-wiki-category：可选创建时挂分类。 */
+    categoryId?: number;
 }
 
 /** PATCH 语义：只传要改的字段（后端用 UNSET 哨兵区分「没传」与「传了 null」）。 */
@@ -78,6 +82,19 @@ export interface WikiPageUpdate {
     version?: string;
     /** Phase 5.5：MISSING_DIMENSION 缺口确认时把 LLM 预览建议一并写入。 */
     autoClassification?: Record<string, unknown> | null;
+    /** feat-wiki-category：page 归属分类；null 表示「脱钩」 */
+    categoryId?: number | null;
+}
+
+/** 树形分类节点（递归 children）；与后端 WikiCategoryRead 对齐。 */
+export interface WikiCategoryNode {
+    id: number;
+    parentId: number | null;
+    sortOrder: number;
+    name: string;
+    description: string | null;
+    pageId: string | null;
+    children: WikiCategoryNode[];
 }
 
 /** 调整分类的结果（action 是本次记录的反馈动作）。 */

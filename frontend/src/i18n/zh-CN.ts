@@ -179,6 +179,7 @@ export const zhCN = {
       wikiGraph: "知识图谱",
       wikiChat: "Wiki Chat",
       wikiLinks: "Wiki 链接管理",
+      wikiCategories: "Wiki 分类管理",
       dataQualityRuleParams: "数据质量 / 规则配置(结构化)",
       profile: "个人信息",
       changePassword: "修改密码",
@@ -2091,6 +2092,8 @@ export const zhCN = {
       dimension: "知识维度",
       authorityLevel: "权威等级",
       authorityLevelPlaceholder: "选择 L0-L5",
+      category: "归属分类",
+      categoryPlaceholder: "选择分类（feat-wiki-category）",
     },
     detail: {
       meta: "条目号 {pageId}｜版本 {version}｜结构阶段 {stage}",
@@ -2136,6 +2139,7 @@ export const zhCN = {
       deleteFailed: "删除失败，请重试",
       batchDeleteFailed: "批量删除失败，请重试",
       statusUpdateFailed: "状态更新失败，请重试",
+      categoryUpdateFailed: "分类更新失败（可能是已被删除）",
     },
     // 事实原子（机制 1 的产物）
     claims: {
@@ -2416,6 +2420,45 @@ export const zhCN = {
     noLinks: "暂无链接",
     selectPageHint: "请先选择左侧 Wiki 页面",
     pageTreeLabel: "请选择 Wiki 页面",
+    treeLoadFailed: "加载分类树失败",
+  },
+  // feat-wiki-category：分类 CRUD 页（admin 维护）
+  wikiCategories: {
+    title: "Wiki 分类管理",
+    description: "管理 Wiki 页面的分类目录（树形结构）。新建分类后可挂 wiki_page 作为概览页。",
+    columns: {
+      name: "名称",
+      parent: "父分类",
+      sortOrder: "排序",
+      page: "概览页",
+      description: "描述",
+    },
+    actions: {
+      create: "新建分类",
+      edit: "编辑",
+      delete: "删除",
+      refresh: "刷新",
+    },
+    form: {
+      name: "分类名称",
+      namePlaceholder: "如：采购管理",
+      parent: "父分类",
+      parentPlaceholder: "顶级分类（不选）",
+      sortOrder: "同级排序（数字越小越靠前）",
+      description: "描述",
+      pageId: "概览页（可选）",
+      pageIdPlaceholder: "选择 wiki_page 作为概览",
+    },
+    messages: {
+      created: "分类已创建",
+      updated: "分类已更新",
+      deleted: "分类已删除",
+      createFailed: "创建失败（可能是名称冲突或父分类已删除）",
+      updateFailed: "更新失败（可能形成环：分类不能挂到自己的后代）",
+      deleteFailed: "删除失败",
+      confirmDelete: "确认删除分类「{name}」？其下的子分类会自动升级为顶级分类。",
+    },
+    empty: "暂无分类，点右上角「新建分类」开始。",
   },
 
   agentTools: {

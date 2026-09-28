@@ -171,6 +171,13 @@ class WikiPage(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
 
+    # feat-wiki-category：page 归属分类（前端左树按它分组）。
+    # 这里用 id 列直接指向 wiki_category.id（与 wiki_category.page_id 的
+    # 「概览页」反向：一个是 page→category，一个 是 category→page）。
+    category_id: Mapped[int | None] = mapped_column(
+        BigIntFk, ForeignKey("wiki_category.id", ondelete="SET NULL"), nullable=True
+    )
+
     claims: Mapped[list[KnowledgeClaim]] = relationship(
         back_populates="page",
         cascade="all, delete-orphan",
@@ -182,6 +189,58 @@ class WikiPage(Base, TimestampMixin):
         return (
             f"<WikiPage id={self.id} page_id={self.page_id} "
             f"dim={self.dimension} stage={self.structure_stage} status={self.status}>"
+        )
+
+
+class WikiCategory(Base, TimestampMixin):
+    """Wiki 知识条目分类目录（树形层级，feat-wiki-category）。
+
+    设计要点：
+    - 自引用树：``parent_id`` 指向同级 ``WikiCategory.id``。
+    - ON DELETE SET NULL：删除父分类时子分类自动升级为根，避免雪崩。
+    - ``sort_order`` 在同一 ``parent_id`` 下升序，决定 UI 渲染顺序。
+      复合索引 ``(parent_id, sort_order)`` 让 tree 端点 O(log n) 取出子树。
+    - ``page_id`` 是可选的「概览页」：分类可挂一篇 wiki_page 作为简介入口，
+      实际业务页由 page 自己归属（一个 page 仍只挂一个 category_id）。
+    - 业务专家通常不需要这个表——这是 admin 维护的目录结构。
+    """
+
+    __tablename__ = "wiki_category"
+    __table_args__ = (
+        Index("ix_wiki_category_parent_sort", "parent_id", "sort_order"),
+        Index("ix_wiki_category_page", "page_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    parent_id: Mapped[int | None] = mapped_column(
+        BigIntFk, ForeignKey("wiki_category.id", ondelete="SET NULL"), nullable=True
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    page_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("wiki_page.page_id", ondelete="SET NULL"), nullable=True
+    )
+
+    children: Mapped[list[WikiCategory]] = relationship(
+        "WikiCategory",
+        back_populates="parent",
+        cascade="all",
+        passive_deletes=True,
+        lazy="select",
+        order_by="WikiCategory.sort_order",
+    )
+    parent: Mapped[WikiCategory | None] = relationship(
+        "WikiCategory",
+        back_populates="children",
+        remote_side="WikiCategory.id",
+        passive_deletes=True,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<WikiCategory id={self.id} name={self.name!r} "
+            f"parent_id={self.parent_id} sort={self.sort_order}>"
         )
 
 

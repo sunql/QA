@@ -24,6 +24,7 @@ const api = vi.hoisted(() => ({
     deleteWikiPage: vi.fn(),
     reclassifyWikiPage: vi.fn(),
     batchDeleteWikiPages: vi.fn(),
+    listWikiCategoryTree: vi.fn(),
 }));
 
 vi.mock("../../api/wikiPages", () => api);
@@ -45,6 +46,7 @@ function makePage(overrides: Partial<WikiPage> = {}): WikiPage {
         validTo: null,
         createdTime: null,
         updatedTime: null,
+        categoryId: null,
         ...overrides,
     };
 }
@@ -118,6 +120,7 @@ describe("AdminWikiPagesPage", () => {
         vi.clearAllMocks();
         api.listWikiPages.mockResolvedValue({ rows: [makePage()], total: 1 });
         api.getWikiPage.mockResolvedValue(makePage());
+        api.listWikiCategoryTree.mockResolvedValue([]);
     });
 
     it("renders page title and rows from the API", async () => {
@@ -246,6 +249,7 @@ describe("AdminWikiPagesPage 批量删除", () => {
      */
     beforeEach(() => {
         vi.clearAllMocks();
+        api.listWikiCategoryTree.mockResolvedValue([]);
     });
 
     function twoRows() {
@@ -417,6 +421,7 @@ describe("AdminWikiPagesPage 单条删除", () => {
         vi.clearAllMocks();
         api.listWikiPages.mockResolvedValue({ rows: [makePage()], total: 1 });
         api.getWikiPage.mockResolvedValue(makePage());
+        api.listWikiCategoryTree.mockResolvedValue([]);
     });
 
     /** 抽屉 + Popconfirm 是 jsdom 下最重的渲染路径，全量跑（112 个文件抢 CPU）

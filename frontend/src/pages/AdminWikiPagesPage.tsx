@@ -35,6 +35,7 @@ import {
     createWikiPage,
     deleteWikiPage,
     getWikiPage,
+    listWikiCategoryTree,
     listWikiPages,
     reclassifyWikiPage,
     searchWikiPages,
@@ -46,6 +47,7 @@ import {
     KNOWLEDGE_DIMENSIONS,
     WIKI_PAGE_STATUSES,
     type KnowledgeDimension,
+    type WikiCategoryNode,
     type WikiPage,
     type WikiPageStatus,
 } from "../types/wikiPages";
@@ -87,6 +89,24 @@ interface CreateFormValues {
     content: string;
     dimension?: KnowledgeDimension;
     authorityLevel?: string;
+    /** feat-wiki-category：可选分类归属。 */
+    categoryId?: number;
+}
+
+/** 扁平化分类树 → Select 选项（带缩进前缀视觉展示层级）。 */
+function flattenCategoryOptions(
+    cats: WikiCategoryNode[],
+    depth = 0,
+): { value: number; label: string }[] {
+    const out: { value: number; label: string }[] = [];
+    const prefix = depth === 0 ? "" : "— ".repeat(depth);
+    for (const c of cats) {
+        out.push({ value: c.id, label: `${prefix}${c.name}` });
+        if (c.children.length > 0) {
+            out.push(...flattenCategoryOptions(c.children, depth + 1));
+        }
+    }
+    return out;
 }
 
 /** 页面级提示条（成功摘要 / 部分失败）。批量删除是破坏性操作，只 toast 会飘走。 */
@@ -118,6 +138,16 @@ export default function AdminWikiPagesPage() {
 
     const [createOpen, setCreateOpen] = useState(false);
     const [createForm] = Form.useForm<CreateFormValues>();
+
+    // feat-wiki-category：分类树（详情抽屉 + 创建 Modal 共用）。
+    const [categoryTree, setCategoryTree] = useState<WikiCategoryNode[]>([]);
+    const fetchCategoryTree = useCallback(async () => {
+        try {
+            setCategoryTree(await listWikiCategoryTree());
+        } catch {
+            // 拉分类失败不应阻塞主列表；只在创建 Modal 打开时再次重试。
+        }
+    }, []);
 
     const [detail, setDetail] = useState<WikiPage | null>(null);
     const [detailLoading, setDetailLoading] = useState(false);
@@ -183,6 +213,10 @@ export default function AdminWikiPagesPage() {
     useEffect(() => {
         void fetchList();
     }, [fetchList]);
+
+    useEffect(() => {
+        void fetchCategoryTree();
+    }, [fetchCategoryTree]);
 
     const openDetail = useCallback(
         async (pageId: string) => {
@@ -648,6 +682,16 @@ export default function AdminWikiPagesPage() {
                             placeholder={t("wikiPages.form.authorityLevelPlaceholder")}
                         />
                     </Form.Item>
+                    <Form.Item
+                        name="categoryId"
+                        label={t("wikiPages.form.category")}
+                    >
+                        <Select
+                            allowClear
+                            options={flattenCategoryOptions(categoryTree)}
+                            placeholder={t("wikiPages.form.categoryPlaceholder")}
+                        />
+                    </Form.Item>
                 </Form>
             </Modal>
 
@@ -708,6 +752,7 @@ export default function AdminWikiPagesPage() {
                                         onDimensionChange={setPendingDimension}
                                         onReclassify={handleReclassify}
                                         dimensionOptions={dimensionOptions}
+                                        categoryTree={categoryTree}
                                         onRefresh={async () => {
                                             const updated = await getWikiPage(detail.pageId);
                                             setDetail(updated);
@@ -749,7 +794,7 @@ export default function AdminWikiPagesPage() {
 
 /* ---------- Sub-components ---------- */
 
-/** 基本信息 Tab：标题/正文/维度/权威等级编辑 + 状态流转按钮 */
+/** 基本信息 Tab：标题/正文/维度/权威等级/分类编辑 + 状态流转按钮 */
 interface BasicInfoTabProps {
     detail: WikiPage;
     currentDimension: KnowledgeDimension | null | undefined;
@@ -760,6 +805,7 @@ interface BasicInfoTabProps {
     onRefresh: () => Promise<void>;
     errorMsg: string | null;
     setErrorMsg: (v: string | null) => void;
+    categoryTree: WikiCategoryNode[];
 }
 
 function BasicInfoTab({
@@ -772,6 +818,7 @@ function BasicInfoTab({
     onRefresh,
     errorMsg,
     setErrorMsg,
+    categoryTree,
 }: BasicInfoTabProps) {
     const { t } = useTranslation();
     const [title, setTitle] = useState(detail.title);
@@ -822,6 +869,19 @@ function BasicInfoTab({
             void onRefresh();
         } catch {
             setErrorMsg(t("wikiPages.errors.statusUpdateFailed"));
+        }
+    };
+
+    /** feat-wiki-category：分类切换 → PATCH {categoryId}。
+     *  null 表示「脱钩」。与已有维度/权威等级「blur 即存」一致。
+     */
+    const handleCategoryChange = async (next: number | null) => {
+        if (next === detail.categoryId) return;
+        try {
+            await updateWikiPage(detail.pageId, { categoryId: next });
+            void onRefresh();
+        } catch {
+            setErrorMsg(t("wikiPages.errors.categoryUpdateFailed"));
         }
     };
 
@@ -951,6 +1011,20 @@ function BasicInfoTab({
                 <p style={{ color: "#888", fontSize: 12, marginTop: 6, marginBottom: 0 }}>
                     {t("wikiPages.detail.statusHint")}
                 </p>
+            </div>
+
+            {/* 归属分类（feat-wiki-category）：下拉切换即写。 */}
+            <h4>{t("wikiPages.form.category")}</h4>
+            <div style={{ marginBottom: 16 }}>
+                <Select
+                    aria-label={t("wikiPages.form.category")}
+                    allowClear
+                    style={{ width: 240 }}
+                    value={detail.categoryId ?? undefined}
+                    onChange={(v) => void handleCategoryChange(v ?? null)}
+                    options={flattenCategoryOptions(categoryTree)}
+                    placeholder={t("wikiPages.form.categoryPlaceholder")}
+                />
             </div>
 
             {/* 错误提示 */}

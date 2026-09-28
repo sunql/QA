@@ -81,6 +81,9 @@ class WikiPageCreate(CamelModel):
     content: str = Field(..., min_length=1, max_length=MAX_CONTENT_CHARS)
     dimension: str | None = Field(default=None, max_length=30)
     authority_level: str | None = Field(default=None, max_length=10)
+    # feat-wiki-category：可选创建时直接挂分类；后端 service 用 updatePage
+    # 同路径写入（category_id 走 _assertCategoryExists 预校验）。
+    category_id: int | None = Field(default=None, ge=1)
 
     @field_validator("authority_level")
     @classmethod
@@ -118,6 +121,8 @@ class WikiPageUpdate(CamelModel):
     status: _UnsetType | str = Field(default=UNSET, max_length=20)
     authority_level: _UnsetType | str | None = Field(default=UNSET, max_length=10)
     version: _UnsetType | str = Field(default=UNSET, min_length=1, max_length=30)
+    # feat-wiki-category：page 归属分类；显式传 null 表示「脱钩」。
+    category_id: _UnsetType | int | None = Field(default=UNSET, ge=1)
     # Phase 5.5：MISSING_DIMENSION 缺口两步预览的「用户确认」落点。
     # 前端在 Modal 里拿到 LLM 建议后调 PATCH，把完整建议一并写入 ——
     # 否则 scan 的 MISSING_DIMENSION 判定（dimension IS NULL AND
@@ -159,6 +164,11 @@ class WikiPageRead(CamelModel):
     valid_to: datetime | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
+    # feat-wiki-category：page 归属分类的 id（前端树按它分组）。
+    # 单数：一个 page 只挂一个分类（与 wiki_category.page_id 概览页不同——
+    # 那是分类主动挂的「概览」，这里是 page 主动归属的「分类」）。
+    # 实现侧：与 wiki_page.category_id 同步，写路径在 WikiPageService。
+    category_id: int | None = None
 
 
 class WikiPageListRead(CamelModel):
@@ -166,6 +176,53 @@ class WikiPageListRead(CamelModel):
 
     rows: list[WikiPageRead]
     total: int
+
+
+# ---------------------------------------------------------------------------
+# Wiki Category（feat-wiki-category）
+# ---------------------------------------------------------------------------
+
+
+class WikiCategoryCreate(CamelModel):
+    """创建分类。
+
+    ``parent_id`` 留空 = 顶级分类。``page_id`` 可选：分类可挂一篇概览页。
+    ``sort_order`` 同级升序排序；同名分类不同 parent 下允许。
+    """
+
+    name: str = Field(..., min_length=1, max_length=100)
+    parent_id: int | None = Field(default=None, ge=1)
+    sort_order: int = Field(default=0, ge=0)
+    description: str | None = Field(default=None, max_length=500)
+    page_id: str | None = Field(default=None, max_length=64)
+
+
+class WikiCategoryUpdate(CamelModel):
+    """更新分类（PATCH 语义；UNSET 跳过，显式 None 置空）。"""
+
+    name: _UnsetType | str = Field(default=UNSET, min_length=1, max_length=100)
+    parent_id: _UnsetType | int | None = Field(default=UNSET, ge=1)
+    sort_order: _UnsetType | int = Field(default=UNSET, ge=0)
+    description: _UnsetType | str | None = Field(default=UNSET, max_length=500)
+    page_id: _UnsetType | str | None = Field(default=UNSET, max_length=64)
+
+
+class WikiCategoryRead(CamelModel):
+    """分类读模型（递归 children，tree 端点用）。
+
+    非 tree 端点也复用此模型——children 默认为空数组，便于前端统一处理。
+    """
+
+    id: int
+    parent_id: int | None
+    sort_order: int
+    name: str
+    description: str | None
+    page_id: str | None
+    children: list["WikiCategoryRead"] = Field(default_factory=list)
+
+
+WikiCategoryRead.model_rebuild()
 
 
 class WikiPageBatchDeleteRequest(CamelModel):

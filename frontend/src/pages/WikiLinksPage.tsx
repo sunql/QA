@@ -1,11 +1,19 @@
 /**
- * Wiki ↔ Ontology 链接管理页（Task 7）。
+ * Wiki ↔ Ontology 链接管理页（Task 7 / feat-wiki-category）。
  *
- * 左侧：Wiki 页面树（Tree）；右侧：选中页面的 class/property 链接列表 + 添加 Modal。
+ * 左侧：分类树 + 每个分类下的 wiki pages（叶子可点）。
+ * 右侧：选中 page 的 class/property 链接列表 + 添加 Modal。
  *
- * 树暂用静态 stub 数据（3 个示例节点），后续接入 WikiPageService.listPages()。
+ * 树结构来源（前端两次请求合并）：
+ *  1. GET /wiki/categories/tree — 全量分类树
+ *  2. GET /wiki/pages?limit=200 — 全量 page（按 categoryId 客户端挂到分类下）
+ * 没挂分类的 page 放进「未分类」伪根，避免丢页。
+ *
+ * 节点 key 约定：
+ *  - 分类节点  ``cat-<id>``（不可点，仅目录）
+ *  - page 叶子  ``<pageId>``（可点 → 查 ontology links）
  */
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Button,
   Form,
@@ -28,38 +36,86 @@ import {
   listWikiLinks,
   revokeWikiLink,
 } from "../api/adminWikiLinks";
+import {
+  listWikiCategoryTree,
+  listWikiPages,
+} from "../api/wikiPages";
+import type { WikiCategoryNode, WikiPage } from "../types/wikiPages";
 import type {
   WikiLink,
   WikiLinkType,
   WikiLinkableTarget,
 } from "../types/wikiLink";
 
-// ---------------------------------------------------------------------------
-// Stub wiki page tree (TODO: replace with WikiPageService.listPages())
-// ---------------------------------------------------------------------------
-const STUB_PAGES: DataNode[] = [
-  {
-    title: "采购管理",
-    key: "page-001",
-    children: [
-      { title: "供应商准入流程", key: "page-001-01" },
-      { title: "采购订单执行", key: "page-001-02" },
-    ],
-  },
-  {
-    title: "质量管理",
-    key: "page-002",
-    children: [{ title: "IQC 来料检验", key: "page-002-01" }],
-  },
-  {
-    title: "仓储物流",
-    key: "page-003",
-    children: [
-      { title: "入库作业", key: "page-003-01" },
-      { title: "出库配送", key: "page-003-02" },
-    ],
-  },
-];
+/** 分类节点 key 前缀（前端区分「分类节点」与「page 叶子」用）。 */
+const CATEGORY_KEY_PREFIX = "cat-";
+/** 没挂分类的 page 放进这个伪根。 */
+const UNCATEGORIZED_KEY = "cat-0";
+const UNCATEGORIZED_TITLE = "未分类";
+
+/** 全量 pages → 按 categoryId 分组（key=0 表示未分类）。 */
+function pagesByCategory(pages: WikiPage[]): Map<number, WikiPage[]> {
+  const out = new Map<number, WikiPage[]>();
+  for (const p of pages) {
+    const cid = p.categoryId ?? 0;
+    if (!out.has(cid)) out.set(cid, []);
+    out.get(cid)!.push(p);
+  }
+  return out;
+}
+
+/** 把 pages 挂到对应分类节点下作为叶子；无分类页 → "未分类"伪根。 */
+function attachPagesToTree(
+  cats: WikiCategoryNode[],
+  pages: WikiPage[],
+): DataNode[] {
+  const byCat = pagesByCategory(pages);
+  const uncat = byCat.get(0) ?? [];
+
+  const attach = (node: WikiCategoryNode): DataNode => {
+    const catPages = byCat.get(node.id) ?? [];
+    return {
+      key: `${CATEGORY_KEY_PREFIX}${node.id}`,
+      title: `${node.name}（${catPages.length}）`,
+      selectable: false,
+      children: [
+        ...node.children.map(attach),
+        ...catPages.map(pageToLeaf),
+      ],
+    };
+  };
+
+  const roots = cats.map(attach);
+  if (uncat.length > 0) {
+    roots.push({
+      key: UNCATEGORIZED_KEY,
+      title: `${UNCATEGORIZED_TITLE}（${uncat.length}）`,
+      selectable: false,
+      children: uncat.map(pageToLeaf),
+    });
+  }
+  return roots;
+}
+
+function pageToLeaf(p: WikiPage): DataNode {
+  return {
+    key: p.pageId,
+    title: p.title,
+    selectable: true,
+    isLeaf: true,
+  };
+}
+
+/** 收集全部分类节点 key（含子分类），用作 defaultExpandedKeys —— 让首次打开就把整棵树铺平。 */
+function allKeys(cats: WikiCategoryNode[]): string[] {
+  const out: string[] = [];
+  const visit = (c: WikiCategoryNode) => {
+    out.push(`${CATEGORY_KEY_PREFIX}${c.id}`);
+    c.children.forEach(visit);
+  };
+  cats.forEach(visit);
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -72,7 +128,41 @@ export function WikiLinksPage() {
   const [linkables, setLinkables] = useState<WikiLinkableTarget[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [tree, setTree] = useState<WikiCategoryNode[]>([]);
+  const [allPages, setAllPages] = useState<WikiPage[]>([]);
+  // 用 controlled expandedKeys：tree 数据回来后立刻铺开整树，
+  // 避免 antd v5 defaultExpandAll 在「首次 render 数据空 + 二次 render 数据齐」
+  // 这条链上失效（实测 defaultExpandedKeys/defaultExpandAll 都救不回来）。
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const [form] = Form.useForm();
+
+  // 两次请求合并：分类树 + 全量 pages（按 categoryId 客户端挂载）
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [cats, pageList] = await Promise.all([
+          listWikiCategoryTree(),
+          listWikiPages({ limit: 200 }),
+        ]);
+        if (cancelled) return;
+        setTree(cats);
+        setAllPages(pageList.rows);
+        setExpandedKeys(allKeys(cats));
+      } catch {
+        if (!cancelled) message.error(t("wikiLinks.treeLoadFailed"));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [t]);
+
+  // 组装 antd tree data：分类节点 + page 叶子
+  const treeData = useMemo(
+    () => attachPagesToTree(tree, allPages),
+    [tree, allPages],
+  );
 
   // Fetch links when page or type changes
   const refresh = useCallback(async () => {
@@ -153,11 +243,16 @@ export function WikiLinksPage() {
             {t("wikiLinks.pageTreeLabel")}
           </div>
           <Tree
-            treeData={STUB_PAGES}
+            treeData={treeData}
+            expandedKeys={expandedKeys}
+            onExpand={(keys) => setExpandedKeys(keys as string[])}
             selectedKeys={selectedPageId ? [selectedPageId] : []}
             onSelect={(keys) => {
               const k = keys[0] as string | undefined;
-              setSelectedPageId(k ?? null);
+              // 分类节点（cat- 前缀）不可点；只有 page 叶子更新 selectedPageId
+              if (k && !k.startsWith(CATEGORY_KEY_PREFIX)) {
+                setSelectedPageId(k);
+              }
             }}
           />
         </div>

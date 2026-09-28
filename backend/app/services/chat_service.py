@@ -112,7 +112,7 @@ from app.services.llm_retry_policy import (
     isRetryableLlmError as _isRetryableLlmError,
     retryGenTokens as _retryGenTokens,
 )
-from app.services.nl2sql_service import Nl2SqlService, SqlResult, _safeSchemaPrefix, _sanitizeContext
+from app.services.nl2sql_service import Nl2SqlService, SqlResult, _readFloatConfig, _safeSchemaPrefix, _sanitizeContext
 from app.services.ontology_service import OntologyService
 from app.services.step_aggregator import StepAggregator
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
@@ -540,8 +540,14 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         answerResp, answerConfig, wastedAnswer = await self._generateAnswer(
             session, dto, pc, data, finalSql,
         )
+        # 4-1（feat-token-cache）：一次性读 cache hit multiplier，避免 chart/answer
+        # 路径上每次 _recordUsage 都查一次。chat_service 入口处读取一次足够。
+        cacheHitMultiplier = await _readFloatConfig(
+            session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
+        )
         totalTokens, totalCost = self._summarizeUsage(
             outcome, chartPt, chartCt, answerResp, answerConfig, wastedAnswer, pc.selected,
+            cacheHitMultiplier=cacheHitMultiplier,
         )
         # 执行错误回灌重试额外消耗计入总量并审计（1-3）
         if retryTokens[0] or retryTokens[1]:

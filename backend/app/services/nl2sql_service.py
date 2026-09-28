@@ -154,6 +154,43 @@ async def _readIntConfig(session: AsyncSession, key: str, default: int) -> int:
         return default
 
 
+async def _readFloatConfig(session: AsyncSession, key: str, default: float) -> float:
+    """读 system_config 的 float 配置；缺席/格式错/超出 [0, 1] 返 default。
+
+    4-1（feat-token-cache，2026-09-28）：用于 LLM_CACHE_HIT_MULTIPLIER 这类
+    「折扣倍数」语义——必须接受 0（命中免费，与旧口径一致，临时回滚用）与
+    0.25（DeepSeek 实际 cache hit 单价比例，miss 单价的 ~1/4）。
+    与 _readIntConfig（契约「非正返默认」）**刻意分开**：后者无法表达「0 合法」。
+
+    超出 [0, 1] 视为非法的「倍数」配置——避免误配成 2.5 / 5 之类放大。
+    """
+    raw: str | None = None
+    try:
+        row = await session.execute(
+            text(f"SELECT value FROM system_config WHERE key = '{key}'")
+        )
+        raw = row.scalar_one_or_none()
+        if raw is None or raw == "":
+            return default
+        value = float(raw)
+        if value < 0 or value > 1:
+            logger.warning(
+                "%s 超出 [0, 1] 范围 %r，返默认值 %r", key, raw, default,
+            )
+            return default
+        return value
+    except (TypeError, ValueError):
+        logger.warning(
+            "%s 值非法 %r，返默认值 %r", key, raw, default,
+        )
+        return default
+    except Exception:
+        logger.warning(
+            "读取 %s 失败，返默认值 %r", key, default, exc_info=True,
+        )
+        return default
+
+
 # 布尔开关的显式假值/真值字面量（大小写不敏感）。
 _FALSY_CONFIG_VALUES: frozenset[str] = frozenset({"0", "false", "off", "no"})
 _TRUTHY_CONFIG_VALUES: frozenset[str] = frozenset({"1", "true", "on", "yes"})

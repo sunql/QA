@@ -18,6 +18,9 @@ from app.domain.enums import ChartType
 from app.domain.models import LlmConfig
 from app.domain.schemas import ChatRequest
 from app.infrastructure.llm.base_client import LlmMessage
+# 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER。
+# 放在 services 层（不在 chat_helpers）以保持 helper 不依赖具体 service。
+from app.services.nl2sql_service import _readFloatConfig
 from app.services.chat_helpers import (
     _PipelineContext,
     _RETRY_SQL_LOG_LIMIT,
@@ -157,7 +160,12 @@ class UsageMixin:
         if not (pt or ct):
             return None
         cfg = outcome.sqlConfig or pc.selected
-        cost = self._costFor(cfg, pt, ct)
+        # 4-1：retry 路径无 cachedTokens（异常提取），multiplier 读出来仅保持口径一致；
+        # cacheHitMultiplier=0 时与原行为完全等价。
+        cacheHitMultiplier = await _readFloatConfig(
+            session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
+        )
+        cost = self._costFor(cfg, pt, ct, cacheHitMultiplier=cacheHitMultiplier)
         await self._recordUsage(session, dto.sessionId, cfg, pt, ct, purpose="nl2sql")
         return _RetryGenUsage(tokens=pt + ct, cost=cost, modelName=cfg.model_name)
 
@@ -219,27 +227,43 @@ class UsageMixin:
         self, outcome: _SqlOutcome, chartPt: int, chartCt: int,
         answerResp: Any, answerConfig: LlmConfig, wastedAnswer: tuple[int, int],
         primary: LlmConfig,
+        cacheHitMultiplier: float = 0.0,
     ) -> tuple[int, Decimal]:
-        """汇总本轮全部 LLM 消耗（含降级前浪费），与 DB 审计行一致。返回 (tokens, cost)。"""
+        """汇总本轮全部 LLM 消耗（含降级前浪费），与 DB 审计行一致。返回 (tokens, cost)。
+
+        cacheHitMultiplier（4-1，feat-token-cache）：DeepSeek cache hit 部分
+        按 miss 单价 × 该比例计费（默认 0 = 命中免费；上线后默认 0.25 对齐 DeepSeek 当前价）。
+        由调用方在 chat_service 入口一次性读 system_config.LLM_CACHE_HIT_MULTIPLIER 透传。
+        """
         total = (
             outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
             + chartPt + chartCt
             + answerResp.promptTokens + answerResp.completionTokens + wastedAnswer[0] + wastedAnswer[1]
         )
-        cost = self._costForSql(outcome, primary)
-        cost += self._costFor(primary, chartPt, chartCt)
-        cost += self._costFor(answerConfig, answerResp.promptTokens, answerResp.completionTokens)
+        cost = self._costForSql(outcome, primary, cacheHitMultiplier=cacheHitMultiplier)
+        cost += self._costFor(primary, chartPt, chartCt, cacheHitMultiplier=cacheHitMultiplier)
+        cost += self._costFor(
+            answerConfig, answerResp.promptTokens, answerResp.completionTokens,
+            cacheHitMultiplier=cacheHitMultiplier,
+        )
         cost += self._costFor(primary, wastedAnswer[0], wastedAnswer[1])
         return total, cost
 
-    def _costForSql(self, outcome: _SqlOutcome, primary: LlmConfig) -> Decimal:
-        """SQL 阶段成本：捷径零消耗；两阶段按实际服务模型 + 主模型浪费分别计费。"""
+    def _costForSql(
+        self, outcome: _SqlOutcome, primary: LlmConfig,
+        cacheHitMultiplier: float = 0.0,
+    ) -> Decimal:
+        """SQL 阶段成本：捷径零消耗；两阶段按实际服务模型 + 主模型浪费分别计费。
+
+        cacheHitMultiplier 透传给 _costFor（见该函数 docstring）。
+        """
         cost = Decimal("0")
         if outcome.sqlConfig is not None:
             # 4-1（feat-token-cache）：两阶段 cached_tokens 合并计入成本修正。
             cost += self._costFor(
                 outcome.sqlConfig, outcome.promptTokens, outcome.completionTokens,
                 cachedTokens=outcome.cachedTokens,
+                cacheHitMultiplier=cacheHitMultiplier,
             )
         cost += self._costFor(primary, outcome.wasted[0], outcome.wasted[1])
         return cost
@@ -279,9 +303,17 @@ class UsageMixin:
         purpose: str,
         cachedTokens: int | None = None,
     ) -> None:
+        # 4-1（feat-token-cache，2026-09-28 续）：system_config.LLM_CACHE_HIT_MULTIPLIER
+        # 控制 cache 命中部分的实付比例（默认 0 = 命中免费，回滚口径；上线后
+        # 调到 0.25 对齐 DeepSeek 当前价）。每次 _recordUsage 内部读一次（DB 一次往返，
+        # 简单且与 _readIntConfig 同口径——可后续提到 _summarizeUsage 一次读）。
+        cacheHitMultiplier = await _readFloatConfig(
+            session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
+        )
         # 4-1（feat-token-cache）：cachedTokens 透传进成本计算（_costFor 按差额计）。
         cost = self._costFor(
-            config, promptTokens, completionTokens, cachedTokens=cachedTokens,
+            config, promptTokens, completionTokens,
+            cachedTokens=cachedTokens, cacheHitMultiplier=cacheHitMultiplier,
         )
         await self._tokenUsage.recordUsage(
             session,
@@ -340,15 +372,27 @@ class UsageMixin:
         promptTokens: int,
         completionTokens: int,
         cachedTokens: int | None = None,
+        cacheHitMultiplier: float = 0.0,
     ) -> Decimal:
         """按 model 单价计费。
 
         4-1（feat-token-cache，2026-09-28）：DeepSeek prompt cache 命中时
-        cached_tokens 非零，对应部分不计 input 成本（按差额计费）。None 或 0
-        → 全额按 prompt 计；cached >= prompt → input cost = 0。
+        cached_tokens 非零。
+
+        ``cacheHitMultiplier`` 是「命中部分相对 miss 单价的折扣比例」——
+        真实账单里，cache hit 仍按 miss 的 ~1/4（DeepSeek 2024 定价）/ ~1/10
+        （DeepSeek V4 早期）计费，不是 0。默认 0 = 命中部分免费（与初版
+        「差额计费」一致，可作回滚）；上线后调成 0.25 对齐 DeepSeek 当前价。
+
+        等价 token 口径：
+            billable = (prompt - cached) + cached × multiplier
+        即「未命中按全额 + 命中按 miss×multiplier」= DeepSeek 实际账单模型。
         """
         if cachedTokens is not None and cachedTokens > 0:
-            billablePrompt = max(0, promptTokens - cachedTokens)
+            billablePrompt = max(
+                0,
+                (promptTokens - cachedTokens) + cachedTokens * cacheHitMultiplier,
+            )
         else:
             billablePrompt = promptTokens
         # 4-1：单价来自 ORM Numeric 列但在测试里传 float；显式 str() 走

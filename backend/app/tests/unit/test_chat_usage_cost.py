@@ -60,3 +60,33 @@ def test_costFor_clamps_billable_at_zero_when_cached_exceeds_prompt() -> None:
     cost = ChatUsageMixin._costFor(_Cfg(), 800, 50, cachedTokens=1000)
     expected = Decimal(50) * Decimal("0.0028") / 1000
     assert cost == expected
+
+
+def test_costFor_multiplier_zero_matches_old_free_cache_behavior() -> None:
+    """cacheHitMultiplier=0（默认）→ 命中按 0 计，与初版差额计费等价。"""
+    cost = ChatUsageMixin._costFor(_Cfg(), 1000, 100, cachedTokens=800, cacheHitMultiplier=0.0)
+    # billable = (1000 - 800) + 800 * 0 = 200；按 input 价计
+    expected = Decimal(200) * Decimal("0.0014") / 1000 + Decimal(100) * Decimal("0.0028") / 1000
+    assert cost == expected
+
+
+def test_costFor_multiplier_quarter_matches_deepseek_current_price() -> None:
+    """cacheHitMultiplier=0.25（DeepSeek 当前价 miss 的 1/4）→ 命中按 1/4 计。"""
+    cost = ChatUsageMixin._costFor(_Cfg(), 1000, 100, cachedTokens=800, cacheHitMultiplier=0.25)
+    # billable = (1000 - 800) + 800 * 0.25 = 400
+    expected = Decimal(400) * Decimal("0.0014") / 1000 + Decimal(100) * Decimal("0.0028") / 1000
+    assert cost == expected
+
+
+def test_costFor_multiplier_full_charges_full_prompt() -> None:
+    """cacheHitMultiplier=1.0 → 即使命中也按 miss 全额计（无折扣）。"""
+    cost = ChatUsageMixin._costFor(_Cfg(), 1000, 100, cachedTokens=800, cacheHitMultiplier=1.0)
+    expected = Decimal(1000) * Decimal("0.0014") / 1000 + Decimal(100) * Decimal("0.0028") / 1000
+    assert cost == expected
+
+
+def test_costFor_multiplier_zero_when_no_cached() -> None:
+    """无 cachedTokens 时 multiplier 参数无影响（兜底）。"""
+    cost = ChatUsageMixin._costFor(_Cfg(), 1000, 100, cachedTokens=None, cacheHitMultiplier=0.25)
+    expected = Decimal(1000) * Decimal("0.0014") / 1000 + Decimal(100) * Decimal("0.0028") / 1000
+    assert cost == expected

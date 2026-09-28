@@ -466,6 +466,12 @@ class RecallMixin:
             classByIdForWeight[h.id] for h, _ in weightedHits
             if h.id in classByIdForWeight
         ]
+        # 构建 class_id → recall_score 索引（供 wiki-ontology-link Task 6 使用）。
+        recallScoreIndex: dict[int, float] = {
+            classByIdForWeight[h.id].id: score
+            for h, score in weightedHits
+            if h.id in classByIdForWeight
+        }
         # 全解析为 ODS 业务表的场景：退而使用「非 ODS 业务表的全量类」，避免
         # ODS_BPARTNER 等备份表再次通过全量回退进 LLM schema。
         if not relevant and allResolvedOdsOnly:
@@ -513,6 +519,12 @@ class RecallMixin:
             session, selected, allClasses
         )
         truncated = pre_expand_truncated or truncated_from_expand
+
+        # 附加 _recall_score 到每个返回的 class 对象（Task 6 wiki 注入用）。
+        # fallback 路径的 score=0.0。
+        for cls in expanded:
+            cls._recall_score = recallScoreIndex.get(cls.id, 0.0)  # type: ignore[attr-defined]
+
         recall = ClassRecallInfo(
             mode="expanded" if len(expanded) > len(relevant) else "recall",
             hitCount=len(relevant),
@@ -570,6 +582,9 @@ class RecallMixin:
         max_classes = await self._getClassFilterMaxClasses(session)
         selected = ranked[:max_classes]
         truncated = len(ranked) > max_classes
+        # 附加 _recall_score=0.0（fallback 路径无向量召回分数）。
+        for cls in selected:
+            cls._recall_score = 0.0  # type: ignore[attr-defined]
         # hits= 只在本场景有值（NO_MATCH 才看得到命中数）；其余场景省略该段，
         # 以保持「reason=<场景> total=<全量>」这段 token 相邻（既有聚合/断言口径）。
         hitDetail = "" if hitCount is None else f" hits={hitCount}"

@@ -257,6 +257,7 @@ def _buildPlanSystemPrompt(
     fewShot: str | None = None,
     dictionaryText: str | None = None,
     featureCatalogText: str | None = None,
+    wikiRulesBlock: str | None = None,
 ) -> str:
     """推理阶段 System Prompt：要求模型先输出结构化查询计划 JSON。
 
@@ -297,6 +298,7 @@ def _buildPlanSystemPrompt(
         f"你是一个专业的数据分析师，负责把用户的自然语言问题解析为查询计划。\n\n"
         f"{_currentDatePart()}"
         f"{contextPart}"
+        f"{wikiRulesBlock or ''}"
         f"{statePart}"
         f"{fewShotPart}"
         "可用的数据表结构（来自企业本体元数据）：\n"

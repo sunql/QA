@@ -471,6 +471,7 @@ class Nl2SqlService:
         scopeQuestion: str | None = None,
         featureCatalogText: str | None = None,
         globalFiltersText: str | None = None,
+        wikiRulesBlock: str | None = None,
         session: AsyncSession | None = None,
     ) -> Any:
         """生成并通过本体 schema 校验的查询计划（ReAct 两阶段流水线阶段一）。
@@ -495,6 +496,7 @@ class Nl2SqlService:
             joins=joins,
             featureCatalogText=featureCatalogText,
             globalFiltersText=globalFiltersText,
+            wikiRulesBlock=wikiRulesBlock,
         )
         # 多步子问题常丢失主问题的时间范围（如主问「2025 年采购情况」，
         # 子问题只剩「查各供应商采购额」）→ 并集判定，宁可不限也不误限。

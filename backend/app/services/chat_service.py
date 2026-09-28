@@ -841,6 +841,20 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         if injection_text:
             statePrompt = (statePrompt + "\n\n" + injection_text) if statePrompt else injection_text
 
+        # ★ wiki-ontology-link Task 6：wiki 业务规则注入（紧贴 context 之后）。
+        # 失败隔离：任何步骤异常 → log warning → wiki_block="" → 不阻断 chat 流水线。
+        wiki_block = ""
+        wiki_chunks_for_trace: list[dict] = []
+        try:
+            if await self._isWikiInjectionEnabled(session):
+                wiki_block, wiki_chunks_for_trace = await self._collectWikiBlock(
+                    session, question, pc.classes,
+                )
+        except Exception:
+            logger.warning("wiki injection failed: %s", question, exc_info=True)
+            wiki_block = ""
+            wiki_chunks_for_trace = []
+
         (planResult, sqlResult), sqlConfig, (wastedPt, wastedCt) = await self._callWithFallback(
             session, dto.sessionId, pc.configs, pc.selected, "nl2sql",
             lambda cfg: self._twoStageGenerate(
@@ -860,6 +874,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                 # feat-multistep-global-filter B 层：跨步骤共享范围类约束文本注入
                 # 计划 user prompt 的 [global_constraints] 块（None = 不注入）。
                 globalFiltersText=global_filters.text if global_filters else None,
+                # ★ wiki-ontology-link Task 6：业务规则块注入计划 system prompt。
+                wikiRulesBlock=wiki_block,
                 # 魔数治理 Phase 2 hard tier：session 传入让 nl2sql 编排层现读阈值。
                 session=session,
             ),
@@ -881,6 +897,15 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             purpose="nl2sql",
             cachedTokens=mergedCachedTokens,
         )
+        # ★ wiki-ontology-link Task 6：audit trace 落库（在 LLM 调用成功之后写入）。
+        # injection 为空时跳过；失败路径仍保留 trace（归因分析用）。
+        if wiki_chunks_for_trace:
+            try:
+                await self._recordWikiTrace(
+                    session, dto.sessionId, question, wiki_chunks_for_trace,
+                )
+            except Exception:
+                logger.warning("wiki trace write failed: %s", question, exc_info=True)
         if not sqlResult.sql:
             # 计划 target=无法回答：未生成 SQL（哨兵），sql 置 None 交由调用方短路。
             # 计划阶段 token 已在上面记录；sqlConfig 仍用实际服务模型，保证 cost 正确计量。
@@ -915,6 +940,151 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             logger.warning("REFINE 捷径改写失败，退回 LLM: %s", question, exc_info=True)
             return None
 
+    # -------------------------------------------------------------------------
+    # wiki-ontology-link Task 6：WikiInjector NL2SQL pipeline integration
+    # -------------------------------------------------------------------------
+
+    async def _isWikiInjectionEnabled(self, session: AsyncSession) -> bool:
+        """返回 WIKI_INJECTION_ENABLED 配置值；缺失时默认 True。"""
+        try:
+            from sqlalchemy import select
+            from app.models.system_config import SystemConfig
+            stmt = select(SystemConfig).where(
+                SystemConfig.key == "WIKI_INJECTION_ENABLED"
+            )
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            if row is None:
+                return True
+            return (row.value or "").lower() == "true"
+        except Exception:
+            # 配置读取失败 → 默认开启（不过度阻断）
+            return True
+
+    async def _collectWikiBlock(
+        self,
+        session: AsyncSession,
+        question: str,  # noqa: ARG002
+        classes: list[Any],
+    ) -> tuple[str, list[dict]]:
+        """调 WikiLinkService + WikiChunkLoader + WikiInjector → (prompt_block, trace_data)。
+
+        失败返回 ("", [])，由调用方统一做 log warning + 不阻断流水线。
+        question 参数保留供未来语义检索扩展使用，当前版本只依赖 ontology 召回链路。
+        """
+        from app.services.wiki_injector import ScoredOntology, WikiInjector
+        from app.services.wiki_link_service import WikiLinkService
+        from app.services.wiki_chunk_loader import WikiChunkLoader
+
+        # Step 1：构建 (type, id) → recall_score 索引（来自传入的 classes）。
+        # classes 来自 _selectRelevantClasses，已经过向量召回裁剪 + ADS 加权 + ODS 过滤。
+        scored_ontology: list[ScoredOntology] = []
+        for cls in classes:
+            oid = getattr(cls, "id", None)
+            if oid is None:
+                continue
+            # 从 class 对象上取 recall score（由 chat_recall 在召回时附加的属性）。
+            recall_score = float(getattr(cls, "_recall_score", 0.0) or 0.0)
+            scored_ontology.append(ScoredOntology(
+                type="class",
+                id=oid,
+                recall_score=recall_score,
+            ))
+
+        if not scored_ontology:
+            return "", []
+
+        # Step 2：查询 wiki-link（根据 ontology type/id 对）。
+        pairs = [(o.type, o.id) for o in scored_ontology]
+        try:
+            link_rows = await WikiLinkService().getLinksByOntology(session, pairs)
+        except Exception as e:
+            logger.warning("getLinksByOntology failed: %s", e)
+            return "", []
+        if not link_rows:
+            return "", []
+
+        # Step 3：加载 chunk 文本。
+        page_ids = [l.page_id for l in link_rows]
+        chunk_ids = [l.chunk_id for l in link_rows]
+        try:
+            chunk_texts = await WikiChunkLoader().loadChunks(session, page_ids, chunk_ids)
+        except Exception as e:
+            logger.warning("loadChunks failed: %s", e)
+            return "", []
+
+        # Step 4：评分 + 截断。
+        budget = await WikiInjector.getBudget(session)
+        try:
+            scored = WikiInjector.collectAndScore(scored_ontology, link_rows, chunk_texts, budget)
+        except Exception as e:
+            logger.warning("collectAndScore failed: %s", e)
+            return "", []
+
+        if not scored:
+            return "", []
+
+        # Step 5：渲染 prompt 块（需要 wiki_page title 索引）。
+        from app.domain.models import WikiPage
+        page_id_set = {c.page_id for c in scored}
+        try:
+            page_index_stmt = select(WikiPage.page_id, WikiPage.title).where(
+                WikiPage.page_id.in_(page_id_set)
+            )
+            page_rows = (await session.execute(page_index_stmt)).all()
+            # Build {page_id: title} from raw rows (works with both Row tuples and RowMapping)
+            page_index = {}
+            for row in page_rows:
+                if hasattr(row, '_mapping'):
+                    page_index[row._mapping['page_id']] = row._mapping['title']
+                elif hasattr(row, 'page_id'):
+                    page_index[row.page_id] = row.title
+                else:
+                    page_index[row[0]] = row[1]
+        except Exception as e:
+            logger.warning("page_index query failed: %s", e)
+            page_index = {}
+
+        block = WikiInjector.renderPromptBlock(scored, budget.maxChars, page_index)
+
+        # Step 6：构造 trace 数据。
+        trace_data = []
+        for c in scored:
+            if not c.applied_to:
+                continue
+            ontology_type, ontology_id = c.applied_to[0]
+            trace_data.append({
+                "ontology_type": ontology_type,
+                "ontology_id": ontology_id,
+                "page_id": c.page_id,
+                "chunk_id": c.chunk_id or "",
+                "injected_chars": len(c.text),
+                "score": c.score,
+            })
+        return block, trace_data
+
+    async def _recordWikiTrace(
+        self,
+        session: AsyncSession,
+        session_id: str,
+        question: str,
+        chunks: list[dict],
+    ) -> None:
+        """写 nl2sql_wiki_trace 行。失败由调用方统一捕获并 log。"""
+        from app.domain.models import Nl2sqlWikiTrace
+        for c in chunks:
+            session.add(Nl2sqlWikiTrace(
+                session_id=session_id,
+                question=question[:2000],
+                ontology_type=c["ontology_type"],
+                ontology_id=c["ontology_id"],
+                page_id=c["page_id"],
+                chunk_id=c["chunk_id"] or None,
+                prompt_position="after_context",
+                injected_chars=c["injected_chars"],
+                score=c["score"],
+            ))
+        await session.flush()
+
     async def _twoStageGenerate(
         self,
         question: str,
@@ -935,6 +1105,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         scopeQuestion: str | None = None,
         featureCatalogText: str | None = None,
         globalFiltersText: str | None = None,
+        wikiRulesBlock: str | None = None,
         session: Any = None,
     ) -> tuple[Any, Any]:
         """两阶段 LLM 调用：先生成并校验查询计划，再基于计划生成 SQL。
@@ -963,6 +1134,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             scopeQuestion=scopeQuestion,
             featureCatalogText=featureCatalogText,
             globalFiltersText=globalFiltersText,
+            wikiRulesBlock=wikiRulesBlock,
             session=session,
         )
         if planResult.plan.isUnanswerable:

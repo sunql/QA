@@ -2085,7 +2085,7 @@ class WikiOntologyLink(Base):
         Index(
             "uq_wol_active",
             "page_id",
-            "chunk_id",
+            sa_text("COALESCE(chunk_id, '')"),
             "ontology_type",
             "ontology_id",
             unique=True,

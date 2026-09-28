@@ -48,10 +48,7 @@ async def test_create_link_persists_row(dbSession):
     assert row.weight == Decimal("1.00")
 
 
-@pytest.mark.skip(reason="chunk_id NULL defeats partial unique index (uq_wol_active); see report concerns")
 async def test_create_link_conflict_returns_409(dbSession):
-    """Partial unique index uq_wol_active does not enforce uniqueness when chunk_id IS NULL
-    (PostgreSQL B-tree NULL semantics: NULL != NULL). Schema-level fix needed."""
     await _seed_page(dbSession)
     await _svc.createLink(
         dbSession,
@@ -59,7 +56,6 @@ async def test_create_link_conflict_returns_409(dbSession):
         ontology_id=12, weight=Decimal("1.00"), note=None,
         actor=await _actor(42),
     )
-    await dbSession.flush()
     with pytest.raises(ConflictError):
         await _svc.createLink(
             dbSession,

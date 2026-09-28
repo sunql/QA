@@ -48,28 +48,28 @@
 
 **Files:** none (git operations only)
 
-- [ ] **Step 1.1: Pull latest main and create epic branch**
+- [ ] **Step 1.1: Verify epic/v31-upgrade exists locally**
 
 ```bash
 cd /Users/sunql/Prejectcode-th/MyWiki/wiki/aicode/qa-system
-git fetch origin
-git checkout main
-git pull --ff-only origin main
-git checkout -b epic/v31-upgrade
-git push -u origin epic/v31-upgrade
+git branch --list "epic/v31-upgrade"
 ```
 
-- [ ] **Step 1.2: Verify alembic head is at 0094 (no 0095/0096 yet)**
+If it exists locally, skip to Step 1.3. If not, fetch it from origin (`git fetch origin && git checkout -b epic/v31-upgrade origin/epic/v31-upgrade`) — README §2 mandates this branch.
+
+- [ ] **Step 1.2: Verify alembic head and Person A's state**
 
 ```bash
-ls backend/alembic/versions/ | grep -E "^009[4-6]_"
+ls backend/alembic/versions/ | grep -E "^009[4-7]_" | sort
 ```
 
-Expected: only `0094_*` present. If `0095_*` exists, fetch latest epic and `git rebase origin/epic/v31-upgrade`.
+Expected: only `0094_*` present. If `0095_*` exists (Person A has merged id_mapping), Task 3.1 will use it as `down_revision`. If `0096_*` or `0097_*` exists, STOP and re-coordinate with Person A.
 
-- [ ] **Step 1.3: Cut task branch and push**
+- [ ] **Step 1.3: Cut task branch from epic**
 
 ```bash
+git checkout epic/v31-upgrade
+git pull --ff-only origin epic/v31-upgrade 2>/dev/null || echo "no upstream yet"
 git checkout -b feat/evidence-sql-metric
 git push -u origin feat/evidence-sql-metric
 ```
@@ -77,11 +77,11 @@ git push -u origin feat/evidence-sql-metric
 - [ ] **Step 1.4: Verify branch and announce**
 
 ```bash
-git status
 git branch --show-current
+git log --oneline -3
 ```
 
-Expected: `feat/evidence-sql-metric`, clean working tree (only spec commit + any new untracked files; ignore untracked v3.1 plan docs).
+Expected: `feat/evidence-sql-metric` with spec + plan commits at top.
 
 ---
 
@@ -686,8 +686,8 @@ git commit -m "feat(evidence): query service (listEvidences / listEvidencesBySes
 
 Uses real PG (qa_metadata_test) + full FastAPI app. Each test:
 1. truncate evidence + knowledge_claim (via client fixture)
-2. arrange: create claim + evidence rows directly via session
-3. act: hit endpoint
+2. arrange: create claim + evidence rows via dbSession fixture
+3. act: hit endpoint with `client`
 4. assert: response shape + DB state
 
 Routes-by-session MUST register before /{evidence_id} (wiki search endpoint lesson).
@@ -699,7 +699,6 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.wiki_models import Evidence, KnowledgeClaim
-from app.tests._pg_support import pgApiClient
 
 
 pytestmark = pytest.mark.integration
@@ -727,8 +726,8 @@ async def _seedClaimAndEvidences(session: AsyncSession) -> tuple[int, list[int]]
     return claim.id, [e1.id, e2.id, e3.id]
 
 
-async def test_list_filters_by_session_id(client: AsyncClient):
-    claim_id, [_, e2, _] = await _seedClaimAndEvidences(client._session_factory())
+async def test_list_filters_by_session_id(client: AsyncClient, dbSession: AsyncSession):
+    claim_id, [_, e2, _] = await _seedClaimAndEvidences(dbSession)
     resp = await client.get("/api/v1/evidences", params={"session_id": "chat-abc"})
     assert resp.status_code == 200
     body = resp.json()
@@ -738,8 +737,8 @@ async def test_list_filters_by_session_id(client: AsyncClient):
     assert body["items"][0]["payload"]["sql"] == "SELECT 1"
 
 
-async def test_list_filters_by_source_type_and_claim_id(client: AsyncClient):
-    claim_id, [_, _, _] = await _seedClaimAndEvidences(client._session_factory())
+async def test_list_filters_by_source_type_and_claim_id(client: AsyncClient, dbSession: AsyncSession):
+    claim_id, [_, _, _] = await _seedClaimAndEvidences(dbSession)
     resp = await client.get(
         "/api/v1/evidences",
         params={"claim_id": claim_id, "source_type": "METRIC_RESULT"},
@@ -760,8 +759,8 @@ async def test_list_invalid_source_type_422(client: AsyncClient):
     assert resp.status_code == 422
 
 
-async def test_get_by_id_returns_evidence(client: AsyncClient):
-    _, [_, e2, _] = await _seedClaimAndEvidences(client._session_factory())
+async def test_get_by_id_returns_evidence(client: AsyncClient, dbSession: AsyncSession):
+    _, [_, e2, _] = await _seedClaimAndEvidences(dbSession)
     resp = await client.get(f"/api/v1/evidences/{e2}")
     assert resp.status_code == 200
     body = resp.json()
@@ -774,13 +773,13 @@ async def test_get_by_id_404_when_missing(client: AsyncClient):
     assert resp.status_code == 404
 
 
-async def test_by_session_route_not_shadowed_by_id_route(client: AsyncClient):
+async def test_by_session_route_not_shadowed_by_id_route(client: AsyncClient, dbSession: AsyncSession):
     """Routes must register by-session BEFORE /{evidence_id}.
 
     If /{evidence_id} shadows, GET /evidences/by-session/chat-abc would
     try to parse 'by-session' as int and return 422 (not 200).
     """
-    _, [_, _, _] = await _seedClaimAndEvidences(client._session_factory())
+    _, [_, _, _] = await _seedClaimAndEvidences(dbSession)
     resp = await client.get("/api/v1/evidences/by-session/chat-abc")
     assert resp.status_code == 200
     body = resp.json()
@@ -817,9 +816,12 @@ GET /api/v1/evidences/{evidence_id}         # 详情
 """
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies import getDb
 from app.domain.wiki_schemas import (
     EvidenceListOut,
     EvidenceQuery,
@@ -833,6 +835,11 @@ from app.services.evidence_query_service import (
 
 
 router = APIRouter(prefix="/evidences", tags=["evidences"])
+
+
+async def _evidencesSession() -> AsyncIterator[AsyncSession]:
+    async for s in getDb():
+        yield s
 
 
 # ⚠️ 路由顺序：by-session 必须先于 /{evidence_id}（wiki search endpoint 教训）
@@ -887,18 +894,18 @@ async def getEvidence(
     return EvidenceRead.model_validate(e)
 ```
 
-Add a small dependency helper at the top of the file (or import from a shared place if one exists — check `app/api/deps.py` or `app/dependencies.py`):
+Add a small dependency helper at the top of the file (or import from a shared place if one exists — `app/dependencies.py` exposes `getDb`):
 
 ```python
-from app.dependencies import getAsyncDbSession  # use whatever the project exposes
+from app.dependencies import getDb  # noqa: F401 (existing project convention)
 
 
-async def _evidencesSession() -> AsyncSession:
-    async for s in getAsyncDbSession():
+async def _evidencesSession() -> AsyncIterator[AsyncSession]:
+    async for s in getDb():
         yield s
 ```
 
-If `getAsyncDbSession` doesn't exist, check the existing API routers for the dependency pattern (e.g., `auth.py`, `chat.py`) and follow the project's convention. Do NOT introduce a new dependency factory.
+Confirmed by inspection of `chat.py:17` and `auth.py:20`: the project's existing API routers import `from app.dependencies import getDb`. Do NOT introduce a new dependency factory.
 
 - [ ] **Step 6.4: Run integration tests to verify they pass**
 

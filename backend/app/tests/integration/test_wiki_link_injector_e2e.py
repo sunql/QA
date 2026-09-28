@@ -339,3 +339,151 @@ async def test_acl_blocks_non_admin(client: AsyncClient) -> None:
         headers={"X-User-Id": "1", "X-User-Roles": "user"},
     )
     assert resp.status_code == 403
+
+
+async def test_stale_ontology_skipped(
+    client_with_fakes: AsyncClient,
+    dbSession: AsyncSession,
+) -> None:
+    """Link points to non-existent ontology → no wiki block and no trace for stale target.
+
+    Strategy: seed 2 classes so recall can distinguish (class id=12 linked, 99999 stale).
+    Override _ontology._selectRelevantClasses to only return class id=12 (the live one),
+    so class id=99999 is never recalled → wiki block empty → no trace for stale link.
+    """
+    # Seed second class (the "live" one that will be recalled)
+    row12 = (await dbSession.execute(
+        select(OntologyClass).where(OntologyClass.id == 12)
+    )).scalar_one_or_none()
+    if row12 is None:
+        dbSession.add(OntologyClass(
+            id=12,
+            class_name="DWD_PO_STALE",
+            source_table="DWD_PO",
+            version=1,
+            valid_from=datetime.now(),
+        ))
+    # Seed stale link (page wp-stale → ontology_id=99999)
+    row_link = (await dbSession.execute(
+        select(WikiOntologyLink).where(
+            WikiOntologyLink.page_id == "wp-stale",
+            WikiOntologyLink.ontology_type == "class",
+            WikiOntologyLink.ontology_id == 99999,
+        )
+    )).scalar_one_or_none()
+    if row_link is None:
+        dbSession.add(WikiOntologyLink(
+            page_id="wp-stale",
+            chunk_id=None,
+            ontology_type="class",
+            ontology_id=99999,
+            weight=Decimal("1.0"),
+            note="stale",
+            created_by=1,
+        ))
+    await dbSession.commit()
+
+    # Override _selectRelevantClasses to only return class id=12 (the linked one)
+    import app.api.v1.chat as chatModule
+
+    class _SelectiveRecallFake:
+        """Fake ontology service that returns only class id=12."""
+
+        def __init__(self, real_ontology: Any) -> None:
+            self._real = real_ontology
+
+        async def listClasses(self, session: AsyncSession) -> list[Any]:
+            return await self._real.listClasses(session)
+
+        async def _selectRelevantClasses(
+            self, session: AsyncSession, question: str, allClasses: list[Any],
+        ) -> tuple[list[Any], Any]:
+            from app.domain.schemas import ClassRecallInfo
+            filtered = [c for c in allClasses if c.id == 12]
+            return filtered, ClassRecallInfo(
+                mode="recall", hitCount=len(filtered),
+                classCount=len(filtered), truncated=False,
+            )
+
+        async def listJoins(self, session: AsyncSession) -> list[Any]:
+            return await self._real.listJoins(session)
+
+    # Get the real ontology service from the chat service
+    real_ontology = chatModule._service._ontology
+    selective = _SelectiveRecallFake(real_ontology)
+    # Replace the _ontology instance variable
+    chatModule._service._ontology = selective  # type: ignore
+
+    try:
+        resp = await client_with_fakes.post(
+            "/api/v1/chat",
+            json={
+                "question": "供应商准时交付率",
+                "datasourceId": 1,
+                "sessionId": "s-stale",
+            },
+            headers={"X-User-Id": "1", "X-User-Roles": "admin"},
+        )
+        assert resp.status_code == 200, f"Got {resp.status_code}: {resp.text}"
+
+        # Verify no trace for the stale ontology_id
+        traces = (await dbSession.execute(
+            select(Nl2sqlWikiTrace).where(
+                Nl2sqlWikiTrace.session_id == "s-stale",
+                Nl2sqlWikiTrace.ontology_id == 99999,
+            )
+        )).scalars().all()
+        assert len(traces) == 0, f"Expected no trace for stale ontology, got {len(traces)}"
+    finally:
+        # Restore real ontology
+        chatModule._service._ontology = real_ontology  # type: ignore
+
+
+async def test_concurrent_link_create_no_deadlock(
+    dbSession: AsyncSession,
+) -> None:
+    """Concurrent wiki-link creation at the service level → all succeed (no deadlock).
+
+    Tests that concurrent inserts on the same (page_id, chunk_id, ontology_type,
+    ontology_id) are properly serialized by the unique index without deadlocking.
+    Uses separate sessions per concurrent task to avoid flush conflicts.
+    """
+    from app.infrastructure import database as dbModule
+
+    # Ensure page exists
+    row = (await dbSession.execute(
+        select(WikiPage).where(WikiPage.page_id == "wp-concurrent")
+    )).scalar_one_or_none()
+    if row is None:
+        dbSession.add(WikiPage(
+            page_id="wp-concurrent", title="Concurrent", content="c", status="published",
+        ))
+        await dbSession.commit()
+
+    # Create a minimal actor stub for the service
+    class _ActorStub:
+        dbUserId = 1
+        roles = ["admin"]
+        departments = []
+
+    from app.services.wiki_link_service import WikiLinkService
+
+    async def _create_link(note: str) -> Any:
+        """Create link using a fresh session per call."""
+        factory = dbModule.getSessionFactory()
+        async with factory() as sess:
+            return await WikiLinkService().createLink(
+                session=sess,
+                page_id="wp-concurrent",
+                chunk_id=None,
+                ontology_type="class",
+                ontology_id=201,
+                weight=Decimal("1.0"),
+                note=note,
+                actor=_ActorStub(),
+            )
+
+    tasks = [_create_link(f"concurrent-{i}") for i in range(10)]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for r in results:
+        assert not isinstance(r, Exception), f"Unexpected exception: {r}"

@@ -56,6 +56,7 @@ from app.api.v1 import (
     wiki_compile,
     wiki_graph,
     evidences,
+    id_mapping,
 )
 from app.config import getSettings
 from app.dependencies import getDb
@@ -234,6 +235,7 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(wiki_compile.router, prefix="/api/v1", tags=["wiki"])
     testApp.include_router(wiki_graph.router, prefix="/api/v1", tags=["wiki"])
     testApp.include_router(evidences.router, prefix="/api/v1", tags=["evidences"])
+    testApp.include_router(id_mapping.router, prefix="/api/v1", tags=["id-mapping"])
     from app.api.v1.admin_wiki_links import router as admin_wiki_links_router
     testApp.include_router(admin_wiki_links_router)
 

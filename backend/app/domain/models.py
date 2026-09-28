@@ -1989,6 +1989,57 @@ class EvaluationReportShare(Base):
         )
 
 
+# =============================================================================
+# M0 Unified ID（v3.1 架构升级，alembic 0097）
+# =============================================================================
+
+
+class IdMapping(Base):
+    """统一 ID 映射中枢（v3.1 M0-P0.1）。
+
+    一行 = 一个业务对象在三个存储引擎中的 ID 映射：
+      unified_id：主键，格式 "obj:{business_object}:{external_id}"
+      PG / Neo4j / Milvus 三列存储各引擎中的真实 ID（M0-P0.2/P0.3 逐步填充）
+
+    唯一约束：(business_object, external_id)
+    """
+
+    __tablename__ = "id_mapping"
+
+    unified_id: Mapped[str] = mapped_column(
+        String(128), primary_key=True,
+    )
+    business_object: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # PG 侧
+    pg_table: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pg_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Neo4j 侧
+    neo4j_node_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Milvus 侧
+    milvus_collection: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    milvus_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # 时间戳
+    created_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow,
+    )
+    updated_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "business_object", "external_id",
+            name="uq_id_mapping_bo_ext",
+        ),
+        Index("ix_id_mapping_bo", "business_object"),
+        Index("ix_id_mapping_pg_table", "pg_table"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<IdMapping unified_id={self.unified_id}>"
+
+
 # Re-export Wiki 覆盖度表（0059 = M7 机制 6：class→域映射 + 覆盖度矩阵）。
 # 与 wiki_learning_models 分文件同理由：覆盖度是**派生快照**，生命周期与
 # 知识本体/管线表都不同（可整体重算、可清空重建）。

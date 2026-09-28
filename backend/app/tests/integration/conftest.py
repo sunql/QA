@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import AsyncClient
+from neo4j import Driver, GraphDatabase
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
@@ -41,6 +42,49 @@ async def dbSession(client: AsyncClient) -> AsyncIterator[AsyncSession]:
     factory = dbModule.getSessionFactory()
     async with factory() as session:
         yield session
+
+
+# ---------------------------------------------------------------------------
+# Neo4j fixtures（M0 Unified ID：从 conftest_neo4j.py 合并）
+# 约定：
+#   - 每个测试启动前清空 Class / Property / Metric 三类节点
+#   - 不 mock 外部 driver（直接连 qa-neo4j:7687）
+#   - 不用 lifespan_context（与 _testapp 启动分离，避免反复重启）
+#   - 通过 getSettings() 读凭据，与生产代码走同一配置源
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def neo4jCleanDriver() -> AsyncIterator[Driver]:
+    """返回已连接的 Neo4j driver，测试结束自动清空 Class/Property/Metric。
+
+    用同步 GraphDatabase.driver 仍 async 兼容：driver 仅持有连接池，实际
+    session 操作由 pytest-asyncio 在事件循环里调度；session.run 是同步阻塞
+    调用，对每测试 < 100 个节点的清仓足够快。
+    """
+    settings = getSettings()
+    driver: Driver = GraphDatabase.driver(
+        settings.neo4jUri,
+        auth=(settings.neo4jUser, settings.neo4jPassword),
+    )
+    yield driver
+    with driver.session() as session:
+        session.run(
+            "MATCH (n) WHERE n:Class OR n:Property OR n:Metric DETACH DELETE n"
+        )
+    driver.close()
+
+
+@pytest.fixture
+async def neo4jSeedClasses(neo4jCleanDriver: Driver) -> AsyncIterator[Driver]:
+    """种入 3 个 Class 节点：1 个带 unified_id，2 个不带（待回填）。"""
+    with neo4jCleanDriver.session() as session:
+        session.run(
+            "CREATE (c:Class {unified_id: 'obj:supplier:S001', name: '供应商'})"
+        )
+        session.run("CREATE (c:Class {id: 100, name: '物料'})")
+        session.run("CREATE (c:Class {id: 101, name: '客户'})")
+    yield neo4jCleanDriver
 
 
 @pytest.fixture

@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic_core import ValidationError
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +55,7 @@ from app.api.v1 import (
     wiki_import,
     wiki_compile,
     wiki_graph,
+    evidences,
 )
 from app.config import getSettings
 from app.dependencies import getDb
@@ -103,6 +105,31 @@ def buildTestApp(testFactory: Any) -> FastAPI:
                 detail=exc.detail,
                 details=getattr(exc, "details", None),
             ).model_dump(by_alias=True),
+        )
+
+    # pydantic-core ValidationError from field validators → 422
+    def _sanitize_value(v):
+        if isinstance(v, (ValueError, Exception)):
+            return str(v)
+        if isinstance(v, dict):
+            return {kk: _sanitize_value(vv) for kk, vv in v.items()}
+        if isinstance(v, list):
+            return [_sanitize_value(item) for item in v]
+        if isinstance(v, (set, tuple)):
+            return [_sanitize_value(item) for item in v]
+        try:
+            _ = str(v)
+            return v
+        except Exception:
+            return str(v)
+
+    @testApp.exception_handler(ValidationError)
+    async def handlePydanticCoreValidationError(
+        request, exc: ValidationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": [_sanitize_value(e) for e in exc.errors()]},
         )
 
     # 直接挂载子路由（子路由自身已有 prefix，故用 /api/v1 前缀覆盖）
@@ -206,6 +233,7 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
     testApp.include_router(wiki_compile.router, prefix="/api/v1", tags=["wiki"])
     testApp.include_router(wiki_graph.router, prefix="/api/v1", tags=["wiki"])
+    testApp.include_router(evidences.router, prefix="/api/v1", tags=["evidences"])
     from app.api.v1.admin_wiki_links import router as admin_wiki_links_router
     testApp.include_router(admin_wiki_links_router)
 

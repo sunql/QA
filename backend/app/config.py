@@ -179,6 +179,10 @@ class Settings(BaseSettings):
     sessionAffinityTurns: int = Field(default=3, alias="SESSION_AFFINITY_TURNS")
     nl2sqlMaxRetries: int = Field(default=2, alias="NL2SQL_MAX_RETRIES")
 
+    # ===== 证据分页（feat-evidence-extension）=====
+    evidence_page_default: int = Field(default=50, alias="EVIDENCE_PAGE_DEFAULT")
+    evidence_page_max: int = Field(default=200, alias="EVIDENCE_PAGE_MAX")
+
     @property
     def isProduction(self) -> bool:
         return self.appEnv == "production"

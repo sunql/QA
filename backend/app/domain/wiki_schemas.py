@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.domain.schemas import UNSET, CamelModel, _UnsetType
 from app.domain.wiki_coverage_models import GAP_UNLINKED
@@ -283,7 +283,10 @@ class WikiPageBatchDeleteRead(CamelModel):
 
 
 class EvidenceRead(CamelModel):
-    """证据出处读模型。"""
+    """证据出处读模型（v3.1 M1' 扩展）。
+
+    新增 payload / session_id（M1'）；补齐 ORM 漏字段 content_hash / confidence。
+    """
 
     id: int
     claim_id: int
@@ -293,7 +296,38 @@ class EvidenceRead(CamelModel):
     section_name: str | None = None
     paragraph_no: int | None = None
     content: str | None = None
+    content_hash: str | None = None
+    confidence: Decimal | None = None
+    payload: dict | None = None
+    session_id: str | None = None
     created_time: datetime | None = None
+
+
+class EvidenceListOut(CamelModel):
+    """证据列表响应（含分页 total）。"""
+
+    items: list[EvidenceRead] = Field(default_factory=list)
+    total: int
+
+
+class EvidenceQuery(BaseModel):
+    """证据查询参数（防 KPI 空关键词 substring "" 副作用）。"""
+
+    session_id: str | None = Field(None, max_length=64)
+    claim_id: int | None = Field(None, ge=1)
+    source_type: Literal["DOCUMENT", "SQL_QUERY", "METRIC_RESULT"] | None = None
+    limit: int = Field(50, ge=1, le=200)
+    offset: int = Field(0, ge=0)
+
+    @field_validator("session_id")
+    @classmethod
+    def _strip_session_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("session_id must not be blank")
+        return stripped
 
 
 class KnowledgeClaimRead(CamelModel):

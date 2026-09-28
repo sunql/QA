@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- **Branching:** all work on `feat/evidence-sql-metric` (cut from `epic/v31-upgrade`).
+- **Branching:** all work on `feat/evidence-extension-v31` (cut from `epic/v31-upgrade`).
 - **TDD:** RED → GREEN → IMPROVE per task. Coverage ≥ 80% on touched modules.
 - **Test isolation:** unit tests and integration tests MUST NOT share process (TRUNCATE wipes ontology_class). Use the existing `pytest -m unit` / `pytest -m integration` markers and pytest config to enforce.
 - **DB:** integration tests use `qa_metadata_test` (恒空) — never write into prod `qa_metadata`.
@@ -70,8 +70,8 @@ Expected: only `0094_*` present. If `0095_*` exists (Person A has merged id_mapp
 ```bash
 git checkout epic/v31-upgrade
 git pull --ff-only origin epic/v31-upgrade 2>/dev/null || echo "no upstream yet"
-git checkout -b feat/evidence-sql-metric
-git push -u origin feat/evidence-sql-metric
+git checkout -b feat/evidence-extension-v31
+git push -u origin feat/evidence-extension-v31
 ```
 
 - [ ] **Step 1.4: Verify branch and announce**
@@ -81,7 +81,7 @@ git branch --show-current
 git log --oneline -3
 ```
 
-Expected: `feat/evidence-sql-metric` with spec + plan commits at top.
+Expected: `feat/evidence-extension-v31` with spec + plan commits at top.
 
 ---
 
@@ -1057,10 +1057,10 @@ Focus areas:
 - [ ] **Step 8.5: Open PR into epic/v31-upgrade**
 
 ```bash
-git push origin feat/evidence-sql-metric
+git push origin feat/evidence-extension-v31
 gh pr create \
   --base epic/v31-upgrade \
-  --head feat/evidence-sql-metric \
+  --head feat/evidence-extension-v31 \
   --title "feat(evidence): B1 — evidence extension (M1' MVP payload + session_id) + /evidences API" \
   --body "$(cat <<'EOF'
 ## Summary

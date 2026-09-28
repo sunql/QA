@@ -58,6 +58,12 @@ MSG_AZURE_OPENAI_MISSING_ENDPOINT = "Azure OpenAI 缺少 endpoint 配置"
 MSG_AZURE_OPENAI_MISSING_ENDPOINT_DETAIL = "请配置 api_endpoint 或 AZURE_OPENAI_ENDPOINT"
 
 # =============================================================================
+# Wiki ↔ Ontology Link（feat-wiki-ontology-link）
+# =============================================================================
+
+MSG_WIKI_LINK_DENIED = "需要 wiki_admin 角色才能管理 wiki ↔ ontology 链接"
+
+# =============================================================================
 # 系统配置（app/config, app/main）
 # =============================================================================
 

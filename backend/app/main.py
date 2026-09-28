@@ -521,6 +521,8 @@ def createApp() -> FastAPI:
     app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(wiki_compile.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(wiki_graph.router, prefix="/api/v1", tags=["wiki"])
+    from app.api.v1.admin_wiki_links import router as admin_wiki_links_router
+    app.include_router(admin_wiki_links_router)
 
     # 健康检查。**必须注册在下方 MCP 挂载之前**：MCP 用 `Mount("")` 挂到 ASGI 树
     # 末端，而 Starlette 按注册顺序匹配 —— catch-all Mount 之后注册的路由永远不会

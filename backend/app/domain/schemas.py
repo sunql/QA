@@ -3502,3 +3502,28 @@ class EvaluationReportScheduleRead(CamelModel):
     created_by: str
     created_time: datetime
     updated_time: datetime
+
+
+# =============================================================================
+# Wiki ↔ Ontology Link（feat-wiki-ontology-link）
+# =============================================================================
+
+
+class WikiLinkOut(BaseModel):
+    id: int
+    page_id: str
+    chunk_id: str | None
+    ontology_type: str
+    ontology_id: int
+    weight: Decimal
+    note: str | None
+    created_by: int
+    revoked_time: datetime | None
+
+
+class WikiLinkableTargetOut(BaseModel):
+    id: int
+    type: str  # 'class' | 'property'
+    name: str
+    alias: str | None
+    description: str | None

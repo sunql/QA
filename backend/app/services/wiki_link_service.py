@@ -75,7 +75,7 @@ class WikiLinkService:
             ontology_id=ontology_id,
             weight=weight,
             note=note,
-            created_by=actor.userId,
+            created_by=actor.dbUserId if actor.dbUserId is not None else 1,
         )
         session.add(row)
         try:
@@ -165,6 +165,23 @@ class WikiLinkService:
                 WikiOntologyLink.revoked_time.is_(None),
             )
         )
+        result = await session.execute(stmt)
+        return [_to_row(r) for r in result.scalars().all()]
+
+    async def listAllLinks(
+        self,
+        session: AsyncSession,
+        ontology_type: str | None = None,
+        ontology_id: int | None = None,
+    ) -> list[WikiLinkRow]:
+        """List all active links filtered by optional ontology_type / ontology_id."""
+        stmt = select(WikiOntologyLink).where(
+            WikiOntologyLink.revoked_time.is_(None)
+        )
+        if ontology_type:
+            stmt = stmt.where(WikiOntologyLink.ontology_type == ontology_type)
+        if ontology_id:
+            stmt = stmt.where(WikiOntologyLink.ontology_id == ontology_id)
         result = await session.execute(stmt)
         return [_to_row(r) for r in result.scalars().all()]
 

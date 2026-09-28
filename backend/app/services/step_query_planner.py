@@ -296,7 +296,9 @@ class StepQueryPlanner:
     ) -> tuple[MultiStepPlan | None, int, int]:
         """调用 LLM 拆步；返回 (计划, prompt_tokens, completion_tokens)。
 
-        解析失败 / steps < 2 / 超过上限时计划为 None（token 仍返回以计量）。
+        解析失败 / steps < 2 时计划为 None（token 仍返回以计量）。**步数超限不在此
+        处理**：计划原样返回，由执行缝（`chat_multistep._isOversizedPlan`）拒收，
+        以便拒收文案能说出真实步数。
         JSON 容错：捕获任何解析异常并记录 warning，绝不抛错。
         """
         try:

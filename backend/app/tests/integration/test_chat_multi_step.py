@@ -21,7 +21,7 @@ import pytest
 from sqlalchemy import select
 
 from app.domain.models import LlmConfig, SessionMessage, SessionQueryState, SessionTokenUsage
-from app.services.messages_zh import MSG_MULTI_STEP_DEGRADE_FAILED
+from app.services.messages_zh import MSG_MULTI_STEP_DEGRADE_FAILED, MSG_PLAN_TOO_MANY_STEPS
 from app.services.stream_events import (
     EVENT_CLASS_RECALL,
     EVENT_DONE,
@@ -80,6 +80,27 @@ class _MultiStepLlm:
         else:
             _Resp.content = "查询完成。"
         return _Resp()
+
+
+# 6 个数据步（>MAX_PLAN_DATA_STEPS=4）的拆步回复，用于超限拒收用例
+_OVERSIZED_PLAN_JSON = (
+    '{"isMultiStep": true, "steps": ['
+    + ", ".join(
+        f'{{"description": "维度{i}", "subQuestion": "维度{i}的金额是多少"}}'
+        for i in range(6)
+    )
+    + '], "aggregationHint": "综合分析"}'
+)
+
+
+class _OversizedLlm(_MultiStepLlm):
+    """拆步 LLM 返回 6 步计划（超出 4 步数据步上限），其余阶段与父类一致。"""
+
+    async def complete(self, messages: list, **kwargs) -> object:
+        resp = await super().complete(messages, **kwargs)
+        if "查询拆分器" in messages[0].content:
+            resp.content = _OVERSIZED_PLAN_JSON
+        return resp
 
 
 class _NoDecomposeLlm(_MultiStepLlm):
@@ -494,6 +515,96 @@ class TestMultiStepChatApi:
         assert len(body["steps"]) == 1
         assert body["steps"][0]["sql"] is not None
         assert body["steps"][0]["error"] is None
+
+
+class TestOversizedPlanRejected:
+    """A6：拆步超限 → 拒收 + 固定提示，**不执行任何数据步**。
+
+    此前超限被 planner 静默截断到 4 步：用户拿到「12 问里的 4 问」却看不出少了
+    什么。现改为 planner 如实上报 + 执行缝拒收，「宁可不答，不给残缺的答案」。
+    """
+
+    _QUESTION = "请分步查询华东销售下降的所有原因并逐项分析"
+
+    async def test_oversized_plan_is_rejected_with_hint(self, client, dbSession, monkeypatch) -> None:
+        """6 步计划 → 提示含真实步数与上限，steps 为空，一条 SQL 都没执行。"""
+        config, ds = await _seed(dbSession)
+        adapter = _OkAdapter()
+        _install(monkeypatch, config, _OversizedLlm(), adapter)
+
+        resp = await client.post("/api/v1/chat", json=_payload(self._QUESTION, ds.id))
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["answer"] == MSG_PLAN_TOO_MANY_STEPS.format(steps=6, limit=4)
+        assert body["intent"] == "multi_step"
+        assert body["steps"] == []
+        # 没有执行任何**数据步** SQL。注意不能断言 `adapter.executed == []`：
+        # 值域采样（SELECT DISTINCT …）是流水线构造 _PipelineContext 时做的准备，
+        # 先于多步决策，且由模块级 _VALUE_SAMPLE_CACHE 决定是否真落到 adapter——
+        # 那样断言会随「本用例是不是进程里第一个碰 RECEIPT.NAME 的」而时绿时红。
+        assert _data_queries(adapter) == []
+
+    async def test_oversized_plan_burns_no_data_step_tokens(self, client, dbSession, monkeypatch) -> None:
+        """拒收必须发生在数据步之前：台账里不得有 nl2sql / answer 行。
+
+        这是与「截断后照常执行」的分水岭——退化成执行前 4 步的话，用户仍会拿到
+        不完整答案，且白烧 4 次 SQL 生成 + 1 次汇总（核心约束 #3 的成本口径）。
+        """
+        config, ds = await _seed(dbSession)
+        _install(monkeypatch, config, _OversizedLlm(), _OkAdapter())
+
+        resp = await client.post("/api/v1/chat", json=_payload(self._QUESTION, ds.id))
+        assert resp.status_code == 200, resp.text
+
+        usages = list((await dbSession.execute(select(SessionTokenUsage))).scalars().all())
+        # 只该剩两次**前置**调用：拆步判定（产出计划）与全局约束抽取（在
+        # chat_service 直接多步入口里先于 _resolveExplicitMultiStep 发生，
+        # 故拒收时它已经花了钱）。数据步与汇总一律未发生。
+        assert sorted(r.purpose for r in usages) == [
+            "multistep_global_filter", "step_plan",
+        ]
+
+    async def test_rule_path_oversized_is_rejected_too(self, client, dbSession, monkeypatch) -> None:
+        """规则快路径（「第X步」标号）同样受上限约束——它此前**完全无上限**。
+
+        五个标号 → 5 个数据步 → 拒收。规则路径不经过拆步 LLM，超限此前无从拦截。
+        """
+        config, ds = await _seed(dbSession)
+        llm = _MultiStepLlm()
+        adapter = _OkAdapter()
+        _install(monkeypatch, config, llm, adapter)
+
+        resp = await client.post("/api/v1/chat", json=_payload(
+            "第一步查华东金额，第二步查华南金额，第三步查华北金额，"
+            "第四步查西南金额，第五步查东北金额",
+            ds.id,
+        ))
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["answer"] == MSG_PLAN_TOO_MANY_STEPS.format(steps=5, limit=4)
+        assert body["steps"] == []
+        assert _data_queries(adapter) == []
+        # 规则路径本就零拆步 LLM 消耗，拒收不改变这一点
+        assert not any("查询拆分器" in m[0][1] for m in llm.calls)
+
+    async def test_four_data_steps_at_limit_still_executes(self, client, dbSession, monkeypatch) -> None:
+        """边界反向验证：恰好 4 个数据步（== 上限）必须放行。
+
+        只测「坏的被拦」会让上限被写成 `>=` 也照样绿（守卫类断言要双向测）。
+        """
+        config, ds = await _seed(dbSession)
+        adapter = _OkAdapter()
+        _install(monkeypatch, config, _MultiStepLlm(), adapter)
+
+        resp = await client.post("/api/v1/chat", json=_payload(
+            "第一步查华东金额，第二步查华南金额，第三步查华北金额，第四步查西南金额",
+            ds.id,
+        ))
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["intent"] == "multi_step"
+        assert len(body["steps"]) == 4
+        assert len(_data_queries(adapter)) == 4
 
 
 class TestMultiStepChatStreamApi:

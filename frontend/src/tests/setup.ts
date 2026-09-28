@@ -82,6 +82,30 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
+// getComputedStyle 桩：只覆盖 jsdom 的"假实现"（抛 Not implemented warning），
+// 让 rc-util 的 getScrollBarSize 拿到一个真实对象（返回 0 scrollbar），
+// 从而 useScrollLocker 不打断 antd Modal 的 Portal 挂载。
+// 仅当真实实现抛错时介入，避免影响其他用 getComputedStyle 测真样式的场景。
+const _realGetComputedStyle = window.getComputedStyle;
+window.getComputedStyle = function getComputedStyleShim(
+  elt: Element,
+  pseudoElt?: string | null,
+): CSSStyleDeclaration {
+  try {
+    return _realGetComputedStyle.call(window, elt, pseudoElt);
+  } catch {
+    // jsdom 对伪元素（::before/::scrollbar 等）抛 "Not implemented" — Modal 渲染时
+    // useScrollLocker → getScrollBarSize 会撞上。返回零滚动条占位对象。
+    const stub: Record<string, string> = {};
+    const proxy = new Proxy(stub as unknown as CSSStyleDeclaration, {
+      get(_target, prop: string) {
+        return prop in stub ? stub[prop] : "";
+      },
+    });
+    return proxy;
+  }
+} as typeof window.getComputedStyle;
+
 // localStorage 补丁（jsdom 环境不提供；themeStore 暗色模式持久化依赖，5.8）
 // 内存版实现，语义与 Web Storage 一致；测试间通过 clear() 复位。
 const storage: Record<string, string> = {};

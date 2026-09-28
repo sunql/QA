@@ -48,6 +48,7 @@ import AdminWikiConflictsPage from "./pages/AdminWikiConflictsPage";
 import AdminWikiSuggestionsPage from "./pages/AdminWikiSuggestionsPage";
 import AdminWikiCoveragePage from "./pages/AdminWikiCoveragePage";
 import AdminWikiGraphPage from "./pages/AdminWikiGraphPage";
+import { WikiLinksPage } from "./pages/WikiLinksPage";
 import BusinessObjectPage from "./pages/BusinessObjectPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
@@ -115,6 +116,7 @@ export default function App() {
         <Route path="admin/wiki-suggestions" element={<AdminWikiSuggestionsPage />} />
         <Route path="admin/wiki-coverage" element={<AdminWikiCoveragePage />} />
         <Route path="admin/wiki-graph" element={<AdminWikiGraphPage />} />
+        <Route path="admin/wiki-links" element={<WikiLinksPage />} />
         <Route path="business-objects" element={<BusinessObjectPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />

@@ -178,6 +178,7 @@ export const zhCN = {
       wikiCoverage: "覆盖度看板",
       wikiGraph: "知识图谱",
       wikiChat: "Wiki Chat",
+      wikiLinks: "Wiki 链接管理",
       dataQualityRuleParams: "数据质量 / 规则配置(结构化)",
       profile: "个人信息",
       changePassword: "修改密码",
@@ -2386,6 +2387,27 @@ export const zhCN = {
       removeFailed: "摘除失败，请重试",
       mappingGone: "这条标注已经不在了（可能刚被他人摘除），已为你刷新。",
     },
+  },
+
+  // Wiki ↔ Ontology 链接管理（Task 7）
+  wikiLinks: {
+    title: "Wiki ↔ Ontology 链接管理",
+    addBinding: "添加绑定",
+    scopePage: "覆盖全页",
+    scopeChunk: "仅限此段落",
+    ontologyObject: "本体对象",
+    weight: "权重",
+    note: "备注",
+    revoke: "撤销",
+    addSuccess: "添加成功",
+    addFailed: "添加失败",
+    revokeSuccess: "已撤销",
+    revokeFailed: "撤销失败",
+    loadFailed: "加载链接失败",
+    loadTargetsFailed: "加载可链接目标失败",
+    noLinks: "暂无链接",
+    selectPageHint: "请先选择左侧 Wiki 页面",
+    pageTreeLabel: "请选择 Wiki 页面",
   },
 
   agentTools: {

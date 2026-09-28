@@ -63,6 +63,8 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.enterpriseWiki", "code": "item.wikiCoverage", "label_key": "menu.item.wikiCoverage", "icon_code": "dashboard", "sort_order": 290, "path": "/admin/wiki-coverage"},
     # Phase 2 知识图谱：Louvain 社区 + 4-Signal 相关性可视化
     {"parent": "section.enterpriseWiki", "code": "item.wikiGraph", "label_key": "menu.item.wikiGraph", "icon_code": "node", "sort_order": 295, "path": "/admin/wiki-graph"},
+    # Task 7: Wiki ↔ Ontology 链接管理
+    {"parent": "section.enterpriseWiki", "code": "item.wikiLinks", "label_key": "menu.item.wikiLinks", "icon_code": "link", "sort_order": 297, "path": "/admin/wiki-links"},
     # Business Config
     {"parent": "section.bizConfig", "code": "item.ontology", "label_key": "menu.item.ontology", "icon_code": "partition", "sort_order": 310, "path": "/ontology"},
     {"parent": "section.bizConfig", "code": "item.dataQuality", "label_key": "menu.item.dataQuality", "icon_code": "audit", "sort_order": 320, "path": "/data-quality"},

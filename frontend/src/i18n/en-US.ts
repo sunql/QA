@@ -172,6 +172,7 @@ export const enUS = {
       wikiCoverage: "Coverage Dashboard",
       wikiGraph: "Knowledge Graph",
       wikiChat: "Wiki Chat",
+      wikiLinks: "Wiki Link Management",
       dataQualityRuleParams: "Data Quality / Rule Config (Structured)",
       profile: "Profile",
       changePassword: "Change Password",
@@ -2378,6 +2379,27 @@ export const enUS = {
       mappingGone:
         "That tag is already gone (someone may have just removed it). The list has been refreshed.",
     },
+  },
+
+  // Wiki ↔ Ontology link management (Task 7)
+  wikiLinks: {
+    title: "Wiki ↔ Ontology Link Management",
+    addBinding: "Add Binding",
+    scopePage: "Entire page",
+    scopeChunk: "This chunk only",
+    ontologyObject: "Ontology object",
+    weight: "Weight",
+    note: "Note",
+    revoke: "Revoke",
+    addSuccess: "Added successfully",
+    addFailed: "Add failed",
+    revokeSuccess: "Revoked",
+    revokeFailed: "Revoke failed",
+    loadFailed: "Failed to load links",
+    loadTargetsFailed: "Failed to load linkable targets",
+    noLinks: "No links",
+    selectPageHint: "Select a Wiki page on the left first",
+    pageTreeLabel: "Select Wiki page",
   },
 
   agentTools: {

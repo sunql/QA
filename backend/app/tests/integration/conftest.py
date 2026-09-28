@@ -201,6 +201,9 @@ def _dropOntologyCollections() -> None:
         _connAlias,
         _connect,
         dropCollection,
+        ensureClassCollection,
+        ensureMetricCollection,
+        ensurePropertyCollection,
     )
     from pymilvus import Collection, utility
 
@@ -212,7 +215,8 @@ def _dropOntologyCollections() -> None:
     except Exception:
         pass  # idempotent
 
-    # 3 new collections (added in M2)
+    # 3 new collections (added in M2): drop then recreate (empty) so
+    # reconcile() can query them even in a "clean" state.
     for name in (
         "ontology_class_embeddings",
         "ontology_property_embeddings",
@@ -223,6 +227,11 @@ def _dropOntologyCollections() -> None:
                 Collection(name, using=_connAlias()).drop()
         except Exception:
             pass  # idempotent
+
+    # Recreate empty collections so reconcile() can query them.
+    ensureClassCollection()
+    ensurePropertyCollection()
+    ensureMetricCollection()
 
 
 @pytest.fixture
@@ -263,3 +272,31 @@ def milvusSeedAllTypes(milvusCleanClient):
         {"ontology_id": 2003, "type": "metric", "name": "Metric1", "alias": "", "description": "", "embedding": [0.3] * _EMBEDDING_DIM},
     ])
     return {"seeded": 3}
+
+
+@pytest.fixture
+def milvusSeedExternalId(milvusCleanClient):
+    """种入 3 条 ontology 行（1 class + 1 property + 1 metric），每行 external_id
+    已预填为可解析的 unified_id 形式，方便 reconcile 校验。
+
+    Reuses insertEmbeddingsDual (Task M3) which writes to BOTH old + new collections.
+    The new collections' external_id fields carry the unified_id values used for
+    reconcile matching.
+    """
+    from app.infrastructure.milvus_client import insertEmbeddingsDual
+
+    insertEmbeddingsDual([
+        {"ontology_id": 5001, "type": "class", "name": "ClassS001",
+         "alias": "", "description": "",
+         "embedding": [0.5] * _EMBEDDING_DIM,
+         "external_id": "obj:class:5001"},
+        {"ontology_id": 5002, "type": "property", "name": "PropP001",
+         "alias": "", "description": "",
+         "embedding": [0.6] * _EMBEDDING_DIM,
+         "external_id": "obj:property:5002"},
+        {"ontology_id": 5003, "type": "metric", "name": "MetricM001",
+         "alias": "", "description": "",
+         "embedding": [0.7] * _EMBEDDING_DIM,
+         "external_id": "obj:metric:5003"},
+    ])
+    return {"seeded": 3, "external_ids": ["obj:class:5001", "obj:property:5002", "obj:metric:5003"]}

@@ -827,6 +827,108 @@ def ensureMetricCollection() -> Collection:
     return _ensureCollection(_METRIC_COLLECTION_NAME, _metricFields())
 
 
+def insertEmbeddingsDual(records: list[dict[str, Any]]) -> None:
+    """Dual-write: insert into BOTH old ontology_embeddings AND type-routed new collection.
+
+    Per-record routing: ``type='class'`` → ontology_class_embeddings, etc.
+    Each new collection's ``external_id`` field is initially empty string; backfill
+    (Task M7) will populate it.
+
+    Raises:
+        ValueError: if any record has invalid ``type`` (not in VALID_EMBEDDING_TYPES).
+    """
+    if not records:
+        return
+
+    # Validate types
+    for r in records:
+        type_ = r.get("type")
+        if type_ not in VALID_EMBEDDING_TYPES:
+            raise ValueError(f"Invalid type {type_!r}; must be one of {sorted(VALID_EMBEDDING_TYPES)}")
+
+    # Old collection write (single call to existing function)
+    insertEmbeddings(records)
+
+    # New collection write: route by type
+    by_type: dict[str, list[dict[str, Any]]] = {}
+    for r in records:
+        by_type.setdefault(r["type"], []).append(r)
+
+    if "class" in by_type:
+        _insertIntoNewCollection(_CLASS_COLLECTION_NAME, by_type["class"])
+    if "property" in by_type:
+        _insertIntoNewCollection(_PROPERTY_COLLECTION_NAME, by_type["property"])
+    if "metric" in by_type:
+        _insertIntoNewCollection(_METRIC_COLLECTION_NAME, by_type["metric"])
+
+
+def _insertIntoNewCollection(name: str, records: list[dict[str, Any]]) -> None:
+    """Insert records into a new 3-collection (class/property/metric) variant.
+
+    Same schema as existing insertEmbeddings PLUS the new external_id field
+    (initially ""; backfilled by Task M7).
+    """
+    if name == _CLASS_COLLECTION_NAME:
+        collection = ensureClassCollection()
+    elif name == _PROPERTY_COLLECTION_NAME:
+        collection = ensurePropertyCollection()
+    elif name == _METRIC_COLLECTION_NAME:
+        collection = ensureMetricCollection()
+    else:
+        raise ValueError(f"Unknown collection name: {name}")
+
+    data = [
+        [r["ontology_id"] for r in records],       # id is auto_id, skip
+        [r["type"] for r in records],
+        [r["name"] for r in records],
+        [r.get("alias") or "" for r in records],
+        [r.get("description") or "" for r in records],
+        [r["embedding"] for r in records],         # embedding before external_id
+        ["" for _ in records],                     # external_id: empty initially, backfilled by M7
+    ]
+    collection.insert(data)
+    collection.flush()
+    logger.info("Dual-write: inserted %d embeddings into %s", len(records), name)
+
+
+def queryClassEmbeddings() -> list[dict[str, Any]]:
+    """Read all rows from ontology_class_embeddings."""
+    return _queryAllRowsFromCollection(_CLASS_COLLECTION_NAME)
+
+
+def queryPropertyEmbeddings() -> list[dict[str, Any]]:
+    """Read all rows from ontology_property_embeddings."""
+    return _queryAllRowsFromCollection(_PROPERTY_COLLECTION_NAME)
+
+
+def queryMetricEmbeddings() -> list[dict[str, Any]]:
+    """Read all rows from ontology_metric_embeddings."""
+    return _queryAllRowsFromCollection(_METRIC_COLLECTION_NAME)
+
+
+def _queryAllRowsFromCollection(name: str) -> list[dict[str, Any]]:
+    """Full query of a collection, returning list[dict].
+
+    Uses simple query(limit=_MILVUS_QUERY_PAGE) since each new collection
+    stays well under 16384 rows in production. For future scale, swap to
+    query_iterator like _queryAllRows does.
+    """
+    collection = _ensureCollectionByName(name)
+    collection.load()
+    results = collection.query(
+        expr="id >= 0",
+        output_fields=["ontology_id", "type", "name", "external_id"],
+        limit=_MILVUS_QUERY_PAGE,
+    )
+    return results
+
+
+def _ensureCollectionByName(name: str) -> Collection:
+    """Connect and get Collection handle by name (assumes collection already exists)."""
+    _connect()
+    return Collection(name, using=_connAlias())
+
+
 def closeConnection() -> None:
     """断开 Milvus 连接（幂等；未连接时 no-op）。"""
     if connections.has_connection(_connAlias()):

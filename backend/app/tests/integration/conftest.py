@@ -193,16 +193,36 @@ _EMBEDDING_DIM = 1024
 def _dropOntologyCollections() -> None:
     """删除全部已知本体 Milvus 集合（idempotent；集合不存在 no-op）。
 
-    当前只 drop ontology_embeddings；Task M2 落地后需追加
-    ontology_class_embeddings / ontology_property_embeddings /
-    ontology_metric_embeddings 三个新集合。
+    Drops ontology_embeddings (old) AND the 3 new type-specific collections
+    (ontology_class_embeddings / ontology_property_embeddings /
+    ontology_metric_embeddings) added in M2.
     """
-    from app.infrastructure.milvus_client import dropCollection
+    from app.infrastructure.milvus_client import (
+        _connAlias,
+        _connect,
+        dropCollection,
+    )
+    from pymilvus import Collection, utility
 
+    _connect()
+
+    # Old single collection
     try:
         dropCollection()  # drops _COLLECTION_NAME = "ontology_embeddings"
     except Exception:
-        pass  # 集合不存在或 drop 失败视为幂等，不阻塞测试
+        pass  # idempotent
+
+    # 3 new collections (added in M2)
+    for name in (
+        "ontology_class_embeddings",
+        "ontology_property_embeddings",
+        "ontology_metric_embeddings",
+    ):
+        try:
+            if utility.has_collection(name, using=_connAlias()):
+                Collection(name, using=_connAlias()).drop()
+        except Exception:
+            pass  # idempotent
 
 
 @pytest.fixture

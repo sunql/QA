@@ -352,6 +352,26 @@ L1.5 命中? ──yes──→ _resolveExplicitMultiStep（plan LLM）
 
 L1 走纯规则（节省 LLM 成本），L1.5 调 plan() LLM。两者复用同一个 `_resolveExplicitMultiStep`，避免代码重复。
 
+### 步数硬限（`MAX_PLAN_DATA_STEPS=4`，2026-09-28 A6/M2a）
+
+数据步（不含自动汇总步）超过 **4 步**的计划一律**拒收**，一个数据步都不执行：
+
+| 项 | 值 / 位置 |
+|---|---|
+| 上限常量 | `app/domain/multi_step_plan.py`：`MAX_PLAN_DATA_STEPS = MAX_MULTI_STEP - 1`。**派生**自 `MAX_MULTI_STEP=5` 而非另写字面量——两个语义不同的 5（含汇总 vs 纯数据步）日后极易被"顺手统一"成一个，从而破坏循环守卫 |
+| 守门谓词 | `chat_multistep._isOversizedPlan`：`len(plan.data_steps) > MAX_PLAN_DATA_STEPS`（汇总步必然排在最后，不占额度） |
+| 拒收动作 | `chat_multistep._rejectOversizedPlan`——落库 + 存状态，**不做任何执行**；文案 `MSG_PLAN_TOO_MANY_STEPS`（`messages_zh.py`）报出**真实**步数与上限 |
+| 两条路径 | 非流式 `_executeMultiStep` 顶部；流式 `_streamMultiStep` 顶部（在读 cache multiplier **之前**，拒收不需要它）。流式事件序列与非流式同型：概览 + 起始 → token → `step_result` 收尾（不收尾前端那张卡永远停在"待执行"） |
+| 单步卡片 | `_oversizedStepResult` 是唯一出处，流式/非流式共用。空 `steps` 会让前端不挂载 `MultiStepPlanCard`，固定文案就变成一段没有归属的裸文字 |
+
+**为什么限制放在执行缝而不是 planner**：planner 必须**如实上报**步数，否则拒收文案说不出真实步数——planner 若自行截断，N 恒等于上限值，文案退化成"需要 4 步，超出 4 步上限"这种废话。原先 `_plan_by_llm` 在出口静默 `steps[:MAX]`，用户拿到"12 问里的 4 问"却不自知；system prompt 里"最多拆 4 个子步骤"的自限也一并删除，因为它让 LLM 在 planner 之前就合并/丢弃子问题，使**拒收分支永远不可达**。
+
+**规则快路径同时堵上**：`rule_based_split`（"第X步"标号）此前**完全无上限**，5 个标号即 5 个数据步无条件执行。
+
+**代价（有意为之）**：需要 5+ 步的问题从"拿到 4 步部分答案"变成"被拒收"，用户可见覆盖面下降。`MAX_PLAN_DATA_STEPS` 是一行常量；上线后观察 info 日志 `拆步超限，按上限拒收` 的频次，过高时优先调 prompt 的"只拆彼此独立的子问题"措辞，而不是直接抬上限。
+
+**未做**：A6 原计划第三条「分级落地（§5.3：2–3 步走模板校验）」刻意未做——它是 planner 成本优化，不改步限，待 Planner 有独立需求时另立变更。详见 `changes/2026-09-28-planner-step-limit/summary.md`。
+
 ## 多步上下文强注入（实体列表作为筛选条件）
 
 `StepExecutionContext.inject_to_prompt`（**`app/domain/multi_step_plan.py:197`** —— 原文写的 `multi_step_plan.py` / `app/services/multi_step_plan.py` **两处路径都不对**，该模块在 `app/domain/` 下）把前序 `StepResult` 渲染为可注入 plan + sql 两个阶段 prompt 的文本片段。2026-08-17 修复 Bug 4（Step N 引用 Step N-1 实体列表作为 WHERE IN 筛选条件）后，渲染按数据类型自动分档 + plan/sql prompt 共用 WHERE IN 强指令（详见 `changes/fix-multistep-context-strong-injection/summary.md`）。

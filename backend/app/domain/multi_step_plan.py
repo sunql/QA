@@ -19,6 +19,10 @@ from typing import Literal
 
 MAX_MULTI_STEP = 5  # 硬上限：含汇总步骤最多 5 步（防无限循环）
 
+# 数据步（非汇总）上限。planner 与执行缝都以它为准；汇总步骤是必然的最后一步，
+# 不占额度。派生自 MAX_MULTI_STEP 而非另写一个 5，避免两处上限各自漂移。
+MAX_PLAN_DATA_STEPS = MAX_MULTI_STEP - 1
+
 # 2026-08-17 修复：Step N 引用 Step N-1 实体列表作为 WHERE IN 筛选条件
 # 实体列表形态：每列一行 `列名: 值1, 值2, ...`，方便 LLM 直接生成 WHERE IN
 _ENTITY_LIST_ITEM_LIMIT = 2000  # 实体列表模式每项字符上限（够 Top 30 完整 ID 列表）

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.enums import IntentType
 from app.domain.models import LlmConfig, SessionQueryState
 from app.domain.multi_step_plan import (
+    MAX_PLAN_DATA_STEPS,
     GlobalFilters,
     MultiStepPlan,
     StepExecutionContext,
@@ -39,6 +40,7 @@ from app.services.chat_helpers import (
 from app.services.messages_zh import (
     MSG_MULTI_STEP_DEGRADE_FAILED,
     MSG_MULTI_STEP_DEGRADE_PARTIAL,
+    MSG_PLAN_TOO_MANY_STEPS,
 )
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 
@@ -358,6 +360,70 @@ class MultiStepMixin:
             tokens=tokens, cost=cost, modelName=model_name, plan=outcome.plan,
         )
 
+    @staticmethod
+    def _isOversizedPlan(plan: MultiStepPlan) -> bool:
+        """计划的数据步数是否超上限（汇总步不占额度）。
+
+        执行缝的守门谓词。planner 负责**如实上报**步数，这里负责**受不受理**——
+        分成两处是因为拒收文案要说得出真实步数：planner 若自行截断，N 恒为上限值。
+        """
+        return len(plan.data_steps) > MAX_PLAN_DATA_STEPS
+
+    @staticmethod
+    def _oversizedStepResult(dto: ChatRequest) -> StepResult:
+        """超限拒收的**唯一**单步卡片定义，流式与非流式共用。
+
+        两条路径都必须给出这张卡（而非空 steps）：前端 MultiStepPlanCard 仅在
+        steps 非空时挂载，留空会把固定文案渲染成一段没有归属的裸文字；而非流式
+        「无法回答」分支（chat_service `_unanswerableResponse`）早已为同一理由
+        填卡。抽成一处是因为两侧文案一旦各写一份，就是本项目反复出现的
+        「流式/非流式漂移」缺陷类型。
+        """
+        return StepResult(
+            step_index=0,
+            description="超出步数上限",
+            sub_question=dto.question,
+            sql=None,
+            data=None,
+            summary="该问题需要的步骤数超出上限",
+        )
+
+    async def _rejectOversizedPlan(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        multiStepPlan: MultiStepPlan,
+        *,
+        total_cost: Decimal,
+        _t0: float,
+    ) -> str:
+        """超限计划的固定回答：落库 + 存状态，返回文案；不做任何执行。
+
+        与 `_finalizeMultiStepDegrade` 同构（流式/非流式共用同一入口，避免两条路径
+        再次漂移），差别只在语义：这里是「按上限拒收」而非「执行失败」，故不写
+        warning 级降级日志、也不重试——重试只会拿到同样超限的计划。
+
+        落库与 `_saveQueryState`（plan/sql 均 None）不能省：否则历史里留下悬空的
+        user 轮，且下一轮追问会锚到更早的问题（静默答错）。
+        """
+        steps = len(multiStepPlan.data_steps)
+        answer = MSG_PLAN_TOO_MANY_STEPS.format(steps=steps, limit=MAX_PLAN_DATA_STEPS)
+        logger.info(
+            "拆步超限，按上限拒收（%d 步 > %d 步）: %s",
+            steps, MAX_PLAN_DATA_STEPS, dto.question,
+        )
+        await self._storeSessionMessages(
+            session, dto.sessionId, dto.question, answer, None,
+            routing_layer="L2",
+            latency_ms=int((time.monotonic() - _t0) * 1000),
+            token_cost_usd=float(total_cost),
+        )
+        await self._saveQueryState(
+            session, dto.sessionId,
+            question=dto.question, plan=None, sql=None, resultColumns=[],
+        )
+        return answer
+
     async def _executeMultiStep(
         self,
         session: AsyncSession,
@@ -382,6 +448,25 @@ class MultiStepMixin:
 
         _t0：调用方传入的计时起点（来自 _handleGenericQuery 入口计时）。
         """
+        if self._isOversizedPlan(multiStepPlan):
+            # 在任何数据步之前返回：拒收不是「执行失败」，更不该先烧掉前几步的
+            # SQL 生成再收尾（那正是本改动要消灭的形态——静默截断）。
+            answer = await self._rejectOversizedPlan(
+                session, dto, multiStepPlan,
+                total_cost=initial_cost, _t0=_t0,
+            )
+            return ChatResponse(
+                answer=answer,
+                intent="multi_step",
+                # 一张拒收卡，不是空 steps：与流式路径、与「无法回答」分支同型
+                # （理由见 _oversizedStepResult）。
+                steps=[_step_result_to_read(self._oversizedStepResult(dto))],
+                tokensUsed=initial_tokens,
+                cost=float(initial_cost),
+                latency_ms=int((time.monotonic() - _t0) * 1000),
+                modelName=None,
+            )
+
         ctx = StepExecutionContext(
             datasource_type=pc.ds.type,
             oracle_version=pc.ds.oracle_version,

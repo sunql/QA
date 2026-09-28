@@ -36,6 +36,14 @@ MSG_MULTI_STEP_DEGRADE_PARTIAL = (
     "多步查询已完成 {done}/{total} 个数据步骤，但汇总分析失败，请重试或简化您的问题。"
 )
 MSG_MULTI_STEP_DEGRADE_FAILED = "多步查询执行过程中出现异常，请重试或简化您的问题。"
+
+# 拆步结果超出数据步上限：执行缝拒收（不是执行失败）。`{steps}` 是模型要求的
+# **真实**步数、`{limit}` 是上限。刻意报出真实步数——只说「问题太复杂」用户无从
+# 判断该缩到什么程度，给出步数才知道要砍掉几项。
+MSG_PLAN_TOO_MANY_STEPS = (
+    "该问题需要拆解为 {steps} 步，超出 {limit} 步上限，"
+    "请聚焦单一维度提问（如先分析客户层面原因）。"
+)
 # MSG_RATE_LIMITED 在 app/domain/error_messages.py（基础设施层）
 
 # 消息角色 → 中文说话人标签（MessageList 渲染使用）

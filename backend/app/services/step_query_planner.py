@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.domain.multi_step_plan import (
-    MAX_MULTI_STEP,
     GlobalFilters,
     MultiStepPlan,
     StepPlan,
@@ -73,7 +72,9 @@ _STEP_PLANNER_SYSTEM_PROMPT = (
     "\"steps\": [{\"description\": \"...\", \"subQuestion\": \"...\"}], "
     "\"aggregationHint\": \"如何汇总\"}\n"
     "若不需要，返回 {\"isMultiStep\": false}。\n"
-    "最多拆 4 个子步骤（汇总步骤不计入）。"
+    "只拆**彼此独立、无法用一条 SQL 完成**的子问题；一次 SQL 能算完的对比/汇总不要拆。\n"
+    "**如实列出全部子问题，不要因为数量多就自行合并或截断**——"
+    "系统会按上限决定是否受理，你少报会让用户拿到不完整的答案。"
 )
 
 
@@ -295,7 +296,9 @@ class StepQueryPlanner:
     ) -> tuple[MultiStepPlan | None, int, int]:
         """调用 LLM 拆步；返回 (计划, prompt_tokens, completion_tokens)。
 
-        解析失败 / steps < 2 / 超过上限时计划为 None（token 仍返回以计量）。
+        解析失败 / steps < 2 时计划为 None（token 仍返回以计量）。**步数超限不在此
+        处理**：计划原样返回，由执行缝（`chat_multistep._isOversizedPlan`）拒收，
+        以便拒收文案能说出真实步数。
         JSON 容错：捕获任何解析异常并记录 warning，绝不抛错。
         """
         try:
@@ -330,7 +333,7 @@ class StepQueryPlanner:
         if len(steps) < 2:
             return None, pt, ct
 
-        # 注入自动汇总步骤（不计入 MAX_MULTI_STEP 上限检查，因为它是必然的最后一步）
+        # 注入自动汇总步骤（不占 MAX_PLAN_DATA_STEPS 额度：它必然排在最后）
         steps.append(
             StepPlan(
                 index=len(steps),
@@ -340,17 +343,9 @@ class StepQueryPlanner:
             )
         )
 
-        # 硬上限保护（不含汇总步骤）
-        non_agg_count = len(steps) - 1
-        if non_agg_count > MAX_MULTI_STEP - 1:
-            logger.warning(
-                "拆步数量 %d 超过上限 %d，截断: %s",
-                non_agg_count,
-                MAX_MULTI_STEP - 1,
-                question,
-            )
-            steps = steps[: MAX_MULTI_STEP - 1] + steps[-1:]
-
+        # 硬上限不在这里施加：planner **如实上报**步数，是否受理由执行缝
+        # （chat_multistep._isOversizedPlan）判定。原先在此静默截断会让用户
+        # 拿到「12 问里的 4 问」却不自知，且拒收文案永远说不出真实步数。
         return (
             MultiStepPlan(
                 steps=tuple(steps),

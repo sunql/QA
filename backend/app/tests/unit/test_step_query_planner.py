@@ -139,8 +139,12 @@ class TestStepQueryPlannerPlan:
         assert result.prompt_tokens == 0  # 调用未成功，无可计量 token
         assert result.completion_tokens == 0
 
-    async def test_steps_over_max_limit_truncated(self) -> None:
-        """拆出 6 个数据步骤（>MAX_MULTI_STEP-1=4）时截断到 4。"""
+    async def test_steps_over_limit_pass_through_untruncated(self) -> None:
+        """拆出 6 个数据步（>MAX_PLAN_DATA_STEPS=4）时**原样返回**，不再截断。
+
+        截断改到执行缝（见 test_chat_multi_step 的超限拒收）。planner 必须如实
+        上报步数，否则拒收文案说不出真实步数、永远只能报 4。
+        """
         planner = StepQueryPlanner()
         many_steps = ', '.join(
             f'{{"description": "step{i}", "subQuestion": "step{i}问"}}'
@@ -151,9 +155,8 @@ class TestStepQueryPlannerPlan:
         )
         result = await planner.plan("对比各年销售额", MagicMock(), mock_client, "gpt-4o")
         assert result.plan is not None
-        # MAX_MULTI_STEP=5，含汇总步骤最多5步 → 4数据步+1汇总步
         non_agg = [s for s in result.plan.steps if not s.aggregation_only]
-        assert len(non_agg) == 4  # 截断到 4
+        assert len(non_agg) == 6  # 原样透传，不截断
 
 
 class TestStepQueryPlannerExtractJson:
@@ -491,3 +494,15 @@ class TestExtractGlobalFilters:
         )
         assert filters is None
         assert (promptTokens, completionTokens) == (10, 5)
+
+
+def test_system_prompt_does_not_cap_step_count() -> None:
+    """拆步 prompt 不得自带步数上限。
+
+    一旦模型被要求「最多拆 N 步」，它会在返回前自行合并/丢步——执行缝看到的
+    步数永远到不了上限，超限拒收分支形同虚设（A6 的核心陷阱）。上限只由
+    `MAX_PLAN_DATA_STEPS` 在执行缝施加，prompt 只负责如实列举。
+    """
+    from app.services.step_query_planner import _STEP_PLANNER_SYSTEM_PROMPT
+
+    assert "最多拆" not in _STEP_PLANNER_SYSTEM_PROMPT

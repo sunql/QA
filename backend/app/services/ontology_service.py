@@ -42,6 +42,7 @@ from app.domain.models import (
     OntologyRelation,
 )
 from app.domain.schemas import (
+    IdMappingCreate,
     OntologyClassCreate,
     OntologyClassUpdate,
     OntologyJoinCreate,
@@ -58,6 +59,7 @@ from app.infrastructure import neo4j_client as neo4j
 from app.services.acl_service import AclService
 from app.services.audit_service import AuditService
 from app.services.embedding_service import EmbeddingService
+from app.services.id_mapping_service import IdMappingService
 from app.services.join_inference import SAGE_X3_REFERENCE_MAP
 from app.services.messages_zh import (
     MSG_CLASS_ALREADY_EXPIRED,
@@ -255,17 +257,36 @@ class OntologyService:
         await session.commit()
         await session.refresh(entity)
 
+        # 注册 unified_id → id_mapping 表（在 PG 事务内与 entity 同批次提交，
+        # 保证原子性：entity 提交则 id_mapping 必提交，任一失败则同回滚）
+        id_mapping_svc = IdMappingService()
+        mapping = await id_mapping_svc.register(
+            session,
+            IdMappingCreate(
+                business_object="CLASS",
+                external_id=str(entity.id),
+                pg_table="ontology_class",
+                pg_id=str(entity.id),
+            ),
+        )
+        unified_id = mapping.unified_id
+
         # Neo4j 节点 + 继承边（upsert 幂等：重复创建/重跑不冲突）
         try:
             neo4j.upsertClassNode(
-                id=entity.id,
+                unified_id=unified_id,
                 name=entity.class_name,
                 alias=entity.class_alias,
                 description=entity.description,
                 sourceTable=entity.source_table,
             )
             if entity.parent_class_id:
-                neo4j.reconcileClassSubclassOf(entity.id, entity.parent_class_id)
+                # 父类的 unified_id 需要从 id_mapping 表查到（父类必已存在，否则 FK 约束早失败）
+                parent_mapping = await id_mapping_svc.resolveByExternal(
+                    session, "CLASS", str(entity.parent_class_id)
+                )
+                if parent_mapping is not None:
+                    neo4j.reconcileClassSubclassOf(unified_id, parent_mapping.unified_id)
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点创建", entity.id, exc)
 
@@ -373,6 +394,8 @@ class OntologyService:
                     raise ValidationError(MSG_CLASS_NAME_EXISTS.format(name=newName))
 
         # 继承校验：仅在显式更新 parent_class_id 时执行
+        id_mapping_svc = IdMappingService()
+        class_uid: str | None = None
         if "parent_class_id" in updates:
             newParentId = updates["parent_class_id"]
             if newParentId is not None:
@@ -382,10 +405,18 @@ class OntologyService:
                 if parent is None:
                     raise ValidationError(MSG_PARENT_CLASS_NOT_FOUND.format(id=newParentId))
                 try:
-                    if neo4j.detectInheritanceCycle(id, newParentId):
-                        raise ValidationError(
-                            MSG_CLASS_INHERIT_CYCLE.format(id=newParentId)
-                        )
+                    # 统一通过 id_mapping 查 unified_id
+                    class_uid_row = await id_mapping_svc.resolveByExternal(
+                        session, "CLASS", str(id)
+                    )
+                    parent_uid_row = await id_mapping_svc.resolveByExternal(
+                        session, "CLASS", str(newParentId)
+                    )
+                    if class_uid_row and parent_uid_row:
+                        if neo4j.detectInheritanceCycle(class_uid_row.unified_id, parent_uid_row.unified_id):
+                            raise ValidationError(
+                                MSG_CLASS_INHERIT_CYCLE.format(id=newParentId)
+                            )
                 except ValidationError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -410,17 +441,31 @@ class OntologyService:
         await session.commit()
         await session.refresh(existing)
 
-        # Neo4j 节点属性 + 继承边同步（id 不变，按原 id 同步，best-effort）
+        # Neo4j 节点属性 + 继承边同步（id 不变，best-effort）
         try:
+            class_uid_row = await id_mapping_svc.resolveByExternal(
+                session, "CLASS", str(existing.id)
+            )
+            if class_uid_row is None:
+                raise RuntimeError(f"id_mapping not found for CLASS:{existing.id}")
             neo4j.upsertClassNode(
-                id=existing.id,
+                unified_id=class_uid_row.unified_id,
                 name=existing.class_name,
                 alias=existing.class_alias,
                 description=existing.description,
                 sourceTable=existing.source_table,
             )
             if "parent_class_id" in updates:
-                neo4j.reconcileClassSubclassOf(existing.id, existing.parent_class_id)
+                if existing.parent_class_id is not None:
+                    parent_uid_row = await id_mapping_svc.resolveByExternal(
+                        session, "CLASS", str(existing.parent_class_id)
+                    )
+                    neo4j.reconcileClassSubclassOf(
+                        class_uid_row.unified_id,
+                        parent_uid_row.unified_id if parent_uid_row else None,
+                    )
+                else:
+                    neo4j.reconcileClassSubclassOf(class_uid_row.unified_id, None)
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点更新", existing.id, exc)
 
@@ -468,8 +513,14 @@ class OntologyService:
             before=before,
         )
         await session.commit()
+        # 通过 id_mapping 表查到 unified_id
+        id_mapping_svc = IdMappingService()
+        class_uid_row = await id_mapping_svc.resolveByExternal(
+            session, "CLASS", str(id)
+        )
         try:
-            neo4j.deleteNode("Class", id)
+            if class_uid_row is not None:
+                neo4j.deleteNode("Class", class_uid_row.unified_id)
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点删除", id, exc)
         try:
@@ -523,9 +574,27 @@ class OntologyService:
         await session.commit()
         await session.refresh(entity)
 
+        # 注册 unified_id → id_mapping 表
+        id_mapping_svc = IdMappingService()
+        mapping = await id_mapping_svc.register(
+            session,
+            IdMappingCreate(
+                business_object="PROPERTY",
+                external_id=str(entity.id),
+                pg_table="ontology_property",
+                pg_id=str(entity.id),
+            ),
+        )
+        unified_id = mapping.unified_id
+
+        # 宿主类的 unified_id
+        class_mapping = await id_mapping_svc.resolveByExternal(
+            session, "CLASS", str(dto.class_id)
+        )
+
         try:
             neo4j.upsertPropertyNode(
-                id=entity.id,
+                unified_id=unified_id,
                 name=entity.property_name,
                 alias=entity.property_alias,
                 dataType=entity.data_type,
@@ -533,9 +602,14 @@ class OntologyService:
                 isPrimaryKey=entity.is_primary_key,
                 isForeignKey=entity.is_foreign_key,
             )
-            neo4j.linkClassHasProperty(dto.class_id, entity.id)
+            if class_mapping is not None:
+                neo4j.linkClassHasProperty(class_mapping.unified_id, unified_id)
             if entity.ref_class_id:
-                neo4j.linkPropertyReferences(entity.id, entity.ref_class_id)
+                ref_mapping = await id_mapping_svc.resolveByExternal(
+                    session, "CLASS", str(entity.ref_class_id)
+                )
+                if ref_mapping is not None:
+                    neo4j.linkPropertyReferences(unified_id, ref_mapping.unified_id)
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点/关系创建", entity.id, exc)
 
@@ -597,25 +671,42 @@ class OntologyService:
         await session.refresh(entity)
 
         # Neo4j 节点属性 + 关系同步（best-effort）
-        try:
-            neo4j.upsertPropertyNode(
-                id=entity.id,
-                name=entity.property_name,
-                alias=entity.property_alias,
-                dataType=entity.data_type,
-                sourceColumn=entity.source_column,
-                isPrimaryKey=entity.is_primary_key,
-                isForeignKey=entity.is_foreign_key,
-            )
-            # 幂等 MERGE，自愈 create 阶段若中断而缺失的 HAS_PROPERTY 边
-            neo4j.linkClassHasProperty(entity.class_id, entity.id)
-            # 外键/引用类变化时重建 REFERENCES；目标以 is_foreign_key 为准，
-            # 避免 is_foreign_key=False 时仍残留 REFERENCES 边
-            if "is_foreign_key" in updates or "ref_class_id" in updates:
-                target = entity.ref_class_id if entity.is_foreign_key else None
-                neo4j.reconcilePropertyReferences(entity.id, target)
-        except Exception as exc:  # noqa: BLE001
-            _logNeo4jFailure("更新", id, exc)
+        id_mapping_svc = IdMappingService()
+        prop_uid_row = await id_mapping_svc.resolveByExternal(
+            session, "PROPERTY", str(entity.id)
+        )
+        class_uid_row = await id_mapping_svc.resolveByExternal(
+            session, "CLASS", str(entity.class_id)
+        )
+        if prop_uid_row is not None and class_uid_row is not None:
+            try:
+                neo4j.upsertPropertyNode(
+                    unified_id=prop_uid_row.unified_id,
+                    name=entity.property_name,
+                    alias=entity.property_alias,
+                    dataType=entity.data_type,
+                    sourceColumn=entity.source_column,
+                    isPrimaryKey=entity.is_primary_key,
+                    isForeignKey=entity.is_foreign_key,
+                )
+                # 幂等 MERGE，自愈 create 阶段若中断而缺失的 HAS_PROPERTY 边
+                neo4j.linkClassHasProperty(class_uid_row.unified_id, prop_uid_row.unified_id)
+                # 外键/引用类变化时重建 REFERENCES；目标以 is_foreign_key 为准，
+                # 避免 is_foreign_key=False 时仍残留 REFERENCES 边
+                if "is_foreign_key" in updates or "ref_class_id" in updates:
+                    target = entity.ref_class_id if entity.is_foreign_key else None
+                    if target is not None:
+                        ref_class_uid_row = await id_mapping_svc.resolveByExternal(
+                            session, "CLASS", str(target)
+                        )
+                        if ref_class_uid_row is not None:
+                            neo4j.reconcilePropertyReferences(
+                                prop_uid_row.unified_id, ref_class_uid_row.unified_id
+                            )
+                    else:
+                        neo4j.reconcilePropertyReferences(prop_uid_row.unified_id, None)
+            except Exception as exc:  # noqa: BLE001
+                _logNeo4jFailure("更新", id, exc)
 
         logger.info("更新本体属性 id=%d", id)
 
@@ -648,8 +739,13 @@ class OntologyService:
         )
         await session.delete(entity)
         await session.commit()
+        id_mapping_svc = IdMappingService()
+        prop_uid_row = await id_mapping_svc.resolveByExternal(
+            session, "PROPERTY", str(id)
+        )
         try:
-            neo4j.deleteNode("Property", id)
+            if prop_uid_row is not None:
+                neo4j.deleteNode("Property", prop_uid_row.unified_id)
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点删除", id, exc)
         try:
@@ -697,16 +793,33 @@ class OntologyService:
         await session.commit()
         await session.refresh(entity)
 
+        # 注册 unified_id → id_mapping 表
+        id_mapping_svc = IdMappingService()
+        mapping = await id_mapping_svc.register(
+            session,
+            IdMappingCreate(
+                business_object="METRIC",
+                external_id=str(entity.id),
+                pg_table="ontology_metric",
+                pg_id=str(entity.id),
+            ),
+        )
+        unified_id = mapping.unified_id
+
         try:
             neo4j.upsertMetricNode(
-                id=entity.id,
+                unified_id=unified_id,
                 name=entity.metric_name,
                 alias=entity.metric_alias,
                 formula=entity.formula,
                 aggFunction=entity.agg_function,
             )
             if entity.target_class_id:
-                neo4j.linkMetricDerivedFrom(entity.id, entity.target_class_id)
+                target_mapping = await id_mapping_svc.resolveByExternal(
+                    session, "CLASS", str(entity.target_class_id)
+                )
+                if target_mapping is not None:
+                    neo4j.linkMetricDerivedFrom(unified_id, target_mapping.unified_id)
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点/关系创建", entity.id, exc)
 
@@ -756,19 +869,30 @@ class OntologyService:
         await session.refresh(entity)
 
         # Neo4j 节点属性 + 关系同步（best-effort）
-        try:
-            neo4j.upsertMetricNode(
-                id=entity.id,
-                name=entity.metric_name,
-                alias=entity.metric_alias,
-                formula=entity.formula,
-                aggFunction=entity.agg_function,
-            )
-            # 目标类变化时重建 DERIVED_FROM 关系
-            if "target_class_id" in updates:
-                neo4j.reconcileMetricDerivedFrom(entity.id, entity.target_class_id)
-        except Exception as exc:  # noqa: BLE001
-            _logNeo4jFailure("更新", id, exc)
+        id_mapping_svc = IdMappingService()
+        metric_uid_row = await id_mapping_svc.resolveByExternal(
+            session, "METRIC", str(entity.id)
+        )
+        if metric_uid_row is not None:
+            try:
+                neo4j.upsertMetricNode(
+                    unified_id=metric_uid_row.unified_id,
+                    name=entity.metric_name,
+                    alias=entity.metric_alias,
+                    formula=entity.formula,
+                    aggFunction=entity.agg_function,
+                )
+                # 目标类变化时重建 DERIVED_FROM 关系
+                if "target_class_id" in updates and entity.target_class_id is not None:
+                    target_uid_row = await id_mapping_svc.resolveByExternal(
+                        session, "CLASS", str(entity.target_class_id)
+                    )
+                    if target_uid_row is not None:
+                        neo4j.reconcileMetricDerivedFrom(
+                            metric_uid_row.unified_id, target_uid_row.unified_id
+                        )
+            except Exception as exc:  # noqa: BLE001
+                _logNeo4jFailure("更新", id, exc)
 
         logger.info("更新本体指标 id=%d", id)
         return entity
@@ -795,8 +919,13 @@ class OntologyService:
         )
         await session.delete(entity)
         await session.commit()
+        id_mapping_svc = IdMappingService()
+        metric_uid_row = await id_mapping_svc.resolveByExternal(
+            session, "METRIC", str(id)
+        )
         try:
-            neo4j.deleteNode("Metric", id)
+            if metric_uid_row is not None:
+                neo4j.deleteNode("Metric", metric_uid_row.unified_id)
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点删除", id, exc)
         try:
@@ -869,7 +998,15 @@ class OntologyService:
         await session.commit()
         await session.refresh(entity)
         try:
-            neo4j.linkClassJoin(entity.source_class_id, entity.target_class_id)
+            id_mapping_svc = IdMappingService()
+            src_uid = await id_mapping_svc.resolveByExternal(
+                session, "CLASS", str(entity.source_class_id)
+            )
+            tgt_uid = await id_mapping_svc.resolveByExternal(
+                session, "CLASS", str(entity.target_class_id)
+            )
+            if src_uid and tgt_uid:
+                neo4j.linkClassJoin(src_uid.unified_id, tgt_uid.unified_id)
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("关联入图", entity.id, exc)
         logger.info(
@@ -910,7 +1047,15 @@ class OntologyService:
         await session.refresh(entity)
         # 幂等 MERGE 自愈：updateJoin 不改端点，但保证 JOIN 边存在
         try:
-            neo4j.linkClassJoin(entity.source_class_id, entity.target_class_id)
+            id_mapping_svc = IdMappingService()
+            src_uid = await id_mapping_svc.resolveByExternal(
+                session, "CLASS", str(entity.source_class_id)
+            )
+            tgt_uid = await id_mapping_svc.resolveByExternal(
+                session, "CLASS", str(entity.target_class_id)
+            )
+            if src_uid and tgt_uid:
+                neo4j.linkClassJoin(src_uid.unified_id, tgt_uid.unified_id)
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("关联入图", entity.id, exc)
         logger.info("更新关联关系 id=%d", id)
@@ -928,7 +1073,6 @@ class OntologyService:
         entity = await session.get(OntologyJoin, id)
         if entity is None:
             raise NotFoundError(MSG_ONTOLOGY_JOIN_NOT_FOUND.format(id=id))
-        sourceId, targetId = entity.source_class_id, entity.target_class_id
         before = _entityToDict(entity)
         await session.flush()
         await _audit.record(
@@ -943,7 +1087,15 @@ class OntologyService:
         await session.delete(entity)
         await session.commit()
         try:
-            neo4j.deleteClassJoin(sourceId, targetId)
+            id_mapping_svc = IdMappingService()
+            src_uid = await id_mapping_svc.resolveByExternal(
+                session, "CLASS", str(entity.source_class_id)
+            )
+            tgt_uid = await id_mapping_svc.resolveByExternal(
+                session, "CLASS", str(entity.target_class_id)
+            )
+            if src_uid and tgt_uid:
+                neo4j.deleteClassJoin(src_uid.unified_id, tgt_uid.unified_id)
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("删除关联图边", id, exc)
         logger.info("删除关联关系 id=%d", id)
@@ -1012,9 +1164,17 @@ class OntologyService:
         await session.commit()
         await session.refresh(entity)
         try:
-            neo4j.linkClassRelation(
-                entity.source_class_id, entity.target_class_id, entity.relation_type
+            id_mapping_svc = IdMappingService()
+            src_uid = await id_mapping_svc.resolveByExternal(
+                session, "CLASS", str(entity.source_class_id)
             )
+            tgt_uid = await id_mapping_svc.resolveByExternal(
+                session, "CLASS", str(entity.target_class_id)
+            )
+            if src_uid and tgt_uid:
+                neo4j.linkClassRelation(
+                    src_uid.unified_id, tgt_uid.unified_id, entity.relation_type
+                )
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("语义关系入图", entity.id, exc)
         logger.info(
@@ -1035,9 +1195,7 @@ class OntologyService:
         entity = await session.get(OntologyRelation, id)
         if entity is None:
             raise NotFoundError(MSG_ONTOLOGY_RELATION_NOT_FOUND.format(id=id))
-        sourceId, targetId, relType = (
-            entity.source_class_id, entity.target_class_id, entity.relation_type
-        )
+        relType = entity.relation_type
         before = _entityToDict(entity)
         await session.flush()
         await _audit.record(
@@ -1052,7 +1210,15 @@ class OntologyService:
         await session.delete(entity)
         await session.commit()
         try:
-            neo4j.deleteClassRelation(sourceId, targetId, relType)
+            id_mapping_svc = IdMappingService()
+            src_uid = await id_mapping_svc.resolveByExternal(
+                session, "CLASS", str(entity.source_class_id)
+            )
+            tgt_uid = await id_mapping_svc.resolveByExternal(
+                session, "CLASS", str(entity.target_class_id)
+            )
+            if src_uid and tgt_uid:
+                neo4j.deleteClassRelation(src_uid.unified_id, tgt_uid.unified_id, relType)
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("删除语义关系图边", id, exc)
         logger.info("删除语义关系 id=%d", id)
@@ -1081,15 +1247,22 @@ class OntologyService:
         Neo4j 不可达不阻断 PG（仅图边缺失，计数如实返回）。
         """
         # ① join 全量入图
+        id_mapping_svc = IdMappingService()
         synced = 0
         joins = await self.listJoins(session)
         for join in joins:
             try:
-                neo4j.linkClassJoin(join.source_class_id, join.target_class_id)
+                src_uid = await id_mapping_svc.resolveByExternal(
+                    session, "CLASS", str(join.source_class_id)
+                )
+                tgt_uid = await id_mapping_svc.resolveByExternal(
+                    session, "CLASS", str(join.target_class_id)
+                )
+                if src_uid and tgt_uid:
+                    neo4j.linkClassJoin(src_uid.unified_id, tgt_uid.unified_id)
+                    synced += 1
             except Exception as exc:  # noqa: BLE001
                 _logNeo4jFailure("join 入图", join.id, exc)
-            else:
-                synced += 1
 
         # ② 补 ref_class_id：仅处理仍缺目标的外键属性
         missing = (
@@ -1147,7 +1320,14 @@ class OntologyService:
                 after=_entityToDict(prop),
             )
             try:
-                neo4j.linkPropertyReferences(prop.id, targetClassId)
+                prop_uid_row = await id_mapping_svc.resolveByExternal(
+                    session, "PROPERTY", str(prop.id)
+                )
+                target_uid_row = await id_mapping_svc.resolveByExternal(
+                    session, "CLASS", str(targetClassId)
+                )
+                if prop_uid_row and target_uid_row:
+                    neo4j.linkPropertyReferences(prop_uid_row.unified_id, target_uid_row.unified_id)
             except Exception as exc:  # noqa: BLE001
                 _logNeo4jFailure("REFERENCES 边补建", prop.id, exc)
 
@@ -1396,22 +1576,57 @@ class OntologyService:
         joins = await self.listJoins(session)
         relations = await self.listRelations(session)
 
-        existingClassIds = neo4j.getClassIds()
-        existingPropIds = neo4j.getPropertyIds()
+        existingClassUids = neo4j.getClassIds()
+        existingPropUids = neo4j.getPropertyIds()
         existingJoinPairs = neo4j.getJoinPairs()
         existingRelTriples = neo4j.getRelationTriples()
 
+        id_mapping_svc = IdMappingService()
         failures: list[dict[str, Any]] = []
         syncedClasses = 0
         for cls in classes:
-            if cls.id in existingClassIds:
+            # 解析 unified_id（从 id_mapping 表，类创建时已注册）
+            cls_uid_row = await id_mapping_svc.resolveByExternal(
+                session, "CLASS", str(cls.id)
+            )
+            if cls_uid_row is None:
+                # 未注册：注册后再同步（极少数边界情况，如直写 PG 的修补脚本）
+                try:
+                    mapping = await id_mapping_svc.register(
+                        session,
+                        IdMappingCreate(
+                            business_object="CLASS",
+                            external_id=str(cls.id),
+                            pg_table="ontology_class",
+                            pg_id=str(cls.id),
+                        ),
+                    )
+                    cls_uid = mapping.unified_id
+                except Exception as exc:  # noqa: BLE001
+                    failures.append({
+                        "entityType": "class", "entityId": cls.id,
+                        "error": f"id_mapping 注册失败: {exc}",
+                    })
+                    continue
+            else:
+                cls_uid = cls_uid_row.unified_id
+
+            if cls_uid in existingClassUids:
                 continue
             try:
                 neo4j.upsertClassNode(
-                    cls.id, cls.class_name, cls.class_alias,
-                    cls.description, cls.source_table,
+                    unified_id=cls_uid,
+                    name=cls.class_name,
+                    alias=cls.class_alias,
+                    description=cls.description,
+                    sourceTable=cls.source_table,
                 )
-                neo4j.reconcileClassSubclassOf(cls.id, cls.parent_class_id)
+                if cls.parent_class_id:
+                    parent_uid_row = await id_mapping_svc.resolveByExternal(
+                        session, "CLASS", str(cls.parent_class_id)
+                    )
+                    if parent_uid_row:
+                        neo4j.reconcileClassSubclassOf(cls_uid, parent_uid_row.unified_id)
                 syncedClasses += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -1424,17 +1639,53 @@ class OntologyService:
 
         syncedProps = 0
         for prop in props:
-            if prop.id in existingPropIds:
+            prop_uid_row = await id_mapping_svc.resolveByExternal(
+                session, "PROPERTY", str(prop.id)
+            )
+            if prop_uid_row is None:
+                try:
+                    mapping = await id_mapping_svc.register(
+                        session,
+                        IdMappingCreate(
+                            business_object="PROPERTY",
+                            external_id=str(prop.id),
+                            pg_table="ontology_property",
+                            pg_id=str(prop.id),
+                        ),
+                    )
+                    prop_uid = mapping.unified_id
+                except Exception as exc:  # noqa: BLE001
+                    failures.append({
+                        "entityType": "property", "entityId": prop.id,
+                        "error": f"id_mapping 注册失败: {exc}",
+                    })
+                    continue
+            else:
+                prop_uid = prop_uid_row.unified_id
+
+            if prop_uid in existingPropUids:
                 continue
             try:
                 neo4j.upsertPropertyNode(
-                    prop.id, prop.property_name, prop.property_alias,
-                    prop.data_type, prop.source_column,
-                    bool(prop.is_primary_key), bool(prop.is_foreign_key),
+                    unified_id=prop_uid,
+                    name=prop.property_name,
+                    alias=prop.property_alias,
+                    dataType=prop.data_type,
+                    sourceColumn=prop.source_column,
+                    isPrimaryKey=bool(prop.is_primary_key),
+                    isForeignKey=bool(prop.is_foreign_key),
                 )
-                neo4j.linkClassHasProperty(prop.class_id, prop.id)
+                class_uid_row = await id_mapping_svc.resolveByExternal(
+                    session, "CLASS", str(prop.class_id)
+                )
+                if class_uid_row:
+                    neo4j.linkClassHasProperty(class_uid_row.unified_id, prop_uid)
                 if prop.ref_class_id:
-                    neo4j.linkPropertyReferences(prop.id, prop.ref_class_id)
+                    ref_uid_row = await id_mapping_svc.resolveByExternal(
+                        session, "CLASS", str(prop.ref_class_id)
+                    )
+                    if ref_uid_row:
+                        neo4j.linkPropertyReferences(prop_uid, ref_uid_row.unified_id)
                 syncedProps += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -1451,7 +1702,14 @@ class OntologyService:
         missingJoinPairs = joinPairs - existingJoinPairs
         for sourceId, targetId in sorted(missingJoinPairs):
             try:
-                neo4j.linkClassJoin(sourceId, targetId)
+                src_uid_row = await id_mapping_svc.resolveByExternal(
+                    session, "CLASS", str(sourceId)
+                )
+                tgt_uid_row = await id_mapping_svc.resolveByExternal(
+                    session, "CLASS", str(targetId)
+                )
+                if src_uid_row and tgt_uid_row:
+                    neo4j.linkClassJoin(src_uid_row.unified_id, tgt_uid_row.unified_id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "图对账：JOIN 边入图失败 %d->%d: %s", sourceId, targetId, exc,
@@ -1471,7 +1729,15 @@ class OntologyService:
             if triple in existingRelTriples:
                 continue
             try:
-                neo4j.linkClassRelation(*triple)
+                src_uid_row = await id_mapping_svc.resolveByExternal(
+                    session, "CLASS", str(rel.source_class_id)
+                )
+                tgt_uid_row = await id_mapping_svc.resolveByExternal(
+                    session, "CLASS", str(rel.target_class_id)
+                )
+                if src_uid_row and tgt_uid_row:
+                    neo4j.linkClassRelation(src_uid_row.unified_id, tgt_uid_row.unified_id, relType)
+                    syncedRelations += 1
                 syncedRelations += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

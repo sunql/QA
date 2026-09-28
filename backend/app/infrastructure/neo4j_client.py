@@ -132,55 +132,66 @@ def closeDriver() -> None:
 # =============================================================================
 
 
-def getClassIds() -> set[int]:
-    """读全部 Class 节点 id（对账用：PG 真源 diff 出缺失集）。"""
+def getClassIds() -> set[str]:
+    """读全部 Class 节点 unified_id（对账用：COALESCE 兼容旧节点 id 属性）。
+
+    迁移期间节点可能仅有旧 id 属性（INTEGER）或新 unified_id 属性（STRING）；
+    COALESCE(unified_id, toString(id)) 两列均兼容。迁移完成后统一只有 unified_id。
+    """
     driver = getDriver()
     with driver.session() as session:
         return {
-            int(record["id"])
-            for record in session.run("MATCH (c:Class) RETURN c.id AS id")
-        }
-
-
-def getPropertyIds() -> set[int]:
-    """读全部 Property 节点 id（对账用）。"""
-    driver = getDriver()
-    with driver.session() as session:
-        return {
-            int(record["id"])
-            for record in session.run("MATCH (p:Property) RETURN p.id AS id")
-        }
-
-
-def getJoinPairs() -> set[tuple[int, int]]:
-    """读全部 JOIN 边 (sourceId, targetId)（对账用；MERGE 折叠后天然去重）。"""
-    driver = getDriver()
-    with driver.session() as session:
-        return {
-            (int(record["sourceId"]), int(record["targetId"]))
+            str(record["uid"])
             for record in session.run(
-                "MATCH (a:Class)-[:JOIN]->(b:Class) "
-                "RETURN a.id AS sourceId, b.id AS targetId"
+                "MATCH (c:Class) RETURN COALESCE(c.unified_id, toString(c.id)) AS uid"
             )
         }
 
 
-def getRelationTriples() -> set[tuple[int, int, str]]:
-    """读全部语义关系边 (sourceId, targetId, relType)（对账用）。"""
+def getPropertyIds() -> set[str]:
+    """读全部 Property 节点 unified_id（对账用）。兼容旧节点 id 属性。"""
     driver = getDriver()
     with driver.session() as session:
         return {
-            (int(record["sourceId"]), int(record["targetId"]), record["relType"])
+            str(record["uid"])
+            for record in session.run(
+                "MATCH (p:Property) RETURN COALESCE(p.unified_id, toString(p.id)) AS uid"
+            )
+        }
+
+
+def getJoinPairs() -> set[tuple[str, str]]:
+    """读全部 JOIN 边 (sourceUid, targetUid)（对账用；COALESCE 兼容旧节点 id 属性）。"""
+    driver = getDriver()
+    with driver.session() as session:
+        return {
+            (str(record["sourceUid"]), str(record["targetUid"]))
+            for record in session.run(
+                "MATCH (a:Class)-[:JOIN]->(b:Class) "
+                "RETURN COALESCE(a.unified_id, toString(a.id)) AS sourceUid, "
+                "       COALESCE(b.unified_id, toString(b.id)) AS targetUid"
+            )
+        }
+
+
+def getRelationTriples() -> set[tuple[str, str, str]]:
+    """读全部语义关系边 (sourceUid, targetUid, relType)（对账用）。COALESCE 兼容旧节点。"""
+    driver = getDriver()
+    with driver.session() as session:
+        return {
+            (str(record["sourceUid"]), str(record["targetUid"]), record["relType"])
             for record in session.run(
                 "MATCH (a:Class)-[r]->(b:Class) "
                 "WHERE type(r) <> 'JOIN' "
-                "RETURN a.id AS sourceId, b.id AS targetId, type(r) AS relType"
+                "RETURN COALESCE(a.unified_id, toString(a.id)) AS sourceUid, "
+                "       COALESCE(b.unified_id, toString(b.id)) AS targetUid, "
+                "       type(r) AS relType"
             )
         }
 
 
-def deleteNode(label: str, nodeId: int) -> int:
-    """删除指定 label 和 id 的节点（同时删除关联关系）。返回删除的节点数。
+def deleteNode(label: str, unified_id: str) -> int:
+    """删除指定 label 和 unified_id 的节点（同时删除关联关系）。返回删除的节点数。
 
     label 必须来自 _ALLOWED_LABELS 白名单（CQL 标签不可参数化，需防御性校验）。
     """
@@ -188,12 +199,12 @@ def deleteNode(label: str, nodeId: int) -> int:
         raise ValueError(f"Invalid label: {label}")
     driver = getDriver()
     cql = f"""
-        MATCH (n:{label} {{id: $id}})
+        MATCH (n:{label} {{unified_id: $unified_id}})
         DETACH DELETE n
         RETURN count(n) AS deleted
     """
     with driver.session() as session:
-        [record] = session.run(cql, id=nodeId)
+        [record] = session.run(cql, unified_id=unified_id)
         return int(record["deleted"])
 
 
@@ -203,24 +214,24 @@ def deleteNode(label: str, nodeId: int) -> int:
 
 
 def upsertClassNode(
-    id: int, name: str, alias: str | None, description: str | None, sourceTable: str | None
+    unified_id: str, name: str, alias: str | None, description: str | None, sourceTable: str | None
 ) -> None:
-    """按 id 幂等创建/更新 Class 节点属性。"""
+    """按 unified_id 幂等创建/更新 Class 节点属性。"""
     driver = getDriver()
     cql = """
-        MERGE (c:Class {id: $id})
+        MERGE (c:Class {unified_id: $unified_id})
         SET c.name = $name, c.alias = $alias,
             c.description = $description, c.sourceTable = $sourceTable
         RETURN c
     """
     with driver.session() as session:
         session.run(
-            cql, id=id, name=name, alias=alias, description=description, sourceTable=sourceTable
+            cql, unified_id=unified_id, name=name, alias=alias, description=description, sourceTable=sourceTable
         )
 
 
 def upsertPropertyNode(
-    id: int,
+    unified_id: str,
     name: str,
     alias: str | None,
     dataType: str,
@@ -228,10 +239,10 @@ def upsertPropertyNode(
     isPrimaryKey: bool,
     isForeignKey: bool,
 ) -> None:
-    """按 id 幂等创建/更新 Property 节点属性。"""
+    """按 unified_id 幂等创建/更新 Property 节点属性。"""
     driver = getDriver()
     cql = """
-        MERGE (p:Property {id: $id})
+        MERGE (p:Property {unified_id: $unified_id})
         SET p.name = $name, p.alias = $alias,
             p.dataType = $dataType, p.sourceColumn = $sourceColumn,
             p.isPrimaryKey = $isPrimaryKey, p.isForeignKey = $isForeignKey
@@ -240,28 +251,28 @@ def upsertPropertyNode(
     with driver.session() as session:
         session.run(
             cql,
-            id=id, name=name, alias=alias, dataType=dataType,
+            unified_id=unified_id, name=name, alias=alias, dataType=dataType,
             sourceColumn=sourceColumn, isPrimaryKey=isPrimaryKey, isForeignKey=isForeignKey,
         )
 
 
 def upsertMetricNode(
-    id: int,
+    unified_id: str,
     name: str,
     alias: str | None,
     formula: str,
     aggFunction: str,
 ) -> None:
-    """按 id 幂等创建/更新 Metric 节点属性。"""
+    """按 unified_id 幂等创建/更新 Metric 节点属性。"""
     driver = getDriver()
     cql = """
-        MERGE (m:Metric {id: $id})
+        MERGE (m:Metric {unified_id: $unified_id})
         SET m.name = $name, m.alias = $alias,
             m.formula = $formula, m.aggFunction = $aggFunction
         RETURN m
     """
     with driver.session() as session:
-        session.run(cql, id=id, name=name, alias=alias, formula=formula, aggFunction=aggFunction)
+        session.run(cql, unified_id=unified_id, name=name, alias=alias, formula=formula, aggFunction=aggFunction)
 
 
 # =============================================================================
@@ -269,162 +280,158 @@ def upsertMetricNode(
 # =============================================================================
 
 
-def linkClassHasProperty(classId: int, propertyId: int) -> None:
-    """Class -[:HAS_PROPERTY]-> Property"""
+def linkClassHasProperty(classUid: str, propertyUid: str) -> None:
+    """Class -[:HAS_PROPERTY]-> Property（按 unified_id 匹配）。"""
     driver = getDriver()
     cql = """
-        MATCH (c:Class {id: $classId}), (p:Property {id: $propertyId})
+        MATCH (c:Class {unified_id: $classUid}), (p:Property {unified_id: $propertyUid})
         MERGE (c)-[:HAS_PROPERTY]->(p)
     """
     with driver.session() as session:
-        session.run(cql, classId=classId, propertyId=propertyId)
+        session.run(cql, classUid=classUid, propertyUid=propertyUid)
 
 
-def linkPropertyReferences(propertyId: int, refClassId: int) -> None:
-    """Property -[:REFERENCES]-> Class"""
+def linkPropertyReferences(propertyUid: str, refClassUid: str) -> None:
+    """Property -[:REFERENCES]-> Class（按 unified_id 匹配）。"""
     driver = getDriver()
     cql = """
-        MATCH (p:Property {id: $propertyId}), (c:Class {id: $refClassId})
+        MATCH (p:Property {unified_id: $propertyUid}), (c:Class {unified_id: $refClassUid})
         MERGE (p)-[:REFERENCES]->(c)
     """
     with driver.session() as session:
-        session.run(cql, propertyId=propertyId, refClassId=refClassId)
+        session.run(cql, propertyUid=propertyUid, refClassUid=refClassUid)
 
 
-def linkMetricDerivedFrom(metricId: int, classId: int) -> None:
-    """Metric -[:DERIVED_FROM]-> Class"""
+def linkMetricDerivedFrom(metricUid: str, classUid: str) -> None:
+    """Metric -[:DERIVED_FROM]-> Class（按 unified_id 匹配）。"""
     driver = getDriver()
     cql = """
-        MATCH (m:Metric {id: $metricId}), (c:Class {id: $classId})
+        MATCH (m:Metric {unified_id: $metricUid}), (c:Class {unified_id: $classUid})
         MERGE (m)-[:DERIVED_FROM]->(c)
     """
     with driver.session() as session:
-        session.run(cql, metricId=metricId, classId=classId)
+        session.run(cql, metricUid=metricUid, classUid=classUid)
 
 
-def reconcilePropertyReferences(propertyId: int, refClassId: int | None) -> None:
+def reconcilePropertyReferences(propertyUid: str, refClassUid: str | None) -> None:
     """重建 Property -[:REFERENCES]-> Class 关系为最新状态。
 
-    refClassId 为 None 时仅删除旧关系（外键取消）。
+    refClassUid 为 None 时仅删除旧关系（外键取消）。
     """
     driver = getDriver()
     with driver.session() as session:
         session.run(
-            "MATCH (p:Property {id: $id})-[r:REFERENCES]->() DELETE r", id=propertyId
+            "MATCH (p:Property {unified_id: $uid})-[r:REFERENCES]->() DELETE r", uid=propertyUid
         )
-        if refClassId:
+        if refClassUid:
             session.run(
-                "MATCH (p:Property {id: $pid}), (c:Class {id: $cid}) MERGE (p)-[:REFERENCES]->(c)",
-                pid=propertyId,
-                cid=refClassId,
+                "MATCH (p:Property {unified_id: $puid}), (c:Class {unified_id: $cuid}) MERGE (p)-[:REFERENCES]->(c)",
+                puid=propertyUid,
+                cuid=refClassUid,
             )
 
 
-def reconcileMetricDerivedFrom(metricId: int, targetClassId: int | None) -> None:
+def reconcileMetricDerivedFrom(metricUid: str, targetClassUid: str | None) -> None:
     """重建 Metric -[:DERIVED_FROM]-> Class 关系为最新状态。
 
-    targetClassId 为 None 时仅删除旧关系（指标不再关联类）。
+    targetClassUid 为 None 时仅删除旧关系（指标不再关联类）。
     """
     driver = getDriver()
     with driver.session() as session:
         session.run(
-            "MATCH (m:Metric {id: $id})-[r:DERIVED_FROM]->() DELETE r", id=metricId
+            "MATCH (m:Metric {unified_id: $uid})-[r:DERIVED_FROM]->() DELETE r", uid=metricUid
         )
-        if targetClassId:
+        if targetClassUid:
             session.run(
-                "MATCH (m:Metric {id: $mid}), (c:Class {id: $cid}) MERGE (m)-[:DERIVED_FROM]->(c)",
-                mid=metricId,
-                cid=targetClassId,
+                "MATCH (m:Metric {unified_id: $muid}), (c:Class {unified_id: $cuid}) MERGE (m)-[:DERIVED_FROM]->(c)",
+                muid=metricUid,
+                cuid=targetClassUid,
             )
 
 
-def reconcileClassSubclassOf(classId: int, parentClassId: int | None) -> None:
+def reconcileClassSubclassOf(classUid: str, parentClassUid: str | None) -> None:
     """重建 Class -[:SUBCLASS_OF]-> Class 继承关系为最新状态。
 
-    parentClassId 为 None 时仅删除旧继承边（取消继承）；
+    parentClassUid 为 None 时仅删除旧继承边（取消继承）；
     否则先删除旧边再 MERGE 新边，保证 parent_class_id 单值语义。
     """
     driver = getDriver()
     with driver.session() as session:
         session.run(
-            "MATCH (c:Class {id: $id})-[r:SUBCLASS_OF]->() DELETE r", id=classId
+            "MATCH (c:Class {unified_id: $uid})-[r:SUBCLASS_OF]->() DELETE r", uid=classUid
         )
-        if parentClassId:
+        if parentClassUid:
             session.run(
-                "MATCH (c:Class {id: $cid}), (p:Class {id: $pid}) "
+                "MATCH (c:Class {unified_id: $cuid}), (p:Class {unified_id: $puid}) "
                 "MERGE (c)-[:SUBCLASS_OF]->(p)",
-                cid=classId,
-                pid=parentClassId,
+                cuid=classUid,
+                puid=parentClassUid,
             )
 
 
-def detectInheritanceCycle(classId: int, newParentId: int) -> bool:
-    """检测将 classId 的父类设为 newParentId 是否会形成继承环。
+def detectInheritanceCycle(classUid: str, newParentUid: str) -> bool:
+    """检测将 classUid 的父类设为 newParentUid 是否会形成继承环。
 
-    判据：newParentId 已是 classId 的后代（存在
-    ``(newParentId)-[:SUBCLASS_OF*]->(classId)`` 路径），此时再建立
-    ``classId -> newParentId`` 的边会闭合为环。``classId == newParentId`` 视为自环。
+    判据：newParentUid 已是 classUid 的后代（存在
+    ``(newParentUid)-[:SUBCLASS_OF*]->(classUid)`` 路径），此时再建立
+    ``classUid -> newParentUid`` 的边会闭合为环。``classUid == newParentUid`` 视为自环。
     """
-    if classId == newParentId:
+    if classUid == newParentUid:
         return True
     driver = getDriver()
     cql = """
-        MATCH (candidate:Class {id: $newParentId})-[:SUBCLASS_OF*]->(ancestor:Class {id: $classId})
+        MATCH (candidate:Class {unified_id: $newParentUid})-[:SUBCLASS_OF*]->(ancestor:Class {unified_id: $classUid})
         RETURN count(ancestor) > 0 AS hasCycle
     """
     with driver.session() as session:
-        [record] = session.run(cql, classId=classId, newParentId=newParentId)
+        [record] = session.run(cql, classUid=classUid, newParentUid=newParentUid)
         return bool(record["hasCycle"])
 
 
-def linkClassJoin(sourceClassId: int, targetClassId: int) -> None:
-    """Class -[:JOIN]-> Class：关联目录入图（由 ontology_join 同步，幂等 MERGE）。
-
-    JOIN 边与语义关系（linkClassRelation）分开维护：JOIN 由 ontology_join 行驱动，
-    方向为 join 的 source → target；语义关系由 ontology_relation 行驱动。
-    """
+def linkClassJoin(sourceClassUid: str, targetClassUid: str) -> None:
+    """Class -[:JOIN]-> Class（按 unified_id 匹配）。"""
     driver = getDriver()
     cql = """
-        MATCH (a:Class {id: $sourceId}), (b:Class {id: $targetId})
+        MATCH (a:Class {unified_id: $sourceUid}), (b:Class {unified_id: $targetUid})
         MERGE (a)-[:JOIN]->(b)
     """
     with driver.session() as session:
-        session.run(cql, sourceId=sourceClassId, targetId=targetClassId)
+        session.run(cql, sourceUid=sourceClassUid, targetUid=targetClassUid)
 
 
-def deleteClassJoin(sourceClassId: int, targetClassId: int) -> None:
+def deleteClassJoin(sourceClassUid: str, targetClassUid: str) -> None:
     """删除 Class -[:JOIN]-> Class 边（对应 ontology_join 行删除）。"""
     driver = getDriver()
     cql = """
-        MATCH (a:Class {id: $sourceId})-[r:JOIN]->(b:Class {id: $targetId})
+        MATCH (a:Class {unified_id: $sourceUid})-[r:JOIN]->(b:Class {unified_id: $targetUid})
         DELETE r
     """
     with driver.session() as session:
-        session.run(cql, sourceId=sourceClassId, targetId=targetClassId)
+        session.run(cql, sourceUid=sourceClassUid, targetUid=targetClassUid)
 
 
-def linkClassRelation(sourceClassId: int, targetClassId: int, relType: str) -> None:
-    """Class -[:relType]-> Class：语义关系镜像（relType 白名单防注入，幂等 MERGE）。"""
+def linkClassRelation(sourceClassUid: str, targetClassUid: str, relType: str) -> None:
+    """Class -[:relType]-> Class（按 unified_id 匹配）。"""
     _assertClassRelation(relType)
     driver = getDriver()
     cql = f"""
-        MATCH (a:Class {{id: $sourceId}}), (b:Class {{id: $targetId}})
+        MATCH (a:Class {{unified_id: $sourceUid}}), (b:Class {{unified_id: $targetUid}})
         MERGE (a)-[:{relType}]->(b)
     """
     with driver.session() as session:
-        session.run(cql, sourceId=sourceClassId, targetId=targetClassId)
+        session.run(cql, sourceUid=sourceClassUid, targetUid=targetClassUid)
 
 
-def deleteClassRelation(sourceClassId: int, targetClassId: int, relType: str) -> None:
+def deleteClassRelation(sourceClassUid: str, targetClassUid: str, relType: str) -> None:
     """删除 Class -[:relType]-> Class 边（对应 ontology_relation 行删除）。"""
     _assertClassRelation(relType)
     driver = getDriver()
     cql = f"""
-        MATCH (a:Class {{id: $sourceId}})-[r:{relType}]->(b:Class {{id: $targetId}})
+        MATCH (a:Class {{unified_id: $sourceUid}})-[r:{relType}]->(b:Class {{unified_id: $targetUid}})
         DELETE r
     """
     with driver.session() as session:
-        session.run(cql, sourceId=sourceClassId, targetId=targetClassId)
+        session.run(cql, sourceUid=sourceClassUid, targetUid=targetClassUid)
 
 
 def syncOntologyNodes(

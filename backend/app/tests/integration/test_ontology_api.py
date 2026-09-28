@@ -31,7 +31,7 @@ class _MockNeo4jDriver:
             pass
 
         def run(self, cql: str, **params: object) -> list[object]:
-            _neo4j_called.append(cql[:200])
+            _neo4j_called.append(cql[:400])
             # 返回一个符合 neo4j.IRecord 签名的 mock
             class _Record:
                 def __init__(self, data: dict) -> None:
@@ -248,8 +248,8 @@ async def testUpdateClassSetsParent(client: AsyncClient) -> None:
     assert response.status_code == 200
     assert response.json()["parentClassId"] == parentId
     cqls = "\n".join(_neo4j_called)
-    # 更新继承边：先删旧边再 MERGE 新边
-    assert "MATCH (c:Class {id: $id})-[r:SUBCLASS_OF]->() DELETE r" in cqls
+    # 更新继承边：先删旧边再 MERGE 新边（unified_id 格式）
+    assert "MATCH (c:Class {unified_id: $uid})-[r:SUBCLASS_OF]->() DELETE r" in cqls
     assert "MERGE (c)-[:SUBCLASS_OF]->(p)" in cqls
 
 
@@ -699,8 +699,8 @@ async def testUpdateClassSyncsNeo4j(client: AsyncClient) -> None:
     headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
-    # 更新触发 MERGE 节点属性同步
-    assert "MERGE (c:Class {id: $id})" in cqls
+    # 更新触发 MERGE 节点属性同步（unified_id 格式）
+    assert "MERGE (c:Class {unified_id: $unified_id})" in cqls
     assert "c.name = $name" in cqls
     assert "c.sourceTable = $sourceTable" in cqls
 
@@ -748,7 +748,8 @@ async def testUpdatePropertySyncsNeo4j(client: AsyncClient) -> None:
     headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
-    assert "MERGE (p:Property {id: $id})" in cqls
+    # unified_id 格式
+    assert "MERGE (p:Property {unified_id: $unified_id})" in cqls
     assert "p.isPrimaryKey = $isPrimaryKey" in cqls
 
 
@@ -852,7 +853,8 @@ async def testUpdateMetricSyncsNeo4j(client: AsyncClient) -> None:
     headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
-    assert "MERGE (m:Metric {id: $id})" in cqls
+    # unified_id 格式
+    assert "MERGE (m:Metric {unified_id: $unified_id})" in cqls
     assert "m.aggFunction = $aggFunction" in cqls
 
 

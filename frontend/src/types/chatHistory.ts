@@ -20,6 +20,9 @@ export interface ChatMessageRead {
   // 仅 assistant 行填充；user 行为 null
   sql: string | null;
   createdTime: string;
+  // H4：assistant 行由断连兜底写入（content 可能是半截回答，也可能是空产出占位文案）；
+  // user 行恒 false
+  interrupted: boolean;
 }
 
 // 会话消息流响应（对齐后端 SessionMessagesResponse）

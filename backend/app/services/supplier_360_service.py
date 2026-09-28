@@ -47,16 +47,47 @@ from app.services.messages_zh import MSG_SUPPLIER_360_NOT_FOUND
 logger = logging.getLogger(__name__)
 
 
-def _kpiSlotFeatureNames(
-    data_object: str = "SUPPLIER", data_layer: str = "FEATURE"
+async def _kpiSlotFeatureNames(
+    session: AsyncSession | None = None,
+    data_object: str = "SUPPLIER",
+    data_layer: str = "FEATURE",
 ) -> tuple[str, ...]:
-    """聚合所有 enabled 规则的 feature_name（spec §6.4）。"""
+    """聚合所有 enabled 规则的 feature_name（spec §6.4）。
+
+    来源并集：
+    1. FeatureRule registry（向后兼容，4 个内置风险规则仍生效）
+    2. FeatureDefinition 表（entity_type + is_enabled + status=ACTIVE），
+       仅在 session 非 None 时查询
+
+    session 为 None 时退化为仅查 registry（保留单元测试路径）。
+    """
     seen: set[str] = set()
+
+    # 来源 1：FeatureRule registry（向后兼容）
     for target_level in ("RISK", "QUALITY_SCORE", "CUSTOM"):
         for rule in feature_rule_registry.getEnabledRules(
             data_object, data_layer, target_level
         ):
             seen.add(rule.feature_name)
+
+    # 来源 2：FeatureDefinition 表（Option A — 仅 session 可用时查询）
+    if session is not None:
+        try:
+            stmt = select(FeatureDefinition.feature_name).where(
+                FeatureDefinition.entity_type == data_object,
+                FeatureDefinition.is_enabled.is_(True),
+                FeatureDefinition.status == FeatureStatus.ACTIVE,
+            )
+            result = await session.execute(stmt)
+            for (fname,) in result.fetchall():
+                seen.add(fname)
+        except Exception:
+            logger.warning(
+                "_kpiSlotFeatureNames FeatureDefinition 查询失败 data_object=%s",
+                data_object,
+                exc_info=True,
+            )
+
     return tuple(sorted(seen))
 
 
@@ -241,7 +272,7 @@ class Supplier360Service:
             all_defs = {}
 
         result: list[Supplier360Kpi] = []
-        for feature_name in _kpiSlotFeatureNames():
+        for feature_name in await _kpiSlotFeatureNames(session):
             fd = all_defs.get(feature_name)
             if fd is None:
                 # DB 中完全无此 feature → 占位
@@ -276,7 +307,9 @@ class Supplier360Service:
         SQL 阶段不过滤是必要的，否则无法区分「DB 中无此行」与「DB 中存在但 disabled」。
         """
         stmt = select(FeatureDefinition).where(
-            FeatureDefinition.feature_name.in_(_kpiSlotFeatureNames()),
+            FeatureDefinition.feature_name.in_(
+                await _kpiSlotFeatureNames(session)
+            ),
             FeatureDefinition.entity_type == "SUPPLIER",
         )
         result = await session.execute(stmt)

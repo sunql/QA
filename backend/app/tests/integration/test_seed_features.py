@@ -33,15 +33,15 @@ class TestSeedFeatures:
         ds_id = await _createTestDatasource(client)
 
         first = await seedFeatures(dbSession, ds_id)
-        assert first == 5
+        assert first == 6  # 6 条特征全部 upsert（5 原有 + 1 PO_COMPLETION_RATE）
 
-        # 5 条特征定义，名称与种子一致
+        # 6 条特征定义，名称与种子一致
         total = (
             await dbSession.execute(
                 select(func.count()).select_from(FeatureDefinition)
             )
         ).scalar()
-        assert total == 5
+        assert total == 6
         names = {
             f["feature_name"] for f in FEATURE_SEEDS
         }
@@ -51,14 +51,16 @@ class TestSeedFeatures:
             "SUPPLIER_PRICE_VARIANCE_3M",
             "SUPPLIER_RISK_SCORE",
             "MATERIAL_SHORTAGE_RISK",
+            "SUPPLIER_PO_COMPLETION_RATE",
         }
 
-        # 幂等：重复运行不新增
+        # 幂等：重复运行不产生重复数据（on_conflict_do_update，每次返回 affected rows=6，
+        # 但 DB 内实际仍是 6 条，无新增）
         second = await seedFeatures(dbSession, ds_id)
-        assert second == 0
+        assert second == 6  # on_conflict_do_update 每行均报告 rowcount=1
         total_after = (
             await dbSession.execute(
                 select(func.count()).select_from(FeatureDefinition)
             )
         ).scalar()
-        assert total_after == 5
+        assert total_after == 6

@@ -337,3 +337,45 @@ describe("MessageItem 消息渲染", () => {
     });
   });
 });
+
+describe("MessageItem 类召回诊断提示", () => {
+  it("classRecall.truncated=true 渲染截断提示", () => {
+    renderItem({
+      content: "查询完成。",
+      classRecall: { mode: "expanded", hitCount: 3, classCount: 30, truncated: true },
+    });
+    expect(screen.getByText(/已达上限（30 张）/)).toBeInTheDocument();
+  });
+
+  it("classRecall.mode=fallback 渲染降级提示", () => {
+    renderItem({
+      content: "查询完成。",
+      classRecall: { mode: "fallback", hitCount: 0, classCount: 96, truncated: false },
+    });
+    expect(screen.getByText(/智能召回暂不可用/)).toBeInTheDocument();
+  });
+
+  it("正常召回（recall/expanded 未截断）不渲染提示", () => {
+    renderItem({
+      content: "查询完成。",
+      classRecall: { mode: "recall", hitCount: 5, classCount: 7, truncated: false },
+    });
+    expect(screen.queryByText(/已达上限/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/智能召回暂不可用/)).not.toBeInTheDocument();
+  });
+});
+
+describe("MessageItem 中断回答提示（H4 断连兜底）", () => {
+  it("interrupted=true 渲染中断提示（内容可能是半截）", () => {
+    renderItem({ content: "查询完成，", interrupted: true });
+    expect(screen.getByText(/已中断/)).toBeInTheDocument();
+  });
+
+  it("interrupted 缺省/为 false 不渲染提示", () => {
+    renderItem({ content: "查询完成。" });
+    expect(screen.queryByText(/已中断/)).not.toBeInTheDocument();
+
+    renderItem({ content: "查询完成。", interrupted: false });
+    expect(screen.queryByText(/已中断/)).not.toBeInTheDocument();
+  });
+});

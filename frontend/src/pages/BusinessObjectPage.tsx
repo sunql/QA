@@ -13,6 +13,7 @@ import {
   Tooltip,
 } from "antd";
 import { useTranslation } from "react-i18next";
+import { useTablePagination } from "../utils/useTablePagination";
 import {
   type BusinessObjectCreate,
   type BusinessObject,
@@ -29,6 +30,7 @@ import type { OntologyClass } from "../types/ontology";
 
 export default function BusinessObjectPage() {
   const { t } = useTranslation();
+  const { pagination } = useTablePagination();
   const [rows, setRows] = useState<BusinessObject[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -158,6 +160,7 @@ export default function BusinessObjectPage() {
       <Table
         loading={loading}
         dataSource={rows}
+        pagination={pagination}
         rowKey="code"
         columns={[
           { title: t("businessObject.columns.code"), dataIndex: "code" },

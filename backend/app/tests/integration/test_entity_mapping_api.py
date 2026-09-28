@@ -2,8 +2,10 @@
 
 验证 HTTP 契约（camelCase JSON）：
 - GET    /api/v1/entity-mappings                列表（按 entityType / sourceSystem / enterpriseKey 过滤）
+- GET    /api/v1/entity-mappings/search         AutoComplete 搜索
 - GET    /api/v1/entity-mappings/{id}           详情
 - POST   /api/v1/entity-mappings                创建（201）
+- POST   /api/v1/entity-mappings/bulk           批量导入（feat-entity-mapping-bulk-import）
 - PUT    /api/v1/entity-mappings/{id}           更新
 - DELETE /api/v1/entity-mappings/{id}           删除（204）
 
@@ -300,3 +302,74 @@ class TestEntityMappingApi:
         rows = resp.json()
         assert all(r["entityType"] == "MATERIAL" for r in rows)
         assert len(rows) >= 1
+
+    async def test_bulk_import_empty_array_returns_422(self, client) -> None:
+        """bulk 端点空数组 → 422 拒绝。"""
+        resp = await client.post("/api/v1/entity-mappings/bulk", json=[])
+        assert resp.status_code == 422
+
+    async def test_bulk_import_inserts_new_rows(self, client) -> None:
+        """bulk：3 行新数据 → inserted=3, updated=0, skipped=0, failed=0。"""
+        items = [
+            _payload(enterpriseKey=400001, enterpriseCode="SUP400001",
+                     sourceKey="X1", sourceCode="X1", name="批1供应商"),
+            _payload(enterpriseKey=400002, enterpriseCode="SUP400002",
+                     sourceKey="X2", sourceCode="X2", name="批2供应商",
+                     sourceSystem="SRM"),
+            _payload(enterpriseKey=400003, enterpriseCode="SUP400003",
+                     sourceKey="X3", sourceCode="X3", name="批3供应商",
+                     sourceSystem="QMS"),
+        ]
+        resp = await client.post("/api/v1/entity-mappings/bulk", json=items)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 3
+        assert data["inserted"] == 3
+        assert data["updated"] == 0
+        assert data["skipped"] == 0
+        assert data["failed"] == 0
+        for row in data["results"]:
+            assert row["status"] == "inserted"
+            assert row["id"] is not None
+
+    async def test_bulk_import_skips_unchanged_and_updates_changed(self, client) -> None:
+        """bulk 幂等性：第 2 批混入相同行（应 skipped）+ name 变更行（应 updated）+ 新行（应 inserted）。"""
+        # 先灌 2 行作为基线
+        baseline = [
+            _payload(enterpriseKey=500001, enterpriseCode="SUP500001",
+                     sourceKey="B1", sourceCode="B1", name="原名1"),
+            _payload(enterpriseKey=500002, enterpriseCode="SUP500002",
+                     sourceKey="B2", sourceCode="B2", name="原名2"),
+        ]
+        resp1 = await client.post("/api/v1/entity-mappings/bulk", json=baseline)
+        assert resp1.json()["inserted"] == 2
+
+        # 第 2 批：1 行完全相同（skipped）+ 1 行 name 变化（updated）+ 1 行全新（inserted）
+        second = [
+            _payload(enterpriseKey=500001, enterpriseCode="SUP500001",
+                     sourceKey="B1", sourceCode="B1", name="原名1"),  # 完全一致 → skipped
+            _payload(enterpriseKey=500002, enterpriseCode="SUP500002",
+                     sourceKey="B2", sourceCode="B2", name="新名2"),  # name 变 → updated
+            _payload(enterpriseKey=500003, enterpriseCode="SUP500003",
+                     sourceKey="B3", sourceCode="B3", name="全新3"),  # 新行 → inserted
+        ]
+        resp2 = await client.post("/api/v1/entity-mappings/bulk", json=second)
+        assert resp2.status_code == 200
+        data = resp2.json()
+        assert data["inserted"] == 1
+        assert data["updated"] == 1
+        assert data["skipped"] == 1
+        assert data["failed"] == 0
+        # 验证 changedFields 含 name
+        updated_row = next(r for r in data["results"] if r["status"] == "updated")
+        assert "name" in (updated_row.get("changedFields") or [])
+
+    async def test_bulk_import_oversize_returns_422(self, client) -> None:
+        """bulk 超 1000 行 → 422。"""
+        items = [
+            _payload(enterpriseKey=600000 + i, enterpriseCode=f"SUP{i:06d}",
+                     sourceKey=f"K{i}", sourceCode=f"C{i}")
+            for i in range(1001)
+        ]
+        resp = await client.post("/api/v1/entity-mappings/bulk", json=items)
+        assert resp.status_code == 422

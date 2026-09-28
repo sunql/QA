@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { Button, Input, Select, Spin, Typography, message } from "antd";
 import { SendOutlined } from "@ant-design/icons";
 import { getSuggestions } from "../../api/chat";
@@ -42,6 +43,7 @@ export default function ChatPanel({
   loading,
 }: ChatPanelProps) {
   const { t } = useTranslation();
+  const location = useLocation();
   const [sources, setSources] = useState<DataSource[]>([]);
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [question, setQuestion] = useState("");
@@ -85,7 +87,20 @@ export default function ChatPanel({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [location.pathname]);
+
+  // 模型列表更新后，若当前选中的模型已不在 active 列表（被禁用 / 软删除），
+  // 自动切回"自动路由"，避免 Select 显示一个 options 里没有的 value。
+  // models.length > 0 守卫：避免初次挂载（models 还没拉回来）就误清空 store。
+  useEffect(() => {
+    if (
+      selectedModelId !== null &&
+      models.length > 0 &&
+      !models.some((m) => m.id === selectedModelId)
+    ) {
+      onModelChange(null);
+    }
+  }, [models, selectedModelId, onModelChange]);
 
   // 相似问法建议：question 停顿 SUGGEST_DEBOUNCE_MS 后请求；空问题或无数据源时清空
   useEffect(() => {

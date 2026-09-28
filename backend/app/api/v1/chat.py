@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
@@ -55,15 +56,32 @@ async def chatStream(
     DB 会话依赖在响应体完整发送后才会释放（依赖项 teardown），
     因此整个生成器可安全使用 session 提交 Token 审计与对话消息。
     #207 安全修复：真实调用方（_user）透传为 Agent 运行 actor（归属审计）。
+
+    H4 断连兜底：`background=` 是唯一能可靠捕获「客户端中途断开」的钩子 —— 它在
+    Starlette 的收敛任务组之外 await，断连时确定会跑到；而断连时生成器多半停在
+    `yield` 上（不在任务栈上，`except CancelledError`/`finally` 都不触发）。钩子只
+    负责调 service，事务与语义都在 service 层。
     """
     async def eventSource() -> AsyncIterator[str]:
         async for event in _service.processMessageStream(dto, session, user=_user):
             yield event.toSse()
 
+    async def persistIfInterrupted() -> None:
+        """响应收尾钩子：本轮已产出的部分答案若尚未落库，补写并标记 interrupted。
+
+        正常跑完的请求在这里是空操作（落库时已解除标记）。钩子在响应完成后运行，
+        吞掉异常只记日志：此时已无法改变给客户端的响应，抛出去只会污染日志。
+        """
+        try:
+            await _service.persistInterruptedStream(dto, session)
+        except Exception as exc:
+            logger.exception("流式断连兜底落库失败: %s", exc)
+
     return StreamingResponse(
         eventSource(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        background=BackgroundTask(persistIfInterrupted),
     )
 
 

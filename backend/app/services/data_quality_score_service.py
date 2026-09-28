@@ -84,8 +84,17 @@ class DataQualityScoreService:
         session: AsyncSession,
         actor: str | None = None,
         actor_departments: tuple[str, ...] | None = None,
+        *,
+        datasource_id: int | None = None,
+        target_tables: tuple[str, ...] | list[str] | None = None,
+        rule_types: tuple[RuleType, ...] | list[RuleType] | None = None,
     ) -> ComputeScoresResponse:
         """拉所有 enabled rule → 批量评估 → 按表聚合 + GLOBAL → 落库 → 返回。
+
+        可选 scope 过滤（feat-dq-scores-scope，2026-09-15；multiselect 2026-09-15）：
+        - datasource_id 单选；target_tables / rule_types 多选
+        - 三条件 AND 组合；scope 命中 0 条规则时直接返回空响应、不写库、不写 GLOBAL
+        - 全 None / 全空列表 = 现有全量行为（向后兼容）
 
         空 enabled rule 集合：直接返回空 response，不写库。
 
@@ -93,7 +102,15 @@ class DataQualityScoreService:
         UPDATE for recompute of existing pairs.
         """
         started = time.perf_counter()
-        enabled_rules = await self._listEnabledRules(session)
+        # 统一空列表 → None（避免 IN () 语法错误）
+        norm_tables = tuple(target_tables) if target_tables else None
+        norm_types = tuple(rule_types) if rule_types else None
+        enabled_rules = await self._listEnabledRules(
+            session,
+            datasource_id=datasource_id,
+            target_tables=norm_tables,
+            rule_types=norm_types,
+        )
         if not enabled_rules:
             return ComputeScoresResponse(
                 evaluated_rules=0, saved_scores=0, duration_ms=0, scores=[]
@@ -275,12 +292,30 @@ class DataQualityScoreService:
 
     # ===== 内部 =====
 
-    async def _listEnabledRules(self, session: AsyncSession) -> list[DataQualityRule]:
+    async def _listEnabledRules(
+        self,
+        session: AsyncSession,
+        *,
+        datasource_id: int | None = None,
+        target_tables: tuple[str, ...] | None = None,
+        rule_types: tuple[RuleType, ...] | None = None,
+    ) -> list[DataQualityRule]:
+        """拉 enabled rules，可选 scope 过滤（AND 组合）。
+
+        全 None 时等同旧行为：仅按 is_enabled 过滤。
+        target_tables / rule_types 多选用 IN（feat-dq-scores-multiselect，2026-09-15）。
+        """
         stmt = (
             select(DataQualityRule)
             .where(DataQualityRule.is_enabled.is_(True))
-            .order_by(DataQualityRule.id)
         )
+        if datasource_id is not None:
+            stmt = stmt.where(DataQualityRule.datasource_id == datasource_id)
+        if target_tables:
+            stmt = stmt.where(DataQualityRule.target_table.in_(list(target_tables)))
+        if rule_types:
+            stmt = stmt.where(DataQualityRule.rule_type.in_(list(rule_types)))
+        stmt = stmt.order_by(DataQualityRule.id)
         return list((await session.execute(stmt)).scalars().all())
 
     async def _listLatest(

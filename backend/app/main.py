@@ -15,16 +15,140 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app import __version__
 from app.config import getSettings
 from app.domain.error_messages import MSG_API_DESCRIPTION
-from app.domain.exceptions import DomainError
+from app.domain.exceptions import DomainError, statusForError
 from app.domain.schemas import ErrorResponse, HealthResponse
 from app.infrastructure.database import disposeEngine, getEngine
 from app.infrastructure.rate_limit import limiter, rateLimitExceededHandler
 
 logger = logging.getLogger(__name__)
+
+
+async def _bootstrapChatConcurrencyConfig() -> None:
+    """feat-chat-concurrency-params: 启动期一次性读 system_config 三 key。
+
+    一次性用一个临时引擎（默认 pool）读 ``DB_POOL_SIZE / DB_MAX_OVERFLOW /
+    RATE_LIMIT_KEY_STRATEGY`` 三行，写入 module-level 缓存：
+
+    - ``app.infrastructure.database._db_pool_config`` → 后续 ``getEngine()`` 创建
+      engine 时用最终 pool_size / max_overflow。
+    - ``app.infrastructure.rate_limit._rate_limit_strategy_cache`` → 请求路径
+      ``_dynamic_key`` 直接读 dict，无 IO。
+
+    失败策略：DB 不可达 / 值非法 → logger.warning 后回退到 Settings 默认值
+    （env 可覆盖），**不阻塞启动**。这是配置项而非 hard deps,生产偶发抖动
+    不应让 uvicorn 拉不起来。
+    """
+    from sqlalchemy import text
+
+    from app.config import getSettings
+    from app.infrastructure.database import init_db_pool_config
+    from app.infrastructure.rate_limit import set_rate_limit_strategy
+
+    settings = getSettings()
+    bootstrap_engine = create_async_engine(settings.databaseUrl, pool_pre_ping=False)
+    try:
+        async with bootstrap_engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT key, value FROM system_config "
+                        "WHERE key = ANY(:keys)"
+                    ),
+                    {
+                        "keys": [
+                            "DB_POOL_SIZE",
+                            "DB_MAX_OVERFLOW",
+                            "RATE_LIMIT_KEY_STRATEGY",
+                            "LLM_CONCURRENCY_LIMIT",
+                        ]
+                    },
+                )
+            ).fetchall()
+    except Exception:
+        logger.exception(
+            "启动期读 system_config 三 key 失败，使用 Settings 默认值 "
+            "(pool_size=%d, max_overflow=%d, strategy='ip', llm_concurrency=%d)",
+            settings.dbPoolSize,
+            settings.dbMaxOverflow,
+            settings.llmConcurrencyLimit,
+        )
+        return
+    finally:
+        await bootstrap_engine.dispose()
+
+    row_map = {r.key: r.value for r in rows}
+    pool_size = settings.dbPoolSize
+    raw_pool = row_map.get("DB_POOL_SIZE")
+    if raw_pool not in (None, ""):
+        try:
+            candidate = int(raw_pool)
+            if candidate < 1:
+                raise ValueError("must be positive")
+            pool_size = candidate
+        except (TypeError, ValueError):
+            logger.warning(
+                "system_config[DB_POOL_SIZE]=%r 非法，回退默认值 %d",
+                raw_pool,
+                pool_size,
+            )
+
+    max_overflow = settings.dbMaxOverflow
+    raw_overflow = row_map.get("DB_MAX_OVERFLOW")
+    if raw_overflow not in (None, ""):
+        try:
+            candidate = int(raw_overflow)
+            if candidate < 0:
+                raise ValueError("must be non-negative")
+            max_overflow = candidate
+        except (TypeError, ValueError):
+            logger.warning(
+                "system_config[DB_MAX_OVERFLOW]=%r 非法，回退默认值 %d",
+                raw_overflow,
+                max_overflow,
+            )
+
+    strategy = row_map.get("RATE_LIMIT_KEY_STRATEGY") or "ip"
+
+    llm_concurrency_limit = settings.llmConcurrencyLimit
+    raw_llm_limit = row_map.get("LLM_CONCURRENCY_LIMIT")
+    if raw_llm_limit not in (None, ""):
+        try:
+            candidate = int(raw_llm_limit)
+            if candidate < 1:
+                raise ValueError("must be positive")
+            llm_concurrency_limit = candidate
+        except (TypeError, ValueError):
+            logger.warning(
+                "system_config[LLM_CONCURRENCY_LIMIT]=%r 非法，回退默认值 %d",
+                raw_llm_limit,
+                llm_concurrency_limit,
+            )
+
+    init_db_pool_config(pool_size=pool_size, max_overflow=max_overflow)
+    set_rate_limit_strategy(strategy)
+    try:
+        from app.infrastructure.llm.factory import reload_llm_concurrency_limit
+
+        reload_llm_concurrency_limit(llm_concurrency_limit)
+    except Exception:
+        logger.exception(
+            "LLMConcurrencyManager 初始化失败；limit 保持首次懒加载时的默认值"
+        )
+
+    logger.info(
+        "chat 并发配置（system_config 覆盖生效）: "
+        "DB_POOL_SIZE=%d DB_MAX_OVERFLOW=%d RATE_LIMIT_KEY_STRATEGY=%s "
+        "LLM_CONCURRENCY_LIMIT=%d",
+        pool_size,
+        max_overflow,
+        strategy,
+        llm_concurrency_limit,
+    )
 
 
 @asynccontextmanager
@@ -46,6 +170,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "生产部署前必须：AUTH_STUB_ENABLED=0 + 反向代理剥离 X-User-* 头，"
             "或接入 JWT/IdP 替换 getCurrentUser。"
         )
+    # config 重复字段批：jwtSecret 曾有两份声明（旧块 default="" 被占位符覆盖），
+    # 漏配时静默用公开已知的开发密钥；旧注释承诺的「启动期校验」当时从未实现，此处补上。
+    from app.config import jwtSecretInsecurityReason
+
+    _jwtReason = jwtSecretInsecurityReason(settings.jwtSecret)
+    if _jwtReason:
+        logger.warning("⚠️ JWT 密钥自检：%s", _jwtReason)
+    # feat-chat-concurrency-params: 启动期一次性读 system_config 三个 key
+    # （DB_POOL_SIZE / DB_MAX_OVERFLOW / RATE_LIMIT_KEY_STRATEGY），注入到对应
+    # module-level 缓存，让 getEngine() 创建的 engine pool 走最终值。失败用
+    # Settings 默认值（env 可覆盖），启动期不可阻塞。
+    await _bootstrapChatConcurrencyConfig()
     engine = getEngine()
     logger.info("元数据库引擎已就绪: %s", engine.url.render_as_string(hide_password=True))
 
@@ -68,7 +204,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError(f"启动失败：无法连接到 {url}。{hint}") from e
     # Schema drift 校验：默认开启，SKIP_SCHEMA_CHECK=1 可关闭（紧急场景）
     if os.environ.get("SKIP_SCHEMA_CHECK") != "1":
-        from scripts.check_schema_drift import _checkDriftAsync
+        # 必须从 app.* 里 import（不是 scripts.*）：本调用与 _splitBySeverity 是
+        # 一对必须同版本部署的两半，同处 app/ 才能被 `docker cp backend/app/.`
+        # 一次带全。放 scripts/ 时该 cp 会留下旧实现 → AttributeError 或起不来。
+        from app.infrastructure.schema_drift import _checkDriftAsync, _splitBySeverity
 
         try:
             issues = await _checkDriftAsync(engine)
@@ -78,9 +217,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "Schema drift 校验失败：无法确认 ORM 与 DB 一致。"
                 "如确认 DB 状态正确可设置 SKIP_SCHEMA_CHECK=1 跳过。"
             ) from e
-        if issues:
-            logger.error("Schema drift 校验失败（%d 项）：", len(issues))
-            for issue in issues:
+        # 只对 blocking 阻断启动。DB 上多出来的列/索引是历史残留（手工 DDL、
+        # 旧迁移遗留），不影响正确性，且删它们有真实丢数据风险 —— 判成阻断
+        # 等于让线上起不来。CLI 的 --strict 才把非阻断项升级为门禁。
+        blocking, warnings = _splitBySeverity(issues)
+        for issue in warnings:
+            logger.warning("Schema drift（非阻断）: %s", issue)
+        if blocking:
+            logger.error("Schema drift 校验失败（%d 类阻断漂移）：", len(blocking))
+            for issue in blocking:
                 logger.error("  - %s", issue)
             raise RuntimeError(
                 "DB schema 与 ORM 不一致，禁止启动。"
@@ -128,6 +273,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.services.business_object_registry import businessObjectRegistry
 
         await businessObjectRegistry.warmUp(session)
+        # Phase 1 Task 1.3：KpiMatchCache 启动预热，加载所有 PUBLISHED KPI
+        from app.services.kpi_match_cache import kpi_match_cache
+
+        await kpi_match_cache.warmUp(session)
+        # 幂等 seed 菜单基线（6 section + 28 item，含 feat-rbac-identity 4 个 RBAC
+        # 管理叶子）；on_conflict_do_update 不会丢已有行，仅刷新可变更列。
+        # 置于其它 seed 之前，确保 `GET /menu-config` 启动即可返回完整菜单。
+        from scripts.seed_menu_config import seed_menu_config as seedMenuConfig
+
+        seeded_n = await seedMenuConfig(session_factory)
+        logger.info("menu_config seed: %d rows upserted", seeded_n)
+        # feat-rbac-identity：幂等 seed RBAC 基线（admin 角色 + admin 用户 + 绑定），
+        # 保证启动后必有超管入口（admin 角色旁路全量菜单权限）。置于 schema drift
+        # 校验与其它 seed 之后。
+        from scripts.seed_rbac import seedRbacBaseline
+
+        await seedRbacBaseline(session)
     yield
     logger.info("关闭中，释放外部连接...")
     await shutdownCleanup()
@@ -215,15 +377,20 @@ def createApp() -> FastAPI:
         agent_tools,
         agents,
         audit,
+        auth,
         business_object,
         chat,
         data_lineage,
         data_quality,
         data_quality_generate,
+        data_quality_rule_params,
         datasource,
         documents,
         embedding_provider,
         entity_mapping,
+        evaluation_report,
+        evidences,
+        id_mapping,
         features,
         feature_rules,
         graph,
@@ -231,14 +398,23 @@ def createApp() -> FastAPI:
         kpi_catalog,
         local_import,
         menu_config,
+        messages,
         model_config,
         ontology,
+        organizations,
+        roles,
         session,
         supplier_360,
         supplier_risk,
         system,
+        system_config,
         term_dictionary,
+        users,
         vectors,
+        wiki,
+        wiki_compile,
+        wiki_graph,
+        wiki_import,
     )
 
     app.include_router(model_config.router, prefix="/api/v1/models", tags=["models"])
@@ -249,6 +425,8 @@ def createApp() -> FastAPI:
     )
     app.include_router(session.router, prefix="/api/v1/sessions", tags=["sessions"])
     app.include_router(ontology.router, prefix="/api/v1", tags=["ontology"])
+    app.include_router(evidences.router, prefix="/api/v1", tags=["evidences"])
+    app.include_router(id_mapping.router, prefix="/api/v1", tags=["id-mapping"])
     app.include_router(
         term_dictionary.router, prefix="/api/v1", tags=["term-dictionary"]
     )
@@ -256,6 +434,11 @@ def createApp() -> FastAPI:
     app.include_router(local_import.router, prefix="/api/v1/datasources", tags=["datasources"])
     app.include_router(
         data_quality.router, prefix="/api/v1/data-quality/rules", tags=["data-quality"]
+    )
+    app.include_router(
+        data_quality_rule_params.router,
+        prefix="/api/v1",
+        tags=["dq-rule-params"],
     )
     app.include_router(
         data_quality.scores_router,
@@ -266,6 +449,11 @@ def createApp() -> FastAPI:
         data_quality_generate.router,
         prefix="/api/v1/data-quality/rules/generate",
         tags=["data-quality-generate"],
+    )
+    app.include_router(
+        evaluation_report.router,
+        prefix="/api/v1/data-quality/reports",
+        tags=["data-quality"],
     )
     app.include_router(
         data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"]
@@ -302,20 +490,77 @@ def createApp() -> FastAPI:
     app.include_router(agent_tools.router, tags=["agent-tools"])
     app.include_router(feature_rules.router, tags=["feature-rules"])
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
+    app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+    app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
+    app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
+    app.include_router(users.router, tags=["users"])
+    app.include_router(roles.router, tags=["roles"])
+    app.include_router(organizations.router, tags=["organizations"])
+    # 认证端点（feat-user-auth）：login/me/logout/me-password/password-policy
+    from app.api.v1 import auth as authRouter
+
+    app.include_router(
+        authRouter.router, prefix="/api/v1/auth", tags=["auth"]
+    )
     app.include_router(
         menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"]
     )
+    app.include_router(
+        messages.router, prefix="/api/v1/messages", tags=["messages"]
+    )
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
+    app.include_router(
+        system_config.router,
+        prefix="/api/v1/admin/system-config",
+        tags=["system-config"],
+    )
     app.include_router(graph.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"]
     )
     app.include_router(vectors.router, prefix="/api/v1/system", tags=["system"])
+    app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"])
+    app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
+    app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
+    app.include_router(wiki_compile.router, prefix="/api/v1", tags=["wiki"])
+    app.include_router(wiki_graph.router, prefix="/api/v1", tags=["wiki"])
+    from app.api.v1.admin_wiki_links import router as admin_wiki_links_router
+    app.include_router(admin_wiki_links_router)
 
+    # 健康检查。**必须注册在下方 MCP 挂载之前**：MCP 用 `Mount("")` 挂到 ASGI 树
+    # 末端，而 Starlette 按注册顺序匹配 —— catch-all Mount 之后注册的路由永远不会
+    # 被命中（2026-09-25 起 /api/v1/health 因此静默 404，直到真机探活才发现）。
+    # 新增路由一律加在本行以上；不变量守卫见 tests/integration/test_app_wiring.py。
     @app.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:
         return HealthResponse(status="ok", version=__version__, appEnv=settings.appEnv)
+
+    # MCP Server（Phase 6）：HTTP/SSE 端点 `/mcp`，复用 FastAPI app + DB session
+    # + stub auth（MCP 客户端的 stdio 模式走 `python -m app.services.mcp_server`）。
+    # 挂载而非 include_router：MCP 走 streamable-http transport（FastAPI route
+    # 适配不到），用 Starlette Mount 拼到 ASGI 树末端。
+    # **关键**：fastmcp http_app 自带 lifespan（管理 streamable-http session
+    # task group），必须在 FastAPI() 构造时把 lifespan 合并进去 —— 否则
+    # ``StreamableHTTPSessionManager task group was not initialized``。
+    # 因为 createApp() 已经把 lifespan 显式传给 FastAPI()，这里改用
+    # starlette lifespan_context 替换为合并版。
+    from starlette.routing import Mount
+    from app.services.mcp_server import mcp as _mcpServer
+
+    _mcpApp = _mcpServer.http_app(path="/mcp", transport="streamable-http")
+    app.router.routes.append(Mount("", app=_mcpApp))
+
+    # 合并 fastmcp 子 app 的 lifespan 到现有 lifespan（schema drift / 引擎预热）。
+    _origFastapiLifespan = lifespan
+
+    @asynccontextmanager
+    async def _mergedLifespan(fastapiApp: FastAPI) -> AsyncIterator[None]:
+        async with _origFastapiLifespan(fastapiApp):
+            async with _mcpApp.lifespan(_mcpApp):
+                yield
+
+    app.router.lifespan_context = _mergedLifespan
 
     return app
 
@@ -325,7 +570,7 @@ def registerExceptionHandlers(app: FastAPI) -> None:
 
     @app.exception_handler(DomainError)
     async def handleDomainError(request: Request, exc: DomainError) -> JSONResponse:
-        status = _statusFor(exc)
+        status = statusForError(exc)
         logger.warning("领域异常 %s: %s (path=%s)", type(exc).__name__, exc.message, request.url.path)
         return JSONResponse(
             status_code=status,
@@ -335,32 +580,6 @@ def registerExceptionHandlers(app: FastAPI) -> None:
                 details=getattr(exc, "details", None),
             ).model_dump(by_alias=True),
         )
-
-
-def _statusFor(exc: DomainError) -> int:
-    """领域异常 -> HTTP 状态码。"""
-    from app.domain.exceptions import (
-        BusinessObjectGraphLabelMismatchError,
-        ConflictError,
-        LLMUnavailableError,
-        NotFoundError,
-        PermissionDeniedError,
-        ValidationError,
-    )
-
-    if isinstance(exc, NotFoundError):
-        return 404
-    if isinstance(exc, ConflictError):
-        return 409
-    if isinstance(exc, ValidationError):
-        return 422
-    if isinstance(exc, BusinessObjectGraphLabelMismatchError):
-        return 422
-    if isinstance(exc, PermissionDeniedError):
-        return 403
-    if isinstance(exc, LLMUnavailableError):
-        return 503
-    return 400
 
 
 app = createApp()

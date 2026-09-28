@@ -41,11 +41,12 @@ interface FormValues {
   maxInputTokens: number;
   weight: number;
   costThreshold: number;
+  temperature?: number;
 }
 
 const EMPTY_FORM: FormValues = {
   modelName: "",
-  provider: "OPENAI_COMPATIBLE_PROXY",
+  provider: "openai_compatible_proxy",
   apiEndpoint: "",
   apiKey: "",
   costPer1KInput: 0,
@@ -53,6 +54,7 @@ const EMPTY_FORM: FormValues = {
   maxInputTokens: 4096,
   weight: 1,
   costThreshold: 1,
+  temperature: undefined,
 };
 
 export default function ModelConfigPage() {
@@ -98,6 +100,7 @@ export default function ModelConfigPage() {
       maxInputTokens: record.maxInputTokens,
       weight: record.weight,
       costThreshold: Number(record.costThreshold),
+      temperature: record.temperature,
     });
     setModalOpen(true);
   };
@@ -110,6 +113,10 @@ export default function ModelConfigPage() {
         // 编辑时不传空 apiKey
         if (!values.apiKey) {
           delete payload.apiKey;
+        }
+        // 编辑时不传 undefined temperature
+        if (values.temperature === undefined) {
+          delete payload.temperature;
         }
         await updateModel(editing.id, payload);
         void message.success(t("toast.updated"));
@@ -128,14 +135,18 @@ export default function ModelConfigPage() {
         await createModel(payload);
         void message.success(t("toast.created"));
       }
-      setModalOpen(false);
       void load();
+      setModalOpen(false);
     } catch (err) {
       if (err instanceof Error && err.message.includes(t("forms.required"))) {
         return; // 表单校验错误，不关闭弹窗
       }
       // 其他错误已由拦截器提示
     }
+  };
+
+  const handleCancel = () => {
+    setModalOpen(false);
   };
 
   const handleDeactivate = async (id: number) => {
@@ -157,7 +168,7 @@ export default function ModelConfigPage() {
 
   const providerOptions = PROVIDER_OPTIONS.map((o) => ({
     value: o.value,
-    label: t(`enums.provider.${o.labelKey}`),
+    label: t(o.labelKey),
   }));
 
   const columns = [
@@ -253,9 +264,9 @@ export default function ModelConfigPage() {
         title={editing ? t("forms.modelConfig.editModalTitle") : t("forms.modelConfig.addModalTitle")}
         open={modalOpen}
         onOk={() => void handleSubmit()}
-        onCancel={() => setModalOpen(false)}
+        onCancel={handleCancel}
         width={560}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" initialValues={EMPTY_FORM}>
           <Form.Item
@@ -303,6 +314,9 @@ export default function ModelConfigPage() {
             </Form.Item>
             <Form.Item name="costThreshold" label={t("forms.modelConfig.labels.costThreshold")}>
               <InputNumber min={0} step={0.1} style={{ width: 140 }} />
+            </Form.Item>
+            <Form.Item name="temperature" label={t("forms.modelConfig.labels.temperature")}>
+              <InputNumber min={0} max={2} step={0.1} style={{ width: 140 }} />
             </Form.Item>
           </Space>
         </Form>

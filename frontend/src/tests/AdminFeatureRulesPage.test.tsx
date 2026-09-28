@@ -8,40 +8,40 @@ vi.mock("../api/featureRules", () => ({
         {
             id: 1,
             code: "SUPPLIER_OTD_RULE",
-            data_object: "SUPPLIER",
-            data_layer: "FEATURE",
-            target_level: "RISK",
-            feature_name: "on_time_delivery_rate",
+            dataObject: "SUPPLIER",
+            dataLayer: "FEATURE",
+            targetLevel: "RISK",
+            featureName: "on_time_delivery_rate",
             enabled: true,
             priority: 100,
-            policy_description: null,
+            policyDescription: null,
             version: 1,
             thresholds: [],
-            created_time: "2026-09-05T00:00:00Z",
-            updated_time: null,
+            createdTime: "2026-09-05T00:00:00Z",
+            updatedTime: null,
         },
         {
             id: 2,
             code: "SUPPLIER_QUALITY_RULE",
-            data_object: "SUPPLIER",
-            data_layer: "DWD",
-            target_level: "QUALITY",
-            feature_name: "defect_rate",
+            dataObject: "SUPPLIER",
+            dataLayer: "DWD",
+            targetLevel: "QUALITY",
+            featureName: "defect_rate",
             enabled: false,
             priority: 200,
-            policy_description: "High defect rate rule",
+            policyDescription: "High defect rate rule",
             version: 3,
             thresholds: [
                 {
                     severity: "HIGH",
                     operator: "gt",
-                    threshold_value: 0.05,
+                    thresholdValue: 0.05,
                     unit: "%",
-                    threshold_order: 1,
+                    thresholdOrder: 1,
                 },
             ],
-            created_time: "2026-09-04T00:00:00Z",
-            updated_time: "2026-09-04T12:00:00Z",
+            createdTime: "2026-09-04T00:00:00Z",
+            updatedTime: "2026-09-04T12:00:00Z",
         },
     ]),
     createFeatureRule: vi.fn(),
@@ -49,19 +49,19 @@ vi.mock("../api/featureRules", () => ({
     deleteFeatureRule: vi.fn(),
     toggleFeatureRule: vi.fn().mockResolvedValue({}),
     parseFeatureRuleDescription: vi.fn().mockResolvedValue({
-        suggested_thresholds: [
+        suggestedThresholds: [
             {
-                feature_name: "on_time_delivery_rate",
+                featureName: "on_time_delivery_rate",
                 severity: "HIGH",
                 operator: "lt",
-                threshold_value: 0.9,
+                thresholdValue: 0.9,
                 unit: "%",
                 confidence: 0.85,
                 rationale: "Delivery rate should be above 90%",
             },
         ],
         reasoning: "Based on industry standards",
-        overall_confidence: 85,
+        overallConfidence: 85,
         warnings: [],
     }),
 }));
@@ -229,19 +229,19 @@ describe("AdminFeatureRulesPage", () => {
 
         // Directly call the API to verify the mock is wired correctly
         await parseFeatureRuleDescription({
-            data_object: "SUPPLIER",
-            data_layer: "FEATURE",
-            target_level: "RISK",
-            natural_language: "supplier delayed delivery rule",
+            dataObject: "SUPPLIER",
+            dataLayer: "FEATURE",
+            targetLevel: "RISK",
+            naturalLanguage: "supplier delayed delivery rule",
         });
 
         // Verify mock was called
         expect(parseFeatureRuleDescription).toHaveBeenCalledTimes(1);
         expect(parseFeatureRuleDescription).toHaveBeenCalledWith({
-            data_object: "SUPPLIER",
-            data_layer: "FEATURE",
-            target_level: "RISK",
-            natural_language: "supplier delayed delivery rule",
+            dataObject: "SUPPLIER",
+            dataLayer: "FEATURE",
+            targetLevel: "RISK",
+            naturalLanguage: "supplier delayed delivery rule",
         });
     });
 });

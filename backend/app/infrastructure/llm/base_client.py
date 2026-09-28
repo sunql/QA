@@ -8,8 +8,27 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """OpenAI tool-call 节点。"""
+
+    id: str
+    name: str
+    args: dict  # JSON-decoded arguments
+
+
+@dataclass(frozen=True)
+class LlmResponseWithTools:
+    """支持 tool calling 的 LLM 调用结果。"""
+
+    content: str | None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: dict | None = None
+    model: str = ""
 
 
 @dataclass(frozen=True)
@@ -18,6 +37,13 @@ class LlmMessage:
 
     role: str
     content: str
+    # tool_call_id: 当 role='tool' 时必填（OpenAI tool API 要求 tool result message
+    # 引用前一条 assistant 消息的 tool_calls[i].id；缺失会导致 deepseek/openai 400）
+    tool_call_id: str | None = None
+    # tool_calls: 当 role='assistant' 且本轮触发了 tool calling 时携带（list[dict]）
+    tool_calls: tuple[dict, ...] | None = None
+    # name: 当 role='tool' 时可选（部分 provider 要求）
+    name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +55,10 @@ class LlmResponse:
     promptTokens: int
     completionTokens: int
     totalTokens: int
+    # 4-1（feat-token-cache，2026-09-28）：DeepSeek prompt cache 命中 token 数。
+    # 服务端基于 prefix matching 自动命中，命中部分不计 input 成本。
+    # 非 DeepSeek provider（OpenAI/MOONSHOT/AZURE 等）此字段为 None，按全额计费。
+    cachedTokens: int | None = None
 
     @property
     def isApproximateUsage(self) -> bool:
@@ -48,6 +78,9 @@ class StreamChunk:
     promptTokens: int
     completionTokens: int
     modelName: str
+    # 4-1（feat-token-cache）：流式末块携带 DeepSeek cached_tokens（与
+    # LlmResponse.cachedTokens 同语义，None = 字段缺失/不支持）。
+    cachedTokens: int | None = None
 
 
 class BaseLlmClient(ABC):
@@ -80,3 +113,12 @@ class BaseLlmClient(ABC):
     @abstractmethod
     async def close(self) -> None:
         """释放底层连接。"""
+
+    @abstractmethod
+    async def complete_with_tools(
+        self,
+        messages: list[LlmMessage],
+        tools: list[dict] | None = None,
+        tool_choice: str | dict = "auto",
+    ) -> LlmResponseWithTools:
+        """发起支持 tool calling 的补全请求，透传给底层 provider。"""

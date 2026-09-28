@@ -25,7 +25,7 @@ import logging
 from dataclasses import dataclass
 
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import LineageLayer, RefreshFrequency
@@ -243,6 +243,15 @@ def _edgesFromJoin(
     tgt_cols = join.target_columns or []
     # 配对：zip 自动截断到较短列，避免错位
     for src_col, tgt_col in zip(src_cols, tgt_cols, strict=False):
+        # 自环跳过：同一 source_table + 同名列（自连接 join，或两个 class 共享 source_table）
+        # 会产出 8 元组全等（source==target）的退化边，无血缘意义。
+        # 镜像 DataLineageService.createEdge 的自环校验——extractor 不经过 service，需自查。
+        if (
+            src_layer == tgt_layer
+            and src_class.source_table == tgt_class.source_table
+            and src_col == tgt_col
+        ):
+            continue
         edges.append(
             ExtractedEdge(
                 source_layer=src_layer,
@@ -319,11 +328,14 @@ async def extractEdges(session: AsyncSession) -> list[ExtractedEdge]:
     Notes:
         不抛错：单条 metric 解析失败不阻断其他 metric；缺失 class 引用跳过对应 join。
     """
+    # schema introspection 最先载入：它失败时 _loadSchemaTableNames 会 session.rollback()
+    # 清 aborted 事务。若在此之前已载入 classes/joins/metrics 等 ORM 对象，rollback 会将其过期，
+    # 后续 _edgesFromJoin/_edgesFromMetric 访问属性会触发 async lazy-load → MissingGreenlet 500。
+    schemaTables = await _loadSchemaTableNames(session)
     classes = await _loadClasses(session)
     joins = await _loadJoins(session)
     metrics = await _loadMetrics(session)
     existing = await _loadExistingEdges(session)
-    schemaTables = await _loadSchemaTableNames(session)
 
     edges: list[ExtractedEdge] = []
     seen: set[tuple] = set(existing)
@@ -357,3 +369,46 @@ async def extractEdges(session: AsyncSession) -> list[ExtractedEdge]:
         edges.append(edge)
 
     return edges
+
+
+async def persistEdges(session: AsyncSession, edges: list[ExtractedEdge]) -> int:
+    """把抽取出的血缘边幂等写入 data_lineage，返回实际新增条数。
+
+    调用方应先经 extractEdges（其内部已与现有行 + 同 run 去重，返回即待新增边）；
+    此处只做逐条落库 + 单次 commit，不重复判重。重复运行安全——extractEdges
+    再跑会因与现有行撞 identity 返回空集，persistEdges 空集直接返回 0。
+
+    并发兜底：字段级边撞 uq_data_lineage_edge 唯一约束（另一并发 /extract 已先提交）
+    时 commit 抛 IntegrityError → 整事务回滚、视为 0 新增（幂等语义由先提交方满足，
+    与 DataLineageService.createEdge「先查后写」先例一致）。
+    注：表级边（source/target_field 均 NULL）因 PG 唯一索引对 NULL 不冲突，无法靠约束
+    兜底，仅靠 extractEdges 内存预检——竞态窗口极小，单管理员按钮场景可接受（前端
+    loading 已禁同组件连点）。
+
+    供 POST /api/v1/lineage/edges/extract 与 scripts/lineage_auto_extract.py 复用，
+    避免两端各自实现 DataLineage 字段映射（DRY）。
+    """
+    if not edges:
+        return 0
+    for edge in edges:
+        session.add(
+            DataLineage(
+                source_layer=edge.source_layer,
+                source_system=edge.source_system,
+                source_object=edge.source_object,
+                source_field=edge.source_field,
+                target_layer=edge.target_layer,
+                target_system=edge.target_system,
+                target_object=edge.target_object,
+                target_field=edge.target_field,
+                transformation_rule=edge.transformation_rule,
+                refresh_frequency=edge.refresh_frequency,
+                is_active=True,
+            )
+        )
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        return 0
+    return len(edges)

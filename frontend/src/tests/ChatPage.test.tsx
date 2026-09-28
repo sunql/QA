@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConfigProvider } from "antd";
+import { MemoryRouter } from "react-router-dom";
 import zhCN from "antd/locale/zh_CN";
 import type { DataSource } from "../types/datasource";
 
@@ -56,7 +57,10 @@ import { useChatStore } from "../stores/chatStore";
 function renderPage() {
   return render(
     <ConfigProvider locale={zhCN}>
-      <ChatPage />
+      {/* ChatPanel 用 useLocation（历史面板按路由持久化），测试需 Router 上下文 */}
+      <MemoryRouter>
+        <ChatPage />
+      </MemoryRouter>
     </ConfigProvider>
   );
 }

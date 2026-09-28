@@ -19,6 +19,10 @@ from typing import Literal
 
 MAX_MULTI_STEP = 5  # 硬上限：含汇总步骤最多 5 步（防无限循环）
 
+# 数据步（非汇总）上限。planner 与执行缝都以它为准；汇总步骤是必然的最后一步，
+# 不占额度。派生自 MAX_MULTI_STEP 而非另写一个 5，避免两处上限各自漂移。
+MAX_PLAN_DATA_STEPS = MAX_MULTI_STEP - 1
+
 # 2026-08-17 修复：Step N 引用 Step N-1 实体列表作为 WHERE IN 筛选条件
 # 实体列表形态：每列一行 `列名: 值1, 值2, ...`，方便 LLM 直接生成 WHERE IN
 _ENTITY_LIST_ITEM_LIMIT = 2000  # 实体列表模式每项字符上限（够 Top 30 完整 ID 列表）
@@ -154,6 +158,20 @@ class MultiStepPlan:
 
 
 @dataclass(frozen=True)
+class GlobalFilters:
+    """多步问题中跨步骤共享的范围类过滤条件（feat-multistep-global-filter B 层）。
+
+    来源：LLM 预抽取（StepQueryPlanner.extract_global_filters），渲染为
+    [global_constraints] 块注入每一步 prompt，强指令 LLM 必须沿用。
+    source 标记：llm（成功抽取）/ fallback（占位空集合，不注入块）。
+    """
+
+    text: str  # 渲染进 prompt 的纯文本片段
+    constraints: tuple[str, ...] = ()  # 原始约束条目（供日志/审计）
+    source: str = "llm"
+
+
+@dataclass(frozen=True)
 class StepExecutionContext:
     """多步执行的共享上下文（不可变，每次 with_step 返回新实例）。
 
@@ -177,6 +195,8 @@ class StepExecutionContext:
     completed_steps: tuple[StepResult, ...] = ()
     injection_char_limit: int = 600
     injection_char_limit_entity: int = _ENTITY_LIST_ITEM_LIMIT
+    global_filters: GlobalFilters | None = None
+    # feat-multistep-global-filter B 层：B 抽取的全局约束，nullable 兼容旧路径
 
     def inject_to_prompt(self, current_index: int) -> str:
         """把当前步骤之前的所有 StepResult 渲染为可注入 prompt 的文本片段。
@@ -207,21 +227,44 @@ class StepExecutionContext:
         当前步骤为 0 时或无已完成步骤时返回空串。
         所有未受信数据经 _sanitizeContext 转义（与单轮注入同口径）。
         """
-        if current_index == 0 or not self.completed_steps:
-            return ""
-
         # 延迟导入避免循环依赖（nl2sql_service 依赖 multi_step_plan）
         from app.services.nl2sql_service import _sanitizeContext
 
+        # B 层：global_constraints 块始终渲染（即便无前序步骤——第一步也需要明确全局约束）
+        global_block = ""
+        if self.global_filters is not None and self.global_filters.text:
+            global_block = (
+                "[global_constraints]\n"
+                f"{self.global_filters.text}\n"
+                "[/global_constraints]"
+            )
+
+        if current_index == 0 or not self.completed_steps:
+            return global_block
+
         prior = [r for r in self.completed_steps if r.step_index < current_index]
         if not prior:
-            return ""
+            return global_block
 
         lines = [
-            "前序步骤结果（可作为后续步骤的筛选条件使用；"
-            "详见 [entity_list] / [aggregate] 标签说明）："
+            "前序步骤结果（**必须沿用**前序步骤的范围类 WHERE 条件——"
+            "外购/内外贸/站点/物料类别/财年等跨步骤口径约束；"
+            "只有当该过滤已被聚合列或前序 JOIN 的实体限定完整覆盖时才可省略；"
+            "详见 [entity_list] / [aggregate] / [global_constraints] 标签说明）："
         ]
+        if global_block:
+            lines.append(global_block)
         for r in prior:
+            if r.sql is None:
+                # 失败步骤（C3 失败隔离）：无 SQL 即无数据。必须显式说「无数据」而不是
+                # 照常渲染空数据块——空摘要（`[]` / `（无数据）`）会被下游 LLM 读成
+                # 「该查询结果为 0」，据此生成错误的 WHERE IN / 对比结论。
+                lines.append(
+                    f"步骤 {r.step_index + 1}：{_sanitizeContext(r.description)}\n"
+                    f"  子问题：{_sanitizeContext(r.sub_question)}\n"
+                    f"  该步骤无数据可注入（{_sanitizeContext(r.error or '未执行')}）"
+                )
+                continue
             shape = _detect_step_data_shape(r.data)
             if shape == "ENTITY_LIST":
                 per_item = self.injection_char_limit_entity
@@ -251,4 +294,7 @@ class StepExecutionContext:
             completed_steps=self.completed_steps + (result,),
             injection_char_limit=self.injection_char_limit,
             injection_char_limit_entity=self.injection_char_limit_entity,
+            # feat-multistep-global-filter B 层：跨步共享范围类约束必须沿用每一步
+            # ——global_filters 在所有 with_step 衍生实例中保持一致。
+            global_filters=self.global_filters,
         )

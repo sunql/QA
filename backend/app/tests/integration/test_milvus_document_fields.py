@@ -1,0 +1,178 @@
+"""Milvus document_embeddings 定位符字段（P0 溯源地基）。
+
+真实 Milvus + 真实集合，不 mock。
+"""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+
+from app.infrastructure.milvus_client import (
+    _documentFields,
+    deleteDocumentChunks,
+    ensureDocumentCollection,
+    insertDocumentChunks,
+    queryDocumentChunks,
+    refreshDocumentCollection,
+    searchDocumentChunks,
+)
+
+
+class TestDocumentFields:
+    def test_locator_fields_present(self) -> None:
+        names = [f.name for f in _documentFields()]
+        assert "page_number" in names
+        assert "section_name" in names
+        assert "paragraph_no" in names
+
+    def test_field_order_matches_insert_payload(self) -> None:
+        """insertDocumentChunks 用位置列表写数据，字段顺序即契约。"""
+        names = [f.name for f in _documentFields()]
+        assert names[-1] == "embedding", "embedding 必须最后，与 data 列表一致"
+        assert names.index("page_number") < names.index("embedding")
+
+
+class TestRoundTrip:
+    @pytest.mark.integration
+    def test_locator_survives_insert_and_search(self) -> None:
+        ensureDocumentCollection()
+        insertDocumentChunks(
+            [
+                {
+                    "document_id": "DOC-P0-TEST",
+                    "chunk_id": "chunk-loc",
+                    "chunk_text": "供应商A暂停采购",
+                    "chunk_sequence": 0,
+                    "effective_date": "",
+                    "security_level": "L1",
+                    "page_number": 18,
+                    "section_name": "质量管理",
+                    "paragraph_no": 3,
+                    "embedding": [0.1] * 1024,
+                }
+            ]
+        )
+        hit = _findChunk("chunk-loc", [0.1] * 1024)
+        assert hit is not None, "应能检索到刚写入的 chunk"
+        assert hit["page_number"] == 18
+        assert hit["section_name"] == "质量管理"
+        assert hit["paragraph_no"] == 3
+
+        # 收尾：不给共享集合留残留（与本文件其它用例一致）
+        deleteDocumentChunks("DOC-P0-TEST")
+
+    @pytest.mark.integration
+    def test_missing_locator_writes_sentinel(self) -> None:
+        ensureDocumentCollection()
+        insertDocumentChunks(
+            [
+                {
+                    "document_id": "DOC-P0-TEST",
+                    "chunk_id": "chunk-null",
+                    "chunk_text": "无定位符",
+                    "chunk_sequence": 1,
+                    "page_number": None,
+                    "section_name": None,
+                    "paragraph_no": None,
+                    "embedding": [0.2] * 1024,
+                }
+            ]
+        )
+        hit = _findChunk("chunk-null", [0.2] * 1024)
+        assert hit is not None
+        assert hit["page_number"] == -1
+        assert hit["section_name"] == ""
+        assert hit["paragraph_no"] == -1
+
+        # 收尾：不给共享集合留残留
+        deleteDocumentChunks("DOC-P0-TEST")
+
+
+    @pytest.mark.integration
+    def test_delete_document_chunks_scopes_to_one_document(self) -> None:
+        """按 document_id 删除只带走该文档的 chunk，不是清空集合。"""
+        doc_id_del = uuid.uuid4().hex[:16]
+        chunk_id_a = uuid.uuid4().hex[:16]
+        doc_id_keep = uuid.uuid4().hex[:16]
+        chunk_id_b = uuid.uuid4().hex[:16]
+        ensureDocumentCollection()
+        insertDocumentChunks(
+            [
+                {
+                    "document_id": doc_id_del,
+                    "chunk_id": chunk_id_a,
+                    "chunk_text": "待删除",
+                    "chunk_sequence": 0,
+                    "page_number": 1,
+                    "section_name": "",
+                    "paragraph_no": 1,
+                    "embedding": [0.3] * 1024,
+                },
+                {
+                    "document_id": doc_id_keep,
+                    "chunk_id": chunk_id_b,
+                    "chunk_text": "不该被删",
+                    "chunk_sequence": 0,
+                    "page_number": 1,
+                    "section_name": "",
+                    "paragraph_no": 1,
+                    "embedding": [0.4] * 1024,
+                },
+            ]
+        )
+
+        deleteDocumentChunks(doc_id_del)
+
+        # release + load 强制 QueryNode 刷新 delta binlog
+        refreshDocumentCollection()
+        # 验证删除生效：reload 后 _findChunk 走 search 应查不到 DEL 的 chunk
+        assert _findChunk(chunk_id_a, [0.3] * 1024) is None
+        assert _findChunk(chunk_id_b, [0.4] * 1024) is not None
+
+        # 收尾：本用例同样不该给共享集合留残留
+        deleteDocumentChunks(doc_id_keep)
+
+    @pytest.mark.integration
+    def test_query_document_chunks_returns_locators(self) -> None:
+        """按 document_id 直查（不经向量检索）也要能拿到定位符。"""
+        doc_id = uuid.uuid4().hex[:16]
+        chunk_id = uuid.uuid4().hex[:16]
+        ensureDocumentCollection()
+        insertDocumentChunks(
+            [
+                {
+                    "document_id": doc_id,
+                    "chunk_id": chunk_id,
+                    "chunk_text": "直查定位符",
+                    "chunk_sequence": 0,
+                    "page_number": 7,
+                    "section_name": "采购管理",
+                    "paragraph_no": 2,
+                    "embedding": [0.5] * 1024,
+                }
+            ]
+        )
+
+        rows = [r for r in queryDocumentChunks(doc_id) if r["chunk_id"] == chunk_id]
+        assert len(rows) == 1
+        assert rows[0]["page_number"] == 7
+        assert rows[0]["section_name"] == "采购管理"
+        assert rows[0]["paragraph_no"] == 2
+
+        deleteDocumentChunks(doc_id)
+
+
+def _findChunk(chunkId: str, embedding: list[float]) -> dict | None:
+    """按 chunk_id 在检索结果里定位，避免依赖排序位置。
+
+    集合是跨用例共享的，topK=1 取到的未必是本用例刚写的那条。
+    **前置**：调用方必须先 ``refreshDocumentCollection()``（delete 后
+    release + load 强制 QueryNode 刷新 delta binlog），否则刚 delete 的
+    chunk 仍可能命中 search 结果。
+    """
+    for hit in searchDocumentChunks(embedding, topK=10):
+        if hit["chunk_id"] == chunkId:
+            return hit
+    return None

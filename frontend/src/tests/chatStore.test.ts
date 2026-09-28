@@ -143,6 +143,42 @@ describe("chatStore", () => {
     expect(state.messages[1].isError).toBe(true);
   });
 
+  it("非流式多步：失败步骤（error 非空）标记为 error 而非 done（C3 失败隔离）", async () => {
+    chatApi.sendMessage.mockResolvedValue({
+      answer: "多步执行失败：0/2 步完成",
+      intent: "multi_step",
+      tokensUsed: 10,
+      cost: 0.00001,
+      steps: [
+        {
+          stepIndex: 0,
+          description: "2024 销售额",
+          subQuestion: "2024年的销售额是多少",
+          sql: "SELECT 1",
+          summary: "1000",
+          error: null,
+        },
+        {
+          stepIndex: 1,
+          description: "2025 销售额",
+          subQuestion: "2025年的销售额是多少",
+          sql: null,
+          summary: null,
+          error: "该步骤执行失败：ORA-00942: 表或视图不存在",
+        },
+      ],
+    });
+    useChatStore.getState().setDatasourceId(1);
+    await useChatStore.getState().sendMessage("分步查询 2024 和 2025 的销售额并对比");
+
+    const steps = useChatStore.getState().messages[1].steps;
+    expect(steps?.[0]).toMatchObject({ status: "done", sql: "SELECT 1" });
+    expect(steps?.[1]).toMatchObject({
+      status: "error",
+      error: "该步骤执行失败：ORA-00942: 表或视图不存在",
+    });
+  });
+
   // =========================================================================
   // 流式输出（5.6）
   // =========================================================================
@@ -370,8 +406,8 @@ describe("chatStore", () => {
     useChatStore.setState({ messages: [{ id: "old", role: "user", content: "old", timestamp: 1 }] });
 
     const historyMessages: ChatMessageRead[] = [
-      { id: 1, role: "user", content: "历史 Q1", question: "历史 Q1", sql: null, createdTime: "2026-01-01T00:00:00Z" },
-      { id: 2, role: "assistant", content: "历史 A1", question: null, sql: "SELECT 1", createdTime: "2026-01-01T00:01:00Z" },
+      { id: 1, role: "user", content: "历史 Q1", question: "历史 Q1", sql: null, createdTime: "2026-01-01T00:00:00Z", interrupted: false },
+      { id: 2, role: "assistant", content: "历史 A1", question: null, sql: "SELECT 1", createdTime: "2026-01-01T00:01:00Z", interrupted: false },
     ];
     historyApi.loadSessionMessages.mockResolvedValue({
       sessionId: "s-history",
@@ -391,6 +427,21 @@ describe("chatStore", () => {
     expect(state.messages.find((m) => m.id === "old")).toBeUndefined();
     // 错误清空
     expect(state.error).toBeNull();
+  });
+
+  it("loadSessionMessages 透传 interrupted（H4 断连兜底写入的半截回答）", async () => {
+    const historyMessages: ChatMessageRead[] = [
+      { id: 1, role: "user", content: "历史 Q1", question: "历史 Q1", sql: null, createdTime: "2026-01-01T00:00:00Z", interrupted: false },
+      { id: 2, role: "assistant", content: "半截回答", question: null, sql: "SELECT 1", createdTime: "2026-01-01T00:01:00Z", interrupted: true },
+      { id: 3, role: "assistant", content: "完整回答", question: null, sql: null, createdTime: "2026-01-01T00:02:00Z", interrupted: false },
+    ];
+    historyApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-history", messages: historyMessages });
+
+    await useChatStore.getState().loadSessionMessages("s-history");
+
+    const messages = useChatStore.getState().messages;
+    expect(messages[1].interrupted).toBe(true);
+    expect(messages[2].interrupted).toBe(false);
   });
 
   it("loadSessionMessages 不影响 datasourceId/selectedModelId", async () => {

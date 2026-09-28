@@ -6,8 +6,10 @@
 - PostgreSQL / MySQL：information_schema（CURRENT_SCHEMA / DATABASE）
 
 所有查询均为只读 SELECT，经 BusinessDbAdapter.execute_read_only 的 SQL Guard 校验。
-发现结果写入 schema_cache 表（datasource_id 唯一 + MD5 版本），
-版本未变化时复用缓存行，避免无效写入。
+发现结果写入 schema_cache 表，按 (datasource_id, schema_name) 唯一 + MD5 版本，
+版本未变化时复用缓存行，避免无效写入。schema_name 为 Oracle owner 命名空间
+（如 ZJTH/THBI）；PG/MySQL 恒为 ''（连接默认）。连接用户在某个 owner 下看得到
+多少表，就取决于该 owner 对其可见对象（ALL_TABLES 等数据字典语义）。
 """
 
 from __future__ import annotations
@@ -75,6 +77,26 @@ def _oracleOwner(username: str) -> str:
     return owner
 
 
+def _normalizeSchemaName(ds: DataSource, owner: str | None) -> str:
+    """把调用方传入的 owner 归一为「缓存键 + 内省 SQL 共用」的 schema 名。
+
+    Oracle：显式非空 owner → strip().upper() + 字符白名单（非法抛 ValidationError）；
+    空/缺省 → 连接用户默认 owner（UPPER(username)，向后兼容先前后端行为）。
+    PG/MySQL：忽略 owner 恒返回 ''（连接默认，单份缓存语义）——避免把非 Oracle
+    数据源误缓存到用户指定 owner 名下（_queryByType 亦忽略非 Oracle 的 owner）。
+    返回新字符串，不改动入参。
+    """
+    try:
+        dsType = DataSourceType(ds.type)
+    except ValueError:
+        return ""
+    if dsType is DataSourceType.ORACLE:
+        if owner is not None and owner.strip():
+            return _oracleOwner(owner)
+        return _oracleOwner(ds.username)
+    return ""
+
+
 def _emptyTable() -> dict[str, Any]:
     return {"owner": "", "columns": [], "primary_keys": [], "foreign_keys": []}
 
@@ -105,17 +127,65 @@ def _mergeRows(columnRows: list[dict], pkRows: list[dict], fkRows: list[dict]) -
     return tables
 
 
+def _annotateComments(
+    merged: dict[str, dict],
+    tableComments: list[dict],
+    colComments: list[dict],
+) -> None:
+    """就地给 merged 的表/列注 comment（feat-ontology-import-comment）。
+
+    行为约定：
+    - 表 comment 写到 `merged[name]["comment"]`，列 comment 写到
+      `merged[name]["columns"][i]["comment"]`。直接修改 dict，调用方拿同一引用。
+    - 空串 / None / 仅空白视为「无注释」：不写 key（避免把 None 与缺字段混淆）。
+      Oracle ALL_TAB_COMMENTS 没有 comment 的行返回 None；PG pg_description LEFT JOIN
+      未命中时返回 ''；MySQL 无注释时返回 ''。三路统一处理。
+    - key 一律 .upper() 归一（Oracle 表名默认大写，PG/MySQL 连接默认小写也能命中）。
+    - 不存在的表/列键会被静默忽略（表注释不存在时对应表就不参与注入）。
+
+    入参为 list[dict]，dict 内字段语义：
+      tableComments: [{table_name, comment}, ...]
+      colComments:   [{table_name, column_name, comment}, ...]
+    """
+    tableMap: dict[str, str] = {}
+    for row in tableComments:
+        raw = row.get("comment") or ""
+        if raw and raw.strip():
+            tableMap[row["table_name"].upper()] = raw.strip()
+
+    colMap: dict[tuple[str, str], str] = {}
+    for row in colComments:
+        raw = row.get("comment") or ""
+        if raw and raw.strip():
+            key = (row["table_name"].upper(), row["column_name"].upper())
+            colMap[key] = raw.strip()
+
+    for name, info in merged.items():
+        upper = name.upper()
+        if upper in tableMap:
+            info["comment"] = tableMap[upper]
+        for col in info["columns"]:
+            key = (upper, col["column_name"].upper())
+            if key in colMap:
+                col["comment"] = colMap[key]
+
+
 class SchemaIntrospectionService:
     """业务数据源 schema 发现与缓存。"""
 
     def __init__(self, *, adapterProvider: AdapterProvider = get_adapter) -> None:
         self._adapterProvider = adapterProvider
 
-    async def introspect(self, ds: DataSource) -> list[TableSchemaRead]:
-        """读取业务库数据字典，返回结构化表清单（不落库）。"""
+    async def introspect(self, ds: DataSource, *, owner: str | None = None) -> list[TableSchemaRead]:
+        """读取业务库数据字典，返回结构化表清单（不落库）。
+
+        owner 仅对 Oracle 有意义（owner 命名空间，如 THBI）；缺省回退连接用户
+        默认 owner（_oracleOwner(ds.username)）。PG/MySQL 忽略 owner，恒查连接
+        默认 schema。
+        """
         adapter = self._adapterProvider(ds.id, ds)
         try:
-            merged = await self._queryByType(adapter, ds)
+            merged = await self._queryByType(adapter, ds, owner)
         except ValidationError:
             raise  # 校验类错误（如 owner 非法）保持原样，便于 API 返回精确语义
         except Exception as exc:  # noqa: BLE001 - 连接/解析异常统一包装为领域异常
@@ -136,22 +206,80 @@ class SchemaIntrospectionService:
             )
         return tables
 
-    async def _queryByType(self, adapter: BusinessDbAdapter, ds: DataSource) -> dict[str, dict]:
-        """按数据源类型执行数据字典查询并合并结果；未知类型抛 ValidationError。"""
+    async def listSchemas(self, ds: DataSource) -> list[str]:
+        """列出该连接可见的 Oracle owner（schema）命名空间，用于向导「选择 Schema」。
+
+        Oracle：ALL_TABLES 的 DISTINCT owner（只读，连接用户可见对象所在的所有者，
+        含自身 owner 与被授权的其他 owner，如 ZJTH 连接可同时见 ZJTH 与 THBI）。
+        PG/MySQL：返回 []——无显式多 schema 概念，向导不显示 schema 选择步。
+        owner 经字符白名单过滤后原样返回（大写），杜绝脏 owner 回传前端。
+        """
+        adapter = self._adapterProvider(ds.id, ds)
+        try:
+            dsType = DataSourceType(ds.type)
+        except ValueError:
+            dsType = None
+        if dsType is not DataSourceType.ORACLE:
+            return []
+        try:
+            rows = await adapter.execute_read_only(_ORACLE_SCHEMAS_SQL)
+        except Exception as exc:  # noqa: BLE001 - 连接/解析异常统一包装为领域异常
+            logger.error("数据源 %s schema 列表读取失败: %s", ds.id, exc, exc_info=True)
+            raise DataSourceError(
+                MSG_DATASOURCE_SCHEMA_READ_FAILED.format(datasourceId=ds.id),
+                detail=MSG_DATASOURCE_SCHEMA_READ_FAILED_DETAIL,
+            ) from exc
+        schemas: set[str] = set()
+        for row in rows:
+            owner = (row.get("owner") or "").strip().upper()
+            if owner and _ORACLE_OWNER_PATTERN.fullmatch(owner):
+                schemas.add(owner)
+        return sorted(schemas)
+
+    async def _queryByType(
+        self,
+        adapter: BusinessDbAdapter,
+        ds: DataSource,
+        owner: str | None = None,
+    ) -> dict[str, dict]:
+        """按数据源类型执行数据字典查询并合并结果；未知类型抛 ValidationError。
+
+        owner 仅 Oracle 生效：显式传 owner 时按其规范化（大写 + 白名单，杜绝注入），
+        缺省回退连接用户默认 owner，向后兼容既有行为。PG/MySQL 恒查连接默认 schema。
+
+        feat-ontology-import-comment：三数据源都额外查表/列注释并 merge 到 merged dict。
+        无注释时 _annotateComments 不写 key（等价 comment=None），向后兼容。
+        """
         try:
             dsType = DataSourceType(ds.type)
         except ValueError:
             dsType = None
         if dsType is DataSourceType.ORACLE:
-            owner = _oracleOwner(ds.username)
-            columnRows = await adapter.execute_read_only(_ORACLE_COLUMNS_SQL.format(owner=owner))
-            pkRows = await adapter.execute_read_only(_ORACLE_PK_SQL.format(owner=owner))
-            fkRows = await adapter.execute_read_only(_ORACLE_FK_SQL.format(owner=owner))
-            return _mergeRows(columnRows, pkRows, fkRows)
+            sqlOwner = _oracleOwner(owner) if (owner and owner.strip()) else _oracleOwner(ds.username)
+            columnRows = await adapter.execute_read_only(_ORACLE_COLUMNS_SQL.format(owner=sqlOwner))
+            pkRows = await adapter.execute_read_only(_ORACLE_PK_SQL.format(owner=sqlOwner))
+            fkRows = await adapter.execute_read_only(_ORACLE_FK_SQL.format(owner=sqlOwner))
+            tableCommentRows = await adapter.execute_read_only(
+                _ORACLE_TABLE_COMMENT_SQL.format(owner=sqlOwner)
+            )
+            colCommentRows = await adapter.execute_read_only(
+                _ORACLE_COL_COMMENT_SQL.format(owner=sqlOwner)
+            )
+            merged = _mergeRows(columnRows, pkRows, fkRows)
+            _annotateComments(merged, tableCommentRows, colCommentRows)
+            return merged
         if dsType is DataSourceType.POSTGRESQL:
-            return await self._fetchInfoSchema(adapter, _PG_SQL)
+            merged = await self._fetchInfoSchema(adapter, _PG_SQL)
+            tableComments = await adapter.execute_read_only(_PG_TABLE_COMMENT_SQL)
+            colComments = await adapter.execute_read_only(_PG_COL_COMMENT_SQL)
+            _annotateComments(merged, tableComments, colComments)
+            return merged
         if dsType is DataSourceType.MYSQL:
-            return await self._fetchInfoSchema(adapter, _MYSQL_SQL)
+            merged = await self._fetchInfoSchema(adapter, _MYSQL_SQL)
+            tableComments = await adapter.execute_read_only(_MYSQL_TABLE_COMMENT_SQL)
+            colComments = await adapter.execute_read_only(_MYSQL_COL_COMMENT_SQL)
+            _annotateComments(merged, tableComments, colComments)
+            return merged
         raise ValidationError(MSG_DATASOURCE_TYPE_NOT_SUPPORTED.format(dsType=ds.type))
 
     @staticmethod
@@ -170,59 +298,99 @@ class SchemaIntrospectionService:
                 columns=[ColumnSchemaRead(**c) for c in info["columns"]],
                 primary_keys=info["primary_keys"],
                 foreign_keys=[ForeignKeySchemaRead(**fk) for fk in info["foreign_keys"]],
+                # feat-ontology-import-comment：DB 表注释透传；空表（无 _annotateComments 调用）
+                # 时 info["comment"] 缺 key，Pydantic 默认 None，向后兼容老数据源。
+                comment=info.get("comment"),
             )
             for name, info in sorted(merged.items())
         ]
 
     # ===== 缓存 =====
 
-    async def getCached(self, session: AsyncSession, datasourceId: int) -> SchemaCache | None:
-        """按数据源读取 schema 缓存行，不存在返回 None。"""
-        stmt = select(SchemaCache).where(SchemaCache.datasource_id == datasourceId)
+    async def getCached(
+        self,
+        session: AsyncSession,
+        datasourceId: int,
+        *,
+        owner: str | None = None,
+        ds: DataSource | None = None,
+    ) -> SchemaCache | None:
+        """按 (datasource_id, schema_name) 读 schema 缓存行，不存在返回 None。
+
+        owner 经 _normalizeSchemaName 归一（Oracle 大写 + 白名单校验；PG/MySQL
+        恒 ''）。owner 缺省时解析为数据源「默认 schema」：Oracle → UPPER(连接
+        用户名)，PG/MySQL → ''。有 ds 对象时传入可避免额外一次 DataSource 查询。
+        """
+        if ds is None:
+            ds = (
+                await session.execute(
+                    select(DataSource).where(DataSource.id == datasourceId)
+                )
+            ).scalars().first()
+        schemaName = _normalizeSchemaName(ds, owner) if ds is not None else (owner or "")
+        stmt = select(SchemaCache).where(
+            SchemaCache.datasource_id == datasourceId,
+            SchemaCache.schema_name == schemaName,
+        )
         result = await session.execute(stmt)
         return result.scalars().first()
 
-    async def introspectAndCache(self, session: AsyncSession, ds: DataSource) -> SchemaCache:
+    async def introspectAndCache(
+        self, session: AsyncSession, ds: DataSource, *, owner: str | None = None,
+    ) -> SchemaCache:
         """发现 schema 并写入缓存；数据未变化时复用已有缓存行。
 
+        缓存键 (datasource_id, schema_name)。owner 经 _normalizeSchemaName 归一
+        （Oracle：大写 + 白名单校验，小写/空白串也归一，杜绝同 owner 大小写不同
+        产生两行缓存；PG/MySQL：忽略 owner 恒 ''，内省走连接默认 schema）。
+
         写入并发安全（跨 PG/SQLite 可移植，不依赖方言特有的 ON CONFLICT）：
-        - 首次写入：session.add + commit，若与并发请求撞唯一约束
-          （uq_schema_cache_datasource），回滚后复用胜出者，避免 500；
+        - 首次写入：session.add + commit，若与并发请求撞复合唯一约束
+          （uq_schema_cache_datasource_schema），回滚后复用胜出者，避免 500；
         - 数据变化：DB 级 UPDATE（不原地修改既有 ORM 对象，符合不可变约束），再刷新取最新值。
         """
-        tables = await self.introspect(ds)
+        schemaName = _normalizeSchemaName(ds, owner)
+        tables = await self.introspect(ds, owner=schemaName)
         schemaData = [t.model_dump() for t in tables]
         version = _schemaVersion(schemaData)
 
-        existing = await self.getCached(session, ds.id)
+        existing = await self.getCached(session, ds.id, owner=schemaName, ds=ds)
         if existing is not None and existing.schema_version == version:
-            logger.info("schema 缓存未变化，复用 datasource_id=%s", ds.id)
+            logger.info("schema 缓存未变化，复用 datasource_id=%s schema=%s", ds.id, schemaName)
             return existing
         if existing is None:
-            cache = SchemaCache(datasource_id=ds.id, schema_data=schemaData, schema_version=version)
+            cache = SchemaCache(
+                datasource_id=ds.id,
+                schema_name=schemaName,
+                schema_data=schemaData,
+                schema_version=version,
+            )
             session.add(cache)
             try:
                 await session.commit()
             except IntegrityError:
-                # 并发双请求同时首次写入：后者撞唯一约束，回滚后复用胜出者
+                # 并发双请求同时首次写入：后者撞复合唯一约束，回滚后复用胜出者
                 await session.rollback()
-                winner = await self.getCached(session, ds.id)
+                winner = await self.getCached(session, ds.id, owner=schemaName, ds=ds)
                 if winner is not None:
-                    logger.info("并发写入冲突，复用已存在缓存 datasource_id=%s", ds.id)
+                    logger.info("并发写入冲突，复用已存在缓存 datasource_id=%s schema=%s", ds.id, schemaName)
                     return winner
                 raise
             await session.refresh(cache)
-            logger.info("写入 schema 缓存 datasource_id=%s tables=%s", ds.id, len(tables))
+            logger.info("写入 schema 缓存 datasource_id=%s schema=%s tables=%s", ds.id, schemaName, len(tables))
             return cache
         # 数据变化：DB 级 UPDATE 刷新版本号与内容（同一行，缓存幂等，仅一条）
         await session.execute(
             update(SchemaCache)
-            .where(SchemaCache.datasource_id == ds.id)
+            .where(
+                SchemaCache.datasource_id == ds.id,
+                SchemaCache.schema_name == schemaName,
+            )
             .values(schema_data=schemaData, schema_version=version, updated_time=datetime.now(UTC))
         )
         await session.commit()
         await session.refresh(existing)
-        logger.info("刷新 schema 缓存 datasource_id=%s tables=%s", ds.id, len(tables))
+        logger.info("刷新 schema 缓存 datasource_id=%s schema=%s tables=%s", ds.id, schemaName, len(tables))
         return existing
 
     @staticmethod
@@ -243,7 +411,7 @@ class SchemaIntrospectionService:
         缓存不存在（尚未 introspect）时返回 schema_cached=false 的空报告——没有
         实际 schema 可对照时不臆测缺失。只读一次缓存行，不落库。
         """
-        cache = await self.getCached(session, ds.id)
+        cache = await self.getCached(session, ds.id, ds=ds)
         if cache is None:
             return OntologyDriftReport(
                 datasource_id=ds.id,
@@ -396,6 +564,15 @@ ORDER BY cc.table_name, cc.position
 """
 
 
+# Oracle：列出连接用户可见对象所在的所有者（DISTINCT），供向导「选择 Schema」。
+# 纯静态只读 SQL，无用户输入参与拼接，owner 值在 Python 侧再经白名单过滤。
+_ORACLE_SCHEMAS_SQL = """
+SELECT DISTINCT owner AS "owner"
+FROM ALL_TABLES
+ORDER BY owner
+"""
+
+
 def _buildInfoSchemaQueries(schemaExpr: str) -> dict[str, str]:
     """构造 information_schema 三连查；schemaExpr 为 CURRENT_SCHEMA() 或 DATABASE()。
 
@@ -428,6 +605,65 @@ WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = {schemaExpr}
 ORDER BY tc.table_name, kcu.ordinal_position
 """,
     }
+
+
+# =============================================================================
+# 表/列注释查询（feat-ontology-import-comment）
+# 所有 SQL 均为只读 SELECT，经 SQL Guard 校验；owner 由 _oracleOwner 白名单后内联。
+# =============================================================================
+
+# Oracle：ALL_TAB_COMMENTS 返回 NULL 的行表示该对象未设注释（与 PG/空串统一处理）
+_ORACLE_TABLE_COMMENT_SQL = """
+SELECT table_name AS "table_name", comments AS "comment"
+FROM ALL_TAB_COMMENTS
+WHERE owner = '{owner}' AND table_name IS NOT NULL AND comments IS NOT NULL
+"""
+
+# Oracle：ALL_COL_COMMENTS 返回 NULL 的行表示该字段未设注释
+_ORACLE_COL_COMMENT_SQL = """
+SELECT table_name AS "table_name", column_name AS "column_name", comments AS "comment"
+FROM ALL_COL_COMMENTS
+WHERE owner = '{owner}' AND table_name IS NOT NULL AND comments IS NOT NULL
+"""
+
+# PostgreSQL：pg_description.objsubid=0 是表级注释，>0 是列注释（attnum）。
+# LEFT JOIN：未设注释的对象返回 NULL（统一在 _annotateComments 里 strip 过滤）。
+# CURRENT_SCHEMA() 与列查询保持一致（连接默认 schema），不引入额外 schema 漂移。
+_PG_TABLE_COMMENT_SQL = """
+SELECT c.relname AS table_name, d.description AS comment
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+WHERE n.nspname = CURRENT_SCHEMA() AND c.relkind = 'r'
+  AND d.description IS NOT NULL
+"""
+
+# PostgreSQL：列注释 objsubid = a.attnum（attnum 从 1 开始；系统列 attnum<0 自动被 AND a.attnum > 0 过滤）。
+# 排除 attnum=0（已用于表注释）+ 排除已 drop 的列（attisdropped）。
+_PG_COL_COMMENT_SQL = """
+SELECT c.relname AS table_name, a.attname AS column_name, d.description AS comment
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = a.attnum
+WHERE n.nspname = CURRENT_SCHEMA() AND c.relkind = 'r'
+  AND d.description IS NOT NULL
+ORDER BY c.relname, a.attnum
+"""
+
+# MySQL：information_schema.tables.table_comment 为空串表示未设注释
+_MYSQL_TABLE_COMMENT_SQL = """
+SELECT table_name AS table_name, table_comment AS comment
+FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_comment <> ''
+"""
+
+# MySQL：information_schema.columns.column_comment 为空串表示未设注释
+_MYSQL_COL_COMMENT_SQL = """
+SELECT table_name AS table_name, column_name AS column_name, column_comment AS comment
+FROM information_schema.columns
+WHERE table_schema = DATABASE() AND column_comment <> ''
+"""
 
 
 _PG_SQL = _buildInfoSchemaQueries("CURRENT_SCHEMA()")

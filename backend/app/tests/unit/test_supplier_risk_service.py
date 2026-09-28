@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -151,7 +152,7 @@ async def test_risk_score_low_at_0_85_returns_low(dbSession: AsyncSession):
     result = await SupplierRiskService().assess(dbSession, 100001, llm_factory=None)
 
     assert result.level.value == "low"
-    assert result.level_source == "risk_score"
+    assert result.level_source == "supplier_risk_score_main"  # 规则路径契约（feat-feature-rule-config）
 
 
 async def test_risk_score_medium_at_0_70_returns_medium(dbSession: AsyncSession):
@@ -161,7 +162,7 @@ async def test_risk_score_medium_at_0_70_returns_medium(dbSession: AsyncSession)
     result = await SupplierRiskService().assess(dbSession, 100001, llm_factory=None)
 
     assert result.level.value == "medium"
-    assert result.level_source == "risk_score"
+    assert result.level_source == "supplier_risk_score_main"  # 规则路径契约（feat-feature-rule-config）
 
 
 async def test_risk_score_high_at_0_50_returns_high(dbSession: AsyncSession):
@@ -171,7 +172,7 @@ async def test_risk_score_high_at_0_50_returns_high(dbSession: AsyncSession):
     result = await SupplierRiskService().assess(dbSession, 100001, llm_factory=None)
 
     assert result.level.value == "high"
-    assert result.level_source == "risk_score"
+    assert result.level_source == "supplier_risk_score_main"  # 规则路径契约（feat-feature-rule-config）
 
 
 async def test_risk_score_boundary_0_80_is_low(dbSession: AsyncSession):
@@ -185,7 +186,11 @@ async def test_risk_score_boundary_0_80_is_low(dbSession: AsyncSession):
 
 
 async def test_fallback_high_when_all_three_violate(dbSession: AsyncSession):
-    """RISK_SCORE 缺失 + OTD<90 + DEFECT>5 + PRICE>10 → High（3 违规）。"""
+    """RISK_SCORE 缺失 + OTD<90 + DEFECT>5 + PRICE>10 → High。
+
+    规则路径（feat-feature-rule-config）：3 个兜底规则全命中 HIGH，
+    source 取首个命中规则（registry 迭代序 OTD 最先）。
+    """
     await _seedSupplier(dbSession, 100001, "SUP000001")
     await _seedDataSource(dbSession)
     await _seedFeatureAndValue(dbSession, 1, "SUPPLIER_OTD_3M", "SUP000001", 80.0)
@@ -195,11 +200,15 @@ async def test_fallback_high_when_all_three_violate(dbSession: AsyncSession):
     result = await SupplierRiskService().assess(dbSession, 100001, llm_factory=None)
 
     assert result.level.value == "high"
-    assert result.level_source == "fallback_composite"
+    assert result.level_source == "supplier_otd_high_risk"
 
 
 async def test_fallback_medium_when_two_violate(dbSession: AsyncSession):
-    """OTD<90 + DEFECT>5 + PRICE 正常 → Medium（2 违规）。"""
+    """OTD<90 + DEFECT>5 + PRICE 正常 → High（规则语义，非 legacy 计数）。
+
+    规则路径取 max severity：两个 HIGH 命中 → High（legacy 计数语义是 Medium，
+    已被 feature_rule_config 引擎取代；阈值可在 DB 规则里调）。
+    """
     await _seedSupplier(dbSession, 100001, "SUP000001")
     await _seedDataSource(dbSession)
     await _seedFeatureAndValue(dbSession, 1, "SUPPLIER_OTD_3M", "SUP000001", 88.0)
@@ -208,11 +217,16 @@ async def test_fallback_medium_when_two_violate(dbSession: AsyncSession):
 
     result = await SupplierRiskService().assess(dbSession, 100001, llm_factory=None)
 
-    assert result.level.value == "medium"
+    assert result.level.value == "high"
+    assert result.level_source == "supplier_otd_high_risk"
 
 
 async def test_fallback_low_when_zero_or_one_violate(dbSession: AsyncSession):
-    """仅 PRICE 超标，其他两个 OK → Low（1 违规）。"""
+    """仅 PRICE 超标（>10）→ High（规则语义，非 legacy 计数）。
+
+    PRICE 规则 severity=HIGH 单独命中即 High；legacy 计数语义（1 违规 → Low）
+    已被 feature_rule_config 引擎取代。
+    """
     await _seedSupplier(dbSession, 100001, "SUP000001")
     await _seedDataSource(dbSession)
     await _seedFeatureAndValue(dbSession, 1, "SUPPLIER_OTD_3M", "SUP000001", 95.0)
@@ -221,7 +235,8 @@ async def test_fallback_low_when_zero_or_one_violate(dbSession: AsyncSession):
 
     result = await SupplierRiskService().assess(dbSession, 100001, llm_factory=None)
 
-    assert result.level.value == "low"
+    assert result.level.value == "high"
+    assert result.level_source == "supplier_price_var_high_risk"
 
 
 async def test_unknown_when_all_four_features_missing(dbSession: AsyncSession):
@@ -266,20 +281,30 @@ async def test_llm_unavailable_falls_back_to_template(dbSession: AsyncSession):
 
 
 async def test_llm_success_records_tokens_and_cost(dbSession: AsyncSession):
-    """LLM 可用 → risk_points_source=llm + tokens_used > 0 + cost > 0 + llm_model_name 非空。"""
+    """LLM 可用 → source=llm + tokens + cost 按**传入 config 单价**（USD）算。
+
+    H9 前该分支硬编码「0.001/0.002 CNY per 1k token」：这里用明显不同的单价
+    （0.5 / 1.5）钉住「成本来自 config，而不是写死在服务里的常数」。
+    """
     fake = _FakeLlm()
     await _seedSupplier(dbSession, 100001, "SUP000001")
     await _seedFeatureAndValue(dbSession, 1, "SUPPLIER_RISK_SCORE", "SUP000001", 0.50, unit="score", window="12M")
+    config = type("Cfg", (), {
+        "id": 7,
+        "cost_per_1k_input": Decimal("0.5"),
+        "cost_per_1k_output": Decimal("1.5"),
+    })()
 
     result = await SupplierRiskService().assess(
-        dbSession, 100001, llm_factory=lambda cfg: fake  # noqa: ARG005
+        dbSession, 100001, llm_factory=lambda cfg: fake, llm_config=config,
     )
 
     assert result.risk_points_source == "llm"
     assert result.tokens_used == 180  # 120 + 60
-    assert result.cost > 0
     assert result.llm_model_name == "fake-risk-model"
     assert result.risk_points == "LLM 生成的风险描述"
+    # 120*0.5/1000 + 60*1.5/1000 = 0.15（USD）；旧硬编码会给出 0.00024
+    assert result.cost == pytest.approx(0.15)
 
 
 async def test_actions_per_level(dbSession: AsyncSession):

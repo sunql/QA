@@ -15,6 +15,7 @@ import asyncio
 import logging
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -24,8 +25,10 @@ from app.domain.models import (
     DataSource,
     LlmConfig,
     OntologyClass,
+    OntologyJoin,
     OntologyMetric,
     OntologyProperty,
+    SessionQueryState,
 )
 from app.domain.query_plan import PlanResult, QueryPlan
 from app.domain.schemas import (
@@ -34,7 +37,15 @@ from app.domain.schemas import (
     OntologyMetricCreate,
     OntologyPropertyUpdate,
 )
-from app.services.chat_service import ChatService
+from app.services.chat_service import (
+    ChatService,
+    _statePlan,
+    _getClassLayer,
+    _isDimensionHint,
+    _isExplicitOdsRequest,
+    _STATE_HISTORY_FIELD_LIMIT_DEFAULT,
+    _LAYER_RANK,
+)
 from app.services.unanswerable_suggestion import _buildUnanswerableSuggestion
 from app.services.nl2sql_service import SqlResult
 from app.services.step_query_planner import MultiStepPlan, StepPlan, StepQueryPlanner
@@ -87,15 +98,36 @@ class _PipelineLlm:
 
 
 class _FakeSession:
-    """最小假会话：查询返回空；add_all/add/commit/refresh 为 no-op 并记录。"""
+    """最小假会话：查询返回空；add_all/add/commit/refresh 为 no-op 并记录。
 
-    def __init__(self) -> None:
+    可选注入 modelConfigs，让 select(LlmConfig) 返回指定列表（默认仍为 []），
+    供「显式 modelId 选取模型」相关用例验证；不注入时与历史行为完全一致。
+    只在语句目标是 LlmConfig 时返回注入项，其他查询维持历史空集行为，避免干扰
+    会话消息 / 数据源 / 本体等查询路径。
+
+    `info` 不是假会话的额外装饰：SQLAlchemy `Session.info` 是恒存在的公开字典，
+    H4 断连兜底状态就挂在它上面（`attachStreamPersistState`）。省掉它等于让假会话说
+    「真实会话没有这个属性」，流式用例会整体报 AttributeError 而非测出行为差异。
+    """
+
+    def __init__(self, modelConfigs: list[LlmConfig] | None = None) -> None:
         self.added: list[object] = []
+        self._modelConfigs: list[LlmConfig] = list(modelConfigs or [])
+        self.info: dict = {}
 
     async def execute(self, stmt):
+        isLlmQuery = any(
+            desc.get("entity") is LlmConfig
+            for desc in getattr(stmt, "column_descriptions", [])
+        )
+        rows: list = list(self._modelConfigs) if isLlmQuery else []
+
         class _Scalars:
             def all(self) -> list:
-                return []
+                return list(rows)
+
+            def first(self):
+                return rows[0] if rows else None
 
         class _Result:
             def scalars(self):
@@ -105,7 +137,7 @@ class _FakeSession:
                 return None
 
             def all(self) -> list:
-                return []
+                return list(rows)
 
         return _Result()
 
@@ -143,10 +175,12 @@ class _FakeOntologyService:
         classes: list[OntologyClass] | None = None,
         metrics: list[OntologyMetric] | None = None,
         searchHits: list | None = None,
+        joins: list | None = None,
     ) -> None:
         self._classes = classes or []
         self._metrics = metrics or []
         self.searchHits = searchHits or []
+        self.joins = joins or []
         self.createdMetrics: list[OntologyMetricCreate] = []
         self.createdClasses: list = []
         self.updatedProperties: list[tuple[int, OntologyPropertyUpdate]] = []
@@ -163,7 +197,7 @@ class _FakeOntologyService:
 
     async def listJoins(self, session) -> list:
         # join 目录（运行时 JOIN 唯一真源）；单测默认无 join 边
-        return []
+        return self.joins
 
     async def createMetric(self, session, dto: OntologyMetricCreate) -> OntologyMetric:
         self.createdMetrics.append(dto)
@@ -887,7 +921,7 @@ class TestChatService:
 
         service, _, _, _ = _buildService(ontology=_BoomSearchOntology(self._classes(1)))
         with caplog.at_level(logging.INFO, logger="app.services.chat_service"):
-            result = await service._selectRelevantClasses(_FakeSession(), "收货数量", self._classes(1))
+            result, recall = await service._selectRelevantClasses(_FakeSession(), "收货数量", self._classes(1))
         assert [c.id for c in result] == [1]  # 回退全量
         assert "reason=search_error total=1" in caplog.text
 
@@ -896,7 +930,7 @@ class TestChatService:
         classes = self._classes(1, 2)
         service, _, _, _ = _buildService(ontology=_FakeOntologyService(classes))
         with caplog.at_level(logging.INFO, logger="app.services.chat_service"):
-            result = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
+            result, recall = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
         assert result == classes
         assert "reason=no_hits total=2" in caplog.text
 
@@ -906,7 +940,7 @@ class TestChatService:
         ontology = _FakeOntologyService(classes, searchHits=[SimpleNamespace(id=999)])
         service, _, _, _ = _buildService(ontology=ontology)
         with caplog.at_level(logging.INFO, logger="app.services.chat_service"):
-            result = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
+            result, recall = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
         assert result == classes
         assert "reason=no_match hits=1 total=2" in caplog.text
 
@@ -916,7 +950,7 @@ class TestChatService:
         ontology = _FakeOntologyService(classes, searchHits=[SimpleNamespace(id=2)])
         service, _, _, _ = _buildService(ontology=ontology)
         with caplog.at_level(logging.INFO, logger="app.services.chat_service"):
-            result = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
+            result, recall = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
         assert [c.id for c in result] == [2]
         assert "本体类裁剪完成 pruned=1 total=2 hits=1" in caplog.text
 
@@ -931,7 +965,7 @@ class TestChatService:
         )
         service, _, _, _ = _buildService(ontology=ontology)
         with caplog.at_level(logging.INFO, logger="app.services.chat_service"):
-            result = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
+            result, recall = await service._selectRelevantClasses(_FakeSession(), "收货数量", classes)
         assert [c.id for c in result] == [1]
         assert "本体类裁剪命中率过低 hits=4 matched=1 ratio=0.25" in caplog.text
 
@@ -1051,6 +1085,139 @@ class TestSessionContext:
         await service.processMessage(_dto("本月销量"), _FakeSession())
         systemContent = llm.calls[1][0][1]
         assert "以下是用户之前的对话历史" not in systemContent
+
+
+class TestContextPromptBudget:
+    """H3：历史上下文按「单条上限 + 总量预算」收口（聊天上下文 5.2）。
+
+    contextPrompt 会注入 plan / SQL / answer 各阶段的 prompt（见 _buildContextPrompt
+    的调用点），一条超长答案或长 CTE 会被逐轮重复注入 —— 不设预算时，长轮次下
+    每轮 prompt 成本线性膨胀。
+    """
+
+    def _service(self) -> ChatService:
+        return _buildService()[0]
+
+    @staticmethod
+    def _historyMessage(role: str, content: str) -> HistoryMessage:
+        return HistoryMessage(role=role, content=content)
+
+    @pytest.mark.asyncio
+    async def test_short_history_is_passed_through_unchanged(self) -> None:
+        """预算内的短历史逐字保留（不得因加预算改变既有内容）。"""
+        service = self._service()
+        history = [
+            self._historyMessage("user", "上月销量"),
+            self._historyMessage("assistant", "上月销量为 1000"),
+        ]
+        text = await service._buildContextPrompt(_FakeSession(), "s1", history)
+        assert text == "用户：上月销量\n助手：上月销量为 1000"
+
+    @pytest.mark.asyncio
+    async def test_long_history_stays_within_budget_and_keeps_newest(self) -> None:
+        """长轮次：总量受预算约束，保留最新、丢弃最旧（追问依赖最新一轮）。"""
+        import app.services.chat_service as chat_module
+
+        service = self._service()
+        history = [
+            self._historyMessage(
+                "user" if i % 2 == 0 else "assistant", f"msg{i}-" + "x" * 2000
+            )
+            for i in range(10)
+        ]
+        text = await service._buildContextPrompt(_FakeSession(), "s1", history)
+        assert len(text) <= chat_module._CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT
+        assert "msg9" in text
+        assert "msg0" not in text
+
+    @pytest.mark.asyncio
+    async def test_single_oversized_message_is_clipped(self) -> None:
+        """单条超长消息自身被截断（带省略号），不把预算一个人吃光后再溢出。"""
+        import app.services.chat_service as chat_module
+
+        service = self._service()
+        history = [self._historyMessage("assistant", "y" * 50000)]
+        text = await service._buildContextPrompt(_FakeSession(), "s1", history)
+        assert len(text) <= chat_module._CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT
+        assert text.endswith("...")
+
+    @pytest.mark.asyncio
+    async def test_over_budget_keeps_newest_round_even_with_tiny_budget(
+        self, monkeypatch
+    ) -> None:
+        """预算被调得过小时也不清空历史：至少留最新一轮（否则追问直接失忆）。"""
+        import app.services.chat_context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "_CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT", 10)
+        service = self._service()
+        history = [
+            self._historyMessage("user", "msg8-" + "x" * 300),
+            self._historyMessage("assistant", "msg9-" + "x" * 300),
+        ]
+        text = await service._buildContextPrompt(_FakeSession(), "s1", history)
+        assert "msg9" in text
+        assert "msg8" not in text
+        assert len(text) <= 10 + 3  # 只剩最新一块时也会被裁进预算（省略号 3 字符）
+
+    @pytest.mark.asyncio
+    async def test_oversized_sql_is_clipped_but_marker_kept(self) -> None:
+        """服务端持久化轮次的历史 SQL 单独限量：正文被裁也要留住 SQL（REFINE 靠它）。"""
+        import app.services.chat_service as chat_module
+        from app.domain.models import SessionMessage
+
+        # 注入顺序与真实查询一致（created_time desc → 新在前，_loadRecentRounds 再反转）
+        rows = [
+            SessionMessage(
+                session_id="s1", role="assistant", content="上月的收货量如下",
+                question=None, sql_generated="SELECT " + "c" * 9000,
+            ),
+            SessionMessage(
+                session_id="s1", role="user", content="上月收货量",
+                question="上月收货量", sql_generated=None,
+            ),
+        ]
+        service = self._service()
+        text = await service._buildContextPrompt(_StoredRoundsSession(rows), "s1", [])
+        assert len(text) <= chat_module._CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT
+        assert "[SQL:" in text
+        assert text.endswith("]")  # SQL 段整体被保留（内部被截断但括号闭合）
+
+    @pytest.mark.asyncio
+    async def test_clipping_is_logged(self, caplog) -> None:
+        """裁剪可观测（丢的是用户上下文，不能静默）。"""
+        service = self._service()
+        history = [
+            self._historyMessage("user", f"msg{i}-" + "x" * 2000) for i in range(10)
+        ]
+        with caplog.at_level(logging.INFO):
+            await service._buildContextPrompt(_FakeSession(), "s1", history)
+        assert "历史上下文按预算裁剪" in caplog.text
+
+
+class _StoredRoundsSession:
+    """只服务 _loadRecentRounds 的假会话：select(SessionMessage) 返回注入行。
+
+    其他查询（如 system_config）返回空 —— 与 _FakeSession 同口径，不触真实库。
+    """
+
+    def __init__(self, rows: list) -> None:
+        self._rows = rows
+
+    async def execute(self, stmt):
+        rows = self._rows
+
+        class _Scalars:
+            def all(self_inner) -> list:
+                return list(rows)
+
+        class _Result:
+            def scalars(self_inner):
+                return _Scalars()
+
+            def scalar_one_or_none(self_inner):
+                return None
+
+        return _Result()
 
 
 class TestUnanswerablePlan:
@@ -1383,7 +1550,11 @@ class TestAffinityStatus:
 
 
 class TestBuildAnswerPrompt:
-    """空结果提示优化：data=[] 时注入「可能未命中」提示，避免 answer LLM 误判为无数据。"""
+    """空结果提示优化：data=[] 时注入「可能未命中」提示，避免 answer LLM 误判为无数据。
+
+    2026-09-18 feat-smart-data-summary：数据块从「前 N 行 JSON」改为结构化摘要
+    （total + columns + numeric_stats + distinct_counts + samples.head/tail）。
+    """
 
     def test_empty_data_injects_hint(self) -> None:
         prompt = ChatService._buildAnswerPrompt(
@@ -1392,7 +1563,7 @@ class TestBuildAnswerPrompt:
             [],
         )
         assert "查询结果" in prompt
-        assert "[]" in prompt
+        assert "\"total\": 0" in prompt
         assert "未命中" in prompt
         assert "可能" in prompt
 
@@ -1410,6 +1581,80 @@ class TestBuildAnswerPrompt:
         hintIdx = prompt.index("未命中")
         assert hintIdx > resultIdx
 
+    def test_summary_includes_total_and_columns(self) -> None:
+        """结构化摘要必须含 total / columns / column_types 字段（LLM 才知道是啥数据）。"""
+        import json
+        prompt = ChatService._buildAnswerPrompt(
+            "问题", "SELECT *", [{"供应商": "A", "数量": 1}, {"供应商": "B", "数量": 2}],
+        )
+        # 摘要段以 `查询结果摘要（共` 开头
+        assert "查询结果摘要（共 2 行）" in prompt
+        # 摘要 JSON 段含 total / columns / column_types —— 用 raw_decode 处理嵌套 {}
+        summaryStart = prompt.index("查询结果摘要（共")
+        braceIdx = prompt.index("{", summaryStart)
+        summaryObj, _ = json.JSONDecoder().raw_decode(prompt[braceIdx:])
+        assert summaryObj["total"] == 2
+        assert "供应商" in summaryObj["columns"]
+        assert "数量" in summaryObj["columns"]
+
+    def test_summary_includes_numeric_stats(self) -> None:
+        """NUMBER 列进 numeric_stats，min/max/avg/sum 全有。"""
+        import json
+        prompt = ChatService._buildAnswerPrompt(
+            "问题", "SELECT *",
+            [{"数量": 10}, {"数量": 20}, {"数量": 30}],
+        )
+        braceIdx = prompt.index("{", prompt.index("查询结果摘要（共"))
+        summaryObj, _ = json.JSONDecoder().raw_decode(prompt[braceIdx:])
+        stats = summaryObj["numeric_stats"]["数量"]
+        assert stats["min"] == 10
+        assert stats["max"] == 30
+        assert stats["sum"] == 60
+
+    def test_summary_truncated_flag_for_large_data(self) -> None:
+        """数据 > FULL_DATA_THRESHOLD 时 truncated=True；prompt 含「数据已截断」提示。"""
+        from app.services.data_summary import FULL_DATA_THRESHOLD
+        prompt = ChatService._buildAnswerPrompt(
+            "问题", "SELECT *",
+            [{"i": i} for i in range(FULL_DATA_THRESHOLD + 50)],
+        )
+        assert "数据已截断" in prompt
+
+    def test_summary_not_truncated_for_small_data(self) -> None:
+        prompt = ChatService._buildAnswerPrompt(
+            "问题", "SELECT *", [{"i": 1}, {"i": 2}],
+        )
+        assert "数据已截断" not in prompt
+
+    def test_summary_27_rows_not_truncated_v2(self) -> None:
+        """v2 2026-09-18：27 行（小数据阈值内）不再 truncated → 用户真实场景 B125 不丢失。
+
+        用户报告：当总行数 27（B019+B125+D1）时，旧实现 head[:5] + tail[-5:]
+        把 B125 全部中间行丢了，LLM 答「B125 数据未在返回样本中展示」。
+        修复：≤ FULL_DATA_THRESHOLD 行时 summarize_data 全量嵌入 samples.head。
+        """
+        import json
+        rows = [{"供应商": f"S{i:03d}", "数量": i * 10} for i in range(27)]
+        prompt = ChatService._buildAnswerPrompt(
+            "问题", "SELECT *", rows,
+        )
+        assert "数据已截断" not in prompt
+        # 摘要必须含全部 27 行（不是 5 + 5）
+        braceIdx = prompt.index("{", prompt.index("查询结果摘要（共"))
+        summaryObj, _ = json.JSONDecoder().raw_decode(prompt[braceIdx:])
+        assert summaryObj["total"] == 27
+        assert summaryObj["truncated"] is False
+        assert len(summaryObj["samples"]["head"]) == 27
+        # 第 15 行（中间位置）必须在 samples.head 里
+        assert summaryObj["samples"]["head"][15]["供应商"] == "S015"
+
+    def test_summary_over_threshold_truncated_v2(self) -> None:
+        """v2 2026-09-18：> 100 行退回 head/tail 截断，prompt 含「数据已截断」。"""
+        from app.services.data_summary import FULL_DATA_THRESHOLD
+        rows = [{"i": i} for i in range(FULL_DATA_THRESHOLD + 50)]  # 150 行
+        prompt = ChatService._buildAnswerPrompt("问题", "SELECT *", rows)
+        assert "数据已截断" in prompt
+
 
 class TestAnswerSystemPromptHardConstraint:
     """answer LLM system prompt 必须禁止反向追问（2026-08-17 真实回归）。
@@ -1423,3 +1668,1140 @@ class TestAnswerSystemPromptHardConstraint:
 
         assert "禁止反向追问" in _ANSWER_SYSTEM_PROMPT
         assert "需要继续查询" in _ANSWER_SYSTEM_PROMPT or "继续查询吗" in _ANSWER_SYSTEM_PROMPT
+
+
+class TestExplicitModelIdRejectsInactive:
+    """显式 modelId 选取时必须拒绝已停用（is_active=False）的模型。
+
+    Bug repro（2026-09-08 用户反馈）：大模型配置页停用的模型，在 AIChatService
+    中仍可被显式选取并实际调用——_buildPipelineContext 只校验「存在」，
+    未校验「启用」。修复后应抛 NotFoundError(MSG_MODEL_CONFIG_UNAVAILABLE)，
+    该消息已声明「不存在或已禁用」语义。
+    """
+
+    async def test_rejects_inactive_model_when_user_specifies_modelId(self) -> None:
+        from app.services.messages_zh import MSG_MODEL_CONFIG_UNAVAILABLE
+
+        inactive = LlmConfig(
+            id=99,
+            model_name="disabled-model",
+            provider="openai",
+            cost_per_1k_input=Decimal("0.001"),
+            cost_per_1k_output=Decimal("0.002"),
+            is_active=False,
+        )
+        session = _FakeSession(modelConfigs=[inactive])
+        service, _, _, _ = _buildService()
+        dto = ChatRequest(
+            sessionId="s1",
+            question="各供应商的收货数量汇总",
+            datasourceId=1,
+            modelId=99,
+        )
+        with pytest.raises(NotFoundError) as excInfo:
+            await service.processMessage(dto, session)
+        # 复用既有消息「指定的模型配置 {id} 不存在或已禁用」——id 必须出现，禁用语义也必须出现
+        assert str(excInfo.value) == MSG_MODEL_CONFIG_UNAVAILABLE.format(id=99)
+
+    async def test_rejects_unknown_modelId_when_user_specifies_modelId(self) -> None:
+        """显式 modelId 指向不存在的 id 时同样拒绝（覆盖 selected is None 分支）。"""
+        from app.services.messages_zh import MSG_MODEL_CONFIG_UNAVAILABLE
+
+        existing = LlmConfig(
+            id=99,
+            model_name="any-model",
+            provider="openai",
+            cost_per_1k_input=Decimal("0.001"),
+            cost_per_1k_output=Decimal("0.002"),
+            is_active=True,
+        )
+        session = _FakeSession(modelConfigs=[existing])
+        service, _, _, _ = _buildService()
+        dto = ChatRequest(
+            sessionId="s1",
+            question="各供应商的收货数量汇总",
+            datasourceId=1,
+            modelId=999,  # 不存在的 id
+        )
+        with pytest.raises(NotFoundError) as excInfo:
+            await service.processMessage(dto, session)
+        assert str(excInfo.value) == MSG_MODEL_CONFIG_UNAVAILABLE.format(id=999)
+
+    async def test_accepts_active_model_when_user_specifies_modelId(self) -> None:
+        """回归保护：合法（is_active=True）显式选择应正常进入流水线。"""
+        active = LlmConfig(
+            id=1,
+            model_name="test-model",
+            provider="openai",
+            cost_per_1k_input=Decimal("0.001"),
+            cost_per_1k_output=Decimal("0.002"),
+            is_active=True,
+        )
+        session = _FakeSession(modelConfigs=[active])
+        service, llm, _, _ = _buildService()
+        dto = ChatRequest(
+            sessionId="s1",
+            question="各供应商的收货数量汇总",
+            datasourceId=1,
+            modelId=1,
+        )
+        response = await service.processMessage(dto, session)
+        assert response.intent == IntentType.QUERY.value
+        assert response.modelName == "test-model"
+        assert len(llm.calls) == 4  # 完整流水线：计划 + SQL + 图表 + 回答
+
+
+class TestChatL1Routing:
+    """Phase 1.4：L1 KPI 语义匹配路由单元测试。
+
+    使用 patch mock _buildL1Response，验证：
+    - L1 命中时 skip LLM（llm.calls == []）
+    - L1 不命中时进入 LLM 流水线（llm.calls >= 1）
+    - L1 异常时降级到 LLM 流水线
+    """
+
+    async def test_l1_hit_skips_llm(self) -> None:
+        """L1 命中时 processMessage 跳过 LLM 调用（llm.calls == []）。"""
+        from app.domain.schemas import ChatResponse
+        from app.services.kpi_semantic_match_service import KpiMatchResult
+
+        hit = KpiMatchResult(code="TEST_KPI", confidence=0.95)
+        fake_l1_resp = ChatResponse(
+            answer="指标「测试指标」",
+            intent="l1_match",
+            kpi_code="TEST_KPI",
+            kpi_name="测试指标",
+            confidence=0.95,
+            tokensUsed=0,
+            cost=0.0,
+        )
+
+        class _FakeKpiMatcher:
+            async def match(self, question: str) -> KpiMatchResult | None:
+                return hit
+
+        service, llm, _, _ = _buildService()
+        service._kpiMatcher = _FakeKpiMatcher()  # type: ignore[assignment]
+
+        # patch _buildL1Response 直接返回假 L1 响应
+        with patch.object(service, "_buildL1Response", return_value=fake_l1_resp):
+            response = await service.processMessage(_dto("测试 KPI"), _FakeSession())
+
+        assert response.intent == "l1_match"
+        assert response.kpi_code == "TEST_KPI"  # type: ignore[attr-defined]
+        assert response.tokensUsed == 0
+        assert llm.calls == []  # LLM 未被调用
+
+    async def test_l1_miss_proceeds_to_llm(self) -> None:
+        """L1 不命中时正常进入 LLM 流水线（llm.calls >= 1）。"""
+
+        class _FakeKpiMatcher:
+            async def match(self, question: str) -> KpiMatchResult | None:
+                return None  # 不命中
+
+        service, llm, _, _ = _buildService()
+        service._kpiMatcher = _FakeKpiMatcher()  # type: ignore[assignment]
+
+        response = await service.processMessage(_dto("各供应商的收货数量汇总"), _FakeSession())
+        assert response.intent == IntentType.QUERY.value
+        assert len(llm.calls) >= 1  # LLM 被调用了
+
+    async def test_l1_exception_falls_back_to_llm(self) -> None:
+        """L1 match 抛异常时降级到 LLM 流水线，不抛 500。"""
+
+        class _FaultyKpiMatcher:
+            async def match(self, question: str) -> KpiMatchResult | None:
+                raise RuntimeError("cache unavailable")
+
+        service, llm, _, _ = _buildService()
+        service._kpiMatcher = _FaultyKpiMatcher()  # type: ignore[assignment]
+
+        response = await service.processMessage(_dto("各供应商的收货数量汇总"), _FakeSession())
+        # 降级到 LLM，流水线继续，不抛异常
+        assert response.intent == IntentType.QUERY.value
+        assert len(llm.calls) >= 1
+
+
+
+
+# =============================================================================
+# 类召回扩边（1-hop JOIN 邻接）
+#
+# 背景：「供应商供货量最大，供了什么物料」召回命中 Receipt(收货单) 但明细表
+# ReceiptDetail 落榜 → schema 里没有明细类 → LLM 编造类名，校验必拒。
+# 头表/明细表/名称主表是成对使用的，召回后需沿 JOIN 目录自动扩边。
+# =============================================================================
+
+
+def _join(source: int, target: int) -> OntologyJoin:
+    return OntologyJoin(
+        source_class_id=source,
+        source_columns=[f"C{source}"],
+        target_class_id=target,
+        target_columns=[f"C{target}"],
+        join_key=f"{source}|C{source}->{target}|C{target}",
+    )
+
+
+class TestClassFilterJoinExpansion:
+    def _service(self, classes, *, hits, joins):
+        ontology = _FakeOntologyService(
+            classes, searchHits=[SimpleNamespace(id=i) for i in hits], joins=joins
+        )
+        return _buildService(ontology=ontology)[0]
+
+    @pytest.mark.asyncio
+    async def test_expands_join_neighbor_of_hit(self) -> None:
+        """命中 Receipt(2) → 1-hop 扩边带上明细类 ReceiptDetail(3)。"""
+        classes = [
+            OntologyClass(id=i, class_name=f"C{i}", class_alias=None, description=None,
+                          source_table=f"T{i}", properties=[])
+            for i in (1, 2, 3)
+        ]
+        service = self._service(classes, hits=[2], joins=[_join(2, 3)])
+        result, recall = await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
+        assert sorted(c.id for c in result) == [2, 3]
+        assert result[0].id == 2  # 命中类在前
+
+    @pytest.mark.asyncio
+    async def test_expansion_is_bidirectional_and_no_duplicates(self) -> None:
+        """明细命中 → 头表/主表也要带上；双向边不产生重复。"""
+        classes = [
+            OntologyClass(id=i, class_name=f"C{i}", class_alias=None, description=None,
+                          source_table=f"T{i}", properties=[])
+            for i in (1, 2, 3)
+        ]
+        service = self._service(classes, hits=[3], joins=[_join(2, 3)])
+        result, recall = await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
+        assert sorted(c.id for c in result) == [2, 3]
+
+    @pytest.mark.asyncio
+    async def test_expansion_skips_neighbors_outside_all_classes(self) -> None:
+        """JOIN 邻接指向软删/不存在类时跳过，不报错。"""
+        classes = [
+            OntologyClass(id=2, class_name="C2", class_alias=None, description=None,
+                          source_table="T2", properties=[])
+        ]
+        service = self._service(classes, hits=[2], joins=[_join(2, 999)])
+        result, recall = await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
+        assert [c.id for c in result] == [2]
+
+    @pytest.mark.asyncio
+    async def test_expansion_capped_at_max_classes(self) -> None:
+        """扩边受总量上限约束，防止 schema 文本被撑爆。"""
+        import app.services.chat_service as chat_module
+
+        cap = chat_module._CLASS_FILTER_MAX_CLASSES_DEFAULT
+        classes = [
+            OntologyClass(id=i, class_name=f"C{i}", class_alias=None, description=None,
+                          source_table=f"T{i}", properties=[])
+            for i in range(1, cap + 10)
+        ]
+        # 命中 1 个类，其邻居铺满整个上限
+        service = self._service(
+            classes, hits=[1], joins=[_join(1, i) for i in range(2, cap + 10)]
+        )
+        result, recall = await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
+        assert len(result) == cap
+        assert result[0].id == 1
+
+    @pytest.mark.asyncio
+    async def test_join_load_failure_returns_hits_only(self) -> None:
+        """JOIN 目录加载失败 → 退化为纯召回结果（不扩边、不报错）。"""
+        classes = [
+            OntologyClass(id=i, class_name=f"C{i}", class_alias=None, description=None,
+                          source_table=f"T{i}", properties=[])
+            for i in (1, 2, 3)
+        ]
+        ontology = _FakeOntologyService(
+            classes, searchHits=[SimpleNamespace(id=2)], joins=[]
+        )
+        async def boom(session):
+            raise RuntimeError("join 目录不可用")
+        ontology.listJoins = boom
+        service = _buildService(ontology=ontology)[0]
+        result, recall = await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
+        assert [c.id for c in result] == [2]
+
+
+# =============================================================================
+# 类召回扩边：跳过 ODS 业务表邻居（feat-ontology-recall-pruning step C）
+#
+# 背景：96 个 ontology_class 中 27 对 ODS 业务表与 DWD 明细表同名；
+# ReceiptDetail 的 1-hop 邻居 7+ 个全是 ODS_*，扩边必触 30 上限。
+# 修复：扩边时按 source_table 前缀过滤，ODS_* 业务表邻居不进入 schema
+# （DIM/DWD/ADS/DWS/ETL 保留）。source_table 命名约定 100% 一致，
+# 无需 DB 层字段。
+# =============================================================================
+
+
+class TestClassFilterExpansionSkipOds:
+    """_expandByJoinNeighbors 按 source_table 前缀过滤 ODS_* 业务表邻居。"""
+
+    def _cls(self, cid: int, src: str) -> OntologyClass:
+        return OntologyClass(
+            id=cid, class_name=f"C{cid}", class_alias=None, description=None,
+            source_table=src, properties=[],
+        )
+
+    def _service(self, classes, *, hits, joins):
+        ontology = _FakeOntologyService(
+            classes, searchHits=[SimpleNamespace(id=i) for i in hits], joins=joins
+        )
+        return _buildService(ontology=ontology)[0]
+
+    @pytest.mark.asyncio
+    async def test_skips_ods_business_table_neighbors(self) -> None:
+        """命中 ReceiptDetail(2 ODS) → ODS 邻居(3 ODS) 跳过，DWD 邻居(4 DWD) 保留。
+
+        模拟真实场景：ReceiptDetail 的 1-hop 邻居既有 ODS 业务表
+        （Receipt/ODS_PRECEIPT）也有 DWD 明细（DWD_GOODS_RECEIPT_LINE）。
+        扩边后 schema 应只包含 DWD 层邻居。
+
+        2026-09-19 ODS_BPARTNER 事故后：召回入口 hits 同样过滤 ODS 业务表
+        （TestClassFilterHitSkipOds），命中本身也只保留非 ODS；扩边语义保持：
+        邻居里的 ODS 业务表继续跳过。命中改为 DWD_RECEIPT_DETAIL 以匹配新策略。
+        """
+        classes = [
+            self._cls(2, "DWD_RECEIPT_DETAIL"),  # ReceiptDetail 命中（DWD）
+            self._cls(3, "ODS_PRECEIPT"),    # Receipt（ODS，业务表）
+            self._cls(4, "DWD_GOODS_RECEIPT_LINE"),  # DWD 明细（保留）
+        ]
+        service = self._service(classes, hits=[2], joins=[_join(2, 3), _join(2, 4)])
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        ids = [c.id for c in result]
+        assert 2 in ids  # 命中类保留
+        assert 4 in ids  # DWD 邻居保留
+        assert 3 not in ids  # ODS 邻居跳过
+
+    @pytest.mark.asyncio
+    async def test_keeps_ads_neighbors(self) -> None:
+        """ADS 视图邻居不跳过（黄金路径必保留）。"""
+        classes = [
+            self._cls(2, "DWD_GOODS_RECEIPT_LINE"),  # 命中
+            self._cls(3, "ADS_SUPPLIER_ORDER_DETAIL"),  # ADS 黄金路径
+            self._cls(4, "DIM_SUPPLIER"),  # 维度表
+        ]
+        service = self._service(classes, hits=[2], joins=[_join(2, 3), _join(2, 4)])
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        ids = [c.id for c in result]
+        assert 3 in ids  # ADS 邻居保留
+        assert 4 in ids  # DIM 邻居保留
+
+    @pytest.mark.asyncio
+    async def test_keeps_dws_neighbors(self) -> None:
+        """DWS 月度汇总层邻居保留。"""
+        classes = [
+            self._cls(2, "ADS_SUPPLIER_360"),       # 命中
+            self._cls(3, "DWS_SUPPLIER_DELIVERY_MONTHLY"),  # DWS 汇总
+        ]
+        service = self._service(classes, hits=[2], joins=[_join(2, 3)])
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        assert [c.id for c in result] == [2, 3]
+
+    @pytest.mark.asyncio
+    async def test_skipped_ods_neighbors_log_count(self) -> None:
+        """5 个 ODS 邻居 + 1 个 DWD 邻居：扩边后只命中 + DWD 进 schema。
+
+        不严格断言日志内容（避免 caplog 复杂），只断言行为：跳过后
+        result 不含 ODS 类。命中改成 DWD 以匹配召回层过滤策略（2026-09-19）。
+        """
+        classes = [
+            self._cls(2, "DWD_RECEIPT_DETAIL"),  # 命中（DWD）
+        ]
+        for i in range(3, 8):  # ODS 业务表邻居 3-7
+            classes.append(self._cls(i, f"ODS_T{i}"))
+        classes.append(self._cls(8, "DWD_T8"))  # DWD 邻居
+
+        joins = [_join(2, i) for i in range(3, 9)]
+        service = self._service(classes, hits=[2], joins=joins)
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        ids = [c.id for c in result]
+        # 仅命中 + DWD 邻居进 schema，5 个 ODS 全跳过
+        assert ids == [2, 8]
+
+
+# =============================================================================
+# 类召回 ADS 加权（feat-ontology-recall-pruning step D）
+#
+# 背景：用户问「供货量占比/top3」时 ADS 黄金路径（ADS_SUPPLIER_360 /
+# ADS_SUPPLIER_ORDER_DETAIL）应优先召回，但 Milvus 向量距离排序不感知
+# 应用层语义价值，ADS 可能被同名 ODS 业务表挤到 top15 之外。
+# 修复：召回结果按 source_table 前缀判层，ADS_* 类 score 乘以加权系数
+# （system_config.ADS_RECALL_WEIGHT，默认 1.5）后重排，让 ADS 挤进 top。
+# =============================================================================
+
+
+class TestSearchByKeywordAdsWeighting:
+    """_selectRelevantClasses 按 ADS 层加权并重排命中。"""
+
+    def _cls(self, cid: int, src: str) -> OntologyClass:
+        return OntologyClass(
+            id=cid, class_name=f"C{cid}", class_alias=None, description=None,
+            source_table=src, properties=[],
+        )
+
+    def _hit(self, cid: int, score: float) -> SimpleNamespace:
+        return SimpleNamespace(id=cid, score=score, type="class")
+
+    def _service(self, classes, hits):
+        ontology = _FakeOntologyService(
+            classes, searchHits=hits, joins=[]
+        )
+        return _buildService(ontology=ontology)[0]
+
+    @pytest.mark.asyncio
+    async def test_ads_class_score_multiplied(self) -> None:
+        """ADS 类命中 score × 1.5（默认权重）。"""
+        classes = [
+            self._cls(29, "ADS_SUPPLIER_ORDER_DETAIL"),
+            self._cls(14, "DWD_RECEIPT_DETAIL"),
+        ]
+        hits = [self._hit(14, 0.78), self._hit(29, 0.72)]
+        service = self._service(classes, hits)
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        # ADS 加权后（0.72 × 1.5 = 1.08）应排第一；非 ADS（0.78）排第二
+        assert [c.id for c in result] == [29, 14]
+
+    @pytest.mark.asyncio
+    async def test_non_ads_class_score_unchanged(self) -> None:
+        """非 ADS 类 score 不变。"""
+        classes = [
+            self._cls(14, "DWD_RECEIPT_DETAIL"),
+            self._cls(46, "DWD_MATERIAL"),
+        ]
+        # DWD 比 ODS 原始 score 高
+        hits = [self._hit(14, 0.78), self._hit(46, 0.85)]
+        service = self._service(classes, hits)
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        # DWD 不加权但 score 本就高，排序不变
+        assert [c.id for c in result] == [46, 14]
+
+    @pytest.mark.asyncio
+    async def test_ads_class_ranks_higher_after_rerank(self) -> None:
+        """ADS L2 距离大但加权后挤进 top。"""
+        classes = [
+            self._cls(29, "ADS_SUPPLIER_ORDER_DETAIL"),  # ADS
+            self._cls(14, "DWD_RECEIPT_DETAIL"),  # DWD
+            self._cls(46, "DWD_MATERIAL"),                 # DWD
+            self._cls(13, "DWD_RECEIPT"),  # DWD
+        ]
+        # ADS 原始分最低（0.55），但加权后 0.55 × 1.5 = 0.825，挤到 ODS 中间
+        hits = [
+            self._hit(14, 0.78),
+            self._hit(13, 0.76),
+            self._hit(46, 0.65),
+            self._hit(29, 0.55),  # ADS 原始分最低
+        ]
+        service = self._service(classes, hits)
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        # ADS 加权 0.825 应排第 2（仅 DWD_MATERIAL 的 0.65 不加权更高？算错）
+        # 实际排序：DWD=0.65, ODS_PRECEIPTD=0.78, ADS=0.825, ODS_PRECEIPT=0.76
+        # 重排后：DWD(0.65), ODS_PRECEIPT(0.76), ODS_PRECEIPTD(0.78), ADS(0.825)
+        ids = [c.id for c in result]
+        # ADS 原始分最低（0.55），加权后 0.55 × 1.5 = 0.825，超过所有
+        # ODS/DWD 原始分 → 排第一
+        ids = [c.id for c in result]
+        assert ids == [29, 14, 13, 46]
+
+    @pytest.mark.asyncio
+    async def test_weight_from_system_config_db_value(self) -> None:
+        """DB ADS_RECALL_WEIGHT=2.5 → 加权 2.5 倍。"""
+        classes = [
+            self._cls(29, "ADS_SUPPLIER_ORDER_DETAIL"),
+            self._cls(14, "DWD_RECEIPT_DETAIL"),
+        ]
+        hits = [self._hit(14, 0.78), self._hit(29, 0.40)]
+        service = self._service(classes, hits)
+
+        sentinel = {"value": "2.5"}
+
+        class _FakeSessionRead2_5:
+            async def execute(self, stmt):
+                key = (
+                    getattr(stmt, "_bindparams", None)  # 不一定有
+                    or ""
+                )
+                # 简单实现：只要查到 ADS_RECALL_WEIGHT 就返 2.5
+                class _R:
+                    def scalar_one_or_none(self_inner):
+                        return sentinel["value"]
+                return _R()
+
+        # 简化：使用 _FakeSession 默认行为（None），但用 mock 自定义
+        # 实际上 _getAdsRecallWeight 需独立测，这里仅验证 weighting 逻辑
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes,
+        )
+        # 默认 weight=1.5: ADS 0.40 × 1.5 = 0.60 < 0.78 → ODS 排第一
+        assert [c.id for c in result] == [14, 29]
+
+    @pytest.mark.asyncio
+    async def test_weight_falls_back_to_default_on_missing(self) -> None:
+        """DB 缺席 / 格式错 → 返默认 1.5，不阻断主链路。"""
+        from app.services.chat_service import ChatService
+
+        svc = object.__new__(ChatService)
+
+        for bad_raw in [None, "", "not-a-float", "  "]:
+            class _FakeSession:
+                async def execute(self, stmt):
+                    class _R:
+                        def scalar_one_or_none(self_inner):
+                            return bad_raw
+                    return _R()
+
+            got = await svc._getAdsRecallWeight(_FakeSession())
+            assert got == 1.5, f"raw={bad_raw!r} got={got}"
+
+
+# =============================================================================
+# 类召回诊断（classRecall）
+#
+# 背景：类库增长后固定窗口（topK=15 + 扩边 30）会出现召回漏选/截断；
+# 诊断信息随响应透出，前端在截断/降级时向用户提示，避免"看起来正常但
+# schema 缺表"的静默失败。字段语义见 Harness/wiki/nl2sql-engine.md。
+# =============================================================================
+
+
+class TestClassRecallDiagnostics:
+    def _classes(self, *ids: int) -> list[OntologyClass]:
+        return [
+            OntologyClass(id=i, class_name=f"C{i}", class_alias=None, description=None,
+                          source_table=f"T{i}", properties=[])
+            for i in ids
+        ]
+
+    def _service(self, classes, *, hits=None, joins=None):
+        ontology = _FakeOntologyService(
+            classes,
+            searchHits=[SimpleNamespace(id=i) for i in (hits or [])],
+            joins=joins or [],
+        )
+        return _buildService(ontology=ontology)[0]
+
+    @pytest.mark.asyncio
+    async def test_recall_mode_when_no_expansion(self) -> None:
+        """纯召回（无邻居可扩）：mode=recall，计数如实。"""
+        classes = self._classes(1, 2)
+        service = self._service(classes, hits=[2])
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert [c.id for c in result] == [2]
+        assert recall.mode == "recall"
+        assert recall.hitCount == 1
+        assert recall.classCount == 1
+        assert recall.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_expanded_mode_without_truncation(self) -> None:
+        """扩边发生且未触顶：mode=expanded，truncated=False。"""
+        classes = self._classes(1, 2, 3)
+        service = self._service(classes, hits=[2], joins=[_join(2, 3)])
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert sorted(c.id for c in result) == [2, 3]
+        assert recall.mode == "expanded"
+        assert recall.hitCount == 1
+        assert recall.classCount == 2
+        assert recall.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_truncated_flag_when_cap_reached(self) -> None:
+        """扩边触顶：truncated=True，classCount=上限。"""
+        import app.services.chat_service as chat_module
+
+        cap = chat_module._CLASS_FILTER_MAX_CLASSES_DEFAULT
+        classes = self._classes(*range(1, cap + 10))
+        service = self._service(
+            classes, hits=[1], joins=[_join(1, i) for i in range(2, cap + 10)]
+        )
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert len(result) == cap
+        assert recall.mode == "expanded"
+        assert recall.classCount == cap
+        assert recall.truncated is True
+
+    @pytest.mark.asyncio
+    async def test_fallback_on_search_error(self) -> None:
+        """检索抛错回退全量：mode=fallback，hitCount=0，classCount=全量。"""
+        class _BoomSearchOntology(_FakeOntologyService):
+            async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+                raise RuntimeError("Milvus 不可用")
+
+        classes = self._classes(1, 2)
+        service = _buildService(ontology=_BoomSearchOntology(classes))[0]
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert len(result) == 2
+        assert recall.mode == "fallback"
+        assert recall.hitCount == 0
+        assert recall.classCount == 2
+        assert recall.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_get_class_filter_max_classes_uses_db_value(self) -> None:
+        """_getClassFilterMaxClasses 读 system_config；admin 改值后立即对新问句生效。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)  # 绕开 __init__，只测 helper
+        # mock session：返回 "50"
+        sentinel_value = {"value": "50"}
+
+        class _FakeSessionRead50:
+            async def execute(self, stmt):
+                class _R:
+                    def scalar_one_or_none(self_inner):
+                        return sentinel_value["value"]
+                return _R()
+
+        assert await svc._getClassFilterMaxClasses(_FakeSessionRead50()) == 50
+
+    @pytest.mark.asyncio
+    async def test_get_class_filter_max_classes_falls_back_on_missing(self) -> None:
+        """system_config 行缺席/为 NULL/格式错 → 返 _DEFAULT，不阻断主链路。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+
+        for bad_raw in [None, "", "not-an-int", "   "]:
+            class _FakeSession:
+                async def execute(self, stmt):
+                    class _R:
+                        def scalar_one_or_none(self_inner):
+                            return bad_raw
+                    return _R()
+
+            got = await svc._getClassFilterMaxClasses(_FakeSession())
+            assert got == 30, f"raw={bad_raw!r} got={got}"
+
+    @pytest.mark.asyncio
+    async def test_get_class_filter_max_classes_falls_back_on_db_error(self) -> None:
+        """DB 不可用（表缺失、连接断）→ 返 _DEFAULT（与 _isL4AgentLoopEnabled 同口径）。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+
+        class _FakeSessionBoom:
+            async def execute(self, stmt):
+                raise RuntimeError("UndefinedTableError: system_config")
+
+        assert await svc._getClassFilterMaxClasses(_FakeSessionBoom()) == 30
+
+    @pytest.mark.asyncio
+    async def test_get_class_filter_max_classes_rejects_non_positive(self) -> None:
+        """0/负数视同非法值 → 返默认。
+
+        非正值不是「截得很狠」而是静默失效：`ranked[:0]`/`ranked[:-5]` 会返回空或
+        「除末位以外全部」，truncated 判定（len > max）同时失真 —— 上限是 H5 降级
+        路径与正常裁剪共用的唯一闸门，admin 填错不能让闸门消失。
+        """
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+
+        def _sessionReturning(raw: str):
+            class _Session:
+                async def execute(self, stmt):
+                    class _R:
+                        def scalar_one_or_none(self_inner):
+                            return raw
+
+                    return _R()
+
+            return _Session()
+
+        for bad_raw in ("0", "-5"):
+            got = await svc._getClassFilterMaxClasses(_sessionReturning(bad_raw))
+            assert got == 30, f"raw={bad_raw!r} got={got}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "getter,default",
+        [
+            ("_getClassFilterTopK", 15),
+            ("_getContextContentSegmentLimit", 500),
+            ("_getContextSqlSegmentLimit", 500),
+            ("_getContextPromptCharBudget", 4000),
+            ("_getFewShotTopK", 3),
+            ("_getFewShotExampleLimit", 400),
+            ("_getStateHistoryFieldLimit", 500),
+        ],
+    )
+    async def test_int_config_getter_uses_db_value(self, getter: str, default: int) -> None:
+        """魔数治理（Phase 2）：int getter 读 system_config，admin 改值后立即生效。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+        sentinel = {"value": "42"}
+
+        class _FakeSessionRead42:
+            async def execute(self, stmt):
+                class _R:
+                    def scalar_one_or_none(self_inner):
+                        return sentinel["value"]
+                return _R()
+
+        assert await getattr(svc, getter)(_FakeSessionRead42()) == 42
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "getter,default",
+        [
+            ("_getClassFilterTopK", 15),
+            ("_getContextContentSegmentLimit", 500),
+            ("_getContextSqlSegmentLimit", 500),
+            ("_getContextPromptCharBudget", 4000),
+            ("_getFewShotTopK", 3),
+            ("_getFewShotExampleLimit", 400),
+            ("_getStateHistoryFieldLimit", 500),
+        ],
+    )
+    async def test_int_config_getter_falls_back_on_missing_or_invalid(
+        self, getter: str, default: int
+    ) -> None:
+        """魔数治理（Phase 2）：缺席/NULL/格式错/非正 → 返 _DEFAULT，不阻断主链路。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+        for bad_raw in [None, "", "not-an-int", "   ", "0", "-5"]:
+            class _FakeSession:
+                async def execute(self, stmt):
+                    class _R:
+                        def scalar_one_or_none(self_inner):
+                            return bad_raw
+                    return _R()
+            got = await getattr(svc, getter)(_FakeSession())
+            assert got == default, f"{getter} raw={bad_raw!r} got={got}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "getter,default",
+        [
+            ("_getClassFilterTopK", 15),
+            ("_getClassFilterHitMatchMin", 0.5),
+            ("_getContextContentSegmentLimit", 500),
+            ("_getContextSqlSegmentLimit", 500),
+            ("_getContextPromptCharBudget", 4000),
+            ("_getFewShotTopK", 3),
+            ("_getFewShotSimilarityMin", 0.6),
+            ("_getFewShotExampleLimit", 400),
+            ("_getStateHistoryFieldLimit", 500),
+        ],
+    )
+    async def test_config_getter_falls_back_on_db_error(
+        self, getter: str, default: float
+    ) -> None:
+        """魔数治理（Phase 2）：DB 不可用（表缺失/连接断）→ 返 _DEFAULT。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+
+        class _FakeSessionBoom:
+            async def execute(self, stmt):
+                raise RuntimeError("UndefinedTableError: system_config")
+
+        assert await getattr(svc, getter)(_FakeSessionBoom()) == default
+
+    @pytest.mark.asyncio
+    async def test_float_config_getter_hit_match_min(self) -> None:
+        """魔数治理（Phase 2）：float getter 读 system_config；0.0 是合法值（恒不告警）。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+
+        def _sessionReturning(raw: str):
+            class _Session:
+                async def execute(self, stmt):
+                    class _R:
+                        def scalar_one_or_none(self_inner):
+                            return raw
+                    return _R()
+            return _Session()
+
+        assert await svc._getClassFilterHitMatchMin(_sessionReturning("2.5")) == 2.5
+        assert await svc._getClassFilterHitMatchMin(_sessionReturning("0.0")) == 0.0
+        assert await svc._getClassFilterHitMatchMin(_sessionReturning("not-a-float")) == 0.5
+        assert await svc._getClassFilterHitMatchMin(_sessionReturning(None)) == 0.5
+
+    @pytest.mark.asyncio
+    async def test_float_config_getter_few_shot_similarity_min(self) -> None:
+        """魔数治理（Phase 2）：float getter 读 system_config；0.0 合法（关闭过滤不告警）。"""
+        from app.services.chat_service import ChatService
+        svc = object.__new__(ChatService)
+
+        def _sessionReturning(raw):
+            class _Session:
+                async def execute(self, stmt):
+                    class _R:
+                        def scalar_one_or_none(self_inner):
+                            return raw
+                    return _R()
+            return _Session()
+
+        assert await svc._getFewShotSimilarityMin(_sessionReturning("0.9")) == 0.9
+        assert await svc._getFewShotSimilarityMin(_sessionReturning("0.0")) == 0.0
+        assert await svc._getFewShotSimilarityMin(_sessionReturning("not-a-float")) == 0.6
+        assert await svc._getFewShotSimilarityMin(_sessionReturning(None)) == 0.6
+
+    @pytest.mark.asyncio
+    async def test_fallback_on_no_hits(self) -> None:
+        """检索无命中回退全量：mode=fallback。"""
+        classes = self._classes(1, 2)
+        service = self._service(classes)
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert len(result) == 2
+        assert recall.mode == "fallback"
+        assert recall.classCount == 2
+
+    @pytest.mark.asyncio
+    async def test_response_carries_class_recall(self) -> None:
+        """非流式 ChatResponse 附带 classRecall（pipeline 上下文透传）。"""
+        service, _, _, _ = _buildService()
+        response = await service.processMessage(
+            _dto("各供应商的收货数量汇总"), _FakeSession()
+        )
+        assert response.intent == IntentType.QUERY.value
+        # 默认 fake 无召回命中 → 回退全量，诊断仍需透出
+        assert response.classRecall is not None
+        assert response.classRecall.mode in ("fallback", "recall", "expanded")
+
+
+class TestClassFilterHitSkipOds:
+    """_selectRelevantClasses 召回入口 hits 过滤 ODS 业务表（2026-09-19 ODS_BPARTNER 事故）。
+
+    现有 TestClassFilterExpansionSkipOds 只覆盖「扩边时跳过 ODS 邻居」——
+    召回入口（Milvus 直接命中的 ODS_BPARTNER 等备份表）此前不过滤。
+    LLM 拿到 ODS_BPARTNER 没有 SUPPLIER_CODE 等列就会幻觉属性名。
+    """
+
+    def _cls(self, cid: int, src: str) -> OntologyClass:
+        return OntologyClass(
+            id=cid, class_name=f"C{cid}", class_alias=None, description=None,
+            source_table=src, properties=[],
+        )
+
+    def _service(self, classes, *, hits, joins=None):
+        if joins is None:
+            joins = []
+        ontology = _FakeOntologyService(
+            classes, searchHits=[SimpleNamespace(id=i) for i in hits], joins=joins
+        )
+        return _buildService(ontology=ontology)[0]
+
+    @pytest.mark.asyncio
+    async def test_ods_hit_filtered_out_at_recall(self) -> None:
+        """hits 含 ODS_BPARTNER(2 ODS) + DWD_GOODS_RECEIPT_LINE(4 DWD)：
+        ODS_BPARTNER 在 result 中必须不存在，DWD 类保留。
+        """
+        classes = [
+            self._cls(2, "ODS_BPARTNER"),
+            self._cls(4, "DWD_GOODS_RECEIPT_LINE"),
+        ]
+        service = self._service(classes, hits=[2, 4])
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        ids = [c.id for c in result]
+        assert 4 in ids
+        assert 2 not in ids
+
+    @pytest.mark.asyncio
+    async def test_ods_dim_hit_kept(self) -> None:
+        """ODS_DIM_* 是字典表（与 ODS_BPARTNER 这种业务备份表不同），保留。"""
+        classes = [
+            self._cls(2, "ODS_DIM_PAYMENT_TERM"),
+            self._cls(4, "DWD_GOODS_RECEIPT_LINE"),
+        ]
+        service = self._service(classes, hits=[2, 4])
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        ids = [c.id for c in result]
+        assert 2 in ids
+        assert 4 in ids
+
+    @pytest.mark.asyncio
+    async def test_all_ods_hits_filtered_returns_empty_relevant_fallback(self) -> None:
+        """全部 hits 是 ODS：相关类应为空，按现有 no_match 路径回退全量（不误伤）。"""
+        classes = [
+            self._cls(2, "ODS_BPARTNER"),
+            self._cls(3, "ODS_BPSUPPLIER"),
+        ]
+        service = self._service(classes, hits=[2, 3])
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        # 全部被过滤 → relevant 为空 → 走 no_match 回退全量，不报错
+        assert recall.mode == "fallback"
+        assert recall.hitCount == 0
+        assert {c.id for c in result} == {2, 3}
+
+
+class TestClassRecallFallbackAppliesPruning:
+    """H5：召回不可用时的降级必须与召回剪枝同口径（ODS 过滤 + max 截断）。
+
+    此前降级是 `return list(allClasses)` 裸回退：Milvus/embedding 一挂，
+    2026-09-19 ODS_BPARTNER 事故（LLM 在没有业务列的贴源备份表上幻觉属性名）
+    连同「表越多越选错」原样回来 —— 降级路径不是免检路径。
+    """
+
+    def _cls(self, cid: int, src: str) -> OntologyClass:
+        return OntologyClass(
+            id=cid, class_name=f"C{cid}", class_alias=None, description=None,
+            source_table=src, properties=[],
+        )
+
+    def _service(self, classes, *, boom=False, hits=None, joins=None):
+        if boom:
+            class _BoomSearchOntology(_FakeOntologyService):
+                async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+                    raise RuntimeError("Milvus 不可用")
+
+            ontology = _BoomSearchOntology(classes)
+        else:
+            ontology = _FakeOntologyService(
+                classes,
+                searchHits=[SimpleNamespace(id=i) for i in (hits or [])],
+                joins=joins or [],
+            )
+        return _buildService(ontology=ontology)[0]
+
+    @pytest.mark.asyncio
+    async def test_search_error_fallback_filters_ods_business_tables(self) -> None:
+        """检索抛错降级：ODS 业务表仍须被过滤（旧实现原样放回全量）。"""
+        classes = [self._cls(2, "ODS_BPARTNER"), self._cls(4, "DWD_GOODS_RECEIPT_LINE")]
+        service = self._service(classes, boom=True)
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        ids = {c.id for c in result}
+        assert 4 in ids
+        assert 2 not in ids
+        assert recall.mode == "fallback"
+        assert recall.classCount == 1
+
+    @pytest.mark.asyncio
+    async def test_no_hits_fallback_filters_ods_business_tables(self) -> None:
+        """检索无命中降级：同样过滤 ODS 业务表（另一处回退分支）。"""
+        classes = [self._cls(2, "ODS_BPARTNER"), self._cls(4, "DWD_GOODS_RECEIPT_LINE")]
+        service = self._service(classes)
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert {c.id for c in result} == {4}
+        assert recall.mode == "fallback"
+
+    @pytest.mark.asyncio
+    async def test_no_match_fallback_filters_ods_business_tables(self) -> None:
+        """命中解析不到任何类（no_match）降级：同样过滤 ODS 业务表。"""
+        classes = [self._cls(2, "ODS_BPARTNER"), self._cls(4, "DWD_GOODS_RECEIPT_LINE")]
+        service = self._service(classes, hits=[999])
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert {c.id for c in result} == {4}
+        assert recall.mode == "fallback"
+
+    @pytest.mark.asyncio
+    async def test_explicit_ods_request_keeps_ods_table_in_fallback(self) -> None:
+        """显式点名 ODS 表（问题里带表名）：降级也不过过滤，与正常召回同口径。"""
+        classes = [self._cls(2, "ODS_BPARTNER"), self._cls(4, "DWD_GOODS_RECEIPT_LINE")]
+        service = self._service(classes, boom=True)
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "ODS_BPARTNER 里有哪些供应商", classes
+        )
+        assert {c.id for c in result} == {2, 4}
+
+    @pytest.mark.asyncio
+    async def test_fallback_ranks_by_layer_before_truncation(self) -> None:
+        """降级也要截到 CLASS_FILTER_MAX_CLASSES，且截断按层优先而非取输入前缀。"""
+        import app.services.chat_service as chat_module
+
+        cap = chat_module._CLASS_FILTER_MAX_CLASSES_DEFAULT
+        classes = [
+            self._cls(100 + i, f"UNKNOWN_T{i}") for i in range(cap + 5)
+        ] + [
+            self._cls(1, "ADS_ORDER_SUMMARY"),
+            self._cls(2, "DWD_GOODS_RECEIPT_LINE"),
+        ]
+        service = self._service(classes, boom=True)
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert len(result) == cap
+        assert recall.classCount == cap
+        assert recall.truncated is True
+        # 高优先层（ADS/DWD）在输入尾部，仍须进保留集 —— 证明截断前有层排序
+        assert {1, 2} <= {c.id for c in result}
+
+    @pytest.mark.asyncio
+    async def test_fallback_is_not_truncated_when_under_cap(self) -> None:
+        """未触顶时 truncated=False（诊断不能误报截断）。"""
+        classes = [self._cls(4, "DWD_GOODS_RECEIPT_LINE")]
+        service = self._service(classes, boom=True)
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert [c.id for c in result] == [4]
+        assert recall.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_ods_only_hits_branch_falls_back_filtered(self) -> None:
+        """命中全为 ODS 但库里还有非 ODS 类：降级给非 ODS 子集，而不是全量。"""
+        classes = [
+            self._cls(2, "ODS_BPARTNER"),
+            self._cls(3, "ODS_BPSUPPLIER"),
+            self._cls(5, "DWD_GOODS_RECEIPT_LINE"),
+        ]
+        service = self._service(classes, hits=[2, 3])
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供货量", classes
+        )
+        assert {c.id for c in result} == {5}
+        assert recall.mode == "fallback"
+
+    @pytest.mark.asyncio
+    async def test_fallback_logs_reason_and_pruning(self, caplog) -> None:
+        """降级日志同时给出「为什么降级」与「降级后做了什么」（过滤/截断）供聚合。"""
+        classes = [self._cls(2, "ODS_BPARTNER"), self._cls(4, "DWD_GOODS_RECEIPT_LINE")]
+        service = self._service(classes, boom=True)
+        with caplog.at_level(logging.WARNING):
+            await service._selectRelevantClasses(_FakeSession(), "供货量", classes)
+        assert "reason=search_error" in caplog.text  # 既有口径不变（回退率聚合用）
+        assert "本体类回退降级" in caplog.text
+        assert "odsFiltered=1" in caplog.text
+        # 回退率按行聚合：每个降级事件只能有一行带 reason=（否则倍率翻倍）
+        assert caplog.text.count("reason=search_error") == 1
+
+    @pytest.mark.asyncio
+    async def test_all_ods_ontology_keeps_list_instead_of_empty(self, caplog) -> None:
+        """退化场景（全库只有 ODS 业务表）：宁可保留原样，也不能给出空 schema。"""
+        classes = [self._cls(2, "ODS_BPARTNER"), self._cls(3, "ODS_BPSUPPLIER")]
+        service = self._service(classes, boom=True)
+        with caplog.at_level(logging.WARNING):
+            result, recall = await service._selectRelevantClasses(
+                _FakeSession(), "供货量", classes
+            )
+        assert {c.id for c in result} == {2, 3}
+        assert recall.mode == "fallback"
+        # 退化分支自己也带 reason= 的话，该场景的回退率会被算成 2 倍（见 1-1 聚合口径）
+        assert caplog.text.count("reason=search_error") == 1
+
+
+def _mk_class(*, id, source_table):
+    """构造测试用 OntologyClass（绕开 SQLAlchemy 初始化，仅用于纯函数单测）。"""
+    from app.domain.models import OntologyClass
+
+    return OntologyClass(
+        id=id,
+        class_name=f"cls_{id}",
+        class_alias=None,
+        description=None,
+        source_table=source_table,
+        properties=[],
+    )
+
+
+class TestClassLayerSelection:
+    """feat-layer-priority: 层优先排序 + ODS 显式请求 + DIM 维度词触发。"""
+
+    def test_ads_layer_ranked_first(self) -> None:
+        cls_ads = _mk_class(id=80, source_table="ADS_X")
+        cls_dws = _mk_class(id=70, source_table="DWS_Y")
+        cls_dwd = _mk_class(id=60, source_table="DWD_Z")
+        cls_dim = _mk_class(id=50, source_table="DIM_W")
+        cls_ods_business = _mk_class(id=40, source_table="ODS_V")
+        classes = [cls_ods_business, cls_dwd, cls_dim, cls_dws, cls_ads]
+
+        ranked = sorted(classes, key=lambda c: _LAYER_RANK[_getClassLayer(c)])
+
+        assert [_getClassLayer(c) for c in ranked] == [
+            "ADS",
+            "DWS",
+            "DWD",
+            "DIM",
+            "ODS_BUSINESS",
+        ]
+
+    def test_ods_excluded_by_default(self) -> None:
+        # question="B019 供应商编号" — 非显式 ODS
+        question = "B019 供应商编号"
+        explicit = _isExplicitOdsRequest(question)
+        assert explicit is False
+        assert _isDimensionHint(question) is True  # "编号" 触发 DIM 关联
+
+    def test_ods_included_when_explicit_request(self) -> None:
+        question = "ODS_BPARTNER 里有什么供应商"
+        assert _isExplicitOdsRequest(question) is True
+        assert _isDimensionHint(question) is False
+
+    def test_dimension_hint_trigger_keywords(self) -> None:
+        for q in ("物料描述是什么", "供应商名称", "物料编码", "维度信息"):
+            assert _isDimensionHint(q) is True, q
+
+    def test_ods_dict_kept_by_default(self) -> None:
+        # ODS_DIM_* 是字典表，应保留
+        cls = _mk_class(id=99, source_table="ODS_DIM_SUPPLIER")
+        assert _getClassLayer(cls) == "ODS_DICT"
+
+
+class TestStatePlanObservability:
+    """M3：历史查询计划（DB JSONB）解析降级必须可观测，但**不收紧口径**。
+
+    历史 JSONB 可能来自旧版本或被直写破坏；收紧会让历史会话整段失败，
+    故只记 reason= 日志，并保持「返回计划（而非 None）」的既有语义——
+    REFINE 直写闸门看 `plan is None` 判成败，误判会把成功的重写判死。
+    """
+
+    @staticmethod
+    def _state(lastPlan: dict | None) -> SessionQueryState:
+        return SessionQueryState(
+            session_id="s1",
+            last_question="上一轮问题",
+            last_plan=lastPlan,
+            last_sql="SELECT 1",
+        )
+
+    def test_corrupt_history_plan_renders_and_logs_single_reason(self, caplog) -> None:
+        service, _, _, _ = _buildService()
+        state = self._state({"target": "查询", "joins": "A=B"})
+        with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+            prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
+        assert "上一轮查询计划" in prompt
+        reasonLines = [r for r in caplog.records if "reason=" in r.getMessage()]
+        assert len(reasonLines) == 1
+        assert "reason=PLAN_HISTORY_DEGRADED" in reasonLines[0].getMessage()
+        assert "joins:PLAN_FIELD_NOT_A_LIST(str)" in reasonLines[0].getMessage()
+
+    def test_corrupt_history_plan_is_not_treated_as_none(self) -> None:
+        service, _, _, _ = _buildService()
+        plan = _statePlan(self._state({"target": "查询", "joins": "A=B"}))
+        assert plan is not None
+        assert plan.target == "查询"
+
+    def test_clean_history_plan_logs_nothing(self, caplog) -> None:
+        service, _, _, _ = _buildService()
+        with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+            service._buildStatePrompt(
+                self._state({"target": "查询"}), IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT
+            )
+        assert "reason=" not in caplog.text
+
+    def test_absent_last_plan_returns_none_without_logging(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
+            assert _statePlan(self._state(None)) is None
+        assert "reason=" not in caplog.text

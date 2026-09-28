@@ -38,6 +38,26 @@ def test_build_rule_code_deterministic():
     assert code.startswith("DQ_PURCHASEORDER_PO_KEY_UNIQUENESS_") and len(code.split("_")[-1]) == 7
 
 
+def test_build_rule_code_matches_schema_pattern():
+    """rule_code 必须符合 GenerateRuleItem.rule_code 的 ^[A-Z][A-Z0-9_]*$ 契约。
+
+    否则 preview 返回的 rule_code 被前端原样回传给 confirm 时会被 Pydantic 422 拦截。
+    hexdigest 历史上是 lowercase a-f，会违反此 pattern。
+    """
+    import re
+
+    from app.domain.schemas import GenerateRuleItem
+
+    code = buildRuleCode("PurchaseOrder", "po_key", RuleType.UNIQUENESS)
+    # 直接从 schema 读 pattern，避免硬编码两份字符串
+    pattern = next(
+        meta.pattern
+        for meta in GenerateRuleItem.model_fields["rule_code"].metadata
+        if hasattr(meta, "pattern")
+    )
+    assert re.match(pattern, code), f"rule_code {code!r} violates pattern {pattern!r}"
+
+
 def test_build_rule_code_always_has_hash_suffix():
     code = buildRuleCode("PurchaseOrder", "po_key", RuleType.UNIQUENESS)
     # hash suffix is always present even for short names
@@ -131,10 +151,58 @@ def test_join_edge_yields_consistency():
     )
 
 
+def test_join_edge_with_multiple_target_dates_yields_distinct_codes():
+    """join 边多个 target_date_columns：每个目标日期产一条建议，rule_code 必须互不相同。
+
+    之前的实现 buildRuleCode 只哈希 (className, propertyName, ruleType)，
+    导致同一个 prop 在同一 ruleType 下多个 targetDate 共用同一 rule_code：
+      - 前端 React Table rowKey 冲突 → "Encountered two children with the same key"
+      - 落库侧 DB unique key 也会冲突，后写的会被前面 EXISTS 掉
+
+    期望：每条建议一个独立 rule_code，且 rule_expression 必须包含对应的 targetDate 列。
+    """
+    edge = JoinEdgeMeta(
+        target_table="PORDERQ",
+        source_columns=["PO_KEY"],
+        target_columns=["PO_KEY"],
+        target_date_columns=["RECEIPT_DATE", "PROMISE_DATE"],
+    )
+    sugg, _ = deriveSuggestions(
+        CTX, [_prop(property_name="po_date", source_column="PO_DATE",
+                    data_type="DATETIME", is_primary_key=False)],
+        [edge], SCHEMA)
+    c = [s for s in sugg if s.rule_type == RuleType.CONSISTENCY]
+    assert len(c) == 2
+    codes = [s.rule_code for s in c]
+    assert len(set(codes)) == 2, f"重复 rule_code：{codes}"
+    # 两列必须分别出现在对应建议的表达式里，避免退化成同一条规则换壳
+    exprs = "\n".join(s.rule_expression for s in c if s.rule_expression)
+    assert "RECEIPT_DATE" in exprs
+    assert "PROMISE_DATE" in exprs
+
+
 def test_missing_table_blocks_all():
     sugg, blocked = deriveSuggestions(CTX, [_prop()], [], None)
     assert sugg == []
     assert blocked[0].reason == "数据源 schema 未缓存"
+
+
+def test_schema_cached_but_table_not_found_distinct_message():
+    """schema 已缓存（SchemaIndex 非空），但 source_table 不在缓存表里：
+    旧实现一并归为「未缓存」，掩盖了「表名拼错 / owner 不匹配」的真因。
+    应改为「找不到对应的表 XXX」，让用户能定位是映射问题而不是 introspect 问题。
+    """
+    # 缓存里有别的表但没有 PORDER
+    otherIndex = SchemaIndex(tables={
+        "OTHER_T": {c.upper(): ColumnMeta(column_name=c, data_type="CHAR", nullable=True)
+                    for c in ["X"]},
+    })
+    sugg, blocked = deriveSuggestions(CTX, [_prop()], [], otherIndex)
+    assert sugg == []
+    assert blocked[0].reason == "找不到对应的表 PORDER", (
+        "schema 已缓存但表名不在缓存里时，应明确告知表名拼错/"
+        "owner 不匹配，而不是含糊地报「未缓存」让用户去重跑 introspect。"
+    )
 
 
 def test_missing_column_blocks_property():
@@ -150,11 +218,18 @@ def test_schema_missing_column_blocks_property():
     assert any("NOPE" in b.reason for b in blocked)
 
 
-def test_allowed_value_with_quote_rejected():
-    with pytest.raises(ValidationError):
-        deriveSuggestions(CTX, [_prop(
-            property_name="status", source_column="STATUS", is_primary_key=False,
-            allowed_values=["OK'--"])], [], SCHEMA)
+def test_allowed_value_with_quote_rejected_via_blocked():
+    """allowed_values 含非法字符（如单引号）：推导期 ValidationError → blocked，不再 raise。
+    blocked.reason 必须含非法值以便用户定位。
+    """
+    sugg, blocked = deriveSuggestions(CTX, [_prop(
+        property_name="status", source_column="STATUS", is_primary_key=False,
+        allowed_values=["OK'--"])], [], SCHEMA)
+    assert sugg == []
+    assert any(
+        b.property_name == "status" and "OK'--" in b.reason
+        for b in blocked
+    )
 
 
 def test_non_text_column_skips_regex():
@@ -201,18 +276,32 @@ def test_source_table_none_blocks_all():
     assert blocked == [BlockedProperty("po_key", "类未配置 source_table")]
 
 
-def test_allowed_value_too_long_rejected():
-    with pytest.raises(ValidationError):
-        deriveSuggestions(CTX, [_prop(
-            property_name="status", source_column="STATUS", is_primary_key=False,
-            allowed_values=["X" * 51])], [], SCHEMA)
+def test_allowed_value_too_long_rejected_via_blocked():
+    """allowed_values 单项超 50 字符：推导期 ValidationError → blocked。"""
+    sugg, blocked = deriveSuggestions(CTX, [_prop(
+        property_name="status", source_column="STATUS", is_primary_key=False,
+        allowed_values=["X" * 51])], [], SCHEMA)
+    assert sugg == []
+    assert any(
+        b.property_name == "status" and "status" in b.reason
+        for b in blocked
+    )
 
 
-def test_fk_without_ref_class_raises():
-    with pytest.raises(ValidationError):
-        deriveSuggestions(CTX, [_prop(
-            property_name="supplier_key", source_column="SUPPLIER_KEY",
-            is_primary_key=False, is_foreign_key=True, ref_class=None)], [], SCHEMA)
+def test_fk_without_ref_class_is_blocked_with_property_name():
+    """回归：用户报「preview 422 外键属性缺少 ref_class」无定位。
+    修复契约：FK 缺 ref_class 不再 raise，而是进 blocked 列表，
+    reason 必须包含 property_name 让用户能定位到具体属性。
+    """
+    sugg, blocked = deriveSuggestions(CTX, [_prop(
+        property_name="supplier_key", source_column="SUPPLIER_KEY",
+        is_primary_key=False, is_foreign_key=True, ref_class=None)], [], SCHEMA)
+    assert sugg == []
+    assert len(blocked) == 1
+    assert blocked[0].property_name == "supplier_key"
+    # 错误消息必须含 property_name，让前端 blocked 面板能精准定位
+    assert "supplier_key" in blocked[0].reason
+    assert "ref_class" in blocked[0].reason
 
 
 def test_fk_without_ref_source_table_is_blocked():

@@ -55,6 +55,43 @@ class TestValidatePlan:
         issues = _service().validatePlan(plan, [_receiptCls()])
         assert any("NONEXISTENT" in i for i in issues)
 
+    def test_cross_class_property_hint_lists_owner_classes(self) -> None:
+        # 真实回归（2026-09-16）：「供货量最大供应商」问题中 LLM 用了「供应商名称」
+        # 但 selectedClasses 只选了收货明细类（该列只存在于供应商主表）。
+        # 原报错「不属于选定的任何类」未说明属性属于哪些类，重试两次仍犯同错
+        # → 整轮失败。报错须列出 schema 中拥有该属性的类，引导把类加入
+        # selectedClasses 并经 JOIN 关联，让重试可自愈。
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("NAME",),
+            groupBy=("NAME",),
+        )
+        issues = _service().validatePlan(plan, [_receiptCls(), _supplierCls()])
+        assert any("NAME" in i and "BPSUPPLIER" in i and "selectedClasses" in i for i in issues)
+        # 选中与分组两处都要带可操作指引
+        assert any("分组属性" in i and "BPSUPPLIER" in i for i in issues)
+
+    def test_property_nowhere_in_schema_says_so(self) -> None:
+        # 属性在本体 schema 中完全不存在（含别名/物理列）时，须如实说明而非
+        # 只说「不属于选定的任何类」，避免重试继续幻觉同一属性名。
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("NONEXISTENT",),
+        )
+        issues = _service().validatePlan(plan, [_receiptCls(), _supplierCls()])
+        assert any("NONEXISTENT" in i and "本体 schema" in i for i in issues)
+
+    def test_aggregation_cross_class_property_hint_lists_owner_classes(self) -> None:
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            aggregations=(Aggregation(function="SUM", property="NAME"),),
+        )
+        issues = _service().validatePlan(plan, [_receiptCls(), _supplierCls()])
+        assert any("聚合属性" in i and "BPSUPPLIER" in i for i in issues)
+
     def test_aggregation_property_must_exist(self) -> None:
         plan = QueryPlan(
             target="x",
@@ -249,6 +286,34 @@ class TestValidatePlan:
         issues = _service().validatePlan(plan, [_receiptCls()])
         assert any("GHOSTFIELD" in i and "公式中的属性" in i for i in issues)
 
+    def test_formula_window_order_by_direction_not_treated_as_property(self) -> None:
+        # 真实回归（2026-09-28）：排名/累计占比类问题中 LLM 在 formula 内写
+        # OVER (ORDER BY SUM(QTY) DESC)；ASC/DESC 是排序方向关键字而非属性，不得误报
+        # 「公式中的属性 DESC 不属于选定的任何类」。
+        # 线上表现：问「每个供应商采购金额占前 5 名合计的比例」稳定 400（plan 校验不过 →
+        # 重试同错 → 整轮失败）；而带空窗口 OVER () 的占比问题恰好绕过，故只在需要排序的
+        # 占比/排名问题暴露。根因是 nl2sql_refs._FORMULA_SQL_KEYWORDS 缺 ASC/DESC
+        # （formula_parser._SQL_KEYWORDS 有），两套关键字集合漂移。
+        for direction in ("DESC", "ASC"):
+            plan = QueryPlan(
+                target="每个供应商采购金额占前 5 名合计的比例",
+                selectedClasses=("PRECEIPT",),
+                selectedProperties=("QTY",),
+                aggregations=(
+                    Aggregation(
+                        function="SUM",
+                        property="QTY",
+                        alias="占比",
+                        formula=(
+                            "SUM(QTY) / SUM(SUM(QTY)) OVER "
+                            f"(ORDER BY SUM(QTY) {direction})"
+                        ),
+                    ),
+                ),
+            )
+            issues = _service().validatePlan(plan, [_receiptCls()])
+            assert issues == [], f"{direction} 被误判为属性: {issues}"
+
     def test_join_references_existing_class(self) -> None:
         plan = QueryPlan(
             target="x",
@@ -350,6 +415,19 @@ class TestValidatePlan:
         )
         issues = _service().validatePlan(plan, [_receiptCls(), _supplierCls()])
         assert any("MAGIC" in i for i in issues)
+
+    def test_join_column_equation_token_reports_array_hint(self) -> None:
+        # LLM 偶发把 join.columns 写成 "A = B" 等式（2026-09-18 真实回归）：
+        # 重试反馈必须指出 join.columns 是列名数组、给出正确写法。
+        plan = QueryPlan(
+            target="x",
+            joins=(JoinSpec(sourceClass="PRECEIPT", targetClass="BPSUPPLIER", columns=("MAGIC",)),),
+        )
+        issues = _service().validatePlan(plan, [_receiptCls(), _supplierCls()])
+        joinIssue = next(i for i in issues if "MAGIC" in i)
+        assert "join.columns" in joinIssue
+        assert "数组" in joinIssue
+        assert "不要写" in joinIssue
 
     def test_valid_cross_class_join_column_passes(self) -> None:
         plan = QueryPlan(
@@ -536,3 +614,139 @@ class TestValidatePlan:
         # 不应出现任何针对 TOTAL_QTY 的报错
         assert not any("TOTAL_QTY" in i for i in issues)
         assert issues == []
+
+
+class TestValidatePlanPerGroupTopN:
+    """2026-09-09：partitionBy/perGroupLimit ——「分别/各/每个 X 的 Top N」逐组取前 N 校验。
+
+    语义红线：每组 Top-N 是「分区内排名取前 N」，不是全局 N×组数。校验强制：
+    分区属性真实存在且是分组维、partitionBy 与 perGroupLimit 成对、组内有排序、
+    rowLimit 必须为 null（不得与全局行数叠加产生「前 N×组数」坍缩）。
+    """
+
+    @staticmethod
+    def _matReceiptCls() -> OntologyClass:
+        return _cls(
+            "PRECEIPT", [("BPSNUM", "BPSNUM_0"), ("MATERIAL", "MAT_0"), ("QTY", "QTY_0")]
+        )
+
+    def _valid(self) -> QueryPlan:
+        return QueryPlan(
+            target="三个供应商各自的 Top3 物料",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "MATERIAL", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM", "MATERIAL"),
+            sortBy=(SortSpec(property="TOTAL_QTY", direction="desc"),),
+            partitionBy=("BPSNUM",),
+            perGroupLimit=3,
+        )
+
+    def test_valid_per_group_topn_passes(self) -> None:
+        assert _service().validatePlan(self._valid(), [self._matReceiptCls()]) == []
+
+    def test_partition_property_must_exist(self) -> None:
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "MATERIAL", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM", "MATERIAL"),
+            sortBy=(SortSpec(property="TOTAL_QTY", direction="desc"),),
+            partitionBy=("GHOST",),
+            perGroupLimit=3,
+        )
+        issues = _service().validatePlan(plan, [self._matReceiptCls()])
+        assert any("GHOST" in i and "分区" in i for i in issues)
+
+    def test_partition_property_must_be_in_group_by(self) -> None:
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "MATERIAL", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("MATERIAL",),  # 分区维 BPSNUM 不在分组里 → 无意义
+            sortBy=(SortSpec(property="TOTAL_QTY", direction="desc"),),
+            partitionBy=("BPSNUM",),
+            perGroupLimit=3,
+        )
+        issues = _service().validatePlan(plan, [self._matReceiptCls()])
+        assert any("BPSNUM" in i and "groupBy" in i for i in issues)
+
+    def test_partition_requires_per_group_limit(self) -> None:
+        plan = self._valid()
+        plan = QueryPlan(
+            target=plan.target,
+            selectedClasses=plan.selectedClasses,
+            selectedProperties=plan.selectedProperties,
+            aggregations=plan.aggregations,
+            groupBy=plan.groupBy,
+            sortBy=plan.sortBy,
+            partitionBy=("BPSNUM",),
+            perGroupLimit=None,
+        )
+        issues = _service().validatePlan(plan, [self._matReceiptCls()])
+        assert any("perGroupLimit" in i for i in issues)
+
+    def test_per_group_limit_requires_partition(self) -> None:
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            perGroupLimit=3,
+            partitionBy=(),
+        )
+        issues = _service().validatePlan(plan, [self._matReceiptCls()])
+        assert any("partitionBy" in i and "perGroupLimit" in i for i in issues)
+
+    def test_per_group_limit_conflicts_with_global_row_limit(self) -> None:
+        # 模型此前正是把「3 供应商 × 每供应商 3」折成 rowLimit=9 —— 必须被拦下。
+        plan = self._valid()
+        plan = QueryPlan(
+            target=plan.target,
+            selectedClasses=plan.selectedClasses,
+            selectedProperties=plan.selectedProperties,
+            aggregations=plan.aggregations,
+            groupBy=plan.groupBy,
+            sortBy=plan.sortBy,
+            partitionBy=("BPSNUM",),
+            perGroupLimit=3,
+            rowLimit=9,
+        )
+        issues = _service().validatePlan(plan, [self._matReceiptCls()])
+        assert any("rowLimit" in i and "9" in i for i in issues)
+        assert any("null" in i for i in issues)
+
+    def test_per_group_topn_requires_sort_by(self) -> None:
+        plan = QueryPlan(
+            target="x",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "MATERIAL", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM", "MATERIAL"),
+            partitionBy=("BPSNUM",),
+            perGroupLimit=3,
+        )
+        issues = _service().validatePlan(plan, [self._matReceiptCls()])
+        assert any("sortBy" in i for i in issues)
+
+
+class TestSqlKeywordSetsStayInSync:
+    """两套 SQL 关键字集合的一致性守卫（2026-09-28 线上 400 回归）。
+
+    formula_parser._SQL_KEYWORDS 用于「不把关键字当裸列名」，
+    nl2sql_refs._FORMULA_SQL_KEYWORDS 用于「不把关键字当公式属性」。
+    二者服务于同一件事（都是「公式里出现的 SQL 词不是属性」），一旦漂移就会出现
+    「同一 token 在一处被当关键字、在另一处被当属性」——ASC/DESC 缺失导致排名占比
+    问题整轮 400 即由此而来。
+    """
+
+    def test_formula_parser_keywords_are_covered_by_refs_keywords(self) -> None:
+        from app.services.formula_parser import _SQL_KEYWORDS
+        from app.services.nl2sql_refs import _FORMULA_SQL_KEYWORDS
+
+        missing = sorted(_SQL_KEYWORDS - _FORMULA_SQL_KEYWORDS)
+        assert missing == [], (
+            f"nl2sql_refs._FORMULA_SQL_KEYWORDS 缺少 {missing}；"
+            f"这些 token 会被 _extractFormulaProperties 当作属性上报"
+        )

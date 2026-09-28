@@ -133,3 +133,59 @@ class MockLlmClient:
 @pytest.fixture()
 def mockLlmClient() -> MockLlmClient:
     return MockLlmClient()
+
+
+# ---------------------------------------------------------------------------
+# 真实 PostgreSQL fixtures（强制规则：Harness/rules/测试规范.md）
+# ---------------------------------------------------------------------------
+
+from app.tests._pg_support import _newEngine, _truncateAll  # noqa: E402
+
+
+@pytest.fixture()
+async def pg_engine(settings: Any) -> Any:
+    """每个测试新建真实 PG 引擎，测试结束后 dispose。"""
+    engine = await _newEngine()
+    yield engine
+    await engine.dispose()
+
+
+@pytest.fixture()
+async def db_session(pg_engine: Any) -> AsyncIterator[AsyncSession]:
+    """提供真实 PG 会话（用于数据准备与断言）。"""
+    factory = async_sessionmaker(
+        pg_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
+    )
+    async with factory() as session:
+        yield session
+
+
+@pytest.fixture()
+async def pg_client(pg_engine: Any) -> AsyncIterator[AsyncClient]:
+    """完整 API 链路测试客户端：真实 PG + 每个测试前 truncate 清库 + 已认证。"""
+    # truncate 清库（隔离测试）
+    await _truncateAll(pg_engine)
+    # 替换全局会话工厂，使 getDb() 走真实 PG
+    old_factory = dbModule._sessionFactory
+    old_engine = dbModule._engine
+    factory = async_sessionmaker(
+        pg_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
+    )
+    dbModule._sessionFactory = factory
+    dbModule._engine = pg_engine
+    try:
+        from app.tests._testapp import buildTestApp
+
+        transport = ASGITransport(app=buildTestApp(factory))
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={
+                "X-User-Id": "test-user-001",
+                "X-User-Departments": "IT,QA",
+            },
+        ) as ac:
+            yield ac
+    finally:
+        dbModule._sessionFactory = old_factory
+        dbModule._engine = old_engine

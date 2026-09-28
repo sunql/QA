@@ -63,6 +63,7 @@ import type { FilterField } from "../components/ontology/FilterBar";
 import { contains, matchSelect } from "../utils/ontologyFilter";
 import type { FilterValues } from "../utils/ontologyFilter";
 import type { EntityType } from "../types/entityMapping";
+import { DocumentQaPanel } from "../components/documents/DocumentQaPanel";
 
 const { TextArea } = Input;
 const { TabPane } = Tabs;
@@ -616,6 +617,10 @@ export default function DocumentsPage() {
         <TabPane tab="语义检索" key="search">
           <RagSearchPanel />
         </TabPane>
+
+        <TabPane tab="知识问答" key="qa">
+          <DocumentQaPanel />
+        </TabPane>
       </Tabs>
 
       {/* Document create/edit modal */}
@@ -627,7 +632,7 @@ export default function DocumentsPage() {
         okText={t("common.confirm")}
         cancelText={t("common.cancel")}
         width={640}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={docForm} layout="vertical">
           <Space.Compact style={{ width: "100%" }}>
@@ -694,7 +699,7 @@ export default function DocumentsPage() {
         okText={t("common.confirm")}
         cancelText={t("common.cancel")}
         width={560}
-        destroyOnClose
+        destroyOnHidden
         confirmLoading={uploading}
       >
         <Form form={uploadForm} layout="vertical">
@@ -758,7 +763,7 @@ export default function DocumentsPage() {
         okText={t("common.confirm")}
         cancelText={t("common.cancel")}
         width={480}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={relForm} layout="vertical">
           <Form.Item

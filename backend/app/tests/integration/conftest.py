@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import AsyncClient
@@ -40,6 +41,40 @@ async def dbSession(client: AsyncClient) -> AsyncIterator[AsyncSession]:
     factory = dbModule.getSessionFactory()
     async with factory() as session:
         yield session
+
+
+@pytest.fixture
+def mockEmbeddingService():
+    """EmbeddingService 的替身，模拟 generateEmbedding。
+
+    向量是固定常数（不是真实 LLM 输出），但保证相同文本得到相同向量，
+    这样 searchDocuments 能用相同 query 命中刚刚 ingest 的文档。
+    """
+    svc = AsyncMock()
+
+    async def fake_embed(text: str) -> list[float]:
+        # 用文本长度作种子，让同一文本生成同一向量（保证 search 能命中）
+        seed = sum(ord(c) for c in text) % 100
+        return [float(seed) / 100.0 + 0.001 * i for i in range(1024)]
+
+    svc.generateEmbedding = fake_embed
+    return svc
+
+
+@pytest.fixture
+def fakeMinio(monkeypatch):
+    """假 MinIO：不联网络，只记录调用。
+
+    用 MagicMock 而不是替身函数：本用例只关心「写没写、写的是不是原始
+    字节」，不该顺带把 putSourceObject 对 SDK 的调用形状（位置参还是
+    关键字参）钉成测试契约 —— 那是 Task 4 单测的职责。
+    """
+    fake = MagicMock()
+    fake.bucket_exists.return_value = True
+    monkeypatch.setattr(
+        "app.infrastructure.object_storage._getClient", lambda: fake
+    )
+    return fake
 
 
 @pytest.fixture(autouse=True)
@@ -83,6 +118,10 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
 
     businessObjectRegistry.invalidate()
     await businessObjectRegistry.warmUp(dbSession)
+    # Phase 1.4：warmUp kpi_match_cache（L1 匹配依赖）
+    from app.services.kpi_match_cache import kpi_match_cache
+    kpi_match_cache.onKpiChanged()
+    await kpi_match_cache.warmUp(dbSession)
     # 关掉 warmUp SELECT 留下的隐式事务：否则 dbSession 持有 AccessShareLock，
     # 阻塞后续 pgSession/engine B 的 TRUNCATE（feat-agent-tool-config-db 教训）
     await dbSession.commit()
@@ -91,3 +130,5 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     agent_tool_config_registry.invalidate()
     feature_rule_registry.invalidate()
     businessObjectRegistry.invalidate()
+    from app.services.kpi_match_cache import kpi_match_cache
+    kpi_match_cache.onKpiChanged()

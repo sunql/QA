@@ -23,6 +23,7 @@ from app.domain.schemas import (
 )
 from app.services.audit_service import AuditService
 from app.services.messages_zh import (
+    MSG_DOCUMENT_CONTENT_DUPLICATE,
     MSG_DOCUMENT_DUPLICATE,
     MSG_DOCUMENT_NOT_FOUND,
     MSG_DOCUMENT_REL_EXISTS,
@@ -34,9 +35,19 @@ _audit = AuditService()
 _DEFAULT_LIMIT = 200
 _MAX_LIMIT = 1000
 
+# document_catalog 上两把「唯一锁」的约束名，用于在 IntegrityError 里区分**哪把
+# 被撞了**。直接读 ``str(exc.orig)``：PG 唯一违例消息会带
+# ``duplicate key value violates unique constraint "uq_..."``，约束名就在里面。
+_UQ_DOCUMENT_ID = "uq_document_id"
+_UQ_DOCUMENT_CONTENT_HASH = "uq_document_catalog_content_hash"
+
 
 def _duplicateError(document_id: str) -> ConflictError:
     return ConflictError(MSG_DOCUMENT_DUPLICATE.format(document_id=document_id))
+
+
+def _contentHashDuplicateError() -> ConflictError:
+    return ConflictError(MSG_DOCUMENT_CONTENT_DUPLICATE)
 
 
 def _entity_to_dict(entity: DocumentCatalog) -> dict:
@@ -66,10 +77,11 @@ class DocumentService:
         document_type: str | None = None,
         security_level: str | None = None,
         status: DocumentStatus | None = None,
+        document_ids: list[str] | None = None,
         limit: int = _DEFAULT_LIMIT,
         offset: int = 0,
     ) -> list[DocumentCatalog]:
-        """列表查询，支持按类型/安全等级/状态过滤。"""
+        """列表查询，支持按类型/安全等级/状态/业务编号过滤。"""
         limit = min(limit, _MAX_LIMIT)
         stmt = select(DocumentCatalog).order_by(DocumentCatalog.id)
         if document_type is not None:
@@ -78,6 +90,12 @@ class DocumentService:
             stmt = stmt.where(DocumentCatalog.security_level == security_level)
         if status is not None:
             stmt = stmt.where(DocumentCatalog.status == status)
+        if document_ids is not None:
+            # 用于 RAG 语义检索结果回填 document_name 时按 ID 精确匹配
+            if not document_ids:
+                # 空列表直接返回，避免 IN () 语法错误
+                return []
+            stmt = stmt.where(DocumentCatalog.document_id.in_(document_ids))
         stmt = stmt.limit(limit).offset(offset)
         result = await session.execute(stmt)
         return list(result.scalars().all())
@@ -89,6 +107,19 @@ class DocumentService:
         if entity is None:
             raise NotFoundError(MSG_DOCUMENT_NOT_FOUND.format(id=id))
         return entity
+
+    async def findByContentHash(
+        self, session: AsyncSession, content_hash: str
+    ) -> DocumentCatalog | None:
+        """按 content_hash 查找文档；无则返回 None。
+
+        供 RAG 入库做「同一文件已入库」预检 —— 在写入 MinIO/Milvus **之前**
+        就拦截重复内容，避免留下孤儿对象（见 rag_service.ingestDocument）。
+        """
+        stmt = select(DocumentCatalog).where(
+            DocumentCatalog.content_hash == content_hash
+        )
+        return (await session.execute(stmt)).scalars().first()
 
     async def createDocument(
         self,
@@ -121,7 +152,15 @@ class DocumentService:
             await session.flush()
         except IntegrityError as exc:
             await session.rollback()
-            raise _duplicateError(dto.document_id) from exc
+            if _UQ_DOCUMENT_CONTENT_HASH in str(exc.orig):
+                # content_hash 撞唯一索引：同一份文件已经入库。必须报**这个**
+                # 冲突而不是复用 document_id 重复的错误 —— 否则运维会以为是
+                # 「编号重复」去换编号，实则「文件内容重复」该去换文件/别再传。
+                raise _contentHashDuplicateError() from exc
+            if _UQ_DOCUMENT_ID in str(exc.orig):
+                # 竞态：SELECT 之后、INSERT 之前另一个事务插入了同一 document_id。
+                raise _duplicateError(dto.document_id) from exc
+            raise
         await _audit.record(
             session,
             entity_type="document_catalog",
@@ -142,7 +181,7 @@ class DocumentService:
         dto: DocumentUpdate,
         actor: CurrentUser,
     ) -> DocumentCatalog:
-        """更新文档；不存在抛 NotFoundError。"""
+        """更新文档；不存在抛 NotFoundError；content_hash 撞唯一索引抛 ConflictError。"""
         entity = await self.getDocument(session, id)
         before_state = _entity_to_dict(entity)
         updates = dto.model_dump(exclude_unset=True)
@@ -158,7 +197,15 @@ class DocumentService:
             before=before_state,
             after=_entity_to_dict(entity),
         )
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            if _UQ_DOCUMENT_CONTENT_HASH in str(exc.orig):
+                # 客户端把 content_hash 改成已存在的值（直接 PUT 或经 re-upload 路径）
+                # → 撞唯一索引。诚实报内容冲突，而不是让 500 冒到客户端。
+                raise _contentHashDuplicateError() from exc
+            raise
         await session.refresh(entity)
         return entity
 

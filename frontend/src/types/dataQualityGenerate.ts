@@ -24,7 +24,7 @@ export type DerivationType =
 
 export type RuleSuggestionStatus = "NEW" | "EXISTS";
 
-export type ConstraintKind = "allowed_values" | "not_null";
+export type ConstraintKind = "allowed_values" | "not_null" | "range" | "pattern";
 
 // ---------------------------------------------------------------------------
 // RuleSuggestion — GeneratorService.preview 返回的单条建议
@@ -83,6 +83,35 @@ export interface PropertyConstraintSuggestion {
   propertyName: string;
   kind: ConstraintKind;
   values: string[] | null;
+  // range / pattern 专用字段（feat-ontology-property-constraints）。
+  // allowed_values / not_null 时为 undefined。
+  minValue?: string | null;
+  maxValue?: string | null;
+  regexPattern?: string | null;
   confidence: number;
   rationale: string;
+}
+
+// ---------------------------------------------------------------------------
+// ParseDescriptionsResponse — parseDescriptions 完整 envelope（含 persistedPropertyIds）
+// ---------------------------------------------------------------------------
+
+export interface ParseDescriptionsResponse {
+  suggestions: PropertyConstraintSuggestion[];
+  /** 当前类下已在 ontology_property 写入 allowed_values 的 propertyId 列表；
+   *  LlmPanel 用它初始化 adoptedIds，实现刷新页面也保持已采纳状态。 */
+  persistedPropertyIds: number[];
+}
+
+// ---------------------------------------------------------------------------
+// LlmModelOption — listLlmModels 返回的最小子集
+// （避免在前端 import 完整 ModelConfig，这里只取向导需要的字段）
+// ---------------------------------------------------------------------------
+
+export type LlmProvider = "OPENAI" | "AZURE_OPENAI" | "OPENAI_COMPATIBLE_PROXY" | "OLLAMA";
+
+export interface LlmModelOption {
+  id: number;
+  modelName: string;
+  provider: LlmProvider;
 }

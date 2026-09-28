@@ -1,70 +1,77 @@
+/**
+ * FeatureRule 前端类型 — camelCase，与后端 Pydantic CamelModel 对齐。
+ *
+ * 历史教训：原本全用 snake_case，但后端 JSON 是 camelCase（alias_generator=to_camel），
+ * 导致表格 dataIndex 找不到字段、编辑表单 setFieldsValue 失败。
+ * 其他 admin 模块（AgentRegistry、AdminTools）都用 camelCase，本模块是 outlier，已统一。
+ */
 export type Severity = "HIGH" | "MEDIUM" | "LOW" | "INFO";
 export type RuleOperator = "lt" | "lte" | "gt" | "gte" | "lt_inverse";
 
 export interface FeatureRuleThreshold {
   severity: Severity;
   operator: RuleOperator;
-  threshold_value: number;
+  thresholdValue: number | string;
   unit?: string | null;
-  threshold_order: number;
+  thresholdOrder: number;
 }
 
 export interface FeatureRule {
   id: number;
   code: string;
-  data_object: string;
-  data_layer: string;
-  target_level: string;
-  feature_name: string;
+  dataObject: string;
+  dataLayer: string;
+  targetLevel: string;
+  featureName: string;
   enabled: boolean;
   priority: number;
-  policy_description?: string | null;
+  policyDescription?: string | null;
   version: number;
   thresholds: FeatureRuleThreshold[];
-  created_time: string;
-  updated_time?: string | null;
+  createdTime: string;
+  updatedTime?: string | null;
 }
 
 export interface FeatureRuleCreate {
   code: string;
-  data_object: string;
-  data_layer: string;
-  target_level: string;
-  feature_name: string;
+  dataObject: string;
+  dataLayer: string;
+  targetLevel: string;
+  featureName: string;
   enabled?: boolean;
   priority?: number;
-  policy_description?: string | null;
+  policyDescription?: string | null;
   thresholds: FeatureRuleThreshold[];
 }
 
 export interface FeatureRuleUpdate {
   enabled?: boolean;
   priority?: number;
-  policy_description?: string | null;
+  policyDescription?: string | null;
   thresholds?: FeatureRuleThreshold[];
   version: number;
 }
 
 export interface FeatureRuleThresholdSuggestion {
-  feature_name: string;
+  featureName: string;
   severity: Severity;
   operator: RuleOperator;
-  threshold_value: number;
+  thresholdValue: number;
   unit?: string | null;
   confidence: number;
   rationale: string;
 }
 
 export interface FeatureRuleParseDescriptionRequest {
-  data_object: string;
-  data_layer: string;
-  target_level: string;
-  natural_language: string;
+  dataObject: string;
+  dataLayer: string;
+  targetLevel: string;
+  naturalLanguage: string;
 }
 
 export interface FeatureRuleParseDescriptionResponse {
-  suggested_thresholds: FeatureRuleThresholdSuggestion[];
+  suggestedThresholds: FeatureRuleThresholdSuggestion[];
   reasoning: string;
-  overall_confidence: number;
+  overallConfidence: number;
   warnings: string[];
 }

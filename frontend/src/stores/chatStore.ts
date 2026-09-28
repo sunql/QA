@@ -4,6 +4,7 @@ import {
   sendMessageStream,
   type StreamChartData,
 } from "../api/chat";
+import { searchDocumentsQa } from "../api/document";
 import {
   deleteSessionHistory as apiDeleteSession,
   listChatSessions as apiListChatSessions,
@@ -14,7 +15,14 @@ import type {
   ChatSession,
   SessionMessagesResponse,
 } from "../types/chatHistory";
-import type { ChatMessage, ChartType, HistoryMessage, IntentType, MultiStepStep } from "../types/chat";
+import type {
+  ChatMessage,
+  ChartType,
+  HistoryMessage,
+  IntentType,
+  MultiStepStep,
+  StepStatus,
+} from "../types/chat";
 import { i18n } from "../i18n";
 import { read as readPersisted, write as writePersisted } from "./persistChatUiState";
 
@@ -56,6 +64,10 @@ export function generateSessionId(): string {
   return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function makeSessionId(channel: "chat" | "doc_qa"): string {
+  return `${channel === "doc_qa" ? "docqa-" : "chat-"}${crypto.randomUUID()}`;
+}
+
 function toHistory(messages: ChatMessage[]): HistoryMessage[] {
   return messages.slice(-HISTORY_LIMIT).map((m) => ({ role: m.role, content: m.content }));
 }
@@ -65,6 +77,12 @@ function patchLastMessage(messages: ChatMessage[], patch: Partial<ChatMessage>):
   const last = messages[messages.length - 1];
   if (!last) return messages;
   return [...messages.slice(0, -1), { ...last, ...patch }];
+}
+
+// 后端步骤结果 → 前端终态：有 error 即失败（失败步骤 sql 恒为 null，与后端同判据）。
+// 流式（onStepResult）与非流式（响应 steps 回填）共用，避免两处判据漂移。
+function stepStatusFromResult(error: string | null | undefined): StepStatus {
+  return error ? "error" : "done";
 }
 
 // 不可变更新最后一条助手消息中指定 stepIndex 的步骤（不动其它步骤与消息）
@@ -95,6 +113,8 @@ function toChatMessage(read: ChatMessageRead): ChatMessage {
     timestamp: Number.isFinite(ts) ? ts : Date.now(),
     sql: read.sql,
     isStreaming: false,
+    // H4：断连兜底写入的半截回答，UI 据此提示「内容不完整」
+    interrupted: read.interrupted,
   };
 }
 
@@ -110,6 +130,10 @@ interface ChatState {
   sessionsLoading: boolean;
   sessionsError: string | null;
   historyPanelOpen: boolean;
+  // Doc-Qa channel（documents-knowledge-qa, Task 7）
+  channel: "chat" | "doc_qa";
+  setChannel: (channel: "chat" | "doc_qa") => void;
+  sendDocQa: (question: string, filters: { securityLevel?: string; documentType?: string }) => Promise<void>;
   setDatasourceId: (id: number | null) => void;
   setSelectedModelId: (id: number | null) => void;
   addMessage: (msg: ChatMessage) => void;
@@ -117,7 +141,7 @@ interface ChatState {
   clearMessages: () => void;
   resetSession: () => void;
   // 历史会话面板 actions
-  loadSessions: () => Promise<void>;
+  loadSessions: (channel?: "chat" | "doc_qa") => Promise<void>;
   loadSessionMessages: (sessionId: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   toggleHistoryPanel: () => void;
@@ -139,6 +163,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   sessionsLoading: false,
   sessionsError: null,
   historyPanelOpen: persisted.historyPanelOpen,
+  channel: "chat",
+
+  setChannel: (c) => {
+    const newId = makeSessionId(c);
+    writePersisted({ lastSessionId: newId });
+    set({ channel: c, sessionId: newId });
+  },
 
   setDatasourceId: (id) => set({ datasourceId: id }),
 
@@ -236,7 +267,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           onStepResult: (result) =>
             set((state) => ({
               messages: patchStep(state.messages, result.stepIndex, {
-                status: result.error ? "error" : "done",
+                status: stepStatusFromResult(result.error),
                 sql: result.sql ?? null,
                 summary: result.summary ?? null,
                 error: result.error ?? null,
@@ -248,6 +279,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             set((state) => ({
               messages: patchLastMessage(state.messages, {
                 dataQuality: payload.badges,
+              }),
+            })),
+          // 类召回诊断（2026-09-16）：截断/降级时 MessageItem 渲染提示
+          onClassRecall: (info) =>
+            set((state) => ({
+              messages: patchLastMessage(state.messages, {
+                classRecall: info,
               }),
             })),
           onToken: (content) =>
@@ -321,6 +359,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             affinityStatus: res.affinityStatus ?? null,
             // Phase 1.4：DQ 可信度 badge（顺序对齐 queryPlan.selectedClasses）
             dataQuality: res.dataQuality ?? null,
+            // 类召回诊断（2026-09-16）：truncated/fallback 时渲染提示
+            classRecall: res.classRecall ?? null,
             // 拦截路径卡片对象（非流式响应回填，MessageItem 按字段存在性渲染）。
             // 修复：Phase 5.3/5.4/6.3 曾只读不写，导致 supplier360/supplierRisk/
             // graphTraversal 卡片在真实 chat 流中从未渲染（#206 审查发现）。
@@ -331,14 +371,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             agentRun: res.agentRun ?? null,
             // Phase 7 G4：中置信语义路由建议卡片（仅命中时非 null）
             suggestedAgent: res.suggestedAgent ?? null,
-            // 非流式多步：steps 数组均为「已完成」（后端仅回传数据步骤，无汇总步骤）
+            // 非流式多步：后端仅回传数据步骤（无汇总步骤），每步成败由 error 判定——
+            // C3 失败隔离后失败步骤也会回到这里（sql/data 为 null、error 非空），
+            // 一律当「已完成」会把失败渲染成成功（与流式 onStepResult 口径也必须一致）
             steps: res.steps?.map(
               (s): MultiStepStep => ({
                 stepIndex: s.stepIndex,
                 description: s.description,
                 subQuestion: s.subQuestion,
                 aggregationOnly: false,
-                status: "done",
+                status: stepStatusFromResult(s.error),
                 sql: s.sql ?? null,
                 summary: s.summary ?? null,
                 error: s.error ?? null,
@@ -386,7 +428,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   clearMessages: () => set({ messages: [], error: null }),
 
   resetSession: () => {
-    const newId = generateSessionId();
+    const { channel } = get();
+    const newId = makeSessionId(channel);
     writePersisted({ lastSessionId: newId });
     set({
       messages: [],
@@ -396,12 +439,102 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     });
   },
 
+  sendDocQa: async (question, filters) => {
+    const { sessionId, channel } = get();
+    if (channel !== "doc_qa") return;
+
+    const userMsg: ChatMessage = {
+      id: nextId(),
+      role: "user",
+      content: question,
+      timestamp: Date.now(),
+    };
+    const placeholderMsg: ChatMessage = {
+      id: nextId(),
+      role: "assistant",
+      content: "",
+      timestamp: Date.now(),
+      isStreaming: true,
+    };
+    set((state) => ({
+      messages: [...state.messages, userMsg, placeholderMsg],
+      loading: true,
+      error: null,
+    }));
+
+    try {
+      await searchDocumentsQa(
+        {
+          sessionId,
+          question,
+          topK: 10,
+          securityLevel: filters.securityLevel,
+          documentType: filters.documentType,
+        },
+        (event) => {
+          switch (event.kind) {
+            case "meta":
+              break;
+            case "citations":
+              set((state) => ({
+                messages: patchLastMessage(state.messages, { citations: event.citations }),
+              }));
+              break;
+            case "token":
+              set((state) => {
+                const last = state.messages[state.messages.length - 1];
+                return {
+                  messages: patchLastMessage(state.messages, {
+                    content: (last.content ?? "") + event.content,
+                  }),
+                };
+              });
+              break;
+            case "done":
+              set((state) => ({
+                messages: patchLastMessage(state.messages, {
+                  tokensUsed: event.tokensUsed,
+                  cost: event.cost,
+                  modelName: event.modelName ?? undefined,
+                  isStreaming: false,
+                }),
+                loading: false,
+              }));
+              break;
+            case "error":
+              set((state) => ({
+                messages: patchLastMessage(state.messages, {
+                  content: event.error,
+                  isError: true,
+                  isStreaming: false,
+                }),
+                loading: false,
+                error: event.error,
+              }));
+              break;
+          }
+        },
+      );
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : i18n.t("errors.networkError");
+      set((state) => ({
+        messages: patchLastMessage(state.messages, {
+          content: errMsg,
+          isError: true,
+          isStreaming: false,
+        }),
+        loading: false,
+        error: errMsg,
+      }));
+    }
+  },
+
   // ============ 历史会话面板 actions ============
 
-  loadSessions: async () => {
+  loadSessions: async (channel) => {
     set({ sessionsLoading: true, sessionsError: null });
     try {
-      const sessions = await apiListChatSessions();
+      const sessions = await apiListChatSessions(undefined, undefined, channel);
       set({ sessions, sessionsLoading: false });
     } catch (err) {
       const msg = err instanceof Error ? err.message : i18n.t("errors.networkError");

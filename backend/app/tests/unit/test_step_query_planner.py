@@ -139,8 +139,12 @@ class TestStepQueryPlannerPlan:
         assert result.prompt_tokens == 0  # 调用未成功，无可计量 token
         assert result.completion_tokens == 0
 
-    async def test_steps_over_max_limit_truncated(self) -> None:
-        """拆出 6 个数据步骤（>MAX_MULTI_STEP-1=4）时截断到 4。"""
+    async def test_steps_over_limit_pass_through_untruncated(self) -> None:
+        """拆出 6 个数据步（>MAX_PLAN_DATA_STEPS=4）时**原样返回**，不再截断。
+
+        截断改到执行缝（见 test_chat_multi_step 的超限拒收）。planner 必须如实
+        上报步数，否则拒收文案说不出真实步数、永远只能报 4。
+        """
         planner = StepQueryPlanner()
         many_steps = ', '.join(
             f'{{"description": "step{i}", "subQuestion": "step{i}问"}}'
@@ -151,9 +155,8 @@ class TestStepQueryPlannerPlan:
         )
         result = await planner.plan("对比各年销售额", MagicMock(), mock_client, "gpt-4o")
         assert result.plan is not None
-        # MAX_MULTI_STEP=5，含汇总步骤最多5步 → 4数据步+1汇总步
         non_agg = [s for s in result.plan.steps if not s.aggregation_only]
-        assert len(non_agg) == 4  # 截断到 4
+        assert len(non_agg) == 6  # 原样透传，不截断
 
 
 class TestStepQueryPlannerExtractJson:
@@ -299,6 +302,59 @@ class TestRuleBasedSplit:
         # sub_question 保留全文
         assert plan.steps[0].sub_question == long_chunk
 
+    # ---- 首段自然语句锚点保留（2026-09-09 回归）-----
+    # 问题以非正则成员开头词（先/找出…）引出第一指令，后续接「然后/最后」时，
+    # 首个连接词之前的锚点子句会被规则切句器整段丢弃，导致后续步骤引用悬空
+    # （如“这三个供应商”无定义 → SQL 用占位符）。修复：保留首段为第一数据步。
+
+    def test_natural_anchor_before_conjunction_preserved(self) -> None:
+        """真实回归：'先找出Top3供应商，然后…三种物料，最后分析' 首段必须成为第一步。"""
+        q = (
+            "先找出公司上半年供货量最大的三个供应商，"
+            "然后分别看这三个供应商供货量最大的三种物料分别是什么，"
+            "最后分析供货的情况"
+        )
+        plan = StepQueryPlanner.rule_based_split(q)
+        assert plan is not None
+        # 3 数据步 + 1 汇总：首段锚点不再被丢弃
+        assert len(plan.steps) == 4
+        assert plan.steps[0].sub_question == "先找出公司上半年供货量最大的三个供应商"
+        assert plan.steps[1].sub_question == "分别看这三个供应商供货量最大的三种物料分别是什么"
+        assert plan.steps[2].sub_question == "分析供货的情况"
+        assert plan.steps[-1].aggregation_only is True
+
+    def test_leading_instruction_kept_when_first_marker_is_connector(self) -> None:
+        """首个命中标记是承接词（接着/然后）时，前置自然语句视为第一指令保留。"""
+        plan = StepQueryPlanner.rule_based_split(
+            "先看各门店营收，接着对比同比，最后汇总"
+        )
+        assert plan is not None
+        assert len(plan.steps) == 4  # 3 数据步 + 1 汇总
+        assert plan.steps[0].sub_question == "先看各门店营收"
+        assert plan.steps[1].sub_question == "对比同比"
+        assert plan.steps[2].sub_question == "汇总"
+
+    def test_scope_preamble_before_shou_xian_not_turned_into_step(self) -> None:
+        """守约：'时间范围，首先A，其次B' 前置范围是上下文而非第一指令，不得成为一步。"""
+        plan = StepQueryPlanner.rule_based_split(
+            "2025年全年数据，首先查各月销量，其次查同比"
+        )
+        assert plan is not None
+        # 2 数据步 + 1 汇总；首段“2025年全年数据”仍是范围上下文，不额外拆成一步
+        assert len(plan.steps) == 3
+        assert plan.steps[0].sub_question == "查各月销量"
+        assert plan.steps[1].sub_question == "查同比"
+
+    def test_numeric_step_scope_preamble_keeps_old_behavior(self) -> None:
+        """守约：'第X步' 自带编号（自我起始标记），前置范围语句不额外拆成一步。"""
+        plan = StepQueryPlanner.rule_based_split(
+            "2025年，第一步查A，第二步查B"
+        )
+        assert plan is not None
+        assert len(plan.steps) == 3  # 2 数据步 + 1 汇总
+        assert plan.steps[0].sub_question == "查A"
+        assert plan.steps[1].sub_question == "查B"
+
     async def test_plan_explicit_returns_plan_no_llm_call(self) -> None:
         """第X步标号命中时 plan_explicit() 不调 LLM，token=0。"""
         planner = StepQueryPlanner()
@@ -315,3 +371,138 @@ class TestRuleBasedSplit:
         result = await planner.plan_explicit("对比 2024 和 2025 年的销售额")
         assert result.plan is None
         assert result.prompt_tokens == 0
+
+
+# =============================================================================
+# feat-multistep-global-filter: B 层 LLM 全局过滤抽取（2026-09-25）
+# =============================================================================
+
+class _Resp:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.modelName = "test-model"
+        self.promptTokens = 10
+        self.completionTokens = 5
+
+
+class _GlobalFilterLlm:
+    """按 system prompt 路由：抽取全局过滤 / 拆步 / 其他。"""
+
+    def __init__(self, response: str = "{}") -> None:
+        self.calls: list[list[tuple[str, str]]] = []
+        self.response = response
+
+    async def complete(self, messages, **kwargs):
+        self.calls.append([(m.role, m.content) for m in messages])
+        return _Resp(self.response)
+
+
+class TestExtractGlobalFilters:
+    """StepQueryPlanner.extract_global_filters：从多步问题中识别跨步骤共享的范围类约束。"""
+
+    async def test_happy_path_returns_global_filters(self) -> None:
+        from app.domain.multi_step_plan import GlobalFilters
+        from app.services.step_query_planner import StepQueryPlanner
+
+        payload = (
+            '{"global": ['
+            '{"table":"DWD_PURCHASE_ORDER_DTL","column":"TCLCOD_0",'
+            '"op":"IN","value":"A02,A03,A04,A05"},'
+            '{"table":"DWD_PURCHASE_ORDER_DTL","column":"INTER_COM_CODE",'
+            '"op":"=","value":"1"},'
+            '{"table":"DWD_PURCHASE_ORDER_DTL","column":"INTER_SITE_CODE",'
+            '"op":"=","value":"1"}'
+            '],"step_overrides": []}'
+        )
+        llm = _GlobalFilterLlm(response=payload)
+        planner = StepQueryPlanner()
+        result, _, _ = await planner.extract_global_filters(
+            "第一步 查询3月供货量最多3家供应商（外购+内贸+境内）...",
+            classes=[],
+            client=llm,
+            model_name="test-model",
+        )
+        assert result is not None
+        assert result.source == "llm"
+        assert "TCLCOD_0" in result.text
+        assert "INTER_COM_CODE" in result.text
+        assert len(result.constraints) >= 3
+
+    async def test_empty_global_returns_empty_filters(self) -> None:
+        """LLM 明确返回无全局约束 → 返回空 GlobalFilters（非 None，便于注入空块）。"""
+        from app.domain.multi_step_plan import GlobalFilters
+        from app.services.step_query_planner import StepQueryPlanner
+
+        llm = _GlobalFilterLlm(response='{"global": [],"step_overrides": []}')
+        planner = StepQueryPlanner()
+        result, _, _ = await planner.extract_global_filters(
+            "对比2024和2025年销售额", classes=[], client=llm, model_name="test-model",
+        )
+        assert result is not None
+        assert result.constraints == ()
+        assert result.text == ""
+
+    async def test_llm_raises_returns_none(self) -> None:
+        """LLM 调用失败 → filters 为 None（降级：仅靠 A 的措辞）；用量未知 → 0/0。"""
+        from app.services.step_query_planner import StepQueryPlanner
+
+        class _BoomLlm:
+            async def complete(self, messages, **kwargs):
+                raise RuntimeError("LLM 不可用")
+
+        planner = StepQueryPlanner()
+        filters, promptTokens, completionTokens = await planner.extract_global_filters(
+            "第一步...", classes=[], client=_BoomLlm(), model_name="test-model",
+        )
+        assert filters is None
+        assert (promptTokens, completionTokens) == (0, 0)
+
+    async def test_llm_invalid_json_returns_none(self) -> None:
+        from app.services.step_query_planner import StepQueryPlanner
+
+        llm = _GlobalFilterLlm(response="not json")
+        planner = StepQueryPlanner()
+        result = await planner.extract_global_filters(
+            "第一步...", classes=[], client=llm, model_name="test-model",
+        )
+        assert result[0] is None
+
+    async def test_returns_token_counts_for_metering(self) -> None:
+        """H1：抽取本身是一次 LLM 调用，tokens 必须交回调用方落台账（核心约束 #3）。
+
+        此前只返回 GlobalFilters，token 数在方法内被丢弃 → 调用方只能写 0/0 假审计行。
+        返回形状与同类的 ``_plan_by_llm`` 一致（(结果, promptTokens, completionTokens)）。
+        """
+        from app.services.step_query_planner import StepQueryPlanner
+
+        llm = _GlobalFilterLlm(response='{"global": [], "step_overrides": []}')
+        planner = StepQueryPlanner()
+        filters, promptTokens, completionTokens = await planner.extract_global_filters(
+            "对比2024和2025年销售额", classes=[], client=llm, model_name="test-model",
+        )
+        assert filters is not None
+        assert (promptTokens, completionTokens) == (10, 5)
+
+    async def test_token_counts_survive_parse_failure(self) -> None:
+        """H1：LLM 调成功了但解析失败（返回 None），token 仍须交回——钱已经花了。"""
+        from app.services.step_query_planner import StepQueryPlanner
+
+        llm = _GlobalFilterLlm(response="not json")
+        planner = StepQueryPlanner()
+        filters, promptTokens, completionTokens = await planner.extract_global_filters(
+            "第一步...", classes=[], client=llm, model_name="test-model",
+        )
+        assert filters is None
+        assert (promptTokens, completionTokens) == (10, 5)
+
+
+def test_system_prompt_does_not_cap_step_count() -> None:
+    """拆步 prompt 不得自带步数上限。
+
+    一旦模型被要求「最多拆 N 步」，它会在返回前自行合并/丢步——执行缝看到的
+    步数永远到不了上限，超限拒收分支形同虚设（A6 的核心陷阱）。上限只由
+    `MAX_PLAN_DATA_STEPS` 在执行缝施加，prompt 只负责如实列举。
+    """
+    from app.services.step_query_planner import _STEP_PLANNER_SYSTEM_PROMPT
+
+    assert "最多拆" not in _STEP_PLANNER_SYSTEM_PROMPT

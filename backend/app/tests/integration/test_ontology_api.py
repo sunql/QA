@@ -9,6 +9,8 @@ Neo4j 和 Milvus 通过 monkeypatch mock，测试不依赖外部服务；
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from httpx import AsyncClient
 
@@ -29,7 +31,7 @@ class _MockNeo4jDriver:
             pass
 
         def run(self, cql: str, **params: object) -> list[object]:
-            _neo4j_called.append(cql[:200])
+            _neo4j_called.append(cql[:400])
             # 返回一个符合 neo4j.IRecord 签名的 mock
             class _Record:
                 def __init__(self, data: dict) -> None:
@@ -95,6 +97,16 @@ def mockNeo4jAndMilvus(monkeypatch: pytest.MonkeyPatch) -> None:
 # =============================================================================
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _waitFor(check, timeout: float = 10.0) -> bool:
+    """轮询等待后台向量同步任务落地（自动同步为 fire-and-forget 后台任务）。"""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if check():
+            return True
+        await asyncio.sleep(0.05)
+    return check()
 
 
 async def testListClassesEmpty(client: AsyncClient) -> None:
@@ -236,8 +248,8 @@ async def testUpdateClassSetsParent(client: AsyncClient) -> None:
     assert response.status_code == 200
     assert response.json()["parentClassId"] == parentId
     cqls = "\n".join(_neo4j_called)
-    # 更新继承边：先删旧边再 MERGE 新边
-    assert "MATCH (c:Class {id: $id})-[r:SUBCLASS_OF]->() DELETE r" in cqls
+    # 更新继承边：先删旧边再 MERGE 新边（unified_id 格式）
+    assert "MATCH (c:Class {unified_id: $uid})-[r:SUBCLASS_OF]->() DELETE r" in cqls
     assert "MERGE (c)-[:SUBCLASS_OF]->(p)" in cqls
 
 
@@ -687,8 +699,8 @@ async def testUpdateClassSyncsNeo4j(client: AsyncClient) -> None:
     headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
-    # 更新触发 MERGE 节点属性同步
-    assert "MERGE (c:Class {id: $id})" in cqls
+    # 更新触发 MERGE 节点属性同步（unified_id 格式）
+    assert "MERGE (c:Class {unified_id: $unified_id})" in cqls
     assert "c.name = $name" in cqls
     assert "c.sourceTable = $sourceTable" in cqls
 
@@ -736,7 +748,8 @@ async def testUpdatePropertySyncsNeo4j(client: AsyncClient) -> None:
     headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
-    assert "MERGE (p:Property {id: $id})" in cqls
+    # unified_id 格式
+    assert "MERGE (p:Property {unified_id: $unified_id})" in cqls
     assert "p.isPrimaryKey = $isPrimaryKey" in cqls
 
 
@@ -840,7 +853,8 @@ async def testUpdateMetricSyncsNeo4j(client: AsyncClient) -> None:
     headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
     )
     cqls = "\n".join(_neo4j_called)
-    assert "MERGE (m:Metric {id: $id})" in cqls
+    # unified_id 格式
+    assert "MERGE (m:Metric {unified_id: $unified_id})" in cqls
     assert "m.aggFunction = $aggFunction" in cqls
 
 
@@ -1039,3 +1053,276 @@ async def test_ontology_class_owner_dept_can_modify_cross_dept_blocked(
         headers={"X-User-Roles": "admin"},
     )
     assert adminDel.status_code == 204
+
+
+async def testPropertyReadExposesAllowedValues(client: AsyncClient) -> None:
+    """GET /ontology/properties/{id} 必须返回 allowed_values 字段。
+
+    回归：OntologyPropertyRead 当前不含 allowed_values → 前端管理页看不到
+    LLM 采纳的值，用户反馈「我哪里去看」。
+    """
+    cls = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "OrderStatus", "sourceTable": "t_order_status"},
+    )
+    classId = cls.json()["id"]
+    prop = await client.post(
+        "/api/v1/ontology/properties",
+        json={"classId": classId, "propertyName": "status", "dataType": "STRING"},
+    )
+    propId = prop.json()["id"]
+
+    # 直接通过 PUT 设置 allowed_values（后续 testPropertyUpdateAcceptsAllowedValues 验证）
+    await client.put(
+        f"/api/v1/ontology/properties/{propId}",
+        json={"allowedValues": ["NEW", "CONFIRMED", "CLOSED"]},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+    )
+
+    get1 = await client.get(f"/api/v1/ontology/properties/{propId}")
+    assert get1.status_code == 200
+    body = get1.json()
+    assert "allowedValues" in body, (
+        f"OntologyPropertyRead 必须暴露 allowedValues，实际 keys: {list(body.keys())}"
+    )
+    assert body["allowedValues"] == ["NEW", "CONFIRMED", "CLOSED"]
+
+    # listPropertiesByClass 同样要暴露
+    listed = await client.get(f"/api/v1/ontology/classes/{classId}/properties")
+    assert listed.status_code == 200
+    listedBody = listed.json()
+    assert any(p["id"] == propId and p.get("allowedValues") == ["NEW", "CONFIRMED", "CLOSED"] for p in listedBody), (
+        f"listPropertiesByClass 返回也必须含 allowedValues，实际: {listedBody}"
+    )
+
+
+async def testPropertyUpdateAcceptsAllowedValues(client: AsyncClient) -> None:
+    """PUT /ontology/properties/{id} 必须接受 allowedValues 字段。
+
+    让本体属性管理页能手动修正 LLM 采纳的值（含单引号的值必须 422）。
+    """
+    cls = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "ShippingMode", "sourceTable": "t_shipping_mode"},
+    )
+    classId = cls.json()["id"]
+    prop = await client.post(
+        "/api/v1/ontology/properties",
+        json={"classId": classId, "propertyName": "mode", "dataType": "STRING"},
+    )
+    propId = prop.json()["id"]
+
+    # 合法值 → 200
+    ok = await client.put(
+        f"/api/v1/ontology/properties/{propId}",
+        json={"allowedValues": ["AIR", "SEA", "LAND"]},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+    )
+    assert ok.status_code == 200, f"合法 allowedValues 应 200，实际: {ok.status_code} {ok.text}"
+    assert ok.json()["allowedValues"] == ["AIR", "SEA", "LAND"]
+
+    # 单引号 → 422（与 apply-suggestion 一致的 SQL 注入防护）
+    bad = await client.put(
+        f"/api/v1/ontology/properties/{propId}",
+        json={"allowedValues": ["AIR", "CON'TAINED"]},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+    )
+    assert bad.status_code == 422, (
+        f"含单引号的 allowedValues 应 422，实际: {bad.status_code} {bad.text}"
+    )
+
+    # 空数组 → 200（视作清空值域；与 None 不修改不同）
+    empty = await client.put(
+        f"/api/v1/ontology/properties/{propId}",
+        json={"allowedValues": []},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+    )
+    assert empty.status_code == 200
+    assert empty.json()["allowedValues"] == []
+
+    # null → 清空（model_dump exclude_unset 时不传，PUT 其他字段不受影响；显式 null 应允许）
+    clear = await client.put(
+        f"/api/v1/ontology/properties/{propId}",
+        json={"allowedValues": None},
+        headers={"X-User-Id": "test-admin", "X-User-Roles": "admin"},
+    )
+    assert clear.status_code == 200, f"清空 allowedValues 应 200，实际: {clear.status_code} {clear.text}"
+    assert clear.json()["allowedValues"] is None
+
+# =============================================================================
+# Embedding 自动同步（createClass/updateClass）+ 手动同步 API（向量对账）
+#
+# 背景：Milvus 类向量与 PG 本体长期漂移（96 类仅 27 条向量，PurchaseOrder 缺失），
+# chat 链路 _selectRelevantClasses 按向量召回裁剪 schema，向量缺失 = 类对问答不可见。
+# =============================================================================
+
+
+def _patchEmbeddingGen(
+    monkeypatch: pytest.MonkeyPatch, texts: list[str]
+) -> None:
+    """stub 掉 API 模块共享 EmbeddingService 的向量生成（记录输入文本）。"""
+    import app.api.v1.ontology as ontology_api
+
+    async def fakeGenerateEmbedding(text: str) -> list[float]:
+        texts.append(text)
+        return [0.1] * 1024
+
+    monkeypatch.setattr(
+        ontology_api._embeddingService, "generateEmbedding", fakeGenerateEmbedding
+    )
+
+
+def _recordMilvus(
+    monkeypatch: pytest.MonkeyPatch,
+    inserted: list[dict],
+) -> None:
+    import app.services.ontology_service as ontology_module
+
+    monkeypatch.setattr(
+        ontology_module.milvus,
+        "insertEmbeddings",
+        lambda rows: inserted.extend(rows),
+    )
+
+
+async def testCreateClassAutoSyncsEmbedding(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    texts: list[str] = []
+    inserted: list[dict] = []
+    _patchEmbeddingGen(monkeypatch, texts)
+    _recordMilvus(monkeypatch, inserted)
+
+    resp = await client.post(
+        "/api/v1/ontology/classes",
+        json={
+            "className": "AutoSyncCls",
+            "classAlias": "自动同步类",
+            "description": "创建时自动同步向量",
+            "sourceTable": "t_auto_sync",
+        },
+    )
+    assert resp.status_code == 201
+    classId = resp.json()["id"]
+
+    # 自动同步是后台任务：轮询等待落地
+    assert await _waitFor(lambda: len(inserted) == 1), (
+        f"创建后应同步 1 条类向量，实际 {len(inserted)}"
+    )
+    row = inserted[0]
+    assert row["ontology_id"] == classId
+    assert row["type"] == "class"
+    assert row["name"] == "AutoSyncCls"
+    assert len(texts) == 1
+    # 向量文本含类名/别名/描述（与 backfill 脚本同口径）
+    assert "AutoSyncCls" in texts[0]
+    assert "自动同步类" in texts[0]
+
+
+async def testUpdateClassAutoSyncsEmbedding(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    texts: list[str] = []
+    inserted: list[dict] = []
+    _patchEmbeddingGen(monkeypatch, texts)
+    _recordMilvus(monkeypatch, inserted)
+
+    create = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "UpdSyncCls", "sourceTable": "t_upd_sync"},
+    )
+    assert create.status_code == 201
+    classId = create.json()["id"]
+
+    inserted.clear()
+    texts.clear()
+    resp = await client.put(
+        f"/api/v1/ontology/classes/{classId}",
+        json={"classAlias": "更新后别名", "description": "更新后描述"},
+    )
+    assert resp.status_code == 200
+    assert await _waitFor(lambda: len(inserted) == 1), "更新后应重新同步类向量"
+    assert inserted[0]["ontology_id"] == classId
+    assert "更新后别名" in texts[0]
+
+
+async def testCreateClassEmbeddingFailureIsBestEffort(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.api.v1.ontology as ontology_api
+
+    async def boom(text: str) -> list[float]:
+        raise RuntimeError("embedding service down")
+
+    monkeypatch.setattr(ontology_api._embeddingService, "generateEmbedding", boom)
+
+    resp = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "SyncFailCls", "sourceTable": "t_sync_fail"},
+    )
+    # 向量同步失败不阻塞本体创建（与 Neo4j best-effort 同策略）
+    assert resp.status_code == 201
+
+
+async def testSyncClassEmbeddingManually(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    texts: list[str] = []
+    inserted: list[dict] = []
+    _patchEmbeddingGen(monkeypatch, texts)
+    _recordMilvus(monkeypatch, inserted)
+
+    create = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "ManualSyncCls", "sourceTable": "t_manual_sync"},
+    )
+    classId = create.json()["id"]
+
+    inserted.clear()
+    resp = await client.post(f"/api/v1/ontology/classes/{classId}/embedding")
+    assert resp.status_code == 204
+    assert len(inserted) == 1
+    assert inserted[0]["ontology_id"] == classId
+
+
+async def testSyncClassEmbeddingNotFound(client: AsyncClient) -> None:
+    resp = await client.post("/api/v1/ontology/classes/999999/embedding")
+    assert resp.status_code == 404
+
+
+async def testSyncMissingEmbeddings(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    texts: list[str] = []
+    inserted: list[dict] = []
+    _patchEmbeddingGen(monkeypatch, texts)
+    _recordMilvus(monkeypatch, inserted)
+
+    classA = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "MissingSyncA", "sourceTable": "t_ms_a"},
+    )
+    classB = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "MissingSyncB", "sourceTable": "t_ms_b"},
+    )
+    idA, idB = classA.json()["id"], classB.json()["id"]
+
+    # 模拟 Milvus 现状：A 有向量、B 缺失
+    import app.services.ontology_service as ontology_module
+
+    monkeypatch.setattr(
+        ontology_module.milvus,
+        "listAllEmbeddings",
+        lambda: [{"ontology_id": idA, "type": "class", "id": 1}],
+    )
+
+    inserted.clear()
+    resp = await client.post("/api/v1/ontology/embeddings/sync-missing")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["missingCount"] == 1
+    assert data["syncedCount"] == 1
+    assert data["failedCount"] == 0
+    assert len(inserted) == 1
+    assert inserted[0]["ontology_id"] == idB

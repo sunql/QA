@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import {
   Table,
   Button,
@@ -10,14 +10,22 @@ import {
   Tag,
   Tooltip,
   Popconfirm,
-  message,
+  App,
 } from "antd";
-import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import {
+  ApiOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  SyncOutlined,
+} from "@ant-design/icons";
 import {
   createClass,
   updateClass,
   deleteClass,
   listClassVersions,
+  syncClassEmbedding,
+  syncMissingEmbeddings,
+  syncMissingGraph,
 } from "../../api/ontology";
 import type {
   ObjectType,
@@ -74,6 +82,10 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<OntologyClass | null>(null);
   const [form] = Form.useForm<ClassFormValues>();
+  // 动态主题：App.useApp() 返回的 message 能跟随 ConfigProvider theme/消息样式，
+  // 替代从 antd 顶层 import 的静态 message（5.x 起会有"Static function can not
+  // consume context"的运行时警告）。
+  const { message } = App.useApp();
   // 版本管理（Phase 6）：版本切换弹窗
   const [versionsModalOpen, setVersionsModalOpen] = useState(false);
   const [versions, setVersions] = useState<OntologyClass[]>([]);
@@ -86,6 +98,96 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
   );
   const resetFilters = useCallback(() => setFilters({}), []);
   const filteredClasses = useMemo(() => filterClasses(classes, filters), [classes, filters]);
+  // 向量同步：单条进行中的类 id 集合 + 批量对账进行中标记
+  const [syncingIds, setSyncingIds] = useState<number[]>([]);
+  const [batchSyncing, setBatchSyncing] = useState(false);
+  const [graphSyncing, setGraphSyncing] = useState(false);
+
+  const handleSyncEmbedding = useCallback(
+    async (record: OntologyClass) => {
+      setSyncingIds((prev) => [...prev, record.id]);
+      try {
+        await syncClassEmbedding(record.id);
+        message.success(
+          t("forms.ontology.syncEmbeddingSuccess", { name: record.className })
+        );
+      } catch {
+        // 错误已由拦截器提示
+      } finally {
+        setSyncingIds((prev) => prev.filter((id) => id !== record.id));
+      }
+    },
+    [message, t]
+  );
+
+  const handleSyncMissing = useCallback(async () => {
+    setBatchSyncing(true);
+    try {
+      const result = await syncMissingEmbeddings();
+      const missingTotal = result.missingCount + result.missingPropertyCount;
+      if (missingTotal === 0) {
+        message.info(
+          t("forms.ontology.syncMissingNone", {
+            total: result.totalClasses,
+            propTotal: result.totalProperties,
+          })
+        );
+      } else if (result.failedCount === 0 && result.failedPropertyCount === 0) {
+        message.success(
+          t("forms.ontology.syncMissingSuccess", {
+            classSynced: result.missingCount,
+            propSynced: result.missingPropertyCount,
+          })
+        );
+      } else {
+        message.warning(
+          t("forms.ontology.syncMissingPartial", {
+            synced: result.syncedCount,
+            failed: result.failedCount + result.failedPropertyCount,
+          })
+        );
+      }
+    } catch {
+      // 错误已由拦截器提示
+    } finally {
+      setBatchSyncing(false);
+    }
+  }, [message, t]);
+
+  const handleSyncGraph = useCallback(async () => {
+    setGraphSyncing(true);
+    try {
+      const result = await syncMissingGraph();
+      const missingTotal =
+        result.missingClassCount +
+        result.missingPropertyCount +
+        result.missingJoinCount +
+        result.missingRelationCount;
+      if (missingTotal === 0) {
+        message.info(t("forms.ontology.syncGraphNone"));
+      } else if (result.failedCount === 0) {
+        message.success(
+          t("forms.ontology.syncGraphSuccess", {
+            classes: result.missingClassCount,
+            properties: result.missingPropertyCount,
+            edges:
+              result.missingJoinCount + result.missingRelationCount,
+          })
+        );
+      } else {
+        message.warning(
+          t("forms.ontology.syncGraphPartial", {
+            synced: missingTotal - result.failedCount,
+            failed: result.failedCount,
+          })
+        );
+      }
+    } catch {
+      // 错误已由拦截器提示
+    } finally {
+      setGraphSyncing(false);
+    }
+  }, [message, t]);
   const classFilterFields: FilterField[] = [
     { key: "className", label: t("forms.ontology.classLabels.className") },
     { key: "classAlias", label: t("forms.ontology.classLabels.classAlias") },
@@ -108,15 +210,23 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
     void load();
   }, [load]);
 
+  // 把「写入表单的值」缓存到 ref，写入时机放到 Modal.afterOpenChange(true) 里。
+  // 同步 setFieldsValue 在 Modal destroyOnHidden 重挂载时序里会触发 antd 警告
+  // "Instance created by useForm is not connected to any Form element"——
+  // jsdom 不复现，但真机会在 setTimeout 里抛 warn。
+  const pendingFormValues = useRef<Partial<ClassFormValues> | null>(null);
+
   const openCreate = () => {
     setEditing(null);
-    void form.setFieldsValue(EMPTY_CLASS_FORM);
+    // destroyOnHidden 下每次打开都是全新表单（initialValues 已是空），
+    // 不再经 afterOpenChange 重置——否则动画期间用户已输入的字符会被抹掉
+    pendingFormValues.current = null;
     setModalOpen(true);
   };
 
   const openEdit = (record: OntologyClass) => {
     setEditing(record);
-    void form.setFieldsValue({
+    pendingFormValues.current = {
       className: record.className,
       classAlias: record.classAlias ?? "",
       description: record.description ?? "",
@@ -124,7 +234,7 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
       parentClassId: record.parentClassId ?? undefined,
       objectType: record.objectType ?? undefined,
       objectOwner: record.objectOwner ?? "",
-    });
+    };
     setModalOpen(true);
   };
 
@@ -281,7 +391,7 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
     },
     {
       title: t("forms.ontology.classColumns.actions"),
-      width: 160,
+      width: 230,
       render: (_: unknown, record: OntologyClass) => (
         <Space>
           <Button size="small" onClick={() => openEdit(record)}>
@@ -289,6 +399,14 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
           </Button>
           <Button size="small" onClick={() => void openVersions(record)}>
             {t("common.version")}
+          </Button>
+          <Button
+            size="small"
+            icon={<SyncOutlined />}
+            loading={syncingIds.includes(record.id)}
+            onClick={() => void handleSyncEmbedding(record)}
+          >
+            {t("forms.ontology.syncEmbedding")}
           </Button>
           <Popconfirm
             title={t("forms.ontology.deleteConfirm")}
@@ -308,6 +426,20 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
         <span />
         <Space>
+          <Button
+            icon={<SyncOutlined />}
+            loading={batchSyncing}
+            onClick={() => void handleSyncMissing()}
+          >
+            {t("forms.ontology.syncMissingEmbeddings")}
+          </Button>
+          <Button
+            icon={<ApiOutlined />}
+            loading={graphSyncing}
+            onClick={() => void handleSyncGraph()}
+          >
+            {t("forms.ontology.syncGraphButton")}
+          </Button>
           <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             {t("common.refresh")}
           </Button>
@@ -329,7 +461,15 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
         onOk={() => void handleSubmit()}
         onCancel={() => setModalOpen(false)}
         width={480}
-        destroyOnClose
+        destroyOnHidden
+        afterOpenChange={(open) => {
+          // 弹窗完全打开后再写值——此时 Form 子组件已挂载，
+          // setFieldsValue 不会再触发 "useForm not connected" 警告。
+          if (open && pendingFormValues.current) {
+            void form.setFieldsValue(pendingFormValues.current);
+            pendingFormValues.current = null;
+          }
+        }}
       >
         <Form form={form} layout="vertical" initialValues={EMPTY_CLASS_FORM}>
           <Form.Item

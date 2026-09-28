@@ -28,7 +28,11 @@ from app.tests.services.conftest import _ADMIN
 
 
 class FakeSchemaService:
-    async def introspectAndCache(self, session, ds):
+    def __init__(self) -> None:
+        self.introspectedOwners: list[str | None] = []
+
+    async def introspectAndCache(self, session, ds, owner: str | None = None):
+        self.introspectedOwners.append(owner)
         return None
 
     def buildResponse(self, cache):
@@ -57,6 +61,9 @@ class FakeOntologyService:
         self._classes = []
         self._properties = []
         self._joins = []
+        # 向量同步记录：批量导入应抑制逐类后台同步、改走整批补齐
+        self.createClassSyncEmbeddingFlags: list[bool] = []
+        self.batchSyncCalls: int = 0
 
     async def listClasses(self, session, includeExpired=False):
         return list(self._classes)
@@ -64,9 +71,12 @@ class FakeOntologyService:
     async def listPropertiesByClass(self, session, classId):
         return [p for p in self._properties if p.class_id == classId]
 
-    async def createClass(self, session, dto, actor):
+    async def createClass(
+        self, session, dto, actor=None, actor_departments=None, sync_embedding=True
+    ):
         from app.domain.models import OntologyClass
 
+        self.createClassSyncEmbeddingFlags.append(sync_embedding)
         self._next_id += 1
         cls = OntologyClass(
             id=self._next_id,
@@ -76,7 +86,9 @@ class FakeOntologyService:
         self._classes.append(cls)
         return cls
 
-    async def createProperty(self, session, dto, actor=None):
+    async def createProperty(
+        self, session, dto, actor=None, actor_departments=None
+    ):
         from app.domain.models import OntologyProperty
 
         self._next_id += 1
@@ -89,13 +101,16 @@ class FakeOntologyService:
         self._properties.append(prop)
         return prop
 
-    async def createJoin(self, session, dto):
+    async def createJoin(self, session, dto, actor=None, actor_departments=None):
         from app.domain.models import OntologyJoin
 
         self._next_id += 1
         join = OntologyJoin(id=self._next_id)
         self._joins.append(join)
         return join
+
+    def syncMissingClassEmbeddingsBestEffort(self):
+        self.batchSyncCalls += 1
 
 
 async def _seed_datasource(dbSession: AsyncSession) -> DataSource:
@@ -696,7 +711,9 @@ async def test_execute_import_recovers_session_after_property_db_failure(
         async def listPropertiesByClass(self, session, classId):
             return []
 
-        async def createClass(self, session, dto, actor=None):
+        async def createClass(
+            self, session, dto, actor=None, actor_departments=None, sync_embedding=True
+        ):
             cls = OntologyClass(class_name=dto.class_name, source_table=dto.source_table)
             session.add(cls)
             await session.commit()
@@ -706,7 +723,9 @@ async def test_execute_import_recovers_session_after_property_db_failure(
             )
             return cls
 
-        async def createProperty(self, session, dto, actor=None):
+        async def createProperty(
+        self, session, dto, actor=None, actor_departments=None
+    ):
             self._property_calls += 1
             if self._property_calls == 2:
                 # property_name=None 违反 NOT NULL：commit 失败后会话进入 pending rollback
@@ -727,7 +746,7 @@ async def test_execute_import_recovers_session_after_property_db_failure(
             await session.commit()
             return prop
 
-        async def createJoin(self, session, dto):
+        async def createJoin(self, session, dto, actor=None, actor_departments=None):
             return None
 
     svc = LocalImportService(
@@ -759,3 +778,70 @@ async def test_execute_import_recovers_session_after_property_db_failure(
     assert result.created_classes == 2
     assert result.created_properties == 2  # orders.id + customers.id 成功
     assert result.success is False
+
+
+@pytest.mark.asyncio
+async def test_execute_import_batches_embedding_sync(dbSession: AsyncSession):
+    """sync_embeddings=True：逐类后台同步被抑制，改走整批补齐（单次 flush）。"""
+    ds = await _seed_datasource(dbSession)
+    ontology = FakeOntologyService()
+    svc = LocalImportService(
+        schema_service=FakeSchemaService(),
+        ontology_service=ontology,
+    )
+    preview = await svc.build_preview(
+        dbSession, datasource_id=ds.id, rules=ImportRuleConfig()
+    )
+    request = ImportExecuteRequest(
+        confirmed_classes=preview.proposed_classes,
+        confirmed_joins=[],
+        conflict_resolutions=[],
+        sync_embeddings=True,
+    )
+
+    result = await svc.execute_import(
+        dbSession,
+        datasource_id=ds.id,
+        request=request,
+        created_by="admin",
+        actor=_ADMIN,
+    )
+
+    assert result.created_classes == 1
+    # 逐类后台同步必须抑制（逐条 syncEmbedding 在当前 Milvus 部署下单次 10-25s）
+    assert ontology.createClassSyncEmbeddingFlags == [False]
+    # 整批补齐恰好触发一次
+    assert ontology.batchSyncCalls == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_import_sync_embeddings_false_skips_batch_sync(
+    dbSession: AsyncSession,
+):
+    """sync_embeddings=False：显式跳过向量同步（连整批补齐也不触发）。"""
+    ds = await _seed_datasource(dbSession)
+    ontology = FakeOntologyService()
+    svc = LocalImportService(
+        schema_service=FakeSchemaService(),
+        ontology_service=ontology,
+    )
+    preview = await svc.build_preview(
+        dbSession, datasource_id=ds.id, rules=ImportRuleConfig()
+    )
+    request = ImportExecuteRequest(
+        confirmed_classes=preview.proposed_classes,
+        confirmed_joins=[],
+        conflict_resolutions=[],
+        sync_embeddings=False,
+    )
+
+    result = await svc.execute_import(
+        dbSession,
+        datasource_id=ds.id,
+        request=request,
+        created_by="admin",
+        actor=_ADMIN,
+    )
+
+    assert result.created_classes == 1
+    assert ontology.batchSyncCalls == 0

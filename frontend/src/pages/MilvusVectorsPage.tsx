@@ -116,7 +116,7 @@ export default function MilvusVectorsPage() {
     <div style={{ overflow: "hidden" }}>
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Col>
-          <Card bodyStyle={{ padding: "12px 24px" }}>
+          <Card styles={{ body: { padding: "12px 24px" } }}>
             <Statistic
               title="Class"
               value={stats?.class ?? 0}
@@ -125,7 +125,7 @@ export default function MilvusVectorsPage() {
           </Card>
         </Col>
         <Col>
-          <Card bodyStyle={{ padding: "12px 24px" }}>
+          <Card styles={{ body: { padding: "12px 24px" } }}>
             <Statistic
               title="Property"
               value={stats?.property ?? 0}
@@ -134,7 +134,7 @@ export default function MilvusVectorsPage() {
           </Card>
         </Col>
         <Col>
-          <Card bodyStyle={{ padding: "12px 24px" }}>
+          <Card styles={{ body: { padding: "12px 24px" } }}>
             <Statistic
               title="Metric"
               value={stats?.metric ?? 0}
@@ -160,7 +160,7 @@ export default function MilvusVectorsPage() {
         <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadRows()} />
       </Space>
 
-      <Card bodyStyle={{ padding: 0 }} style={{ overflow: "hidden" }}>
+      <Card styles={{ body: { padding: 0 } }} style={{ overflow: "hidden" }}>
         <Table
           rowKey="ontology_id"
           loading={loading}

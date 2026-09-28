@@ -30,7 +30,7 @@ def _datasource() -> DataSource:
         host="h",
         port=1521,
         database_name="svc",
-        username="u",
+        username="ZJTH",
         password_encrypted=encryptApiKey("secret"),
         is_active=True,
         is_default=True,
@@ -76,6 +76,8 @@ async def _seedDriftDataset(session) -> int:
     session.add(
         SchemaCache(
             datasource_id=ds.id,
+            # Oracle 默认缓存行以 UPPER(username) 为键（_defaultSchemaName 语义）
+            schema_name=ds.username,
             schema_data=schemaData,
             schema_version=_schemaVersion(schemaData),
         )
@@ -137,6 +139,7 @@ class TestOntologyDriftApi:
         dbSession.add(
             SchemaCache(
                 datasource_id=ds.id,
+                schema_name=ds.username,
                 schema_data=schemaData,
                 schema_version=_schemaVersion(schemaData),
             )

@@ -26,6 +26,24 @@ user-facing 中文字面量集中。本模块**仅含字面量**，不引入 i18
 # =============================================================================
 
 MSG_INTERNAL_ERROR = "服务内部错误，请稍后重试"
+# 解析出的模型配置无法构造 LLM 客户端（无 API key，含各 provider 的 env 回退）
+# 时抛 LLMUnavailableError（503）的文案，与 doc_qa/wiki_qa 同口径。
+MSG_LLM_UNAVAILABLE = "未配置可用的 LLM，无法回答该问题"
+
+# 多步查询降级收尾（无汇总步骤）：有数据步骤成功 / 全部失败。`{done}`/`{total}`
+# 为本轮完成的数据步骤数与总步骤数，用 str.format 注入。
+MSG_MULTI_STEP_DEGRADE_PARTIAL = (
+    "多步查询已完成 {done}/{total} 个数据步骤，但汇总分析失败，请重试或简化您的问题。"
+)
+MSG_MULTI_STEP_DEGRADE_FAILED = "多步查询执行过程中出现异常，请重试或简化您的问题。"
+
+# 拆步结果超出数据步上限：执行缝拒收（不是执行失败）。`{steps}` 是模型要求的
+# **真实**步数、`{limit}` 是上限。刻意报出真实步数——只说「问题太复杂」用户无从
+# 判断该缩到什么程度，给出步数才知道要砍掉几项。
+MSG_PLAN_TOO_MANY_STEPS = (
+    "该问题需要拆解为 {steps} 步，超出 {limit} 步上限，"
+    "请聚焦单一维度提问（如先分析客户层面原因）。"
+)
 # MSG_RATE_LIMITED 在 app/domain/error_messages.py（基础设施层）
 
 # 消息角色 → 中文说话人标签（MessageList 渲染使用）
@@ -123,6 +141,12 @@ MSG_DQ_EVAL_TARGET_COLUMN_REQUIRED = (
 )
 MSG_DQ_EVAL_DATASOURCE_NOT_FOUND = "评估 DQ 规则 {ruleId} 找不到关联业务数据源"
 MSG_DQ_EVAL_RULE_TYPE_UNSUPPORTED = "不支持的数据质量规则类型: {ruleType}"
+# feat-eval-fail-reason (2026-09-15)：FAIL 时填 message，让前端能看到「为什么没通过」。
+# 模板：实际通过率 < 阈值；总 N 条 / 通过 M 条
+MSG_DQ_EVAL_FAIL_REASON = (
+    "未通过：实际通过率 {passRate}% < 阈值 {threshold}%"
+    "（总 {total} 条，通过 {passed} 条）"
+)
 
 
 # =============================================================================
@@ -148,6 +172,8 @@ MSG_ENTITY_MAPPING_EXISTS = (
     "{entityType} enterprise_key={enterpriseKey} source_system={sourceSystem}"
 )
 MSG_ENTITY_MAPPING_DATE_RANGE = "生效日期不得晚于失效日期: {effectiveDate} > {expiryDate}"
+MSG_ENTITY_MAPPING_BULK_TOO_LARGE = "批量导入单次最多 {maxRows} 行，实际 {actualRows} 行"
+MSG_ENTITY_MAPPING_BULK_EMPTY = "批量导入请求体为空"
 
 
 # =============================================================================
@@ -216,8 +242,15 @@ MSG_EMBEDDING_PROVIDER_ACTIVE_CONFLICT = "同时存在多个待激活的 embeddi
 # 运行时维度守卫：激活的 embedding 服务输出维度必须与 Milvus 集合一致，否则语义检索
 # 插入/查询会静默错乱。提示走重建 + 回填流程（scripts/backfill_milvus_embeddings.py）。
 MSG_EMBEDDING_PROVIDER_DIMENSION_MISMATCH = (
-    "embedding 服务 {name} 输出维度 {dimension} 与 Milvus 集合维度 {milvusDimension} 不一致；"
+    "embedding 服务 {name}（来源 {source}）输出维度 {dimension} 与 Milvus 集合维度 {milvusDimension} 不一致；"
     "请重建集合为 {dimension} 维并回填（scripts/backfill_milvus_embeddings.py）"
+)
+# provider_type 守卫（H7）：该列此前是死元数据（工厂从不读，任何值都按 OpenAI 兼容
+# 处理）。已知集合 = KNOWN_PROVIDER_TYPES，与前端 types/embeddingProvider.ts 一致。
+MSG_EMBEDDING_PROVIDER_TYPE_UNKNOWN = (
+    "embedding 服务 {name}（id={id}）的 provider_type={providerType} 不在已知集合内"
+    "（已知：{known}）；未知类型不再静默按 OpenAI 兼容处理，请改为已知值"
+    "（前端下拉与后端 KNOWN_PROVIDER_TYPES 需同步扩展）"
 )
 
 
@@ -247,6 +280,12 @@ MSG_ONTOLOGY_JOIN_COLUMN_COUNT_MISMATCH = (
     "源列与目标列数量必须一致（source_columns 与 target_columns 逐列配对）"
 )
 MSG_ONTOLOGY_JOIN_DUP = "该关联关系已存在（相同源类/源列 → 目标类/目标列）"
+
+# 语义关系（ontology_relation）错误
+MSG_ONTOLOGY_RELATION_NOT_FOUND = "OntologyRelation id={id} 不存在"
+MSG_ONTOLOGY_RELATION_DUP = "该语义关系已存在（相同源类 → 目标类 → 关系类型）"
+MSG_ONTOLOGY_RELATION_SELF = "源类与目标类不能相同（语义关系必须是两个不同类之间）"
+MSG_ONTOLOGY_RELATION_INVALID_TYPE = "不支持的关系类型: {relationType}"
 
 # 向量检索 / 同步（Milvus）
 MSG_VECTOR_SEARCH_FAILED = "向量检索失败"
@@ -296,6 +335,117 @@ MSG_NL2SQL_SQL_FAILED = "无法生成 SQL"
 MSG_TERM_DICT_TERM_EXISTS = "术语「{term}」已存在"
 MSG_TERM_DICT_NOT_FOUND = "术语 id={id} 不存在"
 
+# ---- Wiki 知识管理（feat-wiki-knowledge）----
+MSG_WIKI_PAGE_NOT_FOUND = "知识条目「{pageId}」不存在"
+MSG_WIKI_PAGE_DUPLICATE = "知识条目 ID「{pageId}」已存在"
+MSG_WIKI_PAGE_DUPLICATE_SKIPPED = "知识条目 ID「{pageId}」已存在且正文一致，本次导入跳过"
+MSG_WIKI_PAGE_DIMENSION_INVALID = "知识维度「{dimension}」不合法"
+MSG_WIKI_PAGE_STAGE_INVALID = "知识结构阶段「{stage}」不合法"
+MSG_WIKI_PAGE_STATUS_INVALID = "知识条目状态「{status}」不合法"
+MSG_WIKI_PAGE_ID_INVALID = "知识条目 ID 不能为空，且仅允许字母、数字、连字符与下划线"
+MSG_WIKI_IMPORT_TASK_TYPE_INVALID = "导入任务类型「{taskType}」不合法"
+MSG_WIKI_IMPORT_SOURCE_TYPE_INVALID = "导入来源类型「{sourceType}」不合法"
+
+# --- M8：Agent 工具（wiki_search / wiki_read / rule_evaluate / coverage_status）---
+MSG_WIKI_AGENT_PAGE_REF_NOT_FOUND = "没有找到与「{ref}」匹配的知识条目"
+MSG_WIKI_AGENT_PAGE_REF_AMBIGUOUS = "「{ref}」匹配到 {count} 条知识，请指明具体条目"
+MSG_WIKI_AGENT_RULE_NO_EXAMPLES = (
+    "知识条目「{pageId}」的规则没有存 dry-run 样例，无法试跑 —— "
+    "请先在条目上补充样例（input + expectedOutput.matched）"
+)
+
+# --- M2：导入任务 + LLM 调用层 ---
+MSG_WIKI_LLM_MODEL_UNUSABLE = "模型「{modelName}」无可用凭据，无法调用"
+MSG_WIKI_LLM_EMPTY_RESPONSE = "AI 返回内容为空，请稍后重试"
+MSG_WIKI_LLM_PARSE_ERROR = "AI 返回格式无法解析，请稍后重试"
+MSG_WIKI_IMPORT_NO_DRAFTS = "未解析出任何可导入的知识条目，请检查内容中的标题层级"
+MSG_WIKI_IMPORT_MODEL_REQUIRED = "开启自动分类时必须指定处理模型（modelId）"
+MSG_WIKI_IMPORT_ALL_FAILED = "全部条目导入失败，请检查草稿内容或 pageId 是否重复"
+MSG_WIKI_IMPORT_ABORTED = "导入过程中发生未预期错误，任务已中止，请查看服务端日志"
+MSG_WIKI_IMPORT_CLASSIFY_INCOMPLETE = (
+    "{count} 条知识未能完成自动分类（已按未分类入库），可稍后批量重分类补做"
+)
+
+# 上传解析（M2 补充）：两条消息刻意分开，因为处置动作不同 ——
+# 「格式不支持」换格式即可，「文件读不出内容」要换文件。合并成一句会让
+# 用户拿着一个损坏的 PDF 反复换扩展名。
+MSG_WIKI_IMPORT_FILE_TYPE_UNSUPPORTED = (
+    "不支持的文件类型「{filename}」，请上传 PDF / Word(.docx) / PPT(.pptx) / "
+    "Excel(.xlsx/.xls) / Markdown / 纯文本。"
+    "老式 .doc / .ppt 请先另存为 .docx / .pptx。"
+)
+MSG_WIKI_IMPORT_FILE_PARSE_FAILED = (
+    "文件解析失败，可能是文件已损坏或内容加密。请确认后重试（服务端日志有详细原因）"
+)
+MSG_WIKI_IMPORT_FILE_TOO_LARGE = (
+    "文件过大（{size} MB），单次上传上限 {max} MB"
+)
+MSG_WIKI_IMPORT_SOURCE_STORE_FAILED = (
+    "源文件留存失败，请稍后重试；若持续失败请联系管理员。"
+)
+
+# --- M3：学习闭环反馈 ---
+MSG_WIKI_FEEDBACK_ACTION_INVALID = "反馈动作「{action}」不合法"
+MSG_WIKI_FEEDBACK_ENTITY_TYPE_INVALID = "反馈目标类型「{entityType}」不合法"
+MSG_WIKI_FEEDBACK_MECHANISM_INVALID = "反馈机制「{mechanism}」不合法"
+MSG_WIKI_FEEDBACK_MODIFICATION_REQUIRED = "反馈动作 MODIFY 必须携带 userModification"
+MSG_WIKI_FEEDBACK_MODIFICATION_UNEXPECTED = (
+    "反馈动作 {action} 不应携带 userModification"
+)
+
+# --- M4：关系发现 ---
+MSG_WIKI_RELATION_NOT_FOUND = "知识关系 id={relationId} 不存在"
+MSG_WIKI_RELATION_REVIEW_ACTION_INVALID = "关系审核动作「{action}」不合法"
+MSG_WIKI_RELATION_ALREADY_REVIEWED = (
+    "知识关系 id={relationId} 已是「{action}」状态，无需重复审核"
+)
+
+# --- M5：冲突检测（机制 3）---
+MSG_WIKI_CONFLICT_NOT_FOUND = "知识冲突 id={conflictId} 不存在"
+MSG_WIKI_CONFLICT_ACTION_INVALID = "冲突处置动作「{action}」不合法"
+MSG_WIKI_CONFLICT_ALREADY_RESOLVED = (
+    "知识冲突 id={conflictId} 已处置（{action}），无需重复处置"
+)
+
+# --- M5：结构化建议（机制 4）---
+MSG_WIKI_SUGGESTION_NOT_FOUND = "结构化建议 id={suggestionId} 不存在"
+MSG_WIKI_SUGGESTION_ALREADY_RESOLVED = (
+    "结构化建议 id={suggestionId} 已处置（{status}），无需重复处置"
+)
+
+# --- M6：可执行规则与渐进结构（机制 5）---
+MSG_WIKI_RULE_NOT_FOUND = "知识条目「{pageId}」还没有可执行规则"
+MSG_WIKI_WORKFLOW_NOT_FOUND = "知识条目「{pageId}」还没有结构化流程"
+MSG_WIKI_RULE_CONDITIONS_REQUIRED = (
+    "规则至少要有一个条件：无条件规则会命中全部记录，不能物化也不能求值"
+)
+MSG_WIKI_RULE_OPERATOR_UNSUPPORTED = (
+    "规则算子「{operator}」系统不认识，无法判定（可用：>= <= > < = != IN、NOT IN）"
+)
+MSG_WIKI_RULE_VALUE_SHAPE_INVALID = (
+    "算子 {operator} 的取值必须是非空数组：写成单值这条规则永远判不了，却看不出坏"
+)
+MSG_WIKI_RULE_EXAMPLE_INVALID = (
+    "dry-run 样例 #{index} 形状不合法：需要 input（对象）与 expectedOutput.matched（布尔）"
+)
+
+
+# --- M7：覆盖度自感知（机制 6）---
+MSG_WIKI_COVERAGE_DOMAIN_EMPTY = "业务域不能为空（空串会让这一格无从归类）"
+MSG_WIKI_COVERAGE_DOMAIN_TOO_LONG = (
+    "业务域「{domain}」超过 {maxLength} 字符，超出列宽会被数据库拒绝"
+)
+MSG_WIKI_COVERAGE_CLASS_NOT_FOUND = "本体类 id={classId} 不存在或已下线"
+MSG_WIKI_COVERAGE_MAPPING_NOT_FOUND = (
+    "本体类 id={classId} 没有标注业务域「{domain}」"
+)
+MSG_WIKI_COVERAGE_STATUS_INVALID = "覆盖度状态「{status}」不合法"
+
+# --- 事实原子编辑（Task 10）---
+MSG_WIKI_CLAIM_NOT_FOUND = "事实原子不存在：{claimId}"
+MSG_WIKI_COMPILE_TASK_NOT_FOUND = "编译作业不存在：{taskId}"
+MSG_WIKI_COMPILE_SCOPE_INVALID = "不支持的编译范围：{scope}"
+MSG_WIKI_AUTHORITY_LEVEL_INVALID = "权威度等级非法，合法值：{levels}"
 
 # =============================================================================
 # 图表（Chart）
@@ -356,9 +506,23 @@ MSG_GOVERNANCE_KPI_NOT_FOUND = "KPI Catalog id={id} 不存在"
 
 MSG_DOCUMENT_NOT_FOUND = "文档 id={id} 不存在"
 MSG_DOCUMENT_DUPLICATE = "文档编号「{document_id}」已存在"
+# content_hash 唯一索引（uq_document_catalog_content_hash）冲突：同一份文件已入库。
+# 与 MSG_DOCUMENT_DUPLICATE 刻意分开 —— 后者是「编号重复」，前者是「内容重复」，
+# 处置动作不同（前者换编号，后者换文件 / 别再传同一份）。
+MSG_DOCUMENT_CONTENT_DUPLICATE = (
+    "文档内容重复：content_hash 命中唯一索引 uq_document_catalog_content_hash，"
+    "同一文件已入库，请勿重复上传"
+)
+MSG_DOCUMENT_CONTENT_EXISTS = (
+    "文档内容重复：该文件已作为文档「{document_id}」入库"
+    "（唯一索引 uq_document_catalog_content_hash），请勿重复上传同一文件"
+)
 MSG_DOCUMENT_REL_NOT_FOUND = "文档关联 id={id} 不存在"
 MSG_DOCUMENT_REL_EXISTS = (
     "文档「{documentId}」与实体 {entityType}/{entityKey} 的关联已存在"
+)
+MSG_DOCUMENT_SOURCE_STORE_FAILED = (
+    "源文件留存失败，请稍后重试；若持续失败请联系管理员。"
 )
 
 # =============================================================================
@@ -389,3 +553,27 @@ MSG_DQ_GEN_CLASS_NOT_FOUND = "本体类 id={id} 不存在"
 MSG_DQ_GEN_DATASOURCE_NOT_FOUND = "数据源 id={id} 不存在"
 MSG_DQ_GEN_RULE_CREATED = "数据质量规则「{rule_code}」已自动生成"
 MSG_DQ_GEN_RULE_SKIPPED_DUPLICATE = "规则「{rule_code}」已存在，已跳过"
+
+# =============================================================================
+# 文档问答（Phase 5.6）
+# =============================================================================
+
+MSG_SESSION_NOT_OWNED = "会话不存在或不属于当前用户"
+
+# =============================================================================
+# 数据质量评估报告（feat-dq-evaluation-report）
+# =============================================================================
+
+MSG_DQ_EVAL_REPORT_NOT_FOUND = "评估报告 id={id} 不存在"
+MSG_DQ_EVAL_REPORT_NAME_EXISTS = "评估报告名称「{name}」已存在"
+MSG_DQ_EVAL_REPORT_CLASS_NOT_FOUND = "本体类 id={id} 不存在"
+MSG_DQ_EVAL_REPORT_RULE_NOT_FOUND = "数据质量规则 id={id} 不存在"
+MSG_DQ_EVAL_REPORT_NAME_TOO_LONG = "评估报告名称长度不能超过 {max} 字符"
+
+# =============================================================================
+# 流式断连兜底（H4）
+# =============================================================================
+
+# 断连时一个字都还没下发给用户：落库的 assistant 行内容用显式占位，不用空串
+# （空内容行在历史面板上无从解释，也让「为什么这轮没有回答」无处可查）
+MSG_STREAM_INTERRUPTED_EMPTY = "（本轮回答被中断，未产出回答文本）"

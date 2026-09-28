@@ -14,6 +14,7 @@ import {
   createEdge,
   updateEdge,
   deleteEdge,
+  extractLineage,
 } from "../api/lineage";
 
 describe("api/lineage — edges", () => {
@@ -74,5 +75,12 @@ describe("api/lineage — edges", () => {
     httpMock.delete.mockResolvedValue({ data: undefined });
     await deleteEdge(1);
     expect(httpMock.delete).toHaveBeenCalledWith("/lineage/edges/1");
+  });
+
+  it("extractLineage POST /lineage/edges/extract（返回 created 计数）", async () => {
+    httpMock.post.mockResolvedValue({ data: { created: 5 } });
+    const result = await extractLineage();
+    expect(httpMock.post).toHaveBeenCalledWith("/lineage/edges/extract");
+    expect(result).toEqual({ created: 5 });
   });
 });

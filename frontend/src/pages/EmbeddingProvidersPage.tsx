@@ -230,7 +230,7 @@ export default function EmbeddingProvidersPage() {
         onOk={() => void handleSubmit()}
         onCancel={() => setModalOpen(false)}
         width={560}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" initialValues={EMPTY_FORM}>
           <Form.Item

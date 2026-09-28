@@ -125,6 +125,64 @@ class TestIntentService:
         result = service.classify("其他产品哪个库存最多", hasPriorState=True)
         assert result is IntentType.NEW_QUERY
 
+    # ===== 省略式追问（feat-follow-up-cascade A 层）：「改动约束 + 呢」短句 =====
+    # 真实回归：三步多步查询后追问"4月份呢？"，因无指代词/追问关键词被判
+    # NEW_QUERY，又不注入历史状态，计划阶段无法映射任何表 → 误报"没有相关业务数据"。
+
+    def test_ellipsis_follow_up_with_prior_state(self, service: IntentService) -> None:
+        """"4月份呢？"整句即追问（时间替换），有历史状态须判 FOLLOW_UP。"""
+        assert service.classify("4月份呢？", hasPriorState=True) is IntentType.FOLLOW_UP
+
+    def test_ellipsis_follow_up_na_variant(self, service: IntentService) -> None:
+        assert service.classify("那去年呢", hasPriorState=True) is IntentType.FOLLOW_UP
+
+    def test_ellipsis_follow_up_without_prior_state_is_query(self, service: IntentService) -> None:
+        """无历史状态时"4月份呢？"没有追问对象，按全新查询处理。"""
+        assert service.classify("4月份呢？", hasPriorState=False) is IntentType.QUERY
+
+    def test_wh_question_ending_ne_stays_new_query(self, service: IntentService) -> None:
+        """N6 守卫：疑问词起头的"…呢"句（为什么/怎么/哪家）是有前置状态的新问题。
+
+        省略式规则刻意排除疑问词前缀，泛化疑问不被锚定到旧上下文。
+        """
+        assert (
+            service.classify("为什么A公司交付量最少呢", hasPriorState=True)
+            is IntentType.NEW_QUERY
+        )
+
+    def test_which_question_ending_ne_stays_new_query(self, service: IntentService) -> None:
+        assert (
+            service.classify("哪家供应商供货最多呢？", hasPriorState=True)
+            is IntentType.NEW_QUERY
+        )
+
+    def test_which_month_ne_is_follow_up(self, service: IntentService) -> None:
+        """口语化时间替换追问：「哪4月份呢」=「那4月份呢」→ 判 FOLLOW_UP。
+
+        与 test_which_question_ending_ne_stays_new_query（实体问「哪家供应商…」）
+        形成对照：「哪」的排除需要细分，仅实体问（后接家/个/位/些…）排除，
+        时间词问（后接月/年/季度/号…）保留。
+        """
+        assert (
+            service.classify("哪4月份呢", hasPriorState=True)
+            is IntentType.FOLLOW_UP
+        )
+
+    def test_explicit_multi_step_ending_ne_not_ellipsis(self, service: IntentService) -> None:
+        """带分步标号的长句即使以"呢"结尾也是全新多步查询，不被省略式规则吸走。"""
+        q = "第一步统计3月份订单数量呢，第二步统计4月份订单数量呢"
+        assert service.classify(q, hasPriorState=True) is IntentType.NEW_QUERY
+
+    def test_short_sequential_ending_ne_stays_new_query(self, service: IntentService) -> None:
+        """reviewer Finding 1：短「先…然后…呢」是显式多步句，须走 NEW_QUERY 而非 FOLLOW_UP。
+
+        顺序约束：_isExplicitMultiStep 必须在省略式短路之前判定，否则会绕过多步拆步。
+        """
+        assert (
+            service.classify("先查X，然后查Y呢", hasPriorState=True)
+            is IntentType.NEW_QUERY
+        )
+
     def test_clarify_without_prior_state(self, service: IntentService) -> None:
         assert service.classify("收货数量是什么意思") is IntentType.CLARIFY
 

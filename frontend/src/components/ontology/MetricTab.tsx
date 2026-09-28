@@ -271,7 +271,7 @@ export default function MetricTab({ classes }: MetricTabProps) {
         onOk={() => void handleSubmit()}
         onCancel={() => setModalOpen(false)}
         width={560}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" initialValues={EMPTY_METRIC_FORM}>
           <Row gutter={12}>

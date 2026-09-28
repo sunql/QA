@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const httpMock = vi.hoisted(() => ({
   get: vi.fn(),
@@ -22,10 +22,17 @@ import {
   deleteRelation,
   uploadDocument,
   searchDocuments,
+  searchDocumentsQa,
 } from "../api/document";
+import { useAuthStore } from "../stores/authStore";
+import { DEFAULT_TENANT_ID } from "../config";
 
 describe("api/document", () => {
   beforeEach(() => { vi.clearAllMocks(); });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    useAuthStore.setState({ token: null });
+  });
 
   it("listDocuments 无 filters", async () => {
     httpMock.get.mockResolvedValue({ data: [] });
@@ -112,7 +119,10 @@ describe("api/document", () => {
     const call = axiosMock.postForm.mock.calls[0];
     expect(call[0]).toMatch(/\/documents\/upload$/);
     expect(call[2].headers["X-Tenant-Id"]).toBeDefined();
-    expect(call[2].headers["X-User-Id"]).toBeDefined();
+    // feat-user-auth: 不再注入 X-User-Id，由 Authorization: Bearer 替代
+    expect(call[2].headers["X-User-Id"]).toBeUndefined();
+    // 没有登录态时也不应有 Authorization —— 测试环境裸 axios 直调
+    expect(call[2].headers["Authorization"]).toBeUndefined();
     expect(result).toEqual({ documentId: "5", chunks: 3 });
   });
 
@@ -124,5 +134,22 @@ describe("api/document", () => {
     expect(call[0]).toContain("securityLevel=L2");
     expect(call[0]).toContain("topK=5");
     expect(call[1]).toEqual({});
+  });
+
+  it("searchDocumentsQa 登录态注入 SSOT auth headers（Authorization + X-Tenant-Id）", async () => {
+    useAuthStore.setState({ token: "test-jwt" });
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.close(); },
+    });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(stream, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await searchDocumentsQa({ question: "门槛" } as never, () => undefined);
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers).toMatchObject({
+      Authorization: "Bearer test-jwt",
+      "X-Tenant-Id": DEFAULT_TENANT_ID,
+    });
   });
 });

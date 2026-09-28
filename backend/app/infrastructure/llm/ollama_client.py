@@ -20,6 +20,7 @@ from app.domain.error_messages import (
 )
 from app.domain.exceptions import LlmClientError
 from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage, LlmResponse, StreamChunk
+from app.infrastructure.llm.factory import acquire_llm_concurrency
 
 logger = logging.getLogger(__name__)
 
@@ -77,17 +78,18 @@ class OllamaClient(BaseLlmClient):
 
         session = await self._getSession()
         try:
-            async with session.post("/api/chat", json=payload) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    raise LlmClientError(
-                        MSG_LLM_HTTP_ERROR.format(
-                            provider="Ollama", status=resp.status, body=text[:200]
-                        ),
-                        provider="ollama",
-                        detail=str(resp.status),
-                    )
-                data = await resp.json()
+            async with acquire_llm_concurrency():
+                async with session.post("/api/chat", json=payload) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        raise LlmClientError(
+                            MSG_LLM_HTTP_ERROR.format(
+                                provider="Ollama", status=resp.status, body=text[:200]
+                            ),
+                            provider="ollama",
+                            detail=str(resp.status),
+                        )
+                    data = await resp.json()
         except aiohttp.ClientError as exc:
             raise LlmClientError(
                 MSG_LLM_CALL_FAILED.format(provider="Ollama", exc=exc),
@@ -105,6 +107,21 @@ class OllamaClient(BaseLlmClient):
             promptTokens=promptTokens,
             completionTokens=completionTokens,
             totalTokens=promptTokens + completionTokens,
+        )
+
+    async def complete_with_tools(
+        self,
+        messages: list[LlmMessage],
+        tools: list[dict] | None = None,
+        tool_choice: str | dict = "auto",
+    ) -> Any:
+        """Ollama 本地模型不支持 tool calling；显式抛 NotImplementedError 以满足抽象契约。
+
+        调用方应在路由层根据 provider capability 决定是否启用 tool calling。
+        """
+        raise NotImplementedError(
+            "OllamaClient.complete_with_tools: Ollama 本地模型不支持 tool calling；"
+            "请改用 OpenAiClient 或其他支持 tools API 的 provider。"
         )
 
     async def completeStream(
@@ -137,17 +154,18 @@ class OllamaClient(BaseLlmClient):
 
         session = await self._getSession()
         try:
-            async with session.post("/api/chat", json=payload) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    raise LlmClientError(
-                        MSG_LLM_HTTP_ERROR.format(
-                            provider="Ollama", status=resp.status, body=text[:200]
-                        ),
-                        provider="ollama",
-                        detail=str(resp.status),
-                    )
-                # 用 readline() 而非直接迭代 resp.content：aiohttp StreamReader 的 __aiter__
+            async with acquire_llm_concurrency():
+                async with session.post("/api/chat", json=payload) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        raise LlmClientError(
+                            MSG_LLM_HTTP_ERROR.format(
+                                provider="Ollama", status=resp.status, body=text[:200]
+                            ),
+                            provider="ollama",
+                            detail=str(resp.status),
+                        )
+                    # 用 readline() 而非直接迭代 resp.content：aiohttp StreamReader 的 __aiter__
                 # 产出原始字节块（不按换行切分），遇到半行/多行合并会误判非法 NDJSON。
                 # readline() 在 aiohttp 内部缓冲，保证每行完整后再交给 JSON 解析。
                 while True:

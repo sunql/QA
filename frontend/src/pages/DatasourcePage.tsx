@@ -9,18 +9,25 @@ import {
   Select,
   Space,
   Tag,
-  Popconfirm,
+  Dropdown,
   Switch,
   message,
   Typography,
 } from "antd";
-import { ImportOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import {
+  ImportOutlined,
+  MoreOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  SyncOutlined,
+} from "@ant-design/icons";
 import {
   listDataSources,
   createDataSource,
   updateDataSource,
   deleteDataSource,
   testDataSource,
+  introspectDatasource,
 } from "../api/datasource";
 import type {
   DataSource,
@@ -85,6 +92,7 @@ export default function DatasourcePage() {
   const [testing, setTesting] = useState(false);
   const [editing, setEditing] = useState<DataSource | null>(null);
   const [importingId, setImportingId] = useState<number | null>(null);
+  const [introspectingId, setIntrospectingId] = useState<number | null>(null);
   const [form] = Form.useForm<FormValues>();
   // 监听类型字段，用于条件展示 Oracle 版本下拉
   const currentType = Form.useWatch("type", form);
@@ -216,23 +224,55 @@ export default function DatasourcePage() {
     }
   };
 
+  // 手工缓存：触发数据源 schema 发现并写入 schema_cache，
+  // 供 DQ 规则生成等下游在未自动缓存时仍可用。
+  const handleIntrospect = async (record: DataSource) => {
+    setIntrospectingId(record.id);
+    try {
+      const res = await introspectDatasource(record.id);
+      void message.success(t("toast.schemaCached", { count: res.tables.length }));
+    } catch {
+      // 错误已由拦截器提示
+    } finally {
+      setIntrospectingId(null);
+    }
+  };
+
+  // 「更多」下拉：编辑 / 删除。删除走 Modal.confirm 二次确认（原 Popconfirm 无法置于 Dropdown 菜单内）。
+  const handleRowMenu = (record: DataSource, key: string) => {
+    if (key === "edit") {
+      openEdit(record);
+      return;
+    }
+    if (key === "delete") {
+      Modal.confirm({
+        title: t("forms.datasource.deleteConfirm"),
+        okText: t("common.confirm"),
+        cancelText: t("common.cancel"),
+        okButtonProps: { danger: true },
+        onOk: () => handleDelete(record.id),
+      });
+    }
+  };
+
   const columns = [
     { title: t("forms.datasource.columns.id"), dataIndex: "id", width: 60 },
-    { title: t("forms.datasource.columns.name"), dataIndex: "name" },
+    { title: t("forms.datasource.columns.name"), dataIndex: "name", width: 180, ellipsis: true },
     {
       title: t("forms.datasource.columns.type"),
       dataIndex: "type",
       width: 110,
       render: (tp: DataSourceType) => <Tag color={TYPE_COLORS[tp]}>{tp.toUpperCase()}</Tag>,
     },
-    { title: t("forms.datasource.columns.host"), dataIndex: "host", ellipsis: true },
+    { title: t("forms.datasource.columns.host"), dataIndex: "host", width: 120, ellipsis: true },
     { title: t("forms.datasource.columns.port"), dataIndex: "port", width: 80 },
     {
       title: t("forms.datasource.columns.databaseName"),
       dataIndex: "databaseName",
+      width: 110,
       ellipsis: true,
     },
-    { title: t("forms.datasource.columns.username"), dataIndex: "username" },
+    { title: t("forms.datasource.columns.username"), dataIndex: "username", width: 90, ellipsis: true },
     {
       title: t("forms.datasource.columns.isDefault"),
       dataIndex: "isDefault",
@@ -249,9 +289,19 @@ export default function DatasourcePage() {
     },
     {
       title: t("forms.datasource.columns.actions"),
-      width: 250,
+      key: "actions",
+      fixed: "right" as const,
+      width: 300,
       render: (_: unknown, record: DataSource) => (
-        <Space>
+        <Space size={4}>
+          <Button
+            size="small"
+            icon={<SyncOutlined />}
+            loading={introspectingId === record.id}
+            onClick={() => void handleIntrospect(record)}
+          >
+            {t("datasource.cacheSchema")}
+          </Button>
           <Button
             size="small"
             icon={<ImportOutlined />}
@@ -259,17 +309,18 @@ export default function DatasourcePage() {
           >
             {t("datasource.importToOntology")}
           </Button>
-          <Button size="small" onClick={() => openEdit(record)}>
-            {t("common.edit")}
-          </Button>
-          <Popconfirm
-            title={t("forms.datasource.deleteConfirm")}
-            onConfirm={() => handleDelete(record.id)}
+          <Dropdown
+            trigger={["click"]}
+            menu={{
+              items: [
+                { key: "edit", label: t("common.edit") },
+                { key: "delete", label: t("common.delete"), danger: true },
+              ],
+              onClick: ({ key }) => handleRowMenu(record, key),
+            }}
           >
-            <Button size="small" danger>
-              {t("common.delete")}
-            </Button>
-          </Popconfirm>
+            <Button size="small" icon={<MoreOutlined />} aria-label={t("common.more")} />
+          </Dropdown>
         </Space>
       ),
     },
@@ -312,6 +363,7 @@ export default function DatasourcePage() {
         dataSource={sources}
         columns={columns}
         pagination={{ pageSize: 10 }}
+        scroll={{ x: 1210 }}
       />
 
       <Modal

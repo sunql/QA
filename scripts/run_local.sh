@@ -138,6 +138,10 @@ if [[ "$DATABASE_URL" == *"localhost:5432"* ]]; then
   exit 1
 fi
 
+# ---- 6. 打印访问入口（部署与访问规范 §四）----
+"$SCRIPT_DIR/show_access_urls.sh" || true
+echo
+
 log "启动命令：$*"
 log "DATABASE_URL=$DATABASE_URL"
 echo

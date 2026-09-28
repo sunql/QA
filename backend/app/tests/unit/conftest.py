@@ -77,6 +77,34 @@ async def warmBusinessObjectRegistry(dbSession: AsyncSession) -> AsyncIterator[N
     businessObjectRegistry.invalidate()
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def warmFeatureRuleRegistry(dbSession: AsyncSession) -> AsyncIterator[None]:
+    """每个 unit 测试前 warmUp featureRuleRegistry（与 warmBusinessObjectRegistry 同理）。
+
+    Unit 测试不走 lifespan，单例 registry 未 warmed；supplier_risk / supplier_360
+    服务内 getEnabledRules 会撞「未 warmUp」守卫。与 prod lifespan 相同顺序：先
+    seedFeatureRules（幂等 upsert 4 个内置 RISK 规则，字节级 legacy 兼容阈值）
+    再 warmUp——这些测试的期望值（0.85→low / 0.70→medium / 0.50→high）正是
+    建立在内置规则之上的。需要特定规则的测试直接覆写单例 _rules（见
+    test_supplier_360_service.test_kpi_slot_feature_names_aggregates_from_registry）。
+    """
+    from app.services.feature_rule_registry import feature_rule_registry
+    from scripts.seed_feature_rules import seedFeatureRules
+
+    if dbSession is None:
+        # 纯内存单测（如 KPI 语义匹配）覆写 dbSession=None 跳过 DB 依赖 —— 不 warmUp
+        yield
+        feature_rule_registry.invalidate()
+        return
+
+    feature_rule_registry.invalidate()
+    await seedFeatureRules(dbSession)
+    await feature_rule_registry.warmUp(dbSession)
+    await dbSession.commit()
+    yield
+    feature_rule_registry.invalidate()
+
+
 # 别名：只用 session 的地方注入 dbSession 即可
 @pytest.fixture()
 async def dbSession(seedEngine) -> AsyncIterator[AsyncSession]:

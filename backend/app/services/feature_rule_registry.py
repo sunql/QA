@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,6 +43,16 @@ class FeatureThresholdReady:
     threshold_order: int
 
 
+def _toDecimal(value: object) -> Decimal:
+    """阈值统一为 Decimal（JSONB 反序列化的 float 需经 str 取十进制字面量）。"""
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return value  # type: ignore[return-value]  # 非数值交由 evaluator 报错
+
+
 class FeatureRuleRegistry:
     def __init__(self) -> None:
         self._rules: dict[tuple[str, str, str], list[FeatureRuleReady]] = {}
@@ -71,7 +82,10 @@ class FeatureRuleRegistry:
                 thresholds_by_rule.setdefault(t.rule_id, []).append(FeatureThresholdReady(
                     severity=t.severity,
                     operator=t.operator,
-                    threshold_value=t.threshold_value,
+                    # JSONB 阈值反序列化为 float（0.8 的二进制 ≈ 0.8000000000000000444），
+                    # 与 DB NUMERIC 的 Decimal 值比较会在边界值上翻转（0.8000 < 0.8000…0444
+                    # = True → MEDIUM 误判）。统一 Decimal(str(f)) 取十进制字面量。
+                    threshold_value=_toDecimal(t.threshold_value),
                     unit=t.unit,
                     threshold_order=t.threshold_order,
                 ))
@@ -127,7 +141,7 @@ class FeatureRuleRegistry:
             ).scalars().all()
             thresholds = tuple(FeatureThresholdReady(
                 severity=t.severity, operator=t.operator,
-                threshold_value=t.threshold_value, unit=t.unit,
+                threshold_value=_toDecimal(t.threshold_value), unit=t.unit,
                 threshold_order=t.threshold_order,
             ) for t in t_rows)
             ready = FeatureRuleReady(

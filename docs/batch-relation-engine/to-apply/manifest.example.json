@@ -1,0 +1,275 @@
+{
+  "joins": [],
+  "relations": [
+    {
+      "sourceClassId": 22,
+      "targetClassId": 23,
+      "relationType": "CONTAINS",
+      "description": "采购订单头含行，键 PO_NO"
+    },
+    {
+      "sourceClassId": 16,
+      "targetClassId": 17,
+      "relationType": "CONTAINS",
+      "description": "收货单头含行，键 RECEIPT_NO"
+    },
+    {
+      "sourceClassId": 8,
+      "targetClassId": 9,
+      "relationType": "CONTAINS",
+      "description": "到货通知头含行，键 ARRIVAL_NOTICE_NO"
+    },
+    {
+      "sourceClassId": 25,
+      "targetClassId": 26,
+      "relationType": "CONTAINS",
+      "description": "报价单头含行，键 QUOTATION_NO"
+    },
+    {
+      "sourceClassId": 10,
+      "targetClassId": 11,
+      "relationType": "CONTAINS",
+      "description": "BOM 头含组成明细，键 MATERIAL_CODE"
+    },
+    {
+      "sourceClassId": 20,
+      "targetClassId": 21,
+      "relationType": "CONTAINS",
+      "description": "采购发票头含行，键 INVOICE_NO"
+    },
+    {
+      "sourceClassId": 30,
+      "targetClassId": 31,
+      "relationType": "CONTAINS",
+      "description": "供应商付款单头含行，键 PAYMENT_NO"
+    },
+    {
+      "sourceClassId": 34,
+      "targetClassId": 32,
+      "relationType": "CONTAINS",
+      "description": "价格表记录含材料价格行，键 PRICE_LIST_CODE/PRICE_LIST_RECORD"
+    },
+    {
+      "sourceClassId": 24,
+      "targetClassId": 26,
+      "relationType": "GENERATES",
+      "description": "请购行产生报价应询，报价行可经 REQUISITION_NO/REQUISITION_LINE_NO 溯源"
+    },
+    {
+      "sourceClassId": 24,
+      "targetClassId": 23,
+      "relationType": "GENERATES",
+      "description": "请购行转采购行，经 DWD_REQUISITION_ORDER_LINK 桥接"
+    },
+    {
+      "sourceClassId": 25,
+      "targetClassId": 22,
+      "relationType": "GENERATES",
+      "description": "报价被采购买成采购订单，采购行可经 QUOTATION_NO 溯源"
+    },
+    {
+      "sourceClassId": 22,
+      "targetClassId": 8,
+      "relationType": "GENERATES",
+      "description": "采购单驱动供应商到货，ASN 行可经 PO_NO 溯源"
+    },
+    {
+      "sourceClassId": 23,
+      "targetClassId": 9,
+      "relationType": "GENERATES",
+      "description": "采购行产生到货通知行，键 PO_NO/PO_LINE_NO"
+    },
+    {
+      "sourceClassId": 8,
+      "targetClassId": 16,
+      "relationType": "GENERATES",
+      "description": "到货通知驱动收货生成，GR 行可经 ARRIVAL_NOTICE_NO 溯源"
+    },
+    {
+      "sourceClassId": 9,
+      "targetClassId": 17,
+      "relationType": "GENERATES",
+      "description": "ASN 行产生收货行，键 ARRIVAL_NOTICE_NO/ARRIVAL_NOTICE_LINE_NO"
+    },
+    {
+      "sourceClassId": 17,
+      "targetClassId": 21,
+      "relationType": "GENERATES",
+      "description": "收货行参与三单匹配生成发票行，可经 RECEIPT_NO/PO_NO 溯源"
+    },
+    {
+      "sourceClassId": 20,
+      "targetClassId": 30,
+      "relationType": "GENERATES",
+      "description": "发票驱动付款，付款行可经 LINKED_INVOICE_NO 溯源"
+    },
+    {
+      "sourceClassId": 38,
+      "targetClassId": 23,
+      "relationType": "GENERATED",
+      "description": "采购月度由采购行聚合：ORDER_QTY/ORDER_AMOUNT/ORDER_LINE_COUNT"
+    },
+    {
+      "sourceClassId": 36,
+      "targetClassId": 17,
+      "relationType": "GENERATED",
+      "description": "到货月度由收货行聚合：RECEIVED_QTY/ON_TIME_RATE（含 ASN 计划日期比对）"
+    },
+    {
+      "sourceClassId": 39,
+      "targetClassId": 17,
+      "relationType": "GENERATED",
+      "description": "质量月度由收货行聚合：REJECTED_QTY/REJECT_RATE"
+    },
+    {
+      "sourceClassId": 39,
+      "targetClassId": 9,
+      "relationType": "GENERATED",
+      "description": "质量月度亦参考 ASN 行 REJECTED_QTY（退货/拒收）"
+    },
+    {
+      "sourceClassId": 37,
+      "targetClassId": 30,
+      "relationType": "GENERATED",
+      "description": "付款月度由付款单聚合：PAYMENT_AMOUNT/PAYMENT_COUNT"
+    },
+    {
+      "sourceClassId": 35,
+      "targetClassId": 23,
+      "relationType": "GENERATED",
+      "description": "物料价格月度由采购实际价聚合：AVG/MIN/MAX_NET_UNIT_PRICE"
+    },
+    {
+      "sourceClassId": 1,
+      "targetClassId": 38,
+      "relationType": "GENERATED",
+      "description": "360 视图聚合采购月度：ORDER_AMOUNT_12M/TOTAL_PO_COUNT"
+    },
+    {
+      "sourceClassId": 1,
+      "targetClassId": 36,
+      "relationType": "GENERATED",
+      "description": "360 视图聚合到货月度：OTD_RATE_12M/AVG_DELAY_DAYS_12M"
+    },
+    {
+      "sourceClassId": 1,
+      "targetClassId": 39,
+      "relationType": "GENERATED",
+      "description": "360 视图聚合质量月度：REJECT_RATE_12M"
+    },
+    {
+      "sourceClassId": 1,
+      "targetClassId": 37,
+      "relationType": "GENERATED",
+      "description": "360 视图聚合付款月度：PAYMENT_AMOUNT_12M"
+    },
+    {
+      "sourceClassId": 2,
+      "targetClassId": 23,
+      "relationType": "GENERATED",
+      "description": "供应商订单明细由采购行派生：PO_NO/物料/单价/金额"
+    },
+    {
+      "sourceClassId": 2,
+      "targetClassId": 17,
+      "relationType": "GENERATED",
+      "description": "供应商订单明细补充收货交付/质量：RECEIVED_QTY/REJECTED_QTY/DELAY_DAYS"
+    },
+    {
+      "sourceClassId": 29,
+      "targetClassId": 19,
+      "relationType": "SUPPLIES",
+      "description": "供应商供应物料主数据"
+    },
+    {
+      "sourceClassId": 29,
+      "targetClassId": 39,
+      "relationType": "INSPECTED_BY",
+      "description": "供应商被其月度质量档案评估（REJECT_RATE）"
+    },
+    {
+      "sourceClassId": 6,
+      "targetClassId": 19,
+      "relationType": "RELATED_TO",
+      "description": "同一物料在维度层与业务明细层"
+    },
+    {
+      "sourceClassId": 7,
+      "targetClassId": 29,
+      "relationType": "RELATED_TO",
+      "description": "同一供应商在维度层与业务明细层"
+    },
+    {
+      "sourceClassId": 5,
+      "targetClassId": 15,
+      "relationType": "RELATED_TO",
+      "description": "同一工厂在维度层与业务明细层"
+    },
+    {
+      "sourceClassId": 12,
+      "targetClassId": 29,
+      "relationType": "RELATED_TO",
+      "description": "通用伙伴主数据与供应商类型主数据对应（PARTNER_CODE）"
+    },
+    {
+      "sourceClassId": 12,
+      "targetClassId": 14,
+      "relationType": "RELATED_TO",
+      "description": "通用伙伴主数据与客户类型主数据对应（PARTNER_CODE）"
+    },
+    {
+      "sourceClassId": 12,
+      "targetClassId": 13,
+      "relationType": "RELATED_TO",
+      "description": "通用伙伴主数据与承运商类型主数据对应（PARTNER_CODE）"
+    },
+    {
+      "sourceClassId": 14,
+      "targetClassId": 29,
+      "relationType": "RELATED_TO",
+      "description": "客户主数据关联兼供货的供应商（DWD_CUSTOMER.SUPPLIER_CODE）"
+    },
+    {
+      "sourceClassId": 19,
+      "targetClassId": 18,
+      "relationType": "RELATED_TO",
+      "description": "物料在各工厂的物料-工厂视图（MATERIAL_CODE+FACILITY_CODE）"
+    },
+    {
+      "sourceClassId": 15,
+      "targetClassId": 18,
+      "relationType": "RELATED_TO",
+      "description": "工厂包含其物料-工厂库存/计划视图"
+    },
+    {
+      "sourceClassId": 19,
+      "targetClassId": 28,
+      "relationType": "RELATED_TO",
+      "description": "物料对应工艺路线工序（MATERIAL_CODE）"
+    },
+    {
+      "sourceClassId": 19,
+      "targetClassId": 10,
+      "relationType": "RELATED_TO",
+      "description": "物料作为 BOM 主料（MATERIAL_CODE）"
+    },
+    {
+      "sourceClassId": 1,
+      "targetClassId": 29,
+      "relationType": "RELATED_TO",
+      "description": "360 视图主体为供应商（SUPPLIER_CODE/SUPPLIER_KEY）"
+    },
+    {
+      "sourceClassId": 24,
+      "targetClassId": 27,
+      "relationType": "CONTAINS",
+      "description": "请购行的采购映射行，键 REQUISITION_NO/REQUISITION_LINE_NO"
+    },
+    {
+      "sourceClassId": 34,
+      "targetClassId": 33,
+      "relationType": "CONTAINS",
+      "description": "价格表多准则配置归属表头，键 PRICE_LIST_CODE"
+    }
+  ]
+}

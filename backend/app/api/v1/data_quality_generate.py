@@ -90,7 +90,15 @@ async def parseDescriptions(
         from app.services.messages_zh import MSG_DQ_GEN_CLASS_NOT_FOUND
         raise NotFoundError(MSG_DQ_GEN_CLASS_NOT_FOUND.format(id=payload.class_id))
 
-    llm_client = _getDefaultLlmClient()
+    # model_id 有值 → 按 LlmConfig 加载指定 provider；否则走默认 env（向后兼容）。
+    # createClient 在 key 缺失时返回 None（不再让 OpenAI SDK 构造期 raise → 500），
+    # 统一走「未配置 LLM → 503 LLMUnavailableError」语义。
+    if payload.model_id:
+        from app.services.model_config_service import ModelConfigService
+        config = await ModelConfigService().get(session, payload.model_id)
+        llm_client = createClient(config)
+    else:
+        llm_client = _getDefaultLlmClient()
     if llm_client is None:
         from app.domain.exceptions import LLMUnavailableError
         raise LLMUnavailableError("未配置 LLM，无法进行 AI 辅助分析")

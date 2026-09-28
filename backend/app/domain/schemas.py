@@ -12,7 +12,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 from app.domain.agent_vocabulary import (
@@ -41,6 +41,7 @@ from app.domain.enums import (
     MatchRule,
     ObjectType,
     RefreshFrequency,
+    ReportTimeWindowType,
     RiskLevel,
     RuleType,
     RuleOperator,
@@ -49,7 +50,7 @@ from app.domain.enums import (
     SourceSystem,
 )
 from app.domain.exceptions import ConfigError
-from typing import Annotated
+from typing import Annotated, Any, Literal
 from pydantic import BeforeValidator
 
 from app.services.business_object_registry import businessObjectRegistry
@@ -103,6 +104,7 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_COUNT,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CREATED_TIME,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_ID,
+    MSG_SCHEMA_CHAT_HISTORY_MESSAGE_INTERRUPTED,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_QUESTION,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_ROLE,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_SQL,
@@ -203,6 +205,7 @@ from app.domain.error_messages import (
     MSG_SCHEMA_ENTITY_MAPPING_ENTITY_TYPE,
     MSG_SCHEMA_ENTITY_MAPPING_EXPIRY_DATE,
     MSG_SCHEMA_ENTITY_MAPPING_MATCH_RULE,
+    MSG_SCHEMA_ENTITY_MAPPING_NAME,
     MSG_SCHEMA_ENTITY_MAPPING_SOURCE_CODE,
     MSG_SCHEMA_ENTITY_MAPPING_SOURCE_KEY,
     MSG_SCHEMA_ENTITY_MAPPING_SOURCE_SYSTEM,
@@ -332,6 +335,7 @@ class LlmConfigCreate(CamelModel):
     weight: int = Field(default=10, ge=0, le=100, description=MSG_SCHEMA_MODEL_WEIGHT)
     cost_threshold: Decimal = Field(default=Decimal("0.05"), ge=0, description=MSG_SCHEMA_MODEL_COST_THRESHOLD)
     is_active: bool = Field(default=True, description=MSG_SCHEMA_MODEL_IS_ACTIVE)
+    temperature: float | None = Field(default=None, description="模型 temperature 值，留空使用默认值 0.0")
 
 
 class LlmConfigUpdate(CamelModel):
@@ -343,6 +347,7 @@ class LlmConfigUpdate(CamelModel):
     weight: int | None = Field(default=None, ge=0, le=100)
     cost_threshold: Decimal | None = Field(default=None, ge=0)
     is_active: bool | None = None
+    temperature: float | None = None
 
 
 class LlmConfigRead(CamelModel):
@@ -356,6 +361,7 @@ class LlmConfigRead(CamelModel):
     weight: int
     cost_threshold: Decimal
     is_active: bool
+    temperature: float | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
 
@@ -541,8 +547,41 @@ class OntologyPropertyUpdate(CamelModel):
     is_foreign_key: bool | None = None
     ref_class_id: int | None = None
     source_column: str | None = None
+    # 值域：本体属性管理页可手动调整 LLM 采纳的值；
+    # None 表示不修改；显式空数组 视作清空值域。
+    allowed_values: list[str] | None = Field(default=None, max_length=50)
+    # 约束字段（feat-ontology-property-constraints）：本体管理页可手工维护，
+    # 也可被 LLM 采纳并沉淀。None = 不修改该字段；显式 false / "" 视作清空。
+    is_not_null: bool | None = None
+    min_value: str | None = Field(default=None, max_length=50)
+    max_value: str | None = Field(default=None, max_length=50)
+    regex_pattern: str | None = Field(default=None, max_length=255)
 
     _check_aliases = field_validator("business_aliases")(_validateBusinessAliases)
+
+    @field_validator("allowed_values")
+    @classmethod
+    def _validateAllowedValuesNoQuotes(cls, v: list[str] | None) -> list[str] | None:
+        """与 apply-suggestion 一致：禁止单引号（SQL 注入防护）。"""
+        if v is None:
+            return v
+        for s in v:
+            if "'" in s:
+                raise ValueError("allowed_values must not contain single quote")
+        return v
+
+    @field_validator("regex_pattern")
+    @classmethod
+    def _validateRegexPattern(cls, v: str | None) -> str | None:
+        """regex_pattern 必须能 compile；否则 service 层 catch 后 422。"""
+        if v is None or v == "":
+            return v
+        import re
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"regex_pattern 编译失败：{e}") from e
+        return v
 
 
 class OntologyMetricCreate(CamelModel):
@@ -594,6 +633,15 @@ class OntologyPropertyRead(CamelModel):
     is_foreign_key: bool
     ref_class_id: int | None = None
     source_column: str | None = None
+    # 值域（LLM 采纳或人工填入）；null 表示未约束。
+    # 暴露给本体属性管理页（让用户能看到「已沉淀」的值并手动修正）。
+    allowed_values: list[str] | None = None
+    # 约束字段（feat-ontology-property-constraints）：前端管理页展示 + wizard
+    # 初始化 adoptedIds（persisted_property_ids）。
+    is_not_null: bool | None = None
+    min_value: str | None = None
+    max_value: str | None = None
+    regex_pattern: str | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
 
@@ -632,6 +680,16 @@ class KpiCatalogCreate(CamelModel):
     status: KpiStatus = KpiStatus.DRAFT
     metric_id: int | None = None
     created_by: str | None = Field(default=None, max_length=50)
+    semantic_keywords: list[str] | None = Field(
+        default=None,
+        description="L1 语义匹配关键词（自动晋升时由 question 提取）",
+    )
+    match_threshold: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="匹配阈值，默认 0.75",
+    )
 
 
 class KpiCatalogUpdate(CamelModel):
@@ -875,7 +933,7 @@ class SupplierRiskRead(CamelModel):
     tokens_used: int = Field(default=0, ge=0, description="LLM 调用 token 数；fallback=0")
     prompt_tokens: int = Field(default=0, ge=0, description="LLM 调用 prompt token 数；fallback=0")
     completion_tokens: int = Field(default=0, ge=0, description="LLM 调用 completion token 数；fallback=0")
-    cost: float = Field(default=0.0, ge=0.0, description="LLM 调用成本（CNY）；fallback=0")
+    cost: float = Field(default=0.0, ge=0.0, description="LLM 调用成本（USD，按 model config 单价）；fallback=0")
     llm_model_name: str | None = None
     fetched_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
@@ -937,13 +995,15 @@ class FeatureComputeBatchResult(CamelModel):
 
 
 class OntologyJoinCreate(CamelModel):
+    model_config = ConfigDict(extra="forbid")
+
     source_class_id: int
     source_columns: list[str] = Field(..., min_length=1)
     target_class_id: int
     target_columns: list[str] = Field(..., min_length=1)
     join_type: str = Field(default="INNER", max_length=10)
     relation_type: str = Field(default="business", max_length=20)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=1000)
 
 
 class OntologyJoinRead(CamelModel):
@@ -965,6 +1025,164 @@ class OntologyJoinUpdate(CamelModel):
     join_type: str | None = None
     relation_type: str | None = None
     description: str | None = None
+
+
+class OntologyRelationCreate(CamelModel):
+    """创建本体「类 × 类」语义关系。relation_type 取值由 service 校验 ClassRelationType。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_class_id: int
+    target_class_id: int
+    relation_type: str = Field(..., max_length=30)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class OntologyRelationRead(CamelModel):
+    id: int
+    source_class_id: int
+    target_class_id: int
+    relation_type: str
+    description: str | None = None
+    created_by: str | None = None
+    created_time: datetime | None = None
+    updated_time: datetime | None = None
+
+
+class RelationBackfillResult(CamelModel):
+    """一键补关系结果：join 全量入图数 + X3 外键 ref_class_id 补全数。"""
+
+    synced_joins: int
+    backfilled_references: int
+
+
+# ===== Ontology Batch Relation Engine（通用批量关系引擎） =====
+
+# 冲突策略：skip=已存在则跳过；overwrite=已存在则覆盖可更新字段（源/目标/列是身份）
+OnConflictPolicy = Literal["skip", "overwrite"]
+
+
+class InferredJoin(CamelModel):
+    """共享列推断出的 join 候选（落库前只读描述；来源区分命名约定/共享列）。"""
+
+    source_class_id: int
+    source_class_name: str
+    source_columns: list[str]
+    target_class_id: int
+    target_class_name: str
+    target_columns: list[str]
+    relation_type: str = "foreign_key"
+    inferred_by: str = "name_convention"  # name_convention | shared_column
+
+
+class RelationManifest(CamelModel):
+    """批量关系清单：joins + relations（与单条创建 schema 一一对应）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    joins: list[OntologyJoinCreate] = Field(default_factory=list)
+    relations: list[OntologyRelationCreate] = Field(default_factory=list)
+
+
+class BatchRowError(CamelModel):
+    """清单单行的错误（index 为该清单内 0-based 行序；message 为原因）。"""
+
+    index: int
+    message: str
+
+
+class BatchCounts(CamelModel):
+    """join/relations 批量应用计数（含行级错误，不 fail-fast）。"""
+
+    created: int = 0
+    skipped: int = 0
+    overwritten: int = 0
+    errors: list[BatchRowError] = Field(default_factory=list)
+
+
+class GraphSyncResult(CamelModel):
+    """syncGraph 本体入图统计（Neo4j 节点/边数）。"""
+
+    classes: int = 0
+    properties: int = 0
+    has_property_edges: int = 0
+    reference_edges: int = 0
+
+
+class BatchRelationRequest(CamelModel):
+    """批量关系引擎请求：可任选其一或多个动作；对已存在关系可选覆盖/跳过。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sync_graph: bool = False
+    infer_joins: bool = False
+    apply_manifest: bool = False
+    on_conflict: OnConflictPolicy = "skip"
+    manifest: RelationManifest | None = None
+
+    @model_validator(mode="after")
+    def _validateAtLeastOneAction(self) -> BatchRelationRequest:
+        if not (self.sync_graph or self.infer_joins or self.apply_manifest):
+            raise ValueError(
+                "batch requires at least one action: syncGraph | inferJoins | applyManifest"
+            )
+        if self.apply_manifest and self.manifest is None:
+            raise ValueError("applyManifest requires a non-null manifest")
+        return self
+
+
+class BatchRelationResult(CamelModel):
+    """批量关系引擎结果（执行或只读预览共用；不可变计数，Neo4j 失败不阻断 PG）。
+
+    warnings（导入闸门，2026-09-18 孤岛事故产物）：批量执行后扫描出的
+    「有 FK 语义列但零 JOIN 边」类清单——不阻断，提示补边。
+    """
+
+    sync_graph: GraphSyncResult | None = None
+    inferred_joins: list[InferredJoin] = Field(default_factory=list)
+    joins: BatchCounts = Field(default_factory=BatchCounts)
+    relations: BatchCounts = Field(default_factory=BatchCounts)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class IsolatedClass(CamelModel):
+    """零 JOIN 边的本体类（孤岛），标注数仓分层与 FK 语义列。"""
+
+    class_id: int
+    class_name: str
+    source_table: str | None
+    layer: str
+    fk_like_columns: list[str] = Field(default_factory=list)
+
+
+class DeadEdge(CamelModel):
+    """值域探针判定为死的 JOIN 边（重叠率 0，含任一侧空列）。"""
+
+    join_id: int
+    join_index: int
+    source_class: str
+    source_column: str
+    target_class: str
+    target_column: str
+    overlap_ratio: float
+    source_distinct: int
+    target_distinct: int
+
+
+class JoinHealthReport(CamelModel):
+    """GET /ontology/health/joins 报告：孤岛清单 +（可选）死边清单。"""
+
+    total_classes: int
+    total_joins: int
+    isolated: list[IsolatedClass] = Field(default_factory=list)
+    dead_edges: list[DeadEdge] | None = None
+
+
+class OntologyCsvParseResult(CamelModel):
+    """CSV 清单解析结果：manifest（按类名反解 id）+ 行级错误（Excel 友好）。"""
+
+    manifest: RelationManifest = Field(default_factory=RelationManifest)
+    errors: list[BatchRowError] = Field(default_factory=list)
 
 
 class OntologySearchResult(CamelModel):
@@ -1047,6 +1265,11 @@ class ColumnSchemaRead(CamelModel):
     data_type: str
     # 必填：nullable 缺失说明数据字典返回形状异常，fail-fast 而非静默默认
     nullable: bool
+    # 字段注释（feat-ontology-import-comment）：Oracle ALL_COL_COMMENTS、PG pg_description、
+    # MySQL information_schema.columns.column_comment。无注释时为 None，老 schema_cache JSON
+    # 缺该字段自动取默认值（None），向后兼容。导入时作为 ontology_property.description
+    # 的最高优先级来源（高于 LLM 增强）。
+    comment: str | None = None
 
 
 class ForeignKeySchemaRead(CamelModel):
@@ -1061,6 +1284,10 @@ class TableSchemaRead(CamelModel):
     columns: list[ColumnSchemaRead] = Field(default_factory=list)
     primary_keys: list[str] = Field(default_factory=list)
     foreign_keys: list[ForeignKeySchemaRead] = Field(default_factory=list)
+    # 表注释（feat-ontology-import-comment）：Oracle ALL_TAB_COMMENTS、PG pg_description、
+    # MySQL information_schema.tables.table_comment。无注释时为 None。导入时作为
+    # ontology_class.description 的最高优先级来源（高于 LLM 增强）。
+    comment: str | None = None
 
 
 class SchemaIntrospectResponse(CamelModel):
@@ -1161,12 +1388,27 @@ class LlmEnhanceOptions(CamelModel):
     suggest_filters: bool = True
 
 
+class JoinInferenceRules(CamelModel):
+    """关联关系推断开关。
+
+    - infer_declared_fk：按数据字典声明的外键生成 join（PG/MySQL/Oracle 声明 FK）。
+    - infer_name_convention：按列名约定推断 Sage X3（THBI）引用边。THBI 不声明
+      任何 FK/PK 约束，schema 缓存 primary_keys/foreign_keys 为空，只有列名约定
+      能还原主数据/单据头引用（ITMREF_0 → ITMMASTER 等）。对无约定列的小写库
+      无匹配，保持空。注册表见 services/join_inference.py。
+    """
+
+    infer_declared_fk: bool = True
+    infer_name_convention: bool = True
+
+
 class ImportRuleConfig(CamelModel):
-    """本地导入规则配置：表过滤 + 类型映射 + LLM 增强。"""
+    """本地导入规则配置：表过滤 + 类型映射 + LLM 增强 + 关联推断。"""
 
     table_filter: TableFilterRules = Field(default_factory=TableFilterRules)
     type_mapping: TypeMappingRules = Field(default_factory=TypeMappingRules)
     llm_enhance_options: LlmEnhanceOptions = Field(default_factory=LlmEnhanceOptions)
+    join_inference: JoinInferenceRules = Field(default_factory=JoinInferenceRules)
 
 
 class ConflictType(StrEnum):
@@ -1223,6 +1465,11 @@ class ProposedJoin(CamelModel):
     join_type: str = "INNER"
     relation_type: str = "foreign_key"
     is_selected: bool = True
+    # 推断来源，供前端预览标注：declared_fk | name_convention；旧响应为 None。
+    inferred_by: str | None = Field(
+        default=None,
+        description="关联推断来源：declared_fk（声明外键）| name_convention（列名约定）",
+    )
 
 
 class ImportPreviewRequest(CamelModel):
@@ -1232,6 +1479,21 @@ class ImportPreviewRequest(CamelModel):
     # 表名白名单：非空时预览只返回命中该列表的表（用于超大 schema 分批导入）。
     # 与 rules.table_filter 是 AND 关系：先按规则过滤，再仅保留白名单命中的表。
     selected_tables: list[str] | None = None
+    # 可选：按表限制参与导入的属性列子集 {表名: [列名]}；省略表示全列。
+    # 单表「只导入部分属性」场景用（列名匹配大小写不敏感，未知列忽略）。
+    selected_columns: dict[str, list[str]] | None = Field(
+        default=None,
+        description="按表限制预览的属性列子集，如 {\"PORDERQ\": [\"POHNUM_0\", \"QTYUOM_0\"]}",
+    )
+    # 可选：内省目标 Oracle owner 命名空间（如 THBI）；缺省取连接用户默认 owner。
+    # 仅影响表来源（schema 缓存键）；本体 source_table 仍存裸表名。
+    # 字段名取 schema_name 避免与 BaseModel/CamelModel 的 schema 属性冲突；
+    # JSON 契约仍为 schema（显式 alias 覆盖 camelCase 生成器）。
+    schema_name: str | None = Field(
+        default=None,
+        alias="schema",
+        description="要预览的 Oracle owner 命名空间（如 THBI）；缺省连接用户默认 owner",
+    )
 
 
 class FilterSuggestions(CamelModel):
@@ -1365,6 +1627,17 @@ class ChatRequest(CamelModel):
     chartType: ChartType | None = Field(default=None, description=MSG_SCHEMA_CHAT_CHART_TYPE_EXPLICIT)
 
 
+class DocQaRequest(CamelModel):
+    """文档问答请求（与 ChatRequest 解耦）。"""
+
+    session_id: str = Field(..., min_length=1, max_length=64)
+    question: str = Field(..., min_length=1)
+    top_k: int = Field(default=8, ge=1, le=20)
+    security_level: str | None = None
+    document_type: str | None = None
+    model_id: int | None = None
+
+
 class ExtractedEntities(CamelModel):
     """从用户问题中抽取的结构化查询实体（best-effort，任一字段可为空）。"""
 
@@ -1396,6 +1669,25 @@ class AgentSuggestion(CamelModel):
     recommended_agent_code: str
     confidence: float
     reason: str
+
+
+class ClassRecallInfo(CamelModel):
+    """类召回诊断（每次 QUERY 附带；前端据此在截断/降级时向用户提示）。
+
+    mode:
+      - recall:   纯向量召回（无邻居可扩边）
+      - expanded: 召回 + JOIN 目录 1-hop 扩边
+      - fallback: 检索不可用/无命中，回退到「ODS 过滤 + 层优先排序 + 上限截断」后的类集
+                  （H5 起降级路径同样受裁剪约束，故 truncated 在 fallback 下同样有意义）
+    truncated: 类集达到 system_config.CLASS_FILTER_MAX_CLASSES 上限被截断，
+    可能存在相关表未进入本次 schema。
+    详见 Harness/wiki/nl2sql-engine.md「类召回窗口与规模化风险」。
+    """
+
+    mode: str
+    hitCount: int = 0
+    classCount: int = 0
+    truncated: bool = False
 
 
 class ChatResponse(CamelModel):
@@ -1456,11 +1748,29 @@ class ChatResponse(CamelModel):
         default=None,
         description=MSG_SCHEMA_CHAT_AGENT_RUN,
     )
+    # 类召回诊断（2026-09-16）：仅 QUERY/NEW_QUERY/multi_step 填充；其余意图为 None
+    classRecall: ClassRecallInfo | None = Field(
+        default=None,
+        description="类召回诊断：mode(recall|expanded|fallback)/hitCount/classCount/truncated",
+    )
     # Phase 7 G4：未指名 Agent 语义路由建议卡片（仅中置信命中时随 QUERY/NEW_QUERY
     # 附带；高置信直接 intent=agent_run，低置信无此字段；前端按字段存在性渲染）
     suggested_agent: AgentSuggestion | None = Field(
         default=None,
         description="中置信语义路由建议卡片：推荐执行某个 Agent（推荐编码 + 置信度 + 理由）",
+    )
+    # Phase 1.4：L1 KPI 语义匹配命中结果（仅 intent=l1_match 时填充；前端按字段存在性渲染）
+    kpi_code: str | None = Field(
+        default=None,
+        description="L1 命中的 KPI code",
+    )
+    kpi_name: str | None = Field(
+        default=None,
+        description="L1 命中的 KPI 名称",
+    )
+    confidence: float | None = Field(
+        default=None,
+        description="L1 匹配置信度（精确 alias=1.0，关键词 Jaccard∈(0,1]）",
     )
 
 
@@ -1586,6 +1896,9 @@ class ChatMessageRead(CamelModel):
     question: str | None = Field(default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_QUESTION)
     sql: str | None = Field(default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_SQL)
     created_time: datetime = Field(..., description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CREATED_TIME)
+    interrupted: bool = Field(
+        default=False, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_INTERRUPTED
+    )
 
 
 class SessionMessagesResponse(CamelModel):
@@ -1608,7 +1921,9 @@ class DataQualityRuleCreate(CamelModel):
         ...,
         min_length=1,
         max_length=100,
-        pattern=r"^[A-Z][A-Z0-9_]*$",
+        # feat-rule-batch-create：MU-DQ-CLASS-YYYYMMDD-NNNNN 编码含连字符，
+        # 原 ^[A-Z][A-Z0-9_]*$ 拒绝 -。放开到允许连字符；下划线/纯字母编码仍合法。
+        pattern=r"^[A-Z][A-Z0-9_-]*$",
         description=MSG_SCHEMA_DQ_RULE_CODE,
     )
     datasource_id: int = Field(..., gt=0, description=MSG_SCHEMA_DQ_DATASOURCE_ID)
@@ -1675,6 +1990,11 @@ class EvaluationResult(CamelModel):
 
     rule_id: int = Field(..., description=MSG_SCHEMA_DQ_EVAL_RULE_ID)
     rule_code: str = Field(..., description=MSG_SCHEMA_DQ_EVAL_RULE_CODE)
+    # feat-report-rules-zh-name (2026-09-15)：前端报告「规则明细」表展示给业务用户，
+    # 用 rule_name（业务可读名）而非 rule_code（系统唯一码）；severity 让严重级别列不再永远空。
+    # 两个字段都 optional，避免破坏旧客户端（早期 evaluator 不带这俩字段）。
+    rule_name: str | None = Field(default=None, description="规则名称（业务可读）")
+    severity: str | None = Field(default=None, description="严重级别（HIGH/MEDIUM/LOW/INFO）")
     rule_type: RuleType = Field(..., description=MSG_SCHEMA_DQ_EVAL_RULE_TYPE)
     datasource_id: int | None = Field(default=None, description=MSG_SCHEMA_DQ_EVAL_DATASOURCE_ID)
     total_count: int = Field(default=0, ge=0, description=MSG_SCHEMA_DQ_EVAL_TOTAL_COUNT)
@@ -1758,6 +2078,32 @@ class ComputeScoresResponse(CamelModel):
     )
 
 
+class ComputeScoresRequest(CamelModel):
+    """计算评分请求（feat-dq-scores-scope，2026-09-15；feat-dq-scores-multiselect）。
+
+    三个 scope 字段全 optional；不传 = 现有全量行为。
+    target_tables 与 rule_types 支持多选（list），多条用 IN 组合；
+    与 datasource_id（仍单选）AND 组合。
+    scope 命中 0 条规则时直接返回空响应、不写库、不写 GLOBAL。
+
+    字段优先级：
+    - target_tables 非空 ⇒ IN；target_tables 为 None/空 ⇒ 全表（向后兼容）
+    - rule_types 非空 ⇒ IN；rule_types 为 None/空 ⇒ 全规则类型
+    """
+
+    datasource_id: int | None = Field(
+        default=None, gt=0, description=MSG_SCHEMA_DQ_DATASOURCE_ID
+    )
+    target_tables: list[str] | None = Field(
+        default=None,
+        description="多选目标表（feat-dq-scores-multiselect，2026-09-15）。",
+    )
+    rule_types: list[RuleType] | None = Field(
+        default=None,
+        description="多选规则类型枚举（feat-dq-scores-multiselect，2026-09-15）。",
+    )
+
+
 # ===== 数据血缘（Phase 2.1）=====
 
 
@@ -1828,6 +2174,17 @@ class LineageEdgeRead(CamelModel):
     updated_time: datetime | None = Field(default=None, description=MSG_SCHEMA_LINEAGE_UPDATED_TIME)
 
 
+class LineageExtractResult(CamelModel):
+    """自动抽取血缘的结果。
+
+    来源与 scripts/lineage_auto_extract.py 一致（OntologyJoin + OntologyMetric.formula
+    + schema introspection）；created = 本次实际写入 data_lineage 的新增边数
+    （幂等：重复调用返回 0）。
+    """
+
+    created: int = Field(..., description="本次实际写入 data_lineage 的新增血缘边数")
+
+
 # ===== 跨系统编码映射（Phase 3.1）=====
 
 
@@ -1866,6 +2223,11 @@ class EntityMappingCreate(CamelModel):
     expiry_date: date | None = Field(
         default=None, description=MSG_SCHEMA_ENTITY_MAPPING_EXPIRY_DATE
     )
+    # Phase 6.x：业务名（供应商 supplier_name / 物料 description_1-3 拼接），仅展示用。
+    # 单条 create 一直未对外暴露，bulk 导入需要这个字段（运营按 CSV 录实体名）。
+    name: str | None = Field(
+        default=None, max_length=200, description=MSG_SCHEMA_ENTITY_MAPPING_NAME
+    )
 
 
 class EntityMappingUpdate(CamelModel):
@@ -1897,12 +2259,64 @@ class EntityMappingRead(CamelModel):
     effective_date: date | None = None
     expiry_date: date | None = None
     owner: str | None = None
+    name: str | None = None
     created_time: datetime | None = Field(
         default=None, description=MSG_SCHEMA_ENTITY_MAPPING_CREATED_TIME
     )
     updated_time: datetime | None = Field(
         default=None, description=MSG_SCHEMA_ENTITY_MAPPING_UPDATED_TIME
     )
+
+
+class EntityMappingBulkImportItem(CamelModel):
+    """批量导入单行请求 DTO（feat-entity-mapping-bulk-import 2026-09-16）。
+
+    与 EntityMappingCreate 的差异：
+    - enterprise_key 可省略（默认 0 表示「按 enterprise_code + entity_type 派生」）；
+      这是 bulk 的核心简化（前端不用算 SHA-256 + offset）。
+    - 单条 create 仍走 EntityMappingCreate（强制 enterprise_key 必填非零，
+      防止「前端误填 0 静默派生错 key」）。
+    """
+
+    entity_type: BusinessObjectCodeType
+    enterprise_key: int = Field(default=0, ge=0, le=2**63 - 1)
+    enterprise_code: str = Field(..., min_length=1, max_length=100)
+    source_system: SourceSystem
+    source_key: str = Field(..., min_length=1, max_length=100)
+    source_code: str = Field(..., min_length=1, max_length=100)
+    match_rule: MatchRule = Field(default=MatchRule.MAPPING)
+    effective_date: date | None = None
+    expiry_date: date | None = None
+    name: str | None = Field(default=None, max_length=200)
+
+
+class EntityMappingBulkResultRow(CamelModel):
+    """批量导入单行结果。
+
+    row: 1-based 行号（含表头），便于用户对照原始 CSV
+    status: inserted / updated / skipped / failed
+    changed_fields: 当 status=updated 时填，其它为空
+    """
+
+    row: int
+    status: Literal["inserted", "updated", "skipped", "failed"]
+    entity_type: BusinessObjectCodeType | None = None
+    enterprise_code: str | None = None
+    id: int | None = None
+    changed_fields: list[str] | None = None
+    reason: str | None = None
+    error: str | None = None
+
+
+class EntityMappingBulkResult(CamelModel):
+    """批量导入聚合结果。"""
+
+    total: int
+    inserted: int
+    updated: int
+    skipped: int
+    failed: int
+    results: list[EntityMappingBulkResultRow]
 
 
 class EntityMappingSearchHit(CamelModel):
@@ -1966,6 +2380,29 @@ class KpiCatalogHistoryRead(CamelModel):
     snapshot_json: dict
     changed_by: str | None = None
     changed_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 Task 1.6: KPI Catalog Search
+# ---------------------------------------------------------------------------
+
+
+class KpiSearchHit(CamelModel):
+    """KPI 搜索命中结果（Phase 1.6）。
+
+    仅含前端 AutoComplete 下拉需要展示的字段，不暴露 formula / owner 等治理字段。
+    """
+
+    kpi_code: str
+    kpi_name: str
+    confidence: float
+
+
+class KpiSearchResponse(CamelModel):
+    """KPI 搜索响应 envelope。"""
+
+    query: str
+    results: list[KpiSearchHit]
 
 
 class FeatureDefinitionHistoryRead(CamelModel):
@@ -2081,6 +2518,12 @@ class AgentAccessPolicyCreate(CamelModel):
     )
     notes: str | None = Field(default=None, max_length=2000)
 
+    # data_object 必须与 data_layer 一样在边界归一化：运行时按
+    # ``p.data_object == tool.data_object`` **精确比对**（工具侧的值已在
+    # AgentToolAssembly.assemble 归一为 strip+upper）。少这一步，管理员填
+    # "supplier " 会存成原样、策略永不命中，而写入本身毫无报错 —— 授权静默
+    # 失效，最终表现成 403。AgentToolConfigCreate 早就有这个校验器，此处补齐。
+    _check_data_object = field_validator("data_object")(_normalizeDataObject)
     _check_data_layer = field_validator("data_layer")(_normalizeDataLayer)
 
 
@@ -2237,7 +2680,6 @@ class AgentDefinitionRead(CamelModel):
     owner: str | None = None
     version: str
     policies: list[AgentAccessPolicyRead] = Field(default_factory=list)
-    created_time: datetime | None = None
     updated_time: datetime | None = None
     created_time: datetime
     tool_name: str | None = None
@@ -2660,6 +3102,9 @@ class ParseDescriptionsRequest(CamelModel):
     """parse-descriptions 请求：给定本体类，让 LLM 从属性描述中提取候选约束。"""
 
     class_id: int = Field(..., gt=0)
+    # 可选 LLM 模型配置 id（前端 modelId）；None 走默认 OPENAI_API_KEY env 路径。
+    # 序列化时通过 to_camel alias 输出 modelId（前端约定）。
+    model_id: int | None = Field(default=None, gt=0, alias="modelId")
 
 
 class PropertyConstraintSuggestionRead(CamelModel):
@@ -2667,8 +3112,12 @@ class PropertyConstraintSuggestionRead(CamelModel):
 
     property_id: int
     property_name: str
-    kind: str  # allowed_values | not_null
+    kind: str  # allowed_values | not_null | range | pattern
     values: list[str] | None = None
+    # range / pattern 专用字段；allowed_values / not_null 时为 None。
+    min_value: str | None = None
+    max_value: str | None = None
+    regex_pattern: str | None = None
     confidence: float
     rationale: str
 
@@ -2677,17 +3126,440 @@ class ParseDescriptionsResponse(CamelModel):
     """parse-descriptions 响应。"""
 
     suggestions: list[PropertyConstraintSuggestionRead] = Field(default_factory=list)
+    # 当前类下，已在 ontology_property.allowed_values 写入值的 propertyId 列表；
+    # 前端用它初始化 LlmPanel.adoptedIds，让刷新页面也保持已采纳状态。
+    persisted_property_ids: list[int] = Field(default_factory=list)
 
 
 class ApplySuggestionRequest(CamelModel):
-    """apply-suggestion 请求：采纳 LLM 推荐的 allowed_values，写入 ontology_property。"""
+    """apply-suggestion 请求：按 kind 派发写入 ontology_property。
+
+    仅 kind 命中的字段会被 service 写入；其它字段即便传也忽略。
+    kind 取值：
+    - allowed_values → allowed_values 列表
+    - not_null       → 仅写 is_not_null=true
+    - range          → min_value + max_value 同时存在
+    - pattern        → regex_pattern
+    """
 
     property_id: int = Field(..., gt=0)
-    allowed_values: list[str] = Field(..., min_length=1, max_length=50)
+    # 默认 allowed_values 兼容旧 client（feat-ontology-property-constraints 之前
+    # 的 client 只传 propertyId + allowedValues）。whitelist 在 _validateKind。
+    kind: str = Field(
+        default="allowed_values",
+        description="allowed_values | not_null | range | pattern",
+    )
+    allowed_values: list[str] | None = Field(default=None, min_length=1, max_length=50)
+    min_value: str | None = Field(default=None, max_length=50)
+    max_value: str | None = Field(default=None, max_length=50)
+    regex_pattern: str | None = Field(default=None, max_length=255)
+
+    @field_validator("kind")
+    @classmethod
+    def _validateKind(cls, v: str) -> str:
+        allowed = {"allowed_values", "not_null", "range", "pattern"}
+        if v not in allowed:
+            raise ValueError(f"kind 必须是 {sorted(allowed)} 之一")
+        return v
+
+    @field_validator("regex_pattern")
+    @classmethod
+    def _validateRegexPattern(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return v
+        import re
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"regex_pattern 编译失败：{e}") from e
+        return v
+
+    @field_validator("allowed_values")
+    @classmethod
+    def _validateAllowedValuesNoQuotes(cls, v: list[str] | None) -> list[str] | None:
+        """与 OntologyPropertyUpdate 一致：禁止单引号（SQL 注入防护）。"""
+        if v is None:
+            return v
+        for s in v:
+            if "'" in s:
+                raise ValueError("allowed_values must not contain single quote")
+        return v
 
 
 class ApplySuggestionResponse(CamelModel):
-    """apply-suggestion 响应。"""
+    """apply-suggestion 响应：回写当前所有约束字段，client 可据此刷新。"""
 
     property_id: int
-    allowed_values: list[str]
+    kind: str
+    allowed_values: list[str] | None = None
+    is_not_null: bool | None = None
+    min_value: str | None = None
+    max_value: str | None = None
+    regex_pattern: str | None = None
+
+
+class DatasourceOption(CamelModel):
+    """数据源下拉选项（仅 id + name，轻量）。"""
+
+    id: int
+    name: str
+
+
+class ClassOption(CamelModel):
+    """本体类下拉选项（id + class_name 轻量）。"""
+
+    id: int
+    class_name: str
+
+
+class RuleOptionsRead(CamelModel):
+    """GET /data-quality/rules/options 响应：规则列表筛选下拉的所有可选值。
+
+    - ruleNames：data_quality_rule 中已用过的 rule_name DISTINCT
+    - datasourceIds：active 数据源全量
+    - targetTables：data_quality_rule 中已用过的 target_table DISTINCT
+    - severities：静态全集（HIGH/MEDIUM/LOW/INFO）
+    - classOptions：active 本体类全量（class_name 去重过滤场景下拉）
+    """
+
+    rule_names: list[str] = Field(default_factory=list)
+    datasource_ids: list[DatasourceOption] = Field(default_factory=list)
+    target_tables: list[str] = Field(default_factory=list)
+    severities: list[str] = Field(default_factory=list)
+    class_options: list[ClassOption] = Field(default_factory=list)
+
+
+class NextRuleCodeRead(CamelModel):
+    """GET /data-quality/rules/next-code 响应（feat-rule-batch-create）。
+
+    前端批量新建向导用：选完类后异步拿建议编码（前端只展示，**不实际占用**）。
+    后端在 createRule() 时按 DB 真实 MAX+1 二次校验防并发冲突。
+    """
+
+    code: str
+    seq: int
+
+
+class SystemConfigRead(CamelModel):
+    """system_config 单行读视图（feat-system-config-admin）。
+
+    key 是不可变主键；value 是可编辑字段；description 是元数据（创建时写入，UI 只读）。
+    updated_time 由 DB DEFAULT NOW() 自动维护（每次 UPDATE 也由 ORM 自动刷新）。
+    """
+
+    key: str
+    value: str | None
+    description: str | None
+    updated_time: datetime
+
+
+class SystemConfigUpdate(CamelModel):
+    """system_config 更新 payload：仅 value 字段可改。
+
+    - key：URL path param 单独传；payload 不重（防 mass-assignment 改主键）。
+    - description：元数据，本计划不允许通过 admin API 改（需 DDL 同步才能让种子和
+      UI 一致；见后续 SSOT 治理）。
+    - value：必填字段（即便清空也要显式传 None 而非省略；用 min_length=0 允许空串）。
+    """
+
+    value: str | None = Field(default=None, max_length=4096)
+
+
+# ===========================================================================
+# Phase 1.5: Evaluation Report (feat-dq-evaluation-report)
+# ===========================================================================
+
+
+class EvaluationReportCreate(CamelModel):
+    """创建评估报告请求。
+
+    class_ids / rule_ids 至少各 1 个（联合约束在 service 层做，因为需要查 DB 验证
+    id 真实存在 + 启用）。time_window 必填：开始 ≤ 结束；与 evaluator 的 WHERE
+    子句配合（Phase 2 改造）。
+    """
+
+    name: str = Field(..., min_length=1, max_length=200)
+    description: str | None = Field(default=None)
+    class_ids: list[int] = Field(..., min_length=1)
+    rule_ids: list[int] = Field(..., min_length=1)
+    time_window_start: datetime
+    time_window_end: datetime
+    tags: list[str] = Field(default_factory=list)
+    status: str = Field(default="PUBLISHED")
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, v: str) -> str:
+        if v not in {"DRAFT", "PUBLISHED"}:
+            raise ValueError(f"unsupported status: {v}")
+        return v
+
+    @field_validator("time_window_end")
+    @classmethod
+    def _validate_window(cls, v: datetime, info) -> datetime:
+        start = info.data.get("time_window_start")
+        if start is not None and v < start:
+            raise ValueError("time_window_end must be >= time_window_start")
+        return v
+
+
+class EvaluationReportUpdate(CamelModel):
+    """更新报告元数据（仅 name/description/tags/status 可改，class/rule/window 不可改）。
+
+    修改 class/rule/window 必须走 regenerate_snapshot（重新评估并替换 snapshot）。
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None)
+    tags: list[str] | None = Field(default=None)
+    status: str | None = Field(default=None)
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if v not in {"DRAFT", "PUBLISHED"}:
+            raise ValueError(f"unsupported status: {v}")
+        return v
+
+
+class EvaluationReportProgress(CamelModel):
+    """异步评估进度（feat-dq-evaluation-report-progress，2026-09-15）。
+
+    字段语义：
+    - stage: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED"
+    - completed / total: 已完成规则数 / 总规则数；total=0 表示尚未开始
+    - current_rule_id / current_rule_code: 当前正在评估的规则（用于 UI 提示）
+    - message: 失败原因或阶段性文字
+    - started_at / finished_at: ISO datetime
+    """
+
+    stage: str = "PENDING"
+    completed: int = 0
+    total: int = 0
+    current_rule_id: int | None = None
+    current_rule_code: str | None = None
+    message: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class EvaluationReportRead(CamelModel):
+    """评估报告读模型：含完整 snapshot。
+
+    snapshot 字段直接渲染，详情页零延迟。前端按 snapshot.schema_version 分支渲染。
+    progress 字段在异步评估场景下非空；前端轮询 progress 字段拿到当前阶段。
+    """
+
+    id: int
+    name: str
+    description: str | None
+    class_ids: list[int]
+    rule_ids: list[int]
+    time_window_start: datetime
+    time_window_end: datetime
+    status: str
+    tags: list[str]
+    snapshot: dict[str, Any]
+    snapshot_version: int
+    progress: EvaluationReportProgress | None = None
+    owner: str | None
+    created_by: str
+    created_time: datetime
+    updated_time: datetime
+    deleted_at: datetime | None
+
+
+class EvaluationReportListRead(CamelModel):
+    """报告列表分页响应（不含 snapshot，省带宽）。"""
+
+    rows: list[EvaluationReportRead]
+    total: int
+
+
+class ViolationSampleRead(CamelModel):
+    """违规样本读模型。
+
+    feat-sampling-error-visible (2026-09-15)：加 samplingError 字段。
+    None = 采样成功或 0 命中；非 None = 异常文本（≤500 chars），前端在 PK 列显式
+    提示「采样失败: <msg>」。
+    """
+
+    id: int
+    report_id: int
+    rule_id: int
+    datasource_id: int
+    target_table: str
+    target_column: str | None
+    total_violations: int
+    sample_size: int
+    sample_pk_values: list[dict[str, Any]]
+    sampling_error: str | None = None
+    captured_at: datetime
+
+
+class RuleDeltaRead(CamelModel):
+    """对比两份报告时，单规则的差异。"""
+
+    rule_id: int
+    rule_code: str
+    pass_rate_left: float | None
+    pass_rate_right: float | None
+    delta: float | None
+    status_change: str  # "IMPROVED" | "REGRESSED" | "UNCHANGED" | "ADDED" | "REMOVED"
+
+
+class DimensionDeltaRead(CamelModel):
+    """对比两份报告时，单维度的差异。"""
+
+    name: str  # completeness/validity/...
+    left: float | None
+    right: float | None
+    delta: float | None
+
+
+class EvaluationReportCompareRead(CamelModel):
+    """对比两份报告的完整响应。"""
+
+    left_id: int
+    right_id: int
+    overall_left: float | None
+    overall_right: float | None
+    overall_delta: float | None
+    dimension_deltas: list[DimensionDeltaRead]
+    rule_deltas: list[RuleDeltaRead]
+    rules_in_left_only: list[int]
+    rules_in_right_only: list[int]
+
+
+class EvaluationReportShareCreate(CamelModel):
+    """创建分享 token 请求。"""
+
+    expires_in_days: int = Field(default=7, ge=1, le=30)
+
+
+class EvaluationReportShareRead(CamelModel):
+    """分享 token 读模型（创建时返回 token + url；解析时返回 report）。"""
+
+    id: int
+    report_id: int
+    share_token: str
+    share_url: str | None = None  # 仅创建时返回；解析时为 None
+    expires_at: datetime
+    access_count: int
+    created_by: str
+    created_at: datetime
+
+
+class EvaluationReportScheduleCreate(CamelModel):
+    """创建定时报告配置。"""
+
+    name: str = Field(..., min_length=1, max_length=200)
+    cron_expression: str = Field(..., min_length=1, max_length=100)
+    class_ids: list[int] = Field(..., min_length=1)
+    rule_ids: list[int] = Field(..., min_length=1)
+    time_window_type: ReportTimeWindowType
+    recipients: list[str] = Field(default_factory=list)  # user_id[]
+    enabled: bool = Field(default=True)
+
+    @field_validator("time_window_type", mode="before")
+    @classmethod
+    def _coerce_window_type(cls, v: Any) -> ReportTimeWindowType:
+        # 入参可能是 ORM Enum 实例 / 字符串，统一走枚举校验：
+        # schema 接受 3 个枚举值（LAST_7D / LAST_30D / LAST_RUN），
+        # 不再裸定义字符串集合（避免加第四个值时漏改）。
+        try:
+            return ReportTimeWindowType(v)
+        except ValueError as e:
+            raise ValueError(f"unsupported time_window_type: {v}") from e
+
+
+class EvaluationReportScheduleUpdate(CamelModel):
+    """更新定时配置（cron / enabled / recipients 等可改；class/rule/window_type 不允许改，要重建）。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    cron_expression: str | None = Field(default=None, min_length=1, max_length=100)
+    recipients: list[str] | None = Field(default=None)
+    enabled: bool | None = Field(default=None)
+
+
+class EvaluationReportScheduleRead(CamelModel):
+    """定时配置读模型。"""
+
+    id: int
+    name: str
+    cron_expression: str
+    class_ids: list[int]
+    rule_ids: list[int]
+    time_window_type: str
+    recipients: list[str]
+    enabled: bool
+    next_run_at: datetime | None
+    last_run_at: datetime | None
+    last_report_id: int | None
+    owner: str | None
+    created_by: str
+    created_time: datetime
+    updated_time: datetime
+
+
+# =============================================================================
+# Wiki ↔ Ontology Link（feat-wiki-ontology-link）
+# =============================================================================
+
+
+class WikiLinkOut(BaseModel):
+    id: int
+    page_id: str
+    chunk_id: str | None
+    ontology_type: str
+    ontology_id: int
+    weight: float
+    note: str | None
+    created_by: int
+    revoked_time: datetime | None
+
+
+class WikiLinkableTargetOut(BaseModel):
+    id: int
+    type: str  # 'class' | 'property'
+    name: str
+    alias: str | None
+    description: str | None
+
+
+# =============================================================================
+# M0 Unified ID（v3.1 架构升级）
+# =============================================================================
+
+
+class IdMappingCreate(CamelModel):
+    """创建 id_mapping 的请求体。"""
+    business_object: str = Field(..., min_length=1, max_length=32)
+    external_id: str = Field(..., min_length=1, max_length=128)
+    pg_table: str | None = Field(default=None, max_length=64)
+    pg_id: str | None = Field(default=None, max_length=128)
+
+
+class IdMappingUpdate(CamelModel):
+    """更新 id_mapping 的请求体（partial）。"""
+    pg_table: str | None = Field(default=None, max_length=64)
+    pg_id: str | None = Field(default=None, max_length=128)
+    neo4j_node_id: str | None = Field(default=None, max_length=128)
+    milvus_collection: str | None = Field(default=None, max_length=64)
+    milvus_id: str | None = Field(default=None, max_length=128)
+
+
+class IdMappingRead(CamelModel):
+    """id_mapping 响应体。"""
+    unified_id: str
+    business_object: str
+    external_id: str
+    pg_table: str | None
+    pg_id: str | None
+    neo4j_node_id: str | None
+    milvus_collection: str | None
+    milvus_id: str | None
+    created_time: datetime
+    updated_time: datetime

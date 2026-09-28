@@ -4,6 +4,7 @@ import type {
   EvaluateBatchRequest,
   EvaluateBatchResponse,
   DataQualityScore,
+  ComputeScoresRequest,
   ComputeScoresResponse,
   ScoreListParams,
 } from "../types/dataQualityScore";
@@ -37,10 +38,16 @@ export async function evaluateBatch(
 // Phase 1.3 评分
 // ---------------------------------------------------------------------------
 
-/** POST /api/v1/data-quality/scores/compute — 触发全量评估 + 聚合落库。 */
-export async function computeScore(): Promise<ComputeScoresResponse> {
+/** POST /api/v1/data-quality/scores/compute — 触发全量评估 + 聚合落库。
+ *
+ * 可选 payload：datasourceId / targetTable / ruleType 三字段全 optional；不传 = 全量。
+ * 三条件 AND 组合；scope 命中 0 条规则时后端返回空响应、不写库、不写 GLOBAL。 */
+export async function computeScore(
+  payload?: ComputeScoresRequest,
+): Promise<ComputeScoresResponse> {
   const res = await httpClient.post<ComputeScoresResponse>(
     `${BASE}/scores/compute`,
+    payload ?? {},
   );
   return res.data;
 }

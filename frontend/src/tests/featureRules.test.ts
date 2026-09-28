@@ -46,10 +46,10 @@ describe("featureRules API", () => {
   it("createFeatureRule POST /feature-rules", async () => {
     const payload = {
       code: "RULE01",
-      data_object: "SUPPLIER",
-      data_layer: "DWD",
-      target_level: "SUPPLIER",
-      feature_name: "SUPPLIER_OTD",
+      dataObject: "SUPPLIER",
+      dataLayer: "DWD",
+      targetLevel: "SUPPLIER",
+      featureName: "SUPPLIER_OTD",
       enabled: true,
       priority: 100,
       thresholds: [],
@@ -82,15 +82,15 @@ describe("featureRules API", () => {
 
   it("parseFeatureRuleDescription POST /feature-rules/parse-description", async () => {
     const payload = {
-      data_object: "SUPPLIER",
-      data_layer: "DWD",
-      target_level: "SUPPLIER",
-      natural_language: "当准时交付率低于 95% 时标记为高风险",
+      dataObject: "SUPPLIER",
+      dataLayer: "DWD",
+      targetLevel: "SUPPLIER",
+      naturalLanguage: "当准时交付率低于 95% 时标记为高风险",
     };
     const response = {
-      suggested_thresholds: [],
+      suggestedThresholds: [],
       reasoning: "test",
-      overall_confidence: 0.9,
+      overallConfidence: 0.9,
       warnings: [],
     };
     httpMock.post.mockResolvedValue({ data: response });

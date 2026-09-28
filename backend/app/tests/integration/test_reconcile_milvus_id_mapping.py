@@ -148,5 +148,54 @@ async def test_reconcile_errors_when_unified_ids_mismatch(
 
 
 # ---------------------------------------------------------------------------
-# NOTE: backfill tests (3) belong to Task M7 — append separately there.
+# Backfill (v3.1 M0-P0.4: Milvus 3 collection external_id backfill)
 # ---------------------------------------------------------------------------
+
+
+async def test_backfill_writes_external_id_for_rows_missing_it(
+    milvusSeedExternalId, dbSession: AsyncSession
+):
+    """Milvus rows with external_id=\"\" → backfill should populate obj:{type}:{ontology_id}."""
+    from scripts.backfill_milvus_external_id import backfill
+
+    await _truncate_id_mapping(dbSession)
+    # milvusSeedExternalId seeds 3 rows (class/property/metric, ontology_id 5001-5003),
+    # but _insertIntoNewCollection writes external_id="", so backfill should fill them.
+
+    written = await backfill(dbSession)
+
+    assert written == 3, f"expected 3 rows backfilled, got {written}"
+    # Verify Milvus actually has external_id
+    from app.infrastructure.milvus_client import (
+        queryClassEmbeddings, queryPropertyEmbeddings, queryMetricEmbeddings,
+    )
+    class_rows = queryClassEmbeddings()
+    assert any(r.get("external_id") == "obj:class:5001" for r in class_rows)
+
+
+async def test_backfill_is_idempotent(
+    milvusSeedExternalId, dbSession: AsyncSession
+):
+    """Running backfill twice should not write duplicate rows."""
+    from scripts.backfill_milvus_external_id import backfill
+
+    await _truncate_id_mapping(dbSession)
+    written1 = await backfill(dbSession)
+    written2 = await backfill(dbSession)
+
+    assert written1 == 3
+    assert written2 == 0  # Second run: no new writes
+
+
+async def test_backfill_then_reconcile_yields_zero_diff(
+    milvusSeedExternalId, dbSession: AsyncSession
+):
+    """After backfill, reconcile must report diff_count=0 (PG placeholder rows synced)."""
+    from scripts.backfill_milvus_external_id import backfill
+    from scripts.reconcile_milvus_id_mapping import reconcile
+
+    await _truncate_id_mapping(dbSession)
+    await backfill(dbSession)
+    report = await reconcile(dbSession)
+
+    assert report.diff_count == 0, f"diff after backfill: {report.rows}"

@@ -110,6 +110,9 @@ class SqlResult:
     sql: str
     promptTokens: int
     completionTokens: int
+    # 4-1（feat-token-cache）：DeepSeek prompt cache 命中 token 数；透传
+    # LlmResponse.cachedTokens；与 plan 阶段 cachedTokens 合并进 _costFor。
+    cachedTokens: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +602,9 @@ class Nl2SqlService:
         errors: list[str] = []
         totalPrompt = 0
         totalCompletion = 0
+        # 4-1（feat-token-cache）：累计 SQL 阶段 DeepSeek cache 命中数。
+        # 任一次响应 None → 整体记 None（保守，理由同 plan 阶段）。
+        totalCached: int | None = None
         # prior_cte 先行校验（Task 3.2 / M8）：来自 LLM 生成或上层显式传入。
         # 契约 = WITH-less 片段（前导 WITH 由本方法补），故先拒绝自带 WITH 的入参，
         # 再按拼接后的真实形态做只读校验（见 _assertPriorCteSafe）。
@@ -634,6 +640,9 @@ class Nl2SqlService:
             )
             totalPrompt += response.promptTokens
             totalCompletion += response.completionTokens
+            # 4-1（feat-token-cache）：任一轮 cached_tokens=None → 整体记 None。
+            if response.cachedTokens is not None:
+                totalCached = (totalCached or 0) + response.cachedTokens
             sql = self.parseSqlFromResponse(response.content)
             if sql is None:
                 errors.append(
@@ -670,6 +679,7 @@ class Nl2SqlService:
                 sql=sql,
                 promptTokens=totalPrompt,
                 completionTokens=totalCompletion,
+                cachedTokens=totalCached,
             )
 
         raise Nl2SqlError(

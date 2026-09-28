@@ -220,6 +220,10 @@ async def generateQueryPlan(
     errors: list[str] = list(initialErrors or [])
     totalPrompt = 0
     totalCompletion = 0
+    # 4-1（feat-token-cache）：累计 plan 阶段 DeepSeek prompt cache 命中数。
+    # 任一次响应 cached_tokens=None（不支持/字段缺失）→ 整体 cachedTokens=None
+    # （保守：避免出现「plan 部分命中、SQL 未命中」被记成部分命中）。
+    totalCached: int | None = None
 
     for attempt in range(maxRetries + 1):
         systemPrompt = _buildPlanSystemPrompt(
@@ -249,6 +253,9 @@ async def generateQueryPlan(
         )
         totalPrompt += response.promptTokens
         totalCompletion += response.completionTokens
+        # 4-1（feat-token-cache）：任一轮 cached_tokens=None → 整体记 None。
+        if response.cachedTokens is not None:
+            totalCached = (totalCached or 0) + response.cachedTokens
         outcome = _parsePlanOutcome(response.content)
         if outcome.plan is None:
             # 单点 reason= 日志：按原因聚合失败率（M3 观测性）
@@ -284,7 +291,8 @@ async def generateQueryPlan(
                 formatPlanDrops(outcome.drops),
             )
         return PlanResult(
-            plan=outcome.plan, promptTokens=totalPrompt, completionTokens=totalCompletion
+            plan=outcome.plan, promptTokens=totalPrompt, completionTokens=totalCompletion,
+            cachedTokens=totalCached,
         )
 
     raise Nl2SqlError(
@@ -321,6 +329,7 @@ def _finalizePlan(
         plan=scoped,
         promptTokens=planResult.promptTokens,
         completionTokens=planResult.completionTokens,
+        cachedTokens=planResult.cachedTokens,
     )
 
 

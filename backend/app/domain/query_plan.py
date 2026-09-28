@@ -310,6 +310,10 @@ class PlanResult:
     plan: QueryPlan
     promptTokens: int
     completionTokens: int
+    # 4-1（feat-token-cache，2026-09-28）：DeepSeek prompt cache 命中 token 数。
+    # None = 字段缺失/不支持（OpenAI/MOONSHOT/AZURE）。由 plan 阶段 LLM 响应
+    # 累计；与 SQL 阶段 cachedTokens 合并后用于 _costFor 按差额计费。
+    cachedTokens: int | None = None
 
 
 def planToText(plan: QueryPlan) -> str:

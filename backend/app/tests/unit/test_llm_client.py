@@ -19,7 +19,7 @@ from app.infrastructure.llm.openai_client import OpenAiClient
 
 
 class FakeChatCompletions:
-    def __init__(self, responseContent: str = "hello back", usage: dict[str, int] | None = None) -> None:
+    def __init__(self, responseContent: str = "hello back", usage: dict[str, Any] | None = None) -> None:
         self.responseContent = responseContent
         self.usage = usage or {"prompt_tokens": 12, "completion_tokens": 8}
         self.callCount = 0
@@ -30,13 +30,25 @@ class FakeChatCompletions:
         self.lastKwargs = kwargs
         usage = self.usage
 
+        # 4-1（feat-token-cache，2026-09-28 实测修正）：DeepSeek 实际走 OpenAI 标准
+        # PromptTokensDetails 路径（usage.prompt_tokens_details.cached_tokens），不是
+        # 早先误用的 usage.cached_tokens 平铺字段。Mock 与生产响应同形：
+        cached_tokens = usage.get("cached_tokens")
+
+        class _PromptTokensDetails:
+            """OpenAI PromptTokensDetails 同形：audio_tokens/cache_write_tokens/cached_tokens。"""
+            def __init__(self, ct: int | None) -> None:
+                self.audio_tokens = None
+                self.cache_write_tokens = None
+                self.cached_tokens = ct
+
         class _Usage:
             prompt_tokens = usage.get("prompt_tokens", 0)
             completion_tokens = usage.get("completion_tokens", 0)
             total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
-            # 4-1（feat-token-cache）：mock 与生产 DeepSeek 响应同形。
-            # 不在 usage dict 中时该属性缺失，getattr(usage, 'cached_tokens', None) → None。
-            cached_tokens = usage.get("cached_tokens")
+            # 字段缺失时 _PromptTokensDetails 存在但 cached_tokens=None，
+            # 与生产 DeepSeek 不支持 cache 的响应一致（被 OpenAiClient 判 None → 全额计费）。
+            prompt_tokens_details = _PromptTokensDetails(cached_tokens)
 
         class _Choice:
             class _Message:

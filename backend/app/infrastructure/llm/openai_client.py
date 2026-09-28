@@ -35,6 +35,26 @@ from app.infrastructure.llm.concurrency import acquire_llm_concurrency
 logger = logging.getLogger(__name__)
 
 
+def _readCachedTokens(usage: Any) -> int | None:
+    """从 OpenAI 协议 usage 读 DeepSeek prompt cache 命中 token 数。
+
+    OpenAI 2024 标准：usage.prompt_tokens_details.cached_tokens。
+    DeepSeek 兼容此格式（实测 prompt_tokens_details.cached_tokens 非零 = 命中）。
+
+    字段缺失或为 None → 返回 None（视作未命中，全额计费）。值是 0 → 返回 0
+    （与 None 区分：0 = 字段存在但确实没命中；None = 字段缺失/不支持）。
+    """
+    if usage is None:
+        return None
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is None:
+        return None
+    cached = getattr(details, "cached_tokens", None)
+    if cached is None:
+        return None
+    return cached or 0
+
+
 class OpenAiClient(BaseLlmClient):
     """OpenAI / Azure / 兼容代理统一客户端。"""
 
@@ -120,12 +140,11 @@ class OpenAiClient(BaseLlmClient):
         usage = getattr(response, "usage", None)
         promptTokens = getattr(usage, "prompt_tokens", 0) or 0
         completionTokens = getattr(usage, "completion_tokens", 0) or 0
-        # 4-1（feat-token-cache）：DeepSeek prompt cache 命中 token 数。None =
-        # 字段缺失（OpenAI/MOONSHOT/AZURE 不支持）。getattr + 0：服务端偶发返
-        # None 时回退为 0（视作未命中，全额计费，符合保底契约）。
-        cachedTokens = getattr(usage, "cached_tokens", None)
-        if cachedTokens is not None:
-            cachedTokens = cachedTokens or 0
+        # 4-1（feat-token-cache）：DeepSeek 通过 OpenAI 标准 PromptTokensDetails
+        # 报告 cache 命中：usage.prompt_tokens_details.cached_tokens。
+        # 实测（sk-...）：两次同 prefix 调用，第二次 prompt_tokens_details.cached_tokens
+        # 非零（首次为 0 因缓存首次写入未命中）。None = 字段缺失（MOONSHOT/AZURE 不支持）。
+        cachedTokens = _readCachedTokens(usage)
         content = ""
         choices = getattr(response, "choices", None)
         if choices:
@@ -188,9 +207,9 @@ class OpenAiClient(BaseLlmClient):
                     if usage is not None:
                         promptTokens = getattr(usage, "prompt_tokens", 0) or 0
                         completionTokens = getattr(usage, "completion_tokens", 0) or 0
-                        # 4-1（feat-token-cache）：流式末块 usage 也读 cached_tokens。
-                        ct = getattr(usage, "cached_tokens", None)
-                        cachedTokens = (ct or 0) if ct is not None else None
+                        # 4-1（feat-token-cache）：流式末块 usage 也读
+                        # prompt_tokens_details.cached_tokens（同 non-stream 路径）。
+                        cachedTokens = _readCachedTokens(usage)
                         continue
                     choices = getattr(chunk, "choices", None)
                     if not choices:

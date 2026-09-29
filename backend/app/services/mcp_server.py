@@ -20,14 +20,18 @@
           "command": "uv",
           "args": ["--directory", "/path/to/backend", "run",
                    "python", "-m", "app.services.mcp_server"],
-          "env": {"AUTH_STUB_ENABLED": "1", "DATABASE_URL": "..."}
+          "env": {"MCP_USER_ID": "<本机用户名>", "DATABASE_URL": "..."}
         }
       }
     }
     ```
 
+    stdio 没有 HTTP 头，身份由 ``MCP_USER_ID`` 注入（默认 ``anonymous``）——
+    这是本机进程身份，不走 Bearer 鉴权。
+
 2. **HTTP/SSE 模式**（已挂到 FastAPI app `/mcp`）—— 见 ``app/main.py`` 的
-   ``createApp()`` 末尾 Mount 子 app + 合并 lifespan。
+   ``createApp()`` 末尾 Mount 子 app + 合并 lifespan。HTTP 入口统一经
+   ``McpAuthMiddleware`` 校验 Bearer（CLI ``--transport http`` 亦同）。
 
 ## 暴露的工具（10 个）
 
@@ -51,9 +55,12 @@
 
 1. **不复用 REST HTTP 调用** —— MCP tool 直接走 service 层，避免 HTTP 循环
    （哪怕是 localhost 自调），也避开跨进程的认证 schema 漂移
-2. **stub auth 必须开** —— stdio 模式下没有 HTTP 头，由环境变量 ``MCP_USER_ID``
-   注入（默认 ``anonymous``，拿默认 admin 桩角色）；生产部署必须关 stub auth
-   或由反向代理注入头
+2. **身份来自 ContextVar，工具不自己造身份** —— ``/mcp`` 的 HTTP 路径由
+   ``app/api/mcp_auth.py`` 的 ``McpAuthMiddleware`` 校验 Bearer 后写入
+   ``mcpCurrentUser``；stdio 路径没有 HTTP 头，用环境变量 ``MCP_USER_ID``
+   （默认 ``anonymous``）。两条路径的身份来源不同，见 ``_resolveCurrentUserId``。
+   生产部署的 HTTP 入口必须经 ``McpAuthMiddleware``（``main.py`` 的 ``/mcp``
+   挂载与 CLI ``--transport http`` 都已接上）
 3. **响应限长** —— 单条返回最多 50KB（fastmcp 默认），超过截断，避免把 LLM
    上下文塞爆
 4. **写操作必须有 preview** —— 与 Phase 5.5 「两步预览」一致：MCP 客户端拿到
@@ -73,7 +80,8 @@ from fastmcp import Context, FastMCP
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import DEFAULT_STUB_USER_ID, getCurrentUser, getDb
+from app.api.mcp_auth import mcpCurrentUser
+from app.dependencies import DEFAULT_STUB_USER_ID
 from app.domain.exceptions import NotFoundError
 from app.domain.wiki_models import (
     KnowledgeCommunity,
@@ -101,6 +109,29 @@ _INSIGHTS_LIMIT = 10
 _DEFAULT_USER_ID = os.environ.get("MCP_USER_ID", DEFAULT_STUB_USER_ID)
 
 
+def _resolveCurrentUserId() -> str:
+    """解析当前 MCP 调用的用户 ID。
+
+    **两条路径，身份来源不同**（2026-09-30 安全批次）：
+
+    1. **HTTP/SSE（``/mcp``）**：``McpAuthMiddleware`` 校验 ``Authorization:
+       Bearer <jwt>`` 成功后把 ``CurrentUser`` 写进 ``mcpCurrentUser``
+       ContextVar。这是 HTTP 路径**唯一**被信任的身份来源 —— 工具函数只读它。
+    2. **stdio / 进程内直接调用**：没有 HTTP 请求，也就没有中间件与 Bearer
+       头，用 ``MCP_USER_ID``（默认 ``anonymous``）。这是**本机进程**的身份，
+       与 HTTP 路径的 Bearer 身份无关，不具备跨进程效力。
+
+    路径 1 不可能落到路径 2：中间件包裹了 ``/mcp`` 与 CLI ``--transport http``
+    两个 HTTP 入口，未通过鉴权的请求在抵达 tool 之前就被 403 拦下。新增 HTTP
+    挂载点时**必须**同样包上 ``McpAuthMiddleware``，否则就是静默降级为
+    ``anonymous``（这正是本批次要消灭的洞）。
+    """
+    current = mcpCurrentUser.get()
+    if current is not None:
+        return current.userId
+    return _DEFAULT_USER_ID
+
+
 @dataclass
 class McpContext:
     """MCP tool 内部上下文：DB session + 当前用户。
@@ -112,8 +143,8 @@ class McpContext:
       ``async with getSessionFactory()`` 已经在 ``_openContext`` 里包了，
       session close 由其 ``__aexit__`` 触发；这里的 ``close()`` 只是防御性
       兜底（万一 ``async with`` 块异常退出 + tool 没让异常冒到 ``finally``）。
-    - ``currentUserId``：MCP 不复用 HTTP header，所以手动构造 stub user
-      （生产必须关 stub auth 并由反向代理或平台注入身份）
+    - ``currentUserId``：HTTP 路径由 ``McpAuthMiddleware`` 鉴权后写 ContextVar；
+      stdio 路径由 ``MCP_USER_ID`` 注入（见 ``_resolveCurrentUserId``）
     """
 
     dbSession: AsyncSession
@@ -127,46 +158,29 @@ class McpContext:
 
 
 async def _openContext() -> McpContext:
-    """开一次 DB session + 解析当前用户（stub auth 兜底）。
+    """开一次 DB session + 解析当前用户身份。
 
     **不用 ``getDb()`` 依赖**：MCP 工具函数不是 FastAPI 路由，无法走 Depends。
     直接调 ``getSessionFactory()`` 的 ``async with`` 进入 session，把 commit /
     rollback / close 拆到 tool 的 ``finally`` 里手动管理（与 getDb 异常分支
     语义一致：失败 rollback、始终 close；成功路径需 tool 自己 commit）。
 
+    身份只从 ContextVar 读（见 ``_resolveCurrentUserId``）—— **不再**自己构造
+    stub 身份、**不再**直接调 ``getCurrentUser``。后者是 FastAPI 依赖函数，
+    未传的参数拿到的是 ``Header(...)`` 哨兵对象（不是 ``None``），
+    ``authorization.lower()`` 必抛 ``AttributeError``，曾让全部 10 个工具崩溃。
+
     Returns:
         McpContext：含 ``dbSession`` 和 ``currentUserId``。调用方负责 ``commit()``
         （写入场景）+ ``close()``（在 ``finally`` 里）。
     """
     from app.infrastructure.database import getSessionFactory
-    from app.dependencies import _buildCurrentUser, getCurrentUser
 
     factory = getSessionFactory()
     async with factory() as session:
-        try:
-            # stub auth 模式下 X-User-Id 走 header，但 MCP 没有 FastAPI header 注入。
-            # 直接构造 CurrentUser（与 dependencies._buildCurrentUser 同语义）。
-            # 显式传 tenantId/roles/departments header（默认 admin stub）保证
-            # 服务层 ACL 不阻断 preview/update。
-            base = _buildCurrentUser(
-                userId=_DEFAULT_USER_ID,
-                tenantId="default",
-                rolesHeader=None,  # 走 DEFAULT_STUB_ROLES 默认值（含 admin）
-                departmentsHeader=None,
-            )
-            current = await getCurrentUser(
-                xUserId=_DEFAULT_USER_ID,
-                xTenantId=base.tenantId,
-                xUserRoles=",".join(base.roles) if base.roles else None,
-                xUserDepartments=",".join(base.departments) if base.departments else None,
-                session=session,
-            )
-            return McpContext(dbSession=session, currentUserId=current.userId)
-        except Exception:
-            # 异常：rollback 已经在 async with 退出时自动跑了（async_sessionmaker
-            # 的 __aexit__ 会自动 rollback 未 commit 的事务）；这里 raise 让
-            # 后续 ``finally`` 走 ``await mcpCtx.close()`` 再次防御性 close。
-            raise
+        return McpContext(
+            dbSession=session, currentUserId=_resolveCurrentUserId()
+        )
 
 
 def _truncate(text: str, limit: int = _MAX_RESPONSE_CHARS) -> str:
@@ -197,7 +211,7 @@ mcp = FastMCP(
 
 @mcp.tool(
     name="wiki_status",
-    description="健康检查：DB 可达 + 当前 stub auth 用户身份。生产部署的关 stub auth 会拒绝 MCP 调用。",
+    description="健康检查：DB 可达 + 当前调用者身份。HTTP 入口需 Bearer 鉴权，未鉴权请求在抵达本工具前即 403。",
     tags={"readonly"},
 )
 async def wiki_status(ctx: Context) -> str:
@@ -652,8 +666,20 @@ def main() -> None:
 
     if args.transport == "stdio":
         mcp.run(transport="stdio")
-    else:
-        mcp.run(transport="http", host=args.host, port=args.port)
+        return
+
+    # HTTP：必须包 McpAuthMiddleware。裸跑 fastmcp 自带 HTTP server 会绕过鉴权，
+    # 而 ``_resolveCurrentUserId`` 在无 ContextVar 时回退到 ``MCP_USER_ID``
+    # （默认 anonymous + 默认 admin 桩角色）—— 那等于把 2 个写工具匿名暴露。
+    # 包装后本入口与 ``main.py`` 的 ``/mcp`` 挂载走同一条 Bearer 鉴权链路。
+    import uvicorn
+
+    from app.api.mcp_auth import McpAuthMiddleware
+
+    httpApp = McpAuthMiddleware(
+        mcp.http_app(path="/mcp", transport="streamable-http")
+    )
+    uvicorn.run(httpApp, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

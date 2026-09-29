@@ -1,24 +1,30 @@
 # v3.1 架构升级 · 执行计划
 
-> 基于 2026-09-29 实勘状态：B1 已合 epic（A6 待合），A1-A5/A7-A8 和 B2-B6 未开始
+> 基于 2026-09-29 实勘状态；**同日二次更新：M0 全链（A1-A4）+ A6 + B1 已合 main，MB1 完成 2/3**
 > 目标：MB1(W5) → MB2(W8) → MB3(W12)
 
 ---
 
-## 当前状态（2026-09-29 实勘）
+## 当前状态（2026-09-29 二次更新）
 
-| 分支 | 状态 | 与 epic 关系 |
+| 任务 | 分支 | 状态 |
 |---|---|---|
-| `feat/planner-step-limit`（A6） | ✅ 完成 5 commit | 需 PR 合 epic |
-| `feat/evidence-extension-v31`（B1） | ✅ 已合 epic（d547355） | epic 领先 m0-unified-id 2 commit |
-| `feat/m0-unified-id`（A1-A4） | 🔴 未开始 | 需 rebase epic 后开始 |
-| 其他所有分支 | 🔴 未开始 | — |
+| A1-A4（M0 统一 ID 全链：id_mapping / Neo4j unified_id / Milvus 3-collection + external_id / 写路径） | feat/m0-unified-id | ✅ 已合 main（经 epic，76ef6ea；后续 R3 修复 55149ee、dim 修复 7d16a08） |
+| A6（Planner ≤5 步硬限） | feat/planner-step-limit | ✅ 已合 main（经 epic） |
+| B1（Evidence payload JSONB + session_id，0096） | feat/evidence-extension-v31 | ✅ 已合 epic（d547355）→ main |
+| A5（Compiler 门面）/ A7（Intent 合并）/ A8（报告模板） | — | 🔴 未开始（服务文件实勘缺失） |
+| B2（SQL 自动 Evidence 钩子）/ B3（Chat 证据展示）/ B4（Confidence 4 级）/ B5（Memory Phase A）/ B6（Hypothesis Hook） | — | 🔴 未开始 |
+
+**alembic 实况**：main head = `0097_id_mapping`（A1 让号后落地）+ `0096_evidence_payload`（B1）。
+后续编号顺延：A5 claim source_version → **0098**；B4 confidence_level → **0099**。原计划的 0097/0098 指派作废，**勿硬编码**。
+
+**分支策略（2026-09-29 拍板，方案 A）**：epic/v31-upgrade 快进对齐 main；后续 feat 分支照旧从 epic 切，保留每周对齐点。
 
 ---
 
 ## W1 · 2026-09-29 ~ 2026-10-03
 
-### 立即行动（今天）
+### 立即行动（今天）— ✅ 已全部完成（见文末清单）
 
 - [ ] **甲**：PR `feat/planner-step-limit` → `epic/v31-upgrade`（A6，5 commit）
 - [ ] **甲**：`git rebase epic/v31-upgrade feat/m0-unified-id`，然后开始 A1
@@ -224,15 +230,19 @@
 
 | 版本 | 内容 | 状态 |
 |---|---|---|
-| 0095 | id_mapping 表 | 待执行（A1） |
-| 0096 | evidence payload JSONB + session_id | ✅ 已合 epic（d547355） |
-| 0097 | claim source_version | 待执行（A5） |
-| 0098 | claim confidence_level 派生列 | 待执行（B4） |
+| 0096 | evidence payload JSONB + session_id | ✅ 已合（B1，d547355） |
+| 0097 | id_mapping 表（原计划 0095，让号后落地） | ✅ 已合 main（A1） |
+| 0098 | claim source_version | 待执行（A5；原计划编号 0097 作废） |
+| 0099 | claim confidence_level 派生列 | 待执行（B4；原计划编号 0098 作废） |
 
 ---
 
-## 立即可执行任务（今天）
+## 立即可执行任务（更新于 2026-09-29 下午）
 
-1. **PR `feat/planner-step-limit` → `epic/v31-upgrade`**（A6，5 commit）
-2. **`git rebase epic/v31-upgrade` on `feat/m0-unified-id`**
-3. 开始 A1：alembic 0095 + IdMapping ORM + API + 回填脚本
+- [x] A1-A4 M0 全链合 main（76ef6ea）
+- [x] A6 合 epic → main
+- [x] B1 合 epic → main（0096）
+- [x] epic/v31-upgrade 快进对齐 main（方案 A）
+- [ ] A5：KnowledgeCompilerService 门面 + 0098 claim source_version
+- [ ] B2：`execute_read_only` SQL 自动 Evidence 钩子（outbox 异步 + best-effort）
+- [ ] 1-2 天 runbook 验证（M0 部署稳定性观察，per qa-system-stale-container-deploy）

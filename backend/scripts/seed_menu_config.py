@@ -1,8 +1,9 @@
-"""seed_menu_config - 幂等 upsert 7 类 36 项菜单（共 43 行）。
+"""seed_menu_config - 幂等 upsert 7 类 41 项菜单（共 48 行）。
 
 与 AppLayout 的旧 key 一一对应；feat-rbac-identity 追加 4 个 RBAC 管理页
 （用户/角色/组织/菜单）叶子项；feat-wiki-knowledge 追加 1 个一级类
-「企业 Wiki」+ 5 个二级项（知识条目/导入/冲突/建议/覆盖度）。
+「企业 Wiki」+ 9 个二级项（对话/知识条目/导入/冲突/建议/覆盖度/知识图谱/
+关联/分类）。
 
 UI 优先策略：本 seed 只在「行不存在」时 INSERT 默认值；行已存在时
 **不覆盖任何 UI 可编辑字段**（label_key / icon_code / path / visible /

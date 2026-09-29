@@ -6,9 +6,12 @@
 主链路（查询延迟红线），失败仅 logging.warning，绝不让查询失败（best-effort
 降级原则，与 Oracle ALTER SESSION 同款）。
 
-ContextVar：chat session_id 由 ChatService 两个入口（processMessage /
-processMessageStream）设置，默认 None——非 chat 调用方（DQ evaluator /
-introspection 等）不阻塞，落库行 session_id 为 NULL。
+ContextVar：chat session_id 与调用方 user_id 均由 ChatService 两个入口
+（processMessage / processMessageStream）设置，默认 None——非 chat 调用方
+（DQ evaluator / introspection 等）不阻塞，落库行 session_id 为 NULL。
+user_id（R2 必修 2，security H2）供 chat 消息落库打归属标
+（session_message.user_id），是 /evidences 归属守卫的数据源：服务端 actor
+派生，不从客户端读。
 
 Blueprint §5.7：SQL_QUERY 型证据创建时不挂 claim（claim_id NULL），claim
 关联由上层（B3/B4）事后填充；表约束由 0098 迁移放开 NOT NULL。
@@ -53,6 +56,26 @@ def resetChatSessionId(token: Token) -> None:
 def currentChatSessionId() -> str | None:
     """读取当前 chat session_id；非 chat 链路返回 None。"""
     return _currentChatSessionId.get()
+
+
+_currentChatUserId: ContextVar[str | None] = ContextVar(
+    "current_chat_user_id", default=None
+)
+
+
+def setChatUserId(userId: str | None) -> Token:
+    """标记当前 chat 请求的调用方（服务端 actor，随 user 参数传入，非客户端自报）。"""
+    return _currentChatUserId.set(userId)
+
+
+def resetChatUserId(token: Token) -> None:
+    """复位 user contextvar（与 setChatSessionId 同一入口 finally 成对调用）。"""
+    _currentChatUserId.reset(token)
+
+
+def currentChatUserId() -> str | None:
+    """读取当前调用方；未传 user（测试直调等）返回 None（行不打标）。"""
+    return _currentChatUserId.get()
 
 
 def computeResultHash(rows: list[dict[str, Any]]) -> str:

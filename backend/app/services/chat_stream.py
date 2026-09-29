@@ -69,7 +69,9 @@ from app.services.chat_helpers import (
 )
 from app.services.evidence_record_service import (
     resetChatSessionId,
+    resetChatUserId,
     setChatSessionId,
+    setChatUserId,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,12 +92,15 @@ class StreamMixin:
         v3.1 B2：流式链路内 execute_read_only 自动落 SQL_QUERY evidence，
         session_id 经 contextvar 透传（evidence_record_service）。生成器体内
         设置/复位：value 在查询调用栈里同步可见，断连/关闭时 finally 复位。
+        R2：同时透传服务端 actor，chat 消息落库时打归属标（session_message.user_id）。
         """
         token = setChatSessionId(dto.sessionId)
+        userToken = setChatUserId(user.userId if user is not None else None)
         try:
             async for event in self._processMessageStreamInner(dto, session, user=user):
                 yield event
         finally:
+            resetChatUserId(userToken)
             resetChatSessionId(token)
 
     async def _processMessageStreamInner(

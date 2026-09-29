@@ -16,6 +16,7 @@ from app.domain.enums import IntentType
 from app.domain.models import SessionMessage, SessionQueryState
 from app.domain.query_plan import QueryPlan, planToText
 from app.domain.schemas import HistoryMessage
+from app.services.evidence_record_service import currentChatUserId
 from app.services.chat_helpers import (
     _clipText,
     _fitPartsToBudget,
@@ -266,8 +267,16 @@ class ContextMixin:
         不必逐个记住也不会重复写。取消只会在 await 点投递，提交返回到解除之间没有挂起
         点 ⇒ 这个解除相对取消是原子的（提交过程本身被取消是明确不保证的竞态，见 SSOT）。
         """
+        # R2 必修 2（security H2）：chat 行打归属标——服务端 actor 经入口
+        # contextvar 透传（doc_qa/wiki_qa 由 API 层透传，chat 此前恒 NULL，
+        # /evidences 归属守卫因此无数据可用）。NULL 兼容存量（守卫 fail-open）。
+        chatUserId = currentChatUserId()
         userMsg = SessionMessage(
-            session_id=sessionId, role="user", content=question, question=question
+            session_id=sessionId,
+            role="user",
+            content=question,
+            question=question,
+            user_id=chatUserId,
         )
         assistantMsg = SessionMessage(
             session_id=sessionId,
@@ -278,6 +287,7 @@ class ContextMixin:
             latency_ms=latency_ms,
             token_cost_usd=token_cost_usd,
             interrupted=interrupted,
+            user_id=chatUserId,
         )
         session.add_all([userMsg, assistantMsg])
         await session.commit()

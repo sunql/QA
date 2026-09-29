@@ -5,6 +5,12 @@ GET /api/v1/evidences/by-session/{sid}      # 必须先于 /{evidence_id} 注册
 GET /api/v1/evidences/{evidence_id}          # 详情
 
 仅只读；写入路径（B2 业务 SQL 自动落库）不在本路由范围。
+
+R2 归属守卫（security H2）：任意认证用户此前可枚举他人 session 的 SQL 原文
++ result_hash。现收敛为——session 维度定点校验（_assertSessionOwnership，
+归属事实源 = session_message.user_id，admin 放行，存量无标记行 fail-open
+与 wiki.py wiki_qa / documents.py docQa 同语义）；无 session 过滤的列表在
+service 层按 viewer 收敛（evidence_query_service.listEvidences）。
 """
 from __future__ import annotations
 
@@ -21,10 +27,11 @@ from app.domain.wiki_schemas import (
 )
 from app.services.evidence_query_service import (
     getEvidenceById,
+    getSessionOwnerUserIds,
     listEvidences,
     listEvidencesBySession,
 )
-
+from app.services.messages_zh import MSG_EVIDENCE_SESSION_NOT_OWNED
 
 router = APIRouter(prefix="/evidences", tags=["evidences"])
 
@@ -32,6 +39,27 @@ router = APIRouter(prefix="/evidences", tags=["evidences"])
 async def _evidencesSession() -> AsyncIterator[AsyncSession]:
     async for s in getDb():
         yield s
+
+
+async def _assertSessionOwnership(
+    session: AsyncSession, sessionId: str, user: CurrentUser
+) -> None:
+    """session 归属定点校验（R2 H2）。
+
+    - admin 放行（getAdminOnlyActor 同判据："admin" in user.roles）
+    - session 已有归属标记且不属于当前用户 → 403（detail 不回显归属者，
+      防 403 侧信道枚举归属人）
+    - 无标记（存量 NULL 行 / 全新会话）→ 放行（fail-open，wiki_qa 同语义）
+    - actor 由服务端 getCurrentUser 派生，不读任何客户端自报字段
+    """
+    if "admin" in (user.roles or []):
+        return
+    owners = await getSessionOwnerUserIds(session, sessionId)
+    if owners and user.userId not in owners:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=MSG_EVIDENCE_SESSION_NOT_OWNED,
+        )
 
 
 # ⚠️ 路由顺序：by-session 必须先于 /{evidence_id}（wiki search endpoint 教训）
@@ -49,6 +77,7 @@ async def listBySession(
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(_evidencesSession),
 ) -> EvidenceListOut:
+    await _assertSessionOwnership(session, sid, _user)
     items, total = await listEvidencesBySession(session, sid, limit, offset)
     return EvidenceListOut(
         items=[EvidenceRead.model_validate(e) for e in items],
@@ -66,7 +95,14 @@ async def listEvidence(
     q: EvidenceQuery = Depends(),
     session: AsyncSession = Depends(_evidencesSession),
 ) -> EvidenceListOut:
-    items, total = await listEvidences(session, q)
+    if q.session_id is not None:
+        await _assertSessionOwnership(session, q.session_id, _user)
+    items, total = await listEvidences(
+        session,
+        q,
+        viewerUserId=_user.userId,
+        viewerIsAdmin="admin" in (_user.roles or []),
+    )
     return EvidenceListOut(
         items=[EvidenceRead.model_validate(e) for e in items],
         total=total,
@@ -86,4 +122,6 @@ async def getEvidence(
     e = await getEvidenceById(session, evidence_id)
     if e is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    if e.session_id is not None:
+        await _assertSessionOwnership(session, e.session_id, _user)
     return EvidenceRead.model_validate(e)

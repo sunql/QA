@@ -37,10 +37,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # 回滚占位：SQL_QUERY 自动证据行没有 claim，可空行先填占位值（自身 id）
-    # 才能重建 NOT NULL 约束。占位值无业务语义，仅保证 downgrade 可执行；
-    # 生产回滚后这些行应人工复核或清理。
-    op.execute("UPDATE evidence SET claim_id = id WHERE claim_id IS NULL")
+    # 回滚语义（R2 必修 1）：无主（NULL claim_id）的 SQL_QUERY 自动证据行
+    # 直接丢弃。此前的占位 UPDATE（SET claim_id = id）会被 fk_evidence_claim
+    # 拒绝——evidence.id 几乎不可能命中 knowledge_claim.id，只要存在 NULL 行
+    # 生产降级必然 FK violation。Document 型写路径恒有 claim，不受影响；
+    # 生产回滚前如需留存证据，请先人工备份 evidence 表。
+    op.execute("DELETE FROM evidence WHERE claim_id IS NULL")
     op.alter_column(
         "evidence",
         "claim_id",

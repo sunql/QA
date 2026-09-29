@@ -245,7 +245,9 @@ from app.services.chat_usage import UsageMixin
 from app.services.chat_stream import StreamMixin
 from app.services.evidence_record_service import (
     resetChatSessionId,
+    resetChatUserId,
     setChatSessionId,
+    setChatUserId,
 )
 from app.services.chat_domain import DomainCommandMixin
 from app.services.chat_l4 import L4Mixin
@@ -331,12 +333,15 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
 
         v3.1 B2：整条链路内 execute_read_only 自动落 SQL_QUERY evidence，
         session_id 经 contextvar 透传（evidence_record_service），非 chat
-        调用方默认 None 不阻塞。
+        调用方默认 None 不阻塞。R2：同时透传服务端 actor，chat 消息落库时
+        打归属标（session_message.user_id，/evidences 归属守卫的数据源）。
         """
         token = setChatSessionId(dto.sessionId)
+        userToken = setChatUserId(user.userId if user is not None else None)
         try:
             return await self._processMessageInner(dto, session, user=user)
         finally:
+            resetChatUserId(userToken)
             resetChatSessionId(token)
 
     async def _processMessageInner(

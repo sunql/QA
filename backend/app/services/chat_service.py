@@ -248,6 +248,7 @@ from app.services.chat_stream import StreamMixin
 from app.services.evidence_record_service import (
     resetChatSessionId,
     resetChatUserId,
+    scheduleMetricResultEvidence,
     setChatSessionId,
     setChatUserId,
 )
@@ -1242,7 +1243,9 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             if kpi is None:
                 return None
             kpi_name = kpi.kpi_name or match.code
-            data = await self._executeCalculationLogic(kpi, match.code, session)
+            data = await self._executeCalculationLogic(
+                kpi, match.code, session, match=match
+            )
             text = self._buildAnswerText(kpi, data, kpi_name)
             return self._wrapChatResponse(match, kpi_name, data, text)
         except Exception:
@@ -1269,16 +1272,12 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         return kpi
 
     # -------------------------------------------------------------------------
-    async def _executeCalculationLogic(
+    async def _resolveCalculationFeature(
         self,
         kpi: KpiCatalog,
-        kpi_code: str,
         session: AsyncSession,
-    ) -> list[dict] | None:
-        """执行 KPI 的 calculation_logic 关联的 FeatureDefinition。
-
-        无 formula / feat 找不到 / 执行失败 → 返回 None。
-        """
+    ) -> Any | None:
+        """按 kpi.formula 解析关联的 FeatureDefinition（无 formula / 找不到 → None）。"""
         if not kpi.formula or not kpi.formula.strip():
             return None
 
@@ -1292,7 +1291,25 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                 FeatureDefinition.is_enabled.is_(True),
             )
         )
-        feat = feat_row.scalar_one_or_none()
+        return feat_row.scalar_one_or_none()
+
+    async def _executeCalculationLogic(
+        self,
+        kpi: KpiCatalog,
+        kpi_code: str,
+        session: AsyncSession,
+        *,
+        match: KpiMatchResult | None = None,
+    ) -> list[dict] | None:
+        """执行 KPI 的 calculation_logic 关联的 FeatureDefinition。
+
+        无 formula / feat 找不到 / 执行失败 → 返回 None。
+
+        v3.1 任务 MR：match 非 None（L1 命中）且查询成功执行后，自动调度
+        METRIC_RESULT evidence（best-effort，调度失败只 warning，不影响
+        主链路；match=None 的直调/回归路径不落）。
+        """
+        feat = await self._resolveCalculationFeature(kpi, session)
         if feat is None:
             return None
 
@@ -1303,18 +1320,35 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             # 链路事实失效）：补 await 真正执行查询；同时 execute_read_only 的
             # evidence 钩子（B2）也只有在真正 await 后才会触发落库。
             raw = await adapter.execute_read_only(feat.calculation_logic)
-            if raw is None:
-                return None
-            if isinstance(raw, list):
-                return [dict(r) for r in raw]
-            if isinstance(raw, (list, tuple)):
-                return [dict(raw)]
-            return [{"value": raw}]
         except Exception:
             logger.warning(
                 "L1 calculation_logic execution failed for %s", kpi_code, exc_info=True
             )
             return None
+        if raw is None:
+            return None
+        data = self._normalizeCalcRows(raw)
+        if match is not None:
+            # v3.1 MR：蓝图 §4.12——L1 命中且执行成功 → METRIC_RESULT 落库。
+            # period best-effort：L1 执行上下文无 period 语义，不猜（恒 None）。
+            scheduleMetricResultEvidence(
+                metricCode=match.code,
+                metricName=kpi.kpi_name,
+                confidence=match.confidence,
+                rows=data,
+                datasourceId=feat.datasource_id,
+            )
+        return data
+
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _normalizeCalcRows(raw: Any) -> list[dict]:
+        """执行结果统一为 list[dict]（list 逐行；tuple 单行；标量 value 包装）。"""
+        if isinstance(raw, list):
+            return [dict(r) for r in raw]
+        if isinstance(raw, tuple):
+            return [dict(raw)]
+        return [{"value": raw}]
 
     # -------------------------------------------------------------------------
     @staticmethod

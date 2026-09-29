@@ -30,3 +30,19 @@ describe("menu i18n keys", () => {
     expect(enUS).toHaveProperty(`menu.item.${k}`);
   });
 });
+
+// 上面的 ITEM_KEYS/SECTION_KEYS 是手工维护的，会随菜单增长而陈旧
+// （曾漏掉 wikiCategories，导致 en-US 缺菜单文案却测试全绿）。
+// 下面两条直接比对两侧键集，自维护：新增菜单项忘记补 en 文案时立即红。
+describe("menu i18n 双语键集对等", () => {
+  it("zh-CN 与 en-US 的 menu.section 键集完全一致", () => {
+    expect(Object.keys(zhCN.menu.section).sort()).toEqual(
+      Object.keys(enUS.menu.section).sort(),
+    );
+  });
+  it("zh-CN 与 en-US 的 menu.item 键集完全一致", () => {
+    expect(Object.keys(zhCN.menu.item).sort()).toEqual(
+      Object.keys(enUS.menu.item).sort(),
+    );
+  });
+});

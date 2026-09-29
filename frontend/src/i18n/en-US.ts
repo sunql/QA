@@ -174,6 +174,7 @@ export const enUS = {
       wikiGraph: "Knowledge Graph",
       wikiChat: "Wiki Chat",
       wikiLinks: "Wiki Link Management",
+      wikiCategories: "Wiki Category Management",
       dataQualityRuleParams: "Data Quality / Rule Config (Structured)",
       profile: "Profile",
       changePassword: "Change Password",
@@ -2481,6 +2482,45 @@ export const enUS = {
     noLinks: "No links",
     selectPageHint: "Select a Wiki page on the left first",
     pageTreeLabel: "Select Wiki page",
+  },
+
+  // feat-wiki-category：分类 CRUD 页（admin 维护）
+  wikiCategories: {
+    title: "Wiki Category Management",
+    description: "Manage the category tree for Wiki pages. A newly created category can have a wiki_page attached as its overview page.",
+    columns: {
+      name: "Name",
+      parent: "Parent Category",
+      sortOrder: "Sort Order",
+      page: "Overview Page",
+      description: "Description",
+    },
+    actions: {
+      create: "New Category",
+      edit: "Edit",
+      delete: "Delete",
+      refresh: "Refresh",
+    },
+    form: {
+      name: "Category Name",
+      namePlaceholder: "e.g. Procurement Management",
+      parent: "Parent Category",
+      parentPlaceholder: "Top level (leave unselected)",
+      sortOrder: "Sibling order (lower number comes first)",
+      description: "Description",
+      pageId: "Overview Page (optional)",
+      pageIdPlaceholder: "Select a wiki_page as the overview",
+    },
+    messages: {
+      created: "Category created",
+      updated: "Category updated",
+      deleted: "Category deleted",
+      createFailed: "Create failed (possibly a name conflict or the parent category was deleted)",
+      updateFailed: "Update failed (this may form a cycle: a category cannot be attached to its own descendant)",
+      deleteFailed: "Delete failed",
+      confirmDelete: "Delete category \"{name}\"? Its subcategories will be promoted to top level.",
+    },
+    empty: "No categories yet — click \"New Category\" in the top right to start.",
   },
 
   agentTools: {

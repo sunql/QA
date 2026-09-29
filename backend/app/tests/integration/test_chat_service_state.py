@@ -35,6 +35,7 @@ from app.domain.schemas import (
     OntologyMetricCreate,
     OntologyPropertyUpdate,
 )
+from app.services.chat_context import ContextMixin, _buildInheritedStateFromSnapshot
 from app.services.chat_service import ChatService, _STATE_HISTORY_FIELD_LIMIT_DEFAULT
 
 
@@ -641,3 +642,58 @@ class TestQueryState:
         # 响应携带上一轮计划供前端展示（快捷路径复用上一轮计划）
         assert response.queryPlan is not None
         assert response.queryPlan["selectedProperties"] == ["NAME", "QTY"]
+
+
+class TestStatePromptWiring:
+    """C-1 守卫：_buildStatePrompt 必须挂在 ContextMixin / ChatService 上（非死代码）。
+
+    回归背景：B5 R1（842f178）在 ContextMixin 类体中间插入了模块级
+    `_buildInheritedStateFromSnapshot`，提前终止类体，使紧随其后的
+    `_buildStatePrompt`（4 空格缩进 + @staticmethod）沦为嵌套函数体内的死代码。
+    生产 REFINE/FOLLOW_UP 路径（chat_service.processMessage）会 AttributeError。
+    """
+
+    async def test_state_prompt_attached_to_mixin_and_service(self) -> None:
+        assert hasattr(ContextMixin, "_buildStatePrompt")
+        assert hasattr(ChatService, "_buildStatePrompt")
+        # 反向守卫：快照渲染器是模块级纯函数，不应成为 mixin 成员
+        assert not hasattr(ContextMixin, "_buildInheritedStateFromSnapshot")
+
+    async def test_inherited_snapshot_renderer_is_module_level_pure(self) -> None:
+        section = _buildInheritedStateFromSnapshot(
+            {
+                "inherited_metric": "收货数量",
+                "inherited_time": {"year": 2026, "month": 4},
+                "inherited_filters": {"SUPPLIER": "A"},
+            }
+        )
+        assert section.startswith("继承字段（")
+        assert "继承指标：收货数量" in section
+        assert "继承时间：2026年4月" in section
+        assert "继承过滤：SUPPLIER=A" in section
+        assert _buildInheritedStateFromSnapshot({}) == ""
+
+    async def test_state_prompt_appends_inherited_section(self) -> None:
+        """B5 §裁决 5：inheritance_snapshot 非空时继承小节并入 _buildStatePrompt 返回值。"""
+        state = SessionQueryState(
+            session_id="s1",
+            last_question="4月份的呢？",
+            inheritance_snapshot={
+                "inherited_metric": "收货数量",
+                "inherited_time": {"year": 2026, "month": 4},
+            },
+        )
+        prompt = ContextMixin._buildStatePrompt(
+            state, IntentType.FOLLOW_UP, _STATE_HISTORY_FIELD_LIMIT_DEFAULT
+        )
+        assert "继承字段（" in prompt
+        assert "继承指标：收货数量" in prompt
+        assert "继承时间：2026年4月" in prompt
+
+    async def test_state_prompt_omits_inherited_section_when_snapshot_empty(self) -> None:
+        """无快照时不出现继承小节（防止无条件追加）。"""
+        state = SessionQueryState(session_id="s1", last_question="q")
+        prompt = ContextMixin._buildStatePrompt(
+            state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT
+        )
+        assert "继承字段（" not in prompt

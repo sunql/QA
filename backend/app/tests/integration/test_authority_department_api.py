@@ -388,13 +388,17 @@ async def test_alembic_0102_authority_department_roundtrip(
         assert meta_page is not None, "再升级后 wiki_page 列应复现"
         assert meta_claim is not None, "再升级后 knowledge_claim 列应复现"
 
-        # 验：升完级别参数与 head 配置一致（avoid「同版本号不同结构」漂移）。
+        # 验：再升级后确实回到 head（不钉具体版本号——迁移链会持续增长，
+        # 0102 之后已有 0103/0104；钉死版本号会让本用例随批次推进无谓变红）。
+        # 口径对齐 test_alembic_0076.py：只断言「没有停在 _PREV」。
         # 注：alembic_version 表存的是短 ID（如 "0102"），与文件 revision 变量
         # 等长；文件名前缀是迁移文件名（grep 用），不是 revision ID。
         version = (
             await dbSession.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0102", f"alembic_version 应为 0102，实际 {version}"
+        assert version != _PREV, (
+            f"再升级后 alembic_version = {version!r} 仍停在 {_PREV!r} —— upgrade head 未生效"
+        )
     finally:
         # 兜底：保证下次测试拿到 head 状态（不依赖调用方按顺序跑）
         try:

@@ -305,6 +305,14 @@ class HypothesisMixin:
             rows = await saveHypotheses(session, sessionId, question, hypotheses)
             return [HypothesisRead.model_validate(r) for r in rows]
         except Exception as exc:
+            # MEDIUM-1 R1：saveHypotheses 的 flush/commit 在 DB 层失败（连接抖动等）
+            # 会让 session 进入失败事务态——不回滚，主链路同一 session 上的后续
+            # SELECT 会抛 PendingRollbackError，主回答可能 500。只回滚假设链路
+            # 自己的失败路径：主链路此前的写入均已独立提交，不受影响。
+            try:
+                await session.rollback()
+            except Exception as rollbackExc:  # pragma: no cover - 连接已死时兜底
+                logger.warning("假设失败路径 rollback 异常（session=%s）: %s", sessionId, rollbackExc)
             await self._accountHypothesisFailure(session, sessionId, pc, exc)
             logger.warning("假设生成失败，best-effort 降级（session=%s）: %s", sessionId, exc)
             return []

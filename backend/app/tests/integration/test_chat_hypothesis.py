@@ -329,6 +329,87 @@ class TestHypothesisGetApi:
         assert resp.json() == []
 
 
+class _MultiStepHypothesisLlm(_HypothesisLlm):
+    """多步链路假设测试：拆步 LLM 返回 2 数据步计划，其余分支同父类。
+
+    多步基线 LLM 调用 = 拆步 1 + 2 数据步 × (plan+SQL) 2×2 + 汇总回答 1 = 6；
+    假设触发时 +1 = 7（与 test_chat_multi_step 的 fake 分支标记同源）。
+    """
+
+    async def complete(self, messages: list, **kwargs) -> object:
+        self.calls.append([(m.role, m.content) for m in messages])
+        system = messages[0].content
+        user = messages[1].content
+
+        class _Resp:
+            content = ""
+            modelName = "test-model"
+            promptTokens = 10
+            completionTokens = 5
+
+        if "查询拆分器" in system:
+            _Resp.content = (
+                '{"isMultiStep": true, "steps": ['
+                '{"description": "2024 年收货数量", "subQuestion": "2024年的收货数量是多少"}, '
+                '{"description": "2025 年收货数量", "subQuestion": "2025年的收货数量是多少"}'
+                '], "aggregationHint": "对比两年收货数量"}'
+            )
+        elif "可能原因假设" in user:
+            _Resp.content = _HYPOTHESES_JSON
+        elif "图表类型" in user:
+            _Resp.content = '{"title":{"text":"t"},"series":[{"type":"bar","data":[1,2]}]}'
+        elif "解析为查询计划" in system:
+            _Resp.content = (
+                '{"target":"收货数量","selectedClasses":["PRECEIPT"],'
+                '"selectedProperties":["NAME","QTY"],"groupBy":["NAME"]}'
+            )
+        elif "生成 SQL 时必须" in system:
+            _Resp.content = (
+                "```sql\nSELECT NAME, SUM(QTY) AS TOTAL_QTY FROM ZJTH.PRECEIPT "
+                "GROUP BY NAME FETCH FIRST 10 ROWS ONLY\n```"
+            )
+        else:
+            # 汇总回答（StepAggregator，system 含「企业数据分析助手」）
+            _Resp.content = "两年收货数量对比完成。"
+        return _Resp()
+
+
+class TestHypothesisMultiStepPath:
+    async def test_multistep_trigger_persists_and_counts(
+        self, client: AsyncClient, dbSession: AsyncSession, monkeypatch,
+    ) -> None:
+        """多步触发：假设落库 + 响应携带 + LLM = 多步基线 6 + 假设 1 = 7。"""
+        config, ds = await _seed(dbSession)
+        llm = _MultiStepHypothesisLlm()
+        _installFakesWithLlm(monkeypatch, config, llm)
+
+        question = "分步查询2024和2025年的收货数量，并分析原因"
+        resp = await client.post(
+            "/api/v1/chat", json=_chat_payload(question, ds.id, sessionId="hyp-ms"),
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["intent"] == "multi_step"
+        # 聚合路径响应携带假设 DTO
+        assert body["hypotheses"] and len(body["hypotheses"]) == 2
+
+        # 落库（真实 PG）
+        rows = (await dbSession.execute(
+            select(AnalysisHypothesis).where(
+                AnalysisHypothesis.session_id == "hyp-ms"
+            )
+        )).scalars().all()
+        assert len(rows) == 2
+        assert rows[0].turn_question == question
+
+        # LLM 预算：多步基线 7（拆步1 + 全局过滤提取器1 + 2数据步×2 + 汇总1）+ 假设 1 = 8
+        hypothesisCalls = [
+            c for c in llm.calls if any("可能原因假设" in m[1] for m in c)
+        ]
+        assert len(hypothesisCalls) == 1, "假设阶段必须恰好调用一次 LLM"
+        assert len(llm.calls) == 8, f"LLM 总调用={len(llm.calls)}，期望多步基线 7 + 假设 1"
+
+
 def _installFakesWithLlm(monkeypatch, config: LlmConfig, llm: _HypothesisLlm) -> None:
     """同 test_chat_api._installFakes，但 LLM 工厂共享同一实例以做调用计数。"""
     import app.api.v1.chat as chat_module

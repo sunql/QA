@@ -174,6 +174,47 @@ async def test_compile_vector_milvus_outage_marks_failed_no_pg_half_product(
     assert row.source_table is None
 
 
+async def test_compile_object_soft_deleted_class_all_roles_failed_no_external_calls(
+    dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I-1（R1 必修）：软删墓碑类不得被编译——三角色全 failed，不触碰 Neo4j/Milvus。
+
+    deleteClass 软删（valid_to 墓碑）后图节点/向量已清；compileObject 若照常
+    分发会把刚清掉的 Neo4j 节点复活，且 vector 角色因 getClass 拒绝墓碑而
+    failed，出现「graph success + vector failed」自相矛盾。
+    """
+    entity = OntologyClass(class_name="墓碑类")
+    dbSession.add(entity)
+    await dbSession.commit()
+    await dbSession.refresh(entity)
+    entityId = entity.id
+    entity.valid_to = datetime.now(timezone.utc)
+    await dbSession.commit()
+
+    neoCalls: list[dict] = []
+    monkeypatch.setattr(
+        kc_module.neo4j, "upsertClassNode", lambda **kw: neoCalls.append(kw)
+    )
+    fakeOntology = MagicMock()
+    fakeOntology.syncClassEmbedding = AsyncMock(return_value=None)
+
+    svc = KnowledgeCompilerService(ontology=fakeOntology)
+    result = await svc.compileObject(dbSession, f"obj:class:{entityId}")
+
+    assert result.isFullySuccessful is False
+    assert {r.role for r in result.roles} == {"graph", "vector", "sql_metadata"}
+    assert all(r.status == "failed" for r in result.roles), (
+        "墓碑对象三角色必须统一 failed（失败隔离同款结构），"
+        f"实际：{[(r.role, r.status) for r in result.roles]}"
+    )
+    assert all(r.error for r in result.roles), "failed 角色必须携带 error message"
+    assert neoCalls == [], "墓碑对象不得触碰 Neo4j（节点不得复活）"
+    fakeOntology.syncClassEmbedding.assert_not_called(), (
+        "墓碑对象不得触碰 Milvus 向量同步"
+    )
+
+
+
 async def test_compile_object_unknown_id_raises_not_found(dbSession: AsyncSession) -> None:
     svc = KnowledgeCompilerService()
     with pytest.raises(NotFoundError):

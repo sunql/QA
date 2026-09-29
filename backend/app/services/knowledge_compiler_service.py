@@ -109,12 +109,29 @@ _TYPE_TO_EMBEDDING_TEXT = {
 _MSG_INVALID_UNIFIED_ID = (
     "非法 unified_id（期望 obj:{{type}}:{{id}}，type ∈ class/property/metric）：{unified_id}"
 )
+_MSG_TOMBSTONE_NOT_FOUND = (
+    "OntologyClass id={id} 已软删（valid_to 非空），编译目标不存在"
+)
 _MSG_RECONCILE_STORE_UNAVAILABLE = "对账：{store} 不可达，本轮跳过其比对：{error}"
 _MSG_RECONCILE_MISMATCH = "对账不一致 {object_type}: {counts}"
 _MSG_RECONCILE_MISSING_COLLECTION = "Milvus 集合缺失: {collection}"
 
 # 运行日志错误信息截断长度（与 agent_scheduler 同口径，避免堆栈细节外泄）
 _MAX_ERROR_LEN = 500
+
+
+# ---------------------------------------------------------------------------
+# 异常
+# ---------------------------------------------------------------------------
+
+
+class _TombstoneNotFoundError(NotFoundError):
+    """软删墓碑对象（valid_to 非空）对编译不可见（R1 I-1）。
+
+    继承 NotFoundError：API 层 404 映射与「对象不存在」语义一致；单独建类
+    是为了让 compileObject 能区分「墓碑（三角色统一 failed，不跑角色）」与
+    「真不存在（直接 404 抛出）」。
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +249,13 @@ class KnowledgeCompilerService:
     ) -> CompileObjectResult:
         """按 unifiedId 增量编译一个本体对象，返回三角色聚合结果。"""
         objectType, ontologyId = parseUnifiedId(unifiedId)
-        entity = await self._loadEntity(session, objectType, ontologyId)
+        try:
+            entity = await self._loadEntity(session, objectType, ontologyId)
+        except _TombstoneNotFoundError as exc:
+            # 墓碑（软删）对象对编译不可见：三角色统一 failed（失败隔离同款
+            # 结构），不触碰 Neo4j/Milvus —— 否则会把 deleteClass 刚清掉的
+            # 图节点复活，且 vector 会因 getClass 拒绝墓碑而自相矛盾。
+            return self._tombstoneResult(unifiedId, objectType, ontologyId, exc)
         roles = (
             await self._runRole(_ROLE_GRAPH, self._compileGraph, session, objectType, entity),
             await self._runRole(_ROLE_VECTOR, self._compileVector, session, objectType, entity),
@@ -247,14 +270,43 @@ class KnowledgeCompilerService:
             roles=roles,
         )
 
+    def _tombstoneResult(
+        self,
+        unifiedId: str,
+        objectType: str,
+        ontologyId: int,
+        exc: NotFoundError,
+    ) -> CompileObjectResult:
+        """墓碑聚合结果：三角色全 failed + error message（不跑任何角色）。"""
+        errMsg = f"{type(exc).__name__}: {exc}"[:_MAX_ERROR_LEN]
+        roles = tuple(
+            CompileRoleResult(role=roleName, status=_STATUS_FAILED, error=errMsg)
+            for roleName in (_ROLE_GRAPH, _ROLE_VECTOR, _ROLE_SQL_METADATA)
+        )
+        logger.warning("编译目标为软删墓碑，跳过三角色: %s", unifiedId)
+        return CompileObjectResult(
+            unified_id=unifiedId,
+            object_type=objectType,
+            ontology_id=ontologyId,
+            roles=roles,
+        )
+
     async def _loadEntity(
         self, session: AsyncSession, objectType: str, ontologyId: int
     ):
-        """PG 真源加载本体对象；不存在抛 NotFoundError（fail-fast at boundary）。"""
+        """PG 真源加载本体对象；不存在或软删墓碑抛 NotFoundError（fail-fast）。
+
+        墓碑（valid_to 非空，仅 class 有软删）按不存在处理，与 listClasses /
+        _countPg 对账口径一致（R1 I-1）。
+        """
         entity = await session.get(_TYPE_TO_MODEL[objectType], ontologyId)
         if entity is None:
             raise NotFoundError(
                 _NOT_FOUND_BY_TYPE[objectType].format(id=ontologyId)
+            )
+        if objectType == "class" and entity.valid_to is not None:
+            raise _TombstoneNotFoundError(
+                _MSG_TOMBSTONE_NOT_FOUND.format(id=ontologyId)
             )
         return entity
 

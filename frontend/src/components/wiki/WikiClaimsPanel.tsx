@@ -127,6 +127,36 @@ export default function WikiClaimsPanel({ pageId }: WikiClaimsPanelProps) {
             render: (type: string | null) =>
                 type ? <Badge status="processing" text={type} /> : "-",
         },
+        // v3.1 §4.13 治理：归属部门 + 权威等级 双 badge 并排（优先级：权限维度
+        // 部门 > 数据精度）。不存在的数据走 "-" 占位，不抛错。
+        {
+            title: t("wikiPages.claims.authorityDepartment"),
+            dataIndex: "authorityDepartment",
+            key: "authorityDepartment",
+            width: 160,
+            render: (dept: string | null) =>
+                dept ? (
+                    <Tooltip title={t("wikiPages.claims.authorityDepartment")}>
+                        <Badge color="geekblue" text={dept} />
+                    </Tooltip>
+                ) : (
+                    <span style={{ color: "#aaa" }}>-</span>
+                ),
+        },
+        {
+            title: t("wikiPages.claims.authorityLevel"),
+            dataIndex: "authorityLevel",
+            key: "authorityLevel",
+            width: 100,
+            render: (level: string | null) =>
+                level ? (
+                    <Tooltip title={t("wikiPages.claims.authorityLevel")}>
+                        <Badge color="purple" text={level} />
+                    </Tooltip>
+                ) : (
+                    <span style={{ color: "#aaa" }}>-</span>
+                ),
+        },
         {
             title: t("wikiPages.claims.confidence"),
             dataIndex: "confidenceLevel",

@@ -113,20 +113,38 @@ def resolvePlaceholder(value: str, params: BaseModel) -> Any:
     return values[key]
 
 
+def _sectionBindingCount(section: dict) -> int:
+    """单节展开后的数据绑定调用数：kpi 节 = len(kpiCodes)，supplier360 节 = 1。
+
+    蓝图 §21 硬约束 1 的口径是「数据绑定调用数」而非「section 数」——
+    kpi 节每个 kpiCode 展开为一次 get_by_code 调用。
+    """
+    source = section.get("source") or {}
+    if source.get("type") == "kpi":
+        return len(source.get("kpiCodes") or [])
+    return 1
+
+
 def validateTemplateStructure(template: dict) -> None:
-    """渲染前模板结构校验：分节数上限 + kind/source 白名单 + 占位符合法。"""
+    """渲染前模板结构校验：展开绑定数上限 + kind/source 白名单 + 占位符合法。
+
+    上限口径 = Σ每节展开绑定数（kpi 节按 kpiCodes 长度展开），与蓝图
+    §21「查询 ≤10」严格同口径。
+    """
     sections = template.get("sections") or []
-    if len(sections) > REPORT_MAX_DATA_QUERIES:
-        raise ValidationError(
-            MSG_REPORT_SECTION_LIMIT.format(limit=REPORT_MAX_DATA_QUERIES)
-        )
     seenIds: set[str] = set()
     paramsModel = template.get("paramsModel")
     paramKeys = (
         set(paramsModel.model_fields.keys()) if paramsModel is not None else set()
     )
+    totalBindings = 0
     for section in sections:
         _validateSection(section, seenIds, paramKeys)
+        totalBindings += _sectionBindingCount(section)
+    if totalBindings > REPORT_MAX_DATA_QUERIES:
+        raise ValidationError(
+            MSG_REPORT_SECTION_LIMIT.format(limit=REPORT_MAX_DATA_QUERIES)
+        )
 
 
 def _validateSection(
@@ -314,12 +332,20 @@ class ReportTemplateService:
         self, session: AsyncSession, template: dict, validated: BaseModel
     ) -> list[dict]:
         bound: list[dict] = []
+        # 同 code 的 get_by_code 结果做本次生成内的缓存复用（消除跨节冗余调用）
+        kpiCache: dict[str, dict | None] = {}
         for section in template["sections"]:
-            bound.append(await self._bindSection(session, section, validated))
+            bound.append(
+                await self._bindSection(session, section, validated, kpiCache)
+            )
         return bound
 
     async def _bindSection(
-        self, session: AsyncSession, section: dict, validated: BaseModel
+        self,
+        session: AsyncSession,
+        section: dict,
+        validated: BaseModel,
+        kpiCache: dict[str, dict | None],
     ) -> dict:
         """单节绑定；失败降级 renderError，不拖垮整份报告（异常隔离）。"""
         base = {
@@ -330,7 +356,7 @@ class ReportTemplateService:
         try:
             source = section["source"]
             if source["type"] == "kpi":
-                data = await self._bindKpiSource(session, source)
+                data = await self._bindKpiSource(session, source, kpiCache)
             else:
                 data = await self._bindSupplier360Source(session, source, validated)
         except Exception as exc:
@@ -343,30 +369,44 @@ class ReportTemplateService:
             return {**base, "data": None, "renderError": str(exc)}
         return {**base, "data": jsonable_encoder(data), "renderError": None}
 
-    async def _bindKpiSource(self, session: AsyncSession, source: dict) -> list[dict]:
-        """KPI 目录绑定：逐 code 走 get_by_code（既有接口）。"""
+    async def _bindKpiSource(
+        self, session: AsyncSession, source: dict, kpiCache: dict[str, dict | None]
+    ) -> list[dict]:
+        """KPI 目录绑定：逐 code 走 get_by_code（既有接口），同 code 缓存复用。"""
         rows: list[dict] = []
         for code in source.get("kpiCodes") or []:
+            cached = kpiCache.get(code)
+            if code in kpiCache:
+                rows.append(
+                    {**cached} if cached is not None
+                    else {"kpiCode": code, "found": False}
+                )
+                continue
             entity = await self._kpiSvc.get_by_code(session, code)
             if entity is None:
+                kpiCache[code] = None
                 rows.append({"kpiCode": code, "found": False})
                 continue
-            rows.append(
-                {
-                    "kpiCode": entity.kpi_code,
-                    "kpiName": entity.kpi_name,
-                    "unit": entity.unit,
-                    "grain": entity.grain,
-                    "formula": entity.formula,
-                    "numerator": entity.numerator,
-                    "denominator": entity.denominator,
-                    "status": entity.status,
-                    "owner": entity.owner,
-                    "version": entity.version,
-                    "found": True,
-                }
-            )
+            row = self._kpiRow(entity)
+            kpiCache[code] = row
+            rows.append({**row})
         return rows
+
+    def _kpiRow(self, entity) -> dict:
+        """KPI 目录行 → 渲染 dict（卡片段取 kpiName/unit/grain/status/owner）。"""
+        return {
+            "kpiCode": entity.kpi_code,
+            "kpiName": entity.kpi_name,
+            "unit": entity.unit,
+            "grain": entity.grain,
+            "formula": entity.formula,
+            "numerator": entity.numerator,
+            "denominator": entity.denominator,
+            "status": entity.status,
+            "owner": entity.owner,
+            "version": entity.version,
+            "found": True,
+        }
 
     async def _bindSupplier360Source(
         self, session: AsyncSession, source: dict, validated: BaseModel
@@ -412,8 +452,13 @@ class ReportTemplateService:
         *,
         configs: list | None,
     ) -> str | None:
-        """单次总结调用；任何失败降级 None（报告主体照常落库）。"""
+        """单次总结调用；任何失败降级 None（报告主体照常落库）。
+
+        报告无 chat session：合成键 ``report-<uuid12>`` 生成一次，RoutingContext
+        与 token_usage 台账共用同一键（路由亲和与计量行可对账）。
+        """
         selected = None
+        reportSessionId = f"report-{uuid.uuid4().hex[:12]}"
         try:
             if not configs:
                 logger.warning("报告总结跳过：无可用模型配置")
@@ -421,7 +466,7 @@ class ReportTemplateService:
             selected = ModelRouterService().selectModel(
                 configs,
                 _REPORT_SUMMARY_SYSTEM_PROMPT,
-                RoutingContext(sessionId=f"report-{uuid.uuid4().hex[:12]}"),
+                RoutingContext(sessionId=reportSessionId),
             )
             client = self._clientFor(selected)
             if client is None:
@@ -443,6 +488,7 @@ class ReportTemplateService:
             resp = await client.complete(messages)
             await self._recordSummaryUsage(
                 session,
+                reportSessionId,
                 selected,
                 resp.promptTokens,
                 resp.completionTokens,
@@ -450,7 +496,7 @@ class ReportTemplateService:
             )
             return normalizeSummary(resp.content) or None
         except Exception as exc:
-            await self._accountFailure(session, selected, exc)
+            await self._accountFailure(session, reportSessionId, selected, exc)
             logger.warning("报告总结生成失败，降级: %s", exc)
             return None
 
@@ -465,6 +511,7 @@ class ReportTemplateService:
     async def _recordSummaryUsage(
         self,
         session: AsyncSession,
+        reportSessionId: str,
         config,
         promptTokens: int,
         completionTokens: int,
@@ -480,7 +527,7 @@ class ReportTemplateService:
         ) / Decimal(1000)
         await self._tokenUsage.recordUsage(
             session,
-            sessionId=f"report-{uuid.uuid4().hex[:12]}",
+            sessionId=reportSessionId,
             modelConfigId=config.id,
             modelName=config.model_name,
             promptTokens=promptTokens,
@@ -490,7 +537,7 @@ class ReportTemplateService:
         )
 
     async def _accountFailure(
-        self, session: AsyncSession, selected: Any, exc: Exception
+        self, session: AsyncSession, reportSessionId: str, selected: Any, exc: Exception
     ) -> None:
         """失败路径已消耗 token 补账（M4 口径：逃逸异常必须带走用量）。"""
         if selected is None:
@@ -499,7 +546,7 @@ class ReportTemplateService:
             promptTokens, completionTokens = consumedTokens(exc)
             if promptTokens or completionTokens:
                 await self._recordSummaryUsage(
-                    session, selected, promptTokens, completionTokens
+                    session, reportSessionId, selected, promptTokens, completionTokens
                 )
         except Exception as accountExc:  # pragma: no cover - 防御分支
             logger.warning("报告总结失败路径补账失败: %s", accountExc)

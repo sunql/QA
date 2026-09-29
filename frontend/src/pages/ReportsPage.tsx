@@ -137,7 +137,7 @@ function SectionBlock({ section }: { section: ReportSection }) {
     return (
       <Table<Record<string, unknown>>
         size="small"
-        rowKey={(_row, idx) => String(idx)}
+        rowKey={(row) => Object.values(row).map((v) => String(v)).join("|")}
         columns={tableColumns}
         dataSource={rows}
         pagination={false}
@@ -166,10 +166,12 @@ function SummaryBlock({ summary }: { summary: string }) {
       </Title>
       {lines.map((line, idx) => {
         const prefix = summaryPrefixOf(line);
+        // 仅对自带前缀的行剥前缀；无前缀行（兜底 [推断]）保留全文
+        const body = line.startsWith(prefix) ? line.slice(prefix.length).trim() : line;
         return (
           <div key={idx} style={{ marginBottom: 4 }}>
             <Tag color={SUMMARY_PREFIX_COLORS[prefix]}>{prefix}</Tag>
-            <Text>{line.slice(prefix.length).trim()}</Text>
+            <Text>{body}</Text>
           </div>
         );
       })}

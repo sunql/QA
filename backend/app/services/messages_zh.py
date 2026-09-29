@@ -597,6 +597,6 @@ MSG_REPORT_STRUCTURE_INVALID = "报告模板结构非法: {detail}"
 MSG_REPORT_PLACEHOLDER_INVALID = (
     "非法占位符（仅支持整串 {{params.xxx}} 且键必须在参数 schema 内）: {detail}"
 )
-MSG_REPORT_SECTION_LIMIT = "报告分节数超过上限 {limit}"
+MSG_REPORT_SECTION_LIMIT = "报告数据绑定数超过上限 {limit}"
 MSG_REPORT_STATUS_INVALID = "非法报告状态过滤值: {value}"
 MSG_REPORT_ALREADY_REVIEWED = "报告已审批，不能重复审批"

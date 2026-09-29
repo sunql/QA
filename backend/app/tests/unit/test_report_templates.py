@@ -126,6 +126,38 @@ class TestValidateTemplateStructure:
                 self._template([self._section(0), self._section(0)])
             )
 
+    def test_expanded_binding_count_over_limit_rejected(self) -> None:
+        """M1 口径：上限按 Σ每节展开绑定数（kpi 节 = len(kpiCodes)）累加。
+
+        3 节 × 5 code = 15 次绑定 > 10 → 拒绝（section 数只有 3，旧口径漏放）。
+        """
+        codes = [f"K{i}" for i in range(5)]
+        sections = [
+            {
+                "sectionId": f"s{idx}",
+                "title": "t",
+                "kind": "kpi_cards",
+                "source": {"type": "kpi", "kpiCodes": codes},
+            }
+            for idx in range(3)
+        ]
+        with pytest.raises(ValidationError):
+            validateTemplateStructure(self._template(sections))
+
+    def test_expanded_binding_count_at_limit_accepted(self) -> None:
+        """2 节 × 5 code = 10 次绑定 = 上限 → 放行。"""
+        codes = [f"K{i}" for i in range(5)]
+        sections = [
+            {
+                "sectionId": f"s{idx}",
+                "title": "t",
+                "kind": "kpi_cards",
+                "source": {"type": "kpi", "kpiCodes": codes},
+            }
+            for idx in range(2)
+        ]
+        validateTemplateStructure(self._template(sections))
+
     def test_non_placeholder_template_form_rejected(self) -> None:
         bad = self._section(0)
         bad["source"] = {"type": "supplier360", "supplierKey": "{{env.SECRET}}"}
@@ -324,6 +356,75 @@ class TestGenerateSummary:
         summary = await service._generateSummary(AsyncMock(), [], configs=[_llmConfig()])
         assert llm.calls == 1
         assert summary is None, "LLM 失败 → None（调用方落「（总结生成失败）」）"
+
+    async def test_routing_and_usage_share_one_session_id(self, monkeypatch) -> None:
+        """L1：RoutingContext 与 token_usage 台账共用同一合成 reportSessionId。"""
+        import app.services.report_template_service as svc_module
+
+        captured: dict = {}
+
+        class _StubRouter:
+            def selectModel(self, configs, prompt, ctx):
+                captured["routingSessionId"] = ctx.sessionId
+                return _llmConfig()
+
+        monkeypatch.setattr(svc_module, "ModelRouterService", _StubRouter)
+        llm = _FakeLlm(content=json.dumps({"lines": ["[事实] A"]}, ensure_ascii=False))
+        usage = _SpyTokenUsage()
+        service = self._service(llm, usage)
+        await service._generateSummary(
+            AsyncMock(), [{"sectionId": "s", "kind": "table", "data": []}],
+            configs=[_llmConfig()],
+        )
+        assert captured["routingSessionId"].startswith("report-")
+        assert usage.recorded[0]["sessionId"] == captured["routingSessionId"], (
+            "路由亲和与计量行必须共用同一合成 session 键"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 渲染层 KPI 同 code 去冗余（M1 R1）
+# ---------------------------------------------------------------------------
+
+
+class _CountingKpiSvc:
+    """计数 get_by_code 恒返 None（去重断言只看调用数）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def get_by_code(self, session, code: str):  # noqa: ANN001
+        self.calls.append(code)
+        return None
+
+
+class TestRenderKpiDedup:
+    async def test_same_code_bound_once_across_sections(self) -> None:
+        """monthly-ops-v1 两个 kpi 节共用 4 个 code：8 次调用 → 去重后 4 次。"""
+        from app.services.report_templates.monthly_ops_v1 import MonthlyOpsParams
+        from app.services.report_templates import REPORT_TEMPLATES
+
+        counting = _CountingKpiSvc()
+        service = ReportTemplateService(
+            llmFactory=lambda _c: None, tokenUsage=_SpyTokenUsage()
+        )
+        service._kpiSvc = counting  # noqa: SLF001 - 测试注入
+        sections = await service._renderSections(
+            AsyncMock(),
+            REPORT_TEMPLATES["monthly-ops-v1"],
+            MonthlyOpsParams(month="2026-09", supplierKey="10105"),
+        )
+        bySection = {s["sectionId"]: s for s in sections}
+        # 两个 kpi 节各自完整渲染 4 行（缓存复用不丢行）
+        for sectionId in ("kpi-overview", "kpi-definitions"):
+            rows = bySection[sectionId]["data"]
+            assert len(rows) == 4
+            assert all(row["found"] is False for row in rows)
+        # 去重后每个 code 恰好 1 次 get_by_code
+        assert sorted(counting.calls) == sorted(
+            set(counting.calls)
+        ), f"存在同 code 冗余调用: {counting.calls}"
+        assert len(counting.calls) == 4
 
 
 # ---------------------------------------------------------------------------

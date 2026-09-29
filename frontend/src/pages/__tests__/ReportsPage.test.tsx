@@ -70,8 +70,24 @@ const INSTANCE: ReportInstance = {
       data: [{ kpiCode: "KPI_SUPPLIER_OTD", kpiName: "OTD", found: true }],
       renderError: null,
     },
+    {
+      sectionId: "kpi-definitions",
+      title: "KPI 口径说明",
+      kind: "table",
+      data: [
+        { kpiCode: "KPI_SUPPLIER_OTD", kpiName: "OTD", formula: "SELECT 1" },
+      ],
+      renderError: null,
+    },
+    {
+      sectionId: "supplier-kpis",
+      title: "供应商特征值",
+      kind: "table",
+      data: null,
+      renderError: "供应商不存在",
+    },
   ],
-  summary: "[事实] 9 月 OTD 达标\n下月预计回升",
+  summary: "[事实] 9 月 OTD 达标\n下月预计回升\n[推断] 由数据推演\n[假设] 或有反复",
   status: "PENDING_REVIEW",
   reviewNote: null,
   reviewedBy: null,
@@ -175,5 +191,52 @@ describe("ReportsPage", () => {
     renderPage();
     await waitFor(() => expect(screen.getByText("待审批")).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: /审\s*批/ })).toBeNull();
+  });
+
+  it("详情 Drawer：table / kpi_cards / renderError 三分支渲染", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("待审批")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /查\s*看/ }));
+    // 等详情加载完成（kpi 卡片标题来自 kpi_cards 分支）
+    await waitFor(() =>
+      expect(document.querySelector(".ant-drawer-open")).not.toBeNull(),
+    );
+    // kpi_cards 分支：卡片标题 = kpiName（"OTD" 同时出现在 table 分支，用卡片头锁定）
+    await waitFor(() => expect(screen.getByText("月度 KPI 总览")).toBeInTheDocument());
+    expect(
+      document.querySelector(".ant-card-head-title")?.textContent,
+    ).toContain("OTD");
+    // table 分支：antd Table 渲染出列名 + 单元格
+    expect(screen.getByText("KPI 口径说明")).toBeInTheDocument();
+    expect(screen.getByText("SELECT 1")).toBeInTheDocument();
+    // renderError 分支：Alert + 错误详情
+    expect(screen.getByText("该分节数据绑定失败")).toBeInTheDocument();
+    expect(screen.getByText("供应商不存在")).toBeInTheDocument();
+  });
+
+  it("总结块按 [事实]/[推断]/[假设] 前缀着色（真实分类逻辑，无前缀兜底 [推断]）", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("待审批")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /查\s*看/ }));
+    await waitFor(() => expect(screen.getByText("总结")).toBeInTheDocument());
+
+    const tagClassesOf = (prefix: string): string[] =>
+      screen
+        .getAllByText(prefix)
+        .map((el) => el.closest(".ant-tag")?.className ?? "");
+
+    expect(tagClassesOf("[事实]")[0]).toContain("ant-tag-green");
+    // 无前缀行「下月预计回升」被兜底为 [推断]（orange）；显式 [推断] 行同色
+    const inferenceTags = tagClassesOf("[推断]");
+    expect(inferenceTags.length).toBe(2);
+    for (const cls of inferenceTags) {
+      expect(cls).toContain("ant-tag-orange");
+    }
+    expect(tagClassesOf("[假设]")[0]).toContain("ant-tag-purple");
+    // 原始行文本剥掉前缀后渲染
+    expect(screen.getByText("9 月 OTD 达标")).toBeInTheDocument();
+    expect(screen.getByText("下月预计回升")).toBeInTheDocument();
+    expect(screen.getByText("由数据推演")).toBeInTheDocument();
+    expect(screen.getByText("或有反复")).toBeInTheDocument();
   });
 });

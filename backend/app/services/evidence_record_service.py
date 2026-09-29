@@ -25,7 +25,9 @@ import json
 import logging
 import time
 from contextvars import ContextVar, Token
-from typing import Any
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any, Awaitable, Callable
 
 from app.domain.wiki_models import Evidence
 from app.infrastructure.database import getSessionFactory
@@ -33,6 +35,7 @@ from app.infrastructure.database import getSessionFactory
 logger = logging.getLogger(__name__)
 
 SOURCE_TYPE_SQL_QUERY = "SQL_QUERY"
+SOURCE_TYPE_METRIC_RESULT = "METRIC_RESULT"
 
 # 后台落库任务的模块级强引用（create_task 弱引用会被 GC，需持握防丢失；
 # 完成即由 done_callback 回收——ontology_service._PENDING_SYNC_TASKS 同款）
@@ -159,15 +162,143 @@ def scheduleSqlQueryEvidence(
 
 
 async def _persistBestEffort(
-    *, payload: dict[str, Any], sessionId: str | None
+    *,
+    payload: dict[str, Any],
+    sessionId: str | None,
+    persist: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> None:
-    """后台落库包装：持久化失败仅 warning（best-effort，绝不上抛）。"""
+    """后台落库包装：持久化失败仅 warning（best-effort，绝不上抛）。
+
+    persist 缺省走 SQL_QUERY（B2 语义不变）；METRIC_RESULT（MR）传入
+    persistMetricResultEvidence 复用同一 best-effort 包装。
+    """
+    persistFn = persist if persist is not None else persistSqlQueryEvidence
     try:
-        await persistSqlQueryEvidence(payload=payload, sessionId=sessionId)
+        await persistFn(payload=payload, sessionId=sessionId)
     except Exception as exc:  # noqa: BLE001 - best-effort 降级路径
         logger.warning(
-            "SQL evidence 落库失败 session_id=%s sql=%.120s: %s",
+            "evidence 落库失败 session_id=%s sql=%.120s: %s",
             sessionId,
             payload.get("sql", ""),
             exc,
         )
+
+
+# =========================================================================
+# v3.1 任务 MR：METRIC_RESULT 自动落库（蓝图 §4.12，补 B1 后半）
+# =========================================================================
+
+
+def extractSampleValue(rows: list[dict[str, Any]]) -> float | str | None:
+    """提取结果首行第一个数值单元格（蓝图 §4.12 sample_value）。
+
+    口径：int/float 直取（bool 是 int 子类，跳过）；Decimal 先 str 再 float
+    （JSONB 序列化边界）；数值字符串可转则取。无数值 / 空行 / 任何异常
+    → None，绝不抛（best-effort 提取）。
+    """
+    try:
+        if not rows:
+            return None
+        for value in rows[0].values():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, Decimal):
+                return float(str(value))
+            if isinstance(value, str):
+                try:
+                    return float(value.strip())
+                except ValueError:
+                    continue
+        return None
+    except Exception:  # noqa: BLE001 - 提取永远不影响主链路
+        return None
+
+
+def buildMetricResultPayload(
+    *,
+    metricCode: str,
+    metricName: str | None,
+    confidence: float,
+    period: str | None,
+    sampleValue: float | str | None,
+    rowCount: int,
+    resultHash: str,
+    calcTime: str,
+    datasourceId: int | None,
+) -> dict[str, Any]:
+    """构造 METRIC_RESULT 型 payload（蓝图 §4.12 四要素 + 追溯上下文）。"""
+    return {
+        "metric_code": metricCode,
+        "metric_name": metricName,
+        "confidence": confidence,
+        "period": period,
+        "sample_value": sampleValue,
+        "row_count": rowCount,
+        "result_hash": resultHash,
+        "calc_time": calcTime,
+        "datasource_id": datasourceId,
+    }
+
+
+async def persistMetricResultEvidence(
+    *, payload: dict[str, Any], sessionId: str | None
+) -> None:
+    """落一条 METRIC_RESULT 型 evidence（独立会话独立事务，由后台任务调用）。
+
+    claim_id 恒为 NULL：蓝图 §5.7 关联由上层填充；本函数不猜 claim。
+    """
+    factory = getSessionFactory()
+    async with factory() as session:
+        session.add(
+            Evidence(
+                claim_id=None,
+                source_type=SOURCE_TYPE_METRIC_RESULT,
+                payload=payload,
+                session_id=sessionId,
+            )
+        )
+        await session.commit()
+
+
+def scheduleMetricResultEvidence(
+    *,
+    metricCode: str,
+    metricName: str | None,
+    confidence: float,
+    rows: list[dict[str, Any]],
+    datasourceId: int | None,
+    period: str | None = None,
+) -> None:
+    """L1 KPI 命中且查询成功执行后调用（同步、非阻塞）。
+
+    逐行镜像 scheduleSqlQueryEvidence 的 best-effort 语义：在调用方 context
+    里同步构造 payload（sample_value / hash / calc_time），session_id 在此刻
+    读取并随参数传入后台任务；任何异常只 warning，查询结果不受影响。
+    period best-effort：执行时上下文有则填，无则 None——不猜。
+    """
+    try:
+        payload = buildMetricResultPayload(
+            metricCode=metricCode,
+            metricName=metricName,
+            confidence=confidence,
+            period=period,
+            sampleValue=extractSampleValue(rows),
+            rowCount=len(rows),
+            resultHash=computeResultHash(rows),
+            calcTime=datetime.now(timezone.utc).isoformat(),
+            datasourceId=datasourceId,
+        )
+        sessionId = currentChatSessionId()
+        task = asyncio.create_task(
+            _persistBestEffort(
+                payload=payload,
+                sessionId=sessionId,
+                persist=persistMetricResultEvidence,
+            )
+        )
+        _PENDING_EVIDENCE_TASKS.add(task)
+        task.add_done_callback(_PENDING_EVIDENCE_TASKS.discard)
+    except Exception as exc:  # noqa: BLE001 - 记录永远不影响查询主链路
+        logger.warning("METRIC evidence 调度失败（查询结果不受影响）: %s", exc)

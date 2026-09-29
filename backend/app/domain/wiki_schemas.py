@@ -332,7 +332,11 @@ class EvidenceQuery(BaseModel):
 
 
 class KnowledgeClaimRead(CamelModel):
-    """事实原子读模型（含其证据列表）。"""
+    """事实原子读模型（含其证据列表）。
+
+    confidence_level / refuse_reason 由读路径现算（confidence_service），
+    非落库值；REFUSE 时 refuse_reason 必给具体原因（v3.1 §12.2）。
+    """
 
     id: int
     page_id: str
@@ -341,6 +345,8 @@ class KnowledgeClaimRead(CamelModel):
     embedding_ref: str | None = None
     created_time: datetime | None = None
     evidences: list[EvidenceRead] = Field(default_factory=list)
+    confidence_level: str | None = None
+    refuse_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------

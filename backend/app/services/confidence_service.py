@@ -252,11 +252,14 @@ async def calculateClaimConfidence(
     *,
     hasOpenConflict: bool | None = None,
     evidences: Iterable[Any] | None = None,
+    historySnapshot: ConfidenceHistorySnapshot | None = None,
 ) -> ConfidenceResult:
     """单条 claim 的置信度编排：取证据数、查冲突、组参数后调纯函数。
 
     ``evidences=None`` 时按 claim_id 查 evidence 表（显式列查询，避免 async
-    上下文触发惰性加载 MissingGreenlet）；``hasOpenConflict=None`` 时现查。
+    上下文触发惰性加载 MissingGreenlet）；``hasOpenConflict=None`` 时现查；
+    ``historySnapshot`` 生产 v1 恒 None（冷启动豁免），未来接学习闭环时由
+    provider 注入。
     """
     if hasOpenConflict is None:
         hasOpenConflict = await pageHasOpenConflict(session, claim.page_id)
@@ -275,6 +278,7 @@ async def calculateClaimConfidence(
             [SimpleNamespace(payload=payload, source_id=sourceId) for payload, sourceId in rows]
         ),
         rulesMatched=claimRulesMatched(claim),
+        historySnapshot=historySnapshot,
     )
 
 
@@ -282,6 +286,8 @@ async def calculatePageClaimConfidence(
     session: AsyncSession,
     pageId: str,
     claims: Iterable[Any],
+    *,
+    historySnapshot: ConfidenceHistorySnapshot | None = None,
 ) -> dict[int, ConfidenceResult]:
     """一个 page 的 N 条 claim：冲突查询只做一次（禁 N+1）。
 
@@ -295,6 +301,7 @@ async def calculatePageClaimConfidence(
             claim,
             hasOpenConflict=hasOpenConflict,
             evidences=claim.evidences,
+            historySnapshot=historySnapshot,
         )
         for claim in claims
     }

@@ -551,9 +551,27 @@ async def batchDeletePages(
 async def listClaims(
     pageId: str, db: AsyncSession = Depends(getDb)
 ) -> list[KnowledgeClaimRead]:
-    """列出条目的事实原子（含证据出处）。"""
+    """列出条目的事实原子（含证据出处 + 现算离散 4 级置信度）。
+
+    置信度在序列化时现算（confidence_service）：一个 page 的 N 条 claim
+    只做一次未解决冲突查询（禁 N+1）；历史两项生产 v1 传 None（冷启动豁免）。
+    """
+    from app.services.confidence_service import (
+        calculatePageClaimConfidence,
+        refuseReasonForUi,
+    )
+
     entities = await _wikiPageService.listClaims(db, pageId)
-    return [KnowledgeClaimRead.model_validate(e) for e in entities]
+    results = await calculatePageClaimConfidence(db, pageId, entities)
+    return [
+        KnowledgeClaimRead.model_validate(e).model_copy(
+            update={
+                "confidence_level": results[e.id].level.value,
+                "refuse_reason": refuseReasonForUi(results[e.id]),
+            }
+        )
+        for e in entities
+    ]
 
 
 @router.post(

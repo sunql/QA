@@ -93,10 +93,18 @@ async def list_task_items(taskId: int, db: AsyncSession = Depends(getDb)):
 
 @router.patch("/claims/{claimId}", response_model=KnowledgeClaimDetailRead)
 async def update_claim(claimId: int, body: WikiClaimUpdateRequest, db: AsyncSession = Depends(getDb)):
-    from app.domain.schemas import CamelModel
-    dto = CamelModel.model_validate({"claim_text": body.claim_text})
+    from app.services.confidence_service import (
+        calculateClaimConfidence,
+        refuseReasonForUi,
+    )
+    # WikiClaimUpdateRequest 自带 claim_text 校验/strip，直接作 DTO 使用。
+    # （原 CamelModel 基类 model_validate 产出空 DTO，dto.claim_text 必 AttributeError
+    #   —— 本任务集成测试揪出的预存 bug，顺手修正。）
     svc = WikiPageService()
-    claim = await svc.updateClaimText(db, claimId, dto=dto)
+    claim = await svc.updateClaimText(db, claimId, dto=body)
+    # 置信度读路径现算（refresh 后的 triple_stale 反映修订后状态）；
+    # evidences 未预取 → 编排层显式列查询，避免 async 惰性加载异常。
+    confidence = await calculateClaimConfidence(db, claim)
     return KnowledgeClaimDetailRead(
         id=claim.id, page_id=claim.page_id, claim_text=claim.claim_text,
         claim_type=claim.claim_type, subject_id=claim.subject_id,
@@ -105,6 +113,8 @@ async def update_claim(claimId: int, body: WikiClaimUpdateRequest, db: AsyncSess
         authority_level=claim.authority_level, status=claim.status,
         source_version=claim.source_version,
         triple_stale=claim.triple_stale, created_time=claim.created_time,
+        confidence_level=confidence.level.value,
+        refuse_reason=refuseReasonForUi(confidence),
     )
 
 __all__ = ["router"]

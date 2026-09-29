@@ -1723,6 +1723,21 @@ class ClassRecallInfo(CamelModel):
     truncated: bool = False
 
 
+class HypothesisRead(CamelModel):
+    """分析假设读模型（v3.1 B6 / 蓝图 §5.6「可能原因」区块）。
+
+    verification_sql 只读展示：前端「验证」按钮把它作为用户问题重新走
+    既有 QUERY 链路（SQL Guard 自然生效），本 DTO 不携带任何执行入口。
+    """
+
+    id: int
+    statement: str
+    driver: str | None = None
+    verification_sql: str
+    turn_question: str | None = None
+    created_time: datetime | None = None
+
+
 class ChatResponse(CamelModel):
     answer: str
     intent: str = Field(
@@ -1804,6 +1819,12 @@ class ChatResponse(CamelModel):
     confidence: float | None = Field(
         default=None,
         description="L1 匹配置信度（精确 alias=1.0，关键词 Jaccard∈(0,1]）",
+    )
+    # v3.1 B6（M7 Hypothesis Hook）：「可能原因」假设（仅触发词表 + 本轮有数据时
+    # 填充；流式路径不随 SSE 下发，前端经 GET /chat/sessions/{id}/hypotheses 读取）
+    hypotheses: list[HypothesisRead] | None = Field(
+        default=None,
+        description="M7 假设后处理：≤3 条可能解释（statement + driver + 验证 SQL）",
     )
 
 

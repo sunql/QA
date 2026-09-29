@@ -544,6 +544,10 @@ class MultiStepMixin:
                 affinity = await self._buildAffinityStatus(
                     session, dto.sessionId, agg_config.id, agg_config.model_name,
                 )
+                # v3.1 B6（M7）：多步出数据后的可选假设后处理（best-effort，不阻断）
+                hypotheses = await self._maybeGenerateHypotheses(
+                    session, dto.sessionId, dto.question, pc, data=last_data,
+                )
                 return ChatResponse(
                     answer=agg_content,
                     intent="multi_step",
@@ -554,6 +558,7 @@ class MultiStepMixin:
                     modelName=last_model_name,
                     affinityStatus=affinity,
                     classRecall=pc.recall,
+                    hypotheses=hypotheses or None,
                 )
 
             # 数据查询步骤：共用 helper（生成 → 执行 + 回灌重试），失败隔离为 error 行
@@ -577,6 +582,10 @@ class MultiStepMixin:
             total_cost=total_cost, _t0=_t0,
             inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
         )
+        # v3.1 B6（M7）：降级收尾同样接假设后处理（last_data 为空时静默跳过）
+        hypotheses = await self._maybeGenerateHypotheses(
+            session, dto.sessionId, dto.question, pc, data=last_data,
+        )
         return ChatResponse(
             answer=answer,
             intent="multi_step",
@@ -585,6 +594,7 @@ class MultiStepMixin:
             cost=float(total_cost),
             latency_ms=int((time.monotonic() - _t0) * 1000),
             modelName=last_model_name,
+            hypotheses=hypotheses or None,
         )
 
     async def _finalizeMultiStepDegrade(

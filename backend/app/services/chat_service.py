@@ -253,6 +253,8 @@ from app.services.evidence_record_service import (
 )
 from app.services.chat_domain import DomainCommandMixin
 from app.services.chat_l4 import L4Mixin
+# v3.1 B6（M7 Hypothesis Hook）：假设后处理 mixin（触发词表 + LLM 生成 + 落库）
+from app.services.hypothesis_service import HypothesisMixin
 logger = logging.getLogger(__name__)
 
 
@@ -262,7 +264,7 @@ logger = logging.getLogger(__name__)
 _UNANSWERABLE_ANSWER = "抱歉，当前系统中没有与您的问题相关的业务数据，无法回答该问题。"
 
 
-class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, ChatStreamOutputMixin):
+class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin):
     """自然语言问答编排服务。
 
     组合 ChatStreamOutputMixin 提供流式回答输出的超时保护与降级能力。
@@ -641,6 +643,10 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             resultColumns=self._columns(data),
             inheritance_snapshot=snap,
         )
+        # v3.1 B6（M7）：单步出数据后的可选假设后处理（best-effort，不阻断）
+        hypotheses = await self._maybeGenerateHypotheses(
+            session, dto.sessionId, dto.question, pc, data=data,
+        )
         affinity = await self._buildAffinityStatus(
             session, dto.sessionId, answerConfig.id, answerConfig.model_name,
         )
@@ -671,6 +677,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             affinityStatus=affinity,
             dataQuality=dqBadges,
             classRecall=pc.recall,
+            hypotheses=hypotheses or None,
         )
 
     # -------------------------------------------------------------------------

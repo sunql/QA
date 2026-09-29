@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -279,17 +280,31 @@ class TestBuildSummaryInput:
 class _FakeLlm:
     """计数 fake：返回带前缀的 JSON 总结。"""
 
-    def __init__(self, *, content: str | None = None, raiseExc: Exception | None = None):
+    def __init__(
+        self,
+        *,
+        content: str | None = None,
+        raiseExc: Exception | None = None,
+        promptTokens: int = 10,
+        completionTokens: int = 5,
+        cachedTokens: int | None = None,
+    ):
         self.calls = 0
         self._content = content
         self._raise = raiseExc
+        self._promptTokens = promptTokens
+        self._completionTokens = completionTokens
+        self._cachedTokens = cachedTokens
 
     async def complete(self, messages, model=None):
         self.calls += 1
         if self._raise is not None:
             raise self._raise
         return MagicMock(
-            content=self._content, promptTokens=10, completionTokens=5, cachedTokens=None
+            content=self._content,
+            promptTokens=self._promptTokens,
+            completionTokens=self._completionTokens,
+            cachedTokens=self._cachedTokens,
         )
 
 
@@ -474,3 +489,61 @@ class TestVisibilityDecision:
         svc = self._service()
         report = self._report("u1", "REJECTED")
         assert svc.canView(report, self._viewer("u2", ("user",))) is False
+
+
+# ---------------------------------------------------------------------------
+# M-2：报告总结计费走 UsageMixin._costFor（cache 差额 SSOT）
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryUsageBilling:
+    """报告总结 prompt 含固定长 system prompt，cache 命中概率不低。
+
+    修复前用平铺 `cost_per_1k_input` 计费（cachedTokens 收了但从不使用），
+    系统性高报。修复后与 B6 同口径：UsageMixin._costFor（cache 差额 +
+    system_config.LLM_CACHE_HIT_MULTIPLIER）。
+    """
+
+    _PROMPT_TOKENS = 1000
+    _COMPLETION_TOKENS = 100
+    _CACHED_TOKENS = 800
+    # 单价（_llmConfig）：input 0.001/1k、output 0.002/1k
+    # 平铺（无差额）：1000×0.001/1000 + 100×0.002/1000 = 0.0012
+    # 差额（multiplier=0，命中免费）：(1000-800)×0.001/1000 + 0.0002 = 0.0004
+    _FLAT_COST = Decimal("0.0012")
+    _CACHED_COST = Decimal("0.0004")
+
+    async def _run(self, *, cachedTokens: int | None) -> tuple[Decimal, Any]:
+        llm = _FakeLlm(
+            content=json.dumps({"lines": ["[事实] A"]}, ensure_ascii=False),
+            promptTokens=self._PROMPT_TOKENS,
+            completionTokens=self._COMPLETION_TOKENS,
+            cachedTokens=cachedTokens,
+        )
+        usage = _SpyTokenUsage()
+        service = ReportTemplateService(llmFactory=lambda _c: llm, tokenUsage=usage)
+        session = AsyncMock()
+        # system_config 无 LLM_CACHE_HIT_MULTIPLIER 行 → _readFloatConfig 返默认 0.0
+        session.execute.return_value.scalar_one_or_none.return_value = None
+        await service._generateSummary(session, [], configs=[_llmConfig()])
+        assert len(usage.recorded) == 1
+        return usage.recorded[0]["cost"], session
+
+    async def test_cache_hit_bills_less_than_flat_price(self) -> None:
+        cost, _ = await self._run(cachedTokens=self._CACHED_TOKENS)
+        assert cost < self._FLAT_COST, (
+            f"cache 命中时成本应低于平铺价 {self._FLAT_COST}，实际 {cost}"
+        )
+        assert cost == self._CACHED_COST
+
+    async def test_no_cached_tokens_keeps_flat_price(self) -> None:
+        cost, _ = await self._run(cachedTokens=None)
+        assert cost == self._FLAT_COST
+
+    async def test_reads_multiplier_from_system_config_ssot(self) -> None:
+        """计费必须经 system_config.LLM_CACHE_HIT_MULTIPLIER（SSOT），不自算。"""
+        _, session = await self._run(cachedTokens=self._CACHED_TOKENS)
+        statements = [str(call.args[0]) for call in session.execute.await_args_list]
+        assert any("LLM_CACHE_HIT_MULTIPLIER" in s for s in statements), (
+            f"未读取 cache 折扣 SSOT；实际执行语句={statements}"
+        )

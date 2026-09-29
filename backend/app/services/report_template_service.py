@@ -21,7 +21,6 @@ import json
 import logging
 import re
 import uuid
-from decimal import Decimal
 from typing import Any
 
 from fastapi.encoders import jsonable_encoder
@@ -34,6 +33,7 @@ from app.dependencies import CurrentUser
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import ReportInstance
 from app.infrastructure.llm.base_client import LlmMessage
+from app.services.chat_usage import UsageMixin
 from app.services.kpi_catalog_service import KpiCatalogService
 from app.services.learning.prompt_fence import neutralizeFence
 from app.services.llm_json_fence import stripJsonFence
@@ -48,6 +48,7 @@ from app.services.messages_zh import (
     MSG_REPORT_TEMPLATE_NOT_FOUND,
 )
 from app.services.model_router_service import ModelRouterService, RoutingContext
+from app.services.nl2sql_service import _readFloatConfig
 from app.services.report_templates import REPORT_TEMPLATES, listTemplateMetas
 from app.services.supplier_360_service import Supplier360Service
 from app.services.token_usage_service import TokenUsageService
@@ -518,13 +519,22 @@ class ReportTemplateService:
         *,
         cachedTokens: int | None = None,
     ) -> None:
-        """计量必须落 token_usage（红线）；零用量不落行（rag_qa 同口径）。"""
+        """计量必须落 token_usage（红线）；零用量不落行（rag_qa 同口径）。
+
+        计费走 ``UsageMixin._costFor``（cache 差额 + system_config.
+        ``LLM_CACHE_HIT_MULTIPLIER``），与 chat / B6 hypothesis 同一 SSOT。
+        报告总结 prompt 含固定长 system prompt，cache 命中概率不低——用平铺
+        ``cost_per_1k_input`` 计费会系统性高报（cachedTokens 收了却不用）。
+        """
         if not promptTokens and not completionTokens:
             return
-        cost = (
-            Decimal(promptTokens) * Decimal(str(config.cost_per_1k_input))
-            + Decimal(completionTokens) * Decimal(str(config.cost_per_1k_output))
-        ) / Decimal(1000)
+        cacheHitMultiplier = await _readFloatConfig(
+            session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
+        )
+        cost = UsageMixin._costFor(
+            config, promptTokens, completionTokens,
+            cachedTokens=cachedTokens, cacheHitMultiplier=cacheHitMultiplier,
+        )
         await self._tokenUsage.recordUsage(
             session,
             sessionId=reportSessionId,

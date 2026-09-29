@@ -240,6 +240,8 @@ from app.services.chat_context import (
     _RECENT_ROUNDS_LIMIT,
     _STATE_HISTORY_FIELD_LIMIT_DEFAULT,
     ContextMixin,
+    InheritedState,
+    TimeHint,
 )
 from app.services.chat_usage import UsageMixin
 from app.services.chat_stream import StreamMixin
@@ -456,6 +458,20 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         if result.intent == IntentType.CLARIFY:
             return await self._handleClarify(session, dto, pc)
 
+        # B5 HIGH-1：提前计算继承字段快照（L1/L1.5/B/C 所有多步分支出口共需）。
+        # prior_snapshot：只读上一轮 inheritance_snapshot 或 plan 的时间条件。
+        prior_snapshot: dict | None = None
+        if state is not None:
+            prior_snapshot = (
+                getattr(state, "inheritance_snapshot", None) or
+                ({"inherited_time": None} if state.last_plan else None)
+            )
+        inherited = self._resolveInheritedState(
+            semanticState=getattr(result, "semanticState", None),
+            priorSnapshot=prior_snapshot,
+            question=dto.question,
+        )
+
         # L1 多步：仅对 NEW_QUERY/QUERY 意图；单步优先策略——
         # 明确要求分步 → 直接多步；其余先单步，SQL 执行失败时回退多步拆解。
         if result.intent in (IntentType.NEW_QUERY, IntentType.QUERY):
@@ -470,6 +486,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                         initial_tokens=step_tokens, initial_cost=step_cost,
                         _t0=_t0,
                         global_filters=global_filters,
+                        semanticState=inherited,
+                        priorSnapshot=prior_snapshot,
                     )
             # L1.5（2026-08-17 真实回归）：并列复合问题（无显式分步信号但语义多步，
             # 如"查询3月份采购订单数量、Top 10物料占比、Top 10物料在4月份的订单数量"）
@@ -487,6 +505,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                         initial_tokens=step_tokens, initial_cost=step_cost,
                         _t0=_t0,
                         global_filters=global_filters,
+                        semanticState=inherited,
+                        priorSnapshot=prior_snapshot,
                     )
 
         # B（feat-follow-up-cascade）：FOLLOW_UP 且上一轮是多步 → LLM 改写回完整
@@ -499,6 +519,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                     session, dto2, pc, multiPlan, state,
                     initial_tokens=msTokens, initial_cost=msCost, _t0=_t0,
                     global_filters=gf2,
+                    semanticState=inherited,
+                    priorSnapshot=prior_snapshot,
                 )
 
         outcome = await self._planAndGenerateSql(session, dto, pc, result.intent, state)
@@ -516,6 +538,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                     session, dto2, pc, multiPlan, state,
                     initial_tokens=msTokens, initial_cost=msCost, _t0=_t0,
                     global_filters=gf2,
+                    semanticState=inherited,
+                    priorSnapshot=prior_snapshot,
                 )
             outcome = await self._planAndGenerateSql(
                 session, dto, pc, IntentType.FOLLOW_UP, state
@@ -559,6 +583,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                         session, dto, pc, detected.plan, state,
                         initial_tokens=prior_tokens, initial_cost=prior_cost,
                         _t0=_t0,
+                        semanticState=None,  # 异常回退，无 semanticState
+                        priorSnapshot=prior_snapshot,
                     )
             raise
         self._spawnEmbedding(dto, finalSql)
@@ -596,10 +622,24 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             latency_ms=_elapsed_ms,
             token_cost_usd=float(totalCost),
         )
+        # B5：计算本轮继承字段快照（读 semanticState + 上一轮 plan/snapshot）
+        prior_snapshot: dict[str, Any] | None = None
+        if state is not None:
+            prior_snapshot = (
+                getattr(state, "inheritance_snapshot", None) or
+                ({"inherited_time": None} if state.last_plan else None)
+            )
+        inherited = self._resolveInheritedState(
+            semanticState=getattr(result, "semanticState", None),
+            priorSnapshot=prior_snapshot,
+            question=dto.question,
+        )
+        snap = self._inheritedStateToSnapshot(inherited)
         await self._saveQueryState(
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=finalSql,
             resultColumns=self._columns(data),
+            inheritance_snapshot=snap,
         )
         affinity = await self._buildAffinityStatus(
             session, dto.sessionId, answerConfig.id, answerConfig.model_name,
@@ -1383,6 +1423,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         await self._saveQueryState(
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
+            inheritance_snapshot=None,
         )
         totalTokens = outcome.promptTokens + outcome.completionTokens
         affinity = await self._buildAffinityStatus(
@@ -1433,6 +1474,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         await self._saveQueryState(
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
+            inheritance_snapshot=None,
         )
         totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
         affinityConfig = outcome.sqlConfig or pc.selected

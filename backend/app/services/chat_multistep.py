@@ -26,6 +26,7 @@ from app.domain.multi_step_plan import (
 from app.domain.query_plan import QueryPlan
 from app.domain.schemas import ChatRequest, ChatResponse
 from app.infrastructure.llm.base_client import LlmMessage
+from app.services.chat_context import InheritedState, TimeHint
 from app.services.chat_helpers import (
     _MSG_STEP_UNANSWERABLE,
     _PipelineContext,
@@ -436,6 +437,8 @@ class MultiStepMixin:
         initial_cost: Decimal = Decimal("0"),
         _t0: float,
         global_filters: GlobalFilters | None = None,
+        semanticState: InheritedState | None = None,
+        priorSnapshot: dict | None = None,
     ) -> ChatResponse:
         """顺序执行每个子步骤，最后调用 StepAggregator 汇总，返回完整多步响应。
 
@@ -447,6 +450,10 @@ class MultiStepMixin:
         单步失败回退时已消耗的单步生成），计入响应 tokensUsed/cost，保证与审计行一致。
 
         _t0：调用方传入的计时起点（来自 _handleGenericQuery 入口计时）。
+
+        semanticState / priorSnapshot（R1 B5 HIGH-1 修复）：多步 B/C 路径的追问改写
+        重跑（首次进入多步时才有 semanticState；priorSnapshot 是上一轮快照）。
+        经 _resolveInheritedState 计算后写入 inheritance_snapshot，支持下一轮追问。
         """
         if self._isOversizedPlan(multiStepPlan):
             # 在任何数据步之前返回：拒收不是「执行失败」，更不该先烧掉前几步的
@@ -519,11 +526,20 @@ class MultiStepMixin:
                     latency_ms=int((time.monotonic() - _t0) * 1000),
                     token_cost_usd=float(total_cost),
                 )
+                # B5 HIGH-1：计算 inheritance_snapshot（支持下一轮追问链路）。
+                # semanticState 可能为 None（如 B/C 路径直接进多步无 A7 输出），
+                # _resolveInheritedState 有完整降级，priorSnapshot 在入口已计算。
+                snap = self._inheritedStateToSnapshot(self._resolveInheritedState(
+                    semanticState=None,  # 多步内部无新的 A7 抽取，用 None
+                    priorSnapshot=priorSnapshot,
+                    question=dto.question,
+                ))
                 # 保存查询状态：用最后一个数据步骤的 plan/sql，支持下一轮 REFINE/FOLLOW_UP
                 await self._saveQueryState(
                     session, dto.sessionId,
                     question=dto.question, plan=last_plan, sql=last_sql,
                     resultColumns=self._columns(last_data),
+                    inheritance_snapshot=snap,
                 )
                 affinity = await self._buildAffinityStatus(
                     session, dto.sessionId, agg_config.id, agg_config.model_name,
@@ -559,6 +575,7 @@ class MultiStepMixin:
             session, dto, completed,
             last_plan=last_plan, last_sql=last_sql, last_data=last_data,
             total_cost=total_cost, _t0=_t0,
+            inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
         )
         return ChatResponse(
             answer=answer,
@@ -581,6 +598,7 @@ class MultiStepMixin:
         last_data: list[dict],
         total_cost: Decimal,
         _t0: float,
+        inheritance_snapshot: dict | None = None,
     ) -> str:
         """无汇总步骤时的降级收尾：落库 + 保存查询状态，返回给用户的文案。
 
@@ -591,6 +609,8 @@ class MultiStepMixin:
         悬空的 user 轮），`last_question`/`last_sql` 停在上一轮 → 下一轮追问会
         锚到更早的问题（静默答错）或退化成无锚点的单轮查询。文案也如实区分
         「数据步已成功、只差汇总」与「整体失败」，前者不该说成「执行异常」。
+
+        inheritance_snapshot（B5 HIGH-1）：多步 B/C 降级路径的快照，支持下一轮追问。
         """
         succeeded = [r for r in completed if r.sql is not None]
         if succeeded:
@@ -613,6 +633,7 @@ class MultiStepMixin:
             session, dto.sessionId,
             question=dto.question, plan=last_plan, sql=last_sql,
             resultColumns=self._columns(last_data),
+            inheritance_snapshot=inheritance_snapshot,
         )
         return answer
 

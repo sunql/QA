@@ -30,7 +30,7 @@ from app.domain.multi_step_plan import (
     StepResult,
 )
 from app.domain.query_plan import QueryPlan
-from app.domain.schemas import AgentSuggestion, ChatRequest
+from app.domain.schemas import AgentSuggestion, ChatRequest, SemanticState
 from app.services.intent_service import IntentResult
 # 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER，
 # 与 chat_service.processMessage 同口径——在 _streamQuery 入口一次性读一次，
@@ -208,6 +208,7 @@ class StreamMixin:
             async for event in self._streamQuery(
                 dto, session, result.intent, state, result.chartType,
                 suggestion=result.suggested_agent, _t0=_stream_t0,
+                semanticState=result.semanticState,  # B5 HIGH-1
             ):
                 yield event
         except LlmClientError as exc:
@@ -331,6 +332,7 @@ class StreamMixin:
         self, dto: ChatRequest, session: AsyncSession, intent: IntentType, state: SessionQueryState | None,
         intentChartType: ChartType | None = None,
         suggestion: AgentSuggestion | None = None,
+        semanticState: SemanticState | None = None,
         *,
         _t0: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
@@ -339,6 +341,7 @@ class StreamMixin:
         suggestion（Phase 7 G4）：中置信语义路由命中的建议卡片，随 done 帧透传；
         前端按字段存在性渲染 SuggestedAgentCard。
         _t0：可选的流式计时起点（由调用方传入；不传则从本函数开始计时）。
+        semanticState（B5 HIGH-1）：A7 通道 1 抽取的语义快照，用于多步追问链路。
         """
         _stream_t0 = _t0 if _t0 is not None else time.monotonic()
         pc = await self._buildPipelineContext(
@@ -359,6 +362,18 @@ class StreamMixin:
                 EVENT_CLASS_RECALL,
                 pc.recall.model_dump(mode="json", by_alias=True),
             )
+        # B5 HIGH-1：提前计算继承快照（L1/L1.5/B/C 所有多步分支出口共需）。
+        prior_snapshot: dict | None = None
+        if state is not None:
+            prior_snapshot = (
+                getattr(state, "inheritance_snapshot", None) or
+                ({"inherited_time": None} if state.last_plan else None)
+            )
+        inherited = self._resolveInheritedState(
+            semanticState=semanticState,
+            priorSnapshot=prior_snapshot,
+            question=dto.question,
+        )
         # L1 多步：单步优先策略——明确要求分步 → 直接多步；其余先单步，
         # SQL 执行失败时回退多步拆解（与 processMessage 同口径）。
         if intent in (IntentType.NEW_QUERY, IntentType.QUERY):
@@ -373,6 +388,8 @@ class StreamMixin:
                         initial_tokens=step_tokens, initial_cost=step_cost,
                         suggestion=suggestion, _t0=_stream_t0,
                         global_filters=global_filters,
+                        semanticState=inherited,
+                        priorSnapshot=prior_snapshot,
                     ):
                         yield event
                     return
@@ -389,6 +406,8 @@ class StreamMixin:
                         initial_tokens=step_tokens, initial_cost=step_cost,
                         suggestion=suggestion, _t0=_stream_t0,
                         global_filters=global_filters,
+                        semanticState=inherited,
+                        priorSnapshot=prior_snapshot,
                     ):
                         yield event
                     return
@@ -403,6 +422,8 @@ class StreamMixin:
                     initial_tokens=msTokens, initial_cost=msCost,
                     suggestion=suggestion, _t0=_stream_t0,
                     global_filters=gf2,
+                    semanticState=inherited,
+                    priorSnapshot=prior_snapshot,
                 ):
                     yield event
                 return
@@ -420,6 +441,8 @@ class StreamMixin:
                     initial_tokens=msTokens, initial_cost=msCost,
                     suggestion=suggestion, _t0=_stream_t0,
                     global_filters=gf2,
+                    semanticState=inherited,
+                    priorSnapshot=prior_snapshot,
                 ):
                     yield event
                 return
@@ -719,6 +742,8 @@ class StreamMixin:
         suggestion: AgentSuggestion | None = None,
         _t0: float | None = None,
         global_filters: GlobalFilters | None = None,
+        semanticState: InheritedState | None = None,
+        priorSnapshot: dict | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """多步查询的流式事件序列：step_plan/step_result × N → token(汇总) → done。
 
@@ -731,6 +756,9 @@ class StreamMixin:
 
         suggestion（Phase 7 G4）：中置信语义路由建议卡片随 done 帧透传，
         与 _streamQuery 的 done 帧口径一致（G4 审查 MEDIUM 修复）。
+
+        semanticState / priorSnapshot（B5 HIGH-1 修复）：多步 B/C 路径的追问改写
+        重跑链路，与非流式 _executeMultiStep 同口径。
 
         _t0：可选的流式计时起点（由调用方传入；不传则从本函数开始计时）。
 
@@ -865,6 +893,7 @@ class StreamMixin:
                     session, dto.sessionId,
                     question=dto.question, plan=last_plan, sql=last_sql,
                     resultColumns=self._columns(last_data),
+                    inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
                 )
                 affinity = await self._buildAffinityStatus(
                     session, dto.sessionId, agg_config.id, agg_config.model_name,
@@ -916,6 +945,7 @@ class StreamMixin:
             session, dto, completed,
             last_plan=last_plan, last_sql=last_sql, last_data=last_data,
             total_cost=total_cost, _t0=_ms_t0,
+            inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
         )
         yield StreamEvent(EVENT_TOKEN, {"content": degrade_answer})
         yield StreamEvent(

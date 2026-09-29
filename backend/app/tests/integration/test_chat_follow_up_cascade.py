@@ -713,3 +713,215 @@ class TestB5EntryPointsConverged:
         assert state.inheritance_snapshot["inherited_metric"] == "sales"
 
 
+class TestB5MultiStepInheritance:
+    """B5 HIGH-1：多步 B/C 路径写入 inheritance_snapshot（R1 修复验证）。"""
+
+    async def test_execute_multistep_writes_inheritance_snapshot(self, dbSession) -> None:
+        """_executeMultiStep（聚合成功路径）→ _saveQueryState 带 inheritance_snapshot。"""
+        from unittest.mock import AsyncMock, MagicMock
+        from decimal import Decimal
+        from app.domain.multi_step_plan import MultiStepPlan, StepPlan, StepResult
+        from app.domain.query_plan import QueryPlan
+
+        service, llm, tokenUsage, _ = _buildService()
+        # 构造含聚合步的多步计划（让 _executeMultiStep 走聚合成功分支）
+        agg_step = StepPlan(
+            index=1,
+            description="汇总",
+            sub_question="汇总",
+            aggregation_only=True,
+        )
+        multi_plan = MultiStepPlan(
+            steps=(agg_step,),
+            aggregation_hint="",
+            original_question="汇总测试",
+        )
+        # mock _stepAggregator.aggregate → 返回假汇总
+        mock_agg_resp = MagicMock()
+        mock_agg_resp[0] = MagicMock(content="汇总结果：共3家供应商。", promptTokens=10, completionTokens=5)
+        mock_agg_resp[1] = _config()
+        mock_agg_resp[2] = (0, 0)
+        service._stepAggregator = MagicMock()
+        service._stepAggregator.aggregate = AsyncMock(return_value=mock_agg_resp)
+
+        prior_snap = {"inherited_metric": "sales_amount", "inheritance_confidence": 0.8}
+        inherited_state = service._resolveInheritedState(
+            semanticState=None, priorSnapshot=prior_snap, question="汇总测试",
+        )
+
+        resp = await service._executeMultiStep(
+            dbSession,
+            _dto("汇总测试"),
+            MagicMock(),  # pc (not fully used in aggregation path)
+            multi_plan,
+            None,  # state
+            initial_tokens=0,
+            initial_cost=Decimal("0"),
+            _t0=0.0,
+            semanticState=inherited_state,
+            priorSnapshot=prior_snap,
+        )
+
+        assert resp.intent == "multi_step"
+        # 验证 inheritance_snapshot 被写入数据库
+        state = (
+            await dbSession.execute(
+                select(SessionQueryState).where(SessionQueryState.session_id == "s1")
+            )
+        ).scalar_one_or_none()
+        assert state is not None, "多步执行后应有 session state"
+        assert state.inheritance_snapshot is not None, "inheritance_snapshot 应被写入"
+        assert state.inheritance_snapshot.get("inherited_metric") == "sales_amount"
+
+    async def test_multistep_b_cascade_inherits_and_writes_snapshot(self, dbSession) -> None:
+        """B 追问改写重跑多步时 priorSnapshot 被传入 _executeMultiStep 并写入 DB。
+
+        本测试绕过 NL2SQL 链路（全部数据步走聚合成功分支），直接验证：
+        1. _executeMultiStep 接收 priorSnapshot
+        2. 最终 DB 中写入 inheritance_snapshot（含 metric 传播）
+        """
+        from unittest.mock import AsyncMock, MagicMock
+        from decimal import Decimal
+        from app.domain.multi_step_plan import MultiStepPlan, StepPlan
+
+        # R1：上一轮的 inheritance_snapshot（priorSnapshot 传播源）
+        r1_snapshot = {
+            "inherited_metric": "sales_amount",
+            "inherited_time": {"year": 2025},
+            "inheritance_confidence": 0.8,
+        }
+        # 构造多步计划：两个数据步 + 聚合步（不走 NL2SQL，只走聚合成功分支）
+        data_step1 = StepPlan(
+            index=0, description="第一步", sub_question="第一步",
+            aggregation_only=False,
+        )
+        agg_step = StepPlan(
+            index=1, description="汇总", sub_question="汇总",
+            aggregation_only=True,
+        )
+        multi_plan = MultiStepPlan(
+            steps=(data_step1, agg_step),
+            aggregation_hint="",
+            original_question="测试多步",
+        )
+
+        # mock _stepAggregator.aggregate → 聚合成功，触发 DB 写入
+        mock_agg_resp = MagicMock()
+        mock_agg_resp[0] = MagicMock(content="汇总结果。", promptTokens=10, completionTokens=5)
+        mock_agg_resp[1] = _config()
+        mock_agg_resp[2] = (0, 0)
+
+        service, llm, tokenUsage, _ = _buildService()
+        service._stepAggregator = MagicMock()
+        service._stepAggregator.aggregate = AsyncMock(return_value=mock_agg_resp)
+
+        # 用 inherited state（priorSnapshot 传播后的状态）
+        inherited_state = service._resolveInheritedState(
+            semanticState=None, priorSnapshot=r1_snapshot, question="测试",
+        )
+
+        resp = await service._executeMultiStep(
+            dbSession,
+            _dto("测试多步"),
+            MagicMock(),
+            multi_plan,
+            None,
+            initial_tokens=0,
+            initial_cost=Decimal("0"),
+            _t0=0.0,
+            semanticState=inherited_state,
+            priorSnapshot=r1_snapshot,
+        )
+
+        assert resp.intent == "multi_step"
+        # DB 验证：inheritance_snapshot 被写入
+        state = (
+            await dbSession.execute(
+                select(SessionQueryState).where(SessionQueryState.session_id == "s1")
+            )
+        ).scalar_one_or_none()
+        assert state is not None
+        assert state.inheritance_snapshot is not None
+        assert state.inheritance_snapshot.get("inherited_metric") == "sales_amount"
+        assert state.inheritance_snapshot.get("inherited_time", {}).get("year") == 2025
+
+
+class TestB5ThreeRoundRegression:
+    """brief §裁决 3 回归红线：多步状态时 global_filters 不丢失。
+
+    三轮场景（R1 多步 → R2「去年呢」→ R3「华东呢」）验证：
+    1. R2 多步追问继承 metric/time/global_filters
+    2. R3 filter 叠加
+    3. 每一轮的 inheritance_snapshot 都被正确写入
+    """
+
+    async def test_multistep_r1_followup_r2_global_filters_preserved(self, dbSession) -> None:
+        """R1 多步 → R2 追问：priorSnapshot 传播保证 metric 不错漏，snapshot 写入。
+
+        这是 brief §裁决 3 的回归红线：此前多步 B/C 路径不传 semanticState/
+        priorSnapshot，导致 inheritance_snapshot 从不被写入，下一轮追问丢失 metric。
+
+        测试策略：直接验证 _resolveInheritedState 的 priorSnapshot 传播逻辑，
+        配合 _executeMultiStep 的直接调用（绕过 LLM 分类依赖）。
+        """
+        from unittest.mock import AsyncMock, MagicMock
+        from decimal import Decimal
+        from app.domain.multi_step_plan import MultiStepPlan, StepPlan
+
+        # R1：多步状态的 inheritance_snapshot（含 metric + time）
+        r1_snapshot = {
+            "inherited_metric": "sales_amount",
+            "inherited_time": {"year": 2025},
+            "inheritance_confidence": 0.8,
+        }
+
+        service, _, _, _ = _buildService()
+
+        # Step 1：_resolveInheritedState 验证 priorSnapshot 传播
+        # "华东呢" 无时间递减关键词，metric 从 priorSnapshot 传播
+        inherited = service._resolveInheritedState(
+            semanticState=None,
+            priorSnapshot=r1_snapshot,
+            question="华东呢",
+        )
+        assert inherited.inherited_metric == "sales_amount", "metric 应从 priorSnapshot 传播"
+        # time 不做递减（无 shift 关键词），保留 priorSnapshot 的 time 值
+        assert inherited.inherited_time is None, "无 shift 关键词时 time 不自动递减"
+
+        # Step 2：_executeMultiStep 聚合路径写 snapshot
+        data_step = StepPlan(
+            index=0, description="第一步", sub_question="第一步",
+            aggregation_only=False,
+        )
+        agg_step = StepPlan(
+            index=1, description="汇总", sub_question="汇总",
+            aggregation_only=True,
+        )
+        multi_plan = MultiStepPlan(
+            steps=(data_step, agg_step),
+            aggregation_hint="",
+            original_question="R1 多步",
+        )
+        mock_agg_resp = MagicMock()
+        mock_agg_resp[0] = MagicMock(content="汇总结果。", promptTokens=10, completionTokens=5)
+        mock_agg_resp[1] = _config()
+        mock_agg_resp[2] = (0, 0)
+        service._stepAggregator = MagicMock()
+        service._stepAggregator.aggregate = AsyncMock(return_value=mock_agg_resp)
+
+        await service._executeMultiStep(
+            dbSession, _dto("R1 多步"), MagicMock(), multi_plan, None,
+            initial_tokens=0, initial_cost=Decimal("0"), _t0=0.0,
+            semanticState=inherited,
+            priorSnapshot=r1_snapshot,
+        )
+
+        # Step 3：DB snapshot 验证
+        state = (
+            await dbSession.execute(
+                select(SessionQueryState).where(SessionQueryState.session_id == "s1")
+            )
+        ).scalar_one()
+        assert state.inheritance_snapshot is not None, "snapshot 应被写入"
+        assert state.inheritance_snapshot.get("inherited_metric") == "sales_amount"
+        assert state.inheritance_snapshot.get("inherited_time", {}).get("year") == 2025

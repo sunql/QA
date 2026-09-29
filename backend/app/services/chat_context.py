@@ -684,6 +684,38 @@ class ContextMixin:
         header = "继承字段（上轮查询已确定的维度，本轮默认沿用，可按需调整）：\n"
         return header + "\n".join(parts)
 
+
+def _buildInheritedStateFromSnapshot(snap: dict) -> str:
+    """将 inheritance_snapshot dict 渲染为 prompt 小节（追加到 _buildStatePrompt 末尾）。
+
+    与 _buildInheritedStatePrompt 同舱：整段经注入层 _sanitizeContext 转义。
+    snap 格式：{inherited_metric, inherited_time{year,month,quarter}, inherited_filters, ...}
+    """
+    parts: list[str] = []
+    metric = snap.get("inherited_metric")
+    if metric:
+        parts.append(f"  - 继承指标：{metric}")
+    time_dict = snap.get("inherited_time")
+    if time_dict and isinstance(time_dict, dict):
+        yr = time_dict.get("year")
+        q = time_dict.get("quarter")
+        mo = time_dict.get("month")
+        label = f"{yr}年" if yr else ""
+        if q:
+            label += f"第{q}季度"
+        elif mo:
+            label += f"{mo}月"
+        if label:
+            parts.append(f"  - 继承时间：{label.strip()}")
+    filters = snap.get("inherited_filters")
+    if filters and isinstance(filters, dict):
+        filter_parts = [f"{k}={v}" for k, v in filters.items()]
+        if filter_parts:
+            parts.append(f"  - 继承过滤：{', '.join(filter_parts)}")
+    if not parts:
+        return ""
+    return "继承字段（上轮查询已确定的维度，本轮默认沿用，可按需调整）：\n" + "\n".join(parts)
+
     @staticmethod
     def _buildStatePrompt(
         state: SessionQueryState, intent: IntentType, field_limit: int,
@@ -721,4 +753,10 @@ class ContextMixin:
             lines.append("当前问题是对上一轮查询的修改（排序/筛选/行数等），请基于上一轮查询调整新的查询。")
         else:
             lines.append("当前问题是针对上一轮查询结果的追问，请结合上一轮查询与结果列作答。")
+        # B5 §裁决 5：追加「继承字段」小节（来自上一轮 inheritance_snapshot）。
+        # 该段经注入层 _sanitizeContext 转义，此处原样渲染即可。
+        if state.inheritance_snapshot:
+            inherited_section = _buildInheritedStateFromSnapshot(state.inheritance_snapshot)
+            if inherited_section:
+                lines.append(inherited_section)
         return "\n".join(lines)

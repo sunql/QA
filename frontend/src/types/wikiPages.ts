@@ -188,6 +188,10 @@ export interface KnowledgeClaim {
     claimText: string;
     claimType: string | null;
     embeddingRef: string | null;
+    /** v3.1 M5（0102）：权威等级（L0-L5 数据精度）；NULL = 待治理。 */
+    authorityLevel: string | null;
+    /** v3.1 M5（0102）：权威归属部门（11 部门枚举之一或 NULL，软约束）。 */
+    authorityDepartment: string | null;
     createdTime: string | null;
     evidences: Evidence[];
     /** 读路径现算的置信度等级；后端缺失时为 null（显示 "-"）。 */

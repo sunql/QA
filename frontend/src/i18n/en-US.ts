@@ -688,6 +688,13 @@ export const enUS = {
       failed: "PDF export failed: {message}",
       emptySession: "No messages to export",
     },
+    hypothesis: {
+      title: "Possible causes",
+      verify: "Verify",
+      driverTooltip: "Field from the data model",
+      sqlDetail: "View verification SQL",
+      disclaimer: "These are possible explanations based on current data and the data model (not causal conclusions). Send the verification SQL to investigate further.",
+    },
   },
 
   termDictionary: {

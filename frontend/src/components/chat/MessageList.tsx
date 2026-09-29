@@ -12,6 +12,8 @@ interface MessageListProps {
   /** 单条问答导出回调：参数是目标消息在后端 SessionMessage 表的主键 id。
    *  仅当 message.dbMessageId 已回填时 MessageItem 才会渲染入口按钮。 */
   onExportSingleTurn?: (dbMessageId: number) => void;
+  /** v3.1 B6（M7）：「验证」假设回调——把 verificationSql 作为用户问题走既有发送链路。 */
+  onVerifyHypothesis?: (verificationSql: string) => void;
 }
 
 export default function MessageList({
@@ -19,6 +21,7 @@ export default function MessageList({
   loading,
   exporting = false,
   onExportSingleTurn,
+  onVerifyHypothesis,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
@@ -40,6 +43,7 @@ export default function MessageList({
           message={message}
           exporting={exporting}
           onExportSingleTurn={onExportSingleTurn}
+          onVerifyHypothesis={onVerifyHypothesis}
         />
       ))}
       {loading ? (

@@ -161,6 +161,9 @@ export interface ChatResponse {
   // intent=agent_run，低置信为 null）。由 MessageItem 按字段存在性路由到
   // SuggestedAgentCard 渲染。
   suggestedAgent?: AgentSuggestion | null;
+  // v3.1 B6（M7）：「可能原因」假设（仅触发词表 + 本轮有数据时填充；
+  // 流式路径经 GET /chat/sessions/{id}/hypotheses 回填）
+  hypotheses?: HypothesisView[] | null;
 }
 
 // 会话亲和性状态：前 N 轮锁定模型 + 剩余轮数（解锁时为 null）
@@ -187,6 +190,17 @@ export interface ClassRecallInfo {
   hitCount: number;
   classCount: number;
   truncated: boolean;
+}
+
+// v3.1 B6（M7 Hypothesis Hook）：「可能原因」假设（后端 HypothesisRead 对齐）
+// verificationSql 只读展示：「验证」按钮把它作为用户问题重新走既有 QUERY 链路
+export interface HypothesisView {
+  id: number;
+  statement: string;
+  driver: string | null;
+  verificationSql: string;
+  turnQuestion: string | null;
+  createdTime: string | null;
 }
 
 // 前端消息（后端响应 + UI 状态）
@@ -241,4 +255,6 @@ export interface ChatMessage {
   citations?: import("./document").DocQaCitation[] | null;
   // 类召回诊断（class_recall 事件回填；truncated/fallback 时 MessageItem 渲染提示）
   classRecall?: ClassRecallInfo | null;
+  // v3.1 B6（M7）：「可能原因」假设（流式结束后由 chatStore 拉 GET 端点回填）
+  hypotheses?: HypothesisView[] | null;
 }

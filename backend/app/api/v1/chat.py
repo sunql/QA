@@ -9,23 +9,67 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.exceptions import DomainError
-from app.domain.schemas import ChatRequest, ChatResponse, QuerySuggestRequest, QuerySuggestResponse
+from app.domain.schemas import (
+    ChatRequest,
+    ChatResponse,
+    HypothesisRead,
+    QuerySuggestRequest,
+    QuerySuggestResponse,
+)
 from app.infrastructure.rate_limit import limiter, rateLimitValue
 from app.services.chat_service import ChatService
 from app.services.embedding_service import EmbeddingService
+from app.services.evidence_query_service import getSessionOwnerUserIds
+from app.services.hypothesis_service import listSessionHypotheses
+from app.services.messages_zh import MSG_HYPOTHESIS_SESSION_NOT_OWNED
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(getCurrentUser)])
 _service = ChatService()
 _embeddingService = EmbeddingService()
+
+
+async def _assertChatSessionOwnership(
+    session: AsyncSession, sessionId: str, user: CurrentUser,
+) -> None:
+    """chat 会话归属定点校验（v3.1 B6，对齐 /evidences R2 H2 守卫口径）。
+
+    - admin 放行；归属事实源 = session_message.user_id；
+    - 有归属标记且不属于当前用户 → 403（detail 不回显归属者，防侧信道）；
+    - 无标记（存量行/新会话）→ fail-open（wiki_qa / evidences 同语义）。
+    """
+    if "admin" in (user.roles or []):
+        return
+    owners = await getSessionOwnerUserIds(session, sessionId)
+    if owners and user.userId not in owners:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=MSG_HYPOTHESIS_SESSION_NOT_OWNED,
+        )
+
+
+@router.get("/sessions/{sessionId}/hypotheses", response_model=list[HypothesisRead])
+async def listHypotheses(
+    sessionId: str = Path(..., min_length=1, max_length=64),
+    limit: int = Query(10, ge=1, le=50),
+    _user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> list[HypothesisRead]:
+    """某会话最新分析假设（M7 Hypothesis Hook；created_time 倒序 limit N）。
+
+    流式路径假设不进 SSE 帧，前端在答案流结束后调本端点取「可能原因」。
+    """
+    await _assertChatSessionOwnership(session, sessionId, _user)
+    rows = await listSessionHypotheses(session, sessionId, limit)
+    return [HypothesisRead.model_validate(r) for r in rows]
 
 
 @router.post("", response_model=ChatResponse)

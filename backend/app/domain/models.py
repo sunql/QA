@@ -897,6 +897,34 @@ class TermDictionary(Base, TimestampMixin):
         return f"<TermDictionary id={self.id} term={self.term}>"
 
 
+class AnalysisHypothesis(Base, TimestampMixin):
+    """分析假设表（v3.1 B6 / 蓝图 §5.6「可能原因」区块）。
+
+    数据查询完成后可选触发的假设后处理产物：每行一条「可能解释」假设，
+    含 schema driver（列名/指标名）与只读验证 SQL。
+
+    verification_sql 只存储不执行——执行走用户显式发起的既有 QUERY 链路
+    （SQL Guard 自然生效），存储前仅做轻量只读静态校验。
+    """
+
+    __tablename__ = "analysis_hypothesis"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    statement: Mapped[str] = mapped_column(Text, nullable=False)
+    driver: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    verification_sql: Mapped[str] = mapped_column(Text, nullable=False)
+    # 触发该假设的用户问题（追溯）
+    turn_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_analysis_hypothesis_session_id", "session_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalysisHypothesis id={self.id} session={self.session_id}>"
+
+
 # =============================================================================
 # Phase 1.1: Data Quality Rule
 # =============================================================================

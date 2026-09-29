@@ -713,6 +713,10 @@ class StreamMixin:
             data=data,
             summary=self._summarizeStepData(data),
         ))
+        # v3.1 B6（M7）：流式假设后处理——只落库，不进 SSE 帧（前端靠 GET 端点取）
+        await self._maybeGenerateHypotheses(
+            session, dto.sessionId, dto.question, pc, data=data,
+        )
         yield StreamEvent(
             EVENT_DONE,
             {
@@ -905,6 +909,10 @@ class StreamMixin:
                     else None
                 )
                 yield StreamEvent(EVENT_TOKEN, {"content": agg_content})
+                # v3.1 B6（M7）：流式多步假设后处理——只落库，不进 SSE 帧
+                await self._maybeGenerateHypotheses(
+                    session, dto.sessionId, dto.question, pc, data=last_data,
+                )
                 yield StreamEvent(
                     EVENT_DONE,
                     {
@@ -948,6 +956,10 @@ class StreamMixin:
             inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
         )
         yield StreamEvent(EVENT_TOKEN, {"content": degrade_answer})
+        # v3.1 B6（M7）：降级收尾同样接假设后处理（last_data 为空时静默跳过）
+        await self._maybeGenerateHypotheses(
+            session, dto.sessionId, dto.question, pc, data=last_data,
+        )
         yield StreamEvent(
             EVENT_DONE,
             {

@@ -792,8 +792,18 @@ class EmbeddingPropertySyncFailure(BaseModel):
     error: str
 
 
+class EmbeddingMetricSyncFailure(BaseModel):
+    metricId: int
+    metricName: str
+    error: str
+
+
 class EmbeddingSyncMissingResult(BaseModel):
-    """向量对账摘要：以 PG 为真源补齐 Milvus 缺失的类与属性向量。"""
+    """向量对账摘要：以 PG 为真源补齐 Milvus 缺失的类、属性、指标向量。
+
+    M0-P0.4 升 3-collection 后 metric 也走同一对账入口（此前只补类与属性，
+    metric 缺口只能靠 scripts/backfill_milvus_embeddings.py --cleanup 手工收敛）。
+    """
 
     totalClasses: int
     missingCount: int
@@ -805,6 +815,11 @@ class EmbeddingSyncMissingResult(BaseModel):
     syncedPropertyCount: int
     failedPropertyCount: int
     propertyFailures: list[EmbeddingPropertySyncFailure]
+    totalMetrics: int
+    missingMetricCount: int
+    syncedMetricCount: int
+    failedMetricCount: int
+    metricFailures: list[EmbeddingMetricSyncFailure]
 
 
 class GraphSyncFailure(BaseModel):

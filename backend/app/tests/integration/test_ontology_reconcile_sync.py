@@ -1,13 +1,15 @@
 """本体对账同步集成测试（真实 PG + 完整 API 链路）。
 
 覆盖两个对账入口：
-1. POST /ontology/embeddings/sync-missing —— 类 + 属性向量对账（此前只补类，
-   属性向量缺口只能靠 scripts/backfill_milvus_embeddings.py --cleanup 手工收敛）
+1. POST /ontology/embeddings/sync-missing —— 类 + 属性 + 指标向量对账
+   （M0-P0.4 升级为 3-collection 后，syncMissing 需覆盖 metric；
+   M0-P0.4 之前只补类，属性/指标向量缺口只能靠 scripts/backfill_milvus_embeddings.py --cleanup 手工收敛）
 2. POST /ontology/graph/sync-missing —— Neo4j 图谱对账（直写 PG 的脚本/批量
    导入失败重试会留下缺图节点/边，此入口按 PG 真源补齐 Class/Property/HAS_PROPERTY/
    REFERENCES/JOIN/语义关系边）
 
-外部依赖 mock 边界：Milvus（模块级 listAllEmbeddings/insertEmbeddings）、
+外部依赖 mock 边界：Milvus（模块级 listEmbeddingsAcross3Collections / insertEmbeddingsDual /
+deleteByOntologyIdDual，M0-P0.4 升级 3-collection 后已替换原 listAllEmbeddings/insertEmbeddings）、
 Neo4j（模块级读写函数）、embedding（注入假服务）；数据层全走真实 PostgreSQL
 （Harness/rules/测试规范.md）。
 """
@@ -49,17 +51,34 @@ class _FakeEmbedding:
 
 
 class _FakeMilvus:
-    """假 Milvus：可预设已存在向量行，记录整批插入。"""
+    """假 Milvus：可预设已存在向量行，记录整批插入 + 单条删除/插入。
+
+    M0-P0.4 升级 3-collection 后，生产代码统一走 type-routed API：
+    listEmbeddingsAcross3Collections / insertEmbeddingsDual / deleteByOntologyIdDual。
+    旧 listAllEmbeddings / insertEmbeddings 已废弃，syncMissing 链路不再调用。
+    """
 
     def __init__(self, existing: list[dict[str, Any]] | None = None) -> None:
         self.existing = existing or []
         self.inserted: list[dict[str, Any]] = []
+        self.deleted: list[tuple[int, str]] = []  # (ontology_id, type)
 
-    def listAllEmbeddings(self) -> list[dict[str, Any]]:
+    def listEmbeddingsAcross3Collections(self) -> list[dict[str, Any]]:
+        """返回 3 collection 全量合并行（含 type 字段，type-routed 路由依据）。"""
         return list(self.existing)
 
-    def insertEmbeddings(self, records: list[dict[str, Any]]) -> None:
+    def insertEmbeddingsDual(self, records: list[dict[str, Any]]) -> None:
+        """记录整批 type-routed 插入（生产路由到对应 collection）。"""
         self.inserted.extend(records)
+
+    def deleteByOntologyIdDual(self, ontologyId: int, type: str) -> None:
+        """记录删除（生产在 type-routed collection 上按 ontology_id 删除）。"""
+        self.deleted.append((ontologyId, type))
+        # 同步维护 existing（与生产 collection 状态一致）
+        self.existing = [
+            r for r in self.existing
+            if not (r.get("ontology_id") == ontologyId and r.get("type") == type)
+        ]
 
 
 class _FakeNeo4j:
@@ -111,6 +130,15 @@ class _FakeNeo4j:
     def linkClassRelation(self, *args: Any, **kw: Any) -> None:
         self.calls.append(("linkClassRelation", args))
 
+    def upsertMetricNode(self, *args: Any, **kw: Any) -> None:
+        self.calls.append(("upsertMetricNode", args))
+
+    def linkMetricDerivedFrom(self, *args: Any, **kw: Any) -> None:
+        self.calls.append(("linkMetricDerivedFrom", args))
+
+    def reconcileMetricDerivedFrom(self, *args: Any, **kw: Any) -> None:
+        self.calls.append(("reconcileMetricDerivedFrom", args))
+
 
 def _installFakes(
     monkeypatch: pytest.MonkeyPatch,
@@ -123,6 +151,17 @@ def _installFakes(
     if embedding is not None:
         monkeypatch.setattr(
             ontology_service_module, "EmbeddingService", lambda: embedding
+        )
+        # 清空已有 OntologyService 实例的 _embedding 缓存：_ensureEmbedding 是
+        # 一次性缓存（首次调用 new 一个真实实例缓存在 self._embedding），即使后
+        # 续 monkeypatch 替换 EmbeddingService 符号，旧缓存仍生效。CRUD 路径
+        # （createProperty / createMetric / updateMetric）触发 best-effort 后台
+        # 同步可能在 _installFakes 之前就完成缓存，所以必须强制清零。
+        monkeypatch.setattr(
+            ontology_service_module.OntologyService,
+            "_ensureEmbedding",
+            lambda self: embedding,
+            raising=True,
         )
 
 
@@ -255,6 +294,215 @@ class TestEmbeddingSyncCoversProperties:
         assert result["failedPropertyCount"] == 1
         assert result["propertyFailures"][0]["propertyId"] == ids["prop"]
         assert [r["type"] for r in milvus.inserted] == ["class", "class"]
+
+
+class TestCreateCrudSyncsEmbedding:
+    """CRUD 路径自动同步：M0-P0.4 后 createProperty/createMetric/updateMetric 应
+    即时落 Milvus（无需等 batch sync）。createClass/updateClass 长期 OK；createProperty
+    漏调 helper；metric 全缺。"""
+
+    async def test_create_property_syncs_embedding_immediately(
+        self, dbSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """createProperty 后属性向量立即出现在 Milvus（type=property，name/alias/description 全带）。"""
+        from app.domain.schemas import OntologyClassCreate, OntologyPropertyCreate
+
+        service = OntologyService()
+        milvus = _FakeMilvus()
+        embedding = _FakeEmbedding()
+        _installFakes(monkeypatch, milvus, _FakeNeo4j(), embedding)
+
+        cls = await service.createClass(
+            dbSession,
+            OntologyClassCreate(class_name="GOODS", source_table="ODS.GOODS"),
+            actor=_ADMIN.userId,
+            actor_departments=None,
+            sync_embedding=False,  # 隔离类向量，专注属性同步
+        )
+        # 等异步 background task 完成（_PENDING_SYNC_TASKS 由 helper 持有）
+        await _waitForPendingSyncTasks()
+
+        milvus_before_prop = list(milvus.inserted)
+        prop = await service.createProperty(
+            dbSession,
+            OntologyPropertyCreate(
+                class_id=cls.id,
+                property_name="QTY",
+                property_alias="数量",
+                data_type="DECIMAL",
+                source_column="QTY",
+                business_aliases=["qty"],
+                description="收货数量",
+            ),
+            actor=_ADMIN.userId,
+            actor_departments=None,
+        )
+        await _waitForPendingSyncTasks()
+
+        propRows = [r for r in milvus.inserted if r.get("type") == "property" and r.get("ontology_id") == prop.id]
+        assert len(propRows) == 1, f"createProperty 未触发属性向量同步，inserted={milvus.inserted[len(milvus_before_prop):]}"
+        assert propRows[0]["name"] == "QTY"
+        assert propRows[0]["alias"] == "数量"
+        assert propRows[0]["description"] == "收货数量"
+        assert any("QTY" in t and "数量" in t for t in embedding.texts)
+
+    async def test_create_metric_syncs_embedding_immediately(
+        self, dbSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """createMetric 后指标向量立即出现在 Milvus（type=metric，公式文本进入 embedding）。"""
+        from app.domain.schemas import OntologyMetricCreate
+
+        service = OntologyService()
+        milvus = _FakeMilvus()
+        embedding = _FakeEmbedding()
+        _installFakes(monkeypatch, milvus, _FakeNeo4j(), embedding)
+
+        metric = await service.createMetric(
+            dbSession,
+            OntologyMetricCreate(
+                metric_name="po_total_qty",
+                metric_alias="采购订单总数量",
+                agg_function="SUM",
+                formula="SUM(quantity)",
+            ),
+            actor=_ADMIN.userId,
+            actor_departments=None,
+        )
+        await _waitForPendingSyncTasks()
+
+        metricRows = [r for r in milvus.inserted if r.get("type") == "metric" and r.get("ontology_id") == metric.id]
+        assert len(metricRows) == 1, f"createMetric 未触发指标向量同步，inserted={milvus.inserted}"
+        assert metricRows[0]["name"] == "po_total_qty"
+        assert metricRows[0]["alias"] == "采购订单总数量"
+        # embedding 文本应含公式
+        assert any("po_total_qty" in t and "SUM(quantity)" in t for t in embedding.texts)
+
+    async def test_update_metric_refreshes_embedding(
+        self, dbSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """updateMetric 后指标向量应被先删后插（幂等覆盖），文本带新公式。"""
+        from app.domain.schemas import OntologyMetricCreate, OntologyMetricUpdate
+
+        service = OntologyService()
+        milvus = _FakeMilvus()
+        embedding = _FakeEmbedding()
+        _installFakes(monkeypatch, milvus, _FakeNeo4j(), embedding)
+
+        metric = await service.createMetric(
+            dbSession,
+            OntologyMetricCreate(
+                metric_name="metric_refresh_test",
+                metric_alias="刷新测试",
+                agg_function="SUM",
+                formula="SUM(a)",
+            ),
+            actor=_ADMIN.userId,
+            actor_departments=None,
+        )
+        await _waitForPendingSyncTasks()
+        inserted_before = len(milvus.inserted)
+        deleted_before = list(milvus.deleted)
+
+        await service.updateMetric(
+            dbSession,
+            metric.id,
+            OntologyMetricUpdate(formula="SUM(b)"),
+            actor=_ADMIN.userId,
+            actor_departments=None,
+        )
+        await _waitForPendingSyncTasks()
+
+        # updateMetric 应先 deleteByOntologyIdDual 再 insertEmbeddingsDual
+        assert (metric.id, "metric") in milvus.deleted, (
+            f"updateMetric 未删除旧向量，deleted={milvus.deleted[len(deleted_before):]}"
+        )
+        newMetricRows = [
+            r for r in milvus.inserted[inserted_before:]
+            if r.get("type") == "metric" and r.get("ontology_id") == metric.id
+        ]
+        assert len(newMetricRows) == 1
+        # 新公式应进入 embedding 文本
+        assert any("SUM(b)" in t for t in embedding.texts[len(embedding.texts) // 2:])
+
+
+class TestSyncMissingIncludesMetrics:
+    """syncMissingClassEmbeddings 扩展：覆盖 metric 类型（M0-P0.4 后 metric 也走 3-collection）。"""
+
+    async def test_syncs_missing_metric_vectors(
+        self, dbSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """metric 向量缺失 → 自动补齐，type=metric 行进入 insertEmbeddingsDual。"""
+        from app.domain.schemas import OntologyMetricCreate
+
+        service = OntologyService()
+        # fake 在 createMetric **前**就装好：M0-P0.4 修复后 createMetric 也会自动
+        # 触发 best-effort 向量同步，不装 fake 会撞真 embedding provider。
+        milvus = _FakeMilvus()
+        embedding = _FakeEmbedding()
+        _installFakes(monkeypatch, milvus, _FakeNeo4j(), embedding)
+
+        # 先种 2 个 metric（首次同步走 _syncMetricEmbeddingBestEffort 后台任务）
+        m1 = await service.createMetric(
+            dbSession,
+            OntologyMetricCreate(
+                metric_name="metric_a",
+                metric_alias="指标A",
+                agg_function="SUM",
+                formula="SUM(x)",
+            ),
+            actor=_ADMIN.userId,
+            actor_departments=None,
+        )
+        m2 = await service.createMetric(
+            dbSession,
+            OntologyMetricCreate(
+                metric_name="metric_b",
+                metric_alias="指标B",
+                agg_function="COUNT",
+                formula="COUNT(*)",
+            ),
+            actor=_ADMIN.userId,
+            actor_departments=None,
+        )
+        await _waitForPendingSyncTasks()
+
+        # 重置 fake Milvus 状态：清空已写入向量，模拟 metric 漏同步（覆盖
+        # createMetric 最佳努力可能失败的场景，验 syncMissing 兜底路径）
+        milvus.existing = []
+        milvus.inserted = []
+        milvus.deleted = []
+
+        result = await service.syncMissingClassEmbeddings(dbSession)
+
+        assert result["totalMetrics"] == 2
+        assert result["missingMetricCount"] == 2
+        assert result["syncedMetricCount"] == 2
+        assert result["failedMetricCount"] == 0
+        types = sorted(r["type"] for r in milvus.inserted)
+        assert "metric" in types, f"syncMissing 未补 metric 向量，types={types}"
+
+
+async def _waitForPendingSyncTasks(timeoutSec: float = 5.0) -> None:
+    """等待 ontology_service 模块级 _PENDING_SYNC_TASKS 集合中所有任务完成。
+
+    CRUD 同步路径走 _syncClassEmbeddingBestEffort / _syncPropertyEmbeddingBestEffort /
+    _syncMetricEmbeddingBestEffort 等后台 asyncio.create_task（避免拖慢 CRUD 响应）；
+    测试断言前必须等任务落库，否则 milvus.inserted 为空。
+    """
+    import asyncio
+
+    import app.services.ontology_service as svc
+
+    deadline = asyncio.get_event_loop().time() + timeoutSec
+    while svc._PENDING_SYNC_TASKS:
+        remaining = list(svc._PENDING_SYNC_TASKS)
+        await asyncio.gather(*remaining, return_exceptions=True)
+        if asyncio.get_event_loop().time() > deadline:
+            raise AssertionError(
+                f"sync 后台任务超时未完成，pending={remaining}"
+            )
+        if not svc._PENDING_SYNC_TASKS:
+            break
 
 
 class TestGraphSyncMissing:

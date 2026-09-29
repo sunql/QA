@@ -152,6 +152,24 @@ def _propertyEmbeddingText(prop: OntologyProperty) -> str:
     )
 
 
+def _metricEmbeddingText(metric: OntologyMetric) -> str:
+    """指标向量文本：指标名 + 别名 + 公式（M0-P0.4 升 3-collection 后口径）。
+
+    公式必填（领域建模要求），是检索召回的关键信号：用户在问「占比」
+    「环比」时，metric_name 中文别名命中是表象，formula（如
+    SUM(quantity)/SUM(SUM(quantity)) OVER ()）才是模型识别「这是
+    占比公式」的依据。agg_function 也进入文本，提示聚合方式。
+    """
+    return " ".join(
+        x for x in (
+            metric.metric_name,
+            metric.metric_alias,
+            f"agg={metric.agg_function}",
+            metric.formula,
+        ) if x
+    )
+
+
 # 自动同步后台任务的强引用集合（create_task 弱引用会被 GC，需持握防丢失）
 _PENDING_SYNC_TASKS: set[asyncio.Task] = set()
 
@@ -613,6 +631,11 @@ class OntologyService:
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点/关系创建", entity.id, exc)
 
+        # 属性向量自动同步（best-effort，后台执行）：createProperty 此前漏调，
+        # 导致属性语义召回永远找不到新建属性（必须等 syncMissingClassEmbeddings 兜底）。
+        # 现在与 createClass / updateProperty 同款，后台异步落 Milvus。
+        await self._syncPropertyEmbeddingBestEffort(entity)
+
         logger.info("创建本体属性 id=%d name=%s", entity.id, entity.property_name)
         return entity
 
@@ -823,6 +846,11 @@ class OntologyService:
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点/关系创建", entity.id, exc)
 
+        # 指标向量自动同步（best-effort，后台执行）：与 createClass / createProperty 同款。
+        # 此前漏调导致指标语义召回永远找不到新指标（公式文本是模型识别「占比」等
+        # 派生指标形态的关键信号），只能靠 syncMissingClassEmbeddings 兜底。
+        await self._syncMetricEmbeddingBestEffort(entity)
+
         logger.info("创建本体指标 id=%d name=%s", entity.id, entity.metric_name)
         return entity
 
@@ -893,6 +921,10 @@ class OntologyService:
                         )
             except Exception as exc:  # noqa: BLE001
                 _logNeo4jFailure("更新", id, exc)
+
+        # 指标向量自动重同步（best-effort，后台执行）：formula / agg_function 变化
+        # 不重刷则语义检索永远拿到旧公式形态（与 updateProperty 同款）。
+        await self._syncMetricEmbeddingBestEffort(entity)
 
         logger.info("更新本体指标 id=%d", id)
         return entity
@@ -1436,14 +1468,16 @@ class OntologyService:
     async def syncMissingClassEmbeddings(
         self, session: AsyncSession
     ) -> dict[str, Any]:
-        """向量对账：为 PG 有而 Milvus 无向量 未软删的类与属性补生成向量。
+        """向量对账：为 PG 有而 Milvus 无向量 未软删的类、属性、指标补生成向量。
 
         以 PG 为唯一真源（与 scripts/backfill_milvus_embeddings.py --cleanup 同口径）。
         缺失实体无需先 delete，直接整批插入（单次 flush）——逐条 syncEmbedding
         在当前 Milvus 部署下单条可达 10-25s，批量场景必须整批。单条向量生成
-        失败不中断，错误聚合进 failures/propertyFailures。
+        失败不中断，错误聚合进 failures/propertyFailures/metricFailures。
         返回对账摘要（类：total/missing/synced/failed；属性：totalProperties/
-        missingPropertyCount/syncedPropertyCount/failedPropertyCount）。
+        missingPropertyCount/syncedPropertyCount/failedPropertyCount；
+        指标：totalMetrics/missingMetricCount/syncedMetricCount/failedMetricCount）。
+        M0-P0.4 升 3-collection 后 metric 也走同一对账入口，不再靠 backfill 脚本。
         """
         classes = await self.listClasses(session)
         rows = milvus.listEmbeddingsAcross3Collections()
@@ -1512,13 +1546,51 @@ class OntologyService:
                     "error": str(exc),
                 })
 
+        # 指标对账：M0-P0.4 升 3-collection 后必须走同一对账入口（M0-P0.4 之前
+        # syncMissingClassEmbeddings 只补类，metric 缺口只能靠 backfill 脚本）。
+        # 公式文本是检索召回关键信号（占比 / 环比 / 排名等派生指标形态）。
+        metrics = list(
+            (await session.execute(select(OntologyMetric))).scalars().all()
+        )
+        presentMetricIds = {
+            r["ontology_id"] for r in rows if r.get("type") == "metric"
+        }
+        missingMetrics = [m for m in metrics if m.id not in presentMetricIds]
+
+        metricFailures: list[dict[str, Any]] = []
+        for metric in missingMetrics:
+            try:
+                vec = await self._ensureEmbedding().generateEmbedding(
+                    _metricEmbeddingText(metric)
+                )
+                records.append({
+                    "ontology_id": metric.id,
+                    "type": "metric",
+                    "name": metric.metric_name,
+                    "alias": metric.metric_alias,
+                    "description": metric.agg_function,
+                    "embedding": vec,
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "缺失指标向量生成失败 id=%d name=%s: %s",
+                    metric.id, metric.metric_name, exc,
+                )
+                metricFailures.append({
+                    "metricId": metric.id,
+                    "metricName": metric.metric_name,
+                    "error": str(exc),
+                })
+
         syncedClasses = 0
         syncedProps = 0
+        syncedMetrics = 0
         if records:
             try:
                 milvus.insertEmbeddingsDual(records)
                 syncedClasses = sum(1 for r in records if r["type"] == "class")
                 syncedProps = sum(1 for r in records if r["type"] == "property")
+                syncedMetrics = sum(1 for r in records if r["type"] == "metric")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("缺失向量整批插入失败 %d 条: %s", len(records), exc)
                 failures.extend(
@@ -1539,19 +1611,31 @@ class OntologyService:
                     for r in records
                     if r["type"] == "property"
                 )
+                metricFailures.extend(
+                    {
+                        "metricId": r["ontology_id"],
+                        "metricName": r["name"],
+                        "error": str(exc),
+                    }
+                    for r in records
+                    if r["type"] == "metric"
+                )
                 records = []
 
         logger.info(
             "向量对账完成 total=%d missing=%d synced=%d failed=%d;"
-            " 属性 total=%d missing=%d synced=%d failed=%d",
+            " 属性 total=%d missing=%d synced=%d failed=%d;"
+            " 指标 total=%d missing=%d synced=%d failed=%d",
             len(classes), len(missing), syncedClasses + syncedProps, len(failures),
             len(props), len(missingProps),
             syncedProps, len(propertyFailures),
+            len(metrics), len(missingMetrics),
+            syncedMetrics, len(metricFailures),
         )
         return {
             "totalClasses": len(classes),
             "missingCount": len(missing),
-            "syncedCount": syncedClasses + syncedProps,
+            "syncedCount": syncedClasses + syncedProps + syncedMetrics,
             "failedCount": len(failures),
             "failures": failures,
             "totalProperties": len(props),
@@ -1559,6 +1643,11 @@ class OntologyService:
             "syncedPropertyCount": syncedProps,
             "failedPropertyCount": len(propertyFailures),
             "propertyFailures": propertyFailures,
+            "totalMetrics": len(metrics),
+            "missingMetricCount": len(missingMetrics),
+            "syncedMetricCount": syncedMetrics,
+            "failedMetricCount": len(metricFailures),
+            "metricFailures": metricFailures,
         }
 
     async def syncMissingGraph(self, session: AsyncSession) -> dict[str, Any]:
@@ -1833,6 +1922,35 @@ class OntologyService:
             logger.warning(
                 "Milvus 属性向量自动同步失败 id=%d name=%s: %s",
                 entity.id, entity.property_name, exc,
+            )
+
+    async def _syncMetricEmbeddingBestEffort(self, entity: OntologyMetric) -> None:
+        """指标向量自动同步（best-effort，后台执行）：与类/属性同款，失败仅告警。
+
+        embedding 文本口径 = metric_name + metric_alias + agg=<agg_function> + formula
+        （公式是检索召回关键信号，「占比」「环比」等术语走 alias，公式让模型识别形态）。
+        """
+        task = asyncio.create_task(self._syncMetricEmbeddingNow(entity))
+        _PENDING_SYNC_TASKS.add(task)
+        task.add_done_callback(_PENDING_SYNC_TASKS.discard)
+
+    async def _syncMetricEmbeddingNow(self, entity: OntologyMetric) -> None:
+        try:
+            vec = await self._ensureEmbedding().generateEmbedding(
+                _metricEmbeddingText(entity)
+            )
+            self.syncEmbedding(
+                ontologyId=entity.id,
+                type="metric",
+                name=entity.metric_name,
+                alias=entity.metric_alias,
+                description=entity.agg_function,
+                embedding=vec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Milvus 指标向量自动同步失败 id=%d name=%s: %s",
+                entity.id, entity.metric_name, exc,
             )
 
     def syncMissingClassEmbeddingsBestEffort(self) -> None:

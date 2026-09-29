@@ -657,19 +657,17 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
     async def _classifyMessage(
         self, session: AsyncSession, dto: ChatRequest
     ) -> tuple[IntentResult, SessionQueryState | None]:
-        """意图识别：先无状态分类；有上一轮状态时重分类，返回 (result, state)。
+        """意图识别：委托 classifyAndRecall 单入口（v3.1 A7 通道 1 收口）。
 
         REFINE/FOLLOW_UP 仅在 hasPriorState=True 时产出；重分类后若收敛为 CHITCHAT
         同样短路（避免空耗模型）。result 携带抽取的查询实体与领域命令参数。
+        needRecall=False：召回仍在 _buildPipelineContext 发生（现状行为不变；
+        召回产物贯通到本入口是 B5 后续任务）。
         """
-        result = self._intent.classifyResult(dto.question)
-        if result.intent == IntentType.CHITCHAT:
-            return result, None
-        state = await self._loadQueryState(session, dto.sessionId)
-        if state is None:
-            return result, None
-        result = self._intent.classifyResult(dto.question, hasPriorState=True)
-        return result, state
+        classified = await self.classifyAndRecall(
+            session, dto.question, sessionId=dto.sessionId, needRecall=False
+        )
+        return classified.intentResult, classified.state
 
     async def _buildPipelineContext(
         self, session: AsyncSession, dto: ChatRequest, *,

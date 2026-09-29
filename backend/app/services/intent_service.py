@@ -23,10 +23,11 @@ import re
 from dataclasses import dataclass
 
 from app.domain.enums import ChartType, IntentType
-from app.domain.schemas import AgentSuggestion
+from app.domain.schemas import AgentSuggestion, SemanticState
 from app.services.agent_routing_service import (
     HIGH_CONFIDENCE,
     AgentRoutingService,
+    keywordConfidence,
 )
 from app.services.step_query_planner import StepQueryPlanner
 
@@ -437,6 +438,43 @@ _CHART_TYPE_PATTERNS: tuple[tuple[tuple[str, ...], ChartType], ...] = (
 )
 
 
+# A7 通道 1 规则置信度档位（口径详见 SemanticState docstring）
+RULE_CONFIDENCE_EXACT = 1.0
+"""确定性规则命中：命中即定论的拦截分支（斜杠指令/闲聊/澄清/领域命令/
+供应商 360/风险/图推理/AGENT_RUN/REFINE）。"""
+
+RULE_CONFIDENCE_FALLBACK = 0.0
+"""完全默认回退：查询家族无任何实体抽取证据（通道 2 LLM 兜底的升级候选）。"""
+
+# 查询家族：意图路由本身由 hasPriorState + 关键词规则决定（确定性），但语义
+# 抽取的歧义集中在这里——ruleConfidence 按抽取到的实体数计（同 keywordConfidence
+# 口径），零抽取 = 完全默认回退。REFINE 有「关键词 + 前置状态」双重门槛，归确定性。
+_QUERY_FAMILY_INTENTS: frozenset[IntentType] = frozenset(
+    {IntentType.QUERY, IntentType.NEW_QUERY, IntentType.FOLLOW_UP}
+)
+
+
+def _deriveSemanticState(
+    *,
+    intent: IntentType,
+    dimension: str | None,
+    metric: str | None,
+    chartType: ChartType | None,
+) -> SemanticState:
+    """从 IntentResult 字段推导 SemanticState（ruleConfidence 口径见 schemas.py）。"""
+    if intent in _QUERY_FAMILY_INTENTS:
+        hits = sum(x is not None for x in (dimension, metric, chartType))
+        confidence = keywordConfidence(hits) if hits else RULE_CONFIDENCE_FALLBACK
+    else:
+        confidence = RULE_CONFIDENCE_EXACT
+    return SemanticState(
+        metric=metric,
+        dimension=dimension,
+        chartType=chartType,
+        ruleConfidence=confidence,
+    )
+
+
 @dataclass(frozen=True)
 class IntentResult:
     """分类结果：意图 + 抽取的查询实体 / 领域命令参数（best-effort，可为 None）。
@@ -444,6 +482,7 @@ class IntentResult:
     dimension / metric / chartType：查询类意图的实体。
     metric 另用于 DEFINE 的指标名；source / target 用于 MAP；formula 用于 DEFINE。
     supplierKey：仅 SUPPLIER_360 意图时填充（提取的 enterprise_key，BIGINT 字符串）。
+    semanticState：A7 通道 1 契约字段，构造时自动派生填充（B5 继承逻辑只读它）。
     """
 
     intent: IntentType
@@ -463,6 +502,26 @@ class IntentResult:
     # Phase 7 G4: 仅 QUERY/NEW_QUERY/FOLLOW_UP 中置信命中时填充（建议卡片）；
     # AGENT_RUN 高置信命中时填充 agent_code 而非本字段；低置信为 None。
     suggested_agent: AgentSuggestion | None = None
+    # A7: 通道 1 语义快照契约；None 时由 __post_init__ 统一派生（出口恒填充）。
+    semanticState: SemanticState | None = None
+
+    def __post_init__(self) -> None:
+        """semanticState 缺省时从其余字段派生（frozen：object.__setattr__）。
+
+        保证 classifyResult 所有出口恒填充 semanticState（B5 依赖），
+        调用方也可显式传入覆盖（如未来通道 2 的 LLM 抽取结果）。
+        """
+        if self.semanticState is None:
+            object.__setattr__(
+                self,
+                "semanticState",
+                _deriveSemanticState(
+                    intent=self.intent,
+                    dimension=self.dimension,
+                    metric=self.metric,
+                    chartType=self.chartType,
+                ),
+            )
 
 
 class IntentService:

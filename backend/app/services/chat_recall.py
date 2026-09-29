@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.enums import IntentType
 from app.domain.schemas import ChatRequest, ClassRecallInfo
 from app.services.chat_helpers import _clipText
+from app.services.intent_service import IntentResult
+
+if TYPE_CHECKING:
+    from app.domain.models import SessionQueryState
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +34,37 @@ _CLASS_FILTER_MAX_CLASSES_DEFAULT = 30  # 召回扩边后的 schema 类总量上
 _ADS_RECALL_WEIGHT_DEFAULT = 1.5  # feat-ontology-recall-pruning step D：ADS 层类 score 加权系数
 # 运行期从 system_config.ADS_RECALL_WEIGHT 读；缺席/格式错返此值。提高此值让
 # ADS 黄金路径在向量召回 top15 中更靠前；降低/设为 1.0 关闭加权。
+
+
+# 只有这四个意图进 NL2SQL 流水线、消费召回产物；其余意图（CHITCHAT/CLARIFY/
+# DEFINE/MAP/METRIC/AGENT_RUN/SUPPLIER_360/SUPPLIER_RISK/GRAPH_REASONING）走拦截或
+# 领域命令路径，classifyAndRecall 对它们跳过召回（省一次向量检索，与现状行为对齐：
+# 现状这些意图的处理器从不调用 _buildPipelineContext/_selectRelevantClasses）。
+_RECALL_INTENTS: frozenset[IntentType] = frozenset(
+    {
+        IntentType.QUERY,
+        IntentType.NEW_QUERY,
+        IntentType.REFINE,
+        IntentType.FOLLOW_UP,
+    }
+)
+
+
+@dataclass(frozen=True)
+class ClassifyAndRecallResult:
+    """classifyAndRecall 单入口产物（v3.1 A7 通道 1 收口）。
+
+    intentResult：分类结果（含 semanticState 契约字段）。
+    classes / recallInfo：_selectRelevantClasses 的原样产物；needRecall=False
+    或意图不属于 _RECALL_INTENTS 时跳过召回（classes=空列表、recallInfo=None）。
+    state：加载到的会话查询状态（无状态/未加载为 None）——调用方下游流水线
+    需要它，随结果一并返回避免二次 DB 读取。
+    """
+
+    intentResult: IntentResult
+    classes: list[Any]
+    recallInfo: ClassRecallInfo | None
+    state: SessionQueryState | None
 
 
 def _isOdsBusinessTable(cls: Any) -> bool:
@@ -127,6 +164,58 @@ def _isDimensionHint(question: str) -> bool:
 
 class RecallMixin:
     """类召回 / 过滤 / 排序（由 ChatService 组合）。"""
+
+    async def classifyAndRecall(
+        self,
+        session: AsyncSession | None,
+        question: str,
+        *,
+        sessionId: str | None = None,
+        hasPriorState: bool = False,
+        needRecall: bool = True,
+    ) -> ClassifyAndRecallResult:
+        """通道 1 单入口：规则意图分类 + （可选）语义召回（v3.1 A7 收口）。
+
+        分类语义 = 重构前 chat_service._classifyMessage 的重分类语义：
+        无状态分类 → CHITCHAT 短路 → 加载会话状态 → 有状态时以
+        hasPriorState=True 重分类（REFINE/FOLLOW_UP/NEW_QUERY 仅在此成立）。
+        CHITCHAT 短路不加载状态、不召回（省 DB 读与向量检索）。
+
+        两种调用模式：
+        - 生产（sessionId 提供）：完整两阶段语义；hasPriorState 形参被忽略
+          （是否有前置状态以 _loadQueryState 实际加载结果为准）。
+        - 对拍/纯分类（sessionId=None）：不触 DB，hasPriorState 显式控制
+          单发分类（路由冻结对拍用此模式两态各跑一遍）。
+
+        needRecall=True 且意图属于 _RECALL_INTENTS 时执行召回（内部经
+        self._ontology.listClasses 取全量类，再走 _selectRelevantClasses）；
+        否则 classes=[] / recallInfo=None。recall 需要真实 session，
+        session=None 且需要召回时显式抛 ValueError（边界校验）。
+        """
+        if sessionId is None:
+            result = self._intent.classifyResult(question, hasPriorState=hasPriorState)
+            state: SessionQueryState | None = None
+        else:
+            result = self._intent.classifyResult(question)
+            state = None
+            if result.intent != IntentType.CHITCHAT:
+                state = await self._loadQueryState(session, sessionId)
+                if state is not None:
+                    result = self._intent.classifyResult(question, hasPriorState=True)
+
+        if not needRecall or result.intent not in _RECALL_INTENTS:
+            return ClassifyAndRecallResult(
+                intentResult=result, classes=[], recallInfo=None, state=state
+            )
+        if session is None:
+            raise ValueError("classifyAndRecall 召回路径需要真实 session")
+        allClasses = await self._ontology.listClasses(session)
+        classes, recallInfo = await self._selectRelevantClasses(
+            session, question, allClasses
+        )
+        return ClassifyAndRecallResult(
+            intentResult=result, classes=classes, recallInfo=recallInfo, state=state
+        )
 
     async def _getClassFilterMaxClasses(self, session: AsyncSession) -> int:
         """读 system_config.CLASS_FILTER_MAX_CLASSES；缺席/格式错/非正返 _DEFAULT。

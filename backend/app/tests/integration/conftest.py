@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import AsyncClient
+from neo4j import Driver, GraphDatabase
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
@@ -41,6 +42,49 @@ async def dbSession(client: AsyncClient) -> AsyncIterator[AsyncSession]:
     factory = dbModule.getSessionFactory()
     async with factory() as session:
         yield session
+
+
+# ---------------------------------------------------------------------------
+# Neo4j fixtures（M0 Unified ID：从 conftest_neo4j.py 合并）
+# 约定：
+#   - 每个测试启动前清空 Class / Property / Metric 三类节点
+#   - 不 mock 外部 driver（直接连 qa-neo4j:7687）
+#   - 不用 lifespan_context（与 _testapp 启动分离，避免反复重启）
+#   - 通过 getSettings() 读凭据，与生产代码走同一配置源
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def neo4jCleanDriver() -> AsyncIterator[Driver]:
+    """返回已连接的 Neo4j driver，测试结束自动清空 Class/Property/Metric。
+
+    用同步 GraphDatabase.driver 仍 async 兼容：driver 仅持有连接池，实际
+    session 操作由 pytest-asyncio 在事件循环里调度；session.run 是同步阻塞
+    调用，对每测试 < 100 个节点的清仓足够快。
+    """
+    settings = getSettings()
+    driver: Driver = GraphDatabase.driver(
+        settings.neo4jUri,
+        auth=(settings.neo4jUser, settings.neo4jPassword),
+    )
+    yield driver
+    with driver.session() as session:
+        session.run(
+            "MATCH (n) WHERE n:Class OR n:Property OR n:Metric DETACH DELETE n"
+        )
+    driver.close()
+
+
+@pytest.fixture
+async def neo4jSeedClasses(neo4jCleanDriver: Driver) -> AsyncIterator[Driver]:
+    """种入 3 个 Class 节点：1 个带 unified_id，2 个不带（待回填）。"""
+    with neo4jCleanDriver.session() as session:
+        session.run(
+            "CREATE (c:Class {unified_id: 'obj:supplier:S001', name: '供应商'})"
+        )
+        session.run("CREATE (c:Class {id: 100, name: '物料'})")
+        session.run("CREATE (c:Class {id: 101, name: '客户'})")
+    yield neo4jCleanDriver
 
 
 @pytest.fixture
@@ -132,3 +176,127 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     businessObjectRegistry.invalidate()
     from app.services.kpi_match_cache import kpi_match_cache
     kpi_match_cache.onKpiChanged()
+
+
+# ---------------------------------------------------------------------------
+# Milvus fixtures（M0 Unified ID：3-collection 重构）
+# 约定：
+#   - sync fixtures（Milvus client 本身是 sync API，不是 asyncio）
+#   - 真实 Milvus 容器 qa-milvus:19530，不 mock
+#   - embedding 维度恒为 1024（_DIM），与 bge-m3 模型一致
+#   - Task M2 落地后需扩展 _dropOntologyCollections 以 drop 3 个新集合
+# ---------------------------------------------------------------------------
+
+_EMBEDDING_DIM = 1024
+
+
+def _dropOntologyCollections() -> None:
+    """删除全部已知本体 Milvus 集合（idempotent；集合不存在 no-op）。
+
+    Drops ontology_embeddings (old) AND the 3 new type-specific collections
+    (ontology_class_embeddings / ontology_property_embeddings /
+    ontology_metric_embeddings) added in M2.
+    """
+    from app.infrastructure.milvus_client import (
+        _connAlias,
+        _connect,
+        dropCollection,
+        ensureClassCollection,
+        ensureMetricCollection,
+        ensurePropertyCollection,
+    )
+    from pymilvus import Collection, utility
+
+    _connect()
+
+    # Old single collection
+    try:
+        dropCollection()  # drops _COLLECTION_NAME = "ontology_embeddings"
+    except Exception:
+        pass  # idempotent
+
+    # 3 new collections (added in M2): drop then recreate (empty) so
+    # reconcile() can query them even in a "clean" state.
+    for name in (
+        "ontology_class_embeddings",
+        "ontology_property_embeddings",
+        "ontology_metric_embeddings",
+    ):
+        try:
+            if utility.has_collection(name, using=_connAlias()):
+                Collection(name, using=_connAlias()).drop()
+        except Exception:
+            pass  # idempotent
+
+    # Recreate empty collections so reconcile() can query them.
+    ensureClassCollection()
+    ensurePropertyCollection()
+    ensureMetricCollection()
+
+
+@pytest.fixture
+def milvusCleanClient():
+    """真实 Milvus 清空夹具：测试前后各 drop 一次 ontology_embeddings。
+
+    后置 drop 保证下一轮测试拿到干净状态。
+    """
+    _dropOntologyCollections()
+    yield
+    _dropOntologyCollections()
+
+
+@pytest.fixture
+def milvusSeedOntology(milvusCleanClient):
+    """种入 3 条 ontology 行（type='class'）：供应商 / 物料 / 客户。"""
+    from app.infrastructure.milvus_client import insertEmbeddings
+
+    insertEmbeddings([
+        {"ontology_id": 1001, "type": "class", "name": "供应商", "alias": "supplier", "description": "", "embedding": [0.0] * _EMBEDDING_DIM},
+        {"ontology_id": 1002, "type": "class", "name": "物料", "alias": "material", "description": "", "embedding": [0.0] * _EMBEDDING_DIM},
+        {"ontology_id": 1003, "type": "class", "name": "客户", "alias": "customer", "description": "", "embedding": [0.0] * _EMBEDDING_DIM},
+    ])
+    return {"seeded": 3}
+
+
+@pytest.fixture
+def milvusSeedAllTypes(milvusCleanClient):
+    """种入 3 条跨类型 ontology 行：1 class + 1 property + 1 metric。
+
+    用于验证类型过滤（typeFilter=class/property/metric）的检索收敛。
+    """
+    from app.infrastructure.milvus_client import insertEmbeddings
+
+    insertEmbeddings([
+        {"ontology_id": 2001, "type": "class", "name": "Class1", "alias": "", "description": "", "embedding": [0.1] * _EMBEDDING_DIM},
+        {"ontology_id": 2002, "type": "property", "name": "Property1", "alias": "", "description": "", "embedding": [0.2] * _EMBEDDING_DIM},
+        {"ontology_id": 2003, "type": "metric", "name": "Metric1", "alias": "", "description": "", "embedding": [0.3] * _EMBEDDING_DIM},
+    ])
+    return {"seeded": 3}
+
+
+@pytest.fixture
+def milvusSeedExternalId(milvusCleanClient):
+    """种入 3 条 ontology 行（1 class + 1 property + 1 metric），每行 external_id
+    已预填为可解析的 unified_id 形式，方便 reconcile 校验。
+
+    Reuses insertEmbeddingsDual (Task M3) which writes to BOTH old + new collections.
+    The new collections' external_id fields carry the unified_id values used for
+    reconcile matching.
+    """
+    from app.infrastructure.milvus_client import insertEmbeddingsDual
+
+    insertEmbeddingsDual([
+        {"ontology_id": 5001, "type": "class", "name": "ClassS001",
+         "alias": "", "description": "",
+         "embedding": [0.5] * _EMBEDDING_DIM,
+         "external_id": "obj:class:5001"},
+        {"ontology_id": 5002, "type": "property", "name": "PropP001",
+         "alias": "", "description": "",
+         "embedding": [0.6] * _EMBEDDING_DIM,
+         "external_id": "obj:property:5002"},
+        {"ontology_id": 5003, "type": "metric", "name": "MetricM001",
+         "alias": "", "description": "",
+         "embedding": [0.7] * _EMBEDDING_DIM,
+         "external_id": "obj:metric:5003"},
+    ])
+    return {"seeded": 3, "external_ids": ["obj:class:5001", "obj:property:5002", "obj:metric:5003"]}

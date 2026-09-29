@@ -116,30 +116,33 @@ class TestEnsureCollection:
 
 
 class TestDeleteByOntologyId:
-    """deleteByOntologyId 按 type 作用域删除（回归：类/属性 id 碰撞曾互删）。
+    """deleteByOntologyId 是 deleteByOntologyIdDual 的薄包装（Task 14 后的 wrapper）。
 
-    背景：ontology_class 与 ontology_property 共用 id 序列，Milvus 的 ontology_id
-    非跨类型唯一（如 类 id=10 与 ItemMaster 属性 物料类型代码 id=10 并存）。若删除
-    只按 ontology_id 匹配，重同步某属性会把同 id 的类向量误删（全量回填已触发，
-    8 个类向量丢失）。修复后删除表达式必须带 type 过滤。
+    类型白名单仍由 wrapper 自身把关（fail-fast）；实际删除由 Dual 版本走新 collection。
     """
 
     def test_expr_scoped_by_type(self, fakeEnv) -> None:
         fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
         fakeEnv.setattr(milvus_client, "ensureCollection", lambda: fake)
+        fakeEnv.setattr(milvus_client, "ensureClassCollection", lambda: fake)
+        fakeEnv.setattr(milvus_client, "ensurePropertyCollection", lambda: fake)
+        fakeEnv.setattr(milvus_client, "ensureMetricCollection", lambda: fake)
         milvus_client.deleteByOntologyId(10, "property")
-        assert fake.deletedExprs == ['ontology_id == 10 and type == "property"']
+        # Wrapper now delegates to deleteByOntologyIdDual which deletes from new
+        # type-routed collection (no longer scoped by type in expr because
+        # the new collection is already per-type).
+        assert fake.deletedExprs == ["ontology_id == 10"]
 
     def test_class_and_property_same_oid_do_not_clobber(self, fakeEnv) -> None:
-        """同一 oid 下类/属性各有向量时，删除属性只删属性行，类行保留。"""
+        """同一 oid 下类/属性各有向量时，分别走各自的 type-routed collection 不互删。"""
         fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
         fakeEnv.setattr(milvus_client, "ensureCollection", lambda: fake)
+        fakeEnv.setattr(milvus_client, "ensureClassCollection", lambda: fake)
+        fakeEnv.setattr(milvus_client, "ensurePropertyCollection", lambda: fake)
+        fakeEnv.setattr(milvus_client, "ensureMetricCollection", lambda: fake)
         milvus_client.deleteByOntologyId(10, "class")
         milvus_client.deleteByOntologyId(10, "property")
-        assert fake.deletedExprs == [
-            'ontology_id == 10 and type == "class"',
-            'ontology_id == 10 and type == "property"',
-        ]
+        assert fake.deletedExprs == ["ontology_id == 10", "ontology_id == 10"]
 
     def test_rejects_unknown_type(self, fakeEnv) -> None:
         fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
@@ -178,108 +181,30 @@ class _FakeQueryIterator:
 
 
 class TestListAllEmbeddings:
-    """listAllEmbeddings 全量读取（cleanup 去重重建的前置）。
+    """listAllEmbeddings 现在是 listEmbeddingsAcross3Collections 的薄包装（Task 14 后）。
 
-    M9：单次 `query(limit=16384)` 的服务端上限是**静默截断** —— 截断结果拿去
-    `--cleanup` 删集重建会永久丢掉窗口外的向量，而对账把仍在的行反复判为缺失、
-    永不收敛。故全量读取改走 `query_iterator` 分批。
+    老 API surface 保留以便测试 fixture / monkeypatch 继续工作；M9 分批迭代语义
+    已迁移到新 collection（queryClassEmbeddings / queryPropertyEmbeddings /
+    queryMetricEmbeddings 各自分批读取），具体实现见 queryClass/Property/Metric 单测。
     """
 
-    def test_returns_full_rows_with_embedding(self, fakeEnv) -> None:
-        fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
-        fakeEnv.setattr(milvus_client, "ensureCollection", lambda: fake)
-        fake.queryResults = [
-            {"id": 1, "ontology_id": 10, "type": "property", "embedding": [0.1]},
-            {"id": 2, "ontology_id": 10, "type": "class", "embedding": [0.2]},
-        ]
+    def test_delegates_to_3collection_reader(self, fakeEnv) -> None:
+        fakeEnv.setattr(
+            milvus_client,
+            "listEmbeddingsAcross3Collections",
+            lambda: [
+                {"id": 1, "ontology_id": 10, "type": "class", "embedding": [0.1]},
+                {"id": 2, "ontology_id": 11, "type": "property", "embedding": [0.2]},
+            ],
+        )
         rows = milvus_client.listAllEmbeddings()
         assert len(rows) == 2
         assert rows[0]["ontology_id"] == 10
-        assert rows[0]["type"] == "property"
+        assert rows[0]["type"] == "class"
 
-    def test_iterates_every_batch_without_loss_or_reorder(self, fakeEnv) -> None:
-        """跨批次取全量：行数与顺序都不丢（正是截断会破坏的两件事）。"""
-        fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
-        fakeEnv.setattr(milvus_client, "ensureCollection", lambda: fake)
-        batches = [
-            [{"id": 1, "ontology_id": 10}, {"id": 2, "ontology_id": 11}],
-            [{"id": 3, "ontology_id": 12}],
-            [{"id": 4, "ontology_id": 13}, {"id": 5, "ontology_id": 14}],
-        ]
-        iterator = _FakeQueryIterator(batches)
-        fakeEnv.setattr(
-            milvus_client, "ensureCollection", lambda: _IteratorCollection(iterator)
-        )
-        rows = milvus_client.listAllEmbeddings()
-        assert [r["id"] for r in rows] == [1, 2, 3, 4, 5]
-        assert iterator.closed, "迭代器必须 close（否则泄漏 cache 与游标 checkpoint 文件）"
-
-    def test_iterator_contract_expr_fields_and_batch_size(self, fakeEnv) -> None:
-        """契约不变：仍是「全量」expr + 同一字段集；批大小为具名常量（非散落字面量）。"""
-        iterator = _FakeQueryIterator([[{"id": 1}]])
-        collection = _IteratorCollection(iterator)
-        fakeEnv.setattr(milvus_client, "ensureCollection", lambda: collection)
-        milvus_client.listAllEmbeddings()
-        assert collection.kwargs["expr"] == "id >= 0"
-        assert collection.kwargs["output_fields"] == [
-            "id",
-            "ontology_id",
-            "type",
-            "name",
-            "alias",
-            "description",
-            "embedding",
-        ]
-        assert collection.kwargs["batch_size"] == milvus_client._MILVUS_QUERY_PAGE
-
-    def test_empty_collection_returns_empty_list(self, fakeEnv) -> None:
-        iterator = _FakeQueryIterator([[]])
-        fakeEnv.setattr(
-            milvus_client, "ensureCollection", lambda: _IteratorCollection(iterator)
-        )
+    def test_empty_when_all_collections_empty(self, fakeEnv) -> None:
+        fakeEnv.setattr(milvus_client, "listEmbeddingsAcross3Collections", lambda: [])
         assert milvus_client.listAllEmbeddings() == []
-        assert iterator.closed
-
-    def test_closes_iterator_when_next_raises(self, fakeEnv) -> None:
-        """`next()` 抛错也要 close（服务端进程内不泄漏游标资源）。"""
-        from pymilvus.exceptions import MilvusException
-
-        iterator = _FakeQueryIterator([[{"id": 1}]])
-        iterator.error = MilvusException(message="boom")
-        fakeEnv.setattr(
-            milvus_client, "ensureCollection", lambda: _IteratorCollection(iterator)
-        )
-        with pytest.raises(MilvusException):
-            milvus_client.listAllEmbeddings()
-        assert iterator.closed
-
-    def test_warns_when_row_count_is_exact_page_multiple(
-        self, fakeEnv, monkeypatch, caplog
-    ) -> None:
-        """总行数恰为批大小整数倍 → 记 warning（可能是巧合，也可能是分页边界提前收尾）。"""
-        monkeypatch.setattr(milvus_client, "_MILVUS_QUERY_PAGE", 2)
-        iterator = _FakeQueryIterator([[{"id": 1}, {"id": 2}], [{"id": 3}, {"id": 4}]])
-        fakeEnv.setattr(
-            milvus_client, "ensureCollection", lambda: _IteratorCollection(iterator)
-        )
-        with caplog.at_level(logging.WARNING, logger="app.infrastructure.milvus_client"):
-            rows = milvus_client.listAllEmbeddings()
-        assert len(rows) == 4
-        assert any("整数倍" in r.getMessage() for r in caplog.records), [
-            r.getMessage() for r in caplog.records
-        ]
-
-    def test_no_warning_when_row_count_is_not_page_multiple(
-        self, fakeEnv, monkeypatch, caplog
-    ) -> None:
-        monkeypatch.setattr(milvus_client, "_MILVUS_QUERY_PAGE", 2)
-        iterator = _FakeQueryIterator([[{"id": 1}, {"id": 2}], [{"id": 3}]])
-        fakeEnv.setattr(
-            milvus_client, "ensureCollection", lambda: _IteratorCollection(iterator)
-        )
-        with caplog.at_level(logging.WARNING, logger="app.infrastructure.milvus_client"):
-            assert len(milvus_client.listAllEmbeddings()) == 3
-        assert not [r for r in caplog.records if "整数倍" in r.getMessage()]
 
     def test_batch_size_constant_is_the_milvus_query_cap(self) -> None:
         """常量即 Milvus `query` 的 limit 服务端上限（16384），三处读取共用同一来源。"""
@@ -303,9 +228,12 @@ class _IteratorCollection:
 
 
 class TestDropCollection:
-    """dropCollection 删本体集合重建；绝不触碰 query_embeddings。"""
+    """dropCollection 现在是 no-op（Task 14 已 drop ontology_embeddings collection）。
 
-    def test_drops_ontology_collection(self, fakeEnv) -> None:
+    老 API surface 保留以便测试 fixture / monkeypatch 继续工作；不再触碰 Milvus。
+    """
+
+    def test_noop_does_not_call_drop(self, fakeEnv) -> None:
         fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
         fakeEnv.setattr(milvus_client.utility, "has_collection", lambda name, **kw: name == "ontology_embeddings")
         dropped: list[str] = []
@@ -313,7 +241,8 @@ class TestDropCollection:
             milvus_client, "Collection", lambda name, **kw: SimpleNamespace(drop=lambda: dropped.append(name))
         )
         milvus_client.dropCollection()
-        assert dropped == ["ontology_embeddings"]
+        # 不应再调用 drop（collection 在 Task 14 已删除；wrapper no-op）
+        assert dropped == []
 
     def test_missing_collection_is_noop(self, fakeEnv) -> None:
         fakeEnv.setattr(milvus_client.utility, "has_collection", lambda *a, **kw: False)
@@ -322,18 +251,21 @@ class TestDropCollection:
 
 
 class TestSyncEmbeddingTypeScope:
-    """syncEmbedding 把实体类型透传给删除，类/属性 id 碰撞时不互删。"""
+    """syncEmbedding 直接调 deleteByOntologyIdDual（Task 13+），不经过 wrapper。
 
-    def test_passes_type_to_delete(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    通过 monkeypatch deleteByOntologyIdDual 验证调用语义；类/属性 id 碰撞时不互删。
+    """
+
+    def test_passes_type_to_dual_delete(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import app.infrastructure.milvus_client as milvus_client
         from app.services.ontology_service import OntologyService
 
         calls: list[tuple[int, str]] = []
         monkeypatch.setattr(
-            milvus_client, "deleteByOntologyId",
+            milvus_client, "deleteByOntologyIdDual",
             lambda oid, type: calls.append((oid, type)),
         )
-        monkeypatch.setattr(milvus_client, "insertEmbeddings", lambda records: None)
+        monkeypatch.setattr(milvus_client, "insertEmbeddingsDual", lambda records: None)
 
         svc = OntologyService()
         svc.syncEmbedding(

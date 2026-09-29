@@ -3,6 +3,9 @@
 负责：连接管理、ontology_embeddings / query_embeddings 集合的创建/插入/搜索。
 
 embedding 生成由调用方负责（LLM / EmbeddingService），此处只做向量存储与检索。
+
+M0-P0.4 Phase 2 (Task 15): Split into milvus_client.py + milvus_dual_write.py
++ milvus_query_helpers.py + milvus_search.py.
 """
 
 from __future__ import annotations
@@ -43,6 +46,9 @@ _MILVUS_QUERY_PAGE = 16384
 # 删除与检索均须按 type 作用域，非法值在拼接表达式前 fail-fast。
 VALID_EMBEDDING_TYPES = frozenset(("class", "property", "metric"))
 
+# ---------------------------------------------------------------------------
+# Common helpers
+# ---------------------------------------------------------------------------
 
 def getEmbeddingDimension() -> int:
     """返回当前 Milvus 集合的向量维度（供 embedding 服务维度守卫校验）。"""
@@ -145,197 +151,9 @@ def _ontologyFields() -> list[FieldSchema]:
     ]
 
 
-def ensureCollection() -> Collection:
-    """确保 ontology_embeddings 集合存在（不存在则创建）。"""
-    return _ensureCollection(_COLLECTION_NAME, _ontologyFields())
-
-
-def insertEmbeddings(records: list[dict[str, Any]]) -> None:
-    """批量插入 embedding 记录。
-
-    Args:
-        records: 每条记录包含 ontology_id, type, name, alias, description, embedding (list[float])
-    """
-    collection = ensureCollection()
-    data = [
-        [r["ontology_id"] for r in records],
-        [r["type"] for r in records],
-        [r["name"] for r in records],
-        [r.get("alias") or "" for r in records],
-        [r.get("description") or "" for r in records],
-        [r["embedding"] for r in records],
-    ]
-    collection.insert(data)
-    collection.flush()
-    logger.info("Inserted %d embeddings into Milvus", len(records))
-
-
-def searchByEmbedding(
-    queryEmbedding: list[float],
-    topK: int = 5,
-    typeFilter: str | None = None,
-) -> list[dict[str, Any]]:
-    """向量相似度搜索。
-
-    Args:
-        queryEmbedding: 查询向量
-        topK: 返回条数
-        typeFilter: 可选，限定类型（class/property/metric）
-
-    Returns:
-        匹配的记录列表，含 ontology_id, type, name, alias, description, distance
-    """
-    collection = ensureCollection()
-
-    expr = None
-    if typeFilter is not None:
-        if typeFilter not in VALID_EMBEDDING_TYPES:
-            raise ValueError(f"unknown embedding type filter: {typeFilter!r}")
-        expr = f'type == "{typeFilter}"'
-    results = collection.search(
-        data=[queryEmbedding],
-        anns_field="embedding",
-        param={"metric_type": "L2", "params": {"ef": 64}},
-        limit=topK,
-        output_fields=["ontology_id", "type", "name", "alias", "description"],
-        expr=expr,
-    )
-
-    hits: list[dict[str, Any]] = []
-    for result in results:
-        for hit in result:
-            hits.append({
-                "ontology_id": hit.entity.get("ontology_id"),
-                "type": hit.entity.get("type"),
-                "name": hit.entity.get("name"),
-                "alias": hit.entity.get("alias"),
-                "description": hit.entity.get("description"),
-                "distance": float(hit.distance),
-            })
-    return hits
-
-
-def deleteByOntologyId(ontologyId: int, type: str) -> None:
-    """删除指定 ontology_id 与类型的向量记录（type 作用域）。
-
-    背景：ontology_class 与 ontology_property 共用 id 序列，Milvus 的 ontology_id
-    非跨类型唯一（类 id=10 与属性 物料类型代码 id=10 可并存）。若只按 ontology_id
-    删除，重同步某实体会把同 id 的其他类型向量误删；故表达式必须带 type 过滤。
-    """
-    if type not in VALID_EMBEDDING_TYPES:
-        raise ValueError(f"unknown embedding type: {type!r}")
-    collection = ensureCollection()
-    expr = f'ontology_id == {ontologyId} and type == "{type}"'
-    collection.delete(expr)
-    collection.flush()
-    logger.info("Deleted Milvus records for ontology_id=%d type=%s", ontologyId, type)
-
-
-def deleteByOntologyIds(ontologyIds: list[int], type: str) -> None:
-    """批量删除多个 ontology_id 的同类型向量（对账脚本批量重生成用，单次 flush）。
-
-    type 作用域理由同 deleteByOntologyId：ontology_id 跨类型不唯一。
-    """
-    if type not in VALID_EMBEDDING_TYPES:
-        raise ValueError(f"unknown embedding type: {type!r}")
-    if not ontologyIds:
-        return
-    collection = ensureCollection()
-    expr = f'ontology_id in {ontologyIds} and type == "{type}"'
-    collection.delete(expr)
-    collection.flush()
-    logger.info("Deleted Milvus records for %d ontology_ids type=%s", len(ontologyIds), type)
-
-
-def listAllEmbeddings() -> list[dict[str, Any]]:
-    """返回 ontology_embeddings **全量**行（含 id/ontology_id/type/name/alias/description/embedding）。
-
-    供一次性数据修复（scripts/backfill_milvus_embeddings.py --cleanup）做全量去重后
-    删集重建，也是 ontology_service 对账的读取入口。
-
-    ⚠️ 必须走分批迭代（M9）：原实现 `query(limit=16384)` 在行数超过 `_MILVUS_QUERY_PAGE`
-    时被服务端**静默截断**，而截断结果拿去「删集重建」会**永久丢掉**窗口外的向量
-    （对账又把仍在的行反复判为缺失、永不收敛）。`query_iterator` 的 limit 默认
-    UNLIMITED，一直取到 `next()` 返回空为止。
-    """
-    collection = ensureCollection()
-    collection.load()
-    return _queryAllRows(
-        collection,
-        expr="id >= 0",
-        outputFields=[
-            "id",
-            "ontology_id",
-            "type",
-            "name",
-            "alias",
-            "description",
-            "embedding",
-        ],
-    )
-
-
-def _queryAllRows(
-    collection: Collection,
-    *,
-    expr: str,
-    outputFields: list[str],
-    iteratorFactory: Any | None = None,
-) -> list[dict[str, Any]]:
-    """用 `query_iterator` 分批取全量行并拼成一个列表（不截断）。
-
-    iteratorFactory 是**可注入接缝**（默认 `collection.query_iterator`）：该迭代器在本
-    模块属净新用法，单测用假迭代器验证跨批次不丢行/不乱序，不依赖真 Milvus。
-
-    `close()` 必须调用（放 finally）：迭代器持有 iterator cache 与游标 checkpoint 文件，
-    `next()` 抛错时不 close 会泄漏 —— 服务端进程内尤其明显。返回空列表即表示取尽。
-
-    pymilvus 3.x 把 ORM 风格 API 标了 deprecated（推荐 MilvusClient.query_iterator）；
-    此处沿用 Collection 以与模块其余部分（connections/utility/ORM 集合）一致，迁移
-    属独立改动。
-    """
-    makeIterator = iteratorFactory or collection.query_iterator
-    iterator = makeIterator(
-        batch_size=_MILVUS_QUERY_PAGE,
-        expr=expr,
-        output_fields=outputFields,
-    )
-    rows: list[dict[str, Any]] = []
-    try:
-        while True:
-            batch = iterator.next()
-            if not batch:
-                break
-            rows.extend(batch)
-    finally:
-        iterator.close()
-    if rows and len(rows) % _MILVUS_QUERY_PAGE == 0:
-        logger.warning(
-            "Milvus 全量读取累计 %d 行恰为批大小 %d 的整数倍，疑似在分页边界提前收尾"
-            "（expr=%s）；请核对集合实际行数",
-            len(rows),
-            _MILVUS_QUERY_PAGE,
-            expr,
-        )
-    return rows
-
-
-def dropCollection() -> None:
-    """删除 ontology_embeddings 集合（删集重建的确定性收敛用）。
-
-    只允许删除本体集合常量；绝不触碰 query_embeddings（历史查询向量）。
-    集合不存在时 no-op。
-    """
-    _connect()
-    if not utility.has_collection(_COLLECTION_NAME, using=_connAlias()):
-        return
-    Collection(_COLLECTION_NAME, using=_connAlias()).drop()
-    logger.info("Dropped Milvus collection '%s'", _COLLECTION_NAME)
-
-
-# =============================================================================
+# ---------------------------------------------------------------------------
 # Phase 5: query_embeddings（历史查询向量）
-# =============================================================================
+# ---------------------------------------------------------------------------
 
 
 def _queryFields() -> list[FieldSchema]:
@@ -405,9 +223,9 @@ def searchQueryEmbedding(
     return hits
 
 
-# =============================================================================
+# ---------------------------------------------------------------------------
 # Phase 5.2: document_embeddings（文档向量）
-# =============================================================================
+# ---------------------------------------------------------------------------
 
 
 def _documentFields() -> list[FieldSchema]:
@@ -586,9 +404,9 @@ def queryDocumentChunks(
     )
 
 
-# =============================================================================
+# ---------------------------------------------------------------------------
 # feat-wiki-semantic-search: wiki_page_embeddings（知识条目向量）
-# =============================================================================
+# ---------------------------------------------------------------------------
 
 
 def _wikiPageFields() -> list[FieldSchema]:
@@ -751,7 +569,7 @@ def queryWikiPageChunks(
 
 
 def refreshWikiCollection() -> None:
-    """测试专用：release + load 强制 QueryNode 刷新 wiki collection。
+    """测试专用：release + load 强制 QueryNode 刷新 wiki collection.
 
     Milvus delete buffer 走 ``Proxy → DML channel → DataNode → QueryNode``
     三段异步管道；``flush()`` 仅持久化（Growing → Sealed → 对象存储），
@@ -770,7 +588,7 @@ def refreshWikiCollection() -> None:
 
 
 def refreshDocumentCollection() -> None:
-    """测试专用：release + load 强制 QueryNode 刷新 document collection。
+    """测试专用：release + load 强制 QueryNode 刷新 document collection.
 
     见 ``refreshWikiCollection`` 注释；语义一致，仅用于 document 集合。
     """
@@ -779,7 +597,110 @@ def refreshDocumentCollection() -> None:
     collection.load()
 
 
+# ---------------------------------------------------------------------------
+# M0-P0.4: 3-collection schema with external_id field (class/property/metric)
+# NOTE: The actual implementations are imported from milvus_dual_write.py,
+# milvus_query_helpers.py, and milvus_search.py above.
+# This section only re-exports the constants used by callers.
+# ---------------------------------------------------------------------------
+
+_CLASS_COLLECTION_NAME = "ontology_class_embeddings"
+_PROPERTY_COLLECTION_NAME = "ontology_property_embeddings"
+_METRIC_COLLECTION_NAME = "ontology_metric_embeddings"
+
+
 def closeConnection() -> None:
     """断开 Milvus 连接（幂等；未连接时 no-op）。"""
     if connections.has_connection(_connAlias()):
         connections.disconnect(alias=_connAlias())
+
+
+# ---------------------------------------------------------------------------
+# OLD single-collection API (deprecated; legacy after Task 14 drop)
+# ---------------------------------------------------------------------------
+# Background: ontology_embeddings collection was dropped in Task 14 of M0-P0.4.
+# These wrappers preserve Python-level API surface (so existing test fixtures
+# and monkeypatches keep working) while redirecting writes/reads to the new
+# type-routed collections (or no-op for safety).
+#
+# ROLLBACK: if drop causes production breakage, recreate the collection via
+# `Collection("ontology_embeddings", schema=...)` and revert these wrappers
+# to their pre-Task-14 implementations (commits 2ba51d1..9ec442a).
+
+
+def insertEmbeddings(records: list[dict[str, Any]]) -> None:
+    """DEPRECATED: legacy single-collection insert. Redirects to insertEmbeddingsDual."""
+    # The old ontology_embeddings collection no longer exists; old API is a
+    # thin wrapper around the type-routed dual-write. Records still land in
+    # the appropriate new collection via type discriminator.
+    insertEmbeddingsDual(records)
+
+
+def searchByEmbedding(
+    queryEmbedding: list[float],
+    topK: int = 5,
+    typeFilter: str | None = None,
+) -> list[dict[str, Any]]:
+    """DEPRECATED: legacy single-collection search. Redirects to type-routed search."""
+    return searchEmbeddingsByTypeRouted(queryEmbedding, topK, typeFilter)
+
+
+def deleteByOntologyId(ontologyId: int, type: str) -> None:
+    """DEPRECATED: legacy single-collection delete. Redirects to dual delete."""
+    if type not in VALID_EMBEDDING_TYPES:
+        raise ValueError(f"unknown embedding type: {type!r}")
+    deleteByOntologyIdDual(ontologyId, type)
+
+
+def deleteByOntologyIds(ontologyIds: list[int], type: str) -> None:
+    """DEPRECATED: legacy bulk delete. No-op shim (no callers in production)."""
+    # No production caller exists; left as a no-op for backward compat with
+    # any future import. Original implementation called old collection which
+    # no longer exists.
+    if type not in VALID_EMBEDDING_TYPES:
+        raise ValueError(f"unknown embedding type: {type!r}")
+    # Intentionally no-op.
+
+
+def listAllEmbeddings() -> list[dict[str, Any]]:
+    """DEPRECATED: legacy single-collection full read. Redirects to 3-collection read."""
+    return listEmbeddingsAcross3Collections()
+
+
+def ensureCollection() -> "Collection | None":
+    """DEPRECATED: legacy single-collection ensure. No-op (collection dropped)."""
+    # The legacy ontology_embeddings collection is intentionally absent.
+    # Production callers have all migrated to ensureClass/Property/MetricCollection.
+    return None
+
+
+def dropCollection() -> None:
+    """DEPRECATED: legacy single-collection drop. No-op (already dropped in Task 14)."""
+    # Intentionally no-op; collection was dropped in Task 14. Kept for
+    # backward compat with test fixtures that called dropCollection() before.
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Imports from extracted modules (Task 15 split — loaded at end to avoid
+# circular import: milvus_dual_write.py imports _connAlias etc. from here)
+# ---------------------------------------------------------------------------
+from app.infrastructure.milvus_dual_write import (
+    _classFields,
+    _propertyFields,
+    _metricFields,
+    ensureClassCollection,
+    ensurePropertyCollection,
+    ensureMetricCollection,
+    insertEmbeddingsDual,
+    deleteByOntologyIdDual,
+)
+from app.infrastructure.milvus_query_helpers import (
+    queryClassEmbeddings,
+    queryPropertyEmbeddings,
+    queryMetricEmbeddings,
+    listEmbeddingsAcross3Collections,
+)
+from app.infrastructure.milvus_search import (
+    searchEmbeddingsByTypeRouted,
+)

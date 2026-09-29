@@ -867,8 +867,14 @@ class WikiPageService:
         return list(result.scalars().all())
 
     def _hasTriple(self, claim: KnowledgeClaim) -> bool:
-        """判断事实原子是否已填充三元组核心字段（subject_id / predicate / object_value / object_type）。"""
-        return any(bool(v) for v in (claim.subject_id, claim.predicate, claim.object_value, claim.object_type))
+        """判断事实原子是否已填充三元组核心字段（subject_id / predicate / object_value / object_type）。
+
+        委托 confidence_service 的共享纯函数（v3.1 B4：rules_matched 判定
+        单一事实源；勿从外部 import 本私有方法——A5 R1 教训）。
+        """
+        from app.services.confidence_service import claimRulesMatched
+
+        return claimRulesMatched(claim)
 
     async def updateClaimText(
         self, session: AsyncSession, claimId: int, *, dto: Any

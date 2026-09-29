@@ -4,17 +4,35 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { App, Badge, Button, Descriptions, Empty, Popconfirm, Select, Table } from "antd";
+import { App, Badge, Button, Descriptions, Empty, Popconfirm, Select, Table, Tag, Tooltip } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import type { TableProps } from "antd/es/table";
 import { useTranslation } from "../../i18n";
 import { extractWikiClaims, listWikiClaims } from "../../api/wikiPages";
 import { listImportModels } from "../../api/wikiImport";
-import type { Evidence, KnowledgeClaim } from "../../types/wikiPages";
+import type { ConfidenceLevel, Evidence, KnowledgeClaim } from "../../types/wikiPages";
 import type { WikiImportModel } from "../../types/wikiImport";
 
 interface WikiClaimsPanelProps {
     pageId: string;
+}
+
+/** 4 级徽标配色（v3.1 §12.2）：HIGH=green / MEDIUM=blue / LOW=orange / REFUSE=red。 */
+const CONFIDENCE_TAG_COLOR: Record<ConfidenceLevel, string> = {
+    HIGH: "green",
+    MEDIUM: "blue",
+    LOW: "orange",
+    REFUSE: "red",
+};
+
+type Translate = (key: string, vars?: Readonly<Record<string, string | number | boolean>>) => string;
+
+/** 悬浮话术：REFUSE 给具体原因，其余级别给用户话术（绝不输出数值）。 */
+export function confidenceTooltipText(level: ConfidenceLevel, refuseReason: string | null, t: Translate): string {
+    if (level === "REFUSE") {
+        return t("wikiPages.claims.refuseTooltip", { reason: refuseReason ?? "" });
+    }
+    return t(`wikiPages.claims.confidenceLevels.${level}`);
 }
 
 export default function WikiClaimsPanel({ pageId }: WikiClaimsPanelProps) {
@@ -108,6 +126,22 @@ export default function WikiClaimsPanel({ pageId }: WikiClaimsPanelProps) {
             width: 100,
             render: (type: string | null) =>
                 type ? <Badge status="processing" text={type} /> : "-",
+        },
+        {
+            title: t("wikiPages.claims.confidence"),
+            dataIndex: "confidenceLevel",
+            key: "confidenceLevel",
+            width: 110,
+            render: (level: ConfidenceLevel | null, record: KnowledgeClaim) =>
+                level ? (
+                    <Tooltip title={confidenceTooltipText(level, record.refuseReason, t)}>
+                        <Tag color={CONFIDENCE_TAG_COLOR[level]} data-testid={`confidence-tag-${level}`}>
+                            {t(`wikiPages.claims.confidenceShort.${level}`)}
+                        </Tag>
+                    </Tooltip>
+                ) : (
+                    "-"
+                ),
         },
         {
             title: t("wikiPages.claims.evidenceCount"),

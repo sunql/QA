@@ -174,6 +174,13 @@ export interface Evidence {
     createdTime: string | null;
 }
 
+/**
+ * 离散 4 级置信度（v3.1 §12.2）：HIGH/MEDIUM/LOW/REFUSE，
+ * 淘汰 0-1 伪精确展示；REFUSE 时 refuseReason 给具体原因。
+ */
+export const CONFIDENCE_LEVELS = ["HIGH", "MEDIUM", "LOW", "REFUSE"] as const;
+export type ConfidenceLevel = (typeof CONFIDENCE_LEVELS)[number];
+
 /** KnowledgeClaim：从 WikiPage 抽取的事实原子。 */
 export interface KnowledgeClaim {
     id: number;
@@ -183,4 +190,8 @@ export interface KnowledgeClaim {
     embeddingRef: string | null;
     createdTime: string | null;
     evidences: Evidence[];
+    /** 读路径现算的置信度等级；后端缺失时为 null（显示 "-"）。 */
+    confidenceLevel: ConfidenceLevel | null;
+    /** REFUSE 时的具体拒绝原因（其余等级为 null）。 */
+    refuseReason: string | null;
 }

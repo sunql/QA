@@ -79,6 +79,9 @@ class KnowledgeClaimDetailRead(CamelModel):
     source_version: str | None
     triple_stale: bool
     created_time: datetime
+    # v3.1 B4：读路径现算的离散 4 级置信度（非落库值）
+    confidence_level: str | None = None
+    refuse_reason: str | None = None
 
 __all__ = [
     "MAX_COMPILE_PAGE_IDS", "WikiCompileCreateRequest", "WikiCompileTaskRead",

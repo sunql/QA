@@ -16,12 +16,9 @@ from pymilvus import Collection, DataType, FieldSchema
 
 from app.infrastructure.milvus_client import (
     VALID_EMBEDDING_TYPES,
-    _DIM,
     _connAlias,
     _connect,
     _ensureCollection,
-    _ensureEmbeddingIndex,
-    _hasEmbeddingIndex,
     _ontologyFields,
 )
 

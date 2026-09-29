@@ -246,6 +246,86 @@ Same gate as Phase 1 Task 7. Run both reviewers in parallel on the 3 scripts + m
 
 (Task 12's decision determines whether Tasks 13-15 are needed.)
 
+### Phase 2-E: M12 decision outcome — 先迁 search + drop（人类决策 2026-09-29）
+
+> **Human decision**: 先迁 2 个 searchByEmbedding call-site 到 type-routed search，再 drop 旧 `ontology_embeddings`。不允许 search 仍打旧 collection 时 drop，否则 production `searchByKeyword` 断。
+
+#### Task 13 (M12-prep): Migrate searchByEmbedding to type-routed search
+
+**Files**:
+- Modify: `backend/app/infrastructure/milvus_client.py` — 加 `searchEmbeddingsByTypeRouted(queryEmbedding, topK, typeFilter)` 函数
+- Modify: `backend/app/services/ontology_service.py:1369` + `:1397` — 切换到 type-routed search，移除 TODO 注释
+- Append tests: `backend/app/tests/integration/test_search_type_routed.py` — 3 cases（无 typeFilter/指定 class/指定 property/指定 metric）+ backfill 后能搜出已 backfill 的 `external_id`
+
+**Steps**:
+1. RED：写 3 test case 调用 `searchEmbeddingsByTypeRouted`，断言 `typeFilter="class"` 只命中 `ontology_class_embeddings`，`typeFilter="property"` 只命中 `ontology_property_embeddings`，`typeFilter=None` 跨 3 collection 召回（合并 topK）。
+2. RED 验证：3 tests FAIL（函数不存在）。
+3. 实现 `searchEmbeddingsByTypeRouted(queryEmbedding, topK, typeFilter)`：
+   - `typeFilter is None` → 跨 3 collection 各取 `topK`，合并排序取 `topK`
+   - `typeFilter == "class"` → 走 `queryClassEmbeddings()` 等价 search
+   - `typeFilter == "property"` / `"metric"` 同上
+   - 返回 dict 列表，schema 与旧 `searchByEmbedding` 一致（含 `ontology_id`/`type`/`name`/`alias`/`description`/`distance`）
+4. 修改 `ontology_service.py:1369` + `:1397`：去掉 TODO 注释，调 `milvus.searchEmbeddingsByTypeRouted`。
+5. GREEN 验证：3 + 既有 5 = 8 tests PASS。
+6. Run reconcile 二次确认：diff_count=0、error=0、warning=0（旧 collection 还有所以 warning 可能仍 =3；属预期）。
+
+**约束**:
+- 旧 `searchByEmbedding` 函数保留（M12-drop 之后才删）
+- 新函数名 `searchEmbeddingsByTypeRouted` 不与旧函数重名
+
+**Commit**: `feat(milvus): type-routed searchEmbeddingsByTypeRouted + migrate 2 ontology_service callers`
+
+**Out of scope**: drop 旧 collection（Task 14）、milvus_client.py 拆分（M12+）
+
+#### Task 14 (M12-drop): Drop old `ontology_embeddings` collection
+
+**Files**:
+- Modify: `backend/app/infrastructure/milvus_client.py` — `insertEmbeddingsDual` 移除写旧 collection、`deleteByOntologyIdDual` 移除删旧 collection、旧 `searchByEmbedding` 函数删除、旧 `insertEmbeddings` 函数删除或改为 only-new、`ensureCollection()`（旧）删除、`listAllEmbeddings()` 改为 only-new、`dropOntologyCollection()` 加 `drop_class/property/metric` 三入口
+- Modify: `backend/app/services/ontology_service.py` — 移除 dual-write helper 调用（如果有），同步切到新函数
+- Modify: `backend/app/api/v1/vectors.py` — 同步
+- Modify: `backend/app/tests/integration/conftest.py` — `milvusCleanClient` fixture 不再 drop 旧 collection（已无）
+- Append tests: `backend/app/tests/integration/test_drop_old_collection.py` — 1 个 test 断言旧 collection 不存在 + 既有 13 + 3 = 16 tests 全绿
+
+**Steps**:
+1. RED：写 1 test case 断言 `Collection("ontology_embeddings")` raise（已不存在）。
+2. 修改 `milvus_client.py`：
+   - 删除 `searchByEmbedding` 旧函数（line 173-215）
+   - 修改 `insertEmbeddingsDual` → 只写 type-routed new collection，去掉 `insertEmbeddings` 旧调用
+   - 修改 `deleteByOntologyIdDual` → 只删 type-routed new collection
+   - `ensureCollection()`（旧 collection 的 ensure）→ 删除
+   - `listAllEmbeddings()` → 改为跨 3 new collection 读（已有 `listEmbeddingsAcross3Collections`）
+3. 在 `main.py` 启动 ensure 链：去掉 `ensureCollection()`，留 `ensureClassCollection/Property/Metric()`
+4. 跑全部 test suite：1 + 既有 13 + 3 + 4 reconcile + 3 backfill + 5 milvus_wiki + 8 unit + 4 neo4j + 1 dual = 36 tests PASS（待估算）
+5. Run reconcile 真实 Milvus：diff_count=0 + warning=0（无旧 collection = 无 PG-only warning）
+
+**约束**:
+- 不可逆操作：执行前再次确认 `diff_count=0` + `error=0` + 全部 caller 迁移完成
+- 必须先跑过 Task 13（type-routed search 已上线）才允许执行
+- `Collection.drop()` 是不可逆操作，必须先 backup（`_listAllEmbeddings` 输出到 stdout 留痕）
+
+**Commit**: `feat(milvus): drop old ontology_embeddings collection (M12-finalize)`
+
+**Out of scope**: milvus_client.py 拆分（M12+）、Neo4j 同步 drop old class label（M12+）
+
+#### Task 15 (M12-cleanup): Refactor milvus_client.py + cleanup
+
+**Files**:
+- Refactor: `backend/app/infrastructure/milvus_client.py`（986 行 → 拆 3 模块：`dual_write.py`/`query_helpers.py`/`search.py`）
+- Update memory: `qa-system-milvus-3-collection-refactor.md` 标记 M12-complete
+- Append tests: 已存在
+
+**Steps**:
+1. 把 `insertEmbeddingsDual` / `deleteByOntologyIdDual` / `ensureClass/Property/MetricCollection` 移到 `dual_write.py`
+2. 把 `queryClass/Property/MetricEmbeddings` / `listEmbeddingsAcross3Collections` 移到 `query_helpers.py`
+3. 把 `searchEmbeddingsByTypeRouted` 移到 `search.py`
+4. 公共 helper（`_DIM`、`_EMBEDDING_TYPES`、`_connect` 等）留在 `milvus_client.py`
+5. Run 全 test suite：≥36 PASS。
+6. Update memory file + MEMORY.md index（标记 Phase 2 M12-final）。
+
+**Commit**: `refactor(milvus): split milvus_client.py (986 → 3 modules, 200-400 lines each)`
+
+**Out of scope**: Neo4j 同步重构、Phase 3 PR 合并（M13-M15 由 Task 14/15 完成后单独评估）
+
 ---
 
 ## Quality Gates

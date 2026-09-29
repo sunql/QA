@@ -277,6 +277,9 @@ class KnowledgeClaim(Base):
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), nullable=True)
     authority_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
     status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # 源版本（v3.1 §4.14 运维约束 2「编译产物可追溯」）：claim 抽取时的
+    # 源 Page 版本号；0099 只加列，存量行为 NULL 不回填。
+    source_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     triple_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="FALSE")

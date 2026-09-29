@@ -57,7 +57,7 @@ const SEED_PAGES: WikiPage[] = [
     { id: 101, pageId: "page-overview-1", title: "采购管理概览",
       content: "", dimension: "PROCESS", structureStage: "MARKDOWN",
       autoClassification: null, status: "EFFECTIVE", authorityLevel: null,
-      version: "v1.0", createdByUserId: null, validFrom: null, validTo: null,
+      authorityDepartment: null, version: "v1.0", createdByUserId: null, validFrom: null, validTo: null,
       createdTime: null, updatedTime: null, categoryId: 1 },
 ];
 

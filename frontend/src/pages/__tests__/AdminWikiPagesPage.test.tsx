@@ -40,6 +40,7 @@ function makePage(overrides: Partial<WikiPage> = {}): WikiPage {
         autoClassification: { primary: "RULE", confidence: 0.92 },
         status: "DRAFT",
         authorityLevel: null,
+        authorityDepartment: null,
         version: "v1.0",
         createdByUserId: null,
         validFrom: null,

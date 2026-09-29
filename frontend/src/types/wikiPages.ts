@@ -17,6 +17,27 @@ export const KNOWLEDGE_DIMENSIONS = [
 ] as const;
 export type KnowledgeDimension = (typeof KNOWLEDGE_DIMENSIONS)[number];
 
+/**
+ * 权威归属部门（v3.1 §4.13 治理软约束，11 个值）。
+ * 与 authorityLevel 双轴并存：前者表数据精度 L0-L5，本字段表组织归属。
+ * 不进学习回路；仅供治理流程冲突仲裁与跨部门追溯。
+ */
+export const KNOWLEDGE_AUTHORITY_DEPARTMENTS = [
+    "SALES_MGMT",
+    "FINANCE",
+    "SCM",
+    "QA",
+    "HR",
+    "IT",
+    "OPS",
+    "EXEC",
+    "LEGAL",
+    "INDUSTRY_STANDARD",
+    "CROSS_DOMAIN",
+] as const;
+export type KnowledgeAuthorityDepartment =
+    (typeof KNOWLEDGE_AUTHORITY_DEPARTMENTS)[number];
+
 /** 条目生命周期状态。 */
 export const WIKI_PAGE_STATUSES = [
     "DRAFT",
@@ -50,6 +71,8 @@ export interface WikiPage {
     autoClassification: AutoClassification | null;
     status: WikiPageStatus;
     authorityLevel: string | null;
+    /** v3.1 §4.13 治理：归属部门（与 authorityLevel 双轴并存；可能为 null）。 */
+    authorityDepartment: KnowledgeAuthorityDepartment | string | null;
     version: string;
     createdByUserId: number | null;
     validFrom: string | null;
@@ -79,6 +102,8 @@ export interface WikiPageUpdate {
     dimension?: KnowledgeDimension | null;
     status?: WikiPageStatus;
     authorityLevel?: string | null;
+    /** v3.1 §4.13 治理：归属部门；null 表示「脱钩」。 */
+    authorityDepartment?: KnowledgeAuthorityDepartment | string | null;
     version?: string;
     /** Phase 5.5：MISSING_DIMENSION 缺口确认时把 LLM 预览建议一并写入。 */
     autoClassification?: Record<string, unknown> | null;

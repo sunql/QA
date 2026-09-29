@@ -160,7 +160,11 @@ class StreamMixin:
             )
             return
 
-        result = self._intent.classifyResult(dto.question)
+        # A7 通道 1 收口：分类+重分类统一走 classifyAndRecall 单入口。
+        # 首帧 META 必须携带无状态分类结果（SSE 事件序列不变），故第一遍以
+        # sessionId=None 纯分类；第二遍带 sessionId 完成「加载状态→重分类」。
+        firstPass = await self.classifyAndRecall(session, dto.question, needRecall=False)
+        result = firstPass.intentResult
         yield StreamEvent(EVENT_META, {"intent": result.intent.value})
 
         if result.intent == IntentType.CHITCHAT:
@@ -169,9 +173,12 @@ class StreamMixin:
             return
 
         try:
-            state = await self._loadQueryState(session, dto.sessionId)
+            classified = await self.classifyAndRecall(
+                session, dto.question, sessionId=dto.sessionId, needRecall=False
+            )
+            state = classified.state
             if state is not None:
-                result = self._intent.classifyResult(dto.question, hasPriorState=True)
+                result = classified.intentResult
                 yield StreamEvent(EVENT_META, {"intent": result.intent.value})
                 if result.intent == IntentType.CHITCHAT:
                     # 重分类后仍可能收敛为闲聊（如问候中含指代词）：同样短路

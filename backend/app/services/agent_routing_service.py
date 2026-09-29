@@ -25,6 +25,16 @@ HIGH_CONFIDENCE = 0.7
 MEDIUM_CONFIDENCE = 0.4
 _SCORE_PER_KEYWORD = 0.4
 
+
+def keywordConfidence(hits: int) -> float:
+    """规则命中强度统一口径（A7 通道 1 共享）：``min(1.0, 命中数 × 0.4)``。
+
+    单关键词命中即达 0.4 中置信阈值，命中 ≥2 个达 0.8 高置信。
+    intent_service 的 ``SemanticState.ruleConfidence`` 与本模块路由置信度
+    同公式（DRY），保证「规则命中强度」全链路一个口径。
+    """
+    return min(1.0, hits * _SCORE_PER_KEYWORD)
+
 # Agent 编码 → 触发关键词（业务领域语言，按 Phase 5.3/5.4/6.3 既有领域词汇扩展；
 # 与各确定性拦截正则去重，避免已被吸走的问法再被路由二次触发）。
 _AGENT_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -90,7 +100,7 @@ class AgentRoutingService:
         top = self._bestAgent(message)
         if top is None:
             return None
-        confidence = min(1.0, top.hits * _SCORE_PER_KEYWORD)
+        confidence = keywordConfidence(top.hits)
         if confidence < MEDIUM_CONFIDENCE:
             return None
         return AgentSuggestion(

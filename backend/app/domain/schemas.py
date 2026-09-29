@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
@@ -50,7 +51,7 @@ from app.domain.enums import (
     SourceSystem,
 )
 from app.domain.exceptions import ConfigError
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Mapping
 from pydantic import BeforeValidator
 
 from app.services.business_object_registry import businessObjectRegistry
@@ -1669,6 +1670,38 @@ class AgentSuggestion(CamelModel):
     recommended_agent_code: str
     confidence: float
     reason: str
+
+
+@dataclass(frozen=True)
+class SemanticState:
+    """通道 1 规则抽取的语义快照（v3.1 A7 级联架构契约，B5 依赖）。
+
+    B5 继承逻辑只读本字段，不再散读 IntentResult。v1 只搬运 classifyResult
+    已抽取的字段（metric/dimension/chartType）；time/filters v1 规则不抽取，
+    留 None 容器位，B5 Memory Phase A 补全继承规则时扩展并定类型。
+
+    ruleConfidence 口径（与 agent_routing_service.keywordConfidence 同公式）：
+    - 1.0（RULE_CONFIDENCE_EXACT）：确定性规则命中，命中即定论的拦截分支
+      （斜杠指令 / 闲聊 / 澄清 / 领域命令 / 供应商 360 / 风险 / 图推理 /
+      AGENT_RUN / REFINE）。AGENT_RUN 统一记 1.0：路由决策一旦产出即定论
+      （显式指名是最高优先级信号；语义路由高置信触发也已越过高置信门槛），
+      通道 2 不会再对拦截类意图升级。
+    - min(1.0, 抽取实体数 × 0.4)：QUERY / NEW_QUERY / FOLLOW_UP 按规则实际
+      抽取到的实体（dimension/metric/chartType）计数。
+    - 0.0（RULE_CONFIDENCE_FALLBACK）：完全默认回退（查询家族无任何抽取
+      证据），是通道 2（LLM 兜底）未来的升级候选。
+
+    注意：suggested_agent.confidence 是 Agent 路由证据强度，不属于意图分类
+    置信度，不并入本字段。
+    """
+
+    metric: str | None
+    dimension: str | None
+    chartType: ChartType | None
+    # v1 恒 None，占位（B5 Memory Phase A 扩展时定类型）
+    time: str | None = None
+    filters: Mapping[str, str] | None = None
+    ruleConfidence: float = 0.0
 
 
 class ClassRecallInfo(CamelModel):

@@ -76,6 +76,7 @@ class KnowledgeClaimDetailRead(CamelModel):
     confidence: Decimal | None
     authority_level: str | None
     status: str | None
+    source_version: str | None
     triple_stale: bool
     created_time: datetime
 

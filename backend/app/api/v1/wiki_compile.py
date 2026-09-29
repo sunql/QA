@@ -103,6 +103,7 @@ async def update_claim(claimId: int, body: WikiClaimUpdateRequest, db: AsyncSess
         predicate=claim.predicate, object_value=claim.object_value,
         object_type=claim.object_type, confidence=claim.confidence,
         authority_level=claim.authority_level, status=claim.status,
+        source_version=claim.source_version,
         triple_stale=claim.triple_stale, created_time=claim.created_time,
     )
 

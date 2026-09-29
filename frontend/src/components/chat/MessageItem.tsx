@@ -13,6 +13,7 @@ import SupplierRiskCard from "./SupplierRiskCard";
 import GraphTraversalCard from "./GraphTraversalCard";
 import AgentResponseCard from "./AgentResponseCard";
 import SuggestedAgentCard from "./SuggestedAgentCard";
+import HypothesisPanel from "./HypothesisPanel";
 import type { ChatMessage } from "../../types/chat";
 import { useTranslation } from "../../i18n";
 
@@ -25,9 +26,16 @@ interface MessageItemProps {
   /** 单条问答导出回调：参数是 message.dbMessageId（后端 SessionMessage 主键）。
    *  仅当 message.dbMessageId 已回填时 MessageItem 才会渲染入口按钮。 */
   onExportSingleTurn?: (dbMessageId: number) => void;
+  /** v3.1 B6（M7）：「验证」假设回调——把 verificationSql 作为用户问题走既有发送链路。 */
+  onVerifyHypothesis?: (verificationSql: string) => void;
 }
 
-function MessageItem({ message, exporting = false, onExportSingleTurn }: MessageItemProps) {
+function MessageItem({
+  message,
+  exporting = false,
+  onExportSingleTurn,
+  onVerifyHypothesis,
+}: MessageItemProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
 
@@ -161,6 +169,13 @@ function MessageItem({ message, exporting = false, onExportSingleTurn }: Message
               <div style={{ marginTop: 8 }}>
                 <SuggestedAgentCard data={message.suggestedAgent} />
               </div>
+            ) : null}
+            {/* v3.1 B6（M7）：「可能原因」区块（有假设才渲染，无假设整块隐藏） */}
+            {message.hypotheses && message.hypotheses.length && onVerifyHypothesis ? (
+              <HypothesisPanel
+                hypotheses={message.hypotheses}
+                onVerify={onVerifyHypothesis}
+              />
             ) : null}
             {message.tokensUsed !== undefined ||
             message.cost !== undefined ||

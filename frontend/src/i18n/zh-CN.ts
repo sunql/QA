@@ -694,6 +694,13 @@ export const zhCN = {
       failed: "PDF 导出失败：{message}",
       emptySession: "当前会话暂无消息可导出",
     },
+    hypothesis: {
+      title: "可能原因",
+      verify: "验证",
+      driverTooltip: "来自数据模型的关联字段",
+      sqlDetail: "查看验证 SQL",
+      disclaimer: "以上为基于当前数据与数据模型的可能解释（非因果结论），可发送验证 SQL 进一步核实。",
+    },
   },
 
   termDictionary: {

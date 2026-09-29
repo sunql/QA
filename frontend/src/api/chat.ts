@@ -1,6 +1,6 @@
 import { httpClient } from "./client";
 import { API_BASE_URL } from "../config";
-import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, QueryPlan, SimilarQuery } from "../types/chat";
+import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery } from "../types/chat";
 import { i18n } from "../i18n";
 import { authHeaders } from "./authHeaders";
 
@@ -82,6 +82,45 @@ export function isStepResult(value: unknown): value is StepResultView {
 export async function sendMessage(payload: ChatRequest): Promise<ChatResponse> {
   const res = await httpClient.post<ChatResponse>(BASE, payload);
   return res.data;
+}
+
+// ===== v3.1 B6（M7 Hypothesis Hook）：「可能原因」假设 =====
+
+// 后端 HYPOTHESIS_MAX_COUNT 对齐：前端再裁一次防御
+export const HYPOTHESIS_MAX_COUNT = 3;
+
+// 运行时收窄（系统边界）：形状不符的条目直接丢弃，不渲染
+export function isHypothesis(value: unknown): value is HypothesisView {
+  if (!value || typeof value !== "object") return false;
+  const h = value as Record<string, unknown>;
+  return (
+    typeof h.id === "number" &&
+    typeof h.statement === "string" &&
+    h.statement.length > 0 &&
+    typeof h.verificationSql === "string" &&
+    h.verificationSql.length > 0 &&
+    (h.driver === null || h.driver === undefined || typeof h.driver === "string") &&
+    (h.turnQuestion === null || h.turnQuestion === undefined || typeof h.turnQuestion === "string") &&
+    (h.createdTime === null || h.createdTime === undefined || typeof h.createdTime === "string")
+  );
+}
+
+/**
+ * 拉取某会话最新分析假设（GET /chat/sessions/{sessionId}/hypotheses）。
+ *
+ * 流式路径假设不进 SSE 帧，前端在答案流结束后调用；非法条目过滤 +
+ * 上限裁剪（HYPOTHESIS_MAX_COUNT）后返回，失败/为空返回空数组。
+ */
+export async function fetchHypotheses(
+  sessionId: string,
+  limit = 10
+): Promise<HypothesisView[]> {
+  const res = await httpClient.get<HypothesisView[]>(
+    `${BASE}/sessions/${encodeURIComponent(sessionId)}/hypotheses`,
+    { params: { limit } }
+  );
+  const list = Array.isArray(res.data) ? res.data : [];
+  return list.filter(isHypothesis).slice(0, HYPOTHESIS_MAX_COUNT);
 }
 
 // 相似历史问法（输入联想）：调用 POST /chat/suggest

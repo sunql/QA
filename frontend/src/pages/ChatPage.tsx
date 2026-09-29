@@ -154,6 +154,7 @@ export default function ChatPage() {
           loading={loading}
           exporting={exporting}
           onExportSingleTurn={(dbMessageId) => void handleExportSession(dbMessageId)}
+          onVerifyHypothesis={(sql) => handleSend(sql, null)}
         />
         <ChatPanel
           datasourceId={datasourceId}

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import {
+  fetchHypotheses as apiFetchHypotheses,
   sendMessage as sendChatMessage,
   sendMessageStream,
   type StreamChartData,
@@ -215,6 +216,22 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       chartType,
     };
 
+    // v3.1 B6（M7）：答案流结束（或非流式响应）后拉取「可能原因」假设。
+    // 流式路径假设不进 SSE 帧；非流式响应虽自带 hypotheses，仍统一走 GET 保持
+    // 单一取数口径。拉取失败/为空静默——面板不渲染，主回答不受影响。
+    const attachHypotheses = async () => {
+      if (get().channel !== "chat") return;
+      try {
+        const items = await apiFetchHypotheses(sessionId);
+        if (!items.length) return;
+        set((state) => ({
+          messages: patchLastMessage(state.messages, { hypotheses: items }),
+        }));
+      } catch {
+        // 假设面板降级：失败不提示
+      }
+    };
+
     try {
       if (useStream) {
         await sendMessageStream(payload, {
@@ -340,6 +357,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               error: message,
             })),
         });
+        // v3.1 B6（M7）：答案流结束后经 GET 端点回填假设（假设不进 SSE 帧）
+        await attachHypotheses();
       } else {
         const res = await sendChatMessage(payload);
         set((state) => ({
@@ -371,6 +390,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             agentRun: res.agentRun ?? null,
             // Phase 7 G4：中置信语义路由建议卡片（仅命中时非 null）
             suggestedAgent: res.suggestedAgent ?? null,
+            // v3.1 B6（M7）：非流式响应自带假设（流式经 attachHypotheses 拉 GET 回填）
+            hypotheses: res.hypotheses ?? null,
             // 非流式多步：后端仅回传数据步骤（无汇总步骤），每步成败由 error 判定——
             // C3 失败隔离后失败步骤也会回到这里（sql/data 为 null、error 非空），
             // 一律当「已完成」会把失败渲染成成功（与流式 onStepResult 口径也必须一致）
@@ -389,6 +410,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           }),
           loading: false,
         }));
+        // v3.1 B6（M7）：非流式响应后统一经 GET 端点回填假设
+        await attachHypotheses();
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : i18n.t("errors.networkError");

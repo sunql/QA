@@ -92,7 +92,12 @@ async def list_task_items(taskId: int, db: AsyncSession = Depends(getDb)):
     ]
 
 @router.patch("/claims/{claimId}", response_model=KnowledgeClaimDetailRead)
-async def update_claim(claimId: int, body: WikiClaimUpdateRequest, db: AsyncSession = Depends(getDb)):
+async def update_claim(
+    claimId: int,
+    body: WikiClaimUpdateRequest,
+    db: AsyncSession = Depends(getDb),
+    user: CurrentUser = Depends(getCurrentUser),
+):
     from app.services.confidence_service import (
         calculateClaimConfidence,
         refuseReasonForUi,

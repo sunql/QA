@@ -20,10 +20,11 @@ LLM 注入 helper（``formatConfidenceForPrompt``）当前无生产消费者
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 

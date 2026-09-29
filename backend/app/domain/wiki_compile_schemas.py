@@ -75,6 +75,8 @@ class KnowledgeClaimDetailRead(CamelModel):
     object_type: str | None
     confidence: Decimal | None
     authority_level: str | None
+    # v3.1 §4.13 治理：归属部门（与 authority_level 双轴并存）。
+    authority_department: str | None
     status: str | None
     source_version: str | None
     triple_stale: bool

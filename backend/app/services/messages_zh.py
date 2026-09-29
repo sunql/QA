@@ -446,6 +446,8 @@ MSG_WIKI_CLAIM_NOT_FOUND = "事实原子不存在：{claimId}"
 MSG_WIKI_COMPILE_TASK_NOT_FOUND = "编译作业不存在：{taskId}"
 MSG_WIKI_COMPILE_SCOPE_INVALID = "不支持的编译范围：{scope}"
 MSG_WIKI_AUTHORITY_LEVEL_INVALID = "权威度等级非法，合法值：{levels}"
+# v3.1 §4.13 治理：归属部门枚举（11 值，含 INDUSTRY_STANDARD/CROSS_DOMAIN 占位）
+MSG_WIKI_AUTHORITY_DEPARTMENT_INVALID = "权威归属部门非法，合法值：{departments}"
 
 # =============================================================================
 # 图表（Chart）

@@ -115,7 +115,10 @@ async def update_claim(
         claim_type=claim.claim_type, subject_id=claim.subject_id,
         predicate=claim.predicate, object_value=claim.object_value,
         object_type=claim.object_type, confidence=claim.confidence,
-        authority_level=claim.authority_level, status=claim.status,
+        authority_level=claim.authority_level,
+        # v3.1 §4.13 治理：归属部门（与 authorityLevel 双轴并存）。
+        authority_department=claim.authority_department,
+        status=claim.status,
         source_version=claim.source_version,
         triple_stale=claim.triple_stale, created_time=claim.created_time,
         confidence_level=confidence.level.value,

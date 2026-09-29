@@ -64,6 +64,24 @@ KNOWLEDGE_DIMENSIONS: tuple[str, ...] = (
 
 # Authority axis: L5 (highest) to L0 (lowest).
 KNOWLEDGE_AUTHORITY_LEVELS: tuple[str, ...] = ("L5", "L4", "L3", "L2", "L1", "L0")
+# Authority 归属部门（v3.1 §4.13 软约束）：前 9 个是常规组织归属，后 2 个是
+# 软约束占位（INDUSTRY_STANDARD 外部权威 / CROSS_DOMAIN 跨部门共识）。
+# authority_level L0-L5 表数据精度，本字段表组织归属 —— 双轴互不替代。
+# 该列**不进入学习回路**（progressive_upgrader / claim_extractor 完全不引用），
+# 仅供治理流程冲突仲裁与跨部门追溯。
+KNOWLEDGE_AUTHORITY_DEPARTMENTS: tuple[str, ...] = (
+    "SALES_MGMT",          # 销售管理部
+    "FINANCE",             # 财务部
+    "SCM",                 # 供应链/采购
+    "QA",                  # 质量部
+    "HR",                  # 人事
+    "IT",                  # IT/技术
+    "OPS",                 # 运营部
+    "EXEC",                # 高管/决策层
+    "LEGAL",               # 法务
+    "INDUSTRY_STANDARD",   # 行业标准/外部权威
+    "CROSS_DOMAIN",        # 跨部门共识
+)
 CLAIM_OBJECT_TYPES: tuple[str, ...] = ("PAGE", "ONTOLOGY_CLASS", "ONTOLOGY_METRIC", "ENTITY_MAPPING", "VALUE")
 CLAIM_STATUSES: tuple[str, ...] = ("ACTIVE", "STALE")
 
@@ -149,6 +167,10 @@ class WikiPage(Base, TimestampMixin):
         String(20), nullable=False, default="DRAFT", server_default="DRAFT"
     )
     authority_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # v3.1 §4.13 治理：组织归属（11 部门枚举，NULL = 待治理流程推动）。
+    # 与 authority_level 双轴并存：后者表数据精度，本字段表组织归属。
+    # 该列不进学习回路，仅供治理流程追溯与冲突仲裁。
+    authority_department: Mapped[str | None] = mapped_column(String(30), nullable=True)
     version: Mapped[str] = mapped_column(
         String(30), nullable=False, default="v1.0", server_default="v1.0"
     )
@@ -276,6 +298,9 @@ class KnowledgeClaim(Base):
     object_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), nullable=True)
     authority_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # v3.1 §4.13 治理：组织归属（独立于 page 的 authority_department，claim 级记录
+    # 便于按部门筛选冲突）。学习回路完全不引用本字段。
+    authority_department: Mapped[str | None] = mapped_column(String(30), nullable=True)
     status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # 源版本（v3.1 §4.14 运维约束 2「编译产物可追溯」）：claim 抽取时的
     # 源 Page 版本号；0099 只加列，存量行为 NULL 不回填。
@@ -475,6 +500,7 @@ class KnowledgeCommunityMember(Base):
 __all__ = [
     "JsonColumn",
     "KNOWLEDGE_DIMENSIONS",
+    "KNOWLEDGE_AUTHORITY_DEPARTMENTS",
     "WIKI_PAGE_STATUSES",
     "STRUCTURE_STAGES",
     "RELATION_TYPES",

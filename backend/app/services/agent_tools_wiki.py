@@ -302,6 +302,8 @@ async def _wikiReadHandler(
             "status": page.status,
             "structureStage": page.structure_stage,
             "authorityLevel": page.authority_level,
+            # v3.1 §4.13 治理：归属部门（与 authorityLevel 双轴并存；可能 None）。
+            "authorityDepartment": page.authority_department,
             "version": page.version,
             "claims": [{"id": c.id, "text": c.claim_text, "type": c.claim_type} for c in claims],
             "relations": [

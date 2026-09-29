@@ -56,6 +56,7 @@ from app.services.learning.feedback_loop import (
 )
 from app.services.messages_zh import (
     MSG_WIKI_AUTHORITY_LEVEL_INVALID,
+    MSG_WIKI_AUTHORITY_DEPARTMENT_INVALID,
     MSG_WIKI_PAGE_DIMENSION_INVALID,
     MSG_WIKI_PAGE_DUPLICATE,
     MSG_WIKI_PAGE_ID_INVALID,
@@ -311,6 +312,28 @@ def _assertKnowledgeAuthorityLevel(value: str | None) -> None:
         raise HTTPException(status_code=400, detail=MSG_WIKI_AUTHORITY_LEVEL_INVALID.format(levels=list(KNOWLEDGE_AUTHORITY_LEVELS)))
 
 
+def _assertKnowledgeAuthorityDepartment(value: str | None) -> None:
+    """权威归属部门白名单校验（None 合法 —— 旧数据/治理未推动）。
+
+    与 ``_assertKnowledgeAuthorityLevel`` 同模式，错误用 400 而非 422：
+    该函数由 service 调用方在 Pydantic 422 通道之外补一道兜底
+    （DTO 验证已被 ``_validateAuthorityDepartment`` 拦过一次，
+    这里是防止 service 被内部调用时漏校验）。两者并存是
+    「DTO 422 + service 400」分层负责，不冲突。
+    """
+    from app.domain.wiki_models import KNOWLEDGE_AUTHORITY_DEPARTMENTS
+    if value is None:
+        return
+    if value not in KNOWLEDGE_AUTHORITY_DEPARTMENTS:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=400,
+            detail=MSG_WIKI_AUTHORITY_DEPARTMENT_INVALID.format(
+                departments=list(KNOWLEDGE_AUTHORITY_DEPARTMENTS)
+            ),
+        )
+
+
 # 删除审计 ``before`` 快照的字段表（顺序即 dict 顺序，单一事实源）。
 #
 # 三点刻意为之：
@@ -333,6 +356,7 @@ _SNAPSHOT_FIELDS: tuple[str, ...] = (
     "structure_stage",
     "version",
     "authority_level",
+    "authority_department",
 )
 
 
@@ -552,6 +576,7 @@ class WikiPageService:
         """
         _assertDimension(dto.dimension)
         _assertKnowledgeAuthorityLevel(dto.authority_level)
+        _assertKnowledgeAuthorityDepartment(dto.authority_department)
         # feat-wiki-category：category_id 预校验，避免 IntegrityError 兜底变 500。
         # null 是合法值（不挂分类），跳过校验。
         if dto.category_id is not None:
@@ -580,6 +605,8 @@ class WikiPageService:
             content_hash=contentHashOf(dto.content),
             dimension=dto.dimension,
             authority_level=dto.authority_level,
+            # v3.1 §4.13 治理：归属部门（与 authority_level 双轴并存；NULL 合法）。
+            authority_department=dto.authority_department,
             category_id=dto.category_id,
             status="DRAFT",
             structure_stage="MARKDOWN",
@@ -636,6 +663,9 @@ class WikiPageService:
                 _assertStatus(value)
             elif field == "authority_level":
                 _assertKnowledgeAuthorityLevel(value)
+            elif field == "authority_department":
+                # v3.1 §4.13 治理：归属部门白名单兜底（DTO 422 已先拦一次）。
+                _assertKnowledgeAuthorityDepartment(value)
             elif field == "content":
                 # 正文变了哈希必须跟着变：content_hash 是「这条条目**当前**正文的
                 # 摘要」这一事实，不是「创建时正文的摘要」。不更新会让导入路径的

@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
+import time
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -33,6 +35,7 @@ from app.domain.error_messages import (
 from app.domain.exceptions import SqlSafetyError
 from app.domain.models import DataSource
 from app.infrastructure.security.crypto import decryptApiKey
+from app.services.evidence_record_service import scheduleSqlQueryEvidence
 
 logger = logging.getLogger(__name__)
 
@@ -382,12 +385,44 @@ def _inject_nulls_last(sql: str) -> str:
 
 
 # =============================================================================
+# Evidence 记录钩子（v3.1 任务 B2）
+# =============================================================================
+
+
+def _recordEvidenceAfterSuccess(func):
+    """execute_read_only 成功后异步落 SQL_QUERY evidence（best-effort，零 LLM）。
+
+    只包外壳：SQL Guard 三集合、库侧只读兜底、行数上限、超时等安全逻辑全部
+    在原方法体内，本装饰器一行不触碰——仅在查询成功返回之后追加记录动作
+    （查询抛异常时不记录、异常照常上抛）。落库调度同步执行且自身吞错
+    （hash 计算失败也只 warning），查询延迟只增加一次 result_hash 计算。
+    """
+    @functools.wraps(func)
+    async def wrapper(self, sql: str) -> list[dict[str, Any]]:
+        startedAt = time.monotonic()
+        rows = await func(self, sql)
+        scheduleSqlQueryEvidence(
+            sql=sql,
+            rows=rows,
+            startedAt=startedAt,
+            datasourceId=self.datasourceId,
+        )
+        return rows
+
+    return wrapper
+
+
+# =============================================================================
 # 适配器协议
 # =============================================================================
 
 
 class BusinessDbAdapter(Protocol):
     """业务数据库适配器统一接口。"""
+
+    # 数据源 ID（get_adapter 缓存时挂上；build_adapter 直调方为 None）。
+    # 仅用于 evidence 记录归属，不参与连接语义。
+    datasourceId: int | None
 
     async def test(self) -> tuple[bool, str]:
         """测试连接，返回 (是否成功, 消息)。"""
@@ -438,6 +473,9 @@ def _build_oracle_dsn(host: str, port: int, service_name: str) -> str:
 class _SqlaAdapter:
     """基于 SQLAlchemy 异步引擎的适配器（PostgreSQL / MySQL 共用）。"""
 
+    # 数据源归属（evidence 记录用）；由 get_adapter 缓存时写入
+    datasourceId: int | None = None
+
     def __init__(self, url: str) -> None:
         self._url = url
         self._engine: AsyncEngine | None = None
@@ -465,6 +503,7 @@ class _SqlaAdapter:
         except Exception as exc:  # noqa: BLE001 - 测试连接需捕获所有异常
             return False, str(exc)
 
+    @_recordEvidenceAfterSuccess
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
         _assert_read_only(sql)
         # queryRowLimit <= 0 视为取消行数上限。注意：不能依赖 fetchmany(None)=全部行——
@@ -514,6 +553,9 @@ class _SqlaAdapter:
 class _OracleAdapter:
     """基于 oracledb 异步 API 的 Oracle 适配器。"""
 
+    # 数据源归属（evidence 记录用）；由 get_adapter 缓存时写入
+    datasourceId: int | None = None
+
     def __init__(self, host: str, port: int, service_name: str, username: str, password: str) -> None:
         self._dsn = _build_oracle_dsn(host, port, service_name)
         self._username = username
@@ -534,6 +576,7 @@ class _OracleAdapter:
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
 
+    @_recordEvidenceAfterSuccess
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
         _assert_read_only(sql)
         # 执行前兜底：给 LLM 生成的数字开头中文别名加双引号，消除 ORA-00923。
@@ -657,6 +700,7 @@ def get_adapter(datasourceId: int, ds: DataSource) -> BusinessDbAdapter:
         ds.username,
         password,
     )
+    adapter.datasourceId = datasourceId
     _adapters[datasourceId] = adapter
     return adapter
 

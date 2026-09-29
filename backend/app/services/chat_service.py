@@ -243,6 +243,10 @@ from app.services.chat_context import (
 )
 from app.services.chat_usage import UsageMixin
 from app.services.chat_stream import StreamMixin
+from app.services.evidence_record_service import (
+    resetChatSessionId,
+    setChatSessionId,
+)
 from app.services.chat_domain import DomainCommandMixin
 from app.services.chat_l4 import L4Mixin
 logger = logging.getLogger(__name__)
@@ -317,6 +321,25 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         self._affinityTurns = affinityTurns
 
     async def processMessage(
+        self,
+        dto: ChatRequest,
+        session: AsyncSession,
+        *,
+        user: CurrentUser | None = None,
+    ) -> ChatResponse:
+        """处理一条用户消息（入口包装：透传 chat session_id 到 evidence 记录）。
+
+        v3.1 B2：整条链路内 execute_read_only 自动落 SQL_QUERY evidence，
+        session_id 经 contextvar 透传（evidence_record_service），非 chat
+        调用方默认 None 不阻塞。
+        """
+        token = setChatSessionId(dto.sessionId)
+        try:
+            return await self._processMessageInner(dto, session, user=user)
+        finally:
+            resetChatSessionId(token)
+
+    async def _processMessageInner(
         self,
         dto: ChatRequest,
         session: AsyncSession,

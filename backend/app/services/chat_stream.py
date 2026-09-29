@@ -67,6 +67,10 @@ from app.services.chat_helpers import (
     attachStreamPersistState,
     streamPersistStateOf,
 )
+from app.services.evidence_record_service import (
+    resetChatSessionId,
+    setChatSessionId,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +79,26 @@ class StreamMixin:
     """流式输出（由 ChatService 组合）。"""
 
     async def processMessageStream(
+        self,
+        dto: ChatRequest,
+        session: AsyncSession,
+        *,
+        user: CurrentUser | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """流式处理一条消息（入口包装：透传 chat session_id 到 evidence 记录）。
+
+        v3.1 B2：流式链路内 execute_read_only 自动落 SQL_QUERY evidence，
+        session_id 经 contextvar 透传（evidence_record_service）。生成器体内
+        设置/复位：value 在查询调用栈里同步可见，断连/关闭时 finally 复位。
+        """
+        token = setChatSessionId(dto.sessionId)
+        try:
+            async for event in self._processMessageStreamInner(dto, session, user=user):
+                yield event
+        finally:
+            resetChatSessionId(token)
+
+    async def _processMessageStreamInner(
         self,
         dto: ChatRequest,
         session: AsyncSession,

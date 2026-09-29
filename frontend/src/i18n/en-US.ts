@@ -2158,6 +2158,8 @@ export const enUS = {
         LOW: "Low confidence, for reference only",
       },
       refuseTooltip: "Cannot determine, reason: {reason}",
+      authorityDepartment: "Authority Department",
+      authorityLevel: "Authority Level",
     },
     // Knowledge relations (mechanism 2)
     relations: {

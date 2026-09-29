@@ -81,6 +81,9 @@ class WikiPageCreate(CamelModel):
     content: str = Field(..., min_length=1, max_length=MAX_CONTENT_CHARS)
     dimension: str | None = Field(default=None, max_length=30)
     authority_level: str | None = Field(default=None, max_length=10)
+    # v3.1 §4.13 治理：归属部门（11 部门枚举之一或 None）。与 authority_level
+    # 双轴并存；None 合法（待治理流程推动新行必填）。
+    authority_department: str | None = Field(default=None, max_length=30)
     # feat-wiki-category：可选创建时直接挂分类；后端 service 用 updatePage
     # 同路径写入（category_id 走 _assertCategoryExists 预校验）。
     category_id: int | None = Field(default=None, ge=1)
@@ -98,6 +101,23 @@ class WikiPageCreate(CamelModel):
             return value
         if value is not None and value not in KNOWLEDGE_AUTHORITY_LEVELS:
             raise ValueError(f"authority_level must be one of {list(KNOWLEDGE_AUTHORITY_LEVELS)}")
+        return value
+
+    @field_validator("authority_department")
+    @classmethod
+    def _validateAuthorityDepartment(cls, value: Any) -> Any:
+        from app.domain.wiki_models import KNOWLEDGE_AUTHORITY_DEPARTMENTS
+        if value is None:
+            return None
+        if isinstance(value, str) and value in KNOWLEDGE_AUTHORITY_DEPARTMENTS:
+            return value
+        from app.domain.schemas import _UnsetType
+        if isinstance(value, _UnsetType):
+            return value
+        if value is not None and value not in KNOWLEDGE_AUTHORITY_DEPARTMENTS:
+            raise ValueError(
+                f"authority_department must be one of {list(KNOWLEDGE_AUTHORITY_DEPARTMENTS)}"
+            )
         return value
 
 
@@ -120,6 +140,8 @@ class WikiPageUpdate(CamelModel):
     structure_stage: _UnsetType | str = Field(default=UNSET, max_length=20)
     status: _UnsetType | str = Field(default=UNSET, max_length=20)
     authority_level: _UnsetType | str | None = Field(default=UNSET, max_length=10)
+    # v3.1 §4.13 治理：归属部门；PATCH UNSET 跳过，显式 None 置空。
+    authority_department: _UnsetType | str | None = Field(default=UNSET, max_length=30)
     version: _UnsetType | str = Field(default=UNSET, min_length=1, max_length=30)
     # feat-wiki-category：page 归属分类；显式传 null 表示「脱钩」。
     category_id: _UnsetType | int | None = Field(default=UNSET, ge=1)
@@ -145,6 +167,23 @@ class WikiPageUpdate(CamelModel):
             raise ValueError(f"authority_level must be one of {list(KNOWLEDGE_AUTHORITY_LEVELS)}")
         return value
 
+    @field_validator("authority_department")
+    @classmethod
+    def _validateAuthorityDepartment(cls, value: Any) -> Any:
+        from app.domain.wiki_models import KNOWLEDGE_AUTHORITY_DEPARTMENTS
+        if value is None:
+            return None
+        if isinstance(value, str) and value in KNOWLEDGE_AUTHORITY_DEPARTMENTS:
+            return value
+        from app.domain.schemas import _UnsetType
+        if isinstance(value, _UnsetType):
+            return value
+        if value is not None and value not in KNOWLEDGE_AUTHORITY_DEPARTMENTS:
+            raise ValueError(
+                f"authority_department must be one of {list(KNOWLEDGE_AUTHORITY_DEPARTMENTS)}"
+            )
+        return value
+
 
 class WikiPageRead(CamelModel):
     """知识条目读模型。"""
@@ -158,6 +197,8 @@ class WikiPageRead(CamelModel):
     auto_classification: dict[str, Any] | None = None
     status: str
     authority_level: str | None = None
+    # v3.1 §4.13 治理：归属部门（可能为 NULL，旧数据/治理未推动）。
+    authority_department: str | None = None
     version: str
     created_by_user_id: int | None = None
     valid_from: datetime | None = None
@@ -343,6 +384,10 @@ class KnowledgeClaimRead(CamelModel):
     claim_text: str
     claim_type: str | None = None
     embedding_ref: str | None = None
+    # v3.1 §4.13 治理：归属部门 + 权威等级 双轴。前端 WikiClaimsPanel
+    # 同时展示两个 badge（详见组件注释）；任一字段缺失时走 "-" 占位。
+    authority_department: str | None = None
+    authority_level: str | None = None
     created_time: datetime | None = None
     evidences: list[EvidenceRead] = Field(default_factory=list)
     confidence_level: str | None = None

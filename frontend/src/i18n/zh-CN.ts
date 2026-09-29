@@ -2176,6 +2176,8 @@ export const zhCN = {
         LOW: "低置信度，仅供参考",
       },
       refuseTooltip: "无法判定，原因：{reason}",
+      authorityDepartment: "权威部门",
+      authorityLevel: "权威等级",
     },
     // 知识关系（机制 2）
     relations: {

@@ -1362,11 +1362,8 @@ class OntologyService:
         """
         embedding = await self._ensureEmbedding().generateEmbedding(query)
         try:
-            # TODO: M12+ — switch to type-routed search after old collection dropped.
-            # During dual-write window, searchByEmbedding on old collection returns
-            # complete data because dual-write keeps old in sync with new.
             hits = await asyncio.to_thread(
-                milvus.searchByEmbedding, embedding, topK, typeFilter
+                milvus.searchEmbeddingsByTypeRouted, embedding, topK, typeFilter
             )
         except (MilvusException, OSError) as exc:
             raise MilvusError(MSG_VECTOR_SEARCH_FAILED, detail=str(exc)) from exc
@@ -1391,10 +1388,7 @@ class OntologyService:
         typeFilter: str | None = None,
     ) -> list[dict[str, Any]]:
         """向量相似度搜索（embedding 由调用方通过 LLM 生成）。"""
-        # TODO: M12+ — switch to type-routed search after old collection dropped.
-        # During dual-write window, searchByEmbedding on old collection returns
-        # complete data because dual-write keeps old in sync with new.
-        return milvus.searchByEmbedding(queryEmbedding, topK, typeFilter)
+        return milvus.searchEmbeddingsByTypeRouted(queryEmbedding, topK, typeFilter)
 
     def syncEmbedding(
         self,

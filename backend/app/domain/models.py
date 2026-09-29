@@ -859,6 +859,10 @@ class SessionQueryState(Base, TimestampMixin):
     recent_rounds: Mapped[list[dict[str, Any]] | None] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
     )
+    # B5：字段继承快照 JSONB（由 _resolveInheritedState 写入，供下一轮继承链路读取）
+    inheritance_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
 
     __table_args__ = (UniqueConstraint("session_id", name="uq_session_query_state_session"),)
 

@@ -8,6 +8,10 @@
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +31,180 @@ from app.services.chat_helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# B5 Memory Phase A：字段继承纯函数（与 ORM/Session 完全解耦，unit 可覆盖）
+# =============================================================================
+
+# 时间表达式正则（conditions 中匹配 year / period / quarter / month）
+_RE_YEAR = re.compile(r"(?:year|年份|年)\s*(?:=|>=|<=|>|<)\s*(\d{4})", re.IGNORECASE)
+_RE_PERIOD = re.compile(r"period\s*=\s*['\"]?(\d{4})-(\d{2})", re.IGNORECASE)
+_RE_QUARTER = re.compile(r"(?:quarter|季度)\s*=\s*(\d)", re.IGNORECASE)
+_RE_MONTH = re.compile(r"(?:month|月份)\s*=\s*(\d{1,2})", re.IGNORECASE)
+
+# 时间递减关键词（启发式，非穷举）
+_LAST_YEAR_PATTERNS = ("去年", "上年", "上一年")
+_LAST_QUARTER_PATTERNS = ("上季度", "上一季", "上个季度")
+_LAST_MONTH_PATTERNS = ("上个月", "上一月", "上月")
+
+
+@dataclass(frozen=True)
+class TimeHint:
+    """从上一轮 plan conditions 解析出的时间锚点（best-effort）。"""
+    year: int | None = None
+    month: int | None = None
+    quarter: int | None = None
+    # 本字段记录从哪个上游 year 值移来（B5 快照用）
+    shifted_from: int | None = None
+
+
+@dataclass(frozen=True)
+class InheritedState:
+    """B5 单一入口 `_resolveInheritedState` 的返回值：下一轮继承的字段快照。
+
+    全部字段有默认值，支持部分继承（如只有 metric 无 time）。
+    inheritance_confidence 口径（A7 ruleConfidence × 字段级匹配强度）：
+      - 1.0：A7 ruleConfidence == 1.0（确定性规则拦截，如 REFINE/AGENT_RUN）
+      - min(1.0, A7_rule_confidence × 0.8)：QUERY/FOLLOW_UP 有抽取实体时
+      - 0.0：完全降级（解析失败 / 无继承字段）
+    """
+    inherited_metric: str | None = None
+    inherited_time: TimeHint | None = None
+    inherited_filters: dict[str, str] | None = None
+    inheritance_confidence: float = 0.0
+
+
+def _parsePlanTime(plan: dict[str, Any] | None) -> TimeHint | None:
+    """从 plan dict 的 conditions 中解析时间表达式（best-effort，绝不抛错）。
+
+    优先级：period (YYYY-MM) > explicit year condition > month > quarter。
+    解析失败 → None。
+    """
+    if not plan:
+        return None
+    conditions: list[Any] = plan.get("conditions") or []
+    if not isinstance(conditions, list):
+        return None
+
+    # 拼成文本供正则扫描（conditions 元素可能是 str / dict / 其他）
+    text_blocks: list[str] = []
+    for c in conditions:
+        if isinstance(c, str):
+            text_blocks.append(c)
+        elif isinstance(c, dict):
+            text_blocks.append(str(c))
+
+    joined = " ".join(text_blocks)
+
+    # period = 'YYYY-MM'（最精确，优先）
+    m_period = _RE_PERIOD.search(joined)
+    if m_period:
+        try:
+            return TimeHint(year=int(m_period.group(1)), month=int(m_period.group(2)))
+        except (ValueError, IndexError):
+            pass
+
+    # quarter = N（与 year 同级，同时存在时两者均取）
+    m_quarter = _RE_QUARTER.search(joined)
+    # year = NNNN
+    m_year = _RE_YEAR.search(joined)
+
+    if m_quarter or m_year:
+        yr: int | None = None
+        qt: int | None = None
+        if m_year:
+            try:
+                yr = int(m_year.group(1))
+            except ValueError:
+                pass
+        if m_quarter:
+            try:
+                qt = int(m_quarter.group(1))
+            except ValueError:
+                pass
+        if yr is not None or qt is not None:
+            return TimeHint(year=yr, quarter=qt)
+
+    # month = N（单独存在时）
+    m_month = _RE_MONTH.search(joined)
+    if m_month:
+        try:
+            return TimeHint(year=None, month=int(m_month.group(1)))
+        except ValueError:
+            pass
+
+    return None
+
+
+def _shiftTimeHint(hint: TimeHint | None, question: str) -> TimeHint | None:
+    """对 TimeHint 应用时间递减：基于 question 内容推断递减方向。
+
+    成功递减 → 新 TimeHint（shifted_from 记录上游值）；无法递减 → 原样返回；
+    hint 为 None → None（不抛错）。
+    """
+    if hint is None:
+        return None
+
+    q = question.strip()
+
+    # 去年 / 上年
+    if any(p in q for p in _LAST_YEAR_PATTERNS) and hint.year is not None:
+        return TimeHint(
+            year=hint.year - 1,
+            month=hint.month,
+            quarter=hint.quarter,
+            shifted_from=hint.year,
+        )
+
+    # 上季度
+    if any(p in q for p in _LAST_QUARTER_PATTERNS) and hint.quarter is not None:
+        new_quarter = hint.quarter - 1
+        new_year = hint.year
+        if new_quarter < 1:
+            new_quarter = 4
+            if new_year is not None:
+                new_year -= 1
+        return TimeHint(
+            year=new_year,
+            month=None,
+            quarter=new_quarter,
+            shifted_from=hint.year or hint.quarter,
+        )
+
+    # 上个月
+    if any(p in q for p in _LAST_MONTH_PATTERNS) and hint.month is not None:
+        new_month = hint.month - 1
+        new_year = hint.year
+        if new_month < 1:
+            new_month = 12
+            if new_year is not None:
+                new_year -= 1
+        return TimeHint(
+            year=new_year,
+            month=new_month,
+            quarter=None,
+            shifted_from=hint.year or hint.month,
+        )
+
+    # 无匹配递减关键词 → 原样返回（不递减）
+    return hint
+
+
+def _mergeFilters(
+    new_filters: dict[str, str] | None,
+    prior_filters: dict[str, str] | None,
+) -> dict[str, str]:
+    """过滤叠加：新过滤与上一轮过滤合并。
+
+    规则（同 key 不覆盖，不同 key 堆叠）：
+    - prior_filters 优先（上一轮已确定的维度不过绕）
+    - new_filters 补全缺失 key
+    """
+    if not new_filters:
+        new_filters = {}
+    if not prior_filters:
+        prior_filters = {}
+    return {**new_filters, **prior_filters}
 
 _CONTEXT_ROUNDS = 5  # 注入上下文的历史轮数（每轮 user + assistant 各一条）
 _CONTEXT_MESSAGE_LIMIT = _CONTEXT_ROUNDS * 2
@@ -317,17 +495,20 @@ class ContextMixin:
         plan: QueryPlan | None,
         sql: str | None,
         resultColumns: list[str],
+        inheritance_snapshot: dict[str, Any] | None = None,
     ) -> SessionQueryState:
         """UPSERT 会话查询状态（session_id 唯一），提交后返回。
 
         存在则更新为新一轮状态并 turn_count+1；否则创建首轮状态（turn_count=1）。
-        更新时把"上一轮"的快照（question + sql）压入 recent_rounds 头部并截断到
+        更新时把上一轮的快照（question + sql）压入 recent_rounds 头部并截断到
         _RECENT_ROUNDS_LIMIT，支持跨多轮 REFINE/FOLLOW_UP 回溯（3-4）。
+
+        inheritance_snapshot（B5）：本轮继承字段快照 JSONB，供下一轮继承链路读取。
         """
         existing = await self._loadQueryState(session, sessionId)
         if existing is not None:
             # 例外说明：ORM 实体是有状态对象，原地更新属性属 SQLAlchemy 标准用法，
-            # 刻意偏离“不可变”规则——identity map 要求复用同一实例提交变更。
+            # 刻意偏离"不可变"规则——identity map 要求复用同一实例提交变更。
             priorSnapshot = _snapshotRound(existing)
             history = [priorSnapshot] + (
                 list(existing.recent_rounds) if existing.recent_rounds else []
@@ -338,6 +519,7 @@ class ContextMixin:
             existing.last_sql = sql
             existing.last_result_columns = resultColumns
             existing.turn_count = (existing.turn_count or 0) + 1
+            existing.inheritance_snapshot = inheritance_snapshot
             session.add(existing)
             await session.commit()
             await session.refresh(existing)
@@ -349,11 +531,158 @@ class ContextMixin:
             last_sql=sql,
             last_result_columns=resultColumns,
             turn_count=1,
+            inheritance_snapshot=inheritance_snapshot,
         )
         session.add(state)
         await session.commit()
         await session.refresh(state)
         return state
+
+    def _resolveInheritedState(
+        self,
+        semanticState,  # SemanticState | None（来自 IntentResult，A7 契约）
+        priorSnapshot: dict[str, Any] | None,  # 上一轮 inheritance_snapshot
+        question: str,  # 本轮问题（用于时间递减判断）
+    ) -> InheritedState:
+        """B5 单一入口：读上一轮 state + semanticState → 解析继承字段 → 返回快照。
+
+        被 5 处入口调用（chat_service.py B 路径 / C 兜底、chat_stream.py B/C、
+        _buildStatePrompt 渲染层），统一继承语义。
+
+        解析失败 best-effort 降级：任何步骤异常 → 空继承 + warning，不阻断主链路。
+        """
+        # Step 1：从 semanticState 读取 metric/dimension/chartType（A7 契约）
+        inherited_metric: str | None = None
+        inherited_time: TimeHint | None = None
+        inherited_filters: dict[str, str] | None = None
+        confidence = 0.0
+
+        try:
+            if semanticState is not None:
+                inherited_metric = getattr(semanticState, "metric", None) or getattr(
+                    semanticState, "dimension", None
+                )
+                # time v1 从 SemanticState 读取（None 占位，B5 补全路径扩展）
+                raw_time = getattr(semanticState, "time", None)
+                if raw_time is not None:
+                    inherited_time = TimeHint(year=None, month=None, quarter=None)
+                # filters v1 同上
+                raw_filters = getattr(semanticState, "filters", None)
+                if raw_filters and isinstance(raw_filters, Mapping):
+                    inherited_filters = dict(raw_filters)
+                # inheritance_confidence 公式：规则置信度 × 字段匹配强度
+                rule_conf = getattr(semanticState, "ruleConfidence", 0.0) or 0.0
+                if rule_conf >= 1.0:
+                    confidence = 1.0  # 确定性规则（REFINE/AGENT_RUN）
+                elif rule_conf > 0:
+                    confidence = min(1.0, rule_conf * 0.8)
+                # 无 metric/dimension 证据时降为 0.0
+                if not inherited_metric and not inherited_filters:
+                    confidence = 0.0
+        except Exception:
+            logger.warning("继承语义解析 semanticState 异常，降级空继承: %s", question)
+
+        # Step 2：从上一轮 plan 解析 time（conditions 中的时间表达式）
+        prior_time: TimeHint | None = None
+        prior_filters: dict[str, str] | None = None
+        try:
+            if priorSnapshot and isinstance(priorSnapshot, dict):
+                raw_prior_time = priorSnapshot.get("inherited_time")
+                if raw_prior_time and isinstance(raw_prior_time, dict):
+                    prior_time = TimeHint(
+                        year=raw_prior_time.get("year"),
+                        month=raw_prior_time.get("month"),
+                        quarter=raw_prior_time.get("quarter"),
+                        shifted_from=raw_prior_time.get("shifted_from"),
+                    )
+                prior_filters = priorSnapshot.get("inherited_filters")
+                if prior_filters and isinstance(prior_filters, dict):
+                    prior_filters = dict(prior_filters)
+        except Exception:
+            logger.warning("继承快照解析 priorSnapshot 异常，降级: %s", question)
+
+        # Step 3：时间递减（省略式追问：「去年呢」「上季度呢」）
+        if prior_time is not None:
+            try:
+                shifted = _shiftTimeHint(prior_time, question)
+                if shifted is not None and shifted is not prior_time:
+                    inherited_time = shifted
+            except Exception:
+                logger.warning("时间递减解析异常，降级保留原时间: %s", question)
+
+        # Step 4：过滤叠加（prior_filters 优先，不覆盖同 key）
+        if prior_filters:
+            if not inherited_filters:
+                inherited_filters = dict(prior_filters)
+            else:
+                inherited_filters = _mergeFilters(inherited_filters, prior_filters)
+
+        # Step 5（B5）：metric/filters 从 priorSnapshot 补全（跨轮传播；
+        # semanticState 只在本轮提供抽取证据，不覆盖已传播的值）
+        if priorSnapshot and isinstance(priorSnapshot, dict):
+            if not inherited_metric:
+                inherited_metric = priorSnapshot.get("inherited_metric")
+            if not inherited_filters:
+                prior_f = priorSnapshot.get("inherited_filters")
+                if prior_f and isinstance(prior_f, dict):
+                    inherited_filters = dict(prior_f)
+
+        return InheritedState(
+            inherited_metric=inherited_metric,
+            inherited_time=inherited_time,
+            inherited_filters=inherited_filters if inherited_filters else None,
+            inheritance_confidence=confidence,
+        )
+
+    @staticmethod
+    def _inheritedStateToSnapshot(state: InheritedState) -> dict[str, Any]:
+        """InheritedState → JSONB-compatible snapshot dict（B5 _saveQueryState 用）。"""
+        result: dict[str, Any] = {
+            "inheritance_confidence": state.inheritance_confidence,
+        }
+        if state.inherited_metric:
+            result["inherited_metric"] = state.inherited_metric
+        if state.inherited_time:
+            t = state.inherited_time
+            time_dict: dict[str, Any] = {}
+            if t.year is not None:
+                time_dict["year"] = t.year
+            if t.month is not None:
+                time_dict["month"] = t.month
+            if t.quarter is not None:
+                time_dict["quarter"] = t.quarter
+            if t.shifted_from is not None:
+                time_dict["shifted_from"] = t.shifted_from
+            if time_dict:
+                result["inherited_time"] = time_dict
+        if state.inherited_filters:
+            result["inherited_filters"] = dict(state.inherited_filters)
+        return result
+
+    @staticmethod
+    def _buildInheritedStatePrompt(state: InheritedState) -> str:
+        """将继承字段渲染为 prompt 小节（B5 追加到 _buildStatePrompt 末尾）。
+
+        与 _buildStatePrompt 同舱：整段经 _sanitizeContext 转义，防注入。
+        """
+        parts: list[str] = []
+        if state.inherited_metric:
+            parts.append(f"  - 继承指标：{state.inherited_metric}")
+        if state.inherited_time:
+            t = state.inherited_time
+            label = f"{t.year or ''}年"
+            if t.quarter:
+                label += f"第{t.quarter}季度"
+            elif t.month:
+                label += f"{t.month}月"
+            parts.append(f"  - 继承时间：{label.strip()}")
+        if state.inherited_filters:
+            filter_parts = [f"{k}={v}" for k, v in state.inherited_filters.items()]
+            parts.append(f"  - 继承过滤：{', '.join(filter_parts)}")
+        if not parts:
+            return ""
+        header = "继承字段（上轮查询已确定的维度，本轮默认沿用，可按需调整）：\n"
+        return header + "\n".join(parts)
 
     @staticmethod
     def _buildStatePrompt(

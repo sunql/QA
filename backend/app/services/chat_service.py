@@ -240,6 +240,8 @@ from app.services.chat_context import (
     _RECENT_ROUNDS_LIMIT,
     _STATE_HISTORY_FIELD_LIMIT_DEFAULT,
     ContextMixin,
+    InheritedState,
+    TimeHint,
 )
 from app.services.chat_usage import UsageMixin
 from app.services.chat_stream import StreamMixin
@@ -596,10 +598,24 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             latency_ms=_elapsed_ms,
             token_cost_usd=float(totalCost),
         )
+        # B5：计算本轮继承字段快照（读 semanticState + 上一轮 plan/snapshot）
+        prior_snapshot: dict[str, Any] | None = None
+        if state is not None:
+            prior_snapshot = (
+                getattr(state, "inheritance_snapshot", None) or
+                ({"inherited_time": None} if state.last_plan else None)
+            )
+        inherited = self._resolveInheritedState(
+            semanticState=getattr(result, "semanticState", None),
+            priorSnapshot=prior_snapshot,
+            question=dto.question,
+        )
+        snap = self._inheritedStateToSnapshot(inherited)
         await self._saveQueryState(
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=finalSql,
             resultColumns=self._columns(data),
+            inheritance_snapshot=snap,
         )
         affinity = await self._buildAffinityStatus(
             session, dto.sessionId, answerConfig.id, answerConfig.model_name,
@@ -1383,6 +1399,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         await self._saveQueryState(
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
+            inheritance_snapshot=None,
         )
         totalTokens = outcome.promptTokens + outcome.completionTokens
         affinity = await self._buildAffinityStatus(
@@ -1433,6 +1450,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         await self._saveQueryState(
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
+            inheritance_snapshot=None,
         )
         totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
         affinityConfig = outcome.sqlConfig or pc.selected

@@ -2145,6 +2145,19 @@ export const enUS = {
       extractAlreadyDone: "Claims already extracted for this page",
       extractFailed: "Extraction failed ({status}), please retry",
       extractStatus: "Extraction status: {status}",
+      confidence: "Confidence",
+      confidenceShort: {
+        HIGH: "High",
+        MEDIUM: "Medium",
+        LOW: "Low",
+        REFUSE: "Refuse",
+      },
+      confidenceLevels: {
+        HIGH: "High confidence, suitable as decision basis",
+        MEDIUM: "Medium confidence, review recommended",
+        LOW: "Low confidence, for reference only",
+      },
+      refuseTooltip: "Cannot determine, reason: {reason}",
     },
     // Knowledge relations (mechanism 2)
     relations: {

@@ -2162,6 +2162,20 @@ export const zhCN = {
       extractAlreadyDone: "该条目已抽过事实原子",
       extractFailed: "抽取失败（{status}），请稍后重试",
       extractStatus: "抽取状态：{status}",
+      // 离散 4 级置信度（v3.1 §12.2）：徽标短标签 + 悬浮完整话术
+      confidence: "置信度",
+      confidenceShort: {
+        HIGH: "高",
+        MEDIUM: "中",
+        LOW: "低",
+        REFUSE: "无法判定",
+      },
+      confidenceLevels: {
+        HIGH: "高置信度，可作为决策依据",
+        MEDIUM: "中等置信度，建议复核",
+        LOW: "低置信度，仅供参考",
+      },
+      refuseTooltip: "无法判定，原因：{reason}",
     },
     // 知识关系（机制 2）
     relations: {

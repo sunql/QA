@@ -9,6 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 
 from app.infrastructure import milvus_client
+from app.infrastructure.milvus_client import _DIM
 
 router = APIRouter(tags=["system"])
 
@@ -24,7 +25,12 @@ async def listEmbeddings(
     type: str | None = Query(default=None, description="class | property | metric"),
     search: str = Query(default="", description="按 name/alias 包含过滤（不区分大小写）"),
 ) -> list[dict]:
-    """返回 ontology_embeddings 条目（不含向量值），可按 type 过滤、按 name/alias 搜索。"""
+    """返回 ontology_embeddings 条目（不含向量值），可按 type 过滤、按 name/alias 搜索。
+
+    dim 取自 milvus_client._DIM（3 个新 collection schema 恒为同维度，bge-m3 = 1024）：
+    listEmbeddingsAcross3Collections 只取元数据（不取 1024 维向量，避免 N×1024 float
+    拉回内存），故 API 不能用 `len(r["embedding"])` —— KeyError 500。
+    """
     if type is not None and type not in _VALID_TYPES:
         raise HTTPException(status_code=422, detail=f"Invalid type: {type!r}")
     rows = milvus_client.listEmbeddingsAcross3Collections()
@@ -37,7 +43,7 @@ async def listEmbeddings(
             if s in (r.get("name") or "").lower()
             or s in (r.get("alias") or "").lower()
         ]
-    # 剔除 embedding 字段，只返回元数据 + dim
+    # 剔除 embedding 字段，只返回元数据 + dim（dim 取自 schema 常量）
     return [
         {
             "ontology_id": r["ontology_id"],
@@ -45,7 +51,7 @@ async def listEmbeddings(
             "name": r["name"],
             "alias": r.get("alias"),
             "description": r.get("description"),
-            "dim": len(r["embedding"]),
+            "dim": _DIM,
         }
         for r in rows
     ]

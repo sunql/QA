@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.dependencies import getCurrentUser
 from app.infrastructure import neo4j_client
 
-router = APIRouter(tags=["system"])
+router = APIRouter(tags=["system"], dependencies=[Depends(getCurrentUser)])
 
 _VALID_LABELS = ("Class", "Property", "Metric")
 

@@ -15,7 +15,7 @@ from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.schemas import TermDictionaryCreate, TermDictionaryRead
 from app.services.term_dictionary_service import TermDictionaryService
 
-router = APIRouter(prefix="/term-dictionary", tags=["term-dictionary"])
+router = APIRouter(prefix="/term-dictionary", tags=["term-dictionary"], dependencies=[Depends(getCurrentUser)])
 _termDictionaryService = TermDictionaryService()
 
 

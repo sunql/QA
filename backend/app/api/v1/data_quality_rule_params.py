@@ -9,11 +9,12 @@ from app.domain.schemas_dq_rule_params import (
     DataQualityRuleParamsUpdate, DqRuleNextCodeRead,
 )
 from app.infrastructure.database import getDb
+from app.dependencies import getCurrentUser
 from app.services.data_quality_rule_params_service import (
     DataQualityRuleParamsService,
 )
 
-router = APIRouter(prefix="/dq-rule-params/rules", tags=["dq-rule-params"])
+router = APIRouter(prefix="/dq-rule-params/rules", tags=["dq-rule-params"], dependencies=[Depends(getCurrentUser)])
 
 
 def _service(session: AsyncSession = Depends(getDb)) -> DataQualityRuleParamsService:

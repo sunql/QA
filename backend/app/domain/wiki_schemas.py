@@ -289,7 +289,8 @@ class EvidenceRead(CamelModel):
     """
 
     id: int
-    claim_id: int
+    # 0098 起可空：SQL_QUERY 型自动证据创建时不挂 claim（蓝图 §5.7）
+    claim_id: int | None = None
     source_type: str
     source_id: str | None = None
     page_number: int | None = None

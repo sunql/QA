@@ -243,6 +243,12 @@ from app.services.chat_context import (
 )
 from app.services.chat_usage import UsageMixin
 from app.services.chat_stream import StreamMixin
+from app.services.evidence_record_service import (
+    resetChatSessionId,
+    resetChatUserId,
+    setChatSessionId,
+    setChatUserId,
+)
 from app.services.chat_domain import DomainCommandMixin
 from app.services.chat_l4 import L4Mixin
 logger = logging.getLogger(__name__)
@@ -317,6 +323,28 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         self._affinityTurns = affinityTurns
 
     async def processMessage(
+        self,
+        dto: ChatRequest,
+        session: AsyncSession,
+        *,
+        user: CurrentUser | None = None,
+    ) -> ChatResponse:
+        """处理一条用户消息（入口包装：透传 chat session_id 到 evidence 记录）。
+
+        v3.1 B2：整条链路内 execute_read_only 自动落 SQL_QUERY evidence，
+        session_id 经 contextvar 透传（evidence_record_service），非 chat
+        调用方默认 None 不阻塞。R2：同时透传服务端 actor，chat 消息落库时
+        打归属标（session_message.user_id，/evidences 归属守卫的数据源）。
+        """
+        token = setChatSessionId(dto.sessionId)
+        userToken = setChatUserId(user.userId if user is not None else None)
+        try:
+            return await self._processMessageInner(dto, session, user=user)
+        finally:
+            resetChatUserId(userToken)
+            resetChatSessionId(token)
+
+    async def _processMessageInner(
         self,
         dto: ChatRequest,
         session: AsyncSession,
@@ -1226,7 +1254,10 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         try:
             adapter = self._adapterProvider(feat.datasource_id, feat)
             _assert_read_only(feat.calculation_logic)
-            raw = adapter.execute_read_only(feat.calculation_logic)
+            # R1 fix（3fc0a15 起缺 await，coroutine 从未被真正执行，L1 FeatureCalc
+            # 链路事实失效）：补 await 真正执行查询；同时 execute_read_only 的
+            # evidence 钩子（B2）也只有在真正 await 后才会触发落库。
+            raw = await adapter.execute_read_only(feat.calculation_logic)
             if raw is None:
                 return None
             if isinstance(raw, list):

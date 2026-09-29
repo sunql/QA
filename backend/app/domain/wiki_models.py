@@ -317,10 +317,12 @@ class Evidence(Base):
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
-    claim_id: Mapped[int] = mapped_column(
+    # 0098 放开 NOT NULL：SQL_QUERY 型自动证据创建时不挂 claim（蓝图 §5.7，
+    # related_claim_ids 由上层填充）；Document 型写路径恒有 claim 不受影响。
+    claim_id: Mapped[int | None] = mapped_column(
         BigIntFk,
         ForeignKey("knowledge_claim.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
     source_type: Mapped[str] = mapped_column(String(30), nullable=False)
     source_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

@@ -1,4 +1,4 @@
-"""seed_menu_config - 幂等 upsert 7 类 35 项菜单（共 42 行）。
+"""seed_menu_config - 幂等 upsert 7 类 36 项菜单（共 43 行）。
 
 与 AppLayout 的旧 key 一一对应；feat-rbac-identity 追加 4 个 RBAC 管理页
 （用户/角色/组织/菜单）叶子项；feat-wiki-knowledge 追加 1 个一级类
@@ -50,6 +50,8 @@ ITEMS: list[dict[str, Any]] = [
     # Smart Analytics
     {"parent": "section.analytics", "code": "item.supplier360", "label_key": "menu.item.supplier360", "icon_code": "barchart", "sort_order": 210, "path": "/supplier-360"},
     {"parent": "section.analytics", "code": "item.supplierRisk", "label_key": "menu.item.supplierRisk", "icon_code": "alert", "sort_order": 220, "path": "/supplier-risk"},
+    # A8（M4 Report 模板 MVP）：「我的报告」页（模板生成 + 审批），挂在智能分析段
+    {"parent": "section.analytics", "code": "item.reports", "label_key": "menu.item.reports", "icon_code": "fund", "sort_order": 230, "path": "/reports"},
     # 企业 Wiki（feat-wiki-knowledge）：二级项 = 机制 1-6 各自的落地面板。
     # 「知识导入」原挂在 section.systemConfig（590），本次归位到本段的 260 ——
     # 它一直是 wiki 的功能，只是先有了页面、后有了分组。
@@ -111,7 +113,7 @@ ITEMS: list[dict[str, Any]] = [
 async def seed_menu_config(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
-    """幂等 upsert 7 个一级类 + 35 个叶子项。返回总行数（42）。
+    """幂等 upsert 7 个一级类 + 36 个叶子项。返回总行数（43）。
 
     冲突键：`code`（全局唯一）。重复运行不新增行，也不刷新任何字段 —— 已存在的行
     完全交给菜单管理 UI 维护（见文件头「UI 优先策略」）。

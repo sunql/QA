@@ -23,14 +23,12 @@ from sqlalchemy import text  # noqa: E402
 from sqlalchemy.exc import IntegrityError  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
-from app.config import getSettings  # noqa: E402
 from app.infrastructure.database import getSessionFactory  # noqa: E402
 from app.infrastructure.milvus_client import (  # noqa: E402
     _CLASS_COLLECTION_NAME,
     _METRIC_COLLECTION_NAME,
     _PROPERTY_COLLECTION_NAME,
     _connect,
-    _connAlias,
     queryClassEmbeddings,
     queryMetricEmbeddings,
     queryPropertyEmbeddings,
@@ -196,7 +194,6 @@ async def reconcile(session: AsyncSession) -> ReconcileReport:
 async def _main() -> int:
     """CLI 入口：连真实 PG + Milvus 跑全量对账，返回 exit_code。"""
     factory = getSessionFactory()
-    settings = getSettings()
 
     async with factory() as session:
         report = await reconcile(session)

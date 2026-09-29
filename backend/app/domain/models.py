@@ -32,7 +32,7 @@ from sqlalchemy import (
 )
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.domain.enums import (
@@ -2251,4 +2251,45 @@ class Nl2sqlWikiTrace(Base):
         return (
             f"<Nl2sqlWikiTrace session={self.session_id} "
             f"{self.ontology_type}#id={self.ontology_id} page={self.page_id}>"
+        )
+
+
+# =============================================================================
+# M4 Report 模板（A8 / v3.1 蓝图 §5.8）
+# =============================================================================
+
+
+class ReportInstance(Base, TimestampMixin):
+    """模板化报告实例（A8 / 蓝图 §5.8 Report Agent → 模板渲染）。
+
+    - 模板存代码不存库（report_templates/ 包），本表只存渲染产物
+    - sections JSONB = 渲染后的分节数据（绑定结果，非 SQL 执行路径）
+    - summary = 恰好 ≤1 次 LLM 的自然语言总结（逐行带 [事实]/[推断]/[假设] 前缀）
+    - 状态机 PENDING_REVIEW → APPROVED / REJECTED（强制人审，蓝图 §21）
+    """
+
+    __tablename__ = "report_instance"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    template_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    params: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    sections: Mapped[list] = mapped_column(JSONB, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="PENDING_REVIEW"
+    )
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    __table_args__ = (
+        Index("ix_report_instance_status", "status"),
+        Index("ix_report_instance_created_by", "created_by"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ReportInstance id={self.id} template={self.template_code} "
+            f"status={self.status}>"
         )

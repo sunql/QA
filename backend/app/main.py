@@ -403,6 +403,7 @@ def createApp() -> FastAPI:
         ontology,
         organizations,
         roles,
+        reports,
         session,
         supplier_360,
         supplier_risk,
@@ -474,6 +475,9 @@ def createApp() -> FastAPI:
         supplier_360.router,
         prefix="/api/v1/supplier-360",
         tags=["supplier-360"],
+    )
+    app.include_router(
+        reports.router, prefix="/api/v1", tags=["reports"]
     )
     app.include_router(
         supplier_risk.router,

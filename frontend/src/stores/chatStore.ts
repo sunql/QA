@@ -224,8 +224,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       try {
         const items = await apiFetchHypotheses(sessionId);
         if (!items.length) return;
+        // v3.1 MB3 M-3：GET 端点只按 session + limit 过滤（无 turn 维度），直接挂载
+        // 会把第 1 轮的假设一路串到后续每轮回答下方，而面板文案是「基于**当前**
+        // 数据…的可能解释」——按 turnQuestion 收敛到本轮问题。
+        // 同问题重复提问的退化情形：过滤后为空则不渲染该区块（宁可不出，不要挂错轮）。
+        const current = items.filter((h) => h.turnQuestion === question);
+        if (!current.length) return;
         set((state) => ({
-          messages: patchLastMessage(state.messages, { hypotheses: items }),
+          messages: patchLastMessage(state.messages, { hypotheses: current }),
         }));
       } catch {
         // 假设面板降级：失败不提示

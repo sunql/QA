@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const chatApi = vi.hoisted(() => ({
   sendMessage: vi.fn(),
   sendMessageStream: vi.fn(),
+  fetchHypotheses: vi.fn(),
 }));
 vi.mock("../api/chat", () => chatApi);
 
@@ -578,5 +579,72 @@ describe("chatStore", () => {
     expect(state.sessionsError).toBe("404 找不到会话");
     // 不污染 chat 区 error
     expect(state.error).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v3.1 MB3 M-3：假设跨轮不串（session 级取数 → turn 级挂载）
+// ---------------------------------------------------------------------------
+
+describe("chatStore 假设跨轮不串（M-3）", () => {
+  const hypothesis = (id: number, turnQuestion: string | null) => ({
+    id,
+    statement: `可能原因 ${id}`,
+    driver: null,
+    verificationSql: "SELECT 1",
+    turnQuestion,
+    createdTime: null,
+  });
+
+  beforeEach(() => {
+    resetStore();
+    vi.clearAllMocks();
+    chatApi.fetchHypotheses.mockResolvedValue([]);
+    chatApi.sendMessage.mockResolvedValue({
+      answer: "查询完成",
+      intent: "query",
+      sql: "SELECT 1",
+      chartType: null,
+      chartOption: null,
+      data: [],
+      tokensUsed: 10,
+      cost: 0,
+      modelName: "m",
+    });
+    useChatStore.getState().setDatasourceId(1);
+  });
+
+  it("第 1 轮假设不挂到第 2 轮回答下方（turnQuestion 过滤）", async () => {
+    // 第 1 轮：后端返回 turnQuestion === "Q1" 的假设
+    chatApi.fetchHypotheses.mockResolvedValue([hypothesis(1, "Q1")]);
+    await useChatStore.getState().sendMessage("Q1");
+    expect(useChatStore.getState().messages[1].hypotheses).toHaveLength(1);
+
+    // 第 2 轮：GET 仍返回同一 session 级列表（端点无 turn 维度）
+    await useChatStore.getState().sendMessage("Q2");
+    const second = useChatStore.getState().messages[3];
+    expect(second.role).toBe("assistant");
+    expect(second.content).toBe("查询完成");
+    // MessageItem 渲染条件：hypotheses && hypotheses.length → 空数组/空值均不渲染
+    expect(second.hypotheses ?? []).toHaveLength(0);
+  });
+
+  it("第 2 轮有本轮假设时只挂本轮（不混入上一轮）", async () => {
+    chatApi.fetchHypotheses.mockResolvedValue([hypothesis(1, "Q1")]);
+    await useChatStore.getState().sendMessage("Q1");
+
+    chatApi.fetchHypotheses.mockResolvedValue([
+      hypothesis(1, "Q1"),
+      hypothesis(2, "Q2"),
+    ]);
+    await useChatStore.getState().sendMessage("Q2");
+    const second = useChatStore.getState().messages[3];
+    expect(second.hypotheses?.map((h) => h.id)).toEqual([2]);
+  });
+
+  it("turnQuestion 为 null 的假设不挂到任何轮次", async () => {
+    chatApi.fetchHypotheses.mockResolvedValue([hypothesis(1, null)]);
+    await useChatStore.getState().sendMessage("Q1");
+    expect(useChatStore.getState().messages[1].hypotheses ?? []).toHaveLength(0);
   });
 });

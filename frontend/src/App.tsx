@@ -30,6 +30,7 @@ import Neo4jGraphPage from "./pages/Neo4jGraphPage";
 import MilvusVectorsPage from "./pages/MilvusVectorsPage";
 import Supplier360Page from "./pages/Supplier360Page";
 import SupplierRiskPage from "./pages/SupplierRiskPage";
+import ReportsPage from "./pages/ReportsPage";
 import AgentRegistryPage from "./pages/AgentRegistryPage";
 import AgentRuntimePage from "./pages/AgentRuntimePage";
 import AdminAuditPage from "./pages/AdminAuditPage";
@@ -100,6 +101,7 @@ export default function App() {
         <Route path="vectors" element={<MilvusVectorsPage />} />
         <Route path="supplier-360" element={<Supplier360Page />} />
         <Route path="supplier-risk" element={<SupplierRiskPage />} />
+        <Route path="reports" element={<ReportsPage />} />
         <Route path="agents/run" element={<AgentRuntimePage />} />
         <Route path="agents" element={<AgentRegistryPage />} />
         <Route path="admin/audit" element={<AdminAuditPage />} />

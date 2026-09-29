@@ -585,3 +585,18 @@ MSG_DQ_EVAL_REPORT_NAME_TOO_LONG = "评估报告名称长度不能超过 {max} �
 # 断连时一个字都还没下发给用户：落库的 assistant 行内容用显式占位，不用空串
 # （空内容行在历史面板上无从解释，也让「为什么这轮没有回答」无处可查）
 MSG_STREAM_INTERRUPTED_EMPTY = "（本轮回答被中断，未产出回答文本）"
+
+# =============================================================================
+# M4 Report 模板（A8）
+# =============================================================================
+
+MSG_REPORT_TEMPLATE_NOT_FOUND = "报告模板不存在: {code}"
+MSG_REPORT_NOT_FOUND = "报告不存在"
+MSG_REPORT_PARAMS_INVALID = "报告参数校验失败: {detail}"
+MSG_REPORT_STRUCTURE_INVALID = "报告模板结构非法: {detail}"
+MSG_REPORT_PLACEHOLDER_INVALID = (
+    "非法占位符（仅支持整串 {{params.xxx}} 且键必须在参数 schema 内）: {detail}"
+)
+MSG_REPORT_SECTION_LIMIT = "报告数据绑定数超过上限 {limit}"
+MSG_REPORT_STATUS_INVALID = "非法报告状态过滤值: {value}"
+MSG_REPORT_ALREADY_REVIEWED = "报告已审批，不能重复审批"

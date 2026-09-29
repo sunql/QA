@@ -266,7 +266,7 @@ def _searchCollection(
     queryEmbedding: list[float],
     topK: int,
 ) -> list[dict[str, Any]]:
-    """Search one specific collection; returns hits in same schema as old searchByEmbedding."""
+    """Search one specific collection; returns hits with keys ontology_id/type/name/alias/description/distance."""
     collection = Collection(collectionName, using=_connAlias())
     collection.load()
     results = collection.search(
@@ -903,11 +903,14 @@ def ensureMetricCollection() -> Collection:
 
 
 def insertEmbeddingsDual(records: list[dict[str, Any]]) -> None:
-    """Dual-write: insert into BOTH old ontology_embeddings AND type-routed new collection.
+    """Dual-write: insert into type-routed new collection.
 
     Per-record routing: ``type='class'`` → ontology_class_embeddings, etc.
     Each new collection's ``external_id`` field is initially empty string; backfill
     (Task M7) will populate it.
+
+    Task 14 (M12-drop): ontology_embeddings 已删除；旧 collection leg 已移除（原
+    ``insertEmbeddings(records)`` 调用会因 collection 缺席抛错；现在直接走 type-routed）。
 
     Raises:
         ValueError: if any record has invalid ``type`` (not in VALID_EMBEDDING_TYPES).
@@ -920,9 +923,6 @@ def insertEmbeddingsDual(records: list[dict[str, Any]]) -> None:
         type_ = r.get("type")
         if type_ not in VALID_EMBEDDING_TYPES:
             raise ValueError(f"Invalid type {type_!r}; must be one of {sorted(VALID_EMBEDDING_TYPES)}")
-
-    # Old collection write (single call to existing function)
-    insertEmbeddings(records)
 
     # New collection write: route by type
     by_type: dict[str, list[dict[str, Any]]] = {}
@@ -1011,19 +1011,16 @@ def closeConnection() -> None:
 
 
 def deleteByOntologyIdDual(ontologyId: int, type: str) -> None:
-    """Dual-delete: 从 old collection 与 type-routed 新 collection 同时删除。
+    """Delete from type-routed new collection (Task 14: ontology_embeddings 已 drop)。
 
-    双写窗口期必须双删：仅删 old 会在新 collection 留幻影行，
-    下一次 insertEmbeddingsDual 又会重建 old，但新 collection 的孤立行
-    导致 reconcile 报 placeholder_failed。
+    历史背景：双写窗口期必须双删；Task 14 之后旧 collection 不存在，dual 删除
+    退化为 type-routed collection 单独删除（原 ``deleteByOntologyId(ontologyId, type)``
+    调用因 collection 缺席无效，已移除）。
 
     type 作用域理由同 deleteByOntologyId：ontology_id 跨类型不唯一。
     """
     if type not in VALID_EMBEDDING_TYPES:
         raise ValueError(f"unknown embedding type: {type!r}")
-
-    # Old collection
-    deleteByOntologyId(ontologyId, type)
 
     # Type-routed new collection
     name_to_ensure = {
@@ -1035,7 +1032,7 @@ def deleteByOntologyIdDual(ontologyId: int, type: str) -> None:
     new_collection.delete(f"ontology_id == {ontologyId}")
     new_collection.flush()
     logger.info(
-        "Dual-deleted Milvus records for ontology_id=%d type=%s",
+        "Deleted Milvus records for ontology_id=%d type=%s",
         ontologyId, type,
     )
 
@@ -1059,3 +1056,69 @@ def listEmbeddingsAcross3Collections() -> list[dict[str, Any]]:
     ):
         rows.extend(query_fn())
     return rows
+
+
+# =============================================================================
+# OLD single-collection API (deprecated; legacy after Task 14 drop)
+# =============================================================================
+# Background: ontology_embeddings collection was dropped in Task 14 of M0-P0.4.
+# These wrappers preserve Python-level API surface (so existing test fixtures
+# and monkeypatches keep working) while redirecting writes/reads to the new
+# type-routed collections (or no-op for safety).
+#
+# ROLLBACK: if drop causes production breakage, recreate the collection via
+# `Collection("ontology_embeddings", schema=...)` and revert these wrappers
+# to their pre-Task-14 implementations (commits 2ba51d1..9ec442a).
+
+
+def insertEmbeddings(records: list[dict[str, Any]]) -> None:
+    """DEPRECATED: legacy single-collection insert. Redirects to insertEmbeddingsDual."""
+    # The old ontology_embeddings collection no longer exists; old API is a
+    # thin wrapper around the type-routed dual-write. Records still land in
+    # the appropriate new collection via type discriminator.
+    insertEmbeddingsDual(records)
+
+
+def searchByEmbedding(
+    queryEmbedding: list[float],
+    topK: int = 5,
+    typeFilter: str | None = None,
+) -> list[dict[str, Any]]:
+    """DEPRECATED: legacy single-collection search. Redirects to type-routed search."""
+    return searchEmbeddingsByTypeRouted(queryEmbedding, topK, typeFilter)
+
+
+def deleteByOntologyId(ontologyId: int, type: str) -> None:
+    """DEPRECATED: legacy single-collection delete. Redirects to dual delete."""
+    if type not in VALID_EMBEDDING_TYPES:
+        raise ValueError(f"unknown embedding type: {type!r}")
+    deleteByOntologyIdDual(ontologyId, type)
+
+
+def deleteByOntologyIds(ontologyIds: list[int], type: str) -> None:
+    """DEPRECATED: legacy bulk delete. No-op shim (no callers in production)."""
+    # No production caller exists; left as a no-op for backward compat with
+    # any future import. Original implementation called old collection which
+    # no longer exists.
+    if type not in VALID_EMBEDDING_TYPES:
+        raise ValueError(f"unknown embedding type: {type!r}")
+    # Intentionally no-op.
+
+
+def listAllEmbeddings() -> list[dict[str, Any]]:
+    """DEPRECATED: legacy single-collection full read. Redirects to 3-collection read."""
+    return listEmbeddingsAcross3Collections()
+
+
+def ensureCollection() -> "Collection | None":
+    """DEPRECATED: legacy single-collection ensure. No-op (collection dropped)."""
+    # The legacy ontology_embeddings collection is intentionally absent.
+    # Production callers have all migrated to ensureClass/Property/MetricCollection.
+    return None
+
+
+def dropCollection() -> None:
+    """DEPRECATED: legacy single-collection drop. No-op (already dropped in Task 14)."""
+    # Intentionally no-op; collection was dropped in Task 14. Kept for
+    # backward compat with test fixtures that called dropCollection() before.
+    pass

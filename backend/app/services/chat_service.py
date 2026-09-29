@@ -1249,7 +1249,10 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         try:
             adapter = self._adapterProvider(feat.datasource_id, feat)
             _assert_read_only(feat.calculation_logic)
-            raw = adapter.execute_read_only(feat.calculation_logic)
+            # R1 fix（3fc0a15 起缺 await，coroutine 从未被真正执行，L1 FeatureCalc
+            # 链路事实失效）：补 await 真正执行查询；同时 execute_read_only 的
+            # evidence 钩子（B2）也只有在真正 await 后才会触发落库。
+            raw = await adapter.execute_read_only(feat.calculation_logic)
             if raw is None:
                 return None
             if isinstance(raw, list):

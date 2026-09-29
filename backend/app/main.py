@@ -162,14 +162,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = getSettings()
     logging.basicConfig(level=getattr(logging, settings.logLevel.upper(), logging.INFO))
     logger.info("启动 QA System 后端 v%s (env=%s)", __version__, settings.appEnv)
-    # Phase 4.5 安全护栏：生产 + stub auth 同时启用应大声告警
-    if settings.appEnv == "production" and os.environ.get("AUTH_STUB_ENABLED", "1") == "1":
-        logger.error(
-            "🚨 安全告警：生产环境 (env=production) 仍在使用 stub auth "
-            "(AUTH_STUB_ENABLED=1)。任何客户端可伪造 X-User-Roles=admin 绕过 ACL。"
-            "生产部署前必须：AUTH_STUB_ENABLED=0 + 反向代理剥离 X-User-* 头，"
-            "或接入 JWT/IdP 替换 getCurrentUser。"
-        )
+    # Phase 4.5 安全护栏：生产环境鉴权配置错误应大声告警。
+    # 判断收敛到 config.productionAuthMisconfiguration（纯函数，可单测）——原内联检查
+    # 只看 AUTH_STUB_ENABLED，漏了 AUTH_MODE（默认 stub），即「生产漏设 AUTH_MODE」
+    # 这一最常见形态当时不会告警。仍然只 logger.error，不阻塞启动。
+    from app.config import productionAuthMisconfiguration
+
+    _authReason = productionAuthMisconfiguration(settings)
+    if _authReason:
+        logger.error("🚨 安全告警：%s", _authReason)
     # config 重复字段批：jwtSecret 曾有两份声明（旧块 default="" 被占位符覆盖），
     # 漏配时静默用公开已知的开发密钥；旧注释承诺的「启动期校验」当时从未实现，此处补上。
     from app.config import jwtSecretInsecurityReason

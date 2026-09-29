@@ -1,7 +1,7 @@
 """id_mapping table — M0-P0.1
 
-Revision ID: 0095
-Revises: 0094_wiki_page_category_id
+Revision ID: 0097
+Revises: 0096
 Create Date: 2026-09-29
 
 id_mapping 表：统一 ID 映射中枢。

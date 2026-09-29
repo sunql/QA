@@ -245,3 +245,45 @@ L1 KPI 命中一次查询执行会落**两条** evidence：`business_db_pool.py:
 - `chat_service` 39 例（含 TD-1 与上述环境类）
 
 **建议**：先修 TD-1（能一次消掉最大的一块），再重新对账基线，避免每次评审重复论证同一批红。
+
+---
+
+## TD-16（P2）· `test_dependencies.py` 一例预存红 —— 与 MCP 的 `Header` 哨兵 bug 同根因
+
+**状态**：待办（2026-09-30 安全批次期间发现，非该批次引入）
+
+`backend/app/tests/unit/test_dependencies.py::test_stub_disabled_raises_permission_denied` 红：
+
+```
+AttributeError: 'Header' object has no attribute 'lower'  @ app/dependencies.py:108
+```
+
+**根因**：该测试**直接调用** FastAPI 依赖函数 `getCurrentUser()` 并传入 `Header` 包装器。依赖函数被直接调用时，未传的参数拿到的是 `fastapi.params.Header` **哨兵对象**而非 `None`——实测该对象 `bool()` 为 **True** 且无 `.lower()`，于是 `authorization.lower()` 必抛。
+
+**同根因的第二处**（安全批次正在修，不在本债目内）：`app/services/mcp_server.py` 的 `_openContext()` 同样直接调用 `getCurrentUser(...)`，导致**全部 10 个 MCP 工具崩溃**。
+
+**归属已核实**：安全批次分支 `fix/security-route-auth` 未改 `dependencies.py` / `test_dependencies.py`
+（`git diff --stat 09eaca2..HEAD` 无匹配）⇒ 预存。
+
+**修法**：测试应走 HTTP 入口（`client` fixture 带鉴权头）而非直接调依赖函数；若要保留直调，须显式传 `authorization=None` 等全部参数。
+
+---
+
+## TD-17（P3）· `productionAuthMisconfiguration` 分支 2 在默认加固配置下是误报
+
+**状态**：待办（2026-09-30 安全批次期间发现；**沿袭自修复前，非该批次新引入**，但该批次把它固化进了 docstring + 测试名）
+
+`backend/app/config.py` 的 `productionAuthMisconfiguration` 第二条分支声称「`AUTH_MODE=real` 但 `AUTH_STUB_ENABLED=1` 时仍构成洞（任何客户端可伪造 `X-User-Roles=admin` 绕过 ACL）」。
+
+**实测该结论在默认加固配置下不成立**：
+- `allowStubWhenReal` 默认 `False`（`app/config.py:76`）
+- `app/dependencies.py:159` 在 `authMode == "real" and not allowStubWhenReal` 时**先**拒绝 stub 头，
+  根本走不到 `:163` 的 `authStubEnabled` 判断
+- ⇒ `AUTH_STUB_ENABLED=1` 不构成洞，该分支只在 `allowStubWhenReal=true` 时成立
+
+**后果**：按推荐配置部署（`APP_ENV=production` + `AUTH_MODE=real` + 不设 `AUTH_STUB_ENABLED`）时，
+**每次启动会打一条误导性的 ERROR**（实为纵深防御建议，不是真实洞）。
+
+**修法**：补上 `allowStubWhenReal` 条件，或把措辞从「洞」降级为「纵深防御建议」。
+
+**旁证**：运行中的 `qa-backend` 容器日志里**没有**这条告警——因为容器 `APP_ENV=development`，生产分支根本没进。

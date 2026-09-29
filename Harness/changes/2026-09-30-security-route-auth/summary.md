@@ -75,25 +75,30 @@
 | POST | `/api/v1/ontology/graph/sync-missing` | `:866` | 匿名批量 reconcile 写 Neo4j |
 | POST | `/api/v1/ontology/classes/{id}/embedding` | `:873` | 匿名重建/覆写单个类 embedding |
 
-### HIGH — 匿名读内部数据模型 / 治理配置（21 条）
+### HIGH — 匿名读内部数据模型 / 治理配置（18 条）
 
-- **本体 schema 全量读**（`ontology.py:94/133/143/196/210/242/291/315/360/421`）：
-  物理表名、列名、别名、join 条件、KPI 公式 ⇒ 注入/提权的高价值侦察面
-- **DQ 规则读**（`data_quality.py:65/97/126`、`data_quality_rule_params.py:24/43`）：
-  目标表/列 + 规则表达式
-- **血缘读**（`data_lineage.py:37/54`）：完整数据流图（系统/表/列/转换/owner）
-- **Neo4j 图读**（`graph.py:31/50`）：节点转储 + 关系
+- **本体 schema 读（9 条）**：`/ontology/classes`、`/classes/{id}`、
+  `/classes/{className}/versions`、`/classes/{classId}/properties`、`/properties`、
+  `/properties/{id}`、`/metrics`、`/joins`、`/relations`
+  ⇒ 物理表名、列名、别名、join 条件、KPI 公式，注入/提权的高价值侦察面
+- **DQ 规则读（3 条）**：`/data-quality/rules`、`/rules/options`、`/rules/{ruleId}`
+- **DQ 规则参数读（2 条）**：`/dq-rule-params/rules`、`/rules/{rule_id}`
+- **血缘读（2 条）**：`/lineage/edges`、`/edges/{edgeId}` ⇒ 完整数据流图
+- **Neo4j 图读（2 条）**：`/system/graph/nodes`、`/nodes/{label}/{nodeId}/relationships`
 
-### MEDIUM / LOW（10 条）
+### MEDIUM / LOW（13 条）
 
-`GET /data-quality/scores`（`data_quality.py:219`）、两条 `next-code`
-（`data_quality.py:107`、`data_quality_rule_params.py:33`）、
-`GET /system/vectors/embeddings|stats`（`vectors.py:24/61`）、
-`GET /wiki/compile/tasks|{taskId}|{taskId}/items`（`wiki_compile.py:65/71/79`，含
-`total_cost_usd` / `selected_model_id` / 错误文本）、
-`GET /term-dictionary`（`term_dictionary.py:23`）、
-`GET /ontology/batch/template`（`ontology.py:667`）、
-`GET /ontology/health/joins`（`ontology.py:730`）。
+`GET /data-quality/scores`、两条 `next-code`（`/data-quality/rules/next-code`、
+`/dq-rule-params/rules/next-code`）、`GET /system/vectors/embeddings`、`/vectors/stats`、
+`GET /wiki/compile/tasks`、`/tasks/{taskId}`、`/tasks/{taskId}/items`（含
+`total_cost_usd` / `selected_model_id` / 错误文本）、`GET /term-dictionary`、
+`GET /ontology/batch/template`、`GET /ontology/health/joins`、`GET /ontology/metrics/{id}`、
+`GET /ontology/search`。
+
+> **计数口径**：46 = CRITICAL 15（写/删）+ HIGH 18（读）+ MEDIUM/LOW 13（读）。
+> 精确集合以守卫测试 `test_noUnauthenticatedRouteOutsideWhitelist` 的失败输出为 SSOT——
+> 本文的行号来自审计时的树，可能与当前行号有少量漂移（如 `/ontology/search`），
+> **以路径为准，不要以行号为准**。
 
 ---
 
@@ -182,3 +187,43 @@
 3. 双向断言生效（无鉴权被拦 + 有鉴权不被拦）
 4. 全量 integration 基线前后对账，报出数字
 5. 部署后实测：46 条路由匿名请求返回 401/403；4 条公开路由仍 200
+
+---
+
+## 八、MCP 面（第 47 条）—— 2026-09-30 追加
+
+Task 1 的任务评审发现：守卫只处理 `APIRoute` 与 `_IncludedRouter`，**Starlette `Mount` 被静默丢弃**，且 floor 断言兜不住（枚举数 389→390，floor 照常通过）。本仓已有 `main.py:556` 的 `app.router.routes.append(Mount("", app=_mcpApp))`。
+
+### 实测暴露面（生产容器 `AUTH_MODE=real`，无任何鉴权头）
+
+| 步骤 | 结果 |
+|---|---|
+| `initialize` | **200**，返回 `mcp-session-id` |
+| `notifications/initialized` | **202** |
+| `tools/list` | **返回全部 10 个工具** |
+| `tools/call wiki_status` | 抵达 handler 并执行，崩于 `AttributeError` |
+
+⇒ **鉴权层完全不覆盖 `/mcp`**（不是「拒绝了」，是「根本没走到」）。
+
+### 伴随缺陷：MCP 整体不可用
+
+`_openContext()` 直接调用 `getCurrentUser(...)`，而后者是 FastAPI 依赖函数——未传的参数拿到 `Header(...)` **哨兵对象**而非 `None`。实测 `Header(default=None, alias='Authorization')` 的 `bool()` 为 **True** 且无 `.lower()`，于是 `getCurrentUser:108` 的 `authorization.lower()` 必抛。
+
+**全部 10 个工具都调 `_openContext()`** ⇒ 所有 MCP 工具都是坏的。`mcp_server.py` 容器版与 HEAD 版 **md5 相同** ⇒ 部署后依旧。
+
+### 耦合（关键）
+
+1. 鉴权不覆盖 `/mcp`（真实缺口）
+2. 但该缺口目前**被上面的 bug 遮住**——工具一执行就崩
+3. ⇒ **单独修 bug 而不加鉴权，会把 2 个写工具（`wiki_update_dimension`、`wiki_update_community_topic`）以默认 `anonymous` + admin 桩身份匿名暴露**
+
+### 处置（用户 2026-09-30 拍板）
+
+**「一并修：先加鉴权再修 bug」** ⇒ Task 2：抽取 `authenticateBearer` helper + `McpAuthMiddleware`（ASGI）+ `_openContext` 改读 ContextVar。Task 3：守卫的 `Mount` 可见性。
+
+### 同时记录（用户拍板「先只记录，单独评估」）
+
+容器实测 `APP_ENV=development`（非 production），且 `AUTH_STUB_ENABLED` 未设（落回默认 `True`）。
+⇒ `main.py:166` 的生产安全护栏**根本没触发**。已核实**伪造 stub 头打不穿 real 模式**
+（`/sessions`、`/models` 带 `X-User-Roles: admin` 仍 403），故现有鉴权本身是好的；
+但 `APP_ENV` 会影响多处行为，改动需单独评估，不在本批次内。

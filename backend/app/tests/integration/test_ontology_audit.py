@@ -30,9 +30,8 @@ def _ontology_payload(entity_type: str, suffix: str) -> dict:
     elif entity_type == "ONTOLOGY_METRIC":
         return {"metricName": f"TestMetric_{suffix}", "formula": "SELECT 1"}
     else:  # ONTOLOGY_JOIN
-        return {
-            "joinName": f"TestJoin_{suffix}",
-        }
+        # OntologyJoinCreate 无 joinName 字段（extra="forbid"）——带上即 422
+        return {}
 
 
 async def _create_dependencies(client, entity_type: str, suffix: str, headers: dict) -> dict:
@@ -65,7 +64,6 @@ async def _create_dependencies(client, entity_type: str, suffix: str, headers: d
             headers=headers,
         )
         return {
-            "joinName": f"TestJoin_{suffix}",
             "sourceClassId": c1.json()["id"],
             "targetClassId": c2.json()["id"],
             "sourceColumns": ["id"],

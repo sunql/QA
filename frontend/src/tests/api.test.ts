@@ -12,7 +12,10 @@ vi.mock("../api/client", () => ({ httpClient: httpMock }));
 const axiosPost = vi.hoisted(() => vi.fn());
 vi.mock("axios", () => ({
   default: {
-    create: () => ({ post: axiosPost }),
+    create: () => ({
+      post: axiosPost,
+      interceptors: { request: { use: vi.fn() } },
+    }),
     __esModule: true,
   },
 }));
@@ -74,7 +77,7 @@ describe("api/modelConfig", () => {
   it("createModel 发起 POST 并返回新模型", async () => {
     const payload: ModelConfigCreate = {
       modelName: "gpt-4o",
-      provider: "OPENAI",
+      provider: "openai",
       apiEndpoint: "https://api.openai.com/v1",
       apiKey: "sk-x",
       costPer1KInput: 0.005,

@@ -30,13 +30,16 @@ CREATE_PAYLOAD = {
 
 
 class _FakeSchemaAdapter:
-    """按 SQL 内容返回预置行集（覆盖 Oracle 三条数据字典查询）。"""
+    """按 SQL 内容返回预置行集（覆盖 Oracle 三条数据字典查询 + ALL_TABLES）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, ownerRows: list[dict] | None = None) -> None:
         self.executed: list[str] = []
+        self.ownerRows = ownerRows or []
 
     async def execute_read_only(self, sql: str) -> list[dict]:
         self.executed.append(sql)
+        if "ALL_TABLES" in sql:
+            return self.ownerRows
         if "ALL_TAB_COLUMNS" in sql:
             return [
                 {"table_name": "PRECEIPT", "column_name": "PTHNUM_0", "data_type": "VARCHAR2", "nullable": 0, "owner": "ZJTH"},
@@ -119,3 +122,69 @@ class TestSchemaApi:
         # 底层连接异常文本不泄露到响应 detail
         assert "业务库不可达" not in resp.json()["detail"]
         assert "服务端日志" in resp.json()["detail"]
+
+
+class TestSchemaOwnerScopingApi:
+    """Oracle owner 作用域化 HTTP 契约：/schemas + ?schema 内省/读取隔离。"""
+
+    PG_PAYLOAD = {
+        "name": "PG-datasource",
+        "type": "postgresql",
+        "host": "db.example.com",
+        "port": 5433,
+        "databaseName": "db",
+        "username": "pg",
+        "password": "secret",
+        "isActive": True,
+        "isDefault": False,
+    }
+
+    async def test_schemas_endpoint_lists_oracle_owners(self, client, monkeypatch) -> None:
+        resp = await client.post("/api/v1/datasources", json=CREATE_PAYLOAD)
+        dsId = resp.json()["id"]
+        adapter = _FakeSchemaAdapter(
+            ownerRows=[
+                {"owner": "THBI"},
+                {"owner": "ZJTH"},
+                {"owner": "bad;owner"},
+                {"owner": "SYS"},
+            ]
+        )
+        _installFakeService(monkeypatch, adapter)
+
+        resp = await client.get(f"/api/v1/datasources/{dsId}/schemas")
+        assert resp.status_code == 200, resp.text
+        # 白名单过滤 + 大写 + 排序
+        assert resp.json() == ["SYS", "THBI", "ZJTH"]
+
+    async def test_schemas_endpoint_empty_for_postgres(self, client) -> None:
+        resp = await client.post("/api/v1/datasources", json=self.PG_PAYLOAD)
+        dsId = resp.json()["id"]
+
+        resp = await client.get(f"/api/v1/datasources/{dsId}/schemas")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == []
+
+    async def test_introspect_and_get_scoped_by_schema_param(self, client, monkeypatch) -> None:
+        """带 ?schema 的内省只写 THBI 缓存；默认 owner（ZJTH）仍 404 → 作用域隔离。"""
+        resp = await client.post("/api/v1/datasources", json=CREATE_PAYLOAD)
+        dsId = resp.json()["id"]
+        adapter = _FakeSchemaAdapter()
+        _installFakeService(monkeypatch, adapter)
+
+        resp = await client.post(f"/api/v1/datasources/{dsId}/introspect?schema=THBI")
+        assert resp.status_code == 200, resp.text
+        assert any("owner = 'THBI'" in sql for sql in adapter.executed)
+        assert not any("owner = 'ZJTH'" in sql for sql in adapter.executed)
+
+        # 读同 schema 缓存命中
+        got = await client.get(f"/api/v1/datasources/{dsId}/schema?schema=THBI")
+        assert got.status_code == 200, got.text
+
+        # 默认 owner（ZJTH）未内省 → 404（schema 作用域隔离生效）
+        miss = await client.get(f"/api/v1/datasources/{dsId}/schema")
+        assert miss.status_code == 404
+
+    async def test_schemas_endpoint_missing_datasource_404(self, client) -> None:
+        resp = await client.get("/api/v1/datasources/9999/schemas")
+        assert resp.status_code == 404

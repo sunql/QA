@@ -8,7 +8,7 @@ _applyRefineDirect 在 REFINE 意图下优先改写上一轮 SQL（行数/排序
 from __future__ import annotations
 
 from app.domain.query_plan import QueryPlan
-from app.services.nl2sql_service import Nl2SqlService, _REFINE_MAX_LIMIT, _normalizeDate
+from app.services.nl2sql_service import Nl2SqlService, _REFINE_MAX_LIMIT_DEFAULT, _normalizeDate
 
 
 def _plan(*props: str) -> QueryPlan:
@@ -131,7 +131,7 @@ class TestRefineDirect:
         sql = "SELECT NAME FROM ZJTH.T LIMIT 10"
         out = _direct(sql, _plan(), "只看前 999999999 条")
         assert out is not None
-        assert out == f"SELECT NAME FROM ZJTH.T LIMIT {_REFINE_MAX_LIMIT}"
+        assert out == f"SELECT NAME FROM ZJTH.T LIMIT {_REFINE_MAX_LIMIT_DEFAULT}"
 
     # ---- 范围感知行数限制（REFINE 已知缺口） ----
 

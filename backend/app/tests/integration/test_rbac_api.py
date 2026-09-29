@@ -80,6 +80,56 @@ async def _rbacSeeds(client: AsyncClient, dbSession: AsyncSession) -> None:
 # --------------------------------------------------------------------------- users
 
 
+class TestUsersMe:
+    """GET /users/me — 个人中心（当前调用方身份，非 admin-only）。
+
+    - X-User-Id 命中 DB 用户 → displayName/email 来自 users 行，
+      roles/departments 以 DB 角色/组织为准（getCurrentUser Phase D 语义）
+    - 未命中（桩回退）→ dbUserId=null，displayName 回退 userId
+    """
+
+    async def test_me_db_user(self, client: AsyncClient) -> None:
+        await _mkUser(client, "me_alice")
+        # 给 me_alice 授 admin 角色以便断言角色来自 DB
+        users = (await client.get("/api/v1/users", headers=AUTH_ADMIN)).json()
+        uid = next(u["id"] for u in users if u["username"] == "me_alice")
+        roles = (await client.get("/api/v1/roles", headers=AUTH_ADMIN)).json()
+        admin_role = next(r["id"] for r in roles if r["code"] == ADMIN_ROLE_CODE)
+        r_set = await client.put(
+            f"/api/v1/users/{uid}/roles", headers=AUTH_ADMIN,
+            json={"roleIds": [admin_role]},
+        )
+        assert r_set.status_code == 204, r_set.text
+
+        r = await client.get("/api/v1/users/me", headers={"X-User-Id": "me_alice"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["userId"] == "me_alice"
+        assert body["displayName"] == "me_alice"
+        assert body["dbUserId"] == uid
+        assert ADMIN_ROLE_CODE in body["roleCodes"]
+
+    async def test_me_stub_fallback(self, client: AsyncClient) -> None:
+        r = await client.get(
+            "/api/v1/users/me",
+            headers={"X-User-Id": "ghost", "X-User-Roles": "analyst",
+                     "X-User-Departments": "procurement"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["userId"] == "ghost"
+        assert body["dbUserId"] is None
+        assert body["roleCodes"] == ["analyst"]
+        assert body["departmentCodes"] == ["procurement"]
+
+    async def test_me_not_shadowed_by_user_id_route(self, client: AsyncClient) -> None:
+        """/me 必须注册在 /{user_id} 之前（路由顺序回归）。"""
+        r = await client.get("/api/v1/users/me", headers=AUTH_ADMIN)
+        assert r.status_code == 200
+        assert "userId" in r.json()
+
+
+
 class TestUsersCrud:
     async def test_create_and_list(self, client: AsyncClient) -> None:
         body = await _mkUser(client, "alice")

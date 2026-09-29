@@ -51,8 +51,11 @@ _SEVERITY_TO_RISK: dict[str, RiskLevel] = {
     "INFO": RiskLevel.LOW,
 }
 
-# LLM factory 签名：与 chatModule._llmFactory 兼容（cfg 参数被忽略，便于复用）
-LlmFactory = Callable[[Any], Any]
+# LLM factory 签名：与 chatModule._llmFactory（= createClient）同形，**cfg 不是占位符**——
+# 工厂需要真实 config 才能解析出 provider/api_key/model_name。传 None 只对
+# 「OPENAI + 环境变量 openaiApiKey」这一种配置有意义，本项目未配置该环境变量，
+# 历史实现 `llm_factory(None)` 因此恒得 None → 风险点永远走 fallback_template。
+LlmFactory = Callable[[Any], Any | None]
 
 
 class _Rule:
@@ -104,9 +107,10 @@ RISK_RULES: dict[str, _Rule] = {
 class SupplierRiskService:
     """供应商风险评估（Phase 5.4 Round 1）。
 
-    assess(session, supplier_key, *, llm_factory=None) 是唯一对外入口：
+    assess(session, supplier_key, *, llm_factory=None, llm_config=None) 是唯一对外入口：
     - supplier 不存在 → NotFoundError（来自 Supplier360Service，与 360° 视图同语义）
-    - LLM 不可用 → fallback_template，risk_points_source=fallback_template
+    - LLM 不可用（缺工厂 / 缺配置 / 工厂给不出客户端）→ fallback_template，
+      risk_points_source=fallback_template，且**不产生任何成本数字**
     """
 
     async def assess(
@@ -115,17 +119,22 @@ class SupplierRiskService:
         supplier_key: Union[str, int],
         *,
         llm_factory: LlmFactory | None = None,
+        llm_config: Any | None = None,
     ) -> SupplierRiskRead:
         """实时评估单供应商风险等级（plan §5.4）。
 
         supplier_key 同时接受 VARCHAR 业务码（如 '10105'）与 BIGINT 代理键。
+
+        ``llm_factory`` + ``llm_config`` 必须成对提供：工厂负责构造客户端，配置提供
+        单价——成本只能按实际使用模型的单价算，本服务无从自行推断。缺任一项则
+        明确降级到 fallback_template（不再是「工厂拿到 None 后抛异常被吞」的隐式降级）。
         """
         view = await Supplier360Service().get360(session, supplier_key)
         contributions = [_toContribution(kpi) for kpi in view.kpis]
         level, level_source = await self._decideLevel_via_rules(view, contributions)
         actions = _buildActions(level)
         risk_points, points_source, prompt_tokens, completion_tokens, cost, model_name = await self._generateRiskPoints(
-            view, contributions, level, llm_factory=llm_factory
+            view, contributions, level, llm_factory=llm_factory, llm_config=llm_config,
         )
         tokens = prompt_tokens + completion_tokens
         return SupplierRiskRead(
@@ -232,23 +241,41 @@ class SupplierRiskService:
         level: RiskLevel,
         *,
         llm_factory: LlmFactory | None,
+        llm_config: Any | None,
     ) -> tuple[str | None, str, int, int, float, str | None]:
         """调 LLM 生成自然语言风险点；LLM 不可用时降级到模板。
 
         返回：(risk_points, source, prompt_tokens, completion_tokens, cost, model_name)
+
+        成本单位与全系统其余路径一致：**USD**，按 ``llm_config`` 的
+        ``cost_per_1k_input`` / ``cost_per_1k_output`` 计。此前硬编码「输入 0.001 /
+        输出 0.002 CNY per 1k token」，与同一张 session_token_usage 台账里其他
+        USD 行混在一起，成本报表与预算降级判断都把人民币当美元用。
         """
-        if llm_factory is None:
-            return (
-                _buildFallbackRiskPoints(contributions),
-                "fallback_template",
-                0,
-                0,
-                0.0,
-                None,
+        fallback = (
+            _buildFallbackRiskPoints(contributions),
+            "fallback_template",
+            0,
+            0,
+            0.0,
+            None,
+        )
+        # 工厂与配置必须成对：只有工厂时无从定价（宁可明确降级，也不写一个来路不明的数字）
+        if llm_factory is None or llm_config is None:
+            return fallback
+
+        # 客户端构造失败（无可用 API key 时 createClient 返回 None，是「无 key」的 SSOT）
+        # 走同一条降级路径。历史实现把它留给下一行的 AttributeError 兜——隐式、无日志，
+        # 且让「工厂传 None 占位」这个 bug 长期隐身。
+        llm = llm_factory(llm_config)
+        if llm is None:
+            logger.warning(
+                "SupplierRisk 无可用 LLM 客户端（model_config_id=%s），降级到 fallback_template",
+                getattr(llm_config, "id", None),
             )
+            return fallback
 
         try:
-            llm = llm_factory(None)  # factory 接受 cfg 占位
             messages = _buildLlmPrompt(view, contributions, level)
             response = await llm.complete(messages)
         except Exception:
@@ -257,14 +284,7 @@ class SupplierRiskService:
                 view.profile.enterprise_key,
                 exc_info=True,
             )
-            return (
-                _buildFallbackRiskPoints(contributions),
-                "fallback_template",
-                0,
-                0,
-                0.0,
-                None,
-            )
+            return fallback
 
         content = getattr(response, "content", "") or ""
         # 真实 BaseLlmClient 返回 LlmResponse（camelCase: promptTokens/completionTokens/modelName）；
@@ -272,11 +292,13 @@ class SupplierRiskService:
         prompt_tokens = int(getattr(response, "promptTokens", None) or getattr(response, "prompt_tokens", 0) or 0)
         completion_tokens = int(getattr(response, "completionTokens", None) or getattr(response, "completion_tokens", 0) or 0)
         model_name = getattr(response, "modelName", None) or getattr(response, "model_name", None)
-        # 价格估算沿用项目惯例：输入 0.001 / 输出 0.002 CNY per 1k token（与现有 chat fakes 对齐）
-        cost = round(
-            (prompt_tokens / 1000.0) * 0.001
-            + (completion_tokens / 1000.0) * 0.002,
-            6,
+        # 与 chat_service._costFor / agent_runtime._cost_for_usage 同公式同口径（USD，按 config 单价）
+        cost = float(
+            (
+                Decimal(prompt_tokens) * Decimal(str(llm_config.cost_per_1k_input))
+                + Decimal(completion_tokens) * Decimal(str(llm_config.cost_per_1k_output))
+            )
+            / Decimal(1000)
         )
         return (
             content,

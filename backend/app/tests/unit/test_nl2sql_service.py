@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+import json
+import logging
+from datetime import date as _date
 from types import SimpleNamespace
 
 import pytest
@@ -15,12 +18,17 @@ import pytest
 from app.domain.enums import DataSourceType
 from app.domain.exceptions import Nl2SqlError
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
-from app.domain.query_plan import QueryPlan
+from app.domain.query_plan import Aggregation, QueryPlan
 from app.services.nl2sql_service import (
+    _NL2SQL_MAX_TOKENS_DEFAULT,
+    _NL2SQL_TRUNCATION_BACKOFF_DEFAULT,
+    _REFINE_MAX_LIMIT_DEFAULT,
+    _OWNER_HINT_MAX_CLASSES_DEFAULT,
+    _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT,
+    _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
+    _VALUE_SAMPLE_VALUE_MAX_DEFAULT,
     Nl2SqlService,
     _renderStatePart,
-    _NL2SQL_MAX_TOKENS,
-    _NL2SQL_TRUNCATION_BACKOFF,
 )
 
 
@@ -32,7 +40,9 @@ def _buildClass(
 
 
 def _llmConfig() -> SimpleNamespace:
-    return SimpleNamespace(model_name="test-model")
+    # temperature：生产代码 generateQueryPlan/generateSQL 会读 modelConfig.temperature
+    # （LLM 模型选择器改动起），桩必须带齐契约字段，否则 AttributeError。
+    return SimpleNamespace(model_name="test-model", temperature=0.0)
 
 
 def _makeJoin(
@@ -287,7 +297,9 @@ class TestBuildSchemaText:
             ],
         )
         text = Nl2SqlService().buildSchemaText([cls])
-        assert "AMT_0 (金额): DECIMAL (column=AMT_0)" in text
+        # 2-5（feat-token-prune）：source_column 与 property_name 相同 → column 回声省略。
+        assert "AMT_0 (金额): DECIMAL" in text
+        assert "(column=AMT_0)" not in text
         assert "业务别名: [营业额, 收入]" in text
         assert "说明: 订单实收金额" in text
 
@@ -431,6 +443,243 @@ class TestBuildSchemaText:
         assert "警告" not in text
 
 
+class TestSchemaCriticalColumnsDigest:
+    """关键过滤列口径摘要（feat-schema-digest, 2026-09-21）。
+
+    schema 文本 28K 字符 / 13 类,TCLCOD_0 这种非 PK 的 description 易被 LLM
+    注意力漏读(2026-09-21 用户场景:C079 外协误入供货量 Top3)。本节在
+    buildSchemaText 顶部插入「关键过滤口径」摘要,把带 description 的关键
+    业务列集中前置,让 LLM 第一眼看见口径。
+    """
+
+    def test_digest_renders_substantive_descriptions_at_top(self) -> None:
+        """有 description 的属性(>=20 字符)进摘要,顶部渲染、原文仍保留。"""
+        cls = _buildClass(
+            "DIM_IMATERIAL",
+            "ZJTH.DIM_IMATERIAL",
+            props=[
+                {
+                    "property_name": "TCLCOD_0",
+                    "data_type": "STRING",
+                    "source_column": "TCLCOD_0",
+                    "description": (
+                        "TCLCOD_0 的值是 'A02','A03','A04','A05' 的为生产型物料;"
+                        "其余为低值易耗/零星物料。统计供货量默认仅生产型物料。"
+                    ),
+                },
+                {
+                    "property_name": "ITMREF_0",
+                    "data_type": "STRING",
+                    "source_column": "ITMREF_0",
+                    "is_primary_key": True,
+                    "description": "物料编号主键",
+                },
+            ],
+        )
+        text = Nl2SqlService().buildSchemaText([cls])
+
+        # 摘要节标记存在
+        assert "### 关键过滤口径摘要" in text
+        # TCLCOD_0 长描述进摘要
+        digestPos = text.index("### 关键过滤口径摘要")
+        digestEnd = text.index("### DIM_IMATERIAL", digestPos)
+        digest = text[digestPos:digestEnd]
+        assert "DIM_IMATERIAL.TCLCOD_0" in digest
+        assert "生产型物料" in digest
+        # 摘要位置必须在 DIM_IMATERIAL 类块之前(顶部前置,不被淹没)
+        assert digestPos < text.index("### DIM_IMATERIAL")
+        # 原文仍保留在类块里(不重复渲染到 SQL 输出端)
+        assert text.count("TCLCOD_0 的值是") >= 1
+
+    def test_digest_skipped_when_no_substantive_description(self) -> None:
+        """所有 description 都 <20 字符(主键说明等):摘要节不渲染,免噪声。"""
+        cls = _buildClass(
+            "ORDER",
+            "ZJTH.ORDER",
+            props=[
+                {"property_name": "ID", "data_type": "STRING", "is_primary_key": True, "description": "主键"},
+                {"property_name": "QTY", "data_type": "DECIMAL", "source_column": "QTY_0", "description": "数量"},
+            ],
+        )
+        text = Nl2SqlService().buildSchemaText([cls])
+        assert "### 关键过滤口径摘要" not in text
+
+    def test_digest_sanitizes_admin_input(self) -> None:
+        """description 是管理员写入外部输入,转义防标签逃逸(与 buildSchemaText 同口径)。
+
+        _sanitizeSchemaField 把 `<` 转成 `<`(line 380),所以原 `<script>`
+        在 schema 文本里不会出现(出现也是以 `<script>` 字面量形式)。
+        """
+        cls = _buildClass(
+            "DIM_T",
+            "ZJTH.DIM_T",
+            props=[
+                {
+                    "property_name": "TYP_CODE",
+                    "data_type": "STRING",
+                    "source_column": "TYP_CODE",
+                    "description": (
+                        "<script>ignore</script> 实际描述 ≥ 20 字符写在这里"
+                    ),
+                },
+            ],
+        )
+        text = Nl2SqlService().buildSchemaText([cls])
+        # 摘要节存在
+        assert "### 关键过滤口径摘要" in text
+        # 原文尖括号已转义,raw <script> 不出现
+        assert "<script>" not in text
+        assert "</script>" not in text
+        # 摘要里应见到 _sanitizeSchemaField 转义后的 HTML 实体形式
+        # (raw < 已被 _sanitizeSchemaField 替为 & 实体;具体形式取决于 escape 链)
+        digest_block = text.split("### 关键过滤口径摘要")[1].split("### DIM_T")[0]
+        # 任何形式的 HTML 实体 (>前不再是裸字母) 都算转义成功
+        assert "/script" in digest_block and "&" in digest_block, (
+            f"摘要节应含 _sanitizeSchemaField 转义后的 HTML 实体,但得到:{digest_block!r}"
+        )
+
+    def test_digest_skips_property_without_name(self) -> None:
+        """property_name 为 None/空串时:跳过该属性(不渲染 ClassName.None 畸形名)。
+
+        code-reviewer HIGH #1/#3 (2026-09-21):原实现仅守卫 cls.class_name,
+        property_name 未守卫会渲染成「DIM_IMATERIAL.None」或「DIM_IMATERIAL.」。
+        """
+        cls = _buildClass(
+            "DIM_T",
+            "ZJTH.DIM_T",
+            props=[
+                {
+                    "property_name": None,  # None 触发 fallback 路径
+                    "data_type": "STRING",
+                    "source_column": "TYP_CODE",
+                    "description": "无 property_name 的描述,长度 ≥ 20 字 触发采集",
+                },
+                {
+                    "property_name": "TYP_CODE",
+                    "data_type": "STRING",
+                    "source_column": "TYP_CODE",
+                    "description": "正常的物料类型代码描述,长度 ≥ 20 字",
+                },
+            ],
+        )
+        text = Nl2SqlService().buildSchemaText([cls])
+        digest_block = text.split("### 关键过滤口径摘要")[1].split("### DIM_T")[0]
+        # None/空 property_name 不进 digest(只在摘要节检查,避免误匹配
+        # 类块里 "DIM_T.TYP_CODE" 这种合法子串)
+        assert "DIM_T.None" not in digest_block
+        # 摘要行格式严格匹配 "- ClassName.PropertyName: desc",
+        # 不应出现 "- DIM_T.: ..." 这种尾部点号的畸形名
+        import re as _re
+        malformed = _re.findall(r"^- DIM_T\.[^A-Za-z_]+: ", digest_block, _re.MULTILINE)
+        assert not malformed, f"摘要含畸形属性名:{malformed!r}"
+        # 正常 property_name 进 digest
+        assert "DIM_T.TYP_CODE" in digest_block
+
+    def test_digest_renders_in_deterministic_order(self) -> None:
+        """摘要顺序按 (class_name, property_name) 字典序:同输入任意顺序输出一致。
+
+        code-reviewer HIGH #2 (2026-09-21):原实现按类/属性 list 迭代顺序追加,
+        同一组类以不同列表序传入会得到不同 digest → 不可重现 prompt + 测试
+        flakiness。修复后排序稳定。
+        """
+        propA = {
+            "property_name": "ZZZ_CODE",
+            "data_type": "STRING",
+            "source_column": "ZZZ_CODE",
+            "description": "Z 类代码描述,长度 ≥ 20 字 触发采集",
+        }
+        propB = {
+            "property_name": "AAA_CODE",
+            "data_type": "STRING",
+            "source_column": "AAA_CODE",
+            "description": "A 类代码描述,长度 ≥ 20 字 触发采集",
+        }
+        clsX = _buildClass("DIM_X", "ZJTH.DIM_X", props=[propA, propB])
+        clsY = _buildClass("DIM_Y", "ZJTH.DIM_Y", props=[propA, propB])
+
+        # 顺序 1: [X, Y]
+        text1 = Nl2SqlService().buildSchemaText([clsX, clsY])
+        # 顺序 2: [Y, X], propA/propB 顺序也交换
+        text2 = Nl2SqlService().buildSchemaText(
+            [
+                _buildClass("DIM_Y", "ZJTH.DIM_Y", props=[propB, propA]),
+                _buildClass("DIM_X", "ZJTH.DIM_X", props=[propB, propA]),
+            ]
+        )
+        # 提取摘要部分
+        digest1 = text1.split("### 关键过滤口径摘要")[1].split("### DIM_")[0]
+        digest2 = text2.split("### 关键过滤口径摘要")[1].split("### DIM_")[0]
+        assert digest1 == digest2, (
+            f"digest 顺序依赖输入顺序 → 不可重现 prompt。\n"
+            f"  顺序1: {digest1!r}\n  顺序2: {digest2!r}"
+        )
+        # 字典序:DIM_X.AAA_CODE 早于 DIM_X.ZZZ_CODE,DIM_Y.*
+        assert digest1.index("DIM_X.AAA_CODE") < digest1.index("DIM_X.ZZZ_CODE")
+        assert digest1.index("DIM_X.ZZZ_CODE") < digest1.index("DIM_Y.AAA_CODE")
+
+    def test_digest_caps_item_count(self) -> None:
+        """条目数硬封顶 50(security-reviewer MEDIUM)。
+
+        防恶意管理员堆 description 撑爆 schema prompt:仅渲染前 50 条,
+        超量触发 logger.warning(测试里不强制断言日志,只验证数量上限生效)。
+        """
+        # 造 60 个不同 property,都命中关键词
+        many_classes = [
+            _buildClass(
+                f"DIM_{i:02d}",
+                f"ZJTH.DIM_{i:02d}",
+                props=[
+                    {
+                        "property_name": "TYP_CODE",
+                        "data_type": "STRING",
+                        "source_column": "TYP_CODE",
+                        "description": f"类型代码描述 {i},长度 ≥ 20 字 触发采集",
+                    }
+                ],
+            )
+            for i in range(60)
+        ]
+        text = Nl2SqlService().buildSchemaText(many_classes)
+        # 摘要节存在
+        assert "### 关键过滤口径摘要" in text
+        # 摘要里最多 50 行 "- ClassName.PropertyName: ..." 格式
+        import re as _re
+        item_lines = _re.findall(r"^- DIM_\d{2}\.TYP_CODE: ", text, _re.MULTILINE)
+        assert len(item_lines) == 50, (
+            f"摘要条数应被封顶在 50,实际 {len(item_lines)}"
+        )
+
+    def test_digest_truncates_long_descriptions(self) -> None:
+        """单条 description 长度硬封顶 200 字(security-reviewer MEDIUM)。
+
+        真实场景下 ontology_property.description Pydantic schema 层有 500 字 cap,
+        但攻击者可绕过 schema 走 DB 直写;渲染层硬封顶作为防御纵深。
+        """
+        long_desc = "A" * 500  # 远超 200 字封顶
+        cls = _buildClass(
+            "DIM_T",
+            "ZJTH.DIM_T",
+            props=[
+                {
+                    "property_name": "TYP_CODE",
+                    "data_type": "STRING",
+                    "source_column": "TYP_CODE",
+                    "description": long_desc,
+                }
+            ],
+        )
+        text = Nl2SqlService().buildSchemaText([cls])
+        # 摘要里的 description 长度 <= 200 + "…"(1 字符)
+        digest_block = text.split("### 关键过滤口径摘要")[1].split("### DIM_T")[0]
+        # 取 - DIM_T.TYP_CODE: 后面的内容
+        line = digest_block.split("- DIM_T.TYP_CODE: ", 1)[1].split("\n", 1)[0]
+        assert len(line) <= 201, (
+            f"摘要单条 description 应 ≤ 200 字 + '…',实际 {len(line)} 字:{line!r}"
+        )
+        # 截断标记 "…" 存在
+        assert line.endswith("…")
+
+
 class TestParseSqlFromResponse:
     def test_extracts_from_sql_fence(self) -> None:
         content = '参考下面的 SQL：\n```sql\nSELECT 1 FROM DUAL\n```\n完毕'
@@ -491,7 +740,7 @@ class TestGenerateSql:
         cls = _buildClass("PRECEIPT", "PRECEIPT")
         await service.generateSql("收货数量", [cls], fake, _llmConfig(), maxRetries=0)
         assert fake.kwargsCalls[0]["temperature"] == 0.0
-        assert fake.kwargsCalls[0]["maxTokens"] == _NL2SQL_MAX_TOKENS
+        assert fake.kwargsCalls[0]["maxTokens"] == _NL2SQL_MAX_TOKENS_DEFAULT
 
     async def test_retries_when_response_truncated(self) -> None:
         """0-2：回复达到 token 上限（可能截断）时注入错误重试，不执行截断 SQL。"""
@@ -504,7 +753,7 @@ class TestGenerateSql:
                 self.calls.append([(m.role, m.content) for m in messages])
                 if len(self.calls) == 1:
                     resp = _Resp("```sql\nSELECT NAME FROM PRECEIPT\n```")  # 截断的 SQL
-                    resp.completionTokens = _NL2SQL_MAX_TOKENS
+                    resp.completionTokens = _NL2SQL_MAX_TOKENS_DEFAULT
                     return resp
                 return _Resp("```sql\nSELECT NAME FROM PRECEIPT GROUP BY NAME\n```")
 
@@ -531,7 +780,7 @@ class TestGenerateSql:
                 self.kwargsCalls.append(kwargs)
                 if len(self.calls) == 1:
                     resp = _Resp("```sql\nSELECT NAME FROM PRECEIPT\n```")
-                    resp.completionTokens = _NL2SQL_MAX_TOKENS
+                    resp.completionTokens = _NL2SQL_MAX_TOKENS_DEFAULT
                     return resp
                 return _Resp("```sql\nSELECT NAME FROM PRECEIPT GROUP BY NAME\n```")
 
@@ -540,8 +789,8 @@ class TestGenerateSql:
         fake = _TruncatedOnceLlm()
         result = await service.generateSql("收货数量", [cls], fake, _llmConfig(), maxRetries=1)
         assert result.sql == "SELECT NAME FROM PRECEIPT GROUP BY NAME"
-        assert fake.kwargsCalls[0]["maxTokens"] == _NL2SQL_MAX_TOKENS
-        assert fake.kwargsCalls[1]["maxTokens"] == _NL2SQL_TRUNCATION_BACKOFF  # 重试预算翻倍
+        assert fake.kwargsCalls[0]["maxTokens"] == _NL2SQL_MAX_TOKENS_DEFAULT
+        assert fake.kwargsCalls[1]["maxTokens"] == _NL2SQL_TRUNCATION_BACKOFF_DEFAULT  # 重试预算翻倍
 
     async def test_truncation_budget_caps_at_double(self) -> None:
         """0-2 交互修复：连续截断时重试预算封顶为两倍上限，不无界增长。"""
@@ -567,7 +816,7 @@ class TestGenerateSql:
             await service.generateSql("收货数量", [cls], fake, _llmConfig(), maxRetries=2)
         # 预算 2048 → 4096 → 4096（封顶），不随重试次数无界增长
         assert [c["maxTokens"] for c in fake.kwargsCalls] == [
-            _NL2SQL_MAX_TOKENS, _NL2SQL_TRUNCATION_BACKOFF, _NL2SQL_TRUNCATION_BACKOFF,
+            _NL2SQL_MAX_TOKENS_DEFAULT, _NL2SQL_TRUNCATION_BACKOFF_DEFAULT, _NL2SQL_TRUNCATION_BACKOFF_DEFAULT,
         ]
 
     async def test_generate_sql_injects_execution_error(self) -> None:
@@ -627,6 +876,25 @@ class TestGenerateSql:
         result = await service.generateSql("问题", [], fake, _llmConfig(), maxRetries=2)
         assert result.sql == "SELECT COUNT(*) AS CNT FROM ZJTH.PRECEIPT"
         assert len(fake.calls) == 2
+
+    async def test_safety_rejection_feeds_reason_back_to_retry_prompt(self) -> None:
+        """拒绝原因必须回注重试反馈，否则 LLM 只被告知「未通过」而无法自愈（M2）。
+
+        用侧信道函数（M1 新增黑名单）作被拒样本：既验证原因文本回注，
+        也验证 M1 的判定结果确实走的是同一条重试链路。
+        """
+        fake = _FakeLlm([
+            "```sql\nSELECT pg_sleep(5) FROM DUAL\n```",
+            "```sql\nSELECT COUNT(*) AS CNT FROM ZJTH.PRECEIPT\n```",
+        ])
+        service = Nl2SqlService()
+        result = await service.generateSql("问题", [], fake, _llmConfig(), maxRetries=2)
+        retryUserPrompt = fake.calls[1][1][1]
+        # 具体违规点（函数名）必须可见
+        assert "PG_SLEEP" in retryUserPrompt
+        # 且不得回显被拒 SQL 本体：避免把失败模式喂回给模型迭代
+        assert "pg_sleep(5)" not in retryUserPrompt
+        assert result.sql == "SELECT COUNT(*) AS CNT FROM ZJTH.PRECEIPT"
 
     async def test_exhausts_retries_raises(self) -> None:
         fake = _FakeLlm(["```sql\nDELETE FROM T\n```", "```sql\nUPDATE T SET X=1\n```"])
@@ -740,8 +1008,11 @@ class TestGenerateSql:
     # ---- 范围感知行数限制 prompt 注入（cases 18-21）----
 
     async def test_plan_prompt_contains_row_limit_rule(self) -> None:
-        """18：计划阶段 system prompt 必须引导模型按"是否有范围"填 rowLimit。"""
-        fake = _FakeLlm(["```json\n{} \n```"])
+        """18：计划阶段 system prompt 必须引导模型按"是否有范围"填 rowLimit。
+        方案B 后给出带 selectedClasses 的合法计划。"""
+        fake = _FakeLlm(
+            ['{"target": "查询", "selectedClasses": ["PRECEIPT"]}']
+        )
         service = Nl2SqlService()
         cls = _buildClass("PRECEIPT", "ZJTH.PRECEIPT", alias="收货单")
         await service.generateQueryPlan("列出所有收货记录", [cls], fake, _llmConfig())
@@ -844,7 +1115,7 @@ class TestPriorStateDirectiveForEntityList:
 
     async def test_plan_prompt_injects_strong_directive_when_prior_state(self) -> None:
         """plan 阶段在 priorState 非空时注入 WHERE IN 强指令。"""
-        fake = _FakeLlm(["{}"])
+        fake = _FakeLlm(['{"target": "查询", "selectedClasses": ["PRECEIPT"]}'])
         service = Nl2SqlService()
         cls = _buildClass("PRECEIPT", "ZJTH.PRECEIPT", alias="收货单")
         prior = "<entity_list>\nMATERIAL_ID: M001, M002\n</entity_list>"
@@ -875,7 +1146,7 @@ class TestPriorStateDirectiveForEntityList:
 
     async def test_plan_prompt_no_prior_state_block(self) -> None:
         """priorState 为空时 plan prompt 不含 <previous_query_state> 段（不污染单步路径）。"""
-        fake = _FakeLlm(["{}"])
+        fake = _FakeLlm(['{"target": "查询", "selectedClasses": ["PRECEIPT"]}'])
         service = Nl2SqlService()
         cls = _buildClass("PRECEIPT", "ZJTH.PRECEIPT", alias="收货单")
         await service.generateValidatedPlan(
@@ -886,7 +1157,7 @@ class TestPriorStateDirectiveForEntityList:
 
     async def test_plan_and_sql_prompts_share_directive_text(self) -> None:
         """plan 与 sql prompt 的强指令段文案必须一致（_renderStatePart 共享）。"""
-        fakePlan = _FakeLlm(["{}"])
+        fakePlan = _FakeLlm(['{"target": "查询", "selectedClasses": ["PRECEIPT"]}'])
         service = Nl2SqlService()
         cls = _buildClass("PRECEIPT", "ZJTH.PRECEIPT", alias="收货单")
         prior = "<entity_list>\nMATERIAL_ID: M001, M002\n</entity_list>"
@@ -1197,3 +1468,722 @@ def _buildJoinedClasses():
         system = fake.calls[0][0][1]
         assert "时间粒度" in system
         assert "DATE_FORMAT" in system
+
+
+class TestPerGroupTopNPrompts:
+    """2026-09-09：两阶段对「分别/各/每个 X 的 Top N」的逐组取前 N 引导。
+
+    计划阶段：模型须输出 partitionBy/perGroupLimit 而非全局 rowLimit=N×组数；
+    SQL 阶段：计划含「每组 Top-N」时用 ROW_NUMBER() OVER (PARTITION BY …) 实现。
+    """
+
+    @staticmethod
+    def _cls() -> OntologyClass:
+        return _buildClass(
+            "PRECEIPT",
+            "ZJTH.PRECEIPT",
+            alias="收货单",
+            props=[
+                {"property_name": "BPSNUM", "source_column": "BPSNUM_0"},
+                {"property_name": "MATERIAL", "source_column": "MAT_0"},
+                {"property_name": "QTY", "source_column": "QTY_0"},
+            ],
+        )
+
+    @staticmethod
+    def _partitionPlan() -> QueryPlan:
+        return QueryPlan.from_dict(
+            {
+                "target": "三个供应商各自的 Top3 物料",
+                "selectedClasses": ["PRECEIPT"],
+                "selectedProperties": ["BPSNUM", "MATERIAL", "QTY"],
+                "aggregations": [{"function": "SUM", "property": "QTY", "alias": "TOTAL_QTY"}],
+                "groupBy": ["BPSNUM", "MATERIAL"],
+                "sortBy": [{"property": "TOTAL_QTY", "direction": "desc"}],
+                "partitionBy": ["BPSNUM"],
+                "perGroupLimit": 3,
+            }
+        )
+
+    async def test_plan_prompt_guides_per_group_topn(self) -> None:
+        fake = _FakeLlm(['{"target": "查询", "selectedClasses": ["PRECEIPT"]}'])
+        service = Nl2SqlService()
+        await service.generateQueryPlan(
+            "分别看这三个供应商供货量最大的三种物料", [self._cls()], fake, _llmConfig(),
+        )
+        system = fake.calls[0][0][1]
+        # JSON 模板须暴露 partitionBy / perGroupLimit 槽位
+        assert '"partitionBy"' in system
+        assert '"perGroupLimit"' in system
+        # 规则明确：分别/各/每个 X 的 top N → 每组各取前 N；禁止 N×组数近似全局截断
+        assert "每组各取前" in system
+        assert "N×组数" in system
+        assert "ROW_NUMBER() OVER (PARTITION BY" in system
+
+    async def test_sql_prompt_requires_row_number_for_partition_plan(self) -> None:
+        fake = _FakeLlm(["```sql\nSELECT 1 FROM DUAL\n```"])
+        service = Nl2SqlService()
+        plan = self._partitionPlan()
+        await service.generateSql(
+            "分别看这三个供应商供货量最大的三种物料", [self._cls()], fake, _llmConfig(),
+            maxRetries=0, plan=plan,
+        )
+        system = fake.calls[0][0][1]
+        # planToText 渲染的逐组 Top-N 行进入 SQL 阶段 prompt
+        assert "每组 Top-N" in system
+        assert "ROW_NUMBER() OVER (PARTITION BY" in system
+        # 既有行数规则不丢（regression guard）
+        assert "行数限制以查询计划为准" in system
+        assert "不要自行限制行数" in system
+        # 安全红线：不引入 FETCH FIRST N ROWS ONLY 字面量
+        assert "FETCH FIRST N ROWS ONLY" not in system
+
+
+class TestScopeHintPromptInjection:
+    """主子问题并集注入：主问题的时间/范围限定经 scopeQuestion 落入
+    计划与 SQL 阶段 user prompt，子问题不再丢失「上半年」类条件。
+
+    现有实现（bug）：scopeQuestion 只在 _applyScopeRowLimit 决策行数，
+    从未到达 prompt。修复：user prompt 末尾追加 <scope_hint> 主问原文</scope_hint>
+    段，强指令化"主问的范围限定适用于本步"，并附带 instructions 引导模型把
+    时间/范围条件写入 conditions / WHERE；scopeQuestion=None（单步）则不注入。
+    """
+
+    def _cls(self) -> OntologyClass:
+        return OntologyClass(
+            class_name="PRECEIPT",
+            source_table="T_PRECEIPT",
+            properties=[
+                OntologyProperty(property_name="BPSNUM", source_column="BPSNUM"),
+                OntologyProperty(property_name="QTY", source_column="QTY"),
+                OntologyProperty(property_name="RCPDATE", source_column="RCPDATE"),
+            ],
+        )
+
+    @staticmethod
+    def _validPlanJson() -> str:
+        plan = QueryPlan(
+            target="各供应商收货数量",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM",),
+        )
+        return json.dumps(plan.to_dict(), ensure_ascii=False)
+
+    async def test_plan_user_prompt_includes_scope_hint_block(self) -> None:
+        """scopeQuestion 注入 _buildPlanUserPrompt：主问原文出现在 <scope_hint> 块。
+
+        主问含时间词，子问题未含；prompt 必须显式带主问让模型继承 conditions。
+        """
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "查各供应商收货数量",
+            errors=[],
+            scopeQuestion="公司2025年上半年的采购情况",
+        )
+        assert "<scope_hint>" in prompt
+        assert "</scope_hint>" in prompt
+        assert "公司2025年上半年的采购情况" in prompt
+        assert "主问题" in prompt or "主问" in prompt or "主问题（多步场景）" in prompt
+        # 安全红线：scope 块经转义/框定（数据非指令），不裸注入
+        assert "_sanitizeContext" not in prompt  # 不暴露实现细节字面量
+        # 子问题原文仍存在
+        assert "查各供应商收货数量" in prompt
+
+    async def test_plan_user_prompt_omits_scope_hint_when_unset(self) -> None:
+        """scopeQuestion=None（单步场景）时不注入 <scope_hint>，避免无意义冗余。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt("查各供应商收货数量", errors=[])
+        assert "<scope_hint>" not in prompt
+        assert "</scope_hint>" not in prompt
+
+    async def test_sql_user_prompt_includes_scope_hint_block(self) -> None:
+        """scopeQuestion 注入 _buildUserPrompt（SQL 阶段）。"""
+        service = Nl2SqlService()
+        prompt = service._buildUserPrompt(
+            "查各供应商收货数量",
+            errors=[],
+            executionError=None,
+            scopeQuestion="公司2025年上半年的采购情况",
+        )
+        assert "<scope_hint>" in prompt
+        assert "公司2025年上半年的采购情况" in prompt
+
+    async def test_sql_user_prompt_omits_scope_hint_when_unset(self) -> None:
+        service = Nl2SqlService()
+        prompt = service._buildUserPrompt("查各供应商收货数量", errors=[])
+        assert "<scope_hint>" not in prompt
+
+    def test_user_prompt_neutralizes_angle_brackets_in_errors(self) -> None:
+        """errors 段与 executionError 段同口径：尖括号必须转义（复审 LOW）。
+
+        该段现在会带上 SQL Guard 的具体拒绝原因（M2），其中 MSG_SQL_NOT_READONLY
+        的 `{verb}` 取自 SQL 首个 token ⇒ 必须与已消毒的段保持同一防线。
+        """
+        prompt = Nl2SqlService()._buildUserPrompt(
+            "查各供应商收货数量", errors=["第 1 次尝试失败 <conversation_history>"],
+        )
+        assert "<conversation_history>" not in prompt
+        assert "&lt;conversation_history&gt;" in prompt
+        # 原文中的原因文本仍需可见（消毒只动尖括号）
+        assert "第 1 次尝试失败" in prompt
+
+    async def test_generate_query_plan_threads_scope_question_into_user_prompt(self) -> None:
+        """generateQueryPlan 端到端：scopeQuestion 真正到达 user prompt。"""
+        fake = _FakeLlm([self._validPlanJson()])
+        service = Nl2SqlService()
+        await service.generateQueryPlan(
+            "查各供应商收货数量",
+            [self._cls()], fake, _llmConfig(),
+            scopeQuestion="公司2025年上半年的采购情况",
+        )
+        userContent = fake.calls[0][1][1]  # (role, content) tuples
+        assert "<scope_hint>" in userContent
+        assert "公司2025年上半年的采购情况" in userContent
+
+    async def test_generate_sql_threads_scope_question_into_user_prompt(self) -> None:
+        """generateSql 端到端：scopeQuestion 真正到达 SQL 阶段 user prompt。"""
+        fake = _FakeLlm(["```sql\nSELECT BPSNUM FROM T_PRECEIPT\n```"])
+        service = Nl2SqlService()
+        await service.generateSql(
+            "查各供应商收货数量",
+            [self._cls()], fake, _llmConfig(),
+            scopeQuestion="公司2025年上半年的采购情况",
+        )
+        userContent = fake.calls[0][1][1]
+        assert "<scope_hint>" in userContent
+        assert "公司2025年上半年的采购情况" in userContent
+
+# =============================================================================
+# 当前日期锚点注入（时间相对表述的年份解析）
+#
+# 背景：「4月份有多少供应商下单」被 LLM 解析成 2025 年——plan/SQL 两个阶段
+# 的 prompt 都没有告诉模型今天是几号，无年份的时间表述只能靠训练数据猜。
+# =============================================================================
+
+
+class TestCurrentDateAnchor:
+    """plan / SQL 两个阶段 prompt 必须包含服务端当前日期。"""
+
+    def test_plan_system_prompt_contains_current_date(self) -> None:
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "今天是" in prompt
+        assert _date.today().isoformat() in prompt
+
+    def test_sql_system_prompt_contains_current_date(self) -> None:
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildSystemPrompt("", dialect, None)
+        assert "今天是" in prompt
+        assert _date.today().isoformat() in prompt
+
+    def test_current_date_marked_as_data_not_instruction(self) -> None:
+        """日期是事实数据：注明由服务端提供，防 prompt 注入面扩大。"""
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "服务端" in prompt
+
+
+class TestEntityNameColumnRule:
+    """plan prompt 应引导 LLM 对实体列同时选出中文名称列（编码+名称都展示）。
+
+    背景：订单明细表只有供应商编号 FK，名称在供应商主表（需 JOIN）；
+    无引导时模型走最短路径只选编码列，结果可读性差。
+    """
+
+    def test_plan_prompt_guides_selecting_entity_name_column(self) -> None:
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "名称列" in prompt
+        assert "供应商" in prompt
+
+    def test_plan_prompt_requires_join_only_from_directory(self) -> None:
+        """补名称的 JOIN 仍受目录约束：提示语须重申只用 JOIN 关系段落。"""
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "JOIN 关系" in prompt
+
+
+# =============================================================================
+# 聚合类问题 schema 选择建议（feat-ontology-recall-pruning step E）
+#
+# 背景：用户问"占比 / 排名 / TOP3 / 总数"时，LLM 在 DWD/ODS 明细表层做除法
+# 或漏掉窗口函数公式 → SQL 不算百分比 / 错把供货期内的 D1 后几年裁掉。
+# 修复：用户问题命中聚合关键词时，在 plan user prompt 追加「Schema 选择建议」
+# 段落，引导 LLM 优先选用 ADS 黄金路径视图（ADS_SUPPLIER_360 /
+# ADS_SUPPLIER_ORDER_DETAIL）以及窗口函数 SUM(x)/SUM(SUM(x)) OVER() 而非
+# CROSS JOIN 笛卡尔积。这是软约束，配合 D 步 ADS 加权召回更稳。
+# =============================================================================
+
+
+class TestAggregateSchemaHint:
+    """plan user prompt 在聚合类问题下追加 schema 选择建议段（仅文本注入）。"""
+
+    def test_plan_user_prompt_injects_schema_hint_when_question_has_占比(self) -> None:
+        """占比 → 注入「Schema 选择建议」段，提及 ADS 视图与窗口函数。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "B019、B125、D1 三家供应商 3 月供货量 top3 物料占比", errors=[],
+        )
+        assert "Schema 选择建议" in prompt
+        assert "ADS" in prompt
+        # 关键算法提示：窗口函数而非笛卡尔积
+        assert "SUM(SUM" in prompt or "OVER" in prompt
+
+    def test_plan_user_prompt_injects_schema_hint_for_topN_keyword(self) -> None:
+        """TOP3 排名类问题也触发（不只占比）。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "TOP3 物料名称", errors=[],
+        )
+        assert "Schema 选择建议" in prompt
+
+    def test_plan_user_prompt_omits_schema_hint_when_no_aggregate_keyword(self) -> None:
+        """纯主数据查询（无占比 / 排名 / total 等）不注入，避免无意义冗余。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "B019 圣特供应商编号是多少", errors=[],
+        )
+        assert "Schema 选择建议" not in prompt
+
+    def test_plan_user_prompt_injects_schema_hint_for_total_keyword(self) -> None:
+        """total 英文关键词也触发（大小写不敏感）。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "suppliers total orders per month", errors=[],
+        )
+        assert "Schema 选择建议" in prompt
+
+
+class TestSchemaLayerPriorityHint:
+    """feat-layer-priority: NL2SQL plan user prompt 注入层优先级段。
+
+    验证 `_LAYER_PRIORITY_HINT` 在 `_buildPlanUserPrompt` 末尾无条件追加——
+    不论问题是聚合类还是主数据类，只要走 chat pipeline 都会看到「Schema 选表优先级」段。
+    """
+
+    def test_layer_priority_hint_injected(self) -> None:
+        """聚合类问题：层优先级段必须含 ADS_/DWD_/ODS 显式访问说明等关键串。"""
+        service = Nl2SqlService()
+        question = "3 月供货量最多的三种物料"
+        prompt = service._buildPlanUserPrompt(question, errors=[])
+        assert "Schema 选表优先级" in prompt
+        assert "ADS_" in prompt
+        assert "DWD_" in prompt
+        assert "ODS_ 业务原始表仅在问题显式要求访问" in prompt
+
+    def test_layer_priority_hint_present_for_supplier_query(self) -> None:
+        """主数据类问题（B019 供应商编号）也必须含层优先级段——无条件注入。"""
+        service = Nl2SqlService()
+        question = "B019 圣特供应商编号是多少"
+        prompt = service._buildPlanUserPrompt(question, errors=[])
+        assert "Schema 选表优先级" in prompt
+
+
+# =============================================================================
+# feat-multistep-global-filter B 层：plan user prompt 注入 [global_constraints]
+#
+# Step N-1 抽出的范围类过滤条件要落到 plan user prompt（不只 system prompt），
+# 让 LLM 在选表/选列/写条件时直接看到，避免「无实体列也照搬」的盲继承。
+# =============================================================================
+
+
+class TestGlobalConstraintsPromptInjection:
+    """[global_constraints] 块在 _buildPlanUserPrompt 渲染。"""
+
+    def _cls(self) -> OntologyClass:
+        return OntologyClass(
+            class_name="PRECEIPT",
+            source_table="T_PRECEIPT",
+            properties=[
+                OntologyProperty(property_name="BPSNUM", source_column="BPSNUM"),
+                OntologyProperty(property_name="QTY", source_column="QTY"),
+            ],
+        )
+
+    @staticmethod
+    def _validPlanJson() -> str:
+        plan = QueryPlan(
+            target="各供应商收货数量",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM",),
+        )
+        return json.dumps(plan.to_dict(), ensure_ascii=False)
+
+    def test_plan_user_prompt_renders_global_constraints_block(self) -> None:
+        """globalFiltersText 非空时渲染成对 [global_constraints] 标签块。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "查3月份供货量最多的三家供应商",
+            errors=[],
+            globalFiltersText="- TCLCOD_0 IN A02,A03,A04,A05\n- INTER_COM_CODE=1",
+        )
+        assert "[global_constraints]" in prompt
+        assert "[/global_constraints]" in prompt
+        assert "TCLCOD_0 IN A02,A03,A04,A05" in prompt
+        assert "INTER_COM_CODE=1" in prompt
+
+    def test_plan_user_prompt_omits_global_constraints_when_unset(self) -> None:
+        """globalFiltersText 为 None/空时不应渲染约束块（与 inject_to_prompt 口径一致）。"""
+        service = Nl2SqlService()
+        prompt_none = service._buildPlanUserPrompt("查供应商", errors=[], globalFiltersText=None)
+        prompt_empty = service._buildPlanUserPrompt("查供应商", errors=[], globalFiltersText="")
+        for p in (prompt_none, prompt_empty):
+            assert "[global_constraints]\n" not in p
+            assert "[/global_constraints]" not in p
+
+    def test_plan_user_prompt_renders_global_constraints_before_layer_priority(self) -> None:
+        """[global_constraints] 块在层优先级提示之前渲染（紧贴问题，远离 schema 段）。"""
+        service = Nl2SqlService()
+        prompt = service._buildPlanUserPrompt(
+            "查3月份供货量最多的三家供应商",
+            errors=[],
+            globalFiltersText="- TCLCOD_0 IN A02,A03,A04,A05",
+        )
+        assert prompt.index("[global_constraints]") < prompt.index("Schema 选表优先级")
+
+    async def test_generate_query_plan_threads_global_filters_into_user_prompt(self) -> None:
+        """generateQueryPlan 端到端：globalFiltersText 真正到达 user prompt。"""
+        fake = _FakeLlm([self._validPlanJson()])
+        service = Nl2SqlService()
+        await service.generateQueryPlan(
+            "查3月份供货量最多的三家供应商",
+            [self._cls()], fake, _llmConfig(),
+            globalFiltersText="- TCLCOD_0 IN A02,A03,A04,A05",
+        )
+        userContent = fake.calls[0][1][1]
+        assert "[global_constraints]" in userContent
+        assert "TCLCOD_0" in userContent
+
+
+class TestPlanParseObservability:
+    """M3：计划解析按原因分类可观测 + 全空计划判失败。
+
+    - 解析失败（空候选 / 无 JSON / JSON 坏 / 非对象 / **全空计划**）各有独立 reason
+    - 内容级丢弃（字段类型损坏）不失败但上报 reason=+drops=
+    - 全空计划必须走重试路径，不得直接进 SQL 生成（模型会自由编造表名）
+    """
+
+    def _cls(self) -> OntologyClass:
+        return _buildClass(
+            "PRECEIPT",
+            "ZJTH.PRECEIPT",
+            props=[
+                {"property_name": "BPSNUM", "source_column": "BPSNUM"},
+                {"property_name": "QTY", "source_column": "QTY"},
+            ],
+        )
+
+    # ---- 全空计划判失败 ----
+
+    def test_empty_json_object_is_parse_failure(self) -> None:
+        service = Nl2SqlService()
+        assert service._parsePlanOutcome("{}").plan is None
+
+    def test_whitespace_target_is_parse_failure(self) -> None:
+        service = Nl2SqlService()
+        assert service._parsePlanOutcome('{"target": "   "}').plan is None
+
+    def test_plan_with_only_interpretation_is_parse_failure(self) -> None:
+        """只有解释没有查询意图：不是计划（interpretation 不算可查目标）。"""
+        service = Nl2SqlService()
+        assert service._parsePlanOutcome('{"interpretation": "用户想查收货量"}').plan is None
+
+    def test_minimal_plan_with_target_is_accepted(self) -> None:
+        """仅有 target 无引用 — 方案B 半空计划必须判失败（走重试）。"""
+        service = Nl2SqlService()
+        outcome = service._parsePlanOutcome('{"target": "查询"}')
+        # 方案 B 后这是「无可查询引用」的半空计划，判 PLAN_EMPTY
+        assert outcome.plan is None
+        assert outcome.reason == "PLAN_EMPTY"
+
+    def test_plan_with_references_but_blank_target_is_accepted(self) -> None:
+        """引用非空的计划不属于「全空」——判定取最窄口径，避免误杀。"""
+        service = Nl2SqlService()
+        outcome = service._parsePlanOutcome('{"target": "", "selectedClasses": ["PRECEIPT"]}')
+        assert outcome.plan is not None
+
+    def test_unanswerable_plan_is_not_treated_as_empty(self) -> None:
+        """target=无法回答 是**合法**空计划（模型判定超范围），必须放行。"""
+        service = Nl2SqlService()
+        outcome = service._parsePlanOutcome(json.dumps({"target": "无法回答"}))
+        assert outcome.plan is not None
+        assert outcome.plan.isUnanswerable is True
+
+    # ---- 失败原因分类 ----
+
+    @pytest.mark.parametrize(
+        ("content", "reason"),
+        [
+            ("", "PLAN_REPLY_EMPTY"),
+            ("抱歉，我无法回答这个问题。", "PLAN_REPLY_NO_JSON"),
+            # 顶层数组同样没有 JSON 对象 → NO_JSON（解析器裁剪后必然以 '{' 开头，
+            # 「JSON 合法但非对象」分支不可达，故无独立 reason）
+            ('["不是对象"]', "PLAN_REPLY_NO_JSON"),
+            ("{不是合法 JSON}", "PLAN_REPLY_JSON_INVALID"),
+            ("{" + "x" * (64 * 1024 + 1), "PLAN_REPLY_TOO_LARGE"),
+            ("{}", "PLAN_EMPTY"),
+        ],
+    )
+    def test_each_failure_path_has_a_distinct_reason(self, content: str, reason: str) -> None:
+        outcome = Nl2SqlService()._parsePlanOutcome(content)
+        assert outcome.plan is None
+        assert outcome.reason == reason
+
+    # ---- 内容级丢弃上报（不失败）----
+
+    def test_corrupt_field_is_reported_without_failing(self) -> None:
+        """方案B 后：corrupt 字段被丢弃，但其他合法引用让 plan 仍非空。
+
+        原「仅 selectedClasses 损坏」用例：在方案B 后判 PLAN_EMPTY（target only）。
+        改成同时给合法 conditions —— 验证 corrupt 字段上报 + 其他合法字段保留。
+        """
+        outcome = Nl2SqlService()._parsePlanOutcome(
+            '{"target": "查询", "selectedClasses": "PRECEIPT", "conditions": ["X=1"]}'
+        )
+        assert outcome.plan is not None
+        assert [d.reason for d in outcome.drops] == ["PLAN_FIELD_NOT_A_LIST"]
+        assert outcome.drops[0].field == "selectedClasses"
+
+    def test_clean_plan_has_no_drops(self) -> None:
+        """方案 B 后「仅有 target 无引用」是 PLAN_EMPTY（不是 clean plan）。
+        干净计划必须有 selectedClasses / conditions / aggregations 等可查询引用。"""
+        outcome = Nl2SqlService()._parsePlanOutcome(
+            '{"target": "查询", "selectedClasses": ["PRECEIPT"]}'
+        )
+        assert outcome.drops == ()
+
+    # ---- 端到端：重试与日志 ----
+
+    async def test_empty_plan_retries_and_succeeds_on_second_attempt(self) -> None:
+        """方案B 后第一跳 {} 失败，第二跳给带 selectedClasses 的完整计划则成功。"""
+        fake = _FakeLlm(
+            ["{}", '{"target": "查询", "selectedClasses": ["PRECEIPT"]}']
+        )
+        service = Nl2SqlService()
+        result = await service.generateQueryPlan("收货数量", [self._cls()], fake, _llmConfig())
+        assert result.plan.target == "查询"
+        assert len(fake.calls) == 2
+        # 重试反馈沿用既有文案（"未能从回复中解析出查询计划"）
+        assert "解析" in fake.calls[1][1][1]
+
+    async def test_empty_plan_retry_hint_lists_dropped_fields(self) -> None:
+        """方案B + 前置核对 D：PLAN_EMPTY 重试反馈必须带具体丢失字段（可操作反馈）。
+
+        否则 LLM 反复补 target 而忽略 selectedClasses/conditions 等真实缺口。
+        """
+        fake = _FakeLlm(
+            ['{"target": 123}', '{"target": "查询", "selectedClasses": ["PRECEIPT"]}']
+        )
+        service = Nl2SqlService()
+        result = await service.generateQueryPlan("收货数量", [self._cls()], fake, _llmConfig())
+        assert result.plan.target == "查询"
+        # 第二跳的 user prompt 必须包含第一跳丢失的具体字段（target:PLAN_TARGET_NOT_STR）
+        retryUserPrompt = fake.calls[1][1][1]
+        assert "target:PLAN_TARGET_NOT_STR" in retryUserPrompt
+
+    async def test_empty_plan_exhausts_retries_and_raises(self) -> None:
+        fake = _FakeLlm(["{}"])
+        service = Nl2SqlService()
+        with pytest.raises(Nl2SqlError):
+            await service.generateQueryPlan(
+                "收货数量", [self._cls()], fake, _llmConfig(), maxRetries=0
+            )
+
+    async def test_parse_failure_logs_single_reason_line(self, caplog) -> None:
+        """一次失败恰好一条 reason= 行（供按原因聚合失败率）。"""
+        fake = _FakeLlm(["抱歉，我无法回答。"])
+        service = Nl2SqlService()
+        with (
+            caplog.at_level(logging.WARNING, logger="app.services.nl2sql_service"),
+            pytest.raises(Nl2SqlError),
+        ):
+            await service.generateQueryPlan(
+                "收货数量", [self._cls()], fake, _llmConfig(), maxRetries=0
+            )
+        reasonLines = [r for r in caplog.records if "reason=" in r.getMessage()]
+        assert len(reasonLines) == 1
+        assert "reason=PLAN_REPLY_NO_JSON" in reasonLines[0].getMessage()
+
+    async def test_empty_plan_failure_log_keeps_drops(self, caplog) -> None:
+        """PLAN_EMPTY 的成因就是「字段被丢光」⇒ 失败日志必须带上丢了什么。
+
+        否则运维只看到 reason=PLAN_EMPTY，看不到「为什么空」—— 正是 M3 要消灭的
+        那种无声降级（drops 被构造出来又被丢弃）。
+        """
+        fake = _FakeLlm(['{"target": 123}'])
+        service = Nl2SqlService()
+        with (
+            caplog.at_level(logging.WARNING, logger="app.services.nl2sql_service"),
+            pytest.raises(Nl2SqlError),
+        ):
+            await service.generateQueryPlan(
+                "收货数量", [self._cls()], fake, _llmConfig(), maxRetries=0
+            )
+        reasonLines = [r for r in caplog.records if "reason=" in r.getMessage()]
+        assert len(reasonLines) == 1
+        msg = reasonLines[0].getMessage()
+        assert "reason=PLAN_EMPTY" in msg
+        assert "target:PLAN_TARGET_NOT_STR(int)" in msg
+
+    async def test_degraded_plan_logs_reason_and_drops(self, caplog) -> None:
+        """方案B 后：groupBy 损坏被丢弃，但 conditions 保留让 plan 非空（PLAN_DEGRADED）。"""
+        fake = _FakeLlm([
+            '{"target": "查询", "groupBy": "BPSNUM", "conditions": ["X=1"]}'
+        ])
+        service = Nl2SqlService()
+        with caplog.at_level(logging.WARNING, logger="app.services.nl2sql_service"):
+            result = await service.generateQueryPlan(
+                "收货数量", [self._cls()], fake, _llmConfig()
+            )
+        assert result.plan.target == "查询"
+        text = caplog.text
+        assert "reason=PLAN_DEGRADED" in text
+        assert "groupBy:PLAN_FIELD_NOT_A_LIST(str)" in text
+
+
+class TestNl2SqlConfigGetter:
+    """魔数治理 Phase 2 hard tier：nl2sql 门面 getter 读 system_config 现读。
+
+    与 chat_recall/chat_context 的 `_getXxx(session)` 同口径：
+    不缓存 / 失败不阻断 / int getter 非正返默认 / `text()` 直写 key。
+    编排层 session 缺席时全部落默认值（既有调用零改动）。
+    """
+
+    @staticmethod
+    def _fakeSessionReturning(raw: str | None):
+        class _R:
+            def scalar_one_or_none(self_inner):
+                return raw
+
+        class _Session:
+            async def execute(self, stmt):
+                return _R()
+
+        return _Session()
+
+    @staticmethod
+    def _fakeSessionBoom():
+        class _SessionBoom:
+            async def execute(self, stmt):
+                raise RuntimeError("UndefinedTableError: system_config")
+
+        return _SessionBoom()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "cfg_key,getter,default",
+        [
+            ("digestMaxItems", "_readSchemaConfig", _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT),
+            ("digestMaxDescChars", "_readSchemaConfig", _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT),
+            ("valueSampleValueMax", "_readSchemaConfig", _VALUE_SAMPLE_VALUE_MAX_DEFAULT),
+            ("maxTokens", "_readSchemaConfig", _NL2SQL_MAX_TOKENS_DEFAULT),
+            ("ownerHintMaxClasses", "_readPlanConfig", _OWNER_HINT_MAX_CLASSES_DEFAULT),
+            ("maxLimit", "_readRefineConfig", _REFINE_MAX_LIMIT_DEFAULT),
+        ],
+    )
+    async def test_config_getter_uses_db_value(self, cfg_key: str, getter: str, default: int) -> None:
+        """session 提供时现读 system_config，admin 改值后立即生效。"""
+        from app.services.nl2sql_service import _readIntConfig
+
+        service = Nl2SqlService()
+        session = self._fakeSessionReturning("42")
+        if getter == "_readSchemaConfig":
+            cfg = await service._readSchemaConfigOrDefault(session)
+        elif getter == "_readPlanConfig":
+            cfg = await service._readPlanConfigOrDefault(session)
+        else:
+            cfg = await service._readRefineConfigOrDefault(session)
+        assert cfg[cfg_key] == 42
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "cfg_key,getter,default",
+        [
+            ("digestMaxItems", "_readSchemaConfig", _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT),
+            ("digestMaxDescChars", "_readSchemaConfig", _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT),
+            ("valueSampleValueMax", "_readSchemaConfig", _VALUE_SAMPLE_VALUE_MAX_DEFAULT),
+            ("maxTokens", "_readSchemaConfig", _NL2SQL_MAX_TOKENS_DEFAULT),
+            ("ownerHintMaxClasses", "_readPlanConfig", _OWNER_HINT_MAX_CLASSES_DEFAULT),
+            ("maxLimit", "_readRefineConfig", _REFINE_MAX_LIMIT_DEFAULT),
+        ],
+    )
+    async def test_config_getter_falls_back_on_invalid(self, cfg_key: str, getter: str, default: int) -> None:
+        """缺席/NULL/格式错/非正 → 返 _DEFAULT，不阻断主链路。"""
+        service = Nl2SqlService()
+        for bad_raw in [None, "", "not-an-int", "0", "-5"]:
+            session = self._fakeSessionReturning(bad_raw)
+            if getter == "_readSchemaConfig":
+                cfg = await service._readSchemaConfigOrDefault(session)
+            elif getter == "_readPlanConfig":
+                cfg = await service._readPlanConfigOrDefault(session)
+            else:
+                cfg = await service._readRefineConfigOrDefault(session)
+            assert cfg[cfg_key] == default, f"raw={bad_raw!r}"
+
+    @pytest.mark.asyncio
+    async def test_config_getter_falls_back_on_db_error(self) -> None:
+        """DB 不可用（表缺失/连接断）→ 全部返 _DEFAULT。"""
+        service = Nl2SqlService()
+        boom = self._fakeSessionBoom()
+        schema_cfg = await service._readSchemaConfigOrDefault(boom)
+        assert schema_cfg == {
+            "digestMaxItems": _CRITICAL_DIGEST_MAX_ITEMS_DEFAULT,
+            "digestMaxDescChars": _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
+            "valueSampleValueMax": _VALUE_SAMPLE_VALUE_MAX_DEFAULT,
+            "maxTokens": _NL2SQL_MAX_TOKENS_DEFAULT,
+            "pruneSchema": 1,
+        }
+        plan_cfg = await service._readPlanConfigOrDefault(boom)
+        assert plan_cfg == {"ownerHintMaxClasses": _OWNER_HINT_MAX_CLASSES_DEFAULT}
+        refine_cfg = await service._readRefineConfigOrDefault(boom)
+        assert refine_cfg == {"maxLimit": _REFINE_MAX_LIMIT_DEFAULT}
+
+    @pytest.mark.asyncio
+    async def test_config_getter_falls_back_when_session_none(self) -> None:
+        """session=None（既有调用路径）→ 全部落默认值，零改动。"""
+        service = Nl2SqlService()
+        schema_cfg = await service._readSchemaConfigOrDefault(None)
+        assert schema_cfg["maxTokens"] == _NL2SQL_MAX_TOKENS_DEFAULT
+        assert schema_cfg["pruneSchema"] is True
+        plan_cfg = await service._readPlanConfigOrDefault(None)
+        assert plan_cfg["ownerHintMaxClasses"] == _OWNER_HINT_MAX_CLASSES_DEFAULT
+        refine_cfg = await service._readRefineConfigOrDefault(None)
+        assert refine_cfg["maxLimit"] == _REFINE_MAX_LIMIT_DEFAULT
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("0", False), ("false", False), ("FALSE", False), ("off", False),
+            ("no", False),
+            ("1", True), ("true", True), ("ON", True), ("yes", True),
+            ("42", True),
+        ],
+    )
+    async def test_bool_config_reads_explicit_off(self, raw: str, expected: bool) -> None:
+        """布尔开关必须能表达「关闭」。
+
+        真实踩坑（2026-09-28 方案 A 的 A/B）：初版用 ``_readIntConfig`` 读
+        NL2SQL_SQL_SCHEMA_PRUNING，而该 helper 的契约是「非正返默认」——写 0 被当成
+        非法值回落默认 1，**开关永远关不掉**，A/B 两臂实际都是开启态，导致
+        「裁剪前后 token 逐字相同」的假象。
+        """
+        from app.services.nl2sql_service import _readBoolConfig
+
+        session = self._fakeSessionReturning(raw)
+        assert await _readBoolConfig(session, "K", True) is expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw", [None, "", "not-a-bool"])
+    async def test_bool_config_falls_back_to_default(self, raw: str | None) -> None:
+        """缺席 / 空 / 非法值 → 返默认值；DB 异常同样不阻断。"""
+        from app.services.nl2sql_service import _readBoolConfig
+
+        assert await _readBoolConfig(self._fakeSessionReturning(raw), "K", True) is True
+        assert await _readBoolConfig(self._fakeSessionReturning(raw), "K", False) is False
+        assert await _readBoolConfig(self._fakeSessionBoom(), "K", False) is False
+        assert await _readBoolConfig(self._fakeSessionBoom(), "K", True) is True

@@ -1,7 +1,8 @@
-"""seed_menu_config - 幂等 upsert 6 类 28 项菜单。
+"""seed_menu_config - 幂等 upsert 7 类 35 项菜单（共 42 行）。
 
 与 AppLayout 的旧 key 一一对应；feat-rbac-identity 追加 4 个 RBAC 管理页
-（用户/角色/组织/菜单）叶子项，零 section 变更（section 数保持 6，测试断言依赖）。
+（用户/角色/组织/菜单）叶子项；feat-wiki-knowledge 追加 1 个一级类
+「企业 Wiki」+ 5 个二级项（知识条目/导入/冲突/建议/覆盖度）。
 
 UI 优先策略：本 seed 只在「行不存在」时 INSERT 默认值；行已存在时
 **不覆盖任何 UI 可编辑字段**（label_key / icon_code / path / visible /
@@ -32,6 +33,9 @@ from app.models.menu_config import MenuConfig
 SECTIONS: list[dict[str, Any]] = [
     {"code": "section.aiAgent", "label_key": "menu.section.aiAgent", "icon_code": "robot", "sort_order": 100},
     {"code": "section.analytics", "label_key": "menu.section.analytics", "icon_code": "fund", "sort_order": 200},
+    # feat-wiki-knowledge：知识管理自成一级（240 是本段唯一空闲的百位区间，
+    # 放在「智能分析」之后、「业务配置」之前，不至于被排到侧边栏最底部）
+    {"code": "section.enterpriseWiki", "label_key": "menu.section.enterpriseWiki", "icon_code": "book", "sort_order": 240},
     {"code": "section.bizConfig", "label_key": "menu.section.bizConfig", "icon_code": "setting", "sort_order": 300},
     {"code": "section.foundation", "label_key": "menu.section.foundation", "icon_code": "database", "sort_order": 400},
     {"code": "section.systemConfig", "label_key": "menu.section.systemConfig", "icon_code": "api", "sort_order": 500},
@@ -46,10 +50,33 @@ ITEMS: list[dict[str, Any]] = [
     # Smart Analytics
     {"parent": "section.analytics", "code": "item.supplier360", "label_key": "menu.item.supplier360", "icon_code": "barchart", "sort_order": 210, "path": "/supplier-360"},
     {"parent": "section.analytics", "code": "item.supplierRisk", "label_key": "menu.item.supplierRisk", "icon_code": "alert", "sort_order": 220, "path": "/supplier-risk"},
+    # 企业 Wiki（feat-wiki-knowledge）：二级项 = 机制 1-6 各自的落地面板。
+    # 「知识导入」原挂在 section.systemConfig（590），本次归位到本段的 260 ——
+    # 它一直是 wiki 的功能，只是先有了页面、后有了分组。
+    # feat-wiki-chat：Wiki Chat 对话入口放组内第一位（245 < 250）——
+    # 知识消费（对话问答）是使用者的第一入口，管理面板跟在后面。
+    {"parent": "section.enterpriseWiki", "code": "item.wikiChat", "label_key": "menu.item.wikiChat", "icon_code": "message", "sort_order": 245, "path": "/wiki-chat"},
+    {"parent": "section.enterpriseWiki", "code": "item.wikiPages", "label_key": "menu.item.wikiPages", "icon_code": "file", "sort_order": 250, "path": "/admin/wiki-pages"},
+    {"parent": "section.enterpriseWiki", "code": "item.wikiImport", "label_key": "menu.item.wikiImport", "icon_code": "import", "sort_order": 260, "path": "/admin/wiki-import"},
+    {"parent": "section.enterpriseWiki", "code": "item.wikiConflicts", "label_key": "menu.item.wikiConflicts", "icon_code": "alert", "sort_order": 270, "path": "/admin/wiki-conflicts"},
+    {"parent": "section.enterpriseWiki", "code": "item.wikiSuggestions", "label_key": "menu.item.wikiSuggestions", "icon_code": "tool", "sort_order": 280, "path": "/admin/wiki-suggestions"},
+    {"parent": "section.enterpriseWiki", "code": "item.wikiCoverage", "label_key": "menu.item.wikiCoverage", "icon_code": "dashboard", "sort_order": 290, "path": "/admin/wiki-coverage"},
+    # Phase 2 知识图谱：Louvain 社区 + 4-Signal 相关性可视化
+    {"parent": "section.enterpriseWiki", "code": "item.wikiGraph", "label_key": "menu.item.wikiGraph", "icon_code": "node", "sort_order": 295, "path": "/admin/wiki-graph"},
+    # Task 7: Wiki ↔ Ontology 链接管理
+    {"parent": "section.enterpriseWiki", "code": "item.wikiLinks", "label_key": "menu.item.wikiLinks", "icon_code": "link", "sort_order": 297, "path": "/admin/wiki-links"},
+    # feat-wiki-category: 分类树 CRUD（admin 维护目录结构）
+    {"parent": "section.enterpriseWiki", "code": "item.wikiCategories", "label_key": "menu.item.wikiCategories", "icon_code": "partition", "sort_order": 298, "path": "/admin/wiki-categories"},
     # Business Config
     {"parent": "section.bizConfig", "code": "item.ontology", "label_key": "menu.item.ontology", "icon_code": "partition", "sort_order": 310, "path": "/ontology"},
     {"parent": "section.bizConfig", "code": "item.dataQuality", "label_key": "menu.item.dataQuality", "icon_code": "audit", "sort_order": 320, "path": "/data-quality"},
-    {"parent": "section.bizConfig", "code": "item.dataQualityGenerate", "label_key": "menu.item.dataQualityGenerate", "icon_code": "thunderbolt", "sort_order": 325, "path": "/data-quality/generate"},
+    # feat-dq-rule-params Task 11
+    {"parent": "section.bizConfig", "code": "item.dataQualityRuleParams", "label_key": "menu.item.dataQualityRuleParams", "icon_code": "audit", "sort_order": 325, "path": "/data-quality/rule-params"},
+    # feat-dq-evaluation-report：评估报告页（路由 /data-quality/reports → 重定向 ?tab=reports
+    # 在 DataQualityPage 内的 reports tab；本菜单项仅作直接入口与发现性，不替代 tab 体验）。
+    {"parent": "section.bizConfig", "code": "item.dataQualityReport", "label_key": "menu.item.dataQualityReport", "icon_code": "fund", "sort_order": 326, "path": "/data-quality/reports"},
+    # item.dataQualityGenerate 已下沉为 DataQualityPage 的 tab（?tab=generate）；
+    # 旧路由由 App.tsx 的 <Navigate> 重定向到 ?tab= 参数。此处不再发菜单项。
     {"parent": "section.bizConfig", "code": "item.lineage", "label_key": "menu.item.lineage", "icon_code": "node", "sort_order": 330, "path": "/lineage"},
     {"parent": "section.bizConfig", "code": "item.entityMapping", "label_key": "menu.item.entityMapping", "icon_code": "code", "sort_order": 340, "path": "/entity-mapping"},
     {"parent": "section.bizConfig", "code": "item.kpiCatalog", "label_key": "menu.item.kpiCatalog", "icon_code": "number", "sort_order": 350, "path": "/kpi-catalog"},
@@ -59,6 +86,8 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.bizConfig", "code": "item.ontologyProperties", "label_key": "menu.item.ontologyProperties", "icon_code": "tags", "sort_order": 375, "path": "/ontology-properties"},
     # Foundation
     {"parent": "section.foundation", "code": "item.datasource", "label_key": "menu.item.datasource", "icon_code": "database", "sort_order": 410, "path": "/datasource"},
+    # feat-local-import-evolution：本地数据初始化独立入口页 /local-import（复用 ImportWizard）
+    {"parent": "section.foundation", "code": "item.localImport", "label_key": "menu.item.localImport", "icon_code": "import", "sort_order": 415, "path": "/local-import"},
     {"parent": "section.foundation", "code": "item.documents", "label_key": "menu.item.documents", "icon_code": "file", "sort_order": 420, "path": "/documents"},
     {"parent": "section.foundation", "code": "item.usage", "label_key": "menu.item.usage", "icon_code": "dashboard", "sort_order": 430, "path": "/usage"},
     {"parent": "section.foundation", "code": "item.graph", "label_key": "menu.item.graph", "icon_code": "apartment", "sort_order": 440, "path": "/graph"},
@@ -72,6 +101,7 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.systemConfig", "code": "item.adminRoles", "label_key": "menu.item.adminRoles", "icon_code": "team", "sort_order": 550, "path": "/admin/roles"},
     {"parent": "section.systemConfig", "code": "item.adminOrganizations", "label_key": "menu.item.adminOrganizations", "icon_code": "org", "sort_order": 560, "path": "/admin/organizations"},
     {"parent": "section.systemConfig", "code": "item.adminMenus", "label_key": "menu.item.adminMenus", "icon_code": "menu", "sort_order": 570, "path": "/admin/menus"},
+    {"parent": "section.systemConfig", "code": "item.adminSystemConfig", "label_key": "menu.item.adminSystemConfig", "icon_code": "setting", "sort_order": 580, "path": "/admin/system-config"},
     # Audit & Security（仅保留审计日志）
     {"parent": "section.auditSecurity", "code": "item.adminAudit", "label_key": "menu.item.adminAudit", "icon_code": "audit", "sort_order": 610, "path": "/admin/audit"},
     # item.adminFeatureRules 已搬到 section.bizConfig sort_order=365（与 item.features 配套）
@@ -81,11 +111,10 @@ ITEMS: list[dict[str, Any]] = [
 async def seed_menu_config(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
-    """幂等 upsert 6 个一级类 + 28 个叶子项。返回总行数。
+    """幂等 upsert 7 个一级类 + 35 个叶子项。返回总行数（42）。
 
-    冲突键：`code`（全局唯一）。重复运行不新增行，仅刷新 label_key / icon_code /
-    sort_order / path / visible。`parent_id` 仅在首次 INSERT 时设置；已存在的
-    行其 parent_id 由菜单管理 UI 维护，seed 不覆盖。
+    冲突键：`code`（全局唯一）。重复运行不新增行，也不刷新任何字段 —— 已存在的行
+    完全交给菜单管理 UI 维护（见文件头「UI 优先策略」）。
     """
     async with session_factory() as session:
         # 1) upsert sections：仅在「行不存在」时写入 seed 默认；冲突时 DO NOTHING

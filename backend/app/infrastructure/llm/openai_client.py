@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -21,9 +22,37 @@ from app.domain.error_messages import (
     MSG_LLM_STREAM_FAILED,
 )
 from app.domain.exceptions import LlmClientError
-from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage, LlmResponse, StreamChunk
+from app.infrastructure.llm.base_client import (
+    BaseLlmClient,
+    LlmMessage,
+    LlmResponse,
+    LlmResponseWithTools,
+    StreamChunk,
+    ToolCall,
+)
+from app.infrastructure.llm.concurrency import acquire_llm_concurrency
 
 logger = logging.getLogger(__name__)
+
+
+def _readCachedTokens(usage: Any) -> int | None:
+    """从 OpenAI 协议 usage 读 DeepSeek prompt cache 命中 token 数。
+
+    OpenAI 2024 标准：usage.prompt_tokens_details.cached_tokens。
+    DeepSeek 兼容此格式（实测 prompt_tokens_details.cached_tokens 非零 = 命中）。
+
+    字段缺失或为 None → 返回 None（视作未命中，全额计费）。值是 0 → 返回 0
+    （与 None 区分：0 = 字段存在但确实没命中；None = 字段缺失/不支持）。
+    """
+    if usage is None:
+        return None
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is None:
+        return None
+    cached = getattr(details, "cached_tokens", None)
+    if cached is None:
+        return None
+    return cached or 0
 
 
 class OpenAiClient(BaseLlmClient):
@@ -90,13 +119,17 @@ class OpenAiClient(BaseLlmClient):
             "messages": [{"role": m.role, "content": m.content} for m in messages],
         }
         if temperature is not None:
+            # Moonshot K3 要求 temperature=1，不接受其他值；强置避免 400
+            if self._provider == ProviderType.MOONSHOT and temperature != 1.0:
+                temperature = 1.0
             payload["temperature"] = temperature
         if maxTokens is not None:
             payload["max_tokens"] = maxTokens
         payload.update(kwargs)
 
         try:
-            response = await self._client.chat.completions.create(**payload)
+            async with acquire_llm_concurrency():
+                response = await self._client.chat.completions.create(**payload)
         except Exception as exc:
             raise LlmClientError(
                 MSG_LLM_CALL_FAILED.format(provider=self._provider.value, exc=exc),
@@ -107,6 +140,11 @@ class OpenAiClient(BaseLlmClient):
         usage = getattr(response, "usage", None)
         promptTokens = getattr(usage, "prompt_tokens", 0) or 0
         completionTokens = getattr(usage, "completion_tokens", 0) or 0
+        # 4-1（feat-token-cache）：DeepSeek 通过 OpenAI 标准 PromptTokensDetails
+        # 报告 cache 命中：usage.prompt_tokens_details.cached_tokens。
+        # 实测（sk-...）：两次同 prefix 调用，第二次 prompt_tokens_details.cached_tokens
+        # 非零（首次为 0 因缓存首次写入未命中）。None = 字段缺失（MOONSHOT/AZURE 不支持）。
+        cachedTokens = _readCachedTokens(usage)
         content = ""
         choices = getattr(response, "choices", None)
         if choices:
@@ -119,6 +157,7 @@ class OpenAiClient(BaseLlmClient):
             promptTokens=promptTokens,
             completionTokens=completionTokens,
             totalTokens=promptTokens + completionTokens,
+            cachedTokens=cachedTokens,
         )
 
     async def completeStream(
@@ -134,6 +173,12 @@ class OpenAiClient(BaseLlmClient):
 
         部分兼容代理不支持 include_usage（不返回 usage 块）时，末块 token 记为 0，
         与 complete() 的近似计量语义一致。
+
+        **失败路径用量携带**（§15 末尾第 3 项）：流式迭代中途出错（连接重置 / SDK 抛错
+        / 用量终块之后又触发的异常）时，已累计的 `promptTokens` / `completionTokens`
+        会挂在抛出的 `LlmClientError.tokens` 上 —— 调用方 `consumedTokens()` 读得到，
+        降级审计行能如实计量已消耗的 token。若流本身没建起来（`create(...)` 抛错），
+        tokens 为 None（不伪造 0，避免被解读为"零消耗"）。
         """
         payload: dict[str, Any] = {
             "model": model or self._modelName,
@@ -142,6 +187,9 @@ class OpenAiClient(BaseLlmClient):
             "stream_options": {"include_usage": True},
         }
         if temperature is not None:
+            # Moonshot K3 要求 temperature=1，不接受其他值；强置避免 400
+            if self._provider == ProviderType.MOONSHOT and temperature != 1.0:
+                temperature = 1.0
             payload["temperature"] = temperature
         if maxTokens is not None:
             payload["max_tokens"] = maxTokens
@@ -149,37 +197,162 @@ class OpenAiClient(BaseLlmClient):
 
         promptTokens = 0
         completionTokens = 0
+        cachedTokens = None
         modelName = self._modelName
         try:
-            stream = await self._client.chat.completions.create(**payload)
-            async for chunk in stream:
-                usage = getattr(chunk, "usage", None)
-                if usage is not None:
-                    promptTokens = getattr(usage, "prompt_tokens", 0) or 0
-                    completionTokens = getattr(usage, "completion_tokens", 0) or 0
-                    continue
-                choices = getattr(chunk, "choices", None)
-                if not choices:
-                    continue
-                delta = getattr(choices[0].delta, "content", None)
-                if delta:
-                    modelName = getattr(chunk, "model", modelName) or modelName
-                    yield StreamChunk(
-                        content=delta, isDone=False, promptTokens=0, completionTokens=0, modelName=modelName
-                    )
-            yield StreamChunk(
-                content="",
-                isDone=True,
-                promptTokens=promptTokens,
-                completionTokens=completionTokens,
-                modelName=modelName,
-            )
+            async with acquire_llm_concurrency():
+                stream = await self._client.chat.completions.create(**payload)
+                async for chunk in stream:
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        promptTokens = getattr(usage, "prompt_tokens", 0) or 0
+                        completionTokens = getattr(usage, "completion_tokens", 0) or 0
+                        # 4-1（feat-token-cache）：流式末块 usage 也读
+                        # prompt_tokens_details.cached_tokens（同 non-stream 路径）。
+                        cachedTokens = _readCachedTokens(usage)
+                        continue
+                    choices = getattr(chunk, "choices", None)
+                    if not choices:
+                        continue
+                    delta = getattr(choices[0].delta, "content", None)
+                    if delta:
+                        modelName = getattr(chunk, "model", modelName) or modelName
+                        yield StreamChunk(
+                            content=delta, isDone=False, promptTokens=0, completionTokens=0, modelName=modelName
+                        )
+                yield StreamChunk(
+                    content="",
+                    isDone=True,
+                    promptTokens=promptTokens,
+                    completionTokens=completionTokens,
+                    modelName=modelName,
+                    cachedTokens=cachedTokens,
+                )
         except Exception as exc:
+            # 失败路径用量：已累计的 promptTokens/completionTokens 若非 0/0 则挂上。
+            # 流没建立起来时 promptTokens/completionTokens 仍为初始值 0/0 ⇒ 不挂
+            # （不伪造"零消耗"，与 create() 失败时 tokens=None 语义一致）。
+            accumulated = (promptTokens, completionTokens) if (promptTokens or completionTokens) else None
             raise LlmClientError(
                 MSG_LLM_STREAM_FAILED.format(provider=self._provider.value, exc=exc),
                 provider=self._provider.value,
                 detail=str(exc),
+                tokens=accumulated,
             ) from exc
+
+    async def complete_with_tools(
+        self,
+        messages: list[LlmMessage],
+        tools: list[dict] | None = None,
+        tool_choice: str | dict = "auto",
+    ) -> LlmResponseWithTools:
+        """支持 tool calling 的 completion，透传 OpenAI tools API。"""
+        # 序列化消息：tool result 必须带 tool_call_id，assistant 触发了 tool calling
+        # 时必须回传 tool_calls（否则 provider 无法关联 tool_call_id ↔ 调用）。
+        # 历史 bug：仅传 {role, content} 导致深求/多轮 tool 调用 400 'missing field tool_call_id'。
+        # 另：tool_calls 必须是 OpenAI 形状 {id, type:'function', function:{name, arguments(JSON 字符串)}}；
+        # 上游 agent_runtime 可能给 langchain 形状 {id, name, args}，需归一化。
+        def _normalize_tool_calls(raw_calls):
+            out = []
+            for tc in raw_calls:
+                # 已是 OpenAI 形状（带 function 键）
+                if isinstance(tc, dict) and "function" in tc:
+                    out.append({
+                        "id": tc["id"],
+                        "type": tc.get("type", "function"),
+                        "function": {
+                            "name": tc["function"].get("name") if isinstance(tc["function"], dict) else tc.get("name"),
+                            "arguments": (
+                                tc["function"]["arguments"]
+                                if isinstance(tc["function"], dict) and "arguments" in tc["function"]
+                                else json.dumps(tc.get("args", {}), ensure_ascii=False)
+                            ),
+                        },
+                    })
+                else:
+                    # langchain 形状 {id, name, args}
+                    args = tc.get("args", {}) if isinstance(tc, dict) else {}
+                    name = tc.get("name") if isinstance(tc, dict) else None
+                    tc_id = tc.get("id") if isinstance(tc, dict) else None
+                    out.append({
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json.dumps(args, ensure_ascii=False),
+                        },
+                    })
+            return out
+
+        serialized: list[dict[str, Any]] = []
+        for m in messages:
+            item: dict[str, Any] = {"role": m.role, "content": m.content}
+            if m.role == "tool" and m.tool_call_id:
+                item["tool_call_id"] = m.tool_call_id
+                if m.name:
+                    item["name"] = m.name
+            elif m.role == "assistant" and m.tool_calls:
+                item["tool_calls"] = _normalize_tool_calls(m.tool_calls)
+            serialized.append(item)
+        payload: dict[str, Any] = {
+            "model": self._modelName,
+            "messages": serialized,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice
+
+        try:
+            async with acquire_llm_concurrency():
+                response = await self._client.chat.completions.create(**payload)
+        except Exception as exc:
+            # create() 失败：响应没收到，无 usage 可记 ⇒ tokens=None（不伪造）
+            raise LlmClientError(
+                MSG_LLM_CALL_FAILED.format(provider=self._provider.value, exc=exc),
+                provider=self._provider.value,
+                detail=str(exc),
+            ) from exc
+
+        # 失败路径用量携带（§15 末尾第 3 项）：tool_calls 解析失败（function.arguments
+        # 非合法 JSON / choices 为空等）时，**已读取**的响应 usage 必须挂在异常上。
+        # 故先把 usage 取出，再做易出错的解析；解析阶段失败 ⇒ 用 `LlmClientError.tokens`
+        # 把这段 usage 携带上抛，调用方 `consumedTokens()` 读得到。
+        usage = getattr(response, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        response_tokens = (prompt_tokens, completion_tokens)
+
+        try:
+            tool_calls: list[ToolCall] = []
+            raw_message = response.choices[0].message
+            if raw_message.tool_calls:
+                for raw_tc in raw_message.tool_calls:
+                    tool_calls.append(
+                        ToolCall(
+                            id=raw_tc.id,
+                            name=raw_tc.function.name,
+                            args=json.loads(raw_tc.function.arguments),
+                        )
+                    )
+        except Exception as exc:
+            # post-response 解析失败：响应已收到，usage 已读出，挂在异常上
+            raise LlmClientError(
+                MSG_LLM_CALL_FAILED.format(provider=self._provider.value, exc=exc),
+                provider=self._provider.value,
+                detail=f"post-response 解析失败：{exc}",
+                tokens=response_tokens,
+            ) from exc
+
+        return LlmResponseWithTools(
+            content=getattr(raw_message, "content", None),
+            tool_calls=tool_calls,
+            usage={
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+            model=getattr(response, "model", self._modelName) or self._modelName,
+        )
 
     async def close(self) -> None:
         close = getattr(self._client, "close", None)

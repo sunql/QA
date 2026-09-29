@@ -21,12 +21,15 @@ _CODE_PATTERN = r"^[a-z][a-zA-Z0-9_]*(?:\.[a-z][a-zA-Z0-9_]*)*$"
 
 
 class UserCreate(CamelModel):
-    """新增用户。username 不可变（作为 X-User-Id 映射键）。"""
+    """新增用户。username 不可变（作为 X-User-Id 映射键）。
+    password 必填——admin 创建时必须给初始密码（feat-admin-user-password）。
+    """
 
     username: str = Field(min_length=1, max_length=64, pattern=_USERNAME_PATTERN)
     display_name: str = Field(min_length=1, max_length=128)
     email: str | None = Field(default=None, max_length=255)
     enabled: bool = True
+    password: str = Field(min_length=8, max_length=128)
 
 
 class UserUpdate(CamelModel):
@@ -35,6 +38,21 @@ class UserUpdate(CamelModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=128)
     email: str | None = Field(default=None, max_length=255)
     enabled: bool | None = None
+
+
+class UserMeRead(CamelModel):
+    """当前调用方身份（GET /users/me，个人中心页用，非 admin-only）。
+
+    - DB 命中：display_name/email 取 users 行，roles/departments 以 DB 为准；
+    - 桩回退（X-User-Id 未命中 DB 用户）：dbUserId=null，displayName 回退 userId。
+    """
+
+    user_id: str
+    display_name: str
+    email: str | None = None
+    role_codes: list[str] = Field(default_factory=list)
+    department_codes: list[str] = Field(default_factory=list)
+    db_user_id: int | None = None
 
 
 class UserRead(CamelModel):

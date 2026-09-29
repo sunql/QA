@@ -28,6 +28,7 @@ from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import KpiCatalog
 from app.domain.schemas import KpiCatalogCreate, KpiCatalogUpdate
 from app.services.acl_service import AclService
+from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.outbox_service import OutboxService
 from app.services.messages_zh import (
     MSG_KPI_CATALOG_DUPLICATE_CODE,
@@ -63,6 +64,13 @@ class KpiCatalogService:
             raise NotFoundError(MSG_KPI_CATALOG_NOT_FOUND.format(id=id))
         return row
 
+    async def get_by_code(self, session: AsyncSession, code: str) -> KpiCatalog | None:
+        """按 kpi_code 查，无则返回 None（用于 idempotency 检查）。"""
+        result = await session.execute(
+            select(KpiCatalog).where(KpiCatalog.kpi_code == code)
+        )
+        return result.scalar_one_or_none()
+
     async def createKpi(
         self,
         session: AsyncSession,
@@ -89,6 +97,8 @@ class KpiCatalogService:
             status=dto.status.value,
             metric_id=dto.metric_id,
             created_by=dto.created_by,
+            semantic_keywords=dto.semantic_keywords,
+            match_threshold=Decimal(str(dto.match_threshold)) if dto.match_threshold is not None else Decimal("0.75"),
         )
         session.add(entity)
         try:
@@ -110,6 +120,7 @@ class KpiCatalogService:
         )
         await session.commit()
         await session.refresh(entity)
+        await get_kpi_match_cache().refreshOne(session, entity.kpi_code)
         logger.info("创建 KPI Catalog id=%d code=%s", entity.id, entity.kpi_code)
         return entity
 
@@ -156,6 +167,7 @@ class KpiCatalogService:
         )
         await session.commit()
         await session.refresh(entity)
+        await get_kpi_match_cache().refreshOne(session, entity.kpi_code)
         logger.info(
             "更新 KPI Catalog id=%d revision=%d by %s",
             id,
@@ -191,6 +203,7 @@ class KpiCatalogService:
         )
         await session.delete(entity)
         await session.commit()
+        get_kpi_match_cache().onKpiChanged(entity.kpi_code)
         logger.info("删除 KPI Catalog id=%d by %s", id, actor.userId)
 
 

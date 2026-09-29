@@ -17,6 +17,7 @@ async def warmBusinessObjectRegistry() -> None:
 from unittest.mock import AsyncMock, MagicMock
 
 from app.dependencies import CurrentUser
+from app.domain.models import SessionMessage
 from app.domain.schemas import DocQaRequest
 from app.services.rag_qa_service import RagQaService
 from app.services.stream_events import EVENT_QA_DONE, EVENT_QA_META
@@ -87,6 +88,9 @@ async def test_answer_stream_no_chunks_returns_template() -> None:
     session.execute = AsyncMock(return_value=MagicMock(scalars=lambda: MagicMock(all=lambda: [])))
     session.add = MagicMock()
     session.flush = AsyncMock()
+    session.commit = AsyncMock()  # _persist 收尾提交（缺它此前必红）
+    # TokenUsageService.recordUsage 收尾 refresh（MagicMock 默认同步，await 必炸）
+    session.refresh = AsyncMock()
     dto = DocQaRequest(session_id="sess-1", question="abc", top_k=8)
 
     actor = CurrentUser(userId="u-1", departments=[])
@@ -160,6 +164,9 @@ async def test_answer_stream_full_pipeline_emits_meta_citations_tokens_done() ->
     )
     session.add = MagicMock()
     session.flush = AsyncMock()
+    session.commit = AsyncMock()  # _persist 收尾提交（缺它此前必红）
+    # TokenUsageService.recordUsage 收尾 refresh（MagicMock 默认同步，await 必炸）
+    session.refresh = AsyncMock()
 
     dto = DocQaRequest(session_id="sess-1", question="什么是质量协议？", top_k=8)
     actor = CurrentUser(userId="u-1", departments=[])
@@ -211,6 +218,9 @@ async def test_answer_stream_passes_history_to_llm_as_plain_text() -> None:
     ])
     session.add = MagicMock()
     session.flush = AsyncMock()
+    session.commit = AsyncMock()  # _persist 收尾提交（缺它此前必红）
+    # TokenUsageService.recordUsage 收尾 refresh（MagicMock 默认同步，await 必炸）
+    session.refresh = AsyncMock()
 
     dto = DocQaRequest(session_id="sess-1", question="更详细说说", top_k=8)
     actor = CurrentUser(userId="u-1", departments=[])
@@ -249,6 +259,9 @@ async def test_answer_stream_persists_user_and_assistant_with_citations() -> Non
     ])
     session.add = MagicMock()
     session.flush = AsyncMock()
+    session.commit = AsyncMock()  # _persist 收尾提交（缺它此前必红）
+    # TokenUsageService.recordUsage 收尾 refresh（MagicMock 默认同步，await 必炸）
+    session.refresh = AsyncMock()
 
     dto = DocQaRequest(session_id="sess-1", question="问题", top_k=8)
     actor = CurrentUser(userId="u-1", departments=[])
@@ -260,7 +273,10 @@ async def test_answer_stream_persists_user_and_assistant_with_citations() -> Non
 
     # session.add 必须被调 ≥ 2 次（user + assistant）
     assert session.add.call_count >= 2
-    added_entities = [c.args[0] for c in session.add.call_args_list]
+    # 只挑 SessionMessage：计量台账行（SessionTokenUsage）也会被 add，它没有 content
+    added_entities = [
+        c.args[0] for c in session.add.call_args_list if isinstance(c.args[0], SessionMessage)
+    ]
     # 找到 user 行（content=dto.question）和 assistant 行（content=回答）
     user_rows = [e for e in added_entities if e.content == "问题" and e.role == "user"]
     asst_rows = [e for e in added_entities if e.content == "回答" and e.role == "assistant"]
@@ -307,6 +323,9 @@ class TestExplicitModelIdRejectsInactive:
         )
         session.add = MagicMock()
         session.flush = AsyncMock()
+        session.commit = AsyncMock()  # _persist 收尾提交（缺它此前必红）
+        # TokenUsageService.recordUsage 收尾 refresh（MagicMock 默认同步，await 必炸）
+        session.refresh = AsyncMock()
         session.commit = AsyncMock()  # 避免 _persist 路径 noise 让 RED 断言更干净
 
         dto = DocQaRequest(
@@ -345,6 +364,9 @@ class TestExplicitModelIdRejectsInactive:
         ])
         session.add = MagicMock()
         session.flush = AsyncMock()
+        session.commit = AsyncMock()  # _persist 收尾提交（缺它此前必红）
+        # TokenUsageService.recordUsage 收尾 refresh（MagicMock 默认同步，await 必炸）
+        session.refresh = AsyncMock()
         session.commit = AsyncMock()
 
         active_cfg = MagicMock(
@@ -370,3 +392,111 @@ class TestExplicitModelIdRejectsInactive:
         assert any(ev.event == EVENT_QA_META for ev in events)
         assert any(ev.event == EVENT_QA_DONE for ev in events)
         svc._llm_factory.assert_called_once()
+
+
+def _make_never_done_client(text: str = "回答") -> MagicMock:
+    """退化客户端：只吐内容，**从不**把 isDone 置 True（不报 usage）。"""
+    client = MagicMock()
+
+    async def _stream(messages, **kwargs):
+        yield StreamChunk(
+            content=text, isDone=False, promptTokens=0, completionTokens=0,
+            modelName="fake-mdl",
+        )
+
+    client.completeStream = _stream
+    return client
+
+
+def _mock_session(history_rows: list | None = None) -> MagicMock:
+    """与既有用例同构的最小 session mock（commit + refresh 都必须可 await）。"""
+    session = MagicMock()
+    session.execute = AsyncMock(
+        return_value=MagicMock(scalars=lambda: MagicMock(all=lambda: list(history_rows or [])))
+    )
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    # TokenUsageService.recordUsage 收尾 refresh（MagicMock 默认同步，await 必炸）
+    session.refresh = AsyncMock()
+    return session
+
+
+def _added_of(session: MagicMock, cls: type) -> list:
+    """session.add 的实参里挑出某一类（台账行 / SessionMessage 混在一起）。"""
+    return [c.args[0] for c in session.add.call_args_list if isinstance(c.args[0], cls)]
+
+
+def _doc_qa_cfg() -> MagicMock:
+    """单条可用 model config（与既有用例同构）。"""
+    return MagicMock(
+        id=1, model_name="fake-mdl",
+        cost_per_1k_input=Decimal("0.001"), cost_per_1k_output=Decimal("0.002"),
+        is_active=True, provider="openai",
+        cost_threshold=Decimal("9999"), weight=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_answer_stream_low_score_persists_real_citations() -> None:
+    """低分短路（top1 < 0.3）也要把**真实检索到的**依据落库，不是空 []。
+
+    H8 的对齐点：wiki_qa 在该分支持久化真实 citations（``wiki_qa_service.py:157``），
+    doc_qa 此前存 ``[]``。SSE 事件里的 citations 本来就在阈值判断**之前**发给了前端
+    （第 4 步），只在落库时抹成空会让历史消息与前端看到的依据不一致。
+    """
+    svc = RagQaService()
+    svc._rag_svc = MagicMock()
+    svc._rag_svc.searchDocuments = AsyncMock(return_value=[
+        {"document_id": "DOC-C", "document_name": "低分文档", "chunk_text": "擦边", "score": 0.12},
+    ])
+    svc._llm_factory = MagicMock()  # 短路 ⇒ 若被调用会抛错
+
+    session = _mock_session()
+    dto = DocQaRequest(session_id="sess-low", question="abc", top_k=8)
+
+    events = [
+        ev
+        async for ev in svc.answer_stream(
+            session, dto, actor=CurrentUser(userId="u-1", departments=[]), configs=[],
+        )
+    ]
+
+    assert events[1].data["citations"][0]["document_id"] == "DOC-C"
+    asst = next(m for m in _added_of(session, SessionMessage) if m.role == "assistant")
+    assert asst.citations is not None
+    assert asst.citations[0]["document_id"] == "DOC-C"
+
+
+@pytest.mark.asyncio
+async def test_answer_stream_zero_usage_writes_no_ledger_row() -> None:
+    """客户端没报 usage（退化流）⇒ 不得写 0/0 假台账行。
+
+    其余每个计量点都守了零用量（``_runL4AgentLoop`` / ``_resolveGlobalFilters`` /
+    ``_recordDirectUsage``）：零 token 行会把 total_requests 灌水，且让「有台账行」
+    不再等于「真的调过 LLM」。
+    """
+    svc = RagQaService()
+    svc._rag_svc = MagicMock()
+    svc._rag_svc.searchDocuments = AsyncMock(return_value=[
+        {"document_id": "DOC-A", "document_name": "合同", "chunk_text": "条款", "score": 0.85},
+    ])
+    svc._llm_factory = MagicMock(return_value=_make_never_done_client())
+
+    session = _mock_session()
+    dto = DocQaRequest(session_id="sess-zero", question="abc", top_k=8)
+
+    _ = [
+        ev
+        async for ev in svc.answer_stream(
+            session, dto,
+            actor=CurrentUser(userId="u-1", departments=[]),
+            configs=[_doc_qa_cfg()],
+        )
+    ]
+
+    from app.domain.models import SessionTokenUsage
+
+    assert _added_of(session, SessionTokenUsage) == []
+    # 消息照旧落库（零台账 ≠ 不落消息）
+    assert len(_added_of(session, SessionMessage)) >= 2

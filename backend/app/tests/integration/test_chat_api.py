@@ -192,6 +192,39 @@ class TestChatApi:
         assert rows[0].content == "各供应商的收货数量汇总"
         assert rows[1].sql_generated is not None
 
+    async def test_l2_writes_routing_layer(self, client, dbSession, monkeypatch) -> None:
+        """L2 NL2SQL 路径应在 session_message 写入 routing_layer='L2'。
+
+        Phase 5 监控管道依赖 routing_layer 列。
+        """
+        import uuid
+
+        from app.domain.models import SessionMessage
+
+        config, ds = await _seed(dbSession)
+        _installFakes(monkeypatch, config)
+        session_id = f"s-{uuid.uuid4().hex[:8]}"
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_chat_payload("各供应商的收货数量汇总", ds.id, sessionId=session_id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        result = await dbSession.execute(
+            select(SessionMessage).where(
+                SessionMessage.session_id == session_id,
+                SessionMessage.role == "assistant",
+            )
+        )
+        assistant_msg = result.scalar_one_or_none()
+        assert assistant_msg is not None
+        assert assistant_msg.routing_layer == "L2", (
+            f"expected routing_layer='L2', got {assistant_msg.routing_layer!r}"
+        )
+        assert assistant_msg.latency_ms is not None and assistant_msg.latency_ms >= 0
+        assert assistant_msg.token_cost_usd is not None and assistant_msg.token_cost_usd >= 0
+
     async def test_follow_up_query_injects_stored_context(self, client, dbSession, monkeypatch) -> None:
         import app.api.v1.chat as chat_module
 

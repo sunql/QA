@@ -14,6 +14,7 @@ class ProviderType(str, Enum):
 
     OPENAI = "openai"
     AZURE_OPENAI = "azure_openai"
+    MOONSHOT = "moonshot"
     OPENAI_COMPATIBLE_PROXY = "openai_compatible_proxy"
     OLLAMA = "ollama"
 
@@ -142,12 +143,25 @@ class ObjectType(str, Enum):
 
 
 class IntentType(str, Enum):
-    """用户意图类型。
+    """用户意图类型（13 类，全量接入流水线，2026-09-27 文档与代码对齐）。
 
-    QUERY / NEW_QUERY：全新查询（NEW_QUERY 表示有历史状态时开启的新一轮）。
-    REFINE / FOLLOW_UP：多轮意图，需存在会话查询状态（见 intent_service）。
-    CLARIFY：询问概念含义，不进 NL2SQL 流水线。
-    DEFINE / MAP / METRIC：设计稿保留意图，暂未接入流水线。
+    NL2SQL 主路径（5 类）：
+    - QUERY / NEW_QUERY：全新查询（NEW_QUERY 表示有历史状态时开启的新一轮）。
+    - REFINE / FOLLOW_UP：多轮意图，需存在会话查询状态（见 intent_service）。
+
+    不进 NL2SQL（1 类）：
+    - CLARIFY：询问概念含义。
+
+    本体治理指令（3 类，已接入，`chat_service._handleDefineClass / _handleDefineMetric /
+      _handleShowMetric / _handleMapProperty`，详见 chat_service.py:2551-2568）：
+    - DEFINE / MAP / METRIC：指标/类/属性创建与查询。
+
+    领域拦截路径（4 类，跳过 NL2SQL 走专项服务）：
+    - CHITCHAT：闲聊，直接对话模板回复。
+    - SUPPLIER_360：供应商 360° 视图（Phase 5.3，Supplier360Service）。
+    - SUPPLIER_RISK：供应商风险 Agent（Phase 5.4，SupplierRiskService）。
+    - GRAPH_REASONING：知识图谱多跳推理（Phase 6.3，GraphTraversalService）。
+    - AGENT_RUN：Agent 运行时（Phase 6.4，AgentRuntimeService.run_agent_loop）。
     """
 
     QUERY = "query"
@@ -437,3 +451,60 @@ class PermissionResourceType(str, Enum):
     ONTOLOGY_CLASS = "ONTOLOGY_CLASS"
     ONTOLOGY_PROPERTY = "ONTOLOGY_PROPERTY"
     METRIC = "METRIC"
+
+
+class ClassRelationType(str, Enum):
+    """本体「类 × 类」语义关系类型（Phase 5.6 关系重构，人工声明）。
+
+    两个本体类之间由用户在语义关系页显式建立的方向性关系，PG ontology_relation
+    为 SSOT、Neo4j (:Class)-[:{TYPE}]->(:Class) 为镜像。初值 6 个，词表可扩展：
+    新增值会被 neo4j_client.CLASS_RELATION_TYPES / service._CLASS_RELATION_VALUES
+    自动继承（两者都由此枚举派生），只需再同步前端
+    SEMANTIC_RELATION_TYPE_OPTIONS + i18n（enums.semanticRelationType.*）。
+    """
+
+    SUPPLIES = "SUPPLIES"
+    CONTAINS = "CONTAINS"
+    GENERATES = "GENERATES"
+    INSPECTED_BY = "INSPECTED_BY"
+    GENERATED = "GENERATED"
+    RELATED_TO = "RELATED_TO"
+
+
+class ReportStatus(str, Enum):
+    """评估报告状态（feat-dq-evaluation-report；progress 2026-09-15）。
+
+    DRAFT: 草稿态，不出现在列表（除非查询时显式带 status 过滤）；可继续编辑。
+    PUBLISHED: 已发布，对所有登录用户可见，可被分享/定时生成。
+    PENDING: 已创建但评估任务尚未开始（后台调度中）。
+    RUNNING: 评估进行中；前端轮询 GET /reports/{id}/progress 拿当前进度。
+    COMPLETED: 评估成功完成，snapshot 字段已写完。
+    FAILED: 评估异常，snapshot 内含错误信息，前端 progress.message 展示。
+    """
+
+    DRAFT = "DRAFT"
+    PUBLISHED = "PUBLISHED"
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class ReportTimeWindowType(str, Enum):
+    """定时报告的时间窗口类型（feat-dq-evaluation-report）。
+
+    LAST_7D: 取最近 7 天数据；LAST_30D: 最近 30 天；LAST_RUN: 上次 evaluate 之后
+    的新数据（首次运行 = 全表扫描，后续增量）。本枚举仅用于定时 schedule，
+    单次报告直接传 time_window_start/end 即可。
+    """
+
+    LAST_7D = "LAST_7D"
+    LAST_30D = "LAST_30D"
+    LAST_RUN = "LAST_RUN"
+
+
+class ExportFormat(str, Enum):
+    """评估报告导出格式（feat-dq-evaluation-report）。"""
+
+    PDF = "pdf"
+    EXCEL = "excel"

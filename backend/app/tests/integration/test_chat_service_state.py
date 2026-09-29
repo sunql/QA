@@ -35,7 +35,7 @@ from app.domain.schemas import (
     OntologyMetricCreate,
     OntologyPropertyUpdate,
 )
-from app.services.chat_service import ChatService
+from app.services.chat_service import ChatService, _STATE_HISTORY_FIELD_LIMIT_DEFAULT
 
 
 # 测试用查询结果（与 test_chat_service_stream.py 同构，供本文件的 affinity 测试使用）
@@ -427,7 +427,7 @@ class TestQueryState:
         )
         state = await service._loadQueryState(dbSession, "s1")
         assert state is not None
-        prompt = service._buildStatePrompt(state, IntentType.REFINE)
+        prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         assert "各供应商的收货数量汇总" in prompt
         assert "PRECEIPT" in prompt
         assert "SELECT BPSNUM, SUM(QTY)" in prompt
@@ -490,7 +490,7 @@ class TestQueryState:
             dbSession, "s1", question="q2", plan=None, sql="SELECT 2", resultColumns=[]
         )
         state = await service._loadQueryState(dbSession, "s1")
-        prompt = service._buildStatePrompt(state, IntentType.REFINE)
+        prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         assert "q1" in prompt
         assert "SELECT 1" in prompt
 
@@ -501,7 +501,7 @@ class TestQueryState:
             dbSession, "s1", question="q1", plan=None, sql="SELECT 1", resultColumns=[]
         )
         state = await service._loadQueryState(dbSession, "s1")
-        prompt = service._buildStatePrompt(state, IntentType.REFINE)
+        prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         assert "更早" not in prompt
 
     async def test_state_prompt_follow_up_includes_history(self, dbSession) -> None:
@@ -514,7 +514,7 @@ class TestQueryState:
             dbSession, "s1", question="q2", plan=None, sql="SELECT 2", resultColumns=[]
         )
         state = await service._loadQueryState(dbSession, "s1")
-        prompt = service._buildStatePrompt(state, IntentType.FOLLOW_UP)
+        prompt = service._buildStatePrompt(state, IntentType.FOLLOW_UP, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         assert "q1" in prompt
         assert "追问" in prompt
 
@@ -528,7 +528,7 @@ class TestQueryState:
         assert state is not None
         # 模拟脏数据：字符串、None、整数、以及一个合法 dict
         state.recent_rounds = ["bad", None, 123, {"q": "ok", "s": "SELECT 1"}]
-        prompt = service._buildStatePrompt(state, IntentType.REFINE)
+        prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         # 合法项仍渲染，坏项被跳过，无异常
         assert "ok" in prompt
         assert "SELECT 1" in prompt
@@ -536,11 +536,9 @@ class TestQueryState:
 
     async def test_state_prompt_truncates_long_history_entries(self, dbSession) -> None:
         # 超长 question/SQL 在渲染时截断，防止撑爆 prompt（LOW-2）
-        from app.services.chat_service import _STATE_HISTORY_FIELD_LIMIT
-
         service, _, _, _ = _buildService()
-        longQ = "问" * (_STATE_HISTORY_FIELD_LIMIT + 200)
-        longS = "SELECT " + "x" * (_STATE_HISTORY_FIELD_LIMIT + 200)
+        longQ = "问" * (_STATE_HISTORY_FIELD_LIMIT_DEFAULT + 200)
+        longS = "SELECT " + "x" * (_STATE_HISTORY_FIELD_LIMIT_DEFAULT + 200)
         await service._saveQueryState(
             dbSession, "s1", question=longQ, plan=None, sql=longS, resultColumns=[]
         )
@@ -548,7 +546,7 @@ class TestQueryState:
             dbSession, "s1", question="q2", plan=None, sql="SELECT 2", resultColumns=[]
         )
         state = await service._loadQueryState(dbSession, "s1")
-        prompt = service._buildStatePrompt(state, IntentType.REFINE)
+        prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         # 历史里的长 q/s 被截断到上限 + 省略号
         assert "..." in prompt
         assert longQ not in prompt
@@ -565,7 +563,7 @@ class TestQueryState:
             dbSession, "s1", question="q2", plan=None, sql="SELECT 2", resultColumns=[]
         )
         state = await service._loadQueryState(dbSession, "s1")
-        prompt = service._buildStatePrompt(state, IntentType.REFINE)
+        prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         # 原文进入 prompt（注入层会转义为 &lt;img&gt;）
         assert "q1 <img>" in prompt
 

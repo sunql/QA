@@ -110,3 +110,52 @@ class TestUpdateClears:
         )
         reloaded = await service.getProperty(dbSession, prop.id)
         assert reloaded.business_aliases == []
+
+class _FakeEmbedding:
+    async def generateEmbedding(self, text: str) -> list[float]:
+        return [float(len(text))] * 4
+
+
+class _FakeMilvus:
+    def __init__(self) -> None:
+        self.deleted: list[tuple[int, str]] = []
+        self.inserted: list[dict] = []
+
+    def deleteByOntologyId(self, ontologyId: int, type: str) -> None:
+        self.deleted.append((ontologyId, type))
+
+    def insertEmbeddings(self, records: list[dict]) -> None:
+        self.inserted.extend(records)
+
+
+class TestUpdateResyncsPropertyEmbedding:
+    """修改 description/business_aliases 后必须重刷属性向量（description 进向量文本，
+    不重刷则语义检索永远拿旧含义——2026-09-18 用户报障「没办法生成向量信息」）。"""
+
+    async def test_update_description_resyncs_property_vector(
+        self, _neutralizeNeo4j, dbSession, monkeypatch
+    ) -> None:
+        import asyncio
+
+        import app.services.ontology_service as mod
+
+        fakeMilvus = _FakeMilvus()
+        monkeypatch.setattr(mod, "milvus", fakeMilvus)
+        service = OntologyService(embeddingService=_FakeEmbedding())  # type: ignore[arg-type]
+
+        prop = await _createProp(dbSession, service)
+        await service.updateProperty(
+            dbSession,
+            prop.id,
+            OntologyPropertyUpdate(description="采购单含税金额"),
+            actor=_ADMIN.userId,
+        )
+
+        # 等待 best-effort 后台同步任务结束
+        await asyncio.gather(*mod._PENDING_SYNC_TASKS)
+
+        assert (prop.id, "property") in fakeMilvus.deleted
+        propertyRecords = [r for r in fakeMilvus.inserted if r["type"] == "property"]
+        assert len(propertyRecords) == 1
+        assert propertyRecords[0]["ontology_id"] == prop.id
+        assert "采购单含税金额" in propertyRecords[0]["description"]

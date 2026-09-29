@@ -95,8 +95,12 @@ class TestAgentRegistryAudit:
         assert any(r["entityId"] == agent_id and r["action"] == "UPDATE" for r in rows)
 
     async def test_delete_agent_not_exposed_in_api(self, client, dbSession) -> None:
-        """DELETE on agent endpoint should not be exposed — only deprecate (soft delete) is the API surface."""
-        # Try direct DELETE — should fail with 405 or 404 (not 204/200)
+        """不带 hard_delete 的 DELETE = 软删除（status → deprecated），非硬删除。
+
+        契约演进：本用例曾断言 DELETE 端点 405/404 不暴露；后来 DELETE 被实现为
+        软删除 API 面（test_agent_registry_api.py 文件头第 8 行 + deprecate 用例），
+        硬删除改为 `?hard_delete=true` 显式参数。这里钉住：默认路径绝不能删行。
+        """
         create_resp = await client.post(
             "/api/v1/agents",
             json=_make_payload(f"AUD_AGENT_NODEL_{id(self)}"),
@@ -105,9 +109,10 @@ class TestAgentRegistryAudit:
         assert create_resp.status_code in (200, 201), f"setup create failed: {create_resp.text}"
         agent_code = create_resp.json()["agentCode"]
         del_resp = await client.delete(f"/api/v1/agents/{agent_code}", headers=ADMIN_HEADERS)
-        assert del_resp.status_code in (405, 404), (
-            f"DELETE should not be exposed; got {del_resp.status_code}: {del_resp.text}"
+        assert del_resp.status_code == 200, (
+            f"soft delete should succeed; got {del_resp.status_code}: {del_resp.text}"
         )
+        assert del_resp.json()["status"] == "deprecated"
 
     async def test_create_agent_actor_departments_injected(self, client, dbSession) -> None:
         code = f"AUD_DEPT_{id(self)}"

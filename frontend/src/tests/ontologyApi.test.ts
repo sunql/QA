@@ -6,7 +6,24 @@ const httpMock = vi.hoisted(() => ({
   put: vi.fn(),
   delete: vi.fn(),
 }));
-vi.mock("../api/client", () => ({ httpClient: httpMock }));
+// parseBatchCsv 等裸 axios 路径的失败 toast 走 client.showMessageError（mock 成 spy 断言）
+const showMessageErrorSpy = vi.hoisted(() => vi.fn());
+vi.mock("../api/client", () => ({
+  httpClient: httpMock,
+  showMessageError: showMessageErrorSpy,
+}));
+
+// parseBatchCsv 必须走 axios.postForm（multipart 让浏览器补 boundary），
+// 而非 httpClient（其实例默认 Content-Type: application/json 会把表单 422 掉）。
+const axiosMock = vi.hoisted(() => ({ postForm: vi.fn() }));
+vi.mock("axios", () => ({ default: axiosMock }));
+
+// antd message.error spy：断言失败 toast（镜像拦截器文案）
+const antdSpies = vi.hoisted(() => ({ error: vi.fn() }));
+vi.mock("antd", async () => {
+  const actual = await vi.importActual<typeof import("antd")>("antd");
+  return { ...actual, message: { ...actual.message, error: antdSpies.error } };
+});
 
 import {
   listClasses,
@@ -28,6 +45,17 @@ import {
   listJoins,
   createJoin,
   deleteJoin,
+  listSemanticRelations,
+  createSemanticRelation,
+  deleteSemanticRelation,
+  backfillRelations,
+  runOntologyBatch,
+  previewOntologyBatch,
+  downloadBatchTemplate,
+  parseBatchCsv,
+  syncClassEmbedding,
+  syncMissingEmbeddings,
+  syncMissingGraph,
 } from "../api/ontology";
 
 // =============================================================================
@@ -213,5 +241,197 @@ describe("api/ontology — Join", () => {
     httpMock.delete.mockResolvedValue({ data: null });
     await deleteJoin(7);
     expect(httpMock.delete).toHaveBeenCalledWith("/ontology/joins/7");
+  });
+});
+
+// =============================================================================
+// Semantic Relation
+// =============================================================================
+
+describe("api/ontology — Semantic Relation", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it("listSemanticRelations GET /ontology/relations", async () => {
+    const data = [{ id: 1, sourceClassId: 1, targetClassId: 2, relationType: "SUPPLIES" }];
+    httpMock.get.mockResolvedValue({ data });
+    const result = await listSemanticRelations();
+    expect(httpMock.get).toHaveBeenCalledWith("/ontology/relations");
+    expect(result).toEqual(data);
+  });
+
+  it("createSemanticRelation POST /ontology/relations", async () => {
+    const payload = {
+      sourceClassId: 1,
+      targetClassId: 2,
+      relationType: "CONTAINS",
+      description: "供应商供货",
+    } as const;
+    httpMock.post.mockResolvedValue({ data: { id: 5, ...payload } });
+    const result = await createSemanticRelation(payload);
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/relations", payload);
+    expect(result.id).toBe(5);
+  });
+
+  it("deleteSemanticRelation DELETE /ontology/relations/:id", async () => {
+    httpMock.delete.mockResolvedValue({ data: null });
+    await deleteSemanticRelation(8);
+    expect(httpMock.delete).toHaveBeenCalledWith("/ontology/relations/8");
+  });
+
+  it("backfillRelations POST /ontology/relations/backfill", async () => {
+    const data = { syncedJoins: 3, backfilledReferences: 2 };
+    httpMock.post.mockResolvedValue({ data });
+    const result = await backfillRelations();
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/relations/backfill");
+    expect(result).toEqual(data);
+  });
+});
+
+// =============================================================================
+// Batch Relation Engine
+// =============================================================================
+
+describe("api/ontology — Batch Relation Engine", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  const emptyResult = {
+    syncGraph: null,
+    inferredJoins: [],
+    joins: { created: 0, skipped: 0, overwritten: 0, errors: [] },
+    relations: { created: 0, skipped: 0, overwritten: 0, errors: [] },
+  };
+
+  it("runOntologyBatch POST /ontology/batch（携带动作 + onConflict）", async () => {
+    const payload = { syncGraph: true, inferJoins: true, onConflict: "skip" as const };
+    httpMock.post.mockResolvedValue({ data: emptyResult });
+    const result = await runOntologyBatch(payload);
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/batch", payload);
+    expect(result).toEqual(emptyResult);
+  });
+
+  it("runOntologyBatch 携带 applyManifest 清单", async () => {
+    const payload = {
+      applyManifest: true,
+      onConflict: "overwrite" as const,
+      manifest: {
+        joins: [{ sourceClassId: 1, sourceColumns: ["A_0"], targetClassId: 2, targetColumns: ["A_0"] }],
+        relations: [{ sourceClassId: 1, targetClassId: 2, relationType: "SUPPLIES" as const }],
+      },
+    };
+    httpMock.post.mockResolvedValue({ data: emptyResult });
+    await runOntologyBatch(payload);
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/batch", payload);
+  });
+
+  it("previewOntologyBatch POST /ontology/batch/preview（只读预览）", async () => {
+    const payload = { inferJoins: true, onConflict: "skip" as const };
+    httpMock.post.mockResolvedValue({ data: emptyResult });
+    const result = await previewOntologyBatch(payload);
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/batch/preview", payload);
+    expect(result).toEqual(emptyResult);
+  });
+
+  it("downloadBatchTemplate GET /ontology/batch/template?kind= 返回 blob", async () => {
+    httpMock.get.mockResolvedValue({ data: new Blob(["a,b,c"], { type: "text/csv" }) });
+    const blob = await downloadBatchTemplate("relations");
+    expect(httpMock.get).toHaveBeenCalledWith("/ontology/batch/template", {
+      params: { kind: "relations" },
+      responseType: "blob",
+    });
+    expect(blob).toBeInstanceOf(Blob);
+  });
+
+  it("parseBatchCsv 走 axios.postForm（multipart 交浏览器补 boundary）+ auth 头，不走 httpClient JSON 通道", async () => {
+    const file = new File(["a"], "relations.csv", { type: "text/csv" });
+    const data = {
+      manifest: { joins: [], relations: [{ sourceClassId: 1, targetClassId: 2, relationType: "SUPPLIES" }] },
+      errors: [],
+    };
+    axiosMock.postForm.mockResolvedValue({ data });
+    const result = await parseBatchCsv(file, "relations");
+    // 回归护栏：httpClient 实例默认 Content-Type: application/json，
+    // 若走它会丢 multipart boundary → 后端 422 missing file。因此必须不用它。
+    expect(httpMock.post).not.toHaveBeenCalled();
+    expect(axiosMock.postForm).toHaveBeenCalledTimes(1);
+    const [url, formData, config] = axiosMock.postForm.mock.calls[0] as [
+      string,
+      FormData,
+      { headers: Record<string, unknown> },
+    ];
+    expect(url).toMatch(/\/ontology\/batch\/parse-csv$/);
+    expect(formData).toBeInstanceOf(FormData);
+    expect(formData.get("kind")).toBe("relations");
+    expect(formData.get("file")).toBe(file);
+    expect(config.headers["X-Tenant-Id"]).toBeDefined();
+    // feat-user-auth: 不再注入 X-User-Id，由 Authorization: Bearer 替代
+    expect(config.headers["X-User-Id"]).toBeUndefined();
+    expect(config.headers["Authorization"]).toBeUndefined();
+    expect(config.headers["Content-Type"]).toBeUndefined();
+    expect(result).toEqual(data);
+  });
+
+  it("parseBatchCsv 失败：showMessageError 走 React 上下文 messageApi 弹错后 rethrow", async () => {
+    const file = new File(["a"], "relations.csv", { type: "text/csv" });
+    // FastAPI 422 detail 形如数组
+    const detail = [{ type: "missing", loc: ["body", "file"], msg: "Field required", input: null }];
+    axiosMock.postForm.mockRejectedValue({ response: { status: 422, data: { detail } } });
+    await expect(parseBatchCsv(file, "relations")).rejects.toBeTruthy();
+    expect(showMessageErrorSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// =============================================================================
+// Embedding 手动同步（向量对账）
+// =============================================================================
+
+describe("api/ontology — embedding 手动同步", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it("syncClassEmbedding POST /ontology/classes/{id}/embedding", async () => {
+    httpMock.post.mockResolvedValue({ data: null });
+    await syncClassEmbedding(20);
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/classes/20/embedding");
+  });
+
+  it("syncMissingEmbeddings POST /ontology/embeddings/sync-missing 并返回摘要", async () => {
+    const data = {
+      totalClasses: 96,
+      missingCount: 69,
+      syncedCount: 69,
+      failedCount: 0,
+      failures: [],
+      totalProperties: 4078,
+      missingPropertyCount: 73,
+      syncedPropertyCount: 73,
+      failedPropertyCount: 0,
+      propertyFailures: [],
+    };
+    httpMock.post.mockResolvedValue({ data });
+    const result = await syncMissingEmbeddings();
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/embeddings/sync-missing");
+    expect(result).toEqual(data);
+  });
+
+  it("syncMissingGraph POST /ontology/graph/sync-missing 并返回对账摘要", async () => {
+    const data = {
+      totalClasses: 54,
+      missingClassCount: 2,
+      syncedClassCount: 2,
+      totalProperties: 54,
+      missingPropertyCount: 1,
+      syncedPropertyCount: 1,
+      totalJoins: 35,
+      missingJoinCount: 0,
+      syncedJoinCount: 0,
+      totalRelations: 3,
+      missingRelationCount: 1,
+      syncedRelationCount: 1,
+      failedCount: 0,
+      failures: [],
+    };
+    httpMock.post.mockResolvedValue({ data });
+    const result = await syncMissingGraph();
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/graph/sync-missing");
+    expect(result).toEqual(data);
   });
 });

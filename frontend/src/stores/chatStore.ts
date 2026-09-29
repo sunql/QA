@@ -15,7 +15,14 @@ import type {
   ChatSession,
   SessionMessagesResponse,
 } from "../types/chatHistory";
-import type { ChatMessage, ChartType, HistoryMessage, IntentType, MultiStepStep } from "../types/chat";
+import type {
+  ChatMessage,
+  ChartType,
+  HistoryMessage,
+  IntentType,
+  MultiStepStep,
+  StepStatus,
+} from "../types/chat";
 import { i18n } from "../i18n";
 import { read as readPersisted, write as writePersisted } from "./persistChatUiState";
 
@@ -72,6 +79,12 @@ function patchLastMessage(messages: ChatMessage[], patch: Partial<ChatMessage>):
   return [...messages.slice(0, -1), { ...last, ...patch }];
 }
 
+// 后端步骤结果 → 前端终态：有 error 即失败（失败步骤 sql 恒为 null，与后端同判据）。
+// 流式（onStepResult）与非流式（响应 steps 回填）共用，避免两处判据漂移。
+function stepStatusFromResult(error: string | null | undefined): StepStatus {
+  return error ? "error" : "done";
+}
+
 // 不可变更新最后一条助手消息中指定 stepIndex 的步骤（不动其它步骤与消息）
 function patchStep(messages: ChatMessage[], stepIndex: number, patch: Partial<MultiStepStep>): ChatMessage[] {
   const last = messages[messages.length - 1];
@@ -100,6 +113,8 @@ function toChatMessage(read: ChatMessageRead): ChatMessage {
     timestamp: Number.isFinite(ts) ? ts : Date.now(),
     sql: read.sql,
     isStreaming: false,
+    // H4：断连兜底写入的半截回答，UI 据此提示「内容不完整」
+    interrupted: read.interrupted,
   };
 }
 
@@ -252,7 +267,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           onStepResult: (result) =>
             set((state) => ({
               messages: patchStep(state.messages, result.stepIndex, {
-                status: result.error ? "error" : "done",
+                status: stepStatusFromResult(result.error),
                 sql: result.sql ?? null,
                 summary: result.summary ?? null,
                 error: result.error ?? null,
@@ -264,6 +279,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             set((state) => ({
               messages: patchLastMessage(state.messages, {
                 dataQuality: payload.badges,
+              }),
+            })),
+          // 类召回诊断（2026-09-16）：截断/降级时 MessageItem 渲染提示
+          onClassRecall: (info) =>
+            set((state) => ({
+              messages: patchLastMessage(state.messages, {
+                classRecall: info,
               }),
             })),
           onToken: (content) =>
@@ -337,6 +359,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             affinityStatus: res.affinityStatus ?? null,
             // Phase 1.4：DQ 可信度 badge（顺序对齐 queryPlan.selectedClasses）
             dataQuality: res.dataQuality ?? null,
+            // 类召回诊断（2026-09-16）：truncated/fallback 时渲染提示
+            classRecall: res.classRecall ?? null,
             // 拦截路径卡片对象（非流式响应回填，MessageItem 按字段存在性渲染）。
             // 修复：Phase 5.3/5.4/6.3 曾只读不写，导致 supplier360/supplierRisk/
             // graphTraversal 卡片在真实 chat 流中从未渲染（#206 审查发现）。
@@ -347,14 +371,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             agentRun: res.agentRun ?? null,
             // Phase 7 G4：中置信语义路由建议卡片（仅命中时非 null）
             suggestedAgent: res.suggestedAgent ?? null,
-            // 非流式多步：steps 数组均为「已完成」（后端仅回传数据步骤，无汇总步骤）
+            // 非流式多步：后端仅回传数据步骤（无汇总步骤），每步成败由 error 判定——
+            // C3 失败隔离后失败步骤也会回到这里（sql/data 为 null、error 非空），
+            // 一律当「已完成」会把失败渲染成成功（与流式 onStepResult 口径也必须一致）
             steps: res.steps?.map(
               (s): MultiStepStep => ({
                 stepIndex: s.stepIndex,
                 description: s.description,
                 subQuestion: s.subQuestion,
                 aggregationOnly: false,
-                status: "done",
+                status: stepStatusFromResult(s.error),
                 sql: s.sql ?? null,
                 summary: s.summary ?? null,
                 error: s.error ?? null,

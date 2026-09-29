@@ -15,6 +15,7 @@ vi.mock("antd", async () => {
 vi.mock("axios", () => {
   const instance = {
     interceptors: {
+      request: { use: vi.fn() },
       response: { use: vi.fn() },
     },
     get: vi.fn(),

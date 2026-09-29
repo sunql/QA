@@ -13,9 +13,13 @@ Harness/changes/feat-rbac-identity/）——本次仅落菜单权限。
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
+    DateTime,
     ForeignKey,
     Index,
     String,
@@ -30,9 +34,25 @@ from app.domain.models import Base, BigIntFk, BigIntPk, TimestampMixin
 GRANT_SUBJECT_TYPES = ("USER", "ROLE", "ORGANIZATION")
 ADMIN_ROLE_CODE = "admin"
 
+# feat-user-onboarding：新建用户默认授予的菜单 code（个人中心）。
+# 集中定义避免散落魔法字符串——seed_menu_config 改了 menu code 时只需改这里。
+DEFAULT_NEW_USER_MENU_CODE = "item.profile"
+
 
 class User(Base, TimestampMixin):
-    """系统用户（无密码——当前无登录态，身份来自 X-User-Id 头桩映射）。"""
+    """系统用户。
+
+    **当前没有密码登录**：身份来自 ``X-User-Id`` 头桩映射（见 getCurrentUser）。
+    下面的 4 个凭据 / 登录态字段来自 ``docs/superpowers/plans/2026-09-08-user-auth.md``
+    那次改造 —— 该计划**从未落地**，这 4 列原先只以手工 DDL 的形式存在于 prod，
+    任何迁移与模型都不认识它们。迁移 0060 + 本模型声明把两侧补齐
+    （见 ``Harness/changes/fix-schema-drift-two-dbs/``）。
+
+    声明它们**不是**为了启用密码登录，而是让 ``alembic autogenerate`` 知道这些列
+    是有意存在的 —— 否则每次 autogenerate 都会提议 DROP，而 prod 上唯一 admin 的
+    ``password_hash`` 是非空 bcrypt，删掉就真丢数据。将来真要开密码登录时，
+    这些列已就位，不必再补一次迁移。
+    """
 
     __tablename__ = "users"
 
@@ -43,14 +63,71 @@ class User(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=sa_text("true")
     )
+    # 0060 / 0082：登录 + 强制改密相关字段（DB 已有列，ORM 同步声明以避免
+    # 列差异在 alembic autogenerate 中触发 phantom diff）。
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa_text("false")
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_login_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("username", name="uq_users_username"),
         Index("ix_users_enabled", "enabled"),
+        # 部分索引：绝大多数行 must_change_password=false，谓词把「待改密用户」
+        # 的查询压到极小的索引上，与「给 bool 列建全表索引」不是一回事。
+        Index(
+            "ix_users_must_change_password",
+            "must_change_password",
+            postgresql_where=sa_text("must_change_password = true"),
+        ),
     )
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<User id={self.id} username={self.username!r}>"
+
+
+class UserSession(Base):
+    """用户会话表（feat-user-auth / 0082）。
+
+    每条 Bearer token 写入一行 ``jti`` + ``revoked_at``；``getCurrentUser``
+    每次同步查该表验证 session 未被吊销。``revoked_reason`` 三种：
+    ``logout`` / ``password_changed`` / ``admin_reset``。
+    """
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    jti: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[int] = mapped_column(
+        BigIntFk, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa_text("now()")
+    )
+
+    __table_args__ = (
+        Index("ix_user_sessions_jti", "jti", unique=True),
+        Index("ix_user_sessions_user_id", "user_id"),
+        Index("ix_user_sessions_active", "user_id", "revoked_at"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"<UserSession id={self.id} jti={self.jti!r} "
+            f"user_id={self.user_id} revoked={self.revoked_at!r}>"
+        )
 
 
 class Role(Base, TimestampMixin):

@@ -27,7 +27,7 @@ async def listEmbeddings(
     """返回 ontology_embeddings 条目（不含向量值），可按 type 过滤、按 name/alias 搜索。"""
     if type is not None and type not in _VALID_TYPES:
         raise HTTPException(status_code=422, detail=f"Invalid type: {type!r}")
-    rows = milvus_client.listAllEmbeddings()
+    rows = milvus_client.listEmbeddingsAcross3Collections()
     if type:
         rows = [r for r in rows if r.get("type") == type]
     if search:
@@ -55,7 +55,7 @@ async def listEmbeddings(
 async def getStats() -> dict[str, int]:
     """返回按 type 分组的向量数量统计。"""
     try:
-        rows = milvus_client.listAllEmbeddings()
+        rows = milvus_client.listEmbeddingsAcross3Collections()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return _stats(rows)

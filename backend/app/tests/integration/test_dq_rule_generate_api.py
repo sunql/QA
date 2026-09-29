@@ -47,6 +47,19 @@ async def ensureDataSourceAndSchema(dbSession, *, tables: dict) -> int:
     return ds.id
 
 
+async def ensureDataSourceOnly(dbSession) -> int:
+    """造数据源但完全不写 schema_cache——模拟「数据源未 introspect」的真空状态。"""
+    import uuid
+
+    from app.domain.models import DataSource
+    ds = DataSource(name=f"gen-nocache-{uuid.uuid4().hex[:8]}", type="POSTGRESQL",
+                   host="localhost", port=5433, database_name="qa_metadata_test",
+                   username="qa_user", password_encrypted="x")
+    dbSession.add(ds)
+    await dbSession.commit()
+    return ds.id
+
+
 async def test_preview_matched_yields_suggestions(client: AsyncClient, dbSession: AsyncSession):
     classId = await ensureClassWithProperty(dbSession)
     dsId = await ensureDataSourceAndSchema(dbSession, tables={
@@ -71,12 +84,28 @@ async def test_preview_missing_column_blocks(client, dbSession):
 
 
 async def test_preview_no_schema_cache_blocks_all(client, dbSession):
+    """数据源根本没 introspect 过（schema_cache 行不存在）→ 报「数据源 schema 未缓存」，
+    让用户去调 introspect，而不是报「找不到表」掩盖真因。"""
     classId = await ensureClassWithProperty(dbSession)
-    dsId = await ensureDataSourceAndSchema(dbSession, tables={})
+    dsId = await ensureDataSourceOnly(dbSession)
     res = await client.post(f"{GEN_BASE}/preview", json={"classId": classId, "datasourceId": dsId})
     body = res.json()
     assert body["suggestions"] == []
     assert all(b["reason"] == "数据源 schema 未缓存" for b in body["blocked"])
+
+
+async def test_preview_table_not_in_cached_schema_distinct_message(client, dbSession):
+    """schema 已缓存，但 source_table 不在缓存里（表名拼错 / owner 不匹配）→
+    报「找不到对应的表 XXX」，与「未缓存」区分开。回归：旧实现把两种场景归到
+    同一句话，掩盖了「映射配置问题」的真因。"""
+    classId = await ensureClassWithProperty(dbSession)
+    # 缓存里只有 OTHER_T，没有 PORDER
+    dsId = await ensureDataSourceAndSchema(dbSession, tables={
+        "OTHER_T": [("X", "varchar", True)]})
+    res = await client.post(f"{GEN_BASE}/preview", json={"classId": classId, "datasourceId": dsId})
+    body = res.json()
+    assert body["suggestions"] == []
+    assert any(b["reason"] == "找不到对应的表 PORDER" for b in body["blocked"])
 
 
 async def test_preview_class_not_found(client: AsyncClient):

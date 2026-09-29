@@ -17,19 +17,24 @@ from __future__ import annotations
 import pytest
 
 import app.infrastructure.neo4j_client as neo4j
+from app.dependencies import CurrentUser
 from app.domain.schemas import (
     OntologyClassCreate,
     OntologyClassUpdate,
     OntologyMetricCreate,
     OntologyPropertyCreate,
 )
+from app.services.acl_service import ADMIN_ROLE
 from app.services.ontology_service import OntologyService
 
 
 # Phase 4.5 ACL 扩展后 updateClass/deleteClass 要求 actor。
 # 本测试不验 ACL 行为，用 admin 绕过。ACL 行为由 test_governance_extension_acl.py 覆盖。
+# updateClass/deleteClass 现收完整 CurrentUser（含 roles）做 ACL——传 str 会被当
+# DEFAULT_STUB_ROLES 处理，admin 绕过须显式 roles=(ADMIN_ROLE,)。
 _ADMIN_ID = "t-admin"
 _ADMIN_DEPARTMENTS = ""  # empty, matches _ADMIN.departments=()
+_ADMIN = CurrentUser(userId=_ADMIN_ID, roles=(ADMIN_ROLE,))
 
 
 @pytest.fixture()
@@ -80,7 +85,7 @@ class TestUpdateKeepsOwnedData:
         """
         cls, prop = await _createClassWithProperty(dbSession, service)
         updated = await service.updateClass(
-            dbSession, cls.id, OntologyClassUpdate(description="v2 描述"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS
+            dbSession, cls.id, OntologyClassUpdate(description="v2 描述"), actor=_ADMIN
         )
         assert updated.id == cls.id  # 主键稳定
         assert updated.version == 1  # 不再版本提升
@@ -95,7 +100,7 @@ class TestUpdateKeepsOwnedData:
     ) -> None:
         """listClasses 返回更新后的类，且仍带属性（智能问答 schema 来源）。"""
         cls, prop = await _createClassWithProperty(dbSession, service)
-        await service.updateClass(dbSession, cls.id, OntologyClassUpdate(class_alias="收货单v2"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
+        await service.updateClass(dbSession, cls.id, OntologyClassUpdate(class_alias="收货单v2"), actor=_ADMIN)
         current = await service.listClasses(dbSession)
         assert len(current) == 1
         assert current[0].id == cls.id  # 不产生新行
@@ -113,7 +118,7 @@ class TestUpdateKeepsOwnedData:
             dbSession, OntologyClassCreate(class_name="C", source_table="T_C", parent_class_id=parent.id)
         , actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
         updatedParent = await service.updateClass(
-            dbSession, parent.id, OntologyClassUpdate(description="B v2"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS
+            dbSession, parent.id, OntologyClassUpdate(description="B v2"), actor=_ADMIN
         )
         assert updatedParent.id == parent.id
         reloadedChild = await service.getClass(dbSession, child.id)
@@ -142,7 +147,7 @@ class TestUpdateKeepsOwnedData:
             actor_departments=_ADMIN_DEPARTMENTS,
         )
         updatedTarget = await service.updateClass(
-            dbSession, target.id, OntologyClassUpdate(description="SUPPLIER v2"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS
+            dbSession, target.id, OntologyClassUpdate(description="SUPPLIER v2"), actor=_ADMIN
         )
         assert updatedTarget.id == target.id
         reloadedSource = await service.getClass(dbSession, source.id)
@@ -163,7 +168,7 @@ class TestUpdateKeepsOwnedData:
             actor_departments=_ADMIN_DEPARTMENTS,
         )
         updatedCls = await service.updateClass(
-            dbSession, cls.id, OntologyClassUpdate(description="SALES v2"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS
+            dbSession, cls.id, OntologyClassUpdate(description="SALES v2"), actor=_ADMIN
         )
         assert updatedCls.id == cls.id
         reloaded = await service.getMetric(dbSession, metric.id)
@@ -189,7 +194,7 @@ class TestUpdateKeepsOwnedData:
             actor_departments=_ADMIN_DEPARTMENTS,
         )
         updatedCls = await service.updateClass(
-            dbSession, cls.id, OntologyClassUpdate(description="EMPLOYEE v2"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS
+            dbSession, cls.id, OntologyClassUpdate(description="EMPLOYEE v2"), actor=_ADMIN
         )
         assert updatedCls.id == cls.id
         reloaded = await service.getClass(dbSession, cls.id)
@@ -217,7 +222,7 @@ class TestUpdateKeepsOwnedData:
             actor=_ADMIN_ID,
             actor_departments=_ADMIN_DEPARTMENTS,
         )
-        await service.updateClass(dbSession, cls.id, OntologyClassUpdate(description="v2"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
+        await service.updateClass(dbSession, cls.id, OntologyClassUpdate(description="v2"), actor=_ADMIN)
         reloaded = await service.getClass(dbSession, cls.id)
         prop = reloaded.properties[0]
         assert prop.property_alias == "金额"
@@ -239,10 +244,10 @@ class TestUpdateKeepsOwnedData:
             actor_departments=_ADMIN_DEPARTMENTS,
         )
         # 连续两次更新：id 稳定、版本保持 1（不再 v1→v2→v3 递增）
-        updated2 = await service.updateClass(dbSession, child.id, OntologyClassUpdate(class_alias="部门v2"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
+        updated2 = await service.updateClass(dbSession, child.id, OntologyClassUpdate(class_alias="部门v2"), actor=_ADMIN)
         assert updated2.id == child.id
         assert updated2.version == 1
-        updated3 = await service.updateClass(dbSession, child.id, OntologyClassUpdate(class_alias="部门v3"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
+        updated3 = await service.updateClass(dbSession, child.id, OntologyClassUpdate(class_alias="部门v3"), actor=_ADMIN)
         assert updated3.id == child.id
         assert updated3.version == 1
 
@@ -263,11 +268,11 @@ class TestUpdateKeepsOwnedData:
         cls = await service.createClass(
             dbSession, OntologyClassCreate(class_name="GONE", source_table="T_GONE")
         , actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
-        await service.deleteClass(dbSession, cls.id, actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
+        await service.deleteClass(dbSession, cls.id, actor=_ADMIN)
         from app.domain.exceptions import ValidationError
 
         with pytest.raises(ValidationError):
-            await service.updateClass(dbSession, cls.id, OntologyClassUpdate(description="复活"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
+            await service.updateClass(dbSession, cls.id, OntologyClassUpdate(description="复活"), actor=_ADMIN)
 
     async def test_update_rename_to_existing_name_rejected(
         self, dbSession, service: OntologyService, _neutralizeNeo4j
@@ -283,7 +288,7 @@ class TestUpdateKeepsOwnedData:
         , actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
         with pytest.raises(ValidationError):
             await service.updateClass(
-                dbSession, b.id, OntologyClassUpdate(class_name="SUPPLIER_A"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS
+                dbSession, b.id, OntologyClassUpdate(class_name="SUPPLIER_A"), actor=_ADMIN
             )
 
     async def test_update_rename_to_tombstoned_name_rejected(
@@ -295,13 +300,13 @@ class TestUpdateKeepsOwnedData:
         a = await service.createClass(
             dbSession, OntologyClassCreate(class_name="RETIRED", source_table="T_R")
         , actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
-        await service.deleteClass(dbSession, a.id, actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)  # 墓碑：RETIRED
+        await service.deleteClass(dbSession, a.id, actor=_ADMIN)  # 墓碑：RETIRED
         b = await service.createClass(
             dbSession, OntologyClassCreate(class_name="LIVE", source_table="T_L")
         , actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
         with pytest.raises(ValidationError):
             await service.updateClass(
-                dbSession, b.id, OntologyClassUpdate(class_name="RETIRED"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS
+                dbSession, b.id, OntologyClassUpdate(class_name="RETIRED"), actor=_ADMIN
             )
 
     async def test_create_after_soft_delete_rejected(
@@ -313,7 +318,7 @@ class TestUpdateKeepsOwnedData:
         a = await service.createClass(
             dbSession, OntologyClassCreate(class_name="RESERVED", source_table="T_R")
         , actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
-        await service.deleteClass(dbSession, a.id, actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
+        await service.deleteClass(dbSession, a.id, actor=_ADMIN)
         with pytest.raises(ValidationError):
             await service.createClass(
                 dbSession, OntologyClassCreate(class_name="RESERVED", source_table="T_R2")
@@ -329,7 +334,7 @@ class TestUpdatedSchemaFeedsNl2Sql:
         from app.services.nl2sql_service import Nl2SqlService
 
         cls, prop = await _createClassWithProperty(dbSession, service)
-        await service.updateClass(dbSession, cls.id, OntologyClassUpdate(class_alias="收货单v2"), actor=_ADMIN_ID, actor_departments=_ADMIN_DEPARTMENTS)
+        await service.updateClass(dbSession, cls.id, OntologyClassUpdate(class_alias="收货单v2"), actor=_ADMIN)
         current = await service.listClasses(dbSession)
 
         text = Nl2SqlService().buildSchemaText(current)

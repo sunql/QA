@@ -15,7 +15,7 @@ def testDeleteNodeRejectsUnknownLabel() -> None:
     # 白名单之外的 label 必须拒绝，防止 CQL 标签注入
     for bad in ("User", "Class; DROP", "`Class`", "Class }"):
         with pytest.raises(ValueError, match="Invalid label"):
-            neo4j.deleteNode(bad, 1)
+            neo4j.deleteNode(bad, "obj:CLASS:1")
 
 
 def testDeleteNodeAcceptsAllowedLabels() -> None:

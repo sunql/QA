@@ -9,6 +9,7 @@ ontology_embeddings：0 实体、indexes=[]）不建索引，搜索时抛 index 
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,7 @@ class FakeCollection:
         self.released = False
         self.deletedExprs: list[str] = []
         self.queryResults: list[dict] = []
+        self.iteratorKwargs: dict = {}
         self.dropped = False
 
     @property
@@ -54,6 +56,11 @@ class FakeCollection:
 
     def query(self, expr: str, output_fields: list[str], limit: int) -> list[dict]:
         return self.queryResults
+
+    def query_iterator(self, **kwargs) -> _FakeQueryIterator:
+        """listAllEmbeddings 走分批迭代取全量（M9）；返回单批假迭代器。"""
+        self.iteratorKwargs = kwargs
+        return _FakeQueryIterator([self.queryResults])
 
     def drop(self) -> None:
         self.dropped = True
@@ -84,8 +91,11 @@ class TestEnsureCollection:
         assert result is fake
         assert fake.released  # 已加载集合需先 release 再建索引
         assert fake.createdIndexFields == ["embedding"]
-        assert fake.createdIndexParams[0]["index_type"] == "IVF_FLAT"
+        # HNSW 而非 IVF_FLAT：nlist=128 对数百~数千向量桶分布失效，最佳匹配
+        # 落进未搜桶被错过（dist=0.85 真匹配 → 返 dist=1.25 错配类）
+        assert fake.createdIndexParams[0]["index_type"] == "HNSW"
         assert fake.createdIndexParams[0]["metric_type"] == "L2"  # 与 searchByEmbedding 一致
+        assert fake.createdIndexParams[0]["params"]["M"] == 16
         assert fake.loaded
 
     def test_existing_collection_with_index_skips_create(self, fakeEnv) -> None:
@@ -106,30 +116,33 @@ class TestEnsureCollection:
 
 
 class TestDeleteByOntologyId:
-    """deleteByOntologyId 按 type 作用域删除（回归：类/属性 id 碰撞曾互删）。
+    """deleteByOntologyId 是 deleteByOntologyIdDual 的薄包装（Task 14 后的 wrapper）。
 
-    背景：ontology_class 与 ontology_property 共用 id 序列，Milvus 的 ontology_id
-    非跨类型唯一（如 类 id=10 与 ItemMaster 属性 物料类型代码 id=10 并存）。若删除
-    只按 ontology_id 匹配，重同步某属性会把同 id 的类向量误删（全量回填已触发，
-    8 个类向量丢失）。修复后删除表达式必须带 type 过滤。
+    类型白名单仍由 wrapper 自身把关（fail-fast）；实际删除由 Dual 版本走新 collection。
     """
 
     def test_expr_scoped_by_type(self, fakeEnv) -> None:
         fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
         fakeEnv.setattr(milvus_client, "ensureCollection", lambda: fake)
+        fakeEnv.setattr(milvus_client, "ensureClassCollection", lambda: fake)
+        fakeEnv.setattr(milvus_client, "ensurePropertyCollection", lambda: fake)
+        fakeEnv.setattr(milvus_client, "ensureMetricCollection", lambda: fake)
         milvus_client.deleteByOntologyId(10, "property")
-        assert fake.deletedExprs == ['ontology_id == 10 and type == "property"']
+        # Wrapper now delegates to deleteByOntologyIdDual which deletes from new
+        # type-routed collection (no longer scoped by type in expr because
+        # the new collection is already per-type).
+        assert fake.deletedExprs == ["ontology_id == 10"]
 
     def test_class_and_property_same_oid_do_not_clobber(self, fakeEnv) -> None:
-        """同一 oid 下类/属性各有向量时，删除属性只删属性行，类行保留。"""
+        """同一 oid 下类/属性各有向量时，分别走各自的 type-routed collection 不互删。"""
         fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
         fakeEnv.setattr(milvus_client, "ensureCollection", lambda: fake)
+        fakeEnv.setattr(milvus_client, "ensureClassCollection", lambda: fake)
+        fakeEnv.setattr(milvus_client, "ensurePropertyCollection", lambda: fake)
+        fakeEnv.setattr(milvus_client, "ensureMetricCollection", lambda: fake)
         milvus_client.deleteByOntologyId(10, "class")
         milvus_client.deleteByOntologyId(10, "property")
-        assert fake.deletedExprs == [
-            'ontology_id == 10 and type == "class"',
-            'ontology_id == 10 and type == "property"',
-        ]
+        assert fake.deletedExprs == ["ontology_id == 10", "ontology_id == 10"]
 
     def test_rejects_unknown_type(self, fakeEnv) -> None:
         fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
@@ -148,26 +161,79 @@ class TestSearchByEmbeddingTypeFilter:
             milvus_client.searchByEmbedding([0.0], topK=5, typeFilter="other")
 
 
-class TestListAllEmbeddings:
-    """listAllEmbeddings 全量读取（cleanup 去重重建的前置）。"""
+class _FakeQueryIterator:
+    """假 `query_iterator`：按预置批次逐次吐出，取尽后返回空列表。"""
 
-    def test_returns_full_rows_with_embedding(self, fakeEnv) -> None:
-        fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
-        fakeEnv.setattr(milvus_client, "ensureCollection", lambda: fake)
-        fake.queryResults = [
-            {"id": 1, "ontology_id": 10, "type": "property", "embedding": [0.1]},
-            {"id": 2, "ontology_id": 10, "type": "class", "embedding": [0.2]},
-        ]
+    def __init__(self, batches: list[list[dict]]) -> None:
+        self._batches = [list(b) for b in batches]
+        self.nextCalls = 0
+        self.closed = False
+        self.error: Exception | None = None
+
+    def next(self) -> list[dict]:
+        self.nextCalls += 1
+        if self.error is not None:
+            raise self.error
+        return self._batches.pop(0) if self._batches else []
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestListAllEmbeddings:
+    """listAllEmbeddings 现在是 listEmbeddingsAcross3Collections 的薄包装（Task 14 后）。
+
+    老 API surface 保留以便测试 fixture / monkeypatch 继续工作；M9 分批迭代语义
+    已迁移到新 collection（queryClassEmbeddings / queryPropertyEmbeddings /
+    queryMetricEmbeddings 各自分批读取），具体实现见 queryClass/Property/Metric 单测。
+    """
+
+    def test_delegates_to_3collection_reader(self, fakeEnv) -> None:
+        fakeEnv.setattr(
+            milvus_client,
+            "listEmbeddingsAcross3Collections",
+            lambda: [
+                {"id": 1, "ontology_id": 10, "type": "class", "embedding": [0.1]},
+                {"id": 2, "ontology_id": 11, "type": "property", "embedding": [0.2]},
+            ],
+        )
         rows = milvus_client.listAllEmbeddings()
         assert len(rows) == 2
         assert rows[0]["ontology_id"] == 10
-        assert rows[0]["type"] == "property"
+        assert rows[0]["type"] == "class"
+
+    def test_empty_when_all_collections_empty(self, fakeEnv) -> None:
+        fakeEnv.setattr(milvus_client, "listEmbeddingsAcross3Collections", lambda: [])
+        assert milvus_client.listAllEmbeddings() == []
+
+    def test_batch_size_constant_is_the_milvus_query_cap(self) -> None:
+        """常量即 Milvus `query` 的 limit 服务端上限（16384），三处读取共用同一来源。"""
+        assert milvus_client._MILVUS_QUERY_PAGE == 16384
+
+
+class _IteratorCollection:
+    """只提供 query_iterator 的最小集合替身（记录调用 kwargs）。"""
+
+    def __init__(self, iterator: _FakeQueryIterator) -> None:
+        self._iterator = iterator
+        self.kwargs: dict = {}
+        self.loaded = False
+
+    def load(self) -> None:
+        self.loaded = True
+
+    def query_iterator(self, **kwargs) -> _FakeQueryIterator:
+        self.kwargs = kwargs
+        return self._iterator
 
 
 class TestDropCollection:
-    """dropCollection 删本体集合重建；绝不触碰 query_embeddings。"""
+    """dropCollection 现在是 no-op（Task 14 已 drop ontology_embeddings collection）。
 
-    def test_drops_ontology_collection(self, fakeEnv) -> None:
+    老 API surface 保留以便测试 fixture / monkeypatch 继续工作；不再触碰 Milvus。
+    """
+
+    def test_noop_does_not_call_drop(self, fakeEnv) -> None:
         fake = _configure(fakeEnv, collectionExists=True, indexFields=["embedding"])
         fakeEnv.setattr(milvus_client.utility, "has_collection", lambda name, **kw: name == "ontology_embeddings")
         dropped: list[str] = []
@@ -175,7 +241,8 @@ class TestDropCollection:
             milvus_client, "Collection", lambda name, **kw: SimpleNamespace(drop=lambda: dropped.append(name))
         )
         milvus_client.dropCollection()
-        assert dropped == ["ontology_embeddings"]
+        # 不应再调用 drop（collection 在 Task 14 已删除；wrapper no-op）
+        assert dropped == []
 
     def test_missing_collection_is_noop(self, fakeEnv) -> None:
         fakeEnv.setattr(milvus_client.utility, "has_collection", lambda *a, **kw: False)
@@ -184,18 +251,21 @@ class TestDropCollection:
 
 
 class TestSyncEmbeddingTypeScope:
-    """syncEmbedding 把实体类型透传给删除，类/属性 id 碰撞时不互删。"""
+    """syncEmbedding 直接调 deleteByOntologyIdDual（Task 13+），不经过 wrapper。
 
-    def test_passes_type_to_delete(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    通过 monkeypatch deleteByOntologyIdDual 验证调用语义；类/属性 id 碰撞时不互删。
+    """
+
+    def test_passes_type_to_dual_delete(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import app.infrastructure.milvus_client as milvus_client
         from app.services.ontology_service import OntologyService
 
         calls: list[tuple[int, str]] = []
         monkeypatch.setattr(
-            milvus_client, "deleteByOntologyId",
+            milvus_client, "deleteByOntologyIdDual",
             lambda oid, type: calls.append((oid, type)),
         )
-        monkeypatch.setattr(milvus_client, "insertEmbeddings", lambda records: None)
+        monkeypatch.setattr(milvus_client, "insertEmbeddingsDual", lambda records: None)
 
         svc = OntologyService()
         svc.syncEmbedding(

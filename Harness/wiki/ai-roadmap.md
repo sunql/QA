@@ -2,6 +2,10 @@
 
 > **本文件为系统级路线图**。详细计划见 `/Users/sunql/.claude/plans/mighty-mixing-sutherland.md`。
 > **关联评估**：`docs/data-knowledge/系统差距评估报告.md`。
+>
+> **🆕 顶层架构蓝图**：[`docs/系统架构优化思路0928-v3.1.md`](../../docs/系统架构优化思路0928-v3.1.md)（**v3.1 现实校准版**——七层 + 双编译器；Agent 9→3-4；DSL 3→1；Evidence 8→3；Confidence 离散4级；每节标注现状 ✅🟡🔵⚪📦）。本路线图所有阶段、change、能力项均在 v3.1 §22「与现状对接」与 §23「MVP 落地建议」中可查。
+> **对照基准**：[`docs/系统架构优化思路0928-v3.md`](../../docs/系统架构优化思路0928-v3.md)（v3 原始合并稿；完整理想化架构；v3.1 是其校准修订版）。
+> **历史稿**：`docs/raw/0928-v1-架构思路.md`、`docs/raw/0928-v2-架构思路.md`（已合并到 v3）。
 
 ## 1. 战略目标
 
@@ -47,6 +51,9 @@ AI 可信度集成        自动解析              缺失对象建模          
 | `feat-data-quality-rule-model` | 1.5-2 周 | 完成（2026-08-29） |
 | `feat-data-quality-evaluator` | 1.5-2 周 | 完成（2026-08-30） |
 | `feat-data-quality-score-model` | 0.5 周 | 完成（2026-08-30） |
+| `feat-dq-rule-list-filters` | 0.5 周 | 完成（2026-09-10） |
+| `feat-dq-multi-select-batch-eval` | 0.3 周 | 完成（2026-09-14） |
+| `feat-llm-panel-dedup-key` | 0.1 周 | 完成（2026-09-14 bugfix） |
 | `feat-nl2sql-quality-integration` | 1 周 | 待启动 |
 
 ### Phase 2 — L3 数据治理：数据血缘（P0）
@@ -137,6 +144,8 @@ AI 可信度集成        自动解析              缺失对象建模          
 
 ## 9. 参考资料
 
+- **🆕 [`docs/系统架构优化思路0928-v3.1.md`](../../docs/系统架构优化思路0928-v3.1.md)** — 顶层架构蓝图（v3.1 现实校准版；七层 + 双编译器；带降级决策 + 工时估算 + 里程碑）
+- [`docs/系统架构优化思路0928-v3.md`](../../docs/系统架构优化思路0928-v3.md) — 对照基准（v3 原始合并稿；完整理想化架构；v3.1 是其校准修订）
 - `docs/data-knowledge/采购域.md` — 采购域 9 项能力蓝图
 - `docs/data-knowledge/系统差距评估报告.md` — 当前 vs 目标差距分析
 - `docs/data-knowledge/《企业 AI-Ready 数据标准体系》.md` — 标准体系

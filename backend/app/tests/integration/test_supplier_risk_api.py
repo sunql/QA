@@ -129,9 +129,9 @@ async def test_get_supplier_risk_returns_full_payload(
     assert resp.status_code == 200, resp.text
     body = resp.json()
 
-    # 主路径 RISK_SCORE=0.50 < 0.60 → High
+    # 主路径 RISK_SCORE=0.50 < 0.60 → High（levelSource 为规则码，feat-feature-rule-config 契约）
     assert body["level"] == "high"
-    assert body["levelSource"] == "risk_score"
+    assert body["levelSource"] == "supplier_risk_score_main"
     # contributions 4 个
     assert len(body["contributions"]) == 4
     names = {c["featureName"] for c in body["contributions"]}
@@ -185,9 +185,9 @@ async def test_get_supplier_risk_fallback_when_no_llm(
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # 3 feature 全违规 → High（fallback_composite）
+    # 3 feature 全违规 → High（levelSource 为最高严重级违规规则码：OTD）
     assert body["level"] == "high"
-    assert body["levelSource"] == "fallback_composite"
+    assert body["levelSource"] == "supplier_otd_high_risk"
     # 无 LLM → fallback_template
     assert body["riskPointsSource"] == "fallback_template"
     assert body["riskPoints"] is not None

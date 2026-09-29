@@ -1,7 +1,8 @@
 import { httpClient } from "./client";
 import { API_BASE_URL } from "../config";
-import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, DataQualityBadge, QueryPlan, SimilarQuery } from "../types/chat";
+import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, QueryPlan, SimilarQuery } from "../types/chat";
 import { i18n } from "../i18n";
+import { authHeaders } from "./authHeaders";
 
 const BASE = "/chat";
 
@@ -125,6 +126,18 @@ export interface StreamDataQualityPayload {
   badges: DataQualityBadge[];
 }
 
+// 类召回诊断运行时校验（系统边界）：形状不符时不触发回调
+function isClassRecallInfo(value: unknown): value is ClassRecallInfo {
+  if (!value || typeof value !== "object") return false;
+  const r = value as Record<string, unknown>;
+  return (
+    (r.mode === "recall" || r.mode === "expanded" || r.mode === "fallback") &&
+    typeof r.hitCount === "number" &&
+    typeof r.classCount === "number" &&
+    typeof r.truncated === "boolean"
+  );
+}
+
 // 流式事件回调（与后端 SSE 事件一一对应）
 export interface StreamEventHandlers {
   onMeta?: (intent: string) => void;
@@ -140,6 +153,8 @@ export interface StreamEventHandlers {
   onStepResult?: (result: StepResultView) => void;
   // Phase 1.4：目标表可信度 badge
   onDataQuality?: (payload: StreamDataQualityPayload) => void;
+  // 类召回诊断（2026-09-16）：截断/降级时前端提示
+  onClassRecall?: (info: ClassRecallInfo) => void;
 }
 
 /**
@@ -153,9 +168,11 @@ export async function sendMessageStream(
   payload: ChatRequest,
   handlers: StreamEventHandlers
 ): Promise<void> {
+  // 走裸 fetch（SSE 流式 axios 不友好）—— 不经 httpClient 拦截器，
+  // 故用 authHeaders()（SSOT）手动注入 Authorization + X-Tenant-Id。
   const response = await fetch(`${API_BASE_URL}${BASE}/stream`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   });
 
@@ -290,6 +307,11 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
         if (badges.length) {
           handlers.onDataQuality?.({ badges });
         }
+      }
+      break;
+    case "class_recall":
+      if (isClassRecallInfo(d)) {
+        handlers.onClassRecall?.(d);
       }
       break;
   }

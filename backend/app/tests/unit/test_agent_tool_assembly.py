@@ -113,17 +113,20 @@ class TestAgentToolAssembly:
 
 
 class TestHandlerRegistries:
-    def test_builtin_has_three(self):
+    def test_builtin_has_expected_keys(self):
+        """供应链 3 个 + feat-wiki-knowledge M8 的 4 个知识工具。"""
         assert set(BUILTIN_HANDLERS.keys()) == {
-            "supplier_360", "supplier_risk", "graph_traverse"
+            "supplier_360", "supplier_risk", "graph_traverse",
+            "wiki_search", "wiki_read", "rule_evaluate", "coverage_status",
         }
 
     def test_nl2sql_has_default(self):
         assert "nl2sql_default" in NL2SQL_HANDLERS
 
-    def test_arg_extractors_three(self):
+    def test_arg_extractors_expected_keys(self):
         assert set(ARG_EXTRACTORS.keys()) == {
-            "supplier_key", "supplier_risk_key", "supplier_graph_key"
+            "supplier_key", "supplier_risk_key", "supplier_graph_key",
+            "wiki_text", "wiki_no_args",
         }
 
     def test_valid_handler_refs_mapping(self):

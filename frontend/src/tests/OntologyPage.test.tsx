@@ -9,6 +9,7 @@ import type {
   OntologyClass,
   OntologyProperty,
   OntologyMetric,
+  OntologySemanticRelation,
 } from "../types/ontology";
 
 // =============================================================================
@@ -75,7 +76,18 @@ const api = vi.hoisted(() => ({
   createMetric: vi.fn(),
   updateMetric: vi.fn(),
   deleteMetric: vi.fn(),
+  listSemanticRelations: vi.fn(),
+  createSemanticRelation: vi.fn(),
+  deleteSemanticRelation: vi.fn(),
+  backfillRelations: vi.fn(),
+  runOntologyBatch: vi.fn(),
+  previewOntologyBatch: vi.fn(),
+  downloadBatchTemplate: vi.fn(),
+  parseBatchCsv: vi.fn(),
   searchOntology: vi.fn(),
+  syncClassEmbedding: vi.fn(),
+  syncMissingEmbeddings: vi.fn(),
+  syncMissingGraph: vi.fn(),
 }));
 
 vi.mock("../api/ontology", () => api);
@@ -115,6 +127,91 @@ describe("OntologyPage", () => {
     });
   });
 
+  it("类行「同步向量」按钮点击后调用 syncClassEmbedding", async () => {
+    const user = userEvent.setup();
+    api.syncClassEmbedding.mockResolvedValue(undefined);
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Customer")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /同步向量/ }));
+    await waitFor(() => {
+      expect(api.syncClassEmbedding).toHaveBeenCalledWith(1);
+    });
+  });
+
+  it("头部「补同步缺失向量」按钮点击后调用 syncMissingEmbeddings", async () => {
+    const user = userEvent.setup();
+    api.syncMissingEmbeddings.mockResolvedValue({
+      totalClasses: 96,
+      missingCount: 69,
+      syncedCount: 69,
+      failedCount: 0,
+      failures: [],
+      totalProperties: 4078,
+      missingPropertyCount: 73,
+      syncedPropertyCount: 73,
+      failedPropertyCount: 0,
+      propertyFailures: [],
+    });
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Customer")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /补同步缺失向量/ }));
+    await waitFor(() => {
+      expect(api.syncMissingEmbeddings).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("头部「补图信息」按钮点击后调用 syncMissingGraph", async () => {
+    const user = userEvent.setup();
+    api.syncMissingGraph.mockResolvedValue({
+      totalClasses: 54,
+      missingClassCount: 2,
+      syncedClassCount: 2,
+      totalProperties: 54,
+      missingPropertyCount: 1,
+      syncedPropertyCount: 1,
+      totalJoins: 35,
+      missingJoinCount: 0,
+      syncedJoinCount: 0,
+      totalRelations: 3,
+      missingRelationCount: 1,
+      syncedRelationCount: 1,
+      failedCount: 0,
+      failures: [],
+    });
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Customer")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /补图信息/ }));
+    await waitFor(() => {
+      expect(api.syncMissingGraph).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("头部「批量关系」按钮打开批量关系引擎弹窗", async () => {
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: /批量关系/ }));
+    // 弹窗标题 + 三个动作 + 冲突策略 + 预览/执行
+    expect(await screen.findByText("批量关系引擎")).toBeInTheDocument();
+    expect(screen.getByText("本体入图")).toBeInTheDocument();
+    expect(screen.getByText("按共享列推断物理关联")).toBeInTheDocument();
+    expect(screen.getByText("应用关系清单")).toBeInTheDocument();
+    expect(screen.getByText("跳过（保留原样）")).toBeInTheDocument();
+    expect(screen.getByText("覆盖（更新差异字段）")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /预\s*览/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /执\s*行/ })).toBeDisabled();
+    // 关闭弹窗后内容卸载
+    await userEvent.click(screen.getByRole("button", { name: /取\s*消/ }));
+    await waitFor(() => expect(screen.queryByText("批量关系引擎")).not.toBeInTheDocument());
+  });
+
   it("类描述超出列宽时悬停 Tooltip 展示完整内容", async () => {
     const LONG_DESC =
       "这是一条非常长的类描述，用于验证超出列宽后悬停可以查看完整内容。实际业务里描述可能包含多句话与补充说明。";
@@ -143,6 +240,27 @@ describe("OntologyPage", () => {
     await waitFor(() => {
       expect(screen.getByText("sales_amount")).toBeInTheDocument();
       expect(screen.getByText("SUM(order_amount)")).toBeInTheDocument();
+    });
+  });
+
+  it("点击「语义关系」标签加载语义关系列表", async () => {
+    const mockRelation: OntologySemanticRelation = {
+      id: 1,
+      sourceClassId: 1,
+      targetClassId: 2,
+      relationType: "SUPPLIES",
+      description: "供应商供货",
+      createdBy: null,
+      createdTime: "2026-08-11T00:00:00Z",
+      updatedTime: "2026-08-11T00:00:00Z",
+    };
+    api.listSemanticRelations.mockResolvedValue([mockRelation]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Customer")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("tab", { name: /语义\s?关系/ }));
+    await waitFor(() => {
+      expect(api.listSemanticRelations).toHaveBeenCalled();
+      expect(screen.getByText("供货 SUPPLIES")).toBeInTheDocument();
     });
   });
 
@@ -304,7 +422,8 @@ describe("OntologyPage", () => {
     await waitFor(() => expect(screen.getByText("Customer")).toBeInTheDocument());
 
     await userEvent.click(screen.getByRole("button", { name: /编\s?辑/ }));
-    const nameInput = screen.getByDisplayValue("Customer");
+    // 预填在 afterOpenChange（弹窗动画结束）时写入 —— 异步，需 waitFor
+    const nameInput = await screen.findByDisplayValue("Customer");
     expect(nameInput).toBeInTheDocument();
     await user.clear(nameInput);
     await user.type(nameInput, "Customer_v2");

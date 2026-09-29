@@ -25,9 +25,11 @@ for line in env.read_text(encoding="utf-8").splitlines():
 
 from sqlalchemy import select  # noqa: E402
 
+from app.dependencies import CurrentUser  # noqa: E402
 from app.domain.models import OntologyClass, OntologyProperty  # noqa: E402
 from app.domain.schemas import OntologyClassUpdate  # noqa: E402
 from app.infrastructure.database import getSessionFactory  # noqa: E402
+from app.services.acl_service import ADMIN_ROLE  # noqa: E402
 from app.services.ontology_service import OntologyService  # noqa: E402
 
 
@@ -45,7 +47,11 @@ async def main() -> None:
             class_alias="供应商价格配置",
             description="供应商价格配置表，定义价格清单的取价条件维度（供应商/物料等字段组合）、取价优先级与价格类型。",
         )
-        updated = await service.updateClass(session, cls.id, dto)
+        # 运维脚本走 admin 角色执行（updateClass 现收完整 CurrentUser 做 ACL）
+        updated = await service.updateClass(
+            session, cls.id, dto,
+            actor=CurrentUser(userId="ops-script", roles=(ADMIN_ROLE,)),
+        )
         print(f"class id={updated.id} name={updated.class_name} alias={updated.class_alias}")
 
         # 删除残留原始重复属性（property_name == 物理列名、非主键、无业务别名）

@@ -143,6 +143,8 @@ export interface ChatResponse {
   // Phase 1.4：目标表的可信度 badge 列表（顺序对齐 queryPlan.selectedClasses）；
   // 无 selectedClasses / DQ 服务降级时为 null
   dataQuality?: DataQualityBadge[] | null;
+  // 类召回诊断（2026-09-16）：截断/降级时前端提示；其余意图为 null
+  classRecall?: ClassRecallInfo | null;
   // Phase 5.3：供应商 360° ADS 视图（仅 intent=supplier_360 时填充；其余为 null）。
   // 由 MessageItem 按字段存在性路由到 Supplier360Card 渲染。
   supplier360?: import("./supplier").Supplier360Read | null;
@@ -177,6 +179,16 @@ export interface DataQualityBadge {
   evaluated: boolean;
 }
 
+// 类召回诊断（2026-09-16）：仅 QUERY/NEW_QUERY/multi_step 填充。
+// truncated/fallback 时前端向用户提示（避免"看起来正常但 schema 缺表"）。
+// 语义见 Harness/wiki/nl2sql-engine.md「类召回窗口与规模化风险」。
+export interface ClassRecallInfo {
+  mode: "recall" | "expanded" | "fallback";
+  hitCount: number;
+  classCount: number;
+  truncated: boolean;
+}
+
 // 前端消息（后端响应 + UI 状态）
 export interface ChatMessage {
   id: string;
@@ -200,6 +212,8 @@ export interface ChatMessage {
   extractedEntities?: ExtractedEntities | null;
   // 流式输出中：占位消息正在接收 token（UI 显示打字光标）
   isStreaming?: boolean;
+  // H4 断连兜底：该 assistant 行是客户端断连后由服务端补写的（content 可能不完整）
+  interrupted?: boolean;
   // NL2SQL 校验失败的具体差异（error 事件透传 detail）
   errorDetail?: string | null;
   // 会话亲和性状态（done 事件回填；解锁时为 null/undefined）
@@ -225,4 +239,6 @@ export interface ChatMessage {
   dbMessageId?: number;
   // Phase 5.6：知识问答引用列表（citations 事件回填；document_name 由后端 hydration 补全）
   citations?: import("./document").DocQaCitation[] | null;
+  // 类召回诊断（class_recall 事件回填；truncated/fallback 时 MessageItem 渲染提示）
+  classRecall?: ClassRecallInfo | null;
 }

@@ -9,7 +9,7 @@ import io
 from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient
@@ -84,6 +84,8 @@ async def test_doc_qa_e2e_full_flow(
     client: AsyncClient,
     dbSession: AsyncSession,
     monkeypatch,
+    fakeMinio,
+    mockEmbeddingService,
 ) -> None:
     """E2E smoke: upload → qa stream → DB 2 rows → history API visible.
 
@@ -108,17 +110,24 @@ async def test_doc_qa_e2e_full_flow(
     await dbSession.commit()
     await dbSession.refresh(config)
 
-    # ── 1. Upload a small text file (Milvus may be unavailable — tolerate 422) ──
+    # ── 1. Upload a small text file（fakes：MinIO + embedding + Milvus insert）──
+    # 用 fakeMinio/mockEmbeddingService + 替身 insert 让上传确定性 201，并顺带验证
+    # 源文件留存真实发生（storage_url 是 s3:// 而非 milvus:// 假 URL）。若有人把
+    # 留存静默删掉或改回假 URL，这里的断言会当场失败，而不是绿着放过。
     file_content = "供应商绩效评估标准：质量合规、交付及时性、价格竞争力。".encode("utf-8")
     file_stream = io.BytesIO(file_content)
-    upload_resp = await client.post(
-        "/api/v1/documents/upload",
-        files={"file": ("test_supplier.txt", file_stream, "text/plain")},
-        data={"documentType": "CONTRACT", "securityLevel": "L1"},
-        headers={"X-User-Id": TEST_USER},
-    )
-    # Milvus may be down; upload is not the focus of this E2E — proceed regardless
-    assert upload_resp.status_code in (200, 201, 422), f"upload unexpected {upload_resp.status_code}"
+    with patch(
+        "app.services.rag_service._getEmbeddingService",
+        return_value=mockEmbeddingService,
+    ), patch("app.services.rag_service.insertDocumentChunks"):
+        upload_resp = await client.post(
+            "/api/v1/documents/upload",
+            files={"file": ("test_supplier.txt", file_stream, "text/plain")},
+            data={"documentType": "CONTRACT", "securityLevel": "L1"},
+            headers={"X-User-Id": TEST_USER},
+        )
+    assert upload_resp.status_code == 201, f"upload unexpected {upload_resp.status_code}"
+    assert upload_resp.json()["storage_url"].startswith("s3://"), "源文件留存必须落对象存储"
 
     # ── 2. Monkeypatch RagQaService to use fake LLM + fake Milvus search ────────
     import app.services.rag_qa_service as rag_qa_module
@@ -185,3 +194,164 @@ async def test_doc_qa_e2e_full_flow(
     sessions = hist_resp.json()
     session_ids = [s.get("sessionId") for s in sessions]
     assert SESSION_ID in session_ids, f"Session {SESSION_ID} not in history: {session_ids}"
+
+
+# ---------------------------------------------------------------------------
+# H8：doc_qa LLM 计量落台账（核心约束 #3）
+# ---------------------------------------------------------------------------
+
+
+async def _streamDocQa(client: AsyncClient, sessionId: str, question: str, user: str) -> list[str]:
+    """走真实 /qa 端点，返回事件类型列表。"""
+    types: list[str] = []
+    async with client.stream(
+        "POST",
+        "/api/v1/documents/qa",
+        json={"sessionId": sessionId, "question": question, "topK": 5},
+        headers={"X-User-Id": user},
+    ) as resp:
+        assert resp.status_code == 200, f"/qa returned {resp.status_code}"
+        async for line in resp.aiter_lines():
+            if line.startswith("event:"):
+                types.append(line.split("\n", 1)[0].replace("event:", "").strip())
+    return types
+
+
+def _patchDocQaExternals(monkeypatch, chunks: list[dict[str, Any]]) -> None:
+    """只假掉外部依赖（Milvus 检索 + LLM 客户端），RagQaService.answer_stream 走真代码。"""
+    from app.services.rag_service import RagService
+
+    monkeypatch.setattr(RagService, "searchDocuments", AsyncMock(return_value=chunks))
+    import app.infrastructure.llm.factory as factory_module
+
+    monkeypatch.setattr(
+        factory_module, "createClient", lambda cfg, **kw: _E2eFakeLlmClient()
+    )
+
+
+@pytest.mark.asyncio
+async def test_doc_qa_writes_token_ledger(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """H8：doc_qa 的 LLM 调用必须落 session_token_usage，而不是只在 done 事件报数。
+
+    此前 doc_qa 只在 SSE done 里报 tokensUsed/cost，台账里这笔消耗完全不存在
+    （wiki_qa 早已落库）——违反核心约束 #3「每次 LLM 调用必须记录 Token 消耗与成本」，
+    且文档问答的成本不进会话成本报表，模型路由的预算判断会低估。
+    """
+    from app.domain.models import SessionTokenUsage
+
+    SESSION_ID = "e2e-sess-docqa-ledger"
+    config = LlmConfig(
+        model_name="test-ledger-model",
+        provider="openai",
+        cost_per_1k_input=Decimal("0.001"),
+        cost_per_1k_output=Decimal("0.002"),
+    )
+    dbSession.add(config)
+    await dbSession.commit()
+    await dbSession.refresh(config)
+
+    _patchDocQaExternals(monkeypatch, [{
+        "document_id": "DOC-LEDGER",
+        "document_name": "ledger.txt",
+        "chunk_text": "供应商绩效评估标准。",
+        "score": 0.85,
+    }])
+
+    ev_types = await _streamDocQa(client, SESSION_ID, "供应商绩效评估标准是什么？", "u-ledger")
+    assert EVENT_QA_DONE in ev_types, f"缺 qa_done：{ev_types}"
+
+    from app.infrastructure.database import getSessionFactory
+
+    async with getSessionFactory()() as verify:
+        rows = list((await verify.execute(
+            select(SessionTokenUsage).where(SessionTokenUsage.session_id == SESSION_ID)
+        )).scalars().all())
+
+    assert len(rows) == 1, f"期望恰好 1 条台账，实际 {len(rows)}"
+    row = rows[0]
+    # _E2eFakeLlmClient 固定返回 promptTokens=100 / completionTokens=20
+    assert row.prompt_tokens == 100
+    assert row.completion_tokens == 20
+    assert row.total_tokens == 120
+    assert row.purpose == "doc_qa_answer"
+    # cost = 100*0.001/1000 + 20*0.002/1000 = 0.00014（USD）
+    assert row.cost == Decimal("0.00014")
+
+
+@pytest.mark.asyncio
+async def test_doc_qa_short_circuit_writes_no_ledger_row(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """H8 边界：命中固定模板（零 LLM 调用）时不写台账——不能凭空白记一笔。"""
+    from app.domain.models import SessionTokenUsage
+
+    SESSION_ID = "e2e-sess-docqa-noledger"
+    config = LlmConfig(
+        model_name="test-ledger-model", provider="openai",
+        cost_per_1k_input=Decimal("0.001"), cost_per_1k_output=Decimal("0.002"),
+    )
+    dbSession.add(config)
+    await dbSession.commit()
+    await dbSession.refresh(config)
+
+    # top1 score < 0.3 → 固定模板分支，零 LLM
+    _patchDocQaExternals(monkeypatch, [{
+        "document_id": "DOC-LOW", "document_name": "low.txt",
+        "chunk_text": "无关内容", "score": 0.1,
+    }])
+
+    ev_types = await _streamDocQa(client, SESSION_ID, "无关问题", "u-ledger2")
+    assert EVENT_QA_DONE in ev_types
+
+    from app.infrastructure.database import getSessionFactory
+
+    async with getSessionFactory()() as verify:
+        rows = list((await verify.execute(
+            select(SessionTokenUsage).where(SessionTokenUsage.session_id == SESSION_ID)
+        )).scalars().all())
+
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_doc_qa_low_score_keeps_citations(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """H8 附带：分数低于阈值但仍检索到 chunks 时，citations 必须落库。
+
+    此前 doc_qa 该分支硬写 `citations=[]`，把已检索到的依据丢掉；wiki_qa 同分支
+    存的是真实 citations。两侧行为对齐。
+    """
+    from app.domain.models import SessionTokenUsage  # noqa: F401  （确保模型已导入）
+
+    SESSION_ID = "e2e-sess-docqa-cit"
+    config = LlmConfig(
+        model_name="test-ledger-model", provider="openai",
+        cost_per_1k_input=Decimal("0.001"), cost_per_1k_output=Decimal("0.002"),
+    )
+    dbSession.add(config)
+    await dbSession.commit()
+    await dbSession.refresh(config)
+
+    _patchDocQaExternals(monkeypatch, [{
+        "document_id": "DOC-CIT", "document_name": "cit.txt",
+        "chunk_text": "命中但低分", "score": 0.2,
+    }])
+
+    await _streamDocQa(client, SESSION_ID, "低分问题", "u-ledger3")
+
+    from app.infrastructure.database import getSessionFactory
+
+    async with getSessionFactory()() as verify:
+        rows = list((await verify.execute(
+            select(SessionMessage).where(
+                SessionMessage.session_id == SESSION_ID,
+                SessionMessage.role == "assistant",
+            )
+        )).scalars().all())
+
+    assert len(rows) == 1
+    assert rows[0].citations, "低分但有 chunks 时 citations 不应被丢成空"
+    assert rows[0].citations[0]["document_id"] == "DOC-CIT"

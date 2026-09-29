@@ -122,6 +122,49 @@ _FOLLOW_UP_CONTINUATION_WORDS: tuple[str, ...] = (
     "接着",
 )
 
+# 省略式追问：整句为「改动约束 + 呢/呐」的短句（"4月份呢？""那去年呢？"），
+# 无指代词亦无追问关键词，靠省略句式本身指代上一轮（feat-follow-up-cascade A 层）。
+# 前缀 2~14 字 + 句尾"呢/呐"（容忍尾随标点）；疑问词起头的"…呢"句是全新问题
+# 而非省略追问，刻意排除（守 N6：泛化疑问不锚定旧上下文）。
+_FOLLOW_UP_ELLIPSIS_RE = re.compile(r"^.{2,14}(?:呢|呐)[？?！!]*$")
+_ELLIPSIS_EXCLUDED_PREFIXES: tuple[str, ...] = (
+    "为什么",
+    "怎么",
+    "如何",
+    "什么",
+    "谁",
+    "多少",
+    "几",
+    "啥",
+)
+# 「哪」的细分排除：句首"哪"只在指向实体（哪+家/个/位/些/供应商/物料）时排除，
+# "哪+月/年/季度/号"是口语化时间替换追问（"哪4月份呢" = "那4月份呢"），应保留
+# 为省略式追问。仅匹配"哪"后接时间词的部分由 _WHO_FOLLOWED_BY_TIME_RE 放开。
+_WHO_EXCLUDE_RE = re.compile(r"^哪(?!(?:[一二三四五六七八九十0-9零〇两\d]+个?)?(?:月|年|季度|周|号|天|日))")
+
+
+def isEllipsisFollowUp(question: str) -> bool:
+    """省略式追问判定（A 分类层与 C 兜底共用同一谓词，保证两处口径一致）。
+
+    "哪"前缀做细分：实体问（哪家供应商…）排除，时间替换问（哪4月份呢）保留。
+    """
+    normalized = question.strip().lower()
+    if any(normalized.startswith(prefix) for prefix in _ELLIPSIS_EXCLUDED_PREFIXES):
+        return False
+    if _WHO_EXCLUDE_RE.match(normalized):
+        return False
+    return _FOLLOW_UP_ELLIPSIS_RE.match(normalized) is not None
+
+
+# 宽松顺序指令：「先」+（然后/再/接着/随后/接下来）。rule_based_split 不命中
+# （仅 1 个连接词时），但 L1 多步闸（chat_service.is_explicit_multi_step）认。
+# 在 _isFollowUp 内额外守卫，避免「先查X，然后查Y呢」被 FOLLOW_UP 吞掉多步
+# 语义（reviewer Finding 1）。
+_LOOSE_SEQUENTIAL_RE = re.compile(
+    r"先.{0,40}(?:然后|再|接着|随后|接下来)"
+)
+
+
 # =============================================================================
 # 领域命令意图（Phase 2）：DEFINE / MAP / METRIC
 # =============================================================================
@@ -659,6 +702,11 @@ class IntentService:
 
         「top10」命中 _REFINE_LIMIT_RE、「这些…占比」命中追问关键词，但整句
         是一条独立的多步新问题，不应锚定到上一轮历史状态。
+
+        注意：「先…然后/再/接着…」等单连接词的顺序指令（rule_based_split 不命中）
+        不在此处覆盖——该判定只在 _isFollowUp 内额外守卫，避免 FOLLOW_UP 吞掉
+        L1 多步闸（chat_service 里 is_explicit_multi_step）的语义；同时不影响
+        REFINE 对「把第一步的结果按金额降序排序」等单「第X步」指代的判定。
         """
         return StepQueryPlanner.rule_based_split(normalized) is not None
 
@@ -678,11 +726,24 @@ class IntentService:
         新查询锚定到旧上下文。仅当消息含指代词（确实指向上一轮）时才按追问处理；
         纯承接词（继续/接着）本身即指代上一轮，免于指代词要求。
 
-        权衡（有意为之）：无指代词的追问（"为什么1月最高"）会被重分类为新查询——
-        纯关键词匹配无法区分"新实体"与"上一轮维度"，宁可不锚定也不误锚定。
+        省略式追问例外（feat-follow-up-cascade）：「改动约束 + 呢/呐」的短句
+        （"4月份呢？"）整句即指代上一轮，无需指代词与关键词。疑问词起头的
+        "…呢"句已被 isEllipsisFollowUp 排除，不破坏 N6 权衡。
+
+        顺序必是 _isExplicitMultiStep 在前（守"先查X，然后查Y呢"不被误判为追问
+        ——多步句须走拆步流水线，单轮 FOLLOW_UP 注入会吞掉多步语义）。
+
+        权衡（有意为之）：无指代词、非省略句式的追问（"为什么1月最高"）会被重分类为
+        新查询——纯关键词匹配无法区分"新实体"与"上一轮维度"，宁可不锚定也不误锚定。
         """
         if IntentService._isExplicitMultiStep(normalized):
             return False
+        if _LOOSE_SEQUENTIAL_RE.search(normalized):
+            # L1 多步闸认但 rule_based_split 不命中的「先…然后…」型——防止
+            # 被 FOLLOW_UP 吞掉多步语义（reviewer Finding 1）。
+            return False
+        if isEllipsisFollowUp(normalized):
+            return True
         if any(cw in normalized for cw in _FOLLOW_UP_CONTINUATION_WORDS):
             return True
         if _FOLLOW_UP_REFERENT_RE.search(normalized) is None:

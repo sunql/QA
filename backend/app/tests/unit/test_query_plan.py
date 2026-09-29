@@ -199,6 +199,100 @@ class TestQueryPlan:
         text = planToText(plan)
         assert "SUM(收货数量) AS TOTAL_QTY" in text
 
+    def test_plan_to_text_strips_compound_form_selected_properties(self) -> None:
+        # 真实回归（2026-09-18）：LLM 偶尔把 schema 渲染格式 '业务名 (alias)' 原样
+        # 抄进 property_name，state 持久化后 planToText 回灌进 prompt 会诱导下一轮
+        # LLM 持续使用复合形式。planToText 渲染时必须拆括号、丢弃别名，仅保留
+        # 业务名，避免污染下一轮 prompt。
+        plan = QueryPlan(
+            target="TOP3",
+            selectedProperties=("供应商 (BPSNUM_0)", "物料编号 (ITMREF_0)"),
+            groupBy=("供应商 (BPSNUM_0)",),
+            partitionBy=("供应商 (BPSNUM_0)",),
+        )
+        text = planToText(plan)
+        # 业务名保留
+        assert "供应商" in text
+        assert "物料编号" in text
+        # ASCII 括号复合形式不再出现
+        assert "供应商 (BPSNUM_0)" not in text
+        assert "物料编号 (ITMREF_0)" not in text
+
+    def test_plan_to_text_strips_compound_form_aggregation(self) -> None:
+        plan = QueryPlan(
+            target="汇总",
+            aggregations=(Aggregation(function="SUM", property="收货数量 (QTYUOM_0)", alias="TOTAL"),),
+            sortBy=(SortSpec(property="收货数量 (QTYUOM_0)", direction="desc"),),
+        )
+        text = planToText(plan)
+        # SUM(prop) 中 prop 已是业务名
+        assert "SUM(收货数量) AS TOTAL" in text
+        # 排序也是纯业务名
+        assert "收货数量 desc" in text
+        # 复合形式剥离
+        assert "收货数量 (QTYUOM_0)" not in text
+
+
+class TestQueryPlanPartitionTopN:
+    """2026-09-09：partitionBy/perGroupLimit ——「分别/各 X 的 Top N」逐组取前 N 槽位。"""
+
+    def test_partition_fields_default_empty(self) -> None:
+        plan = QueryPlan(target="查询")
+        assert plan.partitionBy == ()
+        assert plan.perGroupLimit is None
+
+    def test_partition_fields_roundtrip(self) -> None:
+        plan = QueryPlan(
+            target="三个供应商各自的 Top3 物料",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("BPSNUM", "MATERIAL", "QTY"),
+            aggregations=(Aggregation(function="SUM", property="QTY", alias="TOTAL_QTY"),),
+            groupBy=("BPSNUM", "MATERIAL"),
+            sortBy=(SortSpec(property="TOTAL_QTY", direction="desc"),),
+            partitionBy=("BPSNUM",),
+            perGroupLimit=3,
+        )
+        data = plan.to_dict()
+        assert data["partitionBy"] == ["BPSNUM"]
+        assert data["perGroupLimit"] == 3
+        restored = QueryPlan.from_dict(data)
+        assert restored == plan
+        assert restored.partitionBy == ("BPSNUM",)
+        assert restored.perGroupLimit == 3
+
+    def test_from_dict_tolerates_missing_partition_fields(self) -> None:
+        plan = QueryPlan.from_dict({"target": "简单查询"})
+        assert plan.partitionBy == ()
+        assert plan.perGroupLimit is None
+
+    def test_from_dict_coerces_per_group_limit_to_positive_int(self) -> None:
+        # 数字字符串可解析；0/负数/垃圾一律归一为 None（与 rowLimit 同口径）
+        plan = QueryPlan.from_dict({"target": "x", "partitionBy": ["BPSNUM"], "perGroupLimit": "3"})
+        assert plan.perGroupLimit == 3
+        assert QueryPlan.from_dict({"target": "x", "perGroupLimit": 0}).perGroupLimit is None
+        assert QueryPlan.from_dict({"target": "x", "perGroupLimit": -1}).perGroupLimit is None
+        assert QueryPlan.from_dict({"target": "x", "perGroupLimit": "abc"}).perGroupLimit is None
+
+    def test_plan_to_text_renders_per_group_topn(self) -> None:
+        plan = QueryPlan(
+            target="供应商 Top3",
+            groupBy=("BPSNUM", "MATERIAL"),
+            sortBy=(SortSpec(property="TOTAL_QTY", direction="desc"),),
+            partitionBy=("BPSNUM",),
+            perGroupLimit=3,
+        )
+        text = planToText(plan)
+        assert "每组 Top-N" in text
+        assert "按 BPSNUM 分区" in text
+        assert "TOTAL_QTY desc" in text
+        assert "取前 3 行" in text
+
+    def test_plan_to_text_omits_per_group_when_unset(self) -> None:
+        assert "每组 Top-N" not in planToText(QueryPlan(target="x"))
+        assert "每组 Top-N" not in planToText(
+            QueryPlan(target="x", partitionBy=("BPSNUM",))
+        )
+
 
 class TestQueryPlanInterpretation:
     def test_interpretation_default_none(self) -> None:
@@ -223,3 +317,79 @@ class TestQueryPlanInterpretation:
 
     def test_plan_to_text_omits_empty_interpretation(self) -> None:
         assert "理解" not in planToText(QueryPlan(target="占比"))
+
+
+class TestJoinColumnNormalization:
+    """join.columns 归一化：LLM 偶发把 join.columns 写成 "A = B" 等式字符串，
+    而契约是列名数组。from_dict 出口一次性拆分，让校验与 SQL 生成自愈。"""
+
+    def test_from_dict_splits_equation_with_spaces(self) -> None:
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{
+                "sourceClass": "A",
+                "targetClass": "B",
+                "columns": ["SUPPLIER_CODE = PARTNER_CODE"],
+            }],
+        })
+        assert plan.joins[0].columns == ("SUPPLIER_CODE", "PARTNER_CODE")
+
+    def test_from_dict_splits_equation_without_spaces(self) -> None:
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{
+                "sourceClass": "A",
+                "targetClass": "B",
+                "columns": ["SUPPLIER_CODE=PARTNER_CODE"],
+            }],
+        })
+        assert plan.joins[0].columns == ("SUPPLIER_CODE", "PARTNER_CODE")
+
+    def test_plain_columns_untouched(self) -> None:
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{
+                "sourceClass": "A",
+                "targetClass": "B",
+                "columns": ["SUPPLIER_CODE", "PARTNER_CODE"],
+            }],
+        })
+        assert plan.joins[0].columns == ("SUPPLIER_CODE", "PARTNER_CODE")
+
+    def test_mixed_list_normalizes_only_equation_tokens(self) -> None:
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{
+                "sourceClass": "A",
+                "targetClass": "B",
+                "columns": ["GOODS_CODE", "SUPPLIER_CODE = PARTNER_CODE"],
+            }],
+        })
+        assert plan.joins[0].columns == ("GOODS_CODE", "SUPPLIER_CODE", "PARTNER_CODE")
+
+    def test_unsplittable_equation_kept_for_validation(self) -> None:
+        # 缺一侧 / 多个等号：无法安全拆分 → 保留原 token，交给 validatePlan 拒绝
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{
+                "sourceClass": "A",
+                "targetClass": "B",
+                "columns": ["= PARTNER_CODE", "A = B = C"],
+            }],
+        })
+        assert plan.joins[0].columns == ("= PARTNER_CODE", "A = B = C")
+
+    def test_non_equation_with_equals_inside_name_untouched(self) -> None:
+        # 极端：列名本身含 "="（现实中不存在）且无法拆出两侧非空 → 原样保留
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{"sourceClass": "A", "targetClass": "B", "columns": ["WEIRD="]}],
+        })
+        assert plan.joins[0].columns == ("WEIRD=",)
+
+    def test_roundtrip_stays_normalized(self) -> None:
+        plan = QueryPlan.from_dict({
+            "target": "x",
+            "joins": [{"sourceClass": "A", "targetClass": "B", "columns": ["A1 = B1"]}],
+        })
+        assert QueryPlan.from_dict(plan.to_dict()) == plan

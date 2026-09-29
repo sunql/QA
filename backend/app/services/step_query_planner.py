@@ -17,7 +17,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from app.domain.multi_step_plan import MAX_MULTI_STEP, MultiStepPlan, StepPlan, _clip_text
+from app.domain.multi_step_plan import (
+    GlobalFilters,
+    MultiStepPlan,
+    StepPlan,
+    _clip_text,
+)
 from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage
 
 logger = logging.getLogger(__name__)
@@ -47,13 +52,29 @@ _RULE_DESCRIPTION_LIMIT = 20
 _RULE_AGG_HINT = "请基于前序步骤结果汇总对比"
 _RULE_STRIP_CHARS = "，,。、：； 　"  # 全角逗号/句号/顿号/冒号/分号 + 全角空格 + 半角空格
 
+# 可自我起始枚举、内容跟随其后的标记词。首个命中若为此类，其前的文本是
+# 范围/上下文（如"2025年数据，首先查A"），不是被丢弃的第一指令，不应补成一步。
+_ORDINAL_SELF_START_MARKERS = frozenset({"首先", "其一"})
+
+
+def _isSelfStartMarker(mark: str) -> bool:
+    """该标记是否自带步骤起始（第X步/首先/其一）；否则视为承接词（然后/接着/最后等）。
+
+    承接词作首个命中时，说明问题的第一指令不带可识别标号、游离在它之前，
+    应由 _splitByRulePattern 补为首个数据步骤（见 2026-09-09 首段锚点回归）。
+    """
+    return bool(_RULE_STEP_PATTERN.fullmatch(mark)) or mark in _ORDINAL_SELF_START_MARKERS
+
+
 _STEP_PLANNER_SYSTEM_PROMPT = (
     "你是查询拆分器。判定用户问题是否需要拆成多个子查询。\n"
     "若需要，返回 JSON: {\"isMultiStep\": true, "
     "\"steps\": [{\"description\": \"...\", \"subQuestion\": \"...\"}], "
     "\"aggregationHint\": \"如何汇总\"}\n"
     "若不需要，返回 {\"isMultiStep\": false}。\n"
-    "最多拆 4 个子步骤（汇总步骤不计入）。"
+    "只拆**彼此独立、无法用一条 SQL 完成**的子问题；一次 SQL 能算完的对比/汇总不要拆。\n"
+    "**如实列出全部子问题，不要因为数量多就自行合并或截断**——"
+    "系统会按上限决定是否受理，你少报会让用户拿到不完整的答案。"
 )
 
 
@@ -68,7 +89,13 @@ def _splitByRulePattern(
     if len(matches) < 2:
         return None
 
-    parts: list[str] = []
+    # 首段锚点保留（2026-09-09 回归）：首个命中标记若为承接词（然后/接着/最后/其次…）
+    # 而非自我起始标记（第X步/首先/其一），说明问题的第一指令未带可识别标号、游离在
+    # 首个连接词之前。此前该段被整段丢弃，后续步骤便引用悬空锚点（如"这三个供应商"
+    # 无定义 → SQL 编造占位符）。这里把该段补为第一数据步骤。
+    leading = question[:matches[0].start()].strip(_RULE_STRIP_CHARS)
+    parts = [leading] if (leading and not _isSelfStartMarker(matches[0].group())) else []
+
     for i, m in enumerate(matches):
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(question)
@@ -147,6 +174,89 @@ class StepQueryPlanner:
             return StepPlanResult(plan=rule_plan)
         return StepPlanResult(plan=None)
 
+    # =========================================================================
+    # feat-multistep-global-filter B 层：跨步范围类约束抽取
+    # =========================================================================
+
+    _EXTRACT_GLOBAL_FILTERS_SYSTEM_PROMPT = (
+        "你是全局过滤提取器。从用户的多步复合问题中识别跨步骤共享的范围类"
+        "WHERE 条件（外购/内外贸/站点/物料类别/财年等口径约束）。\n"
+        "返回 JSON：{\"global\": [{\"table\": \"...\", \"column\": \"...\","
+        "\"op\": \"IN|=|>=\"|\"value\": \"...\"}], \"step_overrides\": []}\n"
+        "若问题无明显跨步骤口径约束，返回 {\"global\": [], \"step_overrides\": []}。"
+    )
+
+    async def extract_global_filters(
+        self,
+        question: str,
+        classes: list[Any],
+        client: BaseLlmClient,
+        model_name: str,
+    ) -> tuple[GlobalFilters | None, int, int]:
+        """调用 LLM 抽取多步问题的全局范围类约束。
+
+        返回 ``(filters, promptTokens, completionTokens)``——形状与同类的
+        ``_plan_by_llm`` 一致。**tokens 必须原样交回调用方**：本方法此前只返回
+        ``GlobalFilters``，把 ``resp.promptTokens/completionTokens`` 直接丢弃，
+        调用方只能写 0/0 假审计行，违反核心约束 #3「每次 LLM 调用必须记录 Token
+        消耗与成本」。
+
+        失败（LLM 异常 / 解析失败 / 返回非 dict）→ filters 为 None（降级：仅靠 A
+        措辞，不阻断多步执行）。**解析失败时 tokens 仍如实返回**——LLM 已调用、
+        钱已花，会计上不能凭空消失。异常路径无从得知用量，返回 0/0。
+        成功但无约束 → 空 GlobalFilters（上层选择不注入空块以减少 prompt 噪声）。
+        """
+        try:
+            resp = await client.complete(
+                messages=[
+                    LlmMessage(
+                        role="system",
+                        content=self._EXTRACT_GLOBAL_FILTERS_SYSTEM_PROMPT,
+                    ),
+                    LlmMessage(
+                        role="user",
+                        content=self._sanitize(question),
+                    ),
+                ],
+                model=model_name,
+            )
+        except Exception:
+            logger.warning("全局过滤抽取 LLM 调用失败，降级仅靠措辞: %s", question, exc_info=True)
+            return None, 0, 0
+
+        promptTokens = int(getattr(resp, "promptTokens", 0) or 0)
+        completionTokens = int(getattr(resp, "completionTokens", 0) or 0)
+
+        data = self._extract_json(resp.content or "")
+        if not data:
+            return None, promptTokens, completionTokens
+        global_list = data.get("global") or []
+        if not isinstance(global_list, list):
+            return None, promptTokens, completionTokens
+
+        constraints: list[str] = []
+        lines: list[str] = []
+        for entry in global_list:
+            if not isinstance(entry, dict):
+                continue
+            table = entry.get("table") or "*"
+            column = entry.get("column") or ""
+            op = entry.get("op") or "="
+            value = entry.get("value") or ""
+            if not column:
+                continue
+            constraints.append(f"{table}.{column} {op} {value}")
+            lines.append(f"- {table}.{column} {op} {value}")
+        return (
+            GlobalFilters(
+                text="\n".join(lines),
+                constraints=tuple(constraints),
+                source="llm",
+            ),
+            promptTokens,
+            completionTokens,
+        )
+
     @staticmethod
     def rule_based_split(question: str) -> MultiStepPlan | None:
         """规则拆分：用户用「第X步」或序数副词序列显式分步时直接切句子，零 LLM 调用。
@@ -186,7 +296,9 @@ class StepQueryPlanner:
     ) -> tuple[MultiStepPlan | None, int, int]:
         """调用 LLM 拆步；返回 (计划, prompt_tokens, completion_tokens)。
 
-        解析失败 / steps < 2 / 超过上限时计划为 None（token 仍返回以计量）。
+        解析失败 / steps < 2 时计划为 None（token 仍返回以计量）。**步数超限不在此
+        处理**：计划原样返回，由执行缝（`chat_multistep._isOversizedPlan`）拒收，
+        以便拒收文案能说出真实步数。
         JSON 容错：捕获任何解析异常并记录 warning，绝不抛错。
         """
         try:
@@ -221,7 +333,7 @@ class StepQueryPlanner:
         if len(steps) < 2:
             return None, pt, ct
 
-        # 注入自动汇总步骤（不计入 MAX_MULTI_STEP 上限检查，因为它是必然的最后一步）
+        # 注入自动汇总步骤（不占 MAX_PLAN_DATA_STEPS 额度：它必然排在最后）
         steps.append(
             StepPlan(
                 index=len(steps),
@@ -231,17 +343,9 @@ class StepQueryPlanner:
             )
         )
 
-        # 硬上限保护（不含汇总步骤）
-        non_agg_count = len(steps) - 1
-        if non_agg_count > MAX_MULTI_STEP - 1:
-            logger.warning(
-                "拆步数量 %d 超过上限 %d，截断: %s",
-                non_agg_count,
-                MAX_MULTI_STEP - 1,
-                question,
-            )
-            steps = steps[: MAX_MULTI_STEP - 1] + steps[-1:]
-
+        # 硬上限不在这里施加：planner **如实上报**步数，是否受理由执行缝
+        # （chat_multistep._isOversizedPlan）判定。原先在此静默截断会让用户
+        # 拿到「12 问里的 4 问」却不自知，且拒收文案永远说不出真实步数。
         return (
             MultiStepPlan(
                 steps=tuple(steps),

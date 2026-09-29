@@ -21,8 +21,12 @@ AgentRegistryService），便于单测替换为 fake。
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +42,7 @@ from app.domain.error_messages import (
 from app.domain.exceptions import ConflictError, PermissionDeniedError, ValidationError
 from app.domain.models import AgentDefinition
 from app.domain.schemas import AgentRunRead, _normalizeDataLayer
+from app.infrastructure.business_db_pool import _assert_read_only
 from app.infrastructure.llm.base_client import BaseLlmClient
 from app.services.agent_registry_service import AgentRegistryService
 from app.services.agent_tools import (
@@ -92,6 +97,7 @@ class AgentRuntimeService:
         input_text: str,
         *,
         llm_factory: LlmFactory | None = None,
+        llm_config: Any | None = None,
         actor: str = "runtime",
     ) -> AgentRunRead:
         """执行一次 Agent 运行（见模块 docstring 完整链路）。"""
@@ -132,7 +138,9 @@ class AgentRuntimeService:
                 MSG_AGENT_RUN_BAD_INPUT.format(code=agent_code, tool=tool.name)
             )
 
-        ctx = AgentToolContext(llm_factory=llm_factory, actor=actor)
+        ctx = AgentToolContext(
+            llm_factory=llm_factory, llm_config=llm_config, actor=actor
+        )
         result = await tool.handler(session, args, ctx)
         return AgentRunRead(
             agent_code=entity.agent_code,
@@ -215,3 +223,562 @@ class AgentRuntimeService:
                         code=entity.agent_code, object=tool.data_object, layer=layer
                     )
                 )
+
+
+# =============================================================================
+# L4 Agent Loop — run_agent_loop
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class AgentLoopResult:
+    """L4 Agent Loop 返回值。"""
+
+    final_sql: str | None
+    answer_text: str | None
+    iterations_used: int
+    tool_calls_made: list[str]
+    total_cost_usd: float
+    terminated_reason: str  # "answered" | "max_iterations" | "cost_cap" | "error"
+    # 各轮 complete_with_tools 的用量累加值。调用方据此落 session_token_usage
+    # 台账（核心约束 #3）——此前 Result 只有一个 USD 数字，token 数无从承载，
+    # L4 的消耗因此整条游离在台账之外。
+    prompt_tokens: int
+    completion_tokens: int
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+# L4 agent loop 系统提示：引导 LLM 区分"需要查数据的探索性问句"和"无需查数据的解释性
+# 问句"。前者走 tool calling，后者直接文字作答（避免无限循环调工具）。
+# 历史 bug：缺系统提示 → LLM 永远调用 tool_calls 直到 max_iterations → answer_text=None
+# → chat_service 降级到 L2 fallback，L4 路径看似"被降级"实则 LLM 从未进入"answered"分支。
+_L4_SYSTEM_PROMPT = """你是 NL2SQL 数据分析助手。会话可调用以下工具查询数据库：
+- list_tables / describe_table / sample_rows / list_joins：探索 schema（**仅在确实需要时**）
+- execute_sql：执行只读 SELECT 查询
+
+行为规则：
+1. **判断问题类型**：
+   - 需要查数据库才能回答（聚合、明细、筛选、对比、为什么某个数据是这样）→ 调用工具
+   - 概念性问题（什么是 / 解释 / 如何理解领域术语 / 如何使用系统）→ 直接文字作答，无需调工具
+   - 含糊不清 → 先回答"我理解你要问的是 X"，再决定是否需要查数据
+2. **迭代预算**（硬约束）：
+   - 探索阶段（list_tables / list_joins / describe_table / sample_rows）**最多 1 轮**且并发执行；同轮内可同时发出多个工具调用
+   - 拿到 schema 立即写 execute_sql，**不要反复 describe 同一表**
+   - 多步骤问题（topN + 子分析 + 聚合）**必须用一次 execute_sql + CTE/子查询合并**，不要拆成多次单 SQL 依次查询
+3. **回答语言**：与用户问题一致（默认中文）
+4. **结束**：拿到足够信息后必须直接文字总结（**不要再发任何 tool_call**），纯文本响应即终止
+5. **放弃条件**：若 1 轮探索 + 1 次 execute_sql 仍未拿到数据，请基于已有信息给出推断 + 明确说明数据缺口，**立即文字总结**，不要再调工具
+
+历史反例：曾因 LLM 反复 describe_table 而耗尽 max_iterations，请严守上述预算。"""
+
+
+def _build_system_message(prompt: str):
+    """构造 system message，兼容 langchain 对象与 dict shim（dev venv 缺 langchain 时）。"""
+    try:
+        from langchain_core.messages import SystemMessage
+
+        return SystemMessage(content=prompt)
+    except ImportError:
+        return {"role": "system", "content": prompt, "type": "system"}
+
+
+def _to_llm_message(msg) -> "LlmMessage":
+    """把 langchain BaseMessage 或 dev shim dict 转为项目的 LlmMessage。"""
+    from app.infrastructure.llm.base_client import LlmMessage
+
+    # 兼容 langchain 对象与 dev shim dict
+    msg_type = getattr(msg, "type", None)
+    msg_content = getattr(msg, "content", None)
+    if msg_type is None and isinstance(msg, dict):
+        msg_type = msg.get("type")
+        msg_content = msg.get("content")
+
+    if msg_type == "human":
+        return LlmMessage(role="user", content=msg_content or "")
+    if msg_type == "ai":
+        # AI 消息可能带 tool_calls（langchain AIMessage.tool_calls / additional_kwargs）
+        ai_tool_calls = (
+            getattr(msg, "tool_calls", None)
+            or (msg.get("tool_calls") if isinstance(msg, dict) else None)
+        )
+        ai_tool_calls_tup = (
+            tuple(ai_tool_calls) if ai_tool_calls else None
+        )
+        return LlmMessage(
+            role="assistant",
+            content=msg_content or "",
+            tool_calls=ai_tool_calls_tup,
+        )
+    if msg_type == "tool":
+        # ToolMessage 必须保留 tool_call_id（OpenAI tool API 强约束）；
+        # 历史 bug：未传导致 deepseek/openai 返回 400 'missing field tool_call_id'
+        tool_call_id = (
+            getattr(msg, "tool_call_id", None)
+            or (msg.get("tool_call_id") if isinstance(msg, dict) else None)
+        )
+        tool_name = (
+            getattr(msg, "name", None)
+            or (msg.get("name") if isinstance(msg, dict) else None)
+        )
+        return LlmMessage(
+            role="tool",
+            content=msg_content or "",
+            tool_call_id=tool_call_id,
+            name=tool_name,
+        )
+    # fallback
+    return LlmMessage(role="user", content=str(msg))
+
+
+def _usage_tokens(usage: dict | None) -> tuple[int, int]:
+    """从 ``LlmResponseWithTools.usage`` 取 ``(promptTokens, completionTokens)``。
+
+    缺失 / 非数值一律回 0（provider 未返回 usage 时不能凭空编数）。
+    """
+    if not usage:
+        return 0, 0
+    return (
+        int(usage.get("prompt_tokens", 0) or 0),
+        int(usage.get("completion_tokens", 0) or 0),
+    )
+
+
+def _cost_for_usage(
+    prompt_tokens: int,
+    completion_tokens: int,
+    *,
+    cost_per_1k_input: float,
+    cost_per_1k_output: float,
+) -> Decimal:
+    """按 model config 单价算 USD 成本（与 chat_service._costFor 同公式同口径）。
+
+    单价由调用方从**真实 model config** 传入——agent loop 内部无从得知用的是哪个
+    模型，此前硬编码 gpt-4o-mini 参考价的写法会让监控埋点上的 L4 成本与
+    llm_config 里的单价脱钩（换模型后数字系统性失真，H2/H9 同类问题）。
+    """
+    return (
+        Decimal(prompt_tokens) * Decimal(str(cost_per_1k_input))
+        + Decimal(completion_tokens) * Decimal(str(cost_per_1k_output))
+    ) / Decimal(1000)
+
+
+def _extract_final_sql(messages: list) -> str | None:
+    """从对话历史中提取 final_sql。
+
+    约定：若 LLM 在最终 answer 中包含 ``final_sql`...` `` 格式，
+    则从中取出 SQL 字符串。
+    """
+    import re
+
+    for msg in reversed(messages):
+        # 兼容 langchain AIMessage / ToolMessage 与 dev shim dict
+        content = getattr(msg, "content", None)
+        if content is None and isinstance(msg, dict):
+            content = msg.get("content")
+        content = content or ""
+        # 匹配 ```final_sql ... ``` 或 ::final_sql:: ... ::
+        match = re.search(
+            r"(?:```final_sql|::final_sql::)\s*([\s\S]+?)(?:```|::)", content
+        )
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _extract_last_ai_content(messages: list) -> str | None:
+    """从对话历史倒序寻找最后一条非空 AI 消息 content。
+
+    用于 max_iterations 兜底：即便 LLM 最后一次响应触发了 tool_calls（被视为 continue），
+    也可能伴随自然语言说明（如"基于以上结果..."），作为最终 answer_text 兜底。
+    """
+    for msg in reversed(messages):
+        msg_type = getattr(msg, "type", None)
+        if msg_type is None and isinstance(msg, dict):
+            msg_type = msg.get("type")
+        if msg_type != "ai":
+            continue
+        content = getattr(msg, "content", None)
+        if content is None and isinstance(msg, dict):
+            content = msg.get("content")
+        if content and content.strip():
+            return content
+    return None
+
+
+# ---------------------------------------------------------------------------
+# AgentLoop step result (immutable dataclass per iteration)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _AgentLoopStepResult:
+    """单次 LLM 调用的结果。"""
+
+    ai_message: Any  # AIMessage | None
+    tool_calls_to_run: list[Any]  # list[ToolCall]
+    answer_text: str | None
+    final_sql: str | None
+    cost_incurred: float
+    should_stop: bool
+    stop_reason: str  # "answered" | "cost_cap" | "continue"
+    # 本轮用量：即便 cost 撞上限（cost_cap 提前 return）也必须带出来——
+    # 那一轮的钱已经花了，会计上不能因为「本轮没产出答案」就把它抹掉。
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
+# ---------------------------------------------------------------------------
+# AgentRuntimeService — run_agent_loop
+# ---------------------------------------------------------------------------
+
+QueryExecutor = object  # minimal type hint; the mock in tests has execute_read_only
+
+
+async def _runAgentLoopIteration(
+    *,
+    messages: list,
+    llm_client,
+    tool_schemas: list[dict],
+    cost_budget_usd: float,
+    cumulative_cost: float,
+    cost_per_1k_input: float,
+    cost_per_1k_output: float,
+) -> _AgentLoopStepResult:
+    """单次 LLM 决策迭代：调用 complete_with_tools，检查 cost cap。"""
+    llm_messages = [_to_llm_message(m) for m in messages]
+    response = await llm_client.complete_with_tools(
+        messages=llm_messages,
+        tools=tool_schemas,
+        tool_choice="auto",
+    )
+    prompt_tokens, completion_tokens = _usage_tokens(response.usage)
+    cost_incurred = float(
+        _cost_for_usage(
+            prompt_tokens,
+            completion_tokens,
+            cost_per_1k_input=cost_per_1k_input,
+            cost_per_1k_output=cost_per_1k_output,
+        )
+    )
+    new_total = cumulative_cost + cost_incurred
+
+    if new_total > cost_budget_usd:
+        return _AgentLoopStepResult(
+            ai_message=None,
+            tool_calls_to_run=[],
+            answer_text=None,
+            final_sql=None,
+            cost_incurred=cost_incurred,
+            should_stop=True,
+            stop_reason="cost_cap",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+
+    ai_message = _buildAiMessage(response)
+
+    if not response.tool_calls:
+        return _AgentLoopStepResult(
+            ai_message=ai_message,
+            tool_calls_to_run=[],
+            answer_text=response.content,
+            final_sql=None,
+            cost_incurred=cost_incurred,
+            should_stop=True,
+            stop_reason="answered",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+
+    return _AgentLoopStepResult(
+        ai_message=ai_message,
+        tool_calls_to_run=response.tool_calls,
+        answer_text=None,
+        final_sql=None,
+        cost_incurred=cost_incurred,
+        should_stop=False,
+        stop_reason="continue",
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+
+
+def _buildAiMessage(response) -> Any:
+    """把 LlmResponseWithTools 转 AIMessage（langchain）。dev venv 缺包时降级为 dict。
+
+    tool_calls 序列化为 OpenAI 兼容格式（type=function + function.arguments 是 JSON 字符串），
+    否则深求/openai 反序列化报错：messages[i]: unknown variant `tool_call`, expected `function`。
+    AIMessage 用 langchain 的 tool_calls 结构（id/name/args），但其实只走 dict 兜底路径
+    （langchain 只是类型注解占位，最终 _to_llm_message 序列化时按 OpenAI 格式）。
+    """
+    # OpenAI 兼容 tool_calls：{id, type:'function', function:{name, arguments(JSON 字符串)}}
+    openai_tool_calls = [
+        {
+            "id": tc.id,
+            "type": "function",
+            "function": {
+                "name": tc.name,
+                "arguments": json.dumps(tc.args, ensure_ascii=False),
+            },
+        }
+        for tc in response.tool_calls
+    ]
+    try:
+        from langchain_core.messages import AIMessage
+        return AIMessage(
+            content=response.content or "",
+            tool_calls=[
+                {"id": tc.id, "name": tc.name, "args": tc.args}
+                for tc in response.tool_calls
+            ],
+        )
+    except ImportError:
+        return {
+            "role": "assistant",
+            "content": response.content or "",
+            "tool_calls": openai_tool_calls,
+            "type": "ai",
+        }
+
+
+async def _dispatchSingleTool(
+    *,
+    tc,
+    session: AsyncSession,
+    executor,
+) -> Any:  # ToolMessage
+    """处理单个 tool_call → ToolMessage。"""
+    from app.infrastructure.llm.base_client import ToolCall as Tc
+    import json
+
+    tc_adapter = Tc(id=tc.id, name=tc.name, args=tc.args)
+
+    if tc.name == "execute_sql":
+        try:
+            sql = tc.args.get("sql", "")
+            _assert_read_only(sql)
+            rows = await executor.execute_read_only(sql)
+            content = json.dumps(
+                {"rows": rows, "row_count": len(rows)},
+                ensure_ascii=False,
+                default=str,
+            )
+        except Exception as exc:
+            content = json.dumps(
+                {"error": type(exc).__name__, "detail": str(exc)},
+                ensure_ascii=False,
+            )
+    else:
+        from app.services.agent_tools_nl2sql import dispatch_tool_call
+
+        result = await dispatch_tool_call(tc_adapter, session=session)
+        content = result.content
+
+    try:
+        from langchain_core.messages import ToolMessage
+        return ToolMessage(content=content, tool_call_id=tc.id, name=tc.name)
+    except ImportError:
+        return {
+            "role": "tool",
+            "content": content,
+            "tool_call_id": tc.id,
+            "name": tc.name,
+            "type": "tool",
+        }
+
+
+async def run_agent_loop(
+    self,
+    *,
+    session: AsyncSession,
+    user_id: int,
+    question: str,
+    llm_client,
+    executor,
+    ontology,
+    max_iterations: int = 5,
+    cost_budget_usd: float = 0.5,
+    cost_per_1k_input: float = 0.0,
+    cost_per_1k_output: float = 0.0,
+) -> AgentLoopResult:
+    """LLM 驱动的 agent loop（纯 Python async while 实现）。
+
+    Architecture 偏差说明：本实现用纯 Python async while loop，未采用 LangGraph StateGraph，
+    因为所有 handler 都是 async、StateGraph node 包装复杂且测试 mock 困难。
+    AgentState TypedDict 保留为后续 LangGraph 升级占位（见 agent_state.py）。
+
+    ``cost_per_1k_input`` / ``cost_per_1k_output``：来自**调用方解析出的 model config**，
+    本函数无从得知实际用哪个模型，故单价必须由外部传入。二者为 0（默认）时
+    ``total_cost_usd`` 恒为 0——调用方须显式传真实单价，否则 L4 成本会被静默低估。
+
+    终止条件：answered / max_iterations / cost_cap / error
+    """
+    from app.services.agent_state import AgentState  # noqa: F401 — future LangGraph upgrade
+    from app.services.agent_tools_nl2sql import TOOL_SCHEMAS
+
+    _logLoopStart(user_id, question)
+
+    state = _initLoopState(question)
+    messages = state["messages"]
+
+    while state["iterations"] < max_iterations:
+        try:
+            await _runOneStep(
+                state,
+                llm_client,
+                TOOL_SCHEMAS,
+                cost_budget_usd,
+                cost_per_1k_input=cost_per_1k_input,
+                cost_per_1k_output=cost_per_1k_output,
+            )
+
+            if state["terminated_reason"] in ("answered", "cost_cap"):
+                break
+
+            await _executePendingToolCalls(
+                state=state,
+                session=session,
+                executor=executor,
+            )
+        except Exception:
+            # 终止原因 error：中途失败（限流 / 超时 / 工具派发异常）时，**前面若干轮
+            # 的钱已经花了**。这里必须收敛成「带累计 token 的正常返回」，而不是让
+            # 异常穿出去——调用方（chat_service._runL4AgentLoop）的 except 在
+            # _recordUsage 之前 return，异常一穿出去累计值就随之丢失，L4 的这部分
+            # 花费既不在台账、也不在监控埋点里（核心约束 #3）。
+            # 行为不变：结果 terminated_reason="error" → answer_text 为 None →
+            # _maybeRunL4AgentLoop 照旧降级 L2/L3。
+            logger.warning(
+                "agent_loop 迭代失败，按 error 终止（保留已消耗 token 以落台账）",
+                exc_info=True,
+            )
+            state["terminated_reason"] = "error"
+            break
+
+    # max_iterations 兜底：若耗尽迭代但 LLM 在最后一轮仍有自然语言输出（即便伴生 tool_calls），
+    # 用该内容作为 answer_text，避免 chat_service 因 answer_text is None 降级到 L2。
+    # 历史 bug：5 次迭代都继续调工具 → answer_text=None → 路由 L2 看似生效实则 L4 失败。
+    if (
+        state["terminated_reason"] == "max_iterations"
+        and state["answer_text"] is None
+    ):
+        fallback = _extract_last_ai_content(state["messages"])
+        if fallback:
+            state["answer_text"] = fallback
+
+    _logLoopEnd(
+        user_id=user_id,
+        terminated_reason=state["terminated_reason"],
+        iterations=state["iterations"],
+        total_cost=state["total_cost"],
+    )
+
+    return AgentLoopResult(
+        final_sql=state["final_sql"],
+        answer_text=state["answer_text"],
+        iterations_used=state["iterations"],
+        tool_calls_made=state["tool_calls_made"],
+        total_cost_usd=round(state["total_cost"], 6),
+        terminated_reason=state["terminated_reason"],
+        prompt_tokens=state["prompt_tokens"],
+        completion_tokens=state["completion_tokens"],
+    )
+
+
+def _logLoopStart(user_id: int, question: str) -> None:
+    """Audit log: loop start."""
+    logger.info(
+        "agent_loop.start user_id=%s question_len=%d",
+        user_id,
+        len(question),
+    )
+
+
+def _logLoopEnd(*, user_id: int, terminated_reason: str, iterations: int, total_cost: float) -> None:
+    """Audit log: loop end."""
+    logger.info(
+        "agent_loop.end user_id=%s terminated=%s iterations=%d cost=%.6f",
+        user_id,
+        terminated_reason,
+        iterations,
+        total_cost,
+    )
+
+
+def _initLoopState(question: str) -> dict:
+    """初始化 loop 状态。"""
+    try:
+        from langchain_core.messages import HumanMessage
+        messages = [
+            _build_system_message(_L4_SYSTEM_PROMPT),
+            HumanMessage(content=question),
+        ]
+    except ImportError:
+        # dev/test venv 可能缺 langchain_core；用 dict shim
+        messages = [
+            _build_system_message(_L4_SYSTEM_PROMPT),
+            {"role": "user", "content": question, "type": "human"},
+        ]
+
+    return {
+        "messages": messages,
+        "iterations": 0,
+        "total_cost": 0.0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "tool_calls_made": [],
+        "terminated_reason": "max_iterations",
+        "final_sql": None,
+        "answer_text": None,
+    }
+
+
+async def _runOneStep(
+    state: dict,
+    llm_client,
+    tool_schemas: list[dict],
+    cost_budget_usd: float,
+    *,
+    cost_per_1k_input: float,
+    cost_per_1k_output: float,
+) -> None:
+    """执行一次 LLM step；in-place 更新 state。"""
+    step = await _runAgentLoopIteration(
+        messages=state["messages"],
+        llm_client=llm_client,
+        tool_schemas=tool_schemas,
+        cost_budget_usd=cost_budget_usd,
+        cumulative_cost=state["total_cost"],
+        cost_per_1k_input=cost_per_1k_input,
+        cost_per_1k_output=cost_per_1k_output,
+    )
+    state["iterations"] += 1
+    state["total_cost"] += step.cost_incurred
+    state["prompt_tokens"] += step.prompt_tokens
+    state["completion_tokens"] += step.completion_tokens
+
+    if step.should_stop:
+        state["terminated_reason"] = step.stop_reason
+        if step.stop_reason == "answered":
+            state["messages"].append(step.ai_message)
+            state["answer_text"] = step.answer_text
+            state["final_sql"] = _extract_final_sql(state["messages"])
+        return
+
+    state["messages"].append(step.ai_message)
+    state["pending_tool_calls"] = step.tool_calls_to_run
+
+
+async def _executePendingToolCalls(*, state: dict, session, executor) -> None:
+    """执行 pending tool_calls；in-place 更新 state.tool_calls_made / messages。"""
+    for tc in state.pop("pending_tool_calls", []):
+        state["tool_calls_made"].append(tc.name)
+        tm = await _dispatchSingleTool(tc=tc, session=session, executor=executor)
+        state["messages"].append(tm)
+
+
+# monkey-patch onto AgentRuntimeService (keeps original class untouched)
+AgentRuntimeService.run_agent_loop = run_agent_loop

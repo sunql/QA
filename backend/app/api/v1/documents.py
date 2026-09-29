@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
@@ -36,6 +37,9 @@ from app.domain.schemas import (
 )
 from app.infrastructure.rate_limit import limiter, rateLimitValue
 from app.services.document_service import DocumentService
+from app.services.messages_zh import MSG_DOCUMENT_SOURCE_STORE_FAILED
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -194,7 +198,7 @@ async def uploadDocument(
 
     文件类型支持：PDF、DOCX、TXT、MD。
     """
-    from app.services.rag_service import RagService, RagError
+    from app.services.rag_service import RagError, RagService, RagSourceStoreError
 
     content = await file.read()
     mime = file.content_type or "application/octet-stream"
@@ -215,6 +219,14 @@ async def uploadDocument(
             actor=_user,
         )
         return result
+    except RagSourceStoreError:
+        # 源文件留存是基础设施故障，处置动作是「稍后重试」，不是换文件/换格式。
+        # 底层原因（MinIO 端点/凭据）进日志，响应只给可行动提示。
+        logger.exception("文档上传源文件留存失败: filename=%s", fname)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=MSG_DOCUMENT_SOURCE_STORE_FAILED,
+        ) from None
     except RagError as e:
         raise HTTPException(status_code=422, detail=str(e))
 

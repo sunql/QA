@@ -12,7 +12,7 @@ const { mockModel } = vi.hoisted(() => ({
   mockModel: {
     id: 1,
     modelName: "deepseek-chat",
-    provider: "OPENAI_COMPATIBLE_PROXY",
+    provider: "openai_compatible_proxy",
     apiEndpoint: "https://api.deepseek.com/v1",
     isActive: true,
     costPer1KInput: 0.0014,
@@ -20,6 +20,7 @@ const { mockModel } = vi.hoisted(() => ({
     maxInputTokens: 64000,
     weight: 2,
     costThreshold: 1,
+    temperature: 0.0,
     createdAt: "2026-08-11T00:00:00Z",
     updatedAt: "2026-08-11T00:00:00Z",
   } as ModelConfig,

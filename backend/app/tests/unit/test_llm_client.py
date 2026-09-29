@@ -19,7 +19,7 @@ from app.infrastructure.llm.openai_client import OpenAiClient
 
 
 class FakeChatCompletions:
-    def __init__(self, responseContent: str = "hello back", usage: dict[str, int] | None = None) -> None:
+    def __init__(self, responseContent: str = "hello back", usage: dict[str, Any] | None = None) -> None:
         self.responseContent = responseContent
         self.usage = usage or {"prompt_tokens": 12, "completion_tokens": 8}
         self.callCount = 0
@@ -30,10 +30,25 @@ class FakeChatCompletions:
         self.lastKwargs = kwargs
         usage = self.usage
 
+        # 4-1（feat-token-cache，2026-09-28 实测修正）：DeepSeek 实际走 OpenAI 标准
+        # PromptTokensDetails 路径（usage.prompt_tokens_details.cached_tokens），不是
+        # 早先误用的 usage.cached_tokens 平铺字段。Mock 与生产响应同形：
+        cached_tokens = usage.get("cached_tokens")
+
+        class _PromptTokensDetails:
+            """OpenAI PromptTokensDetails 同形：audio_tokens/cache_write_tokens/cached_tokens。"""
+            def __init__(self, ct: int | None) -> None:
+                self.audio_tokens = None
+                self.cache_write_tokens = None
+                self.cached_tokens = ct
+
         class _Usage:
             prompt_tokens = usage.get("prompt_tokens", 0)
             completion_tokens = usage.get("completion_tokens", 0)
             total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+            # 字段缺失时 _PromptTokensDetails 存在但 cached_tokens=None，
+            # 与生产 DeepSeek 不支持 cache 的响应一致（被 OpenAiClient 判 None → 全额计费）。
+            prompt_tokens_details = _PromptTokensDetails(cached_tokens)
 
         class _Choice:
             class _Message:
@@ -99,6 +114,39 @@ class TestOpenAiClient:
         assert resp.completionTokens == 5
         assert resp.totalTokens == 15
         assert resp.modelName == "gpt-4o"
+
+    @pytest.mark.asyncio
+    async def test_complete_parses_cached_tokens_when_present(self) -> None:
+        """DeepSeek prompt cache 命中时 response 应携带 cachedTokens。
+
+        服务端基于 prefix matching 自动命中，usage.cached_tokens > 0。
+        """
+        # Arrange
+        fake = FakeChatCompletions(
+            responseContent="hi",
+            usage={"prompt_tokens": 1000, "completion_tokens": 5, "cached_tokens": 800},
+        )
+        client = OpenAiClient(FakeLlmConfigModel(), apiKey="sk-test", client=FakeOpenAi(fake))
+        # Act
+        resp = await client.complete([LlmMessage(role="user", content="hi")])
+        # Assert
+        assert resp.cachedTokens == 800
+        assert resp.promptTokens == 1000  # 原始值不变
+        assert resp.totalTokens == 1005
+
+    @pytest.mark.asyncio
+    async def test_complete_omits_cached_tokens_when_absent(self) -> None:
+        """非 DeepSeek provider（无 cached_tokens 字段）cachedTokens 应为 None。"""
+        # Arrange
+        fake = FakeChatCompletions(
+            responseContent="hi",
+            usage={"prompt_tokens": 100, "completion_tokens": 5},  # 无 cached_tokens
+        )
+        client = OpenAiClient(FakeLlmConfigModel(), apiKey="sk-test", client=FakeOpenAi(fake))
+        # Act
+        resp = await client.complete([LlmMessage(role="user", content="hi")])
+        # Assert
+        assert resp.cachedTokens is None
 
     @pytest.mark.asyncio
     async def test_complete_passes_model_and_messages(self) -> None:

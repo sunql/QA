@@ -121,11 +121,38 @@ content = '{"target":"各供应商的收货数量汇总","selectedClasses":["PRE
 
 ---
 
-## TD-5（P1）· `wiki_compile` 的 `run_task` 路由无鉴权
+## TD-5（P1）· 路由无鉴权 —— **范围已修正：1 条 → 46 条**
 
-**状态**：待办（预存，非 v3.1 引入；多次评审点名）
+**状态**：**已升级为独立安全批次**，见 `Harness/changes/2026-09-30-security-route-auth/`
+（用户 2026-09-30 拍板「单独安全批次，先做」）
 
-`backend/app/api/v1/wiki_compile.py` 的 `run_task` 端点缺 `Depends(getCurrentUser)`。与本仓既定规则冲突——见 `qa-system-router-auth-mandatory`：**每个 read-only router 必须挂 `Depends(getCurrentUser)`**。属安全项，建议与 TD-1 同批处理。
+### 范围修正经过（保留决策轨迹）
+
+原登记只说 `wiki_compile` 的 `run_task` 一条。2026-09-30 核实 TD-5 时改用**实测**（`app.openapi()`
+路径表 + `AUTH_MODE=real` + 无头请求），发现 **46 条非公开路由匿名可达，其中 15 条是写/删**。
+
+**为什么原登记漏了 45 条**：本仓 FastAPI 0.141 的 `app.routes` 含 49 个 `_IncludedRouter`
+包装对象（`path=None`，`routes`/`app`/`router` 属性 `hasattr=False`），朴素的依赖链扫描
+**会整片漏掉**。本批次期间两轮静态分析都得出过错误结论（一次误报 67 条，一次只报出 1 条）。
+
+**生产实际状态**：`docker exec qa-backend printenv AUTH_MODE` → `real`，即 46 条是**真实的
+匿名可达**，不是理论问题。8 个 router 声明为 `APIRouter()` 或 `APIRouter(dependencies=[])`，
+无全局鉴权中间件，受影响服务层也无 ACL ⇒ 匿名调用者直接抵达服务层。
+
+详见批次 `summary.md` 第三节的完整清单与逐条危害。
+
+### 附带发现（同批次闭合）
+
+- **容器代码漂移**：容器与工作树的 `app/api/v1/*.py` 有 5 个文件不一致。
+  容器版 `wiki_compile.py` 的 `PATCH /claims/{claimId}` **在生产仍匿名**（工作树已修）；
+  容器版 `evidences.py` **缺 R2 按会话归属守卫** ⇒ 跨用户 evidence 枚举。
+  ⇒ 改源码是必要条件，不是充分条件，**必须部署**。
+
+### 已核实「不是缺陷」（避免后人重复起疑）
+
+审计曾把 `DataLineage.owner`（`data_lineage_service.py:174` 的 `owner=dto.owner`）定性为
+mass-assignment。经核实该字段**不参与任何鉴权/ACL**（全局 grep 无命中），只是 ≤100 字符的
+描述性元数据；加了鉴权后，登录用户设置它正是该字段的设计用途。**不据此造任务。**
 
 ---
 

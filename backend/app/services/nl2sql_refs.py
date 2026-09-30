@@ -213,6 +213,45 @@ def _propertyOwnerHint(
     )
 
 
+def _classNameHint(
+    phantom_name: str,
+    classes: list[OntologyClass],
+    *,
+    maxSuggestions: int = 3,
+) -> str:
+    """LLM 选了不在本体 schema 中的类名时的可操作提示。
+
+    当 LLM 幻觉出一个不存在的类名时（如 DWD_GOODS_RECEIPT_DTL
+    而实际类名是 DWD_GOODS_RECEIPT），计算字符串相似度，
+    返回最相似的真实类名列表，引导重试时选择真实类。
+    """
+    if not classes:
+        return ""
+    # 计算与幻影类名的编辑距离，返回最近的真实类名
+    def edit_distance(a: str, b: str) -> int:
+        m, n = len(a), len(b)
+        dp = [[0] * (n + 1) for _ in range(m + 1)]
+        for i in range(m + 1):
+            dp[i][0] = i
+        for j in range(n + 1):
+            dp[0][j] = j
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                cost = 0 if a[i - 1] == b[j - 1] else 1
+                dp[i][j] = min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
+        return dp[m][n]
+
+    real_names = [cls.class_name for cls in classes]
+    scored = sorted(real_names, key=lambda name: edit_distance(phantom_name, name))
+    suggestions = scored[:maxSuggestions]
+    names_str = "、".join(suggestions)
+    return (
+        f"本体 schema 中不存在类 {phantom_name}；"
+        f"最相似的真实类名有：{names_str}，"
+        f"请从中选择一个真实存在的类"
+    )
+
+
 def _extractFormulaProperties(formula: str) -> set[str]:
     """从公式中提取候选属性名，供 validatePlan 做存在性校验。
 

@@ -35,6 +35,7 @@ from app.services.nl2sql_refs import (
     _OWNER_HINT_MAX_CLASSES_DEFAULT,
     _aggregationAliases,
     _aliasRequiresFormula,
+    _classNameHint,
     _classRefNames,
     _extractFormulaProperties,
     _propertyOwnerHint,
@@ -365,7 +366,7 @@ def validatePlan(
 
     for name in plan.selectedClasses:
         if name not in classesById:
-            issues.append(f"选中的类 {name} 不在本体 schema 中")
+            issues.append(f"选中的类 {name} 不在本体 schema 中；{_classNameHint(name, list(classesById.values()))}")
 
     # 属性校验限定在选定类内；未指定类时退回到全局属性集合
     if plan.selectedClasses:

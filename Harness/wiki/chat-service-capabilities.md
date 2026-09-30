@@ -77,13 +77,26 @@ BI 智能问答系统——支持 **13 类意图分发**、**多步拆解**、**
 - **失败路径用量**（H1/H2/H8/H9）：`LlmClientError.tokens` + `consumedTokens` 第二档；不伪造 0
 - **Prompt Cache 账单**（Lever E）：`_costFor` 读 `cached_tokens` + `LLM_CACHE_HIT_MULTIPLIER=0.25`（DeepSeek 1/4 价），SQL / 图表 / 回答 / 流式全路径透传
 
-### 3.3 图表（`ChartService`）
+### 3.3 图表（`ChartService` 门面 + 决策引擎，2026-09-30 重写）
 
-- `recommendChartType`：列组合规则（1 字符串+1 数值→ PIE / LINE / BAR / 2 维→ BAR / 默认 TABLE）
-- `generateChartOption`：LLM 生成 ECharts option + 4-tuple（option, pt, ct, cachedTokens）
-- 100 行内全量嵌入 prompt（`FULL_DATA_THRESHOLD` 修复 27 行数据丢失）
-- `_normalizeOptionFormatters`：`{d}%` → `{c}%`（pie 保留）；不可变返回
-- 失败 / 非 JSON / 无 series 全部优雅回退
+> 完整规则表与契约见 [chart-rendering.md](./chart-rendering.md)。
+
+- **决策引擎规则优先**：`decideChartKind` 按数据语义选型（R00–R14，首个命中者胜），
+  **LLM 不再是决策者**，只在规则歧义时给一个语义标签（`TREND|SHARE|RANK|COMPARE|
+  RELATION|DETAIL|KPI` 白名单），**绝不产出图表代码**
+- **标准化 spec 驱动渲染**：`chart_spec_builder` 从 `QueryPlan` 派生出 ChartSpec
+  （标签取 `aggregations[].alias` / `target`），`chart_renderer` 逐 kind 转成
+  **不含颜色**的 ECharts option；11 类（折线/柱状/横柱/饼/环形/散点/热力图/KPI/表格/
+  柱线组合/瀑布）
+- **服务端只发结构**（决策 6）：颜色/轴色/文字色全部由前端 `applyChartTheme` 按主题补
+- **降级不产空图**：规格校验失败、渲染异常、空数据一律降级 TABLE + warning
+- **多步每步出图**（决策 3）：`StepResultRead` 与 `EVENT_STEP_RESULT` 各带
+  `chartType`/`chartOption`；分类器每轮最多调 1 次（跨步预算）
+- **L1 KPI 直答补指标卡**（决策 7）：`chartType=kpi` + `{"kpi": {label, value, unit, delta}}`；
+  值不能转成数字时不发卡
+- **阈值治理**：`CHART_PIE_MAX_ROWS` / `CHART_HBAR_MIN_ROWS` / `CHART_HEATMAP_MIN_COVERAGE`
+  / `CHART_TOP_N_MAX` 走 `system_config`
+- 失败 / 非 JSON / 无 series 全部优雅回退；token 计量口径（4-tuple + `cachedTokens`）不变
 
 ### 3.4 回答与可读性
 
@@ -227,7 +240,7 @@ class ChatService(
 | 召回 | 向量 + 关键词 + 分层加权 + JOIN 扩边 + 相似历史 few-shot |
 | NL2SQL | ReAct 两阶段 + REFINE 捷径 + 多步 + 全局 filter + 追问重写 + 失败隔离 |
 | 兜底 | L4 Agent Loop（NL2SQL 失败时自动调度 Tool） |
-| 图表 | 4 类自动推荐 + ECharts option + formatter 归一化 |
+| 图表 | 决策引擎 11 类（规则优先，LLM 只做歧义标签）+ 标准化 spec + 无颜色 option + 前端主题注入 |
 | 多轮 | 服务端持久化 + 客户端降级 + 状态注入 + 预算控制 |
 | 计量 | prompt_tokens / cost 双轨 + cache 命中折扣 + 全 LLM 调用覆盖 |
 | 流式 | SSE + 单发标志 + `background=` 断连兜底 |

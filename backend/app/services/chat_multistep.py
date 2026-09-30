@@ -349,6 +349,8 @@ class MultiStepMixin:
 
         # 后台存储查询向量（用子问题，便于 few-shot 精确匹配）
         self._spawnEmbedding(dto, final_sql, question=step_plan.sub_question)
+        selected = list(outcome.plan.selectedClasses) if outcome.plan else []
+        logger.info("step %d selected_classes: %s", step_plan.index, selected)
         return _StepRun(
             result=StepResult(
                 step_index=step_plan.index,
@@ -357,7 +359,7 @@ class MultiStepMixin:
                 sql=final_sql,
                 data=data,
                 summary=self._summarizeStepData(data),
-                selected_classes=list(outcome.plan.selectedClasses) if outcome.plan else [],
+                selected_classes=selected,
             ),
             tokens=tokens, cost=cost, modelName=model_name, plan=outcome.plan,
         )

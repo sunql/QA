@@ -263,6 +263,11 @@ logger = logging.getLogger(__name__)
 # 不调用回答 LLM：模型已判定无数据可查，避免空计划诱导编造 SQL 并掩盖真实原因。
 # 4-2：答案由 _unanswerableAnswerText 附上缺表/缺术语建议（见 unanswerable_suggestion.py）。
 _UNANSWERABLE_ANSWER = "抱歉，当前系统中没有与您的问题相关的业务数据，无法回答该问题。"
+# 向量召回降级时：Milvus 无命中 / 检索异常，指向量同步缺失。
+_UNANSWERABLE_ANSWER_MISSING_VECTOR = (
+    "抱歉，向量检索未返回相关本体类，可能尚未同步向量数据。"
+    "请在「本体管理→向量同步」中同步向量数据后再试。"
+)
 
 
 class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin):
@@ -526,31 +531,46 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                     priorSnapshot=prior_snapshot,
                 )
 
-        outcome = await self._planAndGenerateSql(session, dto, pc, result.intent, state)
-        if outcome.sql is None and self._isFollowUpRetryCandidate(
-            dto.question, result.intent, state,
-        ):
-            # C：短句新查询计划不可回答 → 升级追问重试一次（先 B 多步重跑，再退回
-            # 单轮 FOLLOW_UP 状态注入；仍不可回答则走下方固定兜底文案）。
-            logger.info("不可回答短句升级追问重试: %s", dto.question)
-            # _isFollowUpRetryCandidate 已保证 state 非空，此处可直接传入
-            prepared = await self._prepareFollowUpMultiStep(session, dto, pc, state)
-            if prepared is not None:
-                dto2, multiPlan, msTokens, msCost, gf2 = prepared
-                return await self._executeMultiStep(
-                    session, dto2, pc, multiPlan, state,
-                    initial_tokens=msTokens, initial_cost=msCost, _t0=_t0,
-                    global_filters=gf2,
-                    semanticState=inherited,
-                    priorSnapshot=prior_snapshot,
+        try:
+            outcome = await self._planAndGenerateSql(session, dto, pc, result.intent, state)
+            if outcome.sql is None and self._isFollowUpRetryCandidate(
+                dto.question, result.intent, state,
+            ):
+                # C：短句新查询计划不可回答 → 升级追问重试一次（先 B 多步重跑，再退回
+                # 单轮 FOLLOW_UP 状态注入；仍不可回答则走下方固定兜底文案）。
+                logger.info("不可回答短句升级追问重试: %s", dto.question)
+                # _isFollowUpRetryCandidate 已保证 state 非空，此处可直接传入
+                prepared = await self._prepareFollowUpMultiStep(session, dto, pc, state)
+                if prepared is not None:
+                    dto2, multiPlan, msTokens, msCost, gf2 = prepared
+                    return await self._executeMultiStep(
+                        session, dto2, pc, multiPlan, state,
+                        initial_tokens=msTokens, initial_cost=msCost, _t0=_t0,
+                        global_filters=gf2,
+                        semanticState=inherited,
+                        priorSnapshot=prior_snapshot,
+                    )
+                outcome = await self._planAndGenerateSql(
+                    session, dto, pc, IntentType.FOLLOW_UP, state
                 )
-            outcome = await self._planAndGenerateSql(
-                session, dto, pc, IntentType.FOLLOW_UP, state
-            )
-            if outcome.sql is not None:
-                # 重试成功：意图如实升级为追问（IntentResult 是 frozen dataclass，
-                # replace 保持不可变风格）
-                result = replace(result, intent=IntentType.FOLLOW_UP)
+                if outcome.sql is not None:
+                    # 重试成功：意图如实升级为追问（IntentResult 是 frozen dataclass，
+                    # replace 保持不可变风格）
+                    result = replace(result, intent=IntentType.FOLLOW_UP)
+        except Nl2SqlError:
+            # 向量召回降级（mode=fallback）导致的不可回答：给出专项提示，
+            # 不走通用错误冒泡（前端 toast 无法区分根因）。
+            if pc.recall is not None and pc.recall.mode == "fallback":
+                return await self._unanswerableResponse(
+                    session, dto, pc, result.intent,
+                    _SqlOutcome(
+                        plan=None, sql=None, sqlConfig=pc.selected,
+                        promptTokens=0, completionTokens=0, wasted=(0, 0), cachedTokens=None,
+                    ),
+                    _t0=_t0,
+                    _overrideAnswer=_UNANSWERABLE_ANSWER_MISSING_VECTOR,
+                )
+            raise
         if outcome.sql is None:
             # 计划 target=无法回答：不执行 SQL/图表/回答 LLM，直接给出固定友好回答
             return await self._unanswerableResponse(session, dto, pc, result.intent, outcome, _t0=_t0)
@@ -1498,13 +1518,16 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         outcome: _SqlOutcome,
         *,
         _t0: float,
+        _overrideAnswer: str | None = None,
     ) -> ChatResponse:
         """计划 target=无法回答 时的非流式响应：固定友好回答，不执行 SQL/图表/回答 LLM。
 
         仅记录计划阶段的 token 用量；保存本轮对话与查询状态（sql=None），
         前端仍可展示"无法回答"计划卡片解释原因。4-2：回答附带缺表/缺术语建议。
+
+        _overrideAnswer：可选，覆盖默认的不可回答文本（如向量缺失专项提示）。
         """
-        answer = self._unanswerableAnswerText(dto.question, pc.classes)
+        answer = _overrideAnswer or self._unanswerableAnswerText(dto.question, pc.classes)
         _elapsed_ms = int((time.monotonic() - _t0) * 1000)
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, answer, None,

@@ -90,6 +90,7 @@ export function createHttpClient(): AxiosInstance {
 
       const errMsg =
         apiError ??
+        (typeof apiDetail === "string" ? apiDetail : undefined) ??
         (status
           ? i18n.t("errors.requestFailedHttp", { status: String(status) })
           : i18n.t("errors.networkError"));

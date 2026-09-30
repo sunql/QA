@@ -163,7 +163,13 @@ def _fitPartsToBudget(parts: list[str], budget: int) -> list[str]:
 
 
 def _summarizeExecutionError(exc: Exception) -> str:
-    """从执行异常提取简短错误信息，回灌给 LLM 修正 SQL（1-3）。"""
+    """从执行异常提取简短错误信息，回灌给 LLM 修正 SQL（1-3）。
+
+    对于 Nl2SqlError，具体校验失败原因在 detail（如"选中的类 X 不在本体"），
+    message 是通用提示。优先取 detail 以提供具体上下文。
+    """
+    if hasattr(exc, "detail") and exc.detail:
+        return exc.detail
     return getattr(exc, "message", None) or str(exc)
 
 

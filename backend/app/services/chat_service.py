@@ -764,9 +764,9 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         # 避免完整多步问法传给 Milvus 匹配到错误的表（如报价单而非收货单）。
         recall_question = dto.question
         if self._stepPlanner.is_explicit_multi_step(dto.question):
-            first_plan = self._stepPlanner.plan_explicit(dto.question).plan
-            if first_plan and first_plan.steps and first_plan.steps[0].sub_question:
-                recall_question = first_plan.steps[0].sub_question
+            first_plan = await self._stepPlanner.plan_explicit(dto.question)
+            if first_plan.plan and first_plan.plan.steps and first_plan.plan.steps[0].sub_question:
+                recall_question = first_plan.plan.steps[0].sub_question
         classes, recallInfo = await self._selectRelevantClasses(
             session, recall_question, allClasses
         )

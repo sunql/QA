@@ -92,6 +92,29 @@ describe("ChatPanel 相似问题建议", () => {
     );
   });
 
+  // 图表类型下拉是第三份手工维护的类型清单（另有 types/chat.ts 的联合类型与
+  // api/chat.ts 的 VALID_CHART_TYPES）。任何一份漏了新类型都会「选得到却发不出去」
+  // 或「发得出去却渲染不出来」，这里逐个钉住可选项与回传值。
+  it.each([
+    ["hbar", "横向柱状图"],
+    ["donut", "环形图"],
+    ["heatmap", "热力图"],
+    ["kpi", "指标卡"],
+    ["combo", "柱线组合"],
+    ["waterfall", "瀑布图"],
+  ])("选择 %s（%s）后发送回传该 chartType", async (chartType, label) => {
+    const user = userEvent.setup();
+    const onSend = vi.fn();
+    renderPanel({ onSend });
+
+    await user.click(screen.getByRole("combobox", { name: /图表类型/ }));
+    await user.click(screen.getByText(label, { selector: ".ant-select-item-option-content" }));
+    await user.type(screen.getByPlaceholderText(/输入自然语言问题/), "各供应商的收货数量汇总");
+    await user.click(screen.getByRole("button", { name: /发\s?送/ }));
+
+    expect(onSend).toHaveBeenCalledWith("各供应商的收货数量汇总", chartType);
+  });
+
   it("输入为空时（含无数据源）不请求相似问法", async () => {
     renderPanel();
     // 空问题：不请求

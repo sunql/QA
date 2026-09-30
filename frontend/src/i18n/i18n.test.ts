@@ -1,6 +1,7 @@
 import { renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { useTranslation, zhCN } from "./index";
+import { enUS } from "./index";
 
 describe("i18n/useTranslation", () => {
   // renderHook + I18nextProvider：react-i18next 的 useTranslation 依赖 React context，
@@ -38,10 +39,31 @@ describe("i18n/useTranslation", () => {
     expect(result.current.locale).toBe("zh-CN");
   });
 
-  it("zh-CN dictionary covers all 7 chat-panel chart type labels", () => {
-    const chartTypes = ["auto", "table", "bar", "pie", "line", "scatter"] as const;
+  it("zh-CN dictionary covers all chat-panel chart type labels", () => {
+    // auto + 后端 ChartType 全集（决策引擎扩容后 11 类）——缺一个下拉框就少一项
+    const chartTypes = [
+      "auto",
+      "table",
+      "bar",
+      "hbar",
+      "pie",
+      "donut",
+      "line",
+      "scatter",
+      "heatmap",
+      "kpi",
+      "combo",
+      "waterfall",
+    ] as const;
     for (const ct of chartTypes) {
       expect(zhCN.chatPanel.chartTypes[ct]).toBeTruthy();
+    }
+  });
+
+  it("en-US dictionary covers all chat-panel chart type labels", () => {
+    // 两个字典必须同时齐全：缺一边编译期就报错（keyof typeof zhCN 的约束）
+    for (const key of Object.keys(zhCN.chatPanel.chartTypes)) {
+      expect(enUS.chatPanel.chartTypes).toHaveProperty(key);
     }
   });
 

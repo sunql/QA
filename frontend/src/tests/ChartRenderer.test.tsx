@@ -93,6 +93,58 @@ describe("ChartRenderer", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  // ===== KPI 指标卡（决策 7）：不是 ECharts，走 KpiCard =====
+
+  it("KPI 类型渲染指标卡而不是 ECharts 画布", () => {
+    const { container } = render(
+      <ChartRenderer
+        chartType="kpi"
+        chartOption={{ kpi: { label: "供应商及时交货率", value: 0.954, unit: "%", delta: null } }}
+      />
+    );
+
+    expect(screen.getByText("供应商及时交货率")).toBeInTheDocument();
+    // antd Statistic 把整数位与小数位拆成两个 span，整体文本要读容器
+    expect(container.textContent).toContain("0.954");
+    expect(screen.getByText("%")).toBeInTheDocument();
+    // 没有 echarts 节点 —— KPI 走 ECharts 会渲染出一张空画布
+    expect(screen.queryByTestId("echarts-mock")).toBeNull();
+  });
+
+  it("KPI 承前端主题色（服务端不发颜色）", () => {
+    const { container } = render(
+      <ChartRenderer
+        chartType="kpi"
+        chartOption={{ kpi: { label: "收货量", value: 9812, unit: null, delta: null } }}
+      />
+    );
+
+    // valueStyle 落在 .ant-statistic-content 上；antd 默认把数值按千分位格式化
+    expect(container.textContent).toContain("9,812");
+    const content = container.querySelector<HTMLElement>(".ant-statistic-content");
+    expect(content).not.toBeNull();
+    // LIGHT_TOKEN.colorPrimary（默认非暗色）—— 颜色只可能来自前端 token
+    expect(content?.style.color).toBe("rgb(0, 184, 169)");
+  });
+
+  it("KPI 无负载（后端降级为不发卡）时整块不渲染", () => {
+    const { container } = render(<ChartRenderer chartType="kpi" chartOption={{ kpi: null }} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("KPI 的 delta 为空时不渲染涨跌行（一期恒 null）", () => {
+    render(
+      <ChartRenderer
+        chartType="kpi"
+        chartOption={{ kpi: { label: "收货量", value: 9812, unit: null, delta: null } }}
+      />
+    );
+
+    expect(screen.queryByText("+undefined")).toBeNull();
+  });
+
+
+
   it("表格渲染「导出 CSV」按钮，点击导出当前展示数据", async () => {
     render(
       <ChartRenderer
@@ -178,5 +230,72 @@ describe("ChartRenderer", () => {
     fireEvent.click(screen.getByRole("button", { name: /导出 PNG/ }));
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("getDataURL failed"));
     errorSpy.mockRestore();
+  });
+
+  // ===== 表格负载自取自足（多步每步不铺全量 data）=====
+
+  it("调用方没传 data 时，表格用 chartOption 里的 rows 渲染", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{
+          columns: ["供应商", "数量"],
+          rows: [{ 供应商: "甲", 数量: 7 }],
+        }}
+      />
+    );
+
+    expect(screen.getByText("甲")).toBeInTheDocument();
+    expect(screen.getByText("7")).toBeInTheDocument();
+  });
+
+  it("rows 为空但 columns 已声明时仍渲染表头（列取自负载而非首行推断）", () => {
+    render(<ChartRenderer chartType="table" chartOption={{ columns: ["供应商"], rows: [] }} />);
+
+    expect(screen.getByText("供应商")).toBeInTheDocument();
+  });
+
+  it("调用方传了 data 时以 data 为准（负载 rows 只作降级）", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{ columns: ["A"], rows: [{ A: "来自负载" }] }}
+        data={[{ A: "来自 data" }]}
+      />
+    );
+
+    expect(screen.getByText("来自 data")).toBeInTheDocument();
+    expect(screen.queryByText("来自负载")).toBeNull();
+  });
+
+  // ===== KPI 的导出按钮（KPI 不是 ECharts，没有 PNG 可导）=====
+
+  it("KPI 卡出「导出 CSV」按钮，不出 PNG 按钮", () => {
+    render(
+      <ChartRenderer
+        chartType="kpi"
+        chartOption={{ kpi: { label: "收货量", value: 9812, unit: null, delta: null } }}
+        data={[{ label: "收货量", value: 9812 }]}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: /导出 CSV/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /导出 PNG/ })).toBeNull();
+  });
+
+  it("KPI 点「导出 CSV」导出的是底层数据行", async () => {
+    render(
+      <ChartRenderer
+        chartType="kpi"
+        chartOption={{ kpi: { label: "收货量", value: 9812, unit: null, delta: null } }}
+        data={[{ 指标: "收货量", 数值: 9812 }]}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /导出 CSV/ }));
+
+    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+    const blob = createObjectUrl.mock.calls[0][0] as Blob;
+    expect(await readBlobText(blob)).toContain("指标,数值\r\n收货量,9812");
   });
 });

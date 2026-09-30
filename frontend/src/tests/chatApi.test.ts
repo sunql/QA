@@ -8,7 +8,7 @@ const httpMock = vi.hoisted(() => ({
 }));
 vi.mock("../api/client", () => ({ httpClient: httpMock }));
 
-import { sendMessage, sendMessageStream } from "../api/chat";
+import { sendMessage, sendMessageStream, type StepResultView } from "../api/chat";
 import { useAuthStore } from "../stores/authStore";
 import { DEFAULT_TENANT_ID } from "../config";
 import type { ChatRequest, ChatResponse } from "../types/chat";
@@ -75,6 +75,83 @@ describe("api/chat", () => {
     expect(httpMock.post).toHaveBeenCalledWith("/chat", payload);
     expect(result.answer).toBe("查询完成");
     expect(result.chartType).toBe("pie");
+  });
+
+  // 非流式响应也走同一道白名单：只有 SSE 帧做校验会让同一份后端数据在两条路径
+  // 下表现不同（流式吞掉未知类型、非流式原样透传给渲染器）。
+  it("sendMessage 收窄未知 chartType 与非对象 chartOption（与流式同一口径）", async () => {
+    httpMock.post.mockResolvedValue({
+      data: {
+        answer: "查询完成",
+        intent: "query",
+        chartType: "radar",
+        chartOption: "not-an-option",
+        data: [{ NAME: "A" }],
+        tokensUsed: 45,
+        cost: 0.00006,
+      } as unknown as ChatResponse,
+    });
+
+    const result = await sendMessage(makePayload());
+    expect(result.chartType).toBeNull();
+    expect(result.chartOption).toBeNull();
+  });
+
+  it("sendMessage 收窄 steps 里每步的图表字段", async () => {
+    httpMock.post.mockResolvedValue({
+      data: {
+        answer: "查询完成",
+        intent: "multi_step",
+        chartType: null,
+        chartOption: null,
+        steps: [
+          {
+            stepIndex: 0,
+            description: "各供应商收货量",
+            subQuestion: "各供应商收货量",
+            sql: "SELECT 1",
+            summary: "9812",
+            error: null,
+            chartType: "hbar",
+            chartOption: { series: [{ type: "bar" }] },
+          },
+          {
+            stepIndex: 1,
+            description: "按月的收货量",
+            subQuestion: "按月的收货量",
+            sql: "SELECT 2",
+            summary: "12",
+            error: null,
+            chartType: "bogus",
+            chartOption: [],
+          },
+        ],
+        tokensUsed: 45,
+        cost: 0.00006,
+      } as unknown as ChatResponse,
+    });
+
+    const result = await sendMessage(makePayload());
+    expect(result.steps?.[0].chartType).toBe("hbar");
+    expect(result.steps?.[0].chartOption).toEqual({ series: [{ type: "bar" }] });
+    expect(result.steps?.[1].chartType).toBeNull();
+    expect(result.steps?.[1].chartOption).toBeNull();
+  });
+
+  it("sendMessage 响应不带 steps 时保持 undefined（不伪造空数组）", async () => {
+    httpMock.post.mockResolvedValue({
+      data: {
+        answer: "查询完成",
+        intent: "query",
+        chartType: null,
+        chartOption: null,
+        tokensUsed: 45,
+        cost: 0.00006,
+      } as unknown as ChatResponse,
+    });
+
+    const result = await sendMessage(makePayload());
+    expect(result.steps).toBeUndefined();
   });
 
   it("sendMessageStream 按事件顺序分发 meta/sql/chart/token/done", async () => {
@@ -172,6 +249,65 @@ describe("api/chat", () => {
     const onChart = vi.fn();
     await sendMessageStream(makePayload(), { onChart });
     expect(onChart).toHaveBeenCalledWith({ chartType: null, chartOption: {}, data: [] });
+  });
+
+  // 决策引擎新增 6 类（hbar/donut/heatmap/kpi/combo/waterfall）。白名单漏同步的
+  // 表现是「图不见了但没有任何报错」——后端发了、前端静默置 null，所以逐个钉住。
+  it.each(["hbar", "donut", "heatmap", "kpi", "combo", "waterfall"])(
+    "chart 事件接受决策引擎新增的 chartType：%s",
+    async (chartType) => {
+      const stream = sseStream(
+        `event: chart\ndata: {"chartType":"${chartType}","chartOption":{},"data":[]}\n\n`
+      );
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+      const onChart = vi.fn();
+      await sendMessageStream(makePayload(), { onChart });
+      expect(onChart).toHaveBeenCalledWith({
+        chartType,
+        chartOption: {},
+        data: [],
+      });
+    }
+  );
+
+  it("step_result 事件透传每步自己的 chartType/chartOption（多步每步出图）", async () => {
+    const stream = sseStream(
+      'event: step_result\ndata: {"stepIndex":0,"description":"各供应商收货量","subQuestion":"各供应商收货量","sql":"SELECT 1","summary":"9812","error":null,"chartType":"hbar","chartOption":{"series":[{"type":"bar"}]}}\n\n'
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const results: StepResultView[] = [];
+    await sendMessageStream(makePayload(), { onStepResult: (r) => results.push(r) });
+
+    expect(results[0].chartType).toBe("hbar");
+    expect(results[0].chartOption).toEqual({ series: [{ type: "bar" }] });
+  });
+
+  it("step_result 的非法 chartType 同样回退为 null（系统边界校验）", async () => {
+    const stream = sseStream(
+      'event: step_result\ndata: {"stepIndex":0,"description":"x","subQuestion":"x","sql":null,"summary":null,"error":"boom","chartType":"bogus"}\n\n'
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const results: StepResultView[] = [];
+    await sendMessageStream(makePayload(), { onStepResult: (r) => results.push(r) });
+
+    expect(results[0].chartType).toBeNull();
+    expect(results[0].chartOption).toBeNull();
+  });
+
+  it("step_result 不带图表字段（失败步骤）时两字段为 null，不误报类型", async () => {
+    const stream = sseStream(
+      'event: step_result\ndata: {"stepIndex":1,"description":"x","subQuestion":"x","sql":null,"summary":null,"error":"boom"}\n\n'
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const results: StepResultView[] = [];
+    await sendMessageStream(makePayload(), { onStepResult: (r) => results.push(r) });
+
+    expect(results[0].chartType).toBeNull();
+    expect(results[0].chartOption).toBeNull();
   });
 
   it("sendMessageStream 分发多步事件 multi_step_plan/step_plan/step_result", async () => {

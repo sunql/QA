@@ -180,6 +180,44 @@ describe("chatStore", () => {
     });
   });
 
+  it("非流式多步：每步自己的 chartType/chartOption 回填到 step（多步每步出图）", async () => {
+    chatApi.sendMessage.mockResolvedValue({
+      answer: "两步都完成了",
+      intent: "multi_step",
+      tokensUsed: 30,
+      cost: 0.00003,
+      steps: [
+        {
+          stepIndex: 0,
+          description: "各供应商收货量",
+          subQuestion: "各供应商的收货量",
+          sql: "SELECT 1",
+          summary: null,
+          error: null,
+          chartType: "hbar",
+          chartOption: { series: [{ type: "bar", data: [1] }] },
+        },
+        {
+          stepIndex: 1,
+          description: "失败的步骤",
+          subQuestion: "查不到的表",
+          sql: null,
+          summary: null,
+          error: "ORA-00942",
+        },
+      ],
+    });
+    useChatStore.getState().setDatasourceId(1);
+    await useChatStore.getState().sendMessage("分步查询");
+
+    const steps = useChatStore.getState().messages[1].steps;
+    expect(steps?.[0]).toMatchObject({ chartType: "hbar" });
+    expect(steps?.[0]?.chartOption).toEqual({ series: [{ type: "bar", data: [1] }] });
+    // 失败步骤没有图：两字段为 null，渲染层据此不画
+    expect(steps?.[1]?.chartType ?? null).toBeNull();
+    expect(steps?.[1]?.chartOption ?? null).toBeNull();
+  });
+
   // =========================================================================
   // 流式输出（5.6）
   // =========================================================================
@@ -314,6 +352,30 @@ describe("chatStore", () => {
     expect(assistant.steps?.[2]).toMatchObject({ status: "done", aggregationOnly: true });
     expect(assistant.currentStepIndex).toBe(2);
     expect(assistant.isStreaming).toBe(false);
+  });
+
+  it("流式 step_result 携带的每步图表回填到 step（多步每步出图）", async () => {
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      handlers.onStepPlanOverview?.([
+        { stepIndex: 0, description: "各供应商收货量", subQuestion: "各供应商的收货量", aggregationOnly: false },
+      ]);
+      handlers.onStepResult?.({
+        stepIndex: 0,
+        description: "各供应商收货量",
+        subQuestion: "各供应商的收货量",
+        sql: "SELECT 1",
+        summary: null,
+        chartType: "hbar",
+        chartOption: { series: [{ type: "bar" }] },
+      });
+      handlers.onDone?.({ tokensUsed: 15, cost: 0.00002 });
+    });
+    useChatStore.getState().setDatasourceId(1);
+    await useChatStore.getState().sendMessage("各供应商的收货量", true);
+
+    const step = useChatStore.getState().messages[1].steps?.[0];
+    expect(step?.chartType).toBe("hbar");
+    expect(step?.chartOption).toEqual({ series: [{ type: "bar" }] });
   });
 
   it("流结束且无 done/error 帧时 loading 与 isStreaming 兜底复位（HIGH#3）", async () => {

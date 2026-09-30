@@ -286,7 +286,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 { currentStepIndex: step.stepIndex }
               ),
             })),
-          // 单个子步骤完成：标记「完成/失败」并回填 sql/summary/error
+          // 单个子步骤完成：标记「完成/失败」并回填 sql/summary/error/图表
           onStepResult: (result) =>
             set((state) => ({
               messages: patchStep(state.messages, result.stepIndex, {
@@ -294,6 +294,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 sql: result.sql ?? null,
                 summary: result.summary ?? null,
                 error: result.error ?? null,
+                chartType: result.chartType ?? null,
+                chartOption: result.chartOption ?? null,
               }),
             })),
           // Phase 1.4：目标表可信度 badge（与 queryPlan 一起展示）
@@ -411,6 +413,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 sql: s.sql ?? null,
                 summary: s.summary ?? null,
                 error: s.error ?? null,
+                // 每步自己的图（决策引擎按该步的 columns/data/plan 各出一张；
+                // 失败步骤后端不发，这里落成 null，渲染层据此不画）
+                chartType: s.chartType ?? null,
+                chartOption: s.chartOption ?? null,
               })
             ),
           }),

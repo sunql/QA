@@ -1,10 +1,14 @@
 import ReactECharts from "echarts-for-react";
 import { Button, Space, Table, message } from "antd";
 import { DownloadOutlined } from "@ant-design/icons";
-import { useRef } from "react";
+import { useMemo, useRef } from "react";
 import { useTranslation } from "../../i18n";
+import { useThemeStore } from "../../stores/themeStore";
+import { applyChartTheme } from "../../theme/chartTheme";
+import { DARK_TOKEN, LIGHT_TOKEN } from "../../theme/tokens";
 import type { ChartType } from "../../types/chat";
 import { downloadBlob, downloadCsv } from "../../utils/download";
+import KpiCard, { parseKpiPayload } from "./KpiCard";
 
 interface ChartRendererProps {
   chartType?: ChartType | null;
@@ -20,14 +24,54 @@ function errorMessageOf(error: unknown): string {
   return error instanceof Error ? error.message : "";
 }
 
+/** 表格负载里的行（`chartOption = {columns, rows}`，服务端 TABLE 契约）。 */
+function payloadRows(chartOption: Record<string, unknown> | null | undefined): Record<string, unknown>[] {
+  const rows = chartOption?.rows;
+  return Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
+}
+
+/** 表格负载里的列名；未声明或全非字符串时返回 null（退回首行推断）。 */
+function payloadColumns(chartOption: Record<string, unknown> | null | undefined): string[] | null {
+  const columns = chartOption?.columns;
+  if (!Array.isArray(columns)) return null;
+  const names = columns.filter((column): column is string => typeof column === "string");
+  return names.length > 0 ? names : null;
+}
+
 export default function ChartRenderer({ chartType, chartOption, data }: ChartRendererProps) {
   const { t } = useTranslation();
+  const isDark = useThemeStore((state) => state.isDark);
   const chartRef = useRef<InstanceType<typeof ReactECharts>>(null);
 
-  const rows = data ?? [];
+  // TABLE 的 chartOption 本身就是 `{columns, rows}`，所以表格并不依赖调用方传 data：
+  // 多步每一步不铺全量 data（见 MultiStepPlanCard），表格要从自己的负载里自取自足。
+  const rows = useMemo(
+    () => (data?.length ? data : payloadRows(chartOption)),
+    [data, chartOption]
+  );
   const isTable = chartType === "table";
-  const isChart = Boolean(chartType && chartOption);
-  if (!isTable && !isChart) {
+  const isKpi = chartType === "kpi";
+  // antd v5 的 rowKey 函数不再保证收到 index（已弃用告警），这里自己配一份稳定 key
+  const tableRows = useMemo(
+    () => rows.map((row, index) => ({ ...row, __rowKey: `row-${index}` })),
+    [rows]
+  );
+  // 决策 6：服务端只发结构，颜色在这一层补（只补色、不改结构；option 来自 store，
+  // 必须走不可变路径，否则同一份消息的其它引用会串台）
+  const themedOption = useMemo(
+    () => (chartOption ? applyChartTheme(chartOption, isDark ? DARK_TOKEN : LIGHT_TOKEN) : null),
+    [chartOption, isDark]
+  );
+  const kpiPayload = useMemo(
+    () => (isKpi ? parseKpiPayload(chartOption) : null),
+    [isKpi, chartOption]
+  );
+  // 无 kpi 负载（后端降级为不发卡）时不渲染空壳卡
+  if (isKpi && !kpiPayload) {
+    return null;
+  }
+  const isChart = Boolean(chartType && themedOption) && !isKpi;
+  if (!isTable && !isKpi && !isChart) {
     return null;
   }
 
@@ -56,23 +100,24 @@ export default function ChartRenderer({ chartType, chartOption, data }: ChartRen
     }
   };
 
-  // 表格空数据时不展示导出按钮；图表无 option 已被上方早退拦截
-  const showToolbar = isTable ? rows.length > 0 : true;
-  const columns =
-    rows.length > 0
-      ? Object.keys(rows[0]).map((key) => ({
-          title: key,
-          dataIndex: key,
-          key,
-        }))
-      : [];
+  // 表格空数据时不展示导出按钮；图表无 option 已被上方早退拦截。
+  // KPI 不是 ECharts，没有 PNG 可导 —— 它按表格口径给 CSV（底层数据本就是表格）。
+  // 注意 KPI 的导出按钮同样要求 `rows` 非空：负载里只有 `{kpi: {...}}` 时导出的是一张
+  // 空表，给一个点了没内容的按钮不如不给（现有两条链路都会带 data，故按钮在线上可见）。
+  const showToolbar = isTable || isKpi ? rows.length > 0 : true;
+  const columnNames = payloadColumns(chartOption) ?? (rows.length > 0 ? Object.keys(rows[0]) : []);
+  const columns = columnNames.map((key) => ({
+    title: key,
+    dataIndex: key,
+    key,
+  }));
 
   return (
     <>
       {showToolbar && (
         <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
           <Space>
-            {isTable ? (
+            {isTable || isKpi ? (
               <Button size="small" icon={<DownloadOutlined />} onClick={handleExportCsv}>
                 {t("chartExport.csv")}
               </Button>
@@ -86,14 +131,16 @@ export default function ChartRenderer({ chartType, chartOption, data }: ChartRen
       )}
       {isTable ? (
         <Table
-          rowKey={(record, index) => index?.toString() ?? JSON.stringify(record)}
+          rowKey="__rowKey"
           size="small"
-          dataSource={rows}
+          dataSource={tableRows}
           columns={columns}
           pagination={{ pageSize: 10 }}
         />
+      ) : isKpi && kpiPayload ? (
+        <KpiCard kpi={kpiPayload} />
       ) : (
-        <ReactECharts ref={chartRef} option={chartOption} style={{ height: 320 }} notMerge />
+        <ReactECharts ref={chartRef} option={themedOption} style={{ height: 320 }} notMerge />
       )}
     </>
   );

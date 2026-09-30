@@ -1,6 +1,7 @@
 import { Collapse, Spin, Steps, Tag, Typography } from "antd";
 import type { MultiStepStep, StepStatus } from "../../types/chat";
 import { useTranslation } from "../../i18n";
+import ChartRenderer from "./ChartRenderer";
 import SqlPreview from "./SqlPreview";
 
 const { Text } = Typography;
@@ -90,6 +91,14 @@ export default function MultiStepPlanCard({ steps, currentStepIndex }: MultiStep
                           <Text type="danger" style={{ display: "block", marginTop: 4 }}>
                             {s.error}
                           </Text>
+                        ) : null}
+                        {/* 多步每步出图（决策 3）：每个 step 挂同一个渲染器，
+                            kind/option 由后端决策引擎按该步自己的数据各出一份。
+                            失败步骤不带这两字段，渲染器自己返回 null。 */}
+                        {s.chartType ? (
+                          <div style={{ marginTop: 8 }}>
+                            <ChartRenderer chartType={s.chartType} chartOption={s.chartOption} />
+                          </div>
                         ) : null}
                       </div>
                     ) : null}

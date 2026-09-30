@@ -6,8 +6,22 @@ import { authHeaders } from "./authHeaders";
 
 const BASE = "/chat";
 
-// 与后端 ChartType 枚举对齐，供运行时校验（避免不安全 cast 把非法值透传给渲染层）
-const VALID_CHART_TYPES = new Set<string>(["table", "bar", "pie", "line", "scatter"]);
+// 与后端 ChartType 枚举对齐，供运行时校验（避免不安全 cast 把非法值透传给渲染层）。
+// ⚠️ 后端新增图表类型时**必须同步这里**：漏同步的表现是「图不见了但没有任何报错」
+// ——chartType 被静默降级为 null，渲染门直接不放行。
+const VALID_CHART_TYPES = new Set<string>([
+  "table",
+  "bar",
+  "hbar",
+  "pie",
+  "donut",
+  "line",
+  "scatter",
+  "heatmap",
+  "kpi",
+  "combo",
+  "waterfall",
+]);
 
 function isChartType(value: unknown): value is ChartType {
   return typeof value === "string" && VALID_CHART_TYPES.has(value);
@@ -45,6 +59,7 @@ export interface StepPlanOverviewItem extends StepPlanView {
 }
 
 // step_result 事件负载（单个子步骤执行结果）
+// 图表两字段由决策引擎每步各自产出（失败步骤为 null）——收窄后恒存在。
 export interface StepResultView {
   stepIndex: number;
   description: string;
@@ -53,6 +68,8 @@ export interface StepResultView {
   data?: Record<string, unknown>[] | null;
   summary?: string | null;
   error?: string | null;
+  chartType?: ChartType | null;
+  chartOption?: Record<string, unknown> | null;
 }
 
 function isStepIndex(value: unknown): value is number {
@@ -79,9 +96,52 @@ export function isStepResult(value: unknown): value is StepResultView {
   return isStepPlan(value);
 }
 
+/** 收窄成 ECharts option 形态；非对象（字符串/数组/null）一律置 null。 */
+function asChartOption(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** 图表两字段的唯一收窄口径（SSE 帧与非流式响应共用，避免两条路径判据漂移）。 */
+function normalizeChartType(value: unknown): ChartType | null {
+  return isChartType(value) ? value : null;
+}
+
+/**
+ * 收窄 step_result 负载（系统边界）：形状不符返回 null，图表字段非法一律置 null。
+ *
+ * 返回**新对象**（不可变），不原地改 SSE 帧。图表字段是决策引擎多步每步出图的
+ * 载体：失败步骤不带这两字段，收窄后为 null，渲染层据此不画（而不是画一张空图）。
+ */
+function normalizeStepResult(value: unknown): StepResultView | null {
+  if (!isStepResult(value)) return null;
+  const record = value as unknown as Record<string, unknown>;
+  return {
+    ...value,
+    chartType: normalizeChartType(record.chartType),
+    chartOption: asChartOption(record.chartOption),
+  };
+}
+
+/** 收窄非流式响应（同一道系统边界：白名单只对 SSE 帧生效会让两条路径口径分叉）。 */
+function normalizeChatResponse(response: ChatResponse): ChatResponse {
+  const record = response as unknown as Record<string, unknown>;
+  return {
+    ...response,
+    chartType: normalizeChartType(record.chartType),
+    chartOption: asChartOption(record.chartOption),
+    steps: Array.isArray(response.steps)
+      ? response.steps
+          .map(normalizeStepResult)
+          .filter((step): step is StepResultView => step !== null)
+      : response.steps,
+  };
+}
+
 export async function sendMessage(payload: ChatRequest): Promise<ChatResponse> {
   const res = await httpClient.post<ChatResponse>(BASE, payload);
-  return res.data;
+  return normalizeChatResponse(res.data);
 }
 
 // ===== v3.1 B6（M7 Hypothesis Hook）：「可能原因」假设 =====
@@ -289,8 +349,8 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
       break;
     case "chart":
       handlers.onChart?.({
-        chartType: isChartType(d.chartType) ? d.chartType : null,
-        chartOption: (d.chartOption as Record<string, unknown>) ?? null,
+        chartType: normalizeChartType(d.chartType),
+        chartOption: asChartOption(d.chartOption),
         data: (d.data as Record<string, unknown>[]) ?? null,
       });
       break;
@@ -335,11 +395,13 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
         handlers.onStepPlan?.(d);
       }
       break;
-    case "step_result":
-      if (isStepResult(d)) {
-        handlers.onStepResult?.(d);
+    case "step_result": {
+      const stepResult = normalizeStepResult(d);
+      if (stepResult) {
+        handlers.onStepResult?.(stepResult);
       }
       break;
+    }
     case "data_quality":
       if (Array.isArray(d.badges)) {
         const badges = d.badges.filter(isDataQualityBadge);

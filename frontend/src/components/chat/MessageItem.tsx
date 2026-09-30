@@ -130,7 +130,10 @@ function MessageItem({
                 <SqlPreview sql={message.sql} />
               </div>
             ) : null}
-            {message.chartType && message.chartOption ? (
+            {/* 渲染门只看 chartType：`kpi` 这类非 ECharts 类型（指标卡）没有 ECharts
+                option 语义，用 `chartOption` 兜门会把它们挡掉。有没有内容由
+                ChartRenderer 自己判（无负载/无 option 时它返回 null）。 */}
+            {message.chartType ? (
               <div style={{ marginTop: 8 }}>
                 <ChartRenderer
                   chartType={message.chartType}

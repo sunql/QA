@@ -18,7 +18,23 @@ export type IntentType =
   | "graph_reasoning"
   | "agent_run";
 
-export type ChartType = "table" | "bar" | "pie" | "line" | "scatter";
+// 图表类型：由后端决策引擎产出（规则优先，LLM 只在规则歧义时给语义标签）。
+// ⚠️ 新增值必须同步 `src/api/chat.ts` 的 VALID_CHART_TYPES，否则运行时校验会把
+// 它降级为 null（静默不渲染）。
+// - `kpi` 不是 ECharts 图表：chartOption 是 `{kpi: {label, value, unit, delta}}`，
+//   由 KpiCard 渲染（不是 ReactECharts）。
+export type ChartType =
+  | "table"
+  | "bar"
+  | "hbar"
+  | "pie"
+  | "donut"
+  | "line"
+  | "scatter"
+  | "heatmap"
+  | "kpi"
+  | "combo"
+  | "waterfall";
 
 // 后端从问题中抽取的结构化查询实体（best-effort，任一字段可为空）
 export interface ExtractedEntities {
@@ -95,6 +111,9 @@ export interface StepResultRead {
   data?: Record<string, unknown>[] | null;
   summary?: string | null;
   error?: string | null;
+  // 每步自己的图（决策引擎按该步的 columns/data/plan 各出一张；失败步骤为 null）
+  chartType?: ChartType | null;
+  chartOption?: Record<string, unknown> | null;
 }
 
 // 多步子步骤的运行时状态（前端聚合，随流式事件推进）
@@ -111,6 +130,9 @@ export interface MultiStepStep {
   sql?: string | null;
   summary?: string | null;
   error?: string | null;
+  // 每步自己的图（多步每步出图）：由 step_result / 非流式 steps 回填
+  chartType?: ChartType | null;
+  chartOption?: Record<string, unknown> | null;
 }
 
 // Phase 7 G4：未指名 Agent 语义路由建议（中置信命中时随 QUERY/NEW_QUERY 附带）

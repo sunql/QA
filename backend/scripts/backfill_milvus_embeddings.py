@@ -34,6 +34,12 @@ Milvus 批量 delete-then-insert 在重负载下不可靠（全量回填 532 次
 重复行），故 cleanup 改为 读全量 -> 按 (ontology_id, type) 去重（保留最新）->
 删集重建 -> 一次整批插入，并补回 PG 有而 Milvus 缺失的向量（不重新嵌入已有）。
 与普通回填互斥。
+
+注意（2026-09-30 修复）：删集重建走 `milvus.rebuildOntologyCollections()`。
+此前这里调的是 `milvus.dropCollection()` / `ensureCollection()` —— Task 14 丢弃旧
+ontology_embeddings 后二者已成 **no-op**，于是 cleanup 静默退化为纯 append：
+每跑一次就多一整套向量（32 类被堆成 98 行、3642 属性被堆成 10926 行），
+检索 topK 窗口被重复项吃光。改动前跑过 cleanup 的库**必须**再跑一次收敛。
 """
 
 from __future__ import annotations
@@ -86,6 +92,41 @@ def _propertyText(prop: OntologyProperty) -> str:
 def _rowDetails(row: dict) -> tuple[str, str, str]:
     """Milvus 行的 (name, alias, description)；None 归一为 ""（与 PG 比对口径一致）。"""
     return (row.get("name") or "", row.get("alias") or "", row.get("description") or "")
+
+
+_READ_PAGE = 16384
+
+
+def _readAllRowsWithVectors() -> list[dict]:
+    """读 3 个本体集合全量，**含 embedding 向量**与 name/alias/description。
+
+    为什么不能用 milvus.listAllEmbeddings()：那条路（milvus_query_helpers.
+    _queryAllRowsFromCollection）刻意只投影元数据、不取 1024 维向量——元数据视图
+    不需要。但 cleanup 的收敛策略是「读全量 → 去重 → 删集重建 → 写回」，
+    向量必须读得出来才写得回去。此前 cleanup 用元数据读取的产物去重建，
+    在 drop 之后以 `KeyError: 'alias'` / `'embedding'` 崩溃 —— 集合被清空、
+    脚本半途死掉，正是「cleanup 跑一次向量就多一套」的成因（2026-09-30 修复）。
+    """
+    rows: list[dict] = []
+    for name, fields in (
+        (milvus._CLASS_COLLECTION_NAME, milvus._classFields),
+        (milvus._PROPERTY_COLLECTION_NAME, milvus._propertyFields),
+        (milvus._METRIC_COLLECTION_NAME, milvus._metricFields),
+    ):
+        collection = milvus._ensureCollection(name, fields())
+        collection.load()
+        page = collection.query(
+            expr="id >= 0",
+            output_fields=[
+                "id", "ontology_id", "type", "name", "alias", "description",
+                "external_id", "embedding",
+            ],
+            limit=_READ_PAGE,
+        )
+        if len(page) >= _READ_PAGE:
+            raise SystemExit(f"{name}: 命中分页上限 {_READ_PAGE}，需改用 query_iterator")
+        rows.extend(page)
+    return rows
 
 
 async def _backfill(
@@ -190,7 +231,7 @@ async def _cleanup(dryRun: bool) -> int:
     print(f"PG 期望: {len(classes)} 类 + {len(properties)} 属性 = {len(expected)}")
 
     # 2) Milvus 现状
-    rows = milvus.listAllEmbeddings()
+    rows = _readAllRowsWithVectors()
     present = {(r["ontology_id"], r["type"]) for r in rows}
     print(f"Milvus 当前: {len(rows)} 行")
 
@@ -243,7 +284,7 @@ async def _cleanup(dryRun: bool) -> int:
             milvus.insertEmbeddings(records)
             print(f"  整批插入 {len(records)} 条（单次 flush）")
         if not dryRun:
-            rows = milvus.listAllEmbeddings()
+            rows = _readAllRowsWithVectors()
             print(f"补缺失后 Milvus: {len(rows)} 行")
 
     # 4) 按 (oid,type) 去重保留最新（auto_id 最大），并剔除 PG 之外的陈旧向量
@@ -311,8 +352,7 @@ async def _cleanup(dryRun: bool) -> int:
     if dryRun:
         print("[dry-run] 未删集重建")
         return failed
-    milvus.dropCollection()
-    milvus.ensureCollection()
+    milvus.rebuildOntologyCollections()
     milvus.insertEmbeddings([
         {
             "ontology_id": r["ontology_id"],

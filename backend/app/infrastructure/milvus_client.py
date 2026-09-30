@@ -694,6 +694,7 @@ from app.infrastructure.milvus_dual_write import (
     ensureMetricCollection,
     insertEmbeddingsDual,
     deleteByOntologyIdDual,
+    rebuildOntologyCollections,
 )
 from app.infrastructure.milvus_query_helpers import (
     queryClassEmbeddings,

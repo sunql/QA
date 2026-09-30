@@ -288,6 +288,66 @@ class TestAmbiguityFlipKeepsTheAxis:
         assert spec.orientation == "horizontal"
 
 
+class TestPlanIdentifiersAgainstResultColumns:
+    """生产形态：plan 用本体属性名（`SUPPLIER_CODE`），结果集列名是小写。
+
+    `business_db_pool.py:639` 对结果列统一 `c.lower()`，所以 `SUPPLIER_CODE` 与
+    `supplier_code` 指的是同一列。把 plan 标识符原样抄进 spec，`validateSpec` 就会
+    判定「引用了结果集中不存在的列」→ **整张图降级成表格**。
+
+    2026-09-30 线上复现（用户强制饼图却拿到表格）：
+    `rule=R_FORCED_CLIENT decision=pie：引用了结果集中不存在的列 'SUPPLIER_CODE'
+    （列：['item_code', ..., 'supplier_code', ...]）`。
+
+    既有用例全是「plan 与列名同为大写」，所以这条鸿沟一直没被测出来。
+    """
+
+    _COLUMNS = ["supplier_code", "total_qty"]
+    _ROWS_LOWER = [
+        {"supplier_code": "B125", "total_qty": 9812},
+        {"supplier_code": "B019", "total_qty": 7401},
+    ]
+
+    def test_sort_reference_resolves_to_the_actual_column(self) -> None:
+        plan = _plan(
+            groupBy=("SUPPLIER_CODE",),
+            sortBy=(SortSpec(property="SUPPLIER_CODE", direction="desc"),),
+        )
+
+        spec, _ = _build(self._COLUMNS, self._ROWS_LOWER, plan=plan)
+
+        assert spec.sort is not None
+        assert spec.sort.by == "supplier_code"
+        assert validateSpec(spec, self._COLUMNS) is None
+
+    def test_sort_is_dropped_when_the_reference_is_unresolvable(self) -> None:
+        plan = _plan(sortBy=(SortSpec(property="NOT_IN_RESULT", direction="desc"),))
+
+        spec, _ = _build(self._COLUMNS, self._ROWS_LOWER, plan=plan)
+
+        # 解析不出来就丢掉排序，而不是留一个指向空列的引用把整张图拖去降级。
+        assert spec.sort is None
+        assert validateSpec(spec, self._COLUMNS) is None
+
+    def test_measure_label_uses_the_plan_alias_despite_case(self) -> None:
+        plan = _plan(
+            groupBy=("SUPPLIER_NAME",),
+            aggregations=(
+                Aggregation(property="RCV_QTY_PUU", function="SUM", alias="占比"),
+            ),
+        )
+        columns = ["supplier_name", "rcv_qty_puu"]
+        rows = [
+            {"supplier_name": "B125 浙江力航", "rcv_qty_puu": 9812},
+            {"supplier_name": "B019 温州圣特", "rcv_qty_puu": 7401},
+        ]
+
+        spec, _ = _build(columns, rows, plan=plan)
+
+        assert spec.measures[0].label == "占比"
+        assert validateSpec(spec, columns) is None
+
+
 class TestImmutability:
     def test_build_does_not_mutate_the_plan_or_rows(self) -> None:
         plan = _plan(groupBy=("SUPPLIER_NAME",))

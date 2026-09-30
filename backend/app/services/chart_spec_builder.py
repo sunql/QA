@@ -59,11 +59,44 @@ def _prettify(field: str) -> str:
     return field.replace("_", " ").strip()
 
 
-def _aliasByField(plan: QueryPlan | None) -> dict[str, str]:
-    """plan 里「属性 → 中文别名」的映射（别名优先，缺了才退回列名）。"""
+def _resolveColumn(name: str | None, columns: tuple[str, ...]) -> str | None:
+    """把 plan 的标识符解析成**结果集里的真实列名**（大小写不敏感）。
+
+    plan 用的是本体属性名（`SUPPLIER_CODE`），而结果集列名由适配器统一转小写
+    （`business_db_pool.py:639` 的 `c.lower()`）—— 两者指的是同一列，但字符串不等。
+    任何**从 plan 抄进 spec 的引用**都必须先过这里：`validateSpec` 按字面比对列名，
+    对不上就把整张图降级成表格（2026-09-30 线上：强制饼图变成表格，
+    日志 `rule=R_FORCED_CLIENT decision=pie：引用了结果集中不存在的列 'SUPPLIER_CODE'`）。
+
+    解析不出来返回 None：宁可放弃这条引用，也不要留一个指向空列的引用 ——
+    后者会让 `validateSpec` 把整张图判死。
+    """
+    if not name:
+        return None
+    target = name.strip().lower()
+    for column in columns:
+        if column.strip().lower() == target:
+            return column
+    return None
+
+
+def _aliasByField(plan: QueryPlan | None, columns: tuple[str, ...]) -> dict[str, str]:
+    """「结果集列名 → 中文别名」映射（别名优先，缺了才退回列名）。
+
+    键必须是**结果集列名**（`signals.measures` 就是它），故先用 `_resolveColumn`
+    把 plan 的属性名折过去 —— 否则 `aliases.get("rcv_qty_puu")` 永远落空，
+    「占比」这类中文别名一个都显示不出来。
+    """
     if plan is None:
         return {}
-    return {a.property: a.alias for a in plan.aggregations if a.alias}
+    aliases: dict[str, str] = {}
+    for aggregation in plan.aggregations:
+        if not aggregation.alias:
+            continue
+        column = _resolveColumn(aggregation.property, columns)
+        if column is not None:
+            aliases[column] = aggregation.alias
+    return aliases
 
 
 def _measureFields(signals: ChartSignals, kind: ChartType) -> tuple[str, ...]:
@@ -161,11 +194,19 @@ def _buildKpi(
     return SpecKpi(label=measures[0].label, value=value, unit=None, delta=None)
 
 
-def _buildSort(plan: QueryPlan | None) -> SpecSort | None:
+def _buildSort(plan: QueryPlan | None, columns: tuple[str, ...]) -> SpecSort | None:
+    """把 plan 的排序规则落到 spec；引用解析不出来就**不带排序**返回 None。
+
+    `by` 用解析后的真实列名（见 `_resolveColumn`）：plan 的 `SUPPLIER_CODE` 与结果集的
+    `supplier_code` 是同一列，抄原样会被 `validateSpec` 判成「引用了不存在的列」。
+    """
     if plan is None or not plan.sortBy:
         return None
     first = plan.sortBy[0]
-    return SpecSort(by=first.property, order=first.direction.lower() or "desc")
+    by = _resolveColumn(first.property, columns)
+    if by is None:
+        return None
+    return SpecSort(by=by, order=first.direction.lower() or "desc")
 
 
 def _buildTitle(kind: ChartType, plan: QueryPlan | None) -> str:
@@ -184,7 +225,7 @@ def buildSpec(
 ) -> ChartSpec:
     """把决策落到一份完整 spec。纯函数：不改 plan、不改 data、不改 signals。"""
     kind = decision.kind
-    aliases = _aliasByField(plan)
+    aliases = _aliasByField(plan, signals.columns)
     dimensions = _buildDimensions(_dimensionFields(signals, kind))
     measures = _buildMeasures(_measureFields(signals, kind), aliases)
 
@@ -196,6 +237,6 @@ def buildSpec(
         measures=measures,
         series=_buildSeries(kind, dimensions, measures),
         orientation="horizontal" if kind is ChartType.HBAR else "vertical",
-        sort=_buildSort(plan),
+        sort=_buildSort(plan, signals.columns),
         kpi=_buildKpi(measures, data) if kind is ChartType.KPI else None,
     )

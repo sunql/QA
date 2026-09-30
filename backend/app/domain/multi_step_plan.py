@@ -277,14 +277,18 @@ class StepExecutionContext:
             summary = _clip_text(r.summary or "（无摘要）", per_item)
             sql_snippet = _clip_text(r.sql or "", per_item)
             tag = shape.lower()
+            extra_lines = (
+                [f"  本步用到的本体类：{', '.join(r.selected_classes)}（后续步骤请优先复用同类表）\n"]
+                if r.selected_classes
+                else []
+            )
             lines.append(
                 f"步骤 {r.step_index + 1}：{_sanitizeContext(r.description)}\n"
                 f"  子问题：{_sanitizeContext(r.sub_question)}\n"
                 f"  SQL：{sql_snippet}\n"
                 f"  摘要：{summary}\n"
-                + (f"  本步用到的本体类：{', '.join(r.selected_classes)}（后续步骤请优先复用同类表）\n"
-                   if r.selected_classes else "")
-                f"  [{tag}]\n    {data_snippet}\n  [/{tag}]"
+                + "".join(extra_lines)
+                + f"  [{tag}]\n    {data_snippet}\n  [/{tag}]"
             )
         return "\n".join(lines)
 

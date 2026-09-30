@@ -565,8 +565,10 @@ MSG_SESSION_NOT_OWNED = "会话不存在或不属于当前用户"
 # v3.1 R2（security H2）：/evidences 归属守卫。detail 不回显归属者（403 侧信道）。
 MSG_EVIDENCE_SESSION_NOT_OWNED = "无权访问该会话的证据记录"
 
-# v3.1 B6（M7 Hypothesis Hook）：/chat/sessions/{sid}/hypotheses 归属守卫（同上口径）。
-MSG_HYPOTHESIS_SESSION_NOT_OWNED = "无权访问该会话的分析假设"
+# 注：`MSG_HYPOTHESIS_SESSION_NOT_OWNED`（"无权访问该会话的分析假设"）已删除 ——
+# 守卫从 chat.py 的私有副本提升为 api/v1/session_guard.py 后服务 6 个端点，
+# 该文案在一半端点上描述错对象；现统一用上面的 MSG_SESSION_NOT_OWNED
+# （见 changes/2026-09-30-chat-session-restore/summary.md §4）。
 
 # =============================================================================
 # 数据质量评估报告（feat-dq-evaluation-report）

@@ -24,7 +24,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import getCurrentUser
+from app.api.v1.session_guard import assertSessionOwnership
+from app.dependencies import CurrentUser, getCurrentUser
 from app.domain.error_messages import (
     MSG_EXPORT_MESSAGE_NOT_FOUND,
     MSG_EXPORT_SESSION_EMPTY,
@@ -128,15 +129,29 @@ async def listChatHistory(
 
 
 @router.get("/{sessionId}/usage", response_model=TokenUsageSummary)
-async def getSessionUsage(sessionId: str, session: AsyncSession = Depends(getDb)) -> TokenUsageSummary:
+async def getSessionUsage(
+    sessionId: str,
+    _user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> TokenUsageSummary:
+    """单会话用量摘要（成本台账）。
+
+    归属：**已打标**且不属于当前用户的会话 → 403。与 messages / delete / export 同口径 ——
+    拿到一个 sessionId 就能读到别人每会话的 token / 成本 / 模型明细，属同一条洞的对称端点。
+    """
+    await assertSessionOwnership(session, sessionId, _user)
     svc = TokenUsageService()
     return await svc.summarize(session, sessionId)
 
 
 @router.get("/{sessionId}/usage/list", response_model=list[SessionTokenUsageRead])
 async def getSessionUsageList(
-    sessionId: str, session: AsyncSession = Depends(getDb)
+    sessionId: str,
+    _user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
 ) -> list[SessionTokenUsageRead]:
+    """单会话用量流水（明细行）。归属口径同 `GET /{sessionId}/usage`。"""
+    await assertSessionOwnership(session, sessionId, _user)
     svc = TokenUsageService()
     usages = await svc.getUsageBySession(session, sessionId)
     return [SessionTokenUsageRead.model_validate(u) for u in usages]
@@ -148,6 +163,7 @@ async def getSessionUsageList(
 )
 async def getSessionMessages(
     sessionId: str,
+    _user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
     limit: int = Query(default=200, ge=1, le=1000, description=MSG_HISTORY_MESSAGES_LIMIT),
     before_id: int | None = Query(default=None, alias="before_id", description=MSG_HISTORY_MESSAGES_BEFORE_ID),
@@ -158,7 +174,12 @@ async def getSessionMessages(
     不存在的 sessionId 返 200 + 空 messages（前端便于无副作用切换）。
     ``tail=true`` 取最新的 limit 条（仍按时间正序返回）—— 导出 PDF 只保留最后
     500 轮，给导出配图的前端必须拿到同一个窗口，否则长会话一张图都配不上。
+
+    归属：**已打标**且不属于当前用户的会话 → 403，三个渠道（chat / doc_qa / wiki_qa）
+    一并生效（此前无校验，任何人拿到 sessionId 就能读）。存量未打标行仍 fail-open，
+    覆盖面见 ``session_guard``。
     """
+    await assertSessionOwnership(session, sessionId, _user)
     svc = SessionHistoryService()
     return await svc.loadFullMessages(
         session, sessionId, limit=limit, beforeId=before_id, tail=tail
@@ -168,12 +189,18 @@ async def getSessionMessages(
 @router.delete("/{sessionId}", status_code=204)
 async def deleteSessionHistory(
     sessionId: str,
+    _user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
 ) -> Response:
     """硬删除某 session 的所有数据（message + token_usage + query_state 三表）。
 
     sessionId 不存在或三表均无数据 → 404。删除为单事务，任一失败回滚。
+
+    归属：**已打标**且不属于当前用户的会话 → 403（三个渠道一并生效）。此前无校验，
+    而删的是**三张表**（含成本台账 session_token_usage）—— 拿到 sessionId 就能销毁
+    别人的会话与账目。
     """
+    await assertSessionOwnership(session, sessionId, _user)
     svc = SessionHistoryService()
     total = await svc.deleteSessionHistory(session, sessionId)
     if total == 0:
@@ -197,6 +224,7 @@ async def exportSessionPdf(
     request: Request,
     sessionId: str,
     body: ChatExportRequest,
+    _user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
 ) -> Response:
     """导出某 session 的问答记录为 PDF。
@@ -215,7 +243,12 @@ async def exportSessionPdf(
 
     响应：application/pdf（attachment 触发下载）；文件名含 sessionId 或 messageId。
     会话无任何消息 → 404（与 DELETE 行为对齐）。
+
+    归属：**已打标**且不属于当前用户的会话 → 403（三个渠道一并生效）。守卫放在 404
+    判定**之前**：这样别人的会话一律停在 403，不会因为「有没有消息」而在 403/404 之间
+    变化（detail 也照旧不回显 id）。
     """
+    await assertSessionOwnership(session, sessionId, _user)
     svc = SessionHistoryService()
     try:
         payload = await svc.buildExportPayload(

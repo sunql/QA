@@ -737,9 +737,10 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         """
         question = dto.question
         if self._stepPlanner.is_explicit_multi_step(question):
-            first_step = self._stepPlanner.plan_explicit(question).plan
-            if first_step and first_step.steps:
-                first_step_q = first_step.steps[0].sub_question
+            first_step_result = await self._stepPlanner.plan_explicit(question)
+            first_plan = first_step_result.plan
+            if first_plan and first_plan.steps:
+                first_step_q = first_plan.steps[0].sub_question
                 if first_step_q:
                     question = first_step_q
         classified = await self.classifyAndRecall(
@@ -770,7 +771,6 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         classes, recallInfo = await self._selectRelevantClasses(
             session, recall_question, allClasses
         )
-        logger.info("召回 classes (%d/%d): %s", len(classes), len(allClasses), [c.class_name for c in classes])
         joins = await self._ontology.listJoins(session)
         ctx = await self._buildRoutingContext(session, dto.sessionId)
         configs = await self._listModelConfigs(session)

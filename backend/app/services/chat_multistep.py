@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -281,6 +282,10 @@ class MultiStepMixin:
         同时保证「无数据」不会被下游 prompt 渲染成「结果为 0 行」。
         """
         injection_text = ctx.inject_to_prompt(step_plan.index)
+        # 每步独立召回：完整多步问法与子问题语义不同，共享召回（pc.classes）
+        # 可能缺当前步骤需要的类（如步骤问"物料"但召回只命中供应商相关表）。
+        # 合并策略：步骤召回 ∪ 共享召回（保跨步骤 JOIN 连通），步骤召回在前。
+        pc = await self._recallForStep(session, pc, step_plan)
         try:
             outcome = await self._planAndGenerateSql(
                 session, dto, pc, IntentType.NEW_QUERY, state,
@@ -361,6 +366,36 @@ class MultiStepMixin:
             ),
             tokens=tokens, cost=cost, modelName=model_name, plan=outcome.plan,
         )
+
+    async def _recallForStep(
+        self, session: AsyncSession, pc: _PipelineContext, step_plan: StepPlan,
+    ) -> _PipelineContext:
+        """步骤级召回：用 sub_question 重新召回类，与共享召回合并。
+
+        完整多步问法召回的 classes 面向整个问题，常缺单步所需的类（如第二步
+        问"物料"但共享召回只命中供应商表）。步骤召回 ∪ 共享召回：步骤召回在前
+        （相关性更高），共享召回殿后（保跨步骤 JOIN 连通所需的中间类）。
+        召回失败时降级沿用共享 pc.classes，不阻断步骤执行。
+        """
+        try:
+            all_classes = await self._ontology.listClasses(session)
+            step_classes, _ = await self._selectRelevantClasses(
+                session, step_plan.sub_question, all_classes
+            )
+        except Exception:
+            logger.warning(
+                "步骤级召回失败，沿用共享召回: step=%s", step_plan.index, exc_info=True,
+            )
+            return pc
+        seen: set = set()
+        merged: list = []
+        for cls in list(step_classes) + list(pc.classes):
+            key = cls.id if getattr(cls, "id", None) is not None else cls.class_name
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(cls)
+        return replace(pc, classes=merged)
 
     @staticmethod
     def _isOversizedPlan(plan: MultiStepPlan) -> bool:

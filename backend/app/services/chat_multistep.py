@@ -357,6 +357,7 @@ class MultiStepMixin:
                 sql=final_sql,
                 data=data,
                 summary=self._summarizeStepData(data),
+                selected_classes=list(outcome.plan.selectedClasses) if outcome.plan else [],
             ),
             tokens=tokens, cost=cost, modelName=model_name, plan=outcome.plan,
         )

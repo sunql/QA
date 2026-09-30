@@ -124,6 +124,8 @@ class StepResult:
     data: list[dict] = field(default_factory=list)
     summary: str = ""
     error: str | None = None
+    # 该步骤选中的本体类（供后续步骤参考：继续用同类表做 JOIN）
+    selected_classes: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -280,6 +282,8 @@ class StepExecutionContext:
                 f"  子问题：{_sanitizeContext(r.sub_question)}\n"
                 f"  SQL：{sql_snippet}\n"
                 f"  摘要：{summary}\n"
+                + (f"  本步用到的本体类：{', '.join(r.selected_classes)}（后续步骤请优先复用同类表）\n"
+                   if r.selected_classes else "")
                 f"  [{tag}]\n    {data_snippet}\n  [/{tag}]"
             )
         return "\n".join(lines)

@@ -760,8 +760,15 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         """
         ds = await self._datasource.get(session, dto.datasourceId)
         allClasses = await self._ontology.listClasses(session)
+        # 显式多步时（带"第一步/第二步"标号）：用第一步子问题做召回，
+        # 避免完整多步问法传给 Milvus 匹配到错误的表（如报价单而非收货单）。
+        recall_question = dto.question
+        if self._stepPlanner.is_explicit_multi_step(dto.question):
+            first_plan = self._stepPlanner.plan_explicit(dto.question).plan
+            if first_plan and first_plan.steps and first_plan.steps[0].sub_question:
+                recall_question = first_plan.steps[0].sub_question
         classes, recallInfo = await self._selectRelevantClasses(
-            session, dto.question, allClasses
+            session, recall_question, allClasses
         )
         logger.info("召回 classes (%d/%d): %s", len(classes), len(allClasses), [c.class_name for c in classes])
         joins = await self._ontology.listJoins(session)

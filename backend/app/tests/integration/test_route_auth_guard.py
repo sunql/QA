@@ -4,6 +4,7 @@
 根因不是「规则缺失」而是「规则无强制」——本测试即强制。
 """
 from fastapi.routing import APIRoute, _IncludedRouter
+from starlette.routing import Mount
 
 from app.dependencies import getCurrentUser
 from app.main import app
@@ -15,6 +16,14 @@ PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/v1/auth/password-policy"),
     ("GET", "/api/v1/data-quality/reports/share/{token}"),
 })
+
+# 已通过 middleware 层面鉴权的 Mount 路由。
+# 这些挂载点在 router 层面不暴露 getCurrentUser 依赖，但 middleware 已强制 Bearer 鉴权。
+# 识别方式：Mount.app 是已知的认证 middleware 包装类（McpAuthMiddleware 实例有 .app + .dispatch）。
+# 新增 Mount 时必须同样包认证中间件。
+# 注意：Mount 的 path 是挂载点路径（main.py:561 的 Mount("") 挂载在根路径），
+#       而内部 app 的路由路径（如 /mcp）通过 app.routes 枚举，不在本集合范围内。
+KNOWN_MIDDLEWARE_PROTECTED_MOUNTS: frozenset[str] = frozenset()
 
 # 枚举下限：展开失效时必须红，而不是空集通过（vacuous pass）
 MIN_ENUMERATED_ROUTES = 300
@@ -95,3 +104,43 @@ def test_whitelistRoutesAreActuallyPublic() -> None:
         assert byKey[key] is False, (
             f"白名单路由 {key} 现在带了鉴权，请确认它是否仍应公开"
         )
+
+
+def test_mountsAreProtectedByMiddleware() -> None:
+    """Mount 可见性守卫：所有 Mount 挂载点必须经 middleware 鉴权。
+
+    Starlette Mount 绕过 FastAPI 依赖注入——即使 router 挂了 Depends(getCurrentUser)，
+    裸 Mount 包裹的 ASGI app 也会直接透传请求。本测试枚举所有 Mount 并断言：
+
+    1. 每个 Mount 的 app 属性不是裸 ASGI app（必须包在某个 middleware 包装类里）
+    2. 每个 Mount 的路径在 KNOWN_MIDDLEWARE_PROTECTED_MOUNTS 里（已知的 middleware 保护路由）
+
+    背景：2026-09-30 安全批次期间，/mcp 经 Mount("") 裸挂载于 main.py:561，
+    绕过 router 级鉴权，工具调用崩于 AttributeError。修复后已包 McpAuthMiddleware。
+    新增 Mount 时必须同样包认证中间件，并同步更新 KNOWN_MIDDLEWARE_PROTECTED_MOUNTS。
+    """
+    from starlette.types import ASGIApp
+
+    unknown_mounts: list[tuple[str, type, str]] = []
+    for route in app.routes:
+        if isinstance(route, Mount):
+            wrapped_app = route.app
+            # McpAuthMiddleware 实例有 .app 属性（指向内部被包装的 ASGI app）。
+            # 用类型名识别，因为已知认证中间件的类名是稳定的。
+            is_known_protected = (
+                hasattr(wrapped_app, "app")
+                and type(wrapped_app).__name__ == "McpAuthMiddleware"
+            )
+            if not is_known_protected:
+                unknown_mounts.append((
+                    route.path,
+                    type(wrapped_app),
+                    type(wrapped_app).__name__,
+                ))
+
+    # 未知（未保护）Mount 必须为空
+    assert unknown_mounts == [], (
+        "以下 Mount 未包认证中间件（匿名可达，请同步加鉴权中间件并更新 "
+        "KNOWN_MIDDLEWARE_PROTECTED_MOUNTS）：\n  "
+        + "\n  ".join(f"path={path!r:20}  type={cls_name}" for path, _, cls_name in unknown_mounts)
+    )

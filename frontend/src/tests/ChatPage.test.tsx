@@ -31,6 +31,11 @@ const { mockDataSource, chatApi, chatHistoryApi, exportCharts } = vi.hoisted(() 
   };
   const chatHistoryApi = {
     exportSessionPdf: vi.fn(),
+    // 挂载期回放会用到这两个（ChatPage → chatStore.enterChannel）：
+    // mock 少一个函数不会报错，只会「调用返回 undefined」被 store 的 try/catch 吞掉，
+    // 表现为页面多出一条红色 Alert —— 这类残缺替身正是缺陷能隐身的老套路。
+    listChatSessions: vi.fn(),
+    loadSessionMessages: vi.fn(),
   };
   // 导出前的截图收集（0105）：单测只关心「有没有被调、结果有没有进请求体」，
   // 真正的离屏渲染在 collectExportCharts / chartSnapshot 自己的测试里。
@@ -50,6 +55,8 @@ vi.mock("../api/chat", () => ({
 }));
 vi.mock("../api/chatHistory", () => ({
   exportSessionPdf: (...args: unknown[]) => chatHistoryApi.exportSessionPdf(...args),
+  listChatSessions: (...args: unknown[]) => chatHistoryApi.listChatSessions(...args),
+  loadSessionMessages: (...args: unknown[]) => chatHistoryApi.loadSessionMessages(...args),
 }));
 vi.mock("../utils/collectExportCharts", () => ({
   collectExportCharts: (...args: unknown[]) => exportCharts.collectExportCharts(...args),
@@ -75,6 +82,11 @@ function renderPage() {
 
 describe("ChatPage", () => {
   beforeEach(() => {
+    // 清掉真实 localStorage：store 的持久化层在本文件里**没有**被 mock，
+    // 于是「上一个用例发送消息时写下的会话恢复指针」会留到这里 —— 挂载期的
+    // 刷新恢复会真的触发，把 sessionId 换成指针里的那个（导出断言随即失败）。
+    // 用例间的持久化状态必须显式清掉，别指望它恰好是空的。
+    window.localStorage.clear();
     vi.clearAllMocks();
     useChatStore.setState({
       messages: [],
@@ -82,15 +94,52 @@ describe("ChatPage", () => {
       loading: false,
       datasourceId: null,
       error: null,
+      channel: "chat",
+      sessions: [],
+      sessionsError: null,
+      historyPanelOpen: false,
     });
     chatApi.listDataSources.mockResolvedValue([mockDataSource]);
     chatApi.getSuggestions.mockResolvedValue([]);
+    // 替身必须有真实形状：默认返回 undefined 会让 store 把 sessions 设成 undefined，
+    // 渲染期直接炸（比「函数不存在」更糟 —— 后者至少会被 store 的 try/catch 兜住）。
+    chatHistoryApi.listChatSessions.mockResolvedValue([]);
+    chatHistoryApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-test", messages: [] });
   });
 
   it("渲染标题与空状态", () => {
     renderPage();
     expect(screen.getByText("AIChatService")).toBeInTheDocument();
     expect(screen.getByText("输入问题开始对话")).toBeInTheDocument();
+  });
+
+  it("挂载即声明 chat 渠道并按恢复指针回放上次会话（刷新恢复的接线）", async () => {
+    // 模拟「上次会话留下的指针」——store 的持久化层在本文件里没被 mock，读的是真 localStorage
+    window.localStorage.setItem("qa:chat:lastSessionId:chat", "chat-last");
+    chatHistoryApi.loadSessionMessages.mockResolvedValue({
+      sessionId: "chat-last",
+      messages: [
+        {
+          id: 7,
+          role: "assistant",
+          content: "上一轮的回答",
+          question: null,
+          sql: null,
+          createdTime: "2026-09-30T10:00:00Z",
+          interrupted: false,
+        },
+      ],
+    });
+
+    renderPage();
+
+    await waitFor(() =>
+      expect(chatHistoryApi.loadSessionMessages).toHaveBeenCalledWith("chat-last", undefined, {
+        tail: true,
+      })
+    );
+    expect(await screen.findByText("上一轮的回答")).toBeInTheDocument();
+    expect(useChatStore.getState().sessionId).toBe("chat-last");
   });
 
   it("发送问题后通过 SSE 流式展示用户与助手消息、SQL 与图表", async () => {

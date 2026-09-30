@@ -26,7 +26,16 @@ import type {
 } from "../types/chat";
 import { asChartOption, normalizeChartType } from "../utils/chartContract";
 import { i18n } from "../i18n";
-import { read as readPersisted, write as writePersisted } from "./persistChatUiState";
+import {
+  readHistoryPanelOpen,
+  readLastChannel,
+  readLastSessionId,
+  writeHistoryPanelOpen,
+  writeLastChannel,
+  writeLastSessionId,
+  type ChatChannel,
+} from "./persistChatUiState";
+import { onUserSwitch } from "./userSwitch";
 
 // 后端已知意图集合（用于运行时收窄 meta 事件，未知值不入库）
 // 9 个活跃值：query 系列 + 本体治理指令（define/map/metric，Phase 2 接入）
@@ -66,8 +75,24 @@ export function generateSessionId(): string {
   return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function makeSessionId(channel: "chat" | "doc_qa"): string {
+function makeSessionId(channel: ChatChannel): string {
   return `${channel === "doc_qa" ? "docqa-" : "chat-"}${crypto.randomUUID()}`;
+}
+
+// 回放代际：异步回放只允许**最新一次**落地。
+//
+// 没有它时的两个真实故障（都属于「晚到的响应盖掉当前状态」）：
+//   1. 进 /chat 触发的 tail 回放还在路上，用户切到「文档问答」→ 回放回来把 chat 的
+//      消息与会话 id 盖到 doc_qa 面板上（跨渠道串台），接着发问就会带着 chat 的 id；
+//   2. 发送过程中回放到达 → `set` 整体替换 messages，冲掉刚入队的用户消息与流式占位，
+//      并把 loading 置回 false，使 sendMessage 的 `if (loading) return` 防线失效。
+//
+// 凡「要重新决定屏幕上显示哪个会话」的动作都调 invalidatePendingLoads()：切渠道、
+// 点历史项、新建会话、删除会话、发送新消息、换人。
+let sessionLoadSeq = 0;
+
+function invalidatePendingLoads(): void {
+  sessionLoadSeq += 1;
 }
 
 function toHistory(messages: ChatMessage[]): HistoryMessage[] {
@@ -123,8 +148,15 @@ function toChatMessage(read: ChatMessageRead): ChatMessage {
     // （渲染门不放行，等于「这轮没图」），而不是让未知类型流进渲染层。
     chartType: normalizeChartType(read.chartType),
     chartOption: asChartOption(read.chartOption),
+    // 回放出来的消息天然知道自己的落库主键，补上它「导出此条」按钮才会出现。
+    // 此前不填：入口只在 dbMessageId 存在时才渲染，于是刷新恢复出来的会话
+    // 整段没有单条导出（实时发送的消息仍然没有，见 ChatMessage.dbMessageId 注释）。
+    dbMessageId: read.id,
   };
 }
+
+/** 回放结果：成功落地 / 载不动 / 被更新的动作作废（见 `sessionLoadSeq`）。 */
+export type SessionLoadOutcome = "loaded" | "failed" | "stale";
 
 interface ChatState {
   messages: ChatMessage[];
@@ -139,8 +171,17 @@ interface ChatState {
   sessionsError: string | null;
   historyPanelOpen: boolean;
   // Doc-Qa channel（documents-knowledge-qa, Task 7）
-  channel: "chat" | "doc_qa";
-  setChannel: (channel: "chat" | "doc_qa") => void;
+  channel: ChatChannel;
+  /**
+   * 面板挂载时声明「我属于哪个渠道」（ChatPage → chat，DocumentQaPanel → doc_qa）。
+   *
+   * 取代旧的 setChannel：旧实现无条件生成新 session id 且不清 messages
+   * （跨渠道串台），也让「挂载时声明」冲掉要恢复的目标。新语义：
+   *   - 渠道相同且已有消息 → 空操作（返回原处不重复拉取）
+   *   - 渠道变了 → 换会话（messages 清空、取该渠道自己的恢复指针、错误清空）
+   *   - 该渠道有恢复指针而当前没有消息 → 异步回放（刷新恢复）
+   */
+  enterChannel: (channel: ChatChannel) => Promise<void>;
   sendDocQa: (question: string, filters: { securityLevel?: string; documentType?: string }) => Promise<void>;
   setDatasourceId: (id: number | null) => void;
   setSelectedModelId: (id: number | null) => void;
@@ -148,21 +189,41 @@ interface ChatState {
   sendMessage: (question: string, useStream?: boolean, chartType?: ChartType | null) => Promise<void>;
   clearMessages: () => void;
   resetSession: () => void;
+  /**
+   * 换人（登录 / 登出 / 401 掉线）时清空会话内存。
+   *
+   * 与 `resetSession` 的区别：**不动渠道**（渠道是 UI 位置，与身份无关），但必须换一个
+   * 新 sessionId —— store 里的 id 与模块级 boot 快照都属于上一个人，沿用它会以别人的
+   * 会话发问（对存量未打标会话服务端会放行，等于继承别人的追问锚点）。
+   */
+  clearForUserSwitch: () => void;
   // 历史会话面板 actions
-  loadSessions: (channel?: "chat" | "doc_qa") => Promise<void>;
-  loadSessionMessages: (sessionId: string) => Promise<void>;
+  loadSessions: (channel?: ChatChannel) => Promise<void>;
+  /**
+   * 载入某会话的消息流。`tail: true` 取**最新**那批 ——
+   * 刷新恢复必须用它：默认取的是会话开头，长会话会「恢复出开头、中间断掉」。
+   *
+   * 返回值：`loaded` 成功落地 / `failed` 载不动（指针已清，调用方应换一个干净会话）/
+   * `stale` 期间已有更新的会话动作，本次结果被丢弃（调用方不插手）。
+   */
+  loadSessionMessages: (
+    sessionId: string,
+    options?: { tail?: boolean }
+  ) => Promise<SessionLoadOutcome>;
   deleteSession: (sessionId: string) => Promise<void>;
   toggleHistoryPanel: () => void;
   setHistoryPanelOpen: (open: boolean) => void;
 }
 
-// 初始化时一次性读取 localStorage（hydration）。后续切换不重复读，
-// 因此 store 之外的模块如需响应变化应订阅 persistChatUiState 自身（本期不实现）
-const persisted = readPersisted();
+// 初始化时一次性读取 localStorage（hydration），把上次的渠道与它的会话指针摆好。
+// **不在这里拉消息** —— 拉取要等面板声明渠道（enterChannel），因为「这次真的进的是哪个
+// 渠道」只有面板知道，而回放失败的自愈（清指针）也在那边。
+const bootChannel: ChatChannel = readLastChannel() ?? "chat";
+const bootSessionId = readLastSessionId(bootChannel) ?? generateSessionId();
 
 export const useChatStore = create<ChatState>()((set, get) => ({
   messages: [],
-  sessionId: persisted.lastSessionId ?? generateSessionId(),
+  sessionId: bootSessionId,
   loading: false,
   datasourceId: null,
   selectedModelId: null,
@@ -170,13 +231,44 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   sessions: [],
   sessionsLoading: false,
   sessionsError: null,
-  historyPanelOpen: persisted.historyPanelOpen,
-  channel: "chat",
+  historyPanelOpen: readHistoryPanelOpen(),
+  channel: bootChannel,
 
-  setChannel: (c) => {
-    const newId = makeSessionId(c);
-    writePersisted({ lastSessionId: newId });
-    set({ channel: c, sessionId: newId });
+  enterChannel: async (channel) => {
+    const { channel: currentChannel, messages, sessionId } = get();
+    const sameChannel = currentChannel === channel;
+    // 同渠道且已有对话 → 回到原处，不重复拉取（面板重挂载 / 路由来回切）
+    if (sameChannel && messages.length > 0) return;
+
+    // 持久化的指针就是权威：它记的是「上次真的在这个渠道里说话的那个会话」。
+    // 同渠道无指针时保留当前 id（别在每次挂载时无谓地换个新 id）。
+    const pointer = readLastSessionId(channel);
+    const nextId = pointer ?? (sameChannel ? sessionId : makeSessionId(channel));
+    // 声明渠道即作废在途回放：上一条渠道的响应回来时不该再落到屏幕上
+    invalidatePendingLoads();
+    writeLastChannel(channel);
+    // 同步部分先做完：sessionId 必须在进入的瞬间就是对的，不能等 await 回来
+    set({
+      channel,
+      sessionId: nextId,
+      // 只在真的换渠道时清空；同渠道重入要保留正在显示的那批消息。
+      // sessions 一起清：历史面板已在显示时，换渠道前若不换列表，面板会短暂
+      // 列出上一个渠道的会话（直到下次 loadSessions 回来）。
+      ...(sameChannel ? {} : { messages: [], sessions: [] }),
+      sessionsError: null,
+      error: null,
+    });
+
+    if (pointer === null) return; // 没有可恢复的目标
+    const outcome = await get().loadSessionMessages(pointer, { tail: true });
+    if (outcome === "failed") {
+      // 回放失败（网络 / 404 / 会话不属于当前用户）：恢复指针已由 loadSessionMessages
+      // 清掉，这里再换一个干净会话。否则屏幕是空的、服务端却还留着那个 session 的
+      // 追问锚点（session_query_state 只按 session_id 存），用户接着提问会得到
+      // 「关于一场看不见的对话」的回答 —— 那比不恢复更坏。
+      set({ sessionId: makeSessionId(channel) });
+    }
+    // "stale" = 期间用户已经切走 / 发了新消息，由更新的那次动作说了算，这里不插手
   },
 
   setDatasourceId: (id) => set({ datasourceId: id }),
@@ -193,6 +285,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       set({ error: i18n.t("toast.pleaseSelectDatasource") });
       return;
     }
+    // 发送即声明「这个会话是刷新后的恢复目标」。
+    // 发送路径原本一次都不写这个指针（只有点历史项 / 换渠道才写，且后两者写的多是
+    // 「刚生成的空会话 id」），所以 qa:chat:lastSessionId 恒为 null，刷新只会起一个新会话。
+    writeLastSessionId(get().channel, sessionId);
+    // 在途回放不得盖掉这条消息（否则用户消息与流式占位会被整体替换掉）
+    invalidatePendingLoads();
 
     // 先写入用户消息 + 流式占位助手消息
     const userMsg: ChatMessage = {
@@ -467,23 +565,47 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
   },
 
-  clearMessages: () => set({ messages: [], error: null }),
+  clearMessages: () => {
+    invalidatePendingLoads();
+    set({ messages: [], error: null });
+  },
 
   resetSession: () => {
     const { channel } = get();
-    const newId = makeSessionId(channel);
-    writePersisted({ lastSessionId: newId });
+    // 「新对话」= 当前没有可恢复的目标：清指针。若照旧写入新 id，刷新会去
+    // 恢复一个刚建出来的空会话（看起来像恢复失败）。
+    writeLastSessionId(channel, null);
+    // 在途回放不得把旧会话的消息搬回来（「新对话」之后屏幕上必须是空的）
+    invalidatePendingLoads();
     set({
       messages: [],
-      sessionId: newId,
+      sessionId: makeSessionId(channel),
       loading: false,
       error: null,
+    });
+  },
+
+  clearForUserSwitch: () => {
+    const { channel } = get();
+    // 指针由 authStore 侧 clearLastSessionIds() 清（那里才知道「换人」这件事）；
+    // 这里只负责内存：messages 与 sessionId 都是上一个人的，必须换掉。
+    invalidatePendingLoads();
+    set({
+      messages: [],
+      sessionId: makeSessionId(channel),
+      loading: false,
+      error: null,
+      sessions: [],
+      sessionsError: null,
     });
   },
 
   sendDocQa: async (question, filters) => {
     const { sessionId, channel } = get();
     if (channel !== "doc_qa") return;
+    // 与 sendMessage 同理：doc_qa 渠道自己的恢复指针也要在发送时落地
+    writeLastSessionId(channel, sessionId);
+    invalidatePendingLoads();
 
     const userMsg: ChatMessage = {
       id: nextId(),
@@ -584,11 +706,19 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
   },
 
-  loadSessionMessages: async (sessionId) => {
+  loadSessionMessages: async (sessionId, options) => {
+    const { channel } = get();
+    invalidatePendingLoads();
+    const seq = sessionLoadSeq;
     try {
-      const resp: SessionMessagesResponse = await apiLoadSessionMessages(sessionId);
+      const resp: SessionMessagesResponse = await apiLoadSessionMessages(sessionId, undefined, {
+        tail: options?.tail,
+      });
+      // 期间发生了更新的会话动作（切渠道 / 点了另一条历史 / 发了新消息）→ 丢弃本次结果。
+      // 既不写指针也不改状态：晚到的响应盖掉用户刚做的选择，是本次改动引入的真实回归。
+      if (seq !== sessionLoadSeq) return "stale";
       const messages = resp.messages.map(toChatMessage);
-      writePersisted({ lastSessionId: sessionId });
+      writeLastSessionId(channel, sessionId);
       set({
         sessionId,
         messages,
@@ -596,42 +726,58 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         error: null,
         sessionsError: null,
       });
+      return "loaded";
     } catch (err) {
+      if (seq !== sessionLoadSeq) return "stale";
       // 加载失败写入 sessionsError（用户可见于面板 Alert），不污染 chat 区 error
       // —— chat 区错误展示与历史面板错误展示语义解耦，避免互相覆盖
       const msg = err instanceof Error ? err.message : i18n.t("errors.networkError");
+      // 清掉指向这个载不动的会话的指针：留着它，每次刷新都会重放同一个失败，
+      // 而失败只在历史面板展开时可见（收起面板时完全静默）—— 表现为「刷新后永远空白」。
+      if (readLastSessionId(channel) === sessionId) writeLastSessionId(channel, null);
       set({ sessionsError: msg });
+      return "failed";
     }
   },
 
   deleteSession: async (sessionId) => {
     await apiDeleteSession(sessionId);
-    // 不可变移除 sessions 中对应项；若是当前会话则同时清空 messages 与 sessionId
-    set((state) => {
-      const nextSessions = state.sessions.filter((s) => s.sessionId !== sessionId);
-      if (state.sessionId !== sessionId) {
-        return { sessions: nextSessions };
-      }
-      const newId = generateSessionId();
-      writePersisted({ lastSessionId: newId });
-      return {
-        sessions: nextSessions,
-        sessionId: newId,
-        messages: [],
-        loading: false,
-        error: null,
-      };
+    const { channel, sessionId: currentId, sessions } = get();
+    const nextSessions = sessions.filter((s) => s.sessionId !== sessionId);
+    if (currentId !== sessionId) {
+      // 删的是别的会话：只有当它恰好是本渠道的恢复目标时才需要清指针
+      if (readLastSessionId(channel) === sessionId) writeLastSessionId(channel, null);
+      set({ sessions: nextSessions });
+      return;
+    }
+    // 删的是当前会话 → 指针必然失效（不必先问它此前有没有被写过），
+    // 否则下次刷新会去恢复一个刚刚被删掉的会话
+    writeLastSessionId(channel, null);
+    // 在途回放不得把刚删掉的会话重新铺回屏幕
+    invalidatePendingLoads();
+    set({
+      sessions: nextSessions,
+      sessionId: makeSessionId(channel),
+      messages: [],
+      loading: false,
+      error: null,
     });
   },
 
   toggleHistoryPanel: () => {
     const next = !get().historyPanelOpen;
-    writePersisted({ historyPanelOpen: next });
+    writeHistoryPanelOpen(next);
     set({ historyPanelOpen: next });
   },
 
   setHistoryPanelOpen: (open) => {
-    writePersisted({ historyPanelOpen: open });
+    writeHistoryPanelOpen(open);
     set({ historyPanelOpen: open });
   },
 }));
+
+// 换人即清内存会话（登录 / 登出 / 401 掉线，见 stores/userSwitch.ts）。
+// 注册而非被 authStore 直接引用：避免 authStore ← chatStore ← api/client ← authStore 的循环。
+onUserSwitch(() => {
+  useChatStore.getState().clearForUserSwitch();
+});

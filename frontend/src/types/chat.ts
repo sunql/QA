@@ -270,8 +270,9 @@ export interface ChatMessage {
   agentRun?: import("./agentRuntime").AgentRunRead | null;
   // Phase 7 G4：未指名 Agent 语义路由建议卡片（仅中置信命中时回填，其余 undefined）
   suggestedAgent?: AgentSuggestion | null;
-  // 后端 SessionMessage 主键（PDF 单条导出需要：chatStore 暂未在 sendMessage
-  // 完成后回填，故默认 undefined，全局按钮正常工作，单条入口 disabled）
+  // 后端 SessionMessage 主键（PDF 单条导出按钮的渲染条件）。
+  // 历史回放（toChatMessage）会回填；实时发送的消息仍为 undefined ——
+  // chatStore 尚未在 sendMessage 完成后回填实时 db id，故实时轮次只有全局导出。
   dbMessageId?: number;
   // Phase 5.6：知识问答引用列表（citations 事件回填；document_name 由后端 hydration 补全）
   citations?: import("./document").DocQaCitation[] | null;

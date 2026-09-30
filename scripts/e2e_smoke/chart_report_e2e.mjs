@@ -15,7 +15,8 @@
  *      - 请求体 `charts[].imagePng` 必须以 `data:image/png;base64,` 开头
  *        （证明前端**真的渲染出了 PNG**，而不是空数组走占位框）
  *      - 响应是 `%PDF-` 且含 `/Subtype /Image`（证明图**真的嵌进了 PDF**）
- *   5. 刷新页面（不自动回放）→ 展开历史面板 → 点「当前」会话载回 → 从历史载回同一会话 → 最终回答里仍有图（0105 持久化生效）
+ *   5. **刷新页面 → 不点任何东西**，上次会话（含最终回答里的图）自动回来（0105 落库
+ *      字段 + 会话恢复）；刷新后新产生的那次 `/messages` 必须带 `tail=true`
  *   6. 反向守卫：`/messages?tail=true` 的响应里 assistant 行必须带 chartType
  *
  * 用法（凭据只从环境变量来，脚本里不落任何口令）：
@@ -111,7 +112,11 @@ let exportRequestBody = null; // 导出 POST 的 body
 let exportRequestHeaders = null; // 导出 POST 的请求头（鉴定 Bearer）
 let exportResponse = null; // 导出的 PDF 字节 + 状态
 let messagesTailOk = null; // /messages?tail=true 的响应
-let messagesLoaded = null; // 任意一次 /messages 响应（点历史项载回时）
+let messagesLoaded = null; // 最近一次 /messages 响应
+let messagesUrl = null; // 最近一次 /messages 的 URL（鉴定 tail=true）
+// /messages 响应计数：刷新前导出那次也会发 /messages?tail=true，光看「messagesLoaded 非空」
+// 分不清抓到的是刷新前那次还是刷新后自动回放那次。用序号划一道分界线。
+let messagesSeq = 0;
 
 page.on("response", async (resp) => {
   const url = resp.url();
@@ -129,6 +134,8 @@ page.on("response", async (resp) => {
     if (url.includes("/messages?") && resp.status() === 200) {
       const body = await resp.json();
       messagesLoaded = body;
+      messagesUrl = url;
+      messagesSeq += 1;
       if (url.includes("tail=true")) messagesTailOk = body;
     }
   } catch {
@@ -275,27 +282,43 @@ try {
     return `${charts.length} 张截图 → PDF ${kb} KB，含 /Subtype /Image`;
   });
 
-  await step("7. 刷新 → 从历史面板点回该会话 → 图仍在（0105 持久化）", async () => {
-    // 刷新**不会**自动回放历史：store 只从 localStorage 恢复 sessionId，而
-    // `loadSessionMessages` 仅在点击历史项时调用 —— 这是既有设计，不是本变更引入的。
-    // 所以走真实用户路径：刷新 → 展开历史面板 → 点最新那条（刚问完，排第一）。
+  await step("7. 刷新 → 不点任何东西 → 上次会话与图自动回来（会话恢复 + 0105 落库）", async () => {
+    // 刷新前先从 localStorage 读恢复指针：它是「刷新后该回哪个会话」的唯一依据。
+    // 发送路径不写它，这里就会是 null —— 那正是本变更要修的缺陷（旧行为恒为 null）。
+    const pointer = await page.evaluate(() =>
+      window.localStorage.getItem("qa:chat:lastSessionId:chat")
+    );
+    if (!pointer) {
+      throw new Error(
+        "刷新前 localStorage 里没有 qa:chat:lastSessionId:chat ⇒ 发送路径没写恢复指针"
+      );
+    }
+    const seqBeforeReload = messagesSeq;
+
+    // 刷新后**一次都不点**：不展开历史面板、不点任何一行。上次的会话要自己回来。
     await page.reload({ waitUntil: "networkidle" });
-    const toggle = page.locator('button[aria-label="展开历史"]');
-    if ((await toggle.count()) > 0) await toggle.first().click();
-    const firstRow = page.locator(".ant-list-item").first();
-    await firstRow.waitFor({ timeout: 30_000 });
-    await page.screenshot({ path: `${OUT_DIR}/03_history_panel.png`, fullPage: true });
-    await firstRow.click();
     await page.waitForSelector("canvas", { timeout: 60_000 });
     await page.screenshot({ path: `${OUT_DIR}/04_after_reload.png`, fullPage: true });
 
-    // 把 DOM 上的 canvas 钉到**落库字段**上：载回用的是 /messages（不是导出那条
-    // ?tail=true），响应里 assistant 行必须自带 chartType/chartOption。
+    // 只看**刷新之后**新产生的那次 /messages（序号划界），并且必须按指针去回放最新的 200 条。
     const msgs = await waitFor(
-      () => messagesLoaded?.messages?.length ? messagesLoaded : null,
-      "点历史项后的 /messages 响应",
+      () => (messagesSeq > seqBeforeReload ? messagesLoaded : null),
+      "刷新后自动回放的 /messages 响应",
       30_000
     );
+    if (!messagesUrl.includes("tail=true")) {
+      throw new Error(
+        `自动回放没有取最新窗口（URL 缺 tail=true）⇒ 长会话会恢复成开头。URL=${messagesUrl}`
+      );
+    }
+    if (!decodeURIComponent(messagesUrl).includes(pointer)) {
+      throw new Error(
+        `自动回放的不是指针指向的会话：指针=${pointer} 请求=${messagesUrl}`
+      );
+    }
+
+    // 把 DOM 上的 canvas 钉到**落库字段**上：会话恢复走的是 /messages，响应里
+    // assistant 行必须自带 chartType/chartOption —— 图是落库的，不是内存里残留的。
     const assistant = msgs.messages.filter((m) => m.role === "assistant");
     const withChart = assistant.filter((m) => m.chartType);
     if (withChart.length === 0) {
@@ -303,7 +326,7 @@ try {
         `画布出来了但 /messages 里 assistant 行没有 chartType ⇒ 图不是从落库字段渲染的。样例=${JSON.stringify(assistant[0]).slice(0, 200)}`
       );
     }
-    return `载回 ${msgs.messages.length} 条消息，其中 ${withChart.length} 条带 chartType=${withChart[0].chartType}，canvas 已渲染`;
+    return `无操作恢复会话 ${pointer}：${msgs.messages.length} 条消息，其中 ${withChart.length} 条带 chartType=${withChart[0].chartType}，canvas 已渲染`;
   });
 
   await step("8. 反向守卫：/messages?tail=true 的 assistant 行带 chartType", async () => {

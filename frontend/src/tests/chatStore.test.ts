@@ -15,10 +15,12 @@ const historyApi = vi.hoisted(() => ({
 vi.mock("../api/chatHistory", () => historyApi);
 
 const persist = vi.hoisted(() => ({
-  read: vi.fn<() => { lastSessionId: string | null; historyPanelOpen: boolean }>(
-    () => ({ lastSessionId: null, historyPanelOpen: false })
-  ),
-  write: vi.fn<(patch: { lastSessionId?: string | null; historyPanelOpen?: boolean }) => void>(),
+  readLastSessionId: vi.fn<(channel: string) => string | null>(() => null),
+  writeLastSessionId: vi.fn<(channel: string, sessionId: string | null) => void>(),
+  readLastChannel: vi.fn<() => string | null>(() => null),
+  writeLastChannel: vi.fn<(channel: string) => void>(),
+  readHistoryPanelOpen: vi.fn<() => boolean>(() => false),
+  writeHistoryPanelOpen: vi.fn<(open: boolean) => void>(),
 }));
 vi.mock("../stores/persistChatUiState", () => persist);
 
@@ -627,49 +629,21 @@ describe("chatStore", () => {
     expect(useChatStore.getState().historyPanelOpen).toBe(false);
 
     // 两次写入都触发（每次切换都持久化）
-    expect(persist.write).toHaveBeenCalled();
+    expect(persist.writeHistoryPanelOpen).toHaveBeenCalled();
   });
 
   it("setHistoryPanelOpen 强制设定并写入 localStorage", () => {
     useChatStore.getState().setHistoryPanelOpen(true);
     expect(useChatStore.getState().historyPanelOpen).toBe(true);
-    expect(persist.write).toHaveBeenCalled();
+    expect(persist.writeHistoryPanelOpen).toHaveBeenCalled();
   });
 
-  it("chatStore 初始化从 localStorage 恢复 historyPanelOpen=true", () => {
-    // 动态修改 mock：read 返回 historyPanelOpen=true
-    persist.read.mockReturnValueOnce({ lastSessionId: null, historyPanelOpen: true });
-    // 重置 store 模块：再次读取 persist（无法重新导入模块；改为直接验证行为）
-    // 这里我们改为通过 useChatStore.setState({...}) 直接读 persist.read 的最新返回：
-    // 验证：在 setState 后 read 的 mock 配置不影响 store（store 已经在初始化时读过）
-    // —— 实际效果：本次仅记录一次 read 调用
-    useChatStore.setState({ historyPanelOpen: true });
-    expect(useChatStore.getState().historyPanelOpen).toBe(true);
-  });
-
-  it("chatStore 初始化有 lastSessionId 时自动调用 loadSessionMessages 恢复历史", async () => {
-    // 预设 mock：persist.read 在下次初始化返回有 lastSessionId 的配置
-    persist.read.mockReturnValueOnce({
-      lastSessionId: "s-restored",
-      historyPanelOpen: false,
-    });
-    historyApi.loadSessionMessages.mockResolvedValue({
-      sessionId: "s-restored",
-      messages: [
-        { id: 10, role: "user", content: "restored", question: "restored", sql: null, createdTime: "2026-01-01T00:00:00Z" },
-      ],
-    });
-
-    // 触发一次：手动调用 loadSessionMessages 模拟 store hydration 后行为
-    await useChatStore.getState().loadSessionMessages("s-restored");
-
-    const state = useChatStore.getState();
-    expect(state.sessionId).toBe("s-restored");
-    expect(state.messages).toHaveLength(1);
-    expect(state.messages[0].content).toBe("restored");
-    // 持久化被读取（无论 hydration 触发与否，store 都允许手动调用）
-    expect(historyApi.loadSessionMessages).toHaveBeenCalledWith("s-restored");
-  });
+  // 注：原先这里有两个用例自称验证「初始化从 localStorage 恢复 historyPanelOpen /
+  // 有 lastSessionId 时自动恢复历史」，实际都只是手工调 setState / loadSessionMessages
+  // 来「模拟 hydration 后行为」—— 断言的东西与描述的路径无关，模块级 hydration
+  // 从来没有被覆盖过（这也是「会话指针恒为 null」能长期隐身的原因）。
+  // 真用例已迁到 chatStoreHydration.test.ts（那里用 vi.resetModules + 动态 import
+  // 真的让模块重新初始化；放在本文件会污染后续用例手上的 store 实例）。
 
   it("loadSessionMessages 失败时写入 sessionsError（不影响 chat 区域的 error）", async () => {
     historyApi.loadSessionMessages.mockRejectedValue(new Error("404 找不到会话"));

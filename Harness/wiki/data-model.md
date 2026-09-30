@@ -78,12 +78,19 @@ docker exec \
 - 部署：脚本随镜像走，改脚本后需 `docker compose build backend && docker compose up -d backend`
   （镜像==代码；`deploy_backend.sh` 只是 Docker Hub 不可达时的临时替代）
 
+**AutoComplete 按业务名搜索**（2026-09-30 补齐）：
+
+- `searchMappings` 的 conds 增加 `EntityMapping.name.ilike(like)`（第三条）
+  —— 此前只有 `enterprise_code` / `source_code`，业务名虽已入库却搜不到
+  （实测 `name ilike '%浙江力航%'` 命中 1 行，原两条子句命中 0 行）。
+  中缀 ILIKE 由 alembic 0086 的 GIN trigram 索引（partial: `entity_type='SUPPLIER'`）支撑。
+- `createMapping` 补写 `name=dto.name`。DTO 一直声明该字段、bulk 路径也写，
+  唯独单条 create 漏写 ⇒ 带 name 的 POST 返 201 却静默丢弃，`name` 列永远是空。
+  由集成测试 `test_create_persists_business_name` 钉住。
+- 仍缺：`EntityMappingUpdate` 无 `name` 字段（改名前只能走 bulk 或重建）。
+
 **待办（不在本 fix 范围）**：
 
-- `entity_mapping_service.searchMappings` 增加 `EntityMapping.name.ilike(like)` 子句，使 AutoComplete 支持中文名搜索
-  —— **2026-09-30 复核仍缺**：数据里 `name ilike '%浙江力航%'` 命中 1 行，
-  而该方法的 `enterprise_code/source_code ILIKE` 子句命中 0 行 ⇒ 下拉框按中文名搜不到
-  （GIN trigram 索引已在 0086 建好，改这个子句有索引支撑）
 - 周期性同步任务（launchd / scheduler）
 - Prometheus 指标 + Alertmanager 行数告警
 

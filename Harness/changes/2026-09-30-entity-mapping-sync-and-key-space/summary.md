@@ -32,12 +32,13 @@
 | 1 | **prod `entity_mapping` 实际为空**（仅 1 行手工垃圾数据 `' B019 圣特'`，name=NULL）；真实 354431 行在 `qa_metadata_restore_tmp`。全称走 `_BARE_NAME_RE` → resolver → 空表 → 硬报错；编号/简称**绕过 resolver**（走 NL2SQL 对数仓的 LIKE / 数字正则）故恰好能查到 —— 这就是「编号能查、全称不能」的不对称来源 | 全称 100% 失败 | 重跑同步 |
 | 2 | 同步脚本源表写成 `THBI.DWD_SUPPLIER` / `THBI.DWD_MATERIAL`，**这两张表在库里已不存在**（实跑 ORA-00942）；现役主数据表是 `DIM_SUPPLIER(BPSNUM_0/BPSNAM_0)` / `DIM_IMATERIAL(ITMREF_0/ITMDES1_0..3)` | 同步 0 行 | `scripts/sync_entity_mapping_from_thbi.py` |
 
-### 修复 1 过程中发现的两条新缺陷
+### 修复 1 过程中发现的另外三条缺陷
 
 | # | 根因 | 触发症状 | 证据 |
 |---|---|---|---|
 | 3 | `_stableKey` 键空间只有 2³²。MATERIAL 350922 条在该空间里**碰撞 12 次**，`ON CONFLICT ... DO UPDATE SET name` 把 12 对编码静默折叠成 12 行（后者编码消失、前者 name 被覆盖），rowcount 仍报满额、无告警 | 同步 planned=350922 但落库 350910 | 只读探针实测：12 个 key 各含两个真实业务码；生日公式期望 14.3。原注释写的「35w 输入 < 10⁻⁵」比实际乐观约 6 个数量级 |
 | 4 | `_BARE_NAME_RE` 无左边界。中文无词间空格，贪婪字符类把紧邻动词吞进公司名 | 真实问句 8 条里 3 条失败：「查询浙江力航…」「我要看浙江力航…」「用浙江力航…」 | 提取结果为「查询浙江力航汽车部件有限公司」（含动词），精确/LIKE 双双落空 |
+| 5 | `searchMappings` 只搜 `enterprise_code`/`source_code`（无 `name`）；且 `createMapping` 漏写 `name=dto.name`（DTO 声明了、bulk 也写） | chat 里输全称能解析，AdminUI 下拉框按中文名一条都列不出；`createMapping` 带 name 返 201 却静默丢弃 | 实测同一 q：`name ilike` 命中 1 行、原两条子句命中 0 行。2026-09-16 已记为待办，本次补 |
 
 ### 候选方案
 
@@ -49,6 +50,7 @@
 | (D) 动词黑名单扩 `_BARE_NAME_RE` | ❌ 否 | 中文动词/名词组合不可枚举（查询/我要看/用/对比/帮我看…），漏一个就失败一次 |
 | (E) **词典裁决左边界**：右边界固定的候选窗口交 entity_mapping 的 3500 个真实名字裁决，取最长精确命中 | ✅ 采用 | 命中即证明是左边界被污染；窗口仅 ~26 个；热路径（裸名提取本就正确）零额外查询 |
 | (F) 键派生保留两份实现 | ❌ 否 | 两处注释都写「同源（SSOT）」而代码是复制粘贴 —— 注释不是约束。收敛到 `app/domain/enterprise_key.py` |
+| (G) `searchMappings` 补 `name.ilike` + `createMapping` 补 `name=dto.name` | ✅ 采用（用户批准） | 0036/0086 已建 GIN trigram 索引，改动只有子句级别；不补则「chat 能查、下拉框不能查」长期并存 |
 
 ## 3. 数据模型变更
 
@@ -84,8 +86,10 @@
 | `app/tests/unit/test_enterprise_key.py`（新） | 确定性、区间不重叠、**2³² 下实测碰撞的 10 对真实编码做回归夹具**、生日公式门槛（350922 条期望碰撞 < 1e-3）、通用段回退、BIGINT 上界 |
 | `app/tests/unit/test_supplier_name_resolver.py` | 新增 8 例：4 种粘连动词形态、最长命中优先、**热路径不加查询**（反向守卫）、词典未命中仍走 LIKE 报未找到（反向守卫）、`_bareNameCandidates` 窗口枚举 4 例 |
 | `app/tests/unit/test_sync_entity_mapping_from_thbi.py` | `TestSourceTables` 钉住源表与列名契约；区间断言改用 SSOT 常量 |
+| `app/tests/integration/test_entity_mapping_api.py`（真 PG + 完整 API 链路） | `test_create_persists_business_name`（create 落 name）、`test_search_matches_business_name`（按名搜索命中）、`test_search_name_match_respects_entity_type_filter`（反向守卫：name 命中不得绕过 entityType 过滤） |
 
-共 95 passed（4 个相关文件）；受影响套件（含 AST 守护 `test_no_duplicate_methods.py`）139 passed。
+五个直接相关文件 121 passed；受影响套件（加 `test_entity_mapping_audit.py` 与 AST 守护
+`test_no_duplicate_methods.py`）134 passed。
 
 ## 7. 安全审查
 
@@ -139,10 +143,14 @@ docker exec -e DATABASE_URL=... -e QUERY_TIMEOUT_SECONDS=600 \
 | 空 `name` / 垃圾行 | 0 / 0 |
 | 键区间实测 | SUPPLIER `81324035971~281438446824712`；MATERIAL `281476003072863~562949535787384`（不重叠，落于各自 2⁴⁸ 段内） |
 | 全称解析（真实词典，deployed 容器） | 真实问句 **8/8** 命中 B125 |
+| 按名搜索（真实 service + prod 3500 供应商） | `浙江力航`→1、`力航`→1、`济南吉利`→2、`B125`→1、全称→1、不存在→0 |
 | 容器内代码校验 | `_bareNameCandidates` 存在、两处 `from app.domain.enterprise_key import` 存在、`KEY_RANGE_SIZE=281474976710656` |
 | 健康 / 迁移 | `/api/v1/health` 200；`alembic current` = 0104 (head) |
 
-**未覆盖**：`entity_mapping_service.searchMappings`（AdminUI AutoComplete 走这条路）
-仍无 `name` 子句 ⇒ 下拉框按中文名搜不到。数据里 `name ilike '%浙江力航%'` 命中 1 行，
-而该方法现有子句命中 0 行。已在 [data-model.md](../../wiki/data-model.md) 待办中标记，
-**非本次修复范围**。
+**历史事实记录**：本次定位阶段发现 prod 的 `entity_mapping` 曾被清空（仅剩 1 行手工垃圾数据
+`' B019 圣特'` / name=NULL），真实 354431 行躺在 `qa_metadata_restore_tmp`。清空原因未查明，
+但「全称查不到、编号/简称能查到」的不对称正源于此 —— 后两者绕过 resolver 直接对 THBI 数仓查询。
+重跑同步后两个路径同时恢复。
+
+**未覆盖**：`EntityMappingUpdate` 无 `name` 字段（改业务名只能走 bulk 重建，或后续补字段）。
+已在 [data-model.md](../../wiki/data-model.md) 标记。

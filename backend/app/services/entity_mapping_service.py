@@ -190,6 +190,11 @@ class EntityMappingService:
         like = f"%{q}%"
         conds.append(EntityMapping.enterprise_code.ilike(like))
         conds.append(EntityMapping.source_code.ilike(like))
+        # 业务名（供应商 supplier_name / 物料描述）：AutoComplete 按中文名找实体的唯一入口。
+        # 少了这一条，「chat 里输全称能解析、下拉框却列不出来」——2026-09-16 起挂在待办，
+        # 2026-09-30 补齐。中缀 ILIKE 有 alembic 0086 的 GIN trigram 索引（partial:
+        # entity_type='SUPPLIER'）支撑，35w 行不会退化成顺序扫。
+        conds.append(EntityMapping.name.ilike(like))
         stmt = stmt.where(or_(*conds))
         if entityType is not None:
             stmt = stmt.where(EntityMapping.entity_type == entityType)
@@ -240,6 +245,10 @@ class EntityMappingService:
             match_rule=dto.match_rule,
             effective_date=dto.effective_date,
             expiry_date=dto.expiry_date,
+            # 业务名：DTO 里已声明且 bulk 路径也写（见 bulkImportMappings），
+            # 此前单条 create 漏写 → 带 name 的 POST 返 201 却静默丢弃该字段，
+            # 于是 AutoComplete 的 name 列永远为空。2026-09-30 补齐。
+            name=dto.name,
             owner=derivedOwner,
         )
         session.add(entity)

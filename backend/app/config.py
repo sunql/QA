@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # ===== Milvus 向量库 =====
     milvusUri: str = Field(default="http://localhost:19530", alias="MILVUS_URI")
     milvusCollection: str = Field(default="ontology_embeddings", alias="MILVUS_COLLECTION")
+    # Milvus database（逻辑库）名；空 = 默认库 "default"。
+    # 用途：测试套件把它指向独立测试库（qa_test），让 drop/重建只作用于测试数据。
+    # 此前 integration 的 milvusCleanClient 夹具 drop 的是**默认库里的生产本体集合**，
+    # 一次裸 pytest 就把线上向量删空（2026-09-30 事故）。
+    milvusDbName: str = Field(default="", alias="MILVUS_DB_NAME")
     # wiki 知识条目向量同步总开关（feat-wiki-semantic-search）：关闭后写路径
     # 跳过向量 upsert/delete，语义检索仍可用（针对已回填的向量）。测试环境
     # 与无 embedding provider 的部署可设 false，避免每次 CRUD 等待超时。

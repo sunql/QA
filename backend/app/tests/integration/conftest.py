@@ -24,6 +24,7 @@ from app.infrastructure.security import crypto
 from app.services.agent_binding_cache import agent_binding_cache
 from app.services.agent_tool_config_registry import agent_tool_config_registry
 from app.tests import _pg_support
+from app.tests.milvus_isolation import dropOntologyCollectionsForTest
 
 
 @pytest.fixture()
@@ -190,48 +191,10 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
 _EMBEDDING_DIM = 1024
 
 
-def _dropOntologyCollections() -> None:
-    """删除全部已知本体 Milvus 集合（idempotent；集合不存在 no-op）。
-
-    Drops ontology_embeddings (old) AND the 3 new type-specific collections
-    (ontology_class_embeddings / ontology_property_embeddings /
-    ontology_metric_embeddings) added in M2.
-    """
-    from app.infrastructure.milvus_client import (
-        _connAlias,
-        _connect,
-        dropCollection,
-        ensureClassCollection,
-        ensureMetricCollection,
-        ensurePropertyCollection,
-    )
-    from pymilvus import Collection, utility
-
-    _connect()
-
-    # Old single collection
-    try:
-        dropCollection()  # drops _COLLECTION_NAME = "ontology_embeddings"
-    except Exception:
-        pass  # idempotent
-
-    # 3 new collections (added in M2): drop then recreate (empty) so
-    # reconcile() can query them even in a "clean" state.
-    for name in (
-        "ontology_class_embeddings",
-        "ontology_property_embeddings",
-        "ontology_metric_embeddings",
-    ):
-        try:
-            if utility.has_collection(name, using=_connAlias()):
-                Collection(name, using=_connAlias()).drop()
-        except Exception:
-            pass  # idempotent
-
-    # Recreate empty collections so reconcile() can query them.
-    ensureClassCollection()
-    ensurePropertyCollection()
-    ensureMetricCollection()
+# 隔离策略与闸门实现搬到 app/tests/milvus_isolation.py：那里能被单元测试直接
+# 调用。写在 conftest 里就只能靠「跑一次 integration」验证，而把闸门调用删掉
+# 同样会让 integration 全绿 —— 正是要堵的回归类（见该模块 docstring）。
+_dropOntologyCollections = dropOntologyCollectionsForTest
 
 
 @pytest.fixture

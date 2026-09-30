@@ -65,6 +65,64 @@ _BARE_NAME_RE = re.compile(
     r"(?P<name>[一-龥A-Za-z0-9·\-]{4,29}(?:有限公司|有限责任公司))"
 )
 
+# 公司后缀（**长在前**：否则「XX有限责任公司」会被当成「XX责任」+「有限公司」）。
+_COMPANY_SUFFIXES: tuple[str, ...] = ("有限责任公司", "有限公司")
+
+# 后缀前的最少字符数（与 _BARE_NAME_RE 的 {4,29} 下界一致；数据驱动：
+# 真实供应商名最短前缀 4 字符，如「华建重工有限公司」）。
+_MIN_BARE_PREFIX = 4
+
+
+def _companySuffixLength(name: str) -> int | None:
+    """name 结尾的公司后缀长度；不是公司名返回 None。"""
+    for suffix in _COMPANY_SUFFIXES:
+        if name.endswith(suffix):
+            return len(suffix)
+    return None
+
+
+def _bareNameCandidates(name: str) -> tuple[str, ...]:
+    """裸名提取结果的**候选窗口**（长 → 短），供 entity_mapping 词典裁决左边界。
+
+    **为什么需要**：`_BARE_NAME_RE` 的右边界（公司后缀）可靠，左边界不可靠 ——
+    中文没有词间空格，贪婪字符类会把紧邻的动词一起吞进去：
+    「查询浙江力航汽车部件有限公司的采购订单」提取出的是
+    「查询浙江力航汽车部件有限公司」。维护动词黑名单永远不全（「查询/我要看/用/对比…」），
+    而右边界固定的窗口只有 ~26 个，交给词典（3500 个真实供应商名）裁决既准确又无需枚举。
+
+    返回空 tuple = 该名字不可能由裸名路径合理产出（无公司后缀 / 前缀太短）。
+    """
+    suffixLen = _companySuffixLength(name)
+    if suffixLen is None:
+        return ()
+    maxPrefix = len(name) - suffixLen
+    if maxPrefix < _MIN_BARE_PREFIX:
+        return ()
+    return tuple(name[i:] for i in range(0, maxPrefix - _MIN_BARE_PREFIX + 1))
+
+
+async def _longestExactMatch(
+    session: AsyncSession, candidates: tuple[str, ...]
+) -> tuple[str, str] | None:
+    """候选窗口里**最长**的词典精确命中 → (enterprise_code, name)；无命中返回 None。
+
+    取最长而非「唯一命中」：窗口是同一右边界向左扩展的嵌套串，
+    「浙江力航汽车部件有限公司」与「力航汽车部件有限公司」可能都是真实供应商，
+    此时覆盖更多原文的那个才是用户所指。
+    """
+    rows = (
+        await session.execute(
+            select(EntityMapping.enterprise_code, EntityMapping.name).where(
+                EntityMapping.entity_type == "SUPPLIER",
+                EntityMapping.name.in_(candidates),
+            )
+        )
+    ).all()
+    if not rows:
+        return None
+    code, name = max(rows, key=lambda row: len(row[1] or ""))
+    return str(code), str(name)
+
 
 def _stripSupplierKeyword(name: str) -> str:
     """剥离裸名提取结果中前导的「供应商/supplier」关键字（无分隔符前缀写法）。"""
@@ -109,6 +167,7 @@ class SupplierNameResolver:
             return ResolvedKey(key=numeric, resolved_by="code_regex", original_name=None)
 
         # Pass 1：中文名提取；无关键词 → 让下游 pipeline 自行处理
+        bareCandidates: tuple[str, ...] = ()
         match = _NAME_EXTRACT_RE.search(message)
         if match is not None:
             name = match.group("name").strip()
@@ -120,6 +179,10 @@ class SupplierNameResolver:
             name = _stripSupplierKeyword(bare.group("name"))
             if len(name) < len("XX有限公司"):
                 return None
+            # 裸名左边界不可靠（贪婪字符类会吞掉紧邻动词），备好候选窗口
+            # 供 Pass 2b 交给词典裁决。前缀本就恰 4 字符时候选只有 1 个，
+            # 与 Pass 2 等价 → 不做额外查询。
+            bareCandidates = _bareNameCandidates(name)
 
         # Pass 2：精确匹配（理论上 (entity_type, name) 唯一；多条属脏数据，按歧义处理）
         exact_rows = (
@@ -147,6 +210,16 @@ class SupplierNameResolver:
                 ),
                 details={"candidates": _rows_to_pairs(exact_rows)},
             )
+
+        # Pass 2b：裸名左边界校正（仅裸名路径，且候选窗口多于一个时才可能需要）。
+        # Pass 2 落空有两种成因：名字确实不在主数据，或左边界被粘连的动词污染。
+        # 词典能区分二者 —— 命中即证明是后者，且最长的命中就是真实左边界。
+        if len(bareCandidates) > 1:
+            hit = await _longestExactMatch(session, bareCandidates)
+            if hit is not None:
+                return ResolvedKey(
+                    key=hit[0], resolved_by="name_exact", original_name=hit[1]
+                )
 
         # Pass 3：LIKE 模糊匹配（无 trigram index，3500 行顺序扫 O(ms)，暂不引 pg_trgm）
         like_rows = (

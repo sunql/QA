@@ -753,6 +753,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         classes, recallInfo = await self._selectRelevantClasses(
             session, dto.question, allClasses
         )
+        logger.info("召回 classes (%d/%d): %s", len(classes), len(allClasses), [c.class_name for c in classes])
         joins = await self._ontology.listJoins(session)
         ctx = await self._buildRoutingContext(session, dto.sessionId)
         configs = await self._listModelConfigs(session)

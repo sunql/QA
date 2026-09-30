@@ -136,6 +136,8 @@ option，但渲染器自己产出的 formatter 仍要正确）。`toNumber(value
 |---|---|
 | `ChatResponse` | `chartType: ChartType \| None` + `chartOption: dict \| None` |
 | `StepResultRead` / `EVENT_STEP_RESULT` | 每步各带 `chartType` + `chartOption`（多步每步出图，决策 3） |
+| **多步顶层** | `chartType`/`chartOption`/`data` = **最后一个成功数据步骤**那张（0105）。判据复用 `run.result.sql is not None`，与 `last_plan`/`last_sql`/`last_data` 同处；**全部步骤失败 → `None`，不是空图** |
+| **多步流式** | 回答 token 之后、`done` 之前发**一次** `EVENT_CHART`（`_reportChartEvent`），两条终点各一次。**有图才发**。不走 `done` 是因为前端 `StreamSummary` 不读 `steps`，而 `chart` 事件前端已完整支持 = 零前端改动 |
 | L1 KPI 直答 | 命中即返回 `chartType=kpi` + `{"kpi": {...}}`；值不能转成数字时不发卡（空壳卡比不发更糟） |
 | `chartOption` 语义 | 仍是 ECharts option，**但不含颜色**；`kpi` 类型不是 ECharts，负载为 `{"kpi": {...}}` |
 
@@ -144,12 +146,54 @@ option，但渲染器自己产出的 formatter 仍要正确）。`toNumber(value
 | 位置 | 契约 |
 |---|---|
 | `frontend/src/types/chat.ts` | `ChartType` 联合类型（11 类 + table） |
-| `frontend/src/api/chat.ts` | **`VALID_CHART_TYPES` 必须同步** —— 漏同步的表现是「图不见了但没有任何报错」（未知类型被静默置 null）。收窄对**流式与非流式同一道**（`normalizeChatResponse` / `normalizeStepResult`） |
+| `frontend/src/utils/chartContract.ts` | **图表字段的唯一收窄口径**（0105 抽出）。`VALID_CHART_TYPES` **必须与后端同步** —— 漏同步的表现是「图不见了但没有任何报错」（未知类型被静默置 null）。**为什么单独一个模块**：收窄规则描述的是**线上契约**不是 HTTP 传输，三个消费者分属三层（SSE/HTTP 响应、历史回放、导出挑图）；留在 `api/chat.ts` 会让 `stores/chatStore` 为一个谓词反向依赖 HTTP 客户端 |
+| `frontend/src/api/chat.ts` | 消费上面的收窄，**流式与非流式同一道**（`normalizeChatResponse` / `normalizeStepResult` / `chart` 事件） |
 | `frontend/src/components/chat/MessageItem.tsx` | 渲染门为 `Boolean(chartType)`（不是 `chartType && chartOption`：KPI 卡没有 ECharts option 语义） |
-| `frontend/src/components/chat/ChartRenderer.tsx` | `table` → antd Table；`kpi` → `KpiCard` + CSV 导出；其余 → `ReactECharts` + PNG 导出。**表格自取自足**：`data` 缺省时用 `chartOption.rows/columns` 渲染（多步每步不铺全量 data） |
+| `frontend/src/components/chat/ChartRenderer.tsx` | `table` → antd Table；`kpi` → `KpiCard` + CSV 导出；其余 → `ReactECharts` + PNG 导出。**表格自取自足**：`data` 缺省时用 `chartOption.rows/columns` 渲染（多步每步不铺全量 data）。**表格带 `truncated: true` 时在下方补一行次要色说明**（落库截行）—— PDF 标注了而前端不标，刷新后那张表看起来就是完整结果，连 CSV 导出的也是截断份 |
 | `frontend/src/components/chat/MultiStepPlanCard.tsx` | 每个 step 挂同一个 `ChartRenderer`（图跟着步骤走，不错位） |
 | `frontend/src/theme/chartTheme.ts` | `applyChartTheme(option, token)` —— 不可变注入调色板/轴色/文字色/tooltip 底色；调用方显式写的 `itemStyle.color`（语义色）优先不被覆盖 |
 | `frontend/src/theme/tokens.ts` | `chartPalette`（两套主题各一套分类系列色） |
+| `frontend/src/utils/chartSnapshot.ts` | `renderChartPng(option)` → `data:image/png;base64,...`。离屏容器**显式 800×420**（零尺寸容器里 ECharts 拿到 0×0 画布）、**固定亮色 token + 白底**（PDF 页面是白的）、关动画、`finally` 里 dispose + 移除容器、**任何异常返回 `null`**。`needsSnapshot(kind)` 对 `table`/`kpi` 返回 false |
+| `frontend/src/utils/collectExportCharts.ts` | 导出前挑图：GET 服务端消息流（**`?tail=true` 取最新**，与导出的「最近 500 轮」窗口对齐）→ 按 `SessionMessage` 主键挑需要截图的轮次 → 离屏渲成 PNG。**以服务端消息流为准而非屏幕列表**（实时会话的前端消息没有 DB id；必须覆盖滚出屏幕的轮次；服务端 `chartOption` 才是落库那份）。截断到 180 张时**保最新**；渲染**块内并发 4、块间串行**（`renderChartPng` 在 `await` 前是同步的，`Promise.all` 会一次性建出全部离屏画布 ≈ 1 GB 后备存储） |
+
+## 导出报告里的图（0105）
+
+**PDF 渲染三档降级**：`原生 table/kpi（从 chart_option 画，不吃图）> 回传的 PNG > 灰色占位框`。
+`table` 排最前是刻意的 —— 它是**文字**，比位图清晰，且**前端截图失败时表格照样出**；
+占位框留给改动前的历史消息（没有 `chart_option`）。
+
+**导出端点由 GET 改 POST**（契约变更，前后端必须同批）：
+
+```
+POST /api/v1/sessions/{sessionId}/export.pdf
+{ "messageId": 123, "charts": [{ "messageId": 123, "imagePng": "data:image/png;base64,..." }] }
+```
+
+`charts` 缺省为空 ⇒ 等价于旧行为。**图缺失不影响导出本身的成败**（导出是主功能，图是增强）。
+边界校验（超限一律 422）：单图解码后 ≤ 2 MB、条数 ≤ 200、总量 ≤ 20 MB、单图 ≤ 8 M px、
+全部 ≤ 40 M px（**逐张累加即判**，不是全解完再量体）、`charts[].messageId` 必须属于该 session。
+
+**这条前端调用必须自己带 `Authorization`**：它刻意绕开 `httpClient`（二进制响应走不了
+`ApiResponse` 信封解包），代价是**连请求拦截器的 Bearer 注入一起绕开**，而 `sessions` router
+是 **router 级**鉴权（`session.py` 的 `APIRouter(dependencies=[Depends(getCurrentUser)])`）
+⇒ 没 Bearer 一律 403「请先登录」。所以头由 SSOT `api/authHeaders.ts` 提供，
+**不要**再手搓 `X-User-Id` 之类 —— nginx 会把 `X-User-*` 整族剥掉（曾因此静默 403，
+且单测因 mock 里虚构了 `X-User-Id` 而看不见）。
+
+**两张闸必须都在，且不能只卡字节**：一张 12000×12000 的纯色 PNG 压缩后只有 580 KB ——
+字节闸放行、PNG 魔数也对，交给 Pillow 却要按 1.44 亿像素分配内存（实测单张峰值 RSS +2 GB）。
+而 PIL 默认 `MAX_IMAGE_PIXELS = 89_478_485` 只在 **2 倍以上**才抛异常，中间一段不设防。
+所以像素数在**任何解码之前**从 IHDR 头自己读（`_pngPixelCount`，纯 stdlib）；读不出 IHDR
+（截断/畸形）按「不是合法 PNG」拒掉，不交给 Pillow 赌它报不报错。
+
+**位图缩放要夹两个轴**：只夹宽度时，一张 100×4000 的窄高图宽度合规、高度溢出页面，
+reportlab 会在 `doc.build()` 里抛 `LayoutError` —— 那已经出了 `_chart_image_flowable` 的
+`try`，于是整份导出 500 而不是降级成占位框。取 `min(框宽/图宽, 框高/图高, 1.0)`。
+
+**为什么是「前端渲染 → 回传 PNG」而不是服务端渲染**：装无头浏览器会让后端镜像陡增；
+用 matplotlib 重画等于**第二套渲染器**（与前端的图必然长得不一样，违反 SSOT），
+且 `builder.build(payload)` 是**同步调用跑在 async handler 里**，服务端光栅化会阻塞事件循环。
+项目对同类问题的既有判断同向（见 `evaluation_report_export_service.py`）。
 
 ## 已知边界（一期）
 

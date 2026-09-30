@@ -93,7 +93,7 @@ describe("ChatPanel 相似问题建议", () => {
   });
 
   // 图表类型下拉是第三份手工维护的类型清单（另有 types/chat.ts 的联合类型与
-  // api/chat.ts 的 VALID_CHART_TYPES）。任何一份漏了新类型都会「选得到却发不出去」
+  // utils/chartContract.ts 的 VALID_CHART_TYPES）。任何一份漏了新类型都会「选得到却发不出去」
   // 或「发得出去却渲染不出来」，这里逐个钉住可选项与回传值。
   it.each([
     ["hbar", "横向柱状图"],

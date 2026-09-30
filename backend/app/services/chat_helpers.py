@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -24,7 +25,7 @@ from app.domain.models import DataSource, LlmConfig, SessionQueryState
 from app.domain.multi_step_plan import StepPlan, StepResult
 from app.domain.plan_drop import formatPlanDrops
 from app.domain.query_plan import QueryPlan
-from app.domain.schemas import ClassRecallInfo
+from app.domain.schemas import AffinityStatus, ChatResponse, ClassRecallInfo, HypothesisRead
 from app.infrastructure.business_db_pool import BusinessDbAdapter
 from app.infrastructure.llm.base_client import BaseLlmClient
 from app.services.audit_service import AuditService
@@ -107,6 +108,48 @@ def _statePlan(state: SessionQueryState) -> QueryPlan | None:
 def _snapshotRound(state: SessionQueryState) -> dict[str, Any]:
     """从当前 last_* 字段构造一个历史快照（question + sql），压入 recent_rounds 前。"""
     return {"q": state.last_question, "s": state.last_sql}
+
+
+def _multiStepResponse(
+    *,
+    answer: str,
+    completed: list[StepResult],
+    tokensUsed: int,
+    cost: Decimal,
+    t0: float,
+    chartType: str | None,
+    chartOption: dict | None,
+    data: list[dict] | None,
+    modelName: str | None = None,
+    affinityStatus: AffinityStatus | None = None,
+    classRecall: ClassRecallInfo | None = None,
+    hypotheses: list[HypothesisRead] | None = None,
+) -> ChatResponse:
+    """多步响应的**唯一**构造点（聚合成功与降级收尾共用）。
+
+    两处收尾此前各写一份 ``ChatResponse(...)``，字段大半重复。重复的代价不是行数，
+    是**漂移**：图表进最终报告这一版改了聚合收尾却漏改降级收尾，用户会看到
+    「正常收尾有图、降级收尾没图」，而两条路径都「能跑」。
+
+    ``chartType``/``chartOption``/``data`` 恒为**最后一个成功数据步骤**那张
+    （全失败时是 ``None``，不是空图）—— 调用方按 ``run.result.sql is not None``
+    同一判据累积后传入，这里不再自行判断。
+    """
+    return ChatResponse(
+        answer=answer,
+        intent="multi_step",
+        chartType=chartType,
+        chartOption=chartOption,
+        data=data,
+        steps=[_step_result_to_read(s) for s in completed],
+        tokensUsed=tokensUsed,
+        cost=float(cost),
+        latency_ms=int((time.monotonic() - t0) * 1000),
+        modelName=modelName,
+        affinityStatus=affinityStatus,
+        classRecall=classRecall,
+        hypotheses=hypotheses,
+    )
 
 
 def _step_result_to_read(result: StepResult) -> "StepResultRead":

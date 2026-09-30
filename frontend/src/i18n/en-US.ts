@@ -692,6 +692,7 @@ export const enUS = {
     png: "Export PNG",
     success: "Exported",
     failed: "Export failed: {message}",
+    truncated: "Showing the first {count} rows only (the full result is longer)",
   },
 
   chatPanel: {

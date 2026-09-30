@@ -268,6 +268,41 @@ describe("ChartRenderer", () => {
     expect(screen.queryByText("来自负载")).toBeNull();
   });
 
+  // ===== 截断披露（0105 落库截行）=====
+  // 后端只留前 N 行并打 `truncated: true`（`chat_chart_persist`）。不告知的话，
+  // 历史回放里这张表看起来就是完整结果，连「导出 CSV」导出的也是截断份 ——
+  // 后端 PDF 已经如实标注，前端这一侧不能假装是全部。
+
+  it("负载带 truncated 标记时，表格下方如实标注只显示了前几行", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{
+          columns: ["A"],
+          rows: [{ A: 1 }, { A: 2 }],
+          truncated: true,
+        }}
+      />
+    );
+
+    expect(screen.getByText(/表格仅显示前 2 行/)).toBeInTheDocument();
+  });
+
+  it("负载没有 truncated 标记时不出截断提示（反向守卫：不能无脑加）", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{ columns: ["A"], rows: [{ A: 1 }, { A: 2 }] }}
+      />
+    );
+
+    // 先证明表体真的渲染了行 —— 否则「没有提示」可能只是整块没渲染
+    // （getByText("1") 会同时命中分页器的页码，所以读表体容器）
+    expect(document.querySelector(".ant-table-tbody")?.textContent).toContain("1");
+    expect(screen.queryByText(/表格仅显示前/)).toBeNull();
+    expect(screen.queryByText(/原始结果更长/)).toBeNull();
+  });
+
   // ===== KPI 的导出按钮（KPI 不是 ECharts，没有 PNG 可导）=====
 
   it("KPI 卡出「导出 CSV」按钮，不出 PNG 按钮", () => {

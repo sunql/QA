@@ -412,6 +412,10 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                         session, dto.sessionId, dto.question, l1_response.answer, None,
                         routing_layer="L1", latency_ms=int((time.monotonic() - _t0) * 1000),
                         token_cost_usd=0.0,
+                        # 0105：KPI 指标块也要能进导出 PDF —— 它是本轮回答的一部分，
+                        # 只活在实时响应里的话，导出时同样退化成占位框。
+                        chart_type=l1_response.chartType,
+                        chart_option=l1_response.chartOption,
                     )
                     return l1_response
         except Exception:  # noqa: BLE001 — L1 异常不阻断，降级到原 LLM 流水线
@@ -657,6 +661,9 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             routing_layer="L2",
             latency_ms=_elapsed_ms,
             token_cost_usd=float(totalCost),
+            # 0105：单步查询的图进「最终报告」（导出 PDF / 历史回放）。
+            chart_type=chartType,
+            chart_option=option,
         )
         # B5：计算本轮继承字段快照（读 semanticState + 上一轮 plan/snapshot）
         prior_snapshot: dict[str, Any] | None = None

@@ -1,5 +1,5 @@
 import ReactECharts from "echarts-for-react";
-import { Button, Space, Table, message } from "antd";
+import { Button, Space, Table, Typography, message } from "antd";
 import { DownloadOutlined } from "@ant-design/icons";
 import { useMemo, useRef } from "react";
 import { useTranslation } from "../../i18n";
@@ -56,6 +56,10 @@ export default function ChartRenderer({ chartType, chartOption, data }: ChartRen
     () => rows.map((row, index) => ({ ...row, __rowKey: `row-${index}` })),
     [rows]
   );
+  // 落库时行数被截过（`chat_chart_persist`）：只有**存回来的**负载才带这个标记。
+  // 实时那一轮拿到的是全量 option（截断发生在写库前，作用在副本上），所以线上
+  // 不会误报；历史回放读到 `truncated: true` 时才提示，与后端 PDF 口径一致。
+  const isTruncatedTable = chartOption?.truncated === true;
   // 决策 6：服务端只发结构，颜色在这一层补（只补色、不改结构；option 来自 store，
   // 必须走不可变路径，否则同一份消息的其它引用会串台）
   const themedOption = useMemo(
@@ -130,13 +134,23 @@ export default function ChartRenderer({ chartType, chartOption, data }: ChartRen
         </div>
       )}
       {isTable ? (
-        <Table
-          rowKey="__rowKey"
-          size="small"
-          dataSource={tableRows}
-          columns={columns}
-          pagination={{ pageSize: 10 }}
-        />
+        <>
+          <Table
+            rowKey="__rowKey"
+            size="small"
+            dataSource={tableRows}
+            columns={columns}
+            pagination={{ pageSize: 10 }}
+          />
+          {/* 落库时行数被截（chat_chart_persist）：不告知的话，历史回放里这看起来
+              就是一份完整的表，连 CSV 也一并导出截断份。后端导出 PDF 已经如实标注，
+              前端这一侧同样不能假装是全部。 */}
+          {isTruncatedTable && (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {t("chartExport.truncated", { count: tableRows.length })}
+            </Typography.Text>
+          )}
+        </>
       ) : isKpi && kpiPayload ? (
         <KpiCard kpi={kpiPayload} />
       ) : (

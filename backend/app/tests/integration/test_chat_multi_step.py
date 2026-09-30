@@ -23,6 +23,7 @@ from sqlalchemy import select
 from app.domain.models import LlmConfig, SessionMessage, SessionQueryState, SessionTokenUsage
 from app.services.messages_zh import MSG_MULTI_STEP_DEGRADE_FAILED, MSG_PLAN_TOO_MANY_STEPS
 from app.services.stream_events import (
+    EVENT_CHART,
     EVENT_CLASS_RECALL,
     EVENT_DONE,
     EVENT_ERROR,
@@ -846,6 +847,97 @@ class TestMultiStepStepCharts:
         # done 帧的 steps 数组同样带图（前端刷新/回放时用）
         donePayload = _parseFrames(resp)[-1][1]
         assert donePayload["steps"][0]["chartType"] == "bar"
+
+    # ------------------------------------------------------------------
+    # 最终报告也要有图（用户反馈）：图此前只活在计划卡的每个步骤里，
+    # 最后那条汇总回答是纯文字 —— 而用户看的是回答，不是折叠着的计划。
+    # 取「最后一个成功数据步骤」的图：它是整条链的终点，服务端本来就把它当作
+    # 追问锚点（last_plan/last_sql/last_data），复用同一份，不另算一张。
+    # ------------------------------------------------------------------
+
+    async def test_final_answer_carries_last_step_chart(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        body = resp.json()
+        steps = body["steps"]
+        assert len(steps) == 2
+        # 顶层图就是最后一步那张（同一份，不是各算一份 —— 否则两处会漂移）
+        assert body["chartType"] == steps[-1]["chartType"] == "bar"
+        assert body["chartOption"] == steps[-1]["chartOption"]
+        # 报告图要带数据：TABLE 类 kind 的前端渲染与 CSV 导出都读它
+        assert len(body["data"]) == len(ROWS)
+
+    async def test_final_answer_chart_skips_failed_last_step(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """最后一步失败 → 顶层图退到最后一个**成功**步骤，而不是消失或指向失败步。"""
+        config, ds = await _seed(dbSession)
+        _install(monkeypatch, config, _MultiStepLlm(), _DataQueryFailAdapter(fail_from_query=2))
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        body = resp.json()
+        assert body["steps"][1]["sql"] is None  # 失败标记
+        assert body["chartType"] == "bar"
+        assert body["chartOption"] == body["steps"][0]["chartOption"]
+
+    async def test_final_answer_has_no_chart_when_all_steps_fail(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """全部数据步骤失败 → 顶层不出图。空图比没图更糟（前端渲染门会画出空白）。"""
+        config, ds = await _seed(dbSession)
+        _install(monkeypatch, config, _MultiStepLlm(), _DataQueryFailAdapter(fail_from_query=1))
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        body = resp.json()
+        assert all(step["sql"] is None for step in body["steps"])
+        assert body["chartType"] is None
+        assert body["chartOption"] is None
+
+    async def test_stream_emits_one_chart_event_before_done(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """流式：最终回答的图走**一次** chart 事件，排在 done 之前。
+
+        每步的图仍走各自的 step_result —— 这条守卫的就是「别每步都补发一次」。
+        """
+        config, ds = await _seed(dbSession)
+        _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+        resp = await client.post(
+            "/api/v1/chat/stream",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        frames = _parseFrames(resp)
+        chartFrames = [i for i, (event, _) in enumerate(frames) if event == EVENT_CHART]
+        assert len(chartFrames) == 1
+        assert frames[-1][0] == EVENT_DONE
+        assert chartFrames[0] < len(frames) - 1
+
+        chart = frames[chartFrames[0]][1]
+        assert chart["chartType"] == "bar"
+        assert chart["chartOption"]["series"][0]["type"] == "bar"
+        assert len(chart["data"]) == len(ROWS)
 
 
 class TestNoAggregationStepDegrade:

@@ -507,6 +507,47 @@ describe("chatStore", () => {
     expect(messages[2].interrupted).toBe(false);
   });
 
+  it("loadSessionMessages 恢复图表字段（0105：历史回放也能出图）", async () => {
+    const option = { columns: ["地区"], rows: [{ 地区: "华北" }] };
+    const historyMessages: ChatMessageRead[] = [
+      { id: 1, role: "user", content: "历史 Q1", question: "历史 Q1", sql: null, createdTime: "2026-01-01T00:00:00Z", interrupted: false },
+      { id: 2, role: "assistant", content: "历史 A1", question: null, sql: "SELECT 1", createdTime: "2026-01-01T00:01:00Z", interrupted: false, chartType: "table", chartOption: option },
+    ];
+    historyApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-history", messages: historyMessages });
+
+    await useChatStore.getState().loadSessionMessages("s-history");
+
+    const assistant = useChatStore.getState().messages[1];
+    expect(assistant.chartType).toBe("table");
+    expect(assistant.chartOption).toEqual(option);
+  });
+
+  it("loadSessionMessages 把白名单不认识的 chartType 收窄为 null", async () => {
+    // 落库的 kind 可能来自更早版本的后端；未知类型不能流进渲染层
+    const historyMessages: ChatMessageRead[] = [
+      { id: 1, role: "assistant", content: "A", question: null, sql: null, createdTime: "2026-01-01T00:01:00Z", interrupted: false, chartType: "sankey-3d", chartOption: {} },
+    ];
+    historyApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-history", messages: historyMessages });
+
+    await useChatStore.getState().loadSessionMessages("s-history");
+
+    const assistant = useChatStore.getState().messages[0];
+    expect(assistant.chartType).toBeNull();
+  });
+
+  it("loadSessionMessages 对存量行（无图表字段）给 null 而不是 undefined", async () => {
+    const historyMessages: ChatMessageRead[] = [
+      { id: 1, role: "assistant", content: "A", question: null, sql: null, createdTime: "2026-01-01T00:01:00Z", interrupted: false },
+    ];
+    historyApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-history", messages: historyMessages });
+
+    await useChatStore.getState().loadSessionMessages("s-history");
+
+    const assistant = useChatStore.getState().messages[0];
+    expect(assistant.chartType).toBeNull();
+    expect(assistant.chartOption).toBeNull();
+  });
+
   it("loadSessionMessages 不影响 datasourceId/selectedModelId", async () => {
     useChatStore.setState({ datasourceId: 1, selectedModelId: 2 });
     historyApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-history", messages: [] });

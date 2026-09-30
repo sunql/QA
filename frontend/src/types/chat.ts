@@ -19,7 +19,7 @@ export type IntentType =
   | "agent_run";
 
 // 图表类型：由后端决策引擎产出（规则优先，LLM 只在规则歧义时给语义标签）。
-// ⚠️ 新增值必须同步 `src/api/chat.ts` 的 VALID_CHART_TYPES，否则运行时校验会把
+// ⚠️ 新增值必须同步 `src/utils/chartContract.ts` 的 VALID_CHART_TYPES，否则运行时校验会把
 // 它降级为 null（静默不渲染）。
 // - `kpi` 不是 ECharts 图表：chartOption 是 `{kpi: {label, value, unit, delta}}`，
 //   由 KpiCard 渲染（不是 ReactECharts）。

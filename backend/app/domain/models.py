@@ -785,6 +785,15 @@ class SessionMessage(Base, TimestampMixin):
     interrupted: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=sa.text("false")
     )
+    # chart_type / chart_option（0105，图表进最终报告）：该轮回答的图表负载。
+    # 服务端只发结构不含颜色（决策 6），颜色由前端主题层补 —— 故存的就是线上
+    # `chartOption` 契约同一份结构（TABLE 为 {columns, rows}、KPI 为 {kpi: {...}}）。
+    # 历史回放与 PDF 导出都从这两列取值：图不能只活在实时响应里。
+    chart_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    chart_option: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
+    )
 
     __table_args__ = (
         Index("idx_session_msg_time", "session_id", "created_time"),

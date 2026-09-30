@@ -92,6 +92,24 @@ BI 智能问答系统——支持 **13 类意图分发**、**多步拆解**、**
 - **降级不产空图**：规格校验失败、渲染异常、空数据一律降级 TABLE + warning
 - **多步每步出图**（决策 3）：`StepResultRead` 与 `EVENT_STEP_RESULT` 各带
   `chartType`/`chartOption`；分类器每轮最多调 1 次（跨步预算）
+- **最终回答也出图**（0105，用户反馈「图表应该在最终报告里，不是只在分析计划里」）：
+  多步顶层 `chartType`/`chartOption`/`data` = **最后一个成功数据步骤**那张，
+  流式在回答 token 之后、`done` 之前发**一次** `EVENT_CHART`；全步骤失败 → `None` 不发。
+  计划卡里的每步图保留
+- **导出 PDF 是真图**（0105）：前端用 ECharts 把图导成 PNG 随导出请求回传，后端
+  三档降级排版（原生 table/kpi > PNG > 占位框）；`session_message` 落 `chart_type`/
+  `chart_option` 两列，故**历史回放也能看到图**。导出端点为此由 GET 改 **POST**
+- **导出取图的窗口必须对齐**：导出本身只覆盖**最近 500 轮**，而 `/messages` 默认按
+  `id.asc()` 返回**最早**那批 —— 长会话下两个窗口不相交，`attachChartImages` 一张也匹配
+  不上，导出的 PDF **全是占位框且不报任何错**。故 `/messages` 增 `tail=true`
+  （先倒序取最新 N 条再翻回正序，响应契约恒为正序）；`before_id` 与 `tail` 同给时
+  **`before_id` 优先**
+- **落库截行要双向披露**：表格 `rows` 是全量（`QUERY_ROW_LIMIT` 默认 0 = 不限行），
+  落库截到 200 行并打 `truncated: true`。**PDF 与前端回放都必须如实标注** —— 只有一侧
+  标注时，另一侧的读者会以为那是完整结果
+- **导出请求必须自带 Bearer**：该调用刻意绕开 `httpClient`（二进制响应），于是也绕开了
+  请求拦截器的 Bearer 注入，而 `sessions` router 是 router 级鉴权 ⇒ 少了它一律 403。
+  头走 SSOT `api/authHeaders.ts`；nginx 会剥掉 `X-User-*`，别再手搓那族头
 - **L1 KPI 直答补指标卡**（决策 7）：`chartType=kpi` + `{"kpi": {label, value, unit, delta}}`；
   值不能转成数字时不发卡
 - **阈值治理**：`CHART_PIE_MAX_ROWS` / `CHART_HBAR_MIN_ROWS` / `CHART_HEATMAP_MIN_COVERAGE`

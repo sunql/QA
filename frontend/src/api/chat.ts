@@ -3,29 +3,9 @@ import { API_BASE_URL } from "../config";
 import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery } from "../types/chat";
 import { i18n } from "../i18n";
 import { authHeaders } from "./authHeaders";
+import { asChartOption, normalizeChartType } from "../utils/chartContract";
 
 const BASE = "/chat";
-
-// 与后端 ChartType 枚举对齐，供运行时校验（避免不安全 cast 把非法值透传给渲染层）。
-// ⚠️ 后端新增图表类型时**必须同步这里**：漏同步的表现是「图不见了但没有任何报错」
-// ——chartType 被静默降级为 null，渲染门直接不放行。
-const VALID_CHART_TYPES = new Set<string>([
-  "table",
-  "bar",
-  "hbar",
-  "pie",
-  "donut",
-  "line",
-  "scatter",
-  "heatmap",
-  "kpi",
-  "combo",
-  "waterfall",
-]);
-
-function isChartType(value: unknown): value is ChartType {
-  return typeof value === "string" && VALID_CHART_TYPES.has(value);
-}
 
 // ReAct 查询计划运行时校验（M2）：API 为系统边界，形状不符时不渲染 QueryPlanCard
 function isQueryPlan(value: unknown): value is QueryPlan {
@@ -94,18 +74,6 @@ function isStepPlanOverviewItem(value: unknown): value is StepPlanOverviewItem {
 
 export function isStepResult(value: unknown): value is StepResultView {
   return isStepPlan(value);
-}
-
-/** 收窄成 ECharts option 形态；非对象（字符串/数组/null）一律置 null。 */
-function asChartOption(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-/** 图表两字段的唯一收窄口径（SSE 帧与非流式响应共用，避免两条路径判据漂移）。 */
-function normalizeChartType(value: unknown): ChartType | null {
-  return isChartType(value) ? value : null;
 }
 
 /**

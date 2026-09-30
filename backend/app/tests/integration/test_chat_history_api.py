@@ -28,6 +28,8 @@ async def _seedMessage(
     role: str,
     content: str,
     sql: str | None = None,
+    chartType: str | None = None,
+    chartOption: dict | None = None,
     createdAt: datetime | None = None,
 ) -> SessionMessage:
     """插入一行会话消息（created_time 可指定，便于排序断言）。"""
@@ -36,6 +38,8 @@ async def _seedMessage(
         role=role,
         content=content,
         sql_generated=sql,
+        chart_type=chartType,
+        chart_option=chartOption,
         created_time=createdAt or datetime.now(UTC),
         updated_time=createdAt or datetime.now(UTC),
     )
@@ -230,6 +234,60 @@ class TestChatHistoryMessages:
         result = resp.json()["messages"]
         assert [m["content"] for m in result] == ["m0", "m1"]
 
+    async def test_messages_tail_returns_the_newest_batch(
+        self, client, dbSession
+    ) -> None:
+        """``tail=true`` 取**最新** limit 条，且仍按时间正序返回。
+
+        这是导出配图的前提：导出 PDF 只保留最后 500 轮，前端若拿最早的 1000 条，
+        长会话里与那个窗口完全不相交 —— 每张图都配不上，且不报任何错。
+        """
+        base = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        for i in range(6):
+            await _seedMessage(
+                dbSession, sessionId="s1", role="user", content=f"m{i}",
+                createdAt=base + timedelta(seconds=i),
+            )
+
+        resp = await client.get("/api/v1/sessions/s1/messages?limit=2&tail=true")
+
+        assert resp.status_code == 200
+        # 正序返回，但内容是最新的两条（不是 m0/m1）
+        assert [m["content"] for m in resp.json()["messages"]] == ["m4", "m5"]
+
+    async def test_messages_tail_within_limit_still_returns_everything(
+        self, client, dbSession
+    ) -> None:
+        """反向守卫：条数不足 limit 时 tail 不能少还、不能反序。"""
+        base = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        for i in range(3):
+            await _seedMessage(
+                dbSession, sessionId="s1", role="user", content=f"m{i}",
+                createdAt=base + timedelta(seconds=i),
+            )
+
+        resp = await client.get("/api/v1/sessions/s1/messages?limit=10&tail=true")
+
+        assert [m["content"] for m in resp.json()["messages"]] == ["m0", "m1", "m2"]
+
+    async def test_messages_before_id_wins_over_tail(self, client, dbSession) -> None:
+        """两者同给时 before_id 更具体 —— 文档承诺的优先级要被测到。"""
+        base = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        msgs = []
+        for i in range(4):
+            msgs.append(
+                await _seedMessage(
+                    dbSession, sessionId="s1", role="user", content=f"m{i}",
+                    createdAt=base + timedelta(seconds=i),
+                )
+            )
+
+        resp = await client.get(
+            f"/api/v1/sessions/s1/messages?limit=2&tail=true&before_id={msgs[2].id}"
+        )
+
+        assert [m["content"] for m in resp.json()["messages"]] == ["m0", "m1"]
+
     async def test_messages_session_with_no_messages_returns_empty(
         self, client, dbSession
     ) -> None:
@@ -239,6 +297,54 @@ class TestChatHistoryMessages:
         body = resp.json()
         assert body["sessionId"] == "nonexistent"
         assert body["messages"] == []
+
+    async def test_messages_carries_chart_payload_for_replay(
+        self, client, dbSession
+    ) -> None:
+        """0105：历史回放要能重新画出图 —— 图不能只活在实时响应里。
+
+        此前 chart/chartOption 未持久化，切走再切回整段图消失。
+        """
+        # Arrange
+        base = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        option = {"columns": ["地区"], "rows": [{"地区": "华北"}]}
+        await _seedMessage(
+            dbSession, sessionId="s-chart", role="user", content="Q", createdAt=base
+        )
+        await _seedMessage(
+            dbSession, sessionId="s-chart", role="assistant", content="A",
+            chartType="table", chartOption=option, createdAt=base + timedelta(seconds=1),
+        )
+
+        # Act
+        resp = await client.get("/api/v1/sessions/s-chart/messages")
+
+        # Assert
+        msgs = resp.json()["messages"]
+        assert msgs[1]["chartType"] == "table"
+        assert msgs[1]["chartOption"] == option
+        # user 行无图：两个字段都存在且为 None（契约字段恒定在场，前端不必判 undefined）
+        assert msgs[0]["chartType"] is None
+        assert msgs[0]["chartOption"] is None
+
+    async def test_messages_chart_fields_are_none_for_legacy_rows(
+        self, client, dbSession
+    ) -> None:
+        """0105 之前的存量行两列为 NULL ⇒ 返 None，前端按「无图」渲染（不是空图）。"""
+        await _seedMessage(
+            dbSession, sessionId="s-legacy", role="user", content="Q",
+            createdAt=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+        )
+        await _seedMessage(
+            dbSession, sessionId="s-legacy", role="assistant", content="A", sql="SELECT 1",
+            createdAt=datetime(2026, 5, 1, 9, 0, 1, tzinfo=UTC),
+        )
+
+        resp = await client.get("/api/v1/sessions/s-legacy/messages")
+
+        asst = resp.json()["messages"][1]
+        assert asst["chartType"] is None
+        assert asst["chartOption"] is None
 
 
 # ============ DELETE /{sessionId} ============

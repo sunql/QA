@@ -681,6 +681,10 @@ class StreamMixin:
             routing_layer="L2",
             latency_ms=int((time.monotonic() - _stream_t0) * 1000),
             token_cost_usd=float(totalCost),
+            # 0105：单步流的图进「最终报告」（导出 PDF / 历史回放）。与流式下发的
+            # 那份是同一份 —— 图不能只活在实时响应里。
+            chart_type=chartType,
+            chart_option=option,
         )
         await self._saveQueryState(
             session, dto.sessionId,
@@ -825,6 +829,10 @@ class StreamMixin:
         last_plan: QueryPlan | None = None
         last_sql: str | None = None
         last_data: list[dict] = []
+        # 最终报告的图（用户反馈）：与非流式 _executeMultiStep 同口径 —— 取最后一个
+        # 成功数据步骤那张，回答本身不再是纯文字。
+        last_chart_type: str | None = None
+        last_chart_option: dict | None = None
 
         # 循环前一次性下发完整计划概览，前端据此渲染各步骤的「待执行」状态
         yield StreamEvent(EVENT_MULTI_STEP_PLAN, {
@@ -894,6 +902,10 @@ class StreamMixin:
                     routing_layer="L2",
                     latency_ms=int((time.monotonic() - _ms_t0) * 1000),
                     token_cost_usd=float(total_cost),
+                    # 0105：多步最终报告的图 = 最后一个成功数据步骤那张，与上面
+                    # `_reportChartEvent` 下发的同一份（同判据、同一变量）。
+                    chart_type=last_chart_type,
+                    chart_option=last_chart_option,
                 )
                 await self._saveQueryState(
                     session, dto.sessionId,
@@ -911,6 +923,14 @@ class StreamMixin:
                     else None
                 )
                 yield StreamEvent(EVENT_TOKEN, {"content": agg_content})
+                # 最终报告的图：走独立的 chart 事件（与单步路径同构），而不是塞进 done
+                # —— done 帧虽已带 steps，但前端 StreamSummary/done 分支都不读它，
+                # 而 chart 事件前端已完整支持，等于零前端改动。
+                reportChart = self._reportChartEvent(
+                    last_chart_type, last_chart_option, last_data,
+                )
+                if reportChart is not None:
+                    yield reportChart
                 # v3.1 B6（M7）：流式多步假设后处理——只落库，不进 SSE 帧
                 await self._maybeGenerateHypotheses(
                     session, dto.sessionId, dto.question, pc, data=last_data,
@@ -948,6 +968,8 @@ class StreamMixin:
                 last_plan = run.plan
                 last_sql = run.result.sql
                 last_data = run.result.data
+                last_chart_type = run.result.chart_type
+                last_chart_option = run.result.chart_option
             yield self._stepResultEvent(run.result)
 
         # 异常降级：所有步骤都不是 aggregation_only（与非流式共用收尾逻辑）
@@ -956,8 +978,16 @@ class StreamMixin:
             last_plan=last_plan, last_sql=last_sql, last_data=last_data,
             total_cost=total_cost, _t0=_ms_t0,
             inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
+            last_chart_type=last_chart_type,      # 0105：降级收尾同样带图
+            last_chart_option=last_chart_option,
         )
         yield StreamEvent(EVENT_TOKEN, {"content": degrade_answer})
+        # 降级收尾同样把最后一张图提上来（有成功步骤时才有）
+        reportChart = self._reportChartEvent(
+            last_chart_type, last_chart_option, last_data,
+        )
+        if reportChart is not None:
+            yield reportChart
         # v3.1 B6（M7）：降级收尾同样接假设后处理（last_data 为空时静默跳过）
         await self._maybeGenerateHypotheses(
             session, dto.sessionId, dto.question, pc, data=last_data,
@@ -973,6 +1003,24 @@ class StreamMixin:
                 if suggestion is not None else None,
             },
         )
+
+    @staticmethod
+    def _reportChartEvent(
+        chartType: str | None, chartOption: dict | None, data: list[dict],
+    ) -> StreamEvent | None:
+        """多步最终回答的图 → chart 事件；没有图时返回 None（调用方不发）。
+
+        负载形状与单步路径逐字一致（`chartType` + `chartOption` + `data`），前端
+        `onChart` 直接复用。**有图才发** —— 空负载的 chart 事件只会让前端多做一次
+        无谓的消息改写，而且「全步骤失败」时本就没有任何一张图可提。
+        """
+        if not chartType:
+            return None
+        return StreamEvent(EVENT_CHART, {
+            "chartType": chartType,
+            "chartOption": chartOption,
+            "data": data or None,
+        })
 
     @staticmethod
     def _stepResultEvent(result: StepResult) -> StreamEvent:

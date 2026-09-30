@@ -21,6 +21,7 @@ from app.domain.models import SessionMessage, SessionQueryState
 from app.domain.query_plan import QueryPlan, planToText
 from app.domain.schemas import HistoryMessage
 from app.services.evidence_record_service import currentChatUserId
+from app.services.chat_chart_persist import boundedChartOption, chartTypeName
 from app.services.chat_helpers import (
     _clipText,
     _fitPartsToBudget,
@@ -428,6 +429,8 @@ class ContextMixin:
         latency_ms: int | None = None,
         token_cost_usd: float | None = None,
         interrupted: bool = False,
+        chart_type: str | None = None,
+        chart_option: dict | None = None,
     ) -> None:
         """持久化一轮对话：user + assistant 双写（仅创建新记录，不可变）。
 
@@ -436,6 +439,12 @@ class ContextMixin:
 
         interrupted（H4）：该 assistant 行是否由断连兜底写入（内容可能是半截回答）。
         默认 False ⇒ 既有调用点（27 处）语义不变。
+
+        chart_type / chart_option（0105，图表进最终报告）：该轮回答的图表负载，供
+        历史回放与 PDF 导出离线取用 —— 图不能只活在实时响应里。默认 None ⇒ 无图的
+        调用点（闲聊/域命令/不可回答等 20 余处）语义不变。**落库前过一道 TABLE 截行**
+        （见 `chat_chart_persist.boundedChartOption`），且此处是唯一入口，所以没有
+        旁路能绕过这道闸。
 
         设计说明：Token 计量在每次 LLM 调用后立即提交（见 _recordUsage），故此处也在独立事务提交。
         属"最终一致"设计——即使后续环节失败，已消耗的 Token 与成本仍会被记录，不随本轮回滚。
@@ -465,6 +474,8 @@ class ContextMixin:
             latency_ms=latency_ms,
             token_cost_usd=token_cost_usd,
             interrupted=interrupted,
+            chart_type=chartTypeName(chart_type),
+            chart_option=boundedChartOption(chart_option),
             user_id=chatUserId,
         )
         session.add_all([userMsg, assistantMsg])

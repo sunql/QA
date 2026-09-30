@@ -101,6 +101,8 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_HISTORY_LAST_ANSWER_PREVIEW,
     MSG_SCHEMA_CHAT_HISTORY_LAST_QUESTION,
     MSG_SCHEMA_CHAT_HISTORY_LAST_TIME,
+    MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CHART_OPTION,
+    MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CHART_TYPE,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CONTENT,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_COUNT,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CREATED_TIME,
@@ -111,6 +113,10 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_SQL,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGES,
     MSG_SCHEMA_CHAT_HISTORY_SESSION_ID,
+    MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG,
+    MSG_SCHEMA_CHAT_EXPORT_CHART_MESSAGE_ID,
+    MSG_SCHEMA_CHAT_EXPORT_CHARTS,
+    MSG_SCHEMA_CHAT_EXPORT_MESSAGE_ID,
     MSG_SCHEMA_CHAT_LOCKED_MODEL,
     MSG_SCHEMA_CHAT_METRIC,
     MSG_SCHEMA_CHAT_MODEL_ID,
@@ -1957,6 +1963,15 @@ class ChatMessageRead(CamelModel):
     interrupted: bool = Field(
         default=False, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_INTERRUPTED
     )
+    # 0105（图表进最终报告）：历史回放也要能显示图 —— 图此前只活在实时响应里，
+    # 刷新后整体消失。前端 `chatStore.toChatMessage` 把这两个字段映射进 `ChatMessage`，
+    # 并过一遍 `normalizeChartType` 白名单（未知类型静默置 null 是既有契约）。
+    chart_type: str | None = Field(
+        default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CHART_TYPE
+    )
+    chart_option: dict | None = Field(
+        default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CHART_OPTION
+    )
 
 
 class SessionMessagesResponse(CamelModel):
@@ -1965,6 +1980,32 @@ class SessionMessagesResponse(CamelModel):
     session_id: str = Field(..., description=MSG_SCHEMA_CHAT_HISTORY_SESSION_ID)
     messages: list[ChatMessageRead] = Field(
         default_factory=list, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGES
+    )
+
+
+class ChatExportChartImage(CamelModel):
+    """导出时前端回传的一张图表位图（0105，图表进最终报告）。
+
+    ECharts 只能在浏览器里渲染，服务端重画会是第二套渲染器（与前端必然长得不一样）。
+    所以由前端用已经渲染好的同一份 option 离屏导出 PNG 回传 —— 像素级一致、零新依赖。
+    """
+
+    message_id: int = Field(..., ge=1, description=MSG_SCHEMA_CHAT_EXPORT_CHART_MESSAGE_ID)
+    image_png: str = Field(..., description=MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG)
+
+
+class ChatExportRequest(CamelModel):
+    """导出 PDF 的请求体（0105：导出端点由 GET 改为 POST）。
+
+    ``charts`` 缺省为空列表 ⇒ 等价于旧行为（PDF 里图表回落占位框）—— 图缺失
+    **不影响导出本身的成败**：导出是主功能，图是增强。
+    """
+
+    message_id: int | None = Field(
+        default=None, ge=1, description=MSG_SCHEMA_CHAT_EXPORT_MESSAGE_ID
+    )
+    charts: list[ChatExportChartImage] = Field(
+        default_factory=list, description=MSG_SCHEMA_CHAT_EXPORT_CHARTS
     )
 
 

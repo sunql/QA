@@ -6,7 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import zhCN from "antd/locale/zh_CN";
 import type { DataSource } from "../types/datasource";
 
-const { mockDataSource, chatApi, chatHistoryApi } = vi.hoisted(() => {
+const { mockDataSource, chatApi, chatHistoryApi, exportCharts } = vi.hoisted(() => {
   const mockDataSource: DataSource = {
     id: 1,
     name: "ZJTH-Oracle",
@@ -32,7 +32,12 @@ const { mockDataSource, chatApi, chatHistoryApi } = vi.hoisted(() => {
   const chatHistoryApi = {
     exportSessionPdf: vi.fn(),
   };
-  return { mockDataSource, chatApi, chatHistoryApi };
+  // 导出前的截图收集（0105）：单测只关心「有没有被调、结果有没有进请求体」，
+  // 真正的离屏渲染在 collectExportCharts / chartSnapshot 自己的测试里。
+  const exportCharts = {
+    collectExportCharts: vi.fn(),
+  };
+  return { mockDataSource, chatApi, chatHistoryApi, exportCharts };
 });
 
 vi.mock("../api/datasource", () => ({
@@ -45,6 +50,9 @@ vi.mock("../api/chat", () => ({
 }));
 vi.mock("../api/chatHistory", () => ({
   exportSessionPdf: (...args: unknown[]) => chatHistoryApi.exportSessionPdf(...args),
+}));
+vi.mock("../utils/collectExportCharts", () => ({
+  collectExportCharts: (...args: unknown[]) => exportCharts.collectExportCharts(...args),
 }));
 vi.mock("echarts-for-react", () => ({
   __esModule: true,
@@ -353,6 +361,7 @@ describe("ChatPage PDF 导出", () => {
     chatHistoryApi.exportSessionPdf.mockResolvedValue(
       new Blob(["%PDF-1.4 mock"], { type: "application/pdf" })
     );
+    exportCharts.collectExportCharts.mockResolvedValue([]);
   });
 
   it("messages 为空时点击全局导出按钮弹出 warning，不调 API", async () => {
@@ -363,6 +372,8 @@ describe("ChatPage PDF 导出", () => {
     });
     await user.click(screen.getByRole("button", { name: "导出当前会话为 PDF" }));
     expect(chatHistoryApi.exportSessionPdf).not.toHaveBeenCalled();
+    // 没消息就不该白跑一趟截图
+    expect(exportCharts.collectExportCharts).not.toHaveBeenCalled();
   });
 
   it("有 messages 时点击全局导出按钮调用 exportSessionPdf(currentSessionId)", async () => {
@@ -389,10 +400,66 @@ describe("ChatPage PDF 导出", () => {
     await waitFor(() => {
       expect(chatHistoryApi.exportSessionPdf).toHaveBeenCalledTimes(1);
     });
-    // 第一个参数是 sessionId，第二个 messageId 缺省
+    // 第一个参数是 sessionId；第二个是导出请求体（0105 起 messageId 走 body）
     const call = chatHistoryApi.exportSessionPdf.mock.calls[0];
     expect(call[0]).toBe("s-test");
-    expect(call[1]).toBeUndefined();
+    expect(call[1]).toEqual({ messageId: undefined, charts: [] });
+  });
+
+  it("导出前先收集图表截图，并把位图放进请求体（0105 图表进最终报告）", async () => {
+    const user = userEvent.setup();
+    const charts = [{ messageId: 7, imagePng: "data:image/png;base64,AA==" }];
+    exportCharts.collectExportCharts.mockResolvedValue(charts);
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      handlers.onToken?.("查询结果：12 条。");
+      handlers.onDone?.({ tokensUsed: 20, cost: 0.0001 });
+    });
+    renderPage();
+    await waitFor(() => {
+      expect(useChatStore.getState().datasourceId).toBe(1);
+    });
+    await user.type(screen.getByPlaceholderText(/输入自然语言问题/), "今天的销售");
+    await user.click(screen.getByRole("button", { name: /发\s?送/ }));
+    await waitFor(() => {
+      expect(screen.getByText("查询结果：12 条。")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "导出当前会话为 PDF" }));
+
+    await waitFor(() => {
+      expect(chatHistoryApi.exportSessionPdf).toHaveBeenCalledWith("s-test", {
+        messageId: undefined,
+        charts,
+      });
+    });
+    expect(exportCharts.collectExportCharts).toHaveBeenCalledWith("s-test", undefined);
+  });
+
+  it("单条导出把 dbMessageId 同时用于截图定位与导出范围", async () => {
+    const user = userEvent.setup();
+    exportCharts.collectExportCharts.mockResolvedValue([]);
+    useChatStore.setState({
+      messages: [
+        {
+          id: "m-test-export",
+          role: "assistant",
+          content: "已回填 dbId 的助手回答",
+          timestamp: Date.now(),
+          dbMessageId: 42,
+        } as unknown as ReturnType<typeof useChatStore.getState>["messages"][number],
+      ],
+    });
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: /导出该条问答为 PDF/ }));
+
+    await waitFor(() => {
+      expect(chatHistoryApi.exportSessionPdf).toHaveBeenCalledWith("s-test", {
+        messageId: 42,
+        charts: [],
+      });
+    });
+    expect(exportCharts.collectExportCharts).toHaveBeenCalledWith("s-test", 42);
   });
 
   it("MessageItem 单条导出按钮在 dbMessageId 已回填时显示", () => {
@@ -433,7 +500,7 @@ describe("ChatPage PDF 导出", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("点击单条导出按钮 → 调用 exportSessionPdf(sessionId, dbMessageId)", async () => {
+  it("点击单条导出按钮 → 调用 exportSessionPdf(sessionId, { messageId: dbMessageId })", async () => {
     const user = userEvent.setup();
     useChatStore.setState({
       messages: [
@@ -449,7 +516,10 @@ describe("ChatPage PDF 导出", () => {
     renderPage();
     await user.click(screen.getByRole("button", { name: /导出该条问答为 PDF/ }));
     await waitFor(() =>
-      expect(chatHistoryApi.exportSessionPdf).toHaveBeenCalledWith("s-test", 99),
+      expect(chatHistoryApi.exportSessionPdf).toHaveBeenCalledWith("s-test", {
+        messageId: 99,
+        charts: [],
+      }),
     );
   });
 });

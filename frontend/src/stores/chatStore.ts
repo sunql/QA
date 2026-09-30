@@ -24,6 +24,7 @@ import type {
   MultiStepStep,
   StepStatus,
 } from "../types/chat";
+import { asChartOption, normalizeChartType } from "../utils/chartContract";
 import { i18n } from "../i18n";
 import { read as readPersisted, write as writePersisted } from "./persistChatUiState";
 
@@ -104,7 +105,9 @@ function finalizeRunningSteps(messages: ChatMessage[]): ChatMessage[] {
   });
 }
 
-// 历史会话消息 → 前端 ChatMessage 转换（chart/chartOption/data 未持久化，历史回放仅展示文本与 SQL）
+// 历史会话消息 → 前端 ChatMessage 转换。
+// 0105 起 chart/chartOption 已持久化，历史回放也能出图（此前只展示文本与 SQL）；
+// `data` 仍未落库 —— 图/表由 chartOption 自带（TABLE 的 rows 在里面），不需要它。
 function toChatMessage(read: ChatMessageRead): ChatMessage {
   const ts = Date.parse(read.createdTime);
   return {
@@ -116,6 +119,10 @@ function toChatMessage(read: ChatMessageRead): ChatMessage {
     isStreaming: false,
     // H4：断连兜底写入的半截回答，UI 据此提示「内容不完整」
     interrupted: read.interrupted,
+    // 系统边界收窄：落库的 kind 可能来自更早版本的后端，白名单不认识就置 null
+    // （渲染门不放行，等于「这轮没图」），而不是让未知类型流进渲染层。
+    chartType: normalizeChartType(read.chartType),
+    chartOption: asChartOption(read.chartOption),
   };
 }
 

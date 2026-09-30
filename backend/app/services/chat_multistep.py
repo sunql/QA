@@ -30,6 +30,7 @@ from app.infrastructure.llm.base_client import LlmMessage
 from app.services.chat_context import InheritedState, TimeHint
 from app.services.chat_helpers import (
     _MSG_STEP_UNANSWERABLE,
+    _multiStepResponse,
     _PipelineContext,
     _STEP_EXEC_FAILED_PREFIX,
     _STEP_GEN_FAILED_PREFIX,
@@ -589,6 +590,11 @@ class MultiStepMixin:
         last_plan: QueryPlan | None = None
         last_sql: str | None = None
         last_data: list[dict] = []
+        # 最终报告的图（用户反馈）：图此前只活在计划卡的每个步骤里，最后那条汇总
+        # 回答是纯文字 —— 而用户看的是回答，不是折叠着的计划。取「最后一个成功数据
+        # 步骤」那张：它是整条链的终点，与上面三个锚点同一判据、同一份，不另算一张。
+        last_chart_type: str | None = None
+        last_chart_option: dict | None = None
 
         for step_plan in multiStepPlan.steps:
             if step_plan.aggregation_only:
@@ -625,6 +631,10 @@ class MultiStepMixin:
                     routing_layer="L2",
                     latency_ms=int((time.monotonic() - _t0) * 1000),
                     token_cost_usd=float(total_cost),
+                    # 0105：多步最终报告的图 = 最后一个成功数据步骤那张（与下面
+                    # `ChatResponse` 顶层同一份，图不能只活在实时响应里）。
+                    chart_type=last_chart_type,
+                    chart_option=last_chart_option,
                 )
                 # B5 HIGH-1：计算 inheritance_snapshot（支持下一轮追问链路）。
                 # semanticState 可能为 None（如 B/C 路径直接进多步无 A7 输出），
@@ -648,13 +658,16 @@ class MultiStepMixin:
                 hypotheses = await self._maybeGenerateHypotheses(
                     session, dto.sessionId, dto.question, pc, data=last_data,
                 )
-                return ChatResponse(
+                # 最终报告的图 = 最后一个成功数据步骤那张（各步自己的图仍在 steps 里）
+                return _multiStepResponse(
                     answer=agg_content,
-                    intent="multi_step",
-                    steps=[_step_result_to_read(s) for s in completed],
+                    completed=completed,
                     tokensUsed=total_tokens,
-                    cost=float(total_cost),
-                    latency_ms=int((time.monotonic() - _t0) * 1000),
+                    cost=total_cost,
+                    t0=_t0,
+                    chartType=last_chart_type,
+                    chartOption=last_chart_option,
+                    data=last_data or None,
                     modelName=last_model_name,
                     affinityStatus=affinity,
                     classRecall=pc.recall,
@@ -674,6 +687,9 @@ class MultiStepMixin:
                 last_plan = run.plan
                 last_sql = run.result.sql
                 last_data = run.result.data
+                # 失败的步骤没有图（`_stepChart` 只对成功步骤出图），故与锚点同判据
+                last_chart_type = run.result.chart_type
+                last_chart_option = run.result.chart_option
 
         # 所有步骤都不是 aggregation_only（异常），降级为普通回答
         answer = await self._finalizeMultiStepDegrade(
@@ -681,18 +697,23 @@ class MultiStepMixin:
             last_plan=last_plan, last_sql=last_sql, last_data=last_data,
             total_cost=total_cost, _t0=_t0,
             inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
+            last_chart_type=last_chart_type,      # 0105：降级收尾同样带图
+            last_chart_option=last_chart_option,
         )
         # v3.1 B6（M7）：降级收尾同样接假设后处理（last_data 为空时静默跳过）
         hypotheses = await self._maybeGenerateHypotheses(
             session, dto.sessionId, dto.question, pc, data=last_data,
         )
-        return ChatResponse(
+        # 降级收尾同样把最后一张图提到顶层（有成功步骤时才有，全失败时为 None）
+        return _multiStepResponse(
             answer=answer,
-            intent="multi_step",
-            steps=[_step_result_to_read(s) for s in completed],
+            completed=completed,
             tokensUsed=total_tokens,
-            cost=float(total_cost),
-            latency_ms=int((time.monotonic() - _t0) * 1000),
+            cost=total_cost,
+            t0=_t0,
+            chartType=last_chart_type,
+            chartOption=last_chart_option,
+            data=last_data or None,
             modelName=last_model_name,
             hypotheses=hypotheses or None,
         )
@@ -709,6 +730,8 @@ class MultiStepMixin:
         total_cost: Decimal,
         _t0: float,
         inheritance_snapshot: dict | None = None,
+        last_chart_type: str | None = None,
+        last_chart_option: dict | None = None,
     ) -> str:
         """无汇总步骤时的降级收尾：落库 + 保存查询状态，返回给用户的文案。
 
@@ -721,6 +744,10 @@ class MultiStepMixin:
         「数据步已成功、只差汇总」与「整体失败」，前者不该说成「执行异常」。
 
         inheritance_snapshot（B5 HIGH-1）：多步 B/C 降级路径的快照，支持下一轮追问。
+
+        last_chart_type / last_chart_option（0105，图表进最终报告）：最后一个成功数据
+        步骤的图。降级时回答文案换成了「已完成 N/M 步」，但图仍然是**结论的一部分**
+        —— 有成功步骤就该出图（调用方只在有图时传非 None，无成功步骤时天然为 None）。
         """
         succeeded = [r for r in completed if r.sql is not None]
         if succeeded:
@@ -738,6 +765,8 @@ class MultiStepMixin:
             routing_layer="L2",
             latency_ms=int((time.monotonic() - _t0) * 1000),
             token_cost_usd=float(total_cost),
+            chart_type=last_chart_type,
+            chart_option=last_chart_option,
         )
         await self._saveQueryState(
             session, dto.sessionId,

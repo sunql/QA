@@ -8,6 +8,7 @@ import ChatHistoryPanel from "../components/chat/ChatHistoryPanel";
 import HistoryToggleButton from "../components/chat/HistoryToggleButton";
 import { useChatStore } from "../stores/chatStore";
 import { exportSessionPdf } from "../api/chatHistory";
+import { collectExportCharts } from "../utils/collectExportCharts";
 import { downloadBlob } from "../utils/download";
 import type { ChartType } from "../types/chat";
 import { useTranslation } from "../i18n";
@@ -91,7 +92,11 @@ export default function ChatPage() {
       setExporting(true);
       const hide = message.loading(t("chat.exportPdf.downloading"), 0);
       try {
-        const blob = await exportSessionPdf(currentSessionId, dbMessageId);
+        // 0105：导出前把该会话的图表截图一并发过去 —— 图要进最终报告，而不只在
+        // 屏幕上。截图是**尽力而为**：collectExportCharts 内部任何失败都只少几张图，
+        // 缺图由后端回落占位框，不会让导出失败。
+        const charts = await collectExportCharts(currentSessionId, dbMessageId);
+        const blob = await exportSessionPdf(currentSessionId, { messageId: dbMessageId, charts });
         const filename = dbMessageId
           ? `qa-message-${dbMessageId}.pdf`
           : `qa-session-${safeFilenamePart(currentSessionId)}.pdf`;

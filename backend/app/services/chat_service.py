@@ -731,9 +731,19 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         同样短路（避免空耗模型）。result 携带抽取的查询实体与领域命令参数。
         needRecall=False：召回仍在 _buildPipelineContext 发生（现状行为不变；
         召回产物贯通到本入口是 B5 后续任务）。
+
+        显式多步（带"第一步/第二步"标号）时：用第一步子问题做意图识别，
+        避免完整多步问法干扰召回。
         """
+        question = dto.question
+        if self._stepPlanner.is_explicit_multi_step(question):
+            first_step = self._stepPlanner.plan_explicit(question).plan
+            if first_step and first_step.steps:
+                first_step_q = first_step.steps[0].sub_question
+                if first_step_q:
+                    question = first_step_q
         classified = await self.classifyAndRecall(
-            session, dto.question, sessionId=dto.sessionId, needRecall=False
+            session, question, sessionId=dto.sessionId, needRecall=False
         )
         return classified.intentResult, classified.state
 

@@ -13,7 +13,6 @@ L1 限定：步骤按顺序线性执行，前序步骤的结果可注入后续�
 from __future__ import annotations
 
 import json as _json
-import logging as _logging
 import re as _re
 from dataclasses import dataclass, field
 from typing import Literal
@@ -293,9 +292,7 @@ class StepExecutionContext:
                 + "".join(extra_lines)
                 + f"  [{tag}]\n    {data_snippet}\n  [/{tag}]"
             )
-        text = "\n".join(lines)
-        logger.info("inject_to_prompt current_index=%d: %s", current_index, text[:300])
-        return text
+        return "\n".join(lines)
 
     def with_step(self, result: StepResult) -> "StepExecutionContext":
         """返回包含新步骤的新上下文（不可变），原实例不受影响。"""

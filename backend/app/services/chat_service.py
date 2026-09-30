@@ -1231,7 +1231,6 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             wikiRulesBlock=wikiRulesBlock,
             session=session,
         )
-        logger.info("planResult isUnanswerable=%s classes=%s plan=%s", planResult.plan.isUnanswerable, [c.class_name for c in classes], planResult.plan.to_dict().get("selectedClasses", []) if planResult.plan else [])
         if planResult.plan.isUnanswerable:
             return planResult, SqlResult(sql="", promptTokens=0, completionTokens=0)
         sqlResult = await self._nl2sql.generateSql(

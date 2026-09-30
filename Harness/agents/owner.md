@@ -59,6 +59,7 @@
 ### 变更 `changes/`
 - [_template/summary.md](../changes/_template/summary.md) - 变更 SSOT 模板
 - **近 30 天热点（按 SSOT 性质）**：
+  - [2026-09-30-chat-session-restore](../changes/2026-09-30-chat-session-restore/summary.md) - 刷新恢复上次会话（分渠道指针 + 挂载回放）+ 会话归属守卫铺到 6 个端点（守卫归属查询改按渠道并集）
   - [chore-magic-number-governance](../changes/chore-magic-number-governance/summary.md) - 魔数治理 Phase 2 15/15（0087 easy + 0088 medium + 0089 hard）
   - [chore-chat-service-file-split](../changes/chore-chat-service-file-split/summary.md) - chat_service.py mixin 分解（4916→~1100 行基类 + 7 mixin + 1 helper）
   - [chore-nl2sql-service-file-split](../changes/chore-nl2sql-service-file-split/summary.md) - nl2sql_service.py 8 文件门面拆分

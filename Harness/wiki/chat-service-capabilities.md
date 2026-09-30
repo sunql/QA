@@ -169,6 +169,39 @@ system prompt，让 LLM 拿到业务口径而非仅靠 schema 推。
 - **预算控制**：`contextPromptCharBudget` / `stateHistoryFieldLimit` / `contentSegmentLimit` / `sqlSegmentLimit` 全可调
 - **可调旋钮均进 `system_config`**：`getContext*Limit` / `getStateHistoryFieldLimit` 模式
 
+### 4.1 会话归属与客户端恢复（2026-09-30）
+
+两个必须一起理解的事实（写与回放拆开上线是**回退**，见 `changes/2026-09-30-chat-session-restore`）：
+
+- **上下文的两半来源不同**：发给 LLM 的对话历史是**前端**带的 `history`（屏幕上可见的那批），
+  而追问锚点（`last_plan` / `last_sql`）由**服务端**按 `session_id` 存在 `session_query_state`
+  （`chat_recall.py` 只按 session_id 读，从不校验这轮在屏幕上是否可见）。
+  ⇒ 所以「只让前端记住 sessionId 却不回放」会让用户对着空屏提问、却拿到**关于一场看不见的对话**的回答。
+- **客户端恢复**：`qa:chat:lastSessionId:<channel>`（每渠道一个恢复目标）+ `qa:chat:lastChannel`。
+  面板挂载声明渠道（`enterChannel`）→ 有指针则以 `tail: true` 回放**最新**那批 → 失败（404/403/422）
+  **清指针并换新会话**（否则每次刷新重放同一个失败，而失败只在历史面板展开时可见 ＝ 表现为「刷新永远空白」）。
+  发送路径必须写指针 —— 原缺陷正是「只有点历史项/换渠道才写，且写的多是刚生成的空会话 id」。
+
+### 4.2 会话归属守卫（`api/v1/session_guard.py`）
+
+`assertSessionOwnership(session, sessionId, user)`，语义：**admin 放行** → 有归属标记且不含当前用户
+→ **403**（detail 不回显归属者，防侧信道枚举）→ 无归属标记 → **fail-open**。
+
+- 挂载点（**7 处**）：`GET /sessions/{id}/messages`、`DELETE /sessions/{id}`、`POST /sessions/{id}/export.pdf`、
+  `GET /sessions/{id}/usage`、`GET /sessions/{id}/usage/list`、
+  `POST /chat`、`POST /chat/stream`、`GET /chat/sessions/{id}/hypotheses`。
+  写端点也要守卫：**不加就能继承别人会话的追问锚点**；usage 两处属「按 sessionId 暴露单会话内容」的对称端点
+  （拿到 id 就能读别人的 token / 成本 / 模型明细）。
+- **事实源按渠道取并集**（`getSessionOwnerUserIds(..., channel=None)`）：被守卫的端点服务
+  chat / doc_qa / wiki_qa **三个**渠道，只查 `channel='chat'` 会让另外两个渠道恒返空集 ⇒ 守卫**静默失效**（已修，4 条用例钉住）。
+- **403 文案中性**：`MSG_SESSION_NOT_OWNED` = 「会话不存在或不属于当前用户」。刻意不区分
+  「不存在」与「不属于」—— 区分即泄露「这个 id 存在」。（原 `MSG_HYPOTHESIS_SESSION_NOT_OWNED`
+  「无权访问该会话的分析假设」已删除：守卫搬到共享模块后服务 7 个端点，该文案在一半端点上描述错对象。）
+- **fail-open 覆盖面有限**：`user_id` 2026-09-30 才开始写（chat 渠道 1032 行里 **920 行 NULL**）⇒
+  存量未打标会话仍对任何登录用户开放（读 / 删 / 导出）。回填属 prod 数据变更，**未做**。
+- 仍未纳入归属：`GET /chat-history`（会话枚举，仅按 channel 过滤，**明确不做** —— 严格过滤会让
+  存量 NULL 占多数时所有人的面板变空，须先定回填口径）。
+
 ---
 
 ## 5. L4 Agent Loop（`L4Mixin`）
@@ -214,6 +247,9 @@ system prompt，让 LLM 拿到业务口径而非仅靠 schema 推。
 - **API 限流**：`@limiter.limit(rateLimitValue)`
 - **审计日志**：每次 LLM 调用 + Agent 运行都写 audit
 - **ACL**：X-User-* 防伪造 + `getOwnerActor` actor 派生（`qa-system-owner-acl-gate-not-binding`）
+  > 例外：容器内 `nginx.conf` 会剥掉客户端 `X-User-*` 且 `AUTH_MODE=real`，现网身份由 JWT→DB 派生，
+  > 不可伪造（stub 头仅测试环境可用）。
+- **会话归属**：`api/v1/session_guard.py` 挂 6 个端点，403 不回显归属者；**fail-open 有存量缺口**，见 §4.2
 
 ---
 
@@ -283,4 +319,6 @@ class ChatService(
 - [[qa-system-feature-rule-config]] — Feature 规则引擎
 - [[qa-system-sql-guard-side-channel]] — SQL Guard 侧信道
 - [[qa-system-wiki-knowledge-layer-plans]] — Wiki 知识层三份计划（spec + P0/P1/P3 迁移链）
+- [[qa-system-chat-session-restore]] — 刷新恢复上次会话 + 会话归属守卫铺开（§4.1 / §4.2）
+- [[qa-system-chat-session-restore-broken]] — 该缺陷的原始诊断（指针恒为 null）
 - [[wiki-ontology-link]] — wiki ↔ ontology 链接 + NL2SQL 业务规则注入（§3.6）

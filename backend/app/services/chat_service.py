@@ -34,6 +34,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
+from app.domain.chart_spec import ChartSpec, SpecKpi
 from app.domain.enums import ChartType, IntentType
 from app.domain.exceptions import (
     ConfigError,
@@ -73,6 +74,7 @@ from app.infrastructure.business_db_pool import BusinessDbAdapter, _assert_read_
 from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage
 from app.infrastructure.llm.factory import createClient
 from app.services.audit_service import AuditService
+from app.services.chart_renderer import toNumber, renderChartOption
 from app.services.chart_service import ChartService
 from app.services.chat_stream_output import _ANSWER_SYSTEM_PROMPT, ChatStreamOutputMixin
 from app.services.data_summary import summarize_data
@@ -268,6 +270,17 @@ _UNANSWERABLE_ANSWER_MISSING_VECTOR = (
     "抱歉，向量检索未返回相关本体类，可能尚未同步向量数据。"
     "请在「本体管理→向量同步」中同步向量数据后再试。"
 )
+
+
+def _firstPresentValue(data: list[dict] | None) -> Any | None:
+    """取首行第一个非 None 值（L1 结果读值的唯一口径）。
+
+    回答文本与指标卡都从这里取值：两处各写一遍 `next(...)` 迟早会漂移，
+    而「文本说 0.954、卡片画别的数」是那种没人会立刻发现的错。
+    """
+    if not data:
+        return None
+    return next((v for v in data[0].values() if v is not None), None)
 
 
 class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin):
@@ -612,7 +625,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             raise
         self._spawnEmbedding(dto, finalSql)
         chartType, option, chartPt, chartCt, chartCached = await self._chartStep(
-            session, dto, pc, data, result.chartType
+            session, dto, pc, data, result.chartType, outcome.plan
         )
         answerResp, answerConfig, wastedAnswer = await self._generateAnswer(
             session, dto, pc, data, finalSql,
@@ -1285,7 +1298,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                 kpi, match.code, session, match=match
             )
             text = self._buildAnswerText(kpi, data, kpi_name)
-            return self._wrapChatResponse(match, kpi_name, data, text)
+            return self._wrapChatResponse(match, kpi_name, data, text, unit=kpi.unit)
         except Exception:
             logger.warning(f"L1 build response failed for {match.code}", exc_info=True)
             return None
@@ -1403,13 +1416,30 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         """
         answer = f"指标「{kpi_name}」"
         if data:
-            first_val = str(
-                next((v for v in data[0].values() if v is not None), "—")
-            )
-            answer += f"：{first_val}"
+            value = _firstPresentValue(data)
+            answer += f"：{'—' if value is None else value}"
         else:
             answer += f"（{kpi.business_definition or '详见系统'}）"
         return answer
+
+    @staticmethod
+    def _buildKpiChart(
+        kpi_name: str,
+        unit: str | None,
+        data: list[dict] | None,
+    ) -> tuple[ChartType | None, dict | None]:
+        """L1 直答的指标卡（决策 7）。返回 `(kind, option)`，无值可展示时为 `(None, None)`。
+
+        值走 `renderChartOption`（KPI 负载的唯一出口），不在这里手搓 `{"kpi": ...}`。
+        降级口径：**值必须能变成数字才发卡** —— 前端的渲染门是 `Boolean(chartType)`，
+        一张 `value=null` 的空壳卡比不发更糟；此时 `_buildAnswerText` 里的口径说明
+        才是用户要看的东西。
+        """
+        value = _firstPresentValue(data)
+        if toNumber(value) is None:
+            return None, None
+        spec = ChartSpec(kind=ChartType.KPI, kpi=SpecKpi(label=kpi_name, value=value, unit=unit))
+        return ChartType.KPI, renderChartOption(spec, list(data or []))
 
     # -------------------------------------------------------------------------
     def _wrapChatResponse(
@@ -1418,12 +1448,16 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         kpi_name: str,
         data: list[dict] | None,
         answer: str,
+        unit: str | None = None,
     ) -> ChatResponse:
         """构造 intent=l1_match 的 ChatResponse（零 LLM 消耗）。"""
+        chartType, chartOption = self._buildKpiChart(kpi_name, unit, data)
         return ChatResponse(
             answer=answer,
             intent="l1_match",
             data=data,
+            chartType=chartType,
+            chartOption=chartOption,
             kpi_code=match.code,
             kpi_name=kpi_name,
             confidence=match.confidence,

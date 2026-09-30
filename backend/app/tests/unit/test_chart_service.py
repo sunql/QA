@@ -1,292 +1,398 @@
-"""ChartService 单元测试。
+"""门面：决策 → spec → 渲染 的编排（含 LLM 调用次数与 token 口径）。
 
-覆盖：
-- recommendChartType：各列组合规则（1 字符串+1 数值、时间+数值、2+字符串+数值、默认 TABLE）
-- _fallbackOption：TABLE/PIE/BAR/LINE 的 ECharts option 结构
-- generateChartOption：LLM 成功、非 JSON 回退、无 series 回退、抛异常回退
+本文件取代旧版（旧版钉的是 `recommendChartType` / `generateChartOption` /
+`_fallbackOption` 三个已删除的内部实现 —— 它们正是这轮改造要消灭的「只看形状 +
+让 LLM 写 option」）。
+
+**这里最该钉住的两件事**：
+1. **LLM 调用次数**：确定性形状（占比有 formula、时间维趋势）一次都不该调；
+   只有歧义形状才调一次。这是「不能完全让 LLM 判定」的量化落点。
+2. **降级链**：任何异常/非法 spec 都落到表格，`chartType` 必须跟着变成 table
+   （否则前端按 chartType 选了图表渲染器，却拿到表格负载 → 画空白）。
 """
 
 from __future__ import annotations
 
-from decimal import Decimal
-from types import SimpleNamespace
+from typing import Any
 
 from app.domain.enums import ChartType
+from app.domain.query_plan import Aggregation, QueryPlan, SortSpec
 from app.services.chart_service import ChartService
 
+_ROWS = [
+    {"SUPPLIER_NAME": "B125 浙江力航", "RCV_QTY_PUU": 9812},
+    {"SUPPLIER_NAME": "B019 温州圣特", "RCV_QTY_PUU": 7401},
+    {"SUPPLIER_NAME": "B153 天津精一", "RCV_QTY_PUU": 5203},
+]
+_MONTH_ROWS = [
+    {"MONTH": "2026-01", "LINE_AMT": 100},
+    {"MONTH": "2026-02", "LINE_AMT": 200},
+]
 
-def _llmConfig() -> SimpleNamespace:
-    return SimpleNamespace(model_name="test-model")
+
+class _FakeSession:
+    """system_config 全缺席 → 阈值全走默认（fail-open）。"""
+
+    async def execute(self, stmt: object) -> Any:
+        class _R:
+            def scalar_one_or_none(self_inner) -> None:
+                return None
+
+        return _R()
 
 
-class _Resp:
-    def __init__(self, content: str, *, cachedTokens: int | None = None) -> None:
+class _FakeResponse:
+    def __init__(self, content: str) -> None:
         self.content = content
-        self.modelName = "test-model"
-        self.promptTokens = 7
-        self.completionTokens = 3
-        self.cachedTokens = cachedTokens
+        self.promptTokens = 42
+        self.completionTokens = 1
+        self.cachedTokens = 5
 
 
-class _FakeLlm:
-    def __init__(self, content: str, *, raises: bool = False) -> None:
-        self._content = content
-        self._raises = raises
-        self.calls: list[list[tuple[str, str]]] = []
+class _CountingClient:
+    """记录调用次数 —— 「不调 LLM」和「调一次」都要能被断言。"""
 
-    async def complete(self, messages: list, **kwargs) -> _Resp:
-        self.calls.append([(m.role, m.content) for m in messages])
-        if self._raises:
-            raise RuntimeError("llm down")
-        return _Resp(self._content)
+    def __init__(self, content: str = "SHARE", boom: bool = False) -> None:
+        self.content = content
+        self.boom = boom
+        self.calls = 0
 
-
-def _rows(strings: list[str], numbers: list[int | Decimal]) -> list[dict]:
-    return [{"NAME": n, "QTY": Decimal(q)} for n, q in zip(strings, numbers, strict=True)]
+    async def complete(self, messages: list[Any], **kwargs: Any) -> _FakeResponse:
+        self.calls += 1
+        if self.boom:
+            raise RuntimeError("LLM 502")
+        return _FakeResponse(self.content)
 
 
-class TestRecommendChartType:
-    def test_one_string_one_number_few_rows_is_pie(self) -> None:
-        data = _rows(["A", "B", "C"], [1, 2, 3])
-        assert ChartService().recommendChartType(["NAME", "QTY"], data) is ChartType.PIE
+class _FakeModelConfig:
+    model_name = "deepseek-chat"
 
-    def test_one_string_one_number_many_rows_is_bar(self) -> None:
-        data = _rows([f"S{i}" for i in range(8)], [i for i in range(8)])
-        assert ChartService().recommendChartType(["NAME", "QTY"], data) is ChartType.BAR
 
-    def test_time_and_number_is_line(self) -> None:
-        data = [{"D": "2026-08-01", "QTY": Decimal(1)}, {"D": "2026-08-02", "QTY": Decimal(2)}]
-        assert ChartService().recommendChartType(["D", "QTY"], data) is ChartType.LINE
+def _plan(**overrides) -> QueryPlan:
+    base: dict = {"target": "DWD_GOODS_RECEIPT_DTL"}
+    base.update(overrides)
+    return QueryPlan(**base)
 
-    def test_two_strings_one_number_is_bar(self) -> None:
-        data = [
-            {"CITY": "上海", "WAREHOUSE": "A", "QTY": Decimal(1)},
-            {"CITY": "上海", "WAREHOUSE": "B", "QTY": Decimal(2)},
+
+async def _build(
+    *,
+    columns: list[str],
+    data: list[dict],
+    plan: QueryPlan | None = None,
+    question: str = "",
+    forcedKind: ChartType | None = None,
+    intentKind: ChartType | None = None,
+    client: _CountingClient | None = None,
+):
+    return await ChartService().buildChart(
+        session=_FakeSession(),
+        plan=plan if plan is not None else _plan(),
+        columns=columns,
+        data=data,
+        question=question,
+        forcedKind=forcedKind,
+        intentKind=intentKind,
+        llmClient=client if client is not None else _CountingClient("COMPARE"),
+        modelConfig=_FakeModelConfig(),
+    )
+
+
+class TestEmptyData:
+    async def test_no_data_yields_table_payload_and_zero_usage(self) -> None:
+        build = await _build(columns=["SUPPLIER_NAME", "RCV_QTY_PUU"], data=[])
+
+        assert build.chartType is ChartType.TABLE
+        assert build.option == {"columns": ["SUPPLIER_NAME", "RCV_QTY_PUU"], "rows": []}
+        assert (build.promptTokens, build.completionTokens) == (0, 0)
+
+    async def test_no_data_does_not_call_the_llm(self) -> None:
+        client = _CountingClient()
+        await _build(columns=["A"], data=[], client=client)
+        assert client.calls == 0
+
+    async def test_forced_kind_yields_to_empty_data(self) -> None:
+        """没有数据就没有图：强制 heatmap 也返回表格，避免前端画空白。"""
+        build = await _build(
+            columns=["A", "B"], data=[], forcedKind=ChartType.HEATMAP
+        )
+        assert build.chartType is ChartType.TABLE
+        assert "columns" in build.option
+
+
+class TestDeterministicShapesSkipTheLlm:
+    """规则能定下来的形状，一次 LLM 都不该调（「不能完全让 LLM 判定」的落点）。"""
+
+    async def test_share_formula_is_donut_without_llm(self) -> None:
+        plan = _plan(
+            aggregations=(
+                Aggregation(
+                    function="SUM", property="RCV_QTY_PUU", alias="占比", formula="x"
+                ),
+            ),
+            groupBy=("SUPPLIER_NAME",),
+        )
+        rows = [
+            {"SUPPLIER_NAME": "B125", "占比": 0.5},
+            {"SUPPLIER_NAME": "B019", "占比": 0.3},
+            {"SUPPLIER_NAME": "B153", "占比": 0.2},
         ]
-        assert ChartService().recommendChartType(["CITY", "WAREHOUSE", "QTY"], data) is ChartType.BAR
+        client = _CountingClient()
 
-    def test_no_data_is_table(self) -> None:
-        assert ChartService().recommendChartType(["NAME", "QTY"], []) is ChartType.TABLE
-
-    def test_string_only_is_table(self) -> None:
-        data = [{"NAME": "A"}]
-        assert ChartService().recommendChartType(["NAME"], data) is ChartType.TABLE
-
-
-class TestFallbackOption:
-    def test_table_option_contains_columns_and_rows(self) -> None:
-        data = _rows(["A"], [1])
-        option = ChartService()._fallbackOption(ChartType.TABLE, ["NAME", "QTY"], data)
-        assert option["columns"] == ["NAME", "QTY"]
-        assert option["rows"] == data
-
-    def test_pie_option_structure(self) -> None:
-        data = _rows(["A", "B"], [1, 2])
-        option = ChartService()._fallbackOption(ChartType.PIE, ["NAME", "QTY"], data)
-        series = option["series"][0]
-        assert series["type"] == "pie"
-        assert series["data"] == [{"name": "A", "value": "1"}, {"name": "B", "value": "2"}]
-
-    def test_bar_option_structure(self) -> None:
-        data = _rows(["A", "B"], [1, 2])
-        option = ChartService()._fallbackOption(ChartType.BAR, ["NAME", "QTY"], data)
-        assert option["xAxis"]["data"] == ["A", "B"]
-        series = option["series"][0]
-        assert series["type"] == "bar"
-        assert series["data"] == ["1", "2"]
-
-    def test_line_option_structure(self) -> None:
-        data = [{"D": "2026-08-01", "QTY": Decimal(1)}, {"D": "2026-08-02", "QTY": Decimal(2)}]
-        option = ChartService()._fallbackOption(ChartType.LINE, ["D", "QTY"], data)
-        assert option["series"][0]["type"] == "line"
-        assert option["xAxis"]["data"] == ["2026-08-01", "2026-08-02"]
-
-
-class TestGenerateChartOption:
-    async def test_llm_success_returns_parsed_option(self) -> None:
-        fake = _FakeLlm('{"series": [{"type": "bar", "data": [1]}]}')
-        option, promptTokens, completionTokens, cachedTokens = await ChartService().generateChartOption(
-            ChartType.BAR, ["NAME", "QTY"], _rows(["A"], [1]), "问题", fake, _llmConfig()
+        build = await _build(
+            columns=["SUPPLIER_NAME", "占比"], data=rows, plan=plan, client=client
         )
-        assert option["series"][0]["type"] == "bar"
-        assert promptTokens == 7
-        assert completionTokens == 3
-        assert cachedTokens is None
 
-    async def test_llm_success_propagates_cached_tokens(self) -> None:
-        """4-2（feat-token-cache）：cachedTokens 必须在 4-tuple 返回里透传。"""
-        # 重新构造一个返回 cachedTokens=5 的 fake
-        class _FakeLlmWithCache(_FakeLlm):
-            pass
+        assert build.chartType is ChartType.DONUT
+        assert client.calls == 0
+        assert build.promptTokens == 0
 
-        class _RespWithCache(_Resp):
-            def __init__(self, content: str) -> None:
-                super().__init__(content, cachedTokens=5)
-
-        fake = _FakeLlmWithCache('{"series": [{"type": "bar", "data": [1]}]}')
-        # 替换 _FakeLlm.complete 的返回类型
-        async def _complete_with_cache(messages, **kwargs):
-            fake.calls.append([(m.role, m.content) for m in messages])
-            return _RespWithCache(fake._content)
-        fake.complete = _complete_with_cache  # type: ignore[method-assign]
-
-        option, promptTokens, completionTokens, cachedTokens = await ChartService().generateChartOption(
-            ChartType.BAR, ["NAME", "QTY"], _rows(["A"], [1]), "问题", fake, _llmConfig()
+    async def test_time_trend_is_line_without_llm(self) -> None:
+        """问句说了「趋势」→ 确定性线索直接定音，一次分类调用都不该有。"""
+        client = _CountingClient()
+        build = await _build(
+            columns=["MONTH", "LINE_AMT"],
+            data=_MONTH_ROWS,
+            plan=_plan(groupBy=("MONTH",)),
+            question="按月的入库金额趋势",
+            client=client,
         )
-        assert option["series"][0]["type"] == "bar"
-        assert cachedTokens == 5, f"cachedTokens 应透传=5, 实际 {cachedTokens}"
 
-    async def test_llm_non_json_falls_back(self) -> None:
-        fake = _FakeLlm("抱歉，我不能生成图表配置。")
-        service = ChartService()
-        data = _rows(["A", "B"], [1, 2])
-        option, _, _, _ = await service.generateChartOption(
-            ChartType.BAR, ["NAME", "QTY"], data, "问题", fake, _llmConfig()
+        assert build.chartType is ChartType.LINE
+        assert client.calls == 0
+
+    async def test_silent_trend_question_lets_the_classifier_flip_to_bar(self) -> None:
+        """问句没线索 → 走一次分类；这正是歧义的定义（可被翻，但只翻在候选集内）。"""
+        client = _CountingClient("COMPARE")
+
+        build = await _build(
+            columns=["MONTH", "LINE_AMT"],
+            data=_MONTH_ROWS,
+            plan=_plan(groupBy=("MONTH",)),
+            client=client,
         )
-        assert option["series"][0]["type"] == "bar"
-        assert option["xAxis"]["data"] == ["A", "B"]
 
-    async def test_llm_json_without_series_falls_back(self) -> None:
-        fake = _FakeLlm('{"title": {"text": "no series"}}')
-        data = _rows(["A"], [1])
-        option, _, _, _ = await ChartService().generateChartOption(
-            ChartType.PIE, ["NAME", "QTY"], data, "问题", fake, _llmConfig()
+        assert client.calls == 1
+        assert build.chartType is ChartType.BAR
+
+    async def test_silent_trend_with_an_unusable_label_keeps_line(self) -> None:
+        client = _CountingClient("TREND")
+
+        build = await _build(
+            columns=["MONTH", "LINE_AMT"],
+            data=_MONTH_ROWS,
+            plan=_plan(groupBy=("MONTH",)),
+            client=client,
         )
-        assert option["series"][0]["type"] == "pie"
 
-    async def test_llm_raises_falls_back(self) -> None:
-        fake = _FakeLlm("", raises=True)
-        data = _rows(["A"], [1])
-        option, _, _, _ = await ChartService().generateChartOption(
-            ChartType.LINE, ["D", "QTY"], [{"D": "2026-08-01", "QTY": Decimal(1)}], "问题", fake, _llmConfig()
+        assert build.chartType is ChartType.LINE
+
+    async def test_topn_is_hbar_without_llm(self) -> None:
+        client = _CountingClient()
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_ROWS,
+            plan=_plan(
+                groupBy=("SUPPLIER_NAME",),
+                sortBy=(SortSpec(property="RCV_QTY_PUU", direction="desc"),),
+                rowLimit=3,
+            ),
+            client=client,
         )
-        assert option["series"][0]["type"] == "line"
 
-    async def test_table_skips_llm_when_falls_back(self) -> None:
-        fake = _FakeLlm("garbage")
-        data = _rows(["A"], [1])
-        option, _, _, _ = await ChartService().generateChartOption(
-            ChartType.TABLE, ["NAME", "QTY"], data, "问题", fake, _llmConfig()
+        assert build.chartType is ChartType.HBAR
+        assert client.calls == 0
+
+    async def test_raw_detail_is_table_without_llm(self) -> None:
+        client = _CountingClient()
+        build = await _build(
+            columns=["PO_NO", "SUPPLIER_NAME", "LINE_AMT"],
+            data=[{"PO_NO": "P1", "SUPPLIER_NAME": "B125", "LINE_AMT": 10}],
+            plan=_plan(),
+            client=client,
         )
-        assert option["columns"] == ["NAME", "QTY"]
+
+        assert build.chartType is ChartType.TABLE
+        assert client.calls == 0
 
 
-class TestBuildOptionPromptSmallData:
-    """v2 2026-09-18：chart LLM prompt 在数据量小（≤ FULL_DATA_THRESHOLD）时全量展示。
+class TestAmbiguousShapeAsksOnce:
+    def _ambiguous(self) -> dict:
+        return {"columns": ["SUPPLIER_NAME", "RCV_QTY_PUU"], "data": _ROWS}
 
-    触发：用户报告 27 行时 chart_service._buildOptionPrompt 的 data[:20]
-    让 LLM 生成的 ECharts option 不含 D1 后几年 → 前端 EVENT_CHART.data 27 行
-    按 option 渲染时 D1 数据「越界」或裁掉。
+    async def test_ambiguous_shape_calls_the_classifier_exactly_once(self) -> None:
+        client = _CountingClient("COMPARE")
 
-    修复：≤ FULL_DATA_THRESHOLD 行（默认 100）时全量嵌入 prompt。
-    """
+        build = await _build(**self._ambiguous(), client=client)
 
-    async def test_27_rows_includes_all_rows_in_prompt(self) -> None:
-        """用户真实场景：27 行（B019+B125+D1）必须全在 LLM prompt 里。"""
-        from app.services.data_summary import FULL_DATA_THRESHOLD
-        rows = [{"供应商": f"S{i:03d}", "数量": i * 10} for i in range(27)]
-        fake = _FakeLlm('{"series": [{"type": "bar", "data": []}]}')
-        await ChartService().generateChartOption(
-            ChartType.BAR, ["供应商", "数量"], rows, "问题", fake, _llmConfig(),
+        assert client.calls == 1
+        assert build.chartType is ChartType.BAR
+        assert build.decision.labelHint == "COMPARE"
+
+    async def test_label_share_switches_to_donut(self) -> None:
+        build = await _build(**self._ambiguous(), client=_CountingClient("SHARE"))
+        assert build.chartType is ChartType.DONUT
+
+    async def test_label_rank_switches_to_hbar(self) -> None:
+        build = await _build(**self._ambiguous(), client=_CountingClient("RANK"))
+        assert build.chartType is ChartType.HBAR
+
+    async def test_garbage_label_keeps_the_rule_verdict(self) -> None:
+        build = await _build(**self._ambiguous(), client=_CountingClient("hbar"))
+
+        assert build.chartType is ChartType.BAR
+        assert build.decision.labelHint is None
+
+    async def test_llm_exception_keeps_the_rule_verdict_and_zero_usage(self) -> None:
+        client = _CountingClient(boom=True)
+
+        build = await _build(**self._ambiguous(), client=client)
+
+        assert client.calls == 1
+        assert build.chartType is ChartType.BAR
+        assert (build.promptTokens, build.completionTokens, build.cachedTokens) == (0, 0, 0)
+
+    async def test_token_triple_is_forwarded(self) -> None:
+        build = await _build(**self._ambiguous(), client=_CountingClient("COMPARE"))
+
+        assert build.promptTokens == 42
+        assert build.completionTokens == 1
+        assert build.cachedTokens == 5
+
+
+class TestForcedKinds:
+    async def test_forced_kind_wins_over_the_engine(self) -> None:
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_ROWS,
+            forcedKind=ChartType.PIE,
+            client=_CountingClient(),
         )
-        # 取最后一次调用的 user prompt（generateChartOption 只发一次）
-        userPrompt = fake.calls[0][1][1]
-        # 最后一行的供应商名 S026 必须出现（全量嵌入）；旧实现 data[:20] 不会含 S026
-        assert "S026" in userPrompt
-        # 行数标注应说"27 行"，不是"最多 20 行"
-        assert f"共 {27} 行" in userPrompt
-        assert "最多 20 行" not in userPrompt
 
-    async def test_at_threshold_includes_all_rows(self) -> None:
-        """边界：恰好 100 行全量嵌入。"""
-        from app.services.data_summary import FULL_DATA_THRESHOLD
-        rows = [{"i": i, "label": f"L{i:03d}"} for i in range(FULL_DATA_THRESHOLD)]
-        fake = _FakeLlm('{"series": [{"type": "bar", "data": []}]}')
-        await ChartService().generateChartOption(
-            ChartType.BAR, ["i", "label"], rows, "问题", fake, _llmConfig(),
+        assert build.chartType is ChartType.PIE
+        assert build.decision.ruleId == "R_FORCED_CLIENT"
+
+    async def test_forced_kind_skips_the_classifier(self) -> None:
+        client = _CountingClient()
+        await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_ROWS,
+            forcedKind=ChartType.PIE,
+            client=client,
         )
-        userPrompt = fake.calls[0][1][1]
-        # 最后一行的 label 必须出现
-        assert f"L{FULL_DATA_THRESHOLD - 1:03d}" in userPrompt
+        assert client.calls == 0
 
-    async def test_over_threshold_truncates_to_20(self) -> None:
-        """边界：101 行退回到 data[:20]，prompt 不含第 21 行。"""
-        from app.services.data_summary import FULL_DATA_THRESHOLD
-        rows = [{"i": i, "label": f"L{i:03d}"} for i in range(FULL_DATA_THRESHOLD + 1)]
-        fake = _FakeLlm('{"series": [{"type": "bar", "data": []}]}')
-        await ChartService().generateChartOption(
-            ChartType.BAR, ["i", "label"], rows, "问题", fake, _llmConfig(),
+    async def test_forced_kind_beats_intent_kind(self) -> None:
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_ROWS,
+            forcedKind=ChartType.PIE,
+            intentKind=ChartType.LINE,
         )
-        userPrompt = fake.calls[0][1][1]
-        # L020（索引 20，第 21 行）不应在 prompt 中
-        assert "L020" not in userPrompt
-        # L000-L019 应在
-        assert "L000" in userPrompt
-        assert "L019" in userPrompt
-        # 标记"最多 20 行"
-        assert "最多 20 行" in userPrompt
+        assert build.chartType is ChartType.PIE
 
-
-class TestNormalizeOptionFormatters:
-    """v3 2026-09-18：LLM 生成的 ECharts option 归一化 formatter 模板。
-
-    触发：用户报告问题 #1 柱状图 label 显示字面量 `{d}%`、tooltip 仅 B019 有值。
-    根因：LLM 写了 `'{d}%'` 意图「数值 + 百分号」，但 ECharts `{d}` 仅 pie 百分比。
-    修复：`_normalizeOptionFormatters` 在非 pie 场景下把 `{d}` 替换为 `{c}`（数值）。
-    """
-
-    def test_bar_label_d_replaced_with_c(self) -> None:
-        """柱图 label.formatter `{d}%` → `{c}%`。"""
-        option = {"series": [{"type": "bar", "label": {"formatter": "{d}%"}}]}
-        out = ChartService._normalizeOptionFormatters(option, ChartType.BAR)
-        assert out["series"][0]["label"]["formatter"] == "{c}%"
-
-    def test_pie_label_d_unchanged(self) -> None:
-        """饼图 label.formatter `{d}%` 保持原样（标准用法）。"""
-        option = {"series": [{"type": "pie", "label": {"formatter": "{d}%"}}]}
-        out = ChartService._normalizeOptionFormatters(option, ChartType.PIE)
-        assert out["series"][0]["label"]["formatter"] == "{d}%"
-
-    def test_line_tooltip_d_replaced(self) -> None:
-        """线图 tooltip.formatter 含 `{d}` → 替换为 `{c}`。"""
-        option = {"tooltip": {"formatter": "{a}<br>{b}: {d}%"}}
-        out = ChartService._normalizeOptionFormatters(option, ChartType.LINE)
-        assert out["tooltip"]["formatter"] == "{a}<br>{b}: {c}%"
-
-    def test_function_formatter_unchanged(self) -> None:
-        """函数 formatter 不动（LLM 写函数时意图明确）。"""
-        fn = lambda params: f"{params.value}%"  # noqa: E731
-        option = {"series": [{"label": {"formatter": fn}}]}
-        out = ChartService._normalizeOptionFormatters(option, ChartType.BAR)
-        assert out["series"][0]["label"]["formatter"] is fn
-
-    def test_nested_tooltip_inside_series_replaced(self) -> None:
-        """series[i].tooltip.formatter 也归一化（用户报告 tooltip 仅 B019 有值的根因）。"""
-        option = {"series": [{"type": "bar", "tooltip": {"formatter": "{a}: {d}"}}]}
-        out = ChartService._normalizeOptionFormatters(option, ChartType.BAR)
-        assert out["series"][0]["tooltip"]["formatter"] == "{a}: {c}"
-
-    def test_immutability(self) -> None:
-        """必须返回新对象，原 option 不被修改（遵循 CLAUDE.md 不可变数据）。"""
-        option = {"series": [{"label": {"formatter": "{d}"}}]}
-        ChartService._normalizeOptionFormatters(option, ChartType.BAR)
-        # 原对象原样保留
-        assert option["series"][0]["label"]["formatter"] == "{d}"
-
-
-class TestGenerateChartOptionNormalizeIntegration:
-    """v3 端到端：LLM 响应含 `{d}%` → generateChartOption 归一化后 series.label.formatter = `{c}%`。"""
-
-    async def test_llm_d_percent_formatter_normalized(self) -> None:
-        from app.domain.enums import ChartType
-        fake = _FakeLlm('{"title": {"text": "x"}, "tooltip": {"trigger": "axis"}, '
-                        '"xAxis": {"type": "category", "data": ["A", "B"]}, '
-                        '"yAxis": {"type": "value"}, '
-                        '"series": [{"type": "bar", "data": [10, 20], '
-                        '"label": {"show": true, "formatter": "{d}%"}}]}')
-        option, _, _, _ = await ChartService().generateChartOption(
-            ChartType.BAR, ["name", "value"], _rows(["A", "B"], [10, 20]),
-            "占比", fake, _llmConfig(),
+    async def test_intent_kind_used_when_no_client_force(self) -> None:
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_ROWS,
+            intentKind=ChartType.LINE,
         )
-        # normalize 后 formatter 应该是 `{c}%`，不再是字面量 `{d}%`
-        assert option["series"][0]["label"]["formatter"] == "{c}%"
+        assert build.chartType is ChartType.LINE
+
+    async def test_impossible_forced_kind_degrades_instead_of_blank(self) -> None:
+        """在 1 维数据上强制热力图 → 确定性降级，而不是发一个画不出的图。
+
+        降级终点是表格（`coerceSpec` 只做「合法则留、非法则退表格」，不做
+        「猜一个相近的图型」）—— 猜错了同样是错，表格至少是诚实的。
+        """
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_ROWS,
+            forcedKind=ChartType.HEATMAP,
+        )
+
+        assert build.chartType is ChartType.TABLE
+        assert build.spec.kind is ChartType.TABLE
+        assert build.option["columns"] == ["SUPPLIER_NAME", "RCV_QTY_PUU"]
+
+
+class TestOptionIsRenderable:
+    async def test_bar_option_carries_categories_and_series(self) -> None:
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_ROWS,
+            plan=_plan(groupBy=("SUPPLIER_NAME",)),
+        )
+
+        assert build.option["xAxis"]["data"] == ["B125 浙江力航", "B019 温州圣特", "B153 天津精一"]
+        assert build.option["series"][0]["data"] == [9812, 7401, 5203]
+
+    async def test_no_color_is_sent_to_the_frontend(self) -> None:
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_ROWS,
+            plan=_plan(groupBy=("SUPPLIER_NAME",)),
+        )
+        assert "color" not in build.option
+
+    async def test_spec_is_returned_for_observability(self) -> None:
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_ROWS,
+            plan=_plan(groupBy=("SUPPLIER_NAME",)),
+        )
+        assert build.spec.kind is build.chartType
+        assert build.spec.columns == ("SUPPLIER_NAME", "RCV_QTY_PUU")
+
+
+class TestNeverRaises:
+    async def test_plan_none_still_produces_a_chart(self) -> None:
+        """多步的某些分支没有 plan —— 退化到「只看形状」也得出图，不能抛。"""
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"], data=_ROWS, plan=None
+        )
+
+        assert build.chartType in set(ChartType)
+        assert isinstance(build.option, dict)
+
+    async def test_session_failure_does_not_break_the_chart(self) -> None:
+        """system_config 抖动不该让图消失（阈值读取 fail-open）。
+
+        断言的是**不变量**：读不到阈值时选出的 kind 与读到默认值时完全一致。
+        硬编码某个 kind 只能证明「这次没崩」，证明不了「降级到默认值」。
+        """
+
+        class _BoomSession:
+            async def execute(self, stmt: object) -> Any:
+                raise RuntimeError("UndefinedTableError: system_config")
+
+        async def _run(session: Any):
+            return await ChartService().buildChart(
+                session=session,
+                plan=_plan(groupBy=("SUPPLIER_NAME",)),
+                columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+                data=_ROWS,
+                question="",
+                llmClient=_CountingClient("COMPARE"),
+                modelConfig=_FakeModelConfig(),
+            )
+
+        healthy = await _run(_FakeSession())
+        broken = await _run(_BoomSession())
+
+        assert broken.chartType is healthy.chartType
+        assert broken.option == healthy.option
+
+    async def test_no_llm_client_still_works(self) -> None:
+        """llmClient=None（如多步预算耗尽）→ 走规则判定，不抛。"""
+        build = await ChartService().buildChart(
+            session=_FakeSession(),
+            plan=_plan(),
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_ROWS,
+            question="",
+            llmClient=None,
+            modelConfig=None,
+        )
+
+        assert build.chartType is ChartType.BAR
+        assert (build.promptTokens, build.completionTokens) == (0, 0)

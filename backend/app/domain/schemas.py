@@ -1657,6 +1657,10 @@ class StepResultRead(CamelModel):
     data: list[dict] | None = None
     summary: str = ""
     error: str | None = None
+    # 该步自己的图（决策引擎按该步的 plan/列/数据选出）；失败步骤为 None。
+    # 与 ChatResponse.chartType/chartOption 同口径（CamelModel 出 chartType/chartOption）。
+    chart_type: ChartType | None = None
+    chart_option: dict | None = None
 
 
 class AgentSuggestion(CamelModel):

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import ChartType
 from app.domain.models import LlmConfig
+from app.domain.query_plan import QueryPlan
 from app.domain.schemas import ChatRequest
 from app.infrastructure.llm.base_client import LlmMessage
 # 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER。
@@ -180,31 +181,54 @@ class UsageMixin:
         pc: _PipelineContext,
         data: list[dict],
         intentChartType: ChartType | None = None,
+        plan: QueryPlan | None = None,
     ) -> tuple[Any, dict, int, int, int | None]:
-        """图表类型推荐 + option 生成（失败自动回退规则 option），有消耗时记录用量。
+        """选图型 + 渲染负载（失败自动降级表格），有消耗时记录用量。
 
         优先级：客户端显式 dto.chartType > 意图抽取 intentChartType（3-3，"换成柱状图"）
-        > 按数据形状自动推荐。
+        > 决策引擎按语义选型（见 chart_service.buildChart）。
+
+        **plan 是决策引擎的主要信号源**：占比（`aggregations[].formula`）、排名
+        （`rowLimit`/`sortBy`）、时间维（`groupBy`）都从它读。不传 plan 会让引擎
+        退化成「只看列形状」，也就是这轮改造要消灭的旧行为 —— 两个调用点都必须传。
 
         返回 5-tuple (chartType, option, promptTokens, completionTokens, cachedTokens)；
         4-2（feat-token-cache）：cachedTokens 由 chart_service 透传，供 _summarizeUsage
         按差额计费（chart 阶段占 token ~3%，但 bill 必须准确）。
         """
         columns = self._columns(data)
-        chartType = (
-            dto.chartType
-            if dto.chartType is not None
-            else intentChartType
-            if intentChartType is not None
-            else self._chart.recommendChartType(columns, data)
+        build = await self._chart.buildChart(
+            session=session,
+            plan=plan,
+            columns=columns,
+            data=data,
+            question=dto.question,
+            forcedKind=dto.chartType,
+            intentKind=intentChartType,
+            llmClient=pc.client,
+            modelConfig=pc.selected,
         )
-        option, chartPt, chartCt, chartCached = await self._chart.generateChartOption(
-            chartType, columns, data, dto.question, pc.client, pc.selected,
+        # 记账失败不能把图表（乃至整轮回答）一起带走，更不能让已知的 token 数丢失：
+        # 多步路径的兜底 except 会把 token 报成 0，账没记上、用量还少报。所以记账
+        # 自己兜住 —— 出事必须吵（error 日志，合规硬约束要求每次 LLM 调用可追溯），
+        # 但返回值照常带上已经发生的消耗。
+        try:
+            await self._recordChartUsage(
+                session, dto, pc.selected,
+                build.promptTokens, build.completionTokens, build.cachedTokens,
+            )
+        except Exception:
+            logger.error(
+                "图表用量记账失败（图表仍返回，用量仍计入本轮汇总）: session=%s prompt=%s completion=%s",
+                dto.sessionId, build.promptTokens, build.completionTokens, exc_info=True,
+            )
+        return (
+            build.chartType,
+            build.option,
+            build.promptTokens,
+            build.completionTokens,
+            build.cachedTokens,
         )
-        await self._recordChartUsage(
-            session, dto, pc.selected, chartPt, chartCt, chartCached,
-        )
-        return chartType, option, chartPt, chartCt, chartCached
 
     async def _generateAnswer(
         self, session: AsyncSession, dto: ChatRequest, pc: _PipelineContext,

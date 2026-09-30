@@ -120,6 +120,8 @@ def _step_result_to_read(result: StepResult) -> "StepResultRead":
         data=result.data if result.data else None,
         summary=result.summary,
         error=result.error,
+        chart_type=result.chart_type,
+        chart_option=result.chart_option,
     )
 
 
@@ -370,6 +372,9 @@ class _StepRun:
     cost: Decimal = Decimal("0")
     modelName: str | None = None
     plan: QueryPlan | None = None
+    # 本步是否用掉了语义标签分类器（>0 即用过）。多步一轮只允许一次分类调用，
+    # 调用方据此在 with_step 时把预算标记为已用。
+    chart_label_calls: int = 0
 
 
 # 断连兜底状态在 session.info 上的槽位键（H4）。用会话自身当载体，是因为

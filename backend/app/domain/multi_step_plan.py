@@ -118,6 +118,10 @@ class StepResult:
         data: SQL 执行结果行列表。
         summary: 该步的一句话小结，供后续步骤与汇总步骤引用。
         error: 步骤级错误描述（None 表示执行成功）。
+        chart_type: 该步的图表类型（决策引擎按该步自己的 plan/列/数据选出）；
+            失败步骤为 None —— 没有数据就没有图，发一个渲染不出来的 kind
+            只会让前端画空白。
+        chart_option: 该步的 ECharts option（**不含颜色**，前端套主题）。
     """
 
     step_index: int
@@ -129,6 +133,8 @@ class StepResult:
     error: str | None = None
     # 该步骤选中的本体类（供后续步骤参考：继续用同类表做 JOIN）
     selected_classes: list[str] = field(default_factory=list)
+    chart_type: str | None = None
+    chart_option: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -202,6 +208,9 @@ class StepExecutionContext:
     injection_char_limit_entity: int = _ENTITY_LIST_ITEM_LIMIT
     global_filters: GlobalFilters | None = None
     # feat-multistep-global-filter B 层：B 抽取的全局约束，nullable 兼容旧路径
+    chart_label_used: bool = False
+    # 本轮是否已用过语义标签分类器（多步每步都可能歧义，但只允许问一次：
+    # N 步 N 次额外往返的 token 与延迟都不划算，其余步骤按规则原判出图）。
 
     def inject_to_prompt(self, current_index: int) -> str:
         """把当前步骤之前的所有 StepResult 渲染为可注入 prompt 的文本片段。
@@ -295,8 +304,14 @@ class StepExecutionContext:
             )
         return "\n".join(lines)
 
-    def with_step(self, result: StepResult) -> "StepExecutionContext":
-        """返回包含新步骤的新上下文（不可变），原实例不受影响。"""
+    def with_step(
+        self, result: StepResult, *, chartLabelUsed: bool = False
+    ) -> "StepExecutionContext":
+        """返回包含新步骤的新上下文（不可变），原实例不受影响。
+
+        chartLabelUsed：本步是否用掉了那一轮唯一的语义标签调用。一旦为 True，
+        后续步骤不再问分类器（预算只累积不回退）。
+        """
         return StepExecutionContext(
             datasource_type=self.datasource_type,
             oracle_version=self.oracle_version,
@@ -308,4 +323,5 @@ class StepExecutionContext:
             # feat-multistep-global-filter B 层：跨步共享范围类约束必须沿用每一步
             # ——global_filters 在所有 with_step 衍生实例中保持一致。
             global_filters=self.global_filters,
+            chart_label_used=self.chart_label_used or chartLabelUsed,
         )

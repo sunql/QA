@@ -14,7 +14,7 @@ from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import IntentType
+from app.domain.enums import ChartType, IntentType
 from app.domain.models import LlmConfig, SessionQueryState
 from app.domain.multi_step_plan import (
     MAX_PLAN_DATA_STEPS,
@@ -44,6 +44,7 @@ from app.services.messages_zh import (
     MSG_MULTI_STEP_DEGRADE_PARTIAL,
     MSG_PLAN_TOO_MANY_STEPS,
 )
+from app.services.nl2sql_service import _readFloatConfig
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 
 logger = logging.getLogger(__name__)
@@ -354,6 +355,20 @@ class MultiStepMixin:
 
         # 后台存储查询向量（用子问题，便于 few-shot 精确匹配）
         self._spawnEmbedding(dto, final_sql, question=step_plan.sub_question)
+        chartType, chartOption, chartPt, chartCt, chartCached = await self._stepChart(
+            session, dto, pc, ctx, step_plan, data, outcome.plan,
+        )
+        if chartPt or chartCt:
+            # 图表阶段（标签分类）的 token 也是这一步花的，计入步骤总量（核心约束 #3）。
+            # 分类调用挤掉了旧版「让 LLM 写 option」那一次，故总量口径未变。
+            cacheHitMultiplier = await _readFloatConfig(
+                session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
+            )
+            tokens += chartPt + chartCt
+            cost += self._costFor(
+                pc.selected, chartPt, chartCt,
+                cachedTokens=chartCached, cacheHitMultiplier=cacheHitMultiplier,
+            )
         return _StepRun(
             result=StepResult(
                 step_index=step_plan.index,
@@ -363,9 +378,58 @@ class MultiStepMixin:
                 data=data,
                 summary=self._summarizeStepData(data),
                 selected_classes=list(outcome.plan.selectedClasses) if outcome.plan else [],
+                chart_type=chartType.value,
+                chart_option=chartOption,
             ),
             tokens=tokens, cost=cost, modelName=model_name, plan=outcome.plan,
+            chart_label_calls=1 if (chartPt or chartCt) else 0,
         )
+
+    async def _stepChart(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        pc: _PipelineContext,
+        ctx: StepExecutionContext,
+        step_plan: StepPlan,
+        data: list[dict],
+        plan: QueryPlan | None,
+    ) -> tuple[ChartType, dict, int, int, int | None]:
+        """为单个步骤出图（每条流水线一个 kind + 一份结构化的 option）。
+
+        与单步路径共用同一个 `_chartStep`：决策引擎按**该步自己的** plan/列/数据
+        选型，spec 由 plan 的 alias/目标派生，渲染器产出不含颜色的 option。
+
+        两处刻意的差异：
+
+        1. **问句用子问题**，不是用户的原始复合问题。「第二步的占比是多少」这类
+           线索只在子问题里；拿原始问句去问分类器，等于让它按别的问题判这一步。
+        2. **分类调用有预算**（`ctx.chart_label_used`）：多步每步都可能落进歧义
+           分支，N 步就是 N 次额外 LLM 往返。一轮只允许一次，其余步骤按规则原判
+           出图 —— 最坏是「不如意但画得出」，不会是空白图。
+
+        出图失败不阻断步骤：`buildChart` 自身设计为不抛，这里再兜一层，
+        降级成表格负载（**形态与 chartType 一致** —— 说 table 就给 {columns, rows}，
+        免得前端按 chartType 选了渲染器却拿到空 option 画空白）。
+        """
+        question = step_plan.sub_question or dto.question
+        stepDto = dto.model_copy(update={"question": question})
+        allowLabel = not ctx.chart_label_used
+        try:
+            return await self._chartStep(
+                session,
+                stepDto,
+                pc if allowLabel else replace(pc, client=None),
+                data,
+                None,
+                plan,
+            )
+        except Exception:
+            logger.warning(
+                "多步步骤出图失败，降级表格: step=%s", step_plan.index, exc_info=True,
+            )
+            columns = list(data[0].keys()) if data else []
+            return ChartType.TABLE, {"columns": columns, "rows": data}, 0, 0, 0
 
     async def _recallForStep(
         self, session: AsyncSession, pc: _PipelineContext, step_plan: StepPlan,
@@ -604,7 +668,7 @@ class MultiStepMixin:
             if run.modelName:
                 last_model_name = run.modelName
             completed.append(run.result)
-            ctx = ctx.with_step(run.result)
+            ctx = ctx.with_step(run.result, chartLabelUsed=run.chart_label_calls > 0)
             if run.result.sql is not None:
                 # 只有成功步骤才更新追问锚点：失败步骤没有 SQL/数据可作下一轮基准
                 last_plan = run.plan

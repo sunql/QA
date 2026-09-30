@@ -73,7 +73,12 @@ class _Resp:
 
 
 class _PipelineLlm:
-    """按 prompt 内容路由回复的假客户端：计划 JSON / SQL / 图表 JSON / 回答。"""
+    """按 prompt 内容路由回复的假客户端：计划 JSON / SQL / 标签分类 / 回答。
+
+    图表阶段现在**不产出 option**：决策引擎定 kind、渲染器画图，LLM 只在规则歧义
+    时给一个语义标签。分类调用落到最后的 else（回一句自然语言）—— 它不是白名单
+    标签，等价于「分类器答非所问」，用于走「保留规则原判」那条路径。
+    """
 
     def __init__(self) -> None:
         self.calls: list[list[tuple[str, str]]] = []
@@ -81,10 +86,7 @@ class _PipelineLlm:
     async def complete(self, messages: list, **kwargs) -> _Resp:
         self.calls.append([(m.role, m.content) for m in messages])
         system = messages[0].content
-        user = messages[1].content
-        if "图表类型" in user:
-            content = '{"title":{"text":"t"},"series":[{"type":"bar","data":[1,2]}]}'
-        elif "解析为查询计划" in system:
+        if "解析为查询计划" in system:
             # ReAct 第一阶段：返回一个能通过校验的空计划（classes 为空时无引用可校验）
             content = '{"target":"各供应商的收货数量汇总"}'
         elif "生成 SQL 时必须" in system:
@@ -429,10 +431,13 @@ class TestChatService:
         response = await service.processMessage(_dto("各供应商的收货数量汇总"), _FakeSession())
         assert response.intent == IntentType.QUERY.value
         assert "PRECEIPT" in (response.sql or "")
-        assert response.chartType == "pie"  # 1 字符串 + 1 数值、2 行 ≤ 6 → PIE
+        # 1 维 + 1 指标、无 formula → R12 分类比较（歧义 → 问一次标签分类器；
+        # 假客户端答的不是白名单标签 → 保留规则原判 BAR）。旧值是 pie：
+        # 那套「1 字符串 + 1 数值就画饼」的形状规则已被决策引擎取代。
+        assert response.chartType == "bar"
         assert response.chartOption is not None
         assert response.data == [{"NAME": "A", "QTY": Decimal(10)}, {"NAME": "B", "QTY": Decimal(20)}]
-        assert response.tokensUsed == 60  # 4 次调用 × 15（计划/校验 + SQL + 图表 + 回答）
+        assert response.tokensUsed == 60  # 4 次调用 × 15（计划/校验 + SQL + 标签分类 + 回答）
         assert response.cost > 0
         assert response.modelName == "test-model"  # 实际服务的回答模型
         # ReAct 计划随响应返回（前端展示用）

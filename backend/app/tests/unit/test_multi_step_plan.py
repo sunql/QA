@@ -220,6 +220,25 @@ class TestStepExecutionContext:
         with pytest.raises(Exception):
             ctx.datasource_type = "changed"  # type: ignore
 
+    def test_chart_label_budget_only_accumulates(self) -> None:
+        """标签分类预算：用掉就一直在，后续 step 不得把它重置回 False。"""
+        ctx = StepExecutionContext(
+            datasource_type="mysql",
+            oracle_version=None,
+            schema_prefix="test",
+            context="",
+        )
+        result = StepResult(step_index=0, description="d", sub_question="sq")
+
+        used = ctx.with_step(result, chartLabelUsed=True)
+        assert used.chart_label_used is True
+
+        # 下一步没有再用（False）也不能把预算还回去 —— 一轮只允许一次
+        stillUsed = used.with_step(
+            StepResult(step_index=1, description="d", sub_question="sq")
+        )
+        assert stillUsed.chart_label_used is True
+
     def test_max_multi_step_constant(self) -> None:
         assert MAX_MULTI_STEP == 5
 

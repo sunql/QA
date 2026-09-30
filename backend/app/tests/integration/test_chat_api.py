@@ -142,12 +142,16 @@ class TestChatApi:
         body = resp.json()
         assert body["intent"] == "query"
         assert "PRECEIPT" in body["sql"]
-        assert body["chartType"] == "pie"
+        # 1 维（NAME）+ 1 指标（QTY）、无 formula → R12 分类比较。
+        # 旧值是 pie（「1 字符串 + 1 数值就画饼」的形状规则）——那时 chartType 与
+        # 下一行的 series 类型**互相矛盾**（pie 配 bar），因为 option 是 LLM 自己
+        # 写的、与代码选的 kind 无关。现在两者都由同一个 spec 派生，必然一致。
+        assert body["chartType"] == "bar"
         assert body["chartOption"] is not None
         assert body["chartOption"]["series"][0]["type"] == "bar"
         assert len(body["data"]) == 2
         assert body["data"][0]["NAME"] == "A"
-        assert body["tokensUsed"] == 60  # 计划/校验 + SQL + 图表 + 回答 = 4 次调用 × 15
+        assert body["tokensUsed"] == 60  # 计划/校验 + SQL + 标签分类 + 回答 = 4 次调用 × 15
         assert body["cost"] > 0
         assert body["modelName"] == "test-model"  # camelCase 输出实际使用的大模型名称
         # ReAct 计划随响应返回（前端展示用）

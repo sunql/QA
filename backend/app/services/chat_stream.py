@@ -545,6 +545,8 @@ class StreamMixin:
                     sql=None,
                     data=step.data,
                     summary=step.summary,
+                    chart_type=step.chart_type,
+                    chart_option=step.chart_option,
                 ))
             yield StreamEvent(EVENT_TOKEN, {"content": featureResp.answer})
             yield StreamEvent(
@@ -611,7 +613,7 @@ class StreamMixin:
             )
 
         chartType, option, chartPt, chartCt, chartCached = await self._chartStep(
-            session, dto, pc, data, intentChartType
+            session, dto, pc, data, intentChartType, outcome.plan
         )
         totalTokens += chartPt + chartCt
         # 4-2（feat-token-cache 续）：chart 阶段 cachedTokens 透传到流式汇总的
@@ -940,7 +942,7 @@ class StreamMixin:
             if run.modelName:
                 last_model_name = run.modelName
             completed.append(run.result)
-            ctx = ctx.with_step(run.result)
+            ctx = ctx.with_step(run.result, chartLabelUsed=run.chart_label_calls > 0)
             if run.result.sql is not None:
                 # 只有成功步骤才更新追问锚点（与非流式同口径）
                 last_plan = run.plan
@@ -974,7 +976,7 @@ class StreamMixin:
 
     @staticmethod
     def _stepResultEvent(result: StepResult) -> StreamEvent:
-        """把 StepResult 转为 EVENT_STEP_RESULT 事件（含数据）。"""
+        """把 StepResult 转为 EVENT_STEP_RESULT 事件（含数据与该步的图）。"""
         return StreamEvent(EVENT_STEP_RESULT, {
             "stepIndex": result.step_index,
             "description": result.description,
@@ -983,6 +985,8 @@ class StreamMixin:
             "data": result.data if result.data else None,
             "summary": result.summary,
             "error": result.error,
+            "chartType": result.chart_type,
+            "chartOption": result.chart_option,
         })
 
     @staticmethod

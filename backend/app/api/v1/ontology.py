@@ -62,7 +62,7 @@ from app.services.embedding_service import EmbeddingService
 from app.services.ontology_batch_service import OntologyBatchService
 from app.services.ontology_service import OntologyService
 
-router = APIRouter(prefix="/ontology", tags=["ontology"])
+router = APIRouter(prefix="/ontology", tags=["ontology"], dependencies=[Depends(getCurrentUser)])
 # 模块级 EmbeddingService：与 chat 模块同构，由 main.shutdownCleanup 统一关闭
 _embeddingService = EmbeddingService()
 _ontologyService = OntologyService(embeddingService=_embeddingService)

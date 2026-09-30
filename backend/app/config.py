@@ -234,6 +234,40 @@ def jwtSecretInsecurityReason(secret: str) -> str | None:
     return None
 
 
+def productionAuthMisconfiguration(settings: Settings) -> str | None:
+    """返回生产环境鉴权配置错误的原因；无错误则返回 None（纯函数，启动自检用）。
+
+    判两种已知形态，二者互相独立：
+
+    1) ``APP_ENV=production`` 但 ``AUTH_MODE`` 不是 ``real``（漏设即默认 ``stub``）：
+       ``getCurrentUser`` 会把无头请求解析为 ``anonymous`` 而**不抛异常**，
+       router 级 ``Depends(getCurrentUser)`` 因此形同虚设——非公开路由匿名可达。
+    2) ``APP_ENV=production`` 但 ``AUTH_STUB_ENABLED`` 为真：任何客户端可伪造
+       ``X-User-Roles=admin`` 绕过 ACL。注意 ``AUTH_MODE=real`` 但
+       ``AUTH_STUB_ENABLED=1`` 时本条仍成立。
+
+    只做「返回原因」这一件事，不抛异常、不阻塞启动：是否 fail-fast 是调用方的
+    运行时行为决定，不属于本函数。
+    """
+    if settings.appEnv != "production":
+        return None
+    if settings.authMode != "real":
+        return (
+            f"APP_ENV=production 但 AUTH_MODE={settings.authMode!r}（应为 'real'）："
+            "stub 模式把无头请求解析为 anonymous 而不报错，router 级 "
+            "Depends(getCurrentUser) 形同虚设，非公开路由匿名可达。"
+            "生产必须设 AUTH_MODE=real。"
+        )
+    if settings.authStubEnabled:
+        return (
+            "APP_ENV=production 但 AUTH_STUB_ENABLED 为真："
+            "任何客户端可伪造 X-User-Roles=admin 绕过 ACL。"
+            "生产必须设 AUTH_STUB_ENABLED=0 + 反向代理剥离 X-User-* 头，"
+            "或接入 JWT/IdP 替换 getCurrentUser。"
+        )
+    return None
+
+
 @lru_cache
 def getSettings() -> Settings:
     """返回缓存的只读 Settings 单例。"""

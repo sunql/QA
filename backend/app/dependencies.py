@@ -106,54 +106,7 @@ async def getCurrentUser(
 
     # 优先级 1: Bearer JWT（两种模式都尝试解析）
     if authorization and authorization.lower().startswith("bearer "):
-        token = authorization[7:].strip()
-        try:
-            payload = decode_jwt(token)
-        except InvalidTokenError as exc:
-            logger.warning("JWT 解析失败: %s", exc)
-            raise PermissionDeniedError(MSG_TOKEN_INVALID) from exc
-
-        jti = payload.get("jti", "")
-        sub = payload.get("sub", "")
-        if not jti or not sub:
-            raise PermissionDeniedError(MSG_TOKEN_INVALID)
-
-        # 同步查 user_sessions 验证 session 未吊销（fail-closed）
-        from app.models.rbac import UserSession  # 避免循环依赖
-
-        session_row = (
-            await session.execute(
-                select(UserSession).where(
-                    UserSession.jti == jti,
-                    UserSession.revoked_at.is_(None),
-                    UserSession.expires_at > __import__("datetime").datetime.now(
-                        __import__("datetime").timezone.utc
-                    ),
-                )
-            )
-        ).scalar_one_or_none()
-        if session_row is None:
-            raise PermissionDeniedError(MSG_TOKEN_REVOKED)
-
-        # 查 DB user
-        try:
-            user_id = int(sub)
-        except ValueError as exc:
-            raise PermissionDeniedError(MSG_TOKEN_INVALID) from exc
-        user = await session.get(User, user_id)
-        if user is None or not user.enabled:
-            raise PermissionDeniedError(MSG_AUTH_REQUIRED)
-
-        roles, departments = await _loadDbRolesAndOrgs(session, user_id)
-        return CurrentUser(
-            userId=user.username,
-            tenantId=xTenantId or "default",
-            roles=roles,
-            departments=departments,
-            dbUserId=user_id,
-            jti=jti,
-            tokenExp=payload.get("exp"),
-        )
+        return await authenticateBearer(authorization, xTenantId, session)
 
     # 优先级 2: stub 头解析
     if settings.authMode == "real" and not settings.allowStubWhenReal:
@@ -182,6 +135,83 @@ async def getCurrentUser(
         roles=roles,
         departments=departments,
         dbUserId=dbUser.id,
+    )
+
+
+async def authenticateBearer(
+    authorization: str,
+    tenantId: str | None,
+    session: AsyncSession,
+) -> CurrentUser:
+    """校验 ``Authorization: Bearer <jwt>`` 并返回 CurrentUser。
+
+    从 ``getCurrentUser`` 的 Bearer 分支**原样抽出**（2026-09-30 安全批次），
+    让不经过 FastAPI 依赖注入的调用方（``/mcp`` 的 ASGI 中间件）复用同一条
+    身份链路 —— 否则各写一份必然漂移（本仓已有 docs 漂移先例）。
+
+    与 ``getCurrentUser`` 的差别只有「谁来剥前缀」：本函数接收**完整头值**
+    （形如 ``"Bearer eyJ..."``），内部自己剥；调用方需先确认 ``bearer `` 前缀
+    （前缀判定仍在 ``getCurrentUser`` 里，语义不变）。
+
+    Args:
+        authorization: 完整 Authorization 头值（含 ``Bearer `` 前缀）。
+        tenantId: X-Tenant-Id 头值；None → ``"default"``。
+        session: 已打开的 AsyncSession（本函数只读，不 commit）。
+
+    Returns:
+        校验通过的 CurrentUser（含 ``jti`` / ``tokenExp`` / ``dbUserId``）。
+
+    Raises:
+        PermissionDeniedError: 验签失败 / jti 或 sub 缺失 / session 已吊销或过期
+            / 用户不存在或已禁用。消息常量与 ``getCurrentUser`` 逐字一致。
+    """
+    token = authorization[7:].strip()
+    try:
+        payload = decode_jwt(token)
+    except InvalidTokenError as exc:
+        logger.warning("JWT 解析失败: %s", exc)
+        raise PermissionDeniedError(MSG_TOKEN_INVALID) from exc
+
+    jti = payload.get("jti", "")
+    sub = payload.get("sub", "")
+    if not jti or not sub:
+        raise PermissionDeniedError(MSG_TOKEN_INVALID)
+
+    # 同步查 user_sessions 验证 session 未吊销（fail-closed）
+    from app.models.rbac import UserSession  # 避免循环依赖
+
+    session_row = (
+        await session.execute(
+            select(UserSession).where(
+                UserSession.jti == jti,
+                UserSession.revoked_at.is_(None),
+                UserSession.expires_at > __import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                ),
+            )
+        )
+    ).scalar_one_or_none()
+    if session_row is None:
+        raise PermissionDeniedError(MSG_TOKEN_REVOKED)
+
+    # 查 DB user
+    try:
+        user_id = int(sub)
+    except ValueError as exc:
+        raise PermissionDeniedError(MSG_TOKEN_INVALID) from exc
+    user = await session.get(User, user_id)
+    if user is None or not user.enabled:
+        raise PermissionDeniedError(MSG_AUTH_REQUIRED)
+
+    roles, departments = await _loadDbRolesAndOrgs(session, user_id)
+    return CurrentUser(
+        userId=user.username,
+        tenantId=tenantId or "default",
+        roles=roles,
+        departments=departments,
+        dbUserId=user_id,
+        jti=jti,
+        tokenExp=payload.get("exp"),
     )
 
 

@@ -7,7 +7,7 @@
 - **关联变更**：[fix-nl2sql-derived-metric-formula-required](../fix-nl2sql-derived-metric-formula-required/summary.md)（占比类必须带 formula 的硬约束，正是它把本问题逼出来的前置）
 - **迁移版本**：**无**
 - **SSOT 出处**：`Harness/wiki/nl2sql-engine.md`（本变更新增 §语句形态 formula 的校验口径，并顺手修正该文件里 `validatePlan` 的过期路径与一处不实描述）
-- **commit**：见本目录提交
+- **commit**：`ef4d5d2`（分支 `fix/nl2sql-structural-formula-guard`）
 
 ---
 

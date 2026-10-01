@@ -87,6 +87,62 @@ class TestBoundedChartOption:
         assert boundedChartOption(None) is None
         assert boundedChartOption({"rows": "not a list"}) == {"rows": "not a list"}
 
+    def test_decimal_rows_become_json_safe(self) -> None:
+        """TABLE 负载存的是原始行：NUMERIC 列是 Decimal，裸 json.dumps 会炸，必须归一。"""
+        import json
+        from decimal import Decimal
+
+        option = {
+            "columns": ["NAME", "QTY"],
+            "rows": [{"NAME": "A", "QTY": Decimal("10")}],
+        }
+
+        bounded = boundedChartOption(option)
+
+        assert bounded["rows"][0]["QTY"] == 10.0
+        assert isinstance(bounded["rows"][0]["QTY"], float)
+        json.dumps(bounded)  # 不抛 TypeError 即通过
+
+    def test_datetime_and_date_become_isoformat(self) -> None:
+        """DATE/TIMESTAMP 列经 SQLAlchemy 返回 date/datetime，须归一为 ISO 字符串。"""
+        import json
+        from datetime import date, datetime
+
+        option = {
+            "columns": ["NAME", "AT"],
+            "rows": [{"NAME": "A", "AT": datetime(2026, 10, 1, 12, 0, 0)}],
+            "meta": {"day": date(2026, 10, 1)},
+        }
+
+        bounded = boundedChartOption(option)
+
+        assert bounded["rows"][0]["AT"] == "2026-10-01T12:00:00"
+        assert bounded["meta"]["day"] == "2026-10-01"
+        json.dumps(bounded)
+
+    def test_unknown_type_stringified_not_dropped(self) -> None:
+        """兜底：未知类型落 str(value)，留可读痕迹，不静默丢值。"""
+
+        class _Unknown:
+            def __str__(self) -> str:
+                return "unknown-marker"
+
+        bounded = boundedChartOption({"v": _Unknown()})
+
+        assert bounded["v"] == "unknown-marker"
+
+    def test_nested_decimal_is_normalized(self) -> None:
+        """归一递归进嵌套容器，只测顶层会漏掉递归分支。"""
+        import json
+        from decimal import Decimal
+
+        option = {"rows": [{"deep": {"v": Decimal("1.5")}}]}
+
+        bounded = boundedChartOption(option)
+
+        assert bounded["rows"][0]["deep"]["v"] == 1.5
+        json.dumps(bounded)
+
 
 class TestBoundedTableOption:
     def test_truncates_rows_over_the_cap_and_marks_it(self) -> None:
@@ -124,7 +180,7 @@ class TestBoundedTableOption:
             "rows": [{"NAME": i} for i in range(_PERSIST_MAX_TABLE_ROWS)],
         }
 
-        assert boundedTableOption(option) == option
+        assert boundedTableOption(option) is option
         assert "truncated" not in boundedTableOption(option)
 
     def test_decimal_rows_become_json_safe(self) -> None:

@@ -5,7 +5,8 @@
 但那里是「多轮上下文与会话持久化」的编排层 —— 纯归一逻辑混在编排里，既让
 `chat_context` 越过 800 行上限，也让「改了一个转换规则」的 diff 看起来像在改流程。
 
-不可变：这些函数都**返回新对象**，绝不原地改调用方手里那份 —— 它还要发给前端。
+不可变：这些函数**绝不原地改**调用方手里那份（它还要发给前端）；无归一/截断时
+原样返回入参，有变化时才返回新对象。
 """
 
 from __future__ import annotations
@@ -42,13 +43,18 @@ def chartTypeName(chartType: Any) -> str | None:
 
 
 def boundedChartOption(chartOption: dict | None) -> dict | None:
-    """把 TABLE 负载的 rows 截到上界再落库；其余 kind 原样返回。
+    """把 chart 负载归一到可落库形态：JSON 安全归一 + rows 截到上界。
 
-    不可变：截断时返回新 dict（不改调用方手里那份，它还要发给前端）。
-    只在 `rows` 确实是 list 且超限时动手，不做类型猜测 —— 负载形状由服务端
-    渲染器保证，这里只做体量兜底。
+    TABLE 类负载存的是原始行（`chart_renderer._buildTable` 返回全量 data），
+    NUMERIC 列在 SQLAlchemy 手里是 `Decimal`，裸 ``json.dumps`` 会抛
+    ``TypeError`` —— 与 `boundedTableOption` 同走 `_jsonSafe` 归一
+    （`Decimal→float`、`datetime/date→isoformat`、dict/list 递归）。ECharts 类
+    （bar/line/pie）渲染器已归一成 float，`_jsonSafe` 原样透传。
+
+    不可变：有归一/截断时才返回新 dict；无变化时原样返回入参（调用方手里那份
+    还要发给前端，不能被就地改）。
     """
-    return _boundedRows(chartOption)
+    return _jsonSafe(_boundedRows(chartOption))
 
 
 def boundedTableOption(tableOption: dict | None) -> dict | None:
@@ -59,8 +65,9 @@ def boundedTableOption(tableOption: dict | None) -> dict | None:
     SQLAlchemy JSONB 序列化器是裸 ``json.dumps``（无 default），遇 `Decimal` 直接
     抛 ``TypeError: Object of type Decimal is not JSON serializable``。这里把
     `Decimal → float`（与图表渲染器 `toNumber` 同口径）、`datetime/date → isoformat`
-    、dict/list 递归归一，str/int/float/bool/None 原样 —— 与 `boundedChartOption`
-    不同：后者吃的是渲染器已归一成 float 的 chartOption，这里吃的是原始 data。
+    、dict/list 递归归一，str/int/float/bool/None 原样 —— TABLE 负载存的是原始
+    data（`Decimal`/`datetime`），ECharts 类渲染器已走 `toNumber` 归一成 float；
+    两路在此合流，已安全的值原样透传。
 
     **上界**：rows 截到 `_PERSIST_MAX_TABLE_ROWS`（200），超限置 truncated=True。
     平时 `assembleTableOption` 已按 FULL_DATA_THRESHOLD（默认 100）截过一轮并置
@@ -96,8 +103,11 @@ def _boundedRows(payload: dict | None) -> dict | None:
 def _jsonSafe(value: Any) -> Any:
     """把 SQL 原始值递归归一为 JSON 可序列化值（供 JSONB 落库）。
 
-    不可变：容器返回新对象，绝不原地改；标量（str/int/float/bool/None）原样返回。
-    未知类型落 `str(value)`（宁可留个可读痕迹，也不静默丢值）。
+    不可变：容器只在确有子值发生变化时才重建（无变化时原样返回入参，保持对象
+    同一性，让调用方能把「无归一」与「是同一份对象」划等号）；绝不原地改。标量
+    （str/int/float/bool/None）原样返回；`Decimal→float`、`datetime/date→isoformat`；
+    tuple 恒产出 list（类型本身就是变化）；未知类型落 `str(value)`（宁可留个可读
+    痕迹，也不静默丢值）。
     """
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -106,7 +116,18 @@ def _jsonSafe(value: Any) -> Any:
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, dict):
-        return {k: _jsonSafe(v) for k, v in value.items()}
+        changed = False
+        result: dict = {}
+        for key, item in value.items():
+            normalized = _jsonSafe(item)
+            result[key] = normalized
+            if normalized is not item:
+                changed = True
+        return result if changed else value
     if isinstance(value, (list, tuple)):
-        return [_jsonSafe(v) for v in value]
+        normalized = [_jsonSafe(item) for item in value]
+        changed = isinstance(value, tuple) or any(
+            newItem is not oldItem for newItem, oldItem in zip(normalized, value)
+        )
+        return normalized if changed else value
     return str(value)

@@ -167,8 +167,8 @@ class TestChatApi:
         """可视化输出策略（case ②③）：单步响应带 tableOption + visualRationale，
         且 steps[0] 与顶层两字段逐字一致。
 
-        chartType 强制 "bar" → R_FORCED_CLIENT → params.kind 是枚举真值 "bar"
-        （不是 "ChartType.BAR"）。这把枚举归一钉在 HTTP 出口。
+        chartType 强制 "bar" → R_FORCED_CLIENT → params.kind 是客户端收到的线格式
+        裸字符串 "bar"（不是 "ChartType.BAR" 枚举名）。
         """
         config, ds = await _seed(dbSession)
         _installFakes(monkeypatch, config)

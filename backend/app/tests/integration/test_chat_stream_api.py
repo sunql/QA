@@ -151,7 +151,7 @@ class TestChatStreamApi:
         self, client, dbSession, monkeypatch
     ) -> None:
         """可视化输出策略（case ①）：流式单步的 chart 事件与 step_result 帧都带
-        tableOption/visualRationale，且 params.kind 逐字是枚举真值 "bar"。
+        tableOption/visualRationale，且 params.kind 是客户端收到的线格式裸字符串 "bar"。
 
         单步流式发两条帧（chart + step_result 收尾），两条帧的字段同口径——
         漏一条就是「计划卡里没依据」。
@@ -211,7 +211,7 @@ class TestChatStreamApi:
         # 0105 图表进最终报告：图必须**真的落进库**。只测 schema 与读路径会漏掉
         # 这一层 —— 多处 `_storeSessionMessages` 调用点任何一个漏传，读取侧照样
         # 全绿（读到 None 而已），而导出 PDF 与历史回放会整批没有图。
-        assert msgs[1].chart_type == "bar", "枚举必须已归一为裸字符串"
+        assert msgs[1].chart_type == "bar", "落库契约：chart_type 列存裸字符串 \"bar\"（不是 \"ChartType.BAR\" 枚举名）"
         assert msgs[1].chart_option is not None
         assert msgs[0].chart_type is None, "user 行不该带图"
         # 0107：表负载 + 判断依据同轮落库 —— 回放/导出要能离线重建，不能只活在实时响应。

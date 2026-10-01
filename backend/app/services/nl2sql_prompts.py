@@ -460,6 +460,8 @@ def _buildSystemPrompt(
         extraRules.append(dialect.nullOrderingRule)
     if dialect.timeBucketRule:
         extraRules.append(dialect.timeBucketRule)
+    if dialect.aggregateRule:
+        extraRules.append(dialect.aggregateRule)
     # 行数决策权交给计划（避免 SQL 阶段自行追加 LIMIT 让"有范围不限制"失效）
     limitRule = dialect.limitRule + (_PLAN_ROW_LIMIT_RULE if plan is not None else "")
     return (

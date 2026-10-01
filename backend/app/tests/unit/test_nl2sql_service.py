@@ -1257,16 +1257,14 @@ class TestSupplementJoinPath:
         assert len(result.joins) == 2
 
 
-def _buildJoinedClasses():
-    """测试 supplementJoinPath 的多类 fixture：A、B、C 三类 + 必要属性。"""
-    return [
-        _buildClass("A", "ZJTH.A", alias="表 A", props=[{"property_name": "A_NAME", "source_column": "A_NAME"}]),
-        _buildClass("B", "ZJTH.B", alias="表 B", props=[{"property_name": "B_NAME", "source_column": "B_NAME"}]),
-        _buildClass("C", "ZJTH.C", alias="表 C", props=[
-            {"property_name": "C_A_ID", "source_column": "C_A_ID"},
-            {"property_name": "C_B_ID", "source_column": "C_B_ID"},
-        ]),
-    ]
+class TestDialectRuleInjection:
+    """方言驱动的 prompt 规则注入：LIMIT / JOIN 示例 / schema 前缀 / 标识符 / NULL 排序 / 时间粒度。
+
+    结构修复（2026-10-02）：本类原有的 17 个用例此前**从未被收集**。
+    `_buildJoinedClasses()` 曾被写成模块级函数却夹在类方法之间，导致其后所有
+    `async def test_*` 落进该函数体内、位于 `return` 之后成为死代码（pytest 一分不收）。
+    现已把该 helper 移到模块级末尾，用例回归本类。见 changes/…-oracle-aggregate-guard。
+    """
 
     async def test_defaults_to_oracle_when_type_omitted(self) -> None:
         fake = _FakeLlm(["```sql\nSELECT 1 FROM DUAL\n```"])
@@ -1397,6 +1395,43 @@ def _buildJoinedClasses():
         assert "不得以数字开头" not in system
         assert "AVG_PRICE_2025" not in system
 
+    async def test_oracle_injects_aggregate_rule(self) -> None:
+        """Oracle 方言注入「聚合与标量子查询不得混排」规则（修复 ORA-00937）。
+
+        真机回归（2026-10-02）：问「5月份供货量最多的三家供应商所供货物总量占比」，
+        Top-N 占比的 SQL 被写成
+            SELECT SUM(t.QTY) / (SELECT SUM(s.QTY) FROM supplier_qty s) FROM topn t
+        Oracle 报 ORA-00937（不是单组分组函数）；PostgreSQL 允许该写法。
+        已在生产库实测：把两侧都改成标量子查询、外层 FROM DUAL 即通过。
+        """
+        fake = _FakeLlm(["```sql\nSELECT 1 FROM DUAL\n```"])
+        service = Nl2SqlService()
+        cls = _buildClass("PRECEIPT", "ZJTH.PRECEIPT")
+        await service.generateSql("收货数量", [cls], fake, _llmConfig(), maxRetries=0)
+        system = fake.calls[0][0][1]
+        assert "ORA-00937" in system
+        # 可操作方向：症状 + 改法 + **适用范围限定**
+        assert "标量子查询" in system
+        # 不断言 "FROM DUAL"：基础规则 9 的示例本就含 `SELECT * FROM DUAL`，
+        # 该子串对每个方言恒真、无区分力（code review LOW）。改断言限定语本身 ——
+        # 它是防止本条把「逐组占比」也推成 FROM DUAL 单行的关键（对应 review MEDIUM）。
+        assert "另一个结果集" in system
+
+    async def test_postgresql_omits_aggregate_rule(self) -> None:
+        """非 Oracle 方言不注入该规则（PostgreSQL 允许聚合与标量子查询混排）。
+
+        规则是 Oracle 特有约束，注入到 PG 只会是噪音 —— 与 identifierRule 同款处理。
+        """
+        fake = _FakeLlm(["```sql\nSELECT 1\n```"])
+        service = Nl2SqlService()
+        cls = _buildClass("PRECEIPT", "PRECEIPT")
+        await service.generateSql(
+            "收货数量", [cls], fake, _llmConfig(), maxRetries=0,
+            datasourceType=DataSourceType.POSTGRESQL,
+        )
+        system = fake.calls[0][0][1]
+        assert "ORA-00937" not in system
+
     async def test_oracle_injects_nulls_rule(self) -> None:
         """Oracle 方言注入 NULL 排序规则：ORDER BY ... DESC 需 NULLS LAST，防跨年 top-N 抓 NULL 行。"""
         fake = _FakeLlm(["```sql\nSELECT 1 FROM DUAL\n```"])
@@ -1468,6 +1503,18 @@ def _buildJoinedClasses():
         system = fake.calls[0][0][1]
         assert "时间粒度" in system
         assert "DATE_FORMAT" in system
+
+
+def _buildJoinedClasses():
+    """测试 supplementJoinPath 的多类 fixture：A、B、C 三类 + 必要属性。"""
+    return [
+        _buildClass("A", "ZJTH.A", alias="表 A", props=[{"property_name": "A_NAME", "source_column": "A_NAME"}]),
+        _buildClass("B", "ZJTH.B", alias="表 B", props=[{"property_name": "B_NAME", "source_column": "B_NAME"}]),
+        _buildClass("C", "ZJTH.C", alias="表 C", props=[
+            {"property_name": "C_A_ID", "source_column": "C_A_ID"},
+            {"property_name": "C_B_ID", "source_column": "C_B_ID"},
+        ]),
+    ]
 
 
 class TestPerGroupTopNPrompts:

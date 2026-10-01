@@ -3,11 +3,11 @@
 - **日期**：2026-10-01
 - **作者**：Claude / 启琳
 - **Phase**：可视化输出（后端 `visual_rationale` / `visual_payload` / `chat_*` 契约贯穿 + 前端 `chartContract` / `ChartRenderer` / `MessageItem` / i18n）
-- **状态**：done（代码已就绪；**用户已授权部署**，尚未执行 —— alembic 0107 仍未应用，见 §6 残留）
+- **状态**：**已部署并验证**（2026-10-01）。生产 `alembic` = **`0107`**、两列已建；前后端同批上线；**e2e 8/8 全过**；`seed_system_config` 已执行（`system_config` 22→27 行）。详见 §6 实测记录。
 - **关联变更**：[2026-09-30-chart-decision-engine](../2026-09-30-chart-decision-engine/summary.md)（规则表 + spec 的前置）、[2026-09-30-chart-in-final-report](../2026-09-30-chart-in-final-report/summary.md)（0105 多步顶层继承图，本次**反转**其多步部分）
-- **迁移版本**：**0107**（`session_message` 加 `table_option` / `visual_rationale` 两列；**尚未应用，部署时 prod 先备份**）
+- **迁移版本**：**0107**（`session_message` 加 `table_option` / `visual_rationale` 两列；**2026-10-01 已应用于生产**，应用前已取 dump 并用 `pg_restore --list` 验证可读）
 - **SSOT 出处**：`Harness/wiki/chart-rendering.md`（本变更更新 §线上契约 + §前端）
-- **commit**：`4f277d2`（Task 1 rationale）→ `5cda713`+`aedaaf6`（Task 2 阈值治理）→ `5e5beb1`（Task 3 装配）→ `eb01dde`（Task 4 契约贯穿）→ `7bc50c0`（Task 5 多步去图）→ `4345371`（Task 6 落库 0107）→ `39b0d37`（Task 10 Decimal 修复）→ `8683897`（Task 7 前端收窄）→ `0c76156`（Task 8 前端渲染+i18n）→ `e05b085`（Task 9 e2e 断言 + 文档）→ `7e6d510`（最终评审修复批：KPI 依据 + NaN 守卫 + 注释/守卫清理）
+- **commit**：`4f277d2`（Task 1 rationale）→ `5cda713`+`aedaaf6`（Task 2 阈值治理）→ `5e5beb1`（Task 3 装配）→ `eb01dde`（Task 4 契约贯穿）→ `7bc50c0`（Task 5 多步去图）→ `4345371`（Task 6 落库 0107）→ `39b0d37`（Task 10 Decimal 修复）→ `8683897`（Task 7 前端收窄）→ `0c76156`（Task 8 前端渲染+i18n）→ `e05b085`（Task 9 e2e 断言 + 文档）→ `7e6d510`（最终评审修复批：KPI 依据 + NaN 守卫 + 注释/守卫清理）→ `cd0746d`（修复轮 2：L1 **无值**路径改 `R00_EMPTY_TABLE`，不再谎称「以指标卡呈现」+ 删两条永真断言）→ `1fbe66e`（docstring 收敛：去掉「枚举归一」虚假声明）
 
 ---
 
@@ -76,17 +76,46 @@
 | **Task 9 本任务** | `node --check scripts/e2e_smoke/chart_report_e2e.mjs` → **通过**（语法自检，确保不是坏文件）；e2e 断言逐条与 Tasks 1–8 实际实现核对（见 §6 残留） |
 | 最终评审修复批 `7e6d510` | 后端 unit 整层 `pytest app/tests/unit -q` → **49 failed / 3365 passed / 1 skipped**，**既有红集合不变**（`3361→3365` 系本批新增用例，非把红转绿）；F1/F2 均**先红后绿**；本批单测 68 passed + 集成 7 passed。本批**未改前端**，故未跑前端套件 |
 
-## 6. 残留 / 未完成（deferred, awaiting authorization）
+## 6. 部署记录与残留（2026-10-01 **已部署并验证**）
 
-1. **部署**（决策 7 同批）：prod 备份 → `alembic upgrade head`（0107）→ 后端镜像重建 → `docker compose build --no-cache frontend` → 起容器 → **e2e 8 步全绿**。
-   - **用户已于 2026-10-01 授权**（原话「代码开发，并测试完毕，可以部署」）。**尚未执行**。
+1. **部署**（决策 7 同批）：prod 备份 → `./scripts/deploy_backend.sh`（灌代码 + 重启）→ `docker compose build --no-cache frontend` → 起前端 → **e2e 8 步全绿**。
+   - **⚠️ 迁移不是手工步骤 —— 容器自己跑**（2026-10-01 实测确认）：`docker/Dockerfile.backend:79` 的 CMD 是
+     `sh -c "uv run alembic upgrade head && uv run uvicorn app.main:app ..."`。⇒ `deploy_backend.sh` 的
+     `docker restart` 会**在容器内**按 `&&` 顺序先迁移、后起服务（迁移失败则 uvicorn 根本不启动，
+     不会出现「新代码 × 旧 schema」）。**不要在宿主手工跑 `alembic upgrade head`** —— `env.py` 只认
+     `DATABASE_URL`，宿主默认指向生产库，绕过容器是自找麻烦（见 memory `qa-system-alembic-targets-prod`）。
+     `scripts/deploy_backend.sh` 的 `SYNC_DIRS` 含 `alembic:/app/alembic`，故 0107 的版本文件会随代码一起灌进容器。
+   - **✅ 已于 2026-10-01 执行完毕**（用户原话授权「代码开发，并测试完毕，可以部署」）。四项独立复核**全过**：
+     生产 `alembic_version` = **`0107`**；`session_message` 两列为 `jsonb`；容器内 `grep -c table_option models.py` → **3**（新代码）；
+     日志 `Running upgrade 0106 -> 0107`。**前端**：`--no-cache` + `--build-arg NPM_REGISTRY=npmmirror` 构建 exit 0 → 起容器；
+     **bundle 内容核对**（不只信「容器重启了」）：`index-5VLnvL_N.js` 里 `R00_EMPTY_TABLE`/`SUMMARY_TEXT_ONLY`/`R_FORCED_CLIENT` 各 2 处（zh+en）。
+     **代理链路**：首页 200；经 nginx `/api/v1/health` → 200（**无 upstream IP 陈旧 502**）；`/api/v1/auth/me` → **403**（应用层拒绝 ⇒ 证明请求确实到了后端）。
+   - **✅ `seed_system_config` 已执行**（2026-10-01，用户批准）：五个受治理键此前在生产**只是没有行**，而 `PUT` 对不存在的 key 返 **404**、
+     admin UI 的 key 字段**只读** ⇒ **不 seed 就等于不可调**（决策 8 只落地了一半）。执行后 `system_config` **22 → 27 行**，
+     值均等于代码默认（**行为无变化**），无覆盖告警 ⇒ 纯插入、未冲掉任何调优。
+     ⚠️ 该脚本是**覆盖式 upsert**，重跑会把已存在的值重置回默认 —— **不得放进启动路径或定时任务**。
    - **⚠️ 唯一的硬顺序约束**：**迁移必须先于新后端容器启动**。ORM（`models.py`）无条件映射这两列，且 `session_history_service` 显式 SELECT 它们 ⇒ HEAD 代码撞 `0106` schema 会让**每一次** `session_message` 读写都抛 `UndefinedColumn`，**chat 与历史回放都会坏**。上面的顺序已满足，**只是不能调换**。反向（先迁移、后换镜像）无害。
    - **部署前只读预检实测（2026-10-01）**：生产 `qa-postgres` = alembic **`0106`**、`session_message` 两列均不存在；**测试库 `qa_metadata_test` 已是 `0107`** ⇒ 该迁移**已被真实执行过一次**，升级路径是验证过的而非仅写出来的；`qa-backend` 容器**仍跑旧代码**（`grep -c table_option app/domain/models.py` → 0）⇒ 当前不存在「新代码 × 旧 schema」的危险组合。
-   - **⚠️ 备份闸门未满足**：最新 dump 为 `2026-09-30 22:32`（约 21 小时前），**当天没有任何备份**。`crontab` 里 `0 8`/`0 20` 两条 `backup_pg.sh` 条目**都存在**，但 `backup.log` **无任何 08:00/20:00 记录**，且已排除「陈旧锁静默跳过」（锁分支会写 ERROR 行、`.backup.lock` 也不存在）⇒ **调度从未触发**（与 memory `qa-system-cron-silently-broken` 吻合；现有 3 份 dump 全是手工跑的）。对本次「纯加 nullable 列」的迁移风险可控，但**生产长期无定时备份**是独立运维问题，须另案处理；部署仍应先取一份新 dump。
-2. **e2e 执行**：`scripts/e2e_smoke/chart_report_e2e.mjs` 已更新断言（多步顶层无图 / 每步有图+折叠表 / 汇总依据可见 / 单步三件套），**未执行**（须部署后跑，本任务不跑）。
+   - **✅ 备份闸门已满足**（2026-10-01 20:14 实测）：手工跑 `./scripts/backup_pg.sh` 成功产出
+     `backups/pg/qa_metadata_2026-10-01_2014.dump`（13.5 MB），并已用 `pg_restore --list` 验证**可读且可用**
+     （768 TOC 条目，含 `session_message`）—— 未验证过的备份不算备份。
+   - **⚠️ 但「定时备份」仍从未触发**（独立运维问题，非本次引入）：此前最新 dump 停在 `2026-09-30 22:32`（约 21 小时前），**当天没有任何备份**。`crontab` 里 `0 8`/`0 20` 两条 `backup_pg.sh` 条目**都存在**，但 `backup.log` **无任何 08:00/20:00 记录**，且已排除「陈旧锁静默跳过」（锁分支会写 ERROR 行、`.backup.lock` 也不存在）⇒ **调度从未触发**（与 memory `qa-system-cron-silently-broken` 吻合）。
+     **本次手工跑成功 ⇒ 脚本本身没问题，坏的是调度**（这条排除了「脚本有 bug」的替代解释）。存储仍须另案处理。
+2. **✅ e2e 已执行：8/8 全过（0 失败）**，关键证据（非只报绿勾）：
+   Step 4 `chartType=hbar, 数据行=12, tableOption=有, rationale=R12_CATEGORY_BAR`；
+   Step 5 canvas=1 + 折叠数据表面板=1（三件套确实渲染）；
+   Step 6 导出 PDF 98 KB 且含 `/Subtype /Image`；
+   Step 7–8 刷新回放 + `/messages?tail=true` 的 assistant 行均带 `chartType=hbar`（证明 0107 两列**在真实读写**）。
+   ⚠️ **本次跑的是脚本默认的「单步」问题**；**多步分支未跑**（需换 `E2E_QUESTION` 成能拆 ≥2 数据步的问法）。
 3. **既有测试债务**（**非本次引入**，勿写成「已修复」）：后端 unit 49 红、chat 集成 16 红、前端 2 红；前端 `coverage.thresholds` 80% 本就失败（其他特性的 0% 覆盖）。
 4. **deferred Minor**（Task 7 记录）：`chatStore.ts` 4 处站点未补 `normalizeChartType`/`asChartOption`（既有路径不一致，扩大爆炸半径，刻意不碰）。
-5. **0107 尚未应用**：当前状态是「代码已就绪、待部署」，文档不把「已部署/已上线」写成既成事实。
+5. **0107 已应用**（2026-10-01）：生产 `alembic_version` = `0107`，两列已建。此前「代码已就绪、待部署」的状态描述**已过期**。
+6. **新增 2 条 LOW（纯文档，范围重审发现，**非**代码缺陷）**：① `chat_chart_persist.py:31-38` 的 `chartTypeName()` docstring 理由**错**
+   （「忘了写会静默存进 `"ChartType.BAR"`」—— 实测 asyncpg 走实例字符串内容，落库是 `bar`）；**函数不删**：它仍有非 str 兜底
+   （`chartTypeName(42)=="42"`）、单点显式化、以及若 `ChartType` 将来不再是 `(str, Enum)` 则纯 `Enum` 成员**无法编码**的保护价值。
+   ② `schemas.py:1774` 注释仍写「params.kind 是枚举真值」。
+7. **`R00_EMPTY_TABLE` 在「有行但值非数值」子情形下文案略偏**：`查询无结果` 字面不准确（行是有的；`不生成图表` 那半句对）。
+   用户仍能从答案正文看到真实值 ⇒ 属「说明不精确」而非「假话」。若该情形常见，再加专用 code。
 
 ## 7. 风险与后续
 

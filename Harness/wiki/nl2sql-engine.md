@@ -512,6 +512,7 @@ plan 与 sql 两个阶段共用 `_renderStatePart(priorState)` 模块级函数�
   | `aggregateRule` | Oracle | **ORA-00937** | SELECT 列表中聚合函数与标量子查询不得并列；Top-N 占比把分子分母都写成标量子查询、外层 `FROM DUAL` |
 
   PostgreSQL/MySQL 不注入 Oracle 特有规则（如 `identifierRule`、`aggregateRule`）——两者都允许相应写法，注入只会是噪音。规则「按方言注入、而非全局注入」是本表的成立前提。
+- **类型分发的两层校验（2026-10-02）**：入口由 `DataSourceCreate.type` 枚举 DTO 挡（API 422）；消费边界由 `coerceDatasourceType`（`nl2sql_dialects.py`）挡——`_buildPipelineContext` 加载 ds 后立即严格校验，脏值（手工改库/seed）抛 `ValidationError`（消息含数据源名 + 脏值 + 指引），在任何 LLM 调用之前拒绝。`resolveDialect` 的「未知回退 Oracle」保留为**最后防线**，不是第一反应——给 MySQL 库生成 ROWNUM 执行必错。`oracle_version` 为空时按 12c+（FETCH FIRST）处理，**11g 库必须填版本**。变更记录：`changes/fix-datasource-type-failfast/summary.md`。
 
 - **Top-N 占比的分母过滤陷阱（2026-10-02，prompt 规则修复）**：SQL 逻辑执行顺序是 `WHERE → GROUP BY → 窗口函数`，因此
   `SELECT SUM(x) / SUM(SUM(x)) OVER (PARTITION BY ...) FROM ranked WHERE RN<=N` 的分母**只剩被过滤后的 N 行**，占比恒为 1（100%）。

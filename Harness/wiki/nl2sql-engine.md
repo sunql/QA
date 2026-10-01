@@ -513,6 +513,13 @@ plan 与 sql 两个阶段共用 `_renderStatePart(priorState)` 模块级函数�
 
   PostgreSQL/MySQL 不注入 Oracle 特有规则（如 `identifierRule`、`aggregateRule`）——两者都允许相应写法，注入只会是噪音。规则「按方言注入、而非全局注入」是本表的成立前提。
 
+- **Top-N 占比的分母过滤陷阱（2026-10-02，prompt 规则修复）**：SQL 逻辑执行顺序是 `WHERE → GROUP BY → 窗口函数`，因此
+  `SELECT SUM(x) / SUM(SUM(x)) OVER (PARTITION BY ...) FROM ranked WHERE RN<=N` 的分母**只剩被过滤后的 N 行**，占比恒为 1（100%）。
+  正确形态：分母来自**未被过滤**的结果集——单独 CTE 汇总总量再 JOIN，或在过滤前用窗口函数算好总数。该陷阱与方言无关（PG 同样如此），
+  故约束写在**基础规则**：计划阶段规则 4「简单形式」标注了适用范围（无 Top-N 过滤），SQL 阶段规则 8 给出否定性禁令。
+  真机事故：同一问题多次运行时对时错（LLM 非确定性），100% 那次模型还编造了「物料不超过 3 种」的业务解释 —— **SQL 算错 + LLM 幻觉解释**两层叠加。
+  变更记录：`changes/fix-nl2sql-topn-share-denominator/summary.md`。
+
 ## 准确性增强
 
 - 注入数据库 ER 图描述（从 Ontology Service 动态拉取）。

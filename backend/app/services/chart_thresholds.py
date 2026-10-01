@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.data_summary import FULL_DATA_THRESHOLD
+
 logger = logging.getLogger(__name__)
 
 # 饼图/环形图超过这个行数就该换横向柱状（读不清的同心扇区没有价值）。
@@ -37,11 +39,11 @@ _CHART_HEATMAP_MIN_COVERAGE_DEFAULT = 0.6
 _CHART_TOP_N_MAX_DEFAULT = 20
 
 
-async def _readPositiveInt(session: AsyncSession, key: str, default: int) -> int:
+async def readPositiveIntConfig(session: AsyncSession, key: str, default: int) -> int:
     """读 system_config[key] 并解析为正整数；缺席/格式错/非正 → default。
 
     与治理规范同口径：`text()` 直写 key（不走 ORM，避免 identity map 缓存），
-    读失败只 warning 不抛。三个 int 阈值共用此实现，避免四份复制粘贴漂移。
+    读失败只 warning 不抛。四个 int 阈值共用此实现，避免复制粘贴漂移。
     """
     try:
         row = await session.execute(
@@ -65,19 +67,19 @@ async def _readPositiveInt(session: AsyncSession, key: str, default: int) -> int
 
 async def _getChartPieMaxRows(session: AsyncSession) -> int:
     """读 CHART_PIE_MAX_ROWS；缺席/格式错/非正返默认。"""
-    return await _readPositiveInt(session, "CHART_PIE_MAX_ROWS", _CHART_PIE_MAX_ROWS_DEFAULT)
+    return await readPositiveIntConfig(session, "CHART_PIE_MAX_ROWS", _CHART_PIE_MAX_ROWS_DEFAULT)
 
 
 async def _getChartHbarMinRows(session: AsyncSession) -> int:
     """读 CHART_HBAR_MIN_ROWS；缺席/格式错/非正返默认。"""
-    return await _readPositiveInt(
+    return await readPositiveIntConfig(
         session, "CHART_HBAR_MIN_ROWS", _CHART_HBAR_MIN_ROWS_DEFAULT
     )
 
 
 async def _getChartTopNMax(session: AsyncSession) -> int:
     """读 CHART_TOP_N_MAX；缺席/格式错/非正返默认。"""
-    return await _readPositiveInt(session, "CHART_TOP_N_MAX", _CHART_TOP_N_MAX_DEFAULT)
+    return await readPositiveIntConfig(session, "CHART_TOP_N_MAX", _CHART_TOP_N_MAX_DEFAULT)
 
 
 async def _getChartHeatmapMinCoverage(session: AsyncSession) -> float:
@@ -106,6 +108,14 @@ async def _getChartHeatmapMinCoverage(session: AsyncSession) -> float:
     except Exception:
         logger.warning("读取 %s 失败，返默认值 %.2f", key, default, exc_info=True)
         return default
+
+
+async def loadFullDataThreshold(session: AsyncSession) -> int:
+    """读 FULL_DATA_THRESHOLD；缺席/格式错/非正返默认（数据清单全量/摘要分界）。
+
+    默认值直接 import 自 data_summary 的 FULL_DATA_THRESHOLD（SSOT，不抄字面量）。
+    """
+    return await readPositiveIntConfig(session, "FULL_DATA_THRESHOLD", FULL_DATA_THRESHOLD)
 
 
 @dataclass(frozen=True)

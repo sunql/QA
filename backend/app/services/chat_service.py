@@ -1871,7 +1871,13 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                 raise
 
     @staticmethod
-    def _buildAnswerPrompt(question: str, sql: str, data: list[dict], history: str = "") -> str:
+    def _buildAnswerPrompt(
+        question: str,
+        sql: str,
+        data: list[dict],
+        history: str = "",
+        full_data_threshold: int | None = None,
+    ) -> str:
         """构造回答阶段的 user prompt；history 为最近对话历史（1-5，可为空串）。
 
         历史注入支持跨轮连贯与对比（如"和上个月比"），复用 _buildContextPrompt 的
@@ -1881,8 +1887,12 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         数值列 min/max/avg/sum + 分类列 distinct + 头尾样本。LLM 拿到的是"全量统计 +
         关键样本"，prompt token 受控但能基于真实数据回答"共 X 行 / X 个供应商 /
         数量范围 Y~Z"。空数据 → {"total": 0, ...}（仍注入「未命中」提示）。
+
+        full_data_threshold（Task 2）：FULL_DATA_THRESHOLD 迁 system_config 后，
+        由持 session 的调用方现读后传入；None 时 summarize_data 回落模块默认。
+        本方法是 @staticmethod（无 session），不在此读 DB。
         """
-        summaryDict = summarize_data(data)
+        summaryDict = summarize_data(data, fullDataThreshold=full_data_threshold)
         summary = json.dumps(summaryDict, ensure_ascii=False, default=str)
         # 空结果提示：查询执行成功但未返回行时，可能是条件过严或生成逻辑有误。
         # 引导 answer LLM 如实说明「未命中」，避免把查询未命中误报成业务数据不存在。

@@ -27,6 +27,7 @@ from app.domain.multi_step_plan import (
 from app.domain.query_plan import QueryPlan
 from app.domain.schemas import ChatRequest, ChatResponse
 from app.infrastructure.llm.base_client import LlmMessage
+from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.chat_context import InheritedState, TimeHint
 from app.services.chat_helpers import (
     _MSG_STEP_UNANSWERABLE,
@@ -605,12 +606,15 @@ class MultiStepMixin:
                     logger.warning("多步数据步骤全部失败，跳过汇总步骤")
                     continue
                 # 汇总步骤：跳过 SQL 执行，调用 StepAggregator
+                # Task 2：await 不能写进 lambda，阈值在 lambda 外先算好再捕获。
+                full_data_threshold = await loadFullDataThreshold(session)
                 agg_resp = await self._callWithFallback(
                     session, dto.sessionId, pc.configs, pc.selected, "answer",
                     lambda cfg: self._stepAggregator.aggregate(
                         dto.question, multiStepPlan, completed,
                         self._llmFactory(cfg), cfg.model_name,
                         history=pc.contextPrompt,
+                        full_data_threshold=full_data_threshold,
                     ),
                     forced=pc.forcedModel,
                 )

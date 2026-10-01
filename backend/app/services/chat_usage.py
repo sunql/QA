@@ -32,6 +32,7 @@ from app.services.chat_helpers import (
     _summarizeExecutionError,
 )
 from app.services.chat_stream_output import _ANSWER_SYSTEM_PROMPT
+from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.llm_retry_policy import (
     attachRetryGenTokens as _attachRetryGenTokens,
     consumedTokens,
@@ -235,6 +236,9 @@ class UsageMixin:
         data: list[dict], sql: str,
     ) -> tuple[Any, LlmConfig, tuple[int, int]]:
         """自然语言回答（失败时降级到最便宜可用模型重试一次）；用户明确选模型时跳过降级。"""
+        # Task 2：阈值在持 session 的 async 调用方现读（await 不能写进 lambda，
+        # 故在构造 lambda 前先算好再捕获）。
+        full_data_threshold = await loadFullDataThreshold(session)
         answerResp, answerConfig, wasted = await self._callWithFallback(
             session, dto.sessionId, pc.configs, pc.selected, "answer",
             lambda cfg: self._llmFactory(cfg).complete(
@@ -244,6 +248,7 @@ class UsageMixin:
                         role="user",
                         content=self._buildAnswerPrompt(
                             dto.question, sql, data, history=pc.contextPrompt,
+                            full_data_threshold=full_data_threshold,
                         ),
                     ),
                 ],

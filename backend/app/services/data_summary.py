@@ -64,6 +64,7 @@ def summarize_data(
     tail_size: int = DEFAULT_TAIL_SAMPLE_SIZE,
     numeric_columns_cap: int = DEFAULT_NUMERIC_COLUMNS_CAP,
     string_columns_cap: int = DEFAULT_STRING_COLUMNS_CAP,
+    fullDataThreshold: int | None = None,
 ) -> dict[str, Any]:
     """构造 SQL 结果的结构化摘要。
 
@@ -73,6 +74,9 @@ def summarize_data(
         tail_size: 尾部样本行数；<=0 视为 0
         numeric_columns_cap: NUMBER 列统计的列数上限；<=0 表示不限
         string_columns_cap: STRING/TIME 列 distinct 统计的列数上限；<=0 表示不限
+        fullDataThreshold: 全量/摘要分界行数（总行数 <= 此值时全量放 samples.head）；
+            None 时回落模块常量 FULL_DATA_THRESHOLD。由持 session 的调用方现读
+            system_config 后传入（本模块保持零 IO 纯函数）。
 
     Returns:
         {
@@ -130,10 +134,12 @@ def summarize_data(
     for col in categorical_cols:
         distinct_counts[col] = len({row.get(col) for row in data})
 
-    # v2 2026-09-18：数据量小时全量展示（≤ FULL_DATA_THRESHOLD 行），
+    # v2 2026-09-18：数据量小时全量展示（≤ 阈值行），
     # 避免 head/tail 采样把中间行丢了（如 27 行时 B125 全在中间）。
     # 超过阈值才退回 head 5 + tail 5 + truncated=True。
-    if total <= FULL_DATA_THRESHOLD:
+    # Task 2：阈值可由调用方显式传入（system_config 现读值）；None 回落模块默认。
+    threshold = FULL_DATA_THRESHOLD if fullDataThreshold is None else fullDataThreshold
+    if total <= threshold:
         head_sample = list(data)
         tail_sample = []
         truncated = False

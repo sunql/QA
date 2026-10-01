@@ -36,6 +36,7 @@ from app.services.intent_service import IntentResult
 # 与 chat_service.processMessage 同口径——在 _streamQuery 入口一次性读一次，
 # 整条流水线复用，避免每段 _costFor 调用都查 DB。
 from app.services.nl2sql_service import _readFloatConfig
+from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.stream_events import (
     ErrorType,
     EVENT_CHART,
@@ -866,12 +867,16 @@ class StreamMixin:
                     "description": step_plan.description,
                     "subQuestion": step_plan.sub_question,
                 })
+                # Task 2：await 不能写进 lambda，阈值在 lambda 外先算好再捕获
+                # （与非流式 _executeMultiStep 同口径，两条路径同源不漂移）。
+                full_data_threshold = await loadFullDataThreshold(session)
                 agg_resp = await self._callWithFallback(
                     session, dto.sessionId, pc.configs, pc.selected, "answer",
                     lambda cfg: self._stepAggregator.aggregate(
                         dto.question, multiStepPlan, completed,
                         self._llmFactory(cfg), cfg.model_name,
                         history=pc.contextPrompt,
+                        full_data_threshold=full_data_threshold,
                     ),
                     forced=pc.forcedModel,
                 )

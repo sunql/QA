@@ -142,7 +142,7 @@ option，但渲染器自己产出的 formatter 仍要正确）。`toNumber(value
 | `StepResultRead` / `EVENT_STEP_RESULT` | 每步各带 `chartType` + `chartOption` + `tableOption` + `visualRationale`（多步每步出图，决策 3；失败步骤四字段全 None） |
 | **多步顶层** | `chartType`/`chartOption`/`tableOption` = **None**（0107 反转，见下）；`visualRationale` = `{"code": "SUMMARY_TEXT_ONLY", "params": {}}` |
 | **多步流式** | 数据步逐条发 `step_result`（各步自带图/表/依据）；汇总步纯文字，`done` 帧携带 `visualRationale`（SUMMARY_TEXT_ONLY）。**不再发 `EVENT_CHART`** —— `_reportChartEvent` 已删 |
-| L1 KPI 直答 | 命中即返回 `chartType=kpi` + `{"kpi": {...}}`；值不能转成数字时不发卡（空壳卡比不发更糟）。`tableOption` 为 None（决策 4：KPI 不附表） |
+| L1 KPI 直答 | 命中即返回 `chartType=kpi` + `{"kpi": {...}}`；值不能转成数字时不发卡（空壳卡比不发更糟）。`tableOption` 为 None（决策 4：KPI 不附表）。**0107 起带 `visualRationale = R01_SINGLE_VALUE_KPI` 并一并落库** —— 原先该快路径 `_buildKpiChart` 只返 2-tuple、**绕开整个 rationale 机制**，于是**出了图却没有任何判断依据**（实时与回放都没有），直接违反「不论是否输出图，必须输出一个判断逻辑」；修复见 commit `7e6d510` |
 | `chartOption` 语义 | 仍是 ECharts option，**但不含颜色**；`kpi` 类型不是 ECharts，负载为 `{"kpi": {...}}` |
 | `tableOption` 语义 | `{"columns", "rows", "truncated?"}` —— 图之外的明细表投影，**仅图形类 kind 附**；TABLE 的表已在 chartOption、KPI 单值卡没有表，这两种 kind 下为 None。截断阈值复用 `FULL_DATA_THRESHOLD`（默认 100），落库再按 `_PERSIST_MAX_TABLE_ROWS`（200）兜底 |
 | `visualRationale` 语义 | `{"code": str, "params": dict}` 结构化判断依据（为什么用这个图 / 为什么不画）。**后端只出 code + 插值变量，文案在前端 i18n**（21 个 code）。**不进 PDF**（决策 6） |
@@ -157,6 +157,27 @@ option，但渲染器自己产出的 formatter 仍要正确）。`toNumber(value
 0107 起改为：**顶层最终回答无图** —— `chartType`/`chartOption`/`tableOption` 全 None，只带
 `visualRationale = SUMMARY_TEXT_ONLY`（「汇总为文字结论，各步骤图表见上方」），解释为什么
 这里没有图。**单步不受影响**：最终回答本身就是那一步，图 + 折叠数据表 + 依据照常。
+
+#### ⚠️ 被接受的代价（**已拍板，不要当 bug 修**）
+
+各数据步的图**只活在响应里**（`step_result`/`steps[]`），**从不落库** —— `session_message` 只有顶层一行，
+而顶层行现在 `chart_type = NULL`。⇒ **多步对话在服务端消息流里一张图都没有**，两个可见后果：
+
+- **PDF 导出零图**：`collectExportCharts.ts` 是按**服务端消息流**的 `message.chartType` 挑图截图（见下方「导出报告里的图」），
+  多步对话因此**导不出任何图**。0105 时这里还有「最后一个数据步」那张。
+- **刷新回放零图**：`chatStore.toChatMessage` **不重建 `steps`**（导入表无 steps 路径、`ChatMessageRead` 也不带），
+  多步对话回放为**纯文字 + SUMMARY_TEXT_ONLY**，哪里都没有图。「展开步骤卡看各步图」**只对未刷新的实时会话成立**。
+- **实时（未刷新）视图不受影响**：各数据步的图/表/依据仍在**步骤卡**里正常显示。
+
+**💡 这是用户 2026-10-01 明确选择「接受」的取舍**（方案 1）—— **主动放弃了 0105
+「为多步对话导出最后一步那张图」的能力**。被否决的两个替代方案（记录在案以免反复重提）：
+
+| 方案 | 内容 | 为什么否决 |
+|---|---|---|
+| 2 | 在汇总行持久化「最后一个成功数据步」的图（即恢复 0105 行为） | **重新引入「实时 vs 回放」不对称** —— 刷新后汇总行有图、实时却不显示，等于把决策 1 想消除的「继承图误导」换个地方复现 |
+| 3 | 持久化**每一步**的图 | 需要新的存储形态决策（新表或 JSONB 数组），成本远超收益 |
+
+e2e 已按本决定断言多步 `charts.length === 0`（**与决定一致，不要改这个断言**）。
 
 ## 前端
 

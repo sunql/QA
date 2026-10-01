@@ -2,6 +2,9 @@
 
 > 2026-09-30 重写。旧文描述的是「LLM 直接写 ECharts option」的契约，那套已经不在了；
 > 变更记录见 `Harness/changes/2026-09-30-chart-decision-engine/`。
+> 2026-10-01 补充「可视化输出策略」（图/表/图+表 + 判断依据）：契约新增 `tableOption` /
+> `visualRationale`，多步顶层继承图**反转**为无图；变更记录见
+> `Harness/changes/2026-10-01-visual-output-strategy/`。
 
 ## 原则
 
@@ -130,27 +133,42 @@ option，但渲染器自己产出的 formatter 仍要正确）。`toNumber(value
 
 ## 线上契约
 
-`chartType` + `chartOption` + `data` 三个字段名与语义**保持不变**，前端保持透传。
+`chartType` + `chartOption` + `data` 三个字段名与语义**保持不变**，前端保持透传；
+**0107 起新增** `tableOption` + `visualRationale` 两个负载字段，随同下发的三条路径一起走。
 
 | 位置 | 说明 |
 |---|---|
-| `ChatResponse` | `chartType: ChartType \| None` + `chartOption: dict \| None` |
-| `StepResultRead` / `EVENT_STEP_RESULT` | 每步各带 `chartType` + `chartOption`（多步每步出图，决策 3） |
-| **多步顶层** | `chartType`/`chartOption`/`data` = **最后一个成功数据步骤**那张（0105）。判据复用 `run.result.sql is not None`，与 `last_plan`/`last_sql`/`last_data` 同处；**全部步骤失败 → `None`，不是空图** |
-| **多步流式** | 回答 token 之后、`done` 之前发**一次** `EVENT_CHART`（`_reportChartEvent`），两条终点各一次。**有图才发**。不走 `done` 是因为前端 `StreamSummary` 不读 `steps`，而 `chart` 事件前端已完整支持 = 零前端改动 |
-| L1 KPI 直答 | 命中即返回 `chartType=kpi` + `{"kpi": {...}}`；值不能转成数字时不发卡（空壳卡比不发更糟） |
+| `ChatResponse` | `chartType: ChartType \| None` + `chartOption: dict \| None` + `tableOption: dict \| None` + `visualRationale: dict \| None`（后两者 0107 新增，仅单步查询路径填值，其余意图为 None） |
+| `StepResultRead` / `EVENT_STEP_RESULT` | 每步各带 `chartType` + `chartOption` + `tableOption` + `visualRationale`（多步每步出图，决策 3；失败步骤四字段全 None） |
+| **多步顶层** | `chartType`/`chartOption`/`tableOption` = **None**（0107 反转，见下）；`visualRationale` = `{"code": "SUMMARY_TEXT_ONLY", "params": {}}` |
+| **多步流式** | 数据步逐条发 `step_result`（各步自带图/表/依据）；汇总步纯文字，`done` 帧携带 `visualRationale`（SUMMARY_TEXT_ONLY）。**不再发 `EVENT_CHART`** —— `_reportChartEvent` 已删 |
+| L1 KPI 直答 | 命中即返回 `chartType=kpi` + `{"kpi": {...}}`；值不能转成数字时不发卡（空壳卡比不发更糟）。`tableOption` 为 None（决策 4：KPI 不附表） |
 | `chartOption` 语义 | 仍是 ECharts option，**但不含颜色**；`kpi` 类型不是 ECharts，负载为 `{"kpi": {...}}` |
+| `tableOption` 语义 | `{"columns", "rows", "truncated?"}` —— 图之外的明细表投影，**仅图形类 kind 附**；TABLE 的表已在 chartOption、KPI 单值卡没有表，这两种 kind 下为 None。截断阈值复用 `FULL_DATA_THRESHOLD`（默认 100），落库再按 `_PERSIST_MAX_TABLE_ROWS`（200）兜底 |
+| `visualRationale` 语义 | `{"code": str, "params": dict}` 结构化判断依据（为什么用这个图 / 为什么不画）。**后端只出 code + 插值变量，文案在前端 i18n**（21 个 code）。**不进 PDF**（决策 6） |
+
+### 多步顶层行为反转（0105 → 0107）
+
+0105 的「多步顶层 = 最后一个成功数据步骤的图」是为了让图进最终回答（导出 PDF / 历史回放）。
+但每个数据步的卡片已各挂各的图（决策 3），顶层再重复同一张图是**冗余**：多步汇总的语义是
+**文字结论**，图表是各数据步骤的产物，继承来的那张「最后一步的图」会与各步骤的图**重复，
+且误导**读者以为汇总步骤自身产出了图。
+
+0107 起改为：**顶层最终回答无图** —— `chartType`/`chartOption`/`tableOption` 全 None，只带
+`visualRationale = SUMMARY_TEXT_ONLY`（「汇总为文字结论，各步骤图表见上方」），解释为什么
+这里没有图。**单步不受影响**：最终回答本身就是那一步，图 + 折叠数据表 + 依据照常。
 
 ## 前端
 
 | 位置 | 契约 |
 |---|---|
-| `frontend/src/types/chat.ts` | `ChartType` 联合类型（11 类 + table） |
-| `frontend/src/utils/chartContract.ts` | **图表字段的唯一收窄口径**（0105 抽出）。`VALID_CHART_TYPES` **必须与后端同步** —— 漏同步的表现是「图不见了但没有任何报错」（未知类型被静默置 null）。**为什么单独一个模块**：收窄规则描述的是**线上契约**不是 HTTP 传输，三个消费者分属三层（SSE/HTTP 响应、历史回放、导出挑图）；留在 `api/chat.ts` 会让 `stores/chatStore` 为一个谓词反向依赖 HTTP 客户端 |
-| `frontend/src/api/chat.ts` | 消费上面的收窄，**流式与非流式同一道**（`normalizeChatResponse` / `normalizeStepResult` / `chart` 事件） |
-| `frontend/src/components/chat/MessageItem.tsx` | 渲染门为 `Boolean(chartType)`（不是 `chartType && chartOption`：KPI 卡没有 ECharts option 语义） |
-| `frontend/src/components/chat/ChartRenderer.tsx` | `table` → antd Table；`kpi` → `KpiCard` + CSV 导出；其余 → `ReactECharts` + PNG 导出。**表格自取自足**：`data` 缺省时用 `chartOption.rows/columns` 渲染（多步每步不铺全量 data）。**表格带 `truncated: true` 时在下方补一行次要色说明**（落库截行）—— PDF 标注了而前端不标，刷新后那张表看起来就是完整结果，连 CSV 导出的也是截断份 |
-| `frontend/src/components/chat/MultiStepPlanCard.tsx` | 每个 step 挂同一个 `ChartRenderer`（图跟着步骤走，不错位） |
+| `frontend/src/types/chat.ts` | `ChartType` 联合类型（11 类 + table）+ `TablePayload` / `VisualRationale` 两接口（0107） |
+| `frontend/src/utils/chartContract.ts` | **图表字段的唯一收窄口径**（0105 抽出）。`VALID_CHART_TYPES` **必须与后端同步** —— 漏同步的表现是「图不见了但没有任何报错」（未知类型被静默置 null）。**为什么单独一个模块**：收窄规则描述的是**线上契约**不是 HTTP 传输，三个消费者分属三层（SSE/HTTP 响应、历史回放、导出挑图）；留在 `api/chat.ts` 会让 `stores/chatStore` 为一个谓词反向依赖 HTTP 客户端。0107 新增 `asTablePayload` / `asVisualRationale`（**不内置 code 白名单** —— rationale 漏一个 code 只是说明行退化成英文码，代价不对称） |
+| `frontend/src/api/chat.ts` | 消费上面的收窄，**流式与非流式同一道**（`normalizeChatResponse` / `normalizeStepResult` / `chart` 事件 / `done` 事件的 `visualRationale`） |
+| `frontend/src/components/chat/MessageItem.tsx` | 渲染门为 `Boolean(chartType)`（不是 `chartType && chartOption`：KPI 卡没有 ECharts option 语义）。**消息级 `visualRationale`**（多步汇总 SUMMARY_TEXT_ONLY）渲染为答案下方次要色一行，**只在无顶层图时兜底**，避免与 ChartRenderer 的依据画两行 |
+| `frontend/src/components/chat/ChartRenderer.tsx` | `table` → antd Table；`kpi` → `KpiCard` + CSV 导出；其余 → `ReactECharts` + PNG 导出。**表格自取自足**：`data` 缺省时用 `chartOption.rows/columns` 渲染（多步每步不铺全量 data）。**表格带 `truncated: true` 时在下方补一行次要色说明**（落库截行）。0107：图形类在图下方加 antd `Collapse`「数据表」（`defaultActiveKey=[]` **默认折叠**，`tableOption` 为 null 不渲染）+ rationale 次要色一行（**所有形态都渲染**，含「为什么不生成图表」）；TABLE/KPI 不重复出表 |
+| `frontend/src/components/chat/MultiStepPlanCard.tsx` | 每个 step 挂同一个 `ChartRenderer`（图跟着步骤走，不错位），并透传该步的 `tableOption` / `visualRationale` |
+| `frontend/src/utils/visualRationale.ts` + `i18n/zh-CN.ts`/`en-US.ts` | `visualRationaleText(rationale, t)` 把结构化依据转成文案；`params.kind` 先经 `chatPanel.chartTypes.<kind>` 本地化图型名再插值；缺 key 回退显示 code 原文。i18n 各一套 `chat.visual.<code>`（**21 个 code**），插值用**单花括号** `{rows}`/`{kind}`（本仓 i18next 被覆写为 `{`/`}`，双花括号不插值） |
 | `frontend/src/theme/chartTheme.ts` | `applyChartTheme(option, token)` —— 不可变注入调色板/轴色/文字色/tooltip 底色；调用方显式写的 `itemStyle.color`（语义色）优先不被覆盖 |
 | `frontend/src/theme/tokens.ts` | `chartPalette`（两套主题各一套分类系列色） |
 | `frontend/src/utils/chartSnapshot.ts` | `renderChartPng(option)` → `data:image/png;base64,...`。离屏容器**显式 800×420**（零尺寸容器里 ECharts 拿到 0×0 画布）、**固定亮色 token + 白底**（PDF 页面是白的）、关动画、`finally` 里 dispose + 移除容器、**任何异常返回 `null`**。`needsSnapshot(kind)` 对 `table`/`kpi` 返回 false |

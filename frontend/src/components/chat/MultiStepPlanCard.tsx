@@ -2,6 +2,7 @@ import { Collapse, Spin, Steps, Tag, Typography } from "antd";
 import type { MultiStepStep, StepStatus } from "../../types/chat";
 import { useTranslation } from "../../i18n";
 import ChartRenderer from "./ChartRenderer";
+import QueryPlanCard from "./QueryPlanCard";
 import SqlPreview from "./SqlPreview";
 
 const { Text } = Typography;
@@ -81,6 +82,12 @@ export default function MultiStepPlanCard({ steps, currentStepIndex }: MultiStep
                     </Text>
                     {s.status === "done" || s.status === "error" ? (
                       <div style={{ marginTop: 6 }}>
+                        {/* 每步自己的查询计划（仅成功步骤有值） */}
+                        {s.queryPlan ? (
+                          <div style={{ marginBottom: 6 }}>
+                            <QueryPlanCard plan={s.queryPlan} dataQuality={null} />
+                          </div>
+                        ) : null}
                         {s.sql ? <SqlPreview sql={s.sql} /> : null}
                         {s.summary ? (
                           <Text type="secondary" style={{ display: "block", marginTop: 4 }}>

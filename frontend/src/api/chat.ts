@@ -50,6 +50,7 @@ export interface StepResultView {
   error?: string | null;
   chartType?: ChartType | null;
   chartOption?: Record<string, unknown> | null;
+  queryPlan?: QueryPlan | null;
 }
 
 function isStepIndex(value: unknown): value is number {
@@ -186,6 +187,8 @@ export interface StreamSummary {
   graphTraversal?: import("../types/graphTraversal").GraphTraversalRead | null;
   // Phase 7 G4：未指名 Agent 语义路由建议卡片（中置信命中时随 done 帧透传）
   suggestedAgent?: import("../types/chat").AgentSuggestion | null;
+  // 多步时顶层查询计划
+  queryPlan?: import("../types/chat").QueryPlan | null;
 }
 
 // data_quality 事件负载（Phase 1.4）：每张 selectedClass 对应一条 badge

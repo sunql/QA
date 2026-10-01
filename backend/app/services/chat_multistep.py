@@ -381,6 +381,7 @@ class MultiStepMixin:
                 selected_classes=list(outcome.plan.selectedClasses) if outcome.plan else [],
                 chart_type=chartType.value,
                 chart_option=chartOption,
+                query_plan=outcome.plan,
             ),
             tokens=tokens, cost=cost, modelName=model_name, plan=outcome.plan,
             chart_label_calls=1 if (chartPt or chartCt) else 0,
@@ -672,6 +673,7 @@ class MultiStepMixin:
                     affinityStatus=affinity,
                     classRecall=pc.recall,
                     hypotheses=hypotheses or None,
+                    queryPlan=last_plan,
                 )
 
             # 数据查询步骤：共用 helper（生成 → 执行 + 回灌重试），失败隔离为 error 行
@@ -716,6 +718,7 @@ class MultiStepMixin:
             data=last_data or None,
             modelName=last_model_name,
             hypotheses=hypotheses or None,
+            queryPlan=last_plan,
         )
 
     async def _finalizeMultiStepDegrade(

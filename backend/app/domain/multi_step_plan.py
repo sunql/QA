@@ -122,6 +122,7 @@ class StepResult:
             失败步骤为 None —— 没有数据就没有图，发一个渲染不出来的 kind
             只会让前端画空白。
         chart_option: 该步的 ECharts option（**不含颜色**，前端套主题）。
+        query_plan: 该步的 NL2SQL 查询计划（供前端 QueryPlanCard 渲染）；失败/汇总步骤为 None。
     """
 
     step_index: int
@@ -135,6 +136,7 @@ class StepResult:
     selected_classes: list[str] = field(default_factory=list)
     chart_type: str | None = None
     chart_option: dict | None = None
+    query_plan: "QueryPlan | None" = None
 
 
 @dataclass(frozen=True)

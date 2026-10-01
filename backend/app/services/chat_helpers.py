@@ -124,6 +124,7 @@ def _multiStepResponse(
     affinityStatus: AffinityStatus | None = None,
     classRecall: ClassRecallInfo | None = None,
     hypotheses: list[HypothesisRead] | None = None,
+    queryPlan: "QueryPlan | None" = None,
 ) -> ChatResponse:
     """多步响应的**唯一**构造点（聚合成功与降级收尾共用）。
 
@@ -134,6 +135,8 @@ def _multiStepResponse(
     ``chartType``/``chartOption``/``data`` 恒为**最后一个成功数据步骤**那张
     （全失败时是 ``None``，不是空图）—— 调用方按 ``run.result.sql is not None``
     同一判据累积后传入，这里不再自行判断。
+
+    queryPlan：最后一个成功数据步骤的 NL2SQL 查询计划（供前端「总查询计划」渲染）。
     """
     return ChatResponse(
         answer=answer,
@@ -141,7 +144,7 @@ def _multiStepResponse(
         chartType=chartType,
         chartOption=chartOption,
         data=data,
-        steps=[_step_result_to_read(s) for s in completed],
+        steps=[_step_result_to_read(s, s.query_plan) for s in completed],
         tokensUsed=tokensUsed,
         cost=float(cost),
         latency_ms=int((time.monotonic() - t0) * 1000),
@@ -149,11 +152,17 @@ def _multiStepResponse(
         affinityStatus=affinityStatus,
         classRecall=classRecall,
         hypotheses=hypotheses,
+        queryPlan=queryPlan.to_dict() if queryPlan else None,
     )
 
 
-def _step_result_to_read(result: StepResult) -> "StepResultRead":
-    """将 StepResult 转换为 API 响应的 DTO（延迟导入避免循环）。"""
+def _step_result_to_read(
+    result: StepResult, plan: "QueryPlan | None" = None,
+) -> "StepResultRead":
+    """将 StepResult 转换为 API 响应的 DTO（延迟导入避免循环）。
+
+    plan：可选的 QueryPlan（来自 _StepRun.plan）；用于填充 query_plan 字段供前端渲染。
+    """
     from app.domain.schemas import StepResultRead
     return StepResultRead(
         step_index=result.step_index,
@@ -165,6 +174,7 @@ def _step_result_to_read(result: StepResult) -> "StepResultRead":
         error=result.error,
         chart_type=result.chart_type,
         chart_option=result.chart_option,
+        query_plan=plan.to_dict() if plan else None,
     )
 
 

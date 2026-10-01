@@ -999,6 +999,7 @@ class StreamMixin:
                 "cost": float(total_cost),
                 "modelName": last_model_name,
                 "latency_ms": int((time.monotonic() - _ms_t0) * 1000),
+                "queryPlan": last_plan.to_dict() if last_plan else None,
                 "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)
                 if suggestion is not None else None,
             },
@@ -1035,6 +1036,7 @@ class StreamMixin:
             "error": result.error,
             "chartType": result.chart_type,
             "chartOption": result.chart_option,
+            "queryPlan": result.query_plan.to_dict() if result.query_plan else None,
         })
 
     @staticmethod

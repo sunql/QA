@@ -1667,6 +1667,8 @@ class StepResultRead(CamelModel):
     # 与 ChatResponse.chartType/chartOption 同口径（CamelModel 出 chartType/chartOption）。
     chart_type: ChartType | None = None
     chart_option: dict | None = None
+    # 该步的 NL2SQL 查询计划（供前端 QueryPlanCard 渲染）；失败/汇总步骤为 None。
+    query_plan: dict | None = None
 
 
 class AgentSuggestion(CamelModel):
@@ -3614,6 +3616,9 @@ class WikiLinkOut(BaseModel):
     chunk_id: str | None
     ontology_type: str
     ontology_id: int
+    # 本体对象名（列表展示用）。对象已删/不存在时为 None，前端回退显示 ID。
+    ontology_name: str | None = None
+    ontology_alias: str | None = None
     weight: float
     note: str | None
     created_by: int
@@ -3622,7 +3627,7 @@ class WikiLinkOut(BaseModel):
 
 class WikiLinkableTargetOut(BaseModel):
     id: int
-    type: str  # 'class' | 'property'
+    type: str  # 'class' | 'property' | 'metric'
     name: str
     alias: str | None
     description: str | None

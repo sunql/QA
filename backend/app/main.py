@@ -558,7 +558,7 @@ def createApp() -> FastAPI:
     from app.services.mcp_server import mcp as _mcpServer
 
     _mcpApp = _mcpServer.http_app(path="/mcp", transport="streamable-http")
-    app.router.routes.append(Mount("", app=McpAuthMiddleware(_mcpApp)))
+    app.router.routes.append(Mount("/mcp", app=McpAuthMiddleware(_mcpApp)))
 
     # 合并 fastmcp 子 app 的 lifespan 到现有 lifespan（schema drift / 引擎预热）。
     _origFastapiLifespan = lifespan

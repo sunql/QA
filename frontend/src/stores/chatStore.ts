@@ -401,6 +401,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 error: result.error ?? null,
                 chartType: result.chartType ?? null,
                 chartOption: result.chartOption ?? null,
+                queryPlan: result.queryPlan ?? null,
               }),
             })),
           // Phase 1.4：目标表可信度 badge（与 queryPlan 一起展示）
@@ -437,6 +438,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             supplierRisk,
             graphTraversal,
             suggestedAgent,
+            queryPlan,
           }) =>
             set((state) => ({
               messages: finalizeRunningSteps(
@@ -454,6 +456,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   graphTraversal: graphTraversal ?? null,
                   // Phase 7 G4：中置信语义路由建议卡片随 done 帧回填
                   suggestedAgent: suggestedAgent ?? null,
+                  // 顶层查询计划：多步时为最后一个成功数据步的计划，单步时直接来自响应
+                  queryPlan: queryPlan ?? null,
                 })
               ),
               loading: false,

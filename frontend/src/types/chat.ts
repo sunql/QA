@@ -114,6 +114,8 @@ export interface StepResultRead {
   // 每步自己的图（决策引擎按该步的 columns/data/plan 各出一张；失败步骤为 null）
   chartType?: ChartType | null;
   chartOption?: Record<string, unknown> | null;
+  // 每步的 NL2SQL 查询计划（供前端 QueryPlanCard 渲染）
+  queryPlan?: QueryPlan | null;
 }
 
 // 多步子步骤的运行时状态（前端聚合，随流式事件推进）
@@ -133,6 +135,8 @@ export interface MultiStepStep {
   // 每步自己的图（多步每步出图）：由 step_result / 非流式 steps 回填
   chartType?: ChartType | null;
   chartOption?: Record<string, unknown> | null;
+  // 每步的 NL2SQL 查询计划（供前端 QueryPlanCard 渲染）
+  queryPlan?: QueryPlan | null;
 }
 
 // Phase 7 G4：未指名 Agent 语义路由建议（中置信命中时随 QUERY/NEW_QUERY 附带）

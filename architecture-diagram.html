@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>企业 AI 数据架构 · 7 层体系</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f7f5f0;
+    --bg-soft: #f0ebe0;
+    --ink: #14171e;
+    --ink-2: #3a4256;
+    --muted: #7c7a72;
+    --line: #e9e3d6;
+    --line-soft: #f0ebe0;
+    --primary: #2f6f5e;
+    --accent: #c97b3f;
+    --warm: #b06367;
+    --card: #ffffff;
+
+    /* 层配色 - 从底到顶渐变 */
+    --l1: #6b5d4f;   /* 治理 - 深棕 */
+    --l2: #8a7660;   /* 系统 - 暖灰棕 */
+    --l3: #b89968;   /* 数据 - 沙黄 */
+    --l4: #6b8e7e;   /* 智能 - 墨绿 */
+    --l5: #c97b3f;   /* 语义 - 赭石 */
+    --l6: #5a7a8c;   /* AI分析师 - 钢蓝 */
+    --l7: #2f6f5e;   /* 应用 - 深松绿 */
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Outfit', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.55;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100dvh;
+    position: relative;
+    overflow-x: hidden;
+  }
+
+  /* 角落柔和光晕 */
+  body::before {
+    content: "";
+    position: fixed;
+    top: -200px; right: -200px;
+    width: 600px; height: 600px;
+    background: radial-gradient(circle, rgba(47, 111, 94, 0.06), transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  body::after {
+    content: "";
+    position: fixed;
+    bottom: -200px; left: -200px;
+    width: 500px; height: 500px;
+    background: radial-gradient(circle, rgba(201, 123, 63, 0.05), transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .page {
+    position: relative;
+    z-index: 1;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 56px 32px 80px;
+  }
+
+  /* Header */
+  header {
+    margin-bottom: 56px;
+    padding-bottom: 28px;
+    border-bottom: 1px solid var(--line);
+  }
+  .eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 24px; height: 1px;
+    background: var(--accent);
+  }
+  h1 {
+    font-family: 'DM Serif Display', 'STSong', serif;
+    font-size: 44px;
+    line-height: 1.15;
+    font-weight: 400;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    margin-bottom: 16px;
+  }
+  .subtitle {
+    font-size: 16px;
+    color: var(--ink-2);
+    max-width: 680px;
+    line-height: 1.6;
+  }
+  .meta {
+    margin-top: 18px;
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .meta span::before {
+    content: "› ";
+    color: var(--accent);
+  }
+
+  /* Main architecture diagram */
+  .diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 56px;
+    position: relative;
+  }
+
+  .layer {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 20px 26px;
+    position: relative;
+    transition: all 0.3s ease;
+  }
+  .layer:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 24px -8px rgba(20, 23, 30, 0.1);
+  }
+
+  .layer-head {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 14px;
+  }
+
+  .layer-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px; height: 56px;
+    border-radius: 12px;
+    flex-shrink: 0;
+    position: relative;
+    color: white;
+  }
+  .layer-badge svg {
+    width: 26px; height: 26px;
+  }
+  .layer-badge .layer-num {
+    position: absolute;
+    top: -6px; right: -6px;
+    background: var(--card);
+    color: var(--ink);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+  }
+
+  .layer-title {
+    flex: 1;
+    min-width: 0;
+  }
+  .layer-title h2 {
+    font-family: 'DM Serif Display', 'STSong', serif;
+    font-size: 22px;
+    font-weight: 400;
+    color: var(--ink);
+    letter-spacing: -0.005em;
+    margin-bottom: 2px;
+  }
+  .layer-title .layer-en {
+    font-size: 12px;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.04em;
+  }
+
+  .layer-desc {
+    font-size: 13px;
+    color: var(--ink-2);
+    margin-bottom: 14px;
+    line-height: 1.55;
+  }
+
+  .layer-modules {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: var(--bg-soft);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--ink-2);
+    transition: all 0.2s ease;
+  }
+  .chip::before {
+    content: "";
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--chip-color, var(--muted));
+    flex-shrink: 0;
+  }
+  .chip:hover {
+    background: var(--card);
+    border-color: var(--chip-color, var(--ink-2));
+    transform: translateY(-1px);
+  }
+
+  /* 各层配色 */
+  .layer-l1 { border-left: 4px solid var(--l1); }
+  .layer-l1 .layer-badge { background: var(--l1); }
+  .layer-l1 .chip { --chip-color: var(--l1); }
+
+  .layer-l2 { border-left: 4px solid var(--l2); }
+  .layer-l2 .layer-badge { background: var(--l2); }
+  .layer-l2 .chip { --chip-color: var(--l2); }
+
+  .layer-l3 { border-left: 4px solid var(--l3); }
+  .layer-l3 .layer-badge { background: var(--l3); }
+  .layer-l3 .chip { --chip-color: var(--l3); }
+
+  .layer-l4 { border-left: 4px solid var(--l4); }
+  .layer-l4 .layer-badge { background: var(--l4); }
+  .layer-l4 .chip { --chip-color: var(--l4); }
+
+  .layer-l5 { border-left: 4px solid var(--l5); }
+  .layer-l5 .layer-badge { background: var(--l5); }
+  .layer-l5 .chip { --chip-color: var(--l5); }
+
+  .layer-l6 { border-left: 4px solid var(--l6); }
+  .layer-l6 .layer-badge { background: var(--l6); }
+  .layer-l6 .chip { --chip-color: var(--l6); }
+
+  .layer-l7 { border-left: 4px solid var(--l7); }
+  .layer-l7 .layer-badge { background: var(--l7); }
+  .layer-l7 .chip { --chip-color: var(--l7); }
+
+  /* Knowledge Compiler 桥接 */
+  .compiler {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 0;
+    position: relative;
+  }
+  .compiler-inner {
+    background: linear-gradient(135deg, var(--l4) 0%, var(--l5) 100%);
+    color: white;
+    padding: 10px 22px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-shadow: 0 4px 16px -4px rgba(47, 111, 94, 0.3);
+    position: relative;
+  }
+  .compiler-inner svg {
+    width: 16px; height: 16px;
+  }
+  .compiler-inner .zh {
+    font-family: 'DM Serif Display', 'STSong', serif;
+    font-size: 14px;
+  }
+  .compiler-inner .en {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    opacity: 0.85;
+    margin-left: 4px;
+  }
+
+  /* 连接箭头 */
+  .arrow {
+    display: flex;
+    justify-content: center;
+    padding: 2px 0;
+    color: var(--muted);
+  }
+  .arrow svg {
+    width: 14px; height: 14px;
+  }
+
+  /* 流向指示 */
+  .flow-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 20px 0 28px;
+    color: var(--muted);
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.1em;
+  }
+  .flow-indicator .line-l, .flow-indicator .line-r {
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+    max-width: 200px;
+  }
+  .flow-indicator .label {
+    padding: 4px 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+  }
+
+  /* 三栏说明 */
+  .principles {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-bottom: 56px;
+  }
+  .principle {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 22px 22px 24px;
+    transition: all 0.3s ease;
+  }
+  .principle:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px -8px rgba(20, 23, 30, 0.1);
+  }
+  .principle .p-icon {
+    width: 36px; height: 36px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-soft);
+    margin-bottom: 14px;
+    color: var(--primary);
+  }
+  .principle .p-icon svg {
+    width: 18px; height: 18px;
+  }
+  .principle h3 {
+    font-family: 'DM Serif Display', 'STSong', serif;
+    font-size: 17px;
+    font-weight: 400;
+    margin-bottom: 8px;
+    color: var(--ink);
+  }
+  .principle p {
+    font-size: 13px;
+    color: var(--ink-2);
+    line-height: 1.6;
+  }
+
+  /* 数据流向标注 */
+  .data-flow {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 28px 30px;
+    margin-bottom: 40px;
+  }
+  .data-flow h3 {
+    font-family: 'DM Serif Display', 'STSong', serif;
+    font-size: 20px;
+    font-weight: 400;
+    margin-bottom: 18px;
+    color: var(--ink);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .data-flow h3 svg {
+    width: 18px; height: 18px;
+    color: var(--accent);
+  }
+  .flow-steps {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 8px;
+    align-items: stretch;
+  }
+  .flow-step {
+    text-align: center;
+    padding: 14px 6px;
+    border-radius: 10px;
+    background: var(--bg-soft);
+    position: relative;
+    font-size: 12px;
+    color: var(--ink-2);
+    border: 1px solid var(--line);
+  }
+  .flow-step .step-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .flow-step .step-label {
+    font-weight: 500;
+    color: var(--ink);
+    font-size: 13px;
+  }
+  .flow-step::after {
+    content: "›";
+    position: absolute;
+    right: -8px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--accent);
+    font-size: 16px;
+    font-weight: 600;
+    z-index: 2;
+  }
+  .flow-step:last-child::after { display: none; }
+
+  /* 底部脚注 */
+  footer {
+    margin-top: 48px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  footer .legend {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  footer .legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  footer .legend span::before {
+    content: "";
+    width: 10px; height: 10px;
+    border-radius: 2px;
+    background: var(--c, var(--muted));
+  }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .page { padding: 32px 18px 60px; }
+    h1 { font-size: 32px; }
+    .principles { grid-template-columns: 1fr; }
+    .flow-steps { grid-template-columns: repeat(2, 1fr); }
+    .flow-step::after { display: none; }
+    .layer { padding: 16px 18px; }
+    .layer-badge { width: 44px; height: 44px; }
+    .layer-badge svg { width: 20px; height: 20px; }
+    .layer-title h2 { font-size: 18px; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <div class="eyebrow">ENTERPRISE AI · DATA ARCHITECTURE</div>
+    <h1>企业 AI 数据架构七层体系</h1>
+    <p class="subtitle">
+      从底层治理到顶层智能应用，自下而上构建可治理、可解释、可决策的数据资产价值链。
+      数据在每一层被沉淀、提炼、语义化，最终成为可被 AI Agent 调用的业务知识。
+    </p>
+    <div class="meta">
+      <span>L7 · APPLICATION</span>
+      <span>L6 · AI ANALYST</span>
+      <span>L5 · SEMANTIC & KNOWLEDGE</span>
+      <span>L4 · DATA INTELLIGENCE</span>
+      <span>L3 · DATA LAYER</span>
+      <span>L2 · ENTERPRISE SYSTEMS</span>
+      <span>L1 · GOVERNANCE & SECURITY</span>
+    </div>
+  </header>
+
+  <!-- 架构主图（自下而上） -->
+  <div class="diagram">
+
+    <!-- L1 -->
+    <div class="layer layer-l1">
+      <div class="layer-head">
+        <div class="layer-badge">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span class="layer-num">L1</span>
+        </div>
+        <div class="layer-title">
+          <h2>治理与安全</h2>
+          <div class="layer-en">Governance & Security · Foundation Layer</div>
+        </div>
+      </div>
+      <p class="layer-desc">贯穿全栈的基础治理能力，保障数据资产、合规与权限的统一管控。</p>
+      <div class="layer-modules">
+        <span class="chip">数据治理</span>
+        <span class="chip">MDM 主数据</span>
+        <span class="chip">数据标准</span>
+        <span class="chip">权限体系</span>
+        <span class="chip">审计日志</span>
+        <span class="chip">IAM 身份认证</span>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+    </div>
+
+    <!-- L2 -->
+    <div class="layer layer-l2">
+      <div class="layer-head">
+        <div class="layer-badge">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <span class="layer-num">L2</span>
+        </div>
+        <div class="layer-title">
+          <h2>企业业务系统</h2>
+          <div class="layer-en">Enterprise Systems · Source of Truth</div>
+        </div>
+      </div>
+      <p class="layer-desc">企业核心业务系统的真实数据源，覆盖经营管理全流程。</p>
+      <div class="layer-modules">
+        <span class="chip">ERP</span>
+        <span class="chip">MES</span>
+        <span class="chip">PLM</span>
+        <span class="chip">WMS</span>
+        <span class="chip">SRM</span>
+        <span class="chip">CRM</span>
+        <span class="chip">OA</span>
+        <span class="chip">APS</span>
+        <span class="chip">Finance</span>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+    </div>
+
+    <!-- L3 -->
+    <div class="layer layer-l3">
+      <div class="layer-head">
+        <div class="layer-badge">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v6c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 11v6c0 1.7 4 3 9 3s9-1.3 9-3v-6"/></svg>
+          <span class="layer-num">L3</span>
+        </div>
+        <div class="layer-title">
+          <h2>数据层</h2>
+          <div class="layer-en">Data Layer · Storage & Computing</div>
+        </div>
+      </div>
+      <p class="layer-desc">分层数据架构与多样化存储计算引擎，支撑批流一体的数据加工。</p>
+      <div class="layer-modules">
+        <span class="chip">ODS</span>
+        <span class="chip">DWD</span>
+        <span class="chip">DWS</span>
+        <span class="chip">ADS</span>
+        <span class="chip">数据湖</span>
+        <span class="chip">湖仓一体</span>
+        <span class="chip">DW</span>
+        <span class="chip">OLAP</span>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+    </div>
+
+    <!-- L4 -->
+    <div class="layer layer-l4">
+      <div class="layer-head">
+        <div class="layer-badge">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.2 4.2l4.3 4.3M15.5 15.5l4.3 4.3M1 12h6M17 12h6M4.2 19.8l4.3-4.3M15.5 8.5l4.3-4.3"/></svg>
+          <span class="layer-num">L4</span>
+        </div>
+        <div class="layer-title">
+          <h2>数据智能层</h2>
+          <div class="layer-en">Data Intelligence Layer · Assetization</div>
+        </div>
+      </div>
+      <p class="layer-desc">让数据成为可被发现、可理解、可信任的生产要素。</p>
+      <div class="layer-modules">
+        <span class="chip">元数据</span>
+        <span class="chip">Schema</span>
+        <span class="chip">数据目录</span>
+        <span class="chip">数据血缘</span>
+        <span class="chip">数据质量</span>
+        <span class="chip">数据安全</span>
+        <span class="chip">数据集</span>
+        <span class="chip">API</span>
+        <span class="chip">SQL</span>
+        <span class="chip">OLAP</span>
+        <span class="chip">数据服务</span>
+        <span class="chip">特征</span>
+      </div>
+    </div>
+
+    <!-- Knowledge Compiler -->
+    <div class="compiler">
+      <div class="compiler-inner">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+        <span class="zh">知识编译器</span>
+        <span class="en">Knowledge Compiler</span>
+      </div>
+    </div>
+
+    <!-- L5 -->
+    <div class="layer layer-l5">
+      <div class="layer-head">
+        <div class="layer-badge">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          <span class="layer-num">L5</span>
+        </div>
+        <div class="layer-title">
+          <h2>企业语义与知识层</h2>
+          <div class="layer-en">Enterprise Semantic & Knowledge Layer</div>
+        </div>
+      </div>
+      <p class="layer-desc">将数据资产沉淀为业务语义与可推理的知识体系，是 AI 理解业务的桥梁。</p>
+      <div class="layer-modules">
+        <span class="chip">业务对象</span>
+        <span class="chip">指标</span>
+        <span class="chip">维度</span>
+        <span class="chip">关系</span>
+        <span class="chip">规则</span>
+        <span class="chip">语义</span>
+        <span class="chip">知识页</span>
+        <span class="chip">声明 Claim</span>
+        <span class="chip">证据</span>
+        <span class="chip">权威</span>
+        <span class="chip">实体</span>
+        <span class="chip">业务流程</span>
+        <span class="chip">业务事件</span>
+        <span class="chip">数据契约</span>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+    </div>
+
+    <!-- L6 -->
+    <div class="layer layer-l6">
+      <div class="layer-head">
+        <div class="layer-badge">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+          <span class="layer-num">L6</span>
+        </div>
+        <div class="layer-title">
+          <h2>AI 数据分析师层</h2>
+          <div class="layer-en">AI Data Analyst Layer · Cognitive Engine</div>
+        </div>
+      </div>
+      <p class="layer-desc">多个协作 Agent 构成的认知引擎，负责理解、规划、推理与产出分析结论。</p>
+      <div class="layer-modules">
+        <span class="chip">Conversation Agent</span>
+        <span class="chip">Planner</span>
+        <span class="chip">Query Agent</span>
+        <span class="chip">Analyst Agent</span>
+        <span class="chip">Hypothesis Agent</span>
+        <span class="chip">Evidence Agent</span>
+        <span class="chip">Report Agent</span>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+    </div>
+
+    <!-- L7 -->
+    <div class="layer layer-l7">
+      <div class="layer-head">
+        <div class="layer-badge">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6v6H9z"/></svg>
+          <span class="layer-num">L7</span>
+        </div>
+        <div class="layer-title">
+          <h2>AI 应用层</h2>
+          <div class="layer-en">AI Application Layer · Value Delivery</div>
+        </div>
+      </div>
+      <p class="layer-desc">面向最终用户与业务场景的智能化产品形态，让数据洞察触手可及。</p>
+      <div class="layer-modules">
+        <span class="chip">AI 智能问数</span>
+        <span class="chip">AI 数据分析</span>
+        <span class="chip">经营分析</span>
+        <span class="chip">管理驾驶舱</span>
+        <span class="chip">自动报告</span>
+        <span class="chip">Agent</span>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- 流向标注 -->
+  <div class="data-flow">
+    <h3>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg>
+      价值流转路径
+    </h3>
+    <div class="flow-steps">
+      <div class="flow-step"><div class="step-num">01</div><div class="step-label">治理</div></div>
+      <div class="flow-step"><div class="step-num">02</div><div class="step-label">业务</div></div>
+      <div class="flow-step"><div class="step-num">03</div><div class="step-label">存储</div></div>
+      <div class="flow-step"><div class="step-num">04</div><div class="step-label">资产化</div></div>
+      <div class="flow-step"><div class="step-num">05</div><div class="step-label">语义</div></div>
+      <div class="flow-step"><div class="step-num">06</div><div class="step-label">认知</div></div>
+      <div class="flow-step"><div class="step-num">07</div><div class="step-label">应用</div></div>
+    </div>
+  </div>
+
+  <!-- 三栏核心思想 -->
+  <div class="principles">
+    <div class="principle">
+      <div class="p-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      </div>
+      <h3>分层沉淀</h3>
+      <p>每一层都是上一层的能力基座。数据从底层被治理、加工、语义化，逐层向上提炼为业务知识与智能服务。</p>
+    </div>
+    <div class="principle">
+      <div class="p-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+      </div>
+      <h3>知识编译器</h3>
+      <p>连接 L4 数据智能与 L5 语义知识的核心组件，将元数据、血缘、Schema 编译为业务对象、指标、规则与知识页。</p>
+    </div>
+    <div class="principle">
+      <div class="p-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+      </div>
+      <h3>Agent 协作</h3>
+      <p>L6 多 Agent 通过对话理解、规划、查询、推理与证据链构建，把语义知识转化为可被 L7 应用直接调用的智能能力。</p>
+    </div>
+  </div>
+
+  <footer>
+    <div class="legend">
+      <span style="--c:#6b5d4f">L1 Governance</span>
+      <span style="--c:#8a7660">L2 Systems</span>
+      <span style="--c:#b89968">L3 Data</span>
+      <span style="--c:#6b8e7e">L4 Intelligence</span>
+      <span style="--c:#c97b3f">L5 Semantic</span>
+      <span style="--c:#5a7a8c">L6 AI Analyst</span>
+      <span style="--c:#2f6f5e">L7 Application</span>
+    </div>
+    <div>Architecture Reference · 2026</div>
+  </footer>
+
+</div>
+</body>
+</html>

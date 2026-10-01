@@ -856,15 +856,16 @@ class TestMultiStepStepCharts:
         assert donePayload["steps"][0]["chartType"] == "bar"
 
     # ------------------------------------------------------------------
-    # 最终报告也要有图（用户反馈）：图此前只活在计划卡的每个步骤里，
-    # 最后那条汇总回答是纯文字 —— 而用户看的是回答，不是折叠着的计划。
-    # 取「最后一个成功数据步骤」的图：它是整条链的终点，服务端本来就把它当作
-    # 追问锚点（last_plan/last_sql/last_data），复用同一份，不另算一张。
+    # 可视化输出策略（决策 1）：多步顶层不再继承最后一个成功数据步骤的图。
+    # 每个数据步已在自己的 steps[i] 里带图 + 明细表 + rationale，顶层再重复一张
+    # 纯属冗余 —— 汇总步是纯文字，顶层只带 SUMMARY_TEXT_ONLY rationale，
+    # 告诉前端「为什么这里没有图」。
     # ------------------------------------------------------------------
 
-    async def test_final_answer_carries_last_step_chart(
+    async def test_final_answer_has_no_chart_and_summary_rationale(
         self, client, dbSession, monkeypatch
     ) -> None:
+        """顶层不再继承最后一步的图：汇总步是纯文字，rationale 解释「为什么没图」。"""
         config, ds = await _seed(dbSession)
         _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
 
@@ -877,16 +878,18 @@ class TestMultiStepStepCharts:
         body = resp.json()
         steps = body["steps"]
         assert len(steps) == 2
-        # 顶层图就是最后一步那张（同一份，不是各算一份 —— 否则两处会漂移）
-        assert body["chartType"] == steps[-1]["chartType"] == "bar"
-        assert body["chartOption"] == steps[-1]["chartOption"]
-        # 报告图要带数据：TABLE 类 kind 的前端渲染与 CSV 导出都读它
-        assert len(body["data"]) == len(ROWS)
+        # 每个数据步仍带自己的图（回归：图只在各步里，不再重复提到顶层）
+        assert steps[0]["chartType"] == "bar"
+        assert steps[1]["chartType"] == "bar"
+        # 顶层是纯文字汇总：无图 + SUMMARY_TEXT_ONLY rationale
+        assert body["chartType"] is None
+        assert body["chartOption"] is None
+        assert body["visualRationale"] == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
 
-    async def test_final_answer_chart_skips_failed_last_step(
+    async def test_final_answer_no_chart_when_last_step_fails(
         self, client, dbSession, monkeypatch
     ) -> None:
-        """最后一步失败 → 顶层图退到最后一个**成功**步骤，而不是消失或指向失败步。"""
+        """最后一步失败 → 顶层同样无图：不再回退到最后一张成功步骤的图。"""
         config, ds = await _seed(dbSession)
         _install(monkeypatch, config, _MultiStepLlm(), _DataQueryFailAdapter(fail_from_query=2))
 
@@ -898,8 +901,13 @@ class TestMultiStepStepCharts:
 
         body = resp.json()
         assert body["steps"][1]["sql"] is None  # 失败标记
-        assert body["chartType"] == "bar"
-        assert body["chartOption"] == body["steps"][0]["chartOption"]
+        # 成功步骤仍带自己的图，失败步骤无图（回归）
+        assert body["steps"][0]["chartType"] == "bar"
+        assert body["steps"][1]["chartType"] is None
+        # 顶层不再继承任何一步的图
+        assert body["chartType"] is None
+        assert body["chartOption"] is None
+        assert body["visualRationale"] == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
 
     async def test_final_answer_has_no_chart_when_all_steps_fail(
         self, client, dbSession, monkeypatch
@@ -918,13 +926,15 @@ class TestMultiStepStepCharts:
         assert all(step["sql"] is None for step in body["steps"])
         assert body["chartType"] is None
         assert body["chartOption"] is None
+        assert body["visualRationale"] == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
 
-    async def test_stream_emits_one_chart_event_before_done(
+    async def test_stream_emits_no_chart_event_and_done_carries_rationale(
         self, client, dbSession, monkeypatch
     ) -> None:
-        """流式：最终回答的图走**一次** chart 事件，排在 done 之前。
+        """流式：多步最终回答不再下发 chart 事件，done 帧带 SUMMARY_TEXT_ONLY rationale。
 
-        每步的图仍走各自的 step_result —— 这条守卫的就是「别每步都补发一次」。
+        每步的图仍走各自的 step_result；顶层 chart 事件整个移除。汇总步骤不发
+        step_result（它流式吐 token 后直接 done），rationale 只能经 done 帧抵达前端。
         """
         config, ds = await _seed(dbSession)
         _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
@@ -936,15 +946,11 @@ class TestMultiStepStepCharts:
         assert resp.status_code == 200, resp.text
 
         frames = _parseFrames(resp)
-        chartFrames = [i for i, (event, _) in enumerate(frames) if event == EVENT_CHART]
-        assert len(chartFrames) == 1
+        assert [e for e, _ in frames if e == EVENT_CHART] == []
         assert frames[-1][0] == EVENT_DONE
-        assert chartFrames[0] < len(frames) - 1
-
-        chart = frames[chartFrames[0]][1]
-        assert chart["chartType"] == "bar"
-        assert chart["chartOption"]["series"][0]["type"] == "bar"
-        assert len(chart["data"]) == len(ROWS)
+        assert frames[-1][1]["visualRationale"] == {
+            "code": "SUMMARY_TEXT_ONLY", "params": {},
+        }
 
 
 class TestNoAggregationStepDegrade:
@@ -994,6 +1000,10 @@ class TestNoAggregationStepDegrade:
         assert len(_data_queries(adapter)) == 2
         # 文案如实反映「数据步完成、汇总失败」，而不是笼统的「执行异常」
         assert "2/2" in body["answer"]
+        # 降级收尾同样是纯文字：顶层无图 + SUMMARY_TEXT_ONLY rationale
+        assert body["chartType"] is None
+        assert body["chartOption"] is None
+        assert body["visualRationale"] == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
 
         # 落库：user + assistant 双写（此前 assistant 缺失 → 历史悬空）
         msgs = list(
@@ -1033,6 +1043,11 @@ class TestNoAggregationStepDegrade:
             str(d.get("content", "")) for e, d in frames if e == EVENT_TOKEN
         )
         assert "2/2" in token_text
+        # 降级收尾同样不下发 chart 事件，done 帧带 SUMMARY_TEXT_ONLY rationale
+        assert [e for e, _ in frames if e == EVENT_CHART] == []
+        assert frames[-1][1]["visualRationale"] == {
+            "code": "SUMMARY_TEXT_ONLY", "params": {},
+        }
 
         msgs = list(
             (await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id)))

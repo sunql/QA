@@ -117,8 +117,7 @@ def _multiStepResponse(
     tokensUsed: int,
     cost: Decimal,
     t0: float,
-    chartType: str | None,
-    chartOption: dict | None,
+    visualRationale: dict | None,
     data: list[dict] | None,
     modelName: str | None = None,
     affinityStatus: AffinityStatus | None = None,
@@ -129,20 +128,23 @@ def _multiStepResponse(
     """多步响应的**唯一**构造点（聚合成功与降级收尾共用）。
 
     两处收尾此前各写一份 ``ChatResponse(...)``，字段大半重复。重复的代价不是行数，
-    是**漂移**：图表进最终报告这一版改了聚合收尾却漏改降级收尾，用户会看到
+    是**漂移**：图表进最终报告那一版改了聚合收尾却漏改降级收尾，用户会看到
     「正常收尾有图、降级收尾没图」，而两条路径都「能跑」。
 
-    ``chartType``/``chartOption``/``data`` 恒为**最后一个成功数据步骤**那张
-    （全失败时是 ``None``，不是空图）—— 调用方按 ``run.result.sql is not None``
-    同一判据累积后传入，这里不再自行判断。
+    顶层**不再继承**最后一个成功数据步骤的图：每个数据步已在自己的 ``steps[i]``
+    里带图 + 明细表 + rationale，顶层再重复一张纯属冗余。汇总步是纯文字，故顶层
+    ``chartType``/``chartOption`` 恒为 None，``visualRationale`` 恒为
+    ``SUMMARY_TEXT_ONLY``（调用方传 ``summaryTextOnlyRationale().to_dict()``），
+    告诉前端「为什么这里没有图」。
 
     queryPlan：最后一个成功数据步骤的 NL2SQL 查询计划（供前端「总查询计划」渲染）。
     """
     return ChatResponse(
         answer=answer,
         intent="multi_step",
-        chartType=chartType,
-        chartOption=chartOption,
+        chartType=None,
+        chartOption=None,
+        visual_rationale=visualRationale,
         data=data,
         steps=[_step_result_to_read(s, s.query_plan) for s in completed],
         tokensUsed=tokensUsed,

@@ -37,6 +37,7 @@ from app.services.intent_service import IntentResult
 # 整条流水线复用，避免每段 _costFor 调用都查 DB。
 from app.services.nl2sql_service import _readFloatConfig
 from app.services.chart_thresholds import loadFullDataThreshold
+from app.services.visual_rationale import summaryTextOnlyRationale
 from app.services.stream_events import (
     ErrorType,
     EVENT_CHART,
@@ -838,10 +839,6 @@ class StreamMixin:
         last_plan: QueryPlan | None = None
         last_sql: str | None = None
         last_data: list[dict] = []
-        # 最终报告的图（用户反馈）：与非流式 _executeMultiStep 同口径 —— 取最后一个
-        # 成功数据步骤那张，回答本身不再是纯文字。
-        last_chart_type: str | None = None
-        last_chart_option: dict | None = None
 
         # 循环前一次性下发完整计划概览，前端据此渲染各步骤的「待执行」状态
         yield StreamEvent(EVENT_MULTI_STEP_PLAN, {
@@ -915,10 +912,10 @@ class StreamMixin:
                     routing_layer="L2",
                     latency_ms=int((time.monotonic() - _ms_t0) * 1000),
                     token_cost_usd=float(total_cost),
-                    # 0105：多步最终报告的图 = 最后一个成功数据步骤那张，与上面
-                    # `_reportChartEvent` 下发的同一份（同判据、同一变量）。
-                    chart_type=last_chart_type,
-                    chart_option=last_chart_option,
+                    # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
+                    # （Task 6 会在此行补 visual_rationale 落库）。
+                    chart_type=None,
+                    chart_option=None,
                 )
                 await self._saveQueryState(
                     session, dto.sessionId,
@@ -936,14 +933,6 @@ class StreamMixin:
                     else None
                 )
                 yield StreamEvent(EVENT_TOKEN, {"content": agg_content})
-                # 最终报告的图：走独立的 chart 事件（与单步路径同构），而不是塞进 done
-                # —— done 帧虽已带 steps，但前端 StreamSummary/done 分支都不读它，
-                # 而 chart 事件前端已完整支持，等于零前端改动。
-                reportChart = self._reportChartEvent(
-                    last_chart_type, last_chart_option, last_data,
-                )
-                if reportChart is not None:
-                    yield reportChart
                 # v3.1 B6（M7）：流式多步假设后处理——只落库，不进 SSE 帧
                 await self._maybeGenerateHypotheses(
                     session, dto.sessionId, dto.question, pc, data=last_data,
@@ -957,6 +946,8 @@ class StreamMixin:
                         "latency_ms": int((time.monotonic() - _ms_t0) * 1000),
                         "affinityStatus": affinity_payload,
                         "steps": [_step_result_to_read(s).model_dump(by_alias=True) for s in completed],
+                        # 汇总步不发 step_result（纯文字），SUMMARY_TEXT_ONLY 只能经 done 帧抵达前端
+                        "visualRationale": summaryTextOnlyRationale().to_dict(),
                         "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)
                         if suggestion is not None else None,
                     },
@@ -981,8 +972,6 @@ class StreamMixin:
                 last_plan = run.plan
                 last_sql = run.result.sql
                 last_data = run.result.data
-                last_chart_type = run.result.chart_type
-                last_chart_option = run.result.chart_option
             yield self._stepResultEvent(run.result)
 
         # 异常降级：所有步骤都不是 aggregation_only（与非流式共用收尾逻辑）
@@ -991,16 +980,8 @@ class StreamMixin:
             last_plan=last_plan, last_sql=last_sql, last_data=last_data,
             total_cost=total_cost, _t0=_ms_t0,
             inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
-            last_chart_type=last_chart_type,      # 0105：降级收尾同样带图
-            last_chart_option=last_chart_option,
         )
         yield StreamEvent(EVENT_TOKEN, {"content": degrade_answer})
-        # 降级收尾同样把最后一张图提上来（有成功步骤时才有）
-        reportChart = self._reportChartEvent(
-            last_chart_type, last_chart_option, last_data,
-        )
-        if reportChart is not None:
-            yield reportChart
         # v3.1 B6（M7）：降级收尾同样接假设后处理（last_data 为空时静默跳过）
         await self._maybeGenerateHypotheses(
             session, dto.sessionId, dto.question, pc, data=last_data,
@@ -1013,28 +994,12 @@ class StreamMixin:
                 "modelName": last_model_name,
                 "latency_ms": int((time.monotonic() - _ms_t0) * 1000),
                 "queryPlan": last_plan.to_dict() if last_plan else None,
+                # 降级收尾同样是纯文字：SUMMARY_TEXT_ONLY 只能经 done 帧抵达前端
+                "visualRationale": summaryTextOnlyRationale().to_dict(),
                 "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)
                 if suggestion is not None else None,
             },
         )
-
-    @staticmethod
-    def _reportChartEvent(
-        chartType: str | None, chartOption: dict | None, data: list[dict],
-    ) -> StreamEvent | None:
-        """多步最终回答的图 → chart 事件；没有图时返回 None（调用方不发）。
-
-        负载形状与单步路径逐字一致（`chartType` + `chartOption` + `data`），前端
-        `onChart` 直接复用。**有图才发** —— 空负载的 chart 事件只会让前端多做一次
-        无谓的消息改写，而且「全步骤失败」时本就没有任何一张图可提。
-        """
-        if not chartType:
-            return None
-        return StreamEvent(EVENT_CHART, {
-            "chartType": chartType,
-            "chartOption": chartOption,
-            "data": data or None,
-        })
 
     @staticmethod
     def _stepResultEvent(result: StepResult) -> StreamEvent:

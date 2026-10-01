@@ -693,6 +693,9 @@ class StreamMixin:
             # 那份是同一份 —— 图不能只活在实时响应里。
             chart_type=chartType,
             chart_option=option,
+            # 0107：图之外的明细表 + 判断依据同轮落库（与流式下发那份同一份）。
+            table_option=tableOption,
+            visual_rationale=rationale,
         )
         await self._saveQueryState(
             session, dto.sessionId,
@@ -913,9 +916,11 @@ class StreamMixin:
                     latency_ms=int((time.monotonic() - _ms_t0) * 1000),
                     token_cost_usd=float(total_cost),
                     # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
-                    # （Task 6 会在此行补 visual_rationale 落库）。
+                    # （0107 补 rationale：顶层不附图，SUMMARY_TEXT_ONLY 解释为什么）。
                     chart_type=None,
                     chart_option=None,
+                    table_option=None,
+                    visual_rationale=summaryTextOnlyRationale().to_dict(),
                 )
                 await self._saveQueryState(
                     session, dto.sessionId,

@@ -233,6 +233,31 @@ class TestChatApi:
         assert rows[0].content == "各供应商的收货数量汇总"
         assert rows[1].sql_generated is not None
 
+    async def test_query_persists_visual_payload(self, client, dbSession, monkeypatch) -> None:
+        """0107：非流式单步的表负载 + 判断依据同轮落库（回放/导出离线重建）。
+
+        与流式 `test_stream_records_answer_usage_and_session_messages` 是两条独立
+        `_storeSessionMessages` 调用点 —— 漏接任何一条，另一条路径的图/表/依据就
+        只活在实时响应里。
+        """
+        config, ds = await _seed(dbSession)
+        _installFakes(monkeypatch, config)
+        await client.post("/api/v1/chat", json=_chat_payload("各供应商的收货数量汇总", ds.id))
+
+        from app.domain.models import SessionMessage
+
+        rows = list((await dbSession.execute(
+            select(SessionMessage).order_by(SessionMessage.id)
+        )).scalars().all())
+        assert len(rows) == 2
+        # 1 维（NAME）+ 1 指标（QTY）、无 formula → R12 分类比较（bar）
+        assert rows[1].table_option is not None, "表负载必须落进库"
+        assert rows[1].table_option["columns"] == ["NAME", "QTY"]
+        assert rows[1].visual_rationale is not None, "判断依据必须落进库"
+        assert rows[1].visual_rationale["code"] == "R12_CATEGORY_BAR"
+        assert rows[0].table_option is None, "user 行不该带表"
+        assert rows[0].visual_rationale is None, "user 行不该带依据"
+
     async def test_l2_writes_routing_layer(self, client, dbSession, monkeypatch) -> None:
         """L2 NL2SQL 路径应在 session_message 写入 routing_layer='L2'。
 

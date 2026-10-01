@@ -21,7 +21,11 @@ from app.domain.models import SessionMessage, SessionQueryState
 from app.domain.query_plan import QueryPlan, planToText
 from app.domain.schemas import HistoryMessage
 from app.services.evidence_record_service import currentChatUserId
-from app.services.chat_chart_persist import boundedChartOption, chartTypeName
+from app.services.chat_chart_persist import (
+    boundedChartOption,
+    boundedTableOption,
+    chartTypeName,
+)
 from app.services.chat_helpers import (
     _clipText,
     _fitPartsToBudget,
@@ -431,6 +435,8 @@ class ContextMixin:
         interrupted: bool = False,
         chart_type: str | None = None,
         chart_option: dict | None = None,
+        table_option: dict | None = None,
+        visual_rationale: dict | None = None,
     ) -> None:
         """持久化一轮对话：user + assistant 双写（仅创建新记录，不可变）。
 
@@ -445,6 +451,13 @@ class ContextMixin:
         调用点（闲聊/域命令/不可回答等 20 余处）语义不变。**落库前过一道 TABLE 截行**
         （见 `chat_chart_persist.boundedChartOption`），且此处是唯一入口，所以没有
         旁路能绕过这道闸。
+
+        table_option / visual_rationale（0107，可视化输出策略）：图之外的明细表负载
+        + 为什么这么画的判断依据，供历史回放离线重建。table_option 落库前同样过
+        一道 200 行截断（`chat_chart_persist.boundedTableOption`，纵深兜底 —— 装配层
+        已按 FULL_DATA_THRESHOLD 截过一轮）；visual_rationale 由调用方经
+        `VisualRationale.to_dict()` 归一成 ``{"code", "params"}``，这里原样落库。
+        默认 None ⇒ 无图/无依据的调用点语义不变。
 
         设计说明：Token 计量在每次 LLM 调用后立即提交（见 _recordUsage），故此处也在独立事务提交。
         属"最终一致"设计——即使后续环节失败，已消耗的 Token 与成本仍会被记录，不随本轮回滚。
@@ -476,6 +489,8 @@ class ContextMixin:
             interrupted=interrupted,
             chart_type=chartTypeName(chart_type),
             chart_option=boundedChartOption(chart_option),
+            table_option=boundedTableOption(table_option),
+            visual_rationale=visual_rationale,
             user_id=chatUserId,
         )
         session.add_all([userMsg, assistantMsg])

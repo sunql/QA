@@ -637,9 +637,11 @@ class MultiStepMixin:
                     latency_ms=int((time.monotonic() - _t0) * 1000),
                     token_cost_usd=float(total_cost),
                     # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
-                    # （Task 6 会在此行补 visual_rationale 落库）。
+                    # （0107 补 rationale：顶层不附图，SUMMARY_TEXT_ONLY 解释为什么）。
                     chart_type=None,
                     chart_option=None,
+                    table_option=None,
+                    visual_rationale=summaryTextOnlyRationale().to_dict(),
                 )
                 # B5 HIGH-1：计算 inheritance_snapshot（支持下一轮追问链路）。
                 # semanticState 可能为 None（如 B/C 路径直接进多步无 A7 输出），
@@ -761,6 +763,9 @@ class MultiStepMixin:
             token_cost_usd=float(total_cost),
             chart_type=None,
             chart_option=None,
+            # 0107：降级收尾同为纯文字，SUMMARY_TEXT_ONLY 解释「为什么这里没有图」。
+            table_option=None,
+            visual_rationale=summaryTextOnlyRationale().to_dict(),
         )
         await self._saveQueryState(
             session, dto.sessionId,

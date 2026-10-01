@@ -250,6 +250,12 @@ MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CHART_OPTION = (
     "assistant 行：该轮回答的图表渲染负载（不含颜色，由前端主题层补）；无图为 null。"
     "TABLE 负载在落库时截到 200 行并带 truncated=true"
 )
+MSG_SCHEMA_CHAT_HISTORY_MESSAGE_TABLE_OPTION = (
+    "assistant 行：图之外的明细表负载（{columns, rows, truncated}）；无表/未落库为 null"
+)
+MSG_SCHEMA_CHAT_HISTORY_MESSAGE_VISUAL_RATIONALE = (
+    "assistant 行：为什么这么画/不画的判断依据（{code, params}）；无依据为 null"
+)
 MSG_SCHEMA_CHAT_EXPORT_MESSAGE_ID = (
     "非空时只导出该 assistant 消息 + 其上一条 user 消息；必须属于该 session"
 )

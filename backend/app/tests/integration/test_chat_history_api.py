@@ -30,6 +30,8 @@ async def _seedMessage(
     sql: str | None = None,
     chartType: str | None = None,
     chartOption: dict | None = None,
+    tableOption: dict | None = None,
+    visualRationale: dict | None = None,
     createdAt: datetime | None = None,
 ) -> SessionMessage:
     """插入一行会话消息（created_time 可指定，便于排序断言）。"""
@@ -40,6 +42,8 @@ async def _seedMessage(
         sql_generated=sql,
         chart_type=chartType,
         chart_option=chartOption,
+        table_option=tableOption,
+        visual_rationale=visualRationale,
         created_time=createdAt or datetime.now(UTC),
         updated_time=createdAt or datetime.now(UTC),
     )
@@ -345,6 +349,54 @@ class TestChatHistoryMessages:
         asst = resp.json()["messages"][1]
         assert asst["chartType"] is None
         assert asst["chartOption"] is None
+
+    async def test_messages_carries_visual_payload_for_replay(
+        self, client, dbSession
+    ) -> None:
+        """0107：历史回放要能拿到表负载 + 判断依据 —— 不能只活在实时响应里。
+
+        图/表/依据三者同轮落库，切走再切回历史面板时缺了表或依据就是缺口。
+        """
+        base = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        table = {"columns": ["地区"], "rows": [{"地区": "华北"}], "truncated": False}
+        rationale = {"code": "R12_CATEGORY_BAR", "params": {}}
+        await _seedMessage(
+            dbSession, sessionId="s-visual", role="user", content="Q", createdAt=base
+        )
+        await _seedMessage(
+            dbSession, sessionId="s-visual", role="assistant", content="A",
+            chartType="bar", chartOption={"series": [{"type": "bar"}]},
+            tableOption=table, visualRationale=rationale,
+            createdAt=base + timedelta(seconds=1),
+        )
+
+        resp = await client.get("/api/v1/sessions/s-visual/messages")
+
+        msgs = resp.json()["messages"]
+        assert msgs[1]["tableOption"] == table
+        assert msgs[1]["visualRationale"] == rationale
+        # user 行无负载：三个字段都存在且为 None（契约字段恒定在场，前端不必判 undefined）
+        assert msgs[0]["tableOption"] is None
+        assert msgs[0]["visualRationale"] is None
+
+    async def test_messages_visual_fields_are_none_for_legacy_rows(
+        self, client, dbSession
+    ) -> None:
+        """0107 之前的存量行两列为 NULL ⇒ 返 None，回放不炸（前端按「无表/无依据」渲染）。"""
+        await _seedMessage(
+            dbSession, sessionId="s-visual-legacy", role="user", content="Q",
+            createdAt=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+        )
+        await _seedMessage(
+            dbSession, sessionId="s-visual-legacy", role="assistant", content="A", sql="SELECT 1",
+            createdAt=datetime(2026, 5, 1, 9, 0, 1, tzinfo=UTC),
+        )
+
+        resp = await client.get("/api/v1/sessions/s-visual-legacy/messages")
+
+        asst = resp.json()["messages"][1]
+        assert asst["tableOption"] is None
+        assert asst["visualRationale"] is None
 
 
 # ============ DELETE /{sessionId} ============

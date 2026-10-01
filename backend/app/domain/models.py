@@ -794,6 +794,18 @@ class SessionMessage(Base, TimestampMixin):
         JSON().with_variant(postgresql.JSONB(), "postgresql"),
         nullable=True,
     )
+    # table_option / visual_rationale（0107，可视化输出策略）：图之外的明细表负载 +
+    # 为什么这么画的判断依据。TABLE/KPI 不附第二份表故 table_option 为 NULL；
+    # visual_rationale 形状 {"code": str, "params": dict}（params.kind 是枚举真值）。
+    # 历史回放与 PDF 导出要能离线重建这两份负载，不能只活在实时响应里。
+    table_option: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
+    )
+    visual_rationale: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
+    )
 
     __table_args__ = (
         Index("idx_session_msg_time", "session_id", "created_time"),

@@ -668,6 +668,9 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             # 0105：单步查询的图进「最终报告」（导出 PDF / 历史回放）。
             chart_type=chartType,
             chart_option=option,
+            # 0107：图之外的明细表 + 判断依据同轮落库（回放/导出离线重建）。
+            table_option=tableOption,
+            visual_rationale=rationale,
         )
         # B5：计算本轮继承字段快照（读 semanticState + 上一轮 plan/snapshot）
         prior_snapshot: dict[str, Any] | None = None

@@ -111,6 +111,8 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_QUESTION,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_ROLE,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_SQL,
+    MSG_SCHEMA_CHAT_HISTORY_MESSAGE_TABLE_OPTION,
+    MSG_SCHEMA_CHAT_HISTORY_MESSAGE_VISUAL_RATIONALE,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGES,
     MSG_SCHEMA_CHAT_HISTORY_SESSION_ID,
     MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG,
@@ -1983,6 +1985,15 @@ class ChatMessageRead(CamelModel):
     )
     chart_option: dict | None = Field(
         default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CHART_OPTION
+    )
+    # 0107（可视化输出策略）：回放也要能拿到图之外的明细表 + 判断依据。与
+    # chart_type 同口径 —— 存的就是列里的原始 dict，裸 dict 透传（不引入新枚举
+    # 包装）；无负载/存量行为 None。前端 `chatStore.toChatMessage` 照此映射。
+    table_option: dict | None = Field(
+        default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_TABLE_OPTION
+    )
+    visual_rationale: dict | None = Field(
+        default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_VISUAL_RATIONALE
     )
 
 

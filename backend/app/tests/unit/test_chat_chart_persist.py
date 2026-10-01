@@ -14,6 +14,7 @@ from app.domain.enums import ChartType
 from app.services.chat_chart_persist import (
     _PERSIST_MAX_TABLE_ROWS,
     boundedChartOption,
+    boundedTableOption,
     chartTypeName,
 )
 
@@ -85,3 +86,62 @@ class TestBoundedChartOption:
         """负载形状由渲染器保证，这里只兜体量 —— 不做类型猜测、不能炸。"""
         assert boundedChartOption(None) is None
         assert boundedChartOption({"rows": "not a list"}) == {"rows": "not a list"}
+
+
+class TestBoundedTableOption:
+    def test_truncates_rows_over_the_cap_and_marks_it(self) -> None:
+        """表负载落库前同样要过 200 行上界（与图负载共用同一道闸）。
+
+        平时 `assembleTableOption` 已按 FULL_DATA_THRESHOLD（默认 100）截过一轮，
+        100 ≤ 200 ⇒ 这道闸只在运维把阈值调到 >200 时才生效 —— 是纵深兜底，不是死代码。
+        """
+        option = {
+            "columns": ["NAME", "QTY"],
+            "rows": [{"NAME": f"n{i}", "QTY": i} for i in range(500)],
+        }
+
+        bounded = boundedTableOption(option)
+
+        assert len(bounded["rows"]) == _PERSIST_MAX_TABLE_ROWS
+        assert bounded["truncated"] is True
+
+    def test_does_not_mutate_the_caller_copy(self) -> None:
+        """调用方手里那份还要发给前端（实时响应发全量），不能被就地截断。"""
+        option = {
+            "columns": ["NAME", "QTY"],
+            "rows": [{"NAME": f"n{i}", "QTY": i} for i in range(500)],
+        }
+
+        boundedTableOption(option)
+
+        assert len(option["rows"]) == 500
+        assert "truncated" not in option
+
+    def test_rows_at_the_cap_are_untouched(self) -> None:
+        """边界：正好等于上限不算超限，不加 truncated 标记（避免谎报截断）。"""
+        option = {
+            "columns": ["NAME"],
+            "rows": [{"NAME": i} for i in range(_PERSIST_MAX_TABLE_ROWS)],
+        }
+
+        assert boundedTableOption(option) == option
+        assert "truncated" not in boundedTableOption(option)
+
+    def test_decimal_rows_become_json_safe(self) -> None:
+        """rows 是 SQL 原始数据（NUMERIC → Decimal），JSONB 裸序列化会炸，必须归一。"""
+        from decimal import Decimal
+
+        option = {
+            "columns": ["NAME", "QTY"],
+            "rows": [{"NAME": "A", "QTY": Decimal("10")}],
+        }
+
+        bounded = boundedTableOption(option)
+
+        assert bounded["rows"][0]["QTY"] == 10.0
+        assert isinstance(bounded["rows"][0]["QTY"], float)
+
+    def test_malformed_payload_does_not_raise(self) -> None:
+        """表负载形状由装配层保证，这里只兜体量 —— 不做类型猜测、不能炸。"""
+        assert boundedTableOption(None) is None
+        assert boundedTableOption({"rows": "not a list"}) == {"rows": "not a list"}

@@ -222,6 +222,9 @@ class SessionHistoryService:
                 # 响应里，切走再切回整段图消失。
                 SessionMessage.chart_type,
                 SessionMessage.chart_option,
+                # 0107（可视化输出策略）：图之外的明细表 + 判断依据随行带出。
+                SessionMessage.table_option,
+                SessionMessage.visual_rationale,
             )
             .where(SessionMessage.session_id == sessionId)
             .limit(limit)
@@ -253,6 +256,9 @@ class SessionHistoryService:
                 # 0105：无图的行（user 行 / 改动前的存量行）两列均为 NULL → None
                 chart_type=r.chart_type,
                 chart_option=r.chart_option,
+                # 0107：无表/无依据的行（user 行 / 改动前的存量行）两列均为 NULL → None
+                table_option=r.table_option,
+                visual_rationale=r.visual_rationale,
             )
             for r in rows
         ]

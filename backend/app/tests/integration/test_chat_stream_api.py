@@ -214,6 +214,13 @@ class TestChatStreamApi:
         assert msgs[1].chart_type == "bar", "枚举必须已归一为裸字符串"
         assert msgs[1].chart_option is not None
         assert msgs[0].chart_type is None, "user 行不该带图"
+        # 0107：表负载 + 判断依据同轮落库 —— 回放/导出要能离线重建，不能只活在实时响应。
+        assert msgs[1].table_option is not None, "表负载必须落进库"
+        assert msgs[1].table_option["columns"] == ["NAME", "QTY"]
+        assert msgs[1].visual_rationale is not None, "判断依据必须落进库"
+        assert msgs[1].visual_rationale["code"] == "R12_CATEGORY_BAR"
+        assert msgs[0].table_option is None, "user 行不该带表"
+        assert msgs[0].visual_rationale is None, "user 行不该带依据"
 
     async def test_chitchat_streams_greeting(self, client, dbSession) -> None:
         resp = await client.post(

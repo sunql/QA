@@ -326,6 +326,10 @@ class TestMultiStepChatApi:
         # 落库：消息 + 查询状态 + 用量（2×nl2sql + 1×answer）
         msgs = list((await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id))).scalars().all())
         assert [m.role for m in msgs] == ["user", "assistant"]
+        # 0107：汇总步纯文字落库 —— 顶层不附图/表，SUMMARY_TEXT_ONLY 解释「为什么没有图」
+        assert msgs[1].chart_type is None
+        assert msgs[1].table_option is None
+        assert msgs[1].visual_rationale == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
         state = await dbSession.execute(select(SessionQueryState))
         state_rows = list(state.scalars().all())
         assert len(state_rows) == 1
@@ -951,6 +955,16 @@ class TestMultiStepStepCharts:
         assert frames[-1][1]["visualRationale"] == {
             "code": "SUMMARY_TEXT_ONLY", "params": {},
         }
+        # 0107：done 帧的 rationale 也随 assistant 行落库（回放/导出离线重建）
+        msgs = list(
+            (await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id)))
+            .scalars()
+            .all()
+        )
+        assert [m.role for m in msgs] == ["user", "assistant"]
+        assert msgs[1].chart_type is None
+        assert msgs[1].table_option is None
+        assert msgs[1].visual_rationale == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
 
 
 class TestNoAggregationStepDegrade:
@@ -1012,6 +1026,10 @@ class TestNoAggregationStepDegrade:
             .all()
         )
         assert [m.role for m in msgs] == ["user", "assistant"]
+        # 0107：降级收尾同是纯文字 —— SUMMARY_TEXT_ONLY 落库
+        assert msgs[1].chart_type is None
+        assert msgs[1].table_option is None
+        assert msgs[1].visual_rationale == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
         # 查询状态锚定本轮问题 + 最后一个成功数据步的 SQL（追问可继续级联）
         state = (
             await dbSession.execute(select(SessionQueryState))

@@ -292,7 +292,7 @@ hint 真源为 `propsByClass`（已经 `_classRefNames` 展开过的业务名 + 
 |---|---|---|
 | CTE | `isCteFormula`（`^\s*WITH\b`，容许前导空白） | **不做**属性存在性校验（CTE 内部标识符不是本体属性） |
 | 语句结构 | `formulaHasSqlStructure`（剥掉字符串字面量后 **`SELECT` 与 `FROM`/`JOIN` 同时**出现） | 报**一条**可操作引导（`_STRUCTURAL_FORMULA_HINT`，置于 issues 首位并去重），不逐 token 报属性 |
-| 纯聚合表达式 | 以上皆否 | 逐 token 做属性存在性校验（原逻辑，如期拦真幻觉） |
+| 纯聚合表达式 | 以上皆否 | 逐 token 做属性存在性校验（原逻辑，如期拦真幻觉），并拼 `_propertyOwnerHint` + `_FORMULA_PROPERTY_HINT` 可操作引导 |
 
 **判据刻意不看首词**：线上错误文本只列出被误报的 token，无法区分「整条 `SELECT`」与「表达式里嵌子查询」（如 `SUM(a)/(SELECT SUM(b) FROM t)`）——两者首词不同（`SELECT` vs `SUM`）但都含 `SELECT` + `FROM`，故一个判据覆盖两种形态。
 
@@ -303,6 +303,12 @@ hint 真源为 `propsByClass`（已经 `_classRefNames` 展开过的业务名 + 
 **误伤边界**：`owned` 只含属性名/别名，不含 schema 名与表名。**含 `SELECT` 的**公式要通过校验，必须其 schema 名、表名、表别名全部恰好等于某个属性名 —— 近乎不可能，故该分支只改变「今天已经在失败」的公式的报错内容。**不含 `SELECT` 的** `EXTRACT`/`TRIM` 类公式落回逐 token 校验，行为与改动前**完全一致**。（初版论证漏掉了后者，被 code review 证伪后修正。）
 
 **提示语必须置首**：`_buildPlanUserPrompt` 把这批 issues 用「；」拼起来后按 `_ERROR_SNIPPET_LIMIT=200` 从**尾部**截断。`_STRUCTURAL_FORMULA_HINT` 占 150 字符，按「追加」顺序会被前面的 issue 挤出预算（实测被砍成 `… ② CTE 形式 WITH a AS (SELECT ...) SELEC`），故实现把它 **insert 到 issues 首位并去重** —— 单独 150 < 200 必然存活，N 条语句公式也只占一份预算。
+
+**纯表达式分支的报错同样必须带方向**（2026-10-01 真机第二轮，也是第一轮修复的覆盖缺口）：该支原先不拼任何可操作提示（同类缺口另有分区属性分支 `分区属性 X 不属于选定的任何类`，属 perGroupLimit 场景，未动）。真机实测：模型面对「Top-N 占比」先写占位符 `SUM(CASE WHEN SUPPLIER_CODE IN (TOP3) THEN RCV_QTY_PUU ELSE 0 END) / SUM(RCV_QTY_PUU)`，收到光秃秃的「公式中的属性 TOP3 不属于选定的任何类」后，把 `TOP3` **就地展开成子查询** —— 第 2 轮输出是第 1 轮的精确回应，表达式结构分毫未动。**模型是照着反馈改的，只是反馈没给它方向。** 故该支现在也拼 `_propertyOwnerHint` + `_FORMULA_PROPERTY_HINT`（96 字符：禁用占位符/子查询 + Top-N 占比用 CTE），引导置 issues 首位并去重。
+
+**触发条件必须收窄到「全 schema 都不存在」的 token**（`p not in allPropNames`）：未知有两种成因，方向相反 —— 跨类引用（真实列，只是不在 selectedClasses 里，如 `SUM(NAME)` 而 NAME 属 `BPSUPPLIER`）该走 `_propertyOwnerHint`「把该类加入 selectedClasses」；占位符/幻觉（全 schema 无此属性，如 `TOP3`）才配得上 Top-N 引导。**给跨类引用叠 Top-N 提示是错误方向，比没方向更糟**（code review MEDIUM，已复现）。这两个分支与 `_propertyOwnerHint` 内部的「有归属 / 不存在」两支同源，口径一致。长度实测：主路径 171 完整；**边界场景会超 `_ERROR_SNIPPET_LIMIT=200`**（单 unknown + 有归属 203、两个 unknown 280），被砍的是排在后面的属性报错行尾部 —— **引导恒完整，这正是置首位的意义**：方向优先于逐条点名。
+
+`_STRUCTURAL_FORMULA_HINT` 的措辞必须涵盖两种形态：真机撞上的是「**表达式里嵌子查询**」，而只说「不能是整条 SQL 语句」会让模型认为与自己无关，引导因此打折 —— 故措辞写明「不能是整条 SQL 语句，**也不得在表达式里嵌子查询**」。
 
 **顺带修掉的既有缺陷**：`isCteFormula` 取代 `formula.strip().upper().startswith("WITH ")`，后者要求 `WITH` 后紧跟**一个空格**，对 `WITH\n` / `WITH\t` 漏判 —— CTE 逃生门本身是脆的。`isCteFormula` 是 SSOT：`parseFormula` 用它路由、`validatePlan` 用它判豁免。
 

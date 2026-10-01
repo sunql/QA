@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from app.domain.models import OntologyClass, OntologyProperty
 from app.domain.query_plan import Aggregation, JoinSpec, QueryPlan, SortSpec
-from app.services.nl2sql_plan import _STRUCTURAL_FORMULA_HINT
-from app.services.nl2sql_prompts import _buildPlanUserPrompt
+from app.services.nl2sql_plan import _FORMULA_PROPERTY_HINT, _STRUCTURAL_FORMULA_HINT
+from app.services.nl2sql_prompts import _ERROR_SNIPPET_LIMIT, _buildPlanUserPrompt
 from app.services.nl2sql_refs import (
     _FORMULA_SQL_KEYWORDS,
     _extractFormulaProperties,
@@ -936,3 +936,157 @@ class TestValidatePlanFormulaShape:
             "GROUP BY BPSNUM) SELECT SUM(qty) AS 占比 FROM top3"
         )
         assert _service().validatePlan(self._plan(formula), [_receiptCls()]) == []
+
+
+class TestPureExpressionFormulaHint:
+    """纯表达式 formula 的幻觉/占位符报错必须带可操作方向（2026-10-01 真机回归）。
+
+    真机实测（`docker logs qa-backend` 的「NL2SQL 计划校验」日志）：问「5月份供货量最多的
+    三家供应商所供货物总量占5月份总供货量的比例是多少」时，模型第一次写
+
+        SUM(CASE WHEN SUPPLIER_CODE IN (TOP3) THEN RCV_QTY_PUU ELSE 0 END) / SUM(RCV_QTY_PUU)
+
+    —— 用占位符 `TOP3` 标出「这里要放前三家」。该公式不含 SELECT/FROM，走纯表达式分支，
+    而该分支是 validatePlan 里**唯一**不拼任何可操作提示的属性校验分支，只回一句
+    `公式中的属性 TOP3 不属于选定的任何类`。模型据此把 `TOP3` **就地展开成子查询**
+    （第二轮输出是第一轮的精确回应 —— 表达式结构完全不变，只把占位符换成真实 SQL），
+    方向错误 → maxPlanAttempts 耗尽 → 整轮失败。
+
+    修法：该分支补 `_FORMULA_PROPERTY_HINT`（禁用占位符/子查询 + Top-N 用 CTE 形式），
+    置 issues 首位并去重 —— 与语句结构分支同一教训（`_ERROR_SNIPPET_LIMIT=200` 从尾部截断）。
+    """
+
+    _PLACEHOLDER = "SUM(CASE WHEN BPSNUM IN (TOP3) THEN QTY ELSE 0 END) / SUM(QTY)"
+
+    def _plan(self, formula: str) -> QueryPlan:
+        return QueryPlan(
+            target="前三家供应商供货量占比",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("QTY",),
+            aggregations=(
+                Aggregation(function="SUM", property="QTY", alias="占比", formula=formula),
+            ),
+        )
+
+    def test_placeholder_reports_actionable_hint(self) -> None:
+        """判别器：修前该支只有裸句，没有任何方向。"""
+        issues = _service().validatePlan(self._plan(self._PLACEHOLDER), [_receiptCls()])
+        # 原有口径保留：逐 token 报幻觉属性 + 归属提示
+        assert any("公式中的属性" in i and "TOP3" in i for i in issues), issues
+        # 新增：可操作方向（禁用占位符/子查询 + Top-N 用 CTE）
+        assert _FORMULA_PROPERTY_HINT in issues, issues
+        # 位次：必须排在属性报错行**之前**（_buildPlanUserPrompt 从**尾部**截断，
+        # 排在后面会被砍掉）。用 index 比较而非 `issues[0] ==`：后者把「必须是全局
+        # 第 0 位」这个实现细节写死，而结构性公式与纯表达式公式同处一个计划时，
+        # 两个 hint 会各占 0/1 位（code review LOW）。
+        firstPropRow = min(i for i, x in enumerate(issues) if "公式中的属性" in x)
+        assert issues.index(_FORMULA_PROPERTY_HINT) < firstPropRow, issues
+
+    def test_hint_survives_snippet_truncation(self) -> None:
+        """提示语必须活过 200 字符尾部截断（前置 issue 会把它挤走）。"""
+        plan = QueryPlan(
+            target="前三家供应商供货量占比",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("NONEXISTENT", "QTY"),  # 制造一条排在公式之前的 issue
+            aggregations=(
+                Aggregation(
+                    function="SUM", property="QTY", alias="占比", formula=self._PLACEHOLDER
+                ),
+            ),
+        )
+        issues = _service().validatePlan(plan, [_receiptCls()])
+        assert len(issues) >= 3, issues
+        # 用生产构造器断言，不重写拼接逻辑（否则会与实现漂移）
+        prompt = _buildPlanUserPrompt("前三家供应商供货量占比", issues)
+        assert _FORMULA_PROPERTY_HINT in prompt, prompt[-300:]
+
+    def test_hint_survives_even_when_issues_overflow_budget(self) -> None:
+        """引导在任何组合下都必须完整 —— 置首位买到的就是这个性质。
+
+        实测（非估算）：两个未知属性 +「有归属」支的长归属提示，issues 拼接达
+        **280 字符，超过** `_ERROR_SNIPPET_LIMIT=200`。此时引导仍完整，被截断的只是
+        排在它后面的属性报错行尾部。故本测试断言的是「引导存活」，**不是**「总和 ≤ 200」
+        —— 后者在边界场景做不到，宣称做到了才是不实。
+        """
+        receipt = _cls("PRECEIPT", [("QTY", "QTY_0")])
+        # NAME 同时属于 5 个类 ⇒ _propertyOwnerHint 走「有归属」支且列满类名（输出最长）
+        others = [
+            _cls(f"CLS{i}", [("X", "X_0"), ("NAME", f"NAME_{i}")]) for i in range(1, 6)
+        ]
+        plan = QueryPlan(
+            target="前三家供应商供货量占比",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("QTY",),
+            aggregations=(
+                Aggregation(
+                    function="SUM",
+                    property="QTY",
+                    alias="占比",
+                    formula="SUM(CASE WHEN NAME IN (TOP3) THEN QTY ELSE 0 END) / SUM(QTY)",
+                ),
+            ),
+        )
+        issues = _service().validatePlan(plan, [receipt] + others)
+        joined = "；".join(issues)
+        # 前提守卫（双向）：夹具必须真的超预算，否则本测试没在测它想测的东西
+        assert len(joined) > _ERROR_SNIPPET_LIMIT, (
+            f"夹具未触发超预算（{len(joined)} ≤ {_ERROR_SNIPPET_LIMIT}），"
+            f"本测试失去意义，请调整夹具"
+        )
+        prompt = _buildPlanUserPrompt("前三家供应商供货量占比", issues)
+        assert _FORMULA_PROPERTY_HINT in prompt, prompt[-300:]
+
+    def test_cross_class_reference_does_not_get_placeholder_hint(self) -> None:
+        """误伤守卫（code review MEDIUM）：跨类引用是**真实列**，不是占位符。
+
+        `NAME` 属于 BPSUPPLIER 而 selectedClasses 只选了 PRECEIPT —— 模型用的是真列，
+        该收到「该属性属于类 BPSUPPLIER，请把对应类加入 selectedClasses」，
+        而不是「不得用占位符或子查询」。后者是**错误方向**，比没方向更糟。
+        """
+        receipt = _cls("PRECEIPT", [("QTY", "QTY_0")])
+        supplier = _cls("BPSUPPLIER", [("BPSNUM", "BPSNUM_0"), ("NAME", "NAME_0")])
+        plan = QueryPlan(
+            target="各供应商收货量占比",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("QTY",),
+            aggregations=(
+                Aggregation(
+                    function="SUM",
+                    property="QTY",
+                    alias="占比",
+                    formula="SUM(QTY) / SUM(NAME) OVER ()",
+                ),
+            ),
+        )
+        issues = _service().validatePlan(plan, [receipt, supplier])
+        assert any("公式中的属性 NAME" in i and "属于类 BPSUPPLIER" in i for i in issues), issues
+        assert _FORMULA_PROPERTY_HINT not in issues, issues
+
+    def test_shape_hallucination_gets_placeholder_hint(self) -> None:
+        """对照（双向守卫）：全 schema 都不存在的 token 才配得上占位符引导。"""
+        plan = QueryPlan(
+            target="各供应商收货量占比",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("QTY",),
+            aggregations=(
+                Aggregation(
+                    function="SUM",
+                    property="QTY",
+                    alias="占比",
+                    formula="SUM(GHOSTFIELD) / SUM(QTY) OVER ()",
+                ),
+            ),
+        )
+        issues = _service().validatePlan(plan, [_receiptCls()])
+        assert _FORMULA_PROPERTY_HINT in issues, issues
+
+    def test_legal_pure_expression_not_disturbed(self) -> None:
+        """反向守卫：不含幻觉/占位符的纯表达式不得被新提示打扰。"""
+        assert _service().validatePlan(
+            self._plan("SUM(QTY) / SUM(SUM(QTY)) OVER ()"), [_receiptCls()]
+        ) == []
+
+    def test_structural_hint_also_names_subquery(self) -> None:
+        """措辞修正：真机撞上的是「表达式里嵌子查询」，而原提示只说「不能是整条 SQL
+        语句」—— 模型会认为自己没犯这条，引导因此打折。"""
+        assert "子查询" in _STRUCTURAL_FORMULA_HINT

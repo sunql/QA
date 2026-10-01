@@ -344,9 +344,31 @@ def _finalizePlan(
 # _ERROR_SNIPPET_LIMIT=200 从**尾部**截断（nl2sql_prompts.py），提示被截掉就白写了。
 # 引导照抄 _buildPlanSystemPrompt 规则 4 的两种合法形式，让重试有明确下一步。
 _STRUCTURAL_FORMULA_HINT = (
-    "formula 不能是整条 SQL 语句（含 FROM/JOIN）；占比/比率请改用 "
+    "formula 不能是整条 SQL 语句，也不得在表达式里嵌子查询（含 FROM/JOIN）；"
+    "占比/比率请改用 "
     "① 单层窗口函数 SUM(x)/SUM(SUM(x)) OVER ()，"
     "或 ② CTE 形式 WITH a AS (SELECT ...) SELECT ... FROM a（需先取 Top-N 再算占比时用 ②）"
+)
+
+# 纯表达式 formula 的报错引导（2026-10-01 真机回归）。
+#
+# 真机实测：模型面对「Top-N 占比」先用占位符标出「这里要放前三家」——
+#   SUM(CASE WHEN SUPPLIER_CODE IN (TOP3) THEN RCV_QTY_PUU ELSE 0 END) / SUM(RCV_QTY_PUU)
+# 该公式不含 SELECT/FROM，走纯表达式分支，而该支原本只回一句光秃秃的
+# 「公式中的属性 TOP3 不属于选定的任何类」，**没有任何方向**。模型据此把 TOP3
+# 就地展开成子查询（第二轮输出是第一轮的精确回应：表达式结构分毫未动，只把占位符
+# 换成了真实 SQL），方向错误 → maxPlanAttempts 耗尽 → 整轮失败。
+#
+# 这条补的就是方向：占位符与子查询都不合法，Top-N 占比的正确形态是 CTE。
+#
+# 长度受 _ERROR_SNIPPET_LIMIT=200 约束（_buildPlanUserPrompt 从**尾部**截断）。
+# 实测：本条 96 字符；属性报错行 75（属性不存在支）~ 107（有归属支且列满类名）；
+# 两个未知属性时拼接达 280 —— **超预算在边界场景是常态**，所以引导必须置首位：
+# 置首后引导恒完整，被砍的只是排在它后面的属性报错行尾部；若按追加，
+# 引导会被整个挤出预算 —— 那正是本次要修的病。**方向比逐条点名重要。**
+_FORMULA_PROPERTY_HINT = (
+    "不得用占位符或子查询；Top-N 占比请用 CTE："
+    "WITH topn AS (SELECT ... FETCH FIRST n ROWS ONLY) SELECT ... FROM topn"
 )
 
 # 失败日志里 formula 原文的最大长度（整条 SELECT 可能很长，截断防日志爆炸）。
@@ -452,7 +474,10 @@ def validatePlan(
             #    改为一条可操作引导。不豁免而拒绝：formula 没有确定性渲染器
             #    （planToText/_aggText 只拼 "{formula} AS {alias}"），豁免会把早期
             #    响亮的失败换成 SQL 阶段晚期安静的失败。
-            # ③ 纯聚合表达式：逐 token 做属性存在性校验（原逻辑，如期拦真幻觉）。
+            # ③ 纯聚合表达式：逐 token 做属性存在性校验（原逻辑，如期拦真幻觉），
+            #    并补一条可操作引导（_FORMULA_PROPERTY_HINT）—— 该支原本不拼任何提示，
+            #    真机实测模型因此把占位符（TOP3）就地展开成子查询，方向错误
+            #    （2026-10-01 真机回归）。
             if isCteFormula(agg.formula):
                 pass
             elif formulaHasSqlStructure(agg.formula):
@@ -464,9 +489,40 @@ def validatePlan(
                 if _STRUCTURAL_FORMULA_HINT not in issues:
                     issues.insert(0, _STRUCTURAL_FORMULA_HINT)
             else:
-                for refProp in _extractFormulaProperties(agg.formula):
-                    if refProp not in owned and refProp not in aggAliases:
-                        issues.append(f"公式中的属性 {refProp} 不属于选定的任何类")
+                # 纯表达式：逐 token 做属性存在性校验（原逻辑，如期拦真幻觉），
+                # 但**报错必须带方向** —— 该支原本不拼任何可操作提示，模型只被告知
+                # 「这个 token 不是属性」，便自己猜怎么改（真机实测：把占位符就地
+                # 展开成子查询，方向错）。
+                # 注：validatePlan 里同类缺口不止这一处 —— 下面的分区属性分支
+                # （`分区属性 X 不属于选定的任何类`）同样不拼提示，本次未动。
+                unknownProps = sorted(
+                    p
+                    for p in _extractFormulaProperties(agg.formula)
+                    if p not in owned and p not in aggAliases
+                )
+                for refProp in unknownProps:
+                    issues.append(
+                        f"公式中的属性 {refProp} 不属于选定的任何类；"
+                        f"{_propertyOwnerHint(refProp, propsByClass, maxClasses=ownerHintMaxClasses)}"
+                    )
+                # 触发条件收窄到**全 schema 都不存在**的 token（code review MEDIUM）。
+                # 「未知」有两种成因，方向截然不同：
+                #   - 跨类引用（真实列，只是不在 selectedClasses 里，如 SUM(NAME) 里
+                #     NAME 属 BPSUPPLIER）—— 该走上面的 _propertyOwnerHint「把该类加入
+                #     selectedClasses」，给它叠 Top-N 提示是**错误方向**，比没方向更糟；
+                #   - 占位符/幻觉（全 schema 无此属性，如 TOP3、GHOSTFIELD）—— 才配得上
+                #     「不得用占位符或子查询，Top-N 占比用 CTE」。
+                # 故只在后者触发。注意这里与 _propertyOwnerHint 的「有归属 / 不存在」
+                # 两支同源，口径一致。
+                #
+                # 置首位**且去重**（与语句结构分支同一教训）：_buildPlanUserPrompt 把
+                # issues 用「；」拼起来后按 _ERROR_SNIPPET_LIMIT=200 从**尾部**截断 ——
+                # 追加在后会被前面那条属性报错行挤出预算，引导就白写了。
+                if (
+                    any(p not in allPropNames for p in unknownProps)
+                    and _FORMULA_PROPERTY_HINT not in issues
+                ):
+                    issues.insert(0, _FORMULA_PROPERTY_HINT)
 
     for prop in plan.groupBy:
         if prop not in owned:

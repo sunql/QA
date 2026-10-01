@@ -47,7 +47,7 @@
 
 1. **语句形态没有专门分支** —— 且 CTE 逃生门本身是脆的：`formula.strip().upper().startswith("WITH ")` 要求 `WITH` 后**紧跟一个空格**，`WITH\n` / `WITH\t` 直接漏判（已实测 `is_cte=False`）。
 2. **`ONLY` 不在关键字集** —— `_FORMULA_SQL_KEYWORDS` 有 `FETCH`/`ROWS`/`FIRST` 却没有 `ONLY`，与 2026-09-28 修过的 `ASC/DESC` 同类漏项。
-3. **该支报错没有可操作提示** —— `公式中的属性 X 不属于选定的任何类` 是唯一**不拼任何 hint** 的分支（其余分支都拼 `_propertyOwnerHint` / `_timeBucketGroupHint`）。重试反馈无指向 → 模型原样重犯 → `maxPlanAttempts=2` 耗尽 → 整轮失败。这解释了「连点三次都一样」。
+3. **该支报错没有可操作提示** —— `公式中的属性 X 不属于选定的任何类` 是唯一**不拼任何 hint** 的分支（其余分支都拼 `_propertyOwnerHint` / `_timeBucketGroupHint`；**后修正**：并非唯一 —— 分区属性分支同样不拼，见 §8）。重试反馈无指向 → 模型原样重犯 → `maxPlanAttempts=2` 耗尽 → 整轮失败。这解释了「连点三次都一样」。
 
 **取证缺口**：计划校验失败当**零日志**，`session_message` 也无 detail 列、无 attempt 表 ⇒ 真实 formula 原文事后不可回看，只能靠现象反推（本次即如此）。
 
@@ -148,3 +148,51 @@
 固定测试只确定性地证明「**反馈现在是对的**」；**LLM 会不会照着写，只有真机跑才知道**。这是本次修复唯一的残余风险，且已被第 4 节的失败日志变成可观测：
 
 部署后重问原问题；若仍失败，`docker logs qa-backend` 现在能看到 attempt + **formula 原文** + issues，据此判断是引导不够还是模型能力问题，再决定是否上调 `maxPlanAttempts`。
+
+---
+
+## 8. 真机回归：第一轮不够，第二轮补纯表达式分支（2026-10-01 同日）
+
+第一轮部署后重问原问题，**仍失败**，但错误信息换成了新引导（用户回报的就是这一条）：
+
+> formula 不能是整条 SQL 语句（含 FROM/JOIN）；占比/比率请改用 ① 单层窗口函数 SUM(x)/SUM(SUM(x)) OVER ()，或 ② CTE 形式 …
+
+⇒ 三路口径**按设计工作**（不再逐 token 误报 9 条假属性），但任务没解决。第 5 节顺带补的取证日志给出了完整因果链：
+
+| 轮次 | 模型写的 formula | 收到的反馈 |
+|---|---|---|
+| attempt=1 | `SUM(CASE WHEN SUPPLIER_CODE IN (TOP3) THEN RCV_QTY_PUU ELSE 0 END) / SUM(RCV_QTY_PUU)` | `公式中的属性 TOP3 不属于选定的任何类`（**裸句，零方向**） |
+| attempt=2 | 同一表达式，仅把 `TOP3` **就地展开成子查询** `IN (SELECT … FETCH FIRST 3 ROWS ONLY)` | 新引导（attempts 已耗尽） |
+
+**第 2 轮是第 1 轮的精确回应** —— 表达式结构分毫未动，只把占位符换成了真实 SQL。模型是**照着反馈改的**，只是反馈没告诉它往哪改。
+
+**这是第一轮修复的覆盖缺口**：`validatePlan` 的**纯表达式** formula 分支不拼任何可操作提示（§2 当时称之为「唯一」，**不准确** —— 分区属性分支 `分区属性 X 不属于选定的任何类` 同样不拼；那是 2026-09-09 的 perGroupLimit 场景，非本次报障场景，**本次未动**）。第 2 节点名过这个缺陷，但第一轮只修了「语句结构」那一支 —— 而模型第一次走的正是这一支。
+
+### 第二轮改动
+
+| 文件 | 改动 |
+|---|---|
+| `backend/app/services/nl2sql_plan.py` | 新增 `_FORMULA_PROPERTY_HINT`（禁用占位符/子查询 + Top-N 占比用 CTE，96 字符）；纯表达式分支改为「收集 `unknownProps`（`sorted` 保证报错可复现）→ 逐条拼 `_propertyOwnerHint`（补回既有口径）→ 引导 insert 到 issues 首位并去重，**触发条件收窄到「全 schema 都不存在」的 token** —— 跨类引用（真实列，只是不在 selectedClasses 里，如 `SUM(NAME)` 而 NAME 属 BPSUPPLIER）该走 `_propertyOwnerHint`「把该类加入 selectedClasses」，给它叠 Top-N 提示是**错误方向**（code review MEDIUM，已实测复现）」；`_STRUCTURAL_FORMULA_HINT` 措辞补上「也不得在表达式里嵌子查询」（真机撞的正是嵌子查询，原措辞只说「整条 SQL 语句」，模型会认为自己没犯这条，引导因此打折） |
+| `backend/app/tests/unit/test_query_plan_validation.py` | 新增 `TestPureExpressionFormulaHint`（4 例：判别器 / 截断存活 / 反向守卫 / 措辞） |
+
+### 验证
+
+- **长度（实测，非估算）**：`_ERROR_SNIPPET_LIMIT=200`，从**尾部**截断。引导 96 字符；属性报错行 75（属性不存在支）~ 107（有归属支且列满类名）。主路径 **171 完整**；**边界场景超预算**（单 unknown + 有归属 = 203、两个 unknown = 280）—— 此时被砍掉的是排在后面的属性报错行尾部，**引导恒完整**（置首位的直接结果）。故测试断言的是「引导存活」**而非**「总和 ≤ 200」：后者在边界场景做不到，宣称做到了才是不实。该测试带**前提守卫**（夹具若不超预算即报错），防它悄悄退化成空测。断言用生产构造器 `_buildPlanUserPrompt`，不重写拼接逻辑（避免与实现漂移）。
+- **判别器（双向，各做过一次反向验证）**：
+  - 移除 `issues.insert(0, …)` 后，`test_placeholder_reports_actionable_hint` 与 `test_hint_survives_snippet_truncation` **两条变红**，另两条（反向守卫、措辞）保持绿 —— 证明新测试确实在钉「引导存在且置首」，不是摆设。
+  - 把触发条件改回不收窄（`bool(unknownProps)`）后，`test_cross_class_reference_does_not_get_placeholder_hint` **变红** —— 证明收窄条件是真判别器。对照组 `test_shape_hallucination_gets_placeholder_hint` 保证「纯幻觉仍会收到引导」，两个方向都钉住。
+- **回归**：`test_query_plan_validation` + `test_formula_parser` + `test_property_ref_normalize` + 显式路径 CTE 两文件 → **154 passed**；集成 `test_nl2sql_structural_formula_retry` → **1 passed**；受影响面 15 个 unit 文件 → **36 failed / 635 passed**，36 条**全部**落在第一轮已用 HEAD 基线 worktree 逐条 diff 证明为既有红的集合内（chat_service 35 + query_plan_generation 1），**零新增红**。
+
+### 已知限制（第二轮；均为**既有**行为，非本 diff 引入）
+
+code review 在收窄触发条件时枚举出「不存在」桶里的三种边界 —— 收窄对它们自洽（都该走引导），只是提示可能不够贴切，**本次不动**：
+
+1. **纯幻觉 vs 占位符**：`GHOSTFIELD` 这类纯幻觉也触发 Top-N 引导，对它是半冗余噪音；但同一 token 的报错行已给「请改用选中类的已有属性」，无害。
+2. **大小写错配**：`qty` vs schema 的 `QTY` 落「不存在」支（校验大小写敏感，既有行为）。模型照抄 schema 大写，实际概率低。
+3. **表限定裸名**：`SUM(T_PRECEIPT.QTY)` 被 `_extractFormulaProperties` 拆成 `T_PRECEIPT` + `QTY`，裸表名不是合法引用名 ⇒ 触发引导。与 §6「已知非目标」同源（extraction 无上下文感知）。
+
+### 残余风险（结论未变，但已被证伪过一次）
+
+固定测试仍只证明「反馈现在是对的」。**第一轮那句「模型会不会照着写，只有真机跑才知道」已经被真机证伪了一次** —— 这类「提示语质量」的修复，唯一可信的验收是真机重问，不是测试绿。
+
+**若第二轮仍失败**：日志现在同时有两轮的 formula 原文与 issues，据此判断是措辞问题还是模型能力问题；届时再考虑方案 B（在 `nl2sql_prompts.py` 规则 4 里补「Top-N 占比」的 CTE 示例 —— 现在 prompt 只有窗口函数示例与 PO 完成率 CTE 示例，**恰好没有这个模式**）或 `maxPlanAttempts` 2→3。

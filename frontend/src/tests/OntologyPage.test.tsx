@@ -300,7 +300,7 @@ describe("OntologyPage", () => {
     await user.type(nameInput, "Dog");
     // 选择父类
     await user.click(screen.getByRole("combobox", { name: /父类/ }));
-    await user.click(screen.getByText("Customer（客户）"));
+    await user.click(screen.getByText("客户（Customer）"));
     await user.click(screen.getByRole("button", { name: /确\s?定$/ }));
 
     await waitFor(() => {
@@ -409,7 +409,7 @@ describe("OntologyPage", () => {
     await user.click(screen.getByRole("combobox", { name: /父类/ }));
     // 可选父类应含 Customer，不含自身 Animal 与后代 Dog
     await waitFor(() => {
-      expect(screen.getByText("Customer（客户）")).toBeInTheDocument();
+      expect(screen.getByText("客户（Customer）")).toBeInTheDocument();
       expect(screen.queryByText("Animal（客户）")).not.toBeInTheDocument();
       expect(screen.queryByText("Dog（客户）")).not.toBeInTheDocument();
     });
@@ -504,7 +504,7 @@ describe("OntologyPage", () => {
     await userEvent.click(screen.getByRole("button", { name: /新增属性/ }));
     // 用 id 精确选所属类下拉（属性模态框有两个 Select：所属类 + 数据类型）
     await userEvent.click(screen.getByRole("combobox", { name: /所属类/ }));
-    await userEvent.click(screen.getByText("Customer（客户）"));
+    await userEvent.click(screen.getByText("客户（Customer）"));
     // 输入属性名
     const propNameInput = screen.getByRole("textbox", { name: "属性名" });
     await user.type(propNameInput, "region_code");

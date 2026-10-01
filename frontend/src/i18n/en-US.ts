@@ -2465,6 +2465,11 @@ export const enUS = {
   // Wiki ↔ Ontology link management (Task 7)
   wikiLinks: {
     title: "Wiki ↔ Ontology Link Management",
+    tabs: {
+      class: "Class",
+      property: "Property",
+      metric: "Metric",
+    },
     addBinding: "Add Binding",
     scopePage: "Entire page",
     scopeChunk: "This chunk only",

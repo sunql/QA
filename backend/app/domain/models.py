@@ -2146,15 +2146,16 @@ from app.models.system_config import SystemConfig  # noqa: E402,F401
 class WikiOntologyLink(Base):
     """Wiki 知识条目 ↔ 本体类/属性的多对多链接（feat-wiki-ontology-link，Task 1）。
 
-    一行 = "某个 wiki 页面（或 page 下某 chunk）说明某个 ontology class/property"。
+    一行 = "某个 wiki 页面（或 page 下某 chunk）说明某个 ontology class/property/metric"。
 
     关键约束：
     - ``revoked_time IS NULL`` 视为活动关系；撤销（软删）后再插相同 key 走
       partial unique + 撤销复活，必须重建一行而不是原地 UPDATE（保持活动历史
       可追溯）。
     - ``chunk_id`` 可空：NULL = page 级语义；非空 = chunk 级定位。
-    - ``ontology_type`` 由 ``chk_link_type`` CHECK 约束为 'class'/'property' 二选一；
-      与 ontology_class.id / ontology_property.id 没有 FK（本体类属性可任意修改
+    - ``ontology_type`` 由 ``chk_link_type`` CHECK 约束为 'class'/'property'/'metric' 三选一
+      （迁移 0106 放开；与 ``OntologyMetric`` 对应）；仍与 ontology_class.id /
+      ontology_property.id / ontology_metric.id 没有 FK（本体类属性可任意修改
       / 重命名，硬 FK 会拖累回滚）。Service 层在写入时校验目标存在。
 
     表与索引设计严格对齐 alembic migration 0091。三 partial 索引都
@@ -2184,7 +2185,7 @@ class WikiOntologyLink(Base):
             postgresql_where=sa_text("revoked_time IS NULL"),
         ),
         CheckConstraint(
-            "ontology_type IN ('class','property')",
+            "ontology_type IN ('class','property','metric')",
             name="chk_link_type",
         ),
         CheckConstraint(

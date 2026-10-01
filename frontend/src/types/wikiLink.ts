@@ -3,7 +3,7 @@
  * 后端 API：GET/POST/DELETE/PATCH /api/v1/admin/wiki-links
  */
 
-export type WikiLinkType = "class" | "property";
+export type WikiLinkType = "class" | "property" | "metric";
 
 export interface WikiLink {
   id: number;
@@ -11,6 +11,8 @@ export interface WikiLink {
   chunk_id: string | null;
   ontology_type: WikiLinkType;
   ontology_id: number;
+  ontology_name: string | null;
+  ontology_alias: string | null;
   weight: number;
   note: string | null;
   created_by: number;

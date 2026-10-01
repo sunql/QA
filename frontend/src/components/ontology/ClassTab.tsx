@@ -77,7 +77,7 @@ export interface ClassTabProps {
 }
 
 export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<OntologyClass | null>(null);
@@ -271,7 +271,7 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
         excluded.add(id);
       }
     }
-    return classOptions(t, classes.filter((c) => !excluded.has(c.id)));
+    return classOptions(classes.filter((c) => !excluded.has(c.id)), locale);
   })();
 
   const handleDelete = async (id: number) => {

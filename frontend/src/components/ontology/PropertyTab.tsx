@@ -62,7 +62,7 @@ export interface PropertyTabProps {
 }
 
 export default function PropertyTab({ classes, refreshClasses }: PropertyTabProps) {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const [properties, setProperties] = useState<OntologyProperty[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -118,7 +118,7 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
       key: "classId",
       label: t("forms.ontology.propertyLabels.classId"),
       type: "select",
-      options: classOptions(t, classes).map((o) => ({ value: String(o.value), label: o.label })),
+      options: classOptions(classes, locale).map((o) => ({ value: String(o.value), label: o.label })),
     },
     {
       key: "dataType",
@@ -296,7 +296,7 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
           >
             <Select
               placeholder={t("forms.ontology.propertyPlaceholders.classId")}
-              options={classOptions(t, classes)}
+              options={classOptions(classes, locale)}
               disabled={!!editing}
             />
           </Form.Item>

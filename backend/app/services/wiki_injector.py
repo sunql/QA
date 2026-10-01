@@ -19,7 +19,7 @@ from app.models.system_config import SystemConfig
 
 @dataclass(frozen=True)
 class ScoredOntology:
-    type: str  # 'class' | 'property'
+    type: str  # 'class' | 'property' | 'metric'
     id: int
     recall_score: float
 
@@ -64,7 +64,7 @@ _DEFAULTS = {
     "WIKI_INJECTION_MAX_CHUNKS": "5",
     "WIKI_INJECTION_MIN_RECALL_SCORE": "0.0",
 }
-_VALID_TYPES = frozenset({"class", "property"})
+_VALID_TYPES = frozenset({"class", "property", "metric"})
 _META_OVERHEAD = 60  # 每条 chunk 的 meta 行大约字符数
 _HEADER_OVERHEAD = 120  ### 业务规则补充... header + footer
 _MIN_TRUNCATE_REMAINS = 80

@@ -2479,6 +2479,12 @@ export const zhCN = {
   // Wiki ↔ Ontology 链接管理（Task 7）
   wikiLinks: {
     title: "Wiki ↔ Ontology 链接管理",
+    tabs: {
+      // 与本体管理 forms.ontology.tabs.* 同词（类/属性/指标），保证两页标签一致
+      class: "类",
+      property: "属性",
+      metric: "指标",
+    },
     addBinding: "添加绑定",
     scopePage: "覆盖全页",
     scopeChunk: "仅限此段落",

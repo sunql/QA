@@ -137,6 +137,11 @@ system prompt，让 LLM 拿到业务口径而非仅靠 schema 推。
 
 - **`WikiLinkService.getLinksByOntology`**：按 `(ontology_type, ontology_id)` 批量反查
   `wiki_ontology_link`（索引 `ix_wol_ontology` 命中；PG 元组 IN 语法）
+- **`WikiLinkService.listConfiguredOntologyTypes`**：`SELECT DISTINCT ontology_type ... WHERE revoked_time IS NULL`，
+  供注入侧判断是否值得为某类型做语义召回（某类型一条链接都没有 ⇒ 跳过该类型召回，零额外成本）
+- **按需召回（`chat_service._collectWikiBlock`）**：class 分数取自 `_selectRelevantClasses` 附加的
+  `_recall_score`；property / metric 仅当 `listConfiguredOntologyTypes` 显示该类型确实配了链接时才
+  `searchByKeyword(..., typeFilter=type)` 召回（`_recallExtraOntologyScores`），单类型失败只跳过该类型不阻断注入
 - **`WikiChunkLoader.loadChunks`**：段落级走 Milvus `wiki_page_embeddings`（`(page_id, chunk_id)` 双键），
   整页级走 PG `wiki_page.content`（Markdown 全文 + 4000 字符截断）
 - **`WikiInjector.collectAndScore`**：纯函数算法（spec §6.1）：

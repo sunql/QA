@@ -270,6 +270,10 @@ _UNANSWERABLE_ANSWER_MISSING_VECTOR = (
     "抱歉，向量检索未返回相关本体类，可能尚未同步向量数据。"
     "请在「本体管理→向量同步」中同步向量数据后再试。"
 )
+# wiki 注入：property / metric 的按需语义召回窗口。
+# class 走 CLASS_FILTER_TOPK（类集合小）；属性向量 3164 条、指标待建，窗口先小后调。
+_WIKI_EXTRA_RECALL_TOPK_DEFAULT = 10
+_WIKI_EXTRA_RECALL_TYPES = ("property", "metric")
 
 
 def _firstPresentValue(data: list[dict] | None) -> Any | None:
@@ -1095,40 +1099,47 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
     async def _collectWikiBlock(
         self,
         session: AsyncSession,
-        question: str,  # noqa: ARG002
+        question: str,
         classes: list[Any],
     ) -> tuple[str, list[dict]]:
         """调 WikiLinkService + WikiChunkLoader + WikiInjector → (prompt_block, trace_data)。
 
         失败返回 ("", [])，由调用方统一做 log warning + 不阻断流水线。
-        question 参数保留供未来语义检索扩展使用，当前版本只依赖 ontology 召回链路。
+
+        收集顺序是**先看配了哪些类型的链接，再决定召回哪些类型**：某类型一条链接都
+        没有时，召回它的结果必然在 WikiInjector 的 recallIndex 命中检查处被丢弃，
+        白花一次 embedding + 一次 Milvus 检索（见 listConfiguredOntologyTypes）。
         """
-        from app.services.wiki_injector import ScoredOntology, WikiInjector
+        from app.services.wiki_injector import WikiInjector
         from app.services.wiki_link_service import WikiLinkService
         from app.services.wiki_chunk_loader import WikiChunkLoader
 
-        # Step 1：构建 (type, id) → recall_score 索引（来自传入的 classes）。
-        # classes 来自 _selectRelevantClasses，已经过向量召回裁剪 + ADS 加权 + ODS 过滤。
-        scored_ontology: list[ScoredOntology] = []
-        for cls in classes:
-            oid = getattr(cls, "id", None)
-            if oid is None:
-                continue
-            # 从 class 对象上取 recall score（由 chat_recall 在召回时附加的属性）。
-            recall_score = float(getattr(cls, "_recall_score", 0.0) or 0.0)
-            scored_ontology.append(ScoredOntology(
-                type="class",
-                id=oid,
-                recall_score=recall_score,
-            ))
+        service = WikiLinkService()
+
+        # Step 1：class 分数来自 _selectRelevantClasses 附加的 _recall_score。
+        scored_ontology = self._classRecallScores(classes)
+
+        # Step 2：property / metric 按需召回 —— 只有真的配了该类型的链接才召回。
+        try:
+            configuredTypes = await service.listConfiguredOntologyTypes(session)
+        except Exception as e:
+            # 查不出来只降级到「class 链接仍工作」，不阻断；不能静默 —— 记 warning。
+            logger.warning("listConfiguredOntologyTypes failed: %s", e)
+            configuredTypes = set()
+        extraTypes = {
+            t for t in _WIKI_EXTRA_RECALL_TYPES if t in configuredTypes
+        }
+        scored_ontology.extend(
+            await self._recallExtraOntologyScores(session, question, extraTypes)
+        )
 
         if not scored_ontology:
             return "", []
 
-        # Step 2：查询 wiki-link（根据 ontology type/id 对）。
+        # Step 3：查询 wiki-link（根据 ontology type/id 对）。
         pairs = [(o.type, o.id) for o in scored_ontology]
         try:
-            link_rows = await WikiLinkService().getLinksByOntology(session, pairs)
+            link_rows = await service.getLinksByOntology(session, pairs)
         except Exception as e:
             logger.warning("getLinksByOntology failed: %s", e)
             return "", []
@@ -1178,21 +1189,97 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
 
         block = WikiInjector.renderPromptBlock(scored, budget.maxChars, page_index)
 
-        # Step 6：构造 trace 数据。
+        # Step 6：构造 trace 数据 —— 每个 applied ontology 一条（page/chunk 可同时绑定
+        # class + property + metric，applied_to 的每一项都是一条独立链接）。
         trace_data = []
         for c in scored:
-            if not c.applied_to:
-                continue
-            ontology_type, ontology_id = c.applied_to[0]
-            trace_data.append({
-                "ontology_type": ontology_type,
-                "ontology_id": ontology_id,
-                "page_id": c.page_id,
-                "chunk_id": c.chunk_id or "",
-                "injected_chars": len(c.text),
-                "score": c.score,
-            })
+            for ontology_type, ontology_id in c.applied_to:
+                trace_data.append({
+                    "ontology_type": ontology_type,
+                    "ontology_id": ontology_id,
+                    "page_id": c.page_id,
+                    "chunk_id": c.chunk_id or "",
+                    "injected_chars": len(c.text),
+                    "score": c.score,
+                })
         return block, trace_data
+
+    @staticmethod
+    def _classRecallScores(classes: list[Any]) -> list[Any]:
+        """把 _selectRelevantClasses 产出的 class 列表转成 ScoredOntology(type="class")。
+
+        分数取自 chat_recall 在召回时附加的 _recall_score（fallback 路径为 0.0）。
+        """
+        from app.services.wiki_injector import ScoredOntology
+
+        out: list[ScoredOntology] = []
+        for cls in classes:
+            oid = getattr(cls, "id", None)
+            if oid is None:
+                continue
+            out.append(ScoredOntology(
+                type="class",
+                id=oid,
+                recall_score=float(getattr(cls, "_recall_score", 0.0) or 0.0),
+            ))
+        return out
+
+    async def _recallExtraOntologyScores(
+        self,
+        session: AsyncSession,
+        question: str,
+        types: set[str],
+    ) -> list[Any]:
+        """对 property / metric 做按需语义召回，返回 ScoredOntology 列表。
+
+        每个类型一次 embedding + 一次 Milvus 检索，故只在**确实配了该类链接**时调用。
+        单类型失败只影响该类型（warning + 跳过），不影响 class 与其他类型 ——
+        注入是增强而非硬依赖。
+        """
+        if not types:
+            return []
+        from app.services.wiki_injector import ScoredOntology
+
+        topK = await self._getWikiExtraRecallTopK(session)
+        scored: list[ScoredOntology] = []
+        for ontologyType in sorted(types):
+            try:
+                hits = await self._ontology.searchByKeyword(
+                    question, topK=topK, typeFilter=ontologyType,
+                )
+            except Exception:
+                logger.warning(
+                    "wiki 注入：%s 类型召回失败，跳过该类型", ontologyType,
+                    exc_info=True,
+                )
+                continue
+            scored.extend(
+                ScoredOntology(
+                    type=ontologyType,
+                    id=hit.id,
+                    recall_score=float(getattr(hit, "score", 0.0) or 0.0),
+                )
+                for hit in hits
+            )
+        return scored
+
+    async def _getWikiExtraRecallTopK(self, session: AsyncSession) -> int:
+        """读 WIKI_LINK_EXTRA_RECALL_TOPK；缺失或非法 → 默认 10。"""
+        try:
+            from sqlalchemy import select
+            from app.models.system_config import SystemConfig
+
+            stmt = select(SystemConfig).where(
+                SystemConfig.key == "WIKI_LINK_EXTRA_RECALL_TOPK"
+            )
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            if row is None:
+                return _WIKI_EXTRA_RECALL_TOPK_DEFAULT
+            value = int(row.value)
+            return value if value > 0 else _WIKI_EXTRA_RECALL_TOPK_DEFAULT
+        except Exception:
+            # 配置读取失败 → 用默认值，不阻断
+            return _WIKI_EXTRA_RECALL_TOPK_DEFAULT
 
     async def _recordWikiTrace(
         self,

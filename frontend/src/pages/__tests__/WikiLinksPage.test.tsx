@@ -14,7 +14,7 @@
  * I18nextProvider + ConfigProvider 包装。
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConfigProvider } from "antd";
@@ -120,6 +120,8 @@ function makeLink(overrides: Partial<WikiLink> = {}): WikiLink {
     chunk_id: null,
     ontology_type: "class",
     ontology_id: 42,
+    ontology_name: null,
+    ontology_alias: null,
     weight: 0.8,
     note: null,
     created_by: 1,
@@ -227,10 +229,12 @@ describe("WikiLinksPage", () => {
     expect(screen.getByText(/请先选择左侧 Wiki 页面/)).toBeInTheDocument();
   });
 
-  it("renders class and property tabs", () => {
+  it("renders class and property tabs", async () => {
+    // 标签走 i18n（与本体管理同词）：zh 下显示「类」「属性」
+    await i18n.changeLanguage("zh-CN");
     renderPage();
-    expect(screen.getByText("Class")).toBeInTheDocument();
-    expect(screen.getByText("Property")).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: "类" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "属性" })).toBeInTheDocument();
   });
 });
 
@@ -375,5 +379,102 @@ describe("WikiLinksPage 交互", () => {
     expect(
       screen.getByPlaceholderText("请输入 chunk_id"),
     ).toBeInTheDocument();
+  });
+});
+
+describe("链接列表显示对象名", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    await i18n.changeLanguage("zh-CN");
+    api.listWikiLinks.mockResolvedValue([]);
+    api.listLinkableTargets.mockResolvedValue([]);
+    api.listWikiCategoryTree.mockResolvedValue(SEED_TREE);
+    api.listWikiPages.mockResolvedValue({ rows: SEED_PAGES, total: SEED_PAGES.length });
+  });
+
+  afterEach(async () => {
+    await i18n.changeLanguage("zh-CN");
+  });
+
+  it("有别名时显示「别名（物理名）」", async () => {
+    api.listWikiLinks.mockResolvedValue([
+      makeLink({
+        id: 1,
+        ontology_id: 42,
+        ontology_name: "DWD_ARRIVAL_ORDER_DTL",
+        ontology_alias: "到货单",
+      }),
+    ]);
+    renderPage();
+    await clickTreeNode("供应商准入流程");
+    expect(
+      await screen.findByText("到货单（DWD_ARRIVAL_ORDER_DTL）"),
+    ).toBeInTheDocument();
+  });
+
+  it("无别名时只显示物理名", async () => {
+    api.listWikiLinks.mockResolvedValue([
+      makeLink({
+        id: 1,
+        ontology_id: 42,
+        ontology_name: "DIM_SUPPLIER",
+        ontology_alias: null,
+      }),
+    ]);
+    renderPage();
+    await clickTreeNode("供应商准入流程");
+    expect(await screen.findByText("DIM_SUPPLIER")).toBeInTheDocument();
+  });
+
+  it("对象已删（ontology_name 为 null）时显示 ID:ontology_id", async () => {
+    api.listWikiLinks.mockResolvedValue([
+      makeLink({ id: 1, ontology_id: 42 }),
+    ]);
+    renderPage();
+    await clickTreeNode("供应商准入流程");
+    expect(await screen.findByText("ID:42")).toBeInTheDocument();
+  });
+});
+
+describe("标签本地化", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listWikiLinks.mockResolvedValue([]);
+    api.listLinkableTargets.mockResolvedValue([]);
+    api.listWikiCategoryTree.mockResolvedValue(SEED_TREE);
+    api.listWikiPages.mockResolvedValue({ rows: SEED_PAGES, total: SEED_PAGES.length });
+  });
+
+  // 语言是模块级全局状态：用 afterEach 复位，避免英文用例中途失败时把 en 泄漏给后续用例
+  afterEach(async () => {
+    await i18n.changeLanguage("zh-CN");
+  });
+
+  it("切到英文后 Tab 标签变成 Class / Property", async () => {
+    await i18n.changeLanguage("en-US");
+    renderPage();
+    expect(await screen.findByRole("tab", { name: "Class" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Property" })).toBeInTheDocument();
+  });
+
+  it("中文下存在「指标」Tab，切换后用 metric 拉取可链接目标", async () => {
+    await i18n.changeLanguage("zh-CN");
+    api.listLinkableTargets.mockResolvedValue([]);
+    renderPage();
+
+    const metricTab = await screen.findByRole("tab", { name: "指标" });
+    await userEvent.click(metricTab);
+
+    // 切 Tab 本身**不**触发拉取 —— `listLinkableTargets` 只在 `openAddModal`
+    // （WikiLinksPage.tsx:193）里调用，必须先选树节点让按钮可用再点它。
+    // 初稿漏了这一步，按原样写这条用例永远不可能变绿。
+    await clickTreeNode("供应商准入流程");
+    const addBtn = screen.getByRole("button", { name: /\+\s*添加绑定/ });
+    await waitFor(() => expect(addBtn).toBeEnabled());
+    await userEvent.click(addBtn);
+
+    await waitFor(() => {
+      expect(api.listLinkableTargets).toHaveBeenCalledWith("metric");
+    });
   });
 });

@@ -1752,6 +1752,42 @@ class TestEntityNameColumnRule:
         assert "JOIN 关系" in prompt
 
 
+class TestTopnShareDenominatorRule:
+    """Top-N 与占比同算时，分母不得与过滤同块 —— 占比恒 100% 事故的 prompt 修复。
+
+    真机事故（2026-10-02，session s-muq3tse9-e5kc9d）：问「三家供应商4月供货量最多
+    的三种物料占比」，SQL 写成
+        SELECT SUM(ITEM_QTY) / SUM(SUM(ITEM_QTY)) OVER (PARTITION BY ...) FROM ranked WHERE RNK <= 3
+    SQL 逻辑执行顺序 WHERE → GROUP BY → 窗口函数 ⇒ 分母只剩 Top-3 行自己，
+    占比恒为 1（100%），模型还编造了「实际物料不超过 3 种」的业务解释。
+    同一问题其他运行（两 CTE 形态）结果正确 ⇒ 非确定性 —— 规则 4/8 教的窗口
+    形态在无过滤时正确、与 Top-N 过滤同块时必错。修复＝在两个 prompt 都加
+    否定性约束（禁令比正例更可迁移，见 fix-oracle-aggregate-guard 的真机观察）。
+    """
+
+    def test_sql_prompt_warns_denominator_must_not_share_filter_block(self) -> None:
+        """SQL 阶段规则 8：窗口分母若与过滤同块，占比恒为 1 —— 必须显式警告。"""
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildSystemPrompt("", dialect, None)
+        # 否定性约束的关键短语（判别器，非泛化子串）
+        assert "未被 Top-N 过滤" in prompt
+        assert "占比恒为 1" in prompt
+        # 可操作方向：分母怎么来
+        assert "单独建 CTE" in prompt
+
+    def test_plan_prompt_simple_formula_form_carries_topn_caveat(self) -> None:
+        """计划阶段规则 4 的「简单形式」必须带适用范围：含 Top-N 时改用 CTE 形式。"""
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "只适合无 Top-N 过滤的场景" in prompt
+
+    def test_rule_applies_to_non_oracle_dialects_too(self) -> None:
+        """分母过滤陷阱与方言无关（PG 同样 WHERE 先于窗口函数）——基础规则非方言规则。"""
+        dialect = Nl2SqlService.resolveDialect("postgresql")
+        prompt = Nl2SqlService()._buildSystemPrompt("", dialect, None)
+        assert "未被 Top-N 过滤" in prompt
+
+
 # =============================================================================
 # 聚合类问题 schema 选择建议（feat-ontology-recall-pruning step E）
 #

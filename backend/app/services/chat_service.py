@@ -116,6 +116,7 @@ from app.services.llm_retry_policy import (
     retryGenTokens as _retryGenTokens,
 )
 from app.services.nl2sql_service import Nl2SqlService, SqlResult, _readFloatConfig, _safeSchemaPrefix, _sanitizeContext
+from app.services.nl2sql_dialects import coerceDatasourceType
 from app.services.ontology_service import OntologyService
 from app.services.step_aggregator import StepAggregator
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
@@ -794,6 +795,10 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         needDrift=False 时跳过漂移校验（CLARIFY 不生成 SQL，无需表漂移告警）。
         """
         ds = await self._datasource.get(session, dto.datasourceId)
+        # fail fast（2026-10-02）：type 脏值（手工改库/seed）此前会静默回退 Oracle
+        # 方言生成 SQL，执行必错。API DTO 的枚举校验只挡创建/更新入口，这里是
+        # 消费边界的最后关口 —— 在任何 LLM 调用之前拒绝。
+        coerceDatasourceType(ds.type, name=ds.name)
         allClasses = await self._ontology.listClasses(session)
         # 显式多步时（带"第一步/第二步"标号）：用第一步子问题做召回，
         # 避免完整多步问法传给 Milvus 匹配到错误的表（如报价单而非收货单）。

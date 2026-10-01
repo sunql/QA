@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 
 from app.domain.enums import ChartType, DataSourceType, IntentType
-from app.domain.exceptions import LlmClientError, Nl2SqlError, NotFoundError
+from app.domain.exceptions import LlmClientError, Nl2SqlError, NotFoundError, ValidationError
 from app.domain.models import (
     DataSource,
     LlmConfig,
@@ -2810,3 +2810,30 @@ class TestStatePlanObservability:
         with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
             assert _statePlan(self._state(None)) is None
         assert "reason=" not in caplog.text
+
+
+class TestDatasourceTypeFailFast:
+    """数据源类型脏值在流水线边界拒绝（2026-10-02，fail fast）。
+
+    data_source.type 走 API 创建时由枚举 DTO 挡住（422），但手工改库/seed
+    仍可能写入脏值。此前 resolveDialect 会静默回退 Oracle —— 给 MySQL 库
+    生成 ROWNUM 语法执行必错。现在 _buildPipelineContext 在任何 LLM 消费
+    **之前**用 coerceDatasourceType 严格校验。
+
+    注：正向链路（合法 type 正常出 SQL）由既有 full-pipeline 测试覆盖
+    （当前该文件部分用例因陈旧夹具红，与本守卫无关，见 changes 记录）。
+    """
+
+    async def test_unknown_type_fails_fast_before_llm(self) -> None:
+        ds = _datasource()
+        ds.type = "bogusdb"
+        service, llm, _, adapter = _buildService(datasource=ds)
+        with pytest.raises(ValidationError) as excInfo:
+            await service.processMessage(_dto("各供应商的收货数量汇总"), _FakeSession())
+        msg = str(excInfo.value.message)
+        assert "ZJTH" in msg          # 数据源名（可定位是哪个库）
+        assert "bogusdb" in msg       # 脏值原文
+        assert "重新保存" in msg       # 可操作指引
+        # fail fast 的实质：一分钱 LLM 都没花，一步 SQL 都没执行
+        assert llm.calls == []
+        assert adapter.executedSql is None

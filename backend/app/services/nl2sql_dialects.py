@@ -12,6 +12,8 @@ import logging
 from dataclasses import dataclass
 
 from app.domain.enums import DataSourceType
+from app.domain.exceptions import ValidationError
+from app.services.messages_zh import MSG_DATASOURCE_TYPE_UNKNOWN
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +148,26 @@ _SQL_DIALECTS: dict[DataSourceType, SqlDialect] = {
         timeBucketRule=_TIME_BUCKET_RULE_POSTGRESQL,
     ),
 }
+
+
+def coerceDatasourceType(value: str | None, *, name: str = "") -> DataSourceType:
+    """数据源类型边界校验（fail fast）：脏值抛 ValidationError，绝不静默回退。
+
+    与 resolveDialect 的「未知回退 Oracle」分工：后者是方言解析的**最后防线**
+    （历史行为，测试钉死）；本函数是流水线的**第一反应** —— 数据源类型脏值若
+    继续走，会用错误方言生成 SQL（如给 MySQL 生成 ROWNUM），执行必错且用户
+    只看到莫名其妙的数据库报错。在 LLM 消费前拒绝，把问题留给能修它的人。
+    消息自足：带数据源名（定位是哪个库）+ 脏值原文 + 可操作指引。
+    """
+    if value is not None:
+        try:
+            return DataSourceType(value)
+        except ValueError:
+            lowered = str(value).lower()
+            for t in DataSourceType:
+                if t.value == lowered:
+                    return t
+    raise ValidationError(MSG_DATASOURCE_TYPE_UNKNOWN.format(name=name, type=value))
 
 
 def resolveDialect(datasourceType: DataSourceType | str | None, oracle_version: str | None = None) -> SqlDialect:

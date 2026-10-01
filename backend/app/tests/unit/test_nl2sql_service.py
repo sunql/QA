@@ -16,7 +16,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.domain.enums import DataSourceType
-from app.domain.exceptions import Nl2SqlError
+from app.services.nl2sql_dialects import coerceDatasourceType
+from app.domain.exceptions import Nl2SqlError, ValidationError
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
 from app.domain.query_plan import Aggregation, QueryPlan
 from app.services.nl2sql_service import (
@@ -2270,3 +2271,38 @@ class TestNl2SqlConfigGetter:
         assert await _readBoolConfig(self._fakeSessionReturning(raw), "K", False) is False
         assert await _readBoolConfig(self._fakeSessionBoom(), "K", False) is False
         assert await _readBoolConfig(self._fakeSessionBoom(), "K", True) is True
+
+
+class TestCoerceDatasourceType:
+    """数据源类型边界校验（fail fast）：脏类型在 LLM 消费前拒绝，不再回退 Oracle。
+
+    背景（2026-10-02）：resolveDialect 对未知/None 类型静默回退 Oracle 11g ——
+    这是历史行为且被测试钉死（test_resolve_dialect_coerces_str_and_enum）。
+    该回退作为**最后防线**可以存在，但作为**第一反应**是错的：给 MySQL 库
+    生成 ROWNUM 语法执行必错，且用户看到的是莫名其妙的数据库报错。
+    coerceDatasourceType 是流水线边界的严格版：DB 里的 type 必须能归一为枚举，
+    否则抛 ValidationError（含数据源名与可操作指引）。
+    """
+
+    @pytest.mark.parametrize("raw", ["oracle", "mysql", "postgresql"])
+    def test_canonical_values_pass_through(self, raw: str) -> None:
+        assert coerceDatasourceType(raw, name="ds").value == raw
+
+    def test_case_variant_normalized(self) -> None:
+        """大小写脏值归一（与 resolveDialect 同等宽容），不拒绝。"""
+        assert coerceDatasourceType("MySQL", name="ds") is DataSourceType.MYSQL
+        assert coerceDatasourceType("ORACLE", name="ds") is DataSourceType.ORACLE
+
+    def test_none_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="无法识别"):
+            coerceDatasourceType(None, name="ds1")
+
+    def test_unknown_rejected_with_actionable_message(self) -> None:
+        with pytest.raises(ValidationError) as excInfo:
+            coerceDatasourceType("bogusdb", name="我的库")
+        msg = str(excInfo.value.message)
+        # 消息必须自足：数据源名 + 脏值 + 可操作方向（双向守卫的正向部分：
+        # 不仅是「拦了」，还要「拦得让人知道怎么修」）
+        assert "我的库" in msg
+        assert "bogusdb" in msg
+        assert "postgresql" in msg

@@ -305,6 +305,10 @@ MSG_VECTOR_SYNC_FAILED = "向量同步失败: {exc}"
 # =============================================================================
 
 MSG_DATASOURCE_NOT_FOUND = "数据源 {id} 不存在"
+MSG_DATASOURCE_TYPE_UNKNOWN = (
+    "数据源「{name}」的类型「{type}」无法识别，已拒绝生成 SQL。"
+    "请编辑该数据源重新保存（支持：mysql / postgresql / oracle），或联系管理员修正。"
+)
 MSG_DATASOURCE_CONNECT_FAILED = "连接失败: {message}"
 MSG_DATASOURCE_HOST_NOT_ALLOWED = "主机 {host} 不在允许列表内"
 MSG_DATASOURCE_HOST_ALLOWLIST_DETAIL = "允许的主机: {hosts}"

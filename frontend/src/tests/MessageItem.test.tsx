@@ -379,3 +379,18 @@ describe("MessageItem 中断回答提示（H4 断连兜底）", () => {
     expect(screen.queryByText(/已中断/)).not.toBeInTheDocument();
   });
 });
+
+describe("MessageItem 消息级 visualRationale（Task 8，多步汇总）", () => {
+  it("多步汇总消息渲染 SUMMARY_TEXT_ONLY 说明行（答案下方次要色）", () => {
+    renderItem({
+      content: "以上为各步骤的对比结论。",
+      visualRationale: { code: "SUMMARY_TEXT_ONLY", params: {} },
+    });
+    expect(screen.getByText("汇总为文字结论，各步骤图表见上方")).toBeInTheDocument();
+  });
+
+  it("无 visualRationale 时不渲染说明行", () => {
+    renderItem({ content: "查询完成。" });
+    expect(screen.queryByText("汇总为文字结论，各步骤图表见上方")).toBeNull();
+  });
+});

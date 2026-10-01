@@ -754,6 +754,32 @@ export const enUS = {
       sqlDetail: "View verification SQL",
       disclaimer: "These are possible explanations based on current data and the data model (not causal conclusions). Send the verification SQL to investigate further.",
     },
+    // Visual output strategy (Task 8): rationale copy keyed by backend ruleId.
+    // {rows}/{kind} are i18next interpolation placeholders matching the backend params keys.
+    visual: {
+      dataTable: "Data Table",
+      R00_EMPTY_TABLE: "No rows returned; no chart generated",
+      R01_SINGLE_VALUE_KPI: "Single aggregate value shown as a KPI card",
+      R01S_SINGLE_ROW_TABLE: "Single-row result shown as a table (one point is not a chart)",
+      R02_SHARE_DONUT: "Share breakdown ({rows} items) as a donut chart, with data table",
+      R03_SHARE_OVERFLOW_HBAR: "Share breakdown with many items ({rows}) as a horizontal bar chart, with data table",
+      R04_TOPN_HBAR: "Top {rows} ranking as a horizontal bar chart, with data table",
+      R05_WATERFALL: "Composition breakdown as a waterfall chart, with data table",
+      R06_COMBO: "Period-over-period comparison as a combo chart, with data table",
+      R07_TREND_LINE: "Time dimension detected; trend shown as a line chart, with data table",
+      R08_RELATION_SCATTER: "Two measures related; shown as a scatter chart, with data table",
+      R09_MULTIDIM_HEATMAP: "Two-dimension cross-tab shown as a heatmap, with data table",
+      R10_MULTIDIM_BAR: "Two-dimension comparison as a grouped bar chart, with data table",
+      R11_HBAR_MANY_ROWS: "Many categories ({rows}) shown as a horizontal bar chart, with data table",
+      R12S_QUESTION_SHARE_DONUT: "Question asks for a share; shown as a donut chart, with data table",
+      R12S_QUESTION_SHARE_HBAR: "Question asks for a share with many items; shown as a horizontal bar chart, with data table",
+      R12_CATEGORY_BAR: "Single-dimension comparison as a bar chart, with data table",
+      R13_RAW_DETAIL_TABLE: "Raw detail list (no aggregation); shown as a table, no chart",
+      R14_DEFAULT_TABLE: "Data shape is not chart-friendly; shown as a table",
+      R_FORCED_CLIENT: "Rendered as the requested chart type ({kind}), with data table",
+      DEGRADE_SPEC_INVALID: "Data does not meet the requirements for {kind}; downgraded to a table",
+      SUMMARY_TEXT_ONLY: "Summary given as text; per-step charts are shown above",
+    },
   },
 
   termDictionary: {

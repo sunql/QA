@@ -761,6 +761,33 @@ export const zhCN = {
       sqlDetail: "查看验证 SQL",
       disclaimer: "以上为基于当前数据与数据模型的可能解释（非因果结论），可发送验证 SQL 进一步核实。",
     },
+    // 可视化输出策略（Task 8）：「为什么这么画」的判断依据文案。code 即后端 ruleId，
+    // 前端不内置白名单（后端可先发新 code，缺 key 时回退显示 code 原文）。
+    // {rows}/{kind} 为 i18next 单花括号插值占位符，与后端 params 的 key 逐字对齐。
+    visual: {
+      dataTable: "数据表",
+      R00_EMPTY_TABLE: "查询无结果，不生成图表",
+      R01_SINGLE_VALUE_KPI: "单一聚合值，以指标卡呈现",
+      R01S_SINGLE_ROW_TABLE: "仅单行结果，以表格呈现（单点数据不构成图形）",
+      R02_SHARE_DONUT: "占比数据（{rows} 项），以环形图呈现，附数据表",
+      R03_SHARE_OVERFLOW_HBAR: "占比项数较多（{rows} 项），以横向柱状图呈现，附数据表",
+      R04_TOPN_HBAR: "TOP {rows} 排名，以横向柱状图呈现，附数据表",
+      R05_WATERFALL: "构成拆解，以瀑布图呈现，附数据表",
+      R06_COMBO: "同比/环比对比，以柱线组合图呈现，附数据表",
+      R07_TREND_LINE: "含时间维度，以折线图呈现趋势，附数据表",
+      R08_RELATION_SCATTER: "双指标关系，以散点图呈现，附数据表",
+      R09_MULTIDIM_HEATMAP: "双维度交叉，以热力图呈现，附数据表",
+      R10_MULTIDIM_BAR: "双维度对比，以分组柱状图呈现，附数据表",
+      R11_HBAR_MANY_ROWS: "类目较多（{rows} 项），以横向柱状图呈现，附数据表",
+      R12S_QUESTION_SHARE_DONUT: "问句指向占比，以环形图呈现，附数据表",
+      R12S_QUESTION_SHARE_HBAR: "问句指向占比且项数较多，以横向柱状图呈现，附数据表",
+      R12_CATEGORY_BAR: "单维度对比，以柱状图呈现，附数据表",
+      R13_RAW_DETAIL_TABLE: "明细清单（无聚合），以表格呈现，不生成图表",
+      R14_DEFAULT_TABLE: "数据形态不适合图形，以表格呈现",
+      R_FORCED_CLIENT: "按指定图型（{kind}）呈现，附数据表",
+      DEGRADE_SPEC_INVALID: "数据结构不满足{kind}的绘图要求，降级为表格",
+      SUMMARY_TEXT_ONLY: "汇总为文字结论，各步骤图表见上方",
+    },
   },
 
   termDictionary: {

@@ -97,4 +97,18 @@ describe("MultiStepPlanCard 每步出图", () => {
     expect(charts[0].textContent).toContain("111");
     expect(charts[1].textContent).toContain("222");
   });
+
+  it("步骤的图渲染自己的 rationale 说明行与折叠数据表（Task 8）", () => {
+    renderExpanded([
+      makeStep({
+        chartType: "hbar",
+        chartOption: { series: [{ type: "bar", data: [9812] }] },
+        tableOption: { columns: ["供应商"], rows: [{ 供应商: "甲" }] },
+        visualRationale: { code: "R11_HBAR_MANY_ROWS", params: { rows: 5 } },
+      }),
+    ]);
+
+    expect(screen.getByText("类目较多（5 项），以横向柱状图呈现，附数据表")).toBeInTheDocument();
+    expect(screen.getByText("数据表")).toBeInTheDocument();
+  });
 });

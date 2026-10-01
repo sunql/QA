@@ -104,7 +104,12 @@ export default function MultiStepPlanCard({ steps, currentStepIndex }: MultiStep
                             失败步骤不带这两字段，渲染器自己返回 null。 */}
                         {s.chartType ? (
                           <div style={{ marginTop: 8 }}>
-                            <ChartRenderer chartType={s.chartType} chartOption={s.chartOption} />
+                            <ChartRenderer
+                              chartType={s.chartType}
+                              chartOption={s.chartOption}
+                              tableOption={s.tableOption}
+                              visualRationale={s.visualRationale}
+                            />
                           </div>
                         ) : null}
                       </div>

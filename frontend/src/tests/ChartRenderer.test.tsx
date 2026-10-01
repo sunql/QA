@@ -333,4 +333,119 @@ describe("ChartRenderer", () => {
     const blob = createObjectUrl.mock.calls[0][0] as Blob;
     expect(await readBlobText(blob)).toContain("指标,数值\r\n收货量,9812");
   });
+
+  // ===== 可视化输出策略（Task 8）：折叠数据表 + rationale 说明行 =====
+
+  it("图形类渲染图 + 折叠数据表 + rationale 说明行（默认折叠，展开见明细）", () => {
+    render(
+      <ChartRenderer
+        chartType="bar"
+        chartOption={{ series: [{ type: "bar", data: [1, 2] }] }}
+        tableOption={{
+          columns: ["供应商", "数量"],
+          rows: [{ 供应商: "甲", 数量: 7 }],
+        }}
+        visualRationale={{ code: "R12_CATEGORY_BAR", params: {} }}
+      />
+    );
+
+    // 图
+    expect(screen.getByTestId("echarts-mock")).toBeInTheDocument();
+    // 折叠面板标签存在
+    expect(screen.getByText("数据表")).toBeInTheDocument();
+    // rationale 说明行
+    expect(screen.getByText("单维度对比，以柱状图呈现，附数据表")).toBeInTheDocument();
+    // 默认折叠：表体内容未挂载
+    expect(screen.queryByText("甲")).toBeNull();
+    // 展开后可见表格行
+    fireEvent.click(screen.getByText("数据表"));
+    expect(screen.getByText("甲")).toBeInTheDocument();
+    expect(screen.getByText("7")).toBeInTheDocument();
+  });
+
+  it("TABLE 形态不重复出表（无折叠面板），rationale 行照常渲染", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{ columns: ["A"], rows: [{ A: "x" }] }}
+        visualRationale={{ code: "R13_RAW_DETAIL_TABLE", params: {} }}
+      />
+    );
+
+    expect(screen.getByText("A")).toBeInTheDocument();
+    expect(screen.getByText("x")).toBeInTheDocument();
+    // TABLE 的表已在主区，不再出「数据表」折叠面板
+    expect(screen.queryByText("数据表")).toBeNull();
+    expect(screen.getByText("明细清单（无聚合），以表格呈现，不生成图表")).toBeInTheDocument();
+  });
+
+  it("KPI 形态渲染指标卡 + rationale 行（无折叠表）", () => {
+    render(
+      <ChartRenderer
+        chartType="kpi"
+        chartOption={{ kpi: { label: "收货量", value: 9812, unit: null, delta: null } }}
+        visualRationale={{ code: "R01_SINGLE_VALUE_KPI", params: {} }}
+      />
+    );
+
+    expect(screen.getByText("收货量")).toBeInTheDocument();
+    expect(screen.queryByText("数据表")).toBeNull();
+    expect(screen.getByText("单一聚合值，以指标卡呈现")).toBeInTheDocument();
+  });
+
+  it("rationale 带 rows 时插值渲染数字", () => {
+    render(
+      <ChartRenderer
+        chartType="donut"
+        chartOption={{ series: [{ type: "pie" }] }}
+        tableOption={{ columns: ["A"], rows: [{ A: 1 }] }}
+        visualRationale={{ code: "R02_SHARE_DONUT", params: { rows: 3 } }}
+      />
+    );
+
+    expect(screen.getByText("占比数据（3 项），以环形图呈现，附数据表")).toBeInTheDocument();
+  });
+
+  it("DEGRADE_SPEC_INVALID 的 kind 本地化为中文图型名（不是裸枚举 bar）", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{ columns: ["A"], rows: [{ A: 1 }] }}
+        visualRationale={{ code: "DEGRADE_SPEC_INVALID", params: { kind: "bar" } }}
+      />
+    );
+
+    expect(screen.getByText("数据结构不满足柱状图的绘图要求，降级为表格")).toBeInTheDocument();
+  });
+
+  it("未知 code 显示 code 原文不炸（i18n 缺 key 回退）", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{ columns: ["A"], rows: [{ A: 1 }] }}
+        visualRationale={{ code: "R99_FUTURE_RULE", params: {} }}
+      />
+    );
+
+    expect(screen.getByText("R99_FUTURE_RULE")).toBeInTheDocument();
+  });
+
+  it("图形类无 tableOption 时不渲染折叠数据表（守卫）", () => {
+    render(
+      <ChartRenderer
+        chartType="bar"
+        chartOption={{ series: [{ type: "bar" }] }}
+        visualRationale={{ code: "R12_CATEGORY_BAR", params: {} }}
+      />
+    );
+
+    expect(screen.getByTestId("echarts-mock")).toBeInTheDocument();
+    expect(screen.queryByText("数据表")).toBeNull();
+  });
+
+  it("无 rationale 时不渲染说明行", () => {
+    render(<ChartRenderer chartType="table" chartOption={{ columns: ["A"], rows: [{ A: 1 }] }} />);
+
+    expect(screen.queryByText("明细清单（无聚合），以表格呈现，不生成图表")).toBeNull();
+  });
 });

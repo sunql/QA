@@ -67,6 +67,47 @@ describe("i18n/useTranslation", () => {
     }
   });
 
+  it("zh-CN / en-US 两个字典都覆盖全部 21 条 visual rationale code", () => {
+    // 可视化输出策略（Task 8）：21 个 code 一个不少 —— 缺 key 前端回退显示 code 原文，
+    // 不炸但难看（尤其英文用户看到裸 R02_SHARE_DONUT）。
+    const codes = [
+      "R00_EMPTY_TABLE",
+      "R01_SINGLE_VALUE_KPI",
+      "R01S_SINGLE_ROW_TABLE",
+      "R02_SHARE_DONUT",
+      "R03_SHARE_OVERFLOW_HBAR",
+      "R04_TOPN_HBAR",
+      "R05_WATERFALL",
+      "R06_COMBO",
+      "R07_TREND_LINE",
+      "R08_RELATION_SCATTER",
+      "R09_MULTIDIM_HEATMAP",
+      "R10_MULTIDIM_BAR",
+      "R11_HBAR_MANY_ROWS",
+      "R12S_QUESTION_SHARE_DONUT",
+      "R12S_QUESTION_SHARE_HBAR",
+      "R12_CATEGORY_BAR",
+      "R13_RAW_DETAIL_TABLE",
+      "R14_DEFAULT_TABLE",
+      "R_FORCED_CLIENT",
+      "DEGRADE_SPEC_INVALID",
+      "SUMMARY_TEXT_ONLY",
+    ];
+    for (const code of codes) {
+      expect(zhCN.chat.visual[code as keyof typeof zhCN.chat.visual]).toBeTruthy();
+      expect(enUS.chat.visual[code as keyof typeof enUS.chat.visual]).toBeTruthy();
+    }
+  });
+
+  it("en-US visual 文案用单花括号占位符（与后端 params 的 rows/kind 逐字对齐）", () => {
+    expect(enUS.chat.visual.R02_SHARE_DONUT).toBe(
+      "Share breakdown ({rows} items) as a donut chart, with data table"
+    );
+    expect(enUS.chat.visual.DEGRADE_SPEC_INVALID).toBe(
+      "Data does not meet the requirements for {kind}; downgraded to a table"
+    );
+  });
+
   it("zh-CN dictionary covers 5 ontology tabs/columns/min enums", () => {
     expect(zhCN.forms.ontology.tabs.classes).toBe("类");
     expect(zhCN.enums.aggFunction.SUM).toBe("求和 SUM");

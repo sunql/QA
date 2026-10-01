@@ -248,7 +248,13 @@ describe("api/chat", () => {
 
     const onChart = vi.fn();
     await sendMessageStream(makePayload(), { onChart });
-    expect(onChart).toHaveBeenCalledWith({ chartType: null, chartOption: {}, data: [] });
+    expect(onChart).toHaveBeenCalledWith({
+      chartType: null,
+      chartOption: {},
+      tableOption: null,
+      visualRationale: null,
+      data: [],
+    });
   });
 
   // 决策引擎新增 6 类（hbar/donut/heatmap/kpi/combo/waterfall）。白名单漏同步的
@@ -266,6 +272,8 @@ describe("api/chat", () => {
       expect(onChart).toHaveBeenCalledWith({
         chartType,
         chartOption: {},
+        tableOption: null,
+        visualRationale: null,
         data: [],
       });
     }
@@ -472,5 +480,123 @@ describe("sendMessageStream class_recall 事件", () => {
     });
 
     expect(received).toHaveLength(0);
+  });
+});
+
+// ===== Task 7（可视化输出策略）：tableOption / visualRationale 收窄 =====
+// 4 个 api 接入点（normalizeStepResult / normalizeChatResponse / chart 事件 / done 事件）
+// 必须对同一份负载产出同一份收窄结果。共享 fixture + 顺序循环，避免复制断言（加第 5 处时漏掉）。
+describe("api/chat 两个新字段收窄（0107）", () => {
+  const TABLE_FIXTURE = { columns: ["NAME", "QTY"], rows: [{ NAME: "A", QTY: 1 }], truncated: true };
+  const RATIONALE_FIXTURE = { code: "R04_TOPN_HBAR", params: { rows: 5 } };
+
+  it("4 个接入点对同一份负载产出相同收窄结果", async () => {
+    const sites: Array<{
+      name: string;
+      run: () => Promise<{ tableOption?: unknown; visualRationale?: unknown }>;
+    }> = [
+      {
+        name: "step_result 事件（normalizeStepResult）",
+        run: async () => {
+          const stream = sseStream(
+            `event: step_result\ndata: ${JSON.stringify({
+              stepIndex: 0,
+              description: "x",
+              subQuestion: "x",
+              tableOption: TABLE_FIXTURE,
+              visualRationale: RATIONALE_FIXTURE,
+            })}\n\n`
+          );
+          vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+          const results: unknown[] = [];
+          await sendMessageStream(makePayload(), { onStepResult: (r) => results.push(r) });
+          return results[0] as { tableOption?: unknown; visualRationale?: unknown };
+        },
+      },
+      {
+        name: "非流式响应（normalizeChatResponse）",
+        run: async () => {
+          httpMock.post.mockResolvedValue({
+            data: {
+              answer: "查询完成",
+              intent: "query",
+              tableOption: TABLE_FIXTURE,
+              visualRationale: RATIONALE_FIXTURE,
+              tokensUsed: 0,
+              cost: 0,
+            } as unknown as ChatResponse,
+          });
+          const result = await sendMessage(makePayload());
+          return { tableOption: result.tableOption, visualRationale: result.visualRationale };
+        },
+      },
+      {
+        name: "chart 事件",
+        run: async () => {
+          const stream = sseStream(
+            `event: chart\ndata: ${JSON.stringify({
+              chartType: "bar",
+              chartOption: {},
+              tableOption: TABLE_FIXTURE,
+              visualRationale: RATIONALE_FIXTURE,
+              data: [],
+            })}\n\n`
+          );
+          vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+          const charts: unknown[] = [];
+          await sendMessageStream(makePayload(), { onChart: (c) => charts.push(c) });
+          return charts[0] as { tableOption?: unknown; visualRationale?: unknown };
+        },
+      },
+      {
+        name: "done 事件（仅 visualRationale）",
+        run: async () => {
+          const stream = sseStream(
+            `event: done\ndata: ${JSON.stringify({
+              tokensUsed: 0,
+              cost: 0,
+              visualRationale: RATIONALE_FIXTURE,
+            })}\n\n`
+          );
+          vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+          const dones: unknown[] = [];
+          await sendMessageStream(makePayload(), { onDone: (s) => dones.push(s) });
+          return dones[0] as { visualRationale?: unknown };
+        },
+      },
+    ];
+
+    const results: Array<{ tableOption?: unknown; visualRationale?: unknown }> = [];
+    for (const site of sites) {
+      results.push(await site.run());
+    }
+
+    for (const [i, site] of sites.entries()) {
+      if (site.name.startsWith("done")) {
+        // done 帧不带 tableOption，只断言 rationale
+        expect(results[i].visualRationale).toEqual(RATIONALE_FIXTURE);
+      } else {
+        expect(results[i]).toMatchObject({
+          tableOption: TABLE_FIXTURE,
+          visualRationale: RATIONALE_FIXTURE,
+        });
+      }
+    }
+  });
+
+  it("非法 tableOption（rows 非数组）在 chart 事件收窄为 null", async () => {
+    const stream = sseStream(
+      'event: chart\ndata: {"chartType":"bar","chartOption":{},"tableOption":{"columns":["NAME"],"rows":"oops"},"visualRationale":{"code":"R04_TOPN_HBAR","params":{"rows":5}},"data":[]}\n\n'
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const charts: unknown[] = [];
+    await sendMessageStream(makePayload(), { onChart: (c) => charts.push(c) });
+
+    expect((charts[0] as { tableOption: unknown }).tableOption).toBeNull();
+    expect((charts[0] as { visualRationale: unknown }).visualRationale).toEqual({
+      code: "R04_TOPN_HBAR",
+      params: { rows: 5 },
+    });
   });
 });

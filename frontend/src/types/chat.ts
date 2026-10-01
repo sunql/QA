@@ -36,6 +36,23 @@ export type ChartType =
   | "combo"
   | "waterfall";
 
+// 可视化输出策略（Task 7）：图之外的明细表负载。后端只在 TABLE 图型附带一份
+// 原始明细表（columns + rows），其余图型为 null/absent。由 chartContract 收窄。
+export interface TablePayload {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  // 仅当后端命中行数上限时存在（absent 时不归一成 false）
+  truncated?: boolean;
+}
+
+// 可视化输出策略（Task 7）：「为什么画这个图」的判断依据。code 为后端 ruleId
+// （21 个之一，但后端可先发新 code，前端**不内置白名单**）；params 只放插值变量
+// （rows 数字 / kind 字符串），文案在前端 i18n。由 chartContract 收窄。
+export interface VisualRationale {
+  code: string;
+  params: Record<string, unknown>;
+}
+
 // 后端从问题中抽取的结构化查询实体（best-effort，任一字段可为空）
 export interface ExtractedEntities {
   dimension?: string | null;
@@ -114,6 +131,9 @@ export interface StepResultRead {
   // 每步自己的图（决策引擎按该步的 columns/data/plan 各出一张；失败步骤为 null）
   chartType?: ChartType | null;
   chartOption?: Record<string, unknown> | null;
+  // 每步的明细表负载 + 判断依据（0107；失败步骤为 null）
+  tableOption?: TablePayload | null;
+  visualRationale?: VisualRationale | null;
   // 每步的 NL2SQL 查询计划（供前端 QueryPlanCard 渲染）
   queryPlan?: QueryPlan | null;
 }
@@ -135,6 +155,9 @@ export interface MultiStepStep {
   // 每步自己的图（多步每步出图）：由 step_result / 非流式 steps 回填
   chartType?: ChartType | null;
   chartOption?: Record<string, unknown> | null;
+  // 每步的明细表负载 + 判断依据（0107）：由 step_result / 非流式 steps 回填
+  tableOption?: TablePayload | null;
+  visualRationale?: VisualRationale | null;
   // 每步的 NL2SQL 查询计划（供前端 QueryPlanCard 渲染）
   queryPlan?: QueryPlan | null;
 }
@@ -153,6 +176,9 @@ export interface ChatResponse {
   sql?: string | null;
   chartType?: ChartType | null;
   chartOption?: Record<string, unknown> | null;
+  // 明细表负载 + 判断依据（0107）：仅单步查询路径填值；多步顶层为 null
+  tableOption?: TablePayload | null;
+  visualRationale?: VisualRationale | null;
   data?: Record<string, unknown>[] | null;
   // ReAct 第一阶段生成并校验通过的查询计划（前端可折叠展示）
   queryPlan?: QueryPlan | null;
@@ -238,6 +264,10 @@ export interface ChatMessage {
   sql?: string | null;
   chartType?: ChartType | null;
   chartOption?: Record<string, unknown> | null;
+  // 收窄后的明细表负载 + 判断依据（0107）：实时路径由 chart 事件回填，多步汇总
+  // 由 done 帧回填（SUMMARY_TEXT_ONLY），历史回放由 toChatMessage 收窄 raw JSON
+  tableOption?: TablePayload | null;
+  visualRationale?: VisualRationale | null;
   data?: Record<string, unknown>[] | null;
   // ReAct 查询计划（非流式响应回填；流式期间隐藏展示）
   queryPlan?: QueryPlan | null;

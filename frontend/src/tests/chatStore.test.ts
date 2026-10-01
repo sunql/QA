@@ -725,3 +725,185 @@ describe("chatStore 假设跨轮不串（M-3）", () => {
     expect(useChatStore.getState().messages[1].hypotheses ?? []).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 7（可视化输出策略）：tableOption / visualRationale 在 store 各接入点的回填
+// ---------------------------------------------------------------------------
+
+describe("chatStore 两个新字段回填（0107）", () => {
+  beforeEach(() => {
+    resetStore();
+    vi.clearAllMocks();
+    useChatStore.getState().setDatasourceId(1);
+  });
+
+  it("多步汇总消息最终带出 SUMMARY_TEXT_ONLY 依据（done 帧收窄并 patch 进消息）", async () => {
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      handlers.onStepPlanOverview?.([
+        { stepIndex: 0, description: "2024 销售额", subQuestion: "2024年销售额", aggregationOnly: false },
+        { stepIndex: 1, description: "对比", subQuestion: "汇总", aggregationOnly: true },
+      ]);
+      handlers.onStepPlan?.({ stepIndex: 0, description: "2024 销售额", subQuestion: "2024年销售额" });
+      handlers.onStepResult?.({ stepIndex: 0, description: "2024 销售额", subQuestion: "2024年销售额", sql: "SELECT 1", summary: "1000" });
+      handlers.onStepPlan?.({ stepIndex: 1, description: "对比", subQuestion: "汇总" });
+      handlers.onToken?.("增长 20%。");
+      handlers.onDone?.({
+        tokensUsed: 45,
+        cost: 0.00006,
+        modelName: "deepseek-chat",
+        visualRationale: { code: "SUMMARY_TEXT_ONLY", params: {} },
+      });
+    });
+    await useChatStore.getState().sendMessage("分步查询并对比", true);
+
+    const assistant = useChatStore.getState().messages[1];
+    expect(assistant.visualRationale).toEqual({ code: "SUMMARY_TEXT_ONLY", params: {} });
+    expect(assistant.visualRationale?.code).toBe("SUMMARY_TEXT_ONLY");
+    // 数据步自己的依据在 step 上，不在顶层
+    expect(assistant.steps?.[0].visualRationale).toBeNull();
+  });
+
+  it("单步 done 帧不带 rationale 时不清掉 chart 事件已回填的依据", async () => {
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      handlers.onChart?.({
+        chartType: "donut",
+        chartOption: { series: [] },
+        tableOption: null,
+        visualRationale: { code: "R02_SHARE_DONUT", params: { rows: 42 } },
+        data: [],
+      });
+      handlers.onDone?.({ tokensUsed: 0, cost: 0 });
+    });
+    await useChatStore.getState().sendMessage("各品类占比", true);
+
+    const assistant = useChatStore.getState().messages[1];
+    expect(assistant.visualRationale).toEqual({ code: "R02_SHARE_DONUT", params: { rows: 42 } });
+  });
+
+  it("5 个 store 接入点对同一份负载回填相同结果（共享 fixture 循环）", async () => {
+    const TABLE = { columns: ["NAME"], rows: [{ NAME: "A" }], truncated: true };
+    const RATIONALE = { code: "R02_SHARE_DONUT", params: { rows: 42 } };
+
+    const sites: Array<{
+      name: string;
+      run: () => Promise<{ tableOption?: unknown; visualRationale?: unknown }>;
+    }> = [
+      {
+        name: "历史回放（toChatMessage）",
+        run: async () => {
+          resetStore();
+          historyApi.loadSessionMessages.mockResolvedValue({
+            sessionId: "s-h",
+            messages: [
+              {
+                id: 1,
+                role: "assistant",
+                content: "答",
+                question: null,
+                sql: null,
+                createdTime: "2026-01-01T10:00:00Z",
+                interrupted: false,
+                tableOption: { columns: ["NAME"], rows: [{ NAME: "A" }], truncated: true },
+                visualRationale: { code: "R02_SHARE_DONUT", params: { rows: 42 } },
+              },
+            ],
+          });
+          persist.readLastSessionId.mockImplementation((ch) => (ch === "chat" ? "s-h" : null));
+          await useChatStore.getState().enterChannel("chat");
+          const m = useChatStore.getState().messages[0];
+          return { tableOption: m.tableOption, visualRationale: m.visualRationale };
+        },
+      },
+      {
+        name: "SSE chart → 消息",
+        run: async () => {
+          resetStore();
+          useChatStore.getState().setDatasourceId(1);
+          chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+            handlers.onChart?.({ chartType: "donut", chartOption: {}, tableOption: TABLE, visualRationale: RATIONALE, data: [] });
+            handlers.onDone?.({ tokensUsed: 0, cost: 0 });
+          });
+          await useChatStore.getState().sendMessage("q", true);
+          const m = useChatStore.getState().messages[1];
+          return { tableOption: m.tableOption, visualRationale: m.visualRationale };
+        },
+      },
+      {
+        name: "SSE step_result → 步骤",
+        run: async () => {
+          resetStore();
+          useChatStore.getState().setDatasourceId(1);
+          chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+            handlers.onStepPlanOverview?.([
+              { stepIndex: 0, description: "d", subQuestion: "q", aggregationOnly: false },
+            ]);
+            handlers.onStepResult?.({ stepIndex: 0, description: "d", subQuestion: "q", sql: "SELECT 1", summary: null, tableOption: TABLE, visualRationale: RATIONALE });
+            handlers.onDone?.({ tokensUsed: 0, cost: 0 });
+          });
+          await useChatStore.getState().sendMessage("q", true);
+          const step = useChatStore.getState().messages[1].steps?.[0];
+          return { tableOption: step?.tableOption, visualRationale: step?.visualRationale };
+        },
+      },
+      {
+        name: "非流式响应 → 消息",
+        run: async () => {
+          resetStore();
+          useChatStore.getState().setDatasourceId(1);
+          chatApi.sendMessage.mockResolvedValue({
+            answer: "查询完成",
+            intent: "query",
+            tableOption: TABLE,
+            visualRationale: RATIONALE,
+            tokensUsed: 0,
+            cost: 0,
+          });
+          await useChatStore.getState().sendMessage("q");
+          const m = useChatStore.getState().messages[1];
+          return { tableOption: m.tableOption, visualRationale: m.visualRationale };
+        },
+      },
+      {
+        name: "非流式 steps[] → 步骤",
+        run: async () => {
+          resetStore();
+          useChatStore.getState().setDatasourceId(1);
+          chatApi.sendMessage.mockResolvedValue({
+            answer: "查询完成",
+            intent: "multi_step",
+            tokensUsed: 0,
+            cost: 0,
+            steps: [
+              {
+                stepIndex: 0,
+                description: "d",
+                subQuestion: "q",
+                sql: "SELECT 1",
+                summary: null,
+                error: null,
+                tableOption: TABLE,
+                visualRationale: RATIONALE,
+              },
+            ],
+          });
+          await useChatStore.getState().sendMessage("q");
+          const step = useChatStore.getState().messages[1].steps?.[0];
+          return { tableOption: step?.tableOption, visualRationale: step?.visualRationale };
+        },
+      },
+    ];
+
+    const results: Array<{ tableOption?: unknown; visualRationale?: unknown }> = [];
+    for (const site of sites) {
+      results.push(await site.run());
+    }
+
+    // 5 处全同一份收窄结果 —— 复制断言会在加第 6 处时漏掉，故这里只循环
+    for (const [i, r] of results.entries()) {
+      expect(r, sites[i].name).toMatchObject({
+        tableOption: TABLE,
+        visualRationale: RATIONALE,
+      });
+    }
+  });
+});

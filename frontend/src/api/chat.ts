@@ -1,9 +1,9 @@
 import { httpClient } from "./client";
 import { API_BASE_URL } from "../config";
-import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery } from "../types/chat";
+import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery, TablePayload, VisualRationale } from "../types/chat";
 import { i18n } from "../i18n";
 import { authHeaders } from "./authHeaders";
-import { asChartOption, normalizeChartType } from "../utils/chartContract";
+import { asChartOption, asTablePayload, asVisualRationale, normalizeChartType } from "../utils/chartContract";
 
 const BASE = "/chat";
 
@@ -50,6 +50,9 @@ export interface StepResultView {
   error?: string | null;
   chartType?: ChartType | null;
   chartOption?: Record<string, unknown> | null;
+  // 每步的明细表负载 + 判断依据（0107）；失败步骤为 null
+  tableOption?: TablePayload | null;
+  visualRationale?: VisualRationale | null;
   queryPlan?: QueryPlan | null;
 }
 
@@ -90,6 +93,8 @@ function normalizeStepResult(value: unknown): StepResultView | null {
     ...value,
     chartType: normalizeChartType(record.chartType),
     chartOption: asChartOption(record.chartOption),
+    tableOption: asTablePayload(record.tableOption),
+    visualRationale: asVisualRationale(record.visualRationale),
   };
 }
 
@@ -100,6 +105,8 @@ function normalizeChatResponse(response: ChatResponse): ChatResponse {
     ...response,
     chartType: normalizeChartType(record.chartType),
     chartOption: asChartOption(record.chartOption),
+    tableOption: asTablePayload(record.tableOption),
+    visualRationale: asVisualRationale(record.visualRationale),
     steps: Array.isArray(response.steps)
       ? response.steps
           .map(normalizeStepResult)
@@ -166,10 +173,12 @@ export async function getSuggestions(
 
 // ===== SSE 流式（5.6）=====
 
-// 图表事件负载（chart 事件携带 chartType + ECharts option + 数据）
+// 图表事件负载（chart 事件携带 chartType + ECharts option + 数据 + 明细表 + 判断依据）
 export interface StreamChartData {
   chartType: ChartType | null;
   chartOption: Record<string, unknown> | null;
+  tableOption: TablePayload | null;
+  visualRationale: VisualRationale | null;
   data: Record<string, unknown>[] | null;
 }
 
@@ -189,6 +198,9 @@ export interface StreamSummary {
   suggestedAgent?: import("../types/chat").AgentSuggestion | null;
   // 多步时顶层查询计划
   queryPlan?: import("../types/chat").QueryPlan | null;
+  // 0107：多步汇总/降级收尾的判断依据（SUMMARY_TEXT_ONLY）。done 帧**不带 tableOption**
+  //（多步顶层无表；单步表走 chart 事件）。单步 done 帧也不带此字段（其依据已由 chart 事件下发）。
+  visualRationale?: import("../types/chat").VisualRationale | null;
 }
 
 // data_quality 事件负载（Phase 1.4）：每张 selectedClass 对应一条 badge
@@ -322,6 +334,8 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
       handlers.onChart?.({
         chartType: normalizeChartType(d.chartType),
         chartOption: asChartOption(d.chartOption),
+        tableOption: asTablePayload(d.tableOption),
+        visualRationale: asVisualRationale(d.visualRationale),
         data: (d.data as Record<string, unknown>[]) ?? null,
       });
       break;
@@ -345,6 +359,8 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
         supplierRisk: (d.supplierRisk as StreamSummary["supplierRisk"]) ?? null,
         graphTraversal: (d.graphTraversal as StreamSummary["graphTraversal"]) ?? null,
         suggestedAgent: (d.suggestedAgent as StreamSummary["suggestedAgent"]) ?? null,
+        // 0107：多步汇总/降级收尾的 SUMMARY_TEXT_ONLY 只能经 done 帧抵达前端
+        visualRationale: asVisualRationale(d.visualRationale),
       });
       break;
     case "error":

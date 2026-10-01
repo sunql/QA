@@ -24,7 +24,7 @@ import type {
   MultiStepStep,
   StepStatus,
 } from "../types/chat";
-import { asChartOption, normalizeChartType } from "../utils/chartContract";
+import { asChartOption, asTablePayload, asVisualRationale, normalizeChartType } from "../utils/chartContract";
 import { i18n } from "../i18n";
 import {
   readHistoryPanelOpen,
@@ -148,6 +148,10 @@ function toChatMessage(read: ChatMessageRead): ChatMessage {
     // （渲染门不放行，等于「这轮没图」），而不是让未知类型流进渲染层。
     chartType: normalizeChartType(read.chartType),
     chartOption: asChartOption(read.chartOption),
+    // 0107：明细表负载 + 判断依据同是系统边界原始 JSON，与 chartType/chartOption
+    // 同一道收窄（older 后端可能发来未知形状，收窄成 null 等于「这轮没有」）。
+    tableOption: asTablePayload(read.tableOption),
+    visualRationale: asVisualRationale(read.visualRationale),
     // 回放出来的消息天然知道自己的落库主键，补上它「导出此条」按钮才会出现。
     // 此前不填：入口只在 dbMessageId 存在时才渲染，于是刷新恢复出来的会话
     // 整段没有单条导出（实时发送的消息仍然没有，见 ChatMessage.dbMessageId 注释）。
@@ -365,6 +369,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               messages: patchLastMessage(state.messages, {
                 chartType: chart.chartType,
                 chartOption: chart.chartOption,
+                tableOption: chart.tableOption,
+                visualRationale: chart.visualRationale,
                 data: chart.data,
               }),
             })),
@@ -401,6 +407,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 error: result.error ?? null,
                 chartType: result.chartType ?? null,
                 chartOption: result.chartOption ?? null,
+                tableOption: result.tableOption ?? null,
+                visualRationale: result.visualRationale ?? null,
                 queryPlan: result.queryPlan ?? null,
               }),
             })),
@@ -439,6 +447,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             graphTraversal,
             suggestedAgent,
             queryPlan,
+            visualRationale,
           }) =>
             set((state) => ({
               messages: finalizeRunningSteps(
@@ -458,6 +467,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   suggestedAgent: suggestedAgent ?? null,
                   // 顶层查询计划：多步时为最后一个成功数据步的计划，单步时直接来自响应
                   queryPlan: queryPlan ?? null,
+                  // 0107：done 帧只在多步汇总/降级收尾携带 rationale（SUMMARY_TEXT_ONLY）；
+                  // 单步的 rationale 已由 chart 事件回填，这里只在非 null 时覆盖 ——
+                  // 否则会把 chart 事件写好的依据抹成 null（键必须整段缺省，不能 `?? undefined`）。
+                  ...(visualRationale ? { visualRationale } : {}),
                 })
               ),
               loading: false,
@@ -484,6 +497,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             sql: res.sql ?? null,
             chartType: res.chartType ?? null,
             chartOption: res.chartOption ?? null,
+            tableOption: res.tableOption ?? null,
+            visualRationale: res.visualRationale ?? null,
             data: res.data ?? null,
             queryPlan: res.queryPlan ?? null,
             intent: isIntent(res.intent) ? res.intent : undefined,
@@ -526,6 +541,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 // 失败步骤后端不发，这里落成 null，渲染层据此不画）
                 chartType: s.chartType ?? null,
                 chartOption: s.chartOption ?? null,
+                tableOption: s.tableOption ?? null,
+                visualRationale: s.visualRationale ?? null,
               })
             ),
           }),

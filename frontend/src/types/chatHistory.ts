@@ -29,6 +29,11 @@ export interface ChatMessageRead {
   // 来自更早版本的后端。由 chatStore 过 normalizeChartType 白名单收窄，不在这里硬 cast。
   chartType?: unknown;
   chartOption?: unknown;
+  // 0107：明细表负载 + 判断依据（与 chartType/chartOption 同是系统边界原始 JSON，
+  // 落库的可能来自更早版本的后端）。由 chatStore 过 asTablePayload / asVisualRationale
+  // 收窄，不在这里硬 cast 成 TablePayload / VisualRationale。
+  tableOption?: unknown;
+  visualRationale?: unknown;
 }
 
 // 会话消息流响应（对齐后端 SessionMessagesResponse）

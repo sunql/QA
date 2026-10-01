@@ -521,6 +521,8 @@ plan 与 sql 两个阶段共用 `_renderStatePart(priorState)` 模块级函数�
   真机事故：同一问题多次运行时对时错（LLM 非确定性），100% 那次模型还编造了「物料不超过 3 种」的业务解释 —— **SQL 算错 + LLM 幻觉解释**两层叠加。
   变更记录：`changes/fix-nl2sql-topn-share-denominator/summary.md`。
 
+- **Oracle 版本分发与连接时探测（2026-10-02）**：Oracle 方言只有**一个版本分叉**——11g 用 ROWNUM、12c+ 用 FETCH FIRST（12c/19c/21c 共用一套）；MySQL/PG 无版本维度。`resolveDialect(type, oracle_version)` 按此分发，点分版本（探测落库原文如 `11.2.0.1.0`）与 `11g` 字样都识别（`startswith(("9","10","11"))`）；版本为空按 12c+ 处理。**连接时自动探测**：`adapter.test()` 第三元返回服务端版本原文（SQLAlchemy `server_version_info` tuple / oracledb `conn.version` str），`datasource_service` 的 create/update 以 best-effort 落库——用户显式值永不被覆盖、探测失败只记 warning 不阻断；`/datasources/test` 响应带 `server_version` 供诊断。**顺带修复**：`DataSourceCreate.oracle_version` 此前从未进构造参数，用户填了也丢。变更记录：`changes/feat-datasource-version-probe/summary.md`。
+
 ## 准确性增强
 
 - 注入数据库 ER 图描述（从 Ontology Service 动态拉取）。

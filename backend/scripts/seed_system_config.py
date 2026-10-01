@@ -37,6 +37,7 @@ from app.services.chart_thresholds import (
     _CHART_PIE_MAX_ROWS_DEFAULT,
     _CHART_TOP_N_MAX_DEFAULT,
 )
+from app.services.data_summary import FULL_DATA_THRESHOLD
 
 # (key, value, description)。value 一律用 str() 从源码常量派生 —— 不写字面量，
 # 这样源码默认值一改，种子自动跟随，漂移只可能来自「忘了把新键加进来」。
@@ -60,6 +61,12 @@ CHART_CONFIG_SEEDS: tuple[tuple[str, str, str], ...] = (
         "CHART_TOP_N_MAX",
         str(_CHART_TOP_N_MAX_DEFAULT),
         "TOP N 上限：结果行数超过此值就不按 Top N 处理，改当普通分类比较",
+    ),
+    (
+        "FULL_DATA_THRESHOLD",
+        str(FULL_DATA_THRESHOLD),
+        "数据清单全量/摘要分界行数：查询结果不超过此行数时全量注入回答 prompt，"
+        "超过则只给首尾样本；调小省 token 但中间行可能丢失（如 27 行的 B125）",
     ),
 )
 

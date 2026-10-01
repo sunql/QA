@@ -27,6 +27,7 @@ from app.services.chart_thresholds import (
     _CHART_PIE_MAX_ROWS_DEFAULT,
     _CHART_TOP_N_MAX_DEFAULT,
 )
+from app.services.data_summary import FULL_DATA_THRESHOLD
 from app.tests import _pg_support
 from scripts.seed_system_config import CHART_CONFIG_SEEDS, seed_system_config
 
@@ -54,6 +55,7 @@ class TestSeedEntriesMatchSourceDefaults:
             "CHART_HBAR_MIN_ROWS": str(_CHART_HBAR_MIN_ROWS_DEFAULT),
             "CHART_HEATMAP_MIN_COVERAGE": str(_CHART_HEATMAP_MIN_COVERAGE_DEFAULT),
             "CHART_TOP_N_MAX": str(_CHART_TOP_N_MAX_DEFAULT),
+            "FULL_DATA_THRESHOLD": str(FULL_DATA_THRESHOLD),
         }
         assert seeded == expected
 

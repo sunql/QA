@@ -502,6 +502,16 @@ plan 与 sql 两个阶段共用 `_renderStatePart(priorState)` 模块级函数�
 - 动态 SQLAlchemy 引擎池：`dict[datasource_id, AsyncEngine]`，懒加载，更新/删除时 dispose。
 - 默认 `is_read_only=True`。
 - **多方言（#66）**：NL2SQL System Prompt 按 `datasource.type` 注入方言规则——Oracle 用 `FETCH FIRST N ROWS ONLY`，MySQL/PostgreSQL 用 `LIMIT N`；schema 前缀提示与 JOIN 示例仅对 Oracle 生效并使用 `datasource.username`（username 即 schema owner，不再硬编码 `ZJTH.`），MySQL/PG 不限定前缀、JOIN 示例为通用表名。未知/缺省类型回退 Oracle 方言。
+- **方言规则的注入机制（SSOT：`app/services/nl2sql_dialects.py`）**：`SqlDialect` 是 `frozen dataclass`，每个「规则字段」承载一段注入 System Prompt 的规则文本；`nl2sql_prompts.py::_buildSystemPrompt`（服务层包装 `nl2sql_service.py:387`）按 `identifierRule → nullOrderingRule → timeBucketRule → aggregateRule` 顺序追加，**序号从 10 起动态编号**（避免跳号）。新增一条方言规则＝加字段 + 加常量 + 在目标方言实例上赋值，**不必改 prompt 拼装逻辑**。
+
+  | 字段 | 生效方言 | 触发的数据库症状 | 规则要点 |
+  |---|---|---|---|
+  | `identifierRule` | Oracle | ORA-00923 | 列/表别名不得以数字开头，否则加双引号 |
+  | `nullOrderingRule` | Oracle、PostgreSQL | top-N 取到 NULL 行 | `ORDER BY … DESC NULLS LAST` |
+  | `timeBucketRule` | 三者各一版 | 按原始时间戳分组 | 月/年/季度截断表达式（方言写法不同） |
+  | `aggregateRule` | Oracle | **ORA-00937** | SELECT 列表中聚合函数与标量子查询不得并列；Top-N 占比把分子分母都写成标量子查询、外层 `FROM DUAL` |
+
+  PostgreSQL/MySQL 不注入 Oracle 特有规则（如 `identifierRule`、`aggregateRule`）——两者都允许相应写法，注入只会是噪音。规则「按方言注入、而非全局注入」是本表的成立前提。
 
 ## 准确性增强
 

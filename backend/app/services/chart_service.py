@@ -33,7 +33,12 @@ from app.services.chart_decision import (
 from app.services.chart_label import classifySemanticLabel
 from app.services.chart_renderer import renderChartOption
 from app.services.chart_spec_builder import buildSpec
-from app.services.chart_thresholds import loadChartThresholds
+from app.services.chart_thresholds import loadChartThresholds, loadFullDataThreshold
+from app.services.visual_payload import assembleTableOption
+from app.services.visual_rationale import (
+    VisualRationale,
+    buildVisualRationale,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +51,15 @@ class ChartBuild:
     """图表构建结果。
 
     三元组（promptTokens/completionTokens/cachedTokens）保持 4-tuple 的计费口径，
-    另外带上 decision 与 spec 供日志与测试观察「为什么选了这个图」。
+    另外带上 decision 与 spec 供日志与测试观察「为什么选了这个图」。Task 3 起
+    同时带 `tableOption`（图之外的明细表负载）与 `rationale`（为什么这么画的
+    判断依据，供前端 i18n 渲染）。
     """
 
     chartType: ChartType
     option: dict[str, Any]
+    tableOption: dict | None
+    rationale: VisualRationale
     promptTokens: int
     completionTokens: int
     cachedTokens: int | None
@@ -85,6 +94,7 @@ class ChartService:
             return self._emptyResult(columns, data)
 
         thresholds = await loadChartThresholds(session)
+        fullDataThreshold = await loadFullDataThreshold(session)
         signals = buildChartSignals(plan, columns, data, question)
 
         forced = forcedKind or intentKind
@@ -124,11 +134,28 @@ class ChartService:
                 degradeReason,
             )
         option = renderChartOption(spec, data)
+        # rationale 的 kind 传「决策引擎选出的 kind（降级前的意图）」，不传降级后的
+        # spec.kind：否则 DEGRADE_SPEC_INVALID 的文案会渲染成「数据结构不满足 table
+        # 的绘图要求」。同理 R_FORCED_CLIENT 传的是被强制的那个 kind。
+        rationale = buildVisualRationale(
+            ruleId=decision.ruleId,
+            kind=decision.kind,
+            rowCount=len(data),
+            degradeReason=degradeReason,
+        )
+        tableOption = assembleTableOption(
+            specKind=spec.kind,
+            columns=columns,
+            data=data,
+            fullDataThreshold=fullDataThreshold,
+        )
         return ChartBuild(
             # 降级后 chartType 必须跟着变成 TABLE：前端按 chartType 分支选渲染器，
             # 说「hbar」却发 {columns, rows} 会让 ECharts 拿到非法 option 画空白。
             chartType=spec.kind,
             option=option,
+            tableOption=tableOption,
+            rationale=rationale,
             promptTokens=promptTokens,
             completionTokens=completionTokens,
             cachedTokens=cachedTokens,
@@ -152,6 +179,12 @@ class ChartService:
         return ChartBuild(
             chartType=ChartType.TABLE,
             option={"columns": list(columns), "rows": list(data)},
+            # 空数据表已在 option 里，不再附第二份表；rationale 零成本（纯函数、
+            # 不读 DB），直接给 R00。
+            tableOption=None,
+            rationale=buildVisualRationale(
+                ruleId="R00_EMPTY_TABLE", kind=ChartType.TABLE, rowCount=len(data)
+            ),
             promptTokens=0,
             completionTokens=0,
             cachedTokens=0,

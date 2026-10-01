@@ -18,6 +18,7 @@ from typing import Any
 from app.domain.enums import ChartType
 from app.domain.query_plan import Aggregation, QueryPlan, SortSpec
 from app.services.chart_service import ChartService
+from app.services.visual_rationale import DEGRADE_SPEC_INVALID
 
 _ROWS = [
     {"SUPPLIER_NAME": "B125 浙江力航", "RCV_QTY_PUU": 9812},
@@ -396,3 +397,89 @@ class TestNeverRaises:
 
         assert build.chartType is ChartType.BAR
         assert (build.promptTokens, build.completionTokens) == (0, 0)
+
+
+class TestTableOptionAndRationale:
+    """Task 3：ChartBuild 同时带「表负载」与「为什么这么画」的 rationale。"""
+
+    async def test_chart_kind_carries_table_option_and_rule_rationale(self) -> None:
+        plan = _plan(
+            aggregations=(
+                Aggregation(
+                    function="SUM", property="RCV_QTY_PUU", alias="占比", formula="x"
+                ),
+            ),
+            groupBy=("SUPPLIER_NAME",),
+        )
+        rows = [
+            {"SUPPLIER_NAME": "B125", "占比": 0.5},
+            {"SUPPLIER_NAME": "B019", "占比": 0.3},
+            {"SUPPLIER_NAME": "B153", "占比": 0.2},
+        ]
+
+        build = await _build(
+            columns=["SUPPLIER_NAME", "占比"], data=rows, plan=plan, client=_CountingClient()
+        )
+
+        assert build.chartType is ChartType.DONUT
+        assert build.rationale.code == "R02_SHARE_DONUT"
+        assert build.tableOption is not None
+        assert build.tableOption["columns"] == ["SUPPLIER_NAME", "占比"]
+        assert build.tableOption["rows"] == rows
+        assert build.tableOption["truncated"] is False
+
+    async def test_table_kind_has_no_table_option(self) -> None:
+        build = await _build(
+            columns=["PO_NO", "SUPPLIER_NAME", "LINE_AMT"],
+            data=[
+                {"PO_NO": "P1", "SUPPLIER_NAME": "B125", "LINE_AMT": 10},
+                {"PO_NO": "P2", "SUPPLIER_NAME": "B019", "LINE_AMT": 20},
+            ],
+            plan=_plan(),
+        )
+
+        assert build.chartType is ChartType.TABLE
+        assert build.tableOption is None
+        assert build.rationale.code == "R13_RAW_DETAIL_TABLE"
+
+    async def test_kpi_kind_has_no_table_option(self) -> None:
+        plan = _plan(aggregations=(Aggregation(function="SUM", property="RCV_QTY_PUU"),))
+        build = await _build(
+            columns=["RCV_QTY_PUU"], data=[{"RCV_QTY_PUU": 22416}], plan=plan
+        )
+
+        assert build.chartType is ChartType.KPI
+        assert build.tableOption is None
+        assert build.rationale.code == "R01_SINGLE_VALUE_KPI"
+
+    async def test_degraded_spec_marks_rationale_spec_invalid(self) -> None:
+        """强制的图型画不出来 → 降级成 TABLE，rationale 记「意图 kind」而非降级后的。"""
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_ROWS,
+            forcedKind=ChartType.HEATMAP,
+        )
+
+        assert build.chartType is ChartType.TABLE
+        assert build.tableOption is None
+        assert build.rationale.code == DEGRADE_SPEC_INVALID
+        assert build.rationale.params["kind"] is ChartType.HEATMAP
+
+    async def test_forced_kind_rationale_records_the_forced_kind(self) -> None:
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_ROWS,
+            forcedKind=ChartType.PIE,
+            client=_CountingClient(),
+        )
+
+        assert build.chartType is ChartType.PIE
+        assert build.rationale.code == "R_FORCED_CLIENT"
+        assert build.rationale.params["kind"] is ChartType.PIE
+
+    async def test_empty_data_rationale_is_r00(self) -> None:
+        build = await _build(columns=["SUPPLIER_NAME", "RCV_QTY_PUU"], data=[])
+
+        assert build.chartType is ChartType.TABLE
+        assert build.tableOption is None
+        assert build.rationale.code == "R00_EMPTY_TABLE"

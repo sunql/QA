@@ -23,7 +23,7 @@ from app.domain.models import OntologyClass, OntologyJoin
 from app.domain.plan_drop import PlanDrop, formatPlanDrops
 from app.domain.query_plan import PlanResult, QueryPlan
 from app.infrastructure.llm.base_client import LlmMessage
-from app.services.formula_parser import parseFormula
+from app.services.formula_parser import isCteFormula
 from app.services.llm_retry_policy import completeWithTransientRetry
 from app.services.messages_zh import (
     MSG_NL2SQL_PLAN_INVALID,
@@ -40,6 +40,7 @@ from app.services.nl2sql_refs import (
     _extractFormulaProperties,
     _propertyOwnerHint,
     _timeBucketGroupHint,
+    formulaHasSqlStructure,
 )
 from app.services.nl2sql_schema import (
     buildSchemaText,
@@ -338,6 +339,33 @@ def _finalizePlan(
     )
 
 
+# 语句形态 formula 的报错（2026-10-01 线上回归）。
+# 必须自足且短：_buildPlanUserPrompt 把这批 issues 用「；」拼起来后按
+# _ERROR_SNIPPET_LIMIT=200 从**尾部**截断（nl2sql_prompts.py），提示被截掉就白写了。
+# 引导照抄 _buildPlanSystemPrompt 规则 4 的两种合法形式，让重试有明确下一步。
+_STRUCTURAL_FORMULA_HINT = (
+    "formula 不能是整条 SQL 语句（含 FROM/JOIN）；占比/比率请改用 "
+    "① 单层窗口函数 SUM(x)/SUM(SUM(x)) OVER ()，"
+    "或 ② CTE 形式 WITH a AS (SELECT ...) SELECT ... FROM a（需先取 Top-N 再算占比时用 ②）"
+)
+
+# 失败日志里 formula 原文的最大长度（整条 SELECT 可能很长，截断防日志爆炸）。
+_FORMULA_LOG_MAX_LEN = 500
+
+
+def formatPlanFormulas(plan: QueryPlan) -> str:
+    """把计划中各聚合的 formula 原文拼成一行，供计划校验失败日志留痕。
+
+    2026-10-01 线上回归暴露的取证缺口：计划校验失败原本零日志，而 session_message
+    没有 detail 列、也没有 attempt 表 ⇒ 真实 formula 原文事后无法回看，只能靠现象反推。
+    文本进日志、**不进 prompt**（进 prompt 会吃掉 _ERROR_SNIPPET_LIMIT 的预算）。
+    """
+    parts = [
+        agg.formula[:_FORMULA_LOG_MAX_LEN] for agg in plan.aggregations if agg.formula
+    ]
+    return " | ".join(parts) if parts else "-"
+
+
 def validatePlan(
     plan: QueryPlan,
     classes: list[OntologyClass],
@@ -412,12 +440,30 @@ def validatePlan(
         # 放行同计划内其他聚合的别名（如跨年比价公式 AVG_PRICE_2026 - AVG_PRICE_2025），
         # 与排序校验放行聚合 alias（_aggregationAliases）口径一致；未知引用仍拒绝。
         if agg.formula:
-            parsed = parseFormula(agg.formula)
-            # CTE 公式（WITH ... SELECT ... FROM cte_name）：CTE inner SELECT 的
-            # 列名/表名（如 line_ratios.ratio、po_lines）不属于本体类属性，而是
-            # CTE 内部定义。SQL Guard 已校验 CTE 语法，validatePlan 不对 CTE 内部
-            # 的属性名做存在性校验（无法也无意义）；仅保留非 CTE 公式的校验逻辑。
-            if not parsed.is_cte:
+            # 三路口径（2026-10-01 线上回归）：
+            # ① CTE 形态（WITH ... SELECT ...）：CTE inner SELECT 的列名/表名
+            #    （如 top3.qty、T_PRECEIPT）是 CTE 内部定义，不是本体属性，不做
+            #    存在性校验。注意：SQL Guard 只在**生成的 SQL** 上跑
+            #    （business_db_pool._assert_read_only），**不检查 formula 文本** ——
+            #    这里是刻意放行，不是「已由他处校验」。
+            # ② 语句形态（含独立词 FROM/JOIN）：整条 SQL 语句，或表达式里嵌子查询。
+            #    其表名/schema 名/表别名/ONLY 会被 _extractFormulaProperties 当成属性
+            #    逐条误报，且该支报错原本无指向 → 模型原样重犯 → 整轮失败。
+            #    改为一条可操作引导。不豁免而拒绝：formula 没有确定性渲染器
+            #    （planToText/_aggText 只拼 "{formula} AS {alias}"），豁免会把早期
+            #    响亮的失败换成 SQL 阶段晚期安静的失败。
+            # ③ 纯聚合表达式：逐 token 做属性存在性校验（原逻辑，如期拦真幻觉）。
+            if isCteFormula(agg.formula):
+                pass
+            elif formulaHasSqlStructure(agg.formula):
+                # 置首位**且去重**（code review MEDIUM）：
+                # _buildPlanUserPrompt 把这批 issues 用「；」拼起来后按
+                # _ERROR_SNIPPET_LIMIT=200 从**尾部**截断 —— 追加在后的提示会被
+                # 排在前面的 issue 挤出预算，那时引导就白写了（正是本次要修的病）。
+                # 去重则避免 N 条语句公式各占 150 字符吃光预算。
+                if _STRUCTURAL_FORMULA_HINT not in issues:
+                    issues.insert(0, _STRUCTURAL_FORMULA_HINT)
+            else:
                 for refProp in _extractFormulaProperties(agg.formula):
                     if refProp not in owned and refProp not in aggAliases:
                         issues.append(f"公式中的属性 {refProp} 不属于选定的任何类")

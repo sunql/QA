@@ -48,6 +48,7 @@ from app.services.nl2sql_dialects import (
     _SQL_DIALECTS,
 )
 from app.services.nl2sql_plan import (
+    formatPlanFormulas,
     generateQueryPlan,
     validatePlan,
     validateConnectivity,
@@ -520,6 +521,15 @@ class Nl2SqlService:
             )
             if not issues:
                 return self._finalizePlan(planResult, classes, joins, scopeText)
+            # 失败留痕（2026-10-01 线上回归）：校验失败原本零日志，线上报障时
+            # 真实 formula 原文无法回看（session_message 无 detail 列、无 attempt 表）。
+            # 记 formula 原文而不只是 issues —— issues 里已经没有原文了。
+            logger.warning(
+                "NL2SQL 计划校验未通过 attempt=%d formulas=%s issues=%s",
+                _ + 1,
+                formatPlanFormulas(planResult.plan),
+                issues,
+            )
             planResult = await self.generateQueryPlan(
                 question, classes, llmClient, modelConfig,
                 initialErrors=issues, scopeQuestion=scopeQuestion, **common,
@@ -531,6 +541,11 @@ class Nl2SqlService:
             planResult.plan, classes, ownerHintMaxClasses=planCfg["ownerHintMaxClasses"]
         )
         if issues:
+            logger.warning(
+                "NL2SQL 计划校验最终失败 formulas=%s issues=%s",
+                formatPlanFormulas(planResult.plan),
+                issues,
+            )
             raise Nl2SqlError(
                 MSG_NL2SQL_PLAN_VALIDATION_FAILED,
                 detail="; ".join(issues),

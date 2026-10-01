@@ -262,14 +262,14 @@ New columns on `session_message`:
 
 ## 跨类属性引用校验补可操作 hint（属性归属 + schema 不存在）
 
-`validatePlan`（`app/services/nl2sql_service.py`）的三个分支（`selectedProperties` / `aggregations` else / `groupBy` 兜底）共用同款可操作重试 hint：`_propertyOwnerHint(prop, propsByClass)`。背景是 2026-09-16 真实回归：用户问「近五个月供货量最大的供应商」时偶发报"选中的属性 供应商名称 不属于选定的任何类"，复现确认是低概率上下文相关 LLM 偏差（上一轮是 PurchaseOrder COUNT → 意图被判为 FOLLOW_UP → statePrompt 注入不相关上轮 → 模型偶发引用跨类属性），旧反馈只说"不属于选定的任何类"无可操作指引，重试两次仍犯同错 → `maxPlanAttempts=2` 耗尽 → 整轮失败。
+`validatePlan`（`app/services/nl2sql_plan.py`）的三个分支（`selectedProperties` / `aggregations` else / `groupBy` 兜底）共用同款可操作重试 hint：`_propertyOwnerHint(prop, propsByClass)`。背景是 2026-09-16 真实回归：用户问「近五个月供货量最大的供应商」时偶发报"选中的属性 供应商名称 不属于选定的任何类"，复现确认是低概率上下文相关 LLM 偏差（上一轮是 PurchaseOrder COUNT → 意图被判为 FOLLOW_UP → statePrompt 注入不相关上轮 → 模型偶发引用跨类属性），旧反馈只说"不属于选定的任何类"无可操作指引，重试两次仍犯同错 → `maxPlanAttempts=2` 耗尽 → 整轮失败。
 
 hint 真源为 `propsByClass`（已经 `_classRefNames` 展开过的业务名 + 别名 + 物理列 + 表限定名 + 类限定名），口径与属性/分组/JOIN 列校验一致：
 
 - 属性在 schema 中**有归属类** → 列出归属类（截断到 `_OWNER_HINT_MAX_CLASSES=3`，避免 schema 类多时提示过长挤占重试 token），引导"把对应类加入 selectedClasses 并按 JOIN 目录关联后再引用"
 - 属性在 schema 中**完全不存在**（含别名/物理列口径比对）→ 如实说明防 LLM 重试继续幻觉同一属性名
 
-`groupBy` 分支优先取 `_timeBucketGroupHint`（粒度词命中），命中不到才走 `_propertyOwnerHint`，与粒度词提示保持正交；`aggregations` 的 `formula` 分支保留 2026-08-14 的"property 应填真实属性 / 别名引用写在 formula 内"风格，不重复插入，避免覆盖原有可操作指引。
+`groupBy` 分支优先取 `_timeBucketGroupHint`（粒度词命中），命中不到才走 `_propertyOwnerHint`，与粒度词提示保持正交；`aggregations` 的 `formula` 分支保留 2026-08-14 的"property 应填真实属性 / 别名引用写在 formula 内"风格，不重复插入，避免覆盖原有可操作指引。注意：`公式中的属性 X 不属于选定的任何类` 这一支原本**没有** hint，2026-10-01 起语句形态由下节「语句形态 formula 的校验口径」接管。
 
 反例守约：
 
@@ -281,6 +281,50 @@ hint 真源为 `propsByClass`（已经 `_classRefNames` 展开过的业务名 + 
 测试守约：`test_query_plan_validation.py` 48 用例（含 3 新增）全过；NL2SQL 单测 161 + chat 集成 102 合计 263 回归全绿；已通过 `deploy_backend.sh` 部署。
 
 详见 `changes/fix-cross-class-property-owner-hint/summary.md`。
+
+## 语句形态 formula 的校验口径（不得逐 token 当属性）
+
+`Aggregation.formula` 的**语句结构豁免**。背景是 2026-10-01 线上回归：用户问「5月份供货量最多的三家供应商所供货物总量占5月份总供货量的比例是多少」，LLM 把**整条 SELECT** 放进 `Aggregation.formula`（该问题要「先取前三家、再算占比」，单条窗口函数表达不了），其 schema 名（`THBI`）、表名（`DWD_GOODS_RECEIPT_DTL` / `DIM_IMATERIAL`）、表别名（`d2` / `m2`）、`ONLY`（来自 `FETCH FIRST 3 ROWS ONLY`）被逐 token 误报成属性幻觉（用户侧 6 条），重试反馈无指向 → 模型原样重犯 → `maxPlanAttempts` 耗尽 → 整轮失败。
+
+`validatePlan`（`app/services/nl2sql_plan.py`）对带 formula 的聚合走**三路口径**：
+
+| 形态 | 判定 | 处理 |
+|---|---|---|
+| CTE | `isCteFormula`（`^\s*WITH\b`，容许前导空白） | **不做**属性存在性校验（CTE 内部标识符不是本体属性） |
+| 语句结构 | `formulaHasSqlStructure`（剥掉字符串字面量后 **`SELECT` 与 `FROM`/`JOIN` 同时**出现） | 报**一条**可操作引导（`_STRUCTURAL_FORMULA_HINT`，置于 issues 首位并去重），不逐 token 报属性 |
+| 纯聚合表达式 | 以上皆否 | 逐 token 做属性存在性校验（原逻辑，如期拦真幻觉） |
+
+**判据刻意不看首词**：线上错误文本只列出被误报的 token，无法区分「整条 `SELECT`」与「表达式里嵌子查询」（如 `SUM(a)/(SELECT SUM(b) FROM t)`）——两者首词不同（`SELECT` vs `SUM`）但都含 `SELECT` + `FROM`，故一个判据覆盖两种形态。
+
+**必须两个条件同时满足**：`EXTRACT(MONTH FROM d)` / `TRIM(BOTH ' ' FROM X)` 里的 `FROM` 是**函数实参分隔符**，不是语句子句。只看 `FROM` 会把这类公式误拒，且提示语内容不实（说它是整条 SQL 语句）—— 而 `EXTRACT` 那条的 token 全是真实属性（只剩 `QTY`/`到货日期`），**改前是能通过校验的**。code review HIGH，已复现并修正。
+
+**为什么是「拒绝 + 引导」而不是豁免**：`Aggregation.formula` **没有确定性渲染器** —— `planToText`/`_aggText`（`app/domain/query_plan.py`）只把它拼成 `"{formula} AS {alias}"` 喂给 SQL 生成 prompt。豁免语句形态会让 SQL 阶段收到 `SELECT ... FETCH FIRST 3 ROWS ONLY AS 占比` 这种畸形聚合行，把早期响亮的失败换成晚期安静的失败。CTE 形态被豁免是因为它至少是**有结构的草稿**。
+
+**误伤边界**：`owned` 只含属性名/别名，不含 schema 名与表名。**含 `SELECT` 的**公式要通过校验，必须其 schema 名、表名、表别名全部恰好等于某个属性名 —— 近乎不可能，故该分支只改变「今天已经在失败」的公式的报错内容。**不含 `SELECT` 的** `EXTRACT`/`TRIM` 类公式落回逐 token 校验，行为与改动前**完全一致**。（初版论证漏掉了后者，被 code review 证伪后修正。）
+
+**提示语必须置首**：`_buildPlanUserPrompt` 把这批 issues 用「；」拼起来后按 `_ERROR_SNIPPET_LIMIT=200` 从**尾部**截断。`_STRUCTURAL_FORMULA_HINT` 占 150 字符，按「追加」顺序会被前面的 issue 挤出预算（实测被砍成 `… ② CTE 形式 WITH a AS (SELECT ...) SELEC`），故实现把它 **insert 到 issues 首位并去重** —— 单独 150 < 200 必然存活，N 条语句公式也只占一份预算。
+
+**顺带修掉的既有缺陷**：`isCteFormula` 取代 `formula.strip().upper().startswith("WITH ")`，后者要求 `WITH` 后紧跟**一个空格**，对 `WITH\n` / `WITH\t` 漏判 —— CTE 逃生门本身是脆的。`isCteFormula` 是 SSOT：`parseFormula` 用它路由、`validatePlan` 用它判豁免。
+
+**取证**：`generateValidatedPlan` 在校验失败时记 `logger.warning`，含 attempt + `formatPlanFormulas(plan)`（formula 原文，截断 500 字符）+ issues。此前校验失败**零日志**，`session_message` 也无 detail 列 ⇒ 线上报障时 formula 原文无法回看。
+
+**关键字集**：`ONLY` 补进 `formula_parser._SQL_KEYWORDS` 与 `nl2sql_refs._FORMULA_SQL_KEYWORDS`（与 2026-09-28 补 `ASC/DESC` 同类漏项；纵深防御，非承重修复）。守卫 `TestSqlKeywordSetsStayInSync` 是**单向**子集断言（`_SQL_KEYWORDS ⊆ _FORMULA_SQL_KEYWORDS`），两处同加即保持绿。
+
+反例守约（`test_query_plan_validation.py::TestValidatePlanFormulaShape` / `TestFormulaStructurePredicate`）：
+
+- 整条 `SELECT ... FROM ... FETCH FIRST 3 ROWS ONLY` → 1 条引导（**修前实测 9 条**「公式中的属性 …」）
+- `SUM(QTY)/(SELECT SUM(QTY) FROM THBI.DWD_X)` → 同上（首词不是 `SELECT` 也覆盖）
+- `SUM(NONEXISTENT)/SUM(SUM(NONEXISTENT)) OVER ()` → 仍报「公式中的属性 NONEXISTENT」（防过度修复）
+- `SUM(CASE WHEN EXTRACT(MONTH FROM 到货日期) = 5 THEN QTY ELSE 0 END)/SUM(SUM(QTY)) OVER ()` → **通过**（`FROM` 是函数实参分隔符；code review HIGH 的回归守卫）
+- `CASE WHEN BPSNUM = 'FROM' THEN ...` → 字面量里的 `FROM` 不算语句结构
+- `(SELECT SUM(x) FROM T)` → 仍判 True（双向）
+- CTE 形态 → 仍豁免
+- 提示语截断判别器：同时含幻觉属性与语句公式时，`_buildPlanUserPrompt` 输出仍含**完整**提示语（改回「追加」顺序即失败）
+- 端到端 `app/tests/integration/test_nl2sql_structural_formula_retry.py`：引导进入第 2 次 prompt，且模型据此改写后通过校验
+
+**已知非目标**：表达式里的限定别名（`SUM(t.QTY)`）以及纯表达式内出现的表名仍会被报 —— `_extractFormulaProperties` 无上下文感知（只做字面量剥离 + 函数名剥离 + 关键字过滤）。本次不动。
+
+详见 `changes/2026-10-01-nl2sql-structural-formula-guard/summary.md`。
 
 ## 范围感知行数限制（scope-aware row limit）
 

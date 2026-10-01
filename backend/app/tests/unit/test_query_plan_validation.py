@@ -8,6 +8,13 @@ from __future__ import annotations
 
 from app.domain.models import OntologyClass, OntologyProperty
 from app.domain.query_plan import Aggregation, JoinSpec, QueryPlan, SortSpec
+from app.services.nl2sql_plan import _STRUCTURAL_FORMULA_HINT
+from app.services.nl2sql_prompts import _buildPlanUserPrompt
+from app.services.nl2sql_refs import (
+    _FORMULA_SQL_KEYWORDS,
+    _extractFormulaProperties,
+    formulaHasSqlStructure,
+)
 from app.services.nl2sql_service import Nl2SqlService
 
 
@@ -750,3 +757,182 @@ class TestSqlKeywordSetsStayInSync:
             f"nl2sql_refs._FORMULA_SQL_KEYWORDS 缺少 {missing}；"
             f"这些 token 会被 _extractFormulaProperties 当作属性上报"
         )
+
+    def test_only_is_covered(self) -> None:
+        """ONLY 来自 FETCH FIRST n ROWS ONLY，是 SQL 词不是属性。
+
+        与 2026-09-28 补的 ASC/DESC 同类漏项（纵深防御，非本次承重修复）。
+        """
+        assert "ONLY" in _FORMULA_SQL_KEYWORDS
+        assert _extractFormulaProperties("FETCH FIRST 3 ROWS ONLY") == set()
+
+
+class TestFormulaStructurePredicate:
+    """formulaHasSqlStructure：公式是否含 SQL 语句结构（独立词 FROM/JOIN）。
+
+    判据刻意**不看首词** —— 线上错误文本只列出被误报的 token，无法区分
+    「整条 SELECT」与「表达式里嵌子查询」（两者首词不同但都含 FROM）。
+    """
+
+    def test_statement_shapes_are_structural(self) -> None:
+        assert formulaHasSqlStructure("SELECT SUM(x) FROM T") is True
+        assert formulaHasSqlStructure("select a from t") is True
+        assert formulaHasSqlStructure("SELECT a JOIN b ON a.id = b.id") is True
+
+    def test_subquery_expression_is_structural(self) -> None:
+        """首词是 SUM 不是 SELECT，仍含 FROM ⇒ 也是语句结构。"""
+        assert formulaHasSqlStructure("SUM(a) / (SELECT SUM(b) FROM T)") is True
+
+    def test_expression_shapes_are_not_structural(self) -> None:
+        assert formulaHasSqlStructure("SUM(QTY) / SUM(SUM(QTY)) OVER ()") is False
+        assert formulaHasSqlStructure("AVG_PRICE_2026 - AVG_PRICE_2025") is False
+
+    def test_from_inside_string_literal_is_not_structural(self) -> None:
+        """字面量里的 FROM 不是语句结构（判前先剥字面量）—— 防误判。"""
+        assert formulaHasSqlStructure("CASE WHEN X = 'FROM' THEN 1 ELSE 0 END") is False
+
+    def test_word_boundary(self) -> None:
+        """FROMX 不是 FROM。"""
+        assert formulaHasSqlStructure("SUM(FROMX)") is False
+
+    def test_from_inside_function_is_not_structural(self) -> None:
+        """EXTRACT/TRIM 里的 FROM 是**函数实参分隔符**，不是语句子句 —— 防误判。
+
+        code review HIGH（2026-10-01 已复现）：只看 `\\b(FROM|JOIN)\\b` 会把
+        `SUM(CASE WHEN EXTRACT(MONTH FROM 到货日期) = 5 THEN QTY ELSE 0 END)/...`
+        判成整条语句，而该公式的 token 全是真实属性（改前**能通过校验**），
+        于是从「能过」变成「被拒」，且提示语内容不实（说它是整条 SQL 语句）。
+        真语句必然同时含 SELECT，故判据要求两者同时出现。
+        """
+        assert formulaHasSqlStructure("SUM(EXTRACT(MONTH FROM D))") is False
+        assert formulaHasSqlStructure("SUM(TRIM(BOTH ' ' FROM D))") is False
+        # 双向：真语句仍须判 True
+        assert formulaHasSqlStructure("(SELECT SUM(x) FROM T)") is True
+
+
+class TestValidatePlanFormulaShape:
+    """语句形态 formula 的校验口径（2026-10-01 线上回归）。
+
+    LLM 把整条 SQL 语句放进 Aggregation.formula → 内部的 schema 名（THBI）、
+    表名（DWD_GOODS_RECEIPT_DTL / DIM_IMATERIAL）、表别名（d2 / m2）、
+    ONLY（FETCH FIRST 3 ROWS ONLY）全被 _extractFormulaProperties 当属性逐条上报：
+
+        公式中的属性 THBI 不属于选定的任何类
+        公式中的属性 DWD_GOODS_RECEIPT_DTL 不属于选定的任何类
+        ...（共 6 条）
+
+    重试反馈无指向 → 模型原样重犯 → maxPlanAttempts 耗尽 → 整轮失败。
+
+    （用户侧报了 6 条：ONLY / m2 / DWD_GOODS_RECEIPT_DTL / DIM_IMATERIAL / d2 / THBI；
+    本夹具公式另含 3 个真实列名 RCV_QTY / ITEM_CODE / ITMREF_0，故实测为 9 条。
+    两者差集正好是那 3 个真实列名 —— 用户那边它们在 owned 里所以未被上报。）
+
+    修法：含 FROM/JOIN 的公式不做属性存在性校验，改为**一条可操作引导**。
+    不豁免而是拒绝，因为 Aggregation.formula 没有确定性渲染器
+    （planToText/_aggText 只拼 "{formula} AS {alias}"），豁免会把早期响亮的
+    失败换成 SQL 阶段晚期安静的失败。
+    """
+
+    _STATEMENT = (
+        "SELECT SUM(d2.RCV_QTY) FROM THBI.DWD_GOODS_RECEIPT_DTL d2 "
+        "JOIN THBI.DIM_IMATERIAL m2 ON d2.ITEM_CODE = m2.ITMREF_0 "
+        "FETCH FIRST 3 ROWS ONLY"
+    )
+
+    def _plan(self, formula: str) -> QueryPlan:
+        return QueryPlan(
+            target="前三家供应商供货量占比",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("QTY",),
+            aggregations=(
+                Aggregation(
+                    function="SUM", property="QTY", alias="占比", formula=formula
+                ),
+            ),
+        )
+
+    def test_statement_formula_reports_single_actionable_issue(self) -> None:
+        """判别器：修前实测返回 9 条「公式中的属性 … 不属于选定的任何类」。"""
+        issues = _service().validatePlan(self._plan(self._STATEMENT), [_receiptCls()])
+        assert len(issues) == 1, issues
+        assert "公式中的属性" not in issues[0]
+        assert "窗口函数" in issues[0]
+        assert "CTE" in issues[0]
+
+    def test_subquery_expression_also_reports_structural_issue(self) -> None:
+        """另一种形态（表达式里嵌子查询）走同一条分支。"""
+        formula = "SUM(QTY) / (SELECT SUM(QTY) FROM THBI.DWD_GOODS_RECEIPT_DTL)"
+        issues = _service().validatePlan(self._plan(formula), [_receiptCls()])
+        assert len(issues) == 1, issues
+        assert "公式中的属性" not in issues[0]
+        assert "窗口函数" in issues[0]
+
+    def test_pure_expression_hallucination_still_reported(self) -> None:
+        """反向守卫：不含 FROM/JOIN 的纯表达式，幻觉属性仍须被拦。
+
+        防止「把属性存在性校验整条废掉」这种过度修复。
+        """
+        formula = "SUM(NONEXISTENT) / SUM(SUM(NONEXISTENT)) OVER ()"
+        issues = _service().validatePlan(self._plan(formula), [_receiptCls()])
+        assert any("公式中的属性" in i and "NONEXISTENT" in i for i in issues), issues
+
+    def test_from_inside_string_literal_is_not_structural(self) -> None:
+        """误判守卫：字面量里的 FROM 不算语句结构，公式照常按属性校验且通过。"""
+        formula = (
+            "SUM(CASE WHEN BPSNUM = 'FROM' THEN QTY ELSE 0 END) "
+            "/ SUM(SUM(QTY)) OVER ()"
+        )
+        assert _service().validatePlan(self._plan(formula), [_receiptCls()]) == []
+
+    def test_extract_function_formula_not_misjudged(self) -> None:
+        """回归守卫（code review HIGH）：含 `EXTRACT(... FROM ...)` 的合法公式必须通过。
+
+        该公式提取出的 token 是 {QTY, 到货日期}，全是真实属性 ⇒ 只看 FROM/JOIN 的
+        版本会把它误拒；正确判据（要求同时含 SELECT）下返回 []。
+        """
+        receipt = _cls(
+            "PRECEIPT",
+            [
+                ("PTHNUM", "PTHNUM_0"),
+                ("BPSNUM", "BPSNUM_0"),
+                ("QTY", "QTY_0"),
+                ("到货日期", "RCV_DATE_0"),
+            ],
+        )
+        formula = (
+            "SUM(CASE WHEN EXTRACT(MONTH FROM 到货日期) = 5 THEN QTY ELSE 0 END) "
+            "/ SUM(SUM(QTY)) OVER ()"
+        )
+        assert _service().validatePlan(self._plan(formula), [receipt]) == []
+
+    def test_hint_survives_snippet_truncation_alongside_other_issues(self) -> None:
+        """提示语必须活过 200 字符的**尾部**截断 —— 排在别的 issue 之后就会被砍掉。
+
+        code review MEDIUM：`_buildPlanUserPrompt` 把 issues 用「；」拼起来后截前
+        `_ERROR_SNIPPET_LIMIT=200` 字符，而公式分支原本排在 selectedProperties 之后
+        ⇒ 有前置 issue 时引导整个消失，重试又变回无指向 —— 正是本次要修的病。
+        故实现把提示 insert 到首位并去重。
+        """
+        plan = QueryPlan(
+            target="前三家供应商供货量占比",
+            selectedClasses=("PRECEIPT",),
+            selectedProperties=("NONEXISTENT", "QTY"),  # 制造一条排在公式之前的 issue
+            aggregations=(
+                Aggregation(
+                    function="SUM", property="QTY", alias="占比", formula=self._STATEMENT
+                ),
+            ),
+        )
+        issues = _service().validatePlan(plan, [_receiptCls()])
+        assert len(issues) >= 2, issues
+        # 用生产构造器断言，不重写拼接逻辑（否则会与实现漂移）
+        prompt = _buildPlanUserPrompt("前三家供应商供货量占比", issues)
+        assert _STRUCTURAL_FORMULA_HINT in prompt, prompt[-300:]
+
+    def test_cte_formula_still_exempt(self) -> None:
+        """CTE 形态仍走豁免（不被新的语句结构分支拦截）。"""
+        formula = (
+            "WITH top3 AS (SELECT BPSNUM, SUM(QTY) AS qty FROM T_PRECEIPT "
+            "GROUP BY BPSNUM) SELECT SUM(qty) AS 占比 FROM top3"
+        )
+        assert _service().validatePlan(self._plan(formula), [_receiptCls()]) == []

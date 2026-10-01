@@ -553,13 +553,15 @@ class TestAdapterCache:
 
 
 class _FakeAdapter:
-    def __init__(self, success: bool, message: str) -> None:
+    def __init__(self, success: bool, message: str, version: object | None = None) -> None:
         self._success = success
         self._message = message
+        self._version = version
         self.disposed = False
 
-    async def test(self) -> tuple[bool, str]:
-        return self._success, self._message
+    async def test(self) -> tuple[bool, str, object | None]:
+        # 2026-10-02 起 test() 顺带返回服务端版本原文（第三元）
+        return self._success, self._message, self._version
 
     async def dispose(self) -> None:
         self.disposed = True
@@ -567,7 +569,7 @@ class _FakeAdapter:
 
 class TestServiceTestConnection:
     async def test_success_returns_response(self, monkeypatch) -> None:
-        fake = _FakeAdapter(True, "连接成功")
+        fake = _FakeAdapter(True, "连接成功", version=("8", "0", "46"))
 
         def _build(*args, **kwargs):
             return fake
@@ -584,6 +586,7 @@ class TestServiceTestConnection:
         result = await DataSourceService().test_connection(dto)
         assert result.success is True
         assert "连接成功" in result.message
+        assert result.server_version == "8.0.46"
         assert fake.disposed is True
 
     async def test_failure_returns_response(self, monkeypatch) -> None:
@@ -604,6 +607,8 @@ class TestServiceTestConnection:
         result = await DataSourceService().test_connection(dto)
         assert result.success is False
         assert "connection refused" in result.message
+        # 失败时版本必须为 None（探测与连接同源，连不上就无从谈版本）
+        assert result.server_version is None
 
 
 class _FakeMappings:

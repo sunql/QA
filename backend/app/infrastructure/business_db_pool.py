@@ -424,8 +424,13 @@ class BusinessDbAdapter(Protocol):
     # 仅用于 evidence 记录归属，不参与连接语义。
     datasourceId: int | None
 
-    async def test(self) -> tuple[bool, str]:
-        """测试连接，返回 (是否成功, 消息)。"""
+    async def test(self) -> tuple[bool, str, str | object | None]:
+        """测试连接，返回 (是否成功, 消息, 服务端版本原文)。
+
+        版本原文的形态按驱动而定（SQLAlchemy 为 tuple，oracledb 为 str），
+        由调用方（datasource_service._normalizeServerVersion）归一。探测与
+        test() 共用同一条连接，不额外建连。失败时版本为 None。
+        """
         ...
 
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
@@ -494,14 +499,15 @@ class _SqlaAdapter:
             )
         return self._engine
 
-    async def test(self) -> tuple[bool, str]:
+    async def test(self) -> tuple[bool, str, str | object | None]:
         try:
             engine = self._ensureEngine()
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
-            return True, MSG_DATASOURCE_CONNECT_OK
+                # server_version_info 首连后由驱动回填（MySQL/PG 通用）
+                return True, MSG_DATASOURCE_CONNECT_OK, conn.dialect.server_version_info
         except Exception as exc:  # noqa: BLE001 - 测试连接需捕获所有异常
-            return False, str(exc)
+            return False, str(exc), None
 
     @_recordEvidenceAfterSuccess
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
@@ -561,7 +567,7 @@ class _OracleAdapter:
         self._username = username
         self._password = password
 
-    async def test(self) -> tuple[bool, str]:
+    async def test(self) -> tuple[bool, str, str | object | None]:
         try:
             conn = await oracledb.connect_async(
                 user=self._username,
@@ -570,11 +576,12 @@ class _OracleAdapter:
             )
             try:
                 await conn.ping()
+                # oracledb 连接自带 version 属性（如 "19.0.0.0.0"），无需额外查询
+                return True, MSG_DATASOURCE_CONNECT_OK, conn.version
             finally:
                 await conn.close()
-            return True, MSG_DATASOURCE_CONNECT_OK
         except Exception as exc:  # noqa: BLE001
-            return False, str(exc)
+            return False, str(exc), None
 
     @_recordEvidenceAfterSuccess
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:

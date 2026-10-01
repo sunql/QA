@@ -1264,6 +1264,9 @@ class DataSourceTestRequest(CamelModel):
 class DataSourceTestResponse(CamelModel):
     success: bool
     message: str
+    # 服务端版本（best-effort 探测，如 "19.0.0.0.0" / "8.0.46"）；连接失败或驱动
+    # 未回填时为 None。落库策略见 DataSourceService.create/update（只在为空时填充）。
+    server_version: str | None = None
 
 
 # ===== Schema 自动发现（Phase 5.7）=====

@@ -192,7 +192,9 @@ def resolveDialect(datasourceType: DataSourceType | str | None, oracle_version: 
     # Oracle 版本判断：12c 及以上用 FETCH FIRST，否则用 ROWNUM
     if dialect.name == "Oracle" and datasourceType == DataSourceType.ORACLE:
         version = (oracle_version or "").lower()
-        if "11g" in version or version.startswith("10") or version.startswith("9"):
+        # 点分版本（探测落库原文，如 "11.2.0.1.0"）与 "11g" 字样都识别为 11g ——
+        # 否则 11.2 会三个规则都不命中而落 12c 分支，给 11g 库生成 FETCH FIRST。
+        if "11g" in version or version.startswith(("9", "10", "11")):
             return _SQL_DIALECTS_ORACLE_11G
         return _SQL_DIALECTS_ORACLE_12C
 

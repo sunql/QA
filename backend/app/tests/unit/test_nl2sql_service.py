@@ -2306,3 +2306,21 @@ class TestCoerceDatasourceType:
         assert "我的库" in msg
         assert "bogusdb" in msg
         assert "postgresql" in msg
+
+
+class TestResolveDialectDottedVersion:
+    """点分版本号识别：探测落库的是 '11.2.0.1.0' 这类原文，11g 不能被误判成 12c。
+
+    resolveDialect 原来只匹配 '11g' 字样与 9/10 前缀 —— 探测版本（'11.2.0.1.0'）
+    三个规则都不命中 → 落 12c 分支 → 给 11g 库生成 FETCH FIRST（ORA-00933）。
+    """
+
+    @pytest.mark.parametrize("version", ["11g", "11.2.0.1.0", "9.2.0", "10.2.0"])
+    def test_11g_family_uses_rownum(self, version: str) -> None:
+        dialect = Nl2SqlService.resolveDialect(DataSourceType.ORACLE, version)
+        assert "ROWNUM" in dialect.limitRule
+
+    @pytest.mark.parametrize("version", ["12.1.0.2", "19.0.0.0.0", "19c", None])
+    def test_12c_plus_uses_fetch_first(self, version: str | None) -> None:
+        dialect = Nl2SqlService.resolveDialect(DataSourceType.ORACLE, version)
+        assert "FETCH FIRST" in dialect.limitRule

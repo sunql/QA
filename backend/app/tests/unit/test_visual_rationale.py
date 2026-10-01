@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import FrozenInstanceError
+from enum import Enum
 
 import pytest
 
@@ -114,13 +115,13 @@ def test_visual_rationale_type() -> None:
 def test_to_dict_normalizes_enum_kind_to_value() -> None:
     """线上形状（Task 4 契约贯穿）：params 里的 ChartType 枚举成员必须归一成 .value。
 
-    `ChartType` 是 `(str, Enum)`：真值是 "bar"，`str(成员)` 却是 "ChartType.BAR"。
-    SSE 层用 `json.dumps(..., default=str)` 序列化裸 dict，未归一就会把
-    "ChartType.BAR" 发上线，前端 i18n 据此渲染「不满足 ChartType.BAR 的绘图要求」。
+    `ChartType.BAR == "bar"` 为 True（`(str, Enum)` 的真值），单纯相等断言无法区分
+    归一与未归一 —— 把 to_dict 的归一整个删掉，`== "bar"` 照样通过。故用
+    `not isinstance(..., Enum)` 钉死「读端拿到的是标量、不是枚举实例」。
     """
     r = buildVisualRationale(ruleId="R_FORCED_CLIENT", kind=ChartType.BAR, rowCount=5)
     assert r.to_dict() == {"code": "R_FORCED_CLIENT", "params": {"kind": "bar"}}
-    assert r.to_dict()["params"]["kind"] == "bar"  # 不是 "ChartType.BAR"
+    assert not isinstance(r.to_dict()["params"]["kind"], Enum)  # 不是 ChartType 实例
 
 
 def test_to_dict_passthrough_params() -> None:

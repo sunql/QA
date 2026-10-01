@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+from enum import Enum
 
 from app.infrastructure.llm.base_client import StreamChunk
 from app.services.stream_events import (
@@ -179,6 +180,7 @@ class TestChatStreamApi:
         assert chartData["visualRationale"]["code"] == "R_FORCED_CLIENT"
         # 关键钉死：枚举真值，不是 "ChartType.BAR"
         assert chartData["visualRationale"]["params"]["kind"] == "bar"
+        assert not isinstance(chartData["visualRationale"]["params"]["kind"], Enum)
 
         stepResultFrames = [f for f in frames if f[0] == EVENT_STEP_RESULT]
         assert len(stepResultFrames) == 1
@@ -209,7 +211,7 @@ class TestChatStreamApi:
         assert msgs[1].role == "assistant"
         assert msgs[1].content == "查询完成，共 2 条记录。"
         # 0105 图表进最终报告：图必须**真的落进库**。只测 schema 与读路径会漏掉
-        # 这一层 —— 四个 `_storeSessionMessages` 调用点任何一个漏传，读取侧照样
+        # 这一层 —— 多处 `_storeSessionMessages` 调用点任何一个漏传，读取侧照样
         # 全绿（读到 None 而已），而导出 PDF 与历史回放会整批没有图。
         assert msgs[1].chart_type == "bar", "枚举必须已归一为裸字符串"
         assert msgs[1].chart_option is not None

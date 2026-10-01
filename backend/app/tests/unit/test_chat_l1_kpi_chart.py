@@ -21,6 +21,7 @@ from decimal import Decimal
 
 from app.domain.enums import ChartType
 from app.services.chat_service import ChatService
+from app.services.kpi_semantic_match_service import KpiMatchResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -158,3 +159,38 @@ class TestCardAndAnswerAgree:
         text = ChatService._buildAnswerText(self._Kpi(), [{"otd_rate": None}], KPI_NAME)
 
         assert text == f"指标「{KPI_NAME}」：—"
+
+
+# ---------------------------------------------------------------------------
+# rationale（F1：L1 直答必须带判断依据，不论是否出图）
+# ---------------------------------------------------------------------------
+
+
+class TestKpiAnswerCarriesRationale:
+    """用户原始需求「不论是否输出图，必须输出一个判断逻辑」。
+
+    `_wrapChatResponse` 是 L1 命中时构造 ChatResponse 的唯一出口 —— 它必须合成
+    R01_SINGLE_VALUE_KPI 的 rationale，否则实时响应/回放/导出都只有一张卡、
+    没有任何判断依据。
+    """
+
+    @staticmethod
+    def _wrap(rows: list[dict] | None) -> "ChatResponse":  # noqa: F821
+        # `_wrapChatResponse` 只用到 `self._buildKpiChart`（staticmethod），
+        # 用 `__new__` 跳过构造器（构造器会拉出一串默认服务，纯单测不需要）。
+        service = ChatService.__new__(ChatService)
+        match = KpiMatchResult(code="KPI_SUPPLIER_OTD", confidence=1.0)
+        return service._wrapChatResponse(match, KPI_NAME, rows, "answer", unit=UNIT_PERCENT)
+
+    def test_response_carries_kpi_rationale(self) -> None:
+        resp = self._wrap([{"otd_rate": Decimal("0.954")}])
+
+        assert resp.chartType is ChartType.KPI
+        assert resp.visual_rationale == {"code": "R01_SINGLE_VALUE_KPI", "params": {}}
+
+    def test_rationale_present_even_without_a_card(self) -> None:
+        """「不论是否输出图」：值缺失时卡没了，判断依据也必须在。"""
+        resp = self._wrap(None)
+
+        assert resp.chartType is None
+        assert resp.visual_rationale == {"code": "R01_SINGLE_VALUE_KPI", "params": {}}

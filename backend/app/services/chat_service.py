@@ -82,6 +82,7 @@ from app.services.datasource_service import DataSourceService
 from app.services.kpi_semantic_match_service import KpiMatchResult, KpiSemanticMatchService
 from app.services.embedding_service import EmbeddingService
 from app.services.intent_service import IntentResult, IntentService
+from app.services.visual_rationale import buildVisualRationale
 from app.domain.error_messages import (
     MSG_AGENT_NOT_FOUND_BY_CODE,
     MSG_AGENT_NOT_RUNNABLE,
@@ -420,6 +421,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                         # 只活在实时响应里的话，导出时同样退化成占位框。
                         chart_type=l1_response.chartType,
                         chart_option=l1_response.chartOption,
+                        # F1：判断依据同轮落库 —— 回放/导出不能只拿一张卡、没有依据。
+                        visual_rationale=l1_response.visual_rationale,
                     )
                     return l1_response
         except Exception:  # noqa: BLE001 — L1 异常不阻断，降级到原 LLM 流水线
@@ -1553,12 +1556,21 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
     ) -> ChatResponse:
         """构造 intent=l1_match 的 ChatResponse（零 LLM 消耗）。"""
         chartType, chartOption = self._buildKpiChart(kpi_name, unit, data)
+        # F1：用户原始需求「不论是否输出图，必须输出一个判断逻辑」。L1 命中即单值
+        # KPI（决策 7），ruleId 恒为 R01_SINGLE_VALUE_KPI —— 即便值缺失、卡没发出，
+        # 判断依据也要跟着响应走（回放/导出不能只拿一张卡、没有依据）。
+        rationale = buildVisualRationale(
+            ruleId="R01_SINGLE_VALUE_KPI",
+            kind=ChartType.KPI,
+            rowCount=len(data or []),
+        )
         return ChatResponse(
             answer=answer,
             intent="l1_match",
             data=data,
             chartType=chartType,
             chartOption=chartOption,
+            visual_rationale=rationale.to_dict(),
             kpi_code=match.code,
             kpi_name=kpi_name,
             confidence=match.confidence,

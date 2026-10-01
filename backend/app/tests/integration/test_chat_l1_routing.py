@@ -298,3 +298,51 @@ class TestL1KpiCard:
         assert data["chartType"] is None
         assert data["chartOption"] is None
         assert data["answer"] == "指标「供应商及时交货率」：—"
+
+    @pytest.mark.asyncio
+    async def test_l1_answer_carries_rationale_and_persists_it(
+        self, client, dbSession: AsyncSession, monkeypatch
+    ) -> None:
+        """F1：L1 直答必须带判断依据（R01_SINGLE_VALUE_KPI），且同轮落库（回放不丢）。
+
+        用户原始需求「不论是否输出图，必须输出一个判断逻辑」——L1 快路径此前只发卡
+        （chartType），没有任何依据；回放/导出拿不到依据正是本特性要消灭的问题。
+        """
+        from sqlalchemy import select
+
+        from app.domain.models import SessionMessage
+
+        import app.api.v1.chat as chat_module
+
+        await _seedDatasource(dbSession)
+        await _seedKpiWithFeature(dbSession, kpi_code="KPI_SUPPLIER_ODT", unit="%")
+        kpi_match_cache.onKpiChanged()
+        await kpi_match_cache.warmUp(dbSession)
+        monkeypatch.setattr(
+            chat_module._service,
+            "_adapterProvider",
+            lambda dsId, ds: _ScalarAdapter([{"otd_rate": Decimal("0.954")}]),
+        )
+
+        session_id = f"s-{uuid.uuid4().hex[:8]}"
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_chat_payload(
+                question="KPI_SUPPLIER_ODT 这个指标是多少", sessionId=session_id
+            ),
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["intent"] == "l1_match"
+        assert data["visualRationale"]["code"] == "R01_SINGLE_VALUE_KPI"
+        assert data["visualRationale"]["params"] == {}
+
+        rows = list((await dbSession.execute(
+            select(SessionMessage).where(
+                SessionMessage.session_id == session_id
+            ).order_by(SessionMessage.id)
+        )).scalars().all())
+        assert len(rows) == 2
+        assert rows[1].visual_rationale == {"code": "R01_SINGLE_VALUE_KPI", "params": {}}
+        assert rows[0].visual_rationale is None, "user 行不该带依据"

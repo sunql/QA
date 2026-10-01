@@ -39,7 +39,8 @@ DEFAULT_STRING_COLUMNS_CAP = 5
 # v2 2026-09-18：小数据全量展示阈值。
 # 行数 ≤ 此值时 samples.head 直接放全部 data，不截断、不进 tail、不打 truncated。
 # 触发：用户报告 27 行时 head/tail 采样丢中间 → B125 看不见、图表 D1 不一致。
-# 100 行 ≈ 5K tokens（按 200 字符/行），完全装得下；chart_service 也 import 此常量做同源判断。
+# 100 行 ≈ 5K tokens（按 200 字符/行），完全装得下；chart_thresholds 的
+# loadFullDataThreshold import 此常量作 system_config 键的默认值（SSOT，不抄字面量）。
 FULL_DATA_THRESHOLD = 100
 
 

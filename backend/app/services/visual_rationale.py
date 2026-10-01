@@ -82,13 +82,10 @@ class VisualRationale:
     def to_dict(self) -> dict[str, Any]:
         """序列化为线上契约形状 ``{"code": str, "params": {k: 原始值}}``。
 
-        ``params`` 里可能装 ``ChartType`` 枚举成员（``(str, Enum)``）：它的真值是
-        ``"heatmap"``，而 ``str(成员)`` 是 ``"ChartType.HEATMAP"``。SSE 层用
-        ``json.dumps(..., default=str)`` 序列化裸 dict，不归一就会把
-        ``"ChartType.HEATMAP"`` 发上线，前端 i18n 据此渲染「不满足
-        ChartType.HEATMAP 的绘图要求」。所以这里在**唯一出口**把枚举成员显式
-        归一成 ``.value``，其余值原样透传 —— 四个下线点（chart 事件 / step_result
-        事件 / ChatResponse / StepResultRead）都调这一处，规则只写一遍。
+        ``params`` 里可能装 ``ChartType`` 枚举成员（``(str, Enum)``）。这里在**唯一
+        出口**把它显式归一成 ``.value``，让读端拿到的是统一的 wire 形状 —— 纯 JSON
+        标量字符串，而不是 `ChartType` 枚举实例：读端（前端 i18n / 历史回放 / 落库）
+        不必各自记得「枚举要转 .value」，规则只写一遍。其余值原样透传。
         """
         return {
             "code": self.code,

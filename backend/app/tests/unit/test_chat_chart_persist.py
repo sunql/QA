@@ -143,6 +143,24 @@ class TestBoundedChartOption:
         assert bounded["rows"][0]["deep"]["v"] == 1.5
         json.dumps(bounded)
 
+    def test_non_finite_floats_become_serializable_strings(self) -> None:
+        """非有限浮点（NaN/±Infinity）必须归一，不能原样透传。
+
+        PG 的 jsonb 拒绝裸 NaN/Infinity（`select '{"v": NaN}'::jsonb` 报
+        invalid input syntax）。`json.dumps` 默认却不抛（输出裸 NaN），所以用
+        `allow_nan=False` 对齐 PG 的拒绝口径 —— 这里不抛即证明已无非有限浮点。
+        """
+        import json
+
+        bounded = boundedChartOption(
+            {"v": float("nan"), "w": float("inf"), "x": float("-inf")}
+        )
+
+        assert bounded["v"] == "nan"
+        assert bounded["w"] == "inf"
+        assert bounded["x"] == "-inf"
+        json.dumps(bounded, allow_nan=False)  # PG 同口径：非有限浮点必须已归一
+
 
 class TestBoundedTableOption:
     def test_truncates_rows_over_the_cap_and_marks_it(self) -> None:
@@ -201,3 +219,18 @@ class TestBoundedTableOption:
         """表负载形状由装配层保证，这里只兜体量 —— 不做类型猜测、不能炸。"""
         assert boundedTableOption(None) is None
         assert boundedTableOption({"rows": "not a list"}) == {"rows": "not a list"}
+
+    def test_decimal_nan_becomes_serializable(self) -> None:
+        """`float(Decimal("NaN"))` 也产出 nan —— 与 Task 10 的 Decimal 崩溃同源。
+
+        NUMERIC 列里出现 NaN/Infinity 时（触发条件比 Decimal 更窄），两条路径
+        （boundedChartOption / boundedTableOption）都经 `_jsonSafe` 的
+        `Decimal→float` 中招，必须归一成可序列化形态。
+        """
+        import json
+        from decimal import Decimal
+
+        bounded = boundedTableOption({"rows": [{"qty": Decimal("NaN")}]})
+
+        assert bounded["rows"][0]["qty"] == "nan"
+        json.dumps(bounded, allow_nan=False)

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -73,7 +74,8 @@ def boundedTableOption(tableOption: dict | None) -> dict | None:
     平时 `assembleTableOption` 已按 FULL_DATA_THRESHOLD（默认 100）截过一轮并置
     truncated，100 ≤ 200 ⇒ 这道闸只在运维把阈值调到 >200 时才生效 —— 是纵深兜底。
 
-    不可变：返回新 dict，绝不原地改调用方手里那份（它还要发给前端）。
+    不可变：有归一/截断时才返回新 dict；无变化时原样返回入参（调用方手里那份
+    还要发给前端，不能被就地改）。
     """
     if not isinstance(tableOption, dict):
         return tableOption
@@ -105,14 +107,24 @@ def _jsonSafe(value: Any) -> Any:
 
     不可变：容器只在确有子值发生变化时才重建（无变化时原样返回入参，保持对象
     同一性，让调用方能把「无归一」与「是同一份对象」划等号）；绝不原地改。标量
-    （str/int/float/bool/None）原样返回；`Decimal→float`、`datetime/date→isoformat`；
-    tuple 恒产出 list（类型本身就是变化）；未知类型落 `str(value)`（宁可留个可读
-    痕迹，也不静默丢值）。
+    （str/int/bool/None）原样返回；有限 float 原样返回、非有限 float（NaN/±Infinity）
+    落 `str(value)`（PG jsonb 拒绝裸 NaN/Infinity）；`Decimal→float`（非有限同样落
+    `str`）、`datetime/date→isoformat`；tuple 恒产出 list（类型本身就是变化）；
+    未知类型落 `str(value)`（宁可留个可读痕迹，也不静默丢值）。
     """
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, (bool, int, str)):
         return value
+    if isinstance(value, float):
+        # 非有限浮点（NaN/±Infinity）：裸 json.dumps 会输出 NaN/Infinity，而
+        # PostgreSQL 的 jsonb 拒绝（`select '{"v": NaN}'::jsonb` → invalid input
+        # syntax for type json）。与 Task 10 的 Decimal 崩溃同源、触发更窄（NUMERIC
+        # 列里出现 NaN/Infinity）。按本模块「未知类型落 str(value)」的 doctrine 落
+        # 字符串（"nan"/"inf"/"-inf" 一定可序列化）而非 None —— 落 None 会静默丢值，
+        # 违背「宁可留个可读痕迹，也不静默丢值」的既有原则。
+        return value if math.isfinite(value) else str(value)
     if isinstance(value, Decimal):
-        return float(value)
+        f = float(value)
+        return f if math.isfinite(f) else str(f)
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, dict):

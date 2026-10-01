@@ -1556,11 +1556,13 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
     ) -> ChatResponse:
         """构造 intent=l1_match 的 ChatResponse（零 LLM 消耗）。"""
         chartType, chartOption = self._buildKpiChart(kpi_name, unit, data)
-        # F1：用户原始需求「不论是否输出图，必须输出一个判断逻辑」。L1 命中即单值
-        # KPI（决策 7），ruleId 恒为 R01_SINGLE_VALUE_KPI —— 即便值缺失、卡没发出，
-        # 判断依据也要跟着响应走（回放/导出不能只拿一张卡、没有依据）。
+        # F1：用户原始需求「不论是否输出图，必须输出一个判断逻辑」。依据必须与
+        # 实际发生的事一致：发了卡 → 单值 KPI；值缺失、卡没发 → 空结果
+        # （R00_EMPTY_TABLE）。不能说「以指标卡呈现」却一张卡都没发。
+        # kind/rowCount 对 R00 只是未使用的入参（buildVisualRationale 会弃置），
+        # 保持与本函数调用形态一致即可。
         rationale = buildVisualRationale(
-            ruleId="R01_SINGLE_VALUE_KPI",
+            ruleId="R01_SINGLE_VALUE_KPI" if chartType is ChartType.KPI else "R00_EMPTY_TABLE",
             kind=ChartType.KPI,
             rowCount=len(data or []),
         )

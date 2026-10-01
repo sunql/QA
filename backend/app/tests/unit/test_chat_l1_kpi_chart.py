@@ -170,8 +170,8 @@ class TestKpiAnswerCarriesRationale:
     """用户原始需求「不论是否输出图，必须输出一个判断逻辑」。
 
     `_wrapChatResponse` 是 L1 命中时构造 ChatResponse 的唯一出口 —— 它必须合成
-    R01_SINGLE_VALUE_KPI 的 rationale，否则实时响应/回放/导出都只有一张卡、
-    没有任何判断依据。
+    与实际发生的事一致的理由：发了卡 → R01_SINGLE_VALUE_KPI；没发卡（值缺失）
+    → R00_EMPTY_TABLE（不能说「以指标卡呈现」却一张卡都没发）。
     """
 
     @staticmethod
@@ -189,8 +189,9 @@ class TestKpiAnswerCarriesRationale:
         assert resp.visual_rationale == {"code": "R01_SINGLE_VALUE_KPI", "params": {}}
 
     def test_rationale_present_even_without_a_card(self) -> None:
-        """「不论是否输出图」：值缺失时卡没了，判断依据也必须在。"""
+        """「不论是否输出图」：值缺失时卡没了，判断依据也必须在 —— 且必须如实
+        说「无结果不生成图表」（R00_EMPTY_TABLE），不能说「以指标卡呈现」。"""
         resp = self._wrap(None)
 
         assert resp.chartType is None
-        assert resp.visual_rationale == {"code": "R01_SINGLE_VALUE_KPI", "params": {}}
+        assert resp.visual_rationale == {"code": "R00_EMPTY_TABLE", "params": {}}

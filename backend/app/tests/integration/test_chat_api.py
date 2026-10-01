@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from enum import Enum
 
 from sqlalchemy import select
 
@@ -190,10 +189,10 @@ class TestChatApi:
         assert body["tableOption"]["columns"] == ["NAME", "QTY"]
         assert len(body["tableOption"]["rows"]) == 2
         assert body["tableOption"]["truncated"] is False
-        # 为什么这么画的判断依据：code + params.kind 是枚举真值
+        # 为什么这么画的判断依据：code 钉 R_FORCED_CLIENT，params.kind 钉线格式
+        # 裸字符串 "bar"（客户端收到的 wire 形状，不是 "ChartType.BAR" 枚举名）
         assert body["visualRationale"]["code"] == "R_FORCED_CLIENT"
         assert body["visualRationale"]["params"]["kind"] == "bar"
-        assert not isinstance(body["visualRationale"]["params"]["kind"], Enum)
         # 单步 steps[0] 与顶层两字段一致（前端 MultiStepPlanCard 常驻渲染）
         steps = body["steps"]
         assert steps is not None and len(steps) == 1

@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import json
-from enum import Enum
 
 from app.infrastructure.llm.base_client import StreamChunk
 from app.services.stream_events import (
@@ -178,9 +177,8 @@ class TestChatStreamApi:
         assert chartData["tableOption"]["columns"] == ["NAME", "QTY"]
         assert chartData["tableOption"]["truncated"] is False
         assert chartData["visualRationale"]["code"] == "R_FORCED_CLIENT"
-        # 关键钉死：枚举真值，不是 "ChartType.BAR"
+        # 关键钉死：线格式契约 —— 客户端收到裸字符串 "bar"，不是 "ChartType.BAR"
         assert chartData["visualRationale"]["params"]["kind"] == "bar"
-        assert not isinstance(chartData["visualRationale"]["params"]["kind"], Enum)
 
         stepResultFrames = [f for f in frames if f[0] == EVENT_STEP_RESULT]
         assert len(stepResultFrames) == 1

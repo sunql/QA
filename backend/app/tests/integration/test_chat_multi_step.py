@@ -775,6 +775,10 @@ class TestMultiStepStepCharts:
             assert step["chartType"] == "bar"
             assert step["chartOption"]["series"][0]["type"] == "bar"
             assert step["chartOption"]["xAxis"]["data"] == ["A", "B"]
+            # 可视化输出策略：每步的图都带明细表 + 判断依据
+            assert step["tableOption"]["columns"] == ["NAME", "QTY"]
+            assert step["visualRationale"]["code"] == "R12_CATEGORY_BAR"
+            assert step["visualRationale"]["params"] == {}
 
     async def test_failed_step_carries_no_chart(self, client, dbSession, monkeypatch) -> None:
         """失败的步骤没有数据可画 —— 不许发一个渲染不出来的 kind。"""
@@ -791,6 +795,9 @@ class TestMultiStepStepCharts:
         assert step2["sql"] is None  # 失败标记
         assert step2["chartType"] is None
         assert step2["chartOption"] is None
+        # 可视化输出策略（case ④）：失败步骤的明细表/判断依据也为 None
+        assert step2["tableOption"] is None
+        assert step2["visualRationale"] is None
 
     async def test_classifier_is_called_at_most_once_per_turn(
         self, client, dbSession, monkeypatch

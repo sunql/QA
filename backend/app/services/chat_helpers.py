@@ -174,6 +174,8 @@ def _step_result_to_read(
         error=result.error,
         chart_type=result.chart_type,
         chart_option=result.chart_option,
+        table_option=result.table_option,
+        visual_rationale=result.visual_rationale,
         query_plan=plan.to_dict() if plan else None,
     )
 

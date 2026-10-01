@@ -161,6 +161,43 @@ class TestChatApi:
         # 无密码/敏感字段泄漏
         assert "password" not in body
 
+    async def test_full_pipeline_carries_table_and_rationale(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """可视化输出策略（case ②③）：单步响应带 tableOption + visualRationale，
+        且 steps[0] 与顶层两字段逐字一致。
+
+        chartType 强制 "bar" → R_FORCED_CLIENT → params.kind 是枚举真值 "bar"
+        （不是 "ChartType.BAR"）。这把枚举归一钉在 HTTP 出口。
+        """
+        config, ds = await _seed(dbSession)
+        _installFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json={
+                "sessionId": "s1",
+                "question": "各供应商的收货数量汇总",
+                "datasourceId": ds.id,
+                "chartType": "bar",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["chartType"] == "bar"
+        # 图之外的明细表负载（同一份 data 的另一个投影）
+        assert body["tableOption"]["columns"] == ["NAME", "QTY"]
+        assert len(body["tableOption"]["rows"]) == 2
+        assert body["tableOption"]["truncated"] is False
+        # 为什么这么画的判断依据：code + params.kind 是枚举真值
+        assert body["visualRationale"]["code"] == "R_FORCED_CLIENT"
+        assert body["visualRationale"]["params"]["kind"] == "bar"  # 不是 "ChartType.BAR"
+        # 单步 steps[0] 与顶层两字段一致（前端 MultiStepPlanCard 常驻渲染）
+        steps = body["steps"]
+        assert steps is not None and len(steps) == 1
+        assert steps[0]["tableOption"] == body["tableOption"]
+        assert steps[0]["visualRationale"] == body["visualRationale"]
+
     async def test_full_pipeline_records_usage_rows(self, client, dbSession, monkeypatch) -> None:
         config, ds = await _seed(dbSession)
         _installFakes(monkeypatch, config)

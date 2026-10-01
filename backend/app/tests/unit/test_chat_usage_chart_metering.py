@@ -17,9 +17,17 @@ from app.services.chat_usage import UsageMixin as ChatUsageMixin
 
 
 @dataclass(frozen=True)
+class _Rationale:
+    def to_dict(self) -> dict:
+        return {"code": "R12_CATEGORY_BAR", "params": {}}
+
+
+@dataclass(frozen=True)
 class _Build:
     chartType: ChartType = ChartType.BAR
     option: dict = None  # type: ignore[assignment]
+    tableOption: dict | None = None
+    rationale: _Rationale = _Rationale()
     promptTokens: int = 120
     completionTokens: int = 30
     cachedTokens: int = 64
@@ -73,12 +81,15 @@ _ROWS = [{"SUPPLIER_NAME": "B125", "RCV_QTY_PUU": 9812}]
 async def test_chart_step_records_usage_and_returns_counts() -> None:
     service = _Service()
 
-    chartType, option, promptTokens, completionTokens, cachedTokens = await service._chartStep(
+    chartType, option, tableOption, rationale, promptTokens, completionTokens, cachedTokens = await service._chartStep(
         None, _Dto(), _Context(), _ROWS,
     )
 
     assert chartType is ChartType.BAR
     assert option == {"series": [{"type": "bar"}]}
+    # 7-tuple 新增两字段：tableOption 透传、rationale 已归一为线上 dict
+    assert tableOption is None
+    assert rationale == {"code": "R12_CATEGORY_BAR", "params": {}}
     assert (promptTokens, completionTokens, cachedTokens) == (120, 30, 64)
     assert service.recorded == [(120, 30, 64)]
 
@@ -87,13 +98,14 @@ async def test_chart_step_keeps_chart_and_counts_when_metering_fails(caplog) -> 
     service = _Service(recordFails=True)
 
     with caplog.at_level("ERROR"):
-        chartType, option, promptTokens, completionTokens, cachedTokens = await service._chartStep(
+        chartType, option, tableOption, rationale, promptTokens, completionTokens, cachedTokens = await service._chartStep(
             None, _Dto(), _Context(), _ROWS,
         )
 
     # 图表与已知用量都保住：不会因为记账失败而把这一步报成 0
     assert chartType is ChartType.BAR
     assert option == {"series": [{"type": "bar"}]}
+    assert rationale == {"code": "R12_CATEGORY_BAR", "params": {}}
     assert (promptTokens, completionTokens, cachedTokens) == (120, 30, 64)
     # 账没记上必须留下痕迹（合规硬约束：每次 LLM 调用都要计量）
     assert any("记账失败" in record.message for record in caplog.records)

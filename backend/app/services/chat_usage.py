@@ -183,7 +183,7 @@ class UsageMixin:
         data: list[dict],
         intentChartType: ChartType | None = None,
         plan: QueryPlan | None = None,
-    ) -> tuple[Any, dict, int, int, int | None]:
+    ) -> tuple[Any, dict, dict | None, dict, int, int, int | None]:
         """选图型 + 渲染负载（失败自动降级表格），有消耗时记录用量。
 
         优先级：客户端显式 dto.chartType > 意图抽取 intentChartType（3-3，"换成柱状图"）
@@ -193,9 +193,11 @@ class UsageMixin:
         （`rowLimit`/`sortBy`）、时间维（`groupBy`）都从它读。不传 plan 会让引擎
         退化成「只看列形状」，也就是这轮改造要消灭的旧行为 —— 两个调用点都必须传。
 
-        返回 5-tuple (chartType, option, promptTokens, completionTokens, cachedTokens)；
-        4-2（feat-token-cache）：cachedTokens 由 chart_service 透传，供 _summarizeUsage
-        按差额计费（chart 阶段占 token ~3%，但 bill 必须准确）。
+        返回 7-tuple (chartType, option, tableOption, rationale, promptTokens,
+        completionTokens, cachedTokens)；`rationale` 已在此归一为线上形状
+        ``{"code": str, "params": dict}``（`VisualRationale.to_dict()`，params.kind
+        是枚举真值）。4-2（feat-token-cache）：cachedTokens 由 chart_service 透传，
+        供 _summarizeUsage 按差额计费（chart 阶段占 token ~3%，但 bill 必须准确）。
         """
         columns = self._columns(data)
         build = await self._chart.buildChart(
@@ -226,6 +228,8 @@ class UsageMixin:
         return (
             build.chartType,
             build.option,
+            build.tableOption,
+            build.rationale.to_dict(),
             build.promptTokens,
             build.completionTokens,
             build.cachedTokens,

@@ -109,3 +109,30 @@ def test_rows_param_is_int() -> None:
 
 def test_visual_rationale_type() -> None:
     assert isinstance(summaryTextOnlyRationale(), VisualRationale)
+
+
+def test_to_dict_normalizes_enum_kind_to_value() -> None:
+    """线上形状（Task 4 契约贯穿）：params 里的 ChartType 枚举成员必须归一成 .value。
+
+    `ChartType` 是 `(str, Enum)`：真值是 "bar"，`str(成员)` 却是 "ChartType.BAR"。
+    SSE 层用 `json.dumps(..., default=str)` 序列化裸 dict，未归一就会把
+    "ChartType.BAR" 发上线，前端 i18n 据此渲染「不满足 ChartType.BAR 的绘图要求」。
+    """
+    r = buildVisualRationale(ruleId="R_FORCED_CLIENT", kind=ChartType.BAR, rowCount=5)
+    assert r.to_dict() == {"code": "R_FORCED_CLIENT", "params": {"kind": "bar"}}
+    assert r.to_dict()["params"]["kind"] == "bar"  # 不是 "ChartType.BAR"
+
+
+def test_to_dict_passthrough_params() -> None:
+    """无 kind 的 code：params 原样透传（rows 是 int，不包装）。"""
+    r = buildVisualRationale(ruleId="R02_SHARE_DONUT", kind=ChartType.DONUT, rowCount=3)
+    assert r.to_dict() == {"code": "R02_SHARE_DONUT", "params": {"rows": 3}}
+
+
+def test_to_dict_degrades_to_spec_invalid() -> None:
+    """降级依据同样归一 kind。"""
+    r = buildVisualRationale(
+        ruleId="R07_TREND_LINE", kind=ChartType.LINE, rowCount=3,
+        degradeReason="spec 校验失败",
+    )
+    assert r.to_dict() == {"code": "DEGRADE_SPEC_INVALID", "params": {"kind": "line"}}

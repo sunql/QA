@@ -136,6 +136,12 @@ class StepResult:
     selected_classes: list[str] = field(default_factory=list)
     chart_type: str | None = None
     chart_option: dict | None = None
+    # 可视化输出策略：图之外的明细表负载 + 为什么这么画的判断依据（前端 i18n）。
+    # 失败步骤为 None；visual_rationale 形状 {"code": str, "params": dict}，
+    # params.kind 是枚举真值（如 "bar"），不是 "ChartType.BAR"（由
+    # VisualRationale.to_dict() 归一）。
+    table_option: dict | None = None
+    visual_rationale: dict | None = None
     query_plan: "QueryPlan | None" = None
 
 

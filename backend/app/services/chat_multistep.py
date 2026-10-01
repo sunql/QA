@@ -357,7 +357,7 @@ class MultiStepMixin:
 
         # 后台存储查询向量（用子问题，便于 few-shot 精确匹配）
         self._spawnEmbedding(dto, final_sql, question=step_plan.sub_question)
-        chartType, chartOption, chartPt, chartCt, chartCached = await self._stepChart(
+        chartType, chartOption, tableOption, rationale, chartPt, chartCt, chartCached = await self._stepChart(
             session, dto, pc, ctx, step_plan, data, outcome.plan,
         )
         if chartPt or chartCt:
@@ -382,6 +382,8 @@ class MultiStepMixin:
                 selected_classes=list(outcome.plan.selectedClasses) if outcome.plan else [],
                 chart_type=chartType.value,
                 chart_option=chartOption,
+                table_option=tableOption,
+                visual_rationale=rationale,
                 query_plan=outcome.plan,
             ),
             tokens=tokens, cost=cost, modelName=model_name, plan=outcome.plan,
@@ -397,7 +399,7 @@ class MultiStepMixin:
         step_plan: StepPlan,
         data: list[dict],
         plan: QueryPlan | None,
-    ) -> tuple[ChartType, dict, int, int, int | None]:
+    ) -> tuple[ChartType, dict, dict | None, dict | None, int, int, int | None]:
         """为单个步骤出图（每条流水线一个 kind + 一份结构化的 option）。
 
         与单步路径共用同一个 `_chartStep`：决策引擎按**该步自己的** plan/列/数据
@@ -432,7 +434,9 @@ class MultiStepMixin:
                 "多步步骤出图失败，降级表格: step=%s", step_plan.index, exc_info=True,
             )
             columns = list(data[0].keys()) if data else []
-            return ChartType.TABLE, {"columns": columns, "rows": data}, 0, 0, 0
+            # 降级成表格：TABLE 不附第二份表（tableOption=None）；图是意外失败降出来的，
+            # 没有判断依据可发（rationale=None，前端不渲染理由而非编造一个）。
+            return ChartType.TABLE, {"columns": columns, "rows": data}, None, None, 0, 0, 0
 
     async def _recallForStep(
         self, session: AsyncSession, pc: _PipelineContext, step_plan: StepPlan,

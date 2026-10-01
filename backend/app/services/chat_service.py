@@ -632,7 +632,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                     )
             raise
         self._spawnEmbedding(dto, finalSql)
-        chartType, option, chartPt, chartCt, chartCached = await self._chartStep(
+        chartType, option, tableOption, rationale, chartPt, chartCt, chartCached = await self._chartStep(
             session, dto, pc, data, result.chartType, outcome.plan
         )
         answerResp, answerConfig, wastedAnswer = await self._generateAnswer(
@@ -703,6 +703,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             sql=finalSql,
             chartType=chartType,
             chartOption=option,
+            table_option=tableOption,
+            visual_rationale=rationale,
             data=data,
             # 单步也填充 steps：前端 MultiStepPlanCard 始终渲染（2026-08-16 体验统一）。
             steps=[_step_result_to_read(StepResult(
@@ -712,6 +714,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                 sql=finalSql,
                 data=data,
                 summary=self._summarizeStepData(data),
+                table_option=tableOption,
+                visual_rationale=rationale,
             ))],
             tokensUsed=totalTokens,
             cost=float(totalCost),

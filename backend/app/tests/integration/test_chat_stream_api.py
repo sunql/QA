@@ -147,6 +147,46 @@ class TestChatStreamApi:
         assert doneData["tokensUsed"] == 60
         assert doneData["cost"] > 0
 
+    async def test_single_step_chart_and_step_result_carry_table_and_rationale(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """可视化输出策略（case ①）：流式单步的 chart 事件与 step_result 帧都带
+        tableOption/visualRationale，且 params.kind 逐字是枚举真值 "bar"。
+
+        单步流式发两条帧（chart + step_result 收尾），两条帧的字段同口径——
+        漏一条就是「计划卡里没依据」。
+        """
+        config, ds = await _seed(dbSession)
+        _installStreamFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat/stream",
+            json={
+                "sessionId": "s1",
+                "question": "各供应商的收货数量汇总",
+                "datasourceId": ds.id,
+                "chartType": "bar",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        frames = _parseFrames(resp.text)
+        chartFrames = [f for f in frames if f[0] == EVENT_CHART]
+        assert len(chartFrames) == 1
+        chartData = chartFrames[0][1]
+        assert chartData["chartType"] == "bar"
+        assert chartData["tableOption"]["columns"] == ["NAME", "QTY"]
+        assert chartData["tableOption"]["truncated"] is False
+        assert chartData["visualRationale"]["code"] == "R_FORCED_CLIENT"
+        # 关键钉死：枚举真值，不是 "ChartType.BAR"
+        assert chartData["visualRationale"]["params"]["kind"] == "bar"
+
+        stepResultFrames = [f for f in frames if f[0] == EVENT_STEP_RESULT]
+        assert len(stepResultFrames) == 1
+        sr = stepResultFrames[0][1]
+        assert sr["tableOption"] == chartData["tableOption"]
+        assert sr["visualRationale"] == chartData["visualRationale"]
+        assert sr["visualRationale"]["params"]["kind"] == "bar"
+
     async def test_stream_records_answer_usage_and_session_messages(
         self, client, dbSession, monkeypatch
     ) -> None:

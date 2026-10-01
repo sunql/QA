@@ -613,7 +613,7 @@ class StreamMixin:
                 retryTokens[0], retryTokens[1], purpose="nl2sql",
             )
 
-        chartType, option, chartPt, chartCt, chartCached = await self._chartStep(
+        chartType, option, tableOption, rationale, chartPt, chartCt, chartCached = await self._chartStep(
             session, dto, pc, data, intentChartType, outcome.plan
         )
         totalTokens += chartPt + chartCt
@@ -624,7 +624,13 @@ class StreamMixin:
             pc.selected, chartPt, chartCt,
             cachedTokens=chartCached, cacheHitMultiplier=cacheHitMultiplier,
         )
-        yield StreamEvent(EVENT_CHART, {"chartType": chartType.value, "chartOption": option, "data": data})
+        yield StreamEvent(EVENT_CHART, {
+            "chartType": chartType.value,
+            "chartOption": option,
+            "tableOption": tableOption,
+            "visualRationale": rationale,
+            "data": data,
+        })
 
         # Phase 1.4：拉取目标表的可信度 badge 并通过 SSE 单独下发（前端订阅后渲染）
         # 在 chart 之后、answer 流之前：不影响用户感知的回答延迟；DQ 故障由 helper 内部静默
@@ -719,6 +725,8 @@ class StreamMixin:
             sql=finalSql,
             data=data,
             summary=self._summarizeStepData(data),
+            table_option=tableOption,
+            visual_rationale=rationale,
         ))
         # v3.1 B6（M7）：流式假设后处理——只落库，不进 SSE 帧（前端靠 GET 端点取）
         await self._maybeGenerateHypotheses(
@@ -1041,6 +1049,8 @@ class StreamMixin:
             "error": result.error,
             "chartType": result.chart_type,
             "chartOption": result.chart_option,
+            "tableOption": result.table_option,
+            "visualRationale": result.visual_rationale,
             "queryPlan": result.query_plan.to_dict() if result.query_plan else None,
         })
 

@@ -1669,6 +1669,11 @@ class StepResultRead(CamelModel):
     chart_option: dict | None = None
     # 该步的 NL2SQL 查询计划（供前端 QueryPlanCard 渲染）；失败/汇总步骤为 None。
     query_plan: dict | None = None
+    # 可视化输出策略：图之外的明细表负载 + 为什么这么画的判断依据（前端 i18n）。
+    # 失败步骤为 None；visual_rationale 形状 {"code": str, "params": dict}，
+    # params.kind 是枚举真值（如 "bar"），不是 "ChartType.BAR"。
+    table_option: dict | None = None
+    visual_rationale: dict | None = None
 
 
 class AgentSuggestion(CamelModel):
@@ -1762,6 +1767,11 @@ class ChatResponse(CamelModel):
     )
     chartType: ChartType | None = None
     chartOption: dict | None = None
+    # 可视化输出策略：图之外的明细表负载 + 为什么这么画的判断依据（前端 i18n）。
+    # 仅单步查询路径填值（与 steps[0] 同口径）；其余意图为 None。visual_rationale
+    # 形状 {"code": str, "params": dict}，params.kind 是枚举真值（如 "bar"）。
+    table_option: dict | None = None
+    visual_rationale: dict | None = None
     data: list[dict] | None = None
     tokensUsed: int = 0
     cost: float = 0.0

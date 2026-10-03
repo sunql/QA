@@ -619,6 +619,55 @@ def validatePlan(
     return issues
 
 
+def _reachableFrom(start: str, graph: JoinGraph) -> set[str]:
+    """从 start 在**整图**上 BFS，返回全部可达节点（含中转节点）。
+
+    必须走整图而不是只在「选中的表」里走：`supplementJoinPath` 允许经**未被选中
+    但在召回集内**的类中转（那正是「中间表」），连通性判定若不许中转，
+    就会把「能绕过去」误判成「不连通」，与补边逻辑自相矛盾。
+    """
+    seen: set[str] = {start}
+    queue: list[str] = [start]
+    while queue:
+        node = queue.pop(0)
+        for neighbor, _ in graph.get(node, []):
+            if neighbor not in seen:
+                seen.add(neighbor)
+                queue.append(neighbor)
+    return seen
+
+
+def _mainConnectedComponent(tables: set[str], graph: JoinGraph) -> set[str]:
+    """挑出「主」连通分量，其余分量即是不连通的那些表。
+
+    ⚠️ 绝不能像旧实现那样 `next(iter(tables))` 随便挑个起点做 BFS：
+    那样报出来的「不连通表」取决于 **set 迭代顺序**，而字符串 set 的顺序受
+    `PYTHONHASHSEED` 影响 ⇒ 同一个失败计划在不同进程会点名**不同的表**。
+    真机实测：起点若落在孤岛上，报错会指向唯一连通的那个表 —— 点错名字。
+    而这条消息自 2026-10-03 起会被回灌给 LLM 让它自愈，它会照着错误提示
+    砍掉**错误的类**，把一次本可自愈的失败变成死局。
+
+    排序键是**整图可达节点数**（`_reachableFrom` 的结果大小），不是选中的表数：
+    只数选中的表时，孤岛（1 个）与「事实表 + 中转维度表」（选中 1 个、经中转可达 2 个）
+    会被算成同大小，字典序最小的孤岛反而当选主分量 —— 正好选反。
+
+    确定性：起点按字典序遍历；严格大于才替换 ⇒ 与 hash seed 无关。
+    """
+    unassigned = set(tables)
+    main: set[str] = set()
+    bestReach = -1
+    for start in sorted(tables):
+        if start not in unassigned:
+            continue
+        reachable = _reachableFrom(start, graph)
+        component = reachable & tables
+        unassigned -= component
+        if len(reachable) > bestReach:
+            main = component
+            bestReach = len(reachable)
+    return main
+
+
 def validateConnectivity(
     plan: QueryPlan, classes: list[OntologyClass], joins: list[OntologyJoin] | None
 ) -> list[str]:
@@ -642,16 +691,9 @@ def validateConnectivity(
     graph = _buildJoinGraph(classes, joins)
     if not graph:
         return []
-    start = next(iter(tablesWithSource))
-    visited: set[str] = {start}
-    queue = [start]
-    while queue:
-        node = queue.pop(0)
-        for neighbor, _ in graph.get(node, []):
-            if neighbor not in visited:
-                visited.add(neighbor)
-                queue.append(neighbor)
-    disconnected = tablesWithSource - visited
+    disconnected = tablesWithSource - _mainConnectedComponent(tablesWithSource, graph)
     if disconnected:
-        return [f"以下表无法通过关联路径连通：{', '.join(disconnected)}，请通过中间表建立 JOIN"]
+        return [
+            f"以下表无法通过关联路径连通：{', '.join(sorted(disconnected))}，请通过中间表建立 JOIN"
+        ]
     return []

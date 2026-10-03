@@ -98,6 +98,7 @@ from app.services.nl2sql_scope import (
     _hasExplicitRowIntent,
     _hasTimeScope,
 )
+from app.services.think_block import stripThinkBlocks
 
 # 匹配 ```sql ... ``` 或 ``` ... ``` 代码块
 _SQL_FENCE_RE = re.compile(r"```(?:sql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -322,6 +323,36 @@ class Nl2SqlService:
         """连通性校验（Feature B）：所有选中的类必须通过 join 目录的边连通。"""
         return validateConnectivity(plan, classes, joins)
 
+    def _planIssues(
+        self,
+        plan: QueryPlan,
+        classes: list[OntologyClass],
+        joins: list[OntologyJoin] | None,
+        *,
+        ownerHintMaxClasses: int,
+    ) -> list[str]:
+        """计划的两道校验合并为一个 issues 列表（空列表 = 通过）。
+
+        1) `validatePlan`：类 / 属性 / JOIN 列的引用是否在本体 schema 中
+        2) `validateConnectivity`：选中的类能否经 join 目录的边连通 —— 先过
+           `supplementJoinPath` 补中间表路径再判，与 `_finalizePlan` 同口径
+
+        为什么合并（2026-10-03 真机）：连通性失败原本在 `_finalizePlan` 里直接
+        raise，LLM 没有第二次机会；属性失败却会回灌 `initialErrors` 自愈。同一道
+        闸门两套语义，真机上「B019 供货量下降原因」多步第 2 步因此整步报废。
+        连通性报错自带不可达表名，正是模型换类所需的信号，并入即可自愈。
+
+        属性级错误优先返回：此时计划马上会被重写，再补 JOIN/算连通性是白算。
+        ownerHintMaxClasses 由编排层现读 system_config 传入（魔数治理 hard tier），
+        本方法保持纯同步、无配置读取，便于单测。
+        """
+        issues = self.validatePlan(plan, classes, ownerHintMaxClasses=ownerHintMaxClasses)
+        if issues:
+            return issues
+        return self.validateConnectivity(
+            self.supplementJoinPath(plan, classes, joins), classes, joins
+        )
+
     def _buildIndirectJoinHints(
         self, classes: list[OntologyClass], joins: list[OntologyJoin] | None
     ) -> str:
@@ -478,8 +509,11 @@ class Nl2SqlService:
     ) -> Any:
         """生成并通过本体 schema 校验的查询计划（ReAct 两阶段流水线阶段一）。
 
-        每轮：generateQueryPlan → validatePlan。校验不过时把具体差异
-        （"表 X 不在本体"）注入重试反馈，而非泛泛 retry；纯代码校验杜绝幻觉。
+        每轮：generateQueryPlan → `_planIssues`（属性归属 + JOIN 连通性）。
+        校验不过时把具体差异（"表 X 不在本体" / "以下表无法通过关联路径连通"）
+        注入重试反馈，而非泛泛 retry；纯代码校验杜绝幻觉。末轮仍不通过则抛
+        Nl2SqlError（不静默吞错）。
+
         （此方法保留在门面并**经由 self 分发** generateQueryPlan / validatePlan /
         _finalizePlan，而非委托给模块函数——既有测试通过 monkeypatch 实例方法隔离
         校验循环，见 test_property_ref_normalize.TestGenerateValidatedPlanRetryNormalizes。）
@@ -516,21 +550,36 @@ class Nl2SqlService:
         )
         # 魔数治理 Phase 2 hard tier：编排层现读 validatePlan 配置（session 缺席落默认）。
         planCfg = await self._readPlanConfigOrDefault(session)
-        for _ in range(maxPlanAttempts - 1):
-            issues = self.validatePlan(
-                planResult.plan, classes, ownerHintMaxClasses=planCfg["ownerHintMaxClasses"]
+        # 下限 1：maxPlanAttempts<=0 时仍须校验一次（改造前循环外那次 validatePlan
+        # 就是这个语义），否则会拿着未校验的计划直接进 _finalizePlan。
+        attempts = max(1, maxPlanAttempts)
+        for attempt in range(attempts):
+            issues = self._planIssues(
+                planResult.plan,
+                classes,
+                joins,
+                ownerHintMaxClasses=planCfg["ownerHintMaxClasses"],
             )
             if not issues:
                 return self._finalizePlan(planResult, classes, joins, scopeText)
             # 失败留痕（2026-10-01 线上回归）：校验失败原本零日志，线上报障时
             # 真实 formula 原文无法回看（session_message 无 detail 列、无 attempt 表）。
             # 记 formula 原文而不只是 issues —— issues 里已经没有原文了。
+            # 连通性与属性错误同走这一条日志（不新增第二个 warning，保持单一日志契约）；
+            # 末轮不再另记「最终失败」—— attempt=attempts 那行已是同一事件的最终留痕。
             logger.warning(
                 "NL2SQL 计划校验未通过 attempt=%d formulas=%s issues=%s",
-                _ + 1,
+                attempt + 1,
                 formatPlanFormulas(planResult.plan),
                 issues,
             )
+            if attempt == attempts - 1:
+                raise Nl2SqlError(
+                    MSG_NL2SQL_PLAN_VALIDATION_FAILED,
+                    detail="; ".join(issues),
+                    tokens=(planResult.promptTokens, planResult.completionTokens),
+                    lastPlan=planResult.plan,
+                )
             planResult = await self.generateQueryPlan(
                 question, classes, llmClient, modelConfig,
                 initialErrors=issues, scopeQuestion=scopeQuestion, **common,
@@ -538,22 +587,6 @@ class Nl2SqlService:
             planResult = replace(
                 planResult, plan=_normalizePlanProperties(planResult.plan, classes),
             )
-        issues = self.validatePlan(
-            planResult.plan, classes, ownerHintMaxClasses=planCfg["ownerHintMaxClasses"]
-        )
-        if issues:
-            logger.warning(
-                "NL2SQL 计划校验最终失败 formulas=%s issues=%s",
-                formatPlanFormulas(planResult.plan),
-                issues,
-            )
-            raise Nl2SqlError(
-                MSG_NL2SQL_PLAN_VALIDATION_FAILED,
-                detail="; ".join(issues),
-                tokens=(planResult.promptTokens, planResult.completionTokens),
-                lastPlan=planResult.plan,
-            )
-        return self._finalizePlan(planResult, classes, joins, scopeText)
 
     @staticmethod
     def applyRefineDirect(
@@ -573,6 +606,10 @@ class Nl2SqlService:
 
     def parseSqlFromResponse(self, content: str) -> str | None:
         """从 LLM 回复中提取 SQL：优先 ```sql/``` 代码块，其次纯 SELECT/WITH 文本。"""
+        # 推理模型把思维链内联在开头：think 前缀会让 startswith(("SELECT","WITH"))
+        # 恒不成立（SQL 阶段必然重试耗尽），think 内的 ```sql 围栏也会被误当输出。
+        # 无条件剥离，与 Think_Hide 无关（机器要能读 ≠ 给用户看什么）。
+        content = stripThinkBlocks(content)
         match = _SQL_FENCE_RE.search(content)
         if match:
             candidate = match.group(1).strip()

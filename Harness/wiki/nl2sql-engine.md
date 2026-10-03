@@ -282,6 +282,115 @@ hint 真源为 `propsByClass`（已经 `_classRefNames` 展开过的业务名 + 
 
 详见 `changes/fix-cross-class-property-owner-hint/summary.md`。
 
+## JOIN 连通性校验：孤岛类与自愈（2026-10-03）
+
+`validateConnectivity`（`app/services/nl2sql_plan.py`）要求 `selectedClasses` 里的表
+能经 `ontology_join` 目录的边互相连通，否则报「以下表无法通过关联路径连通」。
+
+### 两条必须同口径的规则
+
+**① 图建不起来 ⇒ 校验放行**。`_buildJoinGraph` 只保留**两端都能在召回集里解析到
+source_table** 的边；`joins` 为空、或所有边的端点都不在召回集时图为空，
+`validateConnectivity` 首行 `if not graph: return []` 直接放行。
+
+`buildSchemaText` 的孤岛标记（`_islandTables`）**严格沿用这一口径**：图为空时
+一个类都不标。否则 prompt 会劝退一个校验根本不拦的类 —— **口径分裂比标错更糟**。
+
+**② 报错文案的「请通过中间表建立 JOIN」不总可行**。若目标类在 join 目录里
+**零边**（孤岛），`_findJoinPath` 找不到任何路径，`supplementJoinPath` 无从补起，
+此时该建议无法满足。2026-10-03 的 `DIM_FACILITY` 就是这种状态（81 条边里 0 条触及它）。
+
+排查孤岛用 `GET /api/v1/ontology/health/joins`（`buildJoinHealthReport`）。
+⚠️ **`probe=true` 在 Oracle 上必然 500**（`ORA-00933`）—— 探针 SQL 用了
+`LIMIT 10000`（`ontology_join_health_service.py:135,138`），Oracle 19c 不认。
+死边巡检目前只能另写探针。
+
+### 连通性失败现在可自愈（2026-10-03 修复）
+
+**改造前**：重试循环只跑 `validatePlan`（属性归属），连通性检查在循环**之外**的
+`_finalizePlan` 里失败直接 `raise`，**不回灌 `initialErrors`**。同一道闸门两套语义 ——
+属性失败给 LLM 重试机会，连通性失败直接终局。真机后果：MiniMax-M3 选了孤岛类
+`DIM_FACILITY`，该步整步报废且无法自救。
+
+**改造后**：`Nl2SqlService._planIssues` 把两道校验合成一个 issues 列表
+（属性级优先返回 —— 计划马上会被重写，再补 JOIN 算连通性是白算），
+循环统一消费它。语义等价性已验证：校验次数与 LLM 调用次数均与改造前一致，
+`maxPlanAttempts` 为 0/1 的边界行为不变。
+
+⚠️ `supplementJoinPath` **幂等**（二次调用走 `changed=False` 原样返回），
+所以 `_planIssues` 与 `_finalizePlan` 各调一次是安全的，有专门用例锁这条。
+
+### Prompt 孤岛标记
+
+召回集内零边的类，类头追加 `[无关联边，不可跨表JOIN]`。
+存在理由：`### JOIN 关系` 段只渲染有边的行，孤岛类**整段缺席**，
+而「缺席」不等于「不可 JOIN」——模型会把缺席读成「可以试着连」。
+
+- 文案只说「不可**跨表 JOIN**」，不说「不可用」：孤岛类做单表查询完全合法
+- 成本 **11 tokens / 每个孤岛**（实测），可忽略
+- 前置：属性级 `ref_class_id` + `is_foreign_key` 要设好，否则 schema 文本
+  渲染不出 `[FK → 目标类]`，LLM 仍无信号。界面上见 `/ontology` 属性编辑弹窗的
+  「引用类」下拉（外键 Checkbox 早就有，选择器是 2026-10-03 才补的缺口）
+
+### 连通性报错必须点名「真凶」，且确定性可复现
+
+`validateConnectivity` 早期实现用 `next(iter(tablesWithSource))` 取 BFS 起点。
+`set[str]` 的**字符串迭代顺序受 `PYTHONHASHSEED` 影响** ⇒ 同一份代码、同一份数据，
+不同进程报出的「不连通表」**不一样**：起点落在孤岛上时会反过来点名唯一连通的那个表。
+
+```
+PYTHONHASHSEED=0 => passed
+PYTHONHASHSEED=1 => failed
+```
+
+⚠️ 这是**先存在、后变致命**的缺陷：连通性错误从不回灌给 LLM 时，点错名字只是
+消息难看；一旦接进自愈回路（见上），LLM 会照着错误提示砍掉**错误的**类，
+本可自愈的失败变成死局。
+
+**正确写法**：求连通分量、取「主分量」，其余分量才是问题表。两条不能省的细节：
+
+1. **BFS 遍历整图**，不能只在选中的表里走 —— `supplementJoinPath` 允许经
+   **未被选中但在召回集内**的类中转（那正是「中间表」）。不许中转就会把
+   「能绕过去」判成「不连通」，与补边逻辑自相矛盾。
+2. **主分量的排序键是整图可达节点数，不是选中的表数**。只数选中的表时，
+   孤岛（1 个选中）与「事实表 + 中转维度表」（选中 1 个、可达 2 个）**同大小**，
+   字典序最小的孤岛反而当选主分量 —— 正好选反。
+3. 起点按 `sorted()` 遍历 + 严格 `>` 才替换 ⇒ 与 hash seed 无关；报错表名加 `sorted()`。
+
+### 「值域重叠 100%」不等于「JOIN 是 1:1」—— 扇出边是静默错答
+
+补 JOIN 边时最常见的验收是「事实侧每个值都能在维度侧找到」（重叠率 1.000）。
+**这只证明值域覆盖，不证明 JOIN 不扇出。**
+
+2026-10-03 在 `DIM_FACILITY` 上实测：
+
+| 目标列 | distinct / 行数 | 单列唯一？ |
+|---|---|---|
+| `FCY_0` | 41 / 41 | ✅ 超键，单列连无损 |
+| `LEGCPY_0` | 27 / 41 | ❌ **最多一个公司挂 10 个工厂** |
+
+于是两条边的实测 JOIN 行数：
+
+| 边 | 事实行数 | JOIN 后 | 倍数 |
+|---|---|---|---|
+| `RCV_SITE_CODE → FCY_0` | 3,558,004 | 3,558,004 | 1.00× ✅ |
+| `COM_CODE → LEGCPY_0` | 3,558,004 | **31,575,628** | **8.87× ❌** |
+
+扇出的危害等级**高于**「连不上」：连不上会报错逼你修；扇出返回 HTTP 200、
+数字形状正常、量级离谱，**没有任何信号**。任何走该边的 `SUM` 都被放大 9 倍。
+
+⇒ **补边验收必跑**：`SELECT COUNT(*) FROM 事实表` vs
+`SELECT COUNT(*) FROM 事实表 JOIN 维度表 ON ...`，两者不等 ⇒ 这条边不能作为聚合路径。
+另：均值会骗人（41/27 看着像「最多 2 倍」，实际最大值 10），
+**别用均匀分布的直觉推断上界**。
+
+⚠️ 连带一条：`is_foreign_key` 在 prompt 里渲染成 `FK → 目标表`、**不带目标列名**
+（`nl2sql_schema.py:311-312`）。给一个会扇出的列打 FK 标记，
+等于**主动提示 LLM 去写那条错 SQL**。FK 标记不是无害的元数据，
+判它是否该标，先看它指向的列单列是否唯一。
+
+详见 `changes/fix-dim-facility-connectivity/summary.md`。
+
 ## 语句形态 formula 的校验口径（不得逐 token 当属性）
 
 `Aggregation.formula` 的**语句结构豁免**。背景是 2026-10-01 线上回归：用户问「5月份供货量最多的三家供应商所供货物总量占5月份总供货量的比例是多少」，LLM 把**整条 SELECT** 放进 `Aggregation.formula`（该问题要「先取前三家、再算占比」，单条窗口函数表达不了），其 schema 名（`THBI`）、表名（`DWD_GOODS_RECEIPT_DTL` / `DIM_IMATERIAL`）、表别名（`d2` / `m2`）、`ONLY`（来自 `FETCH FIRST 3 ROWS ONLY`）被逐 token 误报成属性幻觉（用户侧 6 条），重试反馈无指向 → 模型原样重犯 → `maxPlanAttempts` 耗尽 → 整轮失败。

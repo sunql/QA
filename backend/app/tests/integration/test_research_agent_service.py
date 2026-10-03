@@ -22,10 +22,8 @@ from sqlalchemy import text
 
 from app.domain.models import LlmConfig
 from app.domain.multi_step_plan import MultiStepPlan
-from app.services.research_agent_service import (
-    LlmUsageRecorder,
-    ResearchAgentService,
-)
+from app.services.research_agent_ports import LlmUsageRecorder
+from app.services.research_agent_service import ResearchAgentService
 from app.services.research_session_service import ResearchSessionService
 
 QUESTION = "供应商收货量为什么下降"
@@ -37,11 +35,13 @@ QUESTION = "供应商收货量为什么下降"
 
 
 class FakeEsl:
-    """ESL fake：真实 ESLExtraction 形状；conflicts 可注入。"""
+    """ESL fake：真实 ESLExtraction 形状；conflicts / 空 scope 可注入，记录调用问题。"""
 
-    def __init__(self, conflicts=(), empty: bool = False) -> None:
+    def __init__(self, conflicts=(), empty: bool = False, emptyOnce: bool = False) -> None:
         self._conflicts = conflicts
         self._empty = empty
+        self._emptyOnce = emptyOnce
+        self.calls: list[str] = []
 
     async def extract(self, question, *, intent=None):
         from app.services.enterprise_semantic_layer import (
@@ -49,7 +49,8 @@ class FakeEsl:
             ESLExtraction,
             MetricRef,
         )
-        if self._empty:
+        self.calls.append(question)
+        if self._empty or (self._emptyOnce and len(self.calls) == 1):
             from app.services.enterprise_semantic_layer import EmptyResearchScopeError
 
             raise EmptyResearchScopeError("三臂检索全空")
@@ -93,14 +94,21 @@ class FakePlanner:
 
 
 class FakeRunner:
-    """执行 runner fake：与 `ResearchSqlRunner` 契约对齐（execute 抛 / verify 不抛）。"""
+    """执行 runner fake：与 `ResearchSqlRunner` 契约对齐（execute 抛 / verify 不抛）。
 
-    def __init__(self, rows=None, error: str | None = None) -> None:
+    `error` 模拟 SQL Guard 拒绝（ValueError）；`raiseError` 模拟任意异常（含编程错误），
+    用于验证 `_runStep` 的异常收窄。
+    """
+
+    def __init__(self, rows=None, error: str | None = None, raiseError=None) -> None:
         self._rows = rows if rows is not None else [{"month": "2026-01", "cnt": 100}]
         self._error = error
+        self._raiseError = raiseError
         self.verifyCalls: list[str] = []
 
     async def executeReadonlySql(self, session, sql):
+        if self._raiseError is not None:
+            raise self._raiseError
         if self._error is not None:
             raise ValueError(self._error)
         return list(self._rows)
@@ -212,12 +220,14 @@ async def _newSession(svc, dbSession, question: str = QUESTION):
     return await svc.sessionService.createSession(dbSession, userId=1, question=question)
 
 
-async def _resolve(svc, dbSession, sessionId, action: str, choice: dict | None = None) -> str:
+async def _resolve(
+    svc, dbSession, sessionId, action: str, choice: dict | None = None, emit=None
+) -> str:
     """取当前 pending checkpoint 并按 action 续跑（模拟 API 层调用）。"""
     cp = await svc.sessionService.getPendingCheckpoint(dbSession, sessionId)
     assert cp is not None, "期望存在 pending checkpoint"
     return await svc.resumeTurn(
-        dbSession, checkpointId=cp.id, action=action, choice=choice or {}
+        dbSession, checkpointId=cp.id, action=action, choice=choice or {}, emit=emit
     )
 
 
@@ -395,6 +405,128 @@ async def test_empty_scope_pauses_for_rewrite_even_in_auto_confirm(dbSession, ma
     assert status == "awaiting_user"
     cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
     assert cp is not None and cp.phase == "intent" and cp.options["signal"] == "empty_scope"
+
+
+# ---------------------------------------------------------------------------
+# fix round 1：空臂恢复通道 / 异常收窄 / 降级可见性
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_empty_scope_resume_with_rewritten_question_reruns_esl(dbSession, makeService) -> None:
+    """HIGH-1：空 scope 恢复必须带改写问题**重跑 ESL**（不是拿空臂直进 plan）。
+
+    两条修复一起验证：① options["resumePhase"] 显式压过固定表（intent→esl 而非 plan）；
+    ② resumeTurn 的 choice["question"] 通道换问题并清派生态。
+    """
+    esl = FakeEsl(emptyOnce=True)
+    svc = makeService(esl=esl)
+    s = await _newSession(svc, dbSession, question="量")
+    assert await svc.startTurn(dbSession, sessionId=s.id, question="量", userId=1) == "awaiting_user"
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp.phase == "intent" and cp.options["signal"] == "empty_scope"
+    assert cp.options["resumePhase"] == "esl"  # 显式恢复点（固定表里 intent→plan）
+
+    assert (
+        await svc.resumeTurn(
+            dbSession,
+            checkpointId=cp.id,
+            action="confirm",
+            choice={"question": QUESTION},
+        )
+        == "awaiting_user"
+    )
+    # ESL 真的用新问题重跑了（不是跳过）
+    assert esl.calls == ["量", QUESTION]
+    cp2 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp2.id != cp.id
+    assert cp2.options["signal"] == "fixed_scope"  # 走到固定 #1，而非直接 plan
+    assert cp2.options["arms"]["businessObjects"]  # 非空三臂进了新 checkpoint
+    # 改写后的问题落 turn 内容（可追溯）
+    content = (
+        await dbSession.execute(
+            text(
+                "SELECT content FROM research_turn WHERE session_id = :sid AND role = 'user'"
+                " ORDER BY turn_index DESC LIMIT 1"
+            ),
+            {"sid": s.id},
+        )
+    ).scalar_one()
+    assert content["question"] == QUESTION
+
+
+@pytest.mark.asyncio
+async def test_intent_checkpoint_confirm_still_resumes_at_plan(dbSession, makeService) -> None:
+    """HIGH-1 回归：普通范围确认（无改写问题）仍从 plan 续跑，ESL 不重跑。"""
+    esl = FakeEsl()
+    svc = makeService(esl=esl)
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    assert await _resolve(svc, dbSession, s.id, "confirm") == "awaiting_user"
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp.phase == "planning"  # 固定表路径没被显式优先规则翻转
+    assert esl.calls == [QUESTION]  # ESL 只跑了一次
+
+
+@pytest.mark.asyncio
+async def test_runner_programming_error_is_not_masked_as_low_confidence(
+    dbSession, makeService
+) -> None:
+    """MEDIUM-5：runner 抛非 DB 异常（编程错误）必须上抛并把会话标 failed。
+
+    不能被伪装成「该步无数据」→ low_confidence_step →（autoConfirm 下）静默 done。
+    """
+    svc = makeService(runner=FakeRunner(raiseError=RuntimeError("boom")), autoConfirm=True)
+    s = await _newSession(svc, dbSession)
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status == "failed"
+    # 编程错误不产生 finding / 报告
+    assert await svc.sessionService.getPendingCheckpoint(dbSession, s.id) is None
+
+
+@pytest.mark.asyncio
+async def test_step_failure_emits_research_error_event(dbSession, makeService) -> None:
+    """MEDIUM-7：步失败除动态点外还必须发 `research.error {code, message}`。"""
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc = makeService(runner=FakeRunner(error="仅允许只读 SELECT"))
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1
+    await _resolve(svc, dbSession, s.id, "confirm", emit=collect)  # 固定 #2 → execute
+
+    errors = [p for (e, p) in events if e == "research.error"]
+    assert [p["code"] for p in errors] == ["sql_validation_failed"]
+    assert "只读" in errors[0]["message"] and errors[0]["stepIndex"] == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_llm_client_is_user_visible_not_silent(dbSession, makeService) -> None:
+    """MEDIUM-4：llmFactory 取不到客户端必须显式留痕（`research.error` + 报告降级标记）。"""
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc = makeService(autoConfirm=True)  # llmFactory 默认 None
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+    assert status == "done"
+    codes = [p["code"] for (e, p) in events if e == "research.error"]
+    assert "llm_unavailable" in codes  # 不静默
+    reportEvent = [p for (e, p) in events if e == "research.report"][-1]
+    assert reportEvent["degraded"] is True
+    doneEvent = [p for (e, p) in events if e == "research.done"][-1]
+    assert doneEvent["degraded"] is True
 
 
 @pytest.mark.asyncio

@@ -44,6 +44,8 @@ interface PropertyFormValues {
   sourceColumn: string;
   isPrimaryKey: boolean;
   isForeignKey: boolean;
+  // 引用类（外键指向的类）。undefined = 未设置；后端 ref_class_id 可空。
+  refClassId?: number;
 }
 
 const EMPTY_PROPERTY_FORM: PropertyFormValues = {
@@ -54,6 +56,7 @@ const EMPTY_PROPERTY_FORM: PropertyFormValues = {
   sourceColumn: "",
   isPrimaryKey: false,
   isForeignKey: false,
+  refClassId: undefined,
 };
 
 export interface PropertyTabProps {
@@ -145,6 +148,7 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
       sourceColumn: record.sourceColumn ?? "",
       isPrimaryKey: record.isPrimaryKey,
       isForeignKey: record.isForeignKey,
+      refClassId: record.refClassId ?? undefined,
     });
     setModalOpen(true);
   };
@@ -162,6 +166,13 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
   const handleSubmit = async () => {
     try {
       const values = await form.validateFields();
+      // 勾了外键却没选引用类会造出「is_foreign_key=true + ref_class_id=NULL」的
+      // 无效组合：DQ 规则生成器遇到它会把属性列进 blocked[] 并报「缺少 ref_class」
+      // （data_quality_rule_generator.py:242）。拦在保存前，别让用户造出来。
+      if (values.isForeignKey && !values.refClassId) {
+        void message.error(t("forms.ontology.propertyLabels.refClassRequired"));
+        return;
+      }
       const payload: OntologyPropertyCreate = {
         classId: values.classId,
         propertyName: values.propertyName,
@@ -170,6 +181,7 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
         sourceColumn: values.sourceColumn || undefined,
         isPrimaryKey: values.isPrimaryKey,
         isForeignKey: values.isForeignKey,
+        refClassId: values.refClassId,
       };
       if (editing) {
         const updatePayload: OntologyPropertyUpdate = {
@@ -179,6 +191,10 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
           sourceColumn: payload.sourceColumn,
           isPrimaryKey: payload.isPrimaryKey,
           isForeignKey: payload.isForeignKey,
+          // ⚠️ 必须显式传 null 而非 undefined：后端 OntologyPropertyUpdate 走
+          // exclude_unset，undefined = 「不修改」，用户清空选择器后旧引用类会残留。
+          // 与 disableThinking 的 false/undefined 是同一类坑。
+          refClassId: values.refClassId ?? null,
         };
         await updateProperty(editing.id, updatePayload);
         void message.success(t("toast.updated"));
@@ -346,6 +362,25 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
               <Checkbox>{t("forms.ontology.propertyLabels.isForeignKey")}</Checkbox>
             </Form.Item>
           </Space>
+          {/* 引用类（2026-10-03）：外键勾选框存在但没有目标类选择器，导致
+              「勾了外键却填不了指向谁」——属性停在 ref_class_id=NULL，
+              schema 文本渲染不出 [FK → 目标]，LLM 拿不到任何关联信号。
+              下拉列出**全部**类（不按 JOIN 边收窄）：外键语义独立于 JOIN 边，
+              有些外键只服务参照完整性校验、不参与 NL2SQL 跨表关联。 */}
+          <Form.Item
+            name="refClassId"
+            label={t("forms.ontology.propertyLabels.refClassId")}
+            tooltip={t("forms.ontology.propertyLabels.refClassIdHint")}
+            extra={<span className="property-tab-ref-hint">{t("forms.ontology.propertyLabels.refClassIdWarning")}</span>}
+          >
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder={t("forms.ontology.propertyLabels.refClassPlaceholder")}
+              options={classOptions(classes, locale)}
+            />
+          </Form.Item>
         </Form>
       </Modal>
     </>

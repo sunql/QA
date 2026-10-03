@@ -120,7 +120,9 @@ export interface OntologyPropertyUpdate {
   dataType?: string;
   isPrimaryKey?: boolean;
   isForeignKey?: boolean;
-  refClassId?: number;
+  // ⚠️ 必须允许 null：后端走 exclude_unset，undefined = 「不修改」。
+  // 清空引用类只能靠显式 null，否则用户清掉选择器后旧 ref_class_id 残留。
+  refClassId?: number | null;
   sourceColumn?: string;
   // 说明：让管理页可手动修正 LLM 采纳的值。
   // null 表示不修改；空数组 视作清空值域；非空数组 写入 ontology_property.allowed_values。

@@ -1584,6 +1584,13 @@ export const enUS = {
         sourceColumn: "Source Column",
         isPrimaryKey: "Primary Key",
         isForeignKey: "Foreign Key",
+        refClassId: "Referenced Class",
+        refClassIdHint:
+          "The ontology class this foreign key points to. The schema text renders it as [FK → target class] so the LLM knows which table this column can join to.",
+        refClassIdWarning:
+          "Setting a foreign key does not create the JOIN edge — maintain them separately, otherwise connectivity validation fails.",
+        refClassRequired: "Select a referenced class when the foreign key is checked",
+        refClassPlaceholder: "Select the class this foreign key points to",
       },
       propertyPlaceholders: {
         classId: "Select an ontology class",

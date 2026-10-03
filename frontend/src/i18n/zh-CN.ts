@@ -1609,6 +1609,13 @@ export const zhCN = {
         sourceColumn: "源字段",
         isPrimaryKey: "主键",
         isForeignKey: "外键",
+        refClassId: "引用类",
+        refClassIdHint:
+          "外键指向的本体类。schema 文本会据此渲染 [FK → 目标类]，LLM 才能知道这一列可以关联到哪张表。",
+        refClassIdWarning:
+          "设置外键不会自动创建 JOIN 边，两者需分别维护，否则连通性校验会失败。",
+        refClassRequired: "勾选外键后必须选择引用类",
+        refClassPlaceholder: "选择外键指向的本体类",
       },
       propertyPlaceholders: {
         classId: "请选择本体类",

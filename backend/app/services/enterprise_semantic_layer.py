@@ -51,7 +51,7 @@ class KnowledgeRef:
 
 @dataclass(frozen=True)
 class ESLConflict:
-    kind: str      # metric_ambiguous | wiki_disagree | bo_join_missing
+    kind: str      # metric_ambiguous | wiki_disagree
     arm: str       # business_object | metric | knowledge
     detail: str
     candidates: list[dict[str, Any]] = field(default_factory=list)
@@ -93,7 +93,7 @@ class EnterpriseSemanticLayer:
                                            self._toKnowledgeRef)
         if not bos and not metrics and not knowledge:
             raise EmptyResearchScopeError("三臂检索全空，需要用户改写问题")
-        conflicts = self._detectConflicts(bos, metrics, knowledge)
+        conflicts = self._detectConflicts(metrics, knowledge)
         return ESLExtraction(
             businessObjects=bos, metrics=metrics, knowledge=knowledge,
             confidenceByArm={
@@ -108,30 +108,37 @@ class EnterpriseSemanticLayer:
                           question: str, toRef: Callable[[dict], Any]) -> list:
         try:
             raw = await searcher(question, topK=_TOP_K[arm])
+            # toRef 返回 None 表示该条目缺关键字段（如 BO 缺 classId），跳过而非降级
+            refs = [ref for item in raw if (ref := toRef(item)) is not None]
         except Exception:
+            # 检索失败或条目畸形（映射抛错）均降级为空臂
             logger.warning("ESL %s 臂检索失败，降级为空臂", arm, exc_info=True)
             return []
-        return [toRef(item) for item in raw]
+        return refs
 
-    def _detectConflicts(self, bos, metrics, knowledge) -> list[ESLConflict]:
+    def _detectConflicts(self, metrics, knowledge) -> list[ESLConflict]:
         conflicts: list[ESLConflict] = []
-        if len(metrics) >= 2 and (metrics[0].confidence - metrics[1].confidence) < _METRIC_AMBIGUOUS_GAP:
+        ranked = sorted(metrics, key=lambda m: m.confidence, reverse=True)
+        gap = round(ranked[0].confidence - ranked[1].confidence, 10) if len(ranked) >= 2 else None
+        if gap is not None and gap < _METRIC_AMBIGUOUS_GAP:
             conflicts.append(ESLConflict(
                 kind="metric_ambiguous", arm="metric",
                 detail=f"前两名 metric 分差 < {_METRIC_AMBIGUOUS_GAP}",
                 candidates=[{"kpiCode": m.kpiCode, "displayName": m.displayName,
-                             "confidence": m.confidence} for m in metrics[:2]]))
+                             "confidence": m.confidence} for m in ranked[:2]]))
         strong = [k for k in knowledge if k.semanticScore >= _WIKI_DISAGREE_SCORE]
         if len(strong) >= 2:
             conflicts.append(ESLConflict(
                 kind="wiki_disagree", arm="knowledge",
-                detail=f"{len(strong)} 篇高相关 wiki 主题重叠，表述可能冲突",
+                detail=f"{len(strong)} 篇高相关 wiki 共主题，建议人工核对表述是否冲突",
                 candidates=[{"pageId": k.pageId, "title": k.title} for k in strong]))
         return conflicts
 
-    def _toBoRef(self, item: dict) -> BusinessObjectRef:
+    def _toBoRef(self, item: dict) -> BusinessObjectRef | None:
+        if item.get("classId") is None:
+            return None
         return BusinessObjectRef(
-            classId=int(item["classId"]), className=item["className"],
+            classId=int(item["classId"]), className=item.get("className") or "",
             sourceTable=item.get("sourceTable") or "",
             matchedAlias=item.get("matchedAlias") or "",
             confidence=float(item.get("confidence") or 0.0))

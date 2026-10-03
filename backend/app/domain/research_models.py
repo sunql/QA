@@ -102,6 +102,9 @@ class ResearchCheckpoint(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), _session_fk(), nullable=False, index=True
+    )
     turn_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), _turn_fk(), nullable=False, index=True
     )
@@ -124,6 +127,9 @@ class ResearchFinding(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), _session_fk(), nullable=False, index=True
+    )
     turn_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), _turn_fk(), nullable=False, index=True
     )
@@ -131,6 +137,9 @@ class ResearchFinding(Base):
     supporting_sql: Mapped[str | None] = mapped_column(Text, nullable=True)
     supporting_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
 
 
 class ResearchReport(Base):

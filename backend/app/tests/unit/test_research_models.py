@@ -23,12 +23,28 @@ def test_session_columns() -> None:
     assert {"id", "title", "mode", "status", "created_by", "input_seed", "updated_at"} <= cols
 
 
+def test_checkpoint_columns() -> None:
+    cols = {c.name for c in ResearchCheckpoint.__table__.columns}
+    assert {"id", "session_id", "turn_id", "phase", "status",
+            "options", "user_choice", "decided_at"} <= cols
+
+
+def test_finding_columns() -> None:
+    cols = {c.name for c in ResearchFinding.__table__.columns}
+    assert {"id", "session_id", "turn_id", "claim_text",
+            "supporting_sql", "supporting_data", "confidence",
+            "created_at"} <= cols
+
+
 def test_report_partial_unique_index() -> None:
     idx = {i.name for i in ResearchReport.__table__.indexes}
     assert "uq_research_report_session_published" in idx
     target = next(i for i in ResearchReport.__table__.indexes
                   if i.name == "uq_research_report_session_published")
     assert target.dialect_options["postgresql"]["where"] is not None
+    assert target.unique is True
+    assert "status = 'published'" in str(
+        target.dialect_options["postgresql"]["where"])
 
 
 def test_turn_content_is_jsonb() -> None:

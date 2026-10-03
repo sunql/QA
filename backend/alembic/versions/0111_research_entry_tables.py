@@ -10,9 +10,9 @@
   BigInteger、**不加 FK**——用户表名跨域耦合无收益，FK 条款按此放宽）。
 - ``research_turn``：会话内单轮交互（``session_id`` FK CASCADE；``content``
   JSONB）。
-- ``research_checkpoint``：分阶段决策检查点（``turn_id`` FK CASCADE；
-  ``options`` / ``user_choice`` JSONB；``decided_at`` 可空）。
-- ``research_finding``：过程结论（``turn_id`` FK CASCADE；
+- ``research_checkpoint``：分阶段决策检查点（``session_id`` / ``turn_id``
+  双 FK CASCADE；``options`` / ``user_choice`` JSONB；``decided_at`` 可空）。
+- ``research_finding``：过程结论（``session_id`` / ``turn_id`` 双 FK CASCADE；
   ``confidence`` Numeric(5,4)）。
 - ``research_report``：研究报告（``session_id`` FK CASCADE；``version`` 递增）。
   带部分唯一索引 ``uq_research_report_session_published``：同一 session 至多
@@ -77,6 +77,12 @@ def upgrade() -> None:
         "research_checkpoint",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column(
+            "session_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("research_session.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column(
             "turn_id",
             postgresql.UUID(as_uuid=True),
             sa.ForeignKey("research_turn.id", ondelete="CASCADE"),
@@ -92,9 +98,18 @@ def upgrade() -> None:
         sa.Column("decided_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index("ix_research_checkpoint_turn_id", "research_checkpoint", ["turn_id"])
+    op.create_index(
+        "ix_research_checkpoint_session_id", "research_checkpoint", ["session_id"]
+    )
     op.create_table(
         "research_finding",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column(
+            "session_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("research_session.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column(
             "turn_id",
             postgresql.UUID(as_uuid=True),
@@ -105,8 +120,12 @@ def upgrade() -> None:
         sa.Column("supporting_sql", sa.Text(), nullable=True),
         sa.Column("supporting_data", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("confidence", sa.Numeric(5, 4), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index("ix_research_finding_turn_id", "research_finding", ["turn_id"])
+    op.create_index(
+        "ix_research_finding_session_id", "research_finding", ["session_id"]
+    )
     op.create_table(
         "research_report",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
@@ -140,7 +159,11 @@ def downgrade() -> None:
     op.drop_index("ix_research_report_session_id", table_name="research_report")
     op.drop_table("research_report")
     op.drop_index("ix_research_finding_turn_id", table_name="research_finding")
+    op.drop_index("ix_research_finding_session_id", table_name="research_finding")
     op.drop_table("research_finding")
+    op.drop_index(
+        "ix_research_checkpoint_session_id", table_name="research_checkpoint"
+    )
     op.drop_index("ix_research_checkpoint_turn_id", table_name="research_checkpoint")
     op.drop_table("research_checkpoint")
     op.drop_index("ix_research_turn_session_id", table_name="research_turn")

@@ -1297,6 +1297,7 @@ export const enUS = {
         weight: "Routing Weight",
         costThreshold: "Cost Threshold ($)",
         temperature: "Temperature",
+        disableThinking: "Disable reasoning-model thinking",
       },
       placeholders: {
         modelName: "e.g. gpt-4o-mini / deepseek-chat / qwen2.5:7b",

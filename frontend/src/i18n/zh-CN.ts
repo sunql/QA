@@ -1317,6 +1317,7 @@ export const zhCN = {
         weight: "路由权重",
         costThreshold: "成本阈值 ($)",
         temperature: "Temperature",
+        disableThinking: "关闭推理模型思维链",
       },
       placeholders: {
         modelName: "如 gpt-4o-mini / deepseek-chat / qwen2.5:7b",

@@ -48,6 +48,7 @@ from app.services.nl2sql_schema import (
     _buildJoinGraph,
 )
 from app.services.nl2sql_scope import _applyScopeRowLimit
+from app.services.think_block import stripThinkBlocks
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,11 @@ def _parsePlanOutcome(content: str) -> _PlanParseOutcome:
     全空计划视为失败（see _isEmptyPlan）：它能通过 validatePlan，会直接进 SQL
     生成让模型自由编造表名。
     """
+    # 推理模型（MiniMax-M3 等）把思维链内联在回复开头，think 内的示例 JSON 会
+    # 被下面的 find("{") 误当作结构起点 ⇒ 从中间截断 ⇒ JSONDecodeError ⇒ 线上 400。
+    # 此处剥离**无条件执行，与 Think_Hide 无关**：该参数管「给用户看什么」，
+    # 内部解析要的是「机器能读什么」，两者正交（勿"优化"成读参数）。
+    content = stripThinkBlocks(content)
     match = _JSON_FENCE_RE.search(content)
     candidate = match.group(1) if match else content.strip()
     if not candidate:
@@ -227,6 +233,8 @@ async def generateQueryPlan(
     # 任一次响应 cached_tokens=None（不支持/字段缺失）→ 整体 cachedTokens=None
     # （保守：避免出现「plan 部分命中、SQL 未命中」被记成部分命中）。
     totalCached: int | None = None
+    # 截断重试预算封顶（与 SQL 阶段共用同一派生常量，见本模块顶部说明）
+    truncationBackoff = _NL2SQL_TRUNCATION_BACKOFF_DEFAULT
 
     for attempt in range(maxRetries + 1):
         systemPrompt = _buildPlanSystemPrompt(
@@ -288,6 +296,17 @@ async def generateQueryPlan(
                     "NL2SQL 计划解析失败 attempt=%d reason=%s", attempt + 1, outcome.reason
                 )
                 errors.append(f"第 {attempt + 1} 次尝试未能从回复中解析出查询计划")
+            # 截断检测（对齐 SQL 阶段 nl2sql_service 的既有范式，0-2）：
+            # 回复达到 token 上限时计划 JSON 可能被截断，翻倍预算重试。
+            # 推理模型尤其高发——思维链本身就能吃满预算（2026-10-03 真机：
+            # MiniMax-M3 写满 2048 仍停在思维链里，连续 3 次 PLAN_REPLY_EMPTY）。
+            # isApproximateUsage=True 时不知真实用量，不判截断。
+            isApprox = getattr(response, "isApproximateUsage", False)
+            if not isApprox and response.completionTokens >= maxTokens:
+                errors.append(
+                    f"第 {attempt + 1} 次尝试的回复达到 token 上限，计划可能被截断"
+                )
+                maxTokens = min(maxTokens * 2, truncationBackoff)
             continue
         if outcome.drops:
             logger.warning(

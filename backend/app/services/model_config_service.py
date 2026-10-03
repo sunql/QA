@@ -45,6 +45,7 @@ class ModelConfigService:
             weight=dto.weight,
             cost_threshold=dto.cost_threshold,
             is_active=dto.is_active,
+            disable_thinking=dto.disable_thinking,
         )
         session.add(config)
         await session.commit()

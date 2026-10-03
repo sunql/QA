@@ -74,8 +74,36 @@ class OpenAiClient(BaseLlmClient):
         # 错误"）。故在构造时固化 model_name/api_endpoint，调用期不再触碰 ORM。
         self._modelName = getattr(config, "model_name", None)
         self._apiEndpoint = getattr(config, "api_endpoint", None)
+        # 关闭推理模型思维链（llm_config.disable_thinking）。固化在构造期，与
+        # model_name/api_endpoint 同理（客户端按 config_id 跨请求缓存）。
+        # getattr 兜底：旧配置对象（测试替身/历史缓存）无该属性时按「不关闭」处理。
+        self._disableThinking = bool(getattr(config, "disable_thinking", False))
         # client 可注入以利测试；否则按 provider 构造真实 SDK 客户端
         self._client = client if client is not None else self._buildRealClient(apiKey)
+
+    def _applyThinkingPolicy(self, payload: dict[str, Any]) -> None:
+        """按 disable_thinking 注入关闭思考的 extra_body。
+
+        推理模型（MiniMax-M3）把 91.3% 的 token 花在 <think> 思维链上
+        （实测 think 5829 / JSON 558 tokens），挤爆 NL2SQL 计划阶段 2048 的
+        预算 ⇒ 回复被截断在 JSON 之前 ⇒ chat 报 400。关闭后实测同 prompt
+        只需 509~907 tokens（省 86-92%）。
+
+        两个易错点：
+        - **必须用 extra_body**：openai SDK 不认顶层 `thinking` kwarg
+          （直传报 unexpected keyword argument），extra_body 是官方透传方式。
+        - **不得覆盖调用方的 extra_body**：调用方可能自带 reasoning_split
+          （官方文档：M2.7 不传它可能返回空响应）。故做 merge 而非赋值，
+          且调用方显式给了 thinking 时以调用方为准。
+        """
+        if not self._disableThinking:
+            return
+        extra = payload.get("extra_body")
+        if not isinstance(extra, dict):
+            extra = {}
+        if "thinking" not in extra:
+            extra["thinking"] = {"type": "disabled"}
+        payload["extra_body"] = extra
 
     def _buildRealClient(self, apiKey: str) -> Any:
         from openai import AsyncAzureOpenAI, AsyncOpenAI
@@ -126,6 +154,8 @@ class OpenAiClient(BaseLlmClient):
         if maxTokens is not None:
             payload["max_tokens"] = maxTokens
         payload.update(kwargs)
+        # 在 update(kwargs) 之后：调用方自带的 extra_body 必须参与 merge
+        self._applyThinkingPolicy(payload)
 
         try:
             async with acquire_llm_concurrency():
@@ -194,6 +224,7 @@ class OpenAiClient(BaseLlmClient):
         if maxTokens is not None:
             payload["max_tokens"] = maxTokens
         payload.update(kwargs)
+        self._applyThinkingPolicy(payload)
 
         promptTokens = 0
         completionTokens = 0
@@ -301,6 +332,7 @@ class OpenAiClient(BaseLlmClient):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice
+        self._applyThinkingPolicy(payload)
 
         try:
             async with acquire_llm_concurrency():

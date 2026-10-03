@@ -111,6 +111,12 @@ class LlmConfig(Base, TimestampMixin):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     temperature: Mapped[float | None] = mapped_column(sa.Float(), nullable=True)
+    # 关闭推理模型思维链（M3 支持，M2.x 传了也无害）。推理模型 91% 的 token 花在
+    # <think> 上，会挤爆计划阶段 2048 的预算 ⇒ 解析失败。由 OpenAiClient 转成
+    # extra_body.thinking.type=disabled 透传（见 openai_client）。
+    disable_thinking: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
 
     usages: Mapped[list[SessionTokenUsage]] = relationship(
         back_populates="model", lazy="selectin"

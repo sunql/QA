@@ -6,7 +6,7 @@
    计量 purpose / SSE 事件名（含 `research.error`）。`PHASES` 由服务模块再导出，
    保持 brief 的 `from app.services.research_agent_service import PHASES` 契约。
 2. **端口与默认适配器**：`UsageRecorder` + `LlmUsageRecorder` + `MeteredClient`（计量）、
-   `Reporter` + `DefaultReporter`（报告；Task 6 落地后由真实 ReportPlanner 替换）。
+   `Reporter`（报告端口；Task 6 起唯一实现是 `ReportPlanner`，占位实现已删除）。
 3. **无状态构件**：state 重建 / options 构造 / 相位映射 / 步结果与计划归一化 /
    假设筛选与打分 / 提示词取值助手 / 静默 emit 与 rollback 兜底。
 
@@ -25,7 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import LlmConfig
-from app.domain.research_models import ResearchFinding, ResearchSession
+from app.domain.research_models import ResearchSession
 from app.services.token_usage_service import TokenUsageService
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,8 @@ ACTION_REJECT = "reject"
 # --- 计量 purpose / 置信度 / 摘要上限 ----------------------------------------
 PURPOSE_PLAN = "research_plan"
 PURPOSE_HYPOTHESIS = "research_hypothesis"
+PURPOSE_REPORT = "research_report"
+"""报告文本块的 LLM 用量 purpose（Task 6；一次 compose 会逐块调用，见 MeteredClient）。"""
 VERIFY_OK_FACTOR = 0.9  # 验证成功：候选分 × 0.9
 VERIFY_FAIL_FACTOR = 0.3  # 验证失败：候选分 × 0.3（失败本身是合法结论，不是 0）
 DEFAULT_CANDIDATE_CONFIDENCE = 0.5  # 假设 driver 未命中 ESL 候选时的基线分
@@ -93,6 +95,12 @@ MAX_VERIFY_HYPOTHESES = 3
 DRIVER_HINT_LIMIT = 30
 COLUMN_SUMMARY_LIMIT = 12
 STEP_MISSING_SQL = "计划步未携带 SQL（逐步 NL2SQL 生成不在本任务注入面内）"
+
+# --- finding.supporting_data 契约（Task 5 写 / Task 6 报告读）------------------
+FINDING_ROWS_KEY = "rows"
+"""验证结果行数据。报告 chart/table 块的**唯一**数据源，逐字透传（Task 6 §4.7 偏差）。"""
+MAX_FINDING_ROWS = 100
+"""落库行上限：bound JSONB 体积；超出丢弃并 warning（不静默截断）。"""
 
 # --- SSE 事件名（设计 §4.5）/ 错误码 / 默认 mode ------------------------------
 EVENT_INTENT = "research.intent"
@@ -139,7 +147,12 @@ class UsageRecorder(Protocol):
 
 
 class Reporter(Protocol):
-    """ReportPlanner（Task 6）契约：`compose(...) -> (payload, rendered_md)`。"""
+    """ReportPlanner（Task 6）契约：`compose(...) -> (payload, rendered_md)`。
+
+    只负责**装配**（payload + rendered_md）；归档（`publishReport`：version=max+1、
+    旧 published → superseded）由调用方 `_stageReport` 完成 —— 故本协议的任何实现
+    （真实 `ReportPlanner` / 测试 fake）都可互换。
+    """
 
     async def compose(
         self,
@@ -210,10 +223,13 @@ class LlmUsageRecorder:
 
 
 class MeteredClient:
-    """LLM 客户端包装：透传 `complete`，捕获最近一次调用的 token 与模型名。
+    """LLM 客户端包装：透传 `complete`，**累加**本轮全部调用的 token 与模型名。
 
     适配层 `generateHypotheses` 只回传假设列表（token 在响应里被丢掉），故计量必须在
     客户端边界捕获——否则「假设生成的 LLM 调用」成为计量盲区（核心约束 #3）。
+
+    累加语义（Task 6）：报告阶段一次 `compose` 会逐块调用 LLM（执行摘要 + 每条结论的
+    解读），只保留「最后一次」会漏计前面的调用；累加后调用方一次性记账。
     """
 
     def __init__(self, inner: Any) -> None:
@@ -224,60 +240,15 @@ class MeteredClient:
 
     async def complete(self, messages: Any, **kwargs: Any) -> Any:
         response = await self._inner.complete(messages, **kwargs)
-        self.promptTokens = int(getattr(response, "promptTokens", 0) or 0)
-        self.completionTokens = int(getattr(response, "completionTokens", 0) or 0)
+        self.promptTokens += int(getattr(response, "promptTokens", 0) or 0)
+        self.completionTokens += int(getattr(response, "completionTokens", 0) or 0)
         self.modelName = getattr(response, "modelName", None) or self.modelName
         return response
 
 
-class DefaultReporter:
-    """ReportPlanner 占位实现（Task 6 落地前）：确定性拼装，零 LLM。
-
-    签名与 Task 6 `ReportPlanner.compose` 一致，Task 6 完成后由注入的 reporter 替换
-    （plan Task 6 Step 5）。只读 finding 行，不做 LLM 文字生成。
-    """
-
-    async def compose(
-        self,
-        session: AsyncSession,
-        *,
-        sessionId: uuid.UUID,
-        turnId: uuid.UUID,
-        mode: str,
-        llmClient: Any = None,
-    ) -> tuple[dict[str, Any], str]:
-        findings = list(
-            await session.scalars(
-                select(ResearchFinding)
-                .where(ResearchFinding.session_id == sessionId)
-                .order_by(ResearchFinding.created_at.asc())
-            )
-        )
-        payload = {
-            "sessionId": str(sessionId),
-            "turnId": str(turnId),
-            "mode": mode,
-            "sections": [
-                {
-                    "id": "findings",
-                    "kind": "table",
-                    "title": "验证结论",
-                    "blocks": [
-                        {
-                            "type": "text",
-                            "content": f"{row.claim_text}（置信度 {row.confidence}）",
-                            "sourceRefs": [{"kind": "finding", "refId": str(row.id)}],
-                        }
-                        for row in findings
-                    ],
-                }
-            ],
-        }
-        lines = [f"# 研究报告（{mode}）", ""]
-        lines += [f"- {row.claim_text}（置信度 {row.confidence}）" for row in findings]
-        if not findings:
-            lines.append("- （本轮无已验证结论）")
-        return payload, "\n".join(lines)
+# Task 5 的占位 `DefaultReporter` 已删除：Task 6 起 `ReportPlanner` 是唯一实现，
+# 且它自身覆盖了原占位的两条兜底路径（`llmClient=None` → 模板文案；无 finding →
+# 空数据段），故保留占位即为死代码。见 task-6-report.md「偏差 2」。
 
 
 # ---------------------------------------------------------------------------
@@ -523,3 +494,99 @@ async def rollbackQuietly(session: AsyncSession) -> None:
         await session.rollback()
     except Exception:  # noqa: BLE001 —— 连接已死时兜底
         logger.warning("研究链路 rollback 异常", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# 无状态构件：finding 数据契约 / LLM 客户端兜底 / 用量记账兜底
+# （Task 6 从 research_agent_service 抽出，保持该文件 ≤ 800 行）
+# ---------------------------------------------------------------------------
+
+
+def findingData(outcome: dict[str, Any]) -> dict[str, Any]:
+    """finding.supporting_data 契约（Task 5 写 / Task 6 报告读）。
+
+    行数据必须落库：步结果只活在内存 state 里，`research_finding.supporting_data`
+    是报告 chart/table 块的**唯一**持久化数据源（Task 6 §4.7 偏差）。行数超
+    `MAX_FINDING_ROWS` 时截断并 warning（不静默丢数据）。
+    """
+    rows = list(outcome.get("rows") or [])
+    if len(rows) > MAX_FINDING_ROWS:
+        logger.warning(
+            "验证结果行数超上限，报告数据截断: rows=%s limit=%s", len(rows), MAX_FINDING_ROWS
+        )
+    return {
+        "rowCount": len(rows),
+        "error": outcome.get("error"),
+        FINDING_ROWS_KEY: rows[:MAX_FINDING_ROWS],
+    }
+
+
+def createClientQuietly(factory: Any) -> Any:
+    """按注入的 factory 取 LLM 客户端；创建失败降级为「无 LLM」并留痕（不中断 turn）。
+
+    `factory(None)` 与 `createClient(None)` 契约一致（无配置走环境变量 key，无 key
+    返回 None，由 `openLlmClient` 显式留痕）。
+    """
+    if factory is None:
+        return None
+    try:
+        return factory(None)
+    except Exception:  # noqa: BLE001 —— 客户端创建失败降级为「无 LLM」，不中断 turn
+        logger.error("LLM 客户端创建失败，本次降级跳过 LLM 段", exc_info=True)
+        return None
+
+
+async def openLlmClient(
+    factory: Any, *, state: dict[str, Any], emit: Emit | None, sessionId: uuid.UUID
+) -> Any:
+    """取 LLM 客户端；取不到时**显式留痕**（`research.error` + 日志 + state 标记）。
+
+    keyless / 创建失败的降级必须用户可见（Task 5 fix round 1）：不静默 `done`。
+    """
+    client = createClientQuietly(factory)
+    if client is not None:
+        return client
+    state["llmUnavailable"] = True
+    logger.warning("无可用 LLM 客户端，本轮 LLM 段降级: session=%s", sessionId)
+    await emitEvent(
+        emit,
+        EVENT_ERROR,
+        {"code": ERROR_LLM_UNAVAILABLE, "message": LLM_UNAVAILABLE_MESSAGE},
+    )
+    return None
+
+
+async def recordUsageQuietly(
+    recorder: UsageRecorder,
+    session: AsyncSession,
+    *,
+    sessionId: uuid.UUID,
+    purpose: str,
+    promptTokens: int,
+    completionTokens: int,
+    modelName: str | None,
+) -> None:
+    """记一次 LLM 用量；记账失败只留痕（不能把已发生的消耗变成未知）。
+
+    零消耗直接跳过（模板降级 / 未真正调 LLM 的相位不写空台账行）。
+    """
+    if promptTokens + completionTokens <= 0:
+        return
+    try:
+        await recorder.recordUsage(
+            session,
+            sessionId=str(sessionId),
+            purpose=purpose,
+            promptTokens=promptTokens,
+            completionTokens=completionTokens,
+            modelName=modelName,
+        )
+    except Exception:  # noqa: BLE001 —— 与 chat `_chartStep` 同处置：记账失败不带走整轮
+        logger.error(
+            "研究链路用量记账失败: session=%s purpose=%s pt=%s ct=%s",
+            sessionId,
+            purpose,
+            promptTokens,
+            completionTokens,
+            exc_info=True,
+        )

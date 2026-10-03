@@ -44,6 +44,7 @@ from app.domain.research_models import ResearchSession
 from app.services.enterprise_semantic_layer import EmptyResearchScopeError
 from app.services.hypothesis_service import Hypothesis
 from app.services.intent_service import IntentService
+from app.services.report_planner import ReportPlanner
 from app.services.research_agent_ports import (
     ACTION_STATUS,
     CHECKPOINT_HYPOTHESIS,
@@ -53,7 +54,6 @@ from app.services.research_agent_ports import (
     CHECKPOINT_RUNTIME_DYNAMIC,
     DEFAULT_MODE,
     ERROR_HYPOTHESIS_FAILED,
-    ERROR_LLM_UNAVAILABLE,
     ERROR_TURN_FAILED,
     EVENT_CHECKPOINT,
     EVENT_DONE,
@@ -66,11 +66,11 @@ from app.services.research_agent_ports import (
     EVENT_REPORT,
     EVENT_STEP_DONE,
     EVENT_STEP_START,
-    LLM_UNAVAILABLE_MESSAGE,
     PHASE_ESL,
     PHASES,
     PURPOSE_HYPOTHESIS,
     PURPOSE_PLAN,
+    PURPOSE_REPORT,
     ROLE_CHECKPOINT,
     SIGNAL_EMPTY_SCOPE,
     SIGNAL_FIXED_HYPOTHESIS,
@@ -84,7 +84,6 @@ from app.services.research_agent_ports import (
     STEP_MISSING_SQL,
     VERIFY_FAIL_FACTOR,
     VERIFY_OK_FACTOR,
-    DefaultReporter,
     Emit,
     LlmUsageRecorder,
     MeteredClient,
@@ -94,14 +93,18 @@ from app.services.research_agent_ports import (
     buildOptions,
     candidateConfidence,
     clientModelName,
+    createClientQuietly,
     dataSummary,
     drivers,
     emitEvent,
     eslClasses,
+    findingData,
     nextPhase,
     nextPhaseForPhase,
     normalizePlan,
+    openLlmClient,
     rebuildState,
+    recordUsageQuietly,
     resumeTurnContent,
     rewriteState,
     rollbackQuietly,
@@ -140,7 +143,17 @@ class ResearchAgentService:
         self._chart = chartService
         self._llmFactory = llmFactory
         self._usage = usageRecorder if usageRecorder is not None else LlmUsageRecorder()
-        self._reporter = reporter if reporter is not None else DefaultReporter()
+        # 报告装配器：默认真实 ReportPlanner（Task 6 接线）。llmClientFactory 指向同一个
+        # factory：compose 只在 `llmClient=None` 时回退自取客户端，而 `_stageReport` 传的
+        # 是同一 factory 的产物 —— 回退路径与计量路径同源，不会产生未计量的调用。
+        self._reporter = (
+            reporter
+            if reporter is not None
+            else ReportPlanner(
+                sessionService=sessionService,
+                llmClientFactory=lambda: createClientQuietly(self._llmFactory),
+            )
+        )
         self._autoConfirm = autoConfirm
         self._intent = IntentService()
         self._stages: dict[str, Any] = {
@@ -530,10 +543,7 @@ class ResearchAgentService:
                 turnId=turnId,
                 claimText=candidate["statement"],
                 supportingSql=candidate.get("verificationSql"),
-                supportingData={
-                    "rowCount": len(outcome.get("rows") or []),
-                    "error": outcome.get("error"),
-                },
+                supportingData=self._findingData(outcome),
                 confidence=confidence,
             )
             findings.append(
@@ -548,18 +558,39 @@ class ResearchAgentService:
         state["findings"] = findings
         return None
 
+    @staticmethod
+    def _findingData(outcome: dict[str, Any]) -> dict[str, Any]:
+        """finding.supporting_data 契约（实现见 ports.findingData，Task 6 报告读侧）。"""
+        return findingData(outcome)
+
     async def _stageReport(
         self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,
         emit: Emit | None, state: dict[str, Any],
     ) -> Pause | None:
-        """[10][11][12] 报告装配 + 归档（reporter 由 Task 6 实现，可注入 fake）。"""
+        """[10][11][12] 报告装配（reporter，Task 6 为真实 ReportPlanner）+ 归档。
+
+        LLM 文本块经 `MeteredClient` 计量（核心约束 #3）：一次 compose 会逐块调用，
+        MeteredClient 累加后此处一次性记 `purpose=research_report`；reporter 自身不记账
+        （避免双计）。归档（version=max+1、旧版 superseded）留在本方法，reporter 只装配。
+        """
+        client = await self._llmClient(state=state, emit=emit, sessionId=sessionId)
+        metered = MeteredClient(client) if client is not None else None
         payload, renderedMd = await self._reporter.compose(
             session,
             sessionId=sessionId,
             turnId=turnId,
             mode=state.get("mode") or DEFAULT_MODE,
-            llmClient=await self._llmClient(state=state, emit=emit, sessionId=sessionId),
+            llmClient=metered,
         )
+        if metered is not None:
+            await self._recordUsage(
+                session,
+                sessionId=sessionId,
+                purpose=PURPOSE_REPORT,
+                promptTokens=metered.promptTokens,
+                completionTokens=metered.completionTokens,
+                modelName=metered.modelName,
+            )
         report = await self._sessions.publishReport(
             session, sessionId=sessionId, payload=payload, renderedMd=renderedMd
         )
@@ -712,36 +743,10 @@ class ResearchAgentService:
     async def _llmClient(
         self, *, state: dict[str, Any], emit: Emit | None, sessionId: uuid.UUID
     ) -> Any:
-        """取 LLM 客户端；取不到时**显式留痕**（`research.error` + 日志 + state 标记）。
-
-        keyless / 创建失败的降级必须用户可见（fix round 1）：不静默 `done`。
-        """
-        client = self._createClient()
-        if client is not None:
-            return client
-        state["llmUnavailable"] = True
-        logger.warning("无可用 LLM 客户端，本轮 LLM 段降级: session=%s", sessionId)
-        await emitEvent(
-            emit,
-            EVENT_ERROR,
-            {"code": ERROR_LLM_UNAVAILABLE, "message": LLM_UNAVAILABLE_MESSAGE},
+        """取 LLM 客户端；取不到时**显式留痕**（实现见 ports.openLlmClient）。"""
+        return await openLlmClient(
+            self._llmFactory, state=state, emit=emit, sessionId=sessionId
         )
-        return None
-
-    def _createClient(self) -> Any:
-        """按注入的 factory 取客户端。
-
-        `llmFactory` 的模型配置选择（ModelRouterService / dto.modelId）不在 Task 5 注入面
-        内，由接线任务补齐——此处 `factory(None)` 与 `createClient(None)` 契约一致
-        （无配置走环境变量 key，无 key 返回 None，由 `_llmClient` 显式留痕）。
-        """
-        if self._llmFactory is None:
-            return None
-        try:
-            return self._llmFactory(None)
-        except Exception:  # noqa: BLE001 —— 客户端创建失败降级为「无 LLM」，不中断 turn
-            logger.error("LLM 客户端创建失败，本次降级跳过 LLM 段", exc_info=True)
-            return None
 
     async def _recordUsage(
         self,
@@ -753,30 +758,16 @@ class ResearchAgentService:
         completionTokens: int,
         modelName: str | None,
     ) -> None:
-        """记一次 LLM 用量；记账失败只留痕（不能把已发生的消耗变成未知）。
-
-        零消耗直接跳过（模板降级 / 未真正调 LLM 的相位不写空台账行）。
-        """
-        if promptTokens + completionTokens <= 0:
-            return
-        try:
-            await self._usage.recordUsage(
-                session,
-                sessionId=str(sessionId),
-                purpose=purpose,
-                promptTokens=promptTokens,
-                completionTokens=completionTokens,
-                modelName=modelName,
-            )
-        except Exception:  # noqa: BLE001 —— 与 chat `_chartStep` 同处置：记账失败不带走整轮
-            logger.error(
-                "研究链路用量记账失败: session=%s purpose=%s pt=%s ct=%s",
-                sessionId,
-                purpose,
-                promptTokens,
-                completionTokens,
-                exc_info=True,
-            )
+        """记一次 LLM 用量（实现见 ports.recordUsageQuietly：零消耗跳过、失败只留痕）。"""
+        await recordUsageQuietly(
+            self._usage,
+            session,
+            sessionId=sessionId,
+            purpose=purpose,
+            promptTokens=promptTokens,
+            completionTokens=completionTokens,
+            modelName=modelName,
+        )
 
     async def _markFailed(self, session: AsyncSession, sessionId: uuid.UUID) -> None:
         """把会话标 failed（best-effort：此处已在异常路径，不再抛二次异常）。"""

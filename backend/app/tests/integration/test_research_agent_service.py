@@ -1,6 +1,7 @@
 """研究状态机：暂停/恢复/动态 checkpoint/终态（真实 PG + fake 依赖）。
 
-Task 5 契约测试。外部依赖全部 fake（ESL / planner / runner / chart / reporter /
+Task 5 契约测试（Task 6 起：报告阶段走**真实** `ReportPlanner`，仅 LLM / ESL / planner /
+runner / chart 是 fake）。外部依赖全部 fake（ESL / planner / runner / chart /
 usage recorder / LLM），**状态一律落真实 PostgreSQL**（research_session /
 research_turn / research_checkpoint / research_finding / research_report）。
 
@@ -22,6 +23,7 @@ from sqlalchemy import text
 
 from app.domain.models import LlmConfig
 from app.domain.multi_step_plan import MultiStepPlan
+from app.services.report_planner import ReportPlanner
 from app.services.research_agent_ports import LlmUsageRecorder
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_session_service import ResearchSessionService
@@ -135,15 +137,11 @@ class FakeChart:
         )
 
 
-class FakeReporter:
-    """ReportPlanner（Task 6）占位 fake：签名与 Task 6 一致。"""
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
+class RaisingReporter:
+    """报告装配抛错：验证报告阶段异常**上抛 + 会话 failed**（不静默 done）。"""
 
     async def compose(self, session, *, sessionId, turnId, mode, llmClient=None):
-        self.calls.append({"sessionId": sessionId, "turnId": turnId, "mode": mode})
-        return ({"sessionId": str(sessionId), "mode": mode}, f"# 报告 {mode}")
+        raise RuntimeError("reporter boom")
 
 
 class FakeUsageRecorder:
@@ -184,6 +182,20 @@ class FakeLlmClient:
         return FakeLlmResponse(self._content, 120, 40)
 
 
+class ScriptedLlmClient:
+    """按调用序切换内容：第 1 次喂假设 JSON，之后喂报告文本（同一客户端服务两个阶段）。"""
+
+    def __init__(self, hypothesisJson: str, reportText: str) -> None:
+        self._hypothesisJson = hypothesisJson
+        self._reportText = reportText
+        self.calls = 0
+
+    async def complete(self, messages, **kwargs):
+        self.calls += 1
+        content = self._hypothesisJson if self.calls == 1 else self._reportText
+        return FakeLlmResponse(content, 120, 40)
+
+
 HYPOTHESIS_JSON = (
     '[{"statement": "供应商A供货减少", "driver": "收货量",'
     ' "verification_sql": "SELECT 1 AS cnt"},'
@@ -198,18 +210,23 @@ HYPOTHESIS_JSON = (
 
 @pytest.fixture
 def makeService(dbSession):
-    """服务工厂：默认 fake 依赖 + 真实 ResearchSessionService（真库）。"""
+    """服务工厂：fake 外部依赖 + **真实** ResearchSessionService / ReportPlanner（真库）。
+
+    报告阶段默认走真实 `ReportPlanner`（Task 6 接线后即产品默认路径）；`reporter` 可覆写
+    以测异常路径（`RaisingReporter`）。
+    """
 
     def _make(**kwargs) -> ResearchAgentService:
+        sessions = ResearchSessionService()
         return ResearchAgentService(
             esl=kwargs.get("esl", FakeEsl()),
-            sessionService=ResearchSessionService(),
+            sessionService=sessions,
             planner=kwargs.get("planner", FakePlanner()),
             runner=kwargs.get("runner", FakeRunner()),
             chartService=kwargs.get("chartService", FakeChart()),
             llmFactory=kwargs.get("llmFactory"),
             usageRecorder=kwargs.get("usageRecorder", FakeUsageRecorder()),
-            reporter=kwargs.get("reporter", FakeReporter()),
+            reporter=kwargs.get("reporter", ReportPlanner(sessionService=sessions)),
             autoConfirm=kwargs.get("autoConfirm", False),
         )
 
@@ -275,13 +292,88 @@ async def test_esl_conflict_inserts_dynamic_checkpoint_before_plan(dbSession, ma
 
 @pytest.mark.asyncio
 async def test_auto_confirm_runs_to_done_and_publishes(dbSession, makeService) -> None:
-    svc = makeService(autoConfirm=True)
+    """真实 ReportPlanner 装配路径：三 mode 模板 + 归档 + MD 渲染。"""
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(autoConfirm=True, llmFactory=lambda cfg: scripted)
     s = await _newSession(svc, dbSession)
     status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
     assert status == "done"
     reports = await svc.sessionService.listReports(dbSession, s.id)
-    assert reports and reports[-1].status == "published"
+    assert reports and reports[-1].status == "published" and reports[-1].version == 1
     assert await svc.sessionService.getPendingCheckpoint(dbSession, s.id) is None
+
+    report = reports[-1]
+    assert [sec["kind"] for sec in report.payload["sections"]] == [
+        "executive_summary",
+        "data",
+        "knowledge",
+        "methodology",
+    ]
+    # chart 块的行数据逐字来自 finding.supporting_data["rows"]（Task 6 数据来源契约）
+    charts = [
+        block
+        for sec in report.payload["sections"]
+        for block in sec["blocks"]
+        if block["type"] == "chart"
+    ]
+    assert charts and charts[0]["content"]["rows"] == [{"cnt": 1}]
+    assert charts[0]["sourceRefs"][0]["kind"] == "finding"
+    assert report.rendered_md.startswith("# ")
+    assert "| cnt |" in report.rendered_md and "| 1 |" in report.rendered_md  # 逐字
+    assert "解读：收货量下降明显。" in report.rendered_md
+
+
+@pytest.mark.asyncio
+async def test_report_llm_calls_are_metered_and_numbers_verbatim(dbSession, makeService) -> None:
+    """报告文本块 LLM 调用计量（累加）+ 数字仍逐字来自 finding 数据（不被 LLM 改写）。"""
+    recorder = FakeUsageRecorder()
+    # 单实例共享：llmFactory 每个阶段各调一次，若每阶段新建则 calls 永远停在 1，
+    # 报告阶段会拿到假设 JSON 而非报告文本。
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(
+        llmFactory=lambda cfg: scripted,
+        usageRecorder=recorder,
+        autoConfirm=True,
+    )
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+    report = (await svc.sessionService.listReports(dbSession, s.id))[-1]
+
+    # LLM 文本进了执行摘要；chart 块数字仍是 finding 数据（LLM 只拿到 claim 摘要）
+    assert report.payload["sections"][0]["blocks"][0]["content"] == "解读：收货量下降明显。"
+    charts = [
+        block
+        for sec in report.payload["sections"]
+        for block in sec["blocks"]
+        if block["type"] == "chart"
+    ]
+    assert charts[0]["content"]["rows"] == [{"cnt": 1}]
+    # 报告阶段 2 次调用（执行摘要 + 1 条结论解读）累加计量：240 / 80
+    assert [r for r in recorder.records if r["purpose"] == "research_report"] == [
+        {
+            "sessionId": str(s.id),
+            "purpose": "research_report",
+            "promptTokens": 240,
+            "completionTokens": 80,
+            "modelName": "fake-model",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reporter_failure_marks_session_failed(dbSession, makeService) -> None:
+    """报告阶段异常必须上抛 + 会话 failed（不静默 done、不留半份报告）。"""
+    svc = makeService(autoConfirm=True, reporter=RaisingReporter())
+    s = await _newSession(svc, dbSession)
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status == "failed"
+    assert await svc.sessionService.listReports(dbSession, s.id) == []
 
 
 # ---------------------------------------------------------------------------

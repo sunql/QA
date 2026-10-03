@@ -249,6 +249,21 @@ class ResearchSessionService:
         )
         return list(rows)
 
+    async def listFindings(
+        self, session: AsyncSession, sessionId: uuid.UUID
+    ) -> list[ResearchFinding]:
+        """按产生顺序列出会话全部结论（报告装配的数据来源，含行数据）。
+
+        读侧唯一入口：`ReportPlanner` 不直接查 `research_finding` 表，
+        保证 Task 5 写契约（`supporting_data["rows"]`）与 Task 6 读契约同源。
+        """
+        rows = await session.scalars(
+            select(ResearchFinding)
+            .where(ResearchFinding.session_id == sessionId)
+            .order_by(ResearchFinding.created_at.asc(), ResearchFinding.id.asc())
+        )
+        return list(rows)
+
     async def updateSessionStatus(
         self, session: AsyncSession, sessionId: uuid.UUID, status: str
     ) -> None:

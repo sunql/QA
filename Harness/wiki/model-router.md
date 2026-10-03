@@ -46,6 +46,17 @@ estPromptCost = tokenCount(modelName, prompt) * cost_per_1k_input / 1000
 - `OpenAiClient`：覆盖 OpenAI/Azure/代理，按 provider 构造 `AsyncOpenAI` 或 `AsyncAzureOpenAI`，支持 `base_url`。
 - `OllamaClient`：`httpx` 调 `/api/chat`，解析 `prompt_eval_count`/`eval_count`。
 - `factory.py`：按 `LlmConfig.id` 缓存客户端，API Key 优先解密配置密文，否则回退环境变量。
+  **缓存失效**：`OpenAiClient` 构造时固化 model_name/api_endpoint/key，配置编辑/停用必须调
+  `invalidateClient(configId)`（`model_config_service` 的 update/deactivate 已接线），否则
+  编辑对运行中的进程永不生效（2026-10-03 MiniMax Connection error 根因）。
+
+## 答案后处理：Think_Hide（2026-10-03）
+
+推理模型（MiniMax-M3 等）把 `<think>…</think>` 思维链内联在答案正文。系统参数
+`Think_Hide`（system_config，迁移 0108 补种 `'0'`）：`1` 在所有 LLM 答案出口剥离
+（chat 单步/多步汇总/流式/doc_qa/wiki chat，`services/think_block.py`），`0`/缺省字节级透传。
+流式用逐字符状态机增量过滤，下发 token 与落库 assistant 消息一致；读取无缓存、每次现读，
+admin 改值即时对新请求生效。内部 LLM 消费（计划 JSON/SQL 生成/图表标签）不剥。
 
 ## 关键参数
 

@@ -1877,68 +1877,25 @@ class OntologyService:
                     "entityType": "property", "entityId": prop.id, "error": str(exc),
                 })
 
-        joinPairs = {
-            (j.source_class_id, j.target_class_id) for j in joins
-        }
-        missingJoinPairs = joinPairs - existingJoinPairs
-        for sourceId, targetId in sorted(missingJoinPairs):
-            try:
-                src_uid_row = await id_mapping_svc.resolveByExternal(
-                    session, "CLASS", str(sourceId)
-                )
-                tgt_uid_row = await id_mapping_svc.resolveByExternal(
-                    session, "CLASS", str(targetId)
-                )
-                if src_uid_row and tgt_uid_row:
-                    neo4j.linkClassJoin(src_uid_row.unified_id, tgt_uid_row.unified_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "图对账：JOIN 边入图失败 %d->%d: %s", sourceId, targetId, exc,
-                )
-                failures.append({
-                    "entityType": "join", "entityId": sourceId, "error": str(exc),
-                })
-
-        syncedRelations = 0
-        for rel in relations:
-            relType = (
-                rel.relation_type.value
-                if hasattr(rel.relation_type, "value")
-                else str(rel.relation_type)
+        joinTotal, missingJoins, syncedJoins, joinFailures = await self._reconcileJoins(
+            session, id_mapping_svc, joins, existingJoinPairs
+        )
+        relTotal, missingRelations, syncedRelations, relFailures = (
+            await self._reconcileRelations(
+                session, id_mapping_svc, relations, existingRelTriples
             )
-            triple = (rel.source_class_id, rel.target_class_id, relType)
-            if triple in existingRelTriples:
-                continue
-            try:
-                src_uid_row = await id_mapping_svc.resolveByExternal(
-                    session, "CLASS", str(rel.source_class_id)
-                )
-                tgt_uid_row = await id_mapping_svc.resolveByExternal(
-                    session, "CLASS", str(rel.target_class_id)
-                )
-                if src_uid_row and tgt_uid_row:
-                    neo4j.linkClassRelation(src_uid_row.unified_id, tgt_uid_row.unified_id, relType)
-                    syncedRelations += 1
-                syncedRelations += 1
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "图对账：语义关系入图失败 id=%d %s: %s", rel.id, triple, exc,
-                )
-                failures.append({
-                    "entityType": "relation", "entityId": rel.id, "error": str(exc),
-                })
+        )
+        failures = [*failures, *joinFailures, *relFailures]
 
         logger.info(
             "图对账完成 类 missing=%d/%d JOIN missing=%d/%d"
             " 属性 missing=%d/%d 关系 missing=%d/%d failed=%d",
             syncedClasses, len(classes),
-            len(missingJoinPairs), len(joinPairs),
+            missingJoins, joinTotal,
             syncedProps, len(props),
-            syncedRelations, len(relations),
+            missingRelations, relTotal,
             len(failures),
         )
-        failedJoins = sum(1 for f in failures if f["entityType"] == "join")
-        failedRelations = sum(1 for f in failures if f["entityType"] == "relation")
         return {
             "totalClasses": len(classes),
             "missingClassCount": syncedClasses,
@@ -1946,15 +1903,106 @@ class OntologyService:
             "totalProperties": len(props),
             "missingPropertyCount": syncedProps,
             "syncedPropertyCount": syncedProps,
-            "totalJoins": len(joinPairs),
-            "missingJoinCount": len(missingJoinPairs),
-            "syncedJoinCount": len(missingJoinPairs) - failedJoins,
-            "totalRelations": len(relations),
-            "missingRelationCount": syncedRelations + failedRelations,
+            "totalJoins": joinTotal,
+            "missingJoinCount": missingJoins,
+            "syncedJoinCount": syncedJoins,
+            "totalRelations": relTotal,
+            "missingRelationCount": missingRelations,
             "syncedRelationCount": syncedRelations,
             "failedCount": len(failures),
             "failures": failures,
         }
+
+    async def _resolveClassUid(
+        self,
+        session: AsyncSession,
+        idMappingSvc: IdMappingService,
+        classId: int | None,
+    ) -> str | None:
+        """PG 类 id → unified_id；未注册返回 None（调用方按 unresolved 处理）。"""
+        if classId is None:
+            return None
+        row = await idMappingSvc.resolveByExternal(session, "CLASS", str(classId))
+        return row.unified_id if row else None
+
+    async def _reconcileJoins(
+        self,
+        session: AsyncSession,
+        idMappingSvc: IdMappingService,
+        joins: list[Any],
+        existingJoinPairs: set[tuple[str, str]],
+    ) -> tuple[int, int, int, list[dict[str, Any]]]:
+        """补齐缺失 JOIN 边；返回 (PG 总对数, 缺失对数, 补齐数, 失败列表)。
+
+        **差分必须两边同类型**：`existingJoinPairs` 来自 `neo4j.getJoinPairs()`，
+        元素是 unified_id 字符串（`COALESCE(unified_id, toString(id))`）。此前直接用
+        PG bigint 去减 ⇒ 差集恒等于全集 ⇒ 永不幂等，且 `missingJoinCount` 恒等于总数
+        （假成功）。见 Harness/changes/fix-m0-graph-key-consistency。
+        """
+        pairs: dict[tuple[str, str], int] = {}
+        for join in joins:
+            srcUid = await self._resolveClassUid(session, idMappingSvc, join.source_class_id)
+            tgtUid = await self._resolveClassUid(session, idMappingSvc, join.target_class_id)
+            if srcUid is None or tgtUid is None:
+                continue
+            pairs.setdefault((srcUid, tgtUid), join.source_class_id)
+
+        missing = {p: eid for p, eid in pairs.items() if p not in existingJoinPairs}
+        synced = 0
+        failures: list[dict[str, Any]] = []
+        for (srcUid, tgtUid), entityId in sorted(missing.items()):
+            try:
+                neo4j.linkClassJoin(srcUid, tgtUid)
+                synced += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("图对账：JOIN 边入图失败 %s->%s: %s", srcUid, tgtUid, exc)
+                failures.append({
+                    "entityType": "join", "entityId": entityId, "error": str(exc),
+                })
+        return len(pairs), len(missing), synced, failures
+
+    async def _reconcileRelations(
+        self,
+        session: AsyncSession,
+        idMappingSvc: IdMappingService,
+        relations: list[Any],
+        existingRelTriples: set[tuple[str, str, str]],
+    ) -> tuple[int, int, int, list[dict[str, Any]]]:
+        """补齐缺失语义关系边；返回 (PG 总数, 缺失数, 补齐数, 失败列表)。
+
+        同 `_reconcileJoins`：`existingRelTriples` 是 unified_id 三元组，PG id 必须
+        先解析再差分。计数只在实际写入成功后 +1（此前 `syncedRelations += 1` 写在
+        if 内外各一次，uid 解析失败也照加，且成功时重复计数）。
+        """
+        triples: dict[tuple[str, str, str], int] = {}
+        for rel in relations:
+            relType = (
+                rel.relation_type.value
+                if hasattr(rel.relation_type, "value")
+                else str(rel.relation_type)
+            )
+            srcUid = await self._resolveClassUid(session, idMappingSvc, rel.source_class_id)
+            tgtUid = await self._resolveClassUid(session, idMappingSvc, rel.target_class_id)
+            if srcUid is None or tgtUid is None:
+                continue
+            triples.setdefault((srcUid, tgtUid, relType), rel.id)
+
+        missing = {t: eid for t, eid in triples.items() if t not in existingRelTriples}
+        synced = 0
+        failures: list[dict[str, Any]] = []
+        for (srcUid, tgtUid, relType), entityId in sorted(missing.items()):
+            try:
+                neo4j.linkClassRelation(srcUid, tgtUid, relType)
+                synced += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "图对账：语义关系入图失败 id=%d %s: %s", entityId,
+                    (srcUid, tgtUid, relType), exc,
+                )
+                failures.append({
+                    "entityType": "relation", "entityId": entityId, "error": str(exc),
+                })
+        return len(triples), len(missing), synced, failures
 
     async def _syncClassEmbeddingBestEffort(self, entity: OntologyClass) -> None:
         """类向量自动同步（best-effort，后台执行）：失败仅告警，不影响 CRUD。

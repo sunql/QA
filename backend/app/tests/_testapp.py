@@ -35,6 +35,7 @@ from app.api.v1 import (
     evaluation_report,
     features,
     feature_rules,
+    graph,
     graph_traversal,
     kpi_catalog,
     local_import,
@@ -223,6 +224,9 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"])
     testApp.include_router(feature_rules.router, tags=["feature-rules"])
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"])
+    # 图只读查询（/system/graph/nodes*）。此前漏挂 ⇒ 该端点零集成覆盖，
+    # 「列表不下发主键 + 关系端点恒返空」两个静默缺陷得以长期隐身。
+    testApp.include_router(graph.router, prefix="/api/v1/system", tags=["system"])
     testApp.include_router(
         system_config.router,
         prefix="/api/v1/admin/system-config",

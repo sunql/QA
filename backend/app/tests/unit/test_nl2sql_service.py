@@ -2324,3 +2324,53 @@ class TestResolveDialectDottedVersion:
     def test_12c_plus_uses_fetch_first(self, version: str | None) -> None:
         dialect = Nl2SqlService.resolveDialect(DataSourceType.ORACLE, version)
         assert "FETCH FIRST" in dialect.limitRule
+
+
+class TestGenerateSqlShareDenominatorGuard:
+    """L1 挂点：占比分母守卫拦截后回灌原因重试（与 SQL Guard 同构）。"""
+
+    TRAP_SQL = (
+        "SELECT r.SUPPLIER_CODE, "
+        "SUM(r.ITEM_QTY) / SUM(SUM(r.ITEM_QTY)) OVER (PARTITION BY r.SUPPLIER_CODE) AS TOP3_SHARE "
+        "FROM ranked r WHERE r.RN <= 3 GROUP BY r.SUPPLIER_CODE"
+    )
+    CLEAN_SQL = (
+        "SELECT r.SUPPLIER_CODE, SUM(r.ITEM_QTY) / NULLIF(t.TOTAL_QTY, 0) AS TOP3_SHARE "
+        "FROM ranked r JOIN sup_total t ON t.SUPPLIER_CODE = r.SUPPLIER_CODE "
+        "WHERE r.RN <= 3 GROUP BY r.SUPPLIER_CODE"
+    )
+
+    async def test_trap_sql_retried_with_feedback(self) -> None:
+        """陷阱 SQL 被拦 → 反馈回灌 → 第二次干净 SQL 直接返回。"""
+        fake = _FakeLlm([
+            f"```sql\n{TestGenerateSqlShareDenominatorGuard.TRAP_SQL}\n```",
+            f"```sql\n{TestGenerateSqlShareDenominatorGuard.CLEAN_SQL}\n```",
+        ])
+        service = Nl2SqlService()
+        cls = _buildClass("PRECEIPT", "PRECEIPT")
+        result = await service.generateSql("Top3 占比", [cls], fake, _llmConfig(), maxRetries=1)
+        assert result.sql == TestGenerateSqlShareDenominatorGuard.CLEAN_SQL
+        assert len(fake.calls) == 2
+        # 反馈文案回灌第二次 user prompt（可操作，教训同 M2）
+        assert "占比类指标的分母" in fake.calls[1][1][1]
+
+    async def test_trap_sql_exhaustion_raises(self) -> None:
+        """重试耗尽仍陷阱 → Nl2SqlError，detail 带守卫原因。"""
+        fake = _FakeLlm([
+            f"```sql\n{TestGenerateSqlShareDenominatorGuard.TRAP_SQL}\n```",
+            f"```sql\n{TestGenerateSqlShareDenominatorGuard.TRAP_SQL}\n```",
+        ])
+        service = Nl2SqlService()
+        cls = _buildClass("PRECEIPT", "PRECEIPT")
+        with pytest.raises(Nl2SqlError) as excInfo:
+            await service.generateSql("Top3 占比", [cls], fake, _llmConfig(), maxRetries=1)
+        assert "占比类指标的分母" in str(excInfo.value.detail)
+
+    async def test_clean_sql_not_blocked(self) -> None:
+        """合法形态（独立 CTE 分母）一次通过，守卫零干扰。"""
+        fake = _FakeLlm([f"```sql\n{TestGenerateSqlShareDenominatorGuard.CLEAN_SQL}\n```"])
+        service = Nl2SqlService()
+        cls = _buildClass("PRECEIPT", "PRECEIPT")
+        result = await service.generateSql("Top3 占比", [cls], fake, _llmConfig(), maxRetries=1)
+        assert result.sql == TestGenerateSqlShareDenominatorGuard.CLEAN_SQL
+        assert len(fake.calls) == 1

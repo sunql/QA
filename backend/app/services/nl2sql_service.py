@@ -58,6 +58,7 @@ from app.services.nl2sql_plan import (
     _NL2SQL_MAX_TOKENS_DEFAULT,
     _NL2SQL_TRUNCATION_BACKOFF_DEFAULT,
 )
+from app.services.nl2sql_semantic_guard import findShareDenominatorIssues
 from app.services.nl2sql_prompts import (
     _buildPlanSystemPrompt,
     _buildPlanUserPrompt,
@@ -730,6 +731,16 @@ class Nl2SqlService:
                     f"（仅允许 SELECT/WITH 只读查询）: {exc}"
                 )
                 logger.warning("NL2SQL 安全校验失败 attempt=%d: %s", attempt + 1, exc)
+                continue
+            # L1 占比分母守卫（feat-nl2sql-share-denominator-guard）：Top-N 过滤后的
+            # 行集上用窗口函数算占比分母 → 恒 100%。prompt 负向约束是概率性的，
+            # 形态级拦截才是确定性的；与 SQL Guard 同构——原因回灌重试。
+            guardIssues = findShareDenominatorIssues(sql)
+            if guardIssues:
+                errors.append(
+                    f"第 {attempt + 1} 次尝试生成的 SQL 存在占比分母问题: {guardIssues[0]}"
+                )
+                logger.warning("NL2SQL 占比分母守卫拦截 attempt=%d sql=%s", attempt + 1, sql[:500])
                 continue
             return SqlResult(
                 sql=sql,

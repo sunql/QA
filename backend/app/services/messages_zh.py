@@ -331,6 +331,24 @@ MSG_NL2SQL_SQL_INVALID = (
 )
 MSG_NL2SQL_SQL_FAILED = "无法生成 SQL"
 
+# Top-N 占比分母守卫（feat-nl2sql-share-denominator-guard，2026-10-02）：
+# 真机回归——同一问题两次生成，一次用独立 CTE 分母（对）、一次在 Top-N 过滤后的
+# 行集上用窗口函数算分母（恒 100%，错）。prompt 负向约束是概率性的，形态级拦截
+# 才是确定性的，故三层：L1 生成时拦截（本反馈）+ L3 结果不变量 + L2 歧义示警。
+MSG_NL2SQL_SHARE_DENOMINATOR_FEEDBACK = (
+    "占比类指标的分母不得在 Top-N 过滤后的行集上用窗口函数计算（分母会只剩 Top-N 行，"
+    "占比恒等于 100%）；请用独立 CTE 从过滤前明细计算每组总量（如 sup_total），"
+    "再用 JOIN 关联回主查询"
+)
+MSG_NL2SQL_SHARE_INVARIANT_FAILED = (
+    "占比校验未通过：Top-N 占比之和超过 100%，结果不可信"
+    "（分母可能受 Top-N 过滤影响），请换一种问法或补充约束"
+)
+MSG_NL2SQL_SHARE_AMBIGUOUS_WARNING = (
+    "⚠️ 各组占比均为 100%：若各组涉及的明细种类多于 Top-N 的 N，"
+    "此结果可能存在分母错误，建议核对。"
+)
+
 
 # =============================================================================
 # NL2SQL 术语字典

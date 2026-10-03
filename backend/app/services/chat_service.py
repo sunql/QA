@@ -116,6 +116,7 @@ from app.services.llm_retry_policy import (
     retryGenTokens as _retryGenTokens,
 )
 from app.services.nl2sql_service import Nl2SqlService, SqlResult, _readFloatConfig, _safeSchemaPrefix, _sanitizeContext
+from app.services.nl2sql_semantic_guard import shareAmbiguityWarning
 from app.services.nl2sql_dialects import coerceDatasourceType
 from app.services.ontology_service import OntologyService
 from app.services.step_aggregator import StepAggregator
@@ -642,6 +643,13 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         answerResp, answerConfig, wastedAnswer = await self._generateAnswer(
             session, dto, pc, data, finalSql,
         )
+        # L2 歧义示警（feat-nl2sql-share-denominator-guard）：全组占比恒 100% 不可
+        # 数学判错（也可能是组内明细 ≤ N），在答案前追加核对提示——violations 已在
+        # _runQueryWithRetry 出口抛错，到这里只剩 warning 场景。
+        shareWarning = shareAmbiguityWarning(outcome.plan, data)
+        answerText = answerResp.content
+        if shareWarning:
+            answerText = f"{shareWarning}\n\n{answerText}"
         # 4-1（feat-token-cache）：一次性读 cache hit multiplier，避免 chart/answer
         # 路径上每次 _recordUsage 都查一次。chat_service 入口处读取一次足够。
         cacheHitMultiplier = await _readFloatConfig(
@@ -665,7 +673,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         # L2: totalCost is Decimal, captured from LLM usage across all stages (SQL + chart + answer)
         _elapsed_ms = int((time.monotonic() - _t0) * 1000)
         await self._storeSessionMessages(
-            session, dto.sessionId, dto.question, answerResp.content, finalSql,
+            session, dto.sessionId, dto.question, answerText, finalSql,
             routing_layer="L2",
             latency_ms=_elapsed_ms,
             token_cost_usd=float(totalCost),
@@ -705,7 +713,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         # Phase 1.4：拉取目标表的可信度 badge（每张 selectedClass 一条；无 selectedClasses 或失败时为 None）
         dqBadges = await self._buildDataQualityBadges(session, outcome)
         return ChatResponse(
-            answer=answerResp.content,
+            answer=answerText,
             intent=result.intent.value,
             sql=finalSql,
             chartType=chartType,

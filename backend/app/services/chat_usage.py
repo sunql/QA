@@ -15,12 +15,15 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import ChartType
+from app.domain.exceptions import Nl2SqlError
 from app.domain.models import LlmConfig
 from app.domain.query_plan import QueryPlan
 from app.domain.schemas import ChatRequest
 from app.infrastructure.llm.base_client import LlmMessage
 # 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER。
 # 放在 services 层（不在 chat_helpers）以保持 helper 不依赖具体 service。
+from app.services.messages_zh import MSG_NL2SQL_SHARE_INVARIANT_FAILED
+from app.services.nl2sql_semantic_guard import checkShareInvariants
 from app.services.nl2sql_service import _readFloatConfig
 from app.services.chat_helpers import (
     _PipelineContext,
@@ -91,7 +94,6 @@ class UsageMixin:
         retry_question = question if question is not None else dto.question
         try:
             data = await self._runQuery(pc, dto, outcome.sql)
-            return data, outcome.sql, (0, 0)
         except Exception as firstErr:
             cfg = outcome.sqlConfig or pc.selected
             logger.info("SQL 执行失败，回灌错误重试一轮: %s", firstErr)
@@ -137,7 +139,33 @@ class UsageMixin:
                     (retryResult.promptTokens, retryResult.completionTokens),
                 )
                 raise firstErr
+            self._checkShareResult(outcome.plan, data, retryResult.sql)
             return data, retryResult.sql, (retryResult.promptTokens, retryResult.completionTokens)
+        else:
+            # L3 占比不变量核验（feat-nl2sql-share-denominator-guard）：Top-N 占比
+            # 之和/单值 > 100% 数学上不可能（Top-N 是总量子集）→ 结果必然错误。
+            # 放在 else（而非 try 体）里：violations 的 Nl2SqlError 直接向上传播，
+            # 走既有失败路径（单步回退多步拆解 / 多步步级隔离），绝不带病返回，
+            # 也绝不能被本函数的执行失败重试逻辑吞掉重生成（决策 3a：直接失败）。
+            self._checkShareResult(outcome.plan, data, outcome.sql)
+            return data, outcome.sql, (0, 0)
+
+    def _checkShareResult(
+        self, plan: QueryPlan | None, data: list[dict], sql: str | None,
+    ) -> None:
+        """L3/L2 执行后核验：violations 抛 Nl2SqlError；warning 留痕（示警注入在渲染层）。"""
+        shareCheck = checkShareInvariants(plan, data)
+        if shareCheck.violations:
+            logger.warning(
+                "NL2SQL 占比不变量违规: %s sql=%s",
+                shareCheck.violations, (sql or "")[:_RETRY_SQL_LOG_LIMIT],
+            )
+            raise Nl2SqlError(
+                MSG_NL2SQL_SHARE_INVARIANT_FAILED,
+                detail="; ".join(shareCheck.violations),
+            )
+        if shareCheck.warning:
+            logger.warning("NL2SQL 占比歧义示警: sql=%s", (sql or "")[:_RETRY_SQL_LOG_LIMIT])
 
     async def _accountRetryGenUsage(
         self,

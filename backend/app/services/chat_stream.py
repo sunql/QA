@@ -36,6 +36,7 @@ from app.services.intent_service import IntentResult
 # 与 chat_service.processMessage 同口径——在 _streamQuery 入口一次性读一次，
 # 整条流水线复用，避免每段 _costFor 调用都查 DB。
 from app.services.nl2sql_service import _readFloatConfig
+from app.services.nl2sql_semantic_guard import shareAmbiguityWarning
 from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.visual_rationale import summaryTextOnlyRationale
 from app.services.stream_events import (
@@ -653,6 +654,13 @@ class StreamMixin:
             persistState.plan = outcome.plan
             persistState.resultColumns = self._columns(data)
             persistState.totalCostUsd = float(totalCost)
+        # L2 歧义示警（feat-nl2sql-share-denominator-guard）：全组占比恒 100% 不可
+        # 数学判错 → 流式下发的首个 token 即提示（快照 answerPieces 同引用，先追加
+        # 后 yield 保证断连兜底可见）。violations 已在 _runQueryWithRetry 出口抛错。
+        shareWarning = shareAmbiguityWarning(outcome.plan, data)
+        if shareWarning:
+            answerPieces.append(shareWarning)
+            yield StreamEvent(EVENT_TOKEN, {"content": shareWarning})
         # 默认取主模型名：即使流异常地零块完成，done 事件仍报告一个合理的模型名
         answerModelName: str | None = pc.selected.model_name
         async for chunk, answerConfig, (wastedPt, wastedCt) in self._streamAnswerWithFallback(

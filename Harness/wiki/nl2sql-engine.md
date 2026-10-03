@@ -523,6 +523,8 @@ plan 与 sql 两个阶段共用 `_renderStatePart(priorState)` 模块级函数�
 
 - **Oracle 版本分发与连接时探测（2026-10-02）**：Oracle 方言只有**一个版本分叉**——11g 用 ROWNUM、12c+ 用 FETCH FIRST（12c/19c/21c 共用一套）；MySQL/PG 无版本维度。`resolveDialect(type, oracle_version)` 按此分发，点分版本（探测落库原文如 `11.2.0.1.0`）与 `11g` 字样都识别（`startswith(("9","10","11"))`）；版本为空按 12c+ 处理。**连接时自动探测**：`adapter.test()` 第三元返回服务端版本原文（SQLAlchemy `server_version_info` tuple / oracledb `conn.version` str），`datasource_service` 的 create/update 以 best-effort 落库——用户显式值永不被覆盖、探测失败只记 warning 不阻断；`/datasources/test` 响应带 `server_version` 供诊断。**顺带修复**：`DataSourceCreate.oracle_version` 此前从未进构造参数，用户填了也丢。变更记录：`changes/feat-datasource-version-probe/summary.md`。
 
+- **Top-N 占比分母三层守卫（2026-10-02，确定性升级）**：上面的 prompt 规则修复被真机复现证伪为**概率性**——同一问题第二次跑仍可能生成陷阱形态。升级为三层确定性机制（`nl2sql_semantic_guard.py`）：**L1 形态守卫**（`generateSql` 出口、与 SQL Guard 同构回灌重试）——判据是 SQL 求值顺序：WHERE 先于 SELECT，故**同一块**里「排名列过滤（rn/rnk/rank 等 `<=N`）+ 窗口函数占比分母（`/ ... OVER (`）」必然恒 100%，不存在合法同块形态（块 = 顶层语句 + 每个 SELECT/WITH 子查询体，字面量剥离、子查询体置空后按块扫描）；**L3 结果不变量**（`_runQueryWithRetry` 出口 try/else）——Top-N 占比 > 100% 数学上不可能（Top-N 是总量子集），单行 > 1 或组求和 > 1 → `Nl2SqlError` 走既有失败路径，绝不带病返回；**L2 歧义示警**——全组恒 100% 不可数学判错（也可能是组内明细 ≤ N），答案以 ⚠️ 提示开头（非流式拼进 answer，流式首个 token）。已知漏报边界：排名列别名不在词表 / 全局 LIMIT 式 Top-N → 由 L3 兜底。测试判别器 = 真机两条 SQL 原文 fixture（陷阱必拦 / `sup_total` CTE 必放）。变更记录：`changes/feat-nl2sql-share-denominator-guard/summary.md`。
+
 ## 准确性增强
 
 - 注入数据库 ER 图描述（从 Ontology Service 动态拉取）。

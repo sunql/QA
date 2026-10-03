@@ -16,6 +16,7 @@ import pytest
 from httpx import AsyncClient
 
 from app.infrastructure import neo4j_client as neo4j
+from app.tests._neo4j_support import assertAppNeo4jIsIsolated
 
 _neo4jAvailable = neo4j.isNeo4jAvailable()
 
@@ -26,7 +27,13 @@ pytestmark = [
 
 
 def _wipeOntologyNodes() -> None:
-    """清空本体图节点（含其全部边）；不触碰 BusinessEntity 业务子图。"""
+    """清空本体图节点（含其全部边）；不触碰 BusinessEntity 业务子图。
+
+    本函数走 `neo4j.getDriver()`（读应用配置），与集成夹具的 `TEST_NEO4J_URI`
+    是两条路径 —— 2026-10-03 就是在这里用生产 driver 删了线上图谱。故清理前
+    强制复查两边指向同一个测试实例（见 `_neo4j_support`）。
+    """
+    assertAppNeo4jIsIsolated()
     with neo4j.getDriver().session() as session:
         for label in ("Class", "Property", "Metric"):
             session.run(f"MATCH (n:{label}) DETACH DELETE n")

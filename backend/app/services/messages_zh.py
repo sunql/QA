@@ -269,6 +269,7 @@ MSG_CLASS_INHERIT_SELF = "类不能继承自身"
 MSG_CLASS_INHERIT_CYCLE = "父类 id={id} 是当前类的后代，设置继承会形成环"
 MSG_INHERIT_CHECK_UNAVAILABLE = "继承环检测不可用，已拒绝更新"
 MSG_CLASS_ALREADY_EXPIRED = "OntologyClass id={id} 已是历史版本，无需重复删除"
+MSG_CLASS_NOT_EXPIRED = "OntologyClass id={id} 未软删除，无需恢复"
 
 # Property / Metric 错误
 MSG_ONTOLOGY_PROPERTY_NOT_FOUND = "OntologyProperty id={id} 不存在"

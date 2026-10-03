@@ -93,6 +93,9 @@ class LocalImportService:
                 ]
 
         existing_classes = await self._ontology_service.listClasses(session)
+        existing_classes_all = await self._ontology_service.listClasses(
+            session, includeExpired=True
+        )
         existing_properties: list = []
         for cls in existing_classes:
             existing_properties.extend(
@@ -104,6 +107,7 @@ class LocalImportService:
             proposed_properties,
             existing_classes,
             existing_properties,
+            existing_classes_all=existing_classes_all,
         )
 
         return ImportPreviewResponse(

@@ -1413,6 +1413,12 @@ export const zhCN = {
       syncGraphNone: "图谱与本体数据已一致，无需补充",
       syncGraphSuccess: "图谱补充完成：类 {classes} 个、属性 {properties} 个、边 {edges} 条",
       syncGraphPartial: "图谱补充完成：成功 {synced} 项，失败 {failed} 项（详情见后端日志）",
+      showDeleted: "显示已删除",
+      restore: "恢复",
+      restoreConfirm: "确认恢复该类？恢复后会重新进入列表并可编辑。",
+      restored: "类已恢复",
+      statusActive: "有效",
+      statusDeleted: "已删除",
 
       classColumns: {
         id: "ID",
@@ -1426,6 +1432,7 @@ export const zhCN = {
         objectOwner: "责任部门/人",
         description: "描述",
         actions: "操作",
+        status: "状态",
         versionTag: "v{version}",
         versionCurrentTag: "v{version} 当前",
       },
@@ -1763,6 +1770,8 @@ export const zhCN = {
       inferredBy: "推断方式",
       inferredByDeclaredFk: "声明外键",
       inferredByNameConvention: "列名约定",
+      tombstonedAlert: "以下表已被同名软删除类占用",
+      tombstonedAlertItem: "已于 {when} 软删除；请到「本体管理」页恢复后再导入",
     },
   },
 

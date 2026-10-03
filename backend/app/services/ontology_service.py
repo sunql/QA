@@ -66,6 +66,7 @@ from app.services.messages_zh import (
     MSG_CLASS_INHERIT_CYCLE,
     MSG_CLASS_INHERIT_SELF,
     MSG_CLASS_NAME_EXISTS,
+    MSG_CLASS_NOT_EXPIRED,
     MSG_INHERIT_CHECK_UNAVAILABLE,
     MSG_ONTOLOGY_CLASS_EXPIRED,
     MSG_ONTOLOGY_CLASS_NOT_FOUND,
@@ -546,6 +547,97 @@ class OntologyService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Milvus 记录删除失败 id=%d: %s", id, exc)
         logger.info("软删除本体类 id=%d（valid_to=%s）", id, entity.valid_to)
+
+    async def restoreClass(
+        self,
+        session: AsyncSession,
+        id: int,
+        *,
+        actor: CurrentUser,
+    ) -> None:
+        """恢复软删除类：valid_to = NULL（fix-class-tombstone-restore）。
+
+        镜像 deleteClass 的动作流，但方向相反：
+          1. ACL 守卫（owner 部门或 admin）
+          2. 状态校验：已活则抛 MSG_CLASS_NOT_EXPIRED
+          3. valid_to = NULL + audit("RESTORE") + commit
+          4. Neo4j 节点复活（upsertClassNode 幂等：若 delete 已删则 create，
+             否则覆盖更新）
+          5. Milvus 向量复活（best-effort 后台同步）
+
+        createClass / deleteClass 在 §7 不动 createClass 占名校验的前提下，
+        本接口是「释放名字」的唯一入口。
+        """
+        entity = await self.getClass(session, id)
+        self._acl.assertCanModify(
+            actor,
+            entity_owner=entity.object_owner,
+            entity_label="ONTOLOGY_CLASS",
+            entity_code=entity.class_name,
+        )
+        if entity.valid_to is None:
+            raise ValidationError(MSG_CLASS_NOT_EXPIRED.format(id=id))
+        before = _entityToDict(entity)
+        entity.valid_to = None
+        await session.flush()
+        await _audit.record(
+            session,
+            entity_type="ONTOLOGY_CLASS",
+            entity_id=entity.id,
+            action="RESTORE",
+            actor=actor.userId,
+            actor_departments=actor.departments,
+            before=before,
+        )
+        await session.commit()
+        await session.refresh(entity)
+
+        # Neo4j 节点复活。id_mapping 行**未必存在**：该特性晚于部分老类落库，
+        # 且历史回填只覆盖活类（活类 32 行 vs 全量 34 类）。缺失时补注册——
+        # 否则 Neo4j 拿不到 unified_id，restore 会产出「PG 可见但图不可达」的
+        # 半残类，且 updateClass 的 resolveByExternal 会抛 RuntimeError 被
+        # best-effort 静默吞掉，Neo4j 属性永远不再同步。
+        id_mapping_svc = IdMappingService()
+        class_uid_row = await id_mapping_svc.resolveByExternal(
+            session, "CLASS", str(id)
+        )
+        if class_uid_row is None:
+            mapping = await id_mapping_svc.register(
+                session,
+                IdMappingCreate(
+                    business_object="CLASS",
+                    external_id=str(entity.id),
+                    pg_table="ontology_class",
+                    pg_id=str(entity.id),
+                ),
+            )
+            unified_id = mapping.unified_id
+        else:
+            unified_id = class_uid_row.unified_id
+        try:
+            neo4j.upsertClassNode(
+                unified_id=unified_id,
+                name=entity.class_name,
+                alias=entity.class_alias,
+                description=entity.description,
+                sourceTable=entity.source_table,
+            )
+            if entity.parent_class_id:
+                parent_mapping = await id_mapping_svc.resolveByExternal(
+                    session, "CLASS", str(entity.parent_class_id)
+                )
+                if parent_mapping is not None:
+                    neo4j.reconcileClassSubclassOf(
+                        unified_id, parent_mapping.unified_id
+                    )
+        except Exception as exc:  # noqa: BLE001
+            _logNeo4jFailure("节点恢复", id, exc)
+
+        # Milvus 向量复活（deleteClass 时一并清；best-effort 后台执行，
+        # 与 createClass 同语义 —— 失败仅告警，不影响 CRUD 响应）
+        await self._syncClassEmbeddingBestEffort(entity)
+
+        logger.info("恢复本体类 id=%d", id)
 
     # =============================================================================
     # Property

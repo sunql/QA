@@ -345,6 +345,10 @@ class LlmConfigCreate(CamelModel):
     cost_threshold: Decimal = Field(default=Decimal("0.05"), ge=0, description=MSG_SCHEMA_MODEL_COST_THRESHOLD)
     is_active: bool = Field(default=True, description=MSG_SCHEMA_MODEL_IS_ACTIVE)
     temperature: float | None = Field(default=None, description="模型 temperature 值，留空使用默认值 0.0")
+    disable_thinking: bool = Field(
+        default=False,
+        description="关闭推理模型思维链（M3 支持；非推理模型传了也无害）",
+    )
 
 
 class LlmConfigUpdate(CamelModel):
@@ -357,6 +361,9 @@ class LlmConfigUpdate(CamelModel):
     cost_threshold: Decimal | None = Field(default=None, ge=0)
     is_active: bool | None = None
     temperature: float | None = None
+    # 走 exclude_unset 语义：显式传 false 会被 setattr 落库（取消勾选能生效）；
+    # 不传该字段则不动原值（部分更新语义）。
+    disable_thinking: bool | None = None
 
 
 class LlmConfigRead(CamelModel):
@@ -371,6 +378,7 @@ class LlmConfigRead(CamelModel):
     cost_threshold: Decimal
     is_active: bool
     temperature: float | None = None
+    disable_thinking: bool = False
     created_time: datetime | None = None
     updated_time: datetime | None = None
 
@@ -1424,21 +1432,29 @@ class ImportRuleConfig(CamelModel):
 
 
 class ConflictType(StrEnum):
-    """导入冲突类型：类（表级）或属性（列级）。"""
+    """导入冲突类型：类（表级）或属性（列级）。
+
+    CLASS_TOMBSTONED（fix-class-tombstone-restore）：同名软删除墓碑占位。
+    预览期显式提示用户先到本体管理页恢复；执行期仍由 createClass 的占名
+    校验兜底（避免同名双活类）。
+    """
 
     CLASS = "class"
     PROPERTY = "property"
+    CLASS_TOMBSTONED = "class_tombstoned"
 
 
 class ImportConflict(CamelModel):
     """本地导入时，建议的类/属性与既有本体的冲突。"""
 
-    type: ConflictType = Field(..., description="冲突类型：class | property")
+    type: ConflictType = Field(..., description="冲突类型：class | property | class_tombstoned")
     source_table: str | None = Field(default=None, description="冲突涉及的源表名")
     source_column: str | None = Field(default=None, description="冲突涉及的源列名（仅属性冲突）")
     existing_id: int = Field(..., description="既有本体类/属性的 id")
     existing_name: str | None = Field(default=None, description="既有本体类/属性名称")
     proposed_name: str | None = Field(default=None, description="建议的类/属性名称")
+    # 仅 CLASS_TOMBSTONED 时填充：墓碑的 valid_to 时间戳，方便前端渲染「已于 X 软删除」
+    existing_valid_to: datetime | None = Field(default=None, description="既有本体类的 valid_to（仅墓碑冲突）")
     # 处置动作：skip（默认，保留既有）| overwrite（覆盖）| rename（改名新建）
     action: str = "skip"
 

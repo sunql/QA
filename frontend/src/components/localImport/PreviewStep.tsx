@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
-import { Button, Input, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Input, Space, Table, Tag, Typography } from "antd";
 import type { TableColumnsType, TableProps } from "antd";
 import { useTranslation } from "../../i18n";
 import type {
+  ImportConflict,
   ImportExecuteRequest,
   ImportPreviewResponse,
   ProposedClass,
@@ -20,6 +21,10 @@ interface PreviewStepProps {
 // 预览确认：分页展示 proposedClasses，支持按表名/类名搜索、勾选子集分批导入。
 // 关联关系单独一节：每条 join 一个勾选框，两端都被勾选的类才可选；可整表开关。
 // 已选类对应 join 默认全部勾上，落库前由 buildExecuteRequest 收敛为「两端都选且勾选」的边。
+//
+// fix-class-tombstone-restore：preview.conflicts 中含 type="class_tombstoned"
+// 的项触发顶部 Alert（不可关闭），列出已被同名软删除的源表名 + 软删时间；
+// 「全选当前筛选」会自动跳过这些表（执行期由 createClass 占名校验兜底）。
 export default function PreviewStep({ preview, onExecute }: PreviewStepProps) {
   const { t } = useTranslation();
   const [searchText, setSearchText] = useState("");
@@ -27,6 +32,21 @@ export default function PreviewStep({ preview, onExecute }: PreviewStepProps) {
   // 被用户手动关掉的 join（joinKey 集合）。有效集合 = 两端已选 join − 此排除集。
   const [excludedJoinKeys, setExcludedJoinKeys] = useState<ReadonlySet<string>>(
     () => new Set<string>()
+  );
+
+  // 墓碑冲突视图（小写 source_table 集合）—「全选当前筛选」跳过这些表。
+  const tombstonedConflicts = useMemo<ImportConflict[]>(
+    () => preview.conflicts.filter((c) => c.type === "class_tombstoned"),
+    [preview.conflicts]
+  );
+  const tombstoneTableSet = useMemo<ReadonlySet<string>>(
+    () =>
+      new Set(
+        tombstonedConflicts
+          .map((c) => (c.sourceTable ?? "").toLowerCase())
+          .filter((s) => s.length > 0)
+      ),
+    [tombstonedConflicts]
   );
 
   // 搜索为展示层过滤：不改变选中集合，也不影响最终提交范围。
@@ -71,10 +91,16 @@ export default function PreviewStep({ preview, onExecute }: PreviewStepProps) {
 
   // 累计语义：把当前筛选命中的行并入已选集合（分批导入时按子集逐批勾选）。
   // 取消选中用表头 checkbox（对当前筛选集 toggle）。
+  // 墓碑冲突源表跳过：执行期 createClass 占名校验会兜底拦截（MSG_CLASS_NAME_EXISTS），
+  // 在这里直接过滤避免用户选了一个注定会失败的目标。
   const handleSelectFiltered = () => {
     setSelectedRowKeys((prev) => {
       const next = new Set(prev);
-      filteredClasses.forEach((c) => next.add(c.sourceTable));
+      filteredClasses.forEach((c) => {
+        if (!tombstoneTableSet.has(c.sourceTable.toLowerCase())) {
+          next.add(c.sourceTable);
+        }
+      });
       return Array.from(next);
     });
   };
@@ -173,6 +199,29 @@ export default function PreviewStep({ preview, onExecute }: PreviewStepProps) {
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      {tombstonedConflicts.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          closable={false}
+          data-testid="tombstoned-alert"
+          message={t("localImport.preview.tombstonedAlert")}
+          description={
+            <ul style={{ margin: 0, paddingInlineStart: 18 }}>
+              {tombstonedConflicts.map((c) => (
+                <li key={`${c.type}-${c.existingId}-${c.sourceTable ?? ""}`}>
+                  <Text code>{c.sourceTable}</Text>
+                  {c.existingValidTo
+                    ? t("localImport.preview.tombstonedAlertItem", {
+                        when: new Date(c.existingValidTo).toLocaleString("zh-CN"),
+                      })
+                    : null}
+                </li>
+              ))}
+            </ul>
+          }
+        />
+      )}
       <Space>
         <Input
           allowClear

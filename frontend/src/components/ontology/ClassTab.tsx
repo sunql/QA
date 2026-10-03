@@ -22,6 +22,8 @@ import {
   createClass,
   updateClass,
   deleteClass,
+  restoreClass,
+  listClasses,
   listClassVersions,
   syncClassEmbedding,
   syncMissingEmbeddings,
@@ -74,14 +76,23 @@ const EMPTY_CLASS_FORM: ClassFormValues = {
 export interface ClassTabProps {
   classes: OntologyClass[];
   refreshClasses: () => Promise<void>;
+  /** fix-class-tombstone-restore：true → ClassTab 自管拉取包含墓碑的列表 */
+  includeExpired?: boolean;
 }
 
-export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
+export default function ClassTab({
+  classes,
+  refreshClasses,
+  includeExpired = false,
+}: ClassTabProps) {
   const { t, locale } = useTranslation();
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<OntologyClass | null>(null);
   const [form] = Form.useForm<ClassFormValues>();
+  // 表格数据源：按 includeExpired 独立拉取（不影响父类传给 PropertyTab/JoinTab 等的 classes）
+  const [displayedClasses, setDisplayedClasses] = useState<OntologyClass[]>(classes);
+  const [restoringIds, setRestoringIds] = useState<number[]>([]);
   // 动态主题：App.useApp() 返回的 message 能跟随 ConfigProvider theme/消息样式，
   // 替代从 antd 顶层 import 的静态 message（5.x 起会有"Static function can not
   // consume context"的运行时警告）。
@@ -97,7 +108,10 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
     []
   );
   const resetFilters = useCallback(() => setFilters({}), []);
-  const filteredClasses = useMemo(() => filterClasses(classes, filters), [classes, filters]);
+  const filteredClasses = useMemo(
+    () => filterClasses(displayedClasses, filters),
+    [displayedClasses, filters]
+  );
   // 向量同步：单条进行中的类 id 集合 + 批量对账进行中标记
   const [syncingIds, setSyncingIds] = useState<number[]>([]);
   const [batchSyncing, setBatchSyncing] = useState(false);
@@ -195,16 +209,21 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
     { key: "description", label: t("forms.ontology.classLabels.description") },
   ];
 
-  const load = useCallback(async () => {
+  // fix-class-tombstone-restore：load() 现在拉取自管数据 + 触发父组件刷新活类列表。
+  // 父类传来的 `classes` 仅作 parentClassOptions 的源；表格数据源完全自管。
+  const loadDisplayed = useCallback(async () => {
     setLoading(true);
     try {
-      await refreshClasses();
+      setDisplayedClasses(await listClasses({ includeExpired }));
     } catch {
       // 错误已由拦截器提示
     } finally {
       setLoading(false);
     }
-  }, [refreshClasses]);
+  }, [includeExpired]);
+  const load = useCallback(async () => {
+    await Promise.all([loadDisplayed(), refreshClasses()]);
+  }, [loadDisplayed, refreshClasses]);
 
   useEffect(() => {
     void load();
@@ -281,6 +300,19 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
       void load();
     } catch {
       // 错误已由拦截器提示
+    }
+  };
+
+  const handleRestore = async (id: number) => {
+    setRestoringIds((prev) => [...prev, id]);
+    try {
+      await restoreClass(id);
+      void message.success(t("forms.ontology.restored"));
+      void load();
+    } catch {
+      // 错误已由拦截器提示
+    } finally {
+      setRestoringIds((prev) => prev.filter((x) => x !== id));
     }
   };
 
@@ -389,6 +421,21 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
           t("common.dash")
         ),
     },
+    ...(includeExpired
+      ? [
+          {
+            title: t("forms.ontology.classColumns.status"),
+            dataIndex: "validTo",
+            width: 90,
+            render: (v: string | null) =>
+              v != null ? (
+                <Tag color="red">{t("forms.ontology.statusDeleted")}</Tag>
+              ) : (
+                <Tag color="green">{t("forms.ontology.statusActive")}</Tag>
+              ),
+          },
+        ]
+      : []),
     {
       title: t("forms.ontology.classColumns.actions"),
       width: 230,
@@ -408,14 +455,34 @@ export default function ClassTab({ classes, refreshClasses }: ClassTabProps) {
           >
             {t("forms.ontology.syncEmbedding")}
           </Button>
-          <Popconfirm
-            title={t("forms.ontology.deleteConfirm")}
-            onConfirm={() => void handleDelete(record.id)}
-          >
-            <Button size="small" danger>
-              {t("common.delete")}
-            </Button>
-          </Popconfirm>
+          {record.validTo != null ? (
+            <Popconfirm
+              title={t("forms.ontology.restoreConfirm")}
+              okText={t("common.confirm")}
+              cancelText={t("common.cancel")}
+              onConfirm={() => void handleRestore(record.id)}
+            >
+              <Button
+                size="small"
+                type="primary"
+                ghost
+                loading={restoringIds.includes(record.id)}
+              >
+                {t("forms.ontology.restore")}
+              </Button>
+            </Popconfirm>
+          ) : (
+            <Popconfirm
+              title={t("forms.ontology.deleteConfirm")}
+              okText={t("common.confirm")}
+              cancelText={t("common.cancel")}
+              onConfirm={() => void handleDelete(record.id)}
+            >
+              <Button size="small" danger>
+                {t("common.delete")}
+              </Button>
+            </Popconfirm>
+          )}
         </Space>
       ),
     },

@@ -118,6 +118,7 @@ from app.services.llm_retry_policy import (
 from app.services.nl2sql_service import Nl2SqlService, SqlResult, _readFloatConfig, _safeSchemaPrefix, _sanitizeContext
 from app.services.nl2sql_semantic_guard import shareAmbiguityWarning
 from app.services.nl2sql_dialects import coerceDatasourceType
+from app.services.think_block import applyThinkPolicy
 from app.services.ontology_service import OntologyService
 from app.services.step_aggregator import StepAggregator
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
@@ -647,7 +648,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         # 数学判错（也可能是组内明细 ≤ N），在答案前追加核对提示——violations 已在
         # _runQueryWithRetry 出口抛错，到这里只剩 warning 场景。
         shareWarning = shareAmbiguityWarning(outcome.plan, data)
-        answerText = answerResp.content
+        # Think_Hide（feat-think-hide）：推理模型的 <think> 思维链按系统参数剥离
+        answerText = await applyThinkPolicy(session, answerResp.content)
         if shareWarning:
             answerText = f"{shareWarning}\n\n{answerText}"
         # 4-1（feat-token-cache）：一次性读 cache hit multiplier，避免 chart/answer

@@ -30,6 +30,7 @@ from app.services.stream_events import (
     EVENT_TOKEN,
     StreamEvent,
 )
+from app.services.think_block import ThinkStreamFilter, isThinkHideEnabled
 from app.services.wiki_qa_prompt import (
     WIKI_QA_SYSTEM_PROMPT,
     WIKI_QA_USER_TEMPLATE,
@@ -194,17 +195,27 @@ class WikiQaService:
             ),
         ]
 
-        # 8. 流式 LLM
+        # 8. 流式 LLM（Think_Hide 开启时增量过滤 <think> 思维链，下发与落库一致）
         full_answer = ""
         total_pt = 0
         total_ct = 0
+        thinkFilter: ThinkStreamFilter | None = (
+            ThinkStreamFilter() if await isThinkHideEnabled(session) else None
+        )
         async for chunk in client.completeStream(messages, model=selected.model_name):
-            full_answer += chunk.content
             if chunk.content:
-                yield StreamEvent(EVENT_TOKEN, {"content": chunk.content})
+                content = thinkFilter.feed(chunk.content) if thinkFilter else chunk.content
+                if content:
+                    full_answer += content
+                    yield StreamEvent(EVENT_TOKEN, {"content": content})
             if chunk.isDone:
                 total_pt = chunk.promptTokens
                 total_ct = chunk.completionTokens
+        if thinkFilter is not None:
+            tail = thinkFilter.flush()
+            if tail:
+                full_answer += tail
+                yield StreamEvent(EVENT_TOKEN, {"content": tail})
 
         # 9. 计量 + cost（核心约束 #3：每次 LLM 调用必须记录）
         cost = (

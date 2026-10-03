@@ -38,6 +38,7 @@ from app.services.intent_service import IntentResult
 from app.services.nl2sql_service import _readFloatConfig
 from app.services.nl2sql_semantic_guard import shareAmbiguityWarning
 from app.services.chart_thresholds import loadFullDataThreshold
+from app.services.think_block import ThinkStreamFilter, applyThinkPolicy, isThinkHideEnabled
 from app.services.visual_rationale import summaryTextOnlyRationale
 from app.services.stream_events import (
     ErrorType,
@@ -663,6 +664,11 @@ class StreamMixin:
             yield StreamEvent(EVENT_TOKEN, {"content": shareWarning})
         # 默认取主模型名：即使流异常地零块完成，done 事件仍报告一个合理的模型名
         answerModelName: str | None = pc.selected.model_name
+        # Think_Hide（feat-think-hide）：开启时对 token 流增量过滤 <think> 思维链，
+        # answerPieces 只收过滤后的内容（断连兜底落库与用户所见一致）
+        thinkFilter: ThinkStreamFilter | None = (
+            ThinkStreamFilter() if await isThinkHideEnabled(session) else None
+        )
         async for chunk, answerConfig, (wastedPt, wastedCt) in self._streamAnswerWithFallback(
             session, dto.sessionId, pc.configs, pc.selected, dto, finalSql, data,
             forced=pc.forcedModel, history=pc.contextPrompt,
@@ -687,8 +693,16 @@ class StreamMixin:
                     persistState.totalCostUsd = float(totalCost)
             if chunk.content:
                 # 独立 if 而非 elif：即使 isDone 块携带内容也不丢失
-                answerPieces.append(chunk.content)
-                yield StreamEvent(EVENT_TOKEN, {"content": chunk.content})
+                content = thinkFilter.feed(chunk.content) if thinkFilter else chunk.content
+                if content:
+                    answerPieces.append(content)
+                    yield StreamEvent(EVENT_TOKEN, {"content": content})
+        if thinkFilter is not None:
+            # 流收尾：NORMAL 态吐出截断的候选缓冲，IN_THINK 态为空（未闭合=隐藏）
+            tail = thinkFilter.flush()
+            if tail:
+                answerPieces.append(tail)
+                yield StreamEvent(EVENT_TOKEN, {"content": tail})
 
         answer = "".join(answerPieces)
         # L2 streaming: totalCost includes SQL + chart + answer LLM costs
@@ -896,7 +910,8 @@ class StreamMixin:
                     ),
                     forced=pc.forcedModel,
                 )
-                agg_content = agg_resp[0].content
+                # Think_Hide（feat-think-hide）：汇总答案按系统参数剥离 <think> 思维链
+                agg_content = await applyThinkPolicy(session, agg_resp[0].content)
                 agg_config = agg_resp[1]
                 agg_pt = agg_resp[0].promptTokens
                 agg_ct = agg_resp[0].completionTokens

@@ -48,6 +48,7 @@ from app.services.messages_zh import (
 )
 from app.services.nl2sql_service import _readFloatConfig
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
+from app.services.think_block import applyThinkPolicy
 from app.services.visual_rationale import summaryTextOnlyRationale
 
 logger = logging.getLogger(__name__)
@@ -618,7 +619,8 @@ class MultiStepMixin:
                     ),
                     forced=pc.forcedModel,
                 )
-                agg_content = agg_resp[0].content
+                # Think_Hide（feat-think-hide）：汇总答案按系统参数剥离 <think> 思维链
+                agg_content = await applyThinkPolicy(session, agg_resp[0].content)
                 agg_config = agg_resp[1]
                 agg_pt = agg_resp[0].promptTokens
                 agg_ct = agg_resp[0].completionTokens

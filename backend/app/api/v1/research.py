@@ -79,6 +79,7 @@ from app.services.research_agent_ports import (
     ERROR_TURN_FAILED,
     EVENT_DONE,
     EVENT_ERROR,
+    TERMINAL_ERROR_CODES,
     nextPhase,
 )
 from app.services.research_agent_service import ResearchAgentService
@@ -107,15 +108,6 @@ HEARTBEAT_SECONDS = 15.0
 
 HEARTBEAT_LINE = ": ping\n\n"
 """SSE 注释行（心跳帧；客户端按 SSE 规范忽略）。"""
-
-TERMINAL_ERROR_CODES = frozenset({ERROR_TURN_FAILED})
-"""**终态**错误码：仅 `turn_failed` 关流。
-
-设计 §4.5 的 `research.error` 同时承载两类语义：①turn 终止（`_guardedRun` 捕获后
-会话置 failed）②可见降级（`llm_unavailable` / 步失败 / 假设生成失败，状态机**继续**
-推进）。一律关流会让降级路径的客户端丢掉后续全部事件（含 `research.done`），故流端
-只对终态码关流（见 task-8-report 偏差 #1）。
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +424,12 @@ def _sseFrame(event: str, payload: dict[str, Any]) -> str:
 
 
 def _isTerminal(event: str, payload: dict[str, Any]) -> bool:
-    """终态判定：`research.done` 或**终态**错误码（降级类 error 不关流，见常量注释）。"""
+    """终态判定：`research.done` 或**终态**错误码（降级类 error 不关流）。
+
+    终态集合由 `research_agent_ports.ERROR_SPECS` 派生（`TERMINAL_ERROR_CODES`），
+    只有 `turn_failed` 关流；降级类（llm_unavailable / 步失败等）不关流，否则客户端
+    会丢掉后续事件（含 `research.done`）。
+    """
     if event == EVENT_DONE:
         return True
     return event == EVENT_ERROR and payload.get("code") in TERMINAL_ERROR_CODES
@@ -470,14 +467,7 @@ async def _runTurnInBackground(
         except Exception as exc:  # noqa: BLE001 —— 后台任务兜底：留痕 + 回滚，不上抛
             logger.exception("研究 turn 后台执行失败: session=%s turn=%s", sessionId, turnId)
             await session.rollback()
-            # Task 8 fix round 1（Important #2）：`_guardedRun` 之前的异常（requireQuestion 的
-            # 空白问题守卫）逃到这里，旧实现只 log+rollback ⇒ 已订阅流只收心跳永不终止。
-            # 补发终态错误让流收敛（总线投递是进程内，与已 rollback 的 DB 事务无关）。
-            await _bus.publish(
-                sessionId,
-                EVENT_ERROR,
-                {"code": ERROR_TURN_FAILED, "message": str(exc)},
-            )
+            await _markTerminalFailure(service, session, sessionId, str(exc))
 
 
 async def _resumeTurnInBackground(
@@ -501,13 +491,27 @@ async def _resumeTurnInBackground(
         except Exception as exc:  # noqa: BLE001 —— 同上：留痕 + 回滚
             logger.exception("研究 turn 恢复失败: checkpoint=%s action=%s", checkpointId, action)
             await session.rollback()
-            # Task 8 fix round 1（Important #2）：resumeTurn 的非法 action / resolveCheckpoint
-            # 已决策 ValueError 都在 `_guardedRun` 之前抛，逃到这里 ⇒ 补发终态错误让流收敛。
-            await _bus.publish(
-                sessionId,
-                EVENT_ERROR,
-                {"code": ERROR_TURN_FAILED, "message": str(exc)},
-            )
+            await _markTerminalFailure(service, session, sessionId, str(exc))
+
+
+async def _markTerminalFailure(
+    service: ResearchAgentService, session: AsyncSession, sessionId: str, message: str
+) -> None:
+    """后台 wrapper 兜底：补发终态 error（关流）+ 会话落 failed（rollback 后同 session 开新事务）。
+
+    只对**终态** code 落 failed —— 判定走 ERROR_SPECS 派生的 `TERMINAL_ERROR_CODES`，
+    不硬编码 `turn_failed` 字面量。rollback 后写库失败只留痕、不掩盖原始异常（原始异常
+    已由调用方 `logger.exception` 留痕）。
+    """
+    code = ERROR_TURN_FAILED
+    await _bus.publish(sessionId, EVENT_ERROR, {"code": code, "message": message})
+    if code not in TERMINAL_ERROR_CODES:
+        return
+    try:
+        await service.markFailed(session, uuid.UUID(sessionId))
+        await session.commit()
+    except Exception:  # noqa: BLE001 —— rollback 后写库失败只留痕，不掩盖原始异常
+        logger.exception("终态错误落 failed 失败: session=%s", sessionId)
 
 
 # ---------------------------------------------------------------------------

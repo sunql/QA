@@ -317,6 +317,9 @@ async def test_degraded_error_does_not_close_stream(
     assert codes and set(codes) == {"llm_unavailable"}
     assert events[-1] == "research.done"
     assert payloads[-1]["degraded"] is True
+    # Task 8.5：llm_unavailable 是**降级**（terminal=False）⇒ 会话不得落 failed，继续到 done
+    detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    assert detail.json()["session"]["status"] == "done"
 
 
 async def test_turn_wrapper_emits_terminal_error_on_pre_guard_failure(

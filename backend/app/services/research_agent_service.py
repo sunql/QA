@@ -91,12 +91,7 @@ from app.services.research_agent_ports import (
     Reporter,
     UsageRecorder,
     buildOptions,
-    candidateConfidence,
-    clientModelName,
-    dataSummary,
-    drivers,
     emitEvent,
-    eslClasses,
     findingData,
     nextPhase,
     nextPhaseForPhase,
@@ -105,10 +100,12 @@ from app.services.research_agent_ports import (
     recordUsageQuietly,
     requireQuestion,
     resolveClient,
-    selectedHypotheses,
     stepSignal,
 )
-from app.services.research_agent_stages import rebuildState, resumeTurnContent, rewriteState
+from app.services.research_agent_stages import (
+    candidateConfidence, clientModelName, dataSummary, drivers, eslClasses, rebuildState,
+    resumeTurnContent, rewriteState, selectedHypotheses,
+)
 from app.services.research_hypothesis_adapter import generateHypotheses
 from app.services.research_session_service import ResearchSessionService
 from app.services.token_usage_service import TokenUsageService
@@ -359,7 +356,7 @@ class ResearchAgentService:
                 EVENT_ERROR,
                 {"code": ERROR_TURN_FAILED, "message": str(exc), "phase": phase},
             )
-            await self._markFailed(session, sessionId)
+            await self.markFailed(session, sessionId)
             raise
 
     async def _runFrom(
@@ -782,8 +779,8 @@ class ResearchAgentService:
             cachedTokens=cachedTokens,
         )
 
-    async def _markFailed(self, session: AsyncSession, sessionId: uuid.UUID) -> None:
-        """把会话标 failed（best-effort：此处已在异常路径，不再抛二次异常）。"""
+    async def markFailed(self, session: AsyncSession, sessionId: uuid.UUID) -> None:
+        """把会话标 failed（公开面：`_guardedRun` 与 API 后台 wrapper 共用；best-effort 不抛二次异常）。"""
         try:
             await self._sessions.updateSessionStatus(session, sessionId, STATUS_FAILED)
         except Exception:  # noqa: BLE001 —— 失败态落库失败不能盖住原始异常

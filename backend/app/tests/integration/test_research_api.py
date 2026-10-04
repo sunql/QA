@@ -286,14 +286,16 @@ async def test_turn_returns_202_and_state_machine_runs(
     assert [t["role"] for t in payload["turns"]] == ["user", "checkpoint_awaiting"]
 
 
-async def test_turn_with_whitespace_question_does_not_advance(
+async def test_turn_with_whitespace_question_marks_session_failed(
     client: AsyncClient, authHeaders: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """LOW：空白问题经 API 路径（createTurn → appendTurn → runTurn）被守卫拦下。
+    """Task 8.5：空白问题在 `_guardedRun` 之前抛 ⇒ 后台 wrapper 落终态 failed。
 
-    Pydantic `min_length=1` 只挡空串，`"   "` 能过边界；守卫下沉到 `runTurn` 后，
-    后台状态机在写 checkpoint 之前就 ValueError ⇒ 会话不推进（无 pending 检查点、
-    无 checkpoint_awaiting 轮次）。
+    Pydantic `min_length=1` 只挡空串，`"   "` 能过边界；守卫下沉到 `runTurn` 后抛
+    ValueError，逃到 `_runTurnInBackground` 的 except。旧实现只补发 error 事件、不改
+    会话状态（停在 running），现在按 ERROR_SPECS 把会话落 failed（表里写的
+    `turn_failed → sessionStatus=failed` 在真实数据上成立）。状态机本身仍不推进：
+    无 pending checkpoint、无 checkpoint_awaiting 轮次。
     """
     monkeypatch.setattr(researchModule, "buildResearchAgentService", _fastService)
     created = await _createSession(client, authHeaders, question="q")
@@ -309,7 +311,7 @@ async def test_turn_with_whitespace_question_does_not_advance(
     payload = detail.json()
     assert payload["pendingCheckpoint"] is None
     assert [t["role"] for t in payload["turns"]] == ["user"]  # 只有请求事务里写的 user turn
-    assert payload["session"]["status"] == "running"
+    assert payload["session"]["status"] == "failed"
 
 
 async def test_checkpoint_answer_and_double_submit_409(

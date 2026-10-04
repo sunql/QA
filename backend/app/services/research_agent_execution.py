@@ -38,12 +38,12 @@ from app.services.research_agent_ports import (
     Emit,
     MeteredClient,
     emitEvent,
-    eslClasses,
     rollbackQuietly,
     selectClassesForTables,
+    stepErrorCode,
     stepResult,
-    stepSignal,
 )
+from app.services.research_agent_stages import eslClasses
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +170,7 @@ async def failedStep(
     await emitEvent(
         emit,
         EVENT_ERROR,
-        {"code": stepSignal(error), "message": error, "stepIndex": result["index"]},
+        {"code": stepErrorCode(error), "message": error, "stepIndex": result["index"]},
     )
     return result
 

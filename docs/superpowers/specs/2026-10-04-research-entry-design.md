@@ -197,6 +197,32 @@ event: research.done             {report_id, version}
 event: research.error            {code, message}
 ```
 
+#### 4.5.1 error code 方案（Task 8.5，用户裁定 2026-10-04）
+
+`research.error` 的 `code` 采用**扁平名 + SSOT 表**，单一事实来源是
+`backend/app/services/research_agent_ports.py` 的 `ERROR_SPECS`（`ErrorSpec` frozen
+dataclass：`terminal` / `sessionStatus` / `payloadFields` / `uiHint` / `summary`）。
+终态判定集合 `TERMINAL_ERROR_CODES` **由表派生**，判定处不得自持集合字面量。
+
+| code | terminal | sessionStatus | payloadFields | uiHint |
+|---|---|---|---|---|
+| `turn_failed` | `True` | `failed` | `("phase",)` | `terminal` |
+| `llm_unavailable` | `False` | `running` | `()` | `degraded` |
+| `hypothesis_generation_failed` | `False` | `running` | `()` | `degraded` |
+| `sql_validation_failed` | `False` | `awaiting_user` | `("stepIndex",)` | `degraded` |
+| `step_failed` | `False` | `awaiting_user` | `("stepIndex",)` | `degraded` |
+
+三条规则：
+
+1. **终态由 `ERROR_SPECS` 派生**：`TERMINAL_ERROR_CODES == {code | spec.terminal}`，
+   任何终态判定点（流关流、会话落 `failed`）都从该派生集合判定，不得硬编码集合字面量。
+2. **checkpoint phase 词汇永不作为 error code**：`fixed_scope` / `fixed_plan` /
+   `fixed_hypothesis` / `empty_scope` / `low_confidence_step` 属于
+   `CheckpointPhase` / `options["signal"]` 白名单，只由 `stepSignal` 产出；
+   步失败的 error code 由 `stepErrorCode` 产出（通用 → `step_failed`，SQL Guard →
+   `sql_validation_failed`），两套词汇解耦，`step_failed` 绝不进 phase 白名单。
+3. **前端按 `uiHint` 的「类」分支**（`terminal` / `degraded`），不按 code 逐个判断。
+
 ### 4.6 Enterprise Semantic Layer（ESL）
 
 **输入**：`{question: str, intent: IntentResult, session_ctx?: ResearchSessionContext}`

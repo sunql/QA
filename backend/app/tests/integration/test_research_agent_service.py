@@ -708,6 +708,35 @@ async def test_step_failure_emits_research_error_event(dbSession, makeService) -
 
 
 @pytest.mark.asyncio
+async def test_generic_step_failure_emits_step_failed_and_keeps_low_confidence_phase(
+    dbSession, makeService
+) -> None:
+    """Task 8.5：通用步失败（非 SQL Guard）→ error code == step_failed，且相位不被污染。
+
+    一条测试同时钉住「code 改名（step_failed 与 checkpoint phase 解耦）」与「相位仍是
+    low_confidence_step、signal 仍是 low_confidence_step（step_failed 不进白名单）」。
+    """
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc = makeService(runner=FakeRunner(raiseError=TimeoutError("执行超时")))
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → plan → 固定 #2
+    await _resolve(svc, dbSession, s.id, "confirm", emit=collect)  # → execute
+
+    errors = [p for (e, p) in events if e == "research.error"]
+    assert [p["code"] for p in errors] == ["step_failed"]
+    # payloadFields == ("stepIndex",) 与真实发射点 payload 的键一致（防表与代码漂移）
+    assert set(errors[0].keys()) == {"code", "message", "stepIndex"}
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "low_confidence_step"
+    assert cp.options["signal"] == "low_confidence_step"
+
+
+@pytest.mark.asyncio
 async def test_missing_llm_client_is_user_visible_not_silent(dbSession, makeService) -> None:
     """MEDIUM-4：llmFactory 取不到客户端必须显式留痕（`research.error` + 报告降级标记）。"""
     events: list[tuple[str, dict]] = []

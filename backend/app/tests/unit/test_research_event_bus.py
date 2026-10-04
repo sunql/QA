@@ -10,6 +10,15 @@ import logging
 import pytest
 
 from app.api.v1 import research as researchModule
+from app.services.research_agent_ports import (
+    ERROR_HYPOTHESIS_FAILED,
+    ERROR_LLM_UNAVAILABLE,
+    ERROR_SQL_VALIDATION_FAILED,
+    ERROR_SPECS,
+    ERROR_STEP_FAILED,
+    ERROR_TURN_FAILED,
+    TERMINAL_ERROR_CODES,
+)
 from app.services.research_event_bus import EVENT_CONNECTED, QUEUE_MAX, ResearchEventBus
 
 # ---------------------------------------------------------------------------
@@ -115,6 +124,7 @@ async def test_event_frames_renders_published_event(
         ("research.error", {"code": "turn_failed"}, True),
         ("research.error", {"code": "llm_unavailable"}, False),
         ("research.error", {"code": "sql_validation_failed"}, False),
+        ("research.error", {"code": "step_failed"}, False),
         ("research.step.done", {"index": 0}, False),
         ("research.checkpoint", {"phase": "intent"}, False),
     ],
@@ -124,3 +134,49 @@ def test_is_terminal_only_closes_on_done_or_turn_failure(
 ) -> None:
     """终态判定：done 或 `turn_failed`；降级类 error（llm_unavailable / 步失败）不关流。"""
     assert researchModule._isTerminal(event, payload) is expected
+
+
+# ---------------------------------------------------------------------------
+# Task 8.5：error code SSOT（ERROR_SPECS 派生终态 / 步失败 code 与相位解耦）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "terminal", "sessionStatus", "payloadFields", "uiHint"),
+    [
+        (ERROR_TURN_FAILED, True, "failed", ("phase",), "terminal"),
+        (ERROR_LLM_UNAVAILABLE, False, "running", (), "degraded"),
+        (ERROR_HYPOTHESIS_FAILED, False, "running", (), "degraded"),
+        (ERROR_SQL_VALIDATION_FAILED, False, "awaiting_user", ("stepIndex",), "degraded"),
+        (ERROR_STEP_FAILED, False, "awaiting_user", ("stepIndex",), "degraded"),
+    ],
+)
+def test_error_specs_table_matches_ruling(
+    code: str, terminal: bool, sessionStatus: str, payloadFields: tuple, uiHint: str
+) -> None:
+    """Task 8.5：ERROR_SPECS 逐 code 钉住用户裁定（终态判定 / 会话状态 / 附加字段 / 前端处置）。"""
+    spec = ERROR_SPECS[code]
+    assert spec.terminal is terminal
+    assert spec.sessionStatus == sessionStatus
+    assert spec.payloadFields == payloadFields
+    assert spec.uiHint == uiHint
+    assert spec.summary  # 每个 code 都有说明，不空
+
+
+def test_error_specs_covers_exactly_the_ruled_codes() -> None:
+    """ERROR_SPECS 键集合 == 裁定的 5 个 code（不多不少，防止后人悄悄增删 code）。"""
+    assert set(ERROR_SPECS) == {
+        ERROR_TURN_FAILED,
+        ERROR_LLM_UNAVAILABLE,
+        ERROR_HYPOTHESIS_FAILED,
+        ERROR_SQL_VALIDATION_FAILED,
+        ERROR_STEP_FAILED,
+    }
+
+
+def test_terminal_error_codes_derived_from_specs() -> None:
+    """TERMINAL_ERROR_CODES 由 ERROR_SPECS 派生（防有人写回硬编码字面量集合）。"""
+    assert TERMINAL_ERROR_CODES == frozenset(
+        code for code, spec in ERROR_SPECS.items() if spec.terminal
+    )
+    assert TERMINAL_ERROR_CODES == frozenset({ERROR_TURN_FAILED})

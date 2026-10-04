@@ -7,9 +7,9 @@
    保持 brief 的 `from app.services.research_agent_service import PHASES` 契约。
 2. **端口与默认适配器**：`UsageRecorder` + `LlmUsageRecorder` + `MeteredClient`（计量）、
    `Reporter`（报告端口；Task 6 起唯一实现是 `ReportPlanner`，占位实现已删除）。
-3. **无状态构件**：options 构造 / 相位映射 / 步结果与计划归一化 / 假设筛选与打分 /
-   提示词取值助手 / 静默 emit 与 rollback 兜底。（恢复态重建 / 改写态 / 恢复轮内容
-   见 `research_agent_stages.py`，Task 8 抽出以守住 800 行上限。）
+3. **无状态构件**：options 构造 / 相位映射 / 步结果与计划归一化 / 静默 emit 与
+   rollback 兜底。（恢复态重建 / 改写态 / 恢复轮内容、假设筛选与打分 / 提示词取值助手
+   见 `research_agent_stages.py`，Task 8 / 8.5 抽出以守住 800 行上限。）
 
 抽取动因：服务文件曾 1072 行，超 800 行硬上限；行为零变化（同一批测试全绿）。
 """
@@ -20,6 +20,7 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -133,8 +134,70 @@ EVENT_ERROR = "research.error"
 ERROR_LLM_UNAVAILABLE = "llm_unavailable"
 ERROR_TURN_FAILED = "turn_failed"
 ERROR_HYPOTHESIS_FAILED = "hypothesis_generation_failed"
+ERROR_SQL_VALIDATION_FAILED = "sql_validation_failed"
+"""SQL Guard 拒绝的 error code（与 SIGNAL_SQL_VALIDATION_FAILED 同值，但语义是 error code 侧）。"""
+ERROR_STEP_FAILED = "step_failed"
+"""通用步失败的 error code（与 checkpoint signal 词汇 `low_confidence_step` 解耦）。"""
 LLM_UNAVAILABLE_MESSAGE = "无可用 LLM 客户端：本轮 LLM 段降级（计划/假设/报告文本可能不完整）"
 DEFAULT_MODE = "research"
+
+
+@dataclass(frozen=True)
+class ErrorSpec:
+    """一个 research.error code 的完整契约（终态判定 / 会话状态 / payload 附加字段 / 前端处置）。"""
+
+    terminal: bool  # True ⇒ 事件后关流
+    sessionStatus: str  # 事件发出后该会话的预期状态
+    payloadFields: tuple[str, ...]  # 除 code / message 外的固定附加字段
+    uiHint: str  # 前端处置（按「类」而非按 code 分支的依据）
+    summary: str
+
+
+# --- error code SSOT（Task 8.5 用户裁定；勿自行增删 code 或改变 terminal 归属）----
+# 注：sql_validation_failed / step_failed 的 sessionStatus 是**默认（等待用户）**语义——
+# 落动态 checkpoint ⇒ awaiting_user；autoConfirm 测试模式下可能直接跑到 done。不为它加分支逻辑。
+ERROR_SPECS: dict[str, ErrorSpec] = {
+    ERROR_TURN_FAILED: ErrorSpec(
+        terminal=True,
+        sessionStatus=STATUS_FAILED,
+        payloadFields=("phase",),
+        uiHint="terminal",
+        summary="turn 终止：终态错误，会话落 failed 并关流",
+    ),
+    ERROR_LLM_UNAVAILABLE: ErrorSpec(
+        terminal=False,
+        sessionStatus=STATUS_RUNNING,
+        payloadFields=(),
+        uiHint="degraded",
+        summary="无可用 LLM：LLM 段降级，状态机继续推进",
+    ),
+    ERROR_HYPOTHESIS_FAILED: ErrorSpec(
+        terminal=False,
+        sessionStatus=STATUS_RUNNING,
+        payloadFields=(),
+        uiHint="degraded",
+        summary="假设生成失败：降级为空候选，状态机继续推进",
+    ),
+    ERROR_SQL_VALIDATION_FAILED: ErrorSpec(
+        terminal=False,
+        sessionStatus=STATUS_AWAITING,
+        payloadFields=("stepIndex",),
+        uiHint="degraded",
+        summary="SQL Guard 拒绝：落动态 low_confidence_step（默认等待用户）",
+    ),
+    ERROR_STEP_FAILED: ErrorSpec(
+        terminal=False,
+        sessionStatus=STATUS_AWAITING,
+        payloadFields=("stepIndex",),
+        uiHint="degraded",
+        summary="通用步失败：落动态 low_confidence_step（默认等待用户）",
+    ),
+}
+
+TERMINAL_ERROR_CODES = frozenset(
+    code for code, spec in ERROR_SPECS.items() if spec.terminal
+)
+"""终态错误码集合：**由 ERROR_SPECS 派生**，判定处不得自持字面量集合。"""
 
 Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
 Pause = tuple[str, dict[str, Any], str]  # (checkpoint 相位, options, 提示文案)
@@ -364,10 +427,24 @@ def nextPhase(checkpoint: Any, action: str) -> str:
 
 
 def stepSignal(error: str | None) -> str:
-    """步失败信号名：SQL Guard 拒绝单列，其余归 low_confidence_step（设计 §4.8）。"""
+    """步失败**checkpoint signal 词汇**：SQL Guard 拒绝单列，其余归 low_confidence_step（设计 §4.8）。
+
+    注意：本函数产出 **checkpoint signal 词汇**（落 options["signal"] / phase 白名单），
+    不是 error code —— `research.error` 事件的 code 走 `stepErrorCode`，勿混用。
+    """
     if error and error.startswith(SIGNAL_SQL_VALIDATION_FAILED):
         return SIGNAL_SQL_VALIDATION_FAILED
     return SIGNAL_LOW_CONFIDENCE_STEP
+
+
+def stepErrorCode(error: str | None) -> str:
+    """步失败 **error code**：SQL Guard 拒绝 → sql_validation_failed，其余 → step_failed。
+
+    与 `stepSignal`（checkpoint signal 词汇）解耦：error code 不进 phase / options["signal"] 白名单。
+    """
+    if error and error.startswith(SIGNAL_SQL_VALIDATION_FAILED):
+        return ERROR_SQL_VALIDATION_FAILED
+    return ERROR_STEP_FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -425,83 +502,6 @@ def stepResult(
         "chartType": chartType,
         "chartOption": chartOption,
     }
-
-
-# ---------------------------------------------------------------------------
-# 无状态构件：假设筛选与打分 / 提示词取值助手
-# ---------------------------------------------------------------------------
-
-
-def selectedHypotheses(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """按用户在固定 #3 的选择（choice["selectedIndexes"]）筛假设；缺省全选。"""
-    candidates = list(state.get("hypotheses") or [])
-    indexes = (state.get("choice") or {}).get("selectedIndexes")
-    if not isinstance(indexes, list):
-        return candidates[:MAX_VERIFY_HYPOTHESES]
-    picked: list[dict[str, Any]] = []
-    for raw in indexes:
-        if isinstance(raw, int) and 0 <= raw < len(candidates):
-            picked.append(candidates[raw])
-        else:
-            logger.warning("假设选择下标越界，忽略: %s", raw)
-    return picked[:MAX_VERIFY_HYPOTHESES]
-
-
-def candidateConfidence(state: dict[str, Any], candidate: dict[str, Any]) -> float:
-    """候选分：假设 driver 命中 ESL 指标/本体时的置信度；未命中取基线。"""
-    driver = str(candidate.get("driver") or "").strip().lower()
-    if driver:
-        for name, score in confidenceIndex(state):
-            if driver in name.lower():
-                return score
-    return DEFAULT_CANDIDATE_CONFIDENCE
-
-
-def confidenceIndex(state: dict[str, Any]) -> list[tuple[str, float]]:
-    esl = state.get("esl") or {}
-    pairs: list[tuple[Any, Any]] = []
-    for metric in esl.get("metrics") or []:
-        pairs += [(metric.get("displayName"), metric.get("confidence"))]
-        pairs += [(metric.get("kpiCode"), metric.get("confidence"))]
-    for obj in esl.get("businessObjects") or []:
-        pairs += [(obj.get("className"), obj.get("confidence"))]
-        pairs += [(obj.get("matchedAlias"), obj.get("confidence"))]
-    return [(str(name), float(score)) for name, score in pairs if name and score is not None]
-
-
-def drivers(state: dict[str, Any]) -> list[str]:
-    """driver 提示：ESL 命中的指标 / 本体名（真实列名提示需 OntologyService，见报告）。"""
-    esl = state.get("esl") or {}
-    names: list[str] = []
-    for metric in esl.get("metrics") or []:
-        names += [metric.get("kpiCode"), metric.get("displayName")]
-    for obj in esl.get("businessObjects") or []:
-        names.append(obj.get("className"))
-    seen: list[str] = []
-    for name in names:
-        if name and name not in seen:
-            seen.append(str(name))
-    return seen[:DRIVER_HINT_LIMIT]
-
-
-def dataSummary(state: dict[str, Any]) -> str:
-    """喂给假设生成的执行摘要（只用步摘要，不塞原始行）。"""
-    lines = [
-        f"步骤 {int(r.get('index', 0)) + 1} {r.get('description') or ''}：{r.get('summary') or ''}"
-        for r in state.get("stepResults") or []
-    ]
-    return "\n".join(lines) or "（本轮未取到数据）"
-
-
-def eslClasses(state: dict[str, Any]) -> list[str]:
-    """喂给计划器的本体类提示：ESL 命中 BO 的物理表名。"""
-    esl = state.get("esl") or {}
-    return [str(o["sourceTable"]) for o in esl.get("businessObjects") or [] if o.get("sourceTable")]
-
-
-def clientModelName(client: Any) -> str | None:
-    """客户端固化的模型名快照（OpenAiClient._modelName，openai_client.py:75）。"""
-    return getattr(client, "_modelName", None) or getattr(client, "model_name", None)
 
 
 # ---------------------------------------------------------------------------

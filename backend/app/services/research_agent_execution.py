@@ -27,7 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.research_agent_ports import (
     EVENT_ERROR,
+    EVENT_STEP_CHART,
+    EVENT_STEP_DATA,
     EVENT_STEP_DONE,
+    EVENT_STEP_SQL,
     EVENT_STEP_START,
     PURPOSE_CHART,
     SIGNAL_SQL_VALIDATION_FAILED,
@@ -76,6 +79,9 @@ async def runStep(
     原样上抛 —— 不能被伪装成「该步无数据」而在 autoConfirm 下静默 done。
 
     Task 6.5-1：生成失败**不抛**（返回 None），落到既有 `STEP_MISSING_SQL` 分支。
+
+    Task 8（MEDIUM-7）：逐步发 §4.5 全事件族 —— start → sql → data → chart → done；
+    缺 SQL 的步没有 sql 事件（无 SQL 可发），失败步止于 `research.error`。
     """
     index = int(step.get("index", 0))
     await emitEvent(
@@ -89,6 +95,7 @@ async def runStep(
         return stepResult(step, rows=[], error=STEP_MISSING_SQL)
     # 不可变：把生成的 SQL 固化进本步副本（步结果/动态点据此可追溯）
     resolved = {**step, "sql": sql}
+    await emitEvent(emit, EVENT_STEP_SQL, {"index": index, "sql": sql})
     try:
         rows = await deps.runner.executeReadonlySql(session, sql)
     except ValueError as exc:
@@ -101,6 +108,9 @@ async def runStep(
     except SQLAlchemyError as exc:
         logger.warning("执行步 DB 失败: session=%s step=%s err=%s", sessionId, index, exc)
         return await failedStep(session, resolved, str(exc), emit=emit)
+    await emitEvent(
+        emit, EVENT_STEP_DATA, {"index": index, "data": rows, "rowCount": len(rows)}
+    )
     return await chartStep(
         session, resolved, rows, sessionId=sessionId, state=state, emit=emit, deps=deps
     )
@@ -175,7 +185,7 @@ async def chartStep(
     emit: Emit | None,
     deps: ExecutionDeps,
 ) -> dict[str, Any]:
-    """出图（ChartService 契约：绝不抛错）并落 result + 发 step_done。"""
+    """出图（ChartService 契约：绝不抛错）并落 result + 发 step_chart / step_done。"""
     build = await _buildChartMetered(
         session, rows, sessionId=sessionId, state=state, emit=emit, deps=deps
     )
@@ -185,6 +195,15 @@ async def chartStep(
         error=None,
         chartType=getattr(getattr(build, "chartType", None), "value", None),
         chartOption=getattr(build, "option", None),
+    )
+    await emitEvent(
+        emit,
+        EVENT_STEP_CHART,
+        {
+            "index": result["index"],
+            "chartType": result["chartType"],
+            "chartOption": result["chartOption"],
+        },
     )
     await emitEvent(
         emit,

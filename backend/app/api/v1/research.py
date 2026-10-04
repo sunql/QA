@@ -4,10 +4,15 @@
 - POST   /sessions                          新建会话（201）
 - GET    /sessions                          当前用户的会话列表
 - GET    /sessions/{sessionId}              {session, turns, pendingCheckpoint}
-- POST   /sessions/{sessionId}/turns        202 + 状态机后台跑（进度走 Task 8 的 SSE）
+- POST   /sessions/{sessionId}/turns        202 + 状态机后台跑（进度走 SSE）
 - POST   /checkpoints/{checkpointId}/answer {sessionStatus, nextPhase}
 - GET    /sessions/{sessionId}/report       ?version=N → 指定版 / 当前 published
 - GET    /sessions/{sessionId}/reports      版本列表
+- GET    /stream?sessionId=...              SSE：research.* 事件族（Task 8，独立端点）
+
+SSE 通道（Task 8）：状态机的事件经 `emit` 接线投递到进程内 `ResearchEventBus`（见
+`_runTurnInBackground` / `_resumeTurnInBackground` 的 `functools.partial(bus.publish, ...)`），
+流端先订阅再返回 `StreamingResponse`。与 chat 的 SSE 实现**完全独立**（设计 §4.5）。
 
 鉴权与越权（安全）：
 - router 级 `Depends(getCurrentUser)`（read-only 也强制，见 memory: router auth 强制）；
@@ -28,11 +33,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import uuid
+from collections.abc import AsyncIterator
+from functools import partial
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,8 +75,14 @@ from app.services.enterprise_semantic_layer import EnterpriseSemanticLayer
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_semantic_match_service import KpiSemanticMatchService
 from app.services.ontology_service import OntologyService
-from app.services.research_agent_ports import nextPhase
+from app.services.research_agent_ports import (
+    ERROR_TURN_FAILED,
+    EVENT_DONE,
+    EVENT_ERROR,
+    nextPhase,
+)
 from app.services.research_agent_service import ResearchAgentService
+from app.services.research_event_bus import EVENT_CONNECTED, bus
 from app.services.research_session_service import PROMPT_KEY, ResearchSessionService
 from app.services.research_sql_runner import ResearchSqlRunner
 from app.services.step_query_planner import StepQueryPlanner
@@ -82,6 +98,24 @@ _sessionService = ResearchSessionService()
 
 _ESL_TOP_K = 5
 """三臂检索条数（与 `EnterpriseSemanticLayer._TOP_K` 同值；ESL 调 searcher 时显式传 topK）。"""
+
+_bus = bus
+"""进程内事件总线单例（模块级别名：便于测试与诊断，见 research_event_bus）。"""
+
+HEARTBEAT_SECONDS = 15.0
+"""SSE 心跳间隔（秒）：空闲超过即发 `: ping` 注释行保活 / 探测断连。"""
+
+HEARTBEAT_LINE = ": ping\n\n"
+"""SSE 注释行（心跳帧；客户端按 SSE 规范忽略）。"""
+
+TERMINAL_ERROR_CODES = frozenset({ERROR_TURN_FAILED})
+"""**终态**错误码：仅 `turn_failed` 关流。
+
+设计 §4.5 的 `research.error` 同时承载两类语义：①turn 终止（`_guardedRun` 捕获后
+会话置 failed）②可见降级（`llm_unavailable` / 步失败 / 假设生成失败，状态机**继续**
+推进）。一律关流会让降级路径的客户端丢掉后续全部事件（含 `research.done`），故流端
+只对终态码关流（见 task-8-report 偏差 #1）。
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +334,11 @@ async def answerCheckpoint(
         raise ConflictError(f"检查点已决策（{checkpoint.status}），不可重复提交")
     nextPhaseValue = nextPhase(checkpoint, payload.action)
     background.add_task(
-        _resumeTurnInBackground, str(checkpoint.id), payload.action, dict(payload.choice)
+        _resumeTurnInBackground,
+        str(checkpoint.id),
+        str(checkpoint.session_id),
+        payload.action,
+        dict(payload.choice),
     )
     return CheckpointAnswerRead(sessionStatus="running", nextPhase=nextPhaseValue)
 
@@ -345,6 +383,62 @@ async def listReports(
 
 
 # ---------------------------------------------------------------------------
+# SSE：research.* 事件流（Task 8，独立端点）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/stream", summary="研究进度 SSE（research.* 事件族）")
+async def streamSessionEvents(
+    sessionId: uuid.UUID,
+    user: CurrentUser = Depends(_requireResearchUser),
+) -> StreamingResponse:
+    """订阅本会话的进度事件（设计 §4.5）。
+
+    **先订阅再触发 turn**：本端点不做历史回放，客户端须在 POST turns / answer 之前
+    建流（brief 契约）。鉴权与越权同 REST 口径：他人会话 404（不泄露存在性）。
+    归属校验用**短会话**（流是长连接，不能把请求级 session 拖到流结束）。
+    """
+    async with getSessionFactory()() as db:
+        await _ownedSession(db, sessionId, user)
+    return StreamingResponse(
+        _eventFrames(str(sessionId)),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _eventFrames(sessionId: str) -> AsyncIterator[str]:
+    """队列 → SSE 帧：首帧 connected；空闲发心跳；终态事件或客户端断连后收尾退订。"""
+    queue = _bus.subscribe(sessionId)
+    try:
+        yield _sseFrame(EVENT_CONNECTED, {"sessionId": sessionId})
+        while True:
+            try:
+                event, payload = await asyncio.wait_for(queue.get(), HEARTBEAT_SECONDS)
+            except TimeoutError:
+                yield HEARTBEAT_LINE
+                continue
+            yield _sseFrame(event, payload)
+            if _isTerminal(event, payload):
+                return
+    finally:
+        # 客户端断连（生成器被取消）与正常收尾都走这里：不留下悬空订阅
+        _bus.unsubscribe(sessionId, queue)
+
+
+def _sseFrame(event: str, payload: dict[str, Any]) -> str:
+    """SSE 帧（`json.dumps` 转义换行，payload 不会破坏帧边界）。"""
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _isTerminal(event: str, payload: dict[str, Any]) -> bool:
+    """终态判定：`research.done` 或**终态**错误码（降级类 error 不关流，见常量注释）。"""
+    if event == EVENT_DONE:
+        return True
+    return event == EVENT_ERROR and payload.get("code") in TERMINAL_ERROR_CODES
+
+
+# ---------------------------------------------------------------------------
 # 后台任务（自开会话；状态机自带 commit 是持久化机制）
 # ---------------------------------------------------------------------------
 
@@ -356,6 +450,9 @@ async def _runTurnInBackground(
 
     异常已在状态机内 `research.error` + 会话置 failed；此处只兜底 rollback 与日志
     （后台任务不得把异常抛回响应 —— 那会让 202 变成 500）。
+
+    `emit` 接线（Task 8）：`partial(bus.publish, sessionId)` —— 状态机发的事件即刻
+    广播给已订阅的流端（订阅必须先于本任务，流端不做历史回放）。
     """
     service = buildResearchAgentService()
     async with getSessionFactory()() as session:
@@ -367,6 +464,7 @@ async def _runTurnInBackground(
                 question=question,
                 userId=userId,
                 mode=mode,
+                emit=partial(_bus.publish, sessionId),
             )
             await session.commit()
         except Exception:  # noqa: BLE001 —— 后台任务兜底：留痕 + 回滚，不上抛
@@ -374,13 +472,22 @@ async def _runTurnInBackground(
             await session.rollback()
 
 
-async def _resumeTurnInBackground(checkpointId: str, action: str, choice: dict[str, Any]) -> None:
-    """后台按用户决策续跑状态机（resolveCheckpoint 在 `resumeTurn` 内完成）。"""
+async def _resumeTurnInBackground(
+    checkpointId: str, sessionId: str, action: str, choice: dict[str, Any]
+) -> None:
+    """后台按用户决策续跑状态机（resolveCheckpoint 在 `resumeTurn` 内完成）。
+
+    `sessionId` 由调用方显式传入（Task 8）：`emit` 必须绑定会话键才能投到正确的流。
+    """
     service = buildResearchAgentService()
     async with getSessionFactory()() as session:
         try:
             await service.resumeTurn(
-                session, checkpointId=uuid.UUID(checkpointId), action=action, choice=choice
+                session,
+                checkpointId=uuid.UUID(checkpointId),
+                action=action,
+                choice=choice,
+                emit=partial(_bus.publish, sessionId),
             )
             await session.commit()
         except Exception:  # noqa: BLE001 —— 同上：留痕 + 回滚

@@ -7,8 +7,9 @@
    保持 brief 的 `from app.services.research_agent_service import PHASES` 契约。
 2. **端口与默认适配器**：`UsageRecorder` + `LlmUsageRecorder` + `MeteredClient`（计量）、
    `Reporter`（报告端口；Task 6 起唯一实现是 `ReportPlanner`，占位实现已删除）。
-3. **无状态构件**：state 重建 / options 构造 / 相位映射 / 步结果与计划归一化 /
-   假设筛选与打分 / 提示词取值助手 / 静默 emit 与 rollback 兜底。
+3. **无状态构件**：options 构造 / 相位映射 / 步结果与计划归一化 / 假设筛选与打分 /
+   提示词取值助手 / 静默 emit 与 rollback 兜底。（恢复态重建 / 改写态 / 恢复轮内容
+   见 `research_agent_stages.py`，Task 8 抽出以守住 800 行上限。）
 
 抽取动因：服务文件曾 1072 行，超 800 行硬上限；行为零变化（同一批测试全绿）。
 """
@@ -26,7 +27,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import LlmConfig
-from app.domain.research_models import ResearchSession
 from app.services.learning.prompt_fence import neutralizeFence
 from app.services.model_router_service import RoutingContext
 from app.services.token_usage_service import TokenUsageService
@@ -116,6 +116,12 @@ EVENT_ESL = "research.esl"
 EVENT_CHECKPOINT = "research.checkpoint"
 EVENT_PLAN = "research.plan"
 EVENT_STEP_START = "research.step.start"
+EVENT_STEP_SQL = "research.step.sql"
+"""步 SQL 就绪（计划自带或逐步 NL2SQL 生成后）。"""
+EVENT_STEP_DATA = "research.step.data"
+"""步数据就绪（只读查询返回行）。"""
+EVENT_STEP_CHART = "research.step.chart"
+"""步出图完成（图表类型 + option）。"""
 EVENT_STEP_DONE = "research.step.done"
 EVENT_HYPOTHESIS = "research.hypothesis"
 EVENT_FINDING = "research.finding"
@@ -312,7 +318,8 @@ class MeteredClient:
 
 
 # ---------------------------------------------------------------------------
-# 无状态构件：state 重建 / options / 相位映射
+# 无状态构件：options / 相位映射
+# （恢复态重建 / 改写态 / 恢复轮内容见 research_agent_stages.py，Task 8 抽出）
 # ---------------------------------------------------------------------------
 
 
@@ -323,20 +330,6 @@ def buildOptions(*, signal: str, resumePhase: str, **payload: Any) -> dict[str, 
         OPT_RESUME_PHASE: resumePhase,
         **{key: value for key, value in payload.items() if value is not None},
     }
-
-
-def resumeTurnContent(
-    *, action: str, choice: dict[str, Any], checkpointId: uuid.UUID, rewritten: str
-) -> dict[str, Any]:
-    """恢复轮的 user turn 内容；带改写问题时一并记录新问题（可追溯）。"""
-    content: dict[str, Any] = {
-        "action": action,
-        "choice": choice or {},
-        "checkpointId": str(checkpointId),
-    }
-    if rewritten:
-        content["question"] = rewritten
-    return content
 
 
 def requireQuestion(question: str, sessionId: uuid.UUID | str) -> None:
@@ -368,35 +361,6 @@ def nextPhase(checkpoint: Any, action: str) -> str:
     if action == ACTION_REJECT and options.get(OPT_ABORT_PHASE):
         return str(options[OPT_ABORT_PHASE])
     return nextPhaseForPhase(checkpoint.phase, options)
-
-
-def rebuildState(row: ResearchSession, checkpoint: Any) -> dict[str, Any]:
-    """恢复态：从会话种子 + checkpoint.options 的语义载荷重建（不重跑 LLM 段）。"""
-    options = checkpoint.options or {}
-    return {
-        "question": row.input_seed or "",
-        "mode": row.mode,
-        "userId": row.created_by,
-        "esl": options.get(OPT_ARMS),
-        "plan": options.get(OPT_PLAN),
-        "stepResults": list(options.get(OPT_STEP_RESULTS) or []),
-        "hypotheses": list(options.get(OPT_CANDIDATES) or []),
-        "resumeStepIndex": int(options.get(OPT_NEXT_STEP) or 0),
-        "choice": {},
-    }
-
-
-def rewriteState(state: dict[str, Any], question: str) -> dict[str, Any]:
-    """改写问题后的恢复态：换问题 + 清空派生数据（强制重跑 ESL，旧三臂不得带进新问题）。"""
-    return {
-        **state,
-        "question": question,
-        "esl": None,
-        "plan": None,
-        "stepResults": [],
-        "hypotheses": [],
-        "resumeStepIndex": 0,
-    }
 
 
 def stepSignal(error: str | None) -> str:

@@ -102,15 +102,13 @@ from app.services.research_agent_ports import (
     nextPhaseForPhase,
     normalizePlan,
     planQuestionWithFeedback,
-    rebuildState,
     recordUsageQuietly,
     requireQuestion,
     resolveClient,
-    resumeTurnContent,
-    rewriteState,
     selectedHypotheses,
     stepSignal,
 )
+from app.services.research_agent_stages import rebuildState, resumeTurnContent, rewriteState
 from app.services.research_hypothesis_adapter import generateHypotheses
 from app.services.research_session_service import ResearchSessionService
 from app.services.token_usage_service import TokenUsageService

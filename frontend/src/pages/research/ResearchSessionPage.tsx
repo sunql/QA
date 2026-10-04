@@ -87,7 +87,11 @@ export default function ResearchSessionPage() {
         />
       </Spin>
       {pendingCheckpoint ? (
-        <CheckpointCard checkpoint={pendingCheckpoint} onAnswer={handleAnswer} />
+        <CheckpointCard
+          key={pendingCheckpoint.id}
+          checkpoint={pendingCheckpoint}
+          onAnswer={handleAnswer}
+        />
       ) : (
         <Space.Compact style={{ width: "100%", marginTop: 16 }}>
           <TextArea

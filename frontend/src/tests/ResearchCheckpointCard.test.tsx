@@ -91,3 +91,129 @@ describe("CheckpointCard", () => {
     expect(onAnswer).toHaveBeenCalledWith("modify", { question: "改为按月统计收货量" });
   });
 });
+
+describe("CheckpointCard 结构化渲染（W1）", () => {
+  const conflictOptions = {
+    signal: "metric_ambiguous",
+    resumePhase: "plan",
+    arms: { metrics: [], businessObjects: [], knowledge: [], conflicts: [] },
+    conflicts: [
+      {
+        kind: "metric_ambiguous",
+        detail: "前两名 metric 分差 < 0.05",
+        candidates: [
+          { kpiCode: "KPI-A", displayName: "供货量", confidence: 0.71 },
+          { kpiCode: "KPI-B", displayName: "收货量", confidence: 0.66 },
+        ],
+      },
+    ],
+  };
+
+  it("目标行按 phase 显示「本次针对什么」", () => {
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({ phase: "runtime_dynamic", options: conflictOptions })}
+          onAnswer={() => {}}
+        />
+      </ConfigProvider>
+    );
+    expect(screen.getByText("本次针对")).toBeInTheDocument();
+    expect(screen.getByText("确认语义歧义的处理方式")).toBeInTheDocument();
+  });
+
+  it("runtime_dynamic：渲染歧义种类、detail 与候选（名称 + 置信度）", () => {
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({ phase: "runtime_dynamic", options: conflictOptions })}
+          onAnswer={() => {}}
+        />
+      </ConfigProvider>
+    );
+    expect(screen.getByText("指标歧义")).toBeInTheDocument();
+    expect(screen.getByText("前两名 metric 分差 < 0.05")).toBeInTheDocument();
+    expect(screen.getByText("供货量")).toBeInTheDocument();
+    expect(screen.getByText(/0\.71/)).toBeInTheDocument();
+  });
+
+  it("runtime_dynamic 但 conflicts 为空：给空态文案而非空白", () => {
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({
+            phase: "runtime_dynamic",
+            options: { ...conflictOptions, conflicts: [] },
+          })}
+          onAnswer={() => {}}
+        />
+      </ConfigProvider>
+    );
+    expect(
+      screen.getByText("本次未返回歧义明细，可直接点「修改」补充说明。")
+    ).toBeInTheDocument();
+  });
+
+  it("planning：双键回落读取 steps（snake_case 与 camelCase 都能取到）", () => {
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({
+            phase: "planning",
+            options: {
+              arms: { metrics: [], conflicts: [] },
+              plan: { steps: [{ sub_question: "按收货地点拆分" }, { subQuestion: "按月拆分" }] },
+            },
+          })}
+          onAnswer={() => {}}
+        />
+      </ConfigProvider>
+    );
+    expect(screen.getByText("按收货地点拆分")).toBeInTheDocument();
+    expect(screen.getByText("按月拆分")).toBeInTheDocument();
+  });
+
+  it("hypothesis：候选渲染为可勾选项，confirm 提交选中的下标", () => {
+    const onAnswer = vi.fn();
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({
+            phase: "hypothesis",
+            options: {
+              arms: { metrics: [], conflicts: [] },
+              candidates: [
+                { statement: "供货量下降因供应商切换", driver: "GR_QTY" },
+                { statement: "供货量下降因收货地点变化", driver: "RCV_SITE" },
+              ],
+            },
+          })}
+          onAnswer={onAnswer}
+        />
+      </ConfigProvider>
+    );
+    // 下标顺序 = candidates 数组顺序：点第 2 项 ⇒ 提交 [1]
+    fireEvent.click(screen.getAllByRole("checkbox")[1]);
+    fireEvent.click(screen.getByRole("button", { name: /确\s*认/ }));
+    expect(onAnswer).toHaveBeenCalledWith("confirm", { selectedIndexes: [1] });
+  });
+
+  it("hypothesis 但候选为空：给空态文案而非空白", () => {
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({
+            phase: "hypothesis",
+            options: { arms: { metrics: [], conflicts: [] }, candidates: [] },
+          })}
+          onAnswer={() => {}}
+        />
+      </ConfigProvider>
+    );
+    expect(
+      screen.getByText(
+        "本轮未生成候选假设（模型不可用或解析失败），可直接点「修改」补充研究方向。"
+      )
+    ).toBeInTheDocument();
+  });
+});

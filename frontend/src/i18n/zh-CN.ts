@@ -2908,6 +2908,28 @@ export const zhCN = {
   research: {
     checkpoint: {
       title: "待决策检查点",
+      targetLabel: "本次针对",
+      targetUnknown: "确认本次决策",
+      target: {
+        intent: "确认研究范围",
+        planning: "确认研究计划",
+        hypothesis: "选择要验证的假设",
+        runtime_dynamic: "确认语义歧义的处理方式",
+        low_confidence_step: "处理执行失败的步骤",
+      },
+      conflicts: "待确认的歧义",
+      conflictKind: {
+        metric_ambiguous: "指标歧义",
+        wiki_disagree: "知识冲突",
+      },
+      conflictKindFallback: "待确认项",
+      confidence: "置信",
+      emptyConflicts: "本次未返回歧义明细，可直接点「修改」补充说明。",
+      planSteps: "研究计划步骤",
+      emptyPlanSteps: "本次未返回计划步骤，可直接点「修改」补充研究方向。",
+      candidates: "候选假设（可多选）",
+      unnamedItem: "（未提供描述）",
+      emptyCandidates: "本轮未生成候选假设（模型不可用或解析失败），可直接点「修改」补充研究方向。",
       confirm: "确认",
       modify: "修改",
       reject: "拒绝",

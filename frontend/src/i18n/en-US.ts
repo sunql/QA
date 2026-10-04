@@ -2893,6 +2893,28 @@ export const enUS = {
   research: {
     checkpoint: {
       title: "Checkpoint",
+      targetLabel: "This decision concerns",
+      targetUnknown: "Confirm this decision",
+      target: {
+        intent: "Confirm the research scope",
+        planning: "Confirm the research plan",
+        hypothesis: "Select hypotheses to verify",
+        runtime_dynamic: "Resolve the detected ambiguity",
+        low_confidence_step: "Handle the failed step",
+      },
+      conflicts: "Ambiguities to resolve",
+      conflictKind: {
+        metric_ambiguous: "Metric ambiguity",
+        wiki_disagree: "Knowledge conflict",
+      },
+      conflictKindFallback: "Item to confirm",
+      confidence: "confidence",
+      emptyConflicts: "No ambiguity details were returned. Click Modify to add context.",
+      planSteps: "Plan steps",
+      emptyPlanSteps: "No plan steps were returned. Click Modify to add a research direction.",
+      candidates: "Candidate hypotheses (multi-select)",
+      unnamedItem: "(no description)",
+      emptyCandidates: "No candidate hypotheses were generated this round (model unavailable or parse failure). Click Modify to add a research direction.",
       confirm: "Confirm",
       modify: "Modify",
       reject: "Reject",

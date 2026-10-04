@@ -7,8 +7,9 @@ verify → report。三个**固定 checkpoint**（范围确认 / 计划确认 / 
 用户决策后 `resumeTurn` 从「下一相位」续跑。
 
 本模块只留编排（相位调度 + IO）；共享词汇、端口协议、默认适配器与无状态构件在
-`research_agent_ports.py`（fix round 1 抽取以满足 800 行上限）。`PHASES` 在此再导出，
-保持 brief 的 `from app.services.research_agent_service import PHASES` 契约。
+`research_agent_ports.py`（fix round 1 抽取），执行面（步 SQL 生成 → 只读查询 → 出图）在
+`research_agent_execution.py`（Task 6.5 fix round 2 抽取）——两者都是为守住 800 行硬上限。
+`PHASES` 在此再导出，保持 brief 的 `from app.services.research_agent_service import PHASES` 契约。
 
 Step 0 核对（2026-10-04，本任务强制）：`grep -nE "class |def " app/services/chat_usage.py`
 只有 `UsageMixin` 的 mixin 私有方法（依赖 `self._costFor` / `self._tokenUsage`），
@@ -37,14 +38,17 @@ from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.research_models import ResearchSession
 from app.services.enterprise_semantic_layer import EmptyResearchScopeError
 from app.services.hypothesis_service import Hypothesis
 from app.services.intent_service import IntentService
+from app.services.model_config_service import ModelConfigService
+from app.services.model_router_service import ModelRouterService
+from app.services.ontology_service import OntologyService
 from app.services.report_planner import ReportPlanner
+from app.services.research_agent_execution import ExecutionDeps, runStep
 from app.services.research_agent_ports import (
     ACTION_STATUS,
     CHECKPOINT_HYPOTHESIS,
@@ -64,8 +68,6 @@ from app.services.research_agent_ports import (
     EVENT_INTENT,
     EVENT_PLAN,
     EVENT_REPORT,
-    EVENT_STEP_DONE,
-    EVENT_STEP_START,
     PHASE_ESL,
     PHASES,
     PURPOSE_HYPOTHESIS,
@@ -76,12 +78,10 @@ from app.services.research_agent_ports import (
     SIGNAL_FIXED_HYPOTHESIS,
     SIGNAL_FIXED_PLAN,
     SIGNAL_FIXED_SCOPE,
-    SIGNAL_SQL_VALIDATION_FAILED,
     STATUS_AWAITING,
     STATUS_DONE,
     STATUS_FAILED,
     STATUS_RUNNING,
-    STEP_MISSING_SQL,
     VERIFY_FAIL_FACTOR,
     VERIFY_OK_FACTOR,
     Emit,
@@ -93,7 +93,6 @@ from app.services.research_agent_ports import (
     buildOptions,
     candidateConfidence,
     clientModelName,
-    createClientQuietly,
     dataSummary,
     drivers,
     emitEvent,
@@ -102,14 +101,13 @@ from app.services.research_agent_ports import (
     nextPhase,
     nextPhaseForPhase,
     normalizePlan,
-    openLlmClient,
+    planQuestionWithFeedback,
     rebuildState,
     recordUsageQuietly,
+    resolveClient,
     resumeTurnContent,
     rewriteState,
-    rollbackQuietly,
     selectedHypotheses,
-    stepResult,
     stepSignal,
 )
 from app.services.research_hypothesis_adapter import generateHypotheses
@@ -134,6 +132,10 @@ class ResearchAgentService:
         llmFactory: Callable[[Any], Any] | None = None,
         usageRecorder: UsageRecorder | None = None,
         reporter: Reporter | None = None,
+        modelConfigs: Any | None = None,
+        modelRouter: Any | None = None,
+        ontology: Any | None = None,
+        nl2sql: Any | None = None,
         autoConfirm: bool = False,
     ) -> None:
         self._esl = esl
@@ -143,19 +145,31 @@ class ResearchAgentService:
         self._chart = chartService
         self._llmFactory = llmFactory
         self._usage = usageRecorder if usageRecorder is not None else LlmUsageRecorder()
-        # 报告装配器：默认真实 ReportPlanner（Task 6 接线）。llmClientFactory 指向同一个
-        # factory：compose 只在 `llmClient=None` 时回退自取客户端，而 `_stageReport` 传的
-        # 是同一 factory 的产物 —— 回退路径与计量路径同源，不会产生未计量的调用。
-        self._reporter = (
-            reporter
-            if reporter is not None
-            else ReportPlanner(
-                sessionService=sessionService,
-                llmClientFactory=lambda: createClientQuietly(self._llmFactory),
-            )
+        # 模型路由（Task 6.5-2）：`llmFactory` 收到的必须是**已选配置**，不再是 `None`。
+        # 三个端口都可注入（测试注入确定性 fake）；默认即 chat 同源的公开实现。
+        self._modelConfigs = modelConfigs if modelConfigs is not None else ModelConfigService()
+        self._modelRouter = modelRouter if modelRouter is not None else ModelRouterService()
+        # 步 SQL 生成（Task 6.5-1）：本体类按 ESL 物理表筛；nl2sql 未注入时该能力关闭
+        # （无 sql 的步仍走 STEP_MISSING_SQL，与接线前行为一致）。
+        self._ontology = ontology if ontology is not None else OntologyService()
+        self._nl2sql = nl2sql
+        # 报告装配器：默认真实 ReportPlanner（Task 6 接线）。**不注入 llmClientFactory**
+        # （Task 6.5-3 / F3）：compose 的自建客户端路径绕过 MeteredClient，是未计量盲区；
+        # 装配所需客户端一律由 `_stageReport` 经计量边界传入，降级时传 None（模板文案）。
+        self._reporter = reporter if reporter is not None else ReportPlanner(
+            sessionService=sessionService
         )
         self._autoConfirm = autoConfirm
         self._intent = IntentService()
+        # 执行面（Task 6.5 fix round 2 抽到 research_agent_execution）：依赖在此一次性绑定。
+        self._exec = ExecutionDeps(
+            runner=runner,
+            chart=chartService,
+            ontology=self._ontology,
+            nl2sql=nl2sql,
+            resolveClient=self._resolveClient,
+            recordUsage=self._recordUsage,
+        )
         self._stages: dict[str, Any] = {
             "intent": self._stageIntent,
             "esl": self._stageEsl,
@@ -246,6 +260,11 @@ class ResearchAgentService:
         if rewritten:
             state = rewriteState(state, rewritten)
             startPhase = PHASE_ESL
+        elif action == "modify" and checkpoint.phase == CHECKPOINT_PLANNING:
+            # Task 6.5-4（MEDIUM-8）：计划点的 modify 不是「确认旧计划继续跑」，而是带
+            # 用户反馈**重跑 planner**；故回到 plan 相位并置 replan 标记（该轮不再暂停）。
+            startPhase = "plan"
+            state["replan"] = True
         logger.info(
             "研究 turn 恢复: session=%s checkpoint=%s action=%s startPhase=%s rewritten=%s",
             checkpoint.session_id, checkpointId, action, startPhase, bool(rewritten),
@@ -431,11 +450,20 @@ class ResearchAgentService:
         self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,
         emit: Emit | None, state: dict[str, Any],
     ) -> Pause | None:
-        """[4][5] 多步计划（LLM，计量）→ 固定 #2 计划确认。"""
-        client = await self._llmClient(state=state, emit=emit, sessionId=sessionId)
-        result = await self._planner.plan(
-            state["question"], eslClasses(state), client, clientModelName(client)
+        """[4][5] 多步计划（LLM，计量）→ 固定 #2 计划确认。
+
+        `state["replan"]`（Task 6.5-4）：计划 checkpoint 的 modify 恢复。此时把用户
+        choice 回灌 planner 重跑出**新计划**，且**不再暂停**在同一检查点（直接进
+        execute）——否则用户会陷入「改了又改」的死循环。
+        """
+        replan = bool(state.pop("replan", False))
+        question = (
+            planQuestionWithFeedback(state["question"], state.get("choice"))
+            if replan
+            else state["question"]
         )
+        client = await self._llmClient(session, state=state, emit=emit, sessionId=sessionId)
+        result = await self._planner.plan(question, eslClasses(state), client, clientModelName(client))
         plan = normalizePlan(getattr(result, "plan", result))
         state["plan"] = plan
         await self._recordUsage(
@@ -447,7 +475,7 @@ class ResearchAgentService:
             modelName=clientModelName(client),
         )
         await emitEvent(emit, EVENT_PLAN, {"steps": plan["steps"]})
-        if self._autoConfirm:
+        if replan or self._autoConfirm:
             return None
         return (
             CHECKPOINT_PLANNING,
@@ -472,8 +500,8 @@ class ResearchAgentService:
         for step in steps:
             if int(step.get("index", 0)) < startIndex:
                 continue
-            result = await self._runStep(
-                session, step, sessionId=sessionId, state=state, emit=emit
+            result = await runStep(
+                session, step, sessionId=sessionId, state=state, emit=emit, deps=self._exec
             )
             results.append(result)
             state["stepResults"] = results
@@ -573,7 +601,7 @@ class ResearchAgentService:
         MeteredClient 累加后此处一次性记 `purpose=research_report`；reporter 自身不记账
         （避免双计）。归档（version=max+1、旧版 superseded）留在本方法，reporter 只装配。
         """
-        client = await self._llmClient(state=state, emit=emit, sessionId=sessionId)
+        client = await self._llmClient(session, state=state, emit=emit, sessionId=sessionId)
         metered = MeteredClient(client) if client is not None else None
         payload, renderedMd = await self._reporter.compose(
             session,
@@ -590,6 +618,7 @@ class ResearchAgentService:
                 promptTokens=metered.promptTokens,
                 completionTokens=metered.completionTokens,
                 modelName=metered.modelName,
+                cachedTokens=metered.cachedTokens,
             )
         report = await self._sessions.publishReport(
             session, sessionId=sessionId, payload=payload, renderedMd=renderedMd
@@ -607,99 +636,6 @@ class ResearchAgentService:
         )
         return None
 
-    # ------------------------------------------------------------------
-    # 执行面
-    # ------------------------------------------------------------------
-
-    async def _runStep(
-        self,
-        session: AsyncSession,
-        step: dict[str, Any],
-        *,
-        sessionId: uuid.UUID,
-        state: dict[str, Any],
-        emit: Emit | None,
-    ) -> dict[str, Any]:
-        """执行单个计划步：只读查询 + 出图。
-
-        失败面**显式收窄**（fix round 1）：只收敛 SQL Guard 拒绝（ValueError）、超时
-        （TimeoutError）与 DB/驱动层（SQLAlchemyError）三类**运行时**失败；其它异常
-        （编程错误）原样上抛 —— 不能被伪装成「该步无数据」而在 autoConfirm 下静默 done。
-        """
-        index = int(step.get("index", 0))
-        await emitEvent(
-            emit, EVENT_STEP_START, {"index": index, "description": step.get("description")}
-        )
-        sql = step.get("sql")
-        if not sql:
-            logger.warning("执行步缺 SQL，按无数据跳过: session=%s step=%s", sessionId, index)
-            return stepResult(step, rows=[], error=STEP_MISSING_SQL)
-        try:
-            rows = await self._runner.executeReadonlySql(session, sql)
-        except ValueError as exc:
-            # SQL Guard 拒绝（Task 4 裁定：ValueError 不属 DomainError 面，必须显式 catch）
-            return await self._failedStep(session, step, f"{SIGNAL_SQL_VALIDATION_FAILED}: {exc}", emit=emit)
-        except TimeoutError as exc:
-            return await self._failedStep(session, step, f"执行超时: {exc}", emit=emit)
-        except SQLAlchemyError as exc:
-            logger.warning("执行步 DB 失败: session=%s step=%s err=%s", sessionId, index, exc)
-            return await self._failedStep(session, step, str(exc), emit=emit)
-        return await self._chartStep(
-            session, step, rows, sessionId=sessionId, state=state, emit=emit
-        )
-
-    async def _failedStep(
-        self,
-        session: AsyncSession,
-        step: dict[str, Any],
-        error: str,
-        *,
-        emit: Emit | None,
-    ) -> dict[str, Any]:
-        """步失败收敛：清障 → 结果摘要 → `research.error` 事件（不抛，交给动态点决策）。"""
-        await rollbackQuietly(session)
-        result = stepResult(step, rows=[], error=error)
-        await emitEvent(
-            emit,
-            EVENT_ERROR,
-            {"code": stepSignal(error), "message": error, "stepIndex": result["index"]},
-        )
-        return result
-
-    async def _chartStep(
-        self,
-        session: AsyncSession,
-        step: dict[str, Any],
-        rows: list[dict[str, Any]],
-        *,
-        sessionId: uuid.UUID,
-        state: dict[str, Any],
-        emit: Emit | None,
-    ) -> dict[str, Any]:
-        """出图（ChartService 契约：绝不抛错）并落 result。"""
-        build = await self._chart.buildChart(
-            session=session,
-            plan=None,
-            columns=list(rows[0].keys()) if rows else [],
-            data=rows,
-            question=state["question"],
-            llmClient=await self._llmClient(state=state, emit=emit, sessionId=sessionId),
-            modelConfig=None,
-        )
-        result = stepResult(
-            step,
-            rows=rows,
-            error=None,
-            chartType=getattr(getattr(build, "chartType", None), "value", None),
-            chartOption=getattr(build, "option", None),
-        )
-        await emitEvent(
-            emit,
-            EVENT_STEP_DONE,
-            {"index": result["index"], "rowCount": result["rowCount"], "summary": result["summary"]},
-        )
-        return result
-
     async def _generateCandidates(
         self,
         session: AsyncSession,
@@ -709,7 +645,7 @@ class ResearchAgentService:
         emit: Emit | None,
     ) -> list[dict[str, Any]]:
         """假设生成（LLM）；无客户端或解析失败都降级为空候选，用量照记、失败显式可见。"""
-        client = await self._llmClient(state=state, emit=emit, sessionId=sessionId)
+        client = await self._llmClient(session, state=state, emit=emit, sessionId=sessionId)
         if client is None:
             return []
         metered = MeteredClient(client)
@@ -733,6 +669,7 @@ class ResearchAgentService:
             promptTokens=metered.promptTokens,
             completionTokens=metered.completionTokens,
             modelName=metered.modelName,
+            cachedTokens=metered.cachedTokens,
         )
         return candidates
 
@@ -741,11 +678,36 @@ class ResearchAgentService:
     # ------------------------------------------------------------------
 
     async def _llmClient(
-        self, *, state: dict[str, Any], emit: Emit | None, sessionId: uuid.UUID
+        self,
+        session: AsyncSession,
+        *,
+        state: dict[str, Any],
+        emit: Emit | None,
+        sessionId: uuid.UUID,
     ) -> Any:
-        """取 LLM 客户端；取不到时**显式留痕**（实现见 ports.openLlmClient）。"""
-        return await openLlmClient(
-            self._llmFactory, state=state, emit=emit, sessionId=sessionId
+        """取 LLM 客户端（按 chat 同口径路由选模型）；取不到时显式留痕（见 ports.resolveClient）。"""
+        client, _config = await self._resolveClient(
+            session, state=state, emit=emit, sessionId=sessionId
+        )
+        return client
+
+    async def _resolveClient(
+        self,
+        session: AsyncSession,
+        *,
+        state: dict[str, Any],
+        emit: Emit | None,
+        sessionId: uuid.UUID,
+    ) -> tuple[Any, Any]:
+        """取（客户端, 模型配置）二元组：步 SQL 生成需要配置透传给 NL2SQL。"""
+        return await resolveClient(
+            self._llmFactory,
+            self._modelConfigs,
+            self._modelRouter,
+            session,
+            state=state,
+            emit=emit,
+            sessionId=sessionId,
         )
 
     async def _recordUsage(
@@ -757,6 +719,7 @@ class ResearchAgentService:
         promptTokens: int,
         completionTokens: int,
         modelName: str | None,
+        cachedTokens: int | None = None,
     ) -> None:
         """记一次 LLM 用量（实现见 ports.recordUsageQuietly：零消耗跳过、失败只留痕）。"""
         await recordUsageQuietly(
@@ -767,6 +730,7 @@ class ResearchAgentService:
             promptTokens=promptTokens,
             completionTokens=completionTokens,
             modelName=modelName,
+            cachedTokens=cachedTokens,
         )
 
     async def _markFailed(self, session: AsyncSession, sessionId: uuid.UUID) -> None:

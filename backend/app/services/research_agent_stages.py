@@ -14,6 +14,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from app.domain.research_models import ResearchSession
 from app.services.research_agent_ports import (
     OPT_ARMS,
     OPT_CANDIDATES,
@@ -37,7 +38,7 @@ def resumeTurnContent(
     return content
 
 
-def rebuildState(row: Any, checkpoint: Any) -> dict[str, Any]:
+def rebuildState(row: ResearchSession, checkpoint: Any) -> dict[str, Any]:
     """恢复态：从会话种子 + checkpoint.options 的语义载荷重建（不重跑 LLM 段）。"""
     options = checkpoint.options or {}
     return {

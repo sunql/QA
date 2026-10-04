@@ -467,9 +467,17 @@ async def _runTurnInBackground(
                 emit=partial(_bus.publish, sessionId),
             )
             await session.commit()
-        except Exception:  # noqa: BLE001 —— 后台任务兜底：留痕 + 回滚，不上抛
+        except Exception as exc:  # noqa: BLE001 —— 后台任务兜底：留痕 + 回滚，不上抛
             logger.exception("研究 turn 后台执行失败: session=%s turn=%s", sessionId, turnId)
             await session.rollback()
+            # Task 8 fix round 1（Important #2）：`_guardedRun` 之前的异常（requireQuestion 的
+            # 空白问题守卫）逃到这里，旧实现只 log+rollback ⇒ 已订阅流只收心跳永不终止。
+            # 补发终态错误让流收敛（总线投递是进程内，与已 rollback 的 DB 事务无关）。
+            await _bus.publish(
+                sessionId,
+                EVENT_ERROR,
+                {"code": ERROR_TURN_FAILED, "message": str(exc)},
+            )
 
 
 async def _resumeTurnInBackground(
@@ -490,9 +498,16 @@ async def _resumeTurnInBackground(
                 emit=partial(_bus.publish, sessionId),
             )
             await session.commit()
-        except Exception:  # noqa: BLE001 —— 同上：留痕 + 回滚
+        except Exception as exc:  # noqa: BLE001 —— 同上：留痕 + 回滚
             logger.exception("研究 turn 恢复失败: checkpoint=%s action=%s", checkpointId, action)
             await session.rollback()
+            # Task 8 fix round 1（Important #2）：resumeTurn 的非法 action / resolveCheckpoint
+            # 已决策 ValueError 都在 `_guardedRun` 之前抛，逃到这里 ⇒ 补发终态错误让流收敛。
+            await _bus.publish(
+                sessionId,
+                EVENT_ERROR,
+                {"code": ERROR_TURN_FAILED, "message": str(exc)},
+            )
 
 
 # ---------------------------------------------------------------------------

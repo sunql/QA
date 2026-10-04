@@ -317,3 +317,75 @@ async def test_degraded_error_does_not_close_stream(
     assert codes and set(codes) == {"llm_unavailable"}
     assert events[-1] == "research.done"
     assert payloads[-1]["degraded"] is True
+
+
+async def test_turn_wrapper_emits_terminal_error_on_pre_guard_failure(
+    client: AsyncClient, authHeaders: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """空白问题在 `_guardedRun` 之前抛 ⇒ 后台 wrapper 补发 `research.error` 并**终止**流。
+
+    Task 8 fix round 1（Important #2）：`requireQuestion` 在 `_guardedRun` 之前抛
+    ValueError，逃到 `_runTurnInBackground` 的 except。旧实现只 log+rollback、不发任何
+    事件 ⇒ 流只收心跳永不终止。断言终止行为：`wait_for` 成功返回（生成器关闭）即证明
+    流已终止，且错误是**末帧**、不补 done。
+    """
+    monkeypatch.setattr(researchModule, "buildResearchAgentService", _fullService)
+    sid = await _createSession(client, authHeaders)
+
+    stream = asyncio.create_task(_readStream(client, sid, authHeaders))
+    await _waitForSubscriber(sid)
+    accepted = await client.post(
+        f"{_BASE}/sessions/{sid}/turns", json={"question": "   "}, headers=authHeaders
+    )
+    assert accepted.status_code == 202, accepted.text
+
+    events, payloads = await asyncio.wait_for(stream, timeout=30)
+    assert events[0] == "research.connected"
+    assert events[-1] == "research.error"
+    assert payloads[-1]["code"] == "turn_failed"
+    assert "研究问题不能为空" in payloads[-1]["message"]
+    assert "research.done" not in events
+
+
+async def test_resume_wrapper_emits_terminal_error_on_pre_guard_failure(
+    client: AsyncClient, authHeaders: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """恢复路径在 `_guardedRun` 之前抛 ⇒ 后台 wrapper 补发 `research.error` 并**终止**流。
+
+    走真实 `resumeTurn` 的 `resolveCheckpoint` 失败面（Task 7.5 rowcount==0 路径）：
+    空 scope 先暂停出一个 pending checkpoint，再把 service 的 `resolveCheckpoint` 替换
+    为抛 ValueError（注入点与真实「已决策」路径同源——两条真实触发路径「非法 action /
+    已决策」都被 HTTP 层 Pydantic/路由校验挡在 `_resumeTurnInBackground` 之外，见报告）。
+    """
+    service = _fullService(esl=FakeEsl(empty=True))
+
+    async def failingResolve(session, *, checkpointId, status, userChoice):
+        raise ValueError(f"checkpoint 非 pending（当前 confirmed）: {checkpointId}")
+
+    service._sessions.resolveCheckpoint = failingResolve
+    monkeypatch.setattr(researchModule, "buildResearchAgentService", lambda: service)
+    sid = await _createSession(client, authHeaders)
+
+    stream = asyncio.create_task(_readStream(client, sid, authHeaders))
+    await _waitForSubscriber(sid)
+    await client.post(
+        f"{_BASE}/sessions/{sid}/turns", json={"question": QUESTION}, headers=authHeaders
+    )
+
+    detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    checkpoint = detail.json()["pendingCheckpoint"]
+    assert checkpoint is not None and checkpoint["options"]["signal"] == "empty_scope"
+
+    answered = await client.post(
+        f"{_BASE}/checkpoints/{checkpoint['id']}/answer",
+        json={"action": "confirm", "choice": {}},
+        headers=authHeaders,
+    )
+    assert answered.status_code == 200, answered.text
+
+    events, payloads = await asyncio.wait_for(stream, timeout=30)
+    assert events[0] == "research.connected"
+    assert events[-1] == "research.error"
+    assert payloads[-1]["code"] == "turn_failed"
+    assert "非 pending" in payloads[-1]["message"]
+    assert "research.done" not in events

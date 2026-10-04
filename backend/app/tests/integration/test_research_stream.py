@@ -31,6 +31,9 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import research as researchModule
+from app.domain.enums import DataSourceType
+from app.domain.models import DataSource
+from app.infrastructure.security.crypto import encryptApiKey
 from app.models.rbac import User
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_event_bus import bus
@@ -55,25 +58,61 @@ pytestmark = pytest.mark.asyncio
 _BASE = "/api/v1/research"
 
 
+async def _seedDatasource(
+    dbSession: AsyncSession, name: str = "stream-test-oracle", *, isDefault: bool = True
+) -> DataSource:
+    """种一个**启用的业务数据源**（Task 13e：建会话必须能解析到业务源）。
+
+    与 `test_research_api.py` 同形：Oracle 形态与生产（`THBI Oracle`）同口径；
+    本套件的 runner 是 fake，适配器只被构造、从不建连，故 host 用不可达假名即可。
+    """
+    ds = DataSource(
+        name=name,
+        type=DataSourceType.ORACLE,
+        host="oracle-test",
+        port=1521,
+        database_name="THBIDB",
+        username="THBI",
+        password_encrypted=encryptApiKey("test-password"),
+        is_active=True,
+        is_default=isDefault,
+        oracle_version="19.0.0.0.0",
+    )
+    dbSession.add(ds)
+    await dbSession.commit()
+    await dbSession.refresh(ds)
+    return ds
+
+
 @pytest.fixture()
 async def authHeaders(dbSession: AsyncSession) -> dict[str, str]:
-    """用户 A 的 stub 头（DB 命中 → dbUserId 非空）。与 test_research_api 同款。"""
+    """用户 A 的 stub 头（DB 命中 → dbUserId 非空）+ 一个启用的默认业务源。
+
+    Task 13e 起 `POST /research/sessions` 是 fail-closed：解析不到启用的业务源即 422，
+    故建会话的夹具必须同步种源（与 test_research_api 同款）。
+    """
     dbSession.add(
         User(username="research-stream-a", display_name="a", email=None, enabled=True,
              password_hash=None)
     )
     await dbSession.commit()
+    await _seedDatasource(dbSession)
     return {"X-User-Id": "research-stream-a"}
 
 
 @pytest.fixture()
 async def secondUserHeaders(dbSession: AsyncSession) -> dict[str, str]:
-    """用户 B 的 stub 头（越权 404 断言用）。"""
+    """用户 B 的 stub 头（越权 404 断言用）+ 一个非默认业务源。
+
+    用户 B 只用于「流他人会话 ⇒ 404」；其源不参与建会话的默认源解析，
+    故用 `isDefault=False` 避免与 `authHeaders` 的默认源冲突（同 `test_research_api.py:556`）。
+    """
     dbSession.add(
         User(username="research-stream-b", display_name="b", email=None, enabled=True,
              password_hash=None)
     )
     await dbSession.commit()
+    await _seedDatasource(dbSession, "stream-test-secondary", isDefault=False)
     return {"X-User-Id": "research-stream-b"}
 
 

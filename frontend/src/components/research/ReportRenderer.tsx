@@ -158,8 +158,8 @@ export function ReportRenderer({ payload }: ReportRendererProps) {
 // opaque payload → ReportPayload 收窄（feat-research-entry Task 12）
 // ---------------------------------------------------------------------------
 // 报告 payload 以 `Record<string, unknown>` 存于 ResearchReport（JSONB），渲染前
-// 必须收窄成类型安全的 ReportPayload。此处是唯一收窄点：ResearchReportPage 的
-// 旧 cast 与 ResearchCompareView 的四行提取都应以本函数为 SSOT，避免两套解析漂移。
+// 必须收窄成类型安全的 ReportPayload。本函数是唯一收窄点：ResearchReportPage
+// 与 ResearchCompareView 都经它收窄，避免两套解析漂移。
 
 const BLOCK_TYPES: ReadonlySet<string> = new Set<string>([
   "text",

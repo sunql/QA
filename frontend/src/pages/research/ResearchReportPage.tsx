@@ -8,7 +8,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { Button, Empty, Space, Tag, Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import { useResearchStore } from "../../stores/researchStore";
-import { ReportRenderer } from "../../components/research/ReportRenderer";
+import { ReportRenderer, parseReportPayload } from "../../components/research/ReportRenderer";
 import type { ReportPayload } from "../../components/research/ReportRenderer";
 
 export default function ResearchReportPage() {
@@ -26,9 +26,7 @@ export default function ResearchReportPage() {
     void loadReport(id);
   }, [id, loadReports, loadReport]);
 
-  const payload: ReportPayload | null = report
-    ? (report.payload as unknown as ReportPayload)
-    : null;
+  const payload: ReportPayload | null = report ? parseReportPayload(report.payload) : null;
 
   return (
     <div style={{ padding: 16 }}>

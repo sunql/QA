@@ -599,6 +599,34 @@ def buildClient(factory: Any, config: Any) -> Any:
         return None
 
 
+async def buildRoutingContext(
+    session: AsyncSession | None, sessionId: uuid.UUID | str, tokenUsage: Any
+) -> RoutingContext:
+    """按 chat 同口径装配路由上下文（对拍 `chat_service._buildRoutingContext`）。
+
+    M1（fix round 1）：此前只传 `sessionId`，`sessionCost` / `sessionTurnCount` /
+    `priorModelId` 全取默认值 ⇒ 路由器的**预算超限降级**（`sessionCost >= sessionBudget`
+    ⇒ 最便宜）与**会话亲和**（`turnCount < affinityTurns` 且 `priorModelId` 命中 ⇒ 沿用）
+    两条规则对研究链路恒不触发，等于路由失效。三项读数一律走 `TokenUsageService` 的公开面
+    （getSessionCost / getSessionTurnCount / getLastModelId），不自算、不读 chat 私有。
+    """
+    if tokenUsage is None or session is None:
+        return RoutingContext(sessionId=str(sessionId))
+    try:
+        cost = await tokenUsage.getSessionCost(session, str(sessionId))
+        turns = await tokenUsage.getSessionTurnCount(session, str(sessionId))
+        prior = await tokenUsage.getLastModelId(session, str(sessionId))
+    except Exception:  # noqa: BLE001 —— 读用量失败按零上下文路由，不阻断整轮
+        logger.warning("装配路由上下文失败，按零上下文路由: session=%s", sessionId, exc_info=True)
+        return RoutingContext(sessionId=str(sessionId))
+    return RoutingContext(
+        sessionId=str(sessionId),
+        sessionCost=float(cost or 0),
+        sessionTurnCount=int(turns or 0),
+        priorModelId=prior,
+    )
+
+
 async def resolveModelConfig(
     modelConfigs: Any,
     modelRouter: Any,
@@ -607,6 +635,7 @@ async def resolveModelConfig(
     *,
     question: str,
     sessionId: uuid.UUID | str,
+    tokenUsage: Any = None,
 ) -> Any | None:
     """按 chat 同口径选出本轮模型配置：`list(activeOnly)` → 可用性筛 → 路由。
 
@@ -614,7 +643,8 @@ async def resolveModelConfig(
     - 配置清单走公开面 `ModelConfigService.list(session, activeOnly=True)`；
     - 「可用」判据复用注入的 `factory`（真实实现即 `createClient`，key 解析的 SSOT），
       逐配置隔离异常（单条密文损坏不应让整轮路由失败）；
-    - 选择走公开面 `ModelRouterService.selectModel(configs, prompt, ctx)`。
+    - 选择走公开面 `ModelRouterService.selectModel(configs, prompt, ctx)`，其中 `ctx`
+      由 `buildRoutingContext` 装配（预算 / 轮次 / 上次模型三项齐备）。
 
     任何一步失败/为空都返回 None（调用方走 `research.error` 显式降级），
     不抛错、不静默用 keyless 客户端顶替。
@@ -633,7 +663,8 @@ async def resolveModelConfig(
     if modelRouter is None:
         return usable[0]
     try:
-        return modelRouter.selectModel(usable, question, RoutingContext(sessionId=str(sessionId)))
+        ctx = await buildRoutingContext(session, sessionId, tokenUsage)
+        return modelRouter.selectModel(usable, question, ctx)
     except Exception:  # noqa: BLE001 —— 路由失败（如 NoAvailableModelError）同样降级
         logger.warning("模型路由失败，本轮 LLM 段降级: session=%s", sessionId, exc_info=True)
         return None
@@ -661,6 +692,7 @@ async def resolveClient(
     state: dict[str, Any],
     emit: Emit | None,
     sessionId: uuid.UUID,
+    tokenUsage: Any = None,
 ) -> tuple[Any, Any]:
     """解析本轮 LLM 客户端与其模型配置；无可用时显式降级并返回 `(None, None)`。"""
     config = await resolveModelConfig(
@@ -670,6 +702,7 @@ async def resolveClient(
         session,
         question=str(state.get("question") or ""),
         sessionId=sessionId,
+        tokenUsage=tokenUsage,
     )
     client = buildClient(factory, config)
     if client is None:

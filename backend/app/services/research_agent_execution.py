@@ -175,7 +175,35 @@ async def chartStep(
     emit: Emit | None,
     deps: ExecutionDeps,
 ) -> dict[str, Any]:
-    """出图（ChartService 契约：绝不抛错）并落 result；LLM 调用经计量边界。
+    """出图（ChartService 契约：绝不抛错）并落 result + 发 step_done。"""
+    build = await _buildChartMetered(
+        session, rows, sessionId=sessionId, state=state, emit=emit, deps=deps
+    )
+    result = stepResult(
+        step,
+        rows=rows,
+        error=None,
+        chartType=getattr(getattr(build, "chartType", None), "value", None),
+        chartOption=getattr(build, "option", None),
+    )
+    await emitEvent(
+        emit,
+        EVENT_STEP_DONE,
+        {"index": result["index"], "rowCount": result["rowCount"], "summary": result["summary"]},
+    )
+    return result
+
+
+async def _buildChartMetered(
+    session: AsyncSession,
+    rows: list[dict[str, Any]],
+    *,
+    sessionId: uuid.UUID,
+    state: dict[str, Any],
+    emit: Emit | None,
+    deps: ExecutionDeps,
+) -> Any:
+    """调 ChartService 出图；LLM 调用经计量边界并按 `purpose=research_chart` 记账。
 
     Task 6.5-3：此前直接把裸客户端交给 ChartService —— 一旦 ChartService 真的走 LLM
     （`decision.ambiguous and modelConfig is not None`），调用就是未计量的。现包
@@ -204,16 +232,4 @@ async def chartStep(
             modelName=metered.modelName,
             cachedTokens=metered.cachedTokens,
         )
-    result = stepResult(
-        step,
-        rows=rows,
-        error=None,
-        chartType=getattr(getattr(build, "chartType", None), "value", None),
-        chartOption=getattr(build, "option", None),
-    )
-    await emitEvent(
-        emit,
-        EVENT_STEP_DONE,
-        {"index": result["index"], "rowCount": result["rowCount"], "summary": result["summary"]},
-    )
-    return result
+    return build

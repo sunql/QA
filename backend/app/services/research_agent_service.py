@@ -112,6 +112,7 @@ from app.services.research_agent_ports import (
 )
 from app.services.research_hypothesis_adapter import generateHypotheses
 from app.services.research_session_service import ResearchSessionService
+from app.services.token_usage_service import TokenUsageService
 
 logger = logging.getLogger(__name__)
 
@@ -136,33 +137,51 @@ class ResearchAgentService:
         modelRouter: Any | None = None,
         ontology: Any | None = None,
         nl2sql: Any | None = None,
+        tokenUsage: Any | None = None,
         autoConfirm: bool = False,
     ) -> None:
         self._esl = esl
         self._sessions = sessionService
         self._planner = planner
         self._runner = runner
-        self._chart = chartService
         self._llmFactory = llmFactory
         self._usage = usageRecorder if usageRecorder is not None else LlmUsageRecorder()
-        # 模型路由（Task 6.5-2）：`llmFactory` 收到的必须是**已选配置**，不再是 `None`。
-        # 三个端口都可注入（测试注入确定性 fake）；默认即 chat 同源的公开实现。
-        self._modelConfigs = modelConfigs if modelConfigs is not None else ModelConfigService()
-        self._modelRouter = modelRouter if modelRouter is not None else ModelRouterService()
-        # 步 SQL 生成（Task 6.5-1）：本体类按 ESL 物理表筛；nl2sql 未注入时该能力关闭
-        # （无 sql 的步仍走 STEP_MISSING_SQL，与接线前行为一致）。
-        self._ontology = ontology if ontology is not None else OntologyService()
-        self._nl2sql = nl2sql
+        self._autoConfirm = autoConfirm
+        self._intent = IntentService()
+        self._wireRouting(modelConfigs, modelRouter, tokenUsage)
+        self._wireNl2sql(ontology, nl2sql)
         # 报告装配器：默认真实 ReportPlanner（Task 6 接线）。**不注入 llmClientFactory**
         # （Task 6.5-3 / F3）：compose 的自建客户端路径绕过 MeteredClient，是未计量盲区；
         # 装配所需客户端一律由 `_stageReport` 经计量边界传入，降级时传 None（模板文案）。
         self._reporter = reporter if reporter is not None else ReportPlanner(
             sessionService=sessionService
         )
-        self._autoConfirm = autoConfirm
-        self._intent = IntentService()
-        # 执行面（Task 6.5 fix round 2 抽到 research_agent_execution）：依赖在此一次性绑定。
-        self._exec = ExecutionDeps(
+        self._exec = self._buildExec(runner, chartService, nl2sql)
+        self._stages = self._buildStages()
+
+    def _wireRouting(
+        self, modelConfigs: Any | None, modelRouter: Any | None, tokenUsage: Any | None
+    ) -> None:
+        """模型路由端口（Task 6.5-2 / M1）：`llmFactory` 收到的必须是**已选配置**。
+
+        三端口均可注入（测试注入确定性 fake）；默认即 chat 同源的公开实现。
+        `tokenUsage` 供装配路由上下文（成本 / 轮次 / 上次模型）——chat 同口径。
+        """
+        self._modelConfigs = modelConfigs if modelConfigs is not None else ModelConfigService()
+        self._modelRouter = modelRouter if modelRouter is not None else ModelRouterService()
+        self._tokenUsage = tokenUsage if tokenUsage is not None else TokenUsageService()
+
+    def _wireNl2sql(self, ontology: Any | None, nl2sql: Any | None) -> None:
+        """步 SQL 生成端口（Task 6.5-1）：本体类按 ESL 物理表筛。
+
+        `nl2sql` 未注入时该能力关闭（无 sql 的步仍走 STEP_MISSING_SQL，与接线前一致）。
+        """
+        self._ontology = ontology if ontology is not None else OntologyService()
+        self._nl2sql = nl2sql
+
+    def _buildExec(self, runner: Any, chartService: Any, nl2sql: Any | None) -> ExecutionDeps:
+        """执行面依赖（Task 6.5 fix round 2 抽到 research_agent_execution）：一次绑定。"""
+        return ExecutionDeps(
             runner=runner,
             chart=chartService,
             ontology=self._ontology,
@@ -170,7 +189,10 @@ class ResearchAgentService:
             resolveClient=self._resolveClient,
             recordUsage=self._recordUsage,
         )
-        self._stages: dict[str, Any] = {
+
+    def _buildStages(self) -> dict[str, Any]:
+        """相位调度表（键 = `PHASES` 的元素，顺序由 `PHASES` 决定）。"""
+        return {
             "intent": self._stageIntent,
             "esl": self._stageEsl,
             "plan": self._stagePlan,
@@ -246,14 +268,9 @@ class ResearchAgentService:
             session, checkpointId=checkpointId, status=status, userChoice=choice or {}
         )
         row = await self._loadSession(session, checkpoint.session_id)
-        rewritten = str((choice or {}).get("question") or "").strip()
-        content = resumeTurnContent(
-            action=action, choice=choice, checkpointId=checkpointId, rewritten=rewritten
+        rewritten = await self._recordResumeTurn(
+            session, checkpoint, action=action, choice=choice, checkpointId=checkpointId
         )
-        await self._sessions.appendTurn(
-            session, sessionId=checkpoint.session_id, role="user", content=content
-        )
-        await self._sessions.updateSessionStatus(session, checkpoint.session_id, STATUS_RUNNING)
         state = rebuildState(row, checkpoint)
         state["choice"] = choice or {}
         startPhase = nextPhase(checkpoint, action)
@@ -277,6 +294,26 @@ class ResearchAgentService:
             emit=emit,
             state=state,
         )
+
+    async def _recordResumeTurn(
+        self,
+        session: AsyncSession,
+        checkpoint: Any,
+        *,
+        action: str,
+        choice: dict[str, Any],
+        checkpointId: uuid.UUID,
+    ) -> str:
+        """写 user turn + 会话置 running；返回改写后的问题（空串 = 用户未改写）。"""
+        rewritten = str((choice or {}).get("question") or "").strip()
+        content = resumeTurnContent(
+            action=action, choice=choice, checkpointId=checkpointId, rewritten=rewritten
+        )
+        await self._sessions.appendTurn(
+            session, sessionId=checkpoint.session_id, role="user", content=content
+        )
+        await self._sessions.updateSessionStatus(session, checkpoint.session_id, STATUS_RUNNING)
+        return rewritten
 
     # ------------------------------------------------------------------
     # 编排骨架
@@ -708,6 +745,7 @@ class ResearchAgentService:
             state=state,
             emit=emit,
             sessionId=sessionId,
+            tokenUsage=self._tokenUsage,
         )
 
     async def _recordUsage(

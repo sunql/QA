@@ -26,6 +26,7 @@ from app.services.research_agent_ports import (
     LlmUsageRecorder,
     MeteredClient,
     buildClient,
+    buildRoutingContext,
     planQuestionWithFeedback,
     resolveModelConfig,
     selectClassesForTables,
@@ -162,6 +163,66 @@ def test_build_client_never_falls_back_to_none_config() -> None:
     assert buildClient(lambda c: calls.append(c), None) is None
     assert calls == []
     assert buildClient(None, _RouteCfg()) is None
+
+
+class _TokenUsage:
+    """TokenUsageService fake：只实现路由上下文要用的三个公开读数。"""
+
+    def __init__(self, cost: Any = "3.5", turns: int = 2, prior: int | None = 7,
+                 broken: bool = False) -> None:
+        self._cost, self._turns, self._prior, self._broken = cost, turns, prior, broken
+
+    def _guard(self) -> None:
+        if self._broken:
+            raise RuntimeError("用量表炸了")
+
+    async def getSessionCost(self, session: Any, sessionId: str) -> Any:
+        self._guard()
+        return Decimal(str(self._cost))
+
+    async def getSessionTurnCount(self, session: Any, sessionId: str) -> int:
+        self._guard()
+        return self._turns
+
+    async def getLastModelId(self, session: Any, sessionId: str) -> int | None:
+        self._guard()
+        return self._prior
+
+
+@pytest.mark.asyncio
+async def test_build_routing_context_populates_cost_turns_and_prior_model() -> None:
+    """M1：路由上下文三项齐备（chat `_buildRoutingContext` 同口径）。"""
+    ctx = await buildRoutingContext(object(), "s-1", _TokenUsage())
+    assert ctx.sessionId == "s-1"
+    assert ctx.sessionCost == 3.5
+    assert ctx.sessionTurnCount == 2
+    assert ctx.priorModelId == 7
+
+
+@pytest.mark.asyncio
+async def test_build_routing_context_degrades_to_zero_context() -> None:
+    """读用量失败 / 无 provider ⇒ 零上下文（不阻断路由，不抛错）。"""
+    for session, provider in ((object(), _TokenUsage(broken=True)), (None, None)):
+        ctx = await buildRoutingContext(session, "s-2", provider)
+        assert (ctx.sessionId, ctx.sessionCost, ctx.sessionTurnCount, ctx.priorModelId) == (
+            "s-2", 0.0, 0, None
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_model_config_routes_with_session_context() -> None:
+    """M1：路由收到的 ctx 带真实用量（只传 sessionId ⇒ 预算/亲和规则恒不触发）。"""
+    cfg = _RouteCfg()
+    router = _Router()
+    picked = await resolveModelConfig(
+        _Provider([cfg]), router, lambda c: object(), object(),
+        question="q", sessionId="s-9", tokenUsage=_TokenUsage(),
+    )
+    assert picked is cfg
+    ctx = router.calls[0][2]
+    assert (ctx.sessionId, ctx.sessionCost, ctx.sessionTurnCount, ctx.priorModelId) == (
+        "s-9", 3.5, 2, 7
+    )
 
 
 # ---------------------------------------------------------------------------

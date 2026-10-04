@@ -28,6 +28,7 @@ from app.services.report_planner import ReportPlanner
 from app.services.research_agent_ports import STEP_MISSING_SQL, LlmUsageRecorder
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_session_service import ResearchSessionService
+from app.services.token_usage_service import TokenUsageService
 
 QUESTION = "供应商收货量为什么下降"
 
@@ -934,3 +935,30 @@ async def test_compose_requires_or_meters_client(dbSession, makeService) -> None
     s = await _newSession(svc, dbSession)
     assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
     assert [r for r in recorder.records if r["purpose"] == "research_report"] == []
+
+
+@pytest.mark.asyncio
+async def test_routing_context_carries_session_cost_and_turns(dbSession, makeService) -> None:
+    """M1（fix round 1）：路由上下文与 chat 同口径 —— 已有真实用量行 ⇒ 三项非默认。
+
+    只传 `sessionId` 时 `sessionCost=0` / `sessionTurnCount=0`，路由器的**预算超限降级**
+    （`model_router_service.py:70`）与**会话亲和**（`:77`）两条规则对研究链路恒不触发。
+    这里先落一条真实 `session_token_usage` 行，再断言 router 实际收到的 ctx。
+    """
+    router = FakeModelRouter()
+    svc = makeService(
+        modelRouter=router, autoConfirm=True,
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+    await TokenUsageService().recordUsage(
+        dbSession, sessionId=str(s.id), modelConfigId=None, modelName="prior-model",
+        promptTokens=100, completionTokens=50, cost=Decimal("3.5"), purpose="seed",
+    )
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+
+    assert router.calls, "路由必须被调用（有可用配置）"
+    ctx = router.calls[0][2]
+    assert ctx.sessionId == str(s.id)
+    assert ctx.sessionCost > 0  # 非零 ⇒ 预算规则可达（此前恒 0）
+    assert ctx.sessionTurnCount >= 1  # 非零 ⇒ 亲和规则可达（此前恒 0）

@@ -2083,6 +2083,8 @@ git commit -m "feat(research): 会话级模型选择（迁移 0113 + modelId 放
 
 - [ ] **Step 1: 写失败测试**
 
+**先看 Task 1 已落地的 `backend/app/tests/unit/test_research_checkpoint_prompt.py` 文件头**：本仓 `app/tests/unit/conftest.py` 有 autouse 的 DB fixtures（`dbSession` / `seedEngine` / `warmBusinessObjectRegistry`），**纯函数单测必须在本文件内用 no-op 覆写它们**，否则每个用例都会走 `seedEngine._truncateAll` 清空整个测试库（既慢又抹掉集成测试依赖的迁移种子）。照抄 Task 1 那段覆写（`dbSession`→None、`seedEngine`→None、`warmBusinessObjectRegistry`→no-op），这是本仓既有约定（另见 `test_prior_cte_contract.py` / `test_kpi_catalog_api.py`）。
+
 新建 `backend/app/tests/unit/test_research_model_selection.py`：
 
 ```python
@@ -2308,6 +2310,8 @@ cd backend && uv run pytest app/tests/unit/test_research_model_selection.py -q
 Expected: PASS（6 passed）。
 
 - [ ] **Step 5: 把会话上的 `model_id` 接进执行期**
+
+**行数红线（Task 1 实测）**：`backend/app/services/research_agent_service.py` 现在是 **799 行**，距项目 800 行上限只剩 1 行，而本步要往里加行。**动手前先 `wc -l` 确认**；若加上本步改动会超 800，**先把等价的纯函数/无状态构件抽到 `research_agent_stages.py`**（该文件是本模块既定的抽出目标，依赖方向单向：service → stages），再回填本步。不要为了塞下改动去改 `alembic`/结构或压缩可读性。
 
 `backend/app/services/research_agent_service.py`：
 

@@ -314,6 +314,9 @@ MSG_DATASOURCE_CONNECT_FAILED = "连接失败: {message}"
 MSG_DATASOURCE_HOST_NOT_ALLOWED = "主机 {host} 不在允许列表内"
 MSG_DATASOURCE_HOST_ALLOWLIST_DETAIL = "允许的主机: {hosts}"
 MSG_DATASOURCE_NAME_EXISTS = "数据源名称 {name} 已存在"
+# 研究域建会话时的数据源解析失败（Task 13e）：无**启用**数据源 ⇒ 执行业务 SQL 无处可去。
+# 刻意显式报错而非回落应用元数据库会话 —— 那正是「研究侧查不到业务表」的历史根因。
+MSG_DATASOURCE_NONE_AVAILABLE = "未配置可用的业务数据源，无法开始研究：请先新建并启用一个数据源"
 # MSG_DATASOURCE_CONNECT_OK 在 app/domain/error_messages.py（基础设施层）
 
 

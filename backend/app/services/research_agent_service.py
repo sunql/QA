@@ -48,7 +48,7 @@ from app.services.model_config_service import ModelConfigService
 from app.services.model_router_service import ModelRouterService
 from app.services.ontology_service import OntologyService
 from app.services.report_planner import ReportPlanner
-from app.services.research_agent_execution import ExecutionDeps, runStep
+from app.services.research_agent_execution import ExecutionDeps, adapterFor, depsForSession, runStep
 from app.services.research_agent_ports import (
     ACTION_STATUS,
     CHECKPOINT_HYPOTHESIS,
@@ -543,11 +543,12 @@ class ResearchAgentService:
         startIndex = int(state.get("resumeStepIndex") or 0)
         # Task 4 契约：执行失败会 rollback 注入的 session，先固化本 turn 已写入的状态行
         await session.commit()
+        deps = await depsForSession(session, sessionId, self._exec)  # Task 13e：业务库源按次送达
         for step in steps:
             if int(step.get("index", 0)) < startIndex:
                 continue
             result = await runStep(
-                session, step, sessionId=sessionId, state=state, emit=emit, deps=self._exec
+                session, step, sessionId=sessionId, state=state, emit=emit, deps=deps
             )
             results.append(result)
             state["stepResults"] = results
@@ -602,9 +603,13 @@ class ResearchAgentService:
     ) -> Pause | None:
         """[9] 逐条验证假设并落 finding（confidence = 候选分 × 0.9 / 0.3）。"""
         findings: list[dict[str, Any]] = []
+        # Task 13e：验证 SQL 与执行步走同一条业务库路径（假设 SQL 也是业务 SQL）
+        adapter = adapterFor((await depsForSession(session, sessionId, self._exec)).datasource)
         for candidate in selectedHypotheses(state):
             await session.commit()  # Task 4 契约：runVerification 失败会 rollback 本 session
-            outcome = await self._runner.runVerification(session, Hypothesis(**candidate))
+            outcome = await self._runner.runVerification(
+                session, Hypothesis(**candidate), adapter=adapter
+            )
             verified = outcome.get("error") is None
             confidence = round(
                 candidateConfidence(state, candidate)
@@ -617,7 +622,7 @@ class ResearchAgentService:
                 turnId=turnId,
                 claimText=candidate["statement"],
                 supportingSql=candidate.get("verificationSql"),
-                supportingData=self._findingData(outcome),
+                supportingData=findingData(outcome),
                 confidence=confidence,
             )
             findings.append(
@@ -631,11 +636,6 @@ class ResearchAgentService:
             await emitEvent(emit, EVENT_FINDING, findings[-1])
         state["findings"] = findings
         return None
-
-    @staticmethod
-    def _findingData(outcome: dict[str, Any]) -> dict[str, Any]:
-        """finding.supporting_data 契约（实现见 ports.findingData，Task 6 报告读侧）。"""
-        return findingData(outcome)
 
     async def _stageReport(
         self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,

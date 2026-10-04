@@ -64,6 +64,9 @@ class ResearchSession(Base):
         String(_STATUS_LEN), default="running", server_default="running"
     )
     created_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 业务数据源（0112）：研究是**多轮 + 可恢复**的，源在会话上一次性选定全程沿用
+    # （state 不持久化，故不能只按请求带）。不加 FK / 可空，理由见迁移 0112。
+    datasource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     input_seed: Mapped[str] = mapped_column(Text, default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False

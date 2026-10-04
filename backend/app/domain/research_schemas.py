@@ -58,6 +58,11 @@ class ResearchSessionCreate(CamelModel):
 
     question: str = Field(min_length=1, max_length=2000)
     mode: ResearchMode = "research"
+    datasourceId: int | None = None
+    """业务数据源（可选，Task 13e）。不传 → 落默认数据源（无可用源则显式报错）。
+
+    可选是**刻意**的：前端无需改动；缺省回落规则与 chat 同口径（默认源优先）。
+    """
 
 
 class ResearchTurnCreate(CamelModel):

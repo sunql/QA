@@ -24,14 +24,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import research as researchModule
+from app.domain.enums import DataSourceType
+from app.domain.models import DataSource
+from app.domain.research_models import ResearchSession
 from app.domain.research_schemas import CheckpointAnswerRequest
 from app.infrastructure.llm.factory import createClient
+from app.infrastructure.security.crypto import encryptApiKey
 from app.models.rbac import User
 from app.services.chart_service import ChartService
 from app.services.enterprise_semantic_layer import (
     EmptyResearchScopeError,
     EnterpriseSemanticLayer,
 )
+from app.services.messages_zh import MSG_DATASOURCE_NONE_AVAILABLE
 from app.services.nl2sql_service import Nl2SqlService
 from app.services.report_planner import ReportPlanner
 from app.services.research_agent_service import ResearchAgentService
@@ -65,11 +70,50 @@ async def _userId(dbSession: AsyncSession, username: str) -> int:
     return await dbSession.scalar(select(User.id).where(User.username == username))
 
 
+async def _seedDatasource(
+    dbSession: AsyncSession, name: str = "api-test-oracle", *, isDefault: bool = True
+) -> DataSource:
+    """种一个**启用的业务数据源**（Task 13e：建会话必须能解析到业务源）。
+
+    Oracle 形态与生产（`THBI Oracle`）同口径；本文件的 runner 是 `_NoopRunner`，
+    适配器只被构造、从不建连，故 host 可以是不可达的假名。
+    """
+    ds = DataSource(
+        name=name,
+        type=DataSourceType.ORACLE,
+        host="oracle-test",
+        port=1521,
+        database_name="THBIDB",
+        username="THBI",
+        password_encrypted=encryptApiKey("test-password"),
+        is_active=True,
+        is_default=isDefault,
+        oracle_version="19.0.0.0.0",
+    )
+    dbSession.add(ds)
+    await dbSession.commit()
+    await dbSession.refresh(ds)
+    return ds
+
+
 @pytest.fixture()
 async def authHeaders(dbSession: AsyncSession) -> dict[str, str]:
-    """用户 A 的 stub 头（DB 命中 → dbUserId 非空）。"""
+    """用户 A 的 stub 头（DB 命中 → dbUserId 非空）+ 一个启用的默认业务数据源。"""
+    await _seedUser(dbSession, "research-user-a")
+    await _seedDatasource(dbSession)
+    return {"X-User-Id": "research-user-a"}
+
+
+@pytest.fixture()
+async def authHeadersNoSource(dbSession: AsyncSession) -> dict[str, str]:
+    """用户 A 的 stub 头，但**不种任何数据源**（Task 13e「无可用源 ⇒ 显式报错」用例）。"""
     await _seedUser(dbSession, "research-user-a")
     return {"X-User-Id": "research-user-a"}
+
+
+async def _seededDatasourceId(dbSession: AsyncSession) -> int:
+    """`authHeaders` 夹具已种下的默认源 id（源在会话上落库，Task 13e）。"""
+    return await dbSession.scalar(select(DataSource.id).order_by(DataSource.id).limit(1))
 
 
 @pytest.fixture()
@@ -99,10 +143,16 @@ class _NoopPlanner:
 
 
 class _NoopRunner:
-    async def executeReadonlySql(self, session, sql):
+    """无步执行的替身；`adapter=` 是 Task 13e 契约（业务 SQL 必经业务库 adapter）。"""
+
+    def __init__(self) -> None:
+        self.adapters: list = []
+
+    async def executeReadonlySql(self, session, sql, *, adapter=None):
+        self.adapters.append(adapter)
         return []
 
-    async def runVerification(self, session, hypothesis):
+    async def runVerification(self, session, hypothesis, *, adapter=None):
         return {"rows": [], "error": None}
 
 
@@ -239,7 +289,9 @@ async def test_pending_checkpoint_prompt_derived_from_options(
     """pendingCheckpoint.prompt 由 options["prompt"] 派生（无独立列）。"""
     svc = ResearchSessionService()
     userId = await _userId(dbSession, "research-user-a")
-    row = await svc.createSession(dbSession, userId=userId, question="q")
+    row = await svc.createSession(
+        dbSession, userId=userId, question="q", datasourceId=await _seededDatasourceId(dbSession)
+    )
     turn = await svc.appendTurn(dbSession, sessionId=row.id, role="user", content={})
     await svc.openCheckpoint(
         dbSession,
@@ -321,7 +373,9 @@ async def test_checkpoint_answer_and_double_submit_409(
     monkeypatch.setattr(researchModule, "buildResearchAgentService", _fastService)
     svc = ResearchSessionService()
     userId = await _userId(dbSession, "research-user-a")
-    row = await svc.createSession(dbSession, userId=userId, question="q")
+    row = await svc.createSession(
+        dbSession, userId=userId, question="q", datasourceId=await _seededDatasourceId(dbSession)
+    )
     turn = await svc.appendTurn(dbSession, sessionId=row.id, role="user", content={})
     cp = await svc.openCheckpoint(
         dbSession,
@@ -355,7 +409,9 @@ async def test_checkpoint_answer_invalid_action_422(
 ) -> None:
     svc = ResearchSessionService()
     userId = await _userId(dbSession, "research-user-a")
-    row = await svc.createSession(dbSession, userId=userId, question="q")
+    row = await svc.createSession(
+        dbSession, userId=userId, question="q", datasourceId=await _seededDatasourceId(dbSession)
+    )
     turn = await svc.appendTurn(dbSession, sessionId=row.id, role="user", content={})
     cp = await svc.openCheckpoint(
         dbSession, sessionId=row.id, turnId=turn.id, phase="intent",
@@ -387,7 +443,9 @@ async def test_report_version_endpoints(
 ) -> None:
     svc = ResearchSessionService()
     userId = await _userId(dbSession, "research-user-a")
-    row = await svc.createSession(dbSession, userId=userId, question="q")
+    row = await svc.createSession(
+        dbSession, userId=userId, question="q", datasourceId=await _seededDatasourceId(dbSession)
+    )
     await svc.publishReport(dbSession, sessionId=row.id, payload={"v": 1}, renderedMd="# v1")
     await svc.publishReport(dbSession, sessionId=row.id, payload={"v": 2}, renderedMd="# v2")
     await dbSession.commit()
@@ -464,3 +522,62 @@ async def test_turn_endpoint_uses_default_construction_path(
     assert resp.status_code == 202
     assert len(seen) == 1
     assert isinstance(seen[0]._reporter, ReportPlanner)
+
+
+# ---------------------------------------------------------------------------
+# Task 13e：业务数据源解析与持久化（研究侧终于连上业务库）
+# ---------------------------------------------------------------------------
+
+
+async def _persistedDatasourceId(dbSession: AsyncSession, sessionId: str):
+    return await dbSession.scalar(
+        select(ResearchSession.datasource_id).where(ResearchSession.id == uuid.UUID(sessionId))
+    )
+
+
+async def test_create_session_persists_default_datasource(
+    client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession
+) -> None:
+    """缺省建会话 → 绑定**默认业务源**并把 id 落库。
+
+    源必须持久化（不是只活在请求内存里）：研究是多轮 + 可恢复的，`state` 不落库，
+    后续 turn 的执行相位只能从 `research_session.datasource_id` 找回同一个库。
+    """
+    created = await _createSession(client, authHeaders)
+    assert await _persistedDatasourceId(dbSession, created["id"]) == await _seededDatasourceId(
+        dbSession
+    )
+
+
+async def test_create_session_honors_explicit_datasource(
+    client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession
+) -> None:
+    """显式 `datasourceId` 优先于默认源（字段可选 ⇒ 前端零改动）。"""
+    other = await _seedDatasource(dbSession, "api-test-secondary", isDefault=False)
+    created = await _createSession(client, authHeaders, datasourceId=other.id)
+    assert await _persistedDatasourceId(dbSession, created["id"]) == other.id
+
+
+async def test_create_session_without_active_datasource_is_rejected(
+    client: AsyncClient, authHeadersNoSource: dict[str, str]
+) -> None:
+    """无可用业务源 ⇒ **显式报错**，绝不静默回落到应用元数据库会话。
+
+    回落正是本特性此前的根因（业务 SQL 打在 Postgres 元数据库上 ⇒ 一律
+    `UndefinedTableError`），所以这里断言的是「建会话就失败」，而不是建完再炸。
+    """
+    resp = await client.post(
+        f"{_BASE}/sessions", json={"question": "q"}, headers=authHeadersNoSource
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"] == MSG_DATASOURCE_NONE_AVAILABLE
+
+
+async def test_create_session_with_unknown_datasource_is_404(
+    client: AsyncClient, authHeaders: dict[str, str]
+) -> None:
+    """显式 id 不存在 ⇒ 404（`DataSourceService.get` 的 NotFoundError），不静默改用默认源。"""
+    resp = await client.post(
+        f"{_BASE}/sessions", json={"question": "q", "datasourceId": 999999}, headers=authHeaders
+    )
+    assert resp.status_code == 404, resp.text

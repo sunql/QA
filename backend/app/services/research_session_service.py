@@ -63,13 +63,20 @@ class ResearchSessionService:
         userId: int | None,
         question: str,
         mode: str = DEFAULT_MODE,
+        datasourceId: int | None = None,
     ) -> ResearchSession:
-        """新建会话；`input_seed` 存原始问题（重启后据此恢复意图）。"""
+        """新建会话；`input_seed` 存原始问题（重启后据此恢复意图）。
+
+        `datasourceId`（Task 13e）由 API 层解析后传入（显式 id 或默认源）：执行面据此
+        连业务库。**不在此处解析默认源** —— 本服务不碰数据源域（单一职责），且解析
+        失败必须在建会话之前显式发生（不留无源的半成品会话）。
+        """
         row = ResearchSession(
             created_by=userId,
             title=question[:TITLE_MAX_LEN],
             input_seed=question,
             mode=mode,
+            datasource_id=datasourceId,
         )
         session.add(row)
         await session.flush()

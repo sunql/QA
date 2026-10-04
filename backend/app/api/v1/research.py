@@ -47,8 +47,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
-from app.domain.exceptions import AuthFailedError, ConflictError, NotFoundError
-from app.domain.models import OntologyClass
+from app.domain.exceptions import (
+    AuthFailedError,
+    ConflictError,
+    NotFoundError,
+    ValidationError,
+)
+from app.domain.models import DataSource, OntologyClass
 from app.domain.research_models import (
     ResearchCheckpoint,
     ResearchReport,
@@ -71,9 +76,11 @@ from app.domain.research_schemas import (
 from app.infrastructure.database import getSessionFactory
 from app.infrastructure.llm.factory import createClient
 from app.services.chart_service import ChartService
+from app.services.datasource_service import DataSourceService
 from app.services.enterprise_semantic_layer import EnterpriseSemanticLayer
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_semantic_match_service import KpiSemanticMatchService
+from app.services.messages_zh import MSG_DATASOURCE_NONE_AVAILABLE
 from app.services.nl2sql_service import Nl2SqlService
 from app.services.ontology_service import OntologyService
 from app.services.research_agent_ports import (
@@ -245,11 +252,34 @@ async def createSession(
     user: CurrentUser = Depends(_requireResearchUser),
     db: AsyncSession = Depends(getDb),
 ) -> ResearchSessionRead:
+    # 先解析数据源再建行：解析失败（无可用源 / id 不存在）不留无源的半成品会话
+    ds = await _resolveDatasource(db, payload.datasourceId)
     row = await _sessionService.createSession(
-        db, userId=user.dbUserId, question=payload.question, mode=payload.mode
+        db,
+        userId=user.dbUserId,
+        question=payload.question,
+        mode=payload.mode,
+        datasourceId=ds.id,
     )
     await db.commit()
     return _sessionRead(row)
+
+
+async def _resolveDatasource(db: AsyncSession, datasourceId: int | None) -> DataSource:
+    """解析研究会话的业务数据源（Task 13e）。
+
+    - 显式 `datasourceId` → `DataSourceService.get`（不存在 → 404 NotFoundError）；
+    - 缺省 → **默认数据源**：`list(activeOnly=True)` 首元素（排序为 `is_default.desc(), id`）；
+    - 空列表 → `ValidationError`（显式报错，**绝不**静默回落到应用元数据库会话 ——
+      研究侧的执行业务 SQL 必须有业务库连接，这正是本特性此前的根因）。
+    """
+    service = DataSourceService()
+    if datasourceId is not None:
+        return await service.get(db, datasourceId)
+    sources = await service.list(db, activeOnly=True)
+    if not sources:
+        raise ValidationError(MSG_DATASOURCE_NONE_AVAILABLE)
+    return sources[0]
 
 
 @router.get("/sessions", response_model=list[ResearchSessionRead], summary="我的研究会话")

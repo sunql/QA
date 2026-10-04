@@ -19,10 +19,13 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
-from app.domain.models import LlmConfig
+from app.domain.enums import DataSourceType
+from app.domain.models import DataSource, LlmConfig
 from app.domain.multi_step_plan import MultiStepPlan
+from app.domain.research_models import ResearchSession
+from app.infrastructure.security.crypto import encryptApiKey
 from app.services.nl2sql_service import SqlResult
 from app.services.report_planner import ReportPlanner
 from app.services.research_agent_ports import (
@@ -118,17 +121,22 @@ class FakeRunner:
         self._raiseError = raiseError
         self.verifyCalls: list[str] = []
         self.executed: list[str] = []
+        # Task 13e：业务库 adapter 按次送达（`adapter=` 关键字）——记下来断言「真的送达了」
+        self.adapters: list = []
+        self.verifyAdapters: list = []
 
-    async def executeReadonlySql(self, session, sql):
+    async def executeReadonlySql(self, session, sql, *, adapter=None):
         self.executed.append(sql)
+        self.adapters.append(adapter)
         if self._raiseError is not None:
             raise self._raiseError
         if self._error is not None:
             raise ValueError(self._error)
         return list(self._rows)
 
-    async def runVerification(self, session, hypothesis):
+    async def runVerification(self, session, hypothesis, *, adapter=None):
         self.verifyCalls.append(hypothesis.verificationSql)
+        self.verifyAdapters.append(adapter)
         if self._error is not None:
             return {"rows": [], "error": self._error}
         return {"rows": [{"cnt": 1}], "error": None}
@@ -337,8 +345,38 @@ def makeService(dbSession):
     return _make
 
 
+async def _ensureDatasource(dbSession):
+    """种一个业务数据源行（Task 13e）：研究会话必须绑定业务源，执行面据此取 adapter。
+
+    用 **Oracle** 形态（真实环境 = `THBI Oracle`）：runner 是 fake ⇒ 适配器只被构造、
+    从不建连，但方言参数（`oracle_version` / `schemaPrefix=THBI`）走的是生产同一条判定。
+    """
+    existing = await dbSession.scalar(select(DataSource).limit(1))
+    if existing is not None:
+        return existing
+    ds = DataSource(
+        name="research-test-oracle",
+        type=DataSourceType.ORACLE,
+        host="oracle-test",
+        port=1521,
+        database_name="THBIDB",
+        username="THBI",
+        password_encrypted=encryptApiKey("test-password"),
+        is_active=True,
+        is_default=True,
+        oracle_version="19.0.0.0.0",
+    )
+    dbSession.add(ds)
+    await dbSession.commit()
+    await dbSession.refresh(ds)
+    return ds
+
+
 async def _newSession(svc, dbSession, question: str = QUESTION):
-    return await svc.sessionService.createSession(dbSession, userId=1, question=question)
+    ds = await _ensureDatasource(dbSession)
+    return await svc.sessionService.createSession(
+        dbSession, userId=1, question=question, datasourceId=ds.id
+    )
 
 
 async def _resolve(
@@ -1110,3 +1148,112 @@ async def test_start_turn_still_rejects_whitespace_question(dbSession, makeServi
         )
     ).scalar_one()
     assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 13e：业务库数据源贯通（研究侧终于连上业务库）
+#
+# 根因：执行面把业务 SQL 打在**应用元数据库会话**上（业务表在 Oracle）⇒ 一律
+# UndefinedTableError。以下用例把「源从会话解析 → 适配器按次送达执行/验证面」钉死。
+# ---------------------------------------------------------------------------
+
+
+async def _sessionDatasourceId(dbSession, sessionId):
+    return await dbSession.scalar(
+        select(ResearchSession.datasource_id).where(ResearchSession.id == sessionId)
+    )
+
+
+@pytest.mark.asyncio
+async def test_step_execution_delivers_business_adapter(dbSession, makeService) -> None:
+    """执行步拿到的是**会话数据源**的业务库 adapter（不是元数据库会话）。
+
+    断言点：`get_adapter(ds.id, ds).datasourceId` 必须等于会话落库的 `datasource_id`。
+    历史缺陷下这里压根没有 adapter —— SQL 打在注入的元数据库 session 上。
+    """
+    runner = FakeRunner(rows=[{"cnt": 42}])
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(runner=runner, autoConfirm=True, llmFactory=lambda cfg: scripted)
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+
+    dsId = await _sessionDatasourceId(dbSession, s.id)
+    assert dsId is not None  # 源落库（会话级，跨轮沿用）
+    assert runner.executed == ["SELECT 1"]  # 默认 FakePlanner 的步 SQL 真的执行了
+    assert [a.datasourceId for a in runner.adapters] == [dsId]
+
+
+@pytest.mark.asyncio
+async def test_verification_delivers_business_adapter(dbSession, makeService) -> None:
+    """验证相位同一条路径：假设验证 SQL 也拿到业务库 adapter（O2 引用的不存在小写表）。"""
+    runner = FakeRunner()
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(runner=runner, autoConfirm=True, llmFactory=lambda cfg: scripted)
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+
+    dsId = await _sessionDatasourceId(dbSession, s.id)
+    assert runner.verifyCalls  # 候选假设确实被验证了
+    assert {a.datasourceId for a in runner.verifyAdapters} == {dsId}
+
+
+@pytest.mark.asyncio
+async def test_generate_step_sql_passes_dialect_and_schema_prefix(dbSession, makeService) -> None:
+    """`generateSql` 收到会话数据源的方言参数（datasourceType / oracle_version / schemaPrefix）。
+
+    真实环境 = `THBI Oracle`：缺 schemaPrefix 时表名不带 owner，LLM 生成的 SQL 只能靠
+    猜；它与 schema 文本路径共用同一白名单 `_safeSchemaPrefix`。
+    """
+    planner = FakePlanner(steps=(SqlStep(index=0, description="x", sub_question="y"),))
+    nl2sql = FakeNl2Sql(sql="SELECT 1 AS cnt")
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(
+        planner=planner,
+        nl2sql=nl2sql,
+        autoConfirm=True,
+        llmFactory=lambda cfg: scripted,
+    )
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+
+    assert nl2sql.calls[0]["datasourceType"] == DataSourceType.ORACLE
+    assert nl2sql.calls[0]["oracle_version"] == "19.0.0.0.0"
+    assert nl2sql.calls[0]["schemaPrefix"] == "THBI"
+
+
+@pytest.mark.asyncio
+async def test_resume_reuses_session_datasource(dbSession, makeService) -> None:
+    """恢复轮复用同一源：源存**会话**（state 不持久化），答 checkpoint 不会丢源。"""
+    runner = FakeRunner()
+    svc = makeService(runner=runner)
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "awaiting_user"
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → planning
+    assert await _resolve(svc, dbSession, s.id, "confirm") == "awaiting_user"  # → execute（执行步）
+
+    dsId = await _sessionDatasourceId(dbSession, s.id)
+    assert runner.adapters  # 恢复轮的 execute 相位确实执行了步
+    assert {a.datasourceId for a in runner.adapters} == {dsId}
+
+
+@pytest.mark.asyncio
+async def test_session_without_datasource_fails_loudly(dbSession, makeService) -> None:
+    """会话无业务源 ⇒ 执行相位**显式报错**（RuntimeError 上抛 + 会话落 failed）。
+
+    不得静默兜底：绝不回落到元数据库会话（那正是「业务表一律不存在」的历史根因）。
+    刻意断言异常类型是 `RuntimeError` 而非 `ValueError` —— 后者会被执行面当成
+    「SQL 被 Guard 拒绝」，把配置缺失伪装成「该步无数据」。
+    """
+    svc = makeService(autoConfirm=True)
+    s = await svc.sessionService.createSession(dbSession, userId=1, question=QUESTION)
+    assert await _sessionDatasourceId(dbSession, s.id) is None  # 无源会话
+
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status == "failed"  # 失败是响亮的（不是静默 done）

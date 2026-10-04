@@ -31,7 +31,7 @@ KNOWN_ICON_CODES: frozenset[str] = frozenset({
     # 叶子项
     "message", "thunderbolt", "appstore", "barchart", "alert",
     "partition", "audit", "node", "code", "number", "cluster",
-    "tags", "tool", "file", "dashboard", "apartment", "heart",
+    "tags", "tool", "file", "dashboard", "apartment", "heart", "link",
     # feat-rbac-identity：RBAC 管理 4 页的 icon
     "user", "team", "org", "menu",
     # 本地导入 / 知识导入共用（ICON_REGISTRY 中已有 "import"）

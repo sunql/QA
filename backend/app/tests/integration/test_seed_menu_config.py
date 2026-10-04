@@ -23,7 +23,7 @@ async def _clean(pg_session: AsyncSession) -> None:
     await pg_session.commit()
 
 
-async def test_seed_inserts_seven_sections_and_forty_one_items(
+async def test_seed_inserts_eight_sections_and_forty_three_items(
     dbSession: AsyncSession, client: object
 ) -> None:
     await _clean(dbSession)

@@ -1,9 +1,10 @@
-"""seed_menu_config - 幂等 upsert 7 类 41 项菜单（共 48 行）。
+"""seed_menu_config - 幂等 upsert 8 类 43 项菜单（共 51 行）。
 
 与 AppLayout 的旧 key 一一对应；feat-rbac-identity 追加 4 个 RBAC 管理页
 （用户/角色/组织/菜单）叶子项；feat-wiki-knowledge 追加 1 个一级类
 「企业 Wiki」+ 9 个二级项（对话/知识条目/导入/冲突/建议/覆盖度/知识图谱/
-关联/分类）。
+关联/分类）；feat-research-entry 追加 1 个一级类「研究代理」+ 2 个叶子项
+（研究会话/研究对比）。
 
 UI 优先策略：本 seed 只在「行不存在」时 INSERT 默认值；行已存在时
 **不覆盖任何 UI 可编辑字段**（label_key / icon_code / path / visible /
@@ -41,6 +42,9 @@ SECTIONS: list[dict[str, Any]] = [
     {"code": "section.foundation", "label_key": "menu.section.foundation", "icon_code": "database", "sort_order": 400},
     {"code": "section.systemConfig", "label_key": "menu.section.systemConfig", "icon_code": "api", "sort_order": 500},
     {"code": "section.auditSecurity", "label_key": "menu.section.auditSecurity", "icon_code": "safety", "sort_order": 600},
+    # feat-research-entry：研究代理自成一级（sort_order 250 介于 enterpriseWiki 240
+    # 与 bizConfig 300 之间，是本段空闲的百位区间）
+    {"code": "section.research", "label_key": "menu.section.research", "icon_code": "experiment", "sort_order": 250},
 ]
 
 ITEMS: list[dict[str, Any]] = [
@@ -108,13 +112,17 @@ ITEMS: list[dict[str, Any]] = [
     # Audit & Security（仅保留审计日志）
     {"parent": "section.auditSecurity", "code": "item.adminAudit", "label_key": "menu.item.adminAudit", "icon_code": "audit", "sort_order": 610, "path": "/admin/audit"},
     # item.adminFeatureRules 已搬到 section.bizConfig sort_order=365（与 item.features 配套）
+    # Research Agent（feat-research-entry）：研究会话 + 研究对比，挂在 section.research
+    # 下（sort_order 用 251x 区间，因 250 已被 wiki 项占用，故叶子用 2510/2520）
+    {"parent": "section.research", "code": "item.researchSession", "label_key": "menu.item.researchSession", "icon_code": "experiment", "sort_order": 2510, "path": "/research"},
+    {"parent": "section.research", "code": "item.researchCompare", "label_key": "menu.item.researchCompare", "icon_code": "barchart", "sort_order": 2520, "path": "/research/compare"},
 ]
 
 
 async def seed_menu_config(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
-    """幂等 upsert 7 个一级类 + 36 个叶子项。返回总行数（43）。
+    """幂等 upsert 8 个一级类 + 43 个叶子项。返回总行数（51）。
 
     冲突键：`code`（全局唯一）。重复运行不新增行，也不刷新任何字段 —— 已存在的行
     完全交给菜单管理 UI 维护（见文件头「UI 优先策略」）。

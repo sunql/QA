@@ -74,6 +74,7 @@ from app.services.chart_service import ChartService
 from app.services.enterprise_semantic_layer import EnterpriseSemanticLayer
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_semantic_match_service import KpiSemanticMatchService
+from app.services.nl2sql_service import Nl2SqlService
 from app.services.ontology_service import OntologyService
 from app.services.research_agent_ports import (
     ERROR_TURN_FAILED,
@@ -136,11 +137,17 @@ async def _requireResearchUser(
 
 
 def buildResearchAgentService() -> ResearchAgentService:
-    """默认构造：真实 ESL / planner / runner / chart + 真 `createClient` + 真 `tokenUsage`。
+    """默认构造：真实 ESL / planner / runner / chart + 真 `createClient` + 真 `tokenUsage`
+    + 真 `Nl2SqlService`。
 
     **不注入 `reporter`**：让默认分支产出真实 `ReportPlanner`（Task 6 F1 要的正是
     这条生产路径被执行）。`llmFactory=createClient` 是 key 解析 SSOT，keyless 环境
     由状态机的 `research.error` 显式降级兜底（测试无需 LLM key，见 Task 6.5 M3）。
+
+    `nl2sql=Nl2SqlService()` 是**步 SQL 生成能力的唯一接线点**（Task 6.5-1）：漏注
+    会让 `generateStepSql` 直接返回 None，所有计划步落 STEP_MISSING_SQL，`research.step.sql`
+    / `.data` / `.chart` / `.done` 事件从不触发（13b 真机铁证 `执行步缺 SQL，按无数据跳过`）。
+    守卫见 `test_research_api.py::test_default_construction_uses_real_reporter_and_llm_factory`。
     """
     return ResearchAgentService(
         esl=buildEnterpriseSemanticLayer(),
@@ -150,6 +157,7 @@ def buildResearchAgentService() -> ResearchAgentService:
         chartService=ChartService(),
         llmFactory=createClient,
         tokenUsage=TokenUsageService(),
+        nl2sql=Nl2SqlService(),
     )
 
 

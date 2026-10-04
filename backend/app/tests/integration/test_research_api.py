@@ -32,6 +32,7 @@ from app.services.enterprise_semantic_layer import (
     EmptyResearchScopeError,
     EnterpriseSemanticLayer,
 )
+from app.services.nl2sql_service import Nl2SqlService
 from app.services.report_planner import ReportPlanner
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_session_service import ResearchSessionService
@@ -426,12 +427,20 @@ async def test_default_construction_uses_real_reporter_and_llm_factory() -> None
     """不传 reporter ⇒ 默认分支产出真实 ReportPlanner；llmFactory = 真 createClient。
 
     keyless 环境由状态机的 `research.error` 降级路径兜底（不在此处断言 LLM 可用）。
+
+    为什么断言**完整依赖集合**：本测试是生产构造点 `buildResearchAgentService()`
+    的**唯一守卫**——端点测试把它 monkeypatch 成假替身，从外面看不见工厂内部。
+    只挑手选子集会漏掉漏注的依赖：`nl2sql` 曾在生产构造点被漏注（该能力静默关闭，
+    计划步全部 STEP_MISSING_SQL、数据事件从不触发），而 4 条旧断言恰好不含
+    `_nl2sql`，P1 因此漏网。故此处补齐 `_nl2sql` 断言，与既有的 reporter / llmFactory /
+    esl / sessionService 一起守住全集。
     """
     service = researchModule.buildResearchAgentService()
     assert isinstance(service._reporter, ReportPlanner)
     assert service._llmFactory is createClient
     assert isinstance(service._esl, EnterpriseSemanticLayer)
     assert isinstance(service.sessionService, ResearchSessionService)
+    assert isinstance(service._nl2sql, Nl2SqlService)
 
 
 async def test_turn_endpoint_uses_default_construction_path(

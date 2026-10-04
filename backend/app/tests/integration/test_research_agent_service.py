@@ -33,10 +33,12 @@ from app.services.research_agent_execution import ExecutionDeps, runStep
 from app.services.research_agent_ports import (
     STEP_MISSING_SQL,
     LlmUsageRecorder,
+    isDegraded,
     resolveModelConfig,
 )
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_session_service import ResearchSessionService
+from app.services.step_query_planner import StepPlanResult
 from app.services.token_usage_service import TokenUsageService
 
 QUESTION = "供应商收货量为什么下降"
@@ -95,15 +97,22 @@ class FakePlanner:
     """计划 fake：默认真实 `MultiStepPlan`（真实字段名）+ 带 SQL 的步。
 
     `replanSteps`：第二次及以后调用的产物（Task 6.5-4 modify 重跑计划用）。
+    `planNone`：复现真实 `StepQueryPlanner.plan` 的**单步语义** —— 返回
+    `StepPlanResult(plan=None)`（其 docstring：非多步问题 ⇒ 调用方按单步处理）。此前本
+    fake **恒返回 ≥1 步**，故 `plan=None` 这条真实分支从未被任何用例驱动过（N1 能穿过
+    整轮开发的直接原因）。
     """
 
-    def __init__(self, steps=None, replanSteps=None) -> None:
+    def __init__(self, steps=None, replanSteps=None, planNone: bool = False) -> None:
         self._steps = steps
         self._replanSteps = replanSteps
+        self._planNone = planNone
         self.calls: list[tuple] = []
 
     async def plan(self, question, classes, client, modelName):
         self.calls.append((question, tuple(classes), client, modelName))
+        if self._planNone:
+            return StepPlanResult(plan=None, prompt_tokens=120, completion_tokens=40)
         steps = self._steps if len(self.calls) == 1 else (self._replanSteps or self._steps)
         if steps is None:
             steps = (SqlStep(index=0, description="收货量趋势", sub_question="近12月收货量", sql="SELECT 1"),)
@@ -535,8 +544,12 @@ async def test_reporter_failure_marks_session_failed(dbSession, makeService) -> 
 
 @pytest.mark.asyncio
 async def test_resume_confirm_walks_three_fixed_checkpoints_to_done(dbSession, makeService) -> None:
-    """固定 #1/#2/#3 逐个 confirm：action→status 映射 + 会话终态 + 报告归档。"""
-    svc = makeService()
+    """固定 #1/#2/#3 逐个 confirm：action→status 映射 + 会话终态 + 报告归档。
+
+    接入脚本 LLM（与 `test_auto_confirm_runs_to_done_and_publishes` 同口径）：否则
+    `llmUnavailable=True` 会让 `degraded` 恒真，掩盖下面那条**恢复轮**口径断言。
+    """
+    svc = makeService(llmFactory=lambda cfg: ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。"))
     s = await _newSession(svc, dbSession)
     assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "awaiting_user"
 
@@ -550,7 +563,15 @@ async def test_resume_confirm_walks_three_fixed_checkpoints_to_done(dbSession, m
 
     cp3 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
     assert cp3.phase == "hypothesis"
-    assert await _resolve(svc, dbSession, s.id, "confirm") == "done"
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    assert await _resolve(svc, dbSession, s.id, "confirm", emit=collect) == "done"
+    # 从「假设」checkpoint 恢复（该相位**不重跑** execute）仍须报健康：degraded 靠 checkpoint 载荷
+    # 携带的已执行步数（Task 14 / N1），否则这一天正常路径会被误标降级
+    assert [p["degraded"] for (e, p) in events if e == "research.done"] == [False]
 
     # 决策落库：confirm→confirmed / modify→modified（Task 3 review 裁定）
     for cpId, expected in ((cp1.id, "confirmed"), (cp2.id, "modified"), (cp3.id, "confirmed")):
@@ -1382,15 +1403,133 @@ async def test_failed_step_does_not_kill_later_steps_in_same_phase(
     assert [p["index"] for (e, p) in events if e == "research.step.data"] == [1]
 
 
-class _StubClient:
-    """缺源用例用的最小 LLM 客户端（永不被调用：闸门在生成面之前就该拦下）。"""
+@pytest.mark.asyncio
+async def test_planner_none_falls_back_to_single_step_and_runs_business_sql(
+    dbSession, makeService
+) -> None:
+    """N1 主用例：planner 判为单步（`plan=None`）⇒ **回落单步**，本 turn 真的跑一步业务 SQL。
 
-    async def complete(self, messages, **kwargs):
-        raise AssertionError("缺业务源时不应走到 LLM 生成面")
+    缺陷（最终审查 N1 blocker / 控制器两次真机复现）：`StepQueryPlanner.plan` 对非多步问题
+    返回 `plan=None`（语义 = 「调用方按单步处理」，chat 正是这么做的），研究侧却把它当「无步」
+    ⇒ `research.plan {"steps": []}` ⇒ 零个 `research.step.*` ⇒ 零 SQL ⇒ 仍出报告并报
+    `degraded:false`。整轮测试全绿是因为 `FakePlanner` 恒返回 ≥1 步，**从无用例驱动
+    `plan=None`**（本用例 + 上面新增的 `planNone` 参数补上这一格）。
+
+    断言要点（brief Step 1）：步真的执行了、走的是**业务 adapter**、计划事件不再是空步。
+    """
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    planner = FakePlanner(planNone=True)
+    nl2sql = FakeNl2Sql(sql="SELECT 1 AS cnt")
+    runner = FakeRunner(rows=[{"cnt": 42}])
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(
+        planner=planner,
+        nl2sql=nl2sql,
+        runner=runner,
+        autoConfirm=True,
+        llmFactory=lambda cfg: scripted,
+    )
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+    assert status == "done"
+
+    # 回落计划进的是既有执行通路：逐步 NL2SQL 生成 → 只读查询（恰好一步）
+    assert planner.calls  # planner 被调过（只是它判定为单步）
+    assert runner.executed == ["SELECT 1 AS cnt"]
+    assert nl2sql.calls[0]["question"] == QUESTION  # 回落步的子问题 = 本 turn 的问题
+    dsId = await _sessionDatasourceId(dbSession, s.id)
+    assert [a.datasourceId for a in runner.adapters] == [dsId]  # 业务 adapter（非元数据库会话）
+
+    # 计划事件不再是空步（N1 的可见症状）
+    plans = [p for (e, p) in events if e == "research.plan"]
+    assert plans and plans[-1]["steps"] != []
+    assert [step["sub_question"] for step in plans[-1]["steps"]] == [QUESTION]
+    assert plans[-1]["steps"][0]["sql"] is None  # 无预置 SQL ⇒ 走生成面
+    assert [p["rowCount"] for (e, p) in events if e == "research.step.data"] == [1]
+    # degraded 的另一侧（N1 相关 Important）：真的执行了步 ⇒ 不得报降级
+    assert [p for (e, p) in events if e == "research.done"][-1]["degraded"] is False
 
 
-async def _stubResolveClient(*args, **kwargs):
-    return (_StubClient(), FakeModelConfig())
+@pytest.mark.asyncio
+async def test_plan_without_data_steps_fails_turn_without_report(dbSession, makeService) -> None:
+    """无步闸门：计划过滤 `aggregation_only` 后为空 ⇒ **终态失败**，不出报告（防御性兜底）。
+
+    加了单步回落之后正常路径不会再命中它（`plan=None` 已有单步计划；`normalizePlan` 也只在
+    计划非空时调用），但闸门必须存在 —— 否则「无数据步」会再次静默走到 hypothesis/report，
+    产出一份全无数据支撑却 `degraded:false` 的报告（N1 的另一半）。
+
+    终态失败走的是本服务**既有**机制：`_stageExecute` 抛错 → `_guardedRun` 发
+    `research.error{turn_failed}` + `markFailed`（会话落 failed）并原样上抛。不新增失败通道。
+    """
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    # 计划非空，但唯一的一步是纯聚合步（`aggregation_only`）⇒ 过滤后为空
+    planner = FakePlanner(
+        steps=(
+            SqlStep(
+                index=0,
+                description="汇总",
+                sub_question="对上面的结果做汇总",
+                sql="SELECT 1",
+                aggregation_only=True,
+            ),
+        )
+    )
+    svc = makeService(planner=planner, autoConfirm=True)
+    s = await _newSession(svc, dbSession)
+
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+
+    names = [event for (event, _) in events]
+    errors = [p for (event, p) in events if event == "research.error"]
+    assert errors and errors[-1]["code"] == "turn_failed"  # 终态错误（不是降级类）
+    assert errors[-1]["uiHint"] == "terminal"
+    assert "research.report" not in names  # 不出报告
+    assert "research.done" not in names  # 也不补 done
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status == "failed"  # 会话置 failed（终态）
+
+
+def test_degraded_flag_covers_zero_executed_steps() -> None:
+    """degraded 口径（Task 14-3）：无可用 LLM **或**零个数据步被执行 ⇒ 降级可见。
+
+    注：Step 2 要求断言闸门用例的 `degraded == true`，但那条路径是**终态失败**——按设计它
+    不发 `research.report`/`research.done`，故 `degraded` 标记本身在端到端不可观测（这正是
+    「不出报告」的含义）。口径因此在这里**双向**钉死：零步 ⇒ true；「有步执行但 0 行」⇒
+    false（合法答案，既有 `low_confidence_step` 动态点已处理，不得在此再叠一层）。
+    """
+    assert isDegraded({"llmUnavailable": False, "stepsExecuted": 0}) is True  # 零个数据步
+    assert isDegraded({"llmUnavailable": False}) is True  # 缺键（旧缺陷形状 / 未知路径）⇒ 按 0
+    assert isDegraded({"llmUnavailable": False, "stepsExecuted": 1}) is False  # 有步执行（0 行也算）
+    assert isDegraded({"llmUnavailable": True, "stepsExecuted": 3}) is True  # 无 LLM
+
+
+class _ResolveClientProbe:
+    """缺源用例的探针：记录 `resolveClient` 调用次数。
+
+    I1（审查裁定）：原 `_StubClient` 靠 `complete()` 抛 `AssertionError` 假装「钉住了顺序」，
+    但 `FakeNl2Sql.generateSql` **从不调** `llmClient.complete` ⇒ 该守卫永不触发（死代码）。
+    改为对**真实调用点**计数：闸门先于生成面 ⇒ 本探针与 `FakeNl2Sql.calls` 都必须为空。
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, *args, **kwargs):
+        self.calls += 1
+        return (FakeLlmClient(HYPOTHESIS_JSON), FakeModelConfig())
 
 
 @pytest.mark.asyncio
@@ -1404,14 +1543,17 @@ async def test_execute_step_without_binding_fails_loudly_before_generation(
     报的是 `AttributeError`（看起来像程序 bug），`adapterFor` 的显式 `RuntimeError`
     （「缺业务源」的契约错误码）永远没机会触发，调用方也无法据此判因。
 
-    现闸门（`businessBinding`）移到相位内第一步、**先于**生成面，本用例直接对 `runStep` 断言。
+    现闸门（`businessBinding`）移到相位内第一步、**先于**生成面，本用例直接对 `runStep` 断言；
+    并顺带把「生成面确实没被走到」钉成**真断言**（I1：计数为 0），而非永假的抛错守卫。
     """
+    probe = _ResolveClientProbe()
+    nl2sql = FakeNl2Sql(sql="SELECT 1 AS cnt")
     deps = ExecutionDeps(
         runner=FakeRunner(),
         chart=FakeChart(),
         ontology=FakeOntology(),
-        nl2sql=FakeNl2Sql(sql="SELECT 1 AS cnt"),
-        resolveClient=_stubResolveClient,
+        nl2sql=nl2sql,
+        resolveClient=probe,
         recordUsage=FakeUsageRecorder().recordUsage,
         # 刻意**不带** adapter / dialectArgs（模拟接线缺失的相位边界）
     )
@@ -1426,3 +1568,6 @@ async def test_execute_step_without_binding_fails_loudly_before_generation(
             emit=None,
             deps=deps,
         )
+
+    assert probe.calls == 0  # 闸门先于生成面：连 LLM 客户端解析都不该发生
+    assert nl2sql.calls == []  # 也没有任何一步 SQL 生成被触发

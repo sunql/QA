@@ -102,7 +102,12 @@ class ResearchSqlRunner:
         """执行假设的 verificationSql，返回 ``{"rows": [...], "error": None | str}``。
 
         验证失败不抛：设计允许「验证失败」本身作为 finding 的结论（Task 5 据此
-        以低 confidence 落库），故全部异常在此收敛为 error 字符串 + warning 日志。
+        以低 confidence 落库），故**业务性**异常在此收敛为 error 字符串 + warning 日志。
+
+        **唯一例外**（Task 14 / E1）：``RuntimeError`` 是 ``executeReadonlySql`` 的
+        「adapter 未送达（接线缺失）」信号，**原样上抛**——把它收敛成 ``error`` 会把
+        配置缺失伪装成「验证失败」的低置信结论（与 ``executeReadonlySql`` docstring
+        刻意用非 ``ValueError`` 的意图相合）。
 
         失败后仍**回滚**调用方事务：Task 13e 后业务 SQL 已不走 ``session``（不再把
         元数据库会话打成失败态），此处保留是**兜底** —— 调用方在同一会话上可能有
@@ -112,6 +117,8 @@ class ResearchSqlRunner:
         try:
             rows = await self.executeReadonlySql(session, hypothesis.verificationSql, adapter=adapter)
             return {"rows": rows, "error": None}
+        except RuntimeError:
+            raise  # 接线缺失：冒泡，不得降级成「验证失败」
         except Exception as exc:  # noqa: BLE001 —— 失败是合法结论，见 docstring
             await self._rollbackQuietly(session)
             logger.warning("假设验证失败，降级为 error 结论: %s", exc)

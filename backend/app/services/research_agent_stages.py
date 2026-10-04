@@ -24,6 +24,7 @@ from app.services.research_agent_ports import (
     OPT_NEXT_STEP,
     OPT_PLAN,
     OPT_STEP_RESULTS,
+    OPT_STEPS_EXECUTED,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,8 @@ def rebuildState(row: ResearchSession, checkpoint: Any) -> dict[str, Any]:
         "esl": options.get(OPT_ARMS),
         "plan": options.get(OPT_PLAN),
         "stepResults": list(options.get(OPT_STEP_RESULTS) or []),
+        # 已执行步数（Task 14 / N1）：degraded 口径跨恢复轮的**唯一**依据，缺键按 0（fail-safe）
+        "stepsExecuted": int(options.get(OPT_STEPS_EXECUTED) or 0),
         "hypotheses": list(options.get(OPT_CANDIDATES) or []),
         "resumeStepIndex": int(options.get(OPT_NEXT_STEP) or 0),
         "choice": {},
@@ -67,6 +70,7 @@ def rewriteState(state: dict[str, Any], question: str) -> dict[str, Any]:
         "esl": None,
         "plan": None,
         "stepResults": [],
+        "stepsExecuted": 0,
         "hypotheses": [],
         "resumeStepIndex": 0,
     }

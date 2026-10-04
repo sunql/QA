@@ -112,8 +112,9 @@ ITEMS: list[dict[str, Any]] = [
     # Audit & Security（仅保留审计日志）
     {"parent": "section.auditSecurity", "code": "item.adminAudit", "label_key": "menu.item.adminAudit", "icon_code": "audit", "sort_order": 610, "path": "/admin/audit"},
     # item.adminFeatureRules 已搬到 section.bizConfig sort_order=365（与 item.features 配套）
-    # Research Agent（feat-research-entry）：研究会话 + 研究对比，挂在 section.research
-    # 下（sort_order 用 251x 区间，因 250 已被 wiki 项占用，故叶子用 2510/2520）
+    # Research Agent（feat-research-entry）：研究会话 + 研究对比，挂在 section.research 下。
+    # 叶子 sort_order 是**按父级作用域**各排各的（250 在别的 section 下另有其项，如
+    # enterpriseWiki 的 item.wikiPages，互不冲突），此处沿用「父级 250 的 25 前缀 + x0」= 2510/2520
     {"parent": "section.research", "code": "item.researchSession", "label_key": "menu.item.researchSession", "icon_code": "experiment", "sort_order": 2510, "path": "/research"},
     {"parent": "section.research", "code": "item.researchCompare", "label_key": "menu.item.researchCompare", "icon_code": "barchart", "sort_order": 2520, "path": "/research/compare"},
 ]

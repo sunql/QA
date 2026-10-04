@@ -538,14 +538,13 @@ async def _markTerminalFailure(
 ) -> None:
     """后台 wrapper 兜底：补发终态 error（关流）+ 会话落 failed（rollback 后同 session 开新事务）。
 
-    只对**终态** code 落 failed —— 判定走 ERROR_SPECS 派生的 `TERMINAL_ERROR_CODES`，
-    不硬编码 `turn_failed` 字面量。rollback 后写库失败只留痕、不掩盖原始异常（原始异常
-    已由调用方 `logger.exception` 留痕）。
+    **单一终态路径**：本函数只服务「后台 wrapper 捕获到未预期异常」，code 恒为终态码
+    `ERROR_TURN_FAILED`。Task 14 / N4 移除的旧写法 `if code not in TERMINAL_ERROR_CODES:
+    return` 因 code 恰是终态字面量而**恒假**——与 docstring「不硬编码字面量」一起说谎，是死分支；
+    集合判定只保留在 `_isTerminal`（事件侧决定是否关流）。rollback 后写库失败只留痕、
+    不掩盖原始异常（原始异常已由调用方 `logger.exception` 留痕）。
     """
-    code = ERROR_TURN_FAILED
-    await _bus.publish(sessionId, EVENT_ERROR, errorPayload(code, message, phase=None))
-    if code not in TERMINAL_ERROR_CODES:
-        return
+    await _bus.publish(sessionId, EVENT_ERROR, errorPayload(ERROR_TURN_FAILED, message, phase=None))
     try:
         await service.markFailed(session, uuid.UUID(sessionId))
         await session.commit()

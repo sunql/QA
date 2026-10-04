@@ -125,6 +125,20 @@ async def test_run_verification_returns_error_dict_not_raise(dbSession, business
 
 
 @pytest.mark.asyncio
+async def test_run_verification_propagates_missing_adapter() -> None:
+    """E1：adapter 未送达（接线缺失）⇒ ``RuntimeError`` **冒泡**，不得收敛成 error 结论。
+
+    与上一条成对：业务性失败（表不存在）仍降级为 ``{"rows": [], "error": ...}``，
+    只有「接线缺失」这一条非业务信号被放行——否则配置缺失会被写进 finding 当成
+    「验证不通过」（低置信）的业务结论。
+    """
+    runner = ResearchSqlRunner()
+    hypothesis = Hypothesis(statement="s", driver=None, verificationSql="SELECT 7 AS cnt")
+    with pytest.raises(RuntimeError):
+        await runner.runVerification(AsyncMock(), hypothesis, adapter=None)
+
+
+@pytest.mark.asyncio
 async def test_run_verification_failure_leaves_session_usable(dbSession, businessAdapter) -> None:
     """失败后会话仍可用（失败路径内建 rollback；Task 13e 后业务 SQL 已不污染 session）。"""
     runner = ResearchSqlRunner()

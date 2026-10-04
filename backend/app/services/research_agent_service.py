@@ -94,6 +94,7 @@ from app.services.research_agent_ports import (
     emitEvent,
     errorPayload,
     findingData,
+    isDegraded,
     nextPhase,
     nextPhaseForPhase,
     normalizePlan,
@@ -101,6 +102,7 @@ from app.services.research_agent_ports import (
     recordUsageQuietly,
     requireQuestion,
     resolveClient,
+    singleStepPlan,
     stepSignal,
 )
 from app.services.research_agent_stages import (
@@ -387,7 +389,7 @@ class ResearchAgentService:
             {
                 "sessionId": str(sessionId),
                 "reportId": state.get("reportId"),
-                "degraded": bool(state.get("llmUnavailable")),
+                "degraded": isDegraded(state),
             },
         )
         return STATUS_DONE
@@ -510,7 +512,8 @@ class ResearchAgentService:
         )
         client = await self._llmClient(session, state=state, emit=emit, sessionId=sessionId)
         result = await self._planner.plan(question, eslClasses(state), client, clientModelName(client))
-        plan = normalizePlan(getattr(result, "plan", result))
+        rawPlan = getattr(result, "plan", result)
+        plan = normalizePlan(rawPlan) if rawPlan is not None else singleStepPlan(question)
         state["plan"] = plan
         await self._recordUsage(
             session,
@@ -539,6 +542,8 @@ class ResearchAgentService:
         steps = [
             s for s in (state.get("plan") or {}).get("steps", []) if not s.get("aggregation_only")
         ]
+        if not steps:  # N1 急停：无数据步 ⇒ 终态失败（`_guardedRun` 转 research.error + failed），不出报告
+            raise RuntimeError("研究计划无数据步（aggregation_only 过滤后为空），本 turn 终止")
         results: list[dict[str, Any]] = list(state.get("stepResults") or [])
         startIndex = int(state.get("resumeStepIndex") or 0)
         # Task 4 契约：执行失败会 rollback 注入的 session，先固化本 turn 已写入的状态行
@@ -562,7 +567,7 @@ class ResearchAgentService:
                     signal=stepSignal(result["error"]),
                     plan=state.get("plan"),
                     arms=state.get("esl"),
-                    stepResults=results,
+                    stepResults=results, stepsExecuted=len(results),
                     stepIndex=result["index"],
                     error=result["error"] or "该步骤无数据返回",
                     resumePhase="execute",
@@ -571,7 +576,7 @@ class ResearchAgentService:
                 ),
                 "步骤失败，跳过还是终止？",
             )
-        state["stepResults"] = results
+        state.update(stepResults=results, stepsExecuted=len(results))  # 步数是 degraded 口径依据（N1）
         return None
 
     async def _stageHypothesis(
@@ -591,7 +596,7 @@ class ResearchAgentService:
             buildOptions(
                 signal=SIGNAL_FIXED_HYPOTHESIS,
                 candidates=candidates,
-                arms=state.get("esl"),
+                arms=state.get("esl"), stepsExecuted=len(state.get("stepResults") or []),
                 resumePhase="verify",
             ),
             "验证哪些假设？",
@@ -677,7 +682,7 @@ class ResearchAgentService:
             {
                 "reportId": str(report.id),
                 "version": report.version,
-                "degraded": bool(state.get("llmUnavailable")),
+                "degraded": isDegraded(state),
             },
         )
         return None

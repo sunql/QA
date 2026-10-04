@@ -68,6 +68,7 @@ OPT_ARMS = "arms"
 OPT_PLAN = "plan"
 OPT_CANDIDATES = "candidates"
 OPT_STEP_RESULTS = "stepResults"
+OPT_STEPS_EXECUTED = "stepsExecuted"
 OPT_RESUME_PHASE = "resumePhase"
 OPT_ABORT_PHASE = "abortPhase"
 OPT_NEXT_STEP = "nextStepIndex"
@@ -464,6 +465,28 @@ def stepErrorCode(error: str | None) -> str:
 # ---------------------------------------------------------------------------
 # 无状态构件：计划 / 步结果归一化
 # ---------------------------------------------------------------------------
+
+
+def singleStepPlan(question: str) -> dict[str, Any]:
+    """planner 判为单步（`plan=None`）时的回落计划：一句一问，单步执行，复用既有执行链路。
+
+    与 chat 同口径，字段与 `normalizePlan` 输出契约一致（N1：此前 `None` 归一成
+    `{"steps": []}` ⇒ 零 SQL 仍出报告）。
+    """
+    return {
+        "steps": [{"index": 0, "description": question, "sub_question": question,
+                   "sql": None, "aggregation_only": False}],
+        "aggregationHint": "",
+        "originalQuestion": question,
+    }
+
+
+def isDegraded(state: dict[str, Any]) -> bool:
+    """降级口径 SSOT（Task 14 / N1）：无可用 LLM，或**本 turn 零个数据步被执行**（不判行数）。
+
+    步数读 `state["stepsExecuted"]`（写回 + 经 checkpoint 载荷跨恢复轮还原，缺键按 0 —— 即
+    宁可在未知路径上标降级）；「有步执行但 0 行」是合法答案，既有机制已落成动态点，不在此叠一层。"""
+    return bool(state.get("llmUnavailable")) or not state.get("stepsExecuted")
 
 
 def normalizePlan(plan: Any) -> dict[str, Any]:

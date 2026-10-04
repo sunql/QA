@@ -92,6 +92,7 @@ from app.services.research_agent_ports import (
     UsageRecorder,
     buildOptions,
     emitEvent,
+    errorPayload,
     findingData,
     nextPhase,
     nextPhaseForPhase,
@@ -354,7 +355,7 @@ class ResearchAgentService:
             await emitEvent(
                 emit,
                 EVENT_ERROR,
-                {"code": ERROR_TURN_FAILED, "message": str(exc), "phase": phase},
+                errorPayload(ERROR_TURN_FAILED, str(exc), phase=phase),
             )
             await self.markFailed(session, sessionId)
             raise
@@ -705,7 +706,7 @@ class ResearchAgentService:
             await emitEvent(
                 emit,
                 EVENT_ERROR,
-                {"code": ERROR_HYPOTHESIS_FAILED, "message": "假设生成失败，本轮无候选假设"},
+                errorPayload(ERROR_HYPOTHESIS_FAILED, "假设生成失败，本轮无候选假设"),
             )
         await self._recordUsage(
             session,

@@ -38,6 +38,7 @@ from app.services.research_agent_ports import (
     Emit,
     MeteredClient,
     emitEvent,
+    errorPayload,
     rollbackQuietly,
     selectClassesForTables,
     stepErrorCode,
@@ -170,7 +171,7 @@ async def failedStep(
     await emitEvent(
         emit,
         EVENT_ERROR,
-        {"code": stepErrorCode(error), "message": error, "stepIndex": result["index"]},
+        errorPayload(stepErrorCode(error), error, stepIndex=result["index"]),
     )
     return result
 

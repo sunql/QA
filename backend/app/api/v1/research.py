@@ -80,6 +80,7 @@ from app.services.research_agent_ports import (
     EVENT_DONE,
     EVENT_ERROR,
     TERMINAL_ERROR_CODES,
+    errorPayload,
     nextPhase,
 )
 from app.services.research_agent_service import ResearchAgentService
@@ -504,7 +505,7 @@ async def _markTerminalFailure(
     已由调用方 `logger.exception` 留痕）。
     """
     code = ERROR_TURN_FAILED
-    await _bus.publish(sessionId, EVENT_ERROR, {"code": code, "message": message})
+    await _bus.publish(sessionId, EVENT_ERROR, errorPayload(code, message, phase=None))
     if code not in TERMINAL_ERROR_CODES:
         return
     try:

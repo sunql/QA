@@ -216,12 +216,18 @@ dataclass：`terminal` / `sessionStatus` / `payloadFields` / `uiHint` / `summary
 
 1. **终态由 `ERROR_SPECS` 派生**：`TERMINAL_ERROR_CODES == {code | spec.terminal}`，
    任何终态判定点（流关流、会话落 `failed`）都从该派生集合判定，不得硬编码集合字面量。
-2. **checkpoint phase 词汇永不作为 error code**：`fixed_scope` / `fixed_plan` /
-   `fixed_hypothesis` / `empty_scope` / `low_confidence_step` 属于
-   `CheckpointPhase` / `options["signal"]` 白名单，只由 `stepSignal` 产出；
+2. **checkpoint 词汇永不作为 error code**（两套白名单，勿混为一谈）：
+   - 相位白名单 `CheckpointPhase`（`research_schemas.py`）= `intent` / `planning` /
+     `hypothesis` / `runtime_dynamic` / `low_confidence_step`；
+   - signal 词汇 `options["signal"]`（`ports.py`）= `fixed_scope` / `fixed_plan` /
+     `fixed_hypothesis` / `empty_scope` / `low_confidence_step`，只由 `stepSignal` 产出；
    步失败的 error code 由 `stepErrorCode` 产出（通用 → `step_failed`，SQL Guard →
-   `sql_validation_failed`），两套词汇解耦，`step_failed` 绝不进 phase 白名单。
-3. **前端按 `uiHint` 的「类」分支**（`terminal` / `degraded`），不按 code 逐个判断。
+   `sql_validation_failed`），两套词汇解耦，`step_failed` 绝不进相位白名单。
+3. **前端只读 `uiHint` 的「类」分支**（`terminal` / `degraded`），不按 code 逐个判断。
+   `research.error` payload 恒含 `code` / `message` / `uiHint` 三字段：`code`/`message`
+   由发射点给定，`uiHint` 由 `ERROR_SPECS` **派生**（所有发射点统一经 `errorPayload`
+   构造，见 `ports.py`）；`payloadFields` 之外的逐 code 附加字段（如 `phase` /
+   `stepIndex`）由 `errorPayload` 按表校验，字段集不符即抛错。
 
 ### 4.6 Enterprise Semantic Layer（ESL）
 

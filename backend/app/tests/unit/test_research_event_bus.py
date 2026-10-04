@@ -18,6 +18,7 @@ from app.services.research_agent_ports import (
     ERROR_STEP_FAILED,
     ERROR_TURN_FAILED,
     TERMINAL_ERROR_CODES,
+    errorPayload,
 )
 from app.services.research_event_bus import EVENT_CONNECTED, QUEUE_MAX, ResearchEventBus
 
@@ -180,3 +181,45 @@ def test_terminal_error_codes_derived_from_specs() -> None:
         code for code, spec in ERROR_SPECS.items() if spec.terminal
     )
     assert TERMINAL_ERROR_CODES == frozenset({ERROR_TURN_FAILED})
+
+
+@pytest.mark.parametrize(
+    ("code", "fields"),
+    [
+        (ERROR_TURN_FAILED, {"phase": "intent"}),
+        (ERROR_LLM_UNAVAILABLE, {}),
+        (ERROR_HYPOTHESIS_FAILED, {}),
+        (ERROR_SQL_VALIDATION_FAILED, {"stepIndex": 0}),
+        (ERROR_STEP_FAILED, {"stepIndex": 2}),
+    ],
+)
+def test_error_payload_constructor_matches_spec_fields(code: str, fields: dict) -> None:
+    """errorPayload 用正确字段集构造成功，键集 == {code,message,uiHint} ∪ payloadFields（钉表与发射点一致）。"""
+    payload = errorPayload(code, "boom", **fields)
+    assert set(payload) == {"code", "message", "uiHint"} | set(
+        ERROR_SPECS[code].payloadFields
+    )
+    assert payload["code"] == code
+    assert payload["message"] == "boom"
+    assert payload["uiHint"] == ERROR_SPECS[code].uiHint
+    for key, value in fields.items():
+        assert payload[key] == value
+
+
+def test_error_payload_rejects_missing_extra_and_unknown_fields() -> None:
+    """双向反例：字段集与 payloadFields 不符（缺 / 多）或未知 code，一律 ValueError。"""
+    with pytest.raises(ValueError, match="phase"):
+        errorPayload(ERROR_TURN_FAILED, "boom")  # 漏传 phase
+    with pytest.raises(ValueError, match="stepIndex"):
+        errorPayload(ERROR_TURN_FAILED, "boom", phase="intent", stepIndex=1)  # 多传
+    with pytest.raises(ValueError, match="未知 error code"):
+        errorPayload("mystery_code", "boom")  # 未知 code（绕过表新增）
+
+
+def test_error_payload_error_message_lists_expected_and_actual() -> None:
+    """错误消息同时列出期望与实得字段集，便于诊断漂移。"""
+    with pytest.raises(ValueError) as excInfo:
+        errorPayload(ERROR_TURN_FAILED, "boom", stepIndex=1)
+    message = str(excInfo.value)
+    assert "{'phase'}" in message  # 期望字段集
+    assert "{'stepIndex'}" in message  # 实得字段集

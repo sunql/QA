@@ -148,7 +148,7 @@ class ErrorSpec:
 
     terminal: bool  # True ⇒ 事件后关流
     sessionStatus: str  # 事件发出后该会话的预期状态
-    payloadFields: tuple[str, ...]  # 除 code / message 外的固定附加字段
+    payloadFields: tuple[str, ...]  # 除 code / message / uiHint（恒在）外的逐 code 固定附加字段
     uiHint: str  # 前端处置（按「类」而非按 code 分支的依据）
     summary: str
 
@@ -198,6 +198,20 @@ TERMINAL_ERROR_CODES = frozenset(
     code for code, spec in ERROR_SPECS.items() if spec.terminal
 )
 """终态错误码集合：**由 ERROR_SPECS 派生**，判定处不得自持字面量集合。"""
+
+
+def errorPayload(code: str, message: str, **fields: Any) -> dict[str, Any]:
+    """按 ERROR_SPECS 构造 research.error payload：code/message/uiHint（表派生）恒在，
+    `**fields` 必须与 payloadFields（逐 code 声明的额外字段）完全一致，不符或未知 code 抛 ValueError。"""
+    spec = ERROR_SPECS.get(code)
+    if spec is None:
+        raise ValueError(f"未知 error code: {code!r}")
+    if set(fields) != set(spec.payloadFields):
+        raise ValueError(
+            f"error payload 字段集不符: code={code!r} 期望 {set(spec.payloadFields)} 实得 {set(fields)}"
+        )
+    return {"code": code, "message": message, "uiHint": spec.uiHint, **fields}
+
 
 Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
 Pause = tuple[str, dict[str, Any], str]  # (checkpoint 相位, options, 提示文案)
@@ -656,7 +670,7 @@ async def markLlmUnavailable(
     await emitEvent(
         emit,
         EVENT_ERROR,
-        {"code": ERROR_LLM_UNAVAILABLE, "message": LLM_UNAVAILABLE_MESSAGE},
+        errorPayload(ERROR_LLM_UNAVAILABLE, LLM_UNAVAILABLE_MESSAGE),
     )
 
 

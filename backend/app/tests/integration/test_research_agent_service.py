@@ -729,8 +729,8 @@ async def test_generic_step_failure_emits_step_failed_and_keeps_low_confidence_p
 
     errors = [p for (e, p) in events if e == "research.error"]
     assert [p["code"] for p in errors] == ["step_failed"]
-    # payloadFields == ("stepIndex",) 与真实发射点 payload 的键一致（防表与代码漂移）
-    assert set(errors[0].keys()) == {"code", "message", "stepIndex"}
+    # payloadFields == ("stepIndex",) 与真实发射点 payload 键一致（code/message/uiHint 恒在 + stepIndex）
+    assert set(errors[0].keys()) == {"code", "message", "uiHint", "stepIndex"}
     cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
     assert cp is not None and cp.phase == "low_confidence_step"
     assert cp.options["signal"] == "low_confidence_step"

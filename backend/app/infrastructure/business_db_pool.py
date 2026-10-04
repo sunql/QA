@@ -343,6 +343,11 @@ def _quote_digit_leading_identifiers(sql: str) -> str:
     return rewritten
 
 
+def _strip_trailing_semicolon(sql: str) -> str:
+    """剥离语句尾部 `;`（Oracle 拒收 ⇒ ORA-00933）。对无尾分号的 SQL 是 no-op。"""
+    return sql.strip().rstrip(";").strip()
+
+
 def _inject_nulls_last(sql: str) -> str:
     """给裸 `ORDER BY ... DESC` 自动补 `NULLS LAST`，消除跨年 top-N 抓 NULL 行。
 
@@ -586,6 +591,8 @@ class _OracleAdapter:
     @_recordEvidenceAfterSuccess
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
         _assert_read_only(sql)
+        # 执行前兜底：剥离语句尾部 `;`（Oracle 拒收 ⇒ ORA-00933）。对无尾分号的 SQL 是 no-op。
+        sql = _strip_trailing_semicolon(sql)
         # 执行前兜底：给 LLM 生成的数字开头中文别名加双引号，消除 ORA-00923。
         # 只对 Oracle 生效（MySQL/PG 用反引号/不同规则）；对已正确 SQL 是无副作用的 no-op。
         sql = _quote_digit_leading_identifiers(sql)

@@ -109,8 +109,9 @@ from app.services.research_agent_ports import (
     stepSignal,
 )
 from app.services.research_agent_stages import (
-    candidateConfidence, clientModelName, dataSummary, drivers, eslClasses, rebuildState,
-    resumeTurnContent, rewriteState, selectedHypotheses,
+    ambiguityPrompt, candidateConfidence, clientModelName, dataSummary, drivers,
+    eslClasses, hypothesisPrompt, rebuildState, resumeTurnContent, rewriteState,
+    selectedHypotheses,
 )
 from app.services.research_hypothesis_adapter import generateHypotheses
 from app.services.research_session_service import ResearchSessionService
@@ -484,7 +485,7 @@ class ResearchAgentService:
                     resumePhase="plan",
                     conflicts=arms["conflicts"],
                 ),
-                "检测到语义歧义，如何处理？",
+                ambiguityPrompt(arms["conflicts"]),
             )
         return (
             CHECKPOINT_INTENT,
@@ -597,7 +598,7 @@ class ResearchAgentService:
                 arms=state.get("esl"), stepsExecuted=executedStepCount(state.get("stepResults") or []),
                 resumePhase="verify",
             ),
-            "验证哪些假设？",
+            hypothesisPrompt(candidates),
         )
 
     async def _stageVerify(

@@ -151,3 +151,53 @@ def eslClasses(state: dict[str, Any]) -> list[str]:
 def clientModelName(client: Any) -> str | None:
     """客户端固化的模型名快照（OpenAiClient._modelName，openai_client.py:75）。"""
     return getattr(client, "_modelName", None) or getattr(client, "model_name", None)
+
+
+# ---------------------------------------------------------------------------
+# 检查点问句构造（feat-research-entry-ux-fixes W1-a）
+# ---------------------------------------------------------------------------
+#
+# 动因：这两个问句原先是 `research_agent_service.py` 里**无插值的死字面量**
+# （用户反馈第 2/3 条：「提示检测到语义歧义，但不知道是什么歧义」「提示验证哪些
+# 假设，但没有任何提示、毫无头绪」）。抽到本模块后，文案带上对象（条数 / 种类），
+# 且可被纯单测钉住 —— 不必驱动整条研究状态机去断言一句文案。
+#
+# 只改文案：**绝不改** checkpoint 的 phase / options 结构，已落库的
+# `research_checkpoint.options` 兼容性依赖结构稳定。
+
+# 冲突种类 → 中文标签。未知 kind 回落通用词、不抛错：ESL 侧 `_detectConflicts`
+# 未来新增 kind 时，本表与本函数都不该因此崩。
+_CONFLICT_KIND_LABELS: dict[str, str] = {
+    "metric_ambiguous": "指标歧义",
+    "wiki_disagree": "知识冲突",
+}
+_CONFLICT_KIND_FALLBACK = "待确认项"
+
+# 冲突种类无法解析时的兜底问句（缺 kind 字段 / kind 为空串）。
+_AMBIGUITY_PROMPT_FALLBACK = "检测到语义歧义，请确认采用哪一项？"
+
+# 候选假设为空时的空态文案（降级路径：无 LLM / 解析失败）。
+_EMPTY_CANDIDATES_PROMPT = (
+    "本轮未生成候选假设（模型不可用或解析失败），可点「修改」补充研究方向。"
+)
+
+
+def conflictKindLabel(kind: str) -> str:
+    """冲突种类的人类可读标签；未知种类回落通用词。"""
+    return _CONFLICT_KIND_LABELS.get(kind, _CONFLICT_KIND_FALLBACK)
+
+
+def ambiguityPrompt(conflicts: list[dict[str, Any]]) -> str:
+    """`runtime_dynamic` 相位的问句：带冲突条数 + 去重后的种类清单。"""
+    kinds = sorted({str(item.get("kind") or "") for item in conflicts if isinstance(item, dict)})
+    labels = "、".join(conflictKindLabel(kind) for kind in kinds if kind != "")
+    if labels == "":
+        return _AMBIGUITY_PROMPT_FALLBACK
+    return f"检测到 {len(conflicts)} 处语义歧义（{labels}），请确认采用哪一项？"
+
+
+def hypothesisPrompt(candidates: list[dict[str, Any]]) -> str:
+    """`hypothesis` 相位的问句：带候选条数；空候选时给下一步指引。"""
+    if not candidates:
+        return _EMPTY_CANDIDATES_PROMPT
+    return f"共 {len(candidates)} 条候选假设，请选择要验证的（可多选）："

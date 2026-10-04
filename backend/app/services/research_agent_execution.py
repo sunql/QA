@@ -8,7 +8,8 @@ Step 0 依据（2026-10-04）：
 - 生成面 = `Nl2SqlService.generateSql(question, classes, llmClient, modelConfig, *,
   session=None)`（公开面，前四位位置参数固定）；
 - 执行面 = 注入的 `ResearchSqlRunner.executeReadonlySql(session, sql, adapter=...)`：
-  `ValueError` 表 SQL Guard 拒绝、`TimeoutError` 表超时、`SQLAlchemyError` 表 DB/驱动层。
+  `ValueError` 表 SQL Guard 拒绝、`TimeoutError` 表超时、驱动层 = `SQLAlchemyError`
+  （PG/MySQL 方言）**与** `oracledb.Error`（Oracle 原生 async，见 `_DRIVER_ERRORS`）。
 
 事务约定（Task 4）：执行失败路径会 rollback 注入的 session，故 `_stageExecute` 在进执行面
 前先 `commit`（见 `research_agent_service.py`），本模块只负责单步的收敛与留痕。
@@ -28,6 +29,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
+import oracledb
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,6 +59,14 @@ from app.services.research_agent_ports import (
 from app.services.research_agent_stages import eslClasses
 
 logger = logging.getLogger(__name__)
+
+# 执行面的**驱动层**异常集合（Task 13e fix round 1）：两条驱动**并列**收窄 ——
+# - `SQLAlchemyError`：PG / MySQL 走 SQLAlchemy async 方言；
+# - `oracledb.Error`：Oracle 走 `business_db_pool._OracleAdapter` 的 **oracledb 原生 async**，
+#   该适配器原样穿透驱动异常，且 `oracledb.Error` **不在** `SQLAlchemyError` 之下。
+# 只收这两条，刻意**不**放开成 `except Exception`：编程错误（如 TypeError）必须原样上抛，
+# 否则会被伪装成「该步无数据」而在 autoConfirm 下静默 done（见测试双侧守卫）。
+_DRIVER_ERRORS: tuple[type[BaseException], ...] = (SQLAlchemyError, oracledb.Error)
 
 
 @dataclass(frozen=True)
@@ -134,8 +144,14 @@ async def runStep(
     """执行单个计划步：无 SQL 先经 NL2SQL 生成 → 只读查询 + 出图。
 
     失败面**显式收窄**（Task 5 fix round 1）：只收敛 SQL Guard 拒绝（ValueError）、超时
-    （TimeoutError）与 DB/驱动层（SQLAlchemyError）三类**运行时**失败；其它异常（编程错误）
-    原样上抛 —— 不能被伪装成「该步无数据」而在 autoConfirm 下静默 done。
+    （TimeoutError）与驱动层（`_DRIVER_ERRORS`：SQLAlchemy 方言 **或** oracledb 原生）三类
+    **运行时**失败；其它异常（编程错误）原样上抛 —— 不能被伪装成「该步无数据」而在
+    autoConfirm 下静默 done。
+
+    Task 13e fix round 1：驱动层此前只列 `SQLAlchemyError`，而业务 SQL 改走 `_OracleAdapter`
+    的 oracledb 原生 async 后，`oracledb.Error` 收不住 ⇒ 单步失败逃成**整 turn 失败**
+    （真机实测 ORA-00920 / ORA-00933 / DPY-6005 三次）。现两条驱动并列收窄、共用同一
+    「单步降级」handler（`logger.warning` + `failedStep`）。
 
     Task 6.5-1：生成失败**不抛**（返回 None），落到既有 `STEP_MISSING_SQL` 分支。
 
@@ -167,7 +183,7 @@ async def runStep(
         )
     except TimeoutError as exc:
         return await failedStep(session, resolved, f"执行超时: {exc}", emit=emit)
-    except SQLAlchemyError as exc:
+    except _DRIVER_ERRORS as exc:
         logger.warning("执行步 DB 失败: session=%s step=%s err=%s", sessionId, index, exc)
         return await failedStep(session, resolved, str(exc), emit=emit)
     await emitEvent(

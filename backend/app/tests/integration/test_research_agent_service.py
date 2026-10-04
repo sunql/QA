@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
+import oracledb
 import pytest
 from sqlalchemy import select, text
 
@@ -1257,3 +1258,67 @@ async def test_session_without_datasource_fails_loudly(dbSession, makeService) -
         )
     ).scalar_one()
     assert status == "failed"  # 失败是响亮的（不是静默 done）
+
+
+@pytest.mark.asyncio
+async def test_oracle_driver_error_degrades_step_instead_of_killing_turn(
+    dbSession, makeService
+) -> None:
+    """Oracle 驱动层异常（`oracledb.Error`）⇒ **单步降级**，不打死整 turn（Task 13e fix round 1）。
+
+    根因：业务 SQL 改走 `_OracleAdapter` 的 `oracledb` **原生 async** 驱动后，驱动异常不再
+    位于 `SQLAlchemyError` 之下（`business_db_pool._OracleAdapter.execute_read_only` 原样穿透），
+    原收窄面收不住 ⇒ 逃到 `_guardedRun` 打死整 turn。真机实测三次（`ORA-00920` / `ORA-00933` /
+    `DPY-6005`）全部如此。本用例钉住「驱动错误 → step_failed 降级 → turn 仍活着」。
+    """
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc = makeService(
+        runner=FakeRunner(raiseError=oracledb.DatabaseError("ORA-00933: SQL 命令未正确结束"))
+    )
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → plan → 固定 #2
+    await _resolve(svc, dbSession, s.id, "confirm", emit=collect)  # → execute
+
+    errors = [p for (e, p) in events if e == "research.error"]
+    assert [p["code"] for p in errors] == ["step_failed"]  # 降级为步失败，不是 turn_failed
+    assert "ORA-00933" in errors[0]["message"]  # 驱动原文透出（不吞、不伪装）
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "low_confidence_step"  # turn 走到动态点，没死
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status != "failed"
+
+
+@pytest.mark.asyncio
+async def test_programming_error_still_propagates_after_driver_narrowing(
+    dbSession, makeService
+) -> None:
+    """反向守卫：收窄面只**多收** `oracledb.Error`，不得放开成吞掉一切。
+
+    编程错误（`TypeError`：既非 SQL Guard / 超时，也非任何驱动错误）仍原样上抛 + 会话落
+    failed —— 否则「收住驱动层」会顺手把程序缺陷伪装成「该步无数据」而在 autoConfirm 下静默
+    done。既有 `test_runner_programming_error_is_not_masked_as_low_confidence` 守 `RuntimeError`，
+    本用例补 `TypeError`，两侧合起来把本次新增的收窄面**双向**钉死。
+    """
+    svc = makeService(
+        runner=FakeRunner(raiseError=TypeError("bound method 少了 self")), autoConfirm=True
+    )
+    s = await _newSession(svc, dbSession)
+    with pytest.raises(TypeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status == "failed"
+    assert await svc.sessionService.getPendingCheckpoint(dbSession, s.id) is None

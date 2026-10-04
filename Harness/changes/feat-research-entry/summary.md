@@ -66,15 +66,65 @@
 | #2 | Plan 生成后 | 分几步 / 查哪几张表 / 维度 |
 | #3 | Hypothesis 候选出后 | 多选 / 排序 |
 
-## 动态 Checkpoint（4 信号）
+## 动态 Checkpoint（相位 × 信号两层）
 
-`metric_ambiguous` / `wiki_disagree` / `low_confidence_step` / `sql_validation_failed`
+checkpoint 的**相位**（落 `research_checkpoint.phase`，`research_agent_ports.py:43-47`）：
+
+`intent` / `planning` / `hypothesis` / `runtime_dynamic` / `low_confidence_step`
+
+其中 `intent` / `planning` / `hypothesis` 是固定 #1/#2/#3 的相位；`runtime_dynamic` 是 ESL
+冲突的动态点（决策后直进 plan）；`low_confidence_step` 是执行步失败/空数据的动态点。
+
+动态**信号名**（落 `options["signal"]`，`research_agent_ports.py:57-63`）：
+
+`fixed_scope` / `fixed_plan` / `fixed_hypothesis` / `empty_scope` / `low_confidence_step` / `sql_validation_failed`
+
+`sql_validation_failed` 是 `low_confidence_step` 相位下的**信号名**，与错误码 `sql_validation_failed`
+**同值**（`research_agent_ports.py:138` 有显式注释承认该同值刻意为之）——它是信号，不是相位；
+5 个相位里没有任何一个是错误码。ESL 冲突种类（`metric_ambiguous` / `wiki_disagree`）是**第三套词汇**，
+不属于 checkpoint 相位，也不属于信号。
+
+## 错误码契约
+
+`research.error` 的 `code` 单一事实来源是 `backend/app/services/research_agent_ports.py:159-195`
+的 `ERROR_SPECS`（`ErrorSpec` frozen dataclass：`terminal` / `sessionStatus` / `payloadFields` /
+`uiHint` / `summary`）。终态集合 `TERMINAL_ERROR_CODES` 由表派生（`:197`）。
+
+| code | terminal | sessionStatus | payloadFields | uiHint |
+|---|---|---|---|---|
+| `turn_failed` | `True` | `failed` | `("phase",)` | `terminal` |
+| `llm_unavailable` | `False` | `running` | `()` | `degraded` |
+| `hypothesis_generation_failed` | `False` | `running` | `()` | `degraded` |
+| `sql_validation_failed` | `False` | `awaiting_user` | `("stepIndex",)` | `degraded` |
+| `step_failed` | `False` | `awaiting_user` | `("stepIndex",)` | `degraded` |
+
+三条铁律：
+
+1. 终态集合由 `ERROR_SPECS` **派生**（`TERMINAL_ERROR_CODES`，`:197`），任何站点**不得自持字面量集合**；
+2. checkpoint **相位**词汇绝不用作错误码；
+3. 前端按 `uiHint` 的**类**分支（`terminal` / `degraded`），**不按 code 逐个判断**。
+
+线上形状：`research.error` payload = `{code, message, uiHint, ...该 code 的 payloadFields}`，其中
+`code` / `message` / `uiHint` **恒在**，`uiHint` 由表**派生**、**不属于** `payloadFields`。
 
 ## 后续优化钩子
 
 - ESL 后置 LLM 精化层（**不混进 ESL 本身**，挂在 Checkpoint #1 之前）
 - `compare` 段落 mode 实现（MVP 后做）
 - 多 turn 协同 / ACL（预留）
+
+## 实现记录
+
+本特性经 Task 1–12 分批落地（设计 → 5 张表迁移 → ESL 三臂 → 持久化/状态机/SSE/REST → 报告归档 →
+步 SQL 接线与路由/计量 → 前端三页面 → 菜单 seed → 对比视图），逐任务 TDD + code-review 收口。
+
+- **13a 客观自动回归**：后端 7 个研究套件 73 passed / 0 failed；单元基线两向空 diff（0 新增 / 0 修复）；
+  覆盖率 9 模块全部 ≥80%（合计 91%）。发现 2 条本特性引入的集成红（`test_menu_config_api.py` 陈旧
+  section 计数锚点 7→8），交 13c 修；另发现 Milvus/Neo4j 集成套件无 deadline 等待会 stall（遗留项）。
+- **13b 真机验收**（本任务）：6 项行为检查通过；发现产品缺陷 P1——`buildResearchAgentService()`
+  未注入 `nl2sql`，生产链路 step 数据事件（`research.step.sql/data/chart/done`）从不触发，已记录待裁定。
+- **遗留/延后**：step NL2SQL 工厂接线（P1）；`test_menu_config_api.py` 计数锚点（13c）；集成套件
+  stall 的 `pytest-timeout` / gRPC deadline；ESL 后置 LLM 精化层；`compare` 段落 mode。
 
 ## 关联
 

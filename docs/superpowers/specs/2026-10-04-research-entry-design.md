@@ -151,7 +151,7 @@ CREATE UNIQUE INDEX uq_research_report_session_published
 [5. ★ FIXED CHECKPOINT #2: 计划确认]
      │ 分几步 / 查哪几张表 / 维度
      ↓
-[6. 每步循环执行]            ← 复用现有 _executeDataStep
+[6. 每步循环执行]            ← 薄 runner runStep/_stageExecute（不穿透 chat mixin 私有）
      │ ★ 每步可选 DYNAMIC CHECKPOINT（4 信号触发）
      ↓
 [7. Hypothesis 显式跑]       ← HypothesisMixin.runHypotheses() (复用)
@@ -237,40 +237,41 @@ dataclass：`terminal` / `sessionStatus` / `payloadFields` / `uiHint` / `summary
 ```python
 @dataclass(frozen=True)
 class ESLExtraction:
-    business_objects: list[BusinessObjectRef]
+    businessObjects: list[BusinessObjectRef]
     metrics: list[MetricRef]
     knowledge: list[KnowledgeRef]
-    confidence_by_arm: dict[str, float]   # 三个臂各 0–1
+    confidenceByArm: dict[str, float]   # 三个臂各 0–1
     conflicts: list[ESLConflict]
 
 @dataclass(frozen=True)
 class BusinessObjectRef:
-    class_id: int; class_name: str; source_table: str
-    matched_alias: str; confidence: float
-    related_joins: list[int]
+    classId: int
+    className: str
+    sourceTable: str
+    matchedAlias: str
+    confidence: float
 
 @dataclass(frozen=True)
 class MetricRef:
-    metric_id: int | None
-    kpi_code: str | None
-    display_name: str
+    metricId: int | None
+    kpiCode: str | None
+    displayName: str
     formula: str | None
     confidence: float
 
 @dataclass(frozen=True)
 class KnowledgeRef:
-    claim_id: int | None
-    page_id: int | None
+    pageId: int | None
     title: str
     snippet: str
-    semantic_score: float
+    semanticScore: float
 
 @dataclass(frozen=True)
 class ESLConflict:
-    kind: str                 # 'metric_ambiguous' | 'wiki_disagree' | 'bo_join_missing'
-    arm: str                  # 'metric' | 'knowledge' | 'business_object'
+    kind: str                 # 'metric_ambiguous' | 'wiki_disagree'
+    arm: str                  # 'business_object' | 'metric' | 'knowledge'
     detail: str
-    candidates: list[dict]
+    candidates: list[dict[str, Any]] = field(default_factory=list)
 ```
 
 **内部流水线：**

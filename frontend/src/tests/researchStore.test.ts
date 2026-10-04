@@ -725,4 +725,41 @@ describe("researchStore", () => {
     await p2;
     expect(useResearchStore.getState().error).toBeNull();
   });
+
+  it("connectStream 流建立后调用 onOpen（开流成功即通知一次）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        body: sseStream('event: research.connected\ndata: {"sessionId":"s1"}\n\n'),
+      }),
+    );
+    const onOpen = vi.fn();
+
+    await useResearchStore.getState().connectStream("s1", undefined, onOpen);
+
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it("connectStream 网络错误也调用 onOpen（避免串行调用方挂起）", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    const onOpen = vi.fn();
+
+    await useResearchStore.getState().connectStream("s1", undefined, onOpen);
+
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(useResearchStore.getState().error).toBe("network down");
+  });
+
+  it("connectStream 主动断流也调用 onOpen 且只通知一次", async () => {
+    stubAbortableStream();
+    const onOpen = vi.fn();
+    const p = useResearchStore.getState().connectStream("s1", undefined, onOpen);
+
+    useResearchStore.getState().reset();
+    await p;
+
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(useResearchStore.getState().error).toBeNull();
+  });
 });

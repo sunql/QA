@@ -120,7 +120,11 @@ interface ResearchState {
   ) => Promise<void>;
   loadReport: (sessionId: string, version?: number) => Promise<void>;
   loadReports: (sessionId: string) => Promise<void>;
-  connectStream: (sessionId: string, signal?: AbortSignal) => Promise<void>;
+  connectStream: (
+    sessionId: string,
+    signal?: AbortSignal,
+    onOpen?: () => void,
+  ) => Promise<void>;
   reset: () => void;
 }
 
@@ -237,13 +241,22 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
     }
   },
 
-  connectStream: async (sessionId, signal) => {
+  connectStream: async (sessionId, signal, onOpen) => {
     // 断旧流再建新流：避免旧事件继续追加进新会话。
     activeAbort?.abort();
     const controller = new AbortController();
     activeAbort = controller;
     const forwardAbort = () => controller.abort();
     signal?.addEventListener("abort", forwardAbort, { once: true });
+
+    // 开流信号只发一次：api 在 fetch 返回 ok 后触发，store 在 error/abort 路径兜底
+    // 触发。二者可能重叠（开流成功后又因断流而读流失败），保证调用方只被通知一次。
+    let openSignalled = false;
+    const signalOpen = () => {
+      if (openSignalled) return;
+      openSignalled = true;
+      onOpen?.();
+    };
 
     set({ streaming: true, error: null });
     try {
@@ -253,10 +266,16 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
           set((state) => applyEvent(state, event));
         },
         controller.signal,
+        signalOpen,
       );
     } catch (err) {
-      // 主动断流（组件卸载 / 切会话 / 外部 signal）不算错误。
-      if (controller.signal.aborted) return;
+      // 主动断流（组件卸载 / 切会话 / 外部 signal）不算错误；但无论成功与否都必须
+      // signalOpen，否则串行编排的调用方（先等 onOpen 再提交首轮）会永久挂起。
+      if (controller.signal.aborted) {
+        signalOpen();
+        return;
+      }
+      signalOpen();
       set({ error: errorMessage(err) });
     } finally {
       signal?.removeEventListener("abort", forwardAbort);

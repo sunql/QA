@@ -117,11 +117,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * @param sessionId 会话 id（查询参数，backend 先校验归属再建流）
  * @param onEvent 每个 SSE 事件的回调（事件名在 event.name）
  * @param signal 可选中止信号（组件卸载 / 切会话时断流）
+ * @param onOpen 可选：流「已建立」（fetch 返回 ok 且 body 存在）后立即回调，供调用方
+ *   在提交首轮前等待流建立（后端不重放历史）。fetch 失败时不会回调（由 store 兜底）。
  */
 export async function openResearchStream(
   sessionId: string,
   onEvent: (event: ResearchSseEvent) => void,
   signal?: AbortSignal,
+  onOpen?: () => void,
 ): Promise<void> {
   // SSE 走裸 fetch（axios 不支持流式），不经 httpClient 拦截器，
   // 故用 authHeaders()（SSOT）注入 Authorization + X-Tenant-Id。
@@ -131,6 +134,7 @@ export async function openResearchStream(
     signal,
   });
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+  onOpen?.();
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";

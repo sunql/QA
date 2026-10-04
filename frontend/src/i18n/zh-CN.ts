@@ -2914,6 +2914,20 @@ export const zhCN = {
       modifyPlaceholder: "输入修改后的要求…",
       submitModify: "提交修改",
     },
+    progress: {
+      empty: "暂无进度",
+      intent: "解析意图",
+      esl: "生成执行步骤",
+      plan: "制定研究计划",
+      stepStart: "开始步骤",
+      stepSql: "执行查询",
+      stepData: "处理数据",
+      stepChart: "生成图表",
+      stepDone: "完成步骤",
+      hypothesis: "形成假设",
+      finding: "得出结论",
+      report: "生成报告",
+    },
     timeline: {
       jump: "定位",
       role: {

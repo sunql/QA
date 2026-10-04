@@ -2899,6 +2899,20 @@ export const enUS = {
       modifyPlaceholder: "Enter the revised requirement…",
       submitModify: "Submit",
     },
+    progress: {
+      empty: "No progress yet",
+      intent: "Parsing intent",
+      esl: "Building execution steps",
+      plan: "Planning research",
+      stepStart: "Starting step",
+      stepSql: "Running query",
+      stepData: "Processing data",
+      stepChart: "Rendering chart",
+      stepDone: "Step completed",
+      hypothesis: "Forming hypothesis",
+      finding: "Drawing conclusion",
+      report: "Generating report",
+    },
     timeline: {
       jump: "Jump",
       role: {

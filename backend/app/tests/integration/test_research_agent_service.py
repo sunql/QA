@@ -23,6 +23,7 @@ import pytest
 from sqlalchemy import select, text
 
 from app.domain.enums import DataSourceType
+from app.domain.exceptions import Nl2SqlError
 from app.domain.models import DataSource, LlmConfig
 from app.domain.multi_step_plan import MultiStepPlan
 from app.domain.research_models import ResearchSession
@@ -1571,3 +1572,196 @@ async def test_execute_step_without_binding_fails_loudly_before_generation(
 
     assert probe.calls == 0  # 闸门先于生成面：连 LLM 客户端解析都不该发生
     assert nl2sql.calls == []  # 也没有任何一步 SQL 生成被触发
+
+
+# ---------------------------------------------------------------------------
+# Task 17（N1'）：失败步不再冒充「已执行」；全部步失败 ⇒ 急停
+#
+# 用户裁定：「全部步失败 ⇒ fail loud；部分失败 ⇒ `degraded=true`」。
+# 缺陷：`stepsExecuted=len(results)` 把**带 error 的步**也算成「已执行」⇒ 执行步全失败的
+# turn 仍报 `degraded:false` 并出报告（真机验收实证，与 N1 同一危害的另一条路径）。
+# ---------------------------------------------------------------------------
+
+
+def _collector():
+    """本批用例共用的事件收集器：返回 `(events, emit)`。"""
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    return events, collect
+
+
+async def _sessionStatus(dbSession, sessionId) -> str:
+    return (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": sessionId}
+        )
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_all_steps_failed_fails_turn_without_report(dbSession, makeService) -> None:
+    """N1' 主守卫：单步计划、SQL 生成恒失败 ⇒ **全部步失败 ⇒ 终态失败**，不出报告。
+
+    修复前：失败步被吞成「无数据步」且计入 `stepsExecuted` ⇒ 本 turn 一路走到
+    `research.report` + `research.done {"degraded": false}`（真机验收的事件序实证）。
+    """
+    events, collect = _collector()
+    planner = FakePlanner(steps=(SqlStep(index=0, description="x", sub_question="y"),))
+    nl2sql = FakeNl2Sql(error=Nl2SqlError("无法生成有效的查询 SQL"))
+    svc = makeService(
+        planner=planner,
+        nl2sql=nl2sql,
+        autoConfirm=True,
+        # 注入可用 LLM：让本用例只钉「步失败」这一维（否则 llmUnavailable 也会致降级）
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+
+    assert nl2sql.calls  # 失败确实发生在生成面（不是没接线）
+    names = [event for (event, _) in events]
+    errors = [p for (event, p) in events if event == "research.error"]
+    assert errors and errors[-1]["code"] == "turn_failed"  # 终态错误（沿用既有通道）
+    assert errors[-1]["uiHint"] == "terminal"  # 关流/终态语义由 uiHint 承载（Task 8.5 SSOT）
+    assert "research.report" not in names  # 不出报告
+    assert "research.done" not in names  # 也不补 done
+    # 零个数据事件（与真机验收同一症状）
+    assert [p["index"] for (event, p) in events if event == "research.step.data"] == []
+    assert await _sessionStatus(dbSession, s.id) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_all_steps_failed_after_skip_resume_still_fails_turn(dbSession, makeService) -> None:
+    """N1' + 恢复轮语义：唯一的一步失败 → 动态点「跳过」→ 恢复轮循环跑完 ⇒ **仍急停**。
+
+    `_autoConfirm=False`（默认路径）时，首个失败步会**暂停**在 `low_confidence_step`，
+    不跑到循环尾；轮到恢复轮才跑完。恢复轮的 `results` 由 `state["stepResults"]` 播种
+    （`rebuildState` 自 checkpoint 载荷还原）⇒ 前一轮的失败结果随恢复轮回流，
+    「全部步失败」判据必须跨越这条暂停/恢复边界仍然成立。
+    """
+    events, collect = _collector()
+    planner = FakePlanner(steps=(SqlStep(index=0, description="x", sub_question="y"),))
+    svc = makeService(
+        planner=planner,
+        nl2sql=FakeNl2Sql(error=Nl2SqlError("无法生成有效的查询 SQL")),
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    assert status == "awaiting_user"
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → planning
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #2 → execute（步失败 → 动态点）
+
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "low_confidence_step"
+    assert cp.options["stepsExecuted"] == 0  # 失败步**不**冒充已执行步
+
+    # 「跳过」⇒ 恢复轮从 nextStepIndex 起跑（本计划只此一步 ⇒ 循环无新步），但失败结果仍在
+    with pytest.raises(RuntimeError):
+        await _resolve(svc, dbSession, s.id, "confirm", emit=collect)
+
+    names = [event for (event, _) in events]
+    assert [p["code"] for (event, p) in events if event == "research.error"] == ["turn_failed"]
+    assert "research.report" not in names and "research.done" not in names
+    assert await _sessionStatus(dbSession, s.id) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_partial_step_failure_continues_with_degraded_true(dbSession, makeService) -> None:
+    """N1'：**部分失败**（步 0 失败、步 1 成功返回行）⇒ 继续出报告，但 `degraded: true`。
+
+    修复前：`stepsExecuted=len(results)=2` ⇒ `degraded: false`（失败步冒充「已执行」）。
+    用户裁定：部分失败**不**急停，但必须显式降级。
+    """
+    events, collect = _collector()
+    planner = FakePlanner(
+        steps=(
+            SqlStep(index=0, description="失败步", sub_question="y"),  # 无 SQL ⇒ 走生成面并失败
+            SqlStep(index=1, description="成功步", sub_question="近3月", sql="SELECT 2"),
+        )
+    )
+    runner = FakeRunner(rows=[{"cnt": 1}])
+    svc = makeService(
+        planner=planner,
+        nl2sql=FakeNl2Sql(error=Nl2SqlError("无法生成有效的查询 SQL")),
+        runner=runner,
+        autoConfirm=True,
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+    assert status == "done"
+
+    assert runner.executed == ["SELECT 2"]  # 失败步没执行 SQL；成功步真的执行了
+    assert [p["rowCount"] for (event, p) in events if event == "research.step.data"] == [1]
+    assert "research.report" in [event for (event, _) in events]  # 部分失败仍出报告
+    done = [p for (event, p) in events if event == "research.done"]
+    assert done and done[-1]["degraded"] is True  # 部分失败 ⇒ 显式降级
+
+
+@pytest.mark.asyncio
+async def test_partial_failure_degraded_survives_hypothesis_resume(dbSession, makeService) -> None:
+    """N1' + 恢复轮：部分失败后从**假设 checkpoint** 恢复 ⇒ `degraded` 仍须为 `true`。
+
+    `stepsExecuted` 须随 checkpoint 载荷携带并由 `rebuildState` 还原（Task 14 契约）。
+    若假设点仍写 `len(stepResults)`（含失败步），恢复轮会把 `degraded` 退回 `false` —— 同一缺陷的另一条出口。
+    """
+    events, collect = _collector()
+    planner = FakePlanner(
+        steps=(
+            SqlStep(index=0, description="失败步", sub_question="y"),
+            SqlStep(index=1, description="成功步", sub_question="近3月", sql="SELECT 2"),
+        )
+    )
+    svc = makeService(
+        planner=planner,
+        nl2sql=FakeNl2Sql(error=Nl2SqlError("无法生成有效的查询 SQL")),
+        runner=FakeRunner(rows=[{"cnt": 1}]),
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → planning
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #2 → execute：步 0 失败 → 动态点
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "low_confidence_step"
+    await _resolve(svc, dbSession, s.id, "confirm")  # 跳过失败步 → 步 1 成功 → 假设点
+
+    cp2 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp2 is not None and cp2.phase == "hypothesis"
+    assert cp2.options["stepsExecuted"] == 0  # 含失败步 ⇒ 新口径记 0（供恢复轮还原）
+    # 从假设点 confirm 恢复（不重跑 execute）⇒ done 仍须报降级
+    assert await _resolve(svc, dbSession, s.id, "confirm", emit=collect) == "done"
+    done = [p for (event, p) in events if event == "research.done"]
+    assert done and done[-1]["degraded"] is True
+
+
+@pytest.mark.asyncio
+async def test_zero_row_success_keeps_degraded_false(dbSession, makeService) -> None:
+    """防回退护栏（Task 14 口径，**修复前后都应为绿**）：步成功执行但 0 行 ⇒ `degraded: false`。
+
+    它钉住「`degraded` 不依赖行数」：0 行是**合法答案**（该窗口确无数据），既有机制已把它变成
+    `low_confidence_step` 动态点，不得在新口径下被误标降级。
+    """
+    events, collect = _collector()
+    planner = FakePlanner(
+        steps=(SqlStep(index=0, description="空窗口", sub_question="近1天", sql="SELECT 1"),)
+    )
+    svc = makeService(
+        planner=planner,
+        runner=FakeRunner(rows=[]),
+        autoConfirm=True,
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+    assert status == "done"
+
+    assert [p["rowCount"] for (event, p) in events if event == "research.step.data"] == [0]
+    done = [p for (event, p) in events if event == "research.done"]
+    assert done and done[-1]["degraded"] is False

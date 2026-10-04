@@ -48,7 +48,10 @@ from app.services.model_config_service import ModelConfigService
 from app.services.model_router_service import ModelRouterService
 from app.services.ontology_service import OntologyService
 from app.services.report_planner import ReportPlanner
-from app.services.research_agent_execution import ExecutionDeps, adapterFor, depsForSession, runStep
+from app.services.research_agent_execution import (
+    ExecutionDeps, adapterFor, buildExecutionDeps, depsForSession, executedStepCount,
+    finalizeStepResults, runStep,
+)
 from app.services.research_agent_ports import (
     ACTION_STATUS,
     CHECKPOINT_HYPOTHESIS,
@@ -179,14 +182,9 @@ class ResearchAgentService:
         self._nl2sql = nl2sql
 
     def _buildExec(self, runner: Any, chartService: Any, nl2sql: Any | None) -> ExecutionDeps:
-        """执行面依赖（Task 6.5 fix round 2 抽到 research_agent_execution）：一次绑定。"""
-        return ExecutionDeps(
-            runner=runner,
-            chart=chartService,
-            ontology=self._ontology,
-            nl2sql=nl2sql,
-            resolveClient=self._resolveClient,
-            recordUsage=self._recordUsage,
+        """执行面依赖（Task 6.5 抽到 research_agent_execution）；构造见 `buildExecutionDeps`。"""
+        return buildExecutionDeps(
+            runner, chartService, self._ontology, nl2sql, self._resolveClient, self._recordUsage
         )
 
     def _buildStages(self) -> dict[str, Any]:
@@ -567,7 +565,7 @@ class ResearchAgentService:
                     signal=stepSignal(result["error"]),
                     plan=state.get("plan"),
                     arms=state.get("esl"),
-                    stepResults=results, stepsExecuted=len(results),
+                    stepResults=results, stepsExecuted=executedStepCount(results),
                     stepIndex=result["index"],
                     error=result["error"] or "该步骤无数据返回",
                     resumePhase="execute",
@@ -576,7 +574,7 @@ class ResearchAgentService:
                 ),
                 "步骤失败，跳过还是终止？",
             )
-        state.update(stepResults=results, stepsExecuted=len(results))  # 步数是 degraded 口径依据（N1）
+        finalizeStepResults(state, results)  # N1'：全部步失败 ⇒ 急停；否则写回步数（degraded 依据）
         return None
 
     async def _stageHypothesis(
@@ -596,7 +594,7 @@ class ResearchAgentService:
             buildOptions(
                 signal=SIGNAL_FIXED_HYPOTHESIS,
                 candidates=candidates,
-                arms=state.get("esl"), stepsExecuted=len(state.get("stepResults") or []),
+                arms=state.get("esl"), stepsExecuted=executedStepCount(state.get("stepResults") or []),
                 resumePhase="verify",
             ),
             "验证哪些假设？",

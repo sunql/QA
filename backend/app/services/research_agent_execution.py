@@ -102,6 +102,30 @@ class ExecutionDeps:
     dialectArgs: dict[str, Any] | None = None
 
 
+def buildExecutionDeps(
+    runner: Any,
+    chart: Any,
+    ontology: Any,
+    nl2sql: Any | None,
+    resolveClient: Callable[..., Awaitable[tuple[Any, Any]]],
+    recordUsage: Callable[..., Awaitable[None]],
+) -> ExecutionDeps:
+    """构造调用方的执行面依赖（一次绑定）。
+
+    从 `research_agent_service._buildExec` 搬来（Task 17，A4.2 行数预算）：装配细节与
+    `ExecutionDeps` / `depsForSession` 同域。`adapter` / `dialectArgs` 刻意留空 —— 它们是
+    **按次**字段，由 `depsForSession` 在相位边界经 `replace` 补齐。
+    """
+    return ExecutionDeps(
+        runner=runner,
+        chart=chart,
+        ontology=ontology,
+        nl2sql=nl2sql,
+        resolveClient=resolveClient,
+        recordUsage=recordUsage,
+    )
+
+
 async def depsForSession(
     session: AsyncSession, sessionId: uuid.UUID, base: ExecutionDeps
 ) -> ExecutionDeps:
@@ -283,6 +307,61 @@ async def generateStepSql(
         logger.warning("步 SQL 生成为空: session=%s step=%s", sessionId, step.get("index"))
         return None
     return str(sql)
+
+
+# ---------------------------------------------------------------------------
+# 步结果语义（Task 17 / N1'）：`degraded` 口径的**数据源** + 全部步失败的急停闸门
+#
+# 缺陷：`stepsExecuted=len(results)` 把**带 error 的步**也算成「已执行」⇒ 执行步全失败的
+# turn 仍报 `degraded:false` 并出报告（用户裁定：全部步失败 ⇒ fail loud；部分失败 ⇒ 降级）。
+# `isDegraded` 的表达式不改 —— 只改喂给它的步数（见 `executedStepCount`）。
+# 步失败 ⇔ `result["error"]` 为真值（`stepResult` 恒带该键，见 `ports.stepResult`）。
+# ---------------------------------------------------------------------------
+
+
+def countSuccessfulSteps(results: list[dict[str, Any]]) -> int:
+    """无 error 的步数（`error` 为真值 ⇒ 失败步）。
+
+    只认 **error 维度**，不看行数：「成功执行但 0 行」仍是成功步（Task 14 口径，不得回退）。
+    """
+    return sum(1 for result in results if not result.get("error"))
+
+
+def allStepsFailed(results: list[dict[str, Any]]) -> bool:
+    """非空且**每一步**都带 error（N1' 急停判据）。
+
+    `results` 为空**不算**全部失败（例如全部步被 `startIndex` 跳过）—— 那不是「失败」而是
+    「无步」，归 N1 的空计划闸门管，此处不得替它抛。
+    """
+    return bool(results) and all(result.get("error") for result in results)
+
+
+def executedStepCount(results: list[dict[str, Any]]) -> int:
+    """喂给 `isDegraded` 的步数（N1'）：**有任何一步失败 ⇒ 0**，否则 = 步数。
+
+    用户裁定「全部步失败 ⇒ fail loud；部分失败 ⇒ `degraded=true`」，而 `isDegraded` 的表达式
+    （`llmUnavailable or not stepsExecuted`）**不改** —— 故「部分失败 ⇒ 降级」只能由**数据源**表达：
+    本 turn 一旦有失败步，就不是「健康地执行了 N 步」，记 0。
+    「成功执行但 0 行」不在失败之列 ⇒ 仍计步 ⇒ `degraded=false`（Task 14 口径不回退）。
+    """
+    successful = countSuccessfulSteps(results)
+    return successful if successful == len(results) else 0
+
+
+def finalizeStepResults(state: dict[str, Any], results: list[dict[str, Any]]) -> None:
+    """执行相位收尾：**全部步失败 ⇒ 急停**；否则把步结果与步数写回 `state`（degraded 口径依据）。
+
+    急停沿用本服务**既有**的终态失败通道（与 `_stageExecute` 的 N1 空计划闸门同一写法：
+    `raise RuntimeError`）—— 由 `_guardedRun` 转 `research.error{turn_failed}` + `markFailed`，
+    **不出报告**。不新增失败通道，不静默 `return None`。
+    """
+    if allStepsFailed(results):
+        logger.error(
+            "研究计划全部步失败（无一成功），本 turn 终止: steps=%s",
+            [result.get("index") for result in results],
+        )
+        raise RuntimeError("研究计划全部步失败（无一成功），本 turn 终止")
+    state.update(stepResults=results, stepsExecuted=executedStepCount(results))
 
 
 async def failedStep(

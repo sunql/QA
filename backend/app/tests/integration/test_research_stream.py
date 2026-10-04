@@ -6,9 +6,12 @@
 - `research.checkpoint` 事件与「暂停不关流」（客户端决策期间流保持打开）；
 - 越权 404 / 匿名 401（与 REST 端点同口径，不泄露存在性）；
 - 终态关流：`research.done`、**终态**错误（`turn_failed`）；
-- 降级类错误（`llm_unavailable`）**不关流**：状态机在该错误后仍推进到 done，关流会让
-  客户端丢掉后续全部事件（Task 5 MEDIUM-4 的可见降级信号与 §4.5 的错误语义共用同名
-  事件，故流端按 code 区分终态，见 task-8-report 偏差 #1）。
+- 降级类错误（`llm_unavailable`）**不关流**（其载荷 `terminal=False`；流端按 code 的终态标记
+  决定是否关流，见 task-8-report 偏差 #1）。但「其后状态机仍推进到 done」只是**常见**情形、
+  **不是**保证 —— Task 17 起：无可用 LLM 且计划回落到**无 SQL 的单步** ⇒ 后续
+  `research.error{turn_failed}` 才是终态（见
+  `test_degraded_error_does_not_close_stream` 的限定说明）。若在降级错误处关流，会让客户端丢掉
+  后续全部事件（Task 5 MEDIUM-4 的可见降级信号与 §4.5 的错误语义共用同名事件）。
 
 驱动方式：httpx 0.27 的 `ASGITransport` 把整个响应体缓冲到 `more_body=False`
 （`ASGIResponseStream`），故 `client.stream` / `client.get` 在流关闭前不返回。测试因此
@@ -337,7 +340,15 @@ async def test_stream_closes_after_terminal_error(
 async def test_degraded_error_does_not_close_stream(
     client: AsyncClient, authHeaders: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """无可用 LLM（llm_unavailable）是**降级**而非终态：流继续到 done（不提前关流）。"""
+    """无可用 LLM（llm_unavailable）**在计划步自带 SQL 时**是降级而非终态：流继续到 done。
+
+    限定条件（Task 17 起）：本结论**仅**在该轮计划步**自带 SQL**（无需 LLM 生成）时成立 ——
+    这里的 `FakePlanner` 默认步带 `sql="SELECT 1"`，故无 LLM 仍能执行、走到 `research.done`。
+    若计划回落到**无 SQL 的单步**（`plan=None` ⇒ `singleStepPlan`，步 `sql: None`），同一「无 LLM」
+    输入会因该步拿不到 SQL 而得 `STEP_MISSING_SQL` ⇒ 全部步失败 ⇒ 按 N1' 急停为**终态**
+    （`research.error{turn_failed}` + 会话 failed，不出 report/done）—— 见用户裁定与
+    `test_research_agent_service.py::test_no_llm_single_step_fallback_fails_turn_without_report`。
+    """
     monkeypatch.setattr(
         researchModule,
         "buildResearchAgentService",
@@ -356,7 +367,8 @@ async def test_degraded_error_does_not_close_stream(
     assert codes and set(codes) == {"llm_unavailable"}
     assert events[-1] == "research.done"
     assert payloads[-1]["degraded"] is True
-    # Task 8.5：llm_unavailable 是**降级**（terminal=False）⇒ 会话不得落 failed，继续到 done
+    # Task 8.5：llm_unavailable 是**降级**（terminal=False）。本场景（步自带 SQL）下 ⇒ 会话不落
+    # failed、继续到 done；但这不是普遍保证 —— 无 SQL 回落步时终态失败由 turn_failed 承载（见 docstring）。
     detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
     assert detail.json()["session"]["status"] == "done"
 

@@ -1765,3 +1765,50 @@ async def test_zero_row_success_keeps_degraded_false(dbSession, makeService) -> 
     assert [p["rowCount"] for (event, p) in events if event == "research.step.data"] == [0]
     done = [p for (event, p) in events if event == "research.done"]
     assert done and done[-1]["degraded"] is False
+
+
+@pytest.mark.asyncio
+async def test_no_llm_single_step_fallback_fails_turn_without_report(dbSession, makeService) -> None:
+    """N1' 边界（本轮钉死）：无可用 LLM + 计划回落到单步（`sql: None`）⇒ 该步 `STEP_MISSING_SQL`
+    ⇒ 全部步失败 ⇒ **终态失败**，不出报告。
+
+    这是「全部步失败 ⇒ 急停」闸门在**无 LLM**场景下的**期望**行为（用户裁定，本轮不得推翻）：
+    `plan=None` ⇒ `singleStepPlan` 恒给 `sql: None`，该步需 LLM 生成 SQL 而本轮无可用 LLM ⇒
+    一个数据步都没执行。若仍出报告，报告会完全由 `confidence≈0.13` / `verified:false` 的未验证
+    猜测堆成 —— 正是 N1/N1' 要消灭的东西。
+
+    对照 `test_research_stream.py::test_degraded_error_does_not_close_stream`：那条的降级成立**仅**
+    因为该轮计划步**自带 SQL**（无需 LLM 生成）；本用例补上它的另一侧 —— 计划回落到无 SQL 的单步
+    时，同一「无 LLM」输入走的是终态失败，**不**降级出报告。
+
+    护栏（**非 RED**）：钉的是 Task 17 已落地、且经用户裁定保留的行为，改动前后都应绿。
+    """
+    events, collect = _collector()
+    planner = FakePlanner(planNone=True)  # 单步语义 ⇒ singleStepPlan（步 sql=None，需生成）
+    # 注入一个**本可成功**的生成面：让「无可用 LLM」成为本 turn 失败的**致因**（若真有 LLM，
+    # 该 fake 会返回有效 SQL、该步即成功 —— 也就走不到本用例的终态失败）。
+    nl2sql = FakeNl2Sql(sql="SELECT 1 AS cnt")
+    svc = makeService(
+        planner=planner,
+        nl2sql=nl2sql,
+        autoConfirm=True,
+        llmFactory=None,  # 无可用 LLM（与 test_research_stream 的降级用例同装配）
+        modelConfigs=FakeModelConfigs([]),
+    )
+    s = await _newSession(svc, dbSession)
+
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+
+    # 无可用 LLM ⇒ `generateStepSql` 在 `resolveClient` 返回 None 时**先行短路**（不调生成面）
+    # ⇒ 该步落 `STEP_MISSING_SQL`（日志「执行步缺 SQL，按无数据跳过」即此分支）。
+    assert nl2sql.calls == []
+    names = [event for (event, _) in events]
+    codes = [p["code"] for (event, p) in events if event == "research.error"]
+    assert "turn_failed" in codes  # 终态错误（沿用既有通道）
+    assert codes[-1] == "turn_failed"  # 且为末帧：其后不补 report / done
+    assert "research.report" not in names  # 不出报告
+    assert "research.done" not in names  # 也不补 done
+    # 零个数据事件（该 turn 一个数据步都没执行 —— 正是本闸门要拦的形状）
+    assert [p["index"] for (event, p) in events if event == "research.step.data"] == []
+    assert await _sessionStatus(dbSession, s.id) == "failed"  # 会话置 failed（终态）

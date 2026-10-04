@@ -29,6 +29,7 @@ from app.domain.research_models import ResearchSession
 from app.infrastructure.security.crypto import encryptApiKey
 from app.services.nl2sql_service import SqlResult
 from app.services.report_planner import ReportPlanner
+from app.services.research_agent_execution import ExecutionDeps, runStep
 from app.services.research_agent_ports import (
     STEP_MISSING_SQL,
     LlmUsageRecorder,
@@ -114,12 +115,17 @@ class FakeRunner:
 
     `error` 模拟 SQL Guard 拒绝（ValueError）；`raiseError` 模拟任意异常（含编程错误），
     用于验证 `_runStep` 的异常收窄。`executed` 记录真正执行过的 SQL（Task 6.5-1 断言点）。
+    `raiseErrorOnFirst` 只让**第 1 步**抛（Task 13e fix round 2：钉住「失败步之后的步仍被执行」
+    —— 回滚会 expire identity map，业务源若是 ORM 对象，第 2 步就会因隐式 IO 被打死）。
     """
 
-    def __init__(self, rows=None, error: str | None = None, raiseError=None) -> None:
+    def __init__(
+        self, rows=None, error: str | None = None, raiseError=None, raiseErrorOnFirst=None
+    ) -> None:
         self._rows = rows if rows is not None else [{"month": "2026-01", "cnt": 100}]
         self._error = error
         self._raiseError = raiseError
+        self._raiseErrorOnFirst = raiseErrorOnFirst
         self.verifyCalls: list[str] = []
         self.executed: list[str] = []
         # Task 13e：业务库 adapter 按次送达（`adapter=` 关键字）——记下来断言「真的送达了」
@@ -129,6 +135,8 @@ class FakeRunner:
     async def executeReadonlySql(self, session, sql, *, adapter=None):
         self.executed.append(sql)
         self.adapters.append(adapter)
+        if self._raiseErrorOnFirst is not None and len(self.executed) == 1:
+            raise self._raiseErrorOnFirst
         if self._raiseError is not None:
             raise self._raiseError
         if self._error is not None:
@@ -1322,3 +1330,99 @@ async def test_programming_error_still_propagates_after_driver_narrowing(
     ).scalar_one()
     assert status == "failed"
     assert await svc.sessionService.getPendingCheckpoint(dbSession, s.id) is None
+
+
+@pytest.mark.asyncio
+async def test_failed_step_does_not_kill_later_steps_in_same_phase(
+    dbSession, makeService
+) -> None:
+    """第 k 步失败后，**第 k+1 步仍被执行**、turn 不致命（Task 13e fix round 2）。
+
+    根因（审查 Important-1）：失败路径 `failedStep` → `rollbackQuietly` 会对注入的 session
+    做**顶层 rollback**，而 SQLAlchemy 的 rollback 会 `_restore_snapshot(dirty_only=False)`
+    expire 整个 identity map（`expire_on_commit=False` 只护 commit，**不护 rollback**）。
+    原实现把**会话 ORM 对象** `DataSource` 放进 `ExecutionDeps`、在**循环内**每步读它的属性
+    （`adapterFor(deps.datasource)` / `dialectArgsFor(deps.datasource)`）⇒ 第 k 步失败后第 k+1
+    步读已过期对象触发隐式 IO ⇒ `MissingGreenlet`，且抛出点在 `runStep` 的收窄面**之外**
+    ⇒ 单步失败又升级成整 turn 死（Important-1 正是因此漏检：既有用例只跑单步计划）。
+
+    现 adapter 与方言参数在**相位边界**一次算好（照 `_stageVerify` 的既有做法），循环内零
+    ORM 属性访问，本用例用「两阶段计划 + 首步驱动错 + autoConfirm」把它钉死。
+    """
+    planner = FakePlanner(
+        steps=(
+            SqlStep(index=0, description="收货量趋势", sub_question="近12月收货量", sql="SELECT 1"),
+            SqlStep(index=1, description="供应商拆分", sub_question="近3月按供应商", sql="SELECT 2"),
+        )
+    )
+    runner = FakeRunner(
+        rows=[{"cnt": 1}],
+        raiseErrorOnFirst=oracledb.DatabaseError("ORA-00933: SQL 命令未正确结束"),
+    )
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc = makeService(
+        planner=planner, runner=runner, autoConfirm=True, llmFactory=lambda cfg: scripted
+    )
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+
+    # 第 2 步真的执行了：回滚没有把业务源（及其 adapter）废掉
+    assert runner.executed == ["SELECT 1", "SELECT 2"]
+    # 首步失败仍按单步降级留痕（驱动原文透出），但**不是** turn_failed
+    errors = [p for (e, p) in events if e == "research.error"]
+    assert [p["code"] for p in errors] == ["step_failed"]
+    assert "ORA-00933" in errors[0]["message"]
+    # turn 不致命：走到报告阶段，且第 2 步的数据事件确实发出
+    assert status == "done"
+    assert [p["index"] for (e, p) in events if e == "research.step.data"] == [1]
+
+
+class _StubClient:
+    """缺源用例用的最小 LLM 客户端（永不被调用：闸门在生成面之前就该拦下）。"""
+
+    async def complete(self, messages, **kwargs):
+        raise AssertionError("缺业务源时不应走到 LLM 生成面")
+
+
+async def _stubResolveClient(*args, **kwargs):
+    return (_StubClient(), FakeModelConfig())
+
+
+@pytest.mark.asyncio
+async def test_execute_step_without_binding_fails_loudly_before_generation(
+    dbSession, makeService
+) -> None:
+    """无业务源绑定 + 该步**无预置 SQL** ⇒ 抛 `RuntimeError`，不是 `AttributeError`。
+
+    根因（审查 Important-2）：原顺序把 adapter 闸门 (`adapterFor`) 放在 `generateStepSql`
+    **之后**，而后者内部读 `dialectArgsFor(deps.datasource)` ⇒ 缺源时先炸在 `None.type` 上，
+    报的是 `AttributeError`（看起来像程序 bug），`adapterFor` 的显式 `RuntimeError`
+    （「缺业务源」的契约错误码）永远没机会触发，调用方也无法据此判因。
+
+    现闸门（`businessBinding`）移到相位内第一步、**先于**生成面，本用例直接对 `runStep` 断言。
+    """
+    deps = ExecutionDeps(
+        runner=FakeRunner(),
+        chart=FakeChart(),
+        ontology=FakeOntology(),
+        nl2sql=FakeNl2Sql(sql="SELECT 1 AS cnt"),
+        resolveClient=_stubResolveClient,
+        recordUsage=FakeUsageRecorder().recordUsage,
+        # 刻意**不带** adapter / dialectArgs（模拟接线缺失的相位边界）
+    )
+    step = {"index": 0, "description": "收货量趋势", "sub_question": "近12月收货量"}  # 无预置 SQL
+
+    with pytest.raises(RuntimeError):
+        await runStep(
+            dbSession,
+            step,
+            sessionId=uuid.uuid4(),
+            state={"question": QUESTION},
+            emit=None,
+            deps=deps,
+        )

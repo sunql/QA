@@ -15,10 +15,15 @@ Step 0 依据（2026-10-04）：
 前先 `commit`（见 `research_agent_service.py`），本模块只负责单步的收敛与留痕。
 
 **Task 13e（业务库接线）**：执行面的数据源是**逐请求**才确定的（`research_session.datasource_id`），
-而 `ResearchSqlRunner` 在工厂里一次性构造 ⇒ 经 `ExecutionDeps.datasource` **按次送达**
-（`depsForSession` 在本 turn 的相位边界产出 `replace(...)` 副本），不给 runner 加构造参数。
+而 `ResearchSqlRunner` 在工厂里一次性构造 ⇒ 经 `ExecutionDeps.adapter` / `.dialectArgs` **按次送达**
+（`depsForSession` 在本 turn 的**相位边界**一次算好，用 `replace(...)` 产副本），不给 runner 加构造参数。
 `adapterFor` 对缺失数据源**显式报错**（`RuntimeError`，刻意避开会被降级的 `ValueError`），
 绝不静默回落到元数据库会话 —— 那正是本特性此前的根因。
+
+**相位边界解析（Task 13e fix round 2）**：adapter 与方言参数在**进循环之前**算好，循环内**零 ORM
+属性访问** —— 失败步的 `failedStep` → `rollbackQuietly` 会顶层 rollback 并 expire identity map
+（`expire_on_commit=False` 只护 commit，不护 rollback），若在循环内读 ORM 数据源对象，下一步就会
+触发隐式 IO 抛 `MissingGreenlet`，把单步失败升级成整 turn 死。照 `_stageVerify` 的既有做法。
 """
 
 from __future__ import annotations
@@ -73,9 +78,13 @@ _DRIVER_ERRORS: tuple[type[BaseException], ...] = (SQLAlchemyError, oracledb.Err
 class ExecutionDeps:
     """执行面依赖（构造期一次性绑定；`runStep` 只读不写）。
 
-    `datasource` 是唯一的**按次**字段：构造期绑定的副本不带它，本 turn 的相位边界经
-    `depsForSession(...)` 用 `replace` 产出带源副本（研究是多轮 + 可恢复的，源逐请求
-    解析）。`None` 只出现在未接线的测试里 —— `adapterFor` 对它显式报错。
+    `adapter` / `dialectArgs` 是**按次**字段：构造期绑定的副本不带它们，本 turn 的相位边界经
+    `depsForSession(...)` 用 `replace` 产出**已解析**副本（研究是多轮 + 可恢复的，源逐请求
+    解析）。`None` 只出现在未接线的测试里 —— `businessBinding` 对它显式报错。
+
+    两者**只能**在相位边界算好，循环内一律读这里：业务源是 ORM 对象，失败步的 rollback 会
+    expire 它，循环内再读属性就会 `MissingGreenlet`（见模块 docstring）。`datasource` 本身保留
+    给**同一条约定**下的其它相位边界（`_stageVerify` 在它的循环外解析 adapter）。
     """
 
     runner: Any
@@ -88,6 +97,9 @@ class ExecutionDeps:
     #               modelName, cachedTokens=None) -> None`
     recordUsage: Callable[..., Awaitable[None]]
     datasource: Any | None = None
+    # 相位边界算好的业务库绑定（`depsForSession` 一次性写入，二者同生共死）
+    adapter: Any | None = None
+    dialectArgs: dict[str, Any] | None = None
 
 
 async def depsForSession(
@@ -98,20 +110,31 @@ async def depsForSession(
     研究**多轮 + 可恢复**（`state` 不持久化），源在会话上一次性选定并全程沿用，故按
     `sessionId` 取。会话缺行 / `datasource_id` 为空 ⇒ 显式报错：**绝不**静默回落到应用
     元数据库会话（`data_source` 表在元数据库，业务表在业务库，两者不可混）。
+
+    adapter 与方言参数在**这里**（= 相位边界）一次算好并写进返回副本：此后循环内不再碰
+    ORM 数据源对象（失败步的 rollback 会 expire 它，循环内读属性即 `MissingGreenlet`）。
+    `get_adapter` 带进程内缓存，按相位重复解析不建连、不重复解密。
     """
     row = await session.get(ResearchSession, sessionId)
     if row is None or row.datasource_id is None:
         logger.error("研究会话未绑定业务数据源: session=%s", sessionId)
         raise RuntimeError(f"研究会话未绑定业务数据源（datasource_id 为空）: {sessionId}")
     ds = await DataSourceService().get(session, row.datasource_id)
-    return replace(base, datasource=ds)
+    # 两个 resolver 紧贴取源处调用：此刻 `ds` 必是新鲜的（尚未经历任何 rollback）
+    return replace(
+        base,
+        datasource=ds,
+        adapter=adapterFor(ds),
+        dialectArgs=dialectArgsFor(ds),
+    )
 
 
 def adapterFor(ds: Any | None) -> Any:
     """业务库适配器（配方与 chat 同源：`get_adapter(ds.id, ds)`，带进程内缓存）。
 
-    `ds` 缺失 ⇒ `RuntimeError`（**不用** `ValueError`：后者会被 `runStep` 当成 SQL Guard
-    拒绝降级成「该步无数据」，把配置缺失伪装成业务失败）。
+    **相位边界**调用（`depsForSession` 取到源后立即调用），结果随 `ExecutionDeps` 副本送达执行面。
+    `ds` 缺失 ⇒ `RuntimeError`（**不用** `ValueError`：后者会被 `runStep` 当成 SQL Guard 拒绝
+    降级成「该步无数据」，把配置缺失伪装成业务失败）。
     """
     if ds is None:
         raise RuntimeError("研究执行面缺少业务数据源（adapter 未按次送达）")
@@ -130,6 +153,18 @@ def dialectArgsFor(ds: Any) -> dict[str, Any]:
         "oracle_version": ds.oracle_version,
         "schemaPrefix": _safeSchemaPrefix(ds.username) if dialect.useSchemaPrefix else None,
     }
+
+
+def businessBinding(deps: ExecutionDeps) -> tuple[Any, dict[str, Any]]:
+    """取本相位边界算好的业务库绑定（adapter + 方言参数）；缺失 ⇒ `RuntimeError`。
+
+    这是执行面的**唯一闸门**，且必须在生成面**之前**：缺源/未接线是配置问题，不能被误诊成
+    编程错误（`AttributeError`），也不能被 `runStep` 的收窄面伪装成「该步无数据」——
+    故刻意用 `RuntimeError` 而非会被降级的 `ValueError`。
+    """
+    if deps.adapter is None or deps.dialectArgs is None:
+        raise RuntimeError("研究执行面缺少业务数据源（adapter / 方言参数未按次送达）")
+    return deps.adapter, deps.dialectArgs
 
 
 async def runStep(
@@ -157,13 +192,24 @@ async def runStep(
 
     Task 8（MEDIUM-7）：逐步发 §4.5 全事件族 —— start → sql → data → chart → done；
     缺 SQL 的步没有 sql 事件（无 SQL 可发），失败步止于 `research.error`。
+
+    Task 13e fix round 2：业务库绑定在**最开头**取出（`businessBinding`，先于生成面与
+    `step.start` 事件）—— 未送达是**接线缺失**（RuntimeError 上抛，不降级），且必须在
+    `generateStepSql` 之前，否则缺源会被误诊成 `AttributeError`。此后循环内零 ORM 访问。
     """
+    adapter, dialectArgs = businessBinding(deps)
     index = int(step.get("index", 0))
     await emitEvent(
         emit, EVENT_STEP_START, {"index": index, "description": step.get("description")}
     )
     sql = step.get("sql") or await generateStepSql(
-        session, step, sessionId=sessionId, state=state, emit=emit, deps=deps
+        session,
+        step,
+        sessionId=sessionId,
+        state=state,
+        emit=emit,
+        deps=deps,
+        dialectArgs=dialectArgs,
     )
     if not sql:
         logger.warning("执行步缺 SQL，按无数据跳过: session=%s step=%s", sessionId, index)
@@ -171,9 +217,6 @@ async def runStep(
     # 不可变：把生成的 SQL 固化进本步副本（步结果/动态点据此可追溯）
     resolved = {**step, "sql": sql}
     await emitEvent(emit, EVENT_STEP_SQL, {"index": index, "sql": sql})
-    # 业务库 adapter 在 try 之外解析：未送达是**接线缺失**（RuntimeError 上抛），
-    # 不能被下面的三面收窄伪装成「该步无数据」
-    adapter = adapterFor(deps.datasource)
     try:
         rows = await deps.runner.executeReadonlySql(session, sql, adapter=adapter)
     except ValueError as exc:
@@ -202,6 +245,7 @@ async def generateStepSql(
     state: dict[str, Any],
     emit: Emit | None,
     deps: ExecutionDeps,
+    dialectArgs: dict[str, Any],
 ) -> str | None:
     """无 SQL 的计划步：走真实 NL2SQL 生成（Task 6.5-1）。
 
@@ -209,8 +253,9 @@ async def generateStepSql(
     走 `STEP_MISSING_SQL`（显式 warning，不静默）。子问题优先于主问题（多步场景下每一步
     的语义范围不同，与 chat `_executeDataStep` 同口径）。
 
-    方言参数（Task 13e）：`datasourceType` / `oracle_version` / `schemaPrefix` 按本 turn
-    的业务数据源注入 —— 缺源的会话在 `runStep` 已被 `adapterFor` 拦截，故此处非空。
+    方言参数（Task 13e）：`datasourceType` / `oracle_version` / `schemaPrefix` 由**相位边界**
+    算好经入参传入 —— 本函数不碰业务源（ORM 对象），缺源在 `runStep` 的 `businessBinding`
+    已经拦下（先于本函数），故此处必非空。
     """
     if deps.nl2sql is None:
         return None
@@ -219,8 +264,6 @@ async def generateStepSql(
     )
     if client is None:
         return None
-    # 方言参数在 try 之外取：缺数据源是接线问题，不该落进下面的「生成失败」降级
-    dialectArgs = dialectArgsFor(deps.datasource)
     question = str(step.get("sub_question") or "").strip() or str(state["question"])
     try:
         classes = selectClassesForTables(

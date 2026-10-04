@@ -59,6 +59,49 @@ async def test_checkpoint_open_resolve_and_pending_lookup(dbSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_checkpoint_is_atomic_against_stale_read(dbSession) -> None:
+    """MEDIUM：并发下第二个决策者必须被原子 UPDATE 拒绝（TOCTOU 封堵）。
+
+    模拟并发：本会话 identity map 里 checkpoint 仍是 pending，而库里已被另一决策者
+    改成 rejected。旧实现只按内存值判断，会放行并**覆盖**先到者的决策（双跑状态机）；
+    新实现的条件 UPDATE（`WHERE status='pending'`）rowcount=0 ⇒ 抛既有 ValueError。
+    """
+    svc = ResearchSessionService()
+    s = await svc.createSession(dbSession, userId=1, question="q")
+    turn = await svc.appendTurn(dbSession, sessionId=s.id, role="agent", content={})
+    cp = await svc.openCheckpoint(
+        dbSession,
+        sessionId=s.id,
+        turnId=turn.id,
+        phase="intent",
+        options={"resumePhase": "plan"},
+        prompt="p",
+    )
+    # 另一决策者抢先落库（原始 UPDATE 不刷新本会话 identity map，正是并发现场）
+    await dbSession.execute(
+        text(
+            "UPDATE research_checkpoint SET status = 'rejected',"
+            " user_choice = CAST(:choice AS jsonb) WHERE id = :cid"
+        ),
+        {"cid": cp.id, "choice": '{"by": "B"}'},
+    )
+
+    with pytest.raises(ValueError, match="非 pending"):
+        await svc.resolveCheckpoint(
+            dbSession, checkpointId=cp.id, status="confirmed", userChoice={"by": "A"}
+        )
+
+    # 先到者的决策原样保留（未被后来者覆盖）
+    row = (
+        await dbSession.execute(
+            text("SELECT status, user_choice FROM research_checkpoint WHERE id = :cid"),
+            {"cid": cp.id},
+        )
+    ).one()
+    assert row.status == "rejected" and row.user_choice == {"by": "B"}
+
+
+@pytest.mark.asyncio
 async def test_publish_report_versioning(dbSession) -> None:
     svc = ResearchSessionService()
     s = await svc.createSession(dbSession, userId=1, question="q")

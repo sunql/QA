@@ -286,6 +286,32 @@ async def test_turn_returns_202_and_state_machine_runs(
     assert [t["role"] for t in payload["turns"]] == ["user", "checkpoint_awaiting"]
 
 
+async def test_turn_with_whitespace_question_does_not_advance(
+    client: AsyncClient, authHeaders: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LOW：空白问题经 API 路径（createTurn → appendTurn → runTurn）被守卫拦下。
+
+    Pydantic `min_length=1` 只挡空串，`"   "` 能过边界；守卫下沉到 `runTurn` 后，
+    后台状态机在写 checkpoint 之前就 ValueError ⇒ 会话不推进（无 pending 检查点、
+    无 checkpoint_awaiting 轮次）。
+    """
+    monkeypatch.setattr(researchModule, "buildResearchAgentService", _fastService)
+    created = await _createSession(client, authHeaders, question="q")
+
+    resp = await client.post(
+        f"{_BASE}/sessions/{created['id']}/turns",
+        json={"question": "   "},
+        headers=authHeaders,
+    )
+    assert resp.status_code == 202
+
+    detail = await client.get(f"{_BASE}/sessions/{created['id']}", headers=authHeaders)
+    payload = detail.json()
+    assert payload["pendingCheckpoint"] is None
+    assert [t["role"] for t in payload["turns"]] == ["user"]  # 只有请求事务里写的 user turn
+    assert payload["session"]["status"] == "running"
+
+
 async def test_checkpoint_answer_and_double_submit_409(
     client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession, monkeypatch
 ) -> None:

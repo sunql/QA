@@ -25,7 +25,11 @@ from app.domain.models import LlmConfig
 from app.domain.multi_step_plan import MultiStepPlan
 from app.services.nl2sql_service import SqlResult
 from app.services.report_planner import ReportPlanner
-from app.services.research_agent_ports import STEP_MISSING_SQL, LlmUsageRecorder
+from app.services.research_agent_ports import (
+    STEP_MISSING_SQL,
+    LlmUsageRecorder,
+    resolveModelConfig,
+)
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_session_service import ResearchSessionService
 from app.services.token_usage_service import TokenUsageService
@@ -962,3 +966,118 @@ async def test_routing_context_carries_session_cost_and_turns(dbSession, makeSer
     assert ctx.sessionId == str(s.id)
     assert ctx.sessionCost > 0  # 非零 ⇒ 预算规则可达（此前恒 0）
     assert ctx.sessionTurnCount >= 1  # 非零 ⇒ 亲和规则可达（此前恒 0）
+
+
+# ---------------------------------------------------------------------------
+# Task 7.5 加固批：resolveModelConfig 事务隔离 + runTurn 问题守卫
+# ---------------------------------------------------------------------------
+
+
+class PoisoningModelConfigs:
+    """`list()` 执行失败 SQL（模拟 llm_config 结构漂移 / 语句级失败）。
+
+    真实 asyncpg 语义：语句级失败会把**当前事务**置为 aborted，后续语句一律
+    `InFailedSQLTransactionError`。旧实现只 catch 异常不隔离事务，于是降级继续跑
+    的 turn 在写 checkpoint / resume turn 时炸掉，被后台 wrapper 回滚——客户端
+    已拿 202，数据静默丢失。
+    """
+
+    async def list(self, session, *, activeOnly: bool = False):
+        await session.execute(text("SELECT 1 FROM research_absent_table_for_poison"))
+        return []
+
+
+@pytest.mark.asyncio
+async def test_model_config_list_failure_does_not_poison_session(dbSession) -> None:
+    """HIGH：`list()` 抛错后主 session 必须仍可写（不抛 InFailedSQLTransactionError）。"""
+    sessions = ResearchSessionService()
+    s = await sessions.createSession(dbSession, userId=1, question=QUESTION)
+
+    config = await resolveModelConfig(
+        PoisoningModelConfigs(), None, None, dbSession, question=QUESTION, sessionId=s.id
+    )
+    assert config is None  # 降级语义不变：无可用模型配置
+
+    # 中毒事务会让这一步炸（PendingRollbackError / InFailedSQLTransactionError）
+    turn = await sessions.appendTurn(
+        dbSession, sessionId=s.id, role="user", content={"question": QUESTION}
+    )
+    assert turn.id is not None and turn.turn_index == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_survives_model_config_list_failure(dbSession, makeService) -> None:
+    """HIGH：list() 失败后 checkpoint 决策与 resume turn 仍落库 + 降级事件照发。"""
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc = makeService(modelConfigs=PoisoningModelConfigs())
+    s = await _newSession(svc, dbSession)
+    assert (
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+        == "awaiting_user"
+    )
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "intent"
+
+    # 恢复轮进 plan 相位：首次触达模型配置读取（失败）→ 计划 checkpoint 仍必须写出
+    status = await _resolve(svc, dbSession, s.id, "confirm", emit=collect)
+    assert status == "awaiting_user"
+    cp2 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp2 is not None and cp2.phase == "planning"
+    # 降级语义不变：无可用 LLM 仍显式可见（research.error / llm_unavailable）
+    assert "llm_unavailable" in [p["code"] for (e, p) in events if e == "research.error"]
+    # 决策 + 恢复轮真的落了库（不是只在内存）：intent 点已 confirmed，新计划点 pending
+    rows = (
+        await dbSession.execute(
+            text("SELECT id, status FROM research_checkpoint WHERE session_id = :sid"),
+            {"sid": s.id},
+        )
+    ).all()
+    statusById = {str(row[0]): row[1] for row in rows}
+    assert statusById[str(cp.id)] == "confirmed"
+    assert sorted(statusById.values()) == ["confirmed", "pending"]
+
+
+@pytest.mark.asyncio
+async def test_run_turn_rejects_whitespace_question(dbSession, makeService) -> None:
+    """LOW：空白问题守卫下沉到 runTurn（API 路径 createTurn → runTurn 绕过 startTurn）。"""
+    svc = makeService()
+    s = await _newSession(svc, dbSession)
+    turn = await svc.sessionService.appendTurn(
+        dbSession, sessionId=s.id, role="user", content={"question": "   "}
+    )
+    with pytest.raises(ValueError):
+        await svc.runTurn(
+            dbSession,
+            sessionId=s.id,
+            turnId=turn.id,
+            question="   ",
+            userId=1,
+            mode="research",
+        )
+    # 空问题不推进状态机：不写 checkpoint、不置 done
+    assert await svc.sessionService.getPendingCheckpoint(dbSession, s.id) is None
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status == "running"
+
+
+@pytest.mark.asyncio
+async def test_start_turn_still_rejects_whitespace_question(dbSession, makeService) -> None:
+    """LOW 回归：startTurn 守卫语义不变（守卫在写 user turn 之前，不留脏轮次）。"""
+    svc = makeService()
+    s = await _newSession(svc, dbSession)
+    with pytest.raises(ValueError):
+        await svc.startTurn(dbSession, sessionId=s.id, question="   ", userId=1)
+    count = (
+        await dbSession.execute(
+            text("SELECT count(*) FROM research_turn WHERE session_id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert count == 0

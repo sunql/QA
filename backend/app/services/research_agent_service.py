@@ -104,6 +104,7 @@ from app.services.research_agent_ports import (
     planQuestionWithFeedback,
     rebuildState,
     recordUsageQuietly,
+    requireQuestion,
     resolveClient,
     resumeTurnContent,
     rewriteState,
@@ -216,9 +217,7 @@ class ResearchAgentService:
         userId: int | None, emit: Emit | None = None,
     ) -> str:
         """开一轮研究：写 user turn → 跑状态机；返回 `awaiting_user` 或 `done`。"""
-        if not question or not question.strip():
-            logger.warning("研究 turn 问题为空: session=%s", sessionId)
-            raise ValueError("研究问题不能为空")
+        requireQuestion(question, sessionId)  # 守卫 SSOT（与 runTurn 同源）
         row = await self._loadSession(session, sessionId)
         turn = await self._sessions.appendTurn(
             session, sessionId=sessionId, role="user", content={"question": question}
@@ -238,7 +237,11 @@ class ResearchAgentService:
         与 `startTurn` 的唯一差别是「谁写 user turn」：API 层必须先拿到 turnId 才能
         立刻回 202（Task 7），故 user turn 由调用方写入后经本方法续跑；`startTurn`
         即 `appendTurn` + 本方法的等价组合（行为不变，Task 7 抽取）。
+
+        Task 7.5 LOW：空白问题守卫下沉到此处（API 路径 `createTurn → appendTurn →
+        runTurn` 绕过 `startTurn`）；守卫在任何写/状态推进之前，空问题不推进状态机。
         """
+        requireQuestion(question, sessionId)
         await self._sessions.updateSessionStatus(session, sessionId, STATUS_RUNNING)
         state: dict[str, Any] = {
             "question": question,

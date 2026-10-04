@@ -283,9 +283,8 @@ class MeteredClient:
     累加语义（Task 6）：报告阶段一次 `compose` 会逐块调用 LLM（执行摘要 + 每条结论的
     解读），只保留「最后一次」会漏计前面的调用；累加后调用方一次性记账。
 
-    缓存口径（Task 6.5-3）：`cachedTokens` 同样累加。任一轮响应**没有**该字段
-    （旧客户端 / 未启用 prompt cache）则整体记 `None` —— 与 nl2sql 4-1 的合并口径
-    一致：宁记「未知」也不谎报命中，否则会把 miss 误折成 hit 少计费。
+    缓存口径（Task 6.5-3）：`cachedTokens` 同样累加；任一轮响应**没有**该字段则整体记 `None`
+    （与 nl2sql 4-1 同口径：宁记「未知」也不谎报命中，否则把 miss 误折成 hit 少计费）。
     """
 
     def __init__(self, inner: Any) -> None:
@@ -308,9 +307,8 @@ class MeteredClient:
         return response
 
 
-# Task 5 的占位 `DefaultReporter` 已删除：Task 6 起 `ReportPlanner` 是唯一实现，
-# 且它自身覆盖了原占位的两条兜底路径（`llmClient=None` → 模板文案；无 finding →
-# 空数据段），故保留占位即为死代码。见 task-6-report.md「偏差 2」。
+# Task 5 的占位 `DefaultReporter` 已删除：Task 6 起 `ReportPlanner` 是唯一实现，其自身覆盖
+# 原占位的两条兜底（`llmClient=None` → 模板文案；无 finding → 空数据段），保留即死代码。
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +337,16 @@ def resumeTurnContent(
     if rewritten:
         content["question"] = rewritten
     return content
+
+
+def requireQuestion(question: str, sessionId: uuid.UUID | str) -> None:
+    """问题守卫（SSOT）：空白问题一律 ValueError（`startTurn` / `runTurn` 共用）。
+
+    Task 7.5 LOW：原只在 `startTurn`，API 路径 `createTurn → appendTurn → runTurn` 绕过了它；下沉后同源。
+    """
+    if not question or not question.strip():
+        logger.warning("研究 turn 问题为空: session=%s", sessionId)
+        raise ValueError("研究问题不能为空")
 
 
 def nextPhaseForPhase(phase: str, options: dict[str, Any]) -> str:
@@ -613,9 +621,11 @@ async def buildRoutingContext(
     if tokenUsage is None or session is None:
         return RoutingContext(sessionId=str(sessionId))
     try:
-        cost = await tokenUsage.getSessionCost(session, str(sessionId))
-        turns = await tokenUsage.getSessionTurnCount(session, str(sessionId))
-        prior = await tokenUsage.getLastModelId(session, str(sessionId))
+        # 同 resolveModelConfig：读用量失败也必须 savepoint 隔离，否则主事务留在 aborted 态，后续写入全炸。
+        async with session.begin_nested():
+            cost = await tokenUsage.getSessionCost(session, str(sessionId))
+            turns = await tokenUsage.getSessionTurnCount(session, str(sessionId))
+            prior = await tokenUsage.getLastModelId(session, str(sessionId))
     except Exception:  # noqa: BLE001 —— 读用量失败按零上下文路由，不阻断整轮
         logger.warning("装配路由上下文失败，按零上下文路由: session=%s", sessionId, exc_info=True)
         return RoutingContext(sessionId=str(sessionId))
@@ -652,7 +662,10 @@ async def resolveModelConfig(
     if modelConfigs is None:
         return None
     try:
-        configs = await modelConfigs.list(session, activeOnly=True)
+        # 独立 savepoint（Task 7.5 HIGH）：`list()` 语句级失败（如 llm_config 结构漂移）会把主事务
+        # 置 aborted ⇒ 后续 checkpoint / resume INSERT 全炸（已发 202，数据静默丢失）；savepoint 隔离之。
+        async with session.begin_nested():
+            configs = await modelConfigs.list(session, activeOnly=True)
     except Exception:  # noqa: BLE001 —— 配置读取失败降级为「无 LLM」，不中断 turn
         logger.warning("读取模型配置失败，本轮 LLM 段降级: session=%s", sessionId, exc_info=True)
         return None

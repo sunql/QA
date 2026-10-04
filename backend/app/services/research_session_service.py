@@ -131,7 +131,13 @@ class ResearchSessionService:
         status: str,
         userChoice: dict[str, Any],
     ) -> ResearchCheckpoint:
-        """写入用户决策；非法状态或非 pending 一律拒绝（幂等保护，防重复提交）。"""
+        """写入用户决策；非法状态或非 pending 一律拒绝（幂等保护，防重复提交）。
+
+        Task 7.5 MEDIUM：判据是**原子条件 UPDATE**（`WHERE status='pending'`），
+        rowcount=0 即拒绝。此前的「先读后写」是 TOCTOU：两个并发 answer 都读到
+        pending ⇒ 双双放行 ⇒ 状态机双跑（重复 execute / verify / 报告归档）。
+        异常类型与文案语义不变（仍是 ValueError，仍区分「不存在」与「非 pending」）。
+        """
         if status not in CHECKPOINT_STATUSES:
             logger.warning("非法 checkpoint 决策状态: id=%s status=%s", checkpointId, status)
             raise ValueError(f"非法 checkpoint 状态 {status}，合法值: {sorted(CHECKPOINT_STATUSES)}")
@@ -139,15 +145,23 @@ class ResearchSessionService:
         if row is None:
             logger.warning("checkpoint 不存在: id=%s", checkpointId)
             raise ValueError(f"checkpoint 不存在: {checkpointId}")
-        if row.status != CHECKPOINT_PENDING:
+        result = await session.execute(
+            update(ResearchCheckpoint)
+            .where(
+                ResearchCheckpoint.id == checkpointId,
+                ResearchCheckpoint.status == CHECKPOINT_PENDING,
+            )
+            .values(status=status, user_choice=userChoice or {}, decided_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 0:
+            await session.refresh(row)  # 刷新以报出**库中真实**状态（identity map 可能陈旧）
             logger.warning(
                 "checkpoint 非 pending，拒绝重复决策: id=%s status=%s", checkpointId, row.status
             )
             raise ValueError(f"checkpoint 非 pending（当前 {row.status}）: {checkpointId}")
-        row.status = status
-        row.user_choice = userChoice or {}
-        row.decided_at = datetime.now(UTC)
         await session.flush()
+        await session.refresh(row)
         return row
 
     async def getPendingCheckpoint(

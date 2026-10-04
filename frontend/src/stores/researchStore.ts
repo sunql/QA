@@ -19,6 +19,7 @@ import type {
   CheckpointAction,
   CheckpointPhase,
   ResearchCheckpoint,
+  ResearchErrorPayload,
   ResearchMode,
   ResearchReport,
   ResearchReportSummary,
@@ -26,9 +27,6 @@ import type {
   ResearchSseEvent,
   ResearchTurn,
 } from "../types/research";
-
-// 终态错误码：仅 turn_failed 关流（降级类 error 流保持打开，状态机继续推进）。
-const TERMINAL_ERROR_CODES: ReadonlySet<string> = new Set(["turn_failed"]);
 
 const CHECKPOINT_PHASES: ReadonlySet<string> = new Set<string>([
   "intent",
@@ -44,6 +42,15 @@ function isCheckpointPhase(value: unknown): value is CheckpointPhase {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// 终态判定只按 uiHint 的「类」分支（用户裁定规则 ③）：绝不按 code 逐个判断，
+// 后端新增终态 code 时前端零改动。payload 从网络 JSON 解析而来，运行时只认
+// `=== "terminal"` 收窄；其余（degraded / 字段缺失）一律走降级分支。
+type TerminalErrorPayload = ResearchErrorPayload & { uiHint: "terminal" };
+
+function isTerminalError(payload: unknown): payload is TerminalErrorPayload {
+  return isRecord(payload) && payload.uiHint === "terminal";
 }
 
 // SSE research.checkpoint payload → store pendingCheckpoint。SSE 只下发
@@ -69,18 +76,15 @@ function applyEvent(state: ResearchState, event: ResearchSseEvent): Partial<Rese
     case "research.done":
       return { events, streaming: false };
     case "research.error": {
-      if (
-        typeof event.payload.code === "string" &&
-        TERMINAL_ERROR_CODES.has(event.payload.code)
-      ) {
+      // 处置只按 uiHint 的「类」分支，绝不按 code 逐个判断（用户裁定规则 ③）。
+      if (isTerminalError(event.payload)) {
         return {
           events,
           streaming: false,
-          error: typeof event.payload.message === "string" ? event.payload.message : "turn_failed",
+          error: typeof event.payload.message === "string" ? event.payload.message : "research.error",
         };
       }
-      // 降级类 error（llm_unavailable / sql_validation_failed / step_failed）：
-      // 流保持打开，状态机会继续推进，后面可能还有 done。
+      // 降级类（degraded / 字段缺失）：流保持打开，状态机会继续推进，后面可能还有 done。
       return { events };
     }
     default:

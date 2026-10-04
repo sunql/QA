@@ -67,6 +67,30 @@ function stubAbortableStream(): void {
   );
 }
 
+// 同 stubAbortableStream，但先 enqueue 若干帧后保持打开（不 close），
+// 供测试在流未结束前观察事件级判定（如降级 error 不应把 streaming 置 false）。
+function stubAbortableOpenStream(...frames: string[]): void {
+  const encoder = new TextEncoder();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal | undefined;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(frames.join("")));
+          const fail = () => controller.error(new Error("aborted"));
+          if (signal?.aborted) {
+            fail();
+            return;
+          }
+          signal?.addEventListener("abort", fail, { once: true });
+        },
+      });
+      return Promise.resolve({ ok: true, body });
+    }),
+  );
+}
+
 function makeSession(overrides: Partial<ResearchSession> = {}): ResearchSession {
   return {
     id: "s1",
@@ -402,9 +426,9 @@ describe("researchStore", () => {
     expect(useResearchStore.getState().streaming).toBe(false);
   });
 
-  it("降级 research.error（llm_unavailable）不关流，后续 done 仍落地", async () => {
+  it("降级 research.error（uiHint:degraded）不关流，后续 done 仍落地", async () => {
     const stream = sseStream(
-      'event: research.error\ndata: {"code":"llm_unavailable","message":"无可用 LLM"}\n\n',
+      'event: research.error\ndata: {"code":"llm_unavailable","message":"无可用 LLM","uiHint":"degraded"}\n\n',
       'event: research.done\ndata: {"degraded":true}\n\n',
     );
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
@@ -417,8 +441,10 @@ describe("researchStore", () => {
     expect(state.streaming).toBe(false);
   });
 
-  it("终态 research.error{turn_failed} 关流并落地 error", async () => {
-    const stream = sseStream('event: research.error\ndata: {"code":"turn_failed","message":"boom"}\n\n');
+  it("终态 research.error（uiHint:terminal）关流并落地 error", async () => {
+    const stream = sseStream(
+      'event: research.error\ndata: {"code":"turn_failed","message":"boom","uiHint":"terminal"}\n\n',
+    );
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
 
     await useResearchStore.getState().connectStream("s1");
@@ -426,6 +452,33 @@ describe("researchStore", () => {
     const state = useResearchStore.getState();
     expect(state.streaming).toBe(false);
     expect(state.error).toBe("boom");
+  });
+
+  it("判定读 uiHint 而非 code：未知 code 但 uiHint:terminal 也关流", async () => {
+    const stream = sseStream(
+      'event: research.error\ndata: {"code":"some_future_code","message":"z","uiHint":"terminal"}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    await useResearchStore.getState().connectStream("s1");
+
+    const state = useResearchStore.getState();
+    expect(state.streaming).toBe(false);
+    expect(state.error).toBe("z");
+  });
+
+  it("判定读 uiHint 而非 code：turn_failed 但 uiHint:degraded 保持打开、不落 error", async () => {
+    const stream = sseStream(
+      'event: research.error\ndata: {"code":"turn_failed","message":"w","uiHint":"degraded"}\n\n',
+      'event: research.done\ndata: {"degraded":true}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    await useResearchStore.getState().connectStream("s1");
+
+    const state = useResearchStore.getState();
+    expect(state.events.map((e) => e.name)).toEqual(["research.error", "research.done"]);
+    expect(state.error).toBeNull(); // 不按 code 判断，degraded 不落 error
   });
 
   it("sendQuestion 创建会话 + 提交首轮 + 返回 sessionId", async () => {
@@ -585,13 +638,45 @@ describe("researchStore", () => {
     expect(cp.options).toEqual({});
   });
 
-  it("终态 turn_failed 无 message 时 error 回退为 turn_failed", async () => {
-    const stream = sseStream('event: research.error\ndata: {"code":"turn_failed"}\n\n');
+  it("终态 uiHint:terminal 无 message 时 error 回退为 research.error", async () => {
+    const stream = sseStream(
+      'event: research.error\ndata: {"code":"turn_failed","uiHint":"terminal"}\n\n',
+    );
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
 
     await useResearchStore.getState().connectStream("s1");
 
-    expect(useResearchStore.getState().error).toBe("turn_failed");
+    expect(useResearchStore.getState().error).toBe("research.error");
+    expect(useResearchStore.getState().streaming).toBe(false);
+  });
+
+  it("uiHint 字段缺失时走降级分支（保持打开、不落 error）", async () => {
+    const stream = sseStream(
+      'event: research.error\ndata: {"code":"turn_failed","message":"legacy"}\n\n',
+      'event: research.done\ndata: {"degraded":true}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    await useResearchStore.getState().connectStream("s1");
+
+    const state = useResearchStore.getState();
+    expect(state.events.map((e) => e.name)).toEqual(["research.error", "research.done"]);
+    expect(state.error).toBeNull(); // 未知/旧 payload 防御：缺 uiHint 不按终态处理
+  });
+
+  it("降级 error（uiHint:degraded）不把 streaming 置 false（流未结束时观察）", async () => {
+    stubAbortableOpenStream(
+      'event: research.error\ndata: {"code":"step_failed","message":"y","uiHint":"degraded"}\n\n',
+    );
+    const p = useResearchStore.getState().connectStream("s1");
+
+    // 等 degraded 事件被应用（流保持打开，尚未结束）
+    await vi.waitFor(() => expect(useResearchStore.getState().events).toHaveLength(1));
+    expect(useResearchStore.getState().streaming).toBe(true);
+    expect(useResearchStore.getState().error).toBeNull();
+
+    useResearchStore.getState().reset();
+    await p;
   });
 
   it("connectStream 网络错误（非断流）落 error 并收流", async () => {

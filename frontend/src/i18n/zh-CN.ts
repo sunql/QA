@@ -2956,6 +2956,7 @@ export const zhCN = {
       empty: "暂无研究会话",
       open: "打开",
       report: "报告",
+      compare: "对比",
       mode: {
         research: "研究",
         attribution: "归因",
@@ -2976,6 +2977,14 @@ export const zhCN = {
       title: "对比分析",
       empty: "暂无可对比的报告",
       back: "返回",
+      row: {
+        title: "标题",
+        executiveSummary: "执行摘要",
+        findings: "关键发现",
+        methodology: "方法学",
+      },
+      noReport: "未生成报告",
+      confidence: "置信度",
     },
   },
   profile: {

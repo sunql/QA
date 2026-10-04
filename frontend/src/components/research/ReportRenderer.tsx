@@ -153,3 +153,70 @@ export function ReportRenderer({ payload }: ReportRendererProps) {
     </article>
   );
 }
+
+// ---------------------------------------------------------------------------
+// opaque payload → ReportPayload 收窄（feat-research-entry Task 12）
+// ---------------------------------------------------------------------------
+// 报告 payload 以 `Record<string, unknown>` 存于 ResearchReport（JSONB），渲染前
+// 必须收窄成类型安全的 ReportPayload。此处是唯一收窄点：ResearchReportPage 的
+// 旧 cast 与 ResearchCompareView 的四行提取都应以本函数为 SSOT，避免两套解析漂移。
+
+const BLOCK_TYPES: ReadonlySet<string> = new Set<string>([
+  "text",
+  "chart",
+  "table",
+  "bullet_list",
+]);
+
+function parseSourceRef(value: unknown): ReportSourceRef | null {
+  if (!isRecord(value)) return null;
+  return {
+    kind: typeof value.kind === "string" ? value.kind : "",
+    refId: typeof value.refId === "string" ? value.refId : "",
+    label: typeof value.label === "string" ? value.label : "",
+  };
+}
+
+function parseBlock(value: unknown): ReportBlock | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.type !== "string" || !BLOCK_TYPES.has(value.type)) return null;
+  return {
+    type: value.type as ReportBlock["type"],
+    content: value.content,
+    sourceRefs: Array.isArray(value.sourceRefs)
+      ? value.sourceRefs
+          .map(parseSourceRef)
+          .filter((ref): ref is ReportSourceRef => ref !== null)
+      : [],
+  };
+}
+
+function parseSection(value: unknown): ReportSection | null {
+  if (!isRecord(value)) return null;
+  const blocks = Array.isArray(value.blocks)
+    ? value.blocks.map(parseBlock).filter((block): block is ReportBlock => block !== null)
+    : [];
+  return {
+    id: typeof value.id === "string" ? value.id : "",
+    kind: typeof value.kind === "string" ? value.kind : "",
+    title: typeof value.title === "string" ? value.title : "",
+    blocks,
+  };
+}
+
+export function parseReportPayload(value: Record<string, unknown>): ReportPayload {
+  const sections = Array.isArray(value.sections)
+    ? value.sections
+        .map(parseSection)
+        .filter((section): section is ReportSection => section !== null)
+    : [];
+  return {
+    sessionId: typeof value.sessionId === "string" ? value.sessionId : "",
+    turnId: typeof value.turnId === "string" ? value.turnId : "",
+    mode: typeof value.mode === "string" ? value.mode : "research",
+    title: typeof value.title === "string" ? value.title : "",
+    question: typeof value.question === "string" ? value.question : "",
+    sections,
+    findingsRef: Array.isArray(value.findingsRef) ? value.findingsRef : [],
+  };
+}

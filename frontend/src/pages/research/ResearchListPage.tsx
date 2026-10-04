@@ -6,7 +6,7 @@
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { App, Button, Card, Empty, Input, List, Select, Space, Tag, Typography } from "antd";
+import { App, Button, Card, Checkbox, Empty, Input, List, Select, Space, Tag, Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import { useResearchStore } from "../../stores/researchStore";
 import { createResearchSession } from "../../api/research";
@@ -30,6 +30,7 @@ export default function ResearchListPage() {
   const [question, setQuestion] = useState("");
   const [mode, setMode] = useState<ResearchMode>("research");
   const [submitting, setSubmitting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   useEffect(() => {
     void loadSessions();
@@ -49,9 +50,27 @@ export default function ResearchListPage() {
     }
   };
 
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
+    );
+  };
+
+  const openCompare = () => {
+    if (selectedIds.length < 2) return;
+    navigate(`/research/compare?ids=${selectedIds.join(",")}`);
+  };
+
   return (
     <div style={{ padding: 16 }}>
-      <Typography.Title level={4}>{t("research.list.title")}</Typography.Title>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <Typography.Title level={4} style={{ margin: 0 }}>
+          {t("research.list.title")}
+        </Typography.Title>
+        <Button type="primary" disabled={selectedIds.length < 2} onClick={openCompare}>
+          {t("research.list.compare")}
+        </Button>
+      </div>
       <Card size="small" style={{ marginBottom: 16 }}>
         <Space direction="vertical" style={{ width: "100%" }}>
           <TextArea
@@ -79,25 +98,36 @@ export default function ResearchListPage() {
         loading={sessionsLoading}
         dataSource={sessions}
         locale={{ emptyText: <Empty description={t("research.list.empty")} /> }}
-        renderItem={(session) => (
-          <List.Item
-            actions={[
-              <Button key="open" type="link" onClick={() => navigate(`/research/${session.id}`)}>
-                {t("research.list.open")}
-              </Button>,
-              <Button
-                key="report"
-                type="link"
-                onClick={() => navigate(`/research/${session.id}/report`)}
-              >
-                {t("research.list.report")}
-              </Button>,
-            ]}
-          >
-            <List.Item.Meta title={session.title || session.question} description={session.question} />
-            <Tag>{t(`research.list.mode.${session.mode}`)}</Tag>
-          </List.Item>
-        )}
+        renderItem={(session) => {
+          const selected = selectedIds.includes(session.id);
+          return (
+            <List.Item
+              actions={[
+                <Button key="open" type="link" onClick={() => navigate(`/research/${session.id}`)}>
+                  {t("research.list.open")}
+                </Button>,
+                <Button
+                  key="report"
+                  type="link"
+                  onClick={() => navigate(`/research/${session.id}/report`)}
+                >
+                  {t("research.list.report")}
+                </Button>,
+              ]}
+            >
+              <Checkbox
+                checked={selected}
+                onChange={() => toggleSelect(session.id)}
+                aria-label={session.title || session.question}
+              />
+              <List.Item.Meta
+                title={session.title || session.question}
+                description={session.question}
+              />
+              <Tag>{t(`research.list.mode.${session.mode}`)}</Tag>
+            </List.Item>
+          );
+        }}
       />
     </div>
   );

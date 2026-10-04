@@ -2941,6 +2941,7 @@ export const enUS = {
       empty: "No research sessions",
       open: "Open",
       report: "Report",
+      compare: "Compare",
       mode: {
         research: "Research",
         attribution: "Attribution",
@@ -2961,6 +2962,14 @@ export const enUS = {
       title: "Compare",
       empty: "No reports to compare",
       back: "Back",
+      row: {
+        title: "Title",
+        executiveSummary: "Executive Summary",
+        findings: "Key Findings",
+        methodology: "Methodology",
+      },
+      noReport: "No report generated",
+      confidence: "Confidence",
     },
   },
   profile: {

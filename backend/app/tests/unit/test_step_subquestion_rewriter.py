@@ -14,12 +14,6 @@ from app.services.step_subquestion_rewriter import (
 )
 
 
-def _make_prev_results(supplier_codes: list[str]) -> tuple[StepResult, ...]:
-    """构造一个含 supplier_codes 的前序 StepResult（仅用于变量抽取）。"""
-    from dataclasses import dataclass, field
-    return ()  # 实际抽取逻辑只看 prev_results[i].aggregate 文本
-
-
 class TestModelFilter:
     """仅 Qwen 系列生效。"""
 
@@ -122,16 +116,14 @@ class TestDegradation:
         """提取器抛异常 → 降级为不重写"""
         rw = StepSubquestionRewriter()
 
-        # Monkey-patch 提取器抛异常
-        class BoomRule(RewriteRule):
-            def extract_vars(self, prev_results):  # type: ignore[override]
-                raise RuntimeError("boom")
+        def _boom_extract(_prev: tuple[Any, ...]) -> dict[str, str]:
+            raise RuntimeError("boom")
 
-        rw._RULES = (BoomRule(
+        rw._RULES = (RewriteRule(
                 id="boom",
                 match=lambda sq, prev: True,
                 template="x {supplier}",
-                extract_vars=lambda prev: {"supplier": "B019"},
+                extract_vars=_boom_extract,
             ),)
         result = rw.rewrite(
             sub_question="对照同地点其他供应商",

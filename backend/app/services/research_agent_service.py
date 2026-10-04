@@ -212,13 +212,8 @@ class ResearchAgentService:
     # ------------------------------------------------------------------
 
     async def startTurn(
-        self,
-        session: AsyncSession,
-        *,
-        sessionId: uuid.UUID,
-        question: str,
-        userId: int | None,
-        emit: Emit | None = None,
+        self, session: AsyncSession, *, sessionId: uuid.UUID, question: str,
+        userId: int | None, emit: Emit | None = None,
     ) -> str:
         """开一轮研究：写 user turn → 跑状态机；返回 `awaiting_user` 或 `done`。"""
         if not question or not question.strip():
@@ -228,10 +223,26 @@ class ResearchAgentService:
         turn = await self._sessions.appendTurn(
             session, sessionId=sessionId, role="user", content={"question": question}
         )
+        logger.info("研究 turn 开始: session=%s turn=%s userId=%s", sessionId, turn.id, userId)
+        return await self.runTurn(
+            session, sessionId=sessionId, turnId=turn.id, question=question,
+            userId=userId, mode=row.mode, emit=emit,
+        )
+
+    async def runTurn(
+        self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,
+        question: str, userId: int | None, mode: str, emit: Emit | None = None,
+    ) -> str:
+        """从**已落库的 user turn** 起跑状态机；返回 `awaiting_user` 或 `done`。
+
+        与 `startTurn` 的唯一差别是「谁写 user turn」：API 层必须先拿到 turnId 才能
+        立刻回 202（Task 7），故 user turn 由调用方写入后经本方法续跑；`startTurn`
+        即 `appendTurn` + 本方法的等价组合（行为不变，Task 7 抽取）。
+        """
         await self._sessions.updateSessionStatus(session, sessionId, STATUS_RUNNING)
         state: dict[str, Any] = {
             "question": question,
-            "mode": row.mode,
+            "mode": mode,
             "userId": userId,
             "esl": None,
             "plan": None,
@@ -241,9 +252,8 @@ class ResearchAgentService:
             "choice": {},
             "llmUnavailable": False,
         }
-        logger.info("研究 turn 开始: session=%s turn=%s userId=%s", sessionId, turn.id, userId)
         return await self._guardedRun(
-            session, sessionId=sessionId, turnId=turn.id, phase=PHASES[0], emit=emit, state=state
+            session, sessionId=sessionId, turnId=turnId, phase=PHASES[0], emit=emit, state=state
         )
 
     async def resumeTurn(

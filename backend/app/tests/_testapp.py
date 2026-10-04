@@ -44,6 +44,7 @@ from app.api.v1 import (
     model_config,
     ontology,
     organizations,
+    research,
     roles,
     reports,
     session,
@@ -173,6 +174,7 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         tags=["data-quality"],
     )
     testApp.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
+    testApp.include_router(research.router, prefix="/api/v1", tags=["research"])
     testApp.include_router(
         data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"]
     )

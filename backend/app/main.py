@@ -403,6 +403,7 @@ def createApp() -> FastAPI:
         model_config,
         ontology,
         organizations,
+        research,
         roles,
         reports,
         session,
@@ -499,6 +500,7 @@ def createApp() -> FastAPI:
     app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
+    app.include_router(research.router, prefix="/api/v1", tags=["research"])
     app.include_router(users.router, tags=["users"])
     app.include_router(roles.router, tags=["roles"])
     app.include_router(organizations.router, tags=["organizations"])

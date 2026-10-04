@@ -132,6 +132,7 @@ export const enUS = {
       foundation: "Foundation",
       systemConfig: "System Config",
       auditSecurity: "Audit & Security",
+      research: "Research",
     },
     item: {
       chat: "AIChatService",
@@ -178,6 +179,8 @@ export const enUS = {
       dataQualityRuleParams: "Data Quality / Rule Config (Structured)",
       profile: "Profile",
       changePassword: "Change Password",
+      researchSession: "Research Session",
+      researchCompare: "Research Compare",
     },
   },
 
@@ -2884,6 +2887,66 @@ export const enUS = {
       codeAutoHint: "Auto-generated: DQ-Rule-YYYYMMDD-10-digit serial",
       name: "Name",
       nameAutoHint: "Auto-generated: Datasource-Class-RuleType (English)",
+    },
+  },
+  // Research agent entry (feat-research-entry Task 10)
+  research: {
+    checkpoint: {
+      title: "Checkpoint",
+      confirm: "Confirm",
+      modify: "Modify",
+      reject: "Reject",
+      modifyPlaceholder: "Enter the revised requirement…",
+      submitModify: "Submit",
+    },
+    timeline: {
+      jump: "Jump",
+      role: {
+        user: "You",
+        agent: "AI",
+        checkpoint: "Checkpoint",
+      },
+      status: {
+        pending: "Pending",
+        confirmed: "Confirmed",
+        modified: "Modified",
+        rejected: "Rejected",
+      },
+    },
+    report: {
+      title: "Research Report",
+      empty: "No report content",
+      versions: "Versions",
+      back: "Back to session",
+    },
+    list: {
+      title: "Research",
+      newQuestion: "New research",
+      questionPlaceholder: "Enter your research question…",
+      start: "Start",
+      empty: "No research sessions",
+      open: "Open",
+      report: "Report",
+      mode: {
+        research: "Research",
+        attribution: "Attribution",
+        compare: "Compare",
+      },
+    },
+    session: {
+      title: "Research Session",
+      inputPlaceholder: "Ask a follow-up…",
+      send: "Send",
+      streaming: "Researching…",
+      error: "Something went wrong",
+      report: "View report",
+      back: "Back to list",
+      compare: "Compare",
+    },
+    compare: {
+      title: "Compare",
+      empty: "No reports to compare",
+      back: "Back",
     },
   },
   profile: {

@@ -23,6 +23,7 @@ const KNOWN_DB_ICON_CODES = [
   "message", "thunderbolt", "appstore", "barchart", "alert",
   "partition", "audit", "node", "code", "number", "cluster",
   "tags", "tool", "file", "dashboard", "apartment", "heart",
+  "experiment",
 ] as const;
 
 describe("ICON_REGISTRY 与 menu_config.icon_code 对齐", () => {

@@ -138,6 +138,7 @@ export const zhCN = {
       foundation: "业务基础信息",
       systemConfig: "系统信息配置",
       auditSecurity: "审计安全",
+      research: "研究分析",
     },
     item: {
       chat: "AIChatService",
@@ -184,6 +185,8 @@ export const zhCN = {
       dataQualityRuleParams: "数据质量 / 规则配置(结构化)",
       profile: "个人信息",
       changePassword: "修改密码",
+      researchSession: "研究会话",
+      researchCompare: "研究对比",
     },
   },
 
@@ -2899,6 +2902,66 @@ export const zhCN = {
       codeAutoHint: "自动生成，格式：DQ-Rule-年月日-10位流水",
       name: "名称",
       nameAutoHint: "自动生成：数据源名称-类名-规则名（英文）",
+    },
+  },
+  // 研究型 Agent 入口（feat-research-entry Task 10）
+  research: {
+    checkpoint: {
+      title: "待决策检查点",
+      confirm: "确认",
+      modify: "修改",
+      reject: "拒绝",
+      modifyPlaceholder: "输入修改后的要求…",
+      submitModify: "提交修改",
+    },
+    timeline: {
+      jump: "定位",
+      role: {
+        user: "你",
+        agent: "AI",
+        checkpoint: "检查点",
+      },
+      status: {
+        pending: "待决策",
+        confirmed: "已确认",
+        modified: "已修改",
+        rejected: "已拒绝",
+      },
+    },
+    report: {
+      title: "研究报告",
+      empty: "暂无报告内容",
+      versions: "版本",
+      back: "返回会话",
+    },
+    list: {
+      title: "研究分析",
+      newQuestion: "发起新研究",
+      questionPlaceholder: "输入你的研究问题…",
+      start: "开始研究",
+      empty: "暂无研究会话",
+      open: "打开",
+      report: "报告",
+      mode: {
+        research: "研究",
+        attribution: "归因",
+        compare: "对比",
+      },
+    },
+    session: {
+      title: "研究会话",
+      inputPlaceholder: "继续提问…",
+      send: "发送",
+      streaming: "研究中…",
+      error: "出错了",
+      report: "查看报告",
+      back: "返回列表",
+      compare: "对比",
+    },
+    compare: {
+      title: "对比分析",
+      empty: "暂无可对比的报告",
+      back: "返回",
     },
   },
   profile: {

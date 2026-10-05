@@ -39,7 +39,7 @@
 **Interfaces:**
 - Consumes: `Base`（来自 `app.domain.models`，与 `research_models.py` 同源）、`research_session.id`（0111 已建，UUID PK）
 - Produces:
-  - `MultiStepRun`（字段 `id, session_id, question, model_id, status, total_steps, completed_steps, current_step_idx, compressed_count, resume_count, version, idempotency_keys, error_summary, started_at, updated_at, finished_at`）
+  - `MultiStepRun`（字段 `id, session_id, question, model_id, datasource_id, status, total_steps, completed_steps, current_step_idx, compressed_count, resume_count, version, idempotency_keys, error_summary, started_at, updated_at, finished_at`）
   - `MultiStepStep`（字段 `id, run_id, step_index, status, sub_question, sql, sql_hash, data, data_compressed, chart_option, model_used, tokens_used, cost, attempt_count, last_error, last_error_kind, started_at, updated_at, finished_at`）
   - 常量 `RUN_STATUS_RUNNING/SUCCEEDED/FAILED/PARTIALLY_FAILED`、`STEP_STATUS_PENDING/RUNNING/SUCCEEDED/FAILED/SKIPPED/COMPRESSED`
 
@@ -84,6 +84,7 @@ async def testRunAndStepRoundTrip(db_session):
         session_id=session_row.id,
         question="第一步查A，第二步查B",
         model_id=3,
+        datasource_id=7,
         total_steps=2,
     )
     db_session.add(run)
@@ -109,6 +110,7 @@ async def testRunAndStepRoundTrip(db_session):
 
     # Assert
     assert loaded.status == "running"
+    assert loaded.datasource_id == 7
     assert loaded.resume_count == 0
     assert loaded.version == 0
     assert loaded.idempotency_keys == []
@@ -202,6 +204,7 @@ class MultiStepRun(Base):
     )
     question: Mapped[str] = mapped_column(Text, nullable=False)
     model_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    datasource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default=RUN_STATUS_RUNNING)
     total_steps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completed_steps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -298,6 +301,7 @@ def upgrade() -> None:
         ),
         sa.Column("question", sa.Text(), nullable=False),
         sa.Column("model_id", sa.Integer(), nullable=True),
+        sa.Column("datasource_id", sa.Integer(), nullable=True),
         sa.Column("status", sa.String(20), nullable=False, server_default="running"),
         sa.Column("total_steps", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("completed_steps", sa.Integer(), nullable=False, server_default="0"),
@@ -400,7 +404,7 @@ git commit -m "feat(multi-step): 新增 multi_step_run/multi_step_step 模型与
 **Interfaces:**
 - Consumes: Task 1 的 `MultiStepRun` / `MultiStepStep` + 状态常量
 - Produces（全部 `async`，第一个参数 `session: AsyncSession`）：
-  - `createRun(session, *, sessionId: uuid.UUID, question: str, modelId: int | None, totalSteps: int) -> MultiStepRun`
+  - `createRun(session, *, sessionId: uuid.UUID, question: str, modelId: int | None, datasourceId: int | None = None, totalSteps: int) -> MultiStepRun`
   - `createSteps(session, *, runId: uuid.UUID, subQuestions: list[str]) -> list[MultiStepStep]`
   - `markStepRunning(session, step: MultiStepStep) -> None`
   - `finishStep(session, step, *, status: str, sql: str | None = None, data: list | None = None, chartOption: dict | None = None, modelUsed: str | None = None, tokens: int = 0, cost: float = 0) -> None`
@@ -564,6 +568,7 @@ async def createRun(
     sessionId: uuid.UUID,
     question: str,
     modelId: int | None,
+    datasourceId: int | None = None,
     totalSteps: int,
 ) -> MultiStepRun:
     if totalSteps < 0:
@@ -573,6 +578,7 @@ async def createRun(
         session_id=sessionId,
         question=question,
         model_id=modelId,
+        datasource_id=datasourceId,
         status=RUN_STATUS_RUNNING,
         total_steps=totalSteps,
     )
@@ -1235,7 +1241,7 @@ git commit -m "feat(multi-step): 新增上下文压缩与 token 估算"
 - Consumes: Task 2 `multi_step_persistence`、Task 3 `runWithTransientRetry`/`classifyStepError`、Task 4 `compressStepData`/`shouldCompress`/`estimatePromptTokens`
 - Produces: `class MultiStepPersistMixin`，方法（全部 `async`）：
   - `_isPersistEnabled(self, session) -> bool`
-  - `_openRun(self, session, *, sessionId, question, modelId, subQuestions) -> MultiStepRun | None`
+  - `_openRun(self, session, *, sessionId, question, modelId, subQuestions, datasourceId=None) -> MultiStepRun | None`
   - `_persistStepSuccess(self, session, step, *, status, sql, data, chartOption, modelUsed, tokens, cost) -> None`
   - `_persistStepFailure(self, session, step, exc) -> str`
   - `_closeRun(self, session, run, *, status, completedSteps, currentStepIdx, errorSummary) -> None`
@@ -1415,6 +1421,7 @@ class MultiStepPersistMixin:
         question: str,
         modelId: int | None,
         subQuestions: list[str],
+        datasourceId: int | None = None,
     ) -> MultiStepRun | None:
         if not await self._isPersistEnabled(session):
             return None
@@ -1423,6 +1430,7 @@ class MultiStepPersistMixin:
             sessionId=sessionId,
             question=question,
             modelId=modelId,
+            datasourceId=datasourceId,
             totalSteps=len(subQuestions),
         )
         await persistence.createSteps(session, runId=run.id, subQuestions=subQuestions)
@@ -1739,6 +1747,7 @@ sed -n '690,745p' backend/app/services/chat_multistep.py
             question=dto.question,
             modelId=getattr(dto, "modelId", None),
             subQuestions=subQuestions,
+            datasourceId=getattr(dto, "datasourceId", None),
         )
 ```
 （字段名以实际 `multiStepPlan.steps` 的元素属性为准；若为 `StepPlan` 用 `s.sub_question`）
@@ -2123,15 +2132,12 @@ from app.services import multi_step_persistence, multi_step_resume
 并在 `ChatRequest` 上加可选字段 `resumeFromStep: int | None = None`（若已存在同名则复用）。
 `_datasourceIdFromRun` 暂时从 run 的 session 最近 query state 取数据源 id；若取不到，返回 `run.question` 就无从执行 → 改为在 `multi_step_run` 增列 `datasource_id INT`（Task 1 的表已可加列，见 Step 5）。
 
-- [ ] **Step 5: 补 `datasource_id` 列（若 Step 4 需要）**
+- [ ] **Step 5: 接上 `datasource_id` 快照**
 
-在 Task 1 的模型与迁移里加：
-```python
-    datasource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-```
-迁移里加 `sa.Column("datasource_id", sa.Integer(), nullable=True)`。
-在 `_openRun` 里接收并写入 `datasourceId`（从 `dto.datasourceId`）。
-然后 `_datasourceIdFromRun(run)` 直接 `return run.datasource_id`。
+`datasource_id` 列已在 Task 1 建好，`createRun` 已支持 `datasourceId`。本步只需：
+1. `_openRun` 增加 `datasourceId: int | None` 形参并透传给 `persistence.createRun(...)`。
+2. Task 6 的接线处把 `datasourceId=getattr(dto, "datasourceId", None)` 传进 `_openRun`。
+3. `_datasourceIdFromRun(run)` 直接 `return run.datasource_id`。
 
 - [ ] **Step 6: 跑测试确认通过**
 

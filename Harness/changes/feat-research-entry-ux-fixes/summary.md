@@ -105,6 +105,7 @@
 | 方法 | 路径 | 变更 |
 |---|---|---|
 | POST | `/api/v1/research/sessions` | 请求新增可选 `modelId: int \| None`；响应新增 `modelId`。`extra="forbid"` 放行该字段 |
+| GET | `/api/v1/research/sessions`（及详情） | **响应新增 `datasourceId: int \| None`**（W4）。请求侧 `datasourceId` 自 0112 起已存在且已落库，但 `ResearchSessionRead` 从不回显 ⇒ 无法在列表/会话页显示"用了哪个库"。本次仅补响应字段 + `_sessionRead` 映射，**不改接收侧与执行期** |
 | DELETE | `/api/v1/research/sessions/{sessionId}` | **新增**。硬删除；归属不符 → 404；删除 0 行 → 404 |
 
 - **状态机**：无变化（会话 `status` 枚举 `running/awaiting_user/done/failed/aborted` 不变）。
@@ -120,7 +121,7 @@
 | W1 检查点可读性 | 后端文案：`services/research_agent_service.py:487`（runtime_dynamic）、`:600`（hypothesis）、`:492`、`:531`；前端渲染：`components/research/CheckpointCard.tsx`；i18n：`src/i18n/zh-CN.ts` / `en-US.ts` |
 | W2 三模式说明 | `pages/research/ResearchListPage.tsx:17-21`（`MODE_OPTIONS`）、`pages/research/ResearchReportPage.tsx` |
 | W3 历史删除 | 后端：`api/v1/research.py`（新增 DELETE）、`services/research_session_service.py`；前端：`api/research.ts`、`stores/researchStore.ts`、`pages/research/ResearchListPage.tsx`（照 `components/chat/ChatHistoryPanel.tsx:156-174`） |
-| W4 数据源选择 | `pages/research/ResearchListPage.tsx:74-96`；复用 `api/datasource.ts` 的 `listDataSources`；参考 `components/chat/ChatPanel.tsx:174-187` |
+| W4 数据源选择 | 后端（**仅响应侧**）：`domain/research_schemas.py:92-102`（`ResearchSessionRead` 加 `datasourceId`）、`api/v1/research.py` 的 `_sessionRead` 映射；前端：`pages/research/ResearchListPage.tsx:74-96`（新建表单加 Select，默认选 `is_default` 源）、列表项与会话页的源 Tag；复用 `api/datasource.ts` 的 `listDataSources`；参考 `components/chat/ChatPanel.tsx:174-187` |
 | W5 模型选择 | 迁移 `alembic/versions/0113_research_session_model.py`；`domain/research_schemas.py:54-65`（放行 `modelId`）、`:92-102`（回显）；`domain/research_models.py:51-76`（新列）；`api/v1/research.py:244-265`（创建）；`services/research_agent_ports.py:641-684`（执行期直选，参考 `services/chat_service.py:831-845` 的消费模式）；前端复用 `api/modelConfig.ts` 的 `listModels` |
 
 **关键算法 / 依赖注入点**：

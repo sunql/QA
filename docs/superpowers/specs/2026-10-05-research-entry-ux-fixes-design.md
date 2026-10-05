@@ -38,7 +38,7 @@
 | 4 | 三按钮不知针对什么 | 卡片标题恒为 i18n `research.checkpoint.title`（"待决策检查点"），卡片内**无 phase / 目标说明** | `CheckpointCard.tsx:49`；`zh-CN.ts:2910` |
 | 5 | 三模式不知区别 | 后端**只在报告章节结构上有差异**，检索/计划/执行/假设/验证零差异；前端**零说明**（无 tooltip、无描述） | `report_planner.py:58-62`；`zh-CN.ts:2961-2963` |
 | 6 | 列表无删除 | **三层皆缺**：无 `DELETE` endpoint、无软删除列、无 store action、无按钮。物理删会 CASCADE 清掉 turn/checkpoint/finding/report | `research.py` 全路由无 `@router.delete`；`research_models.py:43-48` 有 CASCADE |
-| 7 | 没有数据库选择 | **后端已全就绪，前端一行没接线**：schema 有 `datasourceId`、迁移 0112 有列、执行期按会话取源、缺省回落默认源 | `research_schemas.py:59-64`；`0112_research_session_datasource.py`；`research_agent_execution.py:129-153` |
+| 7 | 没有数据库选择 | **后端接收侧已就绪，前端一行没接线**：请求 schema 有 `datasourceId`、迁移 0112 有列、执行期按会话取源、缺省回落默认源。但**响应侧不回显** —— `ResearchSessionRead` 无 `datasourceId`，故"显示用了哪个库"需补一个响应字段 | `research_schemas.py:59-64`（请求有）、`:92-102`（响应无）；`0112_research_session_datasource.py`；`research_agent_execution.py:129-153` |
 
 **结论**：7 条中 5 条（2/3/4/6/7）是"能力已在、暴露缺失"；1 条（5）是"文案缺失"；**只有 1 条（1）是真正的新增能力**。
 
@@ -128,13 +128,16 @@
 
 ### W4 数据源选择（第 7 条）
 
-**后端：零改动**（schema / 迁移 0112 / 执行期读取三层已通）。
+**后端：仅补一个响应字段**（接收侧 / 落库 / 执行期读取三层本就已通）：
+
+- `ResearchSessionRead`（`research_schemas.py:92-102`）新增 `datasourceId: int | None = None`。
+- `research.py` 的 `_sessionRead(row)` 映射补该字段。
 
 **前端：**
 
 - 新建表单（`ResearchListPage.tsx:74-96`）加数据源 Select，选项来自 `listDataSources`（`api/datasource.ts`），**默认选中 `is_default` 的源**。
 - 复用 chat 侧现成参考实现：`components/chat/ChatPanel.tsx:174-187`。
-- 列表项与会话页显示本次研究的数据源 Tag（治"不知道对哪个库研究"）。
+- 列表项与会话页显示本次研究的数据源 Tag（治"不知道对哪个库研究"）—— id → 名称由前端用已加载的 `listDataSources` 结果映射，**不新增后端字段之外的能力**。
 
 ### W5 模型选择（第 1 条）
 

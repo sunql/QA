@@ -93,7 +93,16 @@ class MultiStepPersistMixin:
         tokens: int = 0,
         cost: float = 0,
     ) -> str:
+        # spec §6.1：分类与落库解耦。kill switch 关掉时 `_openRun` 返回 None，
+        # 调用方没有 step 行可传（只能传 None），但**仍然需要 kind** 去决定要不要
+        # 重试 —— 故先分类，只在落库处短路。
+        #
+        # 缺这个守卫（`_persistStepSuccess` 早有同名守卫）会让 recordStepError 在
+        # `step.attempt_count`（multi_step_persistence.py:114）抛 AttributeError，
+        # 把原始的步错误顶掉：kill switch 一关，失败路径反而崩在守卫自身。
         kind = classifyStepError(exc)
+        if step is None:
+            return kind
         await persistence.recordStepError(
             session, step,
             message=f"{type(exc).__name__}: {exc}", kind=kind,

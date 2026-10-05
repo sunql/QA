@@ -88,6 +88,35 @@ async def testPersistStepFailureRecordsClassification(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def testPersistStepFailureWithStepNoneSkipsWriteButStillClassifies(monkeypatch):
+    """kill switch 关掉时 step 为 None：只分类、不落库。
+
+    缺这个守卫会让 recordStepError 在 `step.attempt_count` 抛 AttributeError，
+    把原始的步错误顶掉 —— 关掉开关反而崩在守卫自身。传了 run 是为了同时钉住
+    `if run is not None` 分支里的 `step.step_index` 访问也被早返回保护。
+    """
+    host = _Host()
+    session = AsyncMock()
+    record = AsyncMock()
+    updateRun = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.multi_step_persist_hooks.persistence.recordStepError", record
+    )
+    monkeypatch.setattr(
+        "app.services.multi_step_persist_hooks.persistence.updateRun", updateRun
+    )
+
+    kind = await host._persistStepFailure(
+        session, None, httpx.ConnectError("refused"),
+        run=SimpleNamespace(status="running"),
+    )
+
+    assert kind == "transient"
+    record.assert_not_awaited()
+    updateRun.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def testMaybeCompressNoOpWhenUnderThreshold(monkeypatch):
     host = _Host()
     session = AsyncMock()

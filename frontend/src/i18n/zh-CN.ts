@@ -2980,6 +2980,9 @@ export const zhCN = {
       open: "打开",
       report: "报告",
       compare: "对比",
+      deleteConfirm: "删除该研究会话？其轮次、检查点与报告将一并清除，不可恢复。",
+      deleteAriaLabel: "删除研究会话",
+      deleteError: "删除失败",
       mode: {
         research: "研究",
         attribution: "归因",

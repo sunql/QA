@@ -141,6 +141,39 @@ describe("ResearchListPage", () => {
     expect(screen.getByTestId("probe").textContent).toBe("/research/compare?ids=s1,s2");
   });
 
+  it("删除：二次确认后调 DELETE 并从列表移除", async () => {
+    const user = userEvent.setup();
+    httpMock.delete.mockResolvedValue({ data: null });
+    renderPage();
+    await waitFor(() => expect(httpMock.get).toHaveBeenCalled());
+
+    // 每行删除按钮的 aria-label 带行标识（title 优先，空则回落 question），
+    // 故列表多行时仍能唯一定位到 s1 那一行。
+    await user.click(screen.getByRole("button", { name: "删除研究会话：供应商 360°" }));
+    // Popconfirm 的确定按钮：antd 会给两字中文按钮插空格 ⇒ 可访问名是「确 定」。
+    await user.click(await screen.findByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() =>
+      expect(httpMock.delete).toHaveBeenCalledWith("/research/sessions/s1"),
+    );
+    await waitFor(() => expect(screen.queryByText("供应商 360°")).not.toBeInTheDocument());
+    // s2 未删，仍在列表（其 title 为空 ⇒ Meta 的 title 与 description 都落到 question，两个文本节点）
+    expect(screen.getAllByText("为什么下降")).toHaveLength(2);
+  });
+
+  it("删除失败：提示错误且列表保持原样（不做乐观移除）", async () => {
+    const user = userEvent.setup();
+    httpMock.delete.mockRejectedValue(new Error("boom"));
+    renderPage();
+    await waitFor(() => expect(httpMock.get).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: "删除研究会话：供应商 360°" }));
+    await user.click(await screen.findByRole("button", { name: /确\s*定/ }));
+
+    expect(await screen.findByText("删除失败")).toBeInTheDocument();
+    expect(screen.getByText("供应商 360°")).toBeInTheDocument();
+  });
+
   it("模式选项带副描述，且页面说明三模式只改报告章节结构", async () => {
     renderPage();
     await waitFor(() => expect(httpMock.get).toHaveBeenCalled());

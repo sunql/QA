@@ -6,7 +6,8 @@
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { App, Button, Card, Checkbox, Empty, Input, List, Select, Space, Tag, Typography } from "antd";
+import { App, Button, Card, Checkbox, Empty, Input, List, Popconfirm, Select, Space, Tag, Typography } from "antd";
+import { DeleteOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { useResearchStore } from "../../stores/researchStore";
 import { createResearchSession } from "../../api/research";
@@ -37,6 +38,7 @@ export default function ResearchListPage() {
   const sessions = useResearchStore((s) => s.sessions);
   const sessionsLoading = useResearchStore((s) => s.sessionsLoading);
   const loadSessions = useResearchStore((s) => s.loadSessions);
+  const deleteSession = useResearchStore((s) => s.deleteSession);
   const [question, setQuestion] = useState("");
   const [mode, setMode] = useState<ResearchMode>("research");
   const [submitting, setSubmitting] = useState(false);
@@ -64,6 +66,16 @@ export default function ResearchListPage() {
     setSelectedIds((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
     );
+  };
+
+  const handleDelete = async (sessionId: string) => {
+    try {
+      await deleteSession(sessionId);
+      // 已删会话不能留在多选集合里，否则「对比」会带上一个不存在的 id。
+      setSelectedIds((prev) => prev.filter((item) => item !== sessionId));
+    } catch {
+      message.error(t("research.list.deleteError"));
+    }
   };
 
   const openCompare = () => {
@@ -113,6 +125,10 @@ export default function ResearchListPage() {
         locale={{ emptyText: <Empty description={t("research.list.empty")} /> }}
         renderItem={(session) => {
           const selected = selectedIds.includes(session.id);
+          // 行标识：与行内可见标题同源（title 为空时回落 question），
+          // 既作复选框标签，也拼进删除按钮的可访问名 —— 多行列表里删除按钮必须
+          // 逐行可辨（扁平 aria-label 会让每一行同名，读屏用户无法区分删的是哪条）。
+          const rowLabel = session.title || session.question;
           return (
             <List.Item
               actions={[
@@ -126,17 +142,30 @@ export default function ResearchListPage() {
                 >
                   {t("research.list.report")}
                 </Button>,
+                <Popconfirm
+                  key="delete"
+                  title={t("research.list.deleteConfirm")}
+                  okText={t("common.confirm")}
+                  cancelText={t("common.cancel")}
+                  onConfirm={() => handleDelete(session.id)}
+                >
+                  <Button
+                    type="link"
+                    danger
+                    icon={<DeleteOutlined />}
+                    aria-label={`${t("research.list.deleteAriaLabel")}：${rowLabel}`}
+                  >
+                    {t("common.delete")}
+                  </Button>
+                </Popconfirm>,
               ]}
             >
               <Checkbox
                 checked={selected}
                 onChange={() => toggleSelect(session.id)}
-                aria-label={session.title || session.question}
+                aria-label={rowLabel}
               />
-              <List.Item.Meta
-                title={session.title || session.question}
-                description={session.question}
-              />
+              <List.Item.Meta title={rowLabel} description={session.question} />
               <Tag>{t(`research.list.mode.${session.mode}`)}</Tag>
             </List.Item>
           );

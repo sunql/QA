@@ -43,6 +43,10 @@ export async function listResearchSessions(): Promise<ResearchSession[]> {
   return res.data;
 }
 
+export async function deleteResearchSession(sessionId: string): Promise<void> {
+  await httpClient.delete(`${BASE}/sessions/${sessionId}`);
+}
+
 export async function getResearchSession(sessionId: string): Promise<ResearchSessionDetail> {
   const res = await httpClient.get<ResearchSessionDetail>(`${BASE}/sessions/${sessionId}`);
   return res.data;

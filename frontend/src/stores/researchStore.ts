@@ -8,6 +8,7 @@ import { create } from "zustand";
 import {
   answerCheckpoint as apiAnswerCheckpoint,
   createResearchSession,
+  deleteResearchSession as apiDeleteResearchSession,
   getReport as apiGetReport,
   getResearchSession,
   listReports as apiListReports,
@@ -110,6 +111,7 @@ interface ResearchState {
   error: string | null;
 
   loadSessions: () => Promise<void>;
+  deleteSession: (sessionId: string) => Promise<void>;
   openSession: (sessionId: string) => Promise<void>;
   sendQuestion: (question: string, mode?: ResearchMode) => Promise<string>;
   submitTurn: (sessionId: string, question: string) => Promise<void>;
@@ -154,6 +156,21 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
       set({ error: errorMessage(err) });
     } finally {
       set({ sessionsLoading: false });
+    }
+  },
+
+  deleteSession: async (sessionId) => {
+    set({ error: null });
+    try {
+      await apiDeleteResearchSession(sessionId);
+      // 服务端确认**之后**才从本地移除（不做乐观移除）：删除失败必须让列表保持原样，
+      // 否则用户会以为删掉了、刷新又回来。
+      set((state) => ({
+        sessions: state.sessions.filter((session) => session.id !== sessionId),
+      }));
+    } catch (err) {
+      set({ error: errorMessage(err) });
+      throw err;
     }
   },
 

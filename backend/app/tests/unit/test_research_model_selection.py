@@ -20,6 +20,7 @@ import pytest
 import pytest_asyncio
 
 from app.services import research_agent_service
+from app.services.research_agent_phases import resumeState
 from app.services.research_agent_ports import (
     PreferredModelUnavailableError,
     resolveModelConfig,
@@ -237,3 +238,46 @@ async def test_resolve_client_forwards_none_when_session_has_no_model(monkeypatc
     await svc._resolveClient(object(), state={}, emit=None, sessionId="s")
 
     assert forwarded == [None]
+
+
+# ---------------------------------------------------------------------------
+# 恢复态构造（fix round 2）：resumeState —— W5 的另一半（checkpoint 载荷不带 modelId）
+#
+# 纯函数、零替身：`rebuildState` 只读 row 的四个属性 + `checkpoint.options`，
+# 故真值断言而非 mock 断言 —— 这正是把这段从 resumeTurn 里抽出来的收益。
+# 放在本文件而非 test_research_checkpoint_prompt.py：W5 的会话模型故事（state["modelId"]）
+# 已集中在此，「写入 state」与「读出去交给 ports」两半相邻可对读。
+# ---------------------------------------------------------------------------
+
+
+class _FakeRow:
+    """`ResearchSession` 的恢复态读取面（`rebuildState` 只读这四个属性）。"""
+
+    def __init__(self, modelId: int | None) -> None:
+        self.input_seed = "问题"
+        self.mode = "deep"
+        self.created_by = 1
+        self.model_id = modelId
+
+
+class _FakeCheckpoint:
+    def __init__(self, options: dict[str, Any] | None = None) -> None:
+        self.options = options or {}
+
+
+def test_resume_state_reinjects_session_model_id() -> None:
+    """恢复态必须带会话选定模型（键序：rebuildState 的键 → 追加 modelId；choice 原地覆写）。"""
+    state = resumeState(_FakeRow(42), _FakeCheckpoint(), {"action": "confirm"})
+
+    assert state["modelId"] == 42
+    assert state["choice"] == {"action": "confirm"}  # 覆写 rebuildState 的 "choice": {}
+    assert state["question"] == "问题"  # rebuildState 的产物仍在（不是另起炉灶）
+    assert list(state)[-1] == "modelId"  # modelId 追加在末尾，既有键序不动
+
+
+def test_resume_state_keeps_none_when_session_has_no_model() -> None:
+    """会话未选定（model_id 为 NULL）⇒ None，恢复后仍走自动路由。"""
+    state = resumeState(_FakeRow(None), _FakeCheckpoint(), None)
+
+    assert state["modelId"] is None
+    assert state["choice"] == {}

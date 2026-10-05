@@ -78,6 +78,7 @@ from app.services.research_agent_stages import (
     clientModelName,
     eslClasses,
     hypothesisPrompt,
+    rebuildState,
     selectedHypotheses,
 )
 
@@ -415,6 +416,17 @@ def planQuestionWithFeedback(question: str, feedback: dict[str, Any] | None) -> 
         return question
     payload = neutralizeFence(json.dumps(feedback, ensure_ascii=False, sort_keys=True))
     return f"{question}\n\n{PLAN_FEEDBACK_HEADER} {payload}"
+
+
+def resumeState(row: Any, checkpoint: Any, choice: dict[str, Any] | None) -> dict[str, Any]:
+    """重建恢复态并补回会话级模型选择（W5）：checkpoint 载荷不带 modelId（模型不是落库状态）。
+
+    键序与恢复前一致（rebuildState → modelId → choice），故 `state` 形状逐字不变。
+    """
+    state = rebuildState(row, checkpoint)
+    state["modelId"] = row.model_id
+    state["choice"] = choice or {}
+    return state
 
 
 def nextPhase(checkpoint: Any, action: str) -> str:

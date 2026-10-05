@@ -52,6 +52,7 @@ from app.services.research_agent_phases import (
     ResearchAgentPhasesMixin,
     isDegraded,
     nextPhase,
+    resumeState,
 )
 from app.services.research_agent_ports import (
     ACTION_STATUS,
@@ -85,7 +86,6 @@ from app.services.research_agent_ports import (
 from app.services.research_agent_stages import (
     dataSummary,
     drivers,
-    rebuildState,
     resumeTurnContent,
     rewriteState,
 )
@@ -264,10 +264,8 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         rewritten = await self._recordResumeTurn(
             session, checkpoint, action=action, choice=choice, checkpointId=checkpointId
         )
-        state = rebuildState(row, checkpoint)
-        # 会话级模型选择（W5）：checkpoint 载荷不带 modelId（模型不是落库状态），在此补回。
-        state["modelId"] = row.model_id
-        state["choice"] = choice or {}
+        # 会话级模型选择（W5）：checkpoint 载荷不带 modelId（模型不是落库状态），由 resumeState 补回。
+        state = resumeState(row, checkpoint, choice)
         startPhase = nextPhase(checkpoint, action)
         if rewritten:
             state = rewriteState(state, rewritten)

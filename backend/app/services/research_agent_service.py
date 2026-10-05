@@ -216,10 +216,13 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         """
         requireQuestion(question, sessionId)
         await self._sessions.updateSessionStatus(session, sessionId, STATUS_RUNNING)
+        # 会话级模型选择（W5）：每轮从会话行取，保证追问也沿用同一模型。
+        row = await self._loadSession(session, sessionId)
         state: dict[str, Any] = {
             "question": question,
             "mode": mode,
             "userId": userId,
+            "modelId": row.model_id,
             "esl": None,
             "plan": None,
             "stepResults": [],
@@ -258,6 +261,8 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             session, checkpoint, action=action, choice=choice, checkpointId=checkpointId
         )
         state = rebuildState(row, checkpoint)
+        # 会话级模型选择（W5）：checkpoint 载荷不带 modelId（模型不是落库状态），在此补回。
+        state["modelId"] = row.model_id
         state["choice"] = choice or {}
         startPhase = nextPhase(checkpoint, action)
         if rewritten:
@@ -476,7 +481,11 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         emit: Emit | None,
         sessionId: uuid.UUID,
     ) -> tuple[Any, Any]:
-        """取（客户端, 模型配置）二元组：步 SQL 生成需要配置透传给 NL2SQL。"""
+        """取（客户端, 模型配置）二元组：步 SQL 生成需要配置透传给 NL2SQL。
+
+        会话级模型选择（W5-b）从 `state["modelId"]` 读（调用点不传参数）；显式选定后
+        不可用会由 `resolveModelConfig` 抛 `PreferredModelUnavailableError`，不静默换模型。
+        """
         return await resolveClient(
             self._llmFactory,
             self._modelConfigs,
@@ -486,6 +495,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             emit=emit,
             sessionId=sessionId,
             tokenUsage=self._tokenUsage,
+            preferredModelId=state.get("modelId"),
         )
 
     async def _recordUsage(

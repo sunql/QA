@@ -9,9 +9,9 @@
    `Reporter`（报告端口；Task 6 起唯一实现是 `ReportPlanner`，占位实现已删除）。
 3. **无状态构件**：options 构造 / 相位映射（`nextPhaseForPhase`）/ 步结果与计划归一化 /
    静默 emit 与 rollback 兜底。（恢复态重建 / 改写态 / 恢复轮内容、假设筛选与打分 /
-   提示词取值助手见 `research_agent_stages.py`，Task 8 / 8.5 抽出；相位纯函数
-   `nextPhase` / `isDegraded` / `findingData` 与 7 个相位执行体见
-   `research_agent_phases.py`，Task 9 Step 0 抽出 —— 均为守住 800 行硬上限。）
+   提示词取值助手见 `research_agent_stages.py`，Task 8 / 8.5 抽出；`nextPhase` /
+   `isDegraded` / `findingData` 与 7 个相位执行体见 `research_agent_phases.py`，
+   Task 9 Step 0 抽出 —— 都是为守住 800 行硬上限。）
 
 抽取动因：服务文件曾 1072 行，超 800 行硬上限；行为零变化（同一批测试全绿）。
 """
@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import LlmConfig
 from app.services.learning.prompt_fence import neutralizeFence
+from app.services.messages_zh import MSG_MODEL_CONFIG_UNAVAILABLE
 from app.services.model_router_service import RoutingContext
 from app.services.token_usage_service import TokenUsageService
 
@@ -605,6 +606,14 @@ async def buildRoutingContext(
     )
 
 
+class PreferredModelUnavailableError(RuntimeError):
+    """会话显式选定的模型不可用（不存在 / 已停用 / key 缺失）。
+
+    **绝不静默回落自动路由**（静默替换正是要修的「以为用了 A 实际用了 B」误判）。由
+    `_guardedRun` 捕获 → 发 `research.error{turn_failed}`（终态）→ markFailed。
+    """
+
+
 async def resolveModelConfig(
     modelConfigs: Any,
     modelRouter: Any,
@@ -614,6 +623,7 @@ async def resolveModelConfig(
     question: str,
     sessionId: uuid.UUID | str,
     tokenUsage: Any = None,
+    preferredModelId: int | None = None,
 ) -> Any | None:
     """按 chat 同口径选出本轮模型配置：`list(activeOnly)` → 可用性筛 → 路由。
 
@@ -624,7 +634,9 @@ async def resolveModelConfig(
     - 选择走公开面 `ModelRouterService.selectModel(configs, prompt, ctx)`，其中 `ctx`
       由 `buildRoutingContext` 装配（预算 / 轮次 / 上次模型三项齐备）。
 
-    任何一步失败/为空都返回 None（调用方走 `research.error` 显式降级），
+    `preferredModelId` 非空表示**会话级显式选定**（W5-b）：按**全量**清单直选、跳过
+    router；不可用（不存在 / 已停用 / key 缺失）一律抛 `PreferredModelUnavailableError`，
+    不回落。其余任何一步失败/为空都返回 None（调用方走 `research.error` 显式降级），
     不抛错、不静默用 keyless 客户端顶替。
     """
     if modelConfigs is None:
@@ -633,10 +645,22 @@ async def resolveModelConfig(
         # 独立 savepoint（Task 7.5 HIGH）：`list()` 语句级失败（如 llm_config 结构漂移）会把主事务
         # 置 aborted ⇒ 后续 checkpoint / resume INSERT 全炸（已发 202，数据静默丢失）；savepoint 隔离之。
         async with session.begin_nested():
-            configs = await modelConfigs.list(session, activeOnly=True)
-    except Exception:  # noqa: BLE001 —— 配置读取失败降级为「无 LLM」，不中断 turn
+            # 显式选定读**全量**清单（否则「存在但已停用」会被可用池过滤后误判为不存在）。
+            configs = await modelConfigs.list(session, activeOnly=preferredModelId is None)
+    except Exception:  # noqa: BLE001 —— 读取失败：显式选定必须报错，自动路由降级
+        if preferredModelId is not None:
+            logger.warning(
+                "读取模型配置失败（会话已指定模型）: session=%s", sessionId, exc_info=True
+            )
+            raise PreferredModelUnavailableError(MSG_MODEL_CONFIG_UNAVAILABLE.format(id=preferredModelId))
         logger.warning("读取模型配置失败，本轮 LLM 段降级: session=%s", sessionId, exc_info=True)
         return None
+    if preferredModelId is not None:
+        # 直选（不走 router）：不存在 / 已停用 / 无 key 一律显式报错，绝不静默换模型。
+        target = next((config for config in configs if config.id == preferredModelId), None)
+        if target is None or not target.is_active or buildClient(factory, target) is None:
+            raise PreferredModelUnavailableError(MSG_MODEL_CONFIG_UNAVAILABLE.format(id=preferredModelId))
+        return target
     usable = [config for config in configs if buildClient(factory, config) is not None]
     if not usable:
         logger.warning("无可用模型配置（key 缺失/未配置），本轮 LLM 段降级: session=%s", sessionId)
@@ -674,8 +698,12 @@ async def resolveClient(
     emit: Emit | None,
     sessionId: uuid.UUID,
     tokenUsage: Any = None,
+    preferredModelId: int | None = None,
 ) -> tuple[Any, Any]:
-    """解析本轮 LLM 客户端与其模型配置；无可用时显式降级并返回 `(None, None)`。"""
+    """解析本轮 LLM 客户端与其模型配置；无可用时显式降级并返回 `(None, None)`。
+
+    `preferredModelId`（显式选定）透传直选；不可用时抛 `PreferredModelUnavailableError`。
+    """
     config = await resolveModelConfig(
         modelConfigs,
         modelRouter,
@@ -684,6 +712,7 @@ async def resolveClient(
         question=str(state.get("question") or ""),
         sessionId=sessionId,
         tokenUsage=tokenUsage,
+        preferredModelId=preferredModelId,
     )
     client = buildClient(factory, config)
     if client is None:

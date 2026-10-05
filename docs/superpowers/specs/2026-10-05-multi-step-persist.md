@@ -175,8 +175,10 @@ provider 失败都被 `openai_client` 以 `LlmClientError(...) from exc` 包住�
 | `ctx > 95%` 压缩后仍超限 | permanent |
 | 其他 4xx（非超时类，429 除外） | permanent |
 
-状态码读 `status_code` 或 `status`（aiohttp 一类客户端用后者）。类型与状态码在链上
-任一环命中即判该分类。
+自外向内遍历 `__cause__`/`__context__` 链，**首个能判定的环生效**：命中瞬态类型即
+`transient`；带状态码则按其值判定（读 `status_code` 或 `status`，aiohttp 一类客户端用
+后者），其余继续深入。现实链路中带状态码的环与传输层瞬态环不会互相嵌套，故与「全链
+扫描」等价。
 
 ### 6.2 自动重试曲线
 

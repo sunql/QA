@@ -782,7 +782,7 @@ git commit -m "feat(multi-step): 新增 MultiStepRepository 落库与查询"
 **设计说明（与既有策略的差异，必须写进 docstring）:** 不复用 `llm_retry_policy.isRetryableLlmError`——它对 `Nl2SqlError` 一律返回可重试，而多步场景下 plan 校验失败属于**永久**错误（重试无意义、白烧 token）。本模块自带分类器。
 
 **分类必须沿整条 `__cause__` 链走（2026-10-05 人类裁决，spec §6.1 同步修订）：** 本仓所有 provider 失败都被 `openai_client` 以 `LlmClientError(...) from exc` 包住，故 spec §6.1 列的 httpx 类型在分类点**永远不会裸着到达**；只看最外层类型、或只看一层 `__cause__`，会把「provider 不可达 / 超时」误判为永久——而那正是本功能要救的故障类别。硬性要求：
-- 遍历 `__cause__`/`__context__` 整条链（按 id 去环），任一环命中瞬态类型或瞬态状态码 → `transient`；
+- 遍历 `__cause__`/`__context__` 整条链（按 id 去环），**自外向内、首个能判定的环生效**——该环命中瞬态类型即 `transient`；该环带状态码则按其值判定（`429/500/502/503/504` → `transient`，其余 → `permanent`）；两者皆无则继续深入。现实链路中「带状态码的环」与「传输层瞬态环」不会互相嵌套，故与「全链扫描」结果等价；此处刻意取首环生效（规则确定、无需两遍扫描）；
 - 瞬态类型 = `httpx.TransportError`（已含 ConnectError / TimeoutException / ReadError / RemoteProtocolError / PoolTimeout）、内建 `ConnectionError`、`asyncio.TimeoutError`；
 - 状态码读 `status_code` 或 `status`（aiohttp 一类客户端用后者），`429/500/502/503/504` → `transient`，其余 → `permanent`；
 - `Nl2SqlError` 与 `LLMUnavailableError` 按类型**优先**判永久（前者语义固定；后者是「未配置 LLM」配置错，重试不自愈）。

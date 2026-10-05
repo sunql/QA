@@ -101,6 +101,8 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_HISTORY_LAST_ANSWER_PREVIEW,
     MSG_SCHEMA_CHAT_HISTORY_LAST_QUESTION,
     MSG_SCHEMA_CHAT_HISTORY_LAST_TIME,
+    MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CHART_OPTION,
+    MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CHART_TYPE,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CONTENT,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_COUNT,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CREATED_TIME,
@@ -109,8 +111,14 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_QUESTION,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_ROLE,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGE_SQL,
+    MSG_SCHEMA_CHAT_HISTORY_MESSAGE_TABLE_OPTION,
+    MSG_SCHEMA_CHAT_HISTORY_MESSAGE_VISUAL_RATIONALE,
     MSG_SCHEMA_CHAT_HISTORY_MESSAGES,
     MSG_SCHEMA_CHAT_HISTORY_SESSION_ID,
+    MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG,
+    MSG_SCHEMA_CHAT_EXPORT_CHART_MESSAGE_ID,
+    MSG_SCHEMA_CHAT_EXPORT_CHARTS,
+    MSG_SCHEMA_CHAT_EXPORT_MESSAGE_ID,
     MSG_SCHEMA_CHAT_LOCKED_MODEL,
     MSG_SCHEMA_CHAT_METRIC,
     MSG_SCHEMA_CHAT_MODEL_ID,
@@ -337,6 +345,10 @@ class LlmConfigCreate(CamelModel):
     cost_threshold: Decimal = Field(default=Decimal("0.05"), ge=0, description=MSG_SCHEMA_MODEL_COST_THRESHOLD)
     is_active: bool = Field(default=True, description=MSG_SCHEMA_MODEL_IS_ACTIVE)
     temperature: float | None = Field(default=None, description="模型 temperature 值，留空使用默认值 0.0")
+    disable_thinking: bool = Field(
+        default=False,
+        description="关闭推理模型思维链（M3 支持；非推理模型传了也无害）",
+    )
 
 
 class LlmConfigUpdate(CamelModel):
@@ -349,6 +361,9 @@ class LlmConfigUpdate(CamelModel):
     cost_threshold: Decimal | None = Field(default=None, ge=0)
     is_active: bool | None = None
     temperature: float | None = None
+    # 走 exclude_unset 语义：显式传 false 会被 setattr 落库（取消勾选能生效）；
+    # 不传该字段则不动原值（部分更新语义）。
+    disable_thinking: bool | None = None
 
 
 class LlmConfigRead(CamelModel):
@@ -363,6 +378,7 @@ class LlmConfigRead(CamelModel):
     cost_threshold: Decimal
     is_active: bool
     temperature: float | None = None
+    disable_thinking: bool = False
     created_time: datetime | None = None
     updated_time: datetime | None = None
 
@@ -1256,6 +1272,9 @@ class DataSourceTestRequest(CamelModel):
 class DataSourceTestResponse(CamelModel):
     success: bool
     message: str
+    # 服务端版本（best-effort 探测，如 "19.0.0.0.0" / "8.0.46"）；连接失败或驱动
+    # 未回填时为 None。落库策略见 DataSourceService.create/update（只在为空时填充）。
+    server_version: str | None = None
 
 
 # ===== Schema 自动发现（Phase 5.7）=====
@@ -1413,21 +1432,29 @@ class ImportRuleConfig(CamelModel):
 
 
 class ConflictType(StrEnum):
-    """导入冲突类型：类（表级）或属性（列级）。"""
+    """导入冲突类型：类（表级）或属性（列级）。
+
+    CLASS_TOMBSTONED（fix-class-tombstone-restore）：同名软删除墓碑占位。
+    预览期显式提示用户先到本体管理页恢复；执行期仍由 createClass 的占名
+    校验兜底（避免同名双活类）。
+    """
 
     CLASS = "class"
     PROPERTY = "property"
+    CLASS_TOMBSTONED = "class_tombstoned"
 
 
 class ImportConflict(CamelModel):
     """本地导入时，建议的类/属性与既有本体的冲突。"""
 
-    type: ConflictType = Field(..., description="冲突类型：class | property")
+    type: ConflictType = Field(..., description="冲突类型：class | property | class_tombstoned")
     source_table: str | None = Field(default=None, description="冲突涉及的源表名")
     source_column: str | None = Field(default=None, description="冲突涉及的源列名（仅属性冲突）")
     existing_id: int = Field(..., description="既有本体类/属性的 id")
     existing_name: str | None = Field(default=None, description="既有本体类/属性名称")
     proposed_name: str | None = Field(default=None, description="建议的类/属性名称")
+    # 仅 CLASS_TOMBSTONED 时填充：墓碑的 valid_to 时间戳，方便前端渲染「已于 X 软删除」
+    existing_valid_to: datetime | None = Field(default=None, description="既有本体类的 valid_to（仅墓碑冲突）")
     # 处置动作：skip（默认，保留既有）| overwrite（覆盖）| rename（改名新建）
     action: str = "skip"
 
@@ -1657,6 +1684,17 @@ class StepResultRead(CamelModel):
     data: list[dict] | None = None
     summary: str = ""
     error: str | None = None
+    # 该步自己的图（决策引擎按该步的 plan/列/数据选出）；失败步骤为 None。
+    # 与 ChatResponse.chartType/chartOption 同口径（CamelModel 出 chartType/chartOption）。
+    chart_type: ChartType | None = None
+    chart_option: dict | None = None
+    # 该步的 NL2SQL 查询计划（供前端 QueryPlanCard 渲染）；失败/汇总步骤为 None。
+    query_plan: dict | None = None
+    # 可视化输出策略：图之外的明细表负载 + 为什么这么画的判断依据（前端 i18n）。
+    # 失败步骤为 None；visual_rationale 形状 {"code": str, "params": dict}，
+    # params.kind 是枚举真值（如 "bar"），不是 "ChartType.BAR"。
+    table_option: dict | None = None
+    visual_rationale: dict | None = None
 
 
 class AgentSuggestion(CamelModel):
@@ -1750,6 +1788,11 @@ class ChatResponse(CamelModel):
     )
     chartType: ChartType | None = None
     chartOption: dict | None = None
+    # 可视化输出策略：图之外的明细表负载 + 为什么这么画的判断依据（前端 i18n）。
+    # 仅单步查询路径填值（与 steps[0] 同口径）；其余意图为 None。visual_rationale
+    # 形状 {"code": str, "params": dict}，params.kind 是枚举真值（如 "bar"）。
+    table_option: dict | None = None
+    visual_rationale: dict | None = None
     data: list[dict] | None = None
     tokensUsed: int = 0
     cost: float = 0.0
@@ -1953,6 +1996,24 @@ class ChatMessageRead(CamelModel):
     interrupted: bool = Field(
         default=False, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_INTERRUPTED
     )
+    # 0105（图表进最终报告）：历史回放也要能显示图 —— 图此前只活在实时响应里，
+    # 刷新后整体消失。前端 `chatStore.toChatMessage` 把这两个字段映射进 `ChatMessage`，
+    # 并过一遍 `normalizeChartType` 白名单（未知类型静默置 null 是既有契约）。
+    chart_type: str | None = Field(
+        default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CHART_TYPE
+    )
+    chart_option: dict | None = Field(
+        default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CHART_OPTION
+    )
+    # 0107（可视化输出策略）：回放也要能拿到图之外的明细表 + 判断依据。与
+    # chart_type 同口径 —— 存的就是列里的原始 dict，裸 dict 透传（不引入新枚举
+    # 包装）；无负载/存量行为 None。前端 `chatStore.toChatMessage` 照此映射。
+    table_option: dict | None = Field(
+        default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_TABLE_OPTION
+    )
+    visual_rationale: dict | None = Field(
+        default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_VISUAL_RATIONALE
+    )
 
 
 class SessionMessagesResponse(CamelModel):
@@ -1961,6 +2022,32 @@ class SessionMessagesResponse(CamelModel):
     session_id: str = Field(..., description=MSG_SCHEMA_CHAT_HISTORY_SESSION_ID)
     messages: list[ChatMessageRead] = Field(
         default_factory=list, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGES
+    )
+
+
+class ChatExportChartImage(CamelModel):
+    """导出时前端回传的一张图表位图（0105，图表进最终报告）。
+
+    ECharts 只能在浏览器里渲染，服务端重画会是第二套渲染器（与前端必然长得不一样）。
+    所以由前端用已经渲染好的同一份 option 离屏导出 PNG 回传 —— 像素级一致、零新依赖。
+    """
+
+    message_id: int = Field(..., ge=1, description=MSG_SCHEMA_CHAT_EXPORT_CHART_MESSAGE_ID)
+    image_png: str = Field(..., description=MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG)
+
+
+class ChatExportRequest(CamelModel):
+    """导出 PDF 的请求体（0105：导出端点由 GET 改为 POST）。
+
+    ``charts`` 缺省为空列表 ⇒ 等价于旧行为（PDF 里图表回落占位框）—— 图缺失
+    **不影响导出本身的成败**：导出是主功能，图是增强。
+    """
+
+    message_id: int | None = Field(
+        default=None, ge=1, description=MSG_SCHEMA_CHAT_EXPORT_MESSAGE_ID
+    )
+    charts: list[ChatExportChartImage] = Field(
+        default_factory=list, description=MSG_SCHEMA_CHAT_EXPORT_CHARTS
     )
 
 
@@ -3569,6 +3656,9 @@ class WikiLinkOut(BaseModel):
     chunk_id: str | None
     ontology_type: str
     ontology_id: int
+    # 本体对象名（列表展示用）。对象已删/不存在时为 None，前端回退显示 ID。
+    ontology_name: str | None = None
+    ontology_alias: str | None = None
     weight: float
     note: str | None
     created_by: int
@@ -3577,7 +3667,7 @@ class WikiLinkOut(BaseModel):
 
 class WikiLinkableTargetOut(BaseModel):
     id: int
-    type: str  # 'class' | 'property'
+    type: str  # 'class' | 'property' | 'metric'
     name: str
     alias: str | None
     description: str | None

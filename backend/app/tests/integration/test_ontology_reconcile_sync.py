@@ -30,10 +30,23 @@ from app.domain.schemas import (
     OntologyRelationCreate,
 )
 from app.services.acl_service import ADMIN_ROLE
+from app.services.id_mapping_service import IdMappingService
 from app.services.ontology_service import OntologyService
 
 
 _ADMIN = CurrentUser(userId="t-admin", roles=(ADMIN_ROLE,), departments=())
+
+
+async def _uid(dbSession, businessObject: str, pgId: int) -> str:
+    """PG id → unified_id（走 id_mapping，与生产同一条解析路径）。
+
+    图侧集合（getClassIds / getJoinPairs / getRelationTriples）返回的都是
+    unified_id 字符串，喂假替身时必须用同一类型 —— 早期版本这里给的是 PG int，
+    两边异类做差集恒等于全集，测试因此「假绿」放过了真实缺陷。
+    """
+    row = await IdMappingService().resolveByExternal(dbSession, businessObject, str(pgId))
+    assert row is not None, f"{businessObject}:{pgId} 未注册 unified_id"
+    return row.unified_id
 
 
 class _FakeEmbedding:
@@ -82,14 +95,20 @@ class _FakeMilvus:
 
 
 class _FakeNeo4j:
-    """假 Neo4j：可预设已存在节点/边，记录全部写入调用。"""
+    """假 Neo4j：可预设已存在节点/边，记录全部写入调用。
+
+    四个「已存在」集合的元素类型**必须与生产一致 —— 都是 unified_id 字符串**
+    （生产按 `COALESCE(unified_id, toString(id))` 读出）。早期版本这里写成
+    `set[int]`，把「两边都是 PG id」这个错误前提钉进了替身，于是 int/str 差集的
+    真实缺陷在测试里永远看不见（假替身保真度问题）。
+    """
 
     def __init__(
         self,
-        classIds: set[int] | None = None,
-        propertyIds: set[int] | None = None,
-        joinPairs: set[tuple[int, int]] | None = None,
-        relationTriples: set[tuple[int, int, str]] | None = None,
+        classIds: set[str] | None = None,
+        propertyIds: set[str] | None = None,
+        joinPairs: set[tuple[str, str]] | None = None,
+        relationTriples: set[tuple[str, str, str]] | None = None,
     ) -> None:
         self.classIds = classIds or set()
         self.propertyIds = propertyIds or set()
@@ -97,26 +116,46 @@ class _FakeNeo4j:
         self.relationTriples = relationTriples or set()
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
 
-    def getClassIds(self) -> set[int]:
+    def getClassIds(self) -> set[str]:
         return set(self.classIds)
 
-    def getPropertyIds(self) -> set[int]:
+    def getPropertyIds(self) -> set[str]:
         return set(self.propertyIds)
 
-    def getJoinPairs(self) -> set[tuple[int, int]]:
+    def getJoinPairs(self) -> set[tuple[str, str]]:
         return set(self.joinPairs)
 
-    def getRelationTriples(self) -> set[tuple[int, int, str]]:
+    def getRelationTriples(self) -> set[tuple[str, str, str]]:
         return set(self.relationTriples)
 
-    def upsertClassNode(self, *args: Any, **kw: Any) -> None:
-        self.calls.append(("upsertClassNode", args))
+    def upsertClassNode(
+        self,
+        unified_id: str,
+        name: str,
+        alias: str | None,
+        description: str | None,
+        sourceTable: str | None,
+    ) -> None:
+        """按**真签名**记录：生产按关键字调用，`*args` 会把它记成空元组。
 
-    def reconcileClassSubclassOf(self, *args: Any, **kw: Any) -> None:
-        self.calls.append(("reconcileClassSubclassOf", args))
+        显式参数名还顺带成了契约检查 —— 调用方写成 `id=` 之类会 TypeError。
+        """
+        self.calls.append(("upsertClassNode", (unified_id,)))
 
-    def upsertPropertyNode(self, *args: Any, **kw: Any) -> None:
-        self.calls.append(("upsertPropertyNode", args))
+    def reconcileClassSubclassOf(self, classUid: str, parentUid: str) -> None:
+        self.calls.append(("reconcileClassSubclassOf", (classUid, parentUid)))
+
+    def upsertPropertyNode(
+        self,
+        unified_id: str,
+        name: str,
+        alias: str | None,
+        dataType: str | None,
+        sourceColumn: str | None,
+        isPrimaryKey: bool,
+        isForeignKey: bool,
+    ) -> None:
+        self.calls.append(("upsertPropertyNode", (unified_id,)))
 
     def linkClassHasProperty(self, *args: Any, **kw: Any) -> None:
         self.calls.append(("linkClassHasProperty", args))
@@ -512,6 +551,9 @@ class TestGraphSyncMissing:
         """图库为空 → 类/属性/HAS_PROPERTY/REFERENCES/JOIN/语义关系全部补齐。"""
         service = OntologyService()
         ids = await _seedGraph(dbSession, service)
+        uidA = await _uid(dbSession, "CLASS", ids["classA"])
+        uidB = await _uid(dbSession, "CLASS", ids["classB"])
+        uidProp = await _uid(dbSession, "PROPERTY", ids["prop"])
         neo4j = _FakeNeo4j()
         _installFakes(monkeypatch, _FakeMilvus(), neo4j)
 
@@ -529,26 +571,33 @@ class TestGraphSyncMissing:
         assert result["failedCount"] == 0
 
         upsertIds = [c[1][0] for c in neo4j.calls if c[0] == "upsertClassNode"]
-        assert sorted(upsertIds) == sorted([ids["classA"], ids["classB"]])
-        assert ("linkClassHasProperty", (ids["classA"], ids["prop"])) in neo4j.calls
-        assert ("linkPropertyReferences", (ids["prop"], ids["classB"])) in neo4j.calls
-        assert ("linkClassJoin", (ids["classA"], ids["classB"])) in neo4j.calls
+        assert sorted(upsertIds) == sorted([uidA, uidB])
+        assert ("linkClassHasProperty", (uidA, uidProp)) in neo4j.calls
+        assert ("linkPropertyReferences", (uidProp, uidB)) in neo4j.calls
+        assert ("linkClassJoin", (uidA, uidB)) in neo4j.calls
         assert (
             "linkClassRelation",
-            (ids["classA"], ids["classB"], ClassRelationType.SUPPLIES.value),
+            (uidA, uidB, ClassRelationType.SUPPLIES.value),
         ) in neo4j.calls
 
     async def test_skips_existing_graph_entities(
         self, dbSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """图库齐全 → 全部 skip，零写入。"""
+        """图库齐全 → 全部 skip，零写入。
+
+        这是**幂等性**的回归闸：若差分两边类型不一致（PG id 减 unified_id），
+        差集恒等于全集 ⇒ 这里会看到 missingJoinCount=1、neo4j.calls 非空。
+        """
         service = OntologyService()
         ids = await _seedGraph(dbSession, service)
+        uidA = await _uid(dbSession, "CLASS", ids["classA"])
+        uidB = await _uid(dbSession, "CLASS", ids["classB"])
+        uidProp = await _uid(dbSession, "PROPERTY", ids["prop"])
         neo4j = _FakeNeo4j(
-            classIds={ids["classA"], ids["classB"]},
-            propertyIds={ids["prop"]},
-            joinPairs={(ids["classA"], ids["classB"])},
-            relationTriples={(ids["classA"], ids["classB"], "SUPPLIES")},
+            classIds={uidA, uidB},
+            propertyIds={uidProp},
+            joinPairs={(uidA, uidB)},
+            relationTriples={(uidA, uidB, "SUPPLIES")},
         )
         _installFakes(monkeypatch, _FakeMilvus(), neo4j)
 

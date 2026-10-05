@@ -23,7 +23,7 @@ from app.domain.models import OntologyClass, OntologyJoin
 from app.domain.plan_drop import PlanDrop, formatPlanDrops
 from app.domain.query_plan import PlanResult, QueryPlan
 from app.infrastructure.llm.base_client import LlmMessage
-from app.services.formula_parser import parseFormula
+from app.services.formula_parser import isCteFormula
 from app.services.llm_retry_policy import completeWithTransientRetry
 from app.services.messages_zh import (
     MSG_NL2SQL_PLAN_INVALID,
@@ -40,6 +40,7 @@ from app.services.nl2sql_refs import (
     _extractFormulaProperties,
     _propertyOwnerHint,
     _timeBucketGroupHint,
+    formulaHasSqlStructure,
 )
 from app.services.nl2sql_schema import (
     buildSchemaText,
@@ -47,6 +48,7 @@ from app.services.nl2sql_schema import (
     _buildJoinGraph,
 )
 from app.services.nl2sql_scope import _applyScopeRowLimit
+from app.services.think_block import stripThinkBlocks
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +133,11 @@ def _parsePlanOutcome(content: str) -> _PlanParseOutcome:
     全空计划视为失败（see _isEmptyPlan）：它能通过 validatePlan，会直接进 SQL
     生成让模型自由编造表名。
     """
+    # 推理模型（MiniMax-M3 等）把思维链内联在回复开头，think 内的示例 JSON 会
+    # 被下面的 find("{") 误当作结构起点 ⇒ 从中间截断 ⇒ JSONDecodeError ⇒ 线上 400。
+    # 此处剥离**无条件执行，与 Think_Hide 无关**：该参数管「给用户看什么」，
+    # 内部解析要的是「机器能读什么」，两者正交（勿"优化"成读参数）。
+    content = stripThinkBlocks(content)
     match = _JSON_FENCE_RE.search(content)
     candidate = match.group(1) if match else content.strip()
     if not candidate:
@@ -226,6 +233,8 @@ async def generateQueryPlan(
     # 任一次响应 cached_tokens=None（不支持/字段缺失）→ 整体 cachedTokens=None
     # （保守：避免出现「plan 部分命中、SQL 未命中」被记成部分命中）。
     totalCached: int | None = None
+    # 截断重试预算封顶（与 SQL 阶段共用同一派生常量，见本模块顶部说明）
+    truncationBackoff = _NL2SQL_TRUNCATION_BACKOFF_DEFAULT
 
     for attempt in range(maxRetries + 1):
         systemPrompt = _buildPlanSystemPrompt(
@@ -287,6 +296,17 @@ async def generateQueryPlan(
                     "NL2SQL 计划解析失败 attempt=%d reason=%s", attempt + 1, outcome.reason
                 )
                 errors.append(f"第 {attempt + 1} 次尝试未能从回复中解析出查询计划")
+            # 截断检测（对齐 SQL 阶段 nl2sql_service 的既有范式，0-2）：
+            # 回复达到 token 上限时计划 JSON 可能被截断，翻倍预算重试。
+            # 推理模型尤其高发——思维链本身就能吃满预算（2026-10-03 真机：
+            # MiniMax-M3 写满 2048 仍停在思维链里，连续 3 次 PLAN_REPLY_EMPTY）。
+            # isApproximateUsage=True 时不知真实用量，不判截断。
+            isApprox = getattr(response, "isApproximateUsage", False)
+            if not isApprox and response.completionTokens >= maxTokens:
+                errors.append(
+                    f"第 {attempt + 1} 次尝试的回复达到 token 上限，计划可能被截断"
+                )
+                maxTokens = min(maxTokens * 2, truncationBackoff)
             continue
         if outcome.drops:
             logger.warning(
@@ -336,6 +356,55 @@ def _finalizePlan(
         completionTokens=planResult.completionTokens,
         cachedTokens=planResult.cachedTokens,
     )
+
+
+# 语句形态 formula 的报错（2026-10-01 线上回归）。
+# 必须自足且短：_buildPlanUserPrompt 把这批 issues 用「；」拼起来后按
+# _ERROR_SNIPPET_LIMIT=200 从**尾部**截断（nl2sql_prompts.py），提示被截掉就白写了。
+# 引导照抄 _buildPlanSystemPrompt 规则 4 的两种合法形式，让重试有明确下一步。
+_STRUCTURAL_FORMULA_HINT = (
+    "formula 不能是整条 SQL 语句，也不得在表达式里嵌子查询（含 FROM/JOIN）；"
+    "占比/比率请改用 "
+    "① 单层窗口函数 SUM(x)/SUM(SUM(x)) OVER ()，"
+    "或 ② CTE 形式 WITH a AS (SELECT ...) SELECT ... FROM a（需先取 Top-N 再算占比时用 ②）"
+)
+
+# 纯表达式 formula 的报错引导（2026-10-01 真机回归）。
+#
+# 真机实测：模型面对「Top-N 占比」先用占位符标出「这里要放前三家」——
+#   SUM(CASE WHEN SUPPLIER_CODE IN (TOP3) THEN RCV_QTY_PUU ELSE 0 END) / SUM(RCV_QTY_PUU)
+# 该公式不含 SELECT/FROM，走纯表达式分支，而该支原本只回一句光秃秃的
+# 「公式中的属性 TOP3 不属于选定的任何类」，**没有任何方向**。模型据此把 TOP3
+# 就地展开成子查询（第二轮输出是第一轮的精确回应：表达式结构分毫未动，只把占位符
+# 换成了真实 SQL），方向错误 → maxPlanAttempts 耗尽 → 整轮失败。
+#
+# 这条补的就是方向：占位符与子查询都不合法，Top-N 占比的正确形态是 CTE。
+#
+# 长度受 _ERROR_SNIPPET_LIMIT=200 约束（_buildPlanUserPrompt 从**尾部**截断）。
+# 实测：本条 96 字符；属性报错行 75（属性不存在支）~ 107（有归属支且列满类名）；
+# 两个未知属性时拼接达 280 —— **超预算在边界场景是常态**，所以引导必须置首位：
+# 置首后引导恒完整，被砍的只是排在它后面的属性报错行尾部；若按追加，
+# 引导会被整个挤出预算 —— 那正是本次要修的病。**方向比逐条点名重要。**
+_FORMULA_PROPERTY_HINT = (
+    "不得用占位符或子查询；Top-N 占比请用 CTE："
+    "WITH topn AS (SELECT ... FETCH FIRST n ROWS ONLY) SELECT ... FROM topn"
+)
+
+# 失败日志里 formula 原文的最大长度（整条 SELECT 可能很长，截断防日志爆炸）。
+_FORMULA_LOG_MAX_LEN = 500
+
+
+def formatPlanFormulas(plan: QueryPlan) -> str:
+    """把计划中各聚合的 formula 原文拼成一行，供计划校验失败日志留痕。
+
+    2026-10-01 线上回归暴露的取证缺口：计划校验失败原本零日志，而 session_message
+    没有 detail 列、也没有 attempt 表 ⇒ 真实 formula 原文事后无法回看，只能靠现象反推。
+    文本进日志、**不进 prompt**（进 prompt 会吃掉 _ERROR_SNIPPET_LIMIT 的预算）。
+    """
+    parts = [
+        agg.formula[:_FORMULA_LOG_MAX_LEN] for agg in plan.aggregations if agg.formula
+    ]
+    return " | ".join(parts) if parts else "-"
 
 
 def validatePlan(
@@ -412,15 +481,67 @@ def validatePlan(
         # 放行同计划内其他聚合的别名（如跨年比价公式 AVG_PRICE_2026 - AVG_PRICE_2025），
         # 与排序校验放行聚合 alias（_aggregationAliases）口径一致；未知引用仍拒绝。
         if agg.formula:
-            parsed = parseFormula(agg.formula)
-            # CTE 公式（WITH ... SELECT ... FROM cte_name）：CTE inner SELECT 的
-            # 列名/表名（如 line_ratios.ratio、po_lines）不属于本体类属性，而是
-            # CTE 内部定义。SQL Guard 已校验 CTE 语法，validatePlan 不对 CTE 内部
-            # 的属性名做存在性校验（无法也无意义）；仅保留非 CTE 公式的校验逻辑。
-            if not parsed.is_cte:
-                for refProp in _extractFormulaProperties(agg.formula):
-                    if refProp not in owned and refProp not in aggAliases:
-                        issues.append(f"公式中的属性 {refProp} 不属于选定的任何类")
+            # 三路口径（2026-10-01 线上回归）：
+            # ① CTE 形态（WITH ... SELECT ...）：CTE inner SELECT 的列名/表名
+            #    （如 top3.qty、T_PRECEIPT）是 CTE 内部定义，不是本体属性，不做
+            #    存在性校验。注意：SQL Guard 只在**生成的 SQL** 上跑
+            #    （business_db_pool._assert_read_only），**不检查 formula 文本** ——
+            #    这里是刻意放行，不是「已由他处校验」。
+            # ② 语句形态（含独立词 FROM/JOIN）：整条 SQL 语句，或表达式里嵌子查询。
+            #    其表名/schema 名/表别名/ONLY 会被 _extractFormulaProperties 当成属性
+            #    逐条误报，且该支报错原本无指向 → 模型原样重犯 → 整轮失败。
+            #    改为一条可操作引导。不豁免而拒绝：formula 没有确定性渲染器
+            #    （planToText/_aggText 只拼 "{formula} AS {alias}"），豁免会把早期
+            #    响亮的失败换成 SQL 阶段晚期安静的失败。
+            # ③ 纯聚合表达式：逐 token 做属性存在性校验（原逻辑，如期拦真幻觉），
+            #    并补一条可操作引导（_FORMULA_PROPERTY_HINT）—— 该支原本不拼任何提示，
+            #    真机实测模型因此把占位符（TOP3）就地展开成子查询，方向错误
+            #    （2026-10-01 真机回归）。
+            if isCteFormula(agg.formula):
+                pass
+            elif formulaHasSqlStructure(agg.formula):
+                # 置首位**且去重**（code review MEDIUM）：
+                # _buildPlanUserPrompt 把这批 issues 用「；」拼起来后按
+                # _ERROR_SNIPPET_LIMIT=200 从**尾部**截断 —— 追加在后的提示会被
+                # 排在前面的 issue 挤出预算，那时引导就白写了（正是本次要修的病）。
+                # 去重则避免 N 条语句公式各占 150 字符吃光预算。
+                if _STRUCTURAL_FORMULA_HINT not in issues:
+                    issues.insert(0, _STRUCTURAL_FORMULA_HINT)
+            else:
+                # 纯表达式：逐 token 做属性存在性校验（原逻辑，如期拦真幻觉），
+                # 但**报错必须带方向** —— 该支原本不拼任何可操作提示，模型只被告知
+                # 「这个 token 不是属性」，便自己猜怎么改（真机实测：把占位符就地
+                # 展开成子查询，方向错）。
+                # 注：validatePlan 里同类缺口不止这一处 —— 下面的分区属性分支
+                # （`分区属性 X 不属于选定的任何类`）同样不拼提示，本次未动。
+                unknownProps = sorted(
+                    p
+                    for p in _extractFormulaProperties(agg.formula)
+                    if p not in owned and p not in aggAliases
+                )
+                for refProp in unknownProps:
+                    issues.append(
+                        f"公式中的属性 {refProp} 不属于选定的任何类；"
+                        f"{_propertyOwnerHint(refProp, propsByClass, maxClasses=ownerHintMaxClasses)}"
+                    )
+                # 触发条件收窄到**全 schema 都不存在**的 token（code review MEDIUM）。
+                # 「未知」有两种成因，方向截然不同：
+                #   - 跨类引用（真实列，只是不在 selectedClasses 里，如 SUM(NAME) 里
+                #     NAME 属 BPSUPPLIER）—— 该走上面的 _propertyOwnerHint「把该类加入
+                #     selectedClasses」，给它叠 Top-N 提示是**错误方向**，比没方向更糟；
+                #   - 占位符/幻觉（全 schema 无此属性，如 TOP3、GHOSTFIELD）—— 才配得上
+                #     「不得用占位符或子查询，Top-N 占比用 CTE」。
+                # 故只在后者触发。注意这里与 _propertyOwnerHint 的「有归属 / 不存在」
+                # 两支同源，口径一致。
+                #
+                # 置首位**且去重**（与语句结构分支同一教训）：_buildPlanUserPrompt 把
+                # issues 用「；」拼起来后按 _ERROR_SNIPPET_LIMIT=200 从**尾部**截断 ——
+                # 追加在后会被前面那条属性报错行挤出预算，引导就白写了。
+                if (
+                    any(p not in allPropNames for p in unknownProps)
+                    and _FORMULA_PROPERTY_HINT not in issues
+                ):
+                    issues.insert(0, _FORMULA_PROPERTY_HINT)
 
     for prop in plan.groupBy:
         if prop not in owned:
@@ -498,6 +619,55 @@ def validatePlan(
     return issues
 
 
+def _reachableFrom(start: str, graph: JoinGraph) -> set[str]:
+    """从 start 在**整图**上 BFS，返回全部可达节点（含中转节点）。
+
+    必须走整图而不是只在「选中的表」里走：`supplementJoinPath` 允许经**未被选中
+    但在召回集内**的类中转（那正是「中间表」），连通性判定若不许中转，
+    就会把「能绕过去」误判成「不连通」，与补边逻辑自相矛盾。
+    """
+    seen: set[str] = {start}
+    queue: list[str] = [start]
+    while queue:
+        node = queue.pop(0)
+        for neighbor, _ in graph.get(node, []):
+            if neighbor not in seen:
+                seen.add(neighbor)
+                queue.append(neighbor)
+    return seen
+
+
+def _mainConnectedComponent(tables: set[str], graph: JoinGraph) -> set[str]:
+    """挑出「主」连通分量，其余分量即是不连通的那些表。
+
+    ⚠️ 绝不能像旧实现那样 `next(iter(tables))` 随便挑个起点做 BFS：
+    那样报出来的「不连通表」取决于 **set 迭代顺序**，而字符串 set 的顺序受
+    `PYTHONHASHSEED` 影响 ⇒ 同一个失败计划在不同进程会点名**不同的表**。
+    真机实测：起点若落在孤岛上，报错会指向唯一连通的那个表 —— 点错名字。
+    而这条消息自 2026-10-03 起会被回灌给 LLM 让它自愈，它会照着错误提示
+    砍掉**错误的类**，把一次本可自愈的失败变成死局。
+
+    排序键是**整图可达节点数**（`_reachableFrom` 的结果大小），不是选中的表数：
+    只数选中的表时，孤岛（1 个）与「事实表 + 中转维度表」（选中 1 个、经中转可达 2 个）
+    会被算成同大小，字典序最小的孤岛反而当选主分量 —— 正好选反。
+
+    确定性：起点按字典序遍历；严格大于才替换 ⇒ 与 hash seed 无关。
+    """
+    unassigned = set(tables)
+    main: set[str] = set()
+    bestReach = -1
+    for start in sorted(tables):
+        if start not in unassigned:
+            continue
+        reachable = _reachableFrom(start, graph)
+        component = reachable & tables
+        unassigned -= component
+        if len(reachable) > bestReach:
+            main = component
+            bestReach = len(reachable)
+    return main
+
+
 def validateConnectivity(
     plan: QueryPlan, classes: list[OntologyClass], joins: list[OntologyJoin] | None
 ) -> list[str]:
@@ -521,16 +691,9 @@ def validateConnectivity(
     graph = _buildJoinGraph(classes, joins)
     if not graph:
         return []
-    start = next(iter(tablesWithSource))
-    visited: set[str] = {start}
-    queue = [start]
-    while queue:
-        node = queue.pop(0)
-        for neighbor, _ in graph.get(node, []):
-            if neighbor not in visited:
-                visited.add(neighbor)
-                queue.append(neighbor)
-    disconnected = tablesWithSource - visited
+    disconnected = tablesWithSource - _mainConnectedComponent(tablesWithSource, graph)
     if disconnected:
-        return [f"以下表无法通过关联路径连通：{', '.join(disconnected)}，请通过中间表建立 JOIN"]
+        return [
+            f"以下表无法通过关联路径连通：{', '.join(sorted(disconnected))}，请通过中间表建立 JOIN"
+        ]
     return []

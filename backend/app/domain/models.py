@@ -111,6 +111,12 @@ class LlmConfig(Base, TimestampMixin):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     temperature: Mapped[float | None] = mapped_column(sa.Float(), nullable=True)
+    # 关闭推理模型思维链（M3 支持，M2.x 传了也无害）。推理模型 91% 的 token 花在
+    # <think> 上，会挤爆计划阶段 2048 的预算 ⇒ 解析失败。由 OpenAiClient 转成
+    # extra_body.thinking.type=disabled 透传（见 openai_client）。
+    disable_thinking: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
 
     usages: Mapped[list[SessionTokenUsage]] = relationship(
         back_populates="model", lazy="selectin"
@@ -784,6 +790,27 @@ class SessionMessage(Base, TimestampMixin):
     # ⇒ 历史面板据此渲染「（已中断）」，下游不得把它当完整回答消费。
     interrupted: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=sa.text("false")
+    )
+    # chart_type / chart_option（0105，图表进最终报告）：该轮回答的图表负载。
+    # 服务端只发结构不含颜色（决策 6），颜色由前端主题层补 —— 故存的就是线上
+    # `chartOption` 契约同一份结构（TABLE 为 {columns, rows}、KPI 为 {kpi: {...}}）。
+    # 历史回放与 PDF 导出都从这两列取值：图不能只活在实时响应里。
+    chart_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    chart_option: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
+    )
+    # table_option / visual_rationale（0107，可视化输出策略）：图之外的明细表负载 +
+    # 为什么这么画的判断依据。TABLE/KPI 不附第二份表故 table_option 为 NULL；
+    # visual_rationale 形状 {"code": str, "params": dict}（params.kind 是枚举真值）。
+    # 历史回放与 PDF 导出要能离线重建这两份负载，不能只活在实时响应里。
+    table_option: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
+    )
+    visual_rationale: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
     )
 
     __table_args__ = (
@@ -2137,15 +2164,16 @@ from app.models.system_config import SystemConfig  # noqa: E402,F401
 class WikiOntologyLink(Base):
     """Wiki 知识条目 ↔ 本体类/属性的多对多链接（feat-wiki-ontology-link，Task 1）。
 
-    一行 = "某个 wiki 页面（或 page 下某 chunk）说明某个 ontology class/property"。
+    一行 = "某个 wiki 页面（或 page 下某 chunk）说明某个 ontology class/property/metric"。
 
     关键约束：
     - ``revoked_time IS NULL`` 视为活动关系；撤销（软删）后再插相同 key 走
       partial unique + 撤销复活，必须重建一行而不是原地 UPDATE（保持活动历史
       可追溯）。
     - ``chunk_id`` 可空：NULL = page 级语义；非空 = chunk 级定位。
-    - ``ontology_type`` 由 ``chk_link_type`` CHECK 约束为 'class'/'property' 二选一；
-      与 ontology_class.id / ontology_property.id 没有 FK（本体类属性可任意修改
+    - ``ontology_type`` 由 ``chk_link_type`` CHECK 约束为 'class'/'property'/'metric' 三选一
+      （迁移 0106 放开；与 ``OntologyMetric`` 对应）；仍与 ontology_class.id /
+      ontology_property.id / ontology_metric.id 没有 FK（本体类属性可任意修改
       / 重命名，硬 FK 会拖累回滚）。Service 层在写入时校验目标存在。
 
     表与索引设计严格对齐 alembic migration 0091。三 partial 索引都
@@ -2175,7 +2203,7 @@ class WikiOntologyLink(Base):
             postgresql_where=sa_text("revoked_time IS NULL"),
         ),
         CheckConstraint(
-            "ontology_type IN ('class','property')",
+            "ontology_type IN ('class','property','metric')",
             name="chk_link_type",
         ),
         CheckConstraint(

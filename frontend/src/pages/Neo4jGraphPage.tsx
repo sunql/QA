@@ -18,24 +18,24 @@ const { Text } = Typography;
 
 const LABELS = ["Class", "Property", "Metric", "业务图"] as const;
 
-function RelationPanel({ label, nodeId }: { label: string; nodeId: number }) {
+function RelationPanel({ label, unifiedId }: { label: string; unifiedId: string }) {
   const [rels, setRels] = useState<GraphRelation[]>([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     setLoading(true);
-    void getGraphRelations(label, nodeId)
+    void getGraphRelations(label, unifiedId)
       .then(setRels)
       .catch(() => setRels([]))
       .finally(() => setLoading(false));
-  }, [label, nodeId]);
+  }, [label, unifiedId]);
 
   if (loading) return <Text type="secondary">加载中...</Text>;
   if (rels.length === 0) return <Text type="secondary">（无关联）</Text>;
   return (
     <Space wrap>
       {rels.map((r) => (
-        <Tag key={`${r.relType}-${r.targetId}`} color="blue">
+        <Tag key={`${r.relType}-${r.targetUid}`} color="blue">
           {r.relType} → {r.targetLabel}({r.targetName})
         </Tag>
       ))}
@@ -75,7 +75,7 @@ export default function Neo4jGraphPage() {
   }, [load]);
 
   const classColumns: ColumnsType<GraphNode> = [
-    { title: "ID", dataIndex: "id", width: 60 },
+    { title: "标识", dataIndex: "unifiedId", width: 140 },
     { title: "名称", dataIndex: "name", width: 160 },
     { title: "别名", dataIndex: "alias", width: 140 },
     { title: "源表", dataIndex: "sourceTable", width: 120 },
@@ -88,7 +88,7 @@ export default function Neo4jGraphPage() {
   ];
 
   const propertyColumns: ColumnsType<GraphNode> = [
-    { title: "ID", dataIndex: "id", width: 60 },
+    { title: "标识", dataIndex: "unifiedId", width: 140 },
     { title: "名称", dataIndex: "name", width: 160 },
     { title: "别名", dataIndex: "alias", width: 140 },
     { title: "数据类型", dataIndex: "dataType", width: 100 },
@@ -114,7 +114,7 @@ export default function Neo4jGraphPage() {
   ];
 
   const metricColumns: ColumnsType<GraphNode> = [
-    { title: "ID", dataIndex: "id", width: 60 },
+    { title: "标识", dataIndex: "unifiedId", width: 140 },
     { title: "名称", dataIndex: "name", width: 160 },
     { title: "别名", dataIndex: "alias", width: 140 },
     { title: "聚合函数", dataIndex: "aggFunction", width: 100 },
@@ -183,14 +183,14 @@ export default function Neo4jGraphPage() {
 
       <Card styles={{ body: { padding: 0 } }} style={{ overflow: "hidden" }}>
         <Table
-          rowKey="id"
+          rowKey="unifiedId"
           loading={loading}
           dataSource={nodes}
           columns={columns}
           pagination={{ pageSize: 20, showSizeChanger: false }}
           expandable={{
             expandedRowRender: (record) => (
-              <RelationPanel label={activeLabel} nodeId={record.id} />
+              <RelationPanel label={activeLabel} unifiedId={record.unifiedId} />
             ),
           }}
         />

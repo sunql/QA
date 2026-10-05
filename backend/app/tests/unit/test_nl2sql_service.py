@@ -16,7 +16,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.domain.enums import DataSourceType
-from app.domain.exceptions import Nl2SqlError
+from app.services.nl2sql_dialects import coerceDatasourceType
+from app.domain.exceptions import Nl2SqlError, ValidationError
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
 from app.domain.query_plan import Aggregation, QueryPlan
 from app.services.nl2sql_service import (
@@ -1257,16 +1258,14 @@ class TestSupplementJoinPath:
         assert len(result.joins) == 2
 
 
-def _buildJoinedClasses():
-    """测试 supplementJoinPath 的多类 fixture：A、B、C 三类 + 必要属性。"""
-    return [
-        _buildClass("A", "ZJTH.A", alias="表 A", props=[{"property_name": "A_NAME", "source_column": "A_NAME"}]),
-        _buildClass("B", "ZJTH.B", alias="表 B", props=[{"property_name": "B_NAME", "source_column": "B_NAME"}]),
-        _buildClass("C", "ZJTH.C", alias="表 C", props=[
-            {"property_name": "C_A_ID", "source_column": "C_A_ID"},
-            {"property_name": "C_B_ID", "source_column": "C_B_ID"},
-        ]),
-    ]
+class TestDialectRuleInjection:
+    """方言驱动的 prompt 规则注入：LIMIT / JOIN 示例 / schema 前缀 / 标识符 / NULL 排序 / 时间粒度。
+
+    结构修复（2026-10-02）：本类原有的 17 个用例此前**从未被收集**。
+    `_buildJoinedClasses()` 曾被写成模块级函数却夹在类方法之间，导致其后所有
+    `async def test_*` 落进该函数体内、位于 `return` 之后成为死代码（pytest 一分不收）。
+    现已把该 helper 移到模块级末尾，用例回归本类。见 changes/…-oracle-aggregate-guard。
+    """
 
     async def test_defaults_to_oracle_when_type_omitted(self) -> None:
         fake = _FakeLlm(["```sql\nSELECT 1 FROM DUAL\n```"])
@@ -1397,6 +1396,43 @@ def _buildJoinedClasses():
         assert "不得以数字开头" not in system
         assert "AVG_PRICE_2025" not in system
 
+    async def test_oracle_injects_aggregate_rule(self) -> None:
+        """Oracle 方言注入「聚合与标量子查询不得混排」规则（修复 ORA-00937）。
+
+        真机回归（2026-10-02）：问「5月份供货量最多的三家供应商所供货物总量占比」，
+        Top-N 占比的 SQL 被写成
+            SELECT SUM(t.QTY) / (SELECT SUM(s.QTY) FROM supplier_qty s) FROM topn t
+        Oracle 报 ORA-00937（不是单组分组函数）；PostgreSQL 允许该写法。
+        已在生产库实测：把两侧都改成标量子查询、外层 FROM DUAL 即通过。
+        """
+        fake = _FakeLlm(["```sql\nSELECT 1 FROM DUAL\n```"])
+        service = Nl2SqlService()
+        cls = _buildClass("PRECEIPT", "ZJTH.PRECEIPT")
+        await service.generateSql("收货数量", [cls], fake, _llmConfig(), maxRetries=0)
+        system = fake.calls[0][0][1]
+        assert "ORA-00937" in system
+        # 可操作方向：症状 + 改法 + **适用范围限定**
+        assert "标量子查询" in system
+        # 不断言 "FROM DUAL"：基础规则 9 的示例本就含 `SELECT * FROM DUAL`，
+        # 该子串对每个方言恒真、无区分力（code review LOW）。改断言限定语本身 ——
+        # 它是防止本条把「逐组占比」也推成 FROM DUAL 单行的关键（对应 review MEDIUM）。
+        assert "另一个结果集" in system
+
+    async def test_postgresql_omits_aggregate_rule(self) -> None:
+        """非 Oracle 方言不注入该规则（PostgreSQL 允许聚合与标量子查询混排）。
+
+        规则是 Oracle 特有约束，注入到 PG 只会是噪音 —— 与 identifierRule 同款处理。
+        """
+        fake = _FakeLlm(["```sql\nSELECT 1\n```"])
+        service = Nl2SqlService()
+        cls = _buildClass("PRECEIPT", "PRECEIPT")
+        await service.generateSql(
+            "收货数量", [cls], fake, _llmConfig(), maxRetries=0,
+            datasourceType=DataSourceType.POSTGRESQL,
+        )
+        system = fake.calls[0][0][1]
+        assert "ORA-00937" not in system
+
     async def test_oracle_injects_nulls_rule(self) -> None:
         """Oracle 方言注入 NULL 排序规则：ORDER BY ... DESC 需 NULLS LAST，防跨年 top-N 抓 NULL 行。"""
         fake = _FakeLlm(["```sql\nSELECT 1 FROM DUAL\n```"])
@@ -1468,6 +1504,18 @@ def _buildJoinedClasses():
         system = fake.calls[0][0][1]
         assert "时间粒度" in system
         assert "DATE_FORMAT" in system
+
+
+def _buildJoinedClasses():
+    """测试 supplementJoinPath 的多类 fixture：A、B、C 三类 + 必要属性。"""
+    return [
+        _buildClass("A", "ZJTH.A", alias="表 A", props=[{"property_name": "A_NAME", "source_column": "A_NAME"}]),
+        _buildClass("B", "ZJTH.B", alias="表 B", props=[{"property_name": "B_NAME", "source_column": "B_NAME"}]),
+        _buildClass("C", "ZJTH.C", alias="表 C", props=[
+            {"property_name": "C_A_ID", "source_column": "C_A_ID"},
+            {"property_name": "C_B_ID", "source_column": "C_B_ID"},
+        ]),
+    ]
 
 
 class TestPerGroupTopNPrompts:
@@ -1703,6 +1751,42 @@ class TestEntityNameColumnRule:
         dialect = Nl2SqlService.resolveDialect(None)
         prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
         assert "JOIN 关系" in prompt
+
+
+class TestTopnShareDenominatorRule:
+    """Top-N 与占比同算时，分母不得与过滤同块 —— 占比恒 100% 事故的 prompt 修复。
+
+    真机事故（2026-10-02，session s-muq3tse9-e5kc9d）：问「三家供应商4月供货量最多
+    的三种物料占比」，SQL 写成
+        SELECT SUM(ITEM_QTY) / SUM(SUM(ITEM_QTY)) OVER (PARTITION BY ...) FROM ranked WHERE RNK <= 3
+    SQL 逻辑执行顺序 WHERE → GROUP BY → 窗口函数 ⇒ 分母只剩 Top-3 行自己，
+    占比恒为 1（100%），模型还编造了「实际物料不超过 3 种」的业务解释。
+    同一问题其他运行（两 CTE 形态）结果正确 ⇒ 非确定性 —— 规则 4/8 教的窗口
+    形态在无过滤时正确、与 Top-N 过滤同块时必错。修复＝在两个 prompt 都加
+    否定性约束（禁令比正例更可迁移，见 fix-oracle-aggregate-guard 的真机观察）。
+    """
+
+    def test_sql_prompt_warns_denominator_must_not_share_filter_block(self) -> None:
+        """SQL 阶段规则 8：窗口分母若与过滤同块，占比恒为 1 —— 必须显式警告。"""
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildSystemPrompt("", dialect, None)
+        # 否定性约束的关键短语（判别器，非泛化子串）
+        assert "未被 Top-N 过滤" in prompt
+        assert "占比恒为 1" in prompt
+        # 可操作方向：分母怎么来
+        assert "单独建 CTE" in prompt
+
+    def test_plan_prompt_simple_formula_form_carries_topn_caveat(self) -> None:
+        """计划阶段规则 4 的「简单形式」必须带适用范围：含 Top-N 时改用 CTE 形式。"""
+        dialect = Nl2SqlService.resolveDialect(None)
+        prompt = Nl2SqlService()._buildPlanSystemPrompt("", dialect, None)
+        assert "只适合无 Top-N 过滤的场景" in prompt
+
+    def test_rule_applies_to_non_oracle_dialects_too(self) -> None:
+        """分母过滤陷阱与方言无关（PG 同样 WHERE 先于窗口函数）——基础规则非方言规则。"""
+        dialect = Nl2SqlService.resolveDialect("postgresql")
+        prompt = Nl2SqlService()._buildSystemPrompt("", dialect, None)
+        assert "未被 Top-N 过滤" in prompt
 
 
 # =============================================================================
@@ -2187,3 +2271,106 @@ class TestNl2SqlConfigGetter:
         assert await _readBoolConfig(self._fakeSessionReturning(raw), "K", False) is False
         assert await _readBoolConfig(self._fakeSessionBoom(), "K", False) is False
         assert await _readBoolConfig(self._fakeSessionBoom(), "K", True) is True
+
+
+class TestCoerceDatasourceType:
+    """数据源类型边界校验（fail fast）：脏类型在 LLM 消费前拒绝，不再回退 Oracle。
+
+    背景（2026-10-02）：resolveDialect 对未知/None 类型静默回退 Oracle 11g ——
+    这是历史行为且被测试钉死（test_resolve_dialect_coerces_str_and_enum）。
+    该回退作为**最后防线**可以存在，但作为**第一反应**是错的：给 MySQL 库
+    生成 ROWNUM 语法执行必错，且用户看到的是莫名其妙的数据库报错。
+    coerceDatasourceType 是流水线边界的严格版：DB 里的 type 必须能归一为枚举，
+    否则抛 ValidationError（含数据源名与可操作指引）。
+    """
+
+    @pytest.mark.parametrize("raw", ["oracle", "mysql", "postgresql"])
+    def test_canonical_values_pass_through(self, raw: str) -> None:
+        assert coerceDatasourceType(raw, name="ds").value == raw
+
+    def test_case_variant_normalized(self) -> None:
+        """大小写脏值归一（与 resolveDialect 同等宽容），不拒绝。"""
+        assert coerceDatasourceType("MySQL", name="ds") is DataSourceType.MYSQL
+        assert coerceDatasourceType("ORACLE", name="ds") is DataSourceType.ORACLE
+
+    def test_none_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="无法识别"):
+            coerceDatasourceType(None, name="ds1")
+
+    def test_unknown_rejected_with_actionable_message(self) -> None:
+        with pytest.raises(ValidationError) as excInfo:
+            coerceDatasourceType("bogusdb", name="我的库")
+        msg = str(excInfo.value.message)
+        # 消息必须自足：数据源名 + 脏值 + 可操作方向（双向守卫的正向部分：
+        # 不仅是「拦了」，还要「拦得让人知道怎么修」）
+        assert "我的库" in msg
+        assert "bogusdb" in msg
+        assert "postgresql" in msg
+
+
+class TestResolveDialectDottedVersion:
+    """点分版本号识别：探测落库的是 '11.2.0.1.0' 这类原文，11g 不能被误判成 12c。
+
+    resolveDialect 原来只匹配 '11g' 字样与 9/10 前缀 —— 探测版本（'11.2.0.1.0'）
+    三个规则都不命中 → 落 12c 分支 → 给 11g 库生成 FETCH FIRST（ORA-00933）。
+    """
+
+    @pytest.mark.parametrize("version", ["11g", "11.2.0.1.0", "9.2.0", "10.2.0"])
+    def test_11g_family_uses_rownum(self, version: str) -> None:
+        dialect = Nl2SqlService.resolveDialect(DataSourceType.ORACLE, version)
+        assert "ROWNUM" in dialect.limitRule
+
+    @pytest.mark.parametrize("version", ["12.1.0.2", "19.0.0.0.0", "19c", None])
+    def test_12c_plus_uses_fetch_first(self, version: str | None) -> None:
+        dialect = Nl2SqlService.resolveDialect(DataSourceType.ORACLE, version)
+        assert "FETCH FIRST" in dialect.limitRule
+
+
+class TestGenerateSqlShareDenominatorGuard:
+    """L1 挂点：占比分母守卫拦截后回灌原因重试（与 SQL Guard 同构）。"""
+
+    TRAP_SQL = (
+        "SELECT r.SUPPLIER_CODE, "
+        "SUM(r.ITEM_QTY) / SUM(SUM(r.ITEM_QTY)) OVER (PARTITION BY r.SUPPLIER_CODE) AS TOP3_SHARE "
+        "FROM ranked r WHERE r.RN <= 3 GROUP BY r.SUPPLIER_CODE"
+    )
+    CLEAN_SQL = (
+        "SELECT r.SUPPLIER_CODE, SUM(r.ITEM_QTY) / NULLIF(t.TOTAL_QTY, 0) AS TOP3_SHARE "
+        "FROM ranked r JOIN sup_total t ON t.SUPPLIER_CODE = r.SUPPLIER_CODE "
+        "WHERE r.RN <= 3 GROUP BY r.SUPPLIER_CODE"
+    )
+
+    async def test_trap_sql_retried_with_feedback(self) -> None:
+        """陷阱 SQL 被拦 → 反馈回灌 → 第二次干净 SQL 直接返回。"""
+        fake = _FakeLlm([
+            f"```sql\n{TestGenerateSqlShareDenominatorGuard.TRAP_SQL}\n```",
+            f"```sql\n{TestGenerateSqlShareDenominatorGuard.CLEAN_SQL}\n```",
+        ])
+        service = Nl2SqlService()
+        cls = _buildClass("PRECEIPT", "PRECEIPT")
+        result = await service.generateSql("Top3 占比", [cls], fake, _llmConfig(), maxRetries=1)
+        assert result.sql == TestGenerateSqlShareDenominatorGuard.CLEAN_SQL
+        assert len(fake.calls) == 2
+        # 反馈文案回灌第二次 user prompt（可操作，教训同 M2）
+        assert "占比类指标的分母" in fake.calls[1][1][1]
+
+    async def test_trap_sql_exhaustion_raises(self) -> None:
+        """重试耗尽仍陷阱 → Nl2SqlError，detail 带守卫原因。"""
+        fake = _FakeLlm([
+            f"```sql\n{TestGenerateSqlShareDenominatorGuard.TRAP_SQL}\n```",
+            f"```sql\n{TestGenerateSqlShareDenominatorGuard.TRAP_SQL}\n```",
+        ])
+        service = Nl2SqlService()
+        cls = _buildClass("PRECEIPT", "PRECEIPT")
+        with pytest.raises(Nl2SqlError) as excInfo:
+            await service.generateSql("Top3 占比", [cls], fake, _llmConfig(), maxRetries=1)
+        assert "占比类指标的分母" in str(excInfo.value.detail)
+
+    async def test_clean_sql_not_blocked(self) -> None:
+        """合法形态（独立 CTE 分母）一次通过，守卫零干扰。"""
+        fake = _FakeLlm([f"```sql\n{TestGenerateSqlShareDenominatorGuard.CLEAN_SQL}\n```"])
+        service = Nl2SqlService()
+        cls = _buildClass("PRECEIPT", "PRECEIPT")
+        result = await service.generateSql("Top3 占比", [cls], fake, _llmConfig(), maxRetries=1)
+        assert result.sql == TestGenerateSqlShareDenominatorGuard.CLEAN_SQL
+        assert len(fake.calls) == 1

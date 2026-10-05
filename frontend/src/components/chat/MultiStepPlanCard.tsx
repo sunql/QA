@@ -1,6 +1,8 @@
 import { Collapse, Spin, Steps, Tag, Typography } from "antd";
 import type { MultiStepStep, StepStatus } from "../../types/chat";
 import { useTranslation } from "../../i18n";
+import ChartRenderer from "./ChartRenderer";
+import QueryPlanCard from "./QueryPlanCard";
 import SqlPreview from "./SqlPreview";
 
 const { Text } = Typography;
@@ -80,6 +82,12 @@ export default function MultiStepPlanCard({ steps, currentStepIndex }: MultiStep
                     </Text>
                     {s.status === "done" || s.status === "error" ? (
                       <div style={{ marginTop: 6 }}>
+                        {/* 每步自己的查询计划（仅成功步骤有值） */}
+                        {s.queryPlan ? (
+                          <div style={{ marginBottom: 6 }}>
+                            <QueryPlanCard plan={s.queryPlan} dataQuality={null} />
+                          </div>
+                        ) : null}
                         {s.sql ? <SqlPreview sql={s.sql} /> : null}
                         {s.summary ? (
                           <Text type="secondary" style={{ display: "block", marginTop: 4 }}>
@@ -90,6 +98,19 @@ export default function MultiStepPlanCard({ steps, currentStepIndex }: MultiStep
                           <Text type="danger" style={{ display: "block", marginTop: 4 }}>
                             {s.error}
                           </Text>
+                        ) : null}
+                        {/* 多步每步出图（决策 3）：每个 step 挂同一个渲染器，
+                            kind/option 由后端决策引擎按该步自己的数据各出一份。
+                            失败步骤不带这两字段，渲染器自己返回 null。 */}
+                        {s.chartType ? (
+                          <div style={{ marginTop: 8 }}>
+                            <ChartRenderer
+                              chartType={s.chartType}
+                              chartOption={s.chartOption}
+                              tableOption={s.tableOption}
+                              visualRationale={s.visualRationale}
+                            />
+                          </div>
                         ) : null}
                       </div>
                     ) : null}

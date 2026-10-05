@@ -15,10 +15,12 @@ const historyApi = vi.hoisted(() => ({
 vi.mock("../api/chatHistory", () => historyApi);
 
 const persist = vi.hoisted(() => ({
-  read: vi.fn<() => { lastSessionId: string | null; historyPanelOpen: boolean }>(
-    () => ({ lastSessionId: null, historyPanelOpen: false })
-  ),
-  write: vi.fn<(patch: { lastSessionId?: string | null; historyPanelOpen?: boolean }) => void>(),
+  readLastSessionId: vi.fn<(channel: string) => string | null>(() => null),
+  writeLastSessionId: vi.fn<(channel: string, sessionId: string | null) => void>(),
+  readLastChannel: vi.fn<() => string | null>(() => null),
+  writeLastChannel: vi.fn<(channel: string) => void>(),
+  readHistoryPanelOpen: vi.fn<() => boolean>(() => false),
+  writeHistoryPanelOpen: vi.fn<(open: boolean) => void>(),
 }));
 vi.mock("../stores/persistChatUiState", () => persist);
 
@@ -180,6 +182,44 @@ describe("chatStore", () => {
     });
   });
 
+  it("非流式多步：每步自己的 chartType/chartOption 回填到 step（多步每步出图）", async () => {
+    chatApi.sendMessage.mockResolvedValue({
+      answer: "两步都完成了",
+      intent: "multi_step",
+      tokensUsed: 30,
+      cost: 0.00003,
+      steps: [
+        {
+          stepIndex: 0,
+          description: "各供应商收货量",
+          subQuestion: "各供应商的收货量",
+          sql: "SELECT 1",
+          summary: null,
+          error: null,
+          chartType: "hbar",
+          chartOption: { series: [{ type: "bar", data: [1] }] },
+        },
+        {
+          stepIndex: 1,
+          description: "失败的步骤",
+          subQuestion: "查不到的表",
+          sql: null,
+          summary: null,
+          error: "ORA-00942",
+        },
+      ],
+    });
+    useChatStore.getState().setDatasourceId(1);
+    await useChatStore.getState().sendMessage("分步查询");
+
+    const steps = useChatStore.getState().messages[1].steps;
+    expect(steps?.[0]).toMatchObject({ chartType: "hbar" });
+    expect(steps?.[0]?.chartOption).toEqual({ series: [{ type: "bar", data: [1] }] });
+    // 失败步骤没有图：两字段为 null，渲染层据此不画
+    expect(steps?.[1]?.chartType ?? null).toBeNull();
+    expect(steps?.[1]?.chartOption ?? null).toBeNull();
+  });
+
   // =========================================================================
   // 流式输出（5.6）
   // =========================================================================
@@ -316,6 +356,30 @@ describe("chatStore", () => {
     expect(assistant.isStreaming).toBe(false);
   });
 
+  it("流式 step_result 携带的每步图表回填到 step（多步每步出图）", async () => {
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      handlers.onStepPlanOverview?.([
+        { stepIndex: 0, description: "各供应商收货量", subQuestion: "各供应商的收货量", aggregationOnly: false },
+      ]);
+      handlers.onStepResult?.({
+        stepIndex: 0,
+        description: "各供应商收货量",
+        subQuestion: "各供应商的收货量",
+        sql: "SELECT 1",
+        summary: null,
+        chartType: "hbar",
+        chartOption: { series: [{ type: "bar" }] },
+      });
+      handlers.onDone?.({ tokensUsed: 15, cost: 0.00002 });
+    });
+    useChatStore.getState().setDatasourceId(1);
+    await useChatStore.getState().sendMessage("各供应商的收货量", true);
+
+    const step = useChatStore.getState().messages[1].steps?.[0];
+    expect(step?.chartType).toBe("hbar");
+    expect(step?.chartOption).toEqual({ series: [{ type: "bar" }] });
+  });
+
   it("流结束且无 done/error 帧时 loading 与 isStreaming 兜底复位（HIGH#3）", async () => {
     // 模拟流式端点成功返回但既无 done 也无 error 帧
     chatApi.sendMessageStream.mockResolvedValue(undefined);
@@ -445,6 +509,47 @@ describe("chatStore", () => {
     expect(messages[2].interrupted).toBe(false);
   });
 
+  it("loadSessionMessages 恢复图表字段（0105：历史回放也能出图）", async () => {
+    const option = { columns: ["地区"], rows: [{ 地区: "华北" }] };
+    const historyMessages: ChatMessageRead[] = [
+      { id: 1, role: "user", content: "历史 Q1", question: "历史 Q1", sql: null, createdTime: "2026-01-01T00:00:00Z", interrupted: false },
+      { id: 2, role: "assistant", content: "历史 A1", question: null, sql: "SELECT 1", createdTime: "2026-01-01T00:01:00Z", interrupted: false, chartType: "table", chartOption: option },
+    ];
+    historyApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-history", messages: historyMessages });
+
+    await useChatStore.getState().loadSessionMessages("s-history");
+
+    const assistant = useChatStore.getState().messages[1];
+    expect(assistant.chartType).toBe("table");
+    expect(assistant.chartOption).toEqual(option);
+  });
+
+  it("loadSessionMessages 把白名单不认识的 chartType 收窄为 null", async () => {
+    // 落库的 kind 可能来自更早版本的后端；未知类型不能流进渲染层
+    const historyMessages: ChatMessageRead[] = [
+      { id: 1, role: "assistant", content: "A", question: null, sql: null, createdTime: "2026-01-01T00:01:00Z", interrupted: false, chartType: "sankey-3d", chartOption: {} },
+    ];
+    historyApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-history", messages: historyMessages });
+
+    await useChatStore.getState().loadSessionMessages("s-history");
+
+    const assistant = useChatStore.getState().messages[0];
+    expect(assistant.chartType).toBeNull();
+  });
+
+  it("loadSessionMessages 对存量行（无图表字段）给 null 而不是 undefined", async () => {
+    const historyMessages: ChatMessageRead[] = [
+      { id: 1, role: "assistant", content: "A", question: null, sql: null, createdTime: "2026-01-01T00:01:00Z", interrupted: false },
+    ];
+    historyApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-history", messages: historyMessages });
+
+    await useChatStore.getState().loadSessionMessages("s-history");
+
+    const assistant = useChatStore.getState().messages[0];
+    expect(assistant.chartType).toBeNull();
+    expect(assistant.chartOption).toBeNull();
+  });
+
   it("loadSessionMessages 不影响 datasourceId/selectedModelId", async () => {
     useChatStore.setState({ datasourceId: 1, selectedModelId: 2 });
     historyApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-history", messages: [] });
@@ -524,49 +629,21 @@ describe("chatStore", () => {
     expect(useChatStore.getState().historyPanelOpen).toBe(false);
 
     // 两次写入都触发（每次切换都持久化）
-    expect(persist.write).toHaveBeenCalled();
+    expect(persist.writeHistoryPanelOpen).toHaveBeenCalled();
   });
 
   it("setHistoryPanelOpen 强制设定并写入 localStorage", () => {
     useChatStore.getState().setHistoryPanelOpen(true);
     expect(useChatStore.getState().historyPanelOpen).toBe(true);
-    expect(persist.write).toHaveBeenCalled();
+    expect(persist.writeHistoryPanelOpen).toHaveBeenCalled();
   });
 
-  it("chatStore 初始化从 localStorage 恢复 historyPanelOpen=true", () => {
-    // 动态修改 mock：read 返回 historyPanelOpen=true
-    persist.read.mockReturnValueOnce({ lastSessionId: null, historyPanelOpen: true });
-    // 重置 store 模块：再次读取 persist（无法重新导入模块；改为直接验证行为）
-    // 这里我们改为通过 useChatStore.setState({...}) 直接读 persist.read 的最新返回：
-    // 验证：在 setState 后 read 的 mock 配置不影响 store（store 已经在初始化时读过）
-    // —— 实际效果：本次仅记录一次 read 调用
-    useChatStore.setState({ historyPanelOpen: true });
-    expect(useChatStore.getState().historyPanelOpen).toBe(true);
-  });
-
-  it("chatStore 初始化有 lastSessionId 时自动调用 loadSessionMessages 恢复历史", async () => {
-    // 预设 mock：persist.read 在下次初始化返回有 lastSessionId 的配置
-    persist.read.mockReturnValueOnce({
-      lastSessionId: "s-restored",
-      historyPanelOpen: false,
-    });
-    historyApi.loadSessionMessages.mockResolvedValue({
-      sessionId: "s-restored",
-      messages: [
-        { id: 10, role: "user", content: "restored", question: "restored", sql: null, createdTime: "2026-01-01T00:00:00Z" },
-      ],
-    });
-
-    // 触发一次：手动调用 loadSessionMessages 模拟 store hydration 后行为
-    await useChatStore.getState().loadSessionMessages("s-restored");
-
-    const state = useChatStore.getState();
-    expect(state.sessionId).toBe("s-restored");
-    expect(state.messages).toHaveLength(1);
-    expect(state.messages[0].content).toBe("restored");
-    // 持久化被读取（无论 hydration 触发与否，store 都允许手动调用）
-    expect(historyApi.loadSessionMessages).toHaveBeenCalledWith("s-restored");
-  });
+  // 注：原先这里有两个用例自称验证「初始化从 localStorage 恢复 historyPanelOpen /
+  // 有 lastSessionId 时自动恢复历史」，实际都只是手工调 setState / loadSessionMessages
+  // 来「模拟 hydration 后行为」—— 断言的东西与描述的路径无关，模块级 hydration
+  // 从来没有被覆盖过（这也是「会话指针恒为 null」能长期隐身的原因）。
+  // 真用例已迁到 chatStoreHydration.test.ts（那里用 vi.resetModules + 动态 import
+  // 真的让模块重新初始化；放在本文件会污染后续用例手上的 store 实例）。
 
   it("loadSessionMessages 失败时写入 sessionsError（不影响 chat 区域的 error）", async () => {
     historyApi.loadSessionMessages.mockRejectedValue(new Error("404 找不到会话"));
@@ -646,5 +723,187 @@ describe("chatStore 假设跨轮不串（M-3）", () => {
     chatApi.fetchHypotheses.mockResolvedValue([hypothesis(1, null)]);
     await useChatStore.getState().sendMessage("Q1");
     expect(useChatStore.getState().messages[1].hypotheses ?? []).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 7（可视化输出策略）：tableOption / visualRationale 在 store 各接入点的回填
+// ---------------------------------------------------------------------------
+
+describe("chatStore 两个新字段回填（0107）", () => {
+  beforeEach(() => {
+    resetStore();
+    vi.clearAllMocks();
+    useChatStore.getState().setDatasourceId(1);
+  });
+
+  it("多步汇总消息最终带出 SUMMARY_TEXT_ONLY 依据（done 帧收窄并 patch 进消息）", async () => {
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      handlers.onStepPlanOverview?.([
+        { stepIndex: 0, description: "2024 销售额", subQuestion: "2024年销售额", aggregationOnly: false },
+        { stepIndex: 1, description: "对比", subQuestion: "汇总", aggregationOnly: true },
+      ]);
+      handlers.onStepPlan?.({ stepIndex: 0, description: "2024 销售额", subQuestion: "2024年销售额" });
+      handlers.onStepResult?.({ stepIndex: 0, description: "2024 销售额", subQuestion: "2024年销售额", sql: "SELECT 1", summary: "1000" });
+      handlers.onStepPlan?.({ stepIndex: 1, description: "对比", subQuestion: "汇总" });
+      handlers.onToken?.("增长 20%。");
+      handlers.onDone?.({
+        tokensUsed: 45,
+        cost: 0.00006,
+        modelName: "deepseek-chat",
+        visualRationale: { code: "SUMMARY_TEXT_ONLY", params: {} },
+      });
+    });
+    await useChatStore.getState().sendMessage("分步查询并对比", true);
+
+    const assistant = useChatStore.getState().messages[1];
+    expect(assistant.visualRationale).toEqual({ code: "SUMMARY_TEXT_ONLY", params: {} });
+    expect(assistant.visualRationale?.code).toBe("SUMMARY_TEXT_ONLY");
+    // 数据步自己的依据在 step 上，不在顶层
+    expect(assistant.steps?.[0].visualRationale).toBeNull();
+  });
+
+  it("单步 done 帧不带 rationale 时不清掉 chart 事件已回填的依据", async () => {
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      handlers.onChart?.({
+        chartType: "donut",
+        chartOption: { series: [] },
+        tableOption: null,
+        visualRationale: { code: "R02_SHARE_DONUT", params: { rows: 42 } },
+        data: [],
+      });
+      handlers.onDone?.({ tokensUsed: 0, cost: 0 });
+    });
+    await useChatStore.getState().sendMessage("各品类占比", true);
+
+    const assistant = useChatStore.getState().messages[1];
+    expect(assistant.visualRationale).toEqual({ code: "R02_SHARE_DONUT", params: { rows: 42 } });
+  });
+
+  it("5 个 store 接入点对同一份负载回填相同结果（共享 fixture 循环）", async () => {
+    const TABLE = { columns: ["NAME"], rows: [{ NAME: "A" }], truncated: true };
+    const RATIONALE = { code: "R02_SHARE_DONUT", params: { rows: 42 } };
+
+    const sites: Array<{
+      name: string;
+      run: () => Promise<{ tableOption?: unknown; visualRationale?: unknown }>;
+    }> = [
+      {
+        name: "历史回放（toChatMessage）",
+        run: async () => {
+          resetStore();
+          historyApi.loadSessionMessages.mockResolvedValue({
+            sessionId: "s-h",
+            messages: [
+              {
+                id: 1,
+                role: "assistant",
+                content: "答",
+                question: null,
+                sql: null,
+                createdTime: "2026-01-01T10:00:00Z",
+                interrupted: false,
+                tableOption: { columns: ["NAME"], rows: [{ NAME: "A" }], truncated: true },
+                visualRationale: { code: "R02_SHARE_DONUT", params: { rows: 42 } },
+              },
+            ],
+          });
+          persist.readLastSessionId.mockImplementation((ch) => (ch === "chat" ? "s-h" : null));
+          await useChatStore.getState().enterChannel("chat");
+          const m = useChatStore.getState().messages[0];
+          return { tableOption: m.tableOption, visualRationale: m.visualRationale };
+        },
+      },
+      {
+        name: "SSE chart → 消息",
+        run: async () => {
+          resetStore();
+          useChatStore.getState().setDatasourceId(1);
+          chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+            handlers.onChart?.({ chartType: "donut", chartOption: {}, tableOption: TABLE, visualRationale: RATIONALE, data: [] });
+            handlers.onDone?.({ tokensUsed: 0, cost: 0 });
+          });
+          await useChatStore.getState().sendMessage("q", true);
+          const m = useChatStore.getState().messages[1];
+          return { tableOption: m.tableOption, visualRationale: m.visualRationale };
+        },
+      },
+      {
+        name: "SSE step_result → 步骤",
+        run: async () => {
+          resetStore();
+          useChatStore.getState().setDatasourceId(1);
+          chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+            handlers.onStepPlanOverview?.([
+              { stepIndex: 0, description: "d", subQuestion: "q", aggregationOnly: false },
+            ]);
+            handlers.onStepResult?.({ stepIndex: 0, description: "d", subQuestion: "q", sql: "SELECT 1", summary: null, tableOption: TABLE, visualRationale: RATIONALE });
+            handlers.onDone?.({ tokensUsed: 0, cost: 0 });
+          });
+          await useChatStore.getState().sendMessage("q", true);
+          const step = useChatStore.getState().messages[1].steps?.[0];
+          return { tableOption: step?.tableOption, visualRationale: step?.visualRationale };
+        },
+      },
+      {
+        name: "非流式响应 → 消息",
+        run: async () => {
+          resetStore();
+          useChatStore.getState().setDatasourceId(1);
+          chatApi.sendMessage.mockResolvedValue({
+            answer: "查询完成",
+            intent: "query",
+            tableOption: TABLE,
+            visualRationale: RATIONALE,
+            tokensUsed: 0,
+            cost: 0,
+          });
+          await useChatStore.getState().sendMessage("q");
+          const m = useChatStore.getState().messages[1];
+          return { tableOption: m.tableOption, visualRationale: m.visualRationale };
+        },
+      },
+      {
+        name: "非流式 steps[] → 步骤",
+        run: async () => {
+          resetStore();
+          useChatStore.getState().setDatasourceId(1);
+          chatApi.sendMessage.mockResolvedValue({
+            answer: "查询完成",
+            intent: "multi_step",
+            tokensUsed: 0,
+            cost: 0,
+            steps: [
+              {
+                stepIndex: 0,
+                description: "d",
+                subQuestion: "q",
+                sql: "SELECT 1",
+                summary: null,
+                error: null,
+                tableOption: TABLE,
+                visualRationale: RATIONALE,
+              },
+            ],
+          });
+          await useChatStore.getState().sendMessage("q");
+          const step = useChatStore.getState().messages[1].steps?.[0];
+          return { tableOption: step?.tableOption, visualRationale: step?.visualRationale };
+        },
+      },
+    ];
+
+    const results: Array<{ tableOption?: unknown; visualRationale?: unknown }> = [];
+    for (const site of sites) {
+      results.push(await site.run());
+    }
+
+    // 5 处全同一份收窄结果 —— 复制断言会在加第 6 处时漏掉，故这里只循环
+    for (const [i, r] of results.entries()) {
+      expect(r, sites[i].name).toMatchObject({
+        tableOption: TABLE,
+        visualRationale: RATIONALE,
+      });
+    }
   });
 });

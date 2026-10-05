@@ -19,6 +19,8 @@ export interface ModelConfig {
   weight: number;
   costThreshold: number | string;
   temperature?: number;
+  /** 关闭推理模型思维链（llm_config.disable_thinking）。非推理模型传了也无害。 */
+  disableThinking?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -35,6 +37,7 @@ export interface ModelConfigCreate {
   weight: number;
   costThreshold: number | string;
   temperature?: number;
+  disableThinking?: boolean;
 }
 
 // 更新模型配置（部分字段，apiKey 可选）
@@ -50,6 +53,8 @@ export interface ModelConfigUpdate {
   costThreshold?: number;
   isActive?: boolean;
   temperature?: number;
+  /** 取消勾选必须显式传 false：后端走 exclude_unset，undefined 等于"未提供"。 */
+  disableThinking?: boolean;
 }
 
 // 供应商选项（用于下拉）—— value 与 DB 层小写下划线格式一致，labelKey 用于 i18n t() 解析

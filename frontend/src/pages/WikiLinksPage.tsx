@@ -30,6 +30,7 @@ import {
 } from "antd";
 import type { DataNode } from "antd/es/tree";
 import { useTranslation } from "../i18n";
+import { ontologyObjectLabel } from "../utils/ontologyLabel";
 import {
   createWikiLink,
   listLinkableTargets,
@@ -52,6 +53,13 @@ const CATEGORY_KEY_PREFIX = "cat-";
 /** 没挂分类的 page 放进这个伪根。 */
 const UNCATEGORIZED_KEY = "cat-0";
 const UNCATEGORIZED_TITLE = "未分类";
+
+/** 链接类型 → i18n 键（t() 键为 string，映射表避免模板串拼接的键类型问题）。 */
+const TYPE_LABEL_KEY: Record<WikiLinkType, string> = {
+  class: "wikiLinks.tabs.class",
+  property: "wikiLinks.tabs.property",
+  metric: "wikiLinks.tabs.metric",
+};
 
 /** 全量 pages → 按 categoryId 分组（key=0 表示未分类）。 */
 function pagesByCategory(pages: WikiPage[]): Map<number, WikiPage[]> {
@@ -121,7 +129,7 @@ function allKeys(cats: WikiCategoryNode[]): string[] {
 // Component
 // ---------------------------------------------------------------------------
 export function WikiLinksPage() {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [linkType, setLinkType] = useState<WikiLinkType>("class");
   const [links, setLinks] = useState<WikiLink[]>([]);
@@ -263,8 +271,9 @@ export function WikiLinksPage() {
             activeKey={linkType}
             onChange={(k) => setLinkType(k as WikiLinkType)}
             items={[
-              { key: "class", label: "Class" },
-              { key: "property", label: "Property" },
+              { key: "class", label: t("wikiLinks.tabs.class") },
+              { key: "property", label: t("wikiLinks.tabs.property") },
+              { key: "metric", label: t("wikiLinks.tabs.metric") },
             ]}
           />
           <Space style={{ marginBottom: 12 }}>
@@ -296,9 +305,13 @@ export function WikiLinksPage() {
                 }}
               >
                 <Tag color={link.ontology_type === "class" ? "blue" : "green"}>
-                  {link.ontology_type}
+                  {t(TYPE_LABEL_KEY[link.ontology_type])}
                 </Tag>
-                <span>ontology_id={link.ontology_id}</span>
+                <span>
+                  {link.ontology_name
+                    ? ontologyObjectLabel(link.ontology_name, link.ontology_alias, locale)
+                    : `ID:${link.ontology_id}`}
+                </span>
                 <span style={{ color: "#666" }}>
                   weight={link.weight.toFixed(2)}
                 </span>
@@ -368,7 +381,7 @@ export function WikiLinksPage() {
             <Select
               options={linkables.map((tgt) => ({
                 value: tgt.id,
-                label: `${tgt.name}${tgt.alias ? ` (${tgt.alias})` : ""}`,
+                label: ontologyObjectLabel(tgt.name, tgt.alias, locale),
               }))}
               placeholder={t("wikiLinks.ontologyPlaceholder")}
               showSearch

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -24,7 +25,7 @@ from app.domain.models import DataSource, LlmConfig, SessionQueryState
 from app.domain.multi_step_plan import StepPlan, StepResult
 from app.domain.plan_drop import formatPlanDrops
 from app.domain.query_plan import QueryPlan
-from app.domain.schemas import ClassRecallInfo
+from app.domain.schemas import AffinityStatus, ChatResponse, ClassRecallInfo, HypothesisRead
 from app.infrastructure.business_db_pool import BusinessDbAdapter
 from app.infrastructure.llm.base_client import BaseLlmClient
 from app.services.audit_service import AuditService
@@ -109,8 +110,61 @@ def _snapshotRound(state: SessionQueryState) -> dict[str, Any]:
     return {"q": state.last_question, "s": state.last_sql}
 
 
-def _step_result_to_read(result: StepResult) -> "StepResultRead":
-    """将 StepResult 转换为 API 响应的 DTO（延迟导入避免循环）。"""
+def _multiStepResponse(
+    *,
+    answer: str,
+    completed: list[StepResult],
+    tokensUsed: int,
+    cost: Decimal,
+    t0: float,
+    visualRationale: dict | None,
+    data: list[dict] | None,
+    modelName: str | None = None,
+    affinityStatus: AffinityStatus | None = None,
+    classRecall: ClassRecallInfo | None = None,
+    hypotheses: list[HypothesisRead] | None = None,
+    queryPlan: "QueryPlan | None" = None,
+) -> ChatResponse:
+    """多步响应的**唯一**构造点（聚合成功与降级收尾共用）。
+
+    两处收尾此前各写一份 ``ChatResponse(...)``，字段大半重复。重复的代价不是行数，
+    是**漂移**：图表进最终报告那一版改了聚合收尾却漏改降级收尾，用户会看到
+    「正常收尾有图、降级收尾没图」，而两条路径都「能跑」。
+
+    顶层**不再继承**最后一个成功数据步骤的图：每个数据步已在自己的 ``steps[i]``
+    里带图 + 明细表 + rationale，顶层再重复一张纯属冗余。汇总步是纯文字，故顶层
+    ``chartType``/``chartOption`` 恒为 None，``visualRationale`` 恒为
+    ``SUMMARY_TEXT_ONLY``（调用方传 ``summaryTextOnlyRationale().to_dict()``），
+    告诉前端「为什么这里没有图」。
+
+    queryPlan：最后一个成功数据步骤的 NL2SQL 查询计划（供前端「总查询计划」渲染）。
+    """
+    return ChatResponse(
+        answer=answer,
+        intent="multi_step",
+        chartType=None,
+        chartOption=None,
+        visual_rationale=visualRationale,
+        data=data,
+        steps=[_step_result_to_read(s, s.query_plan) for s in completed],
+        tokensUsed=tokensUsed,
+        cost=float(cost),
+        latency_ms=int((time.monotonic() - t0) * 1000),
+        modelName=modelName,
+        affinityStatus=affinityStatus,
+        classRecall=classRecall,
+        hypotheses=hypotheses,
+        queryPlan=queryPlan.to_dict() if queryPlan else None,
+    )
+
+
+def _step_result_to_read(
+    result: StepResult, plan: "QueryPlan | None" = None,
+) -> "StepResultRead":
+    """将 StepResult 转换为 API 响应的 DTO（延迟导入避免循环）。
+
+    plan：可选的 QueryPlan（来自 _StepRun.plan）；用于填充 query_plan 字段供前端渲染。
+    """
     from app.domain.schemas import StepResultRead
     return StepResultRead(
         step_index=result.step_index,
@@ -120,6 +174,11 @@ def _step_result_to_read(result: StepResult) -> "StepResultRead":
         data=result.data if result.data else None,
         summary=result.summary,
         error=result.error,
+        chart_type=result.chart_type,
+        chart_option=result.chart_option,
+        table_option=result.table_option,
+        visual_rationale=result.visual_rationale,
+        query_plan=plan.to_dict() if plan else None,
     )
 
 
@@ -370,6 +429,9 @@ class _StepRun:
     cost: Decimal = Decimal("0")
     modelName: str | None = None
     plan: QueryPlan | None = None
+    # 本步是否用掉了语义标签分类器（>0 即用过）。多步一轮只允许一次分类调用，
+    # 调用方据此在 with_step 时把预算标记为已用。
+    chart_label_calls: int = 0
 
 
 # 断连兜底状态在 session.info 上的槽位键（H4）。用会话自身当载体，是因为

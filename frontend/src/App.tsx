@@ -51,6 +51,10 @@ import AdminWikiSuggestionsPage from "./pages/AdminWikiSuggestionsPage";
 import AdminWikiCoveragePage from "./pages/AdminWikiCoveragePage";
 import AdminWikiGraphPage from "./pages/AdminWikiGraphPage";
 import { WikiLinksPage } from "./pages/WikiLinksPage";
+import ResearchListPage from "./pages/research/ResearchListPage";
+import ResearchSessionPage from "./pages/research/ResearchSessionPage";
+import ResearchReportPage from "./pages/research/ResearchReportPage";
+import ResearchComparePage from "./pages/research/ResearchComparePage";
 import BusinessObjectPage from "./pages/BusinessObjectPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
@@ -126,6 +130,10 @@ export default function App() {
         <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />
         <Route path="profile" element={<ProfilePage />} />
         <Route path="change-password" element={<ChangePasswordPage />} />
+        <Route path="research" element={<ResearchListPage />} />
+        <Route path="research/compare" element={<ResearchComparePage />} />
+        <Route path="research/:id" element={<ResearchSessionPage />} />
+        <Route path="research/:id/report" element={<ResearchReportPage />} />
         </Route>
       </Route>
     </Routes>

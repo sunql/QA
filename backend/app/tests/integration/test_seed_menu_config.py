@@ -23,27 +23,29 @@ async def _clean(pg_session: AsyncSession) -> None:
     await pg_session.commit()
 
 
-async def test_seed_inserts_seven_sections_and_forty_one_items(
+async def test_seed_inserts_eight_sections_and_forty_three_items(
     dbSession: AsyncSession, client: object
 ) -> None:
     await _clean(dbSession)
 
     factory = dbModule.getSessionFactory()
     count = await seed_menu_config(factory)
-    # 7 sections + 41 items = 48 rows（feat-rbac-identity 追加 adminUsers/Roles/
+    # 8 sections + 43 items = 51 rows（feat-rbac-identity 追加 adminUsers/Roles/
     # Organizations/Menus + adminSystemConfig + bizConfig 追加 dataQualityGenerate/
     # ontologyProperties/businessObjects/adminFeatureRules + foundation 追加
     # localImport + feat-wiki-knowledge 追加一级类 enterpriseWiki 与其下 6 项
     # wikiPages/wikiImport/wikiConflicts/wikiSuggestions/wikiCoverage/wikiGraph
     # + DQ 追加 dataQualityRuleParams/dataQualityReport + feat-wiki-chat 追加 wikiChat
-    # + M4 追加 adminWikiLinks/adminWikiCategories + A8 追加 reports）
-    assert count == 48
+    # + M4 追加 adminWikiLinks/adminWikiCategories + A8 追加 reports
+    # + feat-research-entry 追加一级类 section.research + 2 叶子项
+    #   researchSession/researchCompare）
+    assert count == 51
 
     svc = MenuConfigService(dbSession)
     result = await svc.list_sections()
-    assert len(result.sections) == 7
+    assert len(result.sections) == 8
     total_items = sum(len(s.children) for s in result.sections)
-    assert total_items == 41
+    assert total_items == 43
 
 
 async def test_seed_is_idempotent(
@@ -56,8 +58,8 @@ async def test_seed_is_idempotent(
     await seed_menu_config(factory)
 
     rows = (await dbSession.execute(select(MenuConfig))).scalars().all()
-    assert len(rows) == 48
-    assert len({r.code for r in rows}) == 48
+    assert len(rows) == 51
+    assert len({r.code for r in rows}) == 51
 
 
 async def test_seed_does_not_overwrite_ui_edited_parent_id(
@@ -199,6 +201,8 @@ async def test_seed_paths_aligned_with_frontend_routes(
         "/admin/wiki-links", "/admin/wiki-categories",
         # A8（M4 Report 模板 MVP）：「我的报告」页，App.tsx:104 真实路由
         "/reports",
+        # feat-research-entry：研究会话 + 研究对比（App.tsx 真实路由）
+        "/research", "/research/compare",
     }
 
     svc = MenuConfigService(dbSession)
@@ -259,5 +263,5 @@ async def test_main_runs_end_to_end_and_disposes_engine(
     await created_engines[0].dispose()
     # 验证种子落库（独立引擎与全局工厂指向同一 URL）
     rows = (await dbSession.execute(select(MenuConfig))).scalars().all()
-    assert len(rows) == 48
-    assert len({r.code for r in rows}) == 48
+    assert len(rows) == 51
+    assert len({r.code for r in rows}) == 51

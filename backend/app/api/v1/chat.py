@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,37 +23,17 @@ from app.domain.schemas import (
     QuerySuggestRequest,
     QuerySuggestResponse,
 )
+from app.api.v1.session_guard import assertSessionOwnership
 from app.infrastructure.rate_limit import limiter, rateLimitValue
 from app.services.chat_service import ChatService
 from app.services.embedding_service import EmbeddingService
-from app.services.evidence_query_service import getSessionOwnerUserIds
 from app.services.hypothesis_service import listSessionHypotheses
-from app.services.messages_zh import MSG_HYPOTHESIS_SESSION_NOT_OWNED
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(getCurrentUser)])
 _service = ChatService()
 _embeddingService = EmbeddingService()
-
-
-async def _assertChatSessionOwnership(
-    session: AsyncSession, sessionId: str, user: CurrentUser,
-) -> None:
-    """chat 会话归属定点校验（v3.1 B6，对齐 /evidences R2 H2 守卫口径）。
-
-    - admin 放行；归属事实源 = session_message.user_id；
-    - 有归属标记且不属于当前用户 → 403（detail 不回显归属者，防侧信道）；
-    - 无标记（存量行/新会话）→ fail-open（wiki_qa / evidences 同语义）。
-    """
-    if "admin" in (user.roles or []):
-        return
-    owners = await getSessionOwnerUserIds(session, sessionId)
-    if owners and user.userId not in owners:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=MSG_HYPOTHESIS_SESSION_NOT_OWNED,
-        )
 
 
 @router.get("/sessions/{sessionId}/hypotheses", response_model=list[HypothesisRead])
@@ -67,7 +47,7 @@ async def listHypotheses(
 
     流式路径假设不进 SSE 帧，前端在答案流结束后调本端点取「可能原因」。
     """
-    await _assertChatSessionOwnership(session, sessionId, _user)
+    await assertSessionOwnership(session, sessionId, _user)
     rows = await listSessionHypotheses(session, sessionId, limit)
     return [HypothesisRead.model_validate(r) for r in rows]
 
@@ -83,7 +63,11 @@ async def chat(
     """处理一条自然语言问题，返回回答 + SQL + 图表 option + 数据。
 
     #207 安全修复：真实调用方（_user）透传为 Agent 运行 actor（归属审计）。
+    归属守卫：追问锚点（last_plan/last_sql/last_data）按 session_id 存在
+    ``session_query_state`` 里，**不校验归属就会被继承** —— 于是「拿到一个别人的
+    sessionId」等于「用别人的上下文提问」。全新会话没有消息行，守卫 fail-open 放行。
     """
+    await assertSessionOwnership(session, dto.sessionId, _user)
     return await _service.processMessage(dto, session, user=_user)
 
 
@@ -106,6 +90,10 @@ async def chatStream(
     `yield` 上（不在任务栈上，`except CancelledError`/`finally` 都不触发）。钩子只
     负责调 service，事务与语义都在 service 层。
     """
+    # 归属守卫必须在这里（流开始之前）：进了 eventSource 就没有 HTTP 状态码可回了。
+    # 与 POST /chat 同一条理由：不加守卫就能继承别人会话的追问锚点。
+    await assertSessionOwnership(session, dto.sessionId, _user)
+
     async def eventSource() -> AsyncIterator[str]:
         async for event in _service.processMessageStream(dto, session, user=_user):
             yield event.toSse()

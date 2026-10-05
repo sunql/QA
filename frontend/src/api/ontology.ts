@@ -67,6 +67,10 @@ export async function deleteClass(id: number): Promise<void> {
   await httpClient.delete(`${BASE}/classes/${id}`);
 }
 
+export async function restoreClass(id: number): Promise<void> {
+  await httpClient.post(`${BASE}/classes/${id}/restore`);
+}
+
 // ===== Property =====
 
 export async function listPropertiesByClass(

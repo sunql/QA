@@ -403,6 +403,7 @@ def createApp() -> FastAPI:
         model_config,
         ontology,
         organizations,
+        research,
         roles,
         reports,
         session,
@@ -499,6 +500,7 @@ def createApp() -> FastAPI:
     app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
+    app.include_router(research.router, prefix="/api/v1", tags=["research"])
     app.include_router(users.router, tags=["users"])
     app.include_router(roles.router, tags=["roles"])
     app.include_router(organizations.router, tags=["organizations"])
@@ -558,7 +560,7 @@ def createApp() -> FastAPI:
     from app.services.mcp_server import mcp as _mcpServer
 
     _mcpApp = _mcpServer.http_app(path="/mcp", transport="streamable-http")
-    app.router.routes.append(Mount("", app=McpAuthMiddleware(_mcpApp)))
+    app.router.routes.append(Mount("/mcp", app=McpAuthMiddleware(_mcpApp)))
 
     # 合并 fastmcp 子 app 的 lifespan 到现有 lifespan（schema drift / 引擎预热）。
     _origFastapiLifespan = lifespan

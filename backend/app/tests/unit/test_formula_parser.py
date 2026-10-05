@@ -19,6 +19,7 @@ import pytest
 
 from app.services.formula_parser import (
     ParsedFormula,
+    isCteFormula,
     parseFormula,
 )
 
@@ -169,3 +170,59 @@ class TestParseAliasStyle:
         """支持双引号包裹的标识符（PG 大小写敏感场景）。"""
         result = parseFormula('SUM("po"."ORDER_QTY")')
         assert ("po", "ORDER_QTY") in result.column_refs
+
+
+class TestIsCteFormula:
+    """CTE 形态判定（2026-10-01 线上回归）。
+
+    旧的 `formula.strip().upper().startswith("WITH ")` 要求 WITH 后紧跟**一个空格**，
+    对 `WITH\\n` / `WITH\\t` 漏判 → CTE 公式掉进「逐 token 当属性校验」那条路，
+    内部的表名/列名被当成属性幻觉上报，整轮计划失败。
+
+    isCteFormula 是 SSOT：parseFormula 用它路由，validatePlan 用它判 CTE 豁免。
+    """
+
+    def test_with_space_is_cte(self):
+        assert isCteFormula("WITH a AS (SELECT 1) SELECT 1") is True
+
+    def test_with_newline_is_cte(self):
+        """判别器：修前该输入经 parseFormula 得到 is_cte=False（已实测）。"""
+        assert isCteFormula("WITH\n  a AS (SELECT 1)\nSELECT 1") is True
+
+    def test_with_tab_is_cte(self):
+        assert isCteFormula("WITH\ta AS (SELECT 1) SELECT 1") is True
+
+    def test_leading_whitespace_is_cte(self):
+        assert isCteFormula("\n  WITH a AS (SELECT 1) SELECT 1") is True
+
+    def test_lowercase_with_is_cte(self):
+        assert isCteFormula("with a as (select 1) select 1") is True
+
+    def test_select_is_not_cte(self):
+        assert isCteFormula("SELECT 1 FROM T") is False
+
+    def test_none_and_empty_are_not_cte(self):
+        assert isCteFormula(None) is False
+        assert isCteFormula("") is False
+        assert isCteFormula("   ") is False
+
+    def test_word_boundary_not_cte(self):
+        """WITHX 不是 WITH（词边界），不得误判为 CTE。"""
+        assert isCteFormula("WITHX a AS (SELECT 1)") is False
+
+    def test_plain_aggregate_is_not_cte(self):
+        assert isCteFormula("SUM(QTY) / SUM(SUM(QTY)) OVER ()") is False
+
+
+class TestParseFormulaCteRouting:
+    """parseFormula 的 CTE 路由 —— 只有走 _parseCteFormula 才会设 is_cte=True。"""
+
+    def test_cte_with_newline_routes_to_cte_parser(self):
+        assert parseFormula("WITH\n  a AS (SELECT 1) SELECT 1").is_cte is True
+
+    def test_cte_with_space_routes_to_cte_parser(self):
+        assert parseFormula("WITH a AS (SELECT 1) SELECT 1").is_cte is True
+
+    def test_statement_is_not_cte(self):
+        """整条裸 SELECT 不是 CTE 形态（由 validatePlan 的语句结构分支处理）。"""
+        assert parseFormula("SELECT SUM(x) FROM T").is_cte is False

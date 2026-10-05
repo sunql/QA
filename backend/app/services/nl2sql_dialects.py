@@ -12,6 +12,8 @@ import logging
 from dataclasses import dataclass
 
 from app.domain.enums import DataSourceType
+from app.domain.exceptions import ValidationError
+from app.services.messages_zh import MSG_DATASOURCE_TYPE_UNKNOWN
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,7 @@ class SqlDialect:
     - sampleLimitSql：值域采样去重查询的取前 N 行语法模板（2-1），含 {sql}/{n}
       占位符；Oracle 11g 用 ROWNUM 子查询，12c 用 FETCH FIRST，其余用 LIMIT。
     - timeBucketRule：按时间粒度（月/年/季度）分组的方言写法规则，注入 System Prompt。
+    - aggregateRule：SELECT 列表中「聚合函数与标量子查询」能否混排的方言限制，注入 System Prompt。
     """
 
     name: str
@@ -38,6 +41,7 @@ class SqlDialect:
     identifierRule: str = ""
     nullOrderingRule: str = ""
     timeBucketRule: str = ""
+    aggregateRule: str = ""
 
     def boundedDistinct(self, table: str, column: str, n: int) -> str:
         """构造取前 n 行去重值查询（表/列已过标识符白名单校验）。"""
@@ -77,6 +81,21 @@ _TIME_BUCKET_RULE_MYSQL = (
     "按季度用 CONCAT(YEAR(日期列),'-Q',QUARTER(日期列))；并在 SELECT 输出同一表达式作为月份/年份列。"
 )
 
+# 聚合与标量子查询不得混排：Oracle 禁止在同一个查询块的 SELECT 列表中把聚合函数
+# 与标量子查询**并列**（ORA-00937「不是单组分组函数」），PostgreSQL 允许该写法。
+# 真机回归（2026-10-02）：问「5月份供货量最多的三家供应商所供货物总量占比」，
+# Top-N 占比被写成 SELECT SUM(t.QTY) / (SELECT SUM(s.QTY) FROM supplier_qty s) FROM topn t。
+# 已在生产 Oracle 库实测：两侧都改成标量子查询、外层 FROM DUAL 即通过。
+_AGGREGATE_RULE_ORACLE = (
+    "SELECT 列表中不得把聚合函数与标量子查询并列混排（Oracle 会报 ORA-00937「不是单组分组函数」；"
+    "PostgreSQL 允许但 Oracle 不允许）：例如 "
+    "SELECT SUM(t.QTY) / (SELECT SUM(QTY) FROM all_rows) FROM topn t 在 Oracle 必然失败。"
+    "改法**仅在分母来自另一个结果集**（全局合计、Top-N 求和）时适用：把分子分母都写成标量子查询、外层用 FROM DUAL，"
+    "例如 SELECT (SELECT SUM(QTY) FROM topn) / NULLIF((SELECT SUM(QTY) FROM all_rows), 0) AS RATIO FROM DUAL。"
+    "若只是逐组占比（每个供应商、每月各占多少），保持窗口函数 SUM(x) / SUM(SUM(x)) OVER () 形态，"
+    "不要为此加 FROM DUAL —— 那会把逐组行塌缩成单行。"
+)
+
 _SQL_DIALECTS_ORACLE_11G = SqlDialect(
     name="Oracle",
     limitRule="需要限制行数时使用 ROWNUM，例如 SELECT * FROM (SELECT t.*, ROWNUM rn FROM (...) t WHERE ROWNUM <= 1000)，不要使用 FETCH FIRST，也不要使用 LIMIT。",
@@ -85,6 +104,7 @@ _SQL_DIALECTS_ORACLE_11G = SqlDialect(
     sampleLimitSql="SELECT * FROM ({sql}) WHERE ROWNUM <= {n}",
     nullOrderingRule=_NULL_ORDERING_RULE,
     timeBucketRule=_TIME_BUCKET_RULE_ORACLE,
+    aggregateRule=_AGGREGATE_RULE_ORACLE,
     identifierRule=(
         "列别名与表别名不得以数字开头（Oracle 标识符规则），否则必须用双引号包裹，"
         "例如 AS 2025采购量 未加引号会报 ORA-00923。建议别名用字母或中文开头，"
@@ -100,6 +120,7 @@ _SQL_DIALECTS_ORACLE_12C = SqlDialect(
     sampleLimitSql="{sql} FETCH FIRST {n} ROWS ONLY",
     nullOrderingRule=_NULL_ORDERING_RULE,
     timeBucketRule=_TIME_BUCKET_RULE_ORACLE,
+    aggregateRule=_AGGREGATE_RULE_ORACLE,
     identifierRule=(
         "列别名与表别名不得以数字开头（Oracle 标识符规则），否则必须用双引号包裹，"
         "例如 AS 2025采购量 未加引号会报 ORA-00923。建议别名用字母或中文开头，"
@@ -129,6 +150,26 @@ _SQL_DIALECTS: dict[DataSourceType, SqlDialect] = {
 }
 
 
+def coerceDatasourceType(value: str | None, *, name: str = "") -> DataSourceType:
+    """数据源类型边界校验（fail fast）：脏值抛 ValidationError，绝不静默回退。
+
+    与 resolveDialect 的「未知回退 Oracle」分工：后者是方言解析的**最后防线**
+    （历史行为，测试钉死）；本函数是流水线的**第一反应** —— 数据源类型脏值若
+    继续走，会用错误方言生成 SQL（如给 MySQL 生成 ROWNUM），执行必错且用户
+    只看到莫名其妙的数据库报错。在 LLM 消费前拒绝，把问题留给能修它的人。
+    消息自足：带数据源名（定位是哪个库）+ 脏值原文 + 可操作指引。
+    """
+    if value is not None:
+        try:
+            return DataSourceType(value)
+        except ValueError:
+            lowered = str(value).lower()
+            for t in DataSourceType:
+                if t.value == lowered:
+                    return t
+    raise ValidationError(MSG_DATASOURCE_TYPE_UNKNOWN.format(name=name, type=value))
+
+
 def resolveDialect(datasourceType: DataSourceType | str | None, oracle_version: str | None = None) -> SqlDialect:
     """按数据源类型解析方言；未指定或未知类型回退 Oracle（历史行为）。
 
@@ -151,7 +192,9 @@ def resolveDialect(datasourceType: DataSourceType | str | None, oracle_version: 
     # Oracle 版本判断：12c 及以上用 FETCH FIRST，否则用 ROWNUM
     if dialect.name == "Oracle" and datasourceType == DataSourceType.ORACLE:
         version = (oracle_version or "").lower()
-        if "11g" in version or version.startswith("10") or version.startswith("9"):
+        # 点分版本（探测落库原文，如 "11.2.0.1.0"）与 "11g" 字样都识别为 11g ——
+        # 否则 11.2 会三个规则都不命中而落 12c 分支，给 11g 库生成 FETCH FIRST。
+        if "11g" in version or version.startswith(("9", "10", "11")):
             return _SQL_DIALECTS_ORACLE_11G
         return _SQL_DIALECTS_ORACLE_12C
 

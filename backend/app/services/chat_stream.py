@@ -36,6 +36,10 @@ from app.services.intent_service import IntentResult
 # 与 chat_service.processMessage 同口径——在 _streamQuery 入口一次性读一次，
 # 整条流水线复用，避免每段 _costFor 调用都查 DB。
 from app.services.nl2sql_service import _readFloatConfig
+from app.services.nl2sql_semantic_guard import shareAmbiguityWarning
+from app.services.chart_thresholds import loadFullDataThreshold
+from app.services.think_block import ThinkStreamFilter, applyThinkPolicy, isThinkHideEnabled
+from app.services.visual_rationale import summaryTextOnlyRationale
 from app.services.stream_events import (
     ErrorType,
     EVENT_CHART,
@@ -379,7 +383,7 @@ class StreamMixin:
         if intent in (IntentType.NEW_QUERY, IntentType.QUERY):
             if self._stepPlanner.is_explicit_multi_step(dto.question):
                 global_filters = await self._resolveGlobalFilters(session, dto, pc)
-                multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
+                dto, multi_plan, pc, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
                 if multi_plan is not None:
@@ -397,7 +401,7 @@ class StreamMixin:
             # 与 processMessage 同口径；详见 _looks_like_compound_question。
             elif _looks_like_compound_question(dto.question):
                 global_filters = await self._resolveGlobalFilters(session, dto, pc)
-                multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
+                dto, multi_plan, pc, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
                 if multi_plan is not None:
@@ -545,6 +549,8 @@ class StreamMixin:
                     sql=None,
                     data=step.data,
                     summary=step.summary,
+                    chart_type=step.chart_type,
+                    chart_option=step.chart_option,
                 ))
             yield StreamEvent(EVENT_TOKEN, {"content": featureResp.answer})
             yield StreamEvent(
@@ -610,8 +616,8 @@ class StreamMixin:
                 retryTokens[0], retryTokens[1], purpose="nl2sql",
             )
 
-        chartType, option, chartPt, chartCt, chartCached = await self._chartStep(
-            session, dto, pc, data, intentChartType
+        chartType, option, tableOption, rationale, chartPt, chartCt, chartCached = await self._chartStep(
+            session, dto, pc, data, intentChartType, outcome.plan
         )
         totalTokens += chartPt + chartCt
         # 4-2（feat-token-cache 续）：chart 阶段 cachedTokens 透传到流式汇总的
@@ -621,7 +627,13 @@ class StreamMixin:
             pc.selected, chartPt, chartCt,
             cachedTokens=chartCached, cacheHitMultiplier=cacheHitMultiplier,
         )
-        yield StreamEvent(EVENT_CHART, {"chartType": chartType.value, "chartOption": option, "data": data})
+        yield StreamEvent(EVENT_CHART, {
+            "chartType": chartType.value,
+            "chartOption": option,
+            "tableOption": tableOption,
+            "visualRationale": rationale,
+            "data": data,
+        })
 
         # Phase 1.4：拉取目标表的可信度 badge 并通过 SSE 单独下发（前端订阅后渲染）
         # 在 chart 之后、answer 流之前：不影响用户感知的回答延迟；DQ 故障由 helper 内部静默
@@ -643,8 +655,20 @@ class StreamMixin:
             persistState.plan = outcome.plan
             persistState.resultColumns = self._columns(data)
             persistState.totalCostUsd = float(totalCost)
+        # L2 歧义示警（feat-nl2sql-share-denominator-guard）：全组占比恒 100% 不可
+        # 数学判错 → 流式下发的首个 token 即提示（快照 answerPieces 同引用，先追加
+        # 后 yield 保证断连兜底可见）。violations 已在 _runQueryWithRetry 出口抛错。
+        shareWarning = shareAmbiguityWarning(outcome.plan, data)
+        if shareWarning:
+            answerPieces.append(shareWarning)
+            yield StreamEvent(EVENT_TOKEN, {"content": shareWarning})
         # 默认取主模型名：即使流异常地零块完成，done 事件仍报告一个合理的模型名
         answerModelName: str | None = pc.selected.model_name
+        # Think_Hide（feat-think-hide）：开启时对 token 流增量过滤 <think> 思维链，
+        # answerPieces 只收过滤后的内容（断连兜底落库与用户所见一致）
+        thinkFilter: ThinkStreamFilter | None = (
+            ThinkStreamFilter() if await isThinkHideEnabled(session) else None
+        )
         async for chunk, answerConfig, (wastedPt, wastedCt) in self._streamAnswerWithFallback(
             session, dto.sessionId, pc.configs, pc.selected, dto, finalSql, data,
             forced=pc.forcedModel, history=pc.contextPrompt,
@@ -669,8 +693,16 @@ class StreamMixin:
                     persistState.totalCostUsd = float(totalCost)
             if chunk.content:
                 # 独立 if 而非 elif：即使 isDone 块携带内容也不丢失
-                answerPieces.append(chunk.content)
-                yield StreamEvent(EVENT_TOKEN, {"content": chunk.content})
+                content = thinkFilter.feed(chunk.content) if thinkFilter else chunk.content
+                if content:
+                    answerPieces.append(content)
+                    yield StreamEvent(EVENT_TOKEN, {"content": content})
+        if thinkFilter is not None:
+            # 流收尾：NORMAL 态吐出截断的候选缓冲，IN_THINK 态为空（未闭合=隐藏）
+            tail = thinkFilter.flush()
+            if tail:
+                answerPieces.append(tail)
+                yield StreamEvent(EVENT_TOKEN, {"content": tail})
 
         answer = "".join(answerPieces)
         # L2 streaming: totalCost includes SQL + chart + answer LLM costs
@@ -679,6 +711,13 @@ class StreamMixin:
             routing_layer="L2",
             latency_ms=int((time.monotonic() - _stream_t0) * 1000),
             token_cost_usd=float(totalCost),
+            # 0105：单步流的图进「最终报告」（导出 PDF / 历史回放）。与流式下发的
+            # 那份是同一份 —— 图不能只活在实时响应里。
+            chart_type=chartType,
+            chart_option=option,
+            # 0107：图之外的明细表 + 判断依据同轮落库（与流式下发那份同一份）。
+            table_option=tableOption,
+            visual_rationale=rationale,
         )
         await self._saveQueryState(
             session, dto.sessionId,
@@ -712,6 +751,8 @@ class StreamMixin:
             sql=finalSql,
             data=data,
             summary=self._summarizeStepData(data),
+            table_option=tableOption,
+            visual_rationale=rationale,
         ))
         # v3.1 B6（M7）：流式假设后处理——只落库，不进 SSE 帧（前端靠 GET 端点取）
         await self._maybeGenerateHypotheses(
@@ -856,16 +897,21 @@ class StreamMixin:
                     "description": step_plan.description,
                     "subQuestion": step_plan.sub_question,
                 })
+                # Task 2：await 不能写进 lambda，阈值在 lambda 外先算好再捕获
+                # （与非流式 _executeMultiStep 同口径，两条路径同源不漂移）。
+                full_data_threshold = await loadFullDataThreshold(session)
                 agg_resp = await self._callWithFallback(
                     session, dto.sessionId, pc.configs, pc.selected, "answer",
                     lambda cfg: self._stepAggregator.aggregate(
                         dto.question, multiStepPlan, completed,
                         self._llmFactory(cfg), cfg.model_name,
                         history=pc.contextPrompt,
+                        full_data_threshold=full_data_threshold,
                     ),
                     forced=pc.forcedModel,
                 )
-                agg_content = agg_resp[0].content
+                # Think_Hide（feat-think-hide）：汇总答案按系统参数剥离 <think> 思维链
+                agg_content = await applyThinkPolicy(session, agg_resp[0].content)
                 agg_config = agg_resp[1]
                 agg_pt = agg_resp[0].promptTokens
                 agg_ct = agg_resp[0].completionTokens
@@ -892,6 +938,12 @@ class StreamMixin:
                     routing_layer="L2",
                     latency_ms=int((time.monotonic() - _ms_t0) * 1000),
                     token_cost_usd=float(total_cost),
+                    # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
+                    # （0107 补 rationale：顶层不附图，SUMMARY_TEXT_ONLY 解释为什么）。
+                    chart_type=None,
+                    chart_option=None,
+                    table_option=None,
+                    visual_rationale=summaryTextOnlyRationale().to_dict(),
                 )
                 await self._saveQueryState(
                     session, dto.sessionId,
@@ -922,6 +974,8 @@ class StreamMixin:
                         "latency_ms": int((time.monotonic() - _ms_t0) * 1000),
                         "affinityStatus": affinity_payload,
                         "steps": [_step_result_to_read(s).model_dump(by_alias=True) for s in completed],
+                        # 汇总步不发 step_result（纯文字），SUMMARY_TEXT_ONLY 只能经 done 帧抵达前端
+                        "visualRationale": summaryTextOnlyRationale().to_dict(),
                         "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)
                         if suggestion is not None else None,
                     },
@@ -940,7 +994,7 @@ class StreamMixin:
             if run.modelName:
                 last_model_name = run.modelName
             completed.append(run.result)
-            ctx = ctx.with_step(run.result)
+            ctx = ctx.with_step(run.result, chartLabelUsed=run.chart_label_calls > 0)
             if run.result.sql is not None:
                 # 只有成功步骤才更新追问锚点（与非流式同口径）
                 last_plan = run.plan
@@ -967,6 +1021,9 @@ class StreamMixin:
                 "cost": float(total_cost),
                 "modelName": last_model_name,
                 "latency_ms": int((time.monotonic() - _ms_t0) * 1000),
+                "queryPlan": last_plan.to_dict() if last_plan else None,
+                # 降级收尾同样是纯文字：SUMMARY_TEXT_ONLY 只能经 done 帧抵达前端
+                "visualRationale": summaryTextOnlyRationale().to_dict(),
                 "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)
                 if suggestion is not None else None,
             },
@@ -974,7 +1031,7 @@ class StreamMixin:
 
     @staticmethod
     def _stepResultEvent(result: StepResult) -> StreamEvent:
-        """把 StepResult 转为 EVENT_STEP_RESULT 事件（含数据）。"""
+        """把 StepResult 转为 EVENT_STEP_RESULT 事件（含数据与该步的图）。"""
         return StreamEvent(EVENT_STEP_RESULT, {
             "stepIndex": result.step_index,
             "description": result.description,
@@ -983,6 +1040,11 @@ class StreamMixin:
             "data": result.data if result.data else None,
             "summary": result.summary,
             "error": result.error,
+            "chartType": result.chart_type,
+            "chartOption": result.chart_option,
+            "tableOption": result.table_option,
+            "visualRationale": result.visual_rationale,
+            "queryPlan": result.query_plan.to_dict() if result.query_plan else None,
         })
 
     @staticmethod

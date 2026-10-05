@@ -15,11 +15,15 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import ChartType
+from app.domain.exceptions import Nl2SqlError
 from app.domain.models import LlmConfig
+from app.domain.query_plan import QueryPlan
 from app.domain.schemas import ChatRequest
 from app.infrastructure.llm.base_client import LlmMessage
 # 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER。
 # 放在 services 层（不在 chat_helpers）以保持 helper 不依赖具体 service。
+from app.services.messages_zh import MSG_NL2SQL_SHARE_INVARIANT_FAILED
+from app.services.nl2sql_semantic_guard import checkShareInvariants
 from app.services.nl2sql_service import _readFloatConfig
 from app.services.chat_helpers import (
     _PipelineContext,
@@ -31,6 +35,7 @@ from app.services.chat_helpers import (
     _summarizeExecutionError,
 )
 from app.services.chat_stream_output import _ANSWER_SYSTEM_PROMPT
+from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.llm_retry_policy import (
     attachRetryGenTokens as _attachRetryGenTokens,
     consumedTokens,
@@ -89,7 +94,6 @@ class UsageMixin:
         retry_question = question if question is not None else dto.question
         try:
             data = await self._runQuery(pc, dto, outcome.sql)
-            return data, outcome.sql, (0, 0)
         except Exception as firstErr:
             cfg = outcome.sqlConfig or pc.selected
             logger.info("SQL 执行失败，回灌错误重试一轮: %s", firstErr)
@@ -135,7 +139,33 @@ class UsageMixin:
                     (retryResult.promptTokens, retryResult.completionTokens),
                 )
                 raise firstErr
+            self._checkShareResult(outcome.plan, data, retryResult.sql)
             return data, retryResult.sql, (retryResult.promptTokens, retryResult.completionTokens)
+        else:
+            # L3 占比不变量核验（feat-nl2sql-share-denominator-guard）：Top-N 占比
+            # 之和/单值 > 100% 数学上不可能（Top-N 是总量子集）→ 结果必然错误。
+            # 放在 else（而非 try 体）里：violations 的 Nl2SqlError 直接向上传播，
+            # 走既有失败路径（单步回退多步拆解 / 多步步级隔离），绝不带病返回，
+            # 也绝不能被本函数的执行失败重试逻辑吞掉重生成（决策 3a：直接失败）。
+            self._checkShareResult(outcome.plan, data, outcome.sql)
+            return data, outcome.sql, (0, 0)
+
+    def _checkShareResult(
+        self, plan: QueryPlan | None, data: list[dict], sql: str | None,
+    ) -> None:
+        """L3/L2 执行后核验：violations 抛 Nl2SqlError；warning 留痕（示警注入在渲染层）。"""
+        shareCheck = checkShareInvariants(plan, data)
+        if shareCheck.violations:
+            logger.warning(
+                "NL2SQL 占比不变量违规: %s sql=%s",
+                shareCheck.violations, (sql or "")[:_RETRY_SQL_LOG_LIMIT],
+            )
+            raise Nl2SqlError(
+                MSG_NL2SQL_SHARE_INVARIANT_FAILED,
+                detail="; ".join(shareCheck.violations),
+            )
+        if shareCheck.warning:
+            logger.warning("NL2SQL 占比歧义示警: sql=%s", (sql or "")[:_RETRY_SQL_LOG_LIMIT])
 
     async def _accountRetryGenUsage(
         self,
@@ -180,37 +210,67 @@ class UsageMixin:
         pc: _PipelineContext,
         data: list[dict],
         intentChartType: ChartType | None = None,
-    ) -> tuple[Any, dict, int, int, int | None]:
-        """图表类型推荐 + option 生成（失败自动回退规则 option），有消耗时记录用量。
+        plan: QueryPlan | None = None,
+    ) -> tuple[Any, dict, dict | None, dict, int, int, int | None]:
+        """选图型 + 渲染负载（失败自动降级表格），有消耗时记录用量。
 
         优先级：客户端显式 dto.chartType > 意图抽取 intentChartType（3-3，"换成柱状图"）
-        > 按数据形状自动推荐。
+        > 决策引擎按语义选型（见 chart_service.buildChart）。
 
-        返回 5-tuple (chartType, option, promptTokens, completionTokens, cachedTokens)；
-        4-2（feat-token-cache）：cachedTokens 由 chart_service 透传，供 _summarizeUsage
-        按差额计费（chart 阶段占 token ~3%，但 bill 必须准确）。
+        **plan 是决策引擎的主要信号源**：占比（`aggregations[].formula`）、排名
+        （`rowLimit`/`sortBy`）、时间维（`groupBy`）都从它读。不传 plan 会让引擎
+        退化成「只看列形状」，也就是这轮改造要消灭的旧行为 —— 两个调用点都必须传。
+
+        返回 7-tuple (chartType, option, tableOption, rationale, promptTokens,
+        completionTokens, cachedTokens)；`rationale` 已在此归一为线上形状
+        ``{"code": str, "params": dict}``（`VisualRationale.to_dict()`，params.kind
+        是枚举真值）。4-2（feat-token-cache）：cachedTokens 由 chart_service 透传，
+        供 _summarizeUsage 按差额计费（chart 阶段占 token ~3%，但 bill 必须准确）。
         """
         columns = self._columns(data)
-        chartType = (
-            dto.chartType
-            if dto.chartType is not None
-            else intentChartType
-            if intentChartType is not None
-            else self._chart.recommendChartType(columns, data)
+        build = await self._chart.buildChart(
+            session=session,
+            plan=plan,
+            columns=columns,
+            data=data,
+            question=dto.question,
+            forcedKind=dto.chartType,
+            intentKind=intentChartType,
+            llmClient=pc.client,
+            modelConfig=pc.selected,
         )
-        option, chartPt, chartCt, chartCached = await self._chart.generateChartOption(
-            chartType, columns, data, dto.question, pc.client, pc.selected,
+        # 记账失败不能把图表（乃至整轮回答）一起带走，更不能让已知的 token 数丢失：
+        # 多步路径的兜底 except 会把 token 报成 0，账没记上、用量还少报。所以记账
+        # 自己兜住 —— 出事必须吵（error 日志，合规硬约束要求每次 LLM 调用可追溯），
+        # 但返回值照常带上已经发生的消耗。
+        try:
+            await self._recordChartUsage(
+                session, dto, pc.selected,
+                build.promptTokens, build.completionTokens, build.cachedTokens,
+            )
+        except Exception:
+            logger.error(
+                "图表用量记账失败（图表仍返回，用量仍计入本轮汇总）: session=%s prompt=%s completion=%s",
+                dto.sessionId, build.promptTokens, build.completionTokens, exc_info=True,
+            )
+        return (
+            build.chartType,
+            build.option,
+            build.tableOption,
+            build.rationale.to_dict(),
+            build.promptTokens,
+            build.completionTokens,
+            build.cachedTokens,
         )
-        await self._recordChartUsage(
-            session, dto, pc.selected, chartPt, chartCt, chartCached,
-        )
-        return chartType, option, chartPt, chartCt, chartCached
 
     async def _generateAnswer(
         self, session: AsyncSession, dto: ChatRequest, pc: _PipelineContext,
         data: list[dict], sql: str,
     ) -> tuple[Any, LlmConfig, tuple[int, int]]:
         """自然语言回答（失败时降级到最便宜可用模型重试一次）；用户明确选模型时跳过降级。"""
+        # Task 2：阈值在持 session 的 async 调用方现读（await 不能写进 lambda，
+        # 故在构造 lambda 前先算好再捕获）。
+        full_data_threshold = await loadFullDataThreshold(session)
         answerResp, answerConfig, wasted = await self._callWithFallback(
             session, dto.sessionId, pc.configs, pc.selected, "answer",
             lambda cfg: self._llmFactory(cfg).complete(
@@ -220,6 +280,7 @@ class UsageMixin:
                         role="user",
                         content=self._buildAnswerPrompt(
                             dto.question, sql, data, history=pc.contextPrompt,
+                            full_data_threshold=full_data_threshold,
                         ),
                     ),
                 ],

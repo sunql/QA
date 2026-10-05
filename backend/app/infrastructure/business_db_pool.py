@@ -343,6 +343,11 @@ def _quote_digit_leading_identifiers(sql: str) -> str:
     return rewritten
 
 
+def _strip_trailing_semicolon(sql: str) -> str:
+    """剥离语句尾部 `;`（Oracle 拒收 ⇒ ORA-00933）。对无尾分号的 SQL 是 no-op。"""
+    return sql.strip().rstrip(";").strip()
+
+
 def _inject_nulls_last(sql: str) -> str:
     """给裸 `ORDER BY ... DESC` 自动补 `NULLS LAST`，消除跨年 top-N 抓 NULL 行。
 
@@ -424,8 +429,13 @@ class BusinessDbAdapter(Protocol):
     # 仅用于 evidence 记录归属，不参与连接语义。
     datasourceId: int | None
 
-    async def test(self) -> tuple[bool, str]:
-        """测试连接，返回 (是否成功, 消息)。"""
+    async def test(self) -> tuple[bool, str, str | object | None]:
+        """测试连接，返回 (是否成功, 消息, 服务端版本原文)。
+
+        版本原文的形态按驱动而定（SQLAlchemy 为 tuple，oracledb 为 str），
+        由调用方（datasource_service._normalizeServerVersion）归一。探测与
+        test() 共用同一条连接，不额外建连。失败时版本为 None。
+        """
         ...
 
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
@@ -494,14 +504,15 @@ class _SqlaAdapter:
             )
         return self._engine
 
-    async def test(self) -> tuple[bool, str]:
+    async def test(self) -> tuple[bool, str, str | object | None]:
         try:
             engine = self._ensureEngine()
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
-            return True, MSG_DATASOURCE_CONNECT_OK
+                # server_version_info 首连后由驱动回填（MySQL/PG 通用）
+                return True, MSG_DATASOURCE_CONNECT_OK, conn.dialect.server_version_info
         except Exception as exc:  # noqa: BLE001 - 测试连接需捕获所有异常
-            return False, str(exc)
+            return False, str(exc), None
 
     @_recordEvidenceAfterSuccess
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
@@ -561,7 +572,7 @@ class _OracleAdapter:
         self._username = username
         self._password = password
 
-    async def test(self) -> tuple[bool, str]:
+    async def test(self) -> tuple[bool, str, str | object | None]:
         try:
             conn = await oracledb.connect_async(
                 user=self._username,
@@ -570,15 +581,18 @@ class _OracleAdapter:
             )
             try:
                 await conn.ping()
+                # oracledb 连接自带 version 属性（如 "19.0.0.0.0"），无需额外查询
+                return True, MSG_DATASOURCE_CONNECT_OK, conn.version
             finally:
                 await conn.close()
-            return True, MSG_DATASOURCE_CONNECT_OK
         except Exception as exc:  # noqa: BLE001
-            return False, str(exc)
+            return False, str(exc), None
 
     @_recordEvidenceAfterSuccess
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
         _assert_read_only(sql)
+        # 执行前兜底：剥离语句尾部 `;`（Oracle 拒收 ⇒ ORA-00933）。对无尾分号的 SQL 是 no-op。
+        sql = _strip_trailing_semicolon(sql)
         # 执行前兜底：给 LLM 生成的数字开头中文别名加双引号，消除 ORA-00923。
         # 只对 Oracle 生效（MySQL/PG 用反引号/不同规则）；对已正确 SQL 是无副作用的 no-op。
         sql = _quote_digit_leading_identifiers(sql)

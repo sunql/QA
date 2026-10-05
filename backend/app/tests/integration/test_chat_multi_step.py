@@ -23,6 +23,7 @@ from sqlalchemy import select
 from app.domain.models import LlmConfig, SessionMessage, SessionQueryState, SessionTokenUsage
 from app.services.messages_zh import MSG_MULTI_STEP_DEGRADE_FAILED, MSG_PLAN_TOO_MANY_STEPS
 from app.services.stream_events import (
+    EVENT_CHART,
     EVENT_CLASS_RECALL,
     EVENT_DONE,
     EVENT_ERROR,
@@ -50,7 +51,13 @@ _MULTI_STEP_PLAN_JSON = (
 
 
 class _MultiStepLlm:
-    """按 system prompt 路由回复：拆步 / 汇总 / 计划 / SQL / 图表 / 回答。"""
+    """按 system prompt 路由回复：拆步 / 汇总 / 计划 / SQL / 标签分类 / 回答。
+
+    图表阶段**不再产出 option**（决策引擎定 kind、渲染器画图，LLM 只在规则歧义时
+    给一个语义标签），故这里没有「图表 JSON」分支：分类调用落到最后的 else，
+    回一句自然语言 —— 不是白名单标签，等价于「分类器答非所问」，用于走
+    「保留规则原判」那条路径。
+    """
 
     def __init__(self) -> None:
         self.calls: list[list[tuple[str, str]]] = []
@@ -70,8 +77,6 @@ class _MultiStepLlm:
             _Resp.content = _MULTI_STEP_PLAN_JSON
         elif "企业数据分析助手" in system:
             _Resp.content = "2025 年销售额较 2024 年增长 25%。"
-        elif "图表类型" in user:
-            _Resp.content = '{"title":{"text":"t"},"series":[{"type":"bar","data":[1,2]}]}'
         elif "解析为查询计划" in system:
             _Resp.content = '{"target":"销售额","selectedClasses":["PRECEIPT"],"selectedProperties":["NAME","QTY"]}'
         elif "生成 SQL 时必须" in system:
@@ -321,6 +326,10 @@ class TestMultiStepChatApi:
         # 落库：消息 + 查询状态 + 用量（2×nl2sql + 1×answer）
         msgs = list((await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id))).scalars().all())
         assert [m.role for m in msgs] == ["user", "assistant"]
+        # 0107：汇总步纯文字落库 —— 顶层不附图/表，SUMMARY_TEXT_ONLY 解释「为什么没有图」
+        assert msgs[1].chart_type is None
+        assert msgs[1].table_option is None
+        assert msgs[1].visual_rationale == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
         state = await dbSession.execute(select(SessionQueryState))
         state_rows = list(state.scalars().all())
         assert len(state_rows) == 1
@@ -328,8 +337,10 @@ class TestMultiStepChatApi:
         # 拆步判定(step_plan) + 2×计划/SQL(nl2sql) + 汇总(answer) + 全局过滤抽取
         # (multistep_global_filter) 均计量。全局过滤抽取是 B 层的独立 LLM 调用
         # （H1 后才把 token 如实落台账，此前写 0-token 假审计行），故它是第 5 行。
+        # chart 那一行 = 第一步出图时的语义标签分类（两步都歧义，但一轮只允许
+        # 问一次，故只有 1 行）——每步各出一张图是决策 3，标签调用必须落账。
         assert sorted(r.purpose for r in usages) == [
-            "answer", "multistep_global_filter", "nl2sql", "nl2sql", "step_plan",
+            "answer", "chart", "multistep_global_filter", "nl2sql", "nl2sql", "step_plan",
         ]
         # 抽取确实花了 token（不是 0/0 占位行）——H1 的验收点
         gf_rows = [u for u in usages if u.purpose == "multistep_global_filter"]
@@ -438,11 +449,13 @@ class TestMultiStepChatApi:
         assert len(body["steps"]) == 3  # 3 数据步（汇总步不进 steps）
         # 规则路径：未调拆步 LLM
         assert not any("查询拆分器" in m[0][1] for m in llm.calls)
-        # 用量：3×nl2sql + 1×answer + 1×step_plan(0 token) + 1×multistep_global_filter，
+        # 用量：3×nl2sql + 1×answer + 1×step_plan(0 token) + 1×multistep_global_filter
+        # + 1×chart（首步出图的语义标签分类；三步只有一次，见 budget 用例），
         # 与 LLM 拆步路径同 purpose 集合（规则路径省掉的是拆步 LLM，全局过滤抽取照跑）
         usages = list((await dbSession.execute(select(SessionTokenUsage))).scalars().all())
         assert sorted(r.purpose for r in usages) == [
-            "answer", "multistep_global_filter", "nl2sql", "nl2sql", "nl2sql", "step_plan",
+            "answer", "chart", "multistep_global_filter",
+            "nl2sql", "nl2sql", "nl2sql", "step_plan",
         ]
         # 规则路径的 step_plan 用量为 0（无 LLM 调用），便于按 purpose 区分规则/LLM 拆步
         step_plan_rows = [u for u in usages if u.purpose == "step_plan"]
@@ -489,11 +502,12 @@ class TestMultiStepChatApi:
         assert not any("查询拆分器" in m[0][1] for m in llm.calls)
         # 3 个数据步骤各执行一次数据 SQL
         assert len(_data_queries(adapter)) == 3
-        # 用量：3×nl2sql + 1×answer + 1×step_plan(0 token) + 1×multistep_global_filter，
-        # 与「第X步」规则路径同构
+        # 用量：3×nl2sql + 1×answer + 1×step_plan(0 token) + 1×multistep_global_filter
+        # + 1×chart（首步出图），与「第X步」规则路径同构
         usages = list((await dbSession.execute(select(SessionTokenUsage))).scalars().all())
         assert sorted(r.purpose for r in usages) == [
-            "answer", "multistep_global_filter", "nl2sql", "nl2sql", "nl2sql", "step_plan",
+            "answer", "chart", "multistep_global_filter",
+            "nl2sql", "nl2sql", "nl2sql", "step_plan",
         ]
 
     async def test_single_step_renders_execution_plan(
@@ -725,6 +739,234 @@ class TestMultiStepChatStreamApi:
         assert suggestion["confidence"] == 0.4
 
 
+class TestMultiStepStepCharts:
+    """决策 3：**每个 step 各出一张图**，且分类调用一轮最多一次。
+
+    服务端只发结构（`chartType` + 不含颜色的 `chartOption`），前端透传 + 套主题。
+    每步的图来自该步**自己的** columns/data/plan —— 多步此前完全不出图
+    （`chartType` 恒为 null），用户看到三个步骤只有表格。
+
+    预算：每步都可能落进歧义分支（R12 分类比较 vs 占比），若 N 步就 N 次额外
+    往返，token 与延迟都白花。故一轮只允许一次语义标签调用，其余步骤按规则原判
+    出图（最坏情况是「不如意但画得出」，不会是空白图）。
+    """
+
+    # 语义标签分类器 prompt 的固定字样（`chart_label._SYSTEM_PROMPT` 的负面约束句
+    # 「不输出图表类型名称，不输出任何 ECharts 配置或代码」）。**在 system 段**，
+    # 故判 system 而不是 user —— 旧版「让 LLM 写 option」的 prompt 里该字样出现在
+    # user 段，那条路径已删除，现在只有分类器会带这个字样的 system prompt。
+    LABEL_PROMPT_MARKER = "图表类型"
+
+    @classmethod
+    def _labelCalls(cls, llm: _MultiStepLlm) -> int:
+        return sum(1 for call in llm.calls if cls.LABEL_PROMPT_MARKER in call[0][1])
+
+    async def test_each_step_carries_its_own_chart(self, client, dbSession, monkeypatch) -> None:
+        config, ds = await _seed(dbSession)
+        llm = _MultiStepLlm()
+        _install(monkeypatch, config, llm, _OkAdapter())
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        steps = resp.json()["steps"]
+        assert len(steps) == 2
+        for step in steps:
+            # 每步都是 1 维（NAME）+ 1 指标（QTY）、无 formula → R12 分类比较
+            assert step["chartType"] == "bar"
+            assert step["chartOption"]["series"][0]["type"] == "bar"
+            assert step["chartOption"]["xAxis"]["data"] == ["A", "B"]
+            # 可视化输出策略：每步的图都带明细表 + 判断依据
+            assert step["tableOption"]["columns"] == ["NAME", "QTY"]
+            assert step["visualRationale"]["code"] == "R12_CATEGORY_BAR"
+            assert step["visualRationale"]["params"] == {}
+
+    async def test_failed_step_carries_no_chart(self, client, dbSession, monkeypatch) -> None:
+        """失败的步骤没有数据可画 —— 不许发一个渲染不出来的 kind。"""
+        config, ds = await _seed(dbSession)
+        _install(monkeypatch, config, _MultiStepLlm(), _DataQueryFailAdapter(fail_from_query=2))
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        step2 = resp.json()["steps"][1]
+        assert step2["sql"] is None  # 失败标记
+        assert step2["chartType"] is None
+        assert step2["chartOption"] is None
+        # 可视化输出策略（case ④）：失败步骤的明细表/判断依据也为 None
+        assert step2["tableOption"] is None
+        assert step2["visualRationale"] is None
+
+    async def test_classifier_is_called_at_most_once_per_turn(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        llm = _MultiStepLlm()
+        _install(monkeypatch, config, llm, _OkAdapter())
+
+        await client.post(
+            "/api/v1/chat",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+
+        # 两步都歧义，但预算只够一次（第一步用掉）
+        assert self._labelCalls(llm) == 1
+
+    async def test_step_chart_tokens_are_metered(self, client, dbSession, monkeypatch) -> None:
+        """分类那一次调用的 token 必须进总量与台账（核心约束 #3）。"""
+        config, ds = await _seed(dbSession)
+        llm = _MultiStepLlm()
+        _install(monkeypatch, config, llm, _OkAdapter())
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        usages = list((await dbSession.execute(select(SessionTokenUsage))).scalars().all())
+        chart_rows = [u for u in usages if u.purpose == "chart"]
+        assert len(chart_rows) == 1
+        # 假 LLM 每次回 10/5 —— 落了真实值，不是 0/0 占位行
+        assert (chart_rows[0].prompt_tokens, chart_rows[0].completion_tokens) == (10, 5)
+        # 图表 token 已计入响应用量（否则用户看到的消耗比实际花的少）
+        assert resp.json()["tokensUsed"] > 10 + 5
+
+    async def test_stream_step_result_event_carries_chart(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        llm = _MultiStepLlm()
+        _install(monkeypatch, config, llm, _OkAdapter())
+
+        resp = await client.post(
+            "/api/v1/chat/stream",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        stepResults = [payload for event, payload in _parseFrames(resp) if event == EVENT_STEP_RESULT]
+        assert len(stepResults) == 2
+        assert stepResults[0]["chartType"] == "bar"
+        assert stepResults[0]["chartOption"]["series"][0]["type"] == "bar"
+        # done 帧的 steps 数组同样带图（前端刷新/回放时用）
+        donePayload = _parseFrames(resp)[-1][1]
+        assert donePayload["steps"][0]["chartType"] == "bar"
+
+    # ------------------------------------------------------------------
+    # 可视化输出策略（决策 1）：多步顶层不再继承最后一个成功数据步骤的图。
+    # 每个数据步已在自己的 steps[i] 里带图 + 明细表 + rationale，顶层再重复一张
+    # 纯属冗余 —— 汇总步是纯文字，顶层只带 SUMMARY_TEXT_ONLY rationale，
+    # 告诉前端「为什么这里没有图」。
+    # ------------------------------------------------------------------
+
+    async def test_final_answer_has_no_chart_and_summary_rationale(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """顶层不再继承最后一步的图：汇总步是纯文字，rationale 解释「为什么没图」。"""
+        config, ds = await _seed(dbSession)
+        _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        body = resp.json()
+        steps = body["steps"]
+        assert len(steps) == 2
+        # 每个数据步仍带自己的图（回归：图只在各步里，不再重复提到顶层）
+        assert steps[0]["chartType"] == "bar"
+        assert steps[1]["chartType"] == "bar"
+        # 顶层是纯文字汇总：无图 + SUMMARY_TEXT_ONLY rationale
+        assert body["chartType"] is None
+        assert body["chartOption"] is None
+        assert body["visualRationale"] == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
+
+    async def test_final_answer_no_chart_when_last_step_fails(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """最后一步失败 → 顶层同样无图：不再回退到最后一张成功步骤的图。"""
+        config, ds = await _seed(dbSession)
+        _install(monkeypatch, config, _MultiStepLlm(), _DataQueryFailAdapter(fail_from_query=2))
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        body = resp.json()
+        assert body["steps"][1]["sql"] is None  # 失败标记
+        # 成功步骤仍带自己的图，失败步骤无图（回归）
+        assert body["steps"][0]["chartType"] == "bar"
+        assert body["steps"][1]["chartType"] is None
+        # 顶层不再继承任何一步的图
+        assert body["chartType"] is None
+        assert body["chartOption"] is None
+        assert body["visualRationale"] == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
+
+    async def test_final_answer_has_no_chart_when_all_steps_fail(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """全部数据步骤失败 → 顶层不出图。空图比没图更糟（前端渲染门会画出空白）。"""
+        config, ds = await _seed(dbSession)
+        _install(monkeypatch, config, _MultiStepLlm(), _DataQueryFailAdapter(fail_from_query=1))
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        body = resp.json()
+        assert all(step["sql"] is None for step in body["steps"])
+        assert body["chartType"] is None
+        assert body["chartOption"] is None
+        assert body["visualRationale"] == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
+
+    async def test_stream_emits_no_chart_event_and_done_carries_rationale(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """流式：多步最终回答不再下发 chart 事件，done 帧带 SUMMARY_TEXT_ONLY rationale。
+
+        每步的图仍走各自的 step_result；顶层 chart 事件整个移除。汇总步骤不发
+        step_result（它流式吐 token 后直接 done），rationale 只能经 done 帧抵达前端。
+        """
+        config, ds = await _seed(dbSession)
+        _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+        resp = await client.post(
+            "/api/v1/chat/stream",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        frames = _parseFrames(resp)
+        assert [e for e, _ in frames if e == EVENT_CHART] == []
+        assert frames[-1][0] == EVENT_DONE
+        assert frames[-1][1]["visualRationale"] == {
+            "code": "SUMMARY_TEXT_ONLY", "params": {},
+        }
+        # 0107：done 帧的 rationale 也随 assistant 行落库（回放/导出离线重建）
+        msgs = list(
+            (await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id)))
+            .scalars()
+            .all()
+        )
+        assert [m.role for m in msgs] == ["user", "assistant"]
+        assert msgs[1].chart_type is None
+        assert msgs[1].table_option is None
+        assert msgs[1].visual_rationale == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
+
+
 class TestNoAggregationStepDegrade:
     """防御分支：计划里没有汇总步（aggregation_only）时的降级收尾。
 
@@ -772,6 +1014,10 @@ class TestNoAggregationStepDegrade:
         assert len(_data_queries(adapter)) == 2
         # 文案如实反映「数据步完成、汇总失败」，而不是笼统的「执行异常」
         assert "2/2" in body["answer"]
+        # 降级收尾同样是纯文字：顶层无图 + SUMMARY_TEXT_ONLY rationale
+        assert body["chartType"] is None
+        assert body["chartOption"] is None
+        assert body["visualRationale"] == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
 
         # 落库：user + assistant 双写（此前 assistant 缺失 → 历史悬空）
         msgs = list(
@@ -780,6 +1026,10 @@ class TestNoAggregationStepDegrade:
             .all()
         )
         assert [m.role for m in msgs] == ["user", "assistant"]
+        # 0107：降级收尾同是纯文字 —— SUMMARY_TEXT_ONLY 落库
+        assert msgs[1].chart_type is None
+        assert msgs[1].table_option is None
+        assert msgs[1].visual_rationale == {"code": "SUMMARY_TEXT_ONLY", "params": {}}
         # 查询状态锚定本轮问题 + 最后一个成功数据步的 SQL（追问可继续级联）
         state = (
             await dbSession.execute(select(SessionQueryState))
@@ -811,6 +1061,11 @@ class TestNoAggregationStepDegrade:
             str(d.get("content", "")) for e, d in frames if e == EVENT_TOKEN
         )
         assert "2/2" in token_text
+        # 降级收尾同样不下发 chart 事件，done 帧带 SUMMARY_TEXT_ONLY rationale
+        assert [e for e, _ in frames if e == EVENT_CHART] == []
+        assert frames[-1][1]["visualRationale"] == {
+            "code": "SUMMARY_TEXT_ONLY", "params": {},
+        }
 
         msgs = list(
             (await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id)))
@@ -878,9 +1133,11 @@ class TestStepFailureIsolation:
         assert any("企业数据分析助手" in m[0][1] for m in llm.calls)
         # 三个 nl2sql 行 = 两步首次生成 + 第二步的**回灌重试生成**。后者是本用例的关键：
         # 重试生成成功、重试执行又失败，那次生成同样花了钱，不能随异常丢失（核心约束 #3）。
+        # chart 只有 1 行：第一步（成功）出了图，第二步失败没有数据可画、不出图。
         usages = list((await dbSession.execute(select(SessionTokenUsage))).scalars().all())
         assert sorted(r.purpose for r in usages) == [
-            "answer", "multistep_global_filter", "nl2sql", "nl2sql", "nl2sql", "step_plan",
+            "answer", "chart", "multistep_global_filter",
+            "nl2sql", "nl2sql", "nl2sql", "step_plan",
         ]
         assert all(r.prompt_tokens > 0 for r in usages if r.purpose == "nl2sql")
         # 落库 + 查询状态锚定**成功**的第一步（失败步骤没有 SQL，不能成为追问锚点）

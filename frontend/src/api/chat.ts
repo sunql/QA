@@ -1,17 +1,11 @@
 import { httpClient } from "./client";
 import { API_BASE_URL } from "../config";
-import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery } from "../types/chat";
+import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery, TablePayload, VisualRationale } from "../types/chat";
 import { i18n } from "../i18n";
 import { authHeaders } from "./authHeaders";
+import { asChartOption, asTablePayload, asVisualRationale, normalizeChartType } from "../utils/chartContract";
 
 const BASE = "/chat";
-
-// 与后端 ChartType 枚举对齐，供运行时校验（避免不安全 cast 把非法值透传给渲染层）
-const VALID_CHART_TYPES = new Set<string>(["table", "bar", "pie", "line", "scatter"]);
-
-function isChartType(value: unknown): value is ChartType {
-  return typeof value === "string" && VALID_CHART_TYPES.has(value);
-}
 
 // ReAct 查询计划运行时校验（M2）：API 为系统边界，形状不符时不渲染 QueryPlanCard
 function isQueryPlan(value: unknown): value is QueryPlan {
@@ -45,6 +39,7 @@ export interface StepPlanOverviewItem extends StepPlanView {
 }
 
 // step_result 事件负载（单个子步骤执行结果）
+// 图表两字段由决策引擎每步各自产出（失败步骤为 null）——收窄后恒存在。
 export interface StepResultView {
   stepIndex: number;
   description: string;
@@ -53,6 +48,12 @@ export interface StepResultView {
   data?: Record<string, unknown>[] | null;
   summary?: string | null;
   error?: string | null;
+  chartType?: ChartType | null;
+  chartOption?: Record<string, unknown> | null;
+  // 每步的明细表负载 + 判断依据（0107）；失败步骤为 null
+  tableOption?: TablePayload | null;
+  visualRationale?: VisualRationale | null;
+  queryPlan?: QueryPlan | null;
 }
 
 function isStepIndex(value: unknown): value is number {
@@ -79,9 +80,44 @@ export function isStepResult(value: unknown): value is StepResultView {
   return isStepPlan(value);
 }
 
+/**
+ * 收窄 step_result 负载（系统边界）：形状不符返回 null，图表字段非法一律置 null。
+ *
+ * 返回**新对象**（不可变），不原地改 SSE 帧。图表字段是决策引擎多步每步出图的
+ * 载体：失败步骤不带这两字段，收窄后为 null，渲染层据此不画（而不是画一张空图）。
+ */
+function normalizeStepResult(value: unknown): StepResultView | null {
+  if (!isStepResult(value)) return null;
+  const record = value as unknown as Record<string, unknown>;
+  return {
+    ...value,
+    chartType: normalizeChartType(record.chartType),
+    chartOption: asChartOption(record.chartOption),
+    tableOption: asTablePayload(record.tableOption),
+    visualRationale: asVisualRationale(record.visualRationale),
+  };
+}
+
+/** 收窄非流式响应（同一道系统边界：白名单只对 SSE 帧生效会让两条路径口径分叉）。 */
+function normalizeChatResponse(response: ChatResponse): ChatResponse {
+  const record = response as unknown as Record<string, unknown>;
+  return {
+    ...response,
+    chartType: normalizeChartType(record.chartType),
+    chartOption: asChartOption(record.chartOption),
+    tableOption: asTablePayload(record.tableOption),
+    visualRationale: asVisualRationale(record.visualRationale),
+    steps: Array.isArray(response.steps)
+      ? response.steps
+          .map(normalizeStepResult)
+          .filter((step): step is StepResultView => step !== null)
+      : response.steps,
+  };
+}
+
 export async function sendMessage(payload: ChatRequest): Promise<ChatResponse> {
   const res = await httpClient.post<ChatResponse>(BASE, payload);
-  return res.data;
+  return normalizeChatResponse(res.data);
 }
 
 // ===== v3.1 B6（M7 Hypothesis Hook）：「可能原因」假设 =====
@@ -137,10 +173,12 @@ export async function getSuggestions(
 
 // ===== SSE 流式（5.6）=====
 
-// 图表事件负载（chart 事件携带 chartType + ECharts option + 数据）
+// 图表事件负载（chart 事件携带 chartType + ECharts option + 数据 + 明细表 + 判断依据）
 export interface StreamChartData {
   chartType: ChartType | null;
   chartOption: Record<string, unknown> | null;
+  tableOption: TablePayload | null;
+  visualRationale: VisualRationale | null;
   data: Record<string, unknown>[] | null;
 }
 
@@ -158,6 +196,11 @@ export interface StreamSummary {
   graphTraversal?: import("../types/graphTraversal").GraphTraversalRead | null;
   // Phase 7 G4：未指名 Agent 语义路由建议卡片（中置信命中时随 done 帧透传）
   suggestedAgent?: import("../types/chat").AgentSuggestion | null;
+  // 多步时顶层查询计划
+  queryPlan?: import("../types/chat").QueryPlan | null;
+  // 0107：多步汇总/降级收尾的判断依据（SUMMARY_TEXT_ONLY）。done 帧**不带 tableOption**
+  //（多步顶层无表；单步表走 chart 事件）。单步 done 帧也不带此字段（其依据已由 chart 事件下发）。
+  visualRationale?: import("../types/chat").VisualRationale | null;
 }
 
 // data_quality 事件负载（Phase 1.4）：每张 selectedClass 对应一条 badge
@@ -289,8 +332,10 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
       break;
     case "chart":
       handlers.onChart?.({
-        chartType: isChartType(d.chartType) ? d.chartType : null,
-        chartOption: (d.chartOption as Record<string, unknown>) ?? null,
+        chartType: normalizeChartType(d.chartType),
+        chartOption: asChartOption(d.chartOption),
+        tableOption: asTablePayload(d.tableOption),
+        visualRationale: asVisualRationale(d.visualRationale),
         data: (d.data as Record<string, unknown>[]) ?? null,
       });
       break;
@@ -314,6 +359,8 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
         supplierRisk: (d.supplierRisk as StreamSummary["supplierRisk"]) ?? null,
         graphTraversal: (d.graphTraversal as StreamSummary["graphTraversal"]) ?? null,
         suggestedAgent: (d.suggestedAgent as StreamSummary["suggestedAgent"]) ?? null,
+        // 0107：多步汇总/降级收尾的 SUMMARY_TEXT_ONLY 只能经 done 帧抵达前端
+        visualRationale: asVisualRationale(d.visualRationale),
       });
       break;
     case "error":
@@ -335,11 +382,13 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
         handlers.onStepPlan?.(d);
       }
       break;
-    case "step_result":
-      if (isStepResult(d)) {
-        handlers.onStepResult?.(d);
+    case "step_result": {
+      const stepResult = normalizeStepResult(d);
+      if (stepResult) {
+        handlers.onStepResult?.(stepResult);
       }
       break;
+    }
     case "data_quality":
       if (Array.isArray(d.badges)) {
         const badges = d.badges.filter(isDataQualityBadge);

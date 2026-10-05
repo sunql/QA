@@ -75,7 +75,7 @@ command -v docker >/dev/null 2>&1 || die "找不到 docker 命令"
 
 CONTAINER_STATE="$(docker inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || true)"
 [[ -n "$CONTAINER_STATE" ]] || die "容器 $CONTAINER 不存在。先 docker compose up -d backend"
-[[ "$CONTAINER_STATE" == "running" ]] || die "容器 $CONTAINER 状态是 $CONTAINER_STATE，不是 running"
+[[ "$CONTAINER_STATE" == "running" ]] || die "容器 ${CONTAINER} 状态是 ${CONTAINER_STATE}，不是 running"
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 SNAPSHOT_DIR="$SNAPSHOT_ROOT/$TIMESTAMP"

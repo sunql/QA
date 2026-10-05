@@ -24,6 +24,7 @@ from app.domain.exceptions import LlmClientError
 from app.domain.models import LlmConfig
 from app.domain.schemas import ChatRequest
 from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage, StreamChunk
+from app.services.chart_thresholds import loadFullDataThreshold
 
 logger = logging.getLogger(__name__)
 
@@ -88,11 +89,16 @@ class ChatStreamOutputMixin:
         - 已产出 token 后中断（无法回退）→ 记录 purpose="answer_stream_failed" 后上抛
         逐块读取经 _iterStreamChunks 块间超时保护，防止 LLM 挂起占用连接。
         """
+        # Task 2：FULL_DATA_THRESHOLD 迁 system_config 后，持 session 的调用方现读。
+        full_data_threshold = await loadFullDataThreshold(session)
         messages = [
             LlmMessage(role="system", content=_ANSWER_SYSTEM_PROMPT),
             LlmMessage(
                 role="user",
-                content=self._buildAnswerPrompt(dto.question, sql, data, history=history),
+                content=self._buildAnswerPrompt(
+                    dto.question, sql, data, history=history,
+                    full_data_threshold=full_data_threshold,
+                ),
             ),
         ]
         emittedContent = False

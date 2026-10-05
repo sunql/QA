@@ -14,7 +14,7 @@ from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import IntentType
+from app.domain.enums import ChartType, IntentType
 from app.domain.models import LlmConfig, SessionQueryState
 from app.domain.multi_step_plan import (
     MAX_PLAN_DATA_STEPS,
@@ -27,9 +27,11 @@ from app.domain.multi_step_plan import (
 from app.domain.query_plan import QueryPlan
 from app.domain.schemas import ChatRequest, ChatResponse
 from app.infrastructure.llm.base_client import LlmMessage
+from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.chat_context import InheritedState, TimeHint
 from app.services.chat_helpers import (
     _MSG_STEP_UNANSWERABLE,
+    _multiStepResponse,
     _PipelineContext,
     _STEP_EXEC_FAILED_PREFIX,
     _STEP_GEN_FAILED_PREFIX,
@@ -44,7 +46,10 @@ from app.services.messages_zh import (
     MSG_MULTI_STEP_DEGRADE_PARTIAL,
     MSG_PLAN_TOO_MANY_STEPS,
 )
+from app.services.nl2sql_service import _readFloatConfig
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
+from app.services.think_block import applyThinkPolicy
+from app.services.visual_rationale import summaryTextOnlyRationale
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +90,14 @@ class MultiStepMixin:
 
     async def _resolveExplicitMultiStep(
         self, session: AsyncSession, dto: ChatRequest, pc: _PipelineContext,
-    ) -> tuple[MultiStepPlan | None, int, Decimal]:
+    ) -> tuple[ChatRequest, MultiStepPlan | None, _PipelineContext, int, Decimal]:
         """解析显式分步信号：先规则快路径（第X步标号），失败回退 LLM 拆步。
 
-        返回 (multi_plan, step_tokens, step_cost)；plan 为 None 表示未拆出多步，
-        调用方按原流水线走单步。规则命中时 token=0（零 LLM 调用）。
+        返回 (dto, multi_plan, pc, step_tokens, step_cost)：
+          - dto 维持用户原始选择的 modelId（不覆盖，遵循「禁止后端改派模型」决策）；
+          - pc 为步骤计划阶段的 _PipelineContext（保留原 selected）；
+          - plan 为 None 表示未拆出多步，调用方按原流水线走单步；
+          - 规则命中时 token=0（零 LLM 调用）。
 
         规则路径仍记一条 token=0 的 step_plan 审计行（与 LLM 拆步同 purpose），
         保证"按 purpose 聚合"的下游分析能一致统计所有多步拆解事件，包括零成本
@@ -100,16 +108,16 @@ class MultiStepMixin:
             await self._recordUsage(
                 session, dto.sessionId, pc.selected, 0, 0, purpose="step_plan",
             )
-            return rule_result.plan, 0, Decimal("0")
+            return dto, rule_result.plan, pc, 0, Decimal("0")
 
         detected = await self._detectMultiStep(session, dto, pc)
         if detected is None or detected.plan is None:
-            return None, 0, Decimal("0")
+            return dto, None, pc, 0, Decimal("0")
         step_tokens = detected.prompt_tokens + detected.completion_tokens
         step_cost = self._costFor(
             pc.selected, detected.prompt_tokens, detected.completion_tokens,
         )
-        return detected.plan, step_tokens, step_cost
+        return dto, detected.plan, pc, step_tokens, step_cost
 
     # =========================================================================
     # feat-follow-up-cascade：追问级联（B 多步重跑 / C 兜底重试）
@@ -221,16 +229,17 @@ class MultiStepMixin:
             return None
         question, rwPt, rwCt = rewritten
         dto2 = dto.model_copy(update={"question": question})
-        multiPlan, stepTokens, stepCost = await self._resolveExplicitMultiStep(
+        dto3, multiPlan, pc, stepTokens, stepCost = await self._resolveExplicitMultiStep(
             session, dto2, pc,
         )
         if multiPlan is None:
             return None
-        # 重写后问题可能改变口径约束：按 dto2 重抽（而非沿用 dto 的）
-        globalFilters = await self._resolveGlobalFilters(session, dto2, pc)
+        # 重写后问题可能改变口径约束：按 dto3 重抽（而非沿用 dto2/dto 的）
+        # dto3 可能已被题目模式 hook 覆盖 modelId；pc.selected 也已被替换为 deepseek
+        globalFilters = await self._resolveGlobalFilters(session, dto3, pc)
         totalTokens = stepTokens + rwPt + rwCt
         totalCost = stepCost + self._costFor(pc.selected, rwPt, rwCt)
-        return dto2, multiPlan, totalTokens, totalCost, globalFilters
+        return dto3, multiPlan, totalTokens, totalCost, globalFilters
 
     async def _resolveGlobalFilters(
         self, session: AsyncSession, dto: ChatRequest, pc: _PipelineContext,
@@ -286,6 +295,22 @@ class MultiStepMixin:
         # 可能缺当前步骤需要的类（如步骤问"物料"但召回只命中供应商相关表）。
         # 合并策略：步骤召回 ∪ 共享召回（保跨步骤 JOIN 连通），步骤召回在前。
         pc = await self._recallForStep(session, pc, step_plan)
+        # ★ NEW: sub-question 改写 hook（feat-qwen-multistep-uplift）
+        # 仅 Qwen 系列 + 命中对比/对照/地点模式时改写；其他模型 / 无匹配 → 原样透传。
+        try:
+            model_name_for_rewrite = (pc.selected.model_name or "") if pc.selected else ""
+            rewrite_result = self._subquestionRewriter.rewrite(
+                sub_question=step_plan.sub_question,
+                prev_results=ctx.completed_steps,
+                model_name=model_name_for_rewrite,
+            )
+            if rewrite_result.rewritten is not None:
+                logger.info(
+                    "sub-question 改写命中 template=%s", rewrite_result.template_id,
+                )
+                step_plan = replace(step_plan, sub_question=rewrite_result.rewritten)
+        except Exception:  # noqa: BLE001
+            logger.warning("sub-question 改写 hook 异常，原 step_plan 保留", exc_info=True)
         try:
             outcome = await self._planAndGenerateSql(
                 session, dto, pc, IntentType.NEW_QUERY, state,
@@ -354,6 +379,20 @@ class MultiStepMixin:
 
         # 后台存储查询向量（用子问题，便于 few-shot 精确匹配）
         self._spawnEmbedding(dto, final_sql, question=step_plan.sub_question)
+        chartType, chartOption, tableOption, rationale, chartPt, chartCt, chartCached = await self._stepChart(
+            session, dto, pc, ctx, step_plan, data, outcome.plan,
+        )
+        if chartPt or chartCt:
+            # 图表阶段（标签分类）的 token 也是这一步花的，计入步骤总量（核心约束 #3）。
+            # 分类调用挤掉了旧版「让 LLM 写 option」那一次，故总量口径未变。
+            cacheHitMultiplier = await _readFloatConfig(
+                session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
+            )
+            tokens += chartPt + chartCt
+            cost += self._costFor(
+                pc.selected, chartPt, chartCt,
+                cachedTokens=chartCached, cacheHitMultiplier=cacheHitMultiplier,
+            )
         return _StepRun(
             result=StepResult(
                 step_index=step_plan.index,
@@ -363,9 +402,63 @@ class MultiStepMixin:
                 data=data,
                 summary=self._summarizeStepData(data),
                 selected_classes=list(outcome.plan.selectedClasses) if outcome.plan else [],
+                chart_type=chartType.value,
+                chart_option=chartOption,
+                table_option=tableOption,
+                visual_rationale=rationale,
+                query_plan=outcome.plan,
             ),
             tokens=tokens, cost=cost, modelName=model_name, plan=outcome.plan,
+            chart_label_calls=1 if (chartPt or chartCt) else 0,
         )
+
+    async def _stepChart(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        pc: _PipelineContext,
+        ctx: StepExecutionContext,
+        step_plan: StepPlan,
+        data: list[dict],
+        plan: QueryPlan | None,
+    ) -> tuple[ChartType, dict, dict | None, dict | None, int, int, int | None]:
+        """为单个步骤出图（每条流水线一个 kind + 一份结构化的 option）。
+
+        与单步路径共用同一个 `_chartStep`：决策引擎按**该步自己的** plan/列/数据
+        选型，spec 由 plan 的 alias/目标派生，渲染器产出不含颜色的 option。
+
+        两处刻意的差异：
+
+        1. **问句用子问题**，不是用户的原始复合问题。「第二步的占比是多少」这类
+           线索只在子问题里；拿原始问句去问分类器，等于让它按别的问题判这一步。
+        2. **分类调用有预算**（`ctx.chart_label_used`）：多步每步都可能落进歧义
+           分支，N 步就是 N 次额外 LLM 往返。一轮只允许一次，其余步骤按规则原判
+           出图 —— 最坏是「不如意但画得出」，不会是空白图。
+
+        出图失败不阻断步骤：`buildChart` 自身设计为不抛，这里再兜一层，
+        降级成表格负载（**形态与 chartType 一致** —— 说 table 就给 {columns, rows}，
+        免得前端按 chartType 选了渲染器却拿到空 option 画空白）。
+        """
+        question = step_plan.sub_question or dto.question
+        stepDto = dto.model_copy(update={"question": question})
+        allowLabel = not ctx.chart_label_used
+        try:
+            return await self._chartStep(
+                session,
+                stepDto,
+                pc if allowLabel else replace(pc, client=None),
+                data,
+                None,
+                plan,
+            )
+        except Exception:
+            logger.warning(
+                "多步步骤出图失败，降级表格: step=%s", step_plan.index, exc_info=True,
+            )
+            columns = list(data[0].keys()) if data else []
+            # 降级成表格：TABLE 不附第二份表（tableOption=None）；图是意外失败降出来的，
+            # 没有判断依据可发（rationale=None，前端不渲染理由而非编造一个）。
+            return ChartType.TABLE, {"columns": columns, "rows": data}, None, None, 0, 0, 0
 
     async def _recallForStep(
         self, session: AsyncSession, pc: _PipelineContext, step_plan: StepPlan,
@@ -534,16 +627,20 @@ class MultiStepMixin:
                     logger.warning("多步数据步骤全部失败，跳过汇总步骤")
                     continue
                 # 汇总步骤：跳过 SQL 执行，调用 StepAggregator
+                # Task 2：await 不能写进 lambda，阈值在 lambda 外先算好再捕获。
+                full_data_threshold = await loadFullDataThreshold(session)
                 agg_resp = await self._callWithFallback(
                     session, dto.sessionId, pc.configs, pc.selected, "answer",
                     lambda cfg: self._stepAggregator.aggregate(
                         dto.question, multiStepPlan, completed,
                         self._llmFactory(cfg), cfg.model_name,
                         history=pc.contextPrompt,
+                        full_data_threshold=full_data_threshold,
                     ),
                     forced=pc.forcedModel,
                 )
-                agg_content = agg_resp[0].content
+                # Think_Hide（feat-think-hide）：汇总答案按系统参数剥离 <think> 思维链
+                agg_content = await applyThinkPolicy(session, agg_resp[0].content)
                 agg_config = agg_resp[1]
                 agg_pt = agg_resp[0].promptTokens
                 agg_ct = agg_resp[0].completionTokens
@@ -561,6 +658,12 @@ class MultiStepMixin:
                     routing_layer="L2",
                     latency_ms=int((time.monotonic() - _t0) * 1000),
                     token_cost_usd=float(total_cost),
+                    # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
+                    # （0107 补 rationale：顶层不附图，SUMMARY_TEXT_ONLY 解释为什么）。
+                    chart_type=None,
+                    chart_option=None,
+                    table_option=None,
+                    visual_rationale=summaryTextOnlyRationale().to_dict(),
                 )
                 # B5 HIGH-1：计算 inheritance_snapshot（支持下一轮追问链路）。
                 # semanticState 可能为 None（如 B/C 路径直接进多步无 A7 输出），
@@ -584,17 +687,20 @@ class MultiStepMixin:
                 hypotheses = await self._maybeGenerateHypotheses(
                     session, dto.sessionId, dto.question, pc, data=last_data,
                 )
-                return ChatResponse(
+                # 汇总步是纯文字：顶层不带图，rationale 告诉前端「为什么这里没有图」
+                return _multiStepResponse(
                     answer=agg_content,
-                    intent="multi_step",
-                    steps=[_step_result_to_read(s) for s in completed],
+                    completed=completed,
                     tokensUsed=total_tokens,
-                    cost=float(total_cost),
-                    latency_ms=int((time.monotonic() - _t0) * 1000),
+                    cost=total_cost,
+                    t0=_t0,
+                    visualRationale=summaryTextOnlyRationale().to_dict(),
+                    data=last_data or None,
                     modelName=last_model_name,
                     affinityStatus=affinity,
                     classRecall=pc.recall,
                     hypotheses=hypotheses or None,
+                    queryPlan=last_plan,
                 )
 
             # 数据查询步骤：共用 helper（生成 → 执行 + 回灌重试），失败隔离为 error 行
@@ -604,7 +710,7 @@ class MultiStepMixin:
             if run.modelName:
                 last_model_name = run.modelName
             completed.append(run.result)
-            ctx = ctx.with_step(run.result)
+            ctx = ctx.with_step(run.result, chartLabelUsed=run.chart_label_calls > 0)
             if run.result.sql is not None:
                 # 只有成功步骤才更新追问锚点：失败步骤没有 SQL/数据可作下一轮基准
                 last_plan = run.plan
@@ -622,15 +728,18 @@ class MultiStepMixin:
         hypotheses = await self._maybeGenerateHypotheses(
             session, dto.sessionId, dto.question, pc, data=last_data,
         )
-        return ChatResponse(
+        # 降级收尾同样是纯文字收尾：顶层不带图，rationale 解释「为什么这里没有图」
+        return _multiStepResponse(
             answer=answer,
-            intent="multi_step",
-            steps=[_step_result_to_read(s) for s in completed],
+            completed=completed,
             tokensUsed=total_tokens,
-            cost=float(total_cost),
-            latency_ms=int((time.monotonic() - _t0) * 1000),
+            cost=total_cost,
+            t0=_t0,
+            visualRationale=summaryTextOnlyRationale().to_dict(),
+            data=last_data or None,
             modelName=last_model_name,
             hypotheses=hypotheses or None,
+            queryPlan=last_plan,
         )
 
     async def _finalizeMultiStepDegrade(
@@ -674,6 +783,11 @@ class MultiStepMixin:
             routing_layer="L2",
             latency_ms=int((time.monotonic() - _t0) * 1000),
             token_cost_usd=float(total_cost),
+            chart_type=None,
+            chart_option=None,
+            # 0107：降级收尾同为纯文字，SUMMARY_TEXT_ONLY 解释「为什么这里没有图」。
+            table_option=None,
+            visual_rationale=summaryTextOnlyRationale().to_dict(),
         )
         await self._saveQueryState(
             session, dto.sessionId,

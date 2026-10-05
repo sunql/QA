@@ -117,6 +117,14 @@ class MultiStepMixin:
                     hint.reason, hint.forced_model_id,
                 )
                 dto = dto.model_copy(update={"modelId": hint.forced_model_id})
+                # Fix Round 2（feat-qwen-multistep-uplift Task 5）：同时替换 pc.selected，
+                # 保证 _executeDataStep 等下游代码真正使用 deepseek 而非 Qwen。
+                # pc.configs[id -> LlmConfig] 索引满足 O(1) 查找。
+                new_cfg = next(
+                    (c for c in pc.configs if c.id == hint.forced_model_id), None,
+                )
+                if new_cfg is not None:
+                    pc.selected = new_cfg
         except Exception:  # noqa: BLE001
             logger.warning("题目模式路由 hook 异常，原 dto.modelId 保留", exc_info=True)
 

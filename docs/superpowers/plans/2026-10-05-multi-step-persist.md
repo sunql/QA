@@ -88,7 +88,7 @@ async def testRunAndStepRoundTrip(db_session):
 
     run = MultiStepRun(
         id=uuid.uuid4(),
-        session_id=sessionKey.id,
+        session_id=sessionKey,
         question="第一步查A，第二步查B",
         model_id=3,
         datasource_id=7,
@@ -139,7 +139,7 @@ async def testDuplicateStepIndexRejected(db_session):
 
     sessionKey = f"chat-{uuid.uuid4()}"
     run = MultiStepRun(
-        id=uuid.uuid4(), session_id=sessionKey.id, question="q", model_id=None, total_steps=1
+        id=uuid.uuid4(), session_id=sessionKey, question="q", model_id=None, total_steps=1
     )
     db_session.add(run)
     await db_session.flush()
@@ -441,7 +441,7 @@ def sessionKey() -> str:
 async def testCreateRunAndSteps(db_session, sessionKey):
     # Act
     run = await repo.createRun(
-        db_session, sessionId=sessionKey.id, question="两步题", modelId=3, totalSteps=2
+        db_session, sessionId=sessionKey, question="两步题", modelId=3, totalSteps=2
     )
     steps = await repo.createSteps(
         db_session, runId=run.id, subQuestions=["查A", "查B"]
@@ -459,7 +459,7 @@ async def testCreateRunAndSteps(db_session, sessionKey):
 @pytest.mark.asyncio
 async def testFinishStepWritesDataAndUsage(db_session, sessionKey):
     run = await repo.createRun(
-        db_session, sessionId=sessionKey.id, question="q", modelId=3, totalSteps=1
+        db_session, sessionId=sessionKey, question="q", modelId=3, totalSteps=1
     )
     (step,) = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
     await repo.markStepRunning(db_session, step)
@@ -480,7 +480,7 @@ async def testFinishStepWritesDataAndUsage(db_session, sessionKey):
 @pytest.mark.asyncio
 async def testRecordStepErrorAccumulatesAttempts(db_session, sessionKey):
     run = await repo.createRun(
-        db_session, sessionId=sessionKey.id, question="q", modelId=3, totalSteps=1
+        db_session, sessionId=sessionKey, question="q", modelId=3, totalSteps=1
     )
     (step,) = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
     await repo.recordStepError(
@@ -502,7 +502,7 @@ async def testRecordStepErrorAccumulatesAttempts(db_session, sessionKey):
 @pytest.mark.asyncio
 async def testUpdateRunClosesRun(db_session, sessionKey):
     run = await repo.createRun(
-        db_session, sessionId=sessionKey.id, question="q", modelId=3, totalSteps=2
+        db_session, sessionId=sessionKey, question="q", modelId=3, totalSteps=2
     )
     await repo.updateRun(
         db_session, run, status="partially_failed", completedSteps=1,
@@ -519,7 +519,7 @@ async def testUpdateRunClosesRun(db_session, sessionKey):
 @pytest.mark.asyncio
 async def testResetStepsFromClearsErrorsAndKeepsSucceeded(db_session, sessionKey):
     run = await repo.createRun(
-        db_session, sessionId=sessionKey.id, question="q", modelId=3, totalSteps=3
+        db_session, sessionId=sessionKey, question="q", modelId=3, totalSteps=3
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["a", "b", "c"])
     await repo.finishStep(db_session, steps[0], status="succeeded", data=[{"x": 1}], sql="SELECT 1")
@@ -2192,7 +2192,7 @@ async def testAdoptRunForResumeAlignsShapeAndStart(pg_client, db_session):
 
     sessionKey = f"chat-{uuid.uuid4()}"
     run = await repo.createRun(
-        db_session, sessionId=sessionKey.id, question="q", modelId=1, totalSteps=2
+        db_session, sessionId=sessionKey, question="q", modelId=1, totalSteps=2
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
     await repo.finishStep(
@@ -2675,7 +2675,7 @@ async def testResumeRejectsNonFailedRun(pg_client, db_session):
 
     sessionKey = f"chat-{uuid.uuid4()}"
     run = await repo.createRun(
-        db_session, sessionId=sessionKey.id, question="q", modelId=1, totalSteps=1
+        db_session, sessionId=sessionKey, question="q", modelId=1, totalSteps=1
     )
     await repo.updateRun(db_session, run, status="succeeded", finished=True)
     await db_session.commit()
@@ -2724,7 +2724,7 @@ async def testResumeAdoptsExistingRunAndSkipsSucceededStep(pg_client, db_session
 
     sessionKey = f"chat-{uuid.uuid4()}"
     run = await repo.createRun(
-        db_session, sessionId=sessionKey.id, question=question,
+        db_session, sessionId=sessionKey, question=question,
         modelId=config.id, datasourceId=datasource.id, totalSteps=2,
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=subQuestions)
@@ -2783,7 +2783,7 @@ async def testPrepareResumeClearsStaleCompressedPayload(db_session):
 
     sessionKey = f"chat-{uuid.uuid4()}"
     run = await repo.createRun(
-        db_session, sessionId=sessionKey.id, question="q", modelId=1, totalSteps=2
+        db_session, sessionId=sessionKey, question="q", modelId=1, totalSteps=2
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
     await repo.finishStep(db_session, steps[0], status="succeeded", data=[{"a": 1}])
@@ -2824,7 +2824,7 @@ async def testResumeIsIdempotentOnSameKey(pg_client, db_session, monkeypatch):
 
     sessionKey = f"chat-{uuid.uuid4()}"
     run = await repo.createRun(
-        db_session, sessionId=sessionKey.id, question=question,
+        db_session, sessionId=sessionKey, question=question,
         modelId=config.id, datasourceId=datasource.id, totalSteps=1,
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
@@ -3138,7 +3138,7 @@ async def testCleanupDeletesOnlyExpiredRuns(pgSession):
 
     async def addRun(status: str, ageDays: int) -> MultiStepRun:
         run = MultiStepRun(
-            id=uuid.uuid4(), session_id=sessionKey.id, question="q", model_id=None,
+            id=uuid.uuid4(), session_id=sessionKey, question="q", model_id=None,
             total_steps=1, status=status,
             started_at=now - timedelta(days=ageDays),
             updated_at=now - timedelta(days=ageDays),
@@ -3172,7 +3172,7 @@ async def testCleanupDeletesStepsViaCascade(pgSession):
     sessionKey = f"chat-{uuid.uuid4()}"
     now = datetime.now(UTC)
     run = MultiStepRun(
-        id=uuid.uuid4(), session_id=sessionKey.id, question="q", model_id=None,
+        id=uuid.uuid4(), session_id=sessionKey, question="q", model_id=None,
         total_steps=1, status="succeeded",
         started_at=now - timedelta(days=60), updated_at=now - timedelta(days=60),
         finished_at=now - timedelta(days=60),

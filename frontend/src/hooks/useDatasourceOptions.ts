@@ -4,7 +4,8 @@
  * `datasourceId` 映射成可读名称（治「不知道对哪个库研究」）。
  *
  * 失败或形状异常一律回落空清单：数据源名只是**辅助信息**，不该成为页面可用性的
- * 前提（本页不做任何依赖它的写操作）。故此处的降级是有意的，且仅限于展示层。
+ * 前提（本页不做任何依赖它的写操作）。故此处的降级是有意的，且仅限于展示层；
+ * 名称取不到时 `datasourceName` 仍回落 `#id`，用户至少能看到「某个库」。
  */
 import { useEffect, useState } from "react";
 import { listDataSources } from "../api/datasource";
@@ -20,7 +21,7 @@ export function useDatasourceOptions(): DataSource[] {
         const list = await listDataSources(true);
         if (alive && Array.isArray(list)) setSources(list);
       } catch {
-        // 展示层降级：名称缺失即不渲染 Tag（见文件头注释）。
+        // 展示层降级：清单回落为空，名称查不到时由 datasourceName 回落 `#id`（见文件头注释）。
       }
     })();
     return () => {

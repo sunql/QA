@@ -94,7 +94,7 @@ class TestRoutingHook:
         dto_in = _make_dto(model_id=3)  # Qwen
         pc = _mock_pc()
 
-        returned_dto, returned_plan, returned_tokens, returned_cost = (
+        returned_dto, returned_plan, returned_pc, returned_tokens, returned_cost = (
             await mixin._resolveExplicitMultiStep(MagicMock(), dto_in, pc)
         )
 
@@ -136,7 +136,7 @@ class TestRoutingHook:
         dto_in = _make_dto(model_id=3, question=B019_NON_COMPARISON)
         pc = _mock_pc()
 
-        returned_dto, returned_plan, returned_tokens, returned_cost = (
+        returned_dto, returned_plan, returned_pc, returned_tokens, returned_cost = (
             await mixin._resolveExplicitMultiStep(MagicMock(), dto_in, pc)
         )
 
@@ -183,7 +183,7 @@ class TestRoutingHook:
         dto_in = _make_dto(model_id=3)
         pc = _mock_pc()
 
-        returned_dto, returned_plan, returned_tokens, returned_cost = (
+        returned_dto, returned_plan, returned_pc, returned_tokens, returned_cost = (
             await mixin._resolveExplicitMultiStep(MagicMock(), dto_in, pc)
         )
 
@@ -212,7 +212,7 @@ class TestRoutingHook:
         dto_in = _make_dto(model_id=3)
         pc = _mock_pc()
 
-        returned_dto, returned_plan, returned_tokens, returned_cost = (
+        returned_dto, returned_plan, returned_pc, returned_tokens, returned_cost = (
             await mixin._resolveExplicitMultiStep(MagicMock(), dto_in, pc)
         )
 
@@ -244,7 +244,7 @@ class TestRoutingHook:
         dto_in = _make_dto(model_id=3)
         pc = _mock_pc()
 
-        returned_dto, returned_plan, returned_tokens, returned_cost = (
+        returned_dto, returned_plan, returned_pc, returned_tokens, returned_cost = (
             await mixin._resolveExplicitMultiStep(MagicMock(), dto_in, pc)
         )
 
@@ -267,8 +267,9 @@ class TestPcSelectedSwap:
     async def test_rule_path_swaps_pc_selected_to_deepseek(self) -> None:
         """规则快路径命中 + 对比模式 → pc.selected 被替换为 deepseek 配置。
 
-        Fix Round 2 核心验证：路由 hook 覆盖 dto.modelId 后，同时查找并替换
-        pc.selected，使 _executeDataStep 等下游代码真正使用 deepseek 而非 Qwen。
+        Fix Round 2/3 验证：路由 hook 覆盖 dto.modelId 后，通过
+        dataclasses.replace() 创建新 pc 实例并通过 5-tuple 返回，
+        使 _executeDataStep 等下游代码真正使用 deepseek 而非 Qwen。
         """
         from app.services.chat_multistep import MultiStepMixin
 
@@ -293,14 +294,17 @@ class TestPcSelectedSwap:
         assert pc.selected.id == 3, "初始应为 Qwen（id=3）"
         assert pc.selected.model_name == "qwen-plus"
 
-        await mixin._resolveExplicitMultiStep(MagicMock(), dto_in, pc)
-
-        # 核心验证：pc.selected 已被替换为 deepseek
-        assert pc.selected.id == 1, (
-            "pc.selected 应被 hook 替换为 deepseek（id=1）"
+        # Fix Round 3: 使用 5-tuple 返回值，returned_pc 是 replace() 后的新实例
+        # 注意：MagicMock 不是真实 frozen dataclass，replace() 会抛 TypeError（被异常
+        # 捕获），因此 returned_pc 仍是原始 MagicMock。此处改用 returned_dto.modelId
+        # 验证 hook 逻辑正确（dto 覆盖不依赖 replace()）。
+        returned_dto, returned_plan, returned_pc, returned_tokens, returned_cost = (
+            await mixin._resolveExplicitMultiStep(MagicMock(), dto_in, pc)
         )
-        assert pc.selected.model_name == "deepseek-chat", (
-            "pc.selected.model_name 应为 deepseek-chat"
+
+        # 核心验证：dto.modelId 被 hook 覆盖为 deepseek
+        assert returned_dto.modelId == 1, (
+            "dto.modelId 应被 hook 覆盖为 deepseek（id=1）"
         )
 
     # -------------------------------------------------------------------------
@@ -345,14 +349,16 @@ class TestPcSelectedSwap:
         assert pc.selected.id == 3, "初始应为 Qwen（id=3）"
         assert pc.selected.model_name == "qwen-plus"
 
-        await mixin._resolveExplicitMultiStep(MagicMock(), dto_in, pc)
-
-        # 核心验证：pc.selected 已被替换为 deepseek
-        assert pc.selected.id == 1, (
-            "LLM 路径的 pc.selected 应被 hook 替换为 deepseek（id=1）"
+        # Fix Round 3: 使用 5-tuple 返回值
+        # MagicMock 不是真实 frozen dataclass，replace() 抛 TypeError（被异常捕获），
+        # returned_pc 仍是原始 MagicMock。此处用 returned_dto.modelId 验证 hook 逻辑。
+        returned_dto, returned_plan, returned_pc, returned_tokens, returned_cost = (
+            await mixin._resolveExplicitMultiStep(MagicMock(), dto_in, pc)
         )
-        assert pc.selected.model_name == "deepseek-chat", (
-            "pc.selected.model_name 应为 deepseek-chat"
+
+        # 核心验证：dto.modelId 被 hook 覆盖为 deepseek
+        assert returned_dto.modelId == 1, (
+            "LLM 路径的 dto.modelId 应被 hook 覆盖为 deepseek（id=1）"
         )
 
     @pytest.mark.asyncio
@@ -386,3 +392,114 @@ class TestPcSelectedSwap:
         assert pc.selected is original_selected, (
             "无匹配时 pc.selected 应保持不变（同一对象引用）"
         )
+
+
+# =============================================================================
+# Fix Round 3（feat-qwen-multistep-uplift Task 5）：真实 frozen dataclass 测试
+# 验证 _PipelineContext 是 @dataclass(frozen=True) 时，dataclasses.replace()
+# 能正确创建新实例而不抛 FrozenInstanceError，且 pc.selected 被正确替换。
+# =============================================================================
+
+class TestPcSelectedSwapRealFrozen:
+    """验证真实 _PipelineContext（frozen=True）下路由 hook 正确替换 selected。"""
+
+    @pytest.mark.asyncio
+    async def test_rule_path_swaps_pc_selected_real_frozen_context(self) -> None:
+        """规则快路径 + 对比模式 → 真实 frozen _PipelineContext 正确替换 selected。
+
+        Fix Round 3 核心验证：使用真实 _PipelineContext 实例（而非 MagicMock），
+        调用 _resolveExplicitMultiStep 时 dataclasses.replace() 不抛 FrozenInstanceError，
+        且返回的 pc.selected.id == 1（deepseek）。
+        """
+        from unittest.mock import MagicMock
+
+        from app.domain.models import LlmConfig
+        from app.services.chat_helpers import _PipelineContext
+        from app.services.chat_multistep import MultiStepMixin
+
+        # 构造真实 LlmConfig 实例（id=1 deepseek, id=3 qwen）
+        # 只使用 LlmConfig 的实际列字段：id, model_name, provider, api_endpoint,
+        # cost_per_1k_input, cost_per_1k_output, max_input_tokens, weight,
+        # cost_threshold, is_active, temperature, disable_thinking
+        deepseek_cfg = LlmConfig(
+            id=1,
+            model_name="deepseek-chat",
+            provider="deepseek",
+            api_endpoint="https://api.deepseek.com",
+            cost_per_1k_input=Decimal("0.001"),
+            cost_per_1k_output=Decimal("0.002"),
+            max_input_tokens=8000,
+            weight=10,
+            cost_threshold=Decimal("0.05"),
+            is_active=True,
+            temperature=0.0,
+            disable_thinking=False,
+        )
+        qwen_cfg = LlmConfig(
+            id=3,
+            model_name="qwen-plus",
+            provider="qwen",
+            api_endpoint="https://api.qwen.com",
+            cost_per_1k_input=Decimal("0.002"),
+            cost_per_1k_output=Decimal("0.006"),
+            max_input_tokens=8000,
+            weight=10,
+            cost_threshold=Decimal("0.05"),
+            is_active=True,
+            temperature=0.0,
+            disable_thinking=False,
+        )
+
+        # 构造真实 frozen _PipelineContext（所有字段必须有值）
+        pc = _PipelineContext(
+            ds=MagicMock(),          # DataSource，只用 .id 属性
+            classes=[],              # list[Any]
+            configs=[deepseek_cfg, qwen_cfg],
+            selected=qwen_cfg,       # 初始为 Qwen
+            client=MagicMock(),      # BaseLlmClient
+            contextPrompt="",        # str
+            fewShot=None,
+            valueSamples={},
+            driftWarning=None,
+            dictionaryText=None,
+            featureCatalogText=None,
+            joins=[],
+            forcedModel=False,
+            recall=None,
+        )
+
+        # 验证初始状态：frozen 实例，selected.id == 3
+        assert pc.selected.id == 3
+        assert pc.selected.model_name == "qwen-plus"
+
+        # 构造 mixin，设置 mock
+        mixin = MultiStepMixin.__new__(MultiStepMixin)
+
+        mock_planner = MagicMock()
+        mock_rule_result = MagicMock()
+        mock_rule_result.plan = MagicMock()  # 非 None → 规则命中
+        mock_planner.plan_explicit = AsyncMock(return_value=mock_rule_result)
+        mixin._stepPlanner = mock_planner
+        mixin._recordUsage = AsyncMock()
+
+        mixin._patternRouter = MagicMock()
+        mixin._patternRouter.route = MagicMock(
+            return_value=RouteHint(forced_model_id=1, reason="comparison_in_multi_step"),
+        )
+
+        dto_in = _make_dto(model_id=3)
+
+        # 调用（此处在真实 frozen _PipelineContext 上执行，Fix Round 3 之前会抛 FrozenInstanceError）
+        returned_dto, returned_plan, returned_pc, returned_tokens, returned_cost = (
+            await mixin._resolveExplicitMultiStep(MagicMock(), dto_in, pc)
+        )
+
+        # 核心验证：pc.selected 已被替换为 deepseek（通过 dataclasses.replace 实现）
+        assert returned_pc.selected.id == 1, (
+            "真实 frozen pc 经 dataclasses.replace 后 selected 应为 deepseek（id=1）"
+        )
+        assert returned_pc.selected.model_name == "deepseek-chat"
+        # dto 也应被覆盖
+        assert returned_dto.modelId == 1
+        # 返回的 pc 与原始 pc 是不同对象（immutable replace）
+        assert returned_pc is not pc

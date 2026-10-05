@@ -517,7 +517,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         if result.intent in (IntentType.NEW_QUERY, IntentType.QUERY):
             if self._stepPlanner.is_explicit_multi_step(dto.question):
                 global_filters = await self._resolveGlobalFilters(session, dto, pc)
-                dto, multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
+                dto, multi_plan, pc, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
                 if multi_plan is not None:
@@ -536,7 +536,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             # changes/fix-compound-question-implicit-decomposition/summary.md）。
             elif _looks_like_compound_question(dto.question):
                 global_filters = await self._resolveGlobalFilters(session, dto, pc)
-                dto, multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
+                dto, multi_plan, pc, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
                 if multi_plan is not None:

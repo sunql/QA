@@ -1653,6 +1653,9 @@ class ChatRequest(CamelModel):
     modelId: int | None = Field(default=None, description=MSG_SCHEMA_CHAT_MODEL_ID)
     # 用户显式指定的图表类型；None 表示由系统按数据形状自动推荐
     chartType: ChartType | None = Field(default=None, description=MSG_SCHEMA_CHAT_CHART_TYPE_EXPLICIT)
+    # 续跑（spec §7）：非空时执行链路复用这个 run 而不是新建（Task 7 的路由填）。
+    # 起始步不从这里传 —— 唯一事实来源是 multi_step_run.current_step_idx。
+    resumeRunId: str | None = Field(default=None, description="续跑：复用既有的 multi-step run")
 
 
 class DocQaRequest(CamelModel):

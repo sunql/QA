@@ -7,20 +7,20 @@ from app.services import multi_step_persistence as repo
 
 
 @pytest.fixture
-async def sessionRow(db_session):
-    from app.domain.research_models import ResearchSession
+def sessionKey() -> str:
+    """chat 侧会话 id 的自由字符串形态（前端是 `chat-<uuid>`，见 chatStore.ts:79）。
 
-    row = ResearchSession(id=uuid.uuid4(), title="repo-test", created_by=1)
-    db_session.add(row)
-    await db_session.commit()
-    return row
+    session_id 是 String(64) 且无 FK（0115 裁决），所以**不再**需要先种一行
+    ResearchSession —— 那正是旧设计（UUID + FK）唯一的用途。
+    """
+    return f"chat-{uuid.uuid4()}"
 
 
 @pytest.mark.asyncio
-async def testCreateRunAndSteps(db_session, sessionRow):
+async def testCreateRunAndSteps(db_session, sessionKey):
     # Act
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="两步题", modelId=3, totalSteps=2
+        db_session, sessionId=sessionKey, question="两步题", modelId=3, totalSteps=2
     )
     steps = await repo.createSteps(
         db_session, runId=run.id, subQuestions=["查A", "查B"]
@@ -36,9 +36,9 @@ async def testCreateRunAndSteps(db_session, sessionRow):
 
 
 @pytest.mark.asyncio
-async def testFinishStepWritesDataAndUsage(db_session, sessionRow):
+async def testFinishStepWritesDataAndUsage(db_session, sessionKey):
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="q", modelId=3, totalSteps=1
+        db_session, sessionId=sessionKey, question="q", modelId=3, totalSteps=1
     )
     (step,) = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
     await repo.markStepRunning(db_session, step)
@@ -57,9 +57,9 @@ async def testFinishStepWritesDataAndUsage(db_session, sessionRow):
 
 
 @pytest.mark.asyncio
-async def testRecordStepErrorAccumulatesAttempts(db_session, sessionRow):
+async def testRecordStepErrorAccumulatesAttempts(db_session, sessionKey):
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="q", modelId=3, totalSteps=1
+        db_session, sessionId=sessionKey, question="q", modelId=3, totalSteps=1
     )
     (step,) = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
     await repo.recordStepError(
@@ -79,9 +79,9 @@ async def testRecordStepErrorAccumulatesAttempts(db_session, sessionRow):
 
 
 @pytest.mark.asyncio
-async def testUpdateRunClosesRun(db_session, sessionRow):
+async def testUpdateRunClosesRun(db_session, sessionKey):
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="q", modelId=3, totalSteps=2
+        db_session, sessionId=sessionKey, question="q", modelId=3, totalSteps=2
     )
     await repo.updateRun(
         db_session, run, status="partially_failed", completedSteps=1,
@@ -96,9 +96,9 @@ async def testUpdateRunClosesRun(db_session, sessionRow):
 
 
 @pytest.mark.asyncio
-async def testResetStepsFromClearsErrorsAndKeepsSucceeded(db_session, sessionRow):
+async def testResetStepsFromClearsErrorsAndKeepsSucceeded(db_session, sessionKey):
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="q", modelId=3, totalSteps=3
+        db_session, sessionId=sessionKey, question="q", modelId=3, totalSteps=3
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["a", "b", "c"])
     await repo.finishStep(db_session, steps[0], status="succeeded", data=[{"x": 1}], sql="SELECT 1")

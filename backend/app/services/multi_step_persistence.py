@@ -1,6 +1,7 @@
 """多步 run/step 的落库与查询（spec §3/§4）。纯数据访问，无 LLM 调用。"""
 from __future__ import annotations
 
+import logging
 import uuid
 from decimal import Decimal
 
@@ -15,12 +16,15 @@ from app.domain.multi_step_models import (
     MultiStepStep,
     _utcnow,
 )
+from app.utils.json_safe import jsonSafe
+
+logger = logging.getLogger(__name__)
 
 
 async def createRun(
     session: AsyncSession,
     *,
-    sessionId: uuid.UUID,
+    sessionId: str,
     question: str,
     modelId: int | None,
     datasourceId: int | None = None,
@@ -83,9 +87,12 @@ async def finishStep(
         step.sql = sql
         step.sql_hash = _sqlHash(sql)
     if data is not None:
-        step.data = data
+        # `data` 是裸 JSONB 列：SQL 结果里的 NUMERIC 列回来是 Decimal，不归一会在
+        # 编译期抛 StatementError（整条 UPDATE 失败、该步什么都不落）。jsonSafe
+        # 把 Decimal 归一成 float（数值口径不变），见 app/utils/json_safe.py。
+        step.data = jsonSafe(data)
     if chartOption is not None:
-        step.chart_option = chartOption
+        step.chart_option = jsonSafe(chartOption)
     if modelUsed is not None:
         step.model_used = modelUsed
     step.tokens_used = (step.tokens_used or 0) + tokens
@@ -188,6 +195,70 @@ async def appendIdempotencyKey(session: AsyncSession, run: MultiStepRun, key: st
         return
     run.idempotency_keys = existing + [key]
     await session.flush()
+
+
+async def adoptRunForResume(
+    session: AsyncSession,
+    *,
+    runId: uuid.UUID,
+    subQuestions: list[str],
+) -> tuple[MultiStepRun | None, int]:
+    """续跑：复用既有 run 并把它的步行对齐到**本次**计划。返回 (run, 起始步号)。
+
+    调用方（Task 6 的接线）**绝不**再调 `createRun` —— 那会新建第二个 run，而
+    被 `prepareResume` 重置过的原 run 会永远停在 running（僵尸）。
+
+    起始步的唯一事实来源是 `run.current_step_idx`（Task 7 的 `prepareResume` 写入）。
+    只有当**计划的形状与原 run 逐字一致**时才沿用它；形状变了（`model_override`
+    换了模型、或重新规划出不同的子问题）时归零整跑，因为旧的「已完成」对应的
+    是别的子问题，跳过它们就是跑错。
+
+    形状对齐同时负责行数：变长补行、变短删尾（否则 `stepsByIdx[index]` 会 KeyError
+    或留下对不上的孤儿行）。
+
+    重置范围是 `>= start`：更早的已成功步**原样保留**（`sql` / `data` 都不动）——
+    续跑省掉重跑正是靠它。`data` 按 spec §5.3 永不删除；`sql` / `sql_hash` 清掉是
+    刻意的：既不复用旧 SQL，也不给将来「sql_hash 命中即复用」的遗留项留一个会
+    误命中的陈旧哈希。
+    """
+    run = await loadRun(session, runId)
+    if run is None:
+        return None, 0
+    steps = await loadSteps(session, runId)
+    shapesMatch = [s.sub_question for s in steps] == list(subQuestions)
+    start = int(run.current_step_idx or 0) if shapesMatch else 0
+    if not shapesMatch:
+        logger.info(
+            "续跑形状变化：run=%s 原 %d 步 → 本次 %d 步，起始步归零",
+            run.id, len(steps), len(subQuestions),
+        )
+
+    byIndex = {s.step_index: s for s in steps}
+    for surplus in steps:
+        if surplus.step_index >= len(subQuestions):
+            await session.delete(surplus)
+    for index, text in enumerate(subQuestions):
+        step = byIndex.get(index)
+        if step is None:
+            session.add(MultiStepStep(
+                id=uuid.uuid4(), run_id=runId, step_index=index,
+                status=STEP_STATUS_PENDING, sub_question=text,
+            ))
+            continue
+        step.sub_question = text
+        if index >= start:
+            step.status = STEP_STATUS_PENDING
+            step.last_error = None
+            step.last_error_kind = None
+            step.attempt_count = 0
+            step.finished_at = None
+            step.data_compressed = None
+            step.sql = None
+            step.sql_hash = None
+    run.total_steps = len(subQuestions)
+    run.current_step_idx = start
+    await session.flush()
+    return run, start
 
 
 def _sqlHash(sql: str) -> str:

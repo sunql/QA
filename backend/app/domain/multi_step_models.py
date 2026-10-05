@@ -31,12 +31,10 @@ class MultiStepRun(Base):
     __tablename__ = "multi_step_run"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    session_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("research_session.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
+    # chat 会话 id 是自由字符串（前端 `chat-<uuid>` / `docqa-<uuid>`，见 chatStore.ts:79），
+    # **不是** UUID，也**没有** research_session 行可指 —— 故用 String(64) 且无 FK
+    # （与 session_message / session_query_state 的既有约定一致；0115 迁移）。
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     question: Mapped[str] = mapped_column(Text, nullable=False)
     model_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     datasource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

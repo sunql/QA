@@ -5,8 +5,9 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
 from decimal import Decimal
+
+from app.utils.json_safe import jsonSafe
 
 COMPRESS_THRESHOLD = 0.7
 DEFAULT_MAX_ROWS = 30
@@ -113,13 +114,10 @@ def _jsonSafe(value: object) -> object:
 
     `data_compressed` 是裸 JSONB 列（无 `default=str` 编码器），Decimal/datetime
     直接写入会抛 TypeError；而 `rows` / `top` / `distinct` 三处都会带出 DB 原值。
+    归一规则收敛到 SSOT `app.utils.json_safe.jsonSafe`（多步落库路径同用一份，
+    避免两处 Decimal/datetime 规则漂移）。
     """
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, (datetime, date)):
-        # datetime 是 date 的子类，两者共用 isoformat()。
-        return value.isoformat()
-    return value
+    return jsonSafe(value)
 
 
 def _isNumber(value: object) -> bool:

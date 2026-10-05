@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from decimal import Decimal
 
@@ -23,6 +24,7 @@ from app.domain.exceptions import (
     ValidationError,
 )
 from app.domain.models import SessionQueryState
+from app.domain.multi_step_models import STEP_STATUS_FAILED, STEP_STATUS_SKIPPED
 from app.domain.multi_step_plan import (
     GlobalFilters,
     MultiStepPlan,
@@ -31,6 +33,7 @@ from app.domain.multi_step_plan import (
 )
 from app.domain.query_plan import QueryPlan
 from app.domain.schemas import AgentSuggestion, ChatRequest, SemanticState
+from app.services import multi_step_persistence as persistence
 from app.services.intent_service import IntentResult
 # 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER，
 # 与 chat_service.processMessage 同口径——在 _streamQuery 入口一次性读一次，
@@ -51,6 +54,7 @@ from app.services.stream_events import (
     EVENT_MULTI_STEP_PLAN,
     EVENT_PLAN,
     EVENT_SQL,
+    EVENT_STEP_COMPRESSED,
     EVENT_STEP_PLAN,
     EVENT_STEP_RESULT,
     EVENT_TOKEN,
@@ -60,6 +64,7 @@ from app.services.messages_zh import (
     MSG_INTERNAL_ERROR,
     MSG_STREAM_INTERRUPTED_EMPTY,
 )
+from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
 from app.services.chat_helpers import (
     _MSG_STEP_AGGREGATION_SKIPPED,
     _PipelineContext,
@@ -865,8 +870,47 @@ class StreamMixin:
         last_sql: str | None = None
         last_data: list[dict] = []
 
-        # 循环前一次性下发完整计划概览，前端据此渲染各步骤的「待执行」状态
+        # 落库只针对**数据步**（汇总步不执行 SQL、没有 sql/data 可落）。
+        # 汇总步仍计入 completedCount（见下方 early-return 封口），故 runStatusFor
+        # 的分母用 len(multiStepPlan.steps)（含汇总步）而不是 len(subQuestions)。
+        subQuestions = [s.description or s.sub_question for s in multiStepPlan.data_steps]
+        # 续跑模式（Task 7 传 resumeRunId）：复用既有 run，**绝不**新建。
+        # 新建会让 prepareResume 重置过的那个 run 永远停在 running（僵尸），
+        # 且落库落在一个与用户所见无关的新 run 上。
+        resumeRunId = getattr(dto, "resumeRunId", None)
+        run = None
+        startIndex = 0
+        if resumeRunId:
+            run, startIndex = await persistence.adoptRunForResume(
+                session, runId=uuid.UUID(str(resumeRunId)), subQuestions=subQuestions,
+            )
+            # adopt 返回 None 只在并发删除时发生（路由已 404 过）。此时退回普通
+            # 新建路径，宁可多一条 run，也不能因为续跑而整轮失败。
+        if run is None:
+            run = await self._openRun(
+                session,
+                sessionId=dto.sessionId,
+                question=dto.question,
+                modelId=getattr(dto, "modelId", None),
+                subQuestions=subQuestions,
+                datasourceId=getattr(dto, "datasourceId", None),
+            )
+            startIndex = 0
+        persisted = await persistence.loadSteps(session, run.id) if run is not None else []
+        stepsByIdx = {s.step_index: s for s in persisted}
+        # 计数器**绝不能**复用上面那个 completed 列表（list[StepResult]，是
+        # _hasDataStepResult / done 帧 steps 的入参）；这里一律用 int。
+        completedCount = 0
+        anyFailed = False
+        anySkipped = False
+
+        # 循环前一次性下发完整计划概览，前端据此渲染各步骤的「待执行」状态。
+        # **必须在下发之前**取得 run：顺序反了 run 还是 None，runId 永远发不出去。
         yield StreamEvent(EVENT_MULTI_STEP_PLAN, {
+            # Task 9：前端凭 runId 调 POST /chat/multi-step/{runId}/resume。
+            # 单步路径（_singleStepOverview）不落库、没有 run，故意不带这个键；
+            # 前端必须按「可选」处理，缺省时不渲染续跑按钮。
+            "runId": str(run.id) if run is not None else None,
             "steps": [
                 {
                     "stepIndex": s.index,
@@ -878,7 +922,15 @@ class StreamMixin:
             ],
         })
 
-        for step_plan in multiStepPlan.steps:
+        for index, step_plan in enumerate(multiStepPlan.steps):
+            if index < startIndex:
+                # 续跑：更早的步已经 succeeded，跳过重跑。**必须**照样计入完成数，
+                # 否则 _closeRun 的 runStatusFor 会把「跳过的成功步」当未完成 ⇒
+                # run 被误判 failed，用户看到续跑「又失败了」。
+                # 前序步结果**不**回灌进 prompt（2026-09-28 诊断已证伪拆步产生步间
+                # 数据依赖，见 memory qa-system-multistep-no-data-dependency）。
+                completedCount += 1
+                continue
             if step_plan.aggregation_only:
                 if not _hasDataStepResult(completed):
                     # 与非流式同判据（C3）：只有错误行时不调汇总 LLM，直接降级收尾
@@ -980,6 +1032,22 @@ class StreamMixin:
                         if suggestion is not None else None,
                     },
                 )
+                # 本 return 在**循环体内**，走不到循环之后的统一 _closeRun ⇒ 计划含
+                # 汇总步时（线上常态）run 会永远停在 running（僵尸），必须在此封口。
+                # 汇总步本身也算「跑完了」，不 +1 的话 completedCount 永远 <
+                # len(steps)（分母含汇总步）⇒ runStatusFor 把成功的 run 判成 failed。
+                completedCount += 1
+                # _closeRun 自己就 `if run is None: return`（kill switch 关掉时 run=None），
+                # 不需要外面再包一层判断。
+                await self._closeRun(
+                    session, run,
+                    status=runStatusFor(
+                        completedCount, len(multiStepPlan.steps), anyFailed, anySkipped
+                    ),
+                    completedSteps=completedCount,
+                    currentStepIdx=len(multiStepPlan.steps),
+                )
+                await session.commit()
                 return
 
             # 数据查询步骤：先下发计划事件，再执行（与非流式共用 helper），最后下发结果事件
@@ -988,19 +1056,119 @@ class StreamMixin:
                 "description": step_plan.description,
                 "subQuestion": step_plan.sub_question,
             })
-            run = await self._executeDataStep(session, dto, pc, ctx, step_plan, state)
-            total_tokens += run.tokens
-            total_cost += run.cost
-            if run.modelName:
-                last_model_name = run.modelName
-            completed.append(run.result)
-            ctx = ctx.with_step(run.result, chartLabelUsed=run.chart_label_calls > 0)
-            if run.result.sql is not None:
+            # 压缩判定必须发生在**构造本步 prompt 之前**：超阈值时把更早的已成功步
+            # 压成 data_compressed，本步注入的是压缩后的那份（本步自己用原始 data）。
+            #
+            # 压缩会把**更早的**步置为 compressed（其 step_result 早就发过了），
+            # 前端无从得知 —— 故这里在调用前后对比 data_compressed，为每个**新**
+            # 被压缩的步补发一条 step_compressed（Task 9 的「已压缩」徽章靠它）。
+            compressedBefore = {s.step_index: s.data_compressed for s in persisted}
+            if run is not None:
+                await self._maybeCompressPriorSteps(
+                    session, run, persisted, nextStepIdx=index,
+                    maxInputTokens=_maxInputTokens(pc),
+                    injectionText=ctx.inject_to_prompt(index),
+                )
+                for s in persisted:
+                    compressed = s.data_compressed
+                    if compressed is None or compressedBefore.get(s.step_index) is not None:
+                        continue
+                    meta = compressed.get("meta") or {}
+                    yield StreamEvent(EVENT_STEP_COMPRESSED, {
+                        "stepIndex": s.step_index,
+                        "originalRows": int(meta.get("original_rows") or 0),
+                        "compressedRows": int(meta.get("compressed_rows") or 0),
+                    })
+            if run is not None:
+                await persistence.markStepRunning(session, stepsByIdx[index])
+            # 瞬态重试：brief Step 4 的「二选一」取**选项 B**（与非流式同口径）——
+            # 不在此处包 `runWithTransientRetry`，保留对 `_executeDataStep` 的原样
+            # 调用，只在异常分支接 `_persistStepFailure`。依据见
+            # chat_multistep._executeMultiStep 的同名注释：helper 内部已有瞬态/回灌
+            # 重试，外层重包会让用量重复计账且覆盖不到「返回 error 行」的软失败。
+            try:
+                stepRun = await self._executeDataStep(session, dto, pc, ctx, step_plan, state)
+            except Exception as exc:  # noqa: BLE001 - 步骤级隔离：单步硬失败不阻断后续步
+                logger.warning("多步步骤硬失败，隔离该步骤: step=%d", index, exc_info=True)
+                if run is not None:
+                    await self._persistStepFailure(
+                        session, stepsByIdx[index], exc, run=run,
+                        tokens=getattr(exc, "tokens_used", 0),
+                        cost=getattr(exc, "cost_used", 0.0),
+                    )
+                    # 落步的终态（spec §6.3 永久错误 → failed；§4.1 的 skip 分支 → skipped）。
+                    # _persistStepFailure 只把步置为 running（per-attempt 语义），终态在此落一次。
+                    #
+                    # isSkip 恒 False：spec §4.1 的 skipped 分支靠「压缩后仍 > 95% 预算」
+                    # 判定，而该阈值与「压缩后重估」在本任务范围内都没有实现源（全仓无
+                    # 0.95 常量、无重估钩子）。凭空造一个阈值会引入未经治理的魔数，故这里
+                    # 按「不满足就是普通失败」处理；skipped / partially_failed 留作遗留项。
+                    isSkip = False
+                    await persistence.finishStep(
+                        session, stepsByIdx[index],
+                        status=STEP_STATUS_SKIPPED if isSkip else STEP_STATUS_FAILED,
+                    )
+                    if isSkip:
+                        anySkipped = True
+                    else:
+                        anyFailed = True
+                # 失败的步也必须下发终态事件，否则概览里那张卡片永远停在「待执行」
+                # ——恰发生在用户最需要看清失败原因的场景（同 935 行跳过汇总的既有先例）。
+                yield self._stepResultEvent(_failedStepResult(
+                    step_plan, f"{type(exc).__name__}: {exc}",
+                ))
+                continue
+            total_tokens += stepRun.tokens
+            total_cost += stepRun.cost
+            if stepRun.modelName:
+                last_model_name = stepRun.modelName
+            completed.append(stepRun.result)
+            if stepRun.result.sql is None:
+                # 软失败（LLM 判无法回答 / 执行 + 回灌重试均失败）不是异常：_executeDataStep
+                # 已把它收敛为 error 行（sql=None 是失败标记）。终态仍需落 failed
+                # （spec §6.3），否则该步永远停在 running。
+                #
+                # 失败记档走软失败入口（spec §6.1 要求软失败同样落 last_error /
+                # last_error_kind / attempt_count；异常本体已丢，只有错误文案）。
+                # 用量只记一次 —— finishStep 会**累加** tokens/cost，两处都传就双记。
+                if run is not None:
+                    await self._persistStepSoftFailure(
+                        session, stepsByIdx[index],
+                        message=stepRun.result.error or "",
+                        run=run, tokens=stepRun.tokens, cost=stepRun.cost,
+                    )
+                    await persistence.finishStep(
+                        session, stepsByIdx[index], status=STEP_STATUS_FAILED,
+                    )
+                    anyFailed = True
+            elif run is not None:
+                await self._persistStepSuccess(
+                    session, stepsByIdx[index],
+                    sql=stepRun.result.sql, data=stepRun.result.data,
+                    chartOption=stepRun.result.chart_option,
+                    modelUsed=stepRun.modelName,
+                    tokens=stepRun.tokens, cost=stepRun.cost,
+                )
+                completedCount += 1
+            ctx = ctx.with_step(stepRun.result, chartLabelUsed=stepRun.chart_label_calls > 0)
+            if stepRun.result.sql is not None:
                 # 只有成功步骤才更新追问锚点（与非流式同口径）
-                last_plan = run.plan
-                last_sql = run.result.sql
-                last_data = run.result.data
-            yield self._stepResultEvent(run.result)
+                last_plan = stepRun.plan
+                last_sql = stepRun.result.sql
+                last_data = stepRun.result.data
+            yield self._stepResultEvent(stepRun.result)
+
+        # 计划里没有汇总步（异常形态）时的统一收尾。分母用 len(multiStepPlan.steps)
+        # （含汇总步）与汇总分支的封口同口径。
+        await self._closeRun(
+            session, run,
+            status=runStatusFor(
+                completedCount, len(multiStepPlan.steps), anyFailed, anySkipped
+            ),
+            completedSteps=completedCount,
+            currentStepIdx=len(multiStepPlan.steps),
+        )
+        await session.commit()
 
         # 异常降级：所有步骤都不是 aggregation_only（与非流式共用收尾逻辑）
         degrade_answer = await self._finalizeMultiStepDegrade(

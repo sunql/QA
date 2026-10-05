@@ -234,3 +234,16 @@
 - 前序设计：`docs/superpowers/specs/2026-10-04-research-entry-design.md`
 - SSOT 摘要：`Harness/changes/feat-research-entry-ux-fixes/summary.md`
 - 前序 SSOT：`Harness/changes/feat-research-entry/summary.md`
+
+## 12. 实施后勘误（2026-10-05，**回填**）
+
+本文档 §2/§3/§4 的**行号引用是设计时的快照**，实现过程中有两处结构性调整使其失效 —— **设计决策本身未被推翻**，全部按原方案落地。定位代码请**按符号名**，不要按本文行号：
+
+| 调整 | 影响的行号引用 | 现在去哪找 |
+|---|---|---|
+| **W1 问句文案抽成纯函数** | `research_agent_service.py:487` / `:600` / `:492` / `:531` / `:475-488` / `:580-601` / `:527-533` / `:698-713` | `services/research_agent_stages.py`：`ambiguityPrompt` / `hypothesisPrompt` / `conflictKindLabel`（+ 兜底常量 `_AMBIGUITY_PROMPT_FALLBACK` / `_EMPTY_CANDIDATES_PROMPT`）。抽出的**动因**就是「死字面量无法被纯单测钉住」——只改文案，**不改** `phase` / `options` 结构 |
+| **执行期从 service 拆分为四模块** | `research_agent_ports.py:641-684`（直选）、`ports.py:492-511` / `:530-541`（双键） | `services/research_agent_ports.py` 的 `resolveModelConfig` → `_readConfigs` / `_resolvePreferredConfig`（直选分支）；双键两端分别是 `research_agent_phases.singleStepPlan`（snake_case）与 `ports.stepResult`（camelCase） |
+
+**新增文件**（设计时未预见，属实现拆分的产物）：`services/research_agent_phases.py`（相位/计划纯函数 + `resumeState`）、`services/research_agent_execution.py`；`services/research_agent_service.py` 只留编排。
+
+**另一处设计未预见的实现细节**：会话级模型选择在 **resume** 路径需要 `resumeState(row, checkpoint, choice)` 把 `modelId` 补回 state（checkpoint 载荷不带 `modelId` —— 模型不是落库的会话状态，而是会话主行上的列）。

@@ -152,6 +152,16 @@ describe("ResearchReportPage", () => {
     expect(await screen.findByText("归因")).toBeInTheDocument();
   });
 
+  it("渲染模式 Tag 与对应 modeDesc 说明文字（A5：复用下拉项同一 key）", async () => {
+    mockApi(reportWith({ ...GOOD_PAYLOAD, mode: "attribution" }));
+    renderPage();
+
+    expect(await screen.findByText("归因")).toBeInTheDocument();
+    expect(
+      screen.getByText("结论 → 假设验证表 → 数据 → 备选假设"),
+    ).toBeInTheDocument();
+  });
+
   it("payload.mode 未知：不渲染模式 Tag（不构造文案）", async () => {
     mockApi(reportWith({ ...GOOD_PAYLOAD, mode: "brand_new_mode" }));
     renderPage();

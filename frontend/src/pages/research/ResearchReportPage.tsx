@@ -47,7 +47,14 @@ export default function ResearchReportPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           {payload?.title || t("research.report.title")}
         </Typography.Title>
-        {mode ? <Tag>{t(`research.list.mode.${mode}`)}</Tag> : null}
+        {mode ? (
+          <Space size={4}>
+            <Tag>{t(`research.list.mode.${mode}`)}</Tag>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {t(`research.list.modeDesc.${mode}`)}
+            </Typography.Text>
+          </Space>
+        ) : null}
       </Space>
       {reports.length > 0 ? (
         <Space wrap style={{ marginBottom: 16 }}>

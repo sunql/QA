@@ -2976,6 +2976,8 @@ export const zhCN = {
       newQuestion: "发起新研究",
       questionPlaceholder: "输入你的研究问题…",
       datasourcePlaceholder: "选择数据源",
+      modelPlaceholder: "选择模型",
+      modelAuto: "自动（智能路由）",
       start: "开始研究",
       empty: "暂无研究会话",
       open: "打开",

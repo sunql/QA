@@ -32,11 +32,21 @@ const DATASOURCES = [
   { id: 2, name: "PG 报表库", type: "postgresql", isDefault: false, isActive: true },
 ];
 
-// 按 URL 分发：数据源清单走 /datasources，其余（会话列表）走 SESSIONS。
-function mockGet(overrides: { sessions?: unknown; datasources?: unknown } = {}) {
+const MODELS = [
+  { id: 1, modelName: "deepseek-chat", isActive: true },
+  { id: 2, modelName: "minimax-m1", isActive: true },
+];
+
+// 按 URL 分发：数据源清单走 /datasources，模型清单走 /models，其余（会话列表）走 SESSIONS。
+function mockGet(
+  overrides: { sessions?: unknown; datasources?: unknown; models?: unknown } = {},
+) {
   httpMock.get.mockImplementation((url: string) => {
     if (url === "/datasources") {
       return Promise.resolve({ data: overrides.datasources ?? DATASOURCES });
+    }
+    if (url === "/models") {
+      return Promise.resolve({ data: overrides.models ?? MODELS });
     }
     return Promise.resolve({ data: overrides.sessions ?? SESSIONS });
   });
@@ -100,6 +110,7 @@ describe("ResearchListPage", () => {
     await user.type(screen.getByPlaceholderText("输入你的研究问题…"), "供应商 360° 全景");
     await user.click(screen.getByRole("button", { name: "开始研究" }));
 
+    // 精确对象匹配：不选模型时请求体里不应出现 modelId 键（「自动」与今天逐字一致）。
     await waitFor(() =>
       expect(httpMock.post).toHaveBeenCalledWith("/research/sessions", {
         question: "供应商 360° 全景",
@@ -210,5 +221,44 @@ describe("ResearchListPage", () => {
     await waitFor(() => expect(screen.getAllByText("THBI Oracle")).toHaveLength(2));
     // s2 无 datasourceId ⇒ 不渲染源 Tag，故「PG 报表库」不出现。
     expect(screen.queryByText("PG 报表库")).not.toBeInTheDocument();
+  });
+
+  it("模型下拉默认「自动」；不选时请求体不带 modelId 键", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() =>
+      expect(httpMock.get).toHaveBeenCalledWith("/models", { params: { activeOnly: true } }),
+    );
+
+    expect(await screen.findByText("自动（智能路由）")).toBeInTheDocument();
+
+    await user.type(screen.getByPlaceholderText("输入你的研究问题…"), "供应商 360° 全景");
+    await user.click(screen.getByRole("button", { name: "开始研究" }));
+
+    await waitFor(() => {
+      const [, body] = httpMock.post.mock.calls[0];
+      expect(body).not.toHaveProperty("modelId");
+    });
+  });
+
+  it("选定模型后请求体带 modelId", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(httpMock.get).toHaveBeenCalled());
+
+    await user.click(screen.getByText("自动（智能路由）"));
+    await user.click(await screen.findByText("minimax-m1"));
+
+    await user.type(screen.getByPlaceholderText("输入你的研究问题…"), "供应商 360° 全景");
+    await user.click(screen.getByRole("button", { name: "开始研究" }));
+
+    await waitFor(() =>
+      expect(httpMock.post).toHaveBeenCalledWith("/research/sessions", {
+        question: "供应商 360° 全景",
+        mode: "research",
+        datasourceId: 1,
+        modelId: 2,
+      }),
+    );
   });
 });

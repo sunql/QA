@@ -24,6 +24,7 @@ export interface ResearchSession {
   status: SessionStatus;
   question: string;
   datasourceId?: number | null;
+  modelId?: number | null;
   createdAt: string;
   updatedAt: string;
 }

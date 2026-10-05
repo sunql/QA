@@ -2961,6 +2961,8 @@ export const enUS = {
       newQuestion: "New research",
       questionPlaceholder: "Enter your research question…",
       datasourcePlaceholder: "Select a datasource",
+      modelPlaceholder: "Select a model",
+      modelAuto: "Auto (smart routing)",
       start: "Start",
       empty: "No research sessions",
       open: "Open",

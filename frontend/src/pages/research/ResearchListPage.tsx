@@ -16,7 +16,9 @@ import { useTranslation } from "react-i18next";
 import { useResearchStore } from "../../stores/researchStore";
 import { useDatasourceOptions, datasourceName } from "../../hooks/useDatasourceOptions";
 import { createResearchSession } from "../../api/research";
+import { listModels } from "../../api/modelConfig";
 import type { DataSource } from "../../types/datasource";
+import type { ModelConfig } from "../../types/modelConfig";
 import type { ResearchMode, ResearchSession } from "../../types/research";
 
 const { TextArea } = Input;
@@ -46,10 +48,13 @@ interface NewResearchForm {
   question: string;
   mode: ResearchMode;
   datasourceId: number | null;
+  models: ModelConfig[];
+  modelId: number | null;
   submitting: boolean;
   setQuestion: (value: string) => void;
   setMode: (value: ResearchMode) => void;
   setDatasourceId: (value: number | null) => void;
+  setModelId: (value: number | null) => void;
   startResearch: () => Promise<void>;
 }
 
@@ -62,6 +67,8 @@ function useNewResearchForm(sources: DataSource[]): NewResearchForm {
   const [mode, setMode] = useState<ResearchMode>("research");
   const [submitting, setSubmitting] = useState(false);
   const [datasourceId, setDatasourceId] = useState<number | null>(null);
+  const [models, setModels] = useState<ModelConfig[]>([]);
+  const [modelId, setModelId] = useState<number | null>(null);
 
   // 默认选中默认数据源；用户已选过（或清单后到）都不再覆盖。
   useEffect(() => {
@@ -70,12 +77,29 @@ function useNewResearchForm(sources: DataSource[]): NewResearchForm {
     if (preferred) setDatasourceId(preferred.id);
   }, [sources, datasourceId]);
 
+  useEffect(() => {
+    void (async () => {
+      try {
+        const list = await listModels(true);
+        if (Array.isArray(list)) setModels(list);
+      } catch {
+        // 展示层降级：清单缺失时下拉为空，用户仍可「自动」建会话。
+      }
+    })();
+  }, []);
+
   const startResearch = async () => {
     const trimmed = question.trim();
     if (trimmed.length === 0) return;
     setSubmitting(true);
     try {
-      const session = await createResearchSession({ question: trimmed, mode, datasourceId });
+      // 条件展开：不选模型时不放 modelId 键，「自动」与今天逐字一致（后端 extra=forbid）。
+      const session = await createResearchSession({
+        question: trimmed,
+        mode,
+        datasourceId,
+        ...(modelId === null ? {} : { modelId }),
+      });
       navigate(`/research/${session.id}`, { state: { question: trimmed } });
     } catch {
       message.error(t("research.session.error"));
@@ -84,18 +108,41 @@ function useNewResearchForm(sources: DataSource[]): NewResearchForm {
     }
   };
 
-  return { question, mode, datasourceId, submitting, setQuestion, setMode, setDatasourceId, startResearch };
+  return {
+    question,
+    mode,
+    datasourceId,
+    models,
+    modelId,
+    submitting,
+    setQuestion,
+    setMode,
+    setDatasourceId,
+    setModelId,
+    startResearch,
+  };
 }
 
 interface NewResearchCardProps {
   sources: DataSource[];
 }
 
-/** 发起新研究卡片：问题 + 数据源 + 模式；模式选项带副描述。 */
+/** 发起新研究卡片：问题 + 数据源 + 模型 + 模式；模式选项带副描述。 */
 function NewResearchCard({ sources }: NewResearchCardProps) {
   const { t } = useTranslation();
-  const { question, mode, datasourceId, submitting, setQuestion, setMode, setDatasourceId, startResearch } =
-    useNewResearchForm(sources);
+  const {
+    question,
+    mode,
+    datasourceId,
+    models,
+    modelId,
+    submitting,
+    setQuestion,
+    setMode,
+    setDatasourceId,
+    setModelId,
+    startResearch,
+  } = useNewResearchForm(sources);
 
   return (
     <Card size="small" style={{ marginBottom: 16 }}>
@@ -112,6 +159,17 @@ function NewResearchCard({ sources }: NewResearchCardProps) {
             onChange={setDatasourceId}
             placeholder={t("research.list.datasourcePlaceholder")}
             options={sources.map((source) => ({ value: source.id, label: source.name }))}
+          />
+          {/* 0 是「自动」哨兵项（真实模型 id 从 1 起）：value 为 undefined 时 antd 只显示
+              占位符，用户看不出默认是自动。请求体仍按 modelId === null 判断是否带键。 */}
+          <Select<number>
+            value={modelId ?? 0}
+            onChange={(value) => setModelId(value === 0 ? null : value)}
+            placeholder={t("research.list.modelPlaceholder")}
+            options={[
+              { value: 0, label: t("research.list.modelAuto") },
+              ...models.map((model) => ({ value: model.id, label: model.modelName })),
+            ]}
           />
           <Select<ResearchMode>
             value={mode}

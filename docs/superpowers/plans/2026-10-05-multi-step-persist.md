@@ -2040,7 +2040,12 @@ async def testPersistDisabledWritesNoRows(pg_client, db_session, monkeypatch):
 
     走**流式**而不是非流式：只断言 `runs == []` 的话，一个「压根没走多步」的
     装配也能让它通过（假绿）。这里用流式的 `multi_step_plan` 事件反过来钉住
-    「多步确实跑了、且拆出 2 步」，同时顺带钉住 Task 9 依赖的 `runId: None` 分支。
+    「多步确实跑了、且拆出 2 个数据步」，同时顺带钉住 Task 9 依赖的 `runId: None` 分支。
+
+    断言是 **3** 不是 2：`steps` 是展示口径 = `len(plan.steps)`，**含** planner 恒追加的
+    末尾汇总步（`step_query_planner.py:124`；本例 2 数据步 + 1 汇总步）。落库口径
+    （`multi_step_step` 行 / `run.total_steps`）才是不含汇总步的 **2**。详见本任务
+    「前置裁决与地基」第 3 条 —— 两套口径别混。
     """
     from types import SimpleNamespace
 
@@ -2068,7 +2073,8 @@ async def testPersistDisabledWritesNoRows(pg_client, db_session, monkeypatch):
 
     assert resp.status_code == 200
     overview = [d for e, d in _parseFrames(resp) if e == EVENT_MULTI_STEP_PLAN]
-    assert len(overview[0]["steps"]) == 2
+    assert len(overview[0]["steps"]) == 3, "展示口径含汇总步：2 数据步 + 1 汇总步"
+    assert [s.get("aggregationOnly") for s in overview[0]["steps"]] == [False, False, True]
     assert overview[0]["runId"] is None, "开关关掉时没有 run，runId 必须是 None"
 
     runs = (await db_session.execute(select(MultiStepRun))).scalars().all()

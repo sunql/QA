@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import re
+from datetime import date, datetime
+from decimal import Decimal
 
 COMPRESS_THRESHOLD = 0.7
 DEFAULT_MAX_ROWS = 30
@@ -39,7 +41,7 @@ def compressStepData(rows: list[dict], *, maxRows: int = DEFAULT_MAX_ROWS) -> di
         values = [row.get(column) for row in rows]
         summary[column] = _summarizeColumn(column, values, rows, columns)
 
-    kept = rows[:maxRows]
+    kept = [_jsonSafeRow(row) for row in rows[:maxRows]]
     original = len(rows)
     return {
         "rows": kept,
@@ -91,17 +93,38 @@ def _summarizeColumn(
             key=lambda row: abs(float(row[column])),
             reverse=True,
         )[:TOP_N_EXTREMES]
-        summary["top"] = [{c: row.get(c) for c in columns} for row in ranked]
+        summary["top"] = [{c: _jsonSafe(row.get(c)) for c in columns} for row in ranked]
         return summary
 
     return {"distinct": _distinctSorted(present)[:MAX_DISTINCT_VALUES]}
 
 
 def _distinctSorted(values: list) -> list:
-    return sorted({v for v in values if v is not None}, key=lambda v: str(v))
+    return sorted({_jsonSafe(v) for v in values if v is not None}, key=lambda v: str(v))
+
+
+def _jsonSafeRow(row: dict) -> dict:
+    """返回归一化后的新行（不改调用方的字典）。"""
+    return {column: _jsonSafe(value) for column, value in row.items()}
+
+
+def _jsonSafe(value: object) -> object:
+    """把 DB 原值归一为 JSON 原生类型。
+
+    `data_compressed` 是裸 JSONB 列（无 `default=str` 编码器），Decimal/datetime
+    直接写入会抛 TypeError；而 `rows` / `top` / `distinct` 三处都会带出 DB 原值。
+    """
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        # datetime 是 date 的子类，两者共用 isoformat()。
+        return value.isoformat()
+    return value
 
 
 def _isNumber(value: object) -> bool:
     if isinstance(value, bool):
         return False
-    return isinstance(value, (int, float))
+    # 含 Decimal：业务库数值列常以 Decimal 返回
+    # （同 data_summary._to_float / chat_multistep._summarizeStepData）。
+    return isinstance(value, (int, float, Decimal))

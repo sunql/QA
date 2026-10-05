@@ -1,3 +1,7 @@
+import json
+from datetime import datetime
+from decimal import Decimal
+
 import pytest
 
 from app.services.multi_step_compressor import (
@@ -60,6 +64,37 @@ def testCompressIgnoresBooleansAsNumeric():
     rows = [{"is_active": True, "amount": 1}, {"is_active": False, "amount": 2}]
     result = compressStepData(rows, maxRows=2)
     assert "max" not in result["columns"]["is_active"]
+
+
+def testCompressAggregatesDecimalColumnsAndEmitsJsonSafeOutput():
+    # 业务库数值列常以 Decimal 返回（同 data_summary._to_float）
+    rows = [{"amount": Decimal("120.50")}, {"amount": Decimal("99.50")}]
+
+    result = compressStepData(rows, maxRows=5)
+
+    summary = result["columns"]["amount"]
+    assert summary["max"] == 120.5
+    assert summary["min"] == 99.5
+    assert summary["avg"] == 110.0
+    assert summary["sum"] == 220.0
+    assert summary["top"][0]["amount"] == 120.5
+    json.dumps(result)  # 不抛 ⇒ 可直接写进 JSONB 的 data_compressed
+
+
+def testCompressNormalizesDbValuesIntoJsonNativeTypes():
+    stamp = datetime(2025, 3, 1, 12, 30, 45)
+    # created_at 不含 _TIME_HINT 的任一子串 ⇒ 走 category 的 distinct 分支
+    rows = [
+        {"created_at": stamp, "amount": Decimal("1.5")},
+        {"created_at": stamp, "amount": Decimal("2.5")},
+    ]
+
+    result = compressStepData(rows, maxRows=5)
+
+    assert result["rows"][0]["created_at"] == "2025-03-01T12:30:45"
+    assert result["rows"][0]["amount"] == 1.5
+    assert result["columns"]["created_at"]["distinct"] == ["2025-03-01T12:30:45"]
+    json.dumps(result)
 
 
 def testEstimatePromptTokensCountsCjkAndLatin():

@@ -50,6 +50,7 @@ from app.services.nl2sql_service import _readFloatConfig
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.think_block import applyThinkPolicy
 from app.services.visual_rationale import summaryTextOnlyRationale
+from app.services.query_pattern_router import QueryPatternRouter, RouteHint  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,17 @@ class MultiStepMixin:
         step_cost = self._costFor(
             pc.selected, detected.prompt_tokens, detected.completion_tokens,
         )
+        # ★ NEW: 题目模式 → 路由 hook（feat-qwen-multistep-uplift）
+        try:
+            hint = self._patternRouter.route(dto.question, is_multi_step=True)
+            if hint.forced_model_id is not None:
+                logger.info(
+                    "题目模式命中模式=%s 强制模型=%s",
+                    hint.reason, hint.forced_model_id,
+                )
+                dto = dto.model_copy(update={"modelId": hint.forced_model_id})
+        except Exception:  # noqa: BLE001
+            logger.warning("题目模式路由 hook 异常，原 dto.modelId 保留", exc_info=True)
         return detected.plan, step_tokens, step_cost
 
     # =========================================================================

@@ -123,6 +123,8 @@ from app.services.ontology_service import OntologyService
 from app.services.step_aggregator import StepAggregator
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.supplier_360_service import Supplier360Service
+from app.services.query_pattern_router import QueryPatternRouter
+from app.services.step_subquestion_rewriter import StepSubquestionRewriter
 from app.services.supplier_name_resolver import SupplierNameResolver
 from app.services.supplier_risk_service import SupplierRiskService, buildRiskAnswer
 from app.services.schema_introspection_service import (
@@ -352,6 +354,9 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         self._supplierNameResolver = supplierNameResolver or SupplierNameResolver()
         # 会话亲和性窗口：前 N 轮锁定模型；None 时按需懒加载 settings
         self._affinityTurns = affinityTurns
+        # 新增 2 行（feat-qwen-multistep-uplift）
+        self._patternRouter = QueryPatternRouter()
+        self._subquestionRewriter = StepSubquestionRewriter()
 
     async def processMessage(
         self,

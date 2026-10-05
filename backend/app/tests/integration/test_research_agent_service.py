@@ -31,10 +31,10 @@ from app.infrastructure.security.crypto import encryptApiKey
 from app.services.nl2sql_service import SqlResult
 from app.services.report_planner import ReportPlanner
 from app.services.research_agent_execution import ExecutionDeps, runStep
+from app.services.research_agent_phases import isDegraded
 from app.services.research_agent_ports import (
     STEP_MISSING_SQL,
     LlmUsageRecorder,
-    isDegraded,
     resolveModelConfig,
 )
 from app.services.research_agent_service import ResearchAgentService

@@ -85,13 +85,13 @@ from app.services.messages_zh import MSG_DATASOURCE_NONE_AVAILABLE, MSG_MODEL_CO
 from app.services.model_config_service import ModelConfigService
 from app.services.nl2sql_service import Nl2SqlService
 from app.services.ontology_service import OntologyService
+from app.services.research_agent_phases import nextPhase
 from app.services.research_agent_ports import (
     ERROR_TURN_FAILED,
     EVENT_DONE,
     EVENT_ERROR,
     TERMINAL_ERROR_CODES,
     errorPayload,
-    nextPhase,
 )
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_event_bus import EVENT_CONNECTED, bus

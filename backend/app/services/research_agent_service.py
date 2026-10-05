@@ -6,9 +6,10 @@ verify → report。三个**固定 checkpoint**（范围确认 / 计划确认 / 
 在指定相位暂停：状态落 `research_checkpoint`（`options` 带恢复所需的语义载荷），
 用户决策后 `resumeTurn` 从「下一相位」续跑。
 
-本模块只留编排（相位调度 + IO）；共享词汇、端口协议、默认适配器与无状态构件在
-`research_agent_ports.py`（fix round 1 抽取），执行面（步 SQL 生成 → 只读查询 → 出图）在
-`research_agent_execution.py`（Task 6.5 fix round 2 抽取）——两者都是为守住 800 行硬上限。
+本模块只留编排（相位调度 + IO）；7 个相位执行体与相位纯函数在
+`research_agent_phases.py`（Task 9 Step 0 抽取，零行为变化），共享词汇、端口协议、默认适配器
+与无状态构件在 `research_agent_ports.py`（fix round 1 抽取），执行面（步 SQL 生成 → 只读查询 →
+出图）在 `research_agent_execution.py`（Task 6.5 fix round 2 抽取）——都是为守住 800 行硬上限。
 `PHASES` 在此再导出，保持 brief 的 `from app.services.research_agent_service import PHASES` 契约。
 
 Step 0 核对（2026-10-04，本任务强制）：`grep -nE "class |def " app/services/chat_usage.py`
@@ -41,77 +42,48 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.research_models import ResearchSession
-from app.services.enterprise_semantic_layer import EmptyResearchScopeError
-from app.services.hypothesis_service import Hypothesis
 from app.services.intent_service import IntentService
 from app.services.model_config_service import ModelConfigService
 from app.services.model_router_service import ModelRouterService
 from app.services.ontology_service import OntologyService
 from app.services.report_planner import ReportPlanner
-from app.services.research_agent_execution import (
-    ExecutionDeps, adapterFor, buildExecutionDeps, depsForSession, executedStepCount,
-    finalizeStepResults, runStep,
+from app.services.research_agent_execution import ExecutionDeps, buildExecutionDeps
+from app.services.research_agent_phases import (
+    ResearchAgentPhasesMixin,
+    isDegraded,
+    nextPhase,
 )
 from app.services.research_agent_ports import (
     ACTION_STATUS,
-    CHECKPOINT_HYPOTHESIS,
-    CHECKPOINT_INTENT,
-    CHECKPOINT_LOW_CONFIDENCE,
     CHECKPOINT_PLANNING,
-    CHECKPOINT_RUNTIME_DYNAMIC,
-    DEFAULT_MODE,
     ERROR_HYPOTHESIS_FAILED,
     ERROR_TURN_FAILED,
     EVENT_CHECKPOINT,
     EVENT_DONE,
     EVENT_ERROR,
-    EVENT_ESL,
-    EVENT_FINDING,
-    EVENT_HYPOTHESIS,
-    EVENT_INTENT,
-    EVENT_PLAN,
-    EVENT_REPORT,
     PHASE_ESL,
     PHASES,
     PURPOSE_HYPOTHESIS,
-    PURPOSE_PLAN,
-    PURPOSE_REPORT,
     ROLE_CHECKPOINT,
-    SIGNAL_EMPTY_SCOPE,
-    SIGNAL_FIXED_HYPOTHESIS,
-    SIGNAL_FIXED_PLAN,
-    SIGNAL_FIXED_SCOPE,
     STATUS_AWAITING,
     STATUS_DONE,
     STATUS_FAILED,
     STATUS_RUNNING,
-    VERIFY_FAIL_FACTOR,
-    VERIFY_OK_FACTOR,
     Emit,
     LlmUsageRecorder,
     MeteredClient,
     Pause,
     Reporter,
     UsageRecorder,
-    buildOptions,
     emitEvent,
     errorPayload,
-    findingData,
-    isDegraded,
-    nextPhase,
     nextPhaseForPhase,
-    normalizePlan,
-    planQuestionWithFeedback,
     recordUsageQuietly,
     requireQuestion,
     resolveClient,
-    singleStepPlan,
-    stepSignal,
 )
 from app.services.research_agent_stages import (
-    ambiguityPrompt, candidateConfidence, clientModelName, dataSummary, drivers,
-    eslClasses, hypothesisPrompt, rebuildState, resumeTurnContent, rewriteState,
-    selectedHypotheses,
+    dataSummary, drivers, rebuildState, resumeTurnContent, rewriteState,
 )
 from app.services.research_hypothesis_adapter import generateHypotheses
 from app.services.research_session_service import ResearchSessionService
@@ -122,8 +94,12 @@ logger = logging.getLogger(__name__)
 __all__ = ["PHASES", "ResearchAgentService"]
 
 
-class ResearchAgentService:
-    """研究 turn 状态机（无状态；构造注入协作者）。"""
+class ResearchAgentService(ResearchAgentPhasesMixin):
+    """研究 turn 状态机（无状态；构造注入协作者）。
+
+    7 个相位执行体（`_stageXxx`）在 `ResearchAgentPhasesMixin`（Task 9 Step 0 抽出）；
+    本类只留编排与公开面。
+    """
 
     def __init__(
         self,
@@ -436,255 +412,6 @@ class ResearchAgentService:
                 "options": options,
             },
         )
-
-    # ------------------------------------------------------------------
-    # 相位实现（各 < 50 行；返回 Pause 表示暂停，None 表示继续）
-    # ------------------------------------------------------------------
-
-    async def _stageIntent(
-        self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,
-        emit: Emit | None, state: dict[str, Any],
-    ) -> Pause | None:
-        """[1] 意图分类（纯规则，零 LLM / 零 DB）→ 决定研究 mode。"""
-        result = self._intent.classifyResult(state["question"])
-        state["intent"] = {"intent": result.intent.value, "mode": state.get("mode")}
-        await emitEvent(emit, EVENT_INTENT, dict(state["intent"]))
-        return None
-
-    async def _stageEsl(
-        self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,
-        emit: Emit | None, state: dict[str, Any],
-    ) -> Pause | None:
-        """[2][3] 三臂拆解 → 动态冲突点（先于固定 #1）→ 固定 #1 范围确认。"""
-        try:
-            extraction = await self._esl.extract(state["question"])
-        except EmptyResearchScopeError as exc:
-            logger.warning("ESL 三臂全空，转范围确认强制改写: session=%s err=%s", sessionId, exc)
-            emptyArms = {"businessObjects": [], "metrics": [], "knowledge": [], "conflicts": []}
-            return (
-                CHECKPOINT_INTENT,
-                buildOptions(
-                    signal=SIGNAL_EMPTY_SCOPE, arms=emptyArms, resumePhase=PHASE_ESL
-                ),
-                "三臂检索全空：请改写问题后继续",
-            )
-        arms = asdict(extraction)
-        state["esl"] = arms
-        await emitEvent(emit, EVENT_ESL, arms)
-        if self._autoConfirm:
-            return None
-        if extraction.conflicts:
-            # 动态点先于固定 #1：冲突未决时范围确认没有意义（且 brief 的契约测试要求
-            # 第一个 pending checkpoint 就是 runtime_dynamic）。
-            kinds = sorted({c.kind for c in extraction.conflicts})
-            return (
-                CHECKPOINT_RUNTIME_DYNAMIC,
-                buildOptions(
-                    signal=kinds[0],
-                    arms=arms,
-                    resumePhase="plan",
-                    conflicts=arms["conflicts"],
-                ),
-                ambiguityPrompt(arms["conflicts"]),
-            )
-        return (
-            CHECKPOINT_INTENT,
-            buildOptions(signal=SIGNAL_FIXED_SCOPE, arms=arms, resumePhase="plan"),
-            "三臂是否齐全？",
-        )
-
-    async def _stagePlan(
-        self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,
-        emit: Emit | None, state: dict[str, Any],
-    ) -> Pause | None:
-        """[4][5] 多步计划（LLM，计量）→ 固定 #2 计划确认。
-
-        `state["replan"]`（Task 6.5-4）：计划 checkpoint 的 modify 恢复。此时把用户
-        choice 回灌 planner 重跑出**新计划**，且**不再暂停**在同一检查点（直接进
-        execute）——否则用户会陷入「改了又改」的死循环。
-        """
-        replan = bool(state.pop("replan", False))
-        question = (
-            planQuestionWithFeedback(state["question"], state.get("choice"))
-            if replan
-            else state["question"]
-        )
-        client = await self._llmClient(session, state=state, emit=emit, sessionId=sessionId)
-        result = await self._planner.plan(question, eslClasses(state), client, clientModelName(client))
-        rawPlan = getattr(result, "plan", result)
-        plan = normalizePlan(rawPlan) if rawPlan is not None else singleStepPlan(question)
-        state["plan"] = plan
-        await self._recordUsage(
-            session,
-            sessionId=sessionId,
-            purpose=PURPOSE_PLAN,
-            promptTokens=int(getattr(result, "prompt_tokens", 0) or 0),
-            completionTokens=int(getattr(result, "completion_tokens", 0) or 0),
-            modelName=clientModelName(client),
-        )
-        await emitEvent(emit, EVENT_PLAN, {"steps": plan["steps"]})
-        if replan or self._autoConfirm:
-            return None
-        return (
-            CHECKPOINT_PLANNING,
-            buildOptions(
-                signal=SIGNAL_FIXED_PLAN, plan=plan, arms=state.get("esl"), resumePhase="execute"
-            ),
-            "计划是否确认？",
-        )
-
-    async def _stageExecute(
-        self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,
-        emit: Emit | None, state: dict[str, Any],
-    ) -> Pause | None:
-        """[6] 逐步只读执行 + 出图；步失败/空数据 → 动态 low_confidence_step 点。"""
-        steps = [
-            s for s in (state.get("plan") or {}).get("steps", []) if not s.get("aggregation_only")
-        ]
-        if not steps:  # N1 急停：无数据步 ⇒ 终态失败（`_guardedRun` 转 research.error + failed），不出报告
-            raise RuntimeError("研究计划无数据步（aggregation_only 过滤后为空），本 turn 终止")
-        results: list[dict[str, Any]] = list(state.get("stepResults") or [])
-        startIndex = int(state.get("resumeStepIndex") or 0)
-        # Task 4 契约：执行失败会 rollback 注入的 session，先固化本 turn 已写入的状态行
-        await session.commit()
-        deps = await depsForSession(session, sessionId, self._exec)  # Task 13e：业务库源按次送达
-        for step in steps:
-            if int(step.get("index", 0)) < startIndex:
-                continue
-            result = await runStep(
-                session, step, sessionId=sessionId, state=state, emit=emit, deps=deps
-            )
-            results.append(result)
-            state["stepResults"] = results
-            if not result["error"] and result["rowCount"] > 0:
-                continue
-            if self._autoConfirm:
-                continue
-            return (
-                CHECKPOINT_LOW_CONFIDENCE,
-                buildOptions(
-                    signal=stepSignal(result["error"]),
-                    plan=state.get("plan"),
-                    arms=state.get("esl"),
-                    stepResults=results, stepsExecuted=executedStepCount(results),
-                    stepIndex=result["index"],
-                    error=result["error"] or "该步骤无数据返回",
-                    resumePhase="execute",
-                    abortPhase="report",
-                    nextStepIndex=result["index"] + 1,
-                ),
-                "步骤失败，跳过还是终止？",
-            )
-        finalizeStepResults(state, results)  # N1'：全部步失败 ⇒ 急停；否则写回步数（degraded 依据）
-        return None
-
-    async def _stageHypothesis(
-        self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,
-        emit: Emit | None, state: dict[str, Any],
-    ) -> Pause | None:
-        """[7][8] 假设生成（LLM，计量）→ 固定 #3 假设挑选。"""
-        candidates = await self._generateCandidates(
-            session, sessionId=sessionId, state=state, emit=emit
-        )
-        state["hypotheses"] = candidates
-        await emitEvent(emit, EVENT_HYPOTHESIS, {"candidates": candidates})
-        if self._autoConfirm:
-            return None
-        return (
-            CHECKPOINT_HYPOTHESIS,
-            buildOptions(
-                signal=SIGNAL_FIXED_HYPOTHESIS,
-                candidates=candidates,
-                arms=state.get("esl"), stepsExecuted=executedStepCount(state.get("stepResults") or []),
-                resumePhase="verify",
-            ),
-            hypothesisPrompt(candidates),
-        )
-
-    async def _stageVerify(
-        self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,
-        emit: Emit | None, state: dict[str, Any],
-    ) -> Pause | None:
-        """[9] 逐条验证假设并落 finding（confidence = 候选分 × 0.9 / 0.3）。"""
-        findings: list[dict[str, Any]] = []
-        # Task 13e：验证 SQL 与执行步走同一条业务库路径（假设 SQL 也是业务 SQL）
-        adapter = adapterFor((await depsForSession(session, sessionId, self._exec)).datasource)
-        for candidate in selectedHypotheses(state):
-            await session.commit()  # Task 4 契约：runVerification 失败会 rollback 本 session
-            outcome = await self._runner.runVerification(
-                session, Hypothesis(**candidate), adapter=adapter
-            )
-            verified = outcome.get("error") is None
-            confidence = round(
-                candidateConfidence(state, candidate)
-                * (VERIFY_OK_FACTOR if verified else VERIFY_FAIL_FACTOR),
-                6,
-            )
-            row = await self._sessions.saveFinding(
-                session,
-                sessionId=sessionId,
-                turnId=turnId,
-                claimText=candidate["statement"],
-                supportingSql=candidate.get("verificationSql"),
-                supportingData=findingData(outcome),
-                confidence=confidence,
-            )
-            findings.append(
-                {
-                    "findingId": str(row.id),
-                    "claim": candidate["statement"],
-                    "confidence": confidence,
-                    "verified": verified,
-                }
-            )
-            await emitEvent(emit, EVENT_FINDING, findings[-1])
-        state["findings"] = findings
-        return None
-
-    async def _stageReport(
-        self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,
-        emit: Emit | None, state: dict[str, Any],
-    ) -> Pause | None:
-        """[10][11][12] 报告装配（reporter，Task 6 为真实 ReportPlanner）+ 归档。
-
-        LLM 文本块经 `MeteredClient` 计量（核心约束 #3）：一次 compose 会逐块调用，
-        MeteredClient 累加后此处一次性记 `purpose=research_report`；reporter 自身不记账
-        （避免双计）。归档（version=max+1、旧版 superseded）留在本方法，reporter 只装配。
-        """
-        client = await self._llmClient(session, state=state, emit=emit, sessionId=sessionId)
-        metered = MeteredClient(client) if client is not None else None
-        payload, renderedMd = await self._reporter.compose(
-            session,
-            sessionId=sessionId,
-            turnId=turnId,
-            mode=state.get("mode") or DEFAULT_MODE,
-            llmClient=metered,
-        )
-        if metered is not None:
-            await self._recordUsage(
-                session,
-                sessionId=sessionId,
-                purpose=PURPOSE_REPORT,
-                promptTokens=metered.promptTokens,
-                completionTokens=metered.completionTokens,
-                modelName=metered.modelName,
-                cachedTokens=metered.cachedTokens,
-            )
-        report = await self._sessions.publishReport(
-            session, sessionId=sessionId, payload=payload, renderedMd=renderedMd
-        )
-        state["reportId"] = str(report.id)
-        state["reportVersion"] = report.version
-        await emitEvent(
-            emit,
-            EVENT_REPORT,
-            {
-                "reportId": str(report.id),
-                "version": report.version,
-                "degraded": isDegraded(state),
-            },
-        )
-        return None
 
     async def _generateCandidates(
         self,

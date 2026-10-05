@@ -7,9 +7,11 @@
    保持 brief 的 `from app.services.research_agent_service import PHASES` 契约。
 2. **端口与默认适配器**：`UsageRecorder` + `LlmUsageRecorder` + `MeteredClient`（计量）、
    `Reporter`（报告端口；Task 6 起唯一实现是 `ReportPlanner`，占位实现已删除）。
-3. **无状态构件**：options 构造 / 相位映射 / 步结果与计划归一化 / 静默 emit 与
-   rollback 兜底。（恢复态重建 / 改写态 / 恢复轮内容、假设筛选与打分 / 提示词取值助手
-   见 `research_agent_stages.py`，Task 8 / 8.5 抽出以守住 800 行上限。）
+3. **无状态构件**：options 构造 / 相位映射（`nextPhaseForPhase`）/ 步结果与计划归一化 /
+   静默 emit 与 rollback 兜底。（恢复态重建 / 改写态 / 恢复轮内容、假设筛选与打分 /
+   提示词取值助手见 `research_agent_stages.py`，Task 8 / 8.5 抽出；相位纯函数
+   `nextPhase` / `isDegraded` / `findingData` 与 7 个相位执行体见
+   `research_agent_phases.py`，Task 9 Step 0 抽出 —— 均为守住 800 行硬上限。）
 
 抽取动因：服务文件曾 1072 行，超 800 行硬上限；行为零变化（同一批测试全绿）。
 """
@@ -433,14 +435,6 @@ def nextPhaseForPhase(phase: str, options: dict[str, Any]) -> str:
     return NEXT_PHASE_BY_CHECKPOINT.get(phase) or PHASES[-1]
 
 
-def nextPhase(checkpoint: Any, action: str) -> str:
-    """决策后回到哪个相位；动态点 reject 时走 `abortPhase`（终止到出报告）。"""
-    options = checkpoint.options or {}
-    if action == ACTION_REJECT and options.get(OPT_ABORT_PHASE):
-        return str(options[OPT_ABORT_PHASE])
-    return nextPhaseForPhase(checkpoint.phase, options)
-
-
 def stepSignal(error: str | None) -> str:
     """步失败**checkpoint signal 词汇**：SQL Guard 拒绝单列，其余归 low_confidence_step（设计 §4.8）。
 
@@ -479,14 +473,6 @@ def singleStepPlan(question: str) -> dict[str, Any]:
         "aggregationHint": "",
         "originalQuestion": question,
     }
-
-
-def isDegraded(state: dict[str, Any]) -> bool:
-    """降级口径 SSOT（Task 14 / N1）：无可用 LLM，或**本 turn 零个数据步被执行**（不判行数）。
-
-    步数读 `state["stepsExecuted"]`（写回 + 经 checkpoint 载荷跨恢复轮还原，缺键按 0 —— 即
-    宁可在未知路径上标降级）；「有步执行但 0 行」是合法答案，既有机制已落成动态点，不在此叠一层。"""
-    return bool(state.get("llmUnavailable")) or not state.get("stepsExecuted")
 
 
 def normalizePlan(plan: Any) -> dict[str, Any]:
@@ -568,28 +554,9 @@ async def rollbackQuietly(session: AsyncSession) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 无状态构件：finding 数据契约 / LLM 客户端兜底 / 用量记账兜底
+# 无状态构件：LLM 客户端兜底 / 用量记账兜底
 # （Task 6 从 research_agent_service 抽出，保持该文件 ≤ 800 行）
 # ---------------------------------------------------------------------------
-
-
-def findingData(outcome: dict[str, Any]) -> dict[str, Any]:
-    """finding.supporting_data 契约（Task 5 写 / Task 6 报告读）。
-
-    行数据必须落库：步结果只活在内存 state 里，`research_finding.supporting_data`
-    是报告 chart/table 块的**唯一**持久化数据源（Task 6 §4.7 偏差）。行数超
-    `MAX_FINDING_ROWS` 时截断并 warning（不静默丢数据）。
-    """
-    rows = list(outcome.get("rows") or [])
-    if len(rows) > MAX_FINDING_ROWS:
-        logger.warning(
-            "验证结果行数超上限，报告数据截断: rows=%s limit=%s", len(rows), MAX_FINDING_ROWS
-        )
-    return {
-        "rowCount": len(rows),
-        "error": outcome.get("error"),
-        FINDING_ROWS_KEY: rows[:MAX_FINDING_ROWS],
-    }
 
 
 def buildClient(factory: Any, config: Any) -> Any:

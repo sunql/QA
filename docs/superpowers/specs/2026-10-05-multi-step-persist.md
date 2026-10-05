@@ -309,7 +309,7 @@ Response: SSE stream（与 /api/v1/chat 一致的事件序列）
 
 | 场景 | 现象 | 自动处理 | 用户可见 |
 |---|---|---|---|
-| oMLX 第 2 步超时 | 1s/2s/4s 自动重试，第 3 次仍败 | 转 manual | 「续跑」按钮亮起 |
+| oMLX 第 2 步超时 | 1s/2s 自动重试，第 3 次仍败 | 转 manual | 「续跑」按钮亮起 |
 | oMLX 全程不可用 | run 整次失败 | 无 | 「网络问题，请稍后重试或点击续跑」 |
 | 第 3 步 prompt 撑爆 ctx | 自动压缩第 1、2 步 data | 压缩后重跑 | step 卡片显示「数据已压缩」徽章 |
 | 压缩后仍超限（>95%） | 该步 skipped | 后续步继续 | run.status=partially_failed，UI 标「部分失败」 |

@@ -775,7 +775,7 @@ git commit -m "feat(multi-step): 新增 MultiStepRepository 落库与查询"
 **Interfaces:**
 - Consumes: `app.domain.exceptions.LLMUnavailableError`、`app.services.llm_retry_policy.isRetryableLlmError`（参考用）
 - Produces:
-  - 常量 `TRANSIENT_WAITS = (1, 2, 4)`、`MAX_ATTEMPTS = 3`、`ERROR_KIND_TRANSIENT = "transient"`、`ERROR_KIND_PERMANENT = "permanent"`
+  - 常量 `TRANSIENT_WAITS = (1, 2)`、`MAX_ATTEMPTS = 3`（**两者各自独立定义，勿写 `MAX_ATTEMPTS = len(TRANSIENT_WAITS)`**）、`ERROR_KIND_TRANSIENT = "transient"`、`ERROR_KIND_PERMANENT = "permanent"`
   - `classifyStepError(exc: BaseException) -> str`
   - `async def runWithTransientRetry(call, *, sleep=asyncio.sleep, onError=None) -> tuple[Any, int]`
 
@@ -930,9 +930,13 @@ logger = logging.getLogger(__name__)
 ERROR_KIND_TRANSIENT = "transient"
 ERROR_KIND_PERMANENT = "permanent"
 
-#: 每次瞬态失败后的等待秒数；长度即「重试次数上限 - 1」
-TRANSIENT_WAITS: tuple[int, ...] = (1, 2, 4)
-MAX_ATTEMPTS: int = len(TRANSIENT_WAITS)
+#: 第 N 次尝试失败后等 TRANSIENT_WAITS[N - 1] 秒。3 次尝试之间只等 2 次
+#: （spec §6.2：1s → 2s → 第 3 次失败即转 manual），故只有 2 个元素。
+TRANSIENT_WAITS: tuple[int, ...] = (1, 2)
+#: 尝试次数上限。**独立于 TRANSIENT_WAITS 的长度**——写成 len(TRANSIENT_WAITS)
+#: 会让「等待次数」与「尝试次数」互相绑死（长度 2 会被误读成最多试 2 次），
+#: 正是本模块要避免的坑。
+MAX_ATTEMPTS: int = 3
 
 _TRANSIENT_STATUS = frozenset({429, 500, 502, 503, 504})
 
@@ -988,7 +992,8 @@ async def runWithTransientRetry(
             if kind != ERROR_KIND_TRANSIENT:
                 raise
             lastError = exc
-            if attempt <= len(TRANSIENT_WAITS):
+            # 最后一次尝试失败后不再等待，直接转人工（spec §6.2）
+            if attempt < MAX_ATTEMPTS:
                 logger.warning("multi-step 第 %d 次尝试瞬态失败，%.0fs 后重试：%s",
                                attempt, TRANSIENT_WAITS[attempt - 1], exc)
                 await sleep(TRANSIENT_WAITS[attempt - 1])
@@ -1007,7 +1012,7 @@ Expected: 15 passed（`testClassifyStepError` 10 个参数化用例 + 5 个测�
 
 ```bash
 git add backend/app/services/multi_step_retry.py backend/app/tests/unit/test_multi_step_retry.py
-git commit -m "feat(multi-step): 新增错误分类与瞬态重试（1s/2s/4s，3 次封顶）"
+git commit -m "feat(multi-step): 新增错误分类与瞬态重试（1s/2s 退避，3 次封顶）"
 ```
 
 ---
@@ -1689,7 +1694,7 @@ async def testRunMarkedFailedWhenStepExhaustsRetries(pg_client, db_session, monk
     monkeypatch.setattr(retryPolicy, "RETRY_WAIT_MIN_SECONDS", 0)
     monkeypatch.setattr(retryPolicy, "RETRY_WAIT_MAX_SECONDS", 0)
     monkeypatch.setattr(
-        "app.services.multi_step_retry.TRANSIENT_WAITS", (0, 0, 0)
+        "app.services.multi_step_retry.TRANSIENT_WAITS", (0, 0)
     )
 
     callCount = {"n": 0}
@@ -2543,7 +2548,7 @@ git commit -m "feat(multi-step): 前端续跑按钮与步骤状态徽章"
 
 - [ ] **Step 1: 写 wiki 条目**
 
-`Harness/wiki/chat_multi_step_persistence.md`：按 `Harness/wiki/` 既有条目格式（frontmatter + 概述 + 详细说明 + 相关条目），内容涵盖：两张表的关系、状态机、压缩触发阈值 0.7、重试 3 次 1s/2s/4s、续跑端点与幂等、保留期 30/7 天、feature flag 名。链接 [[chat_multistep_flow]]、[[llm_retry_policy]]、[[research_session]]（按实际存在的条目名调整）。
+`Harness/wiki/chat_multi_step_persistence.md`：按 `Harness/wiki/` 既有条目格式（frontmatter + 概述 + 详细说明 + 相关条目），内容涵盖：两张表的关系、状态机、压缩触发阈值 0.7、重试 3 次 1s/2s 退避、续跑端点与幂等、保留期 30/7 天、feature flag 名。链接 [[chat_multistep_flow]]、[[llm_retry_policy]]、[[research_session]]（按实际存在的条目名调整）。
 
 - [ ] **Step 2: 写 change 记录**
 

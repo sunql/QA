@@ -773,13 +773,19 @@ git commit -m "feat(multi-step): 新增 MultiStepRepository 落库与查询"
 - Test: `backend/app/tests/unit/test_multi_step_retry.py`
 
 **Interfaces:**
-- Consumes: `app.domain.exceptions.LLMUnavailableError`、`app.services.llm_retry_policy.isRetryableLlmError`（参考用）
+- Consumes: `app.domain.exceptions.LLMUnavailableError`、`LlmClientError`、`Nl2SqlError`
 - Produces:
   - 常量 `TRANSIENT_WAITS = (1, 2)`、`MAX_ATTEMPTS = 3`（**两者各自独立定义，勿写 `MAX_ATTEMPTS = len(TRANSIENT_WAITS)`**）、`ERROR_KIND_TRANSIENT = "transient"`、`ERROR_KIND_PERMANENT = "permanent"`
   - `classifyStepError(exc: BaseException) -> str`
-  - `async def runWithTransientRetry(call, *, sleep=asyncio.sleep, onError=None) -> tuple[Any, int]`
+  - `async def runWithTransientRetry(call, *, sleep=asyncio.sleep, onError=None) -> tuple[T, int]`
 
-**设计说明（与既有策略的差异，必须写进 docstring）:** `llm_retry_policy.isRetryableLlmError` 对 `Nl2SqlError` 一律返回可重试；但多步场景下 plan 校验失败属于**永久**错误（重试无意义、白烧 token）。故本模块自带分类器，不复用那一条规则。
+**设计说明（与既有策略的差异，必须写进 docstring）:** 不复用 `llm_retry_policy.isRetryableLlmError`——它对 `Nl2SqlError` 一律返回可重试，而多步场景下 plan 校验失败属于**永久**错误（重试无意义、白烧 token）。本模块自带分类器。
+
+**分类必须沿整条 `__cause__` 链走（2026-10-05 人类裁决，spec §6.1 同步修订）：** 本仓所有 provider 失败都被 `openai_client` 以 `LlmClientError(...) from exc` 包住，故 spec §6.1 列的 httpx 类型在分类点**永远不会裸着到达**；只看最外层类型、或只看一层 `__cause__`，会把「provider 不可达 / 超时」误判为永久——而那正是本功能要救的故障类别。硬性要求：
+- 遍历 `__cause__`/`__context__` 整条链（按 id 去环），任一环命中瞬态类型或瞬态状态码 → `transient`；
+- 瞬态类型 = `httpx.TransportError`（已含 ConnectError / TimeoutException / ReadError / RemoteProtocolError / PoolTimeout）、内建 `ConnectionError`、`asyncio.TimeoutError`；
+- 状态码读 `status_code` 或 `status`（aiohttp 一类客户端用后者），`429/500/502/503/504` → `transient`，其余 → `permanent`；
+- `Nl2SqlError` 与 `LLMUnavailableError` 按类型**优先**判永久（前者语义固定；后者是「未配置 LLM」配置错，重试不自愈）。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -790,7 +796,7 @@ import asyncio
 import httpx
 import pytest
 
-from app.domain.exceptions import LLMUnavailableError, Nl2SqlError
+from app.domain.exceptions import LLMUnavailableError, LlmClientError, Nl2SqlError
 from app.services.multi_step_retry import (
     ERROR_KIND_PERMANENT,
     ERROR_KIND_TRANSIENT,
@@ -806,19 +812,56 @@ class _StatusError(Exception):
         self.status_code = status_code
 
 
+def _wrap(inner: Exception, outer: Exception) -> Exception:
+    """返回以 ``inner`` 为 __cause__ 的 ``outer``（等价于 `raise outer from inner`）。"""
+    try:
+        raise inner
+    except Exception as exc:  # noqa: BLE001 - 仅用于构造异常链
+        try:
+            raise outer from exc
+        except Exception as wrapped:  # noqa: BLE001 - 同上
+            return wrapped
+
+
 @pytest.mark.parametrize(
     "exc, expected",
     [
+        # 裸类型（本模块自身可能直接看到）
         (httpx.ConnectError("refused"), ERROR_KIND_TRANSIENT),
         (httpx.ReadTimeout("slow"), ERROR_KIND_TRANSIENT),
         (asyncio.TimeoutError(), ERROR_KIND_TRANSIENT),
-        (LLMUnavailableError("no client"), ERROR_KIND_TRANSIENT),
         (_StatusError(429), ERROR_KIND_TRANSIENT),
         (_StatusError(502), ERROR_KIND_TRANSIENT),
         (_StatusError(503), ERROR_KIND_TRANSIENT),
         (_StatusError(400), ERROR_KIND_PERMANENT),
         (Nl2SqlError("plan 校验失败"), ERROR_KIND_PERMANENT),
         (ValueError("bad input"), ERROR_KIND_PERMANENT),
+        # 配置错误（未配置 LLM / 无可用 key）：重试不会自愈 → 永久
+        (LLMUnavailableError("no client"), ERROR_KIND_PERMANENT),
+        # 真实链路形态：provider 失败被 LlmClientError 包住（openai_client 的 `from exc`）
+        (
+            _wrap(httpx.ConnectError("refused"), LlmClientError("call failed", provider="openai")),
+            ERROR_KIND_TRANSIENT,
+        ),
+        (
+            _wrap(ConnectionResetError("reset by peer"), LlmClientError("call failed", provider="openai")),
+            ERROR_KIND_TRANSIENT,
+        ),
+        (
+            _wrap(_StatusError(503), LlmClientError("call failed", provider="openai")),
+            ERROR_KIND_TRANSIENT,
+        ),
+        (
+            _wrap(_StatusError(401), LlmClientError("call failed", provider="openai")),
+            ERROR_KIND_PERMANENT,
+        ),
+        # 状态码埋在第二层 __cause__ 之下：只走一层会漏判
+        (
+            _wrap(_wrap(_StatusError(503), Exception("middle")), LlmClientError("call failed")),
+            ERROR_KIND_TRANSIENT,
+        ),
+        # 无 cause 的 LlmClientError（缺 endpoint / key 等配置错）→ 永久
+        (LlmClientError("missing endpoint", provider="azure"), ERROR_KIND_PERMANENT),
     ],
 )
 def testClassifyStepError(exc, expected):
@@ -918,8 +961,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
-from typing import Any, TypeVar
+from collections.abc import Awaitable, Callable, Iterator
+from typing import TypeVar
 
 import httpx
 
@@ -938,32 +981,64 @@ TRANSIENT_WAITS: tuple[int, ...] = (1, 2)
 #: 正是本模块要避免的坑。
 MAX_ATTEMPTS: int = 3
 
+#: 判定「瞬态」的 http 状态码：429 限流 + 5xx 服务端错误。
 _TRANSIENT_STATUS = frozenset({429, 500, 502, 503, 504})
+
+#: 直接判瞬态的异常类型。`httpx.TransportError` 已覆盖 ConnectError /
+#: TimeoutException / ReadError / RemoteProtocolError / PoolTimeout 等全部传输层
+#: 失败（它们都没有 http 状态码，重试是正确处置）；内建 `ConnectionError`
+#: 覆盖 socket 层的连接重置/拒绝。
+_TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
+    httpx.TransportError,
+    ConnectionError,
+    asyncio.TimeoutError,
+)
 
 T = TypeVar("T")
 
 
 def classifyStepError(exc: BaseException) -> str:
-    """把异常分成 transient（可自动重试）或 permanent（转人工）。"""
-    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.TimeoutException)):
-        return ERROR_KIND_TRANSIENT
-    if isinstance(exc, asyncio.TimeoutError):
-        return ERROR_KIND_TRANSIENT
-    if isinstance(exc, LLMUnavailableError):
-        return ERROR_KIND_TRANSIENT
-    if isinstance(exc, Nl2SqlError):
+    """把异常分成 transient（可自动重试）或 permanent（转人工）。
+
+    **沿整条 `__cause__`/`__context__` 链判定**，不只看最外层：本仓所有 provider
+    失败都被 `openai_client` 以 `LlmClientError(...) from exc` 包住，故 spec §6.1
+    列的 httpx 类型在分类点永远不会裸着到达；只看一层会把「provider 不可达 /
+    超时」误判为永久，而那正是本功能要救的故障类别。HTTP 状态码同理，也可能
+    埋在多层之下。
+
+    与 `llm_retry_policy.isRetryableLlmError` 的差异：那一条对 `Nl2SqlError` 一律
+    返回可重试，而多步场景下 plan 校验失败属永久错误（重试白烧 token），故不复用。
+    """
+    # 按类型优先判永久：语义固定，不受包装层数影响。
+    if isinstance(exc, (Nl2SqlError, LLMUnavailableError)):
+        # Nl2SqlError：NL2SQL 自带重试/降级，plan 校验失败重试无意义。
+        # LLMUnavailableError：「未配置 LLM / 无可用 key」是配置错，重试不自愈。
         return ERROR_KIND_PERMANENT
 
-    status = _statusCode(exc)
-    if status is not None:
-        return ERROR_KIND_TRANSIENT if status in _TRANSIENT_STATUS else ERROR_KIND_PERMANENT
+    for link in _causeChain(exc):
+        if isinstance(link, _TRANSIENT_TYPES):
+            return ERROR_KIND_TRANSIENT
+        status = _statusCodeOf(link)
+        if status is not None:
+            return ERROR_KIND_TRANSIENT if status in _TRANSIENT_STATUS else ERROR_KIND_PERMANENT
     return ERROR_KIND_PERMANENT
 
 
-def _statusCode(exc: BaseException) -> int | None:
-    for candidate in (exc, getattr(exc, "__cause__", None)):
-        code = getattr(candidate, "status_code", None)
-        if isinstance(code, int):
+def _causeChain(exc: BaseException) -> Iterator[BaseException]:
+    """异常自身 + 整条 `__cause__`／`__context__` 链（按 id 去环）。"""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _statusCodeOf(exc: BaseException) -> int | None:
+    """取链接上的 http 状态码（`status` 是 aiohttp 一类客户端的字段名）。"""
+    for attr in ("status_code", "status"):
+        code = getattr(exc, attr, None)
+        if isinstance(code, int) and not isinstance(code, bool):
             return code
     return None
 
@@ -1006,7 +1081,7 @@ async def runWithTransientRetry(
 ```bash
 pytest app/tests/unit/test_multi_step_retry.py -v
 ```
-Expected: 15 passed（`testClassifyStepError` 10 个参数化用例 + 5 个测试函数）
+Expected: 21 passed（`testClassifyStepError` 16 个参数化用例 + 5 个测试函数）
 
 - [ ] **Step 5: Commit**
 

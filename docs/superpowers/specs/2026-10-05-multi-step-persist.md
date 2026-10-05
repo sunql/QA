@@ -155,19 +155,28 @@ return estimated > model.max_input_tokens * 0.7
 
 ### 6.1 错误分类
 
-`_classifyError(exc) -> "transient" | "permanent"`：
+`classifyStepError(exc) -> "transient" | "permanent"`：
+
+**判定必须沿整条 `__cause__`/`__context__` 链进行（2026-10-05 修订）**：本仓所有
+provider 失败都被 `openai_client` 以 `LlmClientError(...) from exc` 包住，故下表中
+的 httpx 类型在分类点**永远不会裸着到达**；只看最外层类型、或只看一层 `__cause__`，
+会把「provider 不可达 / 超时」误判为永久 —— 而那正是本节要自动重试的故障类别。
+`Nl2SqlError` 与 `LLMUnavailableError` 按类型**优先**判永久。
 
 | 错误类型 | 分类 |
 |---|---|
-| `httpx.ConnectError` | transient |
-| `httpx.TimeoutException` | transient |
+| `httpx.TransportError` 家族（ConnectError / TimeoutException / ReadError / RemoteProtocolError / PoolTimeout） | transient |
+| 内建 `ConnectionError` 家族（连接重置 / 拒绝） | transient |
+| `asyncio.TimeoutError` | transient |
 | HTTP 429（限流） | transient |
 | HTTP 500 / 502 / 503 / 504 | transient |
-| `LLMUnavailableError`（503 类） | transient |
+| `LLMUnavailableError`（未配置 LLM / 无可用 key，属配置错） | permanent |
+| `Nl2SqlError`（含 plan 校验失败、SQL Guard、`ValidationError`） | permanent |
 | `ctx > 95%` 压缩后仍超限 | permanent |
-| Plan 校验失败（SQL Guard / 关联路径） | permanent |
-| NL2SQL `ValidationError` | permanent |
 | 其他 4xx（非超时类，429 除外） | permanent |
+
+状态码读 `status_code` 或 `status`（aiohttp 一类客户端用后者）。类型与状态码在链上
+任一环命中即判该分类。
 
 ### 6.2 自动重试曲线
 
@@ -254,10 +263,10 @@ Response: SSE stream（与 /api/v1/chat 一致的事件序列）
 
 | 用例 | 覆盖 |
 |---|---|
-| `_compressStepData` 关键列识别 | GROUP BY / 数值 / 类别列分类 |
-| `_compressStepData` 极值点 top 5 | 同比环比绝对值排序 |
-| `_classifyError` 各异常分类 | transient / permanent 全覆盖 |
-| `_estimatePromptTokens` 估算精度 | ±20% 内 |
+| `compressStepData` 关键列识别 | GROUP BY / 数值 / 类别列分类 |
+| `compressStepData` 极值点 top 5 | 同比环比绝对值排序 |
+| `classifyStepError` 各异常分类 | transient / permanent 全覆盖（含被 `LlmClientError` 包裹的链路形态） |
+| `estimatePromptTokens` 估算精度 | ±20% 内 |
 | `_shouldCompress` 阈值判定 | 0.7 倍临界 |
 
 ### 9.2 集成测试

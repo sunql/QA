@@ -16,17 +16,23 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 from httpx import AsyncClient
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import research as researchModule
 from app.domain.enums import DataSourceType
 from app.domain.models import DataSource
-from app.domain.research_models import ResearchSession
+from app.domain.research_models import (
+    ResearchCheckpoint,
+    ResearchReport,
+    ResearchSession,
+    ResearchTurn,
+)
 from app.domain.research_schemas import CheckpointAnswerRequest
 from app.infrastructure.llm.factory import createClient
 from app.infrastructure.security.crypto import encryptApiKey
@@ -581,3 +587,67 @@ async def test_create_session_with_unknown_datasource_is_404(
         f"{_BASE}/sessions", json={"question": "q", "datasourceId": 999999}, headers=authHeaders
     )
     assert resp.status_code == 404, resp.text
+
+
+# ---------------------------------------------------------------------------
+# W3：删除会话（硬删 + 级联 + 归属 404）
+# ---------------------------------------------------------------------------
+
+
+async def _countRows(dbSession: AsyncSession, model: Any, sessionId: uuid.UUID) -> int:
+    """统计某会话在子表中的行数（删后应全为 0 —— 验证 CASCADE 真的生效）。"""
+    return await dbSession.scalar(
+        select(func.count()).select_from(model).where(model.session_id == sessionId)
+    )
+
+
+async def test_delete_session_cascades_children_and_404_afterwards(
+    client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession
+) -> None:
+    """删除会话 → 204；turn / checkpoint / report 子行一并消失；再读 404。"""
+    created = await _createSession(client, authHeaders, question="q")
+    sid = uuid.UUID(created["id"])
+    svc = ResearchSessionService()
+    turn = await svc.appendTurn(dbSession, sessionId=sid, role="user", content={})
+    await svc.openCheckpoint(
+        dbSession, sessionId=sid, turnId=turn.id, phase="intent", options={}, prompt="p"
+    )
+    await svc.publishReport(dbSession, sessionId=sid, payload={"title": "t"}, renderedMd="# t")
+    await dbSession.commit()
+
+    resp = await client.delete(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    assert resp.status_code == 204, resp.text
+    assert resp.content == b""
+
+    detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    assert detail.status_code == 404
+    assert await _countRows(dbSession, ResearchTurn, sid) == 0
+    assert await _countRows(dbSession, ResearchCheckpoint, sid) == 0
+    assert await _countRows(dbSession, ResearchReport, sid) == 0
+
+
+async def test_delete_other_user_session_404_and_kept(
+    client: AsyncClient,
+    authHeaders: dict[str, str],
+    secondUserHeaders: dict[str, str],
+) -> None:
+    """他人会话删除 → 404，且**真的没删**（不泄露存在性，也不做横向越权写）。"""
+    created = await _createSession(client, authHeaders, question="q")
+    resp = await client.delete(f"{_BASE}/sessions/{created['id']}", headers=secondUserHeaders)
+    assert resp.status_code == 404
+
+    kept = await client.get(f"{_BASE}/sessions/{created['id']}", headers=authHeaders)
+    assert kept.status_code == 200
+
+
+async def test_delete_missing_session_404(
+    client: AsyncClient, authHeaders: dict[str, str]
+) -> None:
+    resp = await client.delete(f"{_BASE}/sessions/{uuid.uuid4()}", headers=authHeaders)
+    assert resp.status_code == 404
+
+
+async def test_delete_requires_auth(client: AsyncClient) -> None:
+    """匿名删除 → 401（未过鉴权，不泄露会话是否存在）。"""
+    resp = await client.delete(f"{_BASE}/sessions/{uuid.uuid4()}")
+    assert resp.status_code == 401

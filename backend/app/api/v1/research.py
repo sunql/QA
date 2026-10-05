@@ -4,6 +4,7 @@
 - POST   /sessions                          新建会话（201）
 - GET    /sessions                          当前用户的会话列表
 - GET    /sessions/{sessionId}              {session, turns, pendingCheckpoint}
+- DELETE /sessions/{sessionId}              硬删会话（DB CASCADE 清子表，归属不符 404）
 - POST   /sessions/{sessionId}/turns        202 + 状态机后台跑（进度走 SSE）
 - POST   /checkpoints/{checkpointId}/answer {sessionStatus, nextPhase}
 - GET    /sessions/{sessionId}/report       ?version=N → 指定版 / 当前 published
@@ -293,6 +294,28 @@ async def listSessions(
         .order_by(ResearchSession.created_at.desc(), ResearchSession.id.desc())
     )
     return [_sessionRead(row) for row in rows]
+
+
+@router.delete(
+    "/sessions/{sessionId}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="删除研究会话",
+)
+async def deleteSession(
+    sessionId: uuid.UUID,
+    user: CurrentUser = Depends(_requireResearchUser),
+    db: AsyncSession = Depends(getDb),
+) -> None:
+    """硬删会话，级联清 turn / checkpoint / finding / report（复用 DB CASCADE）。
+
+    归属不符 → 404（而非 403）：与详情 / 列表同一口径，不泄露会话存在性。
+    """
+    await _ownedSession(db, sessionId, user)
+    removed = await _sessionService.deleteSession(db, sessionId)
+    if removed == 0:
+        # 归属已过仍删 0 行 = 并发下已被另一请求删掉；语义上仍是「不存在」。
+        raise NotFoundError("研究会话不存在")
+    await db.commit()
 
 
 @router.get(

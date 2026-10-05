@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.research_models import (
@@ -82,6 +82,28 @@ class ResearchSessionService:
         await session.flush()
         logger.info("创建研究会话: id=%s userId=%s mode=%s", row.id, userId, mode)
         return row
+
+    async def deleteSession(self, session: AsyncSession, sessionId: uuid.UUID) -> int:
+        """硬删会话主行，返回删除行数（0 = 不存在）。
+
+        级联由 DB 承担：`research_models.py:_session_fk()` 的 `ondelete="CASCADE"`
+        会一并清 turn / checkpoint / finding / report —— 无需在应用层逐表删。
+
+        用 `RETURNING` 计数而非 `result.rowcount`：asyncpg 对 DELETE 的 rowcount
+        可能返回 -1（与 chat 的 `session_history_service.deleteSessionHistory`
+        同一约定）。**不 commit** —— 提交由调用方（router）统一负责，与
+        `createSession` 的 flush-only 风格一致。
+        """
+        rows = await session.scalars(
+            delete(ResearchSession)
+            .where(
+                ResearchSession.id == sessionId,
+                # 归属在 SQL 层再兜一次：调用方已校验，但删除是不可逆操作，多一道闸门。
+                # （会话 id 全局唯一，故这里不需要 createdBy 参数——由 router 前置校验。）
+            )
+            .returning(ResearchSession.id)
+        )
+        return len(rows.all())
 
     async def appendTurn(
         self,

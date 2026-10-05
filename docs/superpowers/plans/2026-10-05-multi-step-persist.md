@@ -408,7 +408,7 @@ git commit -m "feat(multi-step): 新增 multi_step_run/multi_step_step 模型与
   - `createSteps(session, *, runId: uuid.UUID, subQuestions: list[str]) -> list[MultiStepStep]`
   - `markStepRunning(session, step: MultiStepStep) -> None`
   - `finishStep(session, step, *, status: str, sql: str | None = None, data: list | None = None, chartOption: dict | None = None, modelUsed: str | None = None, tokens: int = 0, cost: float = 0) -> None`
-  - `recordStepError(session, step, *, message: str, kind: str) -> None`
+  - `recordStepError(session, step, *, message: str, kind: str, tokens: int = 0, cost: float = 0) -> None`（失败尝试的用量累加进本步，不覆盖）
   - `updateRun(session, run, *, status: str | None = None, completedSteps: int | None = None, currentStepIdx: int | None = None, compressedCount: int | None = None, errorSummary: str | None = None, finished: bool = False) -> None`
   - `loadRun(session, runId: uuid.UUID) -> MultiStepRun | None`
   - `loadSteps(session, runId: uuid.UUID) -> list[MultiStepStep]`（按 `step_index` 升序）
@@ -420,6 +420,7 @@ git commit -m "feat(multi-step): 新增 multi_step_run/multi_step_step 模型与
 `backend/app/tests/integration/test_multi_step_persist_repo.py`:
 ```python
 import uuid
+from decimal import Decimal
 
 import pytest
 
@@ -482,7 +483,9 @@ async def testRecordStepErrorAccumulatesAttempts(db_session, sessionRow):
         db_session, sessionId=sessionRow.id, question="q", modelId=3, totalSteps=1
     )
     (step,) = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
-    await repo.recordStepError(db_session, step, message="timeout", kind="transient")
+    await repo.recordStepError(
+        db_session, step, message="timeout", kind="transient", tokens=12, cost=0.0002
+    )
     await repo.recordStepError(db_session, step, message="timeout again", kind="transient")
     await db_session.commit()
 
@@ -491,6 +494,9 @@ async def testRecordStepErrorAccumulatesAttempts(db_session, sessionRow):
     assert loaded.last_error == "timeout again"
     assert loaded.last_error_kind == "transient"
     assert loaded.status == "running"  # 未终态
+    # 失败尝试的用量累加不覆盖（spec §6.2）；第二次未传用量即按默认 0 处理
+    assert loaded.tokens_used == 12
+    assert loaded.cost == Decimal("0.0002")
 
 
 @pytest.mark.asyncio
@@ -640,11 +646,27 @@ async def finishStep(
 
 
 async def recordStepError(
-    session: AsyncSession, step: MultiStepStep, *, message: str, kind: str
+    session: AsyncSession,
+    step: MultiStepStep,
+    *,
+    message: str,
+    kind: str,
+    tokens: int = 0,
+    cost: float = 0,
 ) -> None:
+    """记录一次失败尝试。
+
+    tokens/cost 是该次尝试已消耗的用量（默认 0），累加进本步、不覆盖
+    （spec §6.2「每次重试 tokens_used / cost 累加」）。调用方拿不到用量时留空，
+    不要为了凑数传假值。
+    状态保持 running：本函数是 per-attempt 语义，步的终态（failed / skipped）
+    由执行链路在判定终止时落库（spec §6.3）。
+    """
     step.attempt_count = (step.attempt_count or 0) + 1
     step.last_error = message[:2000]
     step.last_error_kind = kind
+    step.tokens_used = (step.tokens_used or 0) + tokens
+    step.cost = Decimal(str(step.cost or 0)) + Decimal(str(cost))
     step.status = STEP_STATUS_RUNNING
     await session.flush()
 
@@ -1339,6 +1361,8 @@ async def testPersistStepFailureRecordsClassification(monkeypatch):
 
     assert kind == "transient"
     assert record.await_args.kwargs["kind"] == "transient"
+    assert record.await_args.kwargs["tokens"] == 0
+    assert record.await_args.kwargs["cost"] == 0
     assert updateRun.await_args.kwargs["status"] == "failed"
 
 
@@ -1390,6 +1414,10 @@ from app.domain.multi_step_models import (
     RUN_STATUS_FAILED,
     RUN_STATUS_PARTIALLY_FAILED,
     RUN_STATUS_SUCCEEDED,
+    STEP_STATUS_COMPRESSED as _STEP_STATUS_COMPRESSED,
+    STEP_STATUS_FAILED as _STEP_STATUS_FAILED,
+    STEP_STATUS_SKIPPED as _STEP_STATUS_SKIPPED,
+    STEP_STATUS_SUCCEEDED as _STEP_STATUS_SUCCEEDED,
     MultiStepRun,
     MultiStepStep,
 )
@@ -1402,9 +1430,6 @@ from app.services.multi_step_compressor import compressStepData
 from app.services.multi_step_retry import classifyStepError
 
 logger = logging.getLogger(__name__)
-
-_STEP_STATUS_COMPRESSED = "compressed"
-_STEP_STATUS_SUCCEEDED = "succeeded"
 
 
 class MultiStepPersistMixin:
@@ -1463,10 +1488,14 @@ class MultiStepPersistMixin:
         exc: Exception,
         *,
         run: MultiStepRun | None = None,
+        tokens: int = 0,
+        cost: float = 0,
     ) -> str:
         kind = classifyStepError(exc)
         await persistence.recordStepError(
-            session, step, message=f"{type(exc).__name__}: {exc}", kind=kind
+            session, step,
+            message=f"{type(exc).__name__}: {exc}", kind=kind,
+            tokens=tokens, cost=cost,
         )
         if run is not None:
             await persistence.updateRun(
@@ -1695,6 +1724,8 @@ async def testRunMarkedFailedWhenStepExhaustsRetries(pg_client, db_session, monk
     ).scalars().all()
     assert steps[0].status in ("succeeded", "compressed")
     assert steps[-1].attempt_count >= 1
+    assert steps[-1].status == "failed"   # spec §6.3：瞬态耗尽 → 步终态 failed
+    assert steps[-1].last_error_kind == "transient"
 
 
 @pytest.mark.asyncio
@@ -1771,7 +1802,21 @@ sed -n '690,745p' backend/app/services/chat_multistep.py
 在每步异常分支里（`except` 块）：
 ```python
             if run is not None:
-                await self._persistStepFailure(session, stepsByIdx[index], exc, run=run)
+                await self._persistStepFailure(
+                    session, stepsByIdx[index], exc, run=run,
+                    tokens=getattr(exc, "tokens_used", 0),
+                    cost=getattr(exc, "cost_used", 0.0),
+                )
+                # 落步的终态（spec §6.3 永久错误 → failed；§4.1 的 skip 分支 → skipped）。
+                # _persistStepFailure 只把步置为 running（per-attempt 语义），终态在此落一次。
+                await persistence.finishStep(
+                    session, stepsByIdx[index],
+                    status=STEP_STATUS_SKIPPED if isSkip else STEP_STATUS_FAILED,
+                )
+                if isSkip:
+                    anySkipped = True
+                else:
+                    anyFailed = True
 ```
 循环**之后**：
 ```python
@@ -1783,13 +1828,15 @@ sed -n '690,745p' backend/app/services/chat_multistep.py
         )
         await session.commit()
 ```
-`completed` / `anyFailed` / `anySkipped` 由本步骤自行维护：循环开始前置 `completed = 0; anyFailed = False; anySkipped = False`；每步成功后 `completed += 1`；`except` 分支里若分类为 permanent 置 `anyFailed = True`，若判定为 skip 置 `anySkipped = True`。**不要**改动既有循环里已有的同名局部变量（若已存在，直接复用）。
+`completed` / `anyFailed` / `anySkipped` 由本步骤自行维护：循环开始前置 `completed = 0; anyFailed = False; anySkipped = False`；每步成功后 `completed += 1`。`except` 分支里先算出 `isSkip`（该步是否走 spec §4.1 的 `skipped` 分支——压缩后仍超限、后续不再补；不满足就是普通失败），再按它分别置 `anySkipped` / `anyFailed`——上面那段落步终态用的是同一个 `isSkip`。**不要**改动既有循环里已有的同名局部变量（若已存在，直接复用）。
 `stepsByIdx` 的取法：`_openRun` 后立刻
 ```python
         persisted = await persistence.loadSteps(session, run.id) if run is not None else []
         stepsByIdx = {s.step_index: s for s in persisted}
 ```
-并在 import 区加 `from app.services import multi_step_persistence as persistence` 与
+并在 import 区加
+`from app.domain.multi_step_models import STEP_STATUS_FAILED, STEP_STATUS_SKIPPED`、
+`from app.services import multi_step_persistence as persistence` 与
 `from app.services.multi_step_persist_hooks import runStatusFor`。
 
 **同时**把每步的 LLM 调用包进瞬态重试：把 `_executeDataStep(...)` 的调用点改为
@@ -1797,12 +1844,28 @@ sed -n '690,745p' backend/app/services/chat_multistep.py
             stepRun, attempts = await runWithTransientRetry(
                 lambda: self._executeDataStep(...原有参数...),
                 onError=lambda exc, attempt: self._persistStepFailure(
-                    session, stepsByIdx[index], exc, run=run
+                    session, stepsByIdx[index], exc, run=run,
+                    tokens=getattr(exc, "tokens_used", 0),
+                    cost=getattr(exc, "cost_used", 0.0),
                 )
                 if run is not None else _noop(),
             )
 ```
 若原调用点参数复杂，退而求其次：保留原调用，只在异常分支接 `_persistStepFailure`（自动重试仍生效，因为 `_executeDataStep` 内部的 `_runQueryWithRetry` 已有瞬态重试）。**二选一并在此步骤的注释里写明选了哪个。**
+
+**失败尝试的用量来源（spec §6.2「每次重试 tokens_used / cost 累加」）：** `_executeDataStep`
+内部已把各段 LLM / SQL 用量累加进局部 `tokens` / `cost`（见 `chat_multistep.py:329-392`），
+但只在成功返回时交回；一旦抛出，这两笔就丢了，而成败与否正是 `onError` 要记的。为让
+`onError` 能记上，在 `_executeDataStep` 的**每个失败出口**（`raise` 之前）把当下已累计的用量
+挂到异常上：
+```python
+        exc.tokens_used = tokens
+        exc.cost_used = float(cost)   # cost 可能是 Decimal，统一成 float 便于跨层传递
+        raise
+```
+只加这两行赋值，**不改**任何 NL2SQL 生成 / SQL 校验 / 重试逻辑。若异常来自更靠前的阶段
+（还没产生任何用量），异常上没有这两个属性，`getattr` 兜底为 0 —— 这是**正确**的：那时
+确实没有可计费响应，记 0 不是漏记。**拿不到用量就记 0，禁止为了凑数传假值。**
 
 - [ ] **Step 4: 在 `_streamMultiStep` 接线（同一套钩子）**
 
@@ -1948,6 +2011,41 @@ async def testResumeFromStepResetsLaterSteps(pg_client, db_session, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def testPrepareResumeClearsStaleCompressedPayload(db_session):
+    """从压缩步续跑必须清掉 data_compressed，否则留下「status=pending 但
+    data_compressed 非空」的非法态（spec §5.3），且压缩钩子见非空即跳过
+    ⇒ 该步此后永远无法再压缩。"""
+    from app.domain.research_models import ResearchSession
+    from app.services import multi_step_persistence as repo
+    from app.services.multi_step_resume import prepareResume
+
+    sessionRow = ResearchSession(id=uuid.uuid4(), title="resume-compressed", created_by=1)
+    db_session.add(sessionRow)
+    await db_session.commit()
+    run = await repo.createRun(
+        db_session, sessionId=sessionRow.id, question="q", modelId=1, totalSteps=2
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
+    await repo.finishStep(db_session, steps[0], status="succeeded", data=[{"a": 1}])
+    await repo.finishStep(db_session, steps[1], status="compressed", data=[{"b": 1}])
+    steps[1].data_compressed = {"rows": 1}
+    await repo.updateRun(db_session, run, status="failed", completedSteps=1, finished=True)
+    await db_session.commit()
+
+    # Act
+    _run, start = await prepareResume(
+        db_session, runId=run.id, fromStepIndex=1, idempotencyKey=None
+    )
+
+    # Assert
+    assert start == 1
+    reloaded = await repo.loadSteps(db_session, run.id)
+    assert reloaded[1].status == "pending"
+    assert reloaded[1].data_compressed is None
+    assert reloaded[0].data_compressed is None  # 前序步不被动
+
+
+@pytest.mark.asyncio
 async def testResumeIsIdempotentOnSameKey(pg_client, db_session, monkeypatch):
     from app.domain.research_models import ResearchSession
     from app.services import multi_step_persistence as repo
@@ -2053,6 +2151,13 @@ async def prepareResume(
             raise ResumeConflict(f"step {step.step_index} not completed; cannot resume from {start}")
 
     await persistence.resetStepsFrom(session, runId=runId, fromStepIndex=start)
+    # spec §5.3：data_compressed 仅当 status=compressed 时有值。resetStepsFrom 只回退
+    # 状态、不清 data_compressed，故这里显式清空被重置范围，否则会留下
+    # 「status=pending 但 data_compressed 非空」的非法态，且压缩钩子见非空即跳过
+    # （_maybeCompressPriorSteps）⇒ 该步此后永远无法再压缩。
+    for step in steps:
+        if step.step_index >= start:
+            step.data_compressed = None
     if idempotencyKey:
         await persistence.appendIdempotencyKey(session, run, idempotencyKey)
     run.resume_count = (run.resume_count or 0) + 1

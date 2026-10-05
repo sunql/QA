@@ -98,14 +98,16 @@ class ResearchSessionService:
         可能返回 -1（与 chat 的 `session_history_service.deleteSessionHistory`
         同一约定）。**不 commit** —— 提交由调用方（router）统一负责，与
         `createSession` 的 flush-only 风格一致。
+
+        **归属不在本方法校验**（2026-10-05 安全审查 MEDIUM 更正）：唯一调用方
+        `api/v1/research.py` 的 `deleteSession` 路由会先过 `_ownedSession`
+        （越权 ⇒ 404，不泄露存在性），那是本操作的**唯一**闸门。此处**刻意**不加
+        `created_by` 谓词 —— 会话 id 是全局唯一 UUID 且本方法没有第二个调用点。
+        **新增调用方必须自行校验归属**，不要指望本方法兜底：硬删不可逆。
         """
         rows = await session.scalars(
             delete(ResearchSession)
-            .where(
-                ResearchSession.id == sessionId,
-                # 归属在 SQL 层再兜一次：调用方已校验，但删除是不可逆操作，多一道闸门。
-                # （会话 id 全局唯一，故这里不需要 createdBy 参数——由 router 前置校验。）
-            )
+            .where(ResearchSession.id == sessionId)
             .returning(ResearchSession.id)
         )
         return len(rows.all())

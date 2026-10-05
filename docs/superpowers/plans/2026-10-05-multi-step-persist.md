@@ -857,7 +857,7 @@ async def testOnErrorHookSeesEachTransientFailure():
     async def call():
         raise httpx.ConnectError("down")
 
-    async def onError(exc: BaseException, attempt: int) -> None:
+    async def onError(exc: Exception, attempt: int) -> None:
         seen.append(f"{type(exc).__name__}:{attempt}")
 
     with pytest.raises(httpx.ConnectError):
@@ -940,17 +940,20 @@ async def runWithTransientRetry(
     call: Callable[[], Awaitable[T]],
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    onError: Callable[[BaseException, int], Awaitable[None]] | None = None,
+    onError: Callable[[Exception, int], Awaitable[None]] | None = None,
 ) -> tuple[T, int]:
     """执行 call，瞬态错误按 TRANSIENT_WAITS 退避重试。
 
     返回 (结果, 实际尝试次数)。永久错误立即抛出；瞬态错误耗尽后抛出最后一次异常。
+
+    只捕获 Exception：CancelledError 继承自 BaseException，必须让它透传，
+    否则客户端断连时重试会把取消信号吞掉。
     """
-    lastError: BaseException | None = None
+    lastError: Exception | None = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             return await call(), attempt
-        except BaseException as exc:  # noqa: BLE001 - 需按分类决定是否重试
+        except Exception as exc:  # noqa: BLE001 - 需按分类决定是否重试
             kind = classifyStepError(exc)
             if onError is not None:
                 await onError(exc, attempt)
@@ -970,7 +973,7 @@ async def runWithTransientRetry(
 ```bash
 pytest app/tests/unit/test_multi_step_retry.py -v
 ```
-Expected: 13 passed（10 个参数化 + 4 个函数 + 1 个常量断言）
+Expected: 15 passed（`testClassifyStepError` 10 个参数化用例 + 5 个测试函数）
 
 - [ ] **Step 5: Commit**
 
@@ -1209,7 +1212,7 @@ def _isNumber(value: object) -> bool:
 ```bash
 pytest app/tests/unit/test_multi_step_compressor.py -v
 ```
-Expected: 12 passed
+Expected: 11 passed（7 个测试函数 + `testShouldCompress` 4 个参数化用例）
 
 - [ ] **Step 5: Commit**
 
@@ -1449,7 +1452,7 @@ class MultiStepPersistMixin:
         self,
         session: AsyncSession,
         step: MultiStepStep,
-        exc: BaseException,
+        exc: Exception,
         *,
         run: MultiStepRun | None = None,
     ) -> str:

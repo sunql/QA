@@ -19,11 +19,13 @@ logger = logging.getLogger(__name__)
 ERROR_KIND_TRANSIENT = "transient"
 ERROR_KIND_PERMANENT = "permanent"
 
-#: 退避曲线 1s/2s/4s。spec §6.2 的曲线是
-#: 「attempt 1 → 1s → attempt 2 → 2s → attempt 3 → 转 manual」，
-#: 即 3 次尝试之间只等 2 次，故实际只用到前 MAX_ATTEMPTS - 1 项。
-TRANSIENT_WAITS: tuple[int, ...] = (1, 2, 4)
-MAX_ATTEMPTS: int = len(TRANSIENT_WAITS)
+#: 第 N 次尝试失败后等 TRANSIENT_WAITS[N - 1] 秒。3 次尝试之间只等 2 次
+#: （spec §6.2：1s → 2s → 第 3 次失败即转 manual），故只有 2 个元素。
+TRANSIENT_WAITS: tuple[int, ...] = (1, 2)
+#: 尝试次数上限。**独立于 TRANSIENT_WAITS 的长度**——写成 len(TRANSIENT_WAITS)
+#: 会让「等待次数」与「尝试次数」互相绑死（长度 2 会被误读成最多试 2 次），
+#: 正是本模块要避免的坑。
+MAX_ATTEMPTS: int = 3
 
 _TRANSIENT_STATUS = frozenset({429, 500, 502, 503, 504})
 
@@ -79,6 +81,7 @@ async def runWithTransientRetry(
             if kind != ERROR_KIND_TRANSIENT:
                 raise
             lastError = exc
+            # 最后一次尝试失败后不再等待，直接转人工（spec §6.2）
             if attempt < MAX_ATTEMPTS:
                 logger.warning("multi-step 第 %d 次尝试瞬态失败，%.0fs 后重试：%s",
                                attempt, TRANSIENT_WAITS[attempt - 1], exc)

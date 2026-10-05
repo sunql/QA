@@ -50,7 +50,6 @@ from app.services.nl2sql_service import _readFloatConfig
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.think_block import applyThinkPolicy
 from app.services.visual_rationale import summaryTextOnlyRationale
-from app.services.query_pattern_router import QueryPatternRouter, RouteHint  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -95,43 +94,15 @@ class MultiStepMixin:
         """解析显式分步信号：先规则快路径（第X步标号），失败回退 LLM 拆步。
 
         返回 (dto, multi_plan, pc, step_tokens, step_cost)：
-          - dto 为题目模式 hook 覆盖后的副本（调用方必须使用，而非原始 dto）；
-          - pc 为路由 hook 替换 selected 后的新上下文（调用方必须使用，而非原始 pc）；
+          - dto 维持用户原始选择的 modelId（不覆盖，遵循「禁止后端改派模型」决策）；
+          - pc 为步骤计划阶段的 _PipelineContext（保留原 selected）；
           - plan 为 None 表示未拆出多步，调用方按原流水线走单步；
           - 规则命中时 token=0（零 LLM 调用）。
 
         规则路径仍记一条 token=0 的 step_plan 审计行（与 LLM 拆步同 purpose），
         保证"按 purpose 聚合"的下游分析能一致统计所有多步拆解事件，包括零成本
         的规则命中（成本/审计一致性 2026-08-16 修复）。
-
-        Bug A fix（feat-qwen-multistep-uplift Task 5）：hook 放在方法入口处，
-        保证规则快路径（plan_explicit 匹配）也能触发路由覆盖——此前 hook 位于
-        plan_explicit 之后的 LLM 检测路径，导致 B019 等规则命中的题目被跳过。
-
-        Fix Round 3（feat-qwen-multistep-uplift Task 5）：_PipelineContext 是
-        @dataclass(frozen=True)，不能 in-place 赋值 pc.selected。使用
-        dataclasses.replace() 创建新实例并通过 5-tuple 返回，遵守不可变原则。
         """
-        # ★ NEW: 题目模式 → 路由 hook（feat-qwen-multistep-uplift Task 5 Bug A）
-        # 放在入口处，确保规则快路径（plan_explicit）和 LLM 检测路径均能触发。
-        try:
-            hint = self._patternRouter.route(dto.question, is_multi_step=True)
-            if hint.forced_model_id is not None:
-                logger.info(
-                    "题目模式命中模式=%s 强制模型=%s",
-                    hint.reason, hint.forced_model_id,
-                )
-                dto = dto.model_copy(update={"modelId": hint.forced_model_id})
-                # Fix Round 3（feat-qwen-multistep-uplift Task 5）：_PipelineContext
-                # 是 @dataclass(frozen=True)，用 dataclasses.replace() 创建新实例。
-                new_cfg = next(
-                    (c for c in pc.configs if c.id == hint.forced_model_id), None,
-                )
-                if new_cfg is not None:
-                    pc = replace(pc, selected=new_cfg)
-        except Exception:  # noqa: BLE001
-            logger.warning("题目模式路由 hook 异常，原 dto.modelId 保留", exc_info=True)
-
         rule_result = await self._stepPlanner.plan_explicit(dto.question)
         if rule_result.plan is not None:
             await self._recordUsage(

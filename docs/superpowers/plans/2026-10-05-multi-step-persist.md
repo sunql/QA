@@ -1103,6 +1103,8 @@ git commit -m "feat(multi-step): 新增错误分类与瞬态重试（1s/2s 退�
   - 常量 `COMPRESS_THRESHOLD = 0.7`、`DEFAULT_MAX_ROWS = 30`、`MAX_DISTINCT_VALUES = 50`、`TOP_N_EXTREMES = 5`
   - `classifyColumn(name: str, values: list) -> str`（返回 `"time"` / `"numeric"` / `"category"`）
   - `compressStepData(rows: list[dict], *, maxRows: int = DEFAULT_MAX_ROWS) -> dict`
+    （返回值保证 JSON 原生：`Decimal`→`float`、`datetime`/`date`→`isoformat()`，
+    因为 `data_compressed` 是裸 JSONB 列、无 `default=str` 编码器）
   - `estimatePromptTokens(text: str) -> int`
   - `shouldCompress(estimatedTokens: int, maxInputTokens: int, *, threshold: float = COMPRESS_THRESHOLD) -> bool`
 
@@ -1110,6 +1112,10 @@ git commit -m "feat(multi-step): 新增错误分类与瞬态重试（1s/2s 退�
 
 `backend/app/tests/unit/test_multi_step_compressor.py`:
 ```python
+import json
+from datetime import datetime
+from decimal import Decimal
+
 import pytest
 
 from app.services.multi_step_compressor import (
@@ -1174,12 +1180,42 @@ def testCompressIgnoresBooleansAsNumeric():
     assert "max" not in result["columns"]["is_active"]
 
 
+def testCompressAggregatesDecimalColumnsAndEmitsJsonSafeOutput():
+    # 业务库数值列常以 Decimal 返回（同 data_summary._to_float）
+    rows = [{"amount": Decimal("120.50")}, {"amount": Decimal("99.50")}]
+
+    result = compressStepData(rows, maxRows=5)
+
+    summary = result["columns"]["amount"]
+    assert summary["max"] == 120.5
+    assert summary["min"] == 99.5
+    assert summary["avg"] == 110.0
+    assert summary["sum"] == 220.0
+    assert summary["top"][0]["amount"] == 120.5
+    json.dumps(result)  # 不抛 ⇒ 可直接写进 JSONB 的 data_compressed
+
+
+def testCompressNormalizesDbValuesIntoJsonNativeTypes():
+    stamp = datetime(2025, 3, 1, 12, 30, 45)
+    # created_at 不含 _TIME_HINT 的任一子串 ⇒ 走 category 的 distinct 分支
+    rows = [
+        {"created_at": stamp, "amount": Decimal("1.5")},
+        {"created_at": stamp, "amount": Decimal("2.5")},
+    ]
+
+    result = compressStepData(rows, maxRows=5)
+
+    assert result["rows"][0]["created_at"] == "2025-03-01T12:30:45"
+    assert result["rows"][0]["amount"] == 1.5
+    assert result["columns"]["created_at"]["distinct"] == ["2025-03-01T12:30:45"]
+    json.dumps(result)
+
+
 def testEstimatePromptTokensCountsCjkAndLatin():
     assert estimatePromptTokens("") == 0
-    # 4 个汉字 ≈ 4 token；8 个 latin 字符 ≈ 2 token
+    # 5 个汉字 ≈ 5 token；8 个 latin 字符 ≈ 2 token
     assert estimatePromptTokens("供应商名称") == 5
     assert estimatePromptTokens("abcdefgh") == 2
-
 
 @pytest.mark.parametrize(
     "estimated, maxInput, expected",
@@ -1213,6 +1249,8 @@ Expected: FAIL — `ModuleNotFoundError: app.services.multi_step_compressor`
 from __future__ import annotations
 
 import re
+from datetime import date, datetime
+from decimal import Decimal
 
 COMPRESS_THRESHOLD = 0.7
 DEFAULT_MAX_ROWS = 30
@@ -1247,7 +1285,7 @@ def compressStepData(rows: list[dict], *, maxRows: int = DEFAULT_MAX_ROWS) -> di
         values = [row.get(column) for row in rows]
         summary[column] = _summarizeColumn(column, values, rows, columns)
 
-    kept = rows[:maxRows]
+    kept = [_jsonSafeRow(row) for row in rows[:maxRows]]
     original = len(rows)
     return {
         "rows": kept,
@@ -1299,20 +1337,41 @@ def _summarizeColumn(
             key=lambda row: abs(float(row[column])),
             reverse=True,
         )[:TOP_N_EXTREMES]
-        summary["top"] = [{c: row.get(c) for c in columns} for row in ranked]
+        summary["top"] = [{c: _jsonSafe(row.get(c)) for c in columns} for row in ranked]
         return summary
 
     return {"distinct": _distinctSorted(present)[:MAX_DISTINCT_VALUES]}
 
 
 def _distinctSorted(values: list) -> list:
-    return sorted({v for v in values if v is not None}, key=lambda v: str(v))
+    return sorted({_jsonSafe(v) for v in values if v is not None}, key=lambda v: str(v))
+
+
+def _jsonSafeRow(row: dict) -> dict:
+    """返回归一化后的新行（不改调用方的字典）。"""
+    return {column: _jsonSafe(value) for column, value in row.items()}
+
+
+def _jsonSafe(value: object) -> object:
+    """把 DB 原值归一为 JSON 原生类型。
+
+    `data_compressed` 是裸 JSONB 列（无 `default=str` 编码器），Decimal/datetime
+    直接写入会抛 TypeError；而 `rows` / `top` / `distinct` 三处都会带出 DB 原值。
+    """
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        # datetime 是 date 的子类，两者共用 isoformat()。
+        return value.isoformat()
+    return value
 
 
 def _isNumber(value: object) -> bool:
     if isinstance(value, bool):
         return False
-    return isinstance(value, (int, float))
+    # 含 Decimal：业务库数值列常以 Decimal 返回
+    # （同 data_summary._to_float / chat_multistep._summarizeStepData）。
+    return isinstance(value, (int, float, Decimal))
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
@@ -1320,7 +1379,7 @@ def _isNumber(value: object) -> bool:
 ```bash
 pytest app/tests/unit/test_multi_step_compressor.py -v
 ```
-Expected: 11 passed（7 个测试函数 + `testShouldCompress` 4 个参数化用例）
+Expected: 13 passed（9 个测试函数 + `testShouldCompress` 4 个参数化用例）
 
 - [ ] **Step 5: Commit**
 
@@ -1348,6 +1407,8 @@ git commit -m "feat(multi-step): 新增上下文压缩与 token 估算"
   - `_persistStepFailure(self, session, step, exc) -> str`
   - `_closeRun(self, session, run, *, status, completedSteps, currentStepIdx, errorSummary) -> None`
   - `_maybeCompressPriorSteps(self, session, run, steps, *, nextStepIdx, maxInputTokens, injectionText) -> bool`
+- Produces（**模块级函数，不是方法**——Task 6 会 `from app.services.multi_step_persist_hooks import runStatusFor`，故必须建在本模块顶层）：
+  - `runStatusFor(completed: int, total: int, anyFailed: bool, anySkipped: bool) -> str`（spec §4.2）
 
 - [ ] **Step 1: 加静态开关**
 
@@ -1463,6 +1524,48 @@ async def testMaybeCompressNoOpWhenUnderThreshold(monkeypatch):
 
     assert changed is False
     finishStep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def testMaybeCompressCompressesPriorSucceededSteps(monkeypatch):
+    host = _Host()
+    session = AsyncMock()
+    finishStep = AsyncMock()
+    updateRun = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.multi_step_persist_hooks.persistence.finishStep", finishStep
+    )
+    monkeypatch.setattr(
+        "app.services.multi_step_persist_hooks.persistence.updateRun", updateRun
+    )
+    run = SimpleNamespace(id="r1", compressed_count=0)
+    steps = [
+        # 唯一符合「前于 nextStepIdx + succeeded + 有 data + 未压缩过」的步
+        SimpleNamespace(
+            step_index=0, status="succeeded",
+            data=[{"a": i} for i in range(50)], data_compressed=None,
+        ),
+        SimpleNamespace(step_index=1, status="succeeded", data=None, data_compressed=None),
+        SimpleNamespace(step_index=2, status="failed", data=[{"a": 1}], data_compressed=None),
+        SimpleNamespace(step_index=3, status="succeeded", data=[{"a": 1}], data_compressed=None),
+    ]
+
+    # maxInputTokens=10 且注入文本远超阈值 ⇒ 必压
+    changed = await host._maybeCompressPriorSteps(
+        session, run, steps,
+        nextStepIdx=3, maxInputTokens=10, injectionText="很长的注入文本" * 20,
+    )
+
+    assert changed is True
+    # step 1 无 data、step 2 非成功态、step 3 不在 nextStepIdx 之前 ⇒ 只压 step 0
+    assert finishStep.await_count == 1
+    assert finishStep.await_args.args[1] is steps[0]
+    assert finishStep.await_args.kwargs["status"] == "compressed"
+    assert steps[0].data_compressed is not None
+    assert steps[0].data_compressed["meta"]["original_rows"] == 50
+    # 原始 data 永不被删除（spec §5：压缩结果另存 data_compressed）
+    assert steps[0].data is not None and len(steps[0].data) == 50
+    assert updateRun.await_args.kwargs["compressedCount"] == 1
 ```
 
 - [ ] **Step 3: 跑测试确认失败**
@@ -1503,10 +1606,11 @@ from app.domain.multi_step_models import (
 )
 from app.services import multi_step_persistence as persistence
 from app.services.multi_step_compressor import (
+    COMPRESS_THRESHOLD,
+    compressStepData,
     estimatePromptTokens,
     shouldCompress,
 )
-from app.services.multi_step_compressor import compressStepData
 from app.services.multi_step_retry import classifyStepError
 
 logger = logging.getLogger(__name__)
@@ -1644,7 +1748,7 @@ class MultiStepPersistMixin:
                 compressedCount=(run.compressed_count or 0) + compressedCount,
             )
             logger.info("多步压缩：run=%s 压缩 %d 步（估算 %d > %.0f%% of %d）",
-                        run.id, compressedCount, estimated, 0.7 * 100, maxInputTokens)
+                        run.id, compressedCount, estimated, COMPRESS_THRESHOLD * 100, maxInputTokens)
         return compressedCount > 0
 
 

@@ -2065,6 +2065,8 @@ git commit -m "feat(research): 会话级模型选择（迁移 0113 + modelId 放
 ## Task 9: W5-b 执行期直选（绕过路由，失效显式报错）
 
 **Files:**
+- Create: `backend/app/services/research_agent_phases.py`（**Step 0 的搬运目标**：阶段执行体 mixin + 相位纯函数）
+- Modify: `backend/app/api/v1/research.py`、`backend/app/tests/integration/test_research_agent_service.py`（**Step 0 改导入点**）
 - Modify: `backend/app/services/research_agent_ports.py`（新增 `PreferredModelUnavailableError`；`resolveModelConfig` / `resolveClient` 加 `preferredModelId`）
 - Modify: `backend/app/services/research_agent_service.py`（`runTurn` / `resumeTurn` 取会话上的 `model_id` 存入 `state["modelId"]`；`_resolveClient` 转发）
 - Test: `backend/app/tests/unit/test_research_model_selection.py`（新建）
@@ -2080,6 +2082,43 @@ git commit -m "feat(research): 会话级模型选择（迁移 0113 + modelId 放
 **背景**：`resolveModelConfig` 现在恒走 `activeOnly=True` 的可用池 + router。选定模型后必须**直选并跳过 router**；而「选定的模型失效了」必须**显式报错**，绝不静默换成别的模型 —— 静默替换正是要修掉的「以为用了 A 实际用了 B」误判。
 
 **为什么抛异常是安全的**：`_guardedRun`（`research_agent_service.py:331-361`）捕获 `Exception` → 发 `research.error{turn_failed}`（**终态**）→ `markFailed` → 重抛。故新增异常**无需改 `ERROR_SPECS`**，自动落到既有的终态失败语义。
+
+- [ ] **Step 0: 行数红线预备（纯搬运，零行为变化；**单独一个 commit**）
+
+**红线现状（2026-10-05 实测）**：`app/services/research_agent_ports.py` 与 `app/services/research_agent_service.py` **都是 799 行**，项目硬上限 800 行（`Harness/rules/工程结构.md:27`）。本 Task 要在 ports 上加约 13 行（异常类 + 两个参数 + 分支 + 转发）、在 service 上加约 5 行 —— **不先腾空间，两个文件都会越线**。所以先搬运、单独提交，再动功能：让审查能分开看「搬运」与「功能」两件事。
+
+**A. 新建 `backend/app/services/research_agent_phases.py`（`ResearchAgentPhasesMixin`）**
+
+把 `research_agent_service.py:444-688` 的 7 个阶段执行体**逐字搬入**（`_stageIntent` / `_stageEsl` / `_stagePlan` / `_stageExecute` / `_stageHypothesis` / `_stageVerify` / `_stageReport`），**语义一行不改**；连同这 7 个方法用到、而 service 其他地方不再使用的 import 一起搬过去。
+
+`research_agent_service.py`：
+- `class ResearchAgentService(ResearchAgentPhasesMixin):`（mixin 占基类位；`__init__`、公开面、`_runFrom` / `_pauseForUser` / `_guardedRun` / `_llmClient` / `_resolveClient` / `_recordUsage` / `markFailed` / `_loadSession` 全留原地）。
+- 删除搬走的 7 个方法体；新增 `from app.services.research_agent_phases import ResearchAgentPhasesMixin`。
+- `_buildStages`（`:191-203`）里的 `self._stageXxx` 引用**不动**（经 MRO 解析到 mixin）。
+
+**B. 把 ports 的 3 个自足纯函数也搬进同一个新模块**
+
+`nextPhase`（`:436-441`）、`isDegraded`（`:484-489`）、`findingData`（`:576-592`）—— 已用 AST 核实：**这三者在 ports 内部零调用**，所以搬走不会产生 `ports → phases` 的反向依赖（依赖方向保持单向：service → phases → ports）。
+- `research_agent_ports.py`：删掉这三个定义（约 -35 行）。
+- 改导入点 —— **动手前先 `grep -rn "nextPhase\|isDegraded\|findingData" backend/app` 逐条确认，不要照抄这份清单**：`backend/app/api/v1/research.py`（`nextPhase`）、`backend/app/services/research_agent_service.py`（`isDegraded` 在 `_runFrom`、`nextPhase` 在 `resumeTurn` 仍要用，`findingData` 随 `_stageVerify` 一并搬走）、`backend/app/tests/integration/test_research_agent_service.py`（`isDegraded`）。一律改为从 `app.services.research_agent_phases` 导入。
+- 顺手同步职责描述：`research_agent_ports.py:1-15` 的模块文档串、以及 `research_agent_stages.py` 顶部说明里若提到这三个名字，一并改到新家。
+
+**本步验收（"零行为变化"的证据）**：
+
+```bash
+cd backend && wc -l app/services/research_agent_ports.py app/services/research_agent_service.py app/services/research_agent_phases.py
+cd backend && uv run ruff check --select F401,F811 app/services/research_agent_phases.py app/services/research_agent_ports.py app/services/research_agent_service.py
+```
+
+Expected: ports ≤ 770、service ≤ 600（都留下后续余量）；上述**三个被触碰的文件** ruff 无输出（未用导入是本步唯一容易漏的机械错误，用它兜底）。**不要**跑 `app/services/` 整目录 —— 本仓既有历史 lint 违规与无关文件，「整目录无输出」这条验收在本仓不成立（2026-10-05 实测）。
+
+再把本 Task **Step 6 的两条研究套件命令**跑一遍：必须与搬运前**同样全绿**（本步**不新增任何测试** —— 搬运的正确性由既有测试证明）。
+
+```bash
+cd /Users/sunql/Prejectcode-th/MyWiki/wiki/aicode/qa-system
+git add backend/app/services/research_agent_phases.py backend/app/services/research_agent_ports.py backend/app/services/research_agent_service.py backend/app/api/v1/research.py backend/app/tests/integration/test_research_agent_service.py
+git commit -m "refactor(research): 阶段执行体与相位纯函数搬出（为 W5 腾出 800 行上限余量，零行为变化）"
+```
 
 - [ ] **Step 1: 写失败测试**
 
@@ -2311,7 +2350,7 @@ Expected: PASS（6 passed）。
 
 - [ ] **Step 5: 把会话上的 `model_id` 接进执行期**
 
-**行数红线（Task 1 实测）**：`backend/app/services/research_agent_service.py` 现在是 **799 行**，距项目 800 行上限只剩 1 行，而本步要往里加行。**动手前先 `wc -l` 确认**；若加上本步改动会超 800，**先把等价的纯函数/无状态构件抽到 `research_agent_stages.py`**（该文件是本模块既定的抽出目标，依赖方向单向：service → stages），再回填本步。不要为了塞下改动去改 `alembic`/结构或压缩可读性。
+**行数红线**：已由 **Step 0 前置解决**（搬运后 service ≈554 行、ports ≈764 行，本步 +5 / +13 都留有余量）。本步**不要**再做额外抽取；若 `wc -l` 仍显示越线，说明 Step 0 未做完或搬错文件 —— 回去补 Step 0，不要在功能步里压缩可读性或改 `alembic`/结构。
 
 `backend/app/services/research_agent_service.py`：
 
@@ -2615,7 +2654,9 @@ cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@loc
 ```
 
 ```bash
-cd backend && uv run pytest app/tests/unit -q -k research
+# unit 层的 conftest 同样强制 TEST_DATABASE_URL（`app/tests/unit/conftest.py:21`，`_resolveTestDbUrl`），
+# 缺了会在**装配期**报 ~100 个 error（不是断言失败）——极易误判成「测试坏了」。
+cd backend && TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test' uv run pytest app/tests/unit -q -k research
 ```
 
 Expected: PASS。
@@ -2655,9 +2696,12 @@ Expected: 通过 vitest.config.ts 里已配置的 80% thresholds。
 
 ```bash
 cd /Users/sunql/Prejectcode-th/MyWiki/wiki/aicode/qa-system
-docker compose build --no-cache frontend
-docker compose up -d
-docker compose exec backend alembic current
+# 批二**同时改了后端**（迁移 0113 + 执行期直选）与前端 ⇒ **两个服务都必须重建**。
+# 只重建前端 = 后端整批静默不生效（2026-10-05 实测：前端新代码调旧后端 ⇒ DELETE 报 405）。
+# compose 文件在 docker/ 下，`-f` 不能漏（漏了报 no configuration file provided）。
+docker compose -f docker/docker-compose.yml build --no-cache backend frontend
+docker compose -f docker/docker-compose.yml up -d
+docker compose -f docker/docker-compose.yml exec backend alembic current
 ```
 
 Expected: `alembic current` 显示 `0113`（迁移由容器启动自动执行；**不手工 upgrade**）。
@@ -2677,7 +2721,7 @@ Expected: 列表里含 `/api/v1/research/sessions/{sessionId}` 且 methods 含 `
 4. 把所选模型在模型配置页停用，再对旧会话追问 → **明确的终态错误提示**，不是静默换模型出结果。
 
 ```bash
-docker compose logs --tail=80 backend
+docker compose -f docker/docker-compose.yml logs --tail=80 backend
 ```
 
 - [ ] **Step 5: 填 Harness SSOT**

@@ -239,6 +239,7 @@ from app.services.chat_recall import (
     _isOdsBusinessTable,
 )
 from app.services.chat_multistep import _FOLLOW_UP_RETRY_MAX_LEN, MultiStepMixin
+from app.services.multi_step_persist_hooks import MultiStepPersistMixin
 # 会话上下文 mixin：方法经 MRO 合并进 ChatService；常量 re-export 给既有测试
 # （test_chat_service_state.py 直接 import _RECENT_ROUNDS_LIMIT / _STATE_HISTORY_FIELD_LIMIT_DEFAULT，
 #  test_chat_service.py 读 _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT 断言）。
@@ -292,7 +293,7 @@ def _firstPresentValue(data: list[dict] | None) -> Any | None:
     return next((v for v in data[0].values() if v is not None), None)
 
 
-class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin):
+class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin):
     """自然语言问答编排服务。
 
     组合 ChatStreamOutputMixin 提供流式回答输出的超时保护与降级能力。

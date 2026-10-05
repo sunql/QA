@@ -2452,6 +2452,10 @@ git commit -m "feat(multi-step): 新增续跑 API POST /chat/multi-step/{runId}/
 ### Task 8: 清理任务
 
 **Files:**
+- Create: `backend/app/jobs/__init__.py`（新子包；本仓约定每个子包都有 `__init__.py`，
+  现有 `app/api` `app/domain` `app/infrastructure` `app/models` `app/schemas` `app/services`
+  `app/tests` `app/utils` `app/workers` 9 个无一例外。缺它不会报错——Python 3 会当成命名空间
+  包——但会留下一个与本仓其余部分不一致的包）
 - Create: `backend/app/jobs/cleanup_multi_step_runs.py`
 - Test: `backend/app/tests/integration/test_multi_step_cleanup.py`
 
@@ -2463,22 +2467,44 @@ git commit -m "feat(multi-step): 新增续跑 API POST /chat/multi-step/{runId}/
 `backend/app/tests/integration/test_multi_step_cleanup.py`:
 ```python
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.multi_step_models import MultiStepRun
 from app.jobs.cleanup_multi_step_runs import cleanupMultiStepRuns
+from app.tests import _pg_support
+
+
+@pytest.fixture()
+async def pgSession() -> AsyncIterator[AsyncSession]:
+    """真实 PG 会话：每测试新建引擎 + TRUNCATE 隔离。
+
+    本文件的断言是**全局**的（`deleted` 计数、剩余 run 集合），必须隔离。
+    不能用 `db_session`：truncate 挂在 `pg_client` 上，`db_session` 不 truncate。
+    """
+    engine = await _pg_support._newEngine()
+    try:
+        await _pg_support._truncateAll(engine)
+        factory = async_sessionmaker(
+            engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
+        )
+        async with factory() as session:
+            yield session
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def testCleanupDeletesOnlyExpiredRuns(db_session):
+async def testCleanupDeletesOnlyExpiredRuns(pgSession):
     from app.domain.research_models import ResearchSession
 
     sessionRow = ResearchSession(id=uuid.uuid4(), title="cleanup", created_by=1)
-    db_session.add(sessionRow)
-    await db_session.commit()
+    pgSession.add(sessionRow)
+    await pgSession.commit()
 
     now = datetime.now(UTC)
 
@@ -2490,8 +2516,8 @@ async def testCleanupDeletesOnlyExpiredRuns(db_session):
             updated_at=now - timedelta(days=ageDays),
             finished_at=now - timedelta(days=ageDays),
         )
-        db_session.add(run)
-        await db_session.flush()
+        pgSession.add(run)
+        await pgSession.flush()
         return run
 
     oldSucceeded = await addRun("succeeded", 40)   # 删
@@ -2499,26 +2525,26 @@ async def testCleanupDeletesOnlyExpiredRuns(db_session):
     oldFailed = await addRun("failed", 10)         # 删
     freshFailed = await addRun("failed", 2)        # 留
     oldRunning = await addRun("running", 100)      # 留（未终态不删）
-    await db_session.commit()
+    await pgSession.commit()
 
     # Act
-    deleted = await cleanupMultiStepRuns(db_session, now=now)
-    await db_session.commit()
+    deleted = await cleanupMultiStepRuns(pgSession, now=now)
+    await pgSession.commit()
 
     # Assert
     assert deleted == 2
-    remaining = {r.id for r in (await db_session.execute(select(MultiStepRun))).scalars().all()}
+    remaining = {r.id for r in (await pgSession.execute(select(MultiStepRun))).scalars().all()}
     assert remaining == {freshSucceeded.id, freshFailed.id, oldRunning.id}
 
 
 @pytest.mark.asyncio
-async def testCleanupDeletesStepsViaCascade(db_session):
+async def testCleanupDeletesStepsViaCascade(pgSession):
     from app.domain.multi_step_models import MultiStepStep
     from app.domain.research_models import ResearchSession
 
     sessionRow = ResearchSession(id=uuid.uuid4(), title="cleanup-cascade", created_by=1)
-    db_session.add(sessionRow)
-    await db_session.commit()
+    pgSession.add(sessionRow)
+    await pgSession.commit()
     now = datetime.now(UTC)
     run = MultiStepRun(
         id=uuid.uuid4(), session_id=sessionRow.id, question="q", model_id=None,
@@ -2526,15 +2552,15 @@ async def testCleanupDeletesStepsViaCascade(db_session):
         started_at=now - timedelta(days=60), updated_at=now - timedelta(days=60),
         finished_at=now - timedelta(days=60),
     )
-    db_session.add(run)
-    await db_session.flush()
-    db_session.add(MultiStepStep(id=uuid.uuid4(), run_id=run.id, step_index=0, status="succeeded", sub_question="a"))
-    await db_session.commit()
+    pgSession.add(run)
+    await pgSession.flush()
+    pgSession.add(MultiStepStep(id=uuid.uuid4(), run_id=run.id, step_index=0, status="succeeded", sub_question="a"))
+    await pgSession.commit()
 
-    await cleanupMultiStepRuns(db_session, now=now)
-    await db_session.commit()
+    await cleanupMultiStepRuns(pgSession, now=now)
+    await pgSession.commit()
 
-    assert (await db_session.execute(select(MultiStepStep))).scalars().all() == []
+    assert (await pgSession.execute(select(MultiStepStep))).scalars().all() == []
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -2614,7 +2640,7 @@ Expected: 2 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/jobs/cleanup_multi_step_runs.py backend/app/tests/integration/test_multi_step_cleanup.py
+git add backend/app/jobs/__init__.py backend/app/jobs/cleanup_multi_step_runs.py backend/app/tests/integration/test_multi_step_cleanup.py
 git commit -m "feat(multi-step): 新增 run 保留期清理任务"
 ```
 

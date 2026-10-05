@@ -9,6 +9,9 @@
 - 指定模型按**全量**清单找（存在但停用 ⇒ 报错，而不是被可用池过滤后误判为不存在）；
 - 指定模型 key 缺失 / 不存在 ⇒ **显式报错，绝不静默换模型**；
 - 未指定 ⇒ 现有自动路由行为逐字不变。
+
+另含**接线**单测（fix round 1）：`state["modelId"]` → `resolveClient(preferredModelId=...)`
+的透传值断言（只断言「调用发生」会漏掉接线断开，故断言**到达 ports 的值**）。
 """
 
 from typing import Any
@@ -16,10 +19,12 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
+from app.services import research_agent_service
 from app.services.research_agent_ports import (
     PreferredModelUnavailableError,
     resolveModelConfig,
 )
+from app.services.research_agent_service import ResearchAgentService
 
 # ---------------------------------------------------------------------------
 # 本文件是纯函数测试，不需要 DB。
@@ -162,3 +167,73 @@ async def test_no_preference_and_no_usable_config_returns_none() -> None:
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# 接线（W5-b fix round 1）：state["modelId"] → ports.resolveClient 的 preferredModelId
+#
+# 上面 6 条只证明 ports 收到参数后行为正确；若服务侧接线断了（state 里没值 / 没透传），
+# 它们全绿而线上仍会静默换模型 —— 本组用例堵这个盲区。
+# ---------------------------------------------------------------------------
+
+
+class _FakeReporter:
+    """`reporter` 端口替身：不注入则构造真实 ReportPlanner（本组用例用不到报告）。"""
+
+
+class _ProbeConfigs:
+    """配置端口占位：`resolveClient` 已被探针替换，本端口不会被读到。"""
+
+
+def _makeService() -> ResearchAgentService:
+    """服务实例（构造期零 DB）：协作者全传替身，默认协作件均为惰性对象。"""
+    return ResearchAgentService(
+        esl=object(),
+        sessionService=object(),
+        planner=object(),
+        runner=object(),
+        chartService=object(),
+        reporter=_FakeReporter(),
+        modelConfigs=_ProbeConfigs(),
+        modelRouter=_FakeRouter(),
+        tokenUsage=object(),
+    )
+
+
+def _forwardingProbe(forwarded: list[Any]):
+    """替身 `resolveClient`：签名与 ports 同形，记录到达的 preferredModelId。"""
+
+    async def _probe(
+        factory: Any, modelConfigs: Any, modelRouter: Any, session: Any, *,
+        state: dict[str, Any], emit: Any, sessionId: Any,
+        tokenUsage: Any = None, preferredModelId: int | None = None,
+    ) -> tuple[Any, Any]:
+        forwarded.append(preferredModelId)
+        return ("client", "config")
+
+    return _probe
+
+
+async def test_resolve_client_forwards_session_model_id_to_ports(monkeypatch: Any) -> None:
+    """会话选定模型 ⇒ `preferredModelId` 必须是**该 id**（不是 None、不是只发生调用）。"""
+    forwarded: list[Any] = []
+    monkeypatch.setattr(research_agent_service, "resolveClient", _forwardingProbe(forwarded))
+    svc = _makeService()
+
+    client, config = await svc._resolveClient(
+        object(), state={"modelId": 42}, emit=None, sessionId="s"
+    )
+
+    assert (client, config) == ("client", "config")  # 返回值原样透传
+    assert forwarded == [42]
+
+
+async def test_resolve_client_forwards_none_when_session_has_no_model(monkeypatch: Any) -> None:
+    """未选定（会话 model_id 为 NULL）⇒ 传 None，保持自动路由。"""
+    forwarded: list[Any] = []
+    monkeypatch.setattr(research_agent_service, "resolveClient", _forwardingProbe(forwarded))
+    svc = _makeService()
+
+    await svc._resolveClient(object(), state={}, emit=None, sessionId="s")
+
+    assert forwarded == [None]

@@ -22,12 +22,12 @@ from typing import Any
 import pytest
 
 from app.services.chat_usage import UsageMixin as ChatUsageMixin
+from app.services.research_agent_phases import planQuestionWithFeedback
 from app.services.research_agent_ports import (
     LlmUsageRecorder,
     MeteredClient,
     buildClient,
     buildRoutingContext,
-    planQuestionWithFeedback,
     resolveModelConfig,
     selectClassesForTables,
 )

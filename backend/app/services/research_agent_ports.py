@@ -18,7 +18,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -30,7 +29,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import LlmConfig
-from app.services.learning.prompt_fence import neutralizeFence
 from app.services.messages_zh import MSG_MODEL_CONFIG_UNAVAILABLE
 from app.services.model_router_service import RoutingContext
 from app.services.token_usage_service import TokenUsageService
@@ -107,7 +105,6 @@ MAX_VERIFY_HYPOTHESES = 3
 DRIVER_HINT_LIMIT = 30
 COLUMN_SUMMARY_LIMIT = 12
 STEP_MISSING_SQL = "计划步未携带 SQL（逐步 NL2SQL 生成失败或未接线）"
-PLAN_FEEDBACK_HEADER = "[用户修改要求]"
 
 # --- finding.supporting_data 契约（Task 5 写 / Task 6 报告读）------------------
 FINDING_ROWS_KEY = "rows"
@@ -399,18 +396,10 @@ class MeteredClient:
 
 
 # ---------------------------------------------------------------------------
-# 无状态构件：options / 相位映射
-# （恢复态重建 / 改写态 / 恢复轮内容见 research_agent_stages.py，Task 8 抽出）
+# 无状态构件：相位映射与步错误码
+# （options 构造 / 步 signal / 计划归一化等唯一消费者在 phase 执行体的构件，
+#  见 research_agent_phases.py；恢复态重建见 research_agent_stages.py，Task 8 抽出）
 # ---------------------------------------------------------------------------
-
-
-def buildOptions(*, signal: str, resumePhase: str, **payload: Any) -> dict[str, Any]:
-    """checkpoint options：信号 + 恢复相位 + 语义载荷（前端卡片直接渲染）。"""
-    return {
-        OPT_SIGNAL: signal,
-        OPT_RESUME_PHASE: resumePhase,
-        **{key: value for key, value in payload.items() if value is not None},
-    }
 
 
 def requireQuestion(question: str, sessionId: uuid.UUID | str) -> None:
@@ -436,21 +425,11 @@ def nextPhaseForPhase(phase: str, options: dict[str, Any]) -> str:
     return NEXT_PHASE_BY_CHECKPOINT.get(phase) or PHASES[-1]
 
 
-def stepSignal(error: str | None) -> str:
-    """步失败**checkpoint signal 词汇**：SQL Guard 拒绝单列，其余归 low_confidence_step（设计 §4.8）。
-
-    注意：本函数产出 **checkpoint signal 词汇**（落 options["signal"] / phase 白名单），
-    不是 error code —— `research.error` 事件的 code 走 `stepErrorCode`，勿混用。
-    """
-    if error and error.startswith(SIGNAL_SQL_VALIDATION_FAILED):
-        return SIGNAL_SQL_VALIDATION_FAILED
-    return SIGNAL_LOW_CONFIDENCE_STEP
-
-
 def stepErrorCode(error: str | None) -> str:
     """步失败 **error code**：SQL Guard 拒绝 → sql_validation_failed，其余 → step_failed。
 
-    与 `stepSignal`（checkpoint signal 词汇）解耦：error code 不进 phase / options["signal"] 白名单。
+    与 `research_agent_phases.stepSignal`（checkpoint signal 词汇，Task 9 fix round 1 搬到那里）
+    解耦：error code 不进 phase / options["signal"] 白名单。
     """
     if error and error.startswith(SIGNAL_SQL_VALIDATION_FAILED):
         return ERROR_SQL_VALIDATION_FAILED
@@ -458,44 +437,10 @@ def stepErrorCode(error: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 无状态构件：计划 / 步结果归一化
+# 无状态构件：步结果归一化
+# （单步回落 / 计划归一化 / 计划反馈回灌见 research_agent_phases.py，
+#  Task 9 fix round 1 搬到那里 —— 唯一消费者是 phase 执行体）
 # ---------------------------------------------------------------------------
-
-
-def singleStepPlan(question: str) -> dict[str, Any]:
-    """planner 判为单步（`plan=None`）时的回落计划：一句一问，单步执行，复用既有执行链路。
-
-    与 chat 同口径，字段与 `normalizePlan` 输出契约一致（N1：此前 `None` 归一成
-    `{"steps": []}` ⇒ 零 SQL 仍出报告）。
-    """
-    return {
-        "steps": [{"index": 0, "description": question, "sub_question": question,
-                   "sql": None, "aggregation_only": False}],
-        "aggregationHint": "",
-        "originalQuestion": question,
-    }
-
-
-def normalizePlan(plan: Any) -> dict[str, Any]:
-    """把 planner 产物归一成可落 JSONB 的 dict（兼容 StepPlanResult.plan 为 None）。"""
-    if plan is None:
-        logger.warning("计划器返回空计划（单步或拆分失败），按无步计划继续")
-        return {"steps": [], "aggregationHint": "", "originalQuestion": ""}
-    steps = [
-        {
-            "index": int(getattr(raw, "index", position)),
-            "description": str(getattr(raw, "description", "") or ""),
-            "sub_question": str(getattr(raw, "sub_question", "") or ""),
-            "sql": getattr(raw, "sql", None),
-            "aggregation_only": bool(getattr(raw, "aggregation_only", False)),
-        }
-        for position, raw in enumerate(getattr(plan, "steps", None) or [])
-    ]
-    return {
-        "steps": steps,
-        "aggregationHint": str(getattr(plan, "aggregation_hint", "") or ""),
-        "originalQuestion": str(getattr(plan, "original_question", "") or ""),
-    }
 
 
 def stepResult(
@@ -641,26 +586,14 @@ async def resolveModelConfig(
     """
     if modelConfigs is None:
         return None
-    try:
-        # 独立 savepoint（Task 7.5 HIGH）：`list()` 语句级失败（如 llm_config 结构漂移）会把主事务
-        # 置 aborted ⇒ 后续 checkpoint / resume INSERT 全炸（已发 202，数据静默丢失）；savepoint 隔离之。
-        async with session.begin_nested():
-            # 显式选定读**全量**清单（否则「存在但已停用」会被可用池过滤后误判为不存在）。
-            configs = await modelConfigs.list(session, activeOnly=preferredModelId is None)
-    except Exception:  # noqa: BLE001 —— 读取失败：显式选定必须报错，自动路由降级
-        if preferredModelId is not None:
-            logger.warning(
-                "读取模型配置失败（会话已指定模型）: session=%s", sessionId, exc_info=True
-            )
-            raise PreferredModelUnavailableError(MSG_MODEL_CONFIG_UNAVAILABLE.format(id=preferredModelId))
-        logger.warning("读取模型配置失败，本轮 LLM 段降级: session=%s", sessionId, exc_info=True)
-        return None
     if preferredModelId is not None:
-        # 直选（不走 router）：不存在 / 已停用 / 无 key 一律显式报错，绝不静默换模型。
-        target = next((config for config in configs if config.id == preferredModelId), None)
-        if target is None or not target.is_active or buildClient(factory, target) is None:
-            raise PreferredModelUnavailableError(MSG_MODEL_CONFIG_UNAVAILABLE.format(id=preferredModelId))
-        return target
+        return await _resolvePreferredConfig(
+            modelConfigs, factory, session, preferredModelId, sessionId=sessionId
+        )
+    configs = await _readConfigs(modelConfigs, session, sessionId, activeOnly=True)
+    if configs is None:
+        logger.warning("读取模型配置失败，本轮 LLM 段降级: session=%s", sessionId)
+        return None
     usable = [config for config in configs if buildClient(factory, config) is not None]
     if not usable:
         logger.warning("无可用模型配置（key 缺失/未配置），本轮 LLM 段降级: session=%s", sessionId)
@@ -673,6 +606,47 @@ async def resolveModelConfig(
     except Exception:  # noqa: BLE001 —— 路由失败（如 NoAvailableModelError）同样降级
         logger.warning("模型路由失败，本轮 LLM 段降级: session=%s", sessionId, exc_info=True)
         return None
+
+
+async def _readConfigs(
+    modelConfigs: Any, session: AsyncSession | None, sessionId: uuid.UUID | str, *,
+    activeOnly: bool,
+) -> list[Any] | None:
+    """读模型配置清单；读失败返回 None（异常在此留痕，调用方只决定降级 / 报错）。
+
+    独立 savepoint（Task 7.5 HIGH）：`list()` 语句级失败（如 llm_config 结构漂移）会把主事务
+    置 aborted ⇒ 后续 checkpoint / resume INSERT 全炸（已发 202，数据静默丢失）；savepoint 隔离之。
+    """
+    try:
+        async with session.begin_nested():
+            return list(await modelConfigs.list(session, activeOnly=activeOnly))
+    except Exception:  # noqa: BLE001 —— 读取失败不在此处置：调用方决定降级或报错
+        logger.warning(
+            "模型配置读取异常: session=%s activeOnly=%s", sessionId, activeOnly, exc_info=True
+        )
+        return None
+
+
+async def _resolvePreferredConfig(
+    modelConfigs: Any, factory: Any, session: AsyncSession | None, preferredModelId: int,
+    *, sessionId: uuid.UUID | str,
+) -> Any:
+    """会话显式选定模型的**直选**：读**全量**清单、跳过 router；不可用即显式报错。
+
+    三种不可用（不存在 / 已停用 / key 缺失）统一抛 `PreferredModelUnavailableError`，
+    **绝不静默回落自动路由** —— 静默替换正是要修的「以为用了 A 实际用了 B」误判。
+    """
+    configs = await _readConfigs(modelConfigs, session, sessionId, activeOnly=False)
+    if configs is None:
+        logger.warning("读取模型配置失败（会话已指定模型）: session=%s", sessionId)
+        raise PreferredModelUnavailableError(MSG_MODEL_CONFIG_UNAVAILABLE.format(id=preferredModelId))
+    target = next((config for config in configs if config.id == preferredModelId), None)
+    if target is None or not target.is_active:
+        raise PreferredModelUnavailableError(MSG_MODEL_CONFIG_UNAVAILABLE.format(id=preferredModelId))
+    if buildClient(factory, target) is None:
+        # key 缺失 / 客户端建不起来：同样显式报错，不换模型。
+        raise PreferredModelUnavailableError(MSG_MODEL_CONFIG_UNAVAILABLE.format(id=preferredModelId))
+    return target
 
 
 async def markLlmUnavailable(
@@ -760,22 +734,8 @@ async def recordUsageQuietly(
 
 
 # ---------------------------------------------------------------------------
-# 无状态构件：计划反馈回灌 / 步本体类筛选（Task 6.5）
+# 无状态构件：步本体类筛选（Task 6.5；计划反馈回灌见 research_agent_phases.py）
 # ---------------------------------------------------------------------------
-
-
-def planQuestionWithFeedback(question: str, feedback: dict[str, Any] | None) -> str:
-    """把计划 checkpoint 的 modify 反馈回灌成 planner 输入（Task 6.5-4）。
-
-    真实 `StepQueryPlanner.plan(question, classes, client, model_name)` 没有反馈参数
-    （Step 0 实测），故反馈只能经**问题文本**进入 —— 与 chat 注入 scopeQuestion /
-    priorState 同款。反馈是用户内容，先经 `neutralizeFence` 打断围栏标签，避免其
-    提前闭合 `<user_content>` 被当成指令执行。
-    """
-    if not feedback:
-        return question
-    payload = neutralizeFence(json.dumps(feedback, ensure_ascii=False, sort_keys=True))
-    return f"{question}\n\n{PLAN_FEEDBACK_HEADER} {payload}"
 
 
 def selectClassesForTables(classes: list[Any], tables: list[str]) -> list[Any]:

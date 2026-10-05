@@ -9,14 +9,16 @@
    `_stageExecute` / `_stageHypothesis` / `_stageVerify` / `_stageReport`）—— 逐字从
    `research_agent_service.py` 搬入，语义一行未改；`ResearchAgentService` 以本 mixin 为基类，
    `_buildStages` 里的 `self._stageXxx` 经 MRO 解析到此处。
-2. **相位纯函数**：`nextPhase` / `isDegraded` / `findingData` —— 逐字从 `research_agent_ports.py`
-   搬入（三者在 ports 内部零调用，故不产生反向依赖）。
+2. **相位纯函数**：`nextPhase` / `isDegraded` / `findingData`（Step 0 自 ports 搬入）与
+   `buildOptions` / `stepSignal` / `singleStepPlan` / `normalizePlan` / `planQuestionWithFeedback`
+   （Task 9 fix round 1 自 ports 搬入，理由同为 ports 内部零调用）；连同 `PLAN_FEEDBACK_HEADER`。
 
 依赖方向**单向**：service → phases → ports（phases 只读 ports 的词汇与构件；ports 不导入本模块）。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from dataclasses import asdict
@@ -26,8 +28,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.enterprise_semantic_layer import EmptyResearchScopeError
 from app.services.hypothesis_service import Hypothesis
+from app.services.learning.prompt_fence import neutralizeFence
 from app.services.research_agent_execution import (
-    adapterFor, depsForSession, executedStepCount, finalizeStepResults, runStep,
+    adapterFor,
+    depsForSession,
+    executedStepCount,
+    finalizeStepResults,
+    runStep,
 )
 from app.services.research_agent_ports import (
     ACTION_REJECT,
@@ -46,6 +53,8 @@ from app.services.research_agent_ports import (
     FINDING_ROWS_KEY,
     MAX_FINDING_ROWS,
     OPT_ABORT_PHASE,
+    OPT_RESUME_PHASE,
+    OPT_SIGNAL,
     PHASE_ESL,
     PURPOSE_PLAN,
     PURPOSE_REPORT,
@@ -53,21 +62,22 @@ from app.services.research_agent_ports import (
     SIGNAL_FIXED_HYPOTHESIS,
     SIGNAL_FIXED_PLAN,
     SIGNAL_FIXED_SCOPE,
+    SIGNAL_LOW_CONFIDENCE_STEP,
+    SIGNAL_SQL_VALIDATION_FAILED,
     VERIFY_FAIL_FACTOR,
     VERIFY_OK_FACTOR,
     Emit,
     MeteredClient,
     Pause,
-    buildOptions,
     emitEvent,
     nextPhaseForPhase,
-    normalizePlan,
-    planQuestionWithFeedback,
-    singleStepPlan,
-    stepSignal,
 )
 from app.services.research_agent_stages import (
-    ambiguityPrompt, candidateConfidence, clientModelName, eslClasses, hypothesisPrompt,
+    ambiguityPrompt,
+    candidateConfidence,
+    clientModelName,
+    eslClasses,
+    hypothesisPrompt,
     selectedHypotheses,
 )
 
@@ -326,6 +336,85 @@ class ResearchAgentPhasesMixin:
         )
         return None
 
+
+
+# ---------------------------------------------------------------------------
+# 无状态构件：options / 信号 / 计划归一化 / 计划反馈回灌
+# （Task 9 fix round 1 从 research_agent_ports.py 搬入：ports 内部零调用，搬迁后
+#   ports 不再导入本模块，依赖方向仍是 service → phases → ports。）
+# ---------------------------------------------------------------------------
+
+PLAN_FEEDBACK_HEADER = "[用户修改要求]"
+
+
+def buildOptions(*, signal: str, resumePhase: str, **payload: Any) -> dict[str, Any]:
+    """checkpoint options：信号 + 恢复相位 + 语义载荷（前端卡片直接渲染）。"""
+    return {
+        OPT_SIGNAL: signal,
+        OPT_RESUME_PHASE: resumePhase,
+        **{key: value for key, value in payload.items() if value is not None},
+    }
+
+
+def stepSignal(error: str | None) -> str:
+    """步失败**checkpoint signal 词汇**：SQL Guard 拒绝单列，其余归 low_confidence_step（设计 §4.8）。
+
+    注意：本函数产出 **checkpoint signal 词汇**（落 options["signal"] / phase 白名单），
+    不是 error code —— `research.error` 事件的 code 走 `stepErrorCode`，勿混用。
+    """
+    if error and error.startswith(SIGNAL_SQL_VALIDATION_FAILED):
+        return SIGNAL_SQL_VALIDATION_FAILED
+    return SIGNAL_LOW_CONFIDENCE_STEP
+
+
+def singleStepPlan(question: str) -> dict[str, Any]:
+    """planner 判为单步（`plan=None`）时的回落计划：一句一问，单步执行，复用既有执行链路。
+
+    与 chat 同口径，字段与 `normalizePlan` 输出契约一致（N1：此前 `None` 归一成
+    `{"steps": []}` ⇒ 零 SQL 仍出报告）。
+    """
+    return {
+        "steps": [{"index": 0, "description": question, "sub_question": question,
+                   "sql": None, "aggregation_only": False}],
+        "aggregationHint": "",
+        "originalQuestion": question,
+    }
+
+
+def normalizePlan(plan: Any) -> dict[str, Any]:
+    """把 planner 产物归一成可落 JSONB 的 dict（兼容 StepPlanResult.plan 为 None）。"""
+    if plan is None:
+        logger.warning("计划器返回空计划（单步或拆分失败），按无步计划继续")
+        return {"steps": [], "aggregationHint": "", "originalQuestion": ""}
+    steps = [
+        {
+            "index": int(getattr(raw, "index", position)),
+            "description": str(getattr(raw, "description", "") or ""),
+            "sub_question": str(getattr(raw, "sub_question", "") or ""),
+            "sql": getattr(raw, "sql", None),
+            "aggregation_only": bool(getattr(raw, "aggregation_only", False)),
+        }
+        for position, raw in enumerate(getattr(plan, "steps", None) or [])
+    ]
+    return {
+        "steps": steps,
+        "aggregationHint": str(getattr(plan, "aggregation_hint", "") or ""),
+        "originalQuestion": str(getattr(plan, "original_question", "") or ""),
+    }
+
+
+def planQuestionWithFeedback(question: str, feedback: dict[str, Any] | None) -> str:
+    """把计划 checkpoint 的 modify 反馈回灌成 planner 输入（Task 6.5-4）。
+
+    真实 `StepQueryPlanner.plan(question, classes, client, model_name)` 没有反馈参数
+    （Step 0 实测），故反馈只能经**问题文本**进入 —— 与 chat 注入 scopeQuestion /
+    priorState 同款。反馈是用户内容，先经 `neutralizeFence` 打断围栏标签，避免其
+    提前闭合 `<user_content>` 被当成指令执行。
+    """
+    if not feedback:
+        return question
+    payload = neutralizeFence(json.dumps(feedback, ensure_ascii=False, sort_keys=True))
+    return f"{question}\n\n{PLAN_FEEDBACK_HEADER} {payload}"
 
 
 def nextPhase(checkpoint: Any, action: str) -> str:

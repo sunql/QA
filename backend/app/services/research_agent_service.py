@@ -83,7 +83,11 @@ from app.services.research_agent_ports import (
     resolveClient,
 )
 from app.services.research_agent_stages import (
-    dataSummary, drivers, rebuildState, resumeTurnContent, rewriteState,
+    dataSummary,
+    drivers,
+    rebuildState,
+    resumeTurnContent,
+    rewriteState,
 )
 from app.services.research_hypothesis_adapter import generateHypotheses
 from app.services.research_session_service import ResearchSessionService

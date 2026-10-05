@@ -398,6 +398,14 @@ async def _newSession(svc, dbSession, question: str = QUESTION):
     )
 
 
+async def _newSessionWithModel(svc, dbSession, modelId: int, question: str = QUESTION):
+    """带**会话级模型选择**的会话（W5：`createSession(modelId=)` 直落 `model_id` 列）。"""
+    ds = await _ensureDatasource(dbSession)
+    return await svc.sessionService.createSession(
+        dbSession, userId=1, question=question, datasourceId=ds.id, modelId=modelId
+    )
+
+
 async def _resolve(
     svc, dbSession, sessionId, action: str, choice: dict | None = None, emit=None
 ) -> str:
@@ -1812,3 +1820,87 @@ async def test_no_llm_single_step_fallback_fails_turn_without_report(dbSession, 
     # 零个数据事件（该 turn 一个数据步都没执行 —— 正是本闸门要拦的形状）
     assert [p["index"] for (event, p) in events if event == "research.step.data"] == []
     assert await _sessionStatus(dbSession, s.id) == "failed"  # 会话置 failed（终态）
+
+
+# ---------------------------------------------------------------------------
+# W5-b 接线（fix round 1）：会话行 model_id → state → 执行期直选
+#
+# 单测已证明 ports 收到 `preferredModelId` 后行为正确；本组证明**服务侧确实把会话
+# 选定的 id 送到了那里**（runTurn 的初始 state / resumeTurn 的恢复态各一处）。
+# 断言「到达 llmFactory 的配置 id」与「router 未被调用」，而不是只断言调用发生。
+# ---------------------------------------------------------------------------
+
+
+class _ListRecorder(FakeModelConfigs):
+    """记录每次 `list` 的 `activeOnly`：显式选定必须读**全量**清单（False）。"""
+
+    def __init__(self, configs=None) -> None:
+        super().__init__(configs)
+        self.activeOnlyCalls: list[bool] = []
+
+    async def list(self, session, *, activeOnly: bool = False):
+        self.activeOnlyCalls.append(activeOnly)
+        return await super().list(session, activeOnly=activeOnly)
+
+
+def _recordingFactory(seen: list):
+    """llmFactory 探针：记录 `resolveClient` 交出的**已选配置**。"""
+
+    def factory(config):
+        seen.append(config)
+        return ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+
+    return factory
+
+
+def _choiceConfigs() -> _ListRecorder:
+    """首位（自动路由会选中的）id=7 + 会话选定的 id=42 —— 两者可区分才算断言。"""
+    return _ListRecorder([FakeModelConfig(id=7), FakeModelConfig(id=42, model_name="chosen")])
+
+
+@pytest.mark.asyncio
+async def test_run_turn_direct_selects_session_model_without_router(
+    dbSession, makeService
+) -> None:
+    """runTurn：会话选定的模型直选（跳过 router），且读的是**全量**清单。"""
+    seen: list = []
+    router = FakeModelRouter()
+    configs = _choiceConfigs()
+    svc = makeService(
+        autoConfirm=True, llmFactory=_recordingFactory(seen),
+        modelConfigs=configs, modelRouter=router,
+    )
+    s = await _newSessionWithModel(svc, dbSession, modelId=42)
+
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+
+    assert status == "done"
+    assert seen and {cfg.id for cfg in seen} == {42}  # 到达 ports 的是会话选定的配置
+    assert router.calls == []  # 直选 ⇒ 不进路由器
+    assert set(configs.activeOnlyCalls) == {False}  # 显式选定读全量（停用项也算「存在」）
+
+
+@pytest.mark.asyncio
+async def test_resume_turn_reinjects_session_model_choice(dbSession, makeService) -> None:
+    """resumeTurn：checkpoint 载荷不带 modelId ⇒ 恢复态必须补回会话选定的模型。
+
+    去掉 `state["modelId"] = row.model_id` 后本用例转红：`resolveClient` 收到 None
+    ⇒ 自动路由选中列表首位（id=7），而非会话选定的 42。
+    """
+    seen: list = []
+    router = FakeModelRouter()
+    configs = _choiceConfigs()
+    svc = makeService(
+        llmFactory=_recordingFactory(seen), modelConfigs=configs, modelRouter=router
+    )
+    s = await _newSessionWithModel(svc, dbSession, modelId=42)
+
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    assert status == "awaiting_user" and seen == []  # intent 相位零 LLM，尚未取客户端
+
+    resumed = await _resolve(svc, dbSession, s.id, "confirm")  # → plan 相位（LLM）
+
+    assert resumed == "awaiting_user"
+    assert seen and {cfg.id for cfg in seen} == {42}
+    assert router.calls == []
+    assert set(configs.activeOnlyCalls) == {False}

@@ -303,6 +303,22 @@ class MultiStepMixin:
         # 可能缺当前步骤需要的类（如步骤问"物料"但召回只命中供应商相关表）。
         # 合并策略：步骤召回 ∪ 共享召回（保跨步骤 JOIN 连通），步骤召回在前。
         pc = await self._recallForStep(session, pc, step_plan)
+        # ★ NEW: sub-question 改写 hook（feat-qwen-multistep-uplift）
+        # 仅 Qwen 系列 + 命中对比/对照/地点模式时改写；其他模型 / 无匹配 → 原样透传。
+        try:
+            model_name_for_rewrite = (pc.selected.model_name or "") if pc.selected else ""
+            rewrite_result = self._subquestionRewriter.rewrite(
+                sub_question=step_plan.sub_question,
+                prev_results=ctx.completed_steps,
+                model_name=model_name_for_rewrite,
+            )
+            if rewrite_result.rewritten is not None:
+                logger.info(
+                    "sub-question 改写命中 template=%s", rewrite_result.template_id,
+                )
+                step_plan = replace(step_plan, sub_question=rewrite_result.rewritten)
+        except Exception:  # noqa: BLE001
+            logger.warning("sub-question 改写 hook 异常，原 step_plan 保留", exc_info=True)
         try:
             outcome = await self._planAndGenerateSql(
                 session, dto, pc, IntentType.NEW_QUERY, state,

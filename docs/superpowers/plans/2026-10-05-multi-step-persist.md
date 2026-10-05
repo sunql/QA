@@ -1404,7 +1404,8 @@ git commit -m "feat(multi-step): 新增上下文压缩与 token 估算"
   - `_isPersistEnabled(self, session) -> bool`
   - `_openRun(self, session, *, sessionId, question, modelId, subQuestions, datasourceId=None) -> MultiStepRun | None`
   - `_persistStepSuccess(self, session, step, *, status, sql, data, chartOption, modelUsed, tokens, cost) -> None`
-  - `_persistStepFailure(self, session, step, exc) -> str`
+  - `_persistStepFailure(self, session, step, exc, *, run=None, tokens=0, cost=0) -> str`
+    （`step` 可为 `None` ⇒ 只分类、不落库、仍返回 kind）
   - `_closeRun(self, session, run, *, status, completedSteps, currentStepIdx, errorSummary) -> None`
   - `_maybeCompressPriorSteps(self, session, run, steps, *, nextStepIdx, maxInputTokens, injectionText) -> bool`
 - Produces（**模块级函数，不是方法**——Task 6 会 `from app.services.multi_step_persist_hooks import runStatusFor`，故必须建在本模块顶层）：
@@ -1508,6 +1509,35 @@ async def testPersistStepFailureRecordsClassification(monkeypatch):
     assert record.await_args.kwargs["tokens"] == 0
     assert record.await_args.kwargs["cost"] == 0
     assert updateRun.await_args.kwargs["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def testPersistStepFailureWithStepNoneSkipsWriteButStillClassifies(monkeypatch):
+    """kill switch 关掉时 step 为 None：只分类、不落库。
+
+    缺这个守卫会让 recordStepError 在 `step.attempt_count` 抛 AttributeError，
+    把原始的步错误顶掉 —— 关掉开关反而崩在守卫自身。传了 run 是为了同时钉住
+    `if run is not None` 分支里的 `step.step_index` 访问也被早返回保护。
+    """
+    host = _Host()
+    session = AsyncMock()
+    record = AsyncMock()
+    updateRun = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.multi_step_persist_hooks.persistence.recordStepError", record
+    )
+    monkeypatch.setattr(
+        "app.services.multi_step_persist_hooks.persistence.updateRun", updateRun
+    )
+
+    kind = await host._persistStepFailure(
+        session, None, httpx.ConnectError("refused"),
+        run=SimpleNamespace(status="running"),
+    )
+
+    assert kind == "transient"
+    record.assert_not_awaited()
+    updateRun.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1678,7 +1708,16 @@ class MultiStepPersistMixin:
         tokens: int = 0,
         cost: float = 0,
     ) -> str:
+        # spec §6.1：分类与落库解耦。kill switch 关掉时 `_openRun` 返回 None，
+        # 调用方没有 step 行可传（只能传 None），但**仍然需要 kind** 去决定要不要
+        # 重试 —— 故先分类，只在落库处短路。
+        #
+        # 缺这个守卫（`_persistStepSuccess` 早有同名守卫）会让 recordStepError 在
+        # `step.attempt_count`（multi_step_persistence.py:114）抛 AttributeError，
+        # 把原始的步错误顶掉：kill switch 一关，失败路径反而崩在守卫自身。
         kind = classifyStepError(exc)
+        if step is None:
+            return kind
         await persistence.recordStepError(
             session, step,
             message=f"{type(exc).__name__}: {exc}", kind=kind,
@@ -1808,15 +1847,39 @@ git commit -m "feat(multi-step): 新增持久化钩子 mixin + MULTI_STEP_PERSIS
 ### Task 6: 接进多步执行链路（非流式 + 流式）
 
 **Files:**
-- Modify: `backend/app/services/chat_multistep.py`（`_executeMultiStep`，仅加钩子调用）
-- Modify: `backend/app/services/chat_stream.py`（`_streamMultiStep`，仅加钩子调用）
+- Modify: `backend/app/services/chat_multistep.py`（`_executeMultiStep`，加钩子调用 + 续跑分支）
+- Modify: `backend/app/services/chat_stream.py`（`_streamMultiStep`，加钩子调用 + 续跑分支 + 两个新 SSE 字段/事件）
+- Modify: `backend/app/services/stream_events.py`（新增 `EVENT_STEP_COMPRESSED` 常量）
+- Modify: `backend/app/domain/schemas.py`（`ChatRequest` 加 `resumeRunId`，为 Task 7 的续跑载体）
+- Modify: `backend/app/services/multi_step_persistence.py`（新增 `adoptRunForResume`）
 - Test: `backend/app/tests/integration/test_multi_step_persist_wiring.py`
 
 **Interfaces:**
-- Consumes: Task 5 的钩子方法、现有 `_executeDataStep` / `StepExecutionContext.inject_to_prompt`
-- Produces: 无新公共接口；行为变化是落库有副作用
+- Consumes: Task 5 的钩子方法、现有 `_executeDataStep` / `StepExecutionContext.inject_to_prompt`、Task 2 的 `loadRun`/`loadSteps`/`resetStepsFrom`
+- Produces（Task 9 依赖，全部在 SSE 层）:
+  - `multi_step_plan` 事件的 data 增加 `runId: str | None`（单步路径为 `None`）
+  - 新事件 `step_compressed`（`EVENT_STEP_COMPRESSED = "step_compressed"`），data 形如
+    `{"stepIndex": int, "originalRows": int, "compressedRows": int}`
+  - 其余行为变化是落库有副作用
+- Produces（**Task 7 依赖**，非 SSE）:
+  - `app.domain.schemas.ChatRequest` 新字段 `resumeRunId: str | None = None`
+  - `multi_step_persistence.adoptRunForResume(session, *, runId, subQuestions) -> tuple[MultiStepRun | None, int]`
 
-**改动纪律:** 只加「打开 run / 每步落库 / 关 run / 压缩判定」四类调用，**不得**改 NL2SQL 逻辑、不得引入模型改派。
+**改动纪律:** 除续跑分支外，只加「打开 run / 每步落库 / 关 run / 压缩判定」四类调用，**不得**改 NL2SQL 逻辑、不得引入模型改派。
+
+**续跑模式（本任务与 Task 7 的接口契约，2026-10-05 人类裁决为「最小正确版」）：**
+
+人类裁决原文：*「Task 6 增续跑模式：携带 runId 复用既有 run（不新建、不留僵尸），步循环从 start 起、跳过更早步。不做前序结果回灌、不复用已存 SQL。§7.2 的 plan 重放 + sql_hash 命中复用登记为遗留项。」*
+
+背景（**必读，否则会写错**）：计划原先让路由把 `resumeFromStep=startIndex` 塞进 `ChatRequest`，但全仓 grep 证明**无任何代码消费它**；而本任务原定的 `_openRun` 是**无条件**的，于是续跑会新建**第二个** run，被 `prepareResume` 重置成 pending 的那个原 run 则**永远停在 running**（僵尸）。本节就是修掉这条链路：
+
+- 载体改为 `ChatRequest.resumeRunId`（`str | None`）。**起始步不再由 DTO 传递**，唯一事实来源是 DB 的 `multi_step_run.current_step_idx`（Task 7 的 `prepareResume` 已写入）。
+- 续跑路径**绝不调用 `_openRun`**，改用 `persistence.adoptRunForResume(...)`。
+- 循环里 `index < startIndex` 的步**跳过执行**，但**必须计入 `completed`** —— 否则 `_closeRun` 的 `runStatusFor(completed, total, ...)` 会把「跳过的成功步」当成未完成，把 run 误判成 `failed`。
+- **不做**前序步结果回灌（不进 prompt 上下文），**不复用**已存 SQL。依据：2026-09-28 真机诊断已证伪「拆步产生步间数据依赖」（见 memory `qa-system-multistep-no-data-dependency`），跳过更早步不损失正确性。
+
+**本任务不管**「续跑被重新路由成单步」的封口 —— 那由 **Task 7 的路由在流结束后兜底**处理（见该任务的 `_sealAbandonedResume`），因为只有路由那层能覆盖「流中途断掉」等一切提前退出的形态。这两个文件里**不要**再加单步分支的守卫。
+
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1834,28 +1897,38 @@ from app.domain.multi_step_models import MultiStepRun, MultiStepStep
 @pytest.mark.asyncio
 async def testMultiStepRunPersistedEndToEnd(pg_client, db_session, monkeypatch):
     """真链路：POST /api/v1/chat 走多步 → multi_step_run/step 落库。"""
-    # Arrange：复用 test_chat_api 的 seed + fakes
-    from app.tests.integration.test_chat_api import _seed, _installFakes, _chat_payload
+    # **必须用 test_chat_multi_step 的 fake**：多步拆解由「查询拆分器」这个 system
+    # prompt 分支驱动，只有 `_MultiStepLlm` 实现了它。`test_chat_api._PipelineLlm`
+    # 没有该分支（落到 else 回一句自然语言）⇒ 根本不会产生多步计划 ⇒ 本用例会
+    # 因为「一条 run 都没有」而红，且原因极具误导性。
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _MultiStepLlm,
+        _OkAdapter,
+        _install,
+        _payload,
+    )
 
     config, datasource = await _seed(db_session)
-    _installFakes(monkeypatch, config)
-    sessionId = str(uuid.uuid4())
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+    # 这个问句是 test_chat_multi_step 里已验证会走多步、且拆出 2 步的那个。
+    question = "请分步查询 2024 和 2025 年的销售额并对比"
 
     # Act
     resp = await pg_client.post(
-        "/api/v1/chat",
-        json=_chat_payload("第一步查总额，第二步查明细", datasource.id, sessionId=sessionId),
+        "/api/v1/chat", json=_payload(question, datasource.id)
     )
 
     # Assert
     assert resp.status_code == 200
     runs = (
-        await db_session.execute(select(MultiStepRun).where(MultiStepRun.question.like("%第一步%")))
+        await db_session.execute(select(MultiStepRun).where(MultiStepRun.question == question))
     ).scalars().all()
-    assert len(runs) == 1
+    assert len(runs) == 1, "多步跑完必须恰好落 1 条 run"
     steps = (
         await db_session.execute(
-            select(MultiStepStep).where(MultiStepStep.run_id == runs[0].id)
+            select(MultiStepStep).where(MultiStepStep.run_id == runs[0].id).order_by(MultiStepStep.step_index)
         )
     ).scalars().all()
     assert [s.step_index for s in steps] == [0, 1]
@@ -1866,11 +1939,18 @@ async def testMultiStepRunPersistedEndToEnd(pg_client, db_session, monkeypatch):
 @pytest.mark.asyncio
 async def testRunMarkedFailedWhenStepExhaustsRetries(pg_client, db_session, monkeypatch):
     """第 2 步 LLM 持续 ConnectError → run.status=failed，第 1 步仍 succeeded。"""
-    from app.tests.integration.test_chat_api import _seed, _installFakes, _chat_payload
     import httpx
 
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _MultiStepLlm,
+        _OkAdapter,
+        _install,
+        _payload,
+    )
+
     config, datasource = await _seed(db_session)
-    _installFakes(monkeypatch, config)
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
 
     import app.services.llm_retry_policy as retryPolicy
     monkeypatch.setattr(retryPolicy, "RETRY_WAIT_MIN_SECONDS", 0)
@@ -1891,16 +1971,13 @@ async def testRunMarkedFailedWhenStepExhaustsRetries(pg_client, db_session, monk
 
     monkeypatch.setattr(service, "_executeDataStep", flakyStep)
 
-    sessionId = str(uuid.uuid4())
-    resp = await pg_client.post(
-        "/api/v1/chat",
-        json=_chat_payload("第一步查总额，第二步查明细", datasource.id, sessionId=sessionId),
-    )
+    question = "请分步查询 2024 和 2025 年的销售额并对比"
+    resp = await pg_client.post("/api/v1/chat", json=_payload(question, datasource.id))
 
     assert resp.status_code in (200, 502, 503)
     run = (
         await db_session.execute(
-            select(MultiStepRun).where(MultiStepRun.question.like("%第一步%"))
+            select(MultiStepRun).where(MultiStepRun.question == question)
         )
     ).scalars().one()
     assert run.status in ("failed", "partially_failed")
@@ -1917,26 +1994,204 @@ async def testRunMarkedFailedWhenStepExhaustsRetries(pg_client, db_session, monk
 
 @pytest.mark.asyncio
 async def testPersistDisabledWritesNoRows(pg_client, db_session, monkeypatch):
-    from app.tests.integration.test_chat_api import _seed, _installFakes, _chat_payload
-    from app.config import getSettings
+    """kill switch 关掉 ⇒ 不落库，但多步本身照跑，且 `runId` 为 None。
+
+    走**流式**而不是非流式：只断言 `runs == []` 的话，一个「压根没走多步」的
+    装配也能让它通过（假绿）。这里用流式的 `multi_step_plan` 事件反过来钉住
+    「多步确实跑了、且拆出 2 步」，同时顺带钉住 Task 9 依赖的 `runId: None` 分支。
+    """
     from types import SimpleNamespace
 
+    from app.services.stream_events import EVENT_MULTI_STEP_PLAN
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _MultiStepLlm,
+        _OkAdapter,
+        _install,
+        _parseFrames,
+        _payload,
+    )
+
     config, datasource = await _seed(db_session)
-    _installFakes(monkeypatch, config)
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
     monkeypatch.setattr(
         "app.services.multi_step_persist_hooks.getSettings",
         lambda: SimpleNamespace(multiStepPersistEnabled=False),
     )
 
-    sessionId = str(uuid.uuid4())
     resp = await pg_client.post(
-        "/api/v1/chat",
-        json=_chat_payload("第一步查总额，第二步查明细", datasource.id, sessionId=sessionId),
+        "/api/v1/chat/stream",
+        json=_payload("请分步查询 2024 和 2025 年的销售额并对比", datasource.id),
     )
 
     assert resp.status_code == 200
+    overview = [d for e, d in _parseFrames(resp) if e == EVENT_MULTI_STEP_PLAN]
+    assert len(overview[0]["steps"]) == 2
+    assert overview[0]["runId"] is None, "开关关掉时没有 run，runId 必须是 None"
+
     runs = (await db_session.execute(select(MultiStepRun))).scalars().all()
     assert runs == []
+
+
+@pytest.mark.asyncio
+async def testStreamMultiStepPlanCarriesRunId(pg_client, db_session, monkeypatch):
+    """流式 multi_step_plan 事件必须带 runId —— Task 9 前端续跑按钮的唯一来源。
+
+    复用 test_chat_multi_step 的 fake 装配（同一个真实 API 链路）。断言分两层：
+    键存在且是字符串，**并且**这个 id 真的能在库里查到 run —— 只断言字符串
+    的话，随手 `str(uuid.uuid4())` 也能过。
+    """
+    from app.services.stream_events import EVENT_MULTI_STEP_PLAN
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _MultiStepLlm,
+        _OkAdapter,
+        _install,
+        _parseFrames,
+        _payload,
+    )
+
+    config, datasource = await _seed(db_session)
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+    # Act
+    resp = await pg_client.post(
+        "/api/v1/chat/stream",
+        json=_payload("请分步查询 2024 和 2025 年的销售额并对比", datasource.id),
+    )
+
+    # Assert
+    assert resp.status_code == 200, resp.text
+    overview = [d for e, d in _parseFrames(resp) if e == EVENT_MULTI_STEP_PLAN]
+    assert len(overview) == 1
+    runId = overview[0]["runId"]
+    assert isinstance(runId, str) and runId
+    run = (
+        await db_session.execute(
+            select(MultiStepRun).where(MultiStepRun.id == uuid.UUID(runId))
+        )
+    ).scalar_one()
+    assert run.question
+
+
+@pytest.mark.asyncio
+async def testStreamEmitsStepCompressedForEarlierStep(pg_client, db_session, monkeypatch):
+    """压缩更早的步后补发 step_compressed —— Task 9「已压缩」徽章的唯一来源。"""
+    from app.services.stream_events import EVENT_STEP_COMPRESSED
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _MultiStepLlm,
+        _install,
+        _parseFrames,
+        _payload,
+    )
+
+    class _BigRowsAdapter:
+        """固定返回 40 行：超过 DEFAULT_MAX_ROWS=30，让压缩比 != 1。
+
+        行数必须真的超过保留上限，否则 originalRows == compressedRows，
+        实现把两个数写反也照样通过。
+        """
+
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+
+        async def execute_read_only(self, sql: str) -> list[dict]:
+            self.executed.append(sql)
+            return [{"NAME": f"N{i}", "QTY": i} for i in range(40)]
+
+    config, datasource = await _seed(db_session)
+    _install(monkeypatch, config, _MultiStepLlm(), _BigRowsAdapter())
+    # 阈值恒真：只验证「压缩发生了 → 事件被发出来」，不依赖 token 估算的具体数值
+    monkeypatch.setattr(
+        "app.services.multi_step_persist_hooks.shouldCompress", lambda *a, **k: True
+    )
+
+    # Act
+    resp = await pg_client.post(
+        "/api/v1/chat/stream",
+        json=_payload("请分步查询 2024 和 2025 年的销售额并对比", datasource.id),
+    )
+
+    # Assert
+    assert resp.status_code == 200, resp.text
+    compressed = [d for e, d in _parseFrames(resp) if e == EVENT_STEP_COMPRESSED]
+    # 只在处理第 2 步前压一次；_maybeCompressPriorSteps 对已有 data_compressed 的步会跳过
+    assert len(compressed) == 1
+    assert compressed[0]["stepIndex"] == 0
+    assert compressed[0]["originalRows"] == 40
+    assert compressed[0]["compressedRows"] == 30
+
+    # 事件数字必须与落库的压缩结果一致（口径只有一个来源）
+    step0 = (
+        await db_session.execute(
+            select(MultiStepStep).where(MultiStepStep.step_index == 0)
+        )
+    ).scalars().one()
+    assert step0.status == "compressed"
+    assert step0.data_compressed["meta"]["original_rows"] == 40
+
+
+@pytest.mark.asyncio
+async def testAdoptRunForResumeAlignsShapeAndStart(pg_client, db_session):
+    """`adoptRunForResume` 三个分支：形状一致保留起点 / 变长 / 变短。
+
+    这是续跑唯一「不新建 run」的入口（最小正确版裁决）。三个分支分别对应：
+    正常续跑、`model_override` 换了模型后重新规划出更多步、重新规划出更少步。
+    """
+    from app.domain.research_models import ResearchSession
+    from app.services import multi_step_persistence as repo
+    from app.services.multi_step_persistence import adoptRunForResume
+
+    sessionRow = ResearchSession(id=uuid.uuid4(), title="adopt-1", created_by=1)
+    db_session.add(sessionRow)
+    await db_session.commit()
+    run = await repo.createRun(
+        db_session, sessionId=sessionRow.id, question="q", modelId=1, totalSteps=2
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
+    await repo.finishStep(
+        db_session, steps[0], status="succeeded", sql="SELECT 1", data=[{"a": 1}]
+    )
+    await repo.recordStepError(db_session, steps[1], message="timeout", kind="transient")
+    await repo.updateRun(db_session, run, status="failed", completedSteps=1, currentStepIdx=1)
+    await db_session.commit()
+
+    # --- 分支 1：形状一致 ⇒ 保留 current_step_idx，且**不动**已成功的第 0 步 ---
+    adopted, start = await adoptRunForResume(db_session, runId=run.id, subQuestions=["查A", "查B"])
+    assert start == 1
+    rows = await repo.loadSteps(db_session, run.id)
+    assert rows[0].status == "succeeded", "已成功的更早步不能被重置（续跑就是靠它省掉重跑）"
+    assert rows[0].sql == "SELECT 1", "更早步的 SQL 必须留着"
+    assert rows[0].data == [{"a": 1}], "spec §5.3：data 永不删除"
+    assert rows[1].status == "pending"
+    assert rows[1].last_error is None
+    assert rows[1].sql is None, "重跑会重新生成 SQL，留着旧的会污染将来的 sql_hash 复用"
+
+    # --- 分支 2：计划变长（换了模型重新规划）⇒ 起点归零、补齐新行 ---
+    adopted2, start2 = await adoptRunForResume(
+        db_session, runId=run.id, subQuestions=["查X", "查Y", "查Z"]
+    )
+    assert start2 == 0, "形状变了，旧的「已完成」对应的是别的子问题，不能跳过任何步"
+    assert adopted2.total_steps == 3
+    rows = await repo.loadSteps(db_session, run.id)
+    assert [s.step_index for s in rows] == [0, 1, 2]
+    assert [s.sub_question for s in rows] == ["查X", "查Y", "查Z"]
+    assert all(s.status == "pending" for s in rows)
+    assert rows[0].sql is None, "形状变了 ⇒ 全跑，旧 SQL 必须清掉"
+
+    # --- 分支 3：计划变短 ⇒ 删掉多余尾行（否则 stepsByIdx 里会留下对不上的孤儿） ---
+    _adopted3, start3 = await adoptRunForResume(db_session, runId=run.id, subQuestions=["查X"])
+    assert start3 == 0
+    rows = await repo.loadSteps(db_session, run.id)
+    assert [s.step_index for s in rows] == [0]
+    assert rows[0].sub_question == "查X"
+
+    # --- run 不存在（并发删除）⇒ (None, 0)，调用方回退普通路径，不炸 ---
+    gone, start4 = await adoptRunForResume(
+        db_session, runId=uuid.uuid4(), subQuestions=["查A"]
+    )
+    assert gone is None and start4 == 0
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1947,9 +2202,78 @@ export TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5
 export TEST_NEO4J_URI=bolt://localhost:7688
 pytest app/tests/integration/test_multi_step_persist_wiring.py -v
 ```
-Expected: `testMultiStepRunPersistedEndToEnd` FAIL（`assert len(runs) == 1` 得到 0）；`testPersistDisabledWritesNoRows` 可能已 PASS（因为还没接线）。
+Expected: `testMultiStepRunPersistedEndToEnd` FAIL（`assert len(runs) == 1` 得到 0）；`testStreamMultiStepPlanCarriesRunId` FAIL（`KeyError: 'runId'`）；`testStreamEmitsStepCompressedForEarlierStep` FAIL（`assert len(compressed) == 1` 得到 0）；`testPersistDisabledWritesNoRows` FAIL（`runId` 键还不存在）；`testAdoptRunForResumeAlignsShapeAndStart` FAIL（`ImportError: cannot import name 'adoptRunForResume'`）。
 
-- [ ] **Step 3: 在 `_executeMultiStep` 接线**
+- [ ] **Step 3: 加 `adoptRunForResume`（仓储层，续跑的形状对齐）**
+
+`backend/app/services/multi_step_persistence.py` 末尾追加（`logger` 若模块里还没有，在 import 区补 `import logging` + `logger = logging.getLogger(__name__)`）：
+
+```python
+async def adoptRunForResume(
+    session: AsyncSession,
+    *,
+    runId: uuid.UUID,
+    subQuestions: list[str],
+) -> tuple[MultiStepRun | None, int]:
+    """续跑：复用既有 run 并把它的步行对齐到**本次**计划。返回 (run, 起始步号)。
+
+    调用方（Task 6 的接线）**绝不**再调 `createRun` —— 那会新建第二个 run，而
+    被 `prepareResume` 重置过的原 run 会永远停在 running（僵尸）。
+
+    起始步的唯一事实来源是 `run.current_step_idx`（Task 7 的 `prepareResume` 写入）。
+    只有当**计划的形状与原 run 逐字一致**时才沿用它；形状变了（`model_override`
+    换了模型、或重新规划出不同的子问题）时归零整跑，因为旧的「已完成」对应的
+    是别的子问题，跳过它们就是跑错。
+
+    形状对齐同时负责行数：变长补行、变短删尾（否则 `stepsByIdx[index]` 会 KeyError
+    或留下对不上的孤儿行）。
+
+    重置范围是 `>= start`：更早的已成功步**原样保留**（`sql` / `data` 都不动）——
+    续跑省掉重跑正是靠它。`data` 按 spec §5.3 永不删除；`sql` / `sql_hash` 清掉是
+    刻意的：既不复用旧 SQL，也不给将来「sql_hash 命中即复用」的遗留项留一个会
+    误命中的陈旧哈希。
+    """
+    run = await loadRun(session, runId)
+    if run is None:
+        return None, 0
+    steps = await loadSteps(session, runId)
+    shapesMatch = [s.sub_question for s in steps] == list(subQuestions)
+    start = int(run.current_step_idx or 0) if shapesMatch else 0
+    if not shapesMatch:
+        logger.info(
+            "续跑形状变化：run=%s 原 %d 步 → 本次 %d 步，起始步归零",
+            run.id, len(steps), len(subQuestions),
+        )
+
+    byIndex = {s.step_index: s for s in steps}
+    for surplus in steps:
+        if surplus.step_index >= len(subQuestions):
+            await session.delete(surplus)
+    for index, text in enumerate(subQuestions):
+        step = byIndex.get(index)
+        if step is None:
+            session.add(MultiStepStep(
+                id=uuid.uuid4(), run_id=runId, step_index=index,
+                status=STEP_STATUS_PENDING, sub_question=text,
+            ))
+            continue
+        step.sub_question = text
+        if index >= start:
+            step.status = STEP_STATUS_PENDING
+            step.last_error = None
+            step.last_error_kind = None
+            step.attempt_count = 0
+            step.finished_at = None
+            step.data_compressed = None
+            step.sql = None
+            step.sql_hash = None
+    run.total_steps = len(subQuestions)
+    run.current_step_idx = start
+    await session.flush()
+    return run, start
+```
+
+- [ ] **Step 4: 在 `_executeMultiStep` 接线**
 
 先读现状：
 ```bash
@@ -1959,16 +2283,57 @@ sed -n '690,745p' backend/app/services/chat_multistep.py
 在 steps 循环**之前**插入：
 ```python
         subQuestions = [s.description or s.subQuestion for s in multiStepPlan.steps]
-        run = await self._openRun(
-            session,
-            sessionId=dto.sessionId,
-            question=dto.question,
-            modelId=getattr(dto, "modelId", None),
-            subQuestions=subQuestions,
-            datasourceId=getattr(dto, "datasourceId", None),
-        )
+        # 续跑模式（Task 7 传 resumeRunId）：复用既有 run，**绝不**新建。
+        # 新建会让 prepareResume 重置过的那个 run 永远停在 running（僵尸），
+        # 且落库落在一个与用户所见无关的新 run 上。
+        resumeRunId = getattr(dto, "resumeRunId", None)
+        run = None
+        startIndex = 0
+        if resumeRunId:
+            run, startIndex = await persistence.adoptRunForResume(
+                session, runId=uuid.UUID(str(resumeRunId)), subQuestions=subQuestions,
+            )
+            # adopt 返回 None 只在并发删除时发生（路由已 404 过）。此时退回普通
+            # 新建路径，宁可多一条 run，也不能因为续跑而整轮失败。
+        if run is None:
+            run = await self._openRun(
+                session,
+                sessionId=dto.sessionId,
+                question=dto.question,
+                modelId=getattr(dto, "modelId", None),
+                subQuestions=subQuestions,
+                datasourceId=getattr(dto, "datasourceId", None),
+            )
+            startIndex = 0
 ```
 （字段名以实际 `multiStepPlan.steps` 的元素属性为准；若为 `StepPlan` 用 `s.sub_question`）
+`uuid` 若未 import，在 import 区补 `import uuid`。
+
+**同时**在 `backend/app/domain/schemas.py` 的 `ChatRequest`（实测在 `domain/schemas.py:1647`，
+不是 `models/schemas.py` —— 后者不存在）上加一个可选字段，声明风格与相邻字段一致（该类的
+字段是**直接写成 camelCase** 的，如 `sessionId` / `datasourceId` / `modelId`）：
+
+```python
+    # 续跑（spec §7）：非空时执行链路复用这个 run 而不是新建（Task 7 的路由填）。
+    # 起始步不从这里传 —— 唯一事实来源是 multi_step_run.current_step_idx。
+    resumeRunId: str | None = Field(default=None, description="续跑：复用既有的 multi-step run")
+```
+
+`CamelModel` 未设 `extra=forbid`，加字段是纯增量、不影响既有入参形状（spec §10.3 要求
+不修改 `/api/v1/chat` 入参形状 —— 加一个默认 `None` 的可选键满足该要求）。
+
+在循环体内、**取 `stepsByIdx[index]` 之前**插入跳过分支：
+```python
+            if index < startIndex:
+                # 续跑：更早的步已经 succeeded，跳过重跑。**必须**照样计入 completed，
+                # 否则 _closeRun 的 runStatusFor 会把「跳过的成功步」当未完成 ⇒
+                # run 被误判 failed，用户看到续跑「又失败了」。
+                # 前序步结果**不**回灌进 prompt（2026-09-28 诊断已证伪拆步产生步间
+                # 数据依赖，见 memory qa-system-multistep-no-data-dependency）。
+                completed += 1
+                continue
+```
+`completed` / `anyFailed` / `anySkipped` 的初始化（下面提到的那三行）必须仍在**这个**跳过分支之前。
 
 在每步**执行前**：
 ```python
@@ -2054,20 +2419,84 @@ sed -n '690,745p' backend/app/services/chat_multistep.py
 （还没产生任何用量），异常上没有这两个属性，`getattr` 兜底为 0 —— 这是**正确**的：那时
 确实没有可计费响应，记 0 不是漏记。**拿不到用量就记 0，禁止为了凑数传假值。**
 
-- [ ] **Step 4: 在 `_streamMultiStep` 接线（同一套钩子）**
+- [ ] **Step 5: 在 `_streamMultiStep` 接线（同一套钩子 + 同一套续跑分支）**
 
 ```bash
 grep -n "_streamMultiStep\|_executeDataStep\|MultiStepPlan\|inject_to_prompt" backend/app/services/chat_stream.py | head -30
 ```
-在流式版循环里加与 Step 3 相同的 `_openRun` / `markStepRunning` / `_persistStepSuccess` / `_persistStepFailure` / `_closeRun`。压缩判定插在 `inject_to_prompt` 调用**之前**：
+在流式版循环里加与 Step 4 相同的 `_openRun` / `markStepRunning` / `_persistStepSuccess` / `_persistStepFailure` / `_closeRun`，**以及同一个续跑分支**（`resumeRunId` ⇒ `persistence.adoptRunForResume`；`run is None` 时才 `_openRun`）与**同一个跳过分支**（`index < startIndex ⇒ completed += 1; continue`）。
+
+**两条路径都要接**——本项目第七次踩「改多步只接了一条路径」（见 memory `qa-system-multistep-failure-isolation`）。
+非流式（`_executeMultiStep`）与流式（`_streamMultiStep`）是两份循环，改一份漏一份不会被任何测试发现：Task 7 的续跑端点走的是**流式**，非流式的续跑只在测试里被直接调用。
+
+**顺序要求（Task 9 依赖）：** run 的取得（`adoptRunForResume` 或 `_openRun`）必须排在**下发计划概览之前**。现状是
+`chat_stream.py:869` 在循环前 `yield StreamEvent(EVENT_MULTI_STEP_PLAN, {"steps": [...]})`，
+取得 run 那段要插在它**上面**（不是下面）。顺序反了 `run` 还是 None，下面那行就永远发不出 runId。
+
+**`multi_step_plan` 事件增加 `runId`（Task 9 前端续跑按钮的唯一来源）：**
+
+```python
+        yield StreamEvent(EVENT_MULTI_STEP_PLAN, {
+            # Task 9：前端凭 runId 调 POST /chat/multi-step/{runId}/resume。
+            # 单步路径（_singleStepOverview）不落库、没有 run，故意不带这个键；
+            # 前端必须按「可选」处理，缺省时不渲染续跑按钮。
+            "runId": str(run.id) if run is not None else None,
+            "steps": [
+                {
+                    "stepIndex": s.index,
+                    "description": s.description,
+                    "subQuestion": s.sub_question,
+                    "aggregationOnly": s.aggregation_only,
+                }
+                for s in multiStepPlan.steps
+            ],
+        })
+```
+
+只加这一个键，**不改** `steps` 数组里任何字段（前端 `isStepPlanOverviewItem` 是白名单收窄，
+多一个顶层键不影响既有断言）。`chat_stream.py:1057` 的 `_singleStepOverview` **保持原样**
+（单步不落库，加 `None` 会让前端多一个恒为假的分支）。
+
+非流式 `/chat`（`_executeMultiStep`）本次**不同步加** runId：其 `steps` 负载由
+`chat_multistep.py` 的读模型另行构造，改动面超出本任务。后果是非流式渲染下没有续跑按钮，
+已登记进 Task 10 的遗留项。
+
+压缩判定插在 `inject_to_prompt` 调用**之前**：
 ```python
         injectionText = stepContext.inject_to_prompt(index)
+        # 压缩会把**更早的**步置为 compressed（其 step_result 早就发过了），
+        # 前端无从得知 —— 故这里在调用前后对比 data_compressed，为每个**新**
+        # 被压缩的步补发一条 step_compressed（Task 9 的「已压缩」徽章靠它）。
+        compressedBefore = {
+            s.step_index: s.data_compressed for s in steps
+        }
         await self._maybeCompressPriorSteps(
             session, run, steps, nextStepIdx=index,
             maxInputTokens=_maxInputTokens(pc), injectionText=injectionText,
         )
+        for s in steps:
+            compressed = s.data_compressed
+            if compressed is None or compressedBefore.get(s.step_index) is not None:
+                continue
+            meta = compressed.get("meta") or {}
+            yield StreamEvent(EVENT_STEP_COMPRESSED, {
+                "stepIndex": s.step_index,
+                "originalRows": int(meta.get("original_rows") or 0),
+                "compressedRows": int(meta.get("compressed_rows") or 0),
+            })
 ```
-非流式（Step 3）同样插入这段。
+`step_compressed` 是**流式专属**事件：非流式路径没有增量推送通道，前端在非流式渲染下
+看不到压缩徽章（已与 runId 一起登记进 Task 10 的遗留项）。
+
+非流式（Step 3）只插入 `_maybeCompressPriorSteps(...)` 调用本身，**不要**插入
+`compressedBefore` / `yield` 这两段（那里没有 SSE 通道，`yield` 会直接语法错误）。
+
+新事件常量加在 `stream_events.py` 现有常量区（紧跟 `EVENT_STEP_RESULT` 之后）：
+```python
+EVENT_STEP_COMPRESSED = "step_compressed"  # 多步：某个**更早**的步被上下文压缩（Task 9 徽章）
+```
+`chat_stream.py` 的 import 区（`EVENT_MULTI_STEP_PLAN` 那一组，约 51 行）补上
+`EVENT_STEP_COMPRESSED`。
 `_maxInputTokens(pc)` 用一行 helper 取当前 model 配置的上限（找不到时返回 `0`，`shouldCompress` 会安全地返回 False）：
 ```python
 def _maxInputTokens(pipelineContext) -> int:
@@ -2077,33 +2506,37 @@ def _maxInputTokens(pipelineContext) -> int:
     return 0
 ```
 
-- [ ] **Step 5: 跑测试确认通过**
+- [ ] **Step 6: 跑测试确认通过**
 
 ```bash
 pytest app/tests/integration/test_multi_step_persist_wiring.py -v
 ```
-Expected: 3 passed
+Expected: 6 passed
 
-- [ ] **Step 6: 回归既有 chat 套件**
+（本文件的用例：`testMultiStepRunPersistedEndToEnd`、`testRunMarkedFailedWhenStepExhaustsRetries`、`testPersistDisabledWritesNoRows`、`testStreamMultiStepPlanCarriesRunId`、`testStreamEmitsStepCompressedForEarlierStep`、`testAdoptRunForResumeAlignsShapeAndStart`。）
+
+- [ ] **Step 7: 回归既有 chat 套件**
 
 ```bash
 pytest app/tests/integration/test_chat_multi_step.py app/tests/integration/test_multistep_global_filter.py -v
 ```
 Expected: 与基线一致（无新增红）。若出现红，先判断是否为本计划引入，**不要**顺手改无关测试。
 
-- [ ] **Step 7: 确认行数未超限**
+- [ ] **Step 8: 确认行数未超限**
 
 ```bash
 wc -l backend/app/services/chat_multistep.py backend/app/services/chat_stream.py backend/app/services/multi_step_persist_hooks.py
 ```
-Expected: `chat_multistep.py` < 1000。若逼近，把 Step 3/4 的重复段落抽成 mixin 方法。
+Expected: `chat_multistep.py` < 1000。若逼近，把 Step 4/5 的重复段落抽成 mixin 方法。
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add backend/app/services/chat_multistep.py backend/app/services/chat_stream.py \
+        backend/app/services/stream_events.py backend/app/services/multi_step_persistence.py \
+        backend/app/domain/schemas.py \
         backend/app/tests/integration/test_multi_step_persist_wiring.py
-git commit -m "feat(multi-step): 执行链路接入落库/重试/压缩钩子"
+git commit -m "feat(multi-step): 执行链路接入落库/重试/压缩钩子，SSE 下发 runId 与 step_compressed，支持续跑复用 run"
 ```
 
 ---
@@ -2116,10 +2549,15 @@ git commit -m "feat(multi-step): 执行链路接入落库/重试/压缩钩子"
 - Test: `backend/app/tests/integration/test_multi_step_resume_api.py`
 
 **Interfaces:**
-- Consumes: Task 2 仓储、Task 5 钩子、现有 `assertSessionOwnership` / `getCurrentUser` / `_service.processMessageStream`
+- Consumes: Task 2 仓储、Task 5 钩子、**Task 6 的 `ChatRequest.resumeRunId` 与 `persistence.adoptRunForResume`**、现有 `assertSessionOwnership` / `getCurrentUser` / `_service.processMessageStream`
 - Produces:
-  - `class MultiStepResumeService`，方法 `async def resume(self, session, *, runId: uuid.UUID, userId: Any, fromStepIndex: int | None, modelOverride: int | None, compressAgain: bool, idempotencyKey: str | None) -> AsyncIterator[...]`
+  - `prepareResume(session, *, runId, fromStepIndex, idempotencyKey) -> tuple[MultiStepRun, int]`
   - HTTP：`POST /api/v1/chat/multi-step/{runId}/resume`
+
+**「起始步」的载体（2026-10-05 裁决后定死，别改回去）：** 路由**不**通过 DTO 传递起始步。
+`prepareResume` 把它写进 `multi_step_run.current_step_idx`，Task 6 的接线再从那里读。
+计划早期版本写的是 `ChatRequest(resumeFromStep=startIndex)` —— 全仓 grep 证明那个字段
+**没有任何消费者**，照旧写会得到一个新建的第二个 run + 一个永远 `running` 的僵尸 run。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -2156,24 +2594,58 @@ async def testResumeRejectsNonFailedRun(pg_client, db_session):
 
 
 @pytest.mark.asyncio
-async def testResumeFromStepResetsLaterSteps(pg_client, db_session, monkeypatch):
+async def testResumeAdoptsExistingRunAndSkipsSucceededStep(pg_client, db_session, monkeypatch):
+    """续跑走通 + **不新建第二个 run** + 跳过的成功步仍被算作已完成。
+
+    这条用例是「最小正确版」裁决的回归闸，三个断言各堵一个真实缺陷：
+    1. `len(allRuns) == 1` —— 原计划会把 resume 变成一次全新的 run（僵尸 + 重复）。
+    2. `reloadedRun.status == "succeeded"` —— Task 6 的跳过分支若忘了把跳过的
+       成功步计入 `completed`，`runStatusFor` 会把 run 判成 `failed`（用户看到
+       「续跑又失败了」），而 `resume_count >= 1` 之类的弱断言完全发现不了。
+    3. `steps[0].sql` 仍是原值 —— 跳过分支若漏了，第 0 步会被重跑并覆盖 SQL。
+    """
+    import json
+
     from app.domain.research_models import ResearchSession
     from app.services import multi_step_persistence as repo
-    from app.tests.integration.test_chat_api import _seed, _installFakes
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _MULTI_STEP_PLAN_JSON,
+        _MultiStepLlm,
+        _OkAdapter,
+        _install,
+    )
 
-    config, _datasource = await _seed(db_session)
-    _installFakes(monkeypatch, config)
+    config, datasource = await _seed(db_session)
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+    # 播种的 sub_question **必须**与 Task 6 会算出的 subQuestions 逐字一致：Task 6 的
+    # adoptRunForResume 以 sub_question 逐字相等判定「形状未变」，形状一变得归零整跑，
+    # 本条用例的「跳过」断言就失效了。故这里**从同一个 `_MULTI_STEP_PLAN_JSON` 反推**，
+    # 而不是手抄字符串 —— 注意 Task 6 的取值是 `description or subQuestion`（描述优先），
+    # 手抄成 subQuestion 会静默对不上。
+    question = "请分步查询 2024 和 2025 年的销售额并对比"
+    planSteps = json.loads(_MULTI_STEP_PLAN_JSON)["steps"]
+    subQuestions = [s.get("description") or s["subQuestion"] for s in planSteps]
+    assert len(subQuestions) == 2
 
     sessionRow = ResearchSession(id=uuid.uuid4(), title="resume-2", created_by=1)
     db_session.add(sessionRow)
     await db_session.commit()
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="两步题", modelId=config.id, totalSteps=2
+        db_session, sessionId=sessionRow.id, question=question,
+        modelId=config.id, datasourceId=datasource.id, totalSteps=2,
     )
-    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
-    await repo.finishStep(db_session, steps[0], status="succeeded", sql="SELECT 1", data=[{"a": 1}])
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=subQuestions)
+    await repo.finishStep(
+        db_session, steps[0], status="succeeded",
+        sql="SELECT NAME, SUM(QTY) AS TOTAL_QTY FROM ZJTH.PRECEIPT GROUP BY NAME",
+        data=[{"NAME": "A", "QTY": 10}],
+    )
     await repo.recordStepError(db_session, steps[1], message="timeout", kind="transient")
-    await repo.updateRun(db_session, run, status="failed", completedSteps=1, finished=True)
+    await repo.updateRun(
+        db_session, run, status="failed", completedSteps=1, currentStepIdx=1, finished=True,
+    )
     await db_session.commit()
 
     # Act
@@ -2184,17 +2656,30 @@ async def testResumeFromStepResetsLaterSteps(pg_client, db_session, monkeypatch)
     )
 
     # Assert
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
+    # ① 全程只有这一条 run（resume 复用而非新建）
+    allRuns = (await db_session.execute(select(MultiStepRun))).scalars().all()
+    assert len(allRuns) == 1, f"续跑不得新建 run，实际 {len(allRuns)} 条"
+    assert allRuns[0].id == run.id
+
     reloaded = (
         await db_session.execute(
             select(MultiStepStep).where(MultiStepStep.run_id == run.id).order_by(MultiStepStep.step_index)
         )
     ).scalars().all()
+    assert reloaded[0].status == "succeeded"
+    assert reloaded[0].data == [{"NAME": "A", "QTY": 10}], "跳过的成功步不得被重跑覆盖"
     assert reloaded[1].last_error is None
-    assert reloaded[1].status in ("pending", "running", "succeeded")
-    reloadedRun = (await db_session.execute(select(MultiStepRun).where(MultiStepRun.id == run.id))).scalar_one()
+    assert reloaded[1].status == "succeeded", "第 2 步应在续跑里跑成功"
+
+    reloadedRun = (
+        await db_session.execute(select(MultiStepRun).where(MultiStepRun.id == run.id))
+    ).scalar_one()
     await db_session.refresh(reloadedRun)
     assert reloadedRun.resume_count >= 1
+    # ② 跳过的成功步计入 completed ⇒ 终态 succeeded（漏计会得到 failed）
+    assert reloadedRun.status == "succeeded"
+    assert reloadedRun.finished_at is not None, "续跑跑完必须封口，不能留下 running 僵尸"
 
 
 @pytest.mark.asyncio
@@ -2236,15 +2721,26 @@ async def testPrepareResumeClearsStaleCompressedPayload(db_session):
 async def testResumeIsIdempotentOnSameKey(pg_client, db_session, monkeypatch):
     from app.domain.research_models import ResearchSession
     from app.services import multi_step_persistence as repo
-    from app.tests.integration.test_chat_api import _seed, _installFakes
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _MultiStepLlm,
+        _OkAdapter,
+        _install,
+    )
 
-    config, _ds = await _seed(db_session)
-    _installFakes(monkeypatch, config)
+    config, datasource = await _seed(db_session)
+    # 必须装多步 fake：第一次续跑会真的把流跑完，问句也得是多步问句，
+    # 否则多步链路不进，run 无人封口（靠 Task 7 的 _sealAbandonedResume 兜底，
+    # 但那条路径不该是本用例要验的幂等语义）。
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+    question = "请分步查询 2024 和 2025 年的销售额并对比"
+
     sessionRow = ResearchSession(id=uuid.uuid4(), title="resume-3", created_by=1)
     db_session.add(sessionRow)
     await db_session.commit()
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="q", modelId=config.id, totalSteps=1
+        db_session, sessionId=sessionRow.id, question=question,
+        modelId=config.id, datasourceId=datasource.id, totalSteps=1,
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
     await repo.recordStepError(db_session, steps[0], message="x", kind="transient")
@@ -2261,6 +2757,13 @@ async def testResumeIsIdempotentOnSameKey(pg_client, db_session, monkeypatch):
 
     assert first.status_code == 200
     assert second.status_code in (200, 409)
+    # 幂等的实证：同 key 第二次请求不得再抬 resume_count
+    reloadedRun = (
+        await db_session.execute(select(MultiStepRun).where(MultiStepRun.id == run.id))
+    ).scalar_one()
+    await db_session.refresh(reloadedRun)
+    assert reloadedRun.resume_count == 1
+    assert key in (reloadedRun.idempotency_keys or [])
 
 
 @pytest.mark.asyncio
@@ -2358,13 +2861,19 @@ async def prepareResume(
 
 - [ ] **Step 4: 写路由**
 
-**先确认 DTO 命名约定**（否则前后端对不上、`extra=forbid` 会直接 422）：
+**先确认 DTO 命名约定**（否则前后端对不上会 422）。**注意实际路径**——`app/models/schemas.py`
+**不存在**，`ChatRequest` 实测在 `app/domain/schemas.py:1647`：
 ```bash
 cd /Users/sunql/Prejectcode-th/MyWiki/wiki/aicode/qa-system/backend
-grep -n "class ChatRequest" -A 25 app/models/schemas.py | head -35
-grep -rn "class ChatRequest\|class CamelModel\|class ResumeRequest" app/
+grep -n "class ChatRequest" -A 25 app/domain/schemas.py
 ```
-若 `ChatRequest` 继承自 `CamelModel`（字段形如 `sessionId` / `datasourceId`），则 `ResumeRequest` 必须同样用 `CamelModel` + snake_case 字段声明（由 `CamelModel` 序列化成 camelCase），且前端 body 发 camelCase；若 `ChatRequest` 是纯 snake_case，则统一 snake_case。**以实测为准**，下面的正文按 camelCase 约定给出。
+实测结论（已核实，不必再猜）：`ChatRequest(CamelModel)`，其字段是**直接写成 camelCase**
+（`sessionId` / `datasourceId` / `modelId`），不是 snake_case + 别名生成器。故 `ResumeRequest`
+也用 `CamelModel`，字段名写成 camelCase 风格与 `ChatRequest` 对齐 —— 但**本计划的接口契约是
+snake_case 的 `from_step_index`**（spec §7.1 如此规定，且 Task 9 的前端发的是
+`{"fromStepIndex": …}`，`CamelModel` 的 `to_camel` 会把 `from_step_index` 映射成 `fromStepIndex`，
+`populate_by_name=True` 让两种写法都能进）。**两边只能选一种写死**：保留 `from_step_index`，
+并在 Task 9 侧发 `fromStepIndex`。
 
 `backend/app/api/v1/chat.py`，在 `suggestQueries` 之后追加：
 ```python
@@ -2372,6 +2881,24 @@ class ResumeRequest(CamelModel):
     from_step_index: int | None = None
     model_override: int | None = None
     compress_again: bool = False
+
+
+async def _sealAbandonedResume(session: AsyncSession, runId: uuid.UUID) -> None:
+    """续跑兜底封口：流跑完后 run 仍是 running ⇒ 没人关它，显式标失败。
+
+    为什么需要：路由只给出 `run.question`，**重新路由的结果不一定还是多步**
+    （首步这次成功了 ⇒ 单步优先策略不拆步），多步链路根本没进入，`adoptRunForResume`
+    也就没被执行；也可能流中途断掉。两种情况下这条 run 都会永远停在 `running`。
+    放在路由层是因为它是唯一能覆盖「一切提前退出形态」的位置。
+    """
+    refreshed = await multi_step_persistence.loadRun(session, runId)
+    if refreshed is None or refreshed.status != RUN_STATUS_RUNNING:
+        return
+    await multi_step_persistence.updateRun(
+        session, refreshed, status=RUN_STATUS_FAILED, finished=True,
+        errorSummary="续跑未走多步链路（被重新路由为单步或流中断），run 已显式封口",
+    )
+    await session.commit()
 
 
 @router.post("/multi-step/{runId}/resume")
@@ -2387,26 +2914,41 @@ async def resumeMultiStep(
         raise NotFoundError(f"multi-step run {runId} 不存在")
     await assertSessionOwnership(session, str(run.session_id), _user)
 
+    if run.datasource_id is None:
+        # ChatRequest.datasourceId 是必填 int；缺了它只能 500，不如显式 409。
+        raise ConflictError("该 multi-step run 没有数据源快照，无法续跑")
+
     idempotencyKey = request.headers.get("Idempotency-Key")
     try:
-        _, startIndex = await multi_step_resume.prepareResume(
+        await multi_step_resume.prepareResume(
             session, runId=runId, fromStepIndex=dto.from_step_index,
             idempotencyKey=idempotencyKey,
         )
+    except multi_step_resume.ResumeNotAllowed as exc:
+        # 上面已查过一次 run；这里兜的是查完与被删之间的竞态。不兜就是一个
+        # 未捕获的领域异常 ⇒ 500，而正确答案是 404。
+        raise NotFoundError(str(exc)) from exc
     except multi_step_resume.ResumeConflict as exc:
         raise ConflictError(str(exc)) from exc
 
+    # 起始步**不**通过 DTO 传递：prepareResume 已把它写进 run.current_step_idx，
+    # Task 6 的 adoptRunForResume 从那里读。唯一事实来源 = DB。
     chatDto = ChatRequest(
         question=run.question,
         sessionId=str(run.session_id),
-        datasourceId=_datasourceIdFromRun(run),
+        datasourceId=run.datasource_id,
         modelId=dto.model_override or run.model_id,
-        resumeFromStep=startIndex,
+        resumeRunId=str(run.id),
     )
 
     async def eventSource() -> AsyncIterator[str]:
-        async for event in _service.processMessageStream(chatDto, session, user=_user):
-            yield event.toSse()
+        try:
+            async for event in _service.processMessageStream(chatDto, session, user=_user):
+                yield event.toSse()
+        finally:
+            # finally 而非「循环后」：客户端断连时生成器被取消，CancelledError 也会
+            # 走到这里，run 照样被封口（H4 断连落库那一课）。
+            await _sealAbandonedResume(session, runId)
 
     return StreamingResponse(
         eventSource(),
@@ -2418,25 +2960,29 @@ async def resumeMultiStep(
 ```python
 import uuid
 from app.domain.exceptions import ConflictError, NotFoundError
-from app.models.schemas import ChatRequest  # 以实际 ChatRequest 所在模块为准
+from app.domain.multi_step_models import RUN_STATUS_FAILED, RUN_STATUS_RUNNING
+from app.domain.schemas import ChatRequest  # 实测路径：domain/schemas.py:1647
 from app.services import multi_step_persistence, multi_step_resume
 ```
-并在 `ChatRequest` 上加可选字段 `resumeFromStep: int | None = None`（若已存在同名则复用）。
-`_datasourceIdFromRun` 暂时从 run 的 session 最近 query state 取数据源 id；若取不到，返回 `run.question` 就无从执行 → 改为在 `multi_step_run` 增列 `datasource_id INT`（Task 1 的表已可加列，见 Step 5）。
 
-- [ ] **Step 5: 接上 `datasource_id` 快照**
+- [ ] **Step 5: 确认 `datasource_id` 快照已接上**
 
-`datasource_id` 列已在 Task 1 建好，`createRun` 已支持 `datasourceId`。本步只需：
-1. `_openRun` 增加 `datasourceId: int | None` 形参并透传给 `persistence.createRun(...)`。
-2. Task 6 的接线处把 `datasourceId=getattr(dto, "datasourceId", None)` 传进 `_openRun`。
-3. `_datasourceIdFromRun(run)` 直接 `return run.datasource_id`。
+`datasource_id` 列在 Task 1 建好、`createRun` 已支持 `datasourceId`、`_openRun` 与
+Task 6 的接线也已透传（Task 6 Step 4 的 `_openRun(... datasourceId=getattr(dto, "datasourceId", None))`）。
+本步只做**核对**（若 Task 6 漏了，补上）：
+```bash
+cd /Users/sunql/Prejectcode-th/MyWiki/wiki/aicode/qa-system/backend
+grep -n "datasourceId" app/services/multi_step_persist_hooks.py app/services/chat_multistep.py app/services/chat_stream.py
+```
+Expected: `_openRun` 的签名与两处调用点都能看到 `datasourceId`；`createRun` 收到它。
+没有这一列，Task 7 的路由就拼不出合法的 `ChatRequest`（`datasourceId` 必填）。
 
 - [ ] **Step 6: 跑测试确认通过**
 
 ```bash
 pytest app/tests/integration/test_multi_step_resume_api.py -v
 ```
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 7: Commit**
 
@@ -2649,54 +3195,526 @@ git commit -m "feat(multi-step): 新增 run 保留期清理任务"
 ### Task 9: 前端续跑入口
 
 **Files:**
-- Modify: `frontend/src/` 聊天面板组件（先定位：`grep -rn "step_result\|multi_step_plan" frontend/src`）
-- Modify: 对应 i18n 文案文件
-- Test: 对应 `*.test.tsx`
+- Modify: `frontend/src/types/chat.ts`（`StepStatus` 增 `compressed`；`MultiStepStep` 增 `runId`/`originalRows`/`compressedRows`）
+- Modify: `frontend/src/api/chat.ts`（抽 `postSseStream`；`onStepPlanOverview` 带 runId；新增 `onStepCompressed`；新增 `resumeMultiStepRun`）
+- Modify: `frontend/src/stores/chatStore.ts`（抽 `streamHandlers(set)`；新增 `resumeRun`；回填 runId 与压缩徽章）
+- Create: `frontend/src/components/chat/ResumeRunButton.tsx`
+- Modify: `frontend/src/components/chat/MultiStepPlanCard.tsx`（压缩徽章 + 失败步续跑按钮）
+- Modify: `frontend/src/components/chat/MessageItem.tsx:133`（把 `resumeRun` 传进卡片）
+- Modify: `frontend/src/i18n/zh-CN.ts`（`multiStep` 段）
+- Modify: `frontend/src/i18n/en-US.ts`（`multiStep` 段）
+- Test: `frontend/src/tests/MultiStepPlanCard.test.tsx`
+- Test: `frontend/src/tests/chatApi.test.ts`
 
 **Interfaces:**
-- Consumes: `POST /api/v1/chat/multi-step/{runId}/resume`；SSE 事件里新增的 run/step 状态（若后端未下发 runId，则从 `multi_step_plan` 事件扩展）
-- Produces: 组件 `ResumeRunButton`；step 卡片状态行
+- Consumes: Task 6 的 `multi_step_plan.runId` 与 `step_compressed` 事件；Task 7 的
+  `POST /api/v1/chat/multi-step/{runId}/resume`（body camelCase `{fromStepIndex, modelOverride, compressAgain}`，
+  header `Idempotency-Key`，响应是 SSE 流）
+- Produces: 组件 `ResumeRunButton`（默认导出）；`MultiStepPlanCard` 新增可选 prop
+  `onResume?: (runId: string, fromStepIndex: number) => void`；`api/chat.ts` 导出
+  `resumeMultiStepRun(runId, fromStepIndex, handlers)`；store 新增动作 `resumeRun(runId, fromStepIndex)`
 
-- [ ] **Step 1: 定位现有 step 渲染组件与 SSE 消费点**
+**范围（已与用户对齐）：** 只做 spec §8.2 的聊天面板部分 —— 失败步续跑按钮 + 压缩徽章。
+§8.1 session 列表徽章、§8.3 续跑弹窗（含 `compressAgain` 复选框）、以及非流式渲染下的
+runId（后端非流式响应不带）都不在本任务，已登记进 Task 10 的遗留项。
+
+- [ ] **Step 1: 先读现状（不要靠猜字段名）**
 
 ```bash
 cd /Users/sunql/Prejectcode-th/MyWiki/wiki/aicode/qa-system
-grep -rn "step_result\|EVENT_STEP_RESULT\|multi_step_plan" frontend/src --include=*.ts --include=*.tsx | head -20
-grep -rn "EventSource\|fetchEventSource\|text/event-stream" frontend/src --include=*.ts --include=*.tsx | head -10
+sed -n '140,165p' frontend/src/types/chat.ts          # StepStatus / MultiStepStep
+sed -n '224,245p' frontend/src/api/chat.ts            # StreamEventHandlers
+sed -n '249,286p' frontend/src/api/chat.ts            # sendMessageStream（要被抽出的那段 fetch）
+sed -n '368,378p' frontend/src/api/chat.ts            # multi_step_plan 分发
+sed -n '103,131p' frontend/src/stores/chatStore.ts    # patchStep / patchLastMessage
+sed -n '352,585p' frontend/src/stores/chatStore.ts    # sendMessage 里内联的 handlers
 ```
 
-- [ ] **Step 2: 写失败测试**
+- [ ] **Step 2: 写失败测试（组件层）**
 
-在定位到的组件测试文件里加：
+`frontend/src/tests/MultiStepPlanCard.test.tsx` —— 这文件已存在且形状良好，**沿用**它的
+`renderExpanded` / `makeStep` / `PANEL_LABEL` / `vi.mock("echarts-for-react")`，不要另起炉灶。
+
+把 `renderExpanded` 改成收一个可选回调（只加参数，既有调用不动）：
 ```tsx
-it('失败步骤渲染续跑按钮并在点击时调用 resume 接口', async () => {
-  // Arrange
-  const onResume = vi.fn();
-  render(<StepCard step={{ index: 1, status: 'failed', subQuestion: '查B', lastError: 'oMLX timeout' }} runId="r-1" onResume={onResume} />);
+function renderExpanded(
+  steps: MultiStepStep[],
+  onResume?: (runId: string, fromStepIndex: number) => void
+) {
+  render(<MultiStepPlanCard steps={steps} onResume={onResume} />);
+  fireEvent.click(screen.getByText(PANEL_LABEL));
+}
+```
+文件末尾追加：
+```tsx
+describe("MultiStepPlanCard 续跑与压缩徽章", () => {
+  it("失败步骤带 runId 时渲染续跑按钮，点击回调带 runId 与步号", () => {
+    // Arrange
+    const onResume = vi.fn();
+    renderExpanded(
+      [makeStep({ stepIndex: 1, status: "error", error: "oMLX timeout", runId: "r-1" })],
+      onResume
+    );
 
-  // Act
-  await userEvent.click(screen.getByRole('button', { name: /续跑/ }));
+    // Act
+    fireEvent.click(screen.getByTestId("resume-run"));
 
-  // Assert
-  expect(onResume).toHaveBeenCalledWith('r-1', 1);
-});
+    // Assert
+    expect(onResume).toHaveBeenCalledWith("r-1", 1);
+  });
 
-it('压缩步骤显示压缩徽章与原始行数', () => {
-  // Arrange & Act
-  render(<StepCard step={{ index: 0, status: 'compressed', originalRows: 1000, compressedRows: 30 }} runId="r-1" />);
+  it("没有 runId 的失败步骤不渲染续跑按钮（单步路径不落库）", () => {
+    const onResume = vi.fn();
+    renderExpanded([makeStep({ status: "error", error: "boom" })], onResume);
 
-  // Assert
-  expect(screen.getByText(/已压缩/)).toBeInTheDocument();
-  expect(screen.getByText(/1000/)).toBeInTheDocument();
+    expect(screen.queryByTestId("resume-run")).toBeNull();
+  });
+
+  it("压缩步骤显示压缩徽章与行数", () => {
+    renderExpanded([
+      makeStep({ status: "compressed", originalRows: 1000, compressedRows: 30 }),
+    ]);
+
+    expect(screen.getByText("已压缩")).toBeInTheDocument();
+    expect(screen.getByText("数据已压缩（1000 → 30 行）")).toBeInTheDocument();
+  });
 });
 ```
 
 - [ ] **Step 3: 跑测试确认失败**
 
 ```bash
-cd frontend && npm test -- --run <组件测试路径>
+cd frontend && npm test -- --run src/tests/MultiStepPlanCard.test.tsx
 ```
-Expected: FAIL — `ResumeRunButton` / `StepCard` 新 props 未定义
+Expected: FAIL —— `runId`/`originalRows`/`compressedRows` 不在 `MultiStepStep` 上（TS 报错），
+且 `onResume` 不是 `MultiStepPlanCard` 的 prop。
+
+- [ ] **Step 4: 写失败测试（API 层）**
+
+`frontend/src/tests/chatApi.test.ts`（沿用文件里已有的 `sseStream` / `vi.stubGlobal("fetch", ...)` 手法）：
+```tsx
+it("multi_step_plan 携带 runId 时作为第二个参数交给回调", async () => {
+  const stream = sseStream(
+    'event: multi_step_plan\ndata: {"runId":"r-9","steps":[{"stepIndex":0,"description":"d","subQuestion":"q","aggregationOnly":false}]}\n\n'
+  );
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+  const seen: Array<[unknown, unknown]> = [];
+  await sendMessageStream(makePayload(), {
+    onStepPlanOverview: (steps, runId) => seen.push([steps, runId]),
+  });
+
+  expect(seen).toHaveLength(1);
+  expect(seen[0]?.[0]).toHaveLength(1);
+  expect(seen[0]?.[1]).toBe("r-9");
+});
+
+it("multi_step_plan 不带 runId（单步路径）时第二个参数为 undefined", async () => {
+  const stream = sseStream(
+    'event: multi_step_plan\ndata: {"steps":[{"stepIndex":0,"description":"d","subQuestion":"q","aggregationOnly":false}]}\n\n'
+  );
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+  const seen: unknown[] = [];
+  await sendMessageStream(makePayload(), {
+    onStepPlanOverview: (_steps, runId) => seen.push(runId),
+  });
+
+  expect(seen).toEqual([undefined]);
+});
+
+it("step_compressed 事件分发给 onStepCompressed", async () => {
+  const stream = sseStream(
+    'event: step_compressed\ndata: {"stepIndex":0,"originalRows":1000,"compressedRows":30}\n\n'
+  );
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+  const seen: unknown[] = [];
+  await sendMessageStream(makePayload(), {
+    onStepCompressed: (payload) => seen.push(payload),
+  });
+
+  expect(seen).toEqual([{ stepIndex: 0, originalRows: 1000, compressedRows: 30 }]);
+});
+
+it("resumeMultiStepRun POST 到 resume 端点，带 Idempotency-Key 与 camelCase body", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: sseStream() }));
+
+  await resumeMultiStepRun("r-1", 2, {});
+
+  const [url, init] = vi.mocked(fetch).mock.calls[0];
+  expect(String(url)).toContain("/chat/multi-step/r-1/resume");
+  expect(init?.method).toBe("POST");
+  expect(JSON.parse(String(init?.body))).toEqual({ fromStepIndex: 2 });
+  // 幂等键由前端生成，后端据此去重（spec §7.3）
+  expect(typeof (init?.headers as Record<string, string>)["Idempotency-Key"]).toBe("string");
+});
+```
+（`resumeMultiStepRun` 与 `sendMessageStream` 一起从 `../api/chat` import。）
+
+- [ ] **Step 5: 跑测试确认失败**
+
+```bash
+cd frontend && npm test -- --run src/tests/chatApi.test.ts
+```
+Expected: FAIL —— `resumeMultiStepRun` / `onStepCompressed` 未定义。
+
+- [ ] **Step 6: 实现 —— 类型**
+
+`frontend/src/types/chat.ts`：
+```ts
+export type StepStatus = "pending" | "running" | "done" | "error" | "compressed";
+```
+`MultiStepStep` 追加三个可选字段（都用 `?`：单步路径与非压缩步没有它们）：
+```ts
+  // 该步所属 run 的 id（multi_step_plan 事件盖章）；单步路径不落库 ⇒ undefined，
+  // 也因此没有续跑按钮。
+  runId?: string;
+  // 被上下文压缩的步：徽章展示原始行数 → 保留行数（step_compressed 事件回填）
+  originalRows?: number;
+  compressedRows?: number;
+```
+
+- [ ] **Step 7: 实现 —— `api/chat.ts`**
+
+`StepStatus` 扩了成员，`MultiStepPlanCard` 里两个 `Record<StepStatus, ...>` 会**编译报错** ——
+这是故意的，它逼你把新状态的两处颜色/阶段补齐（Step 9）。
+
+`StreamEventHandlers` 改两处 + 加一个：
+```ts
+  // 多步：完整计划概览 / 单个子步骤计划（进入执行）/ 单个子步骤结果
+  // runId：Task 6 起 multi_step_plan 事件携带；单步路径不发 ⇒ undefined
+  onStepPlanOverview?: (steps: StepPlanOverviewItem[], runId?: string) => void;
+  onStepPlan?: (step: StepPlanView) => void;
+  onStepResult?: (result: StepResultView) => void;
+  // 多步：某个**更早**的步被上下文压缩（其 step_result 早已发过，故单独补一条）
+  onStepCompressed?: (payload: StepCompressedView) => void;
+```
+新增视图类型（放在 `StepResultView` 旁边）：
+```ts
+// step_compressed 事件负载（Task 6 新增）：某个更早的步被压缩后补发
+export interface StepCompressedView {
+  stepIndex: number;
+  originalRows: number;
+  compressedRows: number;
+}
+```
+
+把 `sendMessageStream` 里的 fetch 段抽成 `postSseStream`（**逐行搬**，不要重写解析逻辑）：
+```ts
+/** 通用 SSE POST：路径可变，解析/分发逻辑与 sendMessageStream 完全共用。 */
+async function postSseStream(
+  path: string,
+  body: unknown,
+  handlers: StreamEventHandlers,
+  extraHeaders: Record<string, string> = {}
+): Promise<void> {
+  // 走裸 fetch（SSE 流式 axios 不友好）—— 不经 httpClient 拦截器，
+  // 故用 authHeaders()（SSOT）手动注入 Authorization + X-Tenant-Id。
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json", ...extraHeaders }),
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw new Error(`请求失败 (HTTP ${response.status})`);
+  }
+  if (!response.body) {
+    throw new Error(i18n.t("errors.noStreamSupport"));
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      buffer = consumeFrames(buffer, handlers);
+    }
+    // 冲刷解码器缓冲的尾字节：最后一个分块可能截断多字节 UTF-8 字符，
+    // 流结束后必须显式解码残留字节，否则该字符被静默丢弃（HIGH#1 修复）
+    buffer += decoder.decode();
+    consumeFrames(buffer, handlers);
+  } finally {
+    reader.releaseLock();
+  }
+}
+```
+`sendMessageStream` 收缩成一行转发（**签名与行为不变**，既有测试与调用方零改动）：
+```ts
+export async function sendMessageStream(
+  payload: ChatRequest,
+  handlers: StreamEventHandlers
+): Promise<void> {
+  return postSseStream(`${BASE}/stream`, payload, handlers);
+}
+```
+新增续跑（`BASE` 与 `sendMessageStream` 同源；`encodeURIComponent` 防 runId 注入路径）：
+
+**先核对后端 DTO 的字段命名**（Task 7 落地的，写错就是 422，不是静默失败）：
+```bash
+cd /Users/sunql/Prejectcode-th/MyWiki/wiki/aicode/qa-system
+grep -n "class ResumeRequest" -A 8 backend/app/api/v1/chat.py
+grep -n "def to_camel\|class CamelModel" -A 6 backend/app/domain/schemas.py | head -30
+```
+实测结论（不必再猜）：`ResumeRequest(CamelModel)`，字段声明为 snake_case 的
+`from_step_index`；`CamelModel` 的 `alias_generator=to_camel` 把对外别名生成成
+`fromStepIndex`，同时 `populate_by_name=True` 让**别名与字段名两种写法都能收**。
+所以前端发 `{ fromStepIndex }` 是对外别名的正解 —— 下面这段照抄，**不要**改成
+`{ from_step_index }`（那样也能进，但就是与 Task 7 的注释里写死的那个名字不一致）。
+
+```ts
+/**
+ * 续跑一个失败的多步 run（spec §7）。响应同样是 SSE 流，复用同一套帧解析。
+ *
+ * Idempotency-Key 由前端生成：后端据它去重，重复提交不会重跑（spec §7.3）。
+ */
+export async function resumeMultiStepRun(
+  runId: string,
+  fromStepIndex: number | undefined,
+  handlers: StreamEventHandlers
+): Promise<void> {
+  return postSseStream(
+    `${BASE}/multi-step/${encodeURIComponent(runId)}/resume`,
+    { fromStepIndex },
+    handlers,
+    { "Idempotency-Key": crypto.randomUUID() }
+  );
+}
+```
+（`crypto.randomUUID()` 在本仓已被 `chatStore.ts:79` 用过，测试环境可用。）
+
+分发器改两处：
+```ts
+    case "multi_step_plan":
+      if (Array.isArray(d.steps)) {
+        const steps = d.steps.filter(isStepPlanOverviewItem);
+        if (steps.length) {
+          // 单步路径不发 runId ⇒ undefined（前端据此不渲染续跑按钮）
+          handlers.onStepPlanOverview?.(
+            steps,
+            typeof d.runId === "string" ? d.runId : undefined
+          );
+        }
+      }
+      break;
+```
+```ts
+    case "step_compressed":
+      if (isStepIndex(d.stepIndex)) {
+        handlers.onStepCompressed?.({
+          stepIndex: d.stepIndex,
+          originalRows: typeof d.originalRows === "number" ? d.originalRows : 0,
+          compressedRows: typeof d.compressedRows === "number" ? d.compressedRows : 0,
+        });
+      }
+      break;
+```
+
+- [ ] **Step 8: 实现 —— `chatStore.ts`**
+
+把 `sendMessage`（约 352–585 行）里内联的 handlers 字面量整体搬到模块级函数
+`streamHandlers(set)`，`sendMessage` 改为 `await sendMessageStream(payload, streamHandlers(set))`。
+**只搬不改**：每个 `set((state) => ...)` 原样保留（该区间内没有用到 `get`）。
+这样续跑与首发共用同一套 handler，避免两处状态判据漂移（同 `stepStatusFromResult` 的注释所述）。
+
+`resumeRun` 动作（加进 `ChatState` 接口与 store 实现）：
+```ts
+  resumeRun: (runId: string, fromStepIndex: number) => Promise<void>;
+```
+```ts
+  resumeRun: async (runId, fromStepIndex) => {
+    set({ loading: true, error: null });
+    try {
+      await resumeMultiStepRun(runId, fromStepIndex, streamHandlers(set));
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : i18n.t("errors.unknownError");
+      set((state) => ({
+        messages: patchLastMessage(state.messages, {
+          content: msg,
+          isError: true,
+          isStreaming: false,
+        }),
+        loading: false,
+        error: msg,
+      }));
+    } finally {
+      set((state) => {
+        const last = state.messages[state.messages.length - 1];
+        if (!state.loading && !last?.isStreaming) return {};
+        if (!last?.isStreaming) return { loading: false };
+        return {
+          messages: patchLastMessage(state.messages, { isStreaming: false }),
+          loading: false,
+        };
+      });
+    }
+  },
+```
+（`error` 分支与 `finally` 兜底与 `sendMessage` 同形 —— 续跑断开也要复位 `loading`，
+否则发送按钮永久禁用，同 HIGH#3。）
+
+两个 handler 改为回填新字段：
+```ts
+          // 完整计划概览：建立各步骤（含汇总步骤），初始状态「待执行」
+          // runId 盖到每个步骤上：续跑按钮要凭它拼 resume 端点
+          onStepPlanOverview: (steps, runId) =>
+            set((state) => ({
+              messages: patchLastMessage(state.messages, {
+                steps: steps.map(
+                  (s): MultiStepStep => ({
+                    stepIndex: s.stepIndex,
+                    description: s.description,
+                    subQuestion: s.subQuestion,
+                    aggregationOnly: s.aggregationOnly,
+                    status: "pending",
+                    runId,
+                  })
+                ),
+              }),
+            })),
+```
+```ts
+          // 更早的步被压缩：补上徽章（该步的 step_result 早已把它置为 done/error，
+          // 这里覆盖成 compressed —— 压缩发生在它成功之后，覆盖是正确方向）
+          onStepCompressed: (payload) =>
+            set((state) => ({
+              messages: patchStep(state.messages, payload.stepIndex, {
+                status: "compressed",
+                originalRows: payload.originalRows,
+                compressedRows: payload.compressedRows,
+              }),
+            })),
+```
+
+- [ ] **Step 9: 实现 —— 组件**
+
+`frontend/src/components/chat/ResumeRunButton.tsx`（默认导出，与同目录组件一致）：
+```tsx
+import { Button } from "antd";
+import { useTranslation } from "../../i18n";
+
+interface ResumeRunButtonProps {
+  runId: string;
+  fromStepIndex: number;
+  disabled?: boolean;
+  onResume: (runId: string, fromStepIndex: number) => void;
+}
+
+/**
+ * 失败步骤的续跑按钮（spec §8.2）。
+ *
+ * 只负责「点击时把 runId + 起始步号交出去」，不发请求 —— 请求由 store 的
+ * resumeRun 统一发起，与首发共用同一套 SSE handler。
+ */
+export default function ResumeRunButton({
+  runId,
+  fromStepIndex,
+  disabled,
+  onResume,
+}: ResumeRunButtonProps) {
+  const { t } = useTranslation();
+  return (
+    <Button
+      size="small"
+      type="primary"
+      disabled={disabled}
+      onClick={() => onResume(runId, fromStepIndex)}
+      data-testid="resume-run"
+    >
+      {t("multiStep.resume")}
+    </Button>
+  );
+}
+```
+
+`MultiStepPlanCard.tsx` 四处改动：
+1. props 加回调、两个 `Record<StepStatus, ...>` 加 `compressed`：
+```tsx
+const STATUS_TO_ANTD: Record<StepStatus, "wait" | "process" | "finish" | "error"> = {
+  pending: "wait",
+  running: "process",
+  done: "finish",
+  // 压缩发生在步骤成功之后 ⇒ 阶段上仍是「完成」，只是数据被裁过
+  compressed: "finish",
+  error: "error",
+};
+
+const STATUS_TAG_COLOR: Record<StepStatus, string> = {
+  pending: "default",
+  running: "processing",
+  done: "success",
+  compressed: "warning",
+  error: "error",
+};
+
+interface MultiStepPlanCardProps {
+  steps: MultiStepStep[];
+  currentStepIndex?: number;
+  /** 失败步的续跑回调；不传则不渲染续跑按钮（如历史回放、单步路径） */
+  onResume?: (runId: string, fromStepIndex: number) => void;
+}
+```
+2. `StatusBadge` 的 `labels` 加 `compressed: t("multiStep.statusCompressed")`。
+3. description 里既有块的判断条件补上 `compressed`（否则压缩步的 SQL/图会整块消失），
+   并在其**之前**插入压缩徽章行：
+```tsx
+                    {s.status === "compressed" && s.originalRows != null && s.compressedRows != null ? (
+                      <Text type="warning" style={{ display: "block", marginTop: 4 }}>
+                        {t("multiStep.compressedRows", {
+                          from: s.originalRows,
+                          to: s.compressedRows,
+                        })}
+                      </Text>
+                    ) : null}
+                    {s.status === "done" || s.status === "compressed" || s.status === "error" ? (
+```
+4. 失败步的按钮，放在 `s.error` 那行之后、`s.chartType` 之前：
+```tsx
+                        {s.status === "error" && s.runId && onResume ? (
+                          <div style={{ marginTop: 6 }}>
+                            <ResumeRunButton
+                              runId={s.runId}
+                              fromStepIndex={s.stepIndex}
+                              onResume={onResume}
+                            />
+                          </div>
+                        ) : null}
+```
+补 import：`import ResumeRunButton from "./ResumeRunButton";`
+
+`MessageItem.tsx:133` 传入 store 的 `resumeRun`（在组件体里取一次）：
+```tsx
+const resumeRun = useChatStore((s) => s.resumeRun);
+```
+```tsx
+                <MultiStepPlanCard
+                  steps={message.steps}
+                  currentStepIndex={message.currentStepIndex}
+                  onResume={resumeRun}
+                />
+```
+（`useChatStore` 的 import 该文件已有；只加一个 selector。）
+
+- [ ] **Step 10: 实现 —— i18n**
+
+`frontend/src/i18n/zh-CN.ts` 的 `multiStep`（约 376 行）加三个键：
+```ts
+    statusCompressed: "已压缩",
+    resume: "续跑",
+    compressedRows: "数据已压缩（{from} → {to} 行）",
+```
+`frontend/src/i18n/en-US.ts` 的 `multiStep`（约 371 行）对应加：
+```ts
+    statusCompressed: "Compressed",
+    resume: "Resume",
+    compressedRows: "Data compressed ({from} → {to} rows)",
+```
+占位符是**单花括号**（react-i18next 已配 `prefix: "{"`）—— 写成 `{{from}}` 会原样显示。
 
 - [ ] **Step 4: 实现组件**
 
@@ -2731,19 +3749,33 @@ export async function resumeMultiStepRun(runId: string, fromStepIndex: number, s
 }
 ```
 
-- [ ] **Step 5: 跑测试确认通过 + 覆盖率门禁**
+- [ ] **Step 11: 跑测试 + 类型检查 + 覆盖率门禁**
 
 ```bash
-cd frontend && npm test -- --run && npm run test:coverage
+cd frontend
+npm test -- src/tests/MultiStepPlanCard.test.tsx src/tests/chatApi.test.ts
+npm test                       # 全量：确认没有既有用例被 streamHandlers 抽取改坏
+npm run build                  # tsc -b：Record<StepStatus, ...> 漏了 compressed 会在这里炸
+npm run lint
+npm run test:coverage          # 全局门禁 lines/functions/branches/statements ≥ 80
 ```
-Expected: 新测试通过；全局覆盖率不低于门禁（见 memory `qa-system-frontend-coverage-gate`）
+Expected: 全绿；覆盖率不低于门禁（见 memory `qa-system-frontend-coverage-gate`）。
+`npm test` 里若有与本次无关的既有红，先判断是否本任务引入，**不要**顺手改无关测试。
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 12: Commit**
 
 ```bash
-git add frontend/src
-git commit -m "feat(multi-step): 前端续跑按钮与步骤状态徽章"
+git add frontend/src/types/chat.ts frontend/src/api/chat.ts \
+        frontend/src/stores/chatStore.ts \
+        frontend/src/components/chat/ResumeRunButton.tsx \
+        frontend/src/components/chat/MultiStepPlanCard.tsx \
+        frontend/src/components/chat/MessageItem.tsx \
+        frontend/src/i18n/zh-CN.ts frontend/src/i18n/en-US.ts \
+        frontend/src/tests/MultiStepPlanCard.test.tsx frontend/src/tests/chatApi.test.ts
+git commit -m "feat(multi-step): 前端续跑按钮与步骤压缩徽章"
 ```
+**逐个文件列路径，不要 `git add frontend/src`** —— 目录级 add 会把同一时间未完成的
+其它改动一并提交进这个 commit。
 
 ---
 
@@ -2760,7 +3792,7 @@ git commit -m "feat(multi-step): 前端续跑按钮与步骤状态徽章"
 
 - [ ] **Step 2: 写 change 记录**
 
-`Harness/changes/feat-multi-step-persist/summary.md`：SSOT 记录，含 spec 链接、迁移号 0114、feature flag、新增文件清单、测试命令与结果、遗留项（数据源 id 快照、压缩后仍超限转 skipped 的实现位置）。
+`Harness/changes/feat-multi-step-persist/summary.md`：SSOT 记录，含 spec 链接、迁移号 0114、feature flag、新增文件清单、测试命令与结果、以及**全部**遗留项（照抄本节末尾「遗留项」清单，一条不漏 —— 特别是 Task 9 只做了 spec §8.2 的聊天面板部分，§8.1/§8.3 没做，别让 change 记录读起来像 UI 已完工）。
 
 - [ ] **Step 3: Commit**
 
@@ -2773,10 +3805,35 @@ git commit -m "docs(multi-step): 补 wiki 与 change 记录"
 
 ## 遗留项（本计划不做，但要在 change 记录里登记）
 
-1. **压缩后仍 > 95% → 步转 `skipped`**：spec §4.1 定义了该状态，但触发点依赖 `_planAndGenerateSql` 的实际报错形态；先按 permanent 处理，观察线上日志后再实现。
-2. **`compress_again` 参数**：API 已接收但当前实现忽略（压缩只按阈值自动触发）。
-3. **前端 `from_step_index` 选择弹窗**：Task 9 只做「默认从首个失败步续跑」；下拉选步延后。
-4. **`sql_hash` 命中缓存跳过 LLM**：字段已落库，但续跑时尚未用它跳过生成 —— 先保证正确性，再优化 token。
-5. **SSE 中断后前端自动重连续跑**：依赖前端的 SSE 封装改造，单独排期。
-6. **超大 data（> 5MB）转对象存储**：spec §14 提到超限走 minio，但当前 `data` 一律进 JSONB。先观察真实 `pg_column_size(multi_step_step.data)` 分布，确认有超限样本后再实现，避免过早引入存储依赖。
-7. **并发续跑乐观锁的落库侧强约束**：当前靠 `run.version++` 的自增语义 + 状态校验挡住大部分并发，但**没有** `SELECT … FOR UPDATE`，极端并发下两个请求都可能通过校验。若线上出现双跑，再补行级锁。
+1. **续跑不做前序结果回灌（spec §7.2 step 5「plan 重放」未做）**：2026-10-05 裁决为
+   「最小正确版」——续跑从 `current_step_idx` 起跑，跳过更早的步（但仍计入 `completed`），
+   **不**把前序步的 `data` 拼回 prompt、**不**按 run 原 plan 重放规划。依据是 2026-09-28
+   真机诊断已证伪「多步之间存在步间数据依赖」（见 `qa-system-multistep-no-data-dependency`）：
+   各子问题独立查询、最后在报告层聚合，故回灌不产生正确性收益。真要做时须同批重审
+   `adoptRunForResume` 的形状判定。
+2. **`sql_hash` 命中缓存跳过 LLM（spec §7.2 step 6 未做）**：字段已落库，`adoptRunForResume`
+   还**刻意**把 `sql` / `sql_hash` 清成 `None`，避免未来这个特性拿陈旧 hash 误命中。
+   先保证正确性，再优化 token。
+3. **压缩后仍 > 95% → 步转 `skipped`**：spec §4.1 定义了该状态，但触发点依赖
+   `_planAndGenerateSql` 的实际报错形态；先按 permanent 处理，观察线上日志后再实现。
+4. **`compress_again` 参数**：`ResumeRequest` 已接收但当前实现忽略（压缩只按阈值自动触发）。
+5. **前端 `from_step_index` 选择弹窗**：Task 9 只做「默认从首个失败步续跑」；下拉选步延后。
+6. **spec §8.1（session 列表「未完成」徽章）未做**：需要 session 列表接口回传 run 状态，
+   现接口不返回，改动面超出本计划。
+7. **spec §8.3（续跑弹窗：`from_step_index` 下拉 + `compressAgain` 复选框）未做**：
+   Task 9 直接把 `fromStepIndex` 定为失败步号、`compressAgain` 固定 false。API 两端
+   都已支持这两个参数（Task 7 的 `ResumeRequest`），只是前端没有入口。
+8. **非流式渲染下的续跑入口缺失**：`runId` 与「已压缩」信息都只走 SSE（Task 6 增量）。
+   非流式 `/chat` 的 `steps` 负载不带这两项，故非流式回答里既没有续跑按钮也没有压缩徽章。
+   补齐需要改 `_executeMultiStep` 的读模型构造 + `ChatResponse.steps` 的元素类型。
+9. **压缩徽章的「展开原始数据」未做**：spec §8.2 要求 `[展开原始数据]` 链到
+   `multi_step_step.data`。需要新增 `GET /chat/multi-step/{runId}/steps/{stepIndex}/data`
+   （含归属校验 + 分页），本计划没有这个端点，故徽章目前只是提示。
+10. **SSE 中断后前端自动重连续跑**：依赖前端的 SSE 封装改造，单独排期。后端一侧已就绪：
+    Task 7 的 `_sealAbandonedResume` 在 `finally` 里封口，断连不会留下 `running` 僵尸。
+11. **超大 data（> 5MB）转对象存储**：spec §14 提到超限走 minio，但当前 `data` 一律进 JSONB。
+    先观察真实 `pg_column_size(multi_step_step.data)` 分布，确认有超限样本后再实现，
+    避免过早引入存储依赖。
+12. **并发续跑乐观锁的落库侧强约束**：当前靠 `run.version++` 的自增语义 + 状态校验挡住
+    大部分并发，但**没有** `SELECT … FOR UPDATE`，极端并发下两个请求都可能通过校验。
+    若线上出现双跑，再补行级锁。

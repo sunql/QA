@@ -1466,21 +1466,24 @@ async def testPersistEnabledOpensRun(monkeypatch):
     )
     host = _Host()
     session = AsyncMock()
-    sentinel = object()
+    # 必须带 id：_openRun 紧接着要把它喂给 createSteps(runId=run.id)
+    run = SimpleNamespace(id="r1")
+    createRun = AsyncMock(return_value=run)
+    createSteps = AsyncMock(return_value=[])
     monkeypatch.setattr(
-        "app.services.multi_step_persist_hooks.persistence.createRun",
-        AsyncMock(return_value=sentinel),
+        "app.services.multi_step_persist_hooks.persistence.createRun", createRun
     )
     monkeypatch.setattr(
-        "app.services.multi_step_persist_hooks.persistence.createSteps",
-        AsyncMock(return_value=[]),
+        "app.services.multi_step_persist_hooks.persistence.createSteps", createSteps
     )
 
-    run = await host._openRun(
+    result = await host._openRun(
         session, sessionId="s", question="q", modelId=1, subQuestions=["a"]
     )
 
-    assert run is sentinel
+    assert result is run
+    assert createRun.await_args.kwargs["totalSteps"] == 1
+    assert createSteps.await_args.kwargs["runId"] == "r1"
 
 
 @pytest.mark.asyncio

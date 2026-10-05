@@ -8,7 +8,7 @@
 - **迁移版本**：0113_research_session_model（W5，**已部署上线**，prod `alembic_version=0113`）
 - **MEMORY**：[qa-system-research-entry-ux-gaps.md](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-research-entry-ux-gaps.md)
 
-> **阶段说明**：§1–§9 已全部按实现实况填齐（§6 测试 / §7 安全审查 / §8 部署验证均为**实测数字与逐字结论**，非计划值）。
+> **阶段说明**：§1–§10 已全部按实现实况填齐（§6 测试 / §7 安全审查 / §8 部署验证均为**实测数字与逐字结论**，非计划值；§10 为终审后的后续约束与裁定）。
 > 状态 `in-review` 表示**等待人工真机验收与代码评审**。
 
 ---
@@ -225,7 +225,11 @@ docker exec qa-postgres pg_dump -U qa_user -d qa_metadata -Fc > ~/backups/qa_met
 - **W3 删除**：DELETE 有子行的会话 → **204**；无子行的会话 → **204**；随机 UUID → **404**；重复删除 → **404**（文案「研究会话不存在」，与「非本人」同响应 ⇒ **不泄露存在性**）。级联实证：删除后 `research_turn=0 / research_checkpoint=0`，`research_session` 计数回到 **2 = pre-state**。
 - **W4 回显**：`GET /research/sessions` 两条既有会话均 `datasourceId=1`、`modelId=null`（批二之前建的会话没有 `model_id`，合乎预期）。
 
-**遗留观察（非本次缺陷，交最终评审裁量）**：硬删研究会话**不**清理 `session_token_usage` —— 该表是 chat / 研究**共用**的计量台账、以 `session_id` 字符串为键、**无 FK**，故无级联（实测删除后仍残留 2 行）。倾向**保留**（成本台账不应随业务对象消失），但需明确裁定。
+**明确裁定：硬删研究会话后 `session_token_usage` 残留 —— 保留（非缺陷，不再作为待裁量项）**
+
+- **事实**：硬删研究会话**不**清理 `session_token_usage`。该表是 chat / 研究**共用**的计量台账、以 `session_id` 字符串为键、**无 FK**，故无级联（实测删除后仍残留 2 行）。
+- **裁定：保留**。理由三条：① Token 计量是**成本台账**（项目 `CLAUDE.md` 核心约束「每次 LLM 调用必须记录 Token 消耗与成本」），成本不随业务对象消失而消失 —— 删除会话是"我不再需要这个分析"，不是"这些调用没花过钱"；② 该表**跨域共用**（chat 侧同样按键留存），在研究域加级联会**偏离 chat 域既有语义**，形成同一张表两套生命周期；③ 加 FK/CASCADE 需迁移，收益仅为"表更干净"。
+- **代价与将来触发条件**：会话硬删后按 `session_id` 再也无法从业务侧定位这些行（无 join 路径）。若将来出现「按会话查成本」的真实需求，正确做法是**软删会话**（保留 id）或给台账加 `session_id` 索引 + 显式归档任务，**不是**加 CASCADE。此约束由本变更**显式确立**，后续变更若要改，需在此处更新裁定并说明理由。
 
 **执行相位失败与本次变更无关（如实记录）**：验收中执行步两次报 `Nl2SqlError: 无法生成有效的查询 SQL，请换一种问法或补充本体元数据` → `RuntimeError: 研究计划全部步失败（无一成功），本 turn 终止`（N1' 急停守卫**按设计**生效）。根因是**验收问题过于宽泛 + 该问法的本体元数据不足**，属数据/环境条件；W5 只决定"选哪个模型"，不改 NL2SQL 生成。
 
@@ -237,3 +241,29 @@ docker exec qa-postgres pg_dump -U qa_user -d qa_metadata -Fc > ~/backups/qa_met
 - Wiki：`Harness/wiki/frontend.md`（前端组件与交互，**已补「研究型 Agent 入口（research）」章节**）
 - Rules：`Harness/rules/变更记录强制规范.md`、`Harness/rules/测试规范.md`、`Harness/rules/权限与安全规范.md`
 - Memory：`~/.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-research-entry-ux-gaps.md`
+
+## 10. 后续约束与本轮裁定（交接给后续变更）
+
+### C1 文件体量：`research_agent_ports.py` 仅剩 **45 行**余量 —— 下一个加逻辑的人必须先抽模块
+
+`Harness/rules/工程结构.md:27`「单文件 200-400 行为宜，**硬上限 800 行**」。本变更后实测：
+
+| 文件 | 行数 | 距 800 硬上限余量 |
+|---|---|---|
+| `app/services/research_agent_ports.py` | **755** | **45** ← 最紧 |
+| `app/services/research_agent_service.py` | 538 | 262（本变更已由原单体拆出 execution / phases / stages 三模块） |
+| `app/services/research_agent_phases.py` | 464 | 336 |
+| `app/services/research_agent_execution.py` | 461 | 339 |
+| `app/services/research_agent_stages.py` | 203 | 597 |
+
+**行动约束**：研究执行域**任何**新增逻辑，**不得**直接写进 `ports.py`（也无余量）——先在 `phases.py` / `execution.py` / `stages.py` 里找落点；确需新建职责单元的，**新建模块**而不是扩 `ports.py`。这条不是风格建议：`ports.py` 一旦越过 800 行即违反硬上限，而该文件是研究执行期的公共出口，后续改动只会更多。
+
+### C2 A5 裁定：报告页补 `modeDesc` 说明（设计内部自相矛盾，按**验收口径**收口）
+
+- **分歧事实**：设计 §1 第 5 行的验收口径是「下拉项**与报告页**均有说明，用户能说出三者差异」（`design.md:25`），但同一份设计的交付描述只写「**报告页显示模式 Tag**」（`design.md:100`）；计划 Task 3 沿用了后者（标题即「…+ 报告页模式 Tag」）。⇒ 终审判定「实现忠实于**计划**，但设计 §1 的验收未闭合」，是**计划/设计收窄**而非实现漂移。
+- **裁定：按验收口径补齐**（补 Tag 旁一行 `modeDesc`，复用下拉项同一个 i18n key，不新增 key），同时把 `design.md:100` 收紧为「模式 Tag **+ 一行 `modeDesc` 说明**」——让设计自身不再自相矛盾。理由：第 5 条诉求是用户**原始反馈**（"三个选项具体应该怎么使用，有什么区别？"），报告页正是用户事后复盘时唯一会看的地方；此处省一行字省不出成本，却会让该验收项永远无法勾选。
+- **副作用**：无。纯增量渲染，`mode` 为 null（未知模式）时 Tag 与说明**同时**不渲染，既有「未知 mode 不渲染」用例语义不变。
+
+### C3 已确立的取舍（不再作为待裁量项）
+
+- **硬删会话保留 `session_token_usage`** —— 见 §8 的「明确裁定」。后续若要改，须在此更新裁定并说明理由。

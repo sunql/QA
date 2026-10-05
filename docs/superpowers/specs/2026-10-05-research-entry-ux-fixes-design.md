@@ -97,7 +97,7 @@
 ### W2 三模式说明（第 5 条）
 
 - **下拉项加描述**：`ResearchListPage.tsx:17-21` 的 `MODE_OPTIONS` 的 `label` 改为**两行渲染**（主标题 + 副描述），利用 antd Select 的 `label` 接受 ReactNode 的能力。**不用 Tooltip** —— 悬停才可见对"用户不知道为什么选"这个痛点帮助有限，选项需要一眼能读懂。
-- **报告页显示模式 Tag**：`ResearchReportPage.tsx` 显示本次报告的模式。
+- **报告页显示模式 Tag + 一行说明**：`ResearchReportPage.tsx` 显示本次报告的模式 Tag，**并在 Tag 右侧渲染同一 i18n key 的 `modeDesc` 说明**（见 §12 的 A5 勘误：此处原文只写「显示模式 Tag」，与 §1 第 5 行的验收口径「下拉项**与报告页**均有说明」不一致，已按**验收口径**收紧）。
 - **文案内容**（诚实表述）：
 
 | 模式 | 说明 |
@@ -247,3 +247,5 @@
 **新增文件**（设计时未预见，属实现拆分的产物）：`services/research_agent_phases.py`（相位/计划纯函数 + `resumeState`）、`services/research_agent_execution.py`；`services/research_agent_service.py` 只留编排。
 
 **另一处设计未预见的实现细节**：会话级模型选择在 **resume** 路径需要 `resumeState(row, checkpoint, choice)` 把 `modelId` 补回 state（checkpoint 载荷不带 `modelId` —— 模型不是落库的会话状态，而是会话主行上的列）。
+
+**A5 勘误（终审发现，2026-10-05）**：§4 的 W2 原文只要求「报告页显示模式 Tag」，与本设计 **§1 第 5 行的验收口径**「下拉项**与报告页**均有说明，用户能说出三者差异」不一致 —— 于是实施计划 Task 3 沿用了窄的那句，报告页最终只渲染 Tag，§1 的验收项无法闭合。**裁定：按验收口径补齐**（报告页 Tag 右侧渲染同一 i18n key `research.list.modeDesc.<mode>` 的说明；不新增 key），`design.md` 的 W2 条目已同步收紧。**教训**：设计文档里"验收口径"与"交付描述"两处对同一能力的粒度必须一致，否则计划作者（下游）一定会挑**更容易实现**的那句。

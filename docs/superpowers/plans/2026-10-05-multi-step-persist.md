@@ -2322,18 +2322,29 @@ sed -n '690,745p' backend/app/services/chat_multistep.py
 `CamelModel` 未设 `extra=forbid`，加字段是纯增量、不影响既有入参形状（spec §10.3 要求
 不修改 `/api/v1/chat` 入参形状 —— 加一个默认 `None` 的可选键满足该要求）。
 
+**循环头必须改成带下标**：现状是 `for step_plan in multiStepPlan.steps:`（`chat_multistep.py:622`），
+没有 `index`。本步骤下面所有 `stepsByIdx[index]` / 跳过分支都依赖它，故改成
+```python
+        for index, step_plan in enumerate(multiStepPlan.steps):
+```
+
 在循环体内、**取 `stepsByIdx[index]` 之前**插入跳过分支：
 ```python
             if index < startIndex:
-                # 续跑：更早的步已经 succeeded，跳过重跑。**必须**照样计入 completed，
+                # 续跑：更早的步已经 succeeded，跳过重跑。**必须**照样计入完成数，
                 # 否则 _closeRun 的 runStatusFor 会把「跳过的成功步」当未完成 ⇒
                 # run 被误判 failed，用户看到续跑「又失败了」。
                 # 前序步结果**不**回灌进 prompt（2026-09-28 诊断已证伪拆步产生步间
                 # 数据依赖，见 memory qa-system-multistep-no-data-dependency）。
-                completed += 1
+                completedCount += 1
                 continue
 ```
-`completed` / `anyFailed` / `anySkipped` 的初始化（下面提到的那三行）必须仍在**这个**跳过分支之前。
+`completedCount` / `anyFailed` / `anySkipped` 的初始化（下面提到的那三行）必须仍在**这个**跳过分支之前。
+
+> **命名警告（必读）**：本方法里**已经有一个** `completed: list[StepResult]`（`chat_multistep.py:613`），
+> 被 `_hasDataStepResult(completed)` 与 `_multiStepResponse(completed=completed, ...)` 使用。
+> **绝对不要**把它复用成计数器 —— 那会静默改掉汇总与读模型的入参类型。
+> 计数器一律用 `completedCount: int`。流式版（Step 5）同理，先 grep 该方法的 `completed` 再动手。
 
 在每步**执行前**：
 ```python
@@ -2374,13 +2385,49 @@ sed -n '690,745p' backend/app/services/chat_multistep.py
 ```python
         await self._closeRun(
             session, run,
-            status=runStatusFor(completed, len(multiStepPlan.steps), anyFailed, anySkipped),
-            completedSteps=completed,
-            currentStepIdx=completed,
+            status=runStatusFor(
+                completedCount, len(multiStepPlan.steps), anyFailed, anySkipped
+            ),
+            completedSteps=completedCount,
+            # run 已收尾，指针挪到末尾；resume 用的是 Task 7 prepareResume 另写的值，
+            # 不读这里。
+            currentStepIdx=len(multiStepPlan.steps),
         )
         await session.commit()
 ```
-`completed` / `anyFailed` / `anySkipped` 由本步骤自行维护：循环开始前置 `completed = 0; anyFailed = False; anySkipped = False`；每步成功后 `completed += 1`。`except` 分支里先算出 `isSkip`（该步是否走 spec §4.1 的 `skipped` 分支——压缩后仍超限、后续不再补；不满足就是普通失败），再按它分别置 `anySkipped` / `anyFailed`——上面那段落步终态用的是同一个 `isSkip`。**不要**改动既有循环里已有的同名局部变量（若已存在，直接复用）。
+`completedCount` / `anyFailed` / `anySkipped` 由本步骤自行维护：循环开始前置
+`completedCount = 0; anyFailed = False; anySkipped = False`；每步成功后 `completedCount += 1`。
+`except` 分支里先算出 `isSkip`（该步是否走 spec §4.1 的 `skipped` 分支——压缩后仍超限、后续不再补；不满足就是普通失败），再按它分别置 `anySkipped` / `anyFailed`——上面那段落步终态用的是同一个 `isSkip`。**不要**动上面那个 `completed` 列表——它是 `_hasDataStepResult` / `_multiStepResponse` 的入参，与计数器是两回事。
+
+**提前 `return` 的汇总分支也必须封口（漏了就是 `running` 僵尸）：**
+
+`_executeMultiStep` 的汇总分支（`if step_plan.aggregation_only:` 的成功路径，
+`chat_multistep.py:691` 的 `return _multiStepResponse(...)`）是**在循环体内直接 return**，
+**走不到**循环之后那段 `_closeRun`。计划含汇总步时（线上常态），run 会永远停在 `running`。
+测试用的 `_MULTI_STEP_PLAN_JSON` **没有** `aggregationOnly` 步 ⇒ **没有任何用例会发现这个漏**，
+必须靠这里的指令补上。在该 `return` **之前**插入：
+```python
+                # 汇总步本身也算「跑完了」，不 +1 的话 completedCount 永远 <
+                # len(steps)（分母含汇总步）⇒ runStatusFor 把成功的 run 判成 failed。
+                completedCount += 1
+                # _closeRun 自己就 `if run is None: return`（kill switch 关掉时 run=None），
+                # 不需要外面再包一层判断。
+                await self._closeRun(
+                    session, run,
+                    status=runStatusFor(
+                        completedCount, len(multiStepPlan.steps), anyFailed, anySkipped
+                    ),
+                    completedSteps=completedCount,
+                    currentStepIdx=len(multiStepPlan.steps),
+                )
+                await session.commit()
+```
+（注意：同一分支里「所有数据步都失败 ⇒ `continue`」那条路径**不要**加 —— 它不 return，
+会落到循环之后的统一 `_closeRun`，那时 `anyFailed` 已是 True、终态自然是 failed。
+在它里面再加一次会重复封口。）
+
+流式版（Step 5）**同样**：`chat_stream.py:983` 的 `return` 也要在它上面插这一段
+（`_closeRun` 之后 `await session.commit()` 的时机保持一致）。
 `stepsByIdx` 的取法：`_openRun` 后立刻
 ```python
         persisted = await persistence.loadSteps(session, run.id) if run is not None else []
@@ -2424,7 +2471,12 @@ sed -n '690,745p' backend/app/services/chat_multistep.py
 ```bash
 grep -n "_streamMultiStep\|_executeDataStep\|MultiStepPlan\|inject_to_prompt" backend/app/services/chat_stream.py | head -30
 ```
-在流式版循环里加与 Step 4 相同的 `_openRun` / `markStepRunning` / `_persistStepSuccess` / `_persistStepFailure` / `_closeRun`，**以及同一个续跑分支**（`resumeRunId` ⇒ `persistence.adoptRunForResume`；`run is None` 时才 `_openRun`）与**同一个跳过分支**（`index < startIndex ⇒ completed += 1; continue`）。
+在流式版循环里加与 Step 4 相同的 `_openRun` / `markStepRunning` / `_persistStepSuccess` / `_persistStepFailure` / `_closeRun`，**以及同一个续跑分支**（`resumeRunId` ⇒ `persistence.adoptRunForResume`；`run is None` 时才 `_openRun`）与**同一个跳过分支**（`index < startIndex ⇒ completedCount += 1; continue`）。
+
+现成的落点（已核实，不必再猜）：`chat_stream.py:881` 是 `for step_plan in multiStepPlan.steps:`，
+**同一个改动**——改成 `for index, step_plan in enumerate(multiStepPlan.steps):`；
+`chat_stream.py:860` 已有 `completed: list[StepResult] = []`，同 Step 4 的命名警告：
+计数器一律叫 `completedCount: int`，**绝不**复用那个列表。
 
 **两条路径都要接**——本项目第七次踩「改多步只接了一条路径」（见 memory `qa-system-multistep-failure-isolation`）。
 非流式（`_executeMultiStep`）与流式（`_streamMultiStep`）是两份循环，改一份漏一份不会被任何测试发现：Task 7 的续跑端点走的是**流式**，非流式的续跑只在测试里被直接调用。

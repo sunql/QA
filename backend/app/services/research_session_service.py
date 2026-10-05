@@ -64,12 +64,16 @@ class ResearchSessionService:
         question: str,
         mode: str = DEFAULT_MODE,
         datasourceId: int | None = None,
+        modelId: int | None = None,
     ) -> ResearchSession:
         """新建会话；`input_seed` 存原始问题（重启后据此恢复意图）。
 
         `datasourceId`（Task 13e）由 API 层解析后传入（显式 id 或默认源）：执行面据此
         连业务库。**不在此处解析默认源** —— 本服务不碰数据源域（单一职责），且解析
         失败必须在建会话之前显式发生（不留无源的半成品会话）。
+
+        `modelId`（W5）同理由 API 层解析校验后传入（None = 自动路由）：本服务不碰模型
+        配置域。
         """
         row = ResearchSession(
             created_by=userId,
@@ -77,6 +81,7 @@ class ResearchSessionService:
             input_seed=question,
             mode=mode,
             datasource_id=datasourceId,
+            model_id=modelId,
         )
         session.add(row)
         await session.flush()

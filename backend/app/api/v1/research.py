@@ -81,7 +81,8 @@ from app.services.datasource_service import DataSourceService
 from app.services.enterprise_semantic_layer import EnterpriseSemanticLayer
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_semantic_match_service import KpiSemanticMatchService
-from app.services.messages_zh import MSG_DATASOURCE_NONE_AVAILABLE
+from app.services.messages_zh import MSG_DATASOURCE_NONE_AVAILABLE, MSG_MODEL_CONFIG_UNAVAILABLE
+from app.services.model_config_service import ModelConfigService
 from app.services.nl2sql_service import Nl2SqlService
 from app.services.ontology_service import OntologyService
 from app.services.research_agent_ports import (
@@ -253,14 +254,16 @@ async def createSession(
     user: CurrentUser = Depends(_requireResearchUser),
     db: AsyncSession = Depends(getDb),
 ) -> ResearchSessionRead:
-    # 先解析数据源再建行：解析失败（无可用源 / id 不存在）不留无源的半成品会话
+    # 先解析数据源与模型再建行：解析失败（无可用源 / id 不存在 / 模型已停用）不留半成品会话
     ds = await _resolveDatasource(db, payload.datasourceId)
+    modelId = await _resolveModelId(db, payload.modelId)
     row = await _sessionService.createSession(
         db,
         userId=user.dbUserId,
         question=payload.question,
         mode=payload.mode,
         datasourceId=ds.id,
+        modelId=modelId,
     )
     await db.commit()
     return _sessionRead(row)
@@ -281,6 +284,22 @@ async def _resolveDatasource(db: AsyncSession, datasourceId: int | None) -> Data
     if not sources:
         raise ValidationError(MSG_DATASOURCE_NONE_AVAILABLE)
     return sources[0]
+
+
+async def _resolveModelId(db: AsyncSession, modelId: int | None) -> int | None:
+    """解析研究会话的 LLM 模型（W5）：显式指定 → 校验存在且启用；缺省 → None（自动路由）。
+
+    查**全量**清单（`activeOnly=False`）而非「可用池」：这样「配置存在但已停用」会报
+    404，而不是被池过滤掉后误判为「不存在」—— 与 chat 的消费模式同口径
+    （`services/chat_service.py:831-845`）。显式报错、**不静默回落自动路由**。
+    """
+    if modelId is None:
+        return None
+    configs = await ModelConfigService().list(db, activeOnly=False)
+    target = next((config for config in configs if config.id == modelId), None)
+    if target is None or not target.is_active:
+        raise NotFoundError(MSG_MODEL_CONFIG_UNAVAILABLE.format(id=modelId))
+    return target.id
 
 
 @router.get("/sessions", response_model=list[ResearchSessionRead], summary="我的研究会话")
@@ -606,6 +625,7 @@ def _sessionRead(row: ResearchSession) -> ResearchSessionRead:
         status=row.status,
         question=row.input_seed or "",
         datasourceId=row.datasource_id,
+        modelId=row.model_id,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )

@@ -67,6 +67,9 @@ class ResearchSession(Base):
     # 业务数据源（0112）：研究是**多轮 + 可恢复**的，源在会话上一次性选定全程沿用
     # （state 不持久化，故不能只按请求带）。不加 FK / 可空，理由见迁移 0112。
     datasource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 会话级 LLM 模型选择（W5）：NULL = 自动路由。无 FK（与 datasource_id 同风格）——
+    # 模型可被停用/删除，但历史会话要保留「当时用的是哪个模型」的事实。
+    model_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     input_seed: Mapped[str] = mapped_column(Text, default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False

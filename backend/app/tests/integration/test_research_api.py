@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import research as researchModule
 from app.domain.enums import DataSourceType
-from app.domain.models import DataSource
+from app.domain.models import DataSource, LlmConfig
 from app.domain.research_models import (
     ResearchCheckpoint,
     ResearchReport,
@@ -664,3 +664,65 @@ async def test_session_read_echoes_datasource_id(
     listed = await client.get(f"{_BASE}/sessions", headers=authHeaders)
     assert listed.status_code == 200
     assert listed.json()[0]["datasourceId"] == expected
+
+
+# ---------------------------------------------------------------------------
+# W5：模型选择（会话级落库 + 显式校验）
+# ---------------------------------------------------------------------------
+
+
+async def _seedModel(
+    dbSession: AsyncSession, name: str = "api-test-model", *, isActive: bool = True
+) -> LlmConfig:
+    """种一个模型配置（api_endpoint 指向不可达端口：本文件不真的调 LLM）。"""
+    row = LlmConfig(
+        model_name=name,
+        provider="openai",
+        api_endpoint="http://127.0.0.1:9/v1",
+        api_key_encrypted=encryptApiKey("test-key"),
+        is_active=isActive,
+    )
+    dbSession.add(row)
+    await dbSession.commit()
+    await dbSession.refresh(row)
+    return row
+
+
+async def test_create_session_honors_explicit_model(
+    client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession
+) -> None:
+    model = await _seedModel(dbSession)
+    created = await _createSession(client, authHeaders, question="q", modelId=model.id)
+
+    assert created["modelId"] == model.id
+    row = await dbSession.get(ResearchSession, uuid.UUID(created["id"]))
+    assert row.model_id == model.id
+
+
+async def test_create_session_defaults_to_auto_routing(
+    client: AsyncClient, authHeaders: dict[str, str]
+) -> None:
+    """不传 modelId ⇒ None（自动路由行为与今天完全一致）。"""
+    created = await _createSession(client, authHeaders, question="q")
+    assert created["modelId"] is None
+
+
+async def test_create_session_with_unknown_model_404(
+    client: AsyncClient, authHeaders: dict[str, str]
+) -> None:
+    resp = await client.post(
+        f"{_BASE}/sessions", json={"question": "q", "modelId": 999999}, headers=authHeaders
+    )
+    assert resp.status_code == 404, resp.text
+    assert "999999" in resp.text
+
+
+async def test_create_session_with_inactive_model_404(
+    client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession
+) -> None:
+    """已停用的模型：报错而非静默换模型（否则用户以为用了 A 实际用了 B）。"""
+    model = await _seedModel(dbSession, "api-test-inactive-model", isActive=False)
+    resp = await client.post(
+        f"{_BASE}/sessions", json={"question": "q", "modelId": model.id}, headers=authHeaders
+    )
+    assert resp.status_code == 404, resp.text

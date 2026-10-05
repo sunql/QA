@@ -63,6 +63,12 @@ class ResearchSessionCreate(CamelModel):
 
     可选是**刻意**的：前端无需改动；缺省回落规则与 chat 同口径（默认源优先）。
     """
+    modelId: int | None = None
+    """LLM 模型配置（可选，W5）。不传 → None = 自动路由（行为与今天完全一致）。
+
+    显式指定时**必须存在且启用**，否则 404（不静默回落自动路由 —— 否则用户以为
+    用了 A 实际用了 B）。会话级落库：研究多轮可恢复，追问 / resume 沿用同一模型。
+    """
 
 
 class ResearchTurnCreate(CamelModel):
@@ -100,6 +106,8 @@ class ResearchSessionRead(CamelModel):
     """原始问题（ORM ``input_seed``；重启恢复意图的唯一来源）。"""
     datasourceId: int | None = None
     """本研究跑在哪个业务数据源上（ORM ``datasource_id``，Task 13e 落库、W4 回显）。"""
+    modelId: int | None = None
+    """本研究用哪个 LLM 模型配置（ORM ``model_id``，W5 落库/回显）；None = 自动路由。"""
     createdAt: datetime
     updatedAt: datetime
 

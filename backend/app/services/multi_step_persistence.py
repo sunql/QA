@@ -95,11 +95,27 @@ async def finishStep(
 
 
 async def recordStepError(
-    session: AsyncSession, step: MultiStepStep, *, message: str, kind: str
+    session: AsyncSession,
+    step: MultiStepStep,
+    *,
+    message: str,
+    kind: str,
+    tokens: int = 0,
+    cost: float = 0,
 ) -> None:
+    """记录一次失败尝试。
+
+    tokens/cost 是该次尝试已消耗的用量（默认 0），累加进本步、不覆盖
+    （spec §6.2「每次重试 tokens_used / cost 累加」）。调用方拿不到用量时留空，
+    不要为了凑数传假值。
+    状态保持 running：本函数是 per-attempt 语义，步的终态（failed / skipped）
+    由执行链路在判定终止时落库（spec §6.3）。
+    """
     step.attempt_count = (step.attempt_count or 0) + 1
     step.last_error = message[:2000]
     step.last_error_kind = kind
+    step.tokens_used = (step.tokens_used or 0) + tokens
+    step.cost = Decimal(str(step.cost or 0)) + Decimal(str(cost))
     step.status = STEP_STATUS_RUNNING
     await session.flush()
 

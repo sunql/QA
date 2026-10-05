@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 
 import pytest
 
@@ -61,7 +62,9 @@ async def testRecordStepErrorAccumulatesAttempts(db_session, sessionRow):
         db_session, sessionId=sessionRow.id, question="q", modelId=3, totalSteps=1
     )
     (step,) = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
-    await repo.recordStepError(db_session, step, message="timeout", kind="transient")
+    await repo.recordStepError(
+        db_session, step, message="timeout", kind="transient", tokens=12, cost=0.0002
+    )
     await repo.recordStepError(db_session, step, message="timeout again", kind="transient")
     await db_session.commit()
 
@@ -70,6 +73,9 @@ async def testRecordStepErrorAccumulatesAttempts(db_session, sessionRow):
     assert loaded.last_error == "timeout again"
     assert loaded.last_error_kind == "transient"
     assert loaded.status == "running"  # 未终态
+    # 失败尝试的用量累加不覆盖（spec §6.2）；第二次未传用量即按默认 0 处理
+    assert loaded.tokens_used == 12
+    assert loaded.cost == Decimal("0.0002")
 
 
 @pytest.mark.asyncio

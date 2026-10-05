@@ -161,12 +161,13 @@ return estimated > model.max_input_tokens * 0.7
 |---|---|
 | `httpx.ConnectError` | transient |
 | `httpx.TimeoutException` | transient |
-| HTTP 502 / 503 / 504 | transient |
+| HTTP 429（限流） | transient |
+| HTTP 500 / 502 / 503 / 504 | transient |
 | `LLMUnavailableError`（503 类） | transient |
 | `ctx > 95%` 压缩后仍超限 | permanent |
 | Plan 校验失败（SQL Guard / 关联路径） | permanent |
 | NL2SQL `ValidationError` | permanent |
-| 其他 4xx（非超时类） | permanent |
+| 其他 4xx（非超时类，429 除外） | permanent |
 
 ### 6.2 自动重试曲线
 

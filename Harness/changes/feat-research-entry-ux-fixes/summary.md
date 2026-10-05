@@ -241,6 +241,7 @@ docker exec qa-postgres pg_dump -U qa_user -d qa_metadata -Fc > ~/backups/qa_met
 - Wiki：`Harness/wiki/frontend.md`（前端组件与交互，**已补「研究型 Agent 入口（research）」章节**）
 - Rules：`Harness/rules/变更记录强制规范.md`、`Harness/rules/测试规范.md`、`Harness/rules/权限与安全规范.md`
 - Memory：`~/.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-research-entry-ux-gaps.md`
+- **遗留待办**：`./后续待办清单.md`（终审 + 逐任务评审留下的 24 条 deferred minor 与 L1–L7，去重后按风险排序；§A 已完成但可能有问题 / §B 未完成 / §C 已闭环）
 
 ## 10. 后续约束与本轮裁定（交接给后续变更）
 

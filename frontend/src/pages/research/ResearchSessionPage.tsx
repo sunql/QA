@@ -6,10 +6,11 @@
  */
 import { useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { Alert, App, Button, Input, Space, Spin, Typography } from "antd";
+import { Alert, App, Button, Input, Space, Spin, Tag, Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import { useResearchStore } from "../../stores/researchStore";
 import { useResearchSession } from "../../hooks/useResearchSession";
+import { useDatasourceOptions, datasourceName } from "../../hooks/useDatasourceOptions";
 import { CheckpointCard } from "../../components/research/CheckpointCard";
 import { ResearchTimeline } from "../../components/research/ResearchTimeline";
 import { ResearchProgress } from "../../components/research/ResearchProgress";
@@ -32,6 +33,7 @@ export default function ResearchSessionPage() {
   const error = useResearchStore((s) => s.error);
   const submitTurn = useResearchStore((s) => s.submitTurn);
   const answer = useResearchStore((s) => s.answer);
+  const sources = useDatasourceOptions();
 
   const pendingQuestion =
     (location.state as { question?: string } | null)?.question ?? "";
@@ -70,6 +72,9 @@ export default function ResearchSessionPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           {currentSession?.title || t("research.session.title")}
         </Typography.Title>
+        {datasourceName(sources, currentSession?.datasourceId) ? (
+          <Tag>{datasourceName(sources, currentSession?.datasourceId)}</Tag>
+        ) : null}
         <Button
           type="primary"
           onClick={() => id && navigate(`/research/${id}/report`)}

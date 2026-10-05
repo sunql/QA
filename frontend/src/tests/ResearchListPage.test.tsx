@@ -18,13 +18,29 @@ vi.mock("../api/client", () => ({ httpClient: httpMock, apiClient: httpMock }));
 const SESSIONS = [
   {
     id: "s1", title: "供应商 360°", mode: "research", status: "succeeded",
-    question: "供应商 360° 全景", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    question: "供应商 360° 全景", datasourceId: 1,
+    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
   },
   {
     id: "s2", title: "", mode: "attribution", status: "succeeded",
     question: "为什么下降", createdAt: "2026-01-02T00:00:00Z", updatedAt: "2026-01-02T00:00:00Z",
   },
 ];
+
+const DATASOURCES = [
+  { id: 1, name: "THBI Oracle", type: "oracle", isDefault: true, isActive: true },
+  { id: 2, name: "PG 报表库", type: "postgresql", isDefault: false, isActive: true },
+];
+
+// 按 URL 分发：数据源清单走 /datasources，其余（会话列表）走 SESSIONS。
+function mockGet(overrides: { sessions?: unknown; datasources?: unknown } = {}) {
+  httpMock.get.mockImplementation((url: string) => {
+    if (url === "/datasources") {
+      return Promise.resolve({ data: overrides.datasources ?? DATASOURCES });
+    }
+    return Promise.resolve({ data: overrides.sessions ?? SESSIONS });
+  });
+}
 
 // 探针：把当前路由暴露给断言（Routes 只渲染命中的那条，故放在 Routes 之外）。
 function Probe() {
@@ -53,7 +69,7 @@ describe("ResearchListPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useResearchStore.getState().reset();
-    httpMock.get.mockResolvedValue({ data: SESSIONS });
+    mockGet();
     httpMock.post.mockResolvedValue({ data: { ...SESSIONS[0], id: "s9" } });
   });
 
@@ -70,7 +86,7 @@ describe("ResearchListPage", () => {
   });
 
   it("无会话时渲染空态文案", async () => {
-    httpMock.get.mockResolvedValue({ data: [] });
+    mockGet({ sessions: [] });
     renderPage();
 
     expect(await screen.findByText("暂无研究会话")).toBeInTheDocument();
@@ -88,6 +104,7 @@ describe("ResearchListPage", () => {
       expect(httpMock.post).toHaveBeenCalledWith("/research/sessions", {
         question: "供应商 360° 全景",
         mode: "research",
+        datasourceId: 1,
       }),
     );
     expect(await screen.findByTestId("session-page")).toBeInTheDocument();
@@ -183,5 +200,15 @@ describe("ResearchListPage", () => {
     expect(
       screen.getByText("三者共用同一条研究流水线，仅改变报告的章节组织，不改变分析行为。"),
     ).toBeInTheDocument();
+  });
+
+  it("新建表单默认选中默认数据源；列表项显示所用数据源名", async () => {
+    renderPage();
+    await waitFor(() => expect(httpMock.get).toHaveBeenCalledWith("/datasources", { params: { activeOnly: true } }));
+
+    // 「THBI Oracle」出现 2 处：新建表单选中项 + s1（datasourceId=1）的 Tag。
+    await waitFor(() => expect(screen.getAllByText("THBI Oracle")).toHaveLength(2));
+    // s2 无 datasourceId ⇒ 不渲染源 Tag，故「PG 报表库」不出现。
+    expect(screen.queryByText("PG 报表库")).not.toBeInTheDocument();
   });
 });

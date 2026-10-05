@@ -651,3 +651,16 @@ async def test_delete_requires_auth(client: AsyncClient) -> None:
     """匿名删除 → 401（未过鉴权，不泄露会话是否存在）。"""
     resp = await client.delete(f"{_BASE}/sessions/{uuid.uuid4()}")
     assert resp.status_code == 401
+
+
+async def test_session_read_echoes_datasource_id(
+    client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession
+) -> None:
+    """响应回显 datasourceId（W4）：创建响应与列表响应都要有（治「不知道对哪个库研究」）。"""
+    expected = await _seededDatasourceId(dbSession)
+    created = await _createSession(client, authHeaders, question="q")
+    assert created["datasourceId"] == expected
+
+    listed = await client.get(f"{_BASE}/sessions", headers=authHeaders)
+    assert listed.status_code == 200
+    assert listed.json()[0]["datasourceId"] == expected

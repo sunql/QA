@@ -37,7 +37,21 @@ function stubOpenFetch(...frames: string[]): void {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: openStream(...frames) }));
 }
 
-function makeDetail(): { data: unknown } {
+interface DetailFixture {
+  session: {
+    id: string;
+    title: string;
+    mode: string;
+    status: string;
+    question: string;
+    createdAt: string;
+    updatedAt: string;
+  };
+  turns: unknown[];
+  pendingCheckpoint: null;
+}
+
+function makeDetail(): { data: DetailFixture } {
   return {
     data: {
       session: {
@@ -135,5 +149,22 @@ describe("ResearchSessionPage", () => {
     renderPage();
 
     await waitFor(() => expect(screen.getByText("提交失败")).toBeInTheDocument());
+  });
+
+  it("会话页显示本次研究的数据源名", async () => {
+    httpMock.get.mockImplementation((url: string) => {
+      if (url === "/datasources") {
+        return Promise.resolve({ data: [{ id: 7, name: "THBI Oracle", isDefault: true }] });
+      }
+      const detail = makeDetail();
+      // 不可变构造：不改 makeDetail() 的返回值本身。
+      return Promise.resolve({
+        data: { ...detail.data, session: { ...detail.data.session, datasourceId: 7 } },
+      });
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("THBI Oracle")).toBeInTheDocument();
   });
 });

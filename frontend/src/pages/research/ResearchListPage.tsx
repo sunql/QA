@@ -10,6 +10,7 @@ import { App, Button, Card, Checkbox, Empty, Input, List, Popconfirm, Select, Sp
 import { DeleteOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { useResearchStore } from "../../stores/researchStore";
+import { useDatasourceOptions, datasourceName } from "../../hooks/useDatasourceOptions";
 import { createResearchSession } from "../../api/research";
 import type { ResearchMode } from "../../types/research";
 
@@ -43,17 +44,29 @@ export default function ResearchListPage() {
   const [mode, setMode] = useState<ResearchMode>("research");
   const [submitting, setSubmitting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const sources = useDatasourceOptions();
+  const [datasourceId, setDatasourceId] = useState<number | null>(null);
 
   useEffect(() => {
     void loadSessions();
   }, [loadSessions]);
+
+  useEffect(() => {
+    if (datasourceId !== null) return;
+    const preferred = sources.find((source) => source.isDefault) ?? sources[0];
+    if (preferred) setDatasourceId(preferred.id);
+  }, [sources, datasourceId]);
 
   const startResearch = async () => {
     const trimmed = question.trim();
     if (trimmed.length === 0) return;
     setSubmitting(true);
     try {
-      const session = await createResearchSession({ question: trimmed, mode });
+      const session = await createResearchSession({
+        question: trimmed,
+        mode,
+        datasourceId,
+      });
       navigate(`/research/${session.id}`, { state: { question: trimmed } });
     } catch {
       message.error(t("research.session.error"));
@@ -102,6 +115,12 @@ export default function ResearchListPage() {
             autoSize={{ minRows: 2 }}
           />
           <Space>
+            <Select<number>
+              value={datasourceId ?? undefined}
+              onChange={setDatasourceId}
+              placeholder={t("research.list.datasourcePlaceholder")}
+              options={sources.map((source) => ({ value: source.id, label: source.name }))}
+            />
             <Select<ResearchMode>
               value={mode}
               onChange={setMode}
@@ -166,6 +185,9 @@ export default function ResearchListPage() {
                 aria-label={rowLabel}
               />
               <List.Item.Meta title={rowLabel} description={session.question} />
+              {datasourceName(sources, session.datasourceId) ? (
+                <Tag>{datasourceName(sources, session.datasourceId)}</Tag>
+              ) : null}
               <Tag>{t(`research.list.mode.${session.mode}`)}</Tag>
             </List.Item>
           );

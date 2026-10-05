@@ -2975,6 +2975,7 @@ export const zhCN = {
       title: "研究分析",
       newQuestion: "发起新研究",
       questionPlaceholder: "输入你的研究问题…",
+      datasourcePlaceholder: "选择数据源",
       start: "开始研究",
       empty: "暂无研究会话",
       open: "打开",

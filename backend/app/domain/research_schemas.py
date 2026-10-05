@@ -98,6 +98,8 @@ class ResearchSessionRead(CamelModel):
     status: SessionStatus
     question: str
     """原始问题（ORM ``input_seed``；重启恢复意图的唯一来源）。"""
+    datasourceId: int | None = None
+    """本研究跑在哪个业务数据源上（ORM ``datasource_id``，Task 13e 落库、W4 回显）。"""
     createdAt: datetime
     updatedAt: datetime
 

@@ -23,6 +23,7 @@ export interface ResearchSession {
   mode: ResearchMode;
   status: SessionStatus;
   question: string;
+  datasourceId?: number | null;
   createdAt: string;
   updatedAt: string;
 }

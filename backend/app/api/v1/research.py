@@ -605,6 +605,7 @@ def _sessionRead(row: ResearchSession) -> ResearchSessionRead:
         mode=row.mode,
         status=row.status,
         question=row.input_seed or "",
+        datasourceId=row.datasource_id,
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )

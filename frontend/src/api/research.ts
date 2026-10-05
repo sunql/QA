@@ -33,6 +33,7 @@ const BASE = "/research";
 export async function createResearchSession(input: {
   question: string;
   mode?: ResearchMode;
+  datasourceId?: number | null;
 }): Promise<ResearchSession> {
   const res = await httpClient.post<ResearchSession>(`${BASE}/sessions`, input);
   return res.data;

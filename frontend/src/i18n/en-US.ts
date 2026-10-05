@@ -2960,6 +2960,7 @@ export const enUS = {
       title: "Research",
       newQuestion: "New research",
       questionPlaceholder: "Enter your research question…",
+      datasourcePlaceholder: "Select a datasource",
       start: "Start",
       empty: "No research sessions",
       open: "Open",

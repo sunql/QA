@@ -37,7 +37,7 @@
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | UUID PK | run 主键 |
-| `session_id` | UUID | 关联 `research_session.id`（已有表，0113） |
+| `session_id` | VARCHAR(64) | chat 会话 id（自由字符串，如 `chat-<uuid>` / `docqa-<uuid>`，见 `chatStore.ts:79`）。**无外键** —— 多步持久化的唯一消费方是 chat 链路，而 chat 会话不创建 `ResearchSession`；对齐 `session_message.session_id` / `session_query_state.session_id` 的既有约定。**修订**：0114 原建为 `UUID + FK→research_session.id`，2026-10-05 裁决方案 A 后由 0115 迁移改为此形态（原设计在 chat 侧必然 `invalid UUID 's1'` 报错） |
 | `question` | TEXT | 原始问题快照（用于审计） |
 | `model_id` | INT | 用户请求的 model_id（model 可删，会话要记事实） |
 | `status` | VARCHAR(20) | `running` / `succeeded` / `failed` / `partially_failed` |
@@ -333,7 +333,7 @@ Response: SSE stream（与 /api/v1/chat 一致的事件序列）
 | 已有 | 关系 |
 |---|---|
 | `StepSubquestionRewriter`（qwen-uplift 保留部分） | 子问题改写在本设计前发生；改写后的 `sub_question` 落 `multi_step_step.sub_question` |
-| `ResearchSession`（0113） | `multi_step_run.session_id` 外键引用；多步 session 的 meta 仍由 ResearchSession 管 |
+| `ResearchSession`（0113） | **无关系**（2026-10-05 裁决修订）。原设计让 `multi_step_run.session_id` 外键引用它，但 chat 会话是自由字符串且不建 `ResearchSession`，该外键在唯一消费方里永远悬空 —— 0115 迁移已去掉。研究链路有自己的一套（`ResearchAgentService` + `ResearchSqlRunner`），不写本设计的表 |
 | `session_message`（已有） | 现有 user/assistant message 落库不变；本设计不复制其数据 |
 | `_executeDataStep`（chat_multistep.py） | 本设计在此函数**前后插入落库 + 压缩 + 重试**；不改其业务逻辑 |
 | LLM fallback 链 | 本设计复用 `pc.configs` 现有 fallback 顺序；不引入新 fallback |

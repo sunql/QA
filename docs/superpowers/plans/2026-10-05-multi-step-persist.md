@@ -31,13 +31,23 @@
 
 ### Task 1: 领域模型 + 迁移 0114
 
+> **修订（2026-10-05，裁决 A —— 见 Task 6 的「前置裁决」块）**
+> 本任务原按 `session_id UUID + FK→research_session.id` 落地，经查证该外键在
+> 多步持久化的唯一消费方（chat 链路）里**永远悬空**：chat 会话 id 是自由字符串
+> （前端 `chat-<uuid>` / `docqa-<uuid>`），且 chat 链路从不创建 `ResearchSession`。
+> 已由 **0115 迁移**改为 `session_id String(64)`、去外键（与
+> `session_message` / `session_query_state` 一致）。下方代码块只保留**当时的**原貌
+> 作为历史记录，**以 0115 与 `app/domain/multi_step_models.py` 的当前内容为准**。
+
 **Files:**
 - Create: `backend/app/domain/multi_step_models.py`
 - Create: `backend/alembic/versions/0114_multi_step_persist.py`
+- Create: `backend/alembic/versions/0115_multi_step_run_session_id_text.py`（修订，见上）
 - Test: `backend/app/tests/integration/test_multi_step_persist_models.py`
 
 **Interfaces:**
-- Consumes: `Base`（来自 `app.domain.models`，与 `research_models.py` 同源）、`research_session.id`（0111 已建，UUID PK）
+- Consumes: `Base`（来自 `app.domain.models`，与 `research_models.py` 同源）
+  - **修订**：曾 `Consumes: research_session.id`，已作废（不再有外键）
 - Produces:
   - `MultiStepRun`（字段 `id, session_id, question, model_id, datasource_id, status, total_steps, completed_steps, current_step_idx, compressed_count, resume_count, version, idempotency_keys, error_summary, started_at, updated_at, finished_at`）
   - `MultiStepStep`（字段 `id, run_id, step_index, status, sub_question, sql, sql_hash, data, data_compressed, chart_option, model_used, tokens_used, cost, attempt_count, last_error, last_error_kind, started_at, updated_at, finished_at`）
@@ -72,16 +82,13 @@ from app.domain.multi_step_models import (
 
 @pytest.mark.asyncio
 async def testRunAndStepRoundTrip(db_session):
-    # Arrange：先建一条 research_session 满足外键
-    from app.domain.research_models import ResearchSession
+    # Arrange：session_id 是自由字符串（chat 链路形态），无外键可满足
 
-    session_row = ResearchSession(id=uuid.uuid4(), title="msp-test", created_by=1)
-    db_session.add(session_row)
-    await db_session.flush()
+    sessionKey = f"chat-{uuid.uuid4()}"
 
     run = MultiStepRun(
         id=uuid.uuid4(),
-        session_id=session_row.id,
+        session_id=sessionKey.id,
         question="第一步查A，第二步查B",
         model_id=3,
         datasource_id=7,
@@ -129,13 +136,10 @@ async def testRunAndStepRoundTrip(db_session):
 
 @pytest.mark.asyncio
 async def testDuplicateStepIndexRejected(db_session):
-    from app.domain.research_models import ResearchSession
 
-    session_row = ResearchSession(id=uuid.uuid4(), title="msp-dup", created_by=1)
-    db_session.add(session_row)
-    await db_session.flush()
+    sessionKey = f"chat-{uuid.uuid4()}"
     run = MultiStepRun(
-        id=uuid.uuid4(), session_id=session_row.id, question="q", model_id=None, total_steps=1
+        id=uuid.uuid4(), session_id=sessionKey.id, question="q", model_id=None, total_steps=1
     )
     db_session.add(run)
     await db_session.flush()
@@ -196,12 +200,8 @@ class MultiStepRun(Base):
     __tablename__ = "multi_step_run"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    session_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("research_session.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
+    # 0115 修订：原为 UUID + FK→research_session.id（在 chat 链路永远悬空），改为自由字符串。
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     question: Mapped[str] = mapped_column(Text, nullable=False)
     model_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     datasource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -271,7 +271,7 @@ class MultiStepStep(Base):
 """多步问答落库：multi_step_run + multi_step_step
 
 触发：spec docs/superpowers/specs/2026-10-05-multi-step-persist.md §3/§10.1
-变更：新建两张表（UUID PK，FK CASCADE 到 research_session / multi_step_run）
+变更：新建两张表（UUID PK，FK CASCADE 到 multi_step_run；session_id 见 0115 修订）
 幂等性：op.create_table 前不判存在，重复执行会报错；本迁移只跑一次
 两库同步：需在 qa_metadata(prod) 与 qa_metadata_test 分别应用
 """
@@ -295,8 +295,8 @@ def upgrade() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column(
             "session_id",
-            postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("research_session.id", ondelete="CASCADE"),
+            # 0115 修订：原为 postgresql.UUID + FK→research_session.id，见本任务「修订」块。
+            sa.String(64),
             nullable=False,
         ),
         sa.Column("question", sa.Text(), nullable=False),
@@ -428,20 +428,20 @@ from app.services import multi_step_persistence as repo
 
 
 @pytest.fixture
-async def sessionRow(db_session):
-    from app.domain.research_models import ResearchSession
+def sessionKey() -> str:
+    """chat 侧会话 id 的自由字符串形态（前端是 `chat-<uuid>`，见 chatStore.ts:79）。
 
-    row = ResearchSession(id=uuid.uuid4(), title="repo-test", created_by=1)
-    db_session.add(row)
-    await db_session.commit()
-    return row
+    `session_id` 是 String(64) 且无外键（0115 裁决），故**不再**需要先种一行
+    ResearchSession —— 那正是旧设计（UUID + FK）唯一的用途。
+    """
+    return f"chat-{uuid.uuid4()}"
 
 
 @pytest.mark.asyncio
-async def testCreateRunAndSteps(db_session, sessionRow):
+async def testCreateRunAndSteps(db_session, sessionKey):
     # Act
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="两步题", modelId=3, totalSteps=2
+        db_session, sessionId=sessionKey.id, question="两步题", modelId=3, totalSteps=2
     )
     steps = await repo.createSteps(
         db_session, runId=run.id, subQuestions=["查A", "查B"]
@@ -457,9 +457,9 @@ async def testCreateRunAndSteps(db_session, sessionRow):
 
 
 @pytest.mark.asyncio
-async def testFinishStepWritesDataAndUsage(db_session, sessionRow):
+async def testFinishStepWritesDataAndUsage(db_session, sessionKey):
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="q", modelId=3, totalSteps=1
+        db_session, sessionId=sessionKey.id, question="q", modelId=3, totalSteps=1
     )
     (step,) = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
     await repo.markStepRunning(db_session, step)
@@ -478,9 +478,9 @@ async def testFinishStepWritesDataAndUsage(db_session, sessionRow):
 
 
 @pytest.mark.asyncio
-async def testRecordStepErrorAccumulatesAttempts(db_session, sessionRow):
+async def testRecordStepErrorAccumulatesAttempts(db_session, sessionKey):
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="q", modelId=3, totalSteps=1
+        db_session, sessionId=sessionKey.id, question="q", modelId=3, totalSteps=1
     )
     (step,) = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
     await repo.recordStepError(
@@ -500,9 +500,9 @@ async def testRecordStepErrorAccumulatesAttempts(db_session, sessionRow):
 
 
 @pytest.mark.asyncio
-async def testUpdateRunClosesRun(db_session, sessionRow):
+async def testUpdateRunClosesRun(db_session, sessionKey):
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="q", modelId=3, totalSteps=2
+        db_session, sessionId=sessionKey.id, question="q", modelId=3, totalSteps=2
     )
     await repo.updateRun(
         db_session, run, status="partially_failed", completedSteps=1,
@@ -517,9 +517,9 @@ async def testUpdateRunClosesRun(db_session, sessionRow):
 
 
 @pytest.mark.asyncio
-async def testResetStepsFromClearsErrorsAndKeepsSucceeded(db_session, sessionRow):
+async def testResetStepsFromClearsErrorsAndKeepsSucceeded(db_session, sessionKey):
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="q", modelId=3, totalSteps=3
+        db_session, sessionId=sessionKey.id, question="q", modelId=3, totalSteps=3
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["a", "b", "c"])
     await repo.finishStep(db_session, steps[0], status="succeeded", data=[{"x": 1}], sql="SELECT 1")
@@ -1880,6 +1880,48 @@ git commit -m "feat(multi-step): 新增持久化钩子 mixin + MULTI_STEP_PERSIS
 
 **本任务不管**「续跑被重新路由成单步」的封口 —— 那由 **Task 7 的路由在流结束后兜底**处理（见该任务的 `_sealAbandonedResume`），因为只有路由那层能覆盖「流中途断掉」等一切提前退出的形态。这两个文件里**不要**再加单步分支的守卫。
 
+**前置裁决与地基（2026-10-05 人类裁决 —— 实现者必读，不要回退）**
+
+派发前已就本任务的两处计划↔现实冲突作出裁决。工作区里**已经**包含以下前提改动，
+它们属于本任务的地基：**不要回退、不要重做、不要另建表、不要重复 0114 的建表**。
+
+1. **`session_id` 是自由字符串（裁决 A）**。全仓 `session_message.session_id` /
+   `session_query_state.session_id` 都是 `String(64)`，chat 会话 id 就是
+   `chat-<uuid>` / `docqa-<uuid>`（`frontend/src/stores/chatStore.ts:79`）。
+   原建的 `UUID + FK→research_session.id` 在唯一消费方（chat 链路）里**永远悬空**
+   —— chat 从不创建 `ResearchSession`（全仓唯一非测试创建点属研究功能，
+   `research_session_service.py:78`）。已落地：
+   - 新迁移 `alembic/versions/0115_multi_step_run_session_id_text.py`（改列 + 去 FK）
+   - `app/domain/multi_step_models.py`：
+     `session_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)`
+   - `app/services/multi_step_persistence.py`：`createRun(sessionId: str)`
+   - `app/tests/integration/test_multi_step_persist_repo.py`：已改用
+     `sessionKey = f"chat-{uuid.uuid4()}"`（5 passed，已验证）
+   ⇒ 本任务里 `_openRun(sessionId=dto.sessionId)` **原样传字符串**：不做 UUID 解析、
+     不建 `ResearchSession`、不用 try/except 吞 `DataError`。
+
+2. **数据步「软失败」记 `failed` 步**。`_executeDataStep` **不抛异常** —— 适配器失败时
+   它返回一行 `sql=None` 的错误结果。因此失败有**两条**路径，两条都要落到
+   `_persistStepFailure`（记 `last_error` / `last_error_kind` / `attempt_count`），
+   并在判定终止时以 `finishStep(status=STEP_STATUS_FAILED)` 落**终态**
+   （注意 `recordStepError` 自己只把状态保持在 `running`，终态由调用方落 ——
+   见 `multi_step_persistence.py:114` 的文档字符串）：
+   - 抛异常（连接/超时等）→ 现有 except 分支
+   - **正常返回但 `sql` 为空** → 额外判一次，同样记失败
+
+3. **步数两套口径，别混**：
+   - SSE `multi_step_plan` 事件的 `steps` = `len(multiStepPlan.steps)` —— **含**末尾
+     汇总步（`step_query_planner.py:124` 恒追加 `agg_step`）；本任务的用例里是 **3**。
+   - 落库的 `multi_step_step` 行 / `run.total_steps` = `len(multiStepPlan.data_steps)`
+     —— **不含**汇总步（`multi_step_plan.py:174`）；本任务的用例里是 **2**。
+   ⇒ `_openRun(subQuestions=[...])` 传 `data_steps` 的文本，**不要**传 `plan.steps`。
+
+4. **其余已照准的修正**：局部名 `run` → `stepRun`（避免与既有变量撞）；
+   `chartOption` 取 `stepRun.result.chart_option`；`_maxInputTokens` 读
+   `pipelineContext.selected.max_input_tokens`（已落地，**别**改回遍历 `configs` ——
+   `LlmConfig` 没有 `selected` 列，那写法恒返回 0 = 压缩永不触发的静默死码）；
+   `isSkip` 的 95% 阈值**无实现来源**，钉死 `False` 并登记为遗留项（不得凭空发明阈值）。
+
 
 - [ ] **Step 1: 写失败测试**
 
@@ -2139,15 +2181,12 @@ async def testAdoptRunForResumeAlignsShapeAndStart(pg_client, db_session):
     这是续跑唯一「不新建 run」的入口（最小正确版裁决）。三个分支分别对应：
     正常续跑、`model_override` 换了模型后重新规划出更多步、重新规划出更少步。
     """
-    from app.domain.research_models import ResearchSession
     from app.services import multi_step_persistence as repo
     from app.services.multi_step_persistence import adoptRunForResume
 
-    sessionRow = ResearchSession(id=uuid.uuid4(), title="adopt-1", created_by=1)
-    db_session.add(sessionRow)
-    await db_session.commit()
+    sessionKey = f"chat-{uuid.uuid4()}"
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="q", modelId=1, totalSteps=2
+        db_session, sessionId=sessionKey.id, question="q", modelId=1, totalSteps=2
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
     await repo.finishStep(
@@ -2626,14 +2665,11 @@ from app.domain.multi_step_models import MultiStepRun, MultiStepStep
 @pytest.mark.asyncio
 async def testResumeRejectsNonFailedRun(pg_client, db_session):
     # Arrange：一条 succeeded 的 run
-    from app.domain.research_models import ResearchSession
     from app.services import multi_step_persistence as repo
 
-    sessionRow = ResearchSession(id=uuid.uuid4(), title="resume-1", created_by=1)
-    db_session.add(sessionRow)
-    await db_session.commit()
+    sessionKey = f"chat-{uuid.uuid4()}"
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="q", modelId=1, totalSteps=1
+        db_session, sessionId=sessionKey.id, question="q", modelId=1, totalSteps=1
     )
     await repo.updateRun(db_session, run, status="succeeded", finished=True)
     await db_session.commit()
@@ -2658,7 +2694,6 @@ async def testResumeAdoptsExistingRunAndSkipsSucceededStep(pg_client, db_session
     """
     import json
 
-    from app.domain.research_models import ResearchSession
     from app.services import multi_step_persistence as repo
     from app.tests.integration.test_chat_api import _seed
     from app.tests.integration.test_chat_multi_step import (
@@ -2681,11 +2716,9 @@ async def testResumeAdoptsExistingRunAndSkipsSucceededStep(pg_client, db_session
     subQuestions = [s.get("description") or s["subQuestion"] for s in planSteps]
     assert len(subQuestions) == 2
 
-    sessionRow = ResearchSession(id=uuid.uuid4(), title="resume-2", created_by=1)
-    db_session.add(sessionRow)
-    await db_session.commit()
+    sessionKey = f"chat-{uuid.uuid4()}"
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question=question,
+        db_session, sessionId=sessionKey.id, question=question,
         modelId=config.id, datasourceId=datasource.id, totalSteps=2,
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=subQuestions)
@@ -2739,15 +2772,12 @@ async def testPrepareResumeClearsStaleCompressedPayload(db_session):
     """从压缩步续跑必须清掉 data_compressed，否则留下「status=pending 但
     data_compressed 非空」的非法态（spec §5.3），且压缩钩子见非空即跳过
     ⇒ 该步此后永远无法再压缩。"""
-    from app.domain.research_models import ResearchSession
     from app.services import multi_step_persistence as repo
     from app.services.multi_step_resume import prepareResume
 
-    sessionRow = ResearchSession(id=uuid.uuid4(), title="resume-compressed", created_by=1)
-    db_session.add(sessionRow)
-    await db_session.commit()
+    sessionKey = f"chat-{uuid.uuid4()}"
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question="q", modelId=1, totalSteps=2
+        db_session, sessionId=sessionKey.id, question="q", modelId=1, totalSteps=2
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
     await repo.finishStep(db_session, steps[0], status="succeeded", data=[{"a": 1}])
@@ -2771,7 +2801,6 @@ async def testPrepareResumeClearsStaleCompressedPayload(db_session):
 
 @pytest.mark.asyncio
 async def testResumeIsIdempotentOnSameKey(pg_client, db_session, monkeypatch):
-    from app.domain.research_models import ResearchSession
     from app.services import multi_step_persistence as repo
     from app.tests.integration.test_chat_api import _seed
     from app.tests.integration.test_chat_multi_step import (
@@ -2787,11 +2816,9 @@ async def testResumeIsIdempotentOnSameKey(pg_client, db_session, monkeypatch):
     _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
     question = "请分步查询 2024 和 2025 年的销售额并对比"
 
-    sessionRow = ResearchSession(id=uuid.uuid4(), title="resume-3", created_by=1)
-    db_session.add(sessionRow)
-    await db_session.commit()
+    sessionKey = f"chat-{uuid.uuid4()}"
     run = await repo.createRun(
-        db_session, sessionId=sessionRow.id, question=question,
+        db_session, sessionId=sessionKey.id, question=question,
         modelId=config.id, datasourceId=datasource.id, totalSteps=1,
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
@@ -3098,17 +3125,14 @@ async def pgSession() -> AsyncIterator[AsyncSession]:
 
 @pytest.mark.asyncio
 async def testCleanupDeletesOnlyExpiredRuns(pgSession):
-    from app.domain.research_models import ResearchSession
 
-    sessionRow = ResearchSession(id=uuid.uuid4(), title="cleanup", created_by=1)
-    pgSession.add(sessionRow)
-    await pgSession.commit()
+    sessionKey = f"chat-{uuid.uuid4()}"
 
     now = datetime.now(UTC)
 
     async def addRun(status: str, ageDays: int) -> MultiStepRun:
         run = MultiStepRun(
-            id=uuid.uuid4(), session_id=sessionRow.id, question="q", model_id=None,
+            id=uuid.uuid4(), session_id=sessionKey.id, question="q", model_id=None,
             total_steps=1, status=status,
             started_at=now - timedelta(days=ageDays),
             updated_at=now - timedelta(days=ageDays),
@@ -3138,14 +3162,11 @@ async def testCleanupDeletesOnlyExpiredRuns(pgSession):
 @pytest.mark.asyncio
 async def testCleanupDeletesStepsViaCascade(pgSession):
     from app.domain.multi_step_models import MultiStepStep
-    from app.domain.research_models import ResearchSession
 
-    sessionRow = ResearchSession(id=uuid.uuid4(), title="cleanup-cascade", created_by=1)
-    pgSession.add(sessionRow)
-    await pgSession.commit()
+    sessionKey = f"chat-{uuid.uuid4()}"
     now = datetime.now(UTC)
     run = MultiStepRun(
-        id=uuid.uuid4(), session_id=sessionRow.id, question="q", model_id=None,
+        id=uuid.uuid4(), session_id=sessionKey.id, question="q", model_id=None,
         total_steps=1, status="succeeded",
         started_at=now - timedelta(days=60), updated_at=now - timedelta(days=60),
         finished_at=now - timedelta(days=60),
@@ -3840,7 +3861,7 @@ git commit -m "feat(multi-step): 前端续跑按钮与步骤压缩徽章"
 
 - [ ] **Step 1: 写 wiki 条目**
 
-`Harness/wiki/chat_multi_step_persistence.md`：按 `Harness/wiki/` 既有条目格式（frontmatter + 概述 + 详细说明 + 相关条目），内容涵盖：两张表的关系、状态机、压缩触发阈值 0.7、重试 3 次 1s/2s 退避、续跑端点与幂等、保留期 30/7 天、feature flag 名。链接 [[chat_multistep_flow]]、[[llm_retry_policy]]、[[research_session]]（按实际存在的条目名调整）。
+`Harness/wiki/chat_multi_step_persistence.md`：按 `Harness/wiki/` 既有条目格式（frontmatter + 概述 + 详细说明 + 相关条目），内容涵盖：两张表的关系、状态机、压缩触发阈值 0.7、重试 3 次 1s/2s 退避、续跑端点与幂等、保留期 30/7 天、feature flag 名。链接 [[chat_multistep_flow]]、[[llm_retry_policy]]（按实际存在的条目名调整）。
 
 - [ ] **Step 2: 写 change 记录**
 

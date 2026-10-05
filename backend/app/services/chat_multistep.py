@@ -91,31 +91,24 @@ class MultiStepMixin:
 
     async def _resolveExplicitMultiStep(
         self, session: AsyncSession, dto: ChatRequest, pc: _PipelineContext,
-    ) -> tuple[MultiStepPlan | None, int, Decimal]:
+    ) -> tuple[ChatRequest, MultiStepPlan | None, int, Decimal]:
         """解析显式分步信号：先规则快路径（第X步标号），失败回退 LLM 拆步。
 
-        返回 (multi_plan, step_tokens, step_cost)；plan 为 None 表示未拆出多步，
-        调用方按原流水线走单步。规则命中时 token=0（零 LLM 调用）。
+        返回 (dto, multi_plan, step_tokens, step_cost)：
+          - dto 为题目模式 hook 覆盖后的副本（调用方必须使用，而非原始 dto）；
+          - plan 为 None 表示未拆出多步，调用方按原流水线走单步；
+          - 规则命中时 token=0（零 LLM 调用）。
 
         规则路径仍记一条 token=0 的 step_plan 审计行（与 LLM 拆步同 purpose），
         保证"按 purpose 聚合"的下游分析能一致统计所有多步拆解事件，包括零成本
         的规则命中（成本/审计一致性 2026-08-16 修复）。
-        """
-        rule_result = await self._stepPlanner.plan_explicit(dto.question)
-        if rule_result.plan is not None:
-            await self._recordUsage(
-                session, dto.sessionId, pc.selected, 0, 0, purpose="step_plan",
-            )
-            return rule_result.plan, 0, Decimal("0")
 
-        detected = await self._detectMultiStep(session, dto, pc)
-        if detected is None or detected.plan is None:
-            return None, 0, Decimal("0")
-        step_tokens = detected.prompt_tokens + detected.completion_tokens
-        step_cost = self._costFor(
-            pc.selected, detected.prompt_tokens, detected.completion_tokens,
-        )
-        # ★ NEW: 题目模式 → 路由 hook（feat-qwen-multistep-uplift）
+        Bug A fix（feat-qwen-multistep-uplift Task 5）：hook 放在方法入口处，
+        保证规则快路径（plan_explicit 匹配）也能触发路由覆盖——此前 hook 位于
+        plan_explicit 之后的 LLM 检测路径，导致 B019 等规则命中的题目被跳过。
+        """
+        # ★ NEW: 题目模式 → 路由 hook（feat-qwen-multistep-uplift Task 5 Bug A）
+        # 放在入口处，确保规则快路径（plan_explicit）和 LLM 检测路径均能触发。
         try:
             hint = self._patternRouter.route(dto.question, is_multi_step=True)
             if hint.forced_model_id is not None:
@@ -126,7 +119,22 @@ class MultiStepMixin:
                 dto = dto.model_copy(update={"modelId": hint.forced_model_id})
         except Exception:  # noqa: BLE001
             logger.warning("题目模式路由 hook 异常，原 dto.modelId 保留", exc_info=True)
-        return detected.plan, step_tokens, step_cost
+
+        rule_result = await self._stepPlanner.plan_explicit(dto.question)
+        if rule_result.plan is not None:
+            await self._recordUsage(
+                session, dto.sessionId, pc.selected, 0, 0, purpose="step_plan",
+            )
+            return dto, rule_result.plan, 0, Decimal("0")
+
+        detected = await self._detectMultiStep(session, dto, pc)
+        if detected is None or detected.plan is None:
+            return dto, None, 0, Decimal("0")
+        step_tokens = detected.prompt_tokens + detected.completion_tokens
+        step_cost = self._costFor(
+            pc.selected, detected.prompt_tokens, detected.completion_tokens,
+        )
+        return dto, detected.plan, step_tokens, step_cost
 
     # =========================================================================
     # feat-follow-up-cascade：追问级联（B 多步重跑 / C 兜底重试）
@@ -238,16 +246,17 @@ class MultiStepMixin:
             return None
         question, rwPt, rwCt = rewritten
         dto2 = dto.model_copy(update={"question": question})
-        multiPlan, stepTokens, stepCost = await self._resolveExplicitMultiStep(
+        dto3, multiPlan, stepTokens, stepCost = await self._resolveExplicitMultiStep(
             session, dto2, pc,
         )
         if multiPlan is None:
             return None
-        # 重写后问题可能改变口径约束：按 dto2 重抽（而非沿用 dto 的）
-        globalFilters = await self._resolveGlobalFilters(session, dto2, pc)
+        # 重写后问题可能改变口径约束：按 dto3 重抽（而非沿用 dto2/dto 的）
+        # dto3 可能已被题目模式 hook 覆盖 modelId
+        globalFilters = await self._resolveGlobalFilters(session, dto3, pc)
         totalTokens = stepTokens + rwPt + rwCt
         totalCost = stepCost + self._costFor(pc.selected, rwPt, rwCt)
-        return dto2, multiPlan, totalTokens, totalCost, globalFilters
+        return dto3, multiPlan, totalTokens, totalCost, globalFilters
 
     async def _resolveGlobalFilters(
         self, session: AsyncSession, dto: ChatRequest, pc: _PipelineContext,

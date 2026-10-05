@@ -383,7 +383,7 @@ class StreamMixin:
         if intent in (IntentType.NEW_QUERY, IntentType.QUERY):
             if self._stepPlanner.is_explicit_multi_step(dto.question):
                 global_filters = await self._resolveGlobalFilters(session, dto, pc)
-                multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
+                dto, multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
                 if multi_plan is not None:
@@ -401,7 +401,7 @@ class StreamMixin:
             # 与 processMessage 同口径；详见 _looks_like_compound_question。
             elif _looks_like_compound_question(dto.question):
                 global_filters = await self._resolveGlobalFilters(session, dto, pc)
-                multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
+                dto, multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
                 if multi_plan is not None:

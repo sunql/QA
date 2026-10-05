@@ -217,3 +217,40 @@ describe("CheckpointCard 结构化渲染（W1）", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("CheckpointCard 候选勾选提示（默认验证全部）", () => {
+  const candidateOptions = {
+    arms: { metrics: [], conflicts: [] },
+    candidates: [
+      { statement: "供货量下降因供应商切换", driver: "GR_QTY" },
+      { statement: "供货量下降因收货地点变化", driver: "RCV_SITE" },
+    ],
+  };
+
+  it("hypothesis：候选块渲染「默认验证全部」提示", () => {
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({ phase: "hypothesis", options: candidateOptions })}
+          onAnswer={() => {}}
+        />
+      </ConfigProvider>
+    );
+    expect(screen.getByText("默认验证全部，勾选可缩小范围")).toBeInTheDocument();
+  });
+
+  it.each(["intent", "planning", "runtime_dynamic"] as const)(
+    "非 hypothesis 相位（%s）：不渲染该提示",
+    (phase) => {
+      render(
+        <ConfigProvider>
+          <CheckpointCard
+            checkpoint={makeCheckpoint({ phase, options: candidateOptions })}
+            onAnswer={() => {}}
+          />
+        </ConfigProvider>
+      );
+      expect(screen.queryByText("默认验证全部，勾选可缩小范围")).not.toBeInTheDocument();
+    }
+  );
+});

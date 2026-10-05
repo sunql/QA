@@ -2913,6 +2913,7 @@ export const enUS = {
       planSteps: "Plan steps",
       emptyPlanSteps: "No plan steps were returned. Click Modify to add a research direction.",
       candidates: "Candidate hypotheses (multi-select)",
+      hypothesisSelectHint: "All hypotheses are verified by default; check items to narrow the scope.",
       unnamedItem: "(no description)",
       emptyCandidates: "No candidate hypotheses were generated this round (model unavailable or parse failure). Click Modify to add a research direction.",
       confirm: "Confirm",

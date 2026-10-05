@@ -2928,6 +2928,7 @@ export const zhCN = {
       planSteps: "研究计划步骤",
       emptyPlanSteps: "本次未返回计划步骤，可直接点「修改」补充研究方向。",
       candidates: "候选假设（可多选）",
+      hypothesisSelectHint: "默认验证全部，勾选可缩小范围",
       unnamedItem: "（未提供描述）",
       emptyCandidates: "本轮未生成候选假设（模型不可用或解析失败），可直接点「修改」补充研究方向。",
       confirm: "确认",

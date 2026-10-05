@@ -14,11 +14,21 @@ import type { ResearchMode } from "../../types/research";
 
 const { TextArea } = Input;
 
-const MODE_OPTIONS: ReadonlyArray<{ value: ResearchMode; labelKey: string }> = [
-  { value: "research", labelKey: "research.list.mode.research" },
-  { value: "attribution", labelKey: "research.list.mode.attribution" },
-  { value: "compare", labelKey: "research.list.mode.compare" },
+const MODE_OPTIONS: ReadonlyArray<{ value: ResearchMode; labelKey: string; descKey: string }> = [
+  { value: "research", labelKey: "research.list.mode.research", descKey: "research.list.modeDesc.research" },
+  { value: "attribution", labelKey: "research.list.mode.attribution", descKey: "research.list.modeDesc.attribution" },
+  { value: "compare", labelKey: "research.list.mode.compare", descKey: "research.list.modeDesc.compare" },
 ];
+
+/** 模式下拉的两行选项：主标题 + 副描述（副描述说明该模式只改变报告的章节组织）。 */
+function ModeOptionLabel({ title, desc }: { title: string; desc: string }) {
+  return (
+    <div>
+      <div>{title}</div>
+      <div style={{ fontSize: 12, color: "#8c8c8c" }}>{desc}</div>
+    </div>
+  );
+}
 
 export default function ResearchListPage() {
   const { t } = useTranslation();
@@ -85,13 +95,16 @@ export default function ResearchListPage() {
               onChange={setMode}
               options={MODE_OPTIONS.map((option) => ({
                 value: option.value,
-                label: t(option.labelKey),
+                label: <ModeOptionLabel title={t(option.labelKey)} desc={t(option.descKey)} />,
               }))}
             />
             <Button type="primary" loading={submitting} onClick={startResearch}>
               {t("research.list.start")}
             </Button>
           </Space>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {t("research.list.modeHint")}
+          </Typography.Text>
         </Space>
       </Card>
       <List

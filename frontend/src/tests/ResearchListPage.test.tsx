@@ -140,4 +140,15 @@ describe("ResearchListPage", () => {
     expect(await screen.findByTestId("compare-page")).toBeInTheDocument();
     expect(screen.getByTestId("probe").textContent).toBe("/research/compare?ids=s1,s2");
   });
+
+  it("模式选项带副描述，且页面说明三模式只改报告章节结构", async () => {
+    renderPage();
+    await waitFor(() => expect(httpMock.get).toHaveBeenCalled());
+
+    // 选中项 label 是两行渲染：主标题 + 副描述（副描述在收起状态下也在 DOM 里）。
+    expect(screen.getByText("执行摘要 → 数据 → 引用知识 → 方法学")).toBeInTheDocument();
+    expect(
+      screen.getByText("三者共用同一条研究流水线，仅改变报告的章节组织，不改变分析行为。"),
+    ).toBeInTheDocument();
+  });
 });

@@ -143,4 +143,23 @@ describe("ResearchReportPage", () => {
     expect(await screen.findAllByText("怪报告")).toHaveLength(2);
     expect(screen.queryByTestId("report-block")).toBeNull();
   });
+
+  it("渲染报告的模式 Tag（payload.mode）", async () => {
+    // mockApi 的签名以该文件既有写法为准；只需让报告 payload 的 mode 变为 attribution。
+    mockApi(reportWith({ ...GOOD_PAYLOAD, mode: "attribution" }));
+    renderPage();
+
+    expect(await screen.findByText("归因")).toBeInTheDocument();
+  });
+
+  it("payload.mode 未知：不渲染模式 Tag（不构造文案）", async () => {
+    mockApi(reportWith({ ...GOOD_PAYLOAD, mode: "brand_new_mode" }));
+    renderPage();
+
+    // 标题恒有两处（页面头部 + ReportRenderer 的 <h2>），与本文件其他用例同口径。
+    expect(await screen.findAllByText("本月收货量分析报告")).toHaveLength(2);
+    // 既不显示原始 mode，也不把未命中的 i18n key 当文案渲染出来。
+    expect(screen.queryByText("brand_new_mode")).not.toBeInTheDocument();
+    expect(screen.queryByText("research.list.mode.brand_new_mode")).not.toBeInTheDocument();
+  });
 });

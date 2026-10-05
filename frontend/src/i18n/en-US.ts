@@ -2970,6 +2970,12 @@ export const enUS = {
         attribution: "Attribution",
         compare: "Compare",
       },
+      modeHint: "All three share one research pipeline; they only change how the report is organised, not the analysis.",
+      modeDesc: {
+        research: "Executive summary → Data → Knowledge → Methodology",
+        attribution: "Conclusion → Hypothesis table → Data → Alternatives",
+        compare: "Comparison table → Data → Diff analysis",
+      },
     },
     session: {
       title: "Research Session",

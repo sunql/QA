@@ -10,6 +10,15 @@ import { useTranslation } from "react-i18next";
 import { useResearchStore } from "../../stores/researchStore";
 import { ReportRenderer, parseReportPayload } from "../../components/research/ReportRenderer";
 import type { ReportPayload } from "../../components/research/ReportRenderer";
+import type { ResearchMode } from "../../types/research";
+
+// payload.mode 由 report_planner 落库，运行时是任意 string ⇒ 收窄到已知
+// 模式集合；未知值不渲染 Tag（不构造文案，也不显示原始 key）。
+const MODE_KEYS: ReadonlySet<string> = new Set<string>(["research", "attribution", "compare"]);
+
+function asResearchMode(value: string): ResearchMode | null {
+  return MODE_KEYS.has(value) ? (value as ResearchMode) : null;
+}
 
 export default function ResearchReportPage() {
   const { id } = useParams<{ id: string }>();
@@ -27,6 +36,7 @@ export default function ResearchReportPage() {
   }, [id, loadReports, loadReport]);
 
   const payload: ReportPayload | null = report ? parseReportPayload(report.payload) : null;
+  const mode = payload ? asResearchMode(payload.mode) : null;
 
   return (
     <div style={{ padding: 16 }}>
@@ -37,6 +47,7 @@ export default function ResearchReportPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           {payload?.title || t("research.report.title")}
         </Typography.Title>
+        {mode ? <Tag>{t(`research.list.mode.${mode}`)}</Tag> : null}
       </Space>
       {reports.length > 0 ? (
         <Space wrap style={{ marginBottom: 16 }}>

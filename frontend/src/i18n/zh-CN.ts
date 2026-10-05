@@ -2985,6 +2985,12 @@ export const zhCN = {
         attribution: "归因",
         compare: "对比",
       },
+      modeHint: "三者共用同一条研究流水线，仅改变报告的章节组织，不改变分析行为。",
+      modeDesc: {
+        research: "执行摘要 → 数据 → 引用知识 → 方法学",
+        attribution: "结论 → 假设验证表 → 数据 → 备选假设",
+        compare: "对比维度表 → 数据 → 差异分析",
+      },
     },
     session: {
       title: "研究会话",

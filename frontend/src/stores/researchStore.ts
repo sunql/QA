@@ -169,7 +169,9 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
         sessions: state.sessions.filter((session) => session.id !== sessionId),
       }));
     } catch (err) {
-      set({ error: errorMessage(err) });
+      // 删除失败的反馈由调用方（列表页 message.error）负责：这里**不写**共享 error 槽，
+      // 否则该文案会串到另一个已打开会话页的 Alert（openSession 仅在成功分支清 error）。
+      // 开头的 set({ error: null }) 保留——它保证本动作不把陈旧错误留在槽里。
       throw err;
     }
   },

@@ -569,6 +569,16 @@ describe("researchStore", () => {
     expect(useResearchStore.getState().error).toBe("boom");
   });
 
+  it("deleteSession 失败：抛出但不写共享 error 槽（反馈归列表页，防串页）", async () => {
+    httpMock.delete.mockRejectedValue(new Error("boom"));
+    useResearchStore.setState({ error: "stale" }); // 预置陈旧错误，验证动作先清槽
+
+    await expect(useResearchStore.getState().deleteSession("s1")).rejects.toThrow("boom");
+
+    expect(httpMock.delete).toHaveBeenCalledWith("/research/sessions/s1");
+    expect(useResearchStore.getState().error).toBeNull();
+  });
+
   it("sendQuestion 创建会话失败时抛出并落 error", async () => {
     httpMock.post.mockRejectedValue(new Error("boom"));
     await expect(useResearchStore.getState().sendQuestion("q")).rejects.toThrow("boom");

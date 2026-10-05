@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from typing import TypeVar
 
 import httpx
@@ -27,32 +27,64 @@ TRANSIENT_WAITS: tuple[int, ...] = (1, 2)
 #: 正是本模块要避免的坑。
 MAX_ATTEMPTS: int = 3
 
+#: 判定「瞬态」的 http 状态码：429 限流 + 5xx 服务端错误。
 _TRANSIENT_STATUS = frozenset({429, 500, 502, 503, 504})
+
+#: 直接判瞬态的异常类型。`httpx.TransportError` 已覆盖 ConnectError /
+#: TimeoutException / ReadError / RemoteProtocolError / PoolTimeout 等全部传输层
+#: 失败（它们都没有 http 状态码，重试是正确处置）；内建 `ConnectionError`
+#: 覆盖 socket 层的连接重置/拒绝。
+_TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
+    httpx.TransportError,
+    ConnectionError,
+    asyncio.TimeoutError,
+)
 
 T = TypeVar("T")
 
 
 def classifyStepError(exc: BaseException) -> str:
-    """把异常分成 transient（可自动重试）或 permanent（转人工）。"""
-    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.TimeoutException)):
-        return ERROR_KIND_TRANSIENT
-    if isinstance(exc, asyncio.TimeoutError):
-        return ERROR_KIND_TRANSIENT
-    if isinstance(exc, LLMUnavailableError):
-        return ERROR_KIND_TRANSIENT
-    if isinstance(exc, Nl2SqlError):
+    """把异常分成 transient（可自动重试）或 permanent（转人工）。
+
+    **沿整条 `__cause__`/`__context__` 链判定**，不只看最外层：本仓所有 provider
+    失败都被 `openai_client` 以 `LlmClientError(...) from exc` 包住，故 spec §6.1
+    列的 httpx 类型在分类点永远不会裸着到达；只看一层会把「provider 不可达 /
+    超时」误判为永久，而那正是本功能要救的故障类别。HTTP 状态码同理，也可能
+    埋在多层之下。
+
+    与 `llm_retry_policy.isRetryableLlmError` 的差异：那一条对 `Nl2SqlError` 一律
+    返回可重试，而多步场景下 plan 校验失败属永久错误（重试白烧 token），故不复用。
+    """
+    # 按类型优先判永久：语义固定，不受包装层数影响。
+    if isinstance(exc, (Nl2SqlError, LLMUnavailableError)):
+        # Nl2SqlError：NL2SQL 自带重试/降级，plan 校验失败重试无意义。
+        # LLMUnavailableError：「未配置 LLM / 无可用 key」是配置错，重试不自愈。
         return ERROR_KIND_PERMANENT
 
-    status = _statusCode(exc)
-    if status is not None:
-        return ERROR_KIND_TRANSIENT if status in _TRANSIENT_STATUS else ERROR_KIND_PERMANENT
+    for link in _causeChain(exc):
+        if isinstance(link, _TRANSIENT_TYPES):
+            return ERROR_KIND_TRANSIENT
+        status = _statusCodeOf(link)
+        if status is not None:
+            return ERROR_KIND_TRANSIENT if status in _TRANSIENT_STATUS else ERROR_KIND_PERMANENT
     return ERROR_KIND_PERMANENT
 
 
-def _statusCode(exc: BaseException) -> int | None:
-    for candidate in (exc, getattr(exc, "__cause__", None)):
-        code = getattr(candidate, "status_code", None)
-        if isinstance(code, int):
+def _causeChain(exc: BaseException) -> Iterator[BaseException]:
+    """异常自身 + 整条 `__cause__`／`__context__` 链（按 id 去环）。"""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _statusCodeOf(exc: BaseException) -> int | None:
+    """取链接上的 http 状态码（`status` 是 aiohttp 一类客户端的字段名）。"""
+    for attr in ("status_code", "status"):
+        code = getattr(exc, attr, None)
+        if isinstance(code, int) and not isinstance(code, bool):
             return code
     return None
 

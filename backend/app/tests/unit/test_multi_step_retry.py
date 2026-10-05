@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import pytest
 
-from app.domain.exceptions import LLMUnavailableError, Nl2SqlError
+from app.domain.exceptions import LLMUnavailableError, LlmClientError, Nl2SqlError
 from app.services.multi_step_retry import (
     ERROR_KIND_PERMANENT,
     ERROR_KIND_TRANSIENT,
@@ -19,19 +19,56 @@ class _StatusError(Exception):
         self.status_code = status_code
 
 
+def _wrap(inner: Exception, outer: Exception) -> Exception:
+    """返回以 ``inner`` 为 __cause__ 的 ``outer``（等价于 `raise outer from inner`）。"""
+    try:
+        raise inner
+    except Exception as exc:  # noqa: BLE001 - 仅用于构造异常链
+        try:
+            raise outer from exc
+        except Exception as wrapped:  # noqa: BLE001 - 同上
+            return wrapped
+
+
 @pytest.mark.parametrize(
     "exc, expected",
     [
+        # 裸类型（本模块自身可能直接看到）
         (httpx.ConnectError("refused"), ERROR_KIND_TRANSIENT),
         (httpx.ReadTimeout("slow"), ERROR_KIND_TRANSIENT),
         (asyncio.TimeoutError(), ERROR_KIND_TRANSIENT),
-        (LLMUnavailableError("no client"), ERROR_KIND_TRANSIENT),
         (_StatusError(429), ERROR_KIND_TRANSIENT),
         (_StatusError(502), ERROR_KIND_TRANSIENT),
         (_StatusError(503), ERROR_KIND_TRANSIENT),
         (_StatusError(400), ERROR_KIND_PERMANENT),
         (Nl2SqlError("plan 校验失败"), ERROR_KIND_PERMANENT),
         (ValueError("bad input"), ERROR_KIND_PERMANENT),
+        # 配置错误（未配置 LLM / 无可用 key）：重试不会自愈 → 永久
+        (LLMUnavailableError("no client"), ERROR_KIND_PERMANENT),
+        # 真实链路形态：provider 失败被 LlmClientError 包住（openai_client 的 `from exc`）
+        (
+            _wrap(httpx.ConnectError("refused"), LlmClientError("call failed", provider="openai")),
+            ERROR_KIND_TRANSIENT,
+        ),
+        (
+            _wrap(ConnectionResetError("reset by peer"), LlmClientError("call failed", provider="openai")),
+            ERROR_KIND_TRANSIENT,
+        ),
+        (
+            _wrap(_StatusError(503), LlmClientError("call failed", provider="openai")),
+            ERROR_KIND_TRANSIENT,
+        ),
+        (
+            _wrap(_StatusError(401), LlmClientError("call failed", provider="openai")),
+            ERROR_KIND_PERMANENT,
+        ),
+        # 状态码埋在第二层 __cause__ 之下：只走一层会漏判
+        (
+            _wrap(_wrap(_StatusError(503), Exception("middle")), LlmClientError("call failed")),
+            ERROR_KIND_TRANSIENT,
+        ),
+        # 无 cause 的 LlmClientError（缺 endpoint / key 等配置错）→ 永久
+        (LlmClientError("missing endpoint", provider="azure"), ERROR_KIND_PERMANENT),
     ],
 )
 def testClassifyStepError(exc, expected):

@@ -2967,7 +2967,7 @@ export const enUS = {
       report: "Report",
       compare: "Compare",
       deleteConfirm: "Delete this research session? Its turns, checkpoints and reports will be removed too. This cannot be undone.",
-      deleteAriaLabel: "Delete research session",
+      deleteAriaLabel: "Delete research session: {name}",
       deleteError: "Delete failed",
       mode: {
         research: "Research",

@@ -55,6 +55,7 @@ from app.services.research_agent_phases import (
     resumeState,
 )
 from app.services.research_agent_ports import (
+    ACTION_MODIFY,
     ACTION_STATUS,
     CHECKPOINT_PLANNING,
     ERROR_HYPOTHESIS_FAILED,
@@ -72,6 +73,7 @@ from app.services.research_agent_ports import (
     PHASES,
     PURPOSE_HYPOTHESIS,
     ROLE_CHECKPOINT,
+    ROLE_USER,
     STATUS_AWAITING,
     STATUS_DONE,
     STATUS_FAILED,
@@ -203,7 +205,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         requireQuestion(question, sessionId)  # 守卫 SSOT（与 runTurn 同源）
         row = await self._loadSession(session, sessionId)
         turn = await self._sessions.appendTurn(
-            session, sessionId=sessionId, role="user", content={"question": question}
+            session, sessionId=sessionId, role=ROLE_USER, content={"question": question}
         )
         logger.info("研究 turn 开始: session=%s turn=%s userId=%s", sessionId, turn.id, userId)
         return await self.runTurn(
@@ -276,7 +278,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         if rewritten:
             state = rewriteState(state, rewritten)
             startPhase = PHASE_ESL
-        elif action == "modify" and checkpoint.phase == CHECKPOINT_PLANNING:
+        elif action == ACTION_MODIFY and checkpoint.phase == CHECKPOINT_PLANNING:
             # Task 6.5-4（MEDIUM-8）：计划点的 modify 不是「确认旧计划继续跑」，而是带
             # 用户反馈**重跑 planner**；故回到 plan 相位并置 replan 标记（该轮不再暂停）。
             startPhase = PHASE_PLAN
@@ -309,7 +311,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             action=action, choice=choice, checkpointId=checkpointId, rewritten=rewritten
         )
         await self._sessions.appendTurn(
-            session, sessionId=checkpoint.session_id, role="user", content=content
+            session, sessionId=checkpoint.session_id, role=ROLE_USER, content=content
         )
         await self._sessions.updateSessionStatus(session, checkpoint.session_id, STATUS_RUNNING)
         return rewritten

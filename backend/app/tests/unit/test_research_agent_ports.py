@@ -376,3 +376,19 @@ def test_select_classes_for_tables_ignores_blank_names() -> None:
 
 def test_default_cost_is_zero_without_config() -> None:
     assert LlmUsageRecorder._costFor(None, 1000, 500) == Decimal("0")
+
+
+def test_role_action_constants_match_status_dict() -> None:
+    """ROLE_USER 与 ACTION_MODIFY/ACTION_CONFIRM 字符串必须与 STATUS dict 值/ACTION_STATUS key 一致。
+
+    `research_agent_service.py` 历史上有 `role="user"` 与 `action == "modify"` 裸字符串；
+    收口到命名常量后必须锁死字面值——任何拼写漂移都会让 checkpoint 决策走错分支。
+    """
+    from app.services import research_agent_ports
+
+    assert research_agent_ports.ROLE_USER == "user"
+    assert research_agent_ports.ACTION_MODIFY == "modify"
+    assert research_agent_ports.ACTION_CONFIRM == "confirm"
+    # ACTION_MODIFY 必须是 ACTION_STATUS 的合法 key（resumeTurn 用 status 派生 checkpoint）
+    assert research_agent_ports.ACTION_MODIFY in research_agent_ports.ACTION_STATUS
+    assert research_agent_ports.ACTION_CONFIRM in research_agent_ports.ACTION_STATUS

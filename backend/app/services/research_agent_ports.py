@@ -89,11 +89,14 @@ STATUS_AWAITING = "awaiting_user"
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 ROLE_CHECKPOINT = "checkpoint_awaiting"
+ROLE_USER = "user"
 
 # 用户动作 → checkpoint 状态（Task 3 review 裁定，不允许其它写法）。不落 "consumed"：
 # resolveCheckpoint 后 getPendingCheckpoint 返 None 即 consumed 语义。
 ACTION_STATUS = {"confirm": "confirmed", "modify": "modified", "reject": "rejected"}
 ACTION_REJECT = "reject"
+ACTION_MODIFY = "modify"
+ACTION_CONFIRM = "confirm"
 
 # --- 计量 purpose / 置信度 / 摘要上限 ----------------------------------------
 PURPOSE_PLAN = "research_plan"

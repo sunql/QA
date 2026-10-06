@@ -1862,8 +1862,9 @@ git commit -m "feat(multi-step): 新增持久化钩子 mixin + MULTI_STEP_PERSIS
     `{"stepIndex": int, "originalRows": int, "compressedRows": int}`
   - 其余行为变化是落库有副作用
 - Produces（**Task 7 依赖**，非 SSE）:
-  - `app.domain.schemas.ChatRequest` 新字段 `resumeRunId: str | None = None`
+  - `app.domain.schemas.ChatRequest` 新字段 `resumeRunId: uuid.UUID | None = None`
   - `multi_step_persistence.adoptRunForResume(session, *, runId, subQuestions) -> tuple[MultiStepRun | None, int]`
+    （读侧钳制越界 `current_step_idx`，见下方 (b)）
 
 **改动纪律:** 除续跑分支外，只加「打开 run / 每步落库 / 关 run / 压缩判定」四类调用，**不得**改 NL2SQL 逻辑、不得引入模型改派。
 
@@ -1873,10 +1874,77 @@ git commit -m "feat(multi-step): 新增持久化钩子 mixin + MULTI_STEP_PERSIS
 
 背景（**必读，否则会写错**）：计划原先让路由把 `resumeFromStep=startIndex` 塞进 `ChatRequest`，但全仓 grep 证明**无任何代码消费它**；而本任务原定的 `_openRun` 是**无条件**的，于是续跑会新建**第二个** run，被 `prepareResume` 重置成 pending 的那个原 run 则**永远停在 running**（僵尸）。本节就是修掉这条链路：
 
-- 载体改为 `ChatRequest.resumeRunId`（`str | None`）。**起始步不再由 DTO 传递**，唯一事实来源是 DB 的 `multi_step_run.current_step_idx`（Task 7 的 `prepareResume` 已写入）。
+- 载体改为 `ChatRequest.resumeRunId`（**`uuid.UUID | None`**）。**起始步不再由 DTO 传递**，唯一事实来源是 DB 的 `multi_step_run.current_step_idx`（Task 7 的 `prepareResume` 已写入）。
 - 续跑路径**绝不调用 `_openRun`**，改用 `persistence.adoptRunForResume(...)`。
 - 循环里 `index < startIndex` 的步**跳过执行**，但**必须计入 `completed`** —— 否则 `_closeRun` 的 `runStatusFor(completed, total, ...)` 会把「跳过的成功步」当成未完成，把 run 误判成 `failed`。
 - **不做**前序步结果回灌（不进 prompt 上下文），**不复用**已存 SQL。依据：2026-09-28 真机诊断已证伪「拆步产生步间数据依赖」（见 memory `qa-system-multistep-no-data-dependency`），跳过更早步不损失正确性。
+
+**2026-10-05 任务评审判决追加的三条（与上节同级，必须一并落地）：**
+
+**(a) `resumeRunId` 两处都做防御。** 字段类型是 `uuid.UUID | None`（Pydantic 在边界
+自动校验，非法值 ⇒ 422），**且**在取值处再包一层防御性转换 → 领域 `ValidationError`。
+理由：`/api/v1/chat` 是公开入参，绝不能出现「未捕获的 `ValueError` ⇒ 500」。
+**两处都要**：字段类型（边界）+ 取值处（纵深），不要只做一处。
+`chat_multistep.py` / `chat_stream.py` 若未 import `ValidationError`，补
+`from app.domain.exceptions import ValidationError`。
+
+**(b) `adoptRunForResume` 读侧钳制越界的 `current_step_idx`（改 Task 2 的文件
+`backend/app/services/multi_step_persistence.py`）。** 写侧的 `_closeRun` 把本列当
+**「越过末尾的哨兵」**用（落 `len(plan.steps)`，含汇总步 —— 比数据步数还大 1），
+而读侧原先把它当**合法起始下标**。直接走 `/api/v1/chat` 带 `resumeRunId` 命中一条
+已收尾的 run 时（该入口**不**经 `prepareResume` 覆盖），`startIndex` 会落到末尾之后，
+跳过分支把每一步都 `continue` 掉 ⇒ **一步不跑，run 却被重新封成终态**，且
+`resetStepsFrom(fromStepIndex=start)` 什么都不重置。修法（读侧钳制，与「形状不匹配」
+同处置）：
+
+```python
+    shapesMatch = [s.sub_question for s in steps] == list(subQuestions)
+    rawStart = int(run.current_step_idx or 0)
+    # 越界即视为「没有可续跑的进度」：写侧 `_closeRun` 落的是 len(plan.steps)（含汇总步）
+    # 这个越界哨兵，读侧必须容忍，否则续跑会把整跑跳过还把它封成终态。
+    if shapesMatch and rawStart < len(subQuestions):
+        start = rawStart
+    else:
+        start = 0
+        logger.info(
+            "续跑起点归零：run=%s 形状%s、current_step_idx=%d、本次 %d 步",
+            run.id, "一致" if shapesMatch else "变化", rawStart, len(subQuestions),
+        )
+```
+补一条回归用例：`current_step_idx` 取越界值（如 3，而 `subQuestions` 只有 2 项）时
+`adoptRunForResume` 必须返回 `start == 0` 并照常把步对齐。
+
+**(c) 把两条链路的重复块抽成 mixin 方法（消除 ~80 行逐字重复）。** 复审实测
+`chat_multistep.py` 与 `chat_stream.py` 各有一份近乎逐字相同的**非 yield** 逻辑，
+必须收口到 `MultiStepPersistMixin`（这两个循环的 yield 序列不同，只抽非 yield 段落，
+**不要**试图抽整段循环）：
+
+```python
+    async def _beginRunForRequest(
+        self, session, dto, *, subQuestions: list[str]
+    ) -> tuple[MultiStepRun | None, int]:
+        """续跑分支 + 新建分支的唯一实现。返回 (run, startIndex)。"""
+
+    async def _shouldSkipStep(self, index: int, startIndex: int) -> bool:
+        """`index < startIndex` ⇒ 跳过；调用方照样 `completedCount += 1`。"""
+
+    async def _recordHardFailure(self, session, run, step, exc) -> None:
+        """硬失败：分类 + per-attempt 错误 + failed 终态。两条链路共用。"""
+
+    async def _recordSoftFailure(
+        self, session, step, *, message: str, kind: str
+    ) -> None:
+        """软失败（`_executeDataStep` 返回 sql=None）：记错误 + failed 终态。"""
+```
+实现方式：把现有两条链路里那几段**逐字搬进**这些方法，调用点各缩成一行。
+`_persistStepFailure` / `_persistStepSoftFailure`（Task 5 已有）保留，新方法是它们的
+调用方，不要复制 Task 5 的逻辑。
+
+**验收标准（可测）**：同一份失败输入下，非流式 `_executeMultiStep` 与流式
+`_streamMultiStep` 必须产出**逐字相同**的 `step.status` / `tokens_used` / `cost` /
+`last_error_kind`。补一条对照用例钉住它 —— 这条断言正是「改多步只接了一条路径」
+这个本仓已犯七次的错误的回归闸。目标：`chat_stream.py` 与 `chat_multistep.py`
+的行数都比现状**下降**。
 
 **本任务不管**「续跑被重新路由成单步」的封口 —— 那由 **Task 7 的路由在流结束后兜底**处理（见该任务的 `_sealAbandonedResume`），因为只有路由那层能覆盖「流中途断掉」等一切提前退出的形态。这两个文件里**不要**再加单步分支的守卫。
 
@@ -2335,8 +2403,20 @@ sed -n '690,745p' backend/app/services/chat_multistep.py
         run = None
         startIndex = 0
         if resumeRunId:
+            # 字段类型已是 `uuid.UUID | None`（边界校验过一次）；这里再兜一层是为
+            # 纵深防御：手工构造的 DTO、或将来别的调用方传进非 UUID 形态时，必须是
+            # 领域 ValidationError(422)，**不能**是未捕获的 ValueError(500)。
+            try:
+                resumeRunUuid = (
+                    resumeRunId if isinstance(resumeRunId, uuid.UUID)
+                    else uuid.UUID(str(resumeRunId))
+                )
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise ValidationError(
+                    f"resumeRunId 不是合法 UUID：{resumeRunId!r}"
+                ) from exc
             run, startIndex = await persistence.adoptRunForResume(
-                session, runId=uuid.UUID(str(resumeRunId)), subQuestions=subQuestions,
+                session, runId=resumeRunUuid, subQuestions=subQuestions,
             )
             # adopt 返回 None 只在并发删除时发生（路由已 404 过）。此时退回普通
             # 新建路径，宁可多一条 run，也不能因为续跑而整轮失败。
@@ -2361,8 +2441,11 @@ sed -n '690,745p' backend/app/services/chat_multistep.py
 ```python
     # 续跑（spec §7）：非空时执行链路复用这个 run 而不是新建（Task 7 的路由填）。
     # 起始步不从这里传 —— 唯一事实来源是 multi_step_run.current_step_idx。
-    resumeRunId: str | None = Field(default=None, description="续跑：复用既有的 multi-step run")
+    # 用 uuid.UUID 而非 str：`/api/v1/chat` 是公开入参，Pydantic 在边界就把
+    # `"abc"` 之类的畸形值挡成 422，不让它漏到 `uuid.UUID(...)` 变成 500。
+    resumeRunId: uuid.UUID | None = Field(default=None, description="续跑：复用既有的 multi-step run")
 ```
+（`schemas.py` 若未 import `uuid`，补 `import uuid`。）
 
 `CamelModel` 未设 `extra=forbid`，加字段是纯增量、不影响既有入参形状（spec §10.3 要求
 不修改 `/api/v1/chat` 入参形状 —— 加一个默认 `None` 的可选键满足该要求）。
@@ -2518,6 +2601,11 @@ grep -n "_streamMultiStep\|_executeDataStep\|MultiStepPlan\|inject_to_prompt" ba
 ```
 在流式版循环里加与 Step 4 相同的 `_openRun` / `markStepRunning` / `_persistStepSuccess` / `_persistStepFailure` / `_closeRun`，**以及同一个续跑分支**（`resumeRunId` ⇒ `persistence.adoptRunForResume`；`run is None` 时才 `_openRun`）与**同一个跳过分支**（`index < startIndex ⇒ completedCount += 1; continue`）。
 
+> **这两段不要各写一份**（见上方 (c)）：续跑/新建的取 run 段、跳过判定段、失败落库段
+> 一律走 `_beginRunForRequest` / `_shouldSkipStep` / `_recordHardFailure` /
+> `_recordSoftFailure` 这四个 mixin 方法，本处只留调用行。
+> 判据：改完之后这两个文件里**不该再有**逐字重复的 adopt / skip / finishStep(FAILED) 段落。
+
 现成的落点（已核实，不必再猜）：`chat_stream.py:881` 是 `for step_plan in multiStepPlan.steps:`，
 **同一个改动**——改成 `for index, step_plan in enumerate(multiStepPlan.steps):`；
 `chat_stream.py:860` 已有 `completed: list[StepResult] = []`，同 Step 4 的命名警告：
@@ -2646,7 +2734,7 @@ git commit -m "feat(multi-step): 执行链路接入落库/重试/压缩钩子，
 - Test: `backend/app/tests/integration/test_multi_step_resume_api.py`
 
 **Interfaces:**
-- Consumes: Task 2 仓储、Task 5 钩子、**Task 6 的 `ChatRequest.resumeRunId` 与 `persistence.adoptRunForResume`**、现有 `assertSessionOwnership` / `getCurrentUser` / `_service.processMessageStream`
+- Consumes: Task 2 仓储、Task 5 钩子、**Task 6 的 `ChatRequest.resumeRunId`（`uuid.UUID | None`）与 `persistence.adoptRunForResume`**、现有 `assertSessionOwnership` / `getCurrentUser` / `_service.processMessageStream`
 - Produces:
   - `prepareResume(session, *, runId, fromStepIndex, idempotencyKey) -> tuple[MultiStepRun, int]`
   - HTTP：`POST /api/v1/chat/multi-step/{runId}/resume`
@@ -2674,8 +2762,12 @@ async def testResumeRejectsNonFailedRun(pg_client, db_session):
     from app.services import multi_step_persistence as repo
 
     sessionKey = f"chat-{uuid.uuid4()}"
+    # `datasourceId` 必须给：路由在 prepareResume **之前**有一道
+    # `run.datasource_id is None ⇒ 409` 的守卫。不给就轮不到状态那道守卫 ——
+    # 断言拿到 409 却完全没验到「状态不可续跑」这个本用例声称要验的东西（假绿）。
     run = await repo.createRun(
-        db_session, sessionId=sessionKey, question="q", modelId=1, totalSteps=1
+        db_session, sessionId=sessionKey, question="q", modelId=1,
+        datasourceId=1, totalSteps=1,
     )
     await repo.updateRun(db_session, run, status="succeeded", finished=True)
     await db_session.commit()
@@ -2685,6 +2777,10 @@ async def testResumeRejectsNonFailedRun(pg_client, db_session):
 
     # Assert
     assert resp.status_code == 409
+    # 两个 409 分支的文案不同（DomainError.message 经全局 handler 落到响应体
+    # 的 `error` 字段），故必须钉住「是状态那道守卫拒的」，否则本用例对
+    # 「把状态校验整段删掉」这种改动毫无反应。
+    assert "not resumable" in resp.text, resp.text
 
 
 @pytest.mark.asyncio
@@ -3023,7 +3119,7 @@ async def resumeMultiStep(
         sessionId=str(run.session_id),
         datasourceId=run.datasource_id,
         modelId=dto.model_override or run.model_id,
-        resumeRunId=str(run.id),
+        resumeRunId=run.id,   # 字段类型是 uuid.UUID | None，直接给 UUID（Task 6 判决后）
     )
 
     async def eventSource() -> AsyncIterator[str]:
@@ -3041,12 +3137,25 @@ async def resumeMultiStep(
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 ```
-补 import：
+补 import（**扩展既有语句，不要新开同来源的第二条** —— 仓内 ruff 选了 `I`，
+同模块两条 import 会被 I001 判红）：
 ```python
+# app/api/v1/chat.py 的既有 import 区现状（实测）：
+#   :18  from app.domain.exceptions import DomainError
+#   :19  from app.domain.schemas import (
+#            ChatRequest, ChatResponse, HypothesisRead,
+#            QuerySuggestRequest, QuerySuggestResponse,
+#        )
+# 改成：
+#   :18  from app.domain.exceptions import ConflictError, DomainError, NotFoundError
+#   :19  from app.domain.schemas import (
+#            CamelModel,          # ← ResumeRequest 的基类，**必须**加，否则 NameError
+#            ChatRequest, ChatResponse, HypothesisRead,
+#            QuerySuggestRequest, QuerySuggestResponse,
+#        )
 import uuid
-from app.domain.exceptions import ConflictError, NotFoundError
+
 from app.domain.multi_step_models import RUN_STATUS_FAILED, RUN_STATUS_RUNNING
-from app.domain.schemas import ChatRequest  # 实测路径：domain/schemas.py:1647
 from app.services import multi_step_persistence, multi_step_resume
 ```
 
@@ -3073,10 +3182,13 @@ Expected: 5 passed
 
 ```bash
 git add backend/app/services/multi_step_resume.py backend/app/api/v1/chat.py \
-        backend/app/domain/multi_step_models.py backend/alembic/versions/0114_multi_step_persist.py \
         backend/app/tests/integration/test_multi_step_resume_api.py
 git commit -m "feat(multi-step): 新增续跑 API POST /chat/multi-step/{runId}/resume"
 ```
+> 本任务**不改** `app/domain/multi_step_models.py` 与 `alembic/versions/0114_multi_step_persist.py`
+> —— `resume_count` / `version` / `data_compressed` 都是 Task 1 已建的列（实测，
+> `multi_step_models.py:46-47,78`），`session_id` 的改动已在 0115 落地。把它们列进 `git add`
+> 只会掩盖「是否真的一个字节都没动」这一点，且违反计划 Global Constraints 的「只 add 目标文件」。
 
 ---
 

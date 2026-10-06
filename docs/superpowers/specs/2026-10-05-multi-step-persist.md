@@ -43,7 +43,7 @@
 | `status` | VARCHAR(20) | `running` / `succeeded` / `failed` / `partially_failed` |
 | `total_steps` | INT | 总步数（plan 解析后写入） |
 | `completed_steps` | INT | 已成功完成步数（用于 UI 进度） |
-| `current_step_idx` | INT | 当前执行到的步号；失败时 = 首个未成功步的 index |
+| `current_step_idx` | INT | 当前执行到的步号；失败时 = 首个未成功步的 index。**注意本列有两种用法**：执行期是「当前步号」（`prepareResume` 也写它），而 `_closeRun` 收尾时写的是**越过末尾的哨兵** `len(plan.steps)`（含汇总步，比数据步数大 1）。读取方**必须容忍越界值** —— `adoptRunForResume` 对 `current_step_idx >= len(subQuestions)` 一律归零整跑（2026-10-05 任务评审判决 (b)）。 |
 | `compressed_count` | INT | 走过压缩的步数（用于诊断「上下文压力」） |
 | `resume_count` | INT DEFAULT 0 | 该 run 被续跑次数（每次成功续跑 +1） |
 | `version` | INT DEFAULT 0 | 乐观锁版本号；续跑 +1；并发续跑冲突时返 409 |
@@ -226,6 +226,10 @@ Response: SSE stream（与 /api/v1/chat 一致的事件序列）
    - 当前用户有 session 读权限（与 `/chat` 同 RBAC）
 3. 把 `from_step_index` 开始的步 `status` 重置为 `pending`，清空 `last_error*`
 4. `run.status = running`，`current_step_idx = from_step_index`
+   - `from_step_index` 必须落在 `0..len(dbSteps)-1`，否则 409（越界即无从续跑）。
+   - 本步是**经路由续跑时**起始步的写入点。**直接走 `/api/v1/chat` 带 `resumeRunId`
+     的入口不经过本步**，那时 `current_step_idx` 还是上一次 `_closeRun` 落的越界哨兵
+     —— `adoptRunForResume` 的读侧钳制（见 §3.1 该列的注）负责兜住这条路径。
 5. 重放 plan（plan 已在 `multi_step_run` 关联的 plan 中，或重新从 sub_question 列表读）
 6. 从 `from_step_index` 开始执行每步：先 SQL cache 命中（`sql_hash` 一致）则直接执行，否则重跑 LLM 生成
 7. SSE 流式返回事件给前端

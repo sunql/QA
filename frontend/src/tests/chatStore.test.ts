@@ -985,6 +985,8 @@ describe("chatStore resumeRun 定向写入", () => {
           summary: "ok",
           error: null,
         });
+        // 续跑的汇总答案会发 token —— 覆盖 onToken 的读/写口是否都认 targetId
+        handlers.onToken?.("追加片段");
       }
     );
 
@@ -997,8 +999,12 @@ describe("chatStore resumeRun 定向写入", () => {
     expect(msgs[0].steps?.[1].sql).toBe("SELECT 1");
     // 未被续跑的那一步不动
     expect(msgs[0].steps?.[0].status).toBe("done");
+    // ①' onToken 的正文必须拼在**目标条自己**的正文后面（读口也要认 targetId）
+    expect(msgs[0].content).toBe("旧的多步回答追加片段");
     // ② 最新那条消息逐个字段未被改动（引用相等 = 不可变更新只碰目标）
     expect(msgs[1]).toBe(newest);
+    // ②' 且最新那条的正文绝不能沾上本次续跑的 chunk（读/写分叉的判别式）
+    expect(msgs[1].content).not.toContain("追加片段");
     // ③ 请求带的是被点的 runId 与起始步号
     expect(chatApi.resumeMultiStepRun).toHaveBeenCalledWith("r-old", 1, expect.anything());
   });

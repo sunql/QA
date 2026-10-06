@@ -361,10 +361,14 @@ function streamHandlers(
       })),
     onToken: (content) =>
       set((state) => {
-        const last = state.messages[state.messages.length - 1];
+        // 读口也必须认 targetId：否则定向写会把**最新**那条的正文拼到旧卡片上（读/写分叉）。
+        // base?.content：targetId 查不到那条时不能抛。
+        const base = targetId
+          ? state.messages.find((m) => m.id === targetId)
+          : state.messages[state.messages.length - 1];
         return {
           messages: patchMessage(state.messages, targetId, {
-            content: (last.content ?? "") + content,
+            content: (base?.content ?? "") + content,
           }),
         };
       }),

@@ -51,8 +51,10 @@ class MultiStepPersistMixin:
         question: str,
         modelId: int | None,
         subQuestions: list[str],
+        totalSteps: int,
         datasourceId: int | None = None,
     ) -> MultiStepRun | None:
+        """`totalSteps` 口径 = **完整计划的步数**（含末尾汇总步），见 `_beginRunForRequest`。"""
         if not await self._isPersistEnabled(session):
             return None
         run = await persistence.createRun(
@@ -61,7 +63,7 @@ class MultiStepPersistMixin:
             question=question,
             modelId=modelId,
             datasourceId=datasourceId,
-            totalSteps=len(subQuestions),
+            totalSteps=totalSteps,
         )
         await persistence.createSteps(session, runId=run.id, subQuestions=subQuestions)
         return run
@@ -72,6 +74,7 @@ class MultiStepPersistMixin:
         dto: ChatRequest,
         *,
         subQuestions: list[str],
+        totalSteps: int,
     ) -> tuple[MultiStepRun | None, int]:
         """取本轮的 run 与其起始步号：续跑分支 + 新建分支的**唯一**实现。
 
@@ -84,6 +87,12 @@ class MultiStepPersistMixin:
 
         `adoptRunForResume` 返回 None 只在并发删除时发生（路由已 404 过）。此时
         退回普通新建路径，宁可多一条 run，也不能因为续跑而整轮失败。
+
+        **`totalSteps` 口径 = `len(plan.steps)`（含末尾汇总步）**，不是
+        `len(subQuestions)`（只数数据步）。IMP-7：完成计数把汇总步也算进
+        `completed_steps`，若分母只数数据步，正常计划就落库成 `3/2` ——
+        同一行自相矛盾。三个计数列（`total_steps` / `completed_steps` /
+        收尾的 `current_step_idx` 哨兵）必须共用这一把尺子。
         """
         resumeRunId = dto.resumeRunId
         if resumeRunId is not None:
@@ -102,6 +111,7 @@ class MultiStepPersistMixin:
                 ) from exc
             adopted, startIndex = await persistence.adoptRunForResume(
                 session, runId=resumeRunUuid, subQuestions=subQuestions,
+                totalSteps=totalSteps,
             )
             if adopted is not None:
                 return adopted, startIndex
@@ -112,6 +122,7 @@ class MultiStepPersistMixin:
             question=dto.question,
             modelId=dto.modelId,
             subQuestions=subQuestions,
+            totalSteps=totalSteps,
             datasourceId=dto.datasourceId,
         )
         return run, 0

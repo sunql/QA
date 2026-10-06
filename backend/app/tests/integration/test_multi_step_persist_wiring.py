@@ -49,6 +49,52 @@ async def testMultiStepRunPersistedEndToEnd(pg_client, db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def testRunCountersShareOneDenominator(pg_client, db_session, monkeypatch):
+    """IMP-7：`total_steps` / `completed_steps` / `current_step_idx` 三者同源。
+
+    正常计划 = 2 个数据步 + 1 个汇总步。此前 `total_steps` 只数**数据步**（2），
+    而 `completed_steps` 把末尾汇总步也算进去（3）⇒ 同一行落库成 `3/2`：已持久化的
+    数据在说谎，任何对账/「未完成徽章」都会读到这个自相矛盾的行。
+
+    流式与非流式**两条路径都断言**：口径漂移正是这类缺陷的复发形态。
+    """
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _install,
+        _MultiStepLlm,
+        _OkAdapter,
+        _payload,
+    )
+
+    config, datasource = await _seed(db_session)
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+    question = "请分步查询 2024 和 2025 年的销售额并对比"
+
+    for path, sessionKey in (
+        ("/api/v1/chat", "s-count-async"),
+        ("/api/v1/chat/stream", "s-count-stream"),
+    ):
+        resp = await pg_client.post(
+            path, json={**_payload(question, datasource.id), "sessionId": sessionKey}
+        )
+        assert resp.status_code == 200, f"{path}: {resp.text[:300]}"
+        run = (
+            await db_session.execute(
+                select(MultiStepRun).where(MultiStepRun.session_id == sessionKey)
+            )
+        ).scalars().one()
+
+        assert run.total_steps == 3, f"{path}: 2 数据步 + 1 汇总步 = 完整计划步数"
+        assert run.completed_steps == run.total_steps, (
+            f"{path}: 同一行里 {run.completed_steps}/{run.total_steps} —— 分子分母必须同源"
+        )
+        assert run.completed_steps <= run.total_steps, f"{path}: 完成数不得越过总数"
+        # 收尾哨兵也走同一把尺子（越过末尾 = total_steps），三个计数列读起来互相自洽
+        assert run.current_step_idx == run.total_steps, f"{path}: 收尾哨兵应等于总步数"
+        assert run.status == "succeeded", f"{path}: {run.status}"
+
+
+@pytest.mark.asyncio
 async def testRunMarkedFailedWhenStepExhaustsRetries(pg_client, db_session, monkeypatch):
     """第 2 步 LLM 持续 ConnectError → run.status=failed，第 1 步仍 succeeded。"""
     import httpx
@@ -324,7 +370,9 @@ async def testAdoptRunForResumeAlignsShapeAndStart(pg_client, db_session):
     await db_session.commit()
 
     # --- 分支 1：形状一致 ⇒ 保留 current_step_idx，且**不动**已成功的第 0 步 ---
-    adopted, start = await adoptRunForResume(db_session, runId=run.id, subQuestions=["查A", "查B"])
+    adopted, start = await adoptRunForResume(
+        db_session, runId=run.id, subQuestions=["查A", "查B"], totalSteps=2,
+    )
     assert start == 1
     rows = await repo.loadSteps(db_session, run.id)
     assert rows[0].status == "succeeded", "已成功的更早步不能被重置（续跑就是靠它省掉重跑）"
@@ -335,11 +383,13 @@ async def testAdoptRunForResumeAlignsShapeAndStart(pg_client, db_session):
     assert rows[1].sql is None, "重跑会重新生成 SQL，留着旧的会污染将来的 sql_hash 复用"
 
     # --- 分支 2：计划变长（换了模型重新规划）⇒ 起点归零、补齐新行 ---
+    # totalSteps 传 4（3 数据步 + 1 汇总步）**故意不等于** len(subQuestions)：口径是
+    # 完整计划步数（IMP-7）。删掉 `run.total_steps = totalSteps` 就会残留旧值 2 ⇒ 红。
     adopted2, start2 = await adoptRunForResume(
-        db_session, runId=run.id, subQuestions=["查X", "查Y", "查Z"]
+        db_session, runId=run.id, subQuestions=["查X", "查Y", "查Z"], totalSteps=4,
     )
     assert start2 == 0, "形状变了，旧的「已完成」对应的是别的子问题，不能跳过任何步"
-    assert adopted2.total_steps == 3
+    assert adopted2.total_steps == 4, "分母必须按本次计划重刷（沿用旧值就是不同源）"
     rows = await repo.loadSteps(db_session, run.id)
     assert [s.step_index for s in rows] == [0, 1, 2]
     assert [s.sub_question for s in rows] == ["查X", "查Y", "查Z"]
@@ -347,15 +397,18 @@ async def testAdoptRunForResumeAlignsShapeAndStart(pg_client, db_session):
     assert rows[0].sql is None, "形状变了 ⇒ 全跑，旧 SQL 必须清掉"
 
     # --- 分支 3：计划变短 ⇒ 删掉多余尾行（否则 stepsByIdx 里会留下对不上的孤儿） ---
-    _adopted3, start3 = await adoptRunForResume(db_session, runId=run.id, subQuestions=["查X"])
+    _adopted3, start3 = await adoptRunForResume(
+        db_session, runId=run.id, subQuestions=["查X"], totalSteps=2,
+    )
     assert start3 == 0
+    assert _adopted3 is not None and _adopted3.total_steps == 2
     rows = await repo.loadSteps(db_session, run.id)
     assert [s.step_index for s in rows] == [0]
     assert rows[0].sub_question == "查X"
 
     # --- run 不存在（并发删除）⇒ (None, 0)，调用方回退普通路径，不炸 ---
     gone, start4 = await adoptRunForResume(
-        db_session, runId=uuid.uuid4(), subQuestions=["查A"]
+        db_session, runId=uuid.uuid4(), subQuestions=["查A"], totalSteps=1,
     )
     assert gone is None and start4 == 0
 
@@ -377,7 +430,8 @@ async def testAdoptRunForResumeClampsOutOfRangePointer(pg_client, db_session):
 
     sessionKey = f"chat-{uuid.uuid4()}"
     run = await repo.createRun(
-        db_session, sessionId=sessionKey, question="q", modelId=1, totalSteps=2
+        db_session, sessionId=sessionKey, question="q", modelId=1,
+        totalSteps=3,   # 2 数据步 + 1 汇总步 —— 与下面哨兵 3 同一把尺子（IMP-7）
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
     await repo.finishStep(
@@ -393,9 +447,10 @@ async def testAdoptRunForResumeClampsOutOfRangePointer(pg_client, db_session):
     await db_session.commit()
 
     adopted, start = await adoptRunForResume(
-        db_session, runId=run.id, subQuestions=["查A", "查B"]
+        db_session, runId=run.id, subQuestions=["查A", "查B"], totalSteps=3,
     )
     assert adopted is not None
+    assert adopted.total_steps == 3
     assert start == 0, "越界指针不是合法续跑起点 —— 必须归零整跑"
     rows = await repo.loadSteps(db_session, run.id)
     assert [s.step_index for s in rows] == [0, 1], "步照常对齐"
@@ -455,7 +510,9 @@ async def testBeginRunForRequestDefensiveValidation(db_session):
     service = __import__("app.api.v1.chat", fromlist=["_service"])._service
 
     with pytest.raises(ValidationError):
-        await service._beginRunForRequest(db_session, dto, subQuestions=["查A"])
+        await service._beginRunForRequest(
+            db_session, dto, subQuestions=["查A"], totalSteps=1
+        )
 
 
 @pytest.mark.asyncio

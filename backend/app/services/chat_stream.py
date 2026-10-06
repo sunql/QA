@@ -872,10 +872,14 @@ class StreamMixin:
         # 落库只针对**数据步**（汇总步不执行 SQL、没有 sql/data 可落）。
         # 汇总步仍计入 completedCount（见下方 early-return 封口），故 runStatusFor
         # 的分母用 len(multiStepPlan.steps)（含汇总步）而不是 len(subQuestions)。
+        # `totalSteps` 也传这同一个数（IMP-7）：`total_steps` / `completed_steps` /
+        # 收尾哨兵 `current_step_idx` 三者必须同源，否则正常计划落库成 3/2。
         subQuestions = [s.description or s.sub_question for s in multiStepPlan.data_steps]
         # 续跑分支 + 新建分支的唯一实现（与非流式共用同一 mixin 方法，见 (c) 裁决）。
         run, startIndex = await self._beginRunForRequest(
-            session, dto, subQuestions=subQuestions,
+            session, dto,
+            subQuestions=subQuestions,
+            totalSteps=len(multiStepPlan.steps),
         )
         persisted = await persistence.loadSteps(session, run.id) if run is not None else []
         stepsByIdx = {s.step_index: s for s in persisted}

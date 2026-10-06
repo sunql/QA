@@ -202,6 +202,7 @@ async def adoptRunForResume(
     *,
     runId: uuid.UUID,
     subQuestions: list[str],
+    totalSteps: int,
 ) -> tuple[MultiStepRun | None, int]:
     """续跑：复用既有 run 并把它的步行对齐到**本次**计划。返回 (run, 起始步号)。
 
@@ -220,6 +221,10 @@ async def adoptRunForResume(
     续跑省掉重跑正是靠它。`data` 按 spec §5.3 永不删除；`sql` / `sql_hash` 清掉是
     刻意的：既不复用旧 SQL，也不给将来「sql_hash 命中即复用」的遗留项留一个会
     误命中的陈旧哈希。
+
+    `totalSteps` 口径与 `createRun` 一致 = `len(plan.steps)`（含汇总步 ≠ 数据步数量）。
+    续跑时**必须重刷**：用户可能换了模型/问题导致重新规划出不同形状的计划，
+    沿用旧 `total_steps` 会让分子（本次的 completed）与分母（上次的 total）不同源。
     """
     run = await loadRun(session, runId)
     if run is None:
@@ -261,7 +266,7 @@ async def adoptRunForResume(
             step.data_compressed = None
             step.sql = None
             step.sql_hash = None
-    run.total_steps = len(subQuestions)
+    run.total_steps = totalSteps
     run.current_step_idx = start
     await session.flush()
     return run, start

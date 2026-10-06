@@ -27,7 +27,7 @@ async def testPersistDisabledSkipsEverything(monkeypatch):
 
     # Act
     run = await host._openRun(
-        session, sessionId="s", question="q", modelId=1, subQuestions=["a"]
+        session, sessionId="s", question="q", modelId=1, subQuestions=["a"], totalSteps=2
     )
 
     # Assert
@@ -55,11 +55,13 @@ async def testPersistEnabledOpensRun(monkeypatch):
     )
 
     result = await host._openRun(
-        session, sessionId="s", question="q", modelId=1, subQuestions=["a"]
+        session, sessionId="s", question="q", modelId=1, subQuestions=["a"], totalSteps=2
     )
 
     assert result is run
-    assert createRun.await_args.kwargs["totalSteps"] == 1
+    # totalSteps 原样透传：口径是**完整计划步数**（含汇总步），不是 len(subQuestions)。
+    # 传 2 ≠ len(subQuestions)=1，删掉透传（改回 len(subQuestions)）这条就红（IMP-7）。
+    assert createRun.await_args.kwargs["totalSteps"] == 2
     assert createSteps.await_args.kwargs["runId"] == "r1"
 
 

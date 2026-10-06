@@ -4017,9 +4017,15 @@ Step 3 的 `git add … Harness/index.md` 会**直接失败**（`pathspec did no
 （迁移号→§3、flag 与文件清单→§5、测试命令与结果→§6、spec 链接→§1/§9、遗留项→§9 之后单列），
 **不是**二选一。实测 194 个 change 目录里 192 个有 `summary.md`，近期
 `feat-supplier-360-ads` / `feat-rbac-identity` 都按 9 段写 ⇒ 这是活约定，不是陈规。
-5 条阻塞项里第 5 条（`scripts/<feature>_realdata.py`）**全仓不存在任何实例**（`ls scripts/`
-的 10 个文件里没有 `*realdata*`）⇒ §8 按实况写「未做，理由」，**不要**为凑齐而新造一个脚本
-（那是计划外的产物）；这一条要不要补，留给收尾时人类定夺。
+5 条阻塞项里第 5 条（真实数据验证脚本）**本特性未做** ⇒ §8 按实况写「未做 + 理由」，
+**不要**为凑齐而新造一个脚本（那是计划外的产物）；这一条要不要补，留给收尾时人类定夺。
+> **更正（2026-10-06，Task 10 复查的 Minor 触发）**：此处原先写「全仓不存在任何 `*realdata*` 实例
+> —— 该约定在实践中是名义性的」，**这是错的**，根因是 controller 只 `ls` 了**仓根** `scripts/`（10 个
+> 无关文件），没看 `backend/scripts/`。实测 **git 跟踪着 3 个**：`backend/scripts/wiki_provenance_realdata.py`、
+> `backend/scripts/wiki_dedup_realdata.py`、`backend/scripts/seed_data_quality_realdata.py`，
+> 另有 `Harness/changes/feat-wiki-dedup/realdata-run.txt` 这样的产物记录 ⇒ **该约定是活的，
+> 只是落点在 `backend/scripts/` 而非仓根**。故本特性缺这个脚本是**真缺口**（不是「名义约定」），
+> 收尾时人类若要补，`backend/scripts/` 里有三个现成范例可抄。
 
 - [ ] **Step 1: 写 wiki 条目**
 
@@ -4124,8 +4130,14 @@ git commit -m "docs(multi-step): 补 wiki 与 change 记录"
     （已核对：两个执行器里只有 4 处 `session.commit()`，全部紧邻带 `finished=True` 的
     `_closeRun`；循环中途 `updateRun(status=FAILED)` 只有 `flush()`，故要么与收尾同事务落盘、
     要么随会话回滚成 `running`）。补齐需先定「多久算死」的阈值，属策略决策，不在本计划范围。
-15. **`变更记录强制规范` §一 第 5 条（`scripts/<feature>_realdata.py`）未做**（2026-10-06 预检发现）：
+15. **`变更记录强制规范` §一 第 5 条（真实数据验证脚本）未做**（2026-10-06 预检发现）：
     该条规定「涉及真实 SQL/DB 改动时」须有一个幂等的真实数据验证脚本，属**部署阻塞项**。
-    但全仓 `scripts/` 的 10 个文件里**没有任何 `*realdata*` 实例** —— 这条约定在实践中是名义性的，
-    本计划也没有排这个产物。故 change 记录的 §8 按实况写「未做 + 理由」，
-    **不新造脚本凑齐**（计划外产物）。要不要补，收尾时由人类定夺。
+    本特性（两张表 + 迁移 0114/0115 + 清理任务）确实涉及 DB 改动，而**没有**这个产物 ——
+    这是一处**真缺口**。仓内该约定的落点是 `backend/scripts/<feature>_realdata.py`，
+    现存 3 个范例（`wiki_provenance_realdata.py` / `wiki_dedup_realdata.py` /
+    `seed_data_quality_realdata.py`），旁证还有 `Harness/changes/feat-wiki-dedup/realdata-run.txt`。
+    故 change 记录的 §8 按实况写「未做 + 理由」，**不新造脚本凑齐**（计划外产物）；
+    要不要补，收尾时由人类定夺（要补的话抄上面三个即可）。
+    > **更正（2026-10-06，Task 10 复查的 Minor 触发）**：本条原先写「全仓不存在任何 `*realdata*` 实例
+    > ⇒ 该约定在实践中是名义性的」—— **该判断是错的**（根因同第 5 条阻塞项那条批注：只看了仓根 `scripts/`）。
+    > 正确的判断是：约定活着，缺口是真的。

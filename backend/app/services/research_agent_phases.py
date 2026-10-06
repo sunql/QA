@@ -57,6 +57,10 @@ from app.services.research_agent_ports import (
     OPT_RESUME_PHASE,
     OPT_SIGNAL,
     PHASE_ESL,
+    PHASE_EXECUTE,
+    PHASE_PLAN,
+    PHASE_REPORT,
+    PHASE_VERIFY,
     PURPOSE_PLAN,
     PURPOSE_REPORT,
     SIGNAL_EMPTY_SCOPE,
@@ -134,14 +138,14 @@ class ResearchAgentPhasesMixin:
                 buildOptions(
                     signal=kinds[0],
                     arms=arms,
-                    resumePhase="plan",
+                    resumePhase=PHASE_PLAN,
                     conflicts=arms["conflicts"],
                 ),
                 ambiguityPrompt(arms["conflicts"]),
             )
         return (
             CHECKPOINT_INTENT,
-            buildOptions(signal=SIGNAL_FIXED_SCOPE, arms=arms, resumePhase="plan"),
+            buildOptions(signal=SIGNAL_FIXED_SCOPE, arms=arms, resumePhase=PHASE_PLAN),
             "三臂是否齐全？",
         )
 
@@ -180,7 +184,7 @@ class ResearchAgentPhasesMixin:
         return (
             CHECKPOINT_PLANNING,
             buildOptions(
-                signal=SIGNAL_FIXED_PLAN, plan=plan, arms=state.get("esl"), resumePhase="execute"
+                signal=SIGNAL_FIXED_PLAN, plan=plan, arms=state.get("esl"), resumePhase=PHASE_EXECUTE
             ),
             "计划是否确认？",
         )
@@ -221,8 +225,8 @@ class ResearchAgentPhasesMixin:
                     stepResults=results, stepsExecuted=executedStepCount(results),
                     stepIndex=result["index"],
                     error=result["error"] or "该步骤无数据返回",
-                    resumePhase="execute",
-                    abortPhase="report",
+                    resumePhase=PHASE_EXECUTE,
+                    abortPhase=PHASE_REPORT,
                     nextStepIndex=result["index"] + 1,
                 ),
                 "步骤失败，跳过还是终止？",
@@ -248,7 +252,7 @@ class ResearchAgentPhasesMixin:
                 signal=SIGNAL_FIXED_HYPOTHESIS,
                 candidates=candidates,
                 arms=state.get("esl"), stepsExecuted=executedStepCount(state.get("stepResults") or []),
-                resumePhase="verify",
+                resumePhase=PHASE_VERIFY,
             ),
             hypothesisPrompt(candidates),
         )

@@ -146,6 +146,32 @@ def test_default_mode_ssot_single_source() -> None:
     assert DEFAULT_MODE == "research"
 
 
+def test_phase_constants_match_phases_tuple() -> None:
+    """PHASE_* 字符串必须与 PHASES 元组对应位置的成员完全一致。
+
+    服务代码各处用 `resumePhase="plan"` / `abortPhase="report"` 等裸字符串。
+    一旦 PHASES 元组调整顺序或重命名，这些裸字符串会静默指错相位 →
+    恢复循环跑偏、abort 时机错位。SSOT 收口到 PHASE_* 常量后必须锁死位置。
+    """
+    from app.services import research_agent_ports
+
+    assert research_agent_ports.PHASE_INTENT == research_agent_ports.PHASES[0]
+    assert research_agent_ports.PHASE_ESL == research_agent_ports.PHASES[1]
+    assert research_agent_ports.PHASE_PLAN == research_agent_ports.PHASES[2]
+    assert research_agent_ports.PHASE_EXECUTE == research_agent_ports.PHASES[3]
+    assert research_agent_ports.PHASE_HYPOTHESIS == research_agent_ports.PHASES[4]
+    assert research_agent_ports.PHASE_VERIFY == research_agent_ports.PHASES[5]
+    assert research_agent_ports.PHASE_REPORT == research_agent_ports.PHASES[6]
+    # 数值 sanity：避免有人不小心把字符串值改了但仍断言 PHASES[i]
+    assert research_agent_ports.PHASE_INTENT == "intent"
+    assert research_agent_ports.PHASE_ESL == "esl"
+    assert research_agent_ports.PHASE_PLAN == "plan"
+    assert research_agent_ports.PHASE_EXECUTE == "execute"
+    assert research_agent_ports.PHASE_HYPOTHESIS == "hypothesis"
+    assert research_agent_ports.PHASE_VERIFY == "verify"
+    assert research_agent_ports.PHASE_REPORT == "report"
+
+
 # ---------------------------------------------------------------------------
 # 模型路由（Task 6.5-2）
 # ---------------------------------------------------------------------------

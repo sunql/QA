@@ -38,8 +38,14 @@ logger = logging.getLogger(__name__)
 # --- 相位与 checkpoint 相位（落 research_checkpoint.phase，长度上限 30）-------
 PHASES = ("intent", "esl", "plan", "execute", "hypothesis", "verify", "report")
 """状态机相位（顺序即执行顺序）。"""
-PHASE_ESL = "esl"
+PHASE_INTENT = "intent"  # PHASES[0]
+PHASE_ESL = "esl"  # PHASES[1]
 """空 scope 改写通道强制重跑的相位。"""
+PHASE_PLAN = "plan"  # PHASES[2]
+PHASE_EXECUTE = "execute"  # PHASES[3]
+PHASE_HYPOTHESIS = "hypothesis"  # PHASES[4]
+PHASE_VERIFY = "verify"  # PHASES[5]
+PHASE_REPORT = "report"  # PHASES[6]
 
 CHECKPOINT_INTENT = "intent"  # 固定 #1 三臂范围确认（由 _stageEsl 开启）
 CHECKPOINT_PLANNING = "planning"  # 固定 #2 计划确认（由 _stagePlan 开启）

@@ -63,6 +63,12 @@ from app.services.research_agent_ports import (
     EVENT_DONE,
     EVENT_ERROR,
     PHASE_ESL,
+    PHASE_EXECUTE,
+    PHASE_HYPOTHESIS,
+    PHASE_INTENT,
+    PHASE_PLAN,
+    PHASE_REPORT,
+    PHASE_VERIFY,
     PHASES,
     PURPOSE_HYPOTHESIS,
     ROLE_CHECKPOINT,
@@ -171,13 +177,13 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
     def _buildStages(self) -> dict[str, Any]:
         """相位调度表（键 = `PHASES` 的元素，顺序由 `PHASES` 决定）。"""
         return {
-            "intent": self._stageIntent,
-            "esl": self._stageEsl,
-            "plan": self._stagePlan,
-            "execute": self._stageExecute,
-            "hypothesis": self._stageHypothesis,
-            "verify": self._stageVerify,
-            "report": self._stageReport,
+            PHASE_INTENT: self._stageIntent,
+            PHASE_ESL: self._stageEsl,
+            PHASE_PLAN: self._stagePlan,
+            PHASE_EXECUTE: self._stageExecute,
+            PHASE_HYPOTHESIS: self._stageHypothesis,
+            PHASE_VERIFY: self._stageVerify,
+            PHASE_REPORT: self._stageReport,
         }
 
     @property
@@ -273,7 +279,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         elif action == "modify" and checkpoint.phase == CHECKPOINT_PLANNING:
             # Task 6.5-4（MEDIUM-8）：计划点的 modify 不是「确认旧计划继续跑」，而是带
             # 用户反馈**重跑 planner**；故回到 plan 相位并置 replan 标记（该轮不再暂停）。
-            startPhase = "plan"
+            startPhase = PHASE_PLAN
             state["replan"] = True
         logger.info(
             "研究 turn 恢复: session=%s checkpoint=%s action=%s startPhase=%s rewritten=%s",

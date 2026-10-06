@@ -77,7 +77,7 @@
 | `multi_step_step` | `id` PK(UUID)、`run_id` FK → `multi_step_run.id` **ON DELETE CASCADE**、`step_index`、`status` String(20) 默认 `pending`、`sub_question`、`sql` / `sql_hash`、`data` JSONB、`data_compressed` JSONB、`chart_option` JSONB、`model_used`、`tokens_used`、`cost` Numeric(12,6)、`attempt_count`、`last_error` / `last_error_kind`、时间戳 | `uq_multi_step_step_run_index (run_id, step_index)` 唯一、`ix_multi_step_step_run_id`、`ix_multi_step_step_status_updated (status, updated_at)` |
 
 - **无 CheckConstraint**：`status` 两列是 `String(20)`，取值（run：`running`/`succeeded`/`failed`/`partially_failed`；step：`pending`/`running`/`succeeded`/`failed`/`skipped`/`compressed`）由应用层常量约束，DB 不拦。
-- 迁移文件名长度：`0114_multi_step_persist.py` = 25 字符 ✓；`0115_multi_step_run_session_id_text.py` = 38 字符，**超过**模板标称的 ≤ 32（既有 114 个迁移里 28 个同样超，属仓内既有约定偏差，本次未改名）。
+- 迁移文件名长度：`0114_multi_step_persist.py` = 26 字符 ✓；`0115_multi_step_run_session_id_text.py` = 38 字符，**超过**模板标称的 ≤ 32（既有 114 个迁移里 28 个同样超，属仓内既有约定偏差，本次未改名）。
 - 迁移**只跑一次**（`drop_constraint` / `create_table` 均无 `IF EXISTS`，重复执行会报错）；升级必须按 `DATABASE_URL` 定向，勿裸跑（[[qa-system-alembic-targets-prod]]）。
 - 0115 的 downgrade **会显式失败**而不是静默截断：若 `session_id` 含非 UUID 值则 `RAISE EXCEPTION`。
 
@@ -230,9 +230,13 @@ npx vitest run src/tests/chatStore.test.ts src/tests/chatApi.test.ts src/tests/M
   且本仓已记「前端必须 compose build 才生效」，重跑部署须与前端同批，不在本任务范围。
   **本项如实登记为未验证。**
 - **真实数据验证脚本**：**未做**。`Harness/rules/变更记录强制规范.md` §一 第 5 条要求涉及真实 SQL/DB 改动的变更
-  提供一个幂等的 `scripts/<feature>_realdata.py`，但**全仓 `scripts/` 的 10 个文件里不存在任何 `*realdata*` 实例**
-  —— 该约定在实践中是名义性的，本计划也未排这个产物（遗留项 15）。**不新造脚本凑齐**（计划外产物）；
-  是否补此约定留给收尾时人类定夺。
+  提供一个幂等的真实数据验证脚本，属**部署阻塞项**；该约定**是活的**，落点是 `backend/scripts/<feature>_realdata.py`
+  （不是仓根 `scripts/`）—— 全仓 git 跟踪着 3 个现成实例：`backend/scripts/wiki_provenance_realdata.py`、
+  `backend/scripts/wiki_dedup_realdata.py`、`backend/scripts/seed_data_quality_realdata.py`
+  （另有 `Harness/changes/feat-wiki-dedup/realdata-run.txt` 这类运行产物记录）。
+  本特性**没有**这个脚本，属**一处真缺口**（不是「名义约定」），本计划也未排这个产物（遗留项 15）。
+  **不新造脚本凑齐**（计划外产物）；要补的话 `backend/scripts/` 里有 3 个现成范例可抄。
+  是否补此缺口留给收尾时人类定夺。
 - **迁移**：`0114` / `0115` 在本会话中**未对任何库执行**（测试库由 `app/tests/_pg_support.py` 按 `TEST_DATABASE_URL`
   建 schema，未经手工 alembic 升级）；生产库 `qa_metadata`（5433）**未连接、未迁移**。
 
@@ -258,9 +262,9 @@ npx vitest run src/tests/chatStore.test.ts src/tests/chatApi.test.ts src/tests/M
 7. **spec §8.3（续跑弹窗：`from_step_index` 下拉 + `compressAgain` 复选框）未做**：Task 9 直接把 `fromStepIndex` 定为失败步号、`compressAgain` 固定 false。API 两端都已支持这两个参数（Task 7 的 `ResumeRequest`），只是前端没有入口。
 8. **非流式渲染下的续跑入口缺失**：`runId` 与「已压缩」信息都只走 SSE（Task 6 增量）。非流式 `/chat` 的 `steps` 负载不带这两项，故非流式回答里既没有续跑按钮也没有压缩徽章。补齐需要改 `_executeMultiStep` 的读模型构造 + `ChatResponse.steps` 的元素类型。
 9. **压缩徽章的「展开原始数据」未做**：spec §8.2 要求 `[展开原始数据]` 链到 `multi_step_step.data`。需要新增 `GET /chat/multi-step/{runId}/steps/{stepIndex}/data`（含归属校验 + 分页），本计划没有这个端点，故徽章目前只是提示。
-10. **SSE 中断后前端自动重连续跑**：依赖前端的 SSE 封装改造，单独排期。后端一侧已就绪：Task 7 的 `_sealAbandonedResume` 挂在 `StreamingResponse(background=...)` 上封口（**不是**生成器 `finally` —— 断连主情形不触发），断连不会留下 `running` 僵尸。
+10. **SSE 中断后前端自动重连续跑**：依赖前端的 SSE 封装改造，单独排期。后端一侧已就绪：Task 7 的 `_sealAbandonedResume` 挂在 `StreamingResponse(background=...)` 上封口（**不是**生成器 `finally` —— 断连主情形不触发，见 Task 7 代码块下的自纠说明），断连不会留下 `running` 僵尸。
 11. **超大 data（> 5MB）转对象存储**：spec §14 提到超限走 minio，但当前 `data` 一律进 JSONB。先观察真实 `pg_column_size(multi_step_step.data)` 分布，确认有超限样本后再实现，避免过早引入存储依赖。
 12. **并发续跑乐观锁的落库侧强约束**：当前靠 `run.version++` 的自增语义 + 状态校验挡住大部分并发，但**没有** `SELECT … FOR UPDATE`，极端并发下两个请求都可能通过校验。若线上出现双跑，再补行级锁。
 13. **清理任务没有调度入口，保留期策略当前不会执行**（2026-10-06 Task 8 计划预检发现）：spec §10.4（`docs/superpowers/specs/2026-10-05-multi-step-persist.md:321`）写「定期清理由新 **cron 任务**执行」，§13 文件清单（同文件 `:358`）把该文件描述为「新建：**cron 清理脚本**」；但本计划只交付一个可导入的函数 —— 无 `__main__`、无 `scripts/cron_*.sh` 包装、无 crontab / launchd 注册。全仓 grep（排除 `.git`）实测：`app.jobs` 的**生产代码**引用为零，唯一引用方是它自己的集成测试 `backend/app/tests/integration/test_multi_step_cleanup.py:10`（`from app.jobs.cleanup_multi_step_runs import cleanupMultiStepRuns`），另两处提及在 spec 与本计划的待建清单里，都是「打算建」而非「谁调用」。故没有任何生产路径会调用它。更关键的是本机 cron 已确认静默失效（`/etc/crontab` 缺失、launchd 契约断裂，见 [[qa-system-cron-silently-broken]]），即便补上注册也不会触发。**结论：30/7 天只是写在代码里的两个常量，线上不会自动回收。** 本计划的处置与 `scripts/backup_pg.sh` 一致 —— 以可手动调用的形态交付 + 在此登记缺口，不粉饰。真要落地调度时，本仓既有两种形态可参照：`scripts/install_pg_backup_cron.sh` 式的外部 cron 安装器，或 agent scheduler 式的「PG 表 + 独立 worker 轮询」（后者不依赖宿主 cron，是当前唯一可靠的一条）。
 14. **spec §10.4 没有给「非终态 run」定保留规则**（同上预检发现）：spec §11 失败场景表自己写明「用户主动 kill 浏览器 ⇒ `run.status=running` 残留」，而 §10.4 只为 `succeeded`(30d) / `failed`+`partially_failed`(7d) 定规则 —— Task 8 用 `_TERMINAL` 过滤正确地**不删**这些行，于是它们无限累积。注意第 10 条只覆盖**续跑**入口的 `_sealAbandonedResume`；**全新执行**被 kill 后留下的 `running` 行无人封口，两者不矛盾（已核对：两个执行器里只有 4 处 `session.commit()`，全部紧邻带 `finished=True` 的 `_closeRun`；循环中途 `updateRun(status=FAILED)` 只有 `flush()`，故要么与收尾同事务落盘、要么随会话回滚成 `running`）。补齐需先定「多久算死」的阈值，属策略决策，不在本计划范围。
-15. **`变更记录强制规范` §一 第 5 条（`scripts/<feature>_realdata.py`）未做**（2026-10-06 预检发现）：该条规定「涉及真实 SQL/DB 改动时」须有一个幂等的真实数据验证脚本，属**部署阻塞项**。但全仓 `scripts/` 的 10 个文件里**没有任何 `*realdata*` 实例** —— 这条约定在实践中是名义性的，本计划也没有排这个产物。故 §8 按实况写「未做 + 理由」，**不新造脚本凑齐**（计划外产物）。要不要补，收尾时由人类定夺。
+15. **`变更记录强制规范` §一 第 5 条（`<feature>_realdata.py`）未做**（2026-10-06 预检发现）：该条规定「涉及真实 SQL/DB 改动时」须有一个幂等的真实数据验证脚本，属**部署阻塞项**。该约定**是活的**，落点是 `backend/scripts/<feature>_realdata.py`（不是仓根 `scripts/`）—— 全仓 git 跟踪着 3 个现成实例（`wiki_provenance_realdata.py` / `wiki_dedup_realdata.py` / `seed_data_quality_realdata.py`），本特性**没有**这个脚本，属**一处真缺口**（不是「名义约定」），本计划也没有排这个产物。故 §8 按实况写「未做 + 理由」，**不新造脚本凑齐**（计划外产物；要补的话 `backend/scripts/` 里有 3 个现成范例可抄）。要不要补，收尾时由人类定夺。

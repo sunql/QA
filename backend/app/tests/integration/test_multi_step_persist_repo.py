@@ -96,6 +96,79 @@ async def testUpdateRunClosesRun(db_session, sessionKey):
 
 
 @pytest.mark.asyncio
+async def testUpdateRunCanClearFinishedAt(db_session, sessionKey):
+    """`updateRun` 必须能**清空** `finished_at`（三态语义）。
+
+    旧签名 `finished: bool = False` 是**单向**的：「不传」与「传 False」不可区分，
+    于是续跑重开只能 `run.finished_at = None` 直接改 ORM 属性 —— 绕过了唯一的
+    写点，也让「终态必伴 finished_at」这条不变量没有单一的收口处。
+
+    三态 = `None`（不传，不动）/ `True`（落时间）/ `False`（显式清空）。
+    """
+    from sqlalchemy import text
+
+    from app.infrastructure import database as dbModule
+
+    async def finishedAtInDb() -> object:
+        """从**新会话**读真实列值 —— 只读本会话内存里的 ORM 实例证明不了已落库。"""
+        async with dbModule.getSessionFactory()() as fresh:
+            return (
+                await fresh.execute(
+                    text("SELECT finished_at FROM multi_step_run WHERE id = :i"),
+                    {"i": run.id},
+                )
+            ).scalar_one()
+
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="q", modelId=3, totalSteps=1
+    )
+    await repo.updateRun(db_session, run, status="failed", finished=True)
+    await db_session.commit()
+    stamped = await finishedAtInDb()
+    assert stamped is not None
+
+    # finished=False ⇒ 显式清空（续跑重开走这条正当路径，不再直接改属性）
+    await repo.updateRun(db_session, run, status="running", finished=False)
+    await db_session.commit()
+    assert await finishedAtInDb() is None
+
+    # 不传 finished ⇒ 不动该列：记「失败步进度指针」时不得顺手把终态时刻抹掉
+    await repo.updateRun(db_session, run, status="failed", finished=True)
+    await db_session.commit()
+    stamped = await finishedAtInDb()
+    await repo.updateRun(db_session, run, completedSteps=1)
+    await db_session.commit()
+    assert await finishedAtInDb() == stamped
+
+
+@pytest.mark.asyncio
+async def testUpdateRunRejectsTerminalStatusWithoutFinishedAt(db_session, sessionKey):
+    """不变量：终态 run 必须**同时**落 `finished_at` —— 由唯一的写点结构性拦下。
+
+    本特性的缺陷正是「先写 status、稍后再写 finished_at」：`_recordStepFailure`
+    落了 `status=failed` 却没落 `finished_at`，而循环中途 `_recordUsage` 的
+    `session.commit()` 会把这个中间态持久化成一个
+    「`failed` + `finished_at IS NULL`」的行（并发续跑据此劫持活着的 run；
+    清理任务两个分支都要求 `finished_at < cutoff` ⇒ 该行永不回收）。
+
+    把不变量钉在 `updateRun` 上 ⇒ 任何调用方都造不出这种行。
+    反向：显式 `finished=True` 放行；非终态放行。
+    """
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="q", modelId=3, totalSteps=1
+    )
+
+    for terminal in ("failed", "succeeded", "partially_failed"):
+        with pytest.raises(ValueError, match="finished_at"):
+            await repo.updateRun(db_session, run, status=terminal)
+
+    # 显式带上 finished 就放行（收尾路径 `_closeRun` 的形状）
+    await repo.updateRun(db_session, run, status="partially_failed", finished=True)
+    # 非终态放行：`running` 不是终态，收尾时刻的清空/保留都合法
+    await repo.updateRun(db_session, run, status="running", finished=False)
+
+
+@pytest.mark.asyncio
 async def testResetStepsFromClearsErrorsAndKeepsSucceeded(db_session, sessionKey):
     run = await repo.createRun(
         db_session, sessionId=sessionKey, question="q", modelId=3, totalSteps=3

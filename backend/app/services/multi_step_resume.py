@@ -94,8 +94,13 @@ async def prepareResume(
         await persistence.appendIdempotencyKey(session, run, idempotencyKey)
     run.resume_count = (run.resume_count or 0) + 1
     run.version = (run.version or 0) + 1
-    run.status = RUN_STATUS_RUNNING
-    run.finished_at = None
-    run.current_step_idx = start
+    # 重开走**唯一的写点** `updateRun`：`finished=False` 是显式清空 finished_at，
+    # 与 status=running / current_step_idx=start 同一条 UPDATE。旧写法直接改
+    # `run.finished_at = None` 绕过写点，正是 IMP-1 缺陷「终态必伴 finished_at」
+    # 没有单一收口处的成因。
+    await persistence.updateRun(
+        session, run,
+        status=RUN_STATUS_RUNNING, currentStepIdx=start, finished=False,
+    )
     await session.commit()
     return run, start

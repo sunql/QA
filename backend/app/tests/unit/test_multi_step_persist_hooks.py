@@ -86,7 +86,11 @@ async def testPersistStepFailureRecordsClassification(monkeypatch):
     assert record.await_args.kwargs["kind"] == "transient"
     assert record.await_args.kwargs["tokens"] == 0
     assert record.await_args.kwargs["cost"] == 0
-    assert updateRun.await_args.kwargs["status"] == "failed"
+    # IMP-1 方案 B：per-attempt 失败**不得**把 run 置终态（否则仍在执行的 run 落成
+    # `failed + finished_at IS NULL`，并发续跑据此劫持它、清理任务永不回收）。
+    # 只前置进度指针 current_step_idx；run 终态只在 `_closeRun` 收尾时写。
+    assert "status" not in updateRun.await_args.kwargs
+    assert updateRun.await_args.kwargs["currentStepIdx"] == 1
 
 
 @pytest.mark.asyncio
@@ -97,7 +101,7 @@ async def testPersistStepFailureWithStepNoneSkipsWriteButStillClassifies(monkeyp
     `attempt_count`**：本用例把 `persistence.recordStepError` 换成了 AsyncMock，
     所以它不会替我们抛；第一个真会炸的是 `_recordStepFailure` 里的
     `updateRun(..., currentStepIdx=step.step_index)`
-    （multi_step_persist_hooks.py:238，`None.step_index` → AttributeError），
+    （`multi_step_persist_hooks._recordStepFailure`，`None.step_index` → AttributeError），
     把原始的步错误顶掉。传了 run 正是为了让那条路真的被走到。
     （`attempt_count` 是**未被 mock 的**生产路径才有的真因 —— 见
     `multi_step_persist_hooks.py` 里 `_persistStepFailure` 的注释。）

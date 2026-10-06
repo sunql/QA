@@ -67,6 +67,62 @@ async def testCleanupDeletesOnlyExpiredRuns(pgSession):
 
 
 @pytest.mark.asyncio
+async def testCleanupDoesNotCollectTerminalRowWithoutFinishedAt(pgSession):
+    """`failed + finished_at IS NULL` 的行**不回收** —— 这是显式裁定，不是遗漏。
+
+    背景（IMP-1 方案 B）：修复前 `_recordStepFailure` 会把仍在执行的 run 写成
+    `failed`，而循环中途 `token_usage_service.recordUsage` 的 `commit()` 会持久化这个
+    中间态 ⇒ 历史上**确实可能**存在「终态但 `finished_at` 为空」的行。清理谓词两个分支
+    都要求 `finished_at < cutoff`，故这类行（含历史遗留）**永不回收**。
+
+    为什么**不**加 `COALESCE(finished_at, updated_at)` 兜底臂（决定与理由）：
+      1. 方案 B 之后生产侧不再产生该形态 ⇒ 兜底臂对新行是死代码（`338f69b` 加过一版、
+         `bc749d1` 以「该行态不可达」撤销；修复后那条理由重新成立）。
+      2. 兜底臂会在**未来回归**（有人把写侧改回写终态）时把证据行连同其 steps
+         级联删掉，掩盖回归；不回收时该行会一直可见，正是运维发现回归的信号。
+      3. 需要真回收时，正确做法是先修写侧（本方案已做），而不是让清理器去猜。
+    代价有界且已登记（summary.md 遗留项 16）：运维按
+    `UPDATE multi_step_run SET finished_at = updated_at
+       WHERE status IN ('succeeded','failed','partially_failed') AND finished_at IS NULL`
+    一次性回填历史遗留行即可。
+
+    反向自检：给谓词加 `COALESCE(finished_at, updated_at)` 兜底臂 ⇒ 本用例红
+    （该行会被回收）。
+    """
+
+    sessionKey = f"chat-{uuid.uuid4()}"
+    now = datetime.now(UTC)
+    poisoned = MultiStepRun(
+        id=uuid.uuid4(), session_id=sessionKey, question="q", model_id=None,
+        total_steps=1, status="failed",
+        started_at=now - timedelta(days=30), updated_at=now - timedelta(days=30),
+        finished_at=None,
+    )
+    # 对照：同一时点的终态行，只差一个 finished_at ⇒ 必须被回收（证明谓词没坏）
+    healthy = MultiStepRun(
+        id=uuid.uuid4(), session_id=sessionKey, question="q", model_id=None,
+        total_steps=1, status="failed",
+        started_at=now - timedelta(days=30), updated_at=now - timedelta(days=30),
+        finished_at=now - timedelta(days=30),
+    )
+    pgSession.add_all([poisoned, healthy])
+    await pgSession.commit()
+
+    # Act
+    deleted = await cleanupMultiStepRuns(pgSession, now=now)
+    await pgSession.commit()
+
+    # Assert：只回收了对照行；缺 finished_at 的终态行原样保留（需人工回填）
+    assert deleted == 1
+    remaining = {
+        r.id for r in (await pgSession.execute(select(MultiStepRun))).scalars().all()
+    }
+    assert remaining == {poisoned.id}, (
+        "缺 finished_at 的终态行被回收了 —— 清理器不该替写侧兜底（会掩盖回归）"
+    )
+
+
+@pytest.mark.asyncio
 async def testCleanupDeletesStepsViaCascade(pgSession):
     from app.domain.multi_step_models import MultiStepStep
 

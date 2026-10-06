@@ -213,6 +213,58 @@ async def testPrepareResumeClearsStaleCompressedPayload(db_session):
 
 
 @pytest.mark.asyncio
+async def testPrepareResumeReopensRunAndClearsFinishedAt(db_session):
+    """续跑重开 = 终态撤销：`finished_at` 由 NOT NULL 变回 NULL、`status` 回 `running`（同事务）。
+
+    这是 `updateRun(finished=False)` 的消费方，也是「终态必伴 finished_at」不变量的另一半：
+    重开必须把 `finished_at` 清回去，否则库里会留下 `running + finished_at NOT NULL`
+    的自相矛盾行（清理任务按 `status IN _TERMINAL` 过滤不会碰它，但任何按
+    `finished_at` 判断「这条 run 已收尾」的读侧都会被它骗过）。
+
+    读侧从**新会话**取真实列值：`prepareResume` 末尾自己 `commit()`，本会话
+    `expire_on_commit=False`，读内存里的旧实例等于没验证。
+    """
+    from sqlalchemy import text
+
+    from app.infrastructure import database as dbModule
+    from app.services import multi_step_persistence as repo
+    from app.services.multi_step_resume import prepareResume
+
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="q", modelId=1, totalSteps=2
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
+    await repo.finishStep(db_session, steps[0], status="succeeded", data=[{"a": 1}])
+    await repo.recordStepError(db_session, steps[1], message="timeout", kind="transient")
+    await repo.updateRun(
+        db_session, run, status="failed", completedSteps=1, currentStepIdx=1, finished=True,
+    )
+    await db_session.commit()
+
+    # Act
+    _run, start = await prepareResume(
+        db_session, runId=run.id, fromStepIndex=1, idempotencyKey=None
+    )
+
+    # Assert：从新会话读真实列值
+    async with dbModule.getSessionFactory()() as fresh:
+        status, finished_at, current = (
+            await fresh.execute(
+                text(
+                    "SELECT status, finished_at, current_step_idx "
+                    "FROM multi_step_run WHERE id = :i"
+                ),
+                {"i": run.id},
+            )
+        ).one()
+    assert start == 1
+    assert status == "running", "重开必须把 run 置回 running"
+    assert finished_at is None, "重开必须清空 finished_at —— 否则 running 行谎称已收尾"
+    assert current == 1
+
+
+@pytest.mark.asyncio
 async def testResumeIsIdempotentOnSameKey(pg_client, db_session, monkeypatch):
     from app.services import multi_step_persistence as repo
     from app.tests.integration.test_chat_api import _seed

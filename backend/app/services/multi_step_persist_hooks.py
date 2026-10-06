@@ -181,10 +181,12 @@ class MultiStepPersistMixin:
         # 重试 —— 故先分类，只在落库处短路。
         #
         # 缺这个守卫（`_persistStepSuccess` 早有同名守卫）会让 recordStepError 在
-        # `step.attempt_count`（multi_step_persistence.py:121）抛 AttributeError，
+        # `step.attempt_count`（multi_step_persistence.recordStepError）抛 AttributeError，
         # 把原始的步错误顶掉：kill switch 一关，失败路径反而崩在守卫自身。
-        # 单测里 recordStepError 被 mock，真会炸的是 `_recordStepFailure` 的
-        # `step.step_index`（本文件 :238）—— 两处守卫缺一不可，别只钉一处。
+        # 单测里 recordStepError 被 mock，真会炸的是 `_recordStepFailure` 里
+        # `updateRun(currentStepIdx=step.step_index)` 的 `step.step_index`
+        # （本文件，函数名即锚点）—— 两处守卫缺一不可，别只钉一处。
+        # 用函数名而非行号：行号会随本文件改动漂移（本条曾指 `:238`，实际早已移位）。
         kind = classifyStepError(exc)
         if step is None:
             return kind
@@ -238,16 +240,25 @@ class MultiStepPersistMixin:
     ) -> None:
         """硬失败与软失败共用的记档体（per-attempt 记录 + run 指针前置）。
 
-        状态保持 `running`（`recordStepError` 的 per-attempt 语义）；步的终态由
-        调用方在判定终止时以 `finishStep` 落（spec §6.3）。
+        **run 状态保持 `running`** —— 与 `recordStepError` 的 per-attempt 语义一致：
+        这一步的这次尝试失败了，但计划未必终止（后面的步照跑）。run 的终态只在
+        真的收尾时由计划级收尾路径落（`_closeRun`），且 `status` 与 `finished_at`
+        在**同一条 UPDATE** 里落下，不留给中间态任何落库窗口。
+
+        这里只前置「进度指针」`current_step_idx`（spec §3：执行期「当前步索引」，
+        失败时 = 该步 index），**不写** run 终态。曾经的实现反手
+        `updateRun(status=RUN_STATUS_FAILED)`（不传 `finished`），把它落成
+        `failed + finished_at IS NULL`；而循环中途 `_recordUsage` →
+        `token_usage_service.recordUsage` 的 `commit()`（token_usage_service.py:58）
+        会把该中间态持久化 ⇒ 仍在执行的 run 在库里已是 `failed`：并发续跑据此劫持
+        活着的 run（`RESUMABLE_STATUSES` 只认 failed/partially_failed），清理任务
+        两个分支都要求 `finished_at < cutoff` ⇒ 该行永不回收。
         """
         await persistence.recordStepError(
             session, step, message=message, kind=kind, tokens=tokens, cost=cost,
         )
         if run is not None:
-            await persistence.updateRun(
-                session, run, status=RUN_STATUS_FAILED, currentStepIdx=step.step_index
-            )
+            await persistence.updateRun(session, run, currentStepIdx=step.step_index)
 
     async def _recordHardFailure(
         self,

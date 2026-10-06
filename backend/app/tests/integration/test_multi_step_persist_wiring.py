@@ -147,6 +147,9 @@ async def testRunMarkedFailedWhenStepExhaustsRetries(pg_client, db_session, monk
     # 同样是「多分支同码」—— 两个值分别代表「部分失败」与「全失败」两种不同事实，
     # 蒙对一个就绿。实测本 fixture 落的就是 failed。
     assert run.status == "failed"
+    # 不变量 ①：终态必须与 finished_at 同一条 UPDATE 落下（否则该行逃过保留期清理、
+    # 也让并发续跑能劫持活着的 run）。此处收尾走 `_closeRun(finished=True)`。
+    assert run.finished_at is not None, "终态 run 必须带 finished_at"
     steps = (
         await db_session.execute(
             select(MultiStepStep).where(MultiStepStep.run_id == run.id).order_by(MultiStepStep.step_index)
@@ -304,6 +307,164 @@ async def testStreamEmitsStepCompressedForEarlierStep(pg_client, db_session, mon
 
 
 @pytest.mark.asyncio
+async def testRunStaysRunningWhilePlanContinuesAfterStepFailure(pg_client, db_session, monkeypatch):
+    """不变量 ②：某步**中途失败但计划继续**时，run 必须仍为 `running`。
+
+    病灶：`_recordStepFailure` 的 docstring 自称 per-attempt 语义（「状态保持
+    `running`」，终态由调用方在判定终止时以 `finishStep` 落），代码却反手
+    `updateRun(status=RUN_STATUS_FAILED)`。而该行**真的会落库** —— 下一步构造 prompt
+    时的 `_recordUsage` 内部就 `await session.commit()`（`token_usage_service.py:58`），
+    于是「仍在执行的 run」在库里已经是 `failed`：
+      - 并发续跑据此劫持活着的 run（`RESUMABLE_STATUSES` 只认 failed/partially_failed）；
+      - 清理任务两个分支都要求 `finished_at < cutoff` ⇒ 这一行永不回收。
+
+    观测点：包住 `_recordSoftFailure`，在它落库之后**提交请求会话**（复刻生产里
+    `_recordUsage` 的提交时序），再从**新会话**读该 run。修复后 = ("running", None)；
+    把写侧修复回退（恢复 `status=RUN_STATUS_FAILED`）⇒ ("failed", None) ⇒ 红。
+    """
+    from sqlalchemy import text
+
+    from app.infrastructure import database as dbModule
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _DataQueryFailAdapter,
+        _install,
+        _MultiStepLlm,
+        _payload,
+    )
+
+    config, datasource = await _seed(db_session)
+    # 第 2 个数据查询（step_index=1）起全部失败（含回灌重试）⇒ 该步软失败，
+    # 之后的汇总步照跑 —— 正是「中途失败但计划继续」的形状。
+    _install(
+        monkeypatch, config, _MultiStepLlm(), _DataQueryFailAdapter(fail_from_query=2)
+    )
+
+    service = __import__("app.api.v1.chat", fromlist=["_service"])._service
+    original = service._recordSoftFailure
+    snapshots: list[tuple[object, object]] = []
+
+    async def captureMidRunState(session, step, *, message, kind, run=None, tokens=0, cost=0):
+        await original(
+            session, step, message=message, kind=kind, run=run, tokens=tokens, cost=cost
+        )
+        # 复刻生产时序：随后的 LLM 调用会经 `_recordUsage` 提交本会话
+        await session.commit()
+        async with dbModule.getSessionFactory()() as fresh:
+            state = (
+                await fresh.execute(
+                    text("SELECT status FROM multi_step_run WHERE id = :i"),
+                    {"i": run.id},
+                )
+            ).scalar_one()
+            finishedAt = (
+                await fresh.execute(
+                    text("SELECT finished_at FROM multi_step_run WHERE id = :i"),
+                    {"i": run.id},
+                )
+            ).scalar_one()
+            snapshots.append((state, finishedAt))
+
+    monkeypatch.setattr(service, "_recordSoftFailure", captureMidRunState)
+
+    resp = await pg_client.post(
+        "/api/v1/chat", json=_payload("请分步查询 2024 和 2025 年的销售额并对比", datasource.id)
+    )
+
+    assert resp.status_code == 200, resp.text[:300]
+    assert snapshots, "第 2 步必须发生一次软失败，拦截点没被走到 ⇒ 本用例什么也没验"
+    assert snapshots == [("running", None)], (
+        "中途失败的步不得把 run 置终态：仍存活的 run 一旦落成 failed，"
+        f"并发续跑即可劫持它、且清理任务永不回收。实测 {snapshots}"
+    )
+    # 收尾之后才允许是终态（并且必须带 finished_at）
+    run = (
+        await db_session.execute(
+            select(MultiStepRun).where(MultiStepRun.session_id == "s1")
+        )
+    ).scalars().one()
+    await db_session.refresh(run)
+    assert run.status == "failed"
+    assert run.finished_at is not None, "收尾的终态必须与 finished_at 同一条 UPDATE 落下"
+
+
+@pytest.mark.asyncio
+async def testNoTerminalRunRowWithoutFinishedAt(pg_client, db_session, monkeypatch):
+    """不变量 ③（全局）：跑过全部收尾形态后，库里**不允许**存在
+    `status ∈ 终态 且 finished_at IS NULL` 的行。
+
+    这是不变量 ①（终态必伴 finished_at）的批量形态 —— 覆盖成功、软失败、
+    硬失败三条收尾路径，任何一条漏落 `finished_at` 都会在这里现形。
+    断言不是空转：先钉住「确实落了终态行」，再钉住「其中没有缺 finished_at 的」。
+    """
+    from sqlalchemy import text
+
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _DataQueryFailAdapter,
+        _install,
+        _MultiStepLlm,
+        _OkAdapter,
+        _payload,
+    )
+
+    config, datasource = await _seed(db_session)
+    question = "请分步查询 2024 和 2025 年的销售额并对比"
+
+    # 形态 1：全程成功（收尾 succeeded）
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+    ok = await pg_client.post(
+        "/api/v1/chat", json={**_payload(question, datasource.id), "sessionId": "s-ok"}
+    )
+    assert ok.status_code == 200, ok.text[:300]
+
+    # 形态 2：第 2 个数据查询软失败（收尾 failed）
+    _install(
+        monkeypatch, config, _MultiStepLlm(), _DataQueryFailAdapter(fail_from_query=2)
+    )
+    soft = await pg_client.post(
+        "/api/v1/chat", json={**_payload(question, datasource.id), "sessionId": "s-soft"}
+    )
+    assert soft.status_code == 200, soft.text[:300]
+
+    # 形态 3：硬失败（`_persistStepFailure` 异常入口，收尾 failed）
+    async def boom(*args, **kwargs):
+        raise RuntimeError("hard failure at data step")
+
+    hardService = __import__("app.api.v1.chat", fromlist=["_service"])._service
+    monkeypatch.setattr(hardService, "_executeDataStep", boom)
+    hard = await pg_client.post(
+        "/api/v1/chat", json={**_payload(question, datasource.id), "sessionId": "s-hard"}
+    )
+    assert hard.status_code == 200, hard.text[:300]
+    monkeypatch.undo()
+
+    terminalIds = (
+        await db_session.execute(
+            text(
+                "SELECT id FROM multi_step_run "
+                "WHERE status IN ('succeeded','failed','partially_failed')"
+            )
+        )
+    ).scalars().all()
+    assert len(terminalIds) == 3, f"三种收尾形态应各落一条终态 run，实际 {len(terminalIds)} 条"
+
+    poisoned = (
+        await db_session.execute(
+            text(
+                "SELECT count(*) FROM multi_step_run "
+                "WHERE status IN ('succeeded','failed','partially_failed') "
+                "AND finished_at IS NULL"
+            )
+        )
+    ).scalar_one()
+    assert poisoned == 0, (
+        f"存在 {poisoned} 条「终态但 finished_at 为空」的 run —— "
+        "这类行既逃过保留期清理（谓词要求 finished_at < cutoff），也让并发续跑能劫持活着的 run"
+    )
+
+
+@pytest.mark.asyncio
 async def testSoftFailedStepRecordsErrorAndTerminalStatus(pg_client, db_session, monkeypatch):
     """**软失败**（不抛异常、返回 `sql=None` 错误行）同样落 failed 终态 + 错误记档。
 
@@ -340,6 +501,7 @@ async def testSoftFailedStepRecordsErrorAndTerminalStatus(pg_client, db_session,
         )
     ).scalars().one()
     assert run.status == "failed"
+    assert run.finished_at is not None, "不变量 ①：终态 run 必须带 finished_at"
     steps = (
         await db_session.execute(
             select(MultiStepStep)
@@ -374,7 +536,9 @@ async def testAdoptRunForResumeAlignsShapeAndStart(pg_client, db_session):
         db_session, steps[0], status="succeeded", sql="SELECT 1", data=[{"a": 1}]
     )
     await repo.recordStepError(db_session, steps[1], message="timeout", kind="transient")
-    await repo.updateRun(db_session, run, status="failed", completedSteps=1, currentStepIdx=1)
+    await repo.updateRun(
+        db_session, run, status="failed", completedSteps=1, currentStepIdx=1, finished=True
+    )
     await db_session.commit()
 
     # --- 分支 1：形状一致 ⇒ 保留 current_step_idx，且**不动**已成功的第 0 步 ---
@@ -450,7 +614,7 @@ async def testAdoptRunForResumeClampsOutOfRangePointer(pg_client, db_session):
     )
     # 写侧 `_closeRun` 落的是 len(plan.steps)＝3（2 数据步 + 1 汇总步）—— 越界哨兵
     await repo.updateRun(
-        db_session, run, status="succeeded", completedSteps=2, currentStepIdx=3
+        db_session, run, status="succeeded", completedSteps=2, currentStepIdx=3, finished=True
     )
     await db_session.commit()
 
@@ -649,7 +813,7 @@ async def testResumeOverviewReplaysTerminalStatusForSkippedSteps(pg_client, db_s
     )
     await repo.recordStepError(db_session, steps[1], message="timeout", kind="transient")
     await repo.updateRun(
-        db_session, run, status="failed", completedSteps=1, currentStepIdx=1,
+        db_session, run, status="failed", completedSteps=1, currentStepIdx=1, finished=True,
     )
     await db_session.commit()
 

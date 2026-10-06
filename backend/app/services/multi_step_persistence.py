@@ -9,7 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.multi_step_models import (
+    RUN_STATUS_FAILED,
+    RUN_STATUS_PARTIALLY_FAILED,
     RUN_STATUS_RUNNING,
+    RUN_STATUS_SUCCEEDED,
     STEP_STATUS_PENDING,
     STEP_STATUS_RUNNING,
     MultiStepRun,
@@ -19,6 +22,15 @@ from app.domain.multi_step_models import (
 from app.utils.json_safe import jsonSafe
 
 logger = logging.getLogger(__name__)
+
+# run 的终态集合。写这些状态**必须**同时落 `finished_at`（见 `updateRun` 的不变量）——
+# 本特性的缺陷正是「先写 status、稍后再补 finished_at」留下的窗口：中途
+# `token_usage_service.recordUsage` 的 `commit()` 会把那个中间态持久化成
+# 「终态 + finished_at IS NULL」的行（并发续跑据此劫持活着的 run；清理任务两个
+# 分支都要求 `finished_at < cutoff` ⇒ 该行永不回收）。
+TERMINAL_RUN_STATUSES = frozenset(
+    {RUN_STATUS_SUCCEEDED, RUN_STATUS_FAILED, RUN_STATUS_PARTIALLY_FAILED}
+)
 
 
 async def createRun(
@@ -136,8 +148,29 @@ async def updateRun(
     currentStepIdx: int | None = None,
     compressedCount: int | None = None,
     errorSummary: str | None = None,
-    finished: bool = False,
+    finished: bool | None = None,
 ) -> None:
+    """Update one run; `status` and `finished_at` land in the **same** UPDATE.
+
+    `finished` is three-state —— the old `bool = False` was one-way (“omitted”
+    and “False” were indistinguishable), so a resume-reopen could only clear
+    `finished_at` by poking the ORM attribute directly, bypassing the single
+    write point and leaving “terminal ⇒ finished_at set” without a chokepoint:
+
+      - `None` (default) → leave `finished_at` untouched (progress/pointer updates)
+      - `True`          → stamp `finished_at = utcnow()` (real close)
+      - `False`         → explicitly clear `finished_at = NULL` (resume reopen)
+
+    Invariant: writing a terminal status requires `finished=True`, else the run
+    row could exist in the impossible `failed + finished_at IS NULL` shape (the
+    IMP-1 defect). Any caller that violates it gets a `ValueError`, not a silent
+    half-written row.
+    """
+    if status is not None and status in TERMINAL_RUN_STATUSES and finished is not True:
+        raise ValueError(
+            f"terminal status {status!r} requires finished=True so that status and "
+            "finished_at are written by the same UPDATE (got finished)"
+        )
     if status is not None:
         run.status = status
     if completedSteps is not None:
@@ -148,8 +181,10 @@ async def updateRun(
         run.compressed_count = compressedCount
     if errorSummary is not None:
         run.error_summary = errorSummary[:2000]
-    if finished:
+    if finished is True:
         run.finished_at = _utcnow()
+    elif finished is False:
+        run.finished_at = None
     await session.flush()
 
 

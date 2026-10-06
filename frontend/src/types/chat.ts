@@ -139,7 +139,7 @@ export interface StepResultRead {
 }
 
 // 多步子步骤的运行时状态（前端聚合，随流式事件推进）
-export type StepStatus = "pending" | "running" | "done" | "error";
+export type StepStatus = "pending" | "running" | "done" | "error" | "compressed";
 
 // 单个多步子步骤（含前端维护的状态与回填结果）
 export interface MultiStepStep {
@@ -160,9 +160,13 @@ export interface MultiStepStep {
   visualRationale?: VisualRationale | null;
   // 每步的 NL2SQL 查询计划（供前端 QueryPlanCard 渲染）
   queryPlan?: QueryPlan | null;
+  // 该步所属 run 的 id（multi_step_plan 事件盖章）；单步路径不落库 ⇒ undefined，
+  // 也因此没有续跑按钮。
+  runId?: string;
+  // 被上下文压缩的步：徽章展示原始行数 → 保留行数（step_compressed 事件回填）
+  originalRows?: number;
+  compressedRows?: number;
 }
-
-// Phase 7 G4：未指名 Agent 语义路由建议（中置信命中时随 QUERY/NEW_QUERY 附带）
 export interface AgentSuggestion {
   recommendedAgentCode: string;
   confidence: number;

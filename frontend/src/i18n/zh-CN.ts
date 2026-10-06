@@ -378,8 +378,11 @@ export const zhCN = {
     statusPending: "待执行",
     statusRunning: "执行中",
     statusDone: "已完成",
+    statusCompressed: "已压缩",
     statusError: "失败",
     summaryStep: "汇总",
+    resume: "续跑",
+    compressedRows: "数据已压缩（{from} → {to} 行）",
   },
 
   messageItem: {

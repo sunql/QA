@@ -17,6 +17,7 @@ import HypothesisPanel from "./HypothesisPanel";
 import type { ChatMessage } from "../../types/chat";
 import { useTranslation } from "../../i18n";
 import { visualRationaleText } from "../../utils/visualRationale";
+import { useChatStore } from "../../stores/chatStore";
 
 const { Paragraph } = Typography;
 
@@ -38,6 +39,10 @@ function MessageItem({
   onVerifyHypothesis,
 }: MessageItemProps) {
   const { t } = useTranslation();
+  // 续跑入口：store 的 resumeRun 与首发共用同一套 SSE handler；
+  // loading 用作续跑按钮的禁用位，流式进行中防重复点击（R5）。
+  const resumeRun = useChatStore((s) => s.resumeRun);
+  const loading = useChatStore((s) => s.loading);
   const isUser = message.role === "user";
 
   if (isUser) {
@@ -130,7 +135,12 @@ function MessageItem({
             ) : null}
             {message.steps && message.steps.length ? (
               <div style={{ marginTop: 8 }}>
-                <MultiStepPlanCard steps={message.steps} currentStepIndex={message.currentStepIndex} />
+                <MultiStepPlanCard
+                  steps={message.steps}
+                  currentStepIndex={message.currentStepIndex}
+                  onResume={resumeRun}
+                  disabled={loading}
+                />
               </div>
             ) : null}
             {message.sql ? (

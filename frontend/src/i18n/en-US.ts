@@ -373,8 +373,11 @@ export const enUS = {
     statusPending: "Pending",
     statusRunning: "Running",
     statusDone: "Done",
+    statusCompressed: "Compressed",
     statusError: "Failed",
     summaryStep: "Summary",
+    resume: "Resume",
+    compressedRows: "Data compressed ({from} → {to} rows)",
   },
 
   messageItem: {

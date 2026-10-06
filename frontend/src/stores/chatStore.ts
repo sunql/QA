@@ -1,9 +1,11 @@
-import { create } from "zustand";
+import { create, type StoreApi } from "zustand";
 import {
   fetchHypotheses as apiFetchHypotheses,
+  resumeMultiStepRun,
   sendMessage as sendChatMessage,
   sendMessageStream,
   type StreamChartData,
+  type StreamEventHandlers,
 } from "../api/chat";
 import { searchDocumentsQa } from "../api/document";
 import {
@@ -191,6 +193,12 @@ interface ChatState {
   setSelectedModelId: (id: number | null) => void;
   addMessage: (msg: ChatMessage) => void;
   sendMessage: (question: string, useStream?: boolean, chartType?: ChartType | null) => Promise<void>;
+  /**
+   * 续跑一个失败的多步 run（spec §7）：从 fromStepIndex 起重跑，响应同样是 SSE 流。
+   *
+   * 与首发共用 `streamHandlers`（同一套状态判据），只是入口不同。
+   */
+  resumeRun: (runId: string, fromStepIndex: number) => Promise<void>;
   clearMessages: () => void;
   resetSession: () => void;
   /**
@@ -217,6 +225,165 @@ interface ChatState {
   deleteSession: (sessionId: string) => Promise<void>;
   toggleHistoryPanel: () => void;
   setHistoryPanelOpen: (open: boolean) => void;
+}
+
+/**
+ * 流式事件 → store 状态（首发与续跑共用同一套，避免两处状态判据漂移）。
+ *
+ * 抽取自 sendMessage 内联的 handlers 字面量：`resumeRun` 复用同一套判据，
+ * 否则「续跑」的步骤状态与「首发」会各写一份、逐渐分叉。
+ */
+function streamHandlers(set: StoreApi<ChatState>["setState"]): StreamEventHandlers {
+  return {
+    onMeta: (intent) =>
+      set((state) => ({
+        messages: patchLastMessage(state.messages, {
+          // 运行时收窄：仅接受已知意图，未知值不入库
+          intent: isIntent(intent) ? intent : undefined,
+        }),
+      })),
+    // ReAct 查询计划（Phase E）：流式中已可回填，完成后配合 isStreaming=false 展示
+    onPlan: (plan) =>
+      set((state) => ({
+        messages: patchLastMessage(state.messages, { queryPlan: plan }),
+      })),
+    onSql: (sql) =>
+      set((state) => ({ messages: patchLastMessage(state.messages, { sql }) })),
+    onChart: (chart: StreamChartData) =>
+      set((state) => ({
+        messages: patchLastMessage(state.messages, {
+          chartType: chart.chartType,
+          chartOption: chart.chartOption,
+          tableOption: chart.tableOption,
+          visualRationale: chart.visualRationale,
+          data: chart.data,
+        }),
+      })),
+    // 完整计划概览：建立各步骤（含汇总步骤），初始状态「待执行」
+    // runId 盖到每个步骤上：续跑按钮要凭它拼 resume 端点
+    onStepPlanOverview: (steps, runId) =>
+      set((state) => ({
+        messages: patchLastMessage(state.messages, {
+          steps: steps.map(
+            (s): MultiStepStep => ({
+              stepIndex: s.stepIndex,
+              description: s.description,
+              subQuestion: s.subQuestion,
+              aggregationOnly: s.aggregationOnly,
+              status: "pending",
+              runId,
+            })
+          ),
+        }),
+      })),
+    // 单个子步骤进入执行：标记「执行中」并高亮当前步骤
+    onStepPlan: (step) =>
+      set((state) => ({
+        messages: patchLastMessage(
+          patchStep(state.messages, step.stepIndex, { status: "running" }),
+          { currentStepIndex: step.stepIndex }
+        ),
+      })),
+    // 单个子步骤完成：标记「完成/失败」并回填 sql/summary/error/图表
+    onStepResult: (result) =>
+      set((state) => ({
+        messages: patchStep(state.messages, result.stepIndex, {
+          status: stepStatusFromResult(result.error),
+          sql: result.sql ?? null,
+          summary: result.summary ?? null,
+          error: result.error ?? null,
+          chartType: result.chartType ?? null,
+          chartOption: result.chartOption ?? null,
+          tableOption: result.tableOption ?? null,
+          visualRationale: result.visualRationale ?? null,
+          queryPlan: result.queryPlan ?? null,
+        }),
+      })),
+    // 更早的步被压缩：补上徽章（该步的 step_result 早已把它置为 done/error，
+    // 这里覆盖成 compressed —— 压缩发生在它成功之后，覆盖是正确方向）
+    onStepCompressed: (payload) =>
+      set((state) => ({
+        messages: patchStep(state.messages, payload.stepIndex, {
+          status: "compressed",
+          originalRows: payload.originalRows,
+          compressedRows: payload.compressedRows,
+        }),
+      })),
+    // Phase 1.4：目标表可信度 badge（与 queryPlan 一起展示）
+    // 用浅合并（不可变 patch）覆盖，避免后续事件把已有 badge 抹掉
+    onDataQuality: (payload) =>
+      set((state) => ({
+        messages: patchLastMessage(state.messages, {
+          dataQuality: payload.badges,
+        }),
+      })),
+    // 类召回诊断（2026-09-16）：截断/降级时 MessageItem 渲染提示
+    onClassRecall: (info) =>
+      set((state) => ({
+        messages: patchLastMessage(state.messages, {
+          classRecall: info,
+        }),
+      })),
+    onToken: (content) =>
+      set((state) => {
+        const last = state.messages[state.messages.length - 1];
+        return {
+          messages: patchLastMessage(state.messages, {
+            content: (last.content ?? "") + content,
+          }),
+        };
+      }),
+    onDone: ({
+      tokensUsed,
+      cost,
+      modelName,
+      affinityStatus,
+      agentRun,
+      supplier360,
+      supplierRisk,
+      graphTraversal,
+      suggestedAgent,
+      queryPlan,
+      visualRationale,
+    }) =>
+      set((state) => ({
+        messages: finalizeRunningSteps(
+          patchLastMessage(state.messages, {
+            tokensUsed,
+            cost,
+            modelName: modelName ?? undefined,
+            isStreaming: false,
+            affinityStatus: affinityStatus ?? null,
+            // #207 审查 HIGH 修复：流式 done 事件同样携带拦截类卡片对象
+            //（此前仅非流式分支回填，导致默认 streaming UI 下卡片从未渲染）
+            agentRun: agentRun ?? null,
+            supplier360: supplier360 ?? null,
+            supplierRisk: supplierRisk ?? null,
+            graphTraversal: graphTraversal ?? null,
+            // Phase 7 G4：中置信语义路由建议卡片随 done 帧回填
+            suggestedAgent: suggestedAgent ?? null,
+            // 顶层查询计划：多步时为最后一个成功数据步的计划，单步时直接来自响应
+            queryPlan: queryPlan ?? null,
+            // 0107：done 帧只在多步汇总/降级收尾携带 rationale（SUMMARY_TEXT_ONLY）；
+            // 单步的 rationale 已由 chart 事件回填，这里只在非 null 时覆盖 ——
+            // 否则会把 chart 事件写好的依据抹成 null（键必须整段缺省，不能 `?? undefined`）。
+            ...(visualRationale ? { visualRationale } : {}),
+          })
+        ),
+        loading: false,
+      })),
+    onError: (message, detail) =>
+      set((state) => ({
+        messages: patchLastMessage(state.messages, {
+          content: message,
+          errorDetail: detail ?? null,
+          isError: true,
+          isStreaming: false,
+        }),
+        loading: false,
+        error: message,
+      })),
+  };
 }
 
 // 初始化时一次性读取 localStorage（hydration），把上次的渠道与它的会话指针摆好。
@@ -349,144 +516,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
     try {
       if (useStream) {
-        await sendMessageStream(payload, {
-          onMeta: (intent) =>
-            set((state) => ({
-              messages: patchLastMessage(state.messages, {
-                // 运行时收窄：仅接受已知意图，未知值不入库
-                intent: isIntent(intent) ? intent : undefined,
-              }),
-            })),
-          // ReAct 查询计划（Phase E）：流式中已可回填，完成后配合 isStreaming=false 展示
-          onPlan: (plan) =>
-            set((state) => ({
-              messages: patchLastMessage(state.messages, { queryPlan: plan }),
-            })),
-          onSql: (sql) =>
-            set((state) => ({ messages: patchLastMessage(state.messages, { sql }) })),
-          onChart: (chart: StreamChartData) =>
-            set((state) => ({
-              messages: patchLastMessage(state.messages, {
-                chartType: chart.chartType,
-                chartOption: chart.chartOption,
-                tableOption: chart.tableOption,
-                visualRationale: chart.visualRationale,
-                data: chart.data,
-              }),
-            })),
-          // 完整计划概览：建立各步骤（含汇总步骤），初始状态「待执行」
-          onStepPlanOverview: (steps) =>
-            set((state) => ({
-              messages: patchLastMessage(state.messages, {
-                steps: steps.map(
-                  (s): MultiStepStep => ({
-                    stepIndex: s.stepIndex,
-                    description: s.description,
-                    subQuestion: s.subQuestion,
-                    aggregationOnly: s.aggregationOnly,
-                    status: "pending",
-                  })
-                ),
-              }),
-            })),
-          // 单个子步骤进入执行：标记「执行中」并高亮当前步骤
-          onStepPlan: (step) =>
-            set((state) => ({
-              messages: patchLastMessage(
-                patchStep(state.messages, step.stepIndex, { status: "running" }),
-                { currentStepIndex: step.stepIndex }
-              ),
-            })),
-          // 单个子步骤完成：标记「完成/失败」并回填 sql/summary/error/图表
-          onStepResult: (result) =>
-            set((state) => ({
-              messages: patchStep(state.messages, result.stepIndex, {
-                status: stepStatusFromResult(result.error),
-                sql: result.sql ?? null,
-                summary: result.summary ?? null,
-                error: result.error ?? null,
-                chartType: result.chartType ?? null,
-                chartOption: result.chartOption ?? null,
-                tableOption: result.tableOption ?? null,
-                visualRationale: result.visualRationale ?? null,
-                queryPlan: result.queryPlan ?? null,
-              }),
-            })),
-          // Phase 1.4：目标表可信度 badge（与 queryPlan 一起展示）
-          // 用浅合并（不可变 patch）覆盖，避免后续事件把已有 badge 抹掉
-          onDataQuality: (payload) =>
-            set((state) => ({
-              messages: patchLastMessage(state.messages, {
-                dataQuality: payload.badges,
-              }),
-            })),
-          // 类召回诊断（2026-09-16）：截断/降级时 MessageItem 渲染提示
-          onClassRecall: (info) =>
-            set((state) => ({
-              messages: patchLastMessage(state.messages, {
-                classRecall: info,
-              }),
-            })),
-          onToken: (content) =>
-            set((state) => {
-              const last = state.messages[state.messages.length - 1];
-              return {
-                messages: patchLastMessage(state.messages, {
-                  content: (last.content ?? "") + content,
-                }),
-              };
-            }),
-          onDone: ({
-            tokensUsed,
-            cost,
-            modelName,
-            affinityStatus,
-            agentRun,
-            supplier360,
-            supplierRisk,
-            graphTraversal,
-            suggestedAgent,
-            queryPlan,
-            visualRationale,
-          }) =>
-            set((state) => ({
-              messages: finalizeRunningSteps(
-                patchLastMessage(state.messages, {
-                  tokensUsed,
-                  cost,
-                  modelName: modelName ?? undefined,
-                  isStreaming: false,
-                  affinityStatus: affinityStatus ?? null,
-                  // #207 审查 HIGH 修复：流式 done 事件同样携带拦截类卡片对象
-                  //（此前仅非流式分支回填，导致默认 streaming UI 下卡片从未渲染）
-                  agentRun: agentRun ?? null,
-                  supplier360: supplier360 ?? null,
-                  supplierRisk: supplierRisk ?? null,
-                  graphTraversal: graphTraversal ?? null,
-                  // Phase 7 G4：中置信语义路由建议卡片随 done 帧回填
-                  suggestedAgent: suggestedAgent ?? null,
-                  // 顶层查询计划：多步时为最后一个成功数据步的计划，单步时直接来自响应
-                  queryPlan: queryPlan ?? null,
-                  // 0107：done 帧只在多步汇总/降级收尾携带 rationale（SUMMARY_TEXT_ONLY）；
-                  // 单步的 rationale 已由 chart 事件回填，这里只在非 null 时覆盖 ——
-                  // 否则会把 chart 事件写好的依据抹成 null（键必须整段缺省，不能 `?? undefined`）。
-                  ...(visualRationale ? { visualRationale } : {}),
-                })
-              ),
-              loading: false,
-            })),
-          onError: (message, detail) =>
-            set((state) => ({
-              messages: patchLastMessage(state.messages, {
-                content: message,
-                errorDetail: detail ?? null,
-                isError: true,
-                isStreaming: false,
-              }),
-              loading: false,
-              error: message,
-            })),
-        });
+        await sendMessageStream(payload, streamHandlers(set));
         // v3.1 B6（M7）：答案流结束后经 GET 端点回填假设（假设不进 SSE 帧）
         await attachHypotheses();
       } else {
@@ -574,6 +604,36 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     } finally {
       // 兜底复位：若流异常结束（无 done/error 帧）导致 loading / isStreaming 残留，
       // 强制复位，避免发送按钮永久禁用（HIGH#3 修复）
+      set((state) => {
+        const last = state.messages[state.messages.length - 1];
+        if (!state.loading && !last?.isStreaming) return {};
+        if (!last?.isStreaming) return { loading: false };
+        return {
+          messages: patchLastMessage(state.messages, { isStreaming: false }),
+          loading: false,
+        };
+      });
+    }
+  },
+
+  resumeRun: async (runId, fromStepIndex) => {
+    set({ loading: true, error: null });
+    try {
+      await resumeMultiStepRun(runId, fromStepIndex, streamHandlers(set));
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : i18n.t("errors.unknownError");
+      set((state) => ({
+        messages: patchLastMessage(state.messages, {
+          content: msg,
+          isError: true,
+          isStreaming: false,
+        }),
+        loading: false,
+        error: msg,
+      }));
+    } finally {
+      // 兜底复位：续跑流异常结束（无 done/error 帧）时也要复位 loading，
+      // 否则发送按钮永久禁用（同 sendMessage 的 HIGH#3）。
       set((state) => {
         const last = state.messages[state.messages.length - 1];
         if (!state.loading && !last?.isStreaming) return {};

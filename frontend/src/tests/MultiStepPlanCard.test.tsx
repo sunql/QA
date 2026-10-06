@@ -27,8 +27,12 @@ import type { MultiStepStep } from "../types/chat";
 
 const PANEL_LABEL = "查看分析计划";
 
-function renderExpanded(steps: MultiStepStep[]) {
-  render(<MultiStepPlanCard steps={steps} />);
+function renderExpanded(
+  steps: MultiStepStep[],
+  onResume?: (runId: string, fromStepIndex: number) => void,
+  disabled?: boolean
+) {
+  render(<MultiStepPlanCard steps={steps} onResume={onResume} disabled={disabled} />);
   fireEvent.click(screen.getByText(PANEL_LABEL));
 }
 
@@ -110,5 +114,48 @@ describe("MultiStepPlanCard 每步出图", () => {
 
     expect(screen.getByText("类目较多（5 项），以横向柱状图呈现，附数据表")).toBeInTheDocument();
     expect(screen.getByText("数据表")).toBeInTheDocument();
+  });
+});
+
+describe("MultiStepPlanCard 续跑与压缩徽章", () => {
+  it("失败步骤带 runId 时渲染续跑按钮，点击回调带 runId 与步号", () => {
+    // Arrange
+    const onResume = vi.fn();
+    renderExpanded(
+      [makeStep({ stepIndex: 1, status: "error", error: "oMLX timeout", runId: "r-1" })],
+      onResume
+    );
+
+    // Act
+    fireEvent.click(screen.getByTestId("resume-run"));
+
+    // Assert
+    expect(onResume).toHaveBeenCalledWith("r-1", 1);
+  });
+
+  it("没有 runId 的失败步骤不渲染续跑按钮（单步路径不落库）", () => {
+    const onResume = vi.fn();
+    renderExpanded([makeStep({ status: "error", error: "boom" })], onResume);
+
+    expect(screen.queryByTestId("resume-run")).toBeNull();
+  });
+
+  it("压缩步骤显示压缩徽章与行数", () => {
+    renderExpanded([
+      makeStep({ status: "compressed", originalRows: 1000, compressedRows: 30 }),
+    ]);
+
+    expect(screen.getByText("已压缩")).toBeInTheDocument();
+    expect(screen.getByText("数据已压缩（1000 → 30 行）")).toBeInTheDocument();
+  });
+
+  it("流式进行中（disabled）时续跑按钮禁用，防重复点击", () => {
+    renderExpanded(
+      [makeStep({ stepIndex: 1, status: "error", error: "boom", runId: "r-1" })],
+      vi.fn(),
+      true
+    );
+
+    expect(screen.getByTestId("resume-run")).toBeDisabled();
   });
 });

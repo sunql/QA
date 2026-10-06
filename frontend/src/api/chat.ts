@@ -56,6 +56,13 @@ export interface StepResultView {
   queryPlan?: QueryPlan | null;
 }
 
+// step_compressed 事件负载（Task 6 新增）：某个更早的步被压缩后补发
+export interface StepCompressedView {
+  stepIndex: number;
+  originalRows: number;
+  compressedRows: number;
+}
+
 function isStepIndex(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
@@ -230,9 +237,12 @@ export interface StreamEventHandlers {
   onDone?: (summary: StreamSummary) => void;
   onError?: (message: string, detail?: string) => void;
   // 多步：完整计划概览 / 单个子步骤计划（进入执行）/ 单个子步骤结果
-  onStepPlanOverview?: (steps: StepPlanOverviewItem[]) => void;
+  // runId：Task 6 起 multi_step_plan 事件携带；单步路径不发 ⇒ undefined
+  onStepPlanOverview?: (steps: StepPlanOverviewItem[], runId?: string) => void;
   onStepPlan?: (step: StepPlanView) => void;
   onStepResult?: (result: StepResultView) => void;
+  // 多步：某个**更早**的步被上下文压缩（其 step_result 早已发过，故单独补一条）
+  onStepCompressed?: (payload: StepCompressedView) => void;
   // Phase 1.4：目标表可信度 badge
   onDataQuality?: (payload: StreamDataQualityPayload) => void;
   // 类召回诊断（2026-09-16）：截断/降级时前端提示
@@ -250,12 +260,24 @@ export async function sendMessageStream(
   payload: ChatRequest,
   handlers: StreamEventHandlers
 ): Promise<void> {
+  return postSseStream(`${BASE}/stream`, payload, handlers);
+}
+
+/**
+ * 通用 SSE POST：路径可变，解析/分发逻辑与 sendMessageStream 完全共用。
+ */
+async function postSseStream(
+  path: string,
+  body: unknown,
+  handlers: StreamEventHandlers,
+  extraHeaders: Record<string, string> = {}
+): Promise<void> {
   // 走裸 fetch（SSE 流式 axios 不友好）—— 不经 httpClient 拦截器，
   // 故用 authHeaders()（SSOT）手动注入 Authorization + X-Tenant-Id。
-  const response = await fetch(`${API_BASE_URL}${BASE}/stream`, {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(payload),
+    headers: authHeaders({ "Content-Type": "application/json", ...extraHeaders }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -283,6 +305,24 @@ export async function sendMessageStream(
   } finally {
     reader.releaseLock();
   }
+}
+
+/**
+ * 续跑一个失败的多步 run（spec §7）。响应同样是 SSE 流，复用同一套帧解析。
+ *
+ * Idempotency-Key 由前端生成：后端据它去重，重复提交不会重跑（spec §7.3）。
+ */
+export async function resumeMultiStepRun(
+  runId: string,
+  fromStepIndex: number | undefined,
+  handlers: StreamEventHandlers
+): Promise<void> {
+  return postSseStream(
+    `${BASE}/multi-step/${encodeURIComponent(runId)}/resume`,
+    { fromStepIndex },
+    handlers,
+    { "Idempotency-Key": crypto.randomUUID() }
+  );
 }
 
 function consumeFrames(buffer: string, handlers: StreamEventHandlers): string {
@@ -373,8 +413,21 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
       if (Array.isArray(d.steps)) {
         const steps = d.steps.filter(isStepPlanOverviewItem);
         if (steps.length) {
-          handlers.onStepPlanOverview?.(steps);
+          // 单步路径不发 runId ⇒ undefined（前端据此不渲染续跑按钮）
+          handlers.onStepPlanOverview?.(
+            steps,
+            typeof d.runId === "string" ? d.runId : undefined
+          );
         }
+      }
+      break;
+    case "step_compressed":
+      if (isStepIndex(d.stepIndex)) {
+        handlers.onStepCompressed?.({
+          stepIndex: d.stepIndex,
+          originalRows: typeof d.originalRows === "number" ? d.originalRows : 0,
+          compressedRows: typeof d.compressedRows === "number" ? d.compressedRows : 0,
+        });
       }
       break;
     case "step_plan":

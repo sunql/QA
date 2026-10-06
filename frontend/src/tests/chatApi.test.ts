@@ -8,7 +8,7 @@ const httpMock = vi.hoisted(() => ({
 }));
 vi.mock("../api/client", () => ({ httpClient: httpMock }));
 
-import { sendMessage, sendMessageStream, type StepResultView } from "../api/chat";
+import { sendMessage, sendMessageStream, resumeMultiStepRun, type StepResultView } from "../api/chat";
 import { useAuthStore } from "../stores/authStore";
 import { DEFAULT_TENANT_ID } from "../config";
 import type { ChatRequest, ChatResponse } from "../types/chat";
@@ -598,5 +598,97 @@ describe("api/chat 两个新字段收窄（0107）", () => {
       code: "R04_TOPN_HBAR",
       params: { rows: 5 },
     });
+  });
+});
+
+// ===== Task 9（多步持久化）：runId 透传 / 压缩事件 / 续跑端点 =====
+describe("api/chat 续跑与压缩（Task 9）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    useAuthStore.setState({ token: null });
+  });
+
+  it("multi_step_plan 携带 runId 时作为第二个参数交给回调", async () => {
+    const stream = sseStream(
+      'event: multi_step_plan\ndata: {"runId":"r-9","steps":[{"stepIndex":0,"description":"d","subQuestion":"q","aggregationOnly":false}]}\n\n'
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const seen: Array<[unknown, unknown]> = [];
+    await sendMessageStream(makePayload(), {
+      onStepPlanOverview: (steps, runId) => seen.push([steps, runId]),
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.[0]).toHaveLength(1);
+    expect(seen[0]?.[1]).toBe("r-9");
+  });
+
+  it("multi_step_plan 不带 runId（单步路径）时第二个参数为 undefined", async () => {
+    const stream = sseStream(
+      'event: multi_step_plan\ndata: {"steps":[{"stepIndex":0,"description":"d","subQuestion":"q","aggregationOnly":false}]}\n\n'
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const seen: unknown[] = [];
+    await sendMessageStream(makePayload(), {
+      onStepPlanOverview: (_steps, runId) => seen.push(runId),
+    });
+
+    expect(seen).toEqual([undefined]);
+  });
+
+  it("step_compressed 事件分发给 onStepCompressed", async () => {
+    const stream = sseStream(
+      'event: step_compressed\ndata: {"stepIndex":0,"originalRows":1000,"compressedRows":30}\n\n'
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const seen: unknown[] = [];
+    await sendMessageStream(makePayload(), {
+      onStepCompressed: (payload) => seen.push(payload),
+    });
+
+    expect(seen).toEqual([{ stepIndex: 0, originalRows: 1000, compressedRows: 30 }]);
+  });
+
+  it("step_compressed 非法负载（缺 stepIndex）不触发回调", async () => {
+    const stream = sseStream(
+      'event: step_compressed\ndata: {"originalRows":1000,"compressedRows":30}\n\n'
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const seen: unknown[] = [];
+    await sendMessageStream(makePayload(), {
+      onStepCompressed: (payload) => seen.push(payload),
+    });
+
+    expect(seen).toHaveLength(0);
+  });
+
+  it("resumeMultiStepRun POST 到 resume 端点，带 Idempotency-Key 与 camelCase body", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: sseStream() }));
+
+    await resumeMultiStepRun("r-1", 2, {});
+
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(String(url)).toContain("/chat/multi-step/r-1/resume");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({ fromStepIndex: 2 });
+    // 幂等键由前端生成，后端据此去重（spec §7.3）
+    expect(typeof (init?.headers as Record<string, string>)["Idempotency-Key"]).toBe("string");
+  });
+
+  it("resumeMultiStepRun 对 runId 做 URL 编码（防路径注入）", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: sseStream() }));
+
+    await resumeMultiStepRun("a/b c", 0, {});
+
+    const [url] = vi.mocked(fetch).mock.calls[0];
+    expect(String(url)).toContain("/chat/multi-step/a%2Fb%20c/resume");
   });
 });

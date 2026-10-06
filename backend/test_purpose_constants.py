@@ -12,25 +12,28 @@ import sys
 # Excluded: "fallback_*" strings — those are constructed via f"fallback_{purpose}" in
 # chat_service._callWithFallback and are intentionally dynamic.
 BARE_LITERALS = [
-    '"nl2sql"',
-    '"chart"',
-    '"answer"',
-    '"step_plan"',
-    '"follow_up_rewrite"',
-    '"multistep_global_filter"',
-    '"l4_agent_loop"',
-    '"clarify"',
-    '"supplier_risk"',
     '"agent_run"',
+    '"answer"',
+    '"answer_stream_failed"',
+    '"chart"',
+    '"clarify"',
+    '"fallback_answer"',
+    '"follow_up_rewrite"',
+    '"l4_agent_loop"',
+    '"multistep_global_filter"',
+    '"nl2sql"',
+    '"step_plan"',
+    '"supplier_risk"',
 ]
 
 TARGETS = [
-    "chat_usage.py",
-    "chat_multistep.py",
-    "chat_stream.py",
-    "chat_service.py",
-    "chat_l4.py",
     "chat_domain.py",
+    "chat_l4.py",
+    "chat_multistep.py",
+    "chat_service.py",
+    "chat_stream.py",
+    "chat_stream_output.py",
+    "chat_usage.py",
 ]
 
 

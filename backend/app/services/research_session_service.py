@@ -32,13 +32,13 @@ from app.domain.research_models import (
     ResearchSession,
     ResearchTurn,
 )
+from app.services.research_agent_ports import DEFAULT_MODE  # re-export for backward compat
 
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_PENDING = "pending"
 REPORT_PUBLISHED = "published"
 REPORT_SUPERSEDED = "superseded"
-DEFAULT_MODE = "research"
 CHECKPOINT_STATUSES = frozenset({"confirmed", "modified", "rejected"})
 """用户决策的合法取值（设计 §2 表 DDL：pending | confirmed | modified | rejected）。
 

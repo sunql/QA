@@ -133,6 +133,19 @@ def test_msg_all_steps_failed_exists() -> None:
     assert "全部步失败" in research_agent_ports.MSG_ALL_STEPS_FAILED
 
 
+def test_default_mode_ssot_single_source() -> None:
+    """DEFAULT_MODE 只允许 research_agent_ports.py 一处定义。
+
+    `research_session_service.py` 历史上独立 `DEFAULT_MODE = "research"`；
+    SSOT 收口后必须 re-export 自 ports.py，两侧 `is` 同一对象。
+    """
+    from app.services import research_agent_ports
+    from app.services.research_session_service import DEFAULT_MODE
+
+    assert DEFAULT_MODE is research_agent_ports.DEFAULT_MODE
+    assert DEFAULT_MODE == "research"
+
+
 # ---------------------------------------------------------------------------
 # 模型路由（Task 6.5-2）
 # ---------------------------------------------------------------------------

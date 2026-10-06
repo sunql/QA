@@ -139,7 +139,12 @@ async def testPrepareResumeClearsStaleCompressedPayload(db_session):
         db_session, sessionId=sessionKey, question="q", modelId=1, totalSteps=2
     )
     steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
-    await repo.finishStep(db_session, steps[0], status="succeeded", data=[{"a": 1}])
+    # 前序步（step 0）**也**带压缩载荷：否则 `data_compressed` 本来就是 NULL，
+    # 「前序步不被动」那条断言恒真（清没清都绿）。
+    # 给 step 0 status=compressed 是 spec §5.3 的**合法**态（data_compressed 仅当
+    # compressed 时有值），且 prepareResume 的前序步守卫恰好把它算作「已完成」。
+    await repo.finishStep(db_session, steps[0], status="compressed", data=[{"a": 1}])
+    steps[0].data_compressed = {"rows": 99}
     await repo.finishStep(db_session, steps[1], status="compressed", data=[{"b": 1}])
     steps[1].data_compressed = {"rows": 1}
     await repo.updateRun(db_session, run, status="failed", completedSteps=1, finished=True)
@@ -155,7 +160,10 @@ async def testPrepareResumeClearsStaleCompressedPayload(db_session):
     reloaded = await repo.loadSteps(db_session, run.id)
     assert reloaded[1].status == "pending"
     assert reloaded[1].data_compressed is None
-    assert reloaded[0].data_compressed is None  # 前序步不被动
+    # 前序步不动：状态与压缩载荷都必须是原值（重置范围必须从 start 起）。
+    # 反向自检：把 prepareResume 里的 `step_index >= start` 改成 `>= 0` ⇒ 两条都红。
+    assert reloaded[0].status == "compressed", "前序步不被动"
+    assert reloaded[0].data_compressed == {"rows": 99}, "前序步不被动"
 
 
 @pytest.mark.asyncio
@@ -189,22 +197,57 @@ async def testResumeIsIdempotentOnSameKey(pg_client, db_session, monkeypatch):
     first = await pg_client.post(
         f"/api/v1/chat/multi-step/{run.id}/resume", json={}, headers={"Idempotency-Key": key}
     )
+    assert first.status_code == 200, first.text
+
+    afterFirst = (
+        await db_session.execute(select(MultiStepRun).where(MultiStepRun.id == run.id))
+    ).scalar_one()
+    await db_session.refresh(afterFirst)
+    resumeCountAfterFirst = afterFirst.resume_count
+    versionAfterFirst = afterFirst.version
+
     second = await pg_client.post(
         f"/api/v1/chat/multi-step/{run.id}/resume", json={}, headers={"Idempotency-Key": key}
     )
 
-    assert first.status_code == 200
-    assert second.status_code in (200, 409)
-    # 幂等的实证：同 key 第二次请求不得再抬 resume_count
+    # 必须钉住「是谁拒的」：两个分支都回 409（幂等键去重 / 状态不可续跑），
+    # 只断言状态码等于没断言 —— 把去重闸删掉，第二次会落到状态闸，仍可能是 409 附近
+    # 的码，用例照样绿。
+    secondBody = second.json()
+    assert second.status_code == 409, second.text
+    assert "duplicate idempotency key" in secondBody["error"], secondBody
+    assert "not resumable" not in secondBody["error"], (
+        "必须是去重闸拒的；落到状态闸说明去重根本没生效"
+    )
+
     reloadedRun = (
         await db_session.execute(select(MultiStepRun).where(MultiStepRun.id == run.id))
     ).scalar_one()
     await db_session.refresh(reloadedRun)
-    assert reloadedRun.resume_count == 1
+    # 幂等的实证：第二次**没有**重新开局 —— resume_count / version 都不许再动。
+    # 单看 `resume_count == 1` 是假绿（键从没被记下来时它也成立），必须与上面的
+    # 409 去重断言合起来读：只有「被去重闸挡在 prepareResume 的写入之前」才推得出
+    # 「两列都没变」。
+    assert resumeCountAfterFirst == 1, "第一次续跑应恰好抬 1 次"
+    assert reloadedRun.resume_count == 1, "第二次不得再抬 resume_count"
+    assert reloadedRun.version == versionAfterFirst, "第二次不得再抬 version"
     assert key in (reloadedRun.idempotency_keys or [])
 
 
 @pytest.mark.asyncio
 async def testResumeUnknownRunReturns404(pg_client):
-    resp = await pg_client.post(f"/api/v1/chat/multi-step/{uuid.uuid4()}/resume", json={})
-    assert resp.status_code == 404
+    """run 不存在 → 404，且必须是**缺席**那道拒的（不是状态/归属那些同码分支）。
+
+    路由上有两个 404：`chat.py` 的 `NotFoundError(f"multi-step run {runId} 不存在")`
+    与 `ResumeNotAllowed`（`prepareResume` 的 "run {runId} not found" 经同一 handler）。
+    两者都会带 uuid，故只断言 404（或只断言含 uuid）区分不开 —— 文案里的
+    「不存在」才是这条分支的指纹。
+    """
+    missingId = uuid.uuid4()
+    resp = await pg_client.post(f"/api/v1/chat/multi-step/{missingId}/resume", json={})
+
+    body = resp.json()
+    assert resp.status_code == 404, resp.text
+    assert str(missingId) in body["error"], body
+    assert "不存在" in body["error"], body
+    assert "not found" not in body["error"], f"落到了 ResumeNotAllowed 分支：{body}"

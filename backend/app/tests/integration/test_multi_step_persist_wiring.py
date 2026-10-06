@@ -132,13 +132,21 @@ async def testRunMarkedFailedWhenStepExhaustsRetries(pg_client, db_session, monk
     question = "请分步查询 2024 和 2025 年的销售额并对比"
     resp = await pg_client.post("/api/v1/chat", json=_payload(question, datasource.id))
 
-    assert resp.status_code in (200, 502, 503)
+    # 传输层恒 200：单步硬失败被**步骤级隔离**收敛成一次正常响应
+    # （chat_multistep.py 的 `except Exception: ... continue`），失败只体现在
+    # 持久化的 run/step 上（下面几条断言）。原来写 `in (200, 502, 503)` ——
+    # 三个码蒙对一个就绿，「步骤级隔离被删 ⇒ 异常穿出 ⇒ 500」这种回归它发现不了。
+    # 反向自检：把该处 `continue` 临时改成 `raise` ⇒ 本行红（实测 500）。
+    assert resp.status_code == 200, resp.text[:300]
     run = (
         await db_session.execute(
             select(MultiStepRun).where(MultiStepRun.question == question)
         )
     ).scalars().one()
-    assert run.status in ("failed", "partially_failed")
+    # 用例名即断言：终态必须是 failed。原来写 in ("failed", "partially_failed")
+    # 同样是「多分支同码」—— 两个值分别代表「部分失败」与「全失败」两种不同事实，
+    # 蒙对一个就绿。实测本 fixture 落的就是 failed。
+    assert run.status == "failed"
     steps = (
         await db_session.execute(
             select(MultiStepStep).where(MultiStepStep.run_id == run.id).order_by(MultiStepStep.step_index)

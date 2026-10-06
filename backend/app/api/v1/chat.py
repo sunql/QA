@@ -143,22 +143,35 @@ class ResumeRequest(CamelModel):
     compress_again: bool = False
 
 
-async def _sealAbandonedResume(session: AsyncSession, runId: uuid.UUID) -> None:
+async def _sealAbandonedResume(runId: uuid.UUID) -> None:
     """续跑兜底封口：流跑完后 run 仍是 running ⇒ 没人关它，显式标失败。
 
     为什么需要：路由只给出 `run.question`，**重新路由的结果不一定还是多步**
     （首步这次成功了 ⇒ 单步优先策略不拆步），多步链路根本没进入，`adoptRunForResume`
     也就没被执行；也可能流中途断掉。两种情况下这条 run 都会永远停在 `running`。
     放在路由层是因为它是唯一能覆盖「一切提前退出形态」的位置。
+
+    **必须新开会话**（照抄同特性姊妹路径
+    `ChatStreamService.persistInterruptedStream` 的形态）：本函数由背景钩子在响应
+    发出之后执行，而断连/取消之后**请求会话不是可靠的写入通道** —— 取消落在最近一个
+    await 上会把它标成 needs-rollback；即便 `rollback()` 复原，底层 asyncpg 连接也已
+    关闭而 SQLAlchemy 并未察觉（那里 docstring 记了实测：`pg_closed=True` 同时
+    `invalidated=False`），下一条语句即以 `InterfaceError: connection is closed` 整条
+    失败。复用请求会话的后果不是「少写一次」，而是**失败即残留 `running`**：该 run
+    既不可续（`prepareResume` 只放行 failed/partially_failed）也不可清 —— 恰是本函数
+    要消灭的僵尸形态。
     """
-    refreshed = await multi_step_persistence.loadRun(session, runId)
-    if refreshed is None or refreshed.status != RUN_STATUS_RUNNING:
-        return
-    await multi_step_persistence.updateRun(
-        session, refreshed, status=RUN_STATUS_FAILED, finished=True,
-        errorSummary="续跑未走多步链路（被重新路由为单步或流中断），run 已显式封口",
-    )
-    await session.commit()
+    from app.infrastructure.database import getSessionFactory
+
+    async with getSessionFactory()() as session:
+        refreshed = await multi_step_persistence.loadRun(session, runId)
+        if refreshed is None or refreshed.status != RUN_STATUS_RUNNING:
+            return
+        await multi_step_persistence.updateRun(
+            session, refreshed, status=RUN_STATUS_FAILED, finished=True,
+            errorSummary="续跑未走多步链路（被重新路由为单步或流中断），run 已显式封口",
+        )
+        await session.commit()
 
 
 @router.post("/multi-step/{runId}/resume")
@@ -209,11 +222,15 @@ async def resumeMultiStep(
     async def sealAbandoned() -> None:
         """兜底封口的唯一入口。best-effort：响应已（部分）发出，抛出去改变不了客户端
         可见的任何东西，只会污染日志（与同文件 `/stream` 的 persistIfInterrupted 同口径）。
-        `_sealAbandonedResume` 幂等（非 running 直接返回），兜底路径多跑一次也只是空转。"""
+        `_sealAbandonedResume` 幂等（非 running 直接返回），兜底路径多跑一次也只是空转。
+
+        这里是 best-effort 而**不是**静默吞错：失败即残留 `running`（不可续、不可清），
+        所以异常必须以 `logger.exception` 留痕，线上才能看出「有一条 run 需要人工清」，
+        而不是只看到一条永不终结的记录。"""
         try:
-            await _sealAbandonedResume(session, runId)
+            await _sealAbandonedResume(runId)
         except Exception as exc:
-            logger.exception("续跑兜底封口失败: %s", exc)
+            logger.exception("续跑兜底封口失败（run 将残留 running，需人工清理）: %s", exc)
 
     async def eventSource() -> AsyncIterator[str]:
         try:

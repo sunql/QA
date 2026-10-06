@@ -297,3 +297,92 @@ async def testResumeUnknownRunReturns404(pg_client):
     assert str(missingId) in body["error"], body
     assert "不存在" in body["error"], body
     assert "not found" not in body["error"], f"落到了 ResumeNotAllowed 分支：{body}"
+
+
+@pytest.mark.asyncio
+async def testResumeSealUsesFreshSessionNotRequestSession(pg_client, db_session, monkeypatch):
+    """兜底封口必须**新开会话**，不得复用请求会话（IMP-2）。
+
+    为什么：断连/取消之后请求会话不是可靠写入通道 —— 同特性的姊妹路径
+    `persistInterruptedStream` 已刻意换成 `getSessionFactory()` 的新会话，并在
+    docstring 里记了实测依据（取消打在 commit/flush 中途 ⇒ 会话进 needs-rollback；
+    即便 rollback 复原，底层 asyncpg 连接也已关闭而 SQLAlchemy 未察觉）。续跑封口
+    若复用请求会话，失败时只剩一行 logger.exception，run 永久留在 `running`：
+    既不可续（只允许 failed/partially_failed）也不可清。
+
+    判别式：用一个**记录型工厂**包住真实工厂，断言封口确实经由它取的会话落库。
+    旧实现（`_sealAbandonedResume(session, runId)` 直接吃请求会话）下这个工厂
+    一次都不会被调用 ⇒ 本用例红。反向自检即「把请求 session 传回去」。
+
+    构造：run 的 question 是**普通问句** ⇒ 续跑被重新路由为单步，多步链路不进、
+    无人 `_closeRun`，run 停在 `running` ⇒ 兜底封口被真实触发（走完整 HTTP 链路，
+    由 `/resume` 的 `BackgroundTask` 驱动）。
+    """
+    import app.infrastructure.database as dbModule
+    from app.infrastructure.llm.base_client import StreamChunk
+    from app.services import multi_step_persistence as repo
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _NoDecomposeLlm,
+        _OkAdapter,
+        _install,
+    )
+
+    class _SingleStepStreamingLlm(_NoDecomposeLlm):
+        """单步 + 流式回答：`complete()` 供计划/SQL（父类），`completeStream()` 供回答。
+
+        补 `completeStream` 是为了让这条续跑**正常跑完单步回答**（父类缺该方法会落到
+        `_streamAnswerWithFallback` 的降级分支，日志里刷 AttributeError，用例意图被噪音
+        淹没）。本用例要的是「单步链路正常结束 ⇒ 没人给 run 封口」这一形态。
+        """
+
+        async def completeStream(self, messages: list, **kwargs):
+            yield StreamChunk(
+                content="", isDone=True, promptTokens=10, completionTokens=5,
+                modelName="test-model",
+            )
+
+    config, datasource = await _seed(db_session)
+    # 单步 fake：拆步问句也一律答「不需要多步」，保证不会进多步链路
+    _install(monkeypatch, config, _SingleStepStreamingLlm(), _OkAdapter())
+
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="查询所有供应商的收货量",
+        modelId=config.id, datasourceId=datasource.id, totalSteps=1,
+    )
+    await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
+    await repo.updateRun(db_session, run, status="failed", finished=True)
+    await db_session.commit()
+
+    # `getSessionFactory()` 返回的是 **sessionmaker**（工厂），由调用方再 `factory()`
+    # 取得会话 —— 记录型替身必须同样返回一个可调用对象，而不是直接返回会话
+    # （返回会话会得到 `TypeError: 'AsyncSession' object is not callable`，
+    # 封口静默失败、run 残留 running，看起来像实现没修）。
+    realFactory = dbModule.getSessionFactory()
+    created: list[object] = []
+
+    class _RecordingMaker:
+        def __call__(self):
+            session = realFactory()
+            created.append(session)
+            return session
+
+    monkeypatch.setattr(dbModule, "getSessionFactory", lambda: _RecordingMaker())
+
+    # Act
+    resp = await pg_client.post(f"/api/v1/chat/multi-step/{run.id}/resume", json={})
+    assert resp.status_code == 200, resp.text[:300]
+
+    # Assert ①：封口经由工厂取的新会话完成（旧实现下 created 为空）
+    assert created, "兜底封口没走 getSessionFactory() —— 仍在复用请求会话"
+
+    # Assert ②：封口确实发生了。prepareResume 已把 run 置回 running，封口没生效
+    # 的话它会一直停在 running（这正是「永久僵尸」的形态）。
+    reloaded = (
+        await db_session.execute(select(MultiStepRun).where(MultiStepRun.id == run.id))
+    ).scalar_one()
+    await db_session.refresh(reloaded)
+    assert reloaded.status == "failed", "run 停在非终态 = 僵尸"
+    assert reloaded.finished_at is not None
+    assert reloaded.error_summary and "续跑未走多步链路" in reloaded.error_summary

@@ -121,6 +121,18 @@ def test_confidence_round_digits_value() -> None:
     assert isinstance(research_agent_ports.CONFIDENCE_ROUND_DIGITS, int)
 
 
+def test_msg_all_steps_failed_exists() -> None:
+    """all-steps-failed 急停 RuntimeError 必须走命名常量 MSG_ALL_STEPS_FAILED。
+
+    该字符串决定 `_guardedRun` 透出的 `research.error.{turn_failed}` 事件 message：
+    任何拼写变化都会让用户看到的错误文本漂移，必须走常量收口。
+    """
+    from app.services import research_agent_ports
+
+    assert isinstance(research_agent_ports.MSG_ALL_STEPS_FAILED, str)
+    assert "全部步失败" in research_agent_ports.MSG_ALL_STEPS_FAILED
+
+
 # ---------------------------------------------------------------------------
 # 模型路由（Task 6.5-2）
 # ---------------------------------------------------------------------------

@@ -49,6 +49,7 @@ from app.services.research_agent_ports import (
     EVENT_STEP_DONE,
     EVENT_STEP_SQL,
     EVENT_STEP_START,
+    MSG_ALL_STEPS_FAILED,
     PURPOSE_CHART,
     SIGNAL_SQL_VALIDATION_FAILED,
     STEP_MISSING_SQL,
@@ -360,7 +361,7 @@ def finalizeStepResults(state: dict[str, Any], results: list[dict[str, Any]]) ->
             "研究计划全部步失败（无一成功），本 turn 终止: steps=%s",
             [result.get("index") for result in results],
         )
-        raise RuntimeError("研究计划全部步失败（无一成功），本 turn 终止")
+        raise RuntimeError(MSG_ALL_STEPS_FAILED)
     state.update(stepResults=results, stepsExecuted=executedStepCount(results))
 
 

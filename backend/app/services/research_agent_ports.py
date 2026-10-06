@@ -146,6 +146,10 @@ ERROR_SQL_VALIDATION_FAILED = "sql_validation_failed"
 ERROR_STEP_FAILED = "step_failed"
 """通用步失败的 error code（与 checkpoint signal 词汇 `low_confidence_step` 解耦）。"""
 LLM_UNAVAILABLE_MESSAGE = "无可用 LLM 客户端：本轮 LLM 段降级（计划/假设/报告文本可能不完整）"
+MSG_ALL_STEPS_FAILED = "研究计划全部步失败（无一成功），本 turn 终止"
+"""all-steps-failed 急停 RuntimeError 的**唯一字符串**（被 `_guardedRun` 透出为
+`research.error.{turn_failed}` 事件的 message 字段，错误码仍是 `ERROR_TURN_FAILED`）。
+任何拼写变化都会让用户看到的错误文本漂移，必须走常量。"""
 DEFAULT_MODE = "research"
 
 

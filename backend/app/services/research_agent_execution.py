@@ -50,6 +50,7 @@ from app.services.research_agent_ports import (
     EVENT_STEP_SQL,
     EVENT_STEP_START,
     MSG_ALL_STEPS_FAILED,
+    OPT_STEP_INDEX,
     PURPOSE_CHART,
     SIGNAL_SQL_VALIDATION_FAILED,
     STEP_MISSING_SQL,
@@ -378,7 +379,7 @@ async def failedStep(
     await emitEvent(
         emit,
         EVENT_ERROR,
-        errorPayload(stepErrorCode(error), error, stepIndex=result["index"]),
+        errorPayload(stepErrorCode(error), error, **{OPT_STEP_INDEX: result["index"]}),
     )
     return result
 

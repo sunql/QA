@@ -3126,17 +3126,35 @@ async def resumeMultiStep(
         try:
             async for event in _service.processMessageStream(chatDto, session, user=_user):
                 yield event.toSse()
-        finally:
-            # finally 而非「循环后」：客户端断连时生成器被取消，CancelledError 也会
-            # 走到这里，run 照样被封口（H4 断连落库那一课）。
-            await _sealAbandonedResume(session, runId)
+        except Exception:
+            # 这条只兜「上游真抛异常」：此时异常穿出 Starlette 的收敛任务组，
+            # 下面的 background 钩子**不会**被执行，run 就没人封口了。
+            await sealAbandoned()
+            raise
 
     return StreamingResponse(
         eventSource(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        background=BackgroundTask(sealAbandoned),
     )
 ```
+
+> **为什么兜底挂在 `background=` 而不是生成器的 `finally`（2026-10-06 计划自纠）**：
+> 本计划早期版本把 `_sealAbandonedResume` 写在 `finally` 里，并声称「断连时
+> CancelledError 会走到这里（H4 断连落库那一课）」—— **那句话是对 H4 的反向引用**。
+> H4 的实测结论恰恰相反（memory `qa-system-chat-disconnect-persistence`，SSOT 为
+> `Harness/changes/fix-chat-disconnect-persistence/summary.md`）：断连有两种时序，
+> **主情形**（生成器停在 `yield` 上）里 `except CancelledError` 与 `finally`
+> **都不触发**（取消不进生成器帧，推迟到 asyncgen 终结器），且 aclose 期间 yield 还会
+> `RuntimeError: async generator ignored GeneratorExit`。故 H4 的操作性结论是
+> 「**不要写生成器 `finally` 落库**」。唯一确定跑到的是
+> `StreamingResponse(background=...)` —— 它在收敛任务组**之外**被 await
+> （`starlette/responses.py`），断连时仍会执行，且此刻请求作用域 session 还开着；
+> 同文件既有 `/stream` 路由就是这么做的（见其 `persistIfInterrupted` 的注释）。
+> 生成器里那条 `except Exception` 是**互补**覆盖：上游真抛异常时异常穿出收敛任务组、
+> `background` 会被跳过，这条负责补上后再 `raise`。落地于 Task 7 提交 `3a823f4`。
+
 补 import（**扩展既有语句，不要新开同来源的第二条** —— 仓内 ruff 选了 `I`，
 同模块两条 import 会被 I001 判红）：
 ```python
@@ -4053,7 +4071,9 @@ git commit -m "docs(multi-step): 补 wiki 与 change 记录"
    `multi_step_step.data`。需要新增 `GET /chat/multi-step/{runId}/steps/{stepIndex}/data`
    （含归属校验 + 分页），本计划没有这个端点，故徽章目前只是提示。
 10. **SSE 中断后前端自动重连续跑**：依赖前端的 SSE 封装改造，单独排期。后端一侧已就绪：
-    Task 7 的 `_sealAbandonedResume` 在 `finally` 里封口，断连不会留下 `running` 僵尸。
+    Task 7 的 `_sealAbandonedResume` 挂在 `StreamingResponse(background=...)` 上封口
+    （**不是**生成器 `finally` —— 断连主情形不触发，见 Task 7 代码块下的自纠说明），
+    断连不会留下 `running` 僵尸。
 11. **超大 data（> 5MB）转对象存储**：spec §14 提到超限走 minio，但当前 `data` 一律进 JSONB。
     先观察真实 `pg_column_size(multi_step_step.data)` 分布，确认有超限样本后再实现，
     避免过早引入存储依赖。

@@ -601,3 +601,67 @@ async def testHardFailureUsageAndParityAcrossPaths(pg_client, db_session, monkey
         "非流式与流式在同一次失败下必须产出逐字段一致的步记录：\n"
         f"  非流式={_signature(asyncSteps)}\n  流式={_signature(streamSteps)}"
     )
+
+
+@pytest.mark.asyncio
+async def testResumeOverviewReplaysTerminalStatusForSkippedSteps(pg_client, db_session, monkeypatch):
+    """F7/IMP-6：续跑概览必须回放「已跳过步」的终态，否则它们从「已完成」退回「待执行」。
+
+    续跑会重发 `multi_step_plan` 概览；`index < startIndex` 的步不执行、只在循环里
+    `continue`（**不发任何事件**，见 chat_stream.py）。概览若一律下发 pending，前 N 个
+    **已成功**的步在 UI 上永远显示「待执行」——「续跑省掉重跑」完全看不出来
+    （DB 里它们确实是 succeeded）。
+
+    判别式：概览 step 0 带 `status="done"`（唯一事实来源 = DB），step 1/2 **不带**
+    status（即将重跑，必须由前端默认为 pending）。不回放 ⇒ step 0 无 status ⇒ 红。
+    """
+    import json
+
+    from app.services import multi_step_persistence as repo
+    from app.services.stream_events import EVENT_MULTI_STEP_PLAN
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _MULTI_STEP_PLAN_JSON,
+        _install,
+        _MultiStepLlm,
+        _OkAdapter,
+        _parseFrames,
+        _payload,
+    )
+
+    config, datasource = await _seed(db_session)
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+    question = "请分步查询 2024 和 2025 年的销售额并对比"
+    planSteps = json.loads(_MULTI_STEP_PLAN_JSON)["steps"]
+    subQuestions = [s.get("description") or s["subQuestion"] for s in planSteps]
+    assert len(subQuestions) == 2
+
+    # 续跑前的世界：step 0 已成功、step 1 失败、指针停在 1（与 prepareResume 写的一致）
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question=question,
+        modelId=config.id, datasourceId=datasource.id, totalSteps=3,
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=subQuestions)
+    await repo.finishStep(
+        db_session, steps[0], status="succeeded", sql="SELECT 1", data=[{"a": 1}]
+    )
+    await repo.recordStepError(db_session, steps[1], message="timeout", kind="transient")
+    await repo.updateRun(
+        db_session, run, status="failed", completedSteps=1, currentStepIdx=1,
+    )
+    await db_session.commit()
+
+    payload = _payload(question, datasource.id)
+    payload["sessionId"] = sessionKey
+    payload["resumeRunId"] = str(run.id)
+    resp = await pg_client.post("/api/v1/chat/stream", json=payload)
+
+    assert resp.status_code == 200, resp.text
+    overviews = [d for e, d in _parseFrames(resp) if e == EVENT_MULTI_STEP_PLAN]
+    assert len(overviews) == 1
+    byIdx = {s["stepIndex"]: s for s in overviews[0]["steps"]}
+    assert byIdx[0].get("status") == "done", f"已跳过步必须回放终态：{byIdx[0]}"
+    assert "status" not in byIdx[1], f"即将重跑的步不得带终态：{byIdx[1]}"
+    assert "status" not in byIdx[2], f"汇总步即将跑，同样不得带终态：{byIdx[2]}"

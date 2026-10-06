@@ -85,6 +85,40 @@ from app.services.visual_rationale import summaryTextOnlyRationale
 
 logger = logging.getLogger(__name__)
 
+# F7/IMP-6：概览回放的 DB 步状态 → 前端 `MultiStepStep.status` 终态映射。
+# **只有**这两个会被回放成「已完成」：`prepareResume` 的前序步守卫只放行
+# succeeded / compressed（multi_step_resume.py），故 `index < startIndex` 的步
+# 必落其中之一。`failed` / `skipped` / `pending` / `running` 一律不回放。
+_OVERVIEW_TERMINAL_STATUS: dict[str, str] = {
+    "succeeded": "done",
+    "compressed": "done",
+}
+
+
+def _overviewStepPayload(step, stepsByIdx: dict, startIndex: int) -> dict:
+    """`multi_step_plan` 概览里单步的载荷。
+
+    续跑时 `index < startIndex` 的步**不执行**（只在循环里 `continue`、不发任何事件），
+    概览若一律下发 pending，这些**已成功**的步会在 UI 上从「已完成」退回「待执行」——
+    「续跑省掉重跑」完全看不出来（DB 里它们确实是 succeeded）。故对它们回放**已持久化
+    的终态**（唯一事实来源 = DB，不是前端记忆）。
+
+    `>= startIndex` 的步（含汇总步）即将（重）跑，**不**带 status，由前端默认为
+    pending —— 否则会把上一轮的失败当成本次终态显示。
+    """
+    payload: dict = {
+        "stepIndex": step.index,
+        "description": step.description,
+        "subQuestion": step.sub_question,
+        "aggregationOnly": step.aggregation_only,
+    }
+    if step.index < startIndex:
+        persisted = stepsByIdx.get(step.index)
+        replay = _OVERVIEW_TERMINAL_STATUS.get(getattr(persisted, "status", None))
+        if replay is not None:
+            payload["status"] = replay
+    return payload
+
 
 class StreamMixin:
     """流式输出（由 ChatService 组合）。"""
@@ -897,13 +931,11 @@ class StreamMixin:
             # 单步路径（_singleStepOverview）不落库、没有 run，故意不带这个键；
             # 前端必须按「可选」处理，缺省时不渲染续跑按钮。
             "runId": str(run.id) if run is not None else None,
+            # F7/IMP-6：续跑时 `index < startIndex` 的步不执行（循环里只 continue、
+            # 不发事件）。概览必须回放它们已持久化的终态，否则会从「已完成」退回
+            # 「待执行」（见 _overviewStepPayload）。
             "steps": [
-                {
-                    "stepIndex": s.index,
-                    "description": s.description,
-                    "subQuestion": s.sub_question,
-                    "aggregationOnly": s.aggregation_only,
-                }
+                _overviewStepPayload(s, stepsByIdx, startIndex)
                 for s in multiStepPlan.steps
             ],
         })

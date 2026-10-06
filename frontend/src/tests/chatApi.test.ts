@@ -628,6 +628,30 @@ describe("api/chat 续跑与压缩（Task 9）", () => {
     expect(seen[0]?.[1]).toBe("r-9");
   });
 
+  it("multi_step_plan 的 step.status 在系统边界收窄：只认 done，其余归零（F7/IMP-6）", async () => {
+    const stream = sseStream(
+      'event: multi_step_plan\ndata: {"steps":['
+        + '{"stepIndex":0,"description":"d0","subQuestion":"q0","aggregationOnly":false,"status":"done"},'
+        + '{"stepIndex":1,"description":"d1","subQuestion":"q1","aggregationOnly":false},'
+        + '{"stepIndex":2,"description":"d2","subQuestion":"q2","aggregationOnly":false,"status":"running"},'
+        + '{"stepIndex":3,"description":"d3","subQuestion":"q3","aggregationOnly":false,"status":42}'
+        + ']}\n\n'
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const seen: Array<Record<string, unknown>> = [];
+    await sendMessageStream(makePayload(), {
+      onStepPlanOverview: (steps) => seen.push(...(steps as unknown as Array<Record<string, unknown>>)),
+    });
+
+    // 合法回放：保留
+    expect(seen[0]?.status).toBe("done");
+    // 未带 / 未知字符串 / 非字符串：一律归零（不让未校验值流进 store）
+    expect(seen[1]?.status).toBeUndefined();
+    expect(seen[2]?.status).toBeUndefined();
+    expect(seen[3]?.status).toBeUndefined();
+  });
+
   it("multi_step_plan 不带 runId（单步路径）时第二个参数为 undefined", async () => {
     const stream = sseStream(
       'event: multi_step_plan\ndata: {"steps":[{"stepIndex":0,"description":"d","subQuestion":"q","aggregationOnly":false}]}\n\n'

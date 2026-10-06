@@ -358,6 +358,45 @@ describe("chatStore", () => {
     expect(assistant.isStreaming).toBe(false);
   });
 
+  it("续跑：概览回放的已跳过步在 store 里是 done，而非 pending（F7/IMP-6）", async () => {
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      // 续跑：step 0 已持久化完成 ⇒ 后端在概览里回放 status:"done"（它不再执行、不发事件）；
+      // step 1 即将（重）跑 ⇒ 不带 status。
+      handlers.onStepPlanOverview?.([
+        { stepIndex: 0, description: "2024 销售额", subQuestion: "2024年销售额", aggregationOnly: false, status: "done" },
+        { stepIndex: 1, description: "2025 销售额", subQuestion: "2025年销售额", aggregationOnly: false },
+      ]);
+      handlers.onStepPlan?.({ stepIndex: 1, description: "2025 销售额", subQuestion: "2025年销售额" });
+      handlers.onStepResult?.({ stepIndex: 1, description: "2025 销售额", subQuestion: "2025年销售额", sql: "SELECT 2", summary: "1200" });
+      handlers.onDone?.({ tokensUsed: 30, cost: 0.00004 });
+    });
+    useChatStore.getState().setDatasourceId(1);
+    await useChatStore.getState().sendMessage("分步查询并对比", true);
+
+    const assistant = useChatStore.getState().messages[1];
+    // 关键断言：被跳过步必须保留「已完成」。store 若硬编码 status:"pending" ⇒ 红
+    // （这正是缺陷：用户点续跑并跑成功，前 N 个已完成步反而显示「待执行」）。
+    expect(assistant.steps?.[0]).toMatchObject({ status: "done" });
+    expect(assistant.steps?.[1]).toMatchObject({ status: "done" });
+  });
+
+  it("续跑：未回放终态的步仍是 pending（回放不得把即将重跑的步也标成 done）", async () => {
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      // 只有 step 0 回放；step 1 无 status ⇒ 必须待执行（尚未执行、也未收到 step_result）
+      handlers.onStepPlanOverview?.([
+        { stepIndex: 0, description: "2024 销售额", subQuestion: "2024年销售额", aggregationOnly: false, status: "done" },
+        { stepIndex: 1, description: "2025 销售额", subQuestion: "2025年销售额", aggregationOnly: false },
+      ]);
+      // 故意不发任何 step_plan/step_result/done：验证概览本身的初始态
+    });
+    useChatStore.getState().setDatasourceId(1);
+    await useChatStore.getState().sendMessage("分步查询并对比", true);
+
+    const assistant = useChatStore.getState().messages[1];
+    expect(assistant.steps?.[0]?.status).toBe("done");
+    expect(assistant.steps?.[1]?.status).toBe("pending");
+  });
+
   it("流式 step_result 携带的每步图表回填到 step（多步每步出图）", async () => {
     chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
       handlers.onStepPlanOverview?.([

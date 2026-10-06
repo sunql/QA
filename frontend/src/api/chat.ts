@@ -36,6 +36,9 @@ export interface StepPlanView {
 // multi_step_plan 事件负载（完整计划概览，循环前一次下发）
 export interface StepPlanOverviewItem extends StepPlanView {
   aggregationOnly: boolean;
+  // F7/IMP-6：续跑时后端为「已跳过（已持久化完成）」的步回放终态。只认 "done"
+  // （唯一被回放的终态），缺省 ⇒ 前端按「待执行」处理。
+  status?: "done";
 }
 
 // step_result 事件负载（单个子步骤执行结果）
@@ -81,6 +84,18 @@ export function isStepPlan(value: unknown): value is StepPlanView {
 function isStepPlanOverviewItem(value: unknown): value is StepPlanOverviewItem {
   const record = value as Record<string, unknown>;
   return isStepPlan(value) && typeof record.aggregationOnly === "boolean";
+}
+
+/**
+ * F7/IMP-6：收窄概览步的回放终态（系统边界）。
+ *
+ * 后端续跑时会给「已跳过」的步回放 `status: "done"`；旧后端 / 异常值不带。这里只认
+ * `"done"`，其余（未知字符串、数字、null）一律归零为 undefined ⇒ 前端按「待执行」处理，
+ * 不让未校验的值流进 store。返回**新对象**（不可变），不原地改 SSE 帧。
+ */
+function normalizeOverviewStatus(item: StepPlanOverviewItem): StepPlanOverviewItem {
+  const raw = (item as { status?: unknown }).status;
+  return raw === "done" ? { ...item, status: "done" } : { ...item, status: undefined };
 }
 
 export function isStepResult(value: unknown): value is StepResultView {
@@ -411,7 +426,7 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
       break;
     case "multi_step_plan":
       if (Array.isArray(d.steps)) {
-        const steps = d.steps.filter(isStepPlanOverviewItem);
+        const steps = d.steps.filter(isStepPlanOverviewItem).map(normalizeOverviewStatus);
         if (steps.length) {
           // 单步路径不发 runId ⇒ undefined（前端据此不渲染续跑按钮）
           handlers.onStepPlanOverview?.(

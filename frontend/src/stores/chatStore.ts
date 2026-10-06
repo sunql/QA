@@ -304,7 +304,11 @@ function streamHandlers(
               description: s.description,
               subQuestion: s.subQuestion,
               aggregationOnly: s.aggregationOnly,
-              status: "pending",
+              // F7/IMP-6：续跑时后端会为「已跳过（已持久化完成）」的步回放终态
+              // （"done"）。不认它就一律回落成「待执行」——用户点续跑并跑成功后，
+              // 前 N 个**已完成**的步反而显示「待执行」，看不出「续跑省掉了重跑」。
+              // 缺省（普通新跑 / 旧后端）⇒ "pending"。
+              status: s.status ?? "pending",
               runId,
             })
           ),

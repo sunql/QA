@@ -3317,39 +3317,6 @@ async def testCleanupDeletesStepsViaCascade(pgSession):
 
     assert (await pgSession.execute(select(MultiStepStep))).scalars().all() == []
 
-
-@pytest.mark.asyncio
-async def testCleanupReapsTerminalRunWithNullFinishedAt(pgSession):
-    """崩溃僵尸：终态但 finished_at 为 NULL（步失败写入后进程即死，收口没跑到）。
-
-    以 updated_at 计龄 ⇒ 保留期外的回收，刚写下的（updated_at 很新）必须留住。
-    """
-    sessionKey = f"chat-{uuid.uuid4()}"
-    now = datetime.now(UTC)
-
-    def zombie(updatedAgo: timedelta) -> MultiStepRun:
-        return MultiStepRun(
-            id=uuid.uuid4(), session_id=sessionKey, question="q", model_id=None,
-            total_steps=1, status="failed",
-            started_at=now - timedelta(days=10), updated_at=now - updatedAgo,
-            finished_at=None,
-        )
-
-    oldZombie = zombie(timedelta(days=10))     # 删（超出失败保留期 7 天）
-    freshZombie = zombie(timedelta(minutes=5))  # 留（刚写下）
-    pgSession.add_all([oldZombie, freshZombie])
-    await pgSession.commit()
-
-    # Act
-    deleted = await cleanupMultiStepRuns(pgSession, now=now)
-    await pgSession.commit()
-
-    # Assert
-    assert deleted == 1
-    remaining = {r.id for r in (await pgSession.execute(select(MultiStepRun))).scalars().all()}
-    assert remaining == {freshZombie.id}
-```
-
 - [ ] **Step 2: 跑测试确认失败**
 
 ```bash
@@ -3359,23 +3326,17 @@ Expected: FAIL — `ModuleNotFoundError: app.jobs.cleanup_multi_step_runs`
 
 - [ ] **Step 3: 写实现**
 
-> **修订（2026-10-06，人类裁决 —— Task 8 复查的 Important 项）**
-> 原谓词只按 `finished_at` 计龄（`status 终态 AND finished_at < 截止`）。但终态 run 可能
-> `finished_at IS NULL`：`_recordStepFailure` 先写 `status=failed`（**不设** `finished_at`），
-> 而步循环内 `chat_multistep.py:745` 会 commit 这个中间态；若进程在收口 `_closeRun`
-> （`:827/:837`）之前被杀，就留下一条**已提交、终态、无 `finished_at`** 的僵尸 run ——
-> `NULL < cutoff` 恒为 NULL ⇒ 它永远匹配不上，清理回收不到它，恰与本任务的目的相抵。
-> 裁决：**加 NULL 兜底臂**，以 `updated_at` 计龄（等价于 `COALESCE(finished_at, updated_at)`），
-> 只在保留期过后才回收，绝不碰新数据。
+> **复核记录（2026-10-06，人类裁决 —— Task 8 复查的 Important 项）**
+> 曾经怀疑存在「已提交、终态、`finished_at IS NULL`」的崩溃僵尸行，并据此加过一条以
+> `updated_at` 计龄的 NULL 兜底臂。**复核后撤销**：该行态在生产上不可产生 —— 唯一会写
+> 「`status=failed` 且不设 `finished_at`」的 `_recordStepFailure` 只 `flush()`（persistence
+> 层零 `commit()`），而四处 `commit()` 全部紧跟在 `_closeRun(...)`（硬编码 `finished=True`）
+> 之后，中间态因此从未落库。谓词保持原样（只按 `finished_at` 计龄）；若将来出现真的
+> 无 `finished_at` 的终态行，再按 `COALESCE(finished_at, updated_at)` 加臂。
 
 `backend/app/jobs/cleanup_multi_step_runs.py`:
 ```python
-"""多步 run 保留期清理（spec §10.4）。成功 30 天，失败/部分失败 7 天，未终态不删。
-
-崩溃僵尸兜底：终态但 `finished_at` 为 NULL 的 run（步循环内 commit 了失败中间态后进程即死、
-收口的 `_closeRun` 没跑到）按 `updated_at` 计龄回收 —— 否则这类行永远匹配不上
-`finished_at < cutoff`，清理任务回收不到它，与任务目的相抵。
-"""
+"""多步 run 保留期清理（spec §10.4）。成功 30 天，失败/部分失败 7 天，未终态不删。"""
 from __future__ import annotations
 
 import logging
@@ -3419,10 +3380,6 @@ async def cleanupMultiStepRuns(
                     & (MultiStepRun.finished_at < succeededBefore),
                     MultiStepRun.status.in_((RUN_STATUS_FAILED, RUN_STATUS_PARTIALLY_FAILED))
                     & (MultiStepRun.finished_at < failedBefore),
-                    # 崩溃僵尸兜底：终态却无 finished_at（见上方修订块）。以 updated_at 计龄。
-                    MultiStepRun.status.in_(_TERMINAL)
-                    & (MultiStepRun.finished_at.is_(None))
-                    & (MultiStepRun.updated_at < failedBefore),
                 ),
             )
         )
@@ -3440,7 +3397,7 @@ async def cleanupMultiStepRuns(
 ```bash
 pytest app/tests/integration/test_multi_step_cleanup.py -v
 ```
-Expected: 3 passed（含修订后新增的 `testCleanupReapsTerminalRunWithNullFinishedAt`）
+Expected: 2 passed
 
 - [ ] **Step 5: Commit**
 

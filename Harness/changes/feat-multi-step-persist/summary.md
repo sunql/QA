@@ -7,7 +7,7 @@
 - **关联变更**：
   - [feat-multi-step-nl2sql](../feat-multi-step-nl2sql/summary.md)（predecessor：多步拆步本体）
   - [feat-qwen-multistep-uplift](../feat-qwen-multistep-uplift/summary.md)（同一批多步链路上的邻近变更）
-- **迁移版本**：0114_multi_step_persist, 0115_multi_step_run_session_id_text
+- **迁移版本**：0114_multi_step_persist, 0115_multi_step_session_text
 - **MEMORY**：[qa-system-resetstepsfrom-data-compressed.md](../../../../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-resetstepsfrom-data-compressed.md)
 
 > **交付边界说明**：本变更落地了 spec 的**后端全链路**（落库 / 重试 / 压缩 / 续跑 API / 清理函数）
@@ -68,7 +68,7 @@
 
 ## 3. 数据模型变更
 
-新增两张表（**新增，无修改既有表**）。迁移：`0114_multi_step_persist`（建表）+ `0115_multi_step_run_session_id_text`
+新增两张表（**新增，无修改既有表**）。迁移：`0114_multi_step_persist`（建表）+ `0115_multi_step_session_text`
 （改 `session_id` 形态并去 FK）。
 
 | 表 | 关键列 | 约束 / 索引 |
@@ -77,7 +77,7 @@
 | `multi_step_step` | `id` PK(UUID)、`run_id` FK → `multi_step_run.id` **ON DELETE CASCADE**、`step_index`、`status` String(20) 默认 `pending`、`sub_question`、`sql` / `sql_hash`、`data` JSONB、`data_compressed` JSONB、`chart_option` JSONB、`model_used`、`tokens_used`、`cost` Numeric(12,6)、`attempt_count`、`last_error` / `last_error_kind`、时间戳 | `uq_multi_step_step_run_index (run_id, step_index)` 唯一、`ix_multi_step_step_run_id`、`ix_multi_step_step_status_updated (status, updated_at)` |
 
 - **无 CheckConstraint**：`status` 两列是 `String(20)`，取值（run：`running`/`succeeded`/`failed`/`partially_failed`；step：`pending`/`running`/`succeeded`/`failed`/`skipped`/`compressed`）由应用层常量约束，DB 不拦。
-- 迁移文件名长度：`0114_multi_step_persist.py` = 26 字符 ✓；`0115_multi_step_run_session_id_text.py` = 38 字符，**超过**模板标称的 ≤ 32（既有 114 个迁移里 28 个同样超，属仓内既有约定偏差，本次未改名）。
+- 迁移文件名长度：`0114_multi_step_persist.py` = 26 字符 ✓；`0115_multi_step_session_text.py` = 31 字符 ✓（≤ 32）。原名 `0115_multi_step_run_session_id_text.py` 是 38 字符、超模板标称的 ≤ 32，收尾时已 `git mv` 改短——文件内 `revision = "0115"` / `down_revision = "0114"` 未动，alembic 按文件内 revision 发现，改名不影响已应用的库。
 - 迁移**只跑一次**（`drop_constraint` / `create_table` 均无 `IF EXISTS`，重复执行会报错）；升级必须按 `DATABASE_URL` 定向，勿裸跑（[[qa-system-alembic-targets-prod]]）。
 - 0115 的 downgrade **会显式失败**而不是静默截断：若 `session_id` 含非 UUID 值则 `RAISE EXCEPTION`。
 
@@ -118,7 +118,7 @@ POST /api/v1/chat/multi-step/{runId}/resume
 |---|---|
 | `backend/app/domain/multi_step_models.py` | 新建：`MultiStepRun` / `MultiStepStep` ORM 模型 + 状态常量 |
 | `backend/alembic/versions/0114_multi_step_persist.py` | 新建：建两张表 + 索引 |
-| `backend/alembic/versions/0115_multi_step_run_session_id_text.py` | 新建：`session_id` UUID+FK → `String(64)` 无 FK |
+| `backend/alembic/versions/0115_multi_step_session_text.py` | 新建：`session_id` UUID+FK → `String(64)` 无 FK |
 | `backend/app/services/multi_step_persistence.py` | 新建：`createRun` / `createSteps` / `finishStep` / `recordStepError` / `updateRun` / `loadRun` / `loadSteps` / `resetStepsFrom` / `appendIdempotencyKey` / `adoptRunForResume` |
 | `backend/app/services/multi_step_persist_hooks.py` | 新建：`MultiStepPersistMixin`（执行链路落库钩子）+ `runStatusFor` |
 | `backend/app/services/multi_step_compressor.py` | 新建：`_shouldCompress`（阈值 0.7）+ 压缩实现（+ Decimal 归一为 JSON 原生值） |

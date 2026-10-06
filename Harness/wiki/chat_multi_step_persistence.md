@@ -13,7 +13,7 @@ sources:
   - backend/app/jobs/cleanup_multi_step_runs.py
   - backend/app/api/v1/chat.py
   - backend/alembic/versions/0114_multi_step_persist.py
-  - backend/alembic/versions/0115_multi_step_run_session_id_text.py
+  - backend/alembic/versions/0115_multi_step_session_text.py
   - frontend/src/components/chat/ResumeRunButton.tsx
 tags:
   - multi-step

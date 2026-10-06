@@ -42,7 +42,7 @@
 **Files:**
 - Create: `backend/app/domain/multi_step_models.py`
 - Create: `backend/alembic/versions/0114_multi_step_persist.py`
-- Create: `backend/alembic/versions/0115_multi_step_run_session_id_text.py`（修订，见上）
+- Create: `backend/alembic/versions/0115_multi_step_session_text.py`（修订，见上）
 - Test: `backend/app/tests/integration/test_multi_step_persist_models.py`
 
 **Interfaces:**
@@ -1959,7 +1959,7 @@ git commit -m "feat(multi-step): 新增持久化钩子 mixin + MULTI_STEP_PERSIS
    原建的 `UUID + FK→research_session.id` 在唯一消费方（chat 链路）里**永远悬空**
    —— chat 从不创建 `ResearchSession`（全仓唯一非测试创建点属研究功能，
    `research_session_service.py:78`）。已落地：
-   - 新迁移 `alembic/versions/0115_multi_step_run_session_id_text.py`（改列 + 去 FK）
+   - 新迁移 `alembic/versions/0115_multi_step_session_text.py`（改列 + 去 FK）
    - `app/domain/multi_step_models.py`：
      `session_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)`
    - `app/services/multi_step_persistence.py`：`createRun(sessionId: str)`
@@ -4070,7 +4070,7 @@ Step 3 的 `git add … Harness/index.md` 会**直接失败**（`pathspec did no
 
 - [ ] **Step 2: 写 change 记录**
 
-`Harness/changes/feat-multi-step-persist/summary.md`：SSOT 记录，**按 `Harness/changes/_template/summary.md` 的 9 段填齐**（含顶部 `# 变更：feat-multi-step-persist` 元数据块：日期 / 作者 / Phase / 状态 / 迁移版本 `0114_multi_step_persist` + `0115_multi_step_run_session_id_text` / MEMORY 链接），
+`Harness/changes/feat-multi-step-persist/summary.md`：SSOT 记录，**按 `Harness/changes/_template/summary.md` 的 9 段填齐**（含顶部 `# 变更：feat-multi-step-persist` 元数据块：日期 / 作者 / Phase / 状态 / 迁移版本 `0114_multi_step_persist` + `0115_multi_step_session_text` / MEMORY 链接），
 内容含 spec 链接、迁移号 0114+0115、feature flag（`MULTI_STEP_PERSIST_ENABLED`，配置字段 `multiStepPersistEnabled`，默认 `True`）、新增文件清单、测试命令与结果、以及**全部**遗留项（照抄本节末尾「遗留项」清单，一条不漏 —— 特别是 Task 9 只做了 spec §8.2 的聊天面板部分，§8.1/§8.3 没做，别让 change 记录读起来像 UI 已完工）。
 9 段里 §7 安全审查与 §8 部署验证**必须写实况**（做了就写结果，没做就写「未做 + 理由」），不写 `TBD`。
 

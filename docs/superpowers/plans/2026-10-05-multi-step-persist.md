@@ -4028,3 +4028,22 @@ git commit -m "docs(multi-step): 补 wiki 与 change 记录"
 12. **并发续跑乐观锁的落库侧强约束**：当前靠 `run.version++` 的自增语义 + 状态校验挡住
     大部分并发，但**没有** `SELECT … FOR UPDATE`，极端并发下两个请求都可能通过校验。
     若线上出现双跑，再补行级锁。
+13. **清理任务没有调度入口，保留期策略当前不会执行**（2026-06-06 Task 8 计划预检发现）：
+    spec §10.4 与 §13 文件清单都把 `app/jobs/cleanup_multi_step_runs.py` 称作「**cron 清理
+    脚本**」，但本计划只交付一个可导入的函数 —— 无 `__main__`、无 `scripts/cron_*.sh`
+    包装、无 crontab / launchd 注册；全仓除本计划外**没有任何** `app.jobs` 引用（已 grep
+    确认），故没有任何东西会调用它。更关键的是本机 cron 已确认静默失效
+    （`/etc/crontab` 缺失、launchd 契约断裂，见 `Harness/changes/qa-system-cron-silently-broken`），
+    即便补上注册也不会触发。**结论：30/7 天只是写在代码里的两个常量，线上不会自动回收。**
+    本计划的处置与 `scripts/backup_pg.sh` 一致 —— 以可手动调用的形态交付 + 在此登记缺口，
+    不粉饰。真要落地调度时，本仓既有两种形态可参照：`scripts/install_pg_backup_cron.sh`
+    式的外部 cron 安装器，或 agent scheduler 式的「PG 表 + 独立 worker 轮询」
+    （后者不依赖宿主 cron，是当前唯一可靠的一条）。
+14. **spec §10.4 没有给「非终态 run」定保留规则**（同上预检发现）：spec §11 失败场景表
+    自己写明「用户主动 kill 浏览器 ⇒ `run.status=running` 残留」，而 §10.4 只为
+    `succeeded`(30d) / `failed`+`partially_failed`(7d) 定规则 —— Task 8 用 `_TERMINAL`
+    过滤正确地**不删**这些行，于是它们无限累积。注意第 10 条只覆盖**续跑**入口的
+    `_sealAbandonedResume`；**全新执行**被 kill 后留下的 `running` 行无人封口，两者不矛盾
+    （已核对：两个执行器里只有 4 处 `session.commit()`，全部紧邻带 `finished=True` 的
+    `_closeRun`；循环中途 `updateRun(status=FAILED)` 只有 `flush()`，故要么与收尾同事务落盘、
+    要么随会话回滚成 `running`）。补齐需先定「多久算死」的阈值，属策略决策，不在本计划范围。

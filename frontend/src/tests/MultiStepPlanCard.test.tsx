@@ -140,6 +140,46 @@ describe("MultiStepPlanCard 续跑与压缩徽章", () => {
     expect(screen.queryByTestId("resume-run")).toBeNull();
   });
 
+  it("汇总步即使失败也不渲染续跑按钮（其步号恒越界，后端必拒）", () => {
+    // 汇总步不落 multi_step_step 行，但它的 stepIndex = len(data_steps)，
+    // 恰好等于 steps 行数 ⇒ 续跑请求必然落在 `start >= len(steps)` 的范围闸上，
+    // 用户点下去只会拿到 409。故前端根本不渲染这个按钮（后端越界闸见
+    // test_multi_step_resume_api.py::testResumeOutOfRangeFromStepIndexRejected）。
+    // 反向自检：删掉 MultiStepPlanCard 里的 `!s.aggregationOnly` ⇒ 本用例红。
+    const onResume = vi.fn();
+    renderExpanded(
+      [
+        makeStep({ stepIndex: 1, status: "error", error: "boom", runId: "r-1", aggregationOnly: true }),
+      ],
+      onResume
+    );
+
+    expect(screen.queryByTestId("resume-run")).toBeNull();
+  });
+
+  it("普通失败步与汇总步并存时，只有普通步拿到续跑按钮", () => {
+    // 挡「把整个按钮删掉」这类过宽修法：普通步必须仍有入口。
+    const onResume = vi.fn();
+    renderExpanded(
+      [
+        makeStep({ stepIndex: 0, status: "error", error: "boom", runId: "r-1" }),
+        makeStep({
+          stepIndex: 1,
+          status: "error",
+          error: "总结失败",
+          runId: "r-1",
+          aggregationOnly: true,
+        }),
+      ],
+      onResume
+    );
+
+    const buttons = screen.getAllByTestId("resume-run");
+    expect(buttons).toHaveLength(1);
+    fireEvent.click(buttons[0]);
+    expect(onResume).toHaveBeenCalledWith("r-1", 0);
+  });
+
   it("压缩步骤显示压缩徽章与行数", () => {
     renderExpanded([
       makeStep({ status: "compressed", originalRows: 1000, compressedRows: 30 }),

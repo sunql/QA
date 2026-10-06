@@ -122,8 +122,12 @@ export default function MultiStepPlanCard({
                             {s.error}
                           </Text>
                         ) : null}
-                        {/* 失败步的续跑入口：仅当后端盖了 runId（多步路径）且调用方给了回调 */}
-                        {s.status === "error" && s.runId && onResume ? (
+                        {/* 失败步的续跑入口：仅当后端盖了 runId（多步路径）且调用方给了回调。
+                            汇总步（aggregationOnly）**排除**：它不落 multi_step_step 行，
+                            其 stepIndex = len(data_steps) 恰好等于步骤行数 ⇒ 续跑请求
+                            必然落在后端 `start >= len(steps)` 的范围闸上（409），
+                            渲染出来只会给用户一个点了必失败的按钮。 */}
+                        {s.status === "error" && s.runId && onResume && !s.aggregationOnly ? (
                           <div style={{ marginTop: 6 }}>
                             <ResumeRunButton
                               runId={s.runId}

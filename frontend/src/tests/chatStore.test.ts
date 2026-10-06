@@ -1008,4 +1008,45 @@ describe("chatStore resumeRun 定向写入", () => {
     // ③ 请求带的是被点的 runId 与起始步号
     expect(chatApi.resumeMultiStepRun).toHaveBeenCalledWith("r-old", 1, expect.anything());
   });
+
+  it("续跑请求失败时不覆盖原正文，只挂独立错误横幅（保留卡片与旧答案）", async () => {
+    // 缺陷：catch 里写 `content: msg, isError: true` ⇒ MessageItem 的 isError
+    // 分支把整块正文（含多步计划卡与旧答案）换成一条错误 Alert，用户既看不到
+    // 原来问出了什么，也失去了再点一次续跑的入口（卡片没了）。改为独立字段。
+    // 反向自检：把 resumeRun 的 catch 改回 `content: msg, isError: true` ⇒ 红色。
+    const { early, newest } = makeMessages();
+    useChatStore.setState({ messages: [early, newest], loading: false });
+    chatApi.resumeMultiStepRun.mockRejectedValue(new Error("resume boom"));
+
+    // Act
+    await useChatStore.getState().resumeRun("r-old", 1, "m-early");
+
+    // Assert —— ① 原正文逐字保留，isError 不得被打开（否则 MessageItem 整块替换）
+    const msgs = useChatStore.getState().messages;
+    expect(msgs[0].content).toBe("旧的多步回答");
+    expect(msgs[0].isError).toBeFalsy();
+    // ② 失败原因走独立字段（由 MessageItem 渲染成卡片上方的 banner）
+    expect(msgs[0].resumeError).toBe("resume boom");
+    // ③ 卡片与步骤本身不被抹掉（还能再点一次续跑）
+    expect(msgs[0].steps).toEqual(EARLY_STEPS);
+    expect(msgs[0].isStreaming).toBe(false);
+    // ④ 未被续跑的那条消息逐字段不动
+    expect(msgs[1]).toBe(newest);
+    expect(useChatStore.getState().loading).toBe(false);
+    expect(useChatStore.getState().error).toBe("resume boom");
+  });
+
+  it("再次续跑会清掉上一次的错误横幅（成功路径不留残影）", async () => {
+    const { early, newest } = makeMessages();
+    useChatStore.setState({ messages: [early, newest], loading: false });
+    chatApi.resumeMultiStepRun.mockRejectedValueOnce(new Error("resume boom"));
+    await useChatStore.getState().resumeRun("r-old", 1, "m-early");
+    expect(useChatStore.getState().messages[0].resumeError).toBe("resume boom");
+
+    chatApi.resumeMultiStepRun.mockResolvedValueOnce(undefined);
+    await useChatStore.getState().resumeRun("r-old", 1, "m-early");
+
+    expect(useChatStore.getState().messages[0].resumeError).toBeNull();
+    expect(useChatStore.getState().messages[0].content).toBe("旧的多步回答");
+  });
 });

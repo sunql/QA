@@ -129,6 +129,50 @@ async def testResumeAdoptsExistingRunAndSkipsSucceededStep(pg_client, db_session
 
 
 @pytest.mark.asyncio
+async def testResumeOutOfRangeFromStepIndexRejected(pg_client, db_session):
+    """`from_step_index` 越界 → 409，且必须是**范围闸**拒的（不是状态/归属等同码分支）。
+
+    这条正是本缺陷漏网的那条分支：前端曾给**汇总步**渲染续跑按钮，而汇总步的
+    `fromStepIndex = len(data_steps)` —— 汇总步不落 `multi_step_step` 行，故该值
+    恰好等于 `len(steps)`，恒越界（`start >= len(steps)`）。用户点下去只会拿到 409。
+    前端已改为不渲染该按钮（MultiStepPlanCard），后端这条用例锁住「越界必须被拒、
+    且文案能区分是谁拒的」。
+
+    两个 409 分支文案不同：范围闸是 `from_step_index N out of range 0..M`，
+    状态闸是 `run status ... not resumable`。只断言 409 等于没断言 ——
+    删掉范围闸后请求会落到后续步骤守卫（`step N not completed`）或直接放行，
+    状态码未必变，用例照样绿。
+    """
+    from app.services import multi_step_persistence as repo
+
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="q", modelId=1,
+        datasourceId=1, totalSteps=2,
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
+    # 两步都成功 ⇒ 排除「前序步未完成」那道守卫的干扰，确保被拒的只能是范围闸。
+    for step in steps:
+        await repo.finishStep(db_session, step, status="succeeded", data=[{"a": 1}])
+    await repo.updateRun(db_session, run, status="failed", completedSteps=2, finished=True)
+    await db_session.commit()
+
+    # Act：from_step_index = len(steps) = 2 —— 汇总步按钮会发出的那个越界值
+    resp = await pg_client.post(
+        f"/api/v1/chat/multi-step/{run.id}/resume",
+        json={"from_step_index": 2},
+    )
+
+    # Assert：先钉状态码 —— 越界若被放行，响应会变成 200 的 SSE 流
+    # （StreamingResponse），此时 resp.json() 抛 JSONDecodeError，把「范围闸没拦住」
+    # 这个真因伪装成一个解析错误。顺序反了会拿到难读的红。
+    assert resp.status_code == 409, resp.text[:300]
+    body = resp.json()
+    assert "out of range 0..1" in body["error"], body
+    assert "not resumable" not in body["error"], f"落到了状态闸：{body}"
+
+
+@pytest.mark.asyncio
 async def testPrepareResumeClearsStaleCompressedPayload(db_session):
     """从压缩步续跑必须清掉 data_compressed，否则留下「status=pending 但
     data_compressed 非空」的非法态（spec §5.3），且压缩钩子见非空即跳过

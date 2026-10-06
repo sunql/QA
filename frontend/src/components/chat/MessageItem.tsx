@@ -108,6 +108,16 @@ function MessageItem({
                 }
               />
             ) : null}
+            {/* 续跑失败：横幅（不是 isError）——保留原正文与多步计划卡，
+                用户能看清上次问出了什么，也能再点一次续跑。 */}
+            {message.resumeError ? (
+              <Alert
+                type="error"
+                showIcon
+                style={{ marginBottom: 8 }}
+                message={t("multiStep.resumeFailed", { message: message.resumeError })}
+              />
+            ) : null}
             {/* H4 断连兜底：内容可能是半截回答（服务端已按 interrupted 标记），必须说清楚 */}
             {message.interrupted ? (
               <Alert

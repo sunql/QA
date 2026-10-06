@@ -382,6 +382,7 @@ export const zhCN = {
     statusError: "失败",
     summaryStep: "汇总",
     resume: "续跑",
+    resumeFailed: "续跑失败：{message}（原有回答已保留，可再次续跑）",
     compressedRows: "数据已压缩（{from} → {to} 行）",
   },
 

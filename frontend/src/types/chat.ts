@@ -288,6 +288,10 @@ export interface ChatMessage {
   isStreaming?: boolean;
   // H4 断连兜底：该 assistant 行是客户端断连后由服务端补写的（content 可能不完整）
   interrupted?: boolean;
+  // 续跑请求失败的原因（独立字段，不覆盖 content）——续跑失败必须保留原正文与
+  // 多步计划卡，否则用户既看不到原来的回答、也失去了再点一次续跑的入口。
+  // 由 MessageItem 渲染成卡片上方的 error banner；下次续跑时清空。
+  resumeError?: string | null;
   // NL2SQL 校验失败的具体差异（error 事件透传 detail）
   errorDetail?: string | null;
   // 会话亲和性状态（done 事件回填；解锁时为 null/undefined）

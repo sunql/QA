@@ -380,6 +380,44 @@ describe("MessageItem 中断回答提示（H4 断连兜底）", () => {
   });
 });
 
+describe("MessageItem 续跑失败横幅", () => {
+  it("resumeError 渲染横幅，且原正文与多步计划卡仍然在（不整块替换）", () => {
+    // 缺陷对照：续跑失败曾写 `content: msg, isError: true` —— MessageItem 的
+    // isError 分支会把正文（含计划卡）整块换成错误 Alert。改为独立横幅字段后，
+    // 用户既知道失败原因，也保留原回答与「再点一次续跑」的入口。
+    renderItem({
+      content: "上一轮的有效回答",
+      resumeError: "resume boom",
+      steps: [
+        {
+          stepIndex: 1,
+          description: "各供应商收货量",
+          subQuestion: "各供应商的收货量是多少",
+          aggregationOnly: false,
+          status: "error",
+          sql: null,
+          summary: null,
+          error: "boom",
+          runId: "r-1",
+        },
+      ],
+    });
+
+    expect(screen.getByText(/续跑失败/)).toBeInTheDocument();
+    expect(screen.getByText(/resume boom/)).toBeInTheDocument();
+    // 原正文还在（isError 路径会把它换掉）
+    expect(screen.getByText("上一轮的有效回答")).toBeInTheDocument();
+    // 计划卡也还在 —— 展开后普通失败步的续跑按钮仍可点第二次
+    fireEvent.click(screen.getByText("查看分析计划"));
+    expect(screen.getByTestId("resume-run")).toBeInTheDocument();
+  });
+
+  it("没有 resumeError 时不渲染横幅", () => {
+    renderItem({ content: "纯文本回答" });
+    expect(screen.queryByText(/续跑失败/)).toBeNull();
+  });
+});
+
 describe("MessageItem 消息级 visualRationale（Task 8，多步汇总）", () => {
   it("多步汇总消息渲染 SUMMARY_TEXT_ONLY 说明行（答案下方次要色）", () => {
     renderItem({

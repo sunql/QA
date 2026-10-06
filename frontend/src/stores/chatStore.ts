@@ -657,16 +657,25 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   resumeRun: async (runId, fromStepIndex, messageId) => {
-    set({ loading: true, error: null });
+    // 开跑前清掉上一次续跑留下的横幅（同一条消息反复续跑时不留残影）。
+    // 用定向 patch：只碰被点的那条消息，其余消息保持引用相等。
+    set((state) => ({
+      loading: true,
+      error: null,
+      messages: patchMessage(state.messages, messageId, { resumeError: null }),
+    }));
     try {
       // 事件写回被点的那条消息（不是最后一条）——见 ChatState.resumeRun 注释
       await resumeMultiStepRun(runId, fromStepIndex, streamHandlers(set, messageId));
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : i18n.t("errors.unknownError");
+      // 失败**只**挂独立横幅字段，绝不写 content / isError：MessageItem 的
+      // isError 分支会把整块正文（含多步计划卡与上一轮的有效回答）替换成一条错误
+      // Alert —— 用户既看不到原来问出了什么，卡片连同「再续跑一次」的入口也一起消失。
+      // 续跑失败是可重试的局部失败，不是这条回答的终态。
       set((state) => ({
         messages: patchMessage(state.messages, messageId, {
-          content: msg,
-          isError: true,
+          resumeError: msg,
           isStreaming: false,
         }),
         loading: false,

@@ -377,6 +377,7 @@ export const enUS = {
     statusError: "Failed",
     summaryStep: "Summary",
     resume: "Resume",
+    resumeFailed: "Resume failed: {message} (the previous answer was kept; you can resume again)",
     compressedRows: "Data compressed ({from} → {to} rows)",
   },
 

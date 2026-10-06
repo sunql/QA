@@ -29,13 +29,7 @@ from app.services.chart_thresholds import loadFullDataThreshold
 logger = logging.getLogger(__name__)
 
 _STREAM_CHUNK_TIMEOUT_SECONDS = 45.0  # 回答流块间超时：防止 LLM 挂起占用连接/会话（4-3：120s→45s）
-_ANSWER_SYSTEM_PROMPT = (
-    "你是一名企业数据分析助手。根据查询结果用简洁的中文回答用户问题，"
-    "不要编造数据，不要输出 SQL。"
-    "**禁止反向追问**：不要询问用户'需要继续查询吗 / 是否需要进一步分析 / "
-    "还需要看其他吗'。"
-    "如查询结果不足以回答问题，直接说明当前结果能回答什么、不能回答什么即可。"
-)
+from app.services.prompts_zh import PROMPT_ANSWER_SYSTEM as _ANSWER_SYSTEM_PROMPT
 
 
 class ChatStreamOutputMixin:

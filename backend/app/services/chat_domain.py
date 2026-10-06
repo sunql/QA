@@ -78,10 +78,7 @@ from app.services.supplier_risk_service import SupplierRiskService, buildRiskAns
 
 logger = logging.getLogger(__name__)
 
-_CLARIFY_SYSTEM_PROMPT = (
-    "你是一名企业数据分析助手。用户正在询问某个业务概念/术语的含义，"
-    "请结合提供的本体元数据用简洁的中文解释，不要编造、不要输出 SQL。"
-)
+from app.services.prompts_zh import PROMPT_CLARIFY_SYSTEM as _CLARIFY_SYSTEM_PROMPT
 
 
 class DomainCommandMixin:

@@ -103,6 +103,8 @@ from app.services.graph_traversal_service import (
     resolveChatMaxHops,
 )
 from app.services.messages_zh import (
+    MSG_CHAT_UNANSWERABLE_MISSING_VECTOR as _UNANSWERABLE_ANSWER_MISSING_VECTOR,
+    MSG_CHAT_UNANSWERABLE_NO_DATA as _UNANSWERABLE_ANSWER,
     MSG_GRAPH_TRAVERSAL_UNAVAILABLE,
     MSG_STREAM_INTERRUPTED_EMPTY,
     MSG_SUPPLIER_360_NOT_FOUND,
@@ -272,15 +274,6 @@ from app.services.hypothesis_service import HypothesisMixin
 logger = logging.getLogger(__name__)
 
 
-# 计划 target=无法回答（问题超出本体可回答范围）时的固定友好回答前缀。
-# 不调用回答 LLM：模型已判定无数据可查，避免空计划诱导编造 SQL 并掩盖真实原因。
-# 4-2：答案由 _unanswerableAnswerText 附上缺表/缺术语建议（见 unanswerable_suggestion.py）。
-_UNANSWERABLE_ANSWER = "抱歉，当前系统中没有与您的问题相关的业务数据，无法回答该问题。"
-# 向量召回降级时：Milvus 无命中 / 检索异常，指向量同步缺失。
-_UNANSWERABLE_ANSWER_MISSING_VECTOR = (
-    "抱歉，向量检索未返回相关本体类，可能尚未同步向量数据。"
-    "请在「本体管理→向量同步」中同步向量数据后再试。"
-)
 # wiki 注入：property / metric 的按需语义召回窗口。
 # class 走 CLASS_FILTER_TOPK（类集合小）；属性向量 3164 条、指标待建，窗口先小后调。
 _WIKI_EXTRA_RECALL_TOPK_DEFAULT = 10

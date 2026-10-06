@@ -29,7 +29,14 @@ from app.domain.schemas import AffinityStatus, ChatResponse, ClassRecallInfo, Hy
 from app.infrastructure.business_db_pool import BusinessDbAdapter
 from app.infrastructure.llm.base_client import BaseLlmClient
 from app.services.audit_service import AuditService
-from app.services.messages_zh import MSG_SPEAKER_ASSISTANT, MSG_SPEAKER_USER
+from app.services.messages_zh import (
+    MSG_CHAT_STEP_AGGREGATION_SKIPPED as _MSG_STEP_AGGREGATION_SKIPPED,
+    MSG_CHAT_STEP_EXEC_FAILED_PREFIX as _STEP_EXEC_FAILED_PREFIX,
+    MSG_CHAT_STEP_GEN_FAILED_PREFIX as _STEP_GEN_FAILED_PREFIX,
+    MSG_CHAT_STEP_UNANSWERABLE as _MSG_STEP_UNANSWERABLE,
+    MSG_SPEAKER_ASSISTANT,
+    MSG_SPEAKER_USER,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -232,19 +239,13 @@ def _summarizeExecutionError(exc: Exception) -> str:
     return getattr(exc, "message", None) or str(exc)
 
 
-# 多步失败隔离（C3）：步骤级错误文案前缀。两类分开，便于日志与前端区分
-# 「根本没生成出 SQL」与「生成了但执行失败（含回灌重试）」。
-_STEP_GEN_FAILED_PREFIX = "该步骤查询生成失败："
-_STEP_EXEC_FAILED_PREFIX = "该步骤执行失败："
-_STEP_FAILED_ERROR_LIMIT = 200  # 步骤错误文案字符上限（避免把整段堆栈塞进响应）
+# 多步失败隔离（C3）：步骤级错误文案字符上限（避免把整段堆栈塞进响应）
+_STEP_FAILED_ERROR_LIMIT = 200
 # 两段（首次 / 重试）各自的上限：只做整体尾部截断的话，一段超长的首次原因会把
 # 「重试为什么也没救回来」整段挤掉 —— 那恰恰是 M7 要暴露的信息（实测 500 字首次原因
 # 下重试原因完全消失）。两段各自限量后，两段之和仍受 _STEP_FAILED_ERROR_LIMIT 约束。
 _STEP_FAILED_SEGMENT_LIMIT = 90
-# 软失败（LLM 判定无有效查询计划）：非硬异常，纯步骤级隔离
-_MSG_STEP_UNANSWERABLE = "无法回答（LLM 判定无有效查询计划）"
-# 汇总步骤被跳过（前置数据步骤全失败）：非失败、非成功，如实说「未执行」
-_MSG_STEP_AGGREGATION_SKIPPED = "未执行（前置数据步骤全部失败）"
+
 # SQLAlchemy 语句异常的 `str()` 会在驱动原因之后追加这两段。它们**只**留给服务端日志与
 # 回灌 LLM 的重试反馈（`_summarizeExecutionError`），进用户可见文案会泄漏内部表/列名
 # （SQL 全文）与查询字面量（参数可能含业务数据）。

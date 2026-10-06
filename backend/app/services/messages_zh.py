@@ -628,3 +628,28 @@ MSG_REPORT_PLACEHOLDER_INVALID = (
 MSG_REPORT_SECTION_LIMIT = "报告数据绑定数超过上限 {limit}"
 MSG_REPORT_STATUS_INVALID = "非法报告状态过滤值: {value}"
 MSG_REPORT_ALREADY_REVIEWED = "报告已审批，不能重复审批"
+
+
+# =============================================================================
+# Chat 模块用户可见文案
+# =============================================================================
+
+# 计划 target=无法回答（问题超出本体可回答范围）时的固定友好回答前缀。
+# 不调用回答 LLM：模型已判定无数据可查，避免空计划诱导编造 SQL 并掩盖真实原因。
+MSG_CHAT_UNANSWERABLE_NO_DATA = (
+    "抱歉，当前系统中没有与您的问题相关的业务数据，无法回答该问题。"
+)
+# 向量召回降级时：Milvus 无命中 / 检索异常，指向量同步缺失。
+MSG_CHAT_UNANSWERABLE_MISSING_VECTOR = (
+    "抱歉，向量检索未返回相关本体类，可能尚未同步向量数据。"
+    "请在「本体管理→向量同步」中同步向量数据后再试。"
+)
+
+# 多步失败隔离（C3）：步骤级错误文案前缀。两类分开，便于日志与前端区分
+# 「根本没生成出 SQL」与「生成了但执行失败（含回灌重试）」。
+MSG_CHAT_STEP_GEN_FAILED_PREFIX = "该步骤查询生成失败："
+MSG_CHAT_STEP_EXEC_FAILED_PREFIX = "该步骤执行失败："
+# 软失败（LLM 判定无有效查询计划）：非硬异常，纯步骤级隔离
+MSG_CHAT_STEP_UNANSWERABLE = "无法回答（LLM 判定无有效查询计划）"
+# 汇总步骤被跳过（前置数据步骤全失败）：非失败、非成功，如实说「未执行」
+MSG_CHAT_STEP_AGGREGATION_SKIPPED = "未执行（前置数据步骤全部失败）"

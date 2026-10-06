@@ -87,35 +87,3 @@ async def testCleanupDeletesStepsViaCascade(pgSession):
     await pgSession.commit()
 
     assert (await pgSession.execute(select(MultiStepStep))).scalars().all() == []
-
-
-@pytest.mark.asyncio
-async def testCleanupReapsTerminalRunWithNullFinishedAt(pgSession):
-    """崩溃僵尸：终态但 finished_at 为 NULL（步失败写入后进程即死，收口没跑到）。
-
-    以 updated_at 计龄 ⇒ 保留期外的回收，刚写下的（updated_at 很新）必须留住。
-    """
-    sessionKey = f"chat-{uuid.uuid4()}"
-    now = datetime.now(UTC)
-
-    def zombie(updatedAgo: timedelta) -> MultiStepRun:
-        return MultiStepRun(
-            id=uuid.uuid4(), session_id=sessionKey, question="q", model_id=None,
-            total_steps=1, status="failed",
-            started_at=now - timedelta(days=10), updated_at=now - updatedAgo,
-            finished_at=None,
-        )
-
-    oldZombie = zombie(timedelta(days=10))     # 删（超出失败保留期 7 天）
-    freshZombie = zombie(timedelta(minutes=5))  # 留（刚写下）
-    pgSession.add_all([oldZombie, freshZombie])
-    await pgSession.commit()
-
-    # Act
-    deleted = await cleanupMultiStepRuns(pgSession, now=now)
-    await pgSession.commit()
-
-    # Assert
-    assert deleted == 1
-    remaining = {r.id for r in (await pgSession.execute(select(MultiStepRun))).scalars().all()}
-    assert remaining == {freshZombie.id}

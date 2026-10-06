@@ -1,9 +1,4 @@
-"""多步 run 保留期清理（spec §10.4）。成功 30 天，失败/部分失败 7 天，未终态不删。
-
-崩溃僵尸兜底：终态但 `finished_at` 为 NULL 的 run（步循环内 commit 了失败中间态后进程即死、
-收口的 `_closeRun` 没跑到）按 `updated_at` 计龄回收 —— 否则这类行永远匹配不上
-`finished_at < cutoff`，清理任务回收不到它，与任务目的相抵。
-"""
+"""多步 run 保留期清理（spec §10.4）。成功 30 天，失败/部分失败 7 天，未终态不删。"""
 from __future__ import annotations
 
 import logging
@@ -47,10 +42,6 @@ async def cleanupMultiStepRuns(
                     & (MultiStepRun.finished_at < succeededBefore),
                     MultiStepRun.status.in_((RUN_STATUS_FAILED, RUN_STATUS_PARTIALLY_FAILED))
                     & (MultiStepRun.finished_at < failedBefore),
-                    # 崩溃僵尸兜底：终态却无 finished_at（见上方修订块）。以 updated_at 计龄。
-                    MultiStepRun.status.in_(_TERMINAL)
-                    & (MultiStepRun.finished_at.is_(None))
-                    & (MultiStepRun.updated_at < failedBefore),
                 ),
             )
         )

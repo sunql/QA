@@ -13,15 +13,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
 from app.domain.exceptions import ValidationError
+
+# 别名常量被 ruff 的默认 isort 规则拆成独立语句块（combine-as-imports=false）——
+# 与本仓 nl2sql_service.py 的既有形态一致，接受工具的规范形态。
 from app.domain.multi_step_models import (
     RUN_STATUS_FAILED,
     RUN_STATUS_PARTIALLY_FAILED,
     RUN_STATUS_SUCCEEDED,
-    STEP_STATUS_COMPRESSED as _STEP_STATUS_COMPRESSED,
-    STEP_STATUS_FAILED as _STEP_STATUS_FAILED,
-    STEP_STATUS_SUCCEEDED as _STEP_STATUS_SUCCEEDED,
     MultiStepRun,
     MultiStepStep,
+)
+from app.domain.multi_step_models import (
+    STEP_STATUS_COMPRESSED as _STEP_STATUS_COMPRESSED,
+)
+from app.domain.multi_step_models import (
+    STEP_STATUS_FAILED as _STEP_STATUS_FAILED,
+)
+from app.domain.multi_step_models import (
+    STEP_STATUS_SUCCEEDED as _STEP_STATUS_SUCCEEDED,
 )
 from app.domain.schemas import ChatRequest
 from app.services import multi_step_persistence as persistence
@@ -172,8 +181,10 @@ class MultiStepPersistMixin:
         # 重试 —— 故先分类，只在落库处短路。
         #
         # 缺这个守卫（`_persistStepSuccess` 早有同名守卫）会让 recordStepError 在
-        # `step.attempt_count`（multi_step_persistence.py:114）抛 AttributeError，
+        # `step.attempt_count`（multi_step_persistence.py:121）抛 AttributeError，
         # 把原始的步错误顶掉：kill switch 一关，失败路径反而崩在守卫自身。
+        # 单测里 recordStepError 被 mock，真会炸的是 `_recordStepFailure` 的
+        # `step.step_index`（本文件 :238）—— 两处守卫缺一不可，别只钉一处。
         kind = classifyStepError(exc)
         if step is None:
             return kind

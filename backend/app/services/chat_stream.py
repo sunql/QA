@@ -32,17 +32,38 @@ from app.domain.multi_step_plan import (
 from app.domain.query_plan import QueryPlan
 from app.domain.schemas import AgentSuggestion, ChatRequest, SemanticState
 from app.services import multi_step_persistence as persistence
+from app.services.chart_thresholds import loadFullDataThreshold
+from app.services.chat_helpers import (
+    _MSG_STEP_AGGREGATION_SKIPPED,
+    _clipText,
+    _failedStepResult,
+    _hasDataStepResult,
+    _looks_like_compound_question,
+    _PipelineContext,
+    _step_result_to_read,
+    attachStreamPersistState,
+    streamPersistStateOf,
+)
+from app.services.evidence_record_service import (
+    resetChatSessionId,
+    resetChatUserId,
+    setChatSessionId,
+    setChatUserId,
+)
 from app.services.intent_service import IntentResult
+from app.services.messages_zh import (
+    MSG_INTERNAL_ERROR,
+    MSG_STREAM_INTERRUPTED_EMPTY,
+)
+from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
+from app.services.multi_step_retry import ERROR_KIND_PERMANENT
+from app.services.nl2sql_semantic_guard import shareAmbiguityWarning
+
 # 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER，
 # 与 chat_service.processMessage 同口径——在 _streamQuery 入口一次性读一次，
 # 整条流水线复用，避免每段 _costFor 调用都查 DB。
 from app.services.nl2sql_service import _readFloatConfig
-from app.services.nl2sql_semantic_guard import shareAmbiguityWarning
-from app.services.chart_thresholds import loadFullDataThreshold
-from app.services.think_block import ThinkStreamFilter, applyThinkPolicy, isThinkHideEnabled
-from app.services.visual_rationale import summaryTextOnlyRationale
 from app.services.stream_events import (
-    ErrorType,
     EVENT_CHART,
     EVENT_CLASS_RECALL,
     EVENT_DATA_QUALITY,
@@ -56,31 +77,11 @@ from app.services.stream_events import (
     EVENT_STEP_PLAN,
     EVENT_STEP_RESULT,
     EVENT_TOKEN,
+    ErrorType,
     StreamEvent,
 )
-from app.services.messages_zh import (
-    MSG_INTERNAL_ERROR,
-    MSG_STREAM_INTERRUPTED_EMPTY,
-)
-from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
-from app.services.multi_step_retry import ERROR_KIND_PERMANENT
-from app.services.chat_helpers import (
-    _MSG_STEP_AGGREGATION_SKIPPED,
-    _PipelineContext,
-    _clipText,
-    _failedStepResult,
-    _hasDataStepResult,
-    _looks_like_compound_question,
-    _step_result_to_read,
-    attachStreamPersistState,
-    streamPersistStateOf,
-)
-from app.services.evidence_record_service import (
-    resetChatSessionId,
-    resetChatUserId,
-    setChatSessionId,
-    setChatUserId,
-)
+from app.services.think_block import ThinkStreamFilter, applyThinkPolicy, isThinkHideEnabled
+from app.services.visual_rationale import summaryTextOnlyRationale
 
 logger = logging.getLogger(__name__)
 

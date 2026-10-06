@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +14,7 @@ from app.domain.multi_step_models import (
     STEP_STATUS_FAILED,
     STEP_STATUS_SKIPPED,
     STEP_STATUS_SUCCEEDED,
+    MultiStepRun,
 )
 from app.services import multi_step_persistence as persistence
 
@@ -28,7 +28,11 @@ class ResumeConflict(Exception):
 
 
 class ResumeNotAllowed(Exception):
-    """run 不存在或不属于该用户。"""
+    """本函数查不到该 run —— 只兜「路由查过之后、这里再查之前被删掉」的竞态。
+
+    **不含归属校验**：归属由调用方 `backend/app/api/v1/chat.py` 的
+    `assertSessionOwnership` 负责（缺失 404 / 非归属 403，见该路由）。
+    """
 
 
 async def prepareResume(
@@ -37,8 +41,8 @@ async def prepareResume(
     runId: uuid.UUID,
     fromStepIndex: int | None,
     idempotencyKey: str | None,
-) -> tuple[Any, int]:
-    """校验并重置；返回 (run, 起始步号)。"""
+) -> tuple[MultiStepRun, int]:
+    """校验并重置；返回 (run, 起始步号)。run 不存在时抛 ResumeNotAllowed（永不返回 None）。"""
     run = await persistence.loadRun(session, runId)
     if run is None:
         raise ResumeNotAllowed(f"run {runId} not found")

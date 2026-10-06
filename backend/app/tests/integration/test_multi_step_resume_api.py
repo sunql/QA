@@ -42,7 +42,9 @@ async def testResumeAdoptsExistingRunAndSkipsSucceededStep(pg_client, db_session
     2. `reloadedRun.status == "succeeded"` —— Task 6 的跳过分支若忘了把跳过的
        成功步计入 `completed`，`runStatusFor` 会把 run 判成 `failed`（用户看到
        「续跑又失败了」），而 `resume_count >= 1` 之类的弱断言完全发现不了。
-    3. `steps[0].sql` 仍是原值 —— 跳过分支若漏了，第 0 步会被重跑并覆盖 SQL。
+    3. `steps[0].data` 仍是原值 —— 跳过分支若漏了，第 0 步会被重跑并覆盖结果。
+       （对齐到下面的实际断言：钉的是 `data` 不是 `sql`。原 docstring 写的是
+       `steps[0].sql`，与代码不符 —— 契约失真注释。）
     """
     import json
 

@@ -15,7 +15,7 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import ChartType, IntentType
-from app.domain.models import LlmConfig, SessionQueryState
+from app.domain.models import SessionQueryState
 from app.domain.multi_step_plan import (
     MAX_PLAN_DATA_STEPS,
     GlobalFilters,
@@ -29,18 +29,18 @@ from app.domain.schemas import ChatRequest, ChatResponse
 from app.infrastructure.llm.base_client import LlmMessage
 from app.services import multi_step_persistence as persistence
 from app.services.chart_thresholds import loadFullDataThreshold
-from app.services.chat_context import InheritedState, TimeHint
+from app.services.chat_context import InheritedState
 from app.services.chat_helpers import (
     _MSG_STEP_UNANSWERABLE,
-    _multiStepResponse,
-    _PipelineContext,
     _STEP_EXEC_FAILED_PREFIX,
     _STEP_GEN_FAILED_PREFIX,
-    _StepRun,
     _failedStepResult,
     _hasDataStepResult,
+    _multiStepResponse,
+    _PipelineContext,
     _step_result_to_read,
     _stepFailedError,
+    _StepRun,
 )
 from app.services.messages_zh import (
     MSG_MULTI_STEP_DEGRADE_FAILED,

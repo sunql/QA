@@ -7,6 +7,7 @@ router 自身 prefix=""，由 main.py 挂载到 /api/v1 下得到 /api/v1/chat�
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, Path, Query, Request
@@ -15,8 +16,10 @@ from starlette.background import BackgroundTask
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
-from app.domain.exceptions import DomainError
+from app.domain.exceptions import ConflictError, DomainError, NotFoundError
+from app.domain.multi_step_models import RUN_STATUS_FAILED, RUN_STATUS_RUNNING
 from app.domain.schemas import (
+    CamelModel,
     ChatRequest,
     ChatResponse,
     HypothesisRead,
@@ -25,6 +28,7 @@ from app.domain.schemas import (
 )
 from app.api.v1.session_guard import assertSessionOwnership
 from app.infrastructure.rate_limit import limiter, rateLimitValue
+from app.services import multi_step_persistence, multi_step_resume
 from app.services.chat_service import ChatService
 from app.services.embedding_service import EmbeddingService
 from app.services.hypothesis_service import listSessionHypotheses
@@ -131,3 +135,83 @@ async def suggestQueries(dto: QuerySuggestRequest) -> QuerySuggestResponse:
         logger.warning("相似问法检索失败，返回空建议: %s", exc.message)
         suggestions = []
     return QuerySuggestResponse(suggestions=suggestions)
+
+
+class ResumeRequest(CamelModel):
+    from_step_index: int | None = None
+    model_override: int | None = None
+    compress_again: bool = False
+
+
+async def _sealAbandonedResume(session: AsyncSession, runId: uuid.UUID) -> None:
+    """续跑兜底封口：流跑完后 run 仍是 running ⇒ 没人关它，显式标失败。
+
+    为什么需要：路由只给出 `run.question`，**重新路由的结果不一定还是多步**
+    （首步这次成功了 ⇒ 单步优先策略不拆步），多步链路根本没进入，`adoptRunForResume`
+    也就没被执行；也可能流中途断掉。两种情况下这条 run 都会永远停在 `running`。
+    放在路由层是因为它是唯一能覆盖「一切提前退出形态」的位置。
+    """
+    refreshed = await multi_step_persistence.loadRun(session, runId)
+    if refreshed is None or refreshed.status != RUN_STATUS_RUNNING:
+        return
+    await multi_step_persistence.updateRun(
+        session, refreshed, status=RUN_STATUS_FAILED, finished=True,
+        errorSummary="续跑未走多步链路（被重新路由为单步或流中断），run 已显式封口",
+    )
+    await session.commit()
+
+
+@router.post("/multi-step/{runId}/resume")
+async def resumeMultiStep(
+    request: Request,
+    runId: uuid.UUID,
+    dto: ResumeRequest,
+    _user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> StreamingResponse:
+    run = await multi_step_persistence.loadRun(session, runId)
+    if run is None:
+        raise NotFoundError(f"multi-step run {runId} 不存在")
+    await assertSessionOwnership(session, str(run.session_id), _user)
+
+    if run.datasource_id is None:
+        # ChatRequest.datasourceId 是必填 int；缺了它只能 500，不如显式 409。
+        raise ConflictError("该 multi-step run 没有数据源快照，无法续跑")
+
+    idempotencyKey = request.headers.get("Idempotency-Key")
+    try:
+        await multi_step_resume.prepareResume(
+            session, runId=runId, fromStepIndex=dto.from_step_index,
+            idempotencyKey=idempotencyKey,
+        )
+    except multi_step_resume.ResumeNotAllowed as exc:
+        # 上面已查过一次 run；这里兜的是查完与被删之间的竞态。不兜就是一个
+        # 未捕获的领域异常 ⇒ 500，而正确答案是 404。
+        raise NotFoundError(str(exc)) from exc
+    except multi_step_resume.ResumeConflict as exc:
+        raise ConflictError(str(exc)) from exc
+
+    # 起始步**不**通过 DTO 传递：prepareResume 已把它写进 run.current_step_idx，
+    # Task 6 的 adoptRunForResume 从那里读。唯一事实来源 = DB。
+    chatDto = ChatRequest(
+        question=run.question,
+        sessionId=str(run.session_id),
+        datasourceId=run.datasource_id,
+        modelId=dto.model_override or run.model_id,
+        resumeRunId=run.id,   # 字段类型是 uuid.UUID | None，直接给 UUID（Task 6 判决后）
+    )
+
+    async def eventSource() -> AsyncIterator[str]:
+        try:
+            async for event in _service.processMessageStream(chatDto, session, user=_user):
+                yield event.toSse()
+        finally:
+            # finally 而非「循环后」：客户端断连时生成器被取消，CancelledError 也会
+            # 走到这里，run 照样被封口（H4 断连落库那一课）。
+            await _sealAbandonedResume(session, runId)
+
+    return StreamingResponse(
+        eventSource(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

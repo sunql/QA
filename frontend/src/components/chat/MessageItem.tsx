@@ -138,7 +138,7 @@ function MessageItem({
                 <MultiStepPlanCard
                   steps={message.steps}
                   currentStepIndex={message.currentStepIndex}
-                  onResume={resumeRun}
+                  onResume={(runId, fromStepIndex) => resumeRun(runId, fromStepIndex, message.id)}
                   disabled={loading}
                 />
               </div>

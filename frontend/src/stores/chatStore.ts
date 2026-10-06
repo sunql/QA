@@ -108,27 +108,54 @@ function patchLastMessage(messages: ChatMessage[], patch: Partial<ChatMessage>):
   return [...messages.slice(0, -1), { ...last, ...patch }];
 }
 
+// 定向更新：targetId 为空时退化为「更新最后一条」（首发路径行为不变）。
+//
+// 续跑必须用它：SSE handler 默认写「最后一条」，而续跑的目标卡片可能是历史里的
+// 任意一条（用户上滚点旧卡片的续跑）—— 写 last 会让被点的卡片纹丝不动、
+// 把最新的消息污染掉。找不到 id 时 map 天然是恒等变换（不新增、不报错）。
+function patchMessage(
+  messages: ChatMessage[],
+  targetId: string | undefined,
+  patch: Partial<ChatMessage>
+): ChatMessage[] {
+  if (!targetId) return patchLastMessage(messages, patch);
+  return messages.map((m) => (m.id === targetId ? { ...m, ...patch } : m));
+}
+
 // 后端步骤结果 → 前端终态：有 error 即失败（失败步骤 sql 恒为 null，与后端同判据）。
 // 流式（onStepResult）与非流式（响应 steps 回填）共用，避免两处判据漂移。
 function stepStatusFromResult(error: string | null | undefined): StepStatus {
   return error ? "error" : "done";
 }
 
-// 不可变更新最后一条助手消息中指定 stepIndex 的步骤（不动其它步骤与消息）
-function patchStep(messages: ChatMessage[], stepIndex: number, patch: Partial<MultiStepStep>): ChatMessage[] {
-  const last = messages[messages.length - 1];
-  if (!last) return messages;
-  const steps = last.steps ?? [];
+// 不可变更新指定消息（targetId 为空 ⇒ 最后一条）中指定 stepIndex 的步骤
+// （不动其它步骤与消息）
+function patchStep(
+  messages: ChatMessage[],
+  targetId: string | undefined,
+  stepIndex: number,
+  patch: Partial<MultiStepStep>
+): ChatMessage[] {
+  // 取数也必须认 targetId：否则定向写会把**最新**消息的 steps 搬到旧卡片上
+  const target = targetId
+    ? messages.find((m) => m.id === targetId)
+    : messages[messages.length - 1];
+  if (!target) return messages;
+  const steps = target.steps ?? [];
   const nextSteps = steps.map((s) => (s.stepIndex === stepIndex ? { ...s, ...patch } : s));
-  return patchLastMessage(messages, { steps: nextSteps });
+  return patchMessage(messages, targetId, { steps: nextSteps });
 }
 
 // 流式结束：把仍处于「执行中」的步骤标记为「已完成」（汇总步骤无 step_result，靠 done 收尾）
-function finalizeRunningSteps(messages: ChatMessage[]): ChatMessage[] {
-  const last = messages[messages.length - 1];
-  if (!last?.steps?.some((s) => s.status === "running")) return messages;
-  return patchLastMessage(messages, {
-    steps: last.steps.map((s) => (s.status === "running" ? { ...s, status: "done" as const } : s)),
+// targetId 为空 ⇒ 最后一条（首发行为不变）；续跑时必须指向目标卡片，
+// 否则旧卡片里卡在「执行中」的汇总步永远不会收尾。
+function finalizeRunningSteps(messages: ChatMessage[], targetId?: string): ChatMessage[] {
+  const target = targetId
+    ? messages.find((m) => m.id === targetId)
+    : messages[messages.length - 1];
+  if (!target?.steps?.some((s) => s.status === "running")) return messages;
+  return patchMessage(messages, targetId, {
+    steps: target.steps.map((s) => (s.status === "running" ? { ...s, status: "done" as const } : s)),
   });
 }
 
@@ -197,8 +224,12 @@ interface ChatState {
    * 续跑一个失败的多步 run（spec §7）：从 fromStepIndex 起重跑，响应同样是 SSE 流。
    *
    * 与首发共用 `streamHandlers`（同一套状态判据），只是入口不同。
+   *
+   * `messageId` 是**被点的那个卡片**的消息 id：续跑的事件必须写回它，
+   * 而不是「最后一条」——否则用户上滚点旧卡片续跑时，旧卡片纹丝不动、
+   * 最新的消息被污染。
    */
-  resumeRun: (runId: string, fromStepIndex: number) => Promise<void>;
+  resumeRun: (runId: string, fromStepIndex: number, messageId: string) => Promise<void>;
   clearMessages: () => void;
   resetSession: () => void;
   /**
@@ -233,11 +264,14 @@ interface ChatState {
  * 抽取自 sendMessage 内联的 handlers 字面量：`resumeRun` 复用同一套判据，
  * 否则「续跑」的步骤状态与「首发」会各写一份、逐渐分叉。
  */
-function streamHandlers(set: StoreApi<ChatState>["setState"]): StreamEventHandlers {
+function streamHandlers(
+  set: StoreApi<ChatState>["setState"],
+  targetId?: string
+): StreamEventHandlers {
   return {
     onMeta: (intent) =>
       set((state) => ({
-        messages: patchLastMessage(state.messages, {
+        messages: patchMessage(state.messages, targetId, {
           // 运行时收窄：仅接受已知意图，未知值不入库
           intent: isIntent(intent) ? intent : undefined,
         }),
@@ -245,13 +279,13 @@ function streamHandlers(set: StoreApi<ChatState>["setState"]): StreamEventHandle
     // ReAct 查询计划（Phase E）：流式中已可回填，完成后配合 isStreaming=false 展示
     onPlan: (plan) =>
       set((state) => ({
-        messages: patchLastMessage(state.messages, { queryPlan: plan }),
+        messages: patchMessage(state.messages, targetId, { queryPlan: plan }),
       })),
     onSql: (sql) =>
-      set((state) => ({ messages: patchLastMessage(state.messages, { sql }) })),
+      set((state) => ({ messages: patchMessage(state.messages, targetId, { sql }) })),
     onChart: (chart: StreamChartData) =>
       set((state) => ({
-        messages: patchLastMessage(state.messages, {
+        messages: patchMessage(state.messages, targetId, {
           chartType: chart.chartType,
           chartOption: chart.chartOption,
           tableOption: chart.tableOption,
@@ -263,7 +297,7 @@ function streamHandlers(set: StoreApi<ChatState>["setState"]): StreamEventHandle
     // runId 盖到每个步骤上：续跑按钮要凭它拼 resume 端点
     onStepPlanOverview: (steps, runId) =>
       set((state) => ({
-        messages: patchLastMessage(state.messages, {
+        messages: patchMessage(state.messages, targetId, {
           steps: steps.map(
             (s): MultiStepStep => ({
               stepIndex: s.stepIndex,
@@ -279,15 +313,16 @@ function streamHandlers(set: StoreApi<ChatState>["setState"]): StreamEventHandle
     // 单个子步骤进入执行：标记「执行中」并高亮当前步骤
     onStepPlan: (step) =>
       set((state) => ({
-        messages: patchLastMessage(
-          patchStep(state.messages, step.stepIndex, { status: "running" }),
+        messages: patchMessage(
+          patchStep(state.messages, targetId, step.stepIndex, { status: "running" }),
+          targetId,
           { currentStepIndex: step.stepIndex }
         ),
       })),
     // 单个子步骤完成：标记「完成/失败」并回填 sql/summary/error/图表
     onStepResult: (result) =>
       set((state) => ({
-        messages: patchStep(state.messages, result.stepIndex, {
+        messages: patchStep(state.messages, targetId, result.stepIndex, {
           status: stepStatusFromResult(result.error),
           sql: result.sql ?? null,
           summary: result.summary ?? null,
@@ -303,7 +338,7 @@ function streamHandlers(set: StoreApi<ChatState>["setState"]): StreamEventHandle
     // 这里覆盖成 compressed —— 压缩发生在它成功之后，覆盖是正确方向）
     onStepCompressed: (payload) =>
       set((state) => ({
-        messages: patchStep(state.messages, payload.stepIndex, {
+        messages: patchStep(state.messages, targetId, payload.stepIndex, {
           status: "compressed",
           originalRows: payload.originalRows,
           compressedRows: payload.compressedRows,
@@ -313,14 +348,14 @@ function streamHandlers(set: StoreApi<ChatState>["setState"]): StreamEventHandle
     // 用浅合并（不可变 patch）覆盖，避免后续事件把已有 badge 抹掉
     onDataQuality: (payload) =>
       set((state) => ({
-        messages: patchLastMessage(state.messages, {
+        messages: patchMessage(state.messages, targetId, {
           dataQuality: payload.badges,
         }),
       })),
     // 类召回诊断（2026-09-16）：截断/降级时 MessageItem 渲染提示
     onClassRecall: (info) =>
       set((state) => ({
-        messages: patchLastMessage(state.messages, {
+        messages: patchMessage(state.messages, targetId, {
           classRecall: info,
         }),
       })),
@@ -328,7 +363,7 @@ function streamHandlers(set: StoreApi<ChatState>["setState"]): StreamEventHandle
       set((state) => {
         const last = state.messages[state.messages.length - 1];
         return {
-          messages: patchLastMessage(state.messages, {
+          messages: patchMessage(state.messages, targetId, {
             content: (last.content ?? "") + content,
           }),
         };
@@ -348,7 +383,7 @@ function streamHandlers(set: StoreApi<ChatState>["setState"]): StreamEventHandle
     }) =>
       set((state) => ({
         messages: finalizeRunningSteps(
-          patchLastMessage(state.messages, {
+          patchMessage(state.messages, targetId, {
             tokensUsed,
             cost,
             modelName: modelName ?? undefined,
@@ -368,13 +403,14 @@ function streamHandlers(set: StoreApi<ChatState>["setState"]): StreamEventHandle
             // 单步的 rationale 已由 chart 事件回填，这里只在非 null 时覆盖 ——
             // 否则会把 chart 事件写好的依据抹成 null（键必须整段缺省，不能 `?? undefined`）。
             ...(visualRationale ? { visualRationale } : {}),
-          })
+          }),
+          targetId
         ),
         loading: false,
       })),
     onError: (message, detail) =>
       set((state) => ({
-        messages: patchLastMessage(state.messages, {
+        messages: patchMessage(state.messages, targetId, {
           content: message,
           errorDetail: detail ?? null,
           isError: true,
@@ -616,14 +652,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
   },
 
-  resumeRun: async (runId, fromStepIndex) => {
+  resumeRun: async (runId, fromStepIndex, messageId) => {
     set({ loading: true, error: null });
     try {
-      await resumeMultiStepRun(runId, fromStepIndex, streamHandlers(set));
+      // 事件写回被点的那条消息（不是最后一条）——见 ChatState.resumeRun 注释
+      await resumeMultiStepRun(runId, fromStepIndex, streamHandlers(set, messageId));
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : i18n.t("errors.unknownError");
       set((state) => ({
-        messages: patchLastMessage(state.messages, {
+        messages: patchMessage(state.messages, messageId, {
           content: msg,
           isError: true,
           isStreaming: false,
@@ -634,12 +671,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     } finally {
       // 兜底复位：续跑流异常结束（无 done/error 帧）时也要复位 loading，
       // 否则发送按钮永久禁用（同 sendMessage 的 HIGH#3）。
+      // 同样认 messageId：异常路径写到最新消息也是这个 finding 的同一个洞。
       set((state) => {
-        const last = state.messages[state.messages.length - 1];
-        if (!state.loading && !last?.isStreaming) return {};
-        if (!last?.isStreaming) return { loading: false };
+        const target = state.messages.find((m) => m.id === messageId);
+        if (!state.loading && !target?.isStreaming) return {};
+        if (!target?.isStreaming) return { loading: false };
         return {
-          messages: patchLastMessage(state.messages, { isStreaming: false }),
+          messages: patchMessage(state.messages, messageId, { isStreaming: false }),
           loading: false,
         };
       });

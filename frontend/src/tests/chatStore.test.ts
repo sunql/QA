@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const chatApi = vi.hoisted(() => ({
   sendMessage: vi.fn(),
   sendMessageStream: vi.fn(),
+  resumeMultiStepRun: vi.fn(),
   fetchHypotheses: vi.fn(),
 }));
 vi.mock("../api/chat", () => chatApi);
@@ -25,6 +26,7 @@ const persist = vi.hoisted(() => ({
 vi.mock("../stores/persistChatUiState", () => persist);
 
 import { useChatStore, generateSessionId } from "../stores/chatStore";
+import type { StreamEventHandlers } from "../api/chat";
 import type { ChatMessage } from "../types/chat";
 import type { ChatSession, ChatMessageRead } from "../types/chatHistory";
 
@@ -905,5 +907,99 @@ describe("chatStore 两个新字段回填（0107）", () => {
         visualRationale: RATIONALE,
       });
     }
+  });
+});
+
+// ===== Task 9 fix round 1：续跑必须写「被点的那条消息」，而不是「最后一条」 =====
+// 复现：多步跑到某步失败 → 追问一句（loading 回落 false）→ 上滚点**旧卡片**的续跑。
+// 旧实现把该 run 的 step 事件全写进最新那条消息 ⇒ 被点的卡片纹丝不动、最新消息被污染。
+describe("chatStore resumeRun 定向写入", () => {
+  const EARLY_STEPS = [
+    {
+      stepIndex: 0,
+      description: "旧步0",
+      subQuestion: "q0",
+      aggregationOnly: false,
+      status: "done" as const,
+      sql: "SELECT 0",
+      summary: null,
+      error: null,
+      runId: "r-old",
+    },
+    {
+      stepIndex: 1,
+      description: "旧步1",
+      subQuestion: "q1",
+      aggregationOnly: false,
+      status: "error" as const,
+      sql: null,
+      summary: null,
+      error: "boom",
+      runId: "r-old",
+    },
+  ];
+
+  function makeMessages(): { early: ChatMessage; newest: ChatMessage } {
+    const early: ChatMessage = {
+      id: "m-early",
+      role: "assistant",
+      content: "旧的多步回答",
+      timestamp: 1,
+      steps: EARLY_STEPS,
+    };
+    const newest: ChatMessage = {
+      id: "m-new",
+      role: "assistant",
+      content: "最新的追问回答",
+      timestamp: 2,
+      sql: "SELECT n",
+      steps: [
+        {
+          stepIndex: 0,
+          description: "新步0",
+          subQuestion: "qn",
+          aggregationOnly: false,
+          status: "done",
+          sql: "SELECT n",
+          summary: null,
+          error: null,
+          runId: "r-new",
+        },
+      ],
+    };
+    return { early, newest };
+  }
+
+  it("对较早那条续跑只更新它，最新那条逐字段不动（引用相等）", async () => {
+    // Arrange
+    const { early, newest } = makeMessages();
+    useChatStore.setState({ messages: [early, newest], loading: false });
+    chatApi.resumeMultiStepRun.mockImplementation(
+      async (_runId: string, _from: number, handlers: StreamEventHandlers) => {
+        handlers.onStepPlan?.({ stepIndex: 1, description: "旧步1", subQuestion: "q1" });
+        handlers.onStepResult?.({
+          stepIndex: 1,
+          description: "旧步1",
+          subQuestion: "q1",
+          sql: "SELECT 1",
+          summary: "ok",
+          error: null,
+        });
+      }
+    );
+
+    // Act
+    await useChatStore.getState().resumeRun("r-old", 1, "m-early");
+
+    // Assert —— ① 被点的那条消息被推进（running → done，并回填 sql）
+    const msgs = useChatStore.getState().messages;
+    expect(msgs[0].steps?.[1].status).toBe("done");
+    expect(msgs[0].steps?.[1].sql).toBe("SELECT 1");
+    // 未被续跑的那一步不动
+    expect(msgs[0].steps?.[0].status).toBe("done");
+    // ② 最新那条消息逐个字段未被改动（引用相等 = 不可变更新只碰目标）
+    expect(msgs[1]).toBe(newest);
+    // ③ 请求带的是被点的 runId 与起始步号
+    expect(chatApi.resumeMultiStepRun).toHaveBeenCalledWith("r-old", 1, expect.anything());
   });
 });

@@ -201,17 +201,34 @@ async def resumeMultiStep(
         resumeRunId=run.id,   # 字段类型是 uuid.UUID | None，直接给 UUID（Task 6 判决后）
     )
 
+    async def sealAbandoned() -> None:
+        """兜底封口的唯一入口。best-effort：响应已（部分）发出，抛出去改变不了客户端
+        可见的任何东西，只会污染日志（与同文件 `/stream` 的 persistIfInterrupted 同口径）。
+        `_sealAbandonedResume` 幂等（非 running 直接返回），兜底路径多跑一次也只是空转。"""
+        try:
+            await _sealAbandonedResume(session, runId)
+        except Exception as exc:
+            logger.exception("续跑兜底封口失败: %s", exc)
+
     async def eventSource() -> AsyncIterator[str]:
         try:
             async for event in _service.processMessageStream(chatDto, session, user=_user):
                 yield event.toSse()
-        finally:
-            # finally 而非「循环后」：客户端断连时生成器被取消，CancelledError 也会
-            # 走到这里，run 照样被封口（H4 断连落库那一课）。
-            await _sealAbandonedResume(session, runId)
+        except Exception:
+            # 这条只兜「上游真抛异常」：此时异常穿出 Starlette 的收敛任务组，
+            # 下面的 background 钩子**不会**被执行，run 就没人封口了。
+            # （GeneratorExit / CancelledError 都是 BaseException，不走这里 —— 断连时
+            # 生成器停在 yield 上、取消不进生成器帧，本分支与 finally 一律不触发。）
+            await sealAbandoned()
+            raise
 
     return StreamingResponse(
         eventSource(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        # 断连必须靠 background：它在收敛任务组**之外**被 await（starlette
+        # responses.py），断连时确定跑到，且此刻请求 session 仍开着。H4 实测：
+        # 断连有两种时序，主情形（生成器停在 yield 上）里 `except CancelledError`
+        # 与 `finally` 都不触发 —— 所以兜底不能写在生成器的 finally 里。
+        background=BackgroundTask(sealAbandoned),
     )

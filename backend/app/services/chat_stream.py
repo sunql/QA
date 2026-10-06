@@ -32,7 +32,11 @@ from app.domain.multi_step_plan import (
 from app.domain.query_plan import QueryPlan
 from app.domain.schemas import AgentSuggestion, ChatRequest, SemanticState
 from app.services import multi_step_persistence as persistence
-from app.services.chat_constants import ROUTING_LAYER_L2
+from app.services.chat_constants import (
+    ROUTING_LAYER_L2,
+    USAGE_PURPOSE_ANSWER,
+    USAGE_PURPOSE_NL2SQL,
+)
 from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.chat_helpers import (
     _MSG_STEP_AGGREGATION_SKIPPED,
@@ -653,7 +657,7 @@ class StreamMixin:
             totalCost += self._costFor(retryCfg, retryTokens[0], retryTokens[1], cacheHitMultiplier=cacheHitMultiplier)
             await self._recordUsage(
                 session, dto.sessionId, retryCfg,
-                retryTokens[0], retryTokens[1], purpose="nl2sql",
+                retryTokens[0], retryTokens[1], purpose=USAGE_PURPOSE_NL2SQL,
             )
 
         chartType, option, tableOption, rationale, chartPt, chartCt, chartCached = await self._chartStep(
@@ -727,7 +731,7 @@ class StreamMixin:
                 )
                 await self._recordUsage(
                     session, dto.sessionId, answerConfig,
-                    chunk.promptTokens, chunk.completionTokens, purpose="answer",
+                    chunk.promptTokens, chunk.completionTokens, purpose=USAGE_PURPOSE_ANSWER,
                 )
                 if persistState is not None:
                     persistState.totalCostUsd = float(totalCost)
@@ -999,7 +1003,7 @@ class StreamMixin:
                 last_model_name = agg_config.model_name
                 await self._recordUsage(
                     session, dto.sessionId, agg_config,
-                    agg_pt, agg_ct, purpose="answer",
+                    agg_pt, agg_ct, purpose=USAGE_PURPOSE_ANSWER,
                 )
                 await self._storeSessionMessages(
                     session, dto.sessionId, dto.question, agg_content, None,

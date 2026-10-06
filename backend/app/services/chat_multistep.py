@@ -28,7 +28,14 @@ from app.domain.query_plan import QueryPlan
 from app.domain.schemas import ChatRequest, ChatResponse
 from app.infrastructure.llm.base_client import LlmMessage
 from app.services import multi_step_persistence as persistence
-from app.services.chat_constants import ROUTING_LAYER_L2
+from app.services.chat_constants import (
+    ROUTING_LAYER_L2,
+    USAGE_PURPOSE_ANSWER,
+    USAGE_PURPOSE_FOLLOW_UP_REWRITE,
+    USAGE_PURPOSE_MULTISTEP_GLOBAL_FILTER,
+    USAGE_PURPOSE_NL2SQL,
+    USAGE_PURPOSE_STEP_PLAN,
+)
 from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.chat_context import InheritedState
 from app.services.chat_helpers import (
@@ -73,7 +80,7 @@ class MultiStepMixin:
         仅对 NEW_QUERY / QUERY 意图触发；REFINE/FOLLOW_UP 走原单轮流水线
         （避免对上一轮 SQL 的微调被强制拆步）。
 
-        拆步 LLM 调用无论结果如何都计量（purpose="step_plan"）；调用抛异常时
+        拆步 LLM 调用无论结果如何都计量（purpose=USAGE_PURPOSE_STEP_PLAN）；调用抛异常时
         返回 None 且不计量（调用未成功，无可计量 token）。
         """
         try:
@@ -86,7 +93,7 @@ class MultiStepMixin:
         # 拆步 LLM 调用已发生，如实计量（即使拆出单步/解析失败）
         await self._recordUsage(
             session, dto.sessionId, pc.selected,
-            result.prompt_tokens, result.completion_tokens, purpose="step_plan",
+            result.prompt_tokens, result.completion_tokens, purpose=USAGE_PURPOSE_STEP_PLAN,
         )
         if result.plan is None or result.plan.is_single_step:
             return None
@@ -110,7 +117,7 @@ class MultiStepMixin:
         rule_result = await self._stepPlanner.plan_explicit(dto.question)
         if rule_result.plan is not None:
             await self._recordUsage(
-                session, dto.sessionId, pc.selected, 0, 0, purpose="step_plan",
+                session, dto.sessionId, pc.selected, 0, 0, purpose=USAGE_PURPOSE_STEP_PLAN,
             )
             return dto, rule_result.plan, pc, 0, Decimal("0")
 
@@ -188,7 +195,7 @@ class MultiStepMixin:
             return None
         await self._recordUsage(
             session, dto.sessionId, pc.selected,
-            resp.promptTokens, resp.completionTokens, purpose="follow_up_rewrite",
+            resp.promptTokens, resp.completionTokens, purpose=USAGE_PURPOSE_FOLLOW_UP_REWRITE,
         )
         data = StepQueryPlanner._extract_json(resp.content or "")
         if not data:
@@ -250,7 +257,7 @@ class MultiStepMixin:
     ) -> GlobalFilters | None:
         """B 层（feat-multistep-global-filter）：预抽取多步问题的全局范围类约束。
 
-        调用一次 LLM（purpose="multistep_global_filter"），失败降级返回 None——
+        调用一次 LLM（purpose=USAGE_PURPOSE_MULTISTEP_GLOBAL_FILTER），失败降级返回 None——
         仅靠 A 的措辞兜底，不阻断多步执行。被抽取的约束将注入每一步 prompt
         的 [global_constraints] 块，强指令 LLM 沿用。
 
@@ -271,7 +278,7 @@ class MultiStepMixin:
         if promptTokens or completionTokens:
             await self._recordUsage(
                 session, dto.sessionId, pc.selected, promptTokens, completionTokens,
-                purpose="multistep_global_filter",
+                purpose=USAGE_PURPOSE_MULTISTEP_GLOBAL_FILTER,
             )
         return gf
 
@@ -385,7 +392,7 @@ class MultiStepMixin:
                 cost += self._costFor(retry_cfg, retry_tokens[0], retry_tokens[1])
                 await self._recordUsage(
                     session, dto.sessionId, retry_cfg,
-                    retry_tokens[0], retry_tokens[1], purpose="nl2sql",
+                    retry_tokens[0], retry_tokens[1], purpose=USAGE_PURPOSE_NL2SQL,
                 )
                 model_name = retry_cfg.model_name
 
@@ -694,7 +701,7 @@ class MultiStepMixin:
                 last_model_name = agg_config.model_name
                 await self._recordUsage(
                     session, dto.sessionId, agg_config,
-                    agg_pt, agg_ct, purpose="answer",
+                    agg_pt, agg_ct, purpose=USAGE_PURPOSE_ANSWER,
                 )
                 await self._storeSessionMessages(
                     session, dto.sessionId, dto.question, agg_content, None,

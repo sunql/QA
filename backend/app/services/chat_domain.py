@@ -37,6 +37,11 @@ from app.domain.schemas import (
     OntologyPropertyUpdate,
 )
 from app.infrastructure.llm.base_client import LlmMessage
+from app.services.chat_constants import (
+    USAGE_PURPOSE_AGENT_RUN,
+    USAGE_PURPOSE_CLARIFY,
+    USAGE_PURPOSE_SUPPLIER_RISK,
+)
 from app.services.chat_helpers import _PipelineContext, _audit
 from app.services.graph_traversal_service import resolveChatMaxHops
 from app.services.intent_service import IntentResult
@@ -99,7 +104,7 @@ class DomainCommandMixin:
         totalCost += self._costFor(pc.selected, wastedPt, wastedCt)
         await self._recordUsage(
             session, dto.sessionId, answerConfig,
-            answerResp.promptTokens, answerResp.completionTokens, purpose="clarify",
+            answerResp.promptTokens, answerResp.completionTokens, purpose=USAGE_PURPOSE_CLARIFY,
         )
         await self._storeSessionMessages(session, dto.sessionId, dto.question, answerResp.content, None)
         affinity = await self._buildAffinityStatus(
@@ -235,7 +240,7 @@ class DomainCommandMixin:
             prompt_tokens=data.prompt_tokens,
             completion_tokens=data.completion_tokens,
             cost=data.cost, model_name=data.llm_model_name,
-            purpose="supplier_risk",
+            purpose=USAGE_PURPOSE_SUPPLIER_RISK,
         )
         # answer 拼装复用 buildRiskAnswer（与 Agent Tool 共用同一文案，DRY）
         answer = buildRiskAnswer(data, result.supplierKey)
@@ -458,7 +463,7 @@ class DomainCommandMixin:
             prompt_tokens=run.prompt_tokens,
             completion_tokens=run.completion_tokens,
             cost=run.cost, model_name=run.llm_model_name,
-            purpose="agent_run",
+            purpose=USAGE_PURPOSE_AGENT_RUN,
         )
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, run.answer, None

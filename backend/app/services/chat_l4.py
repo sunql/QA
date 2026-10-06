@@ -21,7 +21,10 @@ from app.domain.exceptions import ConfigError
 from app.domain.schemas import ChatRequest, ChatResponse
 from app.infrastructure.llm.base_client import BaseLlmClient
 from app.services.agent_runtime_service import AgentLoopResult
-from app.services.chat_constants import ROUTING_LAYER_L4
+from app.services.chat_constants import (
+    ROUTING_LAYER_L4,
+    USAGE_PURPOSE_L4_AGENT_LOOP,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +114,7 @@ class L4Mixin:
                 llm_config,
                 result.prompt_tokens,
                 result.completion_tokens,
-                purpose="l4_agent_loop",
+                purpose=USAGE_PURPOSE_L4_AGENT_LOOP,
             )
         return result
 

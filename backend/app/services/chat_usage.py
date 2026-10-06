@@ -25,6 +25,11 @@ from app.infrastructure.llm.base_client import LlmMessage
 from app.services.messages_zh import MSG_NL2SQL_SHARE_INVARIANT_FAILED
 from app.services.nl2sql_semantic_guard import checkShareInvariants
 from app.services.nl2sql_service import _readFloatConfig
+from app.services.chat_constants import (
+    USAGE_PURPOSE_ANSWER,
+    USAGE_PURPOSE_CHART,
+    USAGE_PURPOSE_NL2SQL,
+)
 from app.services.chat_helpers import (
     _PipelineContext,
     _RETRY_SQL_LOG_LIMIT,
@@ -196,7 +201,7 @@ class UsageMixin:
             session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
         )
         cost = self._costFor(cfg, pt, ct, cacheHitMultiplier=cacheHitMultiplier)
-        await self._recordUsage(session, dto.sessionId, cfg, pt, ct, purpose="nl2sql")
+        await self._recordUsage(session, dto.sessionId, cfg, pt, ct, purpose=USAGE_PURPOSE_NL2SQL)
         return _RetryGenUsage(tokens=pt + ct, cost=cost, modelName=cfg.model_name)
 
     @staticmethod
@@ -356,7 +361,7 @@ class UsageMixin:
         if chartPt + chartCt > 0:
             await self._recordUsage(
                 session, dto.sessionId, config, chartPt, chartCt,
-                purpose="chart", cachedTokens=chartCached,
+                purpose=USAGE_PURPOSE_CHART, cachedTokens=chartCached,
             )
 
     async def _recordAnswerUsage(
@@ -367,7 +372,7 @@ class UsageMixin:
         await self._recordUsage(
             session, dto.sessionId, config,
             resp.promptTokens, resp.completionTokens,
-            purpose="answer", cachedTokens=getattr(resp, "cachedTokens", None),
+            purpose=USAGE_PURPOSE_ANSWER, cachedTokens=getattr(resp, "cachedTokens", None),
         )
 
     @staticmethod

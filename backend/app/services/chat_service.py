@@ -34,7 +34,11 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
-from app.services.chat_constants import ROUTING_LAYER_L1, ROUTING_LAYER_L2
+from app.services.chat_constants import (
+    ROUTING_LAYER_L1,
+    ROUTING_LAYER_L2,
+    USAGE_PURPOSE_NL2SQL,
+)
 from app.domain.chart_spec import ChartSpec, SpecKpi
 from app.domain.enums import ChartType, IntentType
 from app.domain.exceptions import (
@@ -673,7 +677,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             totalCost += self._costFor(retryCfg, retryTokens[0], retryTokens[1])
             await self._recordUsage(
                 session, dto.sessionId, retryCfg,
-                retryTokens[0], retryTokens[1], purpose="nl2sql",
+                retryTokens[0], retryTokens[1], purpose=USAGE_PURPOSE_NL2SQL,
             )
         # 图表/回答用量已在 _chartStep / _recordAnswerUsage 中记录，此处仅汇总展示
         await self._recordAnswerUsage(session, dto, answerConfig, answerResp)
@@ -1060,7 +1064,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             session, dto.sessionId, sqlConfig,
             planResult.promptTokens + sqlResult.promptTokens,
             planResult.completionTokens + sqlResult.completionTokens,
-            purpose="nl2sql",
+            purpose=USAGE_PURPOSE_NL2SQL,
             cachedTokens=mergedCachedTokens,
         )
         # ★ wiki-ontology-link Task 6：audit trace 落库（在 LLM 调用成功之后写入）。

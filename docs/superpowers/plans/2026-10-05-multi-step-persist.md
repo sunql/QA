@@ -3327,13 +3327,27 @@ Expected: FAIL — `ModuleNotFoundError: app.jobs.cleanup_multi_step_runs`
 
 - [ ] **Step 3: 写实现**
 
-> **复核记录（2026-10-06，人类裁决 —— Task 8 复查的 Important 项）**
+> **复核记录（2026-10-06，人类裁决 —— Task 8 复查的 Important 项；同日 IMP-1 方案 B 修正）**
 > 曾经怀疑存在「已提交、终态、`finished_at IS NULL`」的崩溃僵尸行，并据此加过一条以
-> `updated_at` 计龄的 NULL 兜底臂。**复核后撤销**：该行态在生产上不可产生 —— 唯一会写
-> 「`status=failed` 且不设 `finished_at`」的 `_recordStepFailure` 只 `flush()`（persistence
-> 层零 `commit()`），而四处 `commit()` 全部紧跟在 `_closeRun(...)`（硬编码 `finished=True`）
-> 之后，中间态因此从未落库。谓词保持原样（只按 `finished_at` 计龄）；若将来出现真的
-> 无 `finished_at` 的终态行，再按 `COALESCE(finished_at, updated_at)` 加臂。
+> `updated_at` 计龄的 NULL 兜底臂。**复核后撤销**：一度以为该行态在生产上不可产生 ——
+> 当时的理由是「唯一会写 `status=failed` 且不设 `finished_at` 的 `_recordStepFailure`
+> 只 `flush()`，persistence 层零 `commit()`，中间态从未落库」。
+>
+> **该理由已证伪**（IMP-1 方案 B，2026-10-06）：persistence 层零 `commit()` 属实，但
+> 落库层不是 —— `backend/app/services/token_usage_service.py:58` 就在 `recordUsage`
+> 里 `await session.commit()`，而它会被多步循环中途的 `_recordUsage` 调用（构造下一步
+> prompt 时的用量记账）。于是 `_recordStepFailure` 写下的
+> `failed + finished_at IS NULL` 中间态**确实会被持久化**：并发续跑据此劫持仍活着的
+> run（`RESUMABLE_STATUSES` 只认 failed/partially_failed），而清理谓词两个分支都要求
+> `finished_at < cutoff` ⇒ 该行**永不被回收**。
+>
+> **修正（写侧，方案 B）**：`_recordStepFailure` 不再写 run 终态（只前置进度指针），
+> run 终态只在 `_closeRun` 落，且 `updateRun` 用同一条 UPDATE 写 `status` 与
+> `finished_at`，并对「终态而无 `finished=True`」结构性抛 `ValueError`。修复后生产侧
+> 不再产生该形态，故**仍不加** `COALESCE(finished_at, updated_at)` 兜底臂 —— 加了它反而
+> 会在将来回归时把证据行级联删掉、掩盖回归。历史遗留行由运维一次性回填
+> （`UPDATE multi_step_run SET finished_at = updated_at WHERE status IN (...) AND finished_at IS NULL`），
+> 见变更记录遗留项 16。
 
 `backend/app/jobs/cleanup_multi_step_runs.py`:
 ```python
@@ -4126,10 +4140,16 @@ git commit -m "docs(multi-step): 补 wiki 与 change 记录"
     自己写明「用户主动 kill 浏览器 ⇒ `run.status=running` 残留」，而 §10.4 只为
     `succeeded`(30d) / `failed`+`partially_failed`(7d) 定规则 —— Task 8 用 `_TERMINAL`
     过滤正确地**不删**这些行，于是它们无限累积。注意第 10 条只覆盖**续跑**入口的
-    `_sealAbandonedResume`；**全新执行**被 kill 后留下的 `running` 行无人封口，两者不矛盾
-    （已核对：两个执行器里只有 4 处 `session.commit()`，全部紧邻带 `finished=True` 的
-    `_closeRun`；循环中途 `updateRun(status=FAILED)` 只有 `flush()`，故要么与收尾同事务落盘、
-    要么随会话回滚成 `running`）。补齐需先定「多久算死」的阈值，属策略决策，不在本计划范围。
+    `_sealAbandonedResume`；**全新执行**被 kill 后留下的 `running` 行无人封口，两者不矛盾。
+    > **更正（2026-10-06，IMP-1 方案 B）**：本条原先写「循环中途 `updateRun(status=FAILED)`
+    > 只有 `flush()`，故要么与收尾同事务落盘、要么随会话回滚成 `running`」—— **该判断是错的**。
+    > `_recordStepFailure` 的那次中间态写**会**落库：多步循环中途的 `_recordUsage` 经
+    > `token_usage_service.recordUsage` 调 `await session.commit()`
+    > （`backend/app/services/token_usage_service.py:58`），把 `failed + finished_at IS NULL`
+    > 持久化。修复（写侧不再写终态 + `updateRun` 结构性禁止终态缺 `finished`）后该形态不再产生，
+    > 但**历史遗留行**仍在，且清理谓词两个分支都要求 `finished_at < cutoff` ⇒ 永不回收，
+    > 需运维一次性回填（见变更记录遗留项 16）。
+    补齐需先定「多久算死」的阈值，属策略决策，不在本计划范围。
 15. **`变更记录强制规范` §一 第 5 条（真实数据验证脚本）未做**（2026-10-06 预检发现）：
     该条规定「涉及真实 SQL/DB 改动时」须有一个幂等的真实数据验证脚本，属**部署阻塞项**。
     本特性（两张表 + 迁移 0114/0115 + 清理任务）确实涉及 DB 改动，而**没有**这个产物 ——

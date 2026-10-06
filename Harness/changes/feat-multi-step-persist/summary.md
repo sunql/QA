@@ -110,6 +110,7 @@ POST /api/v1/chat/multi-step/{runId}/resume
 
 - run：`running → succeeded | failed | partially_failed`；续跑把 `failed`/`partially_failed` 重置回 `running`，`current_step_idx = 起始步`、`finished_at = None`、`resume_count++`、`version++`。
 - step：`pending → running → succeeded | failed | compressed | skipped`；续跑把 `>= 起点` 的步重置回 `pending` 并清 `last_error*` / `attempt_count` / `finished_at` / `data_compressed` / `sql` / `sql_hash`。
+- **不变量（IMP-1 方案 B，2026-10-06）**：run 的**终态**只在计划级收尾路径 `_closeRun` 落，且 `status` 与 `finished_at` 由**同一条 UPDATE** 落下；`updateRun` 对「终态而无 `finished=True`」结构性抛 `ValueError`。**单步的 per-attempt 失败（`_recordStepFailure`）不写 run 终态** —— 那只是「这一步的这次尝试失败了」，计划可能继续（run 保持 `running`）。
 
 ## 5. 实现要点
 
@@ -268,5 +269,14 @@ npx vitest run src/tests/chatStore.test.ts src/tests/chatApi.test.ts src/tests/M
 11. **超大 data（> 5MB）转对象存储**：spec §14 提到超限走 minio，但当前 `data` 一律进 JSONB。先观察真实 `pg_column_size(multi_step_step.data)` 分布，确认有超限样本后再实现，避免过早引入存储依赖。
 12. **并发续跑乐观锁的落库侧强约束**：当前靠 `run.version++` 的自增语义 + 状态校验挡住大部分并发，但**没有** `SELECT … FOR UPDATE`，极端并发下两个请求都可能通过校验。若线上出现双跑，再补行级锁。
 13. **清理任务没有调度入口，保留期策略当前不会执行**（2026-10-06 Task 8 计划预检发现）：spec §10.4（`docs/superpowers/specs/2026-10-05-multi-step-persist.md:321`）写「定期清理由新 **cron 任务**执行」，§13 文件清单（同文件 `:358`）把该文件描述为「新建：**cron 清理脚本**」；但本计划只交付一个可导入的函数 —— 无 `__main__`、无 `scripts/cron_*.sh` 包装、无 crontab / launchd 注册。全仓 grep（排除 `.git`）实测：`app.jobs` 的**生产代码**引用为零，唯一引用方是它自己的集成测试 `backend/app/tests/integration/test_multi_step_cleanup.py:10`（`from app.jobs.cleanup_multi_step_runs import cleanupMultiStepRuns`），另两处提及在 spec 与本计划的待建清单里，都是「打算建」而非「谁调用」。故没有任何生产路径会调用它。更关键的是本机 cron 已确认静默失效（`/etc/crontab` 缺失、launchd 契约断裂，见 [[qa-system-cron-silently-broken]]），即便补上注册也不会触发。**结论：30/7 天只是写在代码里的两个常量，线上不会自动回收。** 本计划的处置与 `scripts/backup_pg.sh` 一致 —— 以可手动调用的形态交付 + 在此登记缺口，不粉饰。真要落地调度时，本仓既有两种形态可参照：`scripts/install_pg_backup_cron.sh` 式的外部 cron 安装器，或 agent scheduler 式的「PG 表 + 独立 worker 轮询」（后者不依赖宿主 cron，是当前唯一可靠的一条）。
-14. **spec §10.4 没有给「非终态 run」定保留规则**（同上预检发现）：spec §11 失败场景表自己写明「用户主动 kill 浏览器 ⇒ `run.status=running` 残留」，而 §10.4 只为 `succeeded`(30d) / `failed`+`partially_failed`(7d) 定规则 —— Task 8 用 `_TERMINAL` 过滤正确地**不删**这些行，于是它们无限累积。注意第 10 条只覆盖**续跑**入口的 `_sealAbandonedResume`；**全新执行**被 kill 后留下的 `running` 行无人封口，两者不矛盾（已核对：两个执行器里只有 4 处 `session.commit()`，全部紧邻带 `finished=True` 的 `_closeRun`；循环中途 `updateRun(status=FAILED)` 只有 `flush()`，故要么与收尾同事务落盘、要么随会话回滚成 `running`）。补齐需先定「多久算死」的阈值，属策略决策，不在本计划范围。
+14. **spec §10.4 没有给「非终态 run」定保留规则**（同上预检发现）：spec §11 失败场景表自己写明「用户主动 kill 浏览器 ⇒ `run.status=running` 残留」，而 §10.4 只为 `succeeded`(30d) / `failed`+`partially_failed`(7d) 定规则 —— Task 8 用 `_TERMINAL` 过滤正确地**不删**这些行，于是它们无限累积。注意第 10 条只覆盖**续跑**入口的 `_sealAbandonedResume`；**全新执行**被 kill 后留下的 `running` 行无人封口，两者不矛盾。补齐需先定「多久算死」的阈值，属策略决策，不在本计划范围。
+    > **更正（2026-10-06，IMP-1 方案 B）**：本条原先的括号注「循环中途 `updateRun(status=FAILED)` 只有 `flush()`，故要么与收尾同事务落盘、要么随会话回滚成 `running`」是**错的**（详见遗留项 16）。那次中间态写**会**被持久化。
+15. **`变更记录强制规范` §一 第 5 条（`<feature>_realdata.py`）未做**（2026-10-06 预检发现）：该条规定「涉及真实 SQL/DB 改动时」须有一个幂等的真实数据验证脚本，属**部署阻塞项**。该约定**是活的**，落点是 `backend/scripts/<feature>_realdata.py`（不是仓根 `scripts/`）—— 全仓 git 跟踪着 3 个现成实例（`wiki_provenance_realdata.py` / `wiki_dedup_realdata.py` / `seed_data_quality_realdata.py`），本特性**没有**这个脚本，属**一处真缺口**（不是「名义约定」），本计划也没有排这个产物。故 §8 按实况写「未做 + 理由」，**不新造脚本凑齐**（计划外产物；要补的话 `backend/scripts/` 里有 3 个现成范例可抄）。要不要补，收尾时由人类定夺。
+    > **已补齐（2026-10-06，人类裁定后补做）**：见 §8「真实数据验证」与遗留项 15 的收尾条目。
+16. **`failed + finished_at IS NULL` 的历史遗留行需运维一次性回填**（2026-10-06，IMP-1 方案 B 复核实证）：修复前 `_recordStepFailure` 会写「终态且不落 `finished_at`」，而多步循环中途的 `_recordUsage` 经 `token_usage_service.recordUsage` 调 `await session.commit()`（`backend/app/services/token_usage_service.py:58`）把该中间态**持久化** ⇒ 历史上**确实可能**存在这类行（本案的「落库层零 commit」旧断言已证伪）。清理谓词（`cleanup_multi_step_runs.py`）两个分支都要求 `finished_at < cutoff`，故这类行**永不回收**（这是**显式裁定**，不是遗漏 —— 加 `COALESCE(finished_at, updated_at)` 兜底臂会在未来回归时把证据行级联删掉、掩盖回归；见 `test_multi_step_cleanup.py::testCleanupDoesNotCollectTerminalRowWithoutFinishedAt` 的理由）。**运维回填**（一次性、幂等）：
+    ```sql
+    UPDATE multi_step_run SET finished_at = updated_at
+     WHERE status IN ('succeeded','failed','partially_failed') AND finished_at IS NULL;
+    ```
+    回填后这些行即可被保留期清理正常回收。方案 B 之后生产侧不再产生该形态。
 15. **`变更记录强制规范` §一 第 5 条（`<feature>_realdata.py`）未做**（2026-10-06 预检发现）：该条规定「涉及真实 SQL/DB 改动时」须有一个幂等的真实数据验证脚本，属**部署阻塞项**。该约定**是活的**，落点是 `backend/scripts/<feature>_realdata.py`（不是仓根 `scripts/`）—— 全仓 git 跟踪着 3 个现成实例（`wiki_provenance_realdata.py` / `wiki_dedup_realdata.py` / `seed_data_quality_realdata.py`），本特性**没有**这个脚本，属**一处真缺口**（不是「名义约定」），本计划也没有排这个产物。故 §8 按实况写「未做 + 理由」，**不新造脚本凑齐**（计划外产物；要补的话 `backend/scripts/` 里有 3 个现成范例可抄）。要不要补，收尾时由人类定夺。

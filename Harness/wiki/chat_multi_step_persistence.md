@@ -72,6 +72,18 @@ running ──▶ succeeded          全部步 succeeded
         └─▶ partially_failed   存在 skipped 步，但后续步跑完
 ```
 
+**写侧不变量（IMP-1 方案 B）**：
+
+- **终态只在 `_closeRun` 落**，且 `status` 与 `finished_at` 由**同一条 UPDATE** 落下；
+  `updateRun` 对「终态而无 `finished=True`」结构性抛 `ValueError`（唯一写点收口）。
+- **单步的 per-attempt 失败（`_recordStepFailure`）不写 run 终态** —— 只记该步这次尝试的
+  错误与进度指针 `current_step_idx`，run 保持 `running`（计划可能继续）。
+  早期实现反手写了 `status=failed` 却不落 `finished_at`，而循环中途
+  `token_usage_service.recordUsage` 的 `commit()` 会把这个中间态持久化 ⇒ 活着的 run 在库里
+  已是 `failed`：并发续跑据此劫持它，且清理谓词（要求 `finished_at < cutoff`）永不回收。
+- 续跑重开走 `updateRun(..., status=running, finished=False)`（`finished` 三态：`None` 不动 /
+  `True` 落 / `False` 清空），不再直接改 ORM 属性绕过写点。
+
 **step**：
 
 ```
@@ -118,6 +130,7 @@ POST /api/v1/chat/multi-step/{runId}/resume
 
 - `succeeded` 保留 **30 天**，`failed` / `partially_failed` 保留 **7 天**（`SUCCEEDED_RETENTION_DAYS` / `FAILED_RETENTION_DAYS`）。
 - **非终态（`running`）的 run 刻意永不删除** —— spec 没给它们定规则；被 kill 后残留的 `running` 行会无限累积（见遗留项 14）。
+- **终态但 `finished_at IS NULL` 的行也**不回收（谓词两分支都要求 `finished_at < cutoff`）。方案 B 之后生产侧不再产生该形态；历史遗留行需运维一次性回填 `UPDATE multi_step_run SET finished_at = updated_at WHERE status IN ('succeeded','failed','partially_failed') AND finished_at IS NULL`（见遗留项 16）。**不加** `COALESCE(finished_at, updated_at)` 兜底臂是显式裁定：兜底臂会在未来回归时把证据行级联删掉、掩盖回归。
 - 实现：`backend/app/jobs/cleanup_multi_step_runs.py` 的 `async def cleanupMultiStepRuns(session, *, succeededRetentionDays=30, failedRetentionDays=7, now=None) -> int`。
 - ⚠️ **没有调度入口**：无 `__main__`、无 `scripts/cron_*.sh` 包装、无 crontab / launchd 注册，全仓生产代码里没有任何调用点（只有它自己的集成测试 import）。**30/7 天当前不会自动执行**。
 

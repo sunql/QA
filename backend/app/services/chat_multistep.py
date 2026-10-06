@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid
 from dataclasses import replace
 from decimal import Decimal
 
@@ -17,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import ChartType, IntentType
 from app.domain.models import LlmConfig, SessionQueryState
-from app.domain.multi_step_models import STEP_STATUS_FAILED, STEP_STATUS_SKIPPED
 from app.domain.multi_step_plan import (
     MAX_PLAN_DATA_STEPS,
     GlobalFilters,
@@ -50,6 +48,7 @@ from app.services.messages_zh import (
     MSG_PLAN_TOO_MANY_STEPS,
 )
 from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
+from app.services.multi_step_retry import ERROR_KIND_PERMANENT
 from app.services.nl2sql_service import _readFloatConfig
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.think_block import applyThinkPolicy
@@ -294,127 +293,141 @@ class MultiStepMixin:
         现在收敛为 `StepResult(error=..., sql=None)` —— sql=None 是失败标记，
         同时保证「无数据」不会被下游 prompt 渲染成「结果为 0 行」。
         """
-        injection_text = ctx.inject_to_prompt(step_plan.index)
-        # 每步独立召回：完整多步问法与子问题语义不同，共享召回（pc.classes）
-        # 可能缺当前步骤需要的类（如步骤问"物料"但召回只命中供应商相关表）。
-        # 合并策略：步骤召回 ∪ 共享召回（保跨步骤 JOIN 连通），步骤召回在前。
-        pc = await self._recallForStep(session, pc, step_plan)
-        # ★ NEW: sub-question 改写 hook（feat-qwen-multistep-uplift）
-        # 仅 Qwen 系列 + 命中对比/对照/地点模式时改写；其他模型 / 无匹配 → 原样透传。
+        # 失败尝试的用量（spec §6.2）：`tokens` / `cost` 要到生成阶段之后才
+        # 累加，一旦异常从本方法**逃逸**（召回 / 落账 / 图表等意外失败），调用点
+        # 的 `getattr(exc, "tokens_used", 0)` 就兜底成 0 —— 钱已经花了，记 0 就是
+        # 漏计。故先把容器置零，任何逃逸路径都在 `except` 里带上当时已累计的用量。
+        tokens = 0
+        cost: Decimal = Decimal("0")
+        model_name: str | None = None
         try:
-            model_name_for_rewrite = (pc.selected.model_name or "") if pc.selected else ""
-            rewrite_result = self._subquestionRewriter.rewrite(
-                sub_question=step_plan.sub_question,
-                prev_results=ctx.completed_steps,
-                model_name=model_name_for_rewrite,
-            )
-            if rewrite_result.rewritten is not None:
-                logger.info(
-                    "sub-question 改写命中 template=%s", rewrite_result.template_id,
+            injection_text = ctx.inject_to_prompt(step_plan.index)
+            # 每步独立召回：完整多步问法与子问题语义不同，共享召回（pc.classes）
+            # 可能缺当前步骤需要的类（如步骤问"物料"但召回只命中供应商相关表）。
+            # 合并策略：步骤召回 ∪ 共享召回（保跨步骤 JOIN 连通），步骤召回在前。
+            pc = await self._recallForStep(session, pc, step_plan)
+            # ★ NEW: sub-question 改写 hook（feat-qwen-multistep-uplift）
+            # 仅 Qwen 系列 + 命中对比/对照/地点模式时改写；其他模型 / 无匹配 → 原样透传。
+            try:
+                model_name_for_rewrite = (pc.selected.model_name or "") if pc.selected else ""
+                rewrite_result = self._subquestionRewriter.rewrite(
+                    sub_question=step_plan.sub_question,
+                    prev_results=ctx.completed_steps,
+                    model_name=model_name_for_rewrite,
                 )
-                step_plan = replace(step_plan, sub_question=rewrite_result.rewritten)
-        except Exception:  # noqa: BLE001
-            logger.warning("sub-question 改写 hook 异常，原 step_plan 保留", exc_info=True)
-        try:
-            outcome = await self._planAndGenerateSql(
-                session, dto, pc, IntentType.NEW_QUERY, state,
-                sub_question=step_plan.sub_question, injection_text=injection_text,
-                global_filters=ctx.global_filters,
+                if rewrite_result.rewritten is not None:
+                    logger.info(
+                        "sub-question 改写命中 template=%s", rewrite_result.template_id,
+                    )
+                    step_plan = replace(step_plan, sub_question=rewrite_result.rewritten)
+            except Exception:  # noqa: BLE001
+                logger.warning("sub-question 改写 hook 异常，原 step_plan 保留", exc_info=True)
+            try:
+                outcome = await self._planAndGenerateSql(
+                    session, dto, pc, IntentType.NEW_QUERY, state,
+                    sub_question=step_plan.sub_question, injection_text=injection_text,
+                    global_filters=ctx.global_filters,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "多步步骤查询生成失败，隔离该步骤: step=%s", step_plan.index, exc_info=True,
+                )
+                return _StepRun(result=_failedStepResult(
+                    step_plan, _stepFailedError(exc, _STEP_GEN_FAILED_PREFIX),
+                ))
+
+            # 生成阶段的 token 无论后续是否执行成功都已花掉，照旧计入总量（核心约束 #3）
+            tokens = (
+                outcome.promptTokens + outcome.completionTokens
+                + outcome.wasted[0] + outcome.wasted[1]
+            )
+            cost = self._costForSql(outcome, pc.selected)
+            model_name = (outcome.sqlConfig or pc.selected).model_name
+
+            if outcome.sql is None or outcome.plan is None or outcome.plan.isUnanswerable:
+                # 软失败（LLM 判定无法回答）：非硬异常，一直就是步骤级隔离
+                return _StepRun(
+                    result=_failedStepResult(step_plan, _MSG_STEP_UNANSWERABLE),
+                    tokens=tokens, cost=cost, modelName=model_name,
+                )
+
+            try:
+                data, final_sql, retry_tokens = await self._runQueryWithRetry(
+                    session, dto, pc, outcome,
+                    # C4：重试必须沿用本步骤的子问题与前序注入（否则退回原始复合问题，
+                    # 丢子问题范围与「前序步骤结果」约束，与本步首次生成口径不一致）
+                    question=step_plan.sub_question, prior_state=injection_text,
+                    # 主问题作 scopeQuestion（多步显式传入，单步调用方不传）：供计划阶段的
+                    # 「主问题 ∪ 子问题」并集判定沿用
+                    scope_question=dto.question,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "多步步骤执行失败（含回灌重试），隔离该步骤: step=%s",
+                    step_plan.index, exc_info=True,
+                )
+                # 回灌重试的**生成** token 也随异常交回：重试生成成功、重试执行又失败时，
+                # 那次生成同样花了钱，必须落账并计入总量（核心约束 #3——失败路径也是计量路径）
+                retryUsage = await self._accountRetryGenUsage(session, dto, exc, pc, outcome)
+                if retryUsage is not None:
+                    tokens += retryUsage.tokens
+                    cost += retryUsage.cost
+                    model_name = retryUsage.modelName
+                return _StepRun(
+                    result=_failedStepResult(step_plan, _stepFailedError(exc, _STEP_EXEC_FAILED_PREFIX)),
+                    tokens=tokens, cost=cost, modelName=model_name,
+                )
+
+            if retry_tokens[0] or retry_tokens[1]:
+                retry_cfg = outcome.sqlConfig or pc.selected
+                tokens += retry_tokens[0] + retry_tokens[1]
+                cost += self._costFor(retry_cfg, retry_tokens[0], retry_tokens[1])
+                await self._recordUsage(
+                    session, dto.sessionId, retry_cfg,
+                    retry_tokens[0], retry_tokens[1], purpose="nl2sql",
+                )
+                model_name = retry_cfg.model_name
+
+            # 后台存储查询向量（用子问题，便于 few-shot 精确匹配）
+            self._spawnEmbedding(dto, final_sql, question=step_plan.sub_question)
+            chartType, chartOption, tableOption, rationale, chartPt, chartCt, chartCached = await self._stepChart(
+                session, dto, pc, ctx, step_plan, data, outcome.plan,
+            )
+            if chartPt or chartCt:
+                # 图表阶段（标签分类）的 token 也是这一步花的，计入步骤总量（核心约束 #3）。
+                # 分类调用挤掉了旧版「让 LLM 写 option」那一次，故总量口径未变。
+                cacheHitMultiplier = await _readFloatConfig(
+                    session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
+                )
+                tokens += chartPt + chartCt
+                cost += self._costFor(
+                    pc.selected, chartPt, chartCt,
+                    cachedTokens=chartCached, cacheHitMultiplier=cacheHitMultiplier,
+                )
+            return _StepRun(
+                result=StepResult(
+                    step_index=step_plan.index,
+                    description=step_plan.description,
+                    sub_question=step_plan.sub_question,
+                    sql=final_sql,
+                    data=data,
+                    summary=self._summarizeStepData(data),
+                    selected_classes=list(outcome.plan.selectedClasses) if outcome.plan else [],
+                    chart_type=chartType.value,
+                    chart_option=chartOption,
+                    table_option=tableOption,
+                    visual_rationale=rationale,
+                    query_plan=outcome.plan,
+                ),
+                tokens=tokens, cost=cost, modelName=model_name, plan=outcome.plan,
+                chart_label_calls=1 if (chartPt or chartCt) else 0,
             )
         except Exception as exc:
-            logger.warning(
-                "多步步骤查询生成失败，隔离该步骤: step=%s", step_plan.index, exc_info=True,
-            )
-            return _StepRun(result=_failedStepResult(
-                step_plan, _stepFailedError(exc, _STEP_GEN_FAILED_PREFIX),
-            ))
-
-        # 生成阶段的 token 无论后续是否执行成功都已花掉，照旧计入总量（核心约束 #3）
-        tokens = (
-            outcome.promptTokens + outcome.completionTokens
-            + outcome.wasted[0] + outcome.wasted[1]
-        )
-        cost = self._costForSql(outcome, pc.selected)
-        model_name = (outcome.sqlConfig or pc.selected).model_name
-
-        if outcome.sql is None or outcome.plan is None or outcome.plan.isUnanswerable:
-            # 软失败（LLM 判定无法回答）：非硬异常，一直就是步骤级隔离
-            return _StepRun(
-                result=_failedStepResult(step_plan, _MSG_STEP_UNANSWERABLE),
-                tokens=tokens, cost=cost, modelName=model_name,
-            )
-
-        try:
-            data, final_sql, retry_tokens = await self._runQueryWithRetry(
-                session, dto, pc, outcome,
-                # C4：重试必须沿用本步骤的子问题与前序注入（否则退回原始复合问题，
-                # 丢子问题范围与「前序步骤结果」约束，与本步首次生成口径不一致）
-                question=step_plan.sub_question, prior_state=injection_text,
-                # 主问题作 scopeQuestion（多步显式传入，单步调用方不传）：供计划阶段的
-                # 「主问题 ∪ 子问题」并集判定沿用
-                scope_question=dto.question,
-            )
-        except Exception as exc:
-            logger.warning(
-                "多步步骤执行失败（含回灌重试），隔离该步骤: step=%s",
-                step_plan.index, exc_info=True,
-            )
-            # 回灌重试的**生成** token 也随异常交回：重试生成成功、重试执行又失败时，
-            # 那次生成同样花了钱，必须落账并计入总量（核心约束 #3——失败路径也是计量路径）
-            retryUsage = await self._accountRetryGenUsage(session, dto, exc, pc, outcome)
-            if retryUsage is not None:
-                tokens += retryUsage.tokens
-                cost += retryUsage.cost
-                model_name = retryUsage.modelName
-            return _StepRun(
-                result=_failedStepResult(step_plan, _stepFailedError(exc, _STEP_EXEC_FAILED_PREFIX)),
-                tokens=tokens, cost=cost, modelName=model_name,
-            )
-
-        if retry_tokens[0] or retry_tokens[1]:
-            retry_cfg = outcome.sqlConfig or pc.selected
-            tokens += retry_tokens[0] + retry_tokens[1]
-            cost += self._costFor(retry_cfg, retry_tokens[0], retry_tokens[1])
-            await self._recordUsage(
-                session, dto.sessionId, retry_cfg,
-                retry_tokens[0], retry_tokens[1], purpose="nl2sql",
-            )
-            model_name = retry_cfg.model_name
-
-        # 后台存储查询向量（用子问题，便于 few-shot 精确匹配）
-        self._spawnEmbedding(dto, final_sql, question=step_plan.sub_question)
-        chartType, chartOption, tableOption, rationale, chartPt, chartCt, chartCached = await self._stepChart(
-            session, dto, pc, ctx, step_plan, data, outcome.plan,
-        )
-        if chartPt or chartCt:
-            # 图表阶段（标签分类）的 token 也是这一步花的，计入步骤总量（核心约束 #3）。
-            # 分类调用挤掉了旧版「让 LLM 写 option」那一次，故总量口径未变。
-            cacheHitMultiplier = await _readFloatConfig(
-                session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
-            )
-            tokens += chartPt + chartCt
-            cost += self._costFor(
-                pc.selected, chartPt, chartCt,
-                cachedTokens=chartCached, cacheHitMultiplier=cacheHitMultiplier,
-            )
-        return _StepRun(
-            result=StepResult(
-                step_index=step_plan.index,
-                description=step_plan.description,
-                sub_question=step_plan.sub_question,
-                sql=final_sql,
-                data=data,
-                summary=self._summarizeStepData(data),
-                selected_classes=list(outcome.plan.selectedClasses) if outcome.plan else [],
-                chart_type=chartType.value,
-                chart_option=chartOption,
-                table_option=tableOption,
-                visual_rationale=rationale,
-                query_plan=outcome.plan,
-            ),
-            tokens=tokens, cost=cost, modelName=model_name, plan=outcome.plan,
-            chart_label_calls=1 if (chartPt or chartCt) else 0,
-        )
+            # 更早的阶段（还没产生任何用量）失败时 tokens/cost 仍是 0 —— 那确实
+            # 没有可计费响应，记 0 是**正确**的，**禁止**为了凑数传假值。
+            exc.tokens_used = tokens
+            exc.cost_used = float(cost)
+            raise
 
     async def _stepChart(
         self,
@@ -627,28 +640,10 @@ class MultiStepMixin:
         # 汇总步仍计入 completedCount（见下方 early-return 封口），故 runStatusFor
         # 的分母用 len(multiStepPlan.steps)（含汇总步）而不是 len(subQuestions)。
         subQuestions = [s.description or s.sub_question for s in multiStepPlan.data_steps]
-        # 续跑模式（Task 7 传 resumeRunId）：复用既有 run，**绝不**新建。
-        # 新建会让 prepareResume 重置过的那个 run 永远停在 running（僵尸），
-        # 且落库落在一个与用户所见无关的新 run 上。
-        resumeRunId = getattr(dto, "resumeRunId", None)
-        run = None
-        startIndex = 0
-        if resumeRunId:
-            run, startIndex = await persistence.adoptRunForResume(
-                session, runId=uuid.UUID(str(resumeRunId)), subQuestions=subQuestions,
-            )
-            # adopt 返回 None 只在并发删除时发生（路由已 404 过）。此时退回普通
-            # 新建路径，宁可多一条 run，也不能因为续跑而整轮失败。
-        if run is None:
-            run = await self._openRun(
-                session,
-                sessionId=dto.sessionId,
-                question=dto.question,
-                modelId=getattr(dto, "modelId", None),
-                subQuestions=subQuestions,
-                datasourceId=getattr(dto, "datasourceId", None),
-            )
-            startIndex = 0
+        # 续跑分支 + 新建分支的唯一实现（与流式共用同一 mixin 方法，见 (c) 裁决）。
+        run, startIndex = await self._beginRunForRequest(
+            session, dto, subQuestions=subQuestions,
+        )
         persisted = await persistence.loadSteps(session, run.id) if run is not None else []
         stepsByIdx = {s.step_index: s for s in persisted}
         # 计数器**绝不能**复用上面那个 completed 列表（list[StepResult]，是
@@ -658,12 +653,9 @@ class MultiStepMixin:
         anySkipped = False
 
         for index, step_plan in enumerate(multiStepPlan.steps):
-            if index < startIndex:
-                # 续跑：更早的步已经 succeeded，跳过重跑。**必须**照样计入完成数，
-                # 否则 _closeRun 的 runStatusFor 会把「跳过的成功步」当未完成 ⇒
-                # run 被误判 failed，用户看到续跑「又失败了」。
-                # 前序步结果**不**回灌进 prompt（2026-09-28 诊断已证伪拆步产生步间
-                # 数据依赖，见 memory qa-system-multistep-no-data-dependency）。
+            if await self._shouldSkipStep(index, startIndex):
+                # 续跑：更早的步已 succeeded。跳过执行但**照样计入完成数**（理由见
+                # `_shouldSkipStep` 的文档字符串）。
                 completedCount += 1
                 continue
             if step_plan.aggregation_only:
@@ -789,27 +781,8 @@ class MultiStepMixin:
             except Exception as exc:  # noqa: BLE001 - 步骤级隔离：单步硬失败不阻断后续步
                 logger.warning("多步步骤硬失败，隔离该步骤: step=%d", index, exc_info=True)
                 if run is not None:
-                    await self._persistStepFailure(
-                        session, stepsByIdx[index], exc, run=run,
-                        tokens=getattr(exc, "tokens_used", 0),
-                        cost=getattr(exc, "cost_used", 0.0),
-                    )
-                    # 落步的终态（spec §6.3 永久错误 → failed；§4.1 的 skip 分支 → skipped）。
-                    # _persistStepFailure 只把步置为 running（per-attempt 语义），终态在此落一次。
-                    #
-                    # isSkip 恒 False：spec §4.1 的 skipped 分支靠「压缩后仍 > 95% 预算」
-                    # 判定，而该阈值与「压缩后重估」在本任务范围内都没有实现源（全仓无
-                    # 0.95 常量、无重估钩子）。凭空造一个阈值会引入未经治理的魔数，故这里
-                    # 按「不满足就是普通失败」处理；skipped / partially_failed 留作遗留项。
-                    isSkip = False
-                    await persistence.finishStep(
-                        session, stepsByIdx[index],
-                        status=STEP_STATUS_SKIPPED if isSkip else STEP_STATUS_FAILED,
-                    )
-                    if isSkip:
-                        anySkipped = True
-                    else:
-                        anyFailed = True
+                    await self._recordHardFailure(session, run, stepsByIdx[index], exc)
+                    anyFailed = True
                 continue
             total_tokens += stepRun.tokens
             total_cost += stepRun.cost
@@ -827,13 +800,10 @@ class MultiStepMixin:
                 # 用量只记一次（记在软失败入口）—— finishStep 会**累加** tokens/cost，
                 # 两处都传就双记。
                 if run is not None:
-                    await self._persistStepSoftFailure(
+                    await self._recordSoftFailure(
                         session, stepsByIdx[index],
-                        message=stepRun.result.error or "",
+                        message=stepRun.result.error or "", kind=ERROR_KIND_PERMANENT,
                         run=run, tokens=stepRun.tokens, cost=stepRun.cost,
-                    )
-                    await persistence.finishStep(
-                        session, stepsByIdx[index], status=STEP_STATUS_FAILED,
                     )
                     anyFailed = True
             elif run is not None:

@@ -226,11 +226,17 @@ async def adoptRunForResume(
         return None, 0
     steps = await loadSteps(session, runId)
     shapesMatch = [s.sub_question for s in steps] == list(subQuestions)
-    start = int(run.current_step_idx or 0) if shapesMatch else 0
-    if not shapesMatch:
+    rawStart = int(run.current_step_idx or 0)
+    # 越界即视为「没有可续跑的进度」：写侧 `_closeRun` 落的是 len(plan.steps)（含汇总步）
+    # 这个越界哨兵，读侧必须容忍，否则续跑会把整跑跳过还把它封成终态。
+    # 与「形状不匹配」同处置 —— 两者都意味着 current_step_idx 不是本次可用的起点。
+    if shapesMatch and rawStart < len(subQuestions):
+        start = rawStart
+    else:
+        start = 0
         logger.info(
-            "续跑形状变化：run=%s 原 %d 步 → 本次 %d 步，起始步归零",
-            run.id, len(steps), len(subQuestions),
+            "续跑起点归零：run=%s 形状%s、current_step_idx=%d、本次 %d 步",
+            run.id, "一致" if shapesMatch else "变化", rawStart, len(subQuestions),
         )
 
     byIndex = {s.step_index: s for s in steps}

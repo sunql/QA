@@ -358,3 +358,181 @@ async def testAdoptRunForResumeAlignsShapeAndStart(pg_client, db_session):
         db_session, runId=uuid.uuid4(), subQuestions=["查A"]
     )
     assert gone is None and start4 == 0
+
+
+@pytest.mark.asyncio
+async def testAdoptRunForResumeClampsOutOfRangePointer(pg_client, db_session):
+    """写侧越界哨兵 ⇒ 读侧归零整跑（Important-2）。
+
+    `_closeRun` 把 `current_step_idx` 当**越过末尾的哨兵**用（落
+    `len(plan.steps)`，含汇总步 —— 比数据步数还大 1），而 `adoptRunForResume`
+    原先把它当**合法起始下标**。直接走 `/api/v1/chat` 带 `resumeRunId` 命中一条
+    已收尾的 run 时（该入口不经 `prepareResume` 覆盖），`startIndex` 会落到末尾
+    之后 ⇒ 跳过分支把每一步都 continue 掉 ⇒ **一步不跑，run 却被重新封成终态**。
+
+    越界与「形状不匹配」同处置：归零整跑。
+    """
+    from app.services import multi_step_persistence as repo
+    from app.services.multi_step_persistence import adoptRunForResume
+
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="q", modelId=1, totalSteps=2
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
+    await repo.finishStep(
+        db_session, steps[0], status="succeeded", sql="SELECT 1", data=[{"a": 1}]
+    )
+    await repo.finishStep(
+        db_session, steps[1], status="succeeded", sql="SELECT 2", data=[{"b": 2}]
+    )
+    # 写侧 `_closeRun` 落的是 len(plan.steps)＝3（2 数据步 + 1 汇总步）—— 越界哨兵
+    await repo.updateRun(
+        db_session, run, status="succeeded", completedSteps=2, currentStepIdx=3
+    )
+    await db_session.commit()
+
+    adopted, start = await adoptRunForResume(
+        db_session, runId=run.id, subQuestions=["查A", "查B"]
+    )
+    assert adopted is not None
+    assert start == 0, "越界指针不是合法续跑起点 —— 必须归零整跑"
+    rows = await repo.loadSteps(db_session, run.id)
+    assert [s.step_index for s in rows] == [0, 1], "步照常对齐"
+    assert all(s.status == "pending" for s in rows), "整跑：每步都重置为 pending"
+    assert all(s.sql is None for s in rows), "整跑必须清掉旧 SQL"
+
+
+@pytest.mark.asyncio
+async def testResumeRunIdRejectsMalformedValue(pg_client, db_session, monkeypatch):
+    """`/api/v1/chat` 是公开入参：畸形 `resumeRunId` 必须是 422，绝不是 500。
+
+    Important-1 的边界层：字段类型是 `uuid.UUID | None`，Pydantic 在**请求边界**
+    就把 `"abc"` 挡成 422 —— 不让它漏到 `uuid.UUID(...)` 变成未捕获的 ValueError。
+    """
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _install,
+        _MultiStepLlm,
+        _OkAdapter,
+        _payload,
+    )
+
+    config, datasource = await _seed(db_session)
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+    payload = _payload("请分步查询 2024 和 2025 年的销售额并对比", datasource.id)
+    payload["resumeRunId"] = "abc"
+
+    for path in ("/api/v1/chat", "/api/v1/chat/stream"):
+        resp = await pg_client.post(path, json=payload)
+        assert resp.status_code == 422, (
+            f"{path}: 畸形 resumeRunId 必须 422，得到 {resp.status_code} —— "
+            "未捕获的 ValueError 会变成 500"
+        )
+
+
+@pytest.mark.asyncio
+async def testBeginRunForRequestDefensiveValidation(db_session):
+    """Important-1 的纵深防御层：取值处再包一层 ⇒ 领域 ValidationError。
+
+    字段类型已在边界挡过一次；这一层守的是「手工构造的 DTO / 别的调用方传进
+    非 UUID 形态」——那种输入绕过 Pydantic 边界，必须收敛成领域 ValidationError
+    （422），而不是未捕获的 ValueError（500）。只能绕过边界构造 DTO 来测。
+    """
+    from app.domain.exceptions import ValidationError
+    from app.domain.schemas import ChatRequest
+
+    dto = ChatRequest.model_construct(
+        sessionId="s1",
+        question="q",
+        datasourceId=1,
+        history=[],
+        modelId=None,
+        chartType=None,
+        resumeRunId="not-a-uuid",
+    )
+    service = __import__("app.api.v1.chat", fromlist=["_service"])._service
+
+    with pytest.raises(ValidationError):
+        await service._beginRunForRequest(db_session, dto, subQuestions=["查A"])
+
+
+@pytest.mark.asyncio
+async def testHardFailureUsageAndParityAcrossPaths(pg_client, db_session, monkeypatch):
+    """Important-3 + (c) 验收：同一失败输入 ⇒ 流式/非流式逐字段一致且用量留痕。
+
+    构造：把 `_stepChart` 打补丁为抛错 —— 它在**生成阶段之后**才被调用，此时
+    `_executeDataStep` 已累计了生成 token。异常从本方法逃逸。
+
+    - Important-3 前：`_executeDataStep` 不把已花用量挂到异常上，调用点
+      `getattr(exc, "tokens_used", 0)` 兜底成 0 ⇒ 失败步记 0（钱花了却漏计）。
+    - (c)：两条路径共用同一批 mixin 方法 ⇒ 步记录必须逐字段相同。
+    """
+    import app.api.v1.chat as chat_module
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _install,
+        _MultiStepLlm,
+        _OkAdapter,
+    )
+
+    config, datasource = await _seed(db_session)
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("chart stage exploded")
+
+    monkeypatch.setattr(chat_module._service, "_stepChart", _boom)
+
+    question = "请分步查询 2024 和 2025 年的销售额并对比"
+
+    async def _runSteps(path: str, session_key: str) -> list[MultiStepStep]:
+        resp = await pg_client.post(
+            path,
+            json={
+                "sessionId": session_key,
+                "question": question,
+                "datasourceId": datasource.id,
+            },
+        )
+        assert resp.status_code == 200, f"{path} -> {resp.status_code}: {resp.text[:300]}"
+        runs = (
+            await db_session.execute(
+                select(MultiStepRun).where(MultiStepRun.session_id == session_key)
+            )
+        ).scalars().all()
+        assert len(runs) == 1, f"{path}: 应恰好落 1 条 run，得到 {len(runs)}"
+        return list(
+            (
+                await db_session.execute(
+                    select(MultiStepStep)
+                    .where(MultiStepStep.run_id == runs[0].id)
+                    .order_by(MultiStepStep.step_index)
+                )
+            ).scalars().all()
+        )
+
+    asyncSteps = await _runSteps("/api/v1/chat", "s-nonstream")
+    streamSteps = await _runSteps("/api/v1/chat/stream", "s-stream")
+
+    assert len(asyncSteps) == 2, "计划有 2 个数据步"
+    assert len(streamSteps) == 2
+
+    # Important-3：硬失败路径的生成 token 必须留痕（钱已经花了）
+    for path_label, steps in (("非流式", asyncSteps), ("流式", streamSteps)):
+        for step in steps:
+            assert step.status == "failed", f"{path_label}: 图表阶段硬失败 ⇒ 步 failed"
+            assert step.tokens_used > 0, (
+                f"{path_label}: 硬失败路径的生成 token 必须留痕，得到 {step.tokens_used}"
+            )
+
+    def _signature(steps: list[MultiStepStep]) -> list[tuple]:
+        return [
+            (s.status, s.tokens_used, s.cost, s.last_error_kind) for s in steps
+        ]
+
+    assert _signature(asyncSteps) == _signature(streamSteps), (
+        "非流式与流式在同一次失败下必须产出逐字段一致的步记录：\n"
+        f"  非流式={_signature(asyncSteps)}\n  流式={_signature(streamSteps)}"
+    )

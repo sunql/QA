@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid
 from collections.abc import AsyncIterator, Iterator
 from decimal import Decimal
 
@@ -24,7 +23,6 @@ from app.domain.exceptions import (
     ValidationError,
 )
 from app.domain.models import SessionQueryState
-from app.domain.multi_step_models import STEP_STATUS_FAILED, STEP_STATUS_SKIPPED
 from app.domain.multi_step_plan import (
     GlobalFilters,
     MultiStepPlan,
@@ -65,6 +63,7 @@ from app.services.messages_zh import (
     MSG_STREAM_INTERRUPTED_EMPTY,
 )
 from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
+from app.services.multi_step_retry import ERROR_KIND_PERMANENT
 from app.services.chat_helpers import (
     _MSG_STEP_AGGREGATION_SKIPPED,
     _PipelineContext,
@@ -874,28 +873,10 @@ class StreamMixin:
         # 汇总步仍计入 completedCount（见下方 early-return 封口），故 runStatusFor
         # 的分母用 len(multiStepPlan.steps)（含汇总步）而不是 len(subQuestions)。
         subQuestions = [s.description or s.sub_question for s in multiStepPlan.data_steps]
-        # 续跑模式（Task 7 传 resumeRunId）：复用既有 run，**绝不**新建。
-        # 新建会让 prepareResume 重置过的那个 run 永远停在 running（僵尸），
-        # 且落库落在一个与用户所见无关的新 run 上。
-        resumeRunId = getattr(dto, "resumeRunId", None)
-        run = None
-        startIndex = 0
-        if resumeRunId:
-            run, startIndex = await persistence.adoptRunForResume(
-                session, runId=uuid.UUID(str(resumeRunId)), subQuestions=subQuestions,
-            )
-            # adopt 返回 None 只在并发删除时发生（路由已 404 过）。此时退回普通
-            # 新建路径，宁可多一条 run，也不能因为续跑而整轮失败。
-        if run is None:
-            run = await self._openRun(
-                session,
-                sessionId=dto.sessionId,
-                question=dto.question,
-                modelId=getattr(dto, "modelId", None),
-                subQuestions=subQuestions,
-                datasourceId=getattr(dto, "datasourceId", None),
-            )
-            startIndex = 0
+        # 续跑分支 + 新建分支的唯一实现（与非流式共用同一 mixin 方法，见 (c) 裁决）。
+        run, startIndex = await self._beginRunForRequest(
+            session, dto, subQuestions=subQuestions,
+        )
         persisted = await persistence.loadSteps(session, run.id) if run is not None else []
         stepsByIdx = {s.step_index: s for s in persisted}
         # 计数器**绝不能**复用上面那个 completed 列表（list[StepResult]，是
@@ -923,12 +904,9 @@ class StreamMixin:
         })
 
         for index, step_plan in enumerate(multiStepPlan.steps):
-            if index < startIndex:
-                # 续跑：更早的步已经 succeeded，跳过重跑。**必须**照样计入完成数，
-                # 否则 _closeRun 的 runStatusFor 会把「跳过的成功步」当未完成 ⇒
-                # run 被误判 failed，用户看到续跑「又失败了」。
-                # 前序步结果**不**回灌进 prompt（2026-09-28 诊断已证伪拆步产生步间
-                # 数据依赖，见 memory qa-system-multistep-no-data-dependency）。
+            if await self._shouldSkipStep(index, startIndex):
+                # 续跑：更早的步已 succeeded。跳过执行但**照样计入完成数**（理由见
+                # `_shouldSkipStep` 的文档字符串）。
                 completedCount += 1
                 continue
             if step_plan.aggregation_only:
@@ -1091,29 +1069,10 @@ class StreamMixin:
             except Exception as exc:  # noqa: BLE001 - 步骤级隔离：单步硬失败不阻断后续步
                 logger.warning("多步步骤硬失败，隔离该步骤: step=%d", index, exc_info=True)
                 if run is not None:
-                    await self._persistStepFailure(
-                        session, stepsByIdx[index], exc, run=run,
-                        tokens=getattr(exc, "tokens_used", 0),
-                        cost=getattr(exc, "cost_used", 0.0),
-                    )
-                    # 落步的终态（spec §6.3 永久错误 → failed；§4.1 的 skip 分支 → skipped）。
-                    # _persistStepFailure 只把步置为 running（per-attempt 语义），终态在此落一次。
-                    #
-                    # isSkip 恒 False：spec §4.1 的 skipped 分支靠「压缩后仍 > 95% 预算」
-                    # 判定，而该阈值与「压缩后重估」在本任务范围内都没有实现源（全仓无
-                    # 0.95 常量、无重估钩子）。凭空造一个阈值会引入未经治理的魔数，故这里
-                    # 按「不满足就是普通失败」处理；skipped / partially_failed 留作遗留项。
-                    isSkip = False
-                    await persistence.finishStep(
-                        session, stepsByIdx[index],
-                        status=STEP_STATUS_SKIPPED if isSkip else STEP_STATUS_FAILED,
-                    )
-                    if isSkip:
-                        anySkipped = True
-                    else:
-                        anyFailed = True
+                    await self._recordHardFailure(session, run, stepsByIdx[index], exc)
+                    anyFailed = True
                 # 失败的步也必须下发终态事件，否则概览里那张卡片永远停在「待执行」
-                # ——恰发生在用户最需要看清失败原因的场景（同 935 行跳过汇总的既有先例）。
+                # ——恰发生在用户最需要看清失败原因的场景（同「跳过汇总」的既有先例）。
                 yield self._stepResultEvent(_failedStepResult(
                     step_plan, f"{type(exc).__name__}: {exc}",
                 ))
@@ -1132,13 +1091,10 @@ class StreamMixin:
                 # last_error_kind / attempt_count；异常本体已丢，只有错误文案）。
                 # 用量只记一次 —— finishStep 会**累加** tokens/cost，两处都传就双记。
                 if run is not None:
-                    await self._persistStepSoftFailure(
+                    await self._recordSoftFailure(
                         session, stepsByIdx[index],
-                        message=stepRun.result.error or "",
+                        message=stepRun.result.error or "", kind=ERROR_KIND_PERMANENT,
                         run=run, tokens=stepRun.tokens, cost=stepRun.cost,
-                    )
-                    await persistence.finishStep(
-                        session, stepsByIdx[index], status=STEP_STATUS_FAILED,
                     )
                     anyFailed = True
             elif run is not None:

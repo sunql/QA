@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -1655,7 +1656,11 @@ class ChatRequest(CamelModel):
     chartType: ChartType | None = Field(default=None, description=MSG_SCHEMA_CHAT_CHART_TYPE_EXPLICIT)
     # 续跑（spec §7）：非空时执行链路复用这个 run 而不是新建（Task 7 的路由填）。
     # 起始步不从这里传 —— 唯一事实来源是 multi_step_run.current_step_idx。
-    resumeRunId: str | None = Field(default=None, description="续跑：复用既有的 multi-step run")
+    #
+    # 类型钉成 `uuid.UUID` 而非 `str`：这是**公开入参**，非 UUID 形态必须在边界被
+    # Pydantic 拦成 422，不能漏到服务层再抛未捕获的 ValueError(500)。
+    # `_beginRunForRequest` 另有一层领域 ValidationError 兜底（纵深防御）。
+    resumeRunId: uuid.UUID | None = Field(default=None, description="续跑：复用既有的 multi-step run")
 
 
 class DocQaRequest(CamelModel):

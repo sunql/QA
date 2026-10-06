@@ -6,22 +6,24 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
+from app.domain.exceptions import ValidationError
 from app.domain.multi_step_models import (
     RUN_STATUS_FAILED,
     RUN_STATUS_PARTIALLY_FAILED,
     RUN_STATUS_SUCCEEDED,
     STEP_STATUS_COMPRESSED as _STEP_STATUS_COMPRESSED,
     STEP_STATUS_FAILED as _STEP_STATUS_FAILED,
-    STEP_STATUS_SKIPPED as _STEP_STATUS_SKIPPED,
     STEP_STATUS_SUCCEEDED as _STEP_STATUS_SUCCEEDED,
     MultiStepRun,
     MultiStepStep,
 )
+from app.domain.schemas import ChatRequest
 from app.services import multi_step_persistence as persistence
 from app.services.multi_step_compressor import (
     COMPRESS_THRESHOLD,
@@ -63,6 +65,66 @@ class MultiStepPersistMixin:
         )
         await persistence.createSteps(session, runId=run.id, subQuestions=subQuestions)
         return run
+
+    async def _beginRunForRequest(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        *,
+        subQuestions: list[str],
+    ) -> tuple[MultiStepRun | None, int]:
+        """取本轮的 run 与其起始步号：续跑分支 + 新建分支的**唯一**实现。
+
+        非流式 `_executeMultiStep` 与流式 `_streamMultiStep` 共用（此前两处各写
+        一份，只改一条就是本项目反复踩的「流式/非流式漂移」缺陷类型）。
+
+        续跑（`dto.resumeRunId` 非空）**绝不**调 `_openRun` —— 新建会让
+        `prepareResume` 重置过的那个 run 永远停在 running（僵尸），且落库落在一个
+        与用户所见无关的新 run 上。
+
+        `adoptRunForResume` 返回 None 只在并发删除时发生（路由已 404 过）。此时
+        退回普通新建路径，宁可多一条 run，也不能因为续跑而整轮失败。
+        """
+        resumeRunId = dto.resumeRunId
+        if resumeRunId is not None:
+            # 字段类型已是 `uuid.UUID | None`（边界校验过一次）；这里再兜一层是
+            # 纵深防御：手工构造的 DTO、或将来别的调用方传进非 UUID 形态时，必须是
+            # 领域 ValidationError(422)，**不能**是未捕获的 ValueError(500) ——
+            # `/api/v1/chat` 是公开入参。
+            try:
+                resumeRunUuid = (
+                    resumeRunId if isinstance(resumeRunId, uuid.UUID)
+                    else uuid.UUID(str(resumeRunId))
+                )
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise ValidationError(
+                    f"resumeRunId 不是合法 UUID：{resumeRunId!r}"
+                ) from exc
+            adopted, startIndex = await persistence.adoptRunForResume(
+                session, runId=resumeRunUuid, subQuestions=subQuestions,
+            )
+            if adopted is not None:
+                return adopted, startIndex
+
+        run = await self._openRun(
+            session,
+            sessionId=dto.sessionId,
+            question=dto.question,
+            modelId=dto.modelId,
+            subQuestions=subQuestions,
+            datasourceId=dto.datasourceId,
+        )
+        return run, 0
+
+    async def _shouldSkipStep(self, index: int, startIndex: int) -> bool:
+        """`index < startIndex` ⇒ 跳过执行（续跑：更早的步已 succeeded）。
+
+        调用方**必须**照样 `completedCount += 1` —— 否则 `_closeRun` 的
+        `runStatusFor` 会把「跳过的成功步」当未完成 ⇒ run 被误判 failed，用户看到
+        续跑「又失败了」。前序步结果**不**回灌进 prompt（2026-09-28 诊断已证伪
+        拆步产生步间数据依赖，见 memory qa-system-multistep-no-data-dependency）。
+        """
+        return index < startIndex
 
     async def _persistStepSuccess(
         self,
@@ -117,6 +179,7 @@ class MultiStepPersistMixin:
         step: MultiStepStep,
         *,
         message: str,
+        kind: str = ERROR_KIND_PERMANENT,
         run: MultiStepRun | None = None,
         tokens: int = 0,
         cost: float = 0,
@@ -127,7 +190,7 @@ class MultiStepPersistMixin:
 
         与 `_persistStepFailure`（异常入口）共用 `_recordStepFailure` 的记档体。
 
-        分类固定 `permanent`：`_executeDataStep` 交给调用方的只有错误文案，异常
+        分类默认 `permanent`：`_executeDataStep` 交给调用方的只有错误文案，异常
         本体在它内部就被折叠成字符串了，分类线索已丢。这也正是诚实的结论 ——
         真正值得自动重试的瞬态故障，`_executeDataStep` 内部的回灌重试已经重试过
         （`_runQueryWithRetry`）；能走到「软失败」说明重试没救回来，转人工是对的。
@@ -136,7 +199,7 @@ class MultiStepPersistMixin:
             return
         await self._recordStepFailure(
             session, step,
-            message=message, kind=ERROR_KIND_PERMANENT,
+            message=message, kind=kind,
             run=run, tokens=tokens, cost=cost,
         )
 
@@ -163,6 +226,56 @@ class MultiStepPersistMixin:
             await persistence.updateRun(
                 session, run, status=RUN_STATUS_FAILED, currentStepIdx=step.step_index
             )
+
+    async def _recordHardFailure(
+        self,
+        session: AsyncSession,
+        run: MultiStepRun | None,
+        step: MultiStepStep,
+        exc: Exception,
+    ) -> None:
+        """硬失败（`_executeDataStep` 抛出）的落库：分类 + per-attempt 错误 + failed 终态。
+
+        非流式与流式共用。异常上携带的 `tokens_used` / `cost_used` 是该次失败尝试
+        已花的用量（spec §6.2「每次重试 tokens_used / cost 累加」）；拿不到就记 0
+        —— 拿不到说明确实没有可计费响应，**禁止**为了凑数传假值。
+        """
+        await self._persistStepFailure(
+            session, step, exc, run=run,
+            tokens=getattr(exc, "tokens_used", 0),
+            cost=getattr(exc, "cost_used", 0.0),
+        )
+        # 落步的终态（spec §6.3 永久错误 → failed）。`_persistStepFailure` 只把步
+        # 置为 running（per-attempt 语义），终态在此落一次。
+        #
+        # 不走 spec §4.1 的 skipped 分支：它靠「压缩后仍 > 95% 预算」判定，而该阈值
+        # 与「压缩后重估」在本任务范围内都没有实现源（全仓无 0.95 常量、无重估钩子）。
+        # 凭空造一个阈值会引入未经治理的魔数，故一律按普通 failed 处理；
+        # skipped / partially_failed 留作遗留项。
+        await persistence.finishStep(session, step, status=_STEP_STATUS_FAILED)
+
+    async def _recordSoftFailure(
+        self,
+        session: AsyncSession,
+        step: MultiStepStep,
+        *,
+        message: str,
+        kind: str,
+        run: MultiStepRun | None = None,
+        tokens: int = 0,
+        cost: float = 0,
+    ) -> None:
+        """软失败（`_executeDataStep` 返回 `sql=None`）的落库：记错误 + failed 终态。
+
+        非流式与流式共用。与硬失败的差别只在入口：这里只有错误**文案**（异常本体
+        在 `_executeDataStep` 内部已被折叠成字符串），故 `kind` 由调用方给出。
+        用量只记一次 —— `finishStep` 也**累加** tokens/cost，两处都传就双记。
+        """
+        await self._persistStepSoftFailure(
+            session, step, message=message, kind=kind, run=run,
+            tokens=tokens, cost=cost,
+        )
+        await persistence.finishStep(session, step, status=_STEP_STATUS_FAILED)
 
     async def _closeRun(
         self,

@@ -95,7 +95,8 @@ POST /api/v1/chat/multi-step/{runId}/resume
 
 | 情形 | 状态码 |
 |---|---|
-| run 不存在 / 归属校验失败 / 查完与被删之间竞态 | 404 |
+| run 不存在（含查完与被删之间的竞态） | 404 |
+| run 存在但不属于当前用户（`assertSessionOwnership`） | 403 |
 | `status` 不可续跑、`from_step_index` 越界或其前序有未完成步、重复 `Idempotency-Key` | 409 |
 | run 没有数据源快照（`datasource_id is None`） | 409 |
 
@@ -175,9 +176,9 @@ uv run pytest app/tests/unit/test_multi_step_compressor.py \
 | 单测 | `app/tests/unit/test_multi_step_persist_hooks.py` | 6 | `runStatusFor` 四态、开关关闭仍分类不落库 |
 | 单测 | `app/tests/unit/test_chat_multistep_rewrite_hook.py` | 3 | sub-question 改写 hook 不改派模型 |
 | 集成 | `app/tests/integration/test_multi_step_persist_models.py` | 2 | ORM 建读回、`session_id` 自由字符串 |
-| 集成 | `app/tests/integration/test_multi_step_persist_repo.py` | 5 | 落库 / `resetStepsFrom` / 幂等 key |
-| 集成 | `app/tests/integration/test_multi_step_persist_wiring.py` | 11 | 端到端落库、重试耗尽标 `failed`、`adoptRunForResume` 三分支 + 越界钳制、开关关闭零落库 |
-| 集成 | `app/tests/integration/test_multi_step_resume_api.py` | 5 | 续跑 API 全链路、404/409 分支 |
+| 集成 | `app/tests/integration/test_multi_step_persist_repo.py` | 7 | 落库 / `resetStepsFrom` / 幂等 key（含并发写者不丢键、行锁串行化） |
+| 集成 | `app/tests/integration/test_multi_step_persist_wiring.py` | 13 | 端到端落库、重试耗尽标 `failed`、`adoptRunForResume` 三分支 + 越界钳制、开关关闭零落库、续跑概览回放终态 |
+| 集成 | `app/tests/integration/test_multi_step_resume_api.py` | 8 | 续跑 API 全链路、404/409 分支、越界 `from_step_index`、幂等键可重放、封口用新会话 |
 | 集成 | `app/tests/integration/test_multi_step_cleanup.py` | 2 | 30/7 天保留期、非终态不删 |
 | 集成 | `app/tests/integration/test_chat_multi_step.py` | 38 | 多步链路回归（本特性亦覆盖） |
 
@@ -213,7 +214,8 @@ npx vitest run src/tests/chatStore.test.ts src/tests/chatApi.test.ts src/tests/M
 以下为按代码实况逐项自查的结论，**非** security-reviewer 的裁定：
 
 - **认证**：`/resume` 端点强制 `Depends(getCurrentUser)`，无「只读就免鉴权」的绕过（对照 [[qa-system-router-auth-mandatory]] 的教训）。
-- **越权 / 侧信道**：`assertSessionOwnership(session, str(run.session_id), user)` 在**读取 run 之后、任何写之前**执行；run 不存在与无权限**同返 404**（不用 403 区分，避免「存在 vs 无权限」侧信道）。
+- **越权**：`assertSessionOwnership(session, str(run.session_id), user)` 在**读取 run 之后、任何写之前**执行（`backend/app/api/v1/chat.py:193`）。状态码按代码实况：run 不存在 → **404**（`NotFoundError`，chat.py:191-192）；run 存在但不属于当前用户 → **403**（共享守卫 `backend/app/api/v1/session_guard.py:53-61`，`HTTP_403_FORBIDDEN` + 中性文案）。**不是**「同返 404」—— 该守卫与仓内其余端点的 6 处调用共用一份实现，刻意统一 403 且明写「不改状态码保持一致」，单独改本路由会造成不一致。
+- **存在性侧信道（如实登记）**：因 404（不存在）与 403（非归属）可区分，持有任意 `runId` 的登录用户能探测该 run 是否存在（**不**能读出内容、也不能续跑）。**缓解**：`runId` 是 `uuid4`（`createRun` 里 `uuid.uuid4()`），猜测成本极高；响应体为中性文案，不回显归属者。**残留**：侧信道本身未消除；如需彻底闭合，得让本路由在非归属时也回 404（即偏离共享守卫的既定口径），属需单独拍板的改动，本批不改。
 - **输入校验**：`from_step_index` / `model_override` / `compress_again` 均为受类型约束的 Pydantic 字段；`resumeRunId` 钉成 `uuid.UUID`（非法形态在边界 → 422，不漏到服务层抛 500）。
 - **SQL 安全**：本变更新增的库操作全部走 SQLAlchemy 参数化（无字符串拼接）；业务查询仍经既有 SQL Guard（只读 SELECT）—— 本变更**未放宽**任何 SQL 校验。
 - **注入 / 路径**：前端 `resumeMultiStepRun` 对 `runId` 做 `encodeURIComponent`（有一条专门用例「防路径注入」）。

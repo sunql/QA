@@ -105,6 +105,9 @@ MAX_VERIFY_HYPOTHESES = 3
 DRIVER_HINT_LIMIT = 30
 COLUMN_SUMMARY_LIMIT = 12
 STEP_MISSING_SQL = "计划步未携带 SQL（逐步 NL2SQL 生成失败或未接线）"
+COST_SCALE_DIVISOR = 1000
+"""成本公式中 per-1k 转 per-token 的除数（与 cost_per_1k_input/output 列名耦合）。
+若定价模型由 per-1k 切到 per-million/per-token，此为唯一静默断点，必须同步改列名 + 此常量。"""
 
 # --- finding.supporting_data 契约（Task 5 写 / Task 6 报告读）------------------
 FINDING_ROWS_KEY = "rows"
@@ -355,7 +358,7 @@ class LlmUsageRecorder:
         return (
             Decimal(billablePrompt) * Decimal(str(config.cost_per_1k_input))
             + Decimal(completionTokens) * Decimal(str(config.cost_per_1k_output))
-        ) / Decimal(1000)
+        ) / Decimal(COST_SCALE_DIVISOR)
 
 
 class MeteredClient:

@@ -105,6 +105,14 @@ def test_cost_for_matches_chat_with_cache_discount() -> None:
         )
 
 
+def test_cost_scale_divisor_value() -> None:
+    """成本公式 /1000 应走命名常量 COST_SCALE_DIVISOR，避免除数单位变更静默。"""
+    from app.services import research_agent_ports
+
+    assert research_agent_ports.COST_SCALE_DIVISOR == 1000
+    assert isinstance(research_agent_ports.COST_SCALE_DIVISOR, int)
+
+
 # ---------------------------------------------------------------------------
 # 模型路由（Task 6.5-2）
 # ---------------------------------------------------------------------------

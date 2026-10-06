@@ -38,6 +38,15 @@ from app.domain.schemas import (
 )
 from app.infrastructure.llm.base_client import LlmMessage
 from app.services.chat_constants import (
+    AGENT_RUN_ERROR_AGENT_NOT_FOUND,
+    AGENT_RUN_ERROR_AGENT_NOT_RUNNABLE,
+    AGENT_RUN_ERROR_BAD_INPUT,
+    AGENT_RUN_ERROR_PERMISSION_DENIED,
+    AGENT_RUN_ERROR_UNEXPECTED,
+    AUDIT_ACTION_CREATE,
+    AUDIT_ENTITY_AGENT_RUN_LOG,
+    AUDIT_RUN_STATUS_FAILED,
+    AUDIT_RUN_STATUS_SUCCESS,
     USAGE_PURPOSE_AGENT_RUN,
     USAGE_PURPOSE_CLARIFY,
     USAGE_PURPOSE_SUPPLIER_RISK,
@@ -285,7 +294,7 @@ class DomainCommandMixin:
         started_at = datetime.now(timezone.utc)
         actor = user.userId if user is not None else "chat"
         actor_departments = user.departments if user is not None else None
-        run_status = "SUCCESS"
+        run_status = AUDIT_RUN_STATUS_SUCCESS
         run = None
         # H9：工具 handler（supplier_risk）需要「工厂 + 真实 config」才能调 LLM 并按
         # config 单价计价。只传工厂时 handler 内部拿不到 config，只能降级模板。
@@ -301,13 +310,13 @@ class DomainCommandMixin:
                 actor=actor,
             )
         except NotFoundError:
-            run_status = "FAILED"
+            run_status = AUDIT_RUN_STATUS_FAILED
             finished_at = datetime.now(timezone.utc)
             await _audit.record(
                 session,
-                entity_type="agent_run_log",
+                entity_type=AUDIT_ENTITY_AGENT_RUN_LOG,
                 entity_id=0,
-                action="CREATE",
+                action=AUDIT_ACTION_CREATE,
                 actor=actor,
                 actor_departments=actor_departments,
                 after={
@@ -315,7 +324,7 @@ class DomainCommandMixin:
                     "status": run_status,
                     "startedAt": started_at.isoformat(),
                     "finishedAt": finished_at.isoformat(),
-                    "error": "AGENT_NOT_FOUND",
+                    "error": AGENT_RUN_ERROR_AGENT_NOT_FOUND,
                 },
             )
             # FAILED 分支不经 persist：审计必须自行提交，否则请求结束随事务回滚丢失
@@ -325,13 +334,13 @@ class DomainCommandMixin:
                 intent=result.intent.value,
             )
         except PermissionDeniedError as exc:
-            run_status = "FAILED"
+            run_status = AUDIT_RUN_STATUS_FAILED
             finished_at = datetime.now(timezone.utc)
             await _audit.record(
                 session,
-                entity_type="agent_run_log",
+                entity_type=AUDIT_ENTITY_AGENT_RUN_LOG,
                 entity_id=0,
-                action="CREATE",
+                action=AUDIT_ACTION_CREATE,
                 actor=actor,
                 actor_departments=actor_departments,
                 after={
@@ -339,7 +348,7 @@ class DomainCommandMixin:
                     "status": run_status,
                     "startedAt": started_at.isoformat(),
                     "finishedAt": finished_at.isoformat(),
-                    "error": "PERMISSION_DENIED",
+                    "error": AGENT_RUN_ERROR_PERMISSION_DENIED,
                 },
             )
             # FAILED 分支不经 persist：审计必须自行提交，否则请求结束随事务回滚丢失
@@ -350,13 +359,13 @@ class DomainCommandMixin:
                 intent=result.intent.value,
             )
         except ConflictError as exc:
-            run_status = "FAILED"
+            run_status = AUDIT_RUN_STATUS_FAILED
             finished_at = datetime.now(timezone.utc)
             await _audit.record(
                 session,
-                entity_type="agent_run_log",
+                entity_type=AUDIT_ENTITY_AGENT_RUN_LOG,
                 entity_id=0,
-                action="CREATE",
+                action=AUDIT_ACTION_CREATE,
                 actor=actor,
                 actor_departments=actor_departments,
                 after={
@@ -364,7 +373,7 @@ class DomainCommandMixin:
                     "status": run_status,
                     "startedAt": started_at.isoformat(),
                     "finishedAt": finished_at.isoformat(),
-                    "error": "AGENT_NOT_RUNNABLE",
+                    "error": AGENT_RUN_ERROR_AGENT_NOT_RUNNABLE,
                 },
             )
             # FAILED 分支不经 persist：审计必须自行提交，否则请求结束随事务回滚丢失
@@ -376,13 +385,13 @@ class DomainCommandMixin:
                 intent=result.intent.value,
             )
         except ValidationError as exc:
-            run_status = "FAILED"
+            run_status = AUDIT_RUN_STATUS_FAILED
             finished_at = datetime.now(timezone.utc)
             await _audit.record(
                 session,
-                entity_type="agent_run_log",
+                entity_type=AUDIT_ENTITY_AGENT_RUN_LOG,
                 entity_id=0,
-                action="CREATE",
+                action=AUDIT_ACTION_CREATE,
                 actor=actor,
                 actor_departments=actor_departments,
                 after={
@@ -390,7 +399,7 @@ class DomainCommandMixin:
                     "status": run_status,
                     "startedAt": started_at.isoformat(),
                     "finishedAt": finished_at.isoformat(),
-                    "error": "BAD_INPUT",
+                    "error": AGENT_RUN_ERROR_BAD_INPUT,
                 },
             )
             # FAILED 分支不经 persist：审计必须自行提交，否则请求结束随事务回滚丢失
@@ -400,13 +409,13 @@ class DomainCommandMixin:
                 intent=result.intent.value,
             )
         except Exception:  # noqa: BLE001 - Agent 执行降级，不阻断 chat 主链路
-            run_status = "FAILED"
+            run_status = AUDIT_RUN_STATUS_FAILED
             finished_at = datetime.now(timezone.utc)
             await _audit.record(
                 session,
-                entity_type="agent_run_log",
+                entity_type=AUDIT_ENTITY_AGENT_RUN_LOG,
                 entity_id=0,
-                action="CREATE",
+                action=AUDIT_ACTION_CREATE,
                 actor=actor,
                 actor_departments=actor_departments,
                 after={
@@ -414,7 +423,7 @@ class DomainCommandMixin:
                     "status": run_status,
                     "startedAt": started_at.isoformat(),
                     "finishedAt": finished_at.isoformat(),
-                    "error": "UNEXPECTED",
+                    "error": AGENT_RUN_ERROR_UNEXPECTED,
                 },
             )
             # FAILED 分支不经 persist：审计必须自行提交，否则请求结束随事务回滚丢失
@@ -430,13 +439,13 @@ class DomainCommandMixin:
         finally:
             # audit-on-finish：finally 确保成功/失败都记录审计（Task 10）
             # 注意：FAILED 分支已在 except 块中记录；此处仅处理 SUCCESS 路径
-            if run is not None and run_status == "SUCCESS":
+            if run is not None and run_status == AUDIT_RUN_STATUS_SUCCESS:
                 finished_at = datetime.now(timezone.utc)
                 await _audit.record(
                     session,
-                    entity_type="agent_run_log",
+                    entity_type=AUDIT_ENTITY_AGENT_RUN_LOG,
                     entity_id=0,
-                    action="CREATE",
+                    action=AUDIT_ACTION_CREATE,
                     actor=actor,
                     actor_departments=actor_departments,
                     after={

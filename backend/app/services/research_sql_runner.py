@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 # _UNLIMITED_BATCH_SIZE 同量级，作为「验证查询」这种小结果集的合理上界。
 VERIFICATION_ROW_CAP = 1000
 
+# 验证查询超行截断日志里 SQL 字符串的字符上限。仅影响运维日志可读性，避免日志里堆
+# 整段长 SQL；下游若有日志解析依赖此长度需同步调整。
+LOG_SQL_TRUNCATE_LEN = 120
+
 
 def assertReadonlySql(sql: str) -> None:
     """只读校验：SQL Guard 拒绝（``SqlSafetyError``）一律转为 ``ValueError``。
@@ -91,7 +95,7 @@ class ResearchSqlRunner:
         rows = await adapter.execute_read_only(sql)
         if len(rows) > VERIFICATION_ROW_CAP:
             logger.warning(
-                "验证查询结果超过行上限 %d，已截断: %s", VERIFICATION_ROW_CAP, sql[:120]
+                "验证查询结果超过行上限 %d，已截断: %s", VERIFICATION_ROW_CAP, sql[:LOG_SQL_TRUNCATE_LEN]
             )
             return rows[:VERIFICATION_ROW_CAP]
         return rows

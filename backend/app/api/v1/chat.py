@@ -249,8 +249,12 @@ async def resumeMultiStep(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         # 断连必须靠 background：它在收敛任务组**之外**被 await（starlette
-        # responses.py），断连时确定跑到，且此刻请求 session 仍开着。H4 实测：
-        # 断连有两种时序，主情形（生成器停在 yield 上）里 `except CancelledError`
-        # 与 `finally` 都不触发 —— 所以兜底不能写在生成器的 finally 里。
+        # responses.py），断连时确定跑到。H4 实测：断连有两种时序，主情形
+        # （生成器停在 yield 上）里 `except CancelledError` 与 `finally` 都不触发
+        # —— 所以兜底不能写在生成器的 finally 里。
+        # 封口**不依赖**请求 session 的存活：`_sealAbandonedResume` 自己开新会话
+        # 并显式 commit（F5 d88b45e）。断连时序下请求会话不是可靠写入通道（取消
+        # 落在最近一个 await 上会把连接标成不可用），故不能复用 —— 理由与姊妹路径
+        # `persistInterruptedStream` 的同一处理一致。
         background=BackgroundTask(sealAbandoned),
     )

@@ -3975,11 +3975,40 @@ git commit -m "feat(multi-step): 前端续跑按钮与步骤压缩徽章"
 **Files:**
 - Create: `Harness/wiki/chat_multi_step_persistence.md`
 - Create: `Harness/changes/feat-multi-step-persist/summary.md`
-- Modify: `Harness/index.md`（若存在索引则登记新条目）
+
+**✗ 不要建 `Harness/index.md`（2026-10-05 controller 预检实测）**：该文件**不存在** ——
+`ls Harness/index.md` → No such file；`Harness/` 下没有任何 `*.md`；
+`find Harness -maxdepth 2 -iname "*index*"` 只命中 `Harness/mcp/README.md`。
+原计划把它列进 Files、又在括号里写「若存在索引则登记新条目」——自相矛盾；更关键的是
+Step 3 的 `git add … Harness/index.md` 会**直接失败**（`pathspec did not match any files`），
+整个提交步骤跑不完。故本轮**不新增**索引文件，可发现性靠 change 记录 + wiki 内链。
 
 - [ ] **Step 1: 写 wiki 条目**
 
-`Harness/wiki/chat_multi_step_persistence.md`：按 `Harness/wiki/` 既有条目格式（frontmatter + 概述 + 详细说明 + 相关条目），内容涵盖：两张表的关系、状态机、压缩触发阈值 0.7、重试 3 次 1s/2s 退避、续跑端点与幂等、保留期 30/7 天、feature flag 名。链接 [[chat_multistep_flow]]、[[llm_retry_policy]]（按实际存在的条目名调整）。
+`Harness/wiki/chat_multi_step_persistence.md`：**格式照 `Harness/wiki/wiki-ontology-link.md`**
+（frontmatter 用 `created` / `updated` / `sources:` 真实文件路径列表 / `tags:` 列表）。
+注意：`Harness/wiki/` 19 篇里**只有 4 篇**有 frontmatter，所以别照
+`chat-service-capabilities.md`、`data-model.md` 这类**无 frontmatter** 的老格式写。
+「相关条目」小节照 `Harness/wiki/audit-log-system.md:320` 的形态：`- [[目标]] — 一句话说明`。
+
+内容涵盖：两张表的关系、状态机、压缩触发阈值 0.7、重试 3 次 1s/2s 退避、
+续跑端点与幂等、保留期 30/7 天、feature flag 名。
+
+**内链目标必须用实测存在的**：原计划的 `[[chat_multistep_flow]]` 与 `[[llm_retry_policy]]`
+**都不是任何 wiki 条目的名字** —— `Harness/wiki/` 下无此二者（`find Harness -name "*.md"`
+对两个词均无命中）。注意 `llm_retry_policy` 在仓内**确有其物**，只是身份不是 wiki 条目：
+它是 `backend/app/services/llm_retry_policy.py`（叶子模块）及其测试
+`backend/app/tests/unit/test_llm_retry_policy.py` —— **照抄进 wikilink 指不到任何条目**。
+`chat_multistep_flow` 则全仓仅本计划提到过。
+而 `Harness/wiki/` 现有条目的命名是 kebab-case 文件名或 `Harness/changes/.../summary.md` 路径。
+可用的真实目标：
+- `[[data-model]]` —— 两张新表挂在数据模型上（`Harness/wiki/data-model.md` 存在）
+- `[[chat-service-capabilities]]` —— 多步是 chat 的能力之一（存在）
+- `[[nl2sql-engine]]` —— 每步的 SQL 由它产出（存在）
+- `[[Harness/changes/feat-multi-step-persist/summary.md|Multi-Step Persist]]` —— 本变更 SSOT
+  （`|显示名` 别名语法是既有用法，见 `business-domain.md` 等）
+- 需要时补 `[[qa-system-multistep-no-data-dependency]]` / `[[qa-system-chat-session-id-contract]]`
+  —— memory 条目，仓内已有引用先例（`audit-log-system.md:325`）
 
 - [ ] **Step 2: 写 change 记录**
 
@@ -3988,9 +4017,12 @@ git commit -m "feat(multi-step): 前端续跑按钮与步骤压缩徽章"
 - [ ] **Step 3: Commit**
 
 ```bash
-git add Harness/wiki/chat_multi_step_persistence.md Harness/changes/feat-multi-step-persist/summary.md Harness/index.md
+git add Harness/wiki/chat_multi_step_persistence.md Harness/changes/feat-multi-step-persist/summary.md
 git commit -m "docs(multi-step): 补 wiki 与 change 记录"
 ```
+
+> `Harness/index.md` 已从本步与上面的 Files 列表移除 —— 该文件不存在，`git add` 会以
+> `pathspec did not match any files` 失败。详见 Files 块下的预检说明。
 
 ---
 
@@ -4029,10 +4061,13 @@ git commit -m "docs(multi-step): 补 wiki 与 change 记录"
     大部分并发，但**没有** `SELECT … FOR UPDATE`，极端并发下两个请求都可能通过校验。
     若线上出现双跑，再补行级锁。
 13. **清理任务没有调度入口，保留期策略当前不会执行**（2026-06-06 Task 8 计划预检发现）：
-    spec §10.4 与 §13 文件清单都把 `app/jobs/cleanup_multi_step_runs.py` 称作「**cron 清理
-    脚本**」，但本计划只交付一个可导入的函数 —— 无 `__main__`、无 `scripts/cron_*.sh`
-    包装、无 crontab / launchd 注册；全仓除本计划外**没有任何** `app.jobs` 引用（已 grep
-    确认），故没有任何东西会调用它。更关键的是本机 cron 已确认静默失效
+    spec §10.4（`docs/superpowers/specs/2026-10-05-multi-step-persist.md:321`）写「定期清理
+    由新 **cron 任务**执行」，§13 文件清单（同文件 `:358`）把该文件描述为「新建：**cron 清理
+    脚本**」；但本计划只交付一个可导入的函数 —— 无 `__main__`、无 `scripts/cron_*.sh`
+    包装、无 crontab / launchd 注册。全仓 grep（排除 `.git`）确认：**代码里**没有任何
+    `app.jobs` 引用 —— 仅有的两处提及都在 spec（上述两行）与本计划的待建清单里，
+    都是「打算建」而非「谁调用」；`ls backend/app/jobs` 亦为 No such file or directory。
+    故没有任何东西会调用它。更关键的是本机 cron 已确认静默失效
     （`/etc/crontab` 缺失、launchd 契约断裂，见 `Harness/changes/qa-system-cron-silently-broken`），
     即便补上注册也不会触发。**结论：30/7 天只是写在代码里的两个常量，线上不会自动回收。**
     本计划的处置与 `scripts/backup_pg.sh` 一致 —— 以可手动调用的形态交付 + 在此登记缺口，

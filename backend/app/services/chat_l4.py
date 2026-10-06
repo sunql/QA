@@ -21,6 +21,7 @@ from app.domain.exceptions import ConfigError
 from app.domain.schemas import ChatRequest, ChatResponse
 from app.infrastructure.llm.base_client import BaseLlmClient
 from app.services.agent_runtime_service import AgentLoopResult
+from app.services.chat_constants import ROUTING_LAYER_L4
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,7 @@ class L4Mixin:
         _t0 = time.monotonic()
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, response.answer, result.final_sql,
-            routing_layer="L4",
+            routing_layer=ROUTING_LAYER_L4,
             latency_ms=int((time.monotonic() - _t0) * 1000),
             token_cost_usd=float(result.total_cost_usd),
         )

@@ -32,6 +32,7 @@ from app.domain.multi_step_plan import (
 from app.domain.query_plan import QueryPlan
 from app.domain.schemas import AgentSuggestion, ChatRequest, SemanticState
 from app.services import multi_step_persistence as persistence
+from app.services.chat_constants import ROUTING_LAYER_L2
 from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.chat_helpers import (
     _MSG_STEP_AGGREGATION_SKIPPED,
@@ -513,7 +514,7 @@ class StreamMixin:
             ))
             await self._storeSessionMessages(
                 session, dto.sessionId, dto.question, answer, None,
-                routing_layer="L2",
+                routing_layer=ROUTING_LAYER_L2,
                 latency_ms=int((time.monotonic() - _stream_t0) * 1000),
                 token_cost_usd=float(self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)),
             )
@@ -747,7 +748,7 @@ class StreamMixin:
         # L2 streaming: totalCost includes SQL + chart + answer LLM costs
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, answer, finalSql,
-            routing_layer="L2",
+            routing_layer=ROUTING_LAYER_L2,
             latency_ms=int((time.monotonic() - _stream_t0) * 1000),
             token_cost_usd=float(totalCost),
             # 0105：单步流的图进「最终报告」（导出 PDF / 历史回放）。与流式下发的
@@ -1002,7 +1003,7 @@ class StreamMixin:
                 )
                 await self._storeSessionMessages(
                     session, dto.sessionId, dto.question, agg_content, None,
-                    routing_layer="L2",
+                    routing_layer=ROUTING_LAYER_L2,
                     latency_ms=int((time.monotonic() - _ms_t0) * 1000),
                     token_cost_usd=float(total_cost),
                     # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
@@ -1270,7 +1271,7 @@ class StreamMixin:
         async with getSessionFactory()() as fallbackSession:
             await self._storeSessionMessages(
                 fallbackSession, dto.sessionId, dto.question, answer, state.sql,
-                routing_layer="L2",
+                routing_layer=ROUTING_LAYER_L2,
                 latency_ms=int((time.monotonic() - state.startedAt) * 1000),
                 token_cost_usd=state.totalCostUsd,
                 interrupted=True,

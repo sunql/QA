@@ -34,6 +34,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
+from app.services.chat_constants import ROUTING_LAYER_L1, ROUTING_LAYER_L2
 from app.domain.chart_spec import ChartSpec, SpecKpi
 from app.domain.enums import ChartType, IntentType
 from app.domain.exceptions import (
@@ -422,7 +423,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                     _t0 = time.monotonic()
                     await self._storeSessionMessages(
                         session, dto.sessionId, dto.question, l1_response.answer, None,
-                        routing_layer="L1", latency_ms=int((time.monotonic() - _t0) * 1000),
+                        routing_layer=ROUTING_LAYER_L1, latency_ms=int((time.monotonic() - _t0) * 1000),
                         token_cost_usd=0.0,
                         # 0105：KPI 指标块也要能进导出 PDF —— 它是本轮回答的一部分，
                         # 只活在实时响应里的话，导出时同样退化成占位框。
@@ -680,7 +681,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
         _elapsed_ms = int((time.monotonic() - _t0) * 1000)
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, answerText, finalSql,
-            routing_layer="L2",
+            routing_layer=ROUTING_LAYER_L2,
             latency_ms=_elapsed_ms,
             token_cost_usd=float(totalCost),
             # 0105：单步查询的图进「最终报告」（导出 PDF / 历史回放）。
@@ -1717,7 +1718,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
         _elapsed_ms = int((time.monotonic() - _t0) * 1000)
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, answer, None,
-            routing_layer="L2",
+            routing_layer=ROUTING_LAYER_L2,
             latency_ms=_elapsed_ms,
             token_cost_usd=float(self._costForSql(outcome, pc.selected)),
         )

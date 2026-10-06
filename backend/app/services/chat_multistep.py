@@ -28,6 +28,7 @@ from app.domain.query_plan import QueryPlan
 from app.domain.schemas import ChatRequest, ChatResponse
 from app.infrastructure.llm.base_client import LlmMessage
 from app.services import multi_step_persistence as persistence
+from app.services.chat_constants import ROUTING_LAYER_L2
 from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.chat_context import InheritedState
 from app.services.chat_helpers import (
@@ -561,7 +562,7 @@ class MultiStepMixin:
         )
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, answer, None,
-            routing_layer="L2",
+            routing_layer=ROUTING_LAYER_L2,
             latency_ms=int((time.monotonic() - _t0) * 1000),
             token_cost_usd=float(total_cost),
         )
@@ -697,7 +698,7 @@ class MultiStepMixin:
                 )
                 await self._storeSessionMessages(
                     session, dto.sessionId, dto.question, agg_content, None,
-                    routing_layer="L2",
+                    routing_layer=ROUTING_LAYER_L2,
                     latency_ms=int((time.monotonic() - _t0) * 1000),
                     token_cost_usd=float(total_cost),
                     # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
@@ -903,7 +904,7 @@ class MultiStepMixin:
         )
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, answer, last_sql,
-            routing_layer="L2",
+            routing_layer=ROUTING_LAYER_L2,
             latency_ms=int((time.monotonic() - _t0) * 1000),
             token_cost_usd=float(total_cost),
             chart_type=None,

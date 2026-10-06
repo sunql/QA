@@ -13,16 +13,15 @@ from app.domain.multi_step_models import (
 
 @pytest.mark.asyncio
 async def testRunAndStepRoundTrip(db_session):
-    # Arrange：先建一条 research_session 满足外键
-    from app.domain.research_models import ResearchSession
-
-    session_row = ResearchSession(id=uuid.uuid4(), title="msp-test", created_by=1)
-    db_session.add(session_row)
-    await db_session.flush()
+    # Arrange：裁决 A（migration 0115）把 session_id 定成**自由字符串**，真实生产者落
+    # `chat-<uuid>`；它与 ResearchSession **无任何关系**（spec §12 明说 chat session 与
+    # research_session 无关）。故这里既不建 ResearchSession 桩行，也不设外键 —— 那套
+    # 是 0114 的旧契约（1c3515d 时 session_id 确实是 Mapped[uuid.UUID]）。
+    sessionKey = f"chat-{uuid.uuid4()}"
 
     run = MultiStepRun(
         id=uuid.uuid4(),
-        session_id=session_row.id,
+        session_id=sessionKey,
         question="第一步查A，第二步查B",
         model_id=3,
         datasource_id=7,
@@ -51,6 +50,7 @@ async def testRunAndStepRoundTrip(db_session):
 
     # Assert
     assert loaded.status == "running"
+    assert loaded.session_id == sessionKey, "自由字符串 session_id 必须原样往返"
     assert loaded.datasource_id == 7
     assert loaded.resume_count == 0
     assert loaded.version == 0
@@ -70,13 +70,13 @@ async def testRunAndStepRoundTrip(db_session):
 
 @pytest.mark.asyncio
 async def testDuplicateStepIndexRejected(db_session):
-    from app.domain.research_models import ResearchSession
-
-    session_row = ResearchSession(id=uuid.uuid4(), title="msp-dup", created_by=1)
-    db_session.add(session_row)
-    await db_session.flush()
+    # 同 testRunAndStepRoundTrip：session_id 是自由字符串，不需要（也没有）ResearchSession 外键。
     run = MultiStepRun(
-        id=uuid.uuid4(), session_id=session_row.id, question="q", model_id=None, total_steps=1
+        id=uuid.uuid4(),
+        session_id=f"chat-{uuid.uuid4()}",
+        question="q",
+        model_id=None,
+        total_steps=1,
     )
     db_session.add(run)
     await db_session.flush()

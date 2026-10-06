@@ -232,16 +232,72 @@ npx vitest run src/tests/chatStore.test.ts src/tests/chatApi.test.ts src/tests/M
   ⇒ **未做**基于本分支新镜像的冒烟。理由：本计划交付的是代码 + 文档，**不含部署动作**；
   且本仓已记「前端必须 compose build 才生效」，重跑部署须与前端同批，不在本任务范围。
   **本项如实登记为未验证。**
-- **真实数据验证脚本**：**未做**。`Harness/rules/变更记录强制规范.md` §一 第 5 条要求涉及真实 SQL/DB 改动的变更
-  提供一个幂等的真实数据验证脚本，属**部署阻塞项**；该约定**是活的**，落点是 `backend/scripts/<feature>_realdata.py`
-  （不是仓根 `scripts/`）—— 全仓 git 跟踪着 3 个现成实例：`backend/scripts/wiki_provenance_realdata.py`、
-  `backend/scripts/wiki_dedup_realdata.py`、`backend/scripts/seed_data_quality_realdata.py`
-  （另有 `Harness/changes/feat-wiki-dedup/realdata-run.txt` 这类运行产物记录）。
-  本特性**没有**这个脚本，属**一处真缺口**（不是「名义约定」），本计划也未排这个产物（遗留项 15）。
-  **不新造脚本凑齐**（计划外产物）；要补的话 `backend/scripts/` 里有 3 个现成范例可抄。
-  是否补此缺口留给收尾时人类定夺。
+- **真实数据验证脚本**：**已补齐**（2026-10-06，人类裁定后补做，遗留项 15 收口）。见下方「真实数据验证」一节。
 - **迁移**：`0114` / `0115` 在本会话中**未对任何库执行**（测试库由 `app/tests/_pg_support.py` 按 `TEST_DATABASE_URL`
   建 schema，未经手工 alembic 升级）；生产库 `qa_metadata`（5433）**未连接、未迁移**。
+
+### 真实数据验证
+
+脚本 `backend/scripts/multi_step_persist_realdata.py`（幂等、可复现，**真实 PostgreSQL**）。
+运行产物全文：`Harness/changes/feat-multi-step-persist/realdata-run.txt`。
+
+```bash
+DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test' \
+    .venv/bin/python -m scripts.multi_step_persist_realdata
+```
+
+写库闸：只允许 `qa_metadata_test`，且**显式拒绝生产端口 5433**（负向验证：给 5433 URL ⇒
+`拒绝执行：端口 5433 是**生产端口**`，exit 1，**未建立任何连接**）。幂等：每次先按
+`session_id LIKE 'realdata-msps-%'` 清掉自己上次写下的行（steps 由 FK CASCADE 一并清）；
+连跑两次输出逐字一致（仅时间戳归一后 dif 为空）。
+
+真实输出（末行恒为 `REALDATA RESULT: PASS|FAIL`）：
+
+```
+[guard] 目标库 = qa_metadata_test @ localhost:5434（测试库，写库闸放行）
+[schema] 两张表就位：['multi_step_run', 'multi_step_step']
+[purge] 上次运行的残留：删 run 6 行、连同 steps 6 行（CASCADE）
+
+── 步骤 1：建 run + steps（total_steps / completed_steps 口径 = F2）
+  SQL: INSERT INTO multi_step_run(...total_steps=3) / multi_step_step ×3
+  SQL: UPDATE multi_step_run SET status='succeeded', completed_steps=3, current_step_idx=3, finished_at=now()
+  回读（新会话）: {'status': 'succeeded', 'total_steps': 3, 'completed_steps': 3, 'current_step_idx': 3, 'finished_at': datetime.datetime(...)}
+  [PASS] run.status == succeeded
+  [PASS] total_steps == 3（含末尾汇总步）
+  [PASS] completed_steps == total_steps == 3（分子分母同源，不出现 3/2）
+  [PASS] 收尾哨兵 current_step_idx == 3（同一把尺子）
+  [PASS] 终态必须带 finished_at（不变量 ①）
+
+── 步骤 2：续跑（prepareResume）
+  SQL: UPDATE multi_step_run SET status='running', current_step_idx=1, finished_at=NULL, idempotency_keys=idempotency_keys||'key-A'
+  合法续跑返回起始步 = 1
+  回读（新会话）: {'status': 'running', 'total_steps': 3, 'completed_steps': 1, 'current_step_idx': 1, 'finished_at': None}
+  [PASS] 合法续跑：起始步 == 1
+  [PASS] 合法续跑：status 回到 running
+  [PASS] 合法续跑：finished_at 由 NOT NULL 清回 NULL
+  [PASS] 合法续跑：current_step_idx == 1
+  重复键被拒文案: 'duplicate idempotency key'
+  状态不可续被拒文案: 'run status running not resumable'
+  [PASS] 重复幂等键被拒 — duplicate idempotency key
+  [PASS] 对照：拒绝文案与「重复键」不同（区分是谁拒的，不是只看抛没抛） — run status running not resumable
+  越界被拒文案: 'from_step_index 99 out of range 0..2'
+  [PASS] 越界 from_step_index=99 被拒（文案含 out of range） — from_step_index 99 out of range 0..2
+  [PASS] 三种拒绝文案两两不同（否则「是哪个闸拒的」无从判起）
+
+── 步骤 3：保留期清理（cleanupMultiStepRuns）
+  谓词 SQL: DELETE FROM multi_step_run WHERE (status='succeeded' AND finished_at < :sb) OR (status IN ('failed','partially_failed') AND finished_at < :fb)
+  全局回收计数 deleted = 2；本脚本清理夹具存活 = 4 行
+  [PASS] 过期的 succeeded（40 天）被回收
+  [PASS] 过期的 failed（10 天）被回收
+  [PASS] 未过期的 succeeded（5 天）不回收
+  [PASS] 未过期的 failed（2 天）不回收
+  [PASS] 非终态 running（100 天）不回收
+  [PASS] 终态但 finished_at IS NULL 不回收（显式裁定，需运维回填）
+
+断言合计 19 条，通过 19 条
+
+REALDATA RESULT: PASS
+```
 
 ## 9. 关联
 
@@ -271,8 +327,8 @@ npx vitest run src/tests/chatStore.test.ts src/tests/chatApi.test.ts src/tests/M
 13. **清理任务没有调度入口，保留期策略当前不会执行**（2026-10-06 Task 8 计划预检发现）：spec §10.4（`docs/superpowers/specs/2026-10-05-multi-step-persist.md:321`）写「定期清理由新 **cron 任务**执行」，§13 文件清单（同文件 `:358`）把该文件描述为「新建：**cron 清理脚本**」；但本计划只交付一个可导入的函数 —— 无 `__main__`、无 `scripts/cron_*.sh` 包装、无 crontab / launchd 注册。全仓 grep（排除 `.git`）实测：`app.jobs` 的**生产代码**引用为零，唯一引用方是它自己的集成测试 `backend/app/tests/integration/test_multi_step_cleanup.py:10`（`from app.jobs.cleanup_multi_step_runs import cleanupMultiStepRuns`），另两处提及在 spec 与本计划的待建清单里，都是「打算建」而非「谁调用」。故没有任何生产路径会调用它。更关键的是本机 cron 已确认静默失效（`/etc/crontab` 缺失、launchd 契约断裂，见 [[qa-system-cron-silently-broken]]），即便补上注册也不会触发。**结论：30/7 天只是写在代码里的两个常量，线上不会自动回收。** 本计划的处置与 `scripts/backup_pg.sh` 一致 —— 以可手动调用的形态交付 + 在此登记缺口，不粉饰。真要落地调度时，本仓既有两种形态可参照：`scripts/install_pg_backup_cron.sh` 式的外部 cron 安装器，或 agent scheduler 式的「PG 表 + 独立 worker 轮询」（后者不依赖宿主 cron，是当前唯一可靠的一条）。
 14. **spec §10.4 没有给「非终态 run」定保留规则**（同上预检发现）：spec §11 失败场景表自己写明「用户主动 kill 浏览器 ⇒ `run.status=running` 残留」，而 §10.4 只为 `succeeded`(30d) / `failed`+`partially_failed`(7d) 定规则 —— Task 8 用 `_TERMINAL` 过滤正确地**不删**这些行，于是它们无限累积。注意第 10 条只覆盖**续跑**入口的 `_sealAbandonedResume`；**全新执行**被 kill 后留下的 `running` 行无人封口，两者不矛盾。补齐需先定「多久算死」的阈值，属策略决策，不在本计划范围。
     > **更正（2026-10-06，IMP-1 方案 B）**：本条原先的括号注「循环中途 `updateRun(status=FAILED)` 只有 `flush()`，故要么与收尾同事务落盘、要么随会话回滚成 `running`」是**错的**（详见遗留项 16）。那次中间态写**会**被持久化。
-15. **`变更记录强制规范` §一 第 5 条（`<feature>_realdata.py`）未做**（2026-10-06 预检发现）：该条规定「涉及真实 SQL/DB 改动时」须有一个幂等的真实数据验证脚本，属**部署阻塞项**。该约定**是活的**，落点是 `backend/scripts/<feature>_realdata.py`（不是仓根 `scripts/`）—— 全仓 git 跟踪着 3 个现成实例（`wiki_provenance_realdata.py` / `wiki_dedup_realdata.py` / `seed_data_quality_realdata.py`），本特性**没有**这个脚本，属**一处真缺口**（不是「名义约定」），本计划也没有排这个产物。故 §8 按实况写「未做 + 理由」，**不新造脚本凑齐**（计划外产物；要补的话 `backend/scripts/` 里有 3 个现成范例可抄）。要不要补，收尾时由人类定夺。
-    > **已补齐（2026-10-06，人类裁定后补做）**：见 §8「真实数据验证」与遗留项 15 的收尾条目。
+15. **~~`变更记录强制规范` §一 第 5 条（`<feature>_realdata.py`）未做~~ ⇒ 已补齐**（2026-10-06）：该条规定「涉及真实 SQL/DB 改动时」须有一个幂等的真实数据验证脚本，属**部署阻塞项**。该约定**是活的**，落点是 `backend/scripts/<feature>_realdata.py`（不是仓根 `scripts/`）—— 全仓 git 跟踪着 3 个现成实例（`wiki_provenance_realdata.py` / `wiki_dedup_realdata.py` / `seed_data_quality_realdata.py`）。
+    **收口**：已交付 `backend/scripts/multi_step_persist_realdata.py`，覆盖 ① 建 run+steps（F2 口径）② 续跑（合法 + 重复幂等键被拒 + 越界被拒，三文案可区分）③ 清理（过期终态回收、未过期/非终态/缺 `finished_at` 不回收）。真实输出（19/19 PASS，`REALDATA RESULT: PASS`）见 §8「真实数据验证」；运行产物 `Harness/changes/feat-multi-step-persist/realdata-run.txt`。幂等已实证（连跑两次输出一致）；写库闸显式拒绝生产端口 5433。
 16. **`failed + finished_at IS NULL` 的历史遗留行需运维一次性回填**（2026-10-06，IMP-1 方案 B 复核实证）：修复前 `_recordStepFailure` 会写「终态且不落 `finished_at`」，而多步循环中途的 `_recordUsage` 经 `token_usage_service.recordUsage` 调 `await session.commit()`（`backend/app/services/token_usage_service.py:58`）把该中间态**持久化** ⇒ 历史上**确实可能**存在这类行（本案的「落库层零 commit」旧断言已证伪）。清理谓词（`cleanup_multi_step_runs.py`）两个分支都要求 `finished_at < cutoff`，故这类行**永不回收**（这是**显式裁定**，不是遗漏 —— 加 `COALESCE(finished_at, updated_at)` 兜底臂会在未来回归时把证据行级联删掉、掩盖回归；见 `test_multi_step_cleanup.py::testCleanupDoesNotCollectTerminalRowWithoutFinishedAt` 的理由）。**运维回填**（一次性、幂等）：
     ```sql
     UPDATE multi_step_run SET finished_at = updated_at

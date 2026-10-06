@@ -4161,3 +4161,6 @@ git commit -m "docs(multi-step): 补 wiki 与 change 记录"
     > **更正（2026-10-06，Task 10 复查的 Minor 触发）**：本条原先写「全仓不存在任何 `*realdata*` 实例
     > ⇒ 该约定在实践中是名义性的」—— **该判断是错的**（根因同第 5 条阻塞项那条批注：只看了仓根 `scripts/`）。
     > 正确的判断是：约定活着，缺口是真的。
+    > **已补齐（2026-10-06，人类裁定后补做）**：`backend/scripts/multi_step_persist_realdata.py`
+    > 已交付（真实 PG 5434，19/19 PASS），产物 `Harness/changes/feat-multi-step-persist/realdata-run.txt`，
+    > 摘要见变更记录 §8「真实数据验证」。

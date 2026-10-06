@@ -108,6 +108,9 @@ STEP_MISSING_SQL = "计划步未携带 SQL（逐步 NL2SQL 生成失败或未接
 COST_SCALE_DIVISOR = 1000
 """成本公式中 per-1k 转 per-token 的除数（与 cost_per_1k_input/output 列名耦合）。
 若定价模型由 per-1k 切到 per-million/per-token，此为唯一静默断点，必须同步改列名 + 此常量。"""
+CONFIDENCE_ROUND_DIGITS = 6
+"""落库 hypothesis.confidence 的精度（与 SQL Numeric 精度对齐）。
+变更此处会重塑所有已存 finding 的可信度对比口径，属配置决策而非魔数。"""
 
 # --- finding.supporting_data 契约（Task 5 写 / Task 6 报告读）------------------
 FINDING_ROWS_KEY = "rows"

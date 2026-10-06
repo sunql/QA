@@ -113,6 +113,14 @@ def test_cost_scale_divisor_value() -> None:
     assert isinstance(research_agent_ports.COST_SCALE_DIVISOR, int)
 
 
+def test_confidence_round_digits_value() -> None:
+    """hypothesis.confidence 落库精度 6 应走命名常量 CONFIDENCE_ROUND_DIGITS，与 SQL Numeric 对齐。"""
+    from app.services import research_agent_ports
+
+    assert research_agent_ports.CONFIDENCE_ROUND_DIGITS == 6
+    assert isinstance(research_agent_ports.CONFIDENCE_ROUND_DIGITS, int)
+
+
 # ---------------------------------------------------------------------------
 # 模型路由（Task 6.5-2）
 # ---------------------------------------------------------------------------

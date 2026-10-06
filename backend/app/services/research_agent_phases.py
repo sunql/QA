@@ -43,6 +43,7 @@ from app.services.research_agent_ports import (
     CHECKPOINT_LOW_CONFIDENCE,
     CHECKPOINT_PLANNING,
     CHECKPOINT_RUNTIME_DYNAMIC,
+    CONFIDENCE_ROUND_DIGITS,
     DEFAULT_MODE,
     EVENT_ESL,
     EVENT_FINDING,
@@ -269,7 +270,7 @@ class ResearchAgentPhasesMixin:
             confidence = round(
                 candidateConfidence(state, candidate)
                 * (VERIFY_OK_FACTOR if verified else VERIFY_FAIL_FACTOR),
-                6,
+                CONFIDENCE_ROUND_DIGITS,
             )
             row = await self._sessions.saveFinding(
                 session,

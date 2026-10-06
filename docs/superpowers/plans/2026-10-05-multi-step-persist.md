@@ -3316,6 +3316,7 @@ async def testCleanupDeletesStepsViaCascade(pgSession):
     await pgSession.commit()
 
     assert (await pgSession.execute(select(MultiStepStep))).scalars().all() == []
+```
 
 - [ ] **Step 2: 跑测试确认失败**
 

@@ -4009,6 +4009,18 @@ git commit -m "feat(multi-step): 前端续跑按钮与步骤压缩徽章"
 Step 3 的 `git add … Harness/index.md` 会**直接失败**（`pathspec did not match any files`），
 整个提交步骤跑不完。故本轮**不新增**索引文件，可发现性靠 change 记录 + wiki 内链。
 
+**✗ 不要漏掉 `Harness/rules/变更记录强制规范.md` 的 9 段模板（2026-10-06 controller 预检补记）**：
+本节原先只列了「要写什么内容」，**没提**本仓的强约束 ——
+`Harness/rules/变更记录强制规范.md` §一 列出 5 条**部署阻塞项**（判定时机：code-review 打回），
+§二 规定 `summary.md` 必须**照搬 `Harness/changes/_template/summary.md` 的 9 段**、
+且「不允许出现 `TBD / TODO / 待补` 占位」。本节要的那几项内容自然落在这 9 段里
+（迁移号→§3、flag 与文件清单→§5、测试命令与结果→§6、spec 链接→§1/§9、遗留项→§9 之后单列），
+**不是**二选一。实测 194 个 change 目录里 192 个有 `summary.md`，近期
+`feat-supplier-360-ads` / `feat-rbac-identity` 都按 9 段写 ⇒ 这是活约定，不是陈规。
+5 条阻塞项里第 5 条（`scripts/<feature>_realdata.py`）**全仓不存在任何实例**（`ls scripts/`
+的 10 个文件里没有 `*realdata*`）⇒ §8 按实况写「未做，理由」，**不要**为凑齐而新造一个脚本
+（那是计划外的产物）；这一条要不要补，留给收尾时人类定夺。
+
 - [ ] **Step 1: 写 wiki 条目**
 
 `Harness/wiki/chat_multi_step_persistence.md`：**格式照 `Harness/wiki/wiki-ontology-link.md`**
@@ -4038,7 +4050,9 @@ Step 3 的 `git add … Harness/index.md` 会**直接失败**（`pathspec did no
 
 - [ ] **Step 2: 写 change 记录**
 
-`Harness/changes/feat-multi-step-persist/summary.md`：SSOT 记录，含 spec 链接、迁移号 0114、feature flag、新增文件清单、测试命令与结果、以及**全部**遗留项（照抄本节末尾「遗留项」清单，一条不漏 —— 特别是 Task 9 只做了 spec §8.2 的聊天面板部分，§8.1/§8.3 没做，别让 change 记录读起来像 UI 已完工）。
+`Harness/changes/feat-multi-step-persist/summary.md`：SSOT 记录，**按 `Harness/changes/_template/summary.md` 的 9 段填齐**（含顶部 `# 变更：feat-multi-step-persist` 元数据块：日期 / 作者 / Phase / 状态 / 迁移版本 `0114_multi_step_persist` + `0115_multi_step_run_session_id_text` / MEMORY 链接），
+内容含 spec 链接、迁移号 0114+0115、feature flag（`MULTI_STEP_PERSIST_ENABLED`，配置字段 `multiStepPersistEnabled`，默认 `True`）、新增文件清单、测试命令与结果、以及**全部**遗留项（照抄本节末尾「遗留项」清单，一条不漏 —— 特别是 Task 9 只做了 spec §8.2 的聊天面板部分，§8.1/§8.3 没做，别让 change 记录读起来像 UI 已完工）。
+9 段里 §7 安全审查与 §8 部署验证**必须写实况**（做了就写结果，没做就写「未做 + 理由」），不写 `TBD`。
 
 - [ ] **Step 3: Commit**
 
@@ -4110,3 +4124,8 @@ git commit -m "docs(multi-step): 补 wiki 与 change 记录"
     （已核对：两个执行器里只有 4 处 `session.commit()`，全部紧邻带 `finished=True` 的
     `_closeRun`；循环中途 `updateRun(status=FAILED)` 只有 `flush()`，故要么与收尾同事务落盘、
     要么随会话回滚成 `running`）。补齐需先定「多久算死」的阈值，属策略决策，不在本计划范围。
+15. **`变更记录强制规范` §一 第 5 条（`scripts/<feature>_realdata.py`）未做**（2026-10-06 预检发现）：
+    该条规定「涉及真实 SQL/DB 改动时」须有一个幂等的真实数据验证脚本，属**部署阻塞项**。
+    但全仓 `scripts/` 的 10 个文件里**没有任何 `*realdata*` 实例** —— 这条约定在实践中是名义性的，
+    本计划也没有排这个产物。故 change 记录的 §8 按实况写「未做 + 理由」，
+    **不新造脚本凑齐**（计划外产物）。要不要补，收尾时由人类定夺。

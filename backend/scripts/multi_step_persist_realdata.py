@@ -23,6 +23,10 @@
 精确识别，``multi_step_step`` 靠 FK ``ON DELETE CASCADE`` 一并清）。绝不 TRUNCATE
 全库，也不碰非本脚本的数据 —— 清理步骤的断言只落在本脚本自己的行上。
 
+**两次运行的输出不是逐字节相同**：`finished_at` 的墙钟时间戳、以及 `[purge]` 行打印的
+全局 `deleted` 计数（取决于库里他人残留的行）都会浮动。稳定的是**断言集合与末行
+`PASS/FAIL`** —— 别把「上次 dif 为空」当成可复现性保证（那次只是恰好同环境）。
+
 写库闸：只允许打到 ``qa_metadata_test``，且**显式拒绝生产端口 5433**（生产库
 ``qa_metadata`` 曾发生整库误删事故，见 memory `qa-system-pg-wipe-incident`）。
 Alembic/settings 只认 ``DATABASE_URL``（``TEST_DATABASE_URL`` 会被静默忽略，

@@ -165,6 +165,18 @@ async def updateRun(
     row could exist in the impossible `failed + finished_at IS NULL` shape (the
     IMP-1 defect). Any caller that violates it gets a `ValueError`, not a silent
     half-written row.
+
+    The check is **one-directional on purpose**: it forbids terminal-without-
+    `finished_at`, but not the converse (a non-terminal status carrying a stale
+    `finished_at`). Enforcing the converse would force every progress-only call
+    to pass `finished=False` — and `status=None`/`compressedCount=…` updates
+    (the common case in `multi_step_persist_hooks`) never meant to touch
+    `finished_at`, so clearing it there would itself be a silent data loss.
+    What keeps the converse true is that there is exactly one non-terminal
+    status writer: `multi_step_resume.prepareResume` reopens with
+    `finished=False`, and `_beginRunForRequest` inserts `running` with
+    `finished_at` unset (NULL). A non-terminal row carrying `finished_at`
+    would be excluded from cleanup forever, same as the IMP-1 shape.
     """
     if status is not None and status in TERMINAL_RUN_STATUSES and finished is not True:
         raise ValueError(

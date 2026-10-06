@@ -249,7 +249,7 @@ DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_meta
 写库闸：只允许 `qa_metadata_test`，且**显式拒绝生产端口 5433**（负向验证：给 5433 URL ⇒
 `拒绝执行：端口 5433 是**生产端口**`，exit 1，**未建立任何连接**）。幂等：每次先按
 `session_id LIKE 'realdata-msps-%'` 清掉自己上次写下的行（steps 由 FK CASCADE 一并清）；
-连跑两次输出逐字一致（仅时间戳归一后 dif 为空）。
+连跑两次的 `PASS/FAIL` 结论与**断言集合**一致；但输出**不是逐字节可复现** —— 与断言无关的值会浮动：`finished_at` 的墙钟时间戳，以及 `[purge]` 行打印的全局 `deleted` 计数（后者取决于测试库里他人残留的行，只是恰好在我那两次连跑中相同）。
 
 真实输出（末行恒为 `REALDATA RESULT: PASS|FAIL`）：
 
@@ -335,4 +335,3 @@ REALDATA RESULT: PASS
      WHERE status IN ('succeeded','failed','partially_failed') AND finished_at IS NULL;
     ```
     回填后这些行即可被保留期清理正常回收。方案 B 之后生产侧不再产生该形态。
-15. **`变更记录强制规范` §一 第 5 条（`<feature>_realdata.py`）未做**（2026-10-06 预检发现）：该条规定「涉及真实 SQL/DB 改动时」须有一个幂等的真实数据验证脚本，属**部署阻塞项**。该约定**是活的**，落点是 `backend/scripts/<feature>_realdata.py`（不是仓根 `scripts/`）—— 全仓 git 跟踪着 3 个现成实例（`wiki_provenance_realdata.py` / `wiki_dedup_realdata.py` / `seed_data_quality_realdata.py`），本特性**没有**这个脚本，属**一处真缺口**（不是「名义约定」），本计划也没有排这个产物。故 §8 按实况写「未做 + 理由」，**不新造脚本凑齐**（计划外产物；要补的话 `backend/scripts/` 里有 3 个现成范例可抄）。要不要补，收尾时由人类定夺。

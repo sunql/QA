@@ -162,6 +162,11 @@ async def _sealAbandonedResume(session: AsyncSession, runId: uuid.UUID) -> None:
 
 
 @router.post("/multi-step/{runId}/resume")
+# 限流与 /chat、/stream 同款：续跑一次要跑全链路 LLM（真金白银）+ 长连接，
+# 漏了这道装饰器，单账号就能不受限地把它打满（与仓内「限流覆盖所有端点」冲突）。
+# 唯一限流来源是 app/infrastructure/rate_limit.py；注意 SlowAPIMiddleware 的
+# default_limits 在本仓实测**不生效**（未装饰路由不会被挡），故装饰器是唯一覆盖。
+@limiter.limit(rateLimitValue)
 async def resumeMultiStep(
     request: Request,
     runId: uuid.UUID,

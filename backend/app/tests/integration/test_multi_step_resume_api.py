@@ -323,9 +323,9 @@ async def testResumeSealUsesFreshSessionNotRequestSession(pg_client, db_session,
     from app.services import multi_step_persistence as repo
     from app.tests.integration.test_chat_api import _seed
     from app.tests.integration.test_chat_multi_step import (
+        _install,
         _NoDecomposeLlm,
         _OkAdapter,
-        _install,
     )
 
     class _SingleStepStreamingLlm(_NoDecomposeLlm):
@@ -386,3 +386,53 @@ async def testResumeSealUsesFreshSessionNotRequestSession(pg_client, db_session,
     assert reloaded.status == "failed", "run 停在非终态 = 僵尸"
     assert reloaded.finished_at is not None
     assert reloaded.error_summary and "续跑未走多步链路" in reloaded.error_summary
+
+
+@pytest.mark.asyncio
+async def testResumeAllowsRepeatedKeyWhenRunIsResumableAgain(pg_client, db_session, monkeypatch):
+    """幂等键**不单独设闸**：键已在册 + 状态又可续（failed）⇒ 续跑必须放行（IMP-5）。
+
+    幂等键的语义是「这个请求跑过一次」，不是「这个请求永远不许再来」。若「键存在即拒」，
+    一次续跑中途失败之后，同一个请求（同键）就再也进不来了 —— 重试能力被烧掉。
+
+    判别式：键已在册、状态是 failed。修复前 key 就是闸（无条件拒）⇒ 409
+    `duplicate idempotency key`；修复后 key 只在**状态也不可续**时改文案 ⇒ 200。
+    `testResumeIsIdempotentOnSameKey` 覆盖的是另一半（键在册 + 状态已 succeeded ⇒
+    仍然 409 duplicate）—— 两条合起来才证明「闸在状态不在键」。
+    """
+    from app.services import multi_step_persistence as repo
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _install,
+        _MultiStepLlm,
+        _OkAdapter,
+    )
+
+    config, datasource = await _seed(db_session)
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+    key = str(uuid.uuid4())
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="请分步查询 2024 和 2025 年的销售额并对比",
+        modelId=config.id, datasourceId=datasource.id, totalSteps=1,
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
+    await repo.recordStepError(db_session, steps[0], message="x", kind="transient")
+    await repo.updateRun(db_session, run, status="failed", finished=True)
+    # 键已在册：等价于「同一次续跑请求之前已经打进过来」
+    run.idempotency_keys = [key]
+    await db_session.commit()
+
+    resp = await pg_client.post(
+        f"/api/v1/chat/multi-step/{run.id}/resume", json={}, headers={"Idempotency-Key": key}
+    )
+
+    assert resp.status_code == 200, resp.text
+    reloaded = (
+        await db_session.execute(select(MultiStepRun).where(MultiStepRun.id == run.id))
+    ).scalar_one()
+    await db_session.refresh(reloaded)
+    # 键不得重复入列（去重），且续跑确实跑过（resume_count 自增）
+    assert reloaded.idempotency_keys == [key], reloaded.idempotency_keys
+    assert reloaded.resume_count >= 1

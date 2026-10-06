@@ -153,9 +153,30 @@ async def updateRun(
     await session.flush()
 
 
-async def loadRun(session: AsyncSession, runId: uuid.UUID) -> MultiStepRun | None:
+async def loadRun(
+    session: AsyncSession, runId: uuid.UUID, *, forUpdate: bool = False
+) -> MultiStepRun | None:
+    """读一条 run；`forUpdate=True` 时以 `SELECT … FOR UPDATE` 持行锁并在锁后重读。
+
+    两个要件缺一不可，各自堵一个真实的洞：
+
+    - `with_for_update()`：并发第二个请求阻塞到第一个提交，**再**看到新状态。
+      没有它，两个续跑请求都读到「key 未含该键 且 status=failed」⇒ 双双通过守门
+      ⇒ 同一步跑两遍（双份 LLM 花费 + 两路交错写同一 run/steps）。
+    - `populate_existing()`：本会话此前多半已经读过这条 run（路由入口那次 `loadRun`），
+      而 SQLAlchemy 默认**不刷新**已在 identity map 里的实例属性 —— 于是 FOR UPDATE
+      取回的最新行会被旧实例的陈旧列值盖掉，锁形同虚设（拿到锁、读到的却是旧状态）。
+
+    锁在调用方 commit/rollback 时释放，故「取锁 → 判定 → 写」必须同事务
+    （`prepareResume` 正是这个形状）。
+    """
+    stmt = select(MultiStepRun).where(MultiStepRun.id == runId)
+    if not forUpdate:
+        return (await session.execute(stmt)).scalar_one_or_none()
     return (
-        await session.execute(select(MultiStepRun).where(MultiStepRun.id == runId))
+        await session.execute(
+            stmt.with_for_update().execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
 
 
@@ -190,10 +211,23 @@ async def resetStepsFrom(
 
 
 async def appendIdempotencyKey(session: AsyncSession, run: MultiStepRun, key: str) -> None:
-    existing = list(run.idempotency_keys or [])
+    """原子追加幂等键（已存在则 no-op）。
+
+    裸的读改写会**丢键**：两个并发写者各自把 `existing + [key]` 落库，后写的整体
+    覆盖先写的（LAST WRITE WINS），先写那个键凭空消失 —— 之后它再来就骗过去重闸，
+    同一请求被放行两遍。故这里先 `loadRun(forUpdate=True)` 在**该行**上加锁并重读
+    最新 `idempotency_keys`，再写回；锁由调用方在其事务提交时释放，整个
+    「读键 → 判定 → 写键」是一个原子段。
+
+    去重 no-op 分支是承重的：同一键重复提交（HTTP 层重放）不得重复入列，
+    否则 `idempotency_keys` 会无界增长。
+    """
+    fresh = await loadRun(session, run.id, forUpdate=True)
+    target = fresh if fresh is not None else run
+    existing = list(target.idempotency_keys or [])
     if key in existing:
         return
-    run.idempotency_keys = existing + [key]
+    target.idempotency_keys = existing + [key]
     await session.flush()
 
 

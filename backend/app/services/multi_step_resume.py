@@ -42,14 +42,26 @@ async def prepareResume(
     fromStepIndex: int | None,
     idempotencyKey: str | None,
 ) -> tuple[MultiStepRun, int]:
-    """校验并重置；返回 (run, 起始步号)。run 不存在时抛 ResumeNotAllowed（永不返回 None）。"""
-    run = await persistence.loadRun(session, runId)
+    """校验并重置；返回 (run, 起始步号)。run 不存在时抛 ResumeNotAllowed（永不返回 None）。
+
+    **整个守卫是行锁下的一段原子段**：`loadRun(forUpdate=True)` 拿 `SELECT … FOR
+    UPDATE` 的行锁，锁由本函数末尾的 `commit()` 释放。于是并发第二个请求会阻塞到
+    第一个提交、再读到 `running` 被状态闸拒掉 —— 而不是两个都读到 `failed` 双双放行
+    （那会让同一步跑两遍：双份 LLM 花费 + 两路交错写同一 run/steps）。
+    """
+    run = await persistence.loadRun(session, runId, forUpdate=True)
     if run is None:
         raise ResumeNotAllowed(f"run {runId} not found")
 
-    if idempotencyKey and idempotencyKey in (run.idempotency_keys or []):
-        raise ResumeConflict("duplicate idempotency key")
     if run.status not in RESUMABLE_STATUSES:
+        # 幂等键的语义：只标记「这个请求跑过一次」，**不**代表「这个请求永远不许再来」。
+        # 故它不单独设闸（键在起流之前就已落库，若「键存在即拒」会烧掉重试能力：
+        # 一次流中途失败之后，同一个请求再也进不来）。它只在**状态也已经不可续**
+        # 时把文案说得更准 —— 那条请求确实已经跑过 / 正在跑。
+        # 并发重复由上面的行锁 + 本闸共同挡住：第一个提交后 status=running，
+        # 第二个拿到锁时看到的必然是 running。
+        if idempotencyKey and idempotencyKey in (run.idempotency_keys or []):
+            raise ResumeConflict("duplicate idempotency key")
         raise ResumeConflict(f"run status {run.status} not resumable")
 
     steps = await persistence.loadSteps(session, runId)

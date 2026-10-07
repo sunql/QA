@@ -409,7 +409,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         """落 checkpoint + checkpoint_awaiting turn + 会话置 awaiting_user。"""
         phase, options, prompt = pause
         settings = getSettings()
-        expires_at = datetime.now(UTC) + timedelta(hours=settings.RESEARCH_CHECKPOINT_TTL_HOURS)
+        expires_at = datetime.now(UTC) + timedelta(hours=settings.researchCheckpointTtlHours)
         checkpoint = await self._sessions.openCheckpoint(
             session,
             sessionId=sessionId,

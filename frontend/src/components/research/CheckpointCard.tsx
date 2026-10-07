@@ -14,13 +14,14 @@
  * 历史 checkpoint 的 options 已落库，不能靠改后端键名统一 ⇒ 这里双键回落读取。
  */
 import { useState } from "react";
-import { Button, Card, Checkbox, Input, Space, Tag, Tooltip, Typography } from "antd";
+import { Button, Card, Checkbox, Input, Space, Spin, Tag, Tooltip, Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import type { CheckpointAction, CheckpointPhase, ResearchCheckpoint } from "../../types/research";
 
 interface CheckpointCardProps {
   checkpoint: ResearchCheckpoint;
   onAnswer: (action: CheckpointAction, choice: Record<string, unknown>) => void;
+  resolutionInFlight?: boolean;
 }
 
 interface ConflictCandidateView {
@@ -381,7 +382,7 @@ function CheckpointActions({
   );
 }
 
-export function CheckpointCard({ checkpoint, onAnswer }: CheckpointCardProps) {
+export function CheckpointCard({ checkpoint, onAnswer, resolutionInFlight }: CheckpointCardProps) {
   const { t } = useTranslation();
   const [selectedIndexes, setSelectedIndexes] = useState<number[]>([]);
 
@@ -425,6 +426,11 @@ export function CheckpointCard({ checkpoint, onAnswer }: CheckpointCardProps) {
         onReject={() => onAnswer("reject", {})}
         onModify={(question) => onAnswer("modify", { question })}
       />
+      {resolutionInFlight && (
+        <Spin size="small" style={{ marginLeft: 12 }}>
+          {t("research.checkpoint.processing")}
+        </Spin>
+      )}
     </Card>
   );
 }

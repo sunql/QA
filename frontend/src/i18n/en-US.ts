@@ -2931,6 +2931,7 @@ export const enUS = {
       modifyPlanningHint: "Will rerun the planner with your feedback",
       rejectAbortHint: "Rejecting will publish the report immediately and end this turn",
       hypothesisConfirmHint: "No selection = verify all hypotheses",
+      processing: "Processing…",
     },
     progress: {
       empty: "No progress yet",

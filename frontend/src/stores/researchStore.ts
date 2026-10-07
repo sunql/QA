@@ -78,6 +78,7 @@ export function buildInitialState(): ResearchState {
     turns: [],
     events: [],
     pendingCheckpoint: null,
+    resolutionInFlight: false,
     report: null,
     reports: [],
     loading: false,
@@ -91,7 +92,7 @@ export function applyResearchEvent(state: ResearchState, event: ResearchSseEvent
   const events = [...state.events, event];
   switch (event.name) {
     case "research.checkpoint":
-      return { events, pendingCheckpoint: checkpointFromEvent(event.payload) };
+      return { events, pendingCheckpoint: checkpointFromEvent(event.payload), resolutionInFlight: false };
     case "research.done":
       return { events, streaming: false };
     case "research.error": {
@@ -135,6 +136,7 @@ interface ResearchState {
   turns: ResearchTurn[];
   events: ResearchSseEvent[];
   pendingCheckpoint: ResearchCheckpoint | null;
+  resolutionInFlight: boolean;
   report: ResearchReport | null;
   reports: ResearchReportSummary[];
   loading: boolean;
@@ -174,6 +176,7 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
   turns: [],
   events: [],
   pendingCheckpoint: null,
+  resolutionInFlight: false,
   report: null,
   reports: [],
   loading: false,
@@ -266,10 +269,11 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
     set({ error: null });
     try {
       await apiAnswerCheckpoint(checkpointId, { action, choice: choice ?? {} });
-      // 决策已提交：无论状态机接下来如何走，pendingCheckpoint 都不再是待决策点。
-      set({ pendingCheckpoint: null });
+      // B4: 不立即清空 pendingCheckpoint；等下一个 SSE 事件到达再切换。
+      // resolutionInFlight=true 表示已提交答案、等待确认中。
+      set({ resolutionInFlight: true });
     } catch (err) {
-      set({ error: errorMessage(err) });
+      set({ error: errorMessage(err), resolutionInFlight: false });
       throw err;
     }
   },
@@ -329,7 +333,7 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
         return;
       }
       signalOpen();
-      set({ error: errorMessage(err) });
+      set({ error: errorMessage(err), resolutionInFlight: false });
     } finally {
       signal?.removeEventListener("abort", forwardAbort);
       if (activeAbort === controller) {
@@ -348,6 +352,7 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
       turns: [],
       events: [],
       pendingCheckpoint: null,
+      resolutionInFlight: false,
       report: null,
       reports: [],
       loading: false,

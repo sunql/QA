@@ -2946,6 +2946,7 @@ export const zhCN = {
       modifyPlanningHint: "将基于您的反馈重跑 planner 重新生成步骤",
       rejectAbortHint: "拒绝后本轮将直接出报告，不再继续",
       hypothesisConfirmHint: "不勾选 = 验证全部假设",
+      processing: "处理中…",
     },
     progress: {
       empty: "暂无进度",

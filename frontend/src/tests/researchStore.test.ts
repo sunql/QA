@@ -351,7 +351,86 @@ describe("researchStore", () => {
     vi.unstubAllGlobals();
   });
 
-  it("answer 提交决策后 pendingCheckpoint 清空", async () => {
+  // B4: answer 提交后保留 pendingCheckpoint + resolutionInFlight 标志，等待下一个 SSE 事件再切换
+  it("answer submit: pendingCheckpoint stays until next SSE event arrives", async () => {
+    useResearchStore.setState({
+      pendingCheckpoint: {
+        id: "cp1",
+        phase: "intent",
+        status: "pending",
+        options: {},
+        prompt: "范围是否确认？",
+        userChoice: null,
+        decidedAt: null,
+      },
+    });
+    httpMock.post.mockResolvedValue({ data: { sessionStatus: "running", nextPhase: "planning" } });
+
+    await useResearchStore.getState().answer("cp1", "confirm", { arm: 0 });
+
+    // API 调用正确
+    expect(httpMock.post).toHaveBeenCalledWith("/research/checkpoints/cp1/answer", {
+      action: "confirm",
+      choice: { arm: 0 },
+    });
+    // B4: pendingCheckpoint 保留（不清空），resolutionInFlight 为 true
+    const state = useResearchStore.getState();
+    expect(state.pendingCheckpoint).not.toBeNull();
+    expect(state.resolutionInFlight).toBe(true);
+  });
+
+  it("answer submit: next SSE checkpoint event clears both pendingCheckpoint and resolutionInFlight", async () => {
+    // 模拟 answer 成功提交后、下一条 SSE 到来之前的状态
+    useResearchStore.setState({
+      pendingCheckpoint: {
+        id: "cp1",
+        phase: "intent",
+        status: "pending",
+        options: {},
+        prompt: "p1",
+        userChoice: null,
+        decidedAt: null,
+      },
+      resolutionInFlight: true,
+    });
+
+    // 模拟下一条 SSE checkpoint 事件到达
+    const nextCheckpoint = {
+      name: "research.checkpoint" as const,
+      payload: { checkpointId: "cp2", phase: "planning", prompt: "p2", options: {} },
+    };
+    const updated = applyResearchEvent(useResearchStore.getState(), nextCheckpoint);
+    useResearchStore.setState(updated);
+
+    // 两项均被新事件替换
+    const state = useResearchStore.getState();
+    expect(state.pendingCheckpoint).not.toBeNull();
+    expect(state.pendingCheckpoint!.id).toBe("cp2");
+    expect(state.resolutionInFlight).toBe(false);
+  });
+
+  it("answer submit: SSE disconnect resets resolutionInFlight to false", async () => {
+    useResearchStore.setState({
+      pendingCheckpoint: {
+        id: "cp1",
+        phase: "intent",
+        status: "pending",
+        options: {},
+        prompt: "p1",
+        userChoice: null,
+        decidedAt: null,
+      },
+      resolutionInFlight: true,
+    });
+
+    // connectStream 抛出非断流错误时，resolutionInFlight 应被重置
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    await useResearchStore.getState().connectStream("s1");
+
+    expect(useResearchStore.getState().resolutionInFlight).toBe(false);
+  });
+
+  it("answer 成功：pendingCheckpoint 保留但 resolutionInFlight=true，等 SSE 替换", async () => {
     useResearchStore.setState({
       pendingCheckpoint: {
         id: "cp1",
@@ -371,7 +450,9 @@ describe("researchStore", () => {
       action: "confirm",
       choice: { arm: 0 },
     });
-    expect(useResearchStore.getState().pendingCheckpoint).toBeNull();
+    // B4: pendingCheckpoint 保留（不清空），由下一个 SSE 事件来切换
+    expect(useResearchStore.getState().pendingCheckpoint).not.toBeNull();
+    expect(useResearchStore.getState().resolutionInFlight).toBe(true);
   });
 
   it("connectStream events 只追加、不改写旧数组", async () => {

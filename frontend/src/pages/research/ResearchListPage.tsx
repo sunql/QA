@@ -102,7 +102,7 @@ function useNewResearchForm(sources: DataSource[]): NewResearchForm {
       });
       navigate(`/research/${session.id}`, { state: { question: trimmed } });
     } catch {
-      message.error(t("research.session.error"));
+      message.error(t("research.session.error.default"));
     } finally {
       setSubmitting(false);
     }

@@ -198,3 +198,31 @@ async def test_resolve_checkpoint_rejects_stale(dbSession) -> None:
     assert cp.status == "pending"
     with pytest.raises(CheckpointStaleError, match="过期"):
         await svc.resolveCheckpoint(dbSession, checkpointId=cp.id, status="confirmed", userChoice={})
+
+
+@pytest.mark.asyncio
+async def test_resolve_checkpoint_writes_audit_log(dbSession) -> None:
+    """checkpoint answer 后 audit_log 应有对应记录。"""
+    from app.domain.models import AuditLog
+
+    svc = ResearchSessionService()
+    s = await svc.createSession(dbSession, userId=1, question="q")
+    turn = await svc.appendTurn(dbSession, sessionId=s.id, role="agent", content={})
+    cp = await svc.openCheckpoint(
+        dbSession,
+        sessionId=s.id,
+        turnId=turn.id,
+        phase="intent",
+        options={},
+        prompt="p",
+    )
+    await svc.resolveCheckpoint(
+        dbSession, checkpointId=cp.id, status="confirmed", userChoice={"selectedIndexes": [0, 1]}, userId=1
+    )
+    row = await dbSession.execute(
+        text("SELECT entity_type, entity_id, action, actor, after_json FROM audit_log WHERE entity_type = 'research_checkpoint'")
+    )
+    log_row = row.one()
+    assert log_row.entity_type == "research_checkpoint"
+    assert log_row.action == "resolved"
+    assert log_row.after_json["status"] == "confirmed"

@@ -42,7 +42,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.research_models import ResearchSession
+from app.domain.research_models import ResearchCheckpoint, ResearchSession
 from app.services.intent_service import IntentService
 from app.services.model_config_service import ModelConfigService
 from app.services.model_router_service import ModelRouterService
@@ -267,10 +267,19 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         if status is None:
             logger.warning("非法 checkpoint 动作: %s", action)
             raise ValueError(f"非法 checkpoint 动作 {action}，合法值: {sorted(ACTION_STATUS)}")
+        # B5：先加载 checkpoint 拿到 session_id，再加载 session 获取 userId（audit_log actor）
+        cp_row = await session.get(ResearchCheckpoint, checkpointId)
+        if cp_row is None:
+            raise ValueError(f"checkpoint 不存在: {checkpointId}")
+        session_row = await self._loadSession(session, cp_row.session_id)
         checkpoint = await self._sessions.resolveCheckpoint(
-            session, checkpointId=checkpointId, status=status, userChoice=choice or {}
+            session,
+            checkpointId=checkpointId,
+            status=status,
+            userChoice=choice or {},
+            userId=session_row.created_by,
         )
-        row = await self._loadSession(session, checkpoint.session_id)
+        row = session_row
         rewritten = await self._recordResumeTurn(
             session, checkpoint, action=action, choice=choice, checkpointId=checkpointId
         )

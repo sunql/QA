@@ -25,6 +25,7 @@ from typing import Any
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.models import AuditLog
 from app.domain.research_models import (
     ResearchCheckpoint,
     ResearchFinding,
@@ -176,6 +177,7 @@ class ResearchSessionService:
         checkpointId: uuid.UUID,
         status: str,
         userChoice: dict[str, Any],
+        userId: int | None = None,
     ) -> ResearchCheckpoint:
         """写入用户决策；非法状态或非 pending 一律拒绝（幂等保护，防重复提交）。
 
@@ -183,6 +185,8 @@ class ResearchSessionService:
         rowcount=0 即拒绝。此前的「先读后写」是 TOCTOU：两个并发 answer 都读到
         pending ⇒ 双双放行 ⇒ 状态机双跑（重复 execute / verify / 报告归档）。
         异常类型与文案语义不变（仍是 ValueError，仍区分「不存在」与「非 pending」）。
+
+        B5：决策成功后写 audit_log（同事务），便于长期审计。
         """
         if status not in CHECKPOINT_STATUSES:
             logger.warning("非法 checkpoint 决策状态: id=%s status=%s", checkpointId, status)
@@ -217,6 +221,20 @@ class ResearchSessionService:
             raise CheckpointConflictError(f"checkpoint 非 pending（当前 {row.status}）: {checkpointId}")
         await session.flush()
         await session.refresh(row)
+        # B5：audit_log 与 UPDATE 同事务（AuditLog 不可变，仅 INSERT）
+        session.add(AuditLog(
+            entity_type="research_checkpoint",
+            entity_id=row.id,
+            action="resolved",
+            actor=str(userId) if userId is not None else "",
+            before_json=None,
+            after_json={
+                "status": status,
+                "user_choice": userChoice,
+                "session_id": str(row.session_id),
+            },
+        ))
+        await session.flush()
         return row
 
     async def getPendingCheckpoint(

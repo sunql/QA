@@ -37,6 +37,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -100,6 +101,7 @@ from app.services.research_agent_stages import (
 from app.services.research_hypothesis_adapter import generateHypotheses
 from app.services.research_session_service import ResearchSessionService
 from app.services.token_usage_service import TokenUsageService
+from app.config import getSettings
 
 logger = logging.getLogger(__name__)
 
@@ -406,6 +408,8 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
     ) -> None:
         """落 checkpoint + checkpoint_awaiting turn + 会话置 awaiting_user。"""
         phase, options, prompt = pause
+        settings = getSettings()
+        expires_at = datetime.now(UTC) + timedelta(hours=settings.RESEARCH_CHECKPOINT_TTL_HOURS)
         checkpoint = await self._sessions.openCheckpoint(
             session,
             sessionId=sessionId,
@@ -413,6 +417,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             phase=phase,
             options=options,
             prompt=prompt,
+            expiresAt=expires_at,
         )
         await self._sessions.appendTurn(
             session,

@@ -5,12 +5,13 @@ ORM 列属性为 snake_case（见 app/domain/research_models.py），故断言�
 """
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
 
 from app.domain.research_models import ResearchSession
-from app.services.research_session_service import ResearchSessionService
+from app.services.research_session_service import CheckpointStaleError, ResearchSessionService
 
 
 @pytest.mark.asyncio
@@ -177,3 +178,23 @@ async def test_save_finding_and_update_session_status(dbSession) -> None:
             supportingData={},
             confidence=1.5,
         )
+
+
+@pytest.mark.asyncio
+async def test_resolve_checkpoint_rejects_stale(dbSession) -> None:
+    """expires_at 已过的 checkpoint 视为已非 pending。"""
+    svc = ResearchSessionService()
+    s = await svc.createSession(dbSession, userId=1, question="q")
+    turn = await svc.appendTurn(dbSession, sessionId=s.id, role="agent", content={})
+    cp = await svc.openCheckpoint(
+        dbSession,
+        sessionId=s.id,
+        turnId=turn.id,
+        phase="intent",
+        options={"resumePhase": "plan"},
+        prompt="p",
+        expiresAt=datetime.now(UTC) - timedelta(hours=1),
+    )
+    assert cp.status == "pending"
+    with pytest.raises(CheckpointStaleError, match="过期"):
+        await svc.resolveCheckpoint(dbSession, checkpointId=cp.id, status="confirmed", userChoice={})

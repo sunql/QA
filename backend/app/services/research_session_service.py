@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.research_models import (
@@ -51,6 +51,14 @@ PROMPT_KEY = "prompt"
 """checkpoint 无 prompt 列，提示文案随 options 落 JSONB 的键名（Task 5 读同键）。"""
 TITLE_MAX_LEN = 200
 """会话标题取问题前 N 字（title 列无长度约束，此处为可读性截断）。"""
+
+
+class CheckpointStaleError(ValueError):
+    """checkpoint 已过期（expires_at <= now），不能再做决策。"""
+
+
+class CheckpointConflictError(ValueError):
+    """checkpoint 状态不是 pending（已被决策或不存在）。"""
 
 
 class ResearchSessionService:
@@ -145,6 +153,7 @@ class ResearchSessionService:
         phase: str,
         options: dict[str, Any],
         prompt: str,
+        expiresAt: datetime | None = None,
     ) -> ResearchCheckpoint:
         """挂起一个待决策检查点（status=pending），等待用户选择。"""
         row = ResearchCheckpoint(
@@ -153,6 +162,7 @@ class ResearchSessionService:
             phase=phase,
             status=CHECKPOINT_PENDING,
             options={**(options or {}), PROMPT_KEY: prompt},
+            expires_at=expiresAt,
         )
         session.add(row)
         await session.flush()
@@ -186,16 +196,25 @@ class ResearchSessionService:
             .where(
                 ResearchCheckpoint.id == checkpointId,
                 ResearchCheckpoint.status == CHECKPOINT_PENDING,
+                or_(
+                    ResearchCheckpoint.expires_at.is_(None),
+                    ResearchCheckpoint.expires_at > datetime.now(UTC),
+                ),
             )
             .values(status=status, user_choice=userChoice or {}, decided_at=datetime.now(UTC))
             .execution_options(synchronize_session=False)
         )
         if result.rowcount == 0:
             await session.refresh(row)  # 刷新以报出**库中真实**状态（identity map 可能陈旧）
+            if row.status == CHECKPOINT_PENDING and (
+                row.expires_at is not None and row.expires_at <= datetime.now(UTC)
+            ):
+                logger.warning("checkpoint 已过期，拒绝决策: id=%s", checkpointId)
+                raise CheckpointStaleError(f"checkpoint 已过期: {checkpointId}")
             logger.warning(
                 "checkpoint 非 pending，拒绝重复决策: id=%s status=%s", checkpointId, row.status
             )
-            raise ValueError(f"checkpoint 非 pending（当前 {row.status}）: {checkpointId}")
+            raise CheckpointConflictError(f"checkpoint 非 pending（当前 {row.status}）: {checkpointId}")
         await session.flush()
         await session.refresh(row)
         return row
@@ -215,6 +234,10 @@ class ResearchSessionService:
             .where(
                 ResearchCheckpoint.session_id == sessionId,
                 ResearchCheckpoint.status == CHECKPOINT_PENDING,
+                or_(
+                    ResearchCheckpoint.expires_at.is_(None),
+                    ResearchCheckpoint.expires_at > datetime.now(UTC),
+                ),
             )
             .order_by(ResearchTurn.turn_index.desc(), ResearchCheckpoint.id.desc())
             .limit(1)

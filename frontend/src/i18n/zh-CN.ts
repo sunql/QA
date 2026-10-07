@@ -3013,7 +3013,10 @@ export const zhCN = {
       inputPlaceholder: "继续提问…",
       send: "发送",
       streaming: "研究中…",
-      error: "出错了",
+      error: {
+        default: "出错了",
+        checkpoint_conflict: "并发检查点冲突：另一请求已先一步决/过期，请刷新后重试",
+      },
       report: "查看报告",
       back: "返回列表",
       compare: "对比",

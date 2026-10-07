@@ -19,7 +19,7 @@ import {
   openResearchStream,
   submitTurn,
 } from "../api/research";
-import { useResearchStore } from "../stores/researchStore";
+import { useResearchStore, applyResearchEvent, buildInitialState } from "../stores/researchStore";
 import { useAuthStore } from "../stores/authStore";
 import { DEFAULT_TENANT_ID } from "../config";
 import type { ResearchCheckpoint, ResearchSession, ResearchSseEvent } from "../types/research";
@@ -771,5 +771,42 @@ describe("researchStore", () => {
 
     expect(onOpen).toHaveBeenCalledTimes(1);
     expect(useResearchStore.getState().error).toBeNull();
+  });
+
+  // B3.5: checkpoint_conflict branch
+  it("uiHint=conflict 设置 error + conflictError 并关闭流", () => {
+    const initial = buildInitialState();
+    const event = {
+      name: "research.error" as const,
+      payload: { code: "checkpoint_conflict", message: "决策冲突", uiHint: "conflict" as const },
+    };
+    const next = applyResearchEvent(initial, event);
+    expect(next.error).toBe("决策冲突");
+    expect(next.conflictError).toBe("决策冲突");
+    expect(next.streaming).toBe(false);
+  });
+
+  it("uiHint=conflict 无 message 时回退为 i18n key", () => {
+    const initial = buildInitialState();
+    const event = {
+      name: "research.error" as const,
+      payload: { code: "checkpoint_conflict", uiHint: "conflict" as const },
+    };
+    const next = applyResearchEvent(initial, event);
+    expect(next.error).toBe("research.error.checkpoint_conflict");
+    expect(next.conflictError).toBe("research.error.checkpoint_conflict");
+    expect(next.streaming).toBe(false);
+  });
+
+  it("uiHint=degraded 保持流打开（现有行为不变）", () => {
+    const initial = buildInitialState();
+    const event = {
+      name: "research.error" as const,
+      payload: { code: "step_failed", uiHint: "degraded" as const },
+    };
+    const next = applyResearchEvent(initial, event);
+    expect(next.error).toBeUndefined();
+    expect(next.conflictError).toBeUndefined();
+    expect(next.streaming).toBeUndefined();
   });
 });

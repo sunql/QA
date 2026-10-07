@@ -107,7 +107,7 @@ export interface ResearchSseEvent {
 // research.error 的处置分类（用户裁定规则 ③）：前端只按 uiHint 的「类」分支，
 // 不按 code 逐个判断（后端新增终态 code 时前端零改动）。uiHint 与 code/message
 // 同级恒在，由后端 ERROR_SPECS 表派生。
-export type ResearchErrorUiHint = "terminal" | "degraded";
+export type ResearchErrorUiHint = "terminal" | "degraded" | "conflict";
 
 export interface ResearchErrorPayload {
   code: string;

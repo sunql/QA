@@ -69,7 +69,25 @@ function checkpointFromEvent(payload: Record<string, unknown>): ResearchCheckpoi
 }
 
 // 单个 SSE 事件 → 状态增量（不可变：events 用展开运算符追加，绝不 push 原数组）。
-function applyEvent(state: ResearchState, event: ResearchSseEvent): Partial<ResearchState> {
+// B3.5: 对外暴露 applyResearchEvent + buildInitialState 供 unit test 直接调用。
+export function buildInitialState(): ResearchState {
+  return {
+    sessions: [],
+    sessionsLoading: false,
+    currentSession: null,
+    turns: [],
+    events: [],
+    pendingCheckpoint: null,
+    report: null,
+    reports: [],
+    loading: false,
+    streaming: false,
+    error: null,
+    conflictError: null,
+  };
+}
+
+export function applyResearchEvent(state: ResearchState, event: ResearchSseEvent): Partial<ResearchState> {
   const events = [...state.events, event];
   switch (event.name) {
     case "research.checkpoint":
@@ -83,6 +101,19 @@ function applyEvent(state: ResearchState, event: ResearchSseEvent): Partial<Rese
           events,
           streaming: false,
           error: typeof event.payload.message === "string" ? event.payload.message : "research.error",
+        };
+      }
+      // B3.5: 并发 checkpoint 决策冲突。流关闭 + 暴露 conflictError 供页面 toast。
+      if (event.payload.uiHint === "conflict") {
+        const message =
+          typeof event.payload.message === "string" && event.payload.message.length > 0
+            ? event.payload.message
+            : "research.error.checkpoint_conflict";
+        return {
+          events,
+          streaming: false,
+          error: message,
+          conflictError: message,
         };
       }
       // 降级类（degraded / 字段缺失）：流保持打开，状态机会继续推进，后面可能还有 done。
@@ -109,6 +140,7 @@ interface ResearchState {
   loading: boolean;
   streaming: boolean;
   error: string | null;
+  conflictError: string | null;
 
   loadSessions: () => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
@@ -128,6 +160,7 @@ interface ResearchState {
     onOpen?: () => void,
   ) => Promise<void>;
   reset: () => void;
+  clearConflictError: () => void;
 }
 
 // 流中断句柄：新流建立前先断旧流（组件卸载 / 切会话 / 重复 connectStream），
@@ -146,6 +179,7 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
   loading: false,
   streaming: false,
   error: null,
+  conflictError: null,
 
   loadSessions: async () => {
     set({ sessionsLoading: true });
@@ -282,7 +316,7 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
       await openResearchStream(
         sessionId,
         (event) => {
-          set((state) => applyEvent(state, event));
+          set((state) => applyResearchEvent(state, event));
         },
         controller.signal,
         signalOpen,
@@ -319,6 +353,9 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
       loading: false,
       streaming: false,
       error: null,
+      conflictError: null,
     });
   },
+
+  clearConflictError: () => set({ conflictError: null }),
 }));

@@ -4,7 +4,7 @@
  * submitTurn，避免「先提交后建流」竞态与 unhandled rejection。流未结束期间由
  * ResearchProgress 渲染 store.events 派生的实时进度；流结束后重拉历史补全时间线。
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Alert, App, Button, Input, Space, Spin, Tag, Typography } from "antd";
 import { useTranslation } from "react-i18next";
@@ -31,8 +31,10 @@ export default function ResearchSessionPage() {
   const currentSession = useResearchStore((s) => s.currentSession);
   const streaming = useResearchStore((s) => s.streaming);
   const error = useResearchStore((s) => s.error);
+  const conflictError = useResearchStore((s) => s.conflictError);
   const submitTurn = useResearchStore((s) => s.submitTurn);
   const answer = useResearchStore((s) => s.answer);
+  const clearConflictError = useResearchStore((s) => s.clearConflictError);
   const sources = useDatasourceOptions();
 
   const pendingQuestion =
@@ -41,6 +43,13 @@ export default function ResearchSessionPage() {
 
   const [input, setInput] = useState("");
 
+  // B3.5: conflictError toast — dispatch clearConflictError after toast so it fires once.
+  useEffect(() => {
+    if (!conflictError) return;
+    message.error(t(conflictError));
+    clearConflictError();
+  }, [conflictError, message, t, clearConflictError]);
+
   const handleSend = async () => {
     const trimmed = input.trim();
     if (!trimmed || !id) return;
@@ -48,7 +57,7 @@ export default function ResearchSessionPage() {
     try {
       await submitTurn(id, trimmed);
     } catch {
-      message.error(t("research.session.error"));
+      message.error(t("research.session.error.default"));
     }
   };
 
@@ -57,7 +66,7 @@ export default function ResearchSessionPage() {
     try {
       await answer(pendingCheckpoint.id, action, choice);
     } catch {
-      message.error(t("research.session.error"));
+      message.error(t("research.session.error.default"));
     }
   };
 

@@ -2998,7 +2998,11 @@ export const enUS = {
       inputPlaceholder: "Ask a follow-up…",
       send: "Send",
       streaming: "Researching…",
-      error: "Something went wrong",
+      error: {
+        default: "Something went wrong",
+        checkpoint_conflict:
+          "Checkpoint conflict: another request already decided or expired; please refresh and retry",
+      },
       report: "View report",
       back: "Back to list",
       compare: "Compare",

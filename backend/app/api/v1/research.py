@@ -87,6 +87,7 @@ from app.services.nl2sql_service import Nl2SqlService
 from app.services.ontology_service import OntologyService
 from app.services.research_agent_phases import nextPhase
 from app.services.research_agent_ports import (
+    ERROR_CHECKPOINT_CONFLICT,
     ERROR_TURN_FAILED,
     EVENT_DONE,
     EVENT_ERROR,
@@ -95,7 +96,12 @@ from app.services.research_agent_ports import (
 )
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_event_bus import EVENT_CONNECTED, bus
-from app.services.research_session_service import PROMPT_KEY, ResearchSessionService
+from app.services.research_session_service import (
+    PROMPT_KEY,
+    CheckpointConflictError,
+    CheckpointStaleError,
+    ResearchSessionService,
+)
 from app.services.research_sql_runner import ResearchSqlRunner
 from app.services.step_query_planner import StepQueryPlanner
 from app.services.token_usage_service import TokenUsageService
@@ -557,6 +563,10 @@ async def _resumeTurnInBackground(
     """后台按用户决策续跑状态机（resolveCheckpoint 在 `resumeTurn` 内完成）。
 
     `sessionId` 由调用方显式传入（Task 8）：`emit` 必须绑定会话键才能投到正确的流。
+
+    并发冲突（CheckpointConflictError）：抛出 409 事件，不落 failed 状态——第二次
+    提交的用户看到的是 SSE 流里的 error.event（前端据此弹 409 提示），而不是静默
+    500 或会话被标记为 failed。
     """
     service = buildResearchAgentService()
     async with getSessionFactory()() as session:
@@ -569,7 +579,15 @@ async def _resumeTurnInBackground(
                 emit=partial(_bus.publish, sessionId),
             )
             await session.commit()
-        except Exception as exc:  # noqa: BLE001 —— 同上：留痕 + 回滚
+        except (CheckpointConflictError, CheckpointStaleError) as exc:
+            # 409：并发提交冲突（另一请求已先一步决/过期）；经 SSE 事件传回客户端。
+            logger.warning("checkpoint 决策冲突，转 409: checkpoint=%s action=%s", checkpointId, action)
+            await _bus.publish(
+                sessionId,
+                EVENT_ERROR,
+                errorPayload(ERROR_CHECKPOINT_CONFLICT, str(exc)),
+            )
+        except Exception as exc:  # noqa: BLE001 —— 未预期异常：留痕 + 回滚
             logger.exception("研究 turn 恢复失败: checkpoint=%s action=%s", checkpointId, action)
             await session.rollback()
             await _markTerminalFailure(service, session, sessionId, str(exc))

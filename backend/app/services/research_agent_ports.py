@@ -158,6 +158,8 @@ ERROR_SQL_VALIDATION_FAILED = "sql_validation_failed"
 """SQL Guard 拒绝的 error code（与 SIGNAL_SQL_VALIDATION_FAILED 同值，但语义是 error code 侧）。"""
 ERROR_STEP_FAILED = "step_failed"
 """通用步失败的 error code（与 checkpoint signal 词汇 `low_confidence_step` 解耦）。"""
+ERROR_CHECKPOINT_CONFLICT = "checkpoint_conflict"
+"""并发 checkpoint 决策冲突：另一请求已先一步决/过期，应返回 409。"""
 LLM_UNAVAILABLE_MESSAGE = "无可用 LLM 客户端：本轮 LLM 段降级（计划/假设/报告文本可能不完整）"
 MSG_ALL_STEPS_FAILED = "研究计划全部步失败（无一成功），本 turn 终止"
 """all-steps-failed 急停 RuntimeError 的**唯一字符串**（被 `_guardedRun` 透出为
@@ -215,6 +217,13 @@ ERROR_SPECS: dict[str, ErrorSpec] = {
         payloadFields=("stepIndex",),
         uiHint="degraded",
         summary="通用步失败：落动态 low_confidence_step（默认等待用户）",
+    ),
+    ERROR_CHECKPOINT_CONFLICT: ErrorSpec(
+        terminal=False,
+        sessionStatus=STATUS_AWAITING,
+        payloadFields=(),
+        uiHint="conflict",
+        summary="并发 checkpoint 决策冲突：另一请求已决/过期，HTTP 应收 409",
     ),
 }
 

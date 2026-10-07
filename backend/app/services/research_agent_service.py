@@ -281,8 +281,19 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         elif action == ACTION_MODIFY and checkpoint.phase == CHECKPOINT_PLANNING:
             # Task 6.5-4（MEDIUM-8）：计划点的 modify 不是「确认旧计划继续跑」，而是带
             # 用户反馈**重跑 planner**；故回到 plan 相位并置 replan 标记（该轮不再暂停）。
-            startPhase = PHASE_PLAN
-            state["replan"] = True
+            # Task B1：replan 上限封顶。超过则不再 replan，按 confirm 处理。
+            replan_count = int(state.get("replanCount", 0))
+            if replan_count < MAX_REPLAN_PER_TURN:
+                startPhase = PHASE_PLAN
+                state["replan"] = True
+                state["replanCount"] = replan_count + 1
+            else:
+                # 上限已到，按 confirm 处理，继续推进
+                startPhase = nextPhaseForPhase(checkpoint.phase, options)
+                logger.info(
+                    "replan 上限已达 %s，按 confirm 推进: session=%s",
+                    MAX_REPLAN_PER_TURN, checkpoint.session_id,
+                )
         logger.info(
             "研究 turn 恢复: session=%s checkpoint=%s action=%s startPhase=%s rewritten=%s",
             checkpoint.session_id, checkpointId, action, startPhase, bool(rewritten),

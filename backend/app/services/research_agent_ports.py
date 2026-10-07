@@ -82,6 +82,7 @@ OPT_NEXT_STEP = "nextStepIndex"
 OPT_STEP_INDEX = "stepIndex"
 OPT_ERROR = "error"
 OPT_CONFLICTS = "conflicts"
+OPT_REPLAN_COUNT = "replanCount"  # Task B1：replan 上限计数器，跨 resumeTurn 持久化
 
 # --- 会话/轮次状态（Task 3 白名单：running|awaiting_user|done|failed|aborted）---
 STATUS_RUNNING = "running"
@@ -97,6 +98,9 @@ ACTION_STATUS = {"confirm": "confirmed", "modify": "modified", "reject": "reject
 ACTION_REJECT = "reject"
 ACTION_MODIFY = "modify"
 ACTION_CONFIRM = "confirm"
+
+# --- 研究计划阶段 modify 重生成上限（Task B1）：超过则按 confirm 处理，避免无限循环 ---
+MAX_REPLAN_PER_TURN = 3
 
 # --- 计量 purpose / 置信度 / 摘要上限 ----------------------------------------
 PURPOSE_PLAN = "research_plan"

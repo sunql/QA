@@ -23,6 +23,7 @@ from app.services.research_agent_ports import (
     OPT_CANDIDATES,
     OPT_NEXT_STEP,
     OPT_PLAN,
+    OPT_REPLAN_COUNT,
     OPT_STEP_RESULTS,
     OPT_STEPS_EXECUTED,
 )
@@ -59,6 +60,8 @@ def rebuildState(row: ResearchSession, checkpoint: Any) -> dict[str, Any]:
         "hypotheses": list(options.get(OPT_CANDIDATES) or []),
         "resumeStepIndex": int(options.get(OPT_NEXT_STEP) or 0),
         "choice": {},
+        # Task B1：replan 上限计数器，跨 resumeTurn 持久化到 checkpoint options
+        "replanCount": int(options.get(OPT_REPLAN_COUNT) or 0),
     }
 
 

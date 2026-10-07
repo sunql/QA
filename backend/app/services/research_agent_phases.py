@@ -54,6 +54,7 @@ from app.services.research_agent_ports import (
     FINDING_ROWS_KEY,
     MAX_FINDING_ROWS,
     OPT_ABORT_PHASE,
+    OPT_REPLAN_COUNT,
     OPT_RESUME_PHASE,
     OPT_SIGNAL,
     PHASE_ESL,
@@ -160,6 +161,9 @@ class ResearchAgentPhasesMixin:
         execute）——否则用户会陷入「改了又改」的死循环。
         """
         replan = bool(state.pop("replan", False))
+        replan_count = int(state.get("replanCount") or 0)
+        if replan:
+            logger.info("第 %s 次 replan", replan_count)
         question = (
             planQuestionWithFeedback(state["question"], state.get("choice"))
             if replan
@@ -184,7 +188,8 @@ class ResearchAgentPhasesMixin:
         return (
             CHECKPOINT_PLANNING,
             buildOptions(
-                signal=SIGNAL_FIXED_PLAN, plan=plan, arms=state.get("esl"), resumePhase=PHASE_EXECUTE
+                signal=SIGNAL_FIXED_PLAN, plan=plan, arms=state.get("esl"),
+                resumePhase=PHASE_EXECUTE, replanCount=state.get("replanCount", 0),
             ),
             "计划是否确认？",
         )

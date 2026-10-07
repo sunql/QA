@@ -1036,6 +1036,59 @@ async def test_planning_modify_reruns_planner_with_choice(dbSession, makeService
 
 
 @pytest.mark.asyncio
+async def test_planning_modify_replan_caps_at_max_replan(dbSession, makeService) -> None:
+    """Task B1：第 4 次 planning modify 不再触发 replan，转按 confirm 继续推进。
+
+    MAX_REPLAN_PER_TURN=3。第 1-3 次 modify → 回到 plan 相位；第 4 次 modify
+    → 按 confirm 处理（跳过 plan，直接进 execute/hypothesis）。
+    """
+    planner = FakePlanner(
+        steps=(SqlStep(index=0, description="计划0", sub_question="q0", sql="SELECT 0"),),
+        replanSteps=(
+            SqlStep(index=0, description="计划1", sub_question="q1", sql="SELECT 1"),
+        ),
+    )
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(
+        planner=planner,
+        llmFactory=lambda cfg: scripted,
+        autoConfirm=True,  # hypothesis 之后直接 done，简化断言
+    )
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → plan → 固定 #2（planning）
+    assert len(planner.calls) == 1
+
+    # 前 3 次 modify：仍回到 plan 相位，planner 被重调用
+    for i in range(3):
+        status = await _resolve(
+            svc, dbSession, s.id, "modify", {"instruction": f"只看华东-{i}"}
+        )
+        assert status == "awaiting_user", f"第 {i+1} 次 modify 应仍暂停: {status}"
+        assert len(planner.calls) == i + 2, f"第 {i+1} 次 modify 应触发 replan"
+
+    # 第 4 次 modify：replan 计数已达上限，不再回 plan，直接推进到 hypothesis/done
+    status = await _resolve(
+        svc, dbSession, s.id, "modify", {"instruction": "只看华东-3（应被忽略）"}
+    )
+    # 不再回 plan 相位，状态机继续推进
+    assert status == "done", f"第 4 次 modify 应跳过 replan 直接推进: {status}"
+    # planner 不再被调用（总数仍为 4）
+    assert len(planner.calls) == 4
+    # 最后一个 planning checkpoint 的状态是 modified（不是 confirmed）
+    cps = await dbSession.execute(
+        text(
+            "SELECT id, status, phase FROM research_checkpoint"
+            " WHERE session_id = :sid AND phase = 'planning'"
+            " ORDER BY created_at DESC LIMIT 1"
+        ),
+        {"sid": s.id},
+    )
+    row = cps.one()
+    assert row.status == "modified"
+
+
+@pytest.mark.asyncio
 async def test_compose_requires_or_meters_client(dbSession, makeService) -> None:
     """Task 6.5-3（F3）：报告装配**不自建未计量客户端**；降级时零 LLM 调用。"""
     recorder = FakeUsageRecorder()

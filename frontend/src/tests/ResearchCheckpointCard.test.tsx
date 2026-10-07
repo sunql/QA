@@ -6,7 +6,8 @@
  * - 错误按 uiHint 类分支的规则由 store 负责，本组件不落任何 code 分支
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ConfigProvider } from "antd";
 import { CheckpointCard } from "../components/research/CheckpointCard";
 import type { ResearchCheckpoint } from "../types/research";
@@ -253,4 +254,83 @@ describe("CheckpointCard 候选勾选提示（默认验证全部）", () => {
       expect(screen.queryByText("默认验证全部，勾选可缩小范围")).not.toBeInTheDocument();
     }
   );
+});
+
+describe("CheckpointCard tooltip per phase", () => {
+  it("planning phase: modify button uses modifyPlanningHint", async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi.fn();
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({ phase: "planning" })}
+          onAnswer={onAnswer}
+        />
+      </ConfigProvider>
+    );
+    const modifyBtn = screen.getByRole("button", { name: /修\s*改/ });
+    await user.hover(modifyBtn);
+    await waitFor(() => {
+      expect(
+        screen.getByText(/将基于您的反馈重跑 planner 重新生成步骤/)
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("intent phase: modify button uses generic modifyHint", async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi.fn();
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({ phase: "intent" })}
+          onAnswer={onAnswer}
+        />
+      </ConfigProvider>
+    );
+    const modifyBtn = screen.getByRole("button", { name: /修\s*改/ });
+    await user.hover(modifyBtn);
+    await waitFor(() => {
+      expect(screen.getByText(/补充说明/)).toBeInTheDocument();
+    });
+  });
+
+  it("runtime_dynamic phase: reject button uses rejectAbortHint", async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi.fn();
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({ phase: "runtime_dynamic" })}
+          onAnswer={onAnswer}
+        />
+      </ConfigProvider>
+    );
+    const rejectBtn = screen.getByRole("button", { name: /拒\s*绝/ });
+    await user.hover(rejectBtn);
+    await waitFor(() => {
+      expect(screen.getByText(/拒绝后本轮将直接出报告/)).toBeInTheDocument();
+    });
+  });
+
+  it("hypothesis phase: confirm button shows hypothesisConfirmHint", async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi.fn();
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({ phase: "hypothesis", options: {
+            arms: { metrics: [], conflicts: [] },
+            candidates: [],
+          } })}
+          onAnswer={onAnswer}
+        />
+      </ConfigProvider>
+    );
+    const confirmBtn = screen.getByRole("button", { name: /确\s*认/ });
+    await user.hover(confirmBtn);
+    await waitFor(() => {
+      expect(screen.getByText(/不勾选 = 验证全部假设/)).toBeInTheDocument();
+    });
+  });
 });

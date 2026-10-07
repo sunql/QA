@@ -14,7 +14,7 @@
  * 历史 checkpoint 的 options 已落库，不能靠改后端键名统一 ⇒ 这里双键回落读取。
  */
 import { useState } from "react";
-import { Button, Card, Checkbox, Input, Space, Tag, Typography } from "antd";
+import { Button, Card, Checkbox, Input, Space, Tag, Tooltip, Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import type { CheckpointAction, CheckpointPhase, ResearchCheckpoint } from "../../types/research";
 
@@ -308,10 +308,29 @@ interface CheckpointActionsProps {
 
 // 三动作区（确认 / 修改 / 拒绝）。修改草稿与展开态是纯局部 UI 状态：留在这里
 // 才能与引入前一致地「收起再展开仍保留草稿」，同时随卡片重挂载（key）清零。
-function CheckpointActions({ onConfirm, onReject, onModify }: CheckpointActionsProps) {
+function CheckpointActions({
+  onConfirm,
+  onReject,
+  onModify,
+  phase,
+}: CheckpointActionsProps & { phase: CheckpointPhase }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+
+  // 上下文化 hint key 选择
+  const modifyHintKey =
+    phase === "planning"
+      ? "research.checkpoint.modifyPlanningHint"
+      : "research.checkpoint.modifyHint";
+  const rejectHintKey =
+    phase === "runtime_dynamic" || phase === "low_confidence_step"
+      ? "research.checkpoint.rejectAbortHint"
+      : "research.checkpoint.rejectHint";
+  const confirmHintKey =
+    phase === "hypothesis"
+      ? "research.checkpoint.hypothesisConfirmHint"
+      : "research.checkpoint.confirmHint";
 
   const submitModify = () => {
     const question = draft.trim();
@@ -324,15 +343,21 @@ function CheckpointActions({ onConfirm, onReject, onModify }: CheckpointActionsP
   return (
     <>
       <Space style={{ marginTop: 12 }}>
-        <Button type="primary" onClick={onConfirm}>
-          {t("research.checkpoint.confirm")}
-        </Button>
-        <Button onClick={() => setEditing((value) => !value)}>
-          {t("research.checkpoint.modify")}
-        </Button>
-        <Button danger onClick={onReject}>
-          {t("research.checkpoint.reject")}
-        </Button>
+        <Tooltip title={t(confirmHintKey)}>
+          <Button type="primary" onClick={onConfirm}>
+            {t("research.checkpoint.confirm")}
+          </Button>
+        </Tooltip>
+        <Tooltip title={t(modifyHintKey)}>
+          <Button onClick={() => setEditing((value) => !value)}>
+            {t("research.checkpoint.modify")}
+          </Button>
+        </Tooltip>
+        <Tooltip title={t(rejectHintKey)}>
+          <Button danger onClick={onReject}>
+            {t("research.checkpoint.reject")}
+          </Button>
+        </Tooltip>
       </Space>
       {editing && (
         <div style={{ marginTop: 12 }}>
@@ -395,6 +420,7 @@ export function CheckpointCard({ checkpoint, onAnswer }: CheckpointCardProps) {
       )}
 
       <CheckpointActions
+        phase={checkpoint.phase}
         onConfirm={submitConfirm}
         onReject={() => onAnswer("reject", {})}
         onModify={(question) => onAnswer("modify", { question })}

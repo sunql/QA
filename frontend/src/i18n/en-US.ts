@@ -2925,6 +2925,12 @@ export const enUS = {
       reject: "Reject",
       modifyPlaceholder: "Enter the revised requirement…",
       submitModify: "Submit",
+      confirmHint: "Proceed with the current plan",
+      modifyHint: "Add feedback; will rerun based on your input",
+      rejectHint: "Skip this checkpoint, continue with the current plan",
+      modifyPlanningHint: "Will rerun the planner with your feedback",
+      rejectAbortHint: "Rejecting will publish the report immediately and end this turn",
+      hypothesisConfirmHint: "No selection = verify all hypotheses",
     },
     progress: {
       empty: "No progress yet",

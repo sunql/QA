@@ -2940,6 +2940,12 @@ export const zhCN = {
       reject: "拒绝",
       modifyPlaceholder: "输入修改后的要求…",
       submitModify: "提交修改",
+      confirmHint: "按当前计划继续",
+      modifyHint: "补充说明，系统将基于反馈重新生成",
+      rejectHint: "放弃当前检查点，按原计划继续",
+      modifyPlanningHint: "将基于您的反馈重跑 planner 重新生成步骤",
+      rejectAbortHint: "拒绝后本轮将直接出报告，不再继续",
+      hypothesisConfirmHint: "不勾选 = 验证全部假设",
     },
     progress: {
       empty: "暂无进度",

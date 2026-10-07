@@ -129,3 +129,23 @@ describe("i18n/useTranslation", () => {
     expect(result.current.t).toBe(first);
   });
 });
+
+describe("research.checkpoint hints", () => {
+  const REQUIRED_KEYS = [
+    "confirmHint",
+    "modifyHint",
+    "rejectHint",
+    "modifyPlanningHint",
+    "rejectAbortHint",
+    "hypothesisConfirmHint",
+  ] as const;
+
+  for (const key of REQUIRED_KEYS) {
+    it(`zh-CN has research.checkpoint.${key}`, () => {
+      expect(zhCN.research.checkpoint[key]).toBeTruthy();
+    });
+    it(`en-US has research.checkpoint.${key}`, () => {
+      expect(enUS.research.checkpoint[key]).toBeTruthy();
+    });
+  }
+});

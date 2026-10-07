@@ -225,7 +225,7 @@ class ResearchSessionService:
         session.add(AuditLog(
             entity_type="research_checkpoint",
             entity_id=row.id,
-            action="resolved",
+            action="UPDATE",
             actor=str(userId) if userId is not None else "",
             before_json=None,
             after_json={

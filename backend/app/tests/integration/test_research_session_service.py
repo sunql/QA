@@ -224,5 +224,5 @@ async def test_resolve_checkpoint_writes_audit_log(dbSession) -> None:
     )
     log_row = row.one()
     assert log_row.entity_type == "research_checkpoint"
-    assert log_row.action == "resolved"
+    assert log_row.action == "UPDATE"
     assert log_row.after_json["status"] == "confirmed"

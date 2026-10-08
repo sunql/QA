@@ -6,7 +6,7 @@
 // 2. 首轮编排串行化：流建立（onOpen）之前不得提交首轮（后端不重放历史），
 //    提交失败也不能产生未处理拒绝。
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { App, ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -214,5 +214,116 @@ describe("ResearchSessionPage", () => {
 
     // 卡片必须显示「处理中…」Spin（CheckpointCard 第 486 行）——证明 prop 已透传。
     expect(await screen.findByText("处理中…")).toBeInTheDocument();
+  });
+
+  // 详情 Drawer 替换轮（2026-10-08）：点「查看」按钮应打开右侧 Drawer，渲染该轮的
+  // 完整内容。user 轮原样展示 question（含换行）；checkpoint 轮结构化展示
+  // phase / status / prompt / options.candidates 全部。
+  it("点 user 轮查看按钮打开 Drawer，原样渲染 question 全文", async () => {
+    const longQuestion = "分步分析：为什么收货量下降？\n第一步统计最近 12 个月每月的收货量趋势；\n第二步按供应商拆分最近 3 个月收货量并对比找出降幅最大的供应商。";
+    httpMock.get.mockResolvedValue({
+      data: {
+        session: {
+          id: "s1",
+          title: "研究",
+          mode: "research",
+          status: "running",
+          question: longQuestion,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+        },
+        turns: [{
+          id: "t1",
+          turnIndex: 0,
+          role: "user",
+          content: { question: longQuestion },
+          createdAt: "2026-10-04T00:00:00Z",
+        }],
+        pendingCheckpoint: null,
+      },
+    });
+
+    renderPage();
+
+    // 触发 user 轮渲染（用 startsWith 避开 getByText 的全等匹配 —— <p> 文本带
+    // \n 时 testing-library 把它和换行后的子节点一起视为多元素）。
+    await waitFor(() =>
+      expect(
+        screen.getByText((content) => content.startsWith("分步分析")),
+      ).toBeInTheDocument(),
+    );
+    // 点查看
+    fireEvent.click(screen.getByTestId("detail-turn-t1"));
+    // Drawer 打开 —— role=dialog 出现
+    const dialog = await screen.findByRole("dialog");
+    // 全文（带 \n）必须出现在 Drawer body 中，原样保留 —— 用 function matcher
+    // 避免 getByText 全等对换行的处理。
+    expect(
+      within(dialog).getByText((content) => content.startsWith("分步分析")),
+    ).toBeInTheDocument();
+    // \n 也必须保留（whiteSpace: pre-wrap 在 Drawer body 上）
+    expect(within(dialog).getByText((content) => content.includes("第一步统计"))).toBeInTheDocument();
+  });
+
+  it("点 checkpoint_awaiting 轮查看按钮打开 Drawer，结构化渲染 prompt + candidates[]", async () => {
+    httpMock.get.mockResolvedValue({
+      data: {
+        session: {
+          id: "s1",
+          title: "研究",
+          mode: "research",
+          status: "awaiting_user",
+          question: "q",
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+        },
+        turns: [{
+          id: "t1",
+          turnIndex: 0,
+          role: "checkpoint_awaiting",
+          content: {
+            checkpointId: "cp-1",
+            phase: "hypothesis",
+            prompt: "共 3 条候选假设，请选择要验证的",
+            options: {
+              candidates: [
+                { statement: "上游采购订单下达量收缩", driver: "K1" },
+                { statement: "到货预约量减少", driver: "K2" },
+                { statement: "收货执行环节变慢", driver: "K3" },
+              ],
+            },
+          },
+          createdAt: "2026-10-04T00:00:01Z",
+        }],
+        pendingCheckpoint: {
+          id: "cp-1",
+          phase: "hypothesis",
+          status: "pending",
+          options: {
+            candidates: [
+              { statement: "上游采购订单下达量收缩", driver: "K1" },
+              { statement: "到货预约量减少", driver: "K2" },
+              { statement: "收货执行环节变慢", driver: "K3" },
+            ],
+          },
+          prompt: "共 3 条候选假设，请选择要验证的",
+          userChoice: null,
+          decidedAt: null,
+        },
+      },
+    });
+
+    renderPage();
+
+    // 等候选渲染
+    await waitFor(() => expect(screen.getByText("上游采购订单下达量收缩")).toBeInTheDocument());
+    // 点查看
+    fireEvent.click(screen.getByTestId("detail-turn-t1"));
+    const dialog = await screen.findByRole("dialog");
+    // prompt 全文 + 全部 3 条候选 statement 都必须出现在 Drawer body
+    expect(within(dialog).getByText("共 3 条候选假设，请选择要验证的")).toBeInTheDocument();
+    expect(within(dialog).getByText("上游采购订单下达量收缩")).toBeInTheDocument();
+    expect(within(dialog).getByText("到货预约量减少")).toBeInTheDocument();
+    expect(within(dialog).getByText("收货执行环节变慢")).toBeInTheDocument();
   });
 });

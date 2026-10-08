@@ -1,11 +1,16 @@
-/** 研究会话时间线（feat-research-entry Task 10）。
+/** 研究会话时间线（feat-research-entry Task 10，详情按钮替换轮）。
  *
  * 渲染 turns 序列（user / agent / checkpoint_awaiting 三类角色）+ 未被任何
- * checkpoint_awaiting 轮引用的「孤儿检查点」追加到末尾。每项带锚点
- * turn-<id> / checkpoint-<id>，点跳转按钮回调 onJump(anchor)。
+ * checkpoint_awaiting 轮引用的「孤儿检查点」追加到末尾。每项带「查看」按钮
+ * 触发 onDetail(payload)，payload 是区分 kind 的结构体（user / checkpoint /
+ * orphan 三种形态），由 ResearchSessionPage 决定如何展示（当前用右侧 Drawer）。
  *
  * 用 antd Timeline 的 `items` API（children 模式要求直接子元素是 Timeline.Item，
  * 自定义包装组件会破坏 antd 的 cloneElement 注入）。
+ *
+ * 2026-10-08 重构：原 onJump(anchor) 按钮 anchor 自指 = 永远 noop，改成
+ * onDetail(payload) + 详情 Drawer；详情数据**用 ResearchCheckpoint 当前态**，
+ * 不是 turn.content 的快照（检查点决策后 userChoice 写在 checkpoint 行）。
  */
 import { Button, Tag, Timeline } from "antd";
 import { useTranslation } from "react-i18next";
@@ -16,10 +21,16 @@ import type {
   TurnRole,
 } from "../../types/research";
 
+// 详情 Drawer 的入参（区分 kind 表达三种来源）。
+export type ResearchDetailPayload =
+  | { kind: "user"; turn: ResearchTurn }
+  | { kind: "checkpoint"; turn: ResearchTurn; checkpoint: ResearchCheckpoint }
+  | { kind: "orphan"; checkpoint: ResearchCheckpoint };
+
 interface ResearchTimelineProps {
   turns: ResearchTurn[];
   checkpoints: ResearchCheckpoint[];
-  onJump: (anchor: string) => void;
+  onDetail: (payload: ResearchDetailPayload) => void;
 }
 
 const STATUS_COLORS: Record<CheckpointStatus, string> = {
@@ -79,10 +90,10 @@ function turnText(turn: ResearchTurn): string {
 interface TurnContentProps {
   turn: ResearchTurn;
   checkpoint?: ResearchCheckpoint;
-  onJump: (anchor: string) => void;
+  onDetail: (payload: ResearchDetailPayload) => void;
 }
 
-function TurnContent({ turn, checkpoint, onJump }: TurnContentProps) {
+function TurnContent({ turn, checkpoint, onDetail }: TurnContentProps) {
   const { t } = useTranslation();
   const anchor = `turn-${turn.id}`;
   const text = turnText(turn);
@@ -93,10 +104,36 @@ function TurnContent({ turn, checkpoint, onJump }: TurnContentProps) {
       <Button
         type="link"
         size="small"
-        data-testid={`jump-${anchor}`}
-        onClick={() => onJump(anchor)}
+        data-testid={`detail-${anchor}`}
+        onClick={() => {
+          if (turn.role === "user") {
+            onDetail({ kind: "user", turn });
+            return;
+          }
+          // checkpoint_awaiting 轮：若 byId 命中就用 ResearchCheckpoint 当前态；
+          // 否则从 turn.content 合成一个（status=confirmed 标记「已决策、不在
+          // pending 列表」、userChoice/decidedAt 不可考 = null）。这覆盖了「历史
+          // 已决策 checkpoint」—— 页面只把 pendingCheckpoint 传给 timeline，
+          // 历史 checkpoint 不会在 byId 里，但「查看」按钮必须有反应。
+          if (turn.role === "checkpoint_awaiting") {
+            const synthesized: ResearchCheckpoint = checkpoint ?? {
+              id: typeof turn.content.checkpointId === "string" ? turn.content.checkpointId : turn.id,
+              // 运行时 turn.content.phase 来自后端 ResearchCheckpoint.phase，
+              // 必然是 CheckpointPhase 联合之一 —— 用 as 收窄即可（不是用户输入）。
+              phase: (typeof turn.content.phase === "string"
+                ? turn.content.phase
+                : "intent") as ResearchCheckpoint["phase"],
+              status: "confirmed",
+              options: (turn.content.options as Record<string, unknown> | undefined) ?? {},
+              prompt: typeof turn.content.prompt === "string" ? turn.content.prompt : "",
+              userChoice: null,
+              decidedAt: null,
+            };
+            onDetail({ kind: "checkpoint", turn, checkpoint: synthesized });
+          }
+        }}
       >
-        {t("research.timeline.jump")}
+        {t("research.timeline.detail")}
       </Button>
       {text ? <p>{text}</p> : null}
     </div>
@@ -105,10 +142,10 @@ function TurnContent({ turn, checkpoint, onJump }: TurnContentProps) {
 
 interface CheckpointContentProps {
   checkpoint: ResearchCheckpoint;
-  onJump: (anchor: string) => void;
+  onDetail: (payload: ResearchDetailPayload) => void;
 }
 
-function CheckpointContent({ checkpoint, onJump }: CheckpointContentProps) {
+function CheckpointContent({ checkpoint, onDetail }: CheckpointContentProps) {
   const { t } = useTranslation();
   const anchor = `checkpoint-${checkpoint.id}`;
   return (
@@ -118,17 +155,17 @@ function CheckpointContent({ checkpoint, onJump }: CheckpointContentProps) {
       <Button
         type="link"
         size="small"
-        data-testid={`jump-${anchor}`}
-        onClick={() => onJump(anchor)}
+        data-testid={`detail-${anchor}`}
+        onClick={() => onDetail({ kind: "orphan", checkpoint })}
       >
-        {t("research.timeline.jump")}
+        {t("research.timeline.detail")}
       </Button>
       {checkpoint.prompt ? <p>{checkpoint.prompt}</p> : null}
     </div>
   );
 }
 
-export function ResearchTimeline({ turns, checkpoints, onJump }: ResearchTimelineProps) {
+export function ResearchTimeline({ turns, checkpoints, onDetail }: ResearchTimelineProps) {
   const byId = checkpointById(checkpoints);
   const referencedIds = referencedCheckpointIds(turns);
   const orphans = checkpoints.filter((checkpoint) => !referencedIds.has(checkpoint.id));
@@ -139,13 +176,13 @@ export function ResearchTimeline({ turns, checkpoints, onJump }: ResearchTimelin
         <TurnContent
           turn={turn}
           checkpoint={turn.role === "checkpoint_awaiting" ? byId.get(checkpointIdOf(turn)) : undefined}
-          onJump={onJump}
+          onDetail={onDetail}
         />
       ),
     })),
     ...orphans.map((checkpoint) => ({
       key: checkpoint.id,
-      children: <CheckpointContent checkpoint={checkpoint} onJump={onJump} />,
+      children: <CheckpointContent checkpoint={checkpoint} onDetail={onDetail} />,
     })),
   ];
   return <Timeline items={items} />;

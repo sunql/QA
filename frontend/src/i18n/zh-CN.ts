@@ -2969,7 +2969,8 @@ export const zhCN = {
       report: "生成报告",
     },
     timeline: {
-      jump: "定位",
+      detail: "查看",
+      detailTitle: "轮次详情",
       role: {
         user: "你",
         agent: "AI",

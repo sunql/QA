@@ -87,16 +87,26 @@ _TIME_BUCKET_RULE_MYSQL = (
 )
 
 # 日期算术：相对时间（"最近 N 月/天"、"X 月以来"）在 WHERE 子句 / 表达式中的方言写法。
-# 2026-10-08 补：LLM 在 Oracle 上默认用 SQL Server 语法 DATEADD → ORA-00904。每条规则**必须**
-# 显式禁用其它方言的日期函数（"不要使用"），仅靠推荐函数不足以让 LLM 改习惯。
+# 2026-10-08 二次补：仅禁 DATEADD 不够——研究复盘实证 LLM 看到 19c Oracle 时仍写
+# MySQL 语法 `DATE_FORMAT(DATE_SUB(CURRENT_DATE, INTERVAL 6 MONTH), '%Y-%m')` → ORA-00907。
+# 修复契约：每条规则**必须**显式禁用其它方言的常用函数（DATEADD/DATE_FORMAT/DATE_SUB/
+# INTERVAL/CURDATE 等），**并给出可直接抄写的 Oracle 正确示例**（TO_CHAR + ADD_MONTHS），
+# 让 LLM 有模板可套，不能光说"不要用"。
 _DATE_ARITHMETIC_RULE_ORACLE = (
-    "相对时间（'最近 N 个月'、'近 N 天'、'X 个月以来'、'同比/环比'）必须用 Oracle 原生写法："
-    "按月加减用 ADD_MONTHS(日期列, -N) 或 ADD_MONTHS(CURRENT_DATE, -N)；"
-    "按天加减用 日期列 - N 或 CURRENT_DATE - N（隐式按天算）；"
-    "组合偏移用 日期列 + NUMTODSINTERVAL(N, 'day') / NUMTOYMINTERVAL(N, 'month')。"
-    "**绝对禁止** DATEADD（SQL Server 语法，Oracle 会报 ORA-00904: \"DATEADD\": 标识符无效）、"
-    "DATE_SUB、DATE_PART、DATEDIFF、INTERVAL 字面量（'N' MONTH 不是 Oracle 语法）。"
-    "基准时间用 CURRENT_DATE（不是 SYSDATE，且不带时分秒）。"
+    "相对时间（'最近 N 个月'、'近 N 天'、'X 个月以来'、'同比/环比'）必须用 Oracle 原生写法。"
+    "**正确示例**（直接抄）："
+    "① 最近 N 个月（按月截断 + 过滤）："
+    "   WHERE date_col >= ADD_MONTHS(TRUNC(CURRENT_DATE, 'MM'), -N)"
+    "   或 SELECT TO_CHAR(ADD_MONTHS(CURRENT_DATE, -N), 'YYYY-MM') AS m FROM DUAL;"
+    "② 最近 N 天：WHERE date_col >= CURRENT_DATE - N"
+    "③ 月度趋势：SELECT TO_CHAR(ADD_MONTHS(CURRENT_DATE, -LEVEL+1), 'YYYY-MM') ... CONNECT BY LEVEL <= N"
+    "或：GROUP BY TO_CHAR(ADD_MONTHS(SYSDATE, -rownum+1), 'YYYY-MM') 这种生成序列的方式。"
+    "**绝对禁止**以下函数（在 Oracle 上必然报错）："
+    "DATEADD（SQL Server，ORA-00904）、DATEDIFF（SQL Server）、DATEPART、DATE_PART；"
+    "DATE_FORMAT（MySQL，ORA-00904）、DATE_SUB / DATE_ADD（MySQL，ORA-00904）、"
+    "INTERVAL 'N' MONTH（PostgreSQL 语法，Oracle 不支持）、CURDATE（MySQL）；"
+    "以及任何 `WHERE date_col >= date_col - INTERVAL N MONTH` 形态（INTERVAL 不是 Oracle 字面量）。"
+    "基准时间用 CURRENT_DATE 或 TRUNC(SYSDATE)（视是否需要时分秒）。"
 )
 _DATE_ARITHMETIC_RULE_POSTGRESQL = (
     "相对时间用 PostgreSQL 原生写法：按月/天加减用 日期列 - INTERVAL 'N' MONTH 或 "

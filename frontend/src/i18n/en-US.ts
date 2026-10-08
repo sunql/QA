@@ -2954,7 +2954,8 @@ export const enUS = {
       report: "Generating report",
     },
     timeline: {
-      jump: "Jump",
+      detail: "View",
+      detailTitle: "Turn details",
       role: {
         user: "You",
         agent: "AI",

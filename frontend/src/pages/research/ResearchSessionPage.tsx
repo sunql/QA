@@ -14,6 +14,7 @@ import { useDatasourceOptions, datasourceName } from "../../hooks/useDatasourceO
 import { CheckpointCard } from "../../components/research/CheckpointCard";
 import { ResearchTimeline } from "../../components/research/ResearchTimeline";
 import { ResearchProgress } from "../../components/research/ResearchProgress";
+import { ResearchDetailDrawer, type ResearchDetailPayload } from "../../components/research/ResearchDetailDrawer";
 import type { CheckpointAction } from "../../types/research";
 
 const { TextArea } = Input;
@@ -43,6 +44,7 @@ export default function ResearchSessionPage() {
   useResearchSession(id, pendingQuestion);
 
   const [input, setInput] = useState("");
+  const [detailPayload, setDetailPayload] = useState<ResearchDetailPayload | null>(null);
 
   // B3.5: conflictError toast — dispatch clearConflictError after toast so it fires once.
   useEffect(() => {
@@ -71,9 +73,10 @@ export default function ResearchSessionPage() {
     }
   };
 
-  const handleJump = (anchor: string) => {
-    document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth" });
+  const handleDetail = (payload: ResearchDetailPayload) => {
+    setDetailPayload(payload);
   };
+  const closeDetail = () => setDetailPayload(null);
 
   return (
     <div style={{ padding: 16 }}>
@@ -98,9 +101,10 @@ export default function ResearchSessionPage() {
         <ResearchTimeline
           turns={turns}
           checkpoints={pendingCheckpoint ? [pendingCheckpoint] : []}
-          onJump={handleJump}
+          onDetail={handleDetail}
         />
       </Spin>
+      <ResearchDetailDrawer payload={detailPayload} onClose={closeDetail} />
       {pendingCheckpoint ? (
         <CheckpointCard
           key={pendingCheckpoint.id}

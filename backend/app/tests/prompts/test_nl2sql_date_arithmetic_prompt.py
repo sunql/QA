@@ -39,6 +39,27 @@ def test_Oracle_prompt_必须含_ADD_MONTHS_禁用_DATEADD() -> None:
     )
 
 
+def test_Oracle_prompt_必须显式禁_MySQL_函数_且给_TO_CHAR_示例() -> None:
+    """2026-10-08 补：研究复盘实证 LLM 在 19c Oracle 上仍写 MySQL 语法
+    `DATE_FORMAT(DATE_SUB(CURRENT_DATE, INTERVAL 6 MONTH), '%Y-%m')` → ORA-00907。
+    仅禁 DATEADD 不够——必须禁 DATE_FORMAT/DATE_SUB/INTERVAL/CURDATE 并给正确模板。
+    """
+    dialect = _SQL_DIALECTS[DataSourceType.ORACLE]
+    prompt = _buildSystemPrompt(
+        schemaText=_empty_schema(),
+        dialect=dialect,
+        schemaPrefix="ZJTH.",
+    )
+    for banned in ("DATE_FORMAT", "DATE_SUB", "DATE_ADD", "INTERVAL", "CURDATE"):
+        assert banned in prompt, (
+            f"Oracle prompt 必须显式禁用 MySQL 函数 {banned}（让 LLM 看不到就还会用）"
+        )
+    # 必须有正确示例
+    assert "TO_CHAR" in prompt and "ADD_MONTHS" in prompt, (
+        "Oracle prompt 必须含 TO_CHAR + ADD_MONTHS 正确示例（让 LLM 有模板抄）"
+    )
+
+
 def test_PostgreSQL_prompt_必须含_INTERVAL_禁用_DATEADD() -> None:
     dialect = _SQL_DIALECTS[DataSourceType.POSTGRESQL]
     prompt = _buildSystemPrompt(

@@ -27,12 +27,30 @@ interface CheckpointCardProps {
 interface ConflictCandidateView {
   label: string;
   confidence: string;
+  pageId: string;
+  snippet: string;
 }
 
 interface ConflictView {
   kind: string;
   detail: string;
   candidates: ConflictCandidateView[];
+}
+
+// 按 conflictKind 派生更准的提示文案（避免「请确认采用哪一项」误导）。
+// 落空时回落 phase 文案 / 后端原始 prompt（保持与既有行为兼容）。
+function promptByKind(
+  conflicts: ConflictView[],
+  fallback: string,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  if (conflicts.length === 0) return fallback;
+  const kind = conflicts[0].kind;
+  const count = conflicts.length;
+  const key = `research.checkpoint.promptByKind.${kind}`;
+  const translated = t(key, { count });
+  if (translated === key) return fallback;
+  return translated;
 }
 
 // 已知冲突种类（后端 enterprise_semantic_layer._detectConflicts 的产出集）；
@@ -92,6 +110,8 @@ function conflictViews(options: Record<string, unknown>): ConflictView[] {
           label: candidateLabel(candidate),
           confidence:
             typeof candidate.confidence === "number" ? candidate.confidence.toFixed(2) : "",
+          pageId: typeof candidate.pageId === "string" ? candidate.pageId : "",
+          snippet: typeof candidate.snippet === "string" ? candidate.snippet : "",
         });
       }
     }
@@ -102,6 +122,13 @@ function conflictViews(options: Record<string, unknown>): ConflictView[] {
     });
   }
   return views;
+}
+
+// 摘要截断（80 字内 + 省略号），过长会把单条候选撑爆列表。
+function truncateSnippet(text: string, max: number = 80): string {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (cleaned.length <= max) return cleaned;
+  return `${cleaned.slice(0, max)}…`;
 }
 
 // 计划步骤描述：先 camelCase 再 snake_case 回落（见文件头「键名坑」）。
@@ -183,12 +210,35 @@ function ConflictItem({ conflict }: ConflictItemProps) {
         <ul style={{ margin: "4px 0 0", paddingLeft: 20 }}>
           {conflict.candidates.map((candidate, index) => (
             <li key={index}>
-              {candidate.label || t("research.checkpoint.unnamedItem")}
+              {candidate.pageId ? (
+                <a
+                  href={`/admin/wiki-pages?pageId=${encodeURIComponent(candidate.pageId)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={t("research.checkpoint.openInNewTabHint")}
+                >
+                  {candidate.label || t("research.checkpoint.unnamedItem")}
+                </a>
+              ) : (
+                candidate.label || t("research.checkpoint.unnamedItem")
+              )}
               {candidate.confidence.length > 0 && (
                 <span>
                   {" "}
                   · {t("research.checkpoint.confidence")} {candidate.confidence}
                 </span>
+              )}
+              {candidate.snippet.length > 0 && (
+                <div
+                  style={{
+                    marginTop: 2,
+                    fontSize: 12,
+                    color: "#8c8c8c",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {truncateSnippet(candidate.snippet)}
+                </div>
               )}
             </li>
           ))}
@@ -404,10 +454,17 @@ export function CheckpointCard({ checkpoint, onAnswer, resolutionInFlight }: Che
 
   // 明细块按相位出：只有对应相位才可能承载该数据，其他相位不渲染（避免每张卡片都挂
   // 一句与本相位无关的空态文案）。
+  // runtime_dynamic 相位：按冲突 kind 派生更准的提示文案，落空回落后端原始 prompt。
+  // 其它相位（intent/planning/hypothesis）保持原行为：直接显示后端 prompt。
+  const displayedPrompt =
+    checkpoint.phase === "runtime_dynamic"
+      ? promptByKind(conflicts, checkpoint.prompt, t)
+      : checkpoint.prompt;
+
   return (
     <Card size="small" title={t("research.checkpoint.title")}>
       <CheckpointTargetLine phase={checkpoint.phase} />
-      <p>{checkpoint.prompt}</p>
+      <p>{displayedPrompt}</p>
       <MetricTags labels={labels} />
 
       {checkpoint.phase === "runtime_dynamic" && <ConflictDetails conflicts={conflicts} />}

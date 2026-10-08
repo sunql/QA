@@ -2914,6 +2914,12 @@ export const enUS = {
       conflictKindFallback: "Item to confirm",
       confidence: "confidence",
       emptyConflicts: "No ambiguity details were returned. Click Modify to add context.",
+      promptByKind: {
+        wiki_disagree: "{count} knowledge conflict(s) detected. Proceed with this background context?",
+        metric_ambiguous: "{count} metric ambiguity detected. Select one to use for this analysis.",
+      },
+      openInNewTabHint: "Open in new tab",
+      snippetFallback: "(no preview)",
       planSteps: "Plan steps",
       emptyPlanSteps: "No plan steps were returned. Click Modify to add a research direction.",
       candidates: "Candidate hypotheses (multi-select)",

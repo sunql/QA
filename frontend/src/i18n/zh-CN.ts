@@ -2929,6 +2929,12 @@ export const zhCN = {
       conflictKindFallback: "待确认项",
       confidence: "置信",
       emptyConflicts: "本次未返回歧义明细，可直接点「修改」补充说明。",
+      promptByKind: {
+        wiki_disagree: "检测到 {count} 处知识冲突，请确认以此为背景继续？",
+        metric_ambiguous: "检测到 {count} 处指标歧义，请选择用于本次分析",
+      },
+      openInNewTabHint: "新标签页打开",
+      snippetFallback: "（无摘要）",
       planSteps: "研究计划步骤",
       emptyPlanSteps: "本次未返回计划步骤，可直接点「修改」补充研究方向。",
       candidates: "候选假设（可多选）",

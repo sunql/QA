@@ -256,6 +256,130 @@ describe("CheckpointCard 候选勾选提示（默认验证全部）", () => {
   );
 });
 
+describe("CheckpointCard wiki_disagree 候选可点可读（W1 UX 修复）", () => {
+  const wikiConflictOptions = {
+    signal: "wiki_disagree",
+    resumePhase: "plan",
+    arms: { metrics: [], businessObjects: [], knowledge: [], conflicts: [] },
+    conflicts: [
+      {
+        kind: "wiki_disagree",
+        detail: "5 篇高相关 wiki 共主题，建议人工核对表述是否冲突",
+        candidates: [
+          {
+            title: "Sheet3",
+            pageId: "PAGE-SHEET3-51ED17C2",
+            snippet: "跟踪订单执行进度、逾期催货、跟催记录、逾期订单占比",
+            confidence: 0.53,
+          },
+          {
+            title: "到货准确率（需要确认准确率还做不做了）",
+            pageId: "PAGE-UNTITLED-08B525C3",
+            snippet: "为统计周期内要货批次之和（要货数量不为零）",
+            confidence: 0.52,
+          },
+        ],
+      },
+    ],
+  };
+
+  it("候选带 pageId：渲染为新标签页链接（用户可点过去看原文）", () => {
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({ phase: "runtime_dynamic", options: wikiConflictOptions })}
+          onAnswer={() => {}}
+        />
+      </ConfigProvider>
+    );
+    const link = screen.getByRole("link", { name: /Sheet3/ });
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link.getAttribute("href") ?? "").toContain("PAGE-SHEET3-51ED17C2");
+  });
+
+  it("候选带 snippet：渲染正文摘要（用户不必跳页就能判断相关性）", () => {
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({ phase: "runtime_dynamic", options: wikiConflictOptions })}
+          onAnswer={() => {}}
+        />
+      </ConfigProvider>
+    );
+    expect(
+      screen.getByText(/跟踪订单执行进度、逾期催货、跟催记录、逾期订单占比/)
+    ).toBeInTheDocument();
+  });
+});
+
+describe("CheckpointCard 按 phase + conflictKind 改写 prompt（不再误导「请确认采用哪一项」）", () => {
+  it("runtime_dynamic + wiki_disagree：显示「以此为背景继续」而非「请确认采用哪一项」", () => {
+    const wikiOptions = {
+      signal: "wiki_disagree",
+      resumePhase: "plan",
+      arms: { metrics: [], conflicts: [] },
+      conflicts: [
+        {
+          kind: "wiki_disagree",
+          detail: "5 篇高相关 wiki",
+          candidates: [{ title: "Sheet3", pageId: "P1" }],
+        },
+      ],
+    };
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({
+            phase: "runtime_dynamic",
+            options: wikiOptions,
+            prompt: "检测到 1 处语义歧义（知识冲突），请确认采用哪一项？", // ← 后端原始误导文案
+          })}
+          onAnswer={() => {}}
+        />
+      </ConfigProvider>
+    );
+    // 新的 phase-specific 文案必须出现
+    expect(screen.getByText(/检测到 1 处.*知识冲突/)).toBeInTheDocument();
+    expect(screen.getByText(/以此为背景继续/)).toBeInTheDocument();
+    // 旧的「请确认采用哪一项」必须不再作为主问句出现
+    expect(
+      screen.queryByText(/请确认采用哪一项/)
+    ).not.toBeInTheDocument();
+  });
+
+  it("runtime_dynamic + metric_ambiguous：显示「请选择用于本次分析」", () => {
+    const metricOptions = {
+      signal: "metric_ambiguous",
+      resumePhase: "plan",
+      arms: { metrics: [], conflicts: [] },
+      conflicts: [
+        {
+          kind: "metric_ambiguous",
+          detail: "前两名分差 < 0.05",
+          candidates: [
+            { kpiCode: "A", displayName: "供货量", confidence: 0.71 },
+            { kpiCode: "B", displayName: "收货量", confidence: 0.66 },
+          ],
+        },
+      ],
+    };
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint({
+            phase: "runtime_dynamic",
+            options: metricOptions,
+            prompt: "检测到 1 处语义歧义（指标歧义），请确认采用哪一项？",
+          })}
+          onAnswer={() => {}}
+        />
+      </ConfigProvider>
+    );
+    expect(screen.getByText(/检测到 1 处.*指标歧义/)).toBeInTheDocument();
+    expect(screen.getByText(/请选择用于本次分析/)).toBeInTheDocument();
+  });
+});
+
 describe("CheckpointCard tooltip per phase", () => {
   it("planning phase: modify button uses modifyPlanningHint", async () => {
     const user = userEvent.setup();

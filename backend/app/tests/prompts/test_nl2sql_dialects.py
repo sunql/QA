@@ -11,11 +11,11 @@ from __future__ import annotations
 
 from app.domain.enums import DataSourceType
 from app.services.nl2sql_dialects import (
-    SqlDialect,
-    resolveDialect,
     _SQL_DIALECTS_ORACLE_11G,
     _SQL_DIALECTS_ORACLE_12C,
-    _SQL_DIALECTS,
+    DialectRegistry,
+    SqlDialect,
+    resolveDialect,
 )
 
 
@@ -51,11 +51,19 @@ def test_日期算术规则_Oracle_必须显式禁用_MySQL_函数() -> None:
 
 def test_resolveDialect_Oracle19c_应走_12c_分支() -> None:
     """2026-10-08 补：19c 被 `version.startswith('11')` 误判为 11g 走 ROWNUM 分支。
-    19c 实际 ≥ 12c 必须走 FETCH FIRST 12c 路径。
+    19c 实际 ≥ 12c 必须走 FETCH FIRST 12c 路径（且 dialect-registry refactor 后有专属 19c notes）。
     """
     dialect = resolveDialect(DataSourceType.ORACLE, oracle_version="19c")
-    assert dialect is _SQL_DIALECTS_ORACLE_12C, (
-        f"19c 必须解析为 12c 方言（实际 {dialect.name}，sampleLimitSql={dialect.sampleLimitSql!r}）"
+    # 不能用 `is` identity（refactor 后 19c 走 _SQL_DIALECTS_ORACLE_19C 克隆，不再返回原 12c）
+    # 改用语义断言：sampleLimitSql 必须是 12c 风格（FETCH FIRST），且 19c 专属 notes 已注入
+    assert "FETCH FIRST" in dialect.sampleLimitSql, (
+        f"19c sampleLimitSql 必须用 FETCH FIRST（实际 {dialect.sampleLimitSql!r}）"
+    )
+    assert "ROWNUM" not in dialect.sampleLimitSql, (
+        f"19c sampleLimitSql 不能误判为 11g 走 ROWNUM（实际 {dialect.sampleLimitSql!r}）"
+    )
+    assert "ADD_MONTHS" in dialect.notes, (
+        f"19c 应有专属 notes（实际 {dialect.notes!r}）"
     )
 
 
@@ -63,7 +71,13 @@ def test_resolveDialect_Oracle11g_字符串_应走_11g() -> None:
     """11g 字面量 / 11.2.x / 9.x / 10.x 都应解析为 11g。"""
     for ver in ("11g", "11.2.0.1.0", "9i", "10g", "11gR2"):
         d = resolveDialect(DataSourceType.ORACLE, oracle_version=ver)
-        assert d is _SQL_DIALECTS_ORACLE_11G, f"{ver} 应走 11g 分支（实际 {d.name}）"
+        # 不用 `is` identity（refactor 后返回 _SQL_DIALECTS_ORACLE_11G_REGISTERED 克隆）
+        assert "ROWNUM" in d.sampleLimitSql, (
+            f"{ver} sampleLimitSql 应走 11g 分支用 ROWNUM（实际 {d.sampleLimitSql!r}）"
+        )
+        assert "FETCH FIRST" not in d.sampleLimitSql, (
+            f"{ver} sampleLimitSql 不应误判为 12c 走 FETCH FIRST（实际 {d.sampleLimitSql!r}）"
+        )
 
 
 def test_日期算术规则_Oracle12c_同样_必须含_ADD_MONTHS() -> None:
@@ -75,7 +89,7 @@ def test_日期算术规则_Oracle12c_同样_必须含_ADD_MONTHS() -> None:
 
 def test_日期算术规则_PostgreSQL_必须含_INTERVAL() -> None:
     """PostgreSQL 用 `date - INTERVAL 'N' MONTH` / `date + INTERVAL 'N' day`。"""
-    dialect = _SQL_DIALECTS[DataSourceType.POSTGRESQL]
+    dialect = DialectRegistry.default().resolve(DataSourceType.POSTGRESQL)
     rule = dialect.dateArithmeticRule
     assert rule, "PostgreSQL 必须定义 dateArithmeticRule"
     assert "INTERVAL" in rule
@@ -84,7 +98,7 @@ def test_日期算术规则_PostgreSQL_必须含_INTERVAL() -> None:
 
 def test_日期算术规则_MySQL_必须含_DATE_SUB_或_DATE_ADD() -> None:
     """MySQL 用 `DATE_SUB(date, INTERVAL N MONTH)` / `DATE_ADD(...)`。"""
-    dialect = _SQL_DIALECTS[DataSourceType.MYSQL]
+    dialect = DialectRegistry.default().resolve(DataSourceType.MYSQL)
     rule = dialect.dateArithmeticRule
     assert rule, "MySQL 必须定义 dateArithmeticRule"
     assert "DATE_SUB" in rule or "DATE_ADD" in rule

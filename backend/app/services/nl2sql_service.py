@@ -45,7 +45,6 @@ from app.services.messages_zh import (
 from app.services.nl2sql_dialects import (
     SqlDialect,
     resolveDialect,
-    _SQL_DIALECTS,
 )
 from app.services.nl2sql_plan import (
     formatPlanFormulas,

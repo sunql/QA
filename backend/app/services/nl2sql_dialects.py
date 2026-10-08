@@ -3,14 +3,15 @@
 按数据源类型（Oracle/MySQL/PostgreSQL）声明行数限制、JOIN 模板、schema 前缀、
 值域采样、NULL 排序、时间粒度分组等方言规则片段。`resolveDialect` 是运行时解析入口。
 
-未来扩展：新增一种 SQL 方言只需在本模块加一个 `SqlDialect` 实例 + `_SQL_DIALECTS` 表项。
+未来扩展：新增一种 SQL 方言只需在本模块加一个 `SqlDialect` 实例 + `_DIALECT_SEEDS` 表项。
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import MappingProxyType
 
 from app.domain.enums import DataSourceType
 from app.domain.exceptions import ValidationError
@@ -48,12 +49,166 @@ class SqlDialect:
     # → ORA-00904 → finding.rows=[] → 报告 data 章节无 chart 块。每种 dialect 必须有非空规则，
     # 且必须**显式禁用**其它方言的日期函数（仅靠推荐函数不足以让 LLM 改习惯）。
     dateArithmeticRule: str = ""
+    # 2026-10-08 dialect-registry refactor：banned set 从模块级 dict 搬到实例上
+    bannedFunctions: tuple[str, ...] = ()
+    keywordPatterns: tuple[tuple[str, str, str], ...] = ()
+    intervalAllowed: bool = True
+    notes: str = ""
+    # 用于 check_sql 生成**该 dialect 专属**的 LLM retry 提示（如 Oracle 把
+    # DATE_FORMAT 提示成「用 TO_CHAR(date, 'YYYY-MM') 替代」）。None 时退回
+    # 通用提示「改用 {name} 原生函数」，仅用于纯单测构造的 SqlDialect。
+    datasourceType: DataSourceType | None = None
 
     def boundedDistinct(self, table: str, column: str, n: int) -> str:
         """构造取前 n 行去重值查询（表/列已过标识符白名单校验）。"""
         return self.sampleLimitSql.format(
             sql=f"SELECT DISTINCT {column} FROM {table}", n=n
         )
+
+    def check_sql(self, sql: str | None) -> DialectGuardResult:
+        """按本方言的 bannedFunctions + keywordPatterns + intervalAllowed 反向校验 SQL。
+
+        2026-10-08 refactor：从模块级 checkSqlDialect 抽到实例方法；行为一致。
+        """
+        if not sql or not sql.strip():
+            return DialectGuardResult(ok=True, violations=(), hint="")
+
+        violations: list[DialectViolation] = []
+        if self.bannedFunctions:
+            found = _extractFunctionNames(sql)
+            for fn in sorted(found & set(self.bannedFunctions)):
+                # 有 datasourceType 时用专属提示（Oracle 给出 "用 TO_CHAR..."），
+                # 否则退到通用提示（纯单测场景不期望强方言语义）
+                suggestion = (
+                    _suggestionFor(self.datasourceType, fn)
+                    if self.datasourceType is not None
+                    else f"改用 {self.name} 原生函数"
+                )
+                violations.append(DialectViolation(function=fn, suggestion=suggestion))
+        if self.keywordPatterns:
+            violations.extend(_checkBannedKeywords(sql, self.keywordPatterns))
+        elif not self.intervalAllowed:
+            # Oracle / MySQL 不允许独立 INTERVAL 字面量；即使 keywordPatterns 为空
+            # 也启用 INTERVAL 默认守卫（与 refactor 前 _BANNED_KEYWORDS_ORACLE 行为一致）。
+            violations.extend(
+                _checkBannedKeywords(
+                    sql,
+                    (
+                        (
+                            r"\bINTERVAL\s+(\d|['\"])",
+                            "INTERVAL",
+                            "用 ADD_MONTHS(date, -N) 或 date - N 替代",
+                        ),
+                    ),
+                )
+            )
+
+        if not violations:
+            return DialectGuardResult(ok=True, violations=(), hint="")
+        # 有 datasourceType 时透传 enum，_buildHint 会取 .value 拼成 "oracle"；
+        # 否则退到 self.name（纯单测场景）
+        hint = _buildHint(
+            self.datasourceType if self.datasourceType is not None else self.name,
+            violations,
+        )
+        return DialectGuardResult(ok=False, violations=tuple(violations), hint=hint)
+
+
+# ---------------------------------------------------------------------------
+# DialectRegistry（2026-10-08 补）：按 (DataSourceType, versionBucket) 注册/解析方言。
+# 取代原 `_SQL_DIALECTS` dict + Oracle-only if 分支；fallback 链 exact → major → "default"。
+# ---------------------------------------------------------------------------
+
+
+def _candidateBuckets(db: DataSourceType, version: str | None) -> list[str]:
+    """按 db 类型生成候选 bucket 列表（fallback 链前缀）。
+
+    Oracle：保留历史 "9/10/11 开头 → 11g" 行为；其它版本按命名规则（N[g/c/i] 或 N）解析。
+    MySQL：按 major.minor / major 解析。
+    PostgreSQL：按 major 解析。
+    未识别版本 → ["default"]。
+    """
+    if not version:
+        return ["default"]
+    v = version.lower().strip()
+    if db is DataSourceType.ORACLE:
+        # 历史行为（原 line 411）：9/10/11 开头或含 "11g" → 11g
+        if v.startswith(("9", "10", "11")) or "11g" in v:
+            return ["11g"]
+        # 命名版本（"19c", "21c", "12c"）→ 直接命中
+        m = re.match(r"(\d+)([gci])", v)
+        if m:
+            return [f"{m.group(1)}{m.group(2)}", "default"]
+        # 纯数字 major（如 "19", "21"）→ 试 major+"c" 后缀
+        m = re.match(r"(\d+)", v)
+        if m:
+            return [f"{m.group(1)}c", m.group(1), "default"]
+        return ["default"]
+    if db is DataSourceType.MYSQL:
+        m = re.match(r"(\d+)\.(\d+)", v)
+        if m:
+            return [f"{m.group(1)}_{m.group(2)}", m.group(1), "default"]
+        m = re.match(r"(\d+)", v)
+        if m:
+            return [m.group(1), "default"]
+        return ["default"]
+    if db is DataSourceType.POSTGRESQL:
+        m = re.match(r"(\d+)", v)
+        if m:
+            return [m.group(1), "default"]
+        return ["default"]
+    return ["default"]
+
+
+@dataclass(frozen=True)
+class DialectRegistry:
+    """按 (dbType, versionBucket) 注册/解析方言；版本不匹配走 fallback 链。
+
+    register 是「创建新实例」语义（frozen），不 mutate；resolve 走 fallback：
+    exact bucket → major bucket → "default" → KeyError。
+    """
+
+    _entries: MappingProxyType  # type: ignore[type-arg]
+
+    @staticmethod
+    def default() -> DialectRegistry:
+        """返回系统内置注册表（所有 known 版本方言已填入）。"""
+        return _BUILTIN_DIALECT_REGISTRY
+
+    def withEntry(
+        self,
+        dbType: DataSourceType | str,
+        bucket: str,
+        dialect: SqlDialect,
+    ) -> DialectRegistry:
+        """注册一条 (dbType, bucket) → 方言；同 key 重复注册抛 ValueError。返回新实例。"""
+        db = DataSourceType(dbType)
+        key = (db, bucket)
+        if key in self._entries:
+            raise ValueError(f"dialect already registered: {db.value}/{bucket}")
+        new_entries = dict(self._entries)
+        new_entries[key] = dialect
+        return DialectRegistry(_entries=MappingProxyType(new_entries))
+
+    def resolve(
+        self,
+        dbType: DataSourceType | str,
+        version: str | None = None,
+    ) -> SqlDialect:
+        """按 fallback 链解析方言。version 解析失败 / 未注册 → 抛 KeyError。
+
+        字符串大小写不敏感匹配（如 "MySQL" / "POSTGRESQL" 都视作 DataSourceType.MYSQL/POSTGRESQL）；
+        不能匹配时抛 ValueError。调用方应在边界（`coerceDatasourceType`）做脏值校验，
+        本函数只对已校验/已归一的输入做方言解析。
+        """
+        if isinstance(dbType, str):
+            dbType = dbType.lower()
+        db = DataSourceType(dbType)
+        for bucket in _candidateBuckets(db, version):
+            key = (db, bucket)
+            if key in self._entries:
+                return self._entries[key]
+        raise KeyError(f"no dialect registered for {db.value} (version={version!r})")
 
 
 # 跨年/分组对比的排序 NULL 规则：Oracle 与 PostgreSQL 的 ORDER BY ... DESC 默认
@@ -172,7 +327,7 @@ _SQL_DIALECTS_ORACLE_12C = SqlDialect(
         "例如 AVG(CASE WHEN EXTRACT(YEAR FROM d.ORDDAT_0) = 2025 THEN d.CPRPRI_0 END) AS AVG_PRICE_2025。"
     ),
 )
-_SQL_DIALECTS: dict[DataSourceType, SqlDialect] = {
+_DIALECT_SEEDS: dict[DataSourceType, SqlDialect] = {
     DataSourceType.ORACLE: _SQL_DIALECTS_ORACLE_11G,  # 默认 11g（保守）；调用方应传入 oracle_version 覆盖
     DataSourceType.MYSQL: SqlDialect(
         name="MySQL",
@@ -194,6 +349,135 @@ _SQL_DIALECTS: dict[DataSourceType, SqlDialect] = {
         dateArithmeticRule=_DATE_ARITHMETIC_RULE_POSTGRESQL,
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Task 3：内置方言注册表（2026-10-08 dialect-registry refactor）
+# 在 _DIALECT_SEEDS dict 之外，构造 12 条版本特定的方言实例；保留既有 11g/12c 实例
+# （用 replace 加 bannedFunctions 等新字段）以保证既有 chat 调用方语义不变。
+# ---------------------------------------------------------------------------
+
+# Oracle banned 集合（refactor 前在 _BANNED_FUNCTIONS_ORACLE 模块常量里）
+_ORACLE_BANNED_FUNCTIONS = (
+    "DATEADD",
+    "DATEDIFF",
+    "DATEPART",
+    "DATE_PART",
+    "DATE_FORMAT",
+    "DATE_SUB",
+    "DATE_ADD",
+    "CURDATE",
+    "NOW",
+)
+_ORACLE_KEYWORD_PATTERNS = (
+    (r"\bINTERVAL\s+(\d|['\"])", "INTERVAL", "用 ADD_MONTHS(date, -N) 或 date - N 替代"),
+)
+# MySQL banned 集合（refactor 前 inline 在 checkSqlDialect 函数里）
+_MYSQL_BANNED_FUNCTIONS = ("DATEADD", "DATEDIFF", "DATEPART", "ADD_MONTHS", "EXTRACT")
+# PG banned 集合（refactor 前 inline 在 checkSqlDialect 函数里）
+_POSTGRES_BANNED_FUNCTIONS = (
+    "DATEADD",
+    "DATEDIFF",
+    "DATEPART",
+    "ADD_MONTHS",
+    "DATE_SUB",
+    "DATE_ADD",
+    "DATE_FORMAT",
+)
+
+# Oracle 12c+ default（基础方言；含 banned 集合 + 12c 风格 notes）
+_SQL_DIALECTS_ORACLE_DEFAULT = replace(
+    _SQL_DIALECTS_ORACLE_12C,
+    bannedFunctions=_ORACLE_BANNED_FUNCTIONS,
+    keywordPatterns=_ORACLE_KEYWORD_PATTERNS,
+    intervalAllowed=False,
+    notes="Oracle 12c+：使用 FETCH FIRST N ROWS ONLY 做行数限制。",
+    datasourceType=DataSourceType.ORACLE,
+)
+
+# Oracle 11g：保留既有 11g 实例 + 加 banned 集合 + 11g 特定 notes
+_SQL_DIALECTS_ORACLE_11G_REGISTERED = replace(
+    _SQL_DIALECTS_ORACLE_11G,
+    bannedFunctions=_ORACLE_BANNED_FUNCTIONS,
+    keywordPatterns=_ORACLE_KEYWORD_PATTERNS,
+    intervalAllowed=False,
+    notes="Oracle 11g：使用 ROWNUM 做行数限制（无 FETCH FIRST 语法）。",
+    datasourceType=DataSourceType.ORACLE,
+)
+
+# Oracle 19c（clone default + 19c 特定 notes）
+_SQL_DIALECTS_ORACLE_19C = replace(
+    _SQL_DIALECTS_ORACLE_DEFAULT,
+    notes="Oracle 19c：ADD_MONTHS 优先；MERGE INTO 可用；JSON_TABLE 在 19c 可用。",
+)
+
+# Oracle 21c（clone default + 21c 特定 notes）
+_SQL_DIALECTS_ORACLE_21C = replace(
+    _SQL_DIALECTS_ORACLE_DEFAULT,
+    notes="Oracle 21c：MERGE INTO 完整支持；JSON_DATAGUIDE / 21c 自治特性。",
+)
+
+# MySQL default（8.0 通用，含 banned 集合）
+_SQL_DIALECTS_MYSQL_DEFAULT = replace(
+    _DIALECT_SEEDS[DataSourceType.MYSQL],
+    bannedFunctions=_MYSQL_BANNED_FUNCTIONS,
+    intervalAllowed=False,
+    notes="MySQL：使用 LIMIT N 做行数限制。",
+    datasourceType=DataSourceType.MYSQL,
+)
+
+# MySQL 8.0
+_SQL_DIALECTS_MYSQL_8_0 = replace(
+    _SQL_DIALECTS_MYSQL_DEFAULT,
+    notes="MySQL 8.0：CTE / 窗口函数 / JSON_TABLE 可用。",
+)
+
+# MySQL 5.7
+_SQL_DIALECTS_MYSQL_5_7 = replace(
+    _SQL_DIALECTS_MYSQL_DEFAULT,
+    notes="MySQL 5.7：无原生 CTE（WITH 子句需 8.0+）；递归用临时表；无窗口函数。",
+)
+
+
+def _replace_pg_default(notes: str = "PostgreSQL：使用 LIMIT N 做行数限制。"):
+    """PG default + 任意 notes（replace 不能 mutate frozen instance）。"""
+    return replace(
+        _DIALECT_SEEDS[DataSourceType.POSTGRESQL],
+        bannedFunctions=_POSTGRES_BANNED_FUNCTIONS,
+        notes=notes,
+        datasourceType=DataSourceType.POSTGRESQL,
+    )
+
+
+def _build_default_registry() -> DialectRegistry:
+    """构造系统内置方言注册表（12 条）。"""
+    entries = (
+        # Oracle
+        (DataSourceType.ORACLE, "default", _SQL_DIALECTS_ORACLE_DEFAULT),
+        (DataSourceType.ORACLE, "11g", _SQL_DIALECTS_ORACLE_11G_REGISTERED),
+        (DataSourceType.ORACLE, "19c", _SQL_DIALECTS_ORACLE_19C),
+        (DataSourceType.ORACLE, "21c", _SQL_DIALECTS_ORACLE_21C),
+        # MySQL
+        (DataSourceType.MYSQL, "default", _SQL_DIALECTS_MYSQL_DEFAULT),
+        (DataSourceType.MYSQL, "8_0", _SQL_DIALECTS_MYSQL_8_0),
+        (DataSourceType.MYSQL, "5_7", _SQL_DIALECTS_MYSQL_5_7),
+        (DataSourceType.MYSQL, "8", _SQL_DIALECTS_MYSQL_DEFAULT),
+        (DataSourceType.MYSQL, "5", _SQL_DIALECTS_MYSQL_DEFAULT),
+        # MariaDB 复用 MySQL default（fallback chain 兜底）
+        # PostgreSQL
+        (DataSourceType.POSTGRESQL, "default", _replace_pg_default()),
+        (DataSourceType.POSTGRESQL, "14", _replace_pg_default("PostgreSQL 14：MERGE INTO 语法可用。")),
+        (DataSourceType.POSTGRESQL, "15", _replace_pg_default("PostgreSQL 15：MERGE / 15+ 完整支持。")),
+        (DataSourceType.POSTGRESQL, "16", _replace_pg_default("PostgreSQL 16：MERGE / JSON_TABLE / 16+ 完整支持。")),
+    )
+    reg: DialectRegistry = DialectRegistry(_entries=MappingProxyType({}))
+    for db, bucket, dialect in entries:
+        reg = reg.withEntry(db, bucket, dialect)
+    return reg
+
+
+# 在 _DIALECT_SEEDS dict 定义之后才构造 registry（依赖既有实例做 replace seed）
+_BUILTIN_DIALECT_REGISTRY = _build_default_registry()
 
 
 # ---------------------------------------------------------------------------
@@ -230,24 +514,6 @@ class DialectGuardResult:
     hint: str  # 喂回 LLM 的人类语言提示（仅在 not ok 时有意义）
 
 
-# Oracle 上不允许的**函数**（大小写不敏感）。这些函数在 Oracle 19c 上必然 ORA-00904 / ORA-00907。
-# 与 `dateArithmeticRule` 文本清单保持一致 —— 后者教 LLM，前者反向校验。
-_BANNED_FUNCTIONS_ORACLE: frozenset[str] = frozenset({
-    # SQL Server 专属
-    "DATEADD", "DATEDIFF", "DATEPART", "DATE_PART",
-    # MySQL 专属
-    "DATE_FORMAT", "DATE_SUB", "DATE_ADD", "CURDATE", "DATE_FORMAT",
-    # MySQL 5+ 的 NOW() 在 Oracle 上要换成 SYSDATE；NOW 在 Oracle 不存在
-    "NOW",
-})
-
-# Oracle 上不允许的**关键字**形态。INTERVAL 是 PostgreSQL/MySQL 的字面量语法，Oracle 不支持；
-# 单独的字符串/列名不会触发（正则要求后跟数字或引号字面量）。
-_BANNED_KEYWORDS_ORACLE: tuple[tuple[str, str, str], ...] = (
-    (r"\bINTERVAL\s+(\d|['\"])", "INTERVAL", "用 ADD_MONTHS(date, -N) 或 date - N 替代"),
-)
-
-
 def _extractFunctionNames(sql: str) -> set[str]:
     """从 SQL 中提取全部函数名（UPPERCASE）。
 
@@ -279,6 +545,10 @@ def checkSqlDialect(
 ) -> DialectGuardResult:
     """反向校验 LLM 生成的 SQL 是否符合目标 dialect；违规则给出 retry 提示。
 
+    2026-10-08 dialect-registry refactor：薄壳化，内部委托给
+    `DialectRegistry.default().resolve(dsType).check_sql(sql)`。
+    行为等价于 refactor 前（banned set 按 DataSourceType 一刀切）。
+
     Args:
         sql: LLM 生成的 SQL 字符串（None / 空 ⇒ 视为无违规，交给上游 `STEP_MISSING_SQL`）。
         datasourceType: 目标数据源类型（`DataSourceType` 枚举或其 `value` 字符串）。
@@ -295,8 +565,7 @@ def checkSqlDialect(
     """
     if not sql or not sql.strip():
         return DialectGuardResult(ok=True, violations=(), hint="")
-
-    # 把字符串归一到 enum（不抛错：失败 = 放行，由上游 `coerceDatasourceType` 负责脏值）
+    # 字符串归一到 enum（与 refactor 前一致：脏值放行，由 coerceDatasourceType 兜底）
     dsEnum: DataSourceType | None = None
     if isinstance(datasourceType, DataSourceType):
         dsEnum = datasourceType
@@ -305,35 +574,13 @@ def checkSqlDialect(
             if t.value == datasourceType.lower():
                 dsEnum = t
                 break
-
-    if dsEnum == DataSourceType.ORACLE:
-        banned = _BANNED_FUNCTIONS_ORACLE
-        keywordPatterns = _BANNED_KEYWORDS_ORACLE
-    elif dsEnum == DataSourceType.MYSQL:
-        # MySQL 自身的 DATE_FORMAT / DATE_SUB / DATE_ADD 是合规的；禁止的是 SQL Server
-        # 的 DATEADD 与 Oracle 专属的 ADD_MONTHS（MySQL 没有这个）。
-        banned = frozenset({"DATEADD", "DATEDIFF", "DATEPART", "ADD_MONTHS", "EXTRACT"})
-        keywordPatterns = ()
-    elif dsEnum == DataSourceType.POSTGRESQL:
-        # PostgreSQL 用 INTERVAL 字面量是合法的（不要禁）；禁 SQL Server / Oracle 专属。
-        banned = frozenset({"DATEADD", "DATEDIFF", "DATEPART", "ADD_MONTHS", "DATE_SUB", "DATE_ADD", "DATE_FORMAT"})
-        keywordPatterns = ()
-    else:
-        # 未知 dialect：放行（不替 resolveDialect 兜底；那是 coerceDatasourceType 的职责）
+    if dsEnum is None:
         return DialectGuardResult(ok=True, violations=(), hint="")
-
-    found = _extractFunctionNames(sql)
-    violations: list[DialectViolation] = []
-    for fn in sorted(found & banned):
-        suggestion = _suggestionFor(dsEnum, fn)
-        violations.append(DialectViolation(function=fn, suggestion=suggestion))
-    violations.extend(_checkBannedKeywords(sql, keywordPatterns))
-
-    if not violations:
+    try:
+        dialect = DialectRegistry.default().resolve(dsEnum)
+    except KeyError:
         return DialectGuardResult(ok=True, violations=(), hint="")
-
-    hint = _buildHint(dsEnum, violations)
-    return DialectGuardResult(ok=False, violations=tuple(violations), hint=hint)
+    return dialect.check_sql(sql)
 
 
 def _suggestionFor(datasourceType: DataSourceType, fn: str) -> str:
@@ -353,10 +600,15 @@ def _suggestionFor(datasourceType: DataSourceType, fn: str) -> str:
     return f"{datasourceType.value} 不支持 {fn}，请改用该 dialect 的原生函数"
 
 
-def _buildHint(datasourceType: DataSourceType, violations: list[DialectViolation]) -> str:
+def _buildHint(datasourceType: DataSourceType | str, violations: list[DialectViolation]) -> str:
     """拼好喂回 LLM 的人类语言提示（注入 prompt 让 LLM 重写）。"""
+    name = (
+        datasourceType.value
+        if isinstance(datasourceType, DataSourceType)
+        else datasourceType
+    )
     lines = [
-        f"上一轮生成的 SQL 包含 {datasourceType.value} dialect 不允许的函数/语法，已被守卫拦截。",
+        f"上一轮生成的 SQL 包含 {name} dialect 不允许的函数/语法，已被守卫拦截。",
         "请重新生成 SQL，**只用**目标 dialect 的原生写法，**不要**用以下函数：",
     ]
     for v in violations:
@@ -385,31 +637,16 @@ def coerceDatasourceType(value: str | None, *, name: str = "") -> DataSourceType
 
 
 def resolveDialect(datasourceType: DataSourceType | str | None, oracle_version: str | None = None) -> SqlDialect:
-    """按数据源类型解析方言；未指定或未知类型回退 Oracle（历史行为）。
+    """按数据源类型解析方言；未指定或未知类型回退 Oracle 11g（历史行为）。
 
-    字符串输入先尝试大小写不敏感匹配（"MySQL"/"POSTGRESQL"），避免脏值
-    误回退 Oracle 生成错误方言。
-    oracle_version 用于区分 Oracle 版本：11g 用 ROWNUM，12c+ 用 FETCH FIRST。
+    2026-10-08 dialect-registry refactor：薄壳化，内部委托给 DialectRegistry。
+    字符串输入由 registry 做大小写不敏感匹配（"MySQL"/"POSTGRESQL" 等）。
+    Oracle 版本通过 candidate bucket 链解析：11g / 19c / 21c / default 各自有专属方言。
     """
     if datasourceType is None:
-        return _SQL_DIALECTS_ORACLE_11G
+        return DialectRegistry.default().resolve(DataSourceType.ORACLE, "11g")
     try:
-        dialect = _SQL_DIALECTS[DataSourceType(datasourceType)]
-    except (ValueError, KeyError):
-        if isinstance(datasourceType, str):
-            for dialectType, dialect in _SQL_DIALECTS.items():
-                if datasourceType.lower() == dialectType.value.lower():
-                    return dialect
+        return DialectRegistry.default().resolve(datasourceType, oracle_version)
+    except (KeyError, ValueError):
         logger.warning("未知数据源类型 %r，NL2SQL 回退到 Oracle 11g 方言", datasourceType)
-        return _SQL_DIALECTS_ORACLE_11G
-
-    # Oracle 版本判断：12c 及以上用 FETCH FIRST，否则用 ROWNUM
-    if dialect.name == "Oracle" and datasourceType == DataSourceType.ORACLE:
-        version = (oracle_version or "").lower()
-        # 点分版本（探测落库原文，如 "11.2.0.1.0"）与 "11g" 字样都识别为 11g ——
-        # 否则 11.2 会三个规则都不命中而落 12c 分支，给 11g 库生成 FETCH FIRST。
-        if "11g" in version or version.startswith(("9", "10", "11")):
-            return _SQL_DIALECTS_ORACLE_11G
-        return _SQL_DIALECTS_ORACLE_12C
-
-    return dialect
+        return DialectRegistry.default().resolve(DataSourceType.ORACLE, "11g")

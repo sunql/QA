@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from app.domain.enums import DataSourceType
-from app.services.nl2sql_dialects import _SQL_DIALECTS
+from app.services.nl2sql_dialects import DialectRegistry
 from app.services.nl2sql_prompts import _buildSystemPrompt
 
 
@@ -25,7 +25,7 @@ def test_Oracle_prompt_必须含_ADD_MONTHS_禁用_DATEADD() -> None:
     防 LLM 凭训练语料默认用 SQL Server 语法；防 prompt 维护者另起规则与
     `SqlDialect.dateArithmeticRule` 漂移。
     """
-    dialect = _SQL_DIALECTS[DataSourceType.ORACLE]
+    dialect = DialectRegistry.default().resolve(DataSourceType.ORACLE)
     prompt = _buildSystemPrompt(
         schemaText=_empty_schema(),
         dialect=dialect,
@@ -44,7 +44,7 @@ def test_Oracle_prompt_必须显式禁_MySQL_函数_且给_TO_CHAR_示例() -> N
     `DATE_FORMAT(DATE_SUB(CURRENT_DATE, INTERVAL 6 MONTH), '%Y-%m')` → ORA-00907。
     仅禁 DATEADD 不够——必须禁 DATE_FORMAT/DATE_SUB/INTERVAL/CURDATE 并给正确模板。
     """
-    dialect = _SQL_DIALECTS[DataSourceType.ORACLE]
+    dialect = DialectRegistry.default().resolve(DataSourceType.ORACLE)
     prompt = _buildSystemPrompt(
         schemaText=_empty_schema(),
         dialect=dialect,
@@ -61,7 +61,7 @@ def test_Oracle_prompt_必须显式禁_MySQL_函数_且给_TO_CHAR_示例() -> N
 
 
 def test_PostgreSQL_prompt_必须含_INTERVAL_禁用_DATEADD() -> None:
-    dialect = _SQL_DIALECTS[DataSourceType.POSTGRESQL]
+    dialect = DialectRegistry.default().resolve(DataSourceType.POSTGRESQL)
     prompt = _buildSystemPrompt(
         schemaText=_empty_schema(),
         dialect=dialect,
@@ -72,7 +72,7 @@ def test_PostgreSQL_prompt_必须含_INTERVAL_禁用_DATEADD() -> None:
 
 
 def test_MySQL_prompt_必须含_DATE_SUB_或_DATE_ADD_禁用_DATEADD() -> None:
-    dialect = _SQL_DIALECTS[DataSourceType.MYSQL]
+    dialect = DialectRegistry.default().resolve(DataSourceType.MYSQL)
     prompt = _buildSystemPrompt(
         schemaText=_empty_schema(),
         dialect=dialect,

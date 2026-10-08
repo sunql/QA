@@ -153,7 +153,7 @@ class FakeRunner:
             raise ValueError(self._error)
         return list(self._rows)
 
-    async def runVerification(self, session, hypothesis, *, adapter=None):
+    async def runVerification(self, session, hypothesis, *, adapter=None, dialectArgs=None):
         self.verifyCalls.append(hypothesis.verificationSql)
         self.verifyAdapters.append(adapter)
         if self._error is not None:

@@ -269,11 +269,14 @@ class ResearchAgentPhasesMixin:
         """[9] 逐条验证假设并落 finding（confidence = 候选分 × 0.9 / 0.3）。"""
         findings: list[dict[str, Any]] = []
         # Task 13e：验证 SQL 与执行步走同一条业务库路径（假设 SQL 也是业务 SQL）
-        adapter = adapterFor((await depsForSession(session, sessionId, self._exec)).datasource)
+        deps = await depsForSession(session, sessionId, self._exec)
+        adapter = adapterFor(deps.datasource)
         for candidate in selectedHypotheses(state):
             await session.commit()  # Task 4 契约：runVerification 失败会 rollback 本 session
+            # 2026-10-08 复盘 3：把 dialectArgs 透传给 runVerification，让假设 SQL
+            # 也走 checkSqlDialect 守卫（plan 步的 runStep 早已有，假设链路缺）
             outcome = await self._runner.runVerification(
-                session, Hypothesis(**candidate), adapter=adapter
+                session, Hypothesis(**candidate), adapter=adapter, dialectArgs=deps.dialectArgs
             )
             verified = outcome.get("error") is None
             confidence = round(

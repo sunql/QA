@@ -101,7 +101,12 @@ class ResearchSqlRunner:
         return rows
 
     async def runVerification(
-        self, session: AsyncSession, hypothesis: Hypothesis, *, adapter: Any
+        self,
+        session: AsyncSession,
+        hypothesis: Hypothesis,
+        *,
+        adapter: Any,
+        dialectArgs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """执行假设的 verificationSql，返回 ``{"rows": [...], "error": None | str}``。
 
@@ -118,6 +123,21 @@ class ResearchSqlRunner:
         其它未决写/失败事务，而失败结论需要会话可用才能落 finding。契约不变：
         调用方不应在同一 session 上留有「必须保留的未提交写入」（Task 5 先 commit 再验证）。
         """
+        # 2026-10-08 复盘 3：假设 verificationSql 也是 LLM 生成，会携带错误方言
+        # （DATE_SUB/CURDATE/INTERVAL 进 Oracle）。``isValidVerificationSql`` 只看
+        # SELECT/WITH 头 + 无 DML/DDL，不过方言 ⇒ 这里再走 ``checkSqlDialect`` 兜底，
+        # 违规时**短路**返回 error 结论（与 ORA 失败同形，不抛、不重试 —— 重试会让
+        # LLM 在已经选好的候选上反复重写，超出"用户已选定"的契约）。
+        if dialectArgs:
+            from app.services.nl2sql_dialects import checkSqlDialect
+            dsType = (dialectArgs.get("datasourceType") or "").lower() or None
+            if dsType:
+                guard = checkSqlDialect(hypothesis.verificationSql, dsType)
+                if not guard.ok:
+                    logger.warning(
+                        "假设 SQL 方言违规（dialect=%s）: %s", dsType, guard.hint
+                    )
+                    return {"rows": [], "error": f"SQL 方言违规: {guard.hint}"}
         try:
             rows = await self.executeReadonlySql(session, hypothesis.verificationSql, adapter=adapter)
             return {"rows": rows, "error": None}

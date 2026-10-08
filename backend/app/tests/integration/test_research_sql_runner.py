@@ -125,6 +125,51 @@ async def test_run_verification_returns_error_dict_not_raise(dbSession, business
 
 
 @pytest.mark.asyncio
+async def test_run_verification_dialect_guard_rejects_mysql_in_oracle() -> None:
+    """2026-10-08 复盘 3：LLM 写出的 hypothesis verificationSql 仍是 MySQL 语法
+    （DATE_SUB/CURDATE/INTERVAL），通过 ``isValidVerificationSql`` 静态校验，
+    但 ``runVerification`` 没接 SQL Guard ⇒ 直送 Oracle ⇒ ORA-00907。
+
+    修复契约：``runVerification`` 在 ``executeReadonlySql`` 之前按 ``dialectArgs``
+    跑 ``checkSqlDialect``，违规时**短路**返回 ``{"rows": [], "error": <hint>}``
+    （与 ORA 失败同形同降级），业务库 adapter 不得被调用。
+    """
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    runner = ResearchSqlRunner()
+    bad = Hypothesis(
+        statement="h",
+        driver=None,
+        verificationSql=(
+            "SELECT s.supplier_name, COUNT(*) AS c "
+            "FROM DWD_PURCHASE_ORDER_DTL o "
+            "WHERE o.order_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH) "
+            "GROUP BY s.supplier_name"
+        ),
+    )
+    # 用 spy adapter：若被调用 ⇒ 守卫未生效 ⇒ 测试失败
+    spyAdapter = AsyncMock()
+    spyAdapter.execute_read_only = AsyncMock(return_value=[{"c": 1}])
+
+    outcome = await runner.runVerification(
+        AsyncMock(),
+        bad,
+        adapter=spyAdapter,
+        dialectArgs={"datasourceType": "oracle", "oracle_version": "19c"},
+    )
+    assert outcome["rows"] == []
+    assert outcome["error"], "dialect 违规应短路成 error 结论"
+    # 守卫消息必须明确提示违规函数（让 LLM 后续能看到并改正）
+    assert "DATE_SUB" in outcome["error"], outcome["error"]
+    assert "CURDATE" in outcome["error"], outcome["error"]
+    # 业务库不得被调
+    spyAdapter.execute_read_only.assert_not_called()
+    # 自检：独立跑一遍 checkSqlDialect 确认这条 SQL 真的会违规
+    guard = checkSqlDialect(bad.verificationSql, "oracle")
+    assert not guard.ok, "自检：当前 SQL 必须在 Oracle 上违规"
+
+
+@pytest.mark.asyncio
 async def test_run_verification_propagates_missing_adapter() -> None:
     """E1：adapter 未送达（接线缺失）⇒ ``RuntimeError`` **冒泡**，不得收敛成 error 结论。
 

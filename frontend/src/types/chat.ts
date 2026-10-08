@@ -18,7 +18,40 @@ export type IntentType =
   | "graph_reasoning"
   | "agent_run";
 
-export type ChartType = "table" | "bar" | "pie" | "line" | "scatter";
+// 图表类型：由后端决策引擎产出（规则优先，LLM 只在规则歧义时给语义标签）。
+// ⚠️ 新增值必须同步 `src/utils/chartContract.ts` 的 VALID_CHART_TYPES，否则运行时校验会把
+// 它降级为 null（静默不渲染）。
+// - `kpi` 不是 ECharts 图表：chartOption 是 `{kpi: {label, value, unit, delta}}`，
+//   由 KpiCard 渲染（不是 ReactECharts）。
+export type ChartType =
+  | "table"
+  | "bar"
+  | "hbar"
+  | "pie"
+  | "donut"
+  | "line"
+  | "scatter"
+  | "heatmap"
+  | "kpi"
+  | "combo"
+  | "waterfall";
+
+// 可视化输出策略（Task 7）：图之外的明细表负载。后端只在 TABLE 图型附带一份
+// 原始明细表（columns + rows），其余图型为 null/absent。由 chartContract 收窄。
+export interface TablePayload {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  // 仅当后端命中行数上限时存在（absent 时不归一成 false）
+  truncated?: boolean;
+}
+
+// 可视化输出策略（Task 7）：「为什么画这个图」的判断依据。code 为后端 ruleId
+// （21 个之一，但后端可先发新 code，前端**不内置白名单**）；params 只放插值变量
+// （rows 数字 / kind 字符串），文案在前端 i18n。由 chartContract 收窄。
+export interface VisualRationale {
+  code: string;
+  params: Record<string, unknown>;
+}
 
 // 后端从问题中抽取的结构化查询实体（best-effort，任一字段可为空）
 export interface ExtractedEntities {
@@ -95,10 +128,18 @@ export interface StepResultRead {
   data?: Record<string, unknown>[] | null;
   summary?: string | null;
   error?: string | null;
+  // 每步自己的图（决策引擎按该步的 columns/data/plan 各出一张；失败步骤为 null）
+  chartType?: ChartType | null;
+  chartOption?: Record<string, unknown> | null;
+  // 每步的明细表负载 + 判断依据（0107；失败步骤为 null）
+  tableOption?: TablePayload | null;
+  visualRationale?: VisualRationale | null;
+  // 每步的 NL2SQL 查询计划（供前端 QueryPlanCard 渲染）
+  queryPlan?: QueryPlan | null;
 }
 
 // 多步子步骤的运行时状态（前端聚合，随流式事件推进）
-export type StepStatus = "pending" | "running" | "done" | "error";
+export type StepStatus = "pending" | "running" | "done" | "error" | "compressed";
 
 // 单个多步子步骤（含前端维护的状态与回填结果）
 export interface MultiStepStep {
@@ -111,9 +152,21 @@ export interface MultiStepStep {
   sql?: string | null;
   summary?: string | null;
   error?: string | null;
+  // 每步自己的图（多步每步出图）：由 step_result / 非流式 steps 回填
+  chartType?: ChartType | null;
+  chartOption?: Record<string, unknown> | null;
+  // 每步的明细表负载 + 判断依据（0107）：由 step_result / 非流式 steps 回填
+  tableOption?: TablePayload | null;
+  visualRationale?: VisualRationale | null;
+  // 每步的 NL2SQL 查询计划（供前端 QueryPlanCard 渲染）
+  queryPlan?: QueryPlan | null;
+  // 该步所属 run 的 id（multi_step_plan 事件盖章）；单步路径不落库 ⇒ undefined，
+  // 也因此没有续跑按钮。
+  runId?: string;
+  // 被上下文压缩的步：徽章展示原始行数 → 保留行数（step_compressed 事件回填）
+  originalRows?: number;
+  compressedRows?: number;
 }
-
-// Phase 7 G4：未指名 Agent 语义路由建议（中置信命中时随 QUERY/NEW_QUERY 附带）
 export interface AgentSuggestion {
   recommendedAgentCode: string;
   confidence: number;
@@ -127,6 +180,9 @@ export interface ChatResponse {
   sql?: string | null;
   chartType?: ChartType | null;
   chartOption?: Record<string, unknown> | null;
+  // 明细表负载 + 判断依据（0107）：仅单步查询路径填值；多步顶层为 null
+  tableOption?: TablePayload | null;
+  visualRationale?: VisualRationale | null;
   data?: Record<string, unknown>[] | null;
   // ReAct 第一阶段生成并校验通过的查询计划（前端可折叠展示）
   queryPlan?: QueryPlan | null;
@@ -212,6 +268,10 @@ export interface ChatMessage {
   sql?: string | null;
   chartType?: ChartType | null;
   chartOption?: Record<string, unknown> | null;
+  // 收窄后的明细表负载 + 判断依据（0107）：实时路径由 chart 事件回填，多步汇总
+  // 由 done 帧回填（SUMMARY_TEXT_ONLY），历史回放由 toChatMessage 收窄 raw JSON
+  tableOption?: TablePayload | null;
+  visualRationale?: VisualRationale | null;
   data?: Record<string, unknown>[] | null;
   // ReAct 查询计划（非流式响应回填；流式期间隐藏展示）
   queryPlan?: QueryPlan | null;
@@ -228,6 +288,10 @@ export interface ChatMessage {
   isStreaming?: boolean;
   // H4 断连兜底：该 assistant 行是客户端断连后由服务端补写的（content 可能不完整）
   interrupted?: boolean;
+  // 续跑请求失败的原因（独立字段，不覆盖 content）——续跑失败必须保留原正文与
+  // 多步计划卡，否则用户既看不到原来的回答、也失去了再点一次续跑的入口。
+  // 由 MessageItem 渲染成卡片上方的 error banner；下次续跑时清空。
+  resumeError?: string | null;
   // NL2SQL 校验失败的具体差异（error 事件透传 detail）
   errorDetail?: string | null;
   // 会话亲和性状态（done 事件回填；解锁时为 null/undefined）
@@ -248,8 +312,9 @@ export interface ChatMessage {
   agentRun?: import("./agentRuntime").AgentRunRead | null;
   // Phase 7 G4：未指名 Agent 语义路由建议卡片（仅中置信命中时回填，其余 undefined）
   suggestedAgent?: AgentSuggestion | null;
-  // 后端 SessionMessage 主键（PDF 单条导出需要：chatStore 暂未在 sendMessage
-  // 完成后回填，故默认 undefined，全局按钮正常工作，单条入口 disabled）
+  // 后端 SessionMessage 主键（PDF 单条导出按钮的渲染条件）。
+  // 历史回放（toChatMessage）会回填；实时发送的消息仍为 undefined ——
+  // chatStore 尚未在 sendMessage 完成后回填实时 db id，故实时轮次只有全局导出。
   dbMessageId?: number;
   // Phase 5.6：知识问答引用列表（citations 事件回填；document_name 由后端 hydration 补全）
   citations?: import("./document").DocQaCitation[] | null;

@@ -14,7 +14,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import getDb
+from app.dependencies import getCurrentUser, getDb
 from app.domain.enums import LineageLayer
 from app.domain.schemas import (
     LineageEdgeCreate,
@@ -25,7 +25,7 @@ from app.domain.schemas import (
 from app.services.data_lineage_service import DataLineageService, lineageToRead
 from app.services.lineage_extractor import extractEdges, persistEdges
 
-router = APIRouter(dependencies=[])
+router = APIRouter(dependencies=[Depends(getCurrentUser)])
 
 
 def getDataLineageService() -> DataLineageService:

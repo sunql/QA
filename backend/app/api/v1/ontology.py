@@ -62,7 +62,7 @@ from app.services.embedding_service import EmbeddingService
 from app.services.ontology_batch_service import OntologyBatchService
 from app.services.ontology_service import OntologyService
 
-router = APIRouter(prefix="/ontology", tags=["ontology"])
+router = APIRouter(prefix="/ontology", tags=["ontology"], dependencies=[Depends(getCurrentUser)])
 # 模块级 EmbeddingService：与 chat 模块同构，由 main.shutdownCleanup 统一关闭
 _embeddingService = EmbeddingService()
 _ontologyService = OntologyService(embeddingService=_embeddingService)
@@ -178,6 +178,24 @@ async def deleteClass(
     Phase 4.5 扩展：走 owner-based ACL。
     """
     await _ontologyService.deleteClass(
+        db, id,
+        actor=user,
+    )
+
+
+@router.post("/classes/{id}/restore", status_code=status.HTTP_204_NO_CONTENT)
+async def restoreClass(
+    id: int,
+    user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+) -> None:
+    """恢复软删除本体类：valid_to = NULL（fix-class-tombstone-restore）。
+
+    镜像 deleteClass 的 ACL；同 owner-based 守卫（owner 部门或 admin）。
+    已活类调用 → 400（MSG_CLASS_NOT_EXPIRED）；不存在 id → 404；非 owner
+    非 admin → 403。
+    """
+    await _ontologyService.restoreClass(
         db, id,
         actor=user,
     )

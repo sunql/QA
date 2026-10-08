@@ -4,6 +4,8 @@ import { API_BASE_URL, REQUEST_TIMEOUT_MS, DEFAULT_TENANT_ID } from "../config";
 import type { ApiResponse } from "../types/common";
 import { i18n } from "../i18n";
 import { useAuthStore } from "../stores/authStore";
+import { clearLastSessionIds } from "../stores/persistChatUiState";
+import { notifyUserSwitch } from "../stores/userSwitch";
 
 /**
  * antd message 实例的 holder。
@@ -86,10 +88,15 @@ export function createHttpClient(): AxiosInstance {
           user: null,
           mustChangePassword: false,
         });
+        // 掉线也算换人：内存里的对话与恢复指针都属于那个已失效的登录会话。
+        // 与 logout() 同口径，避免「此路径少清一处」的纵深缺口。
+        clearLastSessionIds();
+        notifyUserSwitch();
       }
 
       const errMsg =
         apiError ??
+        (typeof apiDetail === "string" ? apiDetail : undefined) ??
         (status
           ? i18n.t("errors.requestFailedHttp", { status: String(status) })
           : i18n.t("errors.networkError"));

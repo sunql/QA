@@ -38,15 +38,18 @@ describe("api/systemViewer — Neo4j", () => {
     });
   });
 
-  it("getGraphRelations GET /system/graph/nodes/:label/:id/relationships", async () => {
+  it("getGraphRelations 用 unified_id 定位节点", async () => {
+    // 节点主键是 unified_id（M0 起），形如 obj:CLASS:9 —— 冒号必须 encode，
+    // 否则路径被 URL 解析截断。曾用数字 id，服务端恒返回空数组。
     httpMock.get.mockResolvedValue({
-      data: [{ relType: "HAS_PROPERTY", targetId: 10, targetName: "BPSNUM", targetLabel: "Property" }],
+      data: [{ relType: "HAS_PROPERTY", targetUid: "obj:PROPERTY:10", targetName: "BPSNUM", targetLabel: "Property" }],
     });
-    const result = await getGraphRelations("Class", 5);
+    const result = await getGraphRelations("Class", "obj:CLASS:9");
     expect(httpMock.get).toHaveBeenCalledWith(
-      "/system/graph/nodes/Class/5/relationships",
+      "/system/graph/nodes/Class/obj%3ACLASS%3A9/relationships",
     );
     expect(result[0].relType).toBe("HAS_PROPERTY");
+    expect(result[0].targetUid).toBe("obj:PROPERTY:10");
   });
 });
 

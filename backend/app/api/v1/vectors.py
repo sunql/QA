@@ -6,12 +6,13 @@ GET /api/v1/system/vectors/stats     — 按 type 分组统计
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.dependencies import getCurrentUser
 from app.infrastructure import milvus_client
 from app.infrastructure.milvus_client import _DIM
 
-router = APIRouter(tags=["system"])
+router = APIRouter(tags=["system"], dependencies=[Depends(getCurrentUser)])
 
 _VALID_TYPES = ("class", "property", "metric")
 

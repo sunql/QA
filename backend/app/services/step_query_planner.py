@@ -66,16 +66,7 @@ def _isSelfStartMarker(mark: str) -> bool:
     return bool(_RULE_STEP_PATTERN.fullmatch(mark)) or mark in _ORDINAL_SELF_START_MARKERS
 
 
-_STEP_PLANNER_SYSTEM_PROMPT = (
-    "你是查询拆分器。判定用户问题是否需要拆成多个子查询。\n"
-    "若需要，返回 JSON: {\"isMultiStep\": true, "
-    "\"steps\": [{\"description\": \"...\", \"subQuestion\": \"...\"}], "
-    "\"aggregationHint\": \"如何汇总\"}\n"
-    "若不需要，返回 {\"isMultiStep\": false}。\n"
-    "只拆**彼此独立、无法用一条 SQL 完成**的子问题；一次 SQL 能算完的对比/汇总不要拆。\n"
-    "**如实列出全部子问题，不要因为数量多就自行合并或截断**——"
-    "系统会按上限决定是否受理，你少报会让用户拿到不完整的答案。"
-)
+from app.services.prompts_zh import PROMPT_STEP_PLANNER_SYSTEM as _STEP_PLANNER_SYSTEM_PROMPT
 
 
 def _splitByRulePattern(

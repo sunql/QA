@@ -31,38 +31,20 @@ from app.domain.multi_step_plan import (
 )
 from app.domain.query_plan import QueryPlan
 from app.domain.schemas import AgentSuggestion, ChatRequest, SemanticState
-from app.services.intent_service import IntentResult
-# 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER，
-# 与 chat_service.processMessage 同口径——在 _streamQuery 入口一次性读一次，
-# 整条流水线复用，避免每段 _costFor 调用都查 DB。
-from app.services.nl2sql_service import _readFloatConfig
-from app.services.stream_events import (
-    ErrorType,
-    EVENT_CHART,
-    EVENT_CLASS_RECALL,
-    EVENT_DATA_QUALITY,
-    EVENT_DONE,
-    EVENT_ERROR,
-    EVENT_META,
-    EVENT_MULTI_STEP_PLAN,
-    EVENT_PLAN,
-    EVENT_SQL,
-    EVENT_STEP_PLAN,
-    EVENT_STEP_RESULT,
-    EVENT_TOKEN,
-    StreamEvent,
+from app.services import multi_step_persistence as persistence
+from app.services.chat_constants import (
+    ROUTING_LAYER_L2,
+    USAGE_PURPOSE_ANSWER,
+    USAGE_PURPOSE_NL2SQL,
 )
-from app.services.messages_zh import (
-    MSG_INTERNAL_ERROR,
-    MSG_STREAM_INTERRUPTED_EMPTY,
-)
+from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.chat_helpers import (
     _MSG_STEP_AGGREGATION_SKIPPED,
-    _PipelineContext,
     _clipText,
     _failedStepResult,
     _hasDataStepResult,
     _looks_like_compound_question,
+    _PipelineContext,
     _step_result_to_read,
     attachStreamPersistState,
     streamPersistStateOf,
@@ -73,8 +55,74 @@ from app.services.evidence_record_service import (
     setChatSessionId,
     setChatUserId,
 )
+from app.services.intent_service import IntentResult
+from app.services.messages_zh import (
+    MSG_INTERNAL_ERROR,
+    MSG_STREAM_INTERRUPTED_EMPTY,
+)
+from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
+from app.services.multi_step_retry import ERROR_KIND_PERMANENT
+from app.services.nl2sql_semantic_guard import shareAmbiguityWarning
+
+# 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER，
+# 与 chat_service.processMessage 同口径——在 _streamQuery 入口一次性读一次，
+# 整条流水线复用，避免每段 _costFor 调用都查 DB。
+from app.services.nl2sql_service import _readFloatConfig
+from app.services.stream_events import (
+    EVENT_CHART,
+    EVENT_CLASS_RECALL,
+    EVENT_DATA_QUALITY,
+    EVENT_DONE,
+    EVENT_ERROR,
+    EVENT_META,
+    EVENT_MULTI_STEP_PLAN,
+    EVENT_PLAN,
+    EVENT_SQL,
+    EVENT_STEP_COMPRESSED,
+    EVENT_STEP_PLAN,
+    EVENT_STEP_RESULT,
+    EVENT_TOKEN,
+    ErrorType,
+    StreamEvent,
+)
+from app.services.think_block import ThinkStreamFilter, applyThinkPolicy, isThinkHideEnabled
+from app.services.visual_rationale import summaryTextOnlyRationale
 
 logger = logging.getLogger(__name__)
+
+# F7/IMP-6：概览回放的 DB 步状态 → 前端 `MultiStepStep.status` 终态映射。
+# **只有**这两个会被回放成「已完成」：`prepareResume` 的前序步守卫只放行
+# succeeded / compressed（multi_step_resume.py），故 `index < startIndex` 的步
+# 必落其中之一。`failed` / `skipped` / `pending` / `running` 一律不回放。
+_OVERVIEW_TERMINAL_STATUS: dict[str, str] = {
+    "succeeded": "done",
+    "compressed": "done",
+}
+
+
+def _overviewStepPayload(step, stepsByIdx: dict, startIndex: int) -> dict:
+    """`multi_step_plan` 概览里单步的载荷。
+
+    续跑时 `index < startIndex` 的步**不执行**（只在循环里 `continue`、不发任何事件），
+    概览若一律下发 pending，这些**已成功**的步会在 UI 上从「已完成」退回「待执行」——
+    「续跑省掉重跑」完全看不出来（DB 里它们确实是 succeeded）。故对它们回放**已持久化
+    的终态**（唯一事实来源 = DB，不是前端记忆）。
+
+    `>= startIndex` 的步（含汇总步）即将（重）跑，**不**带 status，由前端默认为
+    pending —— 否则会把上一轮的失败当成本次终态显示。
+    """
+    payload: dict = {
+        "stepIndex": step.index,
+        "description": step.description,
+        "subQuestion": step.sub_question,
+        "aggregationOnly": step.aggregation_only,
+    }
+    if step.index < startIndex:
+        persisted = stepsByIdx.get(step.index)
+        replay = _OVERVIEW_TERMINAL_STATUS.get(getattr(persisted, "status", None))
+        if replay is not None:
+            payload["status"] = replay
+    return payload
 
 
 class StreamMixin:
@@ -379,7 +427,7 @@ class StreamMixin:
         if intent in (IntentType.NEW_QUERY, IntentType.QUERY):
             if self._stepPlanner.is_explicit_multi_step(dto.question):
                 global_filters = await self._resolveGlobalFilters(session, dto, pc)
-                multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
+                dto, multi_plan, pc, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
                 if multi_plan is not None:
@@ -397,7 +445,7 @@ class StreamMixin:
             # 与 processMessage 同口径；详见 _looks_like_compound_question。
             elif _looks_like_compound_question(dto.question):
                 global_filters = await self._resolveGlobalFilters(session, dto, pc)
-                multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
+                dto, multi_plan, pc, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
                 if multi_plan is not None:
@@ -470,7 +518,7 @@ class StreamMixin:
             ))
             await self._storeSessionMessages(
                 session, dto.sessionId, dto.question, answer, None,
-                routing_layer="L2",
+                routing_layer=ROUTING_LAYER_L2,
                 latency_ms=int((time.monotonic() - _stream_t0) * 1000),
                 token_cost_usd=float(self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)),
             )
@@ -545,6 +593,8 @@ class StreamMixin:
                     sql=None,
                     data=step.data,
                     summary=step.summary,
+                    chart_type=step.chart_type,
+                    chart_option=step.chart_option,
                 ))
             yield StreamEvent(EVENT_TOKEN, {"content": featureResp.answer})
             yield StreamEvent(
@@ -607,11 +657,11 @@ class StreamMixin:
             totalCost += self._costFor(retryCfg, retryTokens[0], retryTokens[1], cacheHitMultiplier=cacheHitMultiplier)
             await self._recordUsage(
                 session, dto.sessionId, retryCfg,
-                retryTokens[0], retryTokens[1], purpose="nl2sql",
+                retryTokens[0], retryTokens[1], purpose=USAGE_PURPOSE_NL2SQL,
             )
 
-        chartType, option, chartPt, chartCt, chartCached = await self._chartStep(
-            session, dto, pc, data, intentChartType
+        chartType, option, tableOption, rationale, chartPt, chartCt, chartCached = await self._chartStep(
+            session, dto, pc, data, intentChartType, outcome.plan
         )
         totalTokens += chartPt + chartCt
         # 4-2（feat-token-cache 续）：chart 阶段 cachedTokens 透传到流式汇总的
@@ -621,7 +671,13 @@ class StreamMixin:
             pc.selected, chartPt, chartCt,
             cachedTokens=chartCached, cacheHitMultiplier=cacheHitMultiplier,
         )
-        yield StreamEvent(EVENT_CHART, {"chartType": chartType.value, "chartOption": option, "data": data})
+        yield StreamEvent(EVENT_CHART, {
+            "chartType": chartType.value,
+            "chartOption": option,
+            "tableOption": tableOption,
+            "visualRationale": rationale,
+            "data": data,
+        })
 
         # Phase 1.4：拉取目标表的可信度 badge 并通过 SSE 单独下发（前端订阅后渲染）
         # 在 chart 之后、answer 流之前：不影响用户感知的回答延迟；DQ 故障由 helper 内部静默
@@ -643,8 +699,20 @@ class StreamMixin:
             persistState.plan = outcome.plan
             persistState.resultColumns = self._columns(data)
             persistState.totalCostUsd = float(totalCost)
+        # L2 歧义示警（feat-nl2sql-share-denominator-guard）：全组占比恒 100% 不可
+        # 数学判错 → 流式下发的首个 token 即提示（快照 answerPieces 同引用，先追加
+        # 后 yield 保证断连兜底可见）。violations 已在 _runQueryWithRetry 出口抛错。
+        shareWarning = shareAmbiguityWarning(outcome.plan, data)
+        if shareWarning:
+            answerPieces.append(shareWarning)
+            yield StreamEvent(EVENT_TOKEN, {"content": shareWarning})
         # 默认取主模型名：即使流异常地零块完成，done 事件仍报告一个合理的模型名
         answerModelName: str | None = pc.selected.model_name
+        # Think_Hide（feat-think-hide）：开启时对 token 流增量过滤 <think> 思维链，
+        # answerPieces 只收过滤后的内容（断连兜底落库与用户所见一致）
+        thinkFilter: ThinkStreamFilter | None = (
+            ThinkStreamFilter() if await isThinkHideEnabled(session) else None
+        )
         async for chunk, answerConfig, (wastedPt, wastedCt) in self._streamAnswerWithFallback(
             session, dto.sessionId, pc.configs, pc.selected, dto, finalSql, data,
             forced=pc.forcedModel, history=pc.contextPrompt,
@@ -663,22 +731,37 @@ class StreamMixin:
                 )
                 await self._recordUsage(
                     session, dto.sessionId, answerConfig,
-                    chunk.promptTokens, chunk.completionTokens, purpose="answer",
+                    chunk.promptTokens, chunk.completionTokens, purpose=USAGE_PURPOSE_ANSWER,
                 )
                 if persistState is not None:
                     persistState.totalCostUsd = float(totalCost)
             if chunk.content:
                 # 独立 if 而非 elif：即使 isDone 块携带内容也不丢失
-                answerPieces.append(chunk.content)
-                yield StreamEvent(EVENT_TOKEN, {"content": chunk.content})
+                content = thinkFilter.feed(chunk.content) if thinkFilter else chunk.content
+                if content:
+                    answerPieces.append(content)
+                    yield StreamEvent(EVENT_TOKEN, {"content": content})
+        if thinkFilter is not None:
+            # 流收尾：NORMAL 态吐出截断的候选缓冲，IN_THINK 态为空（未闭合=隐藏）
+            tail = thinkFilter.flush()
+            if tail:
+                answerPieces.append(tail)
+                yield StreamEvent(EVENT_TOKEN, {"content": tail})
 
         answer = "".join(answerPieces)
         # L2 streaming: totalCost includes SQL + chart + answer LLM costs
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, answer, finalSql,
-            routing_layer="L2",
+            routing_layer=ROUTING_LAYER_L2,
             latency_ms=int((time.monotonic() - _stream_t0) * 1000),
             token_cost_usd=float(totalCost),
+            # 0105：单步流的图进「最终报告」（导出 PDF / 历史回放）。与流式下发的
+            # 那份是同一份 —— 图不能只活在实时响应里。
+            chart_type=chartType,
+            chart_option=option,
+            # 0107：图之外的明细表 + 判断依据同轮落库（与流式下发那份同一份）。
+            table_option=tableOption,
+            visual_rationale=rationale,
         )
         await self._saveQueryState(
             session, dto.sessionId,
@@ -712,6 +795,8 @@ class StreamMixin:
             sql=finalSql,
             data=data,
             summary=self._summarizeStepData(data),
+            table_option=tableOption,
+            visual_rationale=rationale,
         ))
         # v3.1 B6（M7）：流式假设后处理——只落库，不进 SSE 帧（前端靠 GET 端点取）
         await self._maybeGenerateHypotheses(
@@ -824,20 +909,48 @@ class StreamMixin:
         last_sql: str | None = None
         last_data: list[dict] = []
 
-        # 循环前一次性下发完整计划概览，前端据此渲染各步骤的「待执行」状态
+        # 落库只针对**数据步**（汇总步不执行 SQL、没有 sql/data 可落）。
+        # 汇总步仍计入 completedCount（见下方 early-return 封口），故 runStatusFor
+        # 的分母用 len(multiStepPlan.steps)（含汇总步）而不是 len(subQuestions)。
+        # `totalSteps` 也传这同一个数（IMP-7）：`total_steps` / `completed_steps` /
+        # 收尾哨兵 `current_step_idx` 三者必须同源，否则正常计划落库成 3/2。
+        subQuestions = [s.description or s.sub_question for s in multiStepPlan.data_steps]
+        # 续跑分支 + 新建分支的唯一实现（与非流式共用同一 mixin 方法，见 (c) 裁决）。
+        run, startIndex = await self._beginRunForRequest(
+            session, dto,
+            subQuestions=subQuestions,
+            totalSteps=len(multiStepPlan.steps),
+        )
+        persisted = await persistence.loadSteps(session, run.id) if run is not None else []
+        stepsByIdx = {s.step_index: s for s in persisted}
+        # 计数器**绝不能**复用上面那个 completed 列表（list[StepResult]，是
+        # _hasDataStepResult / done 帧 steps 的入参）；这里一律用 int。
+        completedCount = 0
+        anyFailed = False
+        anySkipped = False
+
+        # 循环前一次性下发完整计划概览，前端据此渲染各步骤的「待执行」状态。
+        # **必须在下发之前**取得 run：顺序反了 run 还是 None，runId 永远发不出去。
         yield StreamEvent(EVENT_MULTI_STEP_PLAN, {
+            # Task 9：前端凭 runId 调 POST /chat/multi-step/{runId}/resume。
+            # 单步路径（_singleStepOverview）不落库、没有 run，故意不带这个键；
+            # 前端必须按「可选」处理，缺省时不渲染续跑按钮。
+            "runId": str(run.id) if run is not None else None,
+            # F7/IMP-6：续跑时 `index < startIndex` 的步不执行（循环里只 continue、
+            # 不发事件）。概览必须回放它们已持久化的终态，否则会从「已完成」退回
+            # 「待执行」（见 _overviewStepPayload）。
             "steps": [
-                {
-                    "stepIndex": s.index,
-                    "description": s.description,
-                    "subQuestion": s.sub_question,
-                    "aggregationOnly": s.aggregation_only,
-                }
+                _overviewStepPayload(s, stepsByIdx, startIndex)
                 for s in multiStepPlan.steps
             ],
         })
 
-        for step_plan in multiStepPlan.steps:
+        for index, step_plan in enumerate(multiStepPlan.steps):
+            if await self._shouldSkipStep(index, startIndex):
+                # 续跑：更早的步已 succeeded。跳过执行但**照样计入完成数**（理由见
+                # `_shouldSkipStep` 的文档字符串）。
+                completedCount += 1
+                continue
             if step_plan.aggregation_only:
                 if not _hasDataStepResult(completed):
                     # 与非流式同判据（C3）：只有错误行时不调汇总 LLM，直接降级收尾
@@ -856,16 +969,21 @@ class StreamMixin:
                     "description": step_plan.description,
                     "subQuestion": step_plan.sub_question,
                 })
+                # Task 2：await 不能写进 lambda，阈值在 lambda 外先算好再捕获
+                # （与非流式 _executeMultiStep 同口径，两条路径同源不漂移）。
+                full_data_threshold = await loadFullDataThreshold(session)
                 agg_resp = await self._callWithFallback(
                     session, dto.sessionId, pc.configs, pc.selected, "answer",
                     lambda cfg: self._stepAggregator.aggregate(
                         dto.question, multiStepPlan, completed,
                         self._llmFactory(cfg), cfg.model_name,
                         history=pc.contextPrompt,
+                        full_data_threshold=full_data_threshold,
                     ),
                     forced=pc.forcedModel,
                 )
-                agg_content = agg_resp[0].content
+                # Think_Hide（feat-think-hide）：汇总答案按系统参数剥离 <think> 思维链
+                agg_content = await applyThinkPolicy(session, agg_resp[0].content)
                 agg_config = agg_resp[1]
                 agg_pt = agg_resp[0].promptTokens
                 agg_ct = agg_resp[0].completionTokens
@@ -885,13 +1003,19 @@ class StreamMixin:
                 last_model_name = agg_config.model_name
                 await self._recordUsage(
                     session, dto.sessionId, agg_config,
-                    agg_pt, agg_ct, purpose="answer",
+                    agg_pt, agg_ct, purpose=USAGE_PURPOSE_ANSWER,
                 )
                 await self._storeSessionMessages(
                     session, dto.sessionId, dto.question, agg_content, None,
-                    routing_layer="L2",
+                    routing_layer=ROUTING_LAYER_L2,
                     latency_ms=int((time.monotonic() - _ms_t0) * 1000),
                     token_cost_usd=float(total_cost),
+                    # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
+                    # （0107 补 rationale：顶层不附图，SUMMARY_TEXT_ONLY 解释为什么）。
+                    chart_type=None,
+                    chart_option=None,
+                    table_option=None,
+                    visual_rationale=summaryTextOnlyRationale().to_dict(),
                 )
                 await self._saveQueryState(
                     session, dto.sessionId,
@@ -922,10 +1046,28 @@ class StreamMixin:
                         "latency_ms": int((time.monotonic() - _ms_t0) * 1000),
                         "affinityStatus": affinity_payload,
                         "steps": [_step_result_to_read(s).model_dump(by_alias=True) for s in completed],
+                        # 汇总步不发 step_result（纯文字），SUMMARY_TEXT_ONLY 只能经 done 帧抵达前端
+                        "visualRationale": summaryTextOnlyRationale().to_dict(),
                         "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)
                         if suggestion is not None else None,
                     },
                 )
+                # 本 return 在**循环体内**，走不到循环之后的统一 _closeRun ⇒ 计划含
+                # 汇总步时（线上常态）run 会永远停在 running（僵尸），必须在此封口。
+                # 汇总步本身也算「跑完了」，不 +1 的话 completedCount 永远 <
+                # len(steps)（分母含汇总步）⇒ runStatusFor 把成功的 run 判成 failed。
+                completedCount += 1
+                # _closeRun 自己就 `if run is None: return`（kill switch 关掉时 run=None），
+                # 不需要外面再包一层判断。
+                await self._closeRun(
+                    session, run,
+                    status=runStatusFor(
+                        completedCount, len(multiStepPlan.steps), anyFailed, anySkipped
+                    ),
+                    completedSteps=completedCount,
+                    currentStepIdx=len(multiStepPlan.steps),
+                )
+                await session.commit()
                 return
 
             # 数据查询步骤：先下发计划事件，再执行（与非流式共用 helper），最后下发结果事件
@@ -934,19 +1076,97 @@ class StreamMixin:
                 "description": step_plan.description,
                 "subQuestion": step_plan.sub_question,
             })
-            run = await self._executeDataStep(session, dto, pc, ctx, step_plan, state)
-            total_tokens += run.tokens
-            total_cost += run.cost
-            if run.modelName:
-                last_model_name = run.modelName
-            completed.append(run.result)
-            ctx = ctx.with_step(run.result)
-            if run.result.sql is not None:
+            # 压缩判定必须发生在**构造本步 prompt 之前**：超阈值时把更早的已成功步
+            # 压成 data_compressed，本步注入的是压缩后的那份（本步自己用原始 data）。
+            #
+            # 压缩会把**更早的**步置为 compressed（其 step_result 早就发过了），
+            # 前端无从得知 —— 故这里在调用前后对比 data_compressed，为每个**新**
+            # 被压缩的步补发一条 step_compressed（Task 9 的「已压缩」徽章靠它）。
+            compressedBefore = {s.step_index: s.data_compressed for s in persisted}
+            if run is not None:
+                await self._maybeCompressPriorSteps(
+                    session, run, persisted, nextStepIdx=index,
+                    maxInputTokens=_maxInputTokens(pc),
+                    injectionText=ctx.inject_to_prompt(index),
+                )
+                for s in persisted:
+                    compressed = s.data_compressed
+                    if compressed is None or compressedBefore.get(s.step_index) is not None:
+                        continue
+                    meta = compressed.get("meta") or {}
+                    yield StreamEvent(EVENT_STEP_COMPRESSED, {
+                        "stepIndex": s.step_index,
+                        "originalRows": int(meta.get("original_rows") or 0),
+                        "compressedRows": int(meta.get("compressed_rows") or 0),
+                    })
+            if run is not None:
+                await persistence.markStepRunning(session, stepsByIdx[index])
+            # 瞬态重试：brief Step 4 的「二选一」取**选项 B**（与非流式同口径）——
+            # 不在此处包 `runWithTransientRetry`，保留对 `_executeDataStep` 的原样
+            # 调用，只在异常分支接 `_persistStepFailure`。依据见
+            # chat_multistep._executeMultiStep 的同名注释：helper 内部已有瞬态/回灌
+            # 重试，外层重包会让用量重复计账且覆盖不到「返回 error 行」的软失败。
+            try:
+                stepRun = await self._executeDataStep(session, dto, pc, ctx, step_plan, state)
+            except Exception as exc:  # noqa: BLE001 - 步骤级隔离：单步硬失败不阻断后续步
+                logger.warning("多步步骤硬失败，隔离该步骤: step=%d", index, exc_info=True)
+                if run is not None:
+                    await self._recordHardFailure(session, run, stepsByIdx[index], exc)
+                    anyFailed = True
+                # 失败的步也必须下发终态事件，否则概览里那张卡片永远停在「待执行」
+                # ——恰发生在用户最需要看清失败原因的场景（同「跳过汇总」的既有先例）。
+                yield self._stepResultEvent(_failedStepResult(
+                    step_plan, f"{type(exc).__name__}: {exc}",
+                ))
+                continue
+            total_tokens += stepRun.tokens
+            total_cost += stepRun.cost
+            if stepRun.modelName:
+                last_model_name = stepRun.modelName
+            completed.append(stepRun.result)
+            if stepRun.result.sql is None:
+                # 软失败（LLM 判无法回答 / 执行 + 回灌重试均失败）不是异常：_executeDataStep
+                # 已把它收敛为 error 行（sql=None 是失败标记）。终态仍需落 failed
+                # （spec §6.3），否则该步永远停在 running。
+                #
+                # 失败记档走软失败入口（spec §6.1 要求软失败同样落 last_error /
+                # last_error_kind / attempt_count；异常本体已丢，只有错误文案）。
+                # 用量只记一次 —— finishStep 会**累加** tokens/cost，两处都传就双记。
+                if run is not None:
+                    await self._recordSoftFailure(
+                        session, stepsByIdx[index],
+                        message=stepRun.result.error or "", kind=ERROR_KIND_PERMANENT,
+                        run=run, tokens=stepRun.tokens, cost=stepRun.cost,
+                    )
+                    anyFailed = True
+            elif run is not None:
+                await self._persistStepSuccess(
+                    session, stepsByIdx[index],
+                    sql=stepRun.result.sql, data=stepRun.result.data,
+                    chartOption=stepRun.result.chart_option,
+                    modelUsed=stepRun.modelName,
+                    tokens=stepRun.tokens, cost=stepRun.cost,
+                )
+                completedCount += 1
+            ctx = ctx.with_step(stepRun.result, chartLabelUsed=stepRun.chart_label_calls > 0)
+            if stepRun.result.sql is not None:
                 # 只有成功步骤才更新追问锚点（与非流式同口径）
-                last_plan = run.plan
-                last_sql = run.result.sql
-                last_data = run.result.data
-            yield self._stepResultEvent(run.result)
+                last_plan = stepRun.plan
+                last_sql = stepRun.result.sql
+                last_data = stepRun.result.data
+            yield self._stepResultEvent(stepRun.result)
+
+        # 计划里没有汇总步（异常形态）时的统一收尾。分母用 len(multiStepPlan.steps)
+        # （含汇总步）与汇总分支的封口同口径。
+        await self._closeRun(
+            session, run,
+            status=runStatusFor(
+                completedCount, len(multiStepPlan.steps), anyFailed, anySkipped
+            ),
+            completedSteps=completedCount,
+            currentStepIdx=len(multiStepPlan.steps),
+        )
+        await session.commit()
 
         # 异常降级：所有步骤都不是 aggregation_only（与非流式共用收尾逻辑）
         degrade_answer = await self._finalizeMultiStepDegrade(
@@ -967,6 +1187,9 @@ class StreamMixin:
                 "cost": float(total_cost),
                 "modelName": last_model_name,
                 "latency_ms": int((time.monotonic() - _ms_t0) * 1000),
+                "queryPlan": last_plan.to_dict() if last_plan else None,
+                # 降级收尾同样是纯文字：SUMMARY_TEXT_ONLY 只能经 done 帧抵达前端
+                "visualRationale": summaryTextOnlyRationale().to_dict(),
                 "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)
                 if suggestion is not None else None,
             },
@@ -974,7 +1197,7 @@ class StreamMixin:
 
     @staticmethod
     def _stepResultEvent(result: StepResult) -> StreamEvent:
-        """把 StepResult 转为 EVENT_STEP_RESULT 事件（含数据）。"""
+        """把 StepResult 转为 EVENT_STEP_RESULT 事件（含数据与该步的图）。"""
         return StreamEvent(EVENT_STEP_RESULT, {
             "stepIndex": result.step_index,
             "description": result.description,
@@ -983,6 +1206,11 @@ class StreamMixin:
             "data": result.data if result.data else None,
             "summary": result.summary,
             "error": result.error,
+            "chartType": result.chart_type,
+            "chartOption": result.chart_option,
+            "tableOption": result.table_option,
+            "visualRationale": result.visual_rationale,
+            "queryPlan": result.query_plan.to_dict() if result.query_plan else None,
         })
 
     @staticmethod
@@ -1047,7 +1275,7 @@ class StreamMixin:
         async with getSessionFactory()() as fallbackSession:
             await self._storeSessionMessages(
                 fallbackSession, dto.sessionId, dto.question, answer, state.sql,
-                routing_layer="L2",
+                routing_layer=ROUTING_LAYER_L2,
                 latency_ms=int((time.monotonic() - state.startedAt) * 1000),
                 token_cost_usd=state.totalCostUsd,
                 interrupted=True,

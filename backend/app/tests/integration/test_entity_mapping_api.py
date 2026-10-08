@@ -303,6 +303,47 @@ class TestEntityMappingApi:
         assert all(r["entityType"] == "MATERIAL" for r in rows)
         assert len(rows) >= 1
 
+    async def test_create_persists_business_name(self, client) -> None:
+        """create 必须落 name —— DTO 声明了它，漏写就是「201 + 静默丢弃」。"""
+        resp = await client.post(
+            "/api/v1/entity-mappings",
+            json=_payload(name="浙江力航汽车部件有限公司"),
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["name"] == "浙江力航汽车部件有限公司"
+
+    async def test_search_matches_business_name(self, client) -> None:
+        """搜索接口：q 模糊匹配**业务名** name（AutoComplete 按中文名找供应商）。
+
+        2026-09-30：此前 conds 只有 enterprise_code / source_code 两条 ILIKE，
+        业务名虽已同步入库（3500 供应商全带 name）却搜不到 —— chat 里输入全称能解析、
+        下拉框却列不出来。GIN trigram 索引见 alembic 0086。
+        """
+        await client.post(
+            "/api/v1/entity-mappings",
+            json=_payload(enterpriseKey=3823452429, enterpriseCode="B125",
+                          sourceKey="B125", sourceCode="B125",
+                          name="浙江力航汽车部件有限公司"),
+        )
+        resp = await client.get("/api/v1/entity-mappings/search?q=浙江力航")
+        assert resp.status_code == 200, resp.text
+        rows = resp.json()
+        assert [r["enterpriseCode"] for r in rows] == ["B125"]
+
+    async def test_search_name_match_respects_entity_type_filter(self, client) -> None:
+        """反向守卫：name 命中不得绕过 entityType 过滤。"""
+        await client.post(
+            "/api/v1/entity-mappings",
+            json=_payload(enterpriseKey=3823452429, enterpriseCode="B125",
+                          sourceKey="B125", sourceCode="B125",
+                          name="浙江力航汽车部件有限公司"),
+        )
+        resp = await client.get(
+            "/api/v1/entity-mappings/search?q=浙江力航&entityType=MATERIAL"
+        )
+        assert resp.status_code == 200
+        assert resp.json() == []
+
     async def test_bulk_import_empty_array_returns_422(self, client) -> None:
         """bulk 端点空数组 → 422 拒绝。"""
         resp = await client.post("/api/v1/entity-mappings/bulk", json=[])

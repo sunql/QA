@@ -121,11 +121,38 @@ content = '{"target":"各供应商的收货数量汇总","selectedClasses":["PRE
 
 ---
 
-## TD-5（P1）· `wiki_compile` 的 `run_task` 路由无鉴权
+## TD-5（P1）· 路由无鉴权 —— **范围已修正：1 条 → 46 条**
 
-**状态**：待办（预存，非 v3.1 引入；多次评审点名）
+**状态**：**已升级为独立安全批次**，见 `Harness/changes/2026-09-30-security-route-auth/`
+（用户 2026-09-30 拍板「单独安全批次，先做」）
 
-`backend/app/api/v1/wiki_compile.py` 的 `run_task` 端点缺 `Depends(getCurrentUser)`。与本仓既定规则冲突——见 `qa-system-router-auth-mandatory`：**每个 read-only router 必须挂 `Depends(getCurrentUser)`**。属安全项，建议与 TD-1 同批处理。
+### 范围修正经过（保留决策轨迹）
+
+原登记只说 `wiki_compile` 的 `run_task` 一条。2026-09-30 核实 TD-5 时改用**实测**（`app.openapi()`
+路径表 + `AUTH_MODE=real` + 无头请求），发现 **46 条非公开路由匿名可达，其中 15 条是写/删**。
+
+**为什么原登记漏了 45 条**：本仓 FastAPI 0.141 的 `app.routes` 含 49 个 `_IncludedRouter`
+包装对象（`path=None`，`routes`/`app`/`router` 属性 `hasattr=False`），朴素的依赖链扫描
+**会整片漏掉**。本批次期间两轮静态分析都得出过错误结论（一次误报 67 条，一次只报出 1 条）。
+
+**生产实际状态**：`docker exec qa-backend printenv AUTH_MODE` → `real`，即 46 条是**真实的
+匿名可达**，不是理论问题。8 个 router 声明为 `APIRouter()` 或 `APIRouter(dependencies=[])`，
+无全局鉴权中间件，受影响服务层也无 ACL ⇒ 匿名调用者直接抵达服务层。
+
+详见批次 `summary.md` 第三节的完整清单与逐条危害。
+
+### 附带发现（同批次闭合）
+
+- **容器代码漂移**：容器与工作树的 `app/api/v1/*.py` 有 5 个文件不一致。
+  容器版 `wiki_compile.py` 的 `PATCH /claims/{claimId}` **在生产仍匿名**（工作树已修）；
+  容器版 `evidences.py` **缺 R2 按会话归属守卫** ⇒ 跨用户 evidence 枚举。
+  ⇒ 改源码是必要条件，不是充分条件，**必须部署**。
+
+### 已核实「不是缺陷」（避免后人重复起疑）
+
+审计曾把 `DataLineage.owner`（`data_lineage_service.py:174` 的 `owner=dto.owner`）定性为
+mass-assignment。经核实该字段**不参与任何鉴权/ACL**（全局 grep 无命中），只是 ≤100 字符的
+描述性元数据；加了鉴权后，登录用户设置它正是该字段的设计用途。**不据此造任务。**
 
 ---
 
@@ -218,3 +245,45 @@ L1 KPI 命中一次查询执行会落**两条** evidence：`business_db_pool.py:
 - `chat_service` 39 例（含 TD-1 与上述环境类）
 
 **建议**：先修 TD-1（能一次消掉最大的一块），再重新对账基线，避免每次评审重复论证同一批红。
+
+---
+
+## TD-16（P2）· `test_dependencies.py` 一例预存红 —— 与 MCP 的 `Header` 哨兵 bug 同根因
+
+**状态**：待办（2026-09-30 安全批次期间发现，非该批次引入）
+
+`backend/app/tests/unit/test_dependencies.py::test_stub_disabled_raises_permission_denied` 红：
+
+```
+AttributeError: 'Header' object has no attribute 'lower'  @ app/dependencies.py:108
+```
+
+**根因**：该测试**直接调用** FastAPI 依赖函数 `getCurrentUser()` 并传入 `Header` 包装器。依赖函数被直接调用时，未传的参数拿到的是 `fastapi.params.Header` **哨兵对象**而非 `None`——实测该对象 `bool()` 为 **True** 且无 `.lower()`，于是 `authorization.lower()` 必抛。
+
+**同根因的第二处**（安全批次正在修，不在本债目内）：`app/services/mcp_server.py` 的 `_openContext()` 同样直接调用 `getCurrentUser(...)`，导致**全部 10 个 MCP 工具崩溃**。
+
+**归属已核实**：安全批次分支 `fix/security-route-auth` 未改 `dependencies.py` / `test_dependencies.py`
+（`git diff --stat 09eaca2..HEAD` 无匹配）⇒ 预存。
+
+**修法**：测试应走 HTTP 入口（`client` fixture 带鉴权头）而非直接调依赖函数；若要保留直调，须显式传 `authorization=None` 等全部参数。
+
+---
+
+## TD-17（P3）· `productionAuthMisconfiguration` 分支 2 在默认加固配置下是误报
+
+**状态**：待办（2026-09-30 安全批次期间发现；**沿袭自修复前，非该批次新引入**，但该批次把它固化进了 docstring + 测试名）
+
+`backend/app/config.py` 的 `productionAuthMisconfiguration` 第二条分支声称「`AUTH_MODE=real` 但 `AUTH_STUB_ENABLED=1` 时仍构成洞（任何客户端可伪造 `X-User-Roles=admin` 绕过 ACL）」。
+
+**实测该结论在默认加固配置下不成立**：
+- `allowStubWhenReal` 默认 `False`（`app/config.py:76`）
+- `app/dependencies.py:159` 在 `authMode == "real" and not allowStubWhenReal` 时**先**拒绝 stub 头，
+  根本走不到 `:163` 的 `authStubEnabled` 判断
+- ⇒ `AUTH_STUB_ENABLED=1` 不构成洞，该分支只在 `allowStubWhenReal=true` 时成立
+
+**后果**：按推荐配置部署（`APP_ENV=production` + `AUTH_MODE=real` + 不设 `AUTH_STUB_ENABLED`）时，
+**每次启动会打一条误导性的 ERROR**（实为纵深防御建议，不是真实洞）。
+
+**修法**：补上 `allowStubWhenReal` 条件，或把措辞从「洞」降级为「纵深防御建议」。
+
+**旁证**：运行中的 `qa-backend` 容器日志里**没有**这条告警——因为容器 `APP_ENV=development`，生产分支根本没进。

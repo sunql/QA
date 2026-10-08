@@ -1,0 +1,1959 @@
+"""研究状态机：暂停/恢复/动态 checkpoint/终态（真实 PG + fake 依赖）。
+
+Task 5 契约测试（Task 6 起：报告阶段走**真实** `ReportPlanner`，仅 LLM / ESL / planner /
+runner / chart 是 fake）。外部依赖全部 fake（ESL / planner / runner / chart /
+usage recorder / LLM），**状态一律落真实 PostgreSQL**（research_session /
+research_turn / research_checkpoint / research_finding / research_report）。
+
+fake 与真实 dataclass 字段对齐（Task 5 brief 注：以真实字段为准修 fake，不改产品代码）：
+- `MultiStepPlan` / `StepPlan` / `GlobalFilters` 的真实字段见 `app/domain/multi_step_plan.py`
+  （StepPlan 无 sql 字段，故执行步用本文件的 `SqlStep` duck-type 表达「计划已带 SQL」）；
+- `ESLExtraction` 等见 `app/services/enterprise_semantic_layer.py`；
+- `ChartBuild` 由真实 `ChartService._emptyResult` 产出（零 LLM / 零 DB 阈值读取）。
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from decimal import Decimal
+
+import oracledb
+import pytest
+from sqlalchemy import select, text
+
+from app.domain.enums import DataSourceType
+from app.domain.exceptions import Nl2SqlError
+from app.domain.models import DataSource, LlmConfig
+from app.domain.multi_step_plan import MultiStepPlan
+from app.domain.research_models import ResearchSession
+from app.infrastructure.security.crypto import encryptApiKey
+from app.services.nl2sql_service import SqlResult
+from app.services.report_planner import ReportPlanner
+from app.services.research_agent_execution import ExecutionDeps, runStep
+from app.services.research_agent_phases import isDegraded
+from app.services.research_agent_ports import (
+    STEP_MISSING_SQL,
+    LlmUsageRecorder,
+    resolveModelConfig,
+)
+from app.services.research_agent_service import ResearchAgentService
+from app.services.research_session_service import ResearchSessionService
+from app.services.step_query_planner import StepPlanResult
+from app.services.token_usage_service import TokenUsageService
+
+QUESTION = "供应商收货量为什么下降"
+
+
+# ---------------------------------------------------------------------------
+# fakes（仅测试资产）
+# ---------------------------------------------------------------------------
+
+
+class FakeEsl:
+    """ESL fake：真实 ESLExtraction 形状；conflicts / 空 scope 可注入，记录调用问题。"""
+
+    def __init__(self, conflicts=(), empty: bool = False, emptyOnce: bool = False) -> None:
+        self._conflicts = conflicts
+        self._empty = empty
+        self._emptyOnce = emptyOnce
+        self.calls: list[str] = []
+
+    async def extract(self, question, *, intent=None):
+        from app.services.enterprise_semantic_layer import (
+            BusinessObjectRef,
+            ESLExtraction,
+            MetricRef,
+        )
+        self.calls.append(question)
+        if self._empty or (self._emptyOnce and len(self.calls) == 1):
+            from app.services.enterprise_semantic_layer import EmptyResearchScopeError
+
+            raise EmptyResearchScopeError("三臂检索全空")
+        return ESLExtraction(
+            businessObjects=[BusinessObjectRef(1, "供应商", "DIM_SUPPLIER", "供应商", 0.9)],
+            metrics=[MetricRef(None, "K1", "收货量", None, 0.8)],
+            knowledge=[],
+            confidenceByArm={"business_object": 0.9, "metric": 0.8, "knowledge": 0.0},
+            conflicts=list(self._conflicts),
+        )
+
+
+@dataclass(frozen=True)
+class SqlStep:
+    """执行步（duck-type）：真实 StepPlan 字段 + 研究链路扩展的 sql。
+
+    真实 `StepPlan` 无 sql 字段——Task 5 的执行面只接受「计划里已带 SQL」的步
+    （逐步子问题 → SQL 的生成需要 Nl2SqlService，不在 Task 5 注入面内，见报告）。
+    """
+
+    index: int
+    description: str
+    sub_question: str
+    sql: str | None = None
+    aggregation_only: bool = False
+
+
+class FakePlanner:
+    """计划 fake：默认真实 `MultiStepPlan`（真实字段名）+ 带 SQL 的步。
+
+    `replanSteps`：第二次及以后调用的产物（Task 6.5-4 modify 重跑计划用）。
+    `planNone`：复现真实 `StepQueryPlanner.plan` 的**单步语义** —— 返回
+    `StepPlanResult(plan=None)`（其 docstring：非多步问题 ⇒ 调用方按单步处理）。此前本
+    fake **恒返回 ≥1 步**，故 `plan=None` 这条真实分支从未被任何用例驱动过（N1 能穿过
+    整轮开发的直接原因）。
+    """
+
+    def __init__(self, steps=None, replanSteps=None, planNone: bool = False) -> None:
+        self._steps = steps
+        self._replanSteps = replanSteps
+        self._planNone = planNone
+        self.calls: list[tuple] = []
+
+    async def plan(self, question, classes, client, modelName):
+        self.calls.append((question, tuple(classes), client, modelName))
+        if self._planNone:
+            return StepPlanResult(plan=None, prompt_tokens=120, completion_tokens=40)
+        steps = self._steps if len(self.calls) == 1 else (self._replanSteps or self._steps)
+        if steps is None:
+            steps = (SqlStep(index=0, description="收货量趋势", sub_question="近12月收货量", sql="SELECT 1"),)
+        return MultiStepPlan(steps=tuple(steps), aggregation_hint="", original_question=question)
+
+
+class FakeRunner:
+    """执行 runner fake：与 `ResearchSqlRunner` 契约对齐（execute 抛 / verify 不抛）。
+
+    `error` 模拟 SQL Guard 拒绝（ValueError）；`raiseError` 模拟任意异常（含编程错误），
+    用于验证 `_runStep` 的异常收窄。`executed` 记录真正执行过的 SQL（Task 6.5-1 断言点）。
+    `raiseErrorOnFirst` 只让**第 1 步**抛（Task 13e fix round 2：钉住「失败步之后的步仍被执行」
+    —— 回滚会 expire identity map，业务源若是 ORM 对象，第 2 步就会因隐式 IO 被打死）。
+    """
+
+    def __init__(
+        self, rows=None, error: str | None = None, raiseError=None, raiseErrorOnFirst=None
+    ) -> None:
+        self._rows = rows if rows is not None else [{"month": "2026-01", "cnt": 100}]
+        self._error = error
+        self._raiseError = raiseError
+        self._raiseErrorOnFirst = raiseErrorOnFirst
+        self.verifyCalls: list[str] = []
+        self.executed: list[str] = []
+        # Task 13e：业务库 adapter 按次送达（`adapter=` 关键字）——记下来断言「真的送达了」
+        self.adapters: list = []
+        self.verifyAdapters: list = []
+
+    async def executeReadonlySql(self, session, sql, *, adapter=None):
+        self.executed.append(sql)
+        self.adapters.append(adapter)
+        if self._raiseErrorOnFirst is not None and len(self.executed) == 1:
+            raise self._raiseErrorOnFirst
+        if self._raiseError is not None:
+            raise self._raiseError
+        if self._error is not None:
+            raise ValueError(self._error)
+        return list(self._rows)
+
+    async def runVerification(self, session, hypothesis, *, adapter=None):
+        self.verifyCalls.append(hypothesis.verificationSql)
+        self.verifyAdapters.append(adapter)
+        if self._error is not None:
+            return {"rows": [], "error": self._error}
+        return {"rows": [{"cnt": 1}], "error": None}
+
+
+class FakeChart:
+    """图表 fake：复用真实 `ChartBuild` 形状（`_emptyResult`，零 LLM / 零 DB）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def buildChart(self, **kwargs):
+        from app.services.chart_service import ChartService
+
+        self.calls.append(kwargs)
+        return ChartService._emptyResult(
+            list(kwargs.get("columns") or []), list(kwargs.get("data") or [])
+        )
+
+
+class RaisingReporter:
+    """报告装配抛错：验证报告阶段异常**上抛 + 会话 failed**（不静默 done）。"""
+
+    async def compose(self, session, *, sessionId, turnId, mode, llmClient=None):
+        raise RuntimeError("reporter boom")
+
+
+class FakeUsageRecorder:
+    """计量 fake：记录每次 LLM 调用（核心约束 #3 的断言点）。"""
+
+    def __init__(self) -> None:
+        self.records: list[dict] = []
+
+    async def recordUsage(
+        self, session, *, sessionId, purpose, promptTokens, completionTokens, modelName,
+        cachedTokens=None,
+    ) -> None:
+        self.records.append(
+            {
+                "sessionId": sessionId,
+                "purpose": purpose,
+                "promptTokens": promptTokens,
+                "completionTokens": completionTokens,
+                "modelName": modelName,
+                "cachedTokens": cachedTokens,
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# Task 6.5 fakes：模型路由 / 本体 / NL2SQL（Step 0 真实签名对齐）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FakeModelConfig:
+    """模型配置 fake（duck-type LlmConfig 的路由面）。"""
+
+    id: int = 7
+    model_name: str = "fake-routed-model"
+    provider: str = "openai"
+    is_active: bool = True
+
+
+class FakeModelConfigs:
+    """模型配置 provider fake：duck-type `ModelConfigService.list(session, activeOnly=)`。"""
+
+    def __init__(self, configs=None) -> None:
+        self._configs = list(configs) if configs is not None else [FakeModelConfig()]
+        self.listCalls = 0
+
+    async def list(self, session, *, activeOnly: bool = False):
+        self.listCalls += 1
+        return list(self._configs)
+
+
+class FakeModelRouter:
+    """路由 fake：取首个候选（真实实现 `ModelRouterService.selectModel`，测试求确定性）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def selectModel(self, configs, prompt, ctx):
+        self.calls.append((tuple(configs), prompt, ctx))
+        return configs[0]
+
+
+@dataclass(frozen=True)
+class FakeClass:
+    """本体类 fake（只需 `source_table` / `class_name` 两个筛选字段）。"""
+
+    source_table: str = "DIM_SUPPLIER"
+    class_name: str = "供应商"
+
+
+class FakeOntology:
+    """本体 fake：duck-type `OntologyService.listClasses(session)`。"""
+
+    def __init__(self, classes=None) -> None:
+        self._classes = list(classes) if classes is not None else [FakeClass()]
+
+    async def listClasses(self, session, *, includeExpired: bool = False):
+        return list(self._classes)
+
+
+class FakeNl2Sql:
+    """NL2SQL fake：duck-type `Nl2SqlService.generateSql`（Step 0 真实签名前 4 位参）。
+
+    真实签名：`generateSql(question, classes, llmClient, modelConfig, *, ...,
+    session=None)` —— 前四位位置参数固定，其余全 keyword。`error` 注入生成失败。
+    """
+
+    def __init__(self, sql: str = "SELECT 42 AS cnt", error: Exception | None = None) -> None:
+        self._sql = sql
+        self._error = error
+        self.calls: list[dict] = []
+
+    async def generateSql(self, question, classes, llmClient, modelConfig, **kwargs):
+        self.calls.append(
+            {
+                "question": question,
+                "classes": tuple(classes),
+                "llmClient": llmClient,
+                "modelConfig": modelConfig,
+                **kwargs,
+            }
+        )
+        if self._error is not None:
+            raise self._error
+        return SqlResult(sql=self._sql, promptTokens=0, completionTokens=0)
+
+
+class FakeLlmResponse:
+    def __init__(self, content: str, promptTokens: int, completionTokens: int) -> None:
+        self.content = content
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.modelName = "fake-model"
+
+
+class FakeLlmClient:
+    """LLM fake：返回合法假设 JSON（含一条非法 verification_sql 会被适配层滤掉）。"""
+
+    def __init__(self, content: str) -> None:
+        self._content = content
+
+    async def complete(self, messages, **kwargs):
+        return FakeLlmResponse(self._content, 120, 40)
+
+
+class ScriptedLlmClient:
+    """按调用序切换内容：第 1 次喂假设 JSON，之后喂报告文本（同一客户端服务两个阶段）。"""
+
+    def __init__(self, hypothesisJson: str, reportText: str) -> None:
+        self._hypothesisJson = hypothesisJson
+        self._reportText = reportText
+        self.calls = 0
+
+    async def complete(self, messages, **kwargs):
+        self.calls += 1
+        content = self._hypothesisJson if self.calls == 1 else self._reportText
+        return FakeLlmResponse(content, 120, 40)
+
+
+HYPOTHESIS_JSON = (
+    '[{"statement": "供应商A供货减少", "driver": "收货量",'
+    ' "verification_sql": "SELECT 1 AS cnt"},'
+    '{"statement": "坏假设", "driver": null, "verification_sql": "DELETE FROM T"}]'
+)
+
+
+# ---------------------------------------------------------------------------
+# fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def makeService(dbSession):
+    """服务工厂：fake 外部依赖 + **真实** ResearchSessionService / ReportPlanner（真库）。
+
+    报告阶段默认走真实 `ReportPlanner`（Task 6 接线后即产品默认路径）；`reporter` 可覆写
+    以测异常路径（`RaisingReporter`）。
+    """
+
+    def _make(**kwargs) -> ResearchAgentService:
+        sessions = ResearchSessionService()
+        return ResearchAgentService(
+            esl=kwargs.get("esl", FakeEsl()),
+            sessionService=sessions,
+            planner=kwargs.get("planner", FakePlanner()),
+            runner=kwargs.get("runner", FakeRunner()),
+            chartService=kwargs.get("chartService", FakeChart()),
+            llmFactory=kwargs.get("llmFactory"),
+            usageRecorder=kwargs.get("usageRecorder", FakeUsageRecorder()),
+            reporter=kwargs.get("reporter", ReportPlanner(sessionService=sessions)),
+            autoConfirm=kwargs.get("autoConfirm", False),
+            # Task 6.5：模型路由 / 本体 / NL2SQL 三端口默认注入确定性 fake。
+            # 默认 fake 配置存在 ⇒ 注入的 llmFactory 会收到**非 None** 的配置；
+            # llmFactory=None 时无可用配置 ⇒ 走 research.error 降级（既有语义）。
+            modelConfigs=kwargs.get("modelConfigs", FakeModelConfigs()),
+            modelRouter=kwargs.get("modelRouter", FakeModelRouter()),
+            ontology=kwargs.get("ontology", FakeOntology()),
+            nl2sql=kwargs.get("nl2sql"),
+        )
+
+    return _make
+
+
+async def _ensureDatasource(dbSession):
+    """种一个业务数据源行（Task 13e）：研究会话必须绑定业务源，执行面据此取 adapter。
+
+    用 **Oracle** 形态（真实环境 = `THBI Oracle`）：runner 是 fake ⇒ 适配器只被构造、
+    从不建连，但方言参数（`oracle_version` / `schemaPrefix=THBI`）走的是生产同一条判定。
+    """
+    existing = await dbSession.scalar(select(DataSource).limit(1))
+    if existing is not None:
+        return existing
+    ds = DataSource(
+        name="research-test-oracle",
+        type=DataSourceType.ORACLE,
+        host="oracle-test",
+        port=1521,
+        database_name="THBIDB",
+        username="THBI",
+        password_encrypted=encryptApiKey("test-password"),
+        is_active=True,
+        is_default=True,
+        oracle_version="19.0.0.0.0",
+    )
+    dbSession.add(ds)
+    await dbSession.commit()
+    await dbSession.refresh(ds)
+    return ds
+
+
+async def _newSession(svc, dbSession, question: str = QUESTION):
+    ds = await _ensureDatasource(dbSession)
+    return await svc.sessionService.createSession(
+        dbSession, userId=1, question=question, datasourceId=ds.id
+    )
+
+
+async def _newSessionWithModel(svc, dbSession, modelId: int, question: str = QUESTION):
+    """带**会话级模型选择**的会话（W5：`createSession(modelId=)` 直落 `model_id` 列）。"""
+    ds = await _ensureDatasource(dbSession)
+    return await svc.sessionService.createSession(
+        dbSession, userId=1, question=question, datasourceId=ds.id, modelId=modelId
+    )
+
+
+async def _resolve(
+    svc, dbSession, sessionId, action: str, choice: dict | None = None, emit=None
+) -> str:
+    """取当前 pending checkpoint 并按 action 续跑（模拟 API 层调用）。"""
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, sessionId)
+    assert cp is not None, "期望存在 pending checkpoint"
+    return await svc.resumeTurn(
+        dbSession, checkpointId=cp.id, action=action, choice=choice or {}, emit=emit
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1-3：brief 指定的三条契约测试
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_turn_pauses_at_checkpoint1(dbSession, makeService) -> None:
+    svc = makeService()
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    assert status == "awaiting_user"
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "intent"
+    assert cp.options["prompt"]  # prompt 无独立列，随 options 落 JSONB（Task 3 契约）
+    # 会话状态也落库（不是只在返回值里）
+    row = await dbSession.execute(
+        text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+    )
+    assert row.scalar_one() == "awaiting_user"
+
+
+@pytest.mark.asyncio
+async def test_esl_conflict_inserts_dynamic_checkpoint_before_plan(dbSession, makeService) -> None:
+    from app.services.enterprise_semantic_layer import ESLConflict
+
+    svc = makeService(
+        esl=FakeEsl(
+            conflicts=[
+                ESLConflict(kind="metric_ambiguous", arm="metric", detail="歧义", candidates=[])
+            ]
+        )
+    )
+    s = await _newSession(svc, dbSession, question="量")
+    status = await svc.startTurn(dbSession, sessionId=s.id, question="量", userId=1)
+    assert status == "awaiting_user"
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    # 冲突先于固定 #1（范围确认）：动态点在 _stageEsl 内先于固定 checkpoint 返回
+    assert cp is not None and cp.phase == "runtime_dynamic"
+    assert cp.options["signal"] == "metric_ambiguous"
+    assert cp.options["resumePhase"] == "plan"  # 决策后跳过范围确认直接进计划
+
+
+@pytest.mark.asyncio
+async def test_auto_confirm_runs_to_done_and_publishes(dbSession, makeService) -> None:
+    """真实 ReportPlanner 装配路径：三 mode 模板 + 归档 + MD 渲染。"""
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(autoConfirm=True, llmFactory=lambda cfg: scripted)
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    assert status == "done"
+    reports = await svc.sessionService.listReports(dbSession, s.id)
+    assert reports and reports[-1].status == "published" and reports[-1].version == 1
+    assert await svc.sessionService.getPendingCheckpoint(dbSession, s.id) is None
+
+    report = reports[-1]
+    assert [sec["kind"] for sec in report.payload["sections"]] == [
+        "executive_summary",
+        "data",
+        "knowledge",
+        "methodology",
+    ]
+    # chart 块的行数据逐字来自 finding.supporting_data["rows"]（Task 6 数据来源契约）
+    charts = [
+        block
+        for sec in report.payload["sections"]
+        for block in sec["blocks"]
+        if block["type"] == "chart"
+    ]
+    assert charts and charts[0]["content"]["rows"] == [{"cnt": 1}]
+    assert charts[0]["sourceRefs"][0]["kind"] == "finding"
+    assert report.rendered_md.startswith("# ")
+    assert "| cnt |" in report.rendered_md and "| 1 |" in report.rendered_md  # 逐字
+    assert "解读：收货量下降明显。" in report.rendered_md
+
+
+@pytest.mark.asyncio
+async def test_report_llm_calls_are_metered_and_numbers_verbatim(dbSession, makeService) -> None:
+    """报告文本块 LLM 调用计量（累加）+ 数字仍逐字来自 finding 数据（不被 LLM 改写）。"""
+    recorder = FakeUsageRecorder()
+    # 单实例共享：llmFactory 每个阶段各调一次，若每阶段新建则 calls 永远停在 1，
+    # 报告阶段会拿到假设 JSON 而非报告文本。
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(
+        llmFactory=lambda cfg: scripted,
+        usageRecorder=recorder,
+        autoConfirm=True,
+    )
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+    report = (await svc.sessionService.listReports(dbSession, s.id))[-1]
+
+    # LLM 文本进了执行摘要；chart 块数字仍是 finding 数据（LLM 只拿到 claim 摘要）
+    assert report.payload["sections"][0]["blocks"][0]["content"] == "解读：收货量下降明显。"
+    charts = [
+        block
+        for sec in report.payload["sections"]
+        for block in sec["blocks"]
+        if block["type"] == "chart"
+    ]
+    assert charts[0]["content"]["rows"] == [{"cnt": 1}]
+    # 报告阶段 2 次调用（执行摘要 + 1 条结论解读）累加计量：240 / 80
+    assert [r for r in recorder.records if r["purpose"] == "research_report"] == [
+        {
+            "sessionId": str(s.id),
+            "purpose": "research_report",
+            "promptTokens": 240,
+            "completionTokens": 80,
+            "modelName": "fake-model",
+            "cachedTokens": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reporter_failure_marks_session_failed(dbSession, makeService) -> None:
+    """报告阶段异常必须上抛 + 会话 failed（不静默 done、不留半份报告）。"""
+    svc = makeService(autoConfirm=True, reporter=RaisingReporter())
+    s = await _newSession(svc, dbSession)
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status == "failed"
+    assert await svc.sessionService.listReports(dbSession, s.id) == []
+
+
+# ---------------------------------------------------------------------------
+# 4-7：暂停/恢复、动态点、计量（Task 5 报告要求的证据）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resume_confirm_walks_three_fixed_checkpoints_to_done(dbSession, makeService) -> None:
+    """固定 #1/#2/#3 逐个 confirm：action→status 映射 + 会话终态 + 报告归档。
+
+    接入脚本 LLM（与 `test_auto_confirm_runs_to_done_and_publishes` 同口径）：否则
+    `llmUnavailable=True` 会让 `degraded` 恒真，掩盖下面那条**恢复轮**口径断言。
+    """
+    svc = makeService(llmFactory=lambda cfg: ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。"))
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "awaiting_user"
+
+    cp1 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp1.phase == "intent"
+    assert await _resolve(svc, dbSession, s.id, "confirm") == "awaiting_user"
+
+    cp2 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp2.phase == "planning" and cp2.id != cp1.id
+    assert await _resolve(svc, dbSession, s.id, "modify", {"plan": "edited"}) == "awaiting_user"
+
+    cp3 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp3.phase == "hypothesis"
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    assert await _resolve(svc, dbSession, s.id, "confirm", emit=collect) == "done"
+    # 从「假设」checkpoint 恢复（该相位**不重跑** execute）仍须报健康：degraded 靠 checkpoint 载荷
+    # 携带的已执行步数（Task 14 / N1），否则这一天正常路径会被误标降级
+    assert [p["degraded"] for (e, p) in events if e == "research.done"] == [False]
+
+    # 决策落库：confirm→confirmed / modify→modified（Task 3 review 裁定）
+    for cpId, expected in ((cp1.id, "confirmed"), (cp2.id, "modified"), (cp3.id, "confirmed")):
+        status = await dbSession.execute(
+            text("SELECT status FROM research_checkpoint WHERE id = :cid"), {"cid": cpId}
+        )
+        assert status.scalar_one() == expected
+    assert await svc.sessionService.getPendingCheckpoint(dbSession, s.id) is None
+    reports = await svc.sessionService.listReports(dbSession, s.id)
+    assert reports[-1].status == "published" and reports[-1].version == 1
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_step_pauses_and_reject_aborts_to_report(
+    dbSession, makeService
+) -> None:
+    """执行步返回空数据 → low_confidence_step 动态点；reject → 终止并归档报告。"""
+    svc = makeService(runner=FakeRunner(rows=[]), autoConfirm=False)
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "awaiting_user"
+    assert await _resolve(svc, dbSession, s.id, "confirm") == "awaiting_user"  # 固定 #1 范围确认
+    assert await _resolve(svc, dbSession, s.id, "confirm") == "awaiting_user"  # 固定 #2 计划确认
+
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp.phase == "low_confidence_step"
+    assert cp.options["signal"] == "low_confidence_step"
+    assert cp.options["stepIndex"] == 0 and cp.options["resumePhase"] == "execute"
+    assert cp.options["abortPhase"] == "report"
+
+    # reject ⇒ 走 abortPhase（终止执行，直接出报告归档）
+    assert await _resolve(svc, dbSession, s.id, "reject") == "done"
+    reports = await svc.sessionService.listReports(dbSession, s.id)
+    assert reports[-1].status == "published"
+
+
+@pytest.mark.asyncio
+async def test_step_failure_from_sql_guard_is_isolated_as_dynamic_signal(
+    dbSession, makeService
+) -> None:
+    """executeReadonlySql 抛 ValueError（SQL Guard 拒绝）→ 步级隔离，不炸整条链路。"""
+    svc = makeService(runner=FakeRunner(error="仅允许只读 SELECT"))
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #2
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "low_confidence_step"
+    assert cp.options["signal"] == "sql_validation_failed"
+    assert "只读" in cp.options["error"]
+
+
+@pytest.mark.asyncio
+async def test_hypothesis_llm_call_is_metered(dbSession, makeService) -> None:
+    """假设生成的 LLM 调用必须计量（核心约束 #3）：purpose=hypothesis + token + model。"""
+    recorder = FakeUsageRecorder()
+    svc = makeService(llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON), usageRecorder=recorder)
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #2 → hypothesis 阶段
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "hypothesis"
+    assert [c["statement"] for c in cp.options["candidates"]] == ["供应商A供货减少"]  # 非法项被滤掉
+    assert recorder.records == [
+        {
+            "sessionId": str(s.id),
+            "purpose": "research_hypothesis",
+            "promptTokens": 120,
+            "completionTokens": 40,
+            "modelName": "fake-model",
+            "cachedTokens": None,
+        }
+    ]
+
+    # confirm 固定 #3 → verify 落 finding（confidence = 候选分 × 0.9）
+    assert await _resolve(svc, dbSession, s.id, "confirm") == "done"
+    finding = (
+        await dbSession.execute(
+            text(
+                "SELECT claim_text, confidence, supporting_data FROM research_finding"
+                " WHERE session_id = :sid"
+            ),
+            {"sid": s.id},
+        )
+    ).one()
+    assert finding.claim_text == "供应商A供货减少"
+    assert finding.confidence == Decimal("0.72")  # 0.8（ESL 指标分）× 0.9
+    assert finding.supporting_data["rowCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_scope_pauses_for_rewrite_even_in_auto_confirm(dbSession, makeService) -> None:
+    """三臂全空（EmptyResearchScopeError）→ 固定 #1 强制用户改写（autoConfirm 也不例外）。"""
+    svc = makeService(esl=FakeEsl(empty=True), autoConfirm=True)
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    assert status == "awaiting_user"
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "intent" and cp.options["signal"] == "empty_scope"
+
+
+# ---------------------------------------------------------------------------
+# fix round 1：空臂恢复通道 / 异常收窄 / 降级可见性
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_empty_scope_resume_with_rewritten_question_reruns_esl(dbSession, makeService) -> None:
+    """HIGH-1：空 scope 恢复必须带改写问题**重跑 ESL**（不是拿空臂直进 plan）。
+
+    两条修复一起验证：① options["resumePhase"] 显式压过固定表（intent→esl 而非 plan）；
+    ② resumeTurn 的 choice["question"] 通道换问题并清派生态。
+    """
+    esl = FakeEsl(emptyOnce=True)
+    svc = makeService(esl=esl)
+    s = await _newSession(svc, dbSession, question="量")
+    assert await svc.startTurn(dbSession, sessionId=s.id, question="量", userId=1) == "awaiting_user"
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp.phase == "intent" and cp.options["signal"] == "empty_scope"
+    assert cp.options["resumePhase"] == "esl"  # 显式恢复点（固定表里 intent→plan）
+
+    assert (
+        await svc.resumeTurn(
+            dbSession,
+            checkpointId=cp.id,
+            action="confirm",
+            choice={"question": QUESTION},
+        )
+        == "awaiting_user"
+    )
+    # ESL 真的用新问题重跑了（不是跳过）
+    assert esl.calls == ["量", QUESTION]
+    cp2 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp2.id != cp.id
+    assert cp2.options["signal"] == "fixed_scope"  # 走到固定 #1，而非直接 plan
+    assert cp2.options["arms"]["businessObjects"]  # 非空三臂进了新 checkpoint
+    # 改写后的问题落 turn 内容（可追溯）
+    content = (
+        await dbSession.execute(
+            text(
+                "SELECT content FROM research_turn WHERE session_id = :sid AND role = 'user'"
+                " ORDER BY turn_index DESC LIMIT 1"
+            ),
+            {"sid": s.id},
+        )
+    ).scalar_one()
+    assert content["question"] == QUESTION
+
+
+@pytest.mark.asyncio
+async def test_intent_checkpoint_confirm_still_resumes_at_plan(dbSession, makeService) -> None:
+    """HIGH-1 回归：普通范围确认（无改写问题）仍从 plan 续跑，ESL 不重跑。"""
+    esl = FakeEsl()
+    svc = makeService(esl=esl)
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    assert await _resolve(svc, dbSession, s.id, "confirm") == "awaiting_user"
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp.phase == "planning"  # 固定表路径没被显式优先规则翻转
+    assert esl.calls == [QUESTION]  # ESL 只跑了一次
+
+
+@pytest.mark.asyncio
+async def test_runner_programming_error_is_not_masked_as_low_confidence(
+    dbSession, makeService
+) -> None:
+    """MEDIUM-5：runner 抛非 DB 异常（编程错误）必须上抛并把会话标 failed。
+
+    不能被伪装成「该步无数据」→ low_confidence_step →（autoConfirm 下）静默 done。
+    """
+    svc = makeService(runner=FakeRunner(raiseError=RuntimeError("boom")), autoConfirm=True)
+    s = await _newSession(svc, dbSession)
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status == "failed"
+    # 编程错误不产生 finding / 报告
+    assert await svc.sessionService.getPendingCheckpoint(dbSession, s.id) is None
+
+
+@pytest.mark.asyncio
+async def test_step_failure_emits_research_error_event(dbSession, makeService) -> None:
+    """MEDIUM-7：步失败除动态点外还必须发 `research.error {code, message}`。"""
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc = makeService(runner=FakeRunner(error="仅允许只读 SELECT"))
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1
+    await _resolve(svc, dbSession, s.id, "confirm", emit=collect)  # 固定 #2 → execute
+
+    errors = [p for (e, p) in events if e == "research.error"]
+    assert [p["code"] for p in errors] == ["sql_validation_failed"]
+    assert "只读" in errors[0]["message"] and errors[0]["stepIndex"] == 0
+
+
+@pytest.mark.asyncio
+async def test_generic_step_failure_emits_step_failed_and_keeps_low_confidence_phase(
+    dbSession, makeService
+) -> None:
+    """Task 8.5：通用步失败（非 SQL Guard）→ error code == step_failed，且相位不被污染。
+
+    一条测试同时钉住「code 改名（step_failed 与 checkpoint phase 解耦）」与「相位仍是
+    low_confidence_step、signal 仍是 low_confidence_step（step_failed 不进白名单）」。
+    """
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc = makeService(runner=FakeRunner(raiseError=TimeoutError("执行超时")))
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → plan → 固定 #2
+    await _resolve(svc, dbSession, s.id, "confirm", emit=collect)  # → execute
+
+    errors = [p for (e, p) in events if e == "research.error"]
+    assert [p["code"] for p in errors] == ["step_failed"]
+    # payloadFields == ("stepIndex",) 与真实发射点 payload 键一致（code/message/uiHint 恒在 + stepIndex）
+    assert set(errors[0].keys()) == {"code", "message", "uiHint", "stepIndex"}
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "low_confidence_step"
+    assert cp.options["signal"] == "low_confidence_step"
+
+
+@pytest.mark.asyncio
+async def test_missing_llm_client_is_user_visible_not_silent(dbSession, makeService) -> None:
+    """MEDIUM-4：llmFactory 取不到客户端必须显式留痕（`research.error` + 报告降级标记）。"""
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc = makeService(autoConfirm=True)  # llmFactory 默认 None
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+    assert status == "done"
+    codes = [p["code"] for (e, p) in events if e == "research.error"]
+    assert "llm_unavailable" in codes  # 不静默
+    reportEvent = [p for (e, p) in events if e == "research.report"][-1]
+    assert reportEvent["degraded"] is True
+    doneEvent = [p for (e, p) in events if e == "research.done"][-1]
+    assert doneEvent["degraded"] is True
+
+
+@pytest.mark.asyncio
+async def test_default_usage_recorder_writes_row_and_skips_zero_usage(dbSession) -> None:
+    """默认计量实现写 chat 同表台账；零消耗不写空行。
+
+    只走「无 modelName」分支（成本 0）：本测试库 `llm_config` 缺 `disable_thinking`
+    列（`alembic_version` 标 0111 但结构滞后于 0109，既有环境漂移，见 Task 5 报告
+    open concerns），任何 LlmConfig ORM 读写都会炸；单价公式另由下一条纯断言覆盖。
+    """
+    recorder = LlmUsageRecorder()
+    sessionId = str(uuid.uuid4())
+    await recorder.recordUsage(
+        dbSession,
+        sessionId=sessionId,
+        purpose="research_hypothesis",
+        promptTokens=1000,
+        completionTokens=500,
+        modelName=None,
+    )
+    row = (
+        await dbSession.execute(
+            text(
+                "SELECT model_config_id, prompt_tokens, completion_tokens, total_tokens,"
+                " cost, purpose FROM session_token_usage WHERE session_id = :sid"
+            ),
+            {"sid": sessionId},
+        )
+    ).one()
+    assert row.model_config_id is None
+    assert (row.prompt_tokens, row.completion_tokens, row.total_tokens) == (1000, 500, 1500)
+    assert row.cost == Decimal("0")
+    assert row.purpose == "research_hypothesis"
+
+    await recorder.recordUsage(
+        dbSession,
+        sessionId=sessionId,
+        purpose="research_hypothesis",
+        promptTokens=0,
+        completionTokens=0,
+        modelName=None,
+    )
+    count = (
+        await dbSession.execute(
+            text("SELECT count(*) FROM session_token_usage WHERE session_id = :sid"),
+            {"sid": sessionId},
+        )
+    ).scalar_one()
+    assert count == 1
+
+
+def test_default_usage_recorder_cost_formula_matches_chat() -> None:
+    """成本公式与 chat `_costFor` 同口径：pt/1000*in + ct/1000*out。
+
+    未落库的 ORM 实例即可（不触 DB，绕开上面的 llm_config 漂移）。
+    """
+    config = LlmConfig(
+        model_name="research-fake-model",
+        provider="openai",
+        cost_per_1k_input=Decimal("1"),
+        cost_per_1k_output=Decimal("2"),
+    )
+    assert LlmUsageRecorder._costFor(config, 1000, 500) == Decimal("2")
+    assert LlmUsageRecorder._costFor(None, 1000, 500) == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# Task 6.5：步 SQL 生成 / 模型路由 / 计量口径 / modify 反馈
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_step_without_sql_generates_via_nl2sql(dbSession, makeService) -> None:
+    """Task 6.5-1：无 sql 的计划步走真实 NL2SQL 生成，生成的 SQL 交给 runner 执行。"""
+    planner = FakePlanner(
+        steps=(SqlStep(index=0, description="收货量趋势", sub_question="近12月收货量"),)
+    )
+    nl2sql = FakeNl2Sql(sql="SELECT 42 AS cnt")
+    runner = FakeRunner(rows=[{"cnt": 42}])
+    svc = makeService(
+        planner=planner,
+        nl2sql=nl2sql,
+        runner=runner,
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+        autoConfirm=True,
+    )
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+
+    assert [c["question"] for c in nl2sql.calls] == ["近12月收货量"]
+    assert runner.executed == ["SELECT 42 AS cnt"]  # 生成的 SQL 真的进了执行面
+    # 生成用的模型配置是路由选中的那个（非 None），且本体类按 ESL 物理表筛过
+    assert nl2sql.calls[0]["modelConfig"] is not None
+    assert [c.class_name for c in nl2sql.calls[0]["classes"]] == ["供应商"]
+    # 步结果里记的是**生成后**的 SQL（报告/动态点据此可追溯）
+    finding = (
+        await dbSession.execute(
+            text("SELECT supporting_data FROM research_finding WHERE session_id = :sid"),
+            {"sid": s.id},
+        )
+    ).one()
+    assert finding.supporting_data["rowCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_step_sql_generation_failure_hits_missing_sql_branch(dbSession, makeService) -> None:
+    """Task 6.5-2：生成器抛错 → 步走 `STEP_MISSING_SQL` 分支（不炸链路，转动态点）。"""
+    planner = FakePlanner(steps=(SqlStep(index=0, description="x", sub_question="y"),))
+    nl2sql = FakeNl2Sql(error=RuntimeError("生成炸了"))
+    runner = FakeRunner()
+    svc = makeService(
+        planner=planner, nl2sql=nl2sql, runner=runner,
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → plan → 固定 #2
+    assert await _resolve(svc, dbSession, s.id, "confirm") == "awaiting_user"  # → execute
+
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "low_confidence_step"
+    assert cp.options["error"] == STEP_MISSING_SQL  # 该分支真的被走到（可测）
+    assert cp.options["signal"] == "low_confidence_step"
+    assert runner.executed == []  # 无 SQL 不执行任何查询
+    assert nl2sql.calls  # 生成器确实被调用了（失败发生在生成里，不是没接线）
+
+
+@pytest.mark.asyncio
+async def test_model_routing_uses_configured_model(dbSession, makeService) -> None:
+    """Task 6.5-2：llmFactory 收到**非 None** 的已选模型配置；无 key 时显式降级。"""
+    seen: list = []
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+
+    def factory(config):
+        seen.append(config)
+        return scripted
+
+    svc = makeService(autoConfirm=True, llmFactory=factory)
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+    assert seen and all(cfg is not None for cfg in seen)  # 不再 factory(None)
+    assert {cfg.model_name for cfg in seen} == {"fake-routed-model"}
+
+    # key 缺失（factory 恒返 None）⇒ 无可构造客户端的配置 ⇒ research.error 降级
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc2 = makeService(autoConfirm=True, llmFactory=lambda cfg: None)
+    s2 = await _newSession(svc2, dbSession)
+    status = await svc2.startTurn(
+        dbSession, sessionId=s2.id, question=QUESTION, userId=1, emit=collect
+    )
+    assert status == "done"
+    assert "llm_unavailable" in [p["code"] for (e, p) in events if e == "research.error"]
+
+
+@pytest.mark.asyncio
+async def test_metered_client_captures_cached_tokens(dbSession, makeService) -> None:
+    """Task 6.5-3：响应带 cached 字段 ⇒ recordUsage 收到 cachedTokens（计量盲区封堵）。"""
+
+    class CachedLlmClient:
+        async def complete(self, messages, **kwargs):
+            resp = FakeLlmResponse(HYPOTHESIS_JSON, 120, 40)
+            resp.cachedTokens = 800
+            return resp
+
+    recorder = FakeUsageRecorder()
+    svc = makeService(
+        llmFactory=lambda cfg: CachedLlmClient(), usageRecorder=recorder, autoConfirm=True
+    )
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+    cached = [r["cachedTokens"] for r in recorder.records if r["purpose"] == "research_hypothesis"]
+    assert cached == [800]
+
+
+@pytest.mark.asyncio
+async def test_planning_modify_reruns_planner_with_choice(dbSession, makeService) -> None:
+    """Task 6.5-4：计划 checkpoint `modify` 把 choice 回灌 planner 重跑（不恢复旧计划）。"""
+    planner = FakePlanner(
+        steps=(SqlStep(index=0, description="原计划", sub_question="原", sql="SELECT 1"),),
+        replanSteps=(SqlStep(index=0, description="新计划", sub_question="新", sql="SELECT 2"),),
+    )
+    runner = FakeRunner()
+    svc = makeService(planner=planner, runner=runner)
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → plan → 固定 #2
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "planning"
+    assert len(planner.calls) == 1  # 首轮计划只跑一次
+
+    status = await _resolve(svc, dbSession, s.id, "modify", {"instruction": "只看华东"})
+    assert status == "awaiting_user"
+    assert len(planner.calls) == 2  # 重跑计划
+    assert "只看华东" in planner.calls[1][0]  # choice 回灌进 planner 输入
+    assert runner.executed == ["SELECT 2"]  # 新计划进 state 并被执行（旧计划未执行）
+    # 新计划没有再次暂停在计划点：直接走到假设点
+    cp2 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp2 is not None and cp2.phase == "hypothesis"
+
+
+@pytest.mark.asyncio
+async def test_planning_modify_replan_caps_at_max_replan(dbSession, makeService) -> None:
+    """Task B1：第 4 次 planning modify 不再触发 replan，转按 confirm 继续推进。
+
+    MAX_REPLAN_PER_TURN=3。第 1-3 次 modify → 回到 plan 相位；第 4 次 modify
+    → 按 confirm 处理（跳过 plan，直接进 execute/hypothesis）。
+    """
+    planner = FakePlanner(
+        steps=(SqlStep(index=0, description="计划0", sub_question="q0", sql="SELECT 0"),),
+        replanSteps=(
+            SqlStep(index=0, description="计划1", sub_question="q1", sql="SELECT 1"),
+        ),
+    )
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(
+        planner=planner,
+        llmFactory=lambda cfg: scripted,
+        autoConfirm=True,  # hypothesis 之后直接 done，简化断言
+    )
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → plan → 固定 #2（planning）
+    assert len(planner.calls) == 1
+
+    # 前 3 次 modify：仍回到 plan 相位，planner 被重调用
+    for i in range(3):
+        status = await _resolve(
+            svc, dbSession, s.id, "modify", {"instruction": f"只看华东-{i}"}
+        )
+        assert status == "awaiting_user", f"第 {i+1} 次 modify 应仍暂停: {status}"
+        assert len(planner.calls) == i + 2, f"第 {i+1} 次 modify 应触发 replan"
+
+    # 第 4 次 modify：replan 计数已达上限，不再回 plan，直接推进到 hypothesis/done
+    status = await _resolve(
+        svc, dbSession, s.id, "modify", {"instruction": "只看华东-3（应被忽略）"}
+    )
+    # 不再回 plan 相位，状态机继续推进
+    assert status == "done", f"第 4 次 modify 应跳过 replan 直接推进: {status}"
+    # planner 不再被调用（总数仍为 4）
+    assert len(planner.calls) == 4
+    # 最后一个 planning checkpoint 的状态是 modified（不是 confirmed）
+    cps = await dbSession.execute(
+        text(
+            "SELECT id, status, phase FROM research_checkpoint"
+            " WHERE session_id = :sid AND phase = 'planning'"
+            " ORDER BY created_at DESC LIMIT 1"
+        ),
+        {"sid": s.id},
+    )
+    row = cps.one()
+    assert row.status == "modified"
+
+
+@pytest.mark.asyncio
+async def test_compose_requires_or_meters_client(dbSession, makeService) -> None:
+    """Task 6.5-3（F3）：报告装配**不自建未计量客户端**；降级时零 LLM 调用。"""
+    recorder = FakeUsageRecorder()
+    svc = makeService(autoConfirm=True, llmFactory=lambda cfg: None, usageRecorder=recorder)
+    assert svc._reporter._llmClientFactory is None  # 自建路径已删除（选法 = 删除）
+
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+    assert [r for r in recorder.records if r["purpose"] == "research_report"] == []
+
+
+@pytest.mark.asyncio
+async def test_routing_context_carries_session_cost_and_turns(dbSession, makeService) -> None:
+    """M1（fix round 1）：路由上下文与 chat 同口径 —— 已有真实用量行 ⇒ 三项非默认。
+
+    只传 `sessionId` 时 `sessionCost=0` / `sessionTurnCount=0`，路由器的**预算超限降级**
+    （`model_router_service.py:70`）与**会话亲和**（`:77`）两条规则对研究链路恒不触发。
+    这里先落一条真实 `session_token_usage` 行，再断言 router 实际收到的 ctx。
+    """
+    router = FakeModelRouter()
+    svc = makeService(
+        modelRouter=router, autoConfirm=True,
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+    await TokenUsageService().recordUsage(
+        dbSession, sessionId=str(s.id), modelConfigId=None, modelName="prior-model",
+        promptTokens=100, completionTokens=50, cost=Decimal("3.5"), purpose="seed",
+    )
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+
+    assert router.calls, "路由必须被调用（有可用配置）"
+    ctx = router.calls[0][2]
+    assert ctx.sessionId == str(s.id)
+    assert ctx.sessionCost > 0  # 非零 ⇒ 预算规则可达（此前恒 0）
+    assert ctx.sessionTurnCount >= 1  # 非零 ⇒ 亲和规则可达（此前恒 0）
+
+
+# ---------------------------------------------------------------------------
+# Task 7.5 加固批：resolveModelConfig 事务隔离 + runTurn 问题守卫
+# ---------------------------------------------------------------------------
+
+
+class PoisoningModelConfigs:
+    """`list()` 执行失败 SQL（模拟 llm_config 结构漂移 / 语句级失败）。
+
+    真实 asyncpg 语义：语句级失败会把**当前事务**置为 aborted，后续语句一律
+    `InFailedSQLTransactionError`。旧实现只 catch 异常不隔离事务，于是降级继续跑
+    的 turn 在写 checkpoint / resume turn 时炸掉，被后台 wrapper 回滚——客户端
+    已拿 202，数据静默丢失。
+    """
+
+    async def list(self, session, *, activeOnly: bool = False):
+        await session.execute(text("SELECT 1 FROM research_absent_table_for_poison"))
+        return []
+
+
+@pytest.mark.asyncio
+async def test_model_config_list_failure_does_not_poison_session(dbSession) -> None:
+    """HIGH：`list()` 抛错后主 session 必须仍可写（不抛 InFailedSQLTransactionError）。"""
+    sessions = ResearchSessionService()
+    s = await sessions.createSession(dbSession, userId=1, question=QUESTION)
+
+    config = await resolveModelConfig(
+        PoisoningModelConfigs(), None, None, dbSession, question=QUESTION, sessionId=s.id
+    )
+    assert config is None  # 降级语义不变：无可用模型配置
+
+    # 中毒事务会让这一步炸（PendingRollbackError / InFailedSQLTransactionError）
+    turn = await sessions.appendTurn(
+        dbSession, sessionId=s.id, role="user", content={"question": QUESTION}
+    )
+    assert turn.id is not None and turn.turn_index == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_survives_model_config_list_failure(dbSession, makeService) -> None:
+    """HIGH：list() 失败后 checkpoint 决策与 resume turn 仍落库 + 降级事件照发。"""
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc = makeService(modelConfigs=PoisoningModelConfigs())
+    s = await _newSession(svc, dbSession)
+    assert (
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+        == "awaiting_user"
+    )
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "intent"
+
+    # 恢复轮进 plan 相位：首次触达模型配置读取（失败）→ 计划 checkpoint 仍必须写出
+    status = await _resolve(svc, dbSession, s.id, "confirm", emit=collect)
+    assert status == "awaiting_user"
+    cp2 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp2 is not None and cp2.phase == "planning"
+    # 降级语义不变：无可用 LLM 仍显式可见（research.error / llm_unavailable）
+    assert "llm_unavailable" in [p["code"] for (e, p) in events if e == "research.error"]
+    # 决策 + 恢复轮真的落了库（不是只在内存）：intent 点已 confirmed，新计划点 pending
+    rows = (
+        await dbSession.execute(
+            text("SELECT id, status FROM research_checkpoint WHERE session_id = :sid"),
+            {"sid": s.id},
+        )
+    ).all()
+    statusById = {str(row[0]): row[1] for row in rows}
+    assert statusById[str(cp.id)] == "confirmed"
+    assert sorted(statusById.values()) == ["confirmed", "pending"]
+
+
+@pytest.mark.asyncio
+async def test_run_turn_rejects_whitespace_question(dbSession, makeService) -> None:
+    """LOW：空白问题守卫下沉到 runTurn（API 路径 createTurn → runTurn 绕过 startTurn）。"""
+    svc = makeService()
+    s = await _newSession(svc, dbSession)
+    turn = await svc.sessionService.appendTurn(
+        dbSession, sessionId=s.id, role="user", content={"question": "   "}
+    )
+    with pytest.raises(ValueError):
+        await svc.runTurn(
+            dbSession,
+            sessionId=s.id,
+            turnId=turn.id,
+            question="   ",
+            userId=1,
+            mode="research",
+        )
+    # 空问题不推进状态机：不写 checkpoint、不置 done
+    assert await svc.sessionService.getPendingCheckpoint(dbSession, s.id) is None
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status == "running"
+
+
+@pytest.mark.asyncio
+async def test_start_turn_still_rejects_whitespace_question(dbSession, makeService) -> None:
+    """LOW 回归：startTurn 守卫语义不变（守卫在写 user turn 之前，不留脏轮次）。"""
+    svc = makeService()
+    s = await _newSession(svc, dbSession)
+    with pytest.raises(ValueError):
+        await svc.startTurn(dbSession, sessionId=s.id, question="   ", userId=1)
+    count = (
+        await dbSession.execute(
+            text("SELECT count(*) FROM research_turn WHERE session_id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 13e：业务库数据源贯通（研究侧终于连上业务库）
+#
+# 根因：执行面把业务 SQL 打在**应用元数据库会话**上（业务表在 Oracle）⇒ 一律
+# UndefinedTableError。以下用例把「源从会话解析 → 适配器按次送达执行/验证面」钉死。
+# ---------------------------------------------------------------------------
+
+
+async def _sessionDatasourceId(dbSession, sessionId):
+    return await dbSession.scalar(
+        select(ResearchSession.datasource_id).where(ResearchSession.id == sessionId)
+    )
+
+
+@pytest.mark.asyncio
+async def test_step_execution_delivers_business_adapter(dbSession, makeService) -> None:
+    """执行步拿到的是**会话数据源**的业务库 adapter（不是元数据库会话）。
+
+    断言点：`get_adapter(ds.id, ds).datasourceId` 必须等于会话落库的 `datasource_id`。
+    历史缺陷下这里压根没有 adapter —— SQL 打在注入的元数据库 session 上。
+    """
+    runner = FakeRunner(rows=[{"cnt": 42}])
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(runner=runner, autoConfirm=True, llmFactory=lambda cfg: scripted)
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+
+    dsId = await _sessionDatasourceId(dbSession, s.id)
+    assert dsId is not None  # 源落库（会话级，跨轮沿用）
+    assert runner.executed == ["SELECT 1"]  # 默认 FakePlanner 的步 SQL 真的执行了
+    assert [a.datasourceId for a in runner.adapters] == [dsId]
+
+
+@pytest.mark.asyncio
+async def test_verification_delivers_business_adapter(dbSession, makeService) -> None:
+    """验证相位同一条路径：假设验证 SQL 也拿到业务库 adapter（O2 引用的不存在小写表）。"""
+    runner = FakeRunner()
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(runner=runner, autoConfirm=True, llmFactory=lambda cfg: scripted)
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+
+    dsId = await _sessionDatasourceId(dbSession, s.id)
+    assert runner.verifyCalls  # 候选假设确实被验证了
+    assert {a.datasourceId for a in runner.verifyAdapters} == {dsId}
+
+
+@pytest.mark.asyncio
+async def test_generate_step_sql_passes_dialect_and_schema_prefix(dbSession, makeService) -> None:
+    """`generateSql` 收到会话数据源的方言参数（datasourceType / oracle_version / schemaPrefix）。
+
+    真实环境 = `THBI Oracle`：缺 schemaPrefix 时表名不带 owner，LLM 生成的 SQL 只能靠
+    猜；它与 schema 文本路径共用同一白名单 `_safeSchemaPrefix`。
+    """
+    planner = FakePlanner(steps=(SqlStep(index=0, description="x", sub_question="y"),))
+    nl2sql = FakeNl2Sql(sql="SELECT 1 AS cnt")
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(
+        planner=planner,
+        nl2sql=nl2sql,
+        autoConfirm=True,
+        llmFactory=lambda cfg: scripted,
+    )
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+
+    assert nl2sql.calls[0]["datasourceType"] == DataSourceType.ORACLE
+    assert nl2sql.calls[0]["oracle_version"] == "19.0.0.0.0"
+    assert nl2sql.calls[0]["schemaPrefix"] == "THBI"
+
+
+@pytest.mark.asyncio
+async def test_resume_reuses_session_datasource(dbSession, makeService) -> None:
+    """恢复轮复用同一源：源存**会话**（state 不持久化），答 checkpoint 不会丢源。"""
+    runner = FakeRunner()
+    svc = makeService(runner=runner)
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "awaiting_user"
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → planning
+    assert await _resolve(svc, dbSession, s.id, "confirm") == "awaiting_user"  # → execute（执行步）
+
+    dsId = await _sessionDatasourceId(dbSession, s.id)
+    assert runner.adapters  # 恢复轮的 execute 相位确实执行了步
+    assert {a.datasourceId for a in runner.adapters} == {dsId}
+
+
+@pytest.mark.asyncio
+async def test_session_without_datasource_fails_loudly(dbSession, makeService) -> None:
+    """会话无业务源 ⇒ 执行相位**显式报错**（RuntimeError 上抛 + 会话落 failed）。
+
+    不得静默兜底：绝不回落到元数据库会话（那正是「业务表一律不存在」的历史根因）。
+    刻意断言异常类型是 `RuntimeError` 而非 `ValueError` —— 后者会被执行面当成
+    「SQL 被 Guard 拒绝」，把配置缺失伪装成「该步无数据」。
+    """
+    svc = makeService(autoConfirm=True)
+    s = await svc.sessionService.createSession(dbSession, userId=1, question=QUESTION)
+    assert await _sessionDatasourceId(dbSession, s.id) is None  # 无源会话
+
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status == "failed"  # 失败是响亮的（不是静默 done）
+
+
+@pytest.mark.asyncio
+async def test_oracle_driver_error_degrades_step_instead_of_killing_turn(
+    dbSession, makeService
+) -> None:
+    """Oracle 驱动层异常（`oracledb.Error`）⇒ **单步降级**，不打死整 turn（Task 13e fix round 1）。
+
+    根因：业务 SQL 改走 `_OracleAdapter` 的 `oracledb` **原生 async** 驱动后，驱动异常不再
+    位于 `SQLAlchemyError` 之下（`business_db_pool._OracleAdapter.execute_read_only` 原样穿透），
+    原收窄面收不住 ⇒ 逃到 `_guardedRun` 打死整 turn。真机实测三次（`ORA-00920` / `ORA-00933` /
+    `DPY-6005`）全部如此。本用例钉住「驱动错误 → step_failed 降级 → turn 仍活着」。
+    """
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc = makeService(
+        runner=FakeRunner(raiseError=oracledb.DatabaseError("ORA-00933: SQL 命令未正确结束"))
+    )
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → plan → 固定 #2
+    await _resolve(svc, dbSession, s.id, "confirm", emit=collect)  # → execute
+
+    errors = [p for (e, p) in events if e == "research.error"]
+    assert [p["code"] for p in errors] == ["step_failed"]  # 降级为步失败，不是 turn_failed
+    assert "ORA-00933" in errors[0]["message"]  # 驱动原文透出（不吞、不伪装）
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "low_confidence_step"  # turn 走到动态点，没死
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status != "failed"
+
+
+@pytest.mark.asyncio
+async def test_programming_error_still_propagates_after_driver_narrowing(
+    dbSession, makeService
+) -> None:
+    """反向守卫：收窄面只**多收** `oracledb.Error`，不得放开成吞掉一切。
+
+    编程错误（`TypeError`：既非 SQL Guard / 超时，也非任何驱动错误）仍原样上抛 + 会话落
+    failed —— 否则「收住驱动层」会顺手把程序缺陷伪装成「该步无数据」而在 autoConfirm 下静默
+    done。既有 `test_runner_programming_error_is_not_masked_as_low_confidence` 守 `RuntimeError`，
+    本用例补 `TypeError`，两侧合起来把本次新增的收窄面**双向**钉死。
+    """
+    svc = makeService(
+        runner=FakeRunner(raiseError=TypeError("bound method 少了 self")), autoConfirm=True
+    )
+    s = await _newSession(svc, dbSession)
+    with pytest.raises(TypeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status == "failed"
+    assert await svc.sessionService.getPendingCheckpoint(dbSession, s.id) is None
+
+
+@pytest.mark.asyncio
+async def test_failed_step_does_not_kill_later_steps_in_same_phase(
+    dbSession, makeService
+) -> None:
+    """第 k 步失败后，**第 k+1 步仍被执行**、turn 不致命（Task 13e fix round 2）。
+
+    根因（审查 Important-1）：失败路径 `failedStep` → `rollbackQuietly` 会对注入的 session
+    做**顶层 rollback**，而 SQLAlchemy 的 rollback 会 `_restore_snapshot(dirty_only=False)`
+    expire 整个 identity map（`expire_on_commit=False` 只护 commit，**不护 rollback**）。
+    原实现把**会话 ORM 对象** `DataSource` 放进 `ExecutionDeps`、在**循环内**每步读它的属性
+    （`adapterFor(deps.datasource)` / `dialectArgsFor(deps.datasource)`）⇒ 第 k 步失败后第 k+1
+    步读已过期对象触发隐式 IO ⇒ `MissingGreenlet`，且抛出点在 `runStep` 的收窄面**之外**
+    ⇒ 单步失败又升级成整 turn 死（Important-1 正是因此漏检：既有用例只跑单步计划）。
+
+    现 adapter 与方言参数在**相位边界**一次算好（照 `_stageVerify` 的既有做法），循环内零
+    ORM 属性访问，本用例用「两阶段计划 + 首步驱动错 + autoConfirm」把它钉死。
+    """
+    planner = FakePlanner(
+        steps=(
+            SqlStep(index=0, description="收货量趋势", sub_question="近12月收货量", sql="SELECT 1"),
+            SqlStep(index=1, description="供应商拆分", sub_question="近3月按供应商", sql="SELECT 2"),
+        )
+    )
+    runner = FakeRunner(
+        rows=[{"cnt": 1}],
+        raiseErrorOnFirst=oracledb.DatabaseError("ORA-00933: SQL 命令未正确结束"),
+    )
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    svc = makeService(
+        planner=planner, runner=runner, autoConfirm=True, llmFactory=lambda cfg: scripted
+    )
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+
+    # 第 2 步真的执行了：回滚没有把业务源（及其 adapter）废掉
+    assert runner.executed == ["SELECT 1", "SELECT 2"]
+    # 首步失败仍按单步降级留痕（驱动原文透出），但**不是** turn_failed
+    errors = [p for (e, p) in events if e == "research.error"]
+    assert [p["code"] for p in errors] == ["step_failed"]
+    assert "ORA-00933" in errors[0]["message"]
+    # turn 不致命：走到报告阶段，且第 2 步的数据事件确实发出
+    assert status == "done"
+    assert [p["index"] for (e, p) in events if e == "research.step.data"] == [1]
+
+
+@pytest.mark.asyncio
+async def test_planner_none_falls_back_to_single_step_and_runs_business_sql(
+    dbSession, makeService
+) -> None:
+    """N1 主用例：planner 判为单步（`plan=None`）⇒ **回落单步**，本 turn 真的跑一步业务 SQL。
+
+    缺陷（最终审查 N1 blocker / 控制器两次真机复现）：`StepQueryPlanner.plan` 对非多步问题
+    返回 `plan=None`（语义 = 「调用方按单步处理」，chat 正是这么做的），研究侧却把它当「无步」
+    ⇒ `research.plan {"steps": []}` ⇒ 零个 `research.step.*` ⇒ 零 SQL ⇒ 仍出报告并报
+    `degraded:false`。整轮测试全绿是因为 `FakePlanner` 恒返回 ≥1 步，**从无用例驱动
+    `plan=None`**（本用例 + 上面新增的 `planNone` 参数补上这一格）。
+
+    断言要点（brief Step 1）：步真的执行了、走的是**业务 adapter**、计划事件不再是空步。
+    """
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    planner = FakePlanner(planNone=True)
+    nl2sql = FakeNl2Sql(sql="SELECT 1 AS cnt")
+    runner = FakeRunner(rows=[{"cnt": 42}])
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(
+        planner=planner,
+        nl2sql=nl2sql,
+        runner=runner,
+        autoConfirm=True,
+        llmFactory=lambda cfg: scripted,
+    )
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+    assert status == "done"
+
+    # 回落计划进的是既有执行通路：逐步 NL2SQL 生成 → 只读查询（恰好一步）
+    assert planner.calls  # planner 被调过（只是它判定为单步）
+    assert runner.executed == ["SELECT 1 AS cnt"]
+    assert nl2sql.calls[0]["question"] == QUESTION  # 回落步的子问题 = 本 turn 的问题
+    dsId = await _sessionDatasourceId(dbSession, s.id)
+    assert [a.datasourceId for a in runner.adapters] == [dsId]  # 业务 adapter（非元数据库会话）
+
+    # 计划事件不再是空步（N1 的可见症状）
+    plans = [p for (e, p) in events if e == "research.plan"]
+    assert plans and plans[-1]["steps"] != []
+    assert [step["sub_question"] for step in plans[-1]["steps"]] == [QUESTION]
+    assert plans[-1]["steps"][0]["sql"] is None  # 无预置 SQL ⇒ 走生成面
+    assert [p["rowCount"] for (e, p) in events if e == "research.step.data"] == [1]
+    # degraded 的另一侧（N1 相关 Important）：真的执行了步 ⇒ 不得报降级
+    assert [p for (e, p) in events if e == "research.done"][-1]["degraded"] is False
+
+
+@pytest.mark.asyncio
+async def test_plan_without_data_steps_fails_turn_without_report(dbSession, makeService) -> None:
+    """无步闸门：计划过滤 `aggregation_only` 后为空 ⇒ **终态失败**，不出报告（防御性兜底）。
+
+    加了单步回落之后正常路径不会再命中它（`plan=None` 已有单步计划；`normalizePlan` 也只在
+    计划非空时调用），但闸门必须存在 —— 否则「无数据步」会再次静默走到 hypothesis/report，
+    产出一份全无数据支撑却 `degraded:false` 的报告（N1 的另一半）。
+
+    终态失败走的是本服务**既有**机制：`_stageExecute` 抛错 → `_guardedRun` 发
+    `research.error{turn_failed}` + `markFailed`（会话落 failed）并原样上抛。不新增失败通道。
+    """
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    # 计划非空，但唯一的一步是纯聚合步（`aggregation_only`）⇒ 过滤后为空
+    planner = FakePlanner(
+        steps=(
+            SqlStep(
+                index=0,
+                description="汇总",
+                sub_question="对上面的结果做汇总",
+                sql="SELECT 1",
+                aggregation_only=True,
+            ),
+        )
+    )
+    svc = makeService(planner=planner, autoConfirm=True)
+    s = await _newSession(svc, dbSession)
+
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+
+    names = [event for (event, _) in events]
+    errors = [p for (event, p) in events if event == "research.error"]
+    assert errors and errors[-1]["code"] == "turn_failed"  # 终态错误（不是降级类）
+    assert errors[-1]["uiHint"] == "terminal"
+    assert "research.report" not in names  # 不出报告
+    assert "research.done" not in names  # 也不补 done
+    status = (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": s.id}
+        )
+    ).scalar_one()
+    assert status == "failed"  # 会话置 failed（终态）
+
+
+def test_degraded_flag_covers_zero_executed_steps() -> None:
+    """degraded 口径（Task 14-3）：无可用 LLM **或**零个数据步被执行 ⇒ 降级可见。
+
+    注：Step 2 要求断言闸门用例的 `degraded == true`，但那条路径是**终态失败**——按设计它
+    不发 `research.report`/`research.done`，故 `degraded` 标记本身在端到端不可观测（这正是
+    「不出报告」的含义）。口径因此在这里**双向**钉死：零步 ⇒ true；「有步执行但 0 行」⇒
+    false（合法答案，既有 `low_confidence_step` 动态点已处理，不得在此再叠一层）。
+    """
+    assert isDegraded({"llmUnavailable": False, "stepsExecuted": 0}) is True  # 零个数据步
+    assert isDegraded({"llmUnavailable": False}) is True  # 缺键（旧缺陷形状 / 未知路径）⇒ 按 0
+    assert isDegraded({"llmUnavailable": False, "stepsExecuted": 1}) is False  # 有步执行（0 行也算）
+    assert isDegraded({"llmUnavailable": True, "stepsExecuted": 3}) is True  # 无 LLM
+
+
+class _ResolveClientProbe:
+    """缺源用例的探针：记录 `resolveClient` 调用次数。
+
+    I1（审查裁定）：原 `_StubClient` 靠 `complete()` 抛 `AssertionError` 假装「钉住了顺序」，
+    但 `FakeNl2Sql.generateSql` **从不调** `llmClient.complete` ⇒ 该守卫永不触发（死代码）。
+    改为对**真实调用点**计数：闸门先于生成面 ⇒ 本探针与 `FakeNl2Sql.calls` 都必须为空。
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, *args, **kwargs):
+        self.calls += 1
+        return (FakeLlmClient(HYPOTHESIS_JSON), FakeModelConfig())
+
+
+@pytest.mark.asyncio
+async def test_execute_step_without_binding_fails_loudly_before_generation(
+    dbSession, makeService
+) -> None:
+    """无业务源绑定 + 该步**无预置 SQL** ⇒ 抛 `RuntimeError`，不是 `AttributeError`。
+
+    根因（审查 Important-2）：原顺序把 adapter 闸门 (`adapterFor`) 放在 `generateStepSql`
+    **之后**，而后者内部读 `dialectArgsFor(deps.datasource)` ⇒ 缺源时先炸在 `None.type` 上，
+    报的是 `AttributeError`（看起来像程序 bug），`adapterFor` 的显式 `RuntimeError`
+    （「缺业务源」的契约错误码）永远没机会触发，调用方也无法据此判因。
+
+    现闸门（`businessBinding`）移到相位内第一步、**先于**生成面，本用例直接对 `runStep` 断言；
+    并顺带把「生成面确实没被走到」钉成**真断言**（I1：计数为 0），而非永假的抛错守卫。
+    """
+    probe = _ResolveClientProbe()
+    nl2sql = FakeNl2Sql(sql="SELECT 1 AS cnt")
+    deps = ExecutionDeps(
+        runner=FakeRunner(),
+        chart=FakeChart(),
+        ontology=FakeOntology(),
+        nl2sql=nl2sql,
+        resolveClient=probe,
+        recordUsage=FakeUsageRecorder().recordUsage,
+        # 刻意**不带** adapter / dialectArgs（模拟接线缺失的相位边界）
+    )
+    step = {"index": 0, "description": "收货量趋势", "sub_question": "近12月收货量"}  # 无预置 SQL
+
+    with pytest.raises(RuntimeError):
+        await runStep(
+            dbSession,
+            step,
+            sessionId=uuid.uuid4(),
+            state={"question": QUESTION},
+            emit=None,
+            deps=deps,
+        )
+
+    assert probe.calls == 0  # 闸门先于生成面：连 LLM 客户端解析都不该发生
+    assert nl2sql.calls == []  # 也没有任何一步 SQL 生成被触发
+
+
+# ---------------------------------------------------------------------------
+# Task 17（N1'）：失败步不再冒充「已执行」；全部步失败 ⇒ 急停
+#
+# 用户裁定：「全部步失败 ⇒ fail loud；部分失败 ⇒ `degraded=true`」。
+# 缺陷：`stepsExecuted=len(results)` 把**带 error 的步**也算成「已执行」⇒ 执行步全失败的
+# turn 仍报 `degraded:false` 并出报告（真机验收实证，与 N1 同一危害的另一条路径）。
+# ---------------------------------------------------------------------------
+
+
+def _collector():
+    """本批用例共用的事件收集器：返回 `(events, emit)`。"""
+    events: list[tuple[str, dict]] = []
+
+    async def collect(event: str, payload: dict) -> None:
+        events.append((event, payload))
+
+    return events, collect
+
+
+async def _sessionStatus(dbSession, sessionId) -> str:
+    return (
+        await dbSession.execute(
+            text("SELECT status FROM research_session WHERE id = :sid"), {"sid": sessionId}
+        )
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_all_steps_failed_fails_turn_without_report(dbSession, makeService) -> None:
+    """N1' 主守卫：单步计划、SQL 生成恒失败 ⇒ **全部步失败 ⇒ 终态失败**，不出报告。
+
+    修复前：失败步被吞成「无数据步」且计入 `stepsExecuted` ⇒ 本 turn 一路走到
+    `research.report` + `research.done {"degraded": false}`（真机验收的事件序实证）。
+    """
+    events, collect = _collector()
+    planner = FakePlanner(steps=(SqlStep(index=0, description="x", sub_question="y"),))
+    nl2sql = FakeNl2Sql(error=Nl2SqlError("无法生成有效的查询 SQL"))
+    svc = makeService(
+        planner=planner,
+        nl2sql=nl2sql,
+        autoConfirm=True,
+        # 注入可用 LLM：让本用例只钉「步失败」这一维（否则 llmUnavailable 也会致降级）
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+
+    assert nl2sql.calls  # 失败确实发生在生成面（不是没接线）
+    names = [event for (event, _) in events]
+    errors = [p for (event, p) in events if event == "research.error"]
+    assert errors and errors[-1]["code"] == "turn_failed"  # 终态错误（沿用既有通道）
+    assert errors[-1]["uiHint"] == "terminal"  # 关流/终态语义由 uiHint 承载（Task 8.5 SSOT）
+    assert "research.report" not in names  # 不出报告
+    assert "research.done" not in names  # 也不补 done
+    # 零个数据事件（与真机验收同一症状）
+    assert [p["index"] for (event, p) in events if event == "research.step.data"] == []
+    assert await _sessionStatus(dbSession, s.id) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_all_steps_failed_after_skip_resume_still_fails_turn(dbSession, makeService) -> None:
+    """N1' + 恢复轮语义：唯一的一步失败 → 动态点「跳过」→ 恢复轮循环跑完 ⇒ **仍急停**。
+
+    `_autoConfirm=False`（默认路径）时，首个失败步会**暂停**在 `low_confidence_step`，
+    不跑到循环尾；轮到恢复轮才跑完。恢复轮的 `results` 由 `state["stepResults"]` 播种
+    （`rebuildState` 自 checkpoint 载荷还原）⇒ 前一轮的失败结果随恢复轮回流，
+    「全部步失败」判据必须跨越这条暂停/恢复边界仍然成立。
+    """
+    events, collect = _collector()
+    planner = FakePlanner(steps=(SqlStep(index=0, description="x", sub_question="y"),))
+    svc = makeService(
+        planner=planner,
+        nl2sql=FakeNl2Sql(error=Nl2SqlError("无法生成有效的查询 SQL")),
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    assert status == "awaiting_user"
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → planning
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #2 → execute（步失败 → 动态点）
+
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "low_confidence_step"
+    assert cp.options["stepsExecuted"] == 0  # 失败步**不**冒充已执行步
+
+    # 「跳过」⇒ 恢复轮从 nextStepIndex 起跑（本计划只此一步 ⇒ 循环无新步），但失败结果仍在
+    with pytest.raises(RuntimeError):
+        await _resolve(svc, dbSession, s.id, "confirm", emit=collect)
+
+    names = [event for (event, _) in events]
+    assert [p["code"] for (event, p) in events if event == "research.error"] == ["turn_failed"]
+    assert "research.report" not in names and "research.done" not in names
+    assert await _sessionStatus(dbSession, s.id) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_partial_step_failure_continues_with_degraded_true(dbSession, makeService) -> None:
+    """N1'：**部分失败**（步 0 失败、步 1 成功返回行）⇒ 继续出报告，但 `degraded: true`。
+
+    修复前：`stepsExecuted=len(results)=2` ⇒ `degraded: false`（失败步冒充「已执行」）。
+    用户裁定：部分失败**不**急停，但必须显式降级。
+    """
+    events, collect = _collector()
+    planner = FakePlanner(
+        steps=(
+            SqlStep(index=0, description="失败步", sub_question="y"),  # 无 SQL ⇒ 走生成面并失败
+            SqlStep(index=1, description="成功步", sub_question="近3月", sql="SELECT 2"),
+        )
+    )
+    runner = FakeRunner(rows=[{"cnt": 1}])
+    svc = makeService(
+        planner=planner,
+        nl2sql=FakeNl2Sql(error=Nl2SqlError("无法生成有效的查询 SQL")),
+        runner=runner,
+        autoConfirm=True,
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+    assert status == "done"
+
+    assert runner.executed == ["SELECT 2"]  # 失败步没执行 SQL；成功步真的执行了
+    assert [p["rowCount"] for (event, p) in events if event == "research.step.data"] == [1]
+    assert "research.report" in [event for (event, _) in events]  # 部分失败仍出报告
+    done = [p for (event, p) in events if event == "research.done"]
+    assert done and done[-1]["degraded"] is True  # 部分失败 ⇒ 显式降级
+
+
+@pytest.mark.asyncio
+async def test_partial_failure_degraded_survives_hypothesis_resume(dbSession, makeService) -> None:
+    """N1' + 恢复轮：部分失败后从**假设 checkpoint** 恢复 ⇒ `degraded` 仍须为 `true`。
+
+    `stepsExecuted` 须随 checkpoint 载荷携带并由 `rebuildState` 还原（Task 14 契约）。
+    若假设点仍写 `len(stepResults)`（含失败步），恢复轮会把 `degraded` 退回 `false` —— 同一缺陷的另一条出口。
+    """
+    events, collect = _collector()
+    planner = FakePlanner(
+        steps=(
+            SqlStep(index=0, description="失败步", sub_question="y"),
+            SqlStep(index=1, description="成功步", sub_question="近3月", sql="SELECT 2"),
+        )
+    )
+    svc = makeService(
+        planner=planner,
+        nl2sql=FakeNl2Sql(error=Nl2SqlError("无法生成有效的查询 SQL")),
+        runner=FakeRunner(rows=[{"cnt": 1}]),
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → planning
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #2 → execute：步 0 失败 → 动态点
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "low_confidence_step"
+    await _resolve(svc, dbSession, s.id, "confirm")  # 跳过失败步 → 步 1 成功 → 假设点
+
+    cp2 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp2 is not None and cp2.phase == "hypothesis"
+    assert cp2.options["stepsExecuted"] == 0  # 含失败步 ⇒ 新口径记 0（供恢复轮还原）
+    # 从假设点 confirm 恢复（不重跑 execute）⇒ done 仍须报降级
+    assert await _resolve(svc, dbSession, s.id, "confirm", emit=collect) == "done"
+    done = [p for (event, p) in events if event == "research.done"]
+    assert done and done[-1]["degraded"] is True
+
+
+@pytest.mark.asyncio
+async def test_zero_row_success_keeps_degraded_false(dbSession, makeService) -> None:
+    """防回退护栏（Task 14 口径，**修复前后都应为绿**）：步成功执行但 0 行 ⇒ `degraded: false`。
+
+    它钉住「`degraded` 不依赖行数」：0 行是**合法答案**（该窗口确无数据），既有机制已把它变成
+    `low_confidence_step` 动态点，不得在新口径下被误标降级。
+    """
+    events, collect = _collector()
+    planner = FakePlanner(
+        steps=(SqlStep(index=0, description="空窗口", sub_question="近1天", sql="SELECT 1"),)
+    )
+    svc = makeService(
+        planner=planner,
+        runner=FakeRunner(rows=[]),
+        autoConfirm=True,
+        llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
+    )
+    s = await _newSession(svc, dbSession)
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+    assert status == "done"
+
+    assert [p["rowCount"] for (event, p) in events if event == "research.step.data"] == [0]
+    done = [p for (event, p) in events if event == "research.done"]
+    assert done and done[-1]["degraded"] is False
+
+
+@pytest.mark.asyncio
+async def test_no_llm_single_step_fallback_fails_turn_without_report(dbSession, makeService) -> None:
+    """N1' 边界（本轮钉死）：无可用 LLM + 计划回落到单步（`sql: None`）⇒ 该步 `STEP_MISSING_SQL`
+    ⇒ 全部步失败 ⇒ **终态失败**，不出报告。
+
+    这是「全部步失败 ⇒ 急停」闸门在**无 LLM**场景下的**期望**行为（用户裁定，本轮不得推翻）：
+    `plan=None` ⇒ `singleStepPlan` 恒给 `sql: None`，该步需 LLM 生成 SQL 而本轮无可用 LLM ⇒
+    一个数据步都没执行。若仍出报告，报告会完全由 `confidence≈0.13` / `verified:false` 的未验证
+    猜测堆成 —— 正是 N1/N1' 要消灭的东西。
+
+    对照 `test_research_stream.py::test_degraded_error_does_not_close_stream`：那条的降级成立**仅**
+    因为该轮计划步**自带 SQL**（无需 LLM 生成）；本用例补上它的另一侧 —— 计划回落到无 SQL 的单步
+    时，同一「无 LLM」输入走的是终态失败，**不**降级出报告。
+
+    护栏（**非 RED**）：钉的是 Task 17 已落地、且经用户裁定保留的行为，改动前后都应绿。
+    """
+    events, collect = _collector()
+    planner = FakePlanner(planNone=True)  # 单步语义 ⇒ singleStepPlan（步 sql=None，需生成）
+    # 注入一个**本可成功**的生成面：让「无可用 LLM」成为本 turn 失败的**致因**（若真有 LLM，
+    # 该 fake 会返回有效 SQL、该步即成功 —— 也就走不到本用例的终态失败）。
+    nl2sql = FakeNl2Sql(sql="SELECT 1 AS cnt")
+    svc = makeService(
+        planner=planner,
+        nl2sql=nl2sql,
+        autoConfirm=True,
+        llmFactory=None,  # 无可用 LLM（与 test_research_stream 的降级用例同装配）
+        modelConfigs=FakeModelConfigs([]),
+    )
+    s = await _newSession(svc, dbSession)
+
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1, emit=collect)
+
+    # 无可用 LLM ⇒ `generateStepSql` 在 `resolveClient` 返回 None 时**先行短路**（不调生成面）
+    # ⇒ 该步落 `STEP_MISSING_SQL`（日志「执行步缺 SQL，按无数据跳过」即此分支）。
+    assert nl2sql.calls == []
+    names = [event for (event, _) in events]
+    codes = [p["code"] for (event, p) in events if event == "research.error"]
+    assert "turn_failed" in codes  # 终态错误（沿用既有通道）
+    assert codes[-1] == "turn_failed"  # 且为末帧：其后不补 report / done
+    assert "research.report" not in names  # 不出报告
+    assert "research.done" not in names  # 也不补 done
+    # 零个数据事件（该 turn 一个数据步都没执行 —— 正是本闸门要拦的形状）
+    assert [p["index"] for (event, p) in events if event == "research.step.data"] == []
+    assert await _sessionStatus(dbSession, s.id) == "failed"  # 会话置 failed（终态）
+
+
+# ---------------------------------------------------------------------------
+# W5-b 接线（fix round 1）：会话行 model_id → state → 执行期直选
+#
+# 单测已证明 ports 收到 `preferredModelId` 后行为正确；本组证明**服务侧确实把会话
+# 选定的 id 送到了那里**（runTurn 的初始 state / resumeTurn 的恢复态各一处）。
+# 断言「到达 llmFactory 的配置 id」与「router 未被调用」，而不是只断言调用发生。
+# ---------------------------------------------------------------------------
+
+
+class _ListRecorder(FakeModelConfigs):
+    """记录每次 `list` 的 `activeOnly`：显式选定必须读**全量**清单（False）。"""
+
+    def __init__(self, configs=None) -> None:
+        super().__init__(configs)
+        self.activeOnlyCalls: list[bool] = []
+
+    async def list(self, session, *, activeOnly: bool = False):
+        self.activeOnlyCalls.append(activeOnly)
+        return await super().list(session, activeOnly=activeOnly)
+
+
+def _recordingFactory(seen: list):
+    """llmFactory 探针：记录 `resolveClient` 交出的**已选配置**。"""
+
+    def factory(config):
+        seen.append(config)
+        return ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+
+    return factory
+
+
+def _choiceConfigs() -> _ListRecorder:
+    """首位（自动路由会选中的）id=7 + 会话选定的 id=42 —— 两者可区分才算断言。"""
+    return _ListRecorder([FakeModelConfig(id=7), FakeModelConfig(id=42, model_name="chosen")])
+
+
+@pytest.mark.asyncio
+async def test_run_turn_direct_selects_session_model_without_router(
+    dbSession, makeService
+) -> None:
+    """runTurn：会话选定的模型直选（跳过 router），且读的是**全量**清单。"""
+    seen: list = []
+    router = FakeModelRouter()
+    configs = _choiceConfigs()
+    svc = makeService(
+        autoConfirm=True, llmFactory=_recordingFactory(seen),
+        modelConfigs=configs, modelRouter=router,
+    )
+    s = await _newSessionWithModel(svc, dbSession, modelId=42)
+
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+
+    assert status == "done"
+    assert seen and {cfg.id for cfg in seen} == {42}  # 到达 ports 的是会话选定的配置
+    assert router.calls == []  # 直选 ⇒ 不进路由器
+    assert set(configs.activeOnlyCalls) == {False}  # 显式选定读全量（停用项也算「存在」）
+
+
+@pytest.mark.asyncio
+async def test_resume_turn_reinjects_session_model_choice(dbSession, makeService) -> None:
+    """resumeTurn：checkpoint 载荷不带 modelId ⇒ 恢复态必须补回会话选定的模型。
+
+    去掉 `state["modelId"] = row.model_id` 后本用例转红：`resolveClient` 收到 None
+    ⇒ 自动路由选中列表首位（id=7），而非会话选定的 42。
+    """
+    seen: list = []
+    router = FakeModelRouter()
+    configs = _choiceConfigs()
+    svc = makeService(
+        llmFactory=_recordingFactory(seen), modelConfigs=configs, modelRouter=router
+    )
+    s = await _newSessionWithModel(svc, dbSession, modelId=42)
+
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    assert status == "awaiting_user" and seen == []  # intent 相位零 LLM，尚未取客户端
+
+    resumed = await _resolve(svc, dbSession, s.id, "confirm")  # → plan 相位（LLM）
+
+    assert resumed == "awaiting_user"
+    assert seen and {cfg.id for cfg in seen} == {42}
+    assert router.calls == []
+    assert set(configs.activeOnlyCalls) == {False}

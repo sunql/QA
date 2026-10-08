@@ -70,7 +70,7 @@ export interface JoinTabProps {
 
 /** 关联目录（运行时 JOIN 唯一真源）：增/删 join 边（改 = 删 + 建）。 */
 export default function JoinTab({ classes }: JoinTabProps) {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const [joins, setJoins] = useState<OntologyJoin[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -98,7 +98,7 @@ export default function JoinTab({ classes }: JoinTabProps) {
     if (!onlyForeignKeys) return byFilters;
     return byFilters.filter((j) => j.relationType === "foreign_key");
   }, [joins, filters, onlyForeignKeys]);
-  const joinClassFilterOptions = classOptions(t, classes).map((o) => ({
+  const joinClassFilterOptions = classOptions(classes, locale).map((o) => ({
     value: String(o.value),
     label: o.label,
   }));
@@ -293,7 +293,7 @@ export default function JoinTab({ classes }: JoinTabProps) {
               >
                 <Select
                   placeholder={t("forms.ontology.joinPlaceholders.sourceClassId")}
-                  options={classOptions(t, classes)}
+                  options={classOptions(classes, locale)}
                 />
               </Form.Item>
             </Col>
@@ -316,7 +316,7 @@ export default function JoinTab({ classes }: JoinTabProps) {
               >
                 <Select
                   placeholder={t("forms.ontology.joinPlaceholders.targetClassId")}
-                  options={classOptions(t, classes)}
+                  options={classOptions(classes, locale)}
                 />
               </Form.Item>
             </Col>

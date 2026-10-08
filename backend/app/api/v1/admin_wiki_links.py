@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getSessionDep, getAdminOnlyActor
+from app.domain.models import OntologyClass, OntologyMetric, OntologyProperty
 from app.domain.schemas import WikiLinkOut, WikiLinkableTargetOut
 from app.services.wiki_link_service import (
     LinkNotFoundError, WikiLinkService, WikiLinkRow, LinkableTarget,
@@ -19,7 +22,7 @@ router = APIRouter(prefix="/api/v1/admin/wiki-links", tags=["admin-wiki-links"])
 class CreateWikiLinkRequest(BaseModel):
     page_id: str = Field(..., max_length=64)
     chunk_id: str | None = Field(None, max_length=64)
-    ontology_type: str = Field(..., pattern="^(class|property)$")
+    ontology_type: str = Field(..., pattern="^(class|property|metric)$")
     ontology_id: int = Field(..., gt=0)
     weight: Decimal = Field(default=Decimal("1.0"), ge=0, le=1)
     note: str | None = Field(None, max_length=200)
@@ -30,13 +33,50 @@ class UpdateWikiLinkRequest(BaseModel):
     note: str | None = Field(None, max_length=200)
 
 
-def _row_to_out(r: WikiLinkRow) -> dict:
-    return WikiLinkOut(
-        id=r.id, page_id=r.page_id, chunk_id=r.chunk_id,
-        ontology_type=r.ontology_type, ontology_id=r.ontology_id,
-        weight=float(r.weight), note=r.note, created_by=r.created_by,
-        revoked_time=r.revoked_time,
-    ).model_dump(mode="json")
+_ONTOLOGY_NAME_FIELDS: dict[str, tuple[Any, str, str]] = {
+    "class": (OntologyClass, "class_name", "class_alias"),
+    "property": (OntologyProperty, "property_name", "property_alias"),
+    "metric": (OntologyMetric, "metric_name", "metric_alias"),
+}
+
+
+async def _resolveOntologyLabels(
+    session: AsyncSession, rows: list[WikiLinkRow],
+) -> dict[tuple[str, int], tuple[str | None, str | None]]:
+    """批量解析 (type, id) → (name, alias)。每张本体表一次 IN 查询，避免 N+1。"""
+    out: dict[tuple[str, int], tuple[str | None, str | None]] = {}
+    byType: dict[str, list[int]] = {}
+    for r in rows:
+        byType.setdefault(r.ontology_type, []).append(r.ontology_id)
+
+    for ontologyType, ids in byType.items():
+        fields = _ONTOLOGY_NAME_FIELDS.get(ontologyType)
+        if fields is None:
+            continue
+        model, nameAttr, aliasAttr = fields
+        stmt = select(model.id, getattr(model, nameAttr), getattr(model, aliasAttr)).where(
+            model.id.in_(set(ids))
+        )
+        for row in (await session.execute(stmt)).all():
+            out[(ontologyType, row[0])] = (row[1], row[2])
+    return out
+
+
+async def _rowsToOut(
+    session: AsyncSession, rows: list[WikiLinkRow],
+) -> list[dict]:
+    labels = await _resolveOntologyLabels(session, rows)
+    out = []
+    for r in rows:
+        name, alias = labels.get((r.ontology_type, r.ontology_id), (None, None))
+        out.append(WikiLinkOut(
+            id=r.id, page_id=r.page_id, chunk_id=r.chunk_id,
+            ontology_type=r.ontology_type, ontology_id=r.ontology_id,
+            ontology_name=name, ontology_alias=alias,
+            weight=float(r.weight), note=r.note, created_by=r.created_by,
+            revoked_time=r.revoked_time,
+        ).model_dump(mode="json"))
+    return out
 
 
 def _target_to_out(t: LinkableTarget) -> dict:
@@ -56,9 +96,9 @@ async def list_links(
     svc = WikiLinkService()
     if page_id:
         rows = await svc.getLinksByPage(session, page_id)
-    else:
-        rows = await svc.listAllLinks(session, ontology_type=ontology_type, ontology_id=ontology_id)
-    return [_row_to_out(r) for r in rows]
+        return await _rowsToOut(session, rows)
+    rows = await svc.listAllLinks(session, ontology_type=ontology_type, ontology_id=ontology_id)
+    return await _rowsToOut(session, rows)
 
 
 @router.post("", status_code=201)
@@ -78,7 +118,7 @@ async def create_link(
         actor=_admin,
     )
     await session.commit()
-    return _row_to_out(row)
+    return (await _rowsToOut(session, [row]))[0]
 
 
 @router.delete("/{link_id}")
@@ -92,7 +132,7 @@ async def revoke_link(
     except LinkNotFoundError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="link not found")
     await session.commit()
-    return _row_to_out(row)
+    return (await _rowsToOut(session, [row]))[0]
 
 
 @router.patch("/{link_id}")
@@ -110,7 +150,7 @@ async def update_link(
     except LinkNotFoundError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="link not found")
     await session.commit()
-    return _row_to_out(row)
+    return (await _rowsToOut(session, [row]))[0]
 
 
 @router.get("/linkables")

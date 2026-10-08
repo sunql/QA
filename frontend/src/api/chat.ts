@@ -1,17 +1,11 @@
 import { httpClient } from "./client";
 import { API_BASE_URL } from "../config";
-import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery } from "../types/chat";
+import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery, TablePayload, VisualRationale } from "../types/chat";
 import { i18n } from "../i18n";
 import { authHeaders } from "./authHeaders";
+import { asChartOption, asTablePayload, asVisualRationale, normalizeChartType } from "../utils/chartContract";
 
 const BASE = "/chat";
-
-// 与后端 ChartType 枚举对齐，供运行时校验（避免不安全 cast 把非法值透传给渲染层）
-const VALID_CHART_TYPES = new Set<string>(["table", "bar", "pie", "line", "scatter"]);
-
-function isChartType(value: unknown): value is ChartType {
-  return typeof value === "string" && VALID_CHART_TYPES.has(value);
-}
 
 // ReAct 查询计划运行时校验（M2）：API 为系统边界，形状不符时不渲染 QueryPlanCard
 function isQueryPlan(value: unknown): value is QueryPlan {
@@ -42,9 +36,13 @@ export interface StepPlanView {
 // multi_step_plan 事件负载（完整计划概览，循环前一次下发）
 export interface StepPlanOverviewItem extends StepPlanView {
   aggregationOnly: boolean;
+  // F7/IMP-6：续跑时后端为「已跳过（已持久化完成）」的步回放终态。只认 "done"
+  // （唯一被回放的终态），缺省 ⇒ 前端按「待执行」处理。
+  status?: "done";
 }
 
 // step_result 事件负载（单个子步骤执行结果）
+// 图表两字段由决策引擎每步各自产出（失败步骤为 null）——收窄后恒存在。
 export interface StepResultView {
   stepIndex: number;
   description: string;
@@ -53,6 +51,19 @@ export interface StepResultView {
   data?: Record<string, unknown>[] | null;
   summary?: string | null;
   error?: string | null;
+  chartType?: ChartType | null;
+  chartOption?: Record<string, unknown> | null;
+  // 每步的明细表负载 + 判断依据（0107）；失败步骤为 null
+  tableOption?: TablePayload | null;
+  visualRationale?: VisualRationale | null;
+  queryPlan?: QueryPlan | null;
+}
+
+// step_compressed 事件负载（Task 6 新增）：某个更早的步被压缩后补发
+export interface StepCompressedView {
+  stepIndex: number;
+  originalRows: number;
+  compressedRows: number;
 }
 
 function isStepIndex(value: unknown): value is number {
@@ -75,13 +86,60 @@ function isStepPlanOverviewItem(value: unknown): value is StepPlanOverviewItem {
   return isStepPlan(value) && typeof record.aggregationOnly === "boolean";
 }
 
+/**
+ * F7/IMP-6：收窄概览步的回放终态（系统边界）。
+ *
+ * 后端续跑时会给「已跳过」的步回放 `status: "done"`；旧后端 / 异常值不带。这里只认
+ * `"done"`，其余（未知字符串、数字、null）一律归零为 undefined ⇒ 前端按「待执行」处理，
+ * 不让未校验的值流进 store。返回**新对象**（不可变），不原地改 SSE 帧。
+ */
+function normalizeOverviewStatus(item: StepPlanOverviewItem): StepPlanOverviewItem {
+  const raw = (item as { status?: unknown }).status;
+  return raw === "done" ? { ...item, status: "done" } : { ...item, status: undefined };
+}
+
 export function isStepResult(value: unknown): value is StepResultView {
   return isStepPlan(value);
 }
 
+/**
+ * 收窄 step_result 负载（系统边界）：形状不符返回 null，图表字段非法一律置 null。
+ *
+ * 返回**新对象**（不可变），不原地改 SSE 帧。图表字段是决策引擎多步每步出图的
+ * 载体：失败步骤不带这两字段，收窄后为 null，渲染层据此不画（而不是画一张空图）。
+ */
+function normalizeStepResult(value: unknown): StepResultView | null {
+  if (!isStepResult(value)) return null;
+  const record = value as unknown as Record<string, unknown>;
+  return {
+    ...value,
+    chartType: normalizeChartType(record.chartType),
+    chartOption: asChartOption(record.chartOption),
+    tableOption: asTablePayload(record.tableOption),
+    visualRationale: asVisualRationale(record.visualRationale),
+  };
+}
+
+/** 收窄非流式响应（同一道系统边界：白名单只对 SSE 帧生效会让两条路径口径分叉）。 */
+function normalizeChatResponse(response: ChatResponse): ChatResponse {
+  const record = response as unknown as Record<string, unknown>;
+  return {
+    ...response,
+    chartType: normalizeChartType(record.chartType),
+    chartOption: asChartOption(record.chartOption),
+    tableOption: asTablePayload(record.tableOption),
+    visualRationale: asVisualRationale(record.visualRationale),
+    steps: Array.isArray(response.steps)
+      ? response.steps
+          .map(normalizeStepResult)
+          .filter((step): step is StepResultView => step !== null)
+      : response.steps,
+  };
+}
+
 export async function sendMessage(payload: ChatRequest): Promise<ChatResponse> {
   const res = await httpClient.post<ChatResponse>(BASE, payload);
-  return res.data;
+  return normalizeChatResponse(res.data);
 }
 
 // ===== v3.1 B6（M7 Hypothesis Hook）：「可能原因」假设 =====
@@ -137,10 +195,12 @@ export async function getSuggestions(
 
 // ===== SSE 流式（5.6）=====
 
-// 图表事件负载（chart 事件携带 chartType + ECharts option + 数据）
+// 图表事件负载（chart 事件携带 chartType + ECharts option + 数据 + 明细表 + 判断依据）
 export interface StreamChartData {
   chartType: ChartType | null;
   chartOption: Record<string, unknown> | null;
+  tableOption: TablePayload | null;
+  visualRationale: VisualRationale | null;
   data: Record<string, unknown>[] | null;
 }
 
@@ -158,6 +218,11 @@ export interface StreamSummary {
   graphTraversal?: import("../types/graphTraversal").GraphTraversalRead | null;
   // Phase 7 G4：未指名 Agent 语义路由建议卡片（中置信命中时随 done 帧透传）
   suggestedAgent?: import("../types/chat").AgentSuggestion | null;
+  // 多步时顶层查询计划
+  queryPlan?: import("../types/chat").QueryPlan | null;
+  // 0107：多步汇总/降级收尾的判断依据（SUMMARY_TEXT_ONLY）。done 帧**不带 tableOption**
+  //（多步顶层无表；单步表走 chart 事件）。单步 done 帧也不带此字段（其依据已由 chart 事件下发）。
+  visualRationale?: import("../types/chat").VisualRationale | null;
 }
 
 // data_quality 事件负载（Phase 1.4）：每张 selectedClass 对应一条 badge
@@ -187,9 +252,12 @@ export interface StreamEventHandlers {
   onDone?: (summary: StreamSummary) => void;
   onError?: (message: string, detail?: string) => void;
   // 多步：完整计划概览 / 单个子步骤计划（进入执行）/ 单个子步骤结果
-  onStepPlanOverview?: (steps: StepPlanOverviewItem[]) => void;
+  // runId：Task 6 起 multi_step_plan 事件携带；单步路径不发 ⇒ undefined
+  onStepPlanOverview?: (steps: StepPlanOverviewItem[], runId?: string) => void;
   onStepPlan?: (step: StepPlanView) => void;
   onStepResult?: (result: StepResultView) => void;
+  // 多步：某个**更早**的步被上下文压缩（其 step_result 早已发过，故单独补一条）
+  onStepCompressed?: (payload: StepCompressedView) => void;
   // Phase 1.4：目标表可信度 badge
   onDataQuality?: (payload: StreamDataQualityPayload) => void;
   // 类召回诊断（2026-09-16）：截断/降级时前端提示
@@ -207,12 +275,24 @@ export async function sendMessageStream(
   payload: ChatRequest,
   handlers: StreamEventHandlers
 ): Promise<void> {
+  return postSseStream(`${BASE}/stream`, payload, handlers);
+}
+
+/**
+ * 通用 SSE POST：路径可变，解析/分发逻辑与 sendMessageStream 完全共用。
+ */
+async function postSseStream(
+  path: string,
+  body: unknown,
+  handlers: StreamEventHandlers,
+  extraHeaders: Record<string, string> = {}
+): Promise<void> {
   // 走裸 fetch（SSE 流式 axios 不友好）—— 不经 httpClient 拦截器，
   // 故用 authHeaders()（SSOT）手动注入 Authorization + X-Tenant-Id。
-  const response = await fetch(`${API_BASE_URL}${BASE}/stream`, {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(payload),
+    headers: authHeaders({ "Content-Type": "application/json", ...extraHeaders }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -240,6 +320,24 @@ export async function sendMessageStream(
   } finally {
     reader.releaseLock();
   }
+}
+
+/**
+ * 续跑一个失败的多步 run（spec §7）。响应同样是 SSE 流，复用同一套帧解析。
+ *
+ * Idempotency-Key 由前端生成：后端据它去重，重复提交不会重跑（spec §7.3）。
+ */
+export async function resumeMultiStepRun(
+  runId: string,
+  fromStepIndex: number | undefined,
+  handlers: StreamEventHandlers
+): Promise<void> {
+  return postSseStream(
+    `${BASE}/multi-step/${encodeURIComponent(runId)}/resume`,
+    { fromStepIndex },
+    handlers,
+    { "Idempotency-Key": crypto.randomUUID() }
+  );
 }
 
 function consumeFrames(buffer: string, handlers: StreamEventHandlers): string {
@@ -289,8 +387,10 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
       break;
     case "chart":
       handlers.onChart?.({
-        chartType: isChartType(d.chartType) ? d.chartType : null,
-        chartOption: (d.chartOption as Record<string, unknown>) ?? null,
+        chartType: normalizeChartType(d.chartType),
+        chartOption: asChartOption(d.chartOption),
+        tableOption: asTablePayload(d.tableOption),
+        visualRationale: asVisualRationale(d.visualRationale),
         data: (d.data as Record<string, unknown>[]) ?? null,
       });
       break;
@@ -314,6 +414,8 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
         supplierRisk: (d.supplierRisk as StreamSummary["supplierRisk"]) ?? null,
         graphTraversal: (d.graphTraversal as StreamSummary["graphTraversal"]) ?? null,
         suggestedAgent: (d.suggestedAgent as StreamSummary["suggestedAgent"]) ?? null,
+        // 0107：多步汇总/降级收尾的 SUMMARY_TEXT_ONLY 只能经 done 帧抵达前端
+        visualRationale: asVisualRationale(d.visualRationale),
       });
       break;
     case "error":
@@ -324,10 +426,23 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
       break;
     case "multi_step_plan":
       if (Array.isArray(d.steps)) {
-        const steps = d.steps.filter(isStepPlanOverviewItem);
+        const steps = d.steps.filter(isStepPlanOverviewItem).map(normalizeOverviewStatus);
         if (steps.length) {
-          handlers.onStepPlanOverview?.(steps);
+          // 单步路径不发 runId ⇒ undefined（前端据此不渲染续跑按钮）
+          handlers.onStepPlanOverview?.(
+            steps,
+            typeof d.runId === "string" ? d.runId : undefined
+          );
         }
+      }
+      break;
+    case "step_compressed":
+      if (isStepIndex(d.stepIndex)) {
+        handlers.onStepCompressed?.({
+          stepIndex: d.stepIndex,
+          originalRows: typeof d.originalRows === "number" ? d.originalRows : 0,
+          compressedRows: typeof d.compressedRows === "number" ? d.compressedRows : 0,
+        });
       }
       break;
     case "step_plan":
@@ -335,11 +450,13 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
         handlers.onStepPlan?.(d);
       }
       break;
-    case "step_result":
-      if (isStepResult(d)) {
-        handlers.onStepResult?.(d);
+    case "step_result": {
+      const stepResult = normalizeStepResult(d);
+      if (stepResult) {
+        handlers.onStepResult?.(stepResult);
       }
       break;
+    }
     case "data_quality":
       if (Array.isArray(d.badges)) {
         const badges = d.badges.filter(isDataQualityBadge);

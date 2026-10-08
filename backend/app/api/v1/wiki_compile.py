@@ -20,7 +20,7 @@ from app.services.wiki_compile_service import WikiCompileService
 from app.services.wiki_page_service import WikiPageService
 from app.services.messages_zh import MSG_WIKI_COMPILE_TASK_NOT_FOUND, MSG_WIKI_CLAIM_NOT_FOUND
 
-router = APIRouter(prefix="/wiki/compile", tags=["compile"])
+router = APIRouter(prefix="/wiki/compile", tags=["compile"], dependencies=[Depends(getCurrentUser)])
 
 def _task_to_read(t: WikiCompileTask) -> WikiCompileTaskRead:
     return WikiCompileTaskRead(

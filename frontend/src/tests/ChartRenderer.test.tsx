@@ -93,6 +93,58 @@ describe("ChartRenderer", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  // ===== KPI 指标卡（决策 7）：不是 ECharts，走 KpiCard =====
+
+  it("KPI 类型渲染指标卡而不是 ECharts 画布", () => {
+    const { container } = render(
+      <ChartRenderer
+        chartType="kpi"
+        chartOption={{ kpi: { label: "供应商及时交货率", value: 0.954, unit: "%", delta: null } }}
+      />
+    );
+
+    expect(screen.getByText("供应商及时交货率")).toBeInTheDocument();
+    // antd Statistic 把整数位与小数位拆成两个 span，整体文本要读容器
+    expect(container.textContent).toContain("0.954");
+    expect(screen.getByText("%")).toBeInTheDocument();
+    // 没有 echarts 节点 —— KPI 走 ECharts 会渲染出一张空画布
+    expect(screen.queryByTestId("echarts-mock")).toBeNull();
+  });
+
+  it("KPI 承前端主题色（服务端不发颜色）", () => {
+    const { container } = render(
+      <ChartRenderer
+        chartType="kpi"
+        chartOption={{ kpi: { label: "收货量", value: 9812, unit: null, delta: null } }}
+      />
+    );
+
+    // valueStyle 落在 .ant-statistic-content 上；antd 默认把数值按千分位格式化
+    expect(container.textContent).toContain("9,812");
+    const content = container.querySelector<HTMLElement>(".ant-statistic-content");
+    expect(content).not.toBeNull();
+    // LIGHT_TOKEN.colorPrimary（默认非暗色）—— 颜色只可能来自前端 token
+    expect(content?.style.color).toBe("rgb(0, 184, 169)");
+  });
+
+  it("KPI 无负载（后端降级为不发卡）时整块不渲染", () => {
+    const { container } = render(<ChartRenderer chartType="kpi" chartOption={{ kpi: null }} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("KPI 的 delta 为空时不渲染涨跌行（一期恒 null）", () => {
+    render(
+      <ChartRenderer
+        chartType="kpi"
+        chartOption={{ kpi: { label: "收货量", value: 9812, unit: null, delta: null } }}
+      />
+    );
+
+    expect(screen.queryByText("+undefined")).toBeNull();
+  });
+
+
+
   it("表格渲染「导出 CSV」按钮，点击导出当前展示数据", async () => {
     render(
       <ChartRenderer
@@ -178,5 +230,222 @@ describe("ChartRenderer", () => {
     fireEvent.click(screen.getByRole("button", { name: /导出 PNG/ }));
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("getDataURL failed"));
     errorSpy.mockRestore();
+  });
+
+  // ===== 表格负载自取自足（多步每步不铺全量 data）=====
+
+  it("调用方没传 data 时，表格用 chartOption 里的 rows 渲染", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{
+          columns: ["供应商", "数量"],
+          rows: [{ 供应商: "甲", 数量: 7 }],
+        }}
+      />
+    );
+
+    expect(screen.getByText("甲")).toBeInTheDocument();
+    expect(screen.getByText("7")).toBeInTheDocument();
+  });
+
+  it("rows 为空但 columns 已声明时仍渲染表头（列取自负载而非首行推断）", () => {
+    render(<ChartRenderer chartType="table" chartOption={{ columns: ["供应商"], rows: [] }} />);
+
+    expect(screen.getByText("供应商")).toBeInTheDocument();
+  });
+
+  it("调用方传了 data 时以 data 为准（负载 rows 只作降级）", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{ columns: ["A"], rows: [{ A: "来自负载" }] }}
+        data={[{ A: "来自 data" }]}
+      />
+    );
+
+    expect(screen.getByText("来自 data")).toBeInTheDocument();
+    expect(screen.queryByText("来自负载")).toBeNull();
+  });
+
+  // ===== 截断披露（0105 落库截行）=====
+  // 后端只留前 N 行并打 `truncated: true`（`chat_chart_persist`）。不告知的话，
+  // 历史回放里这张表看起来就是完整结果，连「导出 CSV」导出的也是截断份 ——
+  // 后端 PDF 已经如实标注，前端这一侧不能假装是全部。
+
+  it("负载带 truncated 标记时，表格下方如实标注只显示了前几行", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{
+          columns: ["A"],
+          rows: [{ A: 1 }, { A: 2 }],
+          truncated: true,
+        }}
+      />
+    );
+
+    expect(screen.getByText(/表格仅显示前 2 行/)).toBeInTheDocument();
+  });
+
+  it("负载没有 truncated 标记时不出截断提示（反向守卫：不能无脑加）", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{ columns: ["A"], rows: [{ A: 1 }, { A: 2 }] }}
+      />
+    );
+
+    // 先证明表体真的渲染了行 —— 否则「没有提示」可能只是整块没渲染
+    // （getByText("1") 会同时命中分页器的页码，所以读表体容器）
+    expect(document.querySelector(".ant-table-tbody")?.textContent).toContain("1");
+    expect(screen.queryByText(/表格仅显示前/)).toBeNull();
+    expect(screen.queryByText(/原始结果更长/)).toBeNull();
+  });
+
+  // ===== KPI 的导出按钮（KPI 不是 ECharts，没有 PNG 可导）=====
+
+  it("KPI 卡出「导出 CSV」按钮，不出 PNG 按钮", () => {
+    render(
+      <ChartRenderer
+        chartType="kpi"
+        chartOption={{ kpi: { label: "收货量", value: 9812, unit: null, delta: null } }}
+        data={[{ label: "收货量", value: 9812 }]}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: /导出 CSV/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /导出 PNG/ })).toBeNull();
+  });
+
+  it("KPI 点「导出 CSV」导出的是底层数据行", async () => {
+    render(
+      <ChartRenderer
+        chartType="kpi"
+        chartOption={{ kpi: { label: "收货量", value: 9812, unit: null, delta: null } }}
+        data={[{ 指标: "收货量", 数值: 9812 }]}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /导出 CSV/ }));
+
+    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+    const blob = createObjectUrl.mock.calls[0][0] as Blob;
+    expect(await readBlobText(blob)).toContain("指标,数值\r\n收货量,9812");
+  });
+
+  // ===== 可视化输出策略（Task 8）：折叠数据表 + rationale 说明行 =====
+
+  it("图形类渲染图 + 折叠数据表 + rationale 说明行（默认折叠，展开见明细）", () => {
+    render(
+      <ChartRenderer
+        chartType="bar"
+        chartOption={{ series: [{ type: "bar", data: [1, 2] }] }}
+        tableOption={{
+          columns: ["供应商", "数量"],
+          rows: [{ 供应商: "甲", 数量: 7 }],
+        }}
+        visualRationale={{ code: "R12_CATEGORY_BAR", params: {} }}
+      />
+    );
+
+    // 图
+    expect(screen.getByTestId("echarts-mock")).toBeInTheDocument();
+    // 折叠面板标签存在
+    expect(screen.getByText("数据表")).toBeInTheDocument();
+    // rationale 说明行
+    expect(screen.getByText("单维度对比，以柱状图呈现，附数据表")).toBeInTheDocument();
+    // 默认折叠：表体内容未挂载
+    expect(screen.queryByText("甲")).toBeNull();
+    // 展开后可见表格行
+    fireEvent.click(screen.getByText("数据表"));
+    expect(screen.getByText("甲")).toBeInTheDocument();
+    expect(screen.getByText("7")).toBeInTheDocument();
+  });
+
+  it("TABLE 形态不重复出表（无折叠面板），rationale 行照常渲染", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{ columns: ["A"], rows: [{ A: "x" }] }}
+        visualRationale={{ code: "R13_RAW_DETAIL_TABLE", params: {} }}
+      />
+    );
+
+    expect(screen.getByText("A")).toBeInTheDocument();
+    expect(screen.getByText("x")).toBeInTheDocument();
+    // TABLE 的表已在主区，不再出「数据表」折叠面板
+    expect(screen.queryByText("数据表")).toBeNull();
+    expect(screen.getByText("明细清单（无聚合），以表格呈现，不生成图表")).toBeInTheDocument();
+  });
+
+  it("KPI 形态渲染指标卡 + rationale 行（无折叠表）", () => {
+    render(
+      <ChartRenderer
+        chartType="kpi"
+        chartOption={{ kpi: { label: "收货量", value: 9812, unit: null, delta: null } }}
+        visualRationale={{ code: "R01_SINGLE_VALUE_KPI", params: {} }}
+      />
+    );
+
+    expect(screen.getByText("收货量")).toBeInTheDocument();
+    expect(screen.queryByText("数据表")).toBeNull();
+    expect(screen.getByText("单一聚合值，以指标卡呈现")).toBeInTheDocument();
+  });
+
+  it("rationale 带 rows 时插值渲染数字", () => {
+    render(
+      <ChartRenderer
+        chartType="donut"
+        chartOption={{ series: [{ type: "pie" }] }}
+        tableOption={{ columns: ["A"], rows: [{ A: 1 }] }}
+        visualRationale={{ code: "R02_SHARE_DONUT", params: { rows: 3 } }}
+      />
+    );
+
+    expect(screen.getByText("占比数据（3 项），以环形图呈现，附数据表")).toBeInTheDocument();
+  });
+
+  it("DEGRADE_SPEC_INVALID 的 kind 本地化为中文图型名（不是裸枚举 bar）", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{ columns: ["A"], rows: [{ A: 1 }] }}
+        visualRationale={{ code: "DEGRADE_SPEC_INVALID", params: { kind: "bar" } }}
+      />
+    );
+
+    expect(screen.getByText("数据结构不满足柱状图的绘图要求，降级为表格")).toBeInTheDocument();
+  });
+
+  it("未知 code 显示 code 原文不炸（i18n 缺 key 回退）", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{ columns: ["A"], rows: [{ A: 1 }] }}
+        visualRationale={{ code: "R99_FUTURE_RULE", params: {} }}
+      />
+    );
+
+    expect(screen.getByText("R99_FUTURE_RULE")).toBeInTheDocument();
+  });
+
+  it("图形类无 tableOption 时不渲染折叠数据表（守卫）", () => {
+    render(
+      <ChartRenderer
+        chartType="bar"
+        chartOption={{ series: [{ type: "bar" }] }}
+        visualRationale={{ code: "R12_CATEGORY_BAR", params: {} }}
+      />
+    );
+
+    expect(screen.getByTestId("echarts-mock")).toBeInTheDocument();
+    expect(screen.queryByText("数据表")).toBeNull();
+  });
+
+  it("无 rationale 时不渲染说明行", () => {
+    render(<ChartRenderer chartType="table" chartOption={{ columns: ["A"], rows: [{ A: 1 }] }} />);
+
+    expect(screen.queryByText("明细清单（无聚合），以表格呈现，不生成图表")).toBeNull();
   });
 });

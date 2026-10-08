@@ -77,8 +77,11 @@ class _GlobalFilterLlm:
                 "aggregationHint": "汇总对比",
             }))
         if "解析为查询计划" in system:
-            # 本体为空时 selectedClasses 必须为空列表（validatePlan 守约）
-            return _Resp('{"target":"t","selectedClasses":[],'
+            # 计划必须「有可查询引用」才算有效（_isEmptyPlan 方案B）：仅 target 的
+            # 空计划会被判 PLAN_EMPTY 并重试到耗尽。这里选中 fake 本体里的
+            # DWD_PURCHASE_ORDER_DTL（与 sqlByStep 实际查的表一致）。
+            return _Resp('{"target":"采购订单明细",'
+                         '"selectedClasses":["DWD_PURCHASE_ORDER_DTL"],'
                          '"selectedProperties":[]}')
         if "生成 SQL 时必须" in system:
             sql_idx = sum(1 for c in self.calls if "生成 SQL 时必须" in c[0][1]) - 1
@@ -112,6 +115,18 @@ class _FakeDatasourceService:
         if datasourceId != self._ds.id:
             raise NotFoundError(f"数据源 {datasourceId} 不存在")
         return self._ds
+
+
+def _purchaseOrderClass() -> OntologyClass:
+    """fake 本体类：与 sqlByStep 里实际查的 ZJTH.DWD_PURCHASE_ORDER_DTL 同名。
+
+    瞬态（transient）ORM 实例访问 ``.properties`` 返回空列表、不触发懒加载，
+    因此本类可用但无属性 —— 与 fixture 计划 selectedProperties=[] 自洽。
+    """
+    return OntologyClass(
+        id=1, class_name="DWD_PURCHASE_ORDER_DTL", class_alias="采购订单明细",
+        source_table="DWD_PURCHASE_ORDER_DTL", version=1,
+    )
 
 
 class _FakeOntologyService:
@@ -197,7 +212,7 @@ def _build_service(llm):
     tokenUsage = _FakeTokenUsage()
     service = ChatService(
         datasourceService=_FakeDatasourceService(_datasource()),
-        ontologyService=_FakeOntologyService(),
+        ontologyService=_FakeOntologyService(classes=[_purchaseOrderClass()]),
         modelRouterService=_FakeRouter(_config()),
         tokenUsageService=tokenUsage,
         embeddingService=_FakeEmbeddingService(),

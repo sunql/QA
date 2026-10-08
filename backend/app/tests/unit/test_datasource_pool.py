@@ -328,6 +328,25 @@ class TestOracleAdapterExecute:
             "WHERE ROWNUM <= 10",
         ]
 
+    async def test_execute_read_only_strips_trailing_semicolon_and_injects_nulls_last(
+        self, monkeypatch
+    ) -> None:
+        """集成：尾部 `;` 被剥 + 裸 DESC 仍补 NULLS LAST（剥离先于注入，顺序守卫）。"""
+        conn = _RecordingOracleConnection([(1,)], [("N",)])
+
+        async def _fakeConnectAsync(**kwargs):
+            return conn
+
+        monkeypatch.setattr(pool.oracledb, "connect_async", _fakeConnectAsync)
+        adapter = pool._OracleAdapter("h", 1521, "svc", "u", "p")
+        sql = "SELECT * FROM T ORDER BY QTY DESC;"
+        await adapter.execute_read_only(sql)
+        # 剥离发生在注入之前：末尾 `;` 剥掉后，裸 DESC 仍被补 NULLS LAST
+        assert conn.executed == [
+            "SET TRANSACTION READ ONLY",
+            "SELECT * FROM T ORDER BY QTY DESC NULLS LAST",
+        ]
+
     async def test_execute_read_only_no_limit_drains_full_streaming_result(self, monkeypatch) -> None:
         """回归：queryRowLimit<=0 时必须循环 fetchmany 直到耗尽，不能被 cursor.arraysize=100 静默截断。
 
@@ -510,6 +529,29 @@ class TestInjectNullsLast:
         assert pool._inject_nulls_last("") == ""
 
 
+class TestStripTrailingSemicolon:
+    """执行前兜底：剥离 SQL 尾部 `;`（Oracle 拒收 ⇒ ORA-00933），对无尾分号是 no-op。"""
+
+    def test_strips_single_trailing_semicolon(self) -> None:
+        assert pool._strip_trailing_semicolon("SELECT 1;") == "SELECT 1"
+
+    def test_strips_semicolon_followed_by_whitespace(self) -> None:
+        assert pool._strip_trailing_semicolon("SELECT 1;  \n") == "SELECT 1"
+
+    def test_no_trailing_semicolon_is_noop(self) -> None:
+        assert pool._strip_trailing_semicolon("SELECT 1") == "SELECT 1"
+
+    def test_strips_multiple_trailing_semicolons(self) -> None:
+        assert pool._strip_trailing_semicolon("SELECT 1;;") == "SELECT 1"
+
+    def test_does_not_touch_mid_statement_semicolon(self) -> None:
+        # 多语句拦截是 _assert_read_only 的职责，此处只剥离尾部，不越权
+        assert pool._strip_trailing_semicolon("SELECT 1; SELECT 2") == "SELECT 1; SELECT 2"
+
+    def test_empty_sql_returns_empty(self) -> None:
+        assert pool._strip_trailing_semicolon("") == ""
+
+
 class TestAdapterCache:
     async def test_get_adapter_caches_instance(self, monkeypatch) -> None:
         # Arrange: 跳过真实解密
@@ -553,13 +595,15 @@ class TestAdapterCache:
 
 
 class _FakeAdapter:
-    def __init__(self, success: bool, message: str) -> None:
+    def __init__(self, success: bool, message: str, version: object | None = None) -> None:
         self._success = success
         self._message = message
+        self._version = version
         self.disposed = False
 
-    async def test(self) -> tuple[bool, str]:
-        return self._success, self._message
+    async def test(self) -> tuple[bool, str, object | None]:
+        # 2026-10-02 起 test() 顺带返回服务端版本原文（第三元）
+        return self._success, self._message, self._version
 
     async def dispose(self) -> None:
         self.disposed = True
@@ -567,7 +611,7 @@ class _FakeAdapter:
 
 class TestServiceTestConnection:
     async def test_success_returns_response(self, monkeypatch) -> None:
-        fake = _FakeAdapter(True, "连接成功")
+        fake = _FakeAdapter(True, "连接成功", version=("8", "0", "46"))
 
         def _build(*args, **kwargs):
             return fake
@@ -584,6 +628,7 @@ class TestServiceTestConnection:
         result = await DataSourceService().test_connection(dto)
         assert result.success is True
         assert "连接成功" in result.message
+        assert result.server_version == "8.0.46"
         assert fake.disposed is True
 
     async def test_failure_returns_response(self, monkeypatch) -> None:
@@ -604,6 +649,8 @@ class TestServiceTestConnection:
         result = await DataSourceService().test_connection(dto)
         assert result.success is False
         assert "connection refused" in result.message
+        # 失败时版本必须为 None（探测与连接同源，连不上就无从谈版本）
+        assert result.server_version is None
 
 
 class _FakeMappings:

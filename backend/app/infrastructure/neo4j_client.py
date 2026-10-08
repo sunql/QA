@@ -440,32 +440,40 @@ def syncOntologyNodes(
 ) -> dict[str, int]:
     """把 PG 本体全量 upsert 入 Neo4j（幂等「本体入图」对账，供批量关系引擎 syncGraph）。
 
-    输入约定（由调用方从 PG 组装，字段名与节点属性一致）：
-    - classes:   {"id","name","alias","description","sourceTable"}
-    - properties:{"id","classId","name","alias","dataType","sourceColumn",
-                  "isPrimaryKey","isForeignKey","refClassId"(可空)}
+    输入约定（由调用方从 PG 组装 + 经 id_mapping 解析出 unified_id）：
+    - classes:   {"unifiedId","name","alias","description","sourceTable"}
+    - properties:{"unifiedId","classUid","name","alias","dataType","sourceColumn",
+                  "isPrimaryKey","isForeignKey","refClassUid"(可空)}
+
+    **键一律用 unified_id**：本函数曾按旧 `id` 属性 MERGE，而 upsertClassNode 等
+    写路径已改按 unified_id —— 两者并存会写出**同一实体的两套节点**（图里出现
+    「重影类」，且新读路径看不见旧那套）。见
+    Harness/changes/fix-m0-graph-key-consistency。
+
     同一连接内分 4 段 UNWIND + MERGE，分别 upsert (:Class)/(:Property) 节点、
     (:Class)-[:HAS_PROPERTY]->(:Property) 与 (:Property)-[:REFERENCES]->(:Class)
-    （refClassId 非空才建）。幂等：重复调用仅对已存在节点 SET、不新增。
+    （refClassUid 非空才建）。幂等：重复调用仅对已存在节点 SET、不新增。
 
     返回本次处理行数计数 {"classes","properties","has_property_edges","reference_edges"}；
     失败由调用方 fail-open（_logNeo4jFailure），本函数不吞异常。
     """
     driver = getDriver()
-    classRows = [c for c in classes if c.get("id") is not None]
+    classRows = [c for c in classes if c.get("unifiedId") is not None]
     propRows = [
-        p for p in properties if p.get("id") is not None and p.get("classId") is not None
+        p
+        for p in properties
+        if p.get("unifiedId") is not None and p.get("classUid") is not None
     ]
     refRows = [
-        {"propertyId": p["id"], "refClassId": p["refClassId"]}
+        {"propertyUid": p["unifiedId"], "refClassUid": p["refClassUid"]}
         for p in propRows
-        if p.get("refClassId") is not None
+        if p.get("refClassUid") is not None
     ]
     statements = [
         (
             """
             UNWIND $rows AS r
-            MERGE (c:Class {id: r.id})
+            MERGE (c:Class {unified_id: r.unifiedId})
             SET c.name = r.name, c.alias = r.alias,
                 c.description = r.description, c.sourceTable = r.sourceTable
             """,
@@ -474,7 +482,7 @@ def syncOntologyNodes(
         (
             """
             UNWIND $rows AS r
-            MERGE (p:Property {id: r.id})
+            MERGE (p:Property {unified_id: r.unifiedId})
             SET p.name = r.name, p.alias = r.alias, p.dataType = r.dataType,
                 p.sourceColumn = r.sourceColumn,
                 p.isPrimaryKey = r.isPrimaryKey, p.isForeignKey = r.isForeignKey
@@ -484,7 +492,7 @@ def syncOntologyNodes(
         (
             """
             UNWIND $rows AS r
-            MATCH (c:Class {id: r.classId}), (p:Property {id: r.id})
+            MATCH (c:Class {unified_id: r.classUid}), (p:Property {unified_id: r.unifiedId})
             MERGE (c)-[:HAS_PROPERTY]->(p)
             """,
             propRows,
@@ -492,7 +500,7 @@ def syncOntologyNodes(
         (
             """
             UNWIND $rows AS r
-            MATCH (p:Property {id: r.propertyId}), (c:Class {id: r.refClassId})
+            MATCH (p:Property {unified_id: r.propertyUid}), (c:Class {unified_id: r.refClassUid})
             MERGE (p)-[:REFERENCES]->(c)
             """,
             refRows,
@@ -514,15 +522,15 @@ def syncOntologyNodes(
 # =============================================================================
 
 
-def getClassWithProperties(classId: int) -> dict[str, Any] | None:
-    """查询 Class 及其直接关联的 Property 列表。"""
+def getClassWithProperties(classUid: str) -> dict[str, Any] | None:
+    """查询 Class 及其直接关联的 Property 列表（按 unified_id）。"""
     driver = getDriver()
     cql = """
-        MATCH (c:Class {id: $id})-[:HAS_PROPERTY]->(p:Property)
+        MATCH (c:Class {unified_id: $uid})-[:HAS_PROPERTY]->(p:Property)
         RETURN c, collect(p) AS properties
     """
     with driver.session() as session:
-        results = list(session.run(cql, id=classId))
+        results = list(session.run(cql, uid=classUid))
         if not results:
             return None
         record = results[0]
@@ -550,20 +558,25 @@ def listNodesByLabel(label: str) -> list[dict[str, Any]]:
         return [dict(r["n"]) for r in session.run(cql)]
 
 
-def getNodeRelationships(label: str, nodeId: int) -> list[dict[str, Any]]:
-    """返回指定节点的出边（任意方向），含 relType / targetId / targetName / targetLabel。"""
+def getNodeRelationships(label: str, unifiedId: str) -> list[dict[str, Any]]:
+    """返回指定节点的出边（任意方向），含 relType / targetUid / targetName / targetLabel。
+
+    按 **unified_id** 匹配：M0 起写路径（upsertClassNode 等）一律以 unified_id 为
+    节点主键，此处若仍按旧 `id` 属性匹配则**永不命中**，表现为 HTTP 200 + 空数组
+    （见 Harness/changes/fix-m0-graph-key-consistency）。
+    """
     if label not in _ALLOWED_LABELS:
         raise ValueError(f"Invalid label: {label!r}")
     driver = getDriver()
     cql = f"""
-        MATCH (n:{label} {{id: $id}})-[r]-(related)
+        MATCH (n:{label} {{unified_id: $unifiedId}})-[r]-(related)
         RETURN type(r) AS relType,
-               related.id AS targetId,
+               related.unified_id AS targetUid,
                related.name AS targetName,
                labels(related)[0] AS targetLabel
     """
     with driver.session() as session:
-        return [dict(r) for r in session.run(cql, id=nodeId)]
+        return [dict(r) for r in session.run(cql, unifiedId=unifiedId)]
 
 
 # =============================================================================

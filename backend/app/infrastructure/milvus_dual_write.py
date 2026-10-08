@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pymilvus import Collection, DataType, FieldSchema
+from pymilvus import Collection, DataType, FieldSchema, utility
 
 from app.infrastructure.milvus_client import (
     VALID_EMBEDDING_TYPES,
@@ -77,6 +77,31 @@ def ensurePropertyCollection() -> Collection:
 def ensureMetricCollection() -> Collection:
     """Ensure ontology_metric_embeddings collection exists (creates if absent)."""
     return _ensureCollection(_METRIC_COLLECTION_NAME, _metricFields())
+
+
+def rebuildOntologyCollections() -> None:
+    """drop 并重建 3 个本体向量集合（空集合 + embedding 索引）。
+
+    仅 scripts/backfill_milvus_embeddings.py --cleanup 的「以 PG 为真源收敛」路径
+    使用。为什么必须 drop 而不能逐条删：此部署下 Milvus 的批量 delete 不可靠
+    （删除要 release+load 才可见，见 milvus_client._ensureCollection 的注释），
+    残留重复行正是这么攒出来的——2026-09-30 实测 32 个类被堆成 98 行 / 3642 个
+    属性被堆成 10926 行，检索 topK 窗口被重复项吃光，多步 NL2SQL 全线失败。
+
+    传空集合 + 索引保证后续 insert 直接可用；集合不存在时不 drop（首次运行幂等）。
+    """
+    _connect()
+    collections = (
+        (_CLASS_COLLECTION_NAME, ensureClassCollection),
+        (_PROPERTY_COLLECTION_NAME, ensurePropertyCollection),
+        (_METRIC_COLLECTION_NAME, ensureMetricCollection),
+    )
+    for name, _ in collections:
+        if utility.has_collection(name, using=_connAlias()):
+            utility.drop_collection(name, using=_connAlias())
+    # drop 全部走完再建：避免「同名重建」与尚未传播的 drop 抢跑
+    for _, ensure in collections:
+        ensure()
 
 
 # ---------------------------------------------------------------------------

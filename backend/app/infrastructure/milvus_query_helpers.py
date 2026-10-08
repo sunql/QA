@@ -45,12 +45,18 @@ def _queryAllRowsFromCollection(name: str) -> list[dict[str, Any]]:
     Uses simple query(limit=_MILVUS_QUERY_PAGE) since each new collection
     stays well under 16384 rows in production. For future scale, swap to
     query_iterator like _queryAllRows does.
+
+    字段投影含 alias/description（不含 1024 维 embedding）：cleanup 的
+    「读全量 → 去重 → 删集重建」要靠 alias/description 写回，缺一则 drop 之后
+    KeyError 崩在半路（2026-09-30 修复，见 test_milvus_query_projection.py）。
     """
     collection = _ensureCollectionByName(name)
     collection.load()
     results = collection.query(
         expr="id >= 0",
-        output_fields=["ontology_id", "type", "name", "external_id"],
+        output_fields=[
+            "ontology_id", "type", "name", "alias", "description", "external_id",
+        ],
         limit=_MILVUS_QUERY_PAGE,
     )
     return results

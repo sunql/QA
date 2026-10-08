@@ -7,6 +7,7 @@ import {
   Input,
   InputNumber,
   Select,
+  Checkbox,
   Space,
   Tag,
   Popconfirm,
@@ -42,6 +43,7 @@ interface FormValues {
   weight: number;
   costThreshold: number;
   temperature?: number;
+  disableThinking: boolean;
 }
 
 const EMPTY_FORM: FormValues = {
@@ -55,6 +57,7 @@ const EMPTY_FORM: FormValues = {
   weight: 1,
   costThreshold: 1,
   temperature: undefined,
+  disableThinking: false,
 };
 
 export default function ModelConfigPage() {
@@ -101,6 +104,8 @@ export default function ModelConfigPage() {
       weight: record.weight,
       costThreshold: Number(record.costThreshold),
       temperature: record.temperature,
+      // 旧记录无该字段（迁移前）⇒ 视为不关闭，保持默认行为
+      disableThinking: record.disableThinking ?? false,
     });
     setModalOpen(true);
   };
@@ -118,6 +123,10 @@ export default function ModelConfigPage() {
         if (values.temperature === undefined) {
           delete payload.temperature;
         }
+        // disableThinking 不做 undefined 过滤：勾选框恒有布尔值，
+        // 后端 LlmConfigUpdate 走 exclude_unset ⇒ 漏传等于"保持原值"，
+        // 用户就无法把已开启的开关关回去。
+        payload.disableThinking = values.disableThinking;
         await updateModel(editing.id, payload);
         void message.success(t("toast.updated"));
       } else {
@@ -131,6 +140,7 @@ export default function ModelConfigPage() {
           maxInputTokens: values.maxInputTokens,
           weight: values.weight,
           costThreshold: values.costThreshold,
+          disableThinking: values.disableThinking,
         };
         await createModel(payload);
         void message.success(t("toast.created"));
@@ -314,6 +324,13 @@ export default function ModelConfigPage() {
             </Form.Item>
             <Form.Item name="costThreshold" label={t("forms.modelConfig.labels.costThreshold")}>
               <InputNumber min={0} step={0.1} style={{ width: 140 }} />
+            </Form.Item>
+            <Form.Item
+              name="disableThinking"
+              valuePropName="checked"
+              label={t("forms.modelConfig.labels.disableThinking")}
+            >
+              <Checkbox />
             </Form.Item>
             <Form.Item name="temperature" label={t("forms.modelConfig.labels.temperature")}>
               <InputNumber min={0} max={2} step={0.1} style={{ width: 140 }} />

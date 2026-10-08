@@ -142,12 +142,16 @@ class TestChatApi:
         body = resp.json()
         assert body["intent"] == "query"
         assert "PRECEIPT" in body["sql"]
-        assert body["chartType"] == "pie"
+        # 1 维（NAME）+ 1 指标（QTY）、无 formula → R12 分类比较。
+        # 旧值是 pie（「1 字符串 + 1 数值就画饼」的形状规则）——那时 chartType 与
+        # 下一行的 series 类型**互相矛盾**（pie 配 bar），因为 option 是 LLM 自己
+        # 写的、与代码选的 kind 无关。现在两者都由同一个 spec 派生，必然一致。
+        assert body["chartType"] == "bar"
         assert body["chartOption"] is not None
         assert body["chartOption"]["series"][0]["type"] == "bar"
         assert len(body["data"]) == 2
         assert body["data"][0]["NAME"] == "A"
-        assert body["tokensUsed"] == 60  # 计划/校验 + SQL + 图表 + 回答 = 4 次调用 × 15
+        assert body["tokensUsed"] == 60  # 计划/校验 + SQL + 标签分类 + 回答 = 4 次调用 × 15
         assert body["cost"] > 0
         assert body["modelName"] == "test-model"  # camelCase 输出实际使用的大模型名称
         # ReAct 计划随响应返回（前端展示用）
@@ -156,6 +160,44 @@ class TestChatApi:
         assert body["queryPlan"]["groupBy"] == ["NAME"]
         # 无密码/敏感字段泄漏
         assert "password" not in body
+
+    async def test_full_pipeline_carries_table_and_rationale(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """可视化输出策略（case ②③）：单步响应带 tableOption + visualRationale，
+        且 steps[0] 与顶层两字段逐字一致。
+
+        chartType 强制 "bar" → R_FORCED_CLIENT → params.kind 是客户端收到的线格式
+        裸字符串 "bar"（不是 "ChartType.BAR" 枚举名）。
+        """
+        config, ds = await _seed(dbSession)
+        _installFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json={
+                "sessionId": "s1",
+                "question": "各供应商的收货数量汇总",
+                "datasourceId": ds.id,
+                "chartType": "bar",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["chartType"] == "bar"
+        # 图之外的明细表负载（同一份 data 的另一个投影）
+        assert body["tableOption"]["columns"] == ["NAME", "QTY"]
+        assert len(body["tableOption"]["rows"]) == 2
+        assert body["tableOption"]["truncated"] is False
+        # 为什么这么画的判断依据：code 钉 R_FORCED_CLIENT，params.kind 钉线格式
+        # 裸字符串 "bar"（客户端收到的 wire 形状，不是 "ChartType.BAR" 枚举名）
+        assert body["visualRationale"]["code"] == "R_FORCED_CLIENT"
+        assert body["visualRationale"]["params"]["kind"] == "bar"
+        # 单步 steps[0] 与顶层两字段一致（前端 MultiStepPlanCard 常驻渲染）
+        steps = body["steps"]
+        assert steps is not None and len(steps) == 1
+        assert steps[0]["tableOption"] == body["tableOption"]
+        assert steps[0]["visualRationale"] == body["visualRationale"]
 
     async def test_full_pipeline_records_usage_rows(self, client, dbSession, monkeypatch) -> None:
         config, ds = await _seed(dbSession)
@@ -191,6 +233,31 @@ class TestChatApi:
         assert [r.role for r in rows] == ["user", "assistant"]
         assert rows[0].content == "各供应商的收货数量汇总"
         assert rows[1].sql_generated is not None
+
+    async def test_query_persists_visual_payload(self, client, dbSession, monkeypatch) -> None:
+        """0107：非流式单步的表负载 + 判断依据同轮落库（回放/导出离线重建）。
+
+        与流式 `test_stream_records_answer_usage_and_session_messages` 是两条独立
+        `_storeSessionMessages` 调用点 —— 漏接任何一条，另一条路径的图/表/依据就
+        只活在实时响应里。
+        """
+        config, ds = await _seed(dbSession)
+        _installFakes(monkeypatch, config)
+        await client.post("/api/v1/chat", json=_chat_payload("各供应商的收货数量汇总", ds.id))
+
+        from app.domain.models import SessionMessage
+
+        rows = list((await dbSession.execute(
+            select(SessionMessage).order_by(SessionMessage.id)
+        )).scalars().all())
+        assert len(rows) == 2
+        # 1 维（NAME）+ 1 指标（QTY）、无 formula → R12 分类比较（bar）
+        assert rows[1].table_option is not None, "表负载必须落进库"
+        assert rows[1].table_option["columns"] == ["NAME", "QTY"]
+        assert rows[1].visual_rationale is not None, "判断依据必须落进库"
+        assert rows[1].visual_rationale["code"] == "R12_CATEGORY_BAR"
+        assert rows[0].table_option is None, "user 行不该带表"
+        assert rows[0].visual_rationale is None, "user 行不该带依据"
 
     async def test_l2_writes_routing_layer(self, client, dbSession, monkeypatch) -> None:
         """L2 NL2SQL 路径应在 session_message 写入 routing_layer='L2'。

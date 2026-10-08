@@ -73,24 +73,41 @@ def _getUri() -> str:
     return getSettings().milvusUri
 
 
+# 当前连接实际挂载的 database 名（pymilvus 不再回读该值，自行记录以便比对）。
+_connectedDbName: str | None = None
+
+
+def getDbName() -> str:
+    """当前配置的目标 database 名；空配置归一为 Milvus 默认库 "default"。"""
+    return getSettings().milvusDbName or "default"
+
+
 def _connect() -> None:
     """建立（或复用）Milvus 连接；已注册但失效时自动重连。
 
     has_connection 只检查连接别名是否注册，不保证连接存活，
     故额外用 list_collections 做轻量健康检查。
+    连接按 database 维度校验：配置的 MILVUS_DB_NAME 变了也要重连，
+    否则「测试库」配置会被已缓存的默认库连接静默吞掉（drop 打回生产集合）。
     """
-    if connections.has_connection(_connAlias()):
+    global _connectedDbName
+    desiredDb = getDbName()
+    if connections.has_connection(_connAlias()) and _connectedDbName == desiredDb:
         try:
             utility.list_collections(using=_connAlias())
             return
         except Exception:
             connections.disconnect(alias=_connAlias())
             logger.warning("Milvus 连接已失效，重新连接")
+    elif connections.has_connection(_connAlias()):
+        connections.disconnect(alias=_connAlias())
+        logger.info("Milvus database 配置变更（%s → %s），重新连接", _connectedDbName, desiredDb)
     uri = _getUri()
     parsed = urlparse(uri if "://" in uri else f"//{uri}")
     host = parsed.hostname or "localhost"
     port = parsed.port or 19530
-    connections.connect(alias=_connAlias(), host=host, port=port)
+    connections.connect(alias=_connAlias(), host=host, port=port, db_name=desiredDb)
+    _connectedDbName = desiredDb
 
 
 def _hasEmbeddingIndex(collection: Collection) -> bool:
@@ -610,9 +627,16 @@ _METRIC_COLLECTION_NAME = "ontology_metric_embeddings"
 
 
 def closeConnection() -> None:
-    """断开 Milvus 连接（幂等；未连接时 no-op）。"""
+    """断开 Milvus 连接（幂等；未连接时 no-op）。
+
+    同时清掉 _connectedDbName：它承诺「镜像当前连接挂的库」，留着旧值会让
+    _connect() 的快路径拿着过期信息比对（未来若有人绕过 _connect 直连同别名，
+    就会漏掉一次该做的重连），故一并归零。
+    """
+    global _connectedDbName
     if connections.has_connection(_connAlias()):
         connections.disconnect(alias=_connAlias())
+    _connectedDbName = None
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +718,7 @@ from app.infrastructure.milvus_dual_write import (
     ensureMetricCollection,
     insertEmbeddingsDual,
     deleteByOntologyIdDual,
+    rebuildOntologyCollections,
 )
 from app.infrastructure.milvus_query_helpers import (
     queryClassEmbeddings,

@@ -8,6 +8,9 @@
 import { useMemo } from "react";
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
+import { useThemeStore } from "../stores/themeStore";
+import { applyChartTheme } from "../theme/chartTheme";
+import { DARK_TOKEN, LIGHT_TOKEN } from "../theme/tokens";
 
 interface EChartProps {
   option: EChartsOption;
@@ -17,11 +20,18 @@ interface EChartProps {
 }
 
 export default function EChart({ option, height = 280, testId }: EChartProps) {
-  const memoOption = useMemo(() => option, [option]);
+  const isDark = useThemeStore((state) => state.isDark);
+  // 图表主题注入（与服务端发来的 chat option 同一条路径）：轴色/文字色/tooltip
+  // 跟着主题走。调用方显式写在 series 上的 itemStyle.color 优先级更高，不会被覆盖
+  // —— 语义色（通过/失败）本来就该由业务定，不该被主题改。
+  const memoOption = useMemo(
+    () => applyChartTheme(option as unknown as Record<string, unknown>, isDark ? DARK_TOKEN : LIGHT_TOKEN),
+    [option, isDark]
+  );
   return (
     <div data-testid={testId}>
       <ReactECharts
-        option={memoOption}
+        option={memoOption as EChartsOption}
         style={{ height, width: "100%" }}
         notMerge
         lazyUpdate

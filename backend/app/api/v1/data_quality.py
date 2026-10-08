@@ -42,8 +42,8 @@ from app.services.data_quality_evaluator import DataQualityEvaluatorDispatcher
 from app.services.data_quality_score_service import DataQualityScoreService
 from app.services.data_quality_service import DataQualityRuleService, ruleToRead
 
-router = APIRouter(dependencies=[])
-scores_router = APIRouter(dependencies=[])
+router = APIRouter(dependencies=[Depends(getCurrentUser)])
+scores_router = APIRouter(dependencies=[Depends(getCurrentUser)])
 
 
 def getDataQualityRuleService() -> DataQualityRuleService:

@@ -162,14 +162,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = getSettings()
     logging.basicConfig(level=getattr(logging, settings.logLevel.upper(), logging.INFO))
     logger.info("启动 QA System 后端 v%s (env=%s)", __version__, settings.appEnv)
-    # Phase 4.5 安全护栏：生产 + stub auth 同时启用应大声告警
-    if settings.appEnv == "production" and os.environ.get("AUTH_STUB_ENABLED", "1") == "1":
-        logger.error(
-            "🚨 安全告警：生产环境 (env=production) 仍在使用 stub auth "
-            "(AUTH_STUB_ENABLED=1)。任何客户端可伪造 X-User-Roles=admin 绕过 ACL。"
-            "生产部署前必须：AUTH_STUB_ENABLED=0 + 反向代理剥离 X-User-* 头，"
-            "或接入 JWT/IdP 替换 getCurrentUser。"
-        )
+    # Phase 4.5 安全护栏：生产环境鉴权配置错误应大声告警。
+    # 判断收敛到 config.productionAuthMisconfiguration（纯函数，可单测）——原内联检查
+    # 只看 AUTH_STUB_ENABLED，漏了 AUTH_MODE（默认 stub），即「生产漏设 AUTH_MODE」
+    # 这一最常见形态当时不会告警。仍然只 logger.error，不阻塞启动。
+    from app.config import productionAuthMisconfiguration
+
+    _authReason = productionAuthMisconfiguration(settings)
+    if _authReason:
+        logger.error("🚨 安全告警：%s", _authReason)
     # config 重复字段批：jwtSecret 曾有两份声明（旧块 default="" 被占位符覆盖），
     # 漏配时静默用公开已知的开发密钥；旧注释承诺的「启动期校验」当时从未实现，此处补上。
     from app.config import jwtSecretInsecurityReason
@@ -402,6 +403,7 @@ def createApp() -> FastAPI:
         model_config,
         ontology,
         organizations,
+        research,
         roles,
         reports,
         session,
@@ -498,6 +500,7 @@ def createApp() -> FastAPI:
     app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
+    app.include_router(research.router, prefix="/api/v1", tags=["research"])
     app.include_router(users.router, tags=["users"])
     app.include_router(roles.router, tags=["roles"])
     app.include_router(organizations.router, tags=["organizations"])
@@ -541,19 +544,23 @@ def createApp() -> FastAPI:
         return HealthResponse(status="ok", version=__version__, appEnv=settings.appEnv)
 
     # MCP Server（Phase 6）：HTTP/SSE 端点 `/mcp`，复用 FastAPI app + DB session
-    # + stub auth（MCP 客户端的 stdio 模式走 `python -m app.services.mcp_server`）。
+    # + Bearer 鉴权（MCP 客户端的 stdio 模式走 `python -m app.services.mcp_server`）。
     # 挂载而非 include_router：MCP 走 streamable-http transport（FastAPI route
     # 适配不到），用 Starlette Mount 拼到 ASGI 树末端。
+    # **鉴权**：Mount 绕过 FastAPI 依赖注入（不是 APIRoute），router 级
+    # `Depends(getCurrentUser)` 覆盖不到它 —— 必须用 ASGI 中间件在进子 app 前
+    # 拦一道（2026-09-30 安全批次；见 app/api/mcp_auth.py）。
     # **关键**：fastmcp http_app 自带 lifespan（管理 streamable-http session
     # task group），必须在 FastAPI() 构造时把 lifespan 合并进去 —— 否则
     # ``StreamableHTTPSessionManager task group was not initialized``。
     # 因为 createApp() 已经把 lifespan 显式传给 FastAPI()，这里改用
     # starlette lifespan_context 替换为合并版。
     from starlette.routing import Mount
+    from app.api.mcp_auth import McpAuthMiddleware
     from app.services.mcp_server import mcp as _mcpServer
 
     _mcpApp = _mcpServer.http_app(path="/mcp", transport="streamable-http")
-    app.router.routes.append(Mount("", app=_mcpApp))
+    app.router.routes.append(Mount("/mcp", app=McpAuthMiddleware(_mcpApp)))
 
     # 合并 fastmcp 子 app 的 lifespan 到现有 lifespan（schema drift / 引擎预热）。
     _origFastapiLifespan = lifespan

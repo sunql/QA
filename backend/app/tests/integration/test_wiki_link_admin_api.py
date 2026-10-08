@@ -111,7 +111,7 @@ async def test_create_wiki_link_invalid_type_returns_422(client: AsyncClient) ->
     resp = await client.post(
         "/api/v1/admin/wiki-links",
         headers=AUTH_HEADERS,
-        json={"page_id": "p001", "chunk_id": None, "ontology_type": "metric", "ontology_id": 12, "weight": 1.0},
+        json={"page_id": "p001", "chunk_id": None, "ontology_type": "unknown", "ontology_id": 12, "weight": 1.0},
     )
     assert resp.status_code == 422
 
@@ -124,3 +124,89 @@ async def test_create_wiki_link_unauthorized_returns_403(client: AsyncClient) ->
         json={"page_id": "p001", "chunk_id": None, "ontology_type": "class", "ontology_id": 12, "weight": 1.0},
     )
     assert resp.status_code == 403
+
+
+async def test_list_links_includes_ontology_name_and_alias(
+    client: AsyncClient, dbSession: AsyncSession,
+) -> None:
+    """列表必须带本体对象名 —— 否则界面只能显示裸 ID，与本体管理对不上。"""
+    from datetime import datetime
+
+    from app.domain.models import OntologyClass
+
+    dbSession.add(OntologyClass(
+        id=701, class_name="DWD_ARRIVAL_ORDER_DTL", class_alias="到货单",
+        version=1, valid_from=datetime.now(),
+    ))
+    await dbSession.commit()
+
+    created = await client.post(
+        "/api/v1/admin/wiki-links", headers=AUTH_HEADERS,
+        json={"page_id": "p001", "chunk_id": None, "ontology_type": "class",
+              "ontology_id": 701, "weight": 1.0},
+    )
+    assert created.status_code == 201, f"Got {created.status_code}: {created.text}"
+
+    resp = await client.get(
+        "/api/v1/admin/wiki-links?page_id=p001", headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200, f"Got {resp.status_code}: {resp.text}"
+    rows = resp.json()
+    assert len(rows) == 1
+    assert rows[0]["ontology_name"] == "DWD_ARRIVAL_ORDER_DTL"
+    assert rows[0]["ontology_alias"] == "到货单"
+
+
+async def test_list_links_missing_ontology_yields_none(client: AsyncClient) -> None:
+    """对象不存在（已删）→ 两个字段为 None，接口不 500。"""
+    created = await client.post(
+        "/api/v1/admin/wiki-links", headers=AUTH_HEADERS,
+        json={"page_id": "p001", "chunk_id": None, "ontology_type": "class",
+              "ontology_id": 999999, "weight": 1.0},
+    )
+    assert created.status_code == 201, f"Got {created.status_code}: {created.text}"
+
+    resp = await client.get(
+        "/api/v1/admin/wiki-links?page_id=p001", headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200, f"Got {resp.status_code}: {resp.text}"
+    rows = resp.json()
+    assert rows[0]["ontology_name"] is None
+    assert rows[0]["ontology_alias"] is None
+
+
+async def test_create_metric_link_accepted(
+    client: AsyncClient, dbSession: AsyncSession,
+) -> None:
+    """API 必须接受 ontology_type=metric（修复前被 422 pattern 拒绝）。"""
+    from app.domain.models import OntologyMetric
+
+    dbSession.add(OntologyMetric(
+        id=802, metric_name="KPI_PURCHASE_CYCLE_TIME", metric_alias="采购周期",
+        formula="AVG(x)", agg_function="AVG",
+    ))
+    await dbSession.commit()
+
+    resp = await client.post(
+        "/api/v1/admin/wiki-links", headers=AUTH_HEADERS,
+        json={"page_id": "p001", "chunk_id": None, "ontology_type": "metric",
+              "ontology_id": 802, "weight": 1.0},
+    )
+    assert resp.status_code == 201, f"Got {resp.status_code}: {resp.text}"
+    assert resp.json()["ontology_type"] == "metric"
+
+    # 列表必须能解析出指标名（Task 4 的解析表已含 metric）
+    listed = await client.get(
+        "/api/v1/admin/wiki-links?page_id=p001", headers=AUTH_HEADERS,
+    )
+    assert listed.json()[0]["ontology_name"] == "KPI_PURCHASE_CYCLE_TIME"
+
+
+async def test_create_link_rejects_unknown_type(client: AsyncClient) -> None:
+    """放开的只有三个值；非法类型仍 422（双向断言）。"""
+    resp = await client.post(
+        "/api/v1/admin/wiki-links", headers=AUTH_HEADERS,
+        json={"page_id": "p001", "chunk_id": None, "ontology_type": "join",
+              "ontology_id": 1, "weight": 1.0},
+    )
+    assert resp.status_code == 422

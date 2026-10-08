@@ -30,6 +30,10 @@ os.environ.setdefault("SECRET_KEY", _TEST_FERNET)
 os.environ.setdefault("SESSION_BUDGET", "0.1")
 # 限流在测试环境强制关闭，避免影响既有用例；限流专项测试自行临时开启
 os.environ["RATE_LIMIT_ENABLED"] = "false"
+# Milvus 指向独立测试库：integration 的清理夹具会 drop 本体集合，若连默认库就是
+# 删线上向量（2026-09-30 事故）。用 setdefault 之外还要覆盖：外部若不慎预设了
+# 空值/默认库，测试必须仍然隔离。故直接赋值，并保留显式覆盖测试库名的能力。
+os.environ["MILVUS_DB_NAME"] = os.environ.get("MILVUS_TEST_DB_NAME", "qa_test")
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
 

@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # ===== Milvus 向量库 =====
     milvusUri: str = Field(default="http://localhost:19530", alias="MILVUS_URI")
     milvusCollection: str = Field(default="ontology_embeddings", alias="MILVUS_COLLECTION")
+    # Milvus database（逻辑库）名；空 = 默认库 "default"。
+    # 用途：测试套件把它指向独立测试库（qa_test），让 drop/重建只作用于测试数据。
+    # 此前 integration 的 milvusCleanClient 夹具 drop 的是**默认库里的生产本体集合**，
+    # 一次裸 pytest 就把线上向量删空（2026-09-30 事故）。
+    milvusDbName: str = Field(default="", alias="MILVUS_DB_NAME")
     # wiki 知识条目向量同步总开关（feat-wiki-semantic-search）：关闭后写路径
     # 跳过向量 upsert/delete，语义检索仍可用（针对已回填的向量）。测试环境
     # 与无 embedding provider 的部署可设 false，避免每次 CRUD 等待超时。
@@ -127,6 +132,12 @@ class Settings(BaseSettings):
     rateLimitEnabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
     rateLimitRequests: int = Field(default=30, alias="RATE_LIMIT_REQUESTS")
     rateLimitWindow: str = Field(default="minute", alias="RATE_LIMIT_WINDOW")
+
+    # ===== 多步持久化（Task 5）=====
+    multiStepPersistEnabled: bool = Field(default=True, alias="MULTI_STEP_PERSIST_ENABLED")
+
+    # ===== ResearchCheckpoint TTL（B2）=====
+    researchCheckpointTtlHours: int = Field(default=24, alias="RESEARCH_CHECKPOINT_TTL_HOURS")
 
     # ===== CORS =====
     # 默认值覆盖常见 dev 来源：localhost / 127.0.0.1 / 局域网子网 192.168.x.x /
@@ -230,6 +241,40 @@ def jwtSecretInsecurityReason(secret: str) -> str | None:
             "JWT_SECRET 仍用开发占位密钥（development-jwt-secret-change-me，公开已知）："
             "任何能连到服务的人都能伪造任意用户 token。生产必须显式设置 "
             "JWT_SECRET（≥32 字节随机串）。"
+        )
+    return None
+
+
+def productionAuthMisconfiguration(settings: Settings) -> str | None:
+    """返回生产环境鉴权配置错误的原因；无错误则返回 None（纯函数，启动自检用）。
+
+    判两种已知形态，二者互相独立：
+
+    1) ``APP_ENV=production`` 但 ``AUTH_MODE`` 不是 ``real``（漏设即默认 ``stub``）：
+       ``getCurrentUser`` 会把无头请求解析为 ``anonymous`` 而**不抛异常**，
+       router 级 ``Depends(getCurrentUser)`` 因此形同虚设——非公开路由匿名可达。
+    2) ``APP_ENV=production`` 但 ``AUTH_STUB_ENABLED`` 为真：任何客户端可伪造
+       ``X-User-Roles=admin`` 绕过 ACL。注意 ``AUTH_MODE=real`` 但
+       ``AUTH_STUB_ENABLED=1`` 时本条仍成立。
+
+    只做「返回原因」这一件事，不抛异常、不阻塞启动：是否 fail-fast 是调用方的
+    运行时行为决定，不属于本函数。
+    """
+    if settings.appEnv != "production":
+        return None
+    if settings.authMode != "real":
+        return (
+            f"APP_ENV=production 但 AUTH_MODE={settings.authMode!r}（应为 'real'）："
+            "stub 模式把无头请求解析为 anonymous 而不报错，router 级 "
+            "Depends(getCurrentUser) 形同虚设，非公开路由匿名可达。"
+            "生产必须设 AUTH_MODE=real。"
+        )
+    if settings.authStubEnabled:
+        return (
+            "APP_ENV=production 但 AUTH_STUB_ENABLED 为真："
+            "任何客户端可伪造 X-User-Roles=admin 绕过 ACL。"
+            "生产必须设 AUTH_STUB_ENABLED=0 + 反向代理剥离 X-User-* 头，"
+            "或接入 JWT/IdP 替换 getCurrentUser。"
         )
     return None
 

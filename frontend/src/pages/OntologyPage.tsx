@@ -9,6 +9,7 @@ import {
   Typography,
   Button,
   Space,
+  Switch,
 } from "antd";
 import { SearchOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { listClasses, searchOntology } from "../api/ontology";
@@ -36,6 +37,9 @@ export default function OntologyPage() {
   const [searchResults, setSearchResults] = useState<OntologySearchHit[]>([]);
   const [searchModalOpen, setSearchModalOpen] = useState(false);
   const [batchModalOpen, setBatchModalOpen] = useState(false);
+  // fix-class-tombstone-restore：ClassTab 内部按此开关决定是否列出墓碑类；
+  // `classes`（供其他 Tab 作为父类/外键下拉源）保持「仅活类」，不影响其他 Tab。
+  const [includeExpired, setIncludeExpired] = useState(false);
 
   const loadClasses = useCallback(async () => {
     try {
@@ -115,6 +119,14 @@ export default function OntologyPage() {
           {t("pages.ontology")}
         </Title>
         <Space>
+          <Space size="small">
+            <Switch
+              checked={includeExpired}
+              onChange={setIncludeExpired}
+              aria-label={t("forms.ontology.showDeleted")}
+            />
+            <span>{t("forms.ontology.showDeleted")}</span>
+          </Space>
           <Button icon={<ThunderboltOutlined />} onClick={() => setBatchModalOpen(true)}>
             {t("forms.ontology.batchRelations.button")}
           </Button>
@@ -138,7 +150,13 @@ export default function OntologyPage() {
           {
             key: "class",
             label: t("forms.ontology.tabs.classes"),
-            children: <ClassTab classes={classes} refreshClasses={loadClasses} />,
+            children: (
+              <ClassTab
+                classes={classes}
+                refreshClasses={loadClasses}
+                includeExpired={includeExpired}
+              />
+            ),
           },
           {
             key: "property",

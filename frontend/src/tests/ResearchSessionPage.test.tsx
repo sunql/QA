@@ -167,4 +167,52 @@ describe("ResearchSessionPage", () => {
 
     expect(await screen.findByText("THBI Oracle")).toBeInTheDocument();
   });
+
+  // B5 修复：answer 提交后页面必须把 store.resolutionInFlight 透传给 CheckpointCard，
+  // 否则 store 已置 true 但卡片不显示「处理中…」Spin，用户看到「点完毫无反应」假象。
+  it("answer 提交中：把 store.resolutionInFlight 透传给 CheckpointCard，渲染「处理中…」", async () => {
+    // 准备一个 hypothesis 检查点：openSession 返回的 detail 把它带进 store。
+    const hypothesisCheckpoint = {
+      id: "cp-1",
+      phase: "hypothesis",
+      status: "pending",
+      options: {
+        arms: { metrics: [], conflicts: [] },
+        candidates: [
+          { statement: "假设 A", driver: "K1" },
+          { statement: "假设 B", driver: "K2" },
+        ],
+      },
+      prompt: "选要验证的",
+      userChoice: null,
+      decidedAt: null,
+    };
+    httpMock.get.mockResolvedValue({
+      data: {
+        session: {
+          id: "s1",
+          title: "研究",
+          mode: "research",
+          status: "running",
+          question: "q",
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+        },
+        turns: [],
+        pendingCheckpoint: hypothesisCheckpoint,
+      },
+    });
+
+    renderPage();
+
+    // 等卡片渲染
+    await waitFor(() => expect(screen.getByText("假设 A")).toBeInTheDocument());
+
+    // 模拟 answer 已提交但下一个 SSE 事件尚未到达的瞬间：把 resolutionInFlight=true
+    // 直接打到 store 上（这是 answer 成功路径的 store 副作用）。
+    useResearchStore.setState({ resolutionInFlight: true });
+
+    // 卡片必须显示「处理中…」Spin（CheckpointCard 第 486 行）——证明 prop 已透传。
+    expect(await screen.findByText("处理中…")).toBeInTheDocument();
+  });
 });

@@ -30,6 +30,7 @@ export default function ResearchSessionPage() {
   const pendingCheckpoint = useResearchStore((s) => s.pendingCheckpoint);
   const currentSession = useResearchStore((s) => s.currentSession);
   const streaming = useResearchStore((s) => s.streaming);
+  const resolutionInFlight = useResearchStore((s) => s.resolutionInFlight);
   const error = useResearchStore((s) => s.error);
   const conflictError = useResearchStore((s) => s.conflictError);
   const submitTurn = useResearchStore((s) => s.submitTurn);
@@ -105,6 +106,7 @@ export default function ResearchSessionPage() {
           key={pendingCheckpoint.id}
           checkpoint={pendingCheckpoint}
           onAnswer={handleAnswer}
+          resolutionInFlight={resolutionInFlight}
         />
       ) : (
         <Space.Compact style={{ width: "100%", marginTop: 16 }}>

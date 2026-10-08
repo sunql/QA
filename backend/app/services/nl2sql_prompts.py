@@ -464,6 +464,10 @@ def _buildSystemPrompt(
         extraRules.append(dialect.timeBucketRule)
     if dialect.aggregateRule:
         extraRules.append(dialect.aggregateRule)
+    if dialect.dateArithmeticRule:
+        # 2026-10-08 补：Oracle 上 LLM 默认用 SQL Server 的 DATEADD → ORA-00904 → 0 行
+        # → 报告 data 章节无 chart 块。SSOT 在 SqlDialect.dateArithmeticRule，这里只是搬运。
+        extraRules.append(dialect.dateArithmeticRule)
     # 行数决策权交给计划（避免 SQL 阶段自行追加 LIMIT 让"有范围不限制"失效）
     limitRule = dialect.limitRule + (_PLAN_ROW_LIMIT_RULE if plan is not None else "")
     return (

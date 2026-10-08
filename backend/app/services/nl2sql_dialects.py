@@ -42,6 +42,11 @@ class SqlDialect:
     nullOrderingRule: str = ""
     timeBucketRule: str = ""
     aggregateRule: str = ""
+    # 日期算术（"最近 N 月/天"、"X 月以来" 等相对时间在 WHERE / 表达式里的写法）
+    # 2026-10-08 补：研究 finding 实锤 LLM 在 Oracle 上写出 DATEADD(month, -12, CURRENT_DATE)
+    # → ORA-00904 → finding.rows=[] → 报告 data 章节无 chart 块。每种 dialect 必须有非空规则，
+    # 且必须**显式禁用**其它方言的日期函数（仅靠推荐函数不足以让 LLM 改习惯）。
+    dateArithmeticRule: str = ""
 
     def boundedDistinct(self, table: str, column: str, n: int) -> str:
         """构造取前 n 行去重值查询（表/列已过标识符白名单校验）。"""
@@ -81,6 +86,32 @@ _TIME_BUCKET_RULE_MYSQL = (
     "按季度用 CONCAT(YEAR(日期列),'-Q',QUARTER(日期列))；并在 SELECT 输出同一表达式作为月份/年份列。"
 )
 
+# 日期算术：相对时间（"最近 N 月/天"、"X 月以来"）在 WHERE 子句 / 表达式中的方言写法。
+# 2026-10-08 补：LLM 在 Oracle 上默认用 SQL Server 语法 DATEADD → ORA-00904。每条规则**必须**
+# 显式禁用其它方言的日期函数（"不要使用"），仅靠推荐函数不足以让 LLM 改习惯。
+_DATE_ARITHMETIC_RULE_ORACLE = (
+    "相对时间（'最近 N 个月'、'近 N 天'、'X 个月以来'、'同比/环比'）必须用 Oracle 原生写法："
+    "按月加减用 ADD_MONTHS(日期列, -N) 或 ADD_MONTHS(CURRENT_DATE, -N)；"
+    "按天加减用 日期列 - N 或 CURRENT_DATE - N（隐式按天算）；"
+    "组合偏移用 日期列 + NUMTODSINTERVAL(N, 'day') / NUMTOYMINTERVAL(N, 'month')。"
+    "**绝对禁止** DATEADD（SQL Server 语法，Oracle 会报 ORA-00904: \"DATEADD\": 标识符无效）、"
+    "DATE_SUB、DATE_PART、DATEDIFF、INTERVAL 字面量（'N' MONTH 不是 Oracle 语法）。"
+    "基准时间用 CURRENT_DATE（不是 SYSDATE，且不带时分秒）。"
+)
+_DATE_ARITHMETIC_RULE_POSTGRESQL = (
+    "相对时间用 PostgreSQL 原生写法：按月/天加减用 日期列 - INTERVAL 'N' MONTH 或 "
+    "日期列 - INTERVAL 'N' DAY；按季度用 日期列 - INTERVAL 'N' QUARTER；"
+    "基准时间用 CURRENT_DATE 或 NOW()。"
+    "**绝对禁止** DATEADD（SQL Server 语法，PostgreSQL 会报 function dateadd does not exist）、"
+    "ADD_MONTHS（Oracle 专属）、DATE_SUB（MySQL 语法）。"
+)
+_DATE_ARITHMETIC_RULE_MYSQL = (
+    "相对时间用 MySQL 原生写法：按月/天加减用 DATE_SUB(日期列, INTERVAL N MONTH) 或 "
+    "DATE_ADD(日期列, INTERVAL N DAY)；基准时间用 CURDATE() 或 NOW()。"
+    "**绝对禁止** DATEADD（SQL Server 语法，MySQL 会报 FUNCTION db.DATEADD does not exist）、"
+    "ADD_MONTHS（Oracle 专属）、INTERVAL 'N' MONTH（PostgreSQL 语法）。"
+)
+
 # 聚合与标量子查询不得混排：Oracle 禁止在同一个查询块的 SELECT 列表中把聚合函数
 # 与标量子查询**并列**（ORA-00937「不是单组分组函数」），PostgreSQL 允许该写法。
 # 真机回归（2026-10-02）：问「5月份供货量最多的三家供应商所供货物总量占比」，
@@ -105,6 +136,7 @@ _SQL_DIALECTS_ORACLE_11G = SqlDialect(
     nullOrderingRule=_NULL_ORDERING_RULE,
     timeBucketRule=_TIME_BUCKET_RULE_ORACLE,
     aggregateRule=_AGGREGATE_RULE_ORACLE,
+    dateArithmeticRule=_DATE_ARITHMETIC_RULE_ORACLE,
     identifierRule=(
         "列别名与表别名不得以数字开头（Oracle 标识符规则），否则必须用双引号包裹，"
         "例如 AS 2025采购量 未加引号会报 ORA-00923。建议别名用字母或中文开头，"
@@ -121,6 +153,7 @@ _SQL_DIALECTS_ORACLE_12C = SqlDialect(
     nullOrderingRule=_NULL_ORDERING_RULE,
     timeBucketRule=_TIME_BUCKET_RULE_ORACLE,
     aggregateRule=_AGGREGATE_RULE_ORACLE,
+    dateArithmeticRule=_DATE_ARITHMETIC_RULE_ORACLE,
     identifierRule=(
         "列别名与表别名不得以数字开头（Oracle 标识符规则），否则必须用双引号包裹，"
         "例如 AS 2025采购量 未加引号会报 ORA-00923。建议别名用字母或中文开头，"
@@ -137,6 +170,7 @@ _SQL_DIALECTS: dict[DataSourceType, SqlDialect] = {
         useSchemaPrefix=False,
         sampleLimitSql="{sql} LIMIT {n}",
         timeBucketRule=_TIME_BUCKET_RULE_MYSQL,
+        dateArithmeticRule=_DATE_ARITHMETIC_RULE_MYSQL,
     ),
     DataSourceType.POSTGRESQL: SqlDialect(
         name="PostgreSQL",
@@ -146,6 +180,7 @@ _SQL_DIALECTS: dict[DataSourceType, SqlDialect] = {
         sampleLimitSql="{sql} LIMIT {n}",
         nullOrderingRule=_NULL_ORDERING_RULE,
         timeBucketRule=_TIME_BUCKET_RULE_POSTGRESQL,
+        dateArithmeticRule=_DATE_ARITHMETIC_RULE_POSTGRESQL,
     ),
 }
 

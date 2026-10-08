@@ -36,6 +36,7 @@ from app.services.research_agent_execution import (
     finalizeStepResults,
     runStep,
 )
+from app.services.research_hypothesis_adapter import rewriteHypothesisSqlWithHint
 from app.services.research_agent_ports import (
     ACTION_REJECT,
     CHECKPOINT_HYPOTHESIS,
@@ -62,6 +63,7 @@ from app.services.research_agent_ports import (
     PHASE_PLAN,
     PHASE_REPORT,
     PHASE_VERIFY,
+    PURPOSE_HYPOTHESIS,
     PURPOSE_PLAN,
     PURPOSE_REPORT,
     SIGNAL_EMPTY_SCOPE,
@@ -271,13 +273,33 @@ class ResearchAgentPhasesMixin:
         # Task 13e：验证 SQL 与执行步走同一条业务库路径（假设 SQL 也是业务 SQL）
         deps = await depsForSession(session, sessionId, self._exec)
         adapter = adapterFor(deps.datasource)
-        for candidate in selectedHypotheses(state):
+        for idx, candidate in enumerate(selectedHypotheses(state)):
             await session.commit()  # Task 4 契约：runVerification 失败会 rollback 本 session
             # 2026-10-08 复盘 3：把 dialectArgs 透传给 runVerification，让假设 SQL
             # 也走 checkSqlDialect 守卫（plan 步的 runStep 早已有，假设链路缺）
             outcome = await self._runner.runVerification(
                 session, Hypothesis(**candidate), adapter=adapter, dialectArgs=deps.dialectArgs
             )
+            # 2026-10-08 A2：拦截到方言违规时，把违规原因喂回 LLM 单次重写 SQL，再跑一次。
+            # 硬限 1 次（避免 runVerification docstring 警告的"反复重写"反模式）；
+            # rewrite 失败 / 重写后仍违规 → 用原 error 落库，confidence 走 fail 因子。
+            # 不可变更新：用 spread 替换 state["hypotheses"][idx]（state 是工作流容器，
+            # 替换 slot 是契约允许的；不动 dict 本身 —— 不污染后续轮 / retry）。
+            if outcome.get("error") and outcome["error"].startswith("SQL 方言违规"):
+                new_sql = await self._rewriteVerificationSqlForDialect(
+                    session, sessionId=sessionId, state=state, emit=emit,
+                    originalSql=candidate.get("verificationSql") or "",
+                    hint=outcome["error"].removeprefix("SQL 方言违规: "),
+                    datasourceType=(deps.dialectArgs or {}).get("datasourceType", ""),
+                )
+                if new_sql:
+                    candidate = {**candidate, "verificationSql": new_sql}
+                    state["hypotheses"][idx] = candidate
+                    await session.commit()
+                    outcome = await self._runner.runVerification(
+                        session, Hypothesis(**candidate),
+                        adapter=adapter, dialectArgs=deps.dialectArgs,
+                    )
             verified = outcome.get("error") is None
             confidence = round(
                 candidateConfidence(state, candidate)
@@ -304,6 +326,38 @@ class ResearchAgentPhasesMixin:
             await emitEvent(emit, EVENT_FINDING, findings[-1])
         state["findings"] = findings
         return None
+
+    async def _rewriteVerificationSqlForDialect(
+        self, session: AsyncSession, *, sessionId: uuid.UUID, state: dict[str, Any],
+        emit: Emit | None, originalSql: str, hint: str, datasourceType: str,
+    ) -> str | None:
+        """把方言违规 hint 喂回 LLM，让其重写 verificationSql。
+
+        A2 helper：与 chat 侧 retry-with-feedback 同思路，但**单次硬限**（避免反复重写）。
+        失败一律返 None（caller 走 fallback：用原 error 字符串落库，不影响主流程）。
+        用量走 ``PURPOSE_HYPOTHESIS`` 维度（与 `_generateCandidates` 同款，不引入新维度）。
+        """
+        if not originalSql or not hint:
+            return None
+        client = await self._llmClient(session, state=state, emit=emit, sessionId=sessionId)
+        if client is None:
+            return None
+        metered = MeteredClient(client)
+        new_sql = await rewriteHypothesisSqlWithHint(
+            metered, originalSql, hint, datasourceType,
+        )
+        if metered.promptTokens or metered.completionTokens:
+            # 一次 LLM 调用 = 一次计量；空调用不浪费一行 session_token_usage
+            await self._recordUsage(
+                session,
+                sessionId=sessionId,
+                purpose=PURPOSE_HYPOTHESIS,
+                promptTokens=metered.promptTokens,
+                completionTokens=metered.completionTokens,
+                modelName=metered.modelName,
+                cachedTokens=metered.cachedTokens,
+            )
+        return new_sql
 
     async def _stageReport(
         self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,

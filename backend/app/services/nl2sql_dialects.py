@@ -371,6 +371,10 @@ _ORACLE_BANNED_FUNCTIONS = (
 )
 _ORACLE_KEYWORD_PATTERNS = (
     (r"\bINTERVAL\s+(\d|['\"])", "INTERVAL", "用 ADD_MONTHS(date, -N) 或 date - N 替代"),
+    # 2026-10-08 复盘 4：研究 finding #1 写 `ORDER BY ... LIMIT 12` → ORA-00933
+    # （Oracle 不支持 LIMIT 关键字；11g 用 ROWNUM 子查询，12c+ 用 FETCH FIRST）。
+    # 强制后跟数字避免误伤列名 `limit_count` / 字符串字面量 `'LIMIT'`。
+    (r"\bLIMIT\s+\d+", "LIMIT", "用 FETCH FIRST N ROWS ONLY（12c+）或 ROWNUM 子查询（11g）替代"),
 )
 # MySQL banned 集合（refactor 前 inline 在 checkSqlDialect 函数里）
 _MYSQL_BANNED_FUNCTIONS = ("DATEADD", "DATEDIFF", "DATEPART", "ADD_MONTHS", "EXTRACT")

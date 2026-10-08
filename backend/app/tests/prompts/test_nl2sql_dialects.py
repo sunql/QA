@@ -276,3 +276,88 @@ def test_checkSqlDialect_列名含_关键词_不_误伤() -> None:
         DataSourceType.ORACLE,
     )
     assert result.ok, f"列名中的 interval / format 不应误伤：{result!r}"
+
+
+# ---------------------------------------------------------------------------
+# A1 (2026-10-08 续)：Oracle 守卫扩 LIMIT 关键字
+#
+# 真机证据：研究复盘 finding #1 写 `ORDER BY rcv_month DESC LIMIT 12` → ORA-00933
+# （"SQL 命令未正确结束"）。Oracle 不支持 LIMIT 关键字（11g 用 ROWNUM，12c+ 用
+# FETCH FIRST），LLM 在 plan 阶段没意识到这一点，又没守卫拦，于是带病落地。
+# 修法：在 _ORACLE_KEYWORD_PATTERNS 增 `\bLIMIT\s+\d+`（强制后跟数字，避免误伤
+# 列名 `limit_count` / 字符串字面量 `'LIMIT'`）。MySQL/PG 保留 LIMIT，**不**扩。
+# ---------------------------------------------------------------------------
+
+
+def test_checkSqlDialect_Oracle_LIMIT_12_被拦() -> None:
+    """2026-10-08 复盘 4：LLM 在 19c Oracle 上写 `LIMIT 12`（MySQL/PG 习惯），
+    守卫之前**没拦**这条规则 → ORA-00933 → 0 行 → 报告 data 章节无 chart。
+    守卫必须检出 LIMIT 并给出 FETCH FIRST/ROWNUM 替代提示。
+    """
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    bad_sql = (
+        "SELECT rcv_month, SUM(rcv_qty) AS total "
+        "FROM DWD_GOODS_RECEIPT_DTL "
+        "GROUP BY rcv_month ORDER BY rcv_month DESC LIMIT 12"
+    )
+    result = checkSqlDialect(bad_sql, DataSourceType.ORACLE)
+    assert not result.ok, f"Oracle 不允许 LIMIT 关键字，但守卫放行：{result!r}"
+    assert "LIMIT" in {v.function for v in result.violations}
+    # hint 必须能让 LLM 知道怎么改（给两个版本的写法让 LLM 选）
+    assert "FETCH FIRST" in result.hint or "ROWNUM" in result.hint
+    # 喂回 LLM 用的标准化前缀（与现有 INTERVAL 守卫同款）
+    assert "oracle dialect 不允许" in result.hint
+
+
+def test_checkSqlDialect_Oracle_LIMIT_后_无数字_不误伤() -> None:
+    r"""防御：`LIMIT` 作为别名 / 单独出现时不应误伤（字符串字面量内的 LIMIT 12
+    会被误拦——这与 INTERVAL 守卫行为一致，是已知限制；测试对齐 INTERVAL 风格）。
+    正则强制 `LIMIT\s+\d+`，**不**要求所有 LIMIT 出现都拦——只拦"行数限制语义"。
+    """
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    cases = [
+        "SELECT 'LIMIT' AS tag FROM dual",                        # 字符串字面量
+        "SELECT 1 AS LIMIT FROM dual",                            # 别名
+    ]
+    for sql in cases:
+        result = checkSqlDialect(sql, DataSourceType.ORACLE)
+        assert result.ok, f"`{sql}` 不应误伤（actual: {result!r}）"
+
+
+def test_checkSqlDialect_列名_limit_count_不误伤() -> None:
+    r"""防御：列名 `limit_count` 不应被误伤为 LIMIT 关键字违规。
+    正则 `\bLIMIT\s+\d+` 强制 LIMIT 边界 + 后跟数字，列名末尾的 `_count` 不构成数字。
+    """
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    result = checkSqlDialect(
+        "SELECT t.limit_count, t.limit_total FROM t1 t WHERE t.limit_count > 0",
+        DataSourceType.ORACLE,
+    )
+    assert result.ok, f"列名 limit_count / limit_total 不应误伤：{result!r}"
+
+
+def test_checkSqlDialect_MySQL_LIMIT_N_合规_放行() -> None:
+    """MySQL 自身的 `LIMIT N` 是合规的，守卫**不**应在 MySQL 上拦 LIMIT。
+    防止"加了 Oracle 守卫后误伤其他 dialect"。
+    """
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    result = checkSqlDialect(
+        "SELECT id, name FROM t1 ORDER BY id LIMIT 12",
+        DataSourceType.MYSQL,
+    )
+    assert result.ok, f"MySQL 原生 LIMIT 应放行：{result!r}"
+
+
+def test_checkSqlDialect_PostgreSQL_LIMIT_N_合规_放行() -> None:
+    """PostgreSQL 自身的 `LIMIT N` 是合规的，守卫**不**应在 PG 上拦 LIMIT。"""
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    result = checkSqlDialect(
+        "SELECT id, name FROM t1 ORDER BY id LIMIT 12",
+        DataSourceType.POSTGRESQL,
+    )
+    assert result.ok, f"PostgreSQL 原生 LIMIT 应放行：{result!r}"

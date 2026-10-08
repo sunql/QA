@@ -70,7 +70,12 @@ function checkpointFromEvent(payload: Record<string, unknown>): ResearchCheckpoi
 
 // 单个 SSE 事件 → 状态增量（不可变：events 用展开运算符追加，绝不 push 原数组）。
 // B3.5: 对外暴露 applyResearchEvent + buildInitialState 供 unit test 直接调用。
-export function buildInitialState(): ResearchState {
+//
+// buildInitialState 只返回数据字段（不带 actions）—— ResearchState 是数据+actions
+// 的合集，buildInitialState 在测试里被当作纯数据用；tsc -b 严格模式拒绝返回残缺
+// ResearchState。ResearchDataState 是数据子集，vitest 用 vite-node 转译（不跑严格
+// tsc）所以这个错误先前未暴露；npm run build 跑 `tsc -b` 立刻炸。
+export function buildInitialState(): ResearchDataState {
   return {
     sessions: [],
     sessionsLoading: false,
@@ -88,7 +93,10 @@ export function buildInitialState(): ResearchState {
   };
 }
 
-export function applyResearchEvent(state: ResearchState, event: ResearchSseEvent): Partial<ResearchState> {
+export function applyResearchEvent(
+  state: ResearchDataState,
+  event: ResearchSseEvent,
+): Partial<ResearchDataState> {
   const events = [...state.events, event];
   switch (event.name) {
     case "research.checkpoint":
@@ -129,7 +137,7 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-interface ResearchState {
+interface ResearchDataState {
   sessions: ResearchSession[];
   sessionsLoading: boolean;
   currentSession: ResearchSession | null;
@@ -143,7 +151,9 @@ interface ResearchState {
   streaming: boolean;
   error: string | null;
   conflictError: string | null;
+}
 
+interface ResearchState extends ResearchDataState {
   loadSessions: () => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   openSession: (sessionId: string) => Promise<void>;

@@ -121,3 +121,144 @@ def test_SqlDialect_dateArithmeticRule_可实例化() -> None:
         dateArithmeticRule="use ADD_MONTHS",
     )
     assert d2.dateArithmeticRule == "use ADD_MONTHS"
+
+
+# ---------------------------------------------------------------------------
+# SQL Guard（2026-10-08 补）：LLM 写的 SQL 与目标 dialect 不符 ⇒ 拦截并喂回反馈
+#
+# 真机证据：研究复盘 8/8 finding 失败，LLM 在 19c Oracle 上写出
+#   `WHERE arr_month >= DATE_FORMAT(DATE_SUB(CURRENT_DATE, INTERVAL 6 MONTH), '%Y-%m')`
+# ⇒ ORA-00907。`dateArithmeticRule` 已经禁了这些函数，但 LLM 视而不见 —— 必须**执行前**
+# 用 sqlparse 反向校验（防御深度）。详见 `checkSqlDialect` 文档。
+# ---------------------------------------------------------------------------
+
+
+def test_checkSqlDialect_Oracle_禁用_DATE_FORMAT() -> None:
+    """2026-10-08 复盘 1：LLM 把 MySQL `DATE_FORMAT` 写进 Oracle SQL → ORA-00904。
+
+    守卫必须在执行前检出，给 retry 通道喂回违规列表 + 正确写法提示。
+    """
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    result = checkSqlDialect(
+        "SELECT DATE_FORMAT(CURRENT_DATE, '%Y-%m') AS m FROM DUAL",
+        DataSourceType.ORACLE,
+    )
+    assert not result.ok, f"Oracle 不允许 DATE_FORMAT，但守卫放行: {result!r}"
+    assert "DATE_FORMAT" in {v.function for v in result.violations}
+
+
+def test_checkSqlDialect_Oracle_ADD_MONTHS_合规_放行() -> None:
+    """守卫不能误伤：Oracle 原生函数 ADD_MONTHS / TO_CHAR / TRUNC / EXTRACT 都不能标违规。"""
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    result = checkSqlDialect(
+        "SELECT TO_CHAR(ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -6), 'YYYY-MM') AS m FROM DUAL",
+        DataSourceType.ORACLE,
+    )
+    assert result.ok, f"Oracle 原生函数应放行，实际: {result!r}"
+
+
+def test_checkSqlDialect_Oracle_复盘实证_完整_MySQL_SQL() -> None:
+    """2026-10-08 复盘 2：LLM 真机写出的整条 SQL —— DATE_FORMAT + DATE_SUB + INTERVAL
+    三件套同时出现。守卫必须一次检出全部三个违规，hint 喂回 LLM 后能触发 retry。
+    """
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    badSql = (
+        "SELECT TO_CHAR(arr_month, 'YYYY-MM') AS m, SUM(qty) AS total "
+        "FROM t1 "
+        "WHERE arr_month >= DATE_FORMAT(DATE_SUB(CURRENT_DATE, INTERVAL 6 MONTH), '%Y-%m') "
+        "GROUP BY TO_CHAR(arr_month, 'YYYY-MM')"
+    )
+    result = checkSqlDialect(badSql, DataSourceType.ORACLE)
+    assert not result.ok
+    found = {v.function for v in result.violations}
+    assert {"DATE_FORMAT", "DATE_SUB", "INTERVAL"} <= found, (
+        f"应同时检出 DATE_FORMAT / DATE_SUB / INTERVAL，实际: {found}"
+    )
+    # hint 必须能让 LLM 知道怎么改
+    assert "TO_CHAR" in result.hint or "ADD_MONTHS" in result.hint
+    assert "DATE_FORMAT" in result.hint
+    assert "DATE_SUB" in result.hint
+    assert "INTERVAL" in result.hint
+
+
+def test_checkSqlDialect_MySQL_原生_DATE_FORMAT_合规_放行() -> None:
+    """MySQL 自身的 `DATE_FORMAT` / `DATE_SUB` 是合规的，守卫不能误伤。"""
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    result = checkSqlDialect(
+        "SELECT DATE_FORMAT(t.dt, '%Y-%m') AS m FROM t1 t",
+        DataSourceType.MYSQL,
+    )
+    assert result.ok, f"MySQL 原生 DATE_FORMAT 应放行: {result!r}"
+
+
+def test_checkSqlDialect_MySQL_禁用_Oracle_ADD_MONTHS() -> None:
+    """LLM 把 Oracle `ADD_MONTHS` 写进 MySQL ⇒ MySQL 报 function not found。"""
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    result = checkSqlDialect(
+        "SELECT ADD_MONTHS(t.dt, -1) AS m FROM t1 t",
+        DataSourceType.MYSQL,
+    )
+    assert not result.ok
+    assert "ADD_MONTHS" in {v.function for v in result.violations}
+
+
+def test_checkSqlDialect_PostgreSQL_原生_INTERVAL_合规_放行() -> None:
+    """PostgreSQL 用 `INTERVAL '6' MONTH` 是合规的；守卫禁 Oracle 语法即可。"""
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    result = checkSqlDialect(
+        "SELECT t.dt - INTERVAL '6' MONTH AS six_months_ago FROM t1 t",
+        DataSourceType.POSTGRESQL,
+    )
+    assert result.ok, f"PostgreSQL 原生 INTERVAL 应放行: {result!r}"
+
+
+def test_checkSqlDialect_PostgreSQL_禁用_Oracle_ADD_MONTHS() -> None:
+    """PostgreSQL 同样不允许 Oracle 专属的 `ADD_MONTHS`。"""
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    result = checkSqlDialect(
+        "SELECT ADD_MONTHS(t.dt, -1) AS m FROM t1 t",
+        DataSourceType.POSTGRESQL,
+    )
+    assert not result.ok
+    assert "ADD_MONTHS" in {v.function for v in result.violations}
+
+
+def test_checkSqlDialect_空_SQL_不_违规() -> None:
+    """空 SQL / None 不应报违规（由上游 `STEP_MISSING_SQL` 处理，无 SQL 守卫不参与）。"""
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    for empty in (None, "", "   ", "\n  \t"):
+        result = checkSqlDialect(empty, DataSourceType.ORACLE)
+        assert result.ok, f"空 SQL 应放行（{empty!r}）：{result!r}"
+
+
+def test_checkSqlDialect_大小写_不敏感() -> None:
+    """LLM 写 `date_format` / `Date_Format` 都应被检出（正则转大写比对）。"""
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    for variant in ("date_format", "Date_Format", "DATE_FORMAT"):
+        result = checkSqlDialect(
+            f"SELECT {variant}(CURRENT_DATE, '%Y-%m') AS m FROM DUAL",
+            DataSourceType.ORACLE,
+        )
+        assert not result.ok, f"变体 {variant} 应被检出：{result!r}"
+
+
+def test_checkSqlDialect_列名含_关键词_不_误伤() -> None:
+    """防御：列名 `interval_id` / `format_col` 不应被当作 INTERVAL 关键字违规。
+    INTERVAL 关键字必须**后跟数字或引号**才算违规（regex 见 nl2sql_dialects 中的 _BANNED_KEYWORDS_ORACLE）。
+    """
+    from app.services.nl2sql_dialects import checkSqlDialect
+
+    result = checkSqlDialect(
+        "SELECT t.interval_id, t.format_col FROM t1 t",
+        DataSourceType.ORACLE,
+    )
+    assert result.ok, f"列名中的 interval / format 不应误伤：{result!r}"

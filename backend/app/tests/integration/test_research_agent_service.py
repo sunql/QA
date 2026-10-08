@@ -1636,6 +1636,150 @@ async def test_execute_step_without_binding_fails_loudly_before_generation(
 
 
 # ---------------------------------------------------------------------------
+# SQL Guard（2026-10-08 补）：LLM 写出 MySQL 语法进 Oracle → 守卫拦下并触发 retry
+#
+# 真机证据：研究复盘 8/8 finding 失败，LLM 在 19c Oracle 上写出
+#   `WHERE ... >= DATE_FORMAT(DATE_SUB(CURRENT_DATE, INTERVAL 6 MONTH), '%Y-%m')`
+# ⇒ ORA-00907 ⇒ 0 行。`dateArithmeticRule` prompt 教了，LLM 仍写错 ⇒ 必须执行前
+# **守卫**拦下，把违规列表喂回 LLM retry。
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedNl2Sql:
+    """按调用顺序逐次返回不同 SQL 的 NL2SQL fake（用于验证 retry 路径）。
+
+    `responses` 是给 `generateSql` 依次返回的 SQL 串；超出长度后取最后一个。
+    记录每次调用的 question（供守卫反馈是否被注入断言）。
+    """
+
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = responses
+        self.calls: list[dict] = []
+
+    async def generateSql(self, question, classes, llmClient, modelConfig, **kwargs):
+        idx = min(len(self.calls), len(self._responses) - 1)
+        self.calls.append(
+            {
+                "question": question,
+                "classes": tuple(classes),
+                "llmClient": llmClient,
+                "modelConfig": modelConfig,
+                **kwargs,
+            }
+        )
+        from app.services.nl2sql_service import SqlResult
+
+        return SqlResult(sql=self._responses[idx], promptTokens=0, completionTokens=0)
+
+
+@pytest.mark.asyncio
+async def test_runStep_SQL_Guard_Oracle_首轮_MySQL_语法_触发_retry(dbSession) -> None:
+    """守卫拦下 MySQL `DATE_FORMAT` → 把违规列表喂回 LLM 重写 → 第二轮执行正确 SQL。
+
+    修复前：`executeReadonlySql` 直接被调用 ⇒ ORA-00907 ⇒ step_failed。
+    修复后：守卫先于执行，违规时自动 retry 一次，第二次执行正确的 SQL。
+    """
+    badSql = (
+        "SELECT TO_CHAR(arr_month, 'YYYY-MM') AS m "
+        "FROM t1 "
+        "WHERE arr_month >= DATE_FORMAT(DATE_SUB(CURRENT_DATE, INTERVAL 6 MONTH), '%Y-%m')"
+    )
+    goodSql = (
+        "SELECT TO_CHAR(ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -6), 'YYYY-MM') AS m FROM DUAL"
+    )
+    nl2sql = _ScriptedNl2Sql(responses=[badSql, goodSql])
+    runner = FakeRunner(rows=[{"m": "2025-04"}])
+    probe = _ResolveClientProbe()
+
+    deps = ExecutionDeps(
+        runner=runner,
+        chart=FakeChart(),
+        ontology=FakeOntology(),
+        nl2sql=nl2sql,
+        resolveClient=probe,
+        recordUsage=FakeUsageRecorder().recordUsage,
+        # 显式送入 `datasourceType=ORACLE`（守卫据此选禁用清单）
+        adapter=object(),
+        dialectArgs={"datasourceType": "oracle", "oracle_version": "19c", "schemaPrefix": "ZJTH."},
+    )
+    step = {"index": 0, "description": "收货量趋势", "sub_question": "近 6 月收货量趋势"}
+
+    result = await runStep(
+        dbSession,
+        step,
+        sessionId=uuid.uuid4(),
+        state={"question": QUESTION},
+        emit=None,
+        deps=deps,
+    )
+
+    # 第二次执行的是改写后的 SQL（守卫 retry 成功）
+    assert runner.executed == [goodSql], (
+        f"守卫应让第二次执行 goodSql，实际: {runner.executed}"
+    )
+    # 守卫确实触发了一次 retry：NL2SQL 调了两次
+    assert len(nl2sql.calls) == 2, f"期望两次 generateSql 调用，实际 {len(nl2sql.calls)}"
+    # 第二次调用必须把守卫反馈（违规列表）拼进 question 喂回 LLM
+    secondQuestion = nl2sql.calls[1]["question"]
+    assert "DATE_FORMAT" in secondQuestion or "DATE_SUB" in secondQuestion, (
+        f"守卫反馈必须出现在第二次 question 中，实际: {secondQuestion!r}"
+    )
+    assert "ADD_MONTHS" in secondQuestion or "TO_CHAR" in secondQuestion, (
+        f"守卫反馈必须给出正确写法（ADD_MONTHS / TO_CHAR）提示，实际: {secondQuestion!r}"
+    )
+    # 守卫拦下 + retry 成功 ⇒ 步成功（无 error）
+    assert not result.get("error"), f"守卫 retry 成功 ⇒ 步应成功，实际: {result!r}"
+
+
+@pytest.mark.asyncio
+async def test_runStep_SQL_Guard_重试_仍违规_标记步失败_且不无限循环(dbSession) -> None:
+    """LLM 两次都写 MySQL 语法 ⇒ 守卫 retry 一次后仍违规 ⇒ 步标 failed，**不**第三次 retry。
+
+    防御：守卫必须硬限次数；LLM 写不出来的 SQL 不能死循环（无 LLM 「无脑生成」就触发不了
+    retry 的下限，但 prompt 改写 + token 消耗必须有上限）。
+    """
+    badSql = (
+        "SELECT DATE_FORMAT(CURRENT_DATE, '%Y-%m') AS m FROM DUAL"
+    )
+    nl2sql = _ScriptedNl2Sql(responses=[badSql, badSql])
+    runner = FakeRunner()
+    probe = _ResolveClientProbe()
+
+    deps = ExecutionDeps(
+        runner=runner,
+        chart=FakeChart(),
+        ontology=FakeOntology(),
+        nl2sql=nl2sql,
+        resolveClient=probe,
+        recordUsage=FakeUsageRecorder().recordUsage,
+        adapter=object(),
+        dialectArgs={"datasourceType": "oracle", "oracle_version": "19c", "schemaPrefix": None},
+    )
+    step = {"index": 0, "description": "趋势", "sub_question": "近 6 月"}
+
+    result = await runStep(
+        dbSession,
+        step,
+        sessionId=uuid.uuid4(),
+        state={"question": QUESTION},
+        emit=None,
+        deps=deps,
+    )
+
+    # 初始 + 1 retry = 2 次生成；不允许第 3 次
+    assert len(nl2sql.calls) == 2, (
+        f"守卫必须硬限 1 次 retry（初始 + 1），实际 {len(nl2sql.calls)} 次"
+    )
+    # 没有任何 SQL 被执行（badSql 一次都没通过守卫）
+    assert runner.executed == [], f"违规 SQL 不应被执行，实际: {runner.executed}"
+    # 步失败，且错误消息透出违规列表
+    assert result.get("error"), f"守卫二次违规 ⇒ 步必须 failed，实际: {result!r}"
+    assert "DATE_FORMAT" in result["error"], (
+        f"错误消息必须透出违规函数便于诊断: {result['error']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Task 17（N1'）：失败步不再冒充「已执行」；全部步失败 ⇒ 急停
 #
 # 用户裁定：「全部步失败 ⇒ fail loud；部分失败 ⇒ `degraded=true`」。

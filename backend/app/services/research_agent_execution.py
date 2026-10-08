@@ -42,6 +42,7 @@ from app.domain.research_models import ResearchSession
 from app.infrastructure.business_db_pool import get_adapter
 from app.services.datasource_service import DataSourceService
 from app.services.nl2sql_service import Nl2SqlService, _safeSchemaPrefix
+from app.services.nl2sql_dialects import checkSqlDialect
 from app.services.research_agent_ports import (
     EVENT_ERROR,
     EVENT_STEP_CHART,
@@ -74,6 +75,11 @@ logger = logging.getLogger(__name__)
 # 只收这两条，刻意**不**放开成 `except Exception`：编程错误（如 TypeError）必须原样上抛，
 # 否则会被伪装成「该步无数据」而在 autoConfirm 下静默 done（见测试双侧守卫）。
 _DRIVER_ERRORS: tuple[type[BaseException], ...] = (SQLAlchemyError, oracledb.Error)
+
+# SQL 守卫（2026-10-08 补）：LLM 写出与目标 dialect 不符的 SQL（如 MySQL 语法进 Oracle）
+# ⇒ 在执行前拦下并把违规列表喂回 LLM 触发 retry。硬限 1 次重试，避免 LLM 改不出来时
+# 无谓地消耗 token / 时间；研究复盘实证 Oracle 守卫命中率足够。
+_SQL_GUARD_MAX_RETRIES: int = 1
 
 
 @dataclass(frozen=True)
@@ -193,6 +199,17 @@ def businessBinding(deps: ExecutionDeps) -> tuple[Any, dict[str, Any]]:
     return deps.adapter, deps.dialectArgs
 
 
+def _datasourceTypeOf(dialectArgs: dict[str, Any] | None) -> Any:
+    """从执行面的 `dialectArgs` 取数据源类型（守卫依赖项）。
+
+    返回 `None` 时**不**跑守卫（`dialectArgs` 缺失 ⇒ 未接线，不挡）—— 这是「守卫在未接线
+    测试里不参与」的统一口径，**不**抛错（守卫不该把接线缺失的 `RuntimeError` 抢走）。
+    """
+    if not dialectArgs:
+        return None
+    return dialectArgs.get("datasourceType")
+
+
 async def runStep(
     session: AsyncSession,
     step: dict[str, Any],
@@ -243,6 +260,54 @@ async def runStep(
     # 不可变：把生成的 SQL 固化进本步副本（步结果/动态点据此可追溯）
     resolved = {**step, "sql": sql}
     await emitEvent(emit, EVENT_STEP_SQL, {"index": index, "sql": sql})
+
+    # SQL Guard（2026-10-08 补）：执行前反向校验 LLM 写的 SQL 是否符合目标 dialect。
+    # 真机证据：研究复盘 8/8 finding 失败，LLM 在 19c Oracle 上写
+    #   `WHERE ... >= DATE_FORMAT(DATE_SUB(CURRENT_DATE, INTERVAL 6 MONTH), '%Y-%m')`
+    # ⇒ ORA-00907 ⇒ 0 行。`dateArithmeticRule` 教了 LLM 不听 ⇒ 必须**执行前**反向校验。
+    # 违规时把违规列表喂回 LLM 触发 retry（硬限 1 次，避免无谓消耗）。
+    dsType = _datasourceTypeOf(dialectArgs)
+    if dsType is not None:
+        guard = checkSqlDialect(sql, dsType)
+        retryCount = 0
+        while not guard.ok and retryCount < _SQL_GUARD_MAX_RETRIES:
+            retryCount += 1
+            logger.warning(
+                "SQL guard rejected (attempt=%d session=%s step=%s): %s",
+                retryCount, sessionId, index, guard.violations,
+            )
+            sql = await generateStepSql(
+                session,
+                step,
+                sessionId=sessionId,
+                state=state,
+                emit=emit,
+                deps=deps,
+                dialectArgs=dialectArgs,
+                sqlGuardFeedback=guard.hint,
+            )
+            if not sql:
+                # LLM 二次生成也空 ⇒ 走 missing sql，不浪费更多 token
+                break
+            resolved = {**resolved, "sql": sql}
+            await emitEvent(
+                emit, EVENT_STEP_SQL,
+                {"index": index, "sql": sql, "guard_retry": retryCount},
+            )
+            guard = checkSqlDialect(sql, dsType)
+        if not sql:
+            logger.warning(
+                "执行步重试后仍缺 SQL，按无数据跳过: session=%s step=%s", sessionId, index,
+            )
+            return stepResult(resolved, rows=[], error=STEP_MISSING_SQL)
+        if not guard.ok:
+            # 硬限 1 次 retry 后仍违规 ⇒ 步失败；错误透出违规列表便于诊断。
+            return await failedStep(
+                session, resolved,
+                f"SQL 方言违规（{retryCount} 次重试仍不合规）: {guard.hint}",
+                emit=emit,
+            )
+
     try:
         rows = await deps.runner.executeReadonlySql(session, sql, adapter=adapter)
     except ValueError as exc:
@@ -272,12 +337,17 @@ async def generateStepSql(
     emit: Emit | None,
     deps: ExecutionDeps,
     dialectArgs: dict[str, Any],
+    sqlGuardFeedback: str | None = None,
 ) -> str | None:
     """无 SQL 的计划步：走真实 NL2SQL 生成（Task 6.5-1）。
 
     未接线（`nl2sql is None`）、无可用 LLM、生成抛错或产物为空都返回 None —— 调用方据此
     走 `STEP_MISSING_SQL`（显式 warning，不静默）。子问题优先于主问题（多步场景下每一步
     的语义范围不同，与 chat `_executeDataStep` 同口径）。
+
+    `sqlGuardFeedback`（2026-10-08 补）：SQL 守卫拦下 LLM 的初稿后，把违规列表拼成
+    「上一轮 SQL 包含禁用函数，请改用 ...」的人类语言提示，**作为子问题的前缀**喂回 LLM
+    触发 retry。LLM 看到这条提示会在重写时刻意避开违规函数。
 
     方言参数（Task 13e）：`datasourceType` / `oracle_version` / `schemaPrefix` 由**相位边界**
     算好经入参传入 —— 本函数不碰业务源（ORM 对象），缺源在 `runStep` 的 `businessBinding`
@@ -290,7 +360,13 @@ async def generateStepSql(
     )
     if client is None:
         return None
-    question = str(step.get("sub_question") or "").strip() or str(state["question"])
+    baseQuestion = str(step.get("sub_question") or "").strip() or str(state["question"])
+    # 守卫反馈拼到子问题**前**（让 LLM 在生成开头就看到「上一轮违规了」），与 step 内容
+    # 之间用换行隔开，便于 LLM 把反馈当独立段落而非污染 sub_question 语义。
+    if sqlGuardFeedback:
+        question = f"{sqlGuardFeedback}\n\n{baseQuestion}"
+    else:
+        question = baseQuestion
     try:
         classes = selectClassesForTables(
             await deps.ontology.listClasses(session), eslClasses(state)

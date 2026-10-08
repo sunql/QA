@@ -219,10 +219,13 @@ async def test_resolve_checkpoint_writes_audit_log(dbSession) -> None:
     await svc.resolveCheckpoint(
         dbSession, checkpointId=cp.id, status="confirmed", userChoice={"selectedIndexes": [0, 1]}, userId=1
     )
+    # checkpoint.id 是 UUID → audit_log 走 entity_id_str 列（0117），entity_id 为 NULL。
     row = await dbSession.execute(
-        text("SELECT entity_type, entity_id, action, actor, after_json FROM audit_log WHERE entity_type = 'research_checkpoint'")
+        text("SELECT entity_type, entity_id, entity_id_str, action, actor, after_json FROM audit_log WHERE entity_type = 'research_checkpoint'")
     )
     log_row = row.one()
     assert log_row.entity_type == "research_checkpoint"
+    assert log_row.entity_id is None
+    assert log_row.entity_id_str == str(cp.id)
     assert log_row.action == "UPDATE"
     assert log_row.after_json["status"] == "confirmed"

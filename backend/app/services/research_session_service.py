@@ -222,9 +222,12 @@ class ResearchSessionService:
         await session.flush()
         await session.refresh(row)
         # B5：audit_log 与 UPDATE 同事务（AuditLog 不可变，仅 INSERT）
+        # checkpoint.id 是 UUID，audit_log.entity_id 是 BIGINT（不兼容），
+        # 走 entity_id_str 列；entity_id 留 NULL（0117 起允许 NULL）。
         session.add(AuditLog(
             entity_type="research_checkpoint",
-            entity_id=row.id,
+            entity_id=None,
+            entity_id_str=str(row.id),
             action="UPDATE",
             actor=str(userId) if userId is not None else "",
             before_json=None,

@@ -1242,6 +1242,10 @@ class AuditLog(Base):
     对任意实体类型（kpi_catalog / ontology_class / data_quality_rule /
     entity_mapping ...）的扩展性。
 
+    entity_id 与 entity_id_str 二选一：业务 PK 是 int → entity_id；是 UUID
+    → entity_id_str（如 research_checkpoint.id）。两列并存由应用层按
+    entity_type 路由。entity_id 自 0117 起允许 NULL，仅 UUID 实体不填。
+
     actor / actor_departments 来自 CurrentUser：actor=userId（X-User-Id），
     actor_departments=',' 拼接的部门（X-User-Departments），便于审计查询
     「哪个部门改了什么」。
@@ -1251,7 +1255,8 @@ class AuditLog(Base):
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    entity_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    entity_id_str: Mapped[str | None] = mapped_column(String(64), nullable=True)
     action: Mapped[str] = mapped_column(String(32), nullable=False)
     actor: Mapped[str] = mapped_column(String(100), nullable=False)
     actor_departments: Mapped[str | None] = mapped_column(String(500), nullable=True)

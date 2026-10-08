@@ -413,7 +413,7 @@ async def test_resume_wrapper_emits_terminal_error_on_pre_guard_failure(
     """
     service = _fullService(esl=FakeEsl(empty=True))
 
-    async def failingResolve(session, *, checkpointId, status, userChoice):
+    async def failingResolve(session, *, checkpointId, status, userChoice, userId=None):
         raise ValueError(f"checkpoint 非 pending（当前 confirmed）: {checkpointId}")
 
     service._sessions.resolveCheckpoint = failingResolve

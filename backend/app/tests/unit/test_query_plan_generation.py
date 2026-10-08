@@ -113,10 +113,24 @@ class TestGenerateQueryPlan:
         assert result.plan.target == "各供应商收货数量"
 
     async def test_missing_fields_use_defaults(self) -> None:
-        fake = _FakeLlm([json.dumps({"target": "只有目标"}, ensure_ascii=False)])
+        """缺失字段回落默认值（selectedClasses 缺省为空元组）。
+
+        夹具说明：JSON 里必须带**至少一个被空计划闸门计入的字段**。
+        2026-09-27 方案B 起 `_isEmptyPlan`（`nl2sql_plan.py:83`）不再把 `target`
+        单独视为「有内容」—— 仅 `{"target": …}` 会被判 PLAN_EMPTY 而走重试，
+        假 LLM 只有一个预置回复 ⇒ `IndexError`（本用例曾因此假红）。
+        这里用 `conditions` 提供最小合法内容，同时**仍然省略** selectedClasses，
+        以保持本用例的原意不变。
+        """
+        fake = _FakeLlm(
+            [json.dumps({"target": "只有目标", "conditions": ["X = 1"]}, ensure_ascii=False)]
+        )
         service = Nl2SqlService()
         result = await service.generateQueryPlan("问题", [_cls("PRECEIPT")], fake, _llmConfig())
         assert result.plan.selectedClasses == ()
+        assert result.plan.conditions == ("X = 1",)
+        # 闸门计数字段齐备 ⇒ 只调一次 LLM，未触发重试
+        assert len(fake.calls) == 1
 
     async def test_retries_on_parse_failure_then_succeeds(self) -> None:
         fake = _FakeLlm(["抱歉，无法解析", _validPlanJson()])

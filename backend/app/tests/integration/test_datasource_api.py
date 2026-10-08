@@ -174,8 +174,9 @@ class TestConnectionEndpoint:
     @staticmethod
     def _fakeAdapter(success: bool, message: str):
         class _Fake:
-            async def test(self) -> tuple[bool, str]:
-                return success, message
+            async def test(self) -> tuple[bool, str, object | None]:
+                # 2026-10-02 起 test() 第三元为服务端版本原文
+                return success, message, ("19", "0", "0.0.0.0") if success else None
 
             async def dispose(self) -> None:
                 pass

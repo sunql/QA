@@ -21,7 +21,7 @@ tags:
 
 # Wiki ↔ Ontology 链接 — 运营指南与架构
 
-把 wiki 页面/段落与 ontology class/property **显式关联**，让 NL2SQL 在生成 SQL
+把 wiki 页面/段落与 ontology class/property/metric **显式关联**，让 NL2SQL 在生成 SQL
 时看到 wiki 业务规则（例如「收货数量按入厂日期计」），避免 LLM 凭默认口径
 猜解读。本特性是把 wiki 知识从「检索增强」升级为「业务规则通道」的最后一公里。
 
@@ -36,7 +36,7 @@ tags:
 
 ## 0. 一句话结论
 
-运营在 **Admin → Wiki 链接管理** 把 wiki 段落绑定到 ontology class/property，
+运营在 **Admin → Wiki 链接管理** 把 wiki 段落绑定到 ontology class/property/metric，
 NL2SQL 引擎在每次生成 SQL 前**自动**把命中的 wiki chunk 注入 system prompt，
 LLM 就能拿到「业务口径」而非仅靠 schema 推。失败走 graceful degradation
 （与改前等价），prometheus + 结构化日志 + `nl2sql_wiki_trace` 审计三重兜底。
@@ -73,8 +73,8 @@ LLM 就能拿到「业务口径」而非仅靠 schema 推。失败走 graceful d
 | `id` | `BIGSERIAL` PK | |
 | `page_id` | `VARCHAR(64)` FK → `wiki_page.page_id` ON DELETE CASCADE | |
 | `chunk_id` | `VARCHAR(64)` NULL | **NULL = 页面级**；非 NULL = 段落级 |
-| `ontology_type` | `VARCHAR(16)` | CHECK：`class` 或 `property` |
-| `ontology_id` | `BIGINT` | ontology_class.id 或 ontology_property.id |
+| `ontology_type` | `VARCHAR(16)` | CHECK：`class` / `property` / `metric`（migration 0106 放开） |
+| `ontology_id` | `BIGINT` | ontology_class.id / ontology_property.id / ontology_metric.id |
 | `weight` | `NUMERIC(3,2)` | `0 ≤ weight ≤ 1`，默认 `1.00` |
 | `note` | `VARCHAR(200)` NULL | 备注（运营可见） |
 | `created_by` | `BIGINT` | FK → 用户 |
@@ -116,9 +116,9 @@ LLM 就能拿到「业务口径」而非仅靠 schema 推。失败走 graceful d
 ### 3.1 流程
 
 1. **左侧选 wiki 页**：搜索 / 折叠（前端 `WikiLinksPage` 树形面板）
-3. **右侧详情**：当前页已绑 ontology 列表（class / property 分 tab）
+3. **右侧详情**：当前页已绑 ontology 列表（class / property / metric 分 tab）
 4. **添加绑定**：点「+ 添加绑定」 → 弹窗
-   - **ontology 类型**：切 class / property
+   - **ontology 类型**：切 class / property / metric
    - **搜索 ontology**：按 name / alias（已绑的标 disabled 防重）
    - **scope**：单选「覆盖全页」 / 「仅限此段落（指定 chunk_id）」
    - **weight**：slider 0–1（默认 1.0）
@@ -221,36 +221,36 @@ class WikiChunkLoader:
         # 整页注入过大风险由「运营优先选具体段落」规范约束
 ```
 
-### 4.3 NL2SQL 接入点（`chat_service._planAndGenerateSql`）
+### 4.3 NL2SQL 接入点（`chat_service._collectWikiBlock`，由 `_planAndGenerateSql` 调用）
 
 ```python
-# ★ 新增：wiki 召回注入
-wikiInjector = WikiInjector()
-linkRows = await WikiLinkService().getLinksByOntology(
-    [(o.type, o.id) for o in recalledOntologies if o.type in ("class", "property")],
-)
-chunkLoader = WikiChunkLoader()
-chunkTexts = await chunkLoader.loadChunks(
-    session,
-    page_ids=[lnk.page_id for lnk in linkRows],
-    chunk_ids=[lnk.chunk_id for lnk in linkRows],
-)
-budget = await wikiInjector.getBudget(session)  # 读 system_config
-scored = wikiInjector.collectAndScore(recalledOntologies, linkRows, chunkTexts, budget)
-wikiPageIndex = await self._loadWikiPageTitles([s.page_id for s in scored])
-wikiRulesBlock = wikiInjector.renderPromptBlock(scored, budget.maxChars, wikiPageIndex)
+# ★ 新增：wiki 召回注入（_collectWikiBlock）
+# 收集顺序是「先看配了哪些类型的链接，再决定召回哪些类型」：某类型一条链接都没有时，
+# 召回结果必然在 recallIndex 命中检查处被丢弃，白花一次 embedding + 一次 Milvus 检索。
 
-# 既有：拼两阶段 prompt
-messages = self._buildTwoStagePrompt(
-    schema=schemaText,
-    context=contextBlock,
-    wikiRulesBlock=wikiRulesBlock,   # ← 新增参数
-    fewShot=fewShot,
-    question=pc.question,
+# Step 1：class 分数来自 _selectRelevantClasses 附加的 _recall_score
+scored_ontology = self._classRecallScores(classes)
+
+# Step 2：property / metric 按需召回 —— 只有真的配了该类型链接才召回
+configured_types = await service.listConfiguredOntologyTypes(session)   # SELECT DISTINCT ontology_type WHERE revoked_time IS NULL
+extra_types = {t for t in _WIKI_EXTRA_RECALL_TYPES if t in configured_types}  # ("property", "metric")
+scored_ontology.extend(await self._recallExtraOntologyScores(session, question, extra_types))
+
+# Step 3：按 (type, id) 对查 wiki 链接 → 加载 chunk → 评分 → 渲染
+pairs = [(o.type, o.id) for o in scored_ontology]
+link_rows = await service.getLinksByOntology(session, pairs)
+chunk_texts = await WikiChunkLoader().loadChunks(
+    session, page_ids=[l.page_id for l in link_rows], chunk_ids=[l.chunk_id for l in link_rows],
 )
+budget = await WikiInjector.getBudget(session)  # 读 system_config
+scored = WikiInjector.collectAndScore(scored_ontology, link_rows, chunk_texts, budget)
+wiki_block = WikiInjector.renderPromptBlock(scored, budget.maxChars, page_index)
+
+# 由 _planAndGenerateSql 把 wiki_block 作为 wikiRulesBlock 参数传给两阶段 prompt
 ```
 
-**失败模式**：4 步任一异常 → `try/except` log warning + 退化为空块（与改前等价）。
+**失败模式**：任一步异常 → `try/except` log warning + 退化为空块（与改前等价）；
+property / metric 单类型召回失败只跳过该类型（warning + continue），不影响 class 与其他类型。
 **总闸关闭**：`WIKI_INJECTION_ENABLED=false` → 整个步骤短路，注入 0 chunk。
 
 ---
@@ -379,7 +379,7 @@ admin 端 4 个写操作（CREATE / UPDATE weight+note / DELETE 软撤销）都�
 
 | 套件 | 用例数 | 覆盖 |
 |---|---|---|
-| `test_wiki_link_service.py` | 12 | CRUD + 软撤销 + 唯一约束 + 类型/权重校验 |
+| `test_wiki_link_service.py` | 15 | CRUD + 软撤销 + 唯一约束 + 类型/权重校验 |
 | `test_wiki_injector.py` | 10+ | 评分公式 / 多 ontology 去重 / 整页 vs 段落并存 / 未召回剪枝 / 末位截断 / max_chunks 上限 / 配置异常回退 / 渲染格式 / 空场景 / 字符预算 |
 | `test_wiki_chunk_loader.py` | 6+ | PG + Milvus 双查 / chunk_id NULL 走 PG / 缺失键静默忽略 / 整页截断 |
 | `test_wiki_link_admin_api.py` | 集成 | /api/v1/admin/wiki-links CRUD + ACL + DTO |
@@ -412,7 +412,7 @@ admin 端 4 个写操作（CREATE / UPDATE weight+note / DELETE 软撤销）都�
 | **注入无效果** | 1) `SELECT value FROM system_config WHERE key='WIKI_INJECTION_ENABLED'` 应为 `'true'`；2) 后端日志查 `[wiki_injector]` 是否出现 + `matched_links` 是否非空；3) 检查 `wiki_ontology_link` 是否软撤销（`revoked_time IS NULL`）；4) 确认 ontology 是否被召回（`recallIndex` 不命中 → 剪枝） |
 | **注入截断严重（chunks 总丢最后几条）** | 调大 `WIKI_INJECTION_MAX_CHARS`（默认 2000） / `WIKI_INJECTION_MAX_CHUNKS`（默认 5）；或运营降低个别 `weight`；注意 obs `wiki_injector_truncated_chunks_total > 20%` 告警 |
 | **wiki 链接创建报 409** | 唯一约束冲突：`page_id + COALESCE(chunk_id,'') + ontology_type + ontology_id` 已存在（可能软撤销的复活不感知，需先 DELETE 撤销的再 CREATE） |
-| **wiki 链接创建报 422** | `ontology_type` 非法（仅 class/property）或 `weight` 越界（0–1）或 `page_id` 不存在（FK 前置） |
+| **wiki 链接创建报 422** | `ontology_type` 非法（仅 class/property/metric）或 `weight` 越界（0–1）或 `page_id` 不存在（FK 前置） |
 | **wiki 链接报 403** | 缺 `wiki_admin` ACL；前端检查当前用户角色 |
 | **trace 表查不到某次会话** | `nl2sql_wiki_trace` 仅在成功注入时写；总闸关 / 召回为空 / 异常降级 → 不写行 |
 | **prompt 找不到 wiki 规则但 wiki 已绑** | 1) 检查 `revoked_time IS NULL`；2) 检查 ontology 是否在本次召回（`recallIndex`）；3) 检查 `WIKI_INJECTION_MIN_RECALL_SCORE` 是否过高；5) 看 chunkLoader 是否取到文本（PG/Milvus 缺失） |

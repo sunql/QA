@@ -269,6 +269,7 @@ MSG_CLASS_INHERIT_SELF = "类不能继承自身"
 MSG_CLASS_INHERIT_CYCLE = "父类 id={id} 是当前类的后代，设置继承会形成环"
 MSG_INHERIT_CHECK_UNAVAILABLE = "继承环检测不可用，已拒绝更新"
 MSG_CLASS_ALREADY_EXPIRED = "OntologyClass id={id} 已是历史版本，无需重复删除"
+MSG_CLASS_NOT_EXPIRED = "OntologyClass id={id} 未软删除，无需恢复"
 
 # Property / Metric 错误
 MSG_ONTOLOGY_PROPERTY_NOT_FOUND = "OntologyProperty id={id} 不存在"
@@ -305,10 +306,17 @@ MSG_VECTOR_SYNC_FAILED = "向量同步失败: {exc}"
 # =============================================================================
 
 MSG_DATASOURCE_NOT_FOUND = "数据源 {id} 不存在"
+MSG_DATASOURCE_TYPE_UNKNOWN = (
+    "数据源「{name}」的类型「{type}」无法识别，已拒绝生成 SQL。"
+    "请编辑该数据源重新保存（支持：mysql / postgresql / oracle），或联系管理员修正。"
+)
 MSG_DATASOURCE_CONNECT_FAILED = "连接失败: {message}"
 MSG_DATASOURCE_HOST_NOT_ALLOWED = "主机 {host} 不在允许列表内"
 MSG_DATASOURCE_HOST_ALLOWLIST_DETAIL = "允许的主机: {hosts}"
 MSG_DATASOURCE_NAME_EXISTS = "数据源名称 {name} 已存在"
+# 研究域建会话时的数据源解析失败（Task 13e）：无**启用**数据源 ⇒ 执行业务 SQL 无处可去。
+# 刻意显式报错而非回落应用元数据库会话 —— 那正是「研究侧查不到业务表」的历史根因。
+MSG_DATASOURCE_NONE_AVAILABLE = "未配置可用的业务数据源，无法开始研究：请先新建并启用一个数据源"
 # MSG_DATASOURCE_CONNECT_OK 在 app/domain/error_messages.py（基础设施层）
 
 
@@ -326,6 +334,24 @@ MSG_NL2SQL_SQL_INVALID = (
     "无法生成有效的查询 SQL，请换一种问法或补充本体元数据"
 )
 MSG_NL2SQL_SQL_FAILED = "无法生成 SQL"
+
+# Top-N 占比分母守卫（feat-nl2sql-share-denominator-guard，2026-10-02）：
+# 真机回归——同一问题两次生成，一次用独立 CTE 分母（对）、一次在 Top-N 过滤后的
+# 行集上用窗口函数算分母（恒 100%，错）。prompt 负向约束是概率性的，形态级拦截
+# 才是确定性的，故三层：L1 生成时拦截（本反馈）+ L3 结果不变量 + L2 歧义示警。
+MSG_NL2SQL_SHARE_DENOMINATOR_FEEDBACK = (
+    "占比类指标的分母不得在 Top-N 过滤后的行集上用窗口函数计算（分母会只剩 Top-N 行，"
+    "占比恒等于 100%）；请用独立 CTE 从过滤前明细计算每组总量（如 sup_total），"
+    "再用 JOIN 关联回主查询"
+)
+MSG_NL2SQL_SHARE_INVARIANT_FAILED = (
+    "占比校验未通过：Top-N 占比之和超过 100%，结果不可信"
+    "（分母可能受 Top-N 过滤影响），请换一种问法或补充约束"
+)
+MSG_NL2SQL_SHARE_AMBIGUOUS_WARNING = (
+    "⚠️ 各组占比均为 100%：若各组涉及的明细种类多于 Top-N 的 N，"
+    "此结果可能存在分母错误，建议核对。"
+)
 
 
 # =============================================================================
@@ -565,8 +591,10 @@ MSG_SESSION_NOT_OWNED = "会话不存在或不属于当前用户"
 # v3.1 R2（security H2）：/evidences 归属守卫。detail 不回显归属者（403 侧信道）。
 MSG_EVIDENCE_SESSION_NOT_OWNED = "无权访问该会话的证据记录"
 
-# v3.1 B6（M7 Hypothesis Hook）：/chat/sessions/{sid}/hypotheses 归属守卫（同上口径）。
-MSG_HYPOTHESIS_SESSION_NOT_OWNED = "无权访问该会话的分析假设"
+# 注：`MSG_HYPOTHESIS_SESSION_NOT_OWNED`（"无权访问该会话的分析假设"）已删除 ——
+# 守卫从 chat.py 的私有副本提升为 api/v1/session_guard.py 后服务 6 个端点，
+# 该文案在一半端点上描述错对象；现统一用上面的 MSG_SESSION_NOT_OWNED
+# （见 changes/2026-09-30-chat-session-restore/summary.md §4）。
 
 # =============================================================================
 # 数据质量评估报告（feat-dq-evaluation-report）
@@ -600,3 +628,28 @@ MSG_REPORT_PLACEHOLDER_INVALID = (
 MSG_REPORT_SECTION_LIMIT = "报告数据绑定数超过上限 {limit}"
 MSG_REPORT_STATUS_INVALID = "非法报告状态过滤值: {value}"
 MSG_REPORT_ALREADY_REVIEWED = "报告已审批，不能重复审批"
+
+
+# =============================================================================
+# Chat 模块用户可见文案
+# =============================================================================
+
+# 计划 target=无法回答（问题超出本体可回答范围）时的固定友好回答前缀。
+# 不调用回答 LLM：模型已判定无数据可查，避免空计划诱导编造 SQL 并掩盖真实原因。
+MSG_CHAT_UNANSWERABLE_NO_DATA = (
+    "抱歉，当前系统中没有与您的问题相关的业务数据，无法回答该问题。"
+)
+# 向量召回降级时：Milvus 无命中 / 检索异常，指向量同步缺失。
+MSG_CHAT_UNANSWERABLE_MISSING_VECTOR = (
+    "抱歉，向量检索未返回相关本体类，可能尚未同步向量数据。"
+    "请在「本体管理→向量同步」中同步向量数据后再试。"
+)
+
+# 多步失败隔离（C3）：步骤级错误文案前缀。两类分开，便于日志与前端区分
+# 「根本没生成出 SQL」与「生成了但执行失败（含回灌重试）」。
+MSG_CHAT_STEP_GEN_FAILED_PREFIX = "该步骤查询生成失败："
+MSG_CHAT_STEP_EXEC_FAILED_PREFIX = "该步骤执行失败："
+# 软失败（LLM 判定无有效查询计划）：非硬异常，纯步骤级隔离
+MSG_CHAT_STEP_UNANSWERABLE = "无法回答（LLM 判定无有效查询计划）"
+# 汇总步骤被跳过（前置数据步骤全失败）：非失败、非成功，如实说「未执行」
+MSG_CHAT_STEP_AGGREGATION_SKIPPED = "未执行（前置数据步骤全部失败）"

@@ -21,8 +21,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import AuditLog, OntologyJoin, OntologyRelation
+from app.services.id_mapping_service import IdMappingService
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _uid(dbSession: AsyncSession, businessObject: str, pgId: int) -> str:
+    """PG id → unified_id（图侧标识一律用它）。"""
+    row = await IdMappingService().resolveByExternal(dbSession, businessObject, str(pgId))
+    assert row is not None, f"{businessObject}:{pgId} 未注册 unified_id"
+    return row.unified_id
 
 _neo4jAvailable = False
 try:  # 探测 Neo4j（同步探测在 async 环境外先跑；与图集成测试同口径）
@@ -372,6 +380,37 @@ class TestBatchSyncGraph:
         assert graph["properties"] >= 0
         assert graph["hasPropertyEdges"] >= 0
         assert graph["referenceEdges"] >= 0
+
+    @pytest.mark.skipif(
+        not _neo4jAvailable, reason="Neo4j 不可达，跳过 syncGraph 计数用例"
+    )
+    async def test_sync_graph_keys_nodes_by_unified_id(
+        self,
+        client: AsyncClient,
+        dbSession: AsyncSession,
+        neo4jCleanDriver,
+    ) -> None:
+        """入图节点必须按 unified_id 落键，且不得另生一套旧 `id` 键节点。
+
+        `syncOntologyNodes` 曾 `MERGE (c:Class {id: r.id})` —— 与 upsertClassNode 的
+        unified_id 节点**并存**，图里出现同一实体的「重影类」，而新读路径只看
+        unified_id。只断言计数（上面的用例）抓不到这个：计数来自 PG 输入行。
+        """
+        pgId = await _createClass(client, "PORDER", "PORDER")
+        resp = await client.post("/api/v1/ontology/batch", json={"syncGraph": True})
+        assert resp.status_code == 200, resp.text
+        uid = await _uid(dbSession, "CLASS", pgId)
+
+        with neo4jCleanDriver.session() as session:
+            keyed = session.run(
+                "MATCH (c:Class {unified_id: $uid}) RETURN count(c) AS n", uid=uid
+            ).single()["n"]
+            legacyKeyed = session.run(
+                "MATCH (c:Class) WHERE c.id IS NOT NULL RETURN count(c) AS n"
+            ).single()["n"]
+
+        assert keyed == 1, "类节点必须按 unified_id 落键"
+        assert legacyKeyed == 0, "不得另生一套旧 id 键节点（重影）"
 
 
 class TestBatchPreview:

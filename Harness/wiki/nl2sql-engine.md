@@ -262,14 +262,14 @@ New columns on `session_message`:
 
 ## 跨类属性引用校验补可操作 hint（属性归属 + schema 不存在）
 
-`validatePlan`（`app/services/nl2sql_service.py`）的三个分支（`selectedProperties` / `aggregations` else / `groupBy` 兜底）共用同款可操作重试 hint：`_propertyOwnerHint(prop, propsByClass)`。背景是 2026-09-16 真实回归：用户问「近五个月供货量最大的供应商」时偶发报"选中的属性 供应商名称 不属于选定的任何类"，复现确认是低概率上下文相关 LLM 偏差（上一轮是 PurchaseOrder COUNT → 意图被判为 FOLLOW_UP → statePrompt 注入不相关上轮 → 模型偶发引用跨类属性），旧反馈只说"不属于选定的任何类"无可操作指引，重试两次仍犯同错 → `maxPlanAttempts=2` 耗尽 → 整轮失败。
+`validatePlan`（`app/services/nl2sql_plan.py`）的三个分支（`selectedProperties` / `aggregations` else / `groupBy` 兜底）共用同款可操作重试 hint：`_propertyOwnerHint(prop, propsByClass)`。背景是 2026-09-16 真实回归：用户问「近五个月供货量最大的供应商」时偶发报"选中的属性 供应商名称 不属于选定的任何类"，复现确认是低概率上下文相关 LLM 偏差（上一轮是 PurchaseOrder COUNT → 意图被判为 FOLLOW_UP → statePrompt 注入不相关上轮 → 模型偶发引用跨类属性），旧反馈只说"不属于选定的任何类"无可操作指引，重试两次仍犯同错 → `maxPlanAttempts=2` 耗尽 → 整轮失败。
 
 hint 真源为 `propsByClass`（已经 `_classRefNames` 展开过的业务名 + 别名 + 物理列 + 表限定名 + 类限定名），口径与属性/分组/JOIN 列校验一致：
 
 - 属性在 schema 中**有归属类** → 列出归属类（截断到 `_OWNER_HINT_MAX_CLASSES=3`，避免 schema 类多时提示过长挤占重试 token），引导"把对应类加入 selectedClasses 并按 JOIN 目录关联后再引用"
 - 属性在 schema 中**完全不存在**（含别名/物理列口径比对）→ 如实说明防 LLM 重试继续幻觉同一属性名
 
-`groupBy` 分支优先取 `_timeBucketGroupHint`（粒度词命中），命中不到才走 `_propertyOwnerHint`，与粒度词提示保持正交；`aggregations` 的 `formula` 分支保留 2026-08-14 的"property 应填真实属性 / 别名引用写在 formula 内"风格，不重复插入，避免覆盖原有可操作指引。
+`groupBy` 分支优先取 `_timeBucketGroupHint`（粒度词命中），命中不到才走 `_propertyOwnerHint`，与粒度词提示保持正交；`aggregations` 的 `formula` 分支保留 2026-08-14 的"property 应填真实属性 / 别名引用写在 formula 内"风格，不重复插入，避免覆盖原有可操作指引。注意：`公式中的属性 X 不属于选定的任何类` 这一支原本**没有** hint，2026-10-01 起语句形态由下节「语句形态 formula 的校验口径」接管。
 
 反例守约：
 
@@ -281,6 +281,165 @@ hint 真源为 `propsByClass`（已经 `_classRefNames` 展开过的业务名 + 
 测试守约：`test_query_plan_validation.py` 48 用例（含 3 新增）全过；NL2SQL 单测 161 + chat 集成 102 合计 263 回归全绿；已通过 `deploy_backend.sh` 部署。
 
 详见 `changes/fix-cross-class-property-owner-hint/summary.md`。
+
+## JOIN 连通性校验：孤岛类与自愈（2026-10-03）
+
+`validateConnectivity`（`app/services/nl2sql_plan.py`）要求 `selectedClasses` 里的表
+能经 `ontology_join` 目录的边互相连通，否则报「以下表无法通过关联路径连通」。
+
+### 两条必须同口径的规则
+
+**① 图建不起来 ⇒ 校验放行**。`_buildJoinGraph` 只保留**两端都能在召回集里解析到
+source_table** 的边；`joins` 为空、或所有边的端点都不在召回集时图为空，
+`validateConnectivity` 首行 `if not graph: return []` 直接放行。
+
+`buildSchemaText` 的孤岛标记（`_islandTables`）**严格沿用这一口径**：图为空时
+一个类都不标。否则 prompt 会劝退一个校验根本不拦的类 —— **口径分裂比标错更糟**。
+
+**② 报错文案的「请通过中间表建立 JOIN」不总可行**。若目标类在 join 目录里
+**零边**（孤岛），`_findJoinPath` 找不到任何路径，`supplementJoinPath` 无从补起，
+此时该建议无法满足。2026-10-03 的 `DIM_FACILITY` 就是这种状态（81 条边里 0 条触及它）。
+
+排查孤岛用 `GET /api/v1/ontology/health/joins`（`buildJoinHealthReport`）。
+⚠️ **`probe=true` 在 Oracle 上必然 500**（`ORA-00933`）—— 探针 SQL 用了
+`LIMIT 10000`（`ontology_join_health_service.py:135,138`），Oracle 19c 不认。
+死边巡检目前只能另写探针。
+
+### 连通性失败现在可自愈（2026-10-03 修复）
+
+**改造前**：重试循环只跑 `validatePlan`（属性归属），连通性检查在循环**之外**的
+`_finalizePlan` 里失败直接 `raise`，**不回灌 `initialErrors`**。同一道闸门两套语义 ——
+属性失败给 LLM 重试机会，连通性失败直接终局。真机后果：MiniMax-M3 选了孤岛类
+`DIM_FACILITY`，该步整步报废且无法自救。
+
+**改造后**：`Nl2SqlService._planIssues` 把两道校验合成一个 issues 列表
+（属性级优先返回 —— 计划马上会被重写，再补 JOIN 算连通性是白算），
+循环统一消费它。语义等价性已验证：校验次数与 LLM 调用次数均与改造前一致，
+`maxPlanAttempts` 为 0/1 的边界行为不变。
+
+⚠️ `supplementJoinPath` **幂等**（二次调用走 `changed=False` 原样返回），
+所以 `_planIssues` 与 `_finalizePlan` 各调一次是安全的，有专门用例锁这条。
+
+### Prompt 孤岛标记
+
+召回集内零边的类，类头追加 `[无关联边，不可跨表JOIN]`。
+存在理由：`### JOIN 关系` 段只渲染有边的行，孤岛类**整段缺席**，
+而「缺席」不等于「不可 JOIN」——模型会把缺席读成「可以试着连」。
+
+- 文案只说「不可**跨表 JOIN**」，不说「不可用」：孤岛类做单表查询完全合法
+- 成本 **11 tokens / 每个孤岛**（实测），可忽略
+- 前置：属性级 `ref_class_id` + `is_foreign_key` 要设好，否则 schema 文本
+  渲染不出 `[FK → 目标类]`，LLM 仍无信号。界面上见 `/ontology` 属性编辑弹窗的
+  「引用类」下拉（外键 Checkbox 早就有，选择器是 2026-10-03 才补的缺口）
+
+### 连通性报错必须点名「真凶」，且确定性可复现
+
+`validateConnectivity` 早期实现用 `next(iter(tablesWithSource))` 取 BFS 起点。
+`set[str]` 的**字符串迭代顺序受 `PYTHONHASHSEED` 影响** ⇒ 同一份代码、同一份数据，
+不同进程报出的「不连通表」**不一样**：起点落在孤岛上时会反过来点名唯一连通的那个表。
+
+```
+PYTHONHASHSEED=0 => passed
+PYTHONHASHSEED=1 => failed
+```
+
+⚠️ 这是**先存在、后变致命**的缺陷：连通性错误从不回灌给 LLM 时，点错名字只是
+消息难看；一旦接进自愈回路（见上），LLM 会照着错误提示砍掉**错误的**类，
+本可自愈的失败变成死局。
+
+**正确写法**：求连通分量、取「主分量」，其余分量才是问题表。两条不能省的细节：
+
+1. **BFS 遍历整图**，不能只在选中的表里走 —— `supplementJoinPath` 允许经
+   **未被选中但在召回集内**的类中转（那正是「中间表」）。不许中转就会把
+   「能绕过去」判成「不连通」，与补边逻辑自相矛盾。
+2. **主分量的排序键是整图可达节点数，不是选中的表数**。只数选中的表时，
+   孤岛（1 个选中）与「事实表 + 中转维度表」（选中 1 个、可达 2 个）**同大小**，
+   字典序最小的孤岛反而当选主分量 —— 正好选反。
+3. 起点按 `sorted()` 遍历 + 严格 `>` 才替换 ⇒ 与 hash seed 无关；报错表名加 `sorted()`。
+
+### 「值域重叠 100%」不等于「JOIN 是 1:1」—— 扇出边是静默错答
+
+补 JOIN 边时最常见的验收是「事实侧每个值都能在维度侧找到」（重叠率 1.000）。
+**这只证明值域覆盖，不证明 JOIN 不扇出。**
+
+2026-10-03 在 `DIM_FACILITY` 上实测：
+
+| 目标列 | distinct / 行数 | 单列唯一？ |
+|---|---|---|
+| `FCY_0` | 41 / 41 | ✅ 超键，单列连无损 |
+| `LEGCPY_0` | 27 / 41 | ❌ **最多一个公司挂 10 个工厂** |
+
+于是两条边的实测 JOIN 行数：
+
+| 边 | 事实行数 | JOIN 后 | 倍数 |
+|---|---|---|---|
+| `RCV_SITE_CODE → FCY_0` | 3,558,004 | 3,558,004 | 1.00× ✅ |
+| `COM_CODE → LEGCPY_0` | 3,558,004 | **31,575,628** | **8.87× ❌** |
+
+扇出的危害等级**高于**「连不上」：连不上会报错逼你修；扇出返回 HTTP 200、
+数字形状正常、量级离谱，**没有任何信号**。任何走该边的 `SUM` 都被放大 9 倍。
+
+⇒ **补边验收必跑**：`SELECT COUNT(*) FROM 事实表` vs
+`SELECT COUNT(*) FROM 事实表 JOIN 维度表 ON ...`，两者不等 ⇒ 这条边不能作为聚合路径。
+另：均值会骗人（41/27 看着像「最多 2 倍」，实际最大值 10），
+**别用均匀分布的直觉推断上界**。
+
+⚠️ 连带一条：`is_foreign_key` 在 prompt 里渲染成 `FK → 目标表`、**不带目标列名**
+（`nl2sql_schema.py:311-312`）。给一个会扇出的列打 FK 标记，
+等于**主动提示 LLM 去写那条错 SQL**。FK 标记不是无害的元数据，
+判它是否该标，先看它指向的列单列是否唯一。
+
+详见 `changes/fix-dim-facility-connectivity/summary.md`。
+
+## 语句形态 formula 的校验口径（不得逐 token 当属性）
+
+`Aggregation.formula` 的**语句结构豁免**。背景是 2026-10-01 线上回归：用户问「5月份供货量最多的三家供应商所供货物总量占5月份总供货量的比例是多少」，LLM 把**整条 SELECT** 放进 `Aggregation.formula`（该问题要「先取前三家、再算占比」，单条窗口函数表达不了），其 schema 名（`THBI`）、表名（`DWD_GOODS_RECEIPT_DTL` / `DIM_IMATERIAL`）、表别名（`d2` / `m2`）、`ONLY`（来自 `FETCH FIRST 3 ROWS ONLY`）被逐 token 误报成属性幻觉（用户侧 6 条），重试反馈无指向 → 模型原样重犯 → `maxPlanAttempts` 耗尽 → 整轮失败。
+
+`validatePlan`（`app/services/nl2sql_plan.py`）对带 formula 的聚合走**三路口径**：
+
+| 形态 | 判定 | 处理 |
+|---|---|---|
+| CTE | `isCteFormula`（`^\s*WITH\b`，容许前导空白） | **不做**属性存在性校验（CTE 内部标识符不是本体属性） |
+| 语句结构 | `formulaHasSqlStructure`（剥掉字符串字面量后 **`SELECT` 与 `FROM`/`JOIN` 同时**出现） | 报**一条**可操作引导（`_STRUCTURAL_FORMULA_HINT`，置于 issues 首位并去重），不逐 token 报属性 |
+| 纯聚合表达式 | 以上皆否 | 逐 token 做属性存在性校验（原逻辑，如期拦真幻觉），并拼 `_propertyOwnerHint` + `_FORMULA_PROPERTY_HINT` 可操作引导 |
+
+**判据刻意不看首词**：线上错误文本只列出被误报的 token，无法区分「整条 `SELECT`」与「表达式里嵌子查询」（如 `SUM(a)/(SELECT SUM(b) FROM t)`）——两者首词不同（`SELECT` vs `SUM`）但都含 `SELECT` + `FROM`，故一个判据覆盖两种形态。
+
+**必须两个条件同时满足**：`EXTRACT(MONTH FROM d)` / `TRIM(BOTH ' ' FROM X)` 里的 `FROM` 是**函数实参分隔符**，不是语句子句。只看 `FROM` 会把这类公式误拒，且提示语内容不实（说它是整条 SQL 语句）—— 而 `EXTRACT` 那条的 token 全是真实属性（只剩 `QTY`/`到货日期`），**改前是能通过校验的**。code review HIGH，已复现并修正。
+
+**为什么是「拒绝 + 引导」而不是豁免**：`Aggregation.formula` **没有确定性渲染器** —— `planToText`/`_aggText`（`app/domain/query_plan.py`）只把它拼成 `"{formula} AS {alias}"` 喂给 SQL 生成 prompt。豁免语句形态会让 SQL 阶段收到 `SELECT ... FETCH FIRST 3 ROWS ONLY AS 占比` 这种畸形聚合行，把早期响亮的失败换成晚期安静的失败。CTE 形态被豁免是因为它至少是**有结构的草稿**。
+
+**误伤边界**：`owned` 只含属性名/别名，不含 schema 名与表名。**含 `SELECT` 的**公式要通过校验，必须其 schema 名、表名、表别名全部恰好等于某个属性名 —— 近乎不可能，故该分支只改变「今天已经在失败」的公式的报错内容。**不含 `SELECT` 的** `EXTRACT`/`TRIM` 类公式落回逐 token 校验，行为与改动前**完全一致**。（初版论证漏掉了后者，被 code review 证伪后修正。）
+
+**提示语必须置首**：`_buildPlanUserPrompt` 把这批 issues 用「；」拼起来后按 `_ERROR_SNIPPET_LIMIT=200` 从**尾部**截断。`_STRUCTURAL_FORMULA_HINT` 占 150 字符，按「追加」顺序会被前面的 issue 挤出预算（实测被砍成 `… ② CTE 形式 WITH a AS (SELECT ...) SELEC`），故实现把它 **insert 到 issues 首位并去重** —— 单独 150 < 200 必然存活，N 条语句公式也只占一份预算。
+
+**纯表达式分支的报错同样必须带方向**（2026-10-01 真机第二轮，也是第一轮修复的覆盖缺口）：该支原先不拼任何可操作提示（同类缺口另有分区属性分支 `分区属性 X 不属于选定的任何类`，属 perGroupLimit 场景，未动）。真机实测：模型面对「Top-N 占比」先写占位符 `SUM(CASE WHEN SUPPLIER_CODE IN (TOP3) THEN RCV_QTY_PUU ELSE 0 END) / SUM(RCV_QTY_PUU)`，收到光秃秃的「公式中的属性 TOP3 不属于选定的任何类」后，把 `TOP3` **就地展开成子查询** —— 第 2 轮输出是第 1 轮的精确回应，表达式结构分毫未动。**模型是照着反馈改的，只是反馈没给它方向。** 故该支现在也拼 `_propertyOwnerHint` + `_FORMULA_PROPERTY_HINT`（96 字符：禁用占位符/子查询 + Top-N 占比用 CTE），引导置 issues 首位并去重。
+
+**触发条件必须收窄到「全 schema 都不存在」的 token**（`p not in allPropNames`）：未知有两种成因，方向相反 —— 跨类引用（真实列，只是不在 selectedClasses 里，如 `SUM(NAME)` 而 NAME 属 `BPSUPPLIER`）该走 `_propertyOwnerHint`「把该类加入 selectedClasses」；占位符/幻觉（全 schema 无此属性，如 `TOP3`）才配得上 Top-N 引导。**给跨类引用叠 Top-N 提示是错误方向，比没方向更糟**（code review MEDIUM，已复现）。这两个分支与 `_propertyOwnerHint` 内部的「有归属 / 不存在」两支同源，口径一致。长度实测：主路径 171 完整；**边界场景会超 `_ERROR_SNIPPET_LIMIT=200`**（单 unknown + 有归属 203、两个 unknown 280），被砍的是排在后面的属性报错行尾部 —— **引导恒完整，这正是置首位的意义**：方向优先于逐条点名。
+
+`_STRUCTURAL_FORMULA_HINT` 的措辞必须涵盖两种形态：真机撞上的是「**表达式里嵌子查询**」，而只说「不能是整条 SQL 语句」会让模型认为与自己无关，引导因此打折 —— 故措辞写明「不能是整条 SQL 语句，**也不得在表达式里嵌子查询**」。
+
+**顺带修掉的既有缺陷**：`isCteFormula` 取代 `formula.strip().upper().startswith("WITH ")`，后者要求 `WITH` 后紧跟**一个空格**，对 `WITH\n` / `WITH\t` 漏判 —— CTE 逃生门本身是脆的。`isCteFormula` 是 SSOT：`parseFormula` 用它路由、`validatePlan` 用它判豁免。
+
+**取证**：`generateValidatedPlan` 在校验失败时记 `logger.warning`，含 attempt + `formatPlanFormulas(plan)`（formula 原文，截断 500 字符）+ issues。此前校验失败**零日志**，`session_message` 也无 detail 列 ⇒ 线上报障时 formula 原文无法回看。
+
+**关键字集**：`ONLY` 补进 `formula_parser._SQL_KEYWORDS` 与 `nl2sql_refs._FORMULA_SQL_KEYWORDS`（与 2026-09-28 补 `ASC/DESC` 同类漏项；纵深防御，非承重修复）。守卫 `TestSqlKeywordSetsStayInSync` 是**单向**子集断言（`_SQL_KEYWORDS ⊆ _FORMULA_SQL_KEYWORDS`），两处同加即保持绿。
+
+反例守约（`test_query_plan_validation.py::TestValidatePlanFormulaShape` / `TestFormulaStructurePredicate`）：
+
+- 整条 `SELECT ... FROM ... FETCH FIRST 3 ROWS ONLY` → 1 条引导（**修前实测 9 条**「公式中的属性 …」）
+- `SUM(QTY)/(SELECT SUM(QTY) FROM THBI.DWD_X)` → 同上（首词不是 `SELECT` 也覆盖）
+- `SUM(NONEXISTENT)/SUM(SUM(NONEXISTENT)) OVER ()` → 仍报「公式中的属性 NONEXISTENT」（防过度修复）
+- `SUM(CASE WHEN EXTRACT(MONTH FROM 到货日期) = 5 THEN QTY ELSE 0 END)/SUM(SUM(QTY)) OVER ()` → **通过**（`FROM` 是函数实参分隔符；code review HIGH 的回归守卫）
+- `CASE WHEN BPSNUM = 'FROM' THEN ...` → 字面量里的 `FROM` 不算语句结构
+- `(SELECT SUM(x) FROM T)` → 仍判 True（双向）
+- CTE 形态 → 仍豁免
+- 提示语截断判别器：同时含幻觉属性与语句公式时，`_buildPlanUserPrompt` 输出仍含**完整**提示语（改回「追加」顺序即失败）
+- 端到端 `app/tests/integration/test_nl2sql_structural_formula_retry.py`：引导进入第 2 次 prompt，且模型据此改写后通过校验
+
+**已知非目标**：表达式里的限定别名（`SUM(t.QTY)`）以及纯表达式内出现的表名仍会被报 —— `_extractFormulaProperties` 无上下文感知（只做字面量剥离 + 函数名剥离 + 关键字过滤）。本次不动。
+
+详见 `changes/2026-10-01-nl2sql-structural-formula-guard/summary.md`。
 
 ## 范围感知行数限制（scope-aware row limit）
 
@@ -452,6 +611,28 @@ plan 与 sql 两个阶段共用 `_renderStatePart(priorState)` 模块级函数�
 - 动态 SQLAlchemy 引擎池：`dict[datasource_id, AsyncEngine]`，懒加载，更新/删除时 dispose。
 - 默认 `is_read_only=True`。
 - **多方言（#66）**：NL2SQL System Prompt 按 `datasource.type` 注入方言规则——Oracle 用 `FETCH FIRST N ROWS ONLY`，MySQL/PostgreSQL 用 `LIMIT N`；schema 前缀提示与 JOIN 示例仅对 Oracle 生效并使用 `datasource.username`（username 即 schema owner，不再硬编码 `ZJTH.`），MySQL/PG 不限定前缀、JOIN 示例为通用表名。未知/缺省类型回退 Oracle 方言。
+- **方言规则的注入机制（SSOT：`app/services/nl2sql_dialects.py`）**：`SqlDialect` 是 `frozen dataclass`，每个「规则字段」承载一段注入 System Prompt 的规则文本；`nl2sql_prompts.py::_buildSystemPrompt`（服务层包装 `nl2sql_service.py:387`）按 `identifierRule → nullOrderingRule → timeBucketRule → aggregateRule` 顺序追加，**序号从 10 起动态编号**（避免跳号）。新增一条方言规则＝加字段 + 加常量 + 在目标方言实例上赋值，**不必改 prompt 拼装逻辑**。
+
+  | 字段 | 生效方言 | 触发的数据库症状 | 规则要点 |
+  |---|---|---|---|
+  | `identifierRule` | Oracle | ORA-00923 | 列/表别名不得以数字开头，否则加双引号 |
+  | `nullOrderingRule` | Oracle、PostgreSQL | top-N 取到 NULL 行 | `ORDER BY … DESC NULLS LAST` |
+  | `timeBucketRule` | 三者各一版 | 按原始时间戳分组 | 月/年/季度截断表达式（方言写法不同） |
+  | `aggregateRule` | Oracle | **ORA-00937** | SELECT 列表中聚合函数与标量子查询不得并列；Top-N 占比把分子分母都写成标量子查询、外层 `FROM DUAL` |
+
+  PostgreSQL/MySQL 不注入 Oracle 特有规则（如 `identifierRule`、`aggregateRule`）——两者都允许相应写法，注入只会是噪音。规则「按方言注入、而非全局注入」是本表的成立前提。
+- **类型分发的两层校验（2026-10-02）**：入口由 `DataSourceCreate.type` 枚举 DTO 挡（API 422）；消费边界由 `coerceDatasourceType`（`nl2sql_dialects.py`）挡——`_buildPipelineContext` 加载 ds 后立即严格校验，脏值（手工改库/seed）抛 `ValidationError`（消息含数据源名 + 脏值 + 指引），在任何 LLM 调用之前拒绝。`resolveDialect` 的「未知回退 Oracle」保留为**最后防线**，不是第一反应——给 MySQL 库生成 ROWNUM 执行必错。`oracle_version` 为空时按 12c+（FETCH FIRST）处理，**11g 库必须填版本**。变更记录：`changes/fix-datasource-type-failfast/summary.md`。
+
+- **Top-N 占比的分母过滤陷阱（2026-10-02，prompt 规则修复）**：SQL 逻辑执行顺序是 `WHERE → GROUP BY → 窗口函数`，因此
+  `SELECT SUM(x) / SUM(SUM(x)) OVER (PARTITION BY ...) FROM ranked WHERE RN<=N` 的分母**只剩被过滤后的 N 行**，占比恒为 1（100%）。
+  正确形态：分母来自**未被过滤**的结果集——单独 CTE 汇总总量再 JOIN，或在过滤前用窗口函数算好总数。该陷阱与方言无关（PG 同样如此），
+  故约束写在**基础规则**：计划阶段规则 4「简单形式」标注了适用范围（无 Top-N 过滤），SQL 阶段规则 8 给出否定性禁令。
+  真机事故：同一问题多次运行时对时错（LLM 非确定性），100% 那次模型还编造了「物料不超过 3 种」的业务解释 —— **SQL 算错 + LLM 幻觉解释**两层叠加。
+  变更记录：`changes/fix-nl2sql-topn-share-denominator/summary.md`。
+
+- **Oracle 版本分发与连接时探测（2026-10-02）**：Oracle 方言只有**一个版本分叉**——11g 用 ROWNUM、12c+ 用 FETCH FIRST（12c/19c/21c 共用一套）；MySQL/PG 无版本维度。`resolveDialect(type, oracle_version)` 按此分发，点分版本（探测落库原文如 `11.2.0.1.0`）与 `11g` 字样都识别（`startswith(("9","10","11"))`）；版本为空按 12c+ 处理。**连接时自动探测**：`adapter.test()` 第三元返回服务端版本原文（SQLAlchemy `server_version_info` tuple / oracledb `conn.version` str），`datasource_service` 的 create/update 以 best-effort 落库——用户显式值永不被覆盖、探测失败只记 warning 不阻断；`/datasources/test` 响应带 `server_version` 供诊断。**顺带修复**：`DataSourceCreate.oracle_version` 此前从未进构造参数，用户填了也丢。变更记录：`changes/feat-datasource-version-probe/summary.md`。
+
+- **Top-N 占比分母三层守卫（2026-10-02，确定性升级）**：上面的 prompt 规则修复被真机复现证伪为**概率性**——同一问题第二次跑仍可能生成陷阱形态。升级为三层确定性机制（`nl2sql_semantic_guard.py`）：**L1 形态守卫**（`generateSql` 出口、与 SQL Guard 同构回灌重试）——判据是 SQL 求值顺序：WHERE 先于 SELECT，故**同一块**里「排名列过滤（rn/rnk/rank 等 `<=N`）+ 窗口函数占比分母（`/ ... OVER (`）」必然恒 100%，不存在合法同块形态（块 = 顶层语句 + 每个 SELECT/WITH 子查询体，字面量剥离、子查询体置空后按块扫描）；**L3 结果不变量**（`_runQueryWithRetry` 出口 try/else）——Top-N 占比 > 100% 数学上不可能（Top-N 是总量子集），单行 > 1 或组求和 > 1 → `Nl2SqlError` 走既有失败路径，绝不带病返回；**L2 歧义示警**——全组恒 100% 不可数学判错（也可能是组内明细 ≤ N），答案以 ⚠️ 提示开头（非流式拼进 answer，流式首个 token）。已知漏报边界：排名列别名不在词表 / 全局 LIMIT 式 Top-N → 由 L3 兜底。测试判别器 = 真机两条 SQL 原文 fixture（陷阱必拦 / `sup_total` CTE 必放）。变更记录：`changes/feat-nl2sql-share-denominator-guard/summary.md`。
 
 ## 准确性增强
 

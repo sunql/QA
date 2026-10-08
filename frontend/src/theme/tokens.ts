@@ -48,6 +48,9 @@ export interface ThemeToken {
   borderRadiusLG: number;  // 较大圆角（大卡片/容器）
   // 血缘层级色板（Phase D）
   layers: LayerPalette;
+  // 图表分类系列色板（图表决策引擎：服务端只发结构，颜色一律由前端主题层补）。
+  // 顺序即 ECharts `color` 数组的取色顺序：第一条系列取第 0 个，依此类推。
+  chartPalette: string[];
 }
 
 /** 暗色 token（默认主题）。工业控制台风格，深海军蓝底 + teal 主色。 */
@@ -73,9 +76,18 @@ export const DARK_TOKEN: ThemeToken = {
     layerKpi: "#f5222d",
     layerAi: "#eb2f96",
   },
+  // 暗色：主色打头，其余取暗底上对比度够的中高亮度档
+  chartPalette: [
+    "#00D9C0",
+    "#4C9AFF",
+    "#FF8C42",
+    "#B37FEB",
+    "#52C41A",
+    "#F56C6C",
+    "#13C2C2",
+    "#FADB14",
+  ],
 };
-
-/** 亮色 token（备选主题）。白底 + 深 teal 主色，对比度满足 WCAG AA。 */
 export const LIGHT_TOKEN: ThemeToken = {
   colorPrimary: "#00B8A9",  // teal 深一档，亮色背景上对比度更好
   colorBgBase: "#f5f7fa",
@@ -98,4 +110,15 @@ export const LIGHT_TOKEN: ThemeToken = {
     layerKpi: "#f5222d",
     layerAi: "#eb2f96",
   },
+  // 亮色：在白底上各降一档饱和/明度，避免 teal 系在浅色背景发飘
+  chartPalette: [
+    "#00B8A9",
+    "#1677FF",
+    "#FA8C16",
+    "#722ED1",
+    "#389E0D",
+    "#F5222D",
+    "#08979C",
+    "#D48806",
+  ],
 };

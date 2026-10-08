@@ -1,246 +1,193 @@
-"""图表服务。
+"""图表服务 —— 编排门面（决策 → spec → 渲染）。
 
-- recommendChartType：基于列类型与数据量规则推荐图表类型（不调 LLM）
-- generateChartOption：LLM 生成 ECharts option，失败回退到纯规则 _fallbackOption
-- _fallbackOption：纯 Python 生成 TABLE/PIE/BAR/LINE 的 ECharts option
+**改造前**：`recommendChartType` 只看列形状（4 个出口，永远不返回散点），然后
+**让 LLM 直接写 ECharts option**。两个后果：语义判不出来（占比与分类比较形状相同），
+且 LLM 写错 option 是「图能不能出来」的唯一失败面。
+
+**改造后**：形状由 `chart_decision` 的规则表判，语义由 `chart_label` 给一个标签
+（只在规则歧义时调），spec 由 `chart_spec_builder` 确定性派生，option 由
+`chart_renderer` 渲染。**LLM 不再产出任何图表代码。**
+
+依赖方向单向：本模块 → decision / spec_builder → renderer → spec。
+
+**计费口径不变**：仍返回 promptTokens/completionTokens/cachedTokens 三元组，
+`_recordChartUsage` 与 `_summarizeUsage` 无需改动。改造后 LLM 调用**大幅减少**
+（常见查询 0 次，只有歧义形状才 1 次，且 prompt 只有 ~250 token）。
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import re
+from dataclasses import dataclass
 from typing import Any
 
+from app.domain.chart_spec import ChartSpec, coerceSpec, tableSpec
 from app.domain.enums import ChartType
-from app.infrastructure.llm.base_client import LlmMessage
-from app.services.data_summary import FULL_DATA_THRESHOLD
-from app.services.messages_zh import MSG_CHART_TITLE_PIE, MSG_CHART_TITLE_RESULT
-from app.utils.column_types import (
-    COLUMN_TYPE_NUMBER,
-    COLUMN_TYPE_STRING,
-    COLUMN_TYPE_TIME,
-    infer_column_types,
-    to_json_number,
+from app.domain.query_plan import QueryPlan
+from app.services.chart_decision import (
+    ChartDecision,
+    buildChartSignals,
+    decideChartKind,
+    resolveByLabel,
+)
+from app.services.chart_label import classifySemanticLabel
+from app.services.chart_renderer import renderChartOption
+from app.services.chart_spec_builder import buildSpec
+from app.services.chart_thresholds import loadChartThresholds, loadFullDataThreshold
+from app.services.visual_payload import assembleTableOption
+from app.services.visual_rationale import (
+    VisualRationale,
+    buildVisualRationale,
 )
 
 logger = logging.getLogger(__name__)
 
-# 提取回复中的 JSON 对象（贪婪匹配首个 { 到最后一个 }）
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+# 客户端/意图强制指定图型时用的伪规则号（便于日志区分「选出来的」和「指定的」）。
+_FORCED_RULE_ID = "R_FORCED_CLIENT"
 
-# 饼图最多展示的维度行数；超过则建议柱状
-_PIE_ROW_LIMIT = 6
+
+@dataclass(frozen=True)
+class ChartBuild:
+    """图表构建结果。
+
+    三元组（promptTokens/completionTokens/cachedTokens）保持 4-tuple 的计费口径，
+    另外带上 decision 与 spec 供日志与测试观察「为什么选了这个图」。Task 3 起
+    同时带 `tableOption`（图之外的明细表负载）与 `rationale`（为什么这么画的
+    判断依据，供前端 i18n 渲染）。
+    """
+
+    chartType: ChartType
+    option: dict[str, Any]
+    tableOption: dict | None
+    rationale: VisualRationale
+    promptTokens: int
+    completionTokens: int
+    cachedTokens: int | None
+    decision: ChartDecision
+    spec: ChartSpec
 
 
 class ChartService:
-    """图表类型推荐与 ECharts option 生成。"""
+    """决策 → spec → 渲染的编排门面。"""
 
-    def recommendChartType(self, columns: list[str], data: list[dict]) -> ChartType:
-        """按列类型与数据量规则推荐图表类型。"""
-        if not columns or not data:
-            return ChartType.TABLE
-        types = self._inferColumnTypes(columns, data)
-        stringCols = [c for c, t in types.items() if t == COLUMN_TYPE_STRING]
-        timeCols = [c for c, t in types.items() if t == COLUMN_TYPE_TIME]
-        numberCols = [c for c, t in types.items() if t == COLUMN_TYPE_NUMBER]
-
-        if len(stringCols) == 1 and not timeCols and len(numberCols) == 1:
-            return ChartType.PIE if len(data) <= _PIE_ROW_LIMIT else ChartType.BAR
-        if timeCols and numberCols:
-            return ChartType.LINE
-        if len(stringCols) >= 2 and numberCols:
-            return ChartType.BAR
-        return ChartType.TABLE
-
-    async def generateChartOption(
+    async def buildChart(
         self,
-        chartType: ChartType,
+        *,
+        session: Any,
+        plan: QueryPlan | None,
         columns: list[str],
         data: list[dict],
         question: str,
-        llmClient: Any,
-        modelConfig: Any,
-    ) -> tuple[dict, int, int, int | None]:
-        """生成 ECharts option。TABLE 走规则；其余类型 LLM 生成，失败回退规则。
+        forcedKind: ChartType | None = None,
+        intentKind: ChartType | None = None,
+        llmClient: Any = None,
+        modelConfig: Any = None,
+    ) -> ChartBuild:
+        """构建图表负载。**绝不抛错** —— 出图失败不该连带把整轮回答打断。
 
-        4-2（feat-token-cache，2026-09-28）：返回 4-tuple `(option, promptTokens,
-        completionTokens, cachedTokens)`；cachedTokens 从 LlmResponse 透传，
-        用于 chart 阶段的 _costFor 差额计费（DeepSeek prompt cache 命中部分
-        按 miss×multiplier 计）。TABLE / LLM 失败 / LLM 抛异常 三条非 happy
-        路径均 cachedTokens=0（无 LLM 调用或调用失败无响应）。
+        优先级：客户端显式 `forcedKind` > 意图抽取 `intentKind` > 决策引擎。
+        强制的图型仍要过 spec 形状校验（在 1 维数据上强制热力图会降级 —— 降级终点
+        是**表格**，见 `coerceSpec`），因为「用户点了热力图」不等于「这份数据画得出
+        热力图」。
         """
-        if chartType == ChartType.TABLE:
-            return self._fallbackOption(chartType, columns, data), 0, 0, 0
+        if not columns or not data:
+            return self._emptyResult(columns, data)
 
-        prompt = self._buildOptionPrompt(chartType, columns, data, question)
-        parsed: dict | None = None
-        promptTokens = 0
-        completionTokens = 0
-        cachedTokens: int | None = 0
-        try:
-            response = await llmClient.complete(
-                messages=[
-                    LlmMessage(role="system", content="你只输出合法的 JSON，不输出任何其他内容。"),
-                    LlmMessage(role="user", content=prompt),
-                ],
-                model=modelConfig.model_name,
+        thresholds = await loadChartThresholds(session)
+        fullDataThreshold = await loadFullDataThreshold(session)
+        signals = buildChartSignals(plan, columns, data, question)
+
+        forced = forcedKind or intentKind
+        decision = (
+            ChartDecision(
+                kind=forced,
+                ruleId=_FORCED_RULE_ID,
+                candidates=(),
+                ambiguous=False,
             )
-            promptTokens = response.promptTokens
-            completionTokens = response.completionTokens
-            cachedTokens = getattr(response, "cachedTokens", None)
-            parsed = self._parseOptionJson(response.content)
-        except Exception as exc:  # noqa: BLE001 - 图表失败应优雅降级
-            logger.warning("图表 option 生成失败，回退到规则: %s", exc)
-            parsed = None
-
-        if parsed is None:
-            parsed = self._fallbackOption(chartType, columns, data)
-        else:
-            # v3 2026-09-18：归一化 LLM 偶发写错的 ECharts 模板变量 `{d}`（仅 pie 百分比）
-            # → 非 pie 场景下替换为 `{c}`（数值），防止柱图/线图显示字面量 `{d}%`。
-            parsed = self._normalizeOptionFormatters(parsed, chartType)
-        return parsed, promptTokens, completionTokens, cachedTokens
-
-    @staticmethod
-    def _normalizeOptionFormatters(option: dict, chartType: ChartType) -> dict:
-        """递归遍历 option，把所有字符串 formatter 里的 `{d}` 在非 pie 下替换为 `{c}`。
-
-        ECharts 标准模板变量：
-        - `{a}` series name / `{b}` category name / `{c}` value — 全图表可用
-        - `{d}` 仅 pie 百分比 — 其他图表 ECharts 找不到替换目标，原样输出 `{d}` 字面量
-
-        触发：用户报告问题 #1 柱图 label 显示字面量 `{d}%`、tooltip 仅 B019 有值（其他 series
-        因为 formatter 失败回退到空字符串）。
-
-        设计要点：
-        - 不可变：返回新 dict，原 option 不变（CLAUDE.md 不可变数据原则）
-        - 函数 formatter（`formatter: callable`）不动 —— LLM 写函数时意图明确
-        - pie chart `{d}%` 保持原样 —— 是 ECharts 标准用法
-        - 递归遍历 dict / list；其他类型原样保留
-        """
-        if chartType == ChartType.PIE:
-            return option
-        return _walkAndNormalizeFormatters(option)
-
-    # =========================================================================
-    # 规则 fallback
-    # =========================================================================
-
-    def _fallbackOption(
-        self, chartType: ChartType, columns: list[str], data: list[dict]
-    ) -> dict:
-        """纯规则生成 ECharts option（LLM 失败时的兜底）。"""
-        if chartType == ChartType.TABLE or not columns or not data:
-            return {"columns": columns or [], "rows": data or []}
-
-        types = self._inferColumnTypes(columns, data)
-        stringCols = [c for c in columns if types[c] == COLUMN_TYPE_STRING]
-        timeCols = [c for c in columns if types[c] == COLUMN_TYPE_TIME]
-        numberCols = [c for c in columns if types[c] == COLUMN_TYPE_NUMBER]
-
-        dimCol = stringCols[0] if stringCols else (timeCols[0] if timeCols else columns[0])
-        measureCol = numberCols[0] if numberCols else columns[-1]
-        names = [str(row.get(dimCol)) for row in data]
-        values = [to_json_number(row.get(measureCol)) for row in data]
-
-        if chartType == ChartType.PIE:
-            return {
-                "title": {"text": MSG_CHART_TITLE_PIE},
-                "tooltip": {"trigger": "item"},
-                "series": [
-                    {
-                        "type": "pie",
-                        "radius": "60%",
-                        "data": [
-                            {"name": name, "value": value}
-                            for name, value in zip(names, values, strict=True)
-                        ],
-                    }
-                ],
-            }
-
-        if chartType in (ChartType.BAR, ChartType.LINE, ChartType.SCATTER):
-            return {
-                "title": {"text": MSG_CHART_TITLE_RESULT},
-                "tooltip": {"trigger": "axis"},
-                "xAxis": {"type": "category", "data": names},
-                "yAxis": {"type": "value"},
-                "series": [{"type": chartType.value, "data": values}],
-            }
-
-        return {"columns": columns, "rows": data}
-
-    # =========================================================================
-    # 列类型推断
-    # =========================================================================
-
-    def _inferColumnTypes(self, columns: list[str], data: list[dict]) -> dict[str, str]:
-        # 委托给 SSOT（app/utils/column_types.infer_column_types），避免双份逻辑
-        return infer_column_types(columns, data)
-
-    # =========================================================================
-    # LLM 解析
-    # =========================================================================
-
-    @staticmethod
-    def _parseOptionJson(content: str) -> dict | None:
-        match = _JSON_OBJECT_RE.search(content)
-        if not match:
-            return None
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return None
-        if isinstance(parsed, dict) and "series" in parsed:
-            return parsed
-        return None
-
-    @staticmethod
-    def _buildOptionPrompt(
-        chartType: ChartType, columns: list[str], data: list[dict], question: str
-    ) -> str:
-        # v2 2026-09-18：数据量小（≤ FULL_DATA_THRESHOLD 行）时全量嵌入 prompt，
-        # 让 LLM 生成的 ECharts option 与前端 EVENT_CHART.data 一致。
-        # 否则截 data[:20]，与原行为一致（图表只看数据形状）。
-        if len(data) <= FULL_DATA_THRESHOLD:
-            sample = json.dumps(data, ensure_ascii=False, default=str)
-            sampleLabel = f"数据（共 {len(data)} 行）："
-        else:
-            sample = json.dumps(data[:20], ensure_ascii=False, default=str)
-            sampleLabel = "数据样本（最多 20 行）："
-        return (
-            "你是一名前端数据可视化专家，请根据查询结果生成一份 ECharts 配置。\n"
-            f"图表类型：{chartType.value}\n"
-            f"列：{columns}\n"
-            f"{sampleLabel}\n{sample}\n"
-            f"原始问题：{question}\n\n"
-            "要求：\n"
-            "1. 只返回一个合法的 JSON 对象（ECharts option），不要包含 markdown 代码块或额外文字。\n"
-            "2. option 必须包含 title、tooltip、series，且 series[0].type 与指定图表类型一致。\n"
-            "3. 数值统一为 JSON 数字类型。\n"
-            "4. 若图表类型为 table，返回 {\"columns\": [...], \"rows\": [...]}。\n"
-            "5. label / tooltip 的 formatter 若用字符串模板，柱图/线图/散点用 `{c}`（数值）或 "
-            "`{b}`（类目），不要用 `{d}`（仅饼图百分比）。"
+            if forced is not None
+            else decideChartKind(signals, thresholds)
         )
 
+        promptTokens = completionTokens = 0
+        cachedTokens: int | None = 0
+        if decision.ambiguous and llmClient is not None and modelConfig is not None:
+            labelResult = await classifySemanticLabel(
+                question=question,
+                columns=columns,
+                data=data,
+                llmClient=llmClient,
+                modelConfig=modelConfig,
+            )
+            promptTokens = labelResult.promptTokens
+            completionTokens = labelResult.completionTokens
+            cachedTokens = labelResult.cachedTokens
+            decision = resolveByLabel(decision, signals, labelResult.label, thresholds)
 
-def _walkAndNormalizeFormatters(node: Any) -> Any:
-    """递归走 option 树，把所有字符串 formatter 里的 `{d}` → `{c}`（用于非 pie）。
+        spec = buildSpec(decision, signals, data, plan)
+        spec, degradeReason = coerceSpec(spec, columns)
+        if degradeReason is not None:
+            logger.warning(
+                "图表 spec 校验未过，降级为表格（rule=%s decision=%s）：%s",
+                decision.ruleId,
+                decision.kind.value,
+                degradeReason,
+            )
+        option = renderChartOption(spec, data)
+        # rationale 的 kind 传「决策引擎选出的 kind（降级前的意图）」，不传降级后的
+        # spec.kind：否则 DEGRADE_SPEC_INVALID 的文案会渲染成「数据结构不满足 table
+        # 的绘图要求」。同理 R_FORCED_CLIENT 传的是被强制的那个 kind。
+        rationale = buildVisualRationale(
+            ruleId=decision.ruleId,
+            kind=decision.kind,
+            rowCount=len(data),
+            degradeReason=degradeReason,
+        )
+        tableOption = assembleTableOption(
+            specKind=spec.kind,
+            columns=columns,
+            data=data,
+            fullDataThreshold=fullDataThreshold,
+        )
+        return ChartBuild(
+            # 降级后 chartType 必须跟着变成 TABLE：前端按 chartType 分支选渲染器，
+            # 说「hbar」却发 {columns, rows} 会让 ECharts 拿到非法 option 画空白。
+            chartType=spec.kind,
+            option=option,
+            tableOption=tableOption,
+            rationale=rationale,
+            promptTokens=promptTokens,
+            completionTokens=completionTokens,
+            cachedTokens=cachedTokens,
+            decision=decision,
+            spec=spec,
+        )
 
-    - dict：浅复制后递归每个 value（保留原 dict 不变）
-    - list：浅复制后递归每个 item
-    - key == "formatter" 且 value 是字符串：替换 `{d}` → `{c}`
-    - 其他：原样保留
-    """
-    if isinstance(node, dict):
-        newDict: dict = {}
-        for key, value in node.items():
-            if key == "formatter" and isinstance(value, str):
-                newDict[key] = value.replace("{d}", "{c}")
-            else:
-                newDict[key] = _walkAndNormalizeFormatters(value)
-        return newDict
-    if isinstance(node, list):
-        return [_walkAndNormalizeFormatters(item) for item in node]
-    return node
+    @staticmethod
+    def _emptyResult(columns: list[str], data: list[dict]) -> ChartBuild:
+        """无数据：零 LLM 消耗，直接给表格负载。
+
+        强制图型在这里也要让位 —— 没有数据就没有图，返回一个渲染不出来的
+        kind 只会让前端画空白，不如老老实实交一张（空）表格。
+        """
+        decision = ChartDecision(
+            kind=ChartType.TABLE,
+            ruleId="R00_EMPTY_TABLE",
+            candidates=(),
+            ambiguous=False,
+        )
+        return ChartBuild(
+            chartType=ChartType.TABLE,
+            option={"columns": list(columns), "rows": list(data)},
+            # 空数据表已在 option 里，不再附第二份表；rationale 零成本（纯函数、
+            # 不读 DB），直接给 R00。
+            tableOption=None,
+            rationale=buildVisualRationale(
+                ruleId="R00_EMPTY_TABLE", kind=ChartType.TABLE, rowCount=len(data)
+            ),
+            promptTokens=0,
+            completionTokens=0,
+            cachedTokens=0,
+            decision=decision,
+            spec=tableSpec(columns),
+        )

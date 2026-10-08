@@ -34,6 +34,12 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
+from app.services.chat_constants import (
+    ROUTING_LAYER_L1,
+    ROUTING_LAYER_L2,
+    USAGE_PURPOSE_NL2SQL,
+)
+from app.domain.chart_spec import ChartSpec, SpecKpi
 from app.domain.enums import ChartType, IntentType
 from app.domain.exceptions import (
     ConfigError,
@@ -73,6 +79,7 @@ from app.infrastructure.business_db_pool import BusinessDbAdapter, _assert_read_
 from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage
 from app.infrastructure.llm.factory import createClient
 from app.services.audit_service import AuditService
+from app.services.chart_renderer import toNumber, renderChartOption
 from app.services.chart_service import ChartService
 from app.services.chat_stream_output import _ANSWER_SYSTEM_PROMPT, ChatStreamOutputMixin
 from app.services.data_summary import summarize_data
@@ -80,6 +87,7 @@ from app.services.datasource_service import DataSourceService
 from app.services.kpi_semantic_match_service import KpiMatchResult, KpiSemanticMatchService
 from app.services.embedding_service import EmbeddingService
 from app.services.intent_service import IntentResult, IntentService
+from app.services.visual_rationale import buildVisualRationale
 from app.domain.error_messages import (
     MSG_AGENT_NOT_FOUND_BY_CODE,
     MSG_AGENT_NOT_RUNNABLE,
@@ -95,6 +103,8 @@ from app.services.graph_traversal_service import (
     resolveChatMaxHops,
 )
 from app.services.messages_zh import (
+    MSG_CHAT_UNANSWERABLE_MISSING_VECTOR as _UNANSWERABLE_ANSWER_MISSING_VECTOR,
+    MSG_CHAT_UNANSWERABLE_NO_DATA as _UNANSWERABLE_ANSWER,
     MSG_GRAPH_TRAVERSAL_UNAVAILABLE,
     MSG_STREAM_INTERRUPTED_EMPTY,
     MSG_SUPPLIER_360_NOT_FOUND,
@@ -113,10 +123,14 @@ from app.services.llm_retry_policy import (
     retryGenTokens as _retryGenTokens,
 )
 from app.services.nl2sql_service import Nl2SqlService, SqlResult, _readFloatConfig, _safeSchemaPrefix, _sanitizeContext
+from app.services.nl2sql_semantic_guard import shareAmbiguityWarning
+from app.services.nl2sql_dialects import coerceDatasourceType
+from app.services.think_block import applyThinkPolicy
 from app.services.ontology_service import OntologyService
 from app.services.step_aggregator import StepAggregator
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.supplier_360_service import Supplier360Service
+from app.services.step_subquestion_rewriter import StepSubquestionRewriter
 from app.services.supplier_name_resolver import SupplierNameResolver
 from app.services.supplier_risk_service import SupplierRiskService, buildRiskAnswer
 from app.services.schema_introspection_service import (
@@ -232,6 +246,7 @@ from app.services.chat_recall import (
     _isOdsBusinessTable,
 )
 from app.services.chat_multistep import _FOLLOW_UP_RETRY_MAX_LEN, MultiStepMixin
+from app.services.multi_step_persist_hooks import MultiStepPersistMixin
 # 会话上下文 mixin：方法经 MRO 合并进 ChatService；常量 re-export 给既有测试
 # （test_chat_service_state.py 直接 import _RECENT_ROUNDS_LIMIT / _STATE_HISTORY_FIELD_LIMIT_DEFAULT，
 #  test_chat_service.py 读 _CONTEXT_PROMPT_CHAR_BUDGET_DEFAULT 断言）。
@@ -259,18 +274,24 @@ from app.services.hypothesis_service import HypothesisMixin
 logger = logging.getLogger(__name__)
 
 
-# 计划 target=无法回答（问题超出本体可回答范围）时的固定友好回答前缀。
-# 不调用回答 LLM：模型已判定无数据可查，避免空计划诱导编造 SQL 并掩盖真实原因。
-# 4-2：答案由 _unanswerableAnswerText 附上缺表/缺术语建议（见 unanswerable_suggestion.py）。
-_UNANSWERABLE_ANSWER = "抱歉，当前系统中没有与您的问题相关的业务数据，无法回答该问题。"
-# 向量召回降级时：Milvus 无命中 / 检索异常，指向量同步缺失。
-_UNANSWERABLE_ANSWER_MISSING_VECTOR = (
-    "抱歉，向量检索未返回相关本体类，可能尚未同步向量数据。"
-    "请在「本体管理→向量同步」中同步向量数据后再试。"
-)
+# wiki 注入：property / metric 的按需语义召回窗口。
+# class 走 CLASS_FILTER_TOPK（类集合小）；属性向量 3164 条、指标待建，窗口先小后调。
+_WIKI_EXTRA_RECALL_TOPK_DEFAULT = 10
+_WIKI_EXTRA_RECALL_TYPES = ("property", "metric")
 
 
-class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin):
+def _firstPresentValue(data: list[dict] | None) -> Any | None:
+    """取首行第一个非 None 值（L1 结果读值的唯一口径）。
+
+    回答文本与指标卡都从这里取值：两处各写一遍 `next(...)` 迟早会漂移，
+    而「文本说 0.954、卡片画别的数」是那种没人会立刻发现的错。
+    """
+    if not data:
+        return None
+    return next((v for v in data[0].values() if v is not None), None)
+
+
+class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin):
     """自然语言问答编排服务。
 
     组合 ChatStreamOutputMixin 提供流式回答输出的超时保护与降级能力。
@@ -331,6 +352,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         self._supplierNameResolver = supplierNameResolver or SupplierNameResolver()
         # 会话亲和性窗口：前 N 轮锁定模型；None 时按需懒加载 settings
         self._affinityTurns = affinityTurns
+        # sub-question 改写 hook（不改派模型，仅当 Qwen 处理多步时改写子问题；见 no-model-override 决策）
+        self._subquestionRewriter = StepSubquestionRewriter()
 
     async def processMessage(
         self,
@@ -397,8 +420,14 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                     _t0 = time.monotonic()
                     await self._storeSessionMessages(
                         session, dto.sessionId, dto.question, l1_response.answer, None,
-                        routing_layer="L1", latency_ms=int((time.monotonic() - _t0) * 1000),
+                        routing_layer=ROUTING_LAYER_L1, latency_ms=int((time.monotonic() - _t0) * 1000),
                         token_cost_usd=0.0,
+                        # 0105：KPI 指标块也要能进导出 PDF —— 它是本轮回答的一部分，
+                        # 只活在实时响应里的话，导出时同样退化成占位框。
+                        chart_type=l1_response.chartType,
+                        chart_option=l1_response.chartOption,
+                        # F1：判断依据同轮落库 —— 回放/导出不能只拿一张卡、没有依据。
+                        visual_rationale=l1_response.visual_rationale,
                     )
                     return l1_response
         except Exception:  # noqa: BLE001 — L1 异常不阻断，降级到原 LLM 流水线
@@ -485,7 +514,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         if result.intent in (IntentType.NEW_QUERY, IntentType.QUERY):
             if self._stepPlanner.is_explicit_multi_step(dto.question):
                 global_filters = await self._resolveGlobalFilters(session, dto, pc)
-                multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
+                dto, multi_plan, pc, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
                 if multi_plan is not None:
@@ -504,7 +533,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             # changes/fix-compound-question-implicit-decomposition/summary.md）。
             elif _looks_like_compound_question(dto.question):
                 global_filters = await self._resolveGlobalFilters(session, dto, pc)
-                multi_plan, step_tokens, step_cost = await self._resolveExplicitMultiStep(
+                dto, multi_plan, pc, step_tokens, step_cost = await self._resolveExplicitMultiStep(
                     session, dto, pc,
                 )
                 if multi_plan is not None:
@@ -611,12 +640,20 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                     )
             raise
         self._spawnEmbedding(dto, finalSql)
-        chartType, option, chartPt, chartCt, chartCached = await self._chartStep(
-            session, dto, pc, data, result.chartType
+        chartType, option, tableOption, rationale, chartPt, chartCt, chartCached = await self._chartStep(
+            session, dto, pc, data, result.chartType, outcome.plan
         )
         answerResp, answerConfig, wastedAnswer = await self._generateAnswer(
             session, dto, pc, data, finalSql,
         )
+        # L2 歧义示警（feat-nl2sql-share-denominator-guard）：全组占比恒 100% 不可
+        # 数学判错（也可能是组内明细 ≤ N），在答案前追加核对提示——violations 已在
+        # _runQueryWithRetry 出口抛错，到这里只剩 warning 场景。
+        shareWarning = shareAmbiguityWarning(outcome.plan, data)
+        # Think_Hide（feat-think-hide）：推理模型的 <think> 思维链按系统参数剥离
+        answerText = await applyThinkPolicy(session, answerResp.content)
+        if shareWarning:
+            answerText = f"{shareWarning}\n\n{answerText}"
         # 4-1（feat-token-cache）：一次性读 cache hit multiplier，避免 chart/answer
         # 路径上每次 _recordUsage 都查一次。chat_service 入口处读取一次足够。
         cacheHitMultiplier = await _readFloatConfig(
@@ -633,17 +670,23 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             totalCost += self._costFor(retryCfg, retryTokens[0], retryTokens[1])
             await self._recordUsage(
                 session, dto.sessionId, retryCfg,
-                retryTokens[0], retryTokens[1], purpose="nl2sql",
+                retryTokens[0], retryTokens[1], purpose=USAGE_PURPOSE_NL2SQL,
             )
         # 图表/回答用量已在 _chartStep / _recordAnswerUsage 中记录，此处仅汇总展示
         await self._recordAnswerUsage(session, dto, answerConfig, answerResp)
         # L2: totalCost is Decimal, captured from LLM usage across all stages (SQL + chart + answer)
         _elapsed_ms = int((time.monotonic() - _t0) * 1000)
         await self._storeSessionMessages(
-            session, dto.sessionId, dto.question, answerResp.content, finalSql,
-            routing_layer="L2",
+            session, dto.sessionId, dto.question, answerText, finalSql,
+            routing_layer=ROUTING_LAYER_L2,
             latency_ms=_elapsed_ms,
             token_cost_usd=float(totalCost),
+            # 0105：单步查询的图进「最终报告」（导出 PDF / 历史回放）。
+            chart_type=chartType,
+            chart_option=option,
+            # 0107：图之外的明细表 + 判断依据同轮落库（回放/导出离线重建）。
+            table_option=tableOption,
+            visual_rationale=rationale,
         )
         # B5：计算本轮继承字段快照（读 semanticState + 上一轮 plan/snapshot）
         prior_snapshot: dict[str, Any] | None = None
@@ -674,11 +717,13 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         # Phase 1.4：拉取目标表的可信度 badge（每张 selectedClass 一条；无 selectedClasses 或失败时为 None）
         dqBadges = await self._buildDataQualityBadges(session, outcome)
         return ChatResponse(
-            answer=answerResp.content,
+            answer=answerText,
             intent=result.intent.value,
             sql=finalSql,
             chartType=chartType,
             chartOption=option,
+            table_option=tableOption,
+            visual_rationale=rationale,
             data=data,
             # 单步也填充 steps：前端 MultiStepPlanCard 始终渲染（2026-08-16 体验统一）。
             steps=[_step_result_to_read(StepResult(
@@ -688,6 +733,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                 sql=finalSql,
                 data=data,
                 summary=self._summarizeStepData(data),
+                table_option=tableOption,
+                visual_rationale=rationale,
             ))],
             tokensUsed=totalTokens,
             cost=float(totalCost),
@@ -760,6 +807,10 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         needDrift=False 时跳过漂移校验（CLARIFY 不生成 SQL，无需表漂移告警）。
         """
         ds = await self._datasource.get(session, dto.datasourceId)
+        # fail fast（2026-10-02）：type 脏值（手工改库/seed）此前会静默回退 Oracle
+        # 方言生成 SQL，执行必错。API DTO 的枚举校验只挡创建/更新入口，这里是
+        # 消费边界的最后关口 —— 在任何 LLM 调用之前拒绝。
+        coerceDatasourceType(ds.type, name=ds.name)
         allClasses = await self._ontology.listClasses(session)
         # 显式多步时（带"第一步/第二步"标号）：用第一步子问题做召回，
         # 避免完整多步问法传给 Milvus 匹配到错误的表（如报价单而非收货单）。
@@ -1006,7 +1057,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             session, dto.sessionId, sqlConfig,
             planResult.promptTokens + sqlResult.promptTokens,
             planResult.completionTokens + sqlResult.completionTokens,
-            purpose="nl2sql",
+            purpose=USAGE_PURPOSE_NL2SQL,
             cachedTokens=mergedCachedTokens,
         )
         # ★ wiki-ontology-link Task 6：audit trace 落库（在 LLM 调用成功之后写入）。
@@ -1075,40 +1126,47 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
     async def _collectWikiBlock(
         self,
         session: AsyncSession,
-        question: str,  # noqa: ARG002
+        question: str,
         classes: list[Any],
     ) -> tuple[str, list[dict]]:
         """调 WikiLinkService + WikiChunkLoader + WikiInjector → (prompt_block, trace_data)。
 
         失败返回 ("", [])，由调用方统一做 log warning + 不阻断流水线。
-        question 参数保留供未来语义检索扩展使用，当前版本只依赖 ontology 召回链路。
+
+        收集顺序是**先看配了哪些类型的链接，再决定召回哪些类型**：某类型一条链接都
+        没有时，召回它的结果必然在 WikiInjector 的 recallIndex 命中检查处被丢弃，
+        白花一次 embedding + 一次 Milvus 检索（见 listConfiguredOntologyTypes）。
         """
-        from app.services.wiki_injector import ScoredOntology, WikiInjector
+        from app.services.wiki_injector import WikiInjector
         from app.services.wiki_link_service import WikiLinkService
         from app.services.wiki_chunk_loader import WikiChunkLoader
 
-        # Step 1：构建 (type, id) → recall_score 索引（来自传入的 classes）。
-        # classes 来自 _selectRelevantClasses，已经过向量召回裁剪 + ADS 加权 + ODS 过滤。
-        scored_ontology: list[ScoredOntology] = []
-        for cls in classes:
-            oid = getattr(cls, "id", None)
-            if oid is None:
-                continue
-            # 从 class 对象上取 recall score（由 chat_recall 在召回时附加的属性）。
-            recall_score = float(getattr(cls, "_recall_score", 0.0) or 0.0)
-            scored_ontology.append(ScoredOntology(
-                type="class",
-                id=oid,
-                recall_score=recall_score,
-            ))
+        service = WikiLinkService()
+
+        # Step 1：class 分数来自 _selectRelevantClasses 附加的 _recall_score。
+        scored_ontology = self._classRecallScores(classes)
+
+        # Step 2：property / metric 按需召回 —— 只有真的配了该类型的链接才召回。
+        try:
+            configuredTypes = await service.listConfiguredOntologyTypes(session)
+        except Exception as e:
+            # 查不出来只降级到「class 链接仍工作」，不阻断；不能静默 —— 记 warning。
+            logger.warning("listConfiguredOntologyTypes failed: %s", e)
+            configuredTypes = set()
+        extraTypes = {
+            t for t in _WIKI_EXTRA_RECALL_TYPES if t in configuredTypes
+        }
+        scored_ontology.extend(
+            await self._recallExtraOntologyScores(session, question, extraTypes)
+        )
 
         if not scored_ontology:
             return "", []
 
-        # Step 2：查询 wiki-link（根据 ontology type/id 对）。
+        # Step 3：查询 wiki-link（根据 ontology type/id 对）。
         pairs = [(o.type, o.id) for o in scored_ontology]
         try:
-            link_rows = await WikiLinkService().getLinksByOntology(session, pairs)
+            link_rows = await service.getLinksByOntology(session, pairs)
         except Exception as e:
             logger.warning("getLinksByOntology failed: %s", e)
             return "", []
@@ -1158,21 +1216,97 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
 
         block = WikiInjector.renderPromptBlock(scored, budget.maxChars, page_index)
 
-        # Step 6：构造 trace 数据。
+        # Step 6：构造 trace 数据 —— 每个 applied ontology 一条（page/chunk 可同时绑定
+        # class + property + metric，applied_to 的每一项都是一条独立链接）。
         trace_data = []
         for c in scored:
-            if not c.applied_to:
-                continue
-            ontology_type, ontology_id = c.applied_to[0]
-            trace_data.append({
-                "ontology_type": ontology_type,
-                "ontology_id": ontology_id,
-                "page_id": c.page_id,
-                "chunk_id": c.chunk_id or "",
-                "injected_chars": len(c.text),
-                "score": c.score,
-            })
+            for ontology_type, ontology_id in c.applied_to:
+                trace_data.append({
+                    "ontology_type": ontology_type,
+                    "ontology_id": ontology_id,
+                    "page_id": c.page_id,
+                    "chunk_id": c.chunk_id or "",
+                    "injected_chars": len(c.text),
+                    "score": c.score,
+                })
         return block, trace_data
+
+    @staticmethod
+    def _classRecallScores(classes: list[Any]) -> list[Any]:
+        """把 _selectRelevantClasses 产出的 class 列表转成 ScoredOntology(type="class")。
+
+        分数取自 chat_recall 在召回时附加的 _recall_score（fallback 路径为 0.0）。
+        """
+        from app.services.wiki_injector import ScoredOntology
+
+        out: list[ScoredOntology] = []
+        for cls in classes:
+            oid = getattr(cls, "id", None)
+            if oid is None:
+                continue
+            out.append(ScoredOntology(
+                type="class",
+                id=oid,
+                recall_score=float(getattr(cls, "_recall_score", 0.0) or 0.0),
+            ))
+        return out
+
+    async def _recallExtraOntologyScores(
+        self,
+        session: AsyncSession,
+        question: str,
+        types: set[str],
+    ) -> list[Any]:
+        """对 property / metric 做按需语义召回，返回 ScoredOntology 列表。
+
+        每个类型一次 embedding + 一次 Milvus 检索，故只在**确实配了该类链接**时调用。
+        单类型失败只影响该类型（warning + 跳过），不影响 class 与其他类型 ——
+        注入是增强而非硬依赖。
+        """
+        if not types:
+            return []
+        from app.services.wiki_injector import ScoredOntology
+
+        topK = await self._getWikiExtraRecallTopK(session)
+        scored: list[ScoredOntology] = []
+        for ontologyType in sorted(types):
+            try:
+                hits = await self._ontology.searchByKeyword(
+                    question, topK=topK, typeFilter=ontologyType,
+                )
+            except Exception:
+                logger.warning(
+                    "wiki 注入：%s 类型召回失败，跳过该类型", ontologyType,
+                    exc_info=True,
+                )
+                continue
+            scored.extend(
+                ScoredOntology(
+                    type=ontologyType,
+                    id=hit.id,
+                    recall_score=float(getattr(hit, "score", 0.0) or 0.0),
+                )
+                for hit in hits
+            )
+        return scored
+
+    async def _getWikiExtraRecallTopK(self, session: AsyncSession) -> int:
+        """读 WIKI_LINK_EXTRA_RECALL_TOPK；缺失或非法 → 默认 10。"""
+        try:
+            from sqlalchemy import select
+            from app.models.system_config import SystemConfig
+
+            stmt = select(SystemConfig).where(
+                SystemConfig.key == "WIKI_LINK_EXTRA_RECALL_TOPK"
+            )
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            if row is None:
+                return _WIKI_EXTRA_RECALL_TOPK_DEFAULT
+            value = int(row.value)
+            return value if value > 0 else _WIKI_EXTRA_RECALL_TOPK_DEFAULT
+        except Exception:
+            # 配置读取失败 → 用默认值，不阻断
+            return _WIKI_EXTRA_RECALL_TOPK_DEFAULT
 
     async def _recordWikiTrace(
         self,
@@ -1285,7 +1419,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                 kpi, match.code, session, match=match
             )
             text = self._buildAnswerText(kpi, data, kpi_name)
-            return self._wrapChatResponse(match, kpi_name, data, text)
+            return self._wrapChatResponse(match, kpi_name, data, text, unit=kpi.unit)
         except Exception:
             logger.warning(f"L1 build response failed for {match.code}", exc_info=True)
             return None
@@ -1403,13 +1537,30 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         """
         answer = f"指标「{kpi_name}」"
         if data:
-            first_val = str(
-                next((v for v in data[0].values() if v is not None), "—")
-            )
-            answer += f"：{first_val}"
+            value = _firstPresentValue(data)
+            answer += f"：{'—' if value is None else value}"
         else:
             answer += f"（{kpi.business_definition or '详见系统'}）"
         return answer
+
+    @staticmethod
+    def _buildKpiChart(
+        kpi_name: str,
+        unit: str | None,
+        data: list[dict] | None,
+    ) -> tuple[ChartType | None, dict | None]:
+        """L1 直答的指标卡（决策 7）。返回 `(kind, option)`，无值可展示时为 `(None, None)`。
+
+        值走 `renderChartOption`（KPI 负载的唯一出口），不在这里手搓 `{"kpi": ...}`。
+        降级口径：**值必须能变成数字才发卡** —— 前端的渲染门是 `Boolean(chartType)`，
+        一张 `value=null` 的空壳卡比不发更糟；此时 `_buildAnswerText` 里的口径说明
+        才是用户要看的东西。
+        """
+        value = _firstPresentValue(data)
+        if toNumber(value) is None:
+            return None, None
+        spec = ChartSpec(kind=ChartType.KPI, kpi=SpecKpi(label=kpi_name, value=value, unit=unit))
+        return ChartType.KPI, renderChartOption(spec, list(data or []))
 
     # -------------------------------------------------------------------------
     def _wrapChatResponse(
@@ -1418,12 +1569,27 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         kpi_name: str,
         data: list[dict] | None,
         answer: str,
+        unit: str | None = None,
     ) -> ChatResponse:
         """构造 intent=l1_match 的 ChatResponse（零 LLM 消耗）。"""
+        chartType, chartOption = self._buildKpiChart(kpi_name, unit, data)
+        # F1：用户原始需求「不论是否输出图，必须输出一个判断逻辑」。依据必须与
+        # 实际发生的事一致：发了卡 → 单值 KPI；值缺失、卡没发 → 空结果
+        # （R00_EMPTY_TABLE）。不能说「以指标卡呈现」却一张卡都没发。
+        # kind/rowCount 对 R00 只是未使用的入参（buildVisualRationale 会弃置），
+        # 保持与本函数调用形态一致即可。
+        rationale = buildVisualRationale(
+            ruleId="R01_SINGLE_VALUE_KPI" if chartType is ChartType.KPI else "R00_EMPTY_TABLE",
+            kind=ChartType.KPI,
+            rowCount=len(data or []),
+        )
         return ChatResponse(
             answer=answer,
             intent="l1_match",
             data=data,
+            chartType=chartType,
+            chartOption=chartOption,
+            visual_rationale=rationale.to_dict(),
             kpi_code=match.code,
             kpi_name=kpi_name,
             confidence=match.confidence,
@@ -1549,7 +1715,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         _elapsed_ms = int((time.monotonic() - _t0) * 1000)
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, answer, None,
-            routing_layer="L2",
+            routing_layer=ROUTING_LAYER_L2,
             latency_ms=_elapsed_ms,
             token_cost_usd=float(self._costForSql(outcome, pc.selected)),
         )
@@ -1743,7 +1909,13 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                 raise
 
     @staticmethod
-    def _buildAnswerPrompt(question: str, sql: str, data: list[dict], history: str = "") -> str:
+    def _buildAnswerPrompt(
+        question: str,
+        sql: str,
+        data: list[dict],
+        history: str = "",
+        full_data_threshold: int | None = None,
+    ) -> str:
         """构造回答阶段的 user prompt；history 为最近对话历史（1-5，可为空串）。
 
         历史注入支持跨轮连贯与对比（如"和上个月比"），复用 _buildContextPrompt 的
@@ -1753,8 +1925,12 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         数值列 min/max/avg/sum + 分类列 distinct + 头尾样本。LLM 拿到的是"全量统计 +
         关键样本"，prompt token 受控但能基于真实数据回答"共 X 行 / X 个供应商 /
         数量范围 Y~Z"。空数据 → {"total": 0, ...}（仍注入「未命中」提示）。
+
+        full_data_threshold（Task 2）：FULL_DATA_THRESHOLD 迁 system_config 后，
+        由持 session 的调用方现读后传入；None 时 summarize_data 回落模块默认。
+        本方法是 @staticmethod（无 session），不在此读 DB。
         """
-        summaryDict = summarize_data(data)
+        summaryDict = summarize_data(data, fullDataThreshold=full_data_threshold)
         summary = json.dumps(summaryDict, ensure_ascii=False, default=str)
         # 空结果提示：查询执行成功但未返回行时，可能是条件过严或生成逻辑有误。
         # 引导 answer LLM 如实说明「未命中」，避免把查询未命中误报成业务数据不存在。

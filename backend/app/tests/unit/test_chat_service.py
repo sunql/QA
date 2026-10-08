@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 
 from app.domain.enums import ChartType, DataSourceType, IntentType
-from app.domain.exceptions import LlmClientError, Nl2SqlError, NotFoundError
+from app.domain.exceptions import LlmClientError, Nl2SqlError, NotFoundError, ValidationError
 from app.domain.models import (
     DataSource,
     LlmConfig,
@@ -73,7 +73,12 @@ class _Resp:
 
 
 class _PipelineLlm:
-    """按 prompt 内容路由回复的假客户端：计划 JSON / SQL / 图表 JSON / 回答。"""
+    """按 prompt 内容路由回复的假客户端：计划 JSON / SQL / 标签分类 / 回答。
+
+    图表阶段现在**不产出 option**：决策引擎定 kind、渲染器画图，LLM 只在规则歧义
+    时给一个语义标签。分类调用落到最后的 else（回一句自然语言）—— 它不是白名单
+    标签，等价于「分类器答非所问」，用于走「保留规则原判」那条路径。
+    """
 
     def __init__(self) -> None:
         self.calls: list[list[tuple[str, str]]] = []
@@ -81,10 +86,7 @@ class _PipelineLlm:
     async def complete(self, messages: list, **kwargs) -> _Resp:
         self.calls.append([(m.role, m.content) for m in messages])
         system = messages[0].content
-        user = messages[1].content
-        if "图表类型" in user:
-            content = '{"title":{"text":"t"},"series":[{"type":"bar","data":[1,2]}]}'
-        elif "解析为查询计划" in system:
+        if "解析为查询计划" in system:
             # ReAct 第一阶段：返回一个能通过校验的空计划（classes 为空时无引用可校验）
             content = '{"target":"各供应商的收货数量汇总"}'
         elif "生成 SQL 时必须" in system:
@@ -429,10 +431,13 @@ class TestChatService:
         response = await service.processMessage(_dto("各供应商的收货数量汇总"), _FakeSession())
         assert response.intent == IntentType.QUERY.value
         assert "PRECEIPT" in (response.sql or "")
-        assert response.chartType == "pie"  # 1 字符串 + 1 数值、2 行 ≤ 6 → PIE
+        # 1 维 + 1 指标、无 formula → R12 分类比较（歧义 → 问一次标签分类器；
+        # 假客户端答的不是白名单标签 → 保留规则原判 BAR）。旧值是 pie：
+        # 那套「1 字符串 + 1 数值就画饼」的形状规则已被决策引擎取代。
+        assert response.chartType == "bar"
         assert response.chartOption is not None
         assert response.data == [{"NAME": "A", "QTY": Decimal(10)}, {"NAME": "B", "QTY": Decimal(20)}]
-        assert response.tokensUsed == 60  # 4 次调用 × 15（计划/校验 + SQL + 图表 + 回答）
+        assert response.tokensUsed == 60  # 4 次调用 × 15（计划/校验 + SQL + 标签分类 + 回答）
         assert response.cost > 0
         assert response.modelName == "test-model"  # 实际服务的回答模型
         # ReAct 计划随响应返回（前端展示用）
@@ -2805,3 +2810,30 @@ class TestStatePlanObservability:
         with caplog.at_level(logging.WARNING, logger="app.services.chat_service"):
             assert _statePlan(self._state(None)) is None
         assert "reason=" not in caplog.text
+
+
+class TestDatasourceTypeFailFast:
+    """数据源类型脏值在流水线边界拒绝（2026-10-02，fail fast）。
+
+    data_source.type 走 API 创建时由枚举 DTO 挡住（422），但手工改库/seed
+    仍可能写入脏值。此前 resolveDialect 会静默回退 Oracle —— 给 MySQL 库
+    生成 ROWNUM 语法执行必错。现在 _buildPipelineContext 在任何 LLM 消费
+    **之前**用 coerceDatasourceType 严格校验。
+
+    注：正向链路（合法 type 正常出 SQL）由既有 full-pipeline 测试覆盖
+    （当前该文件部分用例因陈旧夹具红，与本守卫无关，见 changes 记录）。
+    """
+
+    async def test_unknown_type_fails_fast_before_llm(self) -> None:
+        ds = _datasource()
+        ds.type = "bogusdb"
+        service, llm, _, adapter = _buildService(datasource=ds)
+        with pytest.raises(ValidationError) as excInfo:
+            await service.processMessage(_dto("各供应商的收货数量汇总"), _FakeSession())
+        msg = str(excInfo.value.message)
+        assert "ZJTH" in msg          # 数据源名（可定位是哪个库）
+        assert "bogusdb" in msg       # 脏值原文
+        assert "重新保存" in msg       # 可操作指引
+        # fail fast 的实质：一分钱 LLM 都没花，一步 SQL 都没执行
+        assert llm.calls == []
+        assert adapter.executedSql is None

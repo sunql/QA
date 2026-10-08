@@ -125,6 +125,22 @@ def _resolveApiKey(config: Any, provider: ProviderType, settings: Settings) -> s
     return ""
 
 
+async def invalidateClient(configId: int) -> None:
+    """使指定配置的缓存客户端失效（配置更新/停用后必须调用）。
+
+    OpenAiClient 构造时固化 model_name/api_endpoint/key（见其 __init__ 注释），
+    若不从缓存移除，运行中的进程将永远使用编辑前的旧配置。
+    close 失败不能让旧客户端留在缓存里——失效语义优先于优雅关闭。
+    """
+    client = _clients.pop(configId, None)
+    if client is None:
+        return
+    try:
+        await client.close()
+    except Exception:
+        logger.warning("invalidateClient: 关闭旧客户端失败 configId=%s", configId, exc_info=True)
+
+
 def resetFactory() -> None:
     """清空客户端缓存（测试用；不关闭连接，因测试注入的是 mock）。"""
     _clients.clear()

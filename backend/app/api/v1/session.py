@@ -8,10 +8,11 @@
     GET /api/v1/sessions/usage/by-model           按模型汇总
     GET /api/v1/sessions/{sessionId}/usage        单会话用量摘要
     GET /api/v1/sessions/{sessionId}/usage/list   单会话用量流水
-- 聊天语义历史（新增）：
+-    聊天语义历史：
     GET    /api/v1/sessions/chat-history          会话列表（按消息聚合，UI 历史面板用）
     GET    /api/v1/sessions/{sessionId}/messages  单会话消息流加载
     DELETE /api/v1/sessions/{sessionId}           硬删除（message + token_usage + query_state）
+    POST   /api/v1/sessions/{sessionId}/export.pdf  导出 PDF（0105 起为 POST，带图表位图）
 
 路由顺序约束：
 - 字面量段（/chat-history, /usage/global 等）必须在 /{sessionId} 之前，避免被路径参数吞掉。
@@ -23,7 +24,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import getCurrentUser
+from app.api.v1.session_guard import assertSessionOwnership
+from app.dependencies import CurrentUser, getCurrentUser
 from app.domain.error_messages import (
     MSG_EXPORT_MESSAGE_NOT_FOUND,
     MSG_EXPORT_SESSION_EMPTY,
@@ -35,9 +37,11 @@ from app.domain.error_messages import (
     MSG_HISTORY_LISTING_OFFSET,
     MSG_HISTORY_MESSAGES_BEFORE_ID,
     MSG_HISTORY_MESSAGES_LIMIT,
+    MSG_HISTORY_MESSAGES_TAIL,
 )
 from app.domain.exceptions import NotFoundError
 from app.domain.schemas import (
+    ChatExportRequest,
     ChatSessionListItem,
     DailyUsageTrend,
     GlobalUsageSummary,
@@ -125,15 +129,29 @@ async def listChatHistory(
 
 
 @router.get("/{sessionId}/usage", response_model=TokenUsageSummary)
-async def getSessionUsage(sessionId: str, session: AsyncSession = Depends(getDb)) -> TokenUsageSummary:
+async def getSessionUsage(
+    sessionId: str,
+    _user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> TokenUsageSummary:
+    """单会话用量摘要（成本台账）。
+
+    归属：**已打标**且不属于当前用户的会话 → 403。与 messages / delete / export 同口径 ——
+    拿到一个 sessionId 就能读到别人每会话的 token / 成本 / 模型明细，属同一条洞的对称端点。
+    """
+    await assertSessionOwnership(session, sessionId, _user)
     svc = TokenUsageService()
     return await svc.summarize(session, sessionId)
 
 
 @router.get("/{sessionId}/usage/list", response_model=list[SessionTokenUsageRead])
 async def getSessionUsageList(
-    sessionId: str, session: AsyncSession = Depends(getDb)
+    sessionId: str,
+    _user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
 ) -> list[SessionTokenUsageRead]:
+    """单会话用量流水（明细行）。归属口径同 `GET /{sessionId}/usage`。"""
+    await assertSessionOwnership(session, sessionId, _user)
     svc = TokenUsageService()
     usages = await svc.getUsageBySession(session, sessionId)
     return [SessionTokenUsageRead.model_validate(u) for u in usages]
@@ -145,30 +163,44 @@ async def getSessionUsageList(
 )
 async def getSessionMessages(
     sessionId: str,
+    _user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
     limit: int = Query(default=200, ge=1, le=1000, description=MSG_HISTORY_MESSAGES_LIMIT),
     before_id: int | None = Query(default=None, alias="before_id", description=MSG_HISTORY_MESSAGES_BEFORE_ID),
+    tail: bool = Query(default=False, description=MSG_HISTORY_MESSAGES_TAIL),
 ) -> SessionMessagesResponse:
     """加载某 session 的完整消息流（按时间正序，user → assistant 交错）。
 
     不存在的 sessionId 返 200 + 空 messages（前端便于无副作用切换）。
-    chartOption/data 未持久化，历史回放仅展示 content + sql + 时间戳。
+    ``tail=true`` 取最新的 limit 条（仍按时间正序返回）—— 导出 PDF 只保留最后
+    500 轮，给导出配图的前端必须拿到同一个窗口，否则长会话一张图都配不上。
+
+    归属：**已打标**且不属于当前用户的会话 → 403，三个渠道（chat / doc_qa / wiki_qa）
+    一并生效（此前无校验，任何人拿到 sessionId 就能读）。存量未打标行仍 fail-open，
+    覆盖面见 ``session_guard``。
     """
+    await assertSessionOwnership(session, sessionId, _user)
     svc = SessionHistoryService()
     return await svc.loadFullMessages(
-        session, sessionId, limit=limit, beforeId=before_id
+        session, sessionId, limit=limit, beforeId=before_id, tail=tail
     )
 
 
 @router.delete("/{sessionId}", status_code=204)
 async def deleteSessionHistory(
     sessionId: str,
+    _user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
 ) -> Response:
     """硬删除某 session 的所有数据（message + token_usage + query_state 三表）。
 
     sessionId 不存在或三表均无数据 → 404。删除为单事务，任一失败回滚。
+
+    归属：**已打标**且不属于当前用户的会话 → 403（三个渠道一并生效）。此前无校验，
+    而删的是**三张表**（含成本台账 session_token_usage）—— 拿到 sessionId 就能销毁
+    别人的会话与账目。
     """
+    await assertSessionOwnership(session, sessionId, _user)
     svc = SessionHistoryService()
     total = await svc.deleteSessionHistory(session, sessionId)
     if total == 0:
@@ -179,7 +211,7 @@ async def deleteSessionHistory(
     return Response(status_code=204)
 
 
-@router.get(
+@router.post(
     "/{sessionId}/export.pdf",
     response_class=Response,
     responses={
@@ -191,21 +223,37 @@ async def deleteSessionHistory(
 async def exportSessionPdf(
     request: Request,
     sessionId: str,
+    body: ChatExportRequest,
+    _user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
-    message_id: int | None = Query(default=None, alias="message_id", ge=1),
 ) -> Response:
     """导出某 session 的问答记录为 PDF。
 
-    Query:
-        message_id: 非空时只导出该 assistant 消息 + 上一条 user 消息（按 id 升序）。
-                    必须属于该 session；否则 404。
+    **契约变更（0105）**：此前是 ``GET ...?message_id=N``。图没法塞进 GET，而保留
+    两个入口会变成两条会漂移的路径（一条带图一条不带），故整体改为 POST。前端是
+    自己的 SPA，兼容面可控。
 
-    响应：application/pdf（attachment 触发下载）；文件名包含 sessionId 或 messageId。
+    Body:
+        messageId: 非空时只导出该 assistant 消息 + 上一条 user 消息（按 id 升序）。
+                   必须属于该 session；否则 404。
+        charts:    前端用**同一份**已经渲染过的 chartOption 离屏导出的 PNG 列表
+                   ``[{messageId, imagePng}]``。服务端不重画 ECharts（那会是第二套
+                   渲染器，与前端必然长得不一样）。为空 ⇒ 图回落占位框，**不影响
+                   导出本身成败**。
+
+    响应：application/pdf（attachment 触发下载）；文件名含 sessionId 或 messageId。
     会话无任何消息 → 404（与 DELETE 行为对齐）。
+
+    归属：**已打标**且不属于当前用户的会话 → 403（三个渠道一并生效）。守卫放在 404
+    判定**之前**：这样别人的会话一律停在 403，不会因为「有没有消息」而在 403/404 之间
+    变化（detail 也照旧不回显 id）。
     """
+    await assertSessionOwnership(session, sessionId, _user)
     svc = SessionHistoryService()
     try:
-        payload = await svc.buildExportPayload(session, sessionId, messageId=message_id)
+        payload = await svc.buildExportPayload(
+            session, sessionId, messageId=body.message_id
+        )
     except ValueError:
         # 安全审查 HIGH-3：404 detail 不回显 sessionId/messageId，避免枚举攻击
         raise NotFoundError(message=MSG_EXPORT_MESSAGE_NOT_FOUND) from None
@@ -213,15 +261,21 @@ async def exportSessionPdf(
         # 安全审查 HIGH-3：404 detail 不回显 sessionId，避免枚举攻击
         raise NotFoundError(message=MSG_EXPORT_SESSION_EMPTY)
 
+    # 图表位图先校验解码再挂上去；不合法 → 422（边界处显式失败，见 service）。
+    # 放在 buildExportPayload 之后：会话本身不存在/无消息该报 404，不该被图片问题掩盖。
+    if body.charts:
+        imagesByMessageId = await svc.resolveChartImages(session, sessionId, body.charts)
+        payload = svc.attachChartImages(payload, imagesByMessageId)
+
     builder = ChatExportPdfBuilder()
     pdf_bytes = builder.build(payload)
 
     filename_template = (
-        MSG_HISTORY_EXPORT_MESSAGE_FILENAME if message_id is not None else MSG_HISTORY_EXPORT_FILENAME
+        MSG_HISTORY_EXPORT_MESSAGE_FILENAME if body.message_id is not None else MSG_HISTORY_EXPORT_FILENAME
     )
     filename = filename_template.format(
-        sessionId=sessionId if message_id is None else f"{sessionId}",
-        messageId=message_id,
+        sessionId=sessionId if body.message_id is None else f"{sessionId}",
+        messageId=body.message_id,
     )
     disposition = MSG_HISTORY_EXPORT_CONTENT_DISPOSITION.format(filename=filename)
     return Response(

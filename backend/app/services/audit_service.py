@@ -33,6 +33,8 @@ _VALID_ACTIONS = frozenset({
     "CREATE",
     "UPDATE",
     "DELETE",
+    # 本体类恢复（fix-class-tombstone-restore，2026-10-03）
+    "RESTORE",
     # 认证事件（feat-user-auth，2026-09-20）
     "auth.login",
     "auth.login_failed",

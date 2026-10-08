@@ -20,12 +20,15 @@ from typing import Any
 import pytest
 
 import scripts.sync_entity_mapping_from_thbi as sync_mod
+from app.domain.enterprise_key import (
+    KEY_RANGE_SIZE,
+    MATERIAL_KEY_OFFSET,
+    SUPPLIER_KEY_OFFSET,
+    stableKey,
+)
 from scripts.sync_entity_mapping_from_thbi import (
-    _MATERIAL_KEY_OFFSET,
-    _SUPPLIER_KEY_OFFSET,
     _buildAllRows,
     _mapping,
-    _stableKey,
     syncEntityMappings,
 )
 
@@ -89,7 +92,12 @@ class _FakeSession:
 
 
 class _FakeAdapter:
-    """Fake THBI adapter：返回预置 supplier_code / supplier_name / material descriptions。"""
+    """Fake THBI adapter：返回预置 supplier_code / supplier_name / material descriptions。
+
+    表名/列名对齐 THBI 真表（2026-09-30 实查）：`DIM_SUPPLIER(BPSNUM_0/BPSNAM_0)`、
+    `DIM_IMATERIAL(ITMREF_0/ITMDES1_0..3)` —— 旧的 `DWD_SUPPLIER`/`DWD_MATERIAL`
+    在库里已不存在（ORA-00942）。列键小写：适配器统一下沉（business_db_pool.py:639）。
+    """
 
     def __init__(
         self,
@@ -97,6 +105,7 @@ class _FakeAdapter:
         materials: list[tuple[str, str | None]] | list[str] | None = None,
     ) -> None:
         # 兼容旧用法：传 [str, ...] 时自动补 None name
+        self.sqls: list[str] = []
         self._suppliers: list[tuple[str, str | None]] = (
             [(c, None) for c in suppliers]
             if suppliers and isinstance(suppliers[0], str)
@@ -109,15 +118,16 @@ class _FakeAdapter:
         )
 
     async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
+        self.sqls.append(sql)
         up = sql.upper()
-        if "DWD_SUPPLIER" in up:
-            # 适配器下沉小写列键（与生产 sync_entity_mapping_from_thbi.py 同口径；
-            # scripts/sync_entity_mapping_from_thbi.py:114 注释明示）。
+        if "DIM_SUPPLIER" in up:
+            # 键取 SQL 的**别名**（`BPSNUM_0 AS supplier_code`）并下沉小写 ——
+            # 与适配器行为一致：它把 Oracle 返回的列名统一 lower()。
             return [
                 {"supplier_code": c, "supplier_name": n}
                 for c, n in self._suppliers
             ]
-        if "DWD_MATERIAL" in up:
+        if "DIM_IMATERIAL" in up:
             return [
                 {
                     "material_code": c,
@@ -136,25 +146,27 @@ class _FakeAdapter:
 
 
 class TestStableKey:
+    """脚本经 SSOT 模块派生键（本文件的 range 断言只钉「脚本确实在用该 offset」）。
+
+    键空间本身的性质（确定性 / 碰撞下限 / 真实碰撞对回归）由
+    `test_enterprise_key.py` 覆盖，此处不重复。
+    """
+
     def test_returns_value_in_offset_range(self) -> None:
-        key = _stableKey("SUP-001", offset=800_000)
-        assert 800_000 <= key < 800_000 + (1 << 32)
+        key = stableKey("SUP-001", offset=SUPPLIER_KEY_OFFSET)
+        assert SUPPLIER_KEY_OFFSET <= key < SUPPLIER_KEY_OFFSET + KEY_RANGE_SIZE
 
-    def test_is_deterministic_across_calls(self) -> None:
-        a = _stableKey("ACME-001", offset=800_000)
-        b = _stableKey("ACME-001", offset=800_000)
-        assert a == b
-
-    def test_different_codes_yield_different_keys(self) -> None:
-        # 4G 空间 + SHA-256：1000 个输入 0 碰撞概率
-        keys = {_stableKey(f"SUP-{i:06d}", offset=800_000) for i in range(1, 1001)}
-        assert len(keys) == 1000
-
-    def test_material_offset_independent_from_supplier(self) -> None:
-        # 同一字符串在 SUPPLIER vs MATERIAL offset 下必得不同 key
-        s = _stableKey("X", offset=_SUPPLIER_KEY_OFFSET)
-        m = _stableKey("X", offset=_MATERIAL_KEY_OFFSET)
-        assert s != m
+    def test_script_derived_rows_use_the_ssot_offsets(self) -> None:
+        """脚本构造的行必须落在 SSOT 的区间里 —— 防止有人在本脚本里再写一份 offset。"""
+        rows = _buildAllRows(suppliers=[("S1", None)], materials=[("M1", None)])
+        supplier = next(r for r in rows if r["entity_type"] == "SUPPLIER")
+        material = next(r for r in rows if r["entity_type"] == "MATERIAL")
+        assert SUPPLIER_KEY_OFFSET <= supplier["enterprise_key"] < MATERIAL_KEY_OFFSET
+        assert (
+            MATERIAL_KEY_OFFSET
+            <= material["enterprise_key"]
+            < MATERIAL_KEY_OFFSET + KEY_RANGE_SIZE
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -198,13 +210,10 @@ class TestBuildAllRows:
         )
         supplier_keys = {r["enterprise_key"] for r in rows if r["entity_type"] == "SUPPLIER"}
         material_keys = {r["enterprise_key"] for r in rows if r["entity_type"] == "MATERIAL"}
-        # SUPPLIER 区间 [800000, 800000 + 2^32)；MATERIAL 区间偏移 2^32
-        supplier_top = 800_000 + (1 << 32)
-        material_top = supplier_top + (1 << 32)
         for k in supplier_keys:
-            assert 800_000 <= k < supplier_top
+            assert SUPPLIER_KEY_OFFSET <= k < MATERIAL_KEY_OFFSET
         for k in material_keys:
-            assert supplier_top <= k < material_top
+            assert MATERIAL_KEY_OFFSET <= k < MATERIAL_KEY_OFFSET + KEY_RANGE_SIZE
 
 
 # -----------------------------------------------------------------------------
@@ -275,6 +284,39 @@ class TestSyncIdempotent:
 # -----------------------------------------------------------------------------
 
 
+class TestSourceTables:
+    """源表契约：THBI 的 `DWD_SUPPLIER` / `DWD_MATERIAL` 已不存在，真表是 DIM_*。
+
+    2026-09-30 实查：`THBI.DWD_SUPPLIER` → ORA-00942（表或视图不存在）；
+    `THBI.DIM_SUPPLIER(BPSNUM_0, BPSNAM_0)` 3500 行、
+    `THBI.DIM_IMATERIAL(ITMREF_0, ITMDES1_0..3)` 350922 行 —— 与 2026-09-16 那次
+    同步落库的行数（3500 / 350925）对得上。
+
+    这条用例钉住「脚本查哪张表、取哪些列」：源表再被改名时，失败会发生在测试里，
+    而不是上线后 dry-run 显示 0 行（或抛 ORA-00942 才发现）。
+    """
+
+    def test_supplier_query_targets_dim_supplier(self) -> None:
+        adapter = _FakeAdapter(suppliers=[("S1", "S1 Inc")], materials=[])
+
+        _run(sync_mod._fetchSupplierCodes(adapter))
+
+        sql = adapter.sqls[0].upper()
+        assert "THBI.DIM_SUPPLIER" in sql
+        assert "BPSNUM_0" in sql and "BPSNAM_0" in sql
+
+    def test_material_query_targets_dim_imaterial(self) -> None:
+        adapter = _FakeAdapter(suppliers=[], materials=[("M1", "Steel")])
+
+        _run(sync_mod._fetchMaterialCodes(adapter))
+
+        sql = adapter.sqls[0].upper()
+        assert "THBI.DIM_IMATERIAL" in sql
+        assert "ITMREF_0" in sql
+        for desc in ("ITMDES1_0", "ITMDES2_0", "ITMDES3_0"):
+            assert desc in sql
+
+
 class TestFetchDedup:
     def test_supplier_dedup_and_trim(self) -> None:
         adapter = _FakeAdapter(
@@ -293,8 +335,8 @@ class TestFetchDedup:
         # 物料 description_1/2/3 非空拼接；全空 → None
         class _MAdapter(_FakeAdapter):
             async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
-                if "DWD_MATERIAL" in sql.upper():
-                    # 适配器下沉小写列键，与生产口径一致
+                if "DIM_IMATERIAL" in sql.upper():
+                    # 键取 SQL 别名（ITMREF_0 AS material_code 等）并下沉小写
                     return [
                         {"material_code": "M1", "description_1": "Steel", "description_2": "AISI 304", "description_3": None},
                         {"material_code": "M2", "description_1": "Copper", "description_2": None, "description_3": "wire"},

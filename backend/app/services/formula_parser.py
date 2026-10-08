@@ -23,7 +23,7 @@ _SQL_KEYWORDS: frozenset[str] = frozenset(
         "AND", "OR", "NOT", "IS", "NULL", "TRUE", "FALSE",
         "CASE", "WHEN", "THEN", "ELSE", "END",
         "AS", "ON", "IN", "EXISTS", "BETWEEN", "LIKE",
-        "DISTINCT", "ALL", "ANY", "SOME",
+        "DISTINCT", "ALL", "ANY", "SOME", "ONLY",
         "PARTITION", "BY", "ORDER", "OVER", "ASC", "DESC",
         "IF", "COALESCE", "NULLIF", "CAST", "CONVERT",
     }
@@ -159,6 +159,23 @@ def _extract_aggregates_and_columns(text: str) -> tuple[list[str], list[tuple[st
     return agg_names, column_refs
 
 
+# CTE 形态判定：以 WITH 开头，容许任意前导空白（换行/制表符）。
+# 旧写法 `formula.strip().upper().startswith("WITH ")` 要求 WITH 后紧跟**一个空格**，
+# 对 `WITH\n` / `WITH\t` 漏判 → CTE 公式掉进「逐 token 当属性校验」那条路，
+# 内部的表名/列名被当成属性幻觉上报，整轮计划失败（2026-10-01 线上回归）。
+_CTE_LEADING_RE = re.compile(r"^\s*WITH\b", re.IGNORECASE)
+
+
+def isCteFormula(formula: str | None) -> bool:
+    """公式是否为 CTE 形态（以 WITH 开头，容许前导空白）。
+
+    SSOT —— 两个消费者：
+    - parseFormula 的路由（决定是否走 _parseCteFormula）；
+    - validatePlan 的 CTE 豁免判定（CTE 内部标识符不做属性存在性校验）。
+    """
+    return bool(formula) and _CTE_LEADING_RE.match(formula) is not None
+
+
 def parseFormula(formula: str | None) -> ParsedFormula:
     """解析 SQL formula 文本。
 
@@ -178,7 +195,7 @@ def parseFormula(formula: str | None) -> ParsedFormula:
         return ParsedFormula(column_refs=(), aggregate_functions=())
 
     # CTE 路由：WITH ... AS ( SELECT ... ) 形式
-    if formula.strip().upper().startswith("WITH "):
+    if isCteFormula(formula):
         return _parseCteFormula(formula)
 
     # 简单聚合

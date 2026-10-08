@@ -1,4 +1,4 @@
-"""验证 Alembic 0047 / 0085 后 session_message 新列/索引落地。"""
+"""验证 Alembic 0047 / 0085 / 0105 后 session_message 新列/索引落地。"""
 import pytest
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -77,3 +77,29 @@ async def test_session_message_interrupted_column_contract() -> None:
 
     orm_col = SessionMessage.__table__.columns["interrupted"]
     assert orm_col.nullable is False, "ORM 侧 interrupted 必须 nullable=False（与库一致）"
+
+
+@pytest.mark.asyncio
+async def test_session_message_chart_columns_contract() -> None:
+    """Alembic 0105（图表进最终报告）后 chart_type / chart_option 落地。
+
+    两列都必须 **nullable**：0105 之前的存量行没有图，加列时不可能回填出有意义的值；
+    强行 NOT NULL 只能填个假值，而「这轮没有图」与「这轮有张空图」是两回事。
+    同时钉 ORM 与库一致 —— 迁移跑了但 ORM 没加列，正是运行期才炸的那类漂移。
+    """
+    def _cols(sync_conn):
+        return {c["name"]: c for c in inspect(sync_conn).get_columns("session_message")}
+
+    settings = getSettings()
+    engine = create_async_engine(settings.databaseUrl)
+    async with engine.begin() as conn:
+        cols = await conn.run_sync(_cols)
+    await engine.dispose()
+
+    assert "chart_type" in cols, "session_message.chart_type 列不存在（0105 未应用？）"
+    assert "chart_option" in cols, "session_message.chart_option 列不存在（0105 未应用？）"
+    for name in ("chart_type", "chart_option"):
+        assert cols[name]["nullable"] is True, f"{name} 必须可空（存量行无图）"
+        assert SessionMessage.__table__.columns[name].nullable is True, (
+            f"ORM 侧 {name} 必须与库一致为可空"
+        )

@@ -133,6 +133,12 @@ class Settings(BaseSettings):
     rateLimitRequests: int = Field(default=30, alias="RATE_LIMIT_REQUESTS")
     rateLimitWindow: str = Field(default="minute", alias="RATE_LIMIT_WINDOW")
 
+    # ===== 多步持久化（Task 5）=====
+    multiStepPersistEnabled: bool = Field(default=True, alias="MULTI_STEP_PERSIST_ENABLED")
+
+    # ===== ResearchCheckpoint TTL（B2）=====
+    researchCheckpointTtlHours: int = Field(default=24, alias="RESEARCH_CHECKPOINT_TTL_HOURS")
+
     # ===== CORS =====
     # 默认值覆盖常见 dev 来源：localhost / 127.0.0.1 / 局域网子网 192.168.x.x /
     # 10.0.x.x / 172.16-31.x.x（Docker Desktop 主机回环 192.168.65.x 兼容）。

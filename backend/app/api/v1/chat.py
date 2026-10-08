@@ -7,53 +7,37 @@ router 自身 prefix=""，由 main.py 挂载到 /api/v1 下得到 /api/v1/chat�
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
-from app.domain.exceptions import DomainError
+from app.domain.exceptions import ConflictError, DomainError, NotFoundError
+from app.domain.multi_step_models import RUN_STATUS_FAILED, RUN_STATUS_RUNNING
 from app.domain.schemas import (
+    CamelModel,
     ChatRequest,
     ChatResponse,
     HypothesisRead,
     QuerySuggestRequest,
     QuerySuggestResponse,
 )
+from app.api.v1.session_guard import assertSessionOwnership
 from app.infrastructure.rate_limit import limiter, rateLimitValue
+from app.services import multi_step_persistence, multi_step_resume
 from app.services.chat_service import ChatService
 from app.services.embedding_service import EmbeddingService
-from app.services.evidence_query_service import getSessionOwnerUserIds
 from app.services.hypothesis_service import listSessionHypotheses
-from app.services.messages_zh import MSG_HYPOTHESIS_SESSION_NOT_OWNED
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(getCurrentUser)])
 _service = ChatService()
 _embeddingService = EmbeddingService()
-
-
-async def _assertChatSessionOwnership(
-    session: AsyncSession, sessionId: str, user: CurrentUser,
-) -> None:
-    """chat 会话归属定点校验（v3.1 B6，对齐 /evidences R2 H2 守卫口径）。
-
-    - admin 放行；归属事实源 = session_message.user_id；
-    - 有归属标记且不属于当前用户 → 403（detail 不回显归属者，防侧信道）；
-    - 无标记（存量行/新会话）→ fail-open（wiki_qa / evidences 同语义）。
-    """
-    if "admin" in (user.roles or []):
-        return
-    owners = await getSessionOwnerUserIds(session, sessionId)
-    if owners and user.userId not in owners:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=MSG_HYPOTHESIS_SESSION_NOT_OWNED,
-        )
 
 
 @router.get("/sessions/{sessionId}/hypotheses", response_model=list[HypothesisRead])
@@ -67,7 +51,7 @@ async def listHypotheses(
 
     流式路径假设不进 SSE 帧，前端在答案流结束后调本端点取「可能原因」。
     """
-    await _assertChatSessionOwnership(session, sessionId, _user)
+    await assertSessionOwnership(session, sessionId, _user)
     rows = await listSessionHypotheses(session, sessionId, limit)
     return [HypothesisRead.model_validate(r) for r in rows]
 
@@ -83,7 +67,11 @@ async def chat(
     """处理一条自然语言问题，返回回答 + SQL + 图表 option + 数据。
 
     #207 安全修复：真实调用方（_user）透传为 Agent 运行 actor（归属审计）。
+    归属守卫：追问锚点（last_plan/last_sql/last_data）按 session_id 存在
+    ``session_query_state`` 里，**不校验归属就会被继承** —— 于是「拿到一个别人的
+    sessionId」等于「用别人的上下文提问」。全新会话没有消息行，守卫 fail-open 放行。
     """
+    await assertSessionOwnership(session, dto.sessionId, _user)
     return await _service.processMessage(dto, session, user=_user)
 
 
@@ -106,6 +94,10 @@ async def chatStream(
     `yield` 上（不在任务栈上，`except CancelledError`/`finally` 都不触发）。钩子只
     负责调 service，事务与语义都在 service 层。
     """
+    # 归属守卫必须在这里（流开始之前）：进了 eventSource 就没有 HTTP 状态码可回了。
+    # 与 POST /chat 同一条理由：不加守卫就能继承别人会话的追问锚点。
+    await assertSessionOwnership(session, dto.sessionId, _user)
+
     async def eventSource() -> AsyncIterator[str]:
         async for event in _service.processMessageStream(dto, session, user=_user):
             yield event.toSse()
@@ -143,3 +135,126 @@ async def suggestQueries(dto: QuerySuggestRequest) -> QuerySuggestResponse:
         logger.warning("相似问法检索失败，返回空建议: %s", exc.message)
         suggestions = []
     return QuerySuggestResponse(suggestions=suggestions)
+
+
+class ResumeRequest(CamelModel):
+    from_step_index: int | None = None
+    model_override: int | None = None
+    compress_again: bool = False
+
+
+async def _sealAbandonedResume(runId: uuid.UUID) -> None:
+    """续跑兜底封口：流跑完后 run 仍是 running ⇒ 没人关它，显式标失败。
+
+    为什么需要：路由只给出 `run.question`，**重新路由的结果不一定还是多步**
+    （首步这次成功了 ⇒ 单步优先策略不拆步），多步链路根本没进入，`adoptRunForResume`
+    也就没被执行；也可能流中途断掉。两种情况下这条 run 都会永远停在 `running`。
+    放在路由层是因为它是唯一能覆盖「一切提前退出形态」的位置。
+
+    **必须新开会话**（照抄同特性姊妹路径
+    `ChatStreamService.persistInterruptedStream` 的形态）：本函数由背景钩子在响应
+    发出之后执行，而断连/取消之后**请求会话不是可靠的写入通道** —— 取消落在最近一个
+    await 上会把它标成 needs-rollback；即便 `rollback()` 复原，底层 asyncpg 连接也已
+    关闭而 SQLAlchemy 并未察觉（那里 docstring 记了实测：`pg_closed=True` 同时
+    `invalidated=False`），下一条语句即以 `InterfaceError: connection is closed` 整条
+    失败。复用请求会话的后果不是「少写一次」，而是**失败即残留 `running`**：该 run
+    既不可续（`prepareResume` 只放行 failed/partially_failed）也不可清 —— 恰是本函数
+    要消灭的僵尸形态。
+    """
+    from app.infrastructure.database import getSessionFactory
+
+    async with getSessionFactory()() as session:
+        refreshed = await multi_step_persistence.loadRun(session, runId)
+        if refreshed is None or refreshed.status != RUN_STATUS_RUNNING:
+            return
+        await multi_step_persistence.updateRun(
+            session, refreshed, status=RUN_STATUS_FAILED, finished=True,
+            errorSummary="续跑未走多步链路（被重新路由为单步或流中断），run 已显式封口",
+        )
+        await session.commit()
+
+
+@router.post("/multi-step/{runId}/resume")
+# 限流与 /chat、/stream 同款：续跑一次要跑全链路 LLM（真金白银）+ 长连接，
+# 漏了这道装饰器，单账号就能不受限地把它打满（与仓内「限流覆盖所有端点」冲突）。
+# 唯一限流来源是 app/infrastructure/rate_limit.py；注意 SlowAPIMiddleware 的
+# default_limits 在本仓实测**不生效**（未装饰路由不会被挡），故装饰器是唯一覆盖。
+@limiter.limit(rateLimitValue)
+async def resumeMultiStep(
+    request: Request,
+    runId: uuid.UUID,
+    dto: ResumeRequest,
+    _user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> StreamingResponse:
+    run = await multi_step_persistence.loadRun(session, runId)
+    if run is None:
+        raise NotFoundError(f"multi-step run {runId} 不存在")
+    await assertSessionOwnership(session, str(run.session_id), _user)
+
+    if run.datasource_id is None:
+        # ChatRequest.datasourceId 是必填 int；缺了它只能 500，不如显式 409。
+        raise ConflictError("该 multi-step run 没有数据源快照，无法续跑")
+
+    idempotencyKey = request.headers.get("Idempotency-Key")
+    try:
+        await multi_step_resume.prepareResume(
+            session, runId=runId, fromStepIndex=dto.from_step_index,
+            idempotencyKey=idempotencyKey,
+        )
+    except multi_step_resume.ResumeNotAllowed as exc:
+        # 上面已查过一次 run；这里兜的是查完与被删之间的竞态。不兜就是一个
+        # 未捕获的领域异常 ⇒ 500，而正确答案是 404。
+        raise NotFoundError(str(exc)) from exc
+    except multi_step_resume.ResumeConflict as exc:
+        raise ConflictError(str(exc)) from exc
+
+    # 起始步**不**通过 DTO 传递：prepareResume 已把它写进 run.current_step_idx，
+    # Task 6 的 adoptRunForResume 从那里读。唯一事实来源 = DB。
+    chatDto = ChatRequest(
+        question=run.question,
+        sessionId=str(run.session_id),
+        datasourceId=run.datasource_id,
+        modelId=dto.model_override or run.model_id,
+        resumeRunId=run.id,   # 字段类型是 uuid.UUID | None，直接给 UUID（Task 6 判决后）
+    )
+
+    async def sealAbandoned() -> None:
+        """兜底封口的唯一入口。best-effort：响应已（部分）发出，抛出去改变不了客户端
+        可见的任何东西，只会污染日志（与同文件 `/stream` 的 persistIfInterrupted 同口径）。
+        `_sealAbandonedResume` 幂等（非 running 直接返回），兜底路径多跑一次也只是空转。
+
+        这里是 best-effort 而**不是**静默吞错：失败即残留 `running`（不可续、不可清），
+        所以异常必须以 `logger.exception` 留痕，线上才能看出「有一条 run 需要人工清」，
+        而不是只看到一条永不终结的记录。"""
+        try:
+            await _sealAbandonedResume(runId)
+        except Exception as exc:
+            logger.exception("续跑兜底封口失败（run 将残留 running，需人工清理）: %s", exc)
+
+    async def eventSource() -> AsyncIterator[str]:
+        try:
+            async for event in _service.processMessageStream(chatDto, session, user=_user):
+                yield event.toSse()
+        except Exception:
+            # 这条只兜「上游真抛异常」：此时异常穿出 Starlette 的收敛任务组，
+            # 下面的 background 钩子**不会**被执行，run 就没人封口了。
+            # （GeneratorExit / CancelledError 都是 BaseException，不走这里 —— 断连时
+            # 生成器停在 yield 上、取消不进生成器帧，本分支与 finally 一律不触发。）
+            await sealAbandoned()
+            raise
+
+    return StreamingResponse(
+        eventSource(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        # 断连必须靠 background：它在收敛任务组**之外**被 await（starlette
+        # responses.py），断连时确定跑到。H4 实测：断连有两种时序，主情形
+        # （生成器停在 yield 上）里 `except CancelledError` 与 `finally` 都不触发
+        # —— 所以兜底不能写在生成器的 finally 里。
+        # 封口**不依赖**请求 session 的存活：`_sealAbandonedResume` 自己开新会话
+        # 并显式 commit（F5 d88b45e）。断连时序下请求会话不是可靠写入通道（取消
+        # 落在最近一个 await 上会把连接标成不可用），故不能复用 —— 理由与姊妹路径
+        # `persistInterruptedStream` 的同一处理一致。
+        background=BackgroundTask(sealAbandoned),
+    )

@@ -74,7 +74,7 @@ export default function ResearchSessionPage() {
       notification.success({
         message: t("research.session.complete_with_report"),
         description: t("research.checkpoint.processing"),
-        btn: (
+        actions: (
           <Button
             type="primary"
             size="small"

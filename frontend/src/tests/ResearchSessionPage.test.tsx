@@ -401,11 +401,11 @@ describe("ResearchSessionPage", () => {
 
       await waitFor(() => expect(notificationSpy).toHaveBeenCalledTimes(1));
 
-      // 通知参数：message/description/btn 必含 i18n 文案，duration=6，placement=topRight
+      // 通知参数：message/description/actions 必含 i18n 文案，duration=6，placement=topRight
       const call = notificationSpy.mock.calls[0][0] as {
         message: string;
         description: string;
-        btn: React.ReactElement<{ children: string; onClick: () => void }>;
+        actions: React.ReactElement<{ children: string; onClick: () => void }>;
         duration: number;
         placement: string;
       };
@@ -413,8 +413,8 @@ describe("ResearchSessionPage", () => {
       expect(call.description).toBe("处理中…");
       expect(call.duration).toBe(6);
       expect(call.placement).toBe("topRight");
-      // btn 是 antd Button 元素，子文本必须是「查看报告」
-      expect(call.btn.props.children).toBe("查看报告");
+      // actions 是 antd Button 元素，子文本必须是「查看报告」
+      expect(call.actions.props.children).toBe("查看报告");
 
       // 再 render 一次，useRef 必须拦住重复弹
       await act(async () => {

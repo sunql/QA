@@ -242,11 +242,17 @@ def buildSpec(
     """把决策落到一份完整 spec。纯函数：不改 plan、不改 data、不改 signals。
 
     `aliasOverrides`（关键字专用，默认 None）供**无 QueryPlan** 的报告路径注入
-    「结果集列名 → 显示名」；默认 None 时行为与既有 chat 链路逐字一致。
+    「结果集列名 → 显示名」。**维度**标签只由它驱动（见下方注释）：chat 调用形态
+    恒不传 ⇒ 维度标签与既有行为逐字一致，且这是**构造保证**而非巧合 —— 指标标签
+    沿用既有「plan 聚合别名优先、overrides 覆盖」的合并映射，行为未变。
     """
     kind = decision.kind
     aliases = _aliasByField(plan, signals.columns, aliasOverrides)
-    dimensions = _buildDimensions(_dimensionFields(signals, kind), aliases)
+    # 维度只吃**注入的 overrides**，不吃 plan 聚合别名：聚合别名属于**指标**，而它的键
+    # 是「聚合 property 解析到的结果集列」——`COUNT(<维度列>)`（validatePlan 不要求
+    # property 是数值列）会把别名挂到维度列上，令 chat 图表的轴被静默改名。
+    # 缺省（chat 调用形态）时这里恒为空 map ⇒ 维度标签与既有行为逐字一致。
+    dimensions = _buildDimensions(_dimensionFields(signals, kind), dict(aliasOverrides or {}))
     measures = _buildMeasures(_measureFields(signals, kind), aliases)
 
     return ChartSpec(

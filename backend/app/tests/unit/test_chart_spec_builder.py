@@ -417,3 +417,44 @@ class TestAliasOverrides:
         )
 
         assert spec.measures[0].label == "账单数"
+
+
+class TestChatDimensionLabelsIgnoreAggregationAliases:
+    """回归守卫：`_buildDimensions` 只能吃**注入的 overrides**，不能吃
+    「overrides ∪ plan 聚合别名」的合并映射。
+
+    聚合别名是**指标**的别名，而 `_aliasByField` 是按「聚合的 property 解析到哪个
+    结果集列」来落键的（`_resolveColumn`）。`validatePlan` 只校验 property 是本体
+    自有属性，**不要求是数值列**，所以 `COUNT(<某个维度列>)` 是合法计划：它的别名
+    会被挂到**该维度列**上。若维度标签也吃合并映射，chat 侧图表的轴就被静默改名
+    （`supplier name` → `记录数`）—— 这是 chat 行为回归。
+    """
+
+    def test_count_on_a_dimension_column_does_not_rename_that_dimension(self) -> None:
+        plan = _plan(
+            groupBy=("SUPPLIER_NAME",),
+            aggregations=(Aggregation(function="COUNT", property="SUPPLIER_NAME", alias="记录数"),),
+        )
+        rows = [
+            {"supplier_name": "B125", "记录数": 12},
+            {"supplier_name": "B019", "记录数": 7},
+        ]
+        spec, _ = _build(["supplier_name", "记录数"], rows, plan=plan)
+
+        assert [d.field for d in spec.dimensions] == ["supplier_name"]
+        # 维度标签保持列名兜底形态，不被聚合别名改写
+        assert spec.dimensions[0].label == "supplier name"
+
+    def test_report_overrides_still_rename_dimensions(self) -> None:
+        """同一形状上，**显式注入的 overrides** 仍然改维度标签（报告路径的能力不缩水）."""
+        rows = [
+            {"supplier_name": "B125", "记录数": 12},
+            {"supplier_name": "B019", "记录数": 7},
+        ]
+        signals = buildChartSignals(None, ["supplier_name", "记录数"], rows, "")
+        decision = decideChartKind(signals, _THRESHOLDS)
+        spec = buildSpec(
+            decision, signals, rows, None, aliasOverrides={"supplier_name": "供应商"},
+        )
+
+        assert spec.dimensions[0].label == "供应商"

@@ -76,7 +76,8 @@ async def test_chart_data_not_llm_touched(fakeReportDeps) -> None:
     planner, sessionId, turnId = fakeReportDeps
     payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
     chart_blocks = [b for s in payload["sections"] for b in s["blocks"] if b["type"] == "chart"]
-    assert chart_blocks[0]["content"]["rows"][0]["cnt"] == 100  # 与 fake step data 逐字一致
+    # R3-B：chart 块 key 统一为 'data'（不是 'rows'）
+    assert chart_blocks[0]["content"]["data"][0]["cnt"] == 100  # 与 fake step data 逐字一致
 
 
 @pytest.mark.asyncio
@@ -137,7 +138,8 @@ async def test_llm_prompt_excludes_raw_rows(fakeReportDeps) -> None:
     chart = next(
         b for s in payload["sections"] for b in s["blocks"] if b["type"] == "chart"
     )
-    assert chart["content"]["rows"][0]["cnt"] == 100
+    # R3-B：chart 块 key 统一为 'data'（不是 'rows'）
+    assert chart["content"]["data"][0]["cnt"] == 100
     assert chart["sourceRefs"][0]["kind"] == "finding"
     assert "100" in md  # 数字在 MD 里逐字来自 chart 块渲染
 
@@ -337,3 +339,45 @@ async def test_stats_bullet_orders_anomaly_first(fakeReportDepsWithSourceTable) 
     assert anomaly_idx >= 0 and topn_idx >= 0 and dist_idx >= 0 and mom_idx >= 0
     # 顺序：异常 < topN < 分布 < 环比
     assert anomaly_idx < topn_idx < dist_idx < mom_idx
+
+
+# ---------------------------------------------------------------------------
+# R3 plan Task B：报告接入 chart 渲染（reuse chat-side chart pipeline）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_chart_block_chartType_is_not_none(fakeReportDepsWithStats) -> None:
+    """_chartContent 不再 hardcode chartType=None；走 chart_decision 决策引擎.
+
+    注：断言用小写，因为 ChartType 枚举值是 str-enum 小写（前端 VALID_CHART_TYPES
+    也是小写白名单）。brief 列了「大写」是契约误导。
+    """
+    planner, sessionId, turnId = fakeReportDepsWithStats
+    payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    data = next(s for s in payload["sections"] if s["kind"] == "data")
+    chart_block = next(b for b in data["blocks"] if b["type"] == "chart")
+    content = chart_block["content"]
+    # chartType 不再是 None（也不是字符串 'None'），而是决策引擎给的 kind
+    assert content.get("chartType") is not None
+    # 应当是 ChartType 枚举值字符串（小写，与前端 VALID_CHART_TYPES 对齐）
+    assert content["chartType"] in (
+        "table", "bar", "pie", "line", "kpi", "scatter", "heatmap", "hbar",
+        "donut", "combo", "waterfall",
+    )
+
+
+@pytest.mark.asyncio
+async def test_chart_block_data_field_is_populated(fakeReportDepsWithStats) -> None:
+    """chart 块 content 应包含 'data' 键（非 'rows'）且非空."""
+    planner, sessionId, turnId = fakeReportDepsWithStats
+    payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    chart_block = next(
+        b for s in payload["sections"] for b in s["blocks"] if b["type"] == "chart"
+    )
+    content = chart_block["content"]
+    assert "data" in content
+    # chat-side 决策管道必须返回非空 data 行（fakeReportDepsWithStats 至少 1 行）
+    assert isinstance(content["data"], list) and len(content["data"]) > 0
+    # 兼容前端契约：columns 也保留
+    assert "columns" in content

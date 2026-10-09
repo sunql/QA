@@ -43,6 +43,7 @@ from app.domain.research_models import (
 from app.infrastructure.llm.base_client import LlmMessage
 from app.services.learning.prompt_fence import neutralizeFence
 from app.services.llm_json_fence import stripJsonFence
+from app.services.chart_integration import buildReportChart
 from app.services.display_name_resolver import resolveValueName
 from app.services.research_agent_ports import DEFAULT_MODE, FINDING_ROWS_KEY, OPT_ARMS
 from app.services.research_session_service import ResearchSessionService
@@ -338,14 +339,28 @@ def _tableBlock(columns: list[str], rows: list[dict[str, Any]], refs: tuple[Sour
     return ReportBlock(BLOCK_TABLE, {"columns": list(columns), "rows": rows}, refs)
 
 
-def _chartContent(view: FindingView) -> dict[str, Any]:
-    """chart 块 content：行数据逐字来自 finding.supporting_data["rows"]。"""
-    return {
-        "title": view.claimText,
-        "chartType": None,  # v1 前端以表格兜底渲染（Task 11）；图表接入留 Task 12
-        "columns": list(view.rows[0].keys()) if view.rows else [],
-        "rows": view.rows,
-    }
+async def _chartContent(view: FindingView, *, session: AsyncSession) -> dict[str, Any]:
+    """chart 块 content：行数据逐字来自 finding.supporting_data["rows"].
+
+    R3 接入 chat-side chart 链路（chart_decision + spec_builder + renderer）：
+    - plan=None（报告无 QueryPlan，决策引擎按数据形状+问句派生）；
+    - 失败降级为 TABLE，绝不抛错（不让整份报告炸）。
+    """
+    if not view.rows:
+        return {
+            "title": view.claimText or "（无数据）",
+            "chartType": "table",
+            "columns": list(view.rows[0].keys()) if view.rows else [],
+            "data": [],
+            "echartsOption": None,
+        }
+    columns = list(view.rows[0].keys())
+    return await buildReportChart(
+        session,
+        rows=view.rows,
+        columns=columns,
+        question=view.claimText or "",
+    )
 
 
 def _names(items: Any, key: str) -> str:
@@ -375,7 +390,11 @@ def _mdTable(columns: list[str], rows: list[dict[str, Any]]) -> list[str]:
 
 
 def _renderBlock(block: dict[str, Any]) -> list[str]:
-    """单块 → MD 行。chart 块渲染为表格 + 「图表见 payload」提示（brief 指定）。"""
+    """单块 → MD 行。chart 块渲染为表格 + 「图表见 payload」提示（brief 指定）。
+
+    R3-B：chart 块 key 统一为 'data'（不是 'rows'）；并打印 chartType 让读者在 MD
+    里直接看到图表语义（BAR / PIE / ...），无需打开 payload。
+    """
     kind, content = block["type"], block["content"]
     if kind == BLOCK_TEXT:
         return [str(content), ""]
@@ -384,8 +403,14 @@ def _renderBlock(block: dict[str, Any]) -> list[str]:
     if kind == BLOCK_TABLE:
         return _mdTable(content["columns"], content["rows"]) + [""]
     if kind == BLOCK_CHART:
-        table = _mdTable(content["columns"], content["rows"])
-        return [*table, "", f"> {CHART_HINT}（chartType={content.get('chartType') or 'table'}）", ""]
+        data = content.get("data") or []
+        if not data:
+            chartType = content.get("chartType") or "table"
+            return ["", f"> {CHART_HINT}（chartType={chartType}）", ""]
+        columns = content.get("columns") or (list(data[0].keys()) if data else [])
+        table = _mdTable(columns, data)
+        chartType = content.get("chartType") or "table"
+        return [*table, "", f"> {CHART_HINT}（chartType={chartType}）", ""]
     logger.warning("报告 MD 渲染遇到未知块类型，跳过: %s", kind)
     return []
 
@@ -457,7 +482,7 @@ class ReportPlanner:
         active = session if session is not None else self._fallbackSession()
         ctx = await self._collectContext(active, sessionId=sessionId, mode=mode)
         client = llmClient if llmClient is not None else self._createClient()
-        sections = tuple([await self._buildSection(kind, ctx, client=client) for kind in kinds])
+        sections = tuple([await self._buildSection(kind, ctx, client=client, session=active) for kind in kinds])
         payload = self._payload(sessionId=sessionId, turnId=turnId, ctx=ctx, sections=sections)
         return payload, renderMarkdown(payload)
 
@@ -534,13 +559,13 @@ class ReportPlanner:
     # ------------------------------------------------------------------
 
     async def _buildSection(
-        self, kind: str, ctx: _Context, *, client: Any
+        self, kind: str, ctx: _Context, *, client: Any, session: AsyncSession
     ) -> ReportSection:
         builder = self._builders.get(kind)
         if builder is None:
             logger.error("未知报告段落 kind: %s", kind)
             raise ValueError(f"未知报告段落: {kind}")
-        return await builder(ctx, client=client)
+        return await builder(ctx, client=client, session=session)
 
     def _textSection(
         self, kind: str, content: str, refs: tuple[SourceRef, ...] = ()
@@ -575,9 +600,13 @@ class ReportPlanner:
         }
 
     async def _narrativeSection(
-        self, kind: str, ctx: _Context, *, client: Any
+        self, kind: str, ctx: _Context, *, client: Any, session: AsyncSession | None = None
     ) -> ReportSection:
-        """叙述型 text 段（执行摘要 / 结论 / 差异分析）：单次 LLM，失败降级模板。"""
+        """叙述型 text 段（执行摘要 / 结论 / 差异分析）：单次 LLM，失败降级模板.
+
+        `session` 来自 `_buildSection` 透传（chart 段用得到），text 段不需要但必须
+        接住 —— 改一次签名省去每个 builder 各自判断是否要的代码。
+        """
         refs = tuple([_findingRef(view) for view in ctx.findings[:MAX_REPORT_FINDINGS]])
         text = await self._llmText(
             client,
@@ -586,22 +615,23 @@ class ReportPlanner:
         )
         return self._textSection(kind, text or _degradedText(ctx), refs)
 
-    async def _executiveSummary(self, ctx: _Context, *, client: Any) -> ReportSection:
-        return await self._narrativeSection("executive_summary", ctx, client=client)
+    async def _executiveSummary(self, ctx: _Context, *, client: Any, session: AsyncSession | None = None) -> ReportSection:
+        return await self._narrativeSection("executive_summary", ctx, client=client, session=session)
 
-    async def _conclusion(self, ctx: _Context, *, client: Any) -> ReportSection:
-        return await self._narrativeSection("conclusion", ctx, client=client)
+    async def _conclusion(self, ctx: _Context, *, client: Any, session: AsyncSession | None = None) -> ReportSection:
+        return await self._narrativeSection("conclusion", ctx, client=client, session=session)
 
-    async def _diffAnalysis(self, ctx: _Context, *, client: Any) -> ReportSection:
-        return await self._narrativeSection("diff_analysis", ctx, client=client)
+    async def _diffAnalysis(self, ctx: _Context, *, client: Any, session: AsyncSession | None = None) -> ReportSection:
+        return await self._narrativeSection("diff_analysis", ctx, client=client, session=session)
 
-    async def _dataSection(self, ctx: _Context, *, client: Any) -> ReportSection:
-        """数据章节：每条结论「chart（行数据逐字）+ stats bullet（确定性摘要）+ LLM bullet（解读）」。"""
+    async def _dataSection(self, ctx: _Context, *, client: Any, session: AsyncSession) -> ReportSection:
+        """数据章节：每条结论「chart（行数据逐字）+ stats bullet（确定性摘要）+ LLM bullet（解读）」."""
         blocks: list[ReportBlock] = []
         for view in ctx.findings[:MAX_REPORT_FINDINGS]:
             ref = _findingRef(view)
             if view.rows:
-                blocks.append(ReportBlock(BLOCK_CHART, _chartContent(view), (ref,)))
+                chartContent = await _chartContent(view, session=session)
+                blocks.append(ReportBlock(BLOCK_CHART, chartContent, (ref,)))
             if view.stats:
                 statsLines = _formatStatsBullet(view.stats, sourceTable=view.sourceTable)
                 if statsLines:
@@ -635,7 +665,7 @@ class ReportPlanner:
         text = stripJsonFence(str(getattr(response, "content", "") or "")).strip()
         return text or None
 
-    async def _knowledgeSection(self, ctx: _Context, *, client: Any = None) -> ReportSection:
+    async def _knowledgeSection(self, ctx: _Context, *, client: Any = None, session: AsyncSession | None = None) -> ReportSection:
         """引用知识：ESL knowledge 臂命中的 wiki 条目（checkpoint options 持久化）。"""
         items = [item for item in (ctx.arms.get("knowledge") or []) if isinstance(item, dict)]
         if not items:
@@ -657,7 +687,7 @@ class ReportPlanner:
             "knowledge", "knowledge", _SECTION_TITLES["knowledge"], (ReportBlock(BLOCK_BULLET, bullets, refs),)
         )
 
-    async def _methodologySection(self, ctx: _Context, *, client: Any = None) -> ReportSection:
+    async def _methodologySection(self, ctx: _Context, *, client: Any = None, session: AsyncSession | None = None) -> ReportSection:
         """方法学：确定性文本（零 LLM）——口径与数据来源必须逐字可控。"""
         arms = ctx.arms
         lines = [
@@ -671,7 +701,7 @@ class ReportPlanner:
         refs = tuple([_findingRef(view) for view in ctx.findings[:MAX_REPORT_FINDINGS]])
         return self._textSection("methodology", "\n".join(lines), refs)
 
-    async def _hypothesisTable(self, ctx: _Context, *, client: Any = None) -> ReportSection:
+    async def _hypothesisTable(self, ctx: _Context, *, client: Any = None, session: AsyncSession | None = None) -> ReportSection:
         views = ctx.findings[:MAX_REPORT_FINDINGS]
         if not views:
             return self._textSection("hypothesis_table", EMPTY_FINDING_TEXT)
@@ -691,7 +721,7 @@ class ReportPlanner:
             "hypothesis_table", "hypothesis_table", _SECTION_TITLES["hypothesis_table"], (block,)
         )
 
-    async def _alternativeSection(self, ctx: _Context, *, client: Any = None) -> ReportSection:
+    async def _alternativeSection(self, ctx: _Context, *, client: Any = None, session: AsyncSession | None = None) -> ReportSection:
         """备选假设：验证未通过的结论（supporting_data["error"] 非空）。"""
         pending = [view for view in ctx.findings if not view.verified][:MAX_REPORT_FINDINGS]
         if not pending:
@@ -702,7 +732,7 @@ class ReportPlanner:
             "alternative", "alternative", _SECTION_TITLES["alternative"], (ReportBlock(BLOCK_BULLET, bullets, refs),)
         )
 
-    async def _comparisonTable(self, ctx: _Context, *, client: Any = None) -> ReportSection:
+    async def _comparisonTable(self, ctx: _Context, *, client: Any = None, session: AsyncSession | None = None) -> ReportSection:
         views = ctx.findings[:MAX_REPORT_FINDINGS]
         if not views:
             return self._textSection("comparison_table", EMPTY_FINDING_TEXT)

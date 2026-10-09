@@ -1,15 +1,23 @@
-/** 研究报告渲染器（feat-research-entry Task 10）。
+/** 研究报告渲染器（feat-research-entry Task 10 + R3-B chart 接入）。
  *
  * 只读渲染 `payload.sections[].blocks[]`，块类型对齐 backend report_planner.py 的
  * JSON 形状（camelCase）：
  * - text → 段落
  * - table → 原生 <table>（可测、不依赖 antd Table 的 rowKey）
- * - chart → 表格兜底（v1 chartType=null，图表接入留后续）
+ * - chart → chartType ∈ {bar, pie, line, hbar, donut, scatter, heatmap, combo, waterfall}
+ *          时走 `<EChart option={block.content.echartsOption} />` 真实渲染；
+ *          table/kpi 或 echartsOption 为 null 时走表格兜底（前端契约不变）。
  * - bullet_list → <ul>/<li>
+ *
  * 每个块带 data-testid="report-block" + data-block-type，供顺序断言。
+ *
+ * R3-B 字段约定：chart 块 content 的数据键是 `data`（不是 `rows`），前端兼容旧
+ * rows 也兼容新 data —— 后端 R3 之后只发 data，但解析器对历史 payload 仍然不破。
  */
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import EChart from "../EChart";
+import { isChartType } from "../../utils/chartContract";
 
 export interface ReportSourceRef {
   kind: string;
@@ -51,6 +59,28 @@ interface TableContent {
 
 interface ChartContent extends TableContent {
   title: string;
+  /** R3-B：决策引擎给定的图型（"table"/"bar"/...）；为 null 时是历史 v1 数据，表格兜底. */
+  chartType: string | null;
+  /** R3-B：报告侧 buildReportChart 预渲染的 ECharts option dict；TABLE 或失败时为 null. */
+  echartsOption: Record<string, unknown> | null;
+}
+
+/** R3-B：兼容旧 payload（无 chartType / 无 echartsOption）+ 新 payload. */
+function asChartContent(value: unknown): ChartContent {
+  if (!isRecord(value)) {
+    return { columns: [], rows: [], title: "", chartType: null, echartsOption: null };
+  }
+  const rows = Array.isArray(value.data)
+    ? value.data.filter(isRecord)
+    : Array.isArray(value.rows)
+      ? value.rows.filter(isRecord)
+      : [];
+  const columns = asStringArray(value.columns ?? (rows[0] ? Object.keys(rows[0]) : []));
+  const title = typeof value.title === "string" ? value.title : "";
+  const chartType =
+    typeof value.chartType === "string" && value.chartType.length > 0 ? value.chartType : null;
+  const echartsOption = isRecord(value.echartsOption) ? value.echartsOption : null;
+  return { columns, rows, title, chartType, echartsOption };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -68,12 +98,6 @@ function asTableContent(value: unknown): TableContent {
     ? value.rows.filter(isRecord)
     : [];
   return { columns: asStringArray(value.columns), rows };
-}
-
-function asChartContent(value: unknown): ChartContent {
-  const table = asTableContent(value);
-  const title = isRecord(value) && typeof value.title === "string" ? value.title : "";
-  return { ...table, title };
 }
 
 function cellText(value: unknown): string {
@@ -121,9 +145,21 @@ function renderBlock(block: ReportBlock): ReactNode {
       return <DataTable content={asTableContent(block.content)} />;
     case "chart": {
       const chart = asChartContent(block.content);
+      // R3-B：非 TABLE 且有预渲染 echartsOption ⇒ 真画 ECharts；其他（v1 历史
+      // chartType=null、TABLE/kpi、报错降级）保持表格兜底，保证前端契约不变。
+      const canRenderChart =
+        isChartType(chart.chartType) &&
+        chart.chartType !== "table" &&
+        chart.echartsOption !== null;
       return (
         <div>
           {chart.title ? <p>{chart.title}</p> : null}
+          {canRenderChart ? (
+            <EChart
+              option={chart.echartsOption as unknown as Parameters<typeof EChart>[0]["option"]}
+              testId={`report-chart-${chart.chartType ?? "unknown"}`}
+            />
+          ) : null}
           <DataTable content={chart} />
         </div>
       );

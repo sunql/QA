@@ -555,11 +555,16 @@ async def test_semantic_context_survives_dead_session(fakeReportDepsWithTermDict
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-async def fakeReportDepsWithSqlOnly(db_session):
-    """复刻真实数据的 finding：supporting_data **无 sourceTable**，表名只在 SQL 里.
+async def _sqlOnlyDeps(db_session, *, dimensionColumns, topContributors):
+    """R4 核心场景 fixture 构造器：supporting_data **无 sourceTable**，表名只在 SQL 里.
 
     这是 R4 的核心场景 —— R3 的翻译层在这个形态下完全无效（F1）。
+
+    `topContributors` 必须复刻生产者的形状：唯一生产者 `_topContributors`
+    （`research_finding_aggregator.py:226-247`）只取 `dim = dimCols[0]` 并把**同一个**
+    `dim` 盖到每个 item 上（`count` = 该值出现的行数，`sharePct` = count/total*100，
+    按 `(-count, value)` 排序）。故同一 fixture 内每个 item 的 `dim` 必须相同、且等于
+    `dimensionColumns[0]` —— 两个 fixture 共用本构造器，以免再次漂移。
     """
     svc = ResearchSessionService()
     s = await svc.createSession(db_session, userId=1, question="7 月对账确认情况", mode="research")
@@ -581,16 +586,12 @@ async def fakeReportDepsWithSqlOnly(db_session):
                 {"site_code": "C1", "confirm_stage": "PRICE", "bill_cnt": 5},
             ],
             "stats": {
-                "topContributors": [
-                    {"dim": "site_code", "value": "C1", "count": 2, "sharePct": 100.0},
-                    {"dim": "confirm_stage", "value": "QTY", "count": 1, "sharePct": 50.0},
-                    {"dim": "confirm_stage", "value": "PRICE", "count": 1, "sharePct": 50.0},
-                ],
+                "topContributors": topContributors,
                 "distribution": {"bill_cnt": {"min": 5.0, "max": 10.0, "mean": 7.5, "std": 3.5}},
                 "mom": [],
                 "anomalies": [],
                 "numericColumns": ["bill_cnt"],
-                "dimensionColumns": ["site_code", "confirm_stage"],
+                "dimensionColumns": dimensionColumns,
                 "rowCount": 2,
             },
         },
@@ -604,6 +605,35 @@ async def fakeReportDepsWithSqlOnly(db_session):
         sessionFactory=lambda: db_session,
     )
     return planner, s.id, turn.id
+
+
+@pytest.fixture
+async def fakeReportDepsWithSqlOnly(db_session):
+    """维度首选 site_code ⇒ 贡献者全是 site_code（照生产者 `dim = dimCols[0]`）."""
+    return await _sqlOnlyDeps(
+        db_session,
+        dimensionColumns=["site_code", "confirm_stage"],
+        topContributors=[{"dim": "site_code", "value": "C1", "count": 2, "sharePct": 100.0}],
+    )
+
+
+@pytest.fixture
+async def fakeReportDepsWithSqlOnlyConfirmStage(db_session):
+    """同形态，但维度首选是 confirm_stage ⇒ 贡献者全是 confirm_stage。
+
+    值字典只有在**值**进入 stats 时才可见，而生产者只发 `dimCols[0]` 的贡献者 ——
+    故值中文化必须用 confirm_stage 置首的独立 fixture（否则就是生产者发不出的形状）。
+    计数与 `rows` 自洽：QTY / PRICE 各 1 行 ⇒ 占比 50/50。
+    """
+    return await _sqlOnlyDeps(
+        db_session,
+        dimensionColumns=["confirm_stage", "site_code"],
+        topContributors=[
+            # 生产者按 (-count, value) 排序：同计数时 "PRICE" < "QTY"。
+            {"dim": "confirm_stage", "value": "PRICE", "count": 1, "sharePct": 50.0},
+            {"dim": "confirm_stage", "value": "QTY", "count": 1, "sharePct": 50.0},
+        ],
+    )
 
 
 @pytest.mark.asyncio
@@ -621,9 +651,9 @@ async def test_stats_bullet_translates_column_names(fakeReportDepsWithSqlOnly) -
 
 
 @pytest.mark.asyncio
-async def test_stats_bullet_translates_values(fakeReportDepsWithSqlOnly) -> None:
+async def test_stats_bullet_translates_values(fakeReportDepsWithSqlOnlyConfirmStage) -> None:
     """值中文化：confirm_stage 的 QTY/PRICE → 数量确认/价格确认（R3 值字典在真实数据上是死的）."""
-    planner, sessionId, turnId = fakeReportDepsWithSqlOnly
+    planner, sessionId, turnId = fakeReportDepsWithSqlOnlyConfirmStage
     payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
     data = next(s for s in payload["sections"] if s["kind"] == "data")
     bullet = next(b for b in data["blocks"] if b["type"] == "bullet_list"

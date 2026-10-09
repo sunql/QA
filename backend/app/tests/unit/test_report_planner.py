@@ -659,3 +659,16 @@ async def test_stats_bullet_translates_values(fakeReportDepsWithSqlOnlyConfirmSt
                   and any("维度 topN" in item for item in b["content"]))
     joined = "\n".join(bullet["content"])
     assert "数量确认" in joined or "价格确认" in joined
+
+
+@pytest.mark.asyncio
+async def test_finding_summary_in_llm_prompt_is_translated(fakeReportDepsWithSqlOnly) -> None:
+    """喂给 LLM 的摘要里列名/值应是中文（LLM 据此写叙述）——不是 site_code/QTY."""
+    planner, sessionId, turnId = fakeReportDepsWithSqlOnly
+    fake = FakeLlm()
+    planner._llmClientFactory = lambda: fake
+    await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    sent = _promptsOf(fake, NARRATIVE_MARKER)
+    joined = "\n".join(sent)
+    assert "site_code" not in joined
+    assert "基地" in joined

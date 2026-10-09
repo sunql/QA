@@ -187,15 +187,19 @@ def _findingRef(view: FindingView) -> SourceRef:
     )
 
 
-def _findingSummary(view: FindingView) -> str:
-    """结论摘要（喂 LLM 的唯一数据形态：不含任何原始行，但可引用 stats 数字）。"""
+async def _findingSummary(view: FindingView, *, db: Any = None) -> str:
+    """结论摘要（喂 LLM 的唯一数据形态：不含任何原始行，但可引用 stats 数字）。
+
+    R4：top1 的列名/值走翻译 —— LLM 看到「按 基地 分，C1 占 100%」才会用中文写叙述。
+    """
     state = "已验证" if view.verified else f"未验证：{view.error}"
     base = f"{view.claimText}（置信度 {view.confidence}，{state}，{view.rowCount} 行）"
     if not view.stats or not view.stats.get("topContributors"):
         return base
     top1 = view.stats["topContributors"][0]
-    dimLabel = str(top1.get("dim") or "")
-    valueLabel = str(top1.get("value") or "")
+    rawDim = str(top1.get("dim") or "")
+    dimLabel = await resolveColumnName(db, view.sourceTable, rawDim)
+    valueLabel = resolveValueName(view.sourceTable, rawDim, top1.get("value"))
     sharePct = float(top1.get("sharePct") or 0.0)
     return f"{base}；按 {dimLabel} 分，{valueLabel} 占 {sharePct}%"
 
@@ -216,11 +220,12 @@ async def _topContributorLabel(
     return f"{dim}={value} ({float(top1.get('sharePct') or 0):.1f}%)"
 
 
-def _findingDigest(ctx: _Context) -> str:
+async def _findingDigest(ctx: _Context, *, db: Any = None) -> str:
     views = ctx.findings[:MAX_REPORT_FINDINGS]
     if not views:
         return EMPTY_FINDING_TEXT
-    return "\n".join(f"- {_findingSummary(view)}" for view in views)
+    lines = [f"- {await _findingSummary(view, db=db)}" for view in views]
+    return "\n".join(lines)
 
 
 def _rowColumns(rows: list[dict[str, Any]]) -> tuple[str, ...]:
@@ -242,9 +247,10 @@ def _semanticColumns(ctx: _Context) -> tuple[str, ...]:
     return tuple(sorted(columnSet))
 
 
-def _degradedText(ctx: _Context) -> str:
+async def _degradedText(ctx: _Context, *, db: Any = None) -> str:
     """LLM 降级文案：显式说明 + 结构化摘要列表（brief 指定文案）。"""
-    return "\n".join([LLM_FALLBACK_NOTICE, *_bulletItems(_findingDigest(ctx))])
+    digest = await _findingDigest(ctx, db=db)
+    return "\n".join([LLM_FALLBACK_NOTICE, *_bulletItems(digest)])
 
 
 def _bulletItems(text: str) -> list[str]:
@@ -540,12 +546,13 @@ class ReportPlanner:
         """
         refs = tuple([_findingRef(view) for view in ctx.findings[:MAX_REPORT_FINDINGS]])
         semanticCtx = await assembleSemanticContext(session, columns=_semanticColumns(ctx))
+        digest = await _findingDigest(ctx, db=session)
         text = await self._llmText(
             client,
             system=_NARRATIVE_SYSTEM.format(intent=_NARRATIVE_INTENTS[kind]),
-            parts=[ctx.question, _findingDigest(ctx), semanticCtx],
+            parts=[ctx.question, digest, semanticCtx],
         )
-        return self._textSection(kind, text or _degradedText(ctx), refs)
+        return self._textSection(kind, text or await _degradedText(ctx, db=session), refs)
 
     async def _executiveSummary(self, ctx: _Context, *, client: Any, session: AsyncSession | None = None) -> ReportSection:
         return await self._narrativeSection("executive_summary", ctx, client=client, session=session)
@@ -584,12 +591,13 @@ class ReportPlanner:
         R3-C：prompt 追加语义 context（术语取自本 finding 行数据的列名）。
         """
         semanticCtx = await assembleSemanticContext(session, columns=_rowColumns(view.rows))
+        summary = await _findingSummary(view, db=session)
         text = await self._llmText(
             client,
             system=_COMMENTARY_SYSTEM,
-            parts=[ctx.question, _findingSummary(view), semanticCtx],
+            parts=[ctx.question, summary, semanticCtx],
         )
-        return _splitBullets(text) if text else [_findingSummary(view)]
+        return _splitBullets(text) if text else [summary]
 
     async def _llmText(self, client: Any, *, system: str, parts: list[str]) -> str | None:
         """单块文本生成；无客户端 / 调用异常 → None（调用方降级，且降级文案可见）。"""
@@ -673,7 +681,7 @@ class ReportPlanner:
         if not pending:
             return self._textSection("alternative", EMPTY_ALTERNATIVE_TEXT)
         refs = tuple([_findingRef(view) for view in pending])
-        bullets = [_findingSummary(view) for view in pending]
+        bullets = [await _findingSummary(view, db=session) for view in pending]
         return ReportSection(
             "alternative", "alternative", _SECTION_TITLES["alternative"], (ReportBlock(BLOCK_BULLET, bullets, refs),)
         )

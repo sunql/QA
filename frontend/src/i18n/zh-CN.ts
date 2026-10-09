@@ -3028,6 +3028,8 @@ export const zhCN = {
       report: "查看报告",
       back: "返回列表",
       compare: "对比",
+      complete_with_report: "分析已完成",
+      view_report: "查看报告",
     },
     compare: {
       title: "对比分析",

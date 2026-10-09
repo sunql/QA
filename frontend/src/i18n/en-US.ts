@@ -3014,6 +3014,8 @@ export const enUS = {
       report: "View report",
       back: "Back to list",
       compare: "Compare",
+      complete_with_report: "Analysis complete",
+      view_report: "View Report",
     },
     compare: {
       title: "Compare",

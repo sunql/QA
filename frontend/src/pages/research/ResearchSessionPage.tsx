@@ -4,9 +4,9 @@
  * submitTurn，避免「先提交后建流」竞态与 unhandled rejection。流未结束期间由
  * ResearchProgress 渲染 store.events 派生的实时进度；流结束后重拉历史补全时间线。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { Alert, App, Button, Input, Space, Spin, Tag, Typography } from "antd";
+import { Alert, App, Button, Input, Space, Spin, Tag, Typography, notification } from "antd";
 import { useTranslation } from "react-i18next";
 import { useResearchStore } from "../../stores/researchStore";
 import { useResearchSession } from "../../hooks/useResearchSession";
@@ -52,6 +52,47 @@ export default function ResearchSessionPage() {
     message.error(t(conflictError));
     clearConflictError();
   }, [conflictError, message, t, clearConflictError]);
+
+  // 分析完成提示：streaming 由 true 翻为 false + 无在途 resolution + 无 conflictError
+  // + 至少 1 个 turn 时弹一次 antd notification，提示用户去查看报告。必须捕捉
+  // 「streaming 由真变假」的边沿（prevStreamingRef），否则首屏挂载时（openSession
+  // 把 turns 填上、connectStream 还没把 streaming 置 true 的中间帧）会误判为完成
+  // 态弹一次。useRef 防止重复弹；新会话或来过 conflictError 都重置闸门。
+  const completeNotifiedRef = useRef(false);
+  const prevStreamingRef = useRef(false);
+  useEffect(() => {
+    const wasStreaming = prevStreamingRef.current;
+    if (
+      wasStreaming &&
+      !streaming &&
+      !resolutionInFlight &&
+      !conflictError &&
+      turns.length > 0 &&
+      !completeNotifiedRef.current
+    ) {
+      completeNotifiedRef.current = true;
+      notification.success({
+        message: t("research.session.complete_with_report"),
+        description: t("research.checkpoint.processing"),
+        btn: (
+          <Button
+            type="primary"
+            size="small"
+            onClick={() => id && navigate(`/research/${id}/report`)}
+          >
+            {t("research.session.view_report")}
+          </Button>
+        ),
+        duration: 6,
+        placement: "topRight",
+      });
+    }
+    // 用户重新开始新一轮（streaming 又开了）或来了一次 conflictError 时，重置闸门
+    if (streaming || conflictError) {
+      completeNotifiedRef.current = false;
+    }
+    prevStreamingRef.current = streaming;
+  }, [streaming, resolutionInFlight, conflictError, turns.length, id, navigate, t]);
 
   const handleSend = async () => {
     const trimmed = input.trim();

@@ -6,8 +6,8 @@
 // 2. 首轮编排串行化：流建立（onOpen）之前不得提交首轮（后端不重放历史），
 //    提交失败也不能产生未处理拒绝。
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
-import { App, ConfigProvider } from "antd";
+import { render, screen, waitFor, fireEvent, within, act } from "@testing-library/react";
+import { App, ConfigProvider, notification } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { useResearchStore } from "../stores/researchStore";
@@ -325,5 +325,149 @@ describe("ResearchSessionPage", () => {
     expect(within(dialog).getByText("上游采购订单下达量收缩")).toBeInTheDocument();
     expect(within(dialog).getByText("到货预约量减少")).toBeInTheDocument();
     expect(within(dialog).getByText("收货执行环节变慢")).toBeInTheDocument();
+  });
+
+  // 分析完成 notification：streaming=false + resolutionInFlight=false + !conflictError +
+  // turns.length>0 时弹一次；提供"查看报告"按钮 navigate 到 /research/:id/report。
+  describe("分析完成 notification", () => {
+    let notificationSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      // spy 在每次测试里新建 + 还原，**不**全局 mock antd 以避免影响其他测试
+      notificationSpy = vi
+        .spyOn(notification, "success")
+        .mockImplementation(() => undefined as never);
+      // openSession 至少返回 1 个 turn（满足 turns.length>0 触发条件）。
+      // store 字段用真实 useResearchStore（selector 风格），不允许替换 mockStoreState
+      // —— 页面内有 11 个 useResearchStore((s) => s.*) 选择器，mock 整 store 会丢字段。
+      httpMock.get.mockResolvedValue({
+        data: {
+          session: {
+            id: "s1",
+            title: "研究",
+            mode: "research",
+            status: "running",
+            question: "q",
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+          },
+          turns: [
+            {
+              id: "t1",
+              turnIndex: 0,
+              role: "user",
+              content: { question: "q" },
+              createdAt: "2026-10-04T00:00:00Z",
+            },
+          ],
+          pendingCheckpoint: null,
+        },
+      });
+      // SSE 走裸 fetch；用不关闭的流占位，connectStream 拿到 body 后 onOpen
+      // 触发但不退出循环 → streaming 保持 true，测试可以观察稳定状态。
+      // （不写这个 stub 会让 connectStream 抛 fetch 失败，finally 把
+      // streaming 置回 false，触发误判「完成」。）
+      stubOpenFetch('event: research.connected\ndata: {"sessionId":"s1"}\n\n');
+    });
+
+    afterEach(() => {
+      notificationSpy.mockRestore();
+    });
+
+    // 工具：等 useResearchSession 把页面流式编排完（openSession 把 turns 填上 +
+    // connectStream 把 streaming 置 true）。React 18 自动批处理把 openSession 的
+    // set(turns) 和 connectStream 的 set(streaming) 合到同一次 render —— 因此
+    // 组件从未观察到「turns 满 + streaming=false」的中间态，避免误弹。
+    async function waitForStreamingSettled() {
+      await waitFor(() => {
+        const state = useResearchStore.getState();
+        expect(state.streaming).toBe(true);
+        expect(state.turns.length).toBeGreaterThan(0);
+      });
+    }
+
+    it("streaming 从 true 变为 false 且无 conflict 时弹一次完成通知，按钮文案 = 查看报告", async () => {
+      renderPage();
+
+      // 等流式编排完成：streaming=true, turns 满
+      await waitForStreamingSettled();
+      // 此刻 useEffect 已跑过 —— streaming=true 故不弹
+      expect(notificationSpy).not.toHaveBeenCalled();
+
+      // 切到 streaming=false：完成态触发，弹一次
+      act(() => {
+        useResearchStore.setState({ streaming: false });
+      });
+
+      await waitFor(() => expect(notificationSpy).toHaveBeenCalledTimes(1));
+
+      // 通知参数：message/description/btn 必含 i18n 文案，duration=6，placement=topRight
+      const call = notificationSpy.mock.calls[0][0] as {
+        message: string;
+        description: string;
+        btn: React.ReactElement<{ children: string; onClick: () => void }>;
+        duration: number;
+        placement: string;
+      };
+      expect(call.message).toBe("分析已完成");
+      expect(call.description).toBe("处理中…");
+      expect(call.duration).toBe(6);
+      expect(call.placement).toBe("topRight");
+      // btn 是 antd Button 元素，子文本必须是「查看报告」
+      expect(call.btn.props.children).toBe("查看报告");
+
+      // 再 render 一次，useRef 必须拦住重复弹
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(notificationSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("streaming 仍是 true 时不弹通知", async () => {
+      renderPage();
+      await waitForStreamingSettled();
+
+      // 等几个 microtask 拍，确保 useEffect 在 streaming=true 下跑过
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(notificationSpy).not.toHaveBeenCalled();
+    });
+
+    it("resolutionInFlight=true 时不弹通知（避免在 checkpoint 答完等待中误判完成）", async () => {
+      renderPage();
+      await waitForStreamingSettled();
+
+      // 模拟「分析完了但 checkpoint 答完等待中」：streaming=false 但 resolutionInFlight=true
+      act(() => {
+        useResearchStore.setState({ streaming: false, resolutionInFlight: true });
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(notificationSpy).not.toHaveBeenCalled();
+    });
+
+    it("conflictError 非空时不弹通知", async () => {
+      renderPage();
+      await waitForStreamingSettled();
+
+      act(() => {
+        useResearchStore.setState({
+          streaming: false,
+          conflictError: "并发检查点冲突：另一请求已先一步决/过期，请刷新后重试",
+        });
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(notificationSpy).not.toHaveBeenCalled();
+    });
   });
 });

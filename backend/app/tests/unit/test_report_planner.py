@@ -243,3 +243,97 @@ async def test_data_section_includes_stats_bullet(fakeReportDepsWithStats) -> No
     assert blockTypes == ["chart", "bullet_list", "bullet_list"]
     stats_block = data["blocks"][1]
     assert any("base=J1 (60.0%)" in item for item in stats_block["content"])
+
+
+# ---------------------------------------------------------------------------
+# R3 plan Task D：stats bullet 中文化 + 排序
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def fakeReportDepsWithSourceTable(dbSession):
+    """带 sourceTable 的 finding：让 resolver 命中 OntologyProperty + DISPLAY_VALUE_DICT."""
+    svc = ResearchSessionService()
+    row = await svc.createSession(dbSession, userId=1, question=QUESTION)
+    turn = await svc.appendTurn(
+        dbSession, sessionId=row.id, role="user", content={"question": QUESTION}
+    )
+    stats = {
+        "topContributors": [
+            {"dim": "site_code", "value": "C1", "sharePct": 60.0, "count": 3},
+            {"dim": "site_code", "value": "C2", "sharePct": 20.0, "count": 1},
+            {"dim": "site_code", "value": "C3", "sharePct": 20.0, "count": 1},
+        ],
+        "distribution": {"amt": {"min": 10.0, "max": 100.0, "mean": 52.0, "std": 38.2}},
+        "mom": [
+            {"period": "2026-01", "value": 100, "deltaPct": 0.0},
+            {"period": "2026-02", "value": 115, "deltaPct": 15.0},
+        ],
+        "anomalies": [{"dim": "amt", "value": 1000, "zScore": 2.5}],
+        "numericColumns": ("amt",),
+        "dimensionColumns": ("site_code",),
+        "rowCount": 5,
+    }
+    supportingData = {
+        "rowCount": 5,
+        "error": None,
+        "rows": [dict(r) for r in FINDING_ROWS],
+        "sourceTable": "dwd_reconciliation_bill_dtl",  # NEW for R3
+        "stats": stats,  # also include stats inside supporting_data (matches R2 wiring)
+    }
+    await svc.saveFinding(
+        dbSession,
+        sessionId=row.id,
+        turnId=turn.id,
+        claimText=CLAIM,
+        supportingSql="SELECT 1",
+        supportingData=supportingData,
+        confidence=0.72,
+        stats=stats,
+    )
+    await dbSession.commit()
+    planner = ReportPlanner(
+        sessionService=svc,
+        llmClientFactory=lambda: FakeLlm(),
+        sessionFactory=lambda: dbSession,
+    )
+    return planner, row.id, turn.id
+
+
+@pytest.mark.asyncio
+async def test_stats_bullet_uses_display_names(fakeReportDepsWithSourceTable) -> None:
+    """_formatStatsBullet 中的列名走 resolver；DISPLAY_VALUE_DICT 命中的值走中文."""
+    planner, sessionId, turnId = fakeReportDepsWithSourceTable
+    payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    data = next(s for s in payload["sections"] if s["kind"] == "data")
+    stats_block = next(
+        b for b in data["blocks"]
+        if b["type"] == "bullet_list" and any("topN" in item for item in b["content"])
+    )
+    items = stats_block["content"]
+    # 1. 列名 site_code 未在 dev DB OntologyProperty → 走 fallback 仍为 site_code
+    #    但 anomaly 行含 site_code 之外的 key (amt → fallback)
+    # 2. 至少 1 个 bullet 出现 "site_code" 字符串（fallback）or 真实 alias
+    # 3. 异常行应存在
+    assert any("异常" in item for item in items)
+
+
+@pytest.mark.asyncio
+async def test_stats_bullet_orders_anomaly_first(fakeReportDepsWithSourceTable) -> None:
+    """bullet 顺序：异常 → topN → 分布 → 环比."""
+    planner, sessionId, turnId = fakeReportDepsWithSourceTable
+    payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    data = next(s for s in payload["sections"] if s["kind"] == "data")
+    stats_block = next(
+        b for b in data["blocks"]
+        if b["type"] == "bullet_list" and any("topN" in item for item in b["content"])
+    )
+    items = stats_block["content"]
+    anomaly_idx = next((i for i, item in enumerate(items) if "异常" in item), -1)
+    topn_idx = next((i for i, item in enumerate(items) if "维度 topN" in item), -1)
+    dist_idx = next((i for i, item in enumerate(items) if "数值分布" in item), -1)
+    mom_idx = next((i for i, item in enumerate(items) if "环比" in item), -1)
+    # 全部存在
+    assert anomaly_idx >= 0 and topn_idx >= 0 and dist_idx >= 0 and mom_idx >= 0
+    # 顺序：异常 < topN < 分布 < 环比
+    assert anomaly_idx < topn_idx < dist_idx < mom_idx

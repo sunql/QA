@@ -43,6 +43,7 @@ from app.domain.research_models import (
 from app.infrastructure.llm.base_client import LlmMessage
 from app.services.learning.prompt_fence import neutralizeFence
 from app.services.llm_json_fence import stripJsonFence
+from app.services.display_name_resolver import resolveValueName
 from app.services.research_agent_ports import DEFAULT_MODE, FINDING_ROWS_KEY, OPT_ARMS
 from app.services.research_session_service import ResearchSessionService
 
@@ -158,6 +159,7 @@ class FindingView:
     rowCount: int
     error: str | None
     stats: dict[str, Any] | None = None  # NEW
+    sourceTable: str | None = None  # NEW (R3)
 
     @property
     def verified(self) -> bool:
@@ -213,6 +215,7 @@ def _findingView(row: ResearchFinding) -> FindingView:
         rowCount=int(data.get("rowCount") or len(rows)),
         error=data.get("error"),
         stats=data.get("stats"),  # NEW: pull from supporting_data["stats"] if present
+        sourceTable=data.get("sourceTable"),  # NEW (R3)
     )
 
 
@@ -267,24 +270,32 @@ def _splitBullets(text: str) -> list[str]:
     return [item[:MAX_BULLET_CHARS] for item in _bulletItems(text)][:MAX_BULLETS]
 
 
-def _formatStatsBullet(stats: dict[str, Any]) -> list[str]:
+def _formatStatsBullet(
+    stats: dict[str, Any], *, sourceTable: str | None = None
+) -> list[str]:
     """stats → bullet 行（确定性、不经 LLM）。
 
-    形如：
-      - 维度 topN：base=J1 (60.0%)，base=T2 (20.0%)，base=H1 (20.0%)
-      - 数值分布：amount min=10, max=100, mean=52.0, std=38.2
-      - 环比：2026-01→2026-02 delta=+15%
-      - 异常：第 3 行 z=2.5
-    空 stats / 缺字段 → 返空列表（不在 report 留占位行）。
+    顺序：异常 → topN → 分布 → 环比。
+    值走 resolveValueName（无需 DB session；命中 DISPLAY_VALUE_DICT → 中文）。
+    列名暂保留 raw（列名翻译留给 Task A 集成层或 R4）。
     """
     lines: list[str] = []
+    # 1. 异常（最优先）
+    anomalies = stats.get("anomalies") or []
+    if anomalies:
+        first = anomalies[0]
+        dim = str(first.get("dim") or "")
+        lines.append(f"- 异常：{dim} z={float(first.get('zScore', 0)):.2f}")
+    # 2. 维度 topN
     top = stats.get("topContributors") or []
     if top:
         items = ", ".join(
-            f"{t.get('dim') or ''}={t.get('value') or ''} ({float(t.get('sharePct') or 0):.1f}%)"
+            f"{t.get('dim') or ''}={resolveValueName(sourceTable, str(t.get('dim') or ''), t.get('value'))} "
+            f"({float(t.get('sharePct') or 0):.1f}%)"
             for t in top[:3]
         )
         lines.append(f"- 维度 topN：{items}")
+    # 3. 数值分布
     dist = stats.get("distribution") or {}
     if dist:
         firstCol, firstStats = next(iter(dist.items()), (None, None))
@@ -296,6 +307,7 @@ def _formatStatsBullet(stats: dict[str, Any]) -> list[str]:
                 f"mean={firstStats.get('mean', 0):.1f}, "
                 f"std={firstStats.get('std', 0):.1f}"
             )
+    # 4. 环比
     mom = stats.get("mom") or []
     if mom:
         firstMom = mom[0]
@@ -304,10 +316,6 @@ def _formatStatsBullet(stats: dict[str, Any]) -> list[str]:
             f"delta={firstMom.get('deltaPct', 0):+.1f}%" if len(mom) >= 2
             else f"- 环比：{firstMom.get('period', '')}（仅 1 期）"
         )
-    anomalies = stats.get("anomalies") or []
-    if anomalies:
-        first = anomalies[0]
-        lines.append(f"- 异常：{first.get('dim', '')} z={float(first.get('zScore', 0)):.2f}")
     return lines
 
 
@@ -595,7 +603,7 @@ class ReportPlanner:
             if view.rows:
                 blocks.append(ReportBlock(BLOCK_CHART, _chartContent(view), (ref,)))
             if view.stats:
-                statsLines = _formatStatsBullet(view.stats)
+                statsLines = _formatStatsBullet(view.stats, sourceTable=view.sourceTable)
                 if statsLines:
                     blocks.append(ReportBlock(BLOCK_BULLET, statsLines, (ref,)))
             bullets = await self._commentary(view, ctx, client=client)

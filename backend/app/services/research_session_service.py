@@ -314,6 +314,8 @@ class ResearchSessionService:
         supportingSql: str | None,
         supportingData: dict[str, Any],
         confidence: float,
+        enhancedClaim: str | None = None,  # NEW: non-empty → use as claim_text
+        stats: dict[str, Any] | None = None,  # NEW: non-None → merge into supporting_data["stats"]
     ) -> ResearchFinding:
         """落一条结论（含支撑 SQL / 数据 / 置信度）。
 
@@ -331,11 +333,15 @@ class ResearchSessionService:
         if not 0.0 <= confidence <= 1.0:
             logger.warning("置信度越界: session=%s confidence=%s", sessionId, confidence)
             raise ValueError(f"confidence 必须落在 [0, 1]: {confidence}")
-        coercedData = _coerceJsonSafe(supportingData or {})
+        data = dict(supportingData or {})
+        if stats is not None:
+            data["stats"] = stats
+        finalClaim = enhancedClaim if enhancedClaim else claimText
+        coercedData = _coerceJsonSafe(data)
         row = ResearchFinding(
             session_id=sessionId,
             turn_id=turnId,
-            claim_text=claimText,
+            claim_text=finalClaim,
             supporting_sql=supportingSql,
             supporting_data=coercedData,
             confidence=Decimal(str(confidence)),

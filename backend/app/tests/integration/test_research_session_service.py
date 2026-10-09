@@ -292,3 +292,57 @@ async def test_resolve_checkpoint_writes_audit_log(dbSession) -> None:
     assert log_row.entity_id_str == str(cp.id)
     assert log_row.action == "UPDATE"
     assert log_row.after_json["status"] == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_save_finding_with_enhanced_claim_and_stats(dbSession) -> None:
+    """enhancedClaim 优先于 claimText；stats 合并到 supporting_data["stats"]。
+
+    覆盖 R2 plan 任务 2：verify 阶段把聚合结果 + 数据视角结论回填到 finding 行。
+    """
+    svc = ResearchSessionService()
+    s = await svc.createSession(dbSession, userId=1, question="Q")
+    turn = await svc.appendTurn(dbSession, sessionId=s.id, role="agent", content={})
+    row = await svc.saveFinding(
+        dbSession,
+        sessionId=s.id,
+        turnId=turn.id,
+        claimText="原 hypothesis（应被 enhancedClaim 覆盖）",
+        supportingSql="SELECT 1",
+        supportingData={"rowCount": 1, "rows": [], "error": None},
+        confidence=0.5,
+        enhancedClaim="按基地 J1 占 78%",
+        stats={
+            "topContributors": [
+                {"dim": "base", "value": "J1", "sharePct": 78.0, "count": 12},
+            ],
+            "distribution": {"amount": {"min": 10.0, "max": 100.0, "mean": 55.0, "std": 30.0}},
+            "mom": (), "anomalies": (),
+            "numericColumns": ("amount",), "dimensionColumns": ("base",), "rowCount": 12,
+        },
+    )
+    await dbSession.commit()
+    assert row.claim_text == "按基地 J1 占 78%"
+    assert row.supporting_data["rowCount"] == 1  # 原 keys 保留
+    assert row.supporting_data["stats"]["topContributors"][0]["dim"] == "base"
+    assert row.supporting_data["stats"]["distribution"]["amount"]["max"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_save_finding_backward_compatible_when_new_kwargs_omitted(dbSession) -> None:
+    """旧调用形态（5 个必填 + 2 必填 kwarg）必须仍工作，claim_text 走原 claimText。"""
+    svc = ResearchSessionService()
+    s = await svc.createSession(dbSession, userId=1, question="Q")
+    turn = await svc.appendTurn(dbSession, sessionId=s.id, role="agent", content={})
+    row = await svc.saveFinding(
+        dbSession,
+        sessionId=s.id,
+        turnId=turn.id,
+        claimText="原 claim 不变",
+        supportingSql="SELECT 1",
+        supportingData={"rowCount": 1, "rows": [], "error": None},
+        confidence=0.5,
+    )
+    await dbSession.commit()
+    assert row.claim_text == "原 claim 不变"
+    assert "stats" not in (row.supporting_data or {})

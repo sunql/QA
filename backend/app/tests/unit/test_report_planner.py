@@ -381,3 +381,170 @@ async def test_chart_block_data_field_is_populated(fakeReportDepsWithStats) -> N
     assert isinstance(content["data"], list) and len(content["data"]) > 0
     # 兼容前端契约：columns 也保留
     assert "columns" in content
+
+
+# ---------------------------------------------------------------------------
+# R3 plan Task C：业务语义 prompt 增强（术语 + 分析模板 + 三段式）
+# ---------------------------------------------------------------------------
+
+# 术语命中的列：finding 行数据含 site_code，术语字典 mapped_property_name=site_code。
+# 注意：语义 context 的 columns 由 **行数据键名** 派生（不是 claimText —— claimText
+# 是自然语言句子，拿它当列名永远匹配不上术语）。
+TERM_NAME = "基地"
+TERM_DEFINITION = "企业经营地理区域单位（如 J1 基地、T2 基地）"
+TERM_ROWS = [{"site_code": "C1", "cnt": 100}]
+
+# `_NARRATIVE_SYSTEM` 独有标记（只在改写后的叙述型 system prompt 里）。
+# 用来把「叙述型调用」从同一份 compose 里的 `_commentary` 调用中筛出来 —— 否则
+# 断言会被 data 段的注释调用顺带满足（双向验证时发现的假绿）。
+NARRATIVE_MARKER = "三段式"
+
+
+def _promptsOf(fake: FakeLlm, marker: str) -> list[str]:
+    """筛出 system prompt 含 `marker` 的那些 LLM 调用，返回其拼好的 prompt 文本。"""
+    return [
+        "\n".join(m.content for m in messages)
+        for messages in fake.calls
+        if any(marker in m.content for m in messages)
+    ]
+
+
+@pytest.fixture
+async def fakeReportDepsWithTermDict(db_session):
+    """带 TermDictionary 的 finding：让 report_semantic_context 命中术语.
+
+    走真实 PG 的 `db_session`（非 legacy `dbSession`）—— 需要 seed term_dictionary
+    行并断言其渲染结果。
+
+    **自清洁**：term_dictionary 是全套件共享表，残留行若 mapped_property_name 命中
+    本次提取出的列名，就会串进 prompt（可能带入数字，破坏 R2 数字免疫不变量）。
+    seed 前先删掉同名 term 及命中同样列名的行，保证断言确定性。
+    """
+    from sqlalchemy import delete
+
+    from app.domain.models import TermDictionary
+
+    termColumns = {k.lower() for k in TERM_ROWS[0]}
+    await db_session.execute(
+        delete(TermDictionary).where(
+            (TermDictionary.term == TERM_NAME)
+            | (TermDictionary.mapped_property_name.in_(termColumns))
+        )
+    )
+    db_session.add(
+        TermDictionary(
+            term=TERM_NAME,
+            definition=TERM_DEFINITION,
+            mapped_class_name="Site",
+            mapped_property_name="site_code",
+            formula_hint=None,
+            created_by="test",
+        )
+    )
+    await db_session.commit()
+
+    svc = ResearchSessionService()
+    row = await svc.createSession(db_session, userId=1, question=QUESTION)
+    turn = await svc.appendTurn(
+        db_session, sessionId=row.id, role="user", content={"question": QUESTION}
+    )
+    await svc.saveFinding(
+        db_session,
+        sessionId=row.id,
+        turnId=turn.id,
+        claimText=CLAIM,
+        supportingSql="SELECT 1",
+        supportingData={"rowCount": 1, "error": None, "rows": [dict(r) for r in TERM_ROWS]},
+        confidence=0.72,
+    )
+    await db_session.commit()
+    planner = ReportPlanner(
+        sessionService=svc,
+        llmClientFactory=lambda: FakeLlm(),
+        sessionFactory=lambda: db_session,
+    )
+    return planner, row.id, turn.id, db_session
+
+
+@pytest.mark.asyncio
+async def test_narrative_prompt_includes_term_dictionary(fakeReportDepsWithTermDict) -> None:
+    """executive_summary 段 LLM prompt 注入「维度业务含义」+「分析模板」块.
+
+    断言只看**叙述型调用**（NARRATIVE_MARKER 筛出），并用块头 `## ...`（而非裸词）
+    ——`_NARRATIVE_SYSTEM` 正文也含「维度业务含义 / 分析模板」字样，只断言裸词会在
+    注入整体失效时依然绿（假绿）。
+    """
+    planner, sessionId, turnId, _ = fakeReportDepsWithTermDict
+    fake = FakeLlm()
+    planner._llmClientFactory = lambda: fake
+    await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    narrativePrompts = _promptsOf(fake, NARRATIVE_MARKER)
+    assert narrativePrompts, "未捕获到叙述型（executive_summary）的 LLM 调用"
+    promptText = "\n".join(narrativePrompts)
+    # TermDictionary 块：含 '维度业务含义' 段头 + 术语行（行数据键名 site_code 命中）
+    assert "## 维度业务含义" in promptText
+    assert f"- {TERM_NAME}：" in promptText  # 术语 '基地' 注入
+    # 分析模板块
+    assert "## 分析模板" in promptText
+
+
+@pytest.mark.asyncio
+async def test_narrative_prompt_requires_three_part_structure(fakeReportDepsWithTermDict) -> None:
+    """_NARRATIVE_SYSTEM 改写后要求「数字 + 原因 + 建议」三段式."""
+    planner, sessionId, turnId, _ = fakeReportDepsWithTermDict
+    fake = FakeLlm()
+    planner._llmClientFactory = lambda: fake
+    await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    promptText = "\n".join(_promptsOf(fake, NARRATIVE_MARKER))
+    # 三段式关键词（「三段式」+ 带序号的「关键数字」只在改写后的 system prompt 里）
+    assert "三段式" in promptText
+    assert "① 关键数字" in promptText
+    assert "原因" in promptText
+    assert "建议" in promptText
+
+
+@pytest.mark.asyncio
+async def test_semantic_context_columns_come_from_rows_not_claim_text(
+    fakeReportDepsWithTermDict,
+) -> None:
+    """列名取自 finding 行数据键名（而非 claimText）—— 拿 claimText 当列名永不命中术语.
+
+    反向断言：claimText（自然语言句子）本身不得出现在术语块里。
+    """
+    planner, sessionId, turnId, _ = fakeReportDepsWithTermDict
+    fake = FakeLlm()
+    planner._llmClientFactory = lambda: fake
+    await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    promptText = "\n".join(_promptsOf(fake, NARRATIVE_MARKER))
+    assert "## 维度业务含义" in promptText
+    # claimText 是句子，不是列名 —— 它不该被当成 columns 参数喂给术语匹配
+    assert f"- {CLAIM}：" not in promptText
+
+
+@pytest.mark.asyncio
+async def test_commentary_prompt_includes_term_dictionary(fakeReportDepsWithTermDict) -> None:
+    """data 段的 _commentary prompt 也注入语义 context（同样的 columns 派生规则）."""
+    planner, sessionId, turnId, _ = fakeReportDepsWithTermDict
+    fake = FakeLlm()
+    planner._llmClientFactory = lambda: fake
+    await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    # data 段每次 LLM 调用的 user prompt 里都带术语块
+    commentaryPrompts = _promptsOf(fake, "关键数字 / 原因 / 建议")
+    assert commentaryPrompts, "未捕获到 _commentary 的 LLM 调用"
+    assert all("## 维度业务含义" in prompt for prompt in commentaryPrompts)
+
+
+@pytest.mark.asyncio
+async def test_semantic_context_survives_dead_session(fakeReportDepsWithTermDict) -> None:
+    """术语加载失败（DB 不可达）只跳过术语段，不炸报告；分析模板段仍在."""
+    from app.services.report_semantic_context import assembleSemanticContext
+
+    class _DeadSession:
+        async def execute(self, *_args, **_kwargs):
+            raise RuntimeError("db down")
+
+    context = await assembleSemanticContext(
+        _DeadSession(), columns=("site_code",)
+    )
+    assert "## 分析模板" in context
+    assert "## 维度业务含义" not in context

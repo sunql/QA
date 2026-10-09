@@ -41,10 +41,11 @@ from app.domain.research_models import (
     ResearchTurn,
 )
 from app.infrastructure.llm.base_client import LlmMessage
-from app.services.learning.prompt_fence import neutralizeFence
-from app.services.llm_json_fence import stripJsonFence
 from app.services.chart_integration import buildReportChart
 from app.services.display_name_resolver import resolveValueName
+from app.services.learning.prompt_fence import neutralizeFence
+from app.services.llm_json_fence import stripJsonFence
+from app.services.report_semantic_context import assembleSemanticContext
 from app.services.research_agent_ports import DEFAULT_MODE, FINDING_ROWS_KEY, OPT_ARMS
 from app.services.research_session_service import ResearchSessionService
 
@@ -98,10 +99,15 @@ MAX_KNOWLEDGE_REFS = 5
 SOURCE_LABEL_LIMIT = 60
 
 # --- LLM 提示词（只喂摘要字符串，绝不喂原始行）---------------------------------
+# R3-C：system prompt 增加「维度业务含义 / 分析模板」输入声明 + 三段式输出要求；
+# 实际语义 context 由 `report_semantic_context.assembleSemanticContext` 组装成
+# user_content 的独立 part（本常量不渲染任何数据）。
 _NARRATIVE_SYSTEM = (
     "你是企业数据分析师。基于 <user_content> 中给出的统计摘要（topN / 分布 / 环比 / 异常）"
-    "写一段{intent}；可以引用摘要中明确给出的数字（如「按基地 J1 占 78%」），"
-    "但不得编造摘要未给出的数字、不得编造数据；用中文，不超过 200 字。"
+    "+ 维度业务含义 + 分析模板，写一段{intent}。\n"
+    "输出三段式：① 关键数字（可引用摘要中明确给出的数字） ② 原因解读（为什么是这样） "
+    "③ 后续建议（业务上应该关注什么）。\n"
+    "不得编造摘要未给出的数字、不得编造数据；用中文，不超过 300 字。"
 )
 _NARRATIVE_INTENTS: dict[str, str] = {
     "executive_summary": "执行摘要（总体结论 + 关键发现）",
@@ -109,9 +115,9 @@ _NARRATIVE_INTENTS: dict[str, str] = {
     "diff_analysis": "差异分析（各结论之间的一致与分歧）",
 }
 _COMMENTARY_SYSTEM = (
-    "你是企业数据分析师。基于 <user_content> 中给出的一条结论及其统计摘要，"
-    "写 1-3 条要点，每条一行、以短横线开头；可以引用摘要中明确给出的数字，"
-    "但不得编造未给出的数字；用中文。"
+    "你是企业数据分析师。基于 <user_content> 中给出的一条结论及其统计摘要 + 维度业务含义，"
+    "写 1-3 条要点，每条一行、以短横线开头；每条可包含「关键数字 / 原因 / 建议」任一部分；"
+    "可以引用摘要中明确给出的数字，但不得编造未给出的数字；用中文。"
 )
 
 
@@ -255,6 +261,25 @@ def _findingDigest(ctx: _Context) -> str:
     if not views:
         return EMPTY_FINDING_TEXT
     return "\n".join(f"- {_findingSummary(view)}" for view in views)
+
+
+def _rowColumns(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    """行数据 → 小写去重列名元组（`assembleSemanticContext` 的 columns 参数）。
+
+    列名只取**键名**（值永不进 prompt），且必须来自 `rows` —— `claimText` 是自然
+    语言句子，拿它当列名永远匹配不上术语字典的 `mapped_property_name`。
+    """
+    if not rows:
+        return ()
+    return tuple(sorted({key.lower() for key in rows[0]}))
+
+
+def _semanticColumns(ctx: _Context) -> tuple[str, ...]:
+    """报告级语义 context 的列名：各 finding 行数据键名的并集（排序保证确定性）。"""
+    columnSet: set[str] = set()
+    for view in ctx.findings[:MAX_REPORT_FINDINGS]:
+        columnSet.update(_rowColumns(view.rows))
+    return tuple(sorted(columnSet))
 
 
 def _degradedText(ctx: _Context) -> str:
@@ -604,14 +629,18 @@ class ReportPlanner:
     ) -> ReportSection:
         """叙述型 text 段（执行摘要 / 结论 / 差异分析）：单次 LLM，失败降级模板.
 
-        `session` 来自 `_buildSection` 透传（chart 段用得到），text 段不需要但必须
-        接住 —— 改一次签名省去每个 builder 各自判断是否要的代码。
+        R3-C：prompt 追加语义 context（术语 + 分析模板）part。columns 取自 finding
+        行数据键名并集（`_semanticColumns`），不是 claimText。
+
+        `session` 来自 `_buildSection` 透传；为 None（旧测试夹具直接调本方法）时
+        `assembleSemanticContext` 内部降级为「仅模板段」。
         """
         refs = tuple([_findingRef(view) for view in ctx.findings[:MAX_REPORT_FINDINGS]])
+        semanticCtx = await assembleSemanticContext(session, columns=_semanticColumns(ctx))
         text = await self._llmText(
             client,
             system=_NARRATIVE_SYSTEM.format(intent=_NARRATIVE_INTENTS[kind]),
-            parts=[ctx.question, _findingDigest(ctx)],
+            parts=[ctx.question, _findingDigest(ctx), semanticCtx],
         )
         return self._textSection(kind, text or _degradedText(ctx), refs)
 
@@ -636,16 +665,24 @@ class ReportPlanner:
                 statsLines = _formatStatsBullet(view.stats, sourceTable=view.sourceTable)
                 if statsLines:
                     blocks.append(ReportBlock(BLOCK_BULLET, statsLines, (ref,)))
-            bullets = await self._commentary(view, ctx, client=client)
+            bullets = await self._commentary(view, ctx, client=client, session=session)
             blocks.append(ReportBlock(BLOCK_BULLET, bullets, (ref,)))
         if not blocks:
             blocks.append(ReportBlock(BLOCK_TEXT, EMPTY_FINDING_TEXT, ()))
         return ReportSection("data", "data", _SECTION_TITLES["data"], tuple(blocks))
 
-    async def _commentary(self, view: FindingView, ctx: _Context, *, client: Any) -> list[str]:
-        """单 finding 单次 LLM 调用（设计 §4.7 约束）；失败降级为该结论的结构化摘要。"""
+    async def _commentary(
+        self, view: FindingView, ctx: _Context, *, client: Any, session: AsyncSession | None = None
+    ) -> list[str]:
+        """单 finding 单次 LLM 调用（设计 §4.7 约束）；失败降级为该结论的结构化摘要.
+
+        R3-C：prompt 追加语义 context（术语取自本 finding 行数据的列名）。
+        """
+        semanticCtx = await assembleSemanticContext(session, columns=_rowColumns(view.rows))
         text = await self._llmText(
-            client, system=_COMMENTARY_SYSTEM, parts=[ctx.question, _findingSummary(view)]
+            client,
+            system=_COMMENTARY_SYSTEM,
+            parts=[ctx.question, _findingSummary(view), semanticCtx],
         )
         return _splitBullets(text) if text else [_findingSummary(view)]
 

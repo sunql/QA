@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from app.services.report_planner import ReportPlanner
+from app.services.research_finding_aggregator import aggregateRows
 from app.services.research_session_service import ResearchSessionService
 
 QUESTION = "供应商收货量为什么下降"
@@ -555,17 +556,19 @@ async def test_semantic_context_survives_dead_session(fakeReportDepsWithTermDict
 # ---------------------------------------------------------------------------
 
 
-async def _sqlOnlyDeps(db_session, *, dimensionColumns, topContributors):
+async def _sqlOnlyDeps(db_session, *, rows, supportingSql):
     """R4 核心场景 fixture 构造器：supporting_data **无 sourceTable**，表名只在 SQL 里.
 
     这是 R4 的核心场景 —— R3 的翻译层在这个形态下完全无效（F1）。
 
-    `topContributors` 必须复刻生产者的形状：唯一生产者 `_topContributors`
-    （`research_finding_aggregator.py:226-247`）只取 `dim = dimCols[0]` 并把**同一个**
-    `dim` 盖到每个 item 上（`count` = 该值出现的行数，`sharePct` = count/total*100，
-    按 `(-count, value)` 排序）。故同一 fixture 内每个 item 的 `dim` 必须相同、且等于
-    `dimensionColumns[0]` —— 两个 fixture 共用本构造器，以免再次漂移。
+    `stats` **不手搓**，而是对本 fixture 自己的 `rows` 调真实聚合器
+    `aggregateRows(rows).asdict()` 派生 —— 与生产写入路径逐字同源：
+    `research_agent_phases.py:345` `aggregateRows(rowsForStats)`（无 `dimensionHints`）
+    → `:323` `stats=statsObj.asdict()`。因此 `topContributors` 单维度（`dim = dimCols[0]`）、
+    `dimensionColumns` 行键序、`distribution.std` 等全部由构造保证保真，两个 fixture
+    不可能再漂移（评审第 2 轮 Finding 1/2 即此类手搓漂移）。
     """
+    stats = aggregateRows(rows).asdict()
     svc = ResearchSessionService()
     s = await svc.createSession(db_session, userId=1, question="7 月对账确认情况", mode="research")
     turn = await svc.appendTurn(db_session, sessionId=s.id, role="user", content={"q": "x"})
@@ -574,27 +577,10 @@ async def _sqlOnlyDeps(db_session, *, dimensionColumns, topContributors):
         sessionId=s.id,
         turnId=turn.id,
         claimText="7 月对账确认情况",
-        supportingSql=(
-            "SELECT SITE_CODE, CONFIRM_STAGE, COUNT(*) AS bill_cnt "
-            "FROM DWD_RECONCILIATION_BILL_DTL GROUP BY SITE_CODE, CONFIRM_STAGE"
-        ),
-        supportingData={
-            "rowCount": 2,
-            "error": None,
-            "rows": [
-                {"site_code": "C1", "confirm_stage": "QTY", "bill_cnt": 10},
-                {"site_code": "C1", "confirm_stage": "PRICE", "bill_cnt": 5},
-            ],
-            "stats": {
-                "topContributors": topContributors,
-                "distribution": {"bill_cnt": {"min": 5.0, "max": 10.0, "mean": 7.5, "std": 3.5}},
-                "mom": [],
-                "anomalies": [],
-                "numericColumns": ["bill_cnt"],
-                "dimensionColumns": dimensionColumns,
-                "rowCount": 2,
-            },
-        },
+        supportingSql=supportingSql,
+        # 与生产 findingData(outcome) 同形：仅 rowCount / error / rows
+        supportingData={"rowCount": len(rows), "error": None, "rows": rows},
+        stats=stats,
         confidence=0.9,
     )
     await db_session.commit()
@@ -609,11 +595,21 @@ async def _sqlOnlyDeps(db_session, *, dimensionColumns, topContributors):
 
 @pytest.fixture
 async def fakeReportDepsWithSqlOnly(db_session):
-    """维度首选 site_code ⇒ 贡献者全是 site_code（照生产者 `dim = dimCols[0]`）."""
+    """维度首选 site_code ⇒ 贡献者全是 site_code（照生产者 `dim = dimCols[0]`）.
+
+    `rows` 行键序把 site_code 放首位 ⇒ `_dimensionColumns`（无 hints）产出
+    `["site_code", "confirm_stage"]`，故 topN 贡献者维度是 site_code。
+    """
     return await _sqlOnlyDeps(
         db_session,
-        dimensionColumns=["site_code", "confirm_stage"],
-        topContributors=[{"dim": "site_code", "value": "C1", "count": 2, "sharePct": 100.0}],
+        supportingSql=(
+            "SELECT SITE_CODE, CONFIRM_STAGE, COUNT(*) AS bill_cnt "
+            "FROM DWD_RECONCILIATION_BILL_DTL GROUP BY SITE_CODE, CONFIRM_STAGE"
+        ),
+        rows=[
+            {"site_code": "C1", "confirm_stage": "QTY", "bill_cnt": 10},
+            {"site_code": "C1", "confirm_stage": "PRICE", "bill_cnt": 5},
+        ],
     )
 
 
@@ -623,15 +619,18 @@ async def fakeReportDepsWithSqlOnlyConfirmStage(db_session):
 
     值字典只有在**值**进入 stats 时才可见，而生产者只发 `dimCols[0]` 的贡献者 ——
     故值中文化必须用 confirm_stage 置首的独立 fixture（否则就是生产者发不出的形状）。
-    计数与 `rows` 自洽：QTY / PRICE 各 1 行 ⇒ 占比 50/50。
+    行键序把 confirm_stage 放首位（且是 `GROUP BY` 首列），无 `dimensionHints`
+    （见 `research_agent_phases.py:345`）⇒ `dimCols[0] == "confirm_stage"`。
     """
     return await _sqlOnlyDeps(
         db_session,
-        dimensionColumns=["confirm_stage", "site_code"],
-        topContributors=[
-            # 生产者按 (-count, value) 排序：同计数时 "PRICE" < "QTY"。
-            {"dim": "confirm_stage", "value": "PRICE", "count": 1, "sharePct": 50.0},
-            {"dim": "confirm_stage", "value": "QTY", "count": 1, "sharePct": 50.0},
+        supportingSql=(
+            "SELECT CONFIRM_STAGE, SITE_CODE, COUNT(*) AS bill_cnt "
+            "FROM DWD_RECONCILIATION_BILL_DTL GROUP BY CONFIRM_STAGE, SITE_CODE"
+        ),
+        rows=[
+            {"confirm_stage": "QTY", "site_code": "C1", "bill_cnt": 10},
+            {"confirm_stage": "PRICE", "site_code": "C1", "bill_cnt": 5},
         ],
     )
 

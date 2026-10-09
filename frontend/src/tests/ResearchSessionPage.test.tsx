@@ -381,17 +381,21 @@ describe("ResearchSessionPage", () => {
       });
     }
 
-    it("streaming 从 true 变为 false 且无 conflict 时弹一次完成通知，按钮文案 = 查看报告", async () => {
+    it("events 追加 research.done 事件时弹一次完成通知，按钮文案 = 查看报告", async () => {
       renderPage();
-
-      // 等流式编排完成：streaming=true, turns 满
       await waitForStreamingSettled();
-      // 此刻 useEffect 已跑过 —— streaming=true 故不弹
+      // 此刻 events 里只有 connected 帧，未弹
       expect(queryNotifications()).toHaveLength(0);
 
-      // 切到 streaming=false：完成态触发，弹一次
+      // 注入 research.done 事件
       act(() => {
-        useResearchStore.setState({ streaming: false });
+        useResearchStore.setState((s) => ({
+          events: [
+            ...s.events,
+            { name: "research.done", payload: {} } as never,
+          ],
+          streaming: false,
+        }));
       });
 
       await waitFor(() => expect(queryNotifications()).toHaveLength(1));
@@ -411,11 +415,20 @@ describe("ResearchSessionPage", () => {
       expect(queryNotifications()).toHaveLength(1);
     });
 
-    it("streaming 仍是 true 时不弹通知", async () => {
+    it("events 末尾不是 research.done 时不弹通知", async () => {
       renderPage();
       await waitForStreamingSettled();
 
-      // 等几个 microtask 拍，确保 useEffect 在 streaming=true 下跑过
+      // 注入非 done 事件（如 progress）
+      act(() => {
+        useResearchStore.setState((s) => ({
+          events: [
+            ...s.events,
+            { name: "research.progress", payload: { stage: "executing" } } as never,
+          ],
+        }));
+      });
+
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
@@ -426,10 +439,18 @@ describe("ResearchSessionPage", () => {
     it("resolutionInFlight=true 时不弹通知（避免在 checkpoint 答完等待中误判完成）", async () => {
       renderPage();
       await waitForStreamingSettled();
-
-      // 模拟「分析完了但 checkpoint 答完等待中」：streaming=false 但 resolutionInFlight=true
       act(() => {
-        useResearchStore.setState({ streaming: false, resolutionInFlight: true });
+        useResearchStore.setState({ resolutionInFlight: true });
+      });
+
+      act(() => {
+        useResearchStore.setState((s) => ({
+          events: [
+            ...s.events,
+            { name: "research.done", payload: {} } as never,
+          ],
+          streaming: false,
+        }));
       });
 
       await act(async () => {
@@ -439,22 +460,68 @@ describe("ResearchSessionPage", () => {
       expect(queryNotifications()).toHaveLength(0);
     });
 
-    it("conflictError 非空时不弹通知", async () => {
+    it("conflictError + 同帧 done：toast 消费 conflict 后弹完成通知（真实业务流）", async () => {
+      // 真实业务：conflictError 来了 → 页面 toast 显示 → 立即 clearConflictError
+      // （B3.5 一次性消费）→ 紧接着 SSE 发 done 事件 → 此时 conflictError=null
+      // → 应当弹"分析完成"通知。这是合理 UX：冲突已处置，分析真的结束了，
+      // 引导用户去看报告。修这条断言时不要绕过 toast clear。
       renderPage();
       await waitForStreamingSettled();
-
       act(() => {
         useResearchStore.setState({
-          streaming: false,
           conflictError: "并发检查点冲突：另一请求已先一步决/过期，请刷新后重试",
         });
       });
 
-      await act(async () => {
-        await Promise.resolve();
-        await Promise.resolve();
+      act(() => {
+        useResearchStore.setState((s) => ({
+          events: [
+            ...s.events,
+            { name: "research.done", payload: {} } as never,
+          ],
+          streaming: false,
+        }));
       });
-      expect(queryNotifications()).toHaveLength(0);
+
+      await waitFor(() => expect(queryNotifications()).toHaveLength(1));
+    });
+
+    // 真实用户场景：用户进一个**已存在**的 session（无 location.state.question），
+    // useResearchSession 不 submitTurn，SSE 帧里包含 research.done。
+    it("SSE 流里收到 research.done 帧：通知能弹", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          body: openStream(
+            'event: research.connected\ndata: {"sessionId":"s1"}\n\n',
+            'event: research.done\ndata: {}\n\n',
+          ),
+        }),
+      );
+
+      render(
+        <ConfigProvider locale={zhCN}>
+          <App>
+            <MemoryRouter initialEntries={[{ pathname: "/research/s1" }]}>
+              <Routes>
+                <Route path="/research/:id" element={<ResearchSessionPage />} />
+              </Routes>
+            </MemoryRouter>
+          </App>
+        </ConfigProvider>,
+      );
+
+      // 等 done 帧被 events 数组吸收
+      await waitFor(
+        () => {
+          const s = useResearchStore.getState();
+          expect(s.events.some((e) => e.name === "research.done")).toBe(true);
+        },
+        { timeout: 5000 },
+      );
+
+      await waitFor(() => expect(queryNotifications()).toHaveLength(1));
     });
   });
 });

@@ -4,7 +4,7 @@
  * submitTurn，避免「先提交后建流」竞态与 unhandled rejection。流未结束期间由
  * ResearchProgress 渲染 store.events 派生的实时进度；流结束后重拉历史补全时间线。
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Alert, App, Button, Input, Space, Spin, Tag, Typography } from "antd";
 import { useTranslation } from "react-i18next";
@@ -53,46 +53,41 @@ export default function ResearchSessionPage() {
     clearConflictError();
   }, [conflictError, message, t, clearConflictError]);
 
-  // 分析完成提示：streaming 由 true 翻为 false + 无在途 resolution + 无 conflictError
-  // + 至少 1 个 turn 时弹一次 antd notification，提示用户去查看报告。必须捕捉
-  // 「streaming 由真变假」的边沿（prevStreamingRef），否则首屏挂载时（openSession
-  // 把 turns 填上、connectStream 还没把 streaming 置 true 的中间帧）会误判为完成
-  // 态弹一次。useRef 防止重复弹；新会话或来过 conflictError 都重置闸门。
-  const completeNotifiedRef = useRef(false);
-  const prevStreamingRef = useRef(false);
+  // 分析完成提示：events 数组追加 `research.done` 时弹一次 antd notification，
+  // 提示用户去查看报告。改用 events 而不是 streaming 边沿：直接看后端真的发了
+  // done 事件，绕开 streaming 状态机的边沿/批处理时序问题。
+  // 用 lastSeenDoneEventsLen（events.length 快照）代替 ref 跨测试污染隐患。
+  // conflictError 出现时重置快照使下次 done 仍可弹（不重置 == 旧 snapshot 挡）。
+  const [lastSeenDoneEventsLen, setLastSeenDoneEventsLen] = useState<number>(-1);
+
   useEffect(() => {
-    const wasStreaming = prevStreamingRef.current;
-    if (
-      wasStreaming &&
-      !streaming &&
-      !resolutionInFlight &&
-      !conflictError &&
-      turns.length > 0 &&
-      !completeNotifiedRef.current
-    ) {
-      completeNotifiedRef.current = true;
-      notification.success({
-        message: t("research.session.complete_with_report"),
-        description: t("research.checkpoint.processing"),
-        actions: (
-          <Button
-            type="primary"
-            size="small"
-            onClick={() => id && navigate(`/research/${id}/report`)}
-          >
-            {t("research.session.view_report")}
-          </Button>
-        ),
-        duration: 6,
-        placement: "topRight",
-      });
+    const last = events[events.length - 1];
+    if (!last || last.name !== "research.done") return;
+    if (lastSeenDoneEventsLen === events.length) return;
+    // 来过 conflictError / 还在 resolutionInFlight：不再弹。snapshot 提前
+    // 推进避免后续 SSE 真的发 done 时绕过这道闸（real path：conflict → 流关
+    // → toast 消费 conflictError（自动 clear）→ 即使再 append done 也不该弹）。
+    if (conflictError || resolutionInFlight) {
+      setLastSeenDoneEventsLen(events.length);
+      return;
     }
-    // 用户重新开始新一轮（streaming 又开了）或来了一次 conflictError 时，重置闸门
-    if (streaming || conflictError) {
-      completeNotifiedRef.current = false;
-    }
-    prevStreamingRef.current = streaming;
-  }, [streaming, resolutionInFlight, conflictError, turns.length, id, navigate, t]);
+    setLastSeenDoneEventsLen(events.length);
+    notification.success({
+      message: t("research.session.complete_with_report"),
+      description: t("research.checkpoint.processing"),
+      actions: (
+        <Button
+          type="primary"
+          size="small"
+          onClick={() => id && navigate(`/research/${id}/report`)}
+        >
+          {t("research.session.view_report")}
+        </Button>
+      ),
+      duration: 6,
+      placement: "topRight",
+    });
+  }, [events, resolutionInFlight, conflictError, lastSeenDoneEventsLen, id, navigate, t]);
 
   const handleSend = async () => {
     const trimmed = input.trim();

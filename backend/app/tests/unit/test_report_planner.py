@@ -548,3 +548,85 @@ async def test_semantic_context_survives_dead_session(fakeReportDepsWithTermDict
     )
     assert "## 分析模板" in context
     assert "## 维度业务含义" not in context
+
+
+# ---------------------------------------------------------------------------
+# R4 plan Task 2：列名/值翻译在真实数据形态（SQL 派生 sourceTable）上生效
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def fakeReportDepsWithSqlOnly(db_session):
+    """复刻真实数据的 finding：supporting_data **无 sourceTable**，表名只在 SQL 里.
+
+    这是 R4 的核心场景 —— R3 的翻译层在这个形态下完全无效（F1）。
+    """
+    svc = ResearchSessionService()
+    s = await svc.createSession(db_session, userId=1, question="7 月对账确认情况", mode="research")
+    turn = await svc.appendTurn(db_session, sessionId=s.id, role="user", content={"q": "x"})
+    await svc.saveFinding(
+        db_session,
+        sessionId=s.id,
+        turnId=turn.id,
+        claimText="7 月对账确认情况",
+        supportingSql=(
+            "SELECT SITE_CODE, CONFIRM_STAGE, COUNT(*) AS bill_cnt "
+            "FROM DWD_RECONCILIATION_BILL_DTL GROUP BY SITE_CODE, CONFIRM_STAGE"
+        ),
+        supportingData={
+            "rowCount": 2,
+            "error": None,
+            "rows": [
+                {"site_code": "C1", "confirm_stage": "QTY", "bill_cnt": 10},
+                {"site_code": "C1", "confirm_stage": "PRICE", "bill_cnt": 5},
+            ],
+            "stats": {
+                "topContributors": [
+                    {"dim": "site_code", "value": "C1", "count": 2, "sharePct": 100.0},
+                    {"dim": "confirm_stage", "value": "QTY", "count": 1, "sharePct": 50.0},
+                    {"dim": "confirm_stage", "value": "PRICE", "count": 1, "sharePct": 50.0},
+                ],
+                "distribution": {"bill_cnt": {"min": 5.0, "max": 10.0, "mean": 7.5, "std": 3.5}},
+                "mom": [],
+                "anomalies": [],
+                "numericColumns": ["bill_cnt"],
+                "dimensionColumns": ["site_code", "confirm_stage"],
+                "rowCount": 2,
+            },
+        },
+        confidence=0.9,
+    )
+    await db_session.commit()
+    fake = FakeLlm()
+    planner = ReportPlanner(
+        sessionService=svc,
+        llmClientFactory=lambda: fake,
+        sessionFactory=lambda: db_session,
+    )
+    return planner, s.id, turn.id
+
+
+@pytest.mark.asyncio
+async def test_stats_bullet_translates_column_names(fakeReportDepsWithSqlOnly) -> None:
+    """列名中文化：site_code → 基地，bill_cnt → 账单数（走 SQL 派生的 sourceTable）."""
+    planner, sessionId, turnId = fakeReportDepsWithSqlOnly
+    payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    data = next(s for s in payload["sections"] if s["kind"] == "data")
+    bullet = next(b for b in data["blocks"] if b["type"] == "bullet_list"
+                  and any("维度 topN" in item for item in b["content"]))
+    joined = "\n".join(bullet["content"])
+    assert "基地=C1" in joined          # dim 译中文 + 值原样（C1 无值字典）
+    assert "site_code" not in joined    # 原始列名不再出现
+    assert "bill_cnt" not in joined     # 数值分布列名也译中文
+
+
+@pytest.mark.asyncio
+async def test_stats_bullet_translates_values(fakeReportDepsWithSqlOnly) -> None:
+    """值中文化：confirm_stage 的 QTY/PRICE → 数量确认/价格确认（R3 值字典在真实数据上是死的）."""
+    planner, sessionId, turnId = fakeReportDepsWithSqlOnly
+    payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    data = next(s for s in payload["sections"] if s["kind"] == "data")
+    bullet = next(b for b in data["blocks"] if b["type"] == "bullet_list"
+                  and any("维度 topN" in item for item in b["content"]))
+    joined = "\n".join(bullet["content"])
+    assert "数量确认" in joined or "价格确认" in joined

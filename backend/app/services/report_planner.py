@@ -42,7 +42,11 @@ from app.domain.research_models import (
 )
 from app.infrastructure.llm.base_client import LlmMessage
 from app.services.chart_integration import buildReportChart
-from app.services.display_name_resolver import resolveValueName
+from app.services.display_name_resolver import (
+    deriveSourceTable,
+    resolveColumnName,
+    resolveValueName,
+)
 from app.services.learning.prompt_fence import neutralizeFence
 from app.services.llm_json_fence import stripJsonFence
 from app.services.report_renderer import (
@@ -170,7 +174,10 @@ def _findingView(row: ResearchFinding) -> FindingView:
         rowCount=int(data.get("rowCount") or len(rows)),
         error=data.get("error"),
         stats=data.get("stats"),  # NEW: pull from supporting_data["stats"] if present
-        sourceTable=data.get("sourceTable"),  # NEW (R3)
+        # R4：R3 从未写入 supporting_data["sourceTable"]（真实会话实测只有
+        # rows/error/stats/rowCount），故缺失时从支撑 SQL 的 FROM 子句派生 ——
+        # 这是唯一能同时修复历史会话与新增会话的读侧方案。
+        sourceTable=data.get("sourceTable") or deriveSourceTable(row.supporting_sql),
     )
 
 
@@ -193,15 +200,20 @@ def _findingSummary(view: FindingView) -> str:
     return f"{base}；按 {dimLabel} 分，{valueLabel} 占 {sharePct}%"
 
 
-def _topContributorLabel(stats: dict[str, Any] | None) -> str:
-    """top1 贡献者标签：「base=J1 (60.0%)」；无 stats → 「—」。"""
+async def _topContributorLabel(
+    stats: dict[str, Any] | None, *, sourceTable: str | None = None, db: Any = None
+) -> str:
+    """top1 贡献者标签：「基地=C1 (60.0%)」；无 stats → 「—」。"""
     if not stats:
         return "—"
     top = stats.get("topContributors") or []
     if not top:
         return "—"
     top1 = top[0]
-    return f"{top1.get('dim') or ''}={top1.get('value') or ''} ({float(top1.get('sharePct') or 0):.1f}%)"
+    rawDim = str(top1.get("dim") or "")
+    dim = await resolveColumnName(db, sourceTable, rawDim)
+    value = resolveValueName(sourceTable, rawDim, top1.get("value"))
+    return f"{dim}={value} ({float(top1.get('sharePct') or 0):.1f}%)"
 
 
 def _findingDigest(ctx: _Context) -> str:
@@ -244,38 +256,43 @@ def _splitBullets(text: str) -> list[str]:
     return [item[:MAX_BULLET_CHARS] for item in _bulletItems(text)][:MAX_BULLETS]
 
 
-def _formatStatsBullet(
-    stats: dict[str, Any], *, sourceTable: str | None = None
+async def _formatStatsBullet(
+    stats: dict[str, Any],
+    *,
+    sourceTable: str | None = None,
+    db: Any = None,
 ) -> list[str]:
     """stats → bullet 行（确定性、不经 LLM）。
 
     顺序：异常 → topN → 分布 → 环比。
-    值走 resolveValueName（无需 DB session；命中 DISPLAY_VALUE_DICT → 中文）。
-    列名暂保留 raw（列名翻译留给 Task A 集成层或 R4）。
+    列名走 resolveColumnName（本体别名 → 代码内列名字典 → 原列名），
+    值走 resolveValueName（代码内值字典）。R4 前两者在真实数据上都是死的。
     """
     lines: list[str] = []
     # 1. 异常（最优先）
     anomalies = stats.get("anomalies") or []
     if anomalies:
         first = anomalies[0]
-        dim = str(first.get("dim") or "")
+        dim = await resolveColumnName(db, sourceTable, str(first.get("dim") or ""))
         lines.append(f"- 异常：{dim} z={float(first.get('zScore', 0)):.2f}")
     # 2. 维度 topN
     top = stats.get("topContributors") or []
     if top:
-        items = ", ".join(
-            f"{t.get('dim') or ''}={resolveValueName(sourceTable, str(t.get('dim') or ''), t.get('value'))} "
-            f"({float(t.get('sharePct') or 0):.1f}%)"
-            for t in top[:3]
-        )
-        lines.append(f"- 维度 topN：{items}")
+        parts: list[str] = []
+        for item in top[:3]:
+            rawDim = str(item.get("dim") or "")
+            dim = await resolveColumnName(db, sourceTable, rawDim)
+            value = resolveValueName(sourceTable, rawDim, item.get("value"))
+            parts.append(f"{dim}={value} ({float(item.get('sharePct') or 0):.1f}%)")
+        lines.append(f"- 维度 topN：{', '.join(parts)}")
     # 3. 数值分布
     dist = stats.get("distribution") or {}
     if dist:
         firstCol, firstStats = next(iter(dist.items()), (None, None))
         if firstCol and firstStats:
+            col = await resolveColumnName(db, sourceTable, firstCol)
             lines.append(
-                f"- 数值分布：{firstCol} "
+                f"- 数值分布：{col} "
                 f"min={firstStats.get('min', 0):g}, "
                 f"max={firstStats.get('max', 0):g}, "
                 f"mean={firstStats.get('mean', 0):.1f}, "
@@ -548,7 +565,9 @@ class ReportPlanner:
                 chartContent = await _chartContent(view, session=session)
                 blocks.append(ReportBlock(BLOCK_CHART, chartContent, (ref,)))
             if view.stats:
-                statsLines = _formatStatsBullet(view.stats, sourceTable=view.sourceTable)
+                statsLines = await _formatStatsBullet(
+                    view.stats, sourceTable=view.sourceTable, db=session
+                )
                 if statsLines:
                     blocks.append(ReportBlock(BLOCK_BULLET, statsLines, (ref,)))
             bullets = await self._commentary(view, ctx, client=client, session=session)
@@ -629,16 +648,20 @@ class ReportPlanner:
         if not views:
             return self._textSection("hypothesis_table", EMPTY_FINDING_TEXT)
         columns = ["假设", "置信度", "已验证", "数据行数", "主要贡献者"]  # NEW: 主要贡献者
-        rows = [
-            {
-                "假设": view.claimText,
-                "置信度": view.confidence,
-                "已验证": "是" if view.verified else "否",
-                "数据行数": view.rowCount,
-                "主要贡献者": _topContributorLabel(view.stats),  # NEW
-            }
-            for view in views
-        ]
+        rows: list[dict[str, Any]] = []
+        for view in views:
+            contributor = await _topContributorLabel(
+                view.stats, sourceTable=view.sourceTable, db=session
+            )
+            rows.append(
+                {
+                    "假设": view.claimText,
+                    "置信度": view.confidence,
+                    "已验证": "是" if view.verified else "否",
+                    "数据行数": view.rowCount,
+                    "主要贡献者": contributor,  # NEW
+                }
+            )
         block = _tableBlock(columns, rows, tuple([_findingRef(view) for view in views]))
         return ReportSection(
             "hypothesis_table", "hypothesis_table", _SECTION_TITLES["hypothesis_table"], (block,)

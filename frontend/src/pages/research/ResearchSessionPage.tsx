@@ -53,21 +53,25 @@ export default function ResearchSessionPage() {
     clearConflictError();
   }, [conflictError, message, t, clearConflictError]);
 
-  // 分析完成提示：events 数组追加 `research.done` 时弹一次 antd notification，
-  // 提示用户去查看报告。改用 events 而不是 streaming 边沿：直接看后端真的发了
-  // done 事件，绕开 streaming 状态机的边沿/批处理时序问题。
-  // 用 lastSeenDoneEventsLen（events.length 快照）代替 ref 跨测试污染隐患。
-  // conflictError 出现时重置快照使下次 done 仍可弹（不重置 == 旧 snapshot 挡）。
+  // 分析完成提示：events 数组追加 `research.done` 时弹一次 antd notification。
+  //
+  // 闸 `!resolutionInFlight` 看上去像该加，但这是 B5「处理中 banner + 按钮 disabled」
+  // 用的 UI 字段——只要用户答了上一题、SSE 还没推到下一个 checkpoint，banner 就要
+  // 一直显示。所以 trigger 不能用 resolutionInFlight 拦 done。
+  //
+  // 真闸改 `!pendingCheckpoint`：done 帧到达时如果有 pendingCheckpoint 意味着研究
+  // 中途还有检查点要答（不可能同时发 done 和新 checkpoint——后端生命周期决定），如果
+  // 没有 pendingCheckpoint 才是真完成。
+  //
+  // conflictError 闸保留：并发冲突期间弹完成通知会误导用户。
   const [lastSeenDoneEventsLen, setLastSeenDoneEventsLen] = useState<number>(-1);
 
   useEffect(() => {
     const last = events[events.length - 1];
     if (!last || last.name !== "research.done") return;
     if (lastSeenDoneEventsLen === events.length) return;
-    // 来过 conflictError / 还在 resolutionInFlight：不再弹。snapshot 提前
-    // 推进避免后续 SSE 真的发 done 时绕过这道闸（real path：conflict → 流关
-    // → toast 消费 conflictError（自动 clear）→ 即使再 append done 也不该弹）。
-    if (conflictError || resolutionInFlight) {
+    if (conflictError) {
+      // 冲突场景：snapshot 推进但不弹（避免「分析完成」误导用户）。
       setLastSeenDoneEventsLen(events.length);
       return;
     }
@@ -87,7 +91,7 @@ export default function ResearchSessionPage() {
       duration: 6,
       placement: "topRight",
     });
-  }, [events, resolutionInFlight, conflictError, lastSeenDoneEventsLen, id, navigate, t]);
+  }, [events, conflictError, lastSeenDoneEventsLen, id, navigate, t]);
 
   const handleSend = async () => {
     const trimmed = input.trim();

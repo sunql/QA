@@ -436,7 +436,12 @@ describe("ResearchSessionPage", () => {
       expect(queryNotifications()).toHaveLength(0);
     });
 
-    it("resolutionInFlight=true 时不弹通知（避免在 checkpoint 答完等待中误判完成）", async () => {
+    it("resolutionInFlight=true 但 done 帧到：通知弹（处理中 banner 与 done 通知正交）", async () => {
+      // 2026-10-09 修复：trigger 不再用 `resolutionInFlight` 闸（该字段是 B5「处理中
+      // banner + 按钮 disabled」用的 UI 状态，要随 answer 提交后一直保留到下一个
+      // checkpoint 帧）。done 帧本身已是研究终态，与该字段正交，通知该弹。
+      // 真实业务里 done 到达时 resolutionInFlight 必为 true（用户刚答完最后一题
+      // → 中间帧不重置 → 一直 true 到 done），所以这个用例同时覆盖真实业务流。
       renderPage();
       await waitForStreamingSettled();
       act(() => {
@@ -453,11 +458,7 @@ describe("ResearchSessionPage", () => {
         }));
       });
 
-      await act(async () => {
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      expect(queryNotifications()).toHaveLength(0);
+      await waitFor(() => expect(queryNotifications()).toHaveLength(1));
     });
 
     // 真实业务流 bug 修复（2026-10-09）：用户答完最后一个检查点 → resolutionInFlight=true

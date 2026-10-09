@@ -100,10 +100,10 @@ export function applyResearchEvent(
   const events = [...state.events, event];
   switch (event.name) {
     case "research.checkpoint":
+      // 新检查点 = 上一题 answer 落地 → 解除 resolutionInFlight，让按钮恢复可点
       return { events, pendingCheckpoint: checkpointFromEvent(event.payload), resolutionInFlight: false };
     case "research.done":
-      // B5：done 帧到达意味着 answer 已落地（后端会先停 research.checkpoint 才走完 phases），
-      // 故同时清 resolutionInFlight，让"分析完成"通知能弹（line 70 这道闸不再被卡）。
+      // 研究彻底跑完：清 streaming 供「分析完成」通知 trigger 用；同时清 resolutionInFlight。
       return { events, streaming: false, resolutionInFlight: false };
     case "research.error": {
       // 处置只按 uiHint 的「类」分支，绝不按 code 逐个判断（用户裁定规则 ③）。
@@ -130,15 +130,17 @@ export function applyResearchEvent(
         };
       }
       // 降级类（degraded / 字段缺失）：流保持打开，状态机会继续推进，后面可能还有 done。
-      return { events, resolutionInFlight: false };
+      return { events };
     }
     default:
-      // 任何**非 checkpoint / 非 done / 非 error**的帧（research.finding /
-      // research.report / research.step.* / research.intent / ...）都意味着
-      // "上一题 answer 已被后端消化、研究继续推进"——resolutionInFlight 必须
-      // 解锁，否则后续 done 帧到达时 trigger 的 `resolutionInFlight` 闸永远 true、
-      // 通知永远不弹。
-      return { events, resolutionInFlight: false };
+      // finding / report / step.* / intent / plan / esl / hypothesis 等中间帧：
+      // 上一题 answer 还在后端消化中（等着下一次 checkpoint 落地）。**保留**
+      // resolutionInFlight，让 CheckpointCard 仍显示「处理中…」banner + 按钮 disabled，
+      // 直到新 research.checkpoint 帧到达（新检查点 = 真正可以再答了）。
+      // （2026-10-09 bug：早期版本 default 也清，banner 闪一下就消失 + 通知 trigger
+      //   因 resolutionInFlight 闸挡着不弹。后续真根因在 ResearchSessionPage trigger
+      //   上：见 trigger 注释。）
+      return { events };
   }
 }
 

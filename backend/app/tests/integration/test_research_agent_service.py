@@ -485,7 +485,7 @@ async def test_auto_confirm_runs_to_done_and_publishes(dbSession, makeService) -
         for block in sec["blocks"]
         if block["type"] == "chart"
     ]
-    assert charts and charts[0]["content"]["rows"] == [{"cnt": 1}]
+    assert charts and charts[0]["content"]["data"] == [{"cnt": 1}]
     assert charts[0]["sourceRefs"][0]["kind"] == "finding"
     assert report.rendered_md.startswith("# ")
     assert "| cnt |" in report.rendered_md and "| 1 |" in report.rendered_md  # 逐字
@@ -516,7 +516,7 @@ async def test_report_llm_calls_are_metered_and_numbers_verbatim(dbSession, make
         for block in sec["blocks"]
         if block["type"] == "chart"
     ]
-    assert charts[0]["content"]["rows"] == [{"cnt": 1}]
+    assert charts[0]["content"]["data"] == [{"cnt": 1}]
     # 报告阶段 2 次调用（执行摘要 + 1 条结论解读）累加计量：240 / 80
     assert [r for r in recorder.records if r["purpose"] == "research_report"] == [
         {

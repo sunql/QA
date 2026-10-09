@@ -150,6 +150,7 @@ function renderBlock(block: ReportBlock): ReactNode {
       const canRenderChart =
         isChartType(chart.chartType) &&
         chart.chartType !== "table" &&
+        chart.chartType !== "kpi" &&
         chart.echartsOption !== null;
       return (
         <div>

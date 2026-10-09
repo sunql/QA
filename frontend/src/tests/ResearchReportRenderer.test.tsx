@@ -7,9 +7,24 @@
  * - text → 段落；table → 表格；chart → 表格兜底（v1 chartType=null）；bullet_list → ul/li
  * - 块按 sections[].blocks[] 顺序渲染，每个块带 data-block-type 供顺序断言
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import React from "react";
 import { render, screen } from "@testing-library/react";
 import { ConfigProvider } from "antd";
+
+// jsdom 无法实例化 ECharts 画布 —— 与 EChart.test.tsx 同模式，占位 div 即可；
+// EChart 外层包裹 div 仍带 testId（`report-chart-<chartType>`），可据其判断是否放行。
+vi.mock("echarts-for-react", () => ({
+  __esModule: true,
+  default: React.forwardRef(function EChartsMock(
+    props: { option?: Record<string, unknown> },
+    ref: React.ForwardedRef<unknown>
+  ) {
+    React.useImperativeHandle(ref, () => ({ getEchartsInstance: () => ({}) }));
+    return <div data-testid="echarts-mock">{JSON.stringify(props.option)}</div>;
+  }),
+}));
+
 import { ReportRenderer } from "../components/research/ReportRenderer";
 import type { ReportPayload } from "../components/research/ReportRenderer";
 
@@ -57,6 +72,40 @@ function makePayload(): ReportPayload {
       },
     ],
     findingsRef: [{ findingId: "f-1", claim: "收货量上升", confidence: 0.9, verified: true }],
+  };
+}
+
+/** R3-B：单个 chart 块的 payload —— chartType + 预渲染 echartsOption 驱动渲染门。 */
+function makeChartPayload(
+  chartType: string | null,
+  echartsOption: Record<string, unknown> | null
+): ReportPayload {
+  return {
+    sessionId: "s-1",
+    turnId: "t-1",
+    mode: "research",
+    title: "报告",
+    question: "问题？",
+    sections: [
+      {
+        id: "detail",
+        kind: "detail",
+        title: "明细",
+        blocks: [
+          {
+            type: "chart",
+            content: {
+              title: "收货量月度趋势",
+              chartType,
+              columns: ["月份", "收货量"],
+              data: [{ 月份: "10月", 收货量: 180 }],
+              echartsOption,
+            },
+            sourceRefs: [],
+          },
+        ],
+      },
+    ],
   };
 }
 
@@ -134,5 +183,38 @@ describe("ReportRenderer", () => {
       (el) => el.getAttribute("data-block-type"),
     );
     expect(types).toEqual(["text", "bullet_list", "table", "chart"]);
+  });
+
+  // R3-B：chartType=kpi 是单指标展示，不是 ECharts 结构 —— 即便 echartsOption 非空
+  // 也必须走表格兜底，否则喂给 ECharts 会渲染成空白图。
+  it("chartType=kpi 即使 echartsOption 非空也回退表格（不喂 ECharts）", () => {
+    render(
+      <ConfigProvider>
+        <ReportRenderer
+          payload={makeChartPayload("kpi", {
+            series: [{ type: "kpi", data: [180] }],
+          })}
+        />
+      </ConfigProvider>
+    );
+    expect(screen.queryByTestId("report-chart-kpi")).toBeNull();
+    // 表格兜底渲染列头与数据
+    expect(screen.getByText("收货量月度趋势")).toBeInTheDocument();
+    expect(screen.getByText("10月")).toBeInTheDocument();
+  });
+
+  it("chartType=bar 且有 echartsOption 时渲染 ECharts 元素", () => {
+    render(
+      <ConfigProvider>
+        <ReportRenderer
+          payload={makeChartPayload("bar", {
+            xAxis: { type: "category", data: ["10月"] },
+            yAxis: { type: "value" },
+            series: [{ type: "bar", data: [180] }],
+          })}
+        />
+      </ConfigProvider>
+    );
+    expect(screen.getByTestId("report-chart-bar")).toBeInTheDocument();
   });
 });

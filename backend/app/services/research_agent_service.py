@@ -468,8 +468,29 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         metered = MeteredClient(client)
         candidates: list[dict[str, Any]] = []
         try:
+            # R1（2026-10-09）：研究侧 schema 反射（真表 + 真列 + 值域采样）喂给假设 LLM。
+            # 让 LLM 看到 ``DWD_GOODS_RECEIPT_DTL(rcv_qty, ...)`` 而不是只看到"供应商"。
+            # 失败面**已**在 buildHypothesisSchemaHint 内部全降级（无源/无 schema/采样失败
+            # 都返占位符），外层 try 仅守"连占位符都构造不出来"这种编程错误。
+            schemaHint = ""
+            esl = state.get("esl")
+            if isinstance(esl, dict) and esl.get("businessObjects"):
+                from app.services.research_schema_reflection import (
+                    buildHypothesisSchemaHint,
+                )
+                try:
+                    schemaHint = await buildHypothesisSchemaHint(
+                        session, sessionId, state["esl"],
+                    )
+                except Exception:
+                    logger.warning(
+                        "研究侧 schema 反射失败，降级空 hint: session=%s",
+                        sessionId, exc_info=True,
+                    )
+                    schemaHint = ""
             hypotheses = await generateHypotheses(
-                metered, state["question"], dataSummary(state), drivers(state)
+                metered, state["question"], dataSummary(state), drivers(state),
+                schemaHint=schemaHint,
             )
             candidates = [asdict(h) for h in hypotheses]
         except Exception:  # noqa: BLE001 —— 假设生成失败降级为空候选（研究链路不因它中断）

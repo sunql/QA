@@ -96,14 +96,19 @@ async def generateHypotheses(
     question: str,
     dataSummary: str,
     drivers: list[str],
+    *,
+    schemaHint: str = "",
 ) -> list[Hypothesis]:
     """生成假设列表：prompt → LLM → 剥 fence → 解析 → 过滤非法 verification_sql。
 
     过滤是第二层防御：``parseHypotheses`` 已丢弃非法项，此处再按
     ``isValidVerificationSql`` 复核（两者若漂移，以静态校验为准），丢弃计数入
     warning 日志（显式处理，不静默）。
+
+    schemaHint（R1，2026-10-09）：研究侧 schema 反射的提示文本，喂给 LLM 让
+    其看到真表真列而不是只看到"供应商"。空串 = 旧行为。
     """
-    messages = buildHypothesisMessages(question, dataSummary, drivers)
+    messages = buildHypothesisMessages(question, dataSummary, drivers, schemaHint=schemaHint)
     raw = await llmClient.complete(messages)
     text = stripJsonFence(getattr(raw, "content", None) or str(raw))
     parsed = parseHypotheses(text)

@@ -6,8 +6,8 @@
  */
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { Alert, App, Button, Descriptions, Drawer, Input, Space, Spin, Tag, Typography } from "antd";
-import { HistoryOutlined, InfoCircleOutlined } from "@ant-design/icons";
+import { Alert, App, Button, Descriptions, Drawer, Empty, Input, List, Space, Spin, Tag, Typography } from "antd";
+import { HistoryOutlined, InfoCircleOutlined, UnorderedListOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { useResearchStore } from "../../stores/researchStore";
 import { useResearchSession } from "../../hooks/useResearchSession";
@@ -38,6 +38,11 @@ export default function ResearchSessionPage() {
   const submitTurn = useResearchStore((s) => s.submitTurn);
   const answer = useResearchStore((s) => s.answer);
   const clearConflictError = useResearchStore((s) => s.clearConflictError);
+  // 历史问答 Drawer 用：listResearchSessions 已在 ResearchListPage 用过，store
+  // 已暴露 sessions / sessionsLoading / loadSessions，**不**新建拉取逻辑。
+  const sessions = useResearchStore((s) => s.sessions);
+  const sessionsLoading = useResearchStore((s) => s.sessionsLoading);
+  const loadSessions = useResearchStore((s) => s.loadSessions);
   const sources = useDatasourceOptions();
 
   const pendingQuestion =
@@ -53,6 +58,9 @@ export default function ResearchSessionPage() {
   // 列表（解析意图/生成执行步骤/开始步骤/执行查询/...），否则会占据主内容 1/4 高度。
   // 流式期间 ResearchProgress 仍展示实时进度，Drawer 内是历史完整记录。
   const [timelineOpen, setTimelineOpen] = useState(false);
+  // 历史问答（所有历史会话）也在右侧 Drawer，便于不返回列表就切到别的研究。
+  // 默认收起；点 header 按钮时再按需拉（loadSessions 命中缓存不重复打 API）。
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   // B3.5: conflictError toast — dispatch clearConflictError after toast so it fires once.
   useEffect(() => {
@@ -60,6 +68,14 @@ export default function ResearchSessionPage() {
     message.error(t(conflictError));
     clearConflictError();
   }, [conflictError, message, t, clearConflictError]);
+
+  // 历史问答 Drawer 打开时按需拉：首次打开（sessions 为空且不在加载中）才打 API。
+  // 后续打开直接吃 store 缓存，避免每次切 Drawer 都重拉列表。
+  useEffect(() => {
+    if (historyOpen && sessions.length === 0 && !sessionsLoading) {
+      void loadSessions();
+    }
+  }, [historyOpen, sessions.length, sessionsLoading, loadSessions]);
 
   // 分析完成提示：events 数组追加 `research.done` 时弹一次 antd notification。
   //
@@ -129,6 +145,14 @@ export default function ResearchSessionPage() {
   };
   const closeDetail = () => setDetailPayload(null);
 
+  // 选历史会话：关 Drawer 后 navigate。点当前会话只关 Drawer（已经在那里了）。
+  const handleSelectHistorySession = (sessionId: string) => {
+    setHistoryOpen(false);
+    if (sessionId !== id) {
+      navigate(`/research/${sessionId}`);
+    }
+  };
+
   return (
     <div style={{ padding: 16 }}>
       <Space style={{ marginBottom: 16 }}>
@@ -149,6 +173,12 @@ export default function ResearchSessionPage() {
           {currentSession && turns.length > 0
             ? ` (${t("research.session.stepCount", { n: turns.length })})`
             : ""}
+        </Button>
+        <Button
+          icon={<UnorderedListOutlined />}
+          onClick={() => setHistoryOpen(true)}
+        >
+          {t("research.session.history")}
         </Button>
         {datasourceName(sources, currentSession?.datasourceId) ? (
           <Tag>{datasourceName(sources, currentSession?.datasourceId)}</Tag>
@@ -216,6 +246,54 @@ export default function ResearchSessionPage() {
             onDetail={handleDetail}
           />
         </Spin>
+      </Drawer>
+      <Drawer
+        title={t("research.session.historyTitle")}
+        placement="right"
+        width={420}
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        destroyOnClose
+      >
+        <List
+          loading={sessionsLoading}
+          dataSource={sessions}
+          locale={{
+            emptyText: <Empty description={t("research.session.historyEmpty")} />,
+          }}
+          renderItem={(session) => {
+            // 当前会话高亮：避免用户点了「历史问答」结果发现点的就是当前页。
+            const isCurrent = session.id === id;
+            return (
+              <List.Item
+                onClick={() => handleSelectHistorySession(session.id)}
+                data-testid={`history-session-${session.id}`}
+                style={{
+                  cursor: "pointer",
+                  padding: "12px 16px",
+                  background: isCurrent ? "rgba(22, 119, 255, 0.06)" : undefined,
+                }}
+              >
+                <List.Item.Meta
+                  title={
+                    <Space size="small">
+                      <span style={{ fontWeight: isCurrent ? 600 : 400 }}>
+                        {session.title || session.question}
+                      </span>
+                      {isCurrent ? (
+                        <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+                          {t("research.session.current")}
+                        </Tag>
+                      ) : null}
+                    </Space>
+                  }
+                  description={session.question}
+                />
+                <Tag>{session.status}</Tag>
+              </List.Item>
+            );
+          }}
+        />
       </Drawer>
       <ResearchDetailDrawer payload={detailPayload} onClose={closeDetail} />
       {pendingCheckpoint ? (

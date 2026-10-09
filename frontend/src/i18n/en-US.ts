@@ -3031,6 +3031,12 @@ export const enUS = {
       timeline: "Timeline",
       timelineTitle: "Research timeline",
       stepCount: "{n} steps",
+      // History: entry to all past research sessions in a right-side Drawer, so the
+      // user can jump to another session without bouncing back to the list page.
+      history: "History",
+      historyTitle: "Q&A history",
+      historyEmpty: "No Q&A history yet",
+      current: "Current",
     },
     compare: {
       title: "Compare",

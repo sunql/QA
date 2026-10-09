@@ -3043,6 +3043,11 @@ export const zhCN = {
       timeline: "时间线",
       timelineTitle: "研究时间线",
       stepCount: "{n} 步",
+      // 历史问答：所有历史会话的入口在右侧 Drawer，便于不返回列表就切到别的研究
+      history: "历史问答",
+      historyTitle: "历史问答",
+      historyEmpty: "还没有历史问答",
+      current: "当前",
     },
     compare: {
       title: "对比分析",

@@ -273,6 +273,60 @@ describe("ResearchSessionPage", () => {
     expect(within(dialog).getByText(/UNIQUEMARKER_PLAN/)).toBeInTheDocument();
   });
 
+  // 历史问答（右侧 Drawer）：点 header 按钮 → 拉取 sessions 列表 → 渲染，
+  // 当前会话标「当前」高亮；点其它会话关闭 Drawer 并 navigate。
+  it("历史问答 Drawer：打开后拉 sessions 列表，标当前会话，点其它会话 navigate", async () => {
+    // 第二次 listResearchSessions 调用会返回这俩会话（页面里点按钮时才发）。
+    // useResearchStore 的 mock 是按调用顺序复用 httpMock.get；
+    // ResearchSessionPage 走的是 listResearchSessions → GET /research/sessions
+    // （httpClient.get 而不是裸 fetch，path 没有 /research/sessions/s1 那种 detail 形态）。
+    const otherSession = {
+      id: "s-other",
+      title: "另一项研究：采购订单",
+      mode: "research" as const,
+      status: "done" as const,
+      question: "上个月的采购订单量？",
+      createdAt: "2026-10-08T00:00:00Z",
+      updatedAt: "2026-10-08T00:00:00Z",
+    };
+    const currentInList = {
+      id: "s1",
+      title: "研究：供应商 360°",
+      mode: "research" as const,
+      status: "running" as const,
+      question: "供应商 360° 全景",
+      createdAt: "2026-10-09T00:00:00Z",
+      updatedAt: "2026-10-09T00:00:00Z",
+    };
+    httpMock.get.mockImplementation((url: string) => {
+      if (url === "/research/sessions") {
+        return Promise.resolve({ data: [currentInList, otherSession] });
+      }
+      const detail = makeDetail();
+      return Promise.resolve({
+        data: { ...detail.data, session: { ...detail.data.session, id: "s1" } },
+      });
+    });
+
+    renderPage();
+
+    // 打开 Drawer
+    const trigger = await screen.findByRole("button", { name: /历史问答/ });
+    fireEvent.click(trigger);
+
+    // Drawer 出现，里面有另一项研究的标题
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("另一项研究：采购订单")).toBeInTheDocument();
+    // 当前会话 s1 也以「当前」标签标出来
+    expect(within(dialog).getByText("当前")).toBeInTheDocument();
+
+    // 点其它会话 → Drawer 关闭 + navigate 切到该会话
+    fireEvent.click(within(dialog).getByTestId("history-session-s-other"));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+  });
+
   // 步数残留修复：openSession 失败 / 还没拉到会话时，store.turns 是上次会话的
   // 残留数据，按钮不应该展示误导性的「时间线 (9 步)」。条件：**currentSession
   // 已设置**才显示步数。

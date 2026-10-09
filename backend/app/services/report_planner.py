@@ -45,6 +45,23 @@ from app.services.chart_integration import buildReportChart
 from app.services.display_name_resolver import resolveValueName
 from app.services.learning.prompt_fence import neutralizeFence
 from app.services.llm_json_fence import stripJsonFence
+from app.services.report_renderer import (
+    _SECTION_TITLES,
+    BLOCK_BULLET,
+    BLOCK_CHART,
+    BLOCK_TABLE,
+    BLOCK_TEXT,
+    CHART_HINT,  # noqa: F401  re-export（表示层常量，planner 侧暂未直接引用）
+    DEFAULT_TITLE,
+    REF_FINDING,
+    REF_WIKI,
+    ReportBlock,
+    ReportSection,
+    SourceRef,
+    blockToDict,  # noqa: F401  re-export（表示层序列化，planner 侧暂未直接引用）
+    renderMarkdown,
+    sectionToDict,
+)
 from app.services.report_semantic_context import assembleSemanticContext
 from app.services.research_agent_ports import DEFAULT_MODE, FINDING_ROWS_KEY, OPT_ARMS
 from app.services.research_session_service import ResearchSessionService
@@ -64,33 +81,11 @@ _MODE_SECTIONS: dict[str, tuple[str, ...]] = {
     MODE_COMPARE: ("comparison_table", "data", "diff_analysis", "methodology"),
 }
 
-_SECTION_TITLES: dict[str, str] = {
-    "executive_summary": "执行摘要",
-    "conclusion": "结论",
-    "data": "数据章节",
-    "knowledge": "引用知识",
-    "methodology": "方法学",
-    "hypothesis_table": "假设验证表",
-    "alternative": "备选假设",
-    "comparison_table": "对比维度表",
-    "diff_analysis": "差异分析",
-}
-
-# --- 块类型 / SourceRef 类型 --------------------------------------------------
-BLOCK_TEXT = "text"
-BLOCK_CHART = "chart"
-BLOCK_TABLE = "table"
-BLOCK_BULLET = "bullet_list"
-REF_FINDING = "finding"
-REF_WIKI = "wiki"
-
 # --- 文案 / 上限 --------------------------------------------------------------
 LLM_FALLBACK_NOTICE = "（自动摘要生成失败，以下为结构化摘要）"
 EMPTY_FINDING_TEXT = "（本轮无已验证结论）"
 EMPTY_KNOWLEDGE_TEXT = "（本轮未引用知识条目）"
 EMPTY_ALTERNATIVE_TEXT = "（本轮无未验证备选假设）"
-DEFAULT_TITLE = "研究报告"
-CHART_HINT = "图表见 payload"
 
 MAX_REPORT_FINDINGS = 10  # 报告纳入的结论条数上限（同时限定 LLM 调用次数）
 MAX_BULLETS = 6
@@ -122,36 +117,8 @@ _COMMENTARY_SYSTEM = (
 
 
 # ---------------------------------------------------------------------------
-# 报告形状（设计 §4.7 段落形状；frozen dataclass，序列化 camelCase 键）
+# 装配上下文（frozen dataclass）
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class SourceRef:
-    """块级溯源：结论 / 知识条目（设计 §4.7 kind: step | finding | wiki | kpi）。"""
-
-    kind: str
-    refId: str
-    label: str
-
-
-@dataclass(frozen=True)
-class ReportBlock:
-    """段落内的一个块：text | chart | table | bullet_list。"""
-
-    type: str
-    content: Any
-    sourceRefs: tuple[SourceRef, ...] = ()
-
-
-@dataclass(frozen=True)
-class ReportSection:
-    """报告段落（id/kind 同值，便于前端按 kind 取段）。"""
-
-    id: str
-    kind: str
-    title: str
-    blocks: tuple[ReportBlock, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -186,27 +153,8 @@ class _Context:
 
 
 # ---------------------------------------------------------------------------
-# 序列化 / 取值助手
+# 取值助手
 # ---------------------------------------------------------------------------
-
-
-def _blockToDict(block: ReportBlock) -> dict[str, Any]:
-    return {
-        "type": block.type,
-        "content": block.content,
-        "sourceRefs": [
-            {"kind": ref.kind, "refId": ref.refId, "label": ref.label} for ref in block.sourceRefs
-        ],
-    }
-
-
-def _sectionToDict(section: ReportSection) -> dict[str, Any]:
-    return {
-        "id": section.id,
-        "kind": section.kind,
-        "title": section.title,
-        "blocks": [_blockToDict(block) for block in section.blocks],
-    }
 
 
 def _findingView(row: ResearchFinding) -> FindingView:
@@ -394,68 +342,6 @@ def _names(items: Any, key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# MD 渲染（纯字符串模板，零 LLM）
-# ---------------------------------------------------------------------------
-
-
-def _cell(value: Any) -> str:
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\n", " ")
-
-
-def _mdTable(columns: list[str], rows: list[dict[str, Any]]) -> list[str]:
-    lines = [
-        "| " + " | ".join(_cell(column) for column in columns) + " |",
-        "| " + " | ".join("---" for _ in columns) + " |",
-    ]
-    lines += [
-        "| " + " | ".join(_cell(row.get(column)) for column in columns) + " |" for row in rows
-    ]
-    return lines
-
-
-def _renderBlock(block: dict[str, Any]) -> list[str]:
-    """单块 → MD 行。chart 块渲染为表格 + 「图表见 payload」提示（brief 指定）。
-
-    R3-B：chart 块 key 统一为 'data'（不是 'rows'）；并打印 chartType 让读者在 MD
-    里直接看到图表语义（BAR / PIE / ...），无需打开 payload。
-    """
-    kind, content = block["type"], block["content"]
-    if kind == BLOCK_TEXT:
-        return [str(content), ""]
-    if kind == BLOCK_BULLET:
-        return [f"- {item}" for item in content] + [""]
-    if kind == BLOCK_TABLE:
-        return _mdTable(content["columns"], content["rows"]) + [""]
-    if kind == BLOCK_CHART:
-        data = content.get("data") or []
-        if not data:
-            chartType = content.get("chartType") or "table"
-            return ["", f"> {CHART_HINT}（chartType={chartType}）", ""]
-        columns = content.get("columns") or (list(data[0].keys()) if data else [])
-        table = _mdTable(columns, data)
-        chartType = content.get("chartType") or "table"
-        return [*table, "", f"> {CHART_HINT}（chartType={chartType}）", ""]
-    logger.warning("报告 MD 渲染遇到未知块类型，跳过: %s", kind)
-    return []
-
-
-def renderMarkdown(payload: dict[str, Any]) -> str:
-    """payload → Markdown（章节标题 + 块渲染；可下载存档）。"""
-    lines = [
-        f"# {payload.get('title') or DEFAULT_TITLE}",
-        "",
-        f"> 模式：{payload.get('mode')}｜问题：{payload.get('question')}",
-        "",
-    ]
-    for section in payload.get("sections") or []:
-        lines += [f"## {section['title']}", ""]
-        for block in section["blocks"]:
-            lines += _renderBlock(block)
-    return "\n".join(lines).strip() + "\n"
-
-
-# ---------------------------------------------------------------------------
 # ReportPlanner
 # ---------------------------------------------------------------------------
 
@@ -612,7 +498,7 @@ class ReportPlanner:
             "mode": ctx.mode,
             "title": ctx.title,
             "question": ctx.question,
-            "sections": [_sectionToDict(section) for section in sections],
+            "sections": [sectionToDict(section) for section in sections],
             "findingsRef": [
                 {
                     "findingId": view.findingId,

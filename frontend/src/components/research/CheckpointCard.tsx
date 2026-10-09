@@ -14,7 +14,7 @@
  * 历史 checkpoint 的 options 已落库，不能靠改后端键名统一 ⇒ 这里双键回落读取。
  */
 import { useState } from "react";
-import { Button, Card, Checkbox, Input, Space, Spin, Tag, Tooltip, Typography } from "antd";
+import { Button, Card, Checkbox, Input, Space, Tag, Tooltip, Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import type { CheckpointAction, CheckpointPhase, ResearchCheckpoint } from "../../types/research";
 
@@ -509,32 +509,6 @@ export function CheckpointCard({ checkpoint, onAnswer, resolutionInFlight }: Che
         onModify={(question) => onAnswer("modify", { question })}
         resolutionInFlight={resolutionInFlight}
       />
-      {resolutionInFlight && (
-        <div
-          data-testid="checkpoint-processing-banner"
-          role="status"
-          aria-live="polite"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 12,
-            marginTop: 16,
-            padding: "12px 20px",
-            borderRadius: 8,
-            background: "rgba(22, 119, 255, 0.06)",
-            border: "1px solid rgba(22, 119, 255, 0.25)",
-            fontSize: 20,
-            fontWeight: 600,
-            color: "#1677ff",
-          }}
-        >
-          <Spin size="large" />
-          <span style={{ fontSize: 20 }}>
-            {t("research.checkpoint.processing")}
-          </span>
-        </div>
-      )}
     </Card>
   );
 }

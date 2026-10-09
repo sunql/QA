@@ -152,7 +152,37 @@ export default function ResearchSessionPage() {
           onAnswer={handleAnswer}
           resolutionInFlight={resolutionInFlight}
         />
-      ) : (
+      ) : null}
+      {pendingCheckpoint && resolutionInFlight ? (
+        // banner 提到外层：跟着 store 走，不随 CheckpointCard key 变化重挂载。
+        // 视觉持续显示直到 resolutionInFlight 在 reducer 里被清（下一个
+        // research.checkpoint 帧到达意味着"新题可答了"）。
+        <div
+          data-testid="checkpoint-processing-banner"
+          role="status"
+          aria-live="polite"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 12,
+            marginTop: 16,
+            padding: "12px 20px",
+            borderRadius: 8,
+            background: "rgba(22, 119, 255, 0.06)",
+            border: "1px solid rgba(22, 119, 255, 0.25)",
+            fontSize: 20,
+            fontWeight: 600,
+            color: "#1677ff",
+          }}
+        >
+          <Spin size="large" />
+          <span style={{ fontSize: 20 }}>
+            {t("research.checkpoint.processing")}
+          </span>
+        </div>
+      ) : null}
+      {!pendingCheckpoint ? (
         <Space.Compact style={{ width: "100%", marginTop: 16 }}>
           <TextArea
             value={input}
@@ -164,7 +194,7 @@ export default function ResearchSessionPage() {
             {t("research.session.send")}
           </Button>
         </Space.Compact>
-      )}
+      ) : null}
     </div>
   );
 }

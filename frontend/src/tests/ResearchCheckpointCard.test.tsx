@@ -490,16 +490,6 @@ describe("CheckpointCard - resolutionInFlight 状态（Task 1：按钮 disabled 
     expect(confirmBtn).not.toBeDisabled();
   });
 
-  it("resolutionInFlight=true 时显示大号处理中 banner（fontSize ≥ 20）", () => {
-    const onAnswer = vi.fn();
-    const { container } = render(
-      <ConfigProvider>
-        <CheckpointCard checkpoint={makeCheckpoint()} onAnswer={onAnswer} resolutionInFlight />
-      </ConfigProvider>
-    );
-    const banner = container.querySelector('[data-testid="checkpoint-processing-banner"]');
-    expect(banner).toBeInTheDocument();
-    const style = window.getComputedStyle(banner as Element);
-    expect(parseInt(style.fontSize, 10)).toBeGreaterThanOrEqual(20);
-  });
+  // 处理中 banner 已迁到 ResearchSessionPage：随 store 走、不随 CheckpointCard
+  // key 变化重挂载；Card 自身只管按钮 disabled。banner 测试在 page 套件。
 });

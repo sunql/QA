@@ -216,6 +216,56 @@ describe("ResearchSessionPage", () => {
     expect(await screen.findByText("处理中…")).toBeInTheDocument();
   });
 
+  // B5 Round 7 修复：处理中 banner 提到 ResearchSessionPage 外层，**不**随
+  // CheckpointCard 的 key={pendingCheckpoint.id} 重挂载消失。变灰→变绿→下个
+  // checkpoint 现象的根因就是 banner 当时在 card 里。
+  it("pendingCheckpoint + resolutionInFlight=true：banner 在页面层（不在 CheckpointCard 内）", async () => {
+    httpMock.get.mockResolvedValue({
+      data: {
+        session: {
+          id: "s1",
+          title: "研究",
+          mode: "research",
+          status: "running",
+          question: "q",
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+        },
+        turns: [],
+        pendingCheckpoint: {
+          id: "cp-1",
+          phase: "hypothesis",
+          status: "pending",
+          options: { candidates: [{ statement: "假设 A", driver: "K1" }] },
+          prompt: "选要验证的",
+          userChoice: null,
+          decidedAt: null,
+        },
+      },
+    });
+
+    renderPage();
+
+    // 等卡片渲染完
+    await waitFor(() => expect(screen.getByText("假设 A")).toBeInTheDocument());
+
+    // 模拟 answer 已提交
+    useResearchStore.setState({ resolutionInFlight: true });
+
+    // banner 存在
+    const banner = await screen.findByTestId("checkpoint-processing-banner");
+    expect(banner).toBeInTheDocument();
+    // 字号 ≥ 20（与设计要求一致）
+    const style = window.getComputedStyle(banner);
+    expect(parseInt(style.fontSize, 10)).toBeGreaterThanOrEqual(20);
+
+    // banner **不在** CheckpointCard 内 —— 这是本轮 bug 修复的关键不变量。
+    // CheckpointCard 渲染一个 antd Card，根节点带 .ant-card 类；banner 必须在它
+    // 外面，否则 key 切换会把它一起重挂载。
+    const card = banner?.closest(".ant-card");
+    expect(card).toBeNull();
+  });
+
   // 详情 Drawer 替换轮（2026-10-08）：点「查看」按钮应打开右侧 Drawer，渲染该轮的
   // 完整内容。user 轮原样展示 question（含换行）；checkpoint 轮结构化展示
   // phase / status / prompt / options.candidates 全部。

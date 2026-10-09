@@ -52,6 +52,7 @@ import AdminWikiCoveragePage from "./pages/AdminWikiCoveragePage";
 import AdminWikiGraphPage from "./pages/AdminWikiGraphPage";
 import { WikiLinksPage } from "./pages/WikiLinksPage";
 import ResearchListPage from "./pages/research/ResearchListPage";
+import ResearchHistoryPage from "./pages/research/ResearchHistoryPage";
 import ResearchSessionPage from "./pages/research/ResearchSessionPage";
 import ResearchReportPage from "./pages/research/ResearchReportPage";
 import ResearchComparePage from "./pages/research/ResearchComparePage";
@@ -131,6 +132,7 @@ export default function App() {
         <Route path="profile" element={<ProfilePage />} />
         <Route path="change-password" element={<ChangePasswordPage />} />
         <Route path="research" element={<ResearchListPage />} />
+        <Route path="research/history" element={<ResearchHistoryPage />} />
         <Route path="research/compare" element={<ResearchComparePage />} />
         <Route path="research/:id" element={<ResearchSessionPage />} />
         <Route path="research/:id/report" element={<ResearchReportPage />} />

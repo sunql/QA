@@ -1,25 +1,30 @@
-/** 研究入口 — 会话列表 + 发起新研究（feat-research-entry Task 10）。
+/** 研究入口 — 发起新研究。
+ *
+ * 历史会话迁到独立路由 `/research/history`（ResearchHistoryPage）：本页面只
+ * 留「创建 + 跳转」，主内容只剩新建研究表单 + 顶部「查看历史」入口。旧版把
+ * 列表塞到右侧 Drawer 反复遇到 useScrollLocker 在 jsdom 下同步阻塞 user.click
+ * 的环境问题，且「对比」按钮需要先选 2+ 项才能启用，UX 上从 Drawer 里勾选
+ * 也不直观——分两个页面更清晰。
  *
  * 新建会话只做「创建 + 跳转」：不在此处提交首轮 turn（首轮必须由会话页
  * 先 connectStream 再 submitTurn，否则后端不重放历史、进度会被漏掉 —— 见
  * researchStore 的注释）。首轮问题经 location.state 带给会话页。
  *
- * 结构（feat-research-entry-ux-fixes）：主组件只做「拉列表 + 组合」，表单 / 列表 /
- * 行 / 行内删除动作各自是本文件的模块级子组件。模块级是硬约束 —— 组件若定义在父
- * 函数内部，每次父渲染都会重挂载，表单输入与勾选态会当场丢失。
+ * 结构（feat-research-entry-ux-fixes）：主组件只做「组合」，表单是本文件
+ * 的模块级子组件。模块级是硬约束 —— 组件若定义在父函数内部，每次父渲染
+ * 都会重挂载，表单输入会当场丢失。
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { App, Button, Card, Checkbox, Empty, Input, List, Popconfirm, Select, Space, Tag, Typography } from "antd";
-import { DeleteOutlined } from "@ant-design/icons";
+import { App, Button, Card, Input, Select, Space, Typography } from "antd";
+import { HistoryOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
-import { useResearchStore } from "../../stores/researchStore";
-import { useDatasourceOptions, datasourceName } from "../../hooks/useDatasourceOptions";
+import { useDatasourceOptions } from "../../hooks/useDatasourceOptions";
 import { createResearchSession } from "../../api/research";
 import { listModels } from "../../api/modelConfig";
 import type { DataSource } from "../../types/datasource";
 import type { ModelConfig } from "../../types/modelConfig";
-import type { ResearchMode, ResearchSession } from "../../types/research";
+import type { ResearchMode } from "../../types/research";
 
 const { TextArea } = Input;
 
@@ -191,176 +196,27 @@ function NewResearchCard({ sources }: NewResearchCardProps) {
   );
 }
 
-interface SessionDeleteActionProps {
-  sessionId: string;
-  rowLabel: string;
-  onDelete: (id: string) => void;
-}
-
-/** 行内删除动作（二次确认）。可访问名必须带行标识 —— 扁平 aria-label 会让每行同名，
- *  读屏用户无法区分删的是哪条；`rowLabel` 与行内可见标题同源（title 空则回落 question）。 */
-function SessionDeleteAction({ sessionId, rowLabel, onDelete }: SessionDeleteActionProps) {
-  const { t } = useTranslation();
-  return (
-    <Popconfirm
-      title={t("research.list.deleteConfirm")}
-      okText={t("common.confirm")}
-      cancelText={t("common.cancel")}
-      onConfirm={() => onDelete(sessionId)}
-    >
-      <Button
-        type="link"
-        danger
-        icon={<DeleteOutlined />}
-        aria-label={t("research.list.deleteAriaLabel", { name: rowLabel })}
-      >
-        {t("common.delete")}
-      </Button>
-    </Popconfirm>
-  );
-}
-
-interface SessionRowProps {
-  session: ResearchSession;
-  sources: DataSource[];
-  selected: boolean;
-  onToggleSelect: (id: string) => void;
-  onDelete: (id: string) => void;
-}
-
-/** 单条会话行：复选框 + 标题/问题 + 数据源 Tag + 模式 Tag + 三动作。 */
-function SessionRow({ session, sources, selected, onToggleSelect, onDelete }: SessionRowProps) {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  // 行标识与行内可见标题同源：既作复选框标签，也作删除按钮的可访问名。同时保证逐行唯一，
-  // 扁平名会让每一行的删除按钮同名。
-  const rowLabel = session.title || session.question;
-  // 数据源名每行只算一次：守卫与 Tag 共用同一结果。
-  const sourceLabel = datasourceName(sources, session.datasourceId);
-
-  return (
-    <List.Item
-      actions={[
-        <Button key="open" type="link" onClick={() => navigate(`/research/${session.id}`)}>
-          {t("research.list.open")}
-        </Button>,
-        <Button key="report" type="link" onClick={() => navigate(`/research/${session.id}/report`)}>
-          {t("research.list.report")}
-        </Button>,
-        <SessionDeleteAction
-          key="delete"
-          sessionId={session.id}
-          rowLabel={rowLabel}
-          onDelete={onDelete}
-        />,
-      ]}
-    >
-      <Checkbox checked={selected} onChange={() => onToggleSelect(session.id)} aria-label={rowLabel} />
-      <List.Item.Meta title={rowLabel} description={session.question} />
-      {sourceLabel ? <Tag>{sourceLabel}</Tag> : null}
-      <Tag>{t(`research.list.mode.${session.mode}`)}</Tag>
-    </List.Item>
-  );
-}
-
-interface SessionListProps {
-  sessions: ResearchSession[];
-  loading: boolean;
-  sources: DataSource[];
-  selectedIds: string[];
-  onToggleSelect: (id: string) => void;
-  onDelete: (id: string) => void;
-}
-
-/** 会话列表容器（空态文案由 locale 提供）。 */
-function SessionList({ sessions, loading, sources, selectedIds, onToggleSelect, onDelete }: SessionListProps) {
-  const { t } = useTranslation();
-  return (
-    <List
-      loading={loading}
-      dataSource={sessions}
-      locale={{ emptyText: <Empty description={t("research.list.empty")} /> }}
-      renderItem={(session) => (
-        <SessionRow
-          session={session}
-          sources={sources}
-          selected={selectedIds.includes(session.id)}
-          onToggleSelect={onToggleSelect}
-          onDelete={onDelete}
-        />
-      )}
-    />
-  );
-}
-
-interface SessionSelection {
-  selectedIds: string[];
-  toggleSelect: (id: string) => void;
-  removeSession: (id: string) => Promise<void>;
-}
-
-/** 多选与删除。删除成功后必须把该 id 移出多选集合，否则「对比」会带上一个不存在的会话。 */
-function useSessionSelection(): SessionSelection {
-  const { t } = useTranslation();
-  const { message } = App.useApp();
-  const deleteSession = useResearchStore((s) => s.deleteSession);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-
-  const toggleSelect = (id: string) => {
-    setSelectedIds((prev) =>
-      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
-    );
-  };
-
-  const removeSession = async (id: string) => {
-    try {
-      await deleteSession(id);
-      setSelectedIds((prev) => prev.filter((item) => item !== id));
-    } catch {
-      message.error(t("research.list.deleteError"));
-    }
-  };
-
-  return { selectedIds, toggleSelect, removeSession };
-}
-
 export default function ResearchListPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const sessions = useResearchStore((s) => s.sessions);
-  const sessionsLoading = useResearchStore((s) => s.sessionsLoading);
-  const loadSessions = useResearchStore((s) => s.loadSessions);
   const sources = useDatasourceOptions();
-  const { selectedIds, toggleSelect, removeSession } = useSessionSelection();
-
-  useEffect(() => {
-    void loadSessions();
-  }, [loadSessions]);
-
-  const openCompare = () => {
-    if (selectedIds.length < 2) return;
-    navigate(`/research/compare?ids=${selectedIds.join(",")}`);
-  };
 
   return (
     <div style={{ padding: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <Typography.Title level={4} style={{ margin: 0 }}>
           {t("research.list.title")}
         </Typography.Title>
-        <Button type="primary" disabled={selectedIds.length < 2} onClick={openCompare}>
-          {t("research.list.compare")}
+        {/* 历史会话拆到独立路由 /research/history 维护（多选/删除/对比都在那边），
+            本页只做「发起新研究」。点此按钮直达历史页。 */}
+        <Button
+          icon={<HistoryOutlined />}
+          onClick={() => navigate("/research/history")}
+        >
+          {t("research.list.history")}
         </Button>
       </div>
       <NewResearchCard sources={sources} />
-      <SessionList
-        sessions={sessions}
-        loading={sessionsLoading}
-        sources={sources}
-        selectedIds={selectedIds}
-        onToggleSelect={toggleSelect}
-        onDelete={removeSession}
-      />
     </div>
   );
 }

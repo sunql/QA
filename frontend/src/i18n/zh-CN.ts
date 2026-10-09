@@ -3015,6 +3015,13 @@ export const zhCN = {
         attribution: "结论 → 假设验证表 → 数据 → 备选假设",
         compare: "对比维度表 → 数据 → 差异分析",
       },
+      // 历史会话入口：从独立路由 /research/history 进入（多选 / 删除 / 对比都
+      // 在那边），不在本页内做 Drawer 收纳。
+      history: "历史会话",
+    },
+    history: {
+      title: "历史会话",
+      back: "返回",
     },
     session: {
       title: "研究会话",

@@ -369,6 +369,8 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
     activeAbort = null;
     set({
       sessions: [],
+      sessionsLoading: false, // ← 重置 loading 旗：否则下个 case 的 useEffect 看
+      // sessions=[] 但 sessionsLoading=true，永远不调 loadSessions（test isolation bug）
       currentSession: null,
       turns: [],
       events: [],

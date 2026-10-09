@@ -3000,6 +3000,12 @@ export const enUS = {
         attribution: "Conclusion → Hypothesis table → Data → Alternatives",
         compare: "Comparison table → Data → Diff analysis",
       },
+      // 历史会话入口：独立路由 /research/history（多选 / 删除 / 对比都在那边）。
+      history: "History",
+    },
+    history: {
+      title: "Research history",
+      back: "Back",
     },
     session: {
       title: "Research Session",

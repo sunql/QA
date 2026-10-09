@@ -1,8 +1,12 @@
 // ResearchListPage 页面级测试（feat-research-entry Task 15 / B3 覆盖率回填）。
 //
-// 本页此前 0% 覆盖，前端 80% 门槛因此「不可评估」。覆盖：挂载拉列表、空态、
-// 发起新研究（含空/纯空白问题短路）、创建失败提示且不导航、多选 ≥2 才启用「对比」
-// 并跳转 /research/compare?ids=…。
+// 本页此前 0% 覆盖，前端 80% 门槛因此「不可评估」。覆盖：发起新研究（含空/纯
+// 空白问题短路）、创建失败提示且不导航、模式选项带副描述、数据源默认选中、
+// 模型「自动」默认值与请求体 modelId 键的行为。
+//
+// 历史会话不在本页：迁到 /research/history 独立路由（ResearchHistoryPage），
+// 多选/删除/对比的覆盖在 ResearchHistoryPage.test.tsx。本页只测「创建 + 跳转 +
+// 新增入口」三件事。
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -65,6 +69,7 @@ function renderPage() {
         <MemoryRouter initialEntries={["/research"]}>
           <Routes>
             <Route path="/research" element={<ResearchListPage />} />
+            <Route path="/research/history" element={<div data-testid="history-page" />} />
             <Route path="/research/compare" element={<div data-testid="compare-page" />} />
             <Route path="/research/:id" element={<div data-testid="session-page" />} />
           </Routes>
@@ -83,23 +88,12 @@ describe("ResearchListPage", () => {
     httpMock.post.mockResolvedValue({ data: { ...SESSIONS[0], id: "s9" } });
   });
 
-  it("挂载即拉取会话列表；title 为空时回落 question", async () => {
+  it("进列表页不主动拉 sessions：历史会话入口在 /research/history", async () => {
     renderPage();
-
-    await waitFor(() => expect(httpMock.get).toHaveBeenCalledWith("/research/sessions"));
-    expect(screen.getByText("供应商 360°")).toBeInTheDocument();
-    // s2 的 title 为空 ⇒ meta.title 与 description 都落到 question（两个文本节点）
-    expect(screen.getAllByText("为什么下降")).toHaveLength(2);
-    // 「研究」出现两处：Select 的选中项（默认 mode=research）+ s1 的模式 Tag。
-    expect(screen.getAllByText("研究")).toHaveLength(2);
-    expect(screen.getByText("归因")).toBeInTheDocument();
-  });
-
-  it("无会话时渲染空态文案", async () => {
-    mockGet({ sessions: [] });
-    renderPage();
-
-    expect(await screen.findByText("暂无研究会话")).toBeInTheDocument();
+    // 等到 datasources/models 这两个无副作用的 GET 至少各打了一次，证明 mount
+    // 完成；断言 sessions 列表接口**未**被打（历史会话拆走，本页不做 list）。
+    await waitFor(() => expect(httpMock.get).toHaveBeenCalledWith("/datasources", { params: { activeOnly: true } }));
+    expect(httpMock.get).not.toHaveBeenCalledWith("/research/sessions");
   });
 
   it("输入问题后点「开始研究」：POST 会话并带 state 跳转到会话页", async () => {
@@ -149,59 +143,6 @@ describe("ResearchListPage", () => {
     expect(screen.getByTestId("probe").textContent).toBe("/research");
   });
 
-  it("选中 ≥2 个会话后「对比」可用并跳转 compare?ids=", async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await waitFor(() => expect(httpMock.get).toHaveBeenCalled());
-
-    // antd 对「两个汉字」的按钮文案自动插空格 ⇒ 可访问名是「对 比」，用正则匹配。
-    const compareButton = screen.getByRole("button", { name: /对\s*比/ });
-    expect(compareButton).toBeDisabled();
-
-    await user.click(screen.getByLabelText("供应商 360°"));
-    expect(compareButton).toBeDisabled(); // 只选 1 个仍禁用
-
-    await user.click(screen.getByLabelText("为什么下降"));
-    await waitFor(() => expect(compareButton).toBeEnabled());
-
-    await user.click(compareButton);
-    expect(await screen.findByTestId("compare-page")).toBeInTheDocument();
-    expect(screen.getByTestId("probe").textContent).toBe("/research/compare?ids=s1,s2");
-  });
-
-  it("删除：二次确认后调 DELETE 并从列表移除", async () => {
-    const user = userEvent.setup();
-    httpMock.delete.mockResolvedValue({ data: null });
-    renderPage();
-    await waitFor(() => expect(httpMock.get).toHaveBeenCalled());
-
-    // 每行删除按钮的 aria-label 带行标识（title 优先，空则回落 question），
-    // 故列表多行时仍能唯一定位到 s1 那一行。
-    await user.click(screen.getByRole("button", { name: "删除研究会话：供应商 360°" }));
-    // Popconfirm 的确定按钮：antd 会给两字中文按钮插空格 ⇒ 可访问名是「确 定」。
-    await user.click(await screen.findByRole("button", { name: /确\s*定/ }));
-
-    await waitFor(() =>
-      expect(httpMock.delete).toHaveBeenCalledWith("/research/sessions/s1"),
-    );
-    await waitFor(() => expect(screen.queryByText("供应商 360°")).not.toBeInTheDocument());
-    // s2 未删，仍在列表（其 title 为空 ⇒ Meta 的 title 与 description 都落到 question，两个文本节点）
-    expect(screen.getAllByText("为什么下降")).toHaveLength(2);
-  });
-
-  it("删除失败：提示错误且列表保持原样（不做乐观移除）", async () => {
-    const user = userEvent.setup();
-    httpMock.delete.mockRejectedValue(new Error("boom"));
-    renderPage();
-    await waitFor(() => expect(httpMock.get).toHaveBeenCalled());
-
-    await user.click(screen.getByRole("button", { name: "删除研究会话：供应商 360°" }));
-    await user.click(await screen.findByRole("button", { name: /确\s*定/ }));
-
-    expect(await screen.findByText("删除失败")).toBeInTheDocument();
-    expect(screen.getByText("供应商 360°")).toBeInTheDocument();
-  });
-
   it("模式选项带副描述，且页面说明三模式只改报告章节结构", async () => {
     renderPage();
     await waitFor(() => expect(httpMock.get).toHaveBeenCalled());
@@ -213,14 +154,12 @@ describe("ResearchListPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("新建表单默认选中默认数据源；列表项显示所用数据源名", async () => {
+  it("新建表单默认选中默认数据源", async () => {
     renderPage();
     await waitFor(() => expect(httpMock.get).toHaveBeenCalledWith("/datasources", { params: { activeOnly: true } }));
 
-    // 「THBI Oracle」出现 2 处：新建表单选中项 + s1（datasourceId=1）的 Tag。
-    await waitFor(() => expect(screen.getAllByText("THBI Oracle")).toHaveLength(2));
-    // s2 无 datasourceId ⇒ 不渲染源 Tag，故「PG 报表库」不出现。
-    expect(screen.queryByText("PG 报表库")).not.toBeInTheDocument();
+    // 新建表单的 Select 选中项渲染 THBI Oracle；s1/s2 都不在本页（迁到 history）。
+    await waitFor(() => expect(screen.getByText("THBI Oracle")).toBeInTheDocument());
   });
 
   it("模型下拉默认「自动」；不选时请求体不带 modelId 键", async () => {
@@ -260,5 +199,16 @@ describe("ResearchListPage", () => {
         modelId: 2,
       }),
     );
+  });
+
+  it("点「历史会话」按钮跳到 /research/history", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(httpMock.get).toHaveBeenCalled());
+
+    // antd 对四个汉字按钮自动插空格 ⇒ 可访问名带空格，用正则兼容。
+    await user.click(screen.getByRole("button", { name: /历\s*史\s*会\s*话/ }));
+    expect(await screen.findByTestId("history-page")).toBeInTheDocument();
+    expect(screen.getByTestId("probe").textContent).toBe("/research/history");
   });
 });

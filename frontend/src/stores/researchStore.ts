@@ -102,13 +102,16 @@ export function applyResearchEvent(
     case "research.checkpoint":
       return { events, pendingCheckpoint: checkpointFromEvent(event.payload), resolutionInFlight: false };
     case "research.done":
-      return { events, streaming: false };
+      // B5：done 帧到达意味着 answer 已落地（后端会先停 research.checkpoint 才走完 phases），
+      // 故同时清 resolutionInFlight，让"分析完成"通知能弹（line 70 这道闸不再被卡）。
+      return { events, streaming: false, resolutionInFlight: false };
     case "research.error": {
       // 处置只按 uiHint 的「类」分支，绝不按 code 逐个判断（用户裁定规则 ③）。
       if (isTerminalError(event.payload)) {
         return {
           events,
           streaming: false,
+          resolutionInFlight: false,
           error: typeof event.payload.message === "string" ? event.payload.message : "research.error",
         };
       }
@@ -121,15 +124,21 @@ export function applyResearchEvent(
         return {
           events,
           streaming: false,
+          resolutionInFlight: false,
           error: message,
           conflictError: message,
         };
       }
       // 降级类（degraded / 字段缺失）：流保持打开，状态机会继续推进，后面可能还有 done。
-      return { events };
+      return { events, resolutionInFlight: false };
     }
     default:
-      return { events };
+      // 任何**非 checkpoint / 非 done / 非 error**的帧（research.finding /
+      // research.report / research.step.* / research.intent / ...）都意味着
+      // "上一题 answer 已被后端消化、研究继续推进"——resolutionInFlight 必须
+      // 解锁，否则后续 done 帧到达时 trigger 的 `resolutionInFlight` 闸永远 true、
+      // 通知永远不弹。
+      return { events, resolutionInFlight: false };
   }
 }
 

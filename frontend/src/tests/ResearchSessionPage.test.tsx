@@ -460,6 +460,50 @@ describe("ResearchSessionPage", () => {
       expect(queryNotifications()).toHaveLength(0);
     });
 
+    // 真实业务流 bug 修复（2026-10-09）：用户答完最后一个检查点 → resolutionInFlight=true
+    // （answer 路径 284 行）→ SSE 推 research.finding（applyResearchEvent default 分支）
+    // → 推 research.report → 推 research.done。如果 reducer default 不重置
+    // resolutionInFlight，trigger 闸永远 true，通知永远不弹。修复：default 分支显式
+    // resolutionInFlight: false（任何中间帧都意味着上一题 answer 已被消化）。
+    it("answer 后 SSE 推 finding/report/done：通知必须弹", async () => {
+      renderPage();
+      await waitForStreamingSettled();
+
+      act(() => {
+        useResearchStore.setState({ resolutionInFlight: true });
+      });
+
+      // **走真实 reducer**（store 实际路径：line 342 `set(state => applyResearchEvent(...))`）——
+      // 直接 setState events 会绕过 reducer，看不到真实业务流。
+      const { applyResearchEvent } = await import("../stores/researchStore");
+      act(() => {
+        useResearchStore.setState((s) =>
+          applyResearchEvent(
+            { ...s, events: [...s.events, { name: "research.finding", payload: { claim: "测试结论" } } as never] },
+            { name: "research.finding", payload: { claim: "测试结论" } } as never,
+          ),
+        );
+      });
+      act(() => {
+        useResearchStore.setState((s) =>
+          applyResearchEvent(
+            { ...s, events: [...s.events, { name: "research.report", payload: {} } as never] },
+            { name: "research.report", payload: {} } as never,
+          ),
+        );
+      });
+      act(() => {
+        useResearchStore.setState((s) =>
+          applyResearchEvent(
+            { ...s, events: [...s.events, { name: "research.done", payload: {} } as never] },
+            { name: "research.done", payload: {} } as never,
+          ),
+        );
+      });
+
+      await waitFor(() => expect(queryNotifications()).toHaveLength(1));
+    });
+
     it("conflictError + 同帧 done：toast 消费 conflict 后弹完成通知（真实业务流）", async () => {
       // 真实业务：conflictError 来了 → 页面 toast 显示 → 立即 clearConflictError
       // （B3.5 一次性消费）→ 紧接着 SSE 发 done 事件 → 此时 conflictError=null

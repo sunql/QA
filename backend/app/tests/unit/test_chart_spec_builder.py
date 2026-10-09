@@ -43,6 +43,13 @@ _CROSS_ROWS = [
     {"SUPPLIER_NAME": "S2", "MATERIAL_NAME": "M2", "AMT": 40},
 ]
 
+# R4 Task 4：报告形态（`site_code` 维度 + `bill_cnt` 指标）—— aliasOverrides 的用例用。
+_TRANSLATED_ROWS = [
+    {"site_code": "C1", "bill_cnt": 10},
+    {"site_code": "C2", "bill_cnt": 5},
+    {"site_code": "C3", "bill_cnt": 3},
+]
+
 
 def _plan(**overrides) -> QueryPlan:
     base: dict = {"target": "DWD_GOODS_RECEIPT_DTL"}
@@ -358,3 +365,55 @@ class TestImmutability:
 
         assert rows == before
         assert plan.groupBy == ("SUPPLIER_NAME",)
+
+
+class TestAliasOverrides:
+    """R4 Task 4：报告路径 plan=None，拿不到 `plan.aggregations[].alias`，只能由调用方
+    直接注入「结果集列名 → 标签」。
+
+    报告图表此前轴/图例全是英文列名（`site_code` / `bill cnt`），根因就是
+    `_aliasByField(plan=None)` 恒返 `{}`。
+    """
+
+    def test_buildSpec_aliasOverrides_rename_dimension_and_measure_labels(self) -> None:
+        """aliasOverrides 直接给出「结果集列名 → 标签」；plan=None（报告路径）时也生效."""
+        decision = decideChartKind(
+            buildChartSignals(None, ("site_code", "bill_cnt"), _TRANSLATED_ROWS, "按基地分"),
+            _THRESHOLDS,
+        )
+        spec = buildSpec(
+            decision,
+            buildChartSignals(None, ("site_code", "bill_cnt"), _TRANSLATED_ROWS, "按基地分"),
+            _TRANSLATED_ROWS,
+            None,
+            aliasOverrides={"site_code": "基地", "bill_cnt": "账单数"},
+        )
+        labels = {d.field: d.label for d in spec.dimensions} | {
+            m.field: m.label for m in spec.measures
+        }
+        assert labels.get("site_code") == "基地"
+        assert labels.get("bill_cnt") == "账单数"
+
+    def test_labels_stay_prettified_when_no_overrides(self) -> None:
+        """回归守卫：不传 aliasOverrides（chat 侧调用形态）⇒ 标签与今日逐字一致."""
+        spec, _ = _build(["site_code", "bill_cnt"], _TRANSLATED_ROWS)
+        labels = {d.field: d.label for d in spec.dimensions} | {
+            m.field: m.label for m in spec.measures
+        }
+        assert labels.get("site_code") == "site code"
+        assert labels.get("bill_cnt") == "bill cnt"
+
+    def test_aliasOverrides_beat_the_plan_alias(self) -> None:
+        """两者同时给时 overrides 优先（报告注入的标签是显示名 SSOT 的直译）."""
+        plan = _plan(
+            groupBy=("site_code",),
+            aggregations=(Aggregation(function="SUM", property="bill_cnt", alias="计划别名"),),
+        )
+        signals = buildChartSignals(plan, ["site_code", "bill_cnt"], _TRANSLATED_ROWS, "")
+        decision = decideChartKind(signals, _THRESHOLDS)
+        spec = buildSpec(
+            decision, signals, _TRANSLATED_ROWS, plan,
+            aliasOverrides={"bill_cnt": "账单数"},
+        )
+
+        assert spec.measures[0].label == "账单数"

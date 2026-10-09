@@ -10,6 +10,8 @@ session，见 task-6-report.md「偏差」）。
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.services.report_planner import ReportPlanner
@@ -353,6 +355,12 @@ async def test_chart_block_chartType_is_not_none(fakeReportDepsWithStats) -> Non
 
     注：断言用小写，因为 ChartType 枚举值是 str-enum 小写（前端 VALID_CHART_TYPES
     也是小写白名单）。brief 列了「大写」是契约误导。
+
+    R4-4：原断言「落在 11 种类型之一」等于不断言，收紧到 fixture 形状应得的类型。
+    `fakeReportDepsWithStats` 的行是 `[{"month": "2026-01", "cnt": 100}]` ⇒ 1 行 /
+    1 指标（`cnt` 数值）/ 0 维度（`month` 被 `_isTimeColumn` 认成时间列，不进
+    `dimensions`）⇒ 规则表首个命中的是 `R01_SINGLE_VALUE_KPI`（**无条件**：不读阈值、
+    无候选集、`decideChartKind` 不带 labelHint ⇒ 无 LLM 消歧）⇒ 类型确定，不随库/配置漂移。
     """
     planner, sessionId, turnId = fakeReportDepsWithStats
     payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
@@ -360,12 +368,7 @@ async def test_chart_block_chartType_is_not_none(fakeReportDepsWithStats) -> Non
     chart_block = next(b for b in data["blocks"] if b["type"] == "chart")
     content = chart_block["content"]
     # chartType 不再是 None（也不是字符串 'None'），而是决策引擎给的 kind
-    assert content.get("chartType") is not None
-    # 应当是 ChartType 枚举值字符串（小写，与前端 VALID_CHART_TYPES 对齐）
-    assert content["chartType"] in (
-        "table", "bar", "pie", "line", "kpi", "scatter", "heatmap", "hbar",
-        "donut", "combo", "waterfall",
-    )
+    assert content.get("chartType") == "kpi"
 
 
 @pytest.mark.asyncio
@@ -672,3 +675,78 @@ async def test_finding_summary_in_llm_prompt_is_translated(fakeReportDepsWithSql
     joined = "\n".join(sent)
     assert "site_code" not in joined
     assert "基地" in joined
+
+
+# ---------------------------------------------------------------------------
+# R4 plan Task 4：报告图表标签中文化（报告无 QueryPlan，只能靠 aliasOverrides 注入）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "brief（task-4-brief.md Step 5）钉死的断言在报告路径上不可达，已 RED 实证："
+        "fakeReportDepsWithSqlOnly 的 2 行 × 2 维度 ⇒ R13_RAW_DETAIL_TABLE ⇒ "
+        "chartType='table'，其 echartsOption 逐字回显 spec.columns + 原始行"
+        "（`{'columns': ['bill_cnt','site_code','confirm_stage'], 'rows': [...原始值...]}`）"
+        "⇒ 'site_code' 必然在 dumped 里、'基地' 必然不在。"
+        "更根本的是：chart_renderer 在任何 kind 下都**不输出维度标签** —— 类目轴装的是"
+        "维度**取值**（C1），饼图/热力图/瀑布同理，scatter 只输出指标名；唯一能落到 "
+        "echartsOption 的标签是**指标**标签（系列名/KPI label）。故「维度显示名进 option」"
+        "只能靠改 chart_renderer（chat 侧共享、本任务禁止），或改 TABLE 负载的 columns"
+        "（前端 DataTable 用 columns 当行取值键，会渲染成空表）。"
+        "按 Task 3 既定裁定「改 brief 钉死的测试须经人类裁定」，此处只备案、不放宽断言；"
+        "可达面上的等价判别由 test_chart_measure_label_is_translated 承担。"
+    ),
+)
+async def test_chart_labels_are_translated(fakeReportDepsWithSqlOnly) -> None:
+    """图表轴/图例标签中文化（报告无 QueryPlan，只能靠 aliasOverrides）."""
+    planner, sessionId, turnId = fakeReportDepsWithSqlOnly
+    payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    chart = next(b for s in payload["sections"] if s["kind"] == "data"
+                 for b in s["blocks"] if b["type"] == "chart")
+    option = chart["content"]["echartsOption"]
+    dumped = json.dumps(option, ensure_ascii=False)
+    assert "基地" in dumped
+    assert "site_code" not in dumped
+
+
+@pytest.fixture
+async def fakeReportDepsWithSqlOnlyOneDim(db_session):
+    """单维度形态（1 维度 + 1 指标）⇒ 决策引擎给 BAR，指标标签才进得了 echartsOption.
+
+    两维形态走 R13 明细表，TABLE 负载逐字回显原始列名（前端表格按列名取值，契约冻结），
+    「标签中文化」在那条路径上不可观测 —— 这是形态决定的，不是缺陷。报告里真实存在
+    单维度聚合（`SELECT SITE_CODE, COUNT(*) ... GROUP BY SITE_CODE`）。
+    """
+    return await _sqlOnlyDeps(
+        db_session,
+        supportingSql=(
+            "SELECT SITE_CODE, COUNT(*) AS bill_cnt "
+            "FROM DWD_RECONCILIATION_BILL_DTL GROUP BY SITE_CODE"
+        ),
+        rows=[
+            {"site_code": "C1", "bill_cnt": 10},
+            {"site_code": "C2", "bill_cnt": 5},
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_chart_measure_label_is_translated(fakeReportDepsWithSqlOnlyOneDim) -> None:
+    """报告图表的中文标签真的渲染进 echartsOption（可达面上的端到端判别）.
+
+    BAR 的系列名取自指标标签（图例），这正是报告路径此前显示英文列名的位置。
+    """
+    planner, sessionId, turnId = fakeReportDepsWithSqlOnlyOneDim
+    payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    chart = next(
+        b for s in payload["sections"] if s["kind"] == "data"
+        for b in s["blocks"] if b["type"] == "chart"
+    )
+    assert chart["content"]["chartType"] == "bar"
+    dumped = json.dumps(chart["content"]["echartsOption"], ensure_ascii=False)
+    assert "账单数" in dumped          # 指标标签中文化（系列名 = 图例）
+    assert "bill_cnt" not in dumped    # 原始列名不再出现
+    assert "site_code" not in dumped   # 维度列名也不再出现（类目轴装的是取值 C1/C2）

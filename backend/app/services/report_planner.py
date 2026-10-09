@@ -341,6 +341,9 @@ async def _chartContent(view: FindingView, *, session: AsyncSession) -> dict[str
     R3 接入 chat-side chart 链路（chart_decision + spec_builder + renderer）：
     - plan=None（报告无 QueryPlan，决策引擎按数据形状+问句派生）；
     - 失败降级为 TABLE，绝不抛错（不让整份报告炸）。
+
+    R4：报告无 QueryPlan ⇒ 自建 aliasOverrides（列名 → 中文），否则图表轴/图例
+    只能是英文列名（`_aliasByField(plan=None)` 恒返 `{}`）。
     """
     if not view.rows:
         return {
@@ -351,11 +354,16 @@ async def _chartContent(view: FindingView, *, session: AsyncSession) -> dict[str
             "echartsOption": None,
         }
     columns = list(view.rows[0].keys())
+    aliasOverrides = {
+        column: await resolveColumnName(session, view.sourceTable, column)
+        for column in columns
+    }
     return await buildReportChart(
         session,
         rows=view.rows,
         columns=columns,
         question=view.claimText or "",
+        aliasOverrides=aliasOverrides,
     )
 
 

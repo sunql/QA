@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from app.domain.chart_spec import (
     ChartSpec,
     SpecDimension,
@@ -80,22 +82,25 @@ def _resolveColumn(name: str | None, columns: tuple[str, ...]) -> str | None:
     return None
 
 
-def _aliasByField(plan: QueryPlan | None, columns: tuple[str, ...]) -> dict[str, str]:
-    """「结果集列名 → 中文别名」映射（别名优先，缺了才退回列名）。
+def _aliasByField(
+    plan: QueryPlan | None,
+    columns: tuple[str, ...],
+    overrides: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """「结果集列名 → 中文别名」映射（overrides 最优先，其次 plan 聚合别名）.
 
-    键必须是**结果集列名**（`signals.measures` 就是它），故先用 `_resolveColumn`
-    把 plan 的属性名折过去 —— 否则 `aliases.get("rcv_qty_puu")` 永远落空，
-    「占比」这类中文别名一个都显示不出来。
+    `overrides` 供**无 QueryPlan** 的路径（研究报告）注入标签 —— 否则
+    `aliases.get("site_code")` 永远落空，图表轴/图例只能是英文列名。
     """
+    aliases: dict[str, str] = dict(overrides or {})
     if plan is None:
-        return {}
-    aliases: dict[str, str] = {}
+        return aliases
     for aggregation in plan.aggregations:
         if not aggregation.alias:
             continue
         column = _resolveColumn(aggregation.property, columns)
         if column is not None:
-            aliases[column] = aggregation.alias
+            aliases.setdefault(column, aggregation.alias)
     return aliases
 
 
@@ -134,8 +139,17 @@ def _dimensionFields(signals: ChartSignals, kind: ChartType) -> tuple[str, ...]:
     return axes[:_MAX_DIMENSIONS]
 
 
-def _buildDimensions(fields: tuple[str, ...]) -> tuple[SpecDimension, ...]:
-    return tuple(SpecDimension(field=f, label=_prettify(f)) for f in fields)
+def _buildDimensions(
+    fields: tuple[str, ...], aliases: dict[str, str]
+) -> tuple[SpecDimension, ...]:
+    """维度标签：显示名优先，缺了才退回「下划线换空格」的列名。
+
+    维度标签此前恒为 `_prettify(f)` —— 报告路径（plan=None）注入的显示名若只在
+    指标上生效，「图表轴」就仍是英文列名，与注入的意图相反。
+    """
+    return tuple(
+        SpecDimension(field=f, label=aliases.get(f) or _prettify(f)) for f in fields
+    )
 
 
 def _buildMeasures(fields: tuple[str, ...], aliases: dict[str, str]) -> tuple[SpecMeasure, ...]:
@@ -221,12 +235,18 @@ def buildSpec(
     decision: ChartDecision,
     signals: ChartSignals,
     data: list[dict],
-    plan: QueryPlan | None,
+    plan: QueryPlan | None = None,
+    *,
+    aliasOverrides: Mapping[str, str] | None = None,
 ) -> ChartSpec:
-    """把决策落到一份完整 spec。纯函数：不改 plan、不改 data、不改 signals。"""
+    """把决策落到一份完整 spec。纯函数：不改 plan、不改 data、不改 signals。
+
+    `aliasOverrides`（关键字专用，默认 None）供**无 QueryPlan** 的报告路径注入
+    「结果集列名 → 显示名」；默认 None 时行为与既有 chat 链路逐字一致。
+    """
     kind = decision.kind
-    aliases = _aliasByField(plan, signals.columns)
-    dimensions = _buildDimensions(_dimensionFields(signals, kind))
+    aliases = _aliasByField(plan, signals.columns, aliasOverrides)
+    dimensions = _buildDimensions(_dimensionFields(signals, kind), aliases)
     measures = _buildMeasures(_measureFields(signals, kind), aliases)
 
     return ChartSpec(

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,10 +31,14 @@ async def buildReportChart(
     columns: list[str],
     question: str = "",
     plan: QueryPlan | None = None,
+    aliasOverrides: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """报告侧 chart 构建。返回 chat-style 形态（kind/columns/data/echartsOption）。
 
     永不抛错：决策引擎/渲染任一环节失败 → 退化为 TABLE 兜底。
+
+    `aliasOverrides`（默认 None）：「结果集列名 → 显示名」，报告无 QueryPlan 时
+    由调用方注入，否则图表标签只能是英文列名。
     """
     if not rows or not columns:
         return _emptyChart(columns)
@@ -42,7 +47,7 @@ async def buildReportChart(
         signals = buildChartSignals(plan, list(columns), rows, question)
         thresholds = await loadChartThresholds(session)
         decision = decideChartKind(signals, thresholds)
-        spec: ChartSpec = buildSpec(decision, signals, rows, plan)
+        spec: ChartSpec = buildSpec(decision, signals, rows, plan, aliasOverrides=aliasOverrides)
         echartsOption = renderChartOption(spec, rows)
         kindStr = spec.kind.value if hasattr(spec.kind, "value") else str(spec.kind)
         return {

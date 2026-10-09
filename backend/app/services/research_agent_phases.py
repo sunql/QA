@@ -28,6 +28,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.enterprise_semantic_layer import EmptyResearchScopeError
 from app.services.hypothesis_service import Hypothesis
+from app.services.research_finding_aggregator import (
+    aggregateRows,
+    buildEnhancedClaim,
+)
 from app.services.learning.prompt_fence import neutralizeFence
 from app.services.research_agent_execution import (
     adapterFor,
@@ -306,6 +310,7 @@ class ResearchAgentPhasesMixin:
                 * (VERIFY_OK_FACTOR if verified else VERIFY_FAIL_FACTOR),
                 CONFIDENCE_ROUND_DIGITS,
             )
+            enhancedClaim, statsObj = self._composeVerifyEnhancement(outcome, candidate)
             row = await self._sessions.saveFinding(
                 session,
                 sessionId=sessionId,
@@ -314,6 +319,8 @@ class ResearchAgentPhasesMixin:
                 supportingSql=candidate.get("verificationSql"),
                 supportingData=findingData(outcome),
                 confidence=confidence,
+                enhancedClaim=enhancedClaim,
+                stats=statsObj.asdict() if statsObj else None,
             )
             findings.append(
                 {
@@ -326,6 +333,22 @@ class ResearchAgentPhasesMixin:
             await emitEvent(emit, EVENT_FINDING, findings[-1])
         state["findings"] = findings
         return None
+
+    def _composeVerifyEnhancement(
+        self, outcome: dict[str, Any], candidate: dict[str, Any],
+    ) -> tuple[str | None, "FindingStats | None"]:
+        """对 verify 阶段的 rows 做聚合，返回 (enhancedClaim, statsObj)。
+
+        无维度 / 空 rows → (None, None)，触发 saveFinding 回落原 hypothesis。
+        """
+        rowsForStats = list(outcome.get("rows") or [])
+        statsObj = aggregateRows(rowsForStats) if rowsForStats else None
+        enhancedClaim = (
+            buildEnhancedClaim(statsObj, originalClaim=candidate["statement"])
+            if statsObj and statsObj.rowCount > 0 and statsObj.topContributors
+            else None
+        )
+        return enhancedClaim, statsObj
 
     async def _rewriteVerificationSqlForDialect(
         self, session: AsyncSession, *, sessionId: uuid.UUID, state: dict[str, Any],

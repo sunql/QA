@@ -2101,3 +2101,89 @@ async def test_resume_turn_reinjects_session_model_choice(dbSession, makeService
     assert seen and {cfg.id for cfg in seen} == {42}
     assert router.calls == []
     assert set(configs.activeOnlyCalls) == {False}
+
+
+# ---------------------------------------------------------------------------
+# R2 plan Task 3：_stageVerify 接入聚合 + claim_text 回填
+# ---------------------------------------------------------------------------
+
+
+class _VerifyRowsRunner(FakeRunner):
+    """FakeRunner 子类：runVerification 返回指定行（FakeRunner 的实现里硬编码 [{"cnt": 1}]）。"""
+    def __init__(self, verifyRows, **kwargs):
+        super().__init__(**kwargs)
+        self._verifyRows = list(verifyRows)
+
+    async def runVerification(self, session, hypothesis, *, adapter=None, dialectArgs=None):
+        self.verifyCalls.append(hypothesis.verificationSql)
+        self.verifyAdapters.append(adapter)
+        if self._error is not None:
+            return {"rows": [], "error": self._error}
+        return {"rows": list(self._verifyRows), "error": None}
+
+
+@pytest.mark.asyncio
+async def test_stageVerify_aggregates_and_rewrites_claim_text(
+    dbSession, makeService
+) -> None:
+    """verify 阶段：rows 非空 + 有维度时，claim_text 被改写为「按 ... 占 ...%」形态；stats 落库。"""
+    verifyRows = [
+        {"base": "J1", "amount": 100},
+        {"base": "J1", "amount": 80},
+        {"base": "J1", "amount": 50},
+        {"base": "T2", "amount": 20},
+        {"base": "H1", "amount": 10},
+    ]
+    svc = makeService(runner=_VerifyRowsRunner(verifyRows=verifyRows), autoConfirm=False,
+                      llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON))
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #2
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #3 → verify 落 finding
+    # 候选 hypothesis "供应商A供货减少" 没动；FakeRunner 给 5 行 base/amount；
+    # 聚合后 topContributors=[{dim: "base", value: "J1", sharePct: 60.0, count: 3}]
+    # buildEnhancedClaim 应输出 "按 base 分，J1 占 60.0%"
+    finding = (
+        await dbSession.execute(
+            text(
+                "SELECT claim_text, confidence, supporting_data FROM research_finding"
+                " WHERE session_id = :sid"
+            ),
+            {"sid": s.id},
+        )
+    ).one()
+    assert finding.claim_text.startswith("按 base 分，J1 占 60.0%")
+    assert finding.supporting_data["rowCount"] == 5
+    assert finding.supporting_data["stats"]["topContributors"][0]["dim"] == "base"
+    assert finding.supporting_data["stats"]["topContributors"][0]["value"] == "J1"
+    assert finding.supporting_data["stats"]["distribution"]["amount"]["max"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_stageVerify_falls_back_to_original_claim_when_no_dimensions(
+    dbSession, makeService
+) -> None:
+    """verify 阶段：rows 全是数值（无维度）→ 不强行分组，claim_text 保持原 hypothesis。"""
+    verifyRows = [{"cnt": 100}, {"cnt": 50}]  # 1 列 cnt，无维度
+    svc = makeService(runner=_VerifyRowsRunner(verifyRows=verifyRows), autoConfirm=False,
+                      llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON))
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")
+    await _resolve(svc, dbSession, s.id, "confirm")
+    await _resolve(svc, dbSession, s.id, "confirm")
+    finding = (
+        await dbSession.execute(
+            text(
+                "SELECT claim_text, supporting_data FROM research_finding"
+                " WHERE session_id = :sid"
+            ),
+            {"sid": s.id},
+        )
+    ).one()
+    # 无维度 ⇒ stats 不会有 topContributors ⇒ enhancedClaim=None ⇒ 走原 hypothesis
+    assert finding.claim_text == "供应商A供货减少"
+    # stats 仍落库（distribution 等统计有意义）
+    assert "stats" in finding.supporting_data
+    assert finding.supporting_data["stats"]["distribution"]["cnt"]["max"] == 100.0

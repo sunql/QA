@@ -144,7 +144,11 @@ export default function ResearchSessionPage() {
           onClick={() => setTimelineOpen(true)}
         >
           {t("research.session.timeline")}
-          {turns.length > 0 ? ` (${t("research.session.stepCount", { n: turns.length })})` : ""}
+          {/* 没选定会话时（currentSession=null）不显示步数——此时 store 残留的
+              turns 是历史会话数据，不应误导用户以为当前在跑。 */}
+          {currentSession && turns.length > 0
+            ? ` (${t("research.session.stepCount", { n: turns.length })})`
+            : ""}
         </Button>
         {datasourceName(sources, currentSession?.datasourceId) ? (
           <Tag>{datasourceName(sources, currentSession?.datasourceId)}</Tag>
@@ -196,7 +200,6 @@ export default function ResearchSessionPage() {
         </Descriptions>
       </Drawer>
       {error ? <Alert type="error" message={error} style={{ marginBottom: 16 }} /> : null}
-      {streaming ? <ResearchProgress events={events} /> : null}
       <Drawer
         title={t("research.session.timelineTitle")}
         placement="right"
@@ -205,6 +208,7 @@ export default function ResearchSessionPage() {
         onClose={() => setTimelineOpen(false)}
         destroyOnClose
       >
+        {streaming ? <ResearchProgress events={events} /> : null}
         <Spin spinning={streaming && turns.length === 0}>
           <ResearchTimeline
             turns={turns}

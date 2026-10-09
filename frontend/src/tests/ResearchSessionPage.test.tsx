@@ -107,6 +107,10 @@ describe("ResearchSessionPage", () => {
 
     renderPage();
 
+    // ResearchProgress 现在在右侧 timeline Drawer 内（live 进度挪走，UX 与
+    // 用户显式请求一致）。先打开 Drawer 才能观察实时进度。
+    fireEvent.click(screen.getByRole("button", { name: /时间线/ }));
+
     await waitFor(() => {
       expect(screen.getByText("执行查询")).toBeInTheDocument();
       expect(screen.getByText("得出结论")).toBeInTheDocument();
@@ -267,6 +271,32 @@ describe("ResearchSessionPage", () => {
     expect(within(dialog).getByText(/UNIQUEMARKER_INTENT/)).toBeInTheDocument();
     expect(within(dialog).getByText(/UNIQUEMARKER_STEPS/)).toBeInTheDocument();
     expect(within(dialog).getByText(/UNIQUEMARKER_PLAN/)).toBeInTheDocument();
+  });
+
+  // 步数残留修复：openSession 失败 / 还没拉到会话时，store.turns 是上次会话的
+  // 残留数据，按钮不应该展示误导性的「时间线 (9 步)」。条件：**currentSession
+  // 已设置**才显示步数。
+  it("currentSession=null 时（残留 turns 来自上次会话）：按钮不显示步数", async () => {
+    // 模拟残留状态：openSession 失败 / 还没拉会话，但 store.turns 有上次会话数据
+    act(() => {
+      useResearchStore.setState({
+        currentSession: null,
+        turns: [
+          { id: "stale-1", turnIndex: 0, role: "agent", content: { text: "stale" }, createdAt: "2026-10-01" },
+          { id: "stale-2", turnIndex: 1, role: "agent", content: { text: "stale" }, createdAt: "2026-10-01" },
+        ],
+      });
+    });
+
+    renderPage();
+
+    // 按钮存在但**不带**步数后缀（关键不变量：未来谁去掉 currentSession 条件
+    // 立刻红）。accessible name 是「history 时间线」（icon label + text），
+    // 用部分匹配。
+    const trigger = screen.getByRole("button", { name: /时间线/ });
+    expect(trigger).toBeInTheDocument();
+    // 关键不变量：accessible name 里**不**含步数。
+    expect(trigger).not.toHaveTextContent(/\d+\s*步/);
   });
 
   // B5 修复：answer 提交后页面必须把 store.resolutionInFlight 透传给 CheckpointCard，
@@ -712,16 +742,11 @@ describe("ResearchSessionPage", () => {
         </ConfigProvider>,
       );
 
-      // 等 done 帧被 events 数组吸收
-      await waitFor(
-        () => {
-          const s = useResearchStore.getState();
-          expect(s.events.some((e) => e.name === "research.done")).toBe(true);
-        },
-        { timeout: 5000 },
-      );
-
-      await waitFor(() => expect(queryNotifications()).toHaveLength(1));
+      // 直接等通知弹出：done 帧被 reducer 处理后会触发 trigger useEffect 弹通知。
+      // 不查 events 数组——useResearchSession 在 streaming 边沿会重拉会话
+      // （researchStore.openSession 把 events 重置为 []），所以 events 里
+      // 短时存在 done 也可能被立即清掉；通知一旦弹出就是终态。
+      await waitFor(() => expect(queryNotifications()).toHaveLength(1), { timeout: 5000 });
     });
   });
 });

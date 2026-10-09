@@ -3016,6 +3016,16 @@ export const enUS = {
       compare: "Compare",
       complete_with_report: "Analysis complete",
       view_report: "View Report",
+      // Long title + full metadata live in a right-side Drawer; header has a trigger
+      // button + the Drawer itself.
+      sessionInfo: "Session info",
+      sessionInfoTitle: "Session details",
+      question: "Original question",
+      mode: "Mode",
+      datasource: "Datasource",
+      createdAt: "Created at",
+      updatedAt: "Updated at",
+      close: "Close",
     },
     compare: {
       title: "Compare",

@@ -3030,6 +3030,15 @@ export const zhCN = {
       compare: "对比",
       complete_with_report: "分析已完成",
       view_report: "查看报告",
+      // 长标题/完整元数据在右侧 Drawer；header 按钮 + Drawer 标题
+      sessionInfo: "会话信息",
+      sessionInfoTitle: "会话详情",
+      question: "原始问题",
+      mode: "模式",
+      datasource: "数据源",
+      createdAt: "创建于",
+      updatedAt: "更新于",
+      close: "关闭",
     },
     compare: {
       title: "对比分析",

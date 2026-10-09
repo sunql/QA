@@ -6,7 +6,8 @@
  */
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { Alert, App, Button, Input, Space, Spin, Tag, Typography } from "antd";
+import { Alert, App, Button, Descriptions, Drawer, Input, Space, Spin, Tag, Typography } from "antd";
+import { InfoCircleOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { useResearchStore } from "../../stores/researchStore";
 import { useResearchSession } from "../../hooks/useResearchSession";
@@ -45,6 +46,9 @@ export default function ResearchSessionPage() {
 
   const [input, setInput] = useState("");
   const [detailPayload, setDetailPayload] = useState<ResearchDetailPayload | null>(null);
+  // 长标题/完整元数据放在右侧 Drawer，header 不再被长文本撑开影响主内容。
+  // 默认收起，用户需要时点按钮打开（与 ResearchDetailDrawer 同一交互范式）。
+  const [sessionInfoOpen, setSessionInfoOpen] = useState(false);
 
   // B3.5: conflictError toast — dispatch clearConflictError after toast so it fires once.
   useEffect(() => {
@@ -122,9 +126,12 @@ export default function ResearchSessionPage() {
     <div style={{ padding: 16 }}>
       <Space style={{ marginBottom: 16 }}>
         <Button onClick={() => navigate("/research")}>{t("research.session.back")}</Button>
-        <Typography.Title level={4} style={{ margin: 0 }}>
-          {currentSession?.title || t("research.session.title")}
-        </Typography.Title>
+        <Button
+          icon={<InfoCircleOutlined />}
+          onClick={() => setSessionInfoOpen(true)}
+        >
+          {t("research.session.sessionInfo")}
+        </Button>
         {datasourceName(sources, currentSession?.datasourceId) ? (
           <Tag>{datasourceName(sources, currentSession?.datasourceId)}</Tag>
         ) : null}
@@ -135,6 +142,45 @@ export default function ResearchSessionPage() {
           {t("research.session.report")}
         </Button>
       </Space>
+      <Drawer
+        title={t("research.session.sessionInfoTitle")}
+        placement="right"
+        width={420}
+        open={sessionInfoOpen}
+        onClose={() => setSessionInfoOpen(false)}
+        destroyOnClose
+      >
+        <Typography.Title
+          level={4}
+          style={{ marginTop: 0, wordBreak: "break-word" }}
+        >
+          {currentSession?.title || t("research.session.title")}
+        </Typography.Title>
+        <Descriptions column={1} size="small">
+          <Descriptions.Item label={t("research.session.question")}>
+            <Typography.Paragraph
+              style={{ whiteSpace: "pre-wrap", marginBottom: 0 }}
+            >
+              {currentSession?.question}
+            </Typography.Paragraph>
+          </Descriptions.Item>
+          <Descriptions.Item label={t("research.session.mode")}>
+            <Tag>{currentSession?.mode}</Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label={t("research.session.status")}>
+            <Tag>{currentSession?.status}</Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label={t("research.session.datasource")}>
+            {datasourceName(sources, currentSession?.datasourceId) || "-"}
+          </Descriptions.Item>
+          <Descriptions.Item label={t("research.session.createdAt")}>
+            {currentSession?.createdAt}
+          </Descriptions.Item>
+          <Descriptions.Item label={t("research.session.updatedAt")}>
+            {currentSession?.updatedAt}
+          </Descriptions.Item>
+        </Descriptions>
+      </Drawer>
       {error ? <Alert type="error" message={error} style={{ marginBottom: 16 }} /> : null}
       {streaming ? <ResearchProgress events={events} /> : null}
       <Spin spinning={streaming && turns.length === 0}>

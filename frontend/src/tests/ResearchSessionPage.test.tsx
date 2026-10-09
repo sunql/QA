@@ -168,6 +168,44 @@ describe("ResearchSessionPage", () => {
     expect(await screen.findByText("THBI Oracle")).toBeInTheDocument();
   });
 
+  // UX 修复：长标题（如「分步分析：今年采购订单的一个趋势情况…」）把 header 撑满
+  // 影响主内容。改成 header 只有「会话信息」按钮 + 右侧 Drawer 展示完整标题 +
+  // 元数据。
+  it("header 不直接渲染长标题，点会话信息按钮打开右侧 Drawer 展示完整标题", async () => {
+    const longTitle =
+      "分步分析：今年采购订单的一个趋势情况，从基地、供应商、物料等几个维度给出结论";
+    httpMock.get.mockResolvedValue({
+      data: {
+        session: {
+          id: "s1",
+          title: longTitle,
+          mode: "research",
+          status: "running",
+          question: "原始问题：今年采购订单趋势？",
+          createdAt: "2026-10-01T00:00:00Z",
+          updatedAt: "2026-10-09T00:00:00Z",
+        },
+        turns: [],
+        pendingCheckpoint: null,
+      },
+    });
+
+    renderPage();
+
+    // header 不应有这个长标题（被搬走了）
+    expect(screen.queryByText(longTitle)).not.toBeInTheDocument();
+
+    // 但有触发按钮
+    const trigger = await screen.findByRole("button", { name: /会话信息/ });
+    fireEvent.click(trigger);
+
+    // Drawer 打开后长标题在 dialog 内
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(longTitle)).toBeInTheDocument();
+    // 元数据也都展示
+    expect(within(dialog).getByText("原始问题：今年采购订单趋势？")).toBeInTheDocument();
+  });
+
   // B5 修复：answer 提交后页面必须把 store.resolutionInFlight 透传给 CheckpointCard，
   // 否则 store 已置 true 但卡片不显示「处理中…」Spin，用户看到「点完毫无反应」假象。
   it("answer 提交中：把 store.resolutionInFlight 透传给 CheckpointCard，渲染「处理中…」", async () => {

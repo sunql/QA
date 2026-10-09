@@ -97,8 +97,9 @@ SOURCE_LABEL_LIMIT = 60
 
 # --- LLM 提示词（只喂摘要字符串，绝不喂原始行）---------------------------------
 _NARRATIVE_SYSTEM = (
-    "你是企业数据分析师。仅依据 <user_content> 中给出的结论条目写一段{intent}；"
-    "不得引入未给出的数字，不得编造数据；用中文，不超过 200 字。"
+    "你是企业数据分析师。基于 <user_content> 中给出的统计摘要（topN / 分布 / 环比 / 异常）"
+    "写一段{intent}；可以引用摘要中明确给出的数字（如「按基地 J1 占 78%」），"
+    "但不得编造摘要未给出的数字、不得编造数据；用中文，不超过 200 字。"
 )
 _NARRATIVE_INTENTS: dict[str, str] = {
     "executive_summary": "执行摘要（总体结论 + 关键发现）",
@@ -106,8 +107,9 @@ _NARRATIVE_INTENTS: dict[str, str] = {
     "diff_analysis": "差异分析（各结论之间的一致与分歧）",
 }
 _COMMENTARY_SYSTEM = (
-    "你是企业数据分析师。仅依据 <user_content> 中的一条结论写 1-3 条要点，"
-    "每条一行、以短横线开头；不得引入未给出的数字，不得编造数据；用中文。"
+    "你是企业数据分析师。基于 <user_content> 中给出的一条结论及其统计摘要，"
+    "写 1-3 条要点，每条一行、以短横线开头；可以引用摘要中明确给出的数字，"
+    "但不得编造未给出的数字；用中文。"
 )
 
 
@@ -155,6 +157,7 @@ class FindingView:
     rows: list[dict[str, Any]]
     rowCount: int
     error: str | None
+    stats: dict[str, Any] | None = None  # NEW
 
     @property
     def verified(self) -> bool:
@@ -209,6 +212,7 @@ def _findingView(row: ResearchFinding) -> FindingView:
         rows=rows,
         rowCount=int(data.get("rowCount") or len(rows)),
         error=data.get("error"),
+        stats=data.get("stats"),  # NEW: pull from supporting_data["stats"] if present
     )
 
 
@@ -219,9 +223,27 @@ def _findingRef(view: FindingView) -> SourceRef:
 
 
 def _findingSummary(view: FindingView) -> str:
-    """结论摘要（喂 LLM 的唯一数据形态：不含任何原始行）。"""
+    """结论摘要（喂 LLM 的唯一数据形态：不含任何原始行，但可引用 stats 数字）。"""
     state = "已验证" if view.verified else f"未验证：{view.error}"
-    return f"{view.claimText}（置信度 {view.confidence}，{state}，{view.rowCount} 行）"
+    base = f"{view.claimText}（置信度 {view.confidence}，{state}，{view.rowCount} 行）"
+    if not view.stats or not view.stats.get("topContributors"):
+        return base
+    top1 = view.stats["topContributors"][0]
+    dimLabel = str(top1.get("dim") or "")
+    valueLabel = str(top1.get("value") or "")
+    sharePct = float(top1.get("sharePct") or 0.0)
+    return f"{base}；按 {dimLabel} 分，{valueLabel} 占 {sharePct}%"
+
+
+def _topContributorLabel(stats: dict[str, Any] | None) -> str:
+    """top1 贡献者标签：「base=J1 (60.0%)」；无 stats → 「—」。"""
+    if not stats:
+        return "—"
+    top = stats.get("topContributors") or []
+    if not top:
+        return "—"
+    top1 = top[0]
+    return f"{top1.get('dim') or ''}={top1.get('value') or ''} ({float(top1.get('sharePct') or 0):.1f}%)"
 
 
 def _findingDigest(ctx: _Context) -> str:
@@ -243,6 +265,65 @@ def _bulletItems(text: str) -> list[str]:
 
 def _splitBullets(text: str) -> list[str]:
     return [item[:MAX_BULLET_CHARS] for item in _bulletItems(text)][:MAX_BULLETS]
+
+
+def _formatStatsBullet(stats: dict[str, Any]) -> list[str]:
+    """stats → bullet 行（确定性、不经 LLM）。
+
+    形如：
+      - 维度 topN：base=J1 (60.0%)，base=T2 (20.0%)，base=H1 (20.0%)
+      - 数值分布：amount min=10, max=100, mean=52.0, std=38.2
+      - 环比：2026-01→2026-02 delta=+15%
+      - 异常：第 3 行 z=2.5
+    空 stats / 缺字段 → 返空列表（不在 report 留占位行）。
+    """
+    lines: list[str] = []
+    top = stats.get("topContributors") or []
+    if top:
+        items = ", ".join(
+            f"{t.get('dim') or ''}={t.get('value') or ''} ({float(t.get('sharePct') or 0):.1f}%)"
+            for t in top[:3]
+        )
+        lines.append(f"- 维度 topN：{items}")
+    dist = stats.get("distribution") or {}
+    if dist:
+        firstCol, firstStats = next(iter(dist.items()), (None, None))
+        if firstCol and firstStats:
+            lines.append(
+                f"- 数值分布：{firstCol} "
+                f"min={firstStats.get('min', 0):g}, "
+                f"max={firstStats.get('max', 0):g}, "
+                f"mean={firstStats.get('mean', 0):.1f}, "
+                f"std={firstStats.get('std', 0):.1f}"
+            )
+    mom = stats.get("mom") or []
+    if mom:
+        firstMom = mom[0]
+        lines.append(
+            f"- 环比：{firstMom.get('period', '')}→{mom[1].get('period', '')} "
+            f"delta={firstMom.get('deltaPct', 0):+.1f}%" if len(mom) >= 2
+            else f"- 环比：{firstMom.get('period', '')}（仅 1 期）"
+        )
+    anomalies = stats.get("anomalies") or []
+    if anomalies:
+        first = anomalies[0]
+        lines.append(f"- 异常：{first.get('dim', '')} z={float(first.get('zScore', 0)):.2f}")
+    return lines
+
+
+def _numericRangeLabel(stats: dict[str, Any] | None) -> str:
+    """第一个数值列的 min-max：「10–100」；无 stats → 「—」。"""
+    if not stats:
+        return "—"
+    dist = stats.get("distribution") or {}
+    if not dist:
+        return "—"
+    firstCol, firstStats = next(iter(dist.items()), (None, None))
+    if not firstCol or not firstStats:
+        return "—"
+    lo = float(firstStats.get("min", 0))
+    hi = float(firstStats.get("max", 0))
+    return f"{lo:g}–{hi:g}"
 
 
 def _tableBlock(columns: list[str], rows: list[dict[str, Any]], refs: tuple[SourceRef, ...] = ()) -> ReportBlock:
@@ -507,12 +588,16 @@ class ReportPlanner:
         return await self._narrativeSection("diff_analysis", ctx, client=client)
 
     async def _dataSection(self, ctx: _Context, *, client: Any) -> ReportSection:
-        """数据章节：每条结论一段「chart（行数据逐字）+ bullet（LLM 解读）」。"""
+        """数据章节：每条结论「chart（行数据逐字）+ stats bullet（确定性摘要）+ LLM bullet（解读）」。"""
         blocks: list[ReportBlock] = []
         for view in ctx.findings[:MAX_REPORT_FINDINGS]:
             ref = _findingRef(view)
             if view.rows:
                 blocks.append(ReportBlock(BLOCK_CHART, _chartContent(view), (ref,)))
+            if view.stats:
+                statsLines = _formatStatsBullet(view.stats)
+                if statsLines:
+                    blocks.append(ReportBlock(BLOCK_BULLET, statsLines, (ref,)))
             bullets = await self._commentary(view, ctx, client=client)
             blocks.append(ReportBlock(BLOCK_BULLET, bullets, (ref,)))
         if not blocks:
@@ -582,13 +667,14 @@ class ReportPlanner:
         views = ctx.findings[:MAX_REPORT_FINDINGS]
         if not views:
             return self._textSection("hypothesis_table", EMPTY_FINDING_TEXT)
-        columns = ["假设", "置信度", "已验证", "数据行数"]
+        columns = ["假设", "置信度", "已验证", "数据行数", "主要贡献者"]  # NEW: 主要贡献者
         rows = [
             {
                 "假设": view.claimText,
                 "置信度": view.confidence,
                 "已验证": "是" if view.verified else "否",
                 "数据行数": view.rowCount,
+                "主要贡献者": _topContributorLabel(view.stats),  # NEW
             }
             for view in views
         ]
@@ -612,13 +698,14 @@ class ReportPlanner:
         views = ctx.findings[:MAX_REPORT_FINDINGS]
         if not views:
             return self._textSection("comparison_table", EMPTY_FINDING_TEXT)
-        columns = ["结论", "置信度", "数据行数", "支撑 SQL"]
+        columns = ["结论", "置信度", "数据行数", "支撑 SQL", "数值范围"]  # NEW: 数值范围
         rows = [
             {
                 "结论": view.claimText,
                 "置信度": view.confidence,
                 "数据行数": view.rowCount,
                 "支撑 SQL": view.sql or "",
+                "数值范围": _numericRangeLabel(view.stats),  # NEW
             }
             for view in views
         ]

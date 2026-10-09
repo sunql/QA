@@ -3026,6 +3026,11 @@ export const enUS = {
       createdAt: "Created at",
       updatedAt: "Updated at",
       close: "Close",
+      // Full turn timeline (multi-step research history) lives in a right-side Drawer;
+      // header button shows the step count.
+      timeline: "Timeline",
+      timelineTitle: "Research timeline",
+      stepCount: "{n} steps",
     },
     compare: {
       title: "Compare",

@@ -206,6 +206,69 @@ describe("ResearchSessionPage", () => {
     expect(within(dialog).getByText("原始问题：今年采购订单趋势？")).toBeInTheDocument();
   });
 
+  // UX 修复：多步研究的 turn 序列（解析意图/生成执行步骤/开始步骤/执行查询/...
+  // 20+ 条）渲染为长竖直列表，占主内容 1/4 高度。挪到右侧 Drawer，header 加
+  // 「时间线 (N 步)」按钮，N 来自 turns.length。
+  it("主内容区不直接渲染完整时间线，点时间线按钮打开 Drawer 展示，header 按钮文案带步数", async () => {
+    const manyTurns = [
+      {
+        id: "t1",
+        turnIndex: 0,
+        role: "agent",
+        content: { text: "解析意图 UNIQUEMARKER_INTENT" },
+        createdAt: "2026-10-04T00:00:00Z",
+      },
+      {
+        id: "t2",
+        turnIndex: 1,
+        role: "agent",
+        content: { text: "生成执行步骤 UNIQUEMARKER_STEPS" },
+        createdAt: "2026-10-04T00:00:01Z",
+      },
+      {
+        id: "t3",
+        turnIndex: 2,
+        role: "agent",
+        content: { text: "制定研究计划 UNIQUEMARKER_PLAN" },
+        createdAt: "2026-10-04T00:00:02Z",
+      },
+    ];
+    httpMock.get.mockResolvedValue({
+      data: {
+        session: {
+          id: "s1",
+          title: "t",
+          mode: "research",
+          status: "running",
+          question: "q",
+          createdAt: "2026-10-01T00:00:00Z",
+          updatedAt: "2026-10-09T00:00:00Z",
+        },
+        turns: manyTurns,
+        pendingCheckpoint: null,
+      },
+    });
+
+    renderPage();
+
+    // header 按钮文案带步数（3 步）
+    const trigger = await screen.findByRole("button", { name: /时间线.*3.*步/ });
+    expect(trigger).toBeInTheDocument();
+
+    // Drawer 未开时主内容不应有任何 turn 文本（关键不变量：未来谁把 timeline
+    // 移回主内容区，测试立刻红）
+    expect(screen.queryByText(/UNIQUEMARKER_INTENT/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/UNIQUEMARKER_STEPS/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/UNIQUEMARKER_PLAN/)).not.toBeInTheDocument();
+
+    // 点按钮 → Drawer 打开
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/UNIQUEMARKER_INTENT/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/UNIQUEMARKER_STEPS/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/UNIQUEMARKER_PLAN/)).toBeInTheDocument();
+  });
+
   // B5 修复：answer 提交后页面必须把 store.resolutionInFlight 透传给 CheckpointCard，
   // 否则 store 已置 true 但卡片不显示「处理中…」Spin，用户看到「点完毫无反应」假象。
   it("answer 提交中：把 store.resolutionInFlight 透传给 CheckpointCard，渲染「处理中…」", async () => {
@@ -333,6 +396,8 @@ describe("ResearchSessionPage", () => {
 
     renderPage();
 
+    // 时间线挪到了右侧 Drawer，先打开 Drawer 才能看到 turn 文本和「查看」按钮。
+    fireEvent.click(screen.getByRole("button", { name: /时间线/ }));
     // 触发 user 轮渲染（用 startsWith 避开 getByText 的全等匹配 —— <p> 文本带
     // \n 时 testing-library 把它和换行后的子节点一起视为多元素）。
     await waitFor(() =>
@@ -403,6 +468,8 @@ describe("ResearchSessionPage", () => {
 
     renderPage();
 
+    // 时间线挪到右侧 Drawer 后先打开
+    fireEvent.click(screen.getByRole("button", { name: /时间线/ }));
     // 等候选渲染
     await waitFor(() => expect(screen.getByText("上游采购订单下达量收缩")).toBeInTheDocument());
     // 点查看

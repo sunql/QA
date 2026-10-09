@@ -7,7 +7,7 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Alert, App, Button, Descriptions, Drawer, Input, Space, Spin, Tag, Typography } from "antd";
-import { InfoCircleOutlined } from "@ant-design/icons";
+import { HistoryOutlined, InfoCircleOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { useResearchStore } from "../../stores/researchStore";
 import { useResearchSession } from "../../hooks/useResearchSession";
@@ -49,6 +49,10 @@ export default function ResearchSessionPage() {
   // 长标题/完整元数据放在右侧 Drawer，header 不再被长文本撑开影响主内容。
   // 默认收起，用户需要时点按钮打开（与 ResearchDetailDrawer 同一交互范式）。
   const [sessionInfoOpen, setSessionInfoOpen] = useState(false);
+  // 完整时间线（多步研究的 turn 序列）也在右侧 Drawer；主内容区不再展示长竖直
+  // 列表（解析意图/生成执行步骤/开始步骤/执行查询/...），否则会占据主内容 1/4 高度。
+  // 流式期间 ResearchProgress 仍展示实时进度，Drawer 内是历史完整记录。
+  const [timelineOpen, setTimelineOpen] = useState(false);
 
   // B3.5: conflictError toast — dispatch clearConflictError after toast so it fires once.
   useEffect(() => {
@@ -119,6 +123,9 @@ export default function ResearchSessionPage() {
 
   const handleDetail = (payload: ResearchDetailPayload) => {
     setDetailPayload(payload);
+    // 时间线 Drawer 内点「查看」→ 关闭时间线 Drawer，让详情 Drawer 占满右侧。
+    // 避免两个 Drawer 同时打开互相挤压可视区域。
+    setTimelineOpen(false);
   };
   const closeDetail = () => setDetailPayload(null);
 
@@ -131,6 +138,13 @@ export default function ResearchSessionPage() {
           onClick={() => setSessionInfoOpen(true)}
         >
           {t("research.session.sessionInfo")}
+        </Button>
+        <Button
+          icon={<HistoryOutlined />}
+          onClick={() => setTimelineOpen(true)}
+        >
+          {t("research.session.timeline")}
+          {turns.length > 0 ? ` (${t("research.session.stepCount", { n: turns.length })})` : ""}
         </Button>
         {datasourceName(sources, currentSession?.datasourceId) ? (
           <Tag>{datasourceName(sources, currentSession?.datasourceId)}</Tag>
@@ -183,13 +197,22 @@ export default function ResearchSessionPage() {
       </Drawer>
       {error ? <Alert type="error" message={error} style={{ marginBottom: 16 }} /> : null}
       {streaming ? <ResearchProgress events={events} /> : null}
-      <Spin spinning={streaming && turns.length === 0}>
-        <ResearchTimeline
-          turns={turns}
-          checkpoints={pendingCheckpoint ? [pendingCheckpoint] : []}
-          onDetail={handleDetail}
-        />
-      </Spin>
+      <Drawer
+        title={t("research.session.timelineTitle")}
+        placement="right"
+        width={480}
+        open={timelineOpen}
+        onClose={() => setTimelineOpen(false)}
+        destroyOnClose
+      >
+        <Spin spinning={streaming && turns.length === 0}>
+          <ResearchTimeline
+            turns={turns}
+            checkpoints={pendingCheckpoint ? [pendingCheckpoint] : []}
+            onDetail={handleDetail}
+          />
+        </Spin>
+      </Drawer>
       <ResearchDetailDrawer payload={detailPayload} onClose={closeDetail} />
       {pendingCheckpoint ? (
         <CheckpointCard

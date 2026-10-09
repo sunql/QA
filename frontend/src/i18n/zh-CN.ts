@@ -3039,6 +3039,10 @@ export const zhCN = {
       createdAt: "创建于",
       updatedAt: "更新于",
       close: "关闭",
+      // 完整时间线（多步研究的 turn 序列）在右侧 Drawer，header 按钮带步数
+      timeline: "时间线",
+      timelineTitle: "研究时间线",
+      stepCount: "{n} 步",
     },
     compare: {
       title: "对比分析",

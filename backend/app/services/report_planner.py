@@ -344,6 +344,9 @@ async def _chartContent(view: FindingView, *, session: AsyncSession) -> dict[str
 
     R4：报告无 QueryPlan ⇒ 自建 aliasOverrides（列名 → 中文），否则图表轴/图例
     只能是英文列名（`_aliasByField(plan=None)` 恒返 `{}`）。
+    只注入**真的解析出显示名**的列：`resolveColumnName` 未命中时返回原列名（identity），
+    而标签构造是 `aliases.get(f) or _prettify(f)` —— identity 也 truthy，会把
+    `receipt_qty` 短路成原始列名，连 pre-R4 的 `receipt qty` 都丢掉。
     """
     if not view.rows:
         return {
@@ -354,10 +357,11 @@ async def _chartContent(view: FindingView, *, session: AsyncSession) -> dict[str
             "echartsOption": None,
         }
     columns = list(view.rows[0].keys())
-    aliasOverrides = {
-        column: await resolveColumnName(session, view.sourceTable, column)
+    resolved = [
+        (column, await resolveColumnName(session, view.sourceTable, column))
         for column in columns
-    }
+    ]
+    aliasOverrides = {column: name for column, name in resolved if name != column}
     return await buildReportChart(
         session,
         rows=view.rows,

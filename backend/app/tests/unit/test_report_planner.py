@@ -750,3 +750,49 @@ async def test_chart_measure_label_is_translated(fakeReportDepsWithSqlOnlyOneDim
     assert "账单数" in dumped          # 指标标签中文化（系列名 = 图例）
     assert "bill_cnt" not in dumped    # 原始列名不再出现
     assert "site_code" not in dumped   # 维度列名也不再出现（类目轴装的是取值 C1/C2）
+
+
+@pytest.fixture
+async def fakeReportDepsWithSqlOnlyUnmappedMeasure(db_session):
+    """同单维度形态，但指标列**不在显示字典里**（`receipt_qty`）.
+
+    `DISPLAY_COLUMN_DICT` 只收录实测出现过的列名，而 LLM 的聚合别名每次取数都变
+    （R4 真机 e2e 拿到过 `bill_count` / `receipt_qty` / `avg_per_bill`）。未命中的列
+    必须落回 `_prettify`（下划线换空格），这条路径才覆盖「字典覆盖不到的多数情况」。
+    """
+    return await _sqlOnlyDeps(
+        db_session,
+        supportingSql=(
+            "SELECT SITE_CODE, SUM(RECEIPT_QTY) AS receipt_qty "
+            "FROM DWD_RECONCILIATION_BILL_DTL GROUP BY SITE_CODE"
+        ),
+        rows=[
+            {"site_code": "C1", "receipt_qty": 9812},
+            {"site_code": "C2", "receipt_qty": 7401},
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_chart_unmapped_measure_label_stays_prettified(
+    fakeReportDepsWithSqlOnlyUnmappedMeasure,
+) -> None:
+    """字典未命中的指标列仍走 `_prettify`：`receipt_qty` → `receipt qty`.
+
+    回归守卫（R4 整卷评审 A3）：`aliasOverrides` 若对**每一列**注入解析结果，未命中
+    时的 identity 映射（`resolveColumnName` 落空返回原列名）会短路掉
+    `aliases.get(f) or _prettify(f)` —— identity 也是 truthy。后果是报告图表的系列名
+    退回原始列名（R4 真机 e2e 的 `bill_count` / `receipt_qty` 系列名即此），比 pre-R4
+    的 `receipt qty` 更差，与「标签更好看」的目标相反。故只注入**真的解析出显示名**
+    的列（`name != column`）。
+    """
+    planner, sessionId, turnId = fakeReportDepsWithSqlOnlyUnmappedMeasure
+    payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    chart = next(
+        b for s in payload["sections"] if s["kind"] == "data"
+        for b in s["blocks"] if b["type"] == "chart"
+    )
+    assert chart["content"]["chartType"] == "bar"
+    dumped = json.dumps(chart["content"]["echartsOption"], ensure_ascii=False)
+    assert "receipt qty" in dumped       # 未命中字典 ⇒ 下划线换空格
+    assert "receipt_qty" not in dumped   # identity alias 不再把原始列名钉死在图例上

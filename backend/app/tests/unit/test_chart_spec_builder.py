@@ -418,6 +418,26 @@ class TestAliasOverrides:
 
         assert spec.measures[0].label == "账单数"
 
+    def test_last_plan_alias_wins_for_the_same_result_column(self) -> None:
+        """chat 原语义：两条聚合落到同一结果列时**后写覆盖**（不是先写赢）.
+
+        回归守卫（R4 整卷评审 A1）：`_aliasByField` 曾把 plan 聚合的赋值从
+        `aliases[column] = ...`（last-wins）改成 `setdefault`（first-wins），这是
+        chat 路径（`chart_service.py:127` 是唯一其它调用方）上未被守卫的行为变更 ——
+        同一 property 上两条聚合（不同别名）时图例标签会换成先写的那条。
+        修法是「先按原语义建 plan 映射，再把 overrides 叠上去」，而不是改赋值语义。
+        """
+        plan = _plan(
+            groupBy=("SUPPLIER_NAME",),
+            aggregations=(
+                Aggregation(function="SUM", property="RCV_QTY_PUU", alias="供货量"),
+                Aggregation(function="SUM", property="RCV_QTY_PUU", alias="总供货量"),
+            ),
+        )
+        spec, _ = _build(["SUPPLIER_NAME", "RCV_QTY_PUU"], _ROWS, plan=plan)
+
+        assert spec.measures[0].label == "总供货量"
+
 
 class TestChatDimensionLabelsIgnoreAggregationAliases:
     """回归守卫：`_buildDimensions` 只能吃**注入的 overrides**，不能吃

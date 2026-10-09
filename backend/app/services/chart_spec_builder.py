@@ -91,17 +91,19 @@ def _aliasByField(
 
     `overrides` 供**无 QueryPlan** 的路径（研究报告）注入标签 —— 否则
     `aliases.get("site_code")` 永远落空，图表轴/图例只能是英文列名。
+
+    plan 映射**保持原语义：后写覆盖**（同一结果列上多条聚合时，最后一条的别名胜出 ——
+    chat 侧行为逐字不变）；overrides 只是叠在它上面的一层，不改 plan 侧的赋值语义。
     """
-    aliases: dict[str, str] = dict(overrides or {})
-    if plan is None:
-        return aliases
-    for aggregation in plan.aggregations:
-        if not aggregation.alias:
-            continue
-        column = _resolveColumn(aggregation.property, columns)
-        if column is not None:
-            aliases.setdefault(column, aggregation.alias)
-    return aliases
+    aliases: dict[str, str] = {}
+    if plan is not None:
+        for aggregation in plan.aggregations:
+            if not aggregation.alias:
+                continue
+            column = _resolveColumn(aggregation.property, columns)
+            if column is not None:
+                aliases[column] = aggregation.alias
+    return {**aliases, **(overrides or {})}
 
 
 def _measureFields(signals: ChartSignals, kind: ChartType) -> tuple[str, ...]:

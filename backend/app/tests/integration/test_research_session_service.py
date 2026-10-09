@@ -181,6 +181,69 @@ async def test_save_finding_and_update_session_status(dbSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_save_finding_supports_datetime_and_decimal_rows(dbSession) -> None:
+    """supportingData["rows"] 含 datetime/Decimal 时不抛 TypeError。
+
+    2026-10-09 复盘 3188a28c + 25d597a6：Oracle 19c 真机数据里常带 DATE/TRUNC
+    列（datetime）和 number(p,s)（Decimal）。SQLAlchemy asyncpg 默认 JSON 编码
+    不认这两种类型，整条 finding INSERT 抛 ``TypeError: Object of type
+    datetime is not JSON serializable``，verify 阶段整段崩，session 被打 failed
+    标，前端看到"无提示 + 报告不存在"。
+
+    本契约：``saveFinding`` 在边界把 datetime / Decimal 强制转 ISO 字符串 / float
+    入库，**不**要求 caller 先手工 coerce（与项目 `json.dumps(..., default=str)`
+    的 5+ 处既有约定一致）。
+    """
+    from datetime import datetime as _dt
+    from decimal import Decimal as _Dec
+
+    svc = ResearchSessionService()
+    s = await svc.createSession(dbSession, userId=1, question="q")
+    turn = await svc.appendTurn(dbSession, sessionId=s.id, role="agent", content={})
+
+    dt = _dt(2026, 10, 9, 12, 30, 45)
+    dec = _Dec("0.4567")
+    payload = {
+        "rows": [
+            {"month_id": dt, "cnt": 12, "share": dec},
+            {"month_id": dt, "cnt": 8, "share": _Dec("0.3")},
+        ],
+        "rowCount": 2,
+        "error": None,
+        "sql": "SELECT TRUNC(ARR_DATE, 'MM') AS month_id, COUNT(*) AS cnt FROM DWD_ARRIVAL_ORDER_DTL",
+    }
+    finding = await svc.saveFinding(
+        dbSession,
+        sessionId=s.id,
+        turnId=turn.id,
+        claimText="到货量月度趋势下降 33%",
+        supportingSql=payload["sql"],
+        supportingData=payload,
+        confidence=0.45,
+    )
+    assert finding.id is not None
+    # DB 真值断言：datetime/Decimal 应**已**转 ISO/float 落库（不抛）
+    dbRow = (
+        await dbSession.execute(
+            text("SELECT supporting_data FROM research_finding WHERE id = :id"),
+            {"id": finding.id},
+        )
+    ).first()
+    assert dbRow is not None
+    sd = dbRow[0]
+    assert isinstance(sd, dict)
+    assert sd["rowCount"] == 2
+    first = sd["rows"][0]
+    assert isinstance(first["month_id"], str), (
+        f"datetime 应被 ISO 化, 实得: {type(first['month_id']).__name__}"
+    )
+    assert first["month_id"].startswith("2026-10-09"), first["month_id"]
+    assert isinstance(first["share"], float), (
+        f"Decimal 应被 float 化, 实得: {type(first['share']).__name__}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_resolve_checkpoint_rejects_stale(dbSession) -> None:
     """expires_at 已过的 checkpoint 视为已非 pending。"""
     svc = ResearchSessionService()

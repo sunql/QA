@@ -16,6 +16,7 @@ research_checkpoint / research_finding / research_report。
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -48,6 +49,44 @@ CHECKPOINT_STATUSES = frozenset({"confirmed", "modified", "rejected"})
 """
 SESSION_STATUSES = frozenset({"running", "awaiting_user", "done", "failed", "aborted"})
 """会话状态合法取值（设计 §2 表 DDL：running | awaiting_user | done | failed | aborted）。"""
+
+
+def _coerceJsonSafe(obj: Any) -> Any:
+    """把不可 JSON 序列化的值（datetime / Decimal / bytes）转成 JSONB 可接受的形态。
+
+    与项目 `json.dumps(..., default=str)` 既有约定一致（agent_tools_nl2sql /
+    chat_service / report_template_service 等 5+ 处）。本实现走自定义递归而非
+    ``default=str``，原因：``default=str`` 会把 datetime 渲成 ``"2026-10-09
+    12:30:45+00:00"`` 这种**含空格**字符串，前端 Date 解析常踩；改用
+    ``datetime.isoformat()`` 显式给 ISO 8601（与 chat_service._dumpTimestamp
+    渲染口径一致）。
+
+    Decimal → float：evidence_record_service 等多处用 ``Decimal`` 算 sha256，
+    入库后转 float 不影响 evidence 校验（同一 Decimal 与其 float 化值在
+    sha256 之外无对照场景）。
+    """
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, bytes):
+        try:
+            return obj.decode("utf-8")
+        except UnicodeDecodeError:
+            return obj.hex()
+    if isinstance(obj, dict):
+        return {str(k): _coerceJsonSafe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_coerceJsonSafe(v) for v in obj]
+    if isinstance(obj, (set, frozenset)):
+        return [_coerceJsonSafe(v) for v in obj]
+    # 兜底：调 json.dumps(default=str) 渲成字符串（与项目惯例一致）
+    try:
+        return json.loads(json.dumps(obj, default=str, ensure_ascii=False))
+    except Exception:
+        return str(obj)
 PROMPT_KEY = "prompt"
 """checkpoint 无 prompt 列，提示文案随 options 落 JSONB 的键名（Task 5 读同键）。"""
 TITLE_MAX_LEN = 200
@@ -276,16 +315,29 @@ class ResearchSessionService:
         supportingData: dict[str, Any],
         confidence: float,
     ) -> ResearchFinding:
-        """落一条结论（含支撑 SQL / 数据 / 置信度）。"""
+        """落一条结论（含支撑 SQL / 数据 / 置信度）。
+
+        supportingData 边界 coerce（2026-10-09）：
+        Oracle 19c 真机 rows 常含 DATE / TRUNC 列（``datetime``）和
+        ``number(p,s)``（``Decimal``）。SQLAlchemy asyncpg 默认 JSON 编码器不认
+        这两类，整条 INSERT 抛 ``TypeError: Object of type datetime is not JSON
+        serializable``，导致 verify 阶段崩 → session failed → 前端看到"无提示 +
+        报告不存在"。
+
+        与项目 `json.dumps(..., default=str)` 既有约定一致（见 agent_tools_nl2sql
+        / chat_service / report_template_service 等 5+ 处）：在写入边界把
+        datetime/Decimal 转成 ISO 字符串 / float，**不**要求 caller 手工 coerce。
+        """
         if not 0.0 <= confidence <= 1.0:
             logger.warning("置信度越界: session=%s confidence=%s", sessionId, confidence)
             raise ValueError(f"confidence 必须落在 [0, 1]: {confidence}")
+        coercedData = _coerceJsonSafe(supportingData or {})
         row = ResearchFinding(
             session_id=sessionId,
             turn_id=turnId,
             claim_text=claimText,
             supporting_sql=supportingSql,
-            supporting_data=supportingData or {},
+            supporting_data=coercedData,
             confidence=Decimal(str(confidence)),
         )
         session.add(row)
@@ -323,7 +375,7 @@ class ResearchSessionService:
         row = ResearchReport(
             session_id=sessionId,
             version=nextVersion,
-            payload=payload or {},
+            payload=_coerceJsonSafe(payload or {}),
             rendered_md=renderedMd,
             status=REPORT_PUBLISHED,
         )

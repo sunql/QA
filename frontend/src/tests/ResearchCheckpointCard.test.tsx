@@ -458,3 +458,48 @@ describe("CheckpointCard tooltip per phase", () => {
     });
   });
 });
+
+describe("CheckpointCard - resolutionInFlight 状态（Task 1：按钮 disabled + 处理中 banner）", () => {
+  it("resolutionInFlight=true 时 3 个按钮全部 disabled（防 409 重复点击）", () => {
+    const onAnswer = vi.fn();
+    render(
+      <ConfigProvider>
+        <CheckpointCard checkpoint={makeCheckpoint()} onAnswer={onAnswer} resolutionInFlight />
+      </ConfigProvider>
+    );
+    const confirmBtn = screen.getByRole("button", { name: /确\s*认/ });
+    const modifyBtn = screen.getByRole("button", { name: /修\s*改/ });
+    const rejectBtn = screen.getByRole("button", { name: /拒\s*绝/ });
+    expect(confirmBtn).toBeDisabled();
+    expect(modifyBtn).toBeDisabled();
+    expect(rejectBtn).toBeDisabled();
+  });
+
+  it("resolutionInFlight=false 时确认按钮 enabled（可正常点击）", () => {
+    const onAnswer = vi.fn();
+    render(
+      <ConfigProvider>
+        <CheckpointCard
+          checkpoint={makeCheckpoint()}
+          onAnswer={onAnswer}
+          resolutionInFlight={false}
+        />
+      </ConfigProvider>
+    );
+    const confirmBtn = screen.getByRole("button", { name: /确\s*认/ });
+    expect(confirmBtn).not.toBeDisabled();
+  });
+
+  it("resolutionInFlight=true 时显示大号处理中 banner（fontSize ≥ 20）", () => {
+    const onAnswer = vi.fn();
+    const { container } = render(
+      <ConfigProvider>
+        <CheckpointCard checkpoint={makeCheckpoint()} onAnswer={onAnswer} resolutionInFlight />
+      </ConfigProvider>
+    );
+    const banner = container.querySelector('[data-testid="checkpoint-processing-banner"]');
+    expect(banner).toBeInTheDocument();
+    const style = window.getComputedStyle(banner as Element);
+    expect(parseInt(style.fontSize, 10)).toBeGreaterThanOrEqual(20);
+  });
+});

@@ -355,15 +355,19 @@ interface CheckpointActionsProps {
   onConfirm: () => void;
   onReject: () => void;
   onModify: (question: string) => void;
+  resolutionInFlight?: boolean;
 }
 
 // 三动作区（确认 / 修改 / 拒绝）。修改草稿与展开态是纯局部 UI 状态：留在这里
 // 才能与引入前一致地「收起再展开仍保留草稿」，同时随卡片重挂载（key）清零。
+// `resolutionInFlight` 期间三按钮全 disabled（防 SSE 状态慢一拍时重复点 409）+ 早
+// return 二次保险（防 focus/Enter 边角）。
 function CheckpointActions({
   onConfirm,
   onReject,
   onModify,
   phase,
+  resolutionInFlight,
 }: CheckpointActionsProps & { phase: CheckpointPhase }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
@@ -384,6 +388,7 @@ function CheckpointActions({
       : "research.checkpoint.confirmHint";
 
   const submitModify = () => {
+    if (resolutionInFlight) return; // 防 SSE 状态延迟期间重复触发
     const question = draft.trim();
     if (question.length === 0) return;
     onModify(question);
@@ -395,17 +400,31 @@ function CheckpointActions({
     <>
       <Space style={{ marginTop: 12 }}>
         <Tooltip title={t(confirmHintKey)}>
-          <Button type="primary" onClick={onConfirm}>
+          <Button
+            type="primary"
+            onClick={onConfirm}
+            disabled={resolutionInFlight}
+            aria-busy={resolutionInFlight}
+          >
             {t("research.checkpoint.confirm")}
           </Button>
         </Tooltip>
         <Tooltip title={t(modifyHintKey)}>
-          <Button onClick={() => setEditing((value) => !value)}>
+          <Button
+            onClick={() => setEditing((value) => !value)}
+            disabled={resolutionInFlight}
+            aria-busy={resolutionInFlight}
+          >
             {t("research.checkpoint.modify")}
           </Button>
         </Tooltip>
         <Tooltip title={t(rejectHintKey)}>
-          <Button danger onClick={onReject}>
+          <Button
+            danger
+            onClick={onReject}
+            disabled={resolutionInFlight}
+            aria-busy={resolutionInFlight}
+          >
             {t("research.checkpoint.reject")}
           </Button>
         </Tooltip>
@@ -422,7 +441,7 @@ function CheckpointActions({
             type="primary"
             onClick={submitModify}
             style={{ marginTop: 8 }}
-            disabled={draft.trim().length === 0}
+            disabled={draft.trim().length === 0 || resolutionInFlight}
           >
             {t("research.checkpoint.submitModify")}
           </Button>
@@ -442,8 +461,14 @@ export function CheckpointCard({ checkpoint, onAnswer, resolutionInFlight }: Che
   const candidates = hypothesisStatements(checkpoint.options);
 
   const submitConfirm = () => {
+    if (resolutionInFlight) return; // 防 SSE 状态延迟期间重复触发
     // 勾了候选才带上 selectedIndexes；未勾选 = 空 choice（与既有行为一致）。
     onAnswer("confirm", selectedIndexes.length > 0 ? { selectedIndexes } : {});
+  };
+
+  const submitReject = () => {
+    if (resolutionInFlight) return; // 防 SSE 状态延迟期间重复触发
+    onAnswer("reject", {});
   };
 
   const toggleCandidate = (index: number, checked: boolean) => {
@@ -480,13 +505,35 @@ export function CheckpointCard({ checkpoint, onAnswer, resolutionInFlight }: Che
       <CheckpointActions
         phase={checkpoint.phase}
         onConfirm={submitConfirm}
-        onReject={() => onAnswer("reject", {})}
+        onReject={submitReject}
         onModify={(question) => onAnswer("modify", { question })}
+        resolutionInFlight={resolutionInFlight}
       />
       {resolutionInFlight && (
-        <Spin size="small" style={{ marginLeft: 12 }}>
-          {t("research.checkpoint.processing")}
-        </Spin>
+        <div
+          data-testid="checkpoint-processing-banner"
+          role="status"
+          aria-live="polite"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 12,
+            marginTop: 16,
+            padding: "12px 20px",
+            borderRadius: 8,
+            background: "rgba(22, 119, 255, 0.06)",
+            border: "1px solid rgba(22, 119, 255, 0.25)",
+            fontSize: 20,
+            fontWeight: 600,
+            color: "#1677ff",
+          }}
+        >
+          <Spin size="large" />
+          <span style={{ fontSize: 20 }}>
+            {t("research.checkpoint.processing")}
+          </span>
+        </div>
       )}
     </Card>
   );

@@ -6,7 +6,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { Alert, App, Button, Input, Space, Spin, Tag, Typography, notification } from "antd";
+import { Alert, App, Button, Input, Space, Spin, Tag, Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import { useResearchStore } from "../../stores/researchStore";
 import { useResearchSession } from "../../hooks/useResearchSession";
@@ -24,7 +24,7 @@ export default function ResearchSessionPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
-  const { message } = App.useApp();
+  const { message, notification } = App.useApp();
 
   const turns = useResearchStore((s) => s.turns);
   const events = useResearchStore((s) => s.events);

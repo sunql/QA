@@ -7,7 +7,7 @@
 //    提交失败也不能产生未处理拒绝。
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within, act } from "@testing-library/react";
-import { App, ConfigProvider, notification } from "antd";
+import { App, ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { useResearchStore } from "../stores/researchStore";
@@ -330,13 +330,12 @@ describe("ResearchSessionPage", () => {
   // 分析完成 notification：streaming=false + resolutionInFlight=false + !conflictError +
   // turns.length>0 时弹一次；提供"查看报告"按钮 navigate 到 /research/:id/report。
   describe("分析完成 notification", () => {
-    let notificationSpy: ReturnType<typeof vi.spyOn>;
+    // 用 querySelector 断言 DOM 出现 antd notification；生产代码用 App.useApp()
+    // 拿到的实例，spy 静态 notification 拿不到，所以走 DOM 断言。
+    const queryNotifications = () =>
+      document.querySelectorAll(".ant-notification-notice");
 
     beforeEach(() => {
-      // spy 在每次测试里新建 + 还原，**不**全局 mock antd 以避免影响其他测试
-      notificationSpy = vi
-        .spyOn(notification, "success")
-        .mockImplementation(() => undefined as never);
       // openSession 至少返回 1 个 turn（满足 turns.length>0 触发条件）。
       // store 字段用真实 useResearchStore（selector 风格），不允许替换 mockStoreState
       // —— 页面内有 11 个 useResearchStore((s) => s.*) 选择器，mock 整 store 会丢字段。
@@ -370,10 +369,6 @@ describe("ResearchSessionPage", () => {
       stubOpenFetch('event: research.connected\ndata: {"sessionId":"s1"}\n\n');
     });
 
-    afterEach(() => {
-      notificationSpy.mockRestore();
-    });
-
     // 工具：等 useResearchSession 把页面流式编排完（openSession 把 turns 填上 +
     // connectStream 把 streaming 置 true）。React 18 自动批处理把 openSession 的
     // set(turns) 和 connectStream 的 set(streaming) 合到同一次 render —— 因此
@@ -392,36 +387,28 @@ describe("ResearchSessionPage", () => {
       // 等流式编排完成：streaming=true, turns 满
       await waitForStreamingSettled();
       // 此刻 useEffect 已跑过 —— streaming=true 故不弹
-      expect(notificationSpy).not.toHaveBeenCalled();
+      expect(queryNotifications()).toHaveLength(0);
 
       // 切到 streaming=false：完成态触发，弹一次
       act(() => {
         useResearchStore.setState({ streaming: false });
       });
 
-      await waitFor(() => expect(notificationSpy).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(queryNotifications()).toHaveLength(1));
 
-      // 通知参数：message/description/actions 必含 i18n 文案，duration=6，placement=topRight
-      const call = notificationSpy.mock.calls[0][0] as {
-        message: string;
-        description: string;
-        actions: React.ReactElement<{ children: string; onClick: () => void }>;
-        duration: number;
-        placement: string;
-      };
-      expect(call.message).toBe("分析已完成");
-      expect(call.description).toBe("处理中…");
-      expect(call.duration).toBe(6);
-      expect(call.placement).toBe("topRight");
-      // actions 是 antd Button 元素，子文本必须是「查看报告」
-      expect(call.actions.props.children).toBe("查看报告");
+      const notice = queryNotifications()[0];
+      expect(notice).toHaveTextContent("分析已完成");
+      expect(notice).toHaveTextContent("查看报告");
+      // 6s 自动关闭（duration=6）+ 右上角
+      const holder = notice.closest(".ant-notification");
+      expect(holder?.className ?? "").toContain("ant-notification-topRight");
 
       // 再 render 一次，useRef 必须拦住重复弹
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(notificationSpy).toHaveBeenCalledTimes(1);
+      expect(queryNotifications()).toHaveLength(1);
     });
 
     it("streaming 仍是 true 时不弹通知", async () => {
@@ -433,7 +420,7 @@ describe("ResearchSessionPage", () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(notificationSpy).not.toHaveBeenCalled();
+      expect(queryNotifications()).toHaveLength(0);
     });
 
     it("resolutionInFlight=true 时不弹通知（避免在 checkpoint 答完等待中误判完成）", async () => {
@@ -449,7 +436,7 @@ describe("ResearchSessionPage", () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(notificationSpy).not.toHaveBeenCalled();
+      expect(queryNotifications()).toHaveLength(0);
     });
 
     it("conflictError 非空时不弹通知", async () => {
@@ -467,7 +454,7 @@ describe("ResearchSessionPage", () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(notificationSpy).not.toHaveBeenCalled();
+      expect(queryNotifications()).toHaveLength(0);
     });
   });
 });

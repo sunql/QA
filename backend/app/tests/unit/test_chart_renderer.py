@@ -181,7 +181,14 @@ class TestCartesian:
         assert option["xAxis"]["data"] == _CATS
 
     def test_injected_axis_labels_render_dimension_name_and_never_raw_field(self) -> None:
-        """注入后：轴名 = 显示名；**恒等映射**不渲染（原始列名不得漏进 option）。"""
+        """注入后：轴名 = 显示名（原始维度列名不得漏进 option）。
+
+        **注意本条的 `"RCV_QTY_PUU": "RCV_QTY_PUU"` 恒等项是惰性条件**：它是指标列，
+        `_buildAxisOption` 只查 `_axisNameOf(spec, catField)`（`catField` = 第一个维度），
+        指标列从不作为轴字段被查询 ⇒ 删掉 `_axisNameOf` 的 `label != field` 判断本条仍绿。
+        「恒等映射必须屏蔽」的真正判别由 test_identity_axis_label_is_not_rendered 承担
+        （恒等项落在**类目字段**上）。
+        """
         spec = _spec(
             ChartType.BAR,
             columns=("SUPPLIER_NAME", "RCV_QTY_PUU"),
@@ -199,6 +206,32 @@ class TestCartesian:
         option = renderChartOption(spec, _ROWS)
 
         assert option["xAxis"]["name"] == "供应商"   # 显示名上了轴
+        assert option["xAxis"]["data"] == _CATS       # 取值仍是数据键，不被翻译
+
+    def test_identity_axis_label_is_not_rendered(self) -> None:
+        """恒等映射（label == field）不上轴 —— 否则原始列名会经轴名漏进 option。
+
+        判别点：恒等项必须落在**类目字段**（`_dimensionOf(spec, 0)`）上才走得到
+        `_axisNameOf` 的 `label != field` 分支。删掉该分支 ⇒ 轴名变回裸列名
+        `SUPPLIER_NAME`，本条立刻红（上一条用例在同一变故下仍绿）。
+        """
+        spec = _spec(
+            ChartType.BAR,
+            columns=("SUPPLIER_NAME", "RCV_QTY_PUU"),
+            dimensions=(_dim("SUPPLIER_NAME"),),
+            measures=(_measure("RCV_QTY_PUU"),),
+            series=(
+                SpecSeries(
+                    name="供货量", kind="bar",
+                    dimension="SUPPLIER_NAME", measure="RCV_QTY_PUU",
+                ),
+            ),
+            axisLabels={"SUPPLIER_NAME": "SUPPLIER_NAME"},
+        )
+
+        option = renderChartOption(spec, _ROWS)
+
+        assert "name" not in option["xAxis"]
         assert option["xAxis"]["data"] == _CATS       # 取值仍是数据键，不被翻译
 
     def test_hbar_puts_categories_on_y_axis(self) -> None:

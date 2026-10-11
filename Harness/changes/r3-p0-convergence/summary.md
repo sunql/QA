@@ -13,25 +13,33 @@
 git merge-base --is-ancestor feat/multi-step-persist HEAD; echo $?   # 0  → 是祖先
 git merge-base --is-ancestor HEAD feat/multi-step-persist; echo $?   # 1
 git merge-base --is-ancestor main HEAD; echo $?                      # 1  → main 不是祖先
-git rev-list --count main..HEAD                                      # 153
+git rev-list --count main..1523fd5                                   # 153（至 T4）
+git rev-list --count main..HEAD                                      # 155（=153 + 本记录 2 提交）
 git rev-list --count HEAD..main                                      # 1
 git merge-base main HEAD                                             # c1857683dec4252f1a978738f6dc73f67d58fae5
 git log --oneline -1 feat/multi-step-persist                         # 8ba43e5
 ```
 
 - `feat/multi-step-persist`（tip `8ba43e5`）是 HEAD 的**祖先** ⇒ r3 是它的超集。
-- `HEAD` **就是** r3（`feat-research-report-r3` @ `1523fd5`）；把 HEAD 说成 r3 的祖先
-  是同义反复，不成立。
-- `main` **不是** r3 的祖先：两者已分叉（r3 独有 153 个提交，main 独有 1 个，
-  共同祖先 = `c185768`）。
+- **r3 的 tip**：至 T4 为 `1523fd5`；本变更记录自身贡献 **2 个提交**（`0608cfe` 记录初稿、
+  `3fb6acc` 事实核对），故当前 `main..HEAD` = 155。把 r3 的 tip 说成 HEAD 的祖先不成立
+  ——HEAD 就在 r3 上（本记录提交之后即为 HEAD）。
+- `main` **不是** r3 的祖先：两者已分叉（r3 独有 155 个提交 = 至 T4 的 153 + 本记录 2，
+  main 独有 1 个，共同祖先 = `c185768`）。
 
 ## 改动
 
 - **T1** `research_agent_service.py`（`c42c182`）：补 `MAX_REPLAN_PER_TURN` 导入
   —— “改计划”路径此前命中 `NameError` 必崩；
-  新增 AST 导入面守卫（`test_research_agent_ports.py`），钉住“模块级名引用必须可解析”。
+  新增 AST 导入面守卫（`test_research_agent_ports.py`），**仅**钉住“被当作模块级名
+  引用（`node.id.isupper()`，即全大写常量/伪常量）的名字必须可解析”——正是本次漏导入
+  的形态；小写局部变量一类不在该守卫射程内（由审查人工兜住，测试未改）。
 - **T2** `research_agent_phases._stageReport`（`c3029b8`）：计量落账移进 `finally`
-  —— `compose` 逐块调 LLM，抛错时已消耗的 token 不再成为永久盲区（核心约束 #3）。
+  —— `compose` 逐块调 LLM，抛错时已消耗的 token 不再成为永久盲区（核心约束 #3）；
+  失败子路径由同 commit 新增的
+  `test_report_metering_survives_reporter_failure`（`test_research_agent_service.py:565`）
+  覆盖：reporter 抛 `RuntimeError` 时异常仍上抛、报告不归档，但该轮 `research_report`
+  消耗已入账（`promptTokens=120/completionTokens=40`）。
 - **T3** `research_agent_ports.MAX_RESEARCH_DATA_STEPS = MAX_PLAN_DATA_STEPS`
   （= 4，派生而非第二个字面量）+ `research_agent_phases._capDataSteps`
   （`8cfbaa3`）：`normalizePlan` 截断超限**数据步**、原样保留 `aggregation_only` 汇总步；
@@ -51,18 +59,20 @@ git log --oneline -1 feat/multi-step-persist                         # 8ba43e5
 - **T4 第三文件修复（裁定 D）**：`backend/app/services/research_agent_service.py`
   被加入 T4 允许文件，仅两处有界改动：
   - `:305` `nextPhaseForPhase(checkpoint.phase, options)` → `checkpoint.options or {}`
-    —— 修掉 `90096f67`（2026-10-08）引入的**第二处死代码 `NameError`**，
-    T4 是第一个让它可达的改动（此前该 `else` 分支永远走不到）；
+    —— 修掉 `90096f67`（2026-10-08）引入的**第二处死代码 `NameError`**：
+    **T1** 让 `:299` 那条守卫可求值（此前 `MAX_REPLAN_PER_TURN` 未导入，守卫先抛
+    `NameError`，`else` 永远不可达），**T4** 再让该 `else` 分支首次真正执行；
   - `:296` 陈旧括注改写（说明第 1..MAX 次 modify 会重新暂停）。
   - 已验证**未改动**：`rebuildState`（在 `research_agent_stages.py`，T1–T4 均未触碰该文件，
     见 `git show --name-only 1523fd5`）、`:299` 上限守卫
-    （`if replan_count < MAX_REPLAN_PER_TURN:`）、`:301` 计数写入
+    （`if replan_count < MAX_REPLAN_PER_TURN:`）、`:302` 计数写入
     （`state["replanCount"] = replan_count + 1`）。
 
 ## 测试
 
 - 集成 `app/tests/integration/test_research_agent_service.py`：3 red → 0 red
-  （**55 passed / 21 warnings / 0 failed**）。
+  （**55 passed / 21 warnings / 0 failed**），含 T2 新增的
+  `test_report_metering_survives_reporter_failure`（reporter 抛错时计量仍落账）。
 - 单元 `app/tests/unit/test_research_agent_ports.py`：24 passed（T1 导入面守卫 +
   T3 数据步上限含“恰好等于上限不截断”的 caplog 判别式反向用例 + cap+1 正向对照）。
 
@@ -86,7 +96,10 @@ git log --oneline -1 feat/multi-step-persist                         # 8ba43e5
    `[用户修改要求] {"instruction": "第 N 次修改要求：..."}` 原文。
 2. **Token 计量有账（T2）** —— 报告落库后 `session_token_usage` 中
    `purpose='research_report'` 有 1 行：`prompt=1230 / completion=583 / total=1813`
-   （报告 `renderedMd` 长 2783 字符，量级相称）。
+   （报告 `renderedMd` 长 2783 字符，量级相称）。真机走查覆盖的是**成功路径**；
+   报告装配中途抛错的**失败子路径**由
+   `test_report_metering_survives_reporter_failure`（`c3029b8` 新增，本次 55 条全绿中）
+   覆盖 —— 两者合起来才是 T2“消耗不再成为永久盲区”的完整口径。
 3. **数据步被截住（T3）** —— 后端日志**未出现** `研究计划数据步超上限 4，截断 N 步`；
    本次会话可见计划恒为 **1 个数据步**（≤ 4）⇒ 与“守卫未触发”**一致**（非 4，故不是歧义态）。
 
@@ -100,6 +113,9 @@ git log --oneline -1 feat/multi-step-persist                         # 8ba43e5
 - 走查观察（非 T1–T4 回归，仅记录）：`research_report` 行的 `model_name` 由 LLM **响应**回填
   （`MeteredClient.modelName` ← `response.modelName`），本次上游自报 `deepseek-flash`（不在
   `llm_config` 中）⇒ `cost` 落 0；`research_plan` 行则自报 `deepseek-chat`（`cost>0`）。
-- 走查观察：`POST /checkpoints/{id}/answer` 的响应里 `nextPhase` 恒为该 checkpoint
-  `options.resumePhase`（planning 恒为 `"execute"`），**不反映** T4 的“modify 重新暂停”；
-  实际相位以重新拉取的 `pendingCheckpoint` 为准。
+- 走查观察：`POST /checkpoints/{id}/answer` 响应里的 `nextPhase` 由 `nextPhaseForPhase`
+  （`research_agent_ports.py:454`）产出——**优先**返回显式 `options["resumePhase"]`，
+  未给时才回落 `NEXT_PHASE_BY_CHECKPOINT.get(phase) or PHASES[-1]`。planning 检查点的
+  `options.resumePhase` 恒为 `"execute"`，故响应里的 `nextPhase` 也恒为 `"execute"`，
+  **不反映** T4 的“modify 重新暂停在 planning”；实际相位以重新拉取的 `pendingCheckpoint`
+  （它走 replan 分支重新生成）为准。

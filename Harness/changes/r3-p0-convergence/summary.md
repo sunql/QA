@@ -14,18 +14,17 @@ git merge-base --is-ancestor feat/multi-step-persist HEAD; echo $?   # 0  → �
 git merge-base --is-ancestor HEAD feat/multi-step-persist; echo $?   # 1
 git merge-base --is-ancestor main HEAD; echo $?                      # 1  → main 不是祖先
 git rev-list --count main..1523fd5                                   # 153（至 T4）
-git rev-list --count main..HEAD                                      # 155（=153 + 本记录 2 提交）
 git rev-list --count HEAD..main                                      # 1
 git merge-base main HEAD                                             # c1857683dec4252f1a978738f6dc73f67d58fae5
 git log --oneline -1 feat/multi-step-persist                         # 8ba43e5
 ```
 
 - `feat/multi-step-persist`（tip `8ba43e5`）是 HEAD 的**祖先** ⇒ r3 是它的超集。
-- **r3 的 tip**：至 T4 为 `1523fd5`；本变更记录自身贡献 **2 个提交**（`0608cfe` 记录初稿、
-  `3fb6acc` 事实核对），故当前 `main..HEAD` = 155。把 r3 的 tip 说成 HEAD 的祖先不成立
-  ——HEAD 就在 r3 上（本记录提交之后即为 HEAD）。
-- `main` **不是** r3 的祖先：两者已分叉（r3 独有 155 个提交 = 至 T4 的 153 + 本记录 2，
-  main 独有 1 个，共同祖先 = `c185768`）。
+- **r3 的 tip**：至 T4 为 `1523fd5`。把 r3 的 tip 说成 HEAD 的祖先不成立——HEAD 就在 r3 上。
+  本记录为**纯文档提交，不改变代码面**；它自身的提交号不在本文中引用（文档无法引用自己的
+  tip 提交：写下引用的动作本身就创建/改写那个提交，引用随 amend 即刻失效）。
+- `main` **不是** r3 的祖先：两者已分叉（r3 独有提交数 = 至 T4 的 153 + 本记录自身的
+  文档提交，main 独有 1 个，共同祖先 = `c185768`）。
 
 ## 改动
 

@@ -61,17 +61,36 @@ git rev-list --count 61986a9..HEAD -- backend/app/tests/integration/test_researc
 - **xfail 退役（本支第二次、也是最关键的一次纠偏）**：原计划把恒等映射的样例条目挂在 `RCV_QTY_PUU`（一个**度量**列）上，而 `_buildAxisOption` 只看向维度列（`catField = _dimensionOf(spec, 0)`）⇒ 计划硬性要求的「恒等映射必须屏蔽」**零判别性覆盖**，实施者的报告声称了一个不成立的证明。审查定级 Important（标注 plan-mandated），修轮**只做加法**：新增 `test_identity_axis_label_is_not_rendered`（恒等条目改挂**维度**列），计划钉住的两条断言**逐字节保留**，`chart_renderer.py` 在修轮里**未被改动**。新增/重贴的用例：`test_chart_dimension_label_is_translated`、`test_chart_table_payload_keeps_raw_columns_as_keys`（取代被删的 `xfail` 块），断言一条不放松。
 - **仍开放**：维度**取值**翻译（`C1` → 基地 C1）另开任务，**不要**碰 `SpecDimension.label`（渲染器从不读它）。
 
+### 整支终评修复轮（`66e9dde`）
+
+整支终评（最强模型）结论 **With fixes**：0 Critical / 0 Important，唯一 must-fix 是一条新增 `I001`。修复轮一次派发清掉 6 项，**其中 3 项是补判别性守卫**（这三处此前「改回旧写法仍全绿」）：
+
+| # | 项 | 落点 |
+|---|---|---|
+| 1 | **must-fix** 新增 `I001`（import 块未排序） | `test_research_resume_decision.py` |
+| 2 | M2 **报告相位**计量站点补判别性用例（复用 `AliasedLlmClient`：配置名 `fake-model` vs 响应自报 `gateway-alias`） | `test_research_agent_service.py` 新增 |
+| 3 | 图表 **heatmap（x+y 轴）/ waterfall（x 轴）** 轴名断言 + 各自的 chat 形状反向断言 | `test_chart_renderer.py` |
+| 4 | `resumeTurn` 是否**真的**调用 `decideResume` 的**结构守卫**（AST 切出函数体，断言 `decideResume(` 在体内）—— 防第二份真相在 `resumeTurn` 里悄悄长回来 | `test_research_resume_decision.py` |
+| 5 | 陈旧注释（显示字段仍称 `checkpoint.options["resumePhase"]` 是恢复 SSOT） | `research_agent_service.py:430`（**本支唯一生产改动 = 注释**） |
+| 6 | 测试里残留的裸字面量 `"replanCount"` → `OPT_REPLAN_COUNT` | `test_research_api.py:446` |
+
+**三个新守卫的判别性是被验证过的，不是自证的**（实施者给出并复评复核了 mutation 证据）：把 `phases.py:422` 改回 `metered.modelName` ⇒ 新用例报 `'gateway-alias' == 'fake-model'`，而既有的假设相位用例**仍绿**（这正好复现了 3/4 缺口）；删掉 heatmap/waterfall 的轴名接线 ⇒ 两处各自 `KeyError: 'name'`；把 `resumeTurn` 的 `decideResume(...)` 换成内联逻辑 ⇒ 结构守卫报红（且体内那处 `decideResume` **注释提及不带左括号**，守卫不会因为注释而假绿）。复评独立复核后判 **All findings addressed / Ready to merge: Yes**。
+
 ## 测试
 
-### 分进程全套（收尾 Step 1，禁同进程混跑）
+### 分进程全套（收尾 Step 1 + 终评修复后复跑，禁同进程混跑）
 
-**单元 17 个文件**：`220 passed, 1 failed`，**无 xfailed**（原为 `1 xfailed`——parked xfail 退役的验收信号）。
+以**最终 HEAD**（`66e9dde`）为准：
+
+**单元 17 个文件**：`225 passed, 1 failed`，**无 xfailed**（原为 `1 xfailed`——parked xfail 退役的验收信号）。
 
 - 唯一红：`test_research_event_bus.py::test_error_specs_covers_exactly_the_ruled_codes` —— 陈旧 frozen code-list（集合里少 `checkpoint_conflict`）。**继承债**。
 
-**集成 7 个文件**：`118 passed, 3 failed`。
+**集成 7 个文件**：`119 passed, 3 failed`。
 
 - 3 红全在 `test_research_hypothesis_rewrite_wiring.py` —— 陈旧 fake double（`_FakeSessionsRepo.saveFinding()` 不接受 `enhancedClaim`）。**继承债**。
+
+两条相对收尾 Step 1（`8055e15`：单元 220/1、集成 118/3）的增量都**恰好等于修复轮新增的守卫**：单元 +5（heatmap 2 + waterfall 2 + 结构守卫 1）、集成 +1（报告相位计量用例）。生产行为零变更。
 
 ### 继承红灯清单（4 处 / 2 个文件，**非本支引入**）
 
@@ -101,9 +120,10 @@ git rev-list --count 61986a9..HEAD -- backend/app/tests/integration/test_researc
 - **`r3 → feat-research-report-analysis` 的合并决定**：r3 冻结在 `61986a9`，决定权在人，本支不动。
 - **`llm_config` 测试库结构漂移**（缺 `disable_thinking`）：修它要 alembic，本仓禁用裸 alembic（打的是 prod）。
 - **上面 4 处继承红灯**（2 个文件）：不在本支修复面。
-- **各任务 deferred Minors**（已逐条记在 `.superpowers/sdd/2026-10-11-research-carryover-fixes/progress.md`，交由整支终评分级）：
-  - M2：5 个计量站点里 3 处（`phases.py:384` 假设改写 / `phases.py:420` `_stageReport` / `execution.py:536` 图表）**无判别性测试** —— 其覆盖测试驱动的 client 没有 `_modelName`，把那几行改回 `metered.modelName` 仍然全绿。**回归护栏缺口**（非现症）。建议复用 `AliasedLlmClient` fork 补一条报告相位用例。
-  - M3：`decideResume` 契约上说 IO-free 却会 `logger.info`；两个调用方共享后，一次用户决策会打**两遍**「replan 上限已达」；`checkpoint.options is None` 与 replan 路径上的 `choice=None` 未被单元覆盖；`research_agent_service.py:425` 注释仍说恢复 SSOT 是 `checkpoint.options["resumePhase"]`（对 planning+modify 已不成立，显示字段、无行为影响）；`test_research_resume_decision.py:8` **新增** I001（import 未排序，与实施者「未新增任何 ruff 告警」的说法相抵，一行可修）。
-  - 图表：`_buildHeatmap` / `_buildWaterfall` 的轴名接线（`chart_renderer.py:377/381/429`）**无断言**，只有实施者的一次性脚本覆盖（共享渲染器分支，可静默回归）；`ChartSpec` 现为 `frozen=True` 且带 dict 默认字段 ⇒ `hash(spec)` 会 `TypeError`（今日无调用方 hash，潜伏脚枪）；`test_chat_shape_renders_no_axis_name` 用的默认 label 是中文而非 chat 真实的 `_prettify(field)` 英文回落（仍可判别，只是不够拟真）；`ChartSpec.axisLabels` 是 dict，`frozen=True` 下仅为名义不可变。
+- **各任务 deferred Minors**（逐条记在 `.superpowers/sdd/2026-10-11-research-carryover-fixes/progress.md`，终评已逐条分级：唯一 must-fix 是新增 I001，已修；其余 18 条 accept-as-is）。修复轮关闭的项以 ~~删除线~~ 标出：
+  - M2：5 个计量站点里 3 处（`phases.py:386` 假设改写 / `phases.py:422` `_stageReport` / `execution.py:536` 图表）**无判别性测试** —— 其覆盖测试驱动的 client 没有 `_modelName`，把那几行改回 `metered.modelName` 仍然全绿。~~`_stageReport` 一处~~ 已由修复轮补上判别性用例；**残留**：另两处（假设改写、图表）**仍无守卫**，同形调用、风险有界，已披露。
+  - M3：`decideResume` 契约上说 IO-free 却会 `logger.info`；两个调用方共享后，一次用户决策会打**两遍**「replan 上限已达」；`checkpoint.options is None` 与 replan 路径上的 `choice=None` 未被单元覆盖；~~`research_agent_service.py:425` 注释仍说恢复 SSOT 是 `checkpoint.options["resumePhase"]`~~（已修）；~~`test_research_resume_decision.py:8` 新增 I001~~（已修）。~~`resumeTurn` 是否真的调用 `decideResume` 无判别~~ 已由结构守卫补上。
+  - 图表：~~`_buildHeatmap` / `_buildWaterfall` 的轴名接线（`chart_renderer.py:375-381/427-430`）无断言~~ 已补（含各自的 chat 形状反向断言）；`ChartSpec` 现为 `frozen=True` 且带 dict 默认字段 ⇒ `hash(spec)` 会 `TypeError`（今日无调用方 hash，潜伏脚枪）；`test_chat_shape_renders_no_axis_name` 用的默认 label 是中文而非 chat 真实的 `_prettify(field)` 英文回落（仍可判别，只是不够拟真）；`ChartSpec.axisLabels` 是 dict，`frozen=True` 下仅为名义不可变。
   - M4：被搬走的段头注释「无状态构件：LLM 客户端兜底 / 用量记账兜底」现在只说对一半（记账那半留在 ports），且 `ports.py` 的 `recordUsageQuietly` 因此失去段头（属「纯搬移」范围，是真实的小幅文档损失）；新模块 docstring 说 ports import 覆盖「这四个」而实际是六个（方向正确、枚举不全）；三处指向旧家的陈旧文字指针（`research_agent_service.py:518`、`test_research_model_selection.py:174/205`）。
+  - 其它（终评 accept-as-is，未修）：`meteringModelName` 的 `metered=None` 默认不可达；`test_research_agent_service.py` 2310 行（既有巨型测试文件，本次 +23）；`research_agent_service.py:34` 的 I001 为**基线既有**（非本支新增，刻意未动）；`research_agent_service.py:296-297` 的原地 `state` 变更（既有模式，计划显式排除）。
 - **计划自身缺陷类（写计划时埋的弱测试）**，供合并时回看：图表 Step 6 把恒等样例挂在度量列上（零判别性）；M4 Step 1 的 grep 判据对多行括号 import 块**完全失明**（实跑输出为空）且**漏掉 ports 自己的单测文件**（按「不留再导出」实施必然 `ImportError`）；M4 Step 3 的 `-k reexported` 与真实测试名对不上（`-k` 选 0 条 ⇒ 退出码 5「no tests ran」，不是有效 RED）；图表 Step 2 的 `-k axis_labels` 大小写不符（`pytest -k` 区分大小写）选 0 条。这四条都在开工前/派活前由控制者按符号名复核抓出并改进了计划（`0f41279`）。

@@ -33,6 +33,7 @@ from app.services.report_planner import ReportPlanner
 from app.services.research_agent_execution import ExecutionDeps, runStep
 from app.services.research_agent_phases import isDegraded
 from app.services.research_agent_ports import (
+    MAX_REPLAN_PER_TURN,
     STEP_MISSING_SQL,
     LlmUsageRecorder,
     resolveModelConfig,
@@ -613,6 +614,12 @@ async def test_resume_confirm_walks_three_fixed_checkpoints_to_done(dbSession, m
     assert cp2.phase == "planning" and cp2.id != cp1.id
     assert await _resolve(svc, dbSession, s.id, "modify", {"plan": "edited"}) == "awaiting_user"
 
+    # 2026-10-11 裁定：planning modify 重跑 planner 并**重新暂停在计划点**（可迭代，上限 3）
+    # ⇒ 新计划须再 confirm 一次，才会推进到假设点（`cp2` 仍是那条 modified 记录）。
+    cp2b = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp2b.phase == "planning" and cp2b.id != cp2.id
+    assert await _resolve(svc, dbSession, s.id, "confirm") == "awaiting_user"
+
     cp3 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
     assert cp3.phase == "hypothesis"
     events: list[tuple[str, dict]] = []
@@ -626,7 +633,12 @@ async def test_resume_confirm_walks_three_fixed_checkpoints_to_done(dbSession, m
     assert [p["degraded"] for (e, p) in events if e == "research.done"] == [False]
 
     # 决策落库：confirm→confirmed / modify→modified（Task 3 review 裁定）
-    for cpId, expected in ((cp1.id, "confirmed"), (cp2.id, "modified"), (cp3.id, "confirmed")):
+    for cpId, expected in (
+        (cp1.id, "confirmed"),
+        (cp2.id, "modified"),
+        (cp2b.id, "confirmed"),
+        (cp3.id, "confirmed"),
+    ):
         status = await dbSession.execute(
             text("SELECT status FROM research_checkpoint WHERE id = :cid"), {"cid": cpId}
         )
@@ -1054,7 +1066,8 @@ async def test_metered_client_captures_cached_tokens(dbSession, makeService) -> 
 
 @pytest.mark.asyncio
 async def test_planning_modify_reruns_planner_with_choice(dbSession, makeService) -> None:
-    """Task 6.5-4：计划 checkpoint `modify` 把 choice 回灌 planner 重跑（不恢复旧计划）。"""
+    """Task 6.5-4 + 2026-10-11 裁定：计划 checkpoint `modify` 把 choice 回灌 planner 重跑，
+    并重新暂停在计划点（用户能看到新计划；迭代上限由 `MAX_REPLAN_PER_TURN` 兜底）。"""
     planner = FakePlanner(
         steps=(SqlStep(index=0, description="原计划", sub_question="原", sql="SELECT 1"),),
         replanSteps=(SqlStep(index=0, description="新计划", sub_question="新", sql="SELECT 2"),),
@@ -1072,63 +1085,57 @@ async def test_planning_modify_reruns_planner_with_choice(dbSession, makeService
     assert status == "awaiting_user"
     assert len(planner.calls) == 2  # 重跑计划
     assert "只看华东" in planner.calls[1][0]  # choice 回灌进 planner 输入
-    assert runner.executed == ["SELECT 2"]  # 新计划进 state 并被执行（旧计划未执行）
-    # 新计划没有再次暂停在计划点：直接走到假设点
+    # 新计划已进 state，但**未确认前一步都不执行**（2026-10-11 裁定：modify 后重新暂停）
+    assert runner.executed == []
     cp2 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
-    assert cp2 is not None and cp2.phase == "hypothesis"
+    assert cp2 is not None and cp2.phase == "planning"
+    assert cp2.options["replanCount"] == 1  # 迭代计数已 +1 并随 checkpoint 持久化
 
 
 @pytest.mark.asyncio
-async def test_planning_modify_replan_caps_at_max_replan(dbSession, makeService) -> None:
-    """Task B1：第 4 次 planning modify 不再触发 replan，转按 confirm 继续推进。
+async def test_planning_modify_iterates_then_caps_at_max_replan(dbSession, makeService) -> None:
+    """2026-10-11 裁定：planning modify 可迭代，上限 `MAX_REPLAN_PER_TURN`。
 
-    MAX_REPLAN_PER_TURN=3。第 1-3 次 modify → 回到 plan 相位；第 4 次 modify
-    → 按 confirm 处理（跳过 plan，直接进 execute/hypothesis）。
+    第 1..3 次 modify → 重跑 planner 且**重新暂停在计划点**（用户看得到改后的计划）；
+    第 4 次 modify → 已达上限、不再 replan，按 confirm 推进到 execute（落 hypothesis 点）。
+
+    旧用例（`replan_caps_at_max_replan`）传了 `autoConfirm=True` 却又断言"逐个 confirm 走
+    检查点"——两个前提互斥（`_autoConfirm` 会把四个检查点全短路），故本例**不传**
+    `autoConfirm`，显式逐步 resolve。
     """
     planner = FakePlanner(
         steps=(SqlStep(index=0, description="计划0", sub_question="q0", sql="SELECT 0"),),
-        replanSteps=(
-            SqlStep(index=0, description="计划1", sub_question="q1", sql="SELECT 1"),
-        ),
+        replanSteps=(SqlStep(index=0, description="计划1", sub_question="q1", sql="SELECT 1"),),
     )
-    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
-    svc = makeService(
-        planner=planner,
-        llmFactory=lambda cfg: scripted,
-        autoConfirm=True,  # hypothesis 之后直接 done，简化断言
-    )
+    runner = FakeRunner()
+    svc = makeService(planner=planner, runner=runner)
     s = await _newSession(svc, dbSession)
     await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
     await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1 → plan → 固定 #2（planning）
     assert len(planner.calls) == 1
+    assert runner.executed == []
 
-    # 前 3 次 modify：仍回到 plan 相位，planner 被重调用
-    for i in range(3):
+    # 第 1..MAX 次 modify：每次都 replan 且重新暂停在计划点
+    for i in range(MAX_REPLAN_PER_TURN):
         status = await _resolve(
             svc, dbSession, s.id, "modify", {"instruction": f"只看华东-{i}"}
         )
-        assert status == "awaiting_user", f"第 {i+1} 次 modify 应仍暂停: {status}"
-        assert len(planner.calls) == i + 2, f"第 {i+1} 次 modify 应触发 replan"
+        assert status == "awaiting_user", f"第 {i + 1} 次 modify 应重新暂停在计划点: {status}"
+        cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+        assert cp is not None and cp.phase == "planning"
+        assert cp.options["replanCount"] == i + 1, "迭代计数应随 checkpoint 持久化"
+        assert len(planner.calls) == i + 2, f"第 {i + 1} 次 modify 应触发 replan"
+    assert runner.executed == [], "迭代期间一次都不该执行"
 
-    # 第 4 次 modify：replan 计数已达上限，不再回 plan，直接推进到 hypothesis/done
+    # 第 MAX+1 次 modify：已达上限 ⇒ 不再 replan，按 confirm 推进到 execute
     status = await _resolve(
         svc, dbSession, s.id, "modify", {"instruction": "只看华东-3（应被忽略）"}
     )
-    # 不再回 plan 相位，状态机继续推进
-    assert status == "done", f"第 4 次 modify 应跳过 replan 直接推进: {status}"
-    # planner 不再被调用（总数仍为 4）
-    assert len(planner.calls) == 4
-    # 最后一个 planning checkpoint 的状态是 modified（不是 confirmed）
-    cps = await dbSession.execute(
-        text(
-            "SELECT id, status, phase FROM research_checkpoint"
-            " WHERE session_id = :sid AND phase = 'planning'"
-            " ORDER BY created_at DESC LIMIT 1"
-        ),
-        {"sid": s.id},
-    )
-    row = cps.one()
-    assert row.status == "modified"
+    assert status == "awaiting_user"
+    assert len(planner.calls) == MAX_REPLAN_PER_TURN + 1, "达上限后不得再 replan"
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None and cp.phase == "hypothesis"
+    assert runner.executed == ["SELECT 1"], "推进后应执行最后一次 replan 出的计划"
 
 
 @pytest.mark.asyncio

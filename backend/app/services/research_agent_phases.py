@@ -163,9 +163,10 @@ class ResearchAgentPhasesMixin:
     ) -> Pause | None:
         """[4][5] 多步计划（LLM，计量）→ 固定 #2 计划确认。
 
-        `state["replan"]`（Task 6.5-4）：计划 checkpoint 的 modify 恢复。此时把用户
-        choice 回灌 planner 重跑出**新计划**，且**不再暂停**在同一检查点（直接进
-        execute）——否则用户会陷入「改了又改」的死循环。
+        `state["replan"]`（Task 6.5-4 + 2026-10-11 裁定）：计划 checkpoint 的 modify 恢复。
+        此时把用户 choice 回灌 planner 重跑出**新计划**，并**重新暂停**在同一检查点，
+        让用户看得到改后的计划。迭代次数由 `resumeTurn` 的 `MAX_REPLAN_PER_TURN` 兜底
+        （达上限后第 N+1 次 modify 按 confirm 推进），故不存在「改了又改」的死循环。
         """
         replan = bool(state.pop("replan", False))
         replan_count = int(state.get("replanCount") or 0)
@@ -190,7 +191,7 @@ class ResearchAgentPhasesMixin:
             modelName=clientModelName(client),
         )
         await emitEvent(emit, EVENT_PLAN, {"steps": plan["steps"]})
-        if replan or self._autoConfirm:
+        if self._autoConfirm:
             return None
         return (
             CHECKPOINT_PLANNING,

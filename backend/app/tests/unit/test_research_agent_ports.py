@@ -483,18 +483,40 @@ def test_normalize_plan_caps_data_steps_and_keeps_aggregation() -> None:
     assert len(agg) == 1  # 汇总步不占额度，且必须留下
 
 
-def test_normalize_plan_does_not_truncate_at_the_cap() -> None:
-    """守卫双向：恰好等于上限时**不得**截断（防止守卫过度触发）。"""
+def test_normalize_plan_does_not_truncate_at_the_cap(caplog) -> None:
+    """守卫双向：恰好等于上限时**不得**截断（防止守卫过度触发）。
+
+    Fix round 1：原版只断言步数，而 keep-set 在数据步 ≤ 上限时恒覆盖全部下标 ⇒
+    截断版与未截断版结果逐字节相同，把守卫的 `<=` 改成 `<`（本测试要抓的 off-by-one）
+    仍然通过 —— 非判别性假绿。改为**判别日志**：恰好等于上限时不得出现截断 warning；
+    并用 cap+1 作正向对照，证明捕获本身有效（否则「无 warning」断言自身也是空的）。
+    """
+    import logging
+
     from app.domain.multi_step_plan import MultiStepPlan, StepPlan
 
+    from app.services import research_agent_phases
     from app.services.research_agent_phases import normalizePlan
     from app.services.research_agent_ports import MAX_RESEARCH_DATA_STEPS
 
-    steps = [
-        StepPlan(index=i, description=f"步{i}", sub_question=f"q{i}", aggregation_only=False)
-        for i in range(MAX_RESEARCH_DATA_STEPS)
-    ]
-    plan = normalizePlan(
-        MultiStepPlan(steps=tuple(steps), aggregation_hint="", original_question="原问")
-    )
+    def _plan(n: int) -> MultiStepPlan:
+        return MultiStepPlan(
+            steps=tuple(
+                StepPlan(
+                    index=i, description=f"步{i}", sub_question=f"q{i}", aggregation_only=False
+                )
+                for i in range(n)
+            ),
+            aggregation_hint="",
+            original_question="原问",
+        )
+
+    with caplog.at_level(logging.WARNING, logger=research_agent_phases.logger.name):
+        plan = normalizePlan(_plan(MAX_RESEARCH_DATA_STEPS))
     assert len(plan["steps"]) == MAX_RESEARCH_DATA_STEPS
+    assert "截断" not in caplog.text  # 恰好等于上限 ⇒ 不得触发守卫
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=research_agent_phases.logger.name):
+        normalizePlan(_plan(MAX_RESEARCH_DATA_STEPS + 1))
+    assert "截断" in caplog.text  # 正向对照：证明捕获本身有效

@@ -64,7 +64,7 @@ from app.services.research_agent_ports import (
     stepErrorCode,
     stepResult,
 )
-from app.services.research_agent_stages import eslClasses
+from app.services.research_agent_stages import eslClasses, meteringModelName
 
 logger = logging.getLogger(__name__)
 
@@ -533,7 +533,7 @@ async def _buildChartMetered(
             purpose=PURPOSE_CHART,
             promptTokens=metered.promptTokens,
             completionTokens=metered.completionTokens,
-            modelName=metered.modelName,
+            modelName=meteringModelName(client, metered),
             cachedTokens=metered.cachedTokens,
         )
     return build

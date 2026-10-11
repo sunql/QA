@@ -322,6 +322,29 @@ class FakeLlmClient:
         return FakeLlmResponse(self._content, 120, 40)
 
 
+class AliasedLlmClient(FakeLlmClient):
+    """配置名与自报名**不同**的客户端：`_modelName` = 配置名（同真 `OpenAiClient`），
+    响应自报网关别名。`test_hypothesis_llm_call_is_metered` 里两者同为 "fake-model"，
+    双拼写同值 ⇒ 判别不出 M2；这里制造分叉，判别才成立。
+    """
+
+    def __init__(
+        self,
+        content: str,
+        *,
+        configured: str = "fake-model",
+        reported: str = "gateway-alias",
+    ) -> None:
+        super().__init__(content)
+        self._modelName = configured
+        self._reported = reported
+
+    async def complete(self, messages, **kwargs):
+        response = await super().complete(messages, **kwargs)
+        response.modelName = self._reported
+        return response
+
+
 class ScriptedLlmClient:
     """按调用序切换内容：第 1 次喂假设 JSON，之后喂报告文本（同一客户端服务两个阶段）。"""
 
@@ -725,6 +748,30 @@ async def test_hypothesis_llm_call_is_metered(dbSession, makeService) -> None:
     assert finding.claim_text == "供应商A供货减少"
     assert finding.confidence == Decimal("0.72")  # 0.8（ESL 指标分）× 0.9
     assert finding.supporting_data["rowCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_hypothesis_metering_records_configured_model_name(dbSession, makeService) -> None:
+    """计量记**配置名**（M2）：自报名查不到 `llm_config` ⇒ 那条账 cost 记 0。
+
+    断言点是「交给 recorder 的名字」，不是 cost 本身：本测试库 `llm_config` 结构漂移
+    （缺 `disable_thinking` 列，见 `test_default_usage_recorder_writes_row_and_skips_zero_usage`
+    的 docstring），任何 ORM 级 LlmConfig 读都会炸，而修漂移要跑 alembic（本计划禁止）。
+    名字对了，`_findConfig` 才查得到 → 成本/`model_config_id` 才有值，这条链路由
+    `test_default_usage_recorder_cost_formula_matches_chat` 覆盖。
+    """
+    recorder = FakeUsageRecorder()
+    svc = makeService(
+        llmFactory=lambda cfg: AliasedLlmClient(HYPOTHESIS_JSON),
+        usageRecorder=recorder,
+    )
+    s = await _newSession(svc, dbSession)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #1
+    await _resolve(svc, dbSession, s.id, "confirm")  # 固定 #2 → hypothesis 阶段
+    assert recorder.records, "假设相位应至少记一笔账"
+    assert recorder.records[0]["modelName"] == "fake-model"
+    assert recorder.records[0]["purpose"] == "research_hypothesis"
 
 
 @pytest.mark.asyncio

@@ -156,6 +156,18 @@ def clientModelName(client: Any) -> str | None:
     return getattr(client, "_modelName", None) or getattr(client, "model_name", None)
 
 
+def meteringModelName(client: Any, metered: Any = None) -> str | None:
+    """计量用的模型名：**配置名优先**（与计划相位 `_stagePlan` 同口径）。
+
+    `MeteredClient.modelName` 是**上游响应自报**的名字（网关别名，如 deepseek-flash），
+    它按 `model_name` 反查不到 `llm_config` ⇒ 成本记 0、`model_config_id` 为空
+    （`TokenUsageService.getLastModelId` 的模型亲和一并失效）。
+    查价与归属都以**客户端固化的配置名**为准；配置名取不到（老 fake 无 `_modelName`）
+    才退回自报名 —— 保证既有 fake 驱动的测试口径不变。
+    """
+    return clientModelName(client) or getattr(metered, "modelName", None)
+
+
 # ---------------------------------------------------------------------------
 # 检查点问句构造（feat-research-entry-ux-fixes W1-a）
 # ---------------------------------------------------------------------------

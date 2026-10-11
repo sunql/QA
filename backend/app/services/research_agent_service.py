@@ -97,6 +97,7 @@ from app.services.research_agent_ports import (
 from app.services.research_agent_stages import (
     dataSummary,
     drivers,
+    meteringModelName,
     resumeTurnContent,
     rewriteState,
 )
@@ -509,7 +510,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             purpose=PURPOSE_HYPOTHESIS,
             promptTokens=metered.promptTokens,
             completionTokens=metered.completionTokens,
-            modelName=metered.modelName,
+            modelName=meteringModelName(client, metered),
             cachedTokens=metered.cachedTokens,
         )
         return candidates

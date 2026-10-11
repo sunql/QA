@@ -91,6 +91,7 @@ from app.services.research_agent_stages import (
     clientModelName,
     eslClasses,
     hypothesisPrompt,
+    meteringModelName,
     rebuildState,
     selectedHypotheses,
 )
@@ -380,7 +381,7 @@ class ResearchAgentPhasesMixin:
                 purpose=PURPOSE_HYPOTHESIS,
                 promptTokens=metered.promptTokens,
                 completionTokens=metered.completionTokens,
-                modelName=metered.modelName,
+                modelName=meteringModelName(client, metered),
                 cachedTokens=metered.cachedTokens,
             )
         return new_sql
@@ -416,7 +417,7 @@ class ResearchAgentPhasesMixin:
                     purpose=PURPOSE_REPORT,
                     promptTokens=metered.promptTokens,
                     completionTokens=metered.completionTokens,
-                    modelName=metered.modelName,
+                    modelName=meteringModelName(client, metered),
                     cachedTokens=metered.cachedTokens,
                 )
         report = await self._sessions.publishReport(

@@ -22,13 +22,15 @@ from typing import Any
 import pytest
 
 from app.services.chat_usage import UsageMixin as ChatUsageMixin
+from app.services.research_agent_model_resolution import (
+    buildClient,
+    buildRoutingContext,
+    resolveModelConfig,
+)
 from app.services.research_agent_phases import planQuestionWithFeedback
 from app.services.research_agent_ports import (
     LlmUsageRecorder,
     MeteredClient,
-    buildClient,
-    buildRoutingContext,
-    resolveModelConfig,
     selectClassesForTables,
 )
 
@@ -520,3 +522,25 @@ def test_normalize_plan_does_not_truncate_at_the_cap(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger=research_agent_phases.logger.name):
         normalizePlan(_plan(MAX_RESEARCH_DATA_STEPS + 1))
     assert "截断" in caplog.text  # 正向对照：证明捕获本身有效
+
+
+def test_model_resolution_seam_lives_only_in_new_module() -> None:
+    """接缝搬走后，新家有、老家**没有**（M4：不留再导出，避免双向 import 环）。
+
+    前半钉住搬移真的发生了（否则测试对「什么都没做」也绿）；后半钉住
+    「只有一个老家」—— ports.py 若又长出同名定义/再导出，两条路径会各自演化，
+    调用方 monkeypatch 哪一边都不确定的假绿就回来了。
+    """
+    from app.services import research_agent_model_resolution as newHome
+    from app.services import research_agent_ports as oldPath
+
+    for name in (
+        "buildClient",
+        "buildRoutingContext",
+        "PreferredModelUnavailableError",
+        "resolveModelConfig",
+        "markLlmUnavailable",
+        "resolveClient",
+    ):
+        assert hasattr(newHome, name), f"新家缺 {name}"
+        assert not hasattr(oldPath, name), f"ports.py 仍暴露 {name}：单一老家被破坏"

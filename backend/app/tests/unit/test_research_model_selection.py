@@ -20,11 +20,11 @@ import pytest
 import pytest_asyncio
 
 from app.services import research_agent_service
-from app.services.research_agent_phases import resumeState
-from app.services.research_agent_ports import (
+from app.services.research_agent_model_resolution import (
     PreferredModelUnavailableError,
     resolveModelConfig,
 )
+from app.services.research_agent_phases import resumeState
 from app.services.research_agent_service import ResearchAgentService
 
 # ---------------------------------------------------------------------------

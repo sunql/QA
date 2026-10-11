@@ -31,13 +31,13 @@ from app.infrastructure.security.crypto import encryptApiKey
 from app.services.nl2sql_service import SqlResult
 from app.services.report_planner import ReportPlanner
 from app.services.research_agent_execution import ExecutionDeps, runStep
+from app.services.research_agent_model_resolution import resolveModelConfig
 from app.services.research_agent_phases import isDegraded
 from app.services.research_agent_ports import (
     MAX_REPLAN_PER_TURN,
     OPT_REPLAN_COUNT,
     STEP_MISSING_SQL,
     LlmUsageRecorder,
-    resolveModelConfig,
 )
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_session_service import ResearchSessionService

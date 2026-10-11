@@ -49,6 +49,7 @@ from app.services.model_router_service import ModelRouterService
 from app.services.ontology_service import OntologyService
 from app.services.report_planner import ReportPlanner
 from app.services.research_agent_execution import ExecutionDeps, buildExecutionDeps
+from app.services.research_agent_model_resolution import resolveClient
 from app.services.research_agent_phases import (
     ResearchAgentPhasesMixin,
     decideResume,
@@ -90,7 +91,6 @@ from app.services.research_agent_ports import (
     nextPhaseForPhase,
     recordUsageQuietly,
     requireQuestion,
-    resolveClient,
 )
 from app.services.research_agent_stages import (
     dataSummary,

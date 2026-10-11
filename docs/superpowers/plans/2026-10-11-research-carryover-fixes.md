@@ -63,7 +63,7 @@
 
 from pathlib import Path
 
-SERVICES_DIR = Path(__file__).resolve().parents[2] / "app" / "services"
+SERVICES_DIR = Path(__file__).resolve().parents[2] / "services"
 
 CONSUMERS = (
     "research_agent_phases.py",
@@ -172,7 +172,8 @@ Expected: `test_planning_modify_reruns_planner_with_choice`、`test_planning_mod
 ```bash
 cd backend && ruff check --select F401,F821 app/services/research_agent_phases.py app/services/research_agent_service.py app/services/research_agent_stages.py
 ```
-Expected: 无输出（`OPT_REPLAN_COUNT` 在 `phases.py` 由「导入未用」变成「已用」）。
+Expected: **只剩基线的 1 条 F821**（`research_agent_phases.py:342` 的 `"FindingStats | None"` 字符串注解 —— BASE 就有、本计划五个 task 都不认领，见「不做」清单）；`OPT_REPLAN_COUNT` 那条 **F401 必须消失**（由「导入未用」变成「已用」），且**不得新增**任何 F401/F821。
+> 判据是「F401 清 0 且本任务零新增」，**不是**「无输出」—— 本仓 F821 的零容忍闸需要先钉基线（基线 30 条，含本支禁改的 chat 侧文件），那是独立任务。
 
 - [ ] **Step 7: 提交**
 

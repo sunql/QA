@@ -45,6 +45,7 @@ from app.services.enterprise_semantic_layer import (
 from app.services.messages_zh import MSG_DATASOURCE_NONE_AVAILABLE
 from app.services.nl2sql_service import Nl2SqlService
 from app.services.report_planner import ReportPlanner
+from app.services.research_agent_ports import OPT_REPLAN_COUNT
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_session_service import ResearchSessionService
 
@@ -431,7 +432,7 @@ async def test_checkpoint_answer_at_planning_modify_reports_replan_phase(
         sessionId=row.id,
         turnId=turn.id,
         phase="planning",
-        options={"signal": "fixed_plan", "resumePhase": "execute", "replanCount": 0},
+        options={"signal": "fixed_plan", "resumePhase": "execute", OPT_REPLAN_COUNT: 0},
         prompt="计划是否确认？",
     )
     await dbSession.commit()

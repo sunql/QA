@@ -370,6 +370,36 @@ class TestHeatmap:
         assert option["visualMap"]["max"] == 40
         assert "inRange" not in option["visualMap"]
 
+    def test_injected_axis_labels_render_dimension_names_on_both_axes(self) -> None:
+        """注入后：x 轴名 = dimensions[1] 显示名，y 轴名 = dimensions[0] 显示名；原始列名不上轴。
+
+        判别点：`_buildHeatmap` 的两个 `_namedAxis(..., _axisNameOf(...))` 包装若被删掉
+        （改回裸 axis 字面量），两条 `name` 断言同时红 —— 这正是 heatmap 轴名接线此前无
+        断言覆盖的盲区（bar 是唯一有覆盖的 kind）。
+        """
+        spec = _spec(
+            ChartType.HEATMAP,
+            columns=("SUPPLIER_NAME", "MATERIAL_NAME", "AMT"),
+            dimensions=(_dim("SUPPLIER_NAME"), _dim("MATERIAL_NAME", "物料")),
+            measures=(_measure("AMT", "金额"),),
+            series=(SpecSeries(name="金额", kind="heatmap", dimension="SUPPLIER_NAME", measure="AMT"),),
+            axisLabels={"MATERIAL_NAME": "物料", "SUPPLIER_NAME": "供应商"},
+        )
+
+        option = renderChartOption(spec, _CROSS_ROWS)
+
+        assert option["xAxis"]["name"] == "物料"          # dimensions[1]（列）显示名
+        assert option["yAxis"]["name"] == "供应商"        # dimensions[0]（行）显示名
+        assert option["xAxis"]["name"] != "MATERIAL_NAME"  # 原始列名不得经轴名漏出
+        assert option["yAxis"]["name"] != "SUPPLIER_NAME"
+        assert option["xAxis"]["data"] == ["M1", "M2"]    # 取值仍是数据键，不被翻译
+
+    def test_chat_shape_renders_no_axis_name(self) -> None:
+        """chat 形态（空 axisLabels）⇒ 两轴都不带 name 键（共享渲染器的反向护栏）。"""
+        option = renderChartOption(self._heatmapSpec(), _CROSS_ROWS)
+        assert "name" not in option["xAxis"]
+        assert "name" not in option["yAxis"]
+
 
 class TestSeriesComeFromSpec:
     """`spec.series` 是系列装配的**唯一来源**。
@@ -513,6 +543,33 @@ class TestWaterfall:
         rows = [{"ITEM": "A", "DELTA_AMT": 10}, {"ITEM": "B", "DELTA_AMT": -5}]
         option = renderChartOption(self._waterfallSpec(), rows)
         assert option["series"][0]["itemStyle"]["color"] == "transparent"
+
+    def test_injected_axis_label_renders_dimension_name_and_never_raw_field(self) -> None:
+        """注入后：瀑布类目轴名 = 维度显示名；原始列名不上轴。
+
+        判别点：`_buildWaterfall` 的 `_namedAxis(..., _axisNameOf(...))` 包装若被删掉
+        ⇒ `name` 断言红（waterfall 轴名接线此前无断言覆盖）。
+        """
+        spec = _spec(
+            ChartType.WATERFALL,
+            columns=("ITEM", "DELTA_AMT"),
+            dimensions=(_dim("ITEM", "项目"),),
+            measures=(_measure("DELTA_AMT", "增减"),),
+            series=(SpecSeries(name="增减", kind="bar", dimension="ITEM", measure="DELTA_AMT"),),
+            axisLabels={"ITEM": "项目"},
+        )
+        rows = [{"ITEM": "期初", "DELTA_AMT": 100}, {"ITEM": "采购", "DELTA_AMT": -40}]
+
+        option = renderChartOption(spec, rows)
+
+        assert option["xAxis"]["name"] == "项目"
+        assert option["xAxis"]["name"] != "ITEM"       # 原始列名不得经轴名漏出
+        assert option["xAxis"]["data"] == ["期初", "采购"]
+
+    def test_chat_shape_renders_no_axis_name(self) -> None:
+        """chat 形态（空 axisLabels）⇒ 类目轴不带 name 键（共享渲染器的反向护栏）。"""
+        option = renderChartOption(self._waterfallSpec(), [{"ITEM": "A", "DELTA_AMT": 10}])
+        assert "name" not in option["xAxis"]
 
 
 class TestNeverRaises:

@@ -427,7 +427,8 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             content={
                 "checkpointId": str(checkpoint.id),
                 "phase": phase,
-                # 仅作展示/调试用途：恢复点 SSOT 是 checkpoint.options["resumePhase"]
+                # 仅作展示/调试用途：恢复点 SSOT 是 `decideResume`（联合 checkpoint.phase /
+                # action / choice / options 判定），不是本字段
                 "nextPhase": nextPhaseForPhase(phase, options),
                 "prompt": prompt,
                 "options": options,

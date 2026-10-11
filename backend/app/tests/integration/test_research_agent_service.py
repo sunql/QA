@@ -570,6 +570,29 @@ async def test_report_llm_calls_are_metered_and_numbers_verbatim(dbSession, make
 
 
 @pytest.mark.asyncio
+async def test_report_metering_records_configured_model_name(dbSession, makeService) -> None:
+    """报告相位计量同样记**配置名**（M2 报告站点）：自报名是网关别名 ⇒ 那条账 cost 记 0。
+
+    与 `test_hypothesis_metering_records_configured_model_name` 同口径（断言「交给
+    recorder 的名字」，不 seed `llm_config`），但走的是 `_stageReport` 这条计量点：
+    `meteringModelName` 的 4 个调用点里，只有假设站点有判别用例 —— 报告站点若被改回
+    `metered.modelName`，此处收到的就是响应自报名 "gateway-alias"，立刻红。
+    """
+    recorder = FakeUsageRecorder()
+    svc = makeService(
+        llmFactory=lambda cfg: AliasedLlmClient(HYPOTHESIS_JSON),
+        usageRecorder=recorder,
+        autoConfirm=True,
+    )
+    s = await _newSession(svc, dbSession)
+    assert await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1) == "done"
+
+    report_records = [r for r in recorder.records if r["purpose"] == "research_report"]
+    assert report_records, "报告相位应至少记一笔账"
+    assert report_records[0]["modelName"] == "fake-model"
+
+
+@pytest.mark.asyncio
 async def test_reporter_failure_marks_session_failed(dbSession, makeService) -> None:
     """报告阶段异常必须上抛 + 会话 failed（不静默 done、不留半份报告）。"""
     svc = makeService(autoConfirm=True, reporter=RaisingReporter())

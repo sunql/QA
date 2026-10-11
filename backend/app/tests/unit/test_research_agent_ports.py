@@ -442,3 +442,59 @@ def test_research_modules_have_no_undefined_global_names() -> None:
                 offenders.append(f"{path.name}:{node.lineno} 引用了未定义的 {node.id}")
 
     assert not offenders, "研究侧模块存在未定义的全局名（漏导入）：\n" + "\n".join(offenders)
+
+
+# --- 研究计划数据步硬上限（N2） -------------------------------------------------
+
+
+def test_research_data_step_cap_follows_chat_cap() -> None:
+    """研究侧数据步上限必须与 chat 同口径，不另写一个 4（避免两处上限各自漂移）。"""
+    from app.domain.multi_step_plan import MAX_PLAN_DATA_STEPS
+
+    from app.services.research_agent_ports import MAX_RESEARCH_DATA_STEPS
+
+    assert MAX_RESEARCH_DATA_STEPS == MAX_PLAN_DATA_STEPS
+
+
+def test_normalize_plan_caps_data_steps_and_keeps_aggregation() -> None:
+    """超上限的 LLM 计划被截到上限个数据步，汇总步不占额度、原样保留。"""
+    from app.domain.multi_step_plan import MultiStepPlan, StepPlan
+
+    from app.services.research_agent_phases import normalizePlan
+    from app.services.research_agent_ports import MAX_RESEARCH_DATA_STEPS
+
+    over = MAX_RESEARCH_DATA_STEPS + 2
+    steps = [
+        StepPlan(index=i, description=f"步{i}", sub_question=f"q{i}", aggregation_only=False)
+        for i in range(over)
+    ] + [
+        StepPlan(
+            index=over, description="汇总", sub_question="汇总", aggregation_only=True
+        )
+    ]
+    plan = normalizePlan(
+        MultiStepPlan(steps=tuple(steps), aggregation_hint="对比", original_question="原问")
+    )
+
+    data = [s for s in plan["steps"] if not s["aggregation_only"]]
+    agg = [s for s in plan["steps"] if s["aggregation_only"]]
+    assert len(data) == MAX_RESEARCH_DATA_STEPS
+    assert [s["index"] for s in data] == list(range(MAX_RESEARCH_DATA_STEPS))
+    assert len(agg) == 1  # 汇总步不占额度，且必须留下
+
+
+def test_normalize_plan_does_not_truncate_at_the_cap() -> None:
+    """守卫双向：恰好等于上限时**不得**截断（防止守卫过度触发）。"""
+    from app.domain.multi_step_plan import MultiStepPlan, StepPlan
+
+    from app.services.research_agent_phases import normalizePlan
+    from app.services.research_agent_ports import MAX_RESEARCH_DATA_STEPS
+
+    steps = [
+        StepPlan(index=i, description=f"步{i}", sub_question=f"q{i}", aggregation_only=False)
+        for i in range(MAX_RESEARCH_DATA_STEPS)
+    ]
+    plan = normalizePlan(
+        MultiStepPlan(steps=tuple(steps), aggregation_hint="", original_question="原问")
+    )
+    assert len(plan["steps"]) == MAX_RESEARCH_DATA_STEPS

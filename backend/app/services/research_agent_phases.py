@@ -58,6 +58,7 @@ from app.services.research_agent_ports import (
     EVENT_REPORT,
     FINDING_ROWS_KEY,
     MAX_FINDING_ROWS,
+    MAX_RESEARCH_DATA_STEPS,
     OPT_ABORT_PHASE,
     OPT_REPLAN_COUNT,
     OPT_RESUME_PHASE,
@@ -493,10 +494,31 @@ def normalizePlan(plan: Any) -> dict[str, Any]:
         for position, raw in enumerate(getattr(plan, "steps", None) or [])
     ]
     return {
-        "steps": steps,
+        "steps": _capDataSteps(steps),
         "aggregationHint": str(getattr(plan, "aggregation_hint", "") or ""),
         "originalQuestion": str(getattr(plan, "original_question", "") or ""),
     }
+
+
+def _capDataSteps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """数据步硬上限（N2）：LLM 计划步数不受控 ⇒ 执行面（每步一次 NL2SQL + 一次 SQL）无界。
+
+    只截数据步，`aggregation_only` 汇总步不占额度、原样保留（与 chat 同口径）。
+    截断必须**有声**：日志留痕，且计划检查点会把截断后的计划原样展示给用户。
+    """
+    dataPositions = [i for i, s in enumerate(steps) if not s.get("aggregation_only")]
+    if len(dataPositions) <= MAX_RESEARCH_DATA_STEPS:
+        return steps
+    keep = set(dataPositions[:MAX_RESEARCH_DATA_STEPS]) | {
+        i for i, s in enumerate(steps) if s.get("aggregation_only")
+    }
+    logger.warning(
+        "研究计划数据步超上限 %s，截断 %s 步（保留前 %s 个数据步 + 全部汇总步）",
+        MAX_RESEARCH_DATA_STEPS,
+        len(dataPositions) - MAX_RESEARCH_DATA_STEPS,
+        MAX_RESEARCH_DATA_STEPS,
+    )
+    return [s for i, s in enumerate(steps) if i in keep]
 
 
 def planQuestionWithFeedback(question: str, feedback: dict[str, Any] | None) -> str:

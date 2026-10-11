@@ -29,6 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import LlmConfig
+from app.domain.multi_step_plan import MAX_PLAN_DATA_STEPS
 from app.services.messages_zh import MSG_MODEL_CONFIG_UNAVAILABLE
 from app.services.model_router_service import RoutingContext
 from app.services.token_usage_service import TokenUsageService
@@ -101,6 +102,12 @@ ACTION_CONFIRM = "confirm"
 
 # --- 研究计划阶段 modify 重生成上限（Task B1）：超过则按 confirm 处理，避免无限循环 ---
 MAX_REPLAN_PER_TURN = 3
+
+# --- 研究计划数据步硬上限（N2）：planner 是 LLM，产出步数不受控 ⇒ 执行面与成本无界 ---
+# 与 chat 同口径，直接派生自 `MAX_PLAN_DATA_STEPS`（= MAX_MULTI_STEP - 1），
+# 不另写一个 4 —— 与 `multi_step_plan.py` 里 `MAX_PLAN_DATA_STEPS` 的同一理由：
+# 两处上限各自漂移是静默断点。汇总步（aggregation_only）不占额度。
+MAX_RESEARCH_DATA_STEPS = MAX_PLAN_DATA_STEPS
 
 # --- 计量 purpose / 置信度 / 摘要上限 ----------------------------------------
 PURPOSE_PLAN = "research_plan"

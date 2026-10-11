@@ -64,6 +64,7 @@ from app.services.research_agent_ports import (
     EVENT_CHECKPOINT,
     EVENT_DONE,
     EVENT_ERROR,
+    MAX_REPLAN_PER_TURN,
     PHASE_ESL,
     PHASE_EXECUTE,
     PHASE_HYPOTHESIS,

@@ -392,3 +392,53 @@ def test_role_action_constants_match_status_dict() -> None:
     # ACTION_MODIFY 必须是 ACTION_STATUS 的合法 key（resumeTurn 用 status 派生 checkpoint）
     assert research_agent_ports.ACTION_MODIFY in research_agent_ports.ACTION_STATUS
     assert research_agent_ports.ACTION_CONFIRM in research_agent_ports.ACTION_STATUS
+
+
+# --- 导入面守卫：research service / phases 引用了但没导入的常量 -----------------
+
+
+def test_research_modules_have_no_undefined_global_names() -> None:
+    """回归守卫（2026-10-11 P0）：`MAX_REPLAN_PER_TURN` 漏导入曾让「计划 modify」整条路径
+    NameError，且导入期不报错 ⇒ 只有跑到那一行才炸，躲过了四轮审查。
+
+    这里钉的是**这一整类**问题：凡是在 service / phases 里当作全局名读取、
+    既非本模块定义、也非导入、也非内建的大写名字，一律视为漏导入。
+    大写限定避免把函数局部变量与小写模块级对象（如 `logger`）误判为漏导入。
+    """
+    import ast
+    import builtins
+    import pathlib
+
+    import app.services.research_agent_phases as phases
+    import app.services.research_agent_service as service
+
+    builtinNames = set(dir(builtins))
+    offenders: list[str] = []
+
+    for module in (service, phases):
+        path = pathlib.Path(module.__file__)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        defined: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                imported |= {(alias.asname or alias.name) for alias in node.names}
+            elif isinstance(node, ast.Import):
+                imported |= {(alias.asname or alias.name.split(".")[0]) for alias in node.names}
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defined.add(node.name)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                defined |= {t.id for t in targets if isinstance(t, ast.Name)}
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Load)
+                and node.id.isupper()
+                and node.id not in imported
+                and node.id not in defined
+                and node.id not in builtinNames
+            ):
+                offenders.append(f"{path.name}:{node.lineno} 引用了未定义的 {node.id}")
+
+    assert not offenders, "研究侧模块存在未定义的全局名（漏导入）：\n" + "\n".join(offenders)

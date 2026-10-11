@@ -157,6 +157,50 @@ class TestCartesian:
         assert option["series"][0]["type"] == "bar"
         assert option["xAxis"]["data"] == _CATS
 
+    def test_chat_shape_renders_no_axis_name(self) -> None:
+        """chat 形态（spec.axisLabels 空）⇒ 类目轴不带 name 键，负载与既有行为一致。
+
+        这是本任务对 chat 侧的**反向护栏**：共享渲染器被改了，但没注入就没轴名。
+        """
+        spec = _spec(
+            ChartType.BAR,
+            columns=("SUPPLIER_NAME", "RCV_QTY_PUU"),
+            dimensions=(_dim("SUPPLIER_NAME"),),
+            measures=(_measure("RCV_QTY_PUU"),),
+            series=(
+                SpecSeries(
+                    name="供货量", kind="bar",
+                    dimension="SUPPLIER_NAME", measure="RCV_QTY_PUU",
+                ),
+            ),
+        )
+
+        option = renderChartOption(spec, _ROWS)
+
+        assert "name" not in option["xAxis"]
+        assert option["xAxis"]["data"] == _CATS
+
+    def test_injected_axis_labels_render_dimension_name_and_never_raw_field(self) -> None:
+        """注入后：轴名 = 显示名；**恒等映射**不渲染（原始列名不得漏进 option）。"""
+        spec = _spec(
+            ChartType.BAR,
+            columns=("SUPPLIER_NAME", "RCV_QTY_PUU"),
+            dimensions=(_dim("SUPPLIER_NAME"),),
+            measures=(_measure("RCV_QTY_PUU"),),
+            series=(
+                SpecSeries(
+                    name="供货量", kind="bar",
+                    dimension="SUPPLIER_NAME", measure="RCV_QTY_PUU",
+                ),
+            ),
+            axisLabels={"SUPPLIER_NAME": "供应商", "RCV_QTY_PUU": "RCV_QTY_PUU"},
+        )
+
+        option = renderChartOption(spec, _ROWS)
+
+        assert option["xAxis"]["name"] == "供应商"   # 显示名上了轴
+        assert option["xAxis"]["data"] == _CATS       # 取值仍是数据键，不被翻译
+
     def test_hbar_puts_categories_on_y_axis(self) -> None:
         option = renderChartOption(_spec(ChartType.HBAR), _ROWS)
         assert option["yAxis"]["type"] == "category"

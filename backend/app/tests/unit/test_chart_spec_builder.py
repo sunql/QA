@@ -403,6 +403,25 @@ class TestAliasOverrides:
         assert labels.get("site_code") == "site code"
         assert labels.get("bill_cnt") == "bill cnt"
 
+    def test_axisLabels_land_on_spec_when_injected(self) -> None:
+        """报告形态：注入「维度字段 → 显示名」⇒ 落进 spec.axisLabels。"""
+        signals = buildChartSignals(None, ("site_code", "bill_cnt"), _TRANSLATED_ROWS, "按基地分")
+        decision = decideChartKind(signals, _THRESHOLDS)
+        spec = buildSpec(
+            decision,
+            signals,
+            _TRANSLATED_ROWS,
+            None,
+            aliasOverrides={"site_code": "基地", "bill_cnt": "账单数"},
+            axisLabels={"site_code": "基地"},
+        )
+        assert spec.axisLabels == {"site_code": "基地"}
+
+    def test_axisLabels_default_to_empty_for_chat_shape(self) -> None:
+        """chat 形态（不注入）⇒ 空 map，渲染层据此不挂任何轴名。"""
+        spec, _ = _build(["site_code", "bill_cnt"], _TRANSLATED_ROWS)
+        assert spec.axisLabels == {}
+
     def test_aliasOverrides_beat_the_plan_alias(self) -> None:
         """两者同时给时 overrides 优先（报告注入的标签是显示名 SSOT 的直译）."""
         plan = _plan(

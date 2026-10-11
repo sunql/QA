@@ -683,33 +683,41 @@ async def test_finding_summary_in_llm_prompt_is_translated(fakeReportDepsWithSql
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "brief（task-4-brief.md Step 5）钉死的断言在报告路径上不可达，已 RED 实证："
-        "fakeReportDepsWithSqlOnly 的 2 行 × 2 维度 ⇒ R13_RAW_DETAIL_TABLE ⇒ "
-        "chartType='table'，其 echartsOption 逐字回显 spec.columns + 原始行"
-        "（`{'columns': ['bill_cnt','site_code','confirm_stage'], 'rows': [...原始值...]}`）"
-        "⇒ 'site_code' 必然在 dumped 里、'基地' 必然不在。"
-        "更根本的是：chart_renderer 在任何 kind 下都**不输出维度标签** —— 类目轴装的是"
-        "维度**取值**（C1），饼图/热力图/瀑布同理，scatter 只输出指标名；唯一能落到 "
-        "echartsOption 的标签是**指标**标签（系列名/KPI label）。故「维度显示名进 option」"
-        "只能靠改 chart_renderer（chat 侧共享、本任务禁止），或改 TABLE 负载的 columns"
-        "（前端 DataTable 用 columns 当行取值键，会渲染成空表）。"
-        "按 Task 3 既定裁定「改 brief 钉死的测试须经人类裁定」，此处只备案、不放宽断言；"
-        "可达面上的等价判别由 test_chart_measure_label_is_translated 承担。"
-    ),
-)
-async def test_chart_labels_are_translated(fakeReportDepsWithSqlOnly) -> None:
-    """图表轴/图例标签中文化（报告无 QueryPlan，只能靠 aliasOverrides）."""
+async def test_chart_dimension_label_is_translated(fakeReportDepsWithSqlOnlyOneDim) -> None:
+    """维度显示名真的进了 echartsOption（类目轴 name = 注入的显示名）。
+
+    与 test_chart_measure_label_is_translated 互补：那条钉指标标签（图例系列名），这条钉
+    维度标签（轴名）。两条此前都不可达 —— 渲染器从不输出维度名；本任务给共享渲染器加了
+    「维度字段 → 显示名」注入点后，轴名可达。原用例（2 维 fixture）走 R13 明细表，
+    TABLE 负载无轴可挂名，故判别点为单维度聚合形态（报告里真实存在）。
+    """
+    planner, sessionId, turnId = fakeReportDepsWithSqlOnlyOneDim
+    payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    chart = next(
+        b for s in payload["sections"] if s["kind"] == "data"
+        for b in s["blocks"] if b["type"] == "chart"
+    )
+    assert chart["content"]["chartType"] == "bar"
+    dumped = json.dumps(chart["content"]["echartsOption"], ensure_ascii=False)
+    assert "基地" in dumped          # 维度显示名（轴名）
+    assert "site_code" not in dumped  # 原始维度列名不得出现
+
+
+@pytest.mark.asyncio
+async def test_chart_table_payload_keeps_raw_columns_as_keys(fakeReportDepsWithSqlOnly) -> None:
+    """TABLE 契约冻结：columns 是**行取值键**（前端 DataTable 按它取值），必须是原始列名。
+
+    这条是上面那条「退役 xfail」的配套：明细表路径不做标签翻译，是契约决定的，
+    不是缺陷 —— 前端契约更换前不得在此路径注入显示名。
+    """
     planner, sessionId, turnId = fakeReportDepsWithSqlOnly
     payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
-    chart = next(b for s in payload["sections"] if s["kind"] == "data"
-                 for b in s["blocks"] if b["type"] == "chart")
-    option = chart["content"]["echartsOption"]
-    dumped = json.dumps(option, ensure_ascii=False)
-    assert "基地" in dumped
-    assert "site_code" not in dumped
+    chart = next(
+        b for s in payload["sections"] if s["kind"] == "data"
+        for b in s["blocks"] if b["type"] == "chart"
+    )
+    assert chart["content"]["chartType"] == "table"
+    assert "site_code" in chart["content"]["columns"]
 
 
 @pytest.fixture

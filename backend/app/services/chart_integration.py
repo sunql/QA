@@ -47,7 +47,10 @@ async def buildReportChart(
         signals = buildChartSignals(plan, list(columns), rows, question)
         thresholds = await loadChartThresholds(session)
         decision = decideChartKind(signals, thresholds)
-        spec: ChartSpec = buildSpec(decision, signals, rows, plan, aliasOverrides=aliasOverrides)
+        spec: ChartSpec = buildSpec(
+            decision, signals, rows, plan,
+            aliasOverrides=aliasOverrides, axisLabels=aliasOverrides,
+        )
         echartsOption = renderChartOption(spec, rows)
         kindStr = spec.kind.value if hasattr(spec.kind, "value") else str(spec.kind)
         return {

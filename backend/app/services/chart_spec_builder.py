@@ -240,6 +240,7 @@ def buildSpec(
     plan: QueryPlan | None = None,
     *,
     aliasOverrides: Mapping[str, str] | None = None,
+    axisLabels: Mapping[str, str] | None = None,
 ) -> ChartSpec:
     """把决策落到一份完整 spec。纯函数：不改 plan、不改 data、不改 signals。
 
@@ -247,6 +248,11 @@ def buildSpec(
     「结果集列名 → 显示名」。**维度**标签只由它驱动（见下方注释）：chat 调用形态
     恒不传 ⇒ 维度标签与既有行为逐字一致，且这是**构造保证**而非巧合 —— 指标标签
     沿用既有「plan 聚合别名优先、overrides 覆盖」的合并映射，行为未变。
+
+    `axisLabels`（关键字专用，默认 None）是「维度字段 → 显示名」，只给**渲染器**当轴名
+    用（`ChartSpec.axisLabels`）。它不改 `dimensions[].label` —— 后者在 chat 形态下是
+    `_prettify(field)` 兜底，不是显示名。chat 调用形态恒不传 ⇒ 空 map ⇒ 渲染器不挂
+    任何轴名 ⇒ chat 图表 option 逐字不变。
     """
     kind = decision.kind
     aliases = _aliasByField(plan, signals.columns, aliasOverrides)
@@ -267,4 +273,5 @@ def buildSpec(
         orientation="horizontal" if kind is ChartType.HBAR else "vertical",
         sort=_buildSort(plan, signals.columns),
         kpi=_buildKpi(measures, data) if kind is ChartType.KPI else None,
+        axisLabels=dict(axisLabels or {}),
     )

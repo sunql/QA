@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -118,6 +119,11 @@ class ChartSpec:
     stacked: bool = False
     kpi: SpecKpi | None = None
     specVersion: int = field(default=SPEC_VERSION)
+    # 维度字段 → 显示名（轴名用）。报告路径注入；chat 形态为空 map ⇒ 渲染负载逐字不变。
+    # 不读 SpecDimension.label：那个 label 在 chat 形态下是 `_prettify(field)` 兜底（英文
+    # 列名美化），照读会把英文轴名强行加到 chat 图上。渲染器还会屏蔽恒等映射（见
+    # `chart_renderer._axisNameOf`）。
+    axisLabels: Mapping[str, str] = field(default_factory=dict)
 
 
 def tableSpec(columns: list[str] | tuple[str, ...]) -> ChartSpec:

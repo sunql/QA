@@ -118,6 +118,24 @@ def _dimensionOf(spec: ChartSpec, index: int) -> str | None:
     return None
 
 
+def _axisNameOf(spec: ChartSpec, field: str | None) -> str | None:
+    """类目轴的轴名 = 该维度的**显示名**；无注入或**恒等映射**时返 None（不挂轴名）。
+
+    恒等映射必须屏蔽：上游 alias 原样返列名时，原始列名会经轴名漏进 option。
+    """
+    if not field:
+        return None
+    label = spec.axisLabels.get(field)
+    return label if label and label != field else None
+
+
+def _namedAxis(axis: dict[str, Any], name: str | None) -> dict[str, Any]:
+    """给轴挂显示名；无名字时**原样返回**（chat 形态的负载因此逐字不变）。"""
+    if not name:
+        return axis
+    return {**axis, "name": name}
+
+
 def _valueLabels(spec: ChartSpec, rowCount: int, position: str) -> dict[str, Any]:
     show = spec.showValueLabels and rowCount <= _LABEL_MAX_POINTS
     return {"show": show, "position": position, "formatter": "{c}"}
@@ -176,6 +194,8 @@ def _buildAxisOption(spec: ChartSpec, data: list[dict], kind: ChartType) -> dict
     if horizontal:
         # Top N 的语义是「最大的在最上面」：类目轴默认自下而上，故翻转。
         categoryAxis["inverse"] = True
+    # 两种朝向共用同一个 categoryAxis 对象，故轴名只此一处。无注入 ⇒ 原对象原样返回。
+    categoryAxis = _namedAxis(categoryAxis, _axisNameOf(spec, catField))
     valueAxis: dict[str, Any] = {"type": "value"}
 
     option: dict[str, Any] = {
@@ -352,8 +372,14 @@ def _buildHeatmap(spec: ChartSpec, data: list[dict]) -> dict[str, Any]:
         **_title(spec),
         "tooltip": {"trigger": "item"},
         "grid": {"left": 64, "right": 32, "bottom": 56, "top": 40, "containLabel": True},
-        "xAxis": {"type": "category", "data": cols, "splitArea": {"show": True}},
-        "yAxis": {"type": "category", "data": rows, "splitArea": {"show": True}},
+        "xAxis": _namedAxis(
+            {"type": "category", "data": cols, "splitArea": {"show": True}},
+            _axisNameOf(spec, colField),
+        ),
+        "yAxis": _namedAxis(
+            {"type": "category", "data": rows, "splitArea": {"show": True}},
+            _axisNameOf(spec, rowField),
+        ),
         # visualMap 必须有 min/max 才渲染；色带交给 ECharts 默认（服务端不选色）。
         "visualMap": {
             "min": min(numbers) if numbers else 0,
@@ -398,10 +424,10 @@ def _buildWaterfall(spec: ChartSpec, data: list[dict]) -> dict[str, Any]:
         **_title(spec),
         "tooltip": {"trigger": "axis"},
         "grid": {"left": 48, "right": 32, "bottom": 32, "top": 40, "containLabel": True},
-        "xAxis": {
-            "type": "category",
-            "data": _categories(data, catField) if catField else [],
-        },
+        "xAxis": _namedAxis(
+            {"type": "category", "data": _categories(data, catField) if catField else []},
+            _axisNameOf(spec, catField),
+        ),
         "yAxis": {"type": "value"},
         "series": [
             {

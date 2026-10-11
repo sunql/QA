@@ -1,8 +1,9 @@
 # fix-research-carryover — 研究分析 r3 收尾债：SSOT 消歧 + 计量真名 + 恢复决策单一化 + 接缝抽离
 
-> 日期：2026-10-11 | 状态：done | 分支：`fix/research-carryover`
-> Base：`feat-research-report-r3` @ `61986a9`（r3 冻结；**未**合并，决定权在人）
+> 日期：2026-10-11 | 状态：done | 分支：`fix/research-carryover`（已快进合入 `feat-research-report-r3`，其 tip 变为 `00b1a85`）
+> Base：`feat-research-report-r3` @ `61986a9`（本支开工时 r3 的冻结点）
 > Plan: `docs/superpowers/plans/2026-10-11-research-carryover-fixes.md`
+> 附录（过程证据）: [`sdd-ledger.md`](./sdd-ledger.md)（逐任务 RED/GREEN 证据与 Minors 台账）、[`sdd-final-fix-report.md`](./sdd-final-fix-report.md)（终评修复轮的 mutation 证据）；两者原为 git-ignored 的 SDD 工作区，因该 worktree 即将清理而归档至此
 
 ## 背景
 

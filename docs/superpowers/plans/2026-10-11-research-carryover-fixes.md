@@ -881,7 +881,7 @@ git commit -m "fix(chart): 共享渲染器支持维度显示名轴标签，报�
 - Modify: `backend/app/services/research_agent_ports.py`（删除被搬走的块；**不留再导出**）
 - Modify: `backend/app/services/research_agent_service.py`（import 改指新家）
 - Modify: `backend/app/tests/unit/test_research_model_selection.py`、`backend/app/tests/integration/test_research_agent_service.py`（同上）
-- Test: `backend/app/tests/unit/test_research_agent_ports.py`（新增 1 条「单一老家」用例）
+- Modify + Test: `backend/app/tests/unit/test_research_agent_ports.py`（既有 import 块改指新家；新增 1 条「单一老家」用例）
 
 **Interfaces:**
 - Consumes: `research_agent_ports` 的 `emitEvent` / `errorPayload` / `ERROR_LLM_UNAVAILABLE` / `LLM_UNAVAILABLE_MESSAGE`（被搬走的块要用它们，故**留**在 ports.py）
@@ -892,7 +892,7 @@ git commit -m "fix(chart): 共享渲染器支持维度显示名轴标签，报�
 > 所以新模块**必须** `import research_agent_ports`。若 ports.py 再反向 import 新模块，就是
 > 一个**双向 import 环** —— 只在「shim 恰好在文件末尾」时靠执行顺序侥幸成立，
 > 谁把 shim 挪到头部（本能的写法）就在启动时 `cannot import name 'emitEvent'`。
-> 单向（新家 → ports）+ 改 3 个引用点，比一个靠顺序成立的环更小、更稳。
+> 单向（新家 → ports）+ 改 4 个引用点，比一个靠顺序成立的环更小、更稳。
 
 - [ ] **Step 1: 先确认接缝是闭合的（决定搬移边界与引用面）**
 
@@ -903,13 +903,25 @@ cd backend && grep -n "buildClient\|buildRoutingContext\|PreferredModelUnavailab
 判据：**每一个命中行都必须落在 541–734 之内**；若某行在范围外（例如 `recordUsageQuietly` 之后仍引用了接缝符号），把该符号一并纳入搬移名单（并在报告里点名）。
 
 同时确认外部引用面（**这是本任务唯一需要改引用点的地方，必须自己复核一遍**）：
+
+> ⚠️ **不要用「`from app.services.research_agent_ports import` 那一行 + `-E` 过滤符号名」的写法**：本仓从 ports 取符号的地方**全是多行括号块**，符号名在后续行上，行内过滤会**一律漏掉**（实测输出为空）。必须**按符号名**扫：
+
 ```bash
-cd backend && grep -rn "from app.services.research_agent_ports import" --include='*.py' app/ | grep -E "buildClient|resolveClient|resolveModelConfig|markLlmUnavailable|buildRoutingContext|PreferredModelUnavailableError"
+cd backend && grep -rn "\bresolveClient\b\|\bresolveModelConfig\b\|\bPreferredModelUnavailableError\b\|\bbuildClient\b\|\bbuildRoutingContext\b\|\bmarkLlmUnavailable\b" app/ --include='*.py' | grep -v "^app/services/research_agent_ports.py"
 ```
-Expected：**恰好 4 处**，与本计划列的一致（多一处或措辞不同都必须在报告里点名）：
-- `app/services/research_agent_service.py` 的 import 块里 `resolveClient`
-- `app/tests/unit/test_research_model_selection.py` 的 import 块里 `resolveModelConfig`、`PreferredModelUnavailableError`
-- `app/tests/integration/test_research_agent_service.py` 的 import 块里 `resolveModelConfig`
+
+Expected：**4 个文件、7 处 import**（控制者在开工前已按此命令复核过；多一处或措辞不同都必须在报告里点名）：
+
+| 文件 | 从 ports 取走的符号 |
+|---|---|
+| `app/services/research_agent_service.py` | `resolveClient` |
+| `app/tests/unit/test_research_model_selection.py` | `PreferredModelUnavailableError`、`resolveModelConfig` |
+| `app/tests/unit/test_research_agent_ports.py` | `buildClient`、`buildRoutingContext`、`resolveModelConfig` |
+| `app/tests/integration/test_research_agent_service.py` | `resolveModelConfig` |
+
+该命令还会命中一批**不是 import** 的同名提及，**不要改**它们：`resolveClient` 作**形参名/注入点**（`research_agent_execution.py` 的 `deps.resolveClient`、各测试里的 `resolveClient=probe`）、以及 docstring 里的说明文字。
+
+控制者已另行核对：`_readConfigs` / `_resolvePreferredConfig` 在 `ports.py` 之外**零引用**（随接缝一起搬走，无需改任何引用点）；`markLlmUnavailable` 在 ports 之外也**零引用**（只被 `resolveClient` 内部调用）。
 
 被搬走的块自身还用到 ports 的 `emitEvent` / `errorPayload` / `ERROR_LLM_UNAVAILABLE` / `LLM_UNAVAILABLE_MESSAGE`（这些**留在** ports.py），新模块要 `from app.services.research_agent_ports import ...` 取它们 —— 这是单向依赖，不能反向。
 
@@ -944,9 +956,13 @@ def test_model_resolution_seam_lives_only_in_new_module() -> None:
 
 Run:
 ```bash
-cd backend && TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test TEST_NEO4J_URI=bolt://localhost:7688 python -m pytest app/tests/unit/test_research_agent_ports.py -v -k reexported
+cd backend && TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test TEST_NEO4J_URI=bolt://localhost:7688 python -m pytest app/tests/unit/test_research_agent_ports.py -v -k model_resolution_seam
 ```
 Expected: FAIL —— `ModuleNotFoundError: No module named 'app.services.research_agent_model_resolution'`。
+
+> `-k` 的匹配串必须与 Step 2 的**函数名**对得上（`test_model_resolution_seam_lives_only_in_new_module`）。
+> 若 `-k` 选中 0 条，pytest 会以「no tests ran」+ **退出码 5** 结束 —— 那不是本步骤要的 RED 证据
+> （RED 必须是 ModuleNotFoundError）。看到「no tests ran」就说明你的 `-k` 串写错了，改串重跑。
 
 - [ ] **Step 4: 建新模块，**逐字**搬移**
 
@@ -967,11 +983,11 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'app.services.resear
 
 然后把 `research_agent_ports.py:541-734` 整段**原样**贴到 docstring 之后，再按 ruff / ImportError 补齐该文件需要的 import（`emitEvent`、`errorPayload`、两个错误常量从 `research_agent_ports` 取；ORM / 标准库 import 按需）。**不要**顺手重命名、重排、注释、拆函数。
 
-- [ ] **Step 5: 改 3 个引用点（不留再导出）**
+- [ ] **Step 5: 改 4 个引用点（不留再导出）**
 
 `research_agent_ports.py`：把 541–734 整段删掉，**不要**加任何再导出（理由见本任务 Interfaces 下的裁定框）。
 
-三处 import 改指新家：
+四处 import 改指新家（新模块名 `research_agent_model_resolution` 按字母序**排在** `research_agent_ports` 之前，拆出来的 import 块要放在 ports 块**上面**，否则 ruff I001 会红）：
 
 `app/services/research_agent_service.py`：在它从 ports 的 import 块里把 `resolveClient` 那行删掉，另起一行新模块 import：
 ```python
@@ -984,10 +1000,27 @@ from app.services.research_agent_model_resolution import (
     resolveModelConfig,
 )
 ```
-`app/tests/integration/test_research_agent_service.py`：`resolveModelConfig` 同样改指新模块。
+`app/tests/unit/test_research_agent_ports.py`：它的 ports 块里 `LlmUsageRecorder` / `MeteredClient` / `selectClassesForTables` **留在**原块，只把 `buildClient` / `buildRoutingContext` / `resolveModelConfig` 三行拆出去：
+```python
+from app.services.research_agent_model_resolution import (
+    buildClient,
+    buildRoutingContext,
+    resolveModelConfig,
+)
+from app.services.research_agent_ports import (
+    LlmUsageRecorder,
+    MeteredClient,
+    selectClassesForTables,
+)
+```
+`app/tests/integration/test_research_agent_service.py`：`resolveModelConfig` 同样改指新模块（该文件从 ports 还取 `MAX_REPLAN_PER_TURN` / `OPT_REPLAN_COUNT` / `STEP_MISSING_SQL` / `LlmUsageRecorder`，这些留在原块）。
 
 > `resolveClient` 作为**形参名**出现的地方（`research_agent_execution.py:103/118/132`、
 > 各测试里的 `resolveClient=probe`）**不要动** —— 那是注入的可调用，与 import 无关。
+>
+> `app/tests/unit/test_research_model_selection.py:221/235` 的
+> `monkeypatch.setattr(research_agent_service, "resolveClient", ...)` 也**不要动** ——
+> 它打的是**被 import 进 service 模块的绑定**，Step 5 改完 import 后该属性依然存在。
 
 - [ ] **Step 6: 跑测试确认全绿 + 行数达标**
 

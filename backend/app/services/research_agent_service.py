@@ -51,20 +51,18 @@ from app.services.report_planner import ReportPlanner
 from app.services.research_agent_execution import ExecutionDeps, buildExecutionDeps
 from app.services.research_agent_phases import (
     ResearchAgentPhasesMixin,
+    decideResume,
     isDegraded,
-    nextPhase,
     resumeState,
+    rewrittenQuestion,
 )
 from app.services.research_agent_ports import (
-    ACTION_MODIFY,
     ACTION_STATUS,
-    CHECKPOINT_PLANNING,
     ERROR_HYPOTHESIS_FAILED,
     ERROR_TURN_FAILED,
     EVENT_CHECKPOINT,
     EVENT_DONE,
     EVENT_ERROR,
-    MAX_REPLAN_PER_TURN,
     OPT_REPLAN_COUNT,
     PHASE_ESL,
     PHASE_EXECUTE,
@@ -288,27 +286,17 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         )
         # 会话级模型选择（W5）：checkpoint 载荷不带 modelId（模型不是落库状态），由 resumeState 补回。
         state = resumeState(row, checkpoint, choice)
-        startPhase = nextPhase(checkpoint, action)
-        if rewritten:
-            state = rewriteState(state, rewritten)
-            startPhase = PHASE_ESL
-        elif action == ACTION_MODIFY and checkpoint.phase == CHECKPOINT_PLANNING:
+        decision = decideResume(checkpoint, action, choice)
+        startPhase = decision.phase
+        if decision.isReplan:
             # Task 6.5-4（MEDIUM-8）：计划点的 modify 不是「确认旧计划继续跑」，而是带
             # 用户反馈**重跑 planner**；故回到 plan 相位并置 replan 标记。2026-10-11 裁定：
             # 第 1..MAX 次 modify 会**重新暂停**在计划点（用户看得到新计划）。
-            # Task B1：replan 上限封顶。超过则不再 replan，按 confirm 处理。
-            replan_count = int(state.get(OPT_REPLAN_COUNT, 0))
-            if replan_count < MAX_REPLAN_PER_TURN:
-                startPhase = PHASE_PLAN
-                state["replan"] = True
-                state[OPT_REPLAN_COUNT] = replan_count + 1
-            else:
-                # 上限已到，按 confirm 处理，继续推进
-                startPhase = nextPhaseForPhase(checkpoint.phase, checkpoint.options or {})
-                logger.info(
-                    "replan 上限已达 %s，按 confirm 推进: session=%s",
-                    MAX_REPLAN_PER_TURN, checkpoint.session_id,
-                )
+            # Task B1：replan 上限由 decideResume 封顶；达到上限后它返 execute、不置 isReplan。
+            state["replan"] = True
+            state[OPT_REPLAN_COUNT] = int(state.get(OPT_REPLAN_COUNT, 0)) + 1
+        if rewritten:
+            state = rewriteState(state, rewritten)
         logger.info(
             "研究 turn 恢复: session=%s checkpoint=%s action=%s startPhase=%s rewritten=%s",
             checkpoint.session_id, checkpointId, action, startPhase, bool(rewritten),
@@ -332,7 +320,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         checkpointId: uuid.UUID,
     ) -> str:
         """写 user turn + 会话置 running；返回改写后的问题（空串 = 用户未改写）。"""
-        rewritten = str((choice or {}).get("question") or "").strip()
+        rewritten = rewrittenQuestion(choice)
         content = resumeTurnContent(
             action=action, choice=choice, checkpointId=checkpointId, rewritten=rewritten
         )

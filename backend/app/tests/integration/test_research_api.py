@@ -410,6 +410,41 @@ async def test_checkpoint_answer_and_double_submit_409(
     assert again.status_code == 409
 
 
+async def test_checkpoint_answer_at_planning_modify_reports_replan_phase(
+    client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession, monkeypatch
+) -> None:
+    """planning 点 modify ⇒ 机器重新暂停在 **plan**，响应不得报 execute（M3）。
+
+    端点同步算这个值（后台任务之前），所以响应体与本断言不受后台执行影响；被判别的
+    是「端点用的判定」而不是「机器实际跑成什么」，后者由
+    test_planning_modify_reruns_planner_with_choice 覆盖。
+    """
+    monkeypatch.setattr(researchModule, "buildResearchAgentService", _fastService)
+    svc = ResearchSessionService()
+    userId = await _userId(dbSession, "research-user-a")
+    row = await svc.createSession(
+        dbSession, userId=userId, question="q", datasourceId=await _seededDatasourceId(dbSession)
+    )
+    turn = await svc.appendTurn(dbSession, sessionId=row.id, role="user", content={})
+    cp = await svc.openCheckpoint(
+        dbSession,
+        sessionId=row.id,
+        turnId=turn.id,
+        phase="planning",
+        options={"signal": "fixed_plan", "resumePhase": "execute", "replanCount": 0},
+        prompt="计划是否确认？",
+    )
+    await dbSession.commit()
+
+    resp = await client.post(
+        f"{_BASE}/checkpoints/{cp.id}/answer",
+        json={"action": "modify", "choice": {"instruction": "只看华东"}},
+        headers=authHeaders,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"sessionStatus": "running", "nextPhase": "plan"}
+
+
 async def test_checkpoint_answer_invalid_action_422(
     client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession
 ) -> None:

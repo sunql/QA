@@ -85,7 +85,7 @@ from app.services.messages_zh import MSG_DATASOURCE_NONE_AVAILABLE, MSG_MODEL_CO
 from app.services.model_config_service import ModelConfigService
 from app.services.nl2sql_service import Nl2SqlService
 from app.services.ontology_service import OntologyService
-from app.services.research_agent_phases import nextPhase
+from app.services.research_agent_phases import decideResume
 from app.services.research_agent_ports import (
     ERROR_CHECKPOINT_CONFLICT,
     ERROR_TURN_FAILED,
@@ -411,7 +411,7 @@ async def answerCheckpoint(
     await _ownedSession(db, checkpoint.session_id, user)  # 越权同样 404，不泄露存在性
     if checkpoint.status != "pending":
         raise ConflictError(f"检查点已决策（{checkpoint.status}），不可重复提交")
-    nextPhaseValue = nextPhase(checkpoint, payload.action)
+    nextPhaseValue = decideResume(checkpoint, payload.action, dict(payload.choice or {})).phase
     background.add_task(
         _resumeTurnInBackground,
         str(checkpoint.id),

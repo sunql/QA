@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,6 +42,7 @@ from app.services.research_agent_execution import (
 )
 from app.services.research_hypothesis_adapter import rewriteHypothesisSqlWithHint
 from app.services.research_agent_ports import (
+    ACTION_MODIFY,
     ACTION_REJECT,
     CHECKPOINT_HYPOTHESIS,
     CHECKPOINT_INTENT,
@@ -58,6 +59,7 @@ from app.services.research_agent_ports import (
     EVENT_REPORT,
     FINDING_ROWS_KEY,
     MAX_FINDING_ROWS,
+    MAX_REPLAN_PER_TURN,
     MAX_RESEARCH_DATA_STEPS,
     OPT_ABORT_PHASE,
     OPT_REPLAN_COUNT,
@@ -555,6 +557,39 @@ def nextPhase(checkpoint: Any, action: str) -> str:
     if action == ACTION_REJECT and options.get(OPT_ABORT_PHASE):
         return str(options[OPT_ABORT_PHASE])
     return nextPhaseForPhase(checkpoint.phase, options)
+
+
+def rewrittenQuestion(choice: dict[str, Any] | None) -> str:
+    """用户改写后的问题（空串 = 未改写）。**唯一推导点**：端点的决策与落库的 turn 共用它。"""
+    return str((choice or {}).get("question") or "").strip()
+
+
+@dataclass(frozen=True)
+class ResumeDecision:
+    """续跑决策：`phase` = 从哪个相位续跑；`isReplan` = 是否走「重跑计划」分支。"""
+
+    phase: str
+    isReplan: bool
+
+
+def decideResume(checkpoint: Any, action: str, choice: dict[str, Any] | None) -> ResumeDecision:
+    """checkpoint 决策 → 续跑相位。**端点与 `resumeTurn` 共用这一份**（M3）。
+
+    判定顺序与 `resumeTurn` 历史实现逐字一致：改写 > replan > （reject → abort，否则
+    `nextPhaseForPhase`）。判定键 `replanCount` 读**已落库**的 checkpoint.options
+    （`_stagePlan` 每次 replan 都把它写回新 checkpoint 的 options）。
+    """
+    if rewrittenQuestion(choice):
+        return ResumeDecision(phase=PHASE_ESL, isReplan=False)
+    if action == ACTION_MODIFY and checkpoint.phase == CHECKPOINT_PLANNING:
+        replanCount = int((checkpoint.options or {}).get(OPT_REPLAN_COUNT) or 0)
+        if replanCount < MAX_REPLAN_PER_TURN:
+            return ResumeDecision(phase=PHASE_PLAN, isReplan=True)
+        logger.info(
+            "replan 上限已达 %s，按 confirm 推进: session=%s",
+            MAX_REPLAN_PER_TURN, checkpoint.session_id,
+        )
+    return ResumeDecision(phase=nextPhase(checkpoint, action), isReplan=False)
 
 
 def isDegraded(state: dict[str, Any]) -> bool:

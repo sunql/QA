@@ -183,6 +183,20 @@ class RaisingReporter:
         raise RuntimeError("reporter boom")
 
 
+class MeteredRaisingReporter:
+    """先真调一次 LLM（让 `MeteredClient` 累加出非零 token）**再**抛错的 reporter。
+
+    与 `RaisingReporter` 的区别是本用例的全部意义：后者零调用直接抛，消耗为 0，
+    `recordUsageQuietly` 会因「零消耗跳过」而不落账 —— 那样即使把计量写在 try 里
+    也测不出差别（假绿）。这里制造「消耗已发生但报告装配失败」的失败路径。
+    """
+
+    async def compose(self, session, *, sessionId, turnId, mode, llmClient=None):
+        if llmClient is not None:
+            await llmClient.complete([{"role": "user", "content": "报告"}])
+        raise RuntimeError("reporter boom after metering")
+
+
 class FakeUsageRecorder:
     """计量 fake：记录每次 LLM 调用（核心约束 #3 的断言点）。"""
 
@@ -544,6 +558,35 @@ async def test_reporter_failure_marks_session_failed(dbSession, makeService) -> 
     ).scalar_one()
     assert status == "failed"
     assert await svc.sessionService.listReports(dbSession, s.id) == []
+
+
+@pytest.mark.asyncio
+async def test_report_metering_survives_reporter_failure(dbSession, makeService) -> None:
+    """报告阶段失败也必须落账**已消耗**的 token（finally 语义，核心约束 #3）。
+
+    报告装配是「逐块调 LLM、末尾一次性记账」的结构，记账点若不在 finally，
+    失败路径上的消耗就永久成为计量盲区。
+    """
+    recorder = FakeUsageRecorder()
+    scripted = ScriptedLlmClient(HYPOTHESIS_JSON, "解读：收货量下降明显。")
+    svc = makeService(
+        llmFactory=lambda cfg: scripted,
+        usageRecorder=recorder,
+        autoConfirm=True,
+        reporter=MeteredRaisingReporter(),
+    )
+    s = await _newSession(svc, dbSession)
+
+    with pytest.raises(RuntimeError):
+        await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+
+    # 异常仍上抛（finally 不得吞掉它），且失败前的消耗已入账
+    assert await svc.sessionService.listReports(dbSession, s.id) == []
+    used = [r for r in recorder.records if r["purpose"] == "research_report"]
+    assert len(used) == 1, "报告阶段失败仍须落账（记账点必须在 finally）"
+    assert used[0]["promptTokens"] == 120
+    assert used[0]["completionTokens"] == 40
+    assert used[0]["modelName"] == "fake-model"
 
 
 # ---------------------------------------------------------------------------

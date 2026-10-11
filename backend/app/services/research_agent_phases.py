@@ -394,23 +394,28 @@ class ResearchAgentPhasesMixin:
         """
         client = await self._llmClient(session, state=state, emit=emit, sessionId=sessionId)
         metered = MeteredClient(client) if client is not None else None
-        payload, renderedMd = await self._reporter.compose(
-            session,
-            sessionId=sessionId,
-            turnId=turnId,
-            mode=state.get("mode") or DEFAULT_MODE,
-            llmClient=metered,
-        )
-        if metered is not None:
-            await self._recordUsage(
+        try:
+            payload, renderedMd = await self._reporter.compose(
                 session,
                 sessionId=sessionId,
-                purpose=PURPOSE_REPORT,
-                promptTokens=metered.promptTokens,
-                completionTokens=metered.completionTokens,
-                modelName=metered.modelName,
-                cachedTokens=metered.cachedTokens,
+                turnId=turnId,
+                mode=state.get("mode") or DEFAULT_MODE,
+                llmClient=metered,
             )
+        finally:
+            # 记账必须在 finally：compose 逐块调 LLM，抛错时已消耗的 token 若不落账
+            # 就成了永久盲区（核心约束 #3）。recordUsageQuietly 从不抛（零消耗跳过、
+            # 其余异常 catch + log）⇒ 不会顶掉 compose 的原始异常。
+            if metered is not None:
+                await self._recordUsage(
+                    session,
+                    sessionId=sessionId,
+                    purpose=PURPOSE_REPORT,
+                    promptTokens=metered.promptTokens,
+                    completionTokens=metered.completionTokens,
+                    modelName=metered.modelName,
+                    cachedTokens=metered.cachedTokens,
+                )
         report = await self._sessions.publishReport(
             session, sessionId=sessionId, payload=payload, renderedMd=renderedMd
         )

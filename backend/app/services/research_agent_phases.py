@@ -169,7 +169,7 @@ class ResearchAgentPhasesMixin:
         （达上限后第 N+1 次 modify 按 confirm 推进），故不存在「改了又改」的死循环。
         """
         replan = bool(state.pop("replan", False))
-        replan_count = int(state.get("replanCount") or 0)
+        replan_count = int(state.get(OPT_REPLAN_COUNT) or 0)
         if replan:
             logger.info("第 %s 次 replan", replan_count)
         question = (
@@ -197,7 +197,8 @@ class ResearchAgentPhasesMixin:
             CHECKPOINT_PLANNING,
             buildOptions(
                 signal=SIGNAL_FIXED_PLAN, plan=plan, arms=state.get("esl"),
-                resumePhase=PHASE_EXECUTE, replanCount=state.get("replanCount", 0),
+                resumePhase=PHASE_EXECUTE,
+                **{OPT_REPLAN_COUNT: state.get(OPT_REPLAN_COUNT, 0)},
             ),
             "计划是否确认？",
         )

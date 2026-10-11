@@ -65,6 +65,7 @@ from app.services.research_agent_ports import (
     EVENT_DONE,
     EVENT_ERROR,
     MAX_REPLAN_PER_TURN,
+    OPT_REPLAN_COUNT,
     PHASE_ESL,
     PHASE_EXECUTE,
     PHASE_HYPOTHESIS,
@@ -295,11 +296,11 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             # 用户反馈**重跑 planner**；故回到 plan 相位并置 replan 标记。2026-10-11 裁定：
             # 第 1..MAX 次 modify 会**重新暂停**在计划点（用户看得到新计划）。
             # Task B1：replan 上限封顶。超过则不再 replan，按 confirm 处理。
-            replan_count = int(state.get("replanCount", 0))
+            replan_count = int(state.get(OPT_REPLAN_COUNT, 0))
             if replan_count < MAX_REPLAN_PER_TURN:
                 startPhase = PHASE_PLAN
                 state["replan"] = True
-                state["replanCount"] = replan_count + 1
+                state[OPT_REPLAN_COUNT] = replan_count + 1
             else:
                 # 上限已到，按 confirm 处理，继续推进
                 startPhase = nextPhaseForPhase(checkpoint.phase, checkpoint.options or {})

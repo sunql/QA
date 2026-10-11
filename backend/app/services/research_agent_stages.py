@@ -61,7 +61,7 @@ def rebuildState(row: ResearchSession, checkpoint: Any) -> dict[str, Any]:
         "resumeStepIndex": int(options.get(OPT_NEXT_STEP) or 0),
         "choice": {},
         # Task B1：replan 上限计数器，跨 resumeTurn 持久化到 checkpoint options
-        "replanCount": int(options.get(OPT_REPLAN_COUNT) or 0),
+        OPT_REPLAN_COUNT: int(options.get(OPT_REPLAN_COUNT) or 0),
     }
 
 

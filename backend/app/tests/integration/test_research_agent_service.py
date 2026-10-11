@@ -34,6 +34,7 @@ from app.services.research_agent_execution import ExecutionDeps, runStep
 from app.services.research_agent_phases import isDegraded
 from app.services.research_agent_ports import (
     MAX_REPLAN_PER_TURN,
+    OPT_REPLAN_COUNT,
     STEP_MISSING_SQL,
     LlmUsageRecorder,
     resolveModelConfig,
@@ -1089,7 +1090,7 @@ async def test_planning_modify_reruns_planner_with_choice(dbSession, makeService
     assert runner.executed == []
     cp2 = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
     assert cp2 is not None and cp2.phase == "planning"
-    assert cp2.options["replanCount"] == 1  # 迭代计数已 +1 并随 checkpoint 持久化
+    assert cp2.options[OPT_REPLAN_COUNT] == 1  # 迭代计数已 +1 并随 checkpoint 持久化
 
 
 @pytest.mark.asyncio
@@ -1123,7 +1124,7 @@ async def test_planning_modify_iterates_then_caps_at_max_replan(dbSession, makeS
         assert status == "awaiting_user", f"第 {i + 1} 次 modify 应重新暂停在计划点: {status}"
         cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
         assert cp is not None and cp.phase == "planning"
-        assert cp.options["replanCount"] == i + 1, "迭代计数应随 checkpoint 持久化"
+        assert cp.options[OPT_REPLAN_COUNT] == i + 1, "迭代计数应随 checkpoint 持久化"
         assert len(planner.calls) == i + 2, f"第 {i + 1} 次 modify 应触发 replan"
     assert runner.executed == [], "迭代期间一次都不该执行"
 

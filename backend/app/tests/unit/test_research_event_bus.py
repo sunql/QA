@@ -11,10 +11,11 @@ import pytest
 
 from app.api.v1 import research as researchModule
 from app.services.research_agent_ports import (
+    ERROR_CHECKPOINT_CONFLICT,
     ERROR_HYPOTHESIS_FAILED,
     ERROR_LLM_UNAVAILABLE,
-    ERROR_SQL_VALIDATION_FAILED,
     ERROR_SPECS,
+    ERROR_SQL_VALIDATION_FAILED,
     ERROR_STEP_FAILED,
     ERROR_TURN_FAILED,
     TERMINAL_ERROR_CODES,
@@ -150,6 +151,7 @@ def test_is_terminal_only_closes_on_done_or_turn_failure(
         (ERROR_HYPOTHESIS_FAILED, False, "running", (), "degraded"),
         (ERROR_SQL_VALIDATION_FAILED, False, "awaiting_user", ("stepIndex",), "degraded"),
         (ERROR_STEP_FAILED, False, "awaiting_user", ("stepIndex",), "degraded"),
+        (ERROR_CHECKPOINT_CONFLICT, False, "awaiting_user", (), "conflict"),
     ],
 )
 def test_error_specs_table_matches_ruling(
@@ -165,22 +167,23 @@ def test_error_specs_table_matches_ruling(
 
 
 def test_error_specs_covers_exactly_the_ruled_codes() -> None:
-    """ERROR_SPECS 键集合 == 裁定的 5 个 code（不多不少，防止后人悄悄增删 code）。"""
+    """ERROR_SPECS 键集合 == 裁定的 6 个 code（不多不少，防止后人悄悄增删 code）。"""
     assert set(ERROR_SPECS) == {
         ERROR_TURN_FAILED,
         ERROR_LLM_UNAVAILABLE,
         ERROR_HYPOTHESIS_FAILED,
         ERROR_SQL_VALIDATION_FAILED,
         ERROR_STEP_FAILED,
+        ERROR_CHECKPOINT_CONFLICT,
     }
 
 
 def test_terminal_error_codes_derived_from_specs() -> None:
     """TERMINAL_ERROR_CODES 由 ERROR_SPECS 派生（防有人写回硬编码字面量集合）。"""
-    assert TERMINAL_ERROR_CODES == frozenset(
+    assert frozenset(
         code for code, spec in ERROR_SPECS.items() if spec.terminal
-    )
-    assert TERMINAL_ERROR_CODES == frozenset({ERROR_TURN_FAILED})
+    ) == TERMINAL_ERROR_CODES
+    assert frozenset({ERROR_TURN_FAILED}) == TERMINAL_ERROR_CODES
 
 
 @pytest.mark.parametrize(

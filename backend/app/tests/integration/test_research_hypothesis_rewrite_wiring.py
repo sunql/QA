@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import json
 import uuid
 from typing import Any
@@ -20,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.research_agent_execution import buildExecutionDeps
 from app.services.research_agent_phases import ResearchAgentPhasesMixin
-
+from app.services.research_session_service import ResearchSessionService
 
 # ---- 固定副本 ---------------------------------------------------------------
 
@@ -173,27 +174,58 @@ class _FakeRecordingUsage:
 
 
 class _FakeSessionsRepo:
-    """``saveFinding`` 记录每次落库的 ``supportingSql`` + supportingData + confidence。"""
+    """``saveFinding`` 记录每次落库的 ``supportingSql`` + supportingData + confidence。
+
+    关键字签名与真身 ``ResearchSessionService.saveFinding`` 对齐（含
+    ``enhancedClaim`` / ``stats``），并按真身语义把 ``enhancedClaim`` 覆盖到
+    ``claim`` 上——替身漏参会让 ``_stageVerify`` 直接 TypeError。
+    """
 
     def __init__(self) -> None:
         self.savedFindings: list[dict] = []
         self._seq = 0
 
     async def saveFinding(
-        self, session, *, sessionId, turnId, claimText, supportingSql, supportingData, confidence
+        self,
+        session,
+        *,
+        sessionId,
+        turnId,
+        claimText,
+        supportingSql,
+        supportingData,
+        confidence,
+        enhancedClaim: str | None = None,
+        stats: dict[str, Any] | None = None,
     ) -> Any:
         self._seq += 1
         row = type("Row", (), {})()
         row.id = uuid.UUID(int=self._seq)
         self.savedFindings.append(
             {
-                "claim": claimText,
+                # 与真身同语义：enhancedClaim 非空 ⇒ 覆盖 claimText
+                "claim": enhancedClaim if enhancedClaim else claimText,
                 "supportingSql": supportingSql,
                 "supportingData": supportingData,
                 "confidence": confidence,
+                "stats": stats,
             }
         )
         return row
+
+
+def test_fake_sessions_repo_covers_real_save_finding_keywords() -> None:
+    """结构性守卫：真身 ``saveFinding`` 的关键字参数 ⊆ 假替身参数名。
+
+    真身加参数而替身不跟，会让 ``_stageVerify`` 抛 TypeError（本文件 3 条红灯
+    的成因）——这道断言让下次加参数时红灯出现在**签名**上，而不是散在用例里。
+    """
+    real = inspect.signature(ResearchSessionService.saveFinding).parameters
+    realKeywords = {
+        name for name, param in real.items() if param.kind is inspect.Parameter.KEYWORD_ONLY
+    }
+    fakeNames = set(inspect.signature(_FakeSessionsRepo.saveFinding).parameters)
+    assert realKeywords <= fakeNames
 
 
 # ---- helpers (复用 test_research_agent_service 的 datasource 模式) ---------

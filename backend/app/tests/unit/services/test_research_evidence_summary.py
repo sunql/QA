@@ -31,6 +31,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from app.services.research_agent_ports import stepResult
 from app.services.research_evidence_summary import (
     EvidenceSummary,
+    _hasPeriodSuffix,
     _hasTimeToken,
     _hasTimeWord,
     _isIdentifierName,
@@ -783,3 +784,123 @@ def test_time_word_predicate_is_ascii_whole_word_and_cjk_free() -> None:
     assert _hasTimeWord("candidate_name") is False  # 含 `date` 子串但非整词（D15 bug 3）
     assert _hasTimeWord("满意度") is False  # CJK 无词边界 ⇒ 由 _isPureTimeName 兜
     assert _hasTimeWord("时长") is False
+
+
+# ---------------------------------------------------------------------------
+# 修复轮 4：整数档再加一条**中文两字期间后缀**判据
+#
+# 修复轮 3 把整数列的兜底收窄成「时间整词（ASCII）或纯时间名」，救回了 ASCII 那一半
+# （`createDate`），但 `_hasTimeWord` 对中文**恒 False**（CJK 无词边界），而 `_isPureTimeName`
+# 要求**全字皆**时间字 ⇒ `会计年度` / `统计年月` / `会计期间` 这类**带非时间前缀**的中文期间名
+# 两头都不命中，掉进度量候选被求和：`total` 变成「年份之和 / 年月编号之和 / 期间号之和」
+# （D16 那记「看着合理的错数」，只是从 `time_range` 搬到了 `total`）。
+#
+# 新判据 = 旧判据 **∨** `_hasPeriodSuffix`（名字末**两字都是**时间字），是**单调加宽**：
+# 只增加能当轴的列，不可能让现在正确的列失去轴资格。
+# ---------------------------------------------------------------------------
+
+
+def test_chinese_period_suffix_predicate_matches_trailing_time_chars() -> None:
+    """`_hasPeriodSuffix`：名字末**两字都是** ``CJK_TIME_CHARS`` 里的字 ⇒ 期间形名字。
+
+    ⚠️ 用 ``CJK_TIME_CHARS``（**不含** ``份``）：``月份额`` 末两字是 ``份额`` ⇒ 不算期间名。
+    也正因为不含 ``份``，``年份`` / ``月份`` 走**本**判据是 ``False`` —— 它们仍是轴，靠的是
+    :func:`_isPureTimeName`（``CJK_PURE_TIME_CHARS`` 才含 ``份``）。两条一起看才是整数档的
+    兜底口径。
+    """
+    # 正例：末两字皆时间字（含带非时间前缀的期间名）
+    assert _hasPeriodSuffix("会计年度") is True
+    assert _hasPeriodSuffix("统计年月") is True
+    assert _hasPeriodSuffix("会计期间") is True
+    assert _hasPeriodSuffix("期间") is True  # 恰好两字
+    # 反例：末两字不全是时间字（或不足两字）
+    assert _hasPeriodSuffix("满意度") is False  # 末两字 `意度`
+    assert _hasPeriodSuffix("时长") is False  # 末两字 `时长`
+    assert _hasPeriodSuffix("日志") is False  # 末两字 `日志`
+    assert _hasPeriodSuffix("完成率") is False  # 末两字 `成率`
+    assert _hasPeriodSuffix("月份额") is False  # `份` 不在 CJK_TIME_CHARS
+    assert _hasPeriodSuffix("份") is False  # 单字（长度 < 2）
+    assert _hasPeriodSuffix("") is False  # 空串
+    # 纯时间名的「陪跑字」`份` 不属于本判据 —— 但该名字仍是轴（另一条判据扛）
+    assert _hasPeriodSuffix("年份") is False
+    assert _isPureTimeName("年份") is True
+    assert _hasPeriodSuffix("月份") is False
+    assert _isPureTimeName("月份") is True
+
+
+def test_fiscal_year_integer_axis_is_restored_and_not_summed() -> None:
+    """C7：`会计年度`（末两字 `年度` ⇒ 期间名）必须仍是轴，`total` 是销售额之和 `300`。
+
+    修复前（`bc7347f`）：`会计年度` 掉进度量候选 ⇒ `total = 2024 + 2025 = 4049`、
+    `time_range=None`（年份轴丢失）。反向断言钉住那记错值。
+    """
+    rows = [
+        {"会计年度": 2024, "销售额": Decimal("100")},
+        {"会计年度": 2025, "销售额": Decimal("200")},
+    ]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range == {"start": "2024", "end": "2025"}
+    assert summary.total == "300"
+    assert summary.total != "4049"  # 反向断言：年份没有被求和
+    assert summary.baseline == "100" and summary.current == "200"
+
+
+def test_stat_yearmonth_integer_axis_is_restored_and_not_summed() -> None:
+    """C8：`统计年月`（末两字 `年月`）—— 修复前 `total = 202401 + 202501 = 404902`。"""
+    rows = [
+        {"统计年月": 202401, "销售额": Decimal("100")},
+        {"统计年月": 202501, "销售额": Decimal("200")},
+    ]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range == {"start": "202401", "end": "202501"}
+    assert summary.total == "300"
+    assert summary.total != "404902"  # 反向断言：年月编号没有被求和
+    assert summary.baseline == "100" and summary.current == "200"
+
+
+def test_accounting_period_integer_axis_is_restored_and_not_summed() -> None:
+    """C9：`会计期间`（末两字 `期间`）—— 修复前 `total = 1 + 2 = 3`（期间号之和）。"""
+    rows = [
+        {"会计期间": 1, "销售额": Decimal("100")},
+        {"会计期间": 2, "销售额": Decimal("200")},
+    ]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range == {"start": "1", "end": "2"}
+    assert summary.total == "300"
+    assert summary.total != "3"  # 反向断言：期间号没有被求和
+    assert summary.baseline == "100" and summary.current == "200"
+
+
+def test_integer_measure_with_two_trailing_time_chars_is_still_a_measure() -> None:
+    """回归屏（C11）：`完成率` 末两字 `成率` 不在时间字集合 ⇒ 仍是度量，不被升格成轴。
+
+    与 `满意度`/`时长`/`日志` 同形：含时间**字**的整数度量不得因新判据被误当期间名。
+    """
+    rows = [{"完成率": 90, "amount": Decimal("50")}, {"完成率": 85, "amount": Decimal("70")}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range is None
+    assert summary.total == "175"  # 度量 = 完成率（第一个数值候选），不是 amount 之和 120
+
+
+def test_period_suffix_widening_does_not_steal_ascii_integer_date_axis() -> None:
+    """回归屏：`createDate` / `create_date`（ASCII 整词日期轴）不受新判据影响，仍不被求和。"""
+    camel = summarizeEvidence(
+        [{"createDate": 2024, "v": Decimal("1")}, {"createDate": 2025, "v": Decimal("2")}]
+    )
+    snake = summarizeEvidence(
+        [
+            {"create_date": 20240101, "amount": Decimal("100")},
+            {"create_date": 20250101, "amount": Decimal("200")},
+        ]
+    )
+
+    assert camel.time_range == {"start": "2024", "end": "2025"} and camel.total == "3"
+    assert snake.time_range == {"start": "20240101", "end": "20250101"} and snake.total == "300"

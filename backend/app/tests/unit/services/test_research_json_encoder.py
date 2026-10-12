@@ -93,6 +93,10 @@ def test_raises_type_error_naming_unknown_type(value: object) -> None:
         research_json({"unknown": value})
     message = str(excInfo.value)
     assert expectedTypeName in message
+    # 下面这一行钉的是**判别器**，不是文案口味：`json.dumps` 自带的 TypeError 同样
+    # 点名类型（"Object of type set is not JSON serializable"）⇒ 只断言类型名无法
+    # 区分「mapper 拒绝」与「json 自己拒绝」，`research_json` 这个 token 才是分界线。
+    # 改动错误文案时请同步改这里，**不要**因为它"只是文案"就删掉这条断言。
     assert "research_json" in message
 
 
@@ -102,6 +106,38 @@ def test_json_native_scalars_are_untouched() -> None:
     encoded = research_json(payload)
     assert encoded == json.dumps(payload, ensure_ascii=False)
     assert json.loads(encoded) == payload
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_float_fails_loudly_instead_of_emitting_invalid_json(value: float) -> None:
+    """非有限 float 必须显式失败 —— 否则产出的是**浏览器读不了**的帧。
+
+    `float` 走 json **原生**编码器（`default` 不触发），故这条只能靠 `allow_nan=False`
+    兜住：关掉之前 `json.dumps` 会写出裸 `NaN` / `Infinity`，那不是合法 JSON，
+    前端 `JSON.parse` 直接抛 ⇒ 整帧丢失，正是本任务要消灭的失败类。
+
+    PG `double precision` 列可存 `'NaN'`、asyncpg 原样回 `float('nan')` ⇒ 可达。
+    """
+    with pytest.raises(ValueError, match="JSON compliant"):
+        research_json({"ratio": value})
+    # 嵌套同罪（容器由 json 自己递归，异常同样穿透）
+    with pytest.raises(ValueError, match="JSON compliant"):
+        research_json({"rows": [{"ratio": value}]})
+
+
+def test_non_finite_decimal_keeps_its_string_form() -> None:
+    """`Decimal('NaN')` 走 `default` ⇒ 字符串 `"NaN"`（**接受**，非拒绝）：与「Decimal 一律 str」同口径。
+
+    刻意**不**与 float 的非有限值一刀切，理由是不对称的契约而非口味：
+    - float 在线上是 JSON **数字字面量**，而 JSON 数字没有 NaN/Inf 的表示 ⇒ 只能失败；
+    - Decimal 在本模块的线上形态**本来就是字符串**（精度原因，见模块 docstring），
+      `"NaN"` 是它忠实且**可解析**的表示，浏览器拿到的是明确的 "NaN" 文本而非坏帧。
+    另外 `numeric` 列合法地能存 `'NaN'`，把它升级成整帧失败会让**合法数据状态**拉黑通道。
+    """
+    assert research_json({"v": Decimal("NaN")}) == '{"v": "NaN"}'
+    assert json.loads(research_json({"v": Decimal("NaN")}))["v"] == "NaN"
+    assert json.loads(research_json({"v": Decimal("Infinity")}))["v"] == "Infinity"
+    assert json.loads(research_json({"v": Decimal("-Infinity")}))["v"] == "-Infinity"
 
 
 def test_keeps_non_ascii_readable() -> None:

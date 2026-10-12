@@ -2098,6 +2098,38 @@ from app.domain.wiki_compile_models import (  # noqa: E402,F401
     WikiCompileTask,
 )
 
+# ---------------------------------------------------------------------------
+# L3 ACL 白名单（Task 4.1：audit-fx-4.1）
+# L3 机密文档的访问控制白名单：user_id + resource_pattern 模糊匹配。
+# granted_by / granted_at 记录授权人 & 时间（不可变日志）。
+# ---------------------------------------------------------------------------
+
+
+class L3Acl(Base):
+    """L3 机密文档访问控制白名单。
+
+    L3 机密文档的访问规则：
+    - user 在 l3_acl 表中（user_id + resource_pattern 匹配）OR
+    - user 角色含 compliance_officer
+
+    resource_pattern 支持 SQL LIKE 模糊匹配（如 ``dataset:*``）。
+    """
+
+    __tablename__ = "l3_acl"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    resource_pattern: Mapped[str] = mapped_column(String(255))  # 模糊匹配
+    granted_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    granted_at: Mapped[datetime] = mapped_column(
+        server_default=sa.func.now(),
+    )
+
+    __table_args__ = (
+        Index("ix_l3_acl_user_id", "user_id"),
+    )
+
+
 # Re-export Wiki 知识管理 4 表（0053 migration，Phase 8 M1）。同样为了让
 # Schema drift 校验与 alembic autogenerate 看到这些表；wiki 模型独立成文件
 # 是为了避免本文件继续膨胀（已 1700+ 行）。

@@ -101,7 +101,11 @@ from app.services.research_agent_stages import (
 )
 from app.services.research_run_state import RunStateSeed, buildRunState, stateToDict, updateRunState
 from app.services.research_hypothesis_adapter import generateHypotheses
-from app.services.research_session_service import ResearchSessionService
+from app.services.research_session_service import (
+    RUN_STATE_IDEMPOTENCY_KEY,
+    ResearchSessionService,
+    RunClaimConflictError,
+)
 from app.services.token_usage_service import TokenUsageService
 from app.config import getSettings
 
@@ -220,6 +224,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
     async def runTurn(
         self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,
         question: str, userId: int | None, mode: str, emit: Emit | None = None,
+        idempotencyKey: str | None = None,
     ) -> str:
         """从**已落库的 user turn** 起跑状态机；返回 `awaiting_user` 或 `done`。
 
@@ -229,9 +234,12 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
 
         Task 7.5 LOW：空白问题守卫下沉到此处（API 路径 `createTurn → appendTurn →
         runTurn` 绕过 `startTurn`）；守卫在任何写/状态推进之前，空问题不推进状态机。
+
+        Task 2：`idempotencyKey` 落 `state_payload`（重试回放同一 turnId 的查据），
+        并据此**原子认领会话执行权** —— 未抢到（另一条状态机在跑）抛
+        `RunClaimConflictError`，由后台 wrapper 转成 SSE 冲突事件（不落 failed）。
         """
         requireQuestion(question, sessionId)
-        await self._sessions.updateSessionStatus(session, sessionId, STATUS_RUNNING)
         # 会话级模型选择（W5）：每轮从会话行取，保证追问也沿用同一模型。
         row = await self._loadSession(session, sessionId)
         run_state = buildRunState(RunStateSeed(
@@ -243,7 +251,22 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             model_id=row.model_id,
             datasource_id=row.datasource_id,
         ))
+        if idempotencyKey:
+            run_state.state_payload = {
+                **run_state.state_payload,
+                RUN_STATE_IDEMPOTENCY_KEY: idempotencyKey,
+            }
         await self._sessions.createRunState(session, run_state)
+        # active_run_id 有 FK 到 research_run_state：先落地 run 行再认领
+        await session.flush()
+        claimed, existing = await self._sessions.claimActiveRun(
+            session, sessionId, run_state.id, idempotencyKey
+        )
+        if not claimed:
+            raise RunClaimConflictError(
+                f"会话已有进行中的研究轮次: session={sessionId} run={existing}"
+            )
+        await self._sessions.updateSessionStatus(session, sessionId, STATUS_RUNNING)
         state: dict[str, Any] = {
             **stateToDict(run_state),
             "runStateId": run_state.id,
@@ -403,7 +426,11 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         emit: Emit | None,
         state: dict[str, Any],
     ) -> str:
-        """跑状态机；异常时发 `research.error`、把会话标 failed，再原样上抛（不吞错）。"""
+        """跑状态机；异常时发 `research.error`、把会话标 failed，再原样上抛（不吞错）。
+
+        Task 2：`finally` 里释放会话执行权（`releaseActiveRun`）。**只有终态才真释放** ——
+        暂停（awaiting_user）时状态机正常返回，执行权必须留着，否则并发轮次会溜进来。
+        """
         try:
             return await self._runFrom(
                 session, sessionId=sessionId, turnId=turnId, phase=phase, emit=emit, state=state
@@ -424,6 +451,23 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             )
             await self.markFailed(session, sessionId)
             raise
+        finally:
+            await self._releaseClaim(session, sessionId, state)
+
+    async def _releaseClaim(
+        self, session: AsyncSession, sessionId: uuid.UUID, state: dict[str, Any]
+    ) -> None:
+        """收尾释放会话执行权（best-effort：释放失败不得盖住原始异常或正常返回值）。
+
+        真正生效只在**会话终态**（`releaseActiveRun` 内部按状态判定）：暂停等用户决策时
+        状态机是正常返回，执行权必须保留给同一条运行的后续 resume。
+        失败路径上本调用会被后台 wrapper 的 rollback 撤掉 —— 由 `markFailed` 重放释放。
+        """
+        runId = state.get("runStateId")
+        try:
+            await self._sessions.releaseActiveRun(session, sessionId, runId)
+        except Exception:  # noqa: BLE001 —— 收尾释放失败只留痕（同 markFailed 口径）
+            logger.error("释放 active_run 失败: session=%s run=%s", sessionId, runId, exc_info=True)
 
     async def _runFrom(
         self,
@@ -630,9 +674,17 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         )
 
     async def markFailed(self, session: AsyncSession, sessionId: uuid.UUID) -> None:
-        """把会话标 failed（公开面：`_guardedRun` 与 API 后台 wrapper 共用；best-effort 不抛二次异常）。"""
+        """把会话标 failed **并释放执行权**（公开面：`_guardedRun` 与 API 后台 wrapper 共用；
+        best-effort 不抛二次异常）。
+
+        Task 2：failed 是终态 ⇒ 执行权必须一并释放，否则会话会带着 active_run_id 永久
+        409（新轮次再也提交不进来）。释放**必须**在这里、而不只在 `_guardedRun` 的 finally：
+        后台 wrapper 捕获异常后会 `rollback`，把 finally 里那次释放一并撤掉，然后重放
+        本方法 —— 只有在同一次重放里释放，终态与释放才原子地一起落下。
+        """
         try:
             await self._sessions.updateSessionStatus(session, sessionId, STATUS_FAILED)
+            await self._sessions.releaseActiveRun(session, sessionId, None)
         except Exception:  # noqa: BLE001 —— 失败态落库失败不能盖住原始异常
             logger.error("标记会话失败态失败: session=%s", sessionId, exc_info=True)
 

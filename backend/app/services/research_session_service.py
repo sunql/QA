@@ -50,6 +50,18 @@ CHECKPOINT_STATUSES = frozenset({"confirmed", "modified", "rejected"})
 """
 SESSION_STATUSES = frozenset({"running", "awaiting_user", "done", "failed", "aborted"})
 """会话状态合法取值（设计 §2 表 DDL：running | awaiting_user | done | failed | aborted）。"""
+TERMINAL_SESSION_STATUSES = frozenset({"done", "failed", "aborted"})
+"""会话终态（Task 2）：**只有终态才释放 active_run**。
+
+`awaiting_user` 不是终态 —— 运行只是暂停等用户决策，同一轮次还在继续，执行权必须保留，
+否则并发提交会溜进来（互斥失效）。
+"""
+RUN_STATE_IDEMPOTENCY_KEY = "idempotencyKey"
+"""幂等键在 `ResearchRunState.state_payload` 里的键名（Task 2）。
+
+写入方 = 状态机入口（`ResearchAgentService.runTurn`）；读取方 = 本服务的
+`getRunStateByIdempotencyKey`（重试回放同一 turnId）。**两处必须同键**。
+"""
 
 
 def _coerceJsonSafe(obj: Any) -> Any:
@@ -100,6 +112,15 @@ class CheckpointStaleError(ValueError):
 
 class CheckpointConflictError(ValueError):
     """checkpoint 状态不是 pending（已被决策或不存在）。"""
+
+
+class RunClaimConflictError(RuntimeError):
+    """会话已有进行中的运行，本轮**未获执行权**（Task 2）。
+
+    与 `CheckpointConflictError` 分开：那是「同一 checkpoint 被重复决策」，这是
+    「同一会话被两条状态机抢」。调用方（后台 wrapper）对二者的收尾不同 ——
+    本异常**不得**把会话标 failed（另一条运行正在正常跑，标 failed 会毁掉它的 UI）。
+    """
 
 
 class ResearchSessionService:
@@ -316,6 +337,138 @@ class ResearchSessionService:
             .limit(1)
         )
         return await session.scalar(stmt)
+
+    async def getRunStateByIdempotencyKey(
+        self, session: AsyncSession, sessionId: uuid.UUID, idempotencyKey: str
+    ) -> ResearchRunState | None:
+        """按幂等键取会话内**最早**那个运行（重试回放同一 turnId 的数据来源）。
+
+        幂等键落在 `state_payload`（JSONB，`@>` 包含查询）。版本化会复制同一 payload，
+        故同键可能有多行 —— 取最早一行（`created_at`, `id` 兜底）即本轮**首次**提交的
+        运行，与「重试返回同一 turnId」的语义对齐。
+        """
+        stmt = (
+            select(ResearchRunState)
+            .where(
+                ResearchRunState.session_id == sessionId,
+                ResearchRunState.state_payload.contains(
+                    {RUN_STATE_IDEMPOTENCY_KEY: idempotencyKey}
+                ),
+            )
+            .order_by(ResearchRunState.created_at.asc(), ResearchRunState.id.asc())
+            .limit(1)
+        )
+        return await session.scalar(stmt)
+
+    async def claimActiveRun(
+        self,
+        session: AsyncSession,
+        sessionId: uuid.UUID,
+        runId: uuid.UUID,
+        idempotencyKey: str | None,
+    ) -> tuple[bool, uuid.UUID | None]:
+        """原子认领会话执行权。返回 `(success, existingRunId)`。
+
+        - 幂等键命中**已存在的其他运行** ⇒ 视为同一运行，返回 `(True, 该运行 id)`，
+          不做占用判定（重试不得被自己的首次提交挡住）；
+        - 认领本身是**条件 UPDATE**（`WHERE active_run_id IS NULL`），rowcount=1 即成功 ——
+          先读后写是 TOCTOU：两条并发提交都读到 NULL ⇒ 双双放行 ⇒ 两条状态机各跑一份
+          （同 `resolveCheckpoint` 的原子条件 UPDATE 口径）；
+        - 认领方为本运行（同 runId 重入）也放行：同一条运行的续跑不是并发。
+
+        幂等键命中必须**排除 runId 自身**：调用方（`runTurn`）先把本轮的 run state 落库
+        （带 key）再来认领，同一事务里它就可见 —— 不排除会让每一条带 key 的轮次都
+        「命中自己」而跳过占用判定，互斥直接失效。
+
+        **不 commit** —— 事务归调用方（与其余方法一致）。
+        """
+        if idempotencyKey:
+            hit = await self.getRunStateByIdempotencyKey(session, sessionId, idempotencyKey)
+            if hit is not None and hit.id != runId:
+                logger.info(
+                    "幂等键命中已落库运行: session=%s key=%s run=%s",
+                    sessionId,
+                    idempotencyKey,
+                    hit.id,
+                )
+                return True, hit.id
+        result = await session.execute(
+            update(ResearchSession)
+            .where(ResearchSession.id == sessionId, ResearchSession.active_run_id.is_(None))
+            .values(active_run_id=runId)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 1:
+            await self._syncActiveRun(session, sessionId, runId)
+            return True, None
+        # 未抢到：报出**库中真实**占用者（identity map 可能陈旧，故走列查询而非 ORM 对象）
+        existing = await session.scalar(
+            select(ResearchSession.active_run_id).where(ResearchSession.id == sessionId)
+        )
+        if existing is None:
+            logger.warning("认领失败但会话不存在: session=%s run=%s", sessionId, runId)
+            return False, None
+        if existing == runId:
+            await self._syncActiveRun(session, sessionId, runId)
+            return True, None
+        logger.info("会话已被其他运行占用: session=%s run=%s existing=%s", sessionId, runId, existing)
+        return False, existing
+
+    async def releaseActiveRun(
+        self, session: AsyncSession, sessionId: uuid.UUID, runId: uuid.UUID | None
+    ) -> None:
+        """释放执行权；**仅会话终态才真释放**。
+
+        判据是会话状态而非 `active_run_id == runId`：运行状态在 resume 时会被版本化
+        （`updateRunState` 生成新 UUID），认领时的 runId 与收尾时的 `runStateId` 未必相等；
+        若按 id 相等判，版本化过的轮次永远释放不掉 ⇒ 会话被永久锁死。会话终态是
+        「可以接手」的唯一可靠判据（`awaiting_user` 只是暂停，见 `TERMINAL_SESSION_STATUSES`）。
+
+        `runId` 仅用于日志对账。**不 commit**。
+
+        释放同样走**条件 UPDATE**（`status IN 终态`）：认领是条件 UPDATE，
+        ORM 对象上的 `active_run_id` 可能陈旧（`synchronize_session=False`），
+        按对象值决定「要不要清」会说谎 —— 实测表现为「库里有占用者、对象上是 None
+        ⇒ 赋 None 不算脏脏 ⇒ 一条 UPDATE 都不发 ⇒ 数据库里的执行权永远留着，
+        终态会话被锁死」。状态判定也一并下沉到 SQL（与认领同口径）。
+        """
+        result = await session.execute(
+            update(ResearchSession)
+            .where(
+                ResearchSession.id == sessionId,
+                ResearchSession.status.in_(TERMINAL_SESSION_STATUSES),
+                ResearchSession.active_run_id.is_not(None),
+            )
+            .values(active_run_id=None)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 1:
+            await self._syncActiveRun(session, sessionId, None)
+            logger.info("释放 active_run: session=%s run=%s", sessionId, runId)
+            return
+        # rowcount=0：非终态（暂停中，执行权必须留着）或会话不存在 —— 都只留痕，不报错
+        status = await session.scalar(
+            select(ResearchSession.status).where(ResearchSession.id == sessionId)
+        )
+        if status is None:
+            logger.warning("释放 active_run 失败：会话不存在: session=%s", sessionId)
+        else:
+            logger.debug(
+                "非终态（%s）保留执行权: session=%s run=%s", status, sessionId, runId
+            )
+
+    async def _syncActiveRun(
+        self, session: AsyncSession, sessionId: uuid.UUID, runId: uuid.UUID | None
+    ) -> None:
+        """把**库中真实**的 `active_run_id` 同步回 identity map 里的会话行。
+
+        认领 / 释放都走条件 UPDATE（`synchronize_session=False`）：同一次会话里
+        先加载过该行的调用方（`runTurn` 的 `_loadSession`）对象属性会停在旧值。
+        行已在 map 中时 `session.get` 不落 SQL，故本同步不增加往返。
+        """
+        row = await session.get(ResearchSession, sessionId)
+        if row is not None:
+            row.active_run_id = runId
 
     async def createRunState(
         self, session: AsyncSession, run_state: ResearchRunState

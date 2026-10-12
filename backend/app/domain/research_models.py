@@ -71,6 +71,16 @@ class ResearchSession(Base):
     # 模型可被停用/删除，但历史会话要保留「当时用的是哪个模型」的事实。
     model_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     input_seed: Mapped[str] = mapped_column(Text, default="", server_default="")
+    # 会话级执行权互斥（Task 2）：非 NULL = 有运行正在进行（或等待用户决策）。
+    # 指向「本轮运行的初始 run_state 行」；run state 被版本化后仍保持初始 id
+    # （释放判据是会话终态，不是 id 相等 —— 见 `releaseActiveRun`）。
+    # ondelete=SET NULL：run state 被删（会话 CASCADE）时不该阻塞会话行本身。
+    active_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_run_state.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )

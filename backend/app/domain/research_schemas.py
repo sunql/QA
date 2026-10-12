@@ -77,6 +77,12 @@ class ResearchTurnCreate(CamelModel):
     model_config = ConfigDict(extra="forbid")
 
     question: str = Field(min_length=1, max_length=2000)
+    idempotencyKey: str | None = Field(default=None, max_length=200)
+    """客户端请求去重键（可选，Task 2）。
+
+    超时重试带上**同一个** key ⇒ 服务端返回**首次**提交的 turnId（不新建轮次、
+    不撞「存在进行中的研究轮次」）。作用域是**会话内**：不同会话用同一 key 互相不影响。
+    """
 
 
 class CheckpointAnswerRequest(CamelModel):
@@ -84,12 +90,17 @@ class CheckpointAnswerRequest(CamelModel):
 
     ``choice`` 是自由 JSONB（不同相位载荷不同：三臂选择 / 计划反馈 /
     假设下标 / 改写问题），故不做结构约束，只要求是对象。
+
+    重复提交的判定**不用** ``idempotencyKey``：端点按已落库的
+    ``(status→action, user_choice)`` 与请求体比对（同 action + 同 choice ⇒ 幂等回放，
+    不同决策仍 409）。``idempotencyKey`` 仅作客户端请求追踪用（可选）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     action: CheckpointAction
     choice: dict[str, Any] = Field(default_factory=dict)
+    idempotencyKey: str | None = Field(default=None, max_length=200)
 
 
 # --- 响应体 -----------------------------------------------------------------

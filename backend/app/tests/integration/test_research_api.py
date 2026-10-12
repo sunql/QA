@@ -402,9 +402,17 @@ async def test_turn_with_whitespace_question_marks_session_failed(
     assert payload["session"]["status"] == "failed"
 
 
-async def test_checkpoint_answer_and_double_submit_409(
+async def test_checkpoint_answer_replay_is_idempotent_but_conflicting_decision_409(
     client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession, monkeypatch
 ) -> None:
+    """Task 2 契约变更：**完全相同**的重复提交 ⇒ 幂等回放 200；**不同决策** ⇒ 409。
+
+    Task 1 及以前这里是「第二次提交一律 409」，把双击/超时重试当成冲突顶回去。
+    Task 2 要求决策幂等（`answerCheckpoint` 按已落库的 `(status→action, user_choice)`
+    比对）：同 action + 同 choice 返回与原提交**相同**的响应体；只有**换了决策**
+    才算真冲突。故 409 的断言改为「换一个 action」，并对 409 断言**是谁拒的**文案
+    （只断状态码会让守卫前移或误判也全绿）。
+    """
     monkeypatch.setattr(researchModule, "buildResearchAgentService", _fastService)
     svc = ResearchSessionService()
     userId = await _userId(dbSession, "research-user-a")
@@ -434,13 +442,23 @@ async def test_checkpoint_answer_and_double_submit_409(
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"sessionStatus": "running", "nextPhase": "plan"}
 
-    # 决策已落库 + 状态机后台续跑到固定 #2
+    # 同一 (action, choice) 重放（双击 / 超时重试）：幂等 —— 200 且响应体与首次**逐字相同**
     again = await client.post(
         f"{_BASE}/checkpoints/{cp.id}/answer",
         json={"action": "confirm"},
         headers=authHeaders,
     )
-    assert again.status_code == 409
+    assert again.status_code == 200, again.text
+    assert again.json() == resp.json()
+
+    # 换了决策（confirm → reject）才算真冲突：409 且文案指明「已决策」
+    conflict = await client.post(
+        f"{_BASE}/checkpoints/{cp.id}/answer",
+        json={"action": "reject"},
+        headers=authHeaders,
+    )
+    assert conflict.status_code == 409, conflict.text
+    assert "已决策" in conflict.json()["error"]
 
 
 async def test_checkpoint_answer_at_planning_modify_reports_replan_phase(

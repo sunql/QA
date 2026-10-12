@@ -87,6 +87,7 @@ from app.services.nl2sql_service import Nl2SqlService
 from app.services.ontology_service import OntologyService
 from app.services.research_agent_phases import decideResume
 from app.services.research_agent_ports import (
+    ACTION_STATUS,
     ERROR_CHECKPOINT_CONFLICT,
     ERROR_TURN_FAILED,
     EVENT_DONE,
@@ -101,6 +102,7 @@ from app.services.research_session_service import (
     CheckpointConflictError,
     CheckpointStaleError,
     ResearchSessionService,
+    RunClaimConflictError,
 )
 from app.services.research_sql_runner import ResearchSqlRunner
 from app.services.step_query_planner import StepQueryPlanner
@@ -380,7 +382,33 @@ async def createTurn(
     user: CurrentUser = Depends(_requireResearchUser),
     db: AsyncSession = Depends(getDb),
 ) -> ResearchTurnAccepted:
+    """追加一轮研究（202）；**会话级互斥**：已有进行中的轮次 ⇒ 409。
+
+    Task 2 两句判定按**这个顺序**（不可互换）：
+
+    1. **幂等键命中**优先 —— 重试（同 `idempotencyKey`）必须回放**首次**的 turnId，
+       而不是被自己首次提交占住的会话弹 409；命中即返回，不再写新轮次；
+    2. 否则 `active_run_id` 非空 ⇒ 409。状态机在后台跑、且**只有终态**才释放执行权
+       （暂停等用户决策时仍占用），故这里读到非空就说明上一轮还没结束。
+    """
     row = await _ownedSession(db, sessionId, user)
+    if payload.idempotencyKey:
+        replay = await _sessionService.getRunStateByIdempotencyKey(
+            db, sessionId, payload.idempotencyKey
+        )
+        if replay is not None:
+            logger.info(
+                "幂等键命中，回放首次轮次: session=%s key=%s turn=%s",
+                sessionId,
+                payload.idempotencyKey,
+                replay.turn_id,
+            )
+            return ResearchTurnAccepted(
+                sessionId=sessionId, turnId=replay.turn_id, status=row.status
+            )
+    if row.active_run_id is not None:
+        logger.info("拒绝并发轮次: session=%s active_run=%s", sessionId, row.active_run_id)
+        raise ConflictError("存在进行中的研究轮次，请等待当前轮次结束后再提交")
     turn = await _sessionService.appendTurn(
         db, sessionId=sessionId, role="user", content={"question": payload.question}
     )
@@ -388,7 +416,13 @@ async def createTurn(
     turnId, mode, userId = turn.id, row.mode, user.dbUserId
     await db.commit()
     background.add_task(
-        _runTurnInBackground, str(sessionId), str(turnId), payload.question, userId, mode
+        _runTurnInBackground,
+        str(sessionId),
+        str(turnId),
+        payload.question,
+        userId,
+        mode,
+        payload.idempotencyKey,
     )
     return ResearchTurnAccepted(sessionId=sessionId, turnId=turnId, status="running")
 
@@ -410,7 +444,13 @@ async def answerCheckpoint(
         raise NotFoundError("研究检查点不存在")
     await _ownedSession(db, checkpoint.session_id, user)  # 越权同样 404，不泄露存在性
     if checkpoint.status != "pending":
-        raise ConflictError(f"检查点已决策（{checkpoint.status}），不可重复提交")
+        if not _isIdempotentReplay(checkpoint, payload):
+            raise ConflictError(f"检查点已决策（{checkpoint.status}），不可重复提交")
+        # 幂等回放：同一 (action, choice) 的重复提交（双击 / 超时重试）视为已被接受，
+        # 返回与原提交**相同**的 nextPhase，而不是 409 把用户当成冲突。
+        replayPhase = decideResume(checkpoint, payload.action, dict(payload.choice or {})).phase
+        logger.info("检查点决策幂等回放: checkpoint=%s action=%s", checkpointId, payload.action)
+        return CheckpointAnswerRead(sessionStatus="running", nextPhase=replayPhase)
     nextPhaseValue = decideResume(checkpoint, payload.action, dict(payload.choice or {})).phase
     background.add_task(
         _resumeTurnInBackground,
@@ -528,7 +568,12 @@ def _isTerminal(event: str, payload: dict[str, Any]) -> bool:
 
 
 async def _runTurnInBackground(
-    sessionId: str, turnId: str, question: str, userId: int, mode: str
+    sessionId: str,
+    turnId: str,
+    question: str,
+    userId: int,
+    mode: str,
+    idempotencyKey: str | None = None,
 ) -> None:
     """后台跑状态机：自开会话 → `runTurn` → 收尾 commit。
 
@@ -537,6 +582,12 @@ async def _runTurnInBackground(
 
     `emit` 接线（Task 8）：`partial(bus.publish, sessionId)` —— 状态机发的事件即刻
     广播给已订阅的流端（订阅必须先于本任务，流端不做历史回放）。
+
+    `idempotencyKey`（Task 2）：透传进 `runTurn` 落 run state，供重试回放同一 turnId。
+
+    执行权冲突（`RunClaimConflictError`）：**不得**走 `_markTerminalFailure` ——
+    另一条运行正在正常推进，标 failed 会毁掉它的 UI。与 checkpoint 冲突同款：
+    发 `research.error(checkpoint_conflict)`（uiHint=conflict）告知用户「另一轮在跑」。
     """
     service = buildResearchAgentService()
     async with getSessionFactory()() as session:
@@ -549,8 +600,15 @@ async def _runTurnInBackground(
                 userId=userId,
                 mode=mode,
                 emit=partial(_bus.publish, sessionId),
+                idempotencyKey=idempotencyKey,
             )
             await session.commit()
+        except RunClaimConflictError as exc:
+            logger.warning("会话已有进行中的轮次，本轮放弃: session=%s turn=%s", sessionId, turnId)
+            await session.rollback()
+            await _bus.publish(
+                sessionId, EVENT_ERROR, errorPayload(ERROR_CHECKPOINT_CONFLICT, str(exc))
+            )
         except Exception as exc:  # noqa: BLE001 —— 后台任务兜底：留痕 + 回滚，不上抛
             logger.exception("研究 turn 后台执行失败: session=%s turn=%s", sessionId, turnId)
             await session.rollback()
@@ -615,6 +673,25 @@ async def _markTerminalFailure(
 # ---------------------------------------------------------------------------
 # 辅助
 # ---------------------------------------------------------------------------
+
+
+_STATUS_TO_ACTION: dict[str, str] = {status: action for action, status in ACTION_STATUS.items()}
+"""checkpoint 决策状态 → 动作反查（由 `ACTION_STATUS` 派生，不另持字面量）。"""
+
+
+def _isIdempotentReplay(
+    checkpoint: ResearchCheckpoint, payload: CheckpointAnswerRequest
+) -> bool:
+    """已决策的 checkpoint 是否收到**完全相同**决策的重复提交（Task 2 幂等回放）。
+
+    判据是库中真实决策（`status` 反查 action + `user_choice`）与请求体逐字相等。
+    决策**不同**（先 confirm 再 reject）不算回放 —— 那仍是并发冲突，必须 409，
+    否则幂等通道会变成「改写已落库决策」的后门。
+    """
+    recordedAction = _STATUS_TO_ACTION.get(checkpoint.status)
+    if recordedAction is None or recordedAction != payload.action:
+        return False
+    return dict(checkpoint.user_choice or {}) == dict(payload.choice or {})
 
 
 async def _ownedSession(

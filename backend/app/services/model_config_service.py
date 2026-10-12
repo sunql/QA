@@ -52,6 +52,7 @@ class ModelConfigService:
             weight=dto.weight,
             cost_threshold=dto.cost_threshold,
             is_active=dto.is_active,
+            temperature=dto.temperature,
         )
         session.add(config)
         await session.commit()

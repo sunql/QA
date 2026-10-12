@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -23,14 +24,14 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import research as researchModule
 from app.domain.enums import DataSourceType
 from app.domain.models import DataSource, User
 from app.domain.multi_step_plan import MultiStepPlan
-from app.domain.research_models import ResearchCheckpoint, ResearchSession
+from app.domain.research_models import ResearchCheckpoint, ResearchSession, ResearchTurn
 from app.infrastructure.security.crypto import encryptApiKey
 from app.services.chart_service import ChartService
 from app.services.enterprise_semantic_layer import (
@@ -622,6 +623,110 @@ async def test_abort_terminal_status_has_no_effect_on_failed(
     assert resp.json() == {"sessionStatus": "failed", "cancelled": False}, resp.text
 
 
+async def test_abort_then_stale_checkpoint_answer_cannot_resurrect(
+    client: AsyncClient,
+    authHeaders: dict[str, str],
+    dbSession: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """abort 之后，答那张仍 `pending` 的检查点卡片**不得**让会话复活（review Fix F）。
+
+    没有这条守卫时的链条：abort 只翻了会话状态，pending checkpoint 原样留着 ⇒ 迟到的
+    「答卡片」把它 resolve 掉、`resumeTurn` 把状态写回 `running` ⇒ **会话复活**；而
+    `resumeTurn` **从不认领执行权** ⇒ 复活后的会话是 `running` + `active_run_id IS NULL`
+    ⇒ 并发的 `POST /turns` 直接放行、`claimActiveRun` 在 `IS NULL` 上成功
+    ⇒ 同一会话两条状态机（正是上一轮刚堵住的洞）。
+
+    断言**库中状态**而非状态码（项目教训：只断状态码是假绿 —— 别的分支也能返同一个码）：
+    状态仍 `aborted`、执行权仍为空、checkpoint 仍 `pending`（⇒ 守卫在 `resolveCheckpoint`
+    **之前**，一行都没改）、轮次数不变（⇒ 没有起跑）。
+    """
+    _patchService(monkeypatch)
+    session = await _createSession(client, authHeaders, "Q1")
+    sid = session["id"]
+    r1 = await _postTurn(client, authHeaders, sid, {"question": "Q1"})
+    assert r1.status_code == 202, r1.text
+    cp = await _waitForCheckpoint(client, authHeaders, sid, phase="intent")
+
+    aborted = await client.post(f"{_BASE}/sessions/{sid}/abort", headers=authHeaders)
+    assert aborted.status_code == 200, aborted.text
+    assert aborted.json()["cancelled"] is True, aborted.text
+    turnsBefore = await _turnCount(dbSession, sid)
+
+    late = await client.post(
+        f"{_BASE}/checkpoints/{cp['id']}/answer",
+        json={"action": "confirm", "choice": {}},
+        headers=authHeaders,
+    )
+    assert late.status_code == 200, late.text  # 端点异步返 200，拒绝经 SSE 传回
+
+    detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    body = detail.json()
+    assert body["session"]["status"] == "aborted", body["session"]
+    assert await _activeRunId(dbSession, sid) is None, "执行权不得被复活"
+    pending = body["pendingCheckpoint"]
+    assert pending is not None, "检查点不得被 resolve（守卫必须在 resolveCheckpoint 之前）"
+    assert pending["status"] == "pending", pending
+    assert await _turnCount(dbSession, sid) == turnsBefore, "不得写下任何恢复轮次（没有起跑）"
+
+
+async def test_expired_checkpoint_cleanup_warns_when_not_cancellable(
+    client: AsyncClient,
+    authHeaders: dict[str, str],
+    dbSession: AsyncSession,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """过期善后遇到「不可取消」的会话必须**告警**，不得静默 no-op（review Fix G）。
+
+    白名单收窄成 `awaiting_user` 之后（Fix A），善后若落在别的非终态上就会变成
+    「只留一句 info 日志、执行权继续占着」—— 正是本任务要修的死路，却**没有任何信号**。
+    本条把信号钉住：状态非 `awaiting_user` ⇒ 必有一条 WARNING 提到「善后未生效」。
+
+    造法：直接种出 `running` + 持有执行权的会话（ASGITransport 下 HTTP 层造不出
+    「正在跑」的中间态），再把 pending checkpoint 的 TTL 拨到过去 ⇒ 后台 resume 先撞
+    `CheckpointStaleError`（守卫只挡终态，`running` 不挡）⇒ 走善后分支。
+    只断日志**不上抛**是本用例的另一半：善后抛异常会掩盖已发给用户的原始冲突原因。
+    """
+    _patchService(monkeypatch)
+    session = await _createSession(client, authHeaders, "Q1")
+    sid = session["id"]
+    svc = ResearchSessionService()
+    run_state = await _seedRunRow(dbSession, svc, uuid.UUID(sid))
+    ok, _ = await svc.claimActiveRun(dbSession, uuid.UUID(sid), run_state.id, None)
+    assert ok is True
+    turn = await svc.appendTurn(dbSession, sessionId=uuid.UUID(sid), role="user", content={})
+    cp = await svc.openCheckpoint(
+        dbSession,
+        sessionId=uuid.UUID(sid),
+        turnId=turn.id,
+        phase="intent",
+        options={"signal": "fixed_scope", "resumePhase": "plan", "prompt": "?"},
+        prompt="?",
+    )
+    await svc.updateSessionStatus(dbSession, uuid.UUID(sid), "running")
+    await dbSession.execute(
+        update(ResearchCheckpoint)
+        .where(ResearchCheckpoint.id == cp.id)
+        .values(expires_at=datetime.now(UTC) - timedelta(hours=1))
+        .execution_options(synchronize_session=False)
+    )
+    await dbSession.commit()
+    claimed = await _activeRunId(dbSession, sid)
+
+    caplog.set_level(logging.WARNING)
+    stale = await client.post(
+        f"{_BASE}/checkpoints/{cp.id}/answer",
+        json={"action": "confirm", "choice": {}},
+        headers=authHeaders,
+    )
+    assert stale.status_code == 200, stale.text
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("善后未生效" in r.getMessage() for r in warnings), [r.getMessage() for r in warnings]
+    assert await _activeRunId(dbSession, sid) == claimed, "善后 no-op ⇒ 执行权仍被占着（正是告警的内容）"
+
+
 async def test_answer_checkpoint_reports_real_session_status(
     client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession, monkeypatch
 ) -> None:
@@ -707,6 +812,14 @@ async def _activeRunId(dbSession: AsyncSession, sessionId: str | uuid.UUID) -> u
     target = sessionId if isinstance(sessionId, uuid.UUID) else uuid.UUID(sessionId)
     return await dbSession.scalar(
         select(ResearchSession.active_run_id).where(ResearchSession.id == target)
+    )
+
+
+async def _turnCount(dbSession: AsyncSession, sessionId: str | uuid.UUID) -> int:
+    """库中该会话的轮次数（「有没有真的起跑」的硬证据，比状态码可靠）。"""
+    target = sessionId if isinstance(sessionId, uuid.UUID) else uuid.UUID(sessionId)
+    return await dbSession.scalar(
+        select(func.count()).select_from(ResearchTurn).where(ResearchTurn.session_id == target)
     )
 
 

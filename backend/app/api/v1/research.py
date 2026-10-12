@@ -736,9 +736,21 @@ async def _abortExpiredSession(session: AsyncSession, sessionId: str) -> None:
 
     调用方已 `rollback`，故本函数在**新事务**里落库并自行 commit；失败只留痕 —— 该路径
     是善后，不该反过来掩盖已经通过 SSE 发给用户的冲突原因。
+
+    **善后未生效必须留信号**（review Fix G）：`abortSessionIfActive` 的白名单只有
+    `awaiting_user`，若这条路径上会话竟是别的状态，取消会变成一个**静默 no-op**
+    （只留一句 info 日志）而执行权继续占着 —— 正是本任务要修的死路，却没有告警。
+    故非 `aborted` 一律 WARNING。**只告警不上抛**：本函数在善后路径上，抛异常会掩盖
+    已通过 SSE 发给用户的原始冲突原因。
     """
     try:
-        await _sessionService.abortSessionIfActive(session, uuid.UUID(sessionId))
+        status = await _sessionService.abortSessionIfActive(session, uuid.UUID(sessionId))
+        if status != "aborted":
+            logger.warning(
+                "过期检查点的善后未生效（期望 awaiting_user ⇒ aborted）: session=%s status=%s",
+                sessionId,
+                status,
+            )
         await session.commit()
     except Exception:  # noqa: BLE001 —— 善后失败只留痕，不掩盖原始冲突
         logger.exception("过期检查点落 aborted 失败: session=%s", sessionId)

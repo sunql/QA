@@ -102,6 +102,8 @@ from app.services.research_run_state import RunStateSeed, buildRunState, stateTo
 from app.services.research_hypothesis_adapter import generateHypotheses
 from app.services.research_session_service import (
     RUN_STATE_IDEMPOTENCY_KEY,
+    TERMINAL_SESSION_STATUSES,
+    CheckpointConflictError,
     ResearchSessionService,
     RunClaimConflictError,
 )
@@ -312,6 +314,23 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         if cp_row is None:
             raise ValueError(f"checkpoint 不存在: {checkpointId}")
         session_row = await self._loadSession(session, cp_row.session_id)
+        # 终态会话不可续跑（Task 2 / review Fix F）。**这是让 abort 成为「最终」的那道闸门**：
+        # abort 只翻会话状态，pending checkpoint 行仍留着 —— 迟到的「答卡片」会把它 resolve
+        # 掉、本方法再把状态写回 `running` ⇒ 会话复活。更糟的是本方法**从不认领执行权**，
+        # 复活后的会话是 `running` + `active_run_id IS NULL` ⇒ 并发的 `POST /turns` 直接放行
+        # ⇒ 同一会话两条状态机（正是本任务的互斥要防的事）。
+        # 守卫放在 `resolveCheckpoint` **之前**：一行 checkpoint 都不改、状态也不写，
+        # 「被拒绝」与「库里没动过」永远是同一件事。
+        if session_row.status in TERMINAL_SESSION_STATUSES:
+            logger.warning(
+                "拒绝续跑终态会话: session=%s status=%s checkpoint=%s",
+                cp_row.session_id,
+                session_row.status,
+                checkpointId,
+            )
+            raise CheckpointConflictError(
+                f"会话已结束（{session_row.status}），无法再续跑: session={cp_row.session_id}"
+            )
         checkpoint = await self._sessions.resolveCheckpoint(
             session,
             checkpointId=checkpointId,

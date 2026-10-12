@@ -24,6 +24,26 @@
 **D15 · 不照抄参考实现的三个崩溃点。** 逐值 ``Decimal(str(v))`` 归一（float 不炸）、
 排序键显式处理 ``None`` 且归一类型（date 与 str 不互比）、时间列用**整词 token** 匹配
 而非子串（``candidate_name`` 不含 time 词边界，不当时间列）。
+
+**D16 · 轴 / 度量的判据是「纯时间名」与「标识符后缀」，不是「含不含时间词」（修复轮 2）。**
+只看「名字里有没有时间词」两头都错：``period_cost`` / ``month_volume`` 这类合法 ERP 度量名
+含时间词却被整块丢掉（``total`` 直接变 ``None``）；而中文轴（``年份``）过 ``_tokenize`` 后
+token 为空、永不命中 ⇒ ``total`` 变成 ``2024 + 2025 = 4049``、基线/当前变成**年份** ——
+同比报表拿年份比年份，是「看着合理的错数」（最坏的一种）。故改用
+:func:`_isPureTimeName`（全为时间单位 ⇒ 轴形名字）与 :func:`_isIdentifierName`（以
+``id`` / ``no`` / ``序号`` 等**结尾** ⇒ id 类列）。英文仍走**整词 / 后缀**匹配
+（退回子串会复现 D15 bug 3）；CJK 无词边界，故按**字符**判。
+
+**残余限制（D9 无 schema 元数据 ⇒ 判据只能是启发式的，别当成完备）。** 判据只看名字，故
+名字**纯时间**的合法度量（如 ``{d, year}`` 里 ``year`` 恰好是要统计的量）会被跳过；名字以
+标识符词**结尾**的度量（如 ``order_no`` 作为「订单号计数」）同理。两者都走「宁可 ``None``
+也不给错数」的保守方向，且只在**有**真时间戳时才降级成 ``None``（无真时间戳时退回第一个
+数值候选，见 :func:`_metricColumn`）。
+
+**SSE 侧是响亮失败，不是静默。** ``trySummarizeEvidence`` 吞异常**不**代表原始行路径静默：
+``emit`` 是 ``ResearchEventBus.publish`` 的 partial，它**只入队、从不序列化**；序列化在 SSE
+帧构造处（``_sseFrame`` → ``research_json``），那一步**不在** ``emitEvent`` 的 try/except 里
+⇒ 白名单外的驱动标量会**炸掉整条 SSE 流**。详见 :func:`trySummarizeEvidence` 的 docstring。
 """
 
 from __future__ import annotations
@@ -57,6 +77,21 @@ NUMERIC_KINDS = frozenset({KIND_INTEGER, KIND_NUMERIC})
 TIME_NAME_TOKENS = frozenset(
     {"year", "month", "date", "time", "period", "quarter", "week", "day", "timestamp"}
 )
+
+# CJK 列名无词边界（``_tokenize`` 的 ASCII 切分对中文列名返回空 token）⇒ 按**字符**判时间语义：
+# ``日期`` / ``月份`` / ``年度`` / ``时间`` / ``季度`` 任一字命中即算「含时间词」。
+CJK_TIME_CHARS = frozenset("年月日季度周时期间")
+
+# ``_isPureTimeName`` 额外允许的「陪跑」字：单独不表时间，但出现在纯时间名里（``年份`` /
+# ``月份``）不改变判定。``份额`` 的 ``额`` 不在此列 ⇒ 它仍是度量（不是轴形名字）。
+CJK_TIME_COMPANION_CHARS = frozenset("份")
+CJK_PURE_TIME_CHARS = CJK_TIME_CHARS | CJK_TIME_COMPANION_CHARS
+
+# 标识符列的**结尾**词（D16）：名字以此结尾 ⇒ id / 序号类列，永不作为度量。必须按**后缀**，
+# 不能按「包含」—— ``no_of_orders`` 含 token ``no`` 却是度量（订单数），按包含判会误伤它。
+IDENT_SUFFIX_TOKENS = frozenset({"id", "no", "code", "num", "number", "rank", "row", "seq"})
+# 中文后缀单独列（CJK 无 token 边界，只能整体 ``endswith``）；``ID`` / ``id`` 由上面的 ASCII 后缀覆盖。
+CJK_IDENT_SUFFIXES = ("编号", "代码", "序号", "排名")
 
 DEFAULT_MAX_SAMPLE_ROWS = 5
 DEFAULT_TOP_N_LIMIT = 5
@@ -194,11 +229,48 @@ def _tokenize(name: str) -> list[str]:
 
 
 def _hasTimeToken(name: str) -> bool:
-    return bool(TIME_NAME_TOKENS & set(_tokenize(name)))
+    """名字**含**时间词 —— 英文按**整词**（D15 bug 3），CJK 按**字**（无词边界）。
+
+    ``candidate_name`` 里含 ``date`` 子串却**不是**时间列，故英文必须整词匹配；退回子串
+    匹配就会复现 D15 bug 3。注意本判据是「含」而非「是」：``period_cost`` 也命中，
+    但它不是**纯**时间名（见 :func:`_isPureTimeName`），仍应作为度量。
+    """
+    if TIME_NAME_TOKENS & set(_tokenize(name)):
+        return True
+    return any(char in CJK_TIME_CHARS for char in name)
+
+
+def _isPureTimeName(name: str) -> bool:
+    """名字是否**全是时间单位**（⇒ 轴形名字，永不作为度量）。
+
+    ``year`` / ``quarter`` / ``年份`` / ``月份`` ⇒ True；
+    ``period_cost``（有 ``cost``）/ ``月度量``（有 ``量``）/ ``日志``（有 ``志``）⇒ False。
+    判据是「**是不是**纯时间名」而不是「含不含时间词」—— 后者会把 ``period_cost`` 这类
+    合法 ERP 度量名整块丢掉（修复轮 1 的反向回归）。
+    """
+    tokens = _tokenize(name)
+    if tokens and all(token in TIME_NAME_TOKENS for token in tokens):
+        return True
+    if not name:
+        return False
+    return all(char in CJK_PURE_TIME_CHARS for char in name)
+
+
+def _isIdentifierName(name: str) -> bool:
+    """名字是否以**标识符词结尾**（⇒ id / 序号类列，永不作为度量）。
+
+    必须按**后缀**：``no_of_orders`` 含 token ``no`` 但它是度量（订单数），按「包含」判
+    会把它误伤成标识符列。``order_no`` / ``product_id`` / ``rank`` / ``序号`` ⇒ True；
+    ``no_of_orders`` / ``amount`` ⇒ False。
+    """
+    tokens = _tokenize(name)
+    if tokens and tokens[-1] in IDENT_SUFFIX_TOKENS:
+        return True
+    return name.lower().endswith(CJK_IDENT_SUFFIXES)
 
 
 def _timeColumn(order: list[str], kinds: dict[str, str]) -> str | None:
-    """时间轴列：**优先真时间戳**（取值即 timestamp），退而用整词 token 匹配名字（D15 bug 3）。
+    """时间轴列：**优先真时间戳**（取值即 timestamp），退而按名字判时间语义（D15 bug 3 / D16）。
 
     名字兜底只在非数值列上做 —— 否则 ``period_amount`` 这类数值列会被误当时间轴。
     """
@@ -214,23 +286,28 @@ def _timeColumn(order: list[str], kinds: dict[str, str]) -> str | None:
 def _metricColumn(
     order: list[str], kinds: dict[str, str], timeColumn: str | None, timeKind: str | None
 ) -> str | None:
-    """被聚合的度量列：**优先无时间词的数值列**，退回带时间词的数值列，否则 ``None``。
+    """被聚合的度量列：排除时间轴列、**纯时间名**与**标识符名**后的第一个数值列（D16）。
 
-    三层，逐层收紧（每一步都对应一个真实的错值形态）：
-    1. 排除时间轴列本身（``{year, amount}`` 无时间戳时，``year`` 是轴）；
-    2. 排除名字带时间词的数值列 —— ``{year, amount, d}`` 里 ``d`` 才是轴，``year`` 不再是
-       ``timeColumn``，但它仍是**整数轴**：若不过滤，``total`` 会变成 ``2024 + 2025 = 4049``、
-       基线/当前变成**年份**，同比报表拿年份比年份 —— 看起来完全合理的错数，最坏的一种；
-    3. **真时间戳存在时不做第 2 步的退回**：此时带时间词的数值列几乎必是轴（如只剩
-       ``{year, d}``）⇒ 宁可 ``None``（没有可辨认的度量），也不给「看着合理」的错值。
-       没有真时间戳时退回是安全的：``{month, month_sales}`` 里 ``month_sales`` 就是度量。
+    判据是「名字**是不是**纯时间名」，不是「含不含时间词」（修复轮 1 的错口径）：后者对
+    ``period_cost`` / ``month_volume`` 这类合法 ERP 度量名会整块丢掉（``total`` 变 ``None``），
+    对 ``年份`` 这类中文轴又完全失效（``_tokenize`` 对 CJK 返回空 ⇒ 永不命中）⇒ ``total``
+    变成 ``2024 + 2025 = 4049``、基线/当前变成**年份**（同比报表拿年份比年份）。同理，
+    ``product_id`` / ``rank`` 这类标识符列是数值却不是量，按**后缀**排除。
+
+    过滤后为空时：
+    - 有真时间戳 ⇒ ``None``：候选真的只剩轴形名字（如 ``{year, d}``）⇒ 宁可没有可辨认的度量，
+      也不给「看着合理」的错值；
+    - 无真时间戳 ⇒ 退回过滤前的第一个数值候选（宽松兜底；``{month, month_sales}`` 里
+      ``month_sales`` 本就是第一个通过者，不受影响）。
     """
     candidates = [
         name for name in order if name != timeColumn and kinds.get(name) in NUMERIC_KINDS
     ]
-    tokenFree = [name for name in candidates if not _hasTimeToken(name)]
-    if tokenFree:
-        return tokenFree[0]
+    measures = [
+        name for name in candidates if not _isPureTimeName(name) and not _isIdentifierName(name)
+    ]
+    if measures:
+        return measures[0]
     if timeKind == KIND_TIMESTAMP:
         return None
     return candidates[0] if candidates else None
@@ -426,9 +503,18 @@ def trySummarizeEvidence(
     """出图路径专用包装：**任何失败只留痕，不让单步失败**（D12 加法原则）。
 
     本模块读的是驱动原始行，可能含 ``research_json`` 白名单外的类型（``bytes`` /
-    ``memoryview`` / oracledb LOB ...）。同批行在 ``EVENT_STEP_DATA`` 的 emit 处失败会被
-    ``emitEvent`` 吞掉（只 warning），故「SSE 能忍」不代表此处能忍；若此处上抛，会经
-    ``_guardedRun`` 把**单步**升级成**整 turn 失败**。结构化摘要是加法：算不出来就不给，
+    ``memoryview`` / oracledb LOB ...）。
+
+    **机制（实测核实，勿再写成「被 ``emitEvent`` 吞掉」）**：``emit`` 是
+    ``ResearchEventBus.publish`` 的 partial，而 ``publish`` 只把 ``(event, payload)``
+    **入队、从不序列化**。因此「同一批行在 emit 处失败」这条路径上**根本没有失败** ——
+    ``emitEvent`` 守卫的是 ``emit`` 那一步，而入队不碰 payload 类型。真正的序列化在 **SSE
+    帧构造处**（``_sseFrame`` → ``research_json``），那一步**不在** ``emitEvent`` 的
+    try/except 里 ⇒ 同一批行在那里失败会**炸掉整条 SSE 流**，是**响亮失败**而非静默。
+
+    正因为原始行路径在 SSE 侧已经足够响亮，结构化摘要这一路才不该反过来把**单步**升级成
+    **整 turn 失败**：此处上抛会经服务的 ``_guardedRun`` 落进终态失败通道，让一个**本可
+    降级**成「本步没有结构化证据」的加法功能成为整轮终止的理由。它是加法：算不出来就不给，
     返回 ``None`` 即「本步无结构化证据」。
     """
     try:

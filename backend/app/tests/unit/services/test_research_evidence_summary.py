@@ -31,6 +31,9 @@ from sqlalchemy.dialects.postgresql import JSONB
 from app.services.research_agent_ports import stepResult
 from app.services.research_evidence_summary import (
     EvidenceSummary,
+    _hasTimeToken,
+    _isIdentifierName,
+    _isPureTimeName,
     inferColumnKinds,
     summarizeEvidence,
     trySummarizeEvidence,
@@ -495,3 +498,149 @@ def test_try_summarize_never_breaks_the_step_on_unsupported_driver_type() -> Non
 
     assert trySummarizeEvidence(rows) is None  # 出图路径：只留痕，不给证据
     assert trySummarizeEvidence([{"v": Decimal("1")}]).total == "1"
+
+
+# ---------------------------------------------------------------------------
+# 修复轮 2：轴 ≠ 度量的判据必须覆盖**非 ASCII 列名**与**标识符列**
+#
+# 修复轮 1 的判据是「名字里**有没有**时间词」且只认英文整词（`_tokenize` 用 ASCII 切分，
+# 中文列名 token 化成 `[]`，永不命中）。正确判据是「名字**是不是纯时间名**」+ 标识符列按
+# **后缀**识别。三条错值形态：中文年份轴被当度量（英文同类已修）、id/rank 列被求和、
+# 名字含时间词的合法度量被整块丢掉。
+# ---------------------------------------------------------------------------
+
+
+def test_chinese_axis_and_measure_are_separated_in_the_digest() -> None:
+    """中文别名（`nl2sql_refine._SAFE_IDENT_RE` 允许 CJK 标识符）同属「整数轴当度量」。
+
+    旧判据只认英文整词 ⇒ `年份` 通过过滤成为度量：`total = 2024 + 2025 = 4049`、
+    基线/当前变成**年份** —— 同比报表拿年份比年份，是「看着合理的错数」。
+    """
+    rows = [
+        {"年份": 2024, "销售额": Decimal("100"), "创建日期": date(2024, 1, 1)},
+        {"年份": 2025, "销售额": Decimal("200"), "创建日期": date(2025, 1, 1)},
+    ]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.total == "300"  # 不是 4049
+    assert summary.baseline == "100" and summary.current == "200"
+    assert summary.delta == "100" and summary.delta_ratio == "1"
+    assert summary.time_range == {"start": "2024-01-01", "end": "2025-01-01"}
+
+
+def test_chinese_axis_top_n_ranks_by_measure_not_by_axis() -> None:
+    """TopN 也按度量排：本数据下「按轴（年份）降序」与「按度量（销售额）降序」结果相反。"""
+    rows = [
+        {"年份": 2024, "销售额": Decimal("200"), "创建日期": date(2024, 1, 1)},
+        {"年份": 2025, "销售额": Decimal("100"), "创建日期": date(2025, 1, 1)},
+    ]
+
+    summary = summarizeEvidence(rows)
+
+    assert [t["row"]["年份"] for t in summary.top_n] == [2024, 2025]
+    assert [t["row"]["销售额"] for t in summary.top_n] == ["200", "100"]
+    assert summary.baseline == "200" and summary.current == "100"
+
+
+def test_chinese_pure_time_axis_only_yields_no_digest() -> None:
+    """中文版「宁可 None」：真时间戳 + 纯中文时间轴、没有别的数值列 ⇒ 不拿轴当度量。"""
+    rows = [
+        {"年份": 2024, "创建日期": date(2024, 1, 1)},
+        {"年份": 2025, "创建日期": date(2025, 1, 1)},
+    ]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.total is None
+    assert summary.baseline is None and summary.current is None
+    assert summary.time_range == {"start": "2024-01-01", "end": "2025-01-01"}
+
+
+def test_identifier_shaped_integer_column_is_not_the_metric_product_id() -> None:
+    """`product_id` 无时间词、又是数值列 ⇒ 旧判据把它求和：`101 + 205 = 306`。"""
+    rows = [
+        {"product_id": 101, "amount": Decimal("50")},
+        {"product_id": 205, "amount": Decimal("70")},
+    ]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.total == "120"
+    assert summary.total != "306"  # 反向断言：id 列没有被求和
+
+
+def test_identifier_shaped_integer_column_is_not_the_metric_rank() -> None:
+    rows = [{"rank": 1, "amount": Decimal("50")}, {"rank": 2, "amount": Decimal("70")}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.total == "120"
+    assert summary.total != "3"
+
+
+def test_chinese_identifier_shaped_column_is_not_the_metric() -> None:
+    """中文标识符后缀（`序号`）同样不得被求和 —— 判据不能只认英文后缀。"""
+    rows = [{"序号": 1, "amount": Decimal("50")}, {"序号": 2, "amount": Decimal("70")}]
+
+    assert summarizeEvidence(rows).total == "120"
+
+
+def test_measure_name_containing_a_time_word_is_not_discarded() -> None:
+    """修复轮 1 的**反向**回归：`period_cost` / `month_volume` 这类合法 ERP 度量名含时间词。
+
+    判据必须是「名字**是不是纯时间名**」（`period_cost` 有 `cost` ⇒ 不是），而不是
+    「名字含不含时间词」—— 后者会把它们整块丢掉（旧代码 `total is None`，修复前是 300）。
+    """
+    rows = [
+        {"d": date(2024, 1, 1), "period_cost": Decimal("100")},
+        {"d": date(2025, 1, 1), "period_cost": Decimal("200")},
+    ]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.total == "300"
+    assert summary.baseline == "100" and summary.current == "200"
+
+
+def test_identifier_suffix_discipline_keeps_no_of_orders_as_a_measure() -> None:
+    """`no_of_orders` 含 token `no`，但它**不以**标识符词结尾 ⇒ 仍是度量（后缀纪律）。
+
+    若标识符判据误用「包含」/「任一 token 命中」，此列会被丢掉，真时间戳在场时
+    `total` 直接变 `None`（与 `period_cost` 同款的错值形态）。
+    """
+    rows = [
+        {"d": date(2024, 1, 1), "no_of_orders": 3},
+        {"d": date(2025, 1, 1), "no_of_orders": 4},
+    ]
+
+    assert summarizeEvidence(rows).total == "7"
+
+
+def test_pure_time_name_predicate_matches_units_not_mere_containment() -> None:
+    assert _isPureTimeName("year") is True
+    assert _isPureTimeName("quarter") is True
+    assert _isPureTimeName("年份") is True
+    assert _isPureTimeName("月份") is True
+    assert _isPureTimeName("period_cost") is False  # 有 `cost`
+    assert _isPureTimeName("月度量") is False  # 有 `量`
+    assert _isPureTimeName("日志") is False  # 有 `志`
+
+
+def test_identifier_name_predicate_uses_suffix_not_substring() -> None:
+    assert _isIdentifierName("order_no") is True
+    assert _isIdentifierName("product_id") is True
+    assert _isIdentifierName("rank") is True
+    assert _isIdentifierName("序号") is True
+    assert _isIdentifierName("no_of_orders") is False  # `no` 是 token，但不在**结尾**
+    assert _isIdentifierName("amount") is False
+
+
+def test_time_token_predicate_whole_word_for_ascii_and_charwise_for_cjk() -> None:
+    """英文整词纪律不得因中文支持而退回子串（`candidate_name` 含 `date` 子串，D15 bug 3）。"""
+    assert _hasTimeToken("candidate_name") is False
+    assert _hasTimeToken("year") is True
+    assert _hasTimeToken("period_cost") is True  # 「含」时间词 —— 但它不是**纯**时间名
+    assert _hasTimeToken("年份") is True
+    assert _hasTimeToken("创建日期") is True
+    assert _hasTimeToken("销售额") is False

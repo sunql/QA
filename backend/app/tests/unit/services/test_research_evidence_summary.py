@@ -31,10 +31,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 from app.services.research_agent_ports import stepResult
 from app.services.research_evidence_summary import (
     EvidenceSummary,
-    _hasPeriodSuffix,
+    _hasPeriodWord,
     _hasTimeToken,
     _hasTimeWord,
     _isIdentifierName,
+    _isPeriodShaped,
     _isPureTimeName,
     inferColumnKinds,
     summarizeEvidence,
@@ -795,37 +796,54 @@ def test_time_word_predicate_is_ascii_whole_word_and_cjk_free() -> None:
 # 两头都不命中，掉进度量候选被求和：`total` 变成「年份之和 / 年月编号之和 / 期间号之和」
 # （D16 那记「看着合理的错数」，只是从 `time_range` 搬到了 `total`）。
 #
-# 新判据 = 旧判据 **∨** `_hasPeriodSuffix`（名字末**两字都是**时间字），是**单调加宽**：
-# 只增加能当轴的列，不可能让现在正确的列失去轴资格。
+# 新判据 = 旧判据 **∨** 「中文期间词后缀」，是**单调加宽**：只增加能当轴的列，不可能让
+# 现在正确的列失去轴资格。
+#
+# ⚠️ 修复轮 5 已把这条判据从「末两字是时间**字**」收窄成「末两字是**期间词**」闭集 —— 前者
+# 会把 `工作时间`/`响应时间` 一并收成轴（见本文件末尾「修复轮 5」段）。本段保留的是
+# 「带非时间前缀的中文期间名仍是轴」这一**回归屏**。
 # ---------------------------------------------------------------------------
 
 
-def test_chinese_period_suffix_predicate_matches_trailing_time_chars() -> None:
-    """`_hasPeriodSuffix`：名字末**两字都是** ``CJK_TIME_CHARS`` 里的字 ⇒ 期间形名字。
+def test_chinese_period_word_predicate_matches_closed_set_suffixes() -> None:
+    """`_hasPeriodWord`：名字以**中文期间词**结尾（闭集）⇒ 期间形名字。
 
-    ⚠️ 用 ``CJK_TIME_CHARS``（**不含** ``份``）：``月份额`` 末两字是 ``份额`` ⇒ 不算期间名。
-    也正因为不含 ``份``，``年份`` / ``月份`` 走**本**判据是 ``False`` —— 它们仍是轴，靠的是
-    :func:`_isPureTimeName`（``CJK_PURE_TIME_CHARS`` 才含 ``份``）。两条一起看才是整数档的
-    兜底口径。
+    ⚠️ 刻意**不含** `时间` 与 `周期`：整数列里「…时间」是时长（`工作时间`/`响应时间`）、
+    `周期` 是周期天数 —— 它们是**度量**，不是轴（`周期` 仍靠 `_isPureTimeName` 当轴，见 N5）。
     """
-    # 正例：末两字皆时间字（含带非时间前缀的期间名）
-    assert _hasPeriodSuffix("会计年度") is True
-    assert _hasPeriodSuffix("统计年月") is True
-    assert _hasPeriodSuffix("会计期间") is True
-    assert _hasPeriodSuffix("期间") is True  # 恰好两字
-    # 反例：末两字不全是时间字（或不足两字）
-    assert _hasPeriodSuffix("满意度") is False  # 末两字 `意度`
-    assert _hasPeriodSuffix("时长") is False  # 末两字 `时长`
-    assert _hasPeriodSuffix("日志") is False  # 末两字 `日志`
-    assert _hasPeriodSuffix("完成率") is False  # 末两字 `成率`
-    assert _hasPeriodSuffix("月份额") is False  # `份` 不在 CJK_TIME_CHARS
-    assert _hasPeriodSuffix("份") is False  # 单字（长度 < 2）
-    assert _hasPeriodSuffix("") is False  # 空串
-    # 纯时间名的「陪跑字」`份` 不属于本判据 —— 但该名字仍是轴（另一条判据扛）
-    assert _hasPeriodSuffix("年份") is False
-    assert _isPureTimeName("年份") is True
-    assert _hasPeriodSuffix("月份") is False
-    assert _isPureTimeName("月份") is True
+    # 正例：以期间词结尾（含带非时间前缀的期间名）
+    assert _hasPeriodWord("会计年度") is True
+    assert _hasPeriodWord("统计年月") is True
+    assert _hasPeriodWord("会计期间") is True
+    assert _hasPeriodWord("年份") is True  # 恰好是 `年份`
+    assert _hasPeriodWord("期间") is True
+    # 反例：不以期间词结尾
+    assert _hasPeriodWord("工作时间") is False  # 末两字 `时间` —— 刻意排除（度量）
+    assert _hasPeriodWord("周期") is False  # `周期` 刻意排除
+    assert _hasPeriodWord("报表期") is False  # 末两字 `表期`
+    assert _hasPeriodWord("时长") is False
+    assert _hasPeriodWord("满意度") is False
+    assert _hasPeriodWord("") is False
+
+
+def test_period_shaped_predicate_matches_year_yearmonth_yearmonthday() -> None:
+    """`_isPeriodShaped`：整年（1900–2100）/ yyyymm / yyyymmdd；只看 int，``bool`` 不算。"""
+    # 正例：三种期间形状
+    assert _isPeriodShaped([2024, 2025]) is True
+    assert _isPeriodShaped([202401, 202501]) is True
+    assert _isPeriodShaped([20240101]) is True
+    assert _isPeriodShaped([20240101, 20251231]) is True
+    # 反例：非期间形状
+    assert _isPeriodShaped([5, 3]) is False  # 评分
+    assert _isPeriodShaped([8, 10]) is False  # 时长
+    assert _isPeriodShaped([300, 500]) is False  # 时长（秒）
+    assert _isPeriodShaped([202413]) is False  # 13 月 —— yyyymm 要求月 1..12
+    assert _isPeriodShaped(["2024"]) is False  # 字符串不算
+    assert _isPeriodShaped([2024.0]) is False  # float 不算
+    assert _isPeriodShaped([True]) is False  # bool 不算（虽为 int 子类）
+    assert _isPeriodShaped([]) is False  # 空
+    assert _isPeriodShaped([None]) is False  # 全缺失
+    assert _isPeriodShaped([2024, 5]) is False  # 混形状（整年 + 短数）不成立
 
 
 def test_fiscal_year_integer_axis_is_restored_and_not_summed() -> None:
@@ -904,3 +922,168 @@ def test_period_suffix_widening_does_not_steal_ascii_integer_date_axis() -> None
 
     assert camel.time_range == {"start": "2024", "end": "2025"} and camel.total == "3"
     assert snake.time_range == {"start": "20240101", "end": "20250101"} and snake.total == "300"
+
+
+# ---------------------------------------------------------------------------
+# 修复轮 5：整数轴的**期间语义**改由「名字含时间词 **且** 取值像期间」判定
+#
+# 轮 3 收窄（整数只认「时间整词 ∨ 纯时间名」）救回 ASCII 日期轴，却把带非时间前缀的
+# 中文期间名（`会计年度`/`统计年月`/`会计期间`）漏成度量；轮 4 的「末两字是时间字」
+# 又把 `工作时间`/`响应时间`/`持续时间`/`加班时间`（末两字 `时间`）一并收成轴 ——
+# 既丢合法度量（`total` 变 None）又把 `time_range` **编造**成时长跨度。
+#
+# `工作时间` 与 `统计时间` 在**名字**上不可分（非时间前缀 + 时间后缀），故本轮把判据
+# 来源换成**取值形状**：期间轴的取值是整年 / yyyymm / yyyymmdd，而时长度量是 8/10、
+# 300/500 ⇒ 用**合取**（含时间词 **且** 取值像期间）把两类分开。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "first", "second", "expected_total"),
+    [
+        ("工作时间", 8, 10, "18"),
+        ("响应时间", 300, 500, "800"),
+        ("持续时间", 12, 30, "42"),
+        ("加班时间", 2, 5, "7"),
+    ],
+)
+def test_fix5_integer_duration_measure_is_not_promoted_to_the_axis(
+    name: str, first: int, second: int, expected_total: str
+) -> None:
+    """N1–N4：末两字是 `时间` 的**整数度量**不得被当轴（不编造 `time_range`，不丢度量）。
+
+    修复前（`e645bc4`）：`…时间` 命中轮 4 的「末两字皆时间字」⇒ 被当轴 ⇒ `total=None`
+    且 `time_range` 变成它的取值跨度（把时长渲染成「数据的时间跨度」）。
+    """
+    rows = [{name: first, "amount": 1}, {name: second, "amount": 2}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range is None
+    assert summary.total == expected_total  # 度量 = 该列自身（第一个数值候选）
+
+
+def test_fix5_statistical_time_integer_axis_is_restored_by_value_shape() -> None:
+    """N8：`统计时间` 末两字是 `时间`（不在期间词闭集），但取值 202401/202501 像 yyyymm ⇒ 仍是轴。
+
+    这正是「判据来源换成取值」的**承重**用例：单看名字 `统计时间` 与 `工作时间` 同形，
+    只有**取值形状**能把它们分开 —— 故名字判据必须**合取**取值判据，缺一不可。
+    """
+    rows = [{"统计时间": 202401, "amount": 1}, {"统计时间": 202501, "amount": 2}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range == {"start": "202401", "end": "202501"}
+    assert summary.total == "3"  # 度量 = amount，不是年月编号之和 404902
+
+
+def test_fix5_period_shaped_values_alone_do_not_make_an_axis() -> None:
+    """反向断言：取值恰在 1900–2100 但**名字不含时间词**的整数度量不得被当轴。
+
+    `单价` 1999/2001 单独看「像整年」，但 `单价` 不含时间词 ⇒ 合取不成立 ⇒ 不是轴。
+    证明「取值像期间」必须**与**「名字含时间词」合取，而不是单独成立。
+    """
+    rows = [{"单价": 1999, "amount": 1}, {"单价": 2001, "amount": 2}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range is None
+    assert summary.total == "4000"  # 度量 = 单价（第一个数值候选）
+
+
+@pytest.mark.parametrize(
+    ("case", "rows", "expected_time_range", "expected_total"),
+    [
+        pytest.param(
+            "C1", [{"满意度": 5, "sales": 100}, {"满意度": 3, "sales": 200}], None, "8", id="C1"
+        ),
+        pytest.param("C2", [{"时长": 10}, {"时长": 20}], None, "30", id="C2"),
+        pytest.param(
+            "C3", [{"日志": 1, "amount": 50}, {"日志": 2, "amount": 70}], None, "3", id="C3"
+        ),
+        pytest.param(
+            "C7",
+            [{"会计年度": 2024, "销售额": 100}, {"会计年度": 2025, "销售额": 200}],
+            {"start": "2024", "end": "2025"},
+            "300",
+            id="C7",
+        ),
+        pytest.param(
+            "C8",
+            [{"统计年月": 202401, "销售额": 100}, {"统计年月": 202501, "销售额": 200}],
+            {"start": "202401", "end": "202501"},
+            "300",
+            id="C8",
+        ),
+        pytest.param(
+            "C9",
+            [{"会计期间": 1, "销售额": 100}, {"会计期间": 2, "销售额": 200}],
+            {"start": "1", "end": "2"},
+            "300",
+            id="C9",
+        ),
+        pytest.param(
+            "C10",
+            [{"create_date": 20240101, "amount": 1}, {"create_date": 20250101, "amount": 2}],
+            {"start": "20240101", "end": "20250101"},
+            "3",
+            id="C10",
+        ),
+        pytest.param(
+            "C11", [{"完成率": 90, "amount": 1}, {"完成率": 85, "amount": 2}], None, "175", id="C11"
+        ),
+        pytest.param(
+            "C12",
+            [{"年份": 2024, "销售额": 100}, {"年份": 2025, "销售额": 200}],
+            {"start": "2024", "end": "2025"},
+            "300",
+            id="C12",
+        ),
+        pytest.param(
+            "N1", [{"工作时间": 8, "amount": 1}, {"工作时间": 10, "amount": 2}], None, "18", id="N1"
+        ),
+        pytest.param(
+            "N2",
+            [{"响应时间": 300, "amount": 1}, {"响应时间": 500, "amount": 2}],
+            None,
+            "800",
+            id="N2",
+        ),
+        pytest.param(
+            "N3", [{"持续时间": 12, "amount": 1}, {"持续时间": 30, "amount": 2}], None, "42", id="N3"
+        ),
+        pytest.param(
+            "N4", [{"加班时间": 2, "amount": 1}, {"加班时间": 5, "amount": 2}], None, "7", id="N4"
+        ),
+        # N5：`周期` **不是**本轮目标 —— `_isPureTimeName("周期")` 为 True，三个版本都当轴，
+        # 语义本就两可，动它会重开修复轮 1 的 `period_cost` 类回归 ⇒ 本轮维持现状（记进残余限制）。
+        pytest.param(
+            "N5", [{"周期": 3, "amount": 1}, {"周期": 5, "amount": 2}],
+            {"start": "3", "end": "5"}, "3", id="N5",
+        ),
+        pytest.param(
+            "N7", [{"有效期": 12, "amount": 1}, {"有效期": 24, "amount": 2}], None, "36", id="N7"
+        ),
+        pytest.param(
+            "N10", [{"逾期天数": 3, "amount": 1}, {"逾期天数": 5, "amount": 2}], None, "8", id="N10"
+        ),
+        pytest.param(
+            "N8",
+            [{"统计时间": 202401, "amount": 1}, {"统计时间": 202501, "amount": 2}],
+            {"start": "202401", "end": "202501"},
+            "3",
+            id="N8",
+        ),
+    ],
+)
+def test_fix5_before_after_table(
+    case: str,
+    rows: list[dict[str, object]],
+    expected_time_range: dict[str, str] | None,
+    expected_total: str,
+) -> None:
+    """16+1 例对照表的**修复后**期望（轴例度量是另一数值列；度量例度量是该列自身）。"""
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range == expected_time_range, case
+    assert summary.total == expected_total, case

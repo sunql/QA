@@ -43,24 +43,38 @@ token 为空、永不命中 ⇒ ``total`` 变成 ``2024 + 2025 = 4049``、基线
 **轴侧的另一条残余路径（修复轮 3）。** 名字含时间**字**的**整数度量**（``满意度`` / ``时长`` /
 ``日志`` / ``活跃度``）在没有真时间戳时，曾被名字兜底的 CJK **按字**匹配升格成时间轴，于是
 既被从度量候选里排除（``total=None``）又把 ``time_range`` **编造**成它的取值跨度（把满意度
-评分渲染成「数据的时间跨度」）。现已把**整数**列的兜底收窄为「时间整词或纯时间名」；文本/未知
-列的「含时间词」判据**仍是启发式**，对 ``stat_date`` 这类真日期轴是必要的，但对名字恰好含时间
-词的文本度量仍可能误判 —— 只是那类误判不会**编造数值**（文本列不进度量候选）。
+评分渲染成「数据的时间跨度」）。现已把**整数**列的兜底收窄；文本/未知列的「含时间词」判据
+**仍是启发式**，对 ``stat_date`` 这类真日期轴是必要的，但对名字恰好含时间词的文本度量仍可能
+误判 —— 只是那类误判不会**编造数值**（文本列不进度量候选）。
 
-**整数档再补一条中文期间后缀（修复轮 4）。** 上一轮的收窄只救回了 ASCII 那一半：整数的名字兜底
-等价于「时间**整词** ∨ **纯**时间名」，而 ``_hasTimeWord`` 对中文列名恒 ``False``（CJK 无词
-边界），``_isPureTimeName`` 又要求**全字皆**时间字 ⇒ ``会计年度`` / ``统计年月`` / ``会计期间``
-这类带非时间前缀的中文期间名两头都不命中，掉进度量候选被求和：``total`` 变成「年份之和 /
-年月编号之和 / 期间号之和」（D16 那记「看着合理的错数」，只是从 ``time_range`` 搬到了
-``total``）。故整数档再加 :func:`_hasPeriodSuffix`（名字**末两字都是**时间字 ⇒ 期间形名字）。
-这是**单调加宽**（旧判据 ∨ 新判据），只增加能当轴的列，不会让任何现在正确的列失去轴资格。
-**仍存的启发式缺口**：末两字非全时间字的中文期间名（如 ``报表期``）仍会掉进度量候选被求和，
-而名字恰好以两个时间字结尾的度量（罕见）会被误当轴。
+**整数轴的期间语义靠「名字 ∧ 取值形状」（修复轮 5，本模块最后一次启发式迭代）。** 整数列的名字
+兜底走过两轮弯路：轮 3 收窄成「时间整词 ∨ 纯时间名」救回 ASCII 日期轴，却把 ``会计年度`` /
+``统计年月`` / ``会计期间`` 这类**带非时间前缀**的中文期间名漏成度量（``total`` 变成「年份之和 /
+年月编号之和 / 期间号之和」）；轮 4 补的「末两字都是时间字」又必然把 ``工作时间`` / ``响应时间``
+/ ``持续时间`` / ``加班时间``（末两字 ``时间``，是**时长**度量）一并收成轴 —— 既丢合法度量
+（``total=None``）又把 ``time_range`` **编造**成时长跨度。**根因**：期间轴与时长度量在名字上
+不可分（都是「非时间前缀 + 时间后缀」）——``工作``+``时间`` 与 ``统计``+``时间`` 同形。故本轮
+**改变判据来源**：整数轴的期间语义 = 「含时间词 **且** 取值像期间（整年 / yyyymm / yyyymmdd，
+见 :func:`_isPeriodShaped`）」，靠**取值形状**把两类分开（时长 8/10、300/500 不是期间形状）。
+整数轴完整的判据是「ASCII 整词（:func:`_hasTimeWord`）**或**纯时间名（:func:`_isPureTimeName`）
+**或**中文期间词后缀（:func:`_hasPeriodWord`）**或**（含时间词 **且** 取值像期间）」。``时间`` /
+``周期`` 被**刻意排除**在期间词外（整数列里它们是度量）：故 ``统计时间`` 靠**取值**当轴、
+``周期`` 靠 ``_isPureTimeName``（其行为在本轮**不变**）。**取值形状**是为在没有 schema 元数据
+（D9）时把「期间标签」与「时长 / 评分」分开 —— 与 :func:`_inferKind` 同一条「无元数据则从取值
+推断」的设计原则。
+
+**整数档仍存的启发式缺口（修复轮 5 如实记录）。** 判据是启发式的，别当成完备：
+
+- 末两字**非**期间词的轴（如 ``报表期``，末两字 ``表期``）既不命中期间词、取值也不像期间 ⇒ 仍会
+  掉进度量候选被求和；
+- 取值恰落在 1900–2100 的**持续时间**（如以秒计的 1800 / 2000）会被误判成轴 ⇒ 丢掉度量并
+  **编造** ``time_range``；
+- 取值不像期间的**期间序号**若不是闭集里的词（如 ``考核期``）同理漏成度量被求和。
 
 **轴与度量的判据方向**刻意**不同**（修复轮 3，别再「统一」）：:func:`_timeColumn` 的兜底
 看「名字**含不含**时间**词**」（文本/未知列按 :func:`_hasTimeToken` 的「整词或 CJK 按字」，
-整数列收窄为「整词 :func:`_hasTimeWord` **或**纯时间名 :func:`_isPureTimeName` **或**两字期间
-后缀 :func:`_hasPeriodSuffix`」）；而
+整数列按「ASCII 整词 :func:`_hasTimeWord` **或**纯时间名 :func:`_isPureTimeName` **或**中文
+期间词后缀 :func:`_hasPeriodWord` **或**（含时间词 **且** 取值像期间）」）；而
 :func:`_metricColumn` 一律看「**是不是**纯时间名 / 标识符名」。方向不一致是**有意**的 ——
 文本日期轴（``stat_date``）与整数日期轴（``createDate``）没有真时间戳时只能靠名字里的
 ``date`` 认出来；而整数列若沿用 CJK **按字**的宽判据，就会把含时间**字**的度量
@@ -121,6 +135,28 @@ CJK_PURE_TIME_CHARS = CJK_TIME_CHARS | CJK_TIME_COMPANION_CHARS
 IDENT_SUFFIX_TOKENS = frozenset({"id", "no", "code", "num", "number", "rank", "row", "seq"})
 # 中文后缀单独列（CJK 无 token 边界，只能整体 ``endswith``）；``ID`` / ``id`` 由上面的 ASCII 后缀覆盖。
 CJK_IDENT_SUFFIXES = ("编号", "代码", "序号", "排名")
+
+# 「取值像期间」的**形状**边界（修复轮 5）：无 schema 元数据（D9）时用取值把「期间标签」
+# 与「时长 / 评分」分开。整年 / yyyymm / yyyymmdd 三种形状，月须在 1..12（日不校验，宽松）。
+MIN_YEAR, MAX_YEAR = 1900, 2100
+MIN_YEARMONTH, MAX_YEARMONTH = 190001, 299912
+MIN_YEARMONTHDAY, MAX_YEARMONTHDAY = 19000101, 29991231
+
+# 中文**期间词**后缀闭集：末两字是这些词才算期间名。
+# ⚠️ 刻意**不含**「时间」与「周期」：整数列里「…时间」是时长（``工作时间``/``响应时间``）、
+#    「周期」是周期天数 —— 它们是**度量**，不是轴。
+PERIOD_WORD_SUFFIXES = (
+    "年度",
+    "年份",
+    "年月",
+    "月份",
+    "日期",
+    "季度",
+    "月度",
+    "期间",
+    "周次",
+    "半年",
+)
 
 DEFAULT_MAX_SAMPLE_ROWS = 5
 DEFAULT_TOP_N_LIMIT = 5
@@ -296,16 +332,31 @@ def _isPureTimeName(name: str) -> bool:
     return all(char in CJK_PURE_TIME_CHARS for char in name)
 
 
-def _hasPeriodSuffix(name: str) -> bool:
-    """名字**末两字都是**时间字（``年度`` / ``年月`` / ``期间`` / ``月份`` / ``日期``）⇒ 期间形名字。
+def _isPeriodShaped(values: list[Any]) -> bool:
+    """取值是否像**期间标签**：整年（1900–2100）/ yyyymm / yyyymmdd。
 
-    中文期间名常带非时间前缀（``会计年度`` / ``统计年月`` / ``会计期间``）⇒ 过不了
-    :func:`_isPureTimeName` 的「全字皆时间字」，但**末两字**是闭合的期间词。用已有的
-    ``CJK_TIME_CHARS``，**不引入新词表**。
-    ⚠️ 用 ``CJK_TIME_CHARS``（**不含** ``份``）：``月份额`` 末两字是 ``份额`` ⇒ 不算期间名
-    （否则 ``份`` 会让它变轴）。故**不要**用 ``CJK_PURE_TIME_CHARS``。
+    只看 int（``bool`` 不算）；任一取值缺失 / 非 int / 越界即该形状不成立。
+    ``yyyymm`` 与 ``yyyymmdd`` 都要求**月份在 1..12**（``yyyymmdd`` 的日不校验，宽松）。
     """
-    return len(name) >= 2 and all(char in CJK_TIME_CHARS for char in name[-2:])
+    nums = [v for v in values if v is not None]
+    if not nums or not all(isinstance(v, int) and not isinstance(v, bool) for v in nums):
+        return False
+    if all(MIN_YEAR <= v <= MAX_YEAR for v in nums):
+        return True
+    if all(MIN_YEARMONTH <= v <= MAX_YEARMONTH and 1 <= v % 100 <= 12 for v in nums):
+        return True
+    return all(
+        MIN_YEARMONTHDAY <= v <= MAX_YEARMONTHDAY and 1 <= (v // 100) % 100 <= 12 for v in nums
+    )
+
+
+def _hasPeriodWord(name: str) -> bool:
+    """名字是否以**中文期间词**结尾（闭集，见 :data:`PERIOD_WORD_SUFFIXES`）。
+
+    救**非纯**期间名里取值不像期间的（``会计期间`` 取值 1/2：既非整年也非 yyyymm）。
+    ``工作时间``（末两字 ``时间``）/ ``周期`` / ``报表期``（末两字 ``表期``）⇒ ``False``。
+    """
+    return name.endswith(PERIOD_WORD_SUFFIXES)
 
 
 def _isIdentifierName(name: str) -> bool:
@@ -321,7 +372,9 @@ def _isIdentifierName(name: str) -> bool:
     return name.lower().endswith(CJK_IDENT_SUFFIXES)
 
 
-def _timeColumn(order: list[str], kinds: dict[str, str]) -> str | None:
+def _timeColumn(
+    order: list[str], kinds: dict[str, str], valuesByColumn: dict[str, list[Any]]
+) -> str | None:
     """时间轴列：**优先真时间戳**（取值即 timestamp），退而按名字判时间语义（D15 bug 3 / D16）。
 
     名字兜底**按 kind 分两档，口径刻意不同**（与 :func:`_metricColumn` 的「是纯时间名」
@@ -329,14 +382,19 @@ def _timeColumn(order: list[str], kinds: dict[str, str]) -> str | None:
 
     - ``KIND_TEXT`` / ``KIND_UNKNOWN`` 用「**含**时间词」（:func:`_hasTimeToken`）：
       ``stat_date`` 这类**文本**日期轴没有真时间戳，只能靠名字里的 ``date`` 认出来；
-    - ``KIND_INTEGER`` 收窄成「时间**整词**（:func:`_hasTimeWord`）或**纯**时间名
-      （:func:`_isPureTimeName`）或**两字期间后缀**（:func:`_hasPeriodSuffix`）」：整数列不能用
-      CJK **按字**的宽判据 —— ``满意度`` / ``时长`` / ``日志`` 含时间**字**却是度量，按「含」判
-      会把它们升格成轴（合法度量被丢 ⇒ ``total=None``，且 ``time_range`` 被**编造**成评分/时长
-      的取值跨度）。而 ``createDate`` 这类**整词**命中的整数日期列、以及 ``会计年度`` /
-      ``统计年月`` / ``会计期间`` 这类**带非时间前缀**的中文期间名仍须是轴 —— 否则它们会掉进
-      度量候选，``total`` 变成 ``2024 + 2025 = 4049`` / 年月编号之和 / 期间号之和（D16 那记
-      「看着合理的错数」重现）。
+    - ``KIND_INTEGER`` 用「时间**整词**（:func:`_hasTimeWord`）**或**纯时间名
+      （:func:`_isPureTimeName`）**或**中文期间词后缀（:func:`_hasPeriodWord`）**或**
+      （**含**时间词（:func:`_hasTimeToken`）**且**取值像期间（:func:`_isPeriodShaped`））」：
+      整数列不能用 CJK **按字**的宽判据 —— ``满意度`` / ``时长`` / ``日志`` 含时间**字**却是
+      度量。而 ``createDate`` 这类**整词**命中的整数日期列、``会计年度`` / ``统计年月`` /
+      ``会计期间`` 这类**带非时间前缀**的中文期间名、``统计时间`` 这类**取值像 yyyymm** 的
+      期间名仍须是轴 —— 否则它们会掉进度量候选，``total`` 变成「年份之和 / 年月编号之和 /
+      期间号之和」（D16 那记「看着合理的错数」）。
+
+      **为什么最后一条要合取取值形状**（修复轮 5）：``工作时间``（末两字 ``时间``）与
+      ``统计时间`` 在**名字**上不可分（都是「非时间前缀 + 时间后缀」）。单看名字必然把
+      时长度量一起收成轴 —— 既丢合法度量（``total=None``）又把 ``time_range`` **编造**成
+      8→10 / 300→500。期间轴的取值有**形状**证据（整年 / yyyymm / yyyymmdd），时长没有。
 
     ``KIND_NUMERIC``（Decimal/float）两档都不收 —— 否则 ``period_amount`` 这类数值列会被
     误当时间轴。
@@ -348,10 +406,15 @@ def _timeColumn(order: list[str], kinds: dict[str, str]) -> str | None:
         kind = kinds.get(name)
         if kind in (KIND_TEXT, KIND_UNKNOWN) and _hasTimeToken(name):
             return name
-        if kind == KIND_INTEGER and (
-            _hasTimeWord(name) or _isPureTimeName(name) or _hasPeriodSuffix(name)
-        ):
-            return name
+        if kind == KIND_INTEGER:
+            values = valuesByColumn.get(name, [])
+            if (
+                _hasTimeWord(name)  # ASCII 整词：createDate
+                or _isPureTimeName(name)  # 纯时间名：年份/月份/年度/年月
+                or _hasPeriodWord(name)  # 中文期间词后缀：会计期间
+                or (_hasTimeToken(name) and _isPeriodShaped(values))  # 含时间词 **且** 取值像期间
+            ):
+                return name
     return None
 
 
@@ -541,7 +604,9 @@ def summarizeEvidence(
 
     order = _columnOrder(rows, columns)
     kinds = {name: _inferKind([row.get(name) for row in rows]) for name in order}
-    timeColumn = _timeColumn(order, kinds)
+    timeColumn = _timeColumn(
+        order, kinds, {name: [row.get(name) for row in rows] for name in order}
+    )
     timeKind = kinds.get(timeColumn) if timeColumn else None
     metricColumn = _metricColumn(order, kinds, timeColumn, timeKind)
 

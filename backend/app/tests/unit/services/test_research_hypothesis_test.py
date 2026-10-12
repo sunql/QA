@@ -83,9 +83,10 @@ def test_derive_direction_none_when_both_directions_present() -> None:
 
 
 # ---------------------------------------------------------------------------
-# I1（轮 3）：否定判据 = 「否定字 + 情态词（含 `是`）· 距方向词 ≤ GAP=4」。
+# I1（轮 3/4）：否定判据 = 「否定字 + 情态词（含 `是`）· 情态词与方向词最多隔 GAP=4 个字」。
 # 40 条电池（38 绿 + 2 标注残余）是**自证地基**：TP（被否定 ⇒ 无方向）与 FP（否定字在
-# 非否定词素里 ⇒ 方向必须保住）成对钉住 —— 任何一侧收窄都会撞翻对面的行。
+# 非否定词素里 ⇒ 方向必须保住）成对钉住 —— 任何一侧收窄都会撞翻对面的行。轮 4 追加 9 条
+# 「`别` 作词末字」的 FP，并把残余整理成 R1/R2/R3 一条 test_derive_direction_known_residuals。
 # ---------------------------------------------------------------------------
 
 
@@ -119,28 +120,42 @@ def test_derive_direction_none_for_negated_true_positives(statement: str) -> Non
     assert deriveDirection(statement) is None
 
 
-# 已知残余（2 条，**承认的盲区，不是正确行为**）：本轮判据（否定字 + 情态词 + GAP≤4）在
-# **局部特征上**与 FP 不可分 —— ``无权下降`` 的 «无» 距方向词 = 2，与 ``未来`` 的 «未» 同为 2；
-# ``不可能会下降`` 的否定字只隔情态链（«不»→«可»→«能»→«会»）。收窄其一即误伤另一。
-# 断言写成「记录当前已知行为」而非「期望 None」，并在此**显式标注为盲区**。
+# 已知残余（**承认的盲区，不是正确行为**）：本轮（轮 4）判据在**局部特征上**与真实 FP 不可分。
+# R1/R2/R3 三类逐条记录当前行为，根因见 ``_isNegatedDirectionWordAt`` docstring 的「已知残余」。
+# 断言写成「记录当前已知行为」而非「期望正确结果」，并在此**显式标注为盲区**。
 @pytest.mark.parametrize(
-    "statement",
-    ["不可能会下降", "无权下降"],
+    ("statement", "expected"),
+    [
+        # (R1) 否定经非情态词桥接 / 情态链 >1 层 ⇒ 仍漏判成**有效方向**（会符号翻转）。
+        ("无权下降", DIRECTION_DECREASE),  # R1：桥接字 «权» 非情态词
+        ("不可能会下降", DIRECTION_DECREASE),  # R1：情态链 «不»→«可»→«能»→«会»
+        ("无法正常实现增长", DIRECTION_INCREASE),  # R1：桥接字（法/正/常/实/现）均非情态词
+        # (R2) 以 没/非/无 收尾的**罕见**词紧邻方向词 ⇒ 被吞成 ``None``（与 R1 同源）。
+        ("淹没下降", None),  # R2：«没» 是「淹没」的末字
+        ("沉没上升", None),  # R2：«没» 是「沉没」的末字
+        ("埋没增长", None),  # R2：«没» 是「埋没」的末字
+        ("是非增长", None),  # R2：«非» 是「是非」的末字
+        ("虚无增长", None),  # R2：«无» 是「虚无」的末字
+        # (R3) 祈使「别……下降」—— 轮 4 从否定闭集去掉 «别» ⇒ 不再判否定，判成有效方向。罕见。
+        ("别下降", DIRECTION_DECREASE),  # R3
+    ],
 )
-def test_derive_direction_known_residual_negation_chains(statement: str) -> None:
-    """**已知残余（盲区，非正确行为）**：情态链 >1 层 / 否定经非情态词桥接仍会漏判成有效方向。
+def test_derive_direction_known_residuals(statement: str, expected: str | None) -> None:
+    """**已知残余（盲区，非正确行为）**：R1/R2/R3 三类，逐条注释指向根因。
 
-    这两条在裸列名 + 取值下与 ``无锡``/``未来`` 类 FP **不可分**（见
-    ``_isNegatedDirectionWordAt`` docstring 的「已知残余」）。测试记录当前行为仅为钉住
-    「已知」，**不得**据此认为它正确；是否收窄交控制器裁定。
+    这些输入在裸列名 + 取值下与真实 FP **不可分**（见 ``_isNegatedDirectionWordAt`` docstring
+    的「已知残余」）。测试只**记录当前行为**以钉住「已知」，**不得**据此认为它正确；本轮为
+    I1 终轮，不再扩判据，是否收窄交控制器裁定。
     """
-    # 承认的盲区：本轮**不**修，断言记录当前（错误）行为。
-    assert deriveDirection(statement) == DIRECTION_DECREASE  # 已知残余，见 docstring
+    # 承认的盲区：本轮**不**修，断言记录当前行为。
+    assert deriveDirection(statement) == expected
 
 
-# FP（21 条，必须保住括号里的方向）：否定字在**非否定词素**（普通词）里 ⇒ 方向必须保留。
-# 这正是不是新判据（情态词桥接）与旧窗口判据的分界：轮 2 的「任意字窗口」把
-# 非常/不仅/不锈钢/未来/供给不足/无货/问题不大 全吞成 None；轮 3 因后随字非情态词而安全。
+# FP（30 条，必须保住括号里的方向）：否定字在**非否定词素**（普通词）里 ⇒ 方向必须保留。
+# 前 21 条来自轮 2/3 回归（轮 2 的「任意字窗口」把 非常/不仅/不锈钢/未来/供给不足/无货/
+# 问题不大 全吞成 None；轮 3 因后随字非情态词而安全）。末 9 条来自轮 4 —— «别» 在汉语里
+# **绝大多数是词末字**（分别/个别/区别/识别/辨别/特别/类别/告别/惜别），故轮 4 把 «别»
+# 从否定闭集移除；这 9 条正是轮 3 判据会误吞的**极常见**现实口径写法。
 @pytest.mark.parametrize(
     ("statement", "expected"),
     [
@@ -165,12 +180,22 @@ def test_derive_direction_known_residual_negation_chains(statement: str) -> None
         ("订单量下降", DIRECTION_DECREASE),  # 纯 FP 基线
         ("成本提高", DIRECTION_INCREASE),  # 纯 FP 基线
         ("利润下滑", DIRECTION_DECREASE),  # 纯 FP 基线
+        # --- 轮 4 新增：«别» 作词末字（去掉 «别» 后必须判方向）---
+        ("分别下降", DIRECTION_DECREASE),  # «别» 是「分别」的末字
+        ("个别下降", DIRECTION_DECREASE),  # «别» 是「个别」的末字
+        ("区别下降", DIRECTION_DECREASE),  # «别» 是「区别」的末字
+        ("识别下降", DIRECTION_DECREASE),  # «别» 是「识别」的末字
+        ("辨别上升", DIRECTION_INCREASE),  # «别» 是「辨别」的末字
+        ("特别增长", DIRECTION_INCREASE),  # «别» 是「特别」的末字
+        ("类别下降", DIRECTION_DECREASE),  # «别» 是「类别」的末字
+        ("告别增长", DIRECTION_INCREASE),  # «别» 是「告别」的末字
+        ("惜别下降", DIRECTION_DECREASE),  # «别» 是「惜别」的末字
     ],
 )
 def test_derive_direction_false_positives_preserve_direction(
     statement: str, expected: str
 ) -> None:
-    """FP：非否定词素里的否定字**不得**作废方向词（21 条，全部来自轮 2 的真实回归）。"""
+    """FP：非否定词素里的否定字**不得**作废方向词（30 条：21 条轮 2/3 回归 + 9 条轮 4 «别»）。"""
     assert deriveDirection(statement) == expected
 
 

@@ -14,6 +14,7 @@
 的透传值断言（只断言「调用发生」会漏掉接线断开，故断言**到达 ports 的值**）。
 """
 
+import uuid
 from typing import Any
 
 import pytest
@@ -250,14 +251,21 @@ async def test_resolve_client_forwards_none_when_session_has_no_model(monkeypatc
 # ---------------------------------------------------------------------------
 
 
-class _FakeRow:
-    """`ResearchSession` 的恢复态读取面（`rebuildState` 只读这四个属性）。"""
+class _FakeRunState:
+    """`ResearchRunState` 的恢复态读取面（`rebuildState` 只读这些属性）。"""
 
     def __init__(self, modelId: int | None) -> None:
-        self.input_seed = "问题"
+        self.id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        self.session_id = uuid.UUID("87654321-4321-8765-4321-876543218765")
+        self.turn_id = uuid.UUID("abcdefab-abcd-abcd-abcd-abcdefabcdef")
+        self.parent_run_id = None
+        self.current_question = "问题"
         self.mode = "deep"
-        self.created_by = 1
+        self.scope_version = 1
+        self.schema_version = 1
+        self.datasource_id = 1
         self.model_id = modelId
+        self.state_payload = {"userId": 1}
 
 
 class _FakeCheckpoint:
@@ -266,18 +274,17 @@ class _FakeCheckpoint:
 
 
 def test_resume_state_reinjects_session_model_id() -> None:
-    """恢复态必须带会话选定模型（键序：rebuildState 的键 → 追加 modelId；choice 原地覆写）。"""
-    state = resumeState(_FakeRow(42), _FakeCheckpoint(), {"action": "confirm"})
+    """恢复态必须带会话选定模型（choice 原地覆写；rebuildState 产物保留）。"""
+    state = resumeState(_FakeRunState(42), _FakeCheckpoint(), {"action": "confirm"})
 
     assert state["modelId"] == 42
     assert state["choice"] == {"action": "confirm"}  # 覆写 rebuildState 的 "choice": {}
     assert state["question"] == "问题"  # rebuildState 的产物仍在（不是另起炉灶）
-    assert list(state)[-1] == "modelId"  # modelId 追加在末尾，既有键序不动
 
 
 def test_resume_state_keeps_none_when_session_has_no_model() -> None:
     """会话未选定（model_id 为 NULL）⇒ None，恢复后仍走自动路由。"""
-    state = resumeState(_FakeRow(None), _FakeCheckpoint(), None)
+    state = resumeState(_FakeRunState(None), _FakeCheckpoint(), None)
 
     assert state["modelId"] is None
     assert state["choice"] == {}

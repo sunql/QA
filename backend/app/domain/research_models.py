@@ -180,3 +180,48 @@ class ResearchReport(Base):
             postgresql_where=sa_text("status = 'published'"),
         ),
     )
+
+
+class ResearchRunState(Base):
+    """研究会话单轮运行的版本化状态快照。"""
+
+    __tablename__ = "research_run_state"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), _session_fk(), nullable=False, index=True
+    )
+    turn_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), _turn_fk(), nullable=False, index=True
+    )
+    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_run_state.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    current_question: Mapped[str] = mapped_column(
+        Text, default="", server_default=""
+    )
+    mode: Mapped[str] = mapped_column(String(_MODE_LEN), nullable=False)
+    scope_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    datasource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    model_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    state_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=sa_text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
+        nullable=False,
+    )

@@ -99,6 +99,7 @@ from app.services.research_agent_stages import (
     resumeTurnContent,
     rewriteState,
 )
+from app.services.research_run_state import RunStateSeed, buildRunState, stateToDict, updateRunState
 from app.services.research_hypothesis_adapter import generateHypotheses
 from app.services.research_session_service import ResearchSessionService
 from app.services.token_usage_service import TokenUsageService
@@ -233,11 +234,19 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         await self._sessions.updateSessionStatus(session, sessionId, STATUS_RUNNING)
         # 会话级模型选择（W5）：每轮从会话行取，保证追问也沿用同一模型。
         row = await self._loadSession(session, sessionId)
+        run_state = buildRunState(RunStateSeed(
+            session_id=sessionId,
+            turn_id=turnId,
+            current_question=question,
+            mode=mode,
+            user_id=userId,
+            model_id=row.model_id,
+            datasource_id=row.datasource_id,
+        ))
+        session.add(run_state)
         state: dict[str, Any] = {
-            "question": question,
-            "mode": mode,
-            "userId": userId,
-            "modelId": row.model_id,
+            **stateToDict(run_state),
+            "runStateId": run_state.id,
             "esl": None,
             "plan": None,
             "stepResults": [],
@@ -247,7 +256,8 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             "llmUnavailable": False,
         }
         return await self._guardedRun(
-            session, sessionId=sessionId, turnId=turnId, phase=PHASES[0], emit=emit, state=state
+            session, sessionId=sessionId, turnId=turnId,
+            phase=PHASES[0], emit=emit, state=state,
         )
 
     async def resumeTurn(
@@ -280,23 +290,21 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             userChoice=choice or {},
             userId=session_row.created_by,
         )
-        row = session_row
+        # 通过 checkpoint.turn_id 找到对应 run state；校验归属防止 URL/ID 拼写错位
+        run_state = await self._sessions.getRunStateByTurn(session, checkpoint.turn_id)
+        if run_state is None or run_state.session_id != checkpoint.session_id:
+            raise ValueError(f"checkpoint 对应的 run state 不存在: checkpoint={checkpointId}")
+
         rewritten = await self._recordResumeTurn(
             session, checkpoint, action=action, choice=choice, checkpointId=checkpointId
         )
         # 会话级模型选择（W5）：checkpoint 载荷不带 modelId（模型不是落库状态），由 resumeState 补回。
-        state = resumeState(row, checkpoint, choice)
+        state = resumeState(run_state, checkpoint, choice)
         decision = decideResume(checkpoint, action, choice)
         startPhase = decision.phase
-        if decision.isReplan:
-            # Task 6.5-4（MEDIUM-8）：计划点的 modify 不是「确认旧计划继续跑」，而是带
-            # 用户反馈**重跑 planner**；故回到 plan 相位并置 replan 标记。2026-10-11 裁定：
-            # 第 1..MAX 次 modify 会**重新暂停**在计划点（用户看得到新计划）。
-            # Task B1：replan 上限由 decideResume 封顶；达到上限后它返 execute、不置 isReplan。
-            state["replan"] = True
-            state[OPT_REPLAN_COUNT] = int(state.get(OPT_REPLAN_COUNT, 0)) + 1
-        if rewritten:
-            state = rewriteState(state, rewritten)
+        run_state, state = self._applyResumeMutations(
+            session, run_state, decision=decision, rewritten=rewritten, state=state
+        )
         logger.info(
             "研究 turn 恢复: session=%s checkpoint=%s action=%s startPhase=%s rewritten=%s",
             checkpoint.session_id, checkpointId, action, startPhase, bool(rewritten),
@@ -309,6 +317,57 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             emit=emit,
             state=state,
         )
+
+    def _applyResumeMutations(
+        self,
+        session: AsyncSession,
+        run_state: Any,
+        *,
+        decision: Any,
+        rewritten: str,
+        state: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any]]:
+        """按续跑决策改写状态机态并同步落库版本化 run state。
+
+        返回 (最新 run_state, 最新 state)：rewriteState 会返回新 dict，故二者都要回传。
+
+        单事务内最多写一行新版本：replan 计数与改写问题合并为一次 updateRunState。
+        （decideResume 保证改写优先于 replan、二者互斥，但合写一行是结构性保证——
+        同 tx 两行快照的 created_at 并列时，getRunStateByTurn 的 tie-break 是随机 UUID，
+        “最新行”不确定，可能取回改写前的旧问题。）
+        """
+        newPayload: dict[str, Any] | None = None
+        if decision.isReplan:
+            # Task 6.5-4（MEDIUM-8）：计划点的 modify 不是「确认旧计划继续跑」，而是带
+            # 用户反馈**重跑 planner**；故回到 plan 相位并置 replan 标记。2026-10-11 裁定：
+            # 第 1..MAX 次 modify 会**重新暂停**在计划点（用户看得到新计划）。
+            # Task B1：replan 上限由 decideResume 封顶；达到上限后它返 execute、不置 isReplan。
+            state["replan"] = True
+            state[OPT_REPLAN_COUNT] = int(state.get(OPT_REPLAN_COUNT, 0)) + 1
+            newPayload = {
+                **(run_state.state_payload or {}),
+                OPT_REPLAN_COUNT: state[OPT_REPLAN_COUNT],
+            }
+        newQuestion: str | None = None
+        newScopeVersion: int | None = None
+        if rewritten:
+            state = rewriteState(state, rewritten)
+            newQuestion = rewritten
+            # rewriteState 递增后的 scopeVersion 同步落库，跨多轮恢复不回退
+            newScopeVersion = int(state.get("scopeVersion") or 1)
+        if newPayload is not None or newQuestion is not None:
+            # 同步落库：改写后的问题/scope 版本/replan 计数成为本轮当前版本
+            run_state = updateRunState(
+                run_state,
+                current_question=newQuestion,
+                scope_version=newScopeVersion,
+                state_payload=newPayload,
+            )
+            session.add(run_state)
+        # 版本化后 run_state.id 可能已变，状态机携带的标识必须同步
+        state["runId"] = str(run_state.id)
+        state["runStateId"] = run_state.id
+        return run_state, state
 
     async def _recordResumeTurn(
         self,

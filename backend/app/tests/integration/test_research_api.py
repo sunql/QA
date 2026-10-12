@@ -30,9 +30,11 @@ from app.domain.models import DataSource, LlmConfig
 from app.domain.research_models import (
     ResearchCheckpoint,
     ResearchReport,
+    ResearchRunState,
     ResearchSession,
     ResearchTurn,
 )
+from app.services.research_run_state import RunStateSeed, buildRunState
 from app.domain.research_schemas import CheckpointAnswerRequest
 from app.infrastructure.llm.factory import createClient
 from app.infrastructure.security.crypto import encryptApiKey
@@ -196,6 +198,32 @@ async def _createSession(
     )
     assert resp.status_code == 201, resp.text
     return resp.json()
+
+
+async def _seedRunState(
+    dbSession: AsyncSession,
+    *,
+    sessionId: uuid.UUID,
+    turnId: uuid.UUID,
+    question: str = "q",
+    mode: str = "research",
+    datasourceId: int | None = None,
+) -> ResearchRunState:
+    """为手动构造 checkpoint 的测试补 run state（resumeTurn 强依赖此快照）。"""
+    run_state = buildRunState(
+        RunStateSeed(
+            session_id=sessionId,
+            turn_id=turnId,
+            current_question=question,
+            mode=mode,
+            user_id=None,
+            model_id=None,
+            datasource_id=datasourceId,
+        )
+    )
+    dbSession.add(run_state)
+    await dbSession.flush()
+    return run_state
 
 
 # ---------------------------------------------------------------------------
@@ -380,10 +408,14 @@ async def test_checkpoint_answer_and_double_submit_409(
     monkeypatch.setattr(researchModule, "buildResearchAgentService", _fastService)
     svc = ResearchSessionService()
     userId = await _userId(dbSession, "research-user-a")
+    datasourceId = await _seededDatasourceId(dbSession)
     row = await svc.createSession(
-        dbSession, userId=userId, question="q", datasourceId=await _seededDatasourceId(dbSession)
+        dbSession, userId=userId, question="q", datasourceId=datasourceId
     )
     turn = await svc.appendTurn(dbSession, sessionId=row.id, role="user", content={})
+    await _seedRunState(
+        dbSession, sessionId=row.id, turnId=turn.id, datasourceId=datasourceId
+    )
     cp = await svc.openCheckpoint(
         dbSession,
         sessionId=row.id,
@@ -423,10 +455,14 @@ async def test_checkpoint_answer_at_planning_modify_reports_replan_phase(
     monkeypatch.setattr(researchModule, "buildResearchAgentService", _fastService)
     svc = ResearchSessionService()
     userId = await _userId(dbSession, "research-user-a")
+    datasourceId = await _seededDatasourceId(dbSession)
     row = await svc.createSession(
-        dbSession, userId=userId, question="q", datasourceId=await _seededDatasourceId(dbSession)
+        dbSession, userId=userId, question="q", datasourceId=datasourceId
     )
     turn = await svc.appendTurn(dbSession, sessionId=row.id, role="user", content={})
+    await _seedRunState(
+        dbSession, sessionId=row.id, turnId=turn.id, datasourceId=datasourceId
+    )
     cp = await svc.openCheckpoint(
         dbSession,
         sessionId=row.id,

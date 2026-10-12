@@ -26,6 +26,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.research_models import ResearchRunState
 from app.services.enterprise_semantic_layer import EmptyResearchScopeError
 from app.services.hypothesis_service import Hypothesis
 from app.services.research_finding_aggregator import (
@@ -540,13 +541,13 @@ def planQuestionWithFeedback(question: str, feedback: dict[str, Any] | None) -> 
     return f"{question}\n\n{PLAN_FEEDBACK_HEADER} {payload}"
 
 
-def resumeState(row: Any, checkpoint: Any, choice: dict[str, Any] | None) -> dict[str, Any]:
-    """重建恢复态并补回会话级模型选择（W5）：checkpoint 载荷不带 modelId（模型不是落库状态）。
+def resumeState(runState: ResearchRunState, checkpoint: Any, choice: dict[str, Any] | None) -> dict[str, Any]:
+    """重建恢复态（W5）：modelId 由 runState 携带（turn 启动时从会话行快照）。
 
-    键序与恢复前一致（rebuildState → modelId → choice），故 `state` 形状逐字不变。
+    checkpoint 载荷不带 modelId（模型不是落库状态）；`rebuildState` 从 runState 补回，
+    故此处只覆写 `choice`，`state` 形状与恢复前逐字一致。
     """
-    state = rebuildState(row, checkpoint)
-    state["modelId"] = row.model_id
+    state = rebuildState(runState, checkpoint)
     state["choice"] = choice or {}
     return state
 

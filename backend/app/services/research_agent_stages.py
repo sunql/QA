@@ -14,7 +14,7 @@ import logging
 import uuid
 from typing import Any
 
-from app.domain.research_models import ResearchSession
+from app.domain.research_models import ResearchRunState
 from app.services.research_agent_ports import (
     DEFAULT_CANDIDATE_CONFIDENCE,
     DRIVER_HINT_LIMIT,
@@ -45,13 +45,19 @@ def resumeTurnContent(
     return content
 
 
-def rebuildState(row: ResearchSession, checkpoint: Any) -> dict[str, Any]:
-    """恢复态：从会话种子 + checkpoint.options 的语义载荷重建（不重跑 LLM 段）。"""
+def rebuildState(runState: ResearchRunState, checkpoint: Any) -> dict[str, Any]:
+    """恢复态：从版本化 run state + checkpoint.options 的语义载荷重建（不重跑 LLM 段）。"""
     options = checkpoint.options or {}
     return {
-        "question": row.input_seed or "",
-        "mode": row.mode,
-        "userId": row.created_by,
+        "runId": str(runState.id),
+        "question": runState.current_question,
+        "mode": runState.mode,
+        "userId": runState.state_payload.get("userId"),
+        "modelId": runState.model_id,
+        "datasourceId": runState.datasource_id,
+        "scopeVersion": runState.scope_version,
+        "schemaVersion": runState.schema_version,
+        "parentRunId": str(runState.parent_run_id) if runState.parent_run_id else None,
         "esl": options.get(OPT_ARMS),
         "plan": options.get(OPT_PLAN),
         "stepResults": list(options.get(OPT_STEP_RESULTS) or []),
@@ -76,6 +82,8 @@ def rewriteState(state: dict[str, Any], question: str) -> dict[str, Any]:
         "stepsExecuted": 0,
         "hypotheses": [],
         "resumeStepIndex": 0,
+        # 改写问题意味着 scope 发生语义变化，递增 scopeVersion
+        "scopeVersion": int(state.get("scopeVersion", 1)) + 1,
     }
 
 

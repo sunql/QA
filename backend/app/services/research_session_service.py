@@ -31,6 +31,7 @@ from app.domain.research_models import (
     ResearchCheckpoint,
     ResearchFinding,
     ResearchReport,
+    ResearchRunState,
     ResearchSession,
     ResearchTurn,
 )
@@ -300,6 +301,18 @@ class ResearchSessionService:
                 ),
             )
             .order_by(ResearchTurn.turn_index.desc(), ResearchCheckpoint.id.desc())
+            .limit(1)
+        )
+        return await session.scalar(stmt)
+
+    async def getRunStateByTurn(
+        self, session: AsyncSession, turnId: uuid.UUID
+    ) -> ResearchRunState | None:
+        """取某一轮次最新一个 ResearchRunState（按创建时间倒序）。"""
+        stmt = (
+            select(ResearchRunState)
+            .where(ResearchRunState.turn_id == turnId)
+            .order_by(ResearchRunState.created_at.desc(), ResearchRunState.id.desc())
             .limit(1)
         )
         return await session.scalar(stmt)

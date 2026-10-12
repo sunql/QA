@@ -242,6 +242,7 @@ export const zhCN = {
       password: "密码",
       passwordPlaceholder: "编辑时留空表示不修改密码",
       passwordStrengthHint: "至少 8 位，须含字母与数字",
+      passwordTooLong: "密码 UTF-8 字节数超过 72",
     },
     role: {
       code: "角色代码",

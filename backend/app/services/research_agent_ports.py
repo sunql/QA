@@ -136,6 +136,16 @@ FINDING_ROWS_KEY = "rows"
 MAX_FINDING_ROWS = 100
 """落库行上限：bound JSONB 体积；超出丢弃并 warning（不静默截断）。"""
 
+# --- 步结果持久化的内部载体（Task 6）-----------------------------------------
+STEP_RESULT_RAW_ROWS_KEY = "__rawRows"
+"""步结果 dict 里的**内部**载体：驱动原始行（`chartStep` 写入，`_stageExecute` 落库后摘除）。
+
+`stepResult` 的公开键集是 JSON 安全的（见其 docstring），**不含**原始行（驱动标量
+`Decimal`/`date` 会破坏 JSONB / SSE 口径）。执行面要把原始行送到落库点，只能用一条
+**旁路**：放在结果 dict 上一个下划线前缀的私有键。载体的生命周期严格止于
+`_stageExecute` 的循环 —— `pop` 摘除后**绝不**进 `state["stepResults"]` / 检查点 /
+SSE，故外部的 result 契约一字不变。"""
+
 # --- SSE 事件名（设计 §4.5）/ 错误码 / 默认 mode ------------------------------
 EVENT_INTENT = "research.intent"
 EVENT_ESL = "research.esl"

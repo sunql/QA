@@ -33,6 +33,7 @@ from app.domain.models import Base
 _STATUS_LEN = 20
 _MODE_LEN = 20
 _PHASE_LEN = 30
+_STEP_TYPE_LEN = 50
 
 
 def _utcnow() -> datetime:
@@ -234,4 +235,38 @@ class ResearchRunState(Base):
         default=_utcnow,
         onupdate=_utcnow,
         nullable=False,
+    )
+
+
+class ResearchStepResult(Base):
+    """研究计划单步的执行结果快照（Task 6）：SQL / 原始行引用 / 证据摘要 / 状态。
+
+    挂在**当前版本**的 `research_run_state` 下 —— resume 时 `updateRunState` 生成新 UUID，
+    步结果随之归属新版本（跨版本完整读取由 Task 8 按 `research_run_state.turn_id` join，
+    见 brief D25；本轮写侧只挂 `state["runStateId"]`）。
+
+    原始行放 `raw_result_ref`（JSONB，`{"rows": [...], "schemaVersion": 1}`，超
+    `MAX_FINDING_ROWS` 截断）；证据摘要放 `evidence_summary`（已是 JSON 原生 dict）。
+    """
+
+    __tablename__ = "research_step_result"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    run_state_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_run_state.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_type: Mapped[str] = mapped_column(String(_STEP_TYPE_LEN), nullable=False)
+    sql_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_result_ref: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    evidence_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(String(_STATUS_LEN), nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
     )

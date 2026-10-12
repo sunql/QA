@@ -45,6 +45,7 @@ from app.services.research_evidence_summary import (
     EvidenceSummary,
     trySummarizeEvidence,
 )
+from app.services.research_step_result import persistStepResult
 from app.services.research_hypothesis_adapter import rewriteHypothesisSqlWithHint
 from app.services.research_hypothesis_test import (
     HypothesisVerdict,
@@ -88,6 +89,7 @@ from app.services.research_agent_ports import (
     SIGNAL_FIXED_SCOPE,
     SIGNAL_LOW_CONFIDENCE_STEP,
     SIGNAL_SQL_VALIDATION_FAILED,
+    STEP_RESULT_RAW_ROWS_KEY,
     VERIFY_FAIL_FACTOR,
     VERIFY_OK_FACTOR,
     Emit,
@@ -236,8 +238,14 @@ class ResearchAgentPhasesMixin:
             result = await runStep(
                 session, step, sessionId=sessionId, state=state, emit=emit, deps=deps
             )
+            # Task 6：摘除内部载体（驱动原始行）后落库；每步一次 commit —— 失败步的
+            # rollbackQuietly 会回滚未提交的行，故落库必须紧贴本步之后。
+            raw_rows = result.pop(STEP_RESULT_RAW_ROWS_KEY, [])
             results.append(result)
             state["stepResults"] = results
+            await persistStepResult(
+                session, state=state, step=step, result=result, raw_rows=raw_rows
+            )
             if not result["error"] and result["rowCount"] > 0:
                 continue
             if self._autoConfirm:

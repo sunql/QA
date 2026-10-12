@@ -55,6 +55,7 @@ from app.services.research_agent_ports import (
     PURPOSE_CHART,
     SIGNAL_SQL_VALIDATION_FAILED,
     STEP_MISSING_SQL,
+    STEP_RESULT_RAW_ROWS_KEY,
     Emit,
     MeteredClient,
     emitEvent,
@@ -489,6 +490,10 @@ async def chartStep(
         chartOption=getattr(build, "option", None),
         evidence=evidence.model_dump(by_alias=True) if evidence is not None else None,
     )
+    # Task 6：本处是**唯一**「`rows` 在手」的结果构造点，把驱动原始行挂上内部载体，
+    # 供 `_stageExecute` 落库 `research_step_result.raw_result_ref`（随后即被 `pop` 摘除，
+    # 不进 state / 检查点 / SSE）。`stepResult` 的公开键集不受影响（见载体常量 docstring）。
+    result[STEP_RESULT_RAW_ROWS_KEY] = rows
     await emitEvent(
         emit,
         EVENT_STEP_CHART,

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import LlmConfig
 from app.domain.schemas import LlmConfigCreate, LlmConfigUpdate
+from app.infrastructure.llm import factory as llmFactory
 from app.infrastructure.security.crypto import encryptApiKey
 from app.infrastructure.url_validator import validateEndpointUrl
 from app.services.messages_zh import (
@@ -96,6 +97,8 @@ class ModelConfigService:
         await session.commit()
         await session.refresh(config)
         logger.info("更新模型配置 id=%s fields=%s", configId, list(updates.keys()))
+        # audit-fx-2.2: belt-and-suspenders — 更新后显式 evict factory 缓存
+        llmFactory.evictClient(configId)
         return config
 
     async def deactivate(self, session: AsyncSession, configId: int) -> None:

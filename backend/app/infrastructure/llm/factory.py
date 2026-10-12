@@ -12,7 +12,11 @@ acquire_llm_concurrency`` 的旧 import 路径以减少扩散。
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from functools import lru_cache
 from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, getSettings
 from app.domain.enums import ProviderType
@@ -31,8 +35,68 @@ from app.infrastructure.security.crypto import decryptApiKey
 
 logger = logging.getLogger(__name__)
 
-# config_id -> 客户端单例
+# config_id -> 客户端单例（legacy 路径使用）
 _clients: dict[int, BaseLlmClient] = {}
+
+
+# ---------------------------------------------------------------------------
+# 缓存路径：cache key = (config_id, updated_at_epoch, endpoint, key_cipher)
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=128)
+def _buildClient(
+    config_id: int,
+    updated_at_epoch: int,
+    endpoint: str,
+    key_cipher: str,
+) -> BaseLlmClient:
+    """构造 LLM 客户端（同步，LRU 缓存）。
+
+    cache key 包含 updated_at_epoch，确保 endpoint/key 变更后 cache miss。
+    """
+    key = decryptApiKey(key_cipher)
+    # 构造兼容 config 对象供 OpenAiClient 使用
+    config = type("_CacheClientConfig", (), {
+        "id": config_id,
+        "model_name": "cached-model",
+        "api_endpoint": endpoint,
+        "api_key_encrypted": key_cipher,
+    })()
+    provider = ProviderType.OPENAI
+    # audit-fx-1.1：生产环境阻断非 https / 私有 IP endpoint
+    if endpoint:
+        validateEndpointUrl(endpoint)
+    return OpenAiClient(config, apiKey=key, provider=provider)
+
+
+async def getOrCreateClient(
+    configId: int,
+    session: AsyncSession,
+) -> BaseLlmClient:
+    """加载 LlmConfig 并返回缓存的客户端（cache key 含 updated_at）。
+
+    Args:
+        configId: LlmConfig id
+        session: AsyncSession（FastAPI 路由中由 Depends(getDb) 注入）。
+    """
+    from app.domain.models import LlmConfig
+
+    cfg = await session.get(LlmConfig, configId)
+    if cfg is None:
+        raise ValueError(f"LlmConfig id={configId} not found")
+    epoch = int(cfg.updated_time.timestamp())
+    return _buildClient(
+        cfg.id,
+        epoch,
+        cfg.api_endpoint or "",
+        cfg.api_key_encrypted or "",
+    )
+
+
+def evictClient(configId: int) -> None:
+    """清除整个 _buildClient LRU 缓存（belt-and-suspenders）。"""
+    _buildClient.cache_clear()
 
 
 def createClient(config: Any, *, settings: Settings | None = None, apiKey: str | None = None) -> BaseLlmClient | None:

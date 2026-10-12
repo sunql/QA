@@ -1,9 +1,10 @@
 """must_change_password 服务端强制集成测试（audit-fx-1.3）。
 
 覆盖：
-- must_change_password=true 用户访问业务端点 → 403 + detail 含 must_change_password
+- must_change_password=true 用户访问业务端点 → 403 + detail 含 MUST_CHANGE_PASSWORD
 - must_change_password=true 用户可访问 /auth/me
 - must_change_password=true 用户可访问 /auth/change-password
+- must_change_password=true 用户可访问 /auth/logout
 - 改密后 guard 解除，业务端点不再被阻断
 """
 
@@ -111,6 +112,22 @@ async def test_must_change_user_can_call_me(
     body = resp.json()
     assert body["username"] == "can_me_u"
     assert body["mustChangePassword"] is True
+
+
+@pytest.mark.asyncio
+async def test_must_change_user_can_logout(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """must_change_password=true 用户可调用 POST /auth/logout。"""
+    user = await _seed_must_change_user(dbSession, username="can_logout_u")
+    token, _, _ = _make_session(dbSession, user)
+    await dbSession.commit()
+
+    resp = await client.post(
+        "/api/v1/auth/logout",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code in (200, 204)
 
 
 @pytest.mark.asyncio

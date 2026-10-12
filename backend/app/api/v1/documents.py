@@ -263,6 +263,7 @@ async def searchDocuments(
         return await svc.searchDocuments(
             q,
             security_level=security_level,
+            user=_user,
             top_k=top_k,
             session=session,
         )

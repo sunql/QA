@@ -243,7 +243,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             model_id=row.model_id,
             datasource_id=row.datasource_id,
         ))
-        session.add(run_state)
+        await self._sessions.createRunState(session, run_state)
         state: dict[str, Any] = {
             **stateToDict(run_state),
             "runStateId": run_state.id,
@@ -302,7 +302,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         state = resumeState(run_state, checkpoint, choice)
         decision = decideResume(checkpoint, action, choice)
         startPhase = decision.phase
-        run_state, state = self._applyResumeMutations(
+        run_state, state = await self._applyResumeMutations(
             session, run_state, decision=decision, rewritten=rewritten, state=state
         )
         logger.info(
@@ -318,7 +318,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             state=state,
         )
 
-    def _applyResumeMutations(
+    async def _applyResumeMutations(
         self,
         session: AsyncSession,
         run_state: Any,
@@ -363,7 +363,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
                 scope_version=newScopeVersion,
                 state_payload=newPayload,
             )
-            session.add(run_state)
+            await self._sessions.updateRunState(session, run_state)
         # 版本化后 run_state.id 可能已变，状态机携带的标识必须同步
         state["runId"] = str(run_state.id)
         state["runStateId"] = run_state.id

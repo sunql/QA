@@ -317,6 +317,28 @@ class ResearchSessionService:
         )
         return await session.scalar(stmt)
 
+    async def createRunState(
+        self, session: AsyncSession, run_state: ResearchRunState
+    ) -> ResearchRunState:
+        """将已构建的 ResearchRunState 加入当前事务。
+
+        调用方负责构造不可变对象（`research_run_state.buildRunState`）；
+        本方法只执行 `session.add` 并原样返回，保证写入操作集中在服务层。
+        """
+        session.add(run_state)
+        return run_state
+
+    async def updateRunState(
+        self, session: AsyncSession, run_state: ResearchRunState
+    ) -> ResearchRunState:
+        """将版本化后的新 ResearchRunState 加入当前事务。
+
+        与 `createRunState` 对称：`research_run_state.updateRunState` 产出新对象后，
+        由本方法统一落库，避免业务状态机直接操作 `session`。
+        """
+        session.add(run_state)
+        return run_state
+
     async def saveFinding(
         self,
         session: AsyncSession,

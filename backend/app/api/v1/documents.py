@@ -70,6 +70,7 @@ async def listDocuments(
 ) -> list[DocumentRead]:
     docs = await service.listDocuments(
         session,
+        user=_user,
         document_type=document_type,
         security_level=security_level,
         status=doc_status,
@@ -86,7 +87,7 @@ async def getDocument(
     session: AsyncSession = Depends(getDb),
     service: DocumentService = Depends(getDocumentService),
 ) -> DocumentRead:
-    doc = await service.getDocument(session, documentId)
+    doc = await service.getDocument(session, documentId, user=_user)
     return DocumentRead.model_validate(doc)
 
 

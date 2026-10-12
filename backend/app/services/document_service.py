@@ -6,6 +6,7 @@ document_id 业务唯一；storage_url / content_hash 可选（文件上传后�
 
 from __future__ import annotations
 
+from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +23,7 @@ from app.domain.schemas import (
     DocumentUpdate,
 )
 from app.services.audit_service import AuditService
+from app.services.document_clearance import buildClearanceFilter
 from app.services.messages_zh import (
     MSG_DOCUMENT_CONTENT_DUPLICATE,
     MSG_DOCUMENT_DUPLICATE,
@@ -74,6 +76,7 @@ class DocumentService:
         self,
         session: AsyncSession,
         *,
+        user: CurrentUser | None = None,
         document_type: str | None = None,
         security_level: str | None = None,
         status: DocumentStatus | None = None,
@@ -81,9 +84,15 @@ class DocumentService:
         limit: int = _DEFAULT_LIMIT,
         offset: int = 0,
     ) -> list[DocumentCatalog]:
-        """列表查询，支持按类型/安全等级/状态/业务编号过滤。"""
+        """列表查询，支持按类型/安全等级/状态/业务编号过滤，并应用密级过滤。"""
         limit = min(limit, _MAX_LIMIT)
         stmt = select(DocumentCatalog).order_by(DocumentCatalog.id)
+
+        # 密级过滤（Task 4.4）
+        if user is not None:
+            clearance_levels = await buildClearanceFilter(session, user)
+            stmt = stmt.where(DocumentCatalog.security_level.in_(clearance_levels))
+
         if document_type is not None:
             stmt = stmt.where(DocumentCatalog.document_type == document_type)
         if security_level is not None:
@@ -101,11 +110,30 @@ class DocumentService:
         return list(result.scalars().all())
 
     async def getDocument(
-        self, session: AsyncSession, id: int
+        self,
+        session: AsyncSession,
+        id: int,
+        user: CurrentUser | None = None,
     ) -> DocumentCatalog:
         entity = await session.get(DocumentCatalog, id)
         if entity is None:
             raise NotFoundError(MSG_DOCUMENT_NOT_FOUND.format(id=id))
+
+        # 密级过滤（Task 4.4）：用户无权查看该密级 → 403
+        if user is not None:
+            clearance_levels = await buildClearanceFilter(session, user)
+            # security_level 在 DB 中存为 string（L1/L2/L3），直接比较字符串
+            entity_level = (
+                entity.security_level.value
+                if hasattr(entity.security_level, "value")
+                else str(entity.security_level)
+            )
+            if entity_level not in clearance_levels:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="您无权查看此文档",
+                )
+
         return entity
 
     async def findByContentHash(

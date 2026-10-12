@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import Field, field_validator
+
+from app.services.password_policy import _checkPasswordBytes
 
 from app.domain.schemas import CamelModel
 
@@ -30,6 +32,8 @@ class UserCreate(CamelModel):
     email: str | None = Field(default=None, max_length=255)
     enabled: bool = True
     password: str = Field(min_length=8, max_length=128)
+
+    _validate_password = field_validator("password")(_checkPasswordBytes)
 
 
 class UserUpdate(CamelModel):

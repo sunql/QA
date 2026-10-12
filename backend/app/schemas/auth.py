@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import Field, field_validator
+
+from app.services.password_policy import _checkPasswordBytes
 
 from app.domain.schemas import CamelModel
 from app.services.password_policy import MIN_LENGTH
@@ -15,6 +17,8 @@ class AuthLoginRequest(CamelModel):
 
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)
+
+    _validate_password = field_validator("password")(_checkPasswordBytes)
 
 
 class UserSummaryRead(CamelModel):
@@ -59,12 +63,16 @@ class AuthChangePasswordRequest(CamelModel):
     oldPassword: str
     newPassword: str
 
+    _validate_password = field_validator("oldPassword", "newPassword")(_checkPasswordBytes)
+
 
 class AdminResetPasswordRequest(CamelModel):
     """PUT /users/{id}/password 请求体。"""
 
     newPassword: str
     forceChangeOnNextLogin: bool = True
+
+    _validate_password = field_validator("newPassword")(_checkPasswordBytes)
 
 
 class PasswordPolicyRead(CamelModel):

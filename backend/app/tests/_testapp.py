@@ -56,7 +56,9 @@ from app.api.v1 import (
     wiki_compile,
     wiki_graph,
     evidences,
+    graph,
     id_mapping,
+    vectors,
 )
 from app.config import getSettings
 from app.dependencies import getDb, mustChangePasswordGuard
@@ -232,6 +234,8 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    testApp.include_router(graph.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    testApp.include_router(vectors.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(
         system_config.router,
         prefix="/api/v1/admin/system-config",

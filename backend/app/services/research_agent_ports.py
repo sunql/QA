@@ -487,8 +487,15 @@ def stepResult(
     error: str | None,
     chartType: str | None = None,
     chartOption: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """步结果（落 state / checkpoint options）：只留摘要与列名，不留原始行。"""
+    """步结果（落 state / checkpoint options）：只留摘要与列名，不留原始行。
+
+    ``evidence``（Task 4，加法）：结构化统计摘要的 **JSON 安全 dict**（由 ``chartStep`` 在
+    ``rows`` 在手边时经 ``summarizeEvidence(...).model_dump(by_alias=True)`` 生成）。
+    ``summary`` 契约不变 —— **仍是人类可读字符串**（``EVENT_STEP_DONE`` / 报告 / 检查点选项
+    都读它），故结构化摘要另起一个 key，不替换、不改名。
+    """
     columns = list(rows[0].keys()) if rows else []
     if error:
         summary = f"步骤失败：{error}"
@@ -507,6 +514,7 @@ def stepResult(
         "error": error,
         "chartType": chartType,
         "chartOption": chartOption,
+        "evidence": evidence,
     }
 
 

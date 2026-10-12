@@ -41,8 +41,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.research_models import ResearchSession
 from app.infrastructure.business_db_pool import get_adapter
 from app.services.datasource_service import DataSourceService
-from app.services.nl2sql_service import Nl2SqlService, _safeSchemaPrefix
 from app.services.nl2sql_dialects import checkSqlDialect
+from app.services.nl2sql_service import Nl2SqlService, _safeSchemaPrefix
 from app.services.research_agent_ports import (
     EVENT_ERROR,
     EVENT_STEP_CHART,
@@ -65,6 +65,7 @@ from app.services.research_agent_ports import (
     stepResult,
 )
 from app.services.research_agent_stages import eslClasses, meteringModelName
+from app.services.research_evidence_summary import trySummarizeEvidence
 
 logger = logging.getLogger(__name__)
 
@@ -470,16 +471,23 @@ async def chartStep(
     emit: Emit | None,
     deps: ExecutionDeps,
 ) -> dict[str, Any]:
-    """出图（ChartService 契约：绝不抛错）并落 result + 发 step_chart / step_done。"""
+    """出图（ChartService 契约：绝不抛错）并落 result + 发 step_chart / step_done。
+
+    Task 4：本处是**唯一**「`rows` 在手边」的结果构造点，故结构化证据摘要
+    （``evidence``）在这里生成并传入 ``stepResult``（其余三个调用点 rows 恒为空，
+    不做后处理）。``trySummarizeEvidence`` 保证摘要算不出来时只留痕、不让单步失败。
+    """
     build = await _buildChartMetered(
         session, rows, sessionId=sessionId, state=state, emit=emit, deps=deps
     )
+    evidence = trySummarizeEvidence(rows)
     result = stepResult(
         step,
         rows=rows,
         error=None,
         chartType=getattr(getattr(build, "chartType", None), "value", None),
         chartOption=getattr(build, "option", None),
+        evidence=evidence.model_dump(by_alias=True) if evidence is not None else None,
     )
     await emitEvent(
         emit,

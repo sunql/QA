@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from jwt import InvalidTokenError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -332,3 +332,39 @@ async def requireAdmin(
             detail="需要 admin 角色",
         )
     return user
+
+
+ALLOWED_PATHS_WHEN_MUST_CHANGE = frozenset({
+    "/api/v1/auth/me",
+    "/api/v1/auth/change-password",
+    "/api/v1/auth/logout",
+})
+
+async def mustChangePasswordGuard(
+    request: Request,
+    user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> None:
+    """must_change_password 强制守卫（audit-fx-1.3）。
+
+    用户 must_change_password=True 时只允许访问白名单路径（/auth/me、
+    /auth/change-password、/auth/logout），其他业务端点一律 403。
+    白名单路径不走本守卫（通过路由 ``dependencies=[]`` 覆盖）。
+    """
+    if not user.dbUserId:
+        return
+    from app.models.rbac import User
+    from sqlalchemy import select
+
+    result = await session.execute(
+        select(User.must_change_password).where(User.id == user.dbUserId)
+    )
+    must_change = result.scalar_one_or_none()
+    if not must_change:
+        return
+    path = request.url.path
+    if path not in ALLOWED_PATHS_WHEN_MUST_CHANGE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "MUST_CHANGE_PASSWORD", "message": "必须先修改密码"},
+        )

@@ -83,6 +83,60 @@ def test_derive_direction_none_when_both_directions_present() -> None:
 
 
 # ---------------------------------------------------------------------------
+# I1：否定式方向词必须作废（位置性否定门）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "statement",
+    ["不应下降", "不会减少", "不该增长", "没有下降", "未能增长", "不增长", "不再下降"],
+)
+def test_derive_direction_none_when_direction_word_is_negated(statement: str) -> None:
+    """TP 矩阵：方向词被**紧邻**否定式否定 ⇒ 作废 ⇒ 无其它方向词 ⇒ ``None``。
+
+    「不应下降」等断言的方向词只是被否定了，不是没有方向词 —— 按本模块「宁可不判，不许瞎猜」
+    的口径必须返回 ``None``（符号翻转 = 静默把「被违背」判成「已验证」）。
+    """
+    assert deriveDirection(statement) is None
+
+
+@pytest.mark.parametrize(
+    ("statement", "expected"),
+    [
+        ("无锡供应商采购额上升", DIRECTION_INCREASE),
+        ("未来三月采购额上升", DIRECTION_INCREASE),
+        ("无法确认库存增长", DIRECTION_INCREASE),
+        ("不但上涨", DIRECTION_INCREASE),
+        ("再增长", DIRECTION_INCREASE),
+    ],
+)
+def test_derive_direction_unaffected_by_non_negating_particles(
+    statement: str, expected: str
+) -> None:
+    """FP 反向矩阵（承重）：``无``/``未``/``不``/``再`` 出现在**非紧邻**位置时**不得**误判为否定。
+
+    这些词如果走全文扫描，会把「无锡」「未来」「无法」整段误伤 —— 故此实现只认**紧邻前缀**。
+    """
+    assert deriveDirection(statement) == expected
+
+
+def test_negated_direction_with_falling_data_is_inconclusive_not_supported() -> None:
+    """I1 RED：「不应下降」+ 数据**下跌** ⇒ 曾被静默判成 SUPPORTED（符号翻转）。
+
+    断言是「**不应**下降」，数据跌了 = 被违背；正确口径是**方向不可判** ⇒ INCONCLUSIVE，
+    并标注「断言含否定」（**不能**用误导性的「断言未含可判方向」——此处有方向词，只是被否定了）。
+    """
+    result = evaluateHypothesis(
+        _candidate("采购金额不应下降"), _summary("200", "100"), rows=[{"amount": 100}]
+    )
+
+    assert result.direction is None
+    assert result.verdict is HypothesisVerdict.INCONCLUSIVE
+    assert any("断言含否定" in item for item in result.limitations)
+    assert not any("断言未含可判方向" in item for item in result.limitations)
+
+
+# ---------------------------------------------------------------------------
 # D20b 反向断言（承重）：方向词 + 同向数据 ⇒ SUPPORTED（不是恒 INCONCLUSIVE）
 # ---------------------------------------------------------------------------
 

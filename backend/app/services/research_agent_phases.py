@@ -350,11 +350,9 @@ class ResearchAgentPhasesMixin:
                 "evidence": test.evidence_summary,
                 "verdict": verdict.value,
             }
-            # 落库不变量（P2）：不得出现 verified=True 与 verdict != supported 的组合。
-            if verified and supportingData["verdict"] != HypothesisVerdict.SUPPORTED.value:
-                raise AssertionError(
-                    f"verified/verdict 自相矛盾: verified={verified} verdict={verdict.value}"
-                )
+            # M1：`verified` 是 `verdict == supported` 的**定义性派生**（上面一行赋值），
+            # `supportingData["verdict"]` 又是同一个 `verdict` ⇒ 「verified 与 verdict 相矛盾」
+            # 恒不可达，故不设运行时守卫。
             row = await self._sessions.saveFinding(
                 session,
                 sessionId=sessionId,

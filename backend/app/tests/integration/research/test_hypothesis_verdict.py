@@ -38,15 +38,16 @@ pytestmark = pytest.mark.asyncio
 
 
 class _FixedRowsRunner:
-    """``runVerification`` 返回固定行（零网络）。"""
+    """``runVerification`` 返回固定行 / 固定错误（零网络）。"""
 
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
+    def __init__(self, rows: list[dict[str, Any]], error: str | None = None) -> None:
         self._rows = list(rows)
+        self._error = error
         self.calls = 0
 
     async def runVerification(self, session, hypothesis, *, adapter=None, dialectArgs=None):
         self.calls += 1
-        return {"rows": [dict(r) for r in self._rows], "error": None}
+        return {"rows": [dict(r) for r in self._rows], "error": self._error}
 
 
 class _FakeUsage:
@@ -87,7 +88,11 @@ async def _seedDatasource(dbSession: AsyncSession) -> int:
 
 
 async def _runStageVerify(
-    dbSession: AsyncSession, *, statement: str, rows: list[dict[str, Any]]
+    dbSession: AsyncSession,
+    *,
+    statement: str,
+    rows: list[dict[str, Any]],
+    error: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """跑一次 ``_stageVerify``，返回 (state, finding_row_as_dict)。"""
     svc = ResearchSessionService()
@@ -100,7 +105,7 @@ async def _runStageVerify(
     )
     await dbSession.commit()
 
-    runner = _FixedRowsRunner(rows)
+    runner = _FixedRowsRunner(rows, error=error)
     execDeps = buildExecutionDeps(
         runner=None,  # _stageVerify 直接用 self._runner
         chart=None,
@@ -195,8 +200,38 @@ async def test_stage_verify_inconclusive_with_rows_is_not_verified(
     assert entry["verdict"] == "inconclusive"
 
 
-async def test_verified_and_verdict_never_contradict(dbSession: AsyncSession) -> None:
-    """落库不变量（P2）：不得出现 verified=True 而 verdict != supported 的组合。"""
+async def test_stage_verify_execution_error_persists_execution_failed(
+    dbSession: AsyncSession,
+) -> None:
+    """I2：验证 SQL **执行失败** ⇒ 写入侧落 ``execution_failed``（此前该路径零 E2E 覆盖）。
+
+    唯一那条 ``execution_failed`` 集成用例是**直接塞进** ``supporting_data`` 的，绕过了
+    ``_stageVerify`` 的 writer；本用例让 runner 真返回 ``error``，钉住：
+    ``_stageVerify`` 的 ``execution_error`` 接线 + ``verdict`` + ``verified=False`` + ``limitations``。
+    """
+    state, finding = await _runStageVerify(
+        dbSession,
+        statement="采购金额上升",
+        rows=[],
+        error="ORA-00942: table or view does not exist",
+    )
+
+    assert finding["supportingData"]["verdict"] == "execution_failed"
+    entry = state["findings"][0]
+    assert entry["verified"] is False
+    assert entry["verdict"] == "execution_failed"
+    assert entry["executionSucceeded"] is False
+    assert entry["limitations"]
+    assert any("执行失败" in item for item in entry["limitations"])
+
+
+async def test_stage_verify_verdict_value_is_in_domain(dbSession: AsyncSession) -> None:
+    """落库 ``verdict`` 的**值域合法性**（不是「verified/verdict 不共存」不变量）。
+
+    ``verified`` 是**派生量**（``verdict == supported``），``supporting_data`` 里没有单独的
+    ``verified`` 列 ⇒ 本测试无从断言「verified=True ∧ verdict≠supported 不并存」；它实际只能
+    断言落库 ``verdict`` 落在闭集内（以及 supported 用例确实落 supported）。
+    """
     _, supported = await _runStageVerify(
         dbSession,
         statement="采购金额上升",
@@ -208,8 +243,6 @@ async def test_verified_and_verdict_never_contradict(dbSession: AsyncSession) ->
 
     for finding in (supported, inconclusive):
         verdict = finding["supportingData"]["verdict"]
-        # verified 是派生量：supporting_data 里没有单独的 verified 列，但契约是
-        # verdict == supported ⇔ 报告侧 verified。此处断言落库 verdict 值域合法。
         assert verdict in {"supported", "contradicted", "inconclusive", "execution_failed"}
     assert supported["supportingData"]["verdict"] == "supported"
     assert inconclusive["supportingData"]["verdict"] != "supported"

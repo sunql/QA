@@ -45,8 +45,17 @@ from app.services.research_evidence_summary import EvidenceSummary
 INCREASE_DIRECTION_WORDS: tuple[str, ...] = ("涨", "上升", "增长", "增加", "提高")
 DECREASE_DIRECTION_WORDS: tuple[str, ...] = ("跌", "下降", "减少", "降低", "下滑")
 
+# I1：否定式方向词作废（位置性判定，**闭集 + 紧邻前缀**）。全文扫描会误伤
+# 「无锡」「未来」「无法」这类词里的否定字，故只认方向词**紧邻**的前缀。
+NEGATION_PARTICLES: frozenset[str] = frozenset("不未没无非别莫")
+NEGATION_AUXILIARIES: frozenset[str] = frozenset("会应该能肯要再有")
+
 DIRECTION_INCREASE = "increase"
 DIRECTION_DECREASE = "decrease"
+
+# I1 limitations 文案：**不复用**「断言未含可判方向」——那句会误导（此处有方向词，只是被
+# 否定式作废了）。
+NEGATED_DIRECTION_LIMITATION = "断言含否定，方向不可判"
 
 
 class HypothesisVerdict(str, Enum):
@@ -79,15 +88,61 @@ def deriveDirection(statement: str | None) -> str | None:
     """纯函数（D20b）：从 statement 的中文方向词推导 ``increase`` / ``decrease``。
 
     两向都命中（互相矛盾）或都不命中 ⇒ ``None``（方向不可定，绝不瞎猜）。
+
+    I1 薄壳：否定式方向词先作废（见 :func:`_resolveDirection`）。
+    """
+    return _resolveDirection(statement)[0]
+
+
+def _isNegatedDirectionWordAt(text: str, start: int) -> bool:
+    """I1：方向词起始下标 ``start`` 的**紧邻前缀**是否为否定式（闭集 + 位置）。
+
+    判真当且仅当：
+
+    - ``text[start-1]`` 是否定助词（``不未没无非别莫``），**或**
+    - ``text[start-1]`` 是能愿/情态助词（``会应该能肯要再有``）**且** ``text[start-2]`` 是否定助词。
+
+    刻意**不**做全文扫描（否则「无锡」「未来」「无法」会被误伤）；也刻意不跨越副词
+    （「不应**大幅**下降」中的副词会挡住本门 —— 属已知盲区，见模块测试注释）。
+    """
+    if start >= 1 and text[start - 1] in NEGATION_PARTICLES:
+        return True
+    return (
+        start >= 2
+        and text[start - 1] in NEGATION_AUXILIARIES
+        and text[start - 2] in NEGATION_PARTICLES
+    )
+
+
+def _scanDirectionWords(text: str, words: tuple[str, ...]) -> tuple[int, bool]:
+    """统计 ``words`` 的出现：返回 ``(未被否定的次数, 是否出现过被否定的出现)``。"""
+    active = 0
+    negated = False
+    for word in words:
+        start = text.find(word)
+        while start != -1:
+            if _isNegatedDirectionWordAt(text, start):
+                negated = True
+            else:
+                active += 1
+            start = text.find(word, start + 1)
+    return active, negated
+
+
+def _resolveDirection(statement: str | None) -> tuple[str | None, bool]:
+    """返回 ``(方向, 是否出现被否定的方向词)``。
+
+    否定式方向词**作废**；作废后仍无有效方向词（或涨跌两向同时有效 ⇒ 互相矛盾）⇒ ``None``。
     """
     text = statement or ""
-    hasIncrease = any(word in text for word in INCREASE_DIRECTION_WORDS)
-    hasDecrease = any(word in text for word in DECREASE_DIRECTION_WORDS)
-    if hasIncrease and not hasDecrease:
-        return DIRECTION_INCREASE
-    if hasDecrease and not hasIncrease:
-        return DIRECTION_DECREASE
-    return None
+    increaseActive, increaseNegated = _scanDirectionWords(text, INCREASE_DIRECTION_WORDS)
+    decreaseActive, decreaseNegated = _scanDirectionWords(text, DECREASE_DIRECTION_WORDS)
+    negated = increaseNegated or decreaseNegated
+    if increaseActive and not decreaseActive:
+        return DIRECTION_INCREASE, negated
+    if decreaseActive and not increaseActive:
+        return DIRECTION_DECREASE, negated
+    return None, negated
 
 
 def evaluateHypothesis(
@@ -106,7 +161,7 @@ def evaluateHypothesis(
     """
     assertion = str(candidate.get("statement") or "")
     metric = str(candidate.get("driver") or "")
-    direction = deriveDirection(assertion)
+    direction, negatedDirection = _resolveDirection(assertion)
     sampleSize = len(rows)
 
     if execution_error is not None:
@@ -134,7 +189,11 @@ def evaluateHypothesis(
     if baseline is None:
         limitations.append("缺少基线")
     if direction is None:
-        limitations.append("断言未含可判方向")
+        # I1：区分「没有方向词」与「有方向词但被否定式作废」——后者绝不能复用前者文案。
+        if negatedDirection:
+            limitations.append(NEGATED_DIRECTION_LIMITATION)
+        else:
+            limitations.append("断言未含可判方向")
 
     verdict = _decideVerdict(
         direction=direction,

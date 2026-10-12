@@ -4,7 +4,7 @@ import { useAuthStore } from "../../stores/authStore";
 const ALLOWED_WHEN_MUST_CHANGE = ["/auth/change-password", "/auth/login"];
 
 function isAllowedWhenMustChange(pathname: string): boolean {
-  return ALLOWED_WHEN_MUST_CHANGE.some((p) => pathname.startsWith(p));
+  return ALLOWED_WHEN_MUST_CHANGE.some((p) => pathname === p || pathname.startsWith(p + "/"));
 }
 
 export default function RequireAuth() {

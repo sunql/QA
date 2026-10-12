@@ -15,6 +15,7 @@ from app.config import Settings, getSettings
 from app.domain.exceptions import PermissionDeniedError
 from app.domain.models import Organization, Role, User, UserOrganization, UserRole
 from app.domain.error_messages import (
+    MSG_ACCOUNT_DISABLED,
     MSG_AUTH_REQUIRED,
     MSG_TOKEN_INVALID,
     MSG_TOKEN_EXPIRED,
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Auth error codes (used in structured detail dict)
 _AUTH_CODE_EXPIRED = "AUTH_EXPIRED"
 _AUTH_CODE_INVALID = "AUTH_INVALID"
-_AUTH_CODE_MISSING = "AUTH_MISSING"
+_AUTH_CODE_DISABLED = "AUTH_DISABLED"
 _PERMISSION_CODE_DENIED = "PERMISSION_DENIED"
 
 
@@ -241,8 +242,10 @@ async def authenticateBearer(
     except ValueError as exc:
         raise AuthenticationFailed(_AUTH_CODE_INVALID, MSG_TOKEN_INVALID) from exc
     user = await session.get(User, user_id)
-    if user is None or not user.enabled:
+    if user is None:
         raise PermissionDeniedError(MSG_AUTH_REQUIRED)
+    if not user.enabled:
+        raise AuthenticationFailed(_AUTH_CODE_DISABLED, MSG_ACCOUNT_DISABLED)
 
     roles, departments = await _loadDbRolesAndOrgs(session, user_id)
     return CurrentUser(

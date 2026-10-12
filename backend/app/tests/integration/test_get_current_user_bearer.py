@@ -176,9 +176,10 @@ class TestBearerRevokedOrExpiredSession:
 
 
 class TestBearerDisabledUser:
-    async def test_disabled_user_raises_403(
+    async def test_disabled_user_raises_401(
         self, dbSession: AsyncSession
     ) -> None:
+        # audit-fx-2.1 fix round 1: disabled user -> 401 AUTH_DISABLED (not 403)
         user = await _create_user_with_role(
             dbSession, username="disabled_dave", role_code="user", enabled=False
         )
@@ -193,7 +194,7 @@ class TestBearerDisabledUser:
         )
         await dbSession.commit()
 
-        with pytest.raises(PermissionDeniedError) as exc_info:
+        with pytest.raises(AuthenticationFailed) as exc_info:
             await getCurrentUser(
                 authorization=f"Bearer {token}",
                 xUserId=None,
@@ -202,7 +203,7 @@ class TestBearerDisabledUser:
                 xUserDepartments=None,
                 session=dbSession,
             )
-        assert exc_info.value.message == "请先登录"
+        assert exc_info.value.detail["code"] == "AUTH_DISABLED"
 
 
 class TestStubModeDbEnrichment:

@@ -3,10 +3,12 @@
 真实 PG + 完整 API 链路。覆盖：
 - 过期 / 无效 / 缺失 Bearer token → 401 + detail.code == "AUTH_EXPIRED" 等
 - 已认证但无 admin 角色访问管理端点 → 403
+- enabled=False 用户带有效 token → 401 AUTH_DISABLED（fix round 1）
 
 Fixtures:
 - expiredToken: 已过期的 JWT（JWT 本身过期，但 session 记录可能仍存在）
 - userWithoutAdminToken: 拥有有效 session 但只有 user 角色的用户的 token
+- disabledUserToken: enabled=False 用户带有效 session
 """
 
 from __future__ import annotations
@@ -107,6 +109,25 @@ async def userWithoutAdminToken(dbSession: AsyncSession) -> tuple[str, User]:
     return token, user
 
 
+@pytest.fixture
+async def disabledUserToken(dbSession: AsyncSession) -> tuple[str, User]:
+    """返回 enabled=False 用户带有效 session 的 token（fix round 1 回归测试）。"""
+    user = await _create_user_with_role(
+        dbSession, username="disabled_auth_user", role_code="user", enabled=False
+    )
+    token, jti, exp = sign_jwt(user_id=user.id, username=user.username)
+    dbSession.add(
+        UserSession(
+            jti=jti,
+            user_id=user.id,
+            issued_at=datetime.now(timezone.utc),
+            expires_at=exp,
+        )
+    )
+    await dbSession.commit()
+    return token, user
+
+
 class TestAuth401:
     @pytest.mark.asyncio
     async def test_expired_token_returns_401(self, client: AsyncClient, expiredToken: str) -> None:
@@ -121,6 +142,15 @@ class TestAuth401:
         """无效签名 / 格式错误的 JWT → 401。"""
         resp = await client.get("/api/v1/auth/me", headers={"Authorization": "Bearer bad.token.here"})
         assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_disabled_user_returns_401(self, client: AsyncClient, disabledUserToken: tuple[str, User]) -> None:
+        """enabled=False 用户带有效 token → 401 AUTH_DISABLED（fix round 1）。"""
+        token, _ = disabledUserToken
+        resp = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 401
+        detail = resp.json()["detail"]
+        assert detail["code"] == "AUTH_DISABLED"
 
 
 class TestAuth403:

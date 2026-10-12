@@ -113,10 +113,54 @@ def test_derive_direction_none_when_direction_word_is_negated(statement: str) ->
 def test_derive_direction_unaffected_by_non_negating_particles(
     statement: str, expected: str
 ) -> None:
-    """FP 反向矩阵（承重）：``无``/``未``/``不``/``再`` 出现在**非紧邻**位置时**不得**误判为否定。
+    """FP 反向矩阵（承重）：``无``/``未``/``不``/``再`` 出现在**窗口外或非否定位置**时**不得**误判为否定。
 
-    这些词如果走全文扫描，会把「无锡」「未来」「无法」整段误伤 —— 故此实现只认**紧邻前缀**。
+    这些词如果走全文扫描，会把「无锡」「未来」「无法」整段误伤 —— 故此实现只从方向词向后看
+    **小句内 5 字窗口**（``NEGATION_SCAN_WINDOW``），且半路遇到转折/连接词即停扫。
+
+    **注意本矩阵不证明该子类安全**：这里的 ``无``/``未`` 都**恰好**落在窗口外（``无锡供应商
+    采购额上升`` 的 «无» 距 «上升» = 8、``未来三月采购额上升`` 的 «未» 距 «上升» = 7），是靠
+    距离躲开，不是靠词边界。窗口内的同类词（``非常``/``特别``/``不仅``/``不锈钢``…）仍会被
+    误判为否定 ⇒ 丢方向（详见 ``_isNegatedDirectionWordAt`` docstring 的「已知残余」第 2 条，
+    属本轮**未收窄**的已知残余，交控制器裁定）。
     """
+    assert deriveDirection(statement) == expected
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "不应大幅下降",  # Hole A：副词隔断（«不» 距 «下降» = 4）
+        "不会明显减少",  # Hole A
+        "未能持续增长",  # Hole A
+        "没有出现下降",  # Hole A
+        "不再有增长",  # Hole B：助词链断（«不» 距 «增长» = 3）
+        "不应再下降",  # Hole B
+    ],
+)
+def test_derive_direction_none_when_negation_separated_by_fillers(statement: str) -> None:
+    """I1 第二轮：否定门从「紧邻前缀」放宽为「小句内 5 字窗口」后，**被隔断的否定式**也必须作废。
+
+    控制器在 ``0266d16`` 上原生复现过这 6 行符号翻转（副词/助词隔断 ⇒ 否定门看不见 ⇒
+    被违背的断言被判成 SUPPORTED）。每行都钉住「否定字 → 填充字 → 方向词」这一同缺陷类。
+    """
+    assert deriveDirection(statement) is None
+
+
+@pytest.mark.parametrize(
+    ("statement", "expected"),
+    [
+        # «无» 距方向词**恰好 6 > W(=5)** ⇒ 落在窗口外，不判否定（与既有行「无法确认库存增长」
+        # 同形，独立一条自证窗口上界；若把 W 改成 6 这条立即翻红）。
+        ("无供应商库存增长", DIRECTION_INCREASE),
+        # 承重回归行：既有 FP 里钉住窗口上界的那条（«无» 距 «增长» = 6）。
+        ("无法确认库存增长", DIRECTION_INCREASE),
+    ],
+)
+def test_scan_window_upper_bound_ignores_negation_beyond_five_chars(
+    statement: str, expected: str
+) -> None:
+    """窗口上界 ``W=5``：超出 5 字的否定字**不**作废方向词（否则「无锡/未来/无法」全误伤）。"""
     assert deriveDirection(statement) == expected
 
 

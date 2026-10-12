@@ -45,10 +45,18 @@ from app.services.research_evidence_summary import EvidenceSummary
 INCREASE_DIRECTION_WORDS: tuple[str, ...] = ("涨", "上升", "增长", "增加", "提高")
 DECREASE_DIRECTION_WORDS: tuple[str, ...] = ("跌", "下降", "减少", "降低", "下滑")
 
-# I1：否定式方向词作废（位置性判定，**闭集 + 紧邻前缀**）。全文扫描会误伤
-# 「无锡」「未来」「无法」这类词里的否定字，故只认方向词**紧邻**的前缀。
+# I1：否定式方向词作废（位置性判定，**闭集 + 小句内向后窗口**）。全文扫描会误伤
+# 「无锡」「未来」「无法」这类词里的否定字，故从方向词**向后**只看窗口内、且不跨小句。
 NEGATION_PARTICLES: frozenset[str] = frozenset("不未没无非别莫")
-NEGATION_AUXILIARIES: frozenset[str] = frozenset("会应该能肯要再有")
+
+# I1：向后扫描窗口上界（字符数）。方向词之前的否定字**至多**隔 W 个字符才算否定：
+# 「不应大幅下降」（«不» 距 «下降» = 4）命中；「无法确认库存增长」（«无» 距 «增长» = 6）
+# 落在窗外 ⇒ 不误伤。
+NEGATION_SCAN_WINDOW = 5
+
+# I1：窗口内一旦命中这些转折/连接词，就**否掉**前面否定式的语义（扫到此停 ⇒ 不算否定）：
+# 「不**但**上涨」的 «但»、「不就**是**上升」的 «是/就»。
+CLAUSE_STOP_CHARS: frozenset[str] = frozenset("但而且还又也却则是就")
 
 DIRECTION_INCREASE = "increase"
 DIRECTION_DECREASE = "decrease"
@@ -94,24 +102,61 @@ def deriveDirection(statement: str | None) -> str | None:
     return _resolveDirection(statement)[0]
 
 
-def _isNegatedDirectionWordAt(text: str, start: int) -> bool:
-    """I1：方向词起始下标 ``start`` 的**紧邻前缀**是否为否定式（闭集 + 位置）。
+def _isCjk(char: str) -> bool:
+    """是否 CJK 统一表意文字（``一``..``鿿`` = U+4E00..U+9FFF）。
 
-    判真当且仅当：
-
-    - ``text[start-1]`` 是否定助词（``不未没无非别莫``），**或**
-    - ``text[start-1]`` 是能愿/情态助词（``会应该能肯要再有``）**且** ``text[start-2]`` 是否定助词。
-
-    刻意**不**做全文扫描（否则「无锡」「未来」「无法」会被误伤）；也刻意不跨越副词
-    （「不应**大幅**下降」中的副词会挡住本门 —— 属已知盲区，见模块测试注释）。
+    窗口扫描把**非**此类字符当作小句边界：标点 / 空格 / ASCII 一律断句（故半角与全角标点
+    都算边界）。
     """
-    if start >= 1 and text[start - 1] in NEGATION_PARTICLES:
-        return True
-    return (
-        start >= 2
-        and text[start - 1] in NEGATION_AUXILIARIES
-        and text[start - 2] in NEGATION_PARTICLES
-    )
+    return "一" <= char <= "鿿"
+
+
+def _isNegatedDirectionWordAt(text: str, start: int) -> bool:
+    """I1：方向词起始下标 ``start`` 之前、**小句窗口内**是否有否定式（闭集 + 位置）。
+
+    从 ``start - 1`` **向后**逐字符扫描，下界 ``start - NEGATION_SCAN_WINDOW``（只看最多 5
+    个字符）。逐字符：
+
+    - 命中否定助词（``不未没无非别莫``）⇒ ``True``（判否定）；
+    - 命中转折/连接词（:data:`CLAUSE_STOP_CHARS`）⇒ ``False``（它否掉前面的否定式语义，
+      如「不**但**上涨」「不就**是**上升」）；
+    - 命中非汉字符（标点/空格/ASCII ⇒ 小句边界）⇒ ``False``；
+    - 否则继续向后。扫到上界仍未命中 ⇒ ``False``。
+
+    窗口取 ``W=5``：`不应大幅下降`（«不» 距 «下降» = 4）命中；`无法确认库存增长`
+    （«无» 距 «增长» = 6）落在窗外 ⇒ 不误伤。
+
+    **已知残余（不是完备判据，别再假装完备）**——裸列名 + 取值下拿不到语法树，以下四类
+    仍会判错，是否收窄交由控制器裁定（**别**在此自行扩张判据）：
+
+    1. **窗口外漏判（符号翻转，危害最大）**：``W=5`` 之外的修饰仍看不见 —— 如
+       「不应该出现大幅下降」（«不» 距 «下降» = 7）、「不应出现明显下降」（= 6）仍会被判成
+       方向词有效。
+    2. **距离按字符数、非词边界 ⇒ 误伤（吞掉）**：**非否定**词里的否定字，只要落在窗口内就
+       会被当成否定，方向被丢成 ``None``。现实输入里最常见的是这两个子类：
+       - 以否定字开头的常用词：``非常`` / ``特别`` / ``不仅`` / ``未来`` / ``无法`` / ``无锡``
+         / ``不锈钢``（**本域真实商品名**）—— 如「库存非常明显地增长」（«非» 距 «增长» = 5）、
+         「不锈钢库存增长」（«不» 距 «增长» = 5）、「不仅增长了销量」「未来将持续下降」。
+       - 单字否定字嵌在词中：如「特别」的 «别»。
+       这是相对上一轮「紧邻前缀」判据的**行为回归**：旧实现（前缀 ≤ 2 字）能躲开，新窗口反
+       而够得到。既有 FP 行「未来三月采购额上升」只是碰巧距离 7 > W 才没翻红，**不是**词边界
+       在挡 —— 故此矩阵**不能**证明该子类安全（见测试同名矩阵）。
+    3. **无标点的多小句**：如「无问题销量下降」「问题不大销售下降」没有小句边界，会把前一小
+       句的否定式误带到方向词上（``None``）。
+    4. **非汉字符截断扫描 ⇒ 同小句内漏判**：否定字与方向词之间夹了 ASCII / 数字 / 空格 / 标点
+       时扫描提前停（判成小句边界）—— 如「不应 下降」（«不» 距 «下降» = 3 ≤ W 却漏判）、
+       「不达5%下降」（«%» 截断）。
+    """
+    lowerBound = max(0, start - NEGATION_SCAN_WINDOW)
+    for index in range(start - 1, lowerBound - 1, -1):
+        char = text[index]
+        if char in NEGATION_PARTICLES:
+            return True
+        if char in CLAUSE_STOP_CHARS:
+            return False
+        if not _isCjk(char):
+            return False
+    return False
 
 
 def _scanDirectionWords(text: str, words: tuple[str, ...]) -> tuple[int, bool]:

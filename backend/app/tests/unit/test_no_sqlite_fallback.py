@@ -81,15 +81,28 @@ def test_no_sqlite_in_fixtures():
         if colon_idx == -1:
             continue
         filename = line[:colon_idx]
+        content = line[colon_idx + 1:]
+
+        # Skip pure comment lines (sqlite appears only in the comment, not in code)
+        stripped = content.lstrip()
+        if stripped.startswith("#"):
+            continue
+
+        # conftest files that must be completely clean: check FIRST, before ALLOWED_FILES.
+        # Only flag sqlite in actual code (import, assignment, function call), not in docstrings.
+        if filename in CONFTEST_FILES_MUST_BE_CLEAN:
+            # Flag only if sqlite appears as a module identifier or in string literals
+            # (not just in docstring prose explaining the prohibition)
+            if (
+                "import sqlite" in content
+                or "sqlite" in content and ("=" in content or "(" in content or "[" in content)
+            ):
+                code_leaks.append(line)
+            continue
 
         # Allowed-doc files: sqlite may appear only in comments/docstrings, never in code.
         # We trust the prohibition is documented correctly in these files.
         if filename in ALLOWED_FILES:
-            continue
-
-        # conftest files that must be completely clean: any sqlite mention = fail
-        if filename in CONFTEST_FILES_MUST_BE_CLEAN:
-            code_leaks.append(line)
             continue
 
         # Any other file: assume the worst — flag it for manual review

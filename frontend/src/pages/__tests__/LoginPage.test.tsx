@@ -168,7 +168,6 @@ describe("LoginPage error handling", () => {
     renderLoginPage();
     await fillAndSubmit("user", "pass");
 
-    console.log("RATE LIMIT calls:", mockMessageError.mock.calls);
     expect(mockMessageError).toHaveBeenCalledWith("尝试次数过多，请稍后再试");
   });
 });

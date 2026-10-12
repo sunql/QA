@@ -16,8 +16,11 @@
 **原始行**（D23）：`chartStep` 把驱动原始行挂在结果 dict 的
 `STEP_RESULT_RAW_ROWS_KEY` 载体上；循环取回后交本模块。原始行过 `research_json`（D14
 口径：`Decimal → str` 无损、`date/datetime → isoformat`）再落 `raw_result_ref` —— 驱动标量
-（`Decimal`/`date`）直接进 JSONB 会 `TypeError`。超过 `MAX_FINDING_ROWS` 时截断（与
-`findingData` 同上限，bound JSONB 体积）。
+（`Decimal`/`date`）直接进 JSONB 会 `TypeError`。`research_json` **校验并转换**：白名单外
+类型（`bytes`/`timedelta`/`time` ...）**显式抛 `TypeError`**（不是「避免 TypeError」）；
+本模块在其上做**逐行容错**（`_jsonSafeRows`：整体失败退化为逐行，坏行丢弃 + warning，
+绝不抛 —— 见 FIX ROUND 1）。超过 `MAX_FINDING_ROWS` 时截断（与 `findingData` 同上限，
+bound JSONB 体积）。
 """
 
 from __future__ import annotations
@@ -68,7 +71,14 @@ def stepTypeOf(step: dict[str, Any]) -> str:
 
 
 def _jsonSafeRows(raw_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """驱动原始行 → JSON 安全行（`research_json` 口径），并按 `MAX_FINDING_ROWS` 截断。"""
+    """驱动原始行 → JSON 安全行（`research_json` 口径），并按 `MAX_FINDING_ROWS` 截断。
+
+    **绝不抛错**（本仓口径：`failedStep` 不抛、`emitEvent` 吞错、`ChartService` 契约
+    「绝不抛错」—— 单步结果落库失败**不得杀整轮**）。`research_json` 对白名单外类型
+    （`bytes` / `timedelta` / `time` ...）**显式抛 `TypeError`**（见其模块 docstring）；
+    此处先整体转换，失败则**逐行**退避：能转的保留、转不了的丢弃并 warning。
+    **语义：一个坏标量只丢那一行，不丢整批、不杀 turn**；逐行仍全失败 ⇒ ``[]``。
+    """
     truncated = raw_rows[:MAX_FINDING_ROWS]
     if len(raw_rows) > MAX_FINDING_ROWS:
         logger.warning(
@@ -76,7 +86,33 @@ def _jsonSafeRows(raw_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             len(raw_rows),
             MAX_FINDING_ROWS,
         )
-    return json.loads(research_json(truncated))
+    try:
+        return json.loads(research_json(truncated))
+    except Exception as exc:  # noqa: BLE001 —— 见 docstring：绝不抛，逐行退避
+        logger.warning("步结果原始行整体序列化失败，退化为逐行保全: %s", exc)
+        return _jsonSafeRowsPerRow(truncated)
+
+
+def _jsonSafeRowsPerRow(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """逐行退避（`_jsonSafeRows` 兜底）：坏行丢弃 + 计数 warning，好行保留。"""
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    firstError: str | None = None
+    for row in rows:
+        try:
+            kept.append(json.loads(research_json([row]))[0])
+        except Exception as exc:  # noqa: BLE001 —— 单行坏标量只丢该行
+            dropped += 1
+            if firstError is None:
+                firstError = str(exc)
+    if dropped:
+        logger.warning(
+            "步结果原始行含不可序列化标量，丢弃 %s/%s 行（示例: %s）",
+            dropped,
+            len(rows),
+            firstError,
+        )
+    return kept
 
 
 def buildStepResult(
@@ -93,6 +129,9 @@ def buildStepResult(
 
     `status` 派生（D23）：`error` 真值 ⇒ ``failed``；否则 `raw_rows` 为空 ⇒ ``empty``；
     否则 ``success``。三者互斥且覆盖全部返回路径（失败 / 空数据 / 有数据）。
+
+    **口径以实现为准**：判据是 ``not raw_rows``（原始行列表为空），与 D23 措辞
+    「``rowCount == 0``」等价（`rowCount` 即 `len(raw_rows)`）。
     """
     status = STEP_STATUS_SUCCESS
     if error:

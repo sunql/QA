@@ -111,9 +111,13 @@ async def _seedDatasource(dbSession: AsyncSession) -> int:
 
 
 async def _runStageExecute(
-    dbSession: AsyncSession, *, steps: list[dict[str, Any]], outcomes: dict[str, Any]
-) -> tuple[uuid.UUID, dict[str, Any]]:
-    """跑一次 ``_stageExecute``，返回 (runStateId, state)。"""
+    dbSession: AsyncSession,
+    *,
+    steps: list[dict[str, Any]],
+    outcomes: dict[str, Any],
+    autoConfirm: bool = True,
+) -> tuple[uuid.UUID, dict[str, Any], Any]:
+    """跑一次 ``_stageExecute``，返回 (runStateId, state, pause)。"""
     svc = ResearchSessionService()
     dsId = await _seedDatasource(dbSession)
     sessionRow = await svc.createSession(
@@ -140,18 +144,18 @@ async def _runStageExecute(
         resolveClient=_fakeResolveClient,
         recordUsage=_FakeUsage().recordUsage,
     )
-    harness = _StageExecuteHarness(execDeps)
+    harness = _StageExecuteHarness(execDeps, autoConfirm=autoConfirm)
     state: dict[str, Any] = {
         "question": "收货量为什么下降",
         "plan": {"steps": steps},
         "stepResults": [],
         "runStateId": run_state.id,
     }
-    await harness._stageExecute(
+    pause = await harness._stageExecute(
         dbSession, sessionId=sessionRow.id, turnId=turn.id, emit=None, state=state
     )
     await dbSession.commit()
-    return run_state.id, state
+    return run_state.id, state, pause
 
 
 def _steps() -> list[dict[str, Any]]:
@@ -168,7 +172,7 @@ def _steps() -> list[dict[str, Any]]:
 
 
 async def test_stage_execute_persists_one_row_per_step(dbSession: AsyncSession) -> None:
-    runStateId, state = await _runStageExecute(
+    runStateId, state, _ = await _runStageExecute(
         dbSession,
         steps=_steps(),
         outcomes={
@@ -208,7 +212,7 @@ async def test_stage_execute_persists_one_row_per_step(dbSession: AsyncSession) 
 
 async def test_evidence_summary_numeric_is_string(dbSession: AsyncSession) -> None:
     """D24：``evidence_summary`` 直接取 ``result["evidence"]`` ⇒ ``baseline`` 是字符串。"""
-    runStateId, _ = await _runStageExecute(
+    runStateId, _, _ = await _runStageExecute(
         dbSession,
         steps=[_steps()[0]],
         outcomes={
@@ -232,7 +236,7 @@ async def test_evidence_summary_numeric_is_string(dbSession: AsyncSession) -> No
 
 async def test_load_step_results_is_scoped_and_ordered(dbSession: AsyncSession) -> None:
     """按 ``run_state_id`` 取回、按 ``step_index`` 升序；另一 run_state 无行。"""
-    runStateId, _ = await _runStageExecute(
+    runStateId, _, _ = await _runStageExecute(
         dbSession,
         steps=_steps(),
         outcomes={_SUCCESS_SQL: [{"amount": 1}], _EMPTY_SQL: [], _FAIL_SQL: ValueError("x")},
@@ -289,3 +293,83 @@ async def test_build_step_result_status_derivation() -> None:
     )
     assert failed.status == "failed"
     assert empty.status == "empty"
+
+
+# ---------------------------------------------------------------------------
+# FIX ROUND 1（Important）：白名单外驱动标量（bytes）不得杀整轮；逐行保全
+# ---------------------------------------------------------------------------
+
+
+async def test_build_step_result_tolerates_non_json_safe_rows() -> None:
+    """纯构造器：含 ``bytes`` 的行只丢那一行，好行保留，构造器不抛。"""
+    rows = [{"ok": 1}, {"bad": b"x"}, {"ok2": 2}]
+
+    result = buildStepResult(
+        run_state_id=uuid.uuid4(),
+        step_index=0,
+        step_type="sql",
+        sql_text="SELECT 1 FROM DUAL",
+        raw_rows=rows,
+        evidence_summary=None,
+        error=None,
+    )
+
+    assert result.status == "success"
+    kept = result.raw_result_ref["rows"]
+    assert {"ok": 1} in kept
+    assert {"ok2": 2} in kept
+    assert all("bad" not in row for row in kept), f"坏行未被丢弃: {kept}"
+    assert len(kept) == 2
+
+
+async def test_stage_execute_survives_non_json_safe_row(dbSession: AsyncSession) -> None:
+    """Important：含 ``bytes`` 值的行不杀整轮 —— 坏行丢、好行与后续步照常。"""
+    runStateId, _, _ = await _runStageExecute(
+        dbSession,
+        steps=_steps(),
+        outcomes={
+            _SUCCESS_SQL: [{"ok": 1}, {"bad": b"x"}, {"ok2": 2}],
+            _EMPTY_SQL: [],
+            _FAIL_SQL: ValueError("守卫拒绝"),
+        },
+    )
+
+    rows = await loadStepResults(dbSession, runStateId)
+    # 后续步照跑：3 步全部落库（不因坏行中断整轮）
+    assert len(rows) == 3, f"预期 3 行，实际 {len(rows)}"
+
+    raw = {row.step_index: row for row in rows}[0].raw_result_ref["rows"]
+    assert {"ok": 1} in raw
+    assert {"ok2": 2} in raw
+    assert all("bad" not in row for row in raw), f"坏行未被丢弃: {raw}"
+
+
+async def test_stage_execute_persists_failed_step_before_checkpoint_pause(
+    dbSession: AsyncSession,
+) -> None:
+    """Minor-1：autoConfirm=False 下失败步触发 checkpoint 早退，但该步行已先落库。"""
+    runStateId, _, pause = await _runStageExecute(
+        dbSession,
+        autoConfirm=False,
+        steps=[
+            {"index": 0, "description": "成功步", "sub_question": "q0", "sql": _SUCCESS_SQL},
+            {"index": 1, "description": "失败步", "sub_question": "q1", "sql": _FAIL_SQL},
+            {"index": 2, "description": "不该跑到", "sub_question": "q2", "sql": _EMPTY_SQL},
+        ],
+        outcomes={
+            _SUCCESS_SQL: [{"amount": 1}],
+            _EMPTY_SQL: [],
+            _FAIL_SQL: ValueError("守卫拒绝"),
+        },
+    )
+
+    # 早退确实发生（返回了 checkpoint 三元组，而非 None）
+    assert pause is not None, "失败步应触发 checkpoint 暂停（提前 return）"
+
+    rows = await loadStepResults(dbSession, runStateId)
+    byIndex = {row.step_index: row for row in rows}
+    # 失败步的行在早退之前已落库
+    assert 1 in byIndex, f"失败步未落库: {sorted(byIndex)}"
+    assert byIndex[1].status == "failed"
+    # 后续步从未执行
+    assert 2 not in byIndex, "暂停后不应继续跑后续步"

@@ -166,6 +166,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 判断收敛到 config.productionAuthMisconfiguration（纯函数，可单测）——原内联检查
     # 只看 AUTH_STUB_ENABLED，漏了 AUTH_MODE（默认 stub），即「生产漏设 AUTH_MODE」
     # 这一最常见形态当时不会告警。仍然只 logger.error，不阻塞启动。
+    # Task 1.2 audit-fx-1.2: 生产启动门禁 — fail-fast 关键安全配置缺失/错误。
+    from app.config import validateProduction
+
+    validateProduction()
     from app.config import productionAuthMisconfiguration
 
     _authReason = productionAuthMisconfiguration(settings)

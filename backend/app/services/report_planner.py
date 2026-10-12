@@ -68,6 +68,7 @@ from app.services.report_renderer import (
 )
 from app.services.report_semantic_context import assembleSemanticContext
 from app.services.research_agent_ports import DEFAULT_MODE, FINDING_ROWS_KEY, OPT_ARMS
+from app.services.research_hypothesis_test import HypothesisVerdict
 from app.services.research_session_service import ResearchSessionService
 
 logger = logging.getLogger(__name__)
@@ -138,11 +139,19 @@ class FindingView:
     error: str | None
     stats: dict[str, Any] | None = None  # NEW
     sourceTable: str | None = None  # NEW (R3)
+    verdict: str | None = None  # NEW (Task 5 D18b): supporting_data["verdict"]
 
     @property
     def verified(self) -> bool:
-        """验证是否成功（Task 5 verify 阶段把失败原因写进 supporting_data["error"]）。"""
-        return self.error is None
+        """**数据支持**该结论（Task 5 D18/D18b 新义）——不再等价于「SQL 跑通」。
+
+        - 有 ``verdict``（Task 5 之后落库的新数据）：``verdict == "supported"``；
+        - 无 ``verdict``（历史数据，``supporting_data`` 里没有该键）：**回落**旧义
+          「执行成功即已验证」（``error is None``），否则历史报告会集体翻脸。
+        """
+        if self.verdict is None:
+            return self.error is None
+        return self.verdict == HypothesisVerdict.SUPPORTED.value
 
 
 @dataclass(frozen=True)
@@ -178,6 +187,8 @@ def _findingView(row: ResearchFinding) -> FindingView:
         # rows/error/stats/rowCount），故缺失时从支撑 SQL 的 FROM 子句派生 ——
         # 这是唯一能同时修复历史会话与新增会话的读侧方案。
         sourceTable=data.get("sourceTable") or deriveSourceTable(row.supporting_sql),
+        # Task 5 D18b：数据支持度判定（历史数据无此键 ⇒ None ⇒ verified 回落旧义）。
+        verdict=data.get("verdict"),
     )
 
 
@@ -187,12 +198,31 @@ def _findingRef(view: FindingView) -> SourceRef:
     )
 
 
+def _verificationLabel(view: FindingView) -> str:
+    """验证状态中文标签（Task 5 D18b / P2）。
+
+    新数据按 ``verdict`` 三分支给措辞（执行失败 / 不支持 / 证据不足）；历史数据
+    （无 ``verdict`` 键）回落旧措辞。**任何分支都不得渲染出字面 ``None``** —— 旧措辞
+    ``f"未验证：{view.error}"`` 在「未支持且无 error」时会泄漏 ``None``。
+    """
+    if view.verified:
+        return "已验证"
+    if view.verdict == HypothesisVerdict.EXECUTION_FAILED.value:
+        return "执行失败"
+    if view.verdict == HypothesisVerdict.CONTRADICTED.value:
+        return "数据不支持"
+    if view.verdict == HypothesisVerdict.INCONCLUSIVE.value:
+        return "证据不足"
+    # 历史数据（无 verdict 键）：只有 error 一种原因；error 为空时也不渲染 "None"。
+    return f"未验证：{view.error}" if view.error else "未验证"
+
+
 async def _findingSummary(view: FindingView, *, db: Any = None) -> str:
     """结论摘要（喂 LLM 的唯一数据形态：不含任何原始行，但可引用 stats 数字）。
 
     R4：top1 的列名/值走翻译 —— LLM 看到「按 基地 分，C1 占 100%」才会用中文写叙述。
     """
-    state = "已验证" if view.verified else f"未验证：{view.error}"
+    state = _verificationLabel(view)
     base = f"{view.claimText}（置信度 {view.confidence}，{state}，{view.rowCount} 行）"
     if not view.stats or not view.stats.get("topContributors"):
         return base
@@ -688,7 +718,12 @@ class ReportPlanner:
         )
 
     async def _alternativeSection(self, ctx: _Context, *, client: Any = None, session: AsyncSession | None = None) -> ReportSection:
-        """备选假设：验证未通过的结论（supporting_data["error"] 非空）。"""
+        """备选假设：**未获数据支持**的结论（Task 5 D18b：不再等价于「执行失败」）。
+
+        ``pending`` 语义随 ``verified`` 新义从「执行失败」扩为「未获支持」——含
+        ``contradicted`` / ``inconclusive`` / ``execution_failed``，与该区块「验证未通过的
+        结论」的本意更一致。
+        """
         pending = [view for view in ctx.findings if not view.verified][:MAX_REPORT_FINDINGS]
         if not pending:
             return self._textSection("alternative", EMPTY_ALTERNATIVE_TEXT)

@@ -41,7 +41,15 @@ from app.services.research_agent_execution import (
     finalizeStepResults,
     runStep,
 )
+from app.services.research_evidence_summary import (
+    EvidenceSummary,
+    trySummarizeEvidence,
+)
 from app.services.research_hypothesis_adapter import rewriteHypothesisSqlWithHint
+from app.services.research_hypothesis_test import (
+    HypothesisVerdict,
+    evaluateHypothesis,
+)
 from app.services.research_agent_ports import (
     ACTION_MODIFY,
     ACTION_REJECT,
@@ -279,7 +287,12 @@ class ResearchAgentPhasesMixin:
         self, session: AsyncSession, *, sessionId: uuid.UUID, turnId: uuid.UUID,
         emit: Emit | None, state: dict[str, Any],
     ) -> Pause | None:
-        """[9] 逐条验证假设并落 finding（confidence = 候选分 × 0.9 / 0.3）。"""
+        """[9] 逐条验证假设并落 finding（confidence = 候选分 × 0.9 / 0.3）。
+
+        Task 5（D16/D18）：另按「数据支持度」判 ``verdict``（落 ``supporting_data["verdict"]``
+        与 ``state["findings"][i]``）；用户可见的 ``verified`` 改为 ``verdict == SUPPORTED``
+        （不是「SQL 跑通」）。置信度公式不变（D17，仍由执行是否成功驱动因子）。
+        """
         findings: list[dict[str, Any]] = []
         # Task 13e：验证 SQL 与执行步走同一条业务库路径（假设 SQL 也是业务 SQL）
         deps = await depsForSession(session, sessionId, self._exec)
@@ -311,20 +324,44 @@ class ResearchAgentPhasesMixin:
                         session, Hypothesis(**candidate),
                         adapter=adapter, dialectArgs=deps.dialectArgs,
                     )
-            verified = outcome.get("error") is None
+            # D17：置信度公式保留（候选分 × 0.9 / 0.3），因子仍由「验证是否跑通」驱动；
+            # verdict 只作为**新增字段**，不改公式（否则候选之间的排序信息全丢）。
+            executionSucceeded = outcome.get("error") is None
             confidence = round(
                 candidateConfidence(state, candidate)
-                * (VERIFY_OK_FACTOR if verified else VERIFY_FAIL_FACTOR),
+                * (VERIFY_OK_FACTOR if executionSucceeded else VERIFY_FAIL_FACTOR),
                 CONFIDENCE_ROUND_DIGITS,
             )
+            # D16/D18/D19：数据支持度判定 —— 与「执行是否成功」正交。证据摘要从验证行派生
+            # （出图路径包装：算不出来只降级为 empty，绝不把单步升级成整 turn 失败）。
+            rows = list(outcome.get("rows") or [])
+            summary = trySummarizeEvidence(rows) or EvidenceSummary(empty=True)
+            test = evaluateHypothesis(
+                candidate, summary, rows, execution_error=outcome.get("error")
+            )
+            verdict = test.verdict
+            # D18/P2：用户可见的 verified ⇔ **数据支持**（不再等价于「SQL 跑通」）。
+            verified = verdict is HypothesisVerdict.SUPPORTED
             enhancedClaim, statsObj = self._composeVerifyEnhancement(outcome, candidate)
+            # D19 接线：扩展 supportingData 字典本身（saveFinding 只认 `stats=` 这个具名
+            # kwarg，别的新键不认）。evidence 已是 JSON 原生 ⇒ _coerceJsonSafe 全程 no-op。
+            supportingData = {
+                **findingData(outcome),
+                "evidence": test.evidence_summary,
+                "verdict": verdict.value,
+            }
+            # 落库不变量（P2）：不得出现 verified=True 与 verdict != supported 的组合。
+            if verified and supportingData["verdict"] != HypothesisVerdict.SUPPORTED.value:
+                raise AssertionError(
+                    f"verified/verdict 自相矛盾: verified={verified} verdict={verdict.value}"
+                )
             row = await self._sessions.saveFinding(
                 session,
                 sessionId=sessionId,
                 turnId=turnId,
                 claimText=candidate["statement"],
                 supportingSql=candidate.get("verificationSql"),
-                supportingData=findingData(outcome),
+                supportingData=supportingData,
                 confidence=confidence,
                 enhancedClaim=enhancedClaim,
                 stats=statsObj.asdict() if statsObj else None,
@@ -335,6 +372,10 @@ class ResearchAgentPhasesMixin:
                     "claim": candidate["statement"],
                     "confidence": confidence,
                     "verified": verified,
+                    # D16 补：新增键安全（前端把载荷当 Record<string, unknown>）；不改/删旧键。
+                    "verdict": verdict.value,
+                    "executionSucceeded": executionSucceeded,
+                    "limitations": test.limitations,
                 }
             )
             await emitEvent(emit, EVENT_FINDING, findings[-1])

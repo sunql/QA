@@ -127,11 +127,13 @@ async def getCurrentUserInfo(
     """
     display_name = user.userId
     email: str | None = None
+    restricted_access = False
     if user.dbUserId is not None:
         row = await session.get(User, user.dbUserId)
         if row is not None:
             display_name = row.display_name
             email = row.email
+            restricted_access = row.restricted_access
     return UserMeRead(
         user_id=user.userId,
         display_name=display_name,
@@ -139,6 +141,7 @@ async def getCurrentUserInfo(
         role_codes=list(user.roles or ()),
         department_codes=list(user.departments or ()),
         db_user_id=user.dbUserId,
+        restricted_access=restricted_access,
     )
 
 
@@ -162,6 +165,26 @@ async def getUser(
 ) -> UserRead:
     """用户详情（含角色/组织）。"""
     row = await _idsvc().get_user(session, user_id)
+    svc = _idsvc()
+    roles = await svc.load_user_roles(session, row.id)
+    orgs = await svc.load_user_orgs(session, row.id)
+    return _to_user_read(
+        row,
+        ([rid for rid, _, _ in roles], [code for _, code, _ in roles]),
+        ([oid for oid, _, _ in orgs], [code for _, code, _ in orgs]),
+    )
+
+
+@router.patch("/{user_id}", response_model=UserRead)
+async def patchUser(
+    user_id: int,
+    payload: UserUpdate,
+    _admin: CurrentUser = Depends(getAdminOnlyActor),
+    session: AsyncSession = Depends(getDb),
+) -> UserRead:
+    """编辑用户（displayName/email/enabled/restrictedAccess）。"""
+    row = await _idsvc().update_user(session, user_id, payload, _admin)
+    await session.commit()
     svc = _idsvc()
     roles = await svc.load_user_roles(session, row.id)
     orgs = await svc.load_user_orgs(session, row.id)

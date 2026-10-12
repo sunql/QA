@@ -73,6 +73,10 @@ class User(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     last_login_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    # Task 4.2 (audit-fx-4.2)：L2 文档访问权限标记。admin PATCH /api/v1/users/{id} 管控。
+    restricted_access: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa_text("false")
+    )
 
     __table_args__ = (
         UniqueConstraint("username", name="uq_users_username"),

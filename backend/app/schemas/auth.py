@@ -30,6 +30,8 @@ class UserSummaryRead(CamelModel):
     email: str | None
     roles: list[str]
     organizations: list[str]
+    # Task 4.2 (audit-fx-4.2)：L2 文档访问权限标记
+    restrictedAccess: bool = False
 
 
 class AuthLoginResponse(CamelModel):

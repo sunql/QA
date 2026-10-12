@@ -42,6 +42,8 @@ class UserUpdate(CamelModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=128)
     email: str | None = Field(default=None, max_length=255)
     enabled: bool | None = None
+    # Task 4.2 (audit-fx-4.2)：L2 文档访问权限标记
+    restricted_access: bool | None = None
 
 
 class UserMeRead(CamelModel):
@@ -57,6 +59,8 @@ class UserMeRead(CamelModel):
     role_codes: list[str] = Field(default_factory=list)
     department_codes: list[str] = Field(default_factory=list)
     db_user_id: int | None = None
+    # Task 4.2 (audit-fx-4.2)：L2 文档访问权限标记
+    restricted_access: bool = False
 
 
 class UserRead(CamelModel):

@@ -6,7 +6,8 @@
 1. **互斥**：会话已有进行中的运行（`research_session.active_run_id` 非空）时，
    第二次提交被拒 409，而不是并发起跑两条状态机；
 2. **幂等键**：同一 `idempotencyKey` 的重试返回**同一** turnId（不新建轮次）；
-3. **终态释放**：会话落终态（done）后释放执行权 —— 新轮次可再次提交。
+3. **终态释放**：会话落终态（done）后释放执行权 —— 新轮次可再次提交；
+4. **不可续跑即释放**：检查点过期 ⇒ 会话落 aborted 并释放（否则永久 409 锁死）。
 
 外加 checkpoint 决策的幂等契约（同一 action + choice 的重复提交返回同一响应，
 不同决策仍 409）。
@@ -17,18 +18,19 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import research as researchModule
 from app.domain.enums import DataSourceType
 from app.domain.models import DataSource, User
 from app.domain.multi_step_plan import MultiStepPlan
-from app.domain.research_models import ResearchSession
+from app.domain.research_models import ResearchCheckpoint, ResearchSession
 from app.infrastructure.security.crypto import encryptApiKey
 from app.services.chart_service import ChartService
 from app.services.enterprise_semantic_layer import (
@@ -468,7 +470,12 @@ async def test_release_keeps_claim_until_terminal(dbSession: AsyncSession) -> No
 async def test_checkpoint_answer_identical_replay_is_idempotent(
     client: AsyncClient, authHeaders: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """同一 (action, choice) 的重复提交 ⇒ 幂等 200（同一响应），不再是 409。"""
+    """同一 (action, choice) 的重复提交 ⇒ 幂等 200（决策不被重新应用），不再是 409。
+
+    幂等的判据是**决策没被再应用一次**（200 + 同一 `nextPhase`），不是响应体逐字相同：
+    `sessionStatus` 是**当前**会话状态的快照 —— 首次提交时后台刚要起跑故报 running，
+    回放时机器已在下一点暂停 ⇒ 如实报 awaiting_user（硬编码 running 才是说谎）。
+    """
     _patchService(monkeypatch)
     session = await _createSession(client, authHeaders, "Q1")
     sid = session["id"]
@@ -482,7 +489,59 @@ async def test_checkpoint_answer_identical_replay_is_idempotent(
 
     replay = await client.post(f"{_BASE}/checkpoints/{cp['id']}/answer", json=body, headers=authHeaders)
     assert replay.status_code == 200, replay.text
-    assert replay.json() == first.json()
+    assert replay.json()["nextPhase"] == first.json()["nextPhase"]
+
+    # 回放报的是**当前**会话状态（非首次提交那一刻的快照）
+    detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    assert replay.json()["sessionStatus"] == detail.json()["session"]["status"]
+    assert replay.json()["sessionStatus"] == "awaiting_user", detail.text
+
+
+async def test_expired_checkpoint_aborts_session_and_releases_claim(
+    client: AsyncClient,
+    authHeaders: dict[str, str],
+    dbSession: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """checkpoint 过期 ⇒ 会话落 aborted 且释放执行权（review 高危项回归守卫）。
+
+    为什么必须：过期的检查点再也无法 resolve，会话也就永远跑不到终态 ⇒
+    `releaseActiveRun` 的终态闸门永不打开 ⇒ `active_run_id` 永久占用 ⇒ 用户此后
+    每次提交都 409，而唯一出路是删掉整个会话（连带丢报告）。锁死是本次变更最坏的
+    后果，故这条路径必须有守卫。
+    """
+    _patchService(monkeypatch)
+    session = await _createSession(client, authHeaders, "Q1")
+    sid = session["id"]
+    r1 = await _postTurn(client, authHeaders, sid, {"question": "Q1"})
+    assert r1.status_code == 202, r1.text
+    cp = await _waitForCheckpoint(client, authHeaders, sid, phase="intent")
+    assert await _activeRunId(dbSession, sid) is not None, "跑到暂停应留下执行权"
+
+    # 把 TTL 拨到过去（等价于「用户 24h 后才点提交」），无需等待真实过期
+    await dbSession.execute(
+        update(ResearchCheckpoint)
+        .where(ResearchCheckpoint.id == uuid.UUID(cp["id"]))
+        .values(expires_at=datetime.now(UTC) - timedelta(hours=1))
+        .execution_options(synchronize_session=False)
+    )
+    await dbSession.commit()
+
+    # 端点同步返 200（过期是后台 resume 时才发现的），冲突经 SSE 传回
+    stale = await client.post(
+        f"{_BASE}/checkpoints/{cp['id']}/answer",
+        json={"action": "confirm", "choice": {}},
+        headers=authHeaders,
+    )
+    assert stale.status_code == 200, stale.text
+
+    detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    assert detail.json()["session"]["status"] == "aborted", detail.text
+    assert await _activeRunId(dbSession, sid) is None, "过期分支必须释放执行权"
+
+    # 关键：不再永久 409 —— 新轮次可提交（否则锁死，用户只能删会话）
+    r2 = await _postTurn(client, authHeaders, sid, {"question": "Q2"})
+    assert r2.status_code == 202, r2.text
 
 
 async def test_checkpoint_answer_conflicting_decision_still_409(

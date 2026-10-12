@@ -442,15 +442,16 @@ async def answerCheckpoint(
     checkpoint = await db.get(ResearchCheckpoint, checkpointId)
     if checkpoint is None:
         raise NotFoundError("研究检查点不存在")
-    await _ownedSession(db, checkpoint.session_id, user)  # 越权同样 404，不泄露存在性
+    sessionRow = await _ownedSession(db, checkpoint.session_id, user)  # 越权同样 404，不泄露存在性
     if checkpoint.status != "pending":
         if not _isIdempotentReplay(checkpoint, payload):
             raise ConflictError(f"检查点已决策（{checkpoint.status}），不可重复提交")
         # 幂等回放：同一 (action, choice) 的重复提交（双击 / 超时重试）视为已被接受，
         # 返回与原提交**相同**的 nextPhase，而不是 409 把用户当成冲突。
+        # 会话状态取**库中当前值**：首次决策后状态机可能已跑到终态（回放报 running 会说谎）。
         replayPhase = decideResume(checkpoint, payload.action, dict(payload.choice or {})).phase
         logger.info("检查点决策幂等回放: checkpoint=%s action=%s", checkpointId, payload.action)
-        return CheckpointAnswerRead(sessionStatus="running", nextPhase=replayPhase)
+        return CheckpointAnswerRead(sessionStatus=sessionRow.status, nextPhase=replayPhase)
     nextPhaseValue = decideResume(checkpoint, payload.action, dict(payload.choice or {})).phase
     background.add_task(
         _resumeTurnInBackground,
@@ -625,6 +626,10 @@ async def _resumeTurnInBackground(
     并发冲突（CheckpointConflictError）：抛出 409 事件，不落 failed 状态——第二次
     提交的用户看到的是 SSE 流里的 error.event（前端据此弹 409 提示），而不是静默
     500 或会话被标记为 failed。
+
+    **过期**（CheckpointStaleError）另当别论：该检查点再也无法 resolve、会话也永远跑不到
+    终态 ⇒ 必须显式落终态并释放执行权（`_abortExpiredSession`），否则 `active_run_id`
+    永久占用、用户此后每次提交都 409（且没有 abort 端点，唯一出路是删掉整个会话）。
     """
     service = buildResearchAgentService()
     async with getSessionFactory()() as session:
@@ -637,8 +642,18 @@ async def _resumeTurnInBackground(
                 emit=partial(_bus.publish, sessionId),
             )
             await session.commit()
-        except (CheckpointConflictError, CheckpointStaleError) as exc:
-            # 409：并发提交冲突（另一请求已先一步决/过期）；经 SSE 事件传回客户端。
+        except CheckpointStaleError as exc:
+            logger.warning("checkpoint 已过期，会话落终态: checkpoint=%s", checkpointId)
+            await _bus.publish(
+                sessionId,
+                EVENT_ERROR,
+                errorPayload(ERROR_CHECKPOINT_CONFLICT, str(exc)),
+            )
+            await session.rollback()
+            await _abortExpiredSession(session, sessionId)
+        except CheckpointConflictError as exc:
+            # 并发提交：另一请求已抢先决策 ⇒ 那条 resume 正在正常推进，会在终态自行释放，
+            # 故这里**不动**执行权（释放了反而放并发进来）。
             logger.warning("checkpoint 决策冲突，转 409: checkpoint=%s action=%s", checkpointId, action)
             await _bus.publish(
                 sessionId,
@@ -649,6 +664,19 @@ async def _resumeTurnInBackground(
             logger.exception("研究 turn 恢复失败: checkpoint=%s action=%s", checkpointId, action)
             await session.rollback()
             await _markTerminalFailure(service, session, sessionId, str(exc))
+
+
+async def _abortExpiredSession(session: AsyncSession, sessionId: str) -> None:
+    """检查点过期 ⇒ 会话落 `aborted` 终态**并**释放执行权（否则永久 409，见调用点）。
+
+    调用方已 `rollback`，故本函数在**新事务**里落库并自行 commit；失败只留痕 —— 该路径
+    是善后，不该反过来掩盖已经通过 SSE 发给用户的冲突原因。
+    """
+    try:
+        await _sessionService.abortSession(session, uuid.UUID(sessionId))
+        await session.commit()
+    except Exception:  # noqa: BLE001 —— 善后失败只留痕，不掩盖原始冲突
+        logger.exception("过期检查点落 aborted 失败: session=%s", sessionId)
 
 
 async def _markTerminalFailure(

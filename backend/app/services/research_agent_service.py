@@ -78,7 +78,6 @@ from app.services.research_agent_ports import (
     ROLE_USER,
     STATUS_AWAITING,
     STATUS_DONE,
-    STATUS_FAILED,
     STATUS_RUNNING,
     Emit,
     LlmUsageRecorder,
@@ -265,6 +264,13 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         if not claimed:
             raise RunClaimConflictError(
                 f"会话已有进行中的研究轮次: session={sessionId} run={existing}"
+            )
+        if existing is not None:
+            # 幂等键命中**另一条**运行（同键双提交的竞态窗口）：本次不跑，让已占坑那条推进。
+            # 正常重试走不到这里 —— API 层先回放首次 turnId、不再排后台任务；只有两条后台
+            # 任务同时起跑才会撞上。放行会让同一会话并行跑两条状态机（互斥形同失效）。
+            raise RunClaimConflictError(
+                f"幂等键已被另一运行占用: session={sessionId} key={idempotencyKey} run={existing}"
             )
         await self._sessions.updateSessionStatus(session, sessionId, STATUS_RUNNING)
         state: dict[str, Any] = {
@@ -681,10 +687,12 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         409（新轮次再也提交不进来）。释放**必须**在这里、而不只在 `_guardedRun` 的 finally：
         后台 wrapper 捕获异常后会 `rollback`，把 finally 里那次释放一并撤掉，然后重放
         本方法 —— 只有在同一次重放里释放，终态与释放才原子地一起落下。
+
+        落终态与释放走 `failSession` 的**单条 UPDATE**（不是「先 updateSessionStatus 再
+        releaseActiveRun」）：两步之间任一步失败都留下「非终态 + 占用中」的锁死态。
         """
         try:
-            await self._sessions.updateSessionStatus(session, sessionId, STATUS_FAILED)
-            await self._sessions.releaseActiveRun(session, sessionId, None)
+            await self._sessions.failSession(session, sessionId)
         except Exception:  # noqa: BLE001 —— 失败态落库失败不能盖住原始异常
             logger.error("标记会话失败态失败: session=%s", sessionId, exc_info=True)
 

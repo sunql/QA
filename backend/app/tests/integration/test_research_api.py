@@ -442,14 +442,18 @@ async def test_checkpoint_answer_replay_is_idempotent_but_conflicting_decision_4
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"sessionStatus": "running", "nextPhase": "plan"}
 
-    # 同一 (action, choice) 重放（双击 / 超时重试）：幂等 —— 200 且响应体与首次**逐字相同**
+    # 同一 (action, choice) 重放（双击 / 超时重试）：幂等 —— 200 且**决策不被重新应用**
+    # （同一 nextPhase）。`sessionStatus` 不逐字相同是**刻意**的：它是当前会话状态快照，
+    # 回放时机器已在下一点暂停故如实报 awaiting_user。
     again = await client.post(
         f"{_BASE}/checkpoints/{cp.id}/answer",
         json={"action": "confirm"},
         headers=authHeaders,
     )
     assert again.status_code == 200, again.text
-    assert again.json() == resp.json()
+    assert again.json()["nextPhase"] == resp.json()["nextPhase"]
+    detail = await client.get(f"{_BASE}/sessions/{row.id}", headers=authHeaders)
+    assert again.json()["sessionStatus"] == detail.json()["session"]["status"]
 
     # 换了决策（confirm → reject）才算真冲突：409 且文案指明「已决策」
     conflict = await client.post(

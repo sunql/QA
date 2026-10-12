@@ -399,7 +399,7 @@ class ResearchSessionService:
             .execution_options(synchronize_session=False)
         )
         if result.rowcount == 1:
-            await self._syncActiveRun(session, sessionId, runId)
+            await self._syncSessionRow(session, sessionId, activeRunId=runId)
             return True, None
         # 未抢到：报出**库中真实**占用者（identity map 可能陈旧，故走列查询而非 ORM 对象）
         existing = await session.scalar(
@@ -409,7 +409,7 @@ class ResearchSessionService:
             logger.warning("认领失败但会话不存在: session=%s run=%s", sessionId, runId)
             return False, None
         if existing == runId:
-            await self._syncActiveRun(session, sessionId, runId)
+            await self._syncSessionRow(session, sessionId, activeRunId=runId)
             return True, None
         logger.info("会话已被其他运行占用: session=%s run=%s existing=%s", sessionId, runId, existing)
         return False, existing
@@ -443,7 +443,7 @@ class ResearchSessionService:
             .execution_options(synchronize_session=False)
         )
         if result.rowcount == 1:
-            await self._syncActiveRun(session, sessionId, None)
+            await self._syncSessionRow(session, sessionId, activeRunId=None)
             logger.info("释放 active_run: session=%s run=%s", sessionId, runId)
             return
         # rowcount=0：非终态（暂停中，执行权必须留着）或会话不存在 —— 都只留痕，不报错
@@ -457,18 +457,60 @@ class ResearchSessionService:
                 "非终态（%s）保留执行权: session=%s run=%s", status, sessionId, runId
             )
 
-    async def _syncActiveRun(
-        self, session: AsyncSession, sessionId: uuid.UUID, runId: uuid.UUID | None
-    ) -> None:
-        """把**库中真实**的 `active_run_id` 同步回 identity map 里的会话行。
+    async def failSession(self, session: AsyncSession, sessionId: uuid.UUID) -> None:
+        """会话落 `failed` 终态**并**释放执行权（单条 UPDATE，见 `_setTerminalAndRelease`）。"""
+        await self._setTerminalAndRelease(session, sessionId, "failed")
 
-        认领 / 释放都走条件 UPDATE（`synchronize_session=False`）：同一次会话里
+    async def abortSession(self, session: AsyncSession, sessionId: uuid.UUID) -> None:
+        """会话落 `aborted` 终态**并**释放执行权。
+
+        专供「检查点过期 ⇒ 本会话永远无法续跑」这类路径：会话再也不会跑到终态，
+        `releaseActiveRun` 的终态闸门永不打开 ⇒ 不显式落终态就永久 409（用户唯一出路是
+        删掉整个会话，连带丢报告）。
+        """
+        await self._setTerminalAndRelease(session, sessionId, "aborted")
+
+    async def _setTerminalAndRelease(
+        self, session: AsyncSession, sessionId: uuid.UUID, status: str
+    ) -> None:
+        """把会话推进到终态 `status` **并且**就地清空 `active_run_id`（一条语句）。
+
+        为什么必须一条语句：分开写会留下中间态 —— 状态写成功而释放失败 ⇒ 锁死；
+        状态写失败（释放被终态闸门挡住）⇒ 同样锁死。终态与释放同生共死，不留窗口。
+        **不 commit** —— 事务归调用方（与其余方法一致）。
+        """
+        if status not in TERMINAL_SESSION_STATUSES:
+            logger.warning("非法终态: id=%s status=%s", sessionId, status)
+            raise ValueError(f"非法终态 {status}，合法值: {sorted(TERMINAL_SESSION_STATUSES)}")
+        await session.execute(
+            update(ResearchSession)
+            .where(ResearchSession.id == sessionId)
+            .values(status=status, active_run_id=None)
+            .execution_options(synchronize_session=False)
+        )
+        await self._syncSessionRow(session, sessionId, activeRunId=None, status=status)
+        logger.info("会话落终态并释放执行权: id=%s status=%s", sessionId, status)
+
+    async def _syncSessionRow(
+        self,
+        session: AsyncSession,
+        sessionId: uuid.UUID,
+        *,
+        activeRunId: uuid.UUID | None,
+        status: str | None = None,
+    ) -> None:
+        """把**库中真实**的会话行值同步回 identity map 里的对象。
+
+        认领 / 释放 / 落终态都走 UPDATE（`synchronize_session=False`）：同一次会话里
         先加载过该行的调用方（`runTurn` 的 `_loadSession`）对象属性会停在旧值。
         行已在 map 中时 `session.get` 不落 SQL，故本同步不增加往返。
         """
         row = await session.get(ResearchSession, sessionId)
-        if row is not None:
-            row.active_run_id = runId
+        if row is None:
+            return
+        row.active_run_id = activeRunId
+        if status is not None:
+            row.status = status
 
     async def createRunState(
         self, session: AsyncSession, run_state: ResearchRunState

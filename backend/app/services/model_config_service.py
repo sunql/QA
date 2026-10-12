@@ -15,6 +15,7 @@ from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import LlmConfig
 from app.domain.schemas import LlmConfigCreate, LlmConfigUpdate
 from app.infrastructure.security.crypto import encryptApiKey
+from app.infrastructure.url_validator import validateEndpointUrl
 from app.services.messages_zh import (
     MSG_MODEL_CONFIG_NAME_EXISTS,
     MSG_MODEL_CONFIG_NOT_FOUND,
@@ -69,9 +70,18 @@ class ModelConfigService:
     async def update(
         self, session: AsyncSession, configId: int, dto: LlmConfigUpdate
     ) -> LlmConfig:
-        """部分更新。api_key 若提供则重新加密。"""
+        """部分更新。api_key 若提供则重新加密。变更 endpoint 必须同时提供新 key。"""
         config = await self.get(session, configId)
         updates = dto.model_dump(exclude_unset=True, exclude_none=True)
+
+        # audit-fx-1.1：endpoint 变更必须同时提供新 key，防止旧 key 泄露到新端点
+        if "api_endpoint" in updates and updates["api_endpoint"] != config.api_endpoint:
+            if not updates.get("api_key"):
+                raise ValidationError("apiEndpoint 变更时必须同时提供新的 apiKey")
+            validateEndpointUrl(updates["api_endpoint"])
+            plainKey = updates.pop("api_key")
+            config.api_key_encrypted = encryptApiKey(plainKey) if plainKey else None
+
         if "api_key" in updates:
             plainKey = updates.pop("api_key")
             config.api_key_encrypted = encryptApiKey(plainKey) if plainKey else None

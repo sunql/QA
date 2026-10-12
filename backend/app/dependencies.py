@@ -317,3 +317,18 @@ async def getAdminOnlyActor(
             detail="仅 admin 可访问审计 API",
         )
     return user
+
+
+async def requireAdmin(
+    user: CurrentUser = Depends(getCurrentUser),
+) -> CurrentUser:
+    """写模型配置 API 的 admin 守卫（audit-fx-1.1）。
+
+    非 admin 直接 403，与 getAdminOnlyActor 模式完全一致。
+    """
+    if "admin" not in (user.roles or []):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="需要 admin 角色",
+        )
+    return user

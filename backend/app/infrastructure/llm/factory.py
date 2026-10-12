@@ -26,6 +26,7 @@ from app.infrastructure.llm.concurrency import (  # noqa: F401  re-export
 )
 from app.infrastructure.llm.ollama_client import OllamaClient
 from app.infrastructure.llm.openai_client import OpenAiClient
+from app.infrastructure.url_validator import validateEndpointUrl
 from app.infrastructure.security.crypto import decryptApiKey
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,9 @@ def createClient(config: Any, *, settings: Settings | None = None, apiKey: str |
             )
             return None
         client = OpenAiClient(config, apiKey=key, provider=provider)
+        # audit-fx-1.1：生产环境阻断非 https / 私有 IP endpoint
+        if getattr(config, "api_endpoint", None):
+            validateEndpointUrl(config.api_endpoint)
     _clients[configId] = client
     return client
 

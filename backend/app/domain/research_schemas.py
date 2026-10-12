@@ -91,16 +91,16 @@ class CheckpointAnswerRequest(CamelModel):
     ``choice`` 是自由 JSONB（不同相位载荷不同：三臂选择 / 计划反馈 /
     假设下标 / 改写问题），故不做结构约束，只要求是对象。
 
-    重复提交的判定**不用** ``idempotencyKey``：端点按已落库的
-    ``(status→action, user_choice)`` 与请求体比对（同 action + 同 choice ⇒ 幂等回放，
-    不同决策仍 409）。``idempotencyKey`` 仅作客户端请求追踪用（可选）。
+    **无幂等键字段**：重复提交的判定按已落库的 ``(status→action, user_choice)``
+    与请求体比对（同 action + 同 choice ⇒ 幂等回放，不同决策仍 409）；重复决策本身
+    已被 ``CheckpointConflictError`` 挡住，客户端键在这里没有可承载的语义
+    （多一个「看着像去重、其实没人读」的字段比没有更糟）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     action: CheckpointAction
     choice: dict[str, Any] = Field(default_factory=dict)
-    idempotencyKey: str | None = Field(default=None, max_length=200)
 
 
 # --- 响应体 -----------------------------------------------------------------
@@ -170,6 +170,17 @@ class CheckpointAnswerRead(CamelModel):
 
     sessionStatus: SessionStatus
     nextPhase: str
+
+
+class ResearchSessionAbortRead(CamelModel):
+    """POST /research/sessions/{sessionId}/abort 响应：取消后的**真实**会话状态。
+
+    ``cancelled=False`` 表示本次是无副作用的幂等调用（会话已终态，如 `done`）——
+    取消是「别等了」而不是「删结果」，已完成的会话状态保持不变。
+    """
+
+    sessionStatus: SessionStatus
+    cancelled: bool
 
 
 class ResearchReportRead(CamelModel):

@@ -257,6 +257,46 @@ async def _waitForCheckpoint(
     raise RuntimeError(f"未在 {timeout}s 内等到 {phase} checkpoint")
 
 
+async def _answerCheckpointsUntilTerminal(
+    client: AsyncClient,
+    headers: dict[str, str],
+    sessionId: str,
+    *,
+    firstCheckpointId: str | None = None,
+    action: str = "confirm",
+    maxCheckpoints: int = 6,
+) -> str:
+    """反复「答掉当前 pending checkpoint → 等下一段」，直到会话落**终态**，返回其状态。
+
+    多步状态机一条主线可以**连续暂停多次**（intent → planning → hypothesis，见
+    `research_agent_service` docstring 的「三个固定 checkpoint」）：只答一个点不足以跑到
+    `done`。`maxCheckpoints` 是死循环护栏（超出即显式报错，不静默返回中间态）。
+    `firstCheckpointId` 供调用方复用已等到的那一个，避免重复轮询。
+    """
+    pendingId = firstCheckpointId
+    for _ in range(maxCheckpoints):
+        resp = await client.get(f"{_BASE}/sessions/{sessionId}", headers=headers)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        status = body["session"]["status"]
+        if status in ("done", "failed", "aborted"):
+            return status
+        pending = body.get("pendingCheckpoint")
+        if pendingId is None and pending is not None:
+            pendingId = pending["id"]
+        if pendingId is None:
+            await asyncio.sleep(0.05)
+            continue
+        answered = await client.post(
+            f"{_BASE}/checkpoints/{pendingId}/answer",
+            json={"action": action, "choice": {}},
+            headers=headers,
+        )
+        assert answered.status_code == 200, answered.text
+        pendingId = None
+    raise RuntimeError(f"会话未在 {maxCheckpoints} 个 checkpoint 内到达终态")
+
+
 # ---------------------------------------------------------------------------
 # 1. 互斥：进行中的轮次存在 ⇒ 第二次提交 409
 # ---------------------------------------------------------------------------
@@ -265,7 +305,13 @@ async def _waitForCheckpoint(
 async def test_second_turn_rejected_while_first_awaiting_user(
     client: AsyncClient, authHeaders: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """首轮暂停在意图点（awaiting_user）时，第二个 submit 必须 409 —— 不允许并发起跑。"""
+    """首轮暂停在意图点（awaiting_user）时，第二个 submit 必须 409 —— 不允许并发起跑。
+
+    **文案必须说真话**：此时并没有轮次在跑（机器停着等用户决策），故不得回
+    「存在进行中的研究轮次」—— 那会误导用户以为在等机器。要指出真实原因（待决策
+    检查点）与出路（可取消本轮）。仅改文案、不加新 error code：新增 code 必须同批扩
+    前端 union/i18n/store（越界）。
+    """
     _patchService(monkeypatch)
     session = await _createSession(client, authHeaders, "Q1")
     sid = session["id"]
@@ -273,6 +319,35 @@ async def test_second_turn_rejected_while_first_awaiting_user(
     r1 = await _postTurn(client, authHeaders, sid, {"question": "Q1"})
     assert r1.status_code == 202, r1.text
     await _waitForCheckpoint(client, authHeaders, sid, phase="intent")
+
+    r2 = await _postTurn(client, authHeaders, sid, {"question": "Q2"})
+    assert r2.status_code == 409, r2.text
+    msg = r2.json()["error"]
+    assert "检查点" in msg, msg
+    assert "等待" in msg, msg
+    assert "取消" in msg, msg
+    assert "进行中" not in msg, f"暂停态不得说「有轮次在跑」: {msg}"
+
+
+async def test_second_turn_conflict_message_names_running_round(
+    client: AsyncClient,
+    authHeaders: dict[str, str],
+    dbSession: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真·在跑（running 且已有占用）时仍回「存在进行中的研究轮次」（文案分支的另一半）。
+
+    走服务层直接占坑：ASGITransport 下后台任务会先跑完，HTTP 层造不出「正在跑」的中间态。
+    """
+    _patchService(monkeypatch)
+    session = await _createSession(client, authHeaders, "Q1")
+    sid = session["id"]
+    svc = ResearchSessionService()
+    run_state = await _seedRunRow(dbSession, svc, uuid.UUID(sid))
+    ok, _ = await svc.claimActiveRun(dbSession, uuid.UUID(sid), run_state.id, None)
+    assert ok is True
+    await svc.updateSessionStatus(dbSession, uuid.UUID(sid), "running")
+    await dbSession.commit()
 
     r2 = await _postTurn(client, authHeaders, sid, {"question": "Q2"})
     assert r2.status_code == 409, r2.text
@@ -371,6 +446,106 @@ async def test_active_run_released_when_session_failed(
 
     r2 = await _postTurn(client, authHeaders, sid, {"question": "Q2"})
     assert r2.status_code == 202, r2.text
+
+
+async def test_active_run_released_when_resume_reaches_done(
+    client: AsyncClient,
+    authHeaders: dict[str, str],
+    dbSession: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**resume 段**跑到终态同样释放执行权（与首轮共用 `_guardedRun` 的 finally）。
+
+    只覆盖「首轮 → done」是不够的：用户答完检查点后的第二段才是常态路径，且它与首轮
+    走的是同一条收尾释放；漏了它，暂停-答完-再暂停这条主线会留下永久占用。
+    """
+    _patchService(monkeypatch, runToDone=True)  # 首轮仍暂停在意图点
+    session = await _createSession(client, authHeaders, "Q1")
+    sid = session["id"]
+    r1 = await _postTurn(client, authHeaders, sid, {"question": "Q1"})
+    assert r1.status_code == 202, r1.text
+    cp = await _waitForCheckpoint(client, authHeaders, sid, phase="intent")
+    assert await _activeRunId(dbSession, sid) is not None, "暂停期间占用执行权"
+
+    finalStatus = await _answerCheckpointsUntilTerminal(
+        client, authHeaders, sid, firstCheckpointId=cp["id"]
+    )
+
+    assert finalStatus == "done", finalStatus
+    assert await _activeRunId(dbSession, sid) is None, "resume 段终态必须释放"
+
+    r2 = await _postTurn(client, authHeaders, sid, {"question": "Q2"})
+    assert r2.status_code == 202, r2.text
+
+
+# ---------------------------------------------------------------------------
+# 3.5 主动取消（POST /sessions/{id}/abort）
+# ---------------------------------------------------------------------------
+
+
+async def test_abort_releases_claim_and_publishes_terminal_event(
+    client: AsyncClient,
+    authHeaders: dict[str, str],
+    dbSession: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """取消停在检查点的会话 ⇒ aborted + 释放执行权 + 发**终态**事件（打开的 SSE 流才关）。
+
+    这是「用户走开」场景的刻意出路：否则占用永不释放、此后每次提交都 409，唯一出口是
+    删掉整个会话（连带丢报告）。终态事件复用既有终态码（`turn_failed`）⇒ 无需前端改动。
+    """
+    _patchService(monkeypatch)
+    session = await _createSession(client, authHeaders, "Q1")
+    sid = session["id"]
+    r1 = await _postTurn(client, authHeaders, sid, {"question": "Q1"})
+    assert r1.status_code == 202, r1.text
+    await _waitForCheckpoint(client, authHeaders, sid, phase="intent")
+    assert await _activeRunId(dbSession, sid) is not None
+
+    queue = researchModule._bus.subscribe(sid)  # 必须先订阅：总线不做历史回放
+    try:
+        resp = await client.post(f"{_BASE}/sessions/{sid}/abort", headers=authHeaders)
+        assert resp.status_code == 200, resp.text
+        frames = []
+        while not queue.empty():
+            frames.append(queue.get_nowait())
+    finally:
+        researchModule._bus.unsubscribe(sid, queue)
+
+    assert frames, "abort 必须发事件（`_eventFrames` 只认终态 → 否则已打开的流不关）"
+    assert any(researchModule._isTerminal(event, payload) for event, payload in frames), frames
+
+    detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    assert detail.json()["session"]["status"] == "aborted", detail.text
+    assert await _activeRunId(dbSession, sid) is None, "abort 必须释放执行权"
+
+    r2 = await _postTurn(client, authHeaders, sid, {"question": "Q2"})
+    assert r2.status_code == 202, r2.text
+
+
+async def test_abort_done_session_keeps_done(
+    client: AsyncClient,
+    authHeaders: dict[str, str],
+    dbSession: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """已 `done` 的会话被 abort ⇒ 幂等无副作用：**状态仍是 done**，不得回退丢结果。
+
+    取消是「别等了」，不是「删结果」；把已完成的研究翻成 aborted 会让用户丢掉报告。
+    """
+    _patchService(monkeypatch, autoConfirm=True, runToDone=True)
+    session = await _createSession(client, authHeaders, "Q1")
+    sid = session["id"]
+    r1 = await _postTurn(client, authHeaders, sid, {"question": "Q1"})
+    assert r1.status_code == 202, r1.text
+    detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    assert detail.json()["session"]["status"] == "done", detail.text
+
+    resp = await client.post(f"{_BASE}/sessions/{sid}/abort", headers=authHeaders)
+    assert resp.status_code == 200, resp.text
+
+    after = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    assert after.json()["session"]["status"] == "done", "abort 不得把终态回退"
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +717,42 @@ async def test_expired_checkpoint_aborts_session_and_releases_claim(
     # 关键：不再永久 409 —— 新轮次可提交（否则锁死，用户只能删会话）
     r2 = await _postTurn(client, authHeaders, sid, {"question": "Q2"})
     assert r2.status_code == 202, r2.text
+
+
+async def test_checkpoint_replay_with_nonempty_choice_is_idempotent(
+    client: AsyncClient, authHeaders: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**非空 choice** 的回放同样幂等（真实的「改一下再点一次」/ modify 带反馈）。
+
+    空 choice 是退化情形（`{} == {}` 谁比都对）：只有非空 choice 才能证明判据真的是
+    「逐字比对 (action, user_choice)」，而不是「只要都非 pending 就放行」。
+    """
+    _patchService(monkeypatch, runToDone=True)
+    session = await _createSession(client, authHeaders, "Q1")
+    sid = session["id"]
+    r1 = await _postTurn(client, authHeaders, sid, {"question": "Q1"})
+    assert r1.status_code == 202, r1.text
+    cp = await _waitForCheckpoint(client, authHeaders, sid, phase="intent")
+
+    body = {
+        "action": "modify",
+        "choice": {"question": "只看甲供应商近12月收货量", "feedback": "限定供应商"},
+    }
+    first = await client.post(f"{_BASE}/checkpoints/{cp['id']}/answer", json=body, headers=authHeaders)
+    assert first.status_code == 200, first.text
+
+    replay = await client.post(f"{_BASE}/checkpoints/{cp['id']}/answer", json=body, headers=authHeaders)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["nextPhase"] == first.json()["nextPhase"]
+
+    # 反例：同一 checkpoint 换个非空 choice ⇒ 409（非空也不等于放行）
+    conflict = await client.post(
+        f"{_BASE}/checkpoints/{cp['id']}/answer",
+        json={"action": "modify", "choice": {"question": "只看乙供应商近12月收货量"}},
+        headers=authHeaders,
+    )
+    assert conflict.status_code == 409, conflict.text
+    assert "已决策" in conflict.json()["error"]
 
 
 async def test_checkpoint_answer_conflicting_decision_still_409(

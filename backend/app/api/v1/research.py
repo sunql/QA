@@ -67,6 +67,7 @@ from app.domain.research_schemas import (
     ResearchCheckpointRead,
     ResearchReportRead,
     ResearchReportSummaryRead,
+    ResearchSessionAbortRead,
     ResearchSessionCreate,
     ResearchSessionDetail,
     ResearchSessionRead,
@@ -92,6 +93,7 @@ from app.services.research_agent_ports import (
     ERROR_TURN_FAILED,
     EVENT_DONE,
     EVENT_ERROR,
+    STATUS_AWAITING,
     TERMINAL_ERROR_CODES,
     errorPayload,
 )
@@ -407,8 +409,13 @@ async def createTurn(
                 sessionId=sessionId, turnId=replay.turn_id, status=row.status
             )
     if row.active_run_id is not None:
-        logger.info("拒绝并发轮次: session=%s active_run=%s", sessionId, row.active_run_id)
-        raise ConflictError("存在进行中的研究轮次，请等待当前轮次结束后再提交")
+        logger.info(
+            "拒绝并发轮次: session=%s active_run=%s status=%s",
+            sessionId,
+            row.active_run_id,
+            row.status,
+        )
+        raise ConflictError(_busyMessage(row.status))
     turn = await _sessionService.appendTurn(
         db, sessionId=sessionId, role="user", content={"question": payload.question}
     )
@@ -425,6 +432,52 @@ async def createTurn(
         payload.idempotencyKey,
     )
     return ResearchTurnAccepted(sessionId=sessionId, turnId=turnId, status="running")
+
+
+@router.post(
+    "/sessions/{sessionId}/abort",
+    response_model=ResearchSessionAbortRead,
+    summary="取消会话（释放执行权并关流）",
+)
+async def abortSession(
+    sessionId: uuid.UUID,
+    user: CurrentUser = Depends(_requireResearchUser),
+    db: AsyncSession = Depends(getDb),
+) -> ResearchSessionAbortRead:
+    """取消研究会话：落 `aborted` 终态、释放执行权，并广播**终态**事件关掉 SSE 流。
+
+    Task 2（review Fix 1b）：这是「轮次停在检查点等用户决策、用户却不想再等」的唯一出路。
+    在此之前该状态会**永久**占用 `active_run_id` —— 用户此后每次提交都 409，且没有任何
+    端点能摘掉这个占用（唯一出路是删掉整个会话）。
+
+    三层语义：
+
+    1. **幂等且不倒退**：`abortSessionIfActive` 是条件 UPDATE（`status NOT IN 终态`），
+       取消一个已 `done` 的会话**不会**把状态倒回 `aborted`、更不会丢弃已完成的结果；
+       此时 `cancelled=False`（无副作用调用）。
+    2. **关流**：`_eventFrames` 只在**终态事件**上收尾，故取消成功时必须发一帧终态。
+       复用既有终态码 `turn_failed`（`TERMINAL_ERROR_CODES` 成员，本就关流）—— 新错误码
+       必须同步前端 union/i18n/store，不在本任务范围。
+    3. **状态回读**：响应带**库中真实**状态（列查询绕过 identity map），取消未生效时
+       前端据此得知会话其实已是 `done`。
+    """
+    await _ownedSession(db, sessionId, user)
+    cancelled = await _sessionService.abortSessionIfActive(db, sessionId)
+    await db.commit()
+    if cancelled:
+        await _bus.publish(
+            str(sessionId),
+            EVENT_ERROR,
+            errorPayload(ERROR_TURN_FAILED, "本轮研究已取消", phase=None),
+        )
+    freshStatus = await db.scalar(
+        select(ResearchSession.status).where(ResearchSession.id == sessionId)
+    )
+    if freshStatus is None:
+        # 并发下会话已被别的请求删掉（本请求与 delete 竞态）：语义上仍是「不存在」。
+        raise NotFoundError("研究会话不存在")
+    logger.info("取消研究会话: session=%s cancelled=%s status=%s", sessionId, cancelled, freshStatus)
+    return ResearchSessionAbortRead(sessionStatus=freshStatus, cancelled=cancelled)
 
 
 @router.post(
@@ -673,7 +726,7 @@ async def _abortExpiredSession(session: AsyncSession, sessionId: str) -> None:
     是善后，不该反过来掩盖已经通过 SSE 发给用户的冲突原因。
     """
     try:
-        await _sessionService.abortSession(session, uuid.UUID(sessionId))
+        await _sessionService.abortSessionIfActive(session, uuid.UUID(sessionId))
         await session.commit()
     except Exception:  # noqa: BLE001 —— 善后失败只留痕，不掩盖原始冲突
         logger.exception("过期检查点落 aborted 失败: session=%s", sessionId)
@@ -705,6 +758,20 @@ async def _markTerminalFailure(
 
 _STATUS_TO_ACTION: dict[str, str] = {status: action for action, status in ACTION_STATUS.items()}
 """checkpoint 决策状态 → 动作反查（由 `ACTION_STATUS` 派生，不另持字面量）。"""
+
+
+def _busyMessage(sessionStatus: str) -> str:
+    """会话被占用（`active_run_id` 非空）时的 409 文案：按**真实**状态区分「在跑」与「等决策」。
+
+    Task 2（review Fix 1a）：`active_run_id` 非空有两种成因 ——（a）状态机真在推进
+    （`running`）；（b）停在检查点等用户决策（`awaiting_user`，此时**没有**任何后台任务在跑）。
+    第二种若也说「存在进行中的研究轮次」，就是在说谎：用户等的是一个**需要他本人操作**的
+    决策点，且**可以取消**。文案必须点明这一点，否则用户被告知「等」却永远等不到。
+    不新增错误码 —— 新码必须同步前端 union/i18n/store，不在本任务范围。
+    """
+    if sessionStatus == STATUS_AWAITING:
+        return "当前轮次停在检查点，等待你的决策后才能继续；如不再需要，可取消本会话"
+    return "存在进行中的研究轮次，请等待当前轮次结束后再提交"
 
 
 def _isIdempotentReplay(

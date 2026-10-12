@@ -429,7 +429,7 @@ class ResearchSessionService:
         释放同样走**条件 UPDATE**（`status IN 终态`）：认领是条件 UPDATE，
         ORM 对象上的 `active_run_id` 可能陈旧（`synchronize_session=False`），
         按对象值决定「要不要清」会说谎 —— 实测表现为「库里有占用者、对象上是 None
-        ⇒ 赋 None 不算脏脏 ⇒ 一条 UPDATE 都不发 ⇒ 数据库里的执行权永远留着，
+        ⇒ 赋 None 不算脏 ⇒ 一条 UPDATE 都不发 ⇒ 数据库里的执行权永远留着，
         终态会话被锁死」。状态判定也一并下沉到 SQL（与认领同口径）。
         """
         result = await session.execute(
@@ -461,14 +461,33 @@ class ResearchSessionService:
         """会话落 `failed` 终态**并**释放执行权（单条 UPDATE，见 `_setTerminalAndRelease`）。"""
         await self._setTerminalAndRelease(session, sessionId, "failed")
 
-    async def abortSession(self, session: AsyncSession, sessionId: uuid.UUID) -> None:
-        """会话落 `aborted` 终态**并**释放执行权。
+    async def abortSessionIfActive(self, session: AsyncSession, sessionId: uuid.UUID) -> bool:
+        """取消会话：**不覆盖已有终态**，并释放执行权。返回「本次是否真的取消了非终态会话」。
 
-        专供「检查点过期 ⇒ 本会话永远无法续跑」这类路径：会话再也不会跑到终态，
-        `releaseActiveRun` 的终态闸门永不打开 ⇒ 不显式落终态就永久 409（用户唯一出路是
-        删掉整个会话，连带丢报告）。
+        两个调用面（用户主动取消 / 检查点过期）都要的是「别等了 + 松手」，**不是**「删结果」：
+        `done` 的会话被取消时必须原样保持 `done`（Flip 成 aborted 会把已完成的研究连报告
+        一起作废）。故此处用条件 UPDATE（`status NOT IN 终态`）—— 非终态 ⇒ 落 aborted +
+        释放；已终态 ⇒ 状态不动，只补一次释放（终态闸门放行）。
+
+        幂等：重复调用第二次 rowcount=0，返回 False。**不 commit**。
         """
-        await self._setTerminalAndRelease(session, sessionId, "aborted")
+        result = await session.execute(
+            update(ResearchSession)
+            .where(
+                ResearchSession.id == sessionId,
+                ResearchSession.status.not_in(TERMINAL_SESSION_STATUSES),
+            )
+            .values(status="aborted", active_run_id=None)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 1:
+            await self._syncSessionRow(session, sessionId, activeRunId=None, status="aborted")
+            logger.info("会话已取消并释放执行权: id=%s", sessionId)
+            return True
+        # 已是终态（或不存在）：状态**不动**，只确保不再占用执行权
+        await self.releaseActiveRun(session, sessionId, None)
+        logger.debug("取消请求无副作用（会话已终态或不存在）: id=%s", sessionId)
+        return False
 
     async def _setTerminalAndRelease(
         self, session: AsyncSession, sessionId: uuid.UUID, status: str

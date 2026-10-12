@@ -83,84 +83,94 @@ def test_derive_direction_none_when_both_directions_present() -> None:
 
 
 # ---------------------------------------------------------------------------
-# I1：否定式方向词必须作废（位置性否定门）
+# I1（轮 3）：否定判据 = 「否定字 + 情态词（含 `是`）· 距方向词 ≤ GAP=4」。
+# 40 条电池（38 绿 + 2 标注残余）是**自证地基**：TP（被否定 ⇒ 无方向）与 FP（否定字在
+# 非否定词素里 ⇒ 方向必须保住）成对钉住 —— 任何一侧收窄都会撞翻对面的行。
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "statement",
-    ["不应下降", "不会减少", "不该增长", "没有下降", "未能增长", "不增长", "不再下降"],
-)
-def test_derive_direction_none_when_direction_word_is_negated(statement: str) -> None:
-    """TP 矩阵：方向词被**紧邻**否定式否定 ⇒ 作废 ⇒ 无其它方向词 ⇒ ``None``。
-
-    「不应下降」等断言的方向词只是被否定了，不是没有方向词 —— 按本模块「宁可不判，不许瞎猜」
-    的口径必须返回 ``None``（符号翻转 = 静默把「被违背」判成「已验证」）。
-    """
-    assert deriveDirection(statement) is None
-
-
-@pytest.mark.parametrize(
-    ("statement", "expected"),
-    [
-        ("无锡供应商采购额上升", DIRECTION_INCREASE),
-        ("未来三月采购额上升", DIRECTION_INCREASE),
-        ("无法确认库存增长", DIRECTION_INCREASE),
-        ("不但上涨", DIRECTION_INCREASE),
-        ("再增长", DIRECTION_INCREASE),
-    ],
-)
-def test_derive_direction_unaffected_by_non_negating_particles(
-    statement: str, expected: str
-) -> None:
-    """FP 反向矩阵（承重）：``无``/``未``/``不``/``再`` 出现在**窗口外或非否定位置**时**不得**误判为否定。
-
-    这些词如果走全文扫描，会把「无锡」「未来」「无法」整段误伤 —— 故此实现只从方向词向后看
-    **小句内 5 字窗口**（``NEGATION_SCAN_WINDOW``），且半路遇到转折/连接词即停扫。
-
-    **注意本矩阵不证明该子类安全**：这里的 ``无``/``未`` 都**恰好**落在窗口外（``无锡供应商
-    采购额上升`` 的 «无» 距 «上升» = 8、``未来三月采购额上升`` 的 «未» 距 «上升» = 7），是靠
-    距离躲开，不是靠词边界。窗口内的同类词（``非常``/``特别``/``不仅``/``不锈钢``…）仍会被
-    误判为否定 ⇒ 丢方向（详见 ``_isNegatedDirectionWordAt`` docstring 的「已知残余」第 2 条，
-    属本轮**未收窄**的已知残余，交控制器裁定）。
-    """
-    assert deriveDirection(statement) == expected
-
-
+# TP（17 条，必须 None）：方向词被否定式作废 ⇒ 无其它方向词 ⇒ ``None``。
+# 「不应下降」等的方向词只是被否定了，不是没有方向词 —— 按本模块「宁可不判，不许瞎猜」
+# 的口径必须 ``None``（符号翻转 = 静默把「被违背」判成「已验证」）。
 @pytest.mark.parametrize(
     "statement",
     [
-        "不应大幅下降",  # Hole A：副词隔断（«不» 距 «下降» = 4）
-        "不会明显减少",  # Hole A
-        "未能持续增长",  # Hole A
-        "没有出现下降",  # Hole A
-        "不再有增长",  # Hole B：助词链断（«不» 距 «增长» = 3）
-        "不应再下降",  # Hole B
+        "不应下降",  # 紧邻（分支 a 不命中；分支 b：«应» 情态 + «不» 否定）
+        "不会减少",  # b：«会»
+        "不该增长",  # b：«该»
+        "没有下降",  # b：«有»
+        "未能增长",  # b：«能»
+        "不增长",  # a：紧邻否定字
+        "不再下降",  # b：«再»
+        "不应大幅下降",  # b：«应» 距 «下» = 3（副词隔断）
+        "不会明显减少",  # b：«会» 距 «减» = 3
+        "未能持续增长",  # b：«能» 距 «增» = 3
+        "没有出现下降",  # b：«有» 距 «下» = 3
+        "不再有增长",  # b：«再»（«有» 不接否定字，靠 «再»）
+        "不应再下降",  # b：«应»
+        "不应 下降",  # b：空格不再截断扫描（轮 2 漏判项）
+        "不能下降",  # b：«能»
+        "不是下降",  # b：«是»（轮 3 新增情态词；轮 2 把 «是» 当停扫字 ⇒ 漏判）
+        "绝非下降",  # a：«非» 紧邻
     ],
 )
-def test_derive_direction_none_when_negation_separated_by_fillers(statement: str) -> None:
-    """I1 第二轮：否定门从「紧邻前缀」放宽为「小句内 5 字窗口」后，**被隔断的否定式**也必须作废。
-
-    控制器在 ``0266d16`` 上原生复现过这 6 行符号翻转（副词/助词隔断 ⇒ 否定门看不见 ⇒
-    被违背的断言被判成 SUPPORTED）。每行都钉住「否定字 → 填充字 → 方向词」这一同缺陷类。
-    """
+def test_derive_direction_none_for_negated_true_positives(statement: str) -> None:
+    """TP：否定式方向词 ⇒ ``None``（17/19；另 2 条见残余人组）。"""
     assert deriveDirection(statement) is None
 
 
+# 已知残余（2 条，**承认的盲区，不是正确行为**）：本轮判据（否定字 + 情态词 + GAP≤4）在
+# **局部特征上**与 FP 不可分 —— ``无权下降`` 的 «无» 距方向词 = 2，与 ``未来`` 的 «未» 同为 2；
+# ``不可能会下降`` 的否定字只隔情态链（«不»→«可»→«能»→«会»）。收窄其一即误伤另一。
+# 断言写成「记录当前已知行为」而非「期望 None」，并在此**显式标注为盲区**。
+@pytest.mark.parametrize(
+    "statement",
+    ["不可能会下降", "无权下降"],
+)
+def test_derive_direction_known_residual_negation_chains(statement: str) -> None:
+    """**已知残余（盲区，非正确行为）**：情态链 >1 层 / 否定经非情态词桥接仍会漏判成有效方向。
+
+    这两条在裸列名 + 取值下与 ``无锡``/``未来`` 类 FP **不可分**（见
+    ``_isNegatedDirectionWordAt`` docstring 的「已知残余」）。测试记录当前行为仅为钉住
+    「已知」，**不得**据此认为它正确；是否收窄交控制器裁定。
+    """
+    # 承认的盲区：本轮**不**修，断言记录当前（错误）行为。
+    assert deriveDirection(statement) == DIRECTION_DECREASE  # 已知残余，见 docstring
+
+
+# FP（21 条，必须保住括号里的方向）：否定字在**非否定词素**（普通词）里 ⇒ 方向必须保留。
+# 这正是不是新判据（情态词桥接）与旧窗口判据的分界：轮 2 的「任意字窗口」把
+# 非常/不仅/不锈钢/未来/供给不足/无货/问题不大 全吞成 None；轮 3 因后随字非情态词而安全。
 @pytest.mark.parametrize(
     ("statement", "expected"),
     [
-        # «无» 距方向词**恰好 6 > W(=5)** ⇒ 落在窗口外，不判否定（与既有行「无法确认库存增长」
-        # 同形，独立一条自证窗口上界；若把 W 改成 6 这条立即翻红）。
-        ("无供应商库存增长", DIRECTION_INCREASE),
-        # 承重回归行：既有 FP 里钉住窗口上界的那条（«无» 距 «增长» = 6）。
-        ("无法确认库存增长", DIRECTION_INCREASE),
+        ("无锡供应商采购额上升", DIRECTION_INCREASE),  # «锡» 非情态
+        ("未来三月采购额上升", DIRECTION_INCREASE),  # «来» 非情态
+        ("无法确认库存增长", DIRECTION_INCREASE),  # «法» 非情态
+        ("不但上涨", DIRECTION_INCREASE),  # «但» 非情态（停扫集已删，靠这一点）
+        ("再增长", DIRECTION_INCREASE),  # «再» 是情态词但**前面**无否定字
+        ("无供应商库存增长", DIRECTION_INCREASE),  # «供» 非情态
+        ("不锈钢库存增长", DIRECTION_INCREASE),  # 商品名「不锈钢」
+        ("无锡库存增长", DIRECTION_INCREASE),  # 地名「无锡」
+        ("未来增长", DIRECTION_INCREASE),  # «来» 非情态
+        ("未来将持续下降", DIRECTION_DECREASE),  # «来» 非情态
+        ("无法预测下降", DIRECTION_DECREASE),  # «法» 非情态
+        ("非常明显地增长", DIRECTION_INCREASE),  # «常» 非情态
+        ("库存特别明显地增长", DIRECTION_INCREASE),  # «别» 嵌在「特别」里
+        ("不仅增长了销量", DIRECTION_INCREASE),  # «仅» 非情态
+        ("供给不足导致下降", DIRECTION_DECREASE),  # «不» 后是「足」，非情态
+        ("无货导致下降", DIRECTION_DECREASE),  # «货» 非情态
+        ("问题不大销售下降", DIRECTION_DECREASE),  # «大» 非情态
+        ("采购金额上升", DIRECTION_INCREASE),  # 纯 FP 基线
+        ("订单量下降", DIRECTION_DECREASE),  # 纯 FP 基线
+        ("成本提高", DIRECTION_INCREASE),  # 纯 FP 基线
+        ("利润下滑", DIRECTION_DECREASE),  # 纯 FP 基线
     ],
 )
-def test_scan_window_upper_bound_ignores_negation_beyond_five_chars(
+def test_derive_direction_false_positives_preserve_direction(
     statement: str, expected: str
 ) -> None:
-    """窗口上界 ``W=5``：超出 5 字的否定字**不**作废方向词（否则「无锡/未来/无法」全误伤）。"""
+    """FP：非否定词素里的否定字**不得**作废方向词（21 条，全部来自轮 2 的真实回归）。"""
     assert deriveDirection(statement) == expected
 
 

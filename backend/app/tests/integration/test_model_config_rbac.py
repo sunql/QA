@@ -136,6 +136,28 @@ async def test_adminCanCreateModel(client: AsyncClient, adminToken: str) -> None
 
 
 @pytest.mark.asyncio
+async def test_adminCreateModelWithHttpEndpointBlocked(
+    client: AsyncClient, adminToken: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """admin 在生产环境 POST 带 http:// endpoint → 422（URL 校验失败）。"""
+    monkeypatch.setenv("APP_ENV", "production")
+    headers = {"Authorization": f"Bearer {adminToken}"}
+    resp = await client.post(
+        "/api/v1/models",
+        json={
+            "modelName": "test-http-blocked",
+            "provider": "openai",
+            "apiEndpoint": "http://api.openai.com/v1",
+            "apiKey": "sk-test",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert "https" in (body.get("error") or body.get("detail") or "")
+
+
+@pytest.mark.asyncio
 async def test_endpointChangeRequiresNewKey(
     client: AsyncClient, adminToken: str, existingModelConfig: LlmConfig
 ) -> None:

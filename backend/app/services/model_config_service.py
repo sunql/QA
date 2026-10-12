@@ -28,7 +28,13 @@ class ModelConfigService:
     """模型配置服务。"""
 
     async def create(self, session: AsyncSession, dto: LlmConfigCreate) -> LlmConfig:
-        """创建模型配置。model_name 唯一。"""
+        """创建模型配置。model_name 唯一；endpoint 须符合生产 URL 规范。"""
+        # audit-fx-1.1 fix1：创建时即 fail-fast，防止无效 URL 入库
+        if dto.api_endpoint:
+            try:
+                validateEndpointUrl(dto.api_endpoint)
+            except ValueError as exc:
+                raise ValidationError(str(exc)) from exc
         existing = await session.execute(
             select(LlmConfig).where(LlmConfig.model_name == dto.model_name)
         )

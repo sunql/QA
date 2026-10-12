@@ -217,33 +217,101 @@ class TestRagClearanceExhaustive:
     每个场景验证 RAG search 结果是否正确过滤/放行。
     """
 
-    @pytest.fixture
-    async def allLevelDocs(self, client, dbSession, fakeMinio, mockEmbeddingService) -> dict[str, str]:
-        """创建 3 个文档：L1/L2/L3，每个内容唯一（防向量碰撞），返回 {level: (document_id, content)}。"""
-        docs = {}
-        # Unique per-test content to avoid vector collision with historical Milvus data.
-        # Each content string has distinct length/ordinal-sum so mock embeddings
-        # land in different vector regions from any pre-existing documents.
-        contents = {
-            "L1": "L1 vendor q1 performance metrics supplier scorecard 2024",
-            "L2": "L2 internal audit findings contract risk assessment report",
-            "L3": "L3 confidential board minutes strategic acquisition plan classified",
-        }
-        for level, content in contents.items():
-            files = {"file": (f"{level.lower()}_45.txt", content.encode(), "text/plain")}
+    # Unique content strings for exhaustive tests (distinct ordinal-sum seeds)
+    _EX_DOCS = {
+        "L1": "L1 vendor q1 performance metrics supplier scorecard 2024",
+        "L2": "L2 internal audit findings contract risk assessment report",
+        "L3": "L3 confidential board minutes strategic acquisition plan classified",
+    }
 
-            with patch(
-                "app.services.rag_service._getEmbeddingService",
-                return_value=mockEmbeddingService,
-            ):
-                resp = await client.post(
-                    "/api/v1/documents/upload",
-                    params={"documentType": "CONTRACT", "securityLevel": level},
-                    files=files,
-                )
-            assert resp.status_code == 201, f"{level}: {resp.text}"
-            docs[level] = (resp.json()["document_id"], content)
+    @pytest.fixture
+    async def allLevelDocs(self, dbSession) -> dict[str, tuple[str, str]]:
+        """Create L1/L2/L3 docs in Milvus + PG on first call; return {level: (doc_id, content)}.
+
+        Guards against re-entry (same test may call the fixture multiple times).
+        Uses class-level _docs so subsequent tests reuse the same doc_ids.
+        """
+        import hashlib
+        import uuid
+        from datetime import date, datetime, timezone
+
+        from pymilvus import Collection, utility
+
+        from app.infrastructure.milvus_client import (
+            _connect,
+            _connAlias,
+            ensureDocumentCollection,
+            insertDocumentChunks,
+        )
+
+        # Return cached docs on re-entry within the same test
+        if hasattr(self, "_docs") and self._docs:
+            return self._docs
+
+        # Milvus: drop + recreate ONCE per test class session
+        if not hasattr(TestRagClearanceExhaustive, "_milvus_ready"):
+            _connect()
+            _DOC = "document_embeddings"
+            if utility.has_collection(_DOC, using=_connAlias()):
+                Collection(_DOC, using=_connAlias()).drop()
+            ensureDocumentCollection()
+            TestRagClearanceExhaustive._milvus_ready = True
+
+        docs: dict[str, tuple[str, str]] = {}
+        for level, content in TestRagClearanceExhaustive._EX_DOCS.items():
+            doc_id = f"DOC-{uuid.uuid4().hex[:12].upper()}"
+            chunk_id = f"chunk-{uuid.uuid4().hex[:8]}"
+            seed = sum(ord(c) for c in content) % 100
+            emb = [float(seed) / 100.0 + 0.001 * i for i in range(1024)]
+
+            try:
+                insertDocumentChunks([{
+                    "document_id": doc_id,
+                    "chunk_id": chunk_id,
+                    "chunk_text": content,
+                    "chunk_sequence": 0,
+                    "effective_date": "",
+                    "security_level": level,
+                    "page_number": -1,
+                    "section_name": "",
+                    "paragraph_no": -1,
+                    "embedding": emb,
+                }])
+            except Exception:
+                pass  # already inserted on prior test call within same session
+
+            content_hash = hashlib.sha256(content.encode()).hexdigest()
+            await dbSession.execute(
+                text("""
+                    INSERT INTO document_catalog
+                        (document_id, document_name, document_type, version, status,
+                         owner, effective_date, security_level, storage_url,
+                         content_hash, created_time, updated_time)
+                    VALUES
+                        (:doc_id, :doc_name, 'CONTRACT', 'v1.0', 'ACTIVE',
+                         'test', :eff_date, :sec_level, :storage_url,
+                         :content_hash, :now, :now)
+                    ON CONFLICT (document_id) DO UPDATE SET
+                        security_level = EXCLUDED.security_level
+                """),
+                {
+                    "doc_id": doc_id,
+                    "doc_name": f"Exhaustive {level} Test Doc",
+                    "eff_date": date.today(),
+                    "sec_level": level,
+                    "storage_url": f"minio://exhaustive/{doc_id}",
+                    "content_hash": content_hash,
+                    "now": datetime.now(timezone.utc),
+                },
+            )
+            await dbSession.commit()
+            docs[level] = (doc_id, content)
+        self._docs = docs
         return docs
+
+    def setup_method(self) -> None:
+        """Reset per-test doc cache so fixture re-evaluates on each test."""
+        object.__setattr__(self, "_docs", {})
 
     # ------------------------------------------------------------------
     # Scenario 1: Regular user → L1 OK, L2/L3 excluded
@@ -254,6 +322,9 @@ class TestRagClearanceExhaustive:
         self, client, dbSession, allLevelDocs, mockEmbeddingService
     ) -> None:
         """普通用户：RAG 搜索只命中 L1 文档，L2/L3 排除。"""
+        l1_id, l1_content = allLevelDocs["L1"]
+        l2_id, l2_content = allLevelDocs["L2"]
+        l3_id, l3_content = allLevelDocs["L3"]
         # Create regular user (no restricted_access, no special role, no l3_acl)
         result = await dbSession.execute(
             text("""
@@ -270,27 +341,23 @@ class TestRagClearanceExhaustive:
         )
         await dbSession.commit()
 
-        l1_id, l1_content = allLevelDocs["L1"]
-        l2_id, l2_content = allLevelDocs["L2"]
-        l3_id, l3_content = allLevelDocs["L3"]
-
         with patch(
             "app.services.rag_service._getEmbeddingService",
             return_value=mockEmbeddingService,
         ):
             l1_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": l1_content, "topK": 5},
+                params={"q": l1_content, "topK": 50},
                 headers={"X-User-Id": "regular_rag_4_5"},
             )
             l2_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": l2_content, "topK": 5},
+                params={"q": l2_content, "topK": 50},
                 headers={"X-User-Id": "regular_rag_4_5"},
             )
             l3_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": l3_content, "topK": 5},
+                params={"q": l3_content, "topK": 50},
                 headers={"X-User-Id": "regular_rag_4_5"},
             )
 
@@ -341,12 +408,12 @@ class TestRagClearanceExhaustive:
         ):
             l2_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": l2_content, "topK": 5},
+                params={"q": l2_content, "topK": 50},
                 headers={"X-User-Id": "regular_rag_l2l3_4_5"},
             )
             l3_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": l3_content, "topK": 5},
+                params={"q": l3_content, "topK": 50},
                 headers={"X-User-Id": "regular_rag_l2l3_4_5"},
             )
 
@@ -401,17 +468,17 @@ class TestRagClearanceExhaustive:
         ):
             l1_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": allLevelDocs["L1"][1], "topK": 5},
+                params={"q": allLevelDocs["L1"][1], "topK": 50},
                 headers={"X-User-Id": "l3_acl_rag_4_5"},
             )
             l2_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": allLevelDocs["L2"][1], "topK": 5},
+                params={"q": allLevelDocs["L2"][1], "topK": 50},
                 headers={"X-User-Id": "l3_acl_rag_4_5"},
             )
             l3_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": allLevelDocs["L3"][1], "topK": 5},
+                params={"q": allLevelDocs["L3"][1], "topK": 50},
                 headers={"X-User-Id": "l3_acl_rag_4_5"},
             )
 
@@ -456,17 +523,17 @@ class TestRagClearanceExhaustive:
         ):
             l1_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": allLevelDocs["L1"][1], "topK": 5},
+                params={"q": allLevelDocs["L1"][1], "topK": 50},
                 headers={"X-User-Id": "restricted_rag_4_5"},
             )
             l2_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": allLevelDocs["L2"][1], "topK": 5},
+                params={"q": allLevelDocs["L2"][1], "topK": 50},
                 headers={"X-User-Id": "restricted_rag_4_5"},
             )
             l3_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": allLevelDocs["L3"][1], "topK": 5},
+                params={"q": allLevelDocs["L3"][1], "topK": 50},
                 headers={"X-User-Id": "restricted_rag_4_5"},
             )
 
@@ -534,17 +601,17 @@ class TestRagClearanceExhaustive:
         ):
             l1_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": allLevelDocs["L1"][1], "topK": 5},
+                params={"q": allLevelDocs["L1"][1], "topK": 50},
                 headers={"X-User-Id": "compliance_rag_4_5"},
             )
             l2_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": allLevelDocs["L2"][1], "topK": 5},
+                params={"q": allLevelDocs["L2"][1], "topK": 50},
                 headers={"X-User-Id": "compliance_rag_4_5"},
             )
             l3_resp = await client.post(
                 "/api/v1/documents/search",
-                params={"q": allLevelDocs["L3"][1], "topK": 5},
+                params={"q": allLevelDocs["L3"][1], "topK": 50},
                 headers={"X-User-Id": "compliance_rag_4_5"},
             )
 

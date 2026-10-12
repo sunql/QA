@@ -29,12 +29,22 @@ export default function LoginPage() {
       }
       const from = (loc.state as { from?: string } | null)?.from ?? "/";
       nav(from, { replace: true });
-    } catch (e: any) {
-      const code = e?.response?.data?.error;
-      if (code === "MSG_INVALID_CREDENTIALS") message.error(t("auth.login.invalidCredentials"));
-      else if (code === "MSG_ACCOUNT_DISABLED") message.error(t("auth.login.accountDisabled"));
-      else if (e?.response?.status === 429) message.error(t("auth.login.rateLimited"));
-      else message.error(t("auth.login.networkError"));
+    } catch (e: unknown) {
+      // Extract detail.code for user-facing error messages (Finding 10 — audit-fx-3.3)
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      const code = typeof detail === "object" && detail !== null && "code" in detail
+        ? String((detail as { code: unknown }).code)
+        : null;
+
+      if (code === "AUTH_INVALID" || code === "E_AUTH_INVALID_PASSWORD") {
+        message.error(t("auth.login.invalidCredentials")); // 账号或密码错误
+      } else if (code === "AUTH_EXPIRED" || code === "E_AUTH_EXPIRED") {
+        message.error("会话已过期，请重新登录");
+      } else if (code === "AUTH_RATE_LIMITED" || code === "E_AUTH_RATE_LIMITED") {
+        message.error(t("auth.login.rateLimited")); // 请求过于频繁，请稍后再试
+      } else {
+        message.error(t("auth.login.networkError"));
+      }
     } finally {
       setSubmitting(false);
     }

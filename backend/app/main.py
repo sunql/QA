@@ -536,9 +536,6 @@ def createApp() -> FastAPI:
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
     app.include_router(vectors.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
-    app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
-    app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
-    app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(wiki_compile.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(wiki_graph.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     from app.api.v1.admin_wiki_links import router as admin_wiki_links_router

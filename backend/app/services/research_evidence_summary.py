@@ -40,6 +40,24 @@ token 为空、永不命中 ⇒ ``total`` 变成 ``2024 + 2025 = 4049``、基线
 也不给错数」的保守方向，且只在**有**真时间戳时才降级成 ``None``（无真时间戳时退回第一个
 数值候选，见 :func:`_metricColumn`）。
 
+**轴侧的另一条残余路径（修复轮 3）。** 名字含时间**字**的**整数度量**（``满意度`` / ``时长`` /
+``日志`` / ``活跃度``）在没有真时间戳时，曾被名字兜底的 CJK **按字**匹配升格成时间轴，于是
+既被从度量候选里排除（``total=None``）又把 ``time_range`` **编造**成它的取值跨度（把满意度
+评分渲染成「数据的时间跨度」）。现已把**整数**列的兜底收窄为「时间整词或纯时间名」；文本/未知
+列的「含时间词」判据**仍是启发式**，对 ``stat_date`` 这类真日期轴是必要的，但对名字恰好含时间
+词的文本度量仍可能误判 —— 只是那类误判不会**编造数值**（文本列不进度量候选）。
+
+**轴与度量的判据方向**刻意**不同**（修复轮 3，别再「统一」）：:func:`_timeColumn` 的兜底
+看「名字**含不含**时间**词**」（文本/未知列按 :func:`_hasTimeToken` 的「整词或 CJK 按字」，
+整数列收窄为「整词 :func:`_hasTimeWord` **或**纯时间名 :func:`_isPureTimeName`」）；而
+:func:`_metricColumn` 一律看「**是不是**纯时间名 / 标识符名」。方向不一致是**有意**的 ——
+文本日期轴（``stat_date``）与整数日期轴（``createDate``）没有真时间戳时只能靠名字里的
+``date`` 认出来；而整数列若沿用 CJK **按字**的宽判据，就会把含时间**字**的度量
+（``满意度`` / ``时长`` / ``日志``）升格成轴，既丢掉合法度量（``total=None``）又**编造**
+``time_range``（把满意度评分渲染成「数据的时间跨度」），且该列还会掉进度量候选被求和。
+「统一」成任一口径都会重新引入一类缺陷：轴侧放宽回「含」（= 本轮这条 bug，整数度量被
+升格成轴）；度量侧放宽成「含」（= 修复轮 1 的 ``period_cost`` 回归）。
+
 **SSE 侧是响亮失败，不是静默。** ``trySummarizeEvidence`` 吞异常**不**代表原始行路径静默：
 ``emit`` 是 ``ResearchEventBus.publish`` 的 partial，它**只入队、从不序列化**；序列化在 SSE
 帧构造处（``_sseFrame`` → ``research_json``），那一步**不在** ``emitEvent`` 的 try/except 里
@@ -240,6 +258,17 @@ def _hasTimeToken(name: str) -> bool:
     return any(char in CJK_TIME_CHARS for char in name)
 
 
+def _hasTimeWord(name: str) -> bool:
+    """名字含时间**整词**（ASCII 口径，如 ``createDate`` → ``date``；``stat_date`` → ``date``）。
+
+    这是 :func:`_hasTimeToken` 的**英文**那一半，单独抽出给 :func:`_timeColumn` 的**整数**
+    兜底用：整数列（年份数字、``20240101``）既常见又只能靠名字判时间语义，而 CJK 的**按字**
+    匹配在整数列上太宽（``满意度``/``时长``/``日志`` 含时间字却是度量）。CJK 无词边界 ⇒ 本
+    判据对中文列名恒 ``False``，由 :func:`_isPureTimeName` 补（``年份``/``月份``）。
+    """
+    return bool(TIME_NAME_TOKENS & set(_tokenize(name)))
+
+
 def _isPureTimeName(name: str) -> bool:
     """名字是否**全是时间单位**（⇒ 轴形名字，永不作为度量）。
 
@@ -272,13 +301,29 @@ def _isIdentifierName(name: str) -> bool:
 def _timeColumn(order: list[str], kinds: dict[str, str]) -> str | None:
     """时间轴列：**优先真时间戳**（取值即 timestamp），退而按名字判时间语义（D15 bug 3 / D16）。
 
-    名字兜底只在非数值列上做 —— 否则 ``period_amount`` 这类数值列会被误当时间轴。
+    名字兜底**按 kind 分两档，口径刻意不同**（与 :func:`_metricColumn` 的「是纯时间名」
+    不同方向，见模块头「残余限制」段 —— 别顺手统一）：
+
+    - ``KIND_TEXT`` / ``KIND_UNKNOWN`` 用「**含**时间词」（:func:`_hasTimeToken`）：
+      ``stat_date`` 这类**文本**日期轴没有真时间戳，只能靠名字里的 ``date`` 认出来；
+    - ``KIND_INTEGER`` 收窄成「时间**整词**（:func:`_hasTimeWord`）或**纯**时间名
+      （:func:`_isPureTimeName`）」：整数列不能用 CJK **按字**的宽判据 —— ``满意度`` / ``时长``
+      / ``日志`` 含时间**字**却是度量，按「含」判会把它们升格成轴（合法度量被丢 ⇒
+      ``total=None``，且 ``time_range`` 被**编造**成评分/时长的取值跨度）。而 ``createDate``
+      这类**整词**命中的整数日期列仍须是轴 —— 否则它会掉进度量候选，``total`` 变成
+      ``2024 + 2025 = 4049``（D16 那记「看着合理的错数」重现）。
+
+    ``KIND_NUMERIC``（Decimal/float）两档都不收 —— 否则 ``period_amount`` 这类数值列会被
+    误当时间轴。
     """
     for name in order:
         if kinds.get(name) == KIND_TIMESTAMP:
             return name
     for name in order:
-        if kinds.get(name) in (KIND_INTEGER, KIND_TEXT, KIND_UNKNOWN) and _hasTimeToken(name):
+        kind = kinds.get(name)
+        if kind in (KIND_TEXT, KIND_UNKNOWN) and _hasTimeToken(name):
+            return name
+        if kind == KIND_INTEGER and (_hasTimeWord(name) or _isPureTimeName(name)):
             return name
     return None
 

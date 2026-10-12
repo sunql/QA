@@ -32,6 +32,7 @@ from app.services.research_agent_ports import stepResult
 from app.services.research_evidence_summary import (
     EvidenceSummary,
     _hasTimeToken,
+    _hasTimeWord,
     _isIdentifierName,
     _isPureTimeName,
     inferColumnKinds,
@@ -644,3 +645,141 @@ def test_time_token_predicate_whole_word_for_ascii_and_charwise_for_cjk() -> Non
     assert _hasTimeToken("年份") is True
     assert _hasTimeToken("创建日期") is True
     assert _hasTimeToken("销售额") is False
+
+
+# ---------------------------------------------------------------------------
+# 修复轮 3：整数列的**名字兜底**必须是「纯时间名」，不能是「含时间字」
+#
+# 修复轮 2 把 `_hasTimeToken` 扩到 CJK **按字**匹配（对 `_isPureTimeName` 是对的），
+# 但 `_timeColumn` 的**名字兜底**同时接受 `KIND_INTEGER` ⇒ `_hasTimeToken` 的「含」
+# 判据落到整数列上，任何含 `度/时/日/月/年/周/期/间/季` 的整数列都被升格成时间轴，
+# 再从度量候选里被排除（`_metricColumn` 只认「纯时间名」，口径不一致）。
+#
+# 两个后果，**都不是「保守」**：
+# 1. 合法整数度量被整块丢掉（`total=None`）—— `满意度`/`活跃度`/`利润度`/`时长` 在本仓
+#    业务域里是**成类**的度量名，不是孤例；
+# 2. `time_range` 被**编造**（满意度评分 5/3 变成「时间跨度 3→5」）—— 这是一个会被下游
+#    渲染给用户看的字段，即「看着合理的错值」，正是本模块最该避免的一类。
+#
+# 修复只动 `_timeColumn` 的名字兜底：整数列只认 `_isPureTimeName`；文本列（`stat_date`
+# 这类**文本**日期轴）保持「包含」判据。前三条是新行为，后五条是回归屏。
+# ---------------------------------------------------------------------------
+
+
+def test_integer_measure_with_a_time_char_is_not_promoted_to_the_time_axis() -> None:
+    """`满意度` 含 `度` ⇒ 曾整列被当时间轴，`time_range` 拿**评分**当时间跨度渲染给用户。
+
+    ⚠️ 轴判据放开后 `满意度` 就是**第一个数值候选**（模块契约：`total` = 第一个数值列求和，
+    见 task-4-brief 的参考实现），故 `total` 是满意度之和 `'8'`。夹具的 `300` 是**修复前**的
+    值（那时 `满意度` 被误当轴、`sales` 才是度量）—— 修复轮 3 简报表格里第 1 行的
+    「度量 = sales（total=300）」照抄了修复前的输出；在「只改 `_timeColumn`、不动
+    `_metricColumn`」的前提下不可达（详见交付报告）。
+    """
+    rows = [{"满意度": 5, "sales": 100}, {"满意度": 3, "sales": 200}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range is None
+    assert summary.total == "8"  # 度量 = 满意度（第一个数值候选）
+    assert summary.baseline is None and summary.current is None  # 无时间轴 ⇒ 无基线/当前
+
+
+def test_lone_integer_measure_with_a_time_char_is_still_digested() -> None:
+    """`时长` 单列：名字兜底曾把它选成 `timeColumn` ⇒ 度量候选被排除光 ⇒ `total=None`。"""
+    rows = [{"时长": 10}, {"时长": 20}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.total == "30"
+    assert summary.time_range is None
+
+
+def test_integer_measure_with_a_time_char_does_not_fabricate_a_time_range() -> None:
+    """`日志` 含 `日`：修复前 `time_range` 被编造成 `{'start':'1','end':'2'}`（日志序号）。
+
+    同第 1 行：轴放开后 `日志` 是第一个数值候选 ⇒ `total='3'`（`120` 是修复前的值，那时
+    `日志` 被误当轴、`amount` 才是度量）。
+    """
+    rows = [{"日志": 1, "amount": 50}, {"日志": 2, "amount": 70}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range is None
+    assert summary.total == "3"  # 度量 = 日志（第一个数值候选）
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected_time_range", "expected_total"),
+    [
+        pytest.param(
+            [{"年份": 2024, "销售额": Decimal("100")}, {"年份": 2025, "销售额": Decimal("200")}],
+            {"start": "2024", "end": "2025"},
+            "300",
+            id="pure-cjk-time-integer-stays-the-axis",
+        ),
+        pytest.param(
+            [{"year": 2024, "amount": Decimal("100")}, {"year": 2025, "amount": Decimal("200")}],
+            {"start": "2024", "end": "2025"},
+            "300",
+            id="pure-ascii-time-integer-stays-the-axis",
+        ),
+        pytest.param(
+            [{"stat_date": "2024-01-01", "amount": Decimal("100")},
+             {"stat_date": "2025-01-01", "amount": Decimal("200")}],
+            {"start": "2024-01-01", "end": "2025-01-01"},
+            "300",
+            id="text-date-axis-keeps-the-containment-predicate",
+        ),
+        pytest.param(
+            [{"年份": 2024, "销售额": Decimal("100"), "创建日期": date(2024, 1, 1)},
+             {"年份": 2025, "销售额": Decimal("200"), "创建日期": date(2025, 1, 1)}],
+            {"start": "2024-01-01", "end": "2025-01-01"},
+            "300",
+            id="real-timestamp-still-wins-over-the-pure-time-integer",
+        ),
+        pytest.param(
+            [{"year": 2024, "d": date(2024, 1, 1)}, {"year": 2025, "d": date(2025, 1, 1)}],
+            {"start": "2024-01-01", "end": "2025-01-01"},
+            None,
+            id="axis-only-data-still-yields-no-numeric-digest",
+        ),
+    ],
+)
+def test_fix3_axis_selection_regression_matrix(
+    rows: list[dict[str, object]], expected_time_range: dict[str, str], expected_total: str | None
+) -> None:
+    """修复轮 2 的成果不得回退：纯时间名仍是轴、文本日期轴仍靠「包含」、真时间戳仍优先。
+
+    `expected_total` 同时钉住**度量列是谁**：`年份`/`year` 若不再是轴就会被求和成
+    `2024 + 2025 = 4049`，故 `total == '300'` 是承重断言（不是「随便一个非 None」）。
+    """
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range == expected_time_range
+    assert summary.total == expected_total
+
+
+def test_ascii_integer_date_column_is_still_the_axis_and_is_not_summed() -> None:
+    """`createDate`：**整词**命中时间词（tokens `create`+`date`）的**整数**日期列。
+
+    整数兜底若只认「纯时间名」，`createDate` 就不再是轴 ⇒ 掉进度量候选被求和 ⇒
+    `total` 变成 `2024 + 2025 = 4049`（D16 那记「看着合理的错数」原样重现）。故整数兜底
+    保留 ASCII **整词**匹配（CJK 仍只认纯时间名 —— 见下条）。
+    """
+    rows = [{"createDate": 2024, "v": Decimal("1")}, {"createDate": 2025, "v": Decimal("2")}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range == {"start": "2024", "end": "2025"}
+    assert summary.total == "3"  # 度量 = v，不是 4049
+    assert summary.total != "4049"
+
+
+def test_time_word_predicate_is_ascii_whole_word_and_cjk_free() -> None:
+    """给整数兜底用的「时间整词」判据：ASCII 整词（不是子串），CJK 恒 False。"""
+    assert _hasTimeWord("createDate") is True
+    assert _hasTimeWord("stat_date") is True
+    assert _hasTimeWord("year") is True
+    assert _hasTimeWord("candidate_name") is False  # 含 `date` 子串但非整词（D15 bug 3）
+    assert _hasTimeWord("满意度") is False  # CJK 无词边界 ⇒ 由 _isPureTimeName 兜
+    assert _hasTimeWord("时长") is False

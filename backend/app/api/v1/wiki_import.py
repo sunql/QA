@@ -146,17 +146,23 @@ async def previewImportFile(
     库内部状态带进响应，而这些是攻击面信息；前端也不会展示 ``detail``
     （它有自己的可行动文案），所以回显纯属净泄露。详细原因进服务端日志。
     """
-    content = await file.read()
+    # audit-fx-3.2: stream in 64 KB chunks so the process heap never grows
+    # unbounded regardless of file size.  Raise 413 before memory damage occurs.
+    chunks = []
+    total = 0
+    while chunk := await file.read(64 * 1024):
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=MSG_WIKI_IMPORT_FILE_TOO_LARGE.format(
+                    size=round(total / _MB, 1), max=MAX_UPLOAD_BYTES // _MB
+                ),
+            )
+        chunks.append(chunk)
+    content = b"".join(chunks)
     mime = file.content_type or "application/octet-stream"
     fname = file.filename or "unknown"
-
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=MSG_WIKI_IMPORT_FILE_TOO_LARGE.format(
-                size=round(len(content) / _MB, 1), max=MAX_UPLOAD_BYTES // _MB
-            ),
-        )
 
     try:
         text, sourceType = await _importService.parseFile(content, mime, fname)

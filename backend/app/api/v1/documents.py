@@ -41,6 +41,10 @@ from app.services.messages_zh import MSG_DOCUMENT_SOURCE_STORE_FAILED
 
 logger = logging.getLogger(__name__)
 
+# Streaming upload size limit (audit-fx-3.2): documents may be up to 50 MB.
+# Streaming read prevents OOM from unbounded in-memory accumulation.
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
 router = APIRouter()
 
 
@@ -200,7 +204,19 @@ async def uploadDocument(
     """
     from app.services.rag_service import RagError, RagService, RagSourceStoreError
 
-    content = await file.read()
+    # audit-fx-3.2: stream in 64 KB chunks so the process heap never grows
+    # unbounded regardless of file size.  Raise 413 before memory damage occurs.
+    chunks = []
+    total = 0
+    while chunk := await file.read(64 * 1024):
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="文件超过 50 MB",
+            )
+        chunks.append(chunk)
+    content = b"".join(chunks)
     mime = file.content_type or "application/octet-stream"
     fname = file.filename or "unknown"
 

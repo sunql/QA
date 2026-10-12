@@ -509,6 +509,7 @@ async def test_abort_releases_claim_and_publishes_terminal_event(
     try:
         resp = await client.post(f"{_BASE}/sessions/{sid}/abort", headers=authHeaders)
         assert resp.status_code == 200, resp.text
+        assert resp.json() == {"sessionStatus": "aborted", "cancelled": True}, resp.text
         frames = []
         while not queue.empty():
             frames.append(queue.get_nowait())
@@ -546,9 +547,106 @@ async def test_abort_done_session_keeps_done(
 
     resp = await client.post(f"{_BASE}/sessions/{sid}/abort", headers=authHeaders)
     assert resp.status_code == 200, resp.text
+    # 无副作用调用要如实标注：cancelled=false 且状态是**真实**终态（前端据此不误报「已取消」）
+    assert resp.json() == {"sessionStatus": "done", "cancelled": False}, resp.text
 
     after = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
     assert after.json()["session"]["status"] == "done", "abort 不得把终态回退"
+
+
+async def test_abort_rejected_while_running(
+    client: AsyncClient,
+    authHeaders: dict[str, str],
+    dbSession: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**真在跑**（`running` + 占用在手）时 abort 必须 409 且什么都不动（review Fix A）。
+
+    放宽成「一切非终态」会打断正在执行的状态机，两个后果都打穿本任务：
+
+    1. 状态机的事后写入是**无条件**的（`updateSessionStatus` 盲写，`_runFrom` 落 done /
+       `_pauseForUser` 落 awaiting_user）⇒ abort 后它照样写回，用户看到「已取消」、
+       刷新又活过来；
+    2. abort 顺手清空 `active_run_id` ⇒ 下一个 `POST /turns` 放行、`claimActiveRun` 在
+       `IS NULL` 上成功 ⇒ **同一会话两条状态机并行**。
+
+    故断言三件：409、状态不变、占用保留；外加**不得发帧** —— 发终态帧会关掉**活着的**流。
+    走服务层直接占坑：ASGITransport 下后台任务会先跑完，HTTP 层造不出「正在跑」的中间态。
+    """
+    _patchService(monkeypatch)
+    session = await _createSession(client, authHeaders, "Q1")
+    sid = session["id"]
+    svc = ResearchSessionService()
+    run_state = await _seedRunRow(dbSession, svc, uuid.UUID(sid))
+    ok, _ = await svc.claimActiveRun(dbSession, uuid.UUID(sid), run_state.id, None)
+    assert ok is True
+    await svc.updateSessionStatus(dbSession, uuid.UUID(sid), "running")
+    await dbSession.commit()
+    claimed = await _activeRunId(dbSession, sid)
+    assert claimed is not None
+
+    queue = researchModule._bus.subscribe(sid)
+    try:
+        resp = await client.post(f"{_BASE}/sessions/{sid}/abort", headers=authHeaders)
+        assert resp.status_code == 409, resp.text
+        assert "无法取消" in resp.json()["error"], resp.text
+        frames = []
+        while not queue.empty():
+            frames.append(queue.get_nowait())
+    finally:
+        researchModule._bus.unsubscribe(sid, queue)
+
+    assert frames == [], f"拒绝 abort 不得发帧（会把活着的流关掉）: {frames}"
+    detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    assert detail.json()["session"]["status"] == "running", "被拒的 abort 不得改状态"
+    assert await _activeRunId(dbSession, sid) == claimed, "被拒的 abort 不得释放执行权"
+
+
+async def test_abort_terminal_status_has_no_effect_on_failed(
+    client: AsyncClient,
+    authHeaders: dict[str, str],
+    dbSession: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`failed` 终态同样幂等无副作用（不止 `done` 一条被覆盖）。"""
+    _patchService(monkeypatch, autoConfirm=True)  # 无产出 ⇒ 落 failed
+    session = await _createSession(client, authHeaders, "Q1")
+    sid = session["id"]
+    r1 = await _postTurn(client, authHeaders, sid, {"question": "Q1"})
+    assert r1.status_code == 202, r1.text
+    detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    assert detail.json()["session"]["status"] == "failed", detail.text
+
+    resp = await client.post(f"{_BASE}/sessions/{sid}/abort", headers=authHeaders)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"sessionStatus": "failed", "cancelled": False}, resp.text
+
+
+async def test_answer_checkpoint_reports_real_session_status(
+    client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession, monkeypatch
+) -> None:
+    """首答 pending checkpoint 的响应必须报**库中真实**状态（review Fix E）。
+
+    此前硬编码 `sessionStatus="running"` —— 那是「状态机接下来要去的状态」，不是此刻的事实：
+    此刻会话正 `awaiting_user`（正因为停在这里，才存在这个 pending checkpoint 可答）。
+    与幂等回放分支同口径：报真值，前端按库里的事实渲染，而不是按一个猜测。
+    """
+    _patchService(monkeypatch)
+    session = await _createSession(client, authHeaders, "Q1")
+    sid = session["id"]
+    r1 = await _postTurn(client, authHeaders, sid, {"question": "Q1"})
+    assert r1.status_code == 202, r1.text
+    cp = await _waitForCheckpoint(client, authHeaders, sid, phase="intent")
+    detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    assert detail.json()["session"]["status"] == "awaiting_user", detail.text
+
+    answered = await client.post(
+        f"{_BASE}/checkpoints/{cp['id']}/answer",
+        json={"action": "confirm", "choice": {}},
+        headers=authHeaders,
+    )
+    assert answered.status_code == 200, answered.text
+    assert answered.json()["sessionStatus"] == "awaiting_user", answered.text
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +785,13 @@ async def test_expired_checkpoint_aborts_session_and_releases_claim(
     `releaseActiveRun` 的终态闸门永不打开 ⇒ `active_run_id` 永久占用 ⇒ 用户此后
     每次提交都 409，而唯一出路是删掉整个会话（连带丢报告）。锁死是本次变更最坏的
     后果，故这条路径必须有守卫。
+
+    **同时钉住第二个调用点的前提**（review Fix A）：`_abortExpiredSession` 调用的
+    `abortSessionIfActive` 现在只接受 `awaiting_user`。这条路径上会话**确实**停在
+    `awaiting_user`（过期是后台 resume 时才发现的，而 `resumeTurn` 里的
+    `updateSessionStatus(running)` 排在 `resolveCheckpoint` 之后、且异常会回滚掉），
+    故下面的显式断言不是装饰 —— 哪天它不再是 awaiting_user，本用例会先报出来，
+    而不是让善后变成静默 no-op（那样占用又永久留着）。
     """
     _patchService(monkeypatch)
     session = await _createSession(client, authHeaders, "Q1")
@@ -695,6 +800,8 @@ async def test_expired_checkpoint_aborts_session_and_releases_claim(
     assert r1.status_code == 202, r1.text
     cp = await _waitForCheckpoint(client, authHeaders, sid, phase="intent")
     assert await _activeRunId(dbSession, sid) is not None, "跑到暂停应留下执行权"
+    paused = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
+    assert paused.json()["session"]["status"] == "awaiting_user", paused.text
 
     # 把 TTL 拨到过去（等价于「用户 24h 后才点提交」），无需等待真实过期
     await dbSession.execute(

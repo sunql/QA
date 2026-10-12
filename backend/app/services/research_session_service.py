@@ -35,7 +35,10 @@ from app.domain.research_models import (
     ResearchSession,
     ResearchTurn,
 )
-from app.services.research_agent_ports import DEFAULT_MODE  # re-export for backward compat
+from app.services.research_agent_ports import (
+    DEFAULT_MODE,  # re-export for backward compat
+    STATUS_AWAITING,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -461,21 +464,38 @@ class ResearchSessionService:
         """会话落 `failed` 终态**并**释放执行权（单条 UPDATE，见 `_setTerminalAndRelease`）。"""
         await self._setTerminalAndRelease(session, sessionId, "failed")
 
-    async def abortSessionIfActive(self, session: AsyncSession, sessionId: uuid.UUID) -> bool:
-        """取消会话：**不覆盖已有终态**，并释放执行权。返回「本次是否真的取消了非终态会话」。
+    async def abortSessionIfActive(
+        self, session: AsyncSession, sessionId: uuid.UUID
+    ) -> str | None:
+        """取消**停在检查点等待用户决策**（`awaiting_user`）的会话，并释放执行权。
 
-        两个调用面（用户主动取消 / 检查点过期）都要的是「别等了 + 松手」，**不是**「删结果」：
-        `done` 的会话被取消时必须原样保持 `done`（Flip 成 aborted 会把已完成的研究连报告
-        一起作废）。故此处用条件 UPDATE（`status NOT IN 终态`）—— 非终态 ⇒ 落 aborted +
-        释放；已终态 ⇒ 状态不动，只补一次释放（终态闸门放行）。
+        返回库中**真实**状态（未命中时走列查询，绕过 identity map）；行已不存在 ⇒ `None`。
+        **不 commit**。调用方按返回值分支：`aborted` = 本次真的取消了；`running` = 拒绝；
+        终态字面量 = 幂等无副作用的空操作。
 
-        幂等：重复调用第二次 rowcount=0，返回 False。**不 commit**。
+        **白名单只有 `awaiting_user`**（review Fix A）。`active_run_id` 非空 + `awaiting_user`
+        是唯一「占用在手、却**没有**任何任务在跑」的状态，也正是「不取消就永久 409」的那个
+        状态。放宽成「一切非终态」是**危险**的，两条后果都会打穿本任务：
+
+        1. 真在执行的 `running` 会话，状态机的事后写入是**无条件**的（`updateSessionStatus`
+           盲写，`_runFrom` 落 done / `_pauseForUser` 落 awaiting_user）⇒ abort 之后它照样
+           把状态写回去，用户看到「已取消」、刷新又活过来；
+        2. 更糟：abort 顺手清空 `active_run_id` ⇒ 下一次 `POST /turns` 直接放行、
+           `claimActiveRun` 在 `IS NULL` 上成功 ⇒ **同一会话两条状态机并行** ——
+           正是本任务的互斥要防的事。
+
+        白名单挡掉 `running`，但**故意**也挡掉「崩溃遗留」（进程被杀、状态卡在 `running`
+        且已无活任务）：状态白名单**无法**区分「活着的 running」与「死掉的 running」，
+        故该场景不由本端点负责，属于已推迟的 TTL / 扫描器 follow-up。
+
+        终态 ⇒ 状态**不动**（取消 ≠ 删结果：把 `done` 翻成 aborted 会连报告一起作废），
+        只补一次释放（终态闸门放行）⇒ 幂等无副作用。
         """
         result = await session.execute(
             update(ResearchSession)
             .where(
                 ResearchSession.id == sessionId,
-                ResearchSession.status.not_in(TERMINAL_SESSION_STATUSES),
+                ResearchSession.status == STATUS_AWAITING,
             )
             .values(status="aborted", active_run_id=None)
             .execution_options(synchronize_session=False)
@@ -483,11 +503,20 @@ class ResearchSessionService:
         if result.rowcount == 1:
             await self._syncSessionRow(session, sessionId, activeRunId=None, status="aborted")
             logger.info("会话已取消并释放执行权: id=%s", sessionId)
-            return True
-        # 已是终态（或不存在）：状态**不动**，只确保不再占用执行权
-        await self.releaseActiveRun(session, sessionId, None)
-        logger.debug("取消请求无副作用（会话已终态或不存在）: id=%s", sessionId)
-        return False
+            return "aborted"
+        status = await session.scalar(
+            select(ResearchSession.status).where(ResearchSession.id == sessionId)
+        )
+        if status is None:
+            logger.warning("取消请求落空：会话不存在: id=%s", sessionId)
+            return None
+        if status in TERMINAL_SESSION_STATUSES:
+            await self.releaseActiveRun(session, sessionId, None)
+            logger.debug("取消请求无副作用（会话已终态 %s）: id=%s", status, sessionId)
+            return status
+        # 既非 awaiting_user 又非终态 = 真在跑：状态与执行权**一律不碰**，交调用方拒绝
+        logger.info("取消请求被拒（会话正在执行）: id=%s status=%s", sessionId, status)
+        return status
 
     async def _setTerminalAndRelease(
         self, session: AsyncSession, sessionId: uuid.UUID, status: str

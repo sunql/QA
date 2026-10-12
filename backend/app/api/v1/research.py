@@ -94,6 +94,7 @@ from app.services.research_agent_ports import (
     EVENT_DONE,
     EVENT_ERROR,
     STATUS_AWAITING,
+    STATUS_RUNNING,
     TERMINAL_ERROR_CODES,
     errorPayload,
 )
@@ -450,34 +451,42 @@ async def abortSession(
     在此之前该状态会**永久**占用 `active_run_id` —— 用户此后每次提交都 409，且没有任何
     端点能摘掉这个占用（唯一出路是删掉整个会话）。
 
-    三层语义：
+    三种结局（状态谓词在**服务层 SQL 里**，不只在这里 `if` —— 双保险）：
 
-    1. **幂等且不倒退**：`abortSessionIfActive` 是条件 UPDATE（`status NOT IN 终态`），
-       取消一个已 `done` 的会话**不会**把状态倒回 `aborted`、更不会丢弃已完成的结果；
-       此时 `cancelled=False`（无副作用调用）。
-    2. **关流**：`_eventFrames` 只在**终态事件**上收尾，故取消成功时必须发一帧终态。
-       复用既有终态码 `turn_failed`（`TERMINAL_ERROR_CODES` 成员，本就关流）—— 新错误码
-       必须同步前端 union/i18n/store，不在本任务范围。
-    3. **状态回读**：响应带**库中真实**状态（列查询绕过 identity map），取消未生效时
-       前端据此得知会话其实已是 `done`。
+    1. **`awaiting_user` ⇒ 200 `cancelled=true`**，落 `aborted` + 释放执行权 + 发一帧终态。
+       这是唯一「占用在手但没有任务在跑」的状态（review Fix A 的白名单）。
+    2. **`running` ⇒ 409**，状态与执行权**都不动**、**不发帧**。真在跑的会话被 abort 会
+       （a）被状态机的无条件终态写入复活、（b）清空占用后放进第二条状态机（见
+       `abortSessionIfActive` docstring）。**不发帧**很关键：终态帧会关掉一条**活着的**流。
+    3. **已终态 ⇒ 200 `cancelled=false`**，状态原样（`done` 不得被翻成 `aborted` 丢结果）。
+
+    响应带**服务层读回的库中真值**（列查询绕过 identity map），端点**不再**回读、故也
+    不存在「先改后 404」的路径；`None`（行已消失）只会出现在「什么都没改」时。
     """
     await _ownedSession(db, sessionId, user)
-    cancelled = await _sessionService.abortSessionIfActive(db, sessionId)
+    status = await _sessionService.abortSessionIfActive(db, sessionId)
+    if status is None:
+        # UPDATE 未命中且行已不在（与 delete 竞态）：本请求**无副作用**，故与其余端点
+        # 同一口径报「不存在」—— 不是「先改后 404」。
+        raise NotFoundError("研究会话不存在")
+    if status == STATUS_RUNNING:
+        logger.info("拒绝取消（会话正在执行）: session=%s", sessionId)
+        raise ConflictError(_ABORT_RUNNING_MESSAGE)
     await db.commit()
-    if cancelled:
+    if status == "aborted":
+        # 复用既有终态码 turn_failed（`TERMINAL_ERROR_CODES` 成员 ⇒ `_isTerminal` 认它关流）。
+        # **已知错配**（review Fix C）：`ERROR_SPECS[ERROR_TURN_FAILED].sessionStatus` 是
+        # `failed`，而这里会话落的是 `aborted` —— 该表对本码的描述**低于**实际情况。
+        # 之所以现在功能正确：运行时**无人**消费 ErrorSpec.sessionStatus（`_isTerminal` 只问
+        # 「是不是终态码」）；它是给前端/文档看的声明。不新增错误码（新码必须同批扩前端
+        # union/i18n/store，而本端点尚无前端调用方）—— 等接线时一并校正该表。
         await _bus.publish(
             str(sessionId),
             EVENT_ERROR,
             errorPayload(ERROR_TURN_FAILED, "本轮研究已取消", phase=None),
         )
-    freshStatus = await db.scalar(
-        select(ResearchSession.status).where(ResearchSession.id == sessionId)
-    )
-    if freshStatus is None:
-        # 并发下会话已被别的请求删掉（本请求与 delete 竞态）：语义上仍是「不存在」。
-        raise NotFoundError("研究会话不存在")
-    logger.info("取消研究会话: session=%s cancelled=%s status=%s", sessionId, cancelled, freshStatus)
-    return ResearchSessionAbortRead(sessionStatus=freshStatus, cancelled=cancelled)
+    logger.info("取消研究会话: session=%s status=%s cancelled=%s", sessionId, status, status == "aborted")
+    return ResearchSessionAbortRead(sessionStatus=status, cancelled=status == "aborted")
 
 
 @router.post(
@@ -513,7 +522,10 @@ async def answerCheckpoint(
         payload.action,
         dict(payload.choice),
     )
-    return CheckpointAnswerRead(sessionStatus="running", nextPhase=nextPhaseValue)
+    # 报**库中真实**状态（与上面的幂等回放分支同口径，review Fix E）：硬编码 "running" 报的
+    # 是「状态机接下来要去的状态」，不是此刻的事实 —— 此刻会话正 `awaiting_user`（正因为
+    # 它停在检查点，才存在这个 pending checkpoint 可答）。
+    return CheckpointAnswerRead(sessionStatus=sessionRow.status, nextPhase=nextPhaseValue)
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +770,10 @@ async def _markTerminalFailure(
 
 _STATUS_TO_ACTION: dict[str, str] = {status: action for action, status in ACTION_STATUS.items()}
 """checkpoint 决策状态 → 动作反查（由 `ACTION_STATUS` 派生，不另持字面量）。"""
+
+
+_ABORT_RUNNING_MESSAGE = "当前轮次正在执行，无法取消；请等待本轮结束后再试"
+"""abort 在 `running` 状态被拒的文案（真在跑：状态与执行权都不动，也不发帧）。"""
 
 
 def _busyMessage(sessionStatus: str) -> str:

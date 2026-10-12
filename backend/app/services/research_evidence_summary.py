@@ -72,6 +72,9 @@ class EvidenceSummary(CamelModel):
     数值标量以**字符串**承载（与 ``research_json`` 的 ``Decimal → str`` 口径一致，无损）。
     跨任务契约（Task 5）：``empty`` / ``baseline`` / ``current`` / ``total`` 可**按 Python
     字段名**构造与读取，故保留 ``populate_by_name=True``；改名或删除会静默打断下游。
+
+    **线上契约：数值字段是字符串**（``decimal`` 无损、且直接是 JSON 安全标量，D14）。
+    故需要算术 / 比较时必须走 :meth:`numeric`（见其 docstring 的踩坑说明）。
     """
 
     model_config = ConfigDict(frozen=True)
@@ -101,6 +104,24 @@ class EvidenceSummary(CamelModel):
         if isinstance(value, (int, float, Decimal)):
             return str(value)
         return value
+
+    def numeric(self, name: str) -> Decimal | None:
+        """按 **Python 字段名**读一个数值字段为 ``Decimal``；缺席 / 非数值 / 非有限 → ``None``。
+
+        **为什么必须用这个访问器，而不是直接拿字段比较**（字段是字符串，见类 docstring）：
+        - ``Decimal('200') > summary.baseline``（``baseline`` 是 ``'100'``）⇒ ``TypeError``；
+        - 而 ``'1000' > '900'`` 在 Python 里是 **``False``**（字典序）⇒ 不报错，却把真实大小
+          **静默反转**。后者更危险：它会让「涨了」判成「跌了」，且没有任何异常提示。
+        ``numeric("baseline")`` 是消费（比较 / 算术 / 阈值判定）的唯一正确读法。
+        """
+        raw = getattr(self, name, None)
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            parsed = Decimal(str(raw))
+        except (InvalidOperation, ValueError):
+            return None
+        return parsed if parsed.is_finite() else None
 
 
 # ---------------------------------------------------------------------------
@@ -190,12 +211,29 @@ def _timeColumn(order: list[str], kinds: dict[str, str]) -> str | None:
     return None
 
 
-def _metricColumn(order: list[str], kinds: dict[str, str], timeColumn: str | None) -> str | None:
-    """被聚合的度量列：第一个数值列，**排除时间轴列**（``year`` 是轴不是度量）。"""
-    for name in order:
-        if name != timeColumn and kinds.get(name) in NUMERIC_KINDS:
-            return name
-    return None
+def _metricColumn(
+    order: list[str], kinds: dict[str, str], timeColumn: str | None, timeKind: str | None
+) -> str | None:
+    """被聚合的度量列：**优先无时间词的数值列**，退回带时间词的数值列，否则 ``None``。
+
+    三层，逐层收紧（每一步都对应一个真实的错值形态）：
+    1. 排除时间轴列本身（``{year, amount}`` 无时间戳时，``year`` 是轴）；
+    2. 排除名字带时间词的数值列 —— ``{year, amount, d}`` 里 ``d`` 才是轴，``year`` 不再是
+       ``timeColumn``，但它仍是**整数轴**：若不过滤，``total`` 会变成 ``2024 + 2025 = 4049``、
+       基线/当前变成**年份**，同比报表拿年份比年份 —— 看起来完全合理的错数，最坏的一种；
+    3. **真时间戳存在时不做第 2 步的退回**：此时带时间词的数值列几乎必是轴（如只剩
+       ``{year, d}``）⇒ 宁可 ``None``（没有可辨认的度量），也不给「看着合理」的错值。
+       没有真时间戳时退回是安全的：``{month, month_sales}`` 里 ``month_sales`` 就是度量。
+    """
+    candidates = [
+        name for name in order if name != timeColumn and kinds.get(name) in NUMERIC_KINDS
+    ]
+    tokenFree = [name for name in candidates if not _hasTimeToken(name)]
+    if tokenFree:
+        return tokenFree[0]
+    if timeKind == KIND_TIMESTAMP:
+        return None
+    return candidates[0] if candidates else None
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +394,7 @@ def summarizeEvidence(
     kinds = {name: _inferKind([row.get(name) for row in rows]) for name in order}
     timeColumn = _timeColumn(order, kinds)
     timeKind = kinds.get(timeColumn) if timeColumn else None
-    metricColumn = _metricColumn(order, kinds, timeColumn)
+    metricColumn = _metricColumn(order, kinds, timeColumn, timeKind)
 
     sortedRows = _sortByTime(rows, timeColumn, timeKind)
     baseline, current = (

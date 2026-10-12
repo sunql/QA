@@ -87,6 +87,80 @@ def test_metric_column_excludes_the_time_column() -> None:
     assert summary.baseline == "100" and summary.current == "200"
 
 
+def test_integer_axis_is_not_the_metric_when_a_real_timestamp_exists() -> None:
+    """**最危险的组合**：整数轴（year）**加**一个真时间戳列（d）。
+
+    `_timeColumn` 会正确地选 `d`，于是「第一个数值列」落到 `year` 上 —— `total` 变成
+    `2024 + 2025 = 4049`、基线/当前变成**年份**，同比报表会拿年份比年份，看着还挺合理。
+    度量列必须在**真时间戳存在**时避开带时间词的数值列。
+    """
+    rows = [
+        {"year": 2024, "amount": Decimal("100"), "d": date(2024, 1, 1)},
+        {"year": 2025, "amount": Decimal("200"), "d": date(2025, 1, 1)},
+    ]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.total == "300"  # 不是 4049（2024 + 2025）
+    assert summary.baseline == "100" and summary.current == "200"
+    assert summary.delta_ratio == "1"
+    assert summary.time_range == {"start": "2024-01-01", "end": "2025-01-01"}
+
+
+@pytest.mark.parametrize("axis", ["year", "quarter", "month", "period", "week", "day"])
+def test_any_time_worded_integer_axis_is_not_the_metric(axis: str) -> None:
+    """同类缺陷对所有带时间词的整数轴都成立（不是 `year` 的特例）。"""
+    rows = [
+        {axis: 1, "amount": Decimal("100"), "d": date(2024, 1, 1)},
+        {axis: 2, "amount": Decimal("200"), "d": date(2025, 1, 1)},
+    ]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.total == "300"
+    assert summary.baseline == "100" and summary.current == "200"
+
+
+def test_top_n_ranks_by_measure_not_by_axis() -> None:
+    """TopN 按同一度量列排名 —— 轴当度量时排序会一起错（本数据下下标序恰好反转）。"""
+    rows = [
+        {"year": 2024, "amount": Decimal("200"), "d": date(2024, 1, 1)},
+        {"year": 2025, "amount": Decimal("100"), "d": date(2025, 1, 1)},
+    ]
+
+    summary = summarizeEvidence(rows)
+
+    # 度量 200 > 100 ⇒ 2024 行在前；按轴（year）降序则 2025 在前
+    assert [t["row"]["year"] for t in summary.top_n] == [2024, 2025]
+    assert [t["row"]["amount"] for t in summary.top_n] == ["200", "100"]
+
+
+def test_axis_only_data_yields_no_numeric_digest_instead_of_a_wrong_one() -> None:
+    """真时间戳 + 只有一个带时间词的整数轴、**没有**别的数值列 ⇒ 不拿轴当度量。
+
+    宁可 `total`/`baseline`/`current` 为 `None`，也不要 2024/2025 这种「看着合理」的错值
+    （2024 + 2025 = 4049 是最坏的错：它看起来像个正常的量）。时间轴本身仍可用。
+    """
+    rows = [{"year": 2024, "d": date(2024, 1, 1)}, {"year": 2025, "d": date(2025, 1, 1)}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.total is None
+    assert summary.baseline is None and summary.current is None
+    assert summary.top_n == []
+    assert summary.time_range == {"start": "2024-01-01", "end": "2025-01-01"}
+
+
+def test_token_worded_numeric_is_still_the_metric_when_no_real_timestamp() -> None:
+    """退回口径：**没有**真时间戳时，带时间词的数值列仍被当作度量（它是唯一候选）。"""
+    rows = [{"month": 1, "month_sales": Decimal("5")}, {"month": 2, "month_sales": Decimal("7")}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.total == "12"
+    assert summary.baseline == "5" and summary.current == "7"
+
+
 def test_top_n_limit_and_ranking_are_deterministic() -> None:
     rows = [
         {"name": "a", "v": Decimal("5")},
@@ -328,6 +402,31 @@ def test_construct_by_python_field_name_normalizes_numerics_to_wire_strings() ->
     assert summary.model_dump(mode="json", by_alias=True)["baseline"] == "100"
 
 
+def test_numeric_accessor_orders_correctly_unlike_raw_strings() -> None:
+    """数值字段是**字符串**（`research_json` 口径），比较/算术必须走 `numeric()`。
+
+    裸串比较是**字典序**：`'1000' > '900'` 为 `False` —— 会静默反转真实大小，且不报错。
+    """
+    rows = [{"year": 2024, "amount": Decimal("900")}, {"year": 2025, "amount": Decimal("1000")}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.baseline == "900" and summary.current == "1000"
+    # 正确读法：走访问器
+    assert summary.numeric("current") > summary.numeric("baseline")  # 1000 > 900
+    assert summary.numeric("delta") == Decimal("100")
+    # 反向断言（钉住「为什么需要访问器」）：裸串是字典序，真实顺序被静默反转
+    assert not (summary.current > summary.baseline)  # '1000' > '900' is False
+
+
+def test_numeric_accessor_returns_none_for_absent_or_non_numeric() -> None:
+    empty = summarizeEvidence([])
+
+    assert empty.numeric("baseline") is None  # 缺席字段
+    assert empty.numeric("empty") is None  # 非数值（bool）字段
+    assert empty.numeric("totally_unknown") is None  # 未声明字段
+
+
 def test_declared_fields_are_all_computed_and_no_dead_fields() -> None:
     """每个声明字段都要真被算出来（不留恒 None 的死字段），并剔掉无口径的字段。"""
     fields = set(EvidenceSummary.model_fields)
@@ -372,6 +471,15 @@ def test_step_result_without_evidence_keeps_the_key_none() -> None:
 
     assert isinstance(result["summary"], str)
     assert result["evidence"] is None
+
+
+def test_step_result_distinguishes_no_rows_from_failed_summarization() -> None:
+    """`evidence` 恒存在（可为 `null`）；「无行」与「有行但摘要失败」用 `rowCount` 区分。"""
+    noRows = stepResult({"index": 0}, rows=[], error=None)
+    assert noRows["evidence"] is None and noRows["rowCount"] == 0
+
+    summarizationFailed = stepResult({"index": 1}, rows=[{"v": Decimal("1")}], error=None, evidence=None)
+    assert summarizationFailed["evidence"] is None and summarizationFailed["rowCount"] == 1
 
 
 # ---------------------------------------------------------------------------

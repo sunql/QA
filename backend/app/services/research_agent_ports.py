@@ -495,6 +495,11 @@ def stepResult(
     ``rows`` 在手边时经 ``summarizeEvidence(...).model_dump(by_alias=True)`` 生成）。
     ``summary`` 契约不变 —— **仍是人类可读字符串**（``EVENT_STEP_DONE`` / 报告 / 检查点选项
     都读它），故结构化摘要另起一个 key，不替换、不改名。
+
+    ``evidence`` key **恒存在**（无证据时为 ``None``）。因此它本身**不区分**两种「无证据」：
+    「无数据行 ⇒ 没有可摘的」与「有行但摘要失败 ⇒ trySummarizeEvidence 放弃」。消费方用
+    ``rowCount`` 区分即可 —— ``rowCount == 0`` 是前者，``rowCount > 0 and evidence is None``
+    是后者。刻意不加标志位：既有信息已足够，少一个需要跨端同步的字段。
     """
     columns = list(rows[0].keys()) if rows else []
     if error:

@@ -35,7 +35,6 @@ SSE 通道（Task 8）：状态机的事件经 `emit` 接线投递到进程内 `
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -100,6 +99,7 @@ from app.services.research_agent_ports import (
 )
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_event_bus import EVENT_CONNECTED, bus
+from app.services.research_json_encoder import research_json
 from app.services.research_session_service import (
     PROMPT_KEY,
     CheckpointConflictError,
@@ -612,8 +612,14 @@ async def _eventFrames(sessionId: str) -> AsyncIterator[str]:
 
 
 def _sseFrame(event: str, payload: dict[str, Any]) -> str:
-    """SSE 帧（`json.dumps` 转义换行，payload 不会破坏帧边界）。"""
-    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    """SSE 帧（`research_json` 转义换行，payload 不会破坏帧边界）。
+
+    payload 里有业务库驱动标量（Decimal / date / datetime / UUID）时，
+    裸 `json.dumps` 会 `TypeError` 炸掉**整帧**，故统一走 `research_json`
+    的 JSON 安全映射（Task 3，见 `services/research_json_encoder`）。
+    JSON 安全 payload 的输出与 `json.dumps(..., ensure_ascii=False)` 逐字节相同。
+    """
+    return f"event: {event}\ndata: {research_json(payload)}\n\n"
 
 
 def _isTerminal(event: str, payload: dict[str, Any]) -> bool:

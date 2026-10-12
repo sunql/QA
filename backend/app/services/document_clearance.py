@@ -19,7 +19,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
     from app.dependencies import CurrentUser
-    from app.domain.models import L3Acl
 
 logger = logging.getLogger(__name__)
 

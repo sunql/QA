@@ -308,9 +308,12 @@ async def test_second_turn_rejected_while_first_awaiting_user(
     """首轮暂停在意图点（awaiting_user）时，第二个 submit 必须 409 —— 不允许并发起跑。
 
     **文案必须说真话**：此时并没有轮次在跑（机器停着等用户决策），故不得回
-    「存在进行中的研究轮次」—— 那会误导用户以为在等机器。要指出真实原因（待决策
-    检查点）与出路（可取消本轮）。仅改文案、不加新 error code：新增 code 必须同批扩
-    前端 union/i18n/store（越界）。
+    「存在进行中的研究轮次」—— 那会误导用户以为在等机器。只说真实原因（待决策检查点）。
+
+    **也不得承诺未接线的动作**：`POST /research/sessions/{id}/abort` 目前**没有前端调用方**
+    （删除会话的入口只在 `/research/history` 页，而 409 出现在没有该入口的会话页），
+    故文案里**不能**出现「可取消本会话」—— 那是让用户去做一件在眼前这个页面上做不到的事，
+    与旧文案同属一类谎言（只是小一点）。abort 端点接上前端后，再在此处公告它。
     """
     _patchService(monkeypatch)
     session = await _createSession(client, authHeaders, "Q1")
@@ -325,8 +328,8 @@ async def test_second_turn_rejected_while_first_awaiting_user(
     msg = r2.json()["error"]
     assert "检查点" in msg, msg
     assert "等待" in msg, msg
-    assert "取消" in msg, msg
     assert "进行中" not in msg, f"暂停态不得说「有轮次在跑」: {msg}"
+    assert "取消" not in msg, f"abort 无前端入口，不得承诺做不到的动作: {msg}"
 
 
 async def test_second_turn_conflict_message_names_running_round(

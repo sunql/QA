@@ -14,7 +14,6 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app import __version__
@@ -24,7 +23,7 @@ from app.domain.error_messages import MSG_API_DESCRIPTION
 from app.domain.exceptions import DomainError, statusForError
 from app.domain.schemas import ErrorResponse, HealthResponse
 from app.infrastructure.database import disposeEngine, getEngine
-from app.infrastructure.rate_limit import limiter, rateLimitExceededHandler
+from app.infrastructure.rate_limit import limiter, rateLimitDep, rateLimitExceededHandler
 
 logger = logging.getLogger(__name__)
 
@@ -357,9 +356,6 @@ def createApp() -> FastAPI:
         redoc_url="/redoc",
     )
 
-    # 中间件顺序：后添加者更外层。SlowAPI 先生成，CORS 最后添加使其最外层，
-    # 保证限流中间件直接产出的 429（非装饰路由路径）也带 CORS 头。
-    app.add_middleware(SlowAPIMiddleware)
     # CORS：非生产仅允许本地 Vite dev server；生产由 Nginx 反代同源承载（allow_origins=[]）。
     # 显式 origin 而非 "*"：* 与 allow_credentials=True 组合违反 CORS 规范，浏览器会拒绝 SSE。
     app.add_middleware(
@@ -424,98 +420,98 @@ def createApp() -> FastAPI:
         wiki_import,
     )
 
-    app.include_router(model_config.router, prefix="/api/v1/models", tags=["models"], dependencies=[Depends(mustChangePasswordGuard)])
+    app.include_router(model_config.router, prefix="/api/v1/models", tags=["models"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(
         embedding_provider.router,
         prefix="/api/v1/embedding-providers",
         tags=["embedding-providers"],
-        dependencies=[Depends(mustChangePasswordGuard)],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
-    app.include_router(session.router, prefix="/api/v1/sessions", tags=["sessions"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(ontology.router, prefix="/api/v1", tags=["ontology"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(evidences.router, prefix="/api/v1", tags=["evidences"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(id_mapping.router, prefix="/api/v1", tags=["id-mapping"], dependencies=[Depends(mustChangePasswordGuard)])
+    app.include_router(session.router, prefix="/api/v1/sessions", tags=["sessions"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(ontology.router, prefix="/api/v1", tags=["ontology"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(evidences.router, prefix="/api/v1", tags=["evidences"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(id_mapping.router, prefix="/api/v1", tags=["id-mapping"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(
-        term_dictionary.router, prefix="/api/v1", tags=["term-dictionary"], dependencies=[Depends(mustChangePasswordGuard)]
+        term_dictionary.router, prefix="/api/v1", tags=["term-dictionary"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
-    app.include_router(datasource.router, prefix="/api/v1/datasources", tags=["datasources"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(local_import.router, prefix="/api/v1/datasources", tags=["datasources"], dependencies=[Depends(mustChangePasswordGuard)])
+    app.include_router(datasource.router, prefix="/api/v1/datasources", tags=["datasources"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(local_import.router, prefix="/api/v1/datasources", tags=["datasources"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(
-        data_quality.router, prefix="/api/v1/data-quality/rules", tags=["data-quality"], dependencies=[Depends(mustChangePasswordGuard)]
+        data_quality.router, prefix="/api/v1/data-quality/rules", tags=["data-quality"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
     app.include_router(
         data_quality_rule_params.router,
         prefix="/api/v1",
         tags=["dq-rule-params"],
-        dependencies=[Depends(mustChangePasswordGuard)],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
     app.include_router(
         data_quality.scores_router,
         prefix="/api/v1/data-quality/scores",
         tags=["data-quality"],
-        dependencies=[Depends(mustChangePasswordGuard)],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
     app.include_router(
         data_quality_generate.router,
         prefix="/api/v1/data-quality/rules/generate",
         tags=["data-quality-generate"],
-        dependencies=[Depends(mustChangePasswordGuard)],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
     app.include_router(
         evaluation_report.router,
         prefix="/api/v1/data-quality/reports",
         tags=["data-quality"],
-        dependencies=[Depends(mustChangePasswordGuard)],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
     app.include_router(
-        data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"], dependencies=[Depends(mustChangePasswordGuard)]
+        data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
     app.include_router(
         entity_mapping.router,
         prefix="/api/v1/entity-mappings",
         tags=["entity-mapping"],
-        dependencies=[Depends(mustChangePasswordGuard)],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
     app.include_router(
-        kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"], dependencies=[Depends(mustChangePasswordGuard)]
+        kpi_catalog.router, prefix="/api/v1/kpi-catalog", tags=["kpi-catalog"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
     app.include_router(
-        business_object.router, prefix="/api/v1", tags=["business-object"], dependencies=[Depends(mustChangePasswordGuard)]
+        business_object.router, prefix="/api/v1", tags=["business-object"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
-    app.include_router(features.router, prefix="/api/v1/features", tags=["features"], dependencies=[Depends(mustChangePasswordGuard)])
+    app.include_router(features.router, prefix="/api/v1/features", tags=["features"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(
         supplier_360.router,
         prefix="/api/v1/supplier-360",
         tags=["supplier-360"],
-        dependencies=[Depends(mustChangePasswordGuard)],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
     app.include_router(
-        reports.router, prefix="/api/v1", tags=["reports"], dependencies=[Depends(mustChangePasswordGuard)]
+        reports.router, prefix="/api/v1", tags=["reports"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
     app.include_router(
         supplier_risk.router,
         prefix="/api/v1/supplier-risk",
         tags=["supplier-risk"],
-        dependencies=[Depends(mustChangePasswordGuard)],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
     app.include_router(
-        documents.router, prefix="/api/v1/documents", tags=["documents"], dependencies=[Depends(mustChangePasswordGuard)]
+        documents.router, prefix="/api/v1/documents", tags=["documents"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
-    app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"], dependencies=[Depends(mustChangePasswordGuard)])
+    app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(
-        agent_runtime.router, prefix="/api/v1/agents", tags=["agents"], dependencies=[Depends(mustChangePasswordGuard)]
+        agent_runtime.router, prefix="/api/v1/agents", tags=["agents"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
-    app.include_router(agent_tools.router, tags=["agent-tools"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard)])
+    app.include_router(agent_tools.router, tags=["agent-tools"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     # auth.router 和 authRouter.router 不加 guard：白名单路径 /auth/me、/auth/change-password、/auth/logout 需无条件放行
-    app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
-    app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(users.router, tags=["users"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(roles.router, tags=["roles"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(organizations.router, tags=["organizations"], dependencies=[Depends(mustChangePasswordGuard)])
+    app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"], dependencies=[Depends(rateLimitDep)])
+    app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(users.router, tags=["users"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(roles.router, tags=["roles"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(organizations.router, tags=["organizations"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     # 认证端点（feat-user-auth）：login/me/logout/me-password/password-policy
     from app.api.v1 import auth as authRouter
 
@@ -523,30 +519,30 @@ def createApp() -> FastAPI:
         authRouter.router, prefix="/api/v1/auth", tags=["auth"]
     )
     app.include_router(
-        menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"], dependencies=[Depends(mustChangePasswordGuard)]
+        menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
     app.include_router(
-        messages.router, prefix="/api/v1/messages", tags=["messages"], dependencies=[Depends(mustChangePasswordGuard)]
+        messages.router, prefix="/api/v1/messages", tags=["messages"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
-    app.include_router(system.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard)])
+    app.include_router(system.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(
         system_config.router,
         prefix="/api/v1/admin/system-config",
         tags=["system-config"],
-        dependencies=[Depends(mustChangePasswordGuard)],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
-    app.include_router(graph.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard)])
+    app.include_router(graph.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(
-        graph_traversal.router, prefix="/api/v1/graph", tags=["graph"], dependencies=[Depends(mustChangePasswordGuard)]
+        graph_traversal.router, prefix="/api/v1/graph", tags=["graph"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
-    app.include_router(vectors.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(wiki_compile.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard)])
-    app.include_router(wiki_graph.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard)])
+    app.include_router(vectors.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(wiki_compile.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(wiki_graph.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     from app.api.v1.admin_wiki_links import router as admin_wiki_links_router
-    app.include_router(admin_wiki_links_router, dependencies=[Depends(mustChangePasswordGuard)])
+    app.include_router(admin_wiki_links_router, dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
 
     # 健康检查。**必须注册在下方 MCP 挂载之前**：MCP 用 `Mount("")` 挂到 ASGI 树
     # 末端，而 Starlette 按注册顺序匹配 —— catch-all Mount 之后注册的路由永远不会

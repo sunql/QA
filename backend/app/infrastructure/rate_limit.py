@@ -28,13 +28,14 @@ import logging
 import time
 from typing import Any
 
-from fastapi import Request
+from fastapi import Depends, Request
 from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.config import getSettings
+from app.dependencies import CurrentUser, getCurrentUser
 from app.domain.error_messages import MSG_RATE_LIMITED
 from app.domain.schemas import ErrorResponse
 
@@ -136,6 +137,73 @@ limiter = Limiter(
     storage_uri="memory://",
     headers_enabled=False,
 )
+# 关闭中间件自动检查（middleware 在 getCurrentUser 之前运行，无法拿到 request.state.user）。
+# 路由级限流通过 rateLimitDep 在 getCurrentUser 之后显式检查。
+limiter._auto_check = False
+
+
+def _expandLimits(limits: list, request: Request) -> list:
+    """将 LimitGroup（with_request）展开为 Limit 对象列表；保留普通 Limit。
+
+    _default_limits 存 LimitGroup（非 Limit），必须用 with_request(request)
+    展开为具体的 Limit 对象列表才能传给 __evaluate_limits。
+    """
+    result = []
+    for lim in limits:
+        if hasattr(lim, "with_request"):
+            try:
+                result.extend(list(lim.with_request(request)))
+            except ValueError:
+                logger.warning("动态限流构造失败 endpoint=%s", request.get("path"))
+        else:
+            result.append(lim)
+    return result
+
+
+async def rateLimitDep(
+    request: Request,
+    _user: "CurrentUser" = Depends(getCurrentUser),
+) -> None:
+    """路由级限流依赖：在 getCurrentUser 之后执行。
+
+    由于 getCurrentUser 不接受 request 参数（保持直接调用兼容性），
+    本函数同时依赖 getCurrentUser 和 Request，在内部将 _user 写入
+    request.state.user 供 _dynamic_key 使用，然后执行限流检查。
+
+    按 RATE_LIMIT_KEY_STRATEGY（ip / user_id / ip_user）分桶计数。
+    未携带身份（public 端点）的请求降级到 IP bucket。
+    限流触发时 raise RateLimitExceeded，由 rateLimitExceededHandler 转换为 429 JSON。
+    """
+    # 写入 request.state，供 _dynamic_key 的 _extract_user_key 使用
+    request.state.user = _user
+
+    if not limiter.enabled:
+        return
+    try:
+        endpoint_url = request.get("path") or ""
+        endpoint_key = endpoint_url
+
+        # 路由级限流（装饰器 @limiter.limit 注册）
+        route_limits: list = list(limiter._route_limits.get(endpoint_key, []))
+        for lg in limiter._dynamic_route_limits.get(endpoint_key, []):
+            try:
+                route_limits.extend(list(lg.with_request(request)))
+            except ValueError:
+                logger.warning("动态限流构造失败 endpoint=%s", endpoint_key)
+
+        # 全局默认限流
+        default_limits = _expandLimits(limiter._default_limits, request)
+        all_limits = route_limits + default_limits
+
+        if not all_limits:
+            return
+
+        limiter._Limiter__evaluate_limits(request, endpoint_key, all_limits)
+    except RateLimitExceeded:
+        raise
+    except Exception as exc:
+        logger.warning("限流检查异常: %s", exc)
+        raise
 
 
 def _retryAfterSeconds(currentLimit: tuple[Any, list[str]]) -> int | None:

@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from fastapi import Depends, Header, HTTPException, Request, status
-from jwt import InvalidTokenError
+from jwt import ExpiredSignatureError, InvalidTokenError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,12 +17,50 @@ from app.domain.models import Organization, Role, User, UserOrganization, UserRo
 from app.domain.error_messages import (
     MSG_AUTH_REQUIRED,
     MSG_TOKEN_INVALID,
+    MSG_TOKEN_EXPIRED,
     MSG_TOKEN_REVOKED,
 )
 from app.infrastructure.database import getDb
 from app.services.jwt_codec import decode_jwt
 
 logger = logging.getLogger(__name__)
+
+
+# Auth error codes (used in structured detail dict)
+_AUTH_CODE_EXPIRED = "AUTH_EXPIRED"
+_AUTH_CODE_INVALID = "AUTH_INVALID"
+_AUTH_CODE_MISSING = "AUTH_MISSING"
+_PERMISSION_CODE_DENIED = "PERMISSION_DENIED"
+
+
+class AuthenticationFailed(HTTPException):
+    """401: token 过期 / 无效 / 缺失（audit-fx-2.1）。
+
+    与 PermissionDenied(403) 的区别：
+    - 401：身份无法确认（重新登录即可解决）
+    - 403：身份确认但权限不足（需要申请更高权限）
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": code, "message": message},
+        )
+
+
+class PermissionDenied(HTTPException):
+    """403: 身份有效但权限不足（audit-fx-2.1）。
+
+    用于 role/capability 检查失败。
+    与 mustChangePasswordGuard 区别：后者返回 MUST_CHANGE_PASSWORD code，
+    业务逻辑可据此做 UI 分流（弹修改密码框而非通用权限提示）。
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": code, "message": message},
+        )
 
 
 DEFAULT_STUB_ROLES: tuple[str, ...] = ("user", "admin")
@@ -168,14 +206,17 @@ async def authenticateBearer(
     token = authorization[7:].strip()
     try:
         payload = decode_jwt(token)
+    except ExpiredSignatureError as exc:
+        logger.warning("JWT 已过期: %s", exc)
+        raise AuthenticationFailed(_AUTH_CODE_EXPIRED, MSG_TOKEN_EXPIRED) from exc
     except InvalidTokenError as exc:
         logger.warning("JWT 解析失败: %s", exc)
-        raise PermissionDeniedError(MSG_TOKEN_INVALID) from exc
+        raise AuthenticationFailed(_AUTH_CODE_INVALID, MSG_TOKEN_INVALID) from exc
 
     jti = payload.get("jti", "")
     sub = payload.get("sub", "")
     if not jti or not sub:
-        raise PermissionDeniedError(MSG_TOKEN_INVALID)
+        raise AuthenticationFailed(_AUTH_CODE_INVALID, MSG_TOKEN_INVALID)
 
     # 同步查 user_sessions 验证 session 未吊销（fail-closed）
     from app.models.rbac import UserSession  # 避免循环依赖
@@ -192,13 +233,13 @@ async def authenticateBearer(
         )
     ).scalar_one_or_none()
     if session_row is None:
-        raise PermissionDeniedError(MSG_TOKEN_REVOKED)
+        raise AuthenticationFailed(_AUTH_CODE_EXPIRED, MSG_TOKEN_REVOKED)
 
     # 查 DB user
     try:
         user_id = int(sub)
     except ValueError as exc:
-        raise PermissionDeniedError(MSG_TOKEN_INVALID) from exc
+        raise AuthenticationFailed(_AUTH_CODE_INVALID, MSG_TOKEN_INVALID) from exc
     user = await session.get(User, user_id)
     if user is None or not user.enabled:
         raise PermissionDeniedError(MSG_AUTH_REQUIRED)
@@ -324,12 +365,12 @@ async def requireAdmin(
 ) -> CurrentUser:
     """写模型配置 API 的 admin 守卫（audit-fx-1.1）。
 
-    非 admin 直接 403，与 getAdminOnlyActor 模式完全一致。
+    非 admin 直接 403（audit-fx-2.1 升级为 PermissionDenied 结构化 detail）。
     """
     if "admin" not in (user.roles or []):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="需要 admin 角色",
+        raise PermissionDenied(
+            code=_PERMISSION_CODE_DENIED,
+            message="需要 admin 角色",
         )
     return user
 

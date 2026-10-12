@@ -80,7 +80,9 @@ export function createHttpClient(): AxiosInstance {
       // 401：token 失效 / 未登录 → 清 store 触发重定向到 /login
       // 不弹 toast（避免每次跳转都弹"登录已失效"，已经准备重定向了）
       // 直接 setState 而非 logout()：拦截器是同步路径，不需要异步调 API
+      // audit-fx-2.1：同时清理 localStorage（持久层），防止过期 token 被 persist 恢复
       if (status === 401) {
+        localStorage.removeItem("token");
         useAuthStore.setState({
           token: null,
           user: null,

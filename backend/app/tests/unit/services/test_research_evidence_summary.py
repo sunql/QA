@@ -1074,6 +1074,33 @@ def test_fix5_period_shaped_values_alone_do_not_make_an_axis() -> None:
             "3",
             id="N8",
         ),
+        # N6：`报表期` **是已知残余**（末字 `期` 是时间字，但取值 1/2 不像期间；名字又与
+        # 「评分/序号」类度量同形）⇒ 判为度量，本轮**刻意不救**（见模块头「残余限制」）。
+        pytest.param(
+            "N6", [{"报表期": 1, "amount": 1}, {"报表期": 2, "amount": 2}], None, "3", id="N6"
+        ),
+        # N11/N12：修复轮 6 的目标 —— 名字的时间字只是**前缀**（`月`+`销量` / `月`+`份额`），
+        # 末字门收窄后掉回度量。
+        pytest.param(
+            "N11",
+            [{"月销量": 2024, "amount": 1}, {"月销量": 2025, "amount": 2}],
+            None,
+            "4049",
+            id="N11",
+        ),
+        pytest.param(
+            "N12",
+            [{"月份额": 202401, "amount": 1}, {"月份额": 202501, "amount": 2}],
+            None,
+            "404902",
+            id="N12",
+        ),
+        # G1：取值恰落在 1900–2100（`单价` 1999/2001「像整年」），但名字的时间字门不成立
+        # ⇒ 仍是度量。（简报表格此处写的 `3` 是「另一列之和」；轴资格从未落在 `单价` 上，
+        # 它是**第一个数值候选** ⇒ `total` 是它自身的和 `4000`，见交付报告。）
+        pytest.param(
+            "G1", [{"单价": 1999, "amount": 1}, {"单价": 2001, "amount": 2}], None, "4000", id="G1"
+        ),
     ],
 )
 def test_fix5_before_after_table(
@@ -1082,8 +1109,76 @@ def test_fix5_before_after_table(
     expected_time_range: dict[str, str] | None,
     expected_total: str,
 ) -> None:
-    """16+1 例对照表的**修复后**期望（轴例度量是另一数值列；度量例度量是该列自身）。"""
+    """21 例对照表的**修复后**期望（轴例度量是另一数值列；度量例度量是该列自身）。
+
+    N1–N4/N7/N10/N11/N12/G1 的 `total` 是**该列自身**之和（轴资格撤掉后它是第一个数值
+    候选，与 r3 C1 `满意度` 同款）—— 简报表格里 N11/N12/G1 写的「另一列之和 `3`」在
+    「只改 `_timeColumn`、不动 `_metricColumn`」的前提下不可达。
+    """
     summary = summarizeEvidence(rows)
 
     assert summary.time_range == expected_time_range, case
     assert summary.total == expected_total, case
+
+
+# ---------------------------------------------------------------------------
+# 修复轮 6（**最后一轮**）：取值档的名字门从「**含**时间词」收窄为「**末字**是时间字」
+#
+# 轮 5 用 `_hasTimeToken(name)`（**含**时间词）当取值档的名字门 ⇒ 任何**名字含时间字、取值
+# 又恰好像期间**的**整数度量**被升格成轴（`time_range` 被**编造**成它的取值跨度）。中文的
+# 期间词是**中心词、居末**（`会计`+`年度`），而 `月销量`（`月` 是前缀修饰，中心词是 `销量`）
+# 与 `月份额`（中心词 `份额`）的时间字只是**前缀**。故名字门收窄为**末字**：
+# `会计年度`（末字 `度`）/ `统计时间`（末字 `间`）仍是轴；`月销量`（末字 `量`）/
+# `月份额`（末字 `额`）掉回度量。取值档的**合取**（取值像期间）一字未动。
+# ---------------------------------------------------------------------------
+
+
+def test_fix6_month_volume_measure_is_not_promoted_to_the_axis() -> None:
+    """N11：`月销量` 2024/2025 —— `月` 是**前缀修饰**（中心词 `销量`），取值恰是整年。
+
+    轮 5 的「含时间词 ∧ 取值像期间」把这类整数**度量**升格成轴：`time_range` 被编造成
+    `{'2024','2025'}`，把销量渲染成「数据的时间跨度」。末字门（`量` 不在时间字集合）后掉回
+    度量。承重断言是 `time_range is None` —— 反向断言钉住那记编造的跨度。
+    """
+    rows = [{"月销量": 2024, "amount": 1}, {"月销量": 2025, "amount": 2}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range is None  # 不是 {'2024','2025'}
+    # `total` 是该列**自身**之和（第一个数值候选），不是 `amount` 之和 `3`
+    assert summary.total == "4049"
+    assert summary.total != "3"
+
+
+def test_fix6_month_share_measure_is_not_promoted_to_the_axis() -> None:
+    """N12：`月份额` 202401/202501 —— 取值恰是 yyyymm，但中心词是 `份额`（度量）。"""
+    rows = [{"月份额": 202401, "amount": 1}, {"月份额": 202501, "amount": 2}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range is None  # 不是 {'202401','202501'}
+    assert summary.total == "404902"
+    assert summary.total != "3"
+
+
+def test_fix6_last_char_gate_keeps_statistical_time_as_the_axis() -> None:
+    """末字门**不得**放宽回归：`统计时间` 末字 `间`（时间字）∧ 取值像 yyyymm ⇒ 仍是轴。
+
+    这一行**不得**被新语义放宽（简报红字）：`统计时间` 与 `月销量` 的区别恰在**末字**。
+    """
+    rows = [{"统计时间": 202401, "amount": 1}, {"统计时间": 202501, "amount": 2}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range == {"start": "202401", "end": "202501"}
+    assert summary.total == "3"
+
+
+def test_fix6_empty_column_name_does_not_raise() -> None:
+    """`bool(name)` 守卫：空列名不得让取值档的名字门 `name[-1]` 抛 `IndexError`。"""
+    rows = [{"": 2024, "amount": 1}, {"": 2025, "amount": 2}]
+
+    summary = summarizeEvidence(rows)
+
+    assert summary.time_range is None
+    assert summary.total == "4049"  # 空名是第一个数值候选（无轴资格）

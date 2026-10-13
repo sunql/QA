@@ -130,6 +130,15 @@ async def test_compose_is_pure_assembly_no_report_rows(fakeReportDeps, dbSession
 
 
 @pytest.mark.asyncio
+async def test_evidence_empty_when_no_step_results(fakeReportDeps) -> None:
+    """Task 8：无 run_state / 无步结果 ⇒ ``evidence.stepResults == []``，报告照常出（降级不炸）。"""
+    planner, sessionId, turnId = fakeReportDeps
+    payload, md = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+    assert payload["evidence"] == {"stepResults": []}
+    assert md  # 报告仍产出
+
+
+@pytest.mark.asyncio
 async def test_llm_prompt_excludes_raw_rows(fakeReportDeps) -> None:
     """数字免疫：喂给 LLM 的 prompt 不含原始行数据（100 只出现在 chart 块）。"""
     planner, sessionId, turnId = fakeReportDeps

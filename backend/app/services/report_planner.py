@@ -38,6 +38,7 @@ from app.domain.research_models import (
     ResearchCheckpoint,
     ResearchFinding,
     ResearchSession,
+    ResearchStepResult,
     ResearchTurn,
 )
 from app.infrastructure.llm.base_client import LlmMessage
@@ -70,6 +71,7 @@ from app.services.report_semantic_context import assembleSemanticContext
 from app.services.research_agent_ports import DEFAULT_MODE, FINDING_ROWS_KEY, OPT_ARMS
 from app.services.research_hypothesis_test import HypothesisVerdict
 from app.services.research_session_service import ResearchSessionService
+from app.services.research_step_result import loadStepResultsByTurn
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +198,23 @@ def _findingRef(view: FindingView) -> SourceRef:
     return SourceRef(
         kind=REF_FINDING, refId=view.findingId, label=view.claimText[:SOURCE_LABEL_LIMIT]
     )
+
+
+def _stepEvidence(row: ResearchStepResult) -> dict[str, Any]:
+    """步结果行 → 报告 `evidence` 条目（Task 8 D25）。
+
+    **不含**原始行（``raw_result_ref["rows"]``）—— 体积：原始行已在 DB，
+    前端证据面板用 ``summary``（证据摘要）即可。只带 ``schemaVersion`` 供结果契约判定。
+    """
+    return {
+        "index": row.step_index,
+        "type": row.step_type,
+        "sql": row.sql_text,
+        "status": row.status,
+        "error": row.error,
+        "summary": row.evidence_summary,
+        "schemaVersion": (row.raw_result_ref or {}).get("schemaVersion"),
+    }
 
 
 def _verificationLabel(view: FindingView) -> str:
@@ -459,7 +478,10 @@ class ReportPlanner:
         ctx = await self._collectContext(active, sessionId=sessionId, mode=mode)
         client = llmClient if llmClient is not None else self._createClient()
         sections = tuple([await self._buildSection(kind, ctx, client=client, session=active) for kind in kinds])
-        payload = self._payload(sessionId=sessionId, turnId=turnId, ctx=ctx, sections=sections)
+        stepResults = await self._loadStepResults(active, turnId)
+        payload = self._payload(
+            sessionId=sessionId, turnId=turnId, ctx=ctx, sections=sections, stepResults=stepResults
+        )
         return payload, renderMarkdown(payload)
 
     # ------------------------------------------------------------------
@@ -530,6 +552,17 @@ class ReportPlanner:
                 arms = candidate
         return arms
 
+    async def _loadStepResults(
+        self, session: AsyncSession, turnId: uuid.UUID
+    ) -> list[ResearchStepResult]:
+        """本 turn 的步结果（跨 run_state **所有版本**聚合，Task 8 D25）。
+
+        唯一读取入口 `loadStepResultsByTurn`（按 `research_run_state.turn_id` join）；
+        它自身已降级（读失败 / 表缺 ⇒ `[]` + warning），故此处不再包 try —— 报告不得因
+        读步结果而炸。
+        """
+        return await loadStepResultsByTurn(session, turnId)
+
     # ------------------------------------------------------------------
     # 段落分派与装配
     # ------------------------------------------------------------------
@@ -556,6 +589,7 @@ class ReportPlanner:
         turnId: uuid.UUID,
         ctx: _Context,
         sections: tuple[ReportSection, ...],
+        stepResults: list[ResearchStepResult],
     ) -> dict[str, Any]:
         return {
             "sessionId": str(sessionId),
@@ -573,6 +607,7 @@ class ReportPlanner:
                 }
                 for view in ctx.findings
             ],
+            "evidence": {"stepResults": [_stepEvidence(row) for row in stepResults]},
         }
 
     async def _narrativeSection(

@@ -18,6 +18,7 @@ import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import EChart from "../EChart";
 import { isChartType } from "../../utils/chartContract";
+import { EvidencePanel } from "./EvidencePanel";
 
 export interface ReportSourceRef {
   kind: string;
@@ -38,6 +39,22 @@ export interface ReportSection {
   blocks: ReportBlock[];
 }
 
+/** Task 8：单步执行证据（对齐 backend `_stepEvidence` 的 payload 形状，camelCase）。 */
+export interface StepEvidence {
+  index: number;
+  type: string;
+  sql: string | null;
+  status: string;
+  error: string | null;
+  summary: Record<string, unknown> | null;
+  schemaVersion: number | null;
+}
+
+/** Task 8：报告执行证据（跨本 turn 所有 run_state 版本的步结果聚合）。 */
+export interface ReportEvidence {
+  stepResults: StepEvidence[];
+}
+
 export interface ReportPayload {
   sessionId: string;
   turnId: string;
@@ -46,6 +63,8 @@ export interface ReportPayload {
   question: string;
   sections: ReportSection[];
   findingsRef?: unknown[];
+  /** Task 8：可缺省 —— Task 8 之前归档的报告 payload 无此键。 */
+  evidence?: ReportEvidence;
 }
 
 interface ReportRendererProps {
@@ -187,6 +206,7 @@ export function ReportRenderer({ payload }: ReportRendererProps) {
           ))}
         </section>
       ))}
+      <EvidencePanel evidence={payload.evidence} />
     </article>
   );
 }
@@ -241,6 +261,30 @@ function parseSection(value: unknown): ReportSection | null {
   };
 }
 
+function parseStepEvidence(value: unknown): StepEvidence | null {
+  if (!isRecord(value)) return null;
+  return {
+    index: typeof value.index === "number" ? value.index : 0,
+    type: typeof value.type === "string" ? value.type : "",
+    sql: typeof value.sql === "string" ? value.sql : null,
+    status: typeof value.status === "string" ? value.status : "",
+    error: typeof value.error === "string" ? value.error : null,
+    summary: isRecord(value.summary) ? value.summary : null,
+    schemaVersion: typeof value.schemaVersion === "number" ? value.schemaVersion : null,
+  };
+}
+
+/** Task 8：evidence 收窄；缺省 / 非法 → undefined（旧 payload 不破）。 */
+function parseEvidence(value: unknown): ReportEvidence | undefined {
+  if (!isRecord(value)) return undefined;
+  const stepResults = Array.isArray(value.stepResults)
+    ? value.stepResults
+        .map(parseStepEvidence)
+        .filter((step): step is StepEvidence => step !== null)
+    : [];
+  return { stepResults };
+}
+
 export function parseReportPayload(value: Record<string, unknown>): ReportPayload {
   const sections = Array.isArray(value.sections)
     ? value.sections
@@ -255,5 +299,6 @@ export function parseReportPayload(value: Record<string, unknown>): ReportPayloa
     question: typeof value.question === "string" ? value.question : "",
     sections,
     findingsRef: Array.isArray(value.findingsRef) ? value.findingsRef : [],
+    evidence: parseEvidence(value.evidence),
   };
 }

@@ -33,7 +33,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.research_models import ResearchStepResult
+from app.domain.research_models import ResearchRunState, ResearchStepResult
 from app.services.research_agent_ports import MAX_FINDING_ROWS
 from app.services.research_json_encoder import research_json
 
@@ -173,6 +173,46 @@ async def loadStepResults(
         .order_by(ResearchStepResult.step_index)
     )
     return list(rows.scalars().all())
+
+
+async def loadStepResultsByTurn(
+    session: AsyncSession, turnId: uuid.UUID
+) -> list[ResearchStepResult]:
+    """跨该 turn 的**所有** run_state 版本聚合步结果（Task 8 / D25）。
+
+    `research_run_state` 会**版本化**（resume ⇒ ``updateRunState`` 生成新 UUID），步结果
+    挂在**写入当时**的版本下（见 ``ResearchStepResult`` 类 docstring）⇒ 只按单个
+    ``run_state_id`` 读会漏掉早前版本（这正是 Task 6 留下的洞）。故按
+    ``research_run_state.turn_id`` join，覆盖该 turn 的全部版本。
+
+    排序 **(run_state 版本时序, step_index)** 升序：``created_at`` + ``id`` 兜底成全序
+    （同一 turn 的各版本按创建先后），版本内按 ``step_index``。
+
+    **降级**（对齐 ``report_planner._loadArms`` 的 ``begin_nested`` + try/except 口径）：
+    读失败 / 表缺（老测试的 fake session）⇒ ``logger.warning`` + 返回 ``[]`` —— 报告不得
+    因读步结果而炸。用 savepoint 隔离，避免一次失败查询污染调用方事务里已挂起的写入。
+    """
+    try:
+        async with session.begin_nested():
+            rows = await session.execute(
+                select(ResearchStepResult)
+                .join(
+                    ResearchRunState,
+                    ResearchRunState.id == ResearchStepResult.run_state_id,
+                )
+                .where(ResearchRunState.turn_id == turnId)
+                .order_by(
+                    ResearchRunState.created_at.asc(),
+                    ResearchRunState.id.asc(),
+                    ResearchStepResult.step_index.asc(),
+                )
+            )
+            return list(rows.scalars().all())
+    except Exception:  # noqa: BLE001 —— 见 docstring：读失败不该炸掉整份报告
+        logger.warning(
+            "步结果按 turn 跨版本读取失败，降级为空: turnId=%s", turnId, exc_info=True
+        )
+        return []
 
 
 async def persistStepResult(

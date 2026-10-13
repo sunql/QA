@@ -2974,6 +2974,15 @@ export const enUS = {
       versions: "Versions",
       back: "Back to session",
     },
+    evidence: {
+      title: "Execution evidence",
+      step: "Step {index}",
+      status: {
+        success: "Succeeded",
+        failed: "Failed",
+        empty: "No data",
+      },
+    },
     list: {
       title: "Research",
       newQuestion: "New research",

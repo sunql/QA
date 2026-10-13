@@ -2989,6 +2989,15 @@ export const zhCN = {
       versions: "版本",
       back: "返回会话",
     },
+    evidence: {
+      title: "执行证据",
+      step: "步骤 {index}",
+      status: {
+        success: "成功",
+        failed: "失败",
+        empty: "无数据",
+      },
+    },
     list: {
       title: "研究分析",
       newQuestion: "发起新研究",

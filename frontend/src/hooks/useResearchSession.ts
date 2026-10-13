@@ -99,6 +99,16 @@ export function useResearchSession(
       if (!sessionId) return;
       // 先建流（等 onOpen）再提交：顺序颠倒会让首帧事件没有订阅者。
       await startStream(sessionId);
+      // Task 12b fix2：connectStream 的失败分支**刻意**先 signalOpen（兜底触发 onOpen，
+      // 防「先等 onOpen 再提交」的调用方永久挂起）再 set({ error })，故开流失败时
+      // startStream 也会 resolve。这里必须拦截，否则 submitTurn 首行 set({ error: null })
+      // 会抹掉开流错误 ⇒ 追问照提交、无 SSE 订阅者、无任何提示（静默失败）。
+      // 时序确定：signalOpen 同步 resolve 了 opened，但 await 续体是微任务，晚于 catch
+      // 里后续同步的 set({ error }) ⇒ 读到的必是本次开流结果（成功路径 error 保持 null）。
+      const streamError = useResearchStore.getState().error;
+      if (streamError !== null) {
+        throw new Error(streamError);
+      }
       await submitTurn(sessionId, question);
     },
     [sessionId, startStream, submitTurn],

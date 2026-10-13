@@ -993,4 +993,51 @@ describe("ResearchSessionPage", () => {
       await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     });
   });
+
+  // Task 12b fix2（回归）：开流失败时，页内追问**不得静默提交**。
+  //
+  // connectStream 的失败分支**刻意**先 signalOpen（兜底触发 onOpen，防「先等 onOpen
+  // 再提交」的调用方永久挂起）再 set({ error })；故 startStream 开流失败也会 resolve。
+  // 若不拦截，submitFollowUp 会继续 submitTurn，而 submitTurn 首行 set({ error: null })
+  // 会抹掉刚设上的开流错误 ⇒ 追问照提交、无 SSE 订阅者、无任何错误提示 = 静默失败。
+  describe("Task 12b fix2：开流失败时追问不静默提交", () => {
+    it("终态会话追问时开流失败：不提交 POST /turns，且把开流错误暴露给用户", async () => {
+      httpMock.get.mockResolvedValue(makeDetailWithStatus("done"));
+      // 开流失败（网络抖动 / 5xx / 代理中断）：fetch reject ⇒ connectStream 落 error。
+      const streamError = "开流失败：SSE 连接被中断";
+      const fetchMock = vi.fn().mockRejectedValue(new Error(streamError));
+      vi.stubGlobal("fetch", fetchMock);
+
+      renderPage(null);
+
+      // 挂载闸门仍生效：终态会话打开即看，**不**连流。
+      await waitFor(() =>
+        expect(useResearchStore.getState().currentSession?.status).toBe("done"),
+      );
+      await waitFor(() => expect(useResearchStore.getState().loading).toBe(false));
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      // 输入追问 → 点发送。
+      fireEvent.change(screen.getByPlaceholderText("继续提问…"), {
+        target: { value: "再查一次" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+
+      // (a) 流被**尝试**打开（证明确实走到了 startStream 的开流失败路径）。
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      expect(String(fetchMock.mock.calls[0][0])).toContain("sessionId=s1");
+
+      // (b) 用户能看到错误：submitFollowUp 检出开流错误后 throw ⇒ handleSend 的
+      //     catch 触发 ⇒ 弹「出错了」提示。修复前不 throw ⇒ 这里恒找不到（静默失败）。
+      //     注：不在此断言 store.error 的**原文**——开流失败会让 streaming 由 true
+      //     转 false，触发 useResearchSession 的「流结束重拉历史」effect → openSession
+      //     成功分支 set({ error: null })(researchStore.ts:277) 会把该错误再次抹掉。
+      //     故用户可见的即时信号是这条 toast（<Alert> 只闪一帧）。此现象为既有行为，
+      //     本 Task 只消灭「静默提交」。
+      expect(await screen.findByText("出错了")).toBeInTheDocument();
+
+      // (c) 追问**未**提交：POST /turns 从未发生（静默提交被拦下）。
+      expect(httpMock.post).not.toHaveBeenCalled();
+    });
+  });
 });

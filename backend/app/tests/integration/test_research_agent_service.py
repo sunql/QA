@@ -112,8 +112,8 @@ class FakePlanner:
         self._planNone = planNone
         self.calls: list[tuple] = []
 
-    async def plan(self, question, classes, client, modelName):
-        self.calls.append((question, tuple(classes), client, modelName))
+    async def plan(self, question, client, modelName):
+        self.calls.append((question, client, modelName))
         if self._planNone:
             return StepPlanResult(plan=None, prompt_tokens=120, completion_tokens=40)
         steps = self._steps if len(self.calls) == 1 else (self._replanSteps or self._steps)

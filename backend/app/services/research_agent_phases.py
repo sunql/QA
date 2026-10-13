@@ -102,7 +102,6 @@ from app.services.research_agent_stages import (
     ambiguityPrompt,
     candidateConfidence,
     clientModelName,
-    eslClasses,
     hypothesisPrompt,
     meteringModelName,
     rebuildState,
@@ -192,7 +191,7 @@ class ResearchAgentPhasesMixin:
             else state["question"]
         )
         client = await self._llmClient(session, state=state, emit=emit, sessionId=sessionId)
-        result = await self._planner.plan(question, eslClasses(state), client, clientModelName(client))
+        result = await self._planner.plan(question, client, clientModelName(client))
         rawPlan = getattr(result, "plan", result)
         plan = normalizePlan(rawPlan) if rawPlan is not None else singleStepPlan(question)
         state["plan"] = plan
@@ -577,7 +576,7 @@ def _capDataSteps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def planQuestionWithFeedback(question: str, feedback: dict[str, Any] | None) -> str:
     """把计划 checkpoint 的 modify 反馈回灌成 planner 输入（Task 6.5-4）。
 
-    真实 `StepQueryPlanner.plan(question, classes, client, model_name)` 没有反馈参数
+    真实 `StepQueryPlanner.plan(question, client, model_name)` 没有反馈参数
     （Step 0 实测），故反馈只能经**问题文本**进入 —— 与 chat 注入 scopeQuestion /
     priorState 同款。反馈是用户内容，先经 `neutralizeFence` 打断围栏标签，避免其
     提前闭合 `<user_content>` 被当成指令执行。

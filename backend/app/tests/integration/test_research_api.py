@@ -147,7 +147,7 @@ class _EmptyEsl:
 class _NoopPlanner:
     """无步计划：normalizePlan(None) 归一为空步计划。"""
 
-    async def plan(self, question, classes, client, modelName):
+    async def plan(self, question, client, modelName):
         return None
 
 

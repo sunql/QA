@@ -109,7 +109,7 @@ class _SingleStepPlanner:
     def __init__(self, seen: list[str] | None = None) -> None:
         self.seen: list[str] = seen if seen is not None else []
 
-    async def plan(self, question: str, classes: list[Any], client: Any, modelName: str | None) -> StepPlanResult:
+    async def plan(self, question: str, client: Any, modelName: str | None) -> StepPlanResult:
         self.seen.append(question)
         return StepPlanResult(
             plan=None,

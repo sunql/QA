@@ -139,7 +139,6 @@ class StepQueryPlanner:
     async def plan(
         self,
         question: str,
-        classes: list[Any],
         client: BaseLlmClient,
         model_name: str,
     ) -> StepPlanResult:

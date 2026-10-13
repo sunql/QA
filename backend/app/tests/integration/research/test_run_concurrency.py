@@ -134,7 +134,7 @@ class _NoPlanPlanner:
     """`plan=None` ⇒ 状态机按单步语义走（非多步问题），确定性暂停在计划点。"""
 
     async def plan(
-        self, question: str, classes: list[Any], client: Any, modelName: str | None
+        self, question: str, client: Any, modelName: str | None
     ) -> StepPlanResult:
         return StepPlanResult(plan=None, prompt_tokens=0, completion_tokens=0)
 
@@ -146,7 +146,7 @@ class _SqlPlanner:
     字段，执行面只接受「计划里已带 SQL」的步（本测试无 Nl2SqlService）。
     """
 
-    async def plan(self, question: str, classes: list[Any], client: Any, modelName: str | None) -> Any:
+    async def plan(self, question: str, client: Any, modelName: str | None) -> Any:
         return MultiStepPlan(
             steps=(
                 _SqlStep(

@@ -85,7 +85,7 @@ class MultiStepMixin:
         """
         try:
             result = await self._stepPlanner.plan(
-                dto.question, pc.classes, pc.client, pc.selected.model_name,
+                dto.question, pc.client, pc.selected.model_name,
             )
         except Exception:
             logger.warning("拆步判定失败，回退单步: %s", dto.question, exc_info=True)

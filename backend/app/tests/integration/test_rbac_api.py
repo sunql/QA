@@ -73,6 +73,14 @@ async def _rbacSeeds(client: AsyncClient, dbSession: AsyncSession) -> None:
     from scripts.seed_rbac import seedRbacBaseline
 
     await seedRbacBaseline(dbSession)
+
+    # 清除 admin 的 must_change_password 标志（seedRbacBaseline 默认 True）
+    admin = await dbSession.execute(select(User).where(User.username == "admin"))
+    admin = admin.scalar_one_or_none()
+    if admin and admin.must_change_password:
+        admin.must_change_password = False
+        await dbSession.commit()
+
     await _seedMenus(dbSession)
     assert client is not None  # 确保 client 已构造（TRUNCATE + app 就绪）
 

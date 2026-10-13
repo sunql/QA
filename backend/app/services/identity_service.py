@@ -165,6 +165,8 @@ class IdentityService:
             row.email = dto.email or None
         if "enabled" in provided and dto.enabled is not None:
             row.enabled = dto.enabled
+        if "restricted_access" in provided and dto.restricted_access is not None:
+            row.restricted_access = dto.restricted_access
         row.updated_time = datetime.now(timezone.utc)
         await session.flush()
         await self._outbox.enqueue(

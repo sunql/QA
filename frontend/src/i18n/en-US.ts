@@ -236,6 +236,7 @@ export const enUS = {
       password: "Password",
       passwordPlaceholder: "Leave blank to keep current password",
       passwordStrengthHint: "Min 8 chars, must contain letter and digit",
+      passwordTooLong: "Password UTF-8 bytes exceed 72",
     },
     role: {
       code: "Role Code",

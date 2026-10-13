@@ -12,7 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import getCurrentUser
+from app.dependencies import getCurrentUser, requireAdmin
 from app.domain.error_messages import MSG_PARAM_ACTIVE_ONLY_MODELS
 from app.domain.schemas import LlmConfigCreate, LlmConfigRead, LlmConfigUpdate
 from app.infrastructure.database import getDb
@@ -31,7 +31,7 @@ async def listModels(
     return [LlmConfigRead.model_validate(c) for c in configs]
 
 
-@router.post("", response_model=LlmConfigRead, status_code=201)
+@router.post("", response_model=LlmConfigRead, status_code=201, dependencies=[Depends(requireAdmin)])
 async def createModel(
     dto: LlmConfigCreate,
     session: AsyncSession = Depends(getDb),
@@ -48,7 +48,7 @@ async def getModel(configId: int, session: AsyncSession = Depends(getDb)) -> Llm
     return LlmConfigRead.model_validate(config)
 
 
-@router.put("/{configId}", response_model=LlmConfigRead)
+@router.put("/{configId}", response_model=LlmConfigRead, dependencies=[Depends(requireAdmin)])
 async def updateModel(
     configId: int,
     dto: LlmConfigUpdate,
@@ -59,7 +59,7 @@ async def updateModel(
     return LlmConfigRead.model_validate(config)
 
 
-@router.delete("/{configId}", status_code=204)
+@router.delete("/{configId}", status_code=204, dependencies=[Depends(requireAdmin)])
 async def deleteModel(configId: int, session: AsyncSession = Depends(getDb)) -> None:
     svc = ModelConfigService()
     await svc.deactivate(session, configId)

@@ -12,7 +12,18 @@ from typing import Literal
 MIN_LENGTH = 8
 """最小长度。中策略：8 位。"""
 
+MAX_UTF8_BYTES = 72
+"""bcrypt 内部上限。超过 72 字节的密码被静默截断（审计 Finding 6）。
+   Schema 层 _checkPasswordBytes 已用此常量；服务层此处兜底。"""
+
 _PASSWORD_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*\d).{" + str(MIN_LENGTH) + r",}$")
+
+
+def _checkPasswordBytes(v: str) -> str:
+    """Pydantic field_validator helper：校验密码 UTF-8 字节数不超过 72。"""
+    if len(v.encode("utf-8")) > MAX_UTF8_BYTES:
+        raise ValueError("密码 UTF-8 字节数超过 72")
+    return v
 
 WEAK = "weak"
 MEDIUM = "medium"
@@ -25,6 +36,8 @@ def validate_password(password: str) -> tuple[bool, str | None]:
     - 弱：返回 ``(False, "MSG_PASSWORD_TOO_WEAK")``
     - 符合：返回 ``(True, None)``
     """
+    if len(password.encode("utf-8")) > MAX_UTF8_BYTES:
+        return False, "MSG_PASSWORD_TOO_LONG"
     if not _PASSWORD_RE.match(password):
         return False, "MSG_PASSWORD_TOO_WEAK"
     return True, None

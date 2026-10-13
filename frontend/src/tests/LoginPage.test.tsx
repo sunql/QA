@@ -38,7 +38,7 @@ describe("LoginPage", () => {
 
   it("401 显示 invalidCredentials", async () => {
     (authApi.login as any).mockRejectedValue({
-      response: { status: 401, data: { error: "MSG_INVALID_CREDENTIALS" } },
+      response: { status: 401, data: { detail: { code: "AUTH_INVALID" } } },
     });
     const user = userEvent.setup();
     render(<MemoryRouter><LoginPage /></MemoryRouter>);

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import Field, field_validator
+
+from app.services.password_policy import _checkPasswordBytes
 
 from app.domain.schemas import CamelModel
 
@@ -31,6 +33,8 @@ class UserCreate(CamelModel):
     enabled: bool = True
     password: str = Field(min_length=8, max_length=128)
 
+    _validate_password = field_validator("password")(_checkPasswordBytes)
+
 
 class UserUpdate(CamelModel):
     """编辑用户。PATCH 语义：仅提供的字段被更新；email 传空串视为清空。"""
@@ -38,6 +42,8 @@ class UserUpdate(CamelModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=128)
     email: str | None = Field(default=None, max_length=255)
     enabled: bool | None = None
+    # Task 4.2 (audit-fx-4.2)：L2 文档访问权限标记
+    restricted_access: bool | None = None
 
 
 class UserMeRead(CamelModel):
@@ -53,6 +59,8 @@ class UserMeRead(CamelModel):
     role_codes: list[str] = Field(default_factory=list)
     department_codes: list[str] = Field(default_factory=list)
     db_user_id: int | None = None
+    # Task 4.2 (audit-fx-4.2)：L2 文档访问权限标记
+    restricted_access: bool = False
 
 
 class UserRead(CamelModel):

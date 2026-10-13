@@ -5,6 +5,55 @@ import type { ApiResponse } from "../types/common";
 import { i18n } from "../i18n";
 import { useAuthStore } from "../stores/authStore";
 
+// ---------------------------------------------------------------------------
+// AppError interface — unified error shape for frontend error handling
+// ---------------------------------------------------------------------------
+
+/** Unified error shape: code + status + detail, extends Error. */
+export interface AppError extends Error {
+  code: string;
+  status: number;
+  detail?: unknown;
+}
+
+/**
+ * Normalize any AxiosError into an AppError.
+ *
+ * Extracts `detail.code` from the backend response (Task 1.2 / 2.1 error code
+ * definitions) so downstream consumers (e.g. LoginPage) can branch on the code
+ * rather than parsing raw message strings.
+ *
+ * 401 side effects (localStorage.clear + redirect) are preserved from Task 2.1.
+ */
+export function normalizeError(err: AxiosError<ApiResponse<unknown>>): AppError {
+  const status = err.response?.status ?? 0;
+  const rawDetail = (err.response?.data as { detail?: unknown } | undefined)?.detail;
+  const detail = rawDetail ?? null;
+  const code =
+    typeof rawDetail === "object" && rawDetail !== null && "code" in rawDetail
+      ? String((rawDetail as { code: unknown }).code)
+      : "UNKNOWN";
+  const message =
+    typeof rawDetail === "object" && rawDetail !== null && "message" in rawDetail
+      ? String((rawDetail as { message: unknown }).message)
+      : err.message ?? "Unknown error";
+
+  // Object.assign to a fresh Error — same pattern as brief GREEN
+  const appErr: AppError = Object.assign(new Error(message), { code, status, detail });
+
+  // 401: clear token + redirect (Task 2.1 — preserved)
+  if (status === 401) {
+    localStorage.removeItem("token");
+    window.location.href = "/auth/login";
+  }
+
+  return appErr;
+}
+
+// ---------------------------------------------------------------------------
+// Message API holder
+// ---------------------------------------------------------------------------
+
 /**
  * antd message 实例的 holder。
  *
@@ -80,7 +129,9 @@ export function createHttpClient(): AxiosInstance {
       // 401：token 失效 / 未登录 → 清 store 触发重定向到 /login
       // 不弹 toast（避免每次跳转都弹"登录已失效"，已经准备重定向了）
       // 直接 setState 而非 logout()：拦截器是同步路径，不需要异步调 API
+      // audit-fx-2.1：同时清理 localStorage（持久层），防止过期 token 被 persist 恢复
       if (status === 401) {
+        localStorage.removeItem("token");
         useAuthStore.setState({
           token: null,
           user: null,
@@ -98,16 +149,9 @@ export function createHttpClient(): AxiosInstance {
       if (status !== 401) {
         showError(errMsg);
       }
-      // 携带领域异常 detail（如 NL2SQL 校验差异），供错误消息折叠展示
-      // 携带 HTTP status，便于业务页面按状态分流（如 403 → 权限提示 Modal）
-      const err = new Error(errMsg) as Error & { detail?: string; status?: number };
-      if (typeof apiDetail === "string") {
-        err.detail = apiDetail;
-      }
-      if (typeof status === "number") {
-        err.status = status;
-      }
-      return Promise.reject(err);
+      // audit-fx-3.3: use normalizeError to produce AppError with code + status + detail
+      const normalized = normalizeError(error);
+      return Promise.reject(normalized);
     }
   );
 

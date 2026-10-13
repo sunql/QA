@@ -3,10 +3,10 @@
 真实 PostgreSQL + 完整 SQLAlchemy 链路（按 Harness/rules/测试规范.md）。
 覆盖：
 - Bearer 命中有效 session → DB user + DB roles（忽略 stub 头）
-- Bearer 但 session revoked → 403 MSG_TOKEN_REVOKED
-- Bearer 但 session 过期（DB expires_at 早于 now）→ 403
-- Bearer 但 user disabled → 403
-- Bearer invalid token → 403
+- Bearer 但 session revoked → 401 AUTH_EXPIRED（audit-fx-2.1 split）
+- Bearer 但 session 过期（DB expires_at 早于 now）→ 401 AUTH_EXPIRED
+- Bearer 但 user disabled → 403 PermissionDeniedError（身份确认但权限不足）
+- Bearer invalid token → 401 AUTH_INVALID（audit-fx-2.1 split）
 - stub 模式 X-User-Id 命中 DB → DB roles 覆盖 header
 """
 
@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
-from app.dependencies import getCurrentUser
+from app.dependencies import AuthenticationFailed, getCurrentUser
 from app.domain.exceptions import PermissionDeniedError
 from app.models.rbac import Role, User, UserRole, UserSession
 from app.services.jwt_codec import sign_jwt
@@ -96,10 +96,11 @@ class TestBearerActiveSession:
         assert current.dbUserId == user.id
         assert current.jti == jti
 
-    async def test_invalid_token_raises_403(
+    async def test_invalid_token_raises_401(
         self, dbSession: AsyncSession
     ) -> None:
-        with pytest.raises(PermissionDeniedError):
+        # audit-fx-2.1: invalid JWT -> 401 AuthenticationFailed (not 403)
+        with pytest.raises(AuthenticationFailed):
             await getCurrentUser(
                 authorization="Bearer not-a-jwt",
                 xUserId=None,
@@ -111,9 +112,10 @@ class TestBearerActiveSession:
 
 
 class TestBearerRevokedOrExpiredSession:
-    async def test_revoked_session_raises_403(
+    async def test_revoked_session_raises_401(
         self, dbSession: AsyncSession
     ) -> None:
+        # audit-fx-2.1: revoked session -> 401 AuthenticationFailed (not 403)
         user = await _create_user_with_role(
             dbSession, username="revoked_bob", role_code="user"
         )
@@ -130,7 +132,7 @@ class TestBearerRevokedOrExpiredSession:
         )
         await dbSession.commit()
 
-        with pytest.raises(PermissionDeniedError) as exc_info:
+        with pytest.raises(AuthenticationFailed) as exc_info:
             await getCurrentUser(
                 authorization=f"Bearer {token}",
                 xUserId=None,
@@ -139,12 +141,13 @@ class TestBearerRevokedOrExpiredSession:
                 xUserDepartments=None,
                 session=dbSession,
             )
-        assert "失效" in exc_info.value.message or "吊销" in exc_info.value.message
+        # MSG_TOKEN_REVOKED: "登录已失效（密码已修改或被吊销），请重新登录"
+        assert "失效" in exc_info.value.detail["message"] or "吊销" in exc_info.value.detail["message"]
 
-    async def test_expired_db_session_raises_403(
+    async def test_expired_db_session_raises_401(
         self, dbSession: AsyncSession
     ) -> None:
-        """user_sessions.expires_at 已过 → 403（即便 JWT 本身未过期）。"""
+        """user_sessions.expires_at 已过 → 401（即便 JWT 本身未过期）（audit-fx-2.1）。"""
         user = await _create_user_with_role(
             dbSession, username="expired_carol", role_code="user"
         )
@@ -160,7 +163,8 @@ class TestBearerRevokedOrExpiredSession:
         )
         await dbSession.commit()
 
-        with pytest.raises(PermissionDeniedError):
+        # audit-fx-2.1: expired DB session -> 401 (token revoked/expired)
+        with pytest.raises(AuthenticationFailed):
             await getCurrentUser(
                 authorization=f"Bearer {token}",
                 xUserId=None,
@@ -172,9 +176,10 @@ class TestBearerRevokedOrExpiredSession:
 
 
 class TestBearerDisabledUser:
-    async def test_disabled_user_raises_403(
+    async def test_disabled_user_raises_401(
         self, dbSession: AsyncSession
     ) -> None:
+        # audit-fx-2.1 fix round 1: disabled user -> 401 AUTH_DISABLED (not 403)
         user = await _create_user_with_role(
             dbSession, username="disabled_dave", role_code="user", enabled=False
         )
@@ -189,7 +194,7 @@ class TestBearerDisabledUser:
         )
         await dbSession.commit()
 
-        with pytest.raises(PermissionDeniedError) as exc_info:
+        with pytest.raises(AuthenticationFailed) as exc_info:
             await getCurrentUser(
                 authorization=f"Bearer {token}",
                 xUserId=None,
@@ -198,7 +203,7 @@ class TestBearerDisabledUser:
                 xUserDepartments=None,
                 session=dbSession,
             )
-        assert exc_info.value.message == "请先登录"
+        assert exc_info.value.detail["code"] == "AUTH_DISABLED"
 
 
 class TestStubModeDbEnrichment:

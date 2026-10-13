@@ -433,6 +433,7 @@ MSG_AGENT_TOOL_UNREGISTERED = (
 MSG_INVALID_CREDENTIALS = "用户名或密码错误"
 MSG_OLD_PASSWORD_INCORRECT = "当前密码不正确"
 MSG_PASSWORD_TOO_WEAK = "密码至少 8 位且必须包含字母和数字"
+MSG_PASSWORD_TOO_LONG = "密码 UTF-8 字节数超过 72"
 MSG_TOKEN_INVALID = "登录已失效，请重新登录"
 MSG_TOKEN_EXPIRED = "登录已过期，请重新登录"
 MSG_TOKEN_REVOKED = "登录已失效（密码已修改或被吊销），请重新登录"

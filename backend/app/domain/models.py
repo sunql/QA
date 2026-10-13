@@ -145,6 +145,8 @@ class SessionTokenUsage(Base):
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
     purpose: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    cost_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # P1-2：成本来源（"measured" 真实 token / "estimated" 估算 / "unknown" 兜底）
 
     model: Mapped[LlmConfig | None] = relationship(back_populates="usages", lazy="selectin")
 

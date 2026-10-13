@@ -41,6 +41,7 @@ class TokenUsageService:
         completionTokens: int,
         cost: Decimal,
         purpose: str | None = None,
+        cost_source: str | None = None,  # P1-2
     ) -> SessionTokenUsage:
         """记录一次 LLM 调用的 Token 消耗并提交。"""
         totalTokens = promptTokens + completionTokens
@@ -53,16 +54,18 @@ class TokenUsageService:
             total_tokens=totalTokens,
             cost=Decimal(str(cost)),
             purpose=purpose,
+            cost_source=cost_source,
         )
         session.add(usage)
         await session.commit()
         await session.refresh(usage)
         logger.info(
-            "记录 Token 消耗: session=%s model=%s total=%d cost=%.6f",
+            "记录 Token 消耗: session=%s model=%s total=%d cost=%.6f source=%s",
             sessionId,
             modelName,
             totalTokens,
             float(usage.cost),
+            cost_source,
         )
         return usage
 

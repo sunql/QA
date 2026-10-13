@@ -949,6 +949,12 @@ class AnalysisHypothesis(Base, TimestampMixin):
     verification_sql: Mapped[str] = mapped_column(Text, nullable=False)
     # 触发该假设的用户问题（追溯）
     turn_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # P1-5：用户点「验证」按钮后的自动验证结果（不自动执行，按用户触发 QUERY 链路）
+    verification_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    support_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rows_sample: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSONB, nullable=True
+    )
 
     __table_args__ = (
         Index("ix_analysis_hypothesis_session_id", "session_id"),

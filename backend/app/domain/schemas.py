@@ -1774,6 +1774,10 @@ class HypothesisRead(CamelModel):
     verification_sql: str
     turn_question: str | None = None
     created_time: datetime | None = None
+    # P1-5：自动验证状态（用户点「验证」按钮后由后端落库）
+    verification_status: str | None = None
+    support_count: int | None = None
+    rows_sample: list[dict[str, Any]] | None = None
 
 
 class ChatResponse(CamelModel):

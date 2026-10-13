@@ -253,6 +253,10 @@ export interface HypothesisView {
   verificationSql: string;
   turnQuestion: string | null;
   createdTime: string | null;
+  // P1-5：自动验证状态（用户点「验证」按钮后由后端落库）
+  verificationStatus?: string | null;
+  supportCount?: number | null;
+  rowsSample?: Record<string, unknown>[] | null;
 }
 
 // 前端消息（后端响应 + UI 状态）

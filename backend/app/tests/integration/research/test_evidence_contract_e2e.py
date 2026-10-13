@@ -20,9 +20,12 @@ BackgroundTasks 于 ``client.post`` 返回前跑完 ⇒ 无需轮询 / SSE。
 - (c) Decimal/date 序列化：已有 **HTTP-SSE** 覆盖（``research/test_sse_serialization.py:135``，
   另有 stage 层 ``research/test_step_result_snapshot.py:213``）；**本文件新增**其在
   **报告端点**层的覆盖（``summary`` 数值标量端到端是 JSON 字符串）；
-- (d) 零支持不标 verified：此前**仅** stage 层覆盖
-  （``research/test_hypothesis_verdict.py:171/187/290``）⇒ **本文件新增 HTTP 报告端点层**；
+- (d) 零支持不标 verified：此前 stage 层（``research/test_hypothesis_verdict.py:171/187``）
+  + **报告 compose 层**（``:290`` 已断 ``payload["findingsRef"][0]["verified"]``）覆盖 ⇒
+  **本文件新增 HTTP 报告端点层**（端到端经 ``GET /report`` 序列化）；
 - (e) 步结果进报告 ``payload.evidence``：此前仅 planner 层覆盖 ⇒ **本文件新增 HTTP 端点层**。
+  注：本文件的 turn 只跑**单个** run_state 版本（1 步），故其行数交叉校验不覆盖**跨版本**
+  聚合 —— 跨版本（2 版本 / 6 步）覆盖在 ``research/test_step_result_by_turn.py:185``。
 """
 
 from __future__ import annotations

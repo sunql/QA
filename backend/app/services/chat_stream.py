@@ -494,6 +494,11 @@ class StreamMixin:
                 intent = IntentType.FOLLOW_UP
         if outcome.sql is None:
             # 计划 target=无法回答：plan + 固定友好回答 + done，不生成 sql/chart，不执行查询
+            # R1 fix: 提前初始化 EVENT_DONE 引用变量（定义在 line 541 return 之后）
+            totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
+            totalCost = self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)
+            affinityConfig = type("FakeAffinity", (), {"model_name": None})()
+            affinityPayload = None
             answer = self._unanswerableAnswerText(dto.question, pc.classes)
             # 单步执行计划：统一展示 MultiStepPlanCard（2026-08-16）
             yield self._singleStepOverview("无法回答", dto.question)

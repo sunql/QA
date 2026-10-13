@@ -39,6 +39,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import socket
 import uuid
 from collections.abc import AsyncIterator
 from functools import partial
@@ -118,6 +120,15 @@ from app.services.research_session_service import (
     _coerceJsonSafe,
 )
 from app.services.research_sql_runner import ResearchSqlRunner
+from app.services.research_task_service import (
+    TASK_KIND_RESUME,
+    TASK_KIND_TURN,
+    TASK_STATUS_DONE,
+    TASK_STATUS_FAILED,
+    claimTask,
+    enqueueTask,
+    finishTask,
+)
 from app.services.step_query_planner import StepQueryPlanner
 from app.services.token_usage_service import TokenUsageService
 from app.services.wiki_vector_service import WikiVectorService
@@ -134,6 +145,10 @@ _ESL_TOP_K = 5
 
 _bus = bus
 """进程内事件总线单例（模块级别名：便于测试与诊断，见 research_event_bus）。"""
+
+_WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
+"""台账认领者标识（Task 10+11）：进程启动时算一次（host:pid）—— 崩溃后新进程 id 不同，
+便于在 ``research_task.worker_id`` 上区分「谁认领的」。"""
 
 
 async def _persistAndPublish(sessionId: str, event: str, payload: dict[str, Any]) -> None:
@@ -461,9 +476,13 @@ async def createTurn(
     )
     # 先取原始值再 commit（不依赖 expire_on_commit 语义，避免提交后 lazy-load）
     turnId, mode, userId = turn.id, row.mode, user.dbUserId
+    # 台账入队必须在 commit **之前**：入队与 turn 同事务落地，后台任务才 claim 得到。
+    task = await enqueueTask(db, sessionId=sessionId, turnId=turnId, kind=TASK_KIND_TURN)
+    taskId = str(task.id)
     await db.commit()
     background.add_task(
         _runTurnInBackground,
+        taskId,
         str(sessionId),
         str(turnId),
         payload.question,
@@ -555,17 +574,39 @@ async def answerCheckpoint(
         logger.info("检查点决策幂等回放: checkpoint=%s action=%s", checkpointId, payload.action)
         return CheckpointAnswerRead(sessionStatus=sessionRow.status, nextPhase=replayPhase)
     nextPhaseValue = decideResume(checkpoint, payload.action, dict(payload.choice or {})).phase
+    choice = dict(payload.choice or {})
+    # 台账入队：resume 由 checkpoint 驱动（turn_id 取 checkpoint.turn_id）。**注意**：
+    # `decideResume` 是纯函数，入队是本 handler 的**第一处写** —— getDb 只在异常时
+    # rollback、**从不 commit**（infrastructure/database.py），故这里必须**自己 commit**，
+    # 否则后台 `_resumeTurnInBackground` 自开的会话看不到 task 行、`claimTask` 恒 False。
+    task = await enqueueTask(
+        db,
+        sessionId=checkpoint.session_id,
+        turnId=checkpoint.turn_id,
+        kind=TASK_KIND_RESUME,
+        payload={
+            "checkpointId": str(checkpoint.id),
+            "action": payload.action,
+            "choice": choice,
+        },
+    )
+    # commit 会 expire ORM 对象 ⇒ **先快照**返回值要用的 sessionStatus，避免提交后
+    # 异步懒加载（与 createTurn 的 turnId/mode/userId 快照同款）。
+    statusSnapshot = sessionRow.status
+    taskId, checkpointId, checkpointSessionId = str(task.id), str(checkpoint.id), str(checkpoint.session_id)
+    await db.commit()
     background.add_task(
         _resumeTurnInBackground,
-        str(checkpoint.id),
-        str(checkpoint.session_id),
+        taskId,
+        checkpointId,
+        checkpointSessionId,
         payload.action,
-        dict(payload.choice),
+        choice,
     )
     # 报**库中真实**状态（与上面的幂等回放分支同口径，review Fix E）：硬编码 "running" 报的
     # 是「状态机接下来要去的状态」，不是此刻的事实 —— 此刻会话正 `awaiting_user`（正因为
     # 它停在检查点，才存在这个 pending checkpoint 可答）。
-    return CheckpointAnswerRead(sessionStatus=sessionRow.status, nextPhase=nextPhaseValue)
+    return CheckpointAnswerRead(sessionStatus=statusSnapshot, nextPhase=nextPhaseValue)
 
 
 # ---------------------------------------------------------------------------
@@ -810,6 +851,7 @@ def _isTerminal(event: str, payload: dict[str, Any]) -> bool:
 
 
 async def _runTurnInBackground(
+    taskId: str,
     sessionId: str,
     turnId: str,
     question: str,
@@ -817,7 +859,7 @@ async def _runTurnInBackground(
     mode: str,
     idempotencyKey: str | None = None,
 ) -> None:
-    """后台跑状态机：自开会话 → `runTurn` → 收尾 commit。
+    """后台跑状态机：自开会话 → 认领台账 → `runTurn` → 收尾 commit。
 
     异常已在状态机内 `research.error` + 会话置 failed；此处只兜底 rollback 与日志
     （后台任务不得把异常抛回响应 —— 那会让 202 变成 500）。
@@ -828,12 +870,21 @@ async def _runTurnInBackground(
 
     `idempotencyKey`（Task 2）：透传进 `runTurn` 落 run state，供重试回放同一 turnId。
 
+    台账（Task 10+11）：认领走原子条件 UPDATE，**认领后立即 commit** —— 否则 run 抛异常
+    时 rollback 会把租赁一并撤掉，reaper 就看不到「有任务在跑」。收尾：`done`（含
+    `awaiting_user` 暂停，本单元工作已完成）与 `failed`。
+
     执行权冲突（`RunClaimConflictError`）：**不得**走 `_markTerminalFailure` ——
     另一条运行正在正常推进，标 failed 会毁掉它的 UI。与 checkpoint 冲突同款：
     发 `research.error(checkpoint_conflict)`（uiHint=conflict）告知用户「另一轮在跑」。
+    台账本条落 `failed` 是对的（本次没干活），但**不动**会话状态。
     """
     service = buildResearchAgentService()
     async with getSessionFactory()() as session:
+        if not await claimTask(session, taskId=uuid.UUID(taskId), workerId=_WORKER_ID):
+            logger.warning("研究任务认领未命中，跳过本轮: task=%s session=%s", taskId, sessionId)
+            return
+        await session.commit()  # 租赁先落地：后续 rollback 不得把它撤掉
         try:
             await service.runTurn(
                 session,
@@ -845,25 +896,37 @@ async def _runTurnInBackground(
                 emit=partial(_persistAndPublish, sessionId),
                 idempotencyKey=idempotencyKey,
             )
+            await finishTask(session, taskId=uuid.UUID(taskId), status=TASK_STATUS_DONE)
             await session.commit()
         except RunClaimConflictError as exc:
             logger.warning("会话已有进行中的轮次，本轮放弃: session=%s turn=%s", sessionId, turnId)
             await session.rollback()
+            await _finishTaskQuietly(session, taskId, str(exc))
             await _persistAndPublish(
                 sessionId, EVENT_ERROR, errorPayload(ERROR_CHECKPOINT_CONFLICT, str(exc))
             )
         except Exception as exc:  # noqa: BLE001 —— 后台任务兜底：留痕 + 回滚，不上抛
             logger.exception("研究 turn 后台执行失败: session=%s turn=%s", sessionId, turnId)
             await session.rollback()
-            await _markTerminalFailure(service, session, sessionId, str(exc))
+            await _markTerminalFailure(
+                service, session, sessionId, str(exc), taskId=uuid.UUID(taskId)
+            )
 
 
 async def _resumeTurnInBackground(
-    checkpointId: str, sessionId: str, action: str, choice: dict[str, Any]
+    taskId: str,
+    checkpointId: str,
+    sessionId: str,
+    action: str,
+    choice: dict[str, Any],
 ) -> None:
     """后台按用户决策续跑状态机（resolveCheckpoint 在 `resumeTurn` 内完成）。
 
     `sessionId` 由调用方显式传入（Task 8）：`emit` 必须绑定会话键才能投到正确的流。
+
+    台账（Task 10+11）：认领 + 立即 commit（同 `_runTurnInBackground`）；三种异常分支
+    都把本条落 `failed`（本次单元没干成活）——`CheckpointConflictError` 用新事务
+    （该分支**不** rollback，见下）。
 
     并发冲突（CheckpointConflictError）：抛出 409 事件，不落 failed 状态——第二次
     提交的用户看到的是 SSE 流里的 error.event（前端据此弹 409 提示），而不是静默
@@ -875,6 +938,10 @@ async def _resumeTurnInBackground(
     """
     service = buildResearchAgentService()
     async with getSessionFactory()() as session:
+        if not await claimTask(session, taskId=uuid.UUID(taskId), workerId=_WORKER_ID):
+            logger.warning("研究任务认领未命中，跳过续跑: task=%s checkpoint=%s", taskId, checkpointId)
+            return
+        await session.commit()  # 租赁先落地
         try:
             await service.resumeTurn(
                 session,
@@ -883,6 +950,7 @@ async def _resumeTurnInBackground(
                 choice=choice,
                 emit=partial(_persistAndPublish, sessionId),
             )
+            await finishTask(session, taskId=uuid.UUID(taskId), status=TASK_STATUS_DONE)
             await session.commit()
         except CheckpointStaleError as exc:
             logger.warning("checkpoint 已过期，会话落终态: checkpoint=%s", checkpointId)
@@ -893,19 +961,25 @@ async def _resumeTurnInBackground(
             )
             await session.rollback()
             await _abortExpiredSession(session, sessionId)
+            await _finishTaskQuietly(session, taskId, str(exc))
         except CheckpointConflictError as exc:
             # 并发提交：另一请求已抢先决策 ⇒ 那条 resume 正在正常推进，会在终态自行释放，
-            # 故这里**不动**执行权（释放了反而放并发进来）。
+            # 故这里**不动**执行权（释放了反而放并发进来）。该分支不 rollback ⇒ 事务可能
+            # 仍开着：先 rollback 关掉它，再在新事务里给台账收尾。
             logger.warning("checkpoint 决策冲突，转 409: checkpoint=%s action=%s", checkpointId, action)
             await _persistAndPublish(
                 sessionId,
                 EVENT_ERROR,
                 errorPayload(ERROR_CHECKPOINT_CONFLICT, str(exc)),
             )
+            await session.rollback()
+            await _finishTaskQuietly(session, taskId, str(exc))
         except Exception as exc:  # noqa: BLE001 —— 未预期异常：留痕 + 回滚
             logger.exception("研究 turn 恢复失败: checkpoint=%s action=%s", checkpointId, action)
             await session.rollback()
-            await _markTerminalFailure(service, session, sessionId, str(exc))
+            await _markTerminalFailure(
+                service, session, sessionId, str(exc), taskId=uuid.UUID(taskId)
+            )
 
 
 async def _abortExpiredSession(session: AsyncSession, sessionId: str) -> None:
@@ -934,24 +1008,48 @@ async def _abortExpiredSession(session: AsyncSession, sessionId: str) -> None:
 
 
 async def _markTerminalFailure(
-    service: ResearchAgentService, session: AsyncSession, sessionId: str, message: str
+    service: ResearchAgentService,
+    session: AsyncSession,
+    sessionId: str,
+    message: str,
+    taskId: uuid.UUID | None = None,
 ) -> None:
-    """后台 wrapper 兜底：补发终态 error（关流）+ 会话落 failed（rollback 后同 session 开新事务）。
+    """后台 wrapper 兜底：补发终态 error（关流）+ 会话落 failed + 台账收尾（同一事务）。
 
     **单一终态路径**：本函数只服务「后台 wrapper 捕获到未预期异常」，code 恒为终态码
     `ERROR_TURN_FAILED`。Task 14 / N4 移除的旧写法 `if code not in TERMINAL_ERROR_CODES:
     return` 因 code 恰是终态字面量而**恒假**——与 docstring「不硬编码字面量」一起说谎，是死分支；
     集合判定只保留在 `_isTerminal`（事件侧决定是否关流）。rollback 后写库失败只留痕、
     不掩盖原始异常（原始异常已由调用方 `logger.exception` 留痕）。
+
+    台账（Task 10+11）：`taskId` 传入时，`finishTask(failed)` 与 `markFailed` 挂进**同一次**
+    提交（`markFailed` 只 UPDATE 会话、不 commit）—— 会话落 failed 与台账落 failed 同生共死，
+    不留「会话已终态、台账仍 leased ⇒ 被下轮 reaper 误当孤儿」的窗口。
     """
     await _persistAndPublish(
         sessionId, EVENT_ERROR, errorPayload(ERROR_TURN_FAILED, message, phase=None)
     )
     try:
         await service.markFailed(session, uuid.UUID(sessionId))
+        if taskId is not None:
+            await finishTask(session, taskId=taskId, status=TASK_STATUS_FAILED, error=message)
         await session.commit()
     except Exception:  # noqa: BLE001 —— rollback 后写库失败只留痕，不掩盖原始异常
         logger.exception("终态错误落 failed 失败: session=%s", sessionId)
+
+
+async def _finishTaskQuietly(session: AsyncSession, taskId: str, message: str) -> None:
+    """在**新事务**里把台账落 `failed`；失败只留痕、不上抛（善后路径）。
+
+    调用方已（或就地）`rollback`，故这里自开新事务并自行 commit —— 与 `_abortExpiredSession`
+    同款「善后自开事务」写法。用于 `RunClaimConflictError` / `CheckpointConflictError` /
+    `CheckpointStaleError` 三条**不该动会话状态**（或不走 `_markTerminalFailure`）的分支。
+    """
+    try:
+        await finishTask(session, taskId=uuid.UUID(taskId), status=TASK_STATUS_FAILED, error=message)
+        await session.commit()
+    except Exception:  # noqa: BLE001 —— 善后失败只留痕，不掩盖已通过 SSE 发给用户的原因
+        logger.exception("任务台账落 failed 失败: task=%s", taskId)
 
 
 # ---------------------------------------------------------------------------

@@ -464,6 +464,38 @@ class ResearchSessionService:
         """会话落 `failed` 终态**并**释放执行权（单条 UPDATE，见 `_setTerminalAndRelease`）。"""
         await self._setTerminalAndRelease(session, sessionId, "failed")
 
+    async def failSessionIfActive(
+        self, session: AsyncSession, sessionId: uuid.UUID
+    ) -> bool:
+        """**条件**把非终态会话落 `failed` 并释放执行权；返回是否真的改了（Task 10+11）。
+
+        与 `failSession`（无条件盲写 `_setTerminalAndRelease`）的关键区别：**已终态的
+        会话一个字都不动**。启动回收（reaper）必须用它，否则崩溃回收会把已经 `done`
+        的会话翻成 `failed`、连报告一起作废。
+
+        条件 UPDATE `WHERE id=:id AND status NOT IN 终态`（同 `abortSessionIfActive` /
+        `releaseActiveRun` 的原子条件 UPDATE 口径）：先读后写是 TOCTOU。**不 commit**。
+        `rowcount==0`（已终态或不存在）⇒ `False`，只留痕。
+        """
+        result = await session.execute(
+            update(ResearchSession)
+            .where(
+                ResearchSession.id == sessionId,
+                ResearchSession.status.not_in(TERMINAL_SESSION_STATUSES),
+            )
+            .values(status="failed", active_run_id=None)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 1:
+            await self._syncSessionRow(session, sessionId, activeRunId=None, status="failed")
+            logger.info("会话落 failed 并释放执行权: id=%s", sessionId)
+            return True
+        status = await session.scalar(
+            select(ResearchSession.status).where(ResearchSession.id == sessionId)
+        )
+        logger.info("failSessionIfActive 未命中（已终态或不存在）: id=%s status=%s", sessionId, status)
+        return False
+
     async def abortSessionIfActive(
         self, session: AsyncSession, sessionId: uuid.UUID
     ) -> str | None:

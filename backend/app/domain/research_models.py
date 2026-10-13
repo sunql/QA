@@ -38,6 +38,12 @@ _EVENT_LEN = 50
 """事件名列长（最长事件名 ``research.step.start`` = 19 字符；留余量，与既有 ``_*_LEN`` 同风格）。"""
 
 
+_TASK_KIND_LEN = 20
+_TASK_STATUS_LEN = 20
+_WORKER_LEN = 64
+"""进程内持久任务台账的长度常量（Task 10+11）。"""
+
+
 def _utcnow() -> datetime:
     """时区感知的当前 UTC 时间（与 models.py 保持一致）。"""
     return datetime.now(UTC)
@@ -271,6 +277,56 @@ class ResearchStepResult(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+
+class ResearchTask(Base):
+    """进程内持久任务台账（Task 10+11）。
+
+    **不新增进程 / 不改运行时拓扑**：执行仍在 ``BackgroundTasks`` 内联跑、SSE 仍走
+    进程内总线。本表只解决一个洞 —— 崩溃 / 重启会让会话的 ``active_run_id`` **永久占用**
+    （用户此后每次提交都 409，``abort`` 对 ``running`` 也 409），启动回收据此把孤儿
+    任务标 ``orphaned`` 并释放会话。
+
+    形态刻意与「独立 worker 进程 + 租约守护」不同（那会切断 SSE 流、打崩测试契约）：
+    ``attempt`` / ``max_attempts`` / ``worker_id`` / ``lease_until`` 都只**记录**在案
+    （本 Task 不实现重试 / 多副本守护），供将来演进，不在此处消费。**不建** ``last_phase``
+    列（无消费方，不自动重跑 = 本 Task 的明确裁定，YAGNI）。
+    """
+
+    __tablename__ = "research_task"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), _session_fk(), nullable=False, index=True
+    )
+    # resume 类任务无关联 turn（由 checkpoint 驱动）⇒ 可空。
+    turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), _turn_fk(), nullable=True, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(_TASK_KIND_LEN), nullable=False)
+    status: Mapped[str] = mapped_column(String(_TASK_STATUS_LEN), nullable=False)
+    attempt: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    worker_id: Mapped[str | None] = mapped_column(String(_WORKER_LEN), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=sa_text("'{}'::jsonb")
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
     )
 
 

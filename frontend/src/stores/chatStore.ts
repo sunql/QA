@@ -201,8 +201,6 @@ interface ChatState {
   datasourceId: number | null;
   selectedModelId: number | null;
   error: string | null;
-  // P1-3：当前流式 run 标识（每次 sendMessage 重新生成，用于 closure guard）
-  currentRunId: string | null;
   // P1-3：当前 placeholder 助手消息 id（流式结束后置 null；切会话/重发时旧 id 标 aborted）
   currentAssistantMessageId: string | null;
   // P1-3：EOF 守门设 true（stream interrupted: no done/error before EOF）
@@ -457,7 +455,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   datasourceId: null,
   selectedModelId: null,
   error: null,
-  currentRunId: null,
   currentAssistantMessageId: null,
   interrupted: false,
   sessions: [],
@@ -540,8 +537,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     writeLastSessionId(get().channel, sessionId);
     invalidatePendingLoads();
 
-    // P1-3：run + assistant id 立即分配
-    const runId = uuidv4();
+    // P1-3：assistant id 立即分配
     const assistantMessageId = uuidv4();
 
     const userMsg: ChatMessage = {
@@ -562,7 +558,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       messages: [...state.messages, userMsg, placeholderMsg],
       loading: true,
       error: null,
-      currentRunId: runId,
       currentAssistantMessageId: assistantMessageId,
       interrupted: false,
     }));
@@ -592,22 +587,37 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       }
     };
 
+    // P1-3：closure 守卫 —— 所有 12 handler 头加。
+    // currentAssistantMessageId 为 null 时（即 sendMessageStream 被直接调用，非 chatStore.sendMessage），
+    // 不拦截任何事件（让 chatApi.test.ts 的直接 SSE 测试能正常收到帧）。
+    const isCurrent = () => {
+      const id = get().currentAssistantMessageId;
+      return id === null || id === assistantMessageId;
+    };
+
     try {
       if (useStream) {
         await sendMessageStream(payload, {
-          onMeta: (intent) =>
+          onMeta: (intent) => {
+            if (!isCurrent()) return;
             set((state) => ({
               messages: patchLastMessage(state.messages, {
                 intent: isIntent(intent) ? intent : undefined,
               }),
-            })),
-          onPlan: (plan) =>
+            }));
+          },
+          onPlan: (plan) => {
+            if (!isCurrent()) return;
             set((state) => ({
               messages: patchLastMessage(state.messages, { queryPlan: plan }),
-            })),
-          onSql: (sql) =>
-            set((state) => ({ messages: patchLastMessage(state.messages, { sql }) })),
-          onChart: (chart: StreamChartData) =>
+            }));
+          },
+          onSql: (sql) => {
+            if (!isCurrent()) return;
+            set((state) => ({ messages: patchLastMessage(state.messages, { sql }) }));
+          },
+          onChart: (chart: StreamChartData) => {
+            if (!isCurrent()) return;
             set((state) => ({
               messages: patchLastMessage(state.messages, {
                 chartType: chart.chartType,
@@ -616,8 +626,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 visualRationale: chart.visualRationale,
                 data: chart.data,
               }),
-            })),
-          onStepPlanOverview: (steps) =>
+            }));
+          },
+          onStepPlanOverview: (steps) => {
+            if (!isCurrent()) return;
             set((state) => ({
               messages: patchLastMessage(state.messages, {
                 steps: steps.map(
@@ -630,15 +642,19 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   })
                 ),
               }),
-            })),
-          onStepPlan: (step) =>
+            }));
+          },
+          onStepPlan: (step) => {
+            if (!isCurrent()) return;
             set((state) => ({
               messages: patchLastMessage(
                 patchStep(state.messages, step.stepIndex, { status: "running" }),
                 { currentStepIndex: step.stepIndex }
               ),
-            })),
-          onStepResult: (result) =>
+            }));
+          },
+          onStepResult: (result) => {
+            if (!isCurrent()) return;
             set((state) => ({
               messages: patchStep(state.messages, result.stepIndex, {
                 status: stepStatusFromResult(result.error),
@@ -651,20 +667,26 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 visualRationale: result.visualRationale ?? null,
                 queryPlan: result.queryPlan ?? null,
               }),
-            })),
-          onDataQuality: (payload) =>
+            }));
+          },
+          onDataQuality: (payload) => {
+            if (!isCurrent()) return;
             set((state) => ({
               messages: patchLastMessage(state.messages, {
                 dataQuality: payload.badges,
               }),
-            })),
-          onClassRecall: (info) =>
+            }));
+          },
+          onClassRecall: (info) => {
+            if (!isCurrent()) return;
             set((state) => ({
               messages: patchLastMessage(state.messages, {
                 classRecall: info,
               }),
-            })),
-          onToken: (content) =>
+            }));
+          },
+          onToken: (content) => {
+            if (!isCurrent()) return;
             set((state) => {
               const last = state.messages[state.messages.length - 1];
               return {
@@ -672,7 +694,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   content: (last.content ?? "") + content,
                 }),
               };
-            }),
+            });
+          },
           onDone: ({
             tokensUsed,
             cost,
@@ -686,8 +709,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             queryPlan,
             visualRationale,
           }) => {
-            // P1-3：若 currentAssistantMessageId 已被后续调用覆盖，跳过清理
-            if (get().currentAssistantMessageId !== assistantMessageId) return;
+            if (!isCurrent()) return;
             set((state) => ({
               messages: finalizeRunningSteps(
                 patchLastMessage(state.messages, {
@@ -710,8 +732,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             void attachHypotheses();
           },
           onError: (message, detail) => {
-            // P1-3：若 currentAssistantMessageId 已被后续调用覆盖，跳过清理
-            if (get().currentAssistantMessageId !== assistantMessageId) return;
+            if (!isCurrent()) return;
             set((state) => ({
               messages: patchLastMessage(state.messages, {
                 content: message,

@@ -13,6 +13,16 @@
 若只标「已过期」，则「崩溃后立刻重启」的窗口（租约未到期）根本回收不到，会话仍被
 永久锁死。**多副本部署下**，A 副本启动会回收 B 副本正在跑的任务 ⇒ 需周期回收 +
 租约 gate 的守护（后续任务）。
+
+**覆盖面边界**（如实登记，不实现）：``reapOrphanedTasks`` 只回收 ``status='leased'``
+（崩在**跑中**）。它**不**覆盖「入队台账 ``commit`` 成功、后台任务被 ``claimTask`` 认领
+之前」这一窗口崩溃后留下的 ``pending`` 台账 —— 例如 ``answerCheckpoint`` 里 commit 成功、
+``background.add_task`` 之前进程死掉：台账停在 ``pending``、会话停在 ``awaiting_user``
+且仍持 ``active_run_id`` ⇒ 重启后 reaper 扫不到它，**不自愈**：用户需自行
+``POST /abort``（``awaiting_user`` 正是 abort 的唯一白名单）或重答该 checkpoint 才能续跑
+（**可恢复，非永久死路**）。**为何不顺手回收 ``pending``**：启动时 ``awaiting_user`` +
+持 ``active_run_id`` 是**设计内的合法状态**（跨重启的暂停会话，运行只是暂停等用户决策），
+naive 回收会把它误杀 ⇒ 修法需人类裁定（已登记的后续项）。
 """
 
 from __future__ import annotations
@@ -175,6 +185,12 @@ async def reapOrphanedTasks(
     """启动回收：标记**所有** ``leased`` 任务为 ``orphaned`` 并释放其会话执行权。
 
     返回被 orphan 的 ``session_id`` 列表（去重、保序）。**不 commit**（调用方提交）。
+
+    **覆盖面（限定）**：只回收 ``leased``（崩在**跑中**）——「死路」这一说法只对 ``leased``
+    成立。**不**覆盖「入队 commit 成功、后台任务被 ``claimTask`` 认领之前」崩溃留下的
+    ``pending`` 台账（如 ``answerCheckpoint`` 的 commit → ``background.add_task`` 窗口）：
+    该窗口重启后不自愈，用户需 ``POST /abort`` 或重答该 checkpoint 才能续跑（可恢复，非永久
+    死路）。详见模块 docstring「覆盖面边界」。
 
     **为什么标所有 leased 而非只标过期**：单进程下「启动即全孤儿」才是正确且可测的
     判据（详见模块 docstring）。幂等：第二次没有 ``leased`` 行 ⇒ 返回空、无额外写入。

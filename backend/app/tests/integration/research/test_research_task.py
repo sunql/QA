@@ -16,6 +16,8 @@
 4. 不误伤已终态会话：``done`` 会话 + 陈旧 ``leased`` task ⇒ 会话**仍 ``done``**，task 仍 orphaned；
 5. reaper 幂等：连调两次 ⇒ 第二次返回空、无额外写入；
 6. ``failSessionIfActive`` 三态：``running`` ⇒ True 且落 failed/释放；终态 ⇒ False 且不动。
+7. **边界固化（已知缺口，非期望行为）**：``pending`` 台账**不**被 reaper 回收 —— 见
+   ``test_reaper_does_not_reap_pending_task``。
 """
 
 from __future__ import annotations
@@ -177,6 +179,40 @@ async def _crashMidRun(dbSession: AsyncSession, sid: str) -> ResearchTask:
     task = await enqueueTask(dbSession, sessionId=sidUuid, turnId=turn.id, kind=TASK_KIND_TURN)
     await dbSession.commit()
     assert await claimTask(dbSession, taskId=task.id, workerId="crashed") is True
+    await dbSession.commit()
+    return task
+
+
+async def _pauseAwaitingUserWithPendingTask(
+    dbSession: AsyncSession, sid: str
+) -> ResearchTask:
+    """造「commit 成功、后台任务认领之前」崩溃的形态：``awaiting_user`` + 持执行权 + ``pending`` task。
+
+    与 ``_crashMidRun`` 的唯一区别：会话停在 ``awaiting_user``（而非 ``running``），且 task
+    **不** ``claimTask``（仍是 ``pending``）—— 正是 ``answerCheckpoint`` 里 ``commit()`` 成功、
+    ``background.add_task`` 之前进程死掉留下的台账形态（真实窗口，见模块 docstring）。
+    """
+    sidUuid = uuid.UUID(sid)
+    mode = await dbSession.scalar(
+        text("SELECT mode FROM research_session WHERE id = :sid"), {"sid": sid}
+    )
+    turn = await researchModule._sessionService.appendTurn(
+        dbSession, sessionId=sidUuid, role="user", content={"question": _QUESTION}
+    )
+    runState = ResearchRunState(session_id=sidUuid, turn_id=turn.id, mode=mode)
+    dbSession.add(runState)
+    await dbSession.commit()
+    await dbSession.execute(
+        text(
+            "UPDATE research_session SET status = 'awaiting_user', active_run_id = :rid "
+            "WHERE id = :sid"
+        ),
+        {"rid": runState.id, "sid": sid},
+    )
+    await dbSession.commit()
+    task = await enqueueTask(
+        dbSession, sessionId=sidUuid, turnId=turn.id, kind=TASK_KIND_RESUME
+    )
     await dbSession.commit()
     return task
 
@@ -401,3 +437,43 @@ async def test_fail_session_if_active_only_touches_running(
         await dbSession.commit()
         status, _run = await _sessionStatusAndRun(dbSession, sid)
         assert status == terminal, f"终态会话不得被改动: {terminal} -> {status}"
+
+
+# ---------------------------------------------------------------------------
+# 7. 边界固化：reaper 只认 `leased`，`pending` 台账**永不**回收
+# ---------------------------------------------------------------------------
+
+
+async def test_reaper_does_not_reap_pending_task(
+    client: AsyncClient, dbSession: AsyncSession, authHeaders: dict[str, str]
+) -> None:
+    """**已知边界（非期望行为）**：``reapOrphanedTasks`` 只回收 ``status='leased'``，
+    ``pending`` 台账**永不被标 orphaned**，其会话（``awaiting_user`` + 持 ``active_run_id``）
+    也**不被动**。
+
+    真实窗口（本用例如实固化、**不**主张这是对的）：``answerCheckpoint`` 里入队台账 commit
+    成功、``background.add_task`` 认领之前进程死掉 ⇒ 台账停在 ``pending``、会话停在
+    ``awaiting_user`` 且仍持 ``active_run_id``。重启后 reaper 扫不到它 ⇒ **不自愈**：用户需
+    自行 ``POST /abort``（``awaiting_user`` 正是 abort 的唯一白名单）或重答该 checkpoint
+    才能续跑 —— **可恢复，非永久死路**。
+
+    已登记的后续项：reaper 不回收 ``pending``；修法需人类裁定，因为启动时 ``awaiting_user``
+    + 持 ``active_run_id`` 是**合法**状态（跨重启的暂停会话），naive 回收会把它误杀。
+
+    本用例**不用** ``xfail``：它固化现状，让这个边界可见（哪天 reaper 扩到 ``pending``，
+    这里会先红，提醒同步更新文档与语义）。
+    """
+    sid = await _createSession(client, authHeaders)
+    task = await _pauseAwaitingUserWithPendingTask(dbSession, sid)
+    beforeStatus, beforeRun = await _sessionStatusAndRun(dbSession, sid)
+    assert beforeStatus == "awaiting_user" and beforeRun is not None, (beforeStatus, beforeRun)
+
+    reaped = await reapOrphanedTasks(dbSession, sessionService=ResearchSessionService())
+    await dbSession.commit()
+
+    assert uuid.UUID(sid) not in reaped, f"pending 台账的会话不得出现在回收列表: {reaped}"
+    row = await _taskRow(dbSession, task.id)
+    assert row["status"] == "pending", f"pending 台账不得被标 orphaned: {row['status']}"
+    afterStatus, afterRun = await _sessionStatusAndRun(dbSession, sid)
+    assert afterStatus == "awaiting_user", f"会话状态不得被动: {afterStatus}"
+    assert afterRun == beforeRun, f"active_run_id 不得被清: {afterRun}"

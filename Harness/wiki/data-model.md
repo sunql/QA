@@ -242,3 +242,60 @@ idempotency_key  VARCHAR            -- 重复触发去重（原子条件 UPDATE 
 
 > 文件名长度约束：≤ 32 字符（见 [[../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode/memory/alembic-version-filename-32-char-limit]]）。
 > 本批 0118 / b1ea6cb32588 初版超限（35 / 38），2026-10-13 改短（27 / 25）。
+
+---
+
+## Phase 环节二 增量：研究平台级表
+
+**日期**：2026-10-13 · **变更**：[feat-research-platform](../changes/feat-research-platform/summary.md)
+· **Wiki**：[[research_platform_capabilities]]
+· **前置**：[§环节一](#phase-环节一-增量研究会话证据契约表)
+
+### research_event_outbox（事件台账，SSE 断线回放）
+
+```
+seq         BIGSERIAL PK                    -- 单调游标（弃 created_at：同刻并列会漏/重）
+session_id  UUID NOT NULL
+event       VARCHAR(50) NOT NULL
+payload     JSONB NOT NULL DEFAULT '{}'::jsonb   -- 先过 research_json 再落库（Decimal→str）
+created_at  TIMESTAMPTZ NOT NULL
+
+索引：ix_research_event_outbox_session_id (session_id)
+```
+
+**承重语义**：**先落库、再广播**（写用**独立短会话** ⇒ 事件活过状态机 rollback）。
+**刻意无 `run_state_id`**（emit 绑定早于 run_state 创建，回放按会话）、**无 UUID event_id**（冗余）。
+无 TTL / 无会话删除级联（**遗留**：孤儿行留存，见变更记录 §7）。
+
+### research_task（任务台账，认领/回收）
+
+```
+id            UUID PK
+session_id    UUID FK → research_session.id (ON DELETE CASCADE)
+turn_id       UUID FK → research_turn.id    (ON DELETE CASCADE)
+kind          VARCHAR(20) NOT NULL
+status        VARCHAR(20) NOT NULL          -- pending / leased / done / failed / orphaned
+attempt       INTEGER NOT NULL DEFAULT 0
+max_attempts  INTEGER NOT NULL DEFAULT 1
+worker_id     VARCHAR(64)
+lease_until   TIMESTAMPTZ
+payload       JSONB NOT NULL DEFAULT '{}'::jsonb   -- 含相位游标（崩溃时知道跑到哪个相位）
+error         TEXT
+created_at / updated_at TIMESTAMPTZ
+
+索引：ix_research_task_session_id (session_id)
+      ix_research_task_turn_id    (turn_id)
+      ix_research_task_lease_until (lease_until)
+```
+
+**承重语义**：认领是**原子条件 UPDATE**（无 TOCTOU）；启动期 **reaper** 把 `leased` 孤儿翻 `orphaned`
+并**释放会话 `active_run_id`**。**边界**：只回收 `leased`；`pending` 与「启动时 `awaiting_user` 且持权」
+是合法态（见 memory `qa-system-research-task-reaper-scope`）。
+
+### 迁移文件
+
+- `alembic/versions/0120_research_event_outbox.py` — `research_event_outbox` 建表（29 字符）
+- `alembic/versions/0121_research_task.py` — `research_task` 建表（21 字符）
+
+迁移链：`0117 → b1ea6cb32588_run_state → 0118 → 0119 → 0120 → 0121`（**非**线性 0117→0118；
+`0118` 的 `down_revision` 是 hash 命名的 `b1ea6cb32588`）。生产库 head：`0121`（2026-10-13 部署冒烟实测）。

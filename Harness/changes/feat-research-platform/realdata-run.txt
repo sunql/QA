@@ -1,0 +1,61 @@
+=== 真实数据验证 2026-10-13T06:5xZ · git HEAD 09173fd ===
+
+说明（如实登记，**异**于环节一）：环节二**未**另写 `backend/scripts/<feature>_realdata.py`。
+本环节的「真实数据」证据由两部分构成：
+
+  ① **回归证明**：环节一脚本 `scripts/research_evidence_realdata.py` 在**环节二 HEAD 重跑** ——
+     证明环节二（尤其 T14 动了 summary 呈现）**没有打破**环节一的证据契约。
+  ② **平台路径**：环节二集成套件 `app/tests/integration/research/`（**真实 PostgreSQL 5434 +
+     完整 HTTP 链路**），其中 T16 两个跨特性交汇点用**独立直查 DB** 交叉校验。
+
+> 环境契约（每次 export）：`TEST_DATABASE_URL=…@localhost:5434/qa_metadata_test` 与
+> `TEST_NEO4J_URI=bolt://localhost:7688`（生产是 7687，绝不打）；unit / services / integration
+> **不**同进程跑（互相 truncate）。
+
+── ① 环节一脚本在环节二 HEAD 重跑（回归证明）──
+命令：
+    DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test' \
+        .venv/bin/python -m scripts.research_evidence_realdata
+退出码：0    stderr：（空）
+
+[guard] 目标库 = qa_metadata_test @ localhost:5434（测试库，写库闸放行）
+[purge] 上次运行的残留：删会话 0 行、连同 step_result 0 行（逐级清理）
+[seed] 会话 a7b8609c-d2ad-4c65-935a-2f0c0cbda74e / turn 2a808a36-8281-4449-83b1-9e1913fefb88
+       版本 v1=ad7a1e8b-88fe-4c27-91c6-9c584dac9db9 v2=8efeaf4b-9b3f-4dee-8bc7-e1bcf961069c（各 3 步）
+
+── 路径 1：跨版本聚合（Task 8 / D25）
+  [PASS] 跨版本聚合返回 6 行（两个版本各 3 行） — 实际 6
+  [PASS] 两个 run_state 版本的行都在（只按单版本读会漏）
+  [PASS] 排序 = (版本时序, step_index)：v1 在前、版本内按步序
+  [PASS] step_index 序列 = [0,1,2,0,1,2]
+  [PASS] status 派生正确（success/empty/failed 三路）
+  [PASS] 无关 turn 读取为空（不串号）
+
+── 路径 2：报告 payload.evidence 透传（Task 8）
+  [PASS] 报告 evidence.stepResults 6 条 — 实际 6
+  [PASS] 字段集恰为契约集（无 rows / raw_result_ref）
+  [PASS] 报告透传 == DB 真值（行数 + step_index 序列，独立直查） — 报告 [0, 1, 2, 0, 1, 2] vs DB [0, 1, 2, 0, 1, 2]
+  [PASS] 报告照常产出 markdown
+
+── 路径 3：summary 数值标量序列化口径（D14）
+  [PASS] summary 数值标量端到端是字符串（非 float）
+  [PASS] 至少断言到一个数值标量（否则本断言形同虚设） — 计 30
+  [PASS] 首步 baseline == '100'（Decimal->str 逐字） — 实际 '100'
+  [PASS] 首步 schemaVersion == 1（raw_result_ref 带的 schema 版本）
+
+断言合计 14 条，通过 14 条
+REALDATA RESULT: PASS
+
+── ② 环节二集成套件（真实 PG + 完整 HTTP）──
+命令：
+    TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test' \
+    TEST_NEO4J_URI='bolt://localhost:7688' \
+        .venv/bin/python -m pytest app/tests/integration/research/ -q
+输出：`79 passed, 21 warnings in 41.20s`（warning = slowapi 对 3.14 的 DeprecationWarning，无关）
+
+其中 Task 16 的**两个跨特性交汇点**（真实 PG + 独立直查交叉校验）：
+  J1  test_over_budget_terminal_error_is_persisted_and_replayable  （T15 × T12）
+      —— 超预算终止帧带 `id:<seq>`（已落 outbox）且该 seq 可经 `?lastEventId=` 回放出**同一条** error 帧。
+  J2  test_over_budget_abort_releases_session_for_reuse              （T15 × 释放执行权不变式）
+      —— 超预算 `failed` 后 `active_run_id IS NULL`，同一会话新 `POST /turns` 得 **202**（不是永久 409），
+         并按更高预算**真跑到 done**（证明是复用，不是「受理后又立刻失败」）。

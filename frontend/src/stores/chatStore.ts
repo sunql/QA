@@ -486,7 +486,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // "stale" = 期间用户已经切走 / 发了新消息，由更新的那次动作说了算，这里不插手
   },
 
-  setDatasourceId: (id) => set({ datasourceId: id }),
+  setDatasourceId: (id) => {
+    if (get().datasourceId === id) return;  // P0-3：早返避免无谓 reset
+    // 切数据源 = 全新会话（不允许旧 state 跨数据源继承）
+    set({
+      datasourceId: id,
+      sessionId: generateSessionId(),
+      messages: [],
+      isStreaming: false,
+    });
+  },
 
   setSelectedModelId: (id) => set({ selectedModelId: id }),
 

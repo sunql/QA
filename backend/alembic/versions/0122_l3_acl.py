@@ -7,8 +7,8 @@ L3 机密文档访问控制白名单表：
 - granted_by FK → users.id（记录授权人）
 - granted_at DateTime server_default=func.now()
 
-Revision ID: 0105
-Revises: 0104
+Revision ID: 0122
+Revises: 0121
 Create Date: 2026-10-12
 """
 
@@ -18,8 +18,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0105"
-down_revision = "0104"
+revision = "0122"
+down_revision = "0121"
 branch_labels = None
 depends_on = None
 

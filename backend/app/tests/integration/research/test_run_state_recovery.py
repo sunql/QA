@@ -25,6 +25,7 @@ from app.services.enterprise_semantic_layer import (
     BusinessObjectRef,
     ESLExtraction,
 )
+from app.services.research_agent_phases import DEFAULT_MODE, _MODE_GUIDANCE
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_session_service import ResearchSessionService
 from app.services.step_query_planner import StepPlanResult
@@ -314,3 +315,7 @@ async def test_rewritten_question_persisted_and_restored_across_resume(
     # 问题开头」断言 —— 本用例要证的仍是「问题来自 runState.current_question」而非 seed。
     assert plan_seen[-1].startswith(rewritten_question), plan_seen[-1]
     assert not plan_seen[-1].startswith(seed_question), plan_seen[-1]
+    # 计数守卫（Task 13 fix1）：指引恰好注入一次。上面的 `startswith` 挡不住「双份注入」
+    # （`rq\n\ng\n\ng` 两个 startswith 都通过），故数出现次数，并钉住精确组合文本。
+    assert plan_seen[-1].count(_MODE_GUIDANCE[DEFAULT_MODE]) == 1, plan_seen[-1]
+    assert plan_seen[-1] == f"{rewritten_question}\n\n{_MODE_GUIDANCE[DEFAULT_MODE]}", plan_seen[-1]

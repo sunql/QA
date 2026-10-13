@@ -58,3 +58,31 @@ def test_mode_guidances_are_pairwise_distinct() -> None:
     """三段指引两两不同 —— 防「复制粘贴一个串改个 key」的假差异化。"""
     values = [planQuestionForMode(_QUESTION, mode) for mode in get_args(ResearchMode)]
     assert len(set(values)) == len(values), values
+
+
+# 旧措辞里出现、被刻意移除的「顺序 / 步间依赖」短语（Task 13 fix1）。
+# 只钉**缺席**，不钉新措辞的具体用词 —— 后者随文案演进而变，前者是禁令。
+_SEQUENCING_WORDS = ("下钻", "逐层", "收窄", "随后")
+
+
+def test_guidance_has_no_sequencing_or_data_dependency_wording() -> None:
+    """文本 lint：mode 指引不得出现「顺序收窄 / 依赖前序步结果」措辞（Task 13 fix1）。
+
+    两条**承重**约束（正是旧措辞违反的），据此把带依赖的措辞钉死为不许回归：
+
+    1. planner 系统提示 ``prompts_zh.PROMPT_STEP_PLANNER_SYSTEM`` 规定
+       「只拆**彼此独立、无法用一条 SQL 完成**的子问题；一次 SQL 能算完的对比/汇总不要拆」，
+       且「**如实列出全部子问题**，不要因为数量多就自行合并或截断」。
+    2. 执行器 ``generateStepSql``（``research_agent_execution.py``）**只用本步自己的
+       ``sub_question``** 生成 SQL（``baseQuestion = step.sub_question or state.question``），
+       **从不把前序步的行结果喂给下一步** —— 任何「第二步基于第一步结果收窄/下钻」的指引，
+       都描述了一个执行器结构上无法实现的流程。
+
+    诚实的边界：这是**文本 lint**，不是行为证明 —— 换个同义词即可绕过。它存在的意义
+    是阻止有人把措辞**改回**带步间依赖的旧版本（旧版含 ``下钻`` / ``逐层`` / ``收窄`` / ``随后``）。
+    """
+    for mode, guidance in _MODE_GUIDANCE.items():
+        for phrase in _SEQUENCING_WORDS:
+            assert phrase not in guidance, (
+                f"{mode} 指引含被移除的顺序/依赖措辞 {phrase!r}：{guidance}"
+            )

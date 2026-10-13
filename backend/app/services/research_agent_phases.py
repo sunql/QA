@@ -191,14 +191,19 @@ class ResearchAgentPhasesMixin:
             else state["question"]
         )
         # 顺序承重：先组合 modify 反馈、再叠加 mode 指引（两者都要保留，不能互相覆盖）。
-        # 指引**只**送 planner：`singleStepPlan(question)` 的回落步会把问题原样当子问题
-        # 交给 NL2SQL，而 mode 指引是**拆步**指令（「每步只回答一个子问题」）—— 混进去
-        # 会让回落步的 SQL 生成读到一个自相矛盾的提问，故回落仍用未注入的 `question`。
+        # 注入的 `plannedQuestion` 只当 planner 入参，**不**等于「只送 planner」：planner 会把
+        # 入参记成 `original_question`，`normalizePlan` 又抄进 `plan["originalQuestion"]` 并随
+        # 计划检查点 options(JSONB) **落库**（research 链路无读者，当前是惰性字段，但仍是把
+        # prompt 脚手架写进存储）。故两处都改回**未注入**的 `question`：① 下面的回落
+        # `singleStepPlan(question)`；② 归一化后的 `originalQuestion`（见下一处注释）。
         plannedQuestion = planQuestionForMode(question, state.get("mode") or DEFAULT_MODE)
         client = await self._llmClient(session, state=state, emit=emit, sessionId=sessionId)
         result = await self._planner.plan(plannedQuestion, client, clientModelName(client))
         rawPlan = getattr(result, "plan", result)
         plan = normalizePlan(rawPlan) if rawPlan is not None else singleStepPlan(question)
+        # `normalizePlan` 是模块级纯函数，看不到未注入值 ⇒ 只能在调用点用**新 dict** 覆盖
+        # （不就地改任何共享对象；`singleStepPlan` 分支的 `originalQuestion` 本已等于 question）。
+        plan = {**plan, "originalQuestion": question}
         state["plan"] = plan
         await self._recordUsage(
             session,
@@ -502,25 +507,32 @@ PLAN_FEEDBACK_HEADER = "[用户修改要求]"
 
 # --- mode 计划指引（Task 13）-------------------------------------------------
 # 报告章节早已按 mode 差异化（`report_planner._MODE_SECTIONS`），但**计划**链路对 mode
-# 零消费 —— 三 mode 拆出的步一模一样。这里按 mode 给 planner 一段**拆步指引**，经
-# 「问题文本注入」进入（与 `planQuestionWithFeedback` 同款：`StepQueryPlanner.plan`
-# 没有 mode 形参，也不该有）。
+# 零消费 —— 三 mode 拆出的步一模一样。这里按 mode 给 planner 一段指引，经「问题文本注入」
+# 进入（与 `planQuestionWithFeedback` 同款：`StepQueryPlanner.plan` 没有 mode 形参，也不该有）。
 # 键集合与 `research_schemas.ResearchMode` 的取值逐一对应（那边是 Literal，无常量可引；
 # 默认值走 `DEFAULT_MODE`，不硬编码 "research" 字面量）。
+#
+# 措辞两条硬约束（Task 13 fix1，之前违反过，见 `test_guidance_has_no_sequencing_...` 守卫）：
+# ① 不得指示拆分「一条 SQL 能算完的对比/汇总」（planner 系统提示的独立性子问题规则）；
+# ② 不得暗示**步间依赖**（`下钻` / `逐层` / `收窄` / `随后` 之类）—— 执行器
+#    `generateStepSql` 只用本步 `sub_question` 生成 SQL，前序步的行结果**从不**喂给下一步。
+# 故三 mode 只在「覆盖哪些**互相独立**的口径/分面」上区分，不在「先后顺序」上区分。
 _MODE_GUIDANCE: dict[str, str] = {
     DEFAULT_MODE: (
-        "【研究指引·探查】先取总体口径与量级（总量/趋势），再沿关键维度逐层拆解，"
-        "最后落到能解释整体的明细项；各步保持同一时间窗与过滤口径，每步只回答一个子问题。"
+        "【研究指引·探查】覆盖总体口径与量级（总量/趋势），并分别给出若干**互相独立**的分面视角"
+        "（如按品类、区域、供应商各看同一口径）；各分面共用同一时间窗与过滤条件、彼此不依赖，"
+        "每步只回答一个子问题，且能由一条 SQL 一次算完的口径不要拆。"
     ),
     "attribution": (
-        "【研究指引·归因】第一步先定位差异：把目标值与基线（上期/目标/同类）对齐，"
-        "找出偏离最大的维度项；随后对差异最大的维度逐层下钻收窄范围；最后用对照验证"
-        "（剔除该因素后差异是否收敛）。每步只收敛一个候选原因，不要并列罗列。"
+        "【研究指引·归因】围绕同一基线（上期/目标/同类）分别量化若干**互相独立**的候选解释维度"
+        "（如价格、数量、区域、供应商各自偏离多少），每个候选维度各用一条 SQL 独立对照基线、"
+        "彼此不依赖，便于报告比较哪个偏离最大；每步只回答一个子问题，"
+        "且能由一条 SQL 一次算完的口径不要拆。"
     ),
     "compare": (
-        "【研究指引·对比】先固定统一口径（同一时间窗、同一过滤条件、同一聚合方式），"
-        "再对每个对比对象**对称**取数（任一侧缺失即该维度不成立），最后算差额与占比，"
-        "并把差异按维度拆分到可解释的来源。"
+        "【研究指引·对比】每个对比对象都取**同一口径**（同一时间窗、同一过滤条件、同一聚合方式），"
+        "各对象各自独立取数、互不依赖（任一侧缺失即该维度不成立），并分别给出各对象的量值与构成拆分；"
+        "**若一条 SQL 即可算出全部对比，就不要拆分**，每步只回答一个子问题。"
     ),
 }
 

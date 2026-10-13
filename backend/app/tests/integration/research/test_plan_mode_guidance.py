@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1 import research as researchModule
 from app.domain.enums import DataSourceType
 from app.domain.models import DataSource, User
+from app.domain.multi_step_plan import MultiStepPlan, StepPlan
 from app.infrastructure.security.crypto import encryptApiKey
 from app.services.chart_service import ChartService
 from app.services.enterprise_semantic_layer import BusinessObjectRef, ESLExtraction
@@ -118,6 +119,31 @@ class _CapturingPlanner:
     ) -> StepPlanResult:
         self.questions.append(question)
         return StepPlanResult(plan=None, prompt_tokens=0, completion_tokens=0)
+
+
+class _PlanningPlanner:
+    """返回**真实** `MultiStepPlan`（驱动 `normalizePlan` 分支，Task 13 fix2 用）。
+
+    `_CapturingPlanner` 返回 `plan=None` ⇒ 走 `singleStepPlan` 回落，其 `originalQuestion`
+    本已等于未注入值，看不到 `normalizePlan` 从 planner 的 `original_question` 抄回
+    `plan["originalQuestion"]` 这条路径（那正是把注入指引写进存储的路径）。
+    """
+
+    def __init__(self) -> None:
+        self.questions: list[str] = []
+
+    async def plan(
+        self, question: str, client: Any, modelName: str | None
+    ) -> StepPlanResult:
+        self.questions.append(question)
+        step = StepPlan(
+            index=0, description="总体量级", sub_question="上月收货总量", aggregation_only=False
+        )
+        return StepPlanResult(
+            plan=MultiStepPlan(steps=(step,), aggregation_hint="", original_question=question),
+            prompt_tokens=0,
+            completion_tokens=0,
+        )
 
 
 class _NoopRunner:
@@ -234,6 +260,9 @@ async def test_planner_receives_mode_guidance(
     planned = planner.questions[-1]
     assert planned.startswith(_QUESTION), planned
     assert _MODE_GUIDANCE[mode] in planned, planned
+    # 计数守卫：指引**恰好注入一次**。`startswith` / `in` 挡不住「双份注入」
+    # （`q\n\ng\n\ng` 两者都通过），故必须数出现次数。
+    assert planned.count(_MODE_GUIDANCE[mode]) == 1, planned
 
 
 async def test_default_mode_still_gets_research_guidance(
@@ -295,3 +324,47 @@ async def test_replan_keeps_feedback_and_mode_guidance(
     assert replanned != firstPlanned, "replan 必须真的重跑 planner"
     assert PLAN_FEEDBACK_HEADER in replanned, replanned
     assert _MODE_GUIDANCE["attribution"] in replanned, replanned
+    # 顺序 + 计数守卫：`_stagePlan` 注释称「先组合反馈、再叠加指引」为承重顺序 —— 这里把它
+    # 断言成真（此前无人测该顺序），并各自数一次防双份注入。feedback 在 `question` 里先成型，
+    # 指引由 `planQuestionForMode` 后追加 ⇒ feedback 必在指引之前。
+    assert replanned.count(PLAN_FEEDBACK_HEADER) == 1, replanned
+    assert replanned.count(_MODE_GUIDANCE["attribution"]) == 1, replanned
+    assert replanned.index(PLAN_FEEDBACK_HEADER) < replanned.index(
+        _MODE_GUIDANCE["attribution"]
+    ), replanned
+
+
+# ---------------------------------------------------------------------------
+# 3. 落库的 plan["originalQuestion"] 是**未注入**的原问题（Task 13 fix2）
+# ---------------------------------------------------------------------------
+
+
+async def test_persisted_plan_original_question_is_uninjected(
+    client: AsyncClient, authHeaders: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """计划检查点 options 里的 `plan["originalQuestion"]` 是**未注入**的 `_QUESTION`。
+
+    planner 把入参（=已注入指引的文本）记成 `original_question`，`normalizePlan` 再抄进
+    `plan["originalQuestion"]` 并随计划检查点 options 落 JSONB。指引是 prompt 脚手架，
+    不该进存储 ⇒ `_stagePlan` 在调用点改回未注入的 `question`。用**真实 MultiStepPlan**
+    的 planner 驱动 `normalizePlan` 分支（`_CapturingPlanner` 的 `plan=None` 走回落、
+    看不见此路径）。
+    """
+    planner = _PlanningPlanner()
+    _patchService(monkeypatch, planner, autoConfirm=False)
+
+    session = await _createSession(client, authHeaders, _QUESTION, mode="attribution")
+    sid = session["id"]
+    resp = await _postTurn(client, authHeaders, sid, _QUESTION)
+    assert resp.status_code == 202, resp.text
+
+    intentCp = await _waitForCheckpoint(client, authHeaders, sid, "intent")
+    await _answer(client, authHeaders, intentCp["id"], {"action": "confirm", "choice": {}})
+    planCp = await _waitForCheckpoint(client, authHeaders, sid, "planning")
+
+    # 对照组：planner 确实收到了**已注入**指引的问题（证明注入发生）
+    assert _MODE_GUIDANCE["attribution"] in planner.questions[-1], planner.questions
+    # 但落库的 originalQuestion 是**未注入**的
+    original = planCp["options"]["plan"]["originalQuestion"]
+    assert original == _QUESTION, original
+    assert _MODE_GUIDANCE["attribution"] not in original, original

@@ -8,13 +8,24 @@
 ``ReportPlanner``）；httpx ``ASGITransport`` 下 BackgroundTasks 于 ``client.post`` 返回前
 跑完 ⇒ turn 落库、outbox 落行都已完成，可直接断言。
 
-六个场景：
+场景：
 1. 落库 + seq 单调无重复；
 2. 有游标回放**恰好**是 ``seq > cursor`` 的事件，每帧带递增 ``id:``；
 3. 无游标**不**回放历史（只 connected + 之后的实时事件）；
 4. 序列化口径一致（承重）：``Decimal`` 回放出来是 **JSON 字符串**（不是 float）；
 5. 坏帧（``bytes``）不截流（后续帧仍到达 + 日志 ERROR）；
 6. 只在测试库（``SELECT current_database()`` 即 ``qa_metadata_test``）。
+
+Task 12 fix round 1（两条「仅当客户端真发 ``lastEventId`` 才发作」的正确性缺陷）：
+7. **多轮不早退**（缺陷 1 正向守卫）：第 1 轮 ``done`` 之后起的第 2 轮，重连回放**不得**
+   停在第 1 轮的终态上（反向守卫：改回「回放中任意终态即 return」必失败）；
+8. **确实结束后仍收尾**（防过度修复）：单轮跑完、游标在终态之前 ⇒ 回放含终态 + 会话
+   已是终态 ⇒ 流正常结束（不挂到心跳超时）；
+9. **游标已最新时不误关流**（保「先连接再提交」）：``lastEventId`` = 最后一条 seq ⇒ 回放
+   为空 ⇒ 不得因状态判断被立刻关掉，且能收到之后实时发布的事件；
+10. **回放翻页**（缺陷 2）：页大小注入为 2 ⇒ 5 条错失事件全部翻回（反向守卫：单次查询必失败）；
+11. ``_isSessionTerminal`` 三态：``done``/``failed``/``aborted`` ⇒ True；``running``/
+    ``awaiting_user`` ⇒ False；行不存在 ⇒ False。
 """
 
 from __future__ import annotations
@@ -34,9 +45,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1 import research as researchModule
 from app.domain.enums import DataSourceType
 from app.domain.models import DataSource
+from app.domain.research_models import ResearchEventOutbox
 from app.infrastructure.security.crypto import encryptApiKey
 from app.models.rbac import User
-from app.services.research_agent_ports import EVENT_DONE, EVENT_STEP_DATA
+from app.services.research_agent_ports import (
+    EVENT_DONE,
+    EVENT_STEP_DATA,
+    EVENT_STEP_START,
+)
 from app.services.research_event_bus import EVENT_CONNECTED
 from app.tests.integration.test_research_agent_service import FakeRunner
 from app.tests.integration.test_research_stream import _fullService
@@ -94,17 +110,52 @@ async def authHeaders(dbSession: AsyncSession) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-async def _runFullTurn(client: AsyncClient, headers: dict[str, str]) -> str:
+async def _createSession(client: AsyncClient, headers: dict[str, str]) -> str:
+    """建会话（不触发 turn）；outbox 初始为空。"""
     created = await client.post(
         f"{_BASE}/sessions", json={"question": _QUESTION}, headers=headers
     )
     assert created.status_code == 201, created.text
-    sid = created.json()["id"]
+    return created.json()["id"]
+
+
+async def _postTurn(client: AsyncClient, headers: dict[str, str], sid: str) -> None:
+    """追加一轮（202）；ASGITransport 下后台状态机在响应返回前跑完。"""
     accepted = await client.post(
         f"{_BASE}/sessions/{sid}/turns", json={"question": _QUESTION}, headers=headers
     )
     assert accepted.status_code == 202, accepted.text
+
+
+async def _runFullTurn(client: AsyncClient, headers: dict[str, str]) -> str:
+    """建会话 + 跑满一轮（首轮）。"""
+    sid = await _createSession(client, headers)
+    await _postTurn(client, headers, sid)
     return sid
+
+
+async def _seedOutbox(dbSession: AsyncSession, sid: str, count: int) -> list[int]:
+    """直写 ``research_event_outbox``（真实 PG，不经业务假替身），返回新种入的 seq 列表。"""
+    dbSession.add_all(
+        [
+            ResearchEventOutbox(
+                session_id=uuid.UUID(sid), event=EVENT_STEP_START, payload={"i": index}
+            )
+            for index in range(count)
+        ]
+    )
+    await dbSession.commit()
+    rows = await _outboxRows(dbSession, sid)
+    return [seq for seq, _event, _payload in rows]
+
+
+async def _setSessionStatus(dbSession: AsyncSession, sid: str, status: str) -> None:
+    """直接把会话置成指定状态（真实 PG）——覆盖 ``_isSessionTerminal`` 的各个取值。"""
+    await dbSession.execute(
+        text("UPDATE research_session SET status = :status WHERE id = :sid"),
+        {"status": status, "sid": sid},
+    )
+    await dbSession.commit()
 
 
 async def _outboxRows(dbSession: AsyncSession, sid: str) -> list[tuple[int, str, dict[str, Any]]]:
@@ -350,3 +401,178 @@ async def test_outbox_lives_in_dedicated_test_db(dbSession: AsyncSession) -> Non
         await dbSession.execute(text("SELECT count(*) FROM research_event_outbox"))
     ).scalar_one()
     assert isinstance(count, int)
+
+
+# ---------------------------------------------------------------------------
+# 7. 缺陷 1 正向守卫：多轮会话不因**上一轮**的终态早退
+# ---------------------------------------------------------------------------
+
+
+async def test_replay_survives_previous_turn_terminal(
+    client: AsyncClient,
+    dbSession: AsyncSession,
+    authHeaders: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """两轮会话：游标停在第 1 轮 ``done`` 之前 ⇒ 回放必须**越过**它，把第 2 轮事件也送出。
+
+    outbox 按**会话**累计（无 run 作用域），``_isTerminal`` 认**任意** ``research.done``。
+    若回放循环里「撞到终态帧就 return」，第 2 轮的事件一条都收不到、UI 永远转圈
+    —— 这正是断线重连要解决的场景本身。
+
+    反向守卫：把 ``_eventFrames`` 的回放循环改回「回放中任意终态即 return」，本用例必失败。
+    """
+    monkeypatch.setattr(researchModule, "buildResearchAgentService", _fullService)
+    sid = await _runFullTurn(client, authHeaders)
+    await _postTurn(client, authHeaders, sid)
+
+    rows = await _outboxRows(dbSession, sid)
+    seqs = [seq for seq, _event, _payload in rows]
+    doneSeqs = [seq for seq, event, _payload in rows if event == EVENT_DONE]
+    assert len(doneSeqs) >= 2, f"前置：两轮应各产出一次 {EVENT_DONE}: {doneSeqs}"
+    firstDone = doneSeqs[0]
+    expected = [seq for seq in seqs if seq > firstDone - 1]
+    assert max(expected) > firstDone, f"前置：第 2 轮应产出 seq > 第 1 轮 done 的事件: {seqs}"
+
+    resp = await asyncio.wait_for(
+        client.get(
+            f"{_BASE}/stream",
+            params={"sessionId": sid, "lastEventId": firstDone - 1},
+            headers=authHeaders,
+        ),
+        timeout=_STREAM_TIMEOUT,
+    )
+    assert resp.status_code == 200, resp.text
+    frames = _parseFramesWithIds(resp.text)
+    ids = [frame["id"] for frame in frames[1:]]
+
+    assert ids == expected, f"回放不得停在第 1 轮的终态上（缺陷 1）: {ids} vs {expected}"
+    assert max(ids) > firstDone, f"第 2 轮事件必须被回放出来: {ids}"
+
+
+# ---------------------------------------------------------------------------
+# 8. 防过度修复：会话确实结束后回放仍收尾
+# ---------------------------------------------------------------------------
+
+
+async def test_replay_closes_when_session_truly_done(
+    client: AsyncClient,
+    dbSession: AsyncSession,
+    authHeaders: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """单轮跑完、游标在终态之前 ⇒ 回放含终态 + 会话已终态 ⇒ 流立即收尾（不挂心跳）。"""
+    monkeypatch.setattr(researchModule, "buildResearchAgentService", _fullService)
+    sid = await _runFullTurn(client, authHeaders)
+
+    rows = await _outboxRows(dbSession, sid)
+    doneSeq = next(seq for seq, event, _payload in rows if event == EVENT_DONE)
+
+    resp = await asyncio.wait_for(
+        client.get(
+            f"{_BASE}/stream",
+            params={"sessionId": sid, "lastEventId": doneSeq - 1},
+            headers=authHeaders,
+        ),
+        timeout=_STREAM_TIMEOUT,
+    )
+    frames = _parseFramesWithIds(resp.text)
+
+    assert frames[-1]["event"] == EVENT_DONE, frames
+    assert ": ping" not in resp.text, "终态回放后应立刻收尾，不得挂到心跳超时"
+
+
+# ---------------------------------------------------------------------------
+# 9. 防过度修复：游标已最新（回放为空）时不得误关流
+# ---------------------------------------------------------------------------
+
+
+async def test_empty_replay_does_not_close_stream(
+    client: AsyncClient,
+    dbSession: AsyncSession,
+    authHeaders: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``lastEventId`` = 最后一条 seq ⇒ 回放为空 ⇒ 不得因「会话已终态」被立刻关流。
+
+    这保住「对已结束的会话先连接、再 POST 新 turn」这类正常流程：此刻游标 >= 上一轮
+    最后的 seq，回放为空 —— 若把状态判断挪到 ``frames`` 为空的路径上，连接会被误关。
+    """
+    monkeypatch.setattr(researchModule, "buildResearchAgentService", _fullService)
+    sid = await _runFullTurn(client, authHeaders)
+
+    rows = await _outboxRows(dbSession, sid)
+    lastSeq = max(seq for seq, _event, _payload in rows)
+
+    task = asyncio.create_task(
+        client.get(
+            f"{_BASE}/stream",
+            params={"sessionId": sid, "lastEventId": lastSeq},
+            headers=authHeaders,
+        )
+    )
+    try:
+        await _waitForSubscriber(sid, task)
+        # 回放为空 ⇒ 应进入实时循环；此时发布的事件必须到达（否则是被误关流）
+        await researchModule._bus.publish(sid, EVENT_DONE, {"degraded": False})
+        resp = await asyncio.wait_for(task, timeout=_STREAM_TIMEOUT)
+    finally:
+        if not task.done():
+            task.cancel()
+
+    frames = _parseFramesWithIds(resp.text)
+    assert [frame["event"] for frame in frames] == [EVENT_CONNECTED, EVENT_DONE], frames
+    assert all(frame["id"] is None for frame in frames[1:]), "回放为空 ⇒ 无带 id 的历史帧"
+
+
+# ---------------------------------------------------------------------------
+# 10. 缺陷 2：回放翻页直到取不满一页
+# ---------------------------------------------------------------------------
+
+
+async def test_fetch_missed_pages_until_short_page(
+    client: AsyncClient,
+    dbSession: AsyncSession,
+    authHeaders: dict[str, str],
+) -> None:
+    """页大小注入为 2 ⇒ 5 条错失事件必须**全部**翻回来（单次查询只回 2 条 ⇒ 静默丢 3 条）。
+
+    反向守卫：把 ``_fetchMissed`` 改回单次 ``fetchEventsAfter`` 调用，本用例必失败。
+    """
+    sid = await _createSession(client, authHeaders)
+    seeded = await _seedOutbox(dbSession, sid, count=5)
+    assert len(seeded) == 5, f"前置：应种入 5 条: {seeded}"
+
+    missed = await researchModule._fetchMissed(sid, seeded[0] - 1, limit=2)
+
+    got = [seq for _event, _payload, seq in missed]
+    assert got == seeded, f"翻页必须取回全部 5 条: {got}"
+    assert got == sorted(got), f"回放 id 必须递增: {got}"
+
+
+# ---------------------------------------------------------------------------
+# 11. _isSessionTerminal 三态
+# ---------------------------------------------------------------------------
+
+
+async def test_is_session_terminal_matches_session_status(
+    client: AsyncClient,
+    dbSession: AsyncSession,
+    authHeaders: dict[str, str],
+) -> None:
+    """只有 ``done``/``failed``/``aborted`` 是终态；``running``/``awaiting_user`` 不是。
+
+    ``awaiting_user`` 被误判为终态会让「等待用户答 checkpoint」的会话瞬间被关流。
+    """
+    sid = await _createSession(client, authHeaders)
+
+    for status in ("running", "awaiting_user"):
+        await _setSessionStatus(dbSession, sid, status)
+        assert await researchModule._isSessionTerminal(sid) is False, status
+
+    for status in ("done", "failed", "aborted"):
+        await _setSessionStatus(dbSession, sid, status)
+        assert await researchModule._isSessionTerminal(sid) is True, status
+
+    # 行不存在 ⇒ False（宁可多连一会儿，不可误关流）
+    assert await researchModule._isSessionTerminal(str(uuid.uuid4())) is False

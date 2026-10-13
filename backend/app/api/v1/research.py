@@ -102,10 +102,15 @@ from app.services.research_agent_ports import (
 )
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_event_bus import EVENT_CONNECTED, bus
-from app.services.research_event_outbox import fetchEventsAfter, persistEvent
+from app.services.research_event_outbox import (
+    _REPLAY_LIMIT,
+    fetchEventsAfter,
+    persistEvent,
+)
 from app.services.research_json_encoder import research_json
 from app.services.research_session_service import (
     PROMPT_KEY,
+    TERMINAL_SESSION_STATUSES,
     CheckpointConflictError,
     CheckpointStaleError,
     ResearchSessionService,
@@ -157,6 +162,13 @@ HEARTBEAT_SECONDS = 15.0
 
 HEARTBEAT_LINE = ": ping\n\n"
 """SSE 注释行（心跳帧；客户端按 SSE 规范忽略）。"""
+
+_REPLAY_MAX_ROWS = 10 * _REPLAY_LIMIT
+"""一次回放的**总量**上限（翻页累加），防御无界物化。
+
+单页上限 `_REPLAY_LIMIT` 防不住「错过多页」：`_fetchMissed` 翻页直到取不满一页，
+故另设总闸。达到上限即停止翻页并记 WARNING（含 lastSeq），**不**静默截断。
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -631,17 +643,28 @@ async def _eventFrames(sessionId: str, lastEventId: int | None = None) -> AsyncI
     """队列 → SSE 帧：首帧 connected；可选回放错失事件；空闲发心跳；终态或断连后收尾退订。
 
     **先订阅再回放**（Task 12）：先 `subscribe` 再查 outbox，否则「查完到订阅」之间新发的
-    事件会漏。回放帧带 `id:`，实时帧若已落库也带 ⇒ 客户端按 `seq` 去重。回放里若已含终态
-    事件则**不再进入实时循环**（该轮已结束，再等只会挂到心跳）。
+    事件会漏。回放帧带 `id:`，实时帧若已落库也带 ⇒ 客户端按 `seq` 去重。
+
+    **回放收尾的两个条件**（Task 12 fix1，缺一不可）：回放的**最后一帧**是终态 **且**
+    会话**当前状态**是终态。outbox 按**会话**累计、无 run 作用域，而 `_isTerminal` 认
+    **任意** `research.done` —— 多轮会话里上一轮的 `done` 就在回放中间，若循环里撞到终态
+    就 `return`，**当前轮**的事件将一条都收不到（UI 永远转圈）。故循环里**不** return，
+    回放完统一判一次。
+
+    `frames` 为空的判据不能省：游标已最新（回放为空）是「对已结束的会话先连接、再 POST
+    新 turn」的正常前奏 —— 此时若只看会话状态就会把连接误关。
     """
     queue = _bus.subscribe(sessionId)
     try:
         yield _sseFrame(EVENT_CONNECTED, {"sessionId": sessionId})
         if lastEventId is not None:
-            for event, payload, seq in await _fetchMissed(sessionId, lastEventId):
+            frames = await _fetchMissed(sessionId, lastEventId)
+            lastTerminal = False
+            for event, payload, seq in frames:
                 yield _sseFrame(event, payload, seq)
-                if _isTerminal(event, payload):
-                    return
+                lastTerminal = _isTerminal(event, payload)  # 只保留**最后一帧**的值
+            if frames and lastTerminal and await _isSessionTerminal(sessionId):
+                return
         while True:
             try:
                 event, payload, seq = await asyncio.wait_for(queue.get(), HEARTBEAT_SECONDS)
@@ -656,19 +679,79 @@ async def _eventFrames(sessionId: str, lastEventId: int | None = None) -> AsyncI
         _bus.unsubscribe(sessionId, queue)
 
 
-async def _fetchMissed(sessionId: str, lastEventId: int) -> list[tuple[str, dict[str, Any], int]]:
-    """独立短会话取 `seq > lastEventId` 的事件，物化为纯元组（脱离 ORM 会话）。
+async def _fetchMissed(
+    sessionId: str, lastEventId: int, limit: int | None = None
+) -> list[tuple[str, dict[str, Any], int]]:
+    """独立短会话取 `seq > lastEventId` 的**全部**事件，物化为纯元组（脱离 ORM 会话）。
 
     用**独立短会话**：流是长连接，不能把请求级 session 拖到流结束；也避免会话关闭后访问
     已 detach 行属性。取数失败只留痕、返回空 —— 回放失败不该炸掉实时流。
+
+    **翻页直到取不满一页**（Task 12 fix1）：单页查询在错过的事件 > 单页上限时，尾部既不在
+    回放页里、也不在订阅队列里（它们在订阅之前就已发布）⇒ **静默丢失**。`limit`（单页大小）
+    可注入以便用小页覆盖翻页；`None` ⇒ 用 `_REPLAY_LIMIT`（取模块全局，便于测试改写）。
     """
+    pageSize = _REPLAY_LIMIT if limit is None else limit
     try:
         async with getSessionFactory()() as session:
-            rows = await fetchEventsAfter(session, uuid.UUID(sessionId), lastEventId)
-            return [(row.event, row.payload, row.seq) for row in rows]
+            return await _collectReplayRows(
+                session, uuid.UUID(sessionId), lastEventId, pageSize
+            )
     except Exception:  # noqa: BLE001 —— 回放失败只留痕，不炸流（实时事件仍照常投递）
         logger.exception("SSE 历史回放失败: session=%s afterSeq=%s", sessionId, lastEventId)
         return []
+
+
+async def _collectReplayRows(
+    session: AsyncSession, sessionId: uuid.UUID, lastEventId: int, pageSize: int
+) -> list[tuple[str, dict[str, Any], int]]:
+    """按 `seq` 游标翻页收集，直到取不满一页或达到 `_REPLAY_MAX_ROWS` 总量闸。"""
+    collected: list[tuple[str, dict[str, Any], int]] = []
+    cursor = lastEventId
+    while True:
+        rows = await fetchEventsAfter(session, sessionId, cursor, pageSize)
+        if not rows:
+            break
+        collected.extend((row.event, row.payload, row.seq) for row in rows)
+        cursor = rows[-1].seq
+        if len(rows) < pageSize or len(collected) >= _REPLAY_MAX_ROWS:
+            break
+    if len(collected) >= _REPLAY_MAX_ROWS:
+        logger.warning(
+            "SSE 回放达到总量上限 %s，尾部可能被截断: session=%s lastSeq=%s",
+            _REPLAY_MAX_ROWS,
+            sessionId,
+            cursor,
+        )
+    return collected
+
+
+async def _isSessionTerminal(sessionId: str) -> bool:
+    """会话**当前**是否终态（`done`/`failed`/`aborted`）—— 回放收尾的第二个条件。
+
+    必须与「回放最后一帧是终态」同时成立才收尾（见 `_eventFrames`）：outbox 按会话累计、
+    `_isTerminal` 认任意终态帧，只看回放会把上一轮的 `done` 当成收尾信号。
+
+    **`awaiting_user` 不是终态**（复用 `TERMINAL_SESSION_STATUSES`）：会话在等用户答
+    checkpoint，状态机稍后会续跑 —— 当成终态会让「等待用户输入」的流瞬间被关。
+
+    读失败（异常 / 行不存在）⇒ 记 WARNING 并返回 `False`：**宁可多连一会儿，不可误关流**。
+    用独立短会话只读、不 commit（流是长连接，不能拖住请求级 session）。
+    """
+    try:
+        async with getSessionFactory()() as session:
+            status = await session.scalar(
+                select(ResearchSession.status).where(
+                    ResearchSession.id == uuid.UUID(sessionId)
+                )
+            )
+    except Exception:  # noqa: BLE001 —— 状态读失败不得误关流
+        logger.warning("会话终态判定失败，按非终态处理: session=%s", sessionId, exc_info=True)
+        return False
+    if status is None:
+        logger.warning("会话终态判定：行不存在，按非终态处理: session=%s", sessionId)
+        return False
+    return status in TERMINAL_SESSION_STATUSES
 
 
 def _sseFrame(event: str, payload: dict[str, Any], seq: int | None = None) -> str:

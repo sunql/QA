@@ -190,8 +190,13 @@ class ResearchAgentPhasesMixin:
             if replan
             else state["question"]
         )
+        # 顺序承重：先组合 modify 反馈、再叠加 mode 指引（两者都要保留，不能互相覆盖）。
+        # 指引**只**送 planner：`singleStepPlan(question)` 的回落步会把问题原样当子问题
+        # 交给 NL2SQL，而 mode 指引是**拆步**指令（「每步只回答一个子问题」）—— 混进去
+        # 会让回落步的 SQL 生成读到一个自相矛盾的提问，故回落仍用未注入的 `question`。
+        plannedQuestion = planQuestionForMode(question, state.get("mode") or DEFAULT_MODE)
         client = await self._llmClient(session, state=state, emit=emit, sessionId=sessionId)
-        result = await self._planner.plan(question, client, clientModelName(client))
+        result = await self._planner.plan(plannedQuestion, client, clientModelName(client))
         rawPlan = getattr(result, "plan", result)
         plan = normalizePlan(rawPlan) if rawPlan is not None else singleStepPlan(question)
         state["plan"] = plan
@@ -494,6 +499,50 @@ class ResearchAgentPhasesMixin:
 # ---------------------------------------------------------------------------
 
 PLAN_FEEDBACK_HEADER = "[用户修改要求]"
+
+# --- mode 计划指引（Task 13）-------------------------------------------------
+# 报告章节早已按 mode 差异化（`report_planner._MODE_SECTIONS`），但**计划**链路对 mode
+# 零消费 —— 三 mode 拆出的步一模一样。这里按 mode 给 planner 一段**拆步指引**，经
+# 「问题文本注入」进入（与 `planQuestionWithFeedback` 同款：`StepQueryPlanner.plan`
+# 没有 mode 形参，也不该有）。
+# 键集合与 `research_schemas.ResearchMode` 的取值逐一对应（那边是 Literal，无常量可引；
+# 默认值走 `DEFAULT_MODE`，不硬编码 "research" 字面量）。
+_MODE_GUIDANCE: dict[str, str] = {
+    DEFAULT_MODE: (
+        "【研究指引·探查】先取总体口径与量级（总量/趋势），再沿关键维度逐层拆解，"
+        "最后落到能解释整体的明细项；各步保持同一时间窗与过滤口径，每步只回答一个子问题。"
+    ),
+    "attribution": (
+        "【研究指引·归因】第一步先定位差异：把目标值与基线（上期/目标/同类）对齐，"
+        "找出偏离最大的维度项；随后对差异最大的维度逐层下钻收窄范围；最后用对照验证"
+        "（剔除该因素后差异是否收敛）。每步只收敛一个候选原因，不要并列罗列。"
+    ),
+    "compare": (
+        "【研究指引·对比】先固定统一口径（同一时间窗、同一过滤条件、同一聚合方式），"
+        "再对每个对比对象**对称**取数（任一侧缺失即该维度不成立），最后算差额与占比，"
+        "并把差异按维度拆分到可解释的来源。"
+    ),
+}
+
+
+def planQuestionForMode(question: str, mode: str) -> str:
+    """把 mode 对应的研究指引拼进**规划问题**（Task 13）。
+
+    `StepQueryPlanner.plan(question, client, model_name)` 没有 mode 形参（也不该有），
+    故指引只能经问题文本进入 —— 与 `planQuestionWithFeedback` 的反馈回灌同款。
+
+    未命中（未知 / 空 mode）⇒ **逐字**原样返回并记 debug，**不抛**：规划阶段不该因
+    一个 mode 取值把整轮研究打断（`compose` 对未知 mode 抛 `ValueError` 是**报告阶段**
+    的策略，不照搬过来）。
+
+    指引是**模块常量**（非用户内容）⇒ 无需 `neutralizeFence`（用户内容在 `question`
+    一侧，已由既有链路中和）。返回值是新字符串，入参不被改写。
+    """
+    guidance = _MODE_GUIDANCE.get(mode)
+    if not guidance:
+        logger.debug("未知研究 mode=%r，规划问题不注入 mode 指引", mode)
+        return question
+    return f"{question}\n\n{guidance}"
 
 
 def buildOptions(*, signal: str, resumePhase: str, **payload: Any) -> dict[str, Any]:

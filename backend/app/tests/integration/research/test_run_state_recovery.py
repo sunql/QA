@@ -310,4 +310,7 @@ async def test_rewritten_question_persisted_and_restored_across_resume(
     assert r4.status_code == 200, r4.text
     await _waitForCheckpoint(client, authHeaders, sid, phase="planning")
     assert plan_seen, "planner 未被调用"
-    assert plan_seen[-1] == rewritten_question
+    # Task 13：planner 输入的**末段**是 mode 指引（本会话为默认 mode），故按「以改写后的
+    # 问题开头」断言 —— 本用例要证的仍是「问题来自 runState.current_question」而非 seed。
+    assert plan_seen[-1].startswith(rewritten_question), plan_seen[-1]
+    assert not plan_seen[-1].startswith(seed_question), plan_seen[-1]

@@ -248,6 +248,18 @@ TERMINAL_ERROR_CODES = frozenset(
 """终态错误码集合：**由 ERROR_SPECS 派生**，判定处不得自持字面量集合。"""
 
 
+class SessionBudgetExceeded(RuntimeError):
+    """会话累计成本已达预算上限 ⇒ **终止本轮研究**（**不是**换模型）。
+
+    与路由器 `ModelRouterService.selectModel` 的超预算**降级**是两种正交处置：路由器
+    只在自动路由（`preferredModelId is None`）时有降级机会，且降级语义是**静默换成最便宜
+    模型**；本异常由相位边界的只读预算闸门抛出，**绝不动用户选定的模型**（硬约束 SSOT：
+    memory `qa-system-no-model-override`）。由 `_guardedRun` 的兜底捕获 → 发
+    `research.error{turn_failed}`（终态）→ `markFailed`；message 带真实成本与预算，
+    用户据此新建会话或调高 `SESSION_BUDGET` 后重试。
+    """
+
+
 def errorPayload(code: str, message: str, **fields: Any) -> dict[str, Any]:
     """按 ERROR_SPECS 构造 research.error payload：code/message/uiHint（表派生）恒在，
     `**fields` 必须与 payloadFields（逐 code 声明的额外字段）完全一致，不符或未知 code 抛 ValueError。"""

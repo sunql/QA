@@ -38,6 +38,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -84,6 +85,7 @@ from app.services.research_agent_ports import (
     MeteredClient,
     Pause,
     Reporter,
+    SessionBudgetExceeded,
     UsageRecorder,
     emitEvent,
     errorPayload,
@@ -114,6 +116,24 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["PHASES", "ResearchAgentService"]
 
+SESSION_BUDGET_MESSAGE_DECIMALS = 6
+"""终止文案里成本/预算的**定点**显示位数（Decimal 定点格式化，杜绝 `1E-2` 科学计数法）。"""
+
+SESSION_BUDGET_HINT = "可新建会话或调高 SESSION_BUDGET 后重试"
+"""超预算终止文案的处置提示（用户可执行的一步；与路由器**降级**口径刻意区分）。"""
+
+SESSION_BUDGET_EXCEEDED_MESSAGE = f"会话累计成本已达预算上限，本轮研究终止；{SESSION_BUDGET_HINT}"
+"""读不到真实金额时的兜底终止文案（二次读打嗝，近乎不可达；仍显式给处置）。"""
+
+
+def sessionBudgetMessage(cost: Decimal, budget: Decimal) -> str:
+    """超预算终止文案：带**真实**成本与预算（定点），并给出用户可执行的处置。"""
+    return (
+        f"会话累计成本 ${cost:.{SESSION_BUDGET_MESSAGE_DECIMALS}f}"
+        f" 已达预算上限 ${budget:.{SESSION_BUDGET_MESSAGE_DECIMALS}f}，"
+        f"本轮研究终止；{SESSION_BUDGET_HINT}"
+    )
+
 
 class ResearchAgentService(ResearchAgentPhasesMixin):
     """研究 turn 状态机（无状态；构造注入协作者）。
@@ -139,6 +159,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         nl2sql: Any | None = None,
         tokenUsage: Any | None = None,
         autoConfirm: bool = False,
+        sessionBudget: float | None = None,
     ) -> None:
         self._esl = esl
         self._sessions = sessionService
@@ -147,6 +168,9 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         self._llmFactory = llmFactory
         self._usage = usageRecorder if usageRecorder is not None else LlmUsageRecorder()
         self._autoConfirm = autoConfirm
+        # 会话级预算闸门的**可注入** seam（Task 15）：None ⇒ 用时读 `getSettings().sessionBudget`。
+        # 生产构造点不传（走全局配置）；测试注入以免污染全局 settings 缓存。
+        self._sessionBudget = sessionBudget
         self._intent = IntentService()
         self._wireRouting(modelConfigs, modelRouter, tokenUsage)
         self._wireNl2sql(ontology, nl2sql)
@@ -494,6 +518,46 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         except Exception:  # noqa: BLE001 —— 收尾释放失败只留痕（同 markFailed 口径）
             logger.error("释放 active_run 失败: session=%s run=%s", sessionId, runId, exc_info=True)
 
+    # --- 会话级预算只读闸门（Task 15）：相位边界查累计成本，超限即终止本轮（不换模型）---
+
+    def _effectiveSessionBudget(self) -> Decimal:
+        """生效预算（注入值优先，否则 `getSettings().sessionBudget`）；经 `str` 转 `Decimal`
+        以挡住 float 二进制噪声 —— 金额比较全程 `Decimal`，绝不退化成 float。"""
+        raw = self._sessionBudget if self._sessionBudget is not None else getSettings().sessionBudget
+        return Decimal(str(raw))
+
+    async def _readSessionCost(self, session: AsyncSession, sessionId: uuid.UUID) -> Decimal | None:
+        """读会话累计成本（best-effort）；读失败返回 None（计量打嗝不得杀研究）。"""
+        try:
+            cost = await self._tokenUsage.getSessionCost(session, str(sessionId))
+        except Exception:  # noqa: BLE001 —— 与 buildRoutingContext 同口径：读用量失败不阻断
+            logger.warning("读取会话累计成本失败，预算闸门本次跳过: session=%s", sessionId, exc_info=True)
+            return None
+        return cost if isinstance(cost, Decimal) else Decimal(str(cost))
+
+    async def _sessionBudgetExceeded(self, session: AsyncSession, sessionId: uuid.UUID) -> bool:
+        """会话累计成本已达/超预算 ⇒ True（本轮研究在**相位边界**终止；**绝不**选/换模型）。
+
+        预算语义（**与路由器相反，刻意如此**）：`budget <= 0` ⇒ **关闭闸门**（恒 False）。
+        路由器 `ModelRouterService.selectModel` 用 `>=`，把 `SESSION_BUDGET=0` 当作「必然
+        超预算 ⇒ 降级到最便宜模型」—— 同一配置值两处含义相反。闸门需要「能整关」的语义，
+        故按 `<= 0` 关闭实现（本 Task **不改**路由器；分歧登记为遗留，见任务回报）。
+
+        best-effort：读成本失败 ⇒ False（计量打嗝既不得杀研究，也不得误判为超限）。
+        """
+        budget = self._effectiveSessionBudget()
+        if budget <= 0:
+            return False
+        cost = await self._readSessionCost(session, sessionId)
+        return cost is not None and cost >= budget
+
+    async def _sessionBudgetMessage(self, session: AsyncSession, sessionId: uuid.UUID) -> str:
+        """超预算终止文案（读**真实**成本/预算）——仅在 `_sessionBudgetExceeded` 为真后调用。"""
+        cost = await self._readSessionCost(session, sessionId)
+        if cost is None:  # 二次读打嗝：仍终止，文案退化为不含金额的兜底（近乎不可达）
+            return SESSION_BUDGET_EXCEEDED_MESSAGE
+        return sessionBudgetMessage(cost, self._effectiveSessionBudget())
+
     async def _runFrom(
         self,
         session: AsyncSession,
@@ -504,8 +568,17 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         emit: Emit | None,
         state: dict[str, Any],
     ) -> str:
-        """从 `phase` 起顺序跑各相位；任一相位返回暂停信号即落 checkpoint 并返回。"""
+        """从 `phase` 起顺序跑各相位；任一相位返回暂停信号即落 checkpoint 并返回。
+
+        Task 15：**相位边界**先过会话预算只读闸门（不半途打断一条相位）—— 超限即抛
+        `SessionBudgetExceeded`，由 `_guardedRun` 转成 `research.error{turn_failed}` +
+        `markFailed`（复用既有终态路径，**不**新增 error code）。
+        """
         for current in PHASES[PHASES.index(phase):]:
+            if await self._sessionBudgetExceeded(session, sessionId):
+                raise SessionBudgetExceeded(
+                    await self._sessionBudgetMessage(session, sessionId)
+                )
             pause = await self._stages[current](
                 session, sessionId=sessionId, turnId=turnId, emit=emit, state=state
             )

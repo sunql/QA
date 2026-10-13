@@ -398,6 +398,9 @@ def makeService(dbSession):
             modelRouter=kwargs.get("modelRouter", FakeModelRouter()),
             ontology=kwargs.get("ontology", FakeOntology()),
             nl2sql=kwargs.get("nl2sql"),
+            # Task 15 预算闸门：默认 None ⇒ 用时读全局 `SESSION_BUDGET`（conftest=0.1）。
+            # 需要「高成本仍跑到路由」的用例显式抬高（否则相位边界即终止）。
+            sessionBudget=kwargs.get("sessionBudget"),
         )
 
     return _make
@@ -1228,10 +1231,14 @@ async def test_routing_context_carries_session_cost_and_turns(dbSession, makeSer
     只传 `sessionId` 时 `sessionCost=0` / `sessionTurnCount=0`，路由器的**预算超限降级**
     （`model_router_service.py:70`）与**会话亲和**（`:77`）两条规则对研究链路恒不触发。
     这里先落一条真实 `session_token_usage` 行，再断言 router 实际收到的 ctx。
+
+    Task 15 起注入 `sessionBudget=10.0`：会话级只读闸门在相位边界按 `SESSION_BUDGET`
+    终止超限轮次，成本 `3.5` 在 conftest 的全局 `0.1` 下**到不了**路由（第一个相位边界
+    即终止）；抬高预算才能复现「高成本会话仍走到路由」这一 M1 场景。
     """
     router = FakeModelRouter()
     svc = makeService(
-        modelRouter=router, autoConfirm=True,
+        modelRouter=router, autoConfirm=True, sessionBudget=10.0,
         llmFactory=lambda cfg: FakeLlmClient(HYPOTHESIS_JSON),
     )
     s = await _newSession(svc, dbSession)

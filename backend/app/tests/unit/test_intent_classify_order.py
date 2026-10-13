@@ -48,3 +48,12 @@ def test_compare_without_history_returns_clarify(service: IntentService):
     """hasPriorState=False + '同比' -> CLARIFY（询问比较对象），不直接生成猜测 SQL。"""
     result = service.classifyResult("同比", hasPriorState=False)
     assert result.intent.value == "clarify", f"got {result.intent}"
+
+
+def test_aggregate_keyword_in_long_query_not_clarify(service: IntentService):
+    """'各供应商的收货数量汇总' (10 chars) -> QUERY 而非 CLARIFY。
+
+    跟踪 length guard 阈值的边界 case：阈值 9 改 10 任何一边都需重新审视。
+    """
+    result = service.classifyResult("各供应商的收货数量汇总", hasPriorState=False)
+    assert result.intent.value == "query", f"got {result.intent}"

@@ -8,11 +8,18 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 
+import dotenv
 import pytest
 import pytest_asyncio
 import seed_ontology
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+# 加载 .env 到环境变量，使 subprocess（alembic）能读到 DATABASE_URL
+# 使用 __file__ 定位 backend/ 目录，确保即使 pytest CWD 不同也能找到
+_backend_dir = Path(__file__).resolve().parents[3]  # backend/
+dotenv.load_dotenv(_backend_dir / ".env")
 
 from app.tests import _pg_support
 

@@ -577,7 +577,7 @@ class IntentService:
         if hasPriorState and (
             IntentService._isRefine(normalized)
             or IntentService._isFollowUp(normalized)
-            or (len(stripped) <= 10 and any(kw in normalized for kw in _SHORT_FOLLOWUP_KEYWORDS))
+            or (len(stripped) <= 9 and any(kw in normalized for kw in _SHORT_FOLLOWUP_KEYWORDS))
         ):
             if IntentService._isFollowUp(normalized):
                 return self._queryResult(IntentType.FOLLOW_UP, original)

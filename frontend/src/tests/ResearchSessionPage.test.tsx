@@ -1040,4 +1040,56 @@ describe("ResearchSessionPage", () => {
       expect(httpMock.post).not.toHaveBeenCalled();
     });
   });
+
+  // Task 12b fix3（回归）：fix2 的守卫读的是**全局共享** error 槽，却在复用活流时误
+  // 当成「本次开流失败」。startStream 命中 dedupe（复用已在途/活着的流）时**不会**重跑
+  // connectStream 的 set({ error: null })(:369) ⇒ 槽里的陈旧 error 不被清空，而 await
+  // 立即续跑 ⇒ 读到陈旧值 ⇒ throw ⇒ 追问被误拒（POST 从未发出）。本用例锁死：复用活流时，
+  // 任何陈旧 error 都不得阻断本次追问。
+  describe("Task 12b fix3：复用活流时不误拒追问", () => {
+    it("running 会话已有活流 + 陈旧 error：再次追问仍发出 POST（不误拒）", async () => {
+      // running 会话：挂载 effect 即开一条活流（非终态 ⇒ 不命中挂载闸门）。
+      httpMock.get.mockResolvedValue(makeDetailWithStatus("running"));
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        body: openStream('event: research.connected\ndata: {"sessionId":"s1"}\n\n'),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      // 追问 #1 的提交瞬时失败（网络抖动）⇒ submitTurn 的 catch 落 error（流仍活）。
+      httpMock.post
+        .mockRejectedValueOnce(new Error("提交瞬时失败"))
+        .mockResolvedValue({ data: { sessionId: "s1", turnId: "t2", status: "running" } });
+
+      renderPage(null);
+      await waitFor(() =>
+        expect(useResearchStore.getState().currentSession?.status).toBe("running"),
+      );
+      await waitFor(() => expect(useResearchStore.getState().loading).toBe(false));
+      // 挂载即开流（活流已建立 ⇒ 后续追问走 dedupe）。
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+      const input = screen.getByPlaceholderText("继续提问…");
+      const send = screen.getByRole("button", { name: /发\s*送/ });
+
+      // 追问 #1：apiSubmitTurn 失败 ⇒ 陈旧 error 落槽；流未结束（streamOpening 仍非空）。
+      fireEvent.change(input, { target: { value: "第一次" } });
+      fireEvent.click(send);
+      await waitFor(() => expect(httpMock.post).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(useResearchStore.getState().error).not.toBeNull(),
+      );
+
+      // 追问 #2（用户重试）：startStream 命中 dedupe（复用活流）。陈旧 error 不得阻断本次
+      // 追问 —— 修复前这里读到陈旧 error 直接 throw ⇒ POST #2 从不发出（总数恒为 1）。
+      fireEvent.change(input, { target: { value: "第二次" } });
+      fireEvent.click(send);
+      await waitFor(() => expect(httpMock.post).toHaveBeenCalledTimes(2));
+      expect(httpMock.post).toHaveBeenLastCalledWith(
+        "/research/sessions/s1/turns",
+        { question: "第二次" },
+      );
+      // 未重开流：复用已有活流（修复不得以「重开流」为代价，重开会 abort 旧流致挂起）。
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
 });

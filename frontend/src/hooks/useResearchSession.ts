@@ -31,8 +31,11 @@ export interface ResearchSessionHandle {
 }
 
 interface StreamStarter {
-  /** 建流并等 onOpen；已有活流/在途开流则复用同一条（去重）。 */
-  startStream: (sessionId: string) => Promise<void>;
+  /** 建流并等 onOpen；已有活流/在途开流则复用同一条（去重）。
+   *  返回值：`true` = 本次**新建**了流（connectStream 刚清空 error 槽，可据以判定
+   *  本次开流成败）；`false` = 复用了已有活流（共享 error 槽里的值与本流无关，
+   *  不得据此判定本次开流）。 */
+  startStream: (sessionId: string) => Promise<boolean>;
   /** 断掉当前活流并清空句柄（组件卸载 / 切会话时调用，防泄漏）。 */
   abortStream: () => void;
 }
@@ -48,8 +51,11 @@ function useStreamStarter(): StreamStarter {
   const streamOpening = useRef<Promise<void> | null>(null);
 
   const startStream = useCallback(
-    (sessionId: string): Promise<void> => {
-      if (streamOpening.current) return streamOpening.current;
+    (sessionId: string): Promise<boolean> => {
+      // 命中去重：复用现有活流，**不**新建 ⇒ false。此时 connectStream 的
+      // set({ error: null }) 不会重跑，共享 error 槽可能是别的动作留下的陈旧值，
+      // 调用方不得据此判定「本次开流失败」（fix3：否则复用活流会误拒追问）。
+      if (streamOpening.current) return Promise.resolve(false);
       const controller = new AbortController();
       streamController.current = controller;
       // onOpen 信号（供调用方 await）与「流结束」分开：connectStream 的 promise 在
@@ -68,7 +74,9 @@ function useStreamStarter(): StreamStarter {
             streamController.current = null;
           }
         });
-      return opened;
+      // 新开路径可靠：connectStream(:369) 刚清空 error，读点是下一微任务，
+      // 无并发写缝 ⇒ 本次开流结果就是 error 槽的当前值。
+      return opened.then(() => true);
     },
     [connectStream],
   );
@@ -98,16 +106,20 @@ export function useResearchSession(
     async (question: string): Promise<void> => {
       if (!sessionId) return;
       // 先建流（等 onOpen）再提交：顺序颠倒会让首帧事件没有订阅者。
-      await startStream(sessionId);
+      // fix3：守卫**只对本次新开**的流生效（openedFresh）。复用活流时 error 槽可能是
+      // 陈旧值（本流建立时清的空，之后别的动作把它置脏），无条件判 error 会误拒追问。
+      const openedFresh = await startStream(sessionId);
       // Task 12b fix2：connectStream 的失败分支**刻意**先 signalOpen（兜底触发 onOpen，
       // 防「先等 onOpen 再提交」的调用方永久挂起）再 set({ error })，故开流失败时
-      // startStream 也会 resolve。这里必须拦截，否则 submitTurn 首行 set({ error: null })
+      // startStream 也会 resolve。新开路径必须拦截，否则 submitTurn 首行 set({ error: null })
       // 会抹掉开流错误 ⇒ 追问照提交、无 SSE 订阅者、无任何提示（静默失败）。
       // 时序确定：signalOpen 同步 resolve 了 opened，但 await 续体是微任务，晚于 catch
       // 里后续同步的 set({ error }) ⇒ 读到的必是本次开流结果（成功路径 error 保持 null）。
-      const streamError = useResearchStore.getState().error;
-      if (streamError !== null) {
-        throw new Error(streamError);
+      if (openedFresh) {
+        const streamError = useResearchStore.getState().error;
+        if (streamError !== null) {
+          throw new Error(streamError);
+        }
       }
       await submitTurn(sessionId, question);
     },
@@ -127,6 +139,8 @@ export function useResearchSession(
       if (!pendingQuestion && isFinishedSession(sessionId)) return;
 
       // 等流建立（onOpen 在 fetch ok 且 body 存在后触发）再提交首轮。
+      // 刻意忽略 startStream 的返回值：挂载首轮路径语义不变（fix3 只圈 submitFollowUp，
+      // 该路径「开流失败仍静默提交」为已登记的既有问题，见 brief MEDIUM-1）。
       await startStream(sessionId);
       if (cancelled) return;
 

@@ -10,6 +10,7 @@
 import { Tag } from "antd";
 import { useTranslation } from "react-i18next";
 import type { ReportEvidence, StepEvidence } from "./ReportRenderer";
+import { timeRangeLabels, topNTableShape } from "./evidenceSummary";
 
 interface EvidencePanelProps {
   evidence?: ReportEvidence;
@@ -37,9 +38,39 @@ function statusLabel(t: (key: string) => string, status: string): string {
   return label === key ? status : label;
 }
 
+/** `summary.topN` ⇒ 紧凑只读表；如实标注这是摘要采样数据回放（非原图）。 */
+function TopNTable({ table, caption }: { table: ReturnType<typeof topNTableShape>; caption: string }) {
+  if (!table) return null;
+  return (
+    <div data-testid="evidence-topn">
+      <p>{caption}</p>
+      <table>
+        <thead>
+          <tr>
+            {table.columns.map((column) => (
+              <th key={column}>{column}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {table.rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>
+              {table.columns.map((column) => (
+                <td key={column}>{row[column] ?? ""}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function EvidenceStep({ step }: { step: StepEvidence }) {
   const { t } = useTranslation();
   const pairs = summaryPairs(step.summary);
+  const topN = topNTableShape(step.summary);
+  const timeRange = timeRangeLabels(step.summary);
   return (
     <div data-testid="evidence-step">
       <p>{`${t("research.evidence.step", { index: step.index })}：${step.type}`}</p>
@@ -52,6 +83,12 @@ function EvidenceStep({ step }: { step: StepEvidence }) {
             <li key={key}>{`${key}: ${value}`}</li>
           ))}
         </ul>
+      ) : null}
+      <TopNTable table={topN} caption={t("research.evidence.topNReplay")} />
+      {timeRange ? (
+        <p data-testid="evidence-time-range">
+          {t("research.evidence.timeRange", { start: timeRange.start, end: timeRange.end })}
+        </p>
       ) : null}
     </div>
   );

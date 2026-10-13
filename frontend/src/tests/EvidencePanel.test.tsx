@@ -6,7 +6,7 @@
  * - evidence 缺省 / stepResults 为空时**不渲染**（安全，旧 payload 不破）。
  */
 import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { ConfigProvider } from "antd";
 
 import { EvidencePanel } from "../components/research/EvidencePanel";
@@ -32,6 +32,36 @@ function makeEvidence(): ReportEvidence {
         status: "failed",
         error: "守卫拒绝",
         summary: null,
+        schemaVersion: 1,
+      },
+    ],
+  };
+}
+
+/** Task 14：带结构化 summary（真实线上形状，camelCase）的单步证据。 */
+function makeStructuredEvidence(): ReportEvidence {
+  return {
+    stepResults: [
+      {
+        index: 0,
+        type: "聚合步",
+        sql: "SELECT bpsnum_0, qty FROM dual",
+        status: "success",
+        error: null,
+        summary: {
+          total: "100",
+          baseline: "80",
+          current: "100",
+          delta: "20",
+          deltaRatio: "0.25",
+          topN: [
+            { rank: 1, row: { BPSNUM_0: "SUP-A", QTY: "12.5" } },
+            { rank: 2, row: { BPSNUM_0: "SUP-B", QTY: "3" } },
+          ],
+          sampleRows: [{ BPSNUM_0: "RAW-LEAK", QTY: "999" }],
+          timeRange: { start: "2024-01", end: "2024-06" },
+          empty: false,
+        },
         schemaVersion: 1,
       },
     ],
@@ -65,6 +95,66 @@ describe("EvidencePanel", () => {
 
     // 失败步的错误信息
     expect(screen.getByText("守卫拒绝")).toBeInTheDocument();
+  });
+
+  it("summary.topN ⇒ 渲染紧凑表（rank + 键并集）并如实标注为采样回放", () => {
+    render(
+      <ConfigProvider>
+        <EvidencePanel evidence={makeStructuredEvidence()} />
+      </ConfigProvider>
+    );
+    const table = screen.getByTestId("evidence-topn");
+    // 表头 = rank + 各行键并集
+    expect(within(table).getByText("rank")).toBeInTheDocument();
+    expect(within(table).getByText("BPSNUM_0")).toBeInTheDocument();
+    expect(within(table).getByText("QTY")).toBeInTheDocument();
+    // 值按原样渲染
+    expect(within(table).getByText("SUP-A")).toBeInTheDocument();
+    expect(within(table).getByText("SUP-B")).toBeInTheDocument();
+    expect(within(table).getByText("12.5")).toBeInTheDocument();
+    // 采样回放标注（非原图）
+    expect(screen.getByText(/摘要采样数据回放/)).toBeInTheDocument();
+  });
+
+  it("summary.timeRange ⇒ 渲染一行时间范围", () => {
+    render(
+      <ConfigProvider>
+        <EvidencePanel evidence={makeStructuredEvidence()} />
+      </ConfigProvider>
+    );
+    expect(screen.getByTestId("evidence-time-range")).toBeInTheDocument();
+    expect(screen.getByText("时间范围 2024-01 – 2024-06")).toBeInTheDocument();
+  });
+
+  it("summary.sampleRows 不铺开（体积/噪声）", () => {
+    render(
+      <ConfigProvider>
+        <EvidencePanel evidence={makeStructuredEvidence()} />
+      </ConfigProvider>
+    );
+    expect(screen.queryByText(/RAW-LEAK/)).toBeNull();
+  });
+
+  it("仅标量 summary ⇒ 不渲染 topN 表 / 时间范围（不误渲染空白）", () => {
+    render(
+      <ConfigProvider>
+        <EvidencePanel evidence={makeEvidence()} />
+      </ConfigProvider>
+    );
+    expect(screen.queryByTestId("evidence-topn")).toBeNull();
+    expect(screen.queryByTestId("evidence-time-range")).toBeNull();
+  });
+
+  it("标量 baseline/current/delta/deltaRatio 仍渲染在 <ul>（不回归）", () => {
+    render(
+      <ConfigProvider>
+        <EvidencePanel evidence={makeStructuredEvidence()} />
+      </ConfigProvider>
+    );
+    expect(screen.getByText(/baseline: 80/)).toBeInTheDocument();
+    expect(screen.getByText(/current: 100/)).toBeInTheDocument();
+    expect(screen.getByText(/delta: 20/)).toBeInTheDocument();
+    expect(screen.getByText(/deltaRatio: 0.25/)).toBeInTheDocument();
   });
 
   it("evidence 缺省时不渲染（安全）", () => {

@@ -2992,6 +2992,8 @@ export const zhCN = {
     evidence: {
       title: "执行证据",
       step: "步骤 {index}",
+      topNReplay: "Top-N（摘要采样数据回放，非原图）",
+      timeRange: "时间范围 {start} – {end}",
       status: {
         success: "成功",
         failed: "失败",

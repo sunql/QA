@@ -25,7 +25,9 @@ QUEUE_MAX = 200
 EVENT_CONNECTED = "research.connected"
 """流建立后的首事件（Task 8 新增，设计 §4.5 之外）：客户端据此确认通道已就绪。"""
 
-Event = tuple[str, dict[str, Any]]
+Event = tuple[str, dict[str, Any], int | None]
+"""总线投递项 ``(事件名, 载荷, seq)``：第 3 位是 outbox ``seq``（Task 12），未落库
+（合成帧 / 直发）时为 ``None``。带 ``seq`` 的事件在 SSE 帧里多一行 ``id: {seq}``。"""
 
 
 class ResearchEventBus:
@@ -55,9 +57,15 @@ class ResearchEventBus:
         """当前订阅者数（测试与诊断用）。"""
         return len(self._subscribers.get(str(sessionId), ()))
 
-    async def publish(self, sessionId: str, event: str, payload: dict[str, Any]) -> None:
-        """广播一帧；队列满的订阅者丢最旧（不阻塞、不抛）。可作 `emit` 的 partial 绑定面。"""
-        item: Event = (event, payload)
+    async def publish(
+        self, sessionId: str, event: str, payload: dict[str, Any], seq: int | None = None
+    ) -> None:
+        """广播一帧；队列满的订阅者丢最旧（不阻塞、不抛）。可作 `emit` 的 partial 绑定面。
+
+        ``seq``（Task 12）= 该事件在 outbox 里的行号；已落库时随帧下发 ``id:``，未落库
+        （合成帧 / 未接线直发）时为 ``None``。
+        """
+        item: Event = (event, payload, seq)
         for queue in list(self._subscribers.get(str(sessionId), ())):
             self._offer(queue, item, str(sessionId))
 

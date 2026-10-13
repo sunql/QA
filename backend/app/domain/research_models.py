@@ -34,6 +34,8 @@ _STATUS_LEN = 20
 _MODE_LEN = 20
 _PHASE_LEN = 30
 _STEP_TYPE_LEN = 50
+_EVENT_LEN = 50
+"""事件名列长（最长事件名 ``research.step.start`` = 19 字符；留余量，与既有 ``_*_LEN`` 同风格）。"""
 
 
 def _utcnow() -> datetime:
@@ -267,6 +269,36 @@ class ResearchStepResult(Base):
     evidence_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(String(_STATUS_LEN), nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+
+class ResearchEventOutbox(Base):
+    """研究事件 outbox（Task 12）：事件**先落库、再广播** ⇒ SSE 断线可回放。
+
+    三处刻意偏离计划的裁定（逐条写清理由）：
+
+    1. **游标用 ``BIGSERIAL seq`` 主键，不用 ``created_at``**。计划拟
+       ``WHERE created_at > after_time``：同一毫秒的并列行会**漏读或重读**，且 DB 时钟
+       回拨仍会乱序。``seq`` 单调递增 ⇒ ``WHERE seq > :cursor ORDER BY seq ASC`` 严格正确。
+       SSE 的 ``lastEventId`` 就是 ``seq``。
+    2. **不带 ``run_state_id``**：``emit`` 的 callable 在 ``runTurn`` 创建 run_state
+       **之前**就已绑定（wrapper 层拿不到该 id），且回放查询是**按会话**（``session_id``）
+       而非按版本 ⇒ 该列对回放零贡献，**不**为填它去改 ``runTurn`` 签名。
+    3. **不带 ``id``/``event_id`` UUID**：``seq`` 已唯一且有序，再留一个 UUID 是冗余。
+    """
+
+    __tablename__ = "research_event_outbox"
+
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    event: Mapped[str] = mapped_column(String(_EVENT_LEN), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=sa_text("'{}'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )

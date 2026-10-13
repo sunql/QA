@@ -37,8 +37,9 @@ async def test_publish_reaches_every_subscriber_of_session() -> None:
 
     await bus.publish("s1", "research.intent", {"intent": "research"})
 
-    assert first.get_nowait() == ("research.intent", {"intent": "research"})
-    assert second.get_nowait() == ("research.intent", {"intent": "research"})
+    # 第 3 位是 outbox seq（Task 12）：直发（未落库）时为 None
+    assert first.get_nowait() == ("research.intent", {"intent": "research"}, None)
+    assert second.get_nowait() == ("research.intent", {"intent": "research"}, None)
     assert other.empty()
 
 

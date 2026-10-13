@@ -518,7 +518,10 @@ async def test_abort_releases_claim_and_publishes_terminal_event(
         researchModule._bus.unsubscribe(sid, queue)
 
     assert frames, "abort 必须发事件（`_eventFrames` 只认终态 → 否则已打开的流不关）"
-    assert any(researchModule._isTerminal(event, payload) for event, payload in frames), frames
+    # 总线项是 (事件名, 载荷, seq) 三元组（Task 12）
+    assert any(
+        researchModule._isTerminal(event, payload) for event, payload, _seq in frames
+    ), frames
 
     detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
     assert detail.json()["session"]["status"] == "aborted", detail.text

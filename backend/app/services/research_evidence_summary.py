@@ -667,14 +667,15 @@ def trySummarizeEvidence(
     本模块读的是驱动原始行，可能含 ``research_json`` 白名单外的类型（``bytes`` /
     ``memoryview`` / oracledb LOB ...）。
 
-    **机制（实测核实，勿再写成「被 ``emitEvent`` 吞掉」）**：``emit`` 是
-    ``ResearchEventBus.publish`` 的 partial，而 ``publish`` 只把 ``(event, payload)``
-    **入队、从不序列化**。因此「同一批行在 emit 处失败」这条路径上**根本没有失败** ——
-    ``emitEvent`` 守卫的是 ``emit`` 那一步，而入队不碰 payload 类型。真正的序列化在 **SSE
-    帧构造处**（``_sseFrame`` → ``research_json``），那一步**不在** ``emitEvent`` 的
-    try/except 里 ⇒ 同一批行在那里失败会**炸掉整条 SSE 流**，是**响亮失败**而非静默。
+    **机制（Task 12 起）**：``emit`` 接线是 ``_persistAndPublish`` 的 partial ——
+    **先落 outbox（``persistEvent`` → ``research_json`` 序列化）再广播**。整条事件路径
+    **不抛**：``persistEvent`` 把序列化 / 落库失败记 ERROR 并返回 ``None``（该帧不带
+    ``id:``），``_persistAndPublish`` 仍照常广播原 payload；SSE 帧构造处（``_sseFrame`` →
+    ``research_json``）亦有守卫：坏帧**降级**（``_coerceJsonSafe`` 兜底）或**丢弃并记 ERROR**，
+    **不**炸整条流。故「同一批行在事件路径上失败」是**响亮失败**（ERROR 日志 + 降级帧），
+    既不静默、也不截断流。
 
-    正因为原始行路径在 SSE 侧已经足够响亮，结构化摘要这一路才不该反过来把**单步**升级成
+    正因为原始行路径在事件侧已经足够响亮，结构化摘要这一路才不该反过来把**单步**升级成
     **整 turn 失败**：此处上抛会经服务的 ``_guardedRun`` 落进终态失败通道，让一个**本可
     降级**成「本步没有结构化证据」的加法功能成为整轮终止的理由。它是加法：算不出来就不给，
     返回 ``None`` 即「本步无结构化证据」。

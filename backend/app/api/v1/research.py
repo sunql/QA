@@ -11,9 +11,11 @@
 - GET    /sessions/{sessionId}/reports      版本列表
 - GET    /stream?sessionId=...              SSE：research.* 事件族（Task 8，独立端点）
 
-SSE 通道（Task 8）：状态机的事件经 `emit` 接线投递到进程内 `ResearchEventBus`（见
-`_runTurnInBackground` / `_resumeTurnInBackground` 的 `functools.partial(bus.publish, ...)`），
-流端先订阅再返回 `StreamingResponse`。与 chat 的 SSE 实现**完全独立**（设计 §4.5）。
+SSE 通道（Task 8）：状态机的事件经 `emit` 接线**先落** `research_event_outbox`（Task 12，
+持久化台账 + 单调 `seq` 游标）**再**广播到进程内 `ResearchEventBus`（见
+`_runTurnInBackground` / `_resumeTurnInBackground` 的 `functools.partial(_persistAndPublish, ...)`），
+流端**先订阅再回放**（`?lastEventId=`）并返回 `StreamingResponse`。与 chat 的 SSE 实现
+**完全独立**（设计 §4.5）。
 
 鉴权与越权（安全）：
 - router 级 `Depends(getCurrentUser)`（read-only 也强制，见 memory: router auth 强制）；
@@ -35,6 +37,7 @@ SSE 通道（Task 8）：状态机的事件经 `emit` 接线投递到进程内 `
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -99,6 +102,7 @@ from app.services.research_agent_ports import (
 )
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_event_bus import EVENT_CONNECTED, bus
+from app.services.research_event_outbox import fetchEventsAfter, persistEvent
 from app.services.research_json_encoder import research_json
 from app.services.research_session_service import (
     PROMPT_KEY,
@@ -106,6 +110,7 @@ from app.services.research_session_service import (
     CheckpointStaleError,
     ResearchSessionService,
     RunClaimConflictError,
+    _coerceJsonSafe,
 )
 from app.services.research_sql_runner import ResearchSqlRunner
 from app.services.step_query_planner import StepQueryPlanner
@@ -124,6 +129,28 @@ _ESL_TOP_K = 5
 
 _bus = bus
 """进程内事件总线单例（模块级别名：便于测试与诊断，见 research_event_bus）。"""
+
+
+async def _persistAndPublish(sessionId: str, event: str, payload: dict[str, Any]) -> None:
+    """先写 outbox（独立短会话、自记账、不抛），再广播（带 ``seq``）。推流失败不改变 turn 结果。
+
+    **为什么用独立短会话**（`getSessionFactory()()`，不用状态机的 session）：状态机在相位
+    边界 commit、异常时整事务 rollback；若 outbox 行挂在**同一**事务上，回滚会连同**已广播
+    给用户的事件**一起从台账里消失，重连回放就出现空洞。独立会话让台账与业务事务解耦。
+
+    写失败**不抛**（与 `emitEvent` 同口径）：`seq=None` ⇒ 帧里不写 `id:`，客户端拿不到该
+    事件的游标，但 turn 照常推进。本函数可作 `emit` 的 partial 绑定面。
+    """
+    seq: int | None = None
+    try:
+        async with getSessionFactory()() as session:
+            seq = await persistEvent(
+                session, sessionId=uuid.UUID(sessionId), event=event, payload=payload
+            )
+            await session.commit()
+    except Exception:  # noqa: BLE001 —— 台账写失败不得杀 turn
+        logger.exception("研究事件 outbox 落库事务失败: session=%s event=%s", sessionId, event)
+    await _bus.publish(sessionId, event, payload, seq)
 
 HEARTBEAT_SECONDS = 15.0
 """SSE 心跳间隔（秒）：空闲超过即发 `: ping` 注释行保活 / 探测断连。"""
@@ -480,7 +507,8 @@ async def abortSession(
         # 之所以现在功能正确：运行时**无人**消费 ErrorSpec.sessionStatus（`_isTerminal` 只问
         # 「是不是终态码」）；它是给前端/文档看的声明。不新增错误码（新码必须同批扩前端
         # union/i18n/store，而本端点尚无前端调用方）—— 等接线时一并校正该表。
-        await _bus.publish(
+        # 终态 error 也必须可回放（Task 12）：走 `_persistAndPublish`（先落 outbox 再广播）。
+        await _persistAndPublish(
             str(sessionId),
             EVENT_ERROR,
             errorPayload(ERROR_TURN_FAILED, "本轮研究已取消", phase=None),
@@ -575,35 +603,52 @@ async def listReports(
 @router.get("/stream", summary="研究进度 SSE（research.* 事件族）")
 async def streamSessionEvents(
     sessionId: uuid.UUID,
+    lastEventId: int | None = Query(
+        default=None, description="上次收到的事件 seq；只回放其后的"
+    ),
     user: CurrentUser = Depends(_requireResearchUser),
 ) -> StreamingResponse:
     """订阅本会话的进度事件（设计 §4.5）。
 
-    **先订阅再触发 turn**：本端点不做历史回放，客户端须在 POST turns / answer 之前
-    建流（brief 契约）。鉴权与越权同 REST 口径：他人会话 404（不泄露存在性）。
-    归属校验用**短会话**（流是长连接，不能把请求级 session 拖到流结束）。
+    **支持历史回放**（Task 12）：带 `?lastEventId=<seq>` 时先回放该 `seq` **之后**的
+    已落库事件（每帧带 `id: <seq>`），再转入实时推送 —— 页面刷新 / SSE 断线后不再永久
+    丢失错过的事件。不带游标则**不**回放（无「错过」的概念，避免把陈年事件当新事件重放）。
+
+    时序建议：首次连接先订阅、再触发 turn；重连时带上客户端记住的最后一个 `id`。
+    鉴权与越权同 REST 口径：他人会话 404（不泄露存在性）。归属校验用**短会话**（流是
+    长连接，不能把请求级 session 拖到流结束）。
     """
     async with getSessionFactory()() as db:
         await _ownedSession(db, sessionId, user)
     return StreamingResponse(
-        _eventFrames(str(sessionId)),
+        _eventFrames(str(sessionId), lastEventId),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
-async def _eventFrames(sessionId: str) -> AsyncIterator[str]:
-    """队列 → SSE 帧：首帧 connected；空闲发心跳；终态事件或客户端断连后收尾退订。"""
+async def _eventFrames(sessionId: str, lastEventId: int | None = None) -> AsyncIterator[str]:
+    """队列 → SSE 帧：首帧 connected；可选回放错失事件；空闲发心跳；终态或断连后收尾退订。
+
+    **先订阅再回放**（Task 12）：先 `subscribe` 再查 outbox，否则「查完到订阅」之间新发的
+    事件会漏。回放帧带 `id:`，实时帧若已落库也带 ⇒ 客户端按 `seq` 去重。回放里若已含终态
+    事件则**不再进入实时循环**（该轮已结束，再等只会挂到心跳）。
+    """
     queue = _bus.subscribe(sessionId)
     try:
         yield _sseFrame(EVENT_CONNECTED, {"sessionId": sessionId})
+        if lastEventId is not None:
+            for event, payload, seq in await _fetchMissed(sessionId, lastEventId):
+                yield _sseFrame(event, payload, seq)
+                if _isTerminal(event, payload):
+                    return
         while True:
             try:
-                event, payload = await asyncio.wait_for(queue.get(), HEARTBEAT_SECONDS)
+                event, payload, seq = await asyncio.wait_for(queue.get(), HEARTBEAT_SECONDS)
             except TimeoutError:
                 yield HEARTBEAT_LINE
                 continue
-            yield _sseFrame(event, payload)
+            yield _sseFrame(event, payload, seq)
             if _isTerminal(event, payload):
                 return
     finally:
@@ -611,15 +656,57 @@ async def _eventFrames(sessionId: str) -> AsyncIterator[str]:
         _bus.unsubscribe(sessionId, queue)
 
 
-def _sseFrame(event: str, payload: dict[str, Any]) -> str:
+async def _fetchMissed(sessionId: str, lastEventId: int) -> list[tuple[str, dict[str, Any], int]]:
+    """独立短会话取 `seq > lastEventId` 的事件，物化为纯元组（脱离 ORM 会话）。
+
+    用**独立短会话**：流是长连接，不能把请求级 session 拖到流结束；也避免会话关闭后访问
+    已 detach 行属性。取数失败只留痕、返回空 —— 回放失败不该炸掉实时流。
+    """
+    try:
+        async with getSessionFactory()() as session:
+            rows = await fetchEventsAfter(session, uuid.UUID(sessionId), lastEventId)
+            return [(row.event, row.payload, row.seq) for row in rows]
+    except Exception:  # noqa: BLE001 —— 回放失败只留痕，不炸流（实时事件仍照常投递）
+        logger.exception("SSE 历史回放失败: session=%s afterSeq=%s", sessionId, lastEventId)
+        return []
+
+
+def _sseFrame(event: str, payload: dict[str, Any], seq: int | None = None) -> str:
     """SSE 帧（`research_json` 转义换行，payload 不会破坏帧边界）。
 
-    payload 里有业务库驱动标量（Decimal / date / datetime / UUID）时，
-    裸 `json.dumps` 会 `TypeError` 炸掉**整帧**，故统一走 `research_json`
-    的 JSON 安全映射（Task 3，见 `services/research_json_encoder`）。
-    JSON 安全 payload 的输出与 `json.dumps(..., ensure_ascii=False)` 逐字节相同。
+    `seq is not None` 时在 `event:` 行后加 `id: {seq}` 行（SSE 规范：`event:` / `id:` /
+    `data:` 任意顺序，`data:` 收尾）—— 客户端据此记住游标、重连带 `?lastEventId=`。
+
+    payload 里有业务库驱动标量（Decimal / date / datetime / UUID）时走 `research_json`
+    的 JSON 安全映射（Task 3）。**序列化有守卫**（Task 12）：`research_json` 对白名单外
+    类型（`bytes`/LOB…）抛错，若任由异常冒泡，一帧坏值会炸掉**整条流**。故先试
+    `research_json`，失败降级 `_coerceJsonSafe`（未知类型 → str），再失败丢该帧并记 ERROR。
     """
-    return f"event: {event}\ndata: {research_json(payload)}\n\n"
+    data = _encodeFrameData(event, payload)
+    if data is None:
+        return ""
+    lines = [f"event: {event}"]
+    if seq is not None:
+        lines.append(f"id: {seq}")
+    lines.append(f"data: {data}")
+    return "\n".join(lines) + "\n\n"
+
+
+def _encodeFrameData(event: str, payload: dict[str, Any]) -> str | None:
+    """帧 `data:` 段编码：`research_json` 优先；失败降级 `_coerceJsonSafe`；再失败丢帧。
+
+    两段守卫都**记 ERROR 且不外抛**：一帧坏值不得截断整条流（降级帧仍用原事件名，
+    **不**新造 error code —— 新 code 会强制前端 union/i18n/store 同批改动）。
+    """
+    try:
+        return research_json(payload)
+    except Exception:  # noqa: BLE001 —— 白名单外类型（bytes/LOB…）：降级，不炸流
+        logger.exception("SSE 帧序列化失败，降级 _coerceJsonSafe: event=%s", event)
+    try:
+        return json.dumps(_coerceJsonSafe(payload), ensure_ascii=False, allow_nan=False)
+    except Exception:  # noqa: BLE001 —— 降级仍失败：丢该帧，不炸流
+        logger.exception("SSE 帧降级序列化仍失败，丢弃该帧: event=%s", event)
+        return None
 
 
 def _isTerminal(event: str, payload: dict[str, Any]) -> bool:
@@ -652,8 +739,9 @@ async def _runTurnInBackground(
     异常已在状态机内 `research.error` + 会话置 failed；此处只兜底 rollback 与日志
     （后台任务不得把异常抛回响应 —— 那会让 202 变成 500）。
 
-    `emit` 接线（Task 8）：`partial(bus.publish, sessionId)` —— 状态机发的事件即刻
-    广播给已订阅的流端（订阅必须先于本任务，流端不做历史回放）。
+    `emit` 接线（Task 8 / 12）：`partial(_persistAndPublish, sessionId)` —— 状态机发的事件
+    **先落** `research_event_outbox`（带 `seq`）**再**广播给已订阅的流端；错过的流端可用
+    `?lastEventId=` 回放（订阅仍建议先于本任务，以最小化回放窗口）。
 
     `idempotencyKey`（Task 2）：透传进 `runTurn` 落 run state，供重试回放同一 turnId。
 
@@ -671,14 +759,14 @@ async def _runTurnInBackground(
                 question=question,
                 userId=userId,
                 mode=mode,
-                emit=partial(_bus.publish, sessionId),
+                emit=partial(_persistAndPublish, sessionId),
                 idempotencyKey=idempotencyKey,
             )
             await session.commit()
         except RunClaimConflictError as exc:
             logger.warning("会话已有进行中的轮次，本轮放弃: session=%s turn=%s", sessionId, turnId)
             await session.rollback()
-            await _bus.publish(
+            await _persistAndPublish(
                 sessionId, EVENT_ERROR, errorPayload(ERROR_CHECKPOINT_CONFLICT, str(exc))
             )
         except Exception as exc:  # noqa: BLE001 —— 后台任务兜底：留痕 + 回滚，不上抛
@@ -710,12 +798,12 @@ async def _resumeTurnInBackground(
                 checkpointId=uuid.UUID(checkpointId),
                 action=action,
                 choice=choice,
-                emit=partial(_bus.publish, sessionId),
+                emit=partial(_persistAndPublish, sessionId),
             )
             await session.commit()
         except CheckpointStaleError as exc:
             logger.warning("checkpoint 已过期，会话落终态: checkpoint=%s", checkpointId)
-            await _bus.publish(
+            await _persistAndPublish(
                 sessionId,
                 EVENT_ERROR,
                 errorPayload(ERROR_CHECKPOINT_CONFLICT, str(exc)),
@@ -726,7 +814,7 @@ async def _resumeTurnInBackground(
             # 并发提交：另一请求已抢先决策 ⇒ 那条 resume 正在正常推进，会在终态自行释放，
             # 故这里**不动**执行权（释放了反而放并发进来）。
             logger.warning("checkpoint 决策冲突，转 409: checkpoint=%s action=%s", checkpointId, action)
-            await _bus.publish(
+            await _persistAndPublish(
                 sessionId,
                 EVENT_ERROR,
                 errorPayload(ERROR_CHECKPOINT_CONFLICT, str(exc)),
@@ -773,7 +861,9 @@ async def _markTerminalFailure(
     集合判定只保留在 `_isTerminal`（事件侧决定是否关流）。rollback 后写库失败只留痕、
     不掩盖原始异常（原始异常已由调用方 `logger.exception` 留痕）。
     """
-    await _bus.publish(sessionId, EVENT_ERROR, errorPayload(ERROR_TURN_FAILED, message, phase=None))
+    await _persistAndPublish(
+        sessionId, EVENT_ERROR, errorPayload(ERROR_TURN_FAILED, message, phase=None)
+    )
     try:
         await service.markFailed(session, uuid.UUID(sessionId))
         await session.commit()

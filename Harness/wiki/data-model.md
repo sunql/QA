@@ -173,4 +173,72 @@ snapshot_message    TEXT
 - `alembic/versions/0069_dq_evaluation_report.py` — 初次建表（status 只有 DRAFT/PUBLISHED）
 - `alembic/versions/0074_dq_eval_report_progress.py` — 扩 CheckConstraint + 新增 progress 列 + ix_evaluation_report_status_running
 
+## Phase 环节一 增量：研究会话证据契约表
+
+**日期**：2026-10-13 · **变更**：[feat-research-evidence-contract](../changes/feat-research-evidence-contract/summary.md)
+· **Wiki**：[[research_evidence_contract]]
+
+### research_run_state（本轮问题的版本化快照）
+
+```
+id               UUID PK
+session_id       UUID FK → research_session.id (ON DELETE CASCADE)
+turn_id          UUID FK → research_turn.id    (ON DELETE CASCADE)
+parent_run_id    UUID FK → research_run_state.id (ON DELETE SET NULL)   -- 版本链
+current_question TEXT NOT NULL DEFAULT ''
+mode             VARCHAR(20) NOT NULL
+scope_version    INTEGER NOT NULL DEFAULT 1
+datasource_id    INTEGER
+schema_version   INTEGER NOT NULL DEFAULT 1
+model_id         INTEGER
+state_payload    JSONB NOT NULL DEFAULT '{}'::jsonb
+created_at / updated_at TIMESTAMPTZ
+
+索引：ix_research_run_state_session_id (session_id)
+      ix_research_run_state_turn_id    (turn_id)
+被引用：research_session.active_run_id            FK (ON DELETE SET NULL)
+        research_step_result.run_state_id         FK (ON DELETE CASCADE)
+        research_run_state.parent_run_id          FK (自引用, ON DELETE SET NULL)
+```
+
+**承重语义**：续跑**新建**一行（新 UUID）而不是原地改 —— 所以「同一 turn 的最新版本」不是某一行的属性，
+只能按 `created_at` 序取；`turn_id` 在版本化时**被复制**（不变）⇒ 按 `turn_id` 能覆盖一个 turn 的
+**所有**版本。只按单个 `run_state_id` 读会漏掉早期版本的行。
+
+### research_step_result（每步真实结果）
+
+```
+id               UUID PK
+run_state_id     UUID FK → research_run_state.id (ON DELETE CASCADE)
+step_index       INTEGER NOT NULL
+step_type        VARCHAR(50) NOT NULL
+sql_text         TEXT
+raw_result_ref   JSONB        -- {"rows": [...], "rowCount": n, "schemaVersion": 1}
+evidence_summary JSONB        -- EvidenceSummary（数值标量串化）
+status           VARCHAR(20) NOT NULL   -- success / empty / failed
+error            TEXT
+created_at       TIMESTAMPTZ
+
+索引：ix_research_step_result_run_state_id (run_state_id)
+```
+
+**没有 `turn_id` 列**（有意）：挂 `run_state_id`，要按 turn 读必须
+`JOIN research_run_state ON run_state_id WHERE research_run_state.turn_id = :t`。
+
+### research_session 增列
+
+```
+active_run_id    UUID FK → research_run_state.id (ON DELETE SET NULL)  -- 会话级执行权互斥
+idempotency_key  VARCHAR            -- 重复触发去重（原子条件 UPDATE 认领）
+```
+
+### 迁移文件
+
+- `alembic/versions/b1ea6cb32588_run_state.py` — `research_run_state` 建表
+- `alembic/versions/0118_research_active_run.py` — `research_session.active_run_id` + FK + 索引
+- `alembic/versions/0119_research_step_result.py` — `research_step_result` 建表
+
+生产库 head：`0119`（2026-10-13 部署冒烟实测）。
+
 > 文件名长度约束：≤ 32 字符（见 [[../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode/memory/alembic-version-filename-32-char-limit]]）。
+> 本批 0118 / b1ea6cb32588 初版超限（35 / 38），2026-10-13 改短（27 / 25）。

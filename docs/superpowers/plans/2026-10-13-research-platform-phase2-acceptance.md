@@ -85,7 +85,17 @@ DATABASE_URL="postgresql+asyncpg://qa_user:<pw>@<host>:5433/qa_metadata" \
 **静默失效**（守门形同虚设），且**没有任何用户可见信号**。
 
 > 这是**已知限制**，**非本任务修复项**。若要可观测，后续可在连续 N 次读失败后发一条
-> 降级类 `research.error`（当前**未**实现）。
+> 降级类 `research.error`。
+
+**已实现（2026-10-13，本验收计划范围之外的后续扩展）**：按上文方向落地 ——
+连续 `SESSION_BUDGET_COST_READ_FAILURE_THRESHOLD`(=2) 次读失败发**一条**（每轮一次）
+降级类 `research.error{code=budget_metering_degraded, uiHint=degraded}`，
+`terminal=False` ⇒ 不关流、不落 `failed`，**fail-open 语义不变**（只加信号）。两个 UI 面：
+主区常驻 warning Alert（`degradedNotice`）+ 时间线一条（`research.progress.degraded`）。
+另有：`_readSessionCost` 的 `Decimal` 转换挪进 `try`（原先在 `try` 外，端口返回
+`None`/非数值会抛 `InvalidOperation` 炸掉整轮）。
+实现与测试见 `Harness/changes/2026-10-13-budget-metering-degraded-visible/`；
+本节其余限制（`budget <= 0` 时闸门显式关闭、下方 reaper 边界）**不变**。
 
 ---
 

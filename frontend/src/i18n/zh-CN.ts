@@ -2970,6 +2970,7 @@ export const zhCN = {
       hypothesis: "形成假设",
       finding: "得出结论",
       report: "生成报告",
+      degraded: "预算计量降级，本轮闸门放行",
     },
     timeline: {
       detail: "查看",

@@ -60,6 +60,8 @@ from app.services.research_agent_phases import (
 )
 from app.services.research_agent_ports import (
     ACTION_STATUS,
+    BUDGET_METERING_DEGRADED_MESSAGE,
+    ERROR_BUDGET_METERING_DEGRADED,
     ERROR_HYPOTHESIS_FAILED,
     ERROR_TURN_FAILED,
     EVENT_CHECKPOINT,
@@ -125,6 +127,16 @@ SESSION_BUDGET_HINT = "可新建会话或调高 SESSION_BUDGET 后重试"
 SESSION_BUDGET_EXCEEDED_MESSAGE = f"会话累计成本已达预算上限，本轮研究终止；{SESSION_BUDGET_HINT}"
 """读不到真实金额时的兜底终止文案（二次读打嗝，近乎不可达；仍显式给处置）。"""
 
+SESSION_BUDGET_COST_READ_FAILURE_THRESHOLD = 2
+"""连续读失败达此数 ⇒ 发一条降级 `research.error`（§3.2；fail-open 语义不变，只加信号）。
+
+**N=2 的理由**：闸门每相位一次（新 turn ≤7 次），但 turn 常在 checkpoint 提前暂停
+（plan 暂停 ⇒ 仅 3 次检查）⇒ N≥3 在短 turn 里**永不触发**；N=1 会被一次瞬时抖动触发、
+下个相位又自愈 ⇒ 用户面噪声。N=2 = 容一次重试，且任何有实际工作的 turn 都能在**第二个
+相位边界**（`intent` 完成、`esl` 开始）前发出。计数器是**实例属性**（服务每 turn 新建），
+故 `state` 跨恢复轮重建不影响它。
+"""
+
 
 def sessionBudgetMessage(cost: Decimal, budget: Decimal) -> str:
     """超预算终止文案：带**真实**成本与预算（定点），并给出用户可执行的处置。"""
@@ -171,6 +183,13 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         # 会话级预算闸门的**可注入** seam（Task 15）：None ⇒ 用时读 `getSettings().sessionBudget`。
         # 生产构造点不传（走全局配置）；测试注入以免污染全局 settings 缓存。
         self._sessionBudget = sessionBudget
+        # 预算闸门降级信号（§3.2）：连续读失败 streak + emit-once 守卫。
+        # 实例属性 ⇒ 粒度是「**本次后台运行**」，不是「本 turn」：服务每次后台运行新建
+        # （`research.py` buildResearchAgentService），而 checkpoint 暂停后 resume 会再新建
+        # 一个 ⇒ 同一 turn 内**可能**再发一条（前端只是把 degradedNotice 重设为同一文案，
+        # 对用户无害）。不依赖 `state`（它跨恢复轮从 DB 重建，装不下这个 flag）。
+        self._budgetCostReadFailures = 0
+        self._budgetDegradeEmitted = False
         self._intent = IntentService()
         self._wireRouting(modelConfigs, modelRouter, tokenUsage)
         self._wireNl2sql(ontology, nl2sql)
@@ -527,15 +546,22 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         return Decimal(str(raw))
 
     async def _readSessionCost(self, session: AsyncSession, sessionId: uuid.UUID) -> Decimal | None:
-        """读会话累计成本（best-effort）；读失败返回 None（计量打嗝不得杀研究）。"""
+        """读会话累计成本（best-effort）；读失败返回 None（计量打嗝不得杀研究）。
+
+        `Decimal` 转换也在 `try` **之内**：端口返回 `None`/非数值时 `Decimal(str(...))` 会抛
+        `InvalidOperation`，若留在 try 外就会从「best-effort」函数里炸出去、直接杀 turn
+        （与「读失败 ⇒ None」的契约自相矛盾）。失败一律收敛为 None。
+        """
         try:
             cost = await self._tokenUsage.getSessionCost(session, str(sessionId))
+            return cost if isinstance(cost, Decimal) else Decimal(str(cost))
         except Exception:  # noqa: BLE001 —— 与 buildRoutingContext 同口径：读用量失败不阻断
             logger.warning("读取会话累计成本失败，预算闸门本次跳过: session=%s", sessionId, exc_info=True)
             return None
-        return cost if isinstance(cost, Decimal) else Decimal(str(cost))
 
-    async def _sessionBudgetExceeded(self, session: AsyncSession, sessionId: uuid.UUID) -> bool:
+    async def _sessionBudgetExceeded(
+        self, session: AsyncSession, sessionId: uuid.UUID, *, emit: Emit | None = None
+    ) -> bool:
         """会话累计成本已达/超预算 ⇒ True（本轮研究在**相位边界**终止；**绝不**选/换模型）。
 
         预算语义（**与路由器相反，刻意如此**）：`budget <= 0` ⇒ **关闭闸门**（恒 False）。
@@ -543,13 +569,49 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         超预算 ⇒ 降级到最便宜模型」—— 同一配置值两处含义相反。闸门需要「能整关」的语义，
         故按 `<= 0` 关闭实现（本 Task **不改**路由器；分歧登记为遗留，见任务回报）。
 
-        best-effort：读成本失败 ⇒ False（计量打嗝既不得杀研究，也不得误判为超限）。
+        best-effort：读成本失败 ⇒ False（计量打嗝既不得杀研究，也不得误判为超限）。读失败
+        会累加**连续**失败 streak，达 `SESSION_BUDGET_COST_READ_FAILURE_THRESHOLD` 时经
+        `_noteBudgetCostReadFailure` 发一条降级 `research.error`（§3.2：fail-open 不变，
+        但让「闸门形同虚设」显式可见）；成功即断 streak。**计数只在此处**——不放进
+        `_readSessionCost`，因为 `_sessionBudgetMessage` 会二次读它（重复计数/幽灵事件）。
         """
         budget = self._effectiveSessionBudget()
         if budget <= 0:
-            return False
+            return False  # 闸门被显式关闭：不读、不计数、不发降级事件（结构上先于读）
         cost = await self._readSessionCost(session, sessionId)
-        return cost is not None and cost >= budget
+        if cost is None:
+            await self._noteBudgetCostReadFailure(sessionId, emit=emit)
+            return False  # fail-open 不变
+        self._budgetCostReadFailures = 0  # 成功即断 streak
+        return cost >= budget
+
+    async def _noteBudgetCostReadFailure(
+        self, sessionId: uuid.UUID, *, emit: Emit | None
+    ) -> None:
+        """记一次读失败；达阈值且本次运行未发过 ⇒ 发一条降级 `research.error`（每次运行至多一次）。
+
+        形状照抄 `markLlmUnavailable`（`research_agent_model_resolution.py`）：守卫标志 →
+        `logger.warning` → `emitEvent(..., errorPayload(...))`。**不做「恢复后再失败」重发**
+        （flag 不清、streak 清）：与 `markLlmUnavailable` 同口径，避免抖动刷屏。
+        粒度是「**本次后台运行**」（见 `__init__` 的 flag 注释）：resume 新建实例 ⇒ 同一
+        turn 内可能再发一条，已登记为设计而非缺陷。
+        """
+        self._budgetCostReadFailures += 1
+        if self._budgetCostReadFailures < SESSION_BUDGET_COST_READ_FAILURE_THRESHOLD:
+            return
+        if self._budgetDegradeEmitted:
+            return
+        self._budgetDegradeEmitted = True
+        logger.warning(
+            "会话成本连续 %d 次读取失败，预算闸门降级放行: session=%s",
+            self._budgetCostReadFailures,
+            sessionId,
+        )
+        await emitEvent(
+            emit,
+            EVENT_ERROR,
+            errorPayload(ERROR_BUDGET_METERING_DEGRADED, BUDGET_METERING_DEGRADED_MESSAGE),
+        )
 
     async def _sessionBudgetMessage(self, session: AsyncSession, sessionId: uuid.UUID) -> str:
         """超预算终止文案（读**真实**成本/预算）——仅在 `_sessionBudgetExceeded` 为真后调用。"""
@@ -572,10 +634,11 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
 
         Task 15：**相位边界**先过会话预算只读闸门（不半途打断一条相位）—— 超限即抛
         `SessionBudgetExceeded`，由 `_guardedRun` 转成 `research.error{turn_failed}` +
-        `markFailed`（复用既有终态路径，**不**新增 error code）。
+        `markFailed`（复用既有终态路径）。**超限**路径不新增 code；但**读失败**路径会发一条
+        降级 `research.error{budget_metering_degraded}`（§3.2：fail-open 不变，只加可见信号）。
         """
         for current in PHASES[PHASES.index(phase):]:
-            if await self._sessionBudgetExceeded(session, sessionId):
+            if await self._sessionBudgetExceeded(session, sessionId, emit=emit):
                 raise SessionBudgetExceeded(
                     await self._sessionBudgetMessage(session, sessionId)
                 )

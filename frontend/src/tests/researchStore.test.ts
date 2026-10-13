@@ -21,6 +21,7 @@ import {
 } from "../api/research";
 import { useResearchStore, applyResearchEvent, buildInitialState } from "../stores/researchStore";
 import { useAuthStore } from "../stores/authStore";
+import { i18n } from "../i18n";
 import { DEFAULT_TENANT_ID } from "../config";
 import type { ResearchCheckpoint, ResearchSession, ResearchSseEvent } from "../types/research";
 
@@ -1098,5 +1099,122 @@ describe("researchStore", () => {
     expect(next.error).toBeUndefined();
     expect(next.conflictError).toBeUndefined();
     expect(next.streaming).toBeUndefined();
+  });
+
+  // §3.2: 预算闸门降级可见化 —— degradedNotice 是 degraded 类**唯一**的 UI 面。
+  it("预算计量降级事件 ⇒ 置 degradedNotice 且不关流", () => {
+    const initial = buildInitialState();
+    const event = {
+      name: "research.error" as const,
+      payload: {
+        code: "budget_metering_degraded",
+        message: "会话成本计量连续读取失败：本轮预算闸门失效并放行",
+        uiHint: "degraded" as const,
+      },
+    };
+    const next = applyResearchEvent(initial, event);
+
+    expect(next.degradedNotice).toBe("会话成本计量连续读取失败：本轮预算闸门失效并放行");
+    // 流必须保持打开：闸门放行后状态机继续推进，后面还有 done（terminal 才关流）
+    expect(next.streaming).toBeUndefined();
+    expect(next.error).toBeUndefined();
+    expect(next.conflictError).toBeUndefined();
+  });
+
+  it("degraded 无 message ⇒ 回退**已翻译**文案（不写空串，也不写裸 i18n key）", () => {
+    const next = applyResearchEvent(buildInitialState(), {
+      name: "research.error" as const,
+      payload: { code: "budget_metering_degraded", uiHint: "degraded" as const },
+    });
+
+    // 页面 Alert 直渲 message（不过 t()）⇒ 落 key 会让用户看到字面 "research.progress.degraded"
+    expect(next.degradedNotice).toBe(i18n.t("research.progress.degraded"));
+    expect(next.degradedNotice).not.toBe("research.progress.degraded");
+    expect(next.degradedNotice).toBeTruthy();
+  });
+
+  it("整类 degraded 都置 degradedNotice（不只 budget_metering_degraded）", () => {
+    // 分支按 uiHint 的**类**（规则 ③）：既有 degraded code（逐步失败/LLM 不可用/校验失败/
+    // 假设生成失败）此前对用户完全静默，本次统一补上这个面 —— 用 step_failed 钉住。
+    const next = applyResearchEvent(buildInitialState(), {
+      name: "research.error" as const,
+      payload: { code: "step_failed", message: "第 2 步执行失败", uiHint: "degraded" as const },
+    });
+
+    expect(next.degradedNotice).toBe("第 2 步执行失败");
+    expect(next.streaming).toBeUndefined(); // 仍不关流
+  });
+
+  it("terminal/conflict 不动 degradedNotice（各自已有自己的面）", () => {
+    const initial = buildInitialState();
+    const terminal = applyResearchEvent(initial, {
+      name: "research.error" as const,
+      payload: { code: "turn_failed", message: "本轮失败", uiHint: "terminal" as const },
+    });
+    expect(terminal.degradedNotice).toBeUndefined();
+
+    const conflict = applyResearchEvent(initial, {
+      name: "research.error" as const,
+      payload: { code: "checkpoint_conflict", message: "冲突", uiHint: "conflict" as const },
+    });
+    expect(conflict.degradedNotice).toBeUndefined();
+  });
+
+  it("uiHint 缺失/未知 ⇒ 也不置 degradedNotice（认不出就不提示，fail-safe）", () => {
+    const next = applyResearchEvent(buildInitialState(), {
+      name: "research.error" as const,
+      payload: { code: "mystery", message: "未知" },
+    });
+
+    expect(next.degradedNotice).toBeUndefined();
+  });
+
+  it("buildInitialState 带 degradedNotice: null（新会话无降级提示）", () => {
+    expect(buildInitialState().degradedNotice).toBeNull();
+  });
+
+  it("reset 清 degradedNotice", () => {
+    useResearchStore.setState({ degradedNotice: "上一轮的降级提示" });
+
+    useResearchStore.getState().reset();
+
+    expect(useResearchStore.getState().degradedNotice).toBeNull();
+  });
+
+  it("开新流即清上一轮的 degradedNotice（与 error 同生命周期）", async () => {
+    stubAbortableStream();
+    useResearchStore.setState({ degradedNotice: "上一轮的降级提示" });
+
+    // `set({ streaming: true, … })` 在首个 await 之前同步执行 ⇒ 可直接断言
+    const pending = useResearchStore.getState().connectStream("s1");
+    expect(useResearchStore.getState().degradedNotice).toBeNull();
+
+    useResearchStore.getState().reset(); // 收尾：断流让 pending 落地
+    await pending;
+  });
+
+  // 跨会话泄漏：切到**已结束**会话不建流（useResearchSession 对终态会话直接 return），
+  // 故 connectStream 那条清除点够不着 —— openSession / sendQuestion 必须自己清。
+  it("openSession 清上一会话的 degradedNotice（切到已结束会话也不残留）", async () => {
+    const detail = {
+      session: makeSession({ status: "done" }),
+      turns: [],
+      pendingCheckpoint: null,
+    };
+    httpMock.get.mockResolvedValue({ data: detail });
+    useResearchStore.setState({ degradedNotice: "上一个会话的降级提示" });
+
+    await useResearchStore.getState().openSession("s2");
+
+    expect(useResearchStore.getState().degradedNotice).toBeNull();
+  });
+
+  it("sendQuestion 清上一会话的 degradedNotice", async () => {
+    httpMock.post.mockResolvedValue({ data: makeSession() });
+    useResearchStore.setState({ degradedNotice: "上一个会话的降级提示" });
+
+    await useResearchStore.getState().sendQuestion("新问题");
+
+    expect(useResearchStore.getState().degradedNotice).toBeNull();
   });
 });

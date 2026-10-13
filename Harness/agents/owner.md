@@ -68,6 +68,7 @@
   - [fix-sql-guard-db-side-readonly](../changes/fix-sql-guard-db-side-readonly/summary.md) - 库侧只读兜底（PG/MySQL/Oracle 三库）
   - [fix-plan-scope-gate-b](../changes/fix-plan-scope-gate-b/summary.md) - 半空计划闸门方案 B
   - [fix-oracle-alter-session-best-effort](../changes/fix-oracle-alter-session-best-effort/summary.md) - Oracle ALTER SESSION best-effort 降级
+  - [2026-10-13-budget-metering-degraded-visible](../changes/2026-10-13-budget-metering-degraded-visible/summary.md) - 预算闸门静默失效 → 用户可见降级信号（第 7 个 error code `budget_metering_degraded` + 前端两面）
   - **历史里程碑**：完整目录见 `Harness/changes/`（173 个变更，每变更配 `summary.md` SSOT）
 
 ### MCP `mcp/`

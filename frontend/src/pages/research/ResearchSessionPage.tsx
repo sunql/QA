@@ -35,6 +35,7 @@ export default function ResearchSessionPage() {
   const resolutionInFlight = useResearchStore((s) => s.resolutionInFlight);
   const error = useResearchStore((s) => s.error);
   const conflictError = useResearchStore((s) => s.conflictError);
+  const degradedNotice = useResearchStore((s) => s.degradedNotice);
   const answer = useResearchStore((s) => s.answer);
   const clearConflictError = useResearchStore((s) => s.clearConflictError);
   // 历史问答 Drawer 用：listResearchSessions 已在 ResearchListPage 用过，store
@@ -231,6 +232,11 @@ export default function ResearchSessionPage() {
         </Descriptions>
       </Drawer>
       {error ? <Alert type="error" message={error} style={{ marginBottom: 16 }} /> : null}
+      {/* §3.2 预算闸门降级：后端 fail-open 放行本轮，用户必须看得见（常驻到下一轮开始）。
+          与上面那条 error Alert 并列而**非**互斥 —— 降级期间流仍开着，本轮随后可能失败。 */}
+      {degradedNotice ? (
+        <Alert type="warning" message={degradedNotice} style={{ marginBottom: 16 }} />
+      ) : null}
       <Drawer
         title={t("research.session.timelineTitle")}
         placement="right"

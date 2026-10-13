@@ -262,6 +262,7 @@ from app.services.chat_domain import DomainCommandMixin
 from app.services.chat_l4 import L4Mixin
 # v3.1 B6（M7 Hypothesis Hook）：假设后处理 mixin（触发词表 + LLM 生成 + 落库）
 from app.services.hypothesis_service import HypothesisMixin
+from app.services.chat_stream_output import L1L4PreambleMixin
 logger = logging.getLogger(__name__)
 
 
@@ -291,7 +292,7 @@ def _firstPresentValue(data: list[dict] | None) -> Any | None:
     return next((v for v in data[0].values() if v is not None), None)
 
 
-class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin):
+class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin, L1L4PreambleMixin):
     """自然语言问答编排服务。
 
     组合 ChatStreamOutputMixin 提供流式回答输出的超时保护与降级能力。
@@ -420,11 +421,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                         session, dto.sessionId, dto.question, l1_response.answer, None,
                         routing_layer="L1", latency_ms=int((time.monotonic() - _t0) * 1000),
                         token_cost_usd=0.0,
-                        # 0105：KPI 指标块也要能进导出 PDF —— 它是本轮回答的一部分，
-                        # 只活在实时响应里的话，导出时同样退化成占位框。
                         chart_type=l1_response.chartType,
                         chart_option=l1_response.chartOption,
-                        # F1：判断依据同轮落库 —— 回放/导出不能只拿一张卡、没有依据。
                         visual_rationale=l1_response.visual_rationale,
                     )
                     return l1_response

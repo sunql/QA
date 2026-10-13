@@ -6,17 +6,21 @@ Create Date: 2026-10-12 20:16:46.933826
 """
 from __future__ import annotations
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
+
 # revision identifiers, used by Alembic.
-revision: str = 'b1ea6cb32588'
-down_revision: Union[str, None] = '0117'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+# 注：本文件原为 ``--autogenerate`` 默认单引号模板；已与同批 0118/0119 对齐为
+# ``str | None`` + 双引号。真正承重的兼容在 ``schema_drift._DOWN_REVISION_LINE``
+# （2026-10-13 部署冒烟：单引号 down_revision 被漏解析 ⇒ 误判多 head 阻塞启动）。
+revision: str = "b1ea6cb32588"
+down_revision: str | None = "0117"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:

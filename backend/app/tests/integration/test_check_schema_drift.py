@@ -369,6 +369,41 @@ class TestParseRevisionFiles:
         assert graph["0002_next"] == "0001_init"
 
 
+    def test_single_quoted_union_down_revision(self, tmp_path: Path) -> None:
+        """``--autogenerate`` 模板用 ``Union[str, None]`` + **单引号**；解析须同等对待。
+
+        回归（2026-10-13 部署冒烟抓到）：``b1ea6cb32588`` 的
+        ``down_revision: Union[str, None] = '0117'`` 用单引号 ⇒ 旧正则（只认双引号）
+        漏掉这条边 ⇒ ``_findHead`` 误判 ``0117`` 为未闭合 head（``heads=['0117','0119']``）
+        ⇒ 后端启动即 ``RuntimeError: Schema drift 校验失败``，**部署阻塞**。
+        """
+        (tmp_path / "0001_init.py").write_text(
+            'revision: str = "0001_init"\n'
+            "down_revision: Union[str, None] = None\n"
+        )
+        (tmp_path / "0002_next.py").write_text(
+            'revision: str = "0002_next"\n'
+            "down_revision: Union[str, None] = '0001_init'\n"
+        )
+        revs, graph = _parseRevisionFiles(tmp_path)
+        assert revs == {"0001_init", "0002_next"}
+        assert graph == {"0001_init": None, "0002_next": "0001_init"}
+        assert _findHead(graph) == "0002_next"
+
+
+class TestShippedChainHasSingleHead:
+    """发布守卫：随仓库发运的迁移链必须**恰好一个** head。
+
+    失败形态就是启动 drift 门拒绝引导 —— 这条守卫若早存在，``b1ea6cb32588`` 的单引号
+    问题会在合前暴露，而不是在部署冒烟时才发现。
+    """
+
+    def test_shipped_chain_has_single_head(self) -> None:
+        revs, graph = _parseRevisionFiles(_drift_module._ALEMBIC_VERSIONS_DIR)
+        head = _findHead(graph)  # 多 head / 无 head 会抛 RuntimeError
+        assert head in revs
+
+
 class TestFindHead:
     """测试 head 解析（链唯一性）。"""
 

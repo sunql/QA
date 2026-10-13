@@ -92,7 +92,11 @@ _REVISION_LINE = re.compile(
     r"^revision\s*:?\s*[^=]*=\s*[\"'](\w+)[\"']", re.MULTILINE
 )
 _DOWN_REVISION_LINE = re.compile(
-    r'^down_revision\s*:?\s*[^\n]*=\s*"([a-zA-Z0-9_]+)"',
+    # 值两侧的引号**双/单都认**：``alembic revision --autogenerate`` 模板用单引号
+    # （``down_revision: Union[str, None] = '0117'``）。只认双引号会漏掉这条边 ⇒
+    # ``_findHead`` 把被指向的 revision 误判成未闭合 head，启动 drift 门直接拒绝引导
+    # （2026-10-13 部署冒烟抓到：heads=['0117','0119'] 阻塞部署）。
+    r"^down_revision\s*:?\s*[^\n]*=\s*[\"']([a-zA-Z0-9_]+)[\"']",
     re.MULTILINE,
 )
 
@@ -331,8 +335,6 @@ def _parseRevisionFiles(versionsDir: Path) -> tuple[set[str], dict[str, str | No
     """
     revisions: set[str] = set()
     graph: dict[str, str | None] = {}
-    # 提取形如 "..." 或 '...' 的字符串字面量（用于 down_revision 值）
-    string_lit_re = re.compile(r'["\']([A-Za-z0-9_]+)["\']')
 
     for path in sorted(versionsDir.glob("*.py")):
         if path.name.startswith("_") or path.name == "__init__.py":
@@ -343,13 +345,9 @@ def _parseRevisionFiles(versionsDir: Path) -> tuple[set[str], dict[str, str | No
             continue
         rev = rev_match.group(1)
         revisions.add(rev)
-        down = None
+        # 捕获组已剥掉引号（``\"0117\"`` / ``'0117'`` 都得 ``0117``），无需再 strip
         down_match = _DOWN_REVISION_LINE.search(content)
-        if down_match:
-            down = down_match.group(1).strip('"\'')
-        else:
-            down = None
-        graph[rev] = down
+        graph[rev] = down_match.group(1) if down_match else None
     return revisions, graph
 
 

@@ -21,9 +21,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Callable, Literal
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.schemas import HypothesisRead
@@ -88,12 +89,63 @@ _HYPOTHESIS_PROMPT_MARKER = "可能原因假设"
 
 
 @dataclass(frozen=True)
+class VerificationResult:
+    """Hypothesis.verify() 的判定结果。"""
+
+    verdict: Literal["supported", "contradicted", "inconclusive", "execution_failed"]
+    support_count: int
+    rows_sample: list[dict[str, Any]] = field(default_factory=list)
+    execution_succeeded: bool = True
+
+
+@dataclass(frozen=True)
 class Hypothesis:
     """一条「可能解释」假设（不可变）。"""
 
     statement: str        # 可能解释（禁止因果断言）
     driver: str | None    # schema 中发现的 driver（列名/指标名）
     verificationSql: str  # 只读 SELECT，可独立执行验证
+
+    async def verify(
+        self,
+        sql_runner: Callable[[str], Any],
+        evidence_store: Any = None,
+    ) -> VerificationResult:
+        """执行 verificationSql 并判定 supported / contradicted / inconclusive / execution_failed。
+
+        调用契约：
+        - sql_runner 必须只读 SELECT，SQL Guard 校验已在调用方完成
+        - evidence_store 可选，存储验证后的样本行供报告回放
+        - 本方法不自动调用，只被用户点「验证」按钮触发的 QUERY 链路调用
+        """
+        try:
+            rows = await sql_runner(self.verificationSql)
+            if not rows:
+                return VerificationResult(
+                    verdict="inconclusive",
+                    support_count=0,
+                    execution_succeeded=True,
+                )
+            has_opposite = any(row.get("opposite") for row in rows)
+            if has_opposite:
+                return VerificationResult(
+                    verdict="contradicted",
+                    support_count=len(rows),
+                    rows_sample=rows[:3],
+                    execution_succeeded=True,
+                )
+            return VerificationResult(
+                verdict="supported",
+                support_count=len(rows),
+                rows_sample=rows[:3],
+                execution_succeeded=True,
+            )
+        except Exception:
+            return VerificationResult(
+                verdict="execution_failed",
+                support_count=0,
+                execution_succeeded=False,
+            )
 
 
 def isHypothesisTrigger(question: str | None) -> bool:
@@ -338,3 +390,27 @@ class HypothesisMixin:
                 )
         except Exception as accountExc:  # pragma: no cover - 防御分支
             logger.warning("假设失败路径用量补账失败: %s", accountExc)
+
+    async def _recordVerification(
+        self,
+        session: AsyncSession,
+        hypothesis_id: int,
+        result: VerificationResult,
+    ) -> None:
+        """把 Hypothesis.verify() 返回结果落库到 AnalysisHypothesis 表。
+
+        仅被用户触发的 QUERY 链路调用；不自动跑。
+        """
+        from app.domain.models import AnalysisHypothesis
+
+        stmt = (
+            update(AnalysisHypothesis)
+            .where(AnalysisHypothesis.id == hypothesis_id)
+            .values(
+                verification_status=result.verdict,
+                support_count=result.support_count,
+                rows_sample=result.rows_sample,
+            )
+        )
+        await session.execute(stmt)
+        await session.commit()

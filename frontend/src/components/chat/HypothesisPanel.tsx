@@ -3,6 +3,20 @@ import { CaretRightOutlined, CodeOutlined, QuestionCircleOutlined } from "@ant-d
 import type { HypothesisView } from "../../types/chat";
 import { useTranslation } from "../../i18n";
 
+function renderVerificationStatus(
+  status: string | null | undefined,
+  t: (key: string) => string,
+): JSX.Element {
+  const colorMap: Record<string, string> = {
+    supported: "green",
+    contradicted: "red",
+    inconclusive: "orange",
+    execution_failed: "default",
+  };
+  const i18nKey = status ? `chat.hypothesis.status.${status}` : "chat.hypothesis.status.pending";
+  return <Tag color={colorMap[status || ""] || "default"}>{t(i18nKey)}</Tag>;
+}
+
 const { Paragraph, Text } = Typography;
 
 // 展示上限：与后端 HYPOTHESIS_MAX_COUNT 对齐（前端再裁一次防御）
@@ -48,6 +62,7 @@ export default function HypothesisPanel({ hypotheses, onVerify }: HypothesisPane
                 <Tag color="cyan" style={{ marginRight: 0 }}>{h.driver}</Tag>
               </Tooltip>
             ) : null}
+            {renderVerificationStatus(h.verificationStatus, t)}
           </Space>
           <Space size={8} style={{ marginTop: 4 }}>
             <Button

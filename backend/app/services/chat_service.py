@@ -406,36 +406,30 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             )
             return ChatResponse(answer=exc.message, intent=preResult.intent.value)
 
-        # Phase 1.4：L1 KPI 语义匹配拦截（命中即返回，0 LLM 开销）
-        # 插入在 _classifyMessage 之前：所有意图分类前先过 L1 快车道
-        try:
-            match = await self._kpiMatcher.match(dto.question)
-            if match is not None:
-                l1_response = await self._buildL1Response(match, session)
-                if l1_response is not None:
-                    logger.info(
-                        "L1 KPI hit: code=%s confidence=%s",
-                        match.code, match.confidence,
-                    )
-                    # L1: 0 LLM cost, capture wall-clock latency
-                    _t0 = time.monotonic()
-                    await self._storeSessionMessages(
-                        session, dto.sessionId, dto.question, l1_response.answer, None,
-                        routing_layer=ROUTING_LAYER_L1, latency_ms=int((time.monotonic() - _t0) * 1000),
-                        token_cost_usd=0.0,
-                        chart_type=l1_response.chartType,
-                        chart_option=l1_response.chartOption,
-                        visual_rationale=l1_response.visual_rationale,
-                    )
-                    return l1_response
-        except Exception:  # noqa: BLE001 — L1 异常不阻断，降级到原 LLM 流水线
-            logger.warning("L1 KPI match failed, falling back to LLM", exc_info=True)
-
-        # Phase 4.4：L4 Agent Loop 入口（兜底路由）
-        # 插入位置：L1 KPI 拦截之后，_classifyMessage 之前
-        l4_response = await self._handleNl2SqlAgent(session, dto, user=user)
-        if l4_response is not None:
-            return l4_response
+        # Phase 1.4 + Phase 4.4：L1 KPI + L4 Agent Loop 共享 pre-amble（流式入口同样调）
+        preamble = await self._runL1AndL4Preamble(dto, session, user)
+        if preamble is not None:
+            if preamble.routing_layer == "L1":
+                # Log L1 KPI hit (mirrors original inline code's logger.info call)
+                logger.info(
+                    "L1 KPI hit: code=%s confidence=%s",
+                    preamble.kpi_code, preamble.confidence,
+                )
+                # L1: 0 LLM cost, capture wall-clock latency
+                _t0 = time.monotonic()
+                await self._storeSessionMessages(
+                    session, dto.sessionId, dto.question, preamble.answer, None,
+                    routing_layer=ROUTING_LAYER_L1, latency_ms=int((time.monotonic() - _t0) * 1000),
+                    token_cost_usd=0.0,
+                    chart_type=preamble.chart_type,
+                    chart_option=preamble.chart_option,
+                    visual_rationale=preamble.visual_rationale,
+                )
+                # Return full ChatResponse stored by mixin (preserves data/confidence/chartType etc.)
+                return self._preamble_l1_response
+            # L4: preamble already ran _handleNl2SqlAgent and built the ChatResponse
+            # l4_chat_response is stored in the mixin; return it directly
+            return self._preamble_l4_response
 
         result, state = await self._classifyMessage(session, dto)
         if result.intent == IntentType.CHITCHAT:

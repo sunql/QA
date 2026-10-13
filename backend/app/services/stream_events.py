@@ -69,16 +69,30 @@ EVENT_CLASS_RECALL = "class_recall"  # 类召回诊断（2026-09-16）：截断/
 
 
 class ErrorType(str, Enum):
-    """error 事件的可枚举错误类型（4-1），供前端差异化降级。
+    """error 事件的可枚举错误类型（4-1 扩 P2-1），供前端差异化降级。
 
     - DOMAIN：领域错误（业务规则/校验失败），error 消息可直接展示。
-    - LLM：LLM 调用失败，可提示服务降级或稍后重试。
+    - LLM：LLM 调用失败（泛指，可提示服务降级或稍后重试）。
     - INTERNAL：未预期异常，展示通用错误提示（不泄露内部细节）。
+    - PROVIDER_TRANSIENT：LLM 5xx / timeout / connection（retryable，已由 isRetryableLlmError 判定）。
+    - PROVIDER_PROTOCOL：LLM 4xx 永久错误 / JSON parse failure（non-retryable）。
+    - SCHEMA_REFERENCE：本体 / 类引用错误。
+    - SQL_SYNTAX：SQL parse / safety violation。
+    - DB_CONNECTIVITY：数据源连接失败。
+    - PERMISSION：权限不足。
+    - QUERY_TIMEOUT：数据源查询超时。
     """
 
     DOMAIN = "domain"
     LLM = "llm"
     INTERNAL = "internal"
+    PROVIDER_TRANSIENT = "provider_transient"
+    PROVIDER_PROTOCOL = "provider_protocol"
+    SCHEMA_REFERENCE = "schema_reference"
+    SQL_SYNTAX = "sql_syntax"
+    DB_CONNECTIVITY = "db_connectivity"
+    PERMISSION = "permission"
+    QUERY_TIMEOUT = "query_timeout"
 
 
 @dataclass(frozen=True)

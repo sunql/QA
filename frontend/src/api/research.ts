@@ -118,23 +118,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** 拼流端点 URL：无游标时**不加** `lastEventId` 参数（与旧 URL 逐字节一致）。 */
+function buildStreamUrl(sessionId: string, lastEventId?: number | null): string {
+  const base = `${API_BASE_URL}${BASE}/stream?sessionId=${encodeURIComponent(sessionId)}`;
+  if (lastEventId === undefined || lastEventId === null) return base;
+  return `${base}&lastEventId=${encodeURIComponent(String(lastEventId))}`;
+}
+
 /**
  * 订阅某会话的 research.* SSE 进度流并逐事件回调。
  * @param sessionId 会话 id（查询参数，backend 先校验归属再建流）
- * @param onEvent 每个 SSE 事件的回调（事件名在 event.name）
+ * @param onEvent 每个 SSE 事件的回调（事件名在 event.name，游标在 event.id）
  * @param signal 可选中止信号（组件卸载 / 切会话时断流）
  * @param onOpen 可选：流「已建立」（fetch 返回 ok 且 body 存在）后立即回调，供调用方
- *   在提交首轮前等待流建立（后端不重放历史）。fetch 失败时不会回调（由 store 兜底）。
+ *   在提交首轮前等待流建立。fetch 失败时不会回调（由 store 兜底）。
+ * @param lastEventId 可选：上次收到的最后一条事件 `seq`（Task 12）。带上后后端**先回放**
+ *   该 seq 之后已落库的事件（每帧带 `id:`），断线/刷新后不再永久丢失进度。null/undefined
+ *   ⇒ 不带该参数、不回放（URL 与旧行为逐字节一致）。**同一帧可能被投递两次**（后端先订阅
+ *   再回放），去重是调用方按 `event.id` 的责任 —— 见 researchStore.connectStream。
  */
 export async function openResearchStream(
   sessionId: string,
   onEvent: (event: ResearchSseEvent) => void,
   signal?: AbortSignal,
   onOpen?: () => void,
+  lastEventId?: number | null,
 ): Promise<void> {
   // SSE 走裸 fetch（axios 不支持流式），不经 httpClient 拦截器，
   // 故用 authHeaders()（SSOT）注入 Authorization + X-Tenant-Id。
-  const url = `${API_BASE_URL}${BASE}/stream?sessionId=${encodeURIComponent(sessionId)}`;
+  const url = buildStreamUrl(sessionId, lastEventId);
   const res = await fetch(url, {
     headers: authHeaders(),
     signal,
@@ -173,6 +185,20 @@ function consumeFrames(buffer: string, onEvent: (e: ResearchSseEvent) => void): 
   return remainder;
 }
 
+// 解析帧内的 `id:` 行（后端 `_sseFrame` 的 `id: <seq>`）。SSE 规范：同帧出现多个
+// `id:` 时**最后一个生效**；空值 / 非整数 ⇒ 忽略（该帧 id 保持 undefined，事件照常分发）。
+function parseFrameId(frame: string): number | undefined {
+  let id: number | undefined;
+  for (const line of frame.split("\n")) {
+    if (!line.startsWith("id:")) continue;
+    const raw = line.slice("id:".length).trim();
+    if (raw === "") continue;
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed)) id = parsed;
+  }
+  return id;
+}
+
 function handleFrame(frame: string, onEvent: (e: ResearchSseEvent) => void): void {
   let name = "";
   const dataLines: string[] = [];
@@ -194,5 +220,7 @@ function handleFrame(frame: string, onEvent: (e: ResearchSseEvent) => void): voi
     return;
   }
   if (!isRecord(payload)) return;
-  onEvent({ name, payload });
+  const id = parseFrameId(frame);
+  // 无 `id:` 时**不写** id 键 —— 保持既有 `toEqual({name, payload})` 断言不变形。
+  onEvent(id === undefined ? { name, payload } : { name, payload, id });
 }

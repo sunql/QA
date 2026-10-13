@@ -217,6 +217,82 @@ describe("api/research SSE（openResearchStream）", () => {
     });
   });
 
+  // Task 12b：无游标（null/undefined）⇒ URL 与今天逐字节一致；有游标才追加。
+  it("传 lastEventId 时 URL 追加 &lastEventId=<n>", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, body: sseStream() });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await openResearchStream("s1", () => {}, undefined, undefined, 7);
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/v1/research/stream?sessionId=s1&lastEventId=7",
+    );
+  });
+
+  it("lastEventId 为 null 时 URL 不带该参数（与旧行为逐字节一致）", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, body: sseStream() });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await openResearchStream("s1", () => {}, undefined, undefined, null);
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/research/stream?sessionId=s1");
+  });
+
+  it("解析 id: 行（事件带上 seq）", async () => {
+    const stream = sseStream(
+      'id: 12\nevent: research.intent\ndata: {"intent":"research"}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: ResearchSseEvent[] = [];
+    await openResearchStream("s1", (e) => received.push(e));
+
+    expect(received).toHaveLength(1);
+    expect(received[0].id).toBe(12);
+  });
+
+  it("同帧多个 id: 行时最后一个生效", async () => {
+    const stream = sseStream(
+      'id: 1\nid: 2\nevent: research.intent\ndata: {"intent":"research"}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: ResearchSseEvent[] = [];
+    await openResearchStream("s1", (e) => received.push(e));
+
+    expect(received).toHaveLength(1);
+    expect(received[0].id).toBe(2);
+  });
+
+  it("id: 非数字 / 空值被忽略，事件仍照常分发（id 为 undefined）", async () => {
+    const stream = sseStream(
+      'id: abc\nevent: research.intent\ndata: {"intent":"research"}\n\n',
+      'id:\nevent: research.esl\ndata: {"metrics":[]}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: ResearchSseEvent[] = [];
+    await openResearchStream("s1", (e) => received.push(e));
+
+    expect(received.map((e) => e.name)).toEqual(["research.intent", "research.esl"]);
+    expect(received[0].id).toBeUndefined();
+    expect(received[1].id).toBeUndefined();
+  });
+
+  it("无 id: 的帧不写 id 键（既有帧断言 toEqual 不变形）", async () => {
+    const stream = sseStream('event: research.intent\ndata: {"intent":"research"}\n\n');
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: ResearchSseEvent[] = [];
+    await openResearchStream("s1", (e) => received.push(e));
+
+    expect(received[0]).toEqual({
+      name: "research.intent",
+      payload: { intent: "research" },
+    });
+    expect("id" in received[0]).toBe(false);
+  });
+
   it("按 event: 名分发事件（顺序与名称都正确）", async () => {
     const frames = [
       'event: research.connected\ndata: {"sessionId":"s1"}\n\n',
@@ -345,6 +421,9 @@ describe("researchStore", () => {
     vi.clearAllMocks();
     useAuthStore.setState({ token: null });
     useResearchStore.getState().reset();
+    // Task 12b：store 会把最后收到的 seq 写进 sessionStorage（键按会话隔离），
+    // 测试间必须清掉，否则上一条用例的游标会串进下一条的 URL。
+    sessionStorage.clear();
   });
 
   afterEach(() => {
@@ -496,6 +575,119 @@ describe("researchStore", () => {
       decidedAt: null,
     });
     expect(state.events[0].name).toBe("research.checkpoint");
+  });
+
+  // --- Task 12b：SSE 断线重连回放（sessionStorage 游标 + 按 seq 去重） ---
+
+  it("重连带上游标：上一轮最后的 seq 经 sessionStorage 回传 lastEventId", async () => {
+    // 首次连接：流里带 id: 5 的事件 ⇒ store 记住游标。
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      body: sseStream('id: 5\nevent: research.intent\ndata: {"intent":"research"}\n\n'),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await useResearchStore.getState().connectStream("s1");
+
+    expect(sessionStorage.getItem("research:lastEventId:s1")).toBe("5");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/research/stream?sessionId=s1");
+
+    // 断线重连：URL 必须带上记住的游标（本任务唯一的用户可见行为）。
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValue({ ok: true, body: sseStream() });
+    await useResearchStore.getState().connectStream("s1");
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/v1/research/stream?sessionId=s1&lastEventId=5",
+    );
+  });
+
+  it("游标按会话隔离：不同 sessionId 各记各的", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        body: sseStream('id: 9\nevent: research.intent\ndata: {"intent":"research"}\n\n'),
+      }),
+    );
+
+    await useResearchStore.getState().connectStream("sA");
+
+    expect(sessionStorage.getItem("research:lastEventId:sA")).toBe("9");
+    expect(sessionStorage.getItem("research:lastEventId:sB")).toBeNull();
+  });
+
+  it("sessionStorage 不可用（getItem/setItem 抛错）：流仍建立、事件仍分发、不抛", async () => {
+    const blocked: Storage = {
+      getItem: () => {
+        throw new Error("sessionStorage blocked");
+      },
+      setItem: () => {
+        throw new Error("sessionStorage blocked");
+      },
+      removeItem: () => {},
+      clear: () => {},
+      key: () => null,
+      length: 0,
+    };
+    const original = Object.getOwnPropertyDescriptor(window, "sessionStorage");
+    Object.defineProperty(window, "sessionStorage", { configurable: true, value: blocked });
+    try {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        body: sseStream('id: 3\nevent: research.intent\ndata: {"intent":"research"}\n\n'),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(useResearchStore.getState().connectStream("s1")).resolves.toBeUndefined();
+
+      // 读失败当无游标：URL 不带 lastEventId（不能因兜底失败而炸掉整条流）。
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/research/stream?sessionId=s1");
+      // 写失败不影响投递：事件照常落地。
+      expect(useResearchStore.getState().events.map((e) => e.name)).toEqual([
+        "research.intent",
+      ]);
+    } finally {
+      if (original) Object.defineProperty(window, "sessionStorage", original);
+    }
+  });
+
+  it("按 seq 去重：订阅/回放窗口重叠的同一事件只投递一次", async () => {
+    // 后端先订阅再查 outbox ⇒ 落在窗口内的事件既进订阅队列又在回放结果里，投递两次。
+    const stream = sseStream(
+      'id: 7\nevent: research.intent\ndata: {"intent":"research"}\n\n',
+      'id: 7\nevent: research.intent\ndata: {"intent":"research"}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    await useResearchStore.getState().connectStream("s1");
+
+    expect(useResearchStore.getState().events).toHaveLength(1);
+  });
+
+  it("去重是单调游标：乱序/更旧的 seq 也被丢弃", async () => {
+    const stream = sseStream(
+      'id: 5\nevent: research.intent\ndata: {"intent":"research"}\n\n',
+      'id: 8\nevent: research.esl\ndata: {"metrics":[]}\n\n',
+      'id: 6\nevent: research.intent\ndata: {"intent":"research"}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    await useResearchStore.getState().connectStream("s1");
+
+    expect(useResearchStore.getState().events).toHaveLength(2);
+  });
+
+  it("无 id 的重复帧不去重（无法判定 seq，两条都透传）", async () => {
+    const stream = sseStream(
+      'event: research.intent\ndata: {"intent":"research"}\n\n',
+      'event: research.intent\ndata: {"intent":"research"}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    await useResearchStore.getState().connectStream("s1");
+
+    expect(useResearchStore.getState().events).toHaveLength(2);
   });
 
   it("research.done 收尾：streaming 置 false", async () => {

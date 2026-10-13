@@ -7,6 +7,19 @@
 import { useEffect, useRef } from "react";
 import { useResearchStore } from "../stores/researchStore";
 
+// 终态会话（与后端 `research_session_service.TERMINAL_SESSION_STATUSES` 同口径）。
+// `awaiting_user` **不是**终态：会话在等用户答 checkpoint，状态机稍后续跑，流必须保持。
+const TERMINAL_SESSION_STATUSES: ReadonlySet<string> = new Set(["done", "failed", "aborted"]);
+
+/** 已结束的会话不连流（Task 12b）。后端流是长连接语义：`_eventFrames` 只在「回放非空且
+ *  收尾于终态」时才 return，游标已最新的回放为空 ⇒ 实时循环只发心跳、永不返回，连了会
+ *  让 UI 永远停在 streaming。终态会话的完整时间线由 openSession 的 turns 提供。
+ *  只在 `openSession` 确实载入了**本会话**时判定，避免旧会话残留 status 误杀新流。 */
+function isFinishedSession(sessionId: string): boolean {
+  const session = useResearchStore.getState().currentSession;
+  return session !== null && session.id === sessionId && TERMINAL_SESSION_STATUSES.has(session.status);
+}
+
 export function useResearchSession(
   sessionId: string | undefined,
   pendingQuestion: string,
@@ -27,6 +40,10 @@ export function useResearchSession(
     void (async () => {
       await openSession(sessionId);
       if (disposed) return;
+
+      // 已结束的会话不连流（Task 12b）。例外：带 pendingQuestion（新会话首轮）仍要连
+      // —— 首轮提交后会话重新 running，进度得走这条流。
+      if (!pendingQuestion && isFinishedSession(sessionId)) return;
 
       // 等流建立（onOpen 在 fetch ok 且 body 存在后触发）再提交首轮。
       let streamOpened!: () => void;

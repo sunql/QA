@@ -102,6 +102,9 @@ export type ResearchEventName =
 export interface ResearchSseEvent {
   name: ResearchEventName;
   payload: Record<string, unknown>;
+  /** SSE `id:` 行的整数 seq（后端落库成功才带；缺失 = undefined，不影响事件分发）。
+   *  也是重连回放游标（`?lastEventId=`）与去重键 —— 见 api/research、researchStore。 */
+  id?: number;
 }
 
 // research.error 的处置分类（用户裁定规则 ③）：前端只按 uiHint 的「类」分支，

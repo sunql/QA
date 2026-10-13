@@ -803,4 +803,48 @@ describe("ResearchSessionPage", () => {
       await waitFor(() => expect(queryNotifications()).toHaveLength(1), { timeout: 5000 });
     });
   });
+
+  // Task 12b：已结束（终态）的会话**不连流**。后端流是长连接语义，游标已最新时回放
+  // 为空、实时循环只发心跳、永不返回（`_eventFrames` 只在「回放非空且收尾于终态」时
+  // 收尾）⇒ 连了会永远停在 streaming。终态会话的完整时间线由 openSession 的 turns 提供。
+  it("已结束（done）的会话不连流：不发起 SSE 请求、streaming 保持 false", async () => {
+    httpMock.get.mockResolvedValue({
+      data: {
+        session: {
+          id: "s1",
+          title: "研究",
+          mode: "research",
+          status: "done",
+          question: "q",
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+        },
+        turns: [],
+        pendingCheckpoint: null,
+      },
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ConfigProvider locale={zhCN}>
+        <App>
+          <MemoryRouter initialEntries={[{ pathname: "/research/s1" }]}>
+            <Routes>
+              <Route path="/research/:id" element={<ResearchSessionPage />} />
+            </Routes>
+          </MemoryRouter>
+        </App>
+      </ConfigProvider>,
+    );
+
+    // 等 openSession 落地（status=done）后再断言：流编排的判定在 openSession 之后。
+    await waitFor(() =>
+      expect(useResearchStore.getState().currentSession?.status).toBe("done"),
+    );
+    await waitFor(() => expect(useResearchStore.getState().loading).toBe(false));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(useResearchStore.getState().streaming).toBe(false);
+  });
 });

@@ -148,6 +148,36 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// --- SSE 重连游标（Task 12b） -------------------------------------------------
+// 每个会话最后收到的事件 `seq` 存 sessionStorage（**传输层游标**，不是 UI state：
+// 刻意不放进 zustand 持久化 state）。重连时带上 `?lastEventId=`，后端回放错过的事件。
+const LAST_EVENT_ID_PREFIX = "research:lastEventId:";
+
+function lastEventIdKey(sessionId: string): string {
+  return `${LAST_EVENT_ID_PREFIX}${sessionId}`;
+}
+
+/** 读游标；读失败（SSR / jsdom 无 sessionStorage / 隐私模式）当**无游标**，不抛。 */
+function readStoredLastEventId(key: string): number | null {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (raw === null) return null;
+    const parsed = Number(raw);
+    return Number.isInteger(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 写游标；写失败只在控制台留痕，**不抛** —— 回放失败不该影响实时流。 */
+function writeStoredLastEventId(key: string, seq: number): void {
+  try {
+    sessionStorage.setItem(key, String(seq));
+  } catch (err) {
+    console.warn("[research] 事件游标写入 sessionStorage 失败：", err);
+  }
+}
+
 interface ResearchDataState {
   sessions: ResearchSession[];
   sessionsLoading: boolean;
@@ -337,14 +367,25 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
     };
 
     set({ streaming: true, error: null });
+    const cursorKey = lastEventIdKey(sessionId);
+    // 去重游标（本次连接内单调递增）：后端**先订阅再回放**，落在窗口内的事件会被投递
+    // 两次 ⇒ `event.id <= lastSeq` 的事件丢弃。`id == null`（后端未落库）无 seq 可判，
+    // 照常透传（这一缺口无法在本层消除）。
+    let lastSeq: number | null = null;
     try {
       await openResearchStream(
         sessionId,
         (event) => {
+          if (event.id != null) {
+            if (lastSeq !== null && event.id <= lastSeq) return; // 重复帧：丢弃
+            lastSeq = event.id;
+            writeStoredLastEventId(cursorKey, event.id);
+          }
           set((state) => applyResearchEvent(state, event));
         },
         controller.signal,
         signalOpen,
+        readStoredLastEventId(cursorKey),
       );
     } catch (err) {
       // 主动断流（组件卸载 / 切会话 / 外部 signal）不算错误；但无论成功与否都必须

@@ -3,7 +3,8 @@ import { useAuthStore } from "../../stores/authStore";
 
 const ALLOWED_WHEN_MUST_CHANGE = ["/auth/change-password", "/auth/login"];
 
-function isAllowedWhenMustChange(pathname: string): boolean {
+/** 白名单判定：精确匹配或子路径；导出供回归测试（`RequireAuth.test.ts`）直接验证策略本身。 */
+export function isAllowedWhenMustChange(pathname: string): boolean {
   return ALLOWED_WHEN_MUST_CHANGE.some((p) => pathname === p || pathname.startsWith(p + "/"));
 }
 

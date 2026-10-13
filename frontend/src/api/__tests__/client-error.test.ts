@@ -5,57 +5,24 @@
  * - AppError shape: { code, status, detail }
  * - normalizeError extracts detail.code on 401 / other errors
  * - 401 side effects: localStorage token removal + redirect preserved from Task 2.1
+ *
+ * 直接 import **真实实现**。原先此处把 `normalizeError` 抄了一份再测那份抄件 ——
+ * 真实现怎么改它都不会红（PR #9 引进；main 上真实实现把 404/网络异常的 message
+ * 退化成 "Unknown error" 时，这份抄件照样全绿，等于零覆盖）。
  */
 
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-
-// ---------------------------------------------------------------------------
-// Types mirroring client.ts
-// ---------------------------------------------------------------------------
-
-interface AppError extends Error {
-  code: string;
-  status: number;
-  detail?: unknown;
-}
-
-// ---------------------------------------------------------------------------
-// Pure function mirroring the normalizeError implementation from client.ts
-// ---------------------------------------------------------------------------
-
-/** Mirrors the normalizeError function exported from client.ts. */
-function normalizeError(err: { response?: { status?: number; data?: { detail?: unknown } }; message?: string }): AppError {
-  const status = err.response?.status ?? 0;
-  const rawDetail = err.response?.data?.detail;
-  const detail = rawDetail ?? null;
-  const code =
-    typeof rawDetail === "object" && rawDetail !== null && "code" in rawDetail
-      ? String((rawDetail as { code: unknown }).code)
-      : "UNKNOWN";
-  const message =
-    typeof rawDetail === "object" && rawDetail !== null && "message" in rawDetail
-      ? String((rawDetail as { message: unknown }).message)
-      : err.message ?? "Unknown error";
-
-  // Build AppError via Object.assign (same pattern as brief GREEN)
-  const appErr: AppError = Object.assign(new Error(message), { code, status, detail });
-
-  // 401: clear token + redirect (Task 2.1 behavior, preserved)
-  if (status === 401) {
-    localStorage.removeItem("token");
-    window.location.href = "/auth/login";
-  }
-
-  return appErr;
-}
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { normalizeError, type AppError } from "../client";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Wraps a raw error object so normalizeError sees the AxiosError-shaped input. */
-function runNormalize(err: { response?: { status?: number; data?: { detail?: unknown } }; message?: string }): AppError {
-  return normalizeError(err);
+type NormalizeInput = Parameters<typeof normalizeError>[0];
+
+/** 以 AxiosError 形状喂真实实现（调用点不必写全 AxiosError 类型）。 */
+function runNormalize(err: unknown, fallbackMessage?: string): AppError {
+  return normalizeError(err as NormalizeInput, fallbackMessage);
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +34,16 @@ describe("normalizeError", () => {
     localStorage.setItem("token", "fake-token-12345");
     let href = "";
     Object.defineProperty(window, "location", {
-      value: { href, set href(val: string) { href = val; }, get href() { return href; } },
+      // 只留访问器：对象字面量里同时写 `href` 属性与 `get/set href` 会被 TS 判为
+      // 重复标识（TS1119/TS2300），这正是本文件此前 build 报错的来源。
+      value: {
+        get href() {
+          return href;
+        },
+        set href(val: string) {
+          href = val;
+        },
+      },
       writable: true,
       configurable: true,
     });
@@ -97,6 +73,28 @@ describe("normalizeError", () => {
       const err = runNormalize({ response: { status: 503 }, message: "Service unavailable" });
       expect(err.code).toBe("UNKNOWN");
       expect(err.status).toBe(503);
+    });
+  });
+
+  // fallbackMessage：拦截器把它**已经算好**的 toast 文案传进来，让弹窗与
+  // AppError.message 同源。少了下面两条断言，把 client.ts 的这个参数整个删掉
+  // 套件依然全绿 —— 而这正是本次修复的**全部内容**（PR #9 遗留的 404 分歧：
+  // 弹窗说「未找到」、页面拿到 "Unknown error"）。
+  describe("fallbackMessage（toast 与 AppError.message 同源）", () => {
+    it("detail 是字符串时，用调用方传入的 toast 文案作为 message", () => {
+      const err = runNormalize(
+        { response: { status: 404, data: { detail: "未找到" } } },
+        "未找到",
+      );
+      expect(err.message).toBe("未找到");
+    });
+
+    it("对象形态 detail.message 优先于 fallbackMessage", () => {
+      const err = runNormalize(
+        { response: { status: 400, data: { detail: { code: "E_X", message: "资源不存在" } } } },
+        "兜底文案",
+      );
+      expect(err.message).toBe("资源不存在");
     });
   });
 

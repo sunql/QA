@@ -24,8 +24,16 @@ export interface AppError extends Error {
  * rather than parsing raw message strings.
  *
  * 401 side effects (localStorage.clear + redirect) are preserved from Task 2.1.
+ *
+ * `fallbackMessage` 承接调用方（拦截器）**已经算好**的文案：响应信封里的
+ * `error`（字符串）与字符串形态的 `detail` 都归它管。不传时退化为 `err.message`。
+ * 少了这条兜底，同一个 404 会变成 toast 说「未找到」、而 `AppError.message`
+ * 却是「Unknown error」—— 下游按 message 分流的页面拿到的是后者。
  */
-export function normalizeError(err: AxiosError<ApiResponse<unknown>>): AppError {
+export function normalizeError(
+  err: AxiosError<ApiResponse<unknown>>,
+  fallbackMessage?: string
+): AppError {
   const status = err.response?.status ?? 0;
   const rawDetail = (err.response?.data as { detail?: unknown } | undefined)?.detail;
   const detail = rawDetail ?? null;
@@ -33,10 +41,15 @@ export function normalizeError(err: AxiosError<ApiResponse<unknown>>): AppError 
     typeof rawDetail === "object" && rawDetail !== null && "code" in rawDetail
       ? String((rawDetail as { code: unknown }).code)
       : "UNKNOWN";
+  // 文案优先级：对象形态 `detail.message`（后端给的最具体文案）> 调用方传入的
+  // fallbackMessage（拦截器已算好的 toast 文案——信封 `error` 或字符串 `detail`）
+  // > axios 自身的 `err.message` > 兜底串。
+  // 注意「同源」不是全局不变量：当后端同时给了信封 `error` 与对象 `detail.message`
+  // 时，toast 显示前者、此处取后者，两者仍是两条不同文案（刻意如此——后者更具体）。
   const message =
     typeof rawDetail === "object" && rawDetail !== null && "message" in rawDetail
       ? String((rawDetail as { message: unknown }).message)
-      : err.message ?? "Unknown error";
+      : fallbackMessage ?? err.message ?? "Unknown error";
 
   // Object.assign to a fresh Error — same pattern as brief GREEN
   const appErr: AppError = Object.assign(new Error(message), { code, status, detail });
@@ -150,7 +163,10 @@ export function createHttpClient(): AxiosInstance {
         showError(errMsg);
       }
       // audit-fx-3.3: use normalizeError to produce AppError with code + status + detail
-      const normalized = normalizeError(error);
+      // 文案复用上面那份 errMsg —— 否则会出现「弹窗说未找到、页面拿 Unknown error」
+      // 这对自相矛盾的用户提示。唯一例外见 normalizeError 内注释：后端同时给了信封
+      // `error` 与对象 `detail.message` 时，message 取更具体的那条。
+      const normalized = normalizeError(error, errMsg);
       return Promise.reject(normalized);
     }
   );

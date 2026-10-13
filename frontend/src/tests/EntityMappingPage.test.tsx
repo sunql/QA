@@ -81,9 +81,11 @@ describe("EntityMappingPage", () => {
 
     await user.click(screen.getByText("新建映射"));
 
-    // 实体类型下拉（combobox 顺序：顶部筛选=0，表单 entityType=1，sourceSystem=2，matchRule=3）
-    const comboboxes = screen.getAllByRole("combobox");
-    await user.click(comboboxes[1]);
+    // 表单里的 Select 一律按 label 定位，**不要**用 getAllByRole("combobox") 的下标：
+    // Table 分页的 page-size select（10/20/50/100 条/页）同样带 role="combobox"，
+    // 它排在顶部筛选之后、表单之前 ⇒ 下标 1 落到分页而非 entityType。antd 次版本升级
+    // 引入这个 select 后，本用例就静默失效了（打开的选项里根本没有 MATERIAL）。
+    await user.click(screen.getByLabelText("实体类型"));
     // 可点击选项是 .ant-select-item-option（带 title 属性）；role=option 的是不可点击的 a11y 复制层
     await user.click(await screen.findByTitle("MATERIAL"));
 
@@ -94,8 +96,8 @@ describe("EntityMappingPage", () => {
     await user.type(screen.getByLabelText("源系统 Key"), "M000001");
     await user.type(screen.getByLabelText("源系统编码"), "M000001");
 
-    // 源系统下拉
-    await user.click(screen.getAllByRole("combobox")[2]);
+    // 源系统下拉（同上：按 label 定位）
+    await user.click(screen.getByLabelText("源系统"));
     await user.click(await screen.findByTitle("SRM"));
 
     // 模态框确定按钮（okText="保存" → antd 加空格："保 存"）

@@ -201,7 +201,7 @@ class UsageMixin:
             session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
         )
         cost = self._costFor(cfg, pt, ct, cacheHitMultiplier=cacheHitMultiplier)
-        await self._recordUsage(session, dto.sessionId, cfg, pt, ct, purpose=USAGE_PURPOSE_NL2SQL)
+        await self._recordUsage(session, dto.sessionId, cfg, pt, ct, purpose="nl2sql", cost_source="estimated")
         return _RetryGenUsage(tokens=pt + ct, cost=cost, modelName=cfg.model_name)
 
     @staticmethod
@@ -395,6 +395,7 @@ class UsageMixin:
         *,
         purpose: str,
         cachedTokens: int | None = None,
+        cost_source: str = "measured",  # P1-2
     ) -> None:
         # 4-1（feat-token-cache，2026-09-28 续）：system_config.LLM_CACHE_HIT_MULTIPLIER
         # 控制 cache 命中部分的实付比例（默认 0 = 命中免费，回滚口径；上线后
@@ -417,6 +418,7 @@ class UsageMixin:
             completionTokens=completionTokens,
             cost=cost,
             purpose=purpose,
+            cost_source=cost_source,
         )
 
     async def _recordDirectUsage(
@@ -430,6 +432,7 @@ class UsageMixin:
         cost: float,
         model_name: str | None,
         purpose: str,
+        cost_source: str = "measured",  # P1-2
     ) -> None:
         """按已知计量写 token_usage（供 Agent/Tool 路径：模型配置未透传）。
 
@@ -457,6 +460,7 @@ class UsageMixin:
             completionTokens=effective_completion,
             cost=Decimal(str(cost)),
             purpose=purpose,
+            cost_source=cost_source,
         )
 
     @staticmethod

@@ -1,9 +1,10 @@
 import { httpClient } from "./client";
 import { API_BASE_URL } from "../config";
-import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery, TablePayload, VisualRationale } from "../types/chat";
+import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery, StepPlanOverviewItem, StepPlanView, StepResultView, StreamChartData, StreamDataQualityPayload, StreamSummary, TablePayload, VisualRationale } from "../types/chat";
 import { i18n } from "../i18n";
 import { authHeaders } from "./authHeaders";
 import { asChartOption, asTablePayload, asVisualRationale, normalizeChartType } from "../utils/chartContract";
+import { StreamChunkParser } from "../stores/stream_chunk_parser";
 
 const BASE = "/chat";
 
@@ -275,26 +276,15 @@ export interface StreamEventHandlers {
  */
 export async function sendMessageStream(
   payload: ChatRequest,
-  handlers: StreamEventHandlers
-): Promise<void> {
-  return postSseStream(`${BASE}/stream`, payload, handlers);
-}
-
-/**
- * 通用 SSE POST：路径可变，解析/分发逻辑与 sendMessageStream 完全共用。
- */
-async function postSseStream(
-  path: string,
-  body: unknown,
   handlers: StreamEventHandlers,
-  extraHeaders: Record<string, string> = {}
+  options?: { lastEventId?: string }
 ): Promise<void> {
-  // 走裸 fetch（SSE 流式 axios 不友好）—— 不经 httpClient 拦截器，
-  // 故用 authHeaders()（SSOT）手动注入 Authorization + X-Tenant-Id。
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const headers = authHeaders({ "Content-Type": "application/json" });
+  if (options?.lastEventId) headers["Last-Event-ID"] = options.lastEventId;
+  const response = await fetch(`${API_BASE_URL}${BASE}/stream`, {
     method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json", ...extraHeaders }),
-    body: JSON.stringify(body),
+    headers,
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
@@ -306,74 +296,47 @@ async function postSseStream(
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
+  const parser = new StreamChunkParser();
+  let sawTerminal = false;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      buffer = consumeFrames(buffer, handlers);
+      const text = decoder.decode(value, { stream: true });
+      for (const frame of parser.feed(text)) {
+        if (frame.event === "done" || frame.event === "error") sawTerminal = true;
+        dispatchFrame(frame, handlers);
+      }
     }
-    // 冲刷解码器缓冲的尾字节：最后一个分块可能截断多字节 UTF-8 字符，
-    // 流结束后必须显式解码残留字节，否则该字符被静默丢弃（HIGH#1 修复）
-    buffer += decoder.decode();
-    consumeFrames(buffer, handlers);
+    const tail = decoder.decode();
+    if (tail) {
+      for (const frame of parser.feed(tail)) {
+        if (frame.event === "done" || frame.event === "error") sawTerminal = true;
+        dispatchFrame(frame, handlers);
+      }
+    }
+    for (const frame of parser.flush()) {
+      if (frame.event === "done" || frame.event === "error") sawTerminal = true;
+      dispatchFrame(frame, handlers);
+    }
+    if (!sawTerminal) throw new Error("stream interrupted: no done/error before EOF");
   } finally {
     reader.releaseLock();
   }
 }
 
-/**
- * 续跑一个失败的多步 run（spec §7）。响应同样是 SSE 流，复用同一套帧解析。
- *
- * Idempotency-Key 由前端生成：后端据它去重，重复提交不会重跑（spec §7.3）。
- */
-export async function resumeMultiStepRun(
-  runId: string,
-  fromStepIndex: number | undefined,
-  handlers: StreamEventHandlers
-): Promise<void> {
-  return postSseStream(
-    `${BASE}/multi-step/${encodeURIComponent(runId)}/resume`,
-    { fromStepIndex },
-    handlers,
-    { "Idempotency-Key": crypto.randomUUID() }
-  );
-}
+function dispatchFrame(frame: { event: string; data: string }, handlers: StreamEventHandlers): void {
+  const { event, data } = frame;
+  if (!event) return;
 
-function consumeFrames(buffer: string, handlers: StreamEventHandlers): string {
-  // 统一 CRLF / CR 为 LF：兼容 HTTP 标准换行（\r\n）与后端当前使用的 \n（HIGH#2 修复）
-  const normalized = buffer.replace(/\r\n|\r/g, "\n");
-  let index: number;
-  let remainder = normalized;
-  while ((index = remainder.indexOf("\n\n")) !== -1) {
-    const frame = remainder.slice(0, index);
-    remainder = remainder.slice(index + 2);
-    handleFrame(frame, handlers);
-  }
-  return remainder;
-}
-
-function handleFrame(frame: string, handlers: StreamEventHandlers): void {
-  let event = "";
-  const dataLines: string[] = [];
-  for (const line of frame.split("\n")) {
-    if (line.startsWith("event:")) {
-      event = line.slice("event:".length).trim();
-    } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice("data:".length).trim());
-    }
-  }
-  if (!event || dataLines.length === 0) return;
-
-  let data: unknown;
+  let parsed: unknown;
   try {
-    data = JSON.parse(dataLines.join("\n"));
+    parsed = JSON.parse(data);
   } catch {
     return;
   }
-  const d = data as Record<string, unknown>;
+  const d = parsed as Record<string, unknown>;
 
   switch (event) {
     case "meta":
@@ -410,16 +373,11 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
         cost: typeof d.cost === "number" ? d.cost : 0,
         modelName: typeof d.modelName === "string" ? d.modelName : null,
         affinityStatus: (d.affinityStatus as AffinityStatus | null) ?? null,
-        // Phase 6.4/7 G4：done 帧携带拦截类卡片对象（此前前端解析丢弃全部卡片字段，
-        // 导致默认 streaming UI 下 agent_run/supplier360/risk/graph/suggestedAgent
-        // 卡片从未渲染——G4 审查 HIGH 修复）。与后端 _streamInterceptCard /
-        // _streamQuery done 帧的 model_dump(by_alias) 形状对齐。
         agentRun: (d.agentRun as StreamSummary["agentRun"]) ?? null,
         supplier360: (d.supplier360 as StreamSummary["supplier360"]) ?? null,
         supplierRisk: (d.supplierRisk as StreamSummary["supplierRisk"]) ?? null,
         graphTraversal: (d.graphTraversal as StreamSummary["graphTraversal"]) ?? null,
         suggestedAgent: (d.suggestedAgent as StreamSummary["suggestedAgent"]) ?? null,
-        // 0107：多步汇总/降级收尾的 SUMMARY_TEXT_ONLY 只能经 done 帧抵达前端
         visualRationale: asVisualRationale(d.visualRationale),
       });
       break;

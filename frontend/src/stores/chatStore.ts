@@ -1,4 +1,5 @@
 import { create, type StoreApi } from "zustand";
+import { v4 as uuidv4 } from "uuid";
 import {
   fetchHypotheses as apiFetchHypotheses,
   resumeMultiStepRun,
@@ -200,6 +201,12 @@ interface ChatState {
   datasourceId: number | null;
   selectedModelId: number | null;
   error: string | null;
+  // P1-3：当前流式 run 标识（每次 sendMessage 重新生成，用于 closure guard）
+  currentRunId: string | null;
+  // P1-3：当前 placeholder 助手消息 id（流式结束后置 null；切会话/重发时旧 id 标 aborted）
+  currentAssistantMessageId: string | null;
+  // P1-3：EOF 守门设 true（stream interrupted: no done/error before EOF）
+  interrupted: boolean;
   // 历史会话面板（feat-chat-history-panel）
   sessions: ChatSession[];
   sessionsLoading: boolean;
@@ -450,6 +457,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   datasourceId: null,
   selectedModelId: null,
   error: null,
+  currentRunId: null,
+  currentAssistantMessageId: null,
+  interrupted: false,
   sessions: [],
   sessionsLoading: false,
   sessionsError: null,
@@ -510,20 +520,30 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     set((state) => ({ messages: [...state.messages, msg], error: null })),
 
   sendMessage: async (question, useStream = false, chartType = null) => {
-    const { sessionId, messages, datasourceId, loading } = get();
+    const { sessionId, messages, datasourceId, loading, currentAssistantMessageId } = get();
+    // P1-3：中止前一条还在进行中的流
+    if (currentAssistantMessageId) {
+      set((state) => ({
+        messages: state.messages.map((m) =>
+          m.assistantMessageId === currentAssistantMessageId
+            ? { ...m, aborted: true, isStreaming: false }
+            : m
+        ),
+      }));
+    }
     if (loading) return;
     if (!datasourceId) {
       set({ error: i18n.t("toast.pleaseSelectDatasource") });
       return;
     }
-    // 发送即声明「这个会话是刷新后的恢复目标」。
-    // 发送路径原本一次都不写这个指针（只有点历史项 / 换渠道才写，且后两者写的多是
-    // 「刚生成的空会话 id」），所以 qa:chat:lastSessionId 恒为 null，刷新只会起一个新会话。
+
     writeLastSessionId(get().channel, sessionId);
-    // 在途回放不得盖掉这条消息（否则用户消息与流式占位会被整体替换掉）
     invalidatePendingLoads();
 
-    // 先写入用户消息 + 流式占位助手消息
+    // P1-3：run + assistant id 立即分配
+    const runId = uuidv4();
+    const assistantMessageId = uuidv4();
+
     const userMsg: ChatMessage = {
       id: nextId(),
       role: "user",
@@ -536,11 +556,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       content: "",
       timestamp: Date.now(),
       isStreaming: true,
+      assistantMessageId, // P1-3
     };
     set((state) => ({
       messages: [...state.messages, userMsg, placeholderMsg],
       loading: true,
       error: null,
+      currentRunId: runId,
+      currentAssistantMessageId: assistantMessageId,
+      interrupted: false,
     }));
 
     const payload = {
@@ -553,17 +577,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     };
 
     // v3.1 B6（M7）：答案流结束（或非流式响应）后拉取「可能原因」假设。
-    // 流式路径假设不进 SSE 帧；非流式响应虽自带 hypotheses，仍统一走 GET 保持
-    // 单一取数口径。拉取失败/为空静默——面板不渲染，主回答不受影响。
     const attachHypotheses = async () => {
       if (get().channel !== "chat") return;
       try {
         const items = await apiFetchHypotheses(sessionId);
         if (!items.length) return;
-        // v3.1 MB3 M-3：GET 端点只按 session + limit 过滤（无 turn 维度），直接挂载
-        // 会把第 1 轮的假设一路串到后续每轮回答下方，而面板文案是「基于**当前**
-        // 数据…的可能解释」——按 turnQuestion 收敛到本轮问题。
-        // 同问题重复提问的退化情形：过滤后为空则不渲染该区块（宁可不出，不要挂错轮）。
         const current = items.filter((h) => h.turnQuestion === question);
         if (!current.length) return;
         set((state) => ({
@@ -576,79 +594,220 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
     try {
       if (useStream) {
-        await sendMessageStream(payload, streamHandlers(set));
-        // v3.1 B6（M7）：答案流结束后经 GET 端点回填假设（假设不进 SSE 帧）
-        await attachHypotheses();
+        await sendMessageStream(payload, {
+          onMeta: (intent) =>
+            set((state) => ({
+              messages: patchLastMessage(state.messages, {
+                intent: isIntent(intent) ? intent : undefined,
+              }),
+            })),
+          onPlan: (plan) =>
+            set((state) => ({
+              messages: patchLastMessage(state.messages, { queryPlan: plan }),
+            })),
+          onSql: (sql) =>
+            set((state) => ({ messages: patchLastMessage(state.messages, { sql }) })),
+          onChart: (chart: StreamChartData) =>
+            set((state) => ({
+              messages: patchLastMessage(state.messages, {
+                chartType: chart.chartType,
+                chartOption: chart.chartOption,
+                tableOption: chart.tableOption,
+                visualRationale: chart.visualRationale,
+                data: chart.data,
+              }),
+            })),
+          onStepPlanOverview: (steps) =>
+            set((state) => ({
+              messages: patchLastMessage(state.messages, {
+                steps: steps.map(
+                  (s): MultiStepStep => ({
+                    stepIndex: s.stepIndex,
+                    description: s.description,
+                    subQuestion: s.subQuestion,
+                    aggregationOnly: s.aggregationOnly,
+                    status: "pending",
+                  })
+                ),
+              }),
+            })),
+          onStepPlan: (step) =>
+            set((state) => ({
+              messages: patchLastMessage(
+                patchStep(state.messages, step.stepIndex, { status: "running" }),
+                { currentStepIndex: step.stepIndex }
+              ),
+            })),
+          onStepResult: (result) =>
+            set((state) => ({
+              messages: patchStep(state.messages, result.stepIndex, {
+                status: stepStatusFromResult(result.error),
+                sql: result.sql ?? null,
+                summary: result.summary ?? null,
+                error: result.error ?? null,
+                chartType: result.chartType ?? null,
+                chartOption: result.chartOption ?? null,
+                tableOption: result.tableOption ?? null,
+                visualRationale: result.visualRationale ?? null,
+                queryPlan: result.queryPlan ?? null,
+              }),
+            })),
+          onDataQuality: (payload) =>
+            set((state) => ({
+              messages: patchLastMessage(state.messages, {
+                dataQuality: payload.badges,
+              }),
+            })),
+          onClassRecall: (info) =>
+            set((state) => ({
+              messages: patchLastMessage(state.messages, {
+                classRecall: info,
+              }),
+            })),
+          onToken: (content) =>
+            set((state) => {
+              const last = state.messages[state.messages.length - 1];
+              return {
+                messages: patchLastMessage(state.messages, {
+                  content: (last.content ?? "") + content,
+                }),
+              };
+            }),
+          onDone: ({
+            tokensUsed,
+            cost,
+            modelName,
+            affinityStatus,
+            agentRun,
+            supplier360,
+            supplierRisk,
+            graphTraversal,
+            suggestedAgent,
+            queryPlan,
+            visualRationale,
+          }) => {
+            // P1-3：若 currentAssistantMessageId 已被后续调用覆盖，跳过清理
+            if (get().currentAssistantMessageId !== assistantMessageId) return;
+            set((state) => ({
+              messages: finalizeRunningSteps(
+                patchLastMessage(state.messages, {
+                  tokensUsed,
+                  cost,
+                  modelName: modelName ?? undefined,
+                  isStreaming: false,
+                  affinityStatus: affinityStatus ?? null,
+                  agentRun: agentRun ?? null,
+                  supplier360: supplier360 ?? null,
+                  supplierRisk: supplierRisk ?? null,
+                  graphTraversal: graphTraversal ?? null,
+                  suggestedAgent: suggestedAgent ?? null,
+                  queryPlan: queryPlan ?? null,
+                  ...(visualRationale ? { visualRationale } : {}),
+                })
+              ),
+              loading: false,
+            }));
+            void attachHypotheses();
+          },
+          onError: (message, detail) => {
+            // P1-3：若 currentAssistantMessageId 已被后续调用覆盖，跳过清理
+            if (get().currentAssistantMessageId !== assistantMessageId) return;
+            set((state) => ({
+              messages: patchLastMessage(state.messages, {
+                content: message,
+                errorDetail: detail ?? null,
+                isError: true,
+                isStreaming: false,
+              }),
+              loading: false,
+              error: message,
+            }));
+          },
+        });
       } else {
-        const res = await sendChatMessage(payload);
-        set((state) => ({
-          messages: patchLastMessage(state.messages, {
-            content: res.answer,
-            sql: res.sql ?? null,
-            chartType: res.chartType ?? null,
-            chartOption: res.chartOption ?? null,
-            tableOption: res.tableOption ?? null,
-            visualRationale: res.visualRationale ?? null,
-            data: res.data ?? null,
-            queryPlan: res.queryPlan ?? null,
-            intent: isIntent(res.intent) ? res.intent : undefined,
-            extractedEntities: res.extractedEntities ?? null,
-            tokensUsed: res.tokensUsed,
-            cost: res.cost,
-            modelName: res.modelName ?? undefined,
-            isStreaming: false,
-            affinityStatus: res.affinityStatus ?? null,
-            // Phase 1.4：DQ 可信度 badge（顺序对齐 queryPlan.selectedClasses）
-            dataQuality: res.dataQuality ?? null,
-            // 类召回诊断（2026-09-16）：truncated/fallback 时渲染提示
-            classRecall: res.classRecall ?? null,
-            // 拦截路径卡片对象（非流式响应回填，MessageItem 按字段存在性渲染）。
-            // 修复：Phase 5.3/5.4/6.3 曾只读不写，导致 supplier360/supplierRisk/
-            // graphTraversal 卡片在真实 chat 流中从未渲染（#206 审查发现）。
-            supplier360: res.supplier360 ?? null,
-            supplierRisk: res.supplierRisk ?? null,
-            graphTraversal: res.graphTraversal ?? null,
-            // Phase 6.4：Agent 运行时执行结果（仅 intent=agent_run 时非 null）
-            agentRun: res.agentRun ?? null,
-            // Phase 7 G4：中置信语义路由建议卡片（仅命中时非 null）
-            suggestedAgent: res.suggestedAgent ?? null,
-            // v3.1 B6（M7）：非流式响应自带假设（流式经 attachHypotheses 拉 GET 回填）
-            hypotheses: res.hypotheses ?? null,
-            // 非流式多步：后端仅回传数据步骤（无汇总步骤），每步成败由 error 判定——
-            // C3 失败隔离后失败步骤也会回到这里（sql/data 为 null、error 非空），
-            // 一律当「已完成」会把失败渲染成成功（与流式 onStepResult 口径也必须一致）
-            steps: res.steps?.map(
-              (s): MultiStepStep => ({
-                stepIndex: s.stepIndex,
-                description: s.description,
-                subQuestion: s.subQuestion,
-                aggregationOnly: false,
-                status: stepStatusFromResult(s.error),
-                sql: s.sql ?? null,
-                summary: s.summary ?? null,
-                error: s.error ?? null,
-                // 每步自己的图（决策引擎按该步的 columns/data/plan 各出一张；
-                // 失败步骤后端不发，这里落成 null，渲染层据此不画）
-                chartType: s.chartType ?? null,
-                chartOption: s.chartOption ?? null,
-                tableOption: s.tableOption ?? null,
-                visualRationale: s.visualRationale ?? null,
-              })
-            ),
-          }),
-          loading: false,
-        }));
-        // v3.1 B6（M7）：非流式响应后统一经 GET 端点回填假设
-        await attachHypotheses();
+      } else {
+        // 非流式分支（不改；也要 reset currentAssistantMessageId）
+        try {
+          const response = await sendChatMessage(payload);
+          set((state) => ({
+            messages: patchLastMessage(state.messages, {
+              content: response.answer,
+              sql: response.sql ?? null,
+              chartType: response.chartType ?? null,
+              chartOption: response.chartOption ?? null,
+              tableOption: response.tableOption ?? null,
+              visualRationale: response.visualRationale ?? null,
+              data: response.data ?? null,
+              queryPlan: response.queryPlan ?? null,
+              intent: isIntent(response.intent) ? response.intent : undefined,
+              extractedEntities: response.extractedEntities ?? null,
+              tokensUsed: response.tokensUsed,
+              cost: response.cost,
+              modelName: response.modelName ?? undefined,
+              isStreaming: false,
+              affinityStatus: response.affinityStatus ?? null,
+              dataQuality: response.dataQuality ?? null,
+              classRecall: response.classRecall ?? null,
+              supplier360: response.supplier360 ?? null,
+              supplierRisk: response.supplierRisk ?? null,
+              graphTraversal: response.graphTraversal ?? null,
+              agentRun: response.agentRun ?? null,
+              suggestedAgent: response.suggestedAgent ?? null,
+              hypotheses: response.hypotheses ?? null,
+              steps: response.steps?.map(
+                (s): MultiStepStep => ({
+                  stepIndex: s.stepIndex,
+                  description: s.description,
+                  subQuestion: s.subQuestion,
+                  aggregationOnly: false,
+                  status: stepStatusFromResult(s.error),
+                  sql: s.sql ?? null,
+                  summary: s.summary ?? null,
+                  error: s.error ?? null,
+                  chartType: s.chartType ?? null,
+                  chartOption: s.chartOption ?? null,
+                  tableOption: s.tableOption ?? null,
+                  visualRationale: s.visualRationale ?? null,
+                })
+              ),
+            }),
+            loading: false,
+            currentAssistantMessageId: null,
+          }));
+          void attachHypotheses();
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : i18n.t("errors.networkError");
+          const errDetail = (err as { detail?: string }).detail ?? null;
+          set((state) => {
+            const last = state.messages[state.messages.length - 1];
+            // 已通过 error 事件展示具体错误时，不覆盖为通用错误文案（LOW#8 修复）
+            if (last?.isError) {
+              return { loading: false };
+            }
+            return {
+              messages: patchLastMessage(state.messages, {
+                content: errMsg,
+                errorDetail: errDetail,
+                isError: true,
+                isStreaming: false,
+              }),
+              loading: false,
+              currentAssistantMessageId: null,
+              error: errMsg,
+            };
+          });
+          throw err;
+        }
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : i18n.t("errors.networkError");
       const errDetail = (err as { detail?: string }).detail ?? null;
+      const isInterrupted = err instanceof Error && err.message.includes("interrupted");
       set((state) => {
         const last = state.messages[state.messages.length - 1];
         // 已通过 error 事件展示具体错误时，不覆盖为通用错误文案（LOW#8 修复）
         if (last?.isError) {
-          return { loading: false };
+          return { loading: false, interrupted: isInterrupted };
         }
         return {
           messages: patchLastMessage(state.messages, {
@@ -656,23 +815,27 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             errorDetail: errDetail,
             isError: true,
             isStreaming: false,
+            ...(isInterrupted ? { interrupted: true } : {}),
           }),
           loading: false,
           error: errMsg,
+          interrupted: isInterrupted,
         };
       });
+      // P1-3：EOF 守门（stream interrupted: no done/error before EOF）需要抛出，
+      // 其他错误由 inner catch 已处理，吞掉不向上传播。
+      if (isInterrupted) throw err;
     } finally {
-      // 兜底复位：若流异常结束（无 done/error 帧）导致 loading / isStreaming 残留，
-      // 强制复位，避免发送按钮永久禁用（HIGH#3 修复）
-      set((state) => {
-        const last = state.messages[state.messages.length - 1];
-        if (!state.loading && !last?.isStreaming) return {};
-        if (!last?.isStreaming) return { loading: false };
-        return {
-          messages: patchLastMessage(state.messages, { isStreaming: false }),
+      // P1-3：loading 重置（正常/异常都需重置，避免按钮永久禁用）。
+      // currentAssistantMessageId 的清理由 onDone/onError handler 负责（正常流），
+      // finally 这里不再重复清（避免在 mock 测试中覆盖 handler 已设置的 null）。
+      // 若 loading 仍为 true（未收到 done/error），强制复位 isStreaming（HIGH#3 兜底）。
+      if (get().loading) {
+        set((state) => ({
           loading: false,
-        };
-      });
+          messages: patchLastMessage(state.messages, { isStreaming: false }),
+        }));
+      }
     }
   },
 

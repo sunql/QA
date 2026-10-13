@@ -32,6 +32,7 @@ from app.domain.multi_step_plan import (
 from app.domain.query_plan import QueryPlan
 from app.domain.schemas import AgentSuggestion, ChatRequest, SemanticState
 from app.services.intent_service import IntentResult
+from app.services.error_classification import classifyError
 # 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER，
 # 与 chat_service.processMessage 同口径——在 _streamQuery 入口一次性读一次，
 # 整条流水线复用，避免每段 _costFor 调用都查 DB。
@@ -250,7 +251,7 @@ class StreamMixin:
         except LlmClientError as exc:
             logger.warning("流式查询 LLM 失败: %s", exc.message)
             await self._storeSessionMessages(session, dto.sessionId, dto.question, exc.message, None)
-            yield StreamEvent(EVENT_ERROR, {"error": exc.message, "errorType": ErrorType.LLM.value})
+            yield StreamEvent(EVENT_ERROR, {"error": exc.message, "errorType": classifyError(exc).value})
         except DomainError as exc:
             logger.warning("流式查询失败: %s", exc.message)
             await self._storeSessionMessages(session, dto.sessionId, dto.question, exc.message, None)
@@ -258,7 +259,7 @@ class StreamMixin:
                 yield StreamEvent(EVENT_PLAN, {"plan": exc.lastPlan.to_dict()})
             yield StreamEvent(
                 EVENT_ERROR,
-                {"error": exc.message, "errorType": ErrorType.DOMAIN.value, "detail": exc.detail},
+                {"error": exc.message, "errorType": classifyError(exc).value, "detail": exc.detail},
             )
         except Exception as exc:
             # 未预期异常（DB 连接中断 / 数据解析错误等）：记录完整上下文并产出结构化

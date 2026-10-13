@@ -69,12 +69,19 @@ function makeDetail(): { data: DetailFixture } {
   };
 }
 
-function renderPage() {
+// `pendingQuestion` 只来自 location.state.question（新会话首轮流程写入）。传 null
+// ⇒ 不写 state（模拟「打开一个已存在的会话」），这也是页内追问的真实路径。
+function renderPage(pendingQuestion: string | null = "供应商 360° 全景") {
   return render(
     <ConfigProvider locale={zhCN}>
       <App>
         <MemoryRouter
-          initialEntries={[{ pathname: "/research/s1", state: { question: "供应商 360° 全景" } }]}
+          initialEntries={[
+            {
+              pathname: "/research/s1",
+              state: pendingQuestion === null ? undefined : { question: pendingQuestion },
+            },
+          ]}
         >
           <Routes>
             <Route path="/research/:id" element={<ResearchSessionPage />} />
@@ -83,6 +90,12 @@ function renderPage() {
       </App>
     </ConfigProvider>,
   );
+}
+
+// 与 makeDetail 同构，只是可控 status（终态 / awaiting_user 分支用）。
+function makeDetailWithStatus(status: string): { data: DetailFixture } {
+  const detail = makeDetail();
+  return { data: { ...detail.data, session: { ...detail.data.session, status } } };
 }
 
 describe("ResearchSessionPage", () => {
@@ -846,5 +859,138 @@ describe("ResearchSessionPage", () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(useResearchStore.getState().streaming).toBe(false);
+  });
+
+  // Task 12b fix1（回归）：**终态会话上的页内追问**必须「先建流、再提交」。
+  //
+  // T12b 的「终态不连流」闸门只在挂载时判定一次（依赖 sessionId/pendingQuestion
+  // 等，页内追问时全不变）；页内追问走 handleSend，而 pendingQuestion 恒为 ""（只
+  // 来自 location.state.question，仅新会话流程写入）。修复前 handleSend 直接
+  // submitTurn（只 POST、不开流）⇒ 后端照跑新一轮，但**没有 SSE 订阅者** ⇒
+  // streaming 不置位、无实时进度、无完成通知、turns 不刷新 ⇒ UI 卡死到整页刷新。
+  describe("Task 12b fix1：终态会话页内追问", () => {
+    it("done 会话追问：先建流（onOpen）再提交，追问 SSE 事件到达 store", async () => {
+      httpMock.get.mockResolvedValue(makeDetailWithStatus("done"));
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        body: openStream(
+          'event: research.connected\ndata: {"sessionId":"s1"}\n\n',
+          'event: research.step.sql\ndata: {"stepIndex":0}\n\n',
+        ),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      // 无 location.state.question ⇒ pendingQuestion=""，走真实「打开已有会话」路径。
+      renderPage(null);
+
+      // 挂载闸门仍生效：终态会话打开即看，**不**连流。
+      await waitFor(() =>
+        expect(useResearchStore.getState().currentSession?.status).toBe("done"),
+      );
+      await waitFor(() => expect(useResearchStore.getState().loading).toBe(false));
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      // 输入追问 → 点发送。
+      fireEvent.change(screen.getByPlaceholderText("继续提问…"), {
+        target: { value: "再查一次" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+
+      // (a) 流**被**打开（带该 sessionId）——修复前这里恒为 0 次调用。
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      expect(String(fetchMock.mock.calls[0][0])).toContain("sessionId=s1");
+
+      // (b) 追问的 SSE 事件经 applyResearchEvent 落到 store（有订阅者的证据）。
+      await waitFor(() =>
+        expect(
+          useResearchStore
+            .getState()
+            .events.some((event) => event.name === "research.step.sql"),
+        ).toBe(true),
+      );
+
+      // (c) 提交发生，且**晚于**建流（先建流后提交的次序）。
+      await waitFor(() =>
+        expect(httpMock.post).toHaveBeenCalledWith(
+          "/research/sessions/s1/turns",
+          { question: "再查一次" },
+        ),
+      );
+      expect(httpMock.post.mock.invocationCallOrder[0]).toBeGreaterThan(
+        fetchMock.mock.invocationCallOrder[0],
+      );
+    });
+
+    it("追问建的流在组件卸载时被 abort（不泄漏）", async () => {
+      httpMock.get.mockResolvedValue(makeDetailWithStatus("done"));
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        body: openStream('event: research.connected\ndata: {"sessionId":"s1"}\n\n'),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { unmount } = renderPage(null);
+      await waitFor(() =>
+        expect(useResearchStore.getState().currentSession?.status).toBe("done"),
+      );
+      await waitFor(() => expect(useResearchStore.getState().loading).toBe(false));
+
+      fireEvent.change(screen.getByPlaceholderText("继续提问…"), {
+        target: { value: "追问" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+      const signal = fetchMock.mock.calls[0][1]?.signal as AbortSignal;
+      expect(signal.aborted).toBe(false);
+
+      unmount();
+
+      // 页内追问建的那条流必须随卸载释放。
+      expect(signal.aborted).toBe(true);
+    });
+
+    it("连续追问复用同一条活流（不双开）", async () => {
+      httpMock.get.mockResolvedValue(makeDetailWithStatus("done"));
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        body: openStream('event: research.connected\ndata: {"sessionId":"s1"}\n\n'),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      renderPage(null);
+      await waitFor(() =>
+        expect(useResearchStore.getState().currentSession?.status).toBe("done"),
+      );
+      await waitFor(() => expect(useResearchStore.getState().loading).toBe(false));
+
+      const input = screen.getByPlaceholderText("继续提问…");
+      const send = screen.getByRole("button", { name: /发\s*送/ });
+
+      fireEvent.change(input, { target: { value: "第一次" } });
+      fireEvent.click(send);
+      await waitFor(() => expect(httpMock.post).toHaveBeenCalledTimes(1));
+
+      fireEvent.change(input, { target: { value: "第二次" } });
+      fireEvent.click(send);
+      await waitFor(() => expect(httpMock.post).toHaveBeenCalledTimes(2));
+
+      // 第二次追问时第一条流还活着 ⇒ 复用它，绝不重开（重开会 abort 旧流，
+      // 且被 abort 的 onOpen 永不触发 ⇒ 挂起）。
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("awaiting_user 会话仍连流（非终态，状态机继续跑）", async () => {
+      httpMock.get.mockResolvedValue(makeDetailWithStatus("awaiting_user"));
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        body: openStream('event: research.connected\ndata: {"sessionId":"s1"}\n\n'),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      renderPage(null);
+
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    });
   });
 });

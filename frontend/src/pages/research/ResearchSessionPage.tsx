@@ -35,7 +35,6 @@ export default function ResearchSessionPage() {
   const resolutionInFlight = useResearchStore((s) => s.resolutionInFlight);
   const error = useResearchStore((s) => s.error);
   const conflictError = useResearchStore((s) => s.conflictError);
-  const submitTurn = useResearchStore((s) => s.submitTurn);
   const answer = useResearchStore((s) => s.answer);
   const clearConflictError = useResearchStore((s) => s.clearConflictError);
   // 历史问答 Drawer 用：listResearchSessions 已在 ResearchListPage 用过，store
@@ -47,7 +46,7 @@ export default function ResearchSessionPage() {
 
   const pendingQuestion =
     (location.state as { question?: string } | null)?.question ?? "";
-  useResearchSession(id, pendingQuestion);
+  const { submitFollowUp } = useResearchSession(id, pendingQuestion);
 
   const [input, setInput] = useState("");
   const [detailPayload, setDetailPayload] = useState<ResearchDetailPayload | null>(null);
@@ -122,7 +121,9 @@ export default function ResearchSessionPage() {
     if (!trimmed || !id) return;
     setInput("");
     try {
-      await submitTurn(id, trimmed);
+      // 先建流（无活流时）再提交 —— 终态会话上挂载闸门不连流，页内追问若直接
+      // submitTurn 则新 turn 无 SSE 订阅者，UI 卡死到整页刷新（Task 12b fix1）。
+      await submitFollowUp(trimmed);
     } catch {
       message.error(t("research.session.error.default"));
     }

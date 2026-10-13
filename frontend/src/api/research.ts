@@ -186,15 +186,15 @@ function consumeFrames(buffer: string, onEvent: (e: ResearchSseEvent) => void): 
 }
 
 // 解析帧内的 `id:` 行（后端 `_sseFrame` 的 `id: <seq>`）。SSE 规范：同帧出现多个
-// `id:` 时**最后一个生效**；空值 / 非整数 ⇒ 忽略（该帧 id 保持 undefined，事件照常分发）。
+// `id:` 时**最后一个生效** —— 空值 / 非整数 ⇒ 该帧 id 为 undefined（不保留更早的
+// 有效值），事件照常分发。（后端当前每帧最多一个数字 `id:`，此分支不可达。）
 function parseFrameId(frame: string): number | undefined {
   let id: number | undefined;
   for (const line of frame.split("\n")) {
     if (!line.startsWith("id:")) continue;
     const raw = line.slice("id:".length).trim();
-    if (raw === "") continue;
     const parsed = Number(raw);
-    if (Number.isInteger(parsed)) id = parsed;
+    id = raw !== "" && Number.isInteger(parsed) ? parsed : undefined;
   }
   return id;
 }

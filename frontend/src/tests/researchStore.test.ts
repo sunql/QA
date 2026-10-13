@@ -264,6 +264,23 @@ describe("api/research SSE（openResearchStream）", () => {
     expect(received[0].id).toBe(2);
   });
 
+  it("同帧多个 id: 行，最后一个非整数 ⇒ id 为 undefined（不保留更早的有效值）", async () => {
+    // SSE 规范「最后一个 id: 生效」的字面含义：后面的非法值必须**重置**，
+    // 而不是被 continue 跳过后留下更早的 5。
+    const stream = sseStream(
+      'id: 5\nid: abc\nevent: research.intent\ndata: {"intent":"research"}\n\n',
+      'id: 5\nid:\nevent: research.esl\ndata: {"metrics":[]}\n\n',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: ResearchSseEvent[] = [];
+    await openResearchStream("s1", (e) => received.push(e));
+
+    expect(received.map((e) => e.name)).toEqual(["research.intent", "research.esl"]);
+    expect(received[0].id).toBeUndefined();
+    expect(received[1].id).toBeUndefined();
+  });
+
   it("id: 非数字 / 空值被忽略，事件仍照常分发（id 为 undefined）", async () => {
     const stream = sseStream(
       'id: abc\nevent: research.intent\ndata: {"intent":"research"}\n\n',

@@ -429,7 +429,11 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             # l4_chat_response is stored in the mixin; return it directly
             return self._preamble_l4_response
 
-        result, state = await self._classifyMessage(session, dto)
+        result, state = await self._classifyMessage(
+            session, dto,
+            userId=user.userId if user is not None else None,
+            datasourceId=dto.datasourceId,
+        )
         if result.intent == IntentType.CHITCHAT:
             response = self._chitchatResponse()
             # 4-4：闲聊轮也持久化消息，历史链不断
@@ -452,7 +456,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         if result.intent == IntentType.AGENT_RUN:
             return await self._handleAgentRun(session, dto, result, user=user)
 
-        response = await self._handleGenericQuery(session, dto, result, state)
+        response = await self._handleGenericQuery(session, dto, result, state, user=user)
         # Phase 7 G4：中置信语义路由命中的建议卡片附到响应。仅 QUERY/NEW_QUERY/
         # FOLLOW_UP 在 classifyResult 中携带 result.suggested_agent；其余意图该
         # 字段为 None 不附加。model_copy 保持不可变风格（不改原响应对象）。
@@ -468,6 +472,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         dto: ChatRequest,
         result: IntentResult,
         state: SessionQueryState | None,
+        *,
+        user: CurrentUser | None = None,
     ) -> ChatResponse:
         """通用查询流水线（CLARIFY + 多步拆解 + NL2SQL 单步）。
 
@@ -515,6 +521,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                         global_filters=global_filters,
                         semanticState=inherited,
                         priorSnapshot=prior_snapshot,
+                        userId=user.userId if user is not None else None,
                     )
             # L1.5（2026-08-17 真实回归）：并列复合问题（无显式分步信号但语义多步，
             # 如"查询3月份采购订单数量、Top 10物料占比、Top 10物料在4月份的订单数量"）
@@ -534,6 +541,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                         global_filters=global_filters,
                         semanticState=inherited,
                         priorSnapshot=prior_snapshot,
+                        userId=user.userId if user is not None else None,
                     )
 
         # B（feat-follow-up-cascade）：FOLLOW_UP 且上一轮是多步 → LLM 改写回完整
@@ -548,6 +556,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                     global_filters=gf2,
                     semanticState=inherited,
                     priorSnapshot=prior_snapshot,
+                    userId=user.userId if user is not None else None,
                 )
 
         try:
@@ -568,6 +577,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                         global_filters=gf2,
                         semanticState=inherited,
                         priorSnapshot=prior_snapshot,
+                        userId=user.userId if user is not None else None,
                     )
                 outcome = await self._planAndGenerateSql(
                     session, dto, pc, IntentType.FOLLOW_UP, state
@@ -592,10 +602,10 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             raise
         if outcome.sql is None:
             # 计划 target=无法回答：不执行 SQL/图表/回答 LLM，直接给出固定友好回答
-            return await self._unanswerableResponse(session, dto, pc, result.intent, outcome, _t0=_t0)
+            return await self._unanswerableResponse(session, dto, pc, result.intent, outcome, _t0=_t0, user=user)
         # Phase 4.4：计划引用了可用 Feature 且特征有值 -> 直接回流特征值，
         # 跳过 SQL 生成与业务库执行（feature_value 在元数据库，非业务库）。
-        featureResponse = await self._tryFeatureResponse(session, dto, pc, outcome)
+        featureResponse = await self._tryFeatureResponse(session, dto, pc, outcome, user=user)
         if featureResponse is not None:
             return featureResponse
         try:
@@ -627,6 +637,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                         _t0=_t0,
                         semanticState=None,  # 异常回退，无 semanticState
                         priorSnapshot=prior_snapshot,
+                        userId=user.userId if user is not None else None,
                     )
             raise
         self._spawnEmbedding(dto, finalSql)
@@ -696,6 +707,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             question=dto.question, plan=outcome.plan, sql=finalSql,
             resultColumns=self._columns(data),
             inheritance_snapshot=snap,
+            userId=user.userId if user is not None else None,
+            datasourceId=dto.datasourceId,
         )
         # v3.1 B6（M7）：单步出数据后的可选假设后处理（best-effort，不阻断）
         hypotheses = await self._maybeGenerateHypotheses(
@@ -760,9 +773,14 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         )
 
     async def _classifyMessage(
-        self, session: AsyncSession, dto: ChatRequest
+        self, session: AsyncSession, dto: ChatRequest,
+        *, userId: int | None = None, datasourceId: int | None = None,
     ) -> tuple[IntentResult, SessionQueryState | None]:
         """意图识别：委托 classifyAndRecall 单入口（v3.1 A7 通道 1 收口）。
+
+        P0-3：加载状态时按 (userId, datasourceId, sessionId) 三元过滤，
+        避免跨用户/跨数据源窜 state。userId/datasourceId 任一 None 时退化为
+        按 sessionId 唯一过滤（兼容既有调用）。
 
         REFINE/FOLLOW_UP 仅在 hasPriorState=True 时产出；重分类后若收敛为 CHITCHAT
         同样短路（避免空耗模型）。result 携带抽取的查询实体与领域命令参数。
@@ -781,7 +799,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
                 if first_step_q:
                     question = first_step_q
         classified = await self.classifyAndRecall(
-            session, question, sessionId=dto.sessionId, needRecall=False
+            session, question, sessionId=dto.sessionId, needRecall=False,
+            userId=userId, datasourceId=datasourceId,
         )
         return classified.intentResult, classified.state
 
@@ -1607,6 +1626,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         dto: ChatRequest,
         pc: _PipelineContext,
         outcome: _SqlOutcome,
+        *,
+        user: CurrentUser | None = None,
     ) -> ChatResponse | None:
         """Phase 4.4：检测计划是否引用了可用 Feature，命中则直接回流特征值。
 
@@ -1659,6 +1680,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
             inheritance_snapshot=None,
+            userId=user.userId if user is not None else None,
+            datasourceId=dto.datasourceId,
         )
         totalTokens = outcome.promptTokens + outcome.completionTokens
         affinity = await self._buildAffinityStatus(
@@ -1692,6 +1715,7 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
         outcome: _SqlOutcome,
         *,
         _t0: float,
+        user: CurrentUser | None = None,
         _overrideAnswer: str | None = None,
     ) -> ChatResponse:
         """计划 target=无法回答 时的非流式响应：固定友好回答，不执行 SQL/图表/回答 LLM。
@@ -1713,6 +1737,8 @@ class ChatService(RecallMixin, MultiStepMixin, StreamMixin, ContextMixin, UsageM
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
             inheritance_snapshot=None,
+            userId=user.userId if user is not None else None,
+            datasourceId=dto.datasourceId,
         )
         totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
         affinityConfig = outcome.sqlConfig or pc.selected

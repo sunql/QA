@@ -506,6 +506,7 @@ class MultiStepMixin:
         *,
         total_cost: Decimal,
         _t0: float,
+        userId: int | None = None,  # P0-3
     ) -> str:
         """超限计划的固定回答：落库 + 存状态，返回文案；不做任何执行。
 
@@ -531,6 +532,8 @@ class MultiStepMixin:
         await self._saveQueryState(
             session, dto.sessionId,
             question=dto.question, plan=None, sql=None, resultColumns=[],
+            userId=userId,
+            datasourceId=dto.datasourceId,
         )
         return answer
 
@@ -548,6 +551,7 @@ class MultiStepMixin:
         global_filters: GlobalFilters | None = None,
         semanticState: InheritedState | None = None,
         priorSnapshot: dict | None = None,
+        userId: int | None = None,  # P0-3
     ) -> ChatResponse:
         """顺序执行每个子步骤，最后调用 StepAggregator 汇总，返回完整多步响应。
 
@@ -570,6 +574,7 @@ class MultiStepMixin:
             answer = await self._rejectOversizedPlan(
                 session, dto, multiStepPlan,
                 total_cost=initial_cost, _t0=_t0,
+                userId=userId,
             )
             return ChatResponse(
                 answer=answer,
@@ -659,6 +664,8 @@ class MultiStepMixin:
                     question=dto.question, plan=last_plan, sql=last_sql,
                     resultColumns=self._columns(last_data),
                     inheritance_snapshot=snap,
+                    userId=userId,
+                    datasourceId=dto.datasourceId,
                 )
                 affinity = await self._buildAffinityStatus(
                     session, dto.sessionId, agg_config.id, agg_config.model_name,
@@ -703,6 +710,7 @@ class MultiStepMixin:
             last_plan=last_plan, last_sql=last_sql, last_data=last_data,
             total_cost=total_cost, _t0=_t0,
             inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
+            userId=userId,
         )
         # v3.1 B6（M7）：降级收尾同样接假设后处理（last_data 为空时静默跳过）
         hypotheses = await self._maybeGenerateHypotheses(
@@ -734,6 +742,7 @@ class MultiStepMixin:
         total_cost: Decimal,
         _t0: float,
         inheritance_snapshot: dict | None = None,
+        userId: int | None = None,  # P0-3
     ) -> str:
         """无汇总步骤时的降级收尾：落库 + 保存查询状态，返回给用户的文案。
 
@@ -774,6 +783,8 @@ class MultiStepMixin:
             question=dto.question, plan=last_plan, sql=last_sql,
             resultColumns=self._columns(last_data),
             inheritance_snapshot=inheritance_snapshot,
+            userId=userId,
+            datasourceId=dto.datasourceId,
         )
         return answer
 

@@ -21,6 +21,14 @@ from typing import Any
 import pytest
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
+from pathlib import Path
+
+import dotenv
+
+# 优先从 .env 加载真实 PG URL（覆盖后续 sqlite setdefault）
+# .env 在 backend/，conftest.py 在 backend/app/tests/，需 parents[2]
+_backend_dotenv = Path(__file__).resolve().parents[2] / ".env"
+dotenv.load_dotenv(_backend_dotenv, override=True)
 
 # 在导入 app 之前设定测试环境变量
 _TEST_FERNET = Fernet.generate_key().decode()

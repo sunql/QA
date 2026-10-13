@@ -14,6 +14,9 @@ from __future__ import annotations
 import re
 from datetime import date as _date
 
+import sqlglot
+from sqlglot import exp
+
 from app.domain.query_plan import QueryPlan
 
 
@@ -90,17 +93,39 @@ def _extractLimit(question: str, maxLimit: int = _REFINE_MAX_LIMIT_DEFAULT) -> i
 
 
 def _rewriteLimit(sql: str, n: int) -> str | None:
-    """改写 FETCH FIRST N / LIMIT N 为指定行数。
+    """改写顶层 LIMIT/FETCH FIRST 为指定行数。
 
-    仅当原 SQL 已含行数子句时改写；无行数子句时返回 None（LOW-2 刻意如此）：
-    方言未知时无法安全追加（Oracle 用 FETCH FIRST、MySQL/PG 用 LIMIT），
-    追加错误方言会产生非法 SQL——退回 LLM 两阶段由方言提示正确生成。
+    AST 化后：仅简单顶层 SELECT（无 CTE / 子查询 / window）走快路径；
+    字符串字面量内的 LIMIT 不被改写（AST 自动 quote-aware）；
+    嵌套 / CTE / window / 解析失败 → 返 None（让两阶段生成接手）。
     """
-    if _CLAUSE_FETCH_FIRST.search(sql):
-        return _CLAUSE_FETCH_FIRST.sub(f"FETCH FIRST {n} ROWS ONLY", sql)
-    if _CLAUSE_LIMIT.search(sql):
-        return _CLAUSE_LIMIT.sub(f"LIMIT {n}", sql)
-    return None
+    return rewriteTopLimit(sql, n)
+
+
+# Public API
+def rewriteTopLimit(sql: str, n: int) -> str | None:
+    """公开 API：AST 化 LIMIT 改写。
+
+    Returns:
+        改写后的 SQL 字符串（quote-aware）；非简单 SELECT / 解析失败 → None。
+    """
+    try:
+        tree = sqlglot.parse_one(sql)
+    except sqlglot.errors.ParseError:
+        return None
+
+    if not isinstance(tree, exp.Select):
+        return None
+    # 嵌套 / CTE / window 自动回退
+    if list(tree.find_all(exp.CTE)):
+        return None
+    if list(tree.find_all(exp.Subquery)):
+        return None
+    if list(tree.find_all(exp.Window)):
+        return None
+
+    tree.set("limit", exp.Limit(expression=exp.Literal.number(n)))
+    return tree.sql()
 
 
 def _extractSort(question: str, columns: tuple[str, ...]) -> tuple[str, str] | None:
@@ -131,29 +156,43 @@ def _extractSort(question: str, columns: tuple[str, ...]) -> tuple[str, str] | N
     return None
 
 
-def _rewriteOrderBy(sql: str, col: str, direction: str) -> str:
-    """追加或替换最外层 ORDER BY 子句。
+def _rewriteOrderBy(sql: str, col: str, direction: str) -> str | None:
+    """改写顶层 ORDER BY（只动顶层；嵌套内层不动）。
 
-    排序列来自本体（计划）已校验的安全标识符，无注入面。定位"最后一个 ORDER BY"
-    （嵌套子查询的 ORDER BY 在前、最外层 ORDER BY 在后），避免误改内层子句
-    （LOW-1：修掉 count=1 + DOTALL 跨子句吞并的隐患）；结束位置取后续
-    FETCH FIRST / LIMIT 子句或语句末尾。
+    AST 化后：用 sqlglot 解析 → 只对顶层 Select.order 操作 → 序列化。
+    解析失败 / 非 Select → 返 None。
     """
-    orderMatches = list(_CLAUSE_ORDER_BY.finditer(sql))
-    if orderMatches:
-        match = orderMatches[-1]
-        rest = sql[match.start():]
-        tail = _CLAUSE_FETCH_FIRST.search(rest) or _CLAUSE_LIMIT.search(rest)
-        end = match.start() + (tail.start() if tail else len(rest))
-        head = sql[:match.start()]
-        tailText = sql[end:].lstrip()
-        sep = " " if tailText else ""
-        return f"{head}ORDER BY {col} {direction}{sep}{tailText}"
-    for anchor in (_CLAUSE_FETCH_FIRST, _CLAUSE_LIMIT):
-        match = anchor.search(sql)
-        if match:
-            return sql[:match.start()] + f"ORDER BY {col} {direction} " + sql[match.start():]
-    return f"{sql} ORDER BY {col} {direction}"
+    return rewriteOrderBy(sql, col, direction)
+
+
+# Public API
+def rewriteOrderBy(sql: str, col: str, direction: str) -> str | None:
+    """公开 API：AST 化顶层 ORDER BY 改写。
+
+    Args:
+        sql: 输入 SQL
+        col: 排序列（已通过 _SAFE_IDENT_RE 校验的安全标识符）
+        direction: "ASC" / "DESC"
+
+    Returns:
+        改写后的 SQL；解析失败 / 非 Select → None。
+        已有顶层 ORDER BY → 替换为新 ORDER BY col direction；
+        无顶层 ORDER BY → 末尾追加。
+    """
+    try:
+        tree = sqlglot.parse_one(sql)
+    except sqlglot.errors.ParseError:
+        return None
+
+    if not isinstance(tree, exp.Select):
+        return None
+
+    desc = direction.upper() == "DESC"
+    new_order = exp.Order(
+        expressions=[exp.Ordered(this=exp.column(col), desc=desc)]
+    )
+    tree.set("order", new_order)
+    return tree.sql()
 
 
 def _quoteFilterValue(val: str) -> str | None:
@@ -378,8 +417,10 @@ def applyRefineDirect(
 
     sort = _extractSort(question, sortColumns)
     if sort is not None:
-        sql = _rewriteOrderBy(sql, sort[0], sort[1])
-        transformed = True
+        rewritten = _rewriteOrderBy(sql, sort[0], sort[1])
+        if rewritten is not None:
+            sql = rewritten
+            transformed = True
 
     filterCond = _extractFilter(question, planColumns)
     if filterCond is not None:

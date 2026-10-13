@@ -46,6 +46,7 @@ from app.services.messages_zh import (
     MSG_MULTI_STEP_DEGRADE_PARTIAL,
     MSG_PLAN_TOO_MANY_STEPS,
 )
+from app.services.multi_step_dependency import MultiStepDependencyResolver
 from app.services.nl2sql_service import _readFloatConfig
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.think_block import applyThinkPolicy
@@ -604,105 +605,142 @@ class MultiStepMixin:
         last_sql: str | None = None
         last_data: list[dict] = []
 
-        for step_plan in multiStepPlan.steps:
-            if step_plan.aggregation_only:
-                if not _hasDataStepResult(completed):
-                    # 所有数据步骤都失败：汇总 LLM 拿到的只有错误行，只会编造结论
-                    # ⇒ 跳过汇总，落到循环后的降级收尾（如实告知失败）
-                    logger.warning("多步数据步骤全部失败，跳过汇总步骤")
-                    continue
-                # 汇总步骤：跳过 SQL 执行，调用 StepAggregator
-                # Task 2：await 不能写进 lambda，阈值在 lambda 外先算好再捕获。
-                full_data_threshold = await loadFullDataThreshold(session)
-                agg_resp = await self._callWithFallback(
-                    session, dto.sessionId, pc.configs, pc.selected, "answer",
-                    lambda cfg: self._stepAggregator.aggregate(
-                        dto.question, multiStepPlan, completed,
-                        self._llmFactory(cfg), cfg.model_name,
-                        history=pc.contextPrompt,
-                        full_data_threshold=full_data_threshold,
-                    ),
-                    forced=pc.forcedModel,
-                )
-                # Think_Hide（feat-think-hide）：汇总答案按系统参数剥离 <think> 思维链
-                agg_content = await applyThinkPolicy(session, agg_resp[0].content)
-                agg_config = agg_resp[1]
-                agg_pt = agg_resp[0].promptTokens
-                agg_ct = agg_resp[0].completionTokens
-                wasted_pt, wasted_ct = agg_resp[2]
-                total_tokens += agg_pt + agg_ct + wasted_pt + wasted_ct
-                total_cost += self._costFor(agg_config, agg_pt, agg_ct)
-                total_cost += self._costFor(pc.selected, wasted_pt, wasted_ct)
-                last_model_name = agg_config.model_name
-                await self._recordUsage(
-                    session, dto.sessionId, agg_config,
-                    agg_pt, agg_ct, purpose="answer",
-                )
-                await self._storeSessionMessages(
-                    session, dto.sessionId, dto.question, agg_content, None,
-                    routing_layer="L2",
-                    latency_ms=int((time.monotonic() - _t0) * 1000),
-                    token_cost_usd=float(total_cost),
-                    # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
-                    # （0107 补 rationale：顶层不附图，SUMMARY_TEXT_ONLY 解释为什么）。
-                    chart_type=None,
-                    chart_option=None,
-                    table_option=None,
-                    visual_rationale=summaryTextOnlyRationale().to_dict(),
-                )
-                # B5 HIGH-1：计算 inheritance_snapshot（支持下一轮追问链路）。
-                # semanticState 可能为 None（如 B/C 路径直接进多步无 A7 输出），
-                # _resolveInheritedState 有完整降级，priorSnapshot 在入口已计算。
-                snap = self._inheritedStateToSnapshot(self._resolveInheritedState(
-                    semanticState=None,  # 多步内部无新的 A7 抽取，用 None
-                    priorSnapshot=priorSnapshot,
-                    question=dto.question,
-                ))
-                # 保存查询状态：用最后一个数据步骤的 plan/sql，支持下一轮 REFINE/FOLLOW_UP
-                await self._saveQueryState(
-                    session, dto.sessionId,
-                    question=dto.question, plan=last_plan, sql=last_sql,
-                    resultColumns=self._columns(last_data),
-                    inheritance_snapshot=snap,
-                    userId=userId,
-                    datasourceId=dto.datasourceId,
-                )
-                affinity = await self._buildAffinityStatus(
-                    session, dto.sessionId, agg_config.id, agg_config.model_name,
-                )
-                # v3.1 B6（M7）：多步出数据后的可选假设后处理（best-effort，不阻断）
-                hypotheses = await self._maybeGenerateHypotheses(
-                    session, dto.sessionId, dto.question, pc, data=last_data,
-                )
-                # 汇总步是纯文字：顶层不带图，rationale 告诉前端「为什么这里没有图」
-                return _multiStepResponse(
-                    answer=agg_content,
-                    completed=completed,
-                    tokensUsed=total_tokens,
-                    cost=total_cost,
-                    t0=_t0,
-                    visualRationale=summaryTextOnlyRationale().to_dict(),
-                    data=last_data or None,
-                    modelName=last_model_name,
-                    affinityStatus=affinity,
-                    classRecall=pc.recall,
-                    hypotheses=hypotheses or None,
-                    queryPlan=last_plan,
-                )
+        # P1-4：依赖解析 + 失败策略
+        MultiStepDependencyResolver.validate(multiStepPlan)  # 一次性校验
+        failed_indexes: set[int] = set()
+        break_from_groups = False
 
-            # 数据查询步骤：共用 helper（生成 → 执行 + 回灌重试），失败隔离为 error 行
-            run = await self._executeDataStep(session, dto, pc, ctx, step_plan, state)
-            total_tokens += run.tokens
-            total_cost += run.cost
-            if run.modelName:
-                last_model_name = run.modelName
-            completed.append(run.result)
-            ctx = ctx.with_step(run.result, chartLabelUsed=run.chart_label_calls > 0)
-            if run.result.sql is not None:
-                # 只有成功步骤才更新追问锚点：失败步骤没有 SQL/数据可作下一轮基准
-                last_plan = run.plan
-                last_sql = run.result.sql
-                last_data = run.result.data
+        for group in MultiStepDependencyResolver.topological_groups(multiStepPlan):
+            for step_index in group:
+                step_plan = multiStepPlan.steps[step_index]
+
+                # P1-4：依赖失败 → 标 skipped 不执行
+                if any(dep in failed_indexes for dep in step_plan.depends_on):
+                    skipped_result = StepResult(
+                        step_index=step_index,
+                        description=step_plan.description,
+                        sub_question=step_plan.sub_question,
+                        skipped=True,
+                        skip_reason=f"依赖步骤 {[d for d in step_plan.depends_on if d in failed_indexes]} 失败",
+                    )
+                    completed.append(skipped_result)
+                    ctx = ctx.with_step(skipped_result, chartLabelUsed=False)
+                    continue
+
+                if step_plan.aggregation_only:
+                    if not _hasDataStepResult(completed):
+                        # 所有数据步骤都失败：汇总 LLM 拿到的只有错误行，只会编造结论
+                        # ⇒ 跳过汇总，落到循环后的降级收尾（如实告知失败）
+                        logger.warning("多步数据步骤全部失败，跳过汇总步骤")
+                        continue
+                    # 汇总步骤：跳过 SQL 执行，调用 StepAggregator
+                    # Task 2：await 不能写进 lambda，阈值在 lambda 外先算好再捕获。
+                    full_data_threshold = await loadFullDataThreshold(session)
+                    agg_resp = await self._callWithFallback(
+                        session, dto.sessionId, pc.configs, pc.selected, "answer",
+                        lambda cfg: self._stepAggregator.aggregate(
+                            dto.question, multiStepPlan, completed,
+                            self._llmFactory(cfg), cfg.model_name,
+                            history=pc.contextPrompt,
+                            full_data_threshold=full_data_threshold,
+                        ),
+                        forced=pc.forcedModel,
+                    )
+                    # Think_Hide（feat-think-hide）：汇总答案按系统参数剥离 <think> 思维链
+                    agg_content = await applyThinkPolicy(session, agg_resp[0].content)
+                    agg_config = agg_resp[1]
+                    agg_pt = agg_resp[0].promptTokens
+                    agg_ct = agg_resp[0].completionTokens
+                    wasted_pt, wasted_ct = agg_resp[2]
+                    total_tokens += agg_pt + agg_ct + wasted_pt + wasted_ct
+                    total_cost += self._costFor(agg_config, agg_pt, agg_ct)
+                    total_cost += self._costFor(pc.selected, wasted_pt, wasted_ct)
+                    last_model_name = agg_config.model_name
+                    await self._recordUsage(
+                        session, dto.sessionId, agg_config,
+                        agg_pt, agg_ct, purpose="answer",
+                    )
+                    await self._storeSessionMessages(
+                        session, dto.sessionId, dto.question, agg_content, None,
+                        routing_layer="L2",
+                        latency_ms=int((time.monotonic() - _t0) * 1000),
+                        token_cost_usd=float(total_cost),
+                        # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
+                        # （0107 补 rationale：顶层不附图，SUMMARY_TEXT_ONLY 解释为什么）。
+                        chart_type=None,
+                        chart_option=None,
+                        table_option=None,
+                        visual_rationale=summaryTextOnlyRationale().to_dict(),
+                    )
+                    # B5 HIGH-1：计算 inheritance_snapshot（支持下一轮追问链路）。
+                    # semanticState 可能为 None（如 B/C 路径直接进多步无 A7 输出），
+                    # _resolveInheritedState 有完整降级，priorSnapshot 在入口已计算。
+                    snap = self._inheritedStateToSnapshot(self._resolveInheritedState(
+                        semanticState=None,  # 多步内部无新的 A7 抽取，用 None
+                        priorSnapshot=priorSnapshot,
+                        question=dto.question,
+                    ))
+                    # 保存查询状态：用最后一个数据步骤的 plan/sql，支持下一轮 REFINE/FOLLOW_UP
+                    await self._saveQueryState(
+                        session, dto.sessionId,
+                        question=dto.question, plan=last_plan, sql=last_sql,
+                        resultColumns=self._columns(last_data),
+                        inheritance_snapshot=snap,
+                        userId=userId,
+                        datasourceId=dto.datasourceId,
+                    )
+                    affinity = await self._buildAffinityStatus(
+                        session, dto.sessionId, agg_config.id, agg_config.model_name,
+                    )
+                    # v3.1 B6（M7）：多步出数据后的可选假设后处理（best-effort，不阻断）
+                    hypotheses = await self._maybeGenerateHypotheses(
+                        session, dto.sessionId, dto.question, pc, data=last_data,
+                    )
+                    # 汇总步是纯文字：顶层不带图，rationale 告诉前端「为什么这里没有图」
+                    return _multiStepResponse(
+                        answer=agg_content,
+                        completed=completed,
+                        tokensUsed=total_tokens,
+                        cost=total_cost,
+                        t0=_t0,
+                        visualRationale=summaryTextOnlyRationale().to_dict(),
+                        data=last_data or None,
+                        modelName=last_model_name,
+                        affinityStatus=affinity,
+                        classRecall=pc.recall,
+                        hypotheses=hypotheses or None,
+                        queryPlan=last_plan,
+                    )
+
+                # 数据查询步骤：共用 helper（生成 → 执行 + 回灌重试），失败隔离为 error 行
+                run = await self._executeDataStep(session, dto, pc, ctx, step_plan, state)
+                total_tokens += run.tokens
+                total_cost += run.cost
+                if run.modelName:
+                    last_model_name = run.modelName
+                completed.append(run.result)
+                ctx = ctx.with_step(run.result, chartLabelUsed=run.chart_label_calls > 0)
+
+                # P1-4：失败策略处理
+                if run.result.sql is None and run.result.error is not None:
+                    if step_plan.on_failure == "abort":
+                        failed_indexes.add(step_index)
+                        break_from_groups = True
+                        break
+                    elif step_plan.on_failure == "skip":
+                        # skip = 自己失败让下游 skip（等价于 isolate，下游依赖检查会处理）
+                        failed_indexes.add(step_index)
+                    # isolate（默认）：标 error 继续
+                    else:
+                        failed_indexes.add(step_index)
+                elif run.result.sql is not None:
+                    # 只有成功步骤才更新追问锚点：失败步骤没有 SQL/数据可作下一轮基准
+                    last_plan = run.plan
+                    last_sql = run.result.sql
+                    last_data = run.result.data
+
+            if break_from_groups:
+                break
 
         # 所有步骤都不是 aggregation_only（异常），降级为普通回答
         answer = await self._finalizeMultiStepDegrade(
@@ -756,7 +794,8 @@ class MultiStepMixin:
 
         inheritance_snapshot（B5 HIGH-1）：多步 B/C 降级路径的快照，支持下一轮追问。
         """
-        succeeded = [r for r in completed if r.sql is not None]
+        succeeded = [r for r in completed if r.sql is not None and not r.skipped]
+        skipped = [r for r in completed if r.skipped]
         if succeeded:
             answer = MSG_MULTI_STEP_DEGRADE_PARTIAL.format(
                 done=len(succeeded), total=len(completed),
@@ -764,8 +803,8 @@ class MultiStepMixin:
         else:
             answer = MSG_MULTI_STEP_DEGRADE_FAILED
         logger.warning(
-            "多步执行异常：无可用的 aggregation 步骤，降级收尾（完成 %d/%d 步）",
-            len(succeeded), len(completed),
+            "多步执行异常：无可用的 aggregation 步骤，降级收尾（成功 %d / 跳过 %d / 共 %d 步）",
+            len(succeeded), len(skipped), len(completed),
         )
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, answer, last_sql,

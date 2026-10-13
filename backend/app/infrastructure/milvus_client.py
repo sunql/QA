@@ -310,6 +310,7 @@ def searchDocumentChunks(
     queryEmbedding: list[float],
     *,
     securityLevel: str | None = None,
+    clearanceLevels: list[str] | None = None,
     topK: int = 5,
     consistencyLevel: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -317,7 +318,8 @@ def searchDocumentChunks(
 
     Args:
         queryEmbedding: 查询向量
-        securityLevel: 可选，按安全等级过滤（L1/L2/L3）
+        securityLevel: 可选，按单一安全等级过滤（L1/L2/L3）；与 clearanceLevels 互斥
+        clearanceLevels: 可选，按密级列表过滤（Task 4.3）；优先级高于 securityLevel
         topK: 返回条数
         consistencyLevel: 可选覆盖（``"Strong"`` 等）；见 ``queryWikiPageChunks`` 注释。
             生产检索路径不传；测试在 delete 后立即验证时传 ``"Strong"``。
@@ -332,7 +334,10 @@ def searchDocumentChunks(
     collection = ensureDocumentCollection()
 
     expr = None
-    if securityLevel is not None:
+    if clearanceLevels is not None and len(clearanceLevels) > 0:
+        quoted = ", ".join(f'"{level}"' for level in clearanceLevels)
+        expr = f"security_level in [{quoted}]"
+    elif securityLevel is not None:
         expr = f'security_level == "{securityLevel}"'
     searchKwargs: dict[str, Any] = {
         "data": [queryEmbedding],

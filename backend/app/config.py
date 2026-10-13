@@ -5,12 +5,39 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.domain.error_messages import MSG_RATE_LIMIT_REQUESTS_INVALID
+
+
+class ProductionConfigError(RuntimeError):
+    """生产环境配置校验失败 — 启动必须终止。"""
+
+
+def validateProduction() -> None:
+    """生产环境启动门禁：校验关键安全配置，缺失或错误则 fail-fast。
+
+    仅在 APP_ENV=production 时生效；development/test 环境直接返回。
+    """
+    env = os.getenv("APP_ENV", "development")
+    if env != "production":
+        return
+    errors = []
+    if os.getenv("AUTH_MODE") != "real":
+        errors.append("AUTH_MODE must be 'real' in production")
+    if os.getenv("AUTH_STUB_ENABLED", "false").lower() == "true":
+        errors.append("AUTH_STUB_ENABLED must be false in production")
+    jwt = os.getenv("JWT_SECRET", "")
+    if jwt in ("", "dev-secret-change-me", "change-me-in-production"):
+        errors.append("JWT_SECRET must be set to a non-default value")
+    if not os.getenv("FERNET_KEY"):
+        errors.append("FERNET_KEY must be set in production")
+    if errors:
+        raise ProductionConfigError("; ".join(errors))
 
 
 class Settings(BaseSettings):

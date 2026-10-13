@@ -13,7 +13,7 @@ from typing import Annotated
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import CurrentUser, getDb
+from app.dependencies import CurrentUser, getDb  # noqa: F401
 from app.domain.enums import DocumentSecurityLevel
 from app.domain.schemas import DocumentCreate, DocumentUpdate
 from app.domain.exceptions import ConflictError
@@ -239,6 +239,7 @@ class RagService:
         query_text: str,
         *,
         security_level: str | None = None,
+        user: CurrentUser | None = None,
         top_k: int = 5,
         session: AsyncSession | None = None,
     ) -> list[dict]:
@@ -246,7 +247,8 @@ class RagService:
 
         Args:
             query_text: 自然语言查询
-            security_level: 可选，按安全等级过滤
+            security_level: 可选，按单一安全等级过滤（向后兼容）
+            user: 可选，当前用户身份（Task 4.3）；传入则自动应用密级过滤
             top_k: 返回数量
             session: DB session（可选，传入则按 document_id JOIN document_catalog
                      回填每条 hit 的 document_name；不传则仅返回 Milvus 字段）
@@ -261,9 +263,17 @@ class RagService:
         except Exception as e:
             raise RagError(f"Query embedding 失败: {e}") from e
 
+        # Task 4.3：密级过滤（用户身份透传时生效）
+        clearance_levels: list[str] | None = None
+        if user is not None and session is not None:
+            from app.services.document_clearance import buildClearanceFilter
+
+            clearance_levels = await buildClearanceFilter(session, user)
+
         hits = searchDocumentChunks(
             query_emb,
             securityLevel=security_level,
+            clearanceLevels=clearance_levels,
             topK=top_k,
         )
         if not hits:

@@ -14,8 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import LlmConfig
 from app.domain.schemas import LlmConfigCreate, LlmConfigUpdate
+from app.infrastructure.llm import factory as llmFactory
 from app.infrastructure.llm.factory import invalidateClient
 from app.infrastructure.security.crypto import encryptApiKey
+from app.infrastructure.url_validator import validateEndpointUrl
 from app.services.messages_zh import (
     MSG_MODEL_CONFIG_NAME_EXISTS,
     MSG_MODEL_CONFIG_NOT_FOUND,
@@ -28,7 +30,13 @@ class ModelConfigService:
     """模型配置服务。"""
 
     async def create(self, session: AsyncSession, dto: LlmConfigCreate) -> LlmConfig:
-        """创建模型配置。model_name 唯一。（新 id 无旧缓存，无需失效客户端）"""
+        """创建模型配置。model_name 唯一；endpoint 须符合生产 URL 规范。（新 id 无旧缓存，无需失效客户端）"""
+        # audit-fx-1.1 fix1：创建时即 fail-fast，防止无效 URL 入库
+        if dto.api_endpoint:
+            try:
+                validateEndpointUrl(dto.api_endpoint)
+            except ValueError as exc:
+                raise ValidationError(str(exc)) from exc
         existing = await session.execute(
             select(LlmConfig).where(LlmConfig.model_name == dto.model_name)
         )
@@ -45,6 +53,7 @@ class ModelConfigService:
             weight=dto.weight,
             cost_threshold=dto.cost_threshold,
             is_active=dto.is_active,
+            temperature=dto.temperature,
             disable_thinking=dto.disable_thinking,
         )
         session.add(config)
@@ -71,9 +80,18 @@ class ModelConfigService:
     async def update(
         self, session: AsyncSession, configId: int, dto: LlmConfigUpdate
     ) -> LlmConfig:
-        """部分更新。api_key 若提供则重新加密。"""
+        """部分更新。api_key 若提供则重新加密。变更 endpoint 必须同时提供新 key。"""
         config = await self.get(session, configId)
         updates = dto.model_dump(exclude_unset=True, exclude_none=True)
+
+        # audit-fx-1.1：endpoint 变更必须同时提供新 key，防止旧 key 泄露到新端点
+        if "api_endpoint" in updates and updates["api_endpoint"] != config.api_endpoint:
+            if not updates.get("api_key"):
+                raise ValidationError("apiEndpoint 变更时必须同时提供新的 apiKey")
+            validateEndpointUrl(updates["api_endpoint"])
+            plainKey = updates.pop("api_key")
+            config.api_key_encrypted = encryptApiKey(plainKey) if plainKey else None
+
         if "api_key" in updates:
             plainKey = updates.pop("api_key")
             config.api_key_encrypted = encryptApiKey(plainKey) if plainKey else None
@@ -85,6 +103,8 @@ class ModelConfigService:
         # 否则运行中的进程永远用旧配置（2026-10-03 MiniMax Connection error 根因）
         await invalidateClient(configId)
         logger.info("更新模型配置 id=%s fields=%s", configId, list(updates.keys()))
+        # audit-fx-2.2: belt-and-suspenders — 更新后显式 evict factory 缓存
+        llmFactory.evictClient(configId)
         return config
 
     async def deactivate(self, session: AsyncSession, configId: int) -> None:

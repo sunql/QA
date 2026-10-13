@@ -208,6 +208,37 @@ class StreamMixin:
             )
             return
 
+        # P0-1：流式入口共享 L1/L4 pre-amble（普通入口已接）
+        # KPI 命中最优先短路（0 LLM cost）；L4 命中也短路；未命中继续分类流程。
+        preamble = await self._runL1AndL4Preamble(dto, session, user)
+        if preamble is not None:
+            yield StreamEvent(EVENT_META, {
+                "intent": "KPI" if preamble.routing_layer == "L1" else "AGENT_RUN",
+                "routingLayer": preamble.routing_layer,
+                "datasourceMismatch": preamble.datasource_mismatch,
+            })
+            if preamble.mismatch_warning is not None:
+                yield StreamEvent(EVENT_META, {
+                    "warning": preamble.mismatch_warning,
+                    "code": "KPI_DATASOURCE_MISMATCH",
+                })
+            if preamble.chart_type is not None and preamble.chart_option is not None:
+                yield StreamEvent(EVENT_CHART, {
+                    "chartType": preamble.chart_type.value if hasattr(preamble.chart_type, "value") else str(preamble.chart_type),
+                    "option": preamble.chart_option,
+                    "rationale": preamble.visual_rationale,
+                })
+            if preamble.agent_run is not None:
+                yield StreamEvent(EVENT_META, {
+                    "agentRun": preamble.agent_run,
+                })
+            yield StreamEvent(EVENT_TOKEN, {"content": preamble.answer})
+            yield StreamEvent(EVENT_DONE, {
+                "routingLayer": preamble.routing_layer,
+                "tokenCostUsd": 0.0 if preamble.routing_layer == "L1" else None,
+            })
+            return
+
         # A7 通道 1 收口：分类+重分类统一走 classifyAndRecall 单入口。
         # 首帧 META 必须携带无状态分类结果（SSE 事件序列不变），故第一遍以
         # sessionId=None 纯分类；第二遍带 sessionId 完成「加载状态→重分类」。

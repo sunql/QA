@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -140,10 +141,16 @@ class Hypothesis:
                 rows_sample=rows[:3],
                 execution_succeeded=True,
             )
-        except Exception:
+        except asyncio.CancelledError:
+            raise  # never swallow async cancellation
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:
+            logger.debug("Hypothesis.verify failed: %s", e, exc_info=True)
             return VerificationResult(
                 verdict="execution_failed",
                 support_count=0,
+                rows_sample=[],
                 execution_succeeded=False,
             )
 

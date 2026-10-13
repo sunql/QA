@@ -28,6 +28,15 @@ export class StreamChunkParser {
   private _extractFrames(): StreamFrame[] {
     const frames: StreamFrame[] = [];
     let boundary: number;
+    // 支持 \n\n 和 \r\n\r\n 两种帧分隔符。
+    // 优先匹配 CRLF（4 字符更长，不可能与 LF 混淆）。
+    while ((boundary = this.buffer.indexOf("\r\n\r\n")) !== -1) {
+      const raw = this.buffer.slice(0, boundary);
+      this.buffer = this.buffer.slice(boundary + 4);
+      const parsed = this._parseFrame(raw);
+      if (parsed !== null) frames.push(parsed);
+    }
+    // 回退 LF-only（纯 LF 环境或单次完整帧）。
     while ((boundary = this.buffer.indexOf("\n\n")) !== -1) {
       const raw = this.buffer.slice(0, boundary);
       this.buffer = this.buffer.slice(boundary + 2);
@@ -41,8 +50,13 @@ export class StreamChunkParser {
     let event = "";
     const dataLines: string[] = [];
     for (const line of raw.split("\n")) {
-      if (line.startsWith("event: ")) event = line.slice(7).trim();
-      else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+      if (line.startsWith("event: ")) {
+        const val = line.slice(7);
+        // 仅从 event 行值末尾去掉 \r（CRLF 分割残余），不碰 data 内容。
+        event = (val.endsWith("\r") ? val.slice(0, -1) : val).trim();
+      } else if (line.startsWith("data: ")) {
+        dataLines.push(line.slice(6));
+      }
     }
     if (!event && dataLines.length === 0) return null;
     return { event, data: dataLines.join("\n") };

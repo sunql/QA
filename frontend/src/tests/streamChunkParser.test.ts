@@ -25,6 +25,7 @@ describe("streamChunkParser CRLF 跨块保留", () => {
 
   it("行内 \\r 保留原样（不归一化到 \\n）", () => {
     const parser = new StreamChunkParser();
+    // 第二行 data: 末尾的 \r 是 JSON 内容的一部分，不是行分隔符。
     const frames = parser.feed("event: meta\ndata: {\"x\": 1\r\n}\n\n");
     expect(frames).toHaveLength(1);
     // 关键：data 里的 \r 不被抹掉

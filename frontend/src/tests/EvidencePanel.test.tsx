@@ -97,7 +97,7 @@ describe("EvidencePanel", () => {
     expect(screen.getByText("守卫拒绝")).toBeInTheDocument();
   });
 
-  it("summary.topN ⇒ 渲染紧凑表（rank + 键并集）并如实标注为采样回放", () => {
+  it("summary.topN ⇒ 渲染紧凑表（rank + 键并集）并如实标注为按度量排名", () => {
     render(
       <ConfigProvider>
         <EvidencePanel evidence={makeStructuredEvidence()} />
@@ -112,8 +112,8 @@ describe("EvidencePanel", () => {
     expect(within(table).getByText("SUP-A")).toBeInTheDocument();
     expect(within(table).getByText("SUP-B")).toBeInTheDocument();
     expect(within(table).getByText("12.5")).toBeInTheDocument();
-    // 采样回放标注（非原图）
-    expect(screen.getByText(/摘要采样数据回放/)).toBeInTheDocument();
+    // 排名标注（非采样、非原图）
+    expect(screen.getByText(/结果行按度量排名/)).toBeInTheDocument();
   });
 
   it("summary.timeRange ⇒ 渲染一行时间范围", () => {

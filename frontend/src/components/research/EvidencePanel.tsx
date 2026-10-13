@@ -38,7 +38,12 @@ function statusLabel(t: (key: string) => string, status: string): string {
   return label === key ? status : label;
 }
 
-/** `summary.topN` ⇒ 紧凑只读表；如实标注这是摘要采样数据回放（非原图）。 */
+/** `summary.topN` ⇒ 紧凑只读表；如实标注这是**结果行按度量排名**（非原图）。
+ *
+ * 后端 `_topNRows` 是「按度量列**全排序**取前 N 并打 `rank`」的**确定性排名**，**不是采样**
+ * —— 真正的采样是同 payload 里的 `sample_rows`（未排序的前 N 行）。文案与注释都不得再把
+ * topN 说成「采样」。
+ */
 function TopNTable({ table, caption }: { table: ReturnType<typeof topNTableShape>; caption: string }) {
   if (!table) return null;
   return (

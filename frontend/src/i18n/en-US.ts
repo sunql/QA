@@ -2977,7 +2977,7 @@ export const enUS = {
     evidence: {
       title: "Execution evidence",
       step: "Step {index}",
-      topNReplay: "Top-N (replay of sampled summary data, not the original chart)",
+      topNReplay: "Top-N (result rows ranked by metric, not the original chart)",
       timeRange: "Time range {start} – {end}",
       status: {
         success: "Succeeded",

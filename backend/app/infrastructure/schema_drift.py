@@ -64,6 +64,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import logging
 import os
@@ -96,6 +97,7 @@ _DOWN_REVISION_LINE = re.compile(
     # （``down_revision: Union[str, None] = '0117'``）。只认双引号会漏掉这条边 ⇒
     # ``_findHead`` 把被指向的 revision 误判成未闭合 head，启动 drift 门直接拒绝引导
     # （2026-10-13 部署冒烟抓到：heads=['0117','0119'] 阻塞部署）。
+    # 仅在 AST 解析不了该文件时为**回落**路径（见 ``_moduleLevelAssignment``）。
     r"^down_revision\s*:?\s*[^\n]*=\s*[\"']([a-zA-Z0-9_]+)[\"']",
     re.MULTILINE,
 )
@@ -326,12 +328,49 @@ def _compareTable(
 # --------------------------------------------------------------------------
 
 
+def _moduleLevelAssignment(content: str, name: str) -> tuple[bool, str | None]:
+    """取模块级赋值 ``name = <字符串字面量>``；返回 ``(是否出现该赋值, 字面量或 None)``。
+
+    用 **AST** 而不是正则：``--autogenerate`` 的模块 docstring 里常**举例**写
+    ``down_revision = '...'``（行首、同样有 ``= '...'``），正则的首次匹配会抓到那个
+    **过期的例子**，把版本图算错 ⇒ ``_findHead`` 误判多 head ⇒ 对**合法**仓库拒绝
+    启动（2026-10-13 安全复查复现）。AST 只认模块级赋值语句：docstring 里的名字是
+    ``Expr(Constant)`` 的**内容**，不是赋值目标，天然被排除。
+
+    第一个元素区分「赋值不存在」与「赋的值不是字符串字面量」（如 ``= None``）——
+    调用方据此决定是否回落到正则，避免把「真值就是 None」误当成「没解析出来」。
+    """
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        # 语法错误的迁移文件 alembic 自己也 import 不了；交给调用方回落正则
+        return False, None
+
+    for node in tree.body:
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign):
+            target, value = node.target, node.value
+        if not isinstance(target, ast.Name) or target.id != name or value is None:
+            continue
+        try:
+            literal = ast.literal_eval(value)
+        except (ValueError, SyntaxError, TypeError):
+            return True, None
+        return True, literal if isinstance(literal, str) else None
+    return False, None
+
+
 def _parseRevisionFiles(versionsDir: Path) -> tuple[set[str], dict[str, str | None]]:
     """解析 alembic/versions/*.py，提取 (所有 revisions, {revision: down_revision})。
 
     支持两种 Alembic 写法：
     - 现代：revision: str = "0023_kpi_catalog" / down_revision: str | None = "0022_..."
     - 旧式：revision = "0006_session_query_state" / down_revision = "0005_..."
+
+    主路径走 AST（见 ``_moduleLevelAssignment``）；仅当文件解析不了时才回落正则。
     """
     revisions: set[str] = set()
     graph: dict[str, str | None] = {}
@@ -340,14 +379,23 @@ def _parseRevisionFiles(versionsDir: Path) -> tuple[set[str], dict[str, str | No
         if path.name.startswith("_") or path.name == "__init__.py":
             continue
         content = path.read_text(encoding="utf-8")
-        rev_match = _REVISION_LINE.search(content)
-        if not rev_match:
+
+        foundRev, rev = _moduleLevelAssignment(content, "revision")
+        if not foundRev:
+            rev_match = _REVISION_LINE.search(content)
+            if not rev_match:
+                continue
+            rev = rev_match.group(1)
+        if rev is None:
             continue
-        rev = rev_match.group(1)
         revisions.add(rev)
-        # 捕获组已剥掉引号（``\"0117\"`` / ``'0117'`` 都得 ``0117``），无需再 strip
-        down_match = _DOWN_REVISION_LINE.search(content)
-        graph[rev] = down_match.group(1) if down_match else None
+
+        foundDown, down = _moduleLevelAssignment(content, "down_revision")
+        if not foundDown:
+            # 回落路径：捕获组已剥掉引号（``"0117"`` / ``'0117'`` 都得 ``0117``）
+            down_match = _DOWN_REVISION_LINE.search(content)
+            down = down_match.group(1) if down_match else None
+        graph[rev] = down
     return revisions, graph
 
 

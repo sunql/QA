@@ -51,7 +51,8 @@ pytestmark = pytest.mark.asyncio
 _BASE = "/api/v1/research"
 _QUESTION = "供应商收货量为什么下降"
 
-# 报告 evidence 条目契约字段集（Task 8 D25）：**不含** ``rows`` / ``raw_result_ref``（体积）。
+# 报告 evidence 条目契约字段集（Task 8 D25）：**顶层**不含 ``rows`` / ``raw_result_ref``（体积）。
+# 注意：顶层没有 ≠ 整条目没有原始行 —— ``summary.sampleRows`` 仍带 <=5 行样例（D14 有意）。
 _EVIDENCE_ITEM_FIELDS = frozenset(
     {"index", "type", "sql", "status", "error", "summary", "schemaVersion"}
 )

@@ -390,6 +390,60 @@ class TestParseRevisionFiles:
         assert graph == {"0001_init": None, "0002_next": "0001_init"}
         assert _findHead(graph) == "0002_next"
 
+    def test_docstring_mention_is_not_an_edge(self, tmp_path: Path) -> None:
+        """模块 docstring 里**举例**提到的 ``down_revision`` 不得被当成真边。
+
+        回归（2026-10-13 安全复查复现）：正则的首次匹配会抓到 docstring 里那行
+        **过期的例子**（它同样在行首、同样有 ``= '...'``），版本图算错 ⇒
+        ``_findHead`` 误判多 head ⇒ 对**合法**仓库拒绝启动。解析须只认
+        **模块级赋值语句**。
+        """
+        (tmp_path / "0001_init.py").write_text(
+            'revision: str = "0001_init"\n'
+            'down_revision: str | None = None\n'
+        )
+        (tmp_path / "0002_next.py").write_text(
+            '"""next\n\n'
+            "仿 --autogenerate 的 docstring 举例（过期值，非真边）：\n"
+            "down_revision = '0009'\n"
+            '"""\n'
+            'revision: str = "0002_next"\n'
+            'down_revision: str | None = "0001_init"\n'
+        )
+        revs, graph = _parseRevisionFiles(tmp_path)
+        assert graph == {"0001_init": None, "0002_next": "0001_init"}
+        assert _findHead(graph) == "0002_next"
+
+    def test_commented_out_assignment_is_not_an_edge(self, tmp_path: Path) -> None:
+        """注释里**被注掉**的赋值同样不得成为边（行首 ``# down_revision = '...'``）。"""
+        (tmp_path / "0001_init.py").write_text(
+            'revision: str = "0001_init"\n'
+            'down_revision: str | None = None\n'
+        )
+        (tmp_path / "0002_next.py").write_text(
+            "# down_revision = '0009'  # 上一版遗留，已改指 0001\n"
+            'revision: str = "0002_next"\n'
+            'down_revision: str | None = "0001_init"\n'
+        )
+        revs, graph = _parseRevisionFiles(tmp_path)
+        assert graph == {"0001_init": None, "0002_next": "0001_init"}
+        assert _findHead(graph) == "0002_next"
+
+    def test_docstring_mention_of_revision_is_not_the_id(self, tmp_path: Path) -> None:
+        """``revision`` 同遭此险：docstring 里举例的 ``revision = '...'`` 会顶替真 id。"""
+        (tmp_path / "0001_init.py").write_text(
+            '"""init\n\n'
+            "down_revision = '0000_stale'\n"
+            "revision = '0000_stale'\n"
+            '"""\n'
+            'revision: str = "0001_init"\n'
+            'down_revision: str | None = None\n'
+        )
+        revs, graph = _parseRevisionFiles(tmp_path)
+        assert revs == {"0001_init"}
+        assert graph == {"0001_init": None}
+        assert _findHead(graph) == "0001_init"
+
 
 class TestShippedChainHasSingleHead:
     """发布守卫：随仓库发运的迁移链必须**恰好一个** head。

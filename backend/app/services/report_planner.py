@@ -203,8 +203,14 @@ def _findingRef(view: FindingView) -> SourceRef:
 def _stepEvidence(row: ResearchStepResult) -> dict[str, Any]:
     """步结果行 → 报告 `evidence` 条目（Task 8 D25）。
 
-    **不含**原始行（``raw_result_ref["rows"]``）—— 体积：原始行已在 DB，
-    前端证据面板用 ``summary``（证据摘要）即可。只带 ``schemaVersion`` 供结果契约判定。
+    **不带**``raw_result_ref["rows"]``（全量原始行，体积）—— 全量行已在 DB。
+    只带 ``schemaVersion`` 供结果契约判定。
+
+    ⚠️ 但 ``summary`` 是**整块** ``evidence_summary``，其中 ``sampleRows``
+    （``DEFAULT_MAX_SAMPLE_ROWS`` 行样例）**是真实业务行**（D14 有意的设计：
+    报告要能给人看几行样例）。故本条目**并非「不含任何原始行」**—— 2026-10-13 安全
+    复查指出旧 docstring 这句不准确，会让后来者以为扩面了却没注意。全量行在
+    ``raw_result_ref``，样例行在 ``summary.sampleRows``，两处口径不同。
     """
     return {
         "index": row.step_index,

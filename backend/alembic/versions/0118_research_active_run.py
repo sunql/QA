@@ -7,6 +7,9 @@
 可空 ⇒ 存量行无需回填；无数据迁移。
 幂等性：add_column / create_index 前不判存在，重复执行会报错；本迁移只跑一次
 两库同步：需在 qa_metadata(prod) 与 qa_metadata_test 分别应用
+文件名：2026-10-13 由 0118_research_session_active_run.py(35 字符) 改名为
+      0118_research_active_run.py(27)，对齐「迁移文件名 ≤ 32 字符」模板；文件内
+      revision/down_revision 未动，alembic 按文件内 revision 发现 ⇒ 对已应用的库无影响。
 """
 from __future__ import annotations
 

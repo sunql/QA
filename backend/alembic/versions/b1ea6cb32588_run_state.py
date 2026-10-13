@@ -3,6 +3,9 @@
 Revision ID: b1ea6cb32588
 Revises: 0117
 Create Date: 2026-10-12 20:16:46.933826
+文件名：2026-10-13 由 b1ea6cb32588_add_research_run_state.py(38 字符) 改名为
+       b1ea6cb32588_run_state.py(25)，对齐「迁移文件名 ≤ 32 字符」模板；文件内
+       revision/down_revision 未动，alembic 按文件内 revision 发现 ⇒ 对已应用的库无影响。
 """
 from __future__ import annotations
 

@@ -153,9 +153,10 @@ class PreambleResult(BaseModel):
     chart_type: Any = None  # ChartType | None — avoid import cycle
     chart_option: dict | None = None
     visual_rationale: dict | str | None = None
-    # L1 KPI 命中信息（用于 ChatResponse kpi_code / kpi_name 字段）
+    # L1 KPI 命中信息（用于 ChatResponse kpi_code / kpi_name / confidence 字段）
     kpi_code: str | None = None
     kpi_name: str | None = None
+    confidence: float | None = None  # KpiMatchResult.confidence
     # L4
     agent_run: dict | None = None
     # L1 cross-datasource mismatch
@@ -201,6 +202,8 @@ class L1L4PreambleMixin:
                         f"该 KPI 指标绑定数据源 {feat.data_source}，"
                         f"与你当前选择的数据源 {str(dto.datasourceId)} 不一致。"
                     )
+                # Store full ChatResponse for non-stream caller; stream path uses PreambleResult fields
+                self._preamble_l1_response = l1
                 return PreambleResult(
                     routing_layer="L1",
                     answer=l1.answer,
@@ -209,6 +212,7 @@ class L1L4PreambleMixin:
                     visual_rationale=l1.visual_rationale,
                     kpi_code=match.code,
                     kpi_name=l1.kpi_name,
+                    confidence=match.confidence,
                     datasource_mismatch=mismatch,
                     mismatch_warning=warning,
                 )
@@ -216,6 +220,8 @@ class L1L4PreambleMixin:
         # 2. L4 Agent Loop
         l4 = await self._handleNl2SqlAgent(session, dto, user=user)
         if l4 is not None:
+            # Store L4 ChatResponse for non-stream caller; stream path uses PreambleResult fields
+            self._preamble_l4_response = l4
             return PreambleResult(
                 routing_layer="L4",
                 answer=l4.answer,

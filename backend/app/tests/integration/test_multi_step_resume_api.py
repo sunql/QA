@@ -1,0 +1,490 @@
+import uuid
+
+import pytest
+from sqlalchemy import select
+
+from app.domain.multi_step_models import MultiStepRun, MultiStepStep
+
+
+@pytest.mark.asyncio
+async def testResumeRejectsNonFailedRun(pg_client, db_session):
+    # Arrange：一条 succeeded 的 run
+    from app.services import multi_step_persistence as repo
+
+    sessionKey = f"chat-{uuid.uuid4()}"
+    # `datasourceId` 必须给：路由在 prepareResume **之前**有一道
+    # `run.datasource_id is None ⇒ 409` 的守卫。不给就轮不到状态那道守卫 ——
+    # 断言拿到 409 却完全没验到「状态不可续跑」这个本用例声称要验的东西（假绿）。
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="q", modelId=1,
+        datasourceId=1, totalSteps=1,
+    )
+    await repo.updateRun(db_session, run, status="succeeded", finished=True)
+    await db_session.commit()
+
+    # Act
+    resp = await pg_client.post(f"/api/v1/chat/multi-step/{run.id}/resume", json={})
+
+    # Assert
+    assert resp.status_code == 409
+    # 两个 409 分支的文案不同（DomainError.message 经全局 handler 落到响应体
+    # 的 `error` 字段），故必须钉住「是状态那道守卫拒的」，否则本用例对
+    # 「把状态校验整段删掉」这种改动毫无反应。
+    assert "not resumable" in resp.text, resp.text
+
+
+@pytest.mark.asyncio
+async def testResumeAdoptsExistingRunAndSkipsSucceededStep(pg_client, db_session, monkeypatch):
+    """续跑走通 + **不新建第二个 run** + 跳过的成功步仍被算作已完成。
+
+    这条用例是「最小正确版」裁决的回归闸，三个断言各堵一个真实缺陷：
+    1. `len(allRuns) == 1` —— 原计划会把 resume 变成一次全新的 run（僵尸 + 重复）。
+    2. `reloadedRun.status == "succeeded"` —— Task 6 的跳过分支若忘了把跳过的
+       成功步计入 `completed`，`runStatusFor` 会把 run 判成 `failed`（用户看到
+       「续跑又失败了」），而 `resume_count >= 1` 之类的弱断言完全发现不了。
+    3. `steps[0].data` 仍是原值 —— 跳过分支若漏了，第 0 步会被重跑并覆盖结果。
+       （对齐到下面的实际断言：钉的是 `data` 不是 `sql`。原 docstring 写的是
+       `steps[0].sql`，与代码不符 —— 契约失真注释。）
+    """
+    import json
+
+    from app.services import multi_step_persistence as repo
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _MULTI_STEP_PLAN_JSON,
+        _install,
+        _MultiStepLlm,
+        _OkAdapter,
+    )
+
+    config, datasource = await _seed(db_session)
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+    # 播种的 sub_question **必须**与 Task 6 会算出的 subQuestions 逐字一致：Task 6 的
+    # adoptRunForResume 以 sub_question 逐字相等判定「形状未变」，形状一变得归零整跑，
+    # 本条用例的「跳过」断言就失效了。故这里**从同一个 `_MULTI_STEP_PLAN_JSON` 反推**，
+    # 而不是手抄字符串 —— 注意 Task 6 的取值是 `description or subQuestion`（描述优先），
+    # 手抄成 subQuestion 会静默对不上。
+    question = "请分步查询 2024 和 2025 年的销售额并对比"
+    planSteps = json.loads(_MULTI_STEP_PLAN_JSON)["steps"]
+    subQuestions = [s.get("description") or s["subQuestion"] for s in planSteps]
+    assert len(subQuestions) == 2
+
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question=question,
+        modelId=config.id, datasourceId=datasource.id, totalSteps=2,
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=subQuestions)
+    await repo.finishStep(
+        db_session, steps[0], status="succeeded",
+        sql="SELECT NAME, SUM(QTY) AS TOTAL_QTY FROM ZJTH.PRECEIPT GROUP BY NAME",
+        data=[{"NAME": "A", "QTY": 10}],
+    )
+    await repo.recordStepError(db_session, steps[1], message="timeout", kind="transient")
+    await repo.updateRun(
+        db_session, run, status="failed", completedSteps=1, currentStepIdx=1, finished=True,
+    )
+    await db_session.commit()
+
+    # Act
+    resp = await pg_client.post(
+        f"/api/v1/chat/multi-step/{run.id}/resume",
+        json={"from_step_index": 1},
+        headers={"Idempotency-Key": str(uuid.uuid4())},
+    )
+
+    # Assert
+    assert resp.status_code == 200, resp.text
+    # ① 全程只有这一条 run（resume 复用而非新建）
+    allRuns = (await db_session.execute(select(MultiStepRun))).scalars().all()
+    assert len(allRuns) == 1, f"续跑不得新建 run，实际 {len(allRuns)} 条"
+    assert allRuns[0].id == run.id
+
+    reloaded = (
+        await db_session.execute(
+            select(MultiStepStep).where(MultiStepStep.run_id == run.id).order_by(MultiStepStep.step_index)
+        )
+    ).scalars().all()
+    # 必须逐行重读：请求在**另一个会话**里改这些行（pg_client 的 getDb 用的是它自己
+    # 那个 session），而本会话的 identity map 仍缓存着续跑前的值 ——
+    # `expire_on_commit=False` 不会让 `select()` 自动刷新已加载过的实例，于是这三条
+    # 断言会读到「续跑前的世界」（last_error='timeout'、status='running'），
+    # 用例红得像是实现错了。断言本身不动，只把读侧对齐到库里。
+    for row in reloaded:
+        await db_session.refresh(row)
+    assert reloaded[0].status == "succeeded"
+    assert reloaded[0].data == [{"NAME": "A", "QTY": 10}], "跳过的成功步不得被重跑覆盖"
+    assert reloaded[1].last_error is None
+    assert reloaded[1].status == "succeeded", "第 2 步应在续跑里跑成功"
+
+    reloadedRun = (
+        await db_session.execute(select(MultiStepRun).where(MultiStepRun.id == run.id))
+    ).scalar_one()
+    await db_session.refresh(reloadedRun)
+    assert reloadedRun.resume_count >= 1
+    # ② 跳过的成功步计入 completed ⇒ 终态 succeeded（漏计会得到 failed）
+    assert reloadedRun.status == "succeeded"
+    assert reloadedRun.finished_at is not None, "续跑跑完必须封口，不能留下 running 僵尸"
+
+
+@pytest.mark.asyncio
+async def testResumeOutOfRangeFromStepIndexRejected(pg_client, db_session):
+    """`from_step_index` 越界 → 409，且必须是**范围闸**拒的（不是状态/归属等同码分支）。
+
+    这条正是本缺陷漏网的那条分支：前端曾给**汇总步**渲染续跑按钮，而汇总步的
+    `fromStepIndex = len(data_steps)` —— 汇总步不落 `multi_step_step` 行，故该值
+    恰好等于 `len(steps)`，恒越界（`start >= len(steps)`）。用户点下去只会拿到 409。
+    前端已改为不渲染该按钮（MultiStepPlanCard），后端这条用例锁住「越界必须被拒、
+    且文案能区分是谁拒的」。
+
+    两个 409 分支文案不同：范围闸是 `from_step_index N out of range 0..M`，
+    状态闸是 `run status ... not resumable`。只断言 409 等于没断言 ——
+    删掉范围闸后请求会落到后续步骤守卫（`step N not completed`）或直接放行，
+    状态码未必变，用例照样绿。
+    """
+    from app.services import multi_step_persistence as repo
+
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="q", modelId=1,
+        datasourceId=1, totalSteps=2,
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
+    # 两步都成功 ⇒ 排除「前序步未完成」那道守卫的干扰，确保被拒的只能是范围闸。
+    for step in steps:
+        await repo.finishStep(db_session, step, status="succeeded", data=[{"a": 1}])
+    await repo.updateRun(db_session, run, status="failed", completedSteps=2, finished=True)
+    await db_session.commit()
+
+    # Act：from_step_index = len(steps) = 2 —— 汇总步按钮会发出的那个越界值
+    resp = await pg_client.post(
+        f"/api/v1/chat/multi-step/{run.id}/resume",
+        json={"from_step_index": 2},
+    )
+
+    # Assert：先钉状态码 —— 越界若被放行，响应会变成 200 的 SSE 流
+    # （StreamingResponse），此时 resp.json() 抛 JSONDecodeError，把「范围闸没拦住」
+    # 这个真因伪装成一个解析错误。顺序反了会拿到难读的红。
+    assert resp.status_code == 409, resp.text[:300]
+    body = resp.json()
+    assert "out of range 0..1" in body["error"], body
+    assert "not resumable" not in body["error"], f"落到了状态闸：{body}"
+
+
+@pytest.mark.asyncio
+async def testPrepareResumeClearsStaleCompressedPayload(db_session):
+    """从压缩步续跑必须清掉 data_compressed，否则留下「status=pending 但
+    data_compressed 非空」的非法态（spec §5.3），且压缩钩子见非空即跳过
+    ⇒ 该步此后永远无法再压缩。"""
+    from app.services import multi_step_persistence as repo
+    from app.services.multi_step_resume import prepareResume
+
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="q", modelId=1, totalSteps=2
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
+    # 前序步（step 0）**也**带压缩载荷：否则 `data_compressed` 本来就是 NULL，
+    # 「前序步不被动」那条断言恒真（清没清都绿）。
+    # 给 step 0 status=compressed 是 spec §5.3 的**合法**态（data_compressed 仅当
+    # compressed 时有值），且 prepareResume 的前序步守卫恰好把它算作「已完成」。
+    await repo.finishStep(db_session, steps[0], status="compressed", data=[{"a": 1}])
+    steps[0].data_compressed = {"rows": 99}
+    await repo.finishStep(db_session, steps[1], status="compressed", data=[{"b": 1}])
+    steps[1].data_compressed = {"rows": 1}
+    await repo.updateRun(db_session, run, status="failed", completedSteps=1, finished=True)
+    await db_session.commit()
+
+    # Act
+    _run, start = await prepareResume(
+        db_session, runId=run.id, fromStepIndex=1, idempotencyKey=None
+    )
+
+    # Assert
+    assert start == 1
+    reloaded = await repo.loadSteps(db_session, run.id)
+    assert reloaded[1].status == "pending"
+    assert reloaded[1].data_compressed is None
+    # 前序步不动：状态与压缩载荷都必须是原值（重置范围必须从 start 起）。
+    # 反向自检：把 prepareResume 里的 `step_index >= start` 改成 `>= 0` ⇒ 两条都红。
+    assert reloaded[0].status == "compressed", "前序步不被动"
+    assert reloaded[0].data_compressed == {"rows": 99}, "前序步不被动"
+
+
+@pytest.mark.asyncio
+async def testPrepareResumeReopensRunAndClearsFinishedAt(db_session):
+    """续跑重开 = 终态撤销：`finished_at` 由 NOT NULL 变回 NULL、`status` 回 `running`（同事务）。
+
+    这是 `updateRun(finished=False)` 的消费方，也是「终态必伴 finished_at」不变量的另一半：
+    重开必须把 `finished_at` 清回去，否则库里会留下 `running + finished_at NOT NULL`
+    的自相矛盾行（清理任务按 `status IN _TERMINAL` 过滤不会碰它，但任何按
+    `finished_at` 判断「这条 run 已收尾」的读侧都会被它骗过）。
+
+    读侧从**新会话**取真实列值：`prepareResume` 末尾自己 `commit()`，本会话
+    `expire_on_commit=False`，读内存里的旧实例等于没验证。
+    """
+    from sqlalchemy import text
+
+    from app.infrastructure import database as dbModule
+    from app.services import multi_step_persistence as repo
+    from app.services.multi_step_resume import prepareResume
+
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="q", modelId=1, totalSteps=2
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A", "查B"])
+    await repo.finishStep(db_session, steps[0], status="succeeded", data=[{"a": 1}])
+    await repo.recordStepError(db_session, steps[1], message="timeout", kind="transient")
+    await repo.updateRun(
+        db_session, run, status="failed", completedSteps=1, currentStepIdx=1, finished=True,
+    )
+    await db_session.commit()
+
+    # Act
+    _run, start = await prepareResume(
+        db_session, runId=run.id, fromStepIndex=1, idempotencyKey=None
+    )
+
+    # Assert：从新会话读真实列值
+    async with dbModule.getSessionFactory()() as fresh:
+        status, finished_at, current = (
+            await fresh.execute(
+                text(
+                    "SELECT status, finished_at, current_step_idx "
+                    "FROM multi_step_run WHERE id = :i"
+                ),
+                {"i": run.id},
+            )
+        ).one()
+    assert start == 1
+    assert status == "running", "重开必须把 run 置回 running"
+    assert finished_at is None, "重开必须清空 finished_at —— 否则 running 行谎称已收尾"
+    assert current == 1
+
+
+@pytest.mark.asyncio
+async def testResumeIsIdempotentOnSameKey(pg_client, db_session, monkeypatch):
+    from app.services import multi_step_persistence as repo
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _install,
+        _MultiStepLlm,
+        _OkAdapter,
+    )
+
+    config, datasource = await _seed(db_session)
+    # 必须装多步 fake：第一次续跑会真的把流跑完，问句也得是多步问句，
+    # 否则多步链路不进，run 无人封口（靠 Task 7 的 _sealAbandonedResume 兜底，
+    # 但那条路径不该是本用例要验的幂等语义）。
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+    question = "请分步查询 2024 和 2025 年的销售额并对比"
+
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question=question,
+        modelId=config.id, datasourceId=datasource.id, totalSteps=1,
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
+    await repo.recordStepError(db_session, steps[0], message="x", kind="transient")
+    await repo.updateRun(db_session, run, status="failed", finished=True)
+    await db_session.commit()
+
+    key = str(uuid.uuid4())
+    first = await pg_client.post(
+        f"/api/v1/chat/multi-step/{run.id}/resume", json={}, headers={"Idempotency-Key": key}
+    )
+    assert first.status_code == 200, first.text
+
+    afterFirst = (
+        await db_session.execute(select(MultiStepRun).where(MultiStepRun.id == run.id))
+    ).scalar_one()
+    await db_session.refresh(afterFirst)
+    resumeCountAfterFirst = afterFirst.resume_count
+    versionAfterFirst = afterFirst.version
+
+    second = await pg_client.post(
+        f"/api/v1/chat/multi-step/{run.id}/resume", json={}, headers={"Idempotency-Key": key}
+    )
+
+    # 必须钉住「是谁拒的」：两个分支都回 409（幂等键去重 / 状态不可续跑），
+    # 只断言状态码等于没断言 —— 把去重闸删掉，第二次会落到状态闸，仍可能是 409 附近
+    # 的码，用例照样绿。
+    secondBody = second.json()
+    assert second.status_code == 409, second.text
+    assert "duplicate idempotency key" in secondBody["error"], secondBody
+    assert "not resumable" not in secondBody["error"], (
+        "必须是去重闸拒的；落到状态闸说明去重根本没生效"
+    )
+
+    reloadedRun = (
+        await db_session.execute(select(MultiStepRun).where(MultiStepRun.id == run.id))
+    ).scalar_one()
+    await db_session.refresh(reloadedRun)
+    # 幂等的实证：第二次**没有**重新开局 —— resume_count / version 都不许再动。
+    # 单看 `resume_count == 1` 是假绿（键从没被记下来时它也成立），必须与上面的
+    # 409 去重断言合起来读：只有「被去重闸挡在 prepareResume 的写入之前」才推得出
+    # 「两列都没变」。
+    assert resumeCountAfterFirst == 1, "第一次续跑应恰好抬 1 次"
+    assert reloadedRun.resume_count == 1, "第二次不得再抬 resume_count"
+    assert reloadedRun.version == versionAfterFirst, "第二次不得再抬 version"
+    assert key in (reloadedRun.idempotency_keys or [])
+
+
+@pytest.mark.asyncio
+async def testResumeUnknownRunReturns404(pg_client):
+    """run 不存在 → 404，且必须是**缺席**那道拒的（不是状态/归属那些同码分支）。
+
+    路由上有两个 404：`chat.py` 的 `NotFoundError(f"multi-step run {runId} 不存在")`
+    与 `ResumeNotAllowed`（`prepareResume` 的 "run {runId} not found" 经同一 handler）。
+    两者都会带 uuid，故只断言 404（或只断言含 uuid）区分不开 —— 文案里的
+    「不存在」才是这条分支的指纹。
+    """
+    missingId = uuid.uuid4()
+    resp = await pg_client.post(f"/api/v1/chat/multi-step/{missingId}/resume", json={})
+
+    body = resp.json()
+    assert resp.status_code == 404, resp.text
+    assert str(missingId) in body["error"], body
+    assert "不存在" in body["error"], body
+    assert "not found" not in body["error"], f"落到了 ResumeNotAllowed 分支：{body}"
+
+
+@pytest.mark.asyncio
+async def testResumeSealUsesFreshSessionNotRequestSession(pg_client, db_session, monkeypatch):
+    """兜底封口必须**新开会话**，不得复用请求会话（IMP-2）。
+
+    为什么：断连/取消之后请求会话不是可靠写入通道 —— 同特性的姊妹路径
+    `persistInterruptedStream` 已刻意换成 `getSessionFactory()` 的新会话，并在
+    docstring 里记了实测依据（取消打在 commit/flush 中途 ⇒ 会话进 needs-rollback；
+    即便 rollback 复原，底层 asyncpg 连接也已关闭而 SQLAlchemy 未察觉）。续跑封口
+    若复用请求会话，失败时只剩一行 logger.exception，run 永久留在 `running`：
+    既不可续（只允许 failed/partially_failed）也不可清。
+
+    判别式：用一个**记录型工厂**包住真实工厂，断言封口确实经由它取的会话落库。
+    旧实现（`_sealAbandonedResume(session, runId)` 直接吃请求会话）下这个工厂
+    一次都不会被调用 ⇒ 本用例红。反向自检即「把请求 session 传回去」。
+
+    构造：run 的 question 是**普通问句** ⇒ 续跑被重新路由为单步，多步链路不进、
+    无人 `_closeRun`，run 停在 `running` ⇒ 兜底封口被真实触发（走完整 HTTP 链路，
+    由 `/resume` 的 `BackgroundTask` 驱动）。
+    """
+    import app.infrastructure.database as dbModule
+    from app.infrastructure.llm.base_client import StreamChunk
+    from app.services import multi_step_persistence as repo
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _install,
+        _NoDecomposeLlm,
+        _OkAdapter,
+    )
+
+    class _SingleStepStreamingLlm(_NoDecomposeLlm):
+        """单步 + 流式回答：`complete()` 供计划/SQL（父类），`completeStream()` 供回答。
+
+        补 `completeStream` 是为了让这条续跑**正常跑完单步回答**（父类缺该方法会落到
+        `_streamAnswerWithFallback` 的降级分支，日志里刷 AttributeError，用例意图被噪音
+        淹没）。本用例要的是「单步链路正常结束 ⇒ 没人给 run 封口」这一形态。
+        """
+
+        async def completeStream(self, messages: list, **kwargs):
+            yield StreamChunk(
+                content="", isDone=True, promptTokens=10, completionTokens=5,
+                modelName="test-model",
+            )
+
+    config, datasource = await _seed(db_session)
+    # 单步 fake：拆步问句也一律答「不需要多步」，保证不会进多步链路
+    _install(monkeypatch, config, _SingleStepStreamingLlm(), _OkAdapter())
+
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="查询所有供应商的收货量",
+        modelId=config.id, datasourceId=datasource.id, totalSteps=1,
+    )
+    await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
+    await repo.updateRun(db_session, run, status="failed", finished=True)
+    await db_session.commit()
+
+    # `getSessionFactory()` 返回的是 **sessionmaker**（工厂），由调用方再 `factory()`
+    # 取得会话 —— 记录型替身必须同样返回一个可调用对象，而不是直接返回会话
+    # （返回会话会得到 `TypeError: 'AsyncSession' object is not callable`，
+    # 封口静默失败、run 残留 running，看起来像实现没修）。
+    realFactory = dbModule.getSessionFactory()
+    created: list[object] = []
+
+    class _RecordingMaker:
+        def __call__(self):
+            session = realFactory()
+            created.append(session)
+            return session
+
+    monkeypatch.setattr(dbModule, "getSessionFactory", lambda: _RecordingMaker())
+
+    # Act
+    resp = await pg_client.post(f"/api/v1/chat/multi-step/{run.id}/resume", json={})
+    assert resp.status_code == 200, resp.text[:300]
+
+    # Assert ①：封口经由工厂取的新会话完成（旧实现下 created 为空）
+    assert created, "兜底封口没走 getSessionFactory() —— 仍在复用请求会话"
+
+    # Assert ②：封口确实发生了。prepareResume 已把 run 置回 running，封口没生效
+    # 的话它会一直停在 running（这正是「永久僵尸」的形态）。
+    reloaded = (
+        await db_session.execute(select(MultiStepRun).where(MultiStepRun.id == run.id))
+    ).scalar_one()
+    await db_session.refresh(reloaded)
+    assert reloaded.status == "failed", "run 停在非终态 = 僵尸"
+    assert reloaded.finished_at is not None
+    assert reloaded.error_summary and "续跑未走多步链路" in reloaded.error_summary
+
+
+@pytest.mark.asyncio
+async def testResumeAllowsRepeatedKeyWhenRunIsResumableAgain(pg_client, db_session, monkeypatch):
+    """幂等键**不单独设闸**：键已在册 + 状态又可续（failed）⇒ 续跑必须放行（IMP-5）。
+
+    幂等键的语义是「这个请求跑过一次」，不是「这个请求永远不许再来」。若「键存在即拒」，
+    一次续跑中途失败之后，同一个请求（同键）就再也进不来了 —— 重试能力被烧掉。
+
+    判别式：键已在册、状态是 failed。修复前 key 就是闸（无条件拒）⇒ 409
+    `duplicate idempotency key`；修复后 key 只在**状态也不可续**时改文案 ⇒ 200。
+    `testResumeIsIdempotentOnSameKey` 覆盖的是另一半（键在册 + 状态已 succeeded ⇒
+    仍然 409 duplicate）—— 两条合起来才证明「闸在状态不在键」。
+    """
+    from app.services import multi_step_persistence as repo
+    from app.tests.integration.test_chat_api import _seed
+    from app.tests.integration.test_chat_multi_step import (
+        _install,
+        _MultiStepLlm,
+        _OkAdapter,
+    )
+
+    config, datasource = await _seed(db_session)
+    _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+    key = str(uuid.uuid4())
+    sessionKey = f"chat-{uuid.uuid4()}"
+    run = await repo.createRun(
+        db_session, sessionId=sessionKey, question="请分步查询 2024 和 2025 年的销售额并对比",
+        modelId=config.id, datasourceId=datasource.id, totalSteps=1,
+    )
+    steps = await repo.createSteps(db_session, runId=run.id, subQuestions=["查A"])
+    await repo.recordStepError(db_session, steps[0], message="x", kind="transient")
+    await repo.updateRun(db_session, run, status="failed", finished=True)
+    # 键已在册：等价于「同一次续跑请求之前已经打进过来」
+    run.idempotency_keys = [key]
+    await db_session.commit()
+
+    resp = await pg_client.post(
+        f"/api/v1/chat/multi-step/{run.id}/resume", json={}, headers={"Idempotency-Key": key}
+    )
+
+    assert resp.status_code == 200, resp.text
+    reloaded = (
+        await db_session.execute(select(MultiStepRun).where(MultiStepRun.id == run.id))
+    ).scalar_one()
+    await db_session.refresh(reloaded)
+    # 键不得重复入列（去重），且续跑确实跑过（resume_count 自增）
+    assert reloaded.idempotency_keys == [key], reloaded.idempotency_keys
+    assert reloaded.resume_count >= 1

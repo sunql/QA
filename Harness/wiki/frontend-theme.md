@@ -1,6 +1,6 @@
 ---
 created: 2026-09-02
-updated: 2026-09-02
+updated: 2026-09-30
 ---
 
 # Frontend Theme System
@@ -25,7 +25,8 @@ updated: 2026-09-02
 
 | 文件 | 角色 |
 |---|---|
-| `frontend/src/theme/tokens.ts` | ThemeToken 类型 + DARK_TOKEN + LIGHT_TOKEN + LayerPalette |
+| `frontend/src/theme/tokens.ts` | ThemeToken 类型 + DARK_TOKEN + LIGHT_TOKEN + LayerPalette + `chartPalette` |
+| `frontend/src/theme/chartTheme.ts` | `applyChartTheme(option, token)` —— ECharts option 的主题注入（2026-09-30 新增） |
 | `frontend/src/theme/cssVariables.ts` | `tokensToCssVars` / `applyCssVarsToRoot` / `removeCssVarsFromRoot` |
 | `frontend/src/theme/index.ts` | 主题模块统一导出 |
 | `frontend/src/components/common/ThemedRoot.tsx` | ConfigProvider 唯一入口 + CSS 变量同步 |
@@ -62,6 +63,20 @@ updated: 2026-09-02
 | `layers.layerAi` | `#eb2f96` | 血缘层 AI |
 
 亮色（`LIGHT_TOKEN`）值见 `tokens.ts`，主色为 teal `#00B8A9`（深一档以保证对比度）。
+
+### 3.1 `chartPalette`（2026-09-30，图表决策引擎）
+
+图表**分类系列色板**（8 色，顺序即 ECharts `color` 数组的取色顺序）。暗色以主色打头，
+亮色各降一档饱和/明度。它**不进 CSS 变量轨道** —— 图表读的是 JS token 对象，不是 CSS。
+
+配套 `applyChartTheme(option, token)`：
+- **不可变**（返回新对象）—— option 来自 store 里的消息对象，原地改会串台；
+- **只补色、不改结构** —— series 的数据/类型一字不动；
+- 不接 `isDark` 参数 —— 轴色/文字色/tooltip 底色都从 token 取，而 token 本身已按主题选好；
+- 调用方显式写在 series 上的 `itemStyle.color`（如 DQ 报表的通过/失败语义色）**优先级更高，
+  不被主题覆盖**。
+
+消费方：`components/chat/ChartRenderer.tsx`（对话图表）、`components/EChart.tsx`（DQ 报表图表）。
 
 ## 4. CSS 变量（注入到 `:root`）
 

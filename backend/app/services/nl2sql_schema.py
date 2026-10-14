@@ -79,6 +79,34 @@ def _renderJoinColumns(bakedTable: str, columns: list[str]) -> str:
 JoinGraph = dict[str, list[tuple[str, str]]]
 
 
+# 孤岛类在类头行上的标记文案（2026-10-03）。
+# 只说「不可跨表 JOIN」，**不说「不可用」** —— 孤岛类做单表查询完全合法
+# （真机 deepseek 就是拿裸 RCV_SITE_CODE 分组跑通的）。
+_ISLAND_MARKER = "无关联边，不可跨表JOIN"
+
+
+def _islandTables(
+    classes: list[OntologyClass], joins: list[OntologyJoin] | None
+) -> set[str]:
+    """召回集内零 JOIN 边的类对应表名（孤岛），供类头标注。
+
+    与 `validateConnectivity` 同一口径：图建不起来（joins 为空/两端都不在召回集）
+    时校验本就放行 ⇒ 此时**不标任何类**，否则 prompt 会让模型避一个其实能用的类。
+
+    存在的理由：`### JOIN 关系` 段只渲染有边的行，孤岛类**整段缺席**，
+    「缺席」不等于「不可 JOIN」——真机上模型正是把缺席读成了「可以试着连」，
+    撞 validateConnectivity 后整步报废（该失败当时还不可自愈）。
+    """
+    graph = _buildJoinGraph(classes, joins)
+    if not graph:
+        return set()
+    return {
+        cls.source_table
+        for cls in classes
+        if cls.source_table and cls.source_table not in graph
+    }
+
+
 def _buildJoinGraph(
     classes: list[OntologyClass], joins: list[OntologyJoin] | None
 ) -> JoinGraph:
@@ -258,6 +286,7 @@ def buildSchemaText(
     if digest:
         blocks.extend(digest)
 
+    islandTables = _islandTables(classes, joins)
     for cls in ordered:
         if not cls.source_table:
             continue
@@ -269,6 +298,8 @@ def buildSchemaText(
         if parent is not None:
             header += f" (继承 {parent.class_name})"
         header += f": table={bakedTable}"
+        if cls.source_table in islandTables:
+            header += f"  [{_ISLAND_MARKER}]"
         blocks.append(header)
         blocks.append("  Columns:")
         for prop in cls.properties:

@@ -4,13 +4,17 @@
 Supplier360Page 的 360° 视图对不上 THBI DWS 表的 supplier_code。
 
 设计：
-- 数据源：`THBI.DWD_SUPPLIER.supplier_code`、`THBI.DWD_MATERIAL.material_code`（THBI 数仓主数据）
+- 数据源：`THBI.DIM_SUPPLIER(BPSNUM_0/BPSNAM_0)`、`THBI.DIM_IMATERIAL(ITMREF_0/ITMDES1_0..3)`
+  （THBI 数仓主数据）。**2026-09-30 改**：原写 `THBI.DWD_SUPPLIER` / `THBI.DWD_MATERIAL`，
+  这两张表在库里已不存在（实跑 ORA-00942），DIM_* 才是现役主数据表 ——
+  行数 3500 / 350922 与 2026-09-16 那次成功同步落库的数字一致。
 - enterprise_code = THBI 原编码（与 DWS supplier_code 自然 JOIN，无需转换层）
-- enterprise_key = SHA-256(stableCode) % 1_000_000 + entityTypeOffset
-    - SUPPLIER offset = 800_000  → 范围 800000–1799999
-    - MATERIAL offset = 1_800_000 → 范围 1800000–2799999
-    - 避开合成 seed 已占区间 100001–500001
-    - 同一 supplier_code 必得同 key → 重跑由 ON CONFLICT (entity_type, enterprise_key, source_system) 兜底幂等
+- enterprise_key 派生见 `app/domain/enterprise_key.py`（**唯一 SSOT**；本脚本与
+  entity_mapping_service 不再各存一份）
+    - 同一 code 必得同 key → 重跑由 ON CONFLICT (entity_type, enterprise_key, source_system) 兜底幂等
+    - **2026-09-30**：原 2³² 键空间对 35 万条太小，MATERIAL 实测 12 个 key 各含两个编码
+      → DO UPDATE 静默折叠 12 行（后者编码消失、前者 name 被覆盖）。已扩到 2⁴⁸，
+      碰撞期望 14.3 → 2.2e-4。
 - source_system = ERP（THBI 即 ERP 数仓）；source_code = enterprise_code
 - match_rule = MDM_MASTER
 - 仅写 entity_mapping；不动 entity 主表、不动 ontology、不动 feature_values
@@ -19,14 +23,14 @@ Supplier360Page 的 360° 视图对不上 THBI DWS 表的 supplier_code。
 - data_source 表里已注册默认活跃 THBI 数据源（is_default=true, is_active=true）
 - 密码由 DataSource.password_encrypted 提供，启动时 `decryptApiKey` 解密
 - 需 PG 元数据库可达（默认 DATABASE_URL）
-- THBI-Oracle 端需 DWD_SUPPLIER / DWD_MATERIAL 表有数据
+- THBI-Oracle 端需 DIM_SUPPLIER / DIM_IMATERIAL 表有数据
 
 用法：
     python -m scripts.sync_entity_mapping_from_thbi --dry-run     # 只打印计划
     python -m scripts.sync_entity_mapping_from_thbi               # 真写（幂等）
 
 环境：
-    QUERY_TIMEOUT_SECONDS=600  # DWD_MATERIAL 35w 行默认 30s 不够，
+    QUERY_TIMEOUT_SECONDS=600  # DIM_IMATERIAL 35w 行默认 30s 不够，
                               # 同步必须显式拉大到 ≥600；小查询可省略。
 """
 
@@ -34,7 +38,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import sys
 from pathlib import Path
 from typing import Any
@@ -45,6 +48,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: E402
 
+from app.domain.enterprise_key import (  # noqa: E402
+    MATERIAL_KEY_OFFSET,
+    SUPPLIER_KEY_OFFSET,
+    stableKey,
+)
 from app.domain.enums import MatchRule, SourceSystem  # noqa: E402
 from app.domain.models import DataSource, EntityMapping  # noqa: E402
 from app.infrastructure.business_db_pool import (  # noqa: E402
@@ -53,32 +61,11 @@ from app.infrastructure.business_db_pool import (  # noqa: E402
 )
 from app.infrastructure.database import getSessionFactory  # noqa: E402
 
-# SHA-256 前 8 字节 → uint64 → 落到 entity_type 独立 4G 区间。
-# 4G 空间 × 35w 输入 → 生日碰撞概率 < 10⁻⁵（实测 0 碰撞），远好于 4 字节 / 1M 区间。
-# SUPPLIER 区间 [800_000, 4_295_767_295)；
-# MATERIAL 区间 [4_295_767_296, 8_591_534_591)（BIGINT 范围内安全）。
-# 全部避开合成 seed（100001-100010 / 200001-200010 / 300001-300003 / 400001 / 500001）。
-_KEY_RANGE_SIZE = 1 << 32  # 4_294_967_296
-_SUPPLIER_KEY_OFFSET = 800_000
-_MATERIAL_KEY_OFFSET = _SUPPLIER_KEY_OFFSET + _KEY_RANGE_SIZE  # 4_295_767_296
-
 # asyncpg 单次查询参数上限 32767；按 11 列/行反推 batch 上限 32767/11 ≈ 2978，
 # 取保守值 2500，留余量给 ORM 可能补的额外参数。
 _CHUNK_ROWS = 2_500
 
 _DEFAULT_EFFECTIVE = __import__("datetime").date(2026, 1, 1)
-
-
-def _stableKey(code: str, *, offset: int) -> int:
-    """把任意字符串映射到 [offset, offset + 2³²) 的稳定正整数。
-
-    SHA-256 前 8 字节转 uint64 → mod 2³² → 加 offset。8 字节在 4G 空间上的生日碰撞概率
-    极低（35w 输入 < 10⁻⁵），避免不同 supplier_code 被映射到同一 enterprise_key。
-    同输入必同输出（进程间稳定），ON CONFLICT 才能在重跑时跳过既有行。
-    """
-    digest = hashlib.sha256(code.encode("utf-8")).digest()
-    head = int.from_bytes(digest[:8], "big")
-    return offset + (head % _KEY_RANGE_SIZE)
 
 
 def _mapping(
@@ -95,7 +82,7 @@ def _mapping(
     """
     return dict(
         entity_type=entity_type,
-        enterprise_key=_stableKey(code, offset=offset),
+        enterprise_key=stableKey(code, offset=offset),
         enterprise_code=code,
         source_system=SourceSystem.ERP,
         source_key=code,
@@ -116,7 +103,8 @@ async def _fetchSupplierCodes(adapter: Any) -> list[tuple[str, str | None]]:
     表现为 dry-run 显示 suppliers=0 / materials=0（实测 DWD_SUPPLIER 有 3500 行）。
     """
     rows = await adapter.execute_read_only(
-        "SELECT supplier_code, supplier_name FROM THBI.DWD_SUPPLIER ORDER BY supplier_code",
+        "SELECT BPSNUM_0 AS supplier_code, BPSNAM_0 AS supplier_name "
+        "FROM THBI.DIM_SUPPLIER ORDER BY BPSNUM_0",
     )
     out: list[tuple[str, str | None]] = []
     seen: set[str] = set()
@@ -137,8 +125,9 @@ async def _fetchMaterialCodes(adapter: Any) -> list[tuple[str, str | None]]:
     给 AutoComplete 完整信息。列名取小写键（与 _fetchSupplierCodes 同源）。
     """
     rows = await adapter.execute_read_only(
-        "SELECT material_code, description_1, description_2, description_3 "
-        "FROM THBI.DWD_MATERIAL ORDER BY material_code",
+        "SELECT ITMREF_0 AS material_code, ITMDES1_0 AS description_1, "
+        "ITMDES2_0 AS description_2, ITMDES3_0 AS description_3 "
+        "FROM THBI.DIM_IMATERIAL ORDER BY ITMREF_0",
     )
     out: list[tuple[str, str | None]] = []
     seen: set[str] = set()
@@ -162,11 +151,11 @@ def _buildAllRows(
     materials: list[tuple[str, str | None]],
 ) -> list[dict[str, Any]]:
     rows = [
-        _mapping("SUPPLIER", code, offset=_SUPPLIER_KEY_OFFSET, name=name)
+        _mapping("SUPPLIER", code, offset=SUPPLIER_KEY_OFFSET, name=name)
         for code, name in suppliers
     ]
     rows += [
-        _mapping("MATERIAL", code, offset=_MATERIAL_KEY_OFFSET, name=name)
+        _mapping("MATERIAL", code, offset=MATERIAL_KEY_OFFSET, name=name)
         for code, name in materials
     ]
     return rows
@@ -180,14 +169,14 @@ async def syncEntityMappings(
 ) -> dict[str, int]:
     """拉取 THBI 主数据并按需写入 entity_mapping；返回统计信息。
 
-    幂等：ON CONFLICT (entity_type, enterprise_key, source_system) DO NOTHING。
-    重跑时 supplier_code / material_code 不变 → enterprise_key 不变 → 命中唯一约束直接跳过。
+    幂等：ON CONFLICT (entity_type, enterprise_key, source_system) DO UPDATE SET name。
+    重跑时 supplier_code / material_code 不变 → enterprise_key 不变 → 命中唯一约束，
+    只刷新 name（THBI 改名 / 物料描述修正），其它列保持原值。
     """
     suppliers = await _fetchSupplierCodes(adapter)
     materials = await _fetchMaterialCodes(adapter)
     rows = _buildAllRows(suppliers, materials)
 
-    inserted = 0
     if dryRun:
         for m in rows[:10]:
             print(

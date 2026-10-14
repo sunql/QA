@@ -35,6 +35,7 @@ const TEST_TOKEN: ThemeToken = {
     layerKpi: "#f5222d",
     layerAi: "#eb2f96",
   },
+  chartPalette: ["#00D9C0", "#4C9AFF"],
 };
 
 describe("tokensToCssVars", () => {

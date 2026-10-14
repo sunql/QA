@@ -24,17 +24,16 @@ from app.domain.exceptions import LlmClientError
 from app.domain.models import LlmConfig
 from app.domain.schemas import ChatRequest
 from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage, StreamChunk
+from app.services.chart_thresholds import loadFullDataThreshold
+from app.services.chat_constants import (
+    USAGE_PURPOSE_ANSWER_STREAM_FAILED,
+    USAGE_PURPOSE_FALLBACK_ANSWER,
+)
 
 logger = logging.getLogger(__name__)
 
 _STREAM_CHUNK_TIMEOUT_SECONDS = 45.0  # 回答流块间超时：防止 LLM 挂起占用连接/会话（4-3：120s→45s）
-_ANSWER_SYSTEM_PROMPT = (
-    "你是一名企业数据分析助手。根据查询结果用简洁的中文回答用户问题，"
-    "不要编造数据，不要输出 SQL。"
-    "**禁止反向追问**：不要询问用户'需要继续查询吗 / 是否需要进一步分析 / "
-    "还需要看其他吗'。"
-    "如查询结果不足以回答问题，直接说明当前结果能回答什么、不能回答什么即可。"
-)
+from app.services.prompts_zh import PROMPT_ANSWER_SYSTEM as _ANSWER_SYSTEM_PROMPT
 
 
 class ChatStreamOutputMixin:
@@ -84,15 +83,20 @@ class ChatStreamOutputMixin:
         产出 (chunk, 实际服务模型, (0,0)) 三元组；第三元恒为 (0,0)——流式失败时
         客户端不会回传已消耗 token（done 块未到达），浪费 token 不可计量，仅以零
         token 审计行作为失败标记：
-        - 主模型失败且未产出 token → 降级，记录 purpose="fallback_answer"
-        - 已产出 token 后中断（无法回退）→ 记录 purpose="answer_stream_failed" 后上抛
+        - 主模型失败且未产出 token → 降级，记录 purpose=USAGE_PURPOSE_FALLBACK_ANSWER
+        - 已产出 token 后中断（无法回退）→ 记录 purpose=USAGE_PURPOSE_ANSWER_STREAM_FAILED 后上抛
         逐块读取经 _iterStreamChunks 块间超时保护，防止 LLM 挂起占用连接。
         """
+        # Task 2：FULL_DATA_THRESHOLD 迁 system_config 后，持 session 的调用方现读。
+        full_data_threshold = await loadFullDataThreshold(session)
         messages = [
             LlmMessage(role="system", content=_ANSWER_SYSTEM_PROMPT),
             LlmMessage(
                 role="user",
-                content=self._buildAnswerPrompt(dto.question, sql, data, history=history),
+                content=self._buildAnswerPrompt(
+                    dto.question, sql, data, history=history,
+                    full_data_threshold=full_data_threshold,
+                ),
             ),
         ]
         emittedContent = False
@@ -110,7 +114,7 @@ class ChatStreamOutputMixin:
                 if emittedContent:
                     # 已产出 token，客户端已收到部分内容，无法回退；记失败标记审计行
                     await self._recordUsage(
-                        session, sessionId, attempt, 0, 0, purpose="answer_stream_failed",
+                        session, sessionId, attempt, 0, 0, purpose=USAGE_PURPOSE_ANSWER_STREAM_FAILED,
                     )
                     logger.warning("回答流中断（已产出 token，不再降级）: %s", exc.message)
                     raise
@@ -121,7 +125,7 @@ class ChatStreamOutputMixin:
                     raise
                 logger.warning("回答流模型 %s 失败，尝试降级: %s", attempt.model_name, exc.message)
                 await self._recordUsage(
-                    session, sessionId, attempt, 0, 0, purpose="fallback_answer",
+                    session, sessionId, attempt, 0, 0, purpose=USAGE_PURPOSE_FALLBACK_ANSWER,
                 )
                 attempt = fallback
 

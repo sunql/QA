@@ -22,13 +22,24 @@ interface ChatPanelProps {
 }
 
 // 图表类型 value 与字典 key 的映射（label 通过 t() 运行时解析）
-const CHART_TYPE_KEYS: { value: string; labelKey: keyof typeof import("../../i18n").zhCN.chatPanel.chartTypes }[] = [
+// value 用联合类型而不是 string：漏一个 i18n 键或写错类型名都在 tsc 阶段报错，
+// 不必靠 `as ChartType` 把运行时风险掩盖过去。
+const CHART_TYPE_KEYS: {
+  value: ChartType | "auto";
+  labelKey: keyof typeof import("../../i18n").zhCN.chatPanel.chartTypes;
+}[] = [
   { value: "auto", labelKey: "auto" },
   { value: "table", labelKey: "table" },
   { value: "bar", labelKey: "bar" },
+  { value: "hbar", labelKey: "hbar" },
   { value: "pie", labelKey: "pie" },
+  { value: "donut", labelKey: "donut" },
   { value: "line", labelKey: "line" },
   { value: "scatter", labelKey: "scatter" },
+  { value: "heatmap", labelKey: "heatmap" },
+  { value: "kpi", labelKey: "kpi" },
+  { value: "combo", labelKey: "combo" },
+  { value: "waterfall", labelKey: "waterfall" },
 ];
 
 // 相似问法建议的防抖间隔（毫秒）
@@ -174,12 +185,14 @@ export default function ChatPanel({
           onChange={(value) => onModelChange(value === -1 ? null : value)}
           options={modelOptions}
         />
-        <Select
+        {/* 12 个固定选项，关掉虚拟滚动：全部选项都在 DOM 里（无障碍工具与测试都能读到） */}
+        <Select<ChartType | "auto">
+          virtual={false}
           style={{ width: 120, flexShrink: 0 }}
           placeholder={t("chatPanel.chartTypePlaceholder")}
           aria-label={t("chatPanel.chartTypeAriaLabel")}
           value={chartType ?? "auto"}
-          onChange={(value) => setChartType(value === "auto" ? null : (value as ChartType))}
+          onChange={(value) => setChartType(value === "auto" ? null : value)}
           options={chartTypeOptions}
         />
       </div>

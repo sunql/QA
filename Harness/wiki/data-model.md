@@ -13,11 +13,12 @@
 - `ontology_property`：属性，`data_type`、`is_primary_key`、`is_foreign_key`、`ref_class_id`、`source_column`。
 - `ontology_metric`：指标，`formula`、`agg_function`、`target_class_id`、`dimension_defaults`(JSON)。
 - `data_source`：数据源，`type`、`connection_url`、`encrypted_password`、`is_read_only`、`is_default`。
-- `session_message`（Phase 5）：会话消息持久化，`session_id`、`role`(user/assistant)、`content`、`question`(assistant 回填)、`sql_generated`(assistant 回填)、时间戳。索引 `(session_id, created_time)`。用于 NL2SQL 前注入最近 5 轮上下文；服务端无记录时回退到客户端 `history` 字段。注入前按预算收口（H3，2026-09-26）：单条正文/历史 SQL 各限 500 字符，拼接后总预算 4000 字符，超预算丢最旧整块并记 `历史上下文按预算裁剪` —— 上下文会被注入 plan/SQL/answer 各阶段，不限长则长轮次下每轮 prompt 成本线性膨胀。**Migration 0051** 新增字段：`routing_layer`（VARCHAR(10)，L1/L2/L3/L4）、`latency_ms`（INTEGER，毫秒）、`token_cost_usd`（FLOAT，美元）。
+- `session_message`（Phase 5）：会话消息持久化，`session_id`、`role`(user/assistant)、`content`、`question`(assistant 回填)、`sql_generated`(assistant 回填)、时间戳。索引 `(session_id, created_time)`。用于 NL2SQL 前注入最近 5 轮上下文；服务端无记录时回退到客户端 `history` 字段。注入前按预算收口（H3，2026-09-26）：单条正文/历史 SQL 各限 500 字符，拼接后总预算 4000 字符，超预算丢最旧整块并记 `历史上下文按预算裁剪` —— 上下文会被注入 plan/SQL/answer 各阶段，不限长则长轮次下每轮 prompt 成本线性膨胀。**Migration 0051** 新增字段：`routing_layer`（VARCHAR(10)，L1/L2/L3/L4）、`latency_ms`（INTEGER，毫秒）、`token_cost_usd`（FLOAT，美元）。**Migration 0105** 新增字段：`chart_type`（VARCHAR(20)，NULL）、`chart_option`（JSONB，NULL）—— 让图表进最终报告（聊天回答 + 导出 PDF）并让**历史回放也能看到图**。两条必须在**唯一落库点**（`chat_context._storeSessionMessages`，归一函数在 `chat_chart_persist.py`）做的归一：`chart_type` 归一为裸字符串（`ChatResponse.chartType` 是 `ChartType | None`，pydantic 保留**枚举成员**，直接落 VARCHAR 会存成 `ChartType.BAR` 这种脏值）；`chart_option` 的 TABLE 负载 `rows` 截到 200 行并记 `truncated: true`（`QUERY_ROW_LIMIT` 默认 0 = 不限行，而表格 builder 返回**全量** data，不截则有把十万行塞进一行的风险）。**只截落库份**，实时响应仍发全量；`truncated` 必须在**读侧两侧**都披露（PDF 与前端回放）。
 
 ### entity_mapping（跨系统编码映射 SSOT）
 
-**日期**：2026-09-16 · **变更**：[fix-entity-mapping-sync-bootstrap](../changes/fix-entity-mapping-sync-bootstrap/summary.md)
+**日期**：2026-09-30 · **变更**：[entity-mapping-sync-and-key-space](../changes/2026-09-30-entity-mapping-sync-and-key-space/summary.md)
+（前次：[fix-entity-mapping-sync-bootstrap](../changes/fix-entity-mapping-sync-bootstrap/summary.md) 2026-09-16）
 
 - 列：`id`、`entity_type`(FK → `business_object.code`，枚举 SUPPLIER/MATERIAL/PO/GR/IQC)、
   `enterprise_key`(BIGINT)、`enterprise_code`、`source_system`(枚举 ERP/SRM/QMS/MDM/PLM)、
@@ -30,14 +31,26 @@
 
 **enterprise_key 区间分配**（避免碰撞）：
 
+派生唯一实现在 `app/domain/enterprise_key.py`（脚本与 `entity_mapping_service` 均 import，
+不再各存一份）。`KEY_RANGE_SIZE = 2⁴⁸`。
+
 | entity_type | 区间 | 来源 |
 |---|---|---|
 | MATERIAL（demo） | 200001–200010 | `seed_entity_mapping.py` 测试 fixture（10 个 RM-STEEL-***） |
 | PO（demo） | 300001–300003 | `seed_entity_mapping.py` 测试 fixture |
 | GR（demo） | 400001 | 同上 |
 | IQC（demo） | 500001 | 同上 |
-| SUPPLIER（真实） | 800000–4295767295 | `sync_entity_mapping_from_thbi.py` SHA-256 前 8 字节 + offset 800000 |
-| MATERIAL（真实） | 4295767296–8591534591 | 同上 + MATERIAL offset |
+| SUPPLIER（真实） | 1000000 – 1000000+2⁴⁸ | `stableKey(code, offset=SUPPLIER_KEY_OFFSET)` |
+| MATERIAL（真实） | 1000000+2⁴⁸ – 1000000+2×2⁴⁸ | 同上 + `MATERIAL_KEY_OFFSET` |
+| 其它未注册类型 | 1000000+2×2⁴⁸ 起 | 通用段（新增业务对象不必改该模块） |
+
+> **2026-09-30 区间重划（不兼容）**：旧区间为 800000–4295767295 / 4295767296–8591534591
+> （`KEY_RANGE_SIZE = 2³²`）。2³² 对 35 万条太小 —— MATERIAL 350922 条实测碰撞 **12 次**，
+> `ON CONFLICT DO UPDATE SET name` 把 12 对编码静默折叠成 12 行（后者编码消失、
+> 前者 name 被覆盖），rowcount 仍报满额。扩到 2⁴⁸ 后碰撞期望 14.3 → 2.2e-4。
+> 键值因此全变，需清空 `entity_mapping` 后重跑同步（354422 行可由 THBI 确定性重放）。
+> 无外部表引用该 BIGINT（`feature_value.entity_key` / `document_entity_relation.entity_key`
+> 均为 VARCHAR 业务码）。
 
 **维护契约**：
 
@@ -56,14 +69,28 @@ docker exec \
   qa-backend python scripts/sync_entity_mapping_from_thbi.py [--dry-run]
 ```
 
-- `QUERY_TIMEOUT_SECONDS` 必须 ≥ 600（DWD_MATERIAL 35w 行 SELECT + fetchmany 全程 > 30s 默认值）
+- `QUERY_TIMEOUT_SECONDS` 必须 ≥ 600（DIM_IMATERIAL 35w 行 SELECT + fetchmany 全程 > 30s 默认值）
+- **源表**：`THBI.DIM_SUPPLIER(BPSNUM_0/BPSNAM_0)`、`THBI.DIM_IMATERIAL(ITMREF_0/ITMDES1_0..3)`。
+  2026-09-30 前写的 `DWD_SUPPLIER` / `DWD_MATERIAL` 在库里已不存在（实跑 ORA-00942），
+  契约由 `test_sync_entity_mapping_from_thbi.py::TestSourceTables` 钉住。
 - 脚本按 `(is_default=true, is_active=true)` 查数据源，**不硬编码 name** — 避免「重命名即失配」
 - 拉取列名按小写键读取（adapter `execute_read_only` 统一下沉小写）
-- 部署：仅需 `docker cp` 单文件到 `/app/scripts/`，无需重启 uvicorn
+- 部署：脚本随镜像走，改脚本后需 `docker compose build backend && docker compose up -d backend`
+  （镜像==代码；`deploy_backend.sh` 只是 Docker Hub 不可达时的临时替代）
+
+**AutoComplete 按业务名搜索**（2026-09-30 补齐）：
+
+- `searchMappings` 的 conds 增加 `EntityMapping.name.ilike(like)`（第三条）
+  —— 此前只有 `enterprise_code` / `source_code`，业务名虽已入库却搜不到
+  （实测 `name ilike '%浙江力航%'` 命中 1 行，原两条子句命中 0 行）。
+  中缀 ILIKE 由 alembic 0086 的 GIN trigram 索引（partial: `entity_type='SUPPLIER'`）支撑。
+- `createMapping` 补写 `name=dto.name`。DTO 一直声明该字段、bulk 路径也写，
+  唯独单条 create 漏写 ⇒ 带 name 的 POST 返 201 却静默丢弃，`name` 列永远是空。
+  由集成测试 `test_create_persists_business_name` 钉住。
+- 仍缺：`EntityMappingUpdate` 无 `name` 字段（改名前只能走 bulk 或重建）。
 
 **待办（不在本 fix 范围）**：
 
-- `entity_mapping_service.searchMappings` 增加 `EntityMapping.name.ilike(like)` 子句，使 AutoComplete 支持中文名搜索
 - 周期性同步任务（launchd / scheduler）
 - Prometheus 指标 + Alertmanager 行数告警
 
@@ -146,4 +173,129 @@ snapshot_message    TEXT
 - `alembic/versions/0069_dq_evaluation_report.py` — 初次建表（status 只有 DRAFT/PUBLISHED）
 - `alembic/versions/0074_dq_eval_report_progress.py` — 扩 CheckConstraint + 新增 progress 列 + ix_evaluation_report_status_running
 
+## Phase 环节一 增量：研究会话证据契约表
+
+**日期**：2026-10-13 · **变更**：[feat-research-evidence-contract](../changes/feat-research-evidence-contract/summary.md)
+· **Wiki**：[[research_evidence_contract]]
+
+### research_run_state（本轮问题的版本化快照）
+
+```
+id               UUID PK
+session_id       UUID FK → research_session.id (ON DELETE CASCADE)
+turn_id          UUID FK → research_turn.id    (ON DELETE CASCADE)
+parent_run_id    UUID FK → research_run_state.id (ON DELETE SET NULL)   -- 版本链
+current_question TEXT NOT NULL DEFAULT ''
+mode             VARCHAR(20) NOT NULL
+scope_version    INTEGER NOT NULL DEFAULT 1
+datasource_id    INTEGER
+schema_version   INTEGER NOT NULL DEFAULT 1
+model_id         INTEGER
+state_payload    JSONB NOT NULL DEFAULT '{}'::jsonb
+created_at / updated_at TIMESTAMPTZ
+
+索引：ix_research_run_state_session_id (session_id)
+      ix_research_run_state_turn_id    (turn_id)
+被引用：research_session.active_run_id            FK (ON DELETE SET NULL)
+        research_step_result.run_state_id         FK (ON DELETE CASCADE)
+        research_run_state.parent_run_id          FK (自引用, ON DELETE SET NULL)
+```
+
+**承重语义**：续跑**新建**一行（新 UUID）而不是原地改 —— 所以「同一 turn 的最新版本」不是某一行的属性，
+只能按 `created_at` 序取；`turn_id` 在版本化时**被复制**（不变）⇒ 按 `turn_id` 能覆盖一个 turn 的
+**所有**版本。只按单个 `run_state_id` 读会漏掉早期版本的行。
+
+### research_step_result（每步真实结果）
+
+```
+id               UUID PK
+run_state_id     UUID FK → research_run_state.id (ON DELETE CASCADE)
+step_index       INTEGER NOT NULL
+step_type        VARCHAR(50) NOT NULL
+sql_text         TEXT
+raw_result_ref   JSONB        -- {"rows": [...], "rowCount": n, "schemaVersion": 1}
+evidence_summary JSONB        -- EvidenceSummary（数值标量串化）
+status           VARCHAR(20) NOT NULL   -- success / empty / failed
+error            TEXT
+created_at       TIMESTAMPTZ
+
+索引：ix_research_step_result_run_state_id (run_state_id)
+```
+
+**没有 `turn_id` 列**（有意）：挂 `run_state_id`，要按 turn 读必须
+`JOIN research_run_state ON run_state_id WHERE research_run_state.turn_id = :t`。
+
+### research_session 增列
+
+```
+active_run_id    UUID FK → research_run_state.id (ON DELETE SET NULL)  -- 会话级执行权互斥
+idempotency_key  VARCHAR            -- 重复触发去重（原子条件 UPDATE 认领）
+```
+
+### 迁移文件
+
+- `alembic/versions/b1ea6cb32588_run_state.py` — `research_run_state` 建表
+- `alembic/versions/0118_research_active_run.py` — `research_session.active_run_id` + FK + 索引
+- `alembic/versions/0119_research_step_result.py` — `research_step_result` 建表
+
+生产库 head：`0119`（2026-10-13 部署冒烟实测）。
+
 > 文件名长度约束：≤ 32 字符（见 [[../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode/memory/alembic-version-filename-32-char-limit]]）。
+> 本批 0118 / b1ea6cb32588 初版超限（35 / 38），2026-10-13 改短（27 / 25）。
+
+---
+
+## Phase 环节二 增量：研究平台级表
+
+**日期**：2026-10-13 · **变更**：[feat-research-platform](../changes/feat-research-platform/summary.md)
+· **Wiki**：[[research_platform_capabilities]]
+· **前置**：[§环节一](#phase-环节一-增量研究会话证据契约表)
+
+### research_event_outbox（事件台账，SSE 断线回放）
+
+```
+seq         BIGSERIAL PK                    -- 单调游标（弃 created_at：同刻并列会漏/重）
+session_id  UUID NOT NULL
+event       VARCHAR(50) NOT NULL
+payload     JSONB NOT NULL DEFAULT '{}'::jsonb   -- 先过 research_json 再落库（Decimal→str）
+created_at  TIMESTAMPTZ NOT NULL
+
+索引：ix_research_event_outbox_session_id (session_id)
+```
+
+**承重语义**：**先落库、再广播**（写用**独立短会话** ⇒ 事件活过状态机 rollback）。
+**刻意无 `run_state_id`**（emit 绑定早于 run_state 创建，回放按会话）、**无 UUID event_id**（冗余）。
+无 TTL / 无会话删除级联（**遗留**：孤儿行留存，见变更记录 §7）。
+
+### research_task（任务台账，认领/回收）
+
+```
+id            UUID PK
+session_id    UUID FK → research_session.id (ON DELETE CASCADE)
+turn_id       UUID FK → research_turn.id    (ON DELETE CASCADE)
+kind          VARCHAR(20) NOT NULL
+status        VARCHAR(20) NOT NULL          -- pending / leased / done / failed / orphaned
+attempt       INTEGER NOT NULL DEFAULT 0
+max_attempts  INTEGER NOT NULL DEFAULT 1
+worker_id     VARCHAR(64)
+lease_until   TIMESTAMPTZ
+payload       JSONB NOT NULL DEFAULT '{}'::jsonb   -- 含相位游标（崩溃时知道跑到哪个相位）
+error         TEXT
+created_at / updated_at TIMESTAMPTZ
+
+索引：ix_research_task_session_id (session_id)
+      ix_research_task_turn_id    (turn_id)
+      ix_research_task_lease_until (lease_until)
+```
+
+**承重语义**：认领是**原子条件 UPDATE**（无 TOCTOU）；启动期 **reaper** 把 `leased` 孤儿翻 `orphaned`
+并**释放会话 `active_run_id`**。**边界**：只回收 `leased`；`pending` 与「启动时 `awaiting_user` 且持权」
+是合法态（见 memory `qa-system-research-task-reaper-scope`）。
+
+### 迁移文件
+
+- `alembic/versions/0120_research_event_outbox.py` — `research_event_outbox` 建表（29 字符）
+- `alembic/versions/0121_research_task.py` — `research_task` 建表（21 字符）
+
+迁移链：`0117 → b1ea6cb32588_run_state → 0118 → 0119 → 0120 → 0121`（**非**线性 0117→0118；
+`0118` 的 `down_revision` 是 hash 命名的 `b1ea6cb32588`）。生产库 head：`0121`（2026-10-13 部署冒烟实测）。

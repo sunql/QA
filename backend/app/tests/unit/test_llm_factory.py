@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.infrastructure.llm.factory import createClient, resetFactory
+from app.infrastructure.llm import factory as factoryModule
+from app.infrastructure.llm.factory import createClient, invalidateClient, resetFactory
 
 
 class _FakeSettings:
@@ -97,3 +98,51 @@ def test_create_client_caches_by_config_id():
     c1 = createClient(cfg, settings=settings)
     c2 = createClient(cfg, settings=settings)
     assert c1 is c2
+
+
+# ---------------------------------------------------------------------------
+# invalidateClient（feat-model-config-cache-invalidation）：
+# OpenAiClient 构造时固化 model_name/api_endpoint/key，配置编辑后旧客户端
+# 若不从缓存移除，运行中的进程将永远用旧配置（2026-10-03 MiniMax Connection error 根因）。
+# ---------------------------------------------------------------------------
+
+
+class _SentinelClient:
+    """带 close 记录的客户端哨兵，直接塞进缓存模拟已存在的旧客户端。"""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def test_invalidate_client_removes_cached_entry_and_closes():
+    sentinel = _SentinelClient()
+    factoryModule._clients[101] = sentinel
+    import asyncio
+
+    asyncio.run(invalidateClient(101))
+    assert 101 not in factoryModule._clients
+    assert sentinel.closed is True
+
+
+def test_invalidate_client_unknown_id_is_noop():
+    import asyncio
+
+    asyncio.run(invalidateClient(99999))  # 不抛错即通过
+
+
+def test_invalidate_client_close_failure_still_removes_entry():
+    """close 抛错不能让旧客户端留在缓存里（失效语义优先于优雅关闭）。"""
+
+    class _BoomClient:
+        async def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    boom = _BoomClient()
+    factoryModule._clients[102] = boom
+    import asyncio
+
+    asyncio.run(invalidateClient(102))
+    assert 102 not in factoryModule._clients

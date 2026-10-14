@@ -237,6 +237,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "请执行 alembic upgrade head 后重启。"
                 "如紧急回滚可设置 SKIP_SCHEMA_CHECK=1。"
             )
+    # Task 10+11：启动回收孤儿任务。上一进程崩在跑中的 run 会让会话 active_run_id 永久
+    # 占用（用户此后每次提交都 409）—— 启动时把 leased 台账标 orphaned 并释放会话。
+    # 置于 schema drift 校验**之后**（表已存在）、**不受** SKIP_SCHEMA_CHECK 管辖；
+    # 失败只记 ERROR、不阻塞启动（善后路径不掩盖启动，且回收失败不致命）。
+    try:
+        from app.infrastructure.database import getSessionFactory as _getSessionFactory
+        from app.services.research_session_service import ResearchSessionService
+        from app.services.research_task_service import reapOrphanedTasks
+
+        async with _getSessionFactory()() as reapSession:
+            orphanedSessionIds = await reapOrphanedTasks(
+                reapSession, sessionService=ResearchSessionService()
+            )
+            await reapSession.commit()
+        if orphanedSessionIds:
+            logger.warning("启动回收孤儿研究任务：释放 %d 个会话", len(orphanedSessionIds))
+    except Exception:
+        logger.exception("启动回收孤儿研究任务失败（不阻塞启动）")
+
     # 启动期 seed：把 AGENT_DEFAULT_BINDINGS 常量中的 binding 写入 agent_definition.tool_name。
     # 幂等（仅处理 tool_name IS NULL 的行）；失败 fail-fast，由 lifespan 抛 RuntimeError。
     # 置于连接预检 + schema drift 校验之后，享受既有 fail-fast 防线。
@@ -404,6 +423,7 @@ def createApp() -> FastAPI:
         model_config,
         ontology,
         organizations,
+        research,
         roles,
         reports,
         session,
@@ -509,6 +529,7 @@ def createApp() -> FastAPI:
     app.include_router(wiki_import.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(wiki.router, prefix="/api/v1", tags=["wiki"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    app.include_router(research.router, prefix="/api/v1", tags=["research"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(users.router, tags=["users"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(roles.router, tags=["roles"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(organizations.router, tags=["organizations"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
@@ -566,7 +587,7 @@ def createApp() -> FastAPI:
     from app.services.mcp_server import mcp as _mcpServer
 
     _mcpApp = _mcpServer.http_app(path="/mcp", transport="streamable-http")
-    app.router.routes.append(Mount("", app=McpAuthMiddleware(_mcpApp)))
+    app.router.routes.append(Mount("/mcp", app=McpAuthMiddleware(_mcpApp)))
 
     # 合并 fastmcp 子 app 的 lifespan 到现有 lifespan（schema drift / 引擎预热）。
     _origFastapiLifespan = lifespan

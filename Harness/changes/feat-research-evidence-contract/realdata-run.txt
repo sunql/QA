@@ -1,0 +1,32 @@
+=== 真实数据验证 2026-10-13T02:37:40Z · git HEAD 17cd1f0 ===
+命令：DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test' .venv/bin/python -m scripts.research_evidence_realdata
+退出码：0    stderr：（空）
+
+[guard] 目标库 = qa_metadata_test @ localhost:5434（测试库，写库闸放行）
+
+[purge] 上次运行的残留：删会话 0 行、连同 step_result 0 行（逐级清理）
+[seed] 会话 54781674-e6e6-4ff5-bc7d-8aa95410c74a / turn f8da6872-e5f5-4b84-81f9-f9afb1ceacfa / 版本 v1=59868e20-fc48-4b2d-b493-8356401e9d17 v2=3490e874-987c-405a-8bca-c1a7df44129d（各 3 步）
+
+── 路径 1：跨版本聚合（Task 8 / D25）
+  [PASS] 跨版本聚合返回 6 行（两个版本各 3 行） — 实际 6
+  [PASS] 两个 run_state 版本的行都在（只按单版本读会漏）
+  [PASS] 排序 = (版本时序, step_index)：v1 在前、版本内按步序
+  [PASS] step_index 序列 = [0,1,2,0,1,2]
+  [PASS] status 派生正确（success/empty/failed 三路）
+  [PASS] 无关 turn 读取为空（不串号）
+
+── 路径 2：报告 payload.evidence 透传（Task 8）
+  [PASS] 报告 evidence.stepResults 6 条 — 实际 6
+  [PASS] 字段集恰为契约集（无 rows / raw_result_ref）
+  [PASS] 报告透传 == DB 真值（行数 + step_index 序列，独立直查） — 报告 [0, 1, 2, 0, 1, 2] vs DB [0, 1, 2, 0, 1, 2]
+  [PASS] 报告照常产出 markdown
+
+── 路径 3：summary 数值标量序列化口径（D14）
+  [PASS] summary 数值标量端到端是字符串（非 float）
+  [PASS] 至少断言到一个数值标量（否则本断言形同虚设） — 计 30
+  [PASS] 首步 baseline == '100'（Decimal->str 逐字） — 实际 '100'
+  [PASS] 首步 schemaVersion == 1（raw_result_ref 带的 schema 版本）
+
+断言合计 14 条，通过 14 条
+
+REALDATA RESULT: PASS

@@ -70,12 +70,15 @@ log() {
 
 # ---- 锁定 ----
 cleanup_lock() { rm -f "$LOCK_FILE"; }
-trap cleanup_lock EXIT
 if [[ -e "$LOCK_FILE" ]]; then
-  log "ERROR: 检测到另一备份进程在跑（lock=$LOCK_FILE），退出"
+  # 注意 ${LOCK_FILE} 的花括号：紧跟全角「）」时 `$LOCK_FILE），退出` 会被 bash
+  # 当成变量名的一部分，set -u 下直接 unbound variable（本行曾因此失效）
+  log "ERROR: 检测到另一备份进程在跑（lock=${LOCK_FILE}），退出"
   exit 1
 fi
 touch "$LOCK_FILE"
+# 取得锁之后才登记清理：放在上面的检查之前，走冲突分支时会删掉别人的锁
+trap cleanup_lock EXIT
 
 # ---- 前置检查 ----
 if ! command -v docker >/dev/null 2>&1; then
@@ -99,7 +102,9 @@ restart_neo4j() {
     docker start "$CONTAINER" >/dev/null 2>&1 || log "WARN: 启动 $CONTAINER 失败，需手动处理"
   fi
 }
-trap restart_neo4j EXIT
+# bash 的 trap 是**覆盖**不是叠加：只写 restart_neo4j 会顶掉上面的
+# cleanup_lock，导致锁文件永不删除、第二次运行必被自己的残留锁挡住
+trap 'restart_neo4j; cleanup_lock' EXIT
 
 # ---- 备份 ----
 TIMESTAMP="$(date '+%Y-%m-%d_%H%M')"

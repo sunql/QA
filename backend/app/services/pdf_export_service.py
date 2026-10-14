@@ -10,8 +10,13 @@
   我们再用 ``html.parser`` 拆分为 block 节点（标题/段落/列表/引用/代码块/表格），
   每个 block 转 platypus Flowable。直接 ``md.convert(text)`` 返回的 HTML
   给 Paragraph 渲染时不支持表格/列表/嵌套结构。
-- 图表区采用「灰色占位框 + 类型标签」策略：图表对象未持久化，
-  不能在服务端重渲染（保留位置 + 信息密度即可，避免重新跑 SQL 的性能与权限风险）。
+- 图表区（0105 起）：**不再一律是占位框**。分三条路：
+  1. 有前端回传的 PNG → 直接嵌 ``Image``（像素与前端的图一致）；
+  2. ``table`` / ``kpi`` → 由本服务从 ``chart_option`` **原生画**（表格/指标块），
+     不吃图片 —— 前端截图失败时这两种仍然出得来；
+  3. 其余 kind 且无 PNG → 保留灰色占位框（存量消息 / 截图失败时的兜底）。
+  服务端不重画 ECharts：那会是第二套渲染器，与前端必然长得不一样，还引入
+  重跑 SQL 的性能与权限风险（同 ``evaluation_report_export_service`` 的判断）。
 - 代码块（SQL）等宽字体用 Courier。
 """
 
@@ -23,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from html.parser import HTMLParser
+from io import BytesIO
 from typing import Any
 
 import markdown
@@ -35,6 +41,7 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
+    Image as PdfImage,
     KeepTogether,
     PageTemplate,
     Paragraph,
@@ -45,12 +52,19 @@ from reportlab.platypus import (
 )
 from reportlab.platypus.flowables import HRFlowable
 
+from app.domain.enums import ChartType
+
 logger = logging.getLogger(__name__)
 
 
 # 中文 CID 字体（reportlab 内置）；不支持粗体/斜体变体
 _CJK_FONT_NAME = "STSong-Light"
 _MONO_FONT_NAME = "Courier"
+
+# 图表位图在 PDF 里能占的正文框 = 正文可用宽/高 × 此比例。与占位框同宽（0.7），让
+# 同一份 PDF 里各轮的图视觉尺度一致；**宽高两轴都用它**，所以是「框」而不是「宽」——
+# 只夹宽度会让窄高图的高度溢出版面。
+_CHART_IMAGE_BOX_RATIO = 0.7
 
 # 支持的 HTML block 标签集合（其它降级为段落）
 _BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "blockquote", "pre", "table", "hr"}
@@ -162,8 +176,16 @@ class ChatExportTurn:
     user_time: datetime | None
     assistant_content: str
     assistant_time: datetime | None
+    # assistant 行的 SessionMessage 主键：把前端回传的位图按 id 对到轮次上。
+    # None 表示该轮无对应消息（如「仅有 user 行」的降级轮）。
+    message_id: int | None = None
     sql: str | None = None
     chart_type: str | None = None
+    # 0105：该轮的图表渲染负载（服务端结构，不含颜色）。table/kpi 直接从这里画。
+    chart_option: dict | None = None
+    # 0105：前端离屏渲出的 PNG 原始字节（不含 data: 前缀）。仅 ECharts 类 kind 有；
+    # table/kpi 不走图片，故为 None 时那两类照样出图。
+    chart_image: bytes | None = None
     model_name: str | None = None
     tokens_used: int | None = None
     cost: Decimal | None = None
@@ -380,10 +402,10 @@ class ChatExportPdfBuilder:
             flowables.append(Spacer(1, 4))
             flowables.append(Paragraph("<b>SQL：</b>", self._styles["body"]))
             flowables.append(self._sql_flowable(turn.sql))
-        # 图表占位（无 chart_option，标记类型 + 占位说明）
+        # 图表（0105）：真图 > 原生 table/kpi > 占位框，三档降级见 _chart_flowables
         if turn.chart_type:
             flowables.append(Spacer(1, 4))
-            flowables.append(self._chart_placeholder_flowable(turn.chart_type))
+            flowables.extend(self._chart_flowables(turn))
         # 元信息：模型/Tokens/成本
         meta_bits: list[str] = []
         if turn.model_name:
@@ -580,6 +602,123 @@ class ChatExportPdfBuilder:
                 borderPadding=4,
             ),
         )
+
+    def _chart_flowables(self, turn: ChatExportTurn) -> list:
+        """该轮回答的图表区 flowables（三档降级）。
+
+        1. **有前端回传的 PNG** → 直接嵌 ``Image``。前端已经用 ECharts 渲过这张图，
+           回传的就是同一张，像素级一致。
+        2. **table / kpi** → 从 ``chart_option`` 原生画。这两类本质是文字，服务端
+           画得出来，**不吃图片** —— 前端截图失败时它们照样出得来。
+        3. **其余 kind 且无 PNG** → 灰色占位框（存量消息 / 截图失败的兜底）。
+
+        ``table`` / ``kpi`` 刻意排在图片之前：官方渲染比位图更清晰、可选中，
+        且不受截图分辨率与暗色主题影响。
+        """
+        if turn.chart_type == ChartType.TABLE.value:
+            table = self._table_from_chart_option(turn.chart_option)
+            if table:
+                return table
+        if turn.chart_type == ChartType.KPI.value:
+            kpi = self._kpi_flowable(turn.chart_option)
+            if kpi:
+                return kpi
+        if turn.chart_image:
+            image = self._chart_image_flowable(turn.chart_image)
+            if image is not None:
+                return [image]
+        return [self._chart_placeholder_flowable(turn.chart_type)]
+
+    def _chart_image_flowable(self, imageBytes: bytes) -> PdfImage | None:
+        """PNG 字节 → 等比缩放到正文框内的 ``Image``；解不出图返回 None（降级占位）。
+
+        只可能是 PNG（controller 已按 ``data:image/png;base64,`` 前缀 + 字节/像素
+        上限校验过），这里再挡一道：**解不开的字节会让 reportlab 在 build 时抛异常，
+        把整份导出的 PDF 一起带走** —— 一张图换一份报告的错配。
+
+        **长宽都要夹**。只夹宽度时，一张又窄又高的图（100×4000）宽度合规、高度却
+        溢出页面，reportlab 会在 ``doc.build()`` 里抛 ``LayoutError`` —— 那已经出了
+        本函数的 try，整份导出变 500 而不是按设计降级成占位框。
+        """
+        try:
+            image = PdfImage(BytesIO(imageBytes))
+            box_width = (self._PAGE_WIDTH - 2 * self._MARGIN) * _CHART_IMAGE_BOX_RATIO
+            box_height = (self._PAGE_HEIGHT - 2 * self._MARGIN) * _CHART_IMAGE_BOX_RATIO
+            # drawWidth/drawHeight 是 platypus Image 的公开可变属性（构造后、wrap 前
+            # 设置）。取两个方向所需比例的**较小者**才同时满足；用 min(…, 1.0) 保证
+            # 小图不被放大（放大只会糊）。
+            scale = min(box_width / image.drawWidth, box_height / image.drawHeight, 1.0)
+            if scale < 1.0:
+                image.drawWidth *= scale
+                image.drawHeight *= scale
+            return image
+        except Exception:
+            logger.warning("导出图表图片解码失败，降级为占位框", exc_info=True)
+            return None
+
+    def _table_from_chart_option(self, chartOption: dict | None) -> list:
+        """``{"columns", "rows"}`` 负载 → 带表头的表格（+ 截断说明）；无从画起返回 []。
+
+        rows 可能已被**落库时**截到 200 行（``truncated: true``，见
+        ``chat_chart_persist._PERSIST_MAX_TABLE_ROWS``）—— 如实标注，不假装是全部。
+        """
+        if not isinstance(chartOption, dict):
+            return []
+        columns = chartOption.get("columns")
+        rows = chartOption.get("rows")
+        if not isinstance(columns, list) or not columns:
+            return []
+        body = [[self._escape_cell(col) for col in columns]]
+        for row in rows or []:
+            if isinstance(row, dict):
+                body.append([self._escape_cell(row.get(col)) for col in columns])
+        if len(body) == 1:
+            return []
+        flowables: list = [self._build_table_flowable(body)]
+        if chartOption.get("truncated"):
+            flowables.append(Paragraph(
+                f"（表格仅显示前 {len(body) - 1} 行，完整结果请回看会话）",
+                self._styles["chart_caption"],
+            ))
+        return flowables
+
+    def _kpi_flowable(self, chartOption: dict | None) -> list:
+        """``{"kpi": {label, value, unit, delta}}`` 负载 → 指标块（label + 大号数值）。
+
+        与表格同源：KPI 不是 ECharts，服务端直接排版比位图清晰。
+        """
+        kpi = chartOption.get("kpi") if isinstance(chartOption, dict) else None
+        if not isinstance(kpi, dict):
+            return []
+        label = kpi.get("label")
+        value = kpi.get("value")
+        if value is None and not label:
+            return []
+        unit = kpi.get("unit") or ""
+        value_text = "—" if value is None else f"{value:g}"
+        flowables: list = [Paragraph(
+            f"<b>{self._escape_cell(label) or '指标'}</b>："
+            f"<font size=14>{self._escape_cell(value_text)}</font>{self._escape_cell(unit)}",
+            self._styles["body"],
+        )]
+        delta = kpi.get("delta")
+        if delta is not None:
+            flowables.append(Paragraph(
+                f"<font color='#666666'>变化: {self._escape_cell(f'{delta:+g}')}</font>",
+                self._styles["chart_caption"],
+            ))
+        return flowables
+
+    @staticmethod
+    def _escape_cell(value: Any) -> str:
+        """图表负载里的裸值 → 可进 Paragraph 的安全文本。
+
+        值来自业务库（供应商名、物料描述等），**必须转义**：不转义的话一个含
+        ``<b>`` 的名称就能污染整段排版，含非法标签时 reportlab 会直接抛异常。
+        """
+        if value is None:
+            return ""
+        return html.escape(str(value), quote=False)
 
     def _chart_placeholder_flowable(self, chart_type: str) -> Table:
         """图表占位框：灰色边框 + 类型标签（chart_option 未持久化，无重渲染）。"""

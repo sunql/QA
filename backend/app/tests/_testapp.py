@@ -34,6 +34,7 @@ from app.api.v1 import (
     evaluation_report,
     features,
     feature_rules,
+    graph,
     graph_traversal,
     kpi_catalog,
     local_import,
@@ -42,6 +43,7 @@ from app.api.v1 import (
     model_config,
     ontology,
     organizations,
+    research,
     roles,
     reports,
     session,
@@ -180,6 +182,7 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
     testApp.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    testApp.include_router(research.router, prefix="/api/v1", tags=["research"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(
         data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
@@ -234,6 +237,8 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    # 图只读查询（/system/graph/nodes*）。此前漏挂 ⇒ 该端点零集成覆盖，
+    # 「列表不下发主键 + 关系端点恒返空」两个静默缺陷得以长期隐身。
     testApp.include_router(graph.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(vectors.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(

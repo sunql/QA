@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ConflictError, ValidationError
-from app.domain.models import WikiOntologyLink
+from app.domain.models import OntologyMetric, WikiOntologyLink
 from app.services.wiki_link_service import (
     LinkNotFoundError, WikiLinkService,
 )
@@ -166,7 +166,7 @@ async def test_list_linkable_targets_query_filters_by_name(dbSession):
 
 
 async def test_list_linkable_targets_invalid_type_returns_empty(dbSession):
-    targets = await _svc.listLinkableTargets(dbSession, "metric", query=None, limit=10)
+    targets = await _svc.listLinkableTargets(dbSession, "unknown", query=None, limit=10)
     assert targets == []
 
 
@@ -175,7 +175,72 @@ async def test_create_link_invalid_type_returns_422(dbSession):
     with pytest.raises(ValidationError):
         await _svc.createLink(
             dbSession,
-            page_id="p001", chunk_id=None, ontology_type="metric",
+            page_id="p001", chunk_id=None, ontology_type="unknown",
             ontology_id=12, weight=Decimal("1.00"), note=None,
             actor=await _actor(42),
         )
+
+
+async def test_list_configured_ontology_types_excludes_revoked(dbSession):
+    """只统计**未撤销**的链接类型。
+
+    构造要点（这一条写错整个测试就是假的）：被撤销的那条必须用一个
+    **只出现在被撤销行里**的类型，否则删掉实现里的 ``revoked_time IS NULL``
+    过滤时结果集不变、测试照样绿 —— 那就成了对核心契约零保护的假测试。
+    """
+    await _seed_page(dbSession)
+    actor = await _actor(42)
+    await _svc.createLink(
+        dbSession, page_id="p001", chunk_id=None, ontology_type="property",
+        ontology_id=13, weight=Decimal("1.00"), note=None, actor=actor,
+    )
+    revoked = await _svc.createLink(
+        dbSession, page_id="p001", chunk_id=None, ontology_type="class",
+        ontology_id=12, weight=Decimal("1.00"), note=None, actor=actor,
+    )
+    await _svc.revokeLink(dbSession, revoked.id, actor=actor)
+
+    # class 只以「已撤销」的身份出现 ⇒ 漏掉 revoked 过滤会得到 {"class","property"}
+    assert await _svc.listConfiguredOntologyTypes(dbSession) == {"property"}
+
+
+async def test_list_configured_ontology_types_empty_when_no_links(dbSession):
+    """空表返回空集 —— 这是「没配就零成本」的前提。"""
+    assert await _svc.listConfiguredOntologyTypes(dbSession) == set()
+
+
+async def test_list_linkable_targets_metric_returns_metrics(dbSession):
+    """metric 现在必须返回指标，而不是空列表。"""
+    dbSession.add(OntologyMetric(
+        id=801, metric_name="KPI_SUPPLIER_OTD", metric_alias="供应商准时交付率",
+        formula="SUM(a)/SUM(b)", agg_function="SUM",
+    ))
+    await dbSession.flush()
+
+    targets = await _svc.listLinkableTargets(dbSession, "metric", query=None, limit=10)
+    assert [(t.id, t.type, t.name, t.alias) for t in targets] == [
+        (801, "metric", "KPI_SUPPLIER_OTD", "供应商准时交付率"),
+    ]
+
+
+async def test_create_metric_link_persists(dbSession):
+    """metric 链接必须能落库（service 层成功路径）。
+
+    与 integration 的 test_create_metric_link_accepted 互补：那条走 HTTP 全链路，
+    这条只压 service 层（createLink 的类型校验 + 落库两件事）。
+
+    注意：本用例**不能**用来钉 ORM 的 chk_link_type —— unit/ 目录由
+    app/tests/unit/conftest.py 覆盖 dbSession 为真实 PG（表结构由 alembic 产生），
+    ORM 元数据不参与建表。app/domain/models.py 那处 CheckConstraint 与迁移 0106
+    对齐是为了 ORM↔迁移一致；当前**没有任何测试路径会强制执行它**
+    （根 conftest 的 create_all 路径已无消费者）。
+    """
+    await _seed_page(dbSession)
+    row = await _svc.createLink(
+        dbSession,
+        page_id="p001", chunk_id=None, ontology_type="metric",
+        ontology_id=801, weight=Decimal("1.00"), note=None,
+        actor=await _actor(42),
+    )
+    assert row.ontology_type == "metric"
+    assert row.ontology_id == 801

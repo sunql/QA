@@ -5,6 +5,7 @@ Run: cd backend && pytest app/tests/integration/test_wiki_link_injector_e2e.py -
 import asyncio
 from datetime import datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -90,6 +91,30 @@ class _StubEmbeddingService:
         datasourceId: int | None = None,
     ) -> list[Any]:
         return []
+
+
+class _RecordingOntology:
+    """包住真实 OntologyService，只拦截 searchByKeyword 并记录 typeFilter。
+
+    类召回继续走真实实现，只有 property / metric 这两个新增的按需召回被替换成可控结果。
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.calls: list[str | None] = []
+        self.hits: dict[str, list[Any]] = {}
+        self.raiseOn: set[str] = set()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def searchByKeyword(self, query, *, topK=5, typeFilter=None):
+        self.calls.append(typeFilter)
+        if typeFilter in self.raiseOn:
+            raise RuntimeError("recall boom")
+        if typeFilter in self.hits:
+            return list(self.hits[typeFilter])
+        return await self._inner.searchByKeyword(query, topK=topK, typeFilter=typeFilter)
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +207,45 @@ async def wiki_link_seed(dbSession: AsyncSession) -> None:
             created_by=1,
         ))
     await dbSession.commit()
+
+
+@pytest.fixture
+async def property_link_seed(
+    dbSession: AsyncSession,
+    wiki_page_seed: None,  # noqa: ARG001 —— 显式声明 FK 前置：link.page_id → wiki_page
+) -> None:
+    """Seed a *property* wiki link —— 证明 property 类型真的会生效（修复前它死链）。"""
+    row = (await dbSession.execute(
+        select(WikiOntologyLink).where(
+            WikiOntologyLink.page_id == "wp001",
+            WikiOntologyLink.ontology_type == "property",
+            WikiOntologyLink.ontology_id == 401,
+        )
+    )).scalar_one_or_none()
+    if row is None:
+        dbSession.add(WikiOntologyLink(
+            page_id="wp001", chunk_id=None, ontology_type="property",
+            ontology_id=401, weight=Decimal("1.0"), note="属性口径", created_by=1,
+        ))
+    await dbSession.commit()
+
+
+@pytest.fixture
+async def recording_ontology(
+    client_with_fakes: AsyncClient,  # noqa: ARG001 —— 触发 _service 装配
+    monkeypatch: pytest.MonkeyPatch,
+) -> _RecordingOntology:
+    """把 _service._ontology 换成记录型替身。
+
+    **必须走 monkeypatch**（与同文件 `client_with_fakes` 的 `_modelRouter` / `_embedding`
+    一致）：裸赋值 `chatModule._service._ontology = recorder` 不会还原，`hits` /
+    `raiseOn` 会泄漏到后续用例 —— 尤其 `test_extra_recall_skipped_when_no_extra_links`
+    会被前一个用例留下的 `hits["property"]` 假命中，成本守卫静默失效。
+    """
+    import app.api.v1.chat as chatModule
+    recorder = _RecordingOntology(chatModule._service._ontology)
+    monkeypatch.setattr(chatModule._service, "_ontology", recorder)
+    return recorder
 
 
 @pytest.fixture
@@ -324,12 +388,124 @@ async def test_wiki_trace_records_correct_fields(
     t = traces[0]
     assert t.session_id == "s-wiki-trace-fields"
     assert t.question is not None
-    assert t.ontology_type in ("class", "property")
+    # 绑的是 class 链接（wiki_link_seed），trace 必须记下同一个类型 ——
+    # 原断言 `in ("class","property")` 由 DB CHECK 约束保证恒真，等于没测。
+    assert t.ontology_type == "class"
     assert t.ontology_id > 0
     assert t.page_id is not None
     assert t.prompt_position == "after_context"
     assert t.injected_chars >= 0
     assert t.score >= 0
+
+
+async def test_extra_recall_skipped_when_no_extra_links(
+    client_with_fakes: AsyncClient,
+    recording_ontology: _RecordingOntology,
+    dbSession: AsyncSession,  # noqa: ARG001 —— 由 client fixture 触发 truncate
+) -> None:
+    """成本回归守卫：库里没有 property/metric 链接时，绝不发起额外语义召回。
+
+    这一条守的是「按需付费」这个设计本身。少了它，将来有人把
+    listConfiguredOntologyTypes 的判断删掉，每轮 chat 都会白花一次 embedding +
+    一次 Milvus 检索，而其它用例全是绿的。
+    """
+    resp = await client_with_fakes.post(
+        "/api/v1/chat",
+        json={"question": "上个月供应商准时交付率", "datasourceId": 1,
+              "sessionId": "s-wiki-cost-guard"},
+        headers={"X-User-Id": "1", "X-User-Roles": "admin"},
+    )
+    assert resp.status_code == 200, f"Got {resp.status_code}: {resp.text}"
+    assert "property" not in recording_ontology.calls
+    assert "metric" not in recording_ontology.calls
+
+
+async def test_property_link_injected_when_property_recalled(
+    client_with_fakes: AsyncClient,
+    recording_ontology: _RecordingOntology,
+    property_link_seed: None,
+    dbSession: AsyncSession,
+) -> None:
+    """property 链接在其属性被召回时必须注入（修复前：恒不注入）。"""
+    recording_ontology.hits["property"] = [
+        SimpleNamespace(id=401, score=0.9),
+    ]
+
+    resp = await client_with_fakes.post(
+        "/api/v1/chat",
+        json={"question": "上个月供应商准时交付率", "datasourceId": 1,
+              "sessionId": "s-wiki-property"},
+        headers={"X-User-Id": "1", "X-User-Roles": "admin"},
+    )
+    assert resp.status_code == 200, f"Got {resp.status_code}: {resp.text}"
+    assert recording_ontology.calls.count("property") == 1
+
+    traces = (await dbSession.execute(
+        select(Nl2sqlWikiTrace).where(
+            Nl2sqlWikiTrace.session_id == "s-wiki-property",
+            Nl2sqlWikiTrace.ontology_type == "property",
+        )
+    )).scalars().all()
+    assert len(traces) == 1
+    assert traces[0].ontology_id == 401
+    assert traces[0].page_id == "wp001"
+
+
+async def test_property_link_skipped_when_property_not_recalled(
+    client_with_fakes: AsyncClient,
+    recording_ontology: _RecordingOntology,
+    property_link_seed: None,
+    dbSession: AsyncSession,
+) -> None:
+    """配了属性链接、但该属性没被召回 → 不注入（不能退化成「配了就无脑注入」）。"""
+    recording_ontology.hits["property"] = [SimpleNamespace(id=999, score=0.9)]
+
+    resp = await client_with_fakes.post(
+        "/api/v1/chat",
+        json={"question": "上个月供应商准时交付率", "datasourceId": 1,
+              "sessionId": "s-wiki-property-miss"},
+        headers={"X-User-Id": "1", "X-User-Roles": "admin"},
+    )
+    assert resp.status_code == 200, f"Got {resp.status_code}: {resp.text}"
+
+    traces = (await dbSession.execute(
+        select(Nl2sqlWikiTrace).where(
+            Nl2sqlWikiTrace.session_id == "s-wiki-property-miss",
+            Nl2sqlWikiTrace.ontology_type == "property",
+        )
+    )).scalars().all()
+    assert traces == []
+
+
+async def test_property_recall_failure_does_not_block_class_injection(
+    client_with_fakes: AsyncClient,
+    recording_ontology: _RecordingOntology,
+    property_link_seed: None,
+    dbSession: AsyncSession,
+) -> None:
+    """属性召回抛异常 → 只跳过 property，class 链接照常注入，且不抛到调用方。
+
+    失败隔离的双向断言：坏输入（抛异常的 property）被降级处理，
+    正确输入（class 链接）不受牵连。
+    """
+    recording_ontology.raiseOn = {"property"}
+
+    resp = await client_with_fakes.post(
+        "/api/v1/chat",
+        json={"question": "上个月供应商准时交付率", "datasourceId": 1,
+              "sessionId": "s-wiki-property-fail"},
+        headers={"X-User-Id": "1", "X-User-Roles": "admin"},
+    )
+    assert resp.status_code == 200, f"Got {resp.status_code}: {resp.text}"
+
+    class_traces = (await dbSession.execute(
+        select(Nl2sqlWikiTrace).where(
+            Nl2sqlWikiTrace.session_id == "s-wiki-property-fail",
+            Nl2sqlWikiTrace.ontology_type == "class",
+        )
+    )).scalars().all()
+    assert len(class_traces) >= 1
+    assert class_traces[0].ontology_id == 201
 
 
 async def test_acl_blocks_non_admin(client: AsyncClient) -> None:

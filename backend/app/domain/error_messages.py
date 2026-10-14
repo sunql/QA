@@ -243,13 +243,51 @@ MSG_SCHEMA_CHAT_HISTORY_MESSAGE_INTERRUPTED = (
     "assistant 行：是否由断连兜底写入（内容可能是半截回答）；user 行：恒 false"
 )
 MSG_SCHEMA_CHAT_HISTORY_MESSAGES = "按时间正序排列的消息流（user → assistant 交错）"
+MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CHART_TYPE = (
+    "assistant 行：该轮回答的图表类型（值域同 chartType）；无图/未落库为 null"
+)
+MSG_SCHEMA_CHAT_HISTORY_MESSAGE_CHART_OPTION = (
+    "assistant 行：该轮回答的图表渲染负载（不含颜色，由前端主题层补）；无图为 null。"
+    "TABLE 负载在落库时截到 200 行并带 truncated=true"
+)
+MSG_SCHEMA_CHAT_HISTORY_MESSAGE_TABLE_OPTION = (
+    "assistant 行：图之外的明细表负载（{columns, rows, truncated}）；无表/未落库为 null"
+)
+MSG_SCHEMA_CHAT_HISTORY_MESSAGE_VISUAL_RATIONALE = (
+    "assistant 行：为什么这么画/不画的判断依据（{code, params}）；无依据为 null"
+)
+MSG_SCHEMA_CHAT_EXPORT_MESSAGE_ID = (
+    "非空时只导出该 assistant 消息 + 其上一条 user 消息；必须属于该 session"
+)
+MSG_SCHEMA_CHAT_EXPORT_CHARTS = (
+    "前端离屏渲染好的图表位图列表（0105）。为空 ⇒ PDF 里图表回落占位框"
+)
+MSG_SCHEMA_CHAT_EXPORT_CHART_MESSAGE_ID = (
+    "该位图对应哪条 assistant 消息（SessionMessage 主键）；必须属于该 session"
+)
+MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG = (
+    "带 data:image/png;base64, 前缀的 PNG data URL"
+)
 MSG_HISTORY_LISTING_LIMIT = "返回条数上限（1-200，默认 50）"
 MSG_HISTORY_LISTING_OFFSET = "分页偏移（默认 0）"
 MSG_HISTORY_MESSAGES_LIMIT = "消息条数上限（1-1000，默认 200）"
 MSG_HISTORY_MESSAGES_BEFORE_ID = "分页 cursor：取该 id 之前更早的消息"
+MSG_HISTORY_MESSAGES_TAIL = "取最新的 limit 条（仍按时间正序返回）；与 before_id 同给时以 before_id 为准"
 MSG_HISTORY_DELETE_NOT_FOUND = "会话不存在或已无消息可删"
 MSG_EXPORT_SESSION_EMPTY = "会话没有任何消息可导出"
 MSG_EXPORT_MESSAGE_NOT_FOUND = "指定的 message_id 不属于该会话"
+# 0105：导出端点改 POST 并接收前端回传的图表位图。失败信息一律**不回显 id**
+# （沿用本文件 MSG_EXPORT_MESSAGE_NOT_FOUND 的安全审查 HIGH-3 口径），否则
+# 错误响应会变成「这个 id 在不在这个会话里」的枚举探针。
+MSG_EXPORT_CHART_IMAGE_INVALID = "图表图片格式不合法（需为 data:image/png;base64, 前缀的 PNG）"
+MSG_EXPORT_CHART_IMAGE_TOO_LARGE = "单张图表图片超出大小上限"
+MSG_EXPORT_CHART_TOTAL_TOO_LARGE = "图表图片总大小超出上限"
+# 压缩尺寸之外还要卡**解出来的像素**：一张 12000×12000 的纯色 PNG 只有 580 KB，
+# 稳稳通过上面的字节闸，解出来却是 1.44 亿像素、单个约 3 GB —— 解压炸弹。
+MSG_EXPORT_CHART_IMAGE_TOO_MANY_PIXELS = "单张图表图片分辨率超出上限"
+MSG_EXPORT_CHART_TOTAL_TOO_MANY_PIXELS = "图表图片总分辨率超出上限"
+MSG_EXPORT_CHART_COUNT_EXCEEDED = "图表图片数量超出上限"
+MSG_EXPORT_CHART_MESSAGE_NOT_FOUND = "图表图片对应的消息不属于该会话"
 MSG_HISTORY_EXPORT_FILENAME = "qa-session-{sessionId}.pdf"
 MSG_HISTORY_EXPORT_MESSAGE_FILENAME = "qa-message-{messageId}.pdf"
 MSG_HISTORY_EXPORT_CONTENT_DISPOSITION = "attachment; filename=\"{filename}\""

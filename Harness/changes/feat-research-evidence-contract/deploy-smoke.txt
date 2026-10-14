@@ -1,0 +1,86 @@
+=== 部署冒烟 2026-10-13T02:37:31Z ===
+git HEAD: 17cd1f0  branch: feat/multi-step-persist
+tracked 未提交改动: 1 项
+
+--- 1) 容器状态 ---
+qa-backend	Up 14 seconds	qa-system-backend
+qa-frontend	Up 19 minutes	qa-system-frontend
+
+--- 2) 后端 openapi 可达性 ---
+HTTP 200  http://localhost:8000/openapi.json
+
+--- 3) research 路由（openapi paths） ---
+/api/v1/research/checkpoints/{checkpointId}/answer
+/api/v1/research/sessions
+/api/v1/research/sessions/{sessionId}
+/api/v1/research/sessions/{sessionId}/abort
+/api/v1/research/sessions/{sessionId}/report
+/api/v1/research/sessions/{sessionId}/reports
+/api/v1/research/sessions/{sessionId}/turns
+/api/v1/research/stream
+
+--- 4) 前端可达性 ---
+HTTP 200  http://localhost:5173/
+
+--- 5) 生产库 alembic head（应为 0119）+ research 表 ---
+0119
+research_checkpoint
+research_finding
+research_report
+research_run_state
+research_session
+research_step_result
+research_turn
+
+--- 6) 环节一新表的真实结构（0118/0119/创建结果） ---
+                        Table "public.research_run_state"
+      Column      |           Type           | Collation | Nullable |   Default   
+------------------+--------------------------+-----------+----------+-------------
+ id               | uuid                     |           | not null | 
+ session_id       | uuid                     |           | not null | 
+ turn_id          | uuid                     |           | not null | 
+ parent_run_id    | uuid                     |           |          | 
+ current_question | text                     |           | not null | ''::text
+ mode             | character varying(20)    |           | not null | 
+ scope_version    | integer                  |           | not null | 1
+ datasource_id    | integer                  |           |          | 
+ schema_version   | integer                  |           | not null | 1
+ model_id         | integer                  |           |          | 
+ state_payload    | jsonb                    |           | not null | '{}'::jsonb
+ created_at       | timestamp with time zone |           | not null | 
+ updated_at       | timestamp with time zone |           | not null | 
+Indexes:
+    "research_run_state_pkey" PRIMARY KEY, btree (id)
+    "ix_research_run_state_session_id" btree (session_id)
+    "ix_research_run_state_turn_id" btree (turn_id)
+Foreign-key constraints:
+    "research_run_state_parent_run_id_fkey" FOREIGN KEY (parent_run_id) REFERENCES research_run_state(id) ON DELETE SET NULL
+    "research_run_state_session_id_fkey" FOREIGN KEY (session_id) REFERENCES research_session(id) ON DELETE CASCADE
+    "research_run_state_turn_id_fkey" FOREIGN KEY (turn_id) REFERENCES research_turn(id) ON DELETE CASCADE
+Referenced by:
+    TABLE "research_session" CONSTRAINT "fk_research_session_active_run_id" FOREIGN KEY (active_run_id) REFERENCES research_run_state(id) ON DELETE SET NULL
+    TABLE "research_step_result" CONSTRAINT "fk_research_step_result_run_state_id" FOREIGN KEY (run_state_id) REFERENCES research_run_state(id) ON DELETE CASCADE
+    TABLE "research_run_state" CONSTRAINT "research_run_state_parent_run_id_fkey" FOREIGN KEY (parent_run_id) REFERENCES research_run_state(id) ON DELETE SET NULL
+
+                     Table "public.research_step_result"
+      Column      |           Type           | Collation | Nullable | Default 
+------------------+--------------------------+-----------+----------+---------
+ id               | uuid                     |           | not null | 
+ run_state_id     | uuid                     |           | not null | 
+ step_index       | integer                  |           | not null | 
+ step_type        | character varying(50)    |           | not null | 
+ sql_text         | text                     |           |          | 
+ raw_result_ref   | jsonb                    |           |          | 
+ evidence_summary | jsonb                    |           |          | 
+ status           | character varying(20)    |           | not null | 
+ error            | text                     |           |          | 
+ created_at       | timestamp with time zone |           | not null | 
+Indexes:
+    "research_step_result_pkey" PRIMARY KEY, btree (id)
+    "ix_research_step_result_run_state_id" btree (run_state_id)
+Foreign-key constraints:
+    "fk_research_step_result_run_state_id" FOREIGN KEY (run_state_id) REFERENCES research_run_state(id) ON DELETE CASCADE
+
+
+--- 7) 启动无 drift 报错（应为空） ---
+(空 —— drift 门通过)

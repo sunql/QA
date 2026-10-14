@@ -67,7 +67,7 @@ export interface SemanticRelationTabProps {
 
 /** 类 × 类语义关系（PG SSOT + Neo4j 镜像边）：表格 + 增删弹窗 + 一键补关系。 */
 export default function SemanticRelationTab({ classes }: SemanticRelationTabProps) {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const [relations, setRelations] = useState<OntologySemanticRelation[]>([]);
   const [loading, setLoading] = useState(false);
   const [backfilling, setBackfilling] = useState(false);
@@ -245,7 +245,7 @@ export default function SemanticRelationTab({ classes }: SemanticRelationTabProp
               >
                 <Select
                   placeholder={t("forms.ontology.semanticRelationPlaceholders.sourceClassId")}
-                  options={classOptions(t, classes)}
+                  options={classOptions(classes, locale)}
                 />
               </Form.Item>
             </Col>
@@ -257,7 +257,7 @@ export default function SemanticRelationTab({ classes }: SemanticRelationTabProp
               >
                 <Select
                   placeholder={t("forms.ontology.semanticRelationPlaceholders.targetClassId")}
-                  options={classOptions(t, classes)}
+                  options={classOptions(classes, locale)}
                 />
               </Form.Item>
             </Col>

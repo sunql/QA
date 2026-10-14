@@ -13,6 +13,7 @@ import { authHeaders } from "./authHeaders";
 import type {
   WikiLink,
   WikiLinkableTarget,
+  WikiLinkType,
   CreateWikiLinkRequest,
 } from "../types/wikiLink";
 
@@ -62,7 +63,7 @@ export async function updateWikiLink(
 }
 
 export async function listLinkableTargets(
-  type: "class" | "property",
+  type: WikiLinkType,
   query?: string,
 ): Promise<WikiLinkableTarget[]> {
   const qs = new URLSearchParams({

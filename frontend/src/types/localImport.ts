@@ -76,12 +76,14 @@ export interface ProposedJoin {
 }
 
 export interface ImportConflict {
-  type: "class" | "property";
+  type: "class" | "property" | "class_tombstoned";
   sourceTable: string | null;
   sourceColumn: string | null;
   existingId: number;
   existingName: string | null;
   proposedName: string | null;
+  /** 墓碑（class_tombstoned）专用：既有本体类的 valid_to 时间戳，ISO 字符串 */
+  existingValidTo?: string | null;
   action: "skip" | "overwrite" | "rename";
 }
 

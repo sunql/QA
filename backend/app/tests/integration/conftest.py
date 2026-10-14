@@ -24,7 +24,27 @@ from app.infrastructure.security import crypto
 from app.services.agent_binding_cache import agent_binding_cache
 from app.services.agent_tool_config_registry import agent_tool_config_registry
 from app.tests import _pg_support
+from app.tests._neo4j_support import (
+    assertAppNeo4jIsIsolated,
+    installTestNeo4jEnv,
+    resolveTestNeo4jUri,
+)
 from app.tests.milvus_isolation import dropOntologyCollectionsForTest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def isolateNeo4jEnv() -> None:
+    """会话级把应用侧 Neo4j 配置钉到测试实例（2026-10-03 事故）。
+
+    放在 fixture 而不是 conftest 导入期：导入期抛错会让 `pytest app/tests` 变成
+    **整体收集错误**，连 unit 套件都跑不了 —— 爆炸半径过大。会话级 fixture 只让
+    integration 变红（`pytest app/tests/unit` 根本不加载本 conftest），这才是
+    期望的规模：宁可 integration 红，也不能让破坏性清理落到生产图谱上。
+
+    会话级早于任何函数级夹具实例化，故 `neo4jCleanDriver` 生效时配置已就位；
+    同时 `closeDriver()` 会丢弃被 `isNeo4jAvailable()` 探测时缓存的生产 driver。
+    """
+    installTestNeo4jEnv()
 
 
 @pytest.fixture()
@@ -49,9 +69,12 @@ async def dbSession(client: AsyncClient) -> AsyncIterator[AsyncSession]:
 # Neo4j fixtures（M0 Unified ID：从 conftest_neo4j.py 合并）
 # 约定：
 #   - 每个测试启动前清空 Class / Property / Metric 三类节点
-#   - 不 mock 外部 driver（直接连 qa-neo4j:7687）
+#   - **连接目标必须来自 TEST_NEO4J_URI**（独立测试实例），未配置即 fail-fast ——
+#     见 _neo4j_support.py。2026-10-03 事故：此夹具用 settings.neo4jUri 的默认值
+#     bolt://localhost:7687（= 生产容器）执行了 DETACH DELETE，清空线上图谱。
+#   - 不 mock 外部 driver（直接连独立测试实例）
 #   - 不用 lifespan_context（与 _testapp 启动分离，避免反复重启）
-#   - 通过 getSettings() 读凭据，与生产代码走同一配置源
+#   - 通过 getSettings() 读凭据，与生产代码走同一配置源；**只有 URI 强制隔离**
 # ---------------------------------------------------------------------------
 
 
@@ -62,13 +85,17 @@ async def neo4jCleanDriver() -> AsyncIterator[Driver]:
     用同步 GraphDatabase.driver 仍 async 兼容：driver 仅持有连接池，实际
     session 操作由 pytest-asyncio 在事件循环里调度；session.run 是同步阻塞
     调用，对每测试 < 100 个节点的清仓足够快。
+
+    未设 `TEST_NEO4J_URI` 时在**建立连接之前**抛 RuntimeError：清空动作是破坏性的，
+    宁可这个套件全红，也不能静默落到生产实例上。
     """
     settings = getSettings()
     driver: Driver = GraphDatabase.driver(
-        settings.neo4jUri,
+        resolveTestNeo4jUri(),
         auth=(settings.neo4jUser, settings.neo4jPassword),
     )
     yield driver
+    assertAppNeo4jIsIsolated()  # 清理前复查配置未漂移
     with driver.session() as session:
         session.run(
             "MATCH (n) WHERE n:Class OR n:Property OR n:Metric DETACH DELETE n"

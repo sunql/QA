@@ -14,10 +14,12 @@ const historyApi = vi.hoisted(() => ({
 vi.mock("../api/chatHistory", () => historyApi);
 
 const persist = vi.hoisted(() => ({
-  read: vi.fn<() => { lastSessionId: string | null; historyPanelOpen: boolean }>(
-    () => ({ lastSessionId: null, historyPanelOpen: false })
-  ),
-  write: vi.fn<(patch: { lastSessionId?: string | null; historyPanelOpen?: boolean }) => void>(),
+  readLastSessionId: vi.fn<(channel: string) => string | null>(() => null),
+  writeLastSessionId: vi.fn<(channel: string, sessionId: string | null) => void>(),
+  readLastChannel: vi.fn<() => string | null>(() => null),
+  writeLastChannel: vi.fn<(channel: string) => void>(),
+  readHistoryPanelOpen: vi.fn<() => boolean>(() => false),
+  writeHistoryPanelOpen: vi.fn<(open: boolean) => void>(),
 }));
 vi.mock("../stores/persistChatUiState", () => persist);
 
@@ -50,8 +52,8 @@ describe("chatStore channel field", () => {
     expect(sid).toMatch(/^chat-/);
   });
 
-  it("resetSession assigns docqa- prefix when channel=doc_qa", () => {
-    useChatStore.getState().setChannel("doc_qa");
+  it("resetSession assigns docqa- prefix when channel=doc_qa", async () => {
+    await useChatStore.getState().enterChannel("doc_qa");
     useChatStore.getState().resetSession();
     const sid = useChatStore.getState().sessionId;
     expect(sid).toMatch(/^docqa-/);

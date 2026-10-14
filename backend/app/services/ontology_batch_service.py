@@ -42,6 +42,7 @@ from app.domain.schemas import (
 )
 from app.infrastructure import neo4j_client as neo4j
 from app.services.audit_service import AuditService
+from app.services.id_mapping_service import IdMappingService
 from app.services.join_inference import SAGE_X3_REFERENCE_MAP
 from app.services.ontology_service import _entityToDict, _logNeo4jFailure, makeJoinKey
 
@@ -382,29 +383,39 @@ class OntologyBatchService:
                 has_property_edges=len(props),
                 reference_edges=refEdges,
             )
+        # 入图键一律 unified_id：两条批量查询取全量映射，避免逐行往返
+        # （属性 3600+ 行；listByBusinessObject 的 200 条分页会静默截断，不能用）。
+        id_mapping_svc = IdMappingService()
+        classUids = await id_mapping_svc.mapExternalIds(session, "CLASS")
+        propUids = await id_mapping_svc.mapExternalIds(session, "PROPERTY")
         classRows = [
             {
-                "id": c.id,
+                "unifiedId": classUids.get(str(c.id)),
                 "name": c.class_name,
                 "alias": c.class_alias,
                 "description": c.description,
                 "sourceTable": c.source_table,
             }
             for c in classes
+            if classUids.get(str(c.id)) is not None
         ]
         propRows = [
             {
-                "id": p.id,
-                "classId": p.class_id,
+                "unifiedId": propUids.get(str(p.id)),
+                "classUid": classUids.get(str(p.class_id)),
                 "name": p.property_name,
                 "alias": p.property_alias,
                 "dataType": p.data_type,
                 "sourceColumn": p.source_column,
                 "isPrimaryKey": p.is_primary_key,
                 "isForeignKey": p.is_foreign_key,
-                "refClassId": p.ref_class_id,
+                "refClassUid": (
+                    classUids.get(str(p.ref_class_id)) if p.ref_class_id else None
+                ),
             }
             for p in props
+            if propUids.get(str(p.id)) is not None
+            and classUids.get(str(p.class_id)) is not None
         ]
         try:
             counts = neo4j.syncOntologyNodes(classRows, propRows)

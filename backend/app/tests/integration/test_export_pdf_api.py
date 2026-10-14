@@ -1,10 +1,14 @@
 """会话问答 PDF 导出 API 集成测试（真实 PG + 完整 API 链路）。
 
 覆盖：
-- GET /api/v1/sessions/{sessionId}/export.pdf
+- POST /api/v1/sessions/{sessionId}/export.pdf（0105 起由 GET 改为 POST，因为要带
+  图表位图；``json={}`` 即等价于旧的无参数 GET）
   - 无 messageId：导出该 session 全部问答
   - 有 messageId：仅导出该 assistant + 上一条 user
 - 鉴权、404、PDF magic header、内容可读性
+
+图表位图相关的用例（合法 PNG 嵌图 / 非法前缀 / 超限 / 跨 session）见
+``test_session_export_charts.py``。
 """
 
 from __future__ import annotations
@@ -81,7 +85,7 @@ class TestExportPdfApi:
             requestTime=datetime(2026, 1, 1, 10, 0, 30, tzinfo=UTC),
         )
 
-        resp = await client.get(f"/api/v1/sessions/{sid}/export.pdf")
+        resp = await client.post(f"/api/v1/sessions/{sid}/export.pdf", json={})
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("application/pdf")
         assert "attachment" in resp.headers["content-disposition"]
@@ -93,7 +97,7 @@ class TestExportPdfApi:
 
     async def test_export_empty_session_returns_404(self, client, dbSession) -> None:
         """无任何消息的 sessionId → 404，与 DELETE 行为对齐。"""
-        resp = await client.get("/api/v1/sessions/s-pdf-empty/export.pdf")
+        resp = await client.post("/api/v1/sessions/s-pdf-empty/export.pdf", json={})
         assert resp.status_code == 404
 
     async def test_export_with_unknown_message_id_returns_404(self, client, dbSession) -> None:
@@ -104,7 +108,9 @@ class TestExportPdfApi:
             createdAt=datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
         )
         # 999999 是其他 session 的 id（无）
-        resp = await client.get(f"/api/v1/sessions/{sid}/export.pdf?message_id=999999")
+        resp = await client.post(
+            f"/api/v1/sessions/{sid}/export.pdf", json={"messageId": 999999}
+        )
         assert resp.status_code == 404
         body = resp.json()
         # 错误信息不包含 sessionId/messageId 防枚举
@@ -134,7 +140,9 @@ class TestExportPdfApi:
         )
 
         # message_id=a1.id → 只导出第一轮
-        resp = await client.get(f"/api/v1/sessions/{sid}/export.pdf?message_id={a1.id}")
+        resp = await client.post(
+            f"/api/v1/sessions/{sid}/export.pdf", json={"messageId": a1.id}
+        )
         assert resp.status_code == 200
         assert resp.content.startswith(b"%PDF-1.")
         # 文件名包含 messageId（与 controller 的 filename 模板一致）
@@ -159,7 +167,7 @@ class TestExportPdfApi:
             sql=long_sql,
             createdAt=datetime(2026, 1, 1, 10, 1, tzinfo=UTC),
         )
-        resp = await client.get(f"/api/v1/sessions/{sid}/export.pdf")
+        resp = await client.post(f"/api/v1/sessions/{sid}/export.pdf", json={})
         assert resp.status_code == 200
         assert len(resp.content) > 2048
 
@@ -170,6 +178,6 @@ class TestExportPdfApi:
             dbSession, sessionId=sid, role="user", content="x",
             createdAt=datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
         )
-        resp = await client.get(f"/api/v1/sessions/{sid}/export.pdf")
+        resp = await client.post(f"/api/v1/sessions/{sid}/export.pdf", json={})
         assert resp.status_code == 200
         assert f"qa-session-{sid}.pdf" in resp.headers["content-disposition"]

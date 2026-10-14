@@ -141,4 +141,85 @@ describe("ModelConfigPage", () => {
       expect(payload.apiKey).toBeUndefined();
     });
   });
+
+  // ── disableThinking（关闭推理模型思维链）────────────────────────────
+  // 后端 llm_config.disable_thinking，Pydantic alias_generator 输出 camelCase。
+  it("编辑时按记录回填 disableThinking 勾选状态", async () => {
+    const user = userEvent.setup();
+    api.updateModel.mockResolvedValue({ ...mockModel, disableThinking: true });
+    api.listModels.mockResolvedValue([{ ...mockModel, disableThinking: true }]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("deepseek-chat")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+
+    const checkbox = await screen.findByRole("checkbox", {
+      name: /关闭推理模型思维链/,
+    });
+    expect(checkbox).toBeChecked();
+  });
+
+  it("勾选后提交把 disableThinking: true 传给 updateModel", async () => {
+    const user = userEvent.setup();
+    api.updateModel.mockResolvedValue({ ...mockModel });
+    api.listModels.mockResolvedValue([{ ...mockModel, disableThinking: false }]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("deepseek-chat")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    await user.click(
+      await screen.findByRole("checkbox", { name: /关闭推理模型思维链/ })
+    );
+    await user.click(screen.getByRole("button", { name: /确\s?定$/ }));
+
+    await waitFor(() => {
+      expect(api.updateModel).toHaveBeenCalledTimes(1);
+      expect(api.updateModel.mock.calls[0][1].disableThinking).toBe(true);
+    });
+  });
+
+  it("取消勾选必须传 false 而非 undefined——否则用户无法关掉已开启的开关", async () => {
+    const user = userEvent.setup();
+    api.updateModel.mockResolvedValue({ ...mockModel });
+    api.listModels.mockResolvedValue([{ ...mockModel, disableThinking: true }]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("deepseek-chat")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    await user.click(
+      await screen.findByRole("checkbox", { name: /关闭推理模型思维链/ })
+    );
+    await user.click(screen.getByRole("button", { name: /确\s?定$/ }));
+
+    await waitFor(() => {
+      expect(api.updateModel).toHaveBeenCalledTimes(1);
+      // 后端 LlmConfigUpdate 走 exclude_unset：传 undefined 等于"没提供" ⇒ 勾选关不掉
+      expect(api.updateModel.mock.calls[0][1].disableThinking).toBe(false);
+    });
+  });
+
+  it("新增时默认不勾选，勾选后随 createModel 提交", async () => {
+    const user = userEvent.setup();
+    api.createModel.mockResolvedValue({ ...mockModel, id: 2 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("deepseek-chat")).toBeInTheDocument());
+
+    await user.click(screen.getByText("新增模型"));
+    const checkbox = await screen.findByRole("checkbox", {
+      name: /关闭推理模型思维链/,
+    });
+    expect(checkbox).not.toBeChecked();
+
+    const nameInputs = screen.getAllByRole("textbox");
+    await user.type(nameInputs[0], "minimax-m3");
+    await user.type(nameInputs[1], "https://api.minimax.cn/v1");
+    await user.type(screen.getByPlaceholderText("sk-..."), "sk-test");
+    await user.click(checkbox);
+    await user.click(screen.getByRole("button", { name: /确\s?定$/ }));
+
+    await waitFor(() => {
+      expect(api.createModel).toHaveBeenCalledTimes(1);
+      expect(api.createModel.mock.calls[0][0].disableThinking).toBe(true);
+    });
+  });
 });

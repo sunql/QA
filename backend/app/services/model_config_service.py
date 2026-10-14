@@ -15,6 +15,7 @@ from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import LlmConfig
 from app.domain.schemas import LlmConfigCreate, LlmConfigUpdate
 from app.infrastructure.llm import factory as llmFactory
+from app.infrastructure.llm.factory import invalidateClient
 from app.infrastructure.security.crypto import encryptApiKey
 from app.infrastructure.url_validator import validateEndpointUrl
 from app.services.messages_zh import (
@@ -29,7 +30,7 @@ class ModelConfigService:
     """模型配置服务。"""
 
     async def create(self, session: AsyncSession, dto: LlmConfigCreate) -> LlmConfig:
-        """创建模型配置。model_name 唯一；endpoint 须符合生产 URL 规范。"""
+        """创建模型配置。model_name 唯一；endpoint 须符合生产 URL 规范。（新 id 无旧缓存，无需失效客户端）"""
         # audit-fx-1.1 fix1：创建时即 fail-fast，防止无效 URL 入库
         if dto.api_endpoint:
             try:
@@ -53,6 +54,7 @@ class ModelConfigService:
             cost_threshold=dto.cost_threshold,
             is_active=dto.is_active,
             temperature=dto.temperature,
+            disable_thinking=dto.disable_thinking,
         )
         session.add(config)
         await session.commit()
@@ -97,6 +99,9 @@ class ModelConfigService:
             setattr(config, field, value)
         await session.commit()
         await session.refresh(config)
+        # 客户端按 config id 缓存且构造时固化 endpoint/key——编辑后必须失效，
+        # 否则运行中的进程永远用旧配置（2026-10-03 MiniMax Connection error 根因）
+        await invalidateClient(configId)
         logger.info("更新模型配置 id=%s fields=%s", configId, list(updates.keys()))
         # audit-fx-2.2: belt-and-suspenders — 更新后显式 evict factory 缓存
         llmFactory.evictClient(configId)
@@ -107,4 +112,5 @@ class ModelConfigService:
         config = await self.get(session, configId)
         config.is_active = False
         await session.commit()
+        await invalidateClient(configId)
         logger.info("停用模型配置 id=%s", configId)

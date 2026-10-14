@@ -58,7 +58,7 @@ export interface MetricTabProps {
 }
 
 export default function MetricTab({ classes }: MetricTabProps) {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const [metrics, setMetrics] = useState<OntologyMetric[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -78,7 +78,7 @@ export default function MetricTab({ classes }: MetricTabProps) {
       key: "targetClassId",
       label: t("forms.ontology.metricLabels.targetClassId"),
       type: "select",
-      options: classOptions(t, classes).map((o) => ({ value: String(o.value), label: o.label })),
+      options: classOptions(classes, locale).map((o) => ({ value: String(o.value), label: o.label })),
     },
   ];
 
@@ -311,7 +311,7 @@ export default function MetricTab({ classes }: MetricTabProps) {
                 <Select
                   allowClear
                   placeholder={t("forms.ontology.metricPlaceholders.targetClassId")}
-                  options={classOptions(t, classes)}
+                  options={classOptions(classes, locale)}
                 />
               </Form.Item>
             </Col>

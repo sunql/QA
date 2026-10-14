@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Space, Typography, message } from "antd";
 import { FilePdfOutlined } from "@ant-design/icons";
 import ChatPanel from "../components/chat/ChatPanel";
@@ -8,6 +8,7 @@ import ChatHistoryPanel from "../components/chat/ChatHistoryPanel";
 import HistoryToggleButton from "../components/chat/HistoryToggleButton";
 import { useChatStore } from "../stores/chatStore";
 import { exportSessionPdf } from "../api/chatHistory";
+import { collectExportCharts } from "../utils/collectExportCharts";
 import { downloadBlob } from "../utils/download";
 import type { ChartType } from "../types/chat";
 import { useTranslation } from "../i18n";
@@ -47,9 +48,21 @@ export default function ChatPage() {
   const deleteSession = useChatStore((s) => s.deleteSession);
   const toggleHistoryPanel = useChatStore((s) => s.toggleHistoryPanel);
   const resetSession = useChatStore((s) => s.resetSession);
+  const enterChannel = useChatStore((s) => s.enterChannel);
 
   // PDF 导出进行中（按钮 Spin）；单按钮与全局按钮共用同一 loading（节流）
   const [exporting, setExporting] = useState(false);
+
+  // 挂载即声明「本页是 chat 渠道」，并按该渠道的恢复指针回放上次的会话（刷新恢复）。
+  // ref 守卫：StrictMode 下 effect 会跑两次，而回放是一次网络请求，不该发两遍。
+  // **store 侧拦不住这一路**：enterChannel 的幂等条件要「同渠道且已有消息」，
+  // 而首次回放时 messages 恰好是空的 —— 只靠它就会真发两次请求。
+  const enteredChannelRef = useRef(false);
+  useEffect(() => {
+    if (enteredChannelRef.current) return;
+    enteredChannelRef.current = true;
+    void enterChannel("chat");
+  }, [enterChannel]);
 
   // 面板首次展开时拉一次列表；面板收起时不重复请求
   useEffect(() => {
@@ -91,7 +104,11 @@ export default function ChatPage() {
       setExporting(true);
       const hide = message.loading(t("chat.exportPdf.downloading"), 0);
       try {
-        const blob = await exportSessionPdf(currentSessionId, dbMessageId);
+        // 0105：导出前把该会话的图表截图一并发过去 —— 图要进最终报告，而不只在
+        // 屏幕上。截图是**尽力而为**：collectExportCharts 内部任何失败都只少几张图，
+        // 缺图由后端回落占位框，不会让导出失败。
+        const charts = await collectExportCharts(currentSessionId, dbMessageId);
+        const blob = await exportSessionPdf(currentSessionId, { messageId: dbMessageId, charts });
         const filename = dbMessageId
           ? `qa-message-${dbMessageId}.pdf`
           : `qa-session-${safeFilenamePart(currentSessionId)}.pdf`;

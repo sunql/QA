@@ -64,3 +64,8 @@ backups/
 
 # superpowers SDD 工作区（每个计划的过程产物，git 历史才是记录）
 .superpowers/
+
+# E2E smoke 的 node_modules 是指向 frontend/node_modules 的符号链接（node_modules/ 模式不匹配链接）
+scripts/e2e_smoke/node_modules
+# Playwright 根目录产物
+/test-results/

@@ -1,0 +1,51 @@
+feat-multi-step-persist 真实数据验证 —— 运行产物
+生成时间: 2026-10-06T09:39:51Z
+脚本: backend/scripts/multi_step_persist_realdata.py
+命令: DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test' .venv/bin/python -m scripts.multi_step_persist_realdata
+目标: 真实 PostgreSQL qa_metadata_test @ localhost:5434（测试库；写库闸拒绝生产端口 5433）
+================================================================
+
+[guard] 目标库 = qa_metadata_test @ localhost:5434（测试库，写库闸放行）
+
+[schema] 两张表就位：['multi_step_run', 'multi_step_step']
+
+[purge] 上次运行的残留：删 run 6 行、连同 steps 6 行（CASCADE）
+── 步骤 1：建 run + steps（total_steps / completed_steps 口径 = F2）
+  SQL: INSERT INTO multi_step_run(...total_steps=3) / multi_step_step ×3
+  SQL: UPDATE multi_step_run SET status='succeeded', completed_steps=3, current_step_idx=3, finished_at=now()
+  回读（新会话）: {'status': 'succeeded', 'total_steps': 3, 'completed_steps': 3, 'current_step_idx': 3, 'finished_at': datetime.datetime(2026, 10, 6, 9, 39, 51, 948920, tzinfo=datetime.timezone.utc)}
+  [PASS] run.status == succeeded
+  [PASS] total_steps == 3（含末尾汇总步）
+  [PASS] completed_steps == total_steps == 3（分子分母同源，不出现 3/2）
+  [PASS] 收尾哨兵 current_step_idx == 3（同一把尺子）
+  [PASS] 终态必须带 finished_at（不变量 ①）
+
+── 步骤 2：续跑（prepareResume）
+  SQL: UPDATE multi_step_run SET status='running', current_step_idx=1, finished_at=NULL, idempotency_keys=idempotency_keys||'key-A'
+  合法续跑返回起始步 = 1
+  回读（新会话）: {'status': 'running', 'total_steps': 3, 'completed_steps': 1, 'current_step_idx': 1, 'finished_at': None}
+  [PASS] 合法续跑：起始步 == 1
+  [PASS] 合法续跑：status 回到 running
+  [PASS] 合法续跑：finished_at 由 NOT NULL 清回 NULL
+  [PASS] 合法续跑：current_step_idx == 1
+  重复键被拒文案: 'duplicate idempotency key'
+  状态不可续被拒文案: 'run status running not resumable'
+  [PASS] 重复幂等键被拒 — duplicate idempotency key
+  [PASS] 对照：拒绝文案与「重复键」不同（区分是谁拒的，不是只看抛没抛） — run status running not resumable
+  越界被拒文案: 'from_step_index 99 out of range 0..2'
+  [PASS] 越界 from_step_index=99 被拒（文案含 out of range） — from_step_index 99 out of range 0..2
+  [PASS] 三种拒绝文案两两不同（否则「是哪个闸拒的」无从判起）
+
+── 步骤 3：保留期清理（cleanupMultiStepRuns）
+  谓词 SQL: DELETE FROM multi_step_run WHERE (status='succeeded' AND finished_at < :sb) OR (status IN ('failed','partially_failed') AND finished_at < :fb)
+  全局回收计数 deleted = 2；本脚本清理夹具存活 = 4 行
+  [PASS] 过期的 succeeded（40 天）被回收
+  [PASS] 过期的 failed（10 天）被回收
+  [PASS] 未过期的 succeeded（5 天）不回收
+  [PASS] 未过期的 failed（2 天）不回收
+  [PASS] 非终态 running（100 天）不回收
+  [PASS] 终态但 finished_at IS NULL 不回收（显式裁定，需运维回填）
+
+断言合计 19 条，通过 19 条
+
+REALDATA RESULT: PASS

@@ -35,13 +35,32 @@ class DataSourceType(str, Enum):
 
 
 class ChartType(str, Enum):
-    """图表类型。"""
+    """图表类型（决策引擎的输出 + 线上契约 chartType 的值域）。
+
+    2026-09-30 图表决策引擎扩容：原 5 类只够表达「列形状」，新增的 6 类用于表达
+    分析语义（占比/TOP N/多维/单值/同比/瀑布）。
+
+    ⚠️ 新增值**必须同步前端** `frontend/src/api/chat.ts` 的 `VALID_CHART_TYPES`：
+    那里会把未知类型静默降级为 null，漏同步的表现是「图不见了但没有任何报错」。
+    """
 
     TABLE = "table"
     BAR = "bar"
+    # 横向柱状：TOP N / 占比行数多 / 类目名长时比竖版可读
+    HBAR = "hbar"
     PIE = "pie"
+    # 环形：占比且行数少（饼图的同心留白版）
+    DONUT = "donut"
     LINE = "line"
     SCATTER = "scatter"
+    # 热力图：两个维度 + 一个指标，且交叉矩阵足够稠密
+    HEATMAP = "heatmap"
+    # 指标卡：单行单值（含 L1 KPI 直答），非 ECharts 渲染
+    KPI = "kpi"
+    # 柱线组合：时间维 + 两个指标（同比/环比的目标形态）
+    COMBO = "combo"
+    # 瀑布：构成拆解
+    WATERFALL = "waterfall"
 
 
 class DataType(str, Enum):

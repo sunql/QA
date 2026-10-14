@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import (
-    OntologyClass, OntologyProperty, WikiOntologyLink,
+    OntologyClass, OntologyMetric, OntologyProperty, WikiOntologyLink,
 )
 
 
@@ -24,7 +24,7 @@ class LinkNotFoundError(NotFoundError):
     pass
 
 
-_VALID_ONTOLOGY_TYPES = frozenset({"class", "property"})
+_VALID_ONTOLOGY_TYPES = frozenset({"class", "property", "metric"})
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,7 @@ class WikiLinkRow:
 @dataclass(frozen=True)
 class LinkableTarget:
     id: int
-    type: str  # 'class' | 'property'
+    type: str  # 'class' | 'property' | 'metric'
     name: str
     alias: str | None
     description: str | None
@@ -189,6 +189,24 @@ class WikiLinkService:
         result = await session.execute(stmt)
         return [_to_row(r) for r in result.scalars().all()]
 
+    async def listConfiguredOntologyTypes(self, session: AsyncSession) -> set[str]:
+        """返回「当前存在未撤销链接」的 ontology_type 集合。
+
+        供注入侧判断是否值得为某类型做语义召回：某类型一条链接都没有时，召回它的
+        结果必然在 ``WikiInjector.collectAndScore`` 的 recallIndex 命中检查处被丢弃
+        （``wiki_injector.py:103``），纯属白花一次 embedding + 一次 Milvus 检索。
+        空表返回空集，调用方零额外成本。
+
+        走 ix_wol_ontology 部分索引（``WHERE revoked_time IS NULL``）。
+        """
+        stmt = (
+            select(WikiOntologyLink.ontology_type)
+            .where(WikiOntologyLink.revoked_time.is_(None))
+            .distinct()
+        )
+        result = await session.execute(stmt)
+        return {row[0] for row in result.all()}
+
     async def listLinkableTargets(
         self,
         session: AsyncSession,
@@ -197,7 +215,7 @@ class WikiLinkService:
         query: str | None = None,
         limit: int = 50,
     ) -> list[LinkableTarget]:
-        """给 admin 弹窗选择器用：列 ontology_class 或 ontology_property。"""
+        """给 admin 弹窗选择器用：列 ontology_class / ontology_property / ontology_metric。"""
         if type == "class":
             stmt = select(OntologyClass)
             if query:
@@ -239,6 +257,28 @@ class WikiLinkService:
                     name=r.property_name,
                     alias=r.property_alias,
                     description=r.description,
+                )
+                for r in rows
+            ]
+        if type == "metric":
+            stmt = select(OntologyMetric)
+            if query:
+                pattern = f"%{query.upper()}%"
+                stmt = stmt.where(
+                    or_(
+                        OntologyMetric.metric_name.ilike(pattern),
+                        OntologyMetric.metric_alias.ilike(pattern),
+                    )
+                )
+            stmt = stmt.limit(limit)
+            rows = (await session.execute(stmt)).scalars().all()
+            return [
+                LinkableTarget(
+                    id=r.id,
+                    type="metric",
+                    name=r.metric_name,
+                    alias=r.metric_alias,
+                    description=None,
                 )
                 for r in rows
             ]

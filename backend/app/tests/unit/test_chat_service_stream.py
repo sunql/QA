@@ -79,9 +79,6 @@ class _StreamPipelineLlm:
     async def complete(self, messages, **kwargs) -> _Resp:
         self.completeCalls += 1
         system = messages[0].content
-        user = messages[1].content
-        if "图表类型" in user:
-            return _Resp('{"title":{"text":"t"},"series":[{"type":"bar","data":[1,2]}]}')
         if "解析为查询计划" in system:
             # ReAct 第一阶段：空计划（classes 为空时无引用可校验）
             return _Resp('{"target":"各供应商的收货数量汇总"}')
@@ -218,7 +215,8 @@ class TestStreamingPipeline:
         assert types[5] == EVENT_SQL
         assert "PRECEIPT" in events[5][1]["sql"]
         assert types[6] == EVENT_CHART
-        assert events[6][1]["chartType"] == "pie"
+        # R12 分类比较（旧值 pie：「1 字符串 + 1 数值就画饼」的形状规则已删除）
+        assert events[6][1]["chartType"] == "bar"
         assert events[6][1]["chartOption"] is not None
         assert len(events[6][1]["data"]) == 2
 
@@ -228,7 +226,7 @@ class TestStreamingPipeline:
         stepResultTypes = [t for t in types if t == EVENT_STEP_RESULT]
         assert len(stepResultTypes) == 1
         assert types[-1] == EVENT_DONE
-        assert events[-1][1]["tokensUsed"] == 60  # plan+sql 30 + chart 15 + answer 15
+        assert events[-1][1]["tokensUsed"] == 60  # plan+sql 30 + 标签分类 15 + answer 15
         assert events[-1][1]["cost"] > 0
         assert events[-1][1]["modelName"] == "test-model"  # 实际服务的回答模型
         assert [r["purpose"] for r in tokenUsage.records] == ["nl2sql", "chart", "answer"]

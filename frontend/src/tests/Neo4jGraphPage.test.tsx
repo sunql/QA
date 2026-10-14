@@ -41,6 +41,23 @@ describe("Neo4jGraphPage — 渲染 + 加载", () => {
     // 表格空
     expect(screen.getByRole("table")).toBeInTheDocument();
   });
+
+  it("展示节点 unifiedId（主键列绑定 unifiedId，不是已废弃的 id）", async () => {
+    // 曾经列绑定 `id`，而端点早就不下发该字段 —— 表格整列空白，
+    // 且关系查询拿不到节点标识。
+    api.listGraphNodes.mockResolvedValue([
+      {
+        unifiedId: "obj:CLASS:9",
+        name: "DWD_CUSTOMER",
+        alias: "客户",
+        description: null,
+        sourceTable: "THBI.DWD_CUSTOMER",
+      },
+    ]);
+    renderPage();
+
+    expect(await screen.findByText("obj:CLASS:9")).toBeInTheDocument();
+  });
 });
 
 describe("Neo4jGraphPage — Segmented 切换", () => {

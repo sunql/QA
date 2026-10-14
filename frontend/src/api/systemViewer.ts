@@ -5,7 +5,8 @@ const BASE = "/system";
 // ----- Neo4j -----
 
 export interface GraphNode {
-  id: number;
+  /** 节点主键：`unified_id`（形如 obj:CLASS:9）。图内一切定位都用它。 */
+  unifiedId: string;
   name: string;
   alias: string | null;
   description: string | null;
@@ -23,7 +24,7 @@ export interface GraphNode {
 
 export interface GraphRelation {
   relType: string;
-  targetId: number;
+  targetUid: string;
   targetName: string;
   targetLabel: string;
 }
@@ -40,10 +41,11 @@ export async function listGraphNodes(
 
 export async function getGraphRelations(
   label: string,
-  nodeId: number,
+  unifiedId: string,
 ): Promise<GraphRelation[]> {
+  // unified_id 含冒号（obj:CLASS:9），必须 encode —— 否则路径被截断成多段。
   const res = await httpClient.get<GraphRelation[]>(
-    `${BASE}/graph/nodes/${label}/${nodeId}/relationships`,
+    `${BASE}/graph/nodes/${label}/${encodeURIComponent(unifiedId)}/relationships`,
   );
   return res.data;
 }

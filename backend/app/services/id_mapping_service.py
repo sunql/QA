@@ -113,6 +113,21 @@ class IdMappingService:
         mapping = row.scalar_one_or_none()
         return _to_read(mapping) if mapping else None
 
+    async def mapExternalIds(
+        self, session: AsyncSession, business_object: str
+    ) -> dict[str, str]:
+        """一次性取 `{external_id: unified_id}`（批量解析，避免 N 次往返）。
+
+        给「全量入图」这类需要把成批 PG id 转 unified_id 的调用方用：
+        `listByBusinessObject` 带 200 条分页上限，全量场景（属性 3600+）会静默截断。
+        """
+        rows = await session.execute(
+            select(IdMapping.external_id, IdMapping.unified_id).where(
+                IdMapping.business_object == business_object
+            )
+        )
+        return {externalId: unifiedId for externalId, unifiedId in rows.all()}
+
     async def listByBusinessObject(
         self, session: AsyncSession, business_object: str, limit: int = 200, offset: int = 0
     ) -> tuple[list[IdMappingRead], int]:

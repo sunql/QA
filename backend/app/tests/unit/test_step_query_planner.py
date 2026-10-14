@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -74,7 +74,7 @@ class TestStepQueryPlannerPlan:
         """即使问题无显式多步信号，plan() 也调用 LLM 拆步（调用方已决定要拆）。"""
         planner = StepQueryPlanner()
         mock_client = _MockLlmClient('{"isMultiStep": false}')
-        result = await planner.plan("各供应商的收货数量汇总", MagicMock(), mock_client, "gpt-4o")
+        result = await planner.plan("各供应商的收货数量汇总", mock_client, "gpt-4o")
         assert mock_client.calls == 1  # 不再有关键词快路径，始终调用 LLM
         assert result.plan is None  # LLM 返回 false → 计划为 None
         assert result.prompt_tokens == 10  # 调用已发生，token 仍随结果返回供计量
@@ -96,7 +96,7 @@ class TestStepQueryPlannerPlan:
             '"aggregationHint": "对比两年数据给出趋势"}'
         )
 
-        result = await planner.plan(question, MagicMock(), mock_client, "gpt-4o")
+        result = await planner.plan(question, mock_client, "gpt-4o")
         assert result.plan is not None
         assert result.plan.is_single_step is False
         assert len(result.plan.steps) == 3  # 2 数据步 + 1 汇总步
@@ -111,7 +111,7 @@ class TestStepQueryPlannerPlan:
         mock_client = _MockLlmClient(
             '{"isMultiStep": true, "steps": [{"description": "销售额", "subQuestion": "销售额是多少"}]}'
         )
-        result = await planner.plan("对比销售额", MagicMock(), mock_client, "gpt-4o")
+        result = await planner.plan("对比销售额", mock_client, "gpt-4o")
         assert result.plan is None
         assert result.prompt_tokens == 10  # 调用已发生，token 仍计量
 
@@ -119,14 +119,14 @@ class TestStepQueryPlannerPlan:
         """LLM 返回非 JSON：返回 None，不抛异常。"""
         planner = StepQueryPlanner()
         mock_client = _MockLlmClient("这不是 JSON 响应")
-        result = await planner.plan("对比各年销售额", MagicMock(), mock_client, "gpt-4o")
+        result = await planner.plan("对比各年销售额", mock_client, "gpt-4o")
         assert result.plan is None
 
     async def test_llm_json_missing_isMultiStep(self) -> None:
         """LLM JSON 缺少 isMultiStep 字段：返回 None。"""
         planner = StepQueryPlanner()
         mock_client = _MockLlmClient('{"steps": []}')
-        result = await planner.plan("对比各年销售额", MagicMock(), mock_client, "gpt-4o")
+        result = await planner.plan("对比各年销售额", mock_client, "gpt-4o")
         assert result.plan is None
 
     async def test_llm_complete_raises(self) -> None:
@@ -134,7 +134,7 @@ class TestStepQueryPlannerPlan:
         planner = StepQueryPlanner()
         broken_client = AsyncMock()
         broken_client.complete.side_effect = RuntimeError("LLM 网络错误")
-        result = await planner.plan("对比各年销售额", MagicMock(), broken_client, "gpt-4o")
+        result = await planner.plan("对比各年销售额", broken_client, "gpt-4o")
         assert result.plan is None
         assert result.prompt_tokens == 0  # 调用未成功，无可计量 token
         assert result.completion_tokens == 0
@@ -153,7 +153,7 @@ class TestStepQueryPlannerPlan:
         mock_client = _MockLlmClient(
             f'{{"isMultiStep": true, "steps": [{many_steps}], "aggregationHint": "汇总"}}'
         )
-        result = await planner.plan("对比各年销售额", MagicMock(), mock_client, "gpt-4o")
+        result = await planner.plan("对比各年销售额", mock_client, "gpt-4o")
         assert result.plan is not None
         non_agg = [s for s in result.plan.steps if not s.aggregation_only]
         assert len(non_agg) == 6  # 原样透传，不截断

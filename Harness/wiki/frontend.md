@@ -97,3 +97,16 @@ useEffect(() => {
 - **必须有用例断言请求头**（`expect(init.headers).toMatchObject({ Authorization: ..., "X-Tenant-Id": ... })`）：`wikiChat` 当初正是因为没有任何头断言，才把「完全没注入」的 403 带到线上。
 
 **遗留**：`api/chatHistory.ts` 仍发死值 `X-User-Id`；`datasource` / `localImport` 有重复拦截器；`RoutingMetricsPage` 不发鉴权头。
+
+## 研究型 Agent 入口（research）（feat-research-entry-ux-fixes）
+
+- **页面**：`pages/research/ResearchListPage.tsx`（列表 + 新建）、`ResearchSessionPage.tsx`（会话 + 检查点）、`ResearchReportPage.tsx`（报告）。
+- **新建表单三要素**：研究问题、**数据源**（默认选 `isDefault` 源）、**模型**（默认「自动（智能路由）」）、模式。三者共用同一条流水线，`mode` 只改报告章节组织 —— 页面上一句免责说明写明这点，免得用户以为选「归因」会走别的流程。
+- **模型选择的 `0` 哨兵**：`Select` 的 `value` 用 `modelId ?? 0`，选项首位是 `{ value: 0, label: 自动 }`，`onChange` 里 `value === 0 ? null : value`。**为什么不用 `undefined`**：antd 在 `value=undefined` 时只显示 `placeholder`，用户看不出默认是「自动」；而请求体仍按 `modelId === null` 判断是否**带键**（`...(modelId === null ? {} : { modelId })`），因为后端 `ResearchSessionCreate` 是 `extra="forbid"` —— 多带一个 `modelId: null` 会被 422 拒掉。**前端加字段必须与后端同批上线**，这是硬约束。
+- **`CheckpointCard`**：按 `phase` 渲染「本次针对」目标行 + 相位明细（`runtime_dynamic` → `options.conflicts`；`planning` → `options.plan.steps`；`hypothesis` → `options.candidates` 可勾选，勾选结果按**数组下标**经 `choice.selectedIndexes` 提交）。空明细必给显式空态文案（降级路径下候选本就是 `[]`，不提示会被误判成「没修好」）。
+- **键名坑（双键回落）**：`options.plan.steps[].sub_question` 是 snake_case（后端 `normalizePlan` / `singleStepPlan`），`options.stepResults[].subQuestion` 是 camelCase（`ports.stepResult` 里的键名）。**历史 checkpoint 的 `options` 已落库** ⇒ 前端读取器先 camelCase 再 snake_case，**绝不改后端键名**。
+- **调用点必须给 `<CheckpointCard key={checkpoint.id} …>`**：组件内有 `useState`（勾选态 / 草稿），换检查点时不重挂载就会**跨检查点串味**。
+- **删除**：`DELETE /api/v1/research/sessions/{id}`（硬删 + DB `ON DELETE CASCADE` + 归属不符 404，不泄露存在性）；前端 Popconfirm 二次确认，**服务端确认后**才从列表移除。
+- **数据源名映射**：`hooks/useDatasourceOptions.ts` 导出 `useDatasourceOptions()`（启用中的源清单）与 `datasourceName(sources, id)`（id → 名称，**查不到的 id 回落 `` `#id` ``**——有 id 就让用户看到"某个库"，取不到名字不等于不渲染）。**取源失败一律回落空清单**——数据源名只是辅助信息，不做页面可用性的前提（仅展示层降级，不阻断页面）。
+- **报告页模式说明**：`ResearchReportPage.tsx` 在模式 Tag 右侧渲染 `research.list.modeDesc.<mode>`（与新建表单下拉项**同一个 i18n key**）。`payload.mode` 运行时是任意 string ⇒ 先经 `asResearchMode()` 收窄；未知值 Tag 与说明**同时**不渲染（不构造文案、不显示原始 key）。
+- **共享 `error` 槽的单一归属**：`researchStore.error` 由**会话页**渲染成 Alert，故**只有会话加载/追问类失败**才写它。列表页的删除失败**自带** `message.error`（`ResearchListPage.tsx`），`deleteSession` 因此**只 rethrow 不写槽** —— 否则列表页的删除错误会短暂串到**另一个**已打开会话页的 Alert 里。

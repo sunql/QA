@@ -15,6 +15,7 @@ from pymilvus import Collection
 from app.infrastructure.milvus_client import (
     VALID_EMBEDDING_TYPES,
     _connAlias,
+    _connect,
 )
 
 
@@ -62,6 +63,15 @@ def searchEmbeddingsByTypeRouted(
     """
     if typeFilter is not None and typeFilter not in VALID_EMBEDDING_TYPES:
         raise ValueError(f"unknown embedding type filter: {typeFilter!r}")
+
+    # 自建连接：pymilvus 的 ORM 接口不认未注册的连接别名，而检索是进程里最先碰
+    # Milvus 的路径之一。把建连留给「别的调用方碰巧先跑过」的代价是：容器/进程
+    # 重建后**首次**检索必失败（ConnectionNotExistException → chat 召回落
+    # fallback →「数据表智能召回暂不可用」），后续又正常，间歇症状极易被放过。
+    # 每个调用只连一次（typeFilter=None 时下面要扫 3 个集合，逐集合建连等于 3 遍
+    # 健康检查）。不写成 `if not has_connection(...)`：别名在而连接已死的场景
+    # 仍须经 _connect() 的失效重连路径。
+    _connect()
 
     if typeFilter == "class":
         return _searchCollection(_CLASS_COLLECTION_NAME, queryEmbedding, topK)

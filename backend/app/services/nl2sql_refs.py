@@ -252,6 +252,16 @@ def _classNameHint(
     )
 
 
+def _stripFormulaLiterals(formula: str) -> str:
+    """去掉单/双引号字符串字面量（替换为空格，保持位置但不产生 token）。
+
+    两个消费者：_extractFormulaProperties（避免把字面量里的词当属性）、
+    formulaHasSqlStructure（避免把字面量里的 FROM/JOIN 当语句结构）。
+    """
+    text = re.sub(r"'[^']*'", " ", formula)
+    return re.sub(r'"[^"]*"', " ", text)
+
+
 def _extractFormulaProperties(formula: str) -> set[str]:
     """从公式中提取候选属性名，供 validatePlan 做存在性校验。
 
@@ -259,13 +269,41 @@ def _extractFormulaProperties(formula: str) -> set[str]:
     （TO_DATE / NVL / COALESCE 等，实参中的列名仍保留继续校验），最后用标识符正则
     提取 token，过滤 SQL 关键字/函数名后返回。数值字面量与运算符不被标识符正则匹配，天然忽略。
     """
-    # 去掉字符串字面量：替换为空格，保持位置但不产生 token
-    text = re.sub(r"'[^']*'", " ", formula)
-    text = re.sub(r'"[^"]*"', " ", text)
+    text = _stripFormulaLiterals(formula)
     # 剥离函数调用名，避免把 TO_DATE 等 SQL 函数名误判为属性
     text = _FORMULA_FUNC_CALL_RE.sub(" ", text)
     tokens = _SAFE_FORMULA_IDENT_RE.findall(text)
     return {t for t in tokens if t.upper() not in _FORMULA_SQL_KEYWORDS}
+
+
+# 语句结构判定：公式（剥掉字符串字面量后）**同时**出现独立词 SELECT 与 FROM/JOIN，
+# 说明它是一条 SQL 语句（整条 SELECT，或表达式里嵌 SELECT 子查询），而不是纯聚合表达式。
+#
+# 2026-10-01 线上回归：LLM 把整条 SELECT 放进 Aggregation.formula，schema 名（THBI）、
+# 表名（DWD_GOODS_RECEIPT_DTL / DIM_IMATERIAL）、表别名（d2 / m2）、ONLY 全被
+# _extractFormulaProperties 当成属性逐条上报（「公式中的属性 X 不属于选定的任何类」），
+# 重试反馈无指向 → 模型原样重犯 → maxPlanAttempts 耗尽 → 整轮失败。
+#
+# 判据刻意**不看首词**：错误文本只列出被误报的 token，无法区分「整条 SELECT」与
+# 「表达式里嵌 SELECT 子查询」（如 SUM(a)/(SELECT SUM(b) FROM t)）——两者首词不同
+# （SELECT vs SUM）但都含 SELECT + FROM，故一个判据覆盖两种形态。
+#
+# **必须两个条件同时满足，不能只看 FROM/JOIN**（code review HIGH，已复现）：
+# `EXTRACT(MONTH FROM 到货日期)` / `TRIM(BOTH ' ' FROM X)` 里的 FROM 是**函数实参
+# 分隔符**，不是语句子句。EXTRACT 那条提取出的 token 全是合法属性（只剩 QTY/到货日期），
+# 加这个谓词**之前是能通过校验的** —— 只看 FROM 会把它误判成整条语句，并给出**内容不实**
+# 的提示（"formula 不能是整条 SQL 语句"），反而把模型带偏。真正的语句形态必然含 SELECT。
+_STRUCTURAL_SQL_RE = re.compile(r"\b(?:FROM|JOIN)\b", re.IGNORECASE)
+_SELECT_KEYWORD_RE = re.compile(r"\bSELECT\b", re.IGNORECASE)
+
+
+def formulaHasSqlStructure(formula: str) -> bool:
+    """公式是否含 SQL 语句结构（独立词 SELECT 与 FROM/JOIN 同时出现）。"""
+    text = _stripFormulaLiterals(formula)
+    return (
+        _SELECT_KEYWORD_RE.search(text) is not None
+        and _STRUCTURAL_SQL_RE.search(text) is not None
+    )
 
 
 # 公式中候选属性名提取：与 _SAFE_IDENT_RE 一致支持 ASCII + CJK 标识符（属性名多为中文）。
@@ -287,7 +325,7 @@ _FORMULA_SQL_KEYWORDS: frozenset[str] = frozenset({
     "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "BETWEEN", "LIKE", "IS", "NULL",
     "ANY", "SOME", "EXISTS",
     "AS", "BY", "GROUP", "ORDER", "HAVING", "JOIN", "ON", "LEFT", "RIGHT", "INNER", "OUTER",
-    "CROSS", "FULL", "UNION", "ALL", "DISTINCT", "LIMIT", "FETCH", "ROWNUM", "WITH",
+    "CROSS", "FULL", "UNION", "ALL", "DISTINCT", "LIMIT", "FETCH", "ROWNUM", "ONLY", "WITH",
     "ASC", "DESC",
     "CASE", "WHEN", "THEN", "ELSE", "END", "CAST", "COALESCE", "NULLIF", "IF", "CONVERT",
     "ABS", "ROUND", "FLOOR", "CEIL", "CEILING", "MOD", "CONCAT", "SUBSTR", "SUBSTRING",

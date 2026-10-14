@@ -25,7 +25,7 @@ from app.domain.schemas import (
     DataSourceUpdate,
 )
 from app.infrastructure.business_db_pool import build_adapter, dispose_adapter
-from app.infrastructure.security.crypto import encryptApiKey
+from app.infrastructure.security.crypto import decryptApiKey, encryptApiKey
 from app.services.audit_service import AuditService
 from app.services.messages_zh import (
     MSG_DATASOURCE_CONNECT_FAILED,
@@ -57,6 +57,15 @@ class DataSourceService:
         if dto.is_default:
             await _clearOtherDefaults(session, keepId=None)
 
+        # 版本来源优先级：用户显式值 > best-effort 探测（方言分发的关键输入，
+        # 尤其 Oracle 11g 与 12c+ 的分页语法分歧）。探测失败不阻断创建。
+        oracleVersion = dto.oracle_version
+        if oracleVersion is None:
+            oracleVersion = await _probeServerVersion(
+                dto.type, dto.host, dto.port,
+                dto.database_name, dto.username, dto.password,
+            )
+
         ds = DataSource(
             name=dto.name,
             type=dto.type,
@@ -69,6 +78,7 @@ class DataSourceService:
             is_active=dto.is_active,
             is_default=dto.is_default,
             created_by=createdBy,
+            oracle_version=oracleVersion,
         )
         session.add(ds)
         await session.flush()
@@ -139,6 +149,19 @@ class DataSourceService:
         if dto.is_default is True:
             await _clearOtherDefaults(session, keepId=datasourceId)
 
+        # 版本补探测（best-effort，不覆盖任何已有值）：用户没显式给版本、且
+        # （连接参数变了 或 版本仍为空）时，用**更新后**的最终参数重新探测。
+        # 探测失败只记日志，保存照常。
+        userSetVersion = updates.get("oracle_version") is not None
+        if not userSetVersion and (connChanged or ds.oracle_version is None):
+            probed = await _probeServerVersion(
+                ds.type, ds.host, ds.port,
+                ds.database_name, ds.username,
+                plainPassword if passwordChanged else decryptApiKey(ds.password_encrypted),
+            )
+            if probed is not None and ds.oracle_version is None:
+                ds.oracle_version = probed
+
         await session.flush()
         await _audit.record(
             session,
@@ -188,7 +211,7 @@ class DataSourceService:
             await _promoteNextDefault(session)
 
     async def test_connection(self, dto: DataSourceTestRequest) -> DataSourceTestResponse:
-        """测试连接（不持久化）。构建临时适配器并调用 test()。"""
+        """测试连接（不持久化）。构建临时适配器并调用 test()，顺带探测服务端版本。"""
         _validateHost(dto.host)
         adapter = build_adapter(
             dto.type,
@@ -199,7 +222,7 @@ class DataSourceService:
             dto.password,
         )
         try:
-            success, message = await adapter.test()
+            success, message, rawVersion = await adapter.test()
         finally:
             await adapter.dispose()
         if not success:
@@ -207,12 +230,59 @@ class DataSourceService:
         return DataSourceTestResponse(
             success=success,
             message=message if success else MSG_DATASOURCE_CONNECT_FAILED.format(message=message),
+            server_version=_normalizeServerVersion(rawVersion),
         )
 
 
 # =============================================================================
 # 辅助函数
 # =============================================================================
+
+
+def _normalizeServerVersion(raw: object | None) -> str | None:
+    """把驱动的版本原文归一为短字符串（None 安全，超长截断防 banner 进字段）。
+
+    SQLAlchemy 的 server_version_info 是 tuple（如 ("8","0","46")），oracledb 的
+    conn.version 是 str（如 "19.0.0.0.0"）；两者都归一为点分/原文短串。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (tuple, list)):
+        normalized = ".".join(str(part) for part in raw if str(part))
+    else:
+        normalized = str(raw)
+    normalized = normalized.strip()
+    return normalized[:40] or None
+
+
+async def _probeServerVersion(
+    dsType: DataSourceType,
+    host: str,
+    port: int,
+    databaseName: str,
+    username: str,
+    password: str,
+) -> str | None:
+    """best-effort 探测服务端版本：建临时适配器 → test() → 释放，失败只记日志。
+
+    与 test_connection 的区别：这是 create/update 的内部探测，任何异常都不向上
+    传播 —— 探测是增强，绝不能阻断数据源的创建/保存。
+    """
+    try:
+        adapter = build_adapter(dsType, host, port, databaseName, username, password)
+    except Exception:  # noqa: BLE001 - 探测失败不阻断
+        logger.warning("版本探测构建适配器失败 host=%s", host, exc_info=True)
+        return None
+    try:
+        success, _message, rawVersion = await adapter.test()
+        if not success:
+            return None
+        return _normalizeServerVersion(rawVersion)
+    except Exception:  # noqa: BLE001 - 探测失败不阻断
+        logger.warning("版本探测失败 host=%s", host, exc_info=True)
+        return None
+    finally:
+        await adapter.dispose()
 
 
 def _validateHost(host: str) -> None:

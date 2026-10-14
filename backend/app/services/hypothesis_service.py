@@ -192,8 +192,14 @@ def extractDriverNames(classes: list) -> list[str]:
 
 def buildHypothesisMessages(
     question: str, dataSummary: str, drivers: list[str],
+    *,
+    schemaHint: str = "",
 ) -> list[LlmMessage]:
-    """构造假设生成的 LLM 消息（question/dataSummary 经围栏隔离进 user prompt）。"""
+    """构造假设生成的 LLM 消息（question/dataSummary 经围栏隔离进 user prompt）。
+
+    schemaHint（R1，2026-10-09）：研究侧 schema 反射的提示文本，含真表 + 真列 +
+    值域采样。仅在非空时追加到 user prompt（空串 = 旧行为，向后兼容 chat 侧调用方）。
+    """
     from app.services.learning.prompt_fence import neutralizeFence
 
     driverText = "、".join(drivers) if drivers else "（无可用列提示）"
@@ -202,6 +208,8 @@ def buildHypothesisMessages(
         f"{neutralizeFence(dataSummary)}\n</user_content>\n\n"
         f"{_HYPOTHESIS_PROMPT_MARKER}生成任务。可用列/指标：{driverText}"
     )
+    if schemaHint:
+        userPrompt += f"\n\n参考 schema（直接用真表真列，别瞎猜）：\n{schemaHint}"
     return [
         LlmMessage(role="system", content=_HYPOTHESIS_SYSTEM_PROMPT),
         LlmMessage(role="user", content=userPrompt),

@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import { authApi } from "../api/auth";
 import { apiClient } from "../api/client";
+import { clearLastSessionIds } from "./persistChatUiState";
+import { notifyUserSwitch } from "./userSwitch";
 import type { AuthMeRead } from "../types/auth";
 
 interface AuthState {
@@ -26,6 +28,12 @@ export const useAuthStore = create<AuthState>()(
 
       login: async (username, password, rememberMe) => {
         const res = await authApi.login({ username, password });
+        // 登录成功即视为换人：清掉上一个登录会话留下的会话恢复指针**与内存里的对话**。
+        // 放在 await 之后而不是函数开头 —— 口令错时老用户仍然登录着，不该丢掉他的恢复目标。
+        // 只清 localStorage 不够：store 里的 messages 还在，而 enterChannel 的
+        // 「同渠道且已有消息」早退会让新登录的人直接看到上一场对话。
+        clearLastSessionIds();
+        notifyUserSwitch();
         set({
           token: res.accessToken,
           mustChangePassword: res.mustChangePassword,
@@ -41,6 +49,11 @@ export const useAuthStore = create<AuthState>()(
         } catch {
           /* noop */
         }
+        // 会话恢复指针只在同一个登录会话内有效：留着它，下一个人登录后会被
+        // 自动恢复到上一个人的会话（自动恢复没有「点一下」这个人为闸门了）。
+        // 内存里的对话同样作废：共享终端上，不刷新页面就换人时它就留在屏幕上。
+        clearLastSessionIds();
+        notifyUserSwitch();
         set({ token: null, user: null, mustChangePassword: false });
         delete apiClient.defaults.headers.common.Authorization;
       },

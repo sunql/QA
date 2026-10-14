@@ -3,8 +3,8 @@
 添加 restricted_access BOOLEAN NOT NULL DEFAULT false 到 users 表。
 L2 文档访问权限标记：admin PATCH /api/v1/users/{id} 管控。
 
-Revision ID: 0106
-Revises: 0105
+Revision ID: 0123
+Revises: 0122
 Create Date: 2026-10-12
 """
 
@@ -14,8 +14,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0106"
-down_revision = "0105"
+revision = "0123"
+down_revision = "0122"
 branch_labels = None
 depends_on = None
 

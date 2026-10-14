@@ -37,13 +37,20 @@ class StepAggregator:
         client: BaseLlmClient,
         model_name: str,
         history: str = "",
+        full_data_threshold: int | None = None,
     ) -> LlmResponse:
         """调用 answer LLM 生成汇总；返回 LlmResponse（含 token）。
 
         失败时由调用方按现有 LLM 错误降级链路处理。
         不对结果做后处理。
+
+        full_data_threshold（Task 2）：本方法同样无 session，由持 session 的调用方
+        现读后透传；None 时 summarize_data 回落模块默认。
         """
-        prompt = self._build_prompt(original_question, multi_step_plan, completed_steps, history)
+        prompt = self._build_prompt(
+            original_question, multi_step_plan, completed_steps, history,
+            full_data_threshold=full_data_threshold,
+        )
         return await client.complete(
             messages=[
                 LlmMessage(role="system", content=_STEP_AGGREGATOR_SYSTEM_PROMPT),
@@ -58,6 +65,7 @@ class StepAggregator:
         multi_step_plan: MultiStepPlan,
         completed_steps: list[StepResult],
         history: str,
+        full_data_threshold: int | None = None,
     ) -> str:
         parts = [
             f"用户原始问题：{_sanitize(original_question)}",
@@ -77,7 +85,8 @@ class StepAggregator:
                 continue
             # 结构化摘要（feat-smart-data-summary，2026-09-18）：替代旧的 data[:20] 截断，
             # 让汇总 LLM 拿到全量统计 + 关键样本，能基于真实数据生成对比结论。
-            data_summary = summarize_data(r.data)
+            # Task 2：全量/摘要分界阈值由持 session 的调用方现读后透传。
+            data_summary = summarize_data(r.data, fullDataThreshold=full_data_threshold)
             data_snippet = json.dumps(
                 data_summary, ensure_ascii=False, default=str
             )

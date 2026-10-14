@@ -130,7 +130,13 @@ class TestChatStreamApi:
         assert frames[4][1]["plan"]["target"] == "各供应商的收货数量汇总"
         assert "PRECEIPT" in frames[5][1]["sql"]
         chartData = frames[6][1]
-        assert chartData["chartType"] == "pie"
+        # 期望 bar 而非 pie：决策引擎（2026-09-30 重写，chart-rendering.md）里
+        # 「占比」图型由 R02 按 **plan 的 formula** 决定，而本用例的假计划是
+        # `{"target": ..., "selectedClasses": ["PRECEIPT"]}` —— 没有 aggregations
+        # 就没有 formula，R02 不可达，落到 R12（1 维 + 1 指标）⇒ 柱状。
+        # 这里的 pie 是引擎重写前的旧期望（当时图型由 LLM 写 option 决定），
+        # 别照着改回去。
+        assert chartData["chartType"] == "bar"
         assert chartData["chartOption"] is not None
         assert len(chartData["data"]) == 2
         # token 增量拼接为完整回答
@@ -140,6 +146,46 @@ class TestChatStreamApi:
         doneData = frames[-1][1]
         assert doneData["tokensUsed"] == 60
         assert doneData["cost"] > 0
+
+    async def test_single_step_chart_and_step_result_carry_table_and_rationale(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """可视化输出策略（case ①）：流式单步的 chart 事件与 step_result 帧都带
+        tableOption/visualRationale，且 params.kind 是客户端收到的线格式裸字符串 "bar"。
+
+        单步流式发两条帧（chart + step_result 收尾），两条帧的字段同口径——
+        漏一条就是「计划卡里没依据」。
+        """
+        config, ds = await _seed(dbSession)
+        _installStreamFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat/stream",
+            json={
+                "sessionId": "s1",
+                "question": "各供应商的收货数量汇总",
+                "datasourceId": ds.id,
+                "chartType": "bar",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        frames = _parseFrames(resp.text)
+        chartFrames = [f for f in frames if f[0] == EVENT_CHART]
+        assert len(chartFrames) == 1
+        chartData = chartFrames[0][1]
+        assert chartData["chartType"] == "bar"
+        assert chartData["tableOption"]["columns"] == ["NAME", "QTY"]
+        assert chartData["tableOption"]["truncated"] is False
+        assert chartData["visualRationale"]["code"] == "R_FORCED_CLIENT"
+        # 关键钉死：线格式契约 —— 客户端收到裸字符串 "bar"，不是 "ChartType.BAR"
+        assert chartData["visualRationale"]["params"]["kind"] == "bar"
+
+        stepResultFrames = [f for f in frames if f[0] == EVENT_STEP_RESULT]
+        assert len(stepResultFrames) == 1
+        sr = stepResultFrames[0][1]
+        assert sr["tableOption"] == chartData["tableOption"]
+        assert sr["visualRationale"] == chartData["visualRationale"]
+        assert sr["visualRationale"]["params"]["kind"] == "bar"
 
     async def test_stream_records_answer_usage_and_session_messages(
         self, client, dbSession, monkeypatch
@@ -162,6 +208,19 @@ class TestChatStreamApi:
         assert len(msgs) == 2
         assert msgs[1].role == "assistant"
         assert msgs[1].content == "查询完成，共 2 条记录。"
+        # 0105 图表进最终报告：图必须**真的落进库**。只测 schema 与读路径会漏掉
+        # 这一层 —— 多处 `_storeSessionMessages` 调用点任何一个漏传，读取侧照样
+        # 全绿（读到 None 而已），而导出 PDF 与历史回放会整批没有图。
+        assert msgs[1].chart_type == "bar", "落库契约：chart_type 列存裸字符串 \"bar\"（不是 \"ChartType.BAR\" 枚举名）"
+        assert msgs[1].chart_option is not None
+        assert msgs[0].chart_type is None, "user 行不该带图"
+        # 0107：表负载 + 判断依据同轮落库 —— 回放/导出要能离线重建，不能只活在实时响应。
+        assert msgs[1].table_option is not None, "表负载必须落进库"
+        assert msgs[1].table_option["columns"] == ["NAME", "QTY"]
+        assert msgs[1].visual_rationale is not None, "判断依据必须落进库"
+        assert msgs[1].visual_rationale["code"] == "R12_CATEGORY_BAR"
+        assert msgs[0].table_option is None, "user 行不该带表"
+        assert msgs[0].visual_rationale is None, "user 行不该带依据"
 
     async def test_chitchat_streams_greeting(self, client, dbSession) -> None:
         resp = await client.post(

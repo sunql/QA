@@ -20,12 +20,15 @@ from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import text
 
+from app.models.system_config import SystemConfig
 from app.services.data_summary import (
     DEFAULT_HEAD_SAMPLE_SIZE,
     DEFAULT_NUMERIC_COLUMNS_CAP,
     DEFAULT_STRING_COLUMNS_CAP,
     DEFAULT_TAIL_SAMPLE_SIZE,
+    FULL_DATA_THRESHOLD,
     summarize_data,
 )
 
@@ -286,3 +289,88 @@ class TestFullDataWhenSmall:
         assert out["numeric_stats"]["qty"]["sum"] == sum(i * 10 for i in range(20))
         # distinct_counts 正常
         assert out["distinct_counts"]["supplier"] == 3
+
+
+class TestFullDataThresholdParam:
+    """Task 2：summarize_data 新增 fullDataThreshold 关键字参数。
+
+    FULL_DATA_THRESHOLD 迁入 system_config 后，读取方把现读到的阈值显式传入；
+    None（缺省）回落模块常量 FULL_DATA_THRESHOLD，保证旧调用行为完全不变。
+    """
+
+    def test_custom_threshold_switches_full_to_summary(self) -> None:
+        """合法值生效：传入 3 → 3 行全量、10 行截断（而非默认的 100 行内全量）。"""
+        rows3 = [{"i": i} for i in range(3)]
+        rows10 = [{"i": i} for i in range(10)]
+        assert summarize_data(rows3, fullDataThreshold=3)["truncated"] is False
+        assert len(summarize_data(rows3, fullDataThreshold=3)["samples"]["head"]) == 3
+        out = summarize_data(rows10, fullDataThreshold=3)
+        assert out["truncated"] is True
+        assert len(out["samples"]["head"]) == 5
+        assert len(out["samples"]["tail"]) == 5
+
+    def test_none_threshold_equals_default(self) -> None:
+        """None 与缺省等价：都回落 FULL_DATA_THRESHOLD（回归口径）。"""
+        rows = [{"i": i} for i in range(100)]
+        assert summarize_data(rows, fullDataThreshold=None) == summarize_data(rows)
+
+    def test_no_arg_behavior_unchanged(self) -> None:
+        """不传参（旧行为）：≤100 全量、>100 截断 —— 与既有用例同口径。"""
+        assert summarize_data([{"i": i} for i in range(100)])["truncated"] is False
+        assert summarize_data([{"i": i} for i in range(101)])["truncated"] is True
+
+
+class _BoomSession:
+    """模拟 system_config 表不可用：execute 直接抛。"""
+
+    async def execute(self, stmt: object) -> None:
+        raise RuntimeError("system_config unavailable")
+
+
+class TestLoadFullDataThreshold:
+    """Task 2：loadFullDataThreshold 从 system_config 现读 FULL_DATA_THRESHOLD。
+
+    口径与 chart_thresholds 既有读取一致：缺席/非法/非正 → 默认 + warning；DB 挂了不阻断。
+    """
+
+    @pytest.mark.asyncio
+    async def test_missing_key_returns_default(self, dbSession) -> None:
+        from app.services.chart_thresholds import loadFullDataThreshold
+
+        assert await loadFullDataThreshold(dbSession) == FULL_DATA_THRESHOLD
+
+    @pytest.mark.asyncio
+    async def test_present_value_wins(self, dbSession) -> None:
+        from app.services.chart_thresholds import loadFullDataThreshold
+
+        dbSession.add(SystemConfig(key="FULL_DATA_THRESHOLD", value="50"))
+        await dbSession.commit()
+        assert await loadFullDataThreshold(dbSession) == 50
+
+    @pytest.mark.asyncio
+    async def test_malformed_value_falls_back(self, dbSession) -> None:
+        from app.services.chart_thresholds import loadFullDataThreshold
+
+        dbSession.add(SystemConfig(key="FULL_DATA_THRESHOLD", value="abc"))
+        await dbSession.commit()
+        assert await loadFullDataThreshold(dbSession) == FULL_DATA_THRESHOLD
+
+    @pytest.mark.asyncio
+    async def test_non_positive_falls_back(self, dbSession) -> None:
+        from app.services.chart_thresholds import loadFullDataThreshold
+
+        dbSession.add(SystemConfig(key="FULL_DATA_THRESHOLD", value="0"))
+        await dbSession.commit()
+        for bad in ("0", "-3"):
+            await dbSession.execute(
+                text("UPDATE system_config SET value = :v WHERE key = 'FULL_DATA_THRESHOLD'"),
+                {"v": bad},
+            )
+            await dbSession.commit()
+            assert await loadFullDataThreshold(dbSession) == FULL_DATA_THRESHOLD, f"raw={bad!r}"
+
+    @pytest.mark.asyncio
+    async def test_db_error_does_not_break_pipeline(self) -> None:
+        from app.services.chart_thresholds import loadFullDataThreshold
+
+        assert await loadFullDataThreshold(_BoomSession()) == FULL_DATA_THRESHOLD

@@ -108,6 +108,60 @@ class TestModelConfigApi:
         assert get.json()["isActive"] is False
 
 
+class _CloseSentinel:
+    """带 close 记录的客户端哨兵（模拟已缓存的旧客户端）。"""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class TestModelConfigCacheInvalidation:
+    """OpenAiClient 构造时固化 endpoint/key——配置编辑/停用必须失效缓存客户端，
+    否则运行中的进程永远用旧配置（2026-10-03 MiniMax Connection error 根因）。"""
+
+    async def test_update_invalidates_cached_client(self, client) -> None:
+        from app.infrastructure.llm import factory as factoryModule
+
+        factoryModule.resetFactory()
+        try:
+            create = await client.post("/api/v1/models", json=CREATE_PAYLOAD)
+            configId = create.json()["id"]
+            sentinel = _CloseSentinel()
+            factoryModule._clients[configId] = sentinel
+            # Act
+            resp = await client.put(
+                f"/api/v1/models/{configId}",
+                json={"apiEndpoint": "https://api.changed.example/v1"},
+            )
+            # Assert
+            assert resp.status_code == 200, resp.text
+            assert configId not in factoryModule._clients
+            assert sentinel.closed is True
+        finally:
+            factoryModule.resetFactory()
+
+    async def test_deactivate_invalidates_cached_client(self, client) -> None:
+        from app.infrastructure.llm import factory as factoryModule
+
+        factoryModule.resetFactory()
+        try:
+            create = await client.post("/api/v1/models", json=CREATE_PAYLOAD)
+            configId = create.json()["id"]
+            sentinel = _CloseSentinel()
+            factoryModule._clients[configId] = sentinel
+            # Act
+            resp = await client.delete(f"/api/v1/models/{configId}")
+            # Assert
+            assert resp.status_code == 204
+            assert configId not in factoryModule._clients
+            assert sentinel.closed is True
+        finally:
+            factoryModule.resetFactory()
+
+
 class TestSessionUsageApi:
     async def test_list_sessions_returns_aggregates(self, client) -> None:
         from app.infrastructure.database import getSessionFactory

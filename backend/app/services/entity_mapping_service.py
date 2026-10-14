@@ -11,8 +11,9 @@ createMapping 接收 actor 并将 owner 设为 actor.departments[0]（防止 cli
 bulk import（feat-entity-mapping-bulk-import 2026-09-16）：
 - bulkImportMappings 接 list[EntityMappingCreate] + actor
 - 单事务提交；行级隔离：某行失败不阻塞其它行
-- enterprise_key 由 (entity_type, enterprise_code) 自动派生（与 scripts/sync
-  脚本 _stableKey 算法一致），保证同 code → 同 key、bulk 与单条一致
+- enterprise_key 由 (entity_type, enterprise_code) 自动派生，走 app/domain/
+  enterprise_key.py 这个**唯一** SSOT（脚本与 service 共用同一实现，不复制粘贴），
+  保证同 code → 同 key、bulk 与单条一致
 - 唯一键 (entity_type, enterprise_key, source_system) 已存在 → 比对差异
   决定 inserted / updated / skipped；不存在 → inserted
 - 上限 1000 行/请求（防长事务锁 PG）
@@ -20,7 +21,6 @@ bulk import（feat-entity-mapping-bulk-import 2026-09-16）：
 
 from __future__ import annotations
 
-import hashlib
 from datetime import date, datetime
 
 from sqlalchemy import or_, select
@@ -28,6 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
+from app.domain.enterprise_key import offsetFor, stableKey
 from app.domain.enums import SourceSystem
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import EntityMapping
@@ -71,37 +72,15 @@ _BULK_COMPARE_FIELDS: tuple[str, ...] = (
     "name",
 )
 
-# enterprise_key 派生常量（与 scripts/sync_entity_mapping_from_thbi.py SSOT）：
-#   - SHA-256(enterprise_code) 前 8 字节 → uint64 → mod 2³² → 加 entity_type offset
-# entity_type 偏移区间：SUPPLIER [800_000, 4_295_767_296)；MATERIAL [4_295_767_296, ...)；
-# 其它类型暂未分配 offset，统一落到 _GENERIC_KEY_OFFSET（避免与 SUPPLIER/MATERIAL 撞区）。
-_KEY_RANGE_SIZE = 2**32
-_SUPPLIER_KEY_OFFSET = 800_000
-_MATERIAL_KEY_OFFSET = 4_295_767_296  # = _SUPPLIER_KEY_OFFSET + _KEY_RANGE_SIZE
-_GENERIC_KEY_OFFSET = 8_591_534_592  # 预留 MATERIAL 之后的下一段 4G
-_ENTITY_TYPE_OFFSETS: dict[str, int] = {
-    "SUPPLIER": _SUPPLIER_KEY_OFFSET,
-    "MATERIAL": _MATERIAL_KEY_OFFSET,
-}
-# 未在 _ENTITY_TYPE_OFFSETS 里的 entity_type 走通用 offset；
-# 这是故意设计：业务对象新增时不需要改 service，只在 seed_business_objects.py 注册即可。
-_DEFAULT_KEY_OFFSET = _GENERIC_KEY_OFFSET
-
-
-def _stableKey(code: str, *, offset: int) -> int:
-    """SHA-256(code) 前 8 字节 → uint64 → mod 2³² → 加 offset。
-
-    与 scripts/sync_entity_mapping_from_thbi.py 同源（SSOT），保证批量导入与
-    运维脚本对同一 enterprise_code 派生同一 enterprise_key。
-    """
-    digest = hashlib.sha256(code.encode("utf-8")).digest()
-    head = int.from_bytes(digest[:8], byteorder="big", signed=False)
-    return offset + (head % _KEY_RANGE_SIZE)
+# enterprise_key 派生**全部**由 app/domain/enterprise_key.py 提供（唯一 SSOT）。
+# 本模块原有一份复制粘贴的常量 + _stableKey，注释写着「与脚本同源」而代码是重复的 ——
+# 2026-09-30 实测证明这种「注释式 SSOT」会失守（2³² 空间碰撞丢 12 行），故删除本地副本。
+# 批量导入（bulkCreate 路径）与运维脚本因此必然派生同一 key。
 
 
 def _deriveKey(entityType: str, enterpriseCode: str) -> int:
-    offset = _ENTITY_TYPE_OFFSETS.get(entityType, _DEFAULT_KEY_OFFSET)
-    return _stableKey(enterpriseCode, offset=offset)
+    """(entity_type, enterprise_code) → enterprise_key（走 SSOT 的 offsetFor）。"""
+    return stableKey(enterpriseCode, offset=offsetFor(entityType))
 
 
 def _entityToDict(entity: EntityMapping) -> dict:
@@ -211,6 +190,11 @@ class EntityMappingService:
         like = f"%{q}%"
         conds.append(EntityMapping.enterprise_code.ilike(like))
         conds.append(EntityMapping.source_code.ilike(like))
+        # 业务名（供应商 supplier_name / 物料描述）：AutoComplete 按中文名找实体的唯一入口。
+        # 少了这一条，「chat 里输全称能解析、下拉框却列不出来」——2026-09-16 起挂在待办，
+        # 2026-09-30 补齐。中缀 ILIKE 有 alembic 0086 的 GIN trigram 索引（partial:
+        # entity_type='SUPPLIER'）支撑，35w 行不会退化成顺序扫。
+        conds.append(EntityMapping.name.ilike(like))
         stmt = stmt.where(or_(*conds))
         if entityType is not None:
             stmt = stmt.where(EntityMapping.entity_type == entityType)
@@ -261,6 +245,10 @@ class EntityMappingService:
             match_rule=dto.match_rule,
             effective_date=dto.effective_date,
             expiry_date=dto.expiry_date,
+            # 业务名：DTO 里已声明且 bulk 路径也写（见 bulkImportMappings），
+            # 此前单条 create 漏写 → 带 name 的 POST 返 201 却静默丢弃该字段，
+            # 于是 AutoComplete 的 name 列永远为空。2026-09-30 补齐。
+            name=dto.name,
             owner=derivedOwner,
         )
         session.add(entity)

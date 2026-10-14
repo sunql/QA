@@ -16,6 +16,8 @@ import SuggestedAgentCard from "./SuggestedAgentCard";
 import HypothesisPanel from "./HypothesisPanel";
 import type { ChatMessage } from "../../types/chat";
 import { useTranslation } from "../../i18n";
+import { visualRationaleText } from "../../utils/visualRationale";
+import { useChatStore } from "../../stores/chatStore";
 
 const { Paragraph } = Typography;
 
@@ -37,6 +39,10 @@ function MessageItem({
   onVerifyHypothesis,
 }: MessageItemProps) {
   const { t } = useTranslation();
+  // 续跑入口：store 的 resumeRun 与首发共用同一套 SSE handler；
+  // loading 用作续跑按钮的禁用位，流式进行中防重复点击（R5）。
+  const resumeRun = useChatStore((s) => s.resumeRun);
+  const loading = useChatStore((s) => s.loading);
   const isUser = message.role === "user";
 
   if (isUser) {
@@ -48,6 +54,13 @@ function MessageItem({
       </div>
     );
   }
+
+  // 消息级 rationale（Task 8）：多步汇总走这条（SUMMARY_TEXT_ONLY，无顶层图）。
+  // 单步的 rationale 随 chartType 交给 ChartRenderer 渲染，这里跳过避免重复。
+  const messageRationale =
+    !message.chartType && message.visualRationale
+      ? visualRationaleText(message.visualRationale, t)
+      : null;
 
   return (
     <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 12 }}>
@@ -95,6 +108,16 @@ function MessageItem({
                 }
               />
             ) : null}
+            {/* 续跑失败：横幅（不是 isError）——保留原正文与多步计划卡，
+                用户能看清上次问出了什么，也能再点一次续跑。 */}
+            {message.resumeError ? (
+              <Alert
+                type="error"
+                showIcon
+                style={{ marginBottom: 8 }}
+                message={t("multiStep.resumeFailed", { message: message.resumeError })}
+              />
+            ) : null}
             {/* H4 断连兜底：内容可能是半截回答（服务端已按 interrupted 标记），必须说清楚 */}
             {message.interrupted ? (
               <Alert
@@ -122,7 +145,12 @@ function MessageItem({
             ) : null}
             {message.steps && message.steps.length ? (
               <div style={{ marginTop: 8 }}>
-                <MultiStepPlanCard steps={message.steps} currentStepIndex={message.currentStepIndex} />
+                <MultiStepPlanCard
+                  steps={message.steps}
+                  currentStepIndex={message.currentStepIndex}
+                  onResume={(runId, fromStepIndex) => resumeRun(runId, fromStepIndex, message.id)}
+                  disabled={loading}
+                />
               </div>
             ) : null}
             {message.sql ? (
@@ -130,14 +158,27 @@ function MessageItem({
                 <SqlPreview sql={message.sql} />
               </div>
             ) : null}
-            {message.chartType && message.chartOption ? (
+            {/* 渲染门只看 chartType：`kpi` 这类非 ECharts 类型（指标卡）没有 ECharts
+                option 语义，用 `chartOption` 兜门会把它们挡掉。有没有内容由
+                ChartRenderer 自己判（无负载/无 option 时它返回 null）。 */}
+            {message.chartType ? (
               <div style={{ marginTop: 8 }}>
                 <ChartRenderer
                   chartType={message.chartType}
                   chartOption={message.chartOption}
                   data={message.data}
+                  tableOption={message.tableOption}
+                  visualRationale={message.visualRationale}
                 />
               </div>
+            ) : null}
+            {/* Task 8：消息级 rationale（多步汇总 SUMMARY_TEXT_ONLY）。单步的 rationale
+                已随 chartType 走 ChartRenderer 渲染，这里只在无顶层图时兜底渲染，
+                避免同一依据画两行。 */}
+            {messageRationale ? (
+              <Typography.Text type="secondary" style={{ display: "block", marginTop: 8, fontSize: 12 }}>
+                {messageRationale}
+              </Typography.Text>
             ) : null}
             {/* Phase 5.3：供应商 360° ADS 视图卡片（仅 intent=supplier_360 + 命中 supplier_key 时回填）。
                 按字段存在性路由，不依赖 message.intent 兜底（意图可能是 chitchat/clarify 等其他）。 */}

@@ -46,6 +46,47 @@ estPromptCost = tokenCount(modelName, prompt) * cost_per_1k_input / 1000
 - `OpenAiClient`：覆盖 OpenAI/Azure/代理，按 provider 构造 `AsyncOpenAI` 或 `AsyncAzureOpenAI`，支持 `base_url`。
 - `OllamaClient`：`httpx` 调 `/api/chat`，解析 `prompt_eval_count`/`eval_count`。
 - `factory.py`：按 `LlmConfig.id` 缓存客户端，API Key 优先解密配置密文，否则回退环境变量。
+  **缓存失效**：`OpenAiClient` 构造时固化 model_name/api_endpoint/key，配置编辑/停用必须调
+  `invalidateClient(configId)`（`model_config_service` 的 update/deactivate 已接线），否则
+  编辑对运行中的进程永不生效（2026-10-03 MiniMax Connection error 根因）。
+
+## 答案后处理：Think_Hide（2026-10-03）
+
+推理模型（MiniMax-M3 等）把 `<think>…</think>` 思维链内联在答案正文。系统参数
+`Think_Hide`（system_config，迁移 0108 补种 `'0'`）：`1` 在所有 LLM 答案出口剥离
+（chat 单步/多步汇总/流式/doc_qa/wiki chat，`services/think_block.py`），`0`/缺省字节级透传。
+流式用逐字符状态机增量过滤，下发 token 与落库 assistant 消息一致；读取无缓存、每次现读，
+admin 改值即时对新请求生效。
+
+⚠️ **`Think_Hide` 只管「给用户看什么」，不管「机器能读什么」**。内部 LLM 消费
+（计划 JSON / SQL 生成）自 2026-10-03 起**无条件剥离** think 块，与该参数无关
+（见下节）—— 这两者正交，勿把解析层的剥离"优化"成读参数。
+
+## 关闭推理模型思维链：`disable_thinking`（2026-10-03）
+
+`llm_config.disable_thinking`（迁移 0109，`server_default=false`）：**按模型配置单独勾选**，
+由 `OpenAiClient._applyThinkingPolicy` 转成 `extra_body.thinking.type=disabled` 透传，
+作用于该模型的全部调用（`complete` / `completeStream` / `complete_with_tools`）。
+
+**为什么需要**：实测 MiniMax-M3 把 **91.3%** 的 token 花在思维链上（think 5,829 / JSON 558），
+挤爆 NL2SQL 计划阶段 2048 的预算 ⇒ 回复被截断在 JSON 之前 ⇒ chat HTTP 400。
+关闭后同prompt 只需 509~907 tokens（省 86-92%），解析 4/4 成功。
+
+三个易错点（改动时勿破坏）：
+1. **必须用 `extra_body`**，顶层 `thinking` kwarg 被 openai SDK 拒
+   （`unexpected keyword argument`）。
+2. **merge 不覆盖**调用方的 `extra_body` —— 调用方可能自带 `reasoning_split`
+   （M2.7 不传可能返回空响应）；`payload.update(kwargs)` 在注入之后执行。
+3. 构造期固化 + `update` 已调 `invalidateClient` ⇒ 勾选后即时对新请求生效。
+
+**配套**：计划阶段补了截断退避（`nl2sql_plan.py`，封顶 4096）。它是**不支持关闭 thinking
+的模型（M2.x）的唯一防线**——4096 < 实测需求 6387，对 M3 靠的是关闭 thinking 而非退避。
+
+⚠️ **代价**：关闭 thinking 后计划质量可能下降（实测 M3 从「单表 + 干净 `SUPPLIER_CODE = 'B019'`」
+变成「多表 + `BPSNUM_0 = 'B019' 或 BPSNAM_0 = '圣特公司'`」），更容易撞本体连通性校验失败。
+这正是做成按模型勾选而非全局开关的原因：风险由用户按模型自行承担。
+
+SSOT：`Harness/changes/fix-reasoning-model-token-budget/summary.md`
 
 ## 关键参数
 

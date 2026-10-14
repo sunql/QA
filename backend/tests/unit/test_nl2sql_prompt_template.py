@@ -6,7 +6,7 @@ Run: pytest backend/tests/unit/test_nl2sql_prompt_template.py -v
 import pytest
 
 from app.services.nl2sql_service import Nl2SqlService, DataSourceType
-from app.services.nl2sql_service import _SQL_DIALECTS
+from app.services.nl2sql_dialects import DialectRegistry
 
 
 class TestPromptRule4CteRatio:
@@ -22,7 +22,7 @@ class TestPromptRule4CteRatio:
 
     def _system_prompt(self, nl2sql, schema_text):
         """Helper: call _buildPlanSystemPrompt with minimal required args."""
-        dialect = _SQL_DIALECTS[DataSourceType.POSTGRESQL]
+        dialect = DialectRegistry.default().resolve(DataSourceType.POSTGRESQL)
         return nl2sql._buildPlanSystemPrompt(
             schemaText=schema_text,
             dialect=dialect,

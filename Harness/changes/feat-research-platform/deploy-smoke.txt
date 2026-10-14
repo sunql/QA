@@ -1,0 +1,105 @@
+=== 部署冒烟 2026-10-13T06:52:03Z ===
+git HEAD: 09173fd  branch: feat/multi-step-persist
+tracked 未提交改动: 0 项
+
+重建方式（本次**必须**重建，否则冒烟测的是旧代码）：
+    cd docker
+    docker compose build backend && docker compose build frontend
+    docker compose up -d backend frontend
+原因：`qa-backend` 是**烘焙镜像**（compose 里 `build: ../docker/Dockerfile.backend`，无 bind-mount）。
+冒烟前它在跑 4 小时前的旧镜像 —— 本分支 T12–T16 的代码（outbox 回放 / 任务台账 / 预算闸门 /
+前端 SSE 重连）**不在其中**。只重建 backend 会让「开放了新路由」这件事变成空话，故前后端都重建。
+（对照：环节一的冒烟是在**旧镜像**上做的，只验了环节一代码 + 当时已应用的迁移；本次补上真部署。）
+
+--- 1) 容器状态 ---
+qa-backend	Up 35 seconds	qa-system-backend
+qa-frontend	Up 3 seconds	qa-system-frontend
+
+--- 2) 后端 openapi 可达性 ---
+HTTP 200  http://localhost:8000/openapi.json
+
+--- 3) research 路由（openapi paths）---
+/api/v1/research/checkpoints/{checkpointId}/answer
+/api/v1/research/sessions
+/api/v1/research/sessions/{sessionId}
+/api/v1/research/sessions/{sessionId}/abort
+/api/v1/research/sessions/{sessionId}/report
+/api/v1/research/sessions/{sessionId}/reports
+/api/v1/research/sessions/{sessionId}/turns
+/api/v1/research/stream
+
+--- 3b) GET /research/stream 参数（T12 契约：lastEventId 必须出现）---
+sessionId (required=True)
+lastEventId (required=False)          <-- Task 12 新增：断线回放游标
+Authorization / X-User-Id / X-Tenant-Id / X-User-Roles / X-User-Departments
+
+--- 4) 前端可达性 ---
+HTTP 200  http://localhost:5173/
+
+--- 5) 生产库 alembic head（应为 0121）+ research 表 ---
+alembic_version = 0121
+research_checkpoint
+research_event_outbox        <-- Task 12
+research_finding
+research_report
+research_run_state
+research_session
+research_step_result
+research_task                <-- Task 10+11
+research_turn
+
+--- 6) 环节二新表的真实结构（0120 / 0121）---
+                        Table "public.research_event_outbox"
+   Column   |           Type           | Nullable |                      Default
+------------+--------------------------+----------+---------------------------------------------------
+ seq        | bigint                   | not null | nextval('research_event_outbox_seq_seq'::regclass)
+ session_id | uuid                     | not null |
+ event      | character varying(50)    | not null |
+ payload    | jsonb                    | not null | '{}'::jsonb
+ created_at | timestamp with time zone | not null |
+Indexes:
+    "research_event_outbox_pkey" PRIMARY KEY, btree (seq)
+    "ix_research_event_outbox_session_id" btree (session_id)
+（承重：`seq` 是 BIGSERIAL 单调游标 —— 弃计划的 `created_at` 游标，同刻并列会漏/重。无 run_state_id、无 UUID event_id，均有意的。）
+
+                         Table "public.research_task"
+    Column     |           Type           | Nullable | Default
+---------------+--------------------------+----------+---------
+ id            | uuid                     | not null |
+ session_id    | uuid                     | not null |
+ turn_id       | uuid                     |          |
+ kind          | character varying(20)    | not null |
+ status        | character varying(20)    | not null |
+ attempt       | integer                  | not null | 0
+ max_attempts  | integer                  | not null | 1
+ worker_id     | character varying(64)    |          |
+ lease_until   | timestamp with time zone |          |
+ payload       | jsonb                    | not null | '{}'::jsonb
+ error         | text                     |          |
+ created_at    | timestamp with time zone | not null |
+ updated_at    | timestamp with time zone | not null |
+Indexes:
+    "research_task_pkey" PRIMARY KEY, btree (id)
+    "ix_research_task_lease_until" btree (lease_until)
+    "ix_research_task_session_id" btree (session_id)
+    "ix_research_task_turn_id" btree (turn_id)
+Foreign-key constraints:
+    "research_task_session_id_fkey" FOREIGN KEY (session_id) REFERENCES research_session(id) ON DELETE CASCADE
+    "research_task_turn_id_fkey" FOREIGN KEY (turn_id) REFERENCES research_turn(id) ON DELETE CASCADE
+
+--- 7) 启动：无阻断 drift + reaper 实测触发 ---
+容器 CMD：sh -c 'alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000'
+  ⇒ 容器**启动时自跑 alembic upgrade head**（本次是 no-op：prod 已 0121）。
+
+schema-drift 门（启动时）输出 = **非阻断**警告（既有存量，非本分支引入）：
+  [db:table]  10 张 ORM 未声明表（BPSUPPLIER, PORDER, PORDERQ, evidence_20260930, …, wiki_page_20260930）
+  [db:column] knowledge_claim.confidence_level
+  [db:index]  29 个 ORM 未声明索引（agent_definition.ix_*, audit_log.idx_*, …）
+⇒ **blocking = 0**，`Application startup complete.`，`Uvicorn running on http://0.0.0.0:8000`。
+
+**reaper 在真实进程启动时执行了**（Task 10+11 的 lifespan 接线在部署态确实跑）：
+  UPDATE research_task SET status=$1, error=$2, updated_at=$3
+    WHERE research_task.status = $4 RETURNING research_task.session_id
+    ('orphaned', '进程重启时任务仍处于执行中', …, 'leased')
+（这正是 T10+11 评审 F2 要求的「生产唯一触发路径」，其接线守卫
+ `app/tests/unit/test_main_lifespan_wires_reaper.py` 会红。）

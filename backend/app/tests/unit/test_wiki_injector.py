@@ -1,4 +1,4 @@
-"""WikiInjector 单测（wiki-ontology-link Task 4，纯函数 12 例）。
+"""WikiInjector 单测（wiki-ontology-link Task 4，纯函数 14 例）。
 
 业务覆盖：
   - 评分 = sum(weight × recall_score) 按 (page_id, chunk_id) 分组
@@ -164,3 +164,25 @@ def test_renderer_caps_chars():
 def test_empty_pairs_returns_empty():
     out = WikiInjector.collectAndScore([], [], {}, _budget())
     assert out == []
+
+
+def test_metric_type_is_accepted():
+    """metric 必须在 _VALID_TYPES 内 —— 否则 A 档刚修好的链在注入器处又被静默丢弃。
+
+    这是「六处枚举」里最隐蔽的一处：wiki_injector 拦掉之后既无日志也无前端提示，
+    表现与本次要修的 A 档缺陷完全一样。
+    """
+    recalled = [_rec("metric", 8, 0.7)]
+    links = [_lnk("p001", None, "metric", 8, "1.0")]
+    chunks = {("p001", ""): "指标口径"}
+    out = WikiInjector.collectAndScore(recalled, links, chunks, _budget())
+    assert len(out) == 1
+    assert out[0].applied_to == [("metric", 8)]
+
+
+def test_unknown_type_is_dropped():
+    """反例：非法类型仍被丢弃 —— 别为了放 metric 把闸门整个拆了。"""
+    recalled = [_rec("join", 8, 0.7)]
+    links = [_lnk("p001", None, "join", 8, "1.0")]
+    chunks = {("p001", ""): "x"}
+    assert WikiInjector.collectAndScore(recalled, links, chunks, _budget()) == []

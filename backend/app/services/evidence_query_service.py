@@ -25,20 +25,27 @@ _CHAT_CHANNEL = "chat"
 
 
 async def getSessionOwnerUserIds(
-    session: AsyncSession, sessionId: str
+    session: AsyncSession, sessionId: str, *, channel: str | None = _CHAT_CHANNEL
 ) -> set[str]:
-    """返回该 chat session 已标记的全部归属 user_id（server-side 事实源）。
+    """返回该 session 已标记的全部归属 user_id（server-side 事实源）。
 
     空集 = 无归属标记（存量 NULL 行或全新会话），由调用方决定放行
     （fail-open，与 wiki.py wiki_qa 守卫同语义）。
+
+    ``channel=None`` = **不限渠道**：取该 session 内任意渠道已标记行的归属者并集。
+    会话端点（``/sessions/{id}/messages``、``DELETE /sessions/{id}``、``export.pdf``）
+    服务 chat / doc_qa / wiki_qa **三个**渠道（`_CHAT_CHANNEL` 只有 "chat"），
+    而 doc_qa 行由 rag_qa_service 打标、wiki_qa 行由 wiki 侧打标 —— 端点侧沿用
+    默认的 "chat" 过滤会让另外两个渠道恒返空集，守卫**静默 fail-open**。
+    同一 session_id 内渠道唯一，取并集只会更严（多找到归属者→多拦），不会误判。
     """
-    rows = await session.execute(
-        select(SessionMessage.user_id).where(
-            SessionMessage.session_id == sessionId,
-            SessionMessage.channel == _CHAT_CHANNEL,
-            SessionMessage.user_id.is_not(None),
-        )
-    )
+    conditions = [
+        SessionMessage.session_id == sessionId,
+        SessionMessage.user_id.is_not(None),
+    ]
+    if channel is not None:
+        conditions.append(SessionMessage.channel == channel)
+    rows = await session.execute(select(SessionMessage.user_id).where(*conditions))
     return set(rows.scalars().all())
 
 

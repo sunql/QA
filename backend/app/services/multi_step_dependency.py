@@ -24,13 +24,16 @@ class MultiStepDependencyResolver:
         - depends_on 引用未知 index（< 0 or >= len(steps)）
         - 检测到 cycle（A depends_on B and B depends_on A）
         """
-        n = len(plan.steps)
+        # step.index 是业务 index（不一定等于 plan.steps tuple 里的位置），
+        # 必须用 map 查表；按位置取会出现 IndexError（#B5 inherit 单步 index=1 即踩中）。
+        step_by_index: dict[int, StepPlan] = {s.index: s for s in plan.steps}
         for step in plan.steps:
             for dep in step.depends_on:
-                # 越界检查
-                if dep < 0 or dep >= n:
+                # 越界检查：依赖必须指向真实存在的步骤
+                if dep not in step_by_index:
                     raise DependencyError(
-                        f"step {step.index} depends on unknown dep {dep} (plan has {n} steps)"
+                        f"step {step.index} depends on unknown dep {dep} "
+                        f"(plan has {len(step_by_index)} steps)"
                     )
         # Cycle 检测：DFS + 路径记录
         visited: dict[int, str] = {}  # index -> "visiting" | "visited"
@@ -46,7 +49,7 @@ class MultiStepDependencyResolver:
                 return
 
             visited[idx] = "visiting"
-            step = plan.steps[idx]
+            step = step_by_index[idx]
             for dep in step.depends_on:
                 dfs(dep, path + [idx])
             visited[idx] = "visited"
@@ -65,12 +68,11 @@ class MultiStepDependencyResolver:
         if not plan.steps:
             return []
 
-        n = len(plan.steps)
-        # 每个 step 的依赖集合
+        # 每个 step 的依赖集合（按 step.index 查表，index 不一定 == tuple 位置）
         deps: dict[int, tuple[int, ...]] = {s.index: s.depends_on for s in plan.steps}
-        # 已排好序的 index
+        # 已排好序的 index（按 step.index 而非 0..n-1）
         ordered: list[int] = []
-        remaining = set(range(n))
+        remaining = set(deps.keys())
 
         while remaining:
             # 找所有 depends_on 都在 ordered 中的步骤
@@ -121,12 +123,14 @@ class MultiStepDependencyResolver:
         # 从 missing 中挑那些依赖链上有失败步骤的，标 skipped
         # 迭代处理：被 skip 的步骤也会导致其下游被 skip
         skipped_by_dep: dict[int, str] = {}  # index -> skip_reason
+        # step.index -> StepPlan 查表，避免按 tuple 位置取（B5 单步 index=1 即踩中）
+        step_by_index: dict[int, StepPlan] = {s.index: s for s in plan.steps}
 
         def compute_skipped(idx: int, path: list[int]) -> None:
             """递归：如果依赖链上有失败，标 idx 为 skipped"""
             if idx in skipped_by_dep or idx in already_skipped:
                 return
-            step = plan.steps[idx]
+            step = step_by_index[idx]
             for dep in step.depends_on:
                 if dep in failed:
                     reason = f"依赖步骤 {[d for d in step.depends_on if d in failed]} 失败"
@@ -144,7 +148,7 @@ class MultiStepDependencyResolver:
 
         # 广度优先：按拓扑顺序处理
         for idx in all_step_indices:
-            step = plan.steps[idx]
+            step = step_by_index[idx]
             if step.index in existing or step.index in skipped_by_dep:
                 continue
             # 检查直接依赖是否有失败的或已 skip 的

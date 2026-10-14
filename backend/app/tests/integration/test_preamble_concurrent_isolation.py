@@ -258,3 +258,64 @@ class TestPreambleConcurrentIsolation:
             "_preamble_l4_response should not exist on ChatService instance - "
             "it was a process-wide singleton that caused cross-user data leakage"
         )
+
+
+class TestPreambleResultGuard:
+    """Guard tests: verify _requireFullResponse fails fast on missing full_response."""
+
+    async def test_missing_full_response_raises_runtime_error_without_internal_details(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """Guard must fail fast when PreambleResult.full_response is not populated.
+
+        RuntimeError is used (not DomainError) so it is unhandled by FastAPI's
+        exception handlers and propagates as an uncaught exception through the test
+        client — this is intentional: the 500 generic handler would produce the same
+        generic message but without going through the full HTTP round-trip in tests.
+
+        - RuntimeError must be raised (not 200 with broken data)
+        - Error message must NOT contain internal identifiers
+        """
+        import pytest
+        import app.api.v1.chat as chat_module
+        from app.services.chat_stream_output import PreambleResult
+
+        config, ds, kpi_a, kpi_b = await _seed_kpis(dbSession)
+        _install_fakes(monkeypatch, config, _KpiLlm())
+
+        # Monkeypatch _runL1AndL4Preamble to return a PreambleResult with full_response=None
+        async def _fake_preamble_none(dto, session, user):
+            return PreambleResult(
+                routing_layer="L1",
+                answer="fake answer",
+                full_response=None,  # intentionally missing
+            )
+
+        monkeypatch.setattr(
+            chat_module._service, "_runL1AndL4Preamble", _fake_preamble_none
+        )
+
+        # RuntimeError propagates through test client (ASGI) as uncaught exception
+        with pytest.raises(RuntimeError) as exc_info:
+            await client.post(
+                "/api/v1/chat",
+                json=_chat_payload("KPI_TEST_A query", ds.id),
+            )
+
+        # Error message must NOT contain internal identifiers
+        error_message = str(exc_info.value)
+        forbidden_substrings = [
+            "full_response",
+            "_runL1AndL4Preamble",
+            "PreambleResult",
+            "routing_layer",
+            "_requireFullResponse",
+            "L1L4PreambleMixin",
+            "l1",
+            "l4",
+        ]
+        found = [s for s in forbidden_substrings if s in error_message]
+        assert not found, (
+            f"error message must not expose internal identifiers, "
+            f"but found: {found!r} in {error_message!r}"
+        )

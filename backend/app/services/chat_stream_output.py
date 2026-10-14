@@ -161,8 +161,13 @@ class PreambleResult(BaseModel):
     # L1 cross-datasource mismatch
     datasource_mismatch: bool = False
     mismatch_warning: str | None = None
-    # 完整 ChatResponse（非流式入口需要完整响应；流式入口只用上面那些字段）
-    # 用 Any 破循环依赖 —— 同 chart_type 的既有做法
+    # 完整 ChatResponse（非流式入口需要完整响应；流式入口只用上面那些字段）。
+    # 用 Any 破循环依赖（同 chart_type 的既有做法）：本模块在 ChatResponse 之前导入，
+    # 若写真实类型注解，pydantic 在建类时会求值该注解（即使有 from __future__ annotations
+    # 也只在 type annotation 层面延迟，BaseModel.model_fields 的求值仍需运行时解析），
+    # 导致 NameError / PydanticUndefinedAnnotation；用 TYPE_CHECKING + 字符串字面量
+    # 也同样会在 pydantic 求值时失败（pydantic 不走 __annotations__ 的 TYPE_CHECKING 分支）。
+    # 唯一可行方案是 TypeVar + model_rebuild()，代价远大于收益；保持 Any 并记录原因。
     full_response: Any = None
 
 

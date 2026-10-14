@@ -425,11 +425,24 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                     chart_option=preamble.chart_option,
                     visual_rationale=preamble.visual_rationale,
                 )
-                # Return full ChatResponse stored by mixin (preserves data/confidence/chartType etc.)
-                return self._preamble_l1_response
+                # Return full ChatResponse via preamble (preserves data/confidence/chartType etc.)
+                if preamble.full_response is None:
+                    raise DomainError(
+                        f"PreambleResult L1 invariant broken: full_response must be populated "
+                        f"(routing_layer={preamble.routing_layer!r}). "
+                        f"Check that L1L4PreambleMixin._runL1AndL4Preamble returns PreambleResult "
+                        f"with full_response=l1 for the L1 path."
+                    )
+                return preamble.full_response
             # L4: preamble already ran _handleNl2SqlAgent and built the ChatResponse
-            # l4_chat_response is stored in the mixin; return it directly
-            return self._preamble_l4_response
+            if preamble.full_response is None:
+                raise DomainError(
+                    f"PreambleResult L4 invariant broken: full_response must be populated "
+                    f"(routing_layer={preamble.routing_layer!r}). "
+                    f"Check that L1L4PreambleMixin._runL1AndL4Preamble returns PreambleResult "
+                    f"with full_response=l4 for the L4 path."
+                )
+            return preamble.full_response
 
         result, state = await self._classifyMessage(
             session, dto,

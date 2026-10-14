@@ -161,6 +161,9 @@ class PreambleResult(BaseModel):
     # L1 cross-datasource mismatch
     datasource_mismatch: bool = False
     mismatch_warning: str | None = None
+    # 完整 ChatResponse（非流式入口需要完整响应；流式入口只用上面那些字段）
+    # 用 Any 破循环依赖 —— 同 chart_type 的既有做法
+    full_response: Any = None
 
 
 class L1L4PreambleMixin:
@@ -202,8 +205,6 @@ class L1L4PreambleMixin:
                         datasource_id=feat.datasource_id,
                         user_datasource_id=dto.datasourceId,
                     )
-                # Store full ChatResponse for non-stream caller; stream path uses PreambleResult fields
-                self._preamble_l1_response = l1
                 return PreambleResult(
                     routing_layer="L1",
                     answer=l1.answer,
@@ -215,13 +216,12 @@ class L1L4PreambleMixin:
                     confidence=match.confidence,
                     datasource_mismatch=mismatch,
                     mismatch_warning=warning,
+                    full_response=l1,
                 )
 
         # 2. L4 Agent Loop
         l4 = await self._handleNl2SqlAgent(session, dto, user=user)
         if l4 is not None:
-            # Store L4 ChatResponse for non-stream caller; stream path uses PreambleResult fields
-            self._preamble_l4_response = l4
             return PreambleResult(
                 routing_layer="L4",
                 answer=l4.answer,
@@ -229,6 +229,7 @@ class L1L4PreambleMixin:
                     l4.agent_run.model_dump(mode="json", by_alias=True)
                     if l4.agent_run is not None else None
                 ),
+                full_response=l4,
             )
 
         return None

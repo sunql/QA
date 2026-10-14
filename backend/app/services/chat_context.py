@@ -504,12 +504,24 @@ class ContextMixin:
     # =========================================================================
 
     async def _loadQueryState(
-        self, session: AsyncSession, sessionId: str
+        self,
+        session: AsyncSession,
+        sessionId: str,
+        *,
+        userId: int | None = None,
+        datasourceId: int | None = None,
     ) -> SessionQueryState | None:
-        """读取该会话上一轮成功查询的状态；无记录返回 None。"""
-        result = await session.execute(
-            select(SessionQueryState).where(SessionQueryState.session_id == sessionId)
-        )
+        """读取该会话上一轮成功查询的状态；无记录返回 None。
+
+        P0-3：当传 userId/datasourceId 时按三元 (user_id, datasource_id, session_id) 过滤；
+        任一 None 不过滤；既有 17+ 调用点不传新参数时行为不变。
+        """
+        stmt = select(SessionQueryState).where(SessionQueryState.session_id == sessionId)
+        if userId is not None:
+            stmt = stmt.where(SessionQueryState.user_id == userId)
+        if datasourceId is not None:
+            stmt = stmt.where(SessionQueryState.datasource_id == datasourceId)
+        result = await session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def _saveQueryState(
@@ -522,19 +534,27 @@ class ContextMixin:
         sql: str | None,
         resultColumns: list[str],
         inheritance_snapshot: dict[str, Any] | None = None,
+        userId: int | None = None,  # P0-3
+        datasourceId: int | None = None,  # P0-3
+        schemaName: str | None = None,  # P0-3
+        datasourceVersion: int | None = None,  # P0-3
     ) -> SessionQueryState:
-        """UPSERT 会话查询状态（session_id 唯一），提交后返回。
+        """UPSERT 会话查询状态。
 
-        存在则更新为新一轮状态并 turn_count+1；否则创建首轮状态（turn_count=1）。
-        更新时把上一轮的快照（question + sql）压入 recent_rounds 头部并截断到
-        _RECENT_ROUNDS_LIMIT，支持跨多轮 REFINE/FOLLOW_UP 回溯（3-4）。
-
-        inheritance_snapshot（B5）：本轮继承字段快照 JSONB，供下一轮继承链路读取。
+        P0-3：传 userId/datasourceId 时按三元 (user, datasource, session) UPSERT，
+        避免不同用户/数据源窜 state。既有调用不传新参数时按 session_id 唯一 UPSERT
+        （向后兼容 17+ 既有调用点）。
         """
-        existing = await self._loadQueryState(session, sessionId)
+        # P0-3：按三元查 existing（不传新参数时退化为按 session_id 唯一）
+        stmt = select(SessionQueryState).where(SessionQueryState.session_id == sessionId)
+        if userId is not None:
+            stmt = stmt.where(SessionQueryState.user_id == userId)
+        if datasourceId is not None:
+            stmt = stmt.where(SessionQueryState.datasource_id == datasourceId)
+        existing = (await session.execute(stmt)).scalar_one_or_none()
+
         if existing is not None:
-            # 例外说明：ORM 实体是有状态对象，原地更新属性属 SQLAlchemy 标准用法，
-            # 刻意偏离"不可变"规则——identity map 要求复用同一实例提交变更。
+            # ORM 实体是有状态对象，原地更新属性属 SQLAlchemy 标准用法
             priorSnapshot = _snapshotRound(existing)
             history = [priorSnapshot] + (
                 list(existing.recent_rounds) if existing.recent_rounds else []
@@ -546,10 +566,20 @@ class ContextMixin:
             existing.last_result_columns = resultColumns
             existing.turn_count = (existing.turn_count or 0) + 1
             existing.inheritance_snapshot = inheritance_snapshot
+            # P0-3：同步 scope 字段
+            if userId is not None:
+                existing.user_id = userId
+            if datasourceId is not None:
+                existing.datasource_id = datasourceId
+            if schemaName is not None:
+                existing.schema_name = schemaName
+            if datasourceVersion is not None:
+                existing.datasource_version = datasourceVersion
             session.add(existing)
             await session.commit()
             await session.refresh(existing)
             return existing
+        # P0-3：创建时写 scope 字段
         state = SessionQueryState(
             session_id=sessionId,
             last_question=question,
@@ -558,6 +588,10 @@ class ContextMixin:
             last_result_columns=resultColumns,
             turn_count=1,
             inheritance_snapshot=inheritance_snapshot,
+            user_id=userId,
+            datasource_id=datasourceId,
+            schema_name=schemaName,
+            datasource_version=datasourceVersion,
         )
         session.add(state)
         await session.commit()

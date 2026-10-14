@@ -173,13 +173,14 @@ class RecallMixin:
         sessionId: str | None = None,
         hasPriorState: bool = False,
         needRecall: bool = True,
+        userId: int | None = None,  # P0-3
+        datasourceId: int | None = None,  # P0-3
     ) -> ClassifyAndRecallResult:
         """通道 1 单入口：规则意图分类 + （可选）语义召回（v3.1 A7 收口）。
 
-        分类语义 = 重构前 chat_service._classifyMessage 的重分类语义：
-        无状态分类 → CHITCHAT 短路 → 加载会话状态 → 有状态时以
-        hasPriorState=True 重分类（REFINE/FOLLOW_UP/NEW_QUERY 仅在此成立）。
-        CHITCHAT 短路不加载状态、不召回（省 DB 读与向量检索）。
+        P0-3：加载状态时按 (userId, datasourceId, sessionId) 三元过滤，
+        避免跨用户/跨数据源窜 state。userId/datasourceId 任一 None 时退化为
+        按 sessionId 唯一过滤（兼容既有调用）。
 
         两种调用模式：
         - 生产（sessionId 提供）：完整两阶段语义；hasPriorState 形参被忽略
@@ -199,7 +200,9 @@ class RecallMixin:
             result = self._intent.classifyResult(question)
             state = None
             if result.intent != IntentType.CHITCHAT:
-                state = await self._loadQueryState(session, sessionId)
+                state = await self._loadQueryState(
+                    session, sessionId, userId=userId, datasourceId=datasourceId,
+                )
                 if state is not None:
                     result = self._intent.classifyResult(question, hasPriorState=True)
 

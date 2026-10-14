@@ -4,12 +4,17 @@ ChatService 以 mixin 方式组合本模块（class ChatService(ChatStreamOutput
 提供：
 - `_iterStreamChunks`：逐块读取流式响应，块间超时保护，防止 LLM 挂起占用连接。
 - `_streamAnswerWithFallback`：主模型失败且未产出 token 时降级到最便宜可用模型。
+- `_runL1AndL4Preamble`：L1 KPI + L4 Agent Loop 预检，普通与流式入口共用。
 
 mixin 契约（依赖 ChatService 提供的实例成员）：
 - `self._llmFactory(config)`：按配置创建 LLM 客户端。
 - `self._modelRouter.selectFallbackModel(configs, excludeId)`：选择降级模型。
 - `self._recordUsage(...)`：记录 Token 用量审计行。
 - `self._buildAnswerPrompt(question, sql, data)`：构建回答 user prompt。
+- `self._kpiMatcher`：KpiSemanticMatchService 实例。
+- `self._buildL1Response(match, session)`：L1 命中时构建回答。
+- `self._resolveKpiCatalog(code, session)`：查 KpiCatalog。
+- `self._handleNl2SqlAgent(session, dto, user)`：L4 Agent Loop。
 """
 
 from __future__ import annotations
@@ -17,9 +22,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from typing import Any, Literal
 
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies import CurrentUser
 from app.domain.exceptions import LlmClientError
 from app.domain.models import LlmConfig
 from app.domain.schemas import ChatRequest
@@ -130,8 +138,104 @@ class ChatStreamOutputMixin:
                 attempt = fallback
 
 
+# ===========================================================================
+# L1 KPI + L4 Agent pre-amble（普通与流式共用）
+# ===========================================================================
+
+
+class PreambleResult(BaseModel):
+    """L1/L4 命中后的封装；含生成 SSE 帧所需全部字段。"""
+
+    routing_layer: Literal["L1", "L4"]
+    answer: str
+    chart_type: Any = None  # ChartType | None — avoid import cycle
+    chart_option: dict | None = None
+    visual_rationale: dict | str | None = None
+    # L1 KPI 命中信息（用于 ChatResponse kpi_code / kpi_name / confidence 字段）
+    kpi_code: str | None = None
+    kpi_name: str | None = None
+    confidence: float | None = None  # KpiMatchResult.confidence
+    # L4
+    agent_run: dict | None = None
+    # L1 cross-datasource mismatch
+    datasource_mismatch: bool = False
+    mismatch_warning: str | None = None
+
+
+class L1L4PreambleMixin:
+    """抽 KPI/L4 预检为共享 mixin，让普通 + 流式入口共用同一条路径。"""
+
+    # Subclasses must provide _kpiMatcher (KpiSemanticMatchService)
+    _kpiMatcher: Any
+
+    async def _runL1AndL4Preamble(
+        self,
+        dto: ChatRequest,
+        session: AsyncSession,
+        user: CurrentUser | None,
+    ) -> PreambleResult | None:
+        """KPI 优先（命中短路）；未命中则尝试 L4；仍未命中返 None（让主路径继续）。
+
+        行为对 source-provider 改：
+        - KPI 用 dto.datasourceId 比较 feat.datasource_id；不匹配给 mismatch_warning（不静默）
+        - L4 不改行为
+        """
+        # 1. KPI 匹配（与 chat_service.py:409-432 同款 try/except 降级）
+        try:
+            match = await self._kpiMatcher.match(dto.question)
+        except Exception:  # noqa: BLE001 — 降级到原 LLM 流水线
+            logger.warning("L1 KPI match failed, falling back to LLM", exc_info=True)
+            match = None
+
+        if match is not None:
+            l1 = await self._buildL1Response(match, session)
+            if l1 is not None:
+                # P0 合并项 6：检查 datasource 是否匹配（仅在 KPI 实际绑定了数据源时）
+                mismatch = False
+                warning = None
+                feat = await self._resolveKpiCatalog(match.code, session)
+                if feat is not None and feat.data_source is not None and str(feat.data_source) != str(dto.datasourceId):
+                    mismatch = True
+                    warning = (
+                        f"该 KPI 指标绑定数据源 {feat.data_source}，"
+                        f"与你当前选择的数据源 {str(dto.datasourceId)} 不一致。"
+                    )
+                # Store full ChatResponse for non-stream caller; stream path uses PreambleResult fields
+                self._preamble_l1_response = l1
+                return PreambleResult(
+                    routing_layer="L1",
+                    answer=l1.answer,
+                    chart_type=l1.chartType,
+                    chart_option=l1.chartOption,
+                    visual_rationale=l1.visual_rationale,
+                    kpi_code=match.code,
+                    kpi_name=l1.kpi_name,
+                    confidence=match.confidence,
+                    datasource_mismatch=mismatch,
+                    mismatch_warning=warning,
+                )
+
+        # 2. L4 Agent Loop
+        l4 = await self._handleNl2SqlAgent(session, dto, user=user)
+        if l4 is not None:
+            # Store L4 ChatResponse for non-stream caller; stream path uses PreambleResult fields
+            self._preamble_l4_response = l4
+            return PreambleResult(
+                routing_layer="L4",
+                answer=l4.answer,
+                agent_run=(
+                    l4.agent_run.model_dump(mode="json", by_alias=True)
+                    if l4.agent_run is not None else None
+                ),
+            )
+
+        return None
+
+
 __all__ = [
     "ChatStreamOutputMixin",
+    "L1L4PreambleMixin",
+    "PreambleResult",
     "_STREAM_CHUNK_TIMEOUT_SECONDS",
     "_ANSWER_SYSTEM_PROMPT",
 ]

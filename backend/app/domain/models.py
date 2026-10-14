@@ -859,21 +859,23 @@ class SchemaCache(Base, TimestampMixin):
 
 
 class SessionQueryState(Base, TimestampMixin):
-    """会话级查询状态表（ReAct 多轮）。
+    """会话级查询状态表（ReAct 多轮 + P0-3 数据源/用户绑定三元）。
 
-    每次成功查询后 UPSERT（session_id 唯一）：保存上一轮的用户问题、
-    查询计划（JSON）、生成 SQL、结果列名，供下一轮 REFINE/FOLLOW_UP
-    意图注入 prompt 作为结构化上下文（而非仅原始对话文本）。
-
-    3-4：`recent_rounds` 保留更早的 N 轮快照（question + sql），支持跨多轮
-    REFINE/FOLLOW_UP 回溯（如"回到刚才第一个查询改一下""和上一次比"）。
-    `last_*` 仍是"最近一轮"，`recent_rounds` 是其前的历史，按新到旧排列。
+    P0-3：每条 state 绑定 (user_id, datasource_id, session_id) 三元，
+    避免切换数据源后用错 state / 跨用户窃取上下文。
+    NULL 列兼容历史无 scope 的旧行。
     """
 
     __tablename__ = "session_query_state"
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # P0-3 新增（NULL 兼容历史）
+    datasource_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    schema_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    datasource_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 原字段
     last_question: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_plan: Mapped[dict[str, Any] | None] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
@@ -886,12 +888,16 @@ class SessionQueryState(Base, TimestampMixin):
     recent_rounds: Mapped[list[dict[str, Any]] | None] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
     )
-    # B5：字段继承快照 JSONB（由 _resolveInheritedState 写入，供下一轮继承链路读取）
     inheritance_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
     )
 
-    __table_args__ = (UniqueConstraint("session_id", name="uq_session_query_state_session"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "datasource_id", "session_id",
+                         name="uq_session_query_state_scope"),
+        Index("ix_session_query_state_user_datasource",
+              "user_id", "datasource_id"),
+    )
 
     def __repr__(self) -> str:
         return f"<SessionQueryState session={self.session_id} turn={self.turn_count}>"

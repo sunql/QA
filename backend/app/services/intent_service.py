@@ -49,6 +49,24 @@ CHITCHAT_KEYWORDS: tuple[str, ...] = (
 
 _SHORT_MESSAGE_LIMIT = 3
 
+# P0-2：礼貌前缀集（用于剥除）
+_GREETING_PREFIXES: tuple[str, ...] = (
+    "你好，", "你好,", "您好，", "您好,",
+    "hi,", "hi, ", "hello,", "hello, ",
+)
+
+# P0-2：追问型短消息关键词集（短追问被 CHITCHAT 短路的修复）
+# 包含「时间相对」（去年呢/上个月呢）、「比较」（同比/环比）、「聚合」（汇总/总计/按月按周）等
+# 仅在 hasPriorState=True 时视为 REFINE 追问；hasPriorState=False 时返 CLARIFY
+_SHORT_FOLLOWUP_KEYWORDS: tuple[str, ...] = (
+    "去年呢", "前年呢", "今年呢", "明年呢",
+    "上个月呢", "上季度呢", "上月呢", "上季呢",
+    "同比", "环比", "对比", "比较", "比一下",
+    "汇总", "汇总一下", "总计", "合计", "总和",
+    "按月", "按周", "按日", "按天", "按年", "按地区", "按部门",
+    "分组", "分类", "拆开", "拆细",
+)
+
 # CLARIFY：询问概念 / 术语含义（3-1 收紧，优先于 REFINE 判断）。
 # 修复 N5：宽泛关键词（"是什么"）把"最高的是什么产品"这类实体查询误判为概念解释。
 # 仅保留明确的含义/解释句式；含最高级形容词的"X 是什么"视为实体查询，降级 QUERY。
@@ -547,13 +565,23 @@ class IntentService:
             slashResult = self._matchSlashCommand(original)
             if slashResult is not None:
                 return slashResult
-        normalized = message.strip().lower()
-        if any(normalized.startswith(kw) for kw in CHITCHAT_KEYWORDS):
-            return IntentResult(intent=IntentType.CHITCHAT)
-        if len(normalized) <= _SHORT_MESSAGE_LIMIT:
-            return IntentResult(intent=IntentType.CHITCHAT)
-        if self._isClarify(normalized):
+        # P0-2：剥除礼貌前缀（让 '你好，请查询' 走业务判定）
+        stripped = IntentService._stripGreetingPrefix(original)
+        normalized = stripped.strip().lower()
+        # 0. CLARIFY 概念解释（在 hasPriorState 判定之前，避免"X 是什么意思"被误判为 REFINE）
+        if IntentService._isClarify(normalized):
             return IntentResult(intent=IntentType.CLARIFY)
+        # 1. hasPriorState 时的 REFINE / FOLLOW_UP 判定（提到 Agent/supplier 之前）
+        #    修复 P0-2：短追问（"去年呢"/"同比"/"汇总"）走此路径而非被长度兜底短路
+        #    长度守卫：仅对 stripped 后 ≤ 10 字的消息生效，避免"…汇总"被误判
+        if hasPriorState and (
+            IntentService._isRefine(normalized)
+            or IntentService._isFollowUp(normalized)
+            or (len(stripped) <= 9 and any(kw in normalized for kw in _SHORT_FOLLOWUP_KEYWORDS))
+        ):
+            if IntentService._isFollowUp(normalized):
+                return self._queryResult(IntentType.FOLLOW_UP, original)
+            return self._queryResult(IntentType.REFINE, original)
         # Phase 6.4: Agent 显式指名检测（优先于 supplier_360 / risk / graph：
         # 指名是最高优先级领域信号，如「用 supplier_risk_agent 评估供应商 100001」）。
         agentCode = extractAgentCode(original)
@@ -590,25 +618,30 @@ class IntentService:
             return IntentResult(
                 intent=IntentType.MAP, source=mapMatch.group(1), target=mapMatch.group(2)
             )
-        # 调整意图优先于 METRIC：避免"按指标排序"被误判为指标列举
-        if hasPriorState and self._isRefine(normalized):
-            return self._queryResult(IntentType.REFINE, original)
-        if self._isMetricQuery(normalized):
+        # 5. METRIC
+        if IntentService._isMetricQuery(normalized):
             return IntentResult(intent=IntentType.METRIC)
-        # Phase 7 G4: 未指名 Agent 语义路由（增量：不覆盖既有意图）。
-        # 前序 360/risk/graph/DEFINE/MAP/METRIC 等确定性拦截均未命中，此处尝试
-        # 用关键词评分推断用户隐含的 Agent 诉求：
-        #   置信 ≥ 0.7 → 自动调度 Agent（AGENT_RUN）；
-        #   0.4 ≤ 置信 < 0.7 → 仍走 NL2SQL 但附带 suggested_agent 建议卡片；
-        #   < 0.4（或无供应商编码/命中聚合量词）→ 无建议，纯查询。
+        # 6. Phase 7 G4：未指名 Agent 语义路由（增量）
         suggestion = _routeSupplierAgent(original)
         if suggestion is not None and suggestion.confidence >= HIGH_CONFIDENCE:
             return IntentResult(
                 intent=IntentType.AGENT_RUN,
                 agent_code=suggestion.recommended_agent_code,
             )
+        # 7. CHITCHAT 关键词（仅当 stripped 后还是关键词前缀）
+        if any(normalized.startswith(kw) for kw in CHITCHAT_KEYWORDS):
+            return IntentResult(intent=IntentType.CHITCHAT)
+        # 8. 短追问（无历史 + 短追问关键词 → CLARIFY 询问比较对象，不生成猜测 SQL）
+        #    长度守卫：仅对 stripped 后 ≤ 10 字的消息生效，避免"…汇总"被误判
+        if len(stripped) <= 10 and any(kw in normalized for kw in _SHORT_FOLLOWUP_KEYWORDS):
+            return IntentResult(intent=IntentType.CLARIFY)
+        # 9. 长度兜底（仅在 hasPriorState=False 时才返 CHITCHAT；
+        #    有历史时短追问已在 step 1 分流）
+        if not hasPriorState and len(normalized) <= _SHORT_MESSAGE_LIMIT:
+            return IntentResult(intent=IntentType.CHITCHAT)
+        # 10. 默认 QUERY（hasPriorState 区分 FOLLOW_UP/NEW_QUERY 保持既有行为）
         if hasPriorState:
-            if self._isFollowUp(normalized):
+            if IntentService._isFollowUp(normalized):
                 return self._queryResult(
                     IntentType.FOLLOW_UP, original, suggestion=suggestion
                 )
@@ -814,6 +847,19 @@ class IntentService:
         if "指标" not in normalized:
             return False
         return any(marker in normalized for marker in _METRIC_QUERY_MARKERS)
+
+    @staticmethod
+    def _stripGreetingPrefix(message: str) -> str:
+        """剥除礼貌前缀；若无前缀返回原 message。
+
+        '你好，请查询 2025 采购总额' -> '请查询 2025 采购总额'
+        '你好' -> '你好'（整词命中 CHITCHAT_KEYWORDS，不剥）
+        """
+        lower = message.lower()
+        for prefix in _GREETING_PREFIXES:
+            if lower.startswith(prefix.lower()):
+                return message[len(prefix):].lstrip()
+        return message
 
     @staticmethod
     def _extractDefine(normalized: str) -> tuple[str | None, str | None]:

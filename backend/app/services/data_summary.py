@@ -19,6 +19,7 @@ prompt token 受控但能基于真实数据回答"共 X 行 / X 个供应商 / �
 
 from __future__ import annotations
 
+import json
 import math
 from decimal import Decimal
 from typing import Any
@@ -132,8 +133,28 @@ def summarize_data(
         if column_types.get(c) in (COLUMN_TYPE_STRING, COLUMN_TYPE_TIME)
     ][:str_cap]
     distinct_counts: dict[str, int] = {}
+    skip_distinct_columns: list[str] = []
+
     for col in categorical_cols:
-        distinct_counts[col] = len({row.get(col) for row in data})
+        try:
+            first = data[0].get(col) if data else None
+            # 检查首行值是否可哈希；set/list/dict 等不可直接放入 set
+            if first is not None and not isinstance(first, (str, int, float, bool, type(None))):
+                # 非标量列：标记为 skip_distinct，并用 JSON 序列化得到稳定字符串
+                skip_distinct_columns.append(col)
+                values = {
+                    json.dumps(row.get(col), sort_keys=True, default=str, ensure_ascii=False)
+                    for row in data
+                }
+                distinct_counts[col] = len(values)
+            else:
+                values = {row.get(col) for row in data}
+                distinct_counts[col] = len(values)
+        except (TypeError, ValueError):
+            # 序列化失败 → 降级为非 distinct 列
+            if col not in skip_distinct_columns:
+                skip_distinct_columns.append(col)
+            distinct_counts[col] = -1  # 标记未统计
 
     # v2 2026-09-18：数据量小时全量展示（≤ 阈值行），
     # 避免 head/tail 采样把中间行丢了（如 27 行时 B125 全在中间）。
@@ -156,5 +177,6 @@ def summarize_data(
         "column_types": column_types,
         "numeric_stats": numeric_stats,
         "distinct_counts": distinct_counts,
+        "skip_distinct_columns": skip_distinct_columns,
         "samples": {"head": head_sample, "tail": tail_sample},
     }

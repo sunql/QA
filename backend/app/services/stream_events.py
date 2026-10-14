@@ -7,9 +7,47 @@
 from __future__ import annotations
 
 import json
+import math
+import uuid
 from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Any
+
+
+def _jsonSafe(value: Any) -> Any:
+    """递归把 value 转成 JSON-safe 标量/struct；保留类型语义。
+
+    - Decimal → str（保留精度）
+    - UUID / date / datetime → ISO string
+    - +Inf/-Inf/NaN → {"__non_finite__": "infinity"|"-infinity"|"nan"}（不让 JSON parse 抛错）
+    - dict / list → 递归
+    - 其他 → 原样（让 json.dumps 的 default=str 兜底）
+    """
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value):
+            return {"__non_finite__": "nan"}
+        if math.isinf(value):
+            return {"__non_finite__": "infinity" if value > 0 else "-infinity"}
+        return value
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _jsonSafe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_jsonSafe(v) for v in value]
+    return value
+
+
+def _jsonSafeData(data: dict[str, Any]) -> dict[str, Any]:
+    return {k: _jsonSafe(v) for k, v in data.items()}
 
 # 事件类型常量
 EVENT_META = "meta"      # 意图识别结果
@@ -51,6 +89,10 @@ class StreamEvent:
     data: dict[str, Any]
 
     def toSse(self) -> str:
-        """序列化为 SSE 帧文本（event + data，data 为 JSON）。"""
-        payload = json.dumps(self.data, ensure_ascii=False, default=str)
+        """序列化为 SSE 帧文本（event + data，data 为 JSON-safe）。"""
+        payload = json.dumps(
+            _jsonSafeData(self.data),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
         return f"event: {self.event}\ndata: {payload}\n\n"

@@ -208,6 +208,37 @@ class StreamMixin:
             )
             return
 
+        # P0-1：流式入口共享 L1/L4 pre-amble（普通入口已接）
+        # KPI 命中最优先短路（0 LLM cost）；L4 命中也短路；未命中继续分类流程。
+        preamble = await self._runL1AndL4Preamble(dto, session, user)
+        if preamble is not None:
+            yield StreamEvent(EVENT_META, {
+                "intent": "KPI" if preamble.routing_layer == "L1" else "AGENT_RUN",
+                "routingLayer": preamble.routing_layer,
+                "datasourceMismatch": preamble.datasource_mismatch,
+            })
+            if preamble.mismatch_warning is not None:
+                yield StreamEvent(EVENT_META, {
+                    "warning": preamble.mismatch_warning,
+                    "code": "KPI_DATASOURCE_MISMATCH",
+                })
+            if preamble.chart_type is not None and preamble.chart_option is not None:
+                yield StreamEvent(EVENT_CHART, {
+                    "chartType": preamble.chart_type.value if hasattr(preamble.chart_type, "value") else str(preamble.chart_type),
+                    "option": preamble.chart_option,
+                    "rationale": preamble.visual_rationale,
+                })
+            if preamble.agent_run is not None:
+                yield StreamEvent(EVENT_META, {
+                    "agentRun": preamble.agent_run,
+                })
+            yield StreamEvent(EVENT_TOKEN, {"content": preamble.answer})
+            yield StreamEvent(EVENT_DONE, {
+                "routingLayer": preamble.routing_layer,
+                "tokenCostUsd": 0.0 if preamble.routing_layer == "L1" else None,
+            })
+            return
+
         # A7 通道 1 收口：分类+重分类统一走 classifyAndRecall 单入口。
         # 首帧 META 必须携带无状态分类结果（SSE 事件序列不变），故第一遍以
         # sessionId=None 纯分类；第二遍带 sessionId 完成「加载状态→重分类」。
@@ -257,6 +288,7 @@ class StreamMixin:
                 dto, session, result.intent, state, result.chartType,
                 suggestion=result.suggested_agent, _t0=_stream_t0,
                 semanticState=result.semanticState,  # B5 HIGH-1
+                user=user,
             ):
                 yield event
         except LlmClientError as exc:
@@ -383,6 +415,7 @@ class StreamMixin:
         semanticState: SemanticState | None = None,
         *,
         _t0: float | None = None,
+        user: CurrentUser | None = None,  # P0-3
     ) -> AsyncIterator[StreamEvent]:
         """查询意图的流式流水线：plan → sql → chart → token×N → done（含持久化与状态保存）。
 
@@ -438,6 +471,7 @@ class StreamMixin:
                         global_filters=global_filters,
                         semanticState=inherited,
                         priorSnapshot=prior_snapshot,
+                        user=user,
                     ):
                         yield event
                     return
@@ -456,6 +490,7 @@ class StreamMixin:
                         global_filters=global_filters,
                         semanticState=inherited,
                         priorSnapshot=prior_snapshot,
+                        user=user,
                     ):
                         yield event
                     return
@@ -472,6 +507,7 @@ class StreamMixin:
                     global_filters=gf2,
                     semanticState=inherited,
                     priorSnapshot=prior_snapshot,
+                    user=user,
                 ):
                     yield event
                 return
@@ -491,6 +527,7 @@ class StreamMixin:
                     global_filters=gf2,
                     semanticState=inherited,
                     priorSnapshot=prior_snapshot,
+                    user=user,
                 ):
                     yield event
                 return
@@ -501,6 +538,11 @@ class StreamMixin:
                 intent = IntentType.FOLLOW_UP
         if outcome.sql is None:
             # 计划 target=无法回答：plan + 固定友好回答 + done，不生成 sql/chart，不执行查询
+            # R1 fix: 提前初始化 EVENT_DONE 引用变量（定义在 line 541 return 之后）
+            totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
+            totalCost = self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)
+            affinityConfig = type("FakeAffinity", (), {"model_name": None})()
+            affinityPayload = None
             answer = self._unanswerableAnswerText(dto.question, pc.classes)
             # 单步执行计划：统一展示 MultiStepPlanCard（2026-08-16）
             yield self._singleStepOverview("无法回答", dto.question)
@@ -525,17 +567,8 @@ class StreamMixin:
             await self._saveQueryState(
                 session, dto.sessionId,
                 question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
-            )
-            totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
-            totalCost = self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)
-            affinityConfig = outcome.sqlConfig or pc.selected
-            affinity = await self._buildAffinityStatus(
-                session, dto.sessionId, affinityConfig.id, affinityConfig.model_name,
-            )
-            affinityPayload = (
-                {"lockedModel": affinity.lockedModel, "remainingTurns": affinity.remainingTurns}
-                if affinity is not None
-                else None
+                userId=user.userId if user is not None else None,
+                datasourceId=dto.datasourceId,
             )
             yield StreamEvent(
                 EVENT_DONE,
@@ -575,6 +608,8 @@ class StreamMixin:
             await self._saveQueryState(
                 session, dto.sessionId,
                 question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
+                userId=user.userId if user is not None else None,
+                datasourceId=dto.datasourceId,
             )
             affinity = await self._buildAffinityStatus(
                 session, dto.sessionId, pc.selected.id, pc.selected.model_name,
@@ -642,6 +677,7 @@ class StreamMixin:
                         dto, session, pc, detected.plan, state,
                         initial_tokens=prior_tokens, initial_cost=prior_cost,
                         suggestion=suggestion,
+                        user=user,
                     ):
                         yield event
                     return
@@ -833,6 +869,7 @@ class StreamMixin:
         global_filters: GlobalFilters | None = None,
         semanticState: InheritedState | None = None,
         priorSnapshot: dict | None = None,
+        user: CurrentUser | None = None,  # P0-3
     ) -> AsyncIterator[StreamEvent]:
         """多步查询的流式事件序列：step_plan/step_result × N → token(汇总) → done。
 
@@ -869,6 +906,7 @@ class StreamMixin:
             answer = await self._rejectOversizedPlan(
                 session, dto, multiStepPlan,
                 total_cost=initial_cost, _t0=_ms_t0,
+                userId=user.userId if user is not None else None,
             )
             yield self._singleStepOverview("超出步数上限", dto.question)
             yield self._singleStepStart("超出步数上限", dto.question)
@@ -1174,6 +1212,7 @@ class StreamMixin:
             last_plan=last_plan, last_sql=last_sql, last_data=last_data,
             total_cost=total_cost, _t0=_ms_t0,
             inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
+            userId=user.userId if user is not None else None,
         )
         yield StreamEvent(EVENT_TOKEN, {"content": degrade_answer})
         # v3.1 B6（M7）：降级收尾同样接假设后处理（last_data 为空时静默跳过）

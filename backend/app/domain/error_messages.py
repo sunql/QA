@@ -91,6 +91,14 @@ MSG_SCHEMA_DQ_DESCRIPTION = "规则说明"
 MSG_SCHEMA_DQ_CREATED_TIME = "创建时间"
 MSG_SCHEMA_DQ_UPDATED_TIME = "更新时间"
 
+# =============================================================================
+# KPI 数据源校验（feat-aichat-gap-f2-kpi-datasource）
+# =============================================================================
+
+MSG_KPI_DATASOURCE_MISMATCH = (
+    "该 KPI 指标绑定数据源 {datasource_id}，与你当前选择的数据源 {user_datasource_id} 不一致。"
+)
+
 # Phase 1.2 evaluator 响应字段描述
 MSG_SCHEMA_DQ_EVAL_RULE_ID = "规则 ID"
 MSG_SCHEMA_DQ_EVAL_RULE_CODE = "规则编码"

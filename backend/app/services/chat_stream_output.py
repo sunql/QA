@@ -37,6 +37,7 @@ from app.services.chat_constants import (
     USAGE_PURPOSE_ANSWER_STREAM_FAILED,
     USAGE_PURPOSE_FALLBACK_ANSWER,
 )
+from app.domain.error_messages import MSG_KPI_DATASOURCE_MISMATCH
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +178,8 @@ class L1L4PreambleMixin:
         """KPI 优先（命中短路）；未命中则尝试 L4；仍未命中返 None（让主路径继续）。
 
         行为对 source-provider 改：
-        - KPI 用 dto.datasourceId 比较 feat.datasource_id；不匹配给 mismatch_warning（不静默）
+        - KPI 用 dto.datasourceId 比较 feat.datasource_id（真 FK 列，非 data_source text）；
+          不匹配给 mismatch_warning（不静默）
         - L4 不改行为
         """
         # 1. KPI 匹配（与 chat_service.py:409-432 同款 try/except 降级）
@@ -194,11 +196,11 @@ class L1L4PreambleMixin:
                 mismatch = False
                 warning = None
                 feat = await self._resolveKpiCatalog(match.code, session)
-                if feat is not None and feat.data_source is not None and str(feat.data_source) != str(dto.datasourceId):
+                if feat is not None and feat.datasource_id is not None and feat.datasource_id != dto.datasourceId:
                     mismatch = True
-                    warning = (
-                        f"该 KPI 指标绑定数据源 {feat.data_source}，"
-                        f"与你当前选择的数据源 {str(dto.datasourceId)} 不一致。"
+                    warning = MSG_KPI_DATASOURCE_MISMATCH.format(
+                        datasource_id=feat.datasource_id,
+                        user_datasource_id=dto.datasourceId,
                     )
                 # Store full ChatResponse for non-stream caller; stream path uses PreambleResult fields
                 self._preamble_l1_response = l1

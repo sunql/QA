@@ -426,6 +426,10 @@ _DIMENSION_BY_RE = re.compile(
 _DIMENSION_PER_RE = re.compile(r"每\s*个?\s*(.{1,12}?)\s*(?:的|分)")
 
 # 指标量词后缀：取最靠右的后缀，再逐字回退抽取其前短语（见 _extractMetric）
+# ⚠️ 与下方 `_DIMENSION_VERBS` 的分工：「汇总」等词**两侧都有，各自语义不同，不是重复**——
+#   在这里是「度量名的**右**边界」（"采购额**汇总**" ⇒ 抽出"采购额"），
+#   在 `_DIMENSION_VERBS` 里是「维度短语的**左**边界」（"**汇总**各供应商" ⇒ 切出动词）。
+#   改任一张表前先读这条，别把另一侧的同名词当成冗余删掉。
 _METRIC_SUFFIXES: tuple[str, ...] = (
     "的总和",
     "总金额",
@@ -441,6 +445,7 @@ _METRIC_SUFFIXES: tuple[str, ...] = (
     "汇总",
 )
 # 维度动词：指标短语的左侧边界（配合"的"与空白一起作为分隔符）
+# ⚠️ 同名词的分工见上方 `_METRIC_SUFFIXES` 的注释：这里是左边界，那里是右边界。
 _DIMENSION_VERBS: tuple[str, ...] = ("汇总", "统计", "分组", "展示", "查看", "显示")
 _METRIC_PHRASE_LIMIT = 8
 

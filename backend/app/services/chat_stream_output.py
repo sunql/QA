@@ -37,7 +37,10 @@ from app.services.chat_constants import (
     USAGE_PURPOSE_ANSWER_STREAM_FAILED,
     USAGE_PURPOSE_FALLBACK_ANSWER,
 )
-from app.domain.error_messages import MSG_KPI_DATASOURCE_MISMATCH
+from app.domain.error_messages import (
+    MSG_INTERNAL_ERROR_GENERIC,
+    MSG_KPI_DATASOURCE_MISMATCH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +172,30 @@ class PreambleResult(BaseModel):
     # 也同样会在 pydantic 求值时失败（pydantic 不走 __annotations__ 的 TYPE_CHECKING 分支）。
     # 唯一可行方案是 TypeVar + model_rebuild()，代价远大于收益；保持 Any 并记录原因。
     full_response: Any = None
+
+
+def requireFullResponse(preamble: PreambleResult, routing_layer: str) -> Any:
+    """守卫：full_response 未填充则快速失败。
+
+    这是内部不变量检查（代码 bug，不是用户输入），所以：
+    - 用 RuntimeError（不是 DomainError）→ 落到 500 兜底 handler，
+      不走 DomainError 那条把 message 原样写进响应体的路径；
+    - 文案取 error_messages 常量，不在 services 层硬编码，且不含任何内部标识；
+    - 详细诊断（routing_layer、preamble 各字段）只进日志。
+    """
+    if preamble.full_response is not None:
+        return preamble.full_response
+    logger.error(
+        "PreambleResult invariant broken: full_response is None for routing_layer=%s "
+        "(preamble fields: routing_layer=%r, answer=%r, chart_type=%r). "
+        "This indicates a code bug: a PreambleResult construction point failed to "
+        "populate full_response. Check L1L4PreambleMixin._runL1AndL4Preamble.",
+        routing_layer,
+        preamble.routing_layer,
+        preamble.answer,
+        preamble.chart_type,
+    )
+    raise RuntimeError(MSG_INTERNAL_ERROR_GENERIC)
 
 
 class L1L4PreambleMixin:

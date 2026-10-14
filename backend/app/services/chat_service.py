@@ -271,7 +271,7 @@ from app.services.chat_domain import DomainCommandMixin
 from app.services.chat_l4 import L4Mixin
 # v3.1 B6（M7 Hypothesis Hook）：假设后处理 mixin（触发词表 + LLM 生成 + 落库）
 from app.services.hypothesis_service import HypothesisMixin
-from app.services.chat_stream_output import L1L4PreambleMixin
+from app.services.chat_stream_output import L1L4PreambleMixin, requireFullResponse
 logger = logging.getLogger(__name__)
 
 
@@ -426,9 +426,9 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                     visual_rationale=preamble.visual_rationale,
                 )
                 # Return full ChatResponse via preamble (preserves data/confidence/chartType etc.)
-                return self._requireFullResponse(preamble, "L1")
+                return requireFullResponse(preamble, "L1")
             # L4: preamble already ran _handleNl2SqlAgent and built the ChatResponse
-            return self._requireFullResponse(preamble, "L4")
+            return requireFullResponse(preamble, "L4")
 
         result, state = await self._classifyMessage(
             session, dto,
@@ -1611,29 +1611,6 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
     # =========================================================================
     # 流水线子步骤（processMessage / _streamQuery 共享）
     # =========================================================================
-
-    @staticmethod
-    def _requireFullResponse(preamble, routing_layer: str) -> Any:
-        """Guard: fail fast if PreambleResult.full_response was not populated.
-
-        This is an internal invariant check (code bug, not user input), so:
-        - Uses RuntimeError (not DomainError) to route to 500 generic handler.
-        - Response body is a generic user-friendly message (no internal identifiers).
-        - Detailed diagnostics (routing_layer, preamble fields) go to logs only.
-        """
-        if preamble.full_response is not None:
-            return preamble.full_response
-        logger.error(
-            "PreambleResult invariant broken: full_response is None for routing_layer=%s "
-            "(preamble fields: routing_layer=%r, answer=%r, chart_type=%r). "
-            "This indicates a code bug: a PreambleResult construction point failed to "
-            "populate full_response. Check L1L4PreambleMixin._runL1AndL4Preamble.",
-            routing_layer,
-            preamble.routing_layer,
-            preamble.answer,
-            preamble.chart_type,
-        )
-        raise RuntimeError("服务暂时不可用，请稍后重试")
 
     def _chitchatResponse(self) -> ChatResponse:
         return ChatResponse(answer=self._chitchatAnswer(), intent=IntentType.CHITCHAT.value)

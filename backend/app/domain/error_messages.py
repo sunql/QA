@@ -490,3 +490,7 @@ MSG_JWT_SECRET_TOO_SHORT = (
     "AUTH_MODE=real 时 JWT_SECRET 必须 ≥ 32 字节（当前 {len}），"
     "用 `python -c 'import secrets; print(secrets.token_urlsafe(48))>'` 生成"
 )
+# 内部不变量被打破（如 PreambleResult.full_response 未填充）时的兜底文案。
+# 这类故障是代码 bug 而非用户输入，用 RuntimeError 走 500 兜底而非 DomainError，
+# 但文案仍走本文件，保证不把内部标识泄露给终端用户（见 main.py 的 DomainError handler）。
+MSG_INTERNAL_ERROR_GENERIC = "服务暂时不可用，请稍后重试"

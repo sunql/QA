@@ -13,16 +13,18 @@ import SupplierRiskCard from "./SupplierRiskCard";
 import GraphTraversalCard from "./GraphTraversalCard";
 import AgentResponseCard from "./AgentResponseCard";
 import SuggestedAgentCard from "./SuggestedAgentCard";
-
-// F2：KPI 警告 code → i18n 键映射表（白名单制，查不到就不渲染，不透裸 key 给用户）
-const KPI_WARNING_I18N_KEYS = Object.freeze({
-  KPI_DATASOURCE_MISMATCH: "multiStep.KPI_DATASOURCE_MISMATCH",
-} as const);
 import HypothesisPanel from "./HypothesisPanel";
 import type { ChatMessage } from "../../types/chat";
 import { useTranslation } from "../../i18n";
 import { visualRationaleText } from "../../utils/visualRationale";
 import { useChatStore } from "../../stores/chatStore";
+
+// F2：KPI 警告 code → i18n 键映射表（白名单制：只有表里有的 code 才渲染，
+// 未知 code 直接不渲染——否则 t() 会把裸 key 原样打到界面上，
+// 因为 i18n.ts 的 missingKeyHandler 只在 DEV 打 warn，并不抑制 key 回显）
+const KPI_WARNING_I18N_KEYS = Object.freeze({
+  KPI_DATASOURCE_MISMATCH: "multiStep.KPI_DATASOURCE_MISMATCH",
+} as const);
 
 const { Paragraph } = Typography;
 

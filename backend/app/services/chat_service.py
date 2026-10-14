@@ -433,7 +433,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
 
         result, state = await self._classifyMessage(
             session, dto,
-            userId=user.userId if user is not None else None,
+            userId=user.dbUserId if user is not None else None,
             datasourceId=dto.datasourceId,
         )
         if result.intent == IntentType.CHITCHAT:
@@ -523,7 +523,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                         global_filters=global_filters,
                         semanticState=inherited,
                         priorSnapshot=prior_snapshot,
-                        userId=user.userId if user is not None else None,
+                        userId=user.dbUserId if user is not None else None,
                     )
             # L1.5（2026-08-17 真实回归）：并列复合问题（无显式分步信号但语义多步，
             # 如"查询3月份采购订单数量、Top 10物料占比、Top 10物料在4月份的订单数量"）
@@ -543,7 +543,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                         global_filters=global_filters,
                         semanticState=inherited,
                         priorSnapshot=prior_snapshot,
-                        userId=user.userId if user is not None else None,
+                        userId=user.dbUserId if user is not None else None,
                     )
 
         # B（feat-follow-up-cascade）：FOLLOW_UP 且上一轮是多步 → LLM 改写回完整
@@ -558,7 +558,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                     global_filters=gf2,
                     semanticState=inherited,
                     priorSnapshot=prior_snapshot,
-                    userId=user.userId if user is not None else None,
+                    userId=user.dbUserId if user is not None else None,
                 )
 
         try:
@@ -579,7 +579,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                         global_filters=gf2,
                         semanticState=inherited,
                         priorSnapshot=prior_snapshot,
-                        userId=user.userId if user is not None else None,
+                        userId=user.dbUserId if user is not None else None,
                     )
                 outcome = await self._planAndGenerateSql(
                     session, dto, pc, IntentType.FOLLOW_UP, state
@@ -639,7 +639,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                         _t0=_t0,
                         semanticState=None,  # 异常回退，无 semanticState
                         priorSnapshot=prior_snapshot,
-                        userId=user.userId if user is not None else None,
+                        userId=user.dbUserId if user is not None else None,
                     )
             raise
         self._spawnEmbedding(dto, finalSql)
@@ -709,7 +709,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             question=dto.question, plan=outcome.plan, sql=finalSql,
             resultColumns=self._columns(data),
             inheritance_snapshot=snap,
-            userId=user.userId if user is not None else None,
+            userId=user.dbUserId if user is not None else None,
             datasourceId=dto.datasourceId,
         )
         # v3.1 B6（M7）：单步出数据后的可选假设后处理（best-effort，不阻断）
@@ -1682,7 +1682,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
             inheritance_snapshot=None,
-            userId=user.userId if user is not None else None,
+            userId=user.dbUserId if user is not None else None,
             datasourceId=dto.datasourceId,
         )
         totalTokens = outcome.promptTokens + outcome.completionTokens
@@ -1739,7 +1739,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
             inheritance_snapshot=None,
-            userId=user.userId if user is not None else None,
+            userId=user.dbUserId if user is not None else None,
             datasourceId=dto.datasourceId,
         )
         totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]

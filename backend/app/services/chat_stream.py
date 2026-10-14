@@ -920,7 +920,7 @@ class StreamMixin:
             answer = await self._rejectOversizedPlan(
                 session, dto, multiStepPlan,
                 total_cost=initial_cost, _t0=_ms_t0,
-                userId=user.userId if user is not None else None,
+                userId=user.dbUserId if user is not None else None,
             )
             yield self._singleStepOverview("超出步数上限", dto.question)
             yield self._singleStepStart("超出步数上限", dto.question)
@@ -1230,7 +1230,7 @@ class StreamMixin:
             last_plan=last_plan, last_sql=last_sql, last_data=last_data,
             total_cost=total_cost, _t0=_ms_t0,
             inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
-            userId=user.userId if user is not None else None,
+            userId=user.dbUserId if user is not None else None,
         )
         yield StreamEvent(EVENT_TOKEN, {"content": degrade_answer})
         # v3.1 B6（M7）：降级收尾同样接假设后处理（last_data 为空时静默跳过）

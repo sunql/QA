@@ -185,6 +185,8 @@ function toChatMessage(read: ChatMessageRead): ChatMessage {
     // 此前不填：入口只在 dbMessageId 存在时才渲染，于是刷新恢复出来的会话
     // 整段没有单条导出（实时发送的消息仍然没有，见 ChatMessage.dbMessageId 注释）。
     dbMessageId: read.id,
+    // F2：kpiDatasourceCode 不在后端 DTO 里，会话恢复时显式清零（不靠「新对象恰好没这个字段」的隐性保证）
+    kpiDatasourceCode: null,
   };
 }
 
@@ -275,6 +277,11 @@ function streamHandlers(
           // 运行时收窄：仅接受已知意图，未知值不入库
           intent: isIntent(intent) ? intent : undefined,
         }),
+      })),
+    // F2：KPI 数据源不一致警告 code（用于选 i18n 键，不存后端中文原文）
+    onMetaWarning: (code) =>
+      set((state) => ({
+        messages: patchMessage(state.messages, targetId, { kpiDatasourceCode: code }),
       })),
     // ReAct 查询计划（Phase E）：流式中已可回填，完成后配合 isStreaming=false 展示
     onPlan: (plan) =>
@@ -670,12 +677,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   resumeRun: async (runId, fromStepIndex, messageId) => {
-    // 开跑前清掉上一次续跑留下的横幅（同一条消息反复续跑时不留残影）。
+    // 开跑前清掉上一次续跑/警告留下的横幅（同一条消息反复续跑时不留残影）。
     // 用定向 patch：只碰被点的那条消息，其余消息保持引用相等。
     set((state) => ({
       loading: true,
       error: null,
-      messages: patchMessage(state.messages, messageId, { resumeError: null }),
+      messages: patchMessage(state.messages, messageId, { resumeError: null, kpiDatasourceCode: null }),
     }));
     try {
       // 事件写回被点的那条消息（不是最后一条）——见 ChatState.resumeRun 注释

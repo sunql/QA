@@ -288,6 +288,8 @@ export interface ChatMessage {
   isStreaming?: boolean;
   // H4 断连兜底：该 assistant 行是客户端断连后由服务端补写的（content 可能不完整）
   interrupted?: boolean;
+  // F2 KPI 数据源不一致警告 code（meta 帧回填）；用于选 i18n 键，不存后端中文原文
+  kpiDatasourceCode?: string | null;
   // 续跑请求失败的原因（独立字段，不覆盖 content）——续跑失败必须保留原正文与
   // 多步计划卡，否则用户既看不到原来的回答、也失去了再点一次续跑的入口。
   // 由 MessageItem 渲染成卡片上方的 error banner；下次续跑时清空。

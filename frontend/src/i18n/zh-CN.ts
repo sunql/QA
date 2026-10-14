@@ -385,6 +385,8 @@ export const zhCN = {
     resume: "续跑",
     resumeFailed: "续跑失败：{message}（原有回答已保留，可再次续跑）",
     compressedRows: "数据已压缩（{from} → {to} 行）",
+    // F2：KPI 数据源不一致警告（按 code 作为 i18n 键名，不存后端中文原文）
+    KPI_DATASOURCE_MISMATCH: "KPI 指标绑定的数据源与你当前选择的数据源不一致",
   },
 
   messageItem: {

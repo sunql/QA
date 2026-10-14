@@ -380,6 +380,8 @@ export const enUS = {
     resume: "Resume",
     resumeFailed: "Resume failed: {message} (the previous answer was kept; you can resume again)",
     compressedRows: "Data compressed ({from} → {to} rows)",
+    // F2：KPI datasource mismatch warning (code used as i18n key, not raw backend text)
+    KPI_DATASOURCE_MISMATCH: "The KPI's bound datasource does not match your currently selected datasource",
   },
 
   messageItem: {

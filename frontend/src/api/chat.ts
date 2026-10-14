@@ -244,6 +244,8 @@ function isClassRecallInfo(value: unknown): value is ClassRecallInfo {
 
 // 流式事件回调（与后端 SSE 事件一一对应）
 export interface StreamEventHandlers {
+  // F2：KPI 数据源不一致警告（code + warning）
+  onMetaWarning?: (code: string, warning: string) => void;
   onMeta?: (intent: string) => void;
   onPlan?: (plan: QueryPlan) => void;
   onSql?: (sql: string) => void;
@@ -376,6 +378,9 @@ function handleFrame(frame: string, handlers: StreamEventHandlers): void {
   switch (event) {
     case "meta":
       handlers.onMeta?.(typeof d.intent === "string" ? d.intent : "");
+      if (d.datasourceMismatch === true && typeof d.code === "string" && typeof d.warning === "string") {
+        handlers.onMetaWarning?.(d.code, d.warning);
+      }
       break;
     case "plan":
       if (isQueryPlan(d.plan)) {

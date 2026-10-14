@@ -13,6 +13,11 @@ import SupplierRiskCard from "./SupplierRiskCard";
 import GraphTraversalCard from "./GraphTraversalCard";
 import AgentResponseCard from "./AgentResponseCard";
 import SuggestedAgentCard from "./SuggestedAgentCard";
+
+// F2：KPI 警告 code → i18n 键映射表（白名单制，查不到就不渲染，不透裸 key 给用户）
+const KPI_WARNING_I18N_KEYS = Object.freeze({
+  KPI_DATASOURCE_MISMATCH: "multiStep.KPI_DATASOURCE_MISMATCH",
+} as const);
 import HypothesisPanel from "./HypothesisPanel";
 import type { ChatMessage } from "../../types/chat";
 import { useTranslation } from "../../i18n";
@@ -106,6 +111,16 @@ function MessageItem({
                         total: message.classRecall.classCount,
                       })
                 }
+              />
+            ) : null}
+            {/* F2：KPI 数据源不一致警告——KPI 答案本身有效，仅提示用户注意。
+                白名单制：code 不在映射表里则不渲染（不冒泡裸 key，不 fallback）。 */}
+            {message.kpiDatasourceCode && message.kpiDatasourceCode in KPI_WARNING_I18N_KEYS ? (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 8 }}
+                message={t(KPI_WARNING_I18N_KEYS[message.kpiDatasourceCode as keyof typeof KPI_WARNING_I18N_KEYS])}
               />
             ) : null}
             {/* 续跑失败：横幅（不是 isError）——保留原正文与多步计划卡，

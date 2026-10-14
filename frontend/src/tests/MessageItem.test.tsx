@@ -418,6 +418,28 @@ describe("MessageItem 续跑失败横幅", () => {
   });
 });
 
+describe("MessageItem KPI 数据源不一致警告横幅", () => {
+  it("已知 code 渲染警告横幅（白名单映射表）", () => {
+    renderItem({
+      content: "KPI 回答内容",
+      kpiDatasourceCode: "KPI_DATASOURCE_MISMATCH",
+    });
+    // 白名单 code 命中，Alert 出现，本地 i18n 文案显示
+    expect(screen.getByText(/KPI 指标绑定的数据源与你当前选择的数据源不一致/)).toBeInTheDocument();
+  });
+
+  it("未知 code 不渲染 Alert，也不冒泡裸 key（白名单制守卫）", () => {
+    const { container } = renderItem({
+      content: "回答内容",
+      kpiDatasourceCode: "KPI_FUTURE_UNKNOWN",
+    });
+    // 白名单没有这个 code，Alert 不出现
+    expect(container.querySelector(".ant-alert")).toBeNull();
+    // 渲染输出里没有裸露的 i18n key
+    expect(container.textContent).not.toContain("multiStep.");
+  });
+});
+
 describe("MessageItem 消息级 visualRationale（Task 8，多步汇总）", () => {
   it("多步汇总消息渲染 SUMMARY_TEXT_ONLY 说明行（答案下方次要色）", () => {
     renderItem({

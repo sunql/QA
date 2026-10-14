@@ -1,8 +1,8 @@
 """session_query_state 加 datasource_id / schema_name / user_id / datasource_version。
 
-Revision ID: 0114
-Revises: 0113
-Create Date: 2026-10-13
+Revision ID: 0124
+Revises: 0123
+Create Date: 2026-10-14
 
 P0-3：SessionQueryState 改 (user_id, datasource_id, session_id) 三元约束，
 避免切换数据源后用错 state / 跨用户窃取上下文。
@@ -12,8 +12,8 @@ from __future__ import annotations
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0114"
-down_revision = "0113"
+revision = "0124"
+down_revision = "0123"
 branch_labels = None
 depends_on = None
 

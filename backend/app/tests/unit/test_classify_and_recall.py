@@ -37,7 +37,9 @@ _ROUTING_FIXTURE: list[tuple[str, IntentType, IntentType]] = [
     ("谢谢", IntentType.CHITCHAT, IntentType.CHITCHAT),
     ("HELP me", IntentType.CHITCHAT, IntentType.CHITCHAT),
     ("Hello", IntentType.CHITCHAT, IntentType.CHITCHAT),
-    # F5 修正（行 40）：「查」有状态列 → CLARIFY（真空洞，本任务修）
+    # F5 修正（行 40）：「查」有状态列 → CLARIFY。
+    # 这是把矩阵对齐到 step 9 的现行语义（有历史 + 极短消息 ⇒ CLARIFY），
+    # 不是修一个旧 bug：原期望值 CHITCHAT 与 step 9 在 hasPriorState 下的行为矛盾。
     ("查", IntentType.CHITCHAT, IntentType.CLARIFY),
     ("能做什么", IntentType.CHITCHAT, IntentType.CHITCHAT),
     ("再见", IntentType.CHITCHAT, IntentType.CHITCHAT),

@@ -630,10 +630,14 @@ class IntentService:
         if any(normalized.startswith(kw) for kw in CHITCHAT_KEYWORDS):
             return IntentResult(intent=IntentType.CHITCHAT)
         # 8. 短追问（无历史 + 短追问关键词 → CLARIFY 询问比较对象，不生成猜测 SQL）
-        #    长度守卫：仅对 stripped 后 ≤ 10 字的消息生效，避免"…汇总"被误判
+        #    长度守卫：仅对 stripped 后 ≤ 10 字的消息生效，长句里的关键词不算追问
+        #    （F5：词表已只保留纯指代词，"汇总/按月/分组"等动作词已移出，
+        #      因为它们本身就是合法查询的开头）
         if len(stripped) <= 10 and any(kw in normalized for kw in _SHORT_FOLLOWUP_KEYWORDS):
             return IntentResult(intent=IntentType.CLARIFY)
-        # 9. 长度兜底：有历史时短消息 → CLARIFY（请用户明确意图，不生成盲 SQL）；
+        # 9. 长度兜底：阈值是 _SHORT_MESSAGE_LIMIT（更短），与 step 8 的 ≤ 10 是两回事——
+        #    step 8 要求「短」且「命中追问词」，这里只要求「短」。
+        #    有历史时短消息 → CLARIFY（请用户明确意图，不生成盲 SQL）；
         #    无历史时 → CHITCHAT（保持既有行为）
         if len(normalized) <= _SHORT_MESSAGE_LIMIT:
             return IntentResult(

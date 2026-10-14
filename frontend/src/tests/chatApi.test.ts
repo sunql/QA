@@ -240,6 +240,31 @@ describe("api/chat", () => {
     expect(received).toEqual(["meta:query", "token:查询完成，", "done:45"]);
   });
 
+  // F2：KPI 数据源不一致警告透传
+  it("sendMessageStream meta 帧带 datasourceMismatch=true 时 onMetaWarning 被调用并传入 code + warning", async () => {
+    const stream = sseStream(
+      'event: meta\ndata: {"intent":"query","datasourceMismatch":true,"code":"KPI_DATASOURCE_MISMATCH","warning":"数据源 ABC 与 KPI 目录不匹配"}\n\n',
+      'event: done\ndata: {"tokensUsed":10,"cost":0}\n\n'
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const onMetaWarning = vi.fn();
+    await sendMessageStream(makePayload(), { onMetaWarning });
+    expect(onMetaWarning).toHaveBeenCalledWith("KPI_DATASOURCE_MISMATCH", "数据源 ABC 与 KPI 目录不匹配");
+  });
+
+  it("sendMessageStream meta 帧无 datasourceMismatch 时 onMetaWarning 不被调用", async () => {
+    const stream = sseStream(
+      'event: meta\ndata: {"intent":"query"}\n\n',
+      'event: done\ndata: {"tokensUsed":10,"cost":0}\n\n'
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const onMetaWarning = vi.fn();
+    await sendMessageStream(makePayload(), { onMetaWarning });
+    expect(onMetaWarning).not.toHaveBeenCalled();
+  });
+
   it("chart 事件中的非法 chartType 回退为 null（MEDIUM#5）", async () => {
     const stream = sseStream(
       'event: chart\ndata: {"chartType":"unknown_chart","chartOption":{},"data":[]}\n\n'

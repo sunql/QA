@@ -212,25 +212,24 @@ class StreamMixin:
         # KPI 命中最优先短路（0 LLM cost）；L4 命中也短路；未命中继续分类流程。
         preamble = await self._runL1AndL4Preamble(dto, session, user)
         if preamble is not None:
-            yield StreamEvent(EVENT_META, {
+            # F2c: merge into single meta frame (was 2-3 separate frames; each
+            #不带 intent 的帧会抹掉前端刚设好的 intent）。
+            meta_frame = {
                 "intent": "KPI" if preamble.routing_layer == "L1" else "AGENT_RUN",
                 "routingLayer": preamble.routing_layer,
                 "datasourceMismatch": preamble.datasource_mismatch,
-            })
+            }
             if preamble.mismatch_warning is not None:
-                yield StreamEvent(EVENT_META, {
-                    "warning": preamble.mismatch_warning,
-                    "code": "KPI_DATASOURCE_MISMATCH",
-                })
+                meta_frame["warning"] = preamble.mismatch_warning
+                meta_frame["code"] = "KPI_DATASOURCE_MISMATCH"
+            if preamble.agent_run is not None:
+                meta_frame["agentRun"] = preamble.agent_run
+            yield StreamEvent(EVENT_META, meta_frame)
             if preamble.chart_type is not None and preamble.chart_option is not None:
                 yield StreamEvent(EVENT_CHART, {
                     "chartType": preamble.chart_type.value if hasattr(preamble.chart_type, "value") else str(preamble.chart_type),
                     "option": preamble.chart_option,
                     "rationale": preamble.visual_rationale,
-                })
-            if preamble.agent_run is not None:
-                yield StreamEvent(EVENT_META, {
-                    "agentRun": preamble.agent_run,
                 })
             yield StreamEvent(EVENT_TOKEN, {"content": preamble.answer})
             yield StreamEvent(EVENT_DONE, {
@@ -253,7 +252,13 @@ class StreamMixin:
 
         try:
             classified = await self.classifyAndRecall(
-                session, dto.question, sessionId=dto.sessionId, needRecall=False
+                session, dto.question, sessionId=dto.sessionId, needRecall=False,
+                # F1：scope 取 dbUserId（int 主键）而非 userId（X-User-Id 字符串）——
+                # SessionQueryState.user_id 是 BigInteger，插字符串会直接 500
+                # （asyncpg: operator does not exist: bigint = character varying）。
+                # stub/anonymous 头解析不到 DB 用户时 dbUserId 为 None，退化为不过滤。
+                userId=user.dbUserId if user is not None else None,
+                datasourceId=dto.datasourceId,
             )
             state = classified.state
             if state is not None:
@@ -567,7 +572,8 @@ class StreamMixin:
             await self._saveQueryState(
                 session, dto.sessionId,
                 question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
-                userId=user.userId if user is not None else None,
+                # F1：dbUserId 是 int 主键，对齐 session_query_state.user_id 的 BigInteger
+                userId=user.dbUserId if user is not None else None,
                 datasourceId=dto.datasourceId,
             )
             yield StreamEvent(
@@ -608,7 +614,8 @@ class StreamMixin:
             await self._saveQueryState(
                 session, dto.sessionId,
                 question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
-                userId=user.userId if user is not None else None,
+                # F1：dbUserId 是 int 主键，对齐 session_query_state.user_id 的 BigInteger
+                userId=user.dbUserId if user is not None else None,
                 datasourceId=dto.datasourceId,
             )
             affinity = await self._buildAffinityStatus(
@@ -803,6 +810,12 @@ class StreamMixin:
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=finalSql,
             resultColumns=self._columns(data),
+            # F1：本行此前漏传 scope，导致默认（流式）路径写出的行 user_id/datasource_id
+            # 恒 NULL —— 下一轮按 scope 过滤时 NULL ≠ uid，追问读不到自己的锚点。
+            # `user` 是 `_streamQuery` 的 keyword-only 形参（由 `_processMessageStreamInner`
+            # 从 API 层的 `Depends(getCurrentUser)` 一路透传，见 L567/L608）。
+            userId=user.dbUserId if user is not None else None,
+            datasourceId=dto.datasourceId,
         )
         # affinity 需用 answerConfig（实际服务的回答模型），与 PC.selected 解耦
         answerConfigId = (await self._tokenUsage.getLastModelId(session, dto.sessionId)) or pc.selected.id
@@ -906,7 +919,7 @@ class StreamMixin:
             answer = await self._rejectOversizedPlan(
                 session, dto, multiStepPlan,
                 total_cost=initial_cost, _t0=_ms_t0,
-                userId=user.userId if user is not None else None,
+                userId=user.dbUserId if user is not None else None,
             )
             yield self._singleStepOverview("超出步数上限", dto.question)
             yield self._singleStepStart("超出步数上限", dto.question)
@@ -1060,6 +1073,10 @@ class StreamMixin:
                     question=dto.question, plan=last_plan, sql=last_sql,
                     resultColumns=self._columns(last_data),
                     inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
+                    # F1：同 L802，`_streamMultiStep` 的 `user` 也是 keyword-only 形参，
+                    # 由 5 个调用点统一透传（见 L467/L486/L503/L523/L676）
+                    userId=user.dbUserId if user is not None else None,
+                    datasourceId=dto.datasourceId,
                 )
                 affinity = await self._buildAffinityStatus(
                     session, dto.sessionId, agg_config.id, agg_config.model_name,
@@ -1212,7 +1229,7 @@ class StreamMixin:
             last_plan=last_plan, last_sql=last_sql, last_data=last_data,
             total_cost=total_cost, _t0=_ms_t0,
             inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
-            userId=user.userId if user is not None else None,
+            userId=user.dbUserId if user is not None else None,
         )
         yield StreamEvent(EVENT_TOKEN, {"content": degrade_answer})
         # v3.1 B6（M7）：降级收尾同样接假设后处理（last_data 为空时静默跳过）
@@ -1278,7 +1295,8 @@ class StreamMixin:
         })
 
     async def persistInterruptedStream(
-        self, dto: ChatRequest, session: AsyncSession
+        self, dto: ChatRequest, session: AsyncSession,
+        *, user: CurrentUser | None = None,  # P0-3 / F1
     ) -> None:
         """断连兜底落库（H4）：把已下发给客户端的部分产出写进历史并标记中断。
 
@@ -1293,6 +1311,9 @@ class StreamMixin:
         下一条语句即整条失败于 `InterfaceError: connection is closed`。注意这不是
         `pool_pre_ping` 能兜住的场景：连接是在**被持有期间**死掉的，pre_ping 只在签出时
         检查。请求会话在取消之后**不是可靠的写入通道**，故不复用：多一条连接，换兜底必达。
+
+        `user`（P0-3 / F1）：调用者身份，用于给兜底落库的 `SessionQueryState` 打
+        (user, datasource) scope。默认 None 保持既有调用点兼容（写 NULL scope 行）。
 
         首行短路：本轮已落库（`pending=False`）⇒ 什么都不写（单发标志去重）。正常跑完
         的请求、以及「先落库后 yield」的各条路径（闲聊/澄清/领域命令/卡片/多步）都在
@@ -1324,6 +1345,13 @@ class StreamMixin:
                 fallbackSession, dto.sessionId,
                 question=dto.question, plan=state.plan, sql=state.sql,
                 resultColumns=state.resultColumns,
+                # F1：断连兜底同样写查询状态，不带 scope 的话下一轮追问丢锚点。
+                # `user` 不能像 `_streamQuery` 那样靠形参自动拿到 —— 本方法由 API 层
+                # 的 `BackgroundTask` 调用，调用链上只带得到 dto/session，故显式加
+                # keyword-only 形参，由 `chat.py` 传 `Depends(getCurrentUser)` 的结果
+                # （与同层 `assertSessionOwnership` 用的是同一个对象）。
+                userId=user.dbUserId if user is not None else None,
+                datasourceId=dto.datasourceId,
             )
         logger.info(
             "流式断连兜底落库: session=%s 已下发片段=%d 内容长度=%d",

@@ -271,7 +271,7 @@ from app.services.chat_domain import DomainCommandMixin
 from app.services.chat_l4 import L4Mixin
 # v3.1 B6（M7 Hypothesis Hook）：假设后处理 mixin（触发词表 + LLM 生成 + 落库）
 from app.services.hypothesis_service import HypothesisMixin
-from app.services.chat_stream_output import L1L4PreambleMixin
+from app.services.chat_stream_output import L1L4PreambleMixin, requireFullResponse
 logger = logging.getLogger(__name__)
 
 
@@ -425,15 +425,14 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                     chart_option=preamble.chart_option,
                     visual_rationale=preamble.visual_rationale,
                 )
-                # Return full ChatResponse stored by mixin (preserves data/confidence/chartType etc.)
-                return self._preamble_l1_response
+                # Return full ChatResponse via preamble (preserves data/confidence/chartType etc.)
+                return requireFullResponse(preamble, "L1")
             # L4: preamble already ran _handleNl2SqlAgent and built the ChatResponse
-            # l4_chat_response is stored in the mixin; return it directly
-            return self._preamble_l4_response
+            return requireFullResponse(preamble, "L4")
 
         result, state = await self._classifyMessage(
             session, dto,
-            userId=user.userId if user is not None else None,
+            userId=user.dbUserId if user is not None else None,
             datasourceId=dto.datasourceId,
         )
         if result.intent == IntentType.CHITCHAT:
@@ -523,7 +522,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                         global_filters=global_filters,
                         semanticState=inherited,
                         priorSnapshot=prior_snapshot,
-                        userId=user.userId if user is not None else None,
+                        userId=user.dbUserId if user is not None else None,
                     )
             # L1.5（2026-08-17 真实回归）：并列复合问题（无显式分步信号但语义多步，
             # 如"查询3月份采购订单数量、Top 10物料占比、Top 10物料在4月份的订单数量"）
@@ -543,7 +542,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                         global_filters=global_filters,
                         semanticState=inherited,
                         priorSnapshot=prior_snapshot,
-                        userId=user.userId if user is not None else None,
+                        userId=user.dbUserId if user is not None else None,
                     )
 
         # B（feat-follow-up-cascade）：FOLLOW_UP 且上一轮是多步 → LLM 改写回完整
@@ -558,7 +557,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                     global_filters=gf2,
                     semanticState=inherited,
                     priorSnapshot=prior_snapshot,
-                    userId=user.userId if user is not None else None,
+                    userId=user.dbUserId if user is not None else None,
                 )
 
         try:
@@ -579,7 +578,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                         global_filters=gf2,
                         semanticState=inherited,
                         priorSnapshot=prior_snapshot,
-                        userId=user.userId if user is not None else None,
+                        userId=user.dbUserId if user is not None else None,
                     )
                 outcome = await self._planAndGenerateSql(
                     session, dto, pc, IntentType.FOLLOW_UP, state
@@ -639,7 +638,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                         _t0=_t0,
                         semanticState=None,  # 异常回退，无 semanticState
                         priorSnapshot=prior_snapshot,
-                        userId=user.userId if user is not None else None,
+                        userId=user.dbUserId if user is not None else None,
                     )
             raise
         self._spawnEmbedding(dto, finalSql)
@@ -709,7 +708,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             question=dto.question, plan=outcome.plan, sql=finalSql,
             resultColumns=self._columns(data),
             inheritance_snapshot=snap,
-            userId=user.userId if user is not None else None,
+            userId=user.dbUserId if user is not None else None,
             datasourceId=dto.datasourceId,
         )
         # v3.1 B6（M7）：单步出数据后的可选假设后处理（best-effort，不阻断）
@@ -1682,7 +1681,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
             inheritance_snapshot=None,
-            userId=user.userId if user is not None else None,
+            userId=user.dbUserId if user is not None else None,
             datasourceId=dto.datasourceId,
         )
         totalTokens = outcome.promptTokens + outcome.completionTokens
@@ -1739,7 +1738,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             session, dto.sessionId,
             question=dto.question, plan=outcome.plan, sql=None, resultColumns=[],
             inheritance_snapshot=None,
-            userId=user.userId if user is not None else None,
+            userId=user.dbUserId if user is not None else None,
             datasourceId=dto.datasourceId,
         )
         totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]

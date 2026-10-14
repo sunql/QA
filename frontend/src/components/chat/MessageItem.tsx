@@ -19,6 +19,13 @@ import { useTranslation } from "../../i18n";
 import { visualRationaleText } from "../../utils/visualRationale";
 import { useChatStore } from "../../stores/chatStore";
 
+// F2：KPI 警告 code → i18n 键映射表（白名单制：只有表里有的 code 才渲染，
+// 未知 code 直接不渲染——否则 t() 会把裸 key 原样打到界面上，
+// 因为 i18n.ts 的 missingKeyHandler 只在 DEV 打 warn，并不抑制 key 回显）
+const KPI_WARNING_I18N_KEYS = Object.freeze({
+  KPI_DATASOURCE_MISMATCH: "multiStep.KPI_DATASOURCE_MISMATCH",
+} as const);
+
 const { Paragraph } = Typography;
 
 interface MessageItemProps {
@@ -106,6 +113,16 @@ function MessageItem({
                         total: message.classRecall.classCount,
                       })
                 }
+              />
+            ) : null}
+            {/* F2：KPI 数据源不一致警告——KPI 答案本身有效，仅提示用户注意。
+                白名单制：code 不在映射表里则不渲染（不冒泡裸 key，不 fallback）。 */}
+            {message.kpiDatasourceCode && message.kpiDatasourceCode in KPI_WARNING_I18N_KEYS ? (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 8 }}
+                message={t(KPI_WARNING_I18N_KEYS[message.kpiDatasourceCode as keyof typeof KPI_WARNING_I18N_KEYS])}
               />
             ) : null}
             {/* 续跑失败：横幅（不是 isError）——保留原正文与多步计划卡，

@@ -94,5 +94,6 @@ class StreamEvent:
             _jsonSafeData(self.data),
             ensure_ascii=False,
             allow_nan=False,
+            default=str,
         )
         return f"event: {self.event}\ndata: {payload}\n\n"

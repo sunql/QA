@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -228,6 +228,45 @@ _RECENT_ROUNDS_LIMIT = 5
 # 3-4：单条历史快照的 q/s 字符上限，防止超长问题或 SQL 撑爆 NL2SQL prompt（LOW-2）。
 # 运行期从 system_config.STATE_HISTORY_FIELD_LIMIT 读，缺席/格式错返此值。
 _STATE_HISTORY_FIELD_LIMIT_DEFAULT = 500
+
+
+def _stateRowRank(row: SessionQueryState) -> tuple[int, Any, int]:
+    """`_selectStateRow` 的排序键，元组比较，越大越优先。"""
+    return (
+        # ① scope 完整度：两个维度都非 NULL 的行优先
+        (row.user_id is not None) + (row.datasource_id is not None),
+        # ② 越新越优先（追问锚点理应是上一轮，不是上周）
+        row.updated_time,
+        # ③ 主键兜底：updated_time 相同也保证结果唯一且与插入顺序无关
+        row.id,
+    )
+
+
+def _selectStateRow(
+    rows: Sequence[SessionQueryState],
+) -> SessionQueryState | None:
+    """从同一 (session_id, 已过滤 scope) 的候选行里确定性地选一行。
+
+    为什么不直接用 `scalar_one_or_none()`：调用方只给**部分**或**不给** scope 时，
+    同一 session 下可能有多行 —— `uq_session_query_state_scope` 是含 NULL 的三列
+    唯一约束，而 Postgres 认为 NULL 之间互不相等，故 P0-3 上线前写的 `(NULL,NULL,s)`
+    行与之后写的 `(uid,ds,s)` 行可以合法并存。裸语义遇到这种数据抛
+    `MultipleResultsFound`，把一次追问打成 500。
+
+    选择策略（按优先级）：
+    1. **scope 完整度高的行**：全 scope 的行是「归属已确定」的状态；NULL scope 的行
+       是 P0-3 之前的遗留桶，归属不明。同等条件下取前者，是因为遗留行可能是任意
+       数据源/用户留下的，读到它等于串味 —— 这正是本次要修的缺陷本身。
+    2. **更新的行**：避免有完整 scope 的历史遗留行盖过本轮刚写的行。
+    3. **主键大的行**：纯粹为了「结果唯一」。`updated_time` 由应用层默认值生成，
+       同一批写入可能撞同一时刻；没有这一级就会出现「同一份数据两次读取返回不同行」。
+
+    已知取舍：调用方给全 scope（生产所有调用点修完后都是这种情况）时，唯一约束保证
+    候选最多一行，本函数退化为恒等选择 —— 即选择策略只在遗留/部分 scope 场景生效。
+    """
+    if not rows:
+        return None
+    return max(rows, key=_stateRowRank)
 
 
 class ContextMixin:
@@ -515,14 +554,20 @@ class ContextMixin:
 
         P0-3：当传 userId/datasourceId 时按三元 (user_id, datasource_id, session_id) 过滤；
         任一 None 不过滤；既有 17+ 调用点不传新参数时行为不变。
+
+        F1：调用方给全 scope 时唯一约束（uq_session_query_state_scope）保证最多一行，
+        直接 `scalar_one_or_none()` 是安全的；但给**部分**或**不给** scope 时，
+        同一 session 下可能同时存在多行（P0-3 之前写的 NULL 行与之后写的 scoped 行
+        可以合法并存 —— Postgres 的 UNIQUE 把 NULL 视作互不相等），裸语义会抛
+        `MultipleResultsFound` 把一次追问打成 500。故统一走 `_selectStateRow`。
         """
         stmt = select(SessionQueryState).where(SessionQueryState.session_id == sessionId)
         if userId is not None:
             stmt = stmt.where(SessionQueryState.user_id == userId)
         if datasourceId is not None:
             stmt = stmt.where(SessionQueryState.datasource_id == datasourceId)
-        result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        rows = (await session.execute(stmt)).scalars().all()
+        return _selectStateRow(rows)
 
     async def _saveQueryState(
         self,
@@ -544,6 +589,10 @@ class ContextMixin:
         P0-3：传 userId/datasourceId 时按三元 (user, datasource, session) UPSERT，
         避免不同用户/数据源窜 state。既有调用不传新参数时按 session_id 唯一 UPSERT
         （向后兼容 17+ 既有调用点）。
+
+        F1：查 existing 的那一步与 `_loadQueryState` 共用 `_selectStateRow` ——
+        「读」和「找要更新的那一行」必须是同一个选择口径，否则读到的锚点与被覆盖的
+        行可能不是同一行（追问继承的就是别人的上一轮）。
         """
         # P0-3：按三元查 existing（不传新参数时退化为按 session_id 唯一）
         stmt = select(SessionQueryState).where(SessionQueryState.session_id == sessionId)
@@ -551,7 +600,8 @@ class ContextMixin:
             stmt = stmt.where(SessionQueryState.user_id == userId)
         if datasourceId is not None:
             stmt = stmt.where(SessionQueryState.datasource_id == datasourceId)
-        existing = (await session.execute(stmt)).scalar_one_or_none()
+        rows = (await session.execute(stmt)).scalars().all()
+        existing = _selectStateRow(rows)
 
         if existing is not None:
             # ORM 实体是有状态对象，原地更新属性属 SQLAlchemy 标准用法

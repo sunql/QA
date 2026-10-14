@@ -37,7 +37,10 @@ _ROUTING_FIXTURE: list[tuple[str, IntentType, IntentType]] = [
     ("谢谢", IntentType.CHITCHAT, IntentType.CHITCHAT),
     ("HELP me", IntentType.CHITCHAT, IntentType.CHITCHAT),
     ("Hello", IntentType.CHITCHAT, IntentType.CHITCHAT),
-    ("查", IntentType.CHITCHAT, IntentType.CHITCHAT),
+    # F5 修正（行 40）：「查」有状态列 → CLARIFY。
+    # 这是把矩阵对齐到 step 9 的现行语义（有历史 + 极短消息 ⇒ CLARIFY），
+    # 不是修一个旧 bug：原期望值 CHITCHAT 与 step 9 在 hasPriorState 下的行为矛盾。
+    ("查", IntentType.CHITCHAT, IntentType.CLARIFY),
     ("能做什么", IntentType.CHITCHAT, IntentType.CHITCHAT),
     ("再见", IntentType.CHITCHAT, IntentType.CHITCHAT),
     # ===== QUERY（无状态）→ NEW_QUERY/REFINE/FOLLOW_UP（有状态）（30）=====
@@ -131,7 +134,9 @@ _ROUTING_FIXTURE: list[tuple[str, IntentType, IntentType]] = [
     ("这个月最高的是哪个", IntentType.QUERY, IntentType.FOLLOW_UP),
     ("继续看下个月的数据", IntentType.QUERY, IntentType.FOLLOW_UP),
     ("接着看下个月的", IntentType.QUERY, IntentType.FOLLOW_UP),
-    ("那去年呢", IntentType.QUERY, IntentType.FOLLOW_UP),
+    # F5 修正（行 134）：「那去年呢」无状态列 → CLARIFY（pre-P0-2 过期冻结，P0-2 step 8 明写
+    #「短追问 → CLARIFY 询问比较对象，不生成猜测 SQL」）
+    ("那去年呢", IntentType.CLARIFY, IntentType.FOLLOW_UP),
     ("哪4月份呢", IntentType.QUERY, IntentType.FOLLOW_UP),
 ]
 

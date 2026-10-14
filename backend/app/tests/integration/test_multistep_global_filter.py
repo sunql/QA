@@ -316,12 +316,17 @@ class TestMultistepGlobalFilterStreaming:
         """
         llm = _GlobalFilterLlm()
         service, _, _, _ = _build_service(llm)
+        # F1：预置行必须带 scope —— 生产路径每个写入点都带，`classifyAndRecall`
+        # 按 (user, datasource, session) 过滤；不带 datasource_id 的遗留行读不到了
+        # （此前这条用例是**靠这行没带 scope 才走对分支**的，即因错误原因而绿）。
+        # 本用例直接调 service、不传 user，故 userId 为 None，只需 datasource 维度。
         await service._saveQueryState(
             dbSession, "s1",
             question=_MULTI_STEP_QUESTION,
             plan=QueryPlan(target="t"),
             sql="SELECT 1 FROM DUAL",
             resultColumns=["C"],
+            datasourceId=_dto("x").datasourceId,
         )
 
         events = [
@@ -375,12 +380,14 @@ class TestMultistepGlobalFilterCascadeFallback:
         """流式 C 兜底：与非流式同口径注入（对称缺口的两侧各一例）。"""
         llm = _CFallbackLlm()
         service, _, tokenUsage, _ = _build_service(llm)
+        # F1：同上，预置行须带 datasource scope，否则读不到「上一轮多步」的状态
         await service._saveQueryState(
             dbSession, "s1",
             question=_MULTI_STEP_QUESTION,
             plan=QueryPlan(target="t"),
             sql="SELECT 1 FROM DUAL",
             resultColumns=["C"],
+            datasourceId=_dto("x").datasourceId,
         )
 
         events = [

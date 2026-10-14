@@ -37,6 +37,10 @@ from app.services.chat_constants import (
     USAGE_PURPOSE_ANSWER_STREAM_FAILED,
     USAGE_PURPOSE_FALLBACK_ANSWER,
 )
+from app.domain.error_messages import (
+    MSG_INTERNAL_ERROR_GENERIC,
+    MSG_KPI_DATASOURCE_MISMATCH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +164,38 @@ class PreambleResult(BaseModel):
     # L1 cross-datasource mismatch
     datasource_mismatch: bool = False
     mismatch_warning: str | None = None
+    # 完整 ChatResponse（非流式入口需要完整响应；流式入口只用上面那些字段）。
+    # 用 Any 破循环依赖（同 chart_type 的既有做法）：本模块在 ChatResponse 之前导入，
+    # 若写真实类型注解，pydantic 在建类时会求值该注解（即使有 from __future__ annotations
+    # 也只在 type annotation 层面延迟，BaseModel.model_fields 的求值仍需运行时解析），
+    # 导致 NameError / PydanticUndefinedAnnotation；用 TYPE_CHECKING + 字符串字面量
+    # 也同样会在 pydantic 求值时失败（pydantic 不走 __annotations__ 的 TYPE_CHECKING 分支）。
+    # 唯一可行方案是 TypeVar + model_rebuild()，代价远大于收益；保持 Any 并记录原因。
+    full_response: Any = None
+
+
+def requireFullResponse(preamble: PreambleResult, routing_layer: str) -> Any:
+    """守卫：full_response 未填充则快速失败。
+
+    这是内部不变量检查（代码 bug，不是用户输入），所以：
+    - 用 RuntimeError（不是 DomainError）→ 落到 500 兜底 handler，
+      不走 DomainError 那条把 message 原样写进响应体的路径；
+    - 文案取 error_messages 常量，不在 services 层硬编码，且不含任何内部标识；
+    - 详细诊断（routing_layer、preamble 各字段）只进日志。
+    """
+    if preamble.full_response is not None:
+        return preamble.full_response
+    logger.error(
+        "PreambleResult invariant broken: full_response is None for routing_layer=%s "
+        "(preamble fields: routing_layer=%r, answer=%r, chart_type=%r). "
+        "This indicates a code bug: a PreambleResult construction point failed to "
+        "populate full_response. Check L1L4PreambleMixin._runL1AndL4Preamble.",
+        routing_layer,
+        preamble.routing_layer,
+        preamble.answer,
+        preamble.chart_type,
+    )
+    raise RuntimeError(MSG_INTERNAL_ERROR_GENERIC)
 
 
 class L1L4PreambleMixin:
@@ -177,7 +213,8 @@ class L1L4PreambleMixin:
         """KPI 优先（命中短路）；未命中则尝试 L4；仍未命中返 None（让主路径继续）。
 
         行为对 source-provider 改：
-        - KPI 用 dto.datasourceId 比较 feat.datasource_id；不匹配给 mismatch_warning（不静默）
+        - KPI 用 dto.datasourceId 比较 feat.datasource_id（真 FK 列，非 data_source text）；
+          不匹配给 mismatch_warning（不静默）
         - L4 不改行为
         """
         # 1. KPI 匹配（与 chat_service.py:409-432 同款 try/except 降级）
@@ -194,14 +231,12 @@ class L1L4PreambleMixin:
                 mismatch = False
                 warning = None
                 feat = await self._resolveKpiCatalog(match.code, session)
-                if feat is not None and feat.data_source is not None and str(feat.data_source) != str(dto.datasourceId):
+                if feat is not None and feat.datasource_id is not None and feat.datasource_id != dto.datasourceId:
                     mismatch = True
-                    warning = (
-                        f"该 KPI 指标绑定数据源 {feat.data_source}，"
-                        f"与你当前选择的数据源 {str(dto.datasourceId)} 不一致。"
+                    warning = MSG_KPI_DATASOURCE_MISMATCH.format(
+                        datasource_id=feat.datasource_id,
+                        user_datasource_id=dto.datasourceId,
                     )
-                # Store full ChatResponse for non-stream caller; stream path uses PreambleResult fields
-                self._preamble_l1_response = l1
                 return PreambleResult(
                     routing_layer="L1",
                     answer=l1.answer,
@@ -213,13 +248,12 @@ class L1L4PreambleMixin:
                     confidence=match.confidence,
                     datasource_mismatch=mismatch,
                     mismatch_warning=warning,
+                    full_response=l1,
                 )
 
         # 2. L4 Agent Loop
         l4 = await self._handleNl2SqlAgent(session, dto, user=user)
         if l4 is not None:
-            # Store L4 ChatResponse for non-stream caller; stream path uses PreambleResult fields
-            self._preamble_l4_response = l4
             return PreambleResult(
                 routing_layer="L4",
                 answer=l4.answer,
@@ -227,6 +261,7 @@ class L1L4PreambleMixin:
                     l4.agent_run.model_dump(mode="json", by_alias=True)
                     if l4.agent_run is not None else None
                 ),
+                full_response=l4,
             )
 
         return None

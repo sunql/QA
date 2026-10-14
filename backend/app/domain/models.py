@@ -382,6 +382,9 @@ class KpiCatalog(Base, TimestampMixin):
     grain: Mapped[str | None] = mapped_column(String(100), nullable=True)
     unit: Mapped[str | None] = mapped_column(String(50), nullable=True)
     data_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    datasource_id: Mapped[int | None] = mapped_column(
+        BigIntFk, ForeignKey("data_source.id", ondelete="SET NULL"), nullable=True
+    )
     owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
     version: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="v1.0"

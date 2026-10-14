@@ -18,6 +18,12 @@ from app.domain.multi_step_plan import (
 )
 from app.domain.schemas import ChatResponse
 
+# 让 unittest.mock.patch("app.services.chat_multistep.MultiStepMixin._executeDataStep")
+# 能通过 pkgutil.resolve_name 的属性 walk：services 包是空 __init__，不显式
+# import 子模块，walk 找不到属性。test_chat_multistep_dep.py 在 worktree
+# 合流时遇到 (memory "测试装配盲区")。
+import app.services.chat_multistep  # noqa: F401
+
 
 def _plan(steps: list[StepPlan]) -> MultiStepPlan:
     return MultiStepPlan(
@@ -87,6 +93,17 @@ class TestChatMultistepFailureStrategies:
         mixin._maybeGenerateHypotheses = AsyncMock(return_value=None)
         mixin._inheritedStateToSnapshot = MagicMock(return_value={})
         mixin._columns = MagicMock(return_value=[])
+        # P0-3 run-persistence 依赖（worktree 合流时补；P1-4 base tree 不含这些方法）
+        mixin._beginRunForRequest = AsyncMock(return_value=(None, 0))
+        mixin._shouldSkipStep = AsyncMock(return_value=False)
+        mixin._maybeCompressPriorSteps = AsyncMock(return_value=None)
+        mixin._recordHardFailure = AsyncMock(return_value=None)
+        mixin._recordSoftFailure = AsyncMock(return_value=None)
+        mixin._persistStepSuccess = AsyncMock(return_value=None)
+        mixin._closeRun = AsyncMock(return_value=None)
+        mixin._resolveInheritedState = MagicMock(return_value=None)
+        # 让降级收尾路径不再依赖真实 DB / 多步对象
+        mixin._finalizeMultiStepDegrade = AsyncMock(return_value="degraded answer")
         return mixin
 
     def _build_dto(self) -> MagicMock:
@@ -127,7 +144,7 @@ class TestChatMultistepFailureStrategies:
 
             mixin = self._build_mixin()
             resp: ChatResponse = await mixin._executeMultiStep(
-                session=MagicMock(),
+                session=AsyncMock(),
                 dto=self._build_dto(),
                 pc=self._build_pc(),
                 multiStepPlan=plan,
@@ -160,7 +177,7 @@ class TestChatMultistepFailureStrategies:
 
             mixin = self._build_mixin()
             resp: ChatResponse = await mixin._executeMultiStep(
-                session=MagicMock(),
+                session=AsyncMock(),
                 dto=self._build_dto(),
                 pc=self._build_pc(),
                 multiStepPlan=plan,

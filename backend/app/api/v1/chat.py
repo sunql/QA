@@ -109,7 +109,8 @@ async def chatStream(
         吞掉异常只记日志：此时已无法改变给客户端的响应，抛出去只会污染日志。
         """
         try:
-            await _service.persistInterruptedStream(dto, session)
+            # F1：透传调用者身份，断连兜底落库的查询状态才带得上 (user, datasource) scope
+            await _service.persistInterruptedStream(dto, session, user=_user)
         except Exception as exc:
             logger.exception("流式断连兜底落库失败: %s", exc)
 

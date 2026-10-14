@@ -55,16 +55,14 @@ _GREETING_PREFIXES: tuple[str, ...] = (
     "hi,", "hi, ", "hello,", "hello, ",
 )
 
-# P0-2：追问型短消息关键词集（短追问被 CHITCHAT 短路的修复）
-# 包含「时间相对」（去年呢/上个月呢）、「比较」（同比/环比）、「聚合」（汇总/总计/按月按周）等
+# P0-2 + F5：纯指代型追问关键词集（动作词已拆分移出）
+# 包含「时间相对」（去年呢/上个月呢）、「比较」（同比/环比）
 # 仅在 hasPriorState=True 时视为 REFINE 追问；hasPriorState=False 时返 CLARIFY
+# F5 修复：动作词（汇总/按月/分组等）移除，因其本身就是合法查询开头
 _SHORT_FOLLOWUP_KEYWORDS: tuple[str, ...] = (
     "去年呢", "前年呢", "今年呢", "明年呢",
     "上个月呢", "上季度呢", "上月呢", "上季呢",
     "同比", "环比", "对比", "比较", "比一下",
-    "汇总", "汇总一下", "总计", "合计", "总和",
-    "按月", "按周", "按日", "按天", "按年", "按地区", "按部门",
-    "分组", "分类", "拆开", "拆细",
 )
 
 # CLARIFY：询问概念 / 术语含义（3-1 收紧，优先于 REFINE 判断）。
@@ -572,8 +570,8 @@ class IntentService:
         if IntentService._isClarify(normalized):
             return IntentResult(intent=IntentType.CLARIFY)
         # 1. hasPriorState 时的 REFINE / FOLLOW_UP 判定（提到 Agent/supplier 之前）
-        #    修复 P0-2：短追问（"去年呢"/"同比"/"汇总"）走此路径而非被长度兜底短路
-        #    长度守卫：仅对 stripped 后 ≤ 10 字的消息生效，避免"…汇总"被误判
+        #    修复 P0-2：短追问（"去年呢"/"同比"）走此路径而非被长度兜底短路
+        #    长度守卫：仅对 stripped 后 ≤ 9 字的消息生效（代码实际值，与注释对齐）
         if hasPriorState and (
             IntentService._isRefine(normalized)
             or IntentService._isFollowUp(normalized)
@@ -635,10 +633,12 @@ class IntentService:
         #    长度守卫：仅对 stripped 后 ≤ 10 字的消息生效，避免"…汇总"被误判
         if len(stripped) <= 10 and any(kw in normalized for kw in _SHORT_FOLLOWUP_KEYWORDS):
             return IntentResult(intent=IntentType.CLARIFY)
-        # 9. 长度兜底（仅在 hasPriorState=False 时才返 CHITCHAT；
-        #    有历史时短追问已在 step 1 分流）
-        if not hasPriorState and len(normalized) <= _SHORT_MESSAGE_LIMIT:
-            return IntentResult(intent=IntentType.CHITCHAT)
+        # 9. 长度兜底：有历史时短消息 → CLARIFY（请用户明确意图，不生成盲 SQL）；
+        #    无历史时 → CHITCHAT（保持既有行为）
+        if len(normalized) <= _SHORT_MESSAGE_LIMIT:
+            return IntentResult(
+                intent=IntentType.CLARIFY if hasPriorState else IntentType.CHITCHAT
+            )
         # 10. 默认 QUERY（hasPriorState 区分 FOLLOW_UP/NEW_QUERY 保持既有行为）
         if hasPriorState:
             if IntentService._isFollowUp(normalized):

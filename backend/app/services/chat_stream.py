@@ -212,25 +212,24 @@ class StreamMixin:
         # KPI 命中最优先短路（0 LLM cost）；L4 命中也短路；未命中继续分类流程。
         preamble = await self._runL1AndL4Preamble(dto, session, user)
         if preamble is not None:
-            yield StreamEvent(EVENT_META, {
+            # F2c: merge into single meta frame (was 2-3 separate frames; each
+            #不带 intent 的帧会抹掉前端刚设好的 intent）。
+            meta_frame = {
                 "intent": "KPI" if preamble.routing_layer == "L1" else "AGENT_RUN",
                 "routingLayer": preamble.routing_layer,
                 "datasourceMismatch": preamble.datasource_mismatch,
-            })
+            }
             if preamble.mismatch_warning is not None:
-                yield StreamEvent(EVENT_META, {
-                    "warning": preamble.mismatch_warning,
-                    "code": "KPI_DATASOURCE_MISMATCH",
-                })
+                meta_frame["warning"] = preamble.mismatch_warning
+                meta_frame["code"] = "KPI_DATASOURCE_MISMATCH"
+            if preamble.agent_run is not None:
+                meta_frame["agentRun"] = preamble.agent_run
+            yield StreamEvent(EVENT_META, meta_frame)
             if preamble.chart_type is not None and preamble.chart_option is not None:
                 yield StreamEvent(EVENT_CHART, {
                     "chartType": preamble.chart_type.value if hasattr(preamble.chart_type, "value") else str(preamble.chart_type),
                     "option": preamble.chart_option,
                     "rationale": preamble.visual_rationale,
-                })
-            if preamble.agent_run is not None:
-                yield StreamEvent(EVENT_META, {
-                    "agentRun": preamble.agent_run,
                 })
             yield StreamEvent(EVENT_TOKEN, {"content": preamble.answer})
             yield StreamEvent(EVENT_DONE, {

@@ -3,7 +3,7 @@
 - **日期**：2026-10-15
 - **作者**：Claude (phase3-reconciler)
 - **Phase**：Phase 3 — AIChat 服务合流
-- **状态**：**pr-review-pending**（PR #19 OPEN at `https://github.com/sunql/QA/pull/19`；等 reviewer human review；SSOT 提前写以作评审证据）
+- **状态**：**done**（PR #19 merged via fast-forward into `origin/main` @ `151372ed` on 2026-10-15；本地 push `bcf2fac0..151372ed`；仓库 main 分支 linear history policy 强制 fast-forward；`--no-ff` merge commit 已被服务端拒，本地 reset 后 fast-forward 推送；PR #19 留待手动 close + 留 comment 说明已 fast-forward 合并）
 - **关联变更**：
   - predecessor: [feat/chat-p1-streaming-assistant-message-id（#14）] · [fix/chat-p1-3-crlf（#15）] · [feat/multistep-p1-4-dep-resolver（#15 主体, 内嵌 P0-3）] · [feat/llm-p1-2-capability-router（#13）] · [refactor/nl2sql-p1-1-sqlglot-ast（#12）] · [feat/hypothesis-p1-5-auto-verify（#16）] · [feat/chat-p2-1-error-classify（#17）]
   - 相关: [P0-3 SessionQueryState 列加（#11 → origin/main @ `bcf2fac0`）] · [F2a kpi_catalog.datasource_id（#18 → origin/main）] · [F1/F1.1b chat_stream 兼容（#18）]
@@ -211,13 +211,13 @@ uv run pytest app/tests/integration/ 2>&1 | tail -30
   - `Harness/wiki/chat_multi_step_persistence.md`（P0-3 + P1-4 合流取舍）
 - **Rules**：无新增规则改动
 - **Memory**：
-  - `~/.claude/.../memory/qa-system-phase3-reconciled-main.md`（本变更总览，标 pr-review-pending）
+  - `~/.claude/.../memory/qa-system-phase3-reconciled-main.md`（本变更总览，标 done；其"后续动作"段同步更新）
   - `~/.claude/.../memory/qa-system-p0-3-vs-f1-f11b-recon.md`（R1 recon 互补判定）
   - `~/.claude/.../memory/qa-system-p1-p2-pr-base-fake-diff.md`（350 文件 diff 假象）
   - `~/.claude/.../memory/qa-system-alembic-merge-number-collision.md`（alembic 撞号修法）
   - `~/.claude/.../memory/qa-system-bcf2fac0-baseline.md`（#18 squash 后 main head）
   - `~/.claude/.../memory/qa-system-shared-worktree-concurrent-sessions.md`（worktree 安全）
-- **关联变更**（predecessor / successor）：暂无 successor（PR #19 合 main 后开 2026-10-15-r2-r3-r4-recon）
+- **关联变更**（predecessor / successor）：successor 待开 `2026-10-15-r2-r3-r4-recon`（phase03-kickoff §1.1 开门问题 1.2/1.3/1.4）+ 生产 alembic 0124→0127 验证（生产库 5433 跑通后由 memory `qa-system-never-fake-alembic-version-number` 判定 stamp vs upgrade）
 
 ---
 

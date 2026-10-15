@@ -188,6 +188,51 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/openapi.json
 docker logs qa-backend --tail=20 | grep -E "Application startup|Uvicorn running"
 ```
 
+### 生产 5433 实跑记录（2026-10-15 done）
+
+**摸现状 → backup → 真跑 → stamp → verify** 全 5 步完成。
+
+```bash
+# 0. 摸现状：prod alembic_version = 0121（漂移 6 步）；0127 analysis_hypothesis 3 列已手工跑过；0122-0126 DDL 都没跑
+# 1. backup：pg_dump -h localhost -p 5433 -U qa_user -d qa_metadata -F c -f /tmp/qa_metadata-backup-20261015.dump
+#    → 14M binary dump
+
+# 2. alembic upgrade 0126（跑 5 个 migration: 0121→0122→0123→0124→0125→0126）
+DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata' \
+  uv run alembic upgrade 0126
+# Running upgrade 0121 -> 0122, l3_acl 表
+# Running upgrade 0122 -> 0123, user.restricted_access 字段
+# Running upgrade 0123 -> 0124, session_query_state 4 列
+# Running upgrade 0124 -> 0125, kpi_catalog.datasource_id FK
+# Running upgrade 0125 -> 0126, P1-2: cost_source 列
+# 全部 OK，0 错误
+
+# 3. alembic stamp head（接受 0127 已跑事实；禁止 UPDATE alembic_version）
+DATABASE_URL=... uv run alembic stamp head
+# stamp_revision 0126 -> 0127
+
+# 4. verify
+psql -c "SELECT version_num FROM alembic_version;"
+# 0127
+```
+
+**6 DDL 全 verified**（prod `qa_metadata` 5433 实物 count）：
+
+| Migration | 验证对象 | hits |
+|---|---|---|
+| 0122 | `l3_acl` 表 | 1 ✅ |
+| 0123 | `users.restricted_access` 列 | 1 ✅ |
+| 0124 | `session_query_state` 4 列（datasource_id / schema_name / user_id / datasource_version）| 4 ✅ |
+| 0125 | `kpi_catalog.datasource_id` | 1 ✅ |
+| 0126 | `session_token_usage.cost_source` | 1 ✅ |
+| 0127 | `analysis_hypothesis` 3 列（verification_status / support_count / rows_sample）| 3 ✅ |
+
+**约束**：
+- 走 memory `qa-system-never-fake-alembic-version-number` 的"部分 DDL 已跑"路径：补齐缺失 DDL + stamp head
+- 走 `qa-system-docker-cmd-live-install` 警示：用主机 backend（main head）+ uv 解析（已 cache），不走 docker compose run（避免 130s hatchling 超时）
+- 走 `qa-system-pg-wipe-incident` 警示：先 backup 14M dump
+- 走 `qa-system-bcf2fac0-baseline`：原 `bcf2fac0` 是 #18 squash 后 head，本变更 fast-forward 到 `4b95098` 后 alembic 走新链
+
 ### 验证方法（复制即用）
 
 ```bash

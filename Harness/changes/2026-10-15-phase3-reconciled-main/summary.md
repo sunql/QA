@@ -63,10 +63,11 @@ PR #18 squash 后 `origin/main` @ `bcf2fac0` 已含 P0-3 / F2a / F1 / F1.1b。`#
 0127_analysis_hypothesis_verification.py ← P1-5 (#16 改号，原 0116)
 ```
 
-**撞号处理**：P0-3 / F2a 已占 0124/0125；P1-2 / P1-5 原 revision 0115/0116 撞号（`#18` squash 之前 baseline 已有 0114）。**改号**：
-- `0115_session_token_usage_cost_source.py` → `0126_…` (down_revision: 0114→0125)
-- `0116_analysis_hypothesis_verification.py` → `0127_…` (down_revision: 0114→0126)
-- `b1ea6cb32588_run_state.py` 不动（hex 模板非数字）
+**撞号处理**：P0-3 / F2a 已占 0124/0125。P1-2 / P1-5 的 alembic 迁移在 phase3/reconciled-main 链上分别为 0126 / 0127：
+- P1-2（`d4bd9dae`）：直接创建 `0126_session_token_usage_cost_source.py`（`revision="0126"` / `down_revision="0125"`）。**注意**：commit message 误写"alembic 0115 加 cost_source 列（head 0114→0115）"——实为 phase3-reconciler 在 cherry-pick 落盘前改号到 0126（0115 号段已被 main head chain 外的 `0115_multi_step_session_text.py` 占用，不撞号但规避混淆）。
+- P1-5（`ef458bbd`）：**rename** `0116_analysis_hypothesis_verification.py → 0127_analysis_hypothesis_verification.py`（commit message 与实际落盘一致；`revision="0127"` / `down_revision="0126"`；1 file 5+/4-）。
+- 0115 / 0116 号段：main head chain 外仍有 `0115_multi_step_session_text.py` / `0116_research_checkpoint_expires_at.py` 两个独立迁移（不同文件，不撞号）。
+- `b1ea6cb32588_run_state.py` 不动（hex 模板非数字）。
 
 **ORM 字段**：
 - `KpiCatalog.datasource_id` BigInteger nullable + `ondelete=SET NULL`（#18，main 已有）

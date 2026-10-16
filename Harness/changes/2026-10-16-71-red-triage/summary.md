@@ -28,7 +28,7 @@ phase3 close-out 时记录 71 红 pre-existing on `bcf2fac0`；本轮 recon 跑
 | 类别 | 预期 | 实测 | 根因类 | 修法 |
 |---|---|---|---|---|
 | chat integration | 28 | 28 | RC-1 `_buildService` PLAN_EMPTY | 代码：fixture 补默认 classes（NAME/QTY） |
-| ontology integration | 9 | 9 | RC-2 Milvus dim 1536 vs 1024 | 代码：test 集合 schema 改 dim |
+| ontology integration | 9 | 0 (PR #27) | RC-2 Milvus dim 1536 vs 1024 + RC-7 mock 老名 + RC-8 property 描述重刷断言 | test fixture 改 dim + 补 4 个新 mock |
 | wiki integration | 24 | **20 + 1 errored = 21**（实测 2026-10-16 全跑 19 文件） | RC-5 + 集中 1 文件 11 红（待细分） | env/doc + header + link_admin 集中修 |
 | chat stream unit | 10 | 10 | RC-1 同 chat | 同 RC-1 |
 | RBAC API | 0 (memory 未列) | **11** | RC-3 `_mkUser` 漏 password 字段 | 代码：test helper 补 password |
@@ -49,13 +49,25 @@ phase3 close-out 时记录 71 红 pre-existing on `bcf2fac0`；本轮 recon 跑
 multistep / session context / query state 整片都过 `_buildService` ⇒ 全军覆没。
 **How to apply**: 修 1 个 helper 消 38 红 = 46% backend backlog。
 
-### RC-2: Milvus embedding dim 不匹配（ontology 9 红）
+### RC-2: Milvus embedding dim 不匹配（ontology 9 红 → PR #27）
 
 **症状**: `MilvusException: length(1536) of float data should divide the dim(1024)`，
 出在 `ontology_service.py:1539` 同步 embedding 时。
 **根因**: test collection schema `dim=1024`，但当前 embedding provider 返回 1536 维向量。
 **修法**: test 集合创建处改 dim 与 embedding provider 输出对齐（或反过来缩 embedding 维度）。
 **风险**: 低（test-only schema 改动），不污染 prod。
+
+**2026-10-16 PR #27 实际根因是 3 个**（不全 = dim）：
+- **RC-α (dim)**: 上文。3 处 test stub `* 1536` 改 `* 1024`。
+- **RC-γ (mock 老名)**: M0-P0.4 refactor 之后 ontology_service 走
+  `insertEmbeddingsDual` / `deleteByOntologyIdDual` /
+  `searchEmbeddingsByTypeRouted` / `listEmbeddingsAcross3Collections`。
+  原 test fixture 只 mock 老名 ⇒ prod 走真 milvus_client 路径或撞
+  AttributeError（fixture 默认 lambda 静默吞），5 个同步/搜索测试假绿失败。
+- **RC-δ (property 描述重刷断言)**: `createProperty` 也调
+  `_syncPropertyEmbeddingBestEffort` (line 729)，create+update 流下 ≥2 条
+  property 记录；create 的后台 task 读到 update 已 commit 的 state，两条
+  都带新 description。原断言 `len == 1` 不成立。
 
 ### RC-3: RBAC `_mkUser` 漏 `password` 字段（rbac 11 红）
 
@@ -139,6 +151,35 @@ multistep / session context / query state 整片都过 `_buildService` ⇒ 全�
     cache_clear 才会重读；本仓已有同款模式 (test_rate_limit_chat_route.py:44)
   - **M2+M3**: 与 PR #25 同款 (item.profile FK seed + must_change_password clear)
 
+**2026-10-16 PR #27** (`fix/ontology-milvus-dim-mismatch`)：合并 2 文件 mock 修，
+- test_ontology_api 7 红（RC-γ mock 老名 + RC-α dim 1536→1024）= ac90bff7
+- test_ontology_property_service 2 红（RC-γ `_FakeMilvus` 缺 `insertEmbeddingsDual`
+  + RC-δ create+update 双同步记录断言 = 1 fail）= ac90bff7
+- 测试 13 个 ontology 文件 163 passed (2:47)
+- **真实 backlog 63 → 54 (-9)**
+- **3 个 root cause**:
+  - **RC-α (dim 1536→1024)**: 3 处 test stub embedding 改 dim 与 prod bge-m3 对齐
+    (milvus_client.py:38 `_DIM=1024`)
+  - **RC-γ (mock 老名)**: M0-P0.4 3-collection refactor 之后 ontology_service
+    统一走 `*Dual` / `*Routed` 入口（`insertEmbeddingsDual` /
+    `deleteByOntologyIdDual` / `listEmbeddingsAcross3Collections` /
+    `searchEmbeddingsByTypeRouted`）；原 test fixture 只 mock 老名
+    （`insertEmbeddings` / `searchByEmbedding` / `listAllEmbeddings`）⇒ prod
+    不再调老名 ⇒ mock 形同虚设 ⇒ 5 个同步/搜索测试假绿失败。修法：autouse
+    fixture 补 4 个新 mock + 3 个 search 测试改 patch 新名 + 1 同步测试
+    改 patch `listEmbeddingsAcross3Collections` + `_FakeMilvus` 加
+    `insertEmbeddingsDual` 同形方法
+  - **RC-δ (property 描述重刷断言)**: `createProperty` 也调
+    `_syncPropertyEmbeddingBestEffort` (line 729) ⇒ create+update 流下
+    ≥2 条 property 记录；create 的后台 task 读到 update 已 commit 的 entity
+    state，两条都带新 description。原断言 `len == 1` 不成立；改
+    `≥1 + 全检 ontology_id + 全检带新 description`
+
+**Why RC-γ 隐藏深**：prod ontology_service 走新名，旧 wrapper 函数（`insertEmbeddings`
+等）仍存在只是不再被调用。fixture 默认 `lambda *a, **kw: None` 静默吞 AttributeError，
+旧 mock 替换老名后调老名 = 还是 none —— **看起来过了，实际 prod 走真 milvus_client
+代码路径**，8/9 红全是假绿。
+
 #### 后续发现的 hidden reds（不在原 83 红统计内）
 
 - **`test_identity_create_user_password.py` 2 红**（2026-10-16 rbac review M2 发现）：
@@ -160,7 +201,7 @@ wiki_link_admin fixture 漏 copy 这一段 ⇒ 1 行 import + 4 行 select/updat
 |---|---|---|---|---|
 | `fix/rbac-mkuser-password` | **0 (PR #24)** | RC-3 + item.profile 配套 | 极低 | **1h done** |
 | `fix/route-auth-guard-fastapi-compat` | 1 (+unblock 200+) | RC-4 | 低 | 30 min |
-| `fix/ontology-milvus-dim-mismatch` | 9 | RC-2 | 低 | 2-3 h |
+| `fix/ontology-milvus-dim-mismatch` | **0 (PR #27 ac90bff7)** | RC-2 + RC-7 + RC-8 | 低 | 2 h done |
 | `fix/chat-stream-plan-empty-fixture` | 38 | RC-1 | 中 | 1-2 天 |
 | `fix/wiki-env-and-auth` | 20+1 | RC-5（11 集中 link_admin） | 中 | 1-2 天（先看 link_admin 同/异根因） |
 | 前端套件 ~10 红 | — | pre-existing on `d1af4d4` | — | 独立 track |

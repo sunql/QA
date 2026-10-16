@@ -92,9 +92,56 @@ class label）注入 LLM prompt → 模型被诱导越权或泄露 system prompt
 **判定**：skip，不修。`__non_finite__` 是 JSON 序列化正确性必需，UI 渲染
 是前端降级问题，独立的 UX 项。
 
-### Task 12.5 — code-reviewer on P0-P1 changed files ⏳ 1 派发
+### Task 12.5 — code-reviewer on P0-P1 changed files ✅ 已派发
 
-**范围**：
+**派发**：dispatch code-reviewer subagent 对 P0-P2 9 文件 + error_classification.py
+跑独立审查。报告：`/tmp/review-package-aichat-p0p2/task-12.5-review-report.md`
+（1690 行 diff = 19 commit d23d091d..b632d945）。
+
+#### 1 Critical ✅ 已修 PR #32
+
+**Finding**：`chat_stream.py:641` `_tryFeatureResponse(session, dto, pc, outcome)`
+漏掉 `user=`。内部 `_saveQueryState` 写 `userId=None` ⇒ 写 `(NULL, ds, session)`
+行，P0-3 三元 scope 过滤读不到，状态被全局复用（与非流式入口
+`chat_service.py:609` 口径不一致）。
+
+**修法**（worktree `/tmp/qa-fix-feature-user` / branch `fix/chat-stream-feature-user-arg`）：
+- 一行 fix：`self._tryFeatureResponse(session, dto, pc, outcome, user=user)`
+- 配套 `TestTryFeatureResponseArg::test_streamQuery_call_passes_user_keyword`：
+  源码静态断言（regex 扫描 `_tryFeatureResponse(...)` 调用必须带
+  `user=user` 关键字参数）。
+- 现有流式测试基线（`test_query_stream_emits_full_event_sequence` 等）
+  受 pre-existing rot 影响（NL2SQL 计划解析落 PLAN_EMPTY），与本契约
+  正交；用源码级守卫把这条 P0-3 写侧硬约束钉死。
+- **TDD**：先跑 RED（chat_stream.py 调用点缺 user=user 报 assert 失败）→
+  应用一行 fix → GREEN。`uv run pytest app/tests/unit/test_chat_service_stream.py::TestTryFeatureResponseArg -xvs` 1 passed in 0.82s。
+- PR **#32**（2026-10-16，base=main）。
+
+#### 1 Important ⏳ 后续小批
+
+**Finding**：`chat_stream.py:626-627` 在 `if featureResp is not None` 块**之前**
+计算 `totalTokens` / `totalCost` / `affinityConfig` / `affinityPayload`（含
+async DB call `_buildAffinityStatus`），但这些值仅在 `featureResp is not None`
+分支内被消费——既浪费又触发不必要的 DB round-trip。
+
+**修法**（未做）：把 4 行 + `_buildAffinityStatus` 调用移到 `if featureResp is None`
+分支内（同时把 SQL/cost 聚合下移到真正需要的位置）。
+
+**优先级**：低——浪费一次 `_buildAffinityStatus` 不是 correctness 问题。
+下一批 P2 followup PR 顺手修。
+
+#### 4 Minor ⏳ 后续小批
+
+- `chatStore.ts:1584` `err.message.includes("interrupted")` magic string →
+  抽 `STREAM_INTERRUPTED` 常量。
+- `error_classification.py:866-868` `Nl2SqlError → PROVIDER_PROTOCOL` 分类口径
+  可商榷（与"重试耗尽" 注释割裂）；加澄清注释。
+- `chat_context.py:246` ORM 原地修改注释里加 `session.add(existing)` 说明
+  （实际上没漏，只是 reviewer 想看注释更清楚）。
+- `intent_service.py:983-984` 短追问 CLARIFY 分支无 `hasPriorState` 守卫 —
+  comment 没说清双路径语义。
+
+**范围（原始）**：
 - backend/app/services/chat_service.py（1986 行）
 - backend/app/services/chat_stream.py
 - backend/app/services/chat_context.py
@@ -104,12 +151,19 @@ class label）注入 LLM prompt → 模型被诱导越权或泄露 system prompt
 - backend/app/domain/models.py
 - frontend/src/stores/chatStore.ts
 - frontend/src/stores/stream_chunk_parser.ts
+- + backend/app/services/error_classification.py
 
 **焦点**：
 - chat_service.py 1986 行（豁免内但需 reviewer 确认 mixin 顺序）
 - immutability（不原地修改 ORM）
 - 异常 handler 错误码 + 状态码
 - 前端 store 改动 wire（prop / store flag / 调用点三处同步）
+
+**已确认 concern (reviewer 提的) 现状**：
+- `KpiCatalog.datasource_id` Alembic：0125 已存在（reviewer 当时没看到 diff 外的
+  迁移文件），concern 撤销。
+- `_selectStateRow` 4 类 NULL/non-NULL 组合测试未在本次补（pre-existing
+  rot 影响整 chat_service_stream 文件，与 Critical 修复合并风险 > 收益）。
 
 ### Frontend 7 red test files ⏳ 4h+
 
@@ -149,15 +203,16 @@ per `qa-system-qwen-multistep-uplift` 记忆，qwen-uplift 回滚后
 
 ## 优先级排序（建议）
 
-| 序 | 项 | 估时 | ROI | 阻塞 |
-|---|---|---|---|---|
-| 1 | Frontend 7 red（先 chatStore 8 红） | 4h | 高 | coverage 闸门 |
-| 2 | Task 12.5 code-reviewer | 1h | 中 | 验证 P0-P1 整体质量 |
-| 3 | X1-X5 dispatch（5 PR） | 2h/个 | 中 | 后续各独立闭环 |
-| 4 | M5（stub 模式回填） | 4h | 中 | OWASP A01 残留 |
-| 5 | M4（数据迁移） | 1h + 审批 | 中 | OWASP A01 残留 |
-| 6 | L1（prompt 注入） | 1d+ | 高 | 需独立 plan |
-| 7 | N4（qwen 知识保留） | 独立 | 低 | 不影响生产 |
+| 序 | 项 | 估时 | ROI | 阻塞 | 状态 |
+|---|---|---|---|---|---|
+| 1 | Frontend 7 red（先 chatStore 8 红） | 4h | 高 | coverage 闸门 | ⏳ |
+| 2 | Task 12.5 code-reviewer | 1h | 中 | 验证 P0-P1 整体质量 | ✅ PR #32 |
+| 3 | X1-X5 dispatch（5 PR） | 2h/个 | 中 | 后续各独立闭环 | ⏳ |
+| 4 | M5（stub 模式回填） | 4h | 中 | OWASP A01 残留 | ⏳ |
+| 5 | M4（数据迁移） | 1h + 审批 | 中 | OWASP A01 残留 | ⏳ |
+| 6 | L1（prompt 注入） | 1d+ | 高 | 需独立 plan | ⏳ |
+| 7 | N4（qwen 知识保留） | 独立 | 低 | 不影响生产 | ⏳ |
+| 8 | Task 12.5 Important + Minor（affinity 移到 else / chatStore 魔串 / error_classification 注释） | 30m | 低 | 与 PR #32 同期补 | ⏳ |
 
 ## Why 此 SSOT 单独存在
 
@@ -174,3 +229,7 @@ per `qa-system-qwen-multistep-uplift` 记忆，qwen-uplift 回滚后
 - Cross-refs spec：`docs/superpowers/specs/2026-10-13-1012-code-review-cross-refs.md`
 - Coverage gate：`/tmp/qa-aichat-priority-remaining/Harness/changes/aichat-priority-remaining-2026-10-16/coverage-gate-report.md`
 - Plan：`docs/superpowers/plans/2026-10-13-aichat-service-priority.md`
+- Task 12.5 review 报告：`/tmp/review-package-aichat-p0p2/task-12.5-review-report.md`
+- Task 12.5 Critical 修复：**PR #32**（`fix/chat-stream-feature-user-arg`，base=main）
+  - worktree：`/tmp/qa-fix-feature-user`
+  - commit：`efc5cfe5` fix(chat): _streamQuery passes user=user to _tryFeatureResponse (P0-3 scope)

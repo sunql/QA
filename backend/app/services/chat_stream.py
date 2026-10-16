@@ -613,7 +613,10 @@ class StreamMixin:
         yield StreamEvent(EVENT_SQL, {"sql": outcome.sql})
 
         # Phase 4.4：检测计划是否引用了可用 Feature，命中则直接回流特征值（SSE 流）。
-        featureResp = await self._tryFeatureResponse(session, dto, pc, outcome)
+        # Task 12.5 review Critical：必须透传 user=user，Feature 路径 _saveQueryState
+        # 写 userId=None 会写 (NULL, ds, session) 行，P0-3 三元 scope 读不到，状态被
+        # 全局复用。与非流式入口（chat_service.py:609）口径一致。
+        featureResp = await self._tryFeatureResponse(session, dto, pc, outcome, user=user)
         if featureResp is not None:
             await self._storeSessionMessages(session, dto.sessionId, dto.question, featureResp.answer, None)
             await self._saveQueryState(

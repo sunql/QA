@@ -118,6 +118,18 @@ multistep / session context / query state 整片都过 `_buildService` ⇒ 全�
 - 1 个 fix 灭 11 红 → `fix/wiki-link-admin-must-change-password` branch（test-only 1 行）
 - 另开 `fix/wiki-import-and-misc` 处理剩下 9 红（4 文件各 2-3 红）
 
+#### 后续发现的 hidden reds（不在原 83 红统计内）
+
+- **`test_identity_create_user_password.py` 2 红**（2026-10-16 rbac review M2 发现）：
+  `test_create_user_hashes_password` + `test_create_user_grants_profile_menu` 都撞
+  `IntegrityError fk_permission_grant_menu` — 同款 item.profile 缺 seed 问题，但走
+  IdentityService 直接调用（不经 HTTP）。修法：与 wiki_link_admin 一并开
+  `fix/test-fixture-item-profile-seed` PR（同 root cause class），11 + 2 = 13 红净收。
+- **`test_user_clearance.py` 潜在隐患**（M1）：line 53 把 item.profile 顶层插入
+  （path="/profile", parent_id=None），与 rbac 修后的 child leaf 模式不兼容 — 该文件
+  当前不调 /menu-config 所以不报错，但合并后若有测试同时跑两边会偶发结构错误。
+  修法：M1 建议同 `fix/test-fixture-item-profile-seed` 统一改 child leaf。
+
 **Why link_admin 改 1 行**: rbac test 已有同款 fix（line 106-111 段，admin.must_change_password = False），
 wiki_link_admin fixture 漏 copy 这一段 ⇒ 1 行 import + 4 行 select/update/commit = 灭 11 红。
 
@@ -184,7 +196,10 @@ PR #20 修完 `_IncludedRouter` import error（4 tests 3 绿 1 新红），
 3. **PLAN_EMPTY 一因吃 38 红**（46% backend backlog）— 修 1 个 fixture helper
    清近一半 backlog，价值密度最高。
 4. **wiki 24 红已实测 = 20 failed + 1 errored = 21 实际**（2026-10-16 全跑 19 文件）。
-   link_admin 11 红集中，待开 branch 第一步看同/异根因。
+   link_admin 11 红 100% MUST_CHANGE_PASSWORD 同根因（已 recon 确认），与 rbac 配套 fix 同步。
+5. **隐藏红 2 个**（2026-10-16 rbac review M2 发现）：test_identity_create_user_password.py
+   2 红（`test_create_user_hashes_password` + `test_create_user_grants_profile_menu`）—
+   同款 item.profile FK 缺 seed，但走 IdentityService 直接调用（不经 HTTP）。**真红数 83 → 85**。
 5. **Milvus dim 漂移** — embedding provider 可能改过输出维度但 test schema 没跟上，
    **检查 prod** `qa_metadata.ontology` 表对应 collection 当前 dim 是否也是 1024
    （如果是 = prod 写不进新数据；如果不是 = test 与 prod 不一致，看哪种是 ground truth）。

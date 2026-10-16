@@ -80,8 +80,15 @@ class _StreamPipelineLlm:
         self.completeCalls += 1
         system = messages[0].content
         if "解析为查询计划" in system:
-            # ReAct 第一阶段：空计划（classes 为空时无引用可校验）
-            return _Resp('{"target":"各供应商的收货数量汇总"}')
+            # ReAct 第一阶段：2026-09-27 方案B 后 _isEmptyPlan 把"仅 target"
+            # 判为 PLAN_EMPTY 走重试，3 次后抛 Nl2SqlError ⇒ 测试红。
+            # conditions 字段不参与 validatePlan 校验，也不进
+            # _buildDataQualityBadges 的 selectedClasses 路径
+            # （避免 _FakeSession.execute() 不支持扩参 ⇒ KeyError）。
+            return _Resp(
+                '{"target":"各供应商的收货数量汇总",'
+                '"conditions":["1=1"]}'
+            )
         if "生成 SQL 时必须" in system:
             return _Resp(
                 "```sql\nSELECT NAME, SUM(QTY) FROM ZJTH.PRECEIPT "

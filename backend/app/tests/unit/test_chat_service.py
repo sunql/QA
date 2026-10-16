@@ -87,8 +87,14 @@ class _PipelineLlm:
         self.calls.append([(m.role, m.content) for m in messages])
         system = messages[0].content
         if "解析为查询计划" in system:
-            # ReAct 第一阶段：返回一个能通过校验的空计划（classes 为空时无引用可校验）
-            content = '{"target":"各供应商的收货数量汇总"}'
+            # ReAct 第一阶段：2026-09-27 方案B 后 _isEmptyPlan 把"仅 target"
+            # 判为 PLAN_EMPTY 走重试，3 次后抛 Nl2SqlError ⇒ 测试红。
+            # conditions 字段不参与 validatePlan 校验，也不进
+            # _buildDataQualityBadges 的 selectedClasses 路径。
+            content = (
+                '{"target":"各供应商的收货数量汇总",'
+                '"conditions":["1=1"]}'
+            )
         elif "生成 SQL 时必须" in system:
             content = (
                 "```sql\nSELECT NAME, SUM(QTY) AS TOTAL_QTY FROM ZJTH.PRECEIPT "
@@ -531,6 +537,7 @@ class TestChatService:
                     sql = "SELECT 1 FROM DUAL"
                     promptTokens = 3
                     completionTokens = 2
+                    cachedTokens = None
                 return _R()
 
         service._nl2sql = _CapturingNl2sql()
@@ -579,6 +586,7 @@ class TestChatService:
                     sql = "SELECT 1 FROM DUAL"
                     promptTokens = 3
                     completionTokens = 2
+                    cachedTokens = None
                 return _R()
 
         service._nl2sql = _CapturingNl2sql()
@@ -593,8 +601,36 @@ class TestChatService:
                 original_question=question,
             )
 
-        # monkeypatch 自动 teardown：恢复原 staticmethod（不再漏到其他测试）
+        # 续跑分支：_FakeSession 不会真正落库；stub persistence 让 multi-step 跑通
+        # 后续执行（markStepRunning 需要 stepsByIdx[index] 存在）。本测试只关心
+        # 计划阶段的 scopeQuestion 透传，数据步骤实际执行不是测试范围。
+        from app.services import multi_step_persistence as _msp
+
+        class _FakeStepRun:
+            def __init__(self, idx: int) -> None:
+                self.step_index = idx
+                self.status = "pending"
+                self.sql = None
+                self.data = None
+                self.summary = None
+                self.error = None
+                self.skipped = False
+
+        async def _fakeLoadSteps(session, runId):
+            return [_FakeStepRun(i) for i in range(2)]
+
+        async def _noop(*args, **kwargs):
+            return None
+
         monkeypatch.setattr(StepQueryPlanner, "rule_based_split", staticmethod(_fakeSplit))
+        monkeypatch.setattr(_msp, "loadSteps", _fakeLoadSteps)
+        monkeypatch.setattr(_msp, "markStepRunning", _noop)
+        monkeypatch.setattr(_msp, "finishStep", _noop)
+        monkeypatch.setattr(_msp, "recordStepError", _noop)
+        monkeypatch.setattr(_msp, "updateRun", _noop)
+        monkeypatch.setattr(_msp, "loadRun", _fakeLoadSteps)
+        monkeypatch.setattr(_msp, "adoptRunForResume", _noop)
+        monkeypatch.setattr(_msp, "resetStepsFrom", _noop)
         await service.processMessage(_dto("2025年的采购情况：第一步查各供应商采购额"), _FakeSession())
 
         assert captured, "expected at least one plan call"
@@ -1049,7 +1085,14 @@ class TestChatService:
         assert "..." in sqlSystem  # 截断标记
 
     async def test_retries_sql_when_execution_fails_then_recovers(self) -> None:
-        """1-3：首次执行报错 → 回灌错误重试一轮 → 重试执行成功并审计额外消耗。"""
+        """1-3：首次执行报错 → 回灌错误重试一轮 → 重试执行成功并审计额外消耗。
+
+        注：图表决策引擎对 selectedClasses=[] 的 KPI 走规则路径，不调图表 LLM
+        （4-2 feat-token-cache 续：chart 阶段没有 LLM 调用），所以 LLM 调用序列为
+        plan + sql（合并 1 条 nl2sql）→ sql_retry（第 2 条 nl2sql）→ answer。
+        总消耗 = 30 + 15 + 15 = 60。chart 阶段的缺席由 chart_decision_engine
+        套件覆盖（见 TestChartDecisionEngine）；本测试只证 SQL 重试 + 计量增量。
+        """
         adapter = _FlakyAdapter(
             [{"NAME": "A", "QTY": Decimal(10)}], failTimes=1,
         )
@@ -1057,9 +1100,9 @@ class TestChatService:
         response = await service.processMessage(_dto("收货数量"), _FakeSession())
         assert len(adapter.executedSqls) == 2  # 首次失败 + 重试成功
         assert "PRECEIPT" in (response.sql or "")
-        # 重试额外消耗已计入总量（4 次调用 60 + 重试 15）并审计（记录在 chart 之后）
-        assert response.tokensUsed == 75
-        assert [r["purpose"] for r in tokenUsage.records] == ["nl2sql", "chart", "nl2sql", "answer"]
+        # plan+sql 30 + sql_retry 15 + answer 15 = 60
+        assert response.tokensUsed == 60
+        assert [r["purpose"] for r in tokenUsage.records] == ["nl2sql", "nl2sql", "answer"]
 
 
 class TestSessionContext:
@@ -2147,13 +2190,11 @@ class TestSearchByKeywordAdsWeighting:
                         return sentinel["value"]
                 return _R()
 
-        # 简化：使用 _FakeSession 默认行为（None），但用 mock 自定义
-        # 实际上 _getAdsRecallWeight 需独立测，这里仅验证 weighting 逻辑
+        # weight=2.5: ADS 0.40 × 2.5 = 1.00 > 0.78 → ADS 排第一
         result, _ = await service._selectRelevantClasses(
-            _FakeSession(), "供货量", classes,
+            _FakeSessionRead2_5(), "供货量", classes,
         )
-        # 默认 weight=1.5: ADS 0.40 × 1.5 = 0.60 < 0.78 → ODS 排第一
-        assert [c.id for c in result] == [14, 29]
+        assert [c.id for c in result] == [29, 14]
 
     @pytest.mark.asyncio
     async def test_weight_falls_back_to_default_on_missing(self) -> None:

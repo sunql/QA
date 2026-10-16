@@ -118,6 +118,13 @@ multistep / session context / query state 整片都过 `_buildService` ⇒ 全�
 - 1 个 fix 灭 11 红 → `fix/wiki-link-admin-must-change-password` branch（test-only 1 行）
 - 另开 `fix/wiki-import-and-misc` 处理剩下 9 红（4 文件各 2-3 红）
 
+**2026-10-16 PR #25** (`fix/test-fixture-item-profile-seed`)：合并 3 个 fixture fix，
+- wiki_link_admin 11 红（MUST_CHANGE_PASSWORD）= 1b1f24a4
+- identity_create_user_password 2 红（hidden M2）= 1b1f24a4
+- user_clearance M1 latent fix（防 MenuConfigStructureError）= 1b1f24a4
+- 测试 18/18 passed（4 min total）
+- **真实 backlog 85 → 72 (-13)**
+
 #### 后续发现的 hidden reds（不在原 83 红统计内）
 
 - **`test_identity_create_user_password.py` 2 红**（2026-10-16 rbac review M2 发现）：

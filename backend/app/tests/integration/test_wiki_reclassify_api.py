@@ -35,6 +35,32 @@ _SUGGESTION = {
 }
 
 
+@pytest.fixture(autouse=True)
+async def _seedItemProfileMenu(dbSession: AsyncSession) -> None:
+    """71 红 A1 流 M2 修（fix/wiki-import-and-misc）：seed item.profile 菜单行。
+
+    IdentityService.create_user 默认给新用户授 DEFAULT_NEW_USER_MENU_CODE
+    （permission_grant 表 menu_code FK → menu_config.code）。本文件 1 个测试
+    直接调 /api/v1/users 创建 wiki-curator，触发 fk_permission_grant_menu
+    ⇒ IntegrityError。修法：与 PR #25 同款 autouse pre-seed item.profile 为
+    adminsys section 的 child leaf。
+    """
+    from app.models.menu_config import MenuConfig
+
+    existing = (await dbSession.execute(
+        select(MenuConfig).where(MenuConfig.code == "item.profile")
+    )).scalar_one_or_none()
+    if existing is None:
+        section = MenuConfig(code="adminsys", label_key="admin_sys", sort_order=90)
+        section.children = [
+            MenuConfig(
+                code="item.profile", label_key="profile", path="/profile", sort_order=99
+            ),
+        ]
+        dbSession.add(section)
+        await dbSession.commit()
+
+
 async def _pageWithSuggestion(
     client: AsyncClient,
     dbSession: AsyncSession,
@@ -217,9 +243,24 @@ async def test_patch_feedback_actor_comes_from_auth_not_body(
     created = await client.post(
         "/api/v1/users",
         headers=_ADMIN_HEADERS,
-        json={"username": "wiki-curator", "display_name": "wiki-curator", "email": None},
+        json={
+            "username": "wiki-curator",
+            "display_name": "wiki-curator",
+            "email": None,
+            "password": "wiki-curator-Pass123",
+        },
     )
     assert created.status_code == 201, created.text
+    # 71 红 A1 流 M3 修（fix/wiki-import-and-misc）：清 wiki-curator 的
+    # must_change_password，否则 wiki router 挂的 mustChangePasswordGuard 会 403。
+    from app.domain.models import User as _User
+    from sqlalchemy import update as _update
+    await dbSession.execute(
+        _update(_User)
+        .where(_User.username == "wiki-curator")
+        .values(must_change_password=False)
+    )
+    await dbSession.commit()
     curatorId = created.json()["id"]
 
     pageId = await _pageWithSuggestion(client, dbSession)
@@ -338,6 +379,10 @@ async def test_reclassify_requires_auth(
 ) -> None:
     """关掉 stub auth（模拟生产）→ 未认证的重新分类必须 403。"""
     monkeypatch.setenv("AUTH_STUB_ENABLED", "0")
+    # 71 红 A1 流 RC-B 修（fix/wiki-import-and-misc）：getSettings 是 @lru_cache，
+    # 必须 cache_clear 才会重读 env 变量。
+    from app.config import getSettings
+    getSettings.cache_clear()
     resp = await client.post(f"{_PAGES}/ANY/reclassify", json={"dimension": "RULE"})
     assert resp.status_code == 403
 

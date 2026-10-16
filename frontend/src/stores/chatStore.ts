@@ -123,7 +123,12 @@ function patchMessage(
   patch: Partial<ChatMessage>
 ): ChatMessage[] {
   if (!targetId) return patchLastMessage(messages, patch);
-  return messages.map((m) => (m.id === targetId ? { ...m, ...patch } : m));
+  // targetId 既能匹配 m.id（resume 路径），也能匹配 m.assistantMessageId（首发 P1-3）
+  return messages.map((m) =>
+    m.id === targetId || m.assistantMessageId === targetId
+      ? { ...m, ...patch }
+      : m
+  );
 }
 
 // 后端步骤结果 → 前端终态：有 error 即失败（失败步骤 sql 恒为 null，与后端同判据）。
@@ -141,8 +146,9 @@ function patchStep(
   patch: Partial<MultiStepStep>
 ): ChatMessage[] {
   // 取数也必须认 targetId：否则定向写会把**最新**消息的 steps 搬到旧卡片上
+  // targetId 匹配 m.id（resume 路径），也匹配 m.assistantMessageId（首发路径 P1-3）
   const target = targetId
-    ? messages.find((m) => m.id === targetId)
+    ? messages.find((m) => m.id === targetId || m.assistantMessageId === targetId)
     : messages[messages.length - 1];
   if (!target) return messages;
   const steps = target.steps ?? [];
@@ -651,7 +657,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             if (!isCurrent()) return;
             set((state) => ({
               messages: patchLastMessage(
-                patchStep(state.messages, step.stepIndex, { status: "running" }),
+                patchStep(state.messages, assistantMessageId, step.stepIndex, { status: "running" }),
                 { currentStepIndex: step.stepIndex }
               ),
             }));
@@ -659,7 +665,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           onStepResult: (result) => {
             if (!isCurrent()) return;
             set((state) => ({
-              messages: patchStep(state.messages, result.stepIndex, {
+              messages: patchStep(state.messages, assistantMessageId, result.stepIndex, {
                 status: stepStatusFromResult(result.error),
                 sql: result.sql ?? null,
                 summary: result.summary ?? null,

@@ -28,7 +28,7 @@ from app.domain.models import (
     UserRole,
 )
 from app.models.menu_config import MenuConfig
-from app.models.rbac import ADMIN_ROLE_CODE
+from app.models.rbac import ADMIN_ROLE_CODE, DEFAULT_NEW_USER_MENU_CODE
 
 AUTH_ADMIN = {
     "X-User-Id": "admin",
@@ -38,6 +38,10 @@ AUTH_ADMIN = {
 
 MENU_A, MENU_B, MENU_C, MENU_D = "menu_a", "menu_b", "menu_c", "menu_d"
 LEAF_MENUS = (MENU_A, MENU_B, MENU_C, MENU_D)
+# 71 红 RC-3 延伸：identity_service.create_user 默认给新用户授
+# DEFAULT_NEW_USER_MENU_CODE（identity_service.py:120）。admin 是 superuser
+# 看到所有叶子菜单（包含此 leaf），用 _mkUser 创建的 alice 也持直接 grant。
+ALL_LEAF_MENUS = LEAF_MENUS + (DEFAULT_NEW_USER_MENU_CODE,)
 
 
 def _auth_as(user_id: str, roles: str = "analyst") -> dict[str, str]:
@@ -49,11 +53,28 @@ def _auth_as(user_id: str, roles: str = "analyst") -> dict[str, str]:
 
 
 async def _seedMenus(dbSession: AsyncSession) -> None:
-    """建一个 section + 4 个叶子菜单（leaf code 作为可授权目标）。"""
+    """建一个 section + 4 个叶子菜单（leaf code 作为可授权目标）。
+
+    71 红 RC-3 延伸：identity_service.create_user 默认给新用户授权
+    ``item.profile``（DEFAULT_NEW_USER_MENU_CODE，identity_service.py:120），
+    不 seed 会在 POST /users 时撞 FK fk_permission_grant_menu。
+    但 item.profile 顶层插入会被 menu_config_service 当成 section 触发
+    MenuConfigStructureError（service.py:84「section 必须 path=None」）。
+    修法：把 item.profile 挂为 adminsys 的 child leaf（path=/profile），
+    与 production seed_menu_config.py 的 children 模式对齐（item.chat 等
+    都是 section.aiAgent 的 child）。
+    """
     section = MenuConfig(code="adminsys", label_key="admin_sys", sort_order=90)
     section.children = [
         MenuConfig(code=code, label_key=code, path=f"/admin/{code}", sort_order=i)
         for i, code in enumerate(LEAF_MENUS)
+    ] + [
+        MenuConfig(
+            code=DEFAULT_NEW_USER_MENU_CODE,
+            label_key="profile",
+            path="/profile",
+            sort_order=99,
+        ),
     ]
     dbSession.add(section)
     await dbSession.commit()
@@ -62,7 +83,14 @@ async def _seedMenus(dbSession: AsyncSession) -> None:
 async def _mkUser(client: AsyncClient, username: str) -> dict:
     r = await client.post(
         "/api/v1/users", headers=AUTH_ADMIN,
-        json={"username": username, "display_name": username, "email": None},
+        json={
+            "username": username,
+            "display_name": username,
+            "email": None,
+            # 修 71 红 RC-3：rbac schema password 必填（min 8 字符）后，
+            # 测试 helper 必须自带 password，否则 422 missing password。
+            "password": f"{username}-Pass123",
+        },
     )
     assert r.status_code == 201, r.text
     return r.json()
@@ -97,7 +125,7 @@ class TestUsersMe:
     - 未命中（桩回退）→ dbUserId=null，displayName 回退 userId
     """
 
-    async def test_me_db_user(self, client: AsyncClient) -> None:
+    async def test_me_db_user(self, client: AsyncClient, dbSession: AsyncSession) -> None:
         await _mkUser(client, "me_alice")
         # 给 me_alice 授 admin 角色以便断言角色来自 DB
         users = (await client.get("/api/v1/users", headers=AUTH_ADMIN)).json()
@@ -109,6 +137,13 @@ class TestUsersMe:
             json={"roleIds": [admin_role]},
         )
         assert r_set.status_code == 204, r_set.text
+
+        # 71 红 RC-3 延伸：_mkUser 创建时 must_change_password=True（feat-admin-user-password
+        # 强制改密）— 必须清掉才能让 me_alice 通过 mustChangePasswordGuard 访问 /me。
+        me_alice_row = await dbSession.get(User, uid)
+        if me_alice_row and me_alice_row.must_change_password:
+            me_alice_row.must_change_password = False
+            await dbSession.commit()
 
         r = await client.get("/api/v1/users/me", headers={"X-User-Id": "me_alice"})
         assert r.status_code == 200, r.text
@@ -157,7 +192,11 @@ class TestUsersCrud:
         await _mkUser(client, "alice")
         r = await client.post(
             "/api/v1/users", headers=AUTH_ADMIN,
-            json={"username": "alice", "display_name": "dup"},
+            json={
+                "username": "alice",
+                "display_name": "dup",
+                "password": "dup-Pass123",  # 71 红 RC-3: schema 必填
+            },
         )
         assert r.status_code == 409, r.text
 
@@ -264,6 +303,7 @@ class TestUsersCrud:
             json={
                 "username": "eve",
                 "display_name": "eve",
+                "password": "eve-Pass123",  # 71 红 RC-3: schema 必填
                 "role_ids": [admin_role_id, role["id"]],  # 试图越权授予
             },
         )
@@ -598,7 +638,9 @@ class TestEffectivePermissions:
             f"/api/v1/users/{alice['id']}/permissions", headers=AUTH_ADMIN
         )
         eff = r.json()
-        assert eff["menuCodes"] == []
+        # 71 红 RC-3 延伸：alice 持 DEFAULT_NEW_USER_MENU_CODE（identity_service.create_user
+        # 默认授的 USER 直接 grant）— 角色 grant 收回后此 direct grant 仍在。
+        assert eff["menuCodes"] == [DEFAULT_NEW_USER_MENU_CODE]
         assert eff["roleGrants"][0]["menuCodes"] == []
 
     async def test_grant_unknown_menu_code_422(self, client: AsyncClient) -> None:
@@ -625,7 +667,8 @@ class TestEffectivePermissions:
         )
         eff = r.json()
         assert eff["isSuperuser"] is True
-        assert eff["menuCodes"] == sorted(LEAF_MENUS)
+        # 71 红 RC-3 延伸：superuser 看到全部菜单叶子（包含 DEFAULT_NEW_USER_MENU_CODE）
+        assert eff["menuCodes"] == sorted(ALL_LEAF_MENUS)
 
     async def test_cannot_remove_admin_from_last_admin(self, client: AsyncClient) -> None:
         admin_row = (
@@ -858,7 +901,8 @@ class TestMenuConfigFiltering:
     async def test_admin_sees_all_visible(self, client: AsyncClient) -> None:
         r = await client.get("/api/v1/menu-config", headers=AUTH_ADMIN)
         assert r.status_code == 200, r.text
-        assert _leaf_codes(r.json()) == set(LEAF_MENUS)
+        # 71 红 RC-3 延伸：adminsys 下挂 5 leaf（4 LEAF_MENUS + item.profile）
+        assert _leaf_codes(r.json()) == set(ALL_LEAF_MENUS)
 
     async def test_stub_unknown_user_fallback_all_visible(
         self, client: AsyncClient
@@ -868,7 +912,7 @@ class TestMenuConfigFiltering:
             "/api/v1/menu-config", headers=_auth_as("ghost", roles="analyst")
         )
         assert r.status_code == 200, r.text
-        assert _leaf_codes(r.json()) == set(LEAF_MENUS)
+        assert _leaf_codes(r.json()) == set(ALL_LEAF_MENUS)
 
     async def test_section_hidden_when_no_leaf_granted(
         self, client: AsyncClient, dbSession: AsyncSession

@@ -45,7 +45,6 @@ _embeddingService = EmbeddingService()
 async def listHypotheses(
     request: Request,  # 限流装饰器需要 Request 参数
     sessionId: str = Path(..., min_length=1, max_length=64),
-    sessionId: str = Path(..., min_length=1, max_length=64),
     limit: int = Query(10, ge=1, le=50),
     _user: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),

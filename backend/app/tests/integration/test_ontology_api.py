@@ -79,15 +79,36 @@ def mockNeo4jAndMilvus(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(neo4j_module, "getDriver", lambda: _MockNeo4jDriver())
 
     # Mock Milvus
+    # 71 红 A1 流 RC-γ 修（fix/ontology-milvus-dim-mismatch）：M0-P0.4 3-collection
+    # refactor 之后 ontology_service 统一走 ``*Dual`` / ``*Routed`` 入口
+    # （insertEmbeddingsDual / deleteByOntologyIdDual /
+    #  listEmbeddingsAcross3Collections / searchEmbeddingsByTypeRouted）；
+    # 旧 ``insertEmbeddings`` / ``searchByEmbedding`` / ``listAllEmbeddings``
+    # 仍存在但只是薄包装，prod 不再调用 ⇒ 原 fixture 只 mock 老名 ⇒ 同步/搜索
+    # 测试假绿。修法：补齐 4 个新名。**老名也保留**——historical unit tests 仍依赖。
     monkeypatch.setattr(milvus_module, "insertEmbeddings", lambda *a, **kw: None)
     monkeypatch.setattr(milvus_module, "deleteByOntologyId", lambda *a, **kw: None)
     monkeypatch.setattr(milvus_module, "searchByEmbedding", lambda *a, **kw: [])
     monkeypatch.setattr(milvus_module, "ensureCollection", lambda: None)
+    monkeypatch.setattr(milvus_module, "insertEmbeddingsDual", lambda *a, **kw: None)
+    monkeypatch.setattr(milvus_module, "deleteByOntologyIdDual", lambda *a, **kw: None)
+    monkeypatch.setattr(milvus_module, "searchEmbeddingsByTypeRouted", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        milvus_module, "listEmbeddingsAcross3Collections", lambda *a, **kw: []
+    )
 
-    # Mock ontology_service milvus reference
+    # Mock ontology_service milvus reference（同样补齐 4 个新名）
     monkeypatch.setattr(ontology_module.milvus, "insertEmbeddings", lambda *a, **kw: None)
     monkeypatch.setattr(ontology_module.milvus, "deleteByOntologyId", lambda *a, **kw: None)
     monkeypatch.setattr(ontology_module.milvus, "searchByEmbedding", lambda *a, **kw: [])
+    monkeypatch.setattr(ontology_module.milvus, "insertEmbeddingsDual", lambda *a, **kw: None)
+    monkeypatch.setattr(ontology_module.milvus, "deleteByOntologyIdDual", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        ontology_module.milvus, "searchEmbeddingsByTypeRouted", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        ontology_module.milvus, "listEmbeddingsAcross3Collections", lambda *a, **kw: []
+    )
 
     _neo4j_called.clear()
 
@@ -647,7 +668,7 @@ async def testSyncEmbeddingValidation(client: AsyncClient) -> None:
             "ontologyId": 1,
             "type": "invalid",
             "name": "test",
-            "embedding": [0.1] * 1536,
+            "embedding": [0.1] * 1024,
         },
     )
     assert response.status_code == 422
@@ -674,7 +695,7 @@ async def testSyncEmbeddingSuccess(client: AsyncClient) -> None:
             "name": "TestClass",
             "alias": "测试类",
             "description": "一个测试类",
-            "embedding": [0.05] * 1536,
+            "embedding": [0.05] * 1024,
         },
     )
     # Milvus 被 mock，不抛异常则成功
@@ -901,7 +922,7 @@ async def _stubEmbedding(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.api.v1 import ontology as ontology_api
 
     async def fakeGenerateEmbedding(text: str) -> list[float]:
-        return [0.1] * 1536
+        return [0.1] * 1024
 
     monkeypatch.setattr(
         ontology_api._embeddingService, "generateEmbedding", fakeGenerateEmbedding
@@ -920,9 +941,12 @@ async def testSearchReturnsHits(
     await _stubEmbedding(monkeypatch)
     import app.services.ontology_service as ontology_module
 
+    # 71 红 A1 流 RC-γ 修：prod 走 ``searchEmbeddingsByTypeRouted``
+    # （ontology_service.py:1490）；原 fixture mock 老名 ⇒ prod 走真 milvus
+    # 拿回真实行（已有 MissingSyncA/B 等），3 ≠ 2 失败。
     monkeypatch.setattr(
         ontology_module.milvus,
-        "searchByEmbedding",
+        "searchEmbeddingsByTypeRouted",
         lambda *a, **kw: [
             {
                 "ontology_id": 1,
@@ -975,7 +999,11 @@ async def testSearchTypeFilterForwarded(
         captured["typeFilter"] = typeFilter
         return []
 
-    monkeypatch.setattr(ontology_module.milvus, "searchByEmbedding", fakeSearch)
+    # 71 红 A1 流 RC-γ 修：prod 走 ``searchEmbeddingsByTypeRouted``
+    # （ontology_service.py:1490），原 fixture mock 老名漏掉。
+    monkeypatch.setattr(
+        ontology_module.milvus, "searchEmbeddingsByTypeRouted", fakeSearch
+    )
 
     response = await client.get(
         "/api/v1/ontology/search", params={"q": "客户", "type": "metric"}
@@ -996,7 +1024,11 @@ async def testSearchMilvusFailureReturns400(
     def raisingSearch(*a, **kw):
         raise MilvusException("connection lost")
 
-    monkeypatch.setattr(ontology_module.milvus, "searchByEmbedding", raisingSearch)
+    # 71 红 A1 流 RC-γ 修：prod 走 ``searchEmbeddingsByTypeRouted``，
+    # 原 fixture mock 老名漏掉，错误不被捕获 ⇒ 500 假绿失败。
+    monkeypatch.setattr(
+        ontology_module.milvus, "searchEmbeddingsByTypeRouted", raisingSearch
+    )
 
     response = await client.get("/api/v1/ontology/search", params={"q": "客户"})
     # MilvusError -> DomainError -> 全局处理器转 400
@@ -1178,9 +1210,14 @@ def _recordMilvus(
 ) -> None:
     import app.services.ontology_service as ontology_module
 
+    # 71 红 A1 流 RC-γ 修（fix/ontology-milvus-dim-mismatch）：prod
+    # ontology_service.py:1529/1682 调 ``insertEmbeddingsDual``（M0-P0.4 后）；
+    # 旧 ``insertEmbeddings`` 不再被 embedding 同步路径调用 ⇒ 原 helper
+    # 记不到任何行 ⇒ 测试 ``assert len(inserted) == 1`` 假绿失败。
+    # 修法：monkeypatch 改 ``insertEmbeddingsDual``。
     monkeypatch.setattr(
         ontology_module.milvus,
-        "insertEmbeddings",
+        "insertEmbeddingsDual",
         lambda rows: inserted.extend(rows),
     )
 
@@ -1311,9 +1348,12 @@ async def testSyncMissingEmbeddings(
     # 模拟 Milvus 现状：A 有向量、B 缺失
     import app.services.ontology_service as ontology_module
 
+    # 71 红 A1 流 RC-γ 修：prod 走 ``listEmbeddingsAcross3Collections``
+    # （ontology_service.py:1575），原 fixture mock 老名 ⇒ prod 拿全量行
+    # 包含 idB ⇒ 判 missingCount=0 ⇒ 假绿失败。
     monkeypatch.setattr(
         ontology_module.milvus,
-        "listAllEmbeddings",
+        "listEmbeddingsAcross3Collections",
         lambda: [{"ontology_id": idA, "type": "class", "id": 1}],
     )
 

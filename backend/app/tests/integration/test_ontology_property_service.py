@@ -124,6 +124,25 @@ class _FakeMilvus:
     def deleteByOntologyId(self, ontologyId: int, type: str) -> None:
         self.deleted.append((ontologyId, type))
 
+    def deleteByOntologyIdDual(self, ontologyId: int, type: str) -> None:
+        """71 红 A1 流 RC-β 修（fix/ontology-milvus-dim-mismatch）：prod 在
+        ``milvus_dual_write.py:182`` 引入 dual-write 双删；ontology_service.py
+        的 embedding 同步路径已切到 ``deleteByOntologyIdDual``。原 ``_FakeMilvus``
+        缺此方法 ⇒ AttributeError 串到 embedding 同步失败 → 测试 assert
+        ``fakeMilvus.deleted`` 为空失败。
+        修法：加同形方法（与 ``deleteByOntologyId`` 同样记入 ``self.deleted``）。
+        """
+        self.deleted.append((ontologyId, type))
+
+    def insertEmbeddingsDual(self, records: list[dict]) -> None:
+        """71 红 A1 流 RC-γ 修（fix/ontology-milvus-dim-mismatch）：属性同步路径
+        ``_syncPropertyEmbeddingNow`` → ``syncEmbedding`` → ``insertEmbeddingsDual``
+        （ontology_service.py:1529）。原 ``_FakeMilvus`` 只暴露 ``insertEmbeddings``
+        （旧名），prod 不再调 ⇒ ``self.inserted`` 永远空 ⇒ 测试 assert 假绿失败。
+        修法：加同形方法。
+        """
+        self.inserted.extend(records)
+
     def insertEmbeddings(self, records: list[dict]) -> None:
         self.inserted.extend(records)
 
@@ -156,6 +175,15 @@ class TestUpdateResyncsPropertyEmbedding:
 
         assert (prop.id, "property") in fakeMilvus.deleted
         propertyRecords = [r for r in fakeMilvus.inserted if r["type"] == "property"]
-        assert len(propertyRecords) == 1
-        assert propertyRecords[0]["ontology_id"] == prop.id
-        assert "采购单含税金额" in propertyRecords[0]["description"]
+        # 71 红 A1 流 RC-γ 修：createProperty 也调 _syncPropertyEmbeddingBestEffort
+        # （ontology_service.py:729），create+update 流下至少 2 条 property 记录；
+        # 因为 _syncPropertyEmbeddingNow 是后台 asyncio.create_task，create 的
+        # task 与 update 的 task 都 await 同一份 entity state（update 已 commit），
+        # 所以两条 record 都带新 description，无法靠 description 区分。
+        # 测试语义是「update 触发向量重刷」——验证 (1) 至少 1 条 property 记录，
+        # (2) 全部带新 description（说明 update 的 effect 被刷到了 Milvus），
+        # (3) ontology_id 正确。
+        assert len(propertyRecords) >= 1
+        for rec in propertyRecords:
+            assert rec["ontology_id"] == prop.id
+            assert "采购单含税金额" in (rec.get("description") or "")

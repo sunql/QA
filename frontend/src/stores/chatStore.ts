@@ -503,11 +503,17 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   setDatasourceId: (id) => {
     if (get().datasourceId === id) return;  // P0-3：早返避免无谓 reset
     // 切数据源 = 全新会话（不允许旧 state 跨数据源继承）
+    // P1-3 配套：旧的 currentAssistantMessageId / interrupted / error 全部清零，
+    // 否则 in-flight SSE 帧仍能通过 isCurrent() 守卫（id 一致）写进新会话的 messages
     set({
       datasourceId: id,
       sessionId: generateSessionId(),
       messages: [],
       isStreaming: false,
+      loading: false,
+      currentAssistantMessageId: null,
+      interrupted: false,
+      error: null,
     });
   },
 
@@ -912,10 +918,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     writeLastSessionId(channel, null);
     // 在途回放不得把旧会话的消息搬回来（「新对话」之后屏幕上必须是空的）
     invalidatePendingLoads();
+    // P1-3 配套：currentAssistantMessageId 必须清，否则旧 in-flight SSE 帧经
+    // isCurrent() 守卫（id 一致）会写进新会话的 messages（跨会话污染）
     set({
       messages: [],
       sessionId: makeSessionId(channel),
       loading: false,
+      isStreaming: false,
+      currentAssistantMessageId: null,
+      interrupted: false,
       error: null,
     });
   },
@@ -925,10 +936,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // 指针由 authStore 侧 clearLastSessionIds() 清（那里才知道「换人」这件事）；
     // 这里只负责内存：messages 与 sessionId 都是上一个人的，必须换掉。
     invalidatePendingLoads();
+    // P1-3 配套：currentAssistantMessageId / interrupted 必须清 ——
+    // 换人后旧 SSE 帧若到 in-flight 收尾写 messages，就是跨用户数据注入
     set({
       messages: [],
       sessionId: makeSessionId(channel),
       loading: false,
+      isStreaming: false,
+      currentAssistantMessageId: null,
+      interrupted: false,
       error: null,
       sessions: [],
       sessionsError: null,

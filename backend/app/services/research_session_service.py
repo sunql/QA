@@ -218,15 +218,21 @@ class ResearchSessionService:
         phase: str,
         options: dict[str, Any],
         prompt: str,
+        originalQuestion: str = "",
         expiresAt: datetime | None = None,
     ) -> ResearchCheckpoint:
-        """挂起一个待决策检查点（status=pending），等待用户选择。"""
+        """挂起一个待决策检查点（status=pending），等待用户选择。
+
+        X3：``originalQuestion`` 固化在 checkpoint 本体，恢复阶段优先读它。
+        旧调用方（不传）默认空串，行为不破坏既有数据。
+        """
         row = ResearchCheckpoint(
             session_id=sessionId,
             turn_id=turnId,
             phase=phase,
             status=CHECKPOINT_PENDING,
             options={**(options or {}), PROMPT_KEY: prompt},
+            original_question=originalQuestion or "",
             expires_at=expiresAt,
         )
         session.add(row)

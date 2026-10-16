@@ -346,3 +346,43 @@ async def test_save_finding_backward_compatible_when_new_kwargs_omitted(dbSessio
     await dbSession.commit()
     assert row.claim_text == "原 claim 不变"
     assert "stats" not in (row.supporting_data or {})
+
+
+# ---------------------------------------------------------------------------
+# X3（1012 cross-refs spec §P0-X3）：openCheckpoint 接受 originalQuestion
+# 固化在 checkpoint 本体；恢复阶段读这一列而不再去 join turn.content。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_openCheckpoint_persistsOriginalQuestion(dbSession) -> None:
+    """X3：openCheckpoint 落 original_question，DB 真值断言。"""
+    svc = ResearchSessionService()
+    s = await svc.createSession(dbSession, userId=1, question="q")
+    turn = await svc.appendTurn(dbSession, sessionId=s.id, role="agent", content={})
+    cp = await svc.openCheckpoint(
+        dbSession,
+        sessionId=s.id,
+        turnId=turn.id,
+        phase="intent",
+        options={"arms": ["bo"]},
+        prompt="三臂是否齐全？",
+        originalQuestion="对比 2024 和 2025 年销售额",
+    )
+    await dbSession.commit()
+    assert cp.original_question == "对比 2024 和 2025 年销售额", (
+        f"originalQuestion 应落 DB，实际 {cp.original_question!r}"
+    )
+    # 反向断言：旧调用（不传）也不破坏，存为空串
+    cp2 = await svc.openCheckpoint(
+        dbSession,
+        sessionId=s.id,
+        turnId=turn.id,
+        phase="intent",
+        options={"arms": ["bo"]},
+        prompt="p",
+    )
+    await dbSession.commit()
+    assert cp2.original_question == "", (
+        f"未传 originalQuestion 应默认为空串，实际 {cp2.original_question!r}"
+    )

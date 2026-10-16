@@ -27,6 +27,13 @@ def test_checkpoint_columns() -> None:
     cols = {c.name for c in ResearchCheckpoint.__table__.columns}
     assert {"id", "session_id", "turn_id", "phase", "status",
             "options", "user_choice", "decided_at"} <= cols
+    # X3（1012 cross-refs spec §P0-X3）：检查点恢复时优先用 checkpoint
+    # 落定的 original_question，避免依赖 turn.content（turn.content
+    # 可能在检查点创建后被修改 / 序列化丢失）。
+    assert "original_question" in cols, (
+        "X3: ResearchCheckpoint 必须有 original_question 列，"
+        "否则恢复阶段无法保留本轮研究问题"
+    )
 
 
 def test_finding_columns() -> None:

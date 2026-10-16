@@ -138,6 +138,10 @@ class ResearchCheckpointRead(CamelModel):
 
     ``prompt`` **无独立列**：由调用方从 ``options["prompt"]`` 派生（Task 3 裁定 #1），
     顶层下发是为了对齐设计 §4.5 的 SSE payload 形状与前端 CheckpointCard。
+
+    X3（1012 cross-refs spec §P0-X3）：加 ``originalQuestion`` 顶层字段，
+    恢复阶段优先读它（不是 ``turn.content``）—— turn.content 可能在 checkpoint
+    创建后被修改 / 序列化丢失 / 跨会话污染。
     """
 
     id: uuid.UUID
@@ -147,6 +151,7 @@ class ResearchCheckpointRead(CamelModel):
     prompt: str = ""
     userChoice: dict[str, Any] | None = None
     decidedAt: datetime | None = None
+    originalQuestion: str = ""
 
 
 class ResearchSessionDetail(CamelModel):

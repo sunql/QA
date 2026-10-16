@@ -1142,7 +1142,10 @@ def _turnRead(row: ResearchTurn) -> ResearchTurnRead:
 
 
 def _checkpointRead(row: ResearchCheckpoint) -> ResearchCheckpointRead:
-    """`prompt` 从 `options[PROMPT_KEY]` 派生（checkpoint 无 prompt 列，Task 3 裁定 #1）。"""
+    """`prompt` 从 `options[PROMPT_KEY]` 派生（checkpoint 无 prompt 列，Task 3 裁定 #1）。
+
+    X3：``originalQuestion`` 直接从 row 读（恢复阶段优先用它，不再 join turn.content）。
+    """
     options = row.options or {}
     return ResearchCheckpointRead(
         id=row.id,
@@ -1152,6 +1155,7 @@ def _checkpointRead(row: ResearchCheckpoint) -> ResearchCheckpointRead:
         prompt=str(options.get(PROMPT_KEY) or ""),
         userChoice=row.user_choice,
         decidedAt=row.decided_at,
+        originalQuestion=row.original_question or "",
     )
 
 

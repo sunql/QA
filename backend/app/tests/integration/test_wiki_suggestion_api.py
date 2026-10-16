@@ -628,6 +628,10 @@ async def test_suggestion_routes_require_auth(
 ) -> None:
     """关掉 stub auth（模拟生产）→ 未认证的抽取/审核必须 403。"""
     monkeypatch.setenv("AUTH_STUB_ENABLED", "0")
+    # 71 红 A1 流 RC-B 修（fix/wiki-import-and-misc）：getSettings 是 @lru_cache，
+    # 必须 cache_clear 才会重读 env 变量。
+    from app.config import getSettings
+    getSettings.cache_clear()
 
     assert (
         await client.post(f"{_PAGES}/ANY/suggestions", json={})
@@ -711,5 +715,9 @@ async def test_list_all_suggestions_requires_auth(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTH_STUB_ENABLED", "0")
+    # 71 红 A1 流 RC-B 修（fix/wiki-import-and-misc）：getSettings 是 @lru_cache，
+    # 必须 cache_clear 才会重读 env 变量。
+    from app.config import getSettings
+    getSettings.cache_clear()
 
     assert (await client.get(_SUGGESTIONS)).status_code == 403

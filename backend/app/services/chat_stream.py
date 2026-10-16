@@ -600,8 +600,6 @@ class StreamMixin:
                 },
             )
             return
-        totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
-        totalCost = self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)
         # 单步执行计划：统一展示 MultiStepPlanCard（2026-08-16）。description 取计划
         # target（ReAct 阶段产出的核心实体），plan 为 None 时退化为问题截断。
         stepDesc = _clipText(
@@ -661,6 +659,12 @@ class StreamMixin:
                 },
             )
             return
+
+        # Task 12.5 follow-up：totalTokens/totalCost 仅在主路径（featureResp is None）
+        # 路径消费，Feature 命中分支用 featureResp.tokensUsed/cost。把计算下移到
+        # 此处避免 Feature 命中时多算一次 + 多一次无意义的 _costForSql。
+        totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
+        totalCost = self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)
 
         try:
             data, finalSql, retryTokens = await self._runQueryWithRetry(session, dto, pc, outcome)

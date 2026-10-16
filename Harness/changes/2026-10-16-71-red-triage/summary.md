@@ -29,7 +29,7 @@ phase3 close-out 时记录 71 红 pre-existing on `bcf2fac0`；本轮 recon 跑
 |---|---|---|---|---|
 | chat integration | 28 | 28 | RC-1 `_buildService` PLAN_EMPTY | 代码：fixture 补默认 classes（NAME/QTY） |
 | ontology integration | 9 | 9 | RC-2 Milvus dim 1536 vs 1024 | 代码：test 集合 schema 改 dim |
-| wiki integration | 24 | ~24（300s timeout 未全跑） | RC-5 端口 + auth header + 部分 RC-1 | env/doc + header |
+| wiki integration | 24 | **20 + 1 errored = 21**（实测 2026-10-16 全跑 19 文件） | RC-5 + 集中 1 文件 11 红（待细分） | env/doc + header + link_admin 集中修 |
 | chat stream unit | 10 | 10 | RC-1 同 chat | 同 RC-1 |
 | RBAC API | 0 (memory 未列) | **11** | RC-3 `_mkUser` 漏 password 字段 | 代码：test helper 补 password |
 | route auth guard | 0 (memory 未列) | **1** | RC-4 `_IncludedRouter` 已从 FastAPI 移除 | 代码：import 改公开 API |
@@ -75,12 +75,50 @@ multistep / session context / query state 整片都过 `_buildService` ⇒ 全�
 **关键**: 修这一个 import error 之后，所有 200+ integration tests 才能被 collect + run，
 否则现状下根本无法"完整跑套件"。
 
-### RC-5: wiki 环境 + auth header（~24 红，未全确认）
+### RC-5: wiki 环境 + auth header + link_admin 集中 11 红（实测 20+1）
+
+**2026-10-16 用真 PG (5434) + 真 Neo4j (7688) + TEST_DATABASE_URL 全跑 19 个 wiki 文件**。
+
+#### 真实分布
+
+| 文件 | passed | failed | 备注 |
+|---|---|---|---|
+| test_wiki_api.py | 37 | — | 1 deadlock（test setup 期间）= errored |
+| test_wiki_structure_api.py | 58 | 0 | 全绿 |
+| test_wiki_relation_api.py | 20 | 0 | 全绿 |
+| test_wiki_conflict_api.py | 17 | 0 | 全绿 |
+| test_wiki_coverage_api.py | 20 | 0 | 全绿 |
+| test_wiki_dedup_api.py | 14 | 0 | 全绿 |
+| test_wiki_dedup_p1_writers.py | 5 | 0 | 全绿 |
+| test_wiki_agent_tools_api.py | 21 | 0 | 全绿 |
+| test_wiki_claims_force_extract.py | 6 | 0 | 全绿 |
+| test_wiki_gap_actions_api.py | 11 | 0 | 全绿 |
+| test_wiki_graph_api.py | 10 | 0 | 全绿 |
+| test_wiki_graph_insights_api.py | 8 | 0 | 全绿 |
+| test_wiki_batch_delete_api.py | 7 | 0 | 全绿（5min timeout 一次过） |
+| **test_wiki_import_api.py** | 40 | **3** | |
+| test_wiki_import_catalog.py | 7 | 0 | 全绿 |
+| **test_wiki_import_retry_api.py** | 8 | **2** | |
+| **test_wiki_link_admin_api.py** | 1 | **11** | **集中大头（先看是不是同 root cause）** |
+| test_wiki_link_injector_e2e.py | 10 | 0 | 全绿 |
+| **test_wiki_reclassify_api.py** | 19 | **2** | |
+| **test_wiki_suggestion_api.py** | 33 | **2** | |
+| **TOTAL** | **352** | **20** | +1 errored = 21 实际 |
+
+#### 已知 RC-5 子类
 
 - `test_wiki_dedup_api.py:19` docstring 写 `localhost:5433`，正确是 5434（test 库）
 - 部分 wiki 测试可能撞 RC-1 PLAN_EMPTY
 - 部分可能需要 `X-User-Id` header（`qa-system-router-auth-mandatory`）
-**修法**: 跑全 suite 之后细分；目前归一类，最后修。
+
+**修法策略**（**先看 link_admin 11 红是不是同 root cause**）：
+
+- 若是同根因（1 个 fix 灭 11 红）→ 1 个 branch `fix/wiki-link-admin-core` + 另开 `fix/wiki-import-and-misc`
+- 若非同根因 → 拆 `fix/wiki-link-admin-1` / `fix/wiki-link-admin-2` / ...
+
+**Why 优先 link_admin**: 11/20 占 55% wiki 红；集中单文件 = 风险隔离；1 个 fix 高概率灭 11 红。
+**How to apply**: 进 `fix/wiki-env-and-auth` branch 第一步：跑 `test_wiki_link_admin_api.py` 11 个红看 trace，
+按 trace 同/异根因分组。
 
 ## 分支分组（5 个独立 branch + 1 独立 track）
 
@@ -90,7 +128,7 @@ multistep / session context / query state 整片都过 `_buildService` ⇒ 全�
 | `fix/route-auth-guard-fastapi-compat` | 1 (+unblock 200+) | RC-4 | 低 | 30 min |
 | `fix/ontology-milvus-dim-mismatch` | 9 | RC-2 | 低 | 2-3 h |
 | `fix/chat-stream-plan-empty-fixture` | 38 | RC-1 | 中 | 1-2 天 |
-| `fix/wiki-env-and-auth` | ~24 | RC-5 | 中 | 1-2 天 |
+| `fix/wiki-env-and-auth` | 20+1 | RC-5（11 集中 link_admin） | 中 | 1-2 天（先看 link_admin 同/异根因） |
 | 前端套件 ~10 红 | — | pre-existing on `d1af4d4` | — | 独立 track |
 
 **Why 5 branch 而非 1**: 各自根因独立、风险差异大、可以并行 + 独立 review。
@@ -143,7 +181,8 @@ PR #20 修完 `_IncludedRouter` import error（4 tests 3 绿 1 新红），
    ⇒ 实际 backlog 比 close-out 报告大 17%。**修订后 83 红**，不是 71。
 3. **PLAN_EMPTY 一因吃 38 红**（46% backend backlog）— 修 1 个 fixture helper
    清近一半 backlog，价值密度最高。
-4. **wiki 24 红未确认**（300s timeout 没收全）— 跑全 wiki suite 需另行 estimate。
+4. **wiki 24 红已实测 = 20 failed + 1 errored = 21 实际**（2026-10-16 全跑 19 文件）。
+   link_admin 11 红集中，待开 branch 第一步看同/异根因。
 5. **Milvus dim 漂移** — embedding provider 可能改过输出维度但 test schema 没跟上，
    **检查 prod** `qa_metadata.ontology` 表对应 collection 当前 dim 是否也是 1024
    （如果是 = prod 写不进新数据；如果不是 = test 与 prod 不一致，看哪种是 ground truth）。

@@ -49,11 +49,46 @@
 - `app/tests/integration/test_research_session_service.py::test_openCheckpoint_persistsOriginalQuestion`：
   - **正向断言**：传 `originalQuestion="对比 2024 和 2025 年销售额"` 后
     `cp.original_question` 等于该字符串，DB 真值断言。
+  - **DTO 序列化断言**（review Minor #2）：`_checkpointRead(cp)` 后
+    `dto.originalQuestion == "对比 ..."`，防 CamelModel alias_generator 漂移。
   - **反向断言**：不传时 `cp2.original_question == ""`（向后兼容，
-    旧调用方不破坏）。
-- 整 17 个 X3 相关用例绿（unit 6 + integration 11）。
+    旧调用方不破坏）；DTO 也为空串。
+- `app/tests/integration/test_research_agent_service.py::test_pause_persists_original_question_from_agent_state`
+  （**review Critical 回归**）：用 `makeService` 跑真 ResearchSessionService，
+  断言 `cp.original_question == QUESTION`。防退化 — 后续若 `_pauseForUser`
+  又被改回去不传，本测试立刻 RED。
+- 17 个 X3 相关 + 2 个新/增强用例绿；research_agent_service 整 58 个测试绿。
 - `alembic upgrade head` 在生产 + 测试库 5434 均已跑过，列真存在
   `is_nullable=NO column_default=''::character varying`。
+
+## Review 闭环（commit 568b5e24）
+
+PR #39 派 reviewer subagent 跑 1 Critical + 2 Minor + 1 Informational。
+
+### Critical ✅ 已修
+
+- **Bug**：`ResearchAgentService._pauseForUser`（backend/app/services/research_agent_service.py:602）
+  是 `openCheckpoint` 的**唯一**生产调用方，原 X3 commit 27c091c2 加了
+  `originalQuestion` 形参但调用方没传 — pause tuple `(phase, options, prompt)`
+  不含 question。原问题永远落空串，X3 防御被绕过。
+- **修法**：`_pauseForUser` 加 `state: dict[str, Any] | None = None` 形参，
+  `_runFrom` 调用点传 state，读 `state['question']` 作为 originalQuestion。
+
+### Minor ✅ 已修
+
+- **DTO 序列化断言**：原 `test_openCheckpoint_persistsOriginalQuestion` 只
+  断言 ORM 列值，没走 `ResearchCheckpointRead` 序列化。补 `_checkpointRead(cp)`
+  调用 + 断言 `dto.originalQuestion == "..."`，防 CamelModel alias_generator
+  漂移让前端读不到字段。
+- **2000 字符故意截断**（research_models.py:41）：原注释只说"与多步计划
+  对齐"，没说截断是设计意图。扩写为「故意截断不抛错」「不要改成 Text 类型」
+  + 「改这里前先评估多步计划侧」。
+
+### Informational（无需修）
+
+- alembic chain 顺序 0127→0128 正确；downgrade 对称；DTO 映射靠 CamelModel
+  alias_generator=to_camel；`or ""` 防御性（nullable=False + server_default=""
+  永不为 NULL）。
 
 ## 反向断言 / 防退化
 

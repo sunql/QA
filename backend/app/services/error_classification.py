@@ -23,6 +23,14 @@ from app.domain.exceptions import (
     PermissionDeniedError,
     SqlSafetyError,
 )
+from app.services.messages_zh import (
+    MSG_DATASOURCE_CONNECTIVITY,
+    MSG_INTERNAL_ERROR,
+    MSG_LLM_GENERIC,
+    MSG_LLM_PROVIDER_PROTOCOL,
+    MSG_LLM_PROVIDER_TRANSIENT,
+    MSG_QUERY_TIMEOUT,
+)
 from app.services.stream_events import ErrorType
 
 _TIMEOUT_HINTS = ("timeout", "timed out", "deadline exceeded")
@@ -112,3 +120,51 @@ def classifyError(exc: BaseException) -> ErrorType:
 
     # 8. 兜底
     return ErrorType.INTERNAL
+
+
+# P2-1 review M1：异常 → 用户面向文案映射（前端只看到这些）
+# 设计原则：
+# - DOMAIN / SCHEMA_REFERENCE / SQL_SYNTAX / PERMISSION：业务级文案，本来就是
+#   给用户看的，**保留** exc.message（去掉 str(exc) 套娃层）
+# - LLM / PROVIDER_* / INTERNAL / DB_CONNECTIVITY / QUERY_TIMEOUT：底层异常文案
+#   可能含 provider 名、status code、stack 信息，**脱敏**为友好文案
+#
+# 原始 exc.message 进 logger（调用方负责），不在 payload 里露给前端。
+_USER_FACING_BY_TYPE: dict[ErrorType, str] = {
+    ErrorType.DOMAIN: "domain_passthrough",  # 标记：调用方需用 exc.message
+    ErrorType.SCHEMA_REFERENCE: "domain_passthrough",
+    ErrorType.SQL_SYNTAX: "domain_passthrough",
+    ErrorType.PERMISSION: "domain_passthrough",
+    ErrorType.PROVIDER_TRANSIENT: MSG_LLM_PROVIDER_TRANSIENT,
+    ErrorType.PROVIDER_PROTOCOL: MSG_LLM_PROVIDER_PROTOCOL,
+    ErrorType.LLM: MSG_LLM_GENERIC,
+    ErrorType.DB_CONNECTIVITY: MSG_DATASOURCE_CONNECTIVITY,
+    ErrorType.QUERY_TIMEOUT: MSG_QUERY_TIMEOUT,
+    ErrorType.INTERNAL: MSG_INTERNAL_ERROR,
+}
+
+# 走 passthrough 的类型（用 exc.message 而非脱敏文案）
+_PASSTHROUGH_TYPES: frozenset[ErrorType] = frozenset({
+    ErrorType.DOMAIN,
+    ErrorType.SCHEMA_REFERENCE,
+    ErrorType.SQL_SYNTAX,
+    ErrorType.PERMISSION,
+})
+
+
+def sanitizeErrorMessage(exc: BaseException, errorType: ErrorType | None = None) -> str:
+    """异常 → 用户面向文案（脱敏或 passthrough）。
+
+    - errorType=None 时内部调 classifyError() 判定（避免重复扫描）
+    - 走 passthrough 的类型用 exc.message（已 user-facing）
+    - 其他类型用 _USER_FACING_BY_TYPE 的脱敏文案
+    - 原始 exc.message 永远不直接进 SSE error 事件 payload（除非 passthrough）
+
+    调用方约定：原始异常信息应同时落 logger.warning/exception，便于排障。
+    """
+    if errorType is None:
+        errorType = classifyError(exc)
+    if errorType in _PASSTHROUGH_TYPES:
+        # exc.message 是 DomainError 的 user-facing 字段（不是 str(exc)）
+        return getattr(exc, "message", None) or str(exc)
+    return _USER_FACING_BY_TYPE[errorType]

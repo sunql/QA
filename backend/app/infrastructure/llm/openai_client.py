@@ -241,7 +241,8 @@ class OpenAiClient(BaseLlmClient):
                         # 4-1（feat-token-cache）：流式末块 usage 也读
                         # prompt_tokens_details.cached_tokens（同 non-stream 路径）。
                         cachedTokens = _readCachedTokens(usage)
-                        continue
+                        # P1-2 修复：不 continue；继续走 choices 检查（OpenAI 末块通常
+                        # usage + choices=[] 同块，需防同块 usage+content 双收场景丢 content）
                     choices = getattr(chunk, "choices", None)
                     if not choices:
                         continue

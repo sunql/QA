@@ -257,6 +257,10 @@ export interface HypothesisView {
   verificationSql: string;
   turnQuestion: string | null;
   createdTime: string | null;
+  // P1-5：自动验证状态（用户点「验证」按钮后由后端落库）
+  verificationStatus?: string | null;
+  supportCount?: number | null;
+  rowsSample?: Record<string, unknown>[] | null;
 }
 
 // 前端消息（后端响应 + UI 状态）
@@ -296,6 +300,10 @@ export interface ChatMessage {
   resumeError?: string | null;
   // NL2SQL 校验失败的具体差异（error 事件透传 detail）
   errorDetail?: string | null;
+  // P1-3：流式绑定——placeholder 时立即分配（UUID）；重发时旧 id 标 aborted
+  assistantMessageId?: string;
+  // P1-3：被新会话/重发取消
+  aborted?: boolean;
   // 会话亲和性状态（done 事件回填；解锁时为 null/undefined）
   affinityStatus?: AffinityStatus | null;
   // 多步子步骤列表（multi_step_plan 事件建立，随 step_plan/step_result 推进状态）

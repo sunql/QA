@@ -27,6 +27,19 @@ _DEFAULT_BUDGET_FACTOR = Decimal(1000)
 
 
 @dataclass(frozen=True)
+class ModelCapability:
+    """模型能力描述，供 router 按任务硬过滤。"""
+
+    supports_stream: bool = True
+    supports_tools: bool = False
+    supports_json_schema: bool = False
+    supports_usage: bool = True
+    context_limit: int = 8192
+    temperature_policy: str = "free"  # "free" | "fixed" | "categorical"
+    health: str = "unknown"  # "healthy" | "degraded" | "unknown"
+
+
+@dataclass(frozen=True)
 class RoutingContext:
     """路由上下文（不可变）。"""
 
@@ -58,13 +71,35 @@ class ModelRouterService:
             affinityTurns if affinityTurns is not None else self._settings.sessionAffinityTurns
         )
 
-    def selectModel(self, configs: list[Any], prompt: str, ctx: RoutingContext) -> Any:
-        """从 configs 中选择一个模型。不修改入参。"""
+    def selectModel(
+        self,
+        configs: list[Any],
+        prompt: str,
+        ctx: RoutingContext,
+        required_capabilities: set[str] | None = None,
+    ) -> Any:
+        """从 configs 中选择一个模型。P1-2：先按 required_capabilities 硬过滤，再走原路由。"""
         if not configs:
             raise NoAvailableModelError(MSG_NO_MODEL_AVAILABLE)
         active = [c for c in configs if c.is_active]
         if not active:
             raise NoAvailableModelError(MSG_NO_ENABLED_MODEL)
+
+        # P1-2：能力硬过滤
+        if required_capabilities:
+            def has_cap(c: Any) -> bool:
+                cap = getattr(c, "capability", None)
+                if cap is None:
+                    return False
+                return all(getattr(cap, field, False) for field in required_capabilities)
+            filtered = [c for c in active if has_cap(c)]
+            if not filtered:
+                logger.warning(
+                    "会话 %s 能力过滤 %s 后无候选 (active=%d)",
+                    ctx.sessionId, required_capabilities, len(active),
+                )
+                raise NoAvailableModelError(MSG_NO_MODEL_AVAILABLE)
+            active = filtered
 
         # 7. 累计成本超预算 -> 强制最便宜
         budget = Decimal(str(self._settings.sessionBudget))

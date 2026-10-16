@@ -14,7 +14,13 @@ import { DEFAULT_TENANT_ID } from "../config";
 import type { ChatRequest, ChatResponse } from "../types/chat";
 
 function sseStream(...frames: string[]): ReadableStream<Uint8Array> {
-  const text = frames.join("");
+  let text = frames.join("");
+  // P1-3 EOF 守门：自动补 terminal 帧，确保所有测试流都能通过 sawTerminal 检查。
+  // 支持 LF (\n) 和 CRLF (\r\n) 两种行尾格式。
+  const hasTerminal = /event: (done|error)(\r?\n)/.test(text);
+  if (!hasTerminal) {
+    text += "event: done\ndata: {}\n\n";
+  }
   const encoder = new TextEncoder();
   return new ReadableStream({
     start(controller) {
@@ -456,7 +462,7 @@ describe("api/chat", () => {
     // "全" = E5 85 A8：把 3 字节拆到两个分块，验证流式解码跨块重组不丢字
     const encoder = new TextEncoder();
     const part1 = encoder.encode('event: token\ndata: {"content":"完');
-    const part2 = encoder.encode('全"}\n\n');
+    const part2 = encoder.encode('全"}\n\nevent: done\ndata: {}\n\n');
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new Uint8Array([...part1, part2[0]]));

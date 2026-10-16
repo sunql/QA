@@ -3,7 +3,7 @@
 背景：2026-09-30 发现 46 条非公开路由在 AUTH_MODE=real 下匿名可达（含 15 条写/删）。
 根因不是「规则缺失」而是「规则无强制」——本测试即强制。
 """
-from fastapi.routing import APIRoute, _IncludedRouter
+from fastapi.routing import APIRoute
 from starlette.routing import Mount
 
 from app.dependencies import getCurrentUser
@@ -50,27 +50,17 @@ def _hasCurrentUser(route: APIRoute, extraDependencies: tuple = ()) -> bool:
 
 
 def _enumerateRoutes() -> list[tuple[str, str, bool]]:
-    """枚举 (method, path, hasAuth)。必须展开 _IncludedRouter。
+    """枚举 (method, path, hasAuth)。
 
-    FastAPI 0.141 的 app.routes 里 _IncludedRouter 的 path 为 None 且
-    routes/app 属性不可见，只能经 original_router + include_context 展开。
+    FastAPI 0.136.1 的 app.routes 是 flat 列表——`include_router()` 已被自动
+    展平为独立 APIRoute 对象（0.141 才有 `_IncludedRouter` 包装层，0.136.1 没有）。
+    Mount 路由（starlette Mount）走单独的 test_mountsAreProtectedByMiddleware。
     """
     found: list[tuple[str, str, bool]] = []
     for route in app.routes:
         if isinstance(route, APIRoute):
             for method in route.methods - _IGNORED_METHODS:
                 found.append((method, route.path, _hasCurrentUser(route)))
-        elif isinstance(route, _IncludedRouter):
-            context = route.include_context
-            prefix = context.prefix or ""
-            for sub in route.original_router.routes:
-                if isinstance(sub, APIRoute):
-                    for method in sub.methods - _IGNORED_METHODS:
-                        found.append((
-                            method,
-                            prefix + sub.path,
-                            _hasCurrentUser(sub, context.dependencies),
-                        ))
     return found
 
 
@@ -79,7 +69,7 @@ def test_enumeratedRouteCountMeetsFloor() -> None:
     routes = _enumerateRoutes()
     assert len(routes) >= MIN_ENUMERATED_ROUTES, (
         f"仅枚举到 {len(routes)} 条路由（下限 {MIN_ENUMERATED_ROUTES}）——"
-        "_IncludedRouter 展开很可能已失效，鉴权守卫会空集通过"
+        "app.routes 结构可能已变（FastAPI include_router 行为），鉴权守卫会空集通过"
     )
 
 

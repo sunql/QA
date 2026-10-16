@@ -233,9 +233,11 @@ class L1L4PreambleMixin:
                 feat = await self._resolveKpiCatalog(match.code, session)
                 if feat is not None and feat.datasource_id is not None and feat.datasource_id != dto.datasourceId:
                     mismatch = True
+                    # P2-1 security review M3：两边都强制 int() 收敛，
+                    # 避免 None 误显或字符串注入（schema 强制 int 但 boundary 处再确认）
                     warning = MSG_KPI_DATASOURCE_MISMATCH.format(
-                        datasource_id=feat.datasource_id,
-                        user_datasource_id=dto.datasourceId,
+                        datasource_id=int(feat.datasource_id),
+                        user_datasource_id=int(dto.datasourceId),
                     )
                 return PreambleResult(
                     routing_layer="L1",

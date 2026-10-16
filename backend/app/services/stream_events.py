@@ -16,13 +16,13 @@ from enum import Enum
 from typing import Any
 
 
-def _jsonSafe(value: Any) -> Any:
+def _jsonSafe(value: Any, *, _depth: int = 0) -> Any:  # type: ignore[no-untyped-def]
     """递归把 value 转成 JSON-safe 标量/struct；保留类型语义。
 
     - Decimal → str（保留精度）
     - UUID / date / datetime → ISO string
     - +Inf/-Inf/NaN → {"__non_finite__": "infinity"|"-infinity"|"nan"}（不让 JSON parse 抛错）
-    - dict / list → 递归
+    - dict / list → 递归（带 _JSON_SAFE_MAX_DEPTH 截断，防止 LLM 恶意嵌套触发 RecursionError）
     - 其他 → 原样（让 json.dumps 的 default=str 兜底）
     """
     if value is None or isinstance(value, (str, int, bool)):
@@ -39,11 +39,19 @@ def _jsonSafe(value: Any) -> Any:
         return str(value)
     if isinstance(value, (date, datetime)):
         return value.isoformat()
+    if _depth >= _JSON_SAFE_MAX_DEPTH:
+        # 超深度截断为字符串，避免 RecursionError → 5xx SSE 中断
+        return f"<truncated:{type(value).__name__}>"
     if isinstance(value, dict):
-        return {k: _jsonSafe(v) for k, v in value.items()}
+        return {k: _jsonSafe(v, _depth=_depth + 1) for k, v in value.items()}
     if isinstance(value, list):
-        return [_jsonSafe(v) for v in value]
+        return [_jsonSafe(v, _depth=_depth + 1) for v in value]
     return value
+
+
+# 防止 LLM 注入产生 1000+ 层 list/dict 触发 Python 默认 recursion limit
+# （P2-1 security review H2 落地）
+_JSON_SAFE_MAX_DEPTH = 64
 
 
 def _jsonSafeData(data: dict[str, Any]) -> dict[str, Any]:

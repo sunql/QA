@@ -219,6 +219,8 @@ MSG_RISK_POINTS_TEMPLATE = "该供应商存在以下风险点：{reasons}"
 
 MSG_NO_MODEL_AVAILABLE = "没有可用的模型配置"
 MSG_NO_ENABLED_MODEL = "没有启用的模型配置"
+# P2-1 security review M2 落地：能力过滤后无候选时携带具体缺失能力列表
+MSG_NO_MODEL_REQUIRED = "没有模型满足所需能力：{requirement}"
 
 
 # =============================================================================

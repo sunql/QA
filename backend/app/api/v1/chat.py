@@ -41,7 +41,10 @@ _embeddingService = EmbeddingService()
 
 
 @router.get("/sessions/{sessionId}/hypotheses", response_model=list[HypothesisRead])
+@limiter.limit(rateLimitValue)  # P2-1 security review L3：与 /chat 同档限流
 async def listHypotheses(
+    request: Request,  # 限流装饰器需要 Request 参数
+    sessionId: str = Path(..., min_length=1, max_length=64),
     sessionId: str = Path(..., min_length=1, max_length=64),
     limit: int = Query(10, ge=1, le=50),
     _user: CurrentUser = Depends(getCurrentUser),
@@ -123,7 +126,11 @@ async def chatStream(
 
 
 @router.post("/suggest", response_model=QuerySuggestResponse)
-async def suggestQueries(dto: QuerySuggestRequest) -> QuerySuggestResponse:
+@limiter.limit(rateLimitValue)  # P2-1 security review L2：embedding 检索计费/限流意义大
+async def suggestQueries(
+    request: Request,  # 限流装饰器需要 Request 参数
+    dto: QuerySuggestRequest,
+) -> QuerySuggestResponse:
     """基于历史查询向量检索相似问法（供前端输入联想/推荐）。
 
     推荐功能属锦上添花：检索失败时记录日志并返回空建议，避免前端报错。

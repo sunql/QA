@@ -19,6 +19,7 @@ from app.infrastructure.token_counter.base_counter import TokenCounter
 from app.services.messages_zh import (
     MSG_NO_ENABLED_MODEL,
     MSG_NO_MODEL_AVAILABLE,
+    MSG_NO_MODEL_REQUIRED,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,12 @@ class ModelRouterService:
                     "会话 %s 能力过滤 %s 后无候选 (active=%d)",
                     ctx.sessionId, required_capabilities, len(active),
                 )
-                raise NoAvailableModelError(MSG_NO_MODEL_AVAILABLE)
+                # P2-1 security review M2：携带缺失能力列表，排障更易（不泄露模型 ID）
+                raise NoAvailableModelError(
+                    MSG_NO_MODEL_REQUIRED.format(
+                        requirement=", ".join(sorted(required_capabilities))
+                    )
+                )
             active = filtered
 
         # 7. 累计成本超预算 -> 强制最便宜

@@ -99,7 +99,7 @@ multistep / session context / query state 整片都过 `_buildService` ⇒ 全�
 | **test_wiki_import_api.py** | 40 | **3** | |
 | test_wiki_import_catalog.py | 7 | 0 | 全绿 |
 | **test_wiki_import_retry_api.py** | 8 | **2** | |
-| **test_wiki_link_admin_api.py** | 1 | **11** | **集中大头（先看是不是同 root cause）** |
+| **test_wiki_link_admin_api.py** | 1 | **11** | **集中大头 — 100% 同根因 MUST_CHANGE_PASSWORD**（2026-10-16 recon 确认）|
 | test_wiki_link_injector_e2e.py | 10 | 0 | 全绿 |
 | **test_wiki_reclassify_api.py** | 19 | **2** | |
 | **test_wiki_suggestion_api.py** | 33 | **2** | |
@@ -113,18 +113,19 @@ multistep / session context / query state 整片都过 `_buildService` ⇒ 全�
 
 **修法策略**（**先看 link_admin 11 红是不是同 root cause**）：
 
-- 若是同根因（1 个 fix 灭 11 红）→ 1 个 branch `fix/wiki-link-admin-core` + 另开 `fix/wiki-import-and-misc`
-- 若非同根因 → 拆 `fix/wiki-link-admin-1` / `fix/wiki-link-admin-2` / ...
+- **2026-10-16 recon 确认**：11 红 100% 同根因 — 都是 403 `MUST_CHANGE_PASSWORD`（admin 用户
+  `must_change_password=True` 没清；与 rbac test fixture 缺同一段 fix 同款）
+- 1 个 fix 灭 11 红 → `fix/wiki-link-admin-must-change-password` branch（test-only 1 行）
+- 另开 `fix/wiki-import-and-misc` 处理剩下 9 红（4 文件各 2-3 红）
 
-**Why 优先 link_admin**: 11/20 占 55% wiki 红；集中单文件 = 风险隔离；1 个 fix 高概率灭 11 红。
-**How to apply**: 进 `fix/wiki-env-and-auth` branch 第一步：跑 `test_wiki_link_admin_api.py` 11 个红看 trace，
-按 trace 同/异根因分组。
+**Why link_admin 改 1 行**: rbac test 已有同款 fix（line 106-111 段，admin.must_change_password = False），
+wiki_link_admin fixture 漏 copy 这一段 ⇒ 1 行 import + 4 行 select/update/commit = 灭 11 红。
 
 ## 分支分组（5 个独立 branch + 1 独立 track）
 
 | branch | 红数 | 根因 | 风险 | 估时 |
 |---|---|---|---|---|
-| `fix/rbac-mkuser-password` | 11 | RC-3 | 极低 | 1-2 h |
+| `fix/rbac-mkuser-password` | **0 (PR #24)** | RC-3 + item.profile 配套 | 极低 | **1h done** |
 | `fix/route-auth-guard-fastapi-compat` | 1 (+unblock 200+) | RC-4 | 低 | 30 min |
 | `fix/ontology-milvus-dim-mismatch` | 9 | RC-2 | 低 | 2-3 h |
 | `fix/chat-stream-plan-empty-fixture` | 38 | RC-1 | 中 | 1-2 天 |
@@ -141,7 +142,8 @@ agent 建议从 rbac（最低风险）起。我**调整优先级**为先开 `fix
 
 1. **route-auth-guard** — 修 1 个 import error 解锁 200+ integration tests collection。
    后续 4 个 branch 都要跑 integration 套件，没这个修 = 验证靠手数。
-2. **rbac-mkuser-password** — 极低风险，1-2 h，11 红净收。
+2. **rbac-mkuser-password** — **PR #24 已开 (a6be76f7)** — 极低风险，1h 净收 11 红。
+   wiki_link_admin 11 红同根因（must_change_password）待开 `fix/wiki-link-admin-must-change-password`。
 3. **ontology-milvus-dim** — 隔离改动，2-3 h，9 红净收。
 4. **chat-stream-plan-empty** — 38 红最大块，1-2 天，要理解 plan validation。
 5. **wiki-env-and-auth** — 跑全 suite 后再细分，1-2 天。

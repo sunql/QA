@@ -226,6 +226,34 @@ async def _seedRunState(
     return run_state
 
 
+async def _claimSession(
+    dbSession: AsyncSession,
+    *,
+    sessionId: uuid.UUID,
+    runStateId: uuid.UUID,
+) -> None:
+    """P0-X5：手动构造 session 时也要让会话持有 claim。
+
+    真实流程中 `createTurn` 会原子地 `active_run_id = runStateId`；本测试
+    用 ``appendTurn + openCheckpoint`` 跳过 createTurn，会话 ``active_run_id``
+    留空。P0-X5 起 ``answerCheckpoint`` 守卫 ``claim_invariant="held"``，
+    不持有 ⇒ 409，故测试也要模拟「正在跑」的状态。
+
+    ``runStateId`` 必须是 ``research_run_state.id``（与 ``active_run_id``
+    列上的 FK 对齐，不是 turn_id）。
+    """
+    from sqlalchemy import update
+
+    from app.domain.research_models import ResearchSession
+
+    await dbSession.execute(
+        update(ResearchSession)
+        .where(ResearchSession.id == sessionId)
+        .values(active_run_id=runStateId)
+    )
+    await dbSession.flush()
+
+
 # ---------------------------------------------------------------------------
 # 鉴权 / 越权
 # ---------------------------------------------------------------------------
@@ -421,9 +449,10 @@ async def test_checkpoint_answer_replay_is_idempotent_but_conflicting_decision_4
         dbSession, userId=userId, question="q", datasourceId=datasourceId
     )
     turn = await svc.appendTurn(dbSession, sessionId=row.id, role="user", content={})
-    await _seedRunState(
+    runState = await _seedRunState(
         dbSession, sessionId=row.id, turnId=turn.id, datasourceId=datasourceId
     )
+    await _claimSession(dbSession, sessionId=row.id, runStateId=runState.id)
     cp = await svc.openCheckpoint(
         dbSession,
         sessionId=row.id,
@@ -482,9 +511,10 @@ async def test_checkpoint_answer_at_planning_modify_reports_replan_phase(
         dbSession, userId=userId, question="q", datasourceId=datasourceId
     )
     turn = await svc.appendTurn(dbSession, sessionId=row.id, role="user", content={})
-    await _seedRunState(
+    runState = await _seedRunState(
         dbSession, sessionId=row.id, turnId=turn.id, datasourceId=datasourceId
     )
+    await _claimSession(dbSession, sessionId=row.id, runStateId=runState.id)
     cp = await svc.openCheckpoint(
         dbSession,
         sessionId=row.id,
@@ -513,6 +543,11 @@ async def test_checkpoint_answer_invalid_action_422(
         dbSession, userId=userId, question="q", datasourceId=await _seededDatasourceId(dbSession)
     )
     turn = await svc.appendTurn(dbSession, sessionId=row.id, role="user", content={})
+    runState = await _seedRunState(
+        dbSession, sessionId=row.id, turnId=turn.id,
+        datasourceId=await _seededDatasourceId(dbSession),
+    )
+    await _claimSession(dbSession, sessionId=row.id, runStateId=runState.id)
     cp = await svc.openCheckpoint(
         dbSession, sessionId=row.id, turnId=turn.id, phase="intent",
         options={"resumePhase": "plan"}, prompt="p",
@@ -531,6 +566,43 @@ async def test_answer_request_rejects_extra_field() -> None:
     """DTO 边界：checkpoint answer 请求体 extra=forbid。"""
     with pytest.raises(ValidationError):
         CheckpointAnswerRequest.model_validate({"action": "confirm", "bogus": 1})
+
+
+async def test_answer_checkpoint_409_when_session_has_no_claim(
+    client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession
+) -> None:
+    """P0-X5：``answerCheckpoint`` 守卫 ``claim_invariant="held"``。
+
+    真实流程下，会话在 ``running`` 状态机停检查点时仍持有 ``active_run_id``；
+    但 abort 之后会清空 claim —— 此时若再答 pending checkpoint（旧实现
+    漏的洞），``resumeTurn`` 会把 ``aborted`` 拉回 ``running`` 而不 claim，
+    出现 ``running + active_run_id=NULL`` 的会话，下次 POST /turns 放行、
+    起第二条状态机。
+
+    本测试构造「会话存在 + 有 pending checkpoint + 无 claim」场景，断言
+    端点 409 + 文案指明「未持有执行权」。
+    """
+    svc = ResearchSessionService()
+    userId = await _userId(dbSession, "research-user-a")
+    row = await svc.createSession(
+        dbSession, userId=userId, question="q", datasourceId=await _seededDatasourceId(dbSession)
+    )
+    turn = await svc.appendTurn(dbSession, sessionId=row.id, role="user", content={})
+    cp = await svc.openCheckpoint(
+        dbSession, sessionId=row.id, turnId=turn.id, phase="intent",
+        options={"resumePhase": "plan"}, prompt="p",
+    )
+    await dbSession.commit()
+    # 关键：**不**调 ``_claimSession`` —— 模拟 abort 后的状态。
+
+    resp = await client.post(
+        f"{_BASE}/checkpoints/{cp.id}/answer",
+        json={"action": "confirm"},
+        headers=authHeaders,
+    )
+    assert resp.status_code == 409, resp.text
+    assert "未持有执行权" in resp.json()["error"]
+    assert "active_run_id 为空" in resp.json()["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +775,10 @@ async def test_delete_session_cascades_children_and_404_afterwards(
     sid = uuid.UUID(created["id"])
     svc = ResearchSessionService()
     turn = await svc.appendTurn(dbSession, sessionId=sid, role="user", content={})
+    runState = await _seedRunState(
+        dbSession, sessionId=sid, turnId=turn.id, datasourceId=None,
+    )
+    await _claimSession(dbSession, sessionId=sid, runStateId=runState.id)
     await svc.openCheckpoint(
         dbSession, sessionId=sid, turnId=turn.id, phase="intent", options={}, prompt="p"
     )

@@ -120,8 +120,11 @@ from app.services.research_session_service import (
     _coerceJsonSafe,
 )
 from app.services.research_sql_runner import ResearchSqlRunner
-from app.services.research_task_service import (
-    TASK_KIND_RESUME,
+from app.services.session_claim import (
+    assert_research_claim_invariant,
+    assert_research_session_ownership,
+)
+from app.services.research_task_service import (    TASK_KIND_RESUME,
     TASK_KIND_TURN,
     TASK_STATUS_DONE,
     TASK_STATUS_FAILED,
@@ -394,7 +397,7 @@ async def deleteSession(
 
     归属不符 → 404（而非 403）：与详情 / 列表同一口径，不泄露会话存在性。
     """
-    await _ownedSession(db, sessionId, user)
+    await assert_research_session_ownership(db, sessionId, user)
     removed = await _sessionService.deleteSession(db, sessionId)
     if removed == 0:
         # 归属已过仍删 0 行 = 并发下已被另一请求删掉；语义上仍是「不存在」。
@@ -412,7 +415,7 @@ async def getSessionDetail(
     user: CurrentUser = Depends(_requireResearchUser),
     db: AsyncSession = Depends(getDb),
 ) -> ResearchSessionDetail:
-    row = await _ownedSession(db, sessionId, user)
+    row = await assert_research_session_ownership(db, sessionId, user)
     turns = await db.scalars(
         select(ResearchTurn)
         .where(ResearchTurn.session_id == sessionId)
@@ -447,8 +450,12 @@ async def createTurn(
        而不是被自己首次提交占住的会话弹 409；命中即返回，不再写新轮次；
     2. 否则 `active_run_id` 非空 ⇒ 409。状态机在后台跑、且**只有终态**才释放执行权
        （暂停等用户决策时仍占用），故这里读到非空就说明上一轮还没结束。
+
+    P0-X5（1012 cross-refs spec §P0-X5）：归属 + claim invariant 双断言下沉
+    到 ``app.services.session_claim`` —— ``assert_research_claim_invariant(
+    expected="free")`` 替换原本内联的 `row.active_run_id is not None` 判定。
     """
-    row = await _ownedSession(db, sessionId, user)
+    row = await assert_research_session_ownership(db, sessionId, user)
     if payload.idempotencyKey:
         replay = await _sessionService.getRunStateByIdempotencyKey(
             db, sessionId, payload.idempotencyKey
@@ -463,14 +470,10 @@ async def createTurn(
             return ResearchTurnAccepted(
                 sessionId=sessionId, turnId=replay.turn_id, status=row.status
             )
-    if row.active_run_id is not None:
-        logger.info(
-            "拒绝并发轮次: session=%s active_run=%s status=%s",
-            sessionId,
-            row.active_run_id,
-            row.status,
-        )
-        raise ConflictError(_busyMessage(row.status))
+    # P0-X5：claim invariant ``free`` 断言（无活跃轮次才放行；不达 ⇒ 409）。
+    # 408/409 文案由 ``assert_research_claim_invariant`` 单点给出，本端点
+    # 不再维护 ``_busyMessage`` 之类的本地分支文案（避免与守卫文案漂移）。
+    await assert_research_claim_invariant(db, sessionId, expected="free")
     turn = await _sessionService.appendTurn(
         db, sessionId=sessionId, role="user", content={"question": payload.question}
     )
@@ -521,7 +524,7 @@ async def abortSession(
     响应带**服务层读回的库中真值**（列查询绕过 identity map），端点**不再**回读、故也
     不存在「先改后 404」的路径；`None`（行已消失）只会出现在「什么都没改」时。
     """
-    await _ownedSession(db, sessionId, user)
+    await assert_research_session_ownership(db, sessionId, user)
     status = await _sessionService.abortSessionIfActive(db, sessionId)
     if status is None:
         # UPDATE 未命中且行已不在（与 delete 竞态）：本请求**无副作用**，故与其余端点
@@ -563,7 +566,13 @@ async def answerCheckpoint(
     checkpoint = await db.get(ResearchCheckpoint, checkpointId)
     if checkpoint is None:
         raise NotFoundError("研究检查点不存在")
-    sessionRow = await _ownedSession(db, checkpoint.session_id, user)  # 越权同样 404，不泄露存在性
+    sessionRow = await assert_research_session_ownership(db, checkpoint.session_id, user)  # 越权同样 404，不泄露存在性
+    # P0-X5：claim invariant ``held`` 断言 —— 续跑（resume）只对仍有活跃轮次的
+    # 会话开放。abort 之后会话落 ``aborted`` + ``active_run_id`` 清空，但
+    # pending checkpoint 仍 ``status="pending"``；不挡则 resumeTurn 把会话拉
+    # 回 running 而不 claim ⇒ 出现 ``running + active_run_id=NULL`` 的会话，
+    # 下次 POST /turns 直接放行、起第二条状态机。详见模块 docstring。
+    await assert_research_claim_invariant(db, checkpoint.session_id, expected="held")
     if checkpoint.status != "pending":
         if not _isIdempotentReplay(checkpoint, payload):
             raise ConflictError(f"检查点已决策（{checkpoint.status}），不可重复提交")
@@ -625,7 +634,7 @@ async def getReport(
     user: CurrentUser = Depends(_requireResearchUser),
     db: AsyncSession = Depends(getDb),
 ) -> ResearchReportRead:
-    await _ownedSession(db, sessionId, user)
+    await assert_research_session_ownership(db, sessionId, user)
     reports = await _sessionService.listReports(db, sessionId)
     target = _pickReport(reports, version)
     if target is None:
@@ -643,7 +652,7 @@ async def listReports(
     user: CurrentUser = Depends(_requireResearchUser),
     db: AsyncSession = Depends(getDb),
 ) -> list[ResearchReportSummaryRead]:
-    await _ownedSession(db, sessionId, user)
+    await assert_research_session_ownership(db, sessionId, user)
     reports = await _sessionService.listReports(db, sessionId)
     return [_reportSummary(report) for report in reports]
 
@@ -672,7 +681,7 @@ async def streamSessionEvents(
     长连接，不能把请求级 session 拖到流结束）。
     """
     async with getSessionFactory()() as db:
-        await _ownedSession(db, sessionId, user)
+        await assert_research_session_ownership(db, sessionId, user)
     return StreamingResponse(
         _eventFrames(str(sessionId), lastEventId),
         media_type="text/event-stream",
@@ -1065,23 +1074,9 @@ _ABORT_RUNNING_MESSAGE = "当前轮次正在执行，无法取消；请等待本
 """abort 在 `running` 状态被拒的文案（真在跑：状态与执行权都不动，也不发帧）。"""
 
 
-def _busyMessage(sessionStatus: str) -> str:
-    """会话被占用（`active_run_id` 非空）时的 409 文案：按**真实**状态区分「在跑」与「等决策」。
-
-    Task 2（review Fix 1a）：`active_run_id` 非空有两种成因 ——（a）状态机真在推进
-    （`running`）；（b）停在检查点等用户决策（`awaiting_user`，此时**没有**任何后台任务在跑）。
-    第二种若也说「存在进行中的研究轮次」，就是在说谎：用户等的是一个**需要他本人操作**的
-    决策点，不是机器。文案只说这一件真事。
-
-    **不广告 `abort` 端点**（review 追加）：`POST /sessions/{id}/abort` 目前**没有前端调用方**
-    —— 删除/取消入口只在 `/research/history` 页，而本 409 出现在没有该入口的会话页。文案若
-    写「可取消本会话」，就是让用户去做一件在眼前页面上做不到的事，与旧文案同属一类谎言
-    （只是小一点）。等 abort 接上前端，再回来公告它。
-    不新增错误码 —— 新码必须同步前端 union/i18n/store，不在本任务范围。
-    """
-    if sessionStatus == STATUS_AWAITING:
-        return "当前轮次停在检查点，等待你的决策后才能继续"
-    return "存在进行中的研究轮次，请等待当前轮次结束后再提交"
+# P0-X5：``_busyMessage`` 已废弃 —— claim invariant 的 409 文案由
+# ``assert_research_claim_invariant`` 单点给出（``app.services.session_claim``）。
+# 不再在本端点维护「在跑 / 等决策」分支文案，避免与守卫文案漂移。
 
 
 def _isIdempotentReplay(
@@ -1099,14 +1094,11 @@ def _isIdempotentReplay(
     return dict(checkpoint.user_choice or {}) == dict(payload.choice or {})
 
 
-async def _ownedSession(
-    db: AsyncSession, sessionId: uuid.UUID, user: CurrentUser
-) -> ResearchSession:
-    """按 id 取会话并校验归属；不存在 / 非本人一律 404（不泄露存在性）。"""
-    row = await db.get(ResearchSession, sessionId)
-    if row is None or row.created_by != user.dbUserId:
-        raise NotFoundError("研究会话不存在")
-    return row
+# P0-X5：``_ownedSession`` 已提升到 ``app.services.session_claim``。
+# 所有研究域写路径（createTurn / answerCheckpoint / abortSession /
+# deleteSession / getSession / listReports / stream）统一走
+# ``assert_research_session_ownership``；互斥判定走
+# ``assert_research_claim_invariant``。本地不再保留。
 
 
 def _pickReport(reports: list[ResearchReport], version: int | None) -> ResearchReport | None:

@@ -29,6 +29,21 @@ API key hint / endpoint 信息。
 **反向断言**：
 - 5 个 parametrize 用例验证 provider / port / status code / "unauthorized" / "unavailable" 等敏感词不进 user 文案
 
+### chatStore 合并残留 backport ✅ commit `95a3aaa6`
+
+**问题**：P1-3 commit b958b855 复制粘贴 stream/non-stream 分支时未删原
+`} else {`，导致 esbuild 编译失败 → 9 个测试文件 2 天阻塞（仓无 CI）。
+
+**修法**：删 line 748 孤立 `} else {`，保留 line 749 起新分支。
+**注意**：这是把 `0bfbfd53`（chore/aichat-priority-remaining 已修，但未合 main）
+backport 到当前 worktree（基于 main）。两个 PR 合先后会冲突，需 rebase。
+
+**验证**：
+- 1 编译错 → 8 测试红
+- 8 红都是 0107 alembic 引入的字段未填充（onChart/onStepResult handler
+  未回填 `tableOption` / `visualRationale` 到 message），属真实实施 gap
+- 需 0107 上下文（原始实现者）独立 PR 修
+
 ## 后续 PR（本批未做）
 
 ### M4 — SessionQueryState NULL legacy 数据迁移 ⏳ 需数据决策
@@ -99,13 +114,20 @@ class label）注入 LLM prompt → 模型被诱导越权或泄露 system prompt
 ### Frontend 7 red test files ⏳ 4h+
 
 **已知红文件**（per coverage-gate-report.md）：
-- chatStore.test.ts 8 红（P0-3/P1-3 行为漂移）
+- chatStore.test.ts 8 红（P0-3/0107 行为漂移）— 1 编译错已修（commit 95a3aaa6），
+  8 测试红是 0107 实施 gap，**需 0107 上下文独立 PR**
 - chatKpiWarning.test.ts 2 红
 - chatApi.test.ts 2 红
 - ChatPage.test.tsx 5 红
 - streamChunkParser branches 75→80%
 
 **意义**：80% coverage 闸门当前不可达；修完后才能跑 step 12.1 覆盖率基线。
+
+**chatStore 8 红根因**（实测）：
+- onChart handler 收到 `tableOption` / `visualRationale` 但未回填到 message
+- onStepResult handler 同上
+- 历史回放（toChatMessage）路径正常
+- 修法需读 0107 alembic 引入新字段的 store 实施，补上 2 个 handler 的回填
 
 ### X1-X5 — 三份 1012 报告 cross-refs 统一 P0 ⏳ 5 独立 branch + PR
 

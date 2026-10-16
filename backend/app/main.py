@@ -483,6 +483,16 @@ def createApp() -> FastAPI:
         tags=["data-quality"],
         dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
+    # 公开的 share/{token} 解析：与 authRouter 同样模式（不带 mustChangePasswordGuard），
+    # 详见 app/api/v1/evaluation_report_share_resolve.py 头部注释。
+    # fix/data-quality-share-auth-policy 2026-10-16。
+    from app.api.v1 import evaluation_report_share_resolve
+
+    app.include_router(
+        evaluation_report_share_resolve.router,
+        prefix="/api/v1/data-quality/reports",
+        tags=["data-quality"],
+    )
     app.include_router(
         data_lineage.router, prefix="/api/v1/lineage/edges", tags=["lineage"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )

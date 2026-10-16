@@ -16,12 +16,28 @@ async def seed_wiki_page(client: AsyncClient, dbSession: AsyncSession) -> None:
     """Seed RBAC baseline and wiki_page for wiki_ontology_link FK + admin role.
 
     Depends on client (pgApiClient sets up factory) and dbSession (per-test session).
+
+    71 红 A1 流 M2 修（fix/test-fixture-item-profile-seed）：seedRbacBaseline 后
+    admin 用户 ``must_change_password=True``（feat-admin-user-password 强制改密契约），
+    任何走 ``mustChangePasswordGuard`` 的路由都会 403。本测试全用 admin
+    调用 ``/api/v1/admin/wiki-links``，全部 11 红都是这个原因。
+    修法：与 test_rbac_api.py 已有 fix 同款，autouse 内清掉 admin 的
+    must_change_password 标志。
     """
+    from app.domain.models import User
     from app.domain.wiki_models import WikiPage
     from scripts.seed_rbac import seedRbacBaseline
     from sqlalchemy import select
+
     # Seed RBAC baseline (admin role + admin user + binding)
     await seedRbacBaseline(dbSession)
+
+    # 清除 admin 的 must_change_password 标志（与 test_rbac_api._rbacSeeds 同款）
+    admin = (await dbSession.execute(select(User).where(User.username == "admin"))).scalar_one_or_none()
+    if admin and admin.must_change_password:
+        admin.must_change_password = False
+        await dbSession.commit()
+
     # Seed wiki_page row for FK constraint
     page_row = (await dbSession.execute(select(WikiPage).where(WikiPage.page_id == "p001"))).scalar_one_or_none()
     if page_row is None:

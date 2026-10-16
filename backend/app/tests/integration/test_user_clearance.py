@@ -42,16 +42,21 @@ async def _rbacSeeds(client: AsyncClient, dbSession: AsyncSession) -> None:
         admin.must_change_password = False
         await dbSession.commit()
 
-    # 同步 seed menus（item.profile 等菜单，identity_service.create_user 会写 permission_grant）
+    # 同步 seed menus（item.profile 等菜单, IdentityService.create_user 会写 permission_grant）
+    # 71 红 A1 流 M1 修（fix/test-fixture-item-profile-seed）：item.profile 顶层插入
+    # 会被 MenuConfigService 当 section 触发 MenuConfigStructureError（list_sections
+    # 「section 必须 path=None」校验）。与 test_rbac_api._seedMenus /
+    # test_identity_create_user_password 同款 child leaf 模式对齐。
     section = MenuConfig(code="adminsys", label_key="admin_sys", sort_order=90)
     section.children = [
         MenuConfig(code=code, label_key=code, path=f"/admin/{code}", sort_order=i)
         for i, code in enumerate(["menu_a", "menu_b", "menu_c", "menu_d"])
+    ] + [
+        MenuConfig(
+            code="item.profile", label_key="profile", path="/profile", sort_order=99
+        ),
     ]
     dbSession.add(section)
-    # item.profile：DEFAULT_NEW_USER_MENU_CODE，新用户默认授权菜单
-    profile_item = MenuConfig(code="item.profile", label_key="profile", path="/profile", sort_order=0)
-    dbSession.add(profile_item)
     await dbSession.commit()
 
 

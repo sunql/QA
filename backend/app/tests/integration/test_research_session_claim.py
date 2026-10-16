@@ -166,11 +166,11 @@ async def test_claim_invariant_free_passes_when_no_active_run(
     row = await svc.createSession(dbSession, userId=researchUser.dbUserId, question="q")
     await dbSession.commit()
 
-    out = await assert_research_claim_invariant(
-        dbSession, row.id, expected="free"
-    )
-    assert out.id == row.id
-    assert out.active_run_id is None
+    # review M1：函数只断言不返回；通过 = 不抛错。验证「拿到会话行（由 createSession
+    # 返回）后 status 仍是 running、active_run_id 为空」即可。
+    await assert_research_claim_invariant(dbSession, row.id, expected="free")
+    await dbSession.refresh(row)
+    assert row.active_run_id is None
 
 
 async def test_claim_invariant_free_409_when_active_run(
@@ -204,6 +204,50 @@ async def test_claim_invariant_free_409_when_active_run(
             dbSession, row.id, expected="free"
         )
     assert "进行中" in str(excInfo.value)
+    # review H2：必须**不**回显 active_run_id UUID 给用户（旧 ``_busyMessage``
+    # 也不回显）。若有人把内部 ID 写回文案，本断言立刻 RED。
+    assert str(runState.id) not in str(excInfo.value)
+    # review H2：默认 status=running ⇒ 走"后台在跑"分支，**不**说"你
+    # 是瓶颈"。
+    assert "等待你的决策" not in str(excInfo.value)
+
+
+async def test_claim_invariant_free_uses_awaiting_user_copy_when_session_awaiting(
+    dbSession: AsyncSession, researchUser: CurrentUser
+) -> None:
+    """review H2：``status=awaiting_user`` ⇒ 走"你是瓶颈"文案（review Fix 1a）。
+
+    若有人把 409 文案回退成统一句，本测试 RED。
+    """
+    from app.services.research_run_state import RunStateSeed, buildRunState
+
+    svc = ResearchSessionService()
+    row = await svc.createSession(dbSession, userId=researchUser.dbUserId, question="q")
+    turn = await svc.appendTurn(dbSession, sessionId=row.id, role="user", content={})
+    runState = buildRunState(
+        RunStateSeed(
+            session_id=row.id,
+            turn_id=turn.id,
+            current_question="q",
+            mode="research",
+            user_id=researchUser.dbUserId,
+            model_id=None,
+            datasource_id=None,
+        )
+    )
+    dbSession.add(runState)
+    await dbSession.flush()
+    row.active_run_id = runState.id
+    row.status = "awaiting_user"
+    await dbSession.commit()
+
+    with pytest.raises(ConflictError) as excInfo:
+        await assert_research_claim_invariant(
+            dbSession, row.id, expected="free"
+        )
+    assert "等待你的决策" in str(excInfo.value)
+    # 反向断言：分支没走错（不写"在跑"分支的文案）。
+    assert "存在进行中的研究轮次" not in str(excInfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -236,11 +280,10 @@ async def test_claim_invariant_held_passes_when_active_run(
     row.active_run_id = runState.id
     await dbSession.commit()
 
-    out = await assert_research_claim_invariant(
-        dbSession, row.id, expected="held"
-    )
-    assert out.id == row.id
-    assert out.active_run_id == runState.id
+    # review M1：函数只断言不返回；通过 = 不抛错。
+    await assert_research_claim_invariant(dbSession, row.id, expected="held")
+    await dbSession.refresh(row)
+    assert row.active_run_id == runState.id
 
 
 async def test_claim_invariant_held_409_when_no_active_run(

@@ -44,12 +44,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import CurrentUser
 from app.domain.exceptions import ConflictError, NotFoundError
 from app.domain.research_models import ResearchSession
+from app.services.research_agent_ports import STATUS_AWAITING
 
 ClaimExpectation = Literal["free", "held"]
 
 # 与既有 ``_ownedSession`` 的 detail 文案逐字节一致：search 用
 # "研究会话不存在" 做断言，改了要同步改测试。
 _MSG_RESEARCH_SESSION_NOT_FOUND = "研究会话不存在"
+
+# P0-X5 review H2（修 review Fix 1a 回归）：把 409 文案按会话状态分流，
+# 避免"用户等的是自己的决策"被笼统说成"在跑"。
+# - awaiting_user ⇒ 告诉用户"你是瓶颈"，不说后台在跑（review Fix 1a 原始语义）
+# - running      ⇒ 告诉用户"后台在跑"，不说有取消入口（旧 ``_busyMessage``
+#   "不广告 abort 端点" 规则保留 —— see research.py abortSession docstring）
+_MSG_RESEARCH_BUSY_AWAITING = "当前轮次停在检查点，等待你的决策后才能继续"
+_MSG_RESEARCH_BUSY_RUNNING = "存在进行中的研究轮次，请等待当前轮次结束后再提交"
 
 
 async def assert_research_session_ownership(
@@ -78,8 +87,12 @@ async def assert_research_claim_invariant(
     sessionId: uuid.UUID,
     *,
     expected: ClaimExpectation,
-) -> ResearchSession:
+) -> None:
     """断言 ``active_run_id`` 与 ``expected`` 一致；不达 ⇒ 409。
+
+    review M1：本函数只做断言，**不**返回行 —— 调用方（createTurn /
+    answerCheckpoint）已经在 ``assert_research_session_ownership`` 拿到
+    ``row``，没必要二次读 + 二次写 identity map。
 
     :param expected:
 
@@ -97,14 +110,17 @@ async def assert_research_claim_invariant(
         raise NotFoundError(_MSG_RESEARCH_SESSION_NOT_FOUND)
     isHeld = row.active_run_id is not None
     if expected == "free" and isHeld:
-        # 中文文案与既有 createTurn 409 保持一致
-        raise ConflictError(
-            f"研究会话已有进行中的轮次（active_run_id={row.active_run_id}），"
-            f"请等待完成或取消后再提交"
+        # review H2：按 row.status 分流文案 —— awaiting_user 告诉用户「你是
+        # 瓶颈」，running 告诉用户「后台在跑」。**不**回显 active_run_id UUID
+        # 给用户（旧 ``_busyMessage`` 也不回显），也**不**广告 cancel 入口。
+        detail = (
+            _MSG_RESEARCH_BUSY_AWAITING
+            if row.status == STATUS_AWAITING
+            else _MSG_RESEARCH_BUSY_RUNNING
         )
+        raise ConflictError(detail)
     if expected == "held" and not isHeld:
         raise ConflictError(
             "研究会话未持有执行权（active_run_id 为空），"
             "无法续跑：会话已终态 / 已取消 / 从未启动"
         )
-    return row

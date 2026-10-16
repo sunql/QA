@@ -97,7 +97,6 @@ from app.services.research_agent_ports import (
     ERROR_TURN_FAILED,
     EVENT_DONE,
     EVENT_ERROR,
-    STATUS_AWAITING,
     STATUS_RUNNING,
     TERMINAL_ERROR_CODES,
     errorPayload,
@@ -121,6 +120,7 @@ from app.services.research_session_service import (
 )
 from app.services.research_sql_runner import ResearchSqlRunner
 from app.services.session_claim import (
+    _MSG_RESEARCH_SESSION_NOT_FOUND,
     assert_research_claim_invariant,
     assert_research_session_ownership,
 )
@@ -401,7 +401,8 @@ async def deleteSession(
     removed = await _sessionService.deleteSession(db, sessionId)
     if removed == 0:
         # 归属已过仍删 0 行 = 并发下已被另一请求删掉；语义上仍是「不存在」。
-        raise NotFoundError("研究会话不存在")
+        # review M2：复用 session_claim 守卫的常量，避免文案漂移。
+        raise NotFoundError(_MSG_RESEARCH_SESSION_NOT_FOUND)
     await db.commit()
 
 
@@ -529,7 +530,8 @@ async def abortSession(
     if status is None:
         # UPDATE 未命中且行已不在（与 delete 竞态）：本请求**无副作用**，故与其余端点
         # 同一口径报「不存在」—— 不是「先改后 404」。
-        raise NotFoundError("研究会话不存在")
+        # review M2：复用 session_claim 守卫的常量。
+        raise NotFoundError(_MSG_RESEARCH_SESSION_NOT_FOUND)
     if status == STATUS_RUNNING:
         logger.info("拒绝取消（会话正在执行）: session=%s", sessionId)
         raise ConflictError(_ABORT_RUNNING_MESSAGE)

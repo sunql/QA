@@ -241,6 +241,9 @@ async def _claimSession(
 
     ``runStateId`` 必须是 ``research_run_state.id``（与 ``active_run_id``
     列上的 FK 对齐，不是 turn_id）。
+
+    review M4：flush 后**不**commit，但 expire 当前 ORM 行（让后续读
+    `row.active_run_id` 重新走 SQL）—— 不再依赖调用方手工 refresh。
     """
     from sqlalchemy import update
 
@@ -252,6 +255,11 @@ async def _claimSession(
         .values(active_run_id=runStateId)
     )
     await dbSession.flush()
+    # review M4：让 ``sessionRow`` 在下次读 ``active_run_id`` 时重走 SQL，
+    # 不依赖调用方手工 refresh。``expire`` 是 O(1) 操作。
+    rowInMap = await dbSession.get(ResearchSession, sessionId)
+    if rowInMap is not None:
+        dbSession.expire(rowInMap, ["active_run_id"])
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +611,75 @@ async def test_answer_checkpoint_409_when_session_has_no_claim(
     assert resp.status_code == 409, resp.text
     assert "未持有执行权" in resp.json()["error"]
     assert "active_run_id 为空" in resp.json()["error"]
+
+
+async def test_abort_then_answer_pending_checkpoint_409(
+    client: AsyncClient, authHeaders: dict[str, str], dbSession: AsyncSession
+) -> None:
+    """P0-X5 review M3：端到端 abort→answer race 端到端覆盖。
+
+    旧实现下：abort 把会话落 ``aborted`` + 清空 ``active_run_id``，但
+    pending checkpoint 仍 ``status="pending"``。再答 checkpoint，
+    ``resumeTurn`` 把 ``aborted`` 拉回 ``running``（且不 claim），出现
+    ``running + active_run_id=NULL`` 的会话，下次 POST /turns 放行、
+    起第二条状态机。详见记忆 [[qa-system-research-claim-invariant-create-only]]。
+
+    本测试**不**手工跳过 ``_claimSession``，而是真走 ``POST /abort`` 把
+    claim 释放掉，然后断言 ``POST /checkpoints/{id}/answer`` 409。
+    守护 ``abortSessionIfActive`` 的释放语义（一旦该 SQL 漏写
+    ``active_run_id=None``，本测试立刻 RED）。
+    """
+    from sqlalchemy import select
+
+    from app.domain.research_models import ResearchSession
+
+    svc = ResearchSessionService()
+    userId = await _userId(dbSession, "research-user-a")
+    row = await svc.createSession(
+        dbSession, userId=userId, question="q", datasourceId=await _seededDatasourceId(dbSession)
+    )
+    turn = await svc.appendTurn(dbSession, sessionId=row.id, role="user", content={})
+    runState = await _seedRunState(
+        dbSession, sessionId=row.id, turnId=turn.id,
+        datasourceId=await _seededDatasourceId(dbSession),
+    )
+    await _claimSession(dbSession, sessionId=row.id, runStateId=runState.id)
+    cp = await svc.openCheckpoint(
+        dbSession, sessionId=row.id, turnId=turn.id, phase="intent",
+        options={"resumePhase": "plan"}, prompt="p",
+    )
+    # 把会话推成 ``awaiting_user``（abort 白名单是 awaiting_user）：
+    row.status = "awaiting_user"
+    await dbSession.commit()
+
+    # 真走 abort 端点：白名单 awaiting_user ⇒ 200 + cancelled + 释放 claim
+    abortResp = await client.post(
+        f"{_BASE}/sessions/{row.id}/abort", headers=authHeaders
+    )
+    assert abortResp.status_code == 200, abortResp.text
+    assert abortResp.json()["cancelled"] is True
+    assert abortResp.json()["sessionStatus"] == "aborted"
+
+    # 守护性断言：abort 之后库中 ``active_run_id`` 真为 NULL（不是 stale）。
+    # 若有人重构 ``abortSessionIfActive`` 漏写 ``active_run_id=None``，
+    # 本 SELECT 立刻 RED —— 也就是说，下面的 409 测试不再是「写出来」的。
+    await dbSession.refresh(row)
+    assert row.active_run_id is None
+    assert row.status == "aborted"
+
+    # 现在答 pending checkpoint：必须 409，不能让 resumeTurn 把它拉回 running
+    answerResp = await client.post(
+        f"{_BASE}/checkpoints/{cp.id}/answer",
+        json={"action": "confirm"},
+        headers=authHeaders,
+    )
+    assert answerResp.status_code == 409, answerResp.text
+    assert "未持有执行权" in answerResp.json()["error"]
+
+    # 守护：会话**仍然**是 ``aborted`` + 无 claim —— 不被续跑污染
+    await dbSession.refresh(row)
+    assert row.status == "aborted"
+    assert row.active_run_id is None
 
 
 # ---------------------------------------------------------------------------

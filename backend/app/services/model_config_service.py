@@ -2,6 +2,11 @@
 
 负责 LlmConfig 的创建/查询/更新/停用，并对 API Key 进行加密存储。
 查询接口不返回密钥明文。
+
+X1 防御纵深（QA-1012-01 #1）：create/update/deactivate 接受可选 ``actor`` 参数。
+传 ``None`` 时维持旧行为（向后兼容内部调用）；传 ``CurrentUser`` 时校验
+``"admin" in actor.roles``，否则抛 ``PermissionDeniedError``。即使绕开 API 路由层
+``Depends(requireAdmin)`` 直接调 service，也无法越权落库。
 """
 
 from __future__ import annotations
@@ -11,7 +16,8 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.exceptions import NotFoundError, ValidationError
+from app.dependencies import CurrentUser
+from app.domain.exceptions import NotFoundError, PermissionDeniedError, ValidationError
 from app.domain.models import LlmConfig
 from app.domain.schemas import LlmConfigCreate, LlmConfigUpdate
 from app.infrastructure.llm import factory as llmFactory
@@ -25,12 +31,38 @@ from app.services.messages_zh import (
 
 logger = logging.getLogger(__name__)
 
+# X1：与 app.dependencies.requireAdmin 共享角色判定字符串。
+_ADMIN_ROLE = "admin"
+
+
+def _requireAdminActor(actor: CurrentUser | None) -> None:
+    """X1 防御纵深：actor 传 None 时跳过（向后兼容内部调用），否则强制 admin 角色。
+
+    Raises:
+        PermissionDeniedError: actor 非 None 且不含 admin 角色。
+    """
+    if actor is None:
+        return  # 内部调用 / 测试 fixture 场景：显式 opt-out
+    if _ADMIN_ROLE not in (actor.roles or ()):
+        raise PermissionDeniedError("需要 admin 角色")
+
 
 class ModelConfigService:
     """模型配置服务。"""
 
-    async def create(self, session: AsyncSession, dto: LlmConfigCreate) -> LlmConfig:
-        """创建模型配置。model_name 唯一；endpoint 须符合生产 URL 规范。（新 id 无旧缓存，无需失效客户端）"""
+    async def create(
+        self,
+        session: AsyncSession,
+        dto: LlmConfigCreate,
+        *,
+        actor: CurrentUser | None = None,
+    ) -> LlmConfig:
+        """创建模型配置。model_name 唯一；endpoint 须符合生产 URL 规范。
+
+        X1 防御纵深：传 ``actor`` 时强制 admin 角色；``actor=None`` 维持旧行为
+        （向后兼容内部调用与已有测试 fixture）。
+        """
+        _requireAdminActor(actor)
         # audit-fx-1.1 fix1：创建时即 fail-fast，防止无效 URL 入库
         if dto.api_endpoint:
             try:
@@ -78,9 +110,18 @@ class ModelConfigService:
         return config
 
     async def update(
-        self, session: AsyncSession, configId: int, dto: LlmConfigUpdate
+        self,
+        session: AsyncSession,
+        configId: int,
+        dto: LlmConfigUpdate,
+        *,
+        actor: CurrentUser | None = None,
     ) -> LlmConfig:
-        """部分更新。api_key 若提供则重新加密。变更 endpoint 必须同时提供新 key。"""
+        """部分更新。api_key 若提供则重新加密。变更 endpoint 必须同时提供新 key。
+
+        X1 防御纵深：传 ``actor`` 时强制 admin 角色；``actor=None`` 维持旧行为。
+        """
+        _requireAdminActor(actor)
         config = await self.get(session, configId)
         updates = dto.model_dump(exclude_unset=True, exclude_none=True)
 
@@ -107,8 +148,18 @@ class ModelConfigService:
         llmFactory.evictClient(configId)
         return config
 
-    async def deactivate(self, session: AsyncSession, configId: int) -> None:
-        """软删除：停用模型配置（is_active=False）。"""
+    async def deactivate(
+        self,
+        session: AsyncSession,
+        configId: int,
+        *,
+        actor: CurrentUser | None = None,
+    ) -> None:
+        """软删除：停用模型配置（is_active=False）。
+
+        X1 防御纵深：传 ``actor`` 时强制 admin 角色；``actor=None`` 维持旧行为。
+        """
+        _requireAdminActor(actor)
         config = await self.get(session, configId)
         config.is_active = False
         await session.commit()

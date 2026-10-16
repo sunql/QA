@@ -5,6 +5,11 @@ POST   /api/v1/models                 创建
 GET    /api/v1/models/{configId}      获取
 PUT    /api/v1/models/{configId}      更新
 DELETE /api/v1/models/{configId}      停用（软删除）
+
+X1 防御纵深（QA-1012-01 #1）：POST/PUT/DELETE 在路由层
+``Depends(requireAdmin)`` 之外，**显式**把 ``user`` 作为 ``actor=`` 传入
+``ModelConfigService``。即使未来某次 refactor 误删路由层 admin 守卫，
+service 层 ``_requireAdminActor`` 仍会兜底拒绝非 admin。
 """
 
 from __future__ import annotations
@@ -12,7 +17,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import getCurrentUser, requireAdmin
+from app.dependencies import CurrentUser, getCurrentUser, requireAdmin
 from app.domain.error_messages import MSG_PARAM_ACTIVE_ONLY_MODELS
 from app.domain.schemas import LlmConfigCreate, LlmConfigRead, LlmConfigUpdate
 from app.infrastructure.database import getDb
@@ -31,13 +36,14 @@ async def listModels(
     return [LlmConfigRead.model_validate(c) for c in configs]
 
 
-@router.post("", response_model=LlmConfigRead, status_code=201, dependencies=[Depends(requireAdmin)])
+@router.post("", response_model=LlmConfigRead, status_code=201)
 async def createModel(
     dto: LlmConfigCreate,
+    user: CurrentUser = Depends(requireAdmin),
     session: AsyncSession = Depends(getDb),
 ) -> LlmConfigRead:
     svc = ModelConfigService()
-    config = await svc.create(session, dto)
+    config = await svc.create(session, dto, actor=user)
     return LlmConfigRead.model_validate(config)
 
 
@@ -48,18 +54,23 @@ async def getModel(configId: int, session: AsyncSession = Depends(getDb)) -> Llm
     return LlmConfigRead.model_validate(config)
 
 
-@router.put("/{configId}", response_model=LlmConfigRead, dependencies=[Depends(requireAdmin)])
+@router.put("/{configId}", response_model=LlmConfigRead)
 async def updateModel(
     configId: int,
     dto: LlmConfigUpdate,
+    user: CurrentUser = Depends(requireAdmin),
     session: AsyncSession = Depends(getDb),
 ) -> LlmConfigRead:
     svc = ModelConfigService()
-    config = await svc.update(session, configId, dto)
+    config = await svc.update(session, configId, dto, actor=user)
     return LlmConfigRead.model_validate(config)
 
 
-@router.delete("/{configId}", status_code=204, dependencies=[Depends(requireAdmin)])
-async def deleteModel(configId: int, session: AsyncSession = Depends(getDb)) -> None:
+@router.delete("/{configId}", status_code=204)
+async def deleteModel(
+    configId: int,
+    user: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> None:
     svc = ModelConfigService()
-    await svc.deactivate(session, configId)
+    await svc.deactivate(session, configId, actor=user)

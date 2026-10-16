@@ -125,6 +125,20 @@ multistep / session context / query state 整片都过 `_buildService` ⇒ 全�
 - 测试 18/18 passed（4 min total）
 - **真实 backlog 85 → 72 (-13)**
 
+**2026-10-16 PR #26** (`fix/wiki-import-and-misc`)：合并 4 文件 fixture fix，
+- test_wiki_import_api 3 红（RC-A password + M2 item.profile + M3 must_change_password）= 2fbab748
+- test_wiki_import_retry 2 红（RC-A + M2 + M3）= 2fbab748
+- test_wiki_reclassify 2 红（RC-A + M2 + M3）= 2fbab748
+- test_wiki_suggestion 2 红（RC-B AUTH_STUB_ENABLED cache_clear）= 2fbab748
+- 测试 123 passed (7m 30s) + 全 wiki suite 166 passed (0 回归)
+- **真实 backlog 72 → 63 (-9)**
+- **3 个 root cause**:
+  - **RC-A**: UserCreate schema password 必填（feat-admin-user-password 引入），
+    5 个测试 helper 漏 password
+  - **RC-B**: getSettings 是 @lru_cache，monkeypatch.setenv 改 env 后必须
+    cache_clear 才会重读；本仓已有同款模式 (test_rate_limit_chat_route.py:44)
+  - **M2+M3**: 与 PR #25 同款 (item.profile FK seed + must_change_password clear)
+
 #### 后续发现的 hidden reds（不在原 83 红统计内）
 
 - **`test_identity_create_user_password.py` 2 红**（2026-10-16 rbac review M2 发现）：

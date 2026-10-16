@@ -64,6 +64,13 @@ def _enumerateRoutes() -> list[tuple[str, str, bool]]:
     return found
 
 
+# 历史注释：曾有 `elif isinstance(route, _IncludedRouter):` 分支试图递归 router
+# 包装，但 `_IncludedRouter` 是 FastAPI 0.141+ 内部符号，0.136.1 不存在
+# ⇒ ImportError block 整个 integration suite collection（200+ tests）。
+# 修法见 fix/route-auth-guard-fastapi-compat（PR #20）；F1 follow-up
+# （fix/data-quality-share-auth-policy）也带上同一修法以便独立可测。
+
+
 def test_enumeratedRouteCountMeetsFloor() -> None:
     """展开失效守卫：内部结构变化导致展开不到路由时，本测试必须红。"""
     routes = _enumerateRoutes()

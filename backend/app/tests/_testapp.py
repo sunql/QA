@@ -32,6 +32,7 @@ from app.api.v1 import (
     embedding_provider,
     entity_mapping,
     evaluation_report,
+    evaluation_report_share_resolve,
     features,
     feature_rules,
     graph,
@@ -180,6 +181,13 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         prefix="/api/v1/data-quality/reports",
         tags=["data-quality"],
         dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+    )
+    # 公开的 share/{token} 解析：与 main.py 同样模式（不带 mustChangePasswordGuard）。
+    # 详见 app/api/v1/evaluation_report_share_resolve.py 头部注释。
+    testApp.include_router(
+        evaluation_report_share_resolve.router,
+        prefix="/api/v1/data-quality/reports",
+        tags=["data-quality"],
     )
     testApp.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(research.router, prefix="/api/v1", tags=["research"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])

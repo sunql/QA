@@ -481,6 +481,29 @@ async def test_turn_pauses_at_checkpoint1(dbSession, makeService) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pause_persists_original_question_from_agent_state(
+    dbSession, makeService
+) -> None:
+    """X3（1012 cross-refs spec §P0-X3 回归）：agent 落 checkpoint 时把
+    state["question"] 一并写到 checkpoint.original_question，恢复阶段优先用本列。
+
+    防退化：
+    - 若 _pauseForUser 后续被改回去不传 originalQuestion ⇒ 原问题丢，
+      恢复层被迫回退 turn.content 老路径，X3 防御被绕过。
+    """
+    svc = makeService()
+    s = await _newSession(svc, dbSession, question=QUESTION)
+    await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp is not None
+    # 关键：原问题从 state 透传到 checkpoint.original_question
+    assert cp.original_question == QUESTION, (
+        f"agent 落 checkpoint 应把 state['question'] 写到 original_question，"
+        f"实际 {cp.original_question!r}（恢复层会读到空串，被迫回退老路径）"
+    )
+
+
+@pytest.mark.asyncio
 async def test_esl_conflict_inserts_dynamic_checkpoint_before_plan(dbSession, makeService) -> None:
     from app.services.enterprise_semantic_layer import ESLConflict
 

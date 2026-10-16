@@ -38,6 +38,10 @@ _EVENT_LEN = 50
 """事件名列长（最长事件名 ``research.step.start`` = 19 字符；留余量，与既有 ``_*_LEN`` 同风格）。"""
 
 # X3：原问题最长 2000 字符（与多步计划的 original_question 上限对齐）。
+# 故意截断（不抛错）：超过 2000 的问题在多步计划 prompt 阶段已被截过，
+# 落到 checkpoint 时再截是同一道闸门。**不要**把上限改成 ``Text`` 类型
+# （会让 ``original_question`` 失去索引 + 增加 IO）；若业务真要更长问题，
+# 改这里前先评估多步计划侧是否一起放宽。
 _ORIGINAL_QUESTION_LEN = 2000
 
 

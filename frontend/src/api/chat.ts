@@ -8,6 +8,11 @@ import { StreamChunkParser } from "../stores/stream_chunk_parser";
 
 const BASE = "/chat";
 
+// P1-3 EOF 守门：流式响应在收到 done/error 之前断开时，抛此错让 store 标记
+// `interrupted=true` 并区分处理（其他错误落通用 error 文案）。
+// chatStore 端通过 includes(STREAM_INTERRUPTED) 嗅探此错误，故常量名+字面值必须稳定。
+export const STREAM_INTERRUPTED = "stream interrupted: no done/error before EOF";
+
 // ReAct 查询计划运行时校验（M2）：API 为系统边界，形状不符时不渲染 QueryPlanCard
 function isQueryPlan(value: unknown): value is QueryPlan {
   if (!value || typeof value !== "object") return false;
@@ -320,7 +325,7 @@ export async function sendMessageStream(
       if (frame.event === "done" || frame.event === "error") sawTerminal = true;
       dispatchFrame(frame, handlers);
     }
-    if (!sawTerminal) throw new Error("stream interrupted: no done/error before EOF");
+    if (!sawTerminal) throw new Error(STREAM_INTERRUPTED);
   } finally {
     reader.releaseLock();
   }

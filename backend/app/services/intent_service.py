@@ -572,6 +572,9 @@ class IntentService:
         stripped = IntentService._stripGreetingPrefix(original)
         normalized = stripped.strip().lower()
         # 0. CLARIFY 概念解释（在 hasPriorState 判定之前，避免"X 是什么意思"被误判为 REFINE）
+        #    双路径语义：CLARIFY 不依赖会话历史（用户问"X 是什么"无论是否追问都得先
+        #    解释概念，不能盲猜是 REFINE 去跑上一轮的 SQL）。所以这里**故意不守卫
+        #    hasPriorState**：REFINE/FOLLOW_UP 路径（#1）才会被 hasPriorState 兜底。
         if IntentService._isClarify(normalized):
             return IntentResult(intent=IntentType.CLARIFY)
         # 1. hasPriorState 时的 REFINE / FOLLOW_UP 判定（提到 Agent/supplier 之前）

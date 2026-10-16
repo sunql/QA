@@ -5,6 +5,7 @@ import {
   resumeMultiStepRun,
   sendMessage as sendChatMessage,
   sendMessageStream,
+  STREAM_INTERRUPTED,
   type StreamChartData,
   type StreamEventHandlers,
 } from "../api/chat";
@@ -823,7 +824,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : i18n.t("errors.networkError");
       const errDetail = (err as { detail?: string }).detail ?? null;
-      const isInterrupted = err instanceof Error && err.message.includes("interrupted");
+      const isInterrupted = err instanceof Error && err.message.includes(STREAM_INTERRUPTED);
       set((state) => {
         const last = state.messages[state.messages.length - 1];
         // 已通过 error 事件展示具体错误时，不覆盖为通用错误文案（LOW#8 修复）

@@ -625,6 +625,9 @@ class ContextMixin:
                 existing.schema_name = schemaName
             if datasourceVersion is not None:
                 existing.datasource_version = datasourceVersion
+            # SQLAlchemy 即使 existing 已在 session.identity_map 中，
+            # 显式 `session.add` 仍合法（幂等），并明确表达「这行是 dirty 待 UPDATE」
+            # 这一意图。commit 时 ORM 走 dirty 检查自动生成 UPDATE。
             session.add(existing)
             await session.commit()
             await session.refresh(existing)

@@ -54,7 +54,10 @@ def classifyError(exc: BaseException) -> ErrorType:
        - 4xx 永久错误（401/403/400）→ PROVIDER_PROTOCOL
        - 5xx / timeout / connection → PROVIDER_TRANSIENT
        - 其他 → LLM (兜底)
-    6. Nl2SqlError → PROVIDER_PROTOCOL (重试耗尽 = 协议级失败)
+    6. Nl2SqlError → PROVIDER_PROTOCOL
+       NL→SQL 流程在重试耗尽后抛 Nl2SqlError，分类上与 4xx 协议级失败同口径：
+       都是「模型端无法按协议完成 NL→SQL 解析」，对用户呈现一致
+       （MSG_LLM_PROVIDER_PROTOCOL，不暴露内部 retry / SQL 细节）。
     7. DomainError → DOMAIN
     8. 兜底 INTERNAL
     """

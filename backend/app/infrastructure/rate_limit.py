@@ -35,9 +35,11 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.config import getSettings
-from app.dependencies import CurrentUser, getCurrentUser
-from app.domain.error_messages import MSG_RATE_LIMITED
+from app.dependencies import CurrentUser, getCurrentUser, getDb
+from app.domain.error_messages import MSG_AUTH_REQUIRED, MSG_RATE_LIMITED
+from app.domain.exceptions import PermissionDeniedError
 from app.domain.schemas import ErrorResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -160,21 +162,71 @@ def _expandLimits(limits: list, request: Request) -> list:
     return result
 
 
+async def _optionalCurrentUser(
+    request: Request,
+    session: "AsyncSession" = Depends(getDb),
+) -> "CurrentUser | None":
+    """rateLimitDep 专用：getCurrentUser 抛 MSG_AUTH_REQUIRED 时返回 None。
+
+    修 fix/public-route-rate-limit-allow-anonymous：原 rateLimitDep 隐式
+    ``Depends(getCurrentUser)`` 在 AUTH_MODE=real + 无 Bearer 时直接 raise
+    ⇒ /api/v1/auth/login 等公开端点被误挡 403（与 docstring 承诺的
+    「未携带身份（public 端点）的请求降级到 IP bucket」不一致）。
+
+    本函数：直接调用 getCurrentUser 的解析逻辑（参数从 request.headers 拿），
+    catch PermissionDeniedError(MSG_AUTH_REQUIRED) → 返回 None。
+    其他错误（TOKEN_EXPIRED / TOKEN_INVALID / ACCOUNT_DISABLED 等带语义
+    的 auth 失败）继续 raise —— 这些是「用户曾有 session 但失效了」，
+    不是「首次访问 public 端点」，应让上层路由决定是 401 还是降级。
+
+    匿名态（_user=None）落到 _extract_user_key → "anonymous"，与
+    user_id strategy 共享 bucket，ip_user strategy 走 IP-only 分桶。
+    """
+    settings = getSettings()
+    try:
+        return await getCurrentUser(
+            authorization=request.headers.get("authorization"),
+            xUserId=request.headers.get("x-user-id"),
+            xTenantId=request.headers.get("x-tenant-id"),
+            xUserRoles=request.headers.get("x-user-roles"),
+            xUserDepartments=request.headers.get("x-user-departments"),
+            session=session,
+        )
+    except PermissionDeniedError as exc:
+        if exc.message == MSG_AUTH_REQUIRED:
+            logger.debug(
+                "rateLimitDep 收到匿名请求：getCurrentUser 抛 MSG_AUTH_REQUIRED，"
+                "降级到 IP bucket（settings.authMode=%s, allowStubWhenReal=%s）",
+                settings.authMode,
+                settings.allowStubWhenReal,
+            )
+            return None
+        raise
+
+
 async def rateLimitDep(
     request: Request,
-    _user: "CurrentUser" = Depends(getCurrentUser),
+    _user: "CurrentUser | None" = Depends(_optionalCurrentUser),
 ) -> None:
-    """路由级限流依赖：在 getCurrentUser 之后执行。
+    """路由级限流依赖：基于可选身份（公开端点降级 IP bucket）。
 
-    由于 getCurrentUser 不接受 request 参数（保持直接调用兼容性），
-    本函数同时依赖 getCurrentUser 和 Request，在内部将 _user 写入
-    request.state.user 供 _dynamic_key 使用，然后执行限流检查。
+    改 fix/public-route-rate-limit-allow-anonymous：原签名用
+    ``Depends(getCurrentUser)`` 隐式触发 auth 检查 ⇒ AUTH_MODE=real
+    下所有挂 rateLimitDep 的公开端点（典型 /api/v1/auth/login、
+    /api/v1/auth/password-policy）被 403 挡掉。本函数改用
+    ``_optionalCurrentUser``：拿不到身份时 _user=None，下游
+    _extract_user_key 自然返回 "anonymous"（与 docstring 承诺一致）。
+
+    保留行为：
+    - getCurrentUser 抛 TOKEN_EXPIRED / TOKEN_INVALID 等带语义的错误
+      时继续向上 raise（_optionalCurrentUser 不 catch 这些）
+    - 限流触发 raise RateLimitExceeded → 429 JSON
+    - limiter.enabled=False 时直接 return（不查 IP）
 
     按 RATE_LIMIT_KEY_STRATEGY（ip / user_id / ip_user）分桶计数。
-    未携带身份（public 端点）的请求降级到 IP bucket。
-    限流触发时 raise RateLimitExceeded，由 rateLimitExceededHandler 转换为 429 JSON。
     """
     # 写入 request.state，供 _dynamic_key 的 _extract_user_key 使用
+    # None 时 _extract_user_key 返回 "anonymous"
     request.state.user = _user
 
     if not limiter.enabled:

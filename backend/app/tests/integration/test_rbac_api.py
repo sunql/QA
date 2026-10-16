@@ -38,9 +38,10 @@ AUTH_ADMIN = {
 
 MENU_A, MENU_B, MENU_C, MENU_D = "menu_a", "menu_b", "menu_c", "menu_d"
 LEAF_MENUS = (MENU_A, MENU_B, MENU_C, MENU_D)
-# 71 红 RC-3 延伸：identity_service.create_user 默认给新用户授
-# DEFAULT_NEW_USER_MENU_CODE（identity_service.py:120）。admin 是 superuser
-# 看到所有叶子菜单（包含此 leaf），用 _mkUser 创建的 alice 也持直接 grant。
+# 71 红 RC-3 延伸：IdentityService.create_user 默认给新用户授
+# DEFAULT_NEW_USER_MENU_CODE（见 IdentityService.create_user 内的 pg_insert 块）。
+# admin 是 superuser 看到所有叶子菜单（包含此 leaf），用 _mkUser 创建的 alice
+# 也持直接 grant。
 ALL_LEAF_MENUS = LEAF_MENUS + (DEFAULT_NEW_USER_MENU_CODE,)
 
 
@@ -55,11 +56,11 @@ def _auth_as(user_id: str, roles: str = "analyst") -> dict[str, str]:
 async def _seedMenus(dbSession: AsyncSession) -> None:
     """建一个 section + 4 个叶子菜单（leaf code 作为可授权目标）。
 
-    71 红 RC-3 延伸：identity_service.create_user 默认给新用户授权
-    ``item.profile``（DEFAULT_NEW_USER_MENU_CODE，identity_service.py:120），
-    不 seed 会在 POST /users 时撞 FK fk_permission_grant_menu。
-    但 item.profile 顶层插入会被 menu_config_service 当成 section 触发
-    MenuConfigStructureError（service.py:84「section 必须 path=None」）。
+    71 红 RC-3 延伸：IdentityService.create_user 默认给新用户授权
+    ``item.profile``（DEFAULT_NEW_USER_MENU_CODE，见 IdentityService.create_user
+    内的 pg_insert 块），不 seed 会在 POST /users 时撞 FK fk_permission_grant_menu。
+    但 item.profile 顶层插入会被 MenuConfigService 当成 section 触发
+    MenuConfigStructureError（list_sections 段「section 必须 path=None」校验）。
     修法：把 item.profile 挂为 adminsys 的 child leaf（path=/profile），
     与 production seed_menu_config.py 的 children 模式对齐（item.chat 等
     都是 section.aiAgent 的 child）。
@@ -138,8 +139,9 @@ class TestUsersMe:
         )
         assert r_set.status_code == 204, r_set.text
 
-        # 71 红 RC-3 延伸：_mkUser 创建时 must_change_password=True（feat-admin-user-password
-        # 强制改密）— 必须清掉才能让 me_alice 通过 mustChangePasswordGuard 访问 /me。
+        # 71 红 RC-3 延伸：_mkUser 创建时 must_change_password=True
+        # （IdentityService.create_user 强制改密契约）— 必须清掉才能让 me_alice
+        # 通过 mustChangePasswordGuard 访问 /me。
         me_alice_row = await dbSession.get(User, uid)
         if me_alice_row and me_alice_row.must_change_password:
             me_alice_row.must_change_password = False
@@ -638,9 +640,10 @@ class TestEffectivePermissions:
             f"/api/v1/users/{alice['id']}/permissions", headers=AUTH_ADMIN
         )
         eff = r.json()
-        # 71 红 RC-3 延伸：alice 持 DEFAULT_NEW_USER_MENU_CODE（identity_service.create_user
+        # 71 红 RC-3 延伸：alice 持 DEFAULT_NEW_USER_MENU_CODE（IdentityService.create_user
         # 默认授的 USER 直接 grant）— 角色 grant 收回后此 direct grant 仍在。
-        assert eff["menuCodes"] == [DEFAULT_NEW_USER_MENU_CODE]
+        # 用 set 比较避开 /permissions 端点返回顺序契约。
+        assert set(eff["menuCodes"]) == {DEFAULT_NEW_USER_MENU_CODE}
         assert eff["roleGrants"][0]["menuCodes"] == []
 
     async def test_grant_unknown_menu_code_422(self, client: AsyncClient) -> None:

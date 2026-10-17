@@ -538,3 +538,38 @@ test("Qwen 中断 → 选 deepseek → step 3 成功", async ({ page }) => {
 - ✅ 无歧义：`modelId | null` / `modelId | undefined` 语义明确
 - ✅ 真实数据库测试：后端测试用真 PG（per memory `qa-system-integration-env-contract`）
 - ✅ 80%+ 覆盖率：后端 + 前端 + E2E 三层覆盖
+
+## 手动验证 checklist（替代 E2E 自动化 — 待 Playwright mockApi 加多步支持后回填）
+
+> 触发条件: Qwen 模型在 multi-step 中途失败 (network error / 5xx / token 超限) 用户主动选 deepseek 续跑.
+
+### 路径 A: Chat multi-step 续跑
+
+1. 启动后端 (qa-pg-a1 5434 跑 alembic head 0130) + 前端 (vite dev)
+2. chat 页选 Qwen 模型 (下拉), 输入 "B019 销量趋势", 发送
+3. 等 step 1, 2 通过, step 3 (Qwen) 失败 — 步骤卡片显示 error 状态 + "续跑" 按钮
+4. 点 "续跑" 按钮 → 弹 Popover, 显示 "原模型 Qwen3.8 (OLLAMA)" + dropdown 选 deepseek
+5. 选 deepseek → 提交
+6. 验证: step 3 重新执行, 显示 deepseek 结果
+7. 后端: `audit_log` 应有 1 条 action=UPDATE, resource_type=research_turn (chat 的多步对应类似, 路径略不同)
+8. 前端: dropdown label 用 ASCII 括号 "deepseek-chat (OPENAI_COMPATIBLE_PROXY)"
+
+### 路径 B: Research checkpoint 续跑
+
+1. 起动后端 + 前端 + Neo4j (7688)
+2. 起动研究问题, 等 checkpoint 弹窗 (action=confirm/modify/reject 三选一)
+3. 弹窗底部 model dropdown, 默认 "Qwen3.8 (OLLAMA)" (turn 原模型)
+4. 不改 model 直接 confirm → 后端 payload 不含 modelId → session.model_id 不变
+5. 重起研究, 同样弹窗, dropdown 改 deepseek → confirm → 后端 payload.modelId=1 → session.model_id=1
+6. 后端: `audit_log` 应有 1 条 action=UPDATE, before.model_id=2, after.model_id=1, resource_type=research_turn, actor_id=current_user
+7. 前端: dropdown label 用 ASCII 括号
+
+### 预期 vs 实际对照
+
+| 步骤 | 预期 | 实际 | 通过 |
+|------|------|------|------|
+| A3 | step 3 显示 "续跑" 按钮 | | ☐ |
+| A5 | step 3 用 deepseek 重跑成功 | | ☐ |
+| A7 | audit_log 有 1 条 UPDATE | | ☐ |
+| B5 | session.model_id=1 写回 | | ☐ |
+| B6 | audit_log before=2 after=1 | | ☐ |

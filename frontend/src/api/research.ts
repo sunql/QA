@@ -13,6 +13,7 @@
 import { API_BASE_URL } from "../config";
 import { httpClient } from "./client";
 import { authHeaders } from "./authHeaders";
+import { StreamChunkParser, type StreamFrame } from "../stores/stream_chunk_parser";
 import type {
   CheckpointAction,
   CheckpointAnswer,
@@ -155,72 +156,68 @@ export async function openResearchStream(
   onOpen?.();
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
+  // X4（1012 cross-refs spec §P0-X4）：research SSE 切帧改走共享的
+  // ``StreamChunkParser``（chat 已在用）。旧 ``consumeFrames`` 在拆帧前对整
+  // buffer 做 ``replace(/\r\n|\r/g, "\n")``，会：
+  //   1) 把 data 内的 ``\r`` 抹成 ``\n``，跨 chunk 时伪造虚假 ``\n\n`` 边界
+  //   2) 没有 EOF flush，最后一帧若不以 ``\n\n`` 结尾会被静默丢弃
+  // 现在由 parser.feed 状态化切帧（保留未完成 ``\r``，避免与 ``\n`` 误切），
+  // parser.flush 在 EOF 时强制吐残留。``id:`` 行 / 事件名 / 多行 data
+  // / 心跳跳过的解析仍在本文件的 ``handleFrame``。
+  const parser = new StreamChunkParser();
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      buffer = consumeFrames(buffer, onEvent);
+      const text = decoder.decode(value, { stream: true });
+      for (const frame of parser.feed(text)) {
+        handleFrame(frame, onEvent);
+      }
     }
     // 冲刷解码器缓冲的尾字节：最后一个分块可能截断多字节 UTF-8 字符。
-    buffer += decoder.decode();
-    consumeFrames(buffer, onEvent);
+    const tail = decoder.decode();
+    if (tail) {
+      for (const frame of parser.feed(tail)) {
+        handleFrame(frame, onEvent);
+      }
+    }
+    // EOF 守门：把 parser 残留 buffer 强制当最后一帧返回（哪怕不完整）。
+    for (const frame of parser.flush()) {
+      handleFrame(frame, onEvent);
+    }
   } finally {
     reader.releaseLock();
   }
 }
 
-// 按 \n\n 拆帧，未闭合的尾帧留在 buffer 里等待下一分块（处理分帧边界）。
-function consumeFrames(buffer: string, onEvent: (e: ResearchSseEvent) => void): string {
-  // 统一 CRLF / CR 为 LF（兼容 HTTP 标准换行与后端当前使用的 \n）。
-  const normalized = buffer.replace(/\r\n|\r/g, "\n");
-  let index: number;
-  let remainder = normalized;
-  while ((index = remainder.indexOf("\n\n")) !== -1) {
-    const frame = remainder.slice(0, index);
-    remainder = remainder.slice(index + 2);
-    handleFrame(frame, onEvent);
-  }
-  return remainder;
-}
-
 // 解析帧内的 `id:` 行（后端 `_sseFrame` 的 `id: <seq>`）。SSE 规范：同帧出现多个
 // `id:` 时**最后一个生效** —— 空值 / 非整数 ⇒ 该帧 id 为 undefined（不保留更早的
-// 有效值），事件照常分发。（后端当前每帧最多一个数字 `id:`，此分支不可达。）
-function parseFrameId(frame: string): number | undefined {
-  let id: number | undefined;
-  for (const line of frame.split("\n")) {
-    if (!line.startsWith("id:")) continue;
-    const raw = line.slice("id:".length).trim();
-    const parsed = Number(raw);
-    id = raw !== "" && Number.isInteger(parsed) ? parsed : undefined;
-  }
-  return id;
-}
-
-function handleFrame(frame: string, onEvent: (e: ResearchSseEvent) => void): void {
-  let name = "";
-  const dataLines: string[] = [];
-  for (const line of frame.split("\n")) {
-    if (line.startsWith(":")) continue; // 心跳 / 注释行：跳过
-    if (line.startsWith("event:")) {
-      name = line.slice("event:".length).trim();
-    } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice("data:".length).trim());
-    }
-  }
-  if (!name || dataLines.length === 0) return;
+// 有效值），事件照常分发。**X4 起**这部分解析下沉到 StreamChunkParser：
+//   - parser 跳过 `:` 注释行（sse 规范）
+//   - parser 把多行 data 用 \n 拼回 data 字符串
+//   - parser 把 event 名（去尾部 \r）放到 frame.event
+//   - parser 把最后一个有效 id 放到 frame.id（无 id: 行 ⇒ 字段不设）
+// 本函数只做 research 特定的「事件名白名单 + JSON parse + 记录游标」三件事。
+//
+// **X4 注意**：parser 的 data 字段**保留** data 行末尾的 `\r`（CRLF 分割残余），
+// 因为行**内部**的 \r 是 JSON 内容一部分（如 `{"x":"a\rb"}`）。但行**末尾**的
+// \r 是 CR of CRLF 终止符 ⇒ JSON 解析前必须剥掉，否则 `{"x": 1\r}` 这种
+// 数据会让 JSON.parse 抛 SyntaxError。
+function handleFrame(frame: StreamFrame, onEvent: (e: ResearchSseEvent) => void): void {
+  const name = frame.event;
+  if (!name) return;
   if (!isResearchEventName(name)) return;
+  // 剥掉 data 行末尾的 \r（CRLF 终止符）；行内 \r 保留（被 JSON.parse 视为
+  // 字符串内的合法字符）。\n 不剥（它是 SSE 多 data 行的合法连接符）。
+  const data = frame.data.endsWith("\r") ? frame.data.slice(0, -1) : frame.data;
   let payload: unknown;
   try {
-    // 多行 data: 按 SSE 规范以 \n 连接（后端当前单行，防御性兼容）。
-    payload = JSON.parse(dataLines.join("\n"));
+    payload = JSON.parse(data);
   } catch {
     return;
   }
   if (!isRecord(payload)) return;
-  const id = parseFrameId(frame);
   // 无 `id:` 时**不写** id 键 —— 保持既有 `toEqual({name, payload})` 断言不变形。
-  onEvent(id === undefined ? { name, payload } : { name, payload, id });
+  // SSE 规范：``id:`` 字段空 / 非整数 ⇒ id 为 undefined（重置先前有效值）。
+  onEvent(frame.id === undefined ? { name, payload } : { name, payload, id: frame.id });
 }

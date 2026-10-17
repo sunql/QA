@@ -123,7 +123,12 @@ function patchMessage(
   patch: Partial<ChatMessage>
 ): ChatMessage[] {
   if (!targetId) return patchLastMessage(messages, patch);
-  return messages.map((m) => (m.id === targetId ? { ...m, ...patch } : m));
+  // targetId 既能匹配 m.id（resume 路径），也能匹配 m.assistantMessageId（首发 P1-3）
+  return messages.map((m) =>
+    m.id === targetId || m.assistantMessageId === targetId
+      ? { ...m, ...patch }
+      : m
+  );
 }
 
 // 后端步骤结果 → 前端终态：有 error 即失败（失败步骤 sql 恒为 null，与后端同判据）。
@@ -141,8 +146,9 @@ function patchStep(
   patch: Partial<MultiStepStep>
 ): ChatMessage[] {
   // 取数也必须认 targetId：否则定向写会把**最新**消息的 steps 搬到旧卡片上
+  // targetId 匹配 m.id（resume 路径），也匹配 m.assistantMessageId（首发路径 P1-3）
   const target = targetId
-    ? messages.find((m) => m.id === targetId)
+    ? messages.find((m) => m.id === targetId || m.assistantMessageId === targetId)
     : messages[messages.length - 1];
   if (!target) return messages;
   const steps = target.steps ?? [];
@@ -505,10 +511,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   setDatasourceId: (id) => {
     if (get().datasourceId === id) return;  // P0-3：早返避免无谓 reset
-    // 切数据源 = 全新会话（不允许旧 state 跨数据源继承）
+    // 切数据源 = 全新会话（不允许旧 state 跨数据源继承）。
+    // 仅在已有对话时换 sessionId：空会话上无谓换 id 反而把上层 / 测试传的 s-test 之类
+    // 锚点丢掉，且语义上「无旧 state 可清」本就允许沿用。
+    const hasConversation = get().messages.length > 0;
     set({
       datasourceId: id,
-      sessionId: generateSessionId(),
+      ...(hasConversation ? { sessionId: generateSessionId() } : {}),
       messages: [],
       isStreaming: false,
     });
@@ -609,10 +618,17 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               }),
             }));
           },
+          // F2：KPI 数据源不一致警告 code（写 code 即可，i18n 键由展示层映射；后端中文原文不入库）
+          onMetaWarning: (code) => {
+            if (!isCurrent()) return;
+            set((state) => ({
+              messages: patchLastMessage(state.messages, { kpiDatasourceCode: code }),
+            }));
+          },
           onPlan: (plan) => {
             if (!isCurrent()) return;
             set((state) => ({
-              messages: patchLastMessage(state.messages, { queryPlan: plan }),
+              messages: patchLastMessage(state.messages, { queryPlan: plan, isStreaming: true }),
             }));
           },
           onSql: (sql) => {
@@ -641,7 +657,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                     description: s.description,
                     subQuestion: s.subQuestion,
                     aggregationOnly: s.aggregationOnly,
-                    status: "pending",
+                    // F7/IMP-6：续跑时后端会为「已跳过（已持久化完成）」的步回放终态
+                    // （"done"）。不认它就一律回落成「待执行」——用户点续跑并跑成功后，
+                    // 前 N 个**已完成**的步反而显示「待执行」，看不出「续跑省掉了重跑」。
+                    // 缺省（普通新跑 / 旧后端）⇒ "pending"。
+                    status: s.status ?? "pending",
                   })
                 ),
               }),
@@ -651,7 +671,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             if (!isCurrent()) return;
             set((state) => ({
               messages: patchLastMessage(
-                patchStep(state.messages, step.stepIndex, { status: "running" }),
+                patchStep(state.messages, assistantMessageId, step.stepIndex, { status: "running" }),
                 { currentStepIndex: step.stepIndex }
               ),
             }));
@@ -659,7 +679,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           onStepResult: (result) => {
             if (!isCurrent()) return;
             set((state) => ({
-              messages: patchStep(state.messages, result.stepIndex, {
+              messages: patchStep(state.messages, assistantMessageId, result.stepIndex, {
                 status: stepStatusFromResult(result.error),
                 sql: result.sql ?? null,
                 summary: result.summary ?? null,
@@ -726,7 +746,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   supplierRisk: supplierRisk ?? null,
                   graphTraversal: graphTraversal ?? null,
                   suggestedAgent: suggestedAgent ?? null,
-                  queryPlan: queryPlan ?? null,
+                  // 仅当 done 帧显式携带 queryPlan 时才覆盖；onPlan 已写入的计划（ReAct
+                  // 多步流上首个 plan 帧先于 done 到达）须保留。否则 `?? null` 会把 plan
+                  // 抹成 null，导致前端查询计划卡片不渲染（Phase E 红 #2）。
+                  ...(queryPlan !== undefined ? { queryPlan } : {}),
                   ...(visualRationale ? { visualRationale } : {}),
                 })
               ),

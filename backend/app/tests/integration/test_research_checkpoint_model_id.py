@@ -13,39 +13,6 @@ from app.api.v1 import research as researchModule
 _BASE = "/api/v1/research"
 
 
-async def _seedUser(dbSession: AsyncSession, username: str) -> None:
-    from app.models.rbac import User
-    user = User(username=username, display_name=username, email=None, enabled=True, password_hash=None)
-    dbSession.add(user)
-    await dbSession.commit()
-
-
-async def _seedDatasource(dbSession: AsyncSession) -> None:
-    from app.domain.models import DataSource
-    from app.domain.enums import DataSourceType
-    from app.infrastructure.security.crypto import encryptApiKey
-    ds = DataSource(
-        name="api-test-oracle",
-        type=DataSourceType.ORACLE,
-        host="oracle-test",
-        port=1521,
-        database_name="THBIDB",
-        username="THBI",
-        password_encrypted=encryptApiKey("test-password"),
-        is_active=True,
-        is_default=True,
-        oracle_version="19.0.0.0.0",
-    )
-    dbSession.add(ds)
-    await dbSession.commit()
-
-
-async def _authHeaders(dbSession: AsyncSession) -> dict[str, str]:
-    await _seedUser(dbSession, "research-user-a")
-    await _seedDatasource(dbSession)
-    return {"X-User-Id": "research-user-a"}
-
-
 async def _createSession(
     dbSession: AsyncSession, userId: int, datasourceId: int
 ):

@@ -383,6 +383,10 @@ export const zhCN = {
     statusError: "失败",
     summaryStep: "汇总",
     resume: "续跑",
+    resumeChooseModel: "选择续跑模型",
+    resumeSameModelHint: "（该模型刚失败，可选重试或换其他模型）",
+    resumeWithSelected: "用所选模型续跑",
+    resumeWithOriginal: "原模型续跑",
     resumeFailed: "续跑失败：{message}（原有回答已保留，可再次续跑）",
     compressedRows: "数据已压缩（{from} → {to} 行）",
     // F2：KPI 数据源不一致警告（按 code 作为 i18n 键名，不存后端中文原文）

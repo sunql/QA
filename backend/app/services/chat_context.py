@@ -230,14 +230,21 @@ _RECENT_ROUNDS_LIMIT = 5
 _STATE_HISTORY_FIELD_LIMIT_DEFAULT = 500
 
 
-def _stateRowRank(row: SessionQueryState) -> tuple[int, Any, int]:
-    """`_selectStateRow` 的排序键，元组比较，越大越优先。"""
+def _stateRowRank(row: SessionQueryState) -> tuple[bool, int, Any, int]:
+    """`_selectStateRow` 的排序键，元组比较，越大越优先。
+
+    M5：is_stub=False 作为第一键（False < True in bool），max() 取出的行
+    必然是 is_stub=False 的 real 行。stub 行即使 scope 完整也不会被选中。
+    其次按 scope 完整度 → 更新时间 → 主键，与原有策略一致。
+    """
     return (
-        # ① scope 完整度：两个维度都非 NULL 的行优先
+        # ① is_stub：real 行（False）优先于 stub 行（True）
+        row.is_stub,
+        # ② scope 完整度：两个维度都非 NULL 的行优先
         (row.user_id is not None) + (row.datasource_id is not None),
-        # ② 越新越优先（追问锚点理应是上一轮，不是上周）
+        # ③ 越新越优先（追问锚点理应是上一轮，不是上周）
         row.updated_time,
-        # ③ 主键兜底：updated_time 相同也保证结果唯一且与插入顺序无关
+        # ④ 主键兜底：updated_time 相同也保证结果唯一且与插入顺序无关
         row.id,
     )
 
@@ -555,13 +562,20 @@ class ContextMixin:
         P0-3：当传 userId/datasourceId 时按三元 (user_id, datasource_id, session_id) 过滤；
         任一 None 不过滤；既有 17+ 调用点不传新参数时行为不变。
 
+        M5：读侧追加 `is_stub=False` 过滤，排除 stub 模式写入的行。
+        即使 stub 行存在，也不会被读到。`_stateRowRank` 的第一排序键
+        `is_stub` 作为纵深防御，确保 real 行永远优先于 stub 行。
+
         F1：调用方给全 scope 时唯一约束（uq_session_query_state_scope）保证最多一行，
         直接 `scalar_one_or_none()` 是安全的；但给**部分**或**不给** scope 时，
         同一 session 下可能同时存在多行（P0-3 之前写的 NULL 行与之后写的 scoped 行
         可以合法并存 —— Postgres 的 UNIQUE 把 NULL 视作互不相等），裸语义会抛
         `MultipleResultsFound` 把一次追问打成 500。故统一走 `_selectStateRow`。
         """
-        stmt = select(SessionQueryState).where(SessionQueryState.session_id == sessionId)
+        stmt = select(SessionQueryState).where(
+            SessionQueryState.session_id == sessionId,
+            SessionQueryState.is_stub == False,  # M5：排除 stub 行
+        )
         if userId is not None:
             stmt = stmt.where(SessionQueryState.user_id == userId)
         if datasourceId is not None:
@@ -619,6 +633,7 @@ class ContextMixin:
             # P0-3：同步 scope 字段
             if userId is not None:
                 existing.user_id = userId
+                existing.is_stub = False  # M5：stub→real 切换，清除 stub 标记
             if datasourceId is not None:
                 existing.datasource_id = datasourceId
             if schemaName is not None:
@@ -630,6 +645,7 @@ class ContextMixin:
             await session.refresh(existing)
             return existing
         # P0-3：创建时写 scope 字段
+        # M5：is_stub = userId is None（stub 模式写入半 scope 行）
         state = SessionQueryState(
             session_id=sessionId,
             last_question=question,
@@ -642,6 +658,7 @@ class ContextMixin:
             datasource_id=datasourceId,
             schema_name=schemaName,
             datasource_version=datasourceVersion,
+            is_stub=userId is None,  # M5
         )
         session.add(state)
         await session.commit()

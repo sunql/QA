@@ -869,6 +869,12 @@ class SessionQueryState(Base, TimestampMixin):
     P0-3：每条 state 绑定 (user_id, datasource_id, session_id) 三元，
     避免切换数据源后用错 state / 跨用户窃取上下文。
     NULL 列兼容历史无 scope 的旧行。
+
+    M5：is_stub 标记 stub 模式（dbUserId=None）写入的半 scope 行。
+    写侧在 userId is None 时设 is_stub=True；读侧追加 WHERE is_stub=false。
+    M4 的 user_id=-1 墓碑行在迁移 0129 中被 backfill 为 is_stub=True，
+    使其被读侧过滤排除。is_stub 比 scope 完整度更强的排序信号：
+    is_stub=False 的行（real 行）在任何情况下都优先于 is_stub=True 的行。
     """
 
     __tablename__ = "session_query_state"
@@ -880,6 +886,10 @@ class SessionQueryState(Base, TimestampMixin):
     schema_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     datasource_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # M5：stub 行标记；userId is None 时写 True，读侧排除
+    is_stub: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa.text("false"),
+    )
     # 原字段
     last_question: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_plan: Mapped[dict[str, Any] | None] = mapped_column(

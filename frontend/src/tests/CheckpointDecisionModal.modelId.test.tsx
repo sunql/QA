@@ -1,5 +1,6 @@
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { vi, describe, it, expect, beforeEach } from "vitest";
+import { buildCheckpointAnswerPayload } from "../components/research/CheckpointDecisionModal";
 
 // Mock httpClient at source (same pattern as researchStore.test.ts).
 const httpMock = vi.hoisted(() => ({
@@ -119,5 +120,29 @@ describe("CheckpointDecisionModal model dropdown (N4)", () => {
     // Submit (display proves selection was registered)
     fireEvent.click(screen.getByTestId("checkpoint-submit"));
     await waitFor(() => expect(httpMock.post).toHaveBeenCalled());
+  });
+});
+
+describe("buildCheckpointAnswerPayload (N4 pure function)", () => {
+  it("modelId == turnModelId → no modelId in payload (走原模型)", () => {
+    const p = buildCheckpointAnswerPayload("confirm", { x: 1 }, 2, 2);
+    expect(p).toEqual({ action: "confirm", choice: { x: 1 } });
+    expect(p).not.toHaveProperty("modelId");
+  });
+
+  it("modelId != turnModelId → payload 含 modelId (改派)", () => {
+    const p = buildCheckpointAnswerPayload("confirm", { x: 1 }, 1, 2);
+    expect(p).toEqual({ action: "confirm", choice: { x: 1 }, modelId: 1 });
+  });
+
+  it("modelId == null (用户没选) → 无 modelId 字段", () => {
+    const p = buildCheckpointAnswerPayload("confirm", { x: 1 }, null, 2);
+    expect(p).toEqual({ action: "confirm", choice: { x: 1 } });
+    expect(p).not.toHaveProperty("modelId");
+  });
+
+  it("action=modify / reject 也走同一 builder", () => {
+    expect(buildCheckpointAnswerPayload("modify", {}, 1, 2)).toEqual({ action: "modify", choice: {}, modelId: 1 });
+    expect(buildCheckpointAnswerPayload("reject", {}, 2, 2)).toEqual({ action: "reject", choice: {} });
   });
 });

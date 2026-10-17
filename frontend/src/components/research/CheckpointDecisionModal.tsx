@@ -12,6 +12,29 @@ import { useLlmModels } from "../../hooks/useLlmModels";
 import { answerCheckpoint } from "../../api/research";
 import type { CheckpointAction } from "../../types/research";
 
+/**
+ * Build the answerCheckpoint payload from current modal state.
+ * Pure function (N4): easy to test without driving antd Select state in jsdom.
+ *
+ * @param action       CheckpointAction ("confirm" | "modify" | "reject")
+ * @param choice       user choice payload
+ * @param modelId      currently-selected model id (null = "no choice made")
+ * @param turnModelId  original turn model id (used to detect "user changed model")
+ * @returns the payload object, with modelId only if user changed model
+ */
+export function buildCheckpointAnswerPayload(
+  action: CheckpointAction,
+  choice: Record<string, unknown>,
+  modelId: number | null,
+  turnModelId: number,
+): { action: CheckpointAction; choice: Record<string, unknown>; modelId?: number } {
+  const payload: { action: CheckpointAction; choice: Record<string, unknown>; modelId?: number } = { action, choice };
+  if (modelId !== null && modelId !== turnModelId) {
+    payload.modelId = modelId;
+  }
+  return payload;
+}
+
 interface CheckpointDecisionModalProps {
   checkpointId: string;
   turnModelId: number;
@@ -43,13 +66,7 @@ export default function CheckpointDecisionModal({
   }));
 
   const handleSubmit = async () => {
-    const payload: { action: CheckpointAction; choice: Record<string, unknown>; modelId?: number } = {
-      action,
-      choice: {},
-    };
-    if (modelId !== null && modelId !== turnModelId) {
-      payload.modelId = modelId;
-    }
+    const payload = buildCheckpointAnswerPayload(action, {}, modelId, turnModelId);
     await answerCheckpoint(checkpointId, payload);
     onSubmit();
     onClose();

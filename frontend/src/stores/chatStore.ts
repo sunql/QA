@@ -511,10 +511,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   setDatasourceId: (id) => {
     if (get().datasourceId === id) return;  // P0-3：早返避免无谓 reset
-    // 切数据源 = 全新会话（不允许旧 state 跨数据源继承）
+    // 切数据源 = 全新会话（不允许旧 state 跨数据源继承）。
+    // 仅在已有对话时换 sessionId：空会话上无谓换 id 反而把上层 / 测试传的 s-test 之类
+    // 锚点丢掉，且语义上「无旧 state 可清」本就允许沿用。
+    const hasConversation = get().messages.length > 0;
     set({
       datasourceId: id,
-      sessionId: generateSessionId(),
+      ...(hasConversation ? { sessionId: generateSessionId() } : {}),
       messages: [],
       isStreaming: false,
     });

@@ -13,9 +13,10 @@
   ② _saveQueryState(userId=1)   → is_stub=False
   ③ _loadQueryState 排除 is_stub=True 行（stub 行存在时读不到）
   ④ existing-branch 更新：userId=None → userId=1 时 is_stub 翻为 False
+  ④b existing-branch stub→stub：连续两次 stub 走真路径 is_stub 保持 True
   ⑤ 反向断言：同一 session 同时有 stub 行 + real 行 → 读回 real 行
-  ⑥ 迁移：upgrade/downgrade round-trip + idempotent backfill
 
+迁移 round-trip（upgrade/downgrade）由 alembic 内置覆盖，本文件不重复造。
 fixtures 复用 test_chat_api.py（_seed / _installFakes / _PipelineLlm / _FakeAdapter / _RouterFor）。
 """
 
@@ -199,6 +200,56 @@ class TestQueryStateIsStub:
         assert is_stub is False, (
             f"userId 已落地，is_stub 应为 False，实际 {is_stub!r}；"
             "stub→real 切换时 is_stub 未清除"
+        )
+
+    async def test_existing_branch_stub_to_stub_keeps_is_stub_true(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """④b existing-branch 更新：连续两次 stub（userId=None）⇒ is_stub 仍 True。
+
+        走真 _saveQueryState 路径（不是手工 SQL UPDATE）：
+        1. 第一次 stub 请求 → 走 create 分支，写入 is_stub=True 行
+        2. 第二次 stub 请求（同 sessionId）→ 走 existing 分支
+        3. 现有 existing 分支在 userId is None 时**不**触碰 is_stub（与 spec 一致：
+           stub 续 stub 仍是 stub，不翻为 real）
+        4. 守护：若有人把 `if userId is not None: existing.is_stub = False` 误改为
+           `if userId is None: existing.is_stub = True` 或类似反向守卫，本测试立刻 RED
+        """
+        config, ds = await _seed(dbSession)
+        _installFakes(monkeypatch, config)
+
+        # 第一轮 stub → create 分支
+        resp1 = await client.post(
+            "/api/v1/chat",
+            json=_chat_payload("各供应商的收货数量汇总", ds.id, "stub-stub-s1"),
+            headers={"X-User-Id": "nobody"},
+        )
+        assert resp1.status_code == 200, f"stub#1 应返回 200，实际 {resp1.status_code}"
+        assert await _readIsStub(dbSession, "stub-stub-s1") is True
+
+        # 第二轮 stub（同 sessionId、同 X-User-Id）→ existing 分支
+        resp2 = await client.post(
+            "/api/v1/chat",
+            json=_chat_payload("再问一遍", ds.id, "stub-stub-s1"),
+            headers={"X-User-Id": "nobody"},
+        )
+        assert resp2.status_code == 200, f"stub#2 应返回 200，实际 {resp2.status_code}"
+
+        # 守护：existing 分支不触碰 is_stub（既不翻为 False 也不重复写 True）
+        is_stub = await _readIsStub(dbSession, "stub-stub-s1")
+        assert is_stub is True, (
+            f"stub→stub 续写后 is_stub 应仍为 True，实际 {is_stub!r}；"
+            "existing 分支在 userId is None 时不应翻动 is_stub"
+        )
+
+        # 守护：仍只有 1 行（existing-branch UPDATE，不是新 INSERT）
+        from app.services.chat_context import ContextMixin
+
+        mixin = ContextMixin()
+        state = await mixin._loadQueryState(dbSession, "stub-stub-s1")
+        assert state is None, (
+            "_loadQueryState 应排除 stub 行，第二次 stub 写入后仍应返回 None；"
+            f"实际 {state!r}"
         )
 
     async def test_reverse_assertion_real_row_wins_over_stub(

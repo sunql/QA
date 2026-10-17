@@ -888,7 +888,7 @@ class SessionQueryState(Base, TimestampMixin):
     datasource_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # M5：stub 行标记；userId is None 时写 True，读侧排除
     is_stub: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=sa.text("false"), default=False,
+        Boolean, nullable=False, server_default=sa.text("false"),
     )
     # 原字段
     last_question: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -13,6 +13,12 @@ Backfill：将 user_id=-1 的 M4 墓碑行标记为 is_stub=True（这些行是 
 在 M4 引入 user_id=-1 作为"无用户"的标记，M5 统一迁移到 is_stub 机制）。
 Idempotent：backfill 的 WHERE user_id=-1 AND is_stub=False 只命中未处理行，
 重复执行是安全的。
+
+合并顺序：M4 (PR #35, branch fix/m4-session-query-state-null-stamp) 占 0128，
+本迁移编 0129 是有意避开冲突的占位。
+- 若 M4 先合：M5 rebase 后 down_revision 由 0127 改为 0128
+- 若 M5 先合：M4 须把 0128 改号到 0130（按 qa-system-alembic-merge-number-collision 规约）
+M5 自身不强制 depends_on（0128 在合并前不存在），靠 PR 协调 + SSOT 记录。
 """
 from __future__ import annotations
 

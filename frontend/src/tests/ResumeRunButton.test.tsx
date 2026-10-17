@@ -75,4 +75,42 @@ describe("ResumeRunButton", () => {
     fireEvent.click(screen.getByTestId("resume-with-original"));
     expect(onResume).toHaveBeenCalledWith("r-1", 2, null);
   });
+
+  it("点 '取消' 按钮 → Popover 关闭 + onResume 不被调", async () => {
+    const onResume = vi.fn();
+    render(<ResumeRunButton runId="r-1" fromStepIndex={2} originalModelId={2} onResume={onResume} />);
+    fireEvent.click(screen.getByTestId("resume-run"));
+    await waitFor(() => screen.getByTestId("resume-model-select"));
+    fireEvent.click(screen.getByTestId("resume-cancel"));
+    expect(onResume).not.toHaveBeenCalled();
+    // Popover closed: setTimeout 让 React 状态更新后, element 应 hidden
+    await new Promise((r) => setTimeout(r, 50));
+    const el = screen.queryByTestId("resume-model-select");
+    expect(el?.closest(".ant-popover-hidden")).not.toBeNull();
+  });
+
+  it("Popover open 时点击 ResumeRunButton 外侧 → Popover 关闭", async () => {
+    const onResume = vi.fn();
+    render(<ResumeRunButton runId="r-1" fromStepIndex={2} originalModelId={2} onResume={onResume} />);
+    fireEvent.click(screen.getByTestId("resume-run"));
+    await waitFor(() => screen.getByTestId("resume-model-select"));
+    // antd Popover outside click: mousedown 先于 click 触发 onOpenChange(false)
+    fireEvent.mouseDown(document.body);
+    fireEvent.click(document.body);
+    await new Promise((r) => setTimeout(r, 50));
+    // Popover 关闭后, 点 resume-with-original 应该重新触发 Popover 打开 (而非触发已关闭的 Popover)
+    // 如果 Popover 没关闭, 会点到已存在的 Popover 内的按钮
+    fireEvent.click(screen.getByTestId("resume-run"));
+    await waitFor(() => screen.getByTestId("resume-model-select"));
+  });
+
+  it("disabled=true → 点 '续跑' 按钮无反应 (Popover 不弹)", async () => {
+    const onResume = vi.fn();
+    render(<ResumeRunButton runId="r-1" fromStepIndex={2} originalModelId={2} onResume={onResume} disabled />);
+    fireEvent.click(screen.getByTestId("resume-run"));
+    // 等待确认没弹出
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByTestId("resume-model-select")).toBeNull();
+    expect(onResume).not.toHaveBeenCalled();
+  });
 });

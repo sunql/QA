@@ -76,7 +76,7 @@ export default function ResumeRunButton({
             >
               {t("multiStep.resumeWithOriginal")}
             </Button>
-            <Button onClick={() => setOpen(false)}>{t("common.cancel")}</Button>
+            <Button onClick={() => setOpen(false)} data-testid="resume-cancel">{t("common.cancel")}</Button>
           </Space>
         </Space>
       }

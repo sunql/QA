@@ -369,6 +369,54 @@ describe("api/research SSE（openResearchStream）", () => {
     expect(received.map((e) => e.name)).toEqual(["research.intent", "research.done"]);
   });
 
+  // X4（1012 cross-refs spec §P0-X4）：跨 chunk 的 CRLF 不能被旧 consumeFrames
+  // 的全局 replace 误归一化。旧实现在调用前对整个 buffer 做
+  // `replace(/\r\n|\r/g, "\n")`，会：
+  //   1) 把 data 里的 `\r` 抹成 `\n`，JSON parse 错位
+  //   2) 当 \r 跨 chunk（chunk1 末尾是 \r，chunk2 开头是 \n）时，\r 被提前归一，
+  //      下一次进入 buffer 的 \n 形成虚假的 \n\n 边界，把一帧切成两半
+  // 现在的解析走共享 StreamChunkParser，\r 只在 event/data 行的**末尾**被剥离。
+  it("X4：data 内的 \\r 跨 chunk 边界仍保留（不归一化到 \\n）", async () => {
+    // 单帧 "event: ...\ndata: {\"x\": 1}\n\n" 但把数据中的 \r\n 跨 chunk：
+    //   chunk1 = "...\ndata: {\"x\": 1\r"
+    //   chunk2 = "\n}\n\n"
+    // 旧实现：chunk1 末尾的 \r 被 replace 成 \n，与 chunk2 首个 \n 形成 \n\n
+    // 边界 → 帧 1 = "event: ...\ndata: {\"x\": 1"（data 残缺）→ JSON.parse 抛错 → 跳帧。
+    const stream = chunkedStream([
+      'event: research.intent\ndata: {"x": 1\r',
+      '\n}\n\n',
+    ]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: ResearchSseEvent[] = [];
+    await openResearchStream("s1", (e) => received.push(e));
+
+    expect(received).toHaveLength(1);
+    expect(received[0].name).toBe("research.intent");
+    // 关键：data 里的 \r 必须保留（与 chat 一致，用 stream_chunk_parser）
+    expect(received[0].payload).toEqual({ x: 1 });
+  });
+
+  // X4（1012 cross-refs spec §P0-X4）：EOF 守门。旧 consumeFrames 在 EOF 时
+  // 只把 buffer 当 remainder 返回，**不**强制把残留切为最后一帧，导致
+  // 后端以非 \n\n 结尾的最后一条事件被静默丢弃（如 connection close 提前）。
+  // 现在走 StreamChunkParser.flush() 强制吐残留。
+  it("X4：最后一帧无 \\n\\n 终止也照常分发（EOF 守门）", async () => {
+    const stream = chunkedStream([
+      'event: research.done\ndata: {"degraded":false}',  // 无尾 \n\n
+    ]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: ResearchSseEvent[] = [];
+    await openResearchStream("s1", (e) => received.push(e));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({
+      name: "research.done",
+      payload: { degraded: false },
+    });
+  });
+
   it("处理分帧边界：单帧跨多个 chunk 也能完整解析", async () => {
     const stream = chunkedStream([
       "event: research.intent\nda",

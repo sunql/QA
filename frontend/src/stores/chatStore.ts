@@ -621,7 +621,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           onPlan: (plan) => {
             if (!isCurrent()) return;
             set((state) => ({
-              messages: patchLastMessage(state.messages, { queryPlan: plan }),
+              messages: patchLastMessage(state.messages, { queryPlan: plan, isStreaming: true }),
             }));
           },
           onSql: (sql) => {
@@ -735,7 +735,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   supplierRisk: supplierRisk ?? null,
                   graphTraversal: graphTraversal ?? null,
                   suggestedAgent: suggestedAgent ?? null,
-                  queryPlan: queryPlan ?? null,
+                  // 仅当 done 帧显式携带 queryPlan 时才覆盖；onPlan 已写入的计划（ReAct
+                  // 多步流上首个 plan 帧先于 done 到达）须保留。否则 `?? null` 会把 plan
+                  // 抹成 null，导致前端查询计划卡片不渲染（Phase E 红 #2）。
+                  ...(queryPlan !== undefined ? { queryPlan } : {}),
                   ...(visualRationale ? { visualRationale } : {}),
                 })
               ),

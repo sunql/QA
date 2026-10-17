@@ -30,6 +30,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.schemas import HypothesisRead
 from app.infrastructure.llm.base_client import LlmMessage
+from app.security.prompt_sanitizer import (
+    UntrustedLabel,
+    renderSecurityPreamble,
+    wrapUntrusted,
+)
 from app.services.llm_json_fence import stripJsonFence
 
 logger = logging.getLogger(__name__)
@@ -75,6 +80,7 @@ _SQL_ALLOWED_PREFIXES = ("SELECT", "WITH")
 
 # LLM 假设生成的 system prompt 硬约束（JSON-only + 禁因果句式 + 只引用给定 driver）
 _HYPOTHESIS_SYSTEM_PROMPT = (
+    f"{renderSecurityPreamble()}\n\n"
     "你是数据分析助手。基于用户问题与已查询到的数据摘要，给出最多 "
     f"{HYPOTHESIS_MAX_COUNT} 条数据波动或结果的「可能解释」假设。\n"
     "硬约束：\n"
@@ -261,10 +267,12 @@ def buildHypothesisMessages(
     """
     from app.services.learning.prompt_fence import neutralizeFence
 
+    safeQuestion = wrapUntrusted(UntrustedLabel.USER_QUESTION, question)
+    safeDataSummary = wrapUntrusted(UntrustedLabel.DATA_SUMMARY, dataSummary)
     driverText = "、".join(drivers) if drivers else "（无可用列提示）"
     userPrompt = (
-        f"<user_content>\n{neutralizeFence(question)}\n"
-        f"{neutralizeFence(dataSummary)}\n</user_content>\n\n"
+        f"{safeQuestion}\n\n"
+        f"{safeDataSummary}\n\n"
         f"{_HYPOTHESIS_PROMPT_MARKER}生成任务。可用列/指标：{driverText}"
     )
     if schemaHint:

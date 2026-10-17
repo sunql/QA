@@ -639,6 +639,13 @@ class IntentService:
         #    （F5：词表已只保留纯指代词，"汇总/按月/分组"等动作词已移出，
         #      因为它们本身就是合法查询的开头）
         if len(stripped) <= 10 and any(kw in normalized for kw in _SHORT_FOLLOWUP_KEYWORDS):
+            # 双路径语义：
+            #   - 有历史（hasPriorState=True）：这是上轮查询的追问线索，但消息太短
+            #     不足以重写 SQL，CLARIFY 让用户补全意图（避免生成猜测 SQL）。
+            #   - 无历史（hasPriorState=False）：这条"短 + 追问词"消息大概率是
+            #     误输入/碎片化输入，CLARIFY 兜底询问比 NEW_QUERY 产生 SQL 更安全。
+            # Step 9（line 647-650）才区分 CHITCHAT — 因为它只要求「短」，不需要
+            # 命中追问词；这条要求"短 + 追问词"两个条件已足够明确为追问语境。
             return IntentResult(intent=IntentType.CLARIFY)
         # 9. 长度兜底：阈值是 _SHORT_MESSAGE_LIMIT（更短），与 step 8 的 ≤ 10 是两回事——
         #    step 8 要求「短」且「命中追问词」，这里只要求「短」。

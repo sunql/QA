@@ -20,6 +20,11 @@ from app.dependencies import CurrentUser
 from app.domain.models import LlmConfig, SessionMessage
 from app.domain.schemas import DocQaRequest
 from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage
+from app.security.prompt_sanitizer import (
+    UntrustedLabel,
+    renderSecurityPreamble,
+    wrapUntrusted,
+)
 from app.services.rag_qa_prompt import (
     DOC_QA_SYSTEM_PROMPT,
     DOC_QA_USER_TEMPLATE,
@@ -190,13 +195,18 @@ class RagQaService:
             from app.domain.exceptions import LLMUnavailableError
             raise LLMUnavailableError("未配置可用的 LLM，无法进行文档问答")
 
-        chunks_json = format_chunks_json(chunks)
+        safe_chunks = wrapUntrusted(UntrustedLabel.WIKI_CHUNKS, format_chunks_json(chunks))
+        safe_history = wrapUntrusted(UntrustedLabel.HISTORY, history_block)
+        safe_question = wrapUntrusted(UntrustedLabel.USER_QUESTION, dto.question)
         messages: list[LlmMessage] = [
-            LlmMessage(role="system", content=DOC_QA_SYSTEM_PROMPT.format(chunks_json=chunks_json)),
+            LlmMessage(
+                role="system",
+                content=f"{renderSecurityPreamble()}\n\n{DOC_QA_SYSTEM_PROMPT.format(chunks_json=safe_chunks)}",
+            ),
             LlmMessage(
                 role="user",
                 content=DOC_QA_USER_TEMPLATE.format(
-                    history_block=history_block, question=dto.question,
+                    history_block=safe_history, question=safe_question,
                 ),
             ),
         ]

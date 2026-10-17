@@ -134,12 +134,47 @@ class TestModelConfigCacheInvalidation:
             # Act
             resp = await client.put(
                 f"/api/v1/models/{configId}",
-                json={"apiEndpoint": "https://api.changed.example/v1"},
+                json={
+                    "apiEndpoint": "https://api.changed.example/v1",
+                    # P1-2 校验（model_config_service.py:90）：apiEndpoint 变更
+                    # 必须同时提供新 apiKey，防旧 key 泄露到新端点。
+                    "apiKey": "sk-test-key-rotated",
+                },
             )
             # Assert
             assert resp.status_code == 200, resp.text
             assert configId not in factoryModule._clients
             assert sentinel.closed is True
+        finally:
+            factoryModule.resetFactory()
+
+    async def test_update_endpoint_without_apiKey_returns_422(self, client) -> None:
+        """反向断言：`apiEndpoint` 变更但没带 `apiKey` 必须返回 422。
+
+        钉死 `model_config_service.py:90` 的 audit-fx-1.1 校验，防止后续有人
+        「为了过测试」移除 apiKey 字段而让旧 key 泄露到新端点（MiniMax
+        Connection error 2026-10-03 根因）。
+        """
+        from app.infrastructure.llm import factory as factoryModule
+
+        factoryModule.resetFactory()
+        try:
+            create = await client.post("/api/v1/models", json=CREATE_PAYLOAD)
+            configId = create.json()["id"]
+            # Act：故意只发 apiEndpoint，不发 apiKey
+            resp = await client.put(
+                f"/api/v1/models/{configId}",
+                json={"apiEndpoint": "https://api.no-key.example/v1"},
+            )
+            # Assert
+            assert resp.status_code == 422, (
+                f"expected 422 for endpoint change without apiKey, "
+                f"got {resp.status_code}: {resp.text}"
+            )
+            body = resp.json()
+            assert "apiKey" in (body.get("error") or ""), (
+                f"422 error should mention apiKey, got: {body}"
+            )
         finally:
             factoryModule.resetFactory()
 

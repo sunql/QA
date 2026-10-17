@@ -38,7 +38,7 @@ from app.services.chat_constants import (
     USAGE_PURPOSE_NL2SQL,
 )
 from app.services.intent_service import IntentResult
-from app.services.error_classification import classifyError
+from app.services.error_classification import classifyError, sanitizeErrorMessage
 # 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER，
 # 与 chat_service.processMessage 同口径——在 _streamQuery 入口一次性读一次，
 # 整条流水线复用，避免每段 _costFor 调用都查 DB。
@@ -196,7 +196,7 @@ class StreamMixin:
             yield StreamEvent(
                 EVENT_ERROR,
                 {
-                    "error": exc.message,
+                    "error": sanitizeErrorMessage(exc, ErrorType.DOMAIN),
                     "errorType": ErrorType.DOMAIN.value,
                     "detail": exc.detail,
                 },
@@ -211,7 +211,10 @@ class StreamMixin:
             )
             yield StreamEvent(
                 EVENT_ERROR,
-                {"error": MSG_INTERNAL_ERROR, "errorType": ErrorType.INTERNAL.value},
+                {
+                    "error": sanitizeErrorMessage(exc, ErrorType.INTERNAL),
+                    "errorType": ErrorType.INTERNAL.value,
+                },
             )
             return
 
@@ -304,24 +307,44 @@ class StreamMixin:
             ):
                 yield event
         except LlmClientError as exc:
+            errorType = classifyError(exc)
             logger.warning("流式查询 LLM 失败: %s", exc.message)
+            # P2-1 review M1：原始 provider 文案进日志，SSE payload 用脱敏文案
+            # exc.message 落库供排障（用户下次看历史对话能定位问题），不暴露给前端
             await self._storeSessionMessages(session, dto.sessionId, dto.question, exc.message, None)
-            yield StreamEvent(EVENT_ERROR, {"error": exc.message, "errorType": classifyError(exc).value})
+            yield StreamEvent(
+                EVENT_ERROR,
+                {
+                    "error": sanitizeErrorMessage(exc, errorType),
+                    "errorType": errorType.value,
+                },
+            )
         except DomainError as exc:
+            errorType = classifyError(exc)
             logger.warning("流式查询失败: %s", exc.message)
             await self._storeSessionMessages(session, dto.sessionId, dto.question, exc.message, None)
             if isinstance(exc, Nl2SqlError) and exc.lastPlan is not None:
                 yield StreamEvent(EVENT_PLAN, {"plan": exc.lastPlan.to_dict()})
             yield StreamEvent(
                 EVENT_ERROR,
-                {"error": exc.message, "errorType": classifyError(exc).value, "detail": exc.detail},
+                {
+                    "error": sanitizeErrorMessage(exc, errorType),
+                    "errorType": errorType.value,
+                    "detail": exc.detail,
+                },
             )
         except Exception as exc:
             # 未预期异常（DB 连接中断 / 数据解析错误等）：记录完整上下文并产出结构化
             # 错误事件，保证 SSE 连接始终以 error 事件结束而不是被强行中断。
             logger.exception("流式查询未预期错误: %s", exc)
             await self._storeSessionMessages(session, dto.sessionId, dto.question, MSG_INTERNAL_ERROR, None)
-            yield StreamEvent(EVENT_ERROR, {"error": MSG_INTERNAL_ERROR, "errorType": ErrorType.INTERNAL.value})
+            yield StreamEvent(
+                EVENT_ERROR,
+                {
+                    "error": sanitizeErrorMessage(exc, ErrorType.INTERNAL),
+                    "errorType": ErrorType.INTERNAL.value,
+                },
+            )
 
     async def _streamChitchat(
         self, dto: ChatRequest, session: AsyncSession
@@ -600,8 +623,6 @@ class StreamMixin:
                 },
             )
             return
-        totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
-        totalCost = self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)
         # 单步执行计划：统一展示 MultiStepPlanCard（2026-08-16）。description 取计划
         # target（ReAct 阶段产出的核心实体），plan 为 None 时退化为问题截断。
         stepDesc = _clipText(
@@ -615,7 +636,10 @@ class StreamMixin:
         yield StreamEvent(EVENT_SQL, {"sql": outcome.sql})
 
         # Phase 4.4：检测计划是否引用了可用 Feature，命中则直接回流特征值（SSE 流）。
-        featureResp = await self._tryFeatureResponse(session, dto, pc, outcome)
+        # Task 12.5 review Critical：必须透传 user=user，Feature 路径 _saveQueryState
+        # 写 userId=None 会写 (NULL, ds, session) 行，P0-3 三元 scope 读不到，状态被
+        # 全局复用。与非流式入口（chat_service.py:609）口径一致。
+        featureResp = await self._tryFeatureResponse(session, dto, pc, outcome, user=user)
         if featureResp is not None:
             await self._storeSessionMessages(session, dto.sessionId, dto.question, featureResp.answer, None)
             await self._saveQueryState(
@@ -661,6 +685,13 @@ class StreamMixin:
                 },
             )
             return
+
+        # Feature 未命中：进入正常 retry 路径，初始化 SQL 总 token/cost。
+        # 注：此计算原本在 line 603（featureResp 之前），reviewer 误判为死计算；
+        # 实际是 featureResp is None 路径下的初值（被 line 704+ 的 `+=` 累加）。
+        # 移到此处后 `featureResp is not None` 路径不再浪费一次 _costForSql 调用。
+        totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
+        totalCost = self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)
 
         try:
             data, finalSql, retryTokens = await self._runQueryWithRetry(session, dto, pc, outcome)

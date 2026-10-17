@@ -1,7 +1,6 @@
 # aichat P2 后续工作项 SSOT（2026-10-16）
 
-> **2026-10-17 更新**：Phase 1 推进 4 PR 合入 main，#34 / #30 关闭。
-> Main HEAD: `7b43d428`。共 9 PR 合入（7 + 4 - 2 关闭 = 9 net merge）：
+> **2026-10-17 全面收尾**：所有 11 个 PR 已合入 main。Main HEAD: `433b6355`。
 > - `7b43d428` P2-1 M1 落地 + chatStore backport (#31)
 > - `29f481bd` chat PLAN_EMPTY fixture (#29)
 > - `c025c04a` model_config_api fixture (#33)
@@ -13,10 +12,13 @@
 > - `2c037d72` X5 session_claim (#41)
 > - `5c12b2c3` X3 checkpoint (#39)
 > - `6dce0f69` M5 stub-scope (#42)
-> 
+> - `aeed0633` Frontend 13 红恢复 (#36)
+> - `8bc15b57` L1 prompt 注入防御 (#43)
+> - `433b6355` M4 NULL user_id 墓碑化 (#35)
+>
 > **关闭**：`#30`（被 #31 取代）、`#34`（被 #44 取代）。
-> 
-> **仍 OPEN**：`#36` Frontend 13 红、`#43` L1 prompt 注入、`#35` M4 NULL 墓碑。
+>
+> **全部 PR 已合入 main**。剩余 N4 qwen 知识保留需独立 plan。
 
 ## 范围
 
@@ -233,9 +235,9 @@ per `qa-system-qwen-multistep-uplift` 记忆，qwen-uplift 回滚后
 | 3 | X4 research SSE 共享 parser | ✅ | `3c7ea35f` (#47) | additive parser 改动 |
 | 3 | X5 session_claim invariant | ✅ | `2c037d72` (#41) | abort→answer 200→409 契约 |
 | 4 | M5 stub-scope marker | ✅ | `6dce0f69` (#42) | is_stub 列 + 读侧 WHERE is_stub=false |
-| 5 | Frontend 13 红 | ⏳ | — | PR #36；等 reviewer |
-| 6 | L1 prompt 注入 | ⏳ | — | PR #43 + `fix/l1-agent-loop-test` ee934a5 |
-| 7 | M4 NULL 墓碑 | ⏳ | — | PR #35；等 DDL 决策 |
+| 5 | Frontend 13 红 | ✅ | `aeed0633` (#36) | 4 文件 111/111 全绿（chatStore + ChatPage + chatApi + chatKpiWarning） |
+| 6 | L1 prompt 注入 | ✅ | `8bc15b57` (#43) | 78/78 L1 测试；6 LLM 入口 + 11 label 白名单 + U+200B |
+| 7 | M4 NULL 墓碑 | ✅ | `433b6355` (#35) | 0128→0131 renumber + chat_context user_id!=-1 + 29 个 legacy 调用补 user/datasource |
 | 8 | N4 qwen 知识保留 | ⏳ | — | 独立 plan |
 | ─ | chat PLAN_EMPTY fixture | ✅ | `29f481bd` (#29) | 4 chat test files 38 reds |
 | ─ | model_config_api apiKey fixture | ✅ | `c025c04a` (#33) | 422 校验对齐 P1-2 |
@@ -258,6 +260,7 @@ per `qa-system-qwen-multistep-uplift` 记忆，qwen-uplift 回滚后
   - `270df6f4` Task 12.5 闭环 (#44)
   - `3c7ea35f` X4 (#47), `85d94fa1` X2 (#46), `d5f108df` X1 (#45)
   - `2c037d72` X5 (#41), `5c12b2c3` X3 (#39), `6dce0f69` M5 (#42)
+  - `aeed0633` Frontend 13 红 (#36), `8bc15b57` L1 prompt 注入 (#43), `433b6355` M4 NULL 墓碑 (#35)
 - 报告：`/tmp/qa-aichat-priority-remaining/Harness/changes/aichat-priority-remaining-2026-10-16/security-review-report.md`
 - Cross-refs spec：`docs/superpowers/specs/2026-10-13-1012-code-review-cross-refs.md`
 - Coverage gate：`/tmp/qa-aichat-priority-remaining/Harness/changes/aichat-priority-remaining-2026-10-16/coverage-gate-report.md`

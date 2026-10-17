@@ -746,4 +746,26 @@ describe("api/chat 续跑与压缩（Task 9）", () => {
     const [url] = vi.mocked(fetch).mock.calls[0];
     expect(String(url)).toContain("/chat/multi-step/a%2Fb%20c/resume");
   });
+
+  it("resumeMultiStepRun 传 modelId → body.modelOverride 是 modelId", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: sseStream() }));
+
+    await resumeMultiStepRun("r-1", 2, {}, { modelId: 5 });
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const body = JSON.parse(String(init?.body));
+    expect(body.modelOverride).toBe(5);
+    expect(body.fromStepIndex).toBe(2);
+  });
+
+  it("resumeMultiStepRun 不传 modelId → body.modelOverride 不存在（沿用 run 原 model）", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: sseStream() }));
+
+    await resumeMultiStepRun("r-1", 2, {});
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const body = JSON.parse(String(init?.body));
+    expect("modelOverride" in body).toBe(false);
+    expect(body.fromStepIndex).toBe(2);
+  });
 });

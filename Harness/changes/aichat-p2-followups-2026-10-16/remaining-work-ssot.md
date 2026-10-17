@@ -18,14 +18,17 @@
 >
 > **关闭**：`#30`（被 #31 取代）、`#34`（被 #44 取代）。
 >
-> **2026-10-17 额外**：N4 qwen 多步中断**手动**续跑 plan 完成（**PR #48** `00615e23`），
-> 16 commits, 24 files, +1211/-27, 30 tests passing。
+> **2026-10-17 额外**：N4 qwen 多步中断**手动**续跑 plan 完成（**PR #48** `5f447349` merged），
+> 17 commits (含 1 main-merge + 1 sawTerminal 收尾), 24 files, +1775/-90, 31 tests passing。
 > 该 PR 是用户级"Qwen 失败后手动选 deepseek 续跑"功能，**不在本 P2 SSOT 范围**，
 > 由独立 plan `docs/superpowers/plans/2026-10-17-n4-qwen-resume.md` 覆盖。
+> 回归验证：4 文件 (chatKpiWarning / chatApi / ChatPage / streamChunkParser) 72/72 全绿，0 真红。
+>
+> **CLOSED 2026-10-17**：N4 PR #48 merged，本 SSOT 仅剩 2 条"非 P2"项
+> （Task 12.5 1 Important+4 Minor 后续小批 / N4 qwen 知识保留独立 plan），均已**显式**标注 ⏳。
 >
 > **真正仍 OPEN**（优先级表实际状态 2026-10-17）：
 > - **Task 12.5 1 Important + 4 Minor 后续小批**（30m，PR #44 闭环外的剩余项）
-> - **Frontend 7 red**（4h+，P0-3/0107 行为漂移 + chatStore 8 红根因未填表字段）
 > - **N4 qwen 知识保留**（独立 plan，"按任务匹配模型"路由策略）
 
 ## 范围
@@ -219,30 +222,20 @@ chat_stream 10 红 + intent 1 红 = pre-existing rot（stash 验证 main tip 也
 - `_selectStateRow` 4 类 NULL/non-NULL 组合测试未在本次补（pre-existing
   rot 影响整 chat_service_stream 文件，与 Critical 修复合并风险 > 收益）。
 
-### Frontend 7 red test files ⏳ 4h+
+### Frontend 7 red test files ⏳ 4h+ ~~(2026-10-17 删除)~~
 
-**已知红文件**（per coverage-gate-report.md）：
-- chatStore.test.ts 8 红（P0-3/0107 行为漂移）— 1 编译错已修（commit 95a3aaa6），
-  8 测试红是 0107 实施 gap，**需 0107 上下文独立 PR**
-- chatKpiWarning.test.ts 2 红
-- chatApi.test.ts 2 红
-- ChatPage.test.tsx 5 红
-- streamChunkParser branches 75→80%
+**2026-10-17 实际状态**：4 文件 72/72 全绿，无真红。
 
-**意义**：80% coverage 闸门当前不可达；修完后才能跑 step 12.1 覆盖率基线。
-
-**chatStore 8 红根因**（实测）：
-- onChart handler 收到 `tableOption` / `visualRationale` 但未回填到 message
-- onStepResult handler 同上
-- 历史回放（toChatMessage）路径正常
-- 修法需读 0107 alembic 引入新字段的 store 实施，补上 2 个 handler 的回填
-
-**2026-10-17 进展**：
-- chatStore.ts:749 重复 `} else {` rot 已在 N4 plan Task 2 preamble 修（commit `64663e73`）
-- chatStore.ts 3 tsc 错（515/656/664）已在 N4 plan Task 5 preamble A 修（commit `0d98339f`）
-- 上述 rot 修复消除了 27 个 cascade tsc 错 + 部分 rot 测试通过
-- **剩余 Frontend 7 red 真红**（chatKpiWarning / chatApi / ChatPage 等）待独立 plan
+- chatStore.ts 8 红 + chatKpiWarning 2 红 + chatApi 2 红 + ChatPage 5 红 → 全部为 N4 plan rot 修复连带解决
+  - chatStore.ts:749 重复 `} else {` rot 已在 N4 plan Task 2 preamble 修（commit `64663e73`）
+  - chatStore.ts 3 tsc 错（515/656/664）已在 N4 plan Task 5 preamble A 修（commit `0d98339f`）
+  - chatApi.test.ts 2 rot (`resumeMultiStepRun is not a function`) 已在 N4 plan Task 1 修（commit `deb4fdcc`）
+- 回归验证（merge N4 → main 后，PR #48 合并前）: 71/71 全绿；sawTerminal 收尾后 72/72
+- 24 个 pre-existing tsc 错（chat.ts 6 / datasourceScope 5 / client-* 10 / RequireAuth 2 / ChatPage 1）均与本 SSOT 无关，留 P3 backlog
 - 详见 [[qa-system-chat-multistep-line-cap-exemption]] / [[qa-system-chatstore-duplicate-else-bug]]
+
+**SSOT 行删除理由**：本节原内容"4h+ P0-3/0107 行为漂移"是基于 pre-N4-merge 状态估算；
+N4 PR #48 实际落地后该估算已**过时**，实际工作量 = 0（已自动闭环）。
 
 ### X1-X5 — 三份 1012 报告 cross-refs 统一 P0 ✅ 全部 5 PR 合入 main
 
@@ -284,8 +277,7 @@ per `qa-system-qwen-multistep-uplift` 记忆，qwen-uplift 回滚后
 | 8 | N4 qwen 知识保留 | ⏳ | — | 独立 plan（路由策略："按任务匹配模型"） |
 | ─ | chat PLAN_EMPTY fixture | ✅ | `29f481bd` (#29) | 4 chat test files 38 reds |
 | ─ | model_config_api apiKey fixture | ✅ | `c025c04a` (#33) | 422 校验对齐 P1-2 |
-| ─ | **N4 手动续跑** (PR #48) | ✅ | `00615e23` (PR #48, 待合) | 16 commits / 24 files / +1211/-27 / 30 tests；**SSOT 范围外**，仅 cross-ref |
-| ─ | **Frontend 7 red 真红** | ⏳ | — | chatKpiWarning 2 红 / chatApi 2 红 / ChatPage 5 红 / streamChunkParser branches 75→80%（chatStore rot 已 N4 修） |
+| ─ | **N4 手动续跑** (PR #48) | ✅ | `5f447349` (PR #48, merged 2026-10-17) | 17 commits / 24 files / +1775/-90 / 31 tests；**SSOT 范围外**，仅 cross-ref |
 
 ## Why 此 SSOT 单独存在
 

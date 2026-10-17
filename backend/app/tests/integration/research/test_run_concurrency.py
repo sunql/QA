@@ -661,7 +661,7 @@ async def test_abort_then_stale_checkpoint_answer_cannot_resurrect(
         json={"action": "confirm", "choice": {}},
         headers=authHeaders,
     )
-    assert late.status_code == 200, late.text  # 端点异步返 200，拒绝经 SSE 传回
+    assert late.status_code == 409, late.text  # X5 claim invariant guard: abort 已清执行权 ⇒ answer 拒绝（"研究会话未持有执行权…"），替代原先的 200 + SSE 异步拒
 
     detail = await client.get(f"{_BASE}/sessions/{sid}", headers=authHeaders)
     body = detail.json()

@@ -1044,8 +1044,13 @@ describe("chatStore resumeRun 定向写入", () => {
     expect(msgs[1]).toBe(newest);
     // ②' 且最新那条的正文绝不能沾上本次续跑的 chunk（读/写分叉的判别式）
     expect(msgs[1].content).not.toContain("追加片段");
-    // ③ 请求带的是被点的 runId 与起始步号
-    expect(chatApi.resumeMultiStepRun).toHaveBeenCalledWith("r-old", 1, expect.anything());
+    // ③ 请求带的是被点的 runId 与起始步号；未传 modelId → 第 4 参数 modelId: null
+    expect(chatApi.resumeMultiStepRun).toHaveBeenCalledWith(
+      "r-old",
+      1,
+      expect.anything(),
+      { modelId: null }
+    );
   });
 
   it("续跑请求失败时不覆盖原正文，只挂独立错误横幅（保留卡片与旧答案）", async () => {
@@ -1087,5 +1092,41 @@ describe("chatStore resumeRun 定向写入", () => {
 
     expect(useChatStore.getState().messages[0].resumeError).toBeNull();
     expect(useChatStore.getState().messages[0].content).toBe("旧的多步回答");
+  });
+
+  it("resumeRun 传 modelId=5 → resumeMultiStepRun 第 4 参数含 modelId: 5", async () => {
+    // Arrange
+    const { early, newest } = makeMessages();
+    useChatStore.setState({ messages: [early, newest], loading: false });
+    chatApi.resumeMultiStepRun.mockResolvedValueOnce(undefined);
+
+    // Act
+    await useChatStore.getState().resumeRun("r-old", 1, "m-early", 5);
+
+    // Assert —— modelId 必须透传到 resumeMultiStepRun 第 4 参数（options.modelId）
+    expect(chatApi.resumeMultiStepRun).toHaveBeenCalledWith(
+      "r-old",
+      1,
+      expect.anything(),
+      { modelId: 5 }
+    );
+  });
+
+  it("resumeRun 不传 modelId → resumeMultiStepRun 第 4 参数 modelId: null（后端用 run 原 model）", async () => {
+    // Arrange
+    const { early, newest } = makeMessages();
+    useChatStore.setState({ messages: [early, newest], loading: false });
+    chatApi.resumeMultiStepRun.mockResolvedValueOnce(undefined);
+
+    // Act
+    await useChatStore.getState().resumeRun("r-old", 1, "m-early");
+
+    // Assert —— 不传 / undefined → null（显式表示「按后端 run 原 model」）
+    expect(chatApi.resumeMultiStepRun).toHaveBeenCalledWith(
+      "r-old",
+      1,
+      expect.anything(),
+      { modelId: null }
+    );
   });
 });

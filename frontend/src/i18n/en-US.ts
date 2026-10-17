@@ -378,6 +378,10 @@ export const enUS = {
     statusError: "Failed",
     summaryStep: "Summary",
     resume: "Resume",
+    resumeChooseModel: "Choose resume model",
+    resumeSameModelHint: "(This model just failed; retry or pick another)",
+    resumeWithSelected: "Resume with selected",
+    resumeWithOriginal: "Resume with original",
     resumeFailed: "Resume failed: {message} (the previous answer was kept; you can resume again)",
     compressedRows: "Data compressed ({from} → {to} rows)",
     // F2：KPI datasource mismatch warning (code used as i18n key, not raw backend text)

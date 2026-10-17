@@ -326,72 +326,6 @@ export async function sendMessageStream(
   }
 }
 
-/**
- * 续跑多步 run：从 fromStepIndex 起重启多步流，仍走 SSE。
- *
- * - runId 经 encodeURIComponent 防路径注入（特殊字符如 a/b c）
- * - body camelCase：{ fromStepIndex }（与 Python 后端 Pydantic alias 一致）
- * - Idempotency-Key 由前端生成（UUID v4），后端据此去重同 runId 重放
- *
- * 异常路径：网络/HTTP 错抛 Error，由调用方（store）转为错误消息。
- */
-export async function resumeMultiStepRun(
-  runId: string,
-  fromStepIndex: number,
-  handlers: StreamEventHandlers,
-): Promise<void> {
-  const headers = authHeaders({
-    "Content-Type": "application/json",
-    "Idempotency-Key": crypto.randomUUID(),
-  });
-  const response = await fetch(
-    `${API_BASE_URL}${BASE}/multi-step/${encodeURIComponent(runId)}/resume`,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ fromStepIndex }),
-    },
-  );
-
-  if (!response.ok) {
-    throw new Error(`续跑失败 (HTTP ${response.status})`);
-  }
-  if (!response.body) {
-    throw new Error(i18n.t("errors.noStreamSupport"));
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const parser = new StreamChunkParser();
-  let sawTerminal = false;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const text = decoder.decode(value, { stream: true });
-      for (const frame of parser.feed(text)) {
-        if (frame.event === "done" || frame.event === "error") sawTerminal = true;
-        dispatchFrame(frame, handlers);
-      }
-    }
-    const tail = decoder.decode();
-    if (tail) {
-      for (const frame of parser.feed(tail)) {
-        if (frame.event === "done" || frame.event === "error") sawTerminal = true;
-        dispatchFrame(frame, handlers);
-      }
-    }
-    for (const frame of parser.flush()) {
-      if (frame.event === "done" || frame.event === "error") sawTerminal = true;
-      dispatchFrame(frame, handlers);
-    }
-    if (!sawTerminal) throw new Error("stream interrupted: no done/error before EOF");
-  } finally {
-    reader.releaseLock();
-  }
-}
-
 function dispatchFrame(frame: { event: string; data: string }, handlers: StreamEventHandlers): void {
   const { event, data } = frame;
   if (!event) return;
@@ -512,4 +446,82 @@ function isDataQualityBadge(value: unknown): value is DataQualityBadge {
     (b.evaluatedAt === null || typeof b.evaluatedAt === "string") &&
     (b.rulesCount === null || typeof b.rulesCount === "number")
   );
+}
+
+// ===== 多步续跑（spec §N4）=====
+
+export interface ResumeMultiStepOptions {
+  /** 续跑使用的模型 id；缺省 = 沿用 run 原 model。 */
+  modelId?: number | null;
+}
+
+/**
+ * 续跑失败的 multi-step run。
+ *
+ * - runId: MultiStepRun.id（UUID 字符串）
+ * - fromStepIndex: 从该 step 起重跑；后端自动定位首个 failed/skipped step
+ * - handlers: SSE 事件回调（与 sendMessageStream 同款）
+ * - options.modelId: 续跑使用的模型 id；null/undefined = 沿用 run 原 model
+ *
+ * 后端路由：POST /api/v1/chat/multi-step/{runId}/resume
+ * 字段名走 camelCase（与后端 CamelModel alias 对齐）。
+ */
+export async function resumeMultiStepRun(
+  runId: string,
+  fromStepIndex: number,
+  handlers: StreamEventHandlers,
+  options?: ResumeMultiStepOptions,
+): Promise<void> {
+  const headers = authHeaders({ "Content-Type": "application/json" });
+  headers["Idempotency-Key"] = `resume-${runId}-${Date.now()}`;
+  const body: Record<string, unknown> = { fromStepIndex };
+  if (options && options.modelId !== undefined) {
+    body.modelOverride = options.modelId;
+  }
+  const response = await fetch(
+    `${API_BASE_URL}${BASE}/multi-step/${encodeURIComponent(runId)}/resume`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`续跑失败 (HTTP ${response.status})`);
+  }
+  if (!response.body) {
+    throw new Error(i18n.t("errors.noStreamSupport"));
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const parser = new StreamChunkParser();
+  let sawTerminal = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value, { stream: true });
+      for (const frame of parser.feed(text)) {
+        if (frame.event === "done" || frame.event === "error") sawTerminal = true;
+        dispatchFrame(frame, handlers);
+      }
+    }
+    const tail = decoder.decode();
+    if (tail) {
+      for (const frame of parser.feed(tail)) {
+        if (frame.event === "done" || frame.event === "error") sawTerminal = true;
+        dispatchFrame(frame, handlers);
+      }
+    }
+    for (const frame of parser.flush()) {
+      if (frame.event === "done" || frame.event === "error") sawTerminal = true;
+      dispatchFrame(frame, handlers);
+    }
+    if (!sawTerminal) throw new Error("stream interrupted: no done/error before EOF");
+  } finally {
+    reader.releaseLock();
+  }
 }

@@ -599,6 +599,7 @@ async def answerCheckpoint(
             "checkpointId": str(checkpoint.id),
             "action": payload.action,
             "choice": choice,
+            "modelId": payload.model_id,
         },
     )
     # commit 会 expire ORM 对象 ⇒ **先快照**返回值要用的 sessionStatus，避免提交后
@@ -613,6 +614,7 @@ async def answerCheckpoint(
         checkpointSessionId,
         payload.action,
         choice,
+        payload.model_id,
     )
     # 报**库中真实**状态（与上面的幂等回放分支同口径，review Fix E）：硬编码 "running" 报的
     # 是「状态机接下来要去的状态」，不是此刻的事实 —— 此刻会话正 `awaiting_user`（正因为
@@ -930,6 +932,7 @@ async def _resumeTurnInBackground(
     sessionId: str,
     action: str,
     choice: dict[str, Any],
+    modelId: int | None = None,
 ) -> None:
     """后台按用户决策续跑状态机（resolveCheckpoint 在 `resumeTurn` 内完成）。
 
@@ -959,6 +962,7 @@ async def _resumeTurnInBackground(
                 checkpointId=uuid.UUID(checkpointId),
                 action=action,
                 choice=choice,
+                model_id=modelId,
                 emit=partial(_persistAndPublish, sessionId),
             )
             await finishTask(session, taskId=uuid.UUID(taskId), status=TASK_STATUS_DONE)

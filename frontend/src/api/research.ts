@@ -68,7 +68,7 @@ export async function submitTurn(
 
 export async function answerCheckpoint(
   checkpointId: string,
-  input: { action: CheckpointAction; choice?: Record<string, unknown> },
+  input: { action: CheckpointAction; choice?: Record<string, unknown>; modelId?: number },
 ): Promise<CheckpointAnswer> {
   const res = await httpClient.post<CheckpointAnswer>(
     `${BASE}/checkpoints/${checkpointId}/answer`,

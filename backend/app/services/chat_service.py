@@ -297,6 +297,26 @@ def _firstPresentValue(data: list[dict] | None) -> Any | None:
     return next((v for v in data[0].values() if v is not None), None)
 
 
+def _wrapMultistepInputs(
+    *,
+    sub_question: str | None,
+    injection_text: str | None,
+    statePrompt: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """L1 防御：多步场景 3 个 user-controlled 输入在 LLM 调用前包裹。
+
+    - sub_question (USER_QUESTION): 子问题（rule_based_split 切句结果，仍 user-controlled）
+    - injection_text (STEP_RESULT): 前序步骤 SQL 结果（最高风险注入面）
+    - statePrompt (HISTORY): prior query state（REFINE/FOLLOW_UP 路径的 history）
+
+    任一为 None 时返回 None（不抛错）。
+    """
+    safe_sub = wrapUntrusted(UntrustedLabel.USER_QUESTION, sub_question) if sub_question else None
+    safe_inj = wrapUntrusted(UntrustedLabel.STEP_RESULT, injection_text) if injection_text else None
+    safe_st = wrapUntrusted(UntrustedLabel.HISTORY, statePrompt) if statePrompt else None
+    return safe_sub, safe_inj, safe_st
+
+
 class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin, L1L4PreambleMixin):
     """自然语言问答编排服务。
 
@@ -1018,6 +1038,23 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
         # 前序步骤结果注入：拼到 statePrompt 末尾（与历史状态注入同口径）
         if injection_text:
             statePrompt = (statePrompt + "\n\n" + injection_text) if statePrompt else injection_text
+
+        # L1 防御：3 个 user-controlled 输入（sub_question / injection_text / statePrompt）
+        # 在 LLM 调用前用对应 label 包裹。sub_question 优先于 dto.question 替换 question。
+        safe_sub, safe_inj, safe_st = _wrapMultistepInputs(
+            sub_question=sub_question,
+            injection_text=injection_text,
+            statePrompt=statePrompt,
+        )
+        if sub_question is not None:
+            question = safe_sub
+        if injection_text is not None and statePrompt is not None:
+            # safeInj 已 wrap，替换拼接里的 raw injection_text
+            statePrompt = statePrompt + "\n\n" + safe_inj
+        elif injection_text is not None:
+            statePrompt = safe_inj
+        if statePrompt is not None:
+            statePrompt = safe_st
 
         # ★ wiki-ontology-link Task 6：wiki 业务规则注入（紧贴 context 之后）。
         # 失败隔离：任何步骤异常 → log warning → wiki_block="" → 不阻断 chat 流水线。

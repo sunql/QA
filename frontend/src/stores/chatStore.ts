@@ -512,7 +512,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       datasourceId: id,
       sessionId: generateSessionId(),
       messages: [],
-      isStreaming: false,
     });
   },
 
@@ -653,7 +652,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             if (!isCurrent()) return;
             set((state) => ({
               messages: patchLastMessage(
-                patchStep(state.messages, step.stepIndex, { status: "running" }),
+                patchStep(state.messages, undefined, step.stepIndex, { status: "running" }),
                 { currentStepIndex: step.stepIndex }
               ),
             }));
@@ -661,7 +660,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           onStepResult: (result) => {
             if (!isCurrent()) return;
             set((state) => ({
-              messages: patchStep(state.messages, result.stepIndex, {
+              messages: patchStep(state.messages, undefined, result.stepIndex, {
                 status: stepStatusFromResult(result.error),
                 sql: result.sql ?? null,
                 summary: result.summary ?? null,

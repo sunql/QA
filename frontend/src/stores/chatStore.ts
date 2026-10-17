@@ -618,6 +618,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               }),
             }));
           },
+          // F2：KPI 数据源不一致警告 code（写 code 即可，i18n 键由展示层映射；后端中文原文不入库）
+          onMetaWarning: (code) => {
+            if (!isCurrent()) return;
+            set((state) => ({
+              messages: patchLastMessage(state.messages, { kpiDatasourceCode: code }),
+            }));
+          },
           onPlan: (plan) => {
             if (!isCurrent()) return;
             set((state) => ({

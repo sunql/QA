@@ -584,7 +584,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             )
             if pause is not None:
                 await self._pauseForUser(
-                    session, sessionId=sessionId, turnId=turnId, pause=pause, emit=emit
+                    session, sessionId=sessionId, turnId=turnId, pause=pause, emit=emit, state=state
                 )
                 return STATUS_AWAITING
         await self._sessions.updateSessionStatus(session, sessionId, STATUS_DONE)
@@ -607,11 +607,19 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         turnId: uuid.UUID,
         pause: Pause,
         emit: Emit | None,
+        state: dict[str, Any] | None = None,
     ) -> None:
-        """落 checkpoint + checkpoint_awaiting turn + 会话置 awaiting_user。"""
+        """落 checkpoint + checkpoint_awaiting turn + 会话置 awaiting_user。
+
+        X3（1012 cross-refs spec §P0-X3）：把当轮研究问题固化到 checkpoint 本体
+        （openCheckpoint 形参 ``originalQuestion``），恢复阶段优先用本列而不再
+        join turn.content。``state`` 可选 — 旧调用方（无 state）传空串，
+        行为不破坏既有数据，恢复层继续用 turn.content 老路径兜底。
+        """
         phase, options, prompt = pause
         settings = getSettings()
         expires_at = datetime.now(UTC) + timedelta(hours=settings.researchCheckpointTtlHours)
+        original_question = (state or {}).get("question") or ""
         checkpoint = await self._sessions.openCheckpoint(
             session,
             sessionId=sessionId,
@@ -619,6 +627,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
             phase=phase,
             options=options,
             prompt=prompt,
+            originalQuestion=original_question,
             expiresAt=expires_at,
         )
         await self._sessions.appendTurn(

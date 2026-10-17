@@ -346,3 +346,55 @@ async def test_save_finding_backward_compatible_when_new_kwargs_omitted(dbSessio
     await dbSession.commit()
     assert row.claim_text == "原 claim 不变"
     assert "stats" not in (row.supporting_data or {})
+
+
+# ---------------------------------------------------------------------------
+# X3（1012 cross-refs spec §P0-X3）：openCheckpoint 接受 originalQuestion
+# 固化在 checkpoint 本体；恢复阶段读这一列而不再去 join turn.content。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_openCheckpoint_persistsOriginalQuestion(dbSession) -> None:
+    """X3：openCheckpoint 落 original_question，DB 真值断言 + DTO 序列化断言。"""
+    svc = ResearchSessionService()
+    s = await svc.createSession(dbSession, userId=1, question="q")
+    turn = await svc.appendTurn(dbSession, sessionId=s.id, role="agent", content={})
+    cp = await svc.openCheckpoint(
+        dbSession,
+        sessionId=s.id,
+        turnId=turn.id,
+        phase="intent",
+        options={"arms": ["bo"]},
+        prompt="三臂是否齐全？",
+        originalQuestion="对比 2024 和 2025 年销售额",
+    )
+    await dbSession.commit()
+    assert cp.original_question == "对比 2024 和 2025 年销售额", (
+        f"originalQuestion 应落 DB，实际 {cp.original_question!r}"
+    )
+    # DTO 序列化断言（X3 Minor review 项）：防止 CamelModel alias_generator
+    # 配置漂移让前端读不到 originalQuestion
+    from app.api.v1.research import _checkpointRead
+    dto = _checkpointRead(cp)
+    assert dto.originalQuestion == "对比 2024 和 2025 年销售额", (
+        f"ResearchCheckpointRead.originalQuestion 应驼峰映射到 row.original_question，"
+        f"实际 {dto.originalQuestion!r}"
+    )
+    # 反向断言：旧调用（不传）也不破坏，存为空串
+    cp2 = await svc.openCheckpoint(
+        dbSession,
+        sessionId=s.id,
+        turnId=turn.id,
+        phase="intent",
+        options={"arms": ["bo"]},
+        prompt="p",
+    )
+    await dbSession.commit()
+    assert cp2.original_question == "", (
+        f"未传 originalQuestion 应默认为空串，实际 {cp2.original_question!r}"
+    )
+    dto2 = _checkpointRead(cp2)
+    assert dto2.originalQuestion == "", (
+        f"未传时 DTO.originalQuestion 也应为空串，实际 {dto2.originalQuestion!r}"
+    )

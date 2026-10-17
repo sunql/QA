@@ -33,7 +33,7 @@ export default function ResumeRunButton({
   const isOriginalModel = effectiveModelId === originalModelId;
   const options = models.map((m) => ({
     value: m.id,
-    label: `${m.modelName}（${m.provider}）`,
+    label: `${m.modelName} (${m.provider})`,
   }));
 
   return (

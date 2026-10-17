@@ -24,6 +24,8 @@ from app.domain.exceptions import DomainError, statusForError
 from app.domain.schemas import ErrorResponse, HealthResponse
 from app.infrastructure.database import disposeEngine, getEngine
 from app.infrastructure.rate_limit import limiter, rateLimitDep, rateLimitExceededHandler
+# P2-1 review M1：DomainError handler 用脱敏文案，避免 LLM/provider 原始信息走 HTTP
+from app.services.error_classification import classifyError, sanitizeErrorMessage
 
 logger = logging.getLogger(__name__)
 
@@ -609,11 +611,17 @@ def registerExceptionHandlers(app: FastAPI) -> None:
     @app.exception_handler(DomainError)
     async def handleDomainError(request: Request, exc: DomainError) -> JSONResponse:
         status = statusForError(exc)
-        logger.warning("领域异常 %s: %s (path=%s)", type(exc).__name__, exc.message, request.url.path)
+        # P2-1 review M1：原始 provider/LLM 文案进日志；HTTP 响应体走 sanitize
+        # 避免 status_code / API key hint / provider 内部结构泄露给前端
+        errorType = classifyError(exc)
+        logger.warning(
+            "领域异常 %s [%s]: %s (path=%s)",
+            type(exc).__name__, errorType.value, exc.message, request.url.path,
+        )
         return JSONResponse(
             status_code=status,
             content=ErrorResponse(
-                error=exc.message,
+                error=sanitizeErrorMessage(exc, errorType),
                 detail=exc.detail,
                 details=getattr(exc, "details", None),
             ).model_dump(by_alias=True),

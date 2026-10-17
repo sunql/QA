@@ -73,7 +73,15 @@ class _CascadeLlm:
         if "解析为查询计划" in system:
             if self.planResponses:
                 return _Resp(self.planResponses.pop(0))
-            return _Resp('{"target":"各供应商的收货数量汇总"}')
+            # 2026-09-27 方案B 后 _isEmptyPlan 把"仅 target"判为 PLAN_EMPTY
+            # 走重试 ⇒ 测试红。conditions 字段不参与 validatePlan 校验
+            # （只有 selectedProperties/groupBy/sortBy 会比对类属性），
+            # 也不进 _buildDataQualityBadges 的 selectedClasses 路径
+            # （避免对 _FakeOntologyService 返回 [] 的类 KeyError）。
+            return _Resp(
+                '{"target":"各供应商的收货数量汇总",'
+                '"conditions":["1=1"]}'
+            )
         if "生成 SQL 时必须" in system:
             return _Resp(
                 "```sql\nSELECT NAME, SUM(QTY) AS TOTAL_QTY FROM ZJTH.PRECEIPT "
@@ -222,6 +230,7 @@ async def _seedMultiStepState(service: ChatService, session: AsyncSession) -> No
     await service._saveQueryState(
         session,
         "s1",
+        datasourceId=1,
         question=_MULTI_STEP_QUESTION,
         plan=QueryPlan(target="t", selectedClasses=("PRECEIPT",)),
         sql="SELECT NAME, SUM(QTY) FROM PRECEIPT GROUP BY NAME",
@@ -278,6 +287,7 @@ class TestFollowUpMultiStepRerun:
         await service._saveQueryState(
             dbSession,
             "s1",
+            datasourceId=1,
             question="各供应商的收货数量汇总",
             plan=QueryPlan(target="t", selectedClasses=("PRECEIPT",)),
             sql="SELECT NAME, SUM(QTY) FROM PRECEIPT GROUP BY NAME",
@@ -343,6 +353,7 @@ class TestUnanswerableFollowUpRetry:
         await service._saveQueryState(
             dbSession,
             "s1",
+            datasourceId=1,
             question="各供应商的收货数量汇总",
             plan=QueryPlan(target="t", selectedClasses=("PRECEIPT",)),
             sql="SELECT NAME, SUM(QTY) FROM PRECEIPT GROUP BY NAME",
@@ -366,6 +377,7 @@ class TestUnanswerableFollowUpRetry:
         await service._saveQueryState(
             dbSession,
             "s1",
+            datasourceId=1,
             question="月球人口",
             plan=None,
             sql=None,
@@ -385,6 +397,7 @@ class TestUnanswerableFollowUpRetry:
         await service._saveQueryState(
             dbSession,
             "s1",
+            datasourceId=1,
             question="各供应商的收货数量汇总",
             plan=QueryPlan(target="t", selectedClasses=("PRECEIPT",)),
             sql="SELECT NAME, SUM(QTY) FROM PRECEIPT GROUP BY NAME",
@@ -492,6 +505,7 @@ class TestCascadeEdges:
         await service._saveQueryState(
             dbSession,
             "s1",
+            datasourceId=1,
             question="各供应商的收货数量汇总",
             plan=QueryPlan(target="t", selectedClasses=("PRECEIPT",)),
             sql="SELECT NAME, SUM(QTY) FROM PRECEIPT GROUP BY NAME",

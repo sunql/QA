@@ -31,6 +31,11 @@ from app.services.stream_events import (
     StreamEvent,
 )
 from app.services.think_block import ThinkStreamFilter, isThinkHideEnabled
+from app.security.prompt_sanitizer import (
+    UntrustedLabel,
+    renderSecurityPreamble,
+    wrapUntrusted,
+)
 from app.services.wiki_qa_prompt import (
     WIKI_QA_SYSTEM_PROMPT,
     WIKI_QA_USER_TEMPLATE,
@@ -184,13 +189,18 @@ class WikiQaService:
             from app.domain.exceptions import LLMUnavailableError
             raise LLMUnavailableError("未配置可用的 LLM，无法进行 Wiki Chat 问答")
 
-        chunks_json = format_chunks_json(hits)
+        safe_chunks = wrapUntrusted(UntrustedLabel.WIKI_CHUNKS, format_chunks_json(hits))
+        safe_history = wrapUntrusted(UntrustedLabel.HISTORY, history_block)
+        safe_question = wrapUntrusted(UntrustedLabel.USER_QUESTION, dto.question)
         messages: list[LlmMessage] = [
-            LlmMessage(role="system", content=WIKI_QA_SYSTEM_PROMPT.format(chunks_json=chunks_json)),
+            LlmMessage(
+                role="system",
+                content=f"{renderSecurityPreamble()}\n\n{WIKI_QA_SYSTEM_PROMPT.format(chunks_json=safe_chunks)}",
+            ),
             LlmMessage(
                 role="user",
                 content=WIKI_QA_USER_TEMPLATE.format(
-                    history_block=history_block, question=dto.question,
+                    history_block=safe_history, question=safe_question,
                 ),
             ),
         ]

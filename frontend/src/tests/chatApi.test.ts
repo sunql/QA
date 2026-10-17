@@ -746,4 +746,47 @@ describe("api/chat 续跑与压缩（Task 9）", () => {
     const [url] = vi.mocked(fetch).mock.calls[0];
     expect(String(url)).toContain("/chat/multi-step/a%2Fb%20c/resume");
   });
+
+  it("resumeMultiStepRun 传 modelId → body.modelOverride 是 modelId", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: sseStream() }));
+
+    await resumeMultiStepRun("r-1", 2, {}, { modelId: 5 });
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const body = JSON.parse(String(init?.body));
+    expect(body.modelOverride).toBe(5);
+    expect(body.fromStepIndex).toBe(2);
+  });
+
+  it("resumeMultiStepRun 不传 modelId → body.modelOverride 不存在（沿用 run 原 model）", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: sseStream() }));
+
+    await resumeMultiStepRun("r-1", 2, {});
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const body = JSON.parse(String(init?.body));
+    expect("modelOverride" in body).toBe(false);
+    expect(body.fromStepIndex).toBe(2);
+  });
+
+  it("resumeMultiStepRun 流式 EOF 之前没收到 done/error → 抛 stream interrupted", async () => {
+    // 构造一个无 terminal 帧的流：只产出 1 帧 (meta) 就 EOF，
+    // 验证 sawTerminal 守门能识别这种异常 EOF 并抛出明确错误，
+    // 而不是静默成功让 UI 误以为续跑完整结束。
+    const encoder = new TextEncoder();
+    const streamNoTerminal = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('event: meta\ndata: {"foo":"bar"}\n\n'));
+        controller.close();
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, body: streamNoTerminal })
+    );
+
+    await expect(resumeMultiStepRun("r-1", 0, {})).rejects.toThrow(
+      "stream interrupted: no done/error before EOF"
+    );
+  });
 });

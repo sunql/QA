@@ -93,7 +93,25 @@ export default function ChatPage() {
     resetSession();
   }, [resetSession]);
 
-  // 导出当前会话为 PDF（全局入口）；单条问答导出共用同一函数，传入 dbMessageId
+  // ChatPanel 挂载时会自动切到默认数据源（listDataSources 回来后发现 datasourceId 仍为 null
+  // 就会调 onDatasourceChange(defaultId)）。这一步不该被当成「用户显式切数据源」——
+  // chatStore.setDatasourceId 在 hasConversation=true 时会做切数据源 = 全新会话（清 messages
+  // + 重置 sessionId），把单测注入的「已回填 dbMessageId 的消息」一并抹掉，导致单条 PDF 导出
+  // 按钮虽然渲染了，但点击时 handleExportSession 看到的是空数组，提前返回。
+  // 故首次自动加载只就地改 datasourceId；后续用户主动改 datasource（必然 datasourceId 已
+  // 非 null 且新 id 不同）才走 chatStore 的「全新会话」语义。
+  const handlePanelDatasourceChange = useCallback(
+    (id: number) => {
+      if (datasourceId === null) {
+        useChatStore.setState({ datasourceId: id });
+        return;
+      }
+      setDatasourceId(id);
+    },
+    [datasourceId, setDatasourceId]
+  );
+
+  // 导出当前会话为 PDF（全局入口）；单条问答导出同一函数，传入 dbMessageId
   const handleExportSession = useCallback(
     async (dbMessageId?: number) => {
       if (messages.length === 0) {
@@ -176,7 +194,7 @@ export default function ChatPage() {
         <ChatPanel
           datasourceId={datasourceId}
           selectedModelId={selectedModelId}
-          onDatasourceChange={setDatasourceId}
+          onDatasourceChange={handlePanelDatasourceChange}
           onModelChange={setSelectedModelId}
           onSend={handleSend}
           loading={loading}

@@ -30,6 +30,18 @@ MSG_INTERNAL_ERROR = "服务内部错误，请稍后重试"
 # 时抛 LLMUnavailableError（503）的文案，与 doc_qa/wiki_qa 同口径。
 MSG_LLM_UNAVAILABLE = "未配置可用的 LLM，无法回答该问题"
 
+# P2-1 review M1：SSE error 事件脱敏文案（前端只看到这些，原始 provider 文案进日志）
+# PROVIDER_TRANSIENT 5xx/timeout/429
+MSG_LLM_PROVIDER_TRANSIENT = "AI 服务暂时繁忙，请稍后重试"
+# PROVIDER_PROTOCOL 4xx 永久错误 / JSON parse failure
+MSG_LLM_PROVIDER_PROTOCOL = "AI 服务返回异常，请稍后重试或换个问题提问"
+# LLM 通用兜底（分类器命中 LLM 但细分类型未覆盖到时）
+MSG_LLM_GENERIC = "AI 服务异常，请稍后重试"
+# DB_CONNECTIVITY 数据源连接失败
+MSG_DATASOURCE_CONNECTIVITY = "数据源连接失败，请稍后重试或联系管理员"
+# QUERY_TIMEOUT 数据源查询超时
+MSG_QUERY_TIMEOUT = "查询超时，请简化您的问题或稍后重试"
+
 # 多步查询降级收尾（无汇总步骤）：有数据步骤成功 / 全部失败。`{done}`/`{total}`
 # 为本轮完成的数据步骤数与总步骤数，用 str.format 注入。
 MSG_MULTI_STEP_DEGRADE_PARTIAL = (

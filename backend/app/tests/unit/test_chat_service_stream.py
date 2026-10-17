@@ -80,8 +80,15 @@ class _StreamPipelineLlm:
         self.completeCalls += 1
         system = messages[0].content
         if "解析为查询计划" in system:
-            # ReAct 第一阶段：空计划（classes 为空时无引用可校验）
-            return _Resp('{"target":"各供应商的收货数量汇总"}')
+            # ReAct 第一阶段：2026-09-27 方案B 后 _isEmptyPlan 把"仅 target"
+            # 判为 PLAN_EMPTY 走重试，3 次后抛 Nl2SqlError ⇒ 测试红。
+            # conditions 字段不参与 validatePlan 校验，也不进
+            # _buildDataQualityBadges 的 selectedClasses 路径
+            # （避免 _FakeSession.execute() 不支持扩参 ⇒ KeyError）。
+            return _Resp(
+                '{"target":"各供应商的收货数量汇总",'
+                '"conditions":["1=1"]}'
+            )
         if "生成 SQL 时必须" in system:
             return _Resp(
                 "```sql\nSELECT NAME, SUM(QTY) FROM ZJTH.PRECEIPT "
@@ -181,6 +188,48 @@ async def _collect(
         events.append((event.event, event.data))
     await asyncio.sleep(0)  # 让后台查询向量任务有机会完成，保证测试确定性
     return events
+
+
+class TestTryFeatureResponseArg:
+    """Task 12.5 review Critical：_streamQuery 必须把 user=user 传给 _tryFeatureResponse。
+
+    否则 Feature 路径命中时 _saveQueryState 拿到 userId=None ⇒ 写 (NULL, ds, session)
+    行，P0-3 三元 scope 过滤读不到，状态被全局复用。
+
+    现有流式测试基线（test_query_stream_emits_full_event_sequence 等）受 pre-existing
+    rot 影响（NL2SQL 计划解析在某些数据形态下落 PLAN_EMPTY），无法直接用真实 LLM
+    mock 跑通整条 _streamQuery。本测试用源码静态断言把这条调用契约钉死，防止
+    chat_stream.py:641 那一行再次漏掉 user=。
+    """
+
+    def test_streamQuery_call_passes_user_keyword(self) -> None:
+        """chat_stream.py 源码里 _tryFeatureResponse 调用必须带 user=user。"""
+        from pathlib import Path
+
+        # backend/app/tests/unit/ → parents[3] = backend/
+        repoRoot = Path(__file__).resolve().parents[3]
+        chatStreamPath = repoRoot / "app" / "services" / "chat_stream.py"
+        source = chatStreamPath.read_text(encoding="utf-8")
+        # _streamQuery 内必须有一行 self._tryFeatureResponse(... user=user)
+        # 防御性扫描：出现 self._tryFeatureResponse( 后必须能在 2 行内看到 user=user
+        import re
+
+        pattern = re.compile(
+            r"self\._tryFeatureResponse\((?P<args>[^)]*?)\)",
+            re.DOTALL,
+        )
+        foundUserKwarg = False
+        for match in pattern.finditer(source):
+            argsBlob = match.group("args")
+            # 关键字参数 user=user 必现
+            if re.search(r"\buser\s*=\s*user\b", argsBlob):
+                foundUserKwarg = True
+                break
+        assert foundUserKwarg, (
+            f"chat_stream.py 中 self._tryFeatureResponse(...) 调用必须显式传 user=user，"
+            f"否则 P0-3 三元 scope 在 Feature 路径上会被写 (NULL, ds, session) 行。"
+            f"源码位置：{chatStreamPath}"
+        )
 
 
 class TestStreamingPipeline:

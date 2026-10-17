@@ -29,6 +29,8 @@ const STATUS_TAG_COLOR: Record<StepStatus, string> = {
 interface MultiStepPlanCardProps {
   steps: MultiStepStep[];
   currentStepIndex?: number;
+  /** N4 qwen 续跑：该消息首发时使用的模型 id（透传给 ResumeRunButton） */
+  originalModelId: number;
   /** 失败步的续跑回调；不传则不渲染续跑按钮（如历史回放、单步路径） */
   onResume?: (runId: string, fromStepIndex: number) => void;
   /** 流式进行中：禁用续跑按钮，防重复点击（由调用方从 store 的 loading 提供） */
@@ -62,6 +64,7 @@ function StatusBadge({ status }: { status: StepStatus }) {
 export default function MultiStepPlanCard({
   steps,
   currentStepIndex,
+  originalModelId,
   onResume,
   disabled,
 }: MultiStepPlanCardProps) {
@@ -132,6 +135,7 @@ export default function MultiStepPlanCard({
                             <ResumeRunButton
                               runId={s.runId}
                               fromStepIndex={s.stepIndex}
+                              originalModelId={originalModelId}
                               disabled={disabled}
                               onResume={onResume}
                             />

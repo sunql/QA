@@ -30,9 +30,10 @@ const PANEL_LABEL = "查看分析计划";
 function renderExpanded(
   steps: MultiStepStep[],
   onResume?: (runId: string, fromStepIndex: number) => void,
-  disabled?: boolean
+  disabled?: boolean,
+  originalModelId = 1
 ) {
-  render(<MultiStepPlanCard steps={steps} onResume={onResume} disabled={disabled} />);
+  render(<MultiStepPlanCard steps={steps} onResume={onResume} disabled={disabled} originalModelId={originalModelId} />);
   fireEvent.click(screen.getByText(PANEL_LABEL));
 }
 

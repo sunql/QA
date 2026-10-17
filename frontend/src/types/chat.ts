@@ -283,6 +283,8 @@ export interface ChatMessage {
   cost?: number;
   // 实际服务于本次回答的大模型名称（done 事件回填）
   modelName?: string;
+  // N4 qwen 续跑：该消息首发时使用的 modelId（sendMessage 时从 dto.modelId 拷）
+  originalModelId?: number;
   isError?: boolean;
   // 意图（meta 事件回填）
   intent?: IntentType;

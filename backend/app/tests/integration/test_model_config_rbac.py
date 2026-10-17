@@ -1,10 +1,12 @@
-"""model-config RBAC + endpoint-change 校验集成测试。
+"""model-config RBAC + endpoint-change + service-layer 防御纵深集成测试。
 
 真实 PostgreSQL + 完整 API 链路（按 Harness/rules/测试规范.md）。
 覆盖：
 - 普通用户 POST /api/v1/models → 403
 - admin 用户 POST /api/v1/models → 201
 - admin 用户 PUT 变更 apiEndpoint 但不带 apiKey → 422
+- X1 防御纵深：service 层 create/update/deactivate 在 actor 非 admin 时抛 PermissionDenied
+- X1 缓存失效：apiEndpoint 变更后客户端缓存被清（下次 getOrCreateClient 重新构造）
 """
 from __future__ import annotations
 
@@ -16,10 +18,15 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies import CurrentUser
+from app.domain.exceptions import PermissionDeniedError
 from app.domain.models import LlmConfig
+from app.domain.schemas import LlmConfigCreate, LlmConfigUpdate
+from app.infrastructure.llm import factory as llmFactory
 from app.models.rbac import Role, User, UserRole, UserSession
 from app.infrastructure.security.crypto import encryptApiKey
 from app.services.jwt_codec import sign_jwt
+from app.services.model_config_service import ModelConfigService
 
 
 def _hash(p: str) -> str:
@@ -172,3 +179,124 @@ async def test_endpointChangeRequiresNewKey(
     # DomainError handler returns {"error": <message>, "detail": <detail>, ...}
     body = resp.json()
     assert "apiKey" in (body.get("error") or body.get("detail") or "")
+
+
+# ---------------------------------------------------------------------------
+# X1 防御纵深：service 层 create/update/deactivate 接受 actor: CurrentUser，
+# 非 admin 直接抛 PermissionDenied（即使绕过 API 路由也无法落库）。
+# ---------------------------------------------------------------------------
+
+
+async def _currentUserFor(
+    session: AsyncSession, username: str, role_code: str
+) -> CurrentUser:
+    """造一个内存 CurrentUser（不签 JWT，直接走 service 层）。"""
+    user = await _createUserWithRole(session, username, role_code=role_code)
+    return CurrentUser(
+        userId=str(user.id),
+        roles=(role_code,),
+        dbUserId=user.id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_serviceLayerRejectsNonAdminCreate(dbSession: AsyncSession) -> None:
+    """X1：非 admin 直接调 service.create → PermissionDenied（防御纵深）。
+
+    即使绕开 API 路由层 Depends(requireAdmin) 直接调 service，也无法越权。
+    """
+    actor = await _currentUserFor(dbSession, "x1_svc_create_user", "user")
+    svc = ModelConfigService()
+    dto = LlmConfigCreate(
+        model_name="x1-svc-create-blocked",
+        provider="openai",
+        api_endpoint="https://api.openai.com/v1",
+        api_key="sk-test",
+    )
+    with pytest.raises(PermissionDeniedError):
+        await svc.create(dbSession, dto, actor=actor)
+
+
+@pytest.mark.asyncio
+async def test_serviceLayerAllowsAdminCreate(dbSession: AsyncSession) -> None:
+    """X1：admin 直接调 service.create → 成功。"""
+    actor = await _currentUserFor(dbSession, "x1_svc_create_admin", "admin")
+    svc = ModelConfigService()
+    dto = LlmConfigCreate(
+        model_name="x1-svc-create-allowed",
+        provider="openai",
+        api_endpoint="https://api.openai.com/v1",
+        api_key="sk-test",
+    )
+    config = await svc.create(dbSession, dto, actor=actor)
+    assert config.id is not None
+    assert config.model_name == "x1-svc-create-allowed"
+
+
+@pytest.mark.asyncio
+async def test_serviceLayerRejectsNonAdminUpdate(
+    dbSession: AsyncSession, existingModelConfig: LlmConfig
+) -> None:
+    """X1：非 admin 直接调 service.update → PermissionDenied。"""
+    actor = await _currentUserFor(dbSession, "x1_svc_update_user", "user")
+    svc = ModelConfigService()
+    dto = LlmConfigUpdate(weight=42)
+    with pytest.raises(PermissionDeniedError):
+        await svc.update(dbSession, existingModelConfig.id, dto, actor=actor)
+
+
+@pytest.mark.asyncio
+async def test_serviceLayerRejectsNonAdminDeactivate(
+    dbSession: AsyncSession, existingModelConfig: LlmConfig
+) -> None:
+    """X1：非 admin 直接调 service.deactivate → PermissionDenied。"""
+    actor = await _currentUserFor(dbSession, "x1_svc_deact_user", "user")
+    svc = ModelConfigService()
+    with pytest.raises(PermissionDeniedError):
+        await svc.deactivate(dbSession, existingModelConfig.id, actor=actor)
+
+
+@pytest.mark.asyncio
+async def test_endpointChangeInvalidatesClientCache(
+    dbSession: AsyncSession, existingModelConfig: LlmConfig
+) -> None:
+    """X1 cache：apiEndpoint 变更后客户端缓存被清（下次 getOrCreateClient 重读）。
+
+    验证生产 2026-10-03 事故根因的修复：旧客户端若不清缓存，进程永远用旧 endpoint。
+    getOrCreateClient 走 _buildClient LRU（cache key 含 updated_at_epoch/endpoint/key_cipher），
+    update 后必须 clear 整个 LRU，否则旧 key 永远命中。
+    """
+    actor = await _currentUserFor(dbSession, "x1_cache_admin", "admin")
+    svc = ModelConfigService()
+
+    # 预热：构造一次客户端，确保 _buildClient LRU 缓存有 id 条目
+    pre = await llmFactory.getOrCreateClient(existingModelConfig.id, dbSession)
+    assert pre is not None
+    infoBefore = llmFactory._buildClient.cache_info()
+    assert infoBefore.currsize >= 1, "预热后 LRU 应有缓存条目"
+
+    # 改 endpoint（必须同时给 key；否则会因 endpoint 变更缺 key 抛 422）
+    await svc.update(
+        dbSession,
+        existingModelConfig.id,
+        LlmConfigUpdate(
+            api_endpoint="https://api.anthropic.com/v1",
+            api_key="sk-new-key-after-endpoint-change",
+        ),
+        actor=actor,
+    )
+
+    # 验证：LRU 缓存被 clear（旧 key 不会命中）
+    infoAfter = llmFactory._buildClient.cache_info()
+    assert infoAfter.currsize == 0, (
+        f"update 后 LRU 缓存应被 clear，实际 currsize={infoAfter.currsize}"
+    )
+
+    # 验证：再 getOrCreateClient 拿到的是新对象（endpont/key 都已换）
+    newClient = await llmFactory.getOrCreateClient(existingModelConfig.id, dbSession)
+    assert newClient is not None
+    # OpenAiClient 在构造时固化 _apiEndpoint（避免 ORM 跨会话 DetachedInstanceError）
+    newEndpoint = getattr(newClient, "_apiEndpoint", None)
+    assert newEndpoint == "https://api.anthropic.com/v1", (
+        f"新客户端应绑新 endpoint，实际 {newEndpoint!r}"
+    )

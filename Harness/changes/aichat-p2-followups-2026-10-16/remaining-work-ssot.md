@@ -1,5 +1,23 @@
 # aichat P2 后续工作项 SSOT（2026-10-16）
 
+> **2026-10-17 更新**：Phase 1 推进 4 PR 合入 main，#34 / #30 关闭。
+> Main HEAD: `7b43d428`。共 9 PR 合入（7 + 4 - 2 关闭 = 9 net merge）：
+> - `7b43d428` P2-1 M1 落地 + chatStore backport (#31)
+> - `29f481bd` chat PLAN_EMPTY fixture (#29)
+> - `c025c04a` model_config_api fixture (#33)
+> - `7611fbeb` Task 12.5 Critical user= (#32)
+> - `270df6f4` Task 12.5 闭环 1 Important+4 Minor (#44)
+> - `3c7ea35f` X4 stream parser (#47)
+> - `85d94fa1` X2 RequireAuth (#46)
+> - `d5f108df` X1 model-config (#45)
+> - `2c037d72` X5 session_claim (#41)
+> - `5c12b2c3` X3 checkpoint (#39)
+> - `6dce0f69` M5 stub-scope (#42)
+> 
+> **关闭**：`#30`（被 #31 取代）、`#34`（被 #44 取代）。
+> 
+> **仍 OPEN**：`#36` Frontend 13 红、`#43` L1 prompt 注入、`#35` M4 NULL 墓碑。
+
 ## 范围
 
 承接 P2-1 security review + aichat-priority plan Task 12 verification gap。
@@ -201,18 +219,26 @@ per `qa-system-qwen-multistep-uplift` 记忆，qwen-uplift 回滚后
 
 **所需**：独立 plan（"按任务匹配模型"的更激进方案）
 
-## 优先级排序（建议）
+## 优先级排序（实际状态 2026-10-17）
 
-| 序 | 项 | 估时 | ROI | 阻塞 | 状态 |
-|---|---|---|---|---|---|
-| 1 | Frontend 7 red（先 chatStore 8 红） | 4h | 高 | coverage 闸门 | ⏳ |
-| 2 | Task 12.5 code-reviewer | 1h | 中 | 验证 P0-P1 整体质量 | ✅ PR #32 |
-| 3 | X1-X5 dispatch（5 PR） | 2h/个 | 中 | 后续各独立闭环 | ⏳ |
-| 4 | M5（stub 模式回填） | 4h | 中 | OWASP A01 残留 | ⏳ |
-| 5 | M4（数据迁移） | 1h + 审批 | 中 | OWASP A01 残留 | ⏳ |
-| 6 | L1（prompt 注入） | 1d+ | 高 | 需独立 plan | ⏳ |
-| 7 | N4（qwen 知识保留） | 独立 | 低 | 不影响生产 | ⏳ |
-| 8 | Task 12.5 Important + Minor（affinity 移到 else / chatStore 魔串 / error_classification 注释） | 30m | 低 | 与 PR #32 同期补 | ⏳ |
+| 序 | 项 | 状态 | Main SHA | 备注 |
+|---|---|---|---|---|
+| 1 | M1 SSE 脱敏 | ✅ | `7b43d428` (#31) | sanitizeErrorMessage + 19 tests + 5 反向断言 |
+| 1' | chatStore 合并残留 backport | ✅ | `7b43d428` (#31) | 同上 PR；删 line 748 孤立 `} else {` |
+| 2 | Task 12.5 Critical user= | ✅ | `7611fbeb` (#32) | `_streamQuery` → `_tryFeatureResponse` 漏 user 关键字 |
+| 2' | Task 12.5 1 Important+4 Minor 闭环 | ✅ | `270df6f4` (#44) | affinity 移到 else / chatStore 魔串 / error_classification 注释 / intent 双路径 |
+| 3 | X1 model-config admin 守卫 | ✅ | `d5f108df` (#45) | service guard + API 显式传 actor |
+| 3 | X2 RequireAuth export | ✅ | `85d94fa1` (#46) | isAllowedWhenMustChange + 边界钉死 |
+| 3 | X3 checkpoint research question | ✅ | `5c12b2c3` (#39) | alembic 0128→0130 renumber |
+| 3 | X4 research SSE 共享 parser | ✅ | `3c7ea35f` (#47) | additive parser 改动 |
+| 3 | X5 session_claim invariant | ✅ | `2c037d72` (#41) | abort→answer 200→409 契约 |
+| 4 | M5 stub-scope marker | ✅ | `6dce0f69` (#42) | is_stub 列 + 读侧 WHERE is_stub=false |
+| 5 | Frontend 13 红 | ⏳ | — | PR #36；等 reviewer |
+| 6 | L1 prompt 注入 | ⏳ | — | PR #43 + `fix/l1-agent-loop-test` ee934a5 |
+| 7 | M4 NULL 墓碑 | ⏳ | — | PR #35；等 DDL 决策 |
+| 8 | N4 qwen 知识保留 | ⏳ | — | 独立 plan |
+| ─ | chat PLAN_EMPTY fixture | ✅ | `29f481bd` (#29) | 4 chat test files 38 reds |
+| ─ | model_config_api apiKey fixture | ✅ | `c025c04a` (#33) | 422 校验对齐 P1-2 |
 
 ## Why 此 SSOT 单独存在
 
@@ -224,12 +250,19 @@ per `qa-system-qwen-multistep-uplift` 记忆，qwen-uplift 回滚后
 
 ## 链接
 
-- 已落地 commit：`52b32928` (M1)
+- 已落地 commit (main 2026-10-17 顺序)：
+  - `7b43d428` P2-1 M1 + chatStore backport (#31)
+  - `29f481bd` chat PLAN_EMPTY fixture (#29)
+  - `c025c04a` model_config_api fixture (#33)
+  - `7611fbeb` Task 12.5 Critical user= (#32)
+  - `270df6f4` Task 12.5 闭环 (#44)
+  - `3c7ea35f` X4 (#47), `85d94fa1` X2 (#46), `d5f108df` X1 (#45)
+  - `2c037d72` X5 (#41), `5c12b2c3` X3 (#39), `6dce0f69` M5 (#42)
 - 报告：`/tmp/qa-aichat-priority-remaining/Harness/changes/aichat-priority-remaining-2026-10-16/security-review-report.md`
 - Cross-refs spec：`docs/superpowers/specs/2026-10-13-1012-code-review-cross-refs.md`
 - Coverage gate：`/tmp/qa-aichat-priority-remaining/Harness/changes/aichat-priority-remaining-2026-10-16/coverage-gate-report.md`
 - Plan：`docs/superpowers/plans/2026-10-13-aichat-service-priority.md`
 - Task 12.5 review 报告：`/tmp/review-package-aichat-p0p2/task-12.5-review-report.md`
-- Task 12.5 Critical 修复：**PR #32**（`fix/chat-stream-feature-user-arg`，base=main）
-  - worktree：`/tmp/qa-fix-feature-user`
-  - commit：`efc5cfe5` fix(chat): _streamQuery passes user=user to _tryFeatureResponse (P0-3 scope)
+- Task 12.5 Critical 修复：**PR #32** 合入 main `7611fbeb`
+  - 原始 commit：`efc5cfe5` fix(chat): _streamQuery passes user=user to _tryFeatureResponse (P0-3 scope)
+  - 原始 worktree：`/tmp/qa-fix-feature-user`

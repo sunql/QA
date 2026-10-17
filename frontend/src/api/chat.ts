@@ -326,6 +326,72 @@ export async function sendMessageStream(
   }
 }
 
+/**
+ * 续跑多步 run：从 fromStepIndex 起重启多步流，仍走 SSE。
+ *
+ * - runId 经 encodeURIComponent 防路径注入（特殊字符如 a/b c）
+ * - body camelCase：{ fromStepIndex }（与 Python 后端 Pydantic alias 一致）
+ * - Idempotency-Key 由前端生成（UUID v4），后端据此去重同 runId 重放
+ *
+ * 异常路径：网络/HTTP 错抛 Error，由调用方（store）转为错误消息。
+ */
+export async function resumeMultiStepRun(
+  runId: string,
+  fromStepIndex: number,
+  handlers: StreamEventHandlers,
+): Promise<void> {
+  const headers = authHeaders({
+    "Content-Type": "application/json",
+    "Idempotency-Key": crypto.randomUUID(),
+  });
+  const response = await fetch(
+    `${API_BASE_URL}${BASE}/multi-step/${encodeURIComponent(runId)}/resume`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ fromStepIndex }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`续跑失败 (HTTP ${response.status})`);
+  }
+  if (!response.body) {
+    throw new Error(i18n.t("errors.noStreamSupport"));
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const parser = new StreamChunkParser();
+  let sawTerminal = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value, { stream: true });
+      for (const frame of parser.feed(text)) {
+        if (frame.event === "done" || frame.event === "error") sawTerminal = true;
+        dispatchFrame(frame, handlers);
+      }
+    }
+    const tail = decoder.decode();
+    if (tail) {
+      for (const frame of parser.feed(tail)) {
+        if (frame.event === "done" || frame.event === "error") sawTerminal = true;
+        dispatchFrame(frame, handlers);
+      }
+    }
+    for (const frame of parser.flush()) {
+      if (frame.event === "done" || frame.event === "error") sawTerminal = true;
+      dispatchFrame(frame, handlers);
+    }
+    if (!sawTerminal) throw new Error("stream interrupted: no done/error before EOF");
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 function dispatchFrame(frame: { event: string; data: string }, handlers: StreamEventHandlers): void {
   const { event, data } = frame;
   if (!event) return;

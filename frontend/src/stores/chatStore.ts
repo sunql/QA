@@ -749,7 +749,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           },
         });
       } else {
-      } else {
         // 非流式分支（不改；也要 reset currentAssistantMessageId）
         try {
           const response = await sendChatMessage(payload);

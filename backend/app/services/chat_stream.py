@@ -38,7 +38,7 @@ from app.services.chat_constants import (
     USAGE_PURPOSE_NL2SQL,
 )
 from app.services.intent_service import IntentResult
-from app.services.error_classification import classifyError
+from app.services.error_classification import classifyError, sanitizeErrorMessage
 # 4-1（feat-token-cache）：_readFloatConfig 用于 LLM_CACHE_HIT_MULTIPLIER，
 # 与 chat_service.processMessage 同口径——在 _streamQuery 入口一次性读一次，
 # 整条流水线复用，避免每段 _costFor 调用都查 DB。
@@ -196,7 +196,7 @@ class StreamMixin:
             yield StreamEvent(
                 EVENT_ERROR,
                 {
-                    "error": exc.message,
+                    "error": sanitizeErrorMessage(exc, ErrorType.DOMAIN),
                     "errorType": ErrorType.DOMAIN.value,
                     "detail": exc.detail,
                 },
@@ -211,7 +211,10 @@ class StreamMixin:
             )
             yield StreamEvent(
                 EVENT_ERROR,
-                {"error": MSG_INTERNAL_ERROR, "errorType": ErrorType.INTERNAL.value},
+                {
+                    "error": sanitizeErrorMessage(exc, ErrorType.INTERNAL),
+                    "errorType": ErrorType.INTERNAL.value,
+                },
             )
             return
 
@@ -304,24 +307,44 @@ class StreamMixin:
             ):
                 yield event
         except LlmClientError as exc:
+            errorType = classifyError(exc)
             logger.warning("流式查询 LLM 失败: %s", exc.message)
+            # P2-1 review M1：原始 provider 文案进日志，SSE payload 用脱敏文案
+            # exc.message 落库供排障（用户下次看历史对话能定位问题），不暴露给前端
             await self._storeSessionMessages(session, dto.sessionId, dto.question, exc.message, None)
-            yield StreamEvent(EVENT_ERROR, {"error": exc.message, "errorType": classifyError(exc).value})
+            yield StreamEvent(
+                EVENT_ERROR,
+                {
+                    "error": sanitizeErrorMessage(exc, errorType),
+                    "errorType": errorType.value,
+                },
+            )
         except DomainError as exc:
+            errorType = classifyError(exc)
             logger.warning("流式查询失败: %s", exc.message)
             await self._storeSessionMessages(session, dto.sessionId, dto.question, exc.message, None)
             if isinstance(exc, Nl2SqlError) and exc.lastPlan is not None:
                 yield StreamEvent(EVENT_PLAN, {"plan": exc.lastPlan.to_dict()})
             yield StreamEvent(
                 EVENT_ERROR,
-                {"error": exc.message, "errorType": classifyError(exc).value, "detail": exc.detail},
+                {
+                    "error": sanitizeErrorMessage(exc, errorType),
+                    "errorType": errorType.value,
+                    "detail": exc.detail,
+                },
             )
         except Exception as exc:
             # 未预期异常（DB 连接中断 / 数据解析错误等）：记录完整上下文并产出结构化
             # 错误事件，保证 SSE 连接始终以 error 事件结束而不是被强行中断。
             logger.exception("流式查询未预期错误: %s", exc)
             await self._storeSessionMessages(session, dto.sessionId, dto.question, MSG_INTERNAL_ERROR, None)
-            yield StreamEvent(EVENT_ERROR, {"error": MSG_INTERNAL_ERROR, "errorType": ErrorType.INTERNAL.value})
+            yield StreamEvent(
+                EVENT_ERROR,
+                {
+                    "error": sanitizeErrorMessage(exc, ErrorType.INTERNAL),
+                    "errorType": ErrorType.INTERNAL.value,
+                },
+            )
 
     async def _streamChitchat(
         self, dto: ChatRequest, session: AsyncSession

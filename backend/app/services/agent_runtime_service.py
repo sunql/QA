@@ -55,6 +55,11 @@ from app.services.agent_tool_config_registry import (
     agent_tool_config_registry,
 )
 from app.services.agent_binding_cache import agent_binding_cache
+from app.security.prompt_sanitizer import (
+    UntrustedLabel,
+    renderSecurityPreamble,
+    wrapUntrusted,
+)
 from app.services.supplier_name_resolver import SupplierNameResolver
 
 logger = logging.getLogger(__name__)
@@ -255,7 +260,10 @@ class AgentLoopResult:
 # 问句"。前者走 tool calling，后者直接文字作答（避免无限循环调工具）。
 # 历史 bug：缺系统提示 → LLM 永远调用 tool_calls 直到 max_iterations → answer_text=None
 # → chat_service 降级到 L2 fallback，L4 路径看似"被降级"实则 LLM 从未进入"answered"分支。
-_L4_SYSTEM_PROMPT = """你是 NL2SQL 数据分析助手。会话可调用以下工具查询数据库：
+_L4_SYSTEM_PROMPT = (
+    renderSecurityPreamble()
+    + "\n\n"
+    + """你是 NL2SQL 数据分析助手。会话可调用以下工具查询数据库：
 - list_tables / describe_table / sample_rows / list_joins：探索 schema（**仅在确实需要时**）
 - execute_sql：执行只读 SELECT 查询
 
@@ -273,6 +281,7 @@ _L4_SYSTEM_PROMPT = """你是 NL2SQL 数据分析助手。会话可调用以下�
 5. **放弃条件**：若 1 轮探索 + 1 次 execute_sql 仍未拿到数据，请基于已有信息给出推断 + 明确说明数据缺口，**立即文字总结**，不要再调工具
 
 历史反例：曾因 LLM 反复 describe_table 而耗尽 max_iterations，请严守上述预算。"""
+)
 
 
 def _build_system_message(prompt: str):
@@ -577,13 +586,14 @@ async def _dispatchSingleTool(
         result = await dispatch_tool_call(tc_adapter, session=session)
         content = result.content
 
+    safeContent = wrapUntrusted(UntrustedLabel.AGENT_TOOL_RESULT, content)
     try:
         from langchain_core.messages import ToolMessage
-        return ToolMessage(content=content, tool_call_id=tc.id, name=tc.name)
+        return ToolMessage(content=safeContent, tool_call_id=tc.id, name=tc.name)
     except ImportError:
         return {
             "role": "tool",
-            "content": content,
+            "content": safeContent,
             "tool_call_id": tc.id,
             "name": tc.name,
             "type": "tool",
@@ -709,18 +719,19 @@ def _logLoopEnd(*, user_id: int, terminated_reason: str, iterations: int, total_
 
 
 def _initLoopState(question: str) -> dict:
-    """初始化 loop 状态。"""
+    """初始化 loop 状态。L1 防御：question 用 <user_question> 包裹。"""
+    safeQuestion = wrapUntrusted(UntrustedLabel.USER_QUESTION, question)
     try:
         from langchain_core.messages import HumanMessage
         messages = [
             _build_system_message(_L4_SYSTEM_PROMPT),
-            HumanMessage(content=question),
+            HumanMessage(content=safeQuestion),
         ]
     except ImportError:
         # dev/test venv 可能缺 langchain_core；用 dict shim
         messages = [
             _build_system_message(_L4_SYSTEM_PROMPT),
-            {"role": "user", "content": question, "type": "human"},
+            {"role": "user", "content": safeQuestion, "type": "human"},
         ]
 
     return {

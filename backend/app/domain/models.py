@@ -870,11 +870,12 @@ class SessionQueryState(Base, TimestampMixin):
     避免切换数据源后用错 state / 跨用户窃取上下文。
     NULL 列兼容历史无 scope 的旧行。
 
-    M5：is_stub 标记 stub 模式（dbUserId=None）写入的半 scope 行。
-    写侧在 userId is None 时设 is_stub=True；读侧追加 WHERE is_stub=false。
-    M4 的 user_id=-1 墓碑行在迁移 0129 中被 backfill 为 is_stub=True，
-    使其被读侧过滤排除。is_stub 比 scope 完整度更强的排序信号：
-    is_stub=False 的行（real 行）在任何情况下都优先于 is_stub=True 的行。
+    M4（方案 A，0128 迁移）：user_id = -1 是墓碑值，把 P0-3 前的 NULL 行 UPDATE 为 -1，
+    表示「归属未明的遗留桶，禁止读」。读侧统一 `WHERE user_id != -1` 排除。
+    M5（0129 backfill + is_stub 列）：M4 的 -1 墓碑行在迁移 0129 中被 backfill 为 is_stub=True，
+    进一步走读侧 `WHERE is_stub=false` 过滤。写侧在 userId is None 时设 is_stub=True。
+    is_stub 比 scope 完整度更强的排序信号：is_stub=False 的行（real 行）在任何情况下
+    都优先于 is_stub=True 的行。
     """
 
     __tablename__ = "session_query_state"

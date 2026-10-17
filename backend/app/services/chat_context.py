@@ -571,10 +571,15 @@ class ContextMixin:
         同一 session 下可能同时存在多行（P0-3 之前写的 NULL 行与之后写的 scoped 行
         可以合法并存 —— Postgres 的 UNIQUE 把 NULL 视作互不相等），裸语义会抛
         `MultipleResultsFound` 把一次追问打成 500。故统一走 `_selectStateRow`。
+
+        M4：0128 迁移把所有 `user_id IS NULL` 的旧行墓碑化为 -1（归属未明的 P0-3
+        前遗留桶），读侧统一 `WHERE user_id != -1` 排除墓碑。防止任意 user 读到
+        别人留下的 NULL 桶造成跨用户上下文污染。
         """
         stmt = select(SessionQueryState).where(
             SessionQueryState.session_id == sessionId,
-            SessionQueryState.is_stub == False,  # M5：排除 stub 行
+            SessionQueryState.is_stub == False,  # M5：排除 stub 行（M4 的 -1 墓碑行已被 0129 backfill 为 is_stub=True）
+            SessionQueryState.user_id != -1,  # M4：排除 user_id = -1 墓碑行（0128 迁移 NULL→-1；M5 0129 backfill 为 is_stub=True 双重保险）
         )
         if userId is not None:
             stmt = stmt.where(SessionQueryState.user_id == userId)

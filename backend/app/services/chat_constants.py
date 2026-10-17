@@ -26,6 +26,18 @@ ROUTING_LAYER_L4 = "L4"  # L4 Agent Loop（研究类问题，触发 _L4_EXPLORAT
 
 
 # =============================================================================
+# Meta frame intent values (SSE wire format; chat_stream._streamQuery L1/L4 preamble)
+# =============================================================================
+# Wire format only — NOT IntentType enum values (those are lowercase "query" /
+# "agent_run" / etc.). Frontend chatApi / researchStore consume these exact strings.
+# Changing requires coordinated PR across both repos. Locked by
+# tests/unit/test_chat_stream_meta_constants.py + tests/integration/test_stream_meta_single_frame.py
+# (the latter's reverse guards assert single["intent"] == "KPI").
+META_INTENT_L1 = "KPI"  # L1 短路命中：KPI 目录直答，0 LLM cost
+META_INTENT_L4 = "AGENT_RUN"  # L4 短路命中：Agent Loop 触发
+
+
+# =============================================================================
 # Token usage 用途（落 token_usage.purpose；按此维度做成本归因与告警）
 # =============================================================================
 

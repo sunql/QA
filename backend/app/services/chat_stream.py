@@ -33,6 +33,9 @@ from app.domain.query_plan import QueryPlan
 from app.domain.schemas import AgentSuggestion, ChatRequest, SemanticState
 from app.services import multi_step_persistence as persistence
 from app.services.chat_constants import (
+    META_INTENT_L1,
+    META_INTENT_L4,
+    ROUTING_LAYER_L1,
     ROUTING_LAYER_L2,
     USAGE_PURPOSE_ANSWER,
     USAGE_PURPOSE_NL2SQL,
@@ -225,7 +228,7 @@ class StreamMixin:
             # F2c: merge into single meta frame (was 2-3 separate frames; each
             #不带 intent 的帧会抹掉前端刚设好的 intent）。
             meta_frame = {
-                "intent": "KPI" if preamble.routing_layer == "L1" else "AGENT_RUN",
+                "intent": META_INTENT_L1 if preamble.routing_layer == ROUTING_LAYER_L1 else META_INTENT_L4,
                 "routingLayer": preamble.routing_layer,
                 "datasourceMismatch": preamble.datasource_mismatch,
             }
@@ -244,7 +247,7 @@ class StreamMixin:
             yield StreamEvent(EVENT_TOKEN, {"content": preamble.answer})
             yield StreamEvent(EVENT_DONE, {
                 "routingLayer": preamble.routing_layer,
-                "tokenCostUsd": 0.0 if preamble.routing_layer == "L1" else None,
+                "tokenCostUsd": 0.0 if preamble.routing_layer == ROUTING_LAYER_L1 else None,
             })
             return
 

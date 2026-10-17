@@ -307,9 +307,11 @@ per `qa-system-qwen-multistep-uplift` 记忆，qwen-uplift 回滚后
   - 原始 commit：`efc5cfe5` fix(chat): _streamQuery passes user=user to _tryFeatureResponse (P0-3 scope)
   - 原始 worktree：`/tmp/qa-fix-feature-user`
 - **N4 手动续跑** cross-ref (SSOT 范围外独立 plan)：
-  - **PR #48** feat(n4): qwen 多步任务中断后跨模型手动续跑 (2026-10-17)
-  - HEAD: `00615e23`, 16 commits, 24 files, +1211/-27
+  - **PR #48** feat(n4): qwen 多步任务中断后跨模型手动续跑 (2026-10-17) ✅ merged `5f447349`
+  - 17 commits (含 main-merge + sawTerminal 收尾), 24 files, +1775/-90, 31 tests
+  - sawTerminal 收尾 commit: `89d31119` (4 参 resumeMultiStepRun 加 EOF 守门)
   - Spec: `docs/superpowers/specs/2026-10-17-n4-qwen-resume-design.md`
   - Plan: `docs/superpowers/plans/2026-10-17-n4-qwen-resume.md`
   - SDD ledger: `.superpowers/sdd/2026-10-17-n4-qwen-resume/progress.md`
-  - Worktree: `/private/tmp/qa-n4-qwen-resume` (branch `feat/n4-qwen-resume`)
+  - 实施 worktree: `/private/tmp/qa-n4-qwen-resume` (已 `git worktree remove --force` 清理, 2026-10-17)
+  - 合并冲突: 2 处 (chatStore.ts onStepPlan/onStepResult + chat.ts resumeMultiStepRun duplicate export), 均保留 main 侧 + 删 N4 重复函数

@@ -269,7 +269,6 @@ class TestChatService:
         await service._saveQueryState(
             dbSession,
             "s1",
-            datasourceId=1,
             question="各供应商的收货数量汇总",
             plan=QueryPlan(target="t", selectedClasses=("PRECEIPT",)),
             sql="SELECT NAME, SUM(QTY) FROM PRECEIPT GROUP BY NAME",
@@ -460,7 +459,6 @@ class TestQueryState:
         state = await service._saveQueryState(
             dbSession,
             "s1",
-            datasourceId=1,
             question="各供应商的收货数量汇总",
             plan=QueryPlan(target="t", selectedClasses=("PRECEIPT",)),
             sql="SELECT 1",
@@ -518,7 +516,6 @@ class TestQueryState:
         await service._saveQueryState(
             dbSession,
             "s1",
-            datasourceId=1,
             question="各供应商的收货数量汇总",
             plan=plan,
             sql="SELECT BPSNUM, SUM(QTY) FROM PRECEIPT",
@@ -718,7 +715,6 @@ class TestQueryState:
         await service._saveQueryState(
             dbSession,
             "s1",
-            datasourceId=1,
             question="各供应商的收货数量汇总",
             plan=QueryPlan(target="t", selectedClasses=("PRECEIPT",)),
             sql="SELECT NAME, SUM(QTY) FROM PRECEIPT GROUP BY NAME",
@@ -740,7 +736,6 @@ class TestQueryState:
         await service._saveQueryState(
             dbSession,
             "s1",
-            datasourceId=1,
             question="各供应商的收货数量汇总",
             plan=QueryPlan(target="t", selectedProperties=("NAME", "QTY")),
             sql="SELECT NAME, SUM(QTY) FROM PRECEIPT GROUP BY NAME",

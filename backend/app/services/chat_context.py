@@ -579,6 +579,7 @@ class ContextMixin:
         stmt = select(SessionQueryState).where(
             SessionQueryState.session_id == sessionId,
             SessionQueryState.is_stub == False,  # M5：排除 stub 行（M4 的 -1 墓碑行已被 0129 backfill 为 is_stub=True）
+            SessionQueryState.user_id != -1,  # M4：排除 user_id = -1 墓碑行（0128 迁移 NULL→-1；M5 0129 backfill 为 is_stub=True 双重保险）
         )
         if userId is not None:
             stmt = stmt.where(SessionQueryState.user_id == userId)

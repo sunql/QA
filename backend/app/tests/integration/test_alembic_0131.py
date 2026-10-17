@@ -1,7 +1,7 @@
-"""验证 Alembic 0128：SessionQueryState NULL user_id 墓碑化（M4 数据迁移）。
+"""验证 Alembic 0131：SessionQueryState NULL user_id 墓碑化（M4 数据迁移）。
 
 契约（per aichat-p2-followups-2026-10-16/remaining-work-ssot §M4 方案 A）：
-- upgrade 0128 后：所有 user_id IS NULL 的行被 UPDATE 为 -1（墓碑）
+- upgrade 0131 后：所有 user_id IS NULL 的行被 UPDATE 为 -1（墓碑）
 - 加列注释说明 -1 语义
 - downgrade 0127 后：-1 行被还原为 NULL，列注释清空
 - 双向对称：upgrade → downgrade → upgrade 状态一致
@@ -24,10 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.tests._pg_support import resolveTestDatabaseUrl
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[3]  # backend/
-_REQUIRED_DB = "qa_metadata_test"
+_REQUIRED_DB = ("qa_metadata_test", "qa_metadata_test_solo")
 
-_REVISION = "0128"
-_PREVIOUS = "0127"
+_REVISION = "0131"
+_PREVIOUS = "0130"
 _TABLE = "session_query_state"
 _TOMBSTONE_USER_ID = -1
 
@@ -38,7 +38,7 @@ def _assertTestDb(url: str) -> None:
     """写库闸：只认测试库，否则 raise（不执行任何 DDL）。"""
     match = re.search(r"/([^/?]+)(?:\?|$)", url)
     dbName = match.group(1) if match else ""
-    if dbName != _REQUIRED_DB:
+    if dbName not in _REQUIRED_DB:
         raise RuntimeError(
             f"拒绝对非测试库执行迁移：解析到库名 {dbName!r}，要求 {_REQUIRED_DB!r}。"
             "alembic/env.py 只读 DATABASE_URL（TEST_DATABASE_URL 被静默忽略），"
@@ -115,8 +115,8 @@ async def _deleteBySessionId(dbSession: AsyncSession, sessionId: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_0128_tombstones_null_user_id_rows(dbSession: AsyncSession) -> None:
-    """upgrade 0128 后：NULL user_id 行被 UPDATE 为 -1（墓碑），列注释存在。"""
+async def test_0131_tombstones_null_user_id_rows(dbSession: AsyncSession) -> None:
+    """upgrade 0131 后：NULL user_id 行被 UPDATE 为 -1（墓碑），列注释存在。"""
     url = resolveTestDatabaseUrl()
     _assertTestDb(url)
 
@@ -127,17 +127,17 @@ async def test_0128_tombstones_null_user_id_rows(dbSession: AsyncSession) -> Non
         sid = "m4-test-legacy-session"
         await _deleteBySessionId(dbSession, sid)
         await _seedNullRow(dbSession, sid)
-        # 升级到 0128
+        # 升级到 0131
         _alembic(url, "upgrade", _REVISION)
         # 验证：NULL → -1
         assert await _userIdBySessionId(dbSession, sid) == _TOMBSTONE_USER_ID, (
-            f"upgrade 0128 后 user_id 应为 -1（墓碑），"
+            f"upgrade 0131 后 user_id 应为 -1（墓碑），"
             f"实际 {await _userIdBySessionId(dbSession, sid)}"
         )
         # 验证：列注释含墓碑说明
         comment = await _columnComment(dbSession)
         assert comment is not None and "墓碑" in comment, (
-            f"upgrade 0128 后列注释应含「墓碑」说明，实际 {comment!r}"
+            f"upgrade 0131 后列注释应含「墓碑」说明，实际 {comment!r}"
         )
     finally:
         # 清理：删测试行 + 送回 head 避免污染后续测试
@@ -146,21 +146,21 @@ async def test_0128_tombstones_null_user_id_rows(dbSession: AsyncSession) -> Non
 
 
 @pytest.mark.asyncio
-async def test_0128_downgrade_restores_null_and_clears_comment(
+async def test_0131_downgrade_restores_null_and_clears_comment(
     dbSession: AsyncSession,
 ) -> None:
     """downgrade 0127：-1 行还原为 NULL，列注释清空。"""
     url = resolveTestDatabaseUrl()
     _assertTestDb(url)
 
-    # 起手：升到 0128，插一行（已是 -1），再回退
+    # 起手：升到 0131，插一行（已是 -1），再回退
     _alembic(url, "upgrade", _REVISION)
     try:
         sid = "m4-test-downgrade-session"
         await _deleteBySessionId(dbSession, sid)
-        # 升级到 0128 后再插：现在 user_id NOT NULL 是 False，可以插 NULL
+        # 升级到 0131 后再插：现在 user_id NOT NULL 是 False，可以插 NULL
         await _seedNullRow(dbSession, sid)
-        # 但 seed 之后已经 -1（因为刚升的 0128 触发器式 UPDATE 不会重跑，所以
+        # 但 seed 之后已经 -1（因为刚升的 0131 触发器式 UPDATE 不会重跑，所以
         # 这次新插的还是 NULL；先手动触发墓碑化用 SQL）
         await dbSession.rollback()
         await dbSession.execute(
@@ -189,8 +189,8 @@ async def test_0128_downgrade_restores_null_and_clears_comment(
 
 
 @pytest.mark.asyncio
-async def test_0128_idempotent_upgrade(dbSession: AsyncSession) -> None:
-    """二次 upgrade 0128：no-op（NULL 行已经在 -1 不会被再次更新）。"""
+async def test_0131_idempotent_upgrade(dbSession: AsyncSession) -> None:
+    """二次 upgrade 0131：no-op（NULL 行已经在 -1 不会被再次更新）。"""
     url = resolveTestDatabaseUrl()
     _assertTestDb(url)
 
@@ -209,7 +209,7 @@ async def test_0128_idempotent_upgrade(dbSession: AsyncSession) -> None:
             {"sid": sid, "tombstone": _TOMBSTONE_USER_ID, "q": f"q-{sid}"},
         )
         await dbSession.commit()
-        # 再跑一次 upgrade 0128
+        # 再跑一次 upgrade 0131
         _alembic(url, "upgrade", _REVISION)
         # 验证：仍是 -1（没被改成 NULL 也没被改两次）
         assert await _userIdBySessionId(dbSession, sid) == _TOMBSTONE_USER_ID

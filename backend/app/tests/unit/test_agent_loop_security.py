@@ -50,10 +50,10 @@ def test_init_loop_state_wraps_user_question() -> None:
     """question 用 <user_question> 包裹（dict shim 路径，本 venv 走这条）。"""
     state = _initLoopState("查询供应商")
     msgs = state["messages"]
-    # 找到 user message
+    # 找到 user message（dict shim 用 role=="user"；langchain HumanMessage 用 type=="human"）
     user_msg = next(
         m for m in msgs
-        if (m.get("role") if isinstance(m, dict) else getattr(m, "type", None)) == "user"
+        if (m.get("role") if isinstance(m, dict) else getattr(m, "type", None)) in ("user", "human")
     )
     content = user_msg.get("content") if isinstance(user_msg, dict) else user_msg.content
     expected = wrapUntrusted(UntrustedLabel.USER_QUESTION, "查询供应商")
@@ -79,7 +79,7 @@ def test_init_loop_state_closing_tag_neutralized() -> None:
     msgs = state["messages"]
     user_msg = next(
         m for m in msgs
-        if (m.get("role") if isinstance(m, dict) else getattr(m, "type", None)) == "user"
+        if (m.get("role") if isinstance(m, dict) else getattr(m, "type", None)) in ("user", "human")
     )
     content = user_msg.get("content") if isinstance(user_msg, dict) else user_msg.content
     # payload 的 </user_question> 应被 U+200B 打断 -> 仍含 </user_question> 字面
@@ -92,7 +92,7 @@ def test_init_loop_state_double_quote_escaped() -> None:
     msgs = state["messages"]
     user_msg = next(
         m for m in msgs
-        if (m.get("role") if isinstance(m, dict) else getattr(m, "type", None)) == "user"
+        if (m.get("role") if isinstance(m, dict) else getattr(m, "type", None)) in ("user", "human")
     )
     content = user_msg.get("content") if isinstance(user_msg, dict) else user_msg.content
     assert "&quot;hi&quot;" in content

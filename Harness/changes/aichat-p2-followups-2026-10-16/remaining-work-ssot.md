@@ -132,7 +132,7 @@ class label）注入 LLM prompt → 模型被诱导越权或泄露 system prompt
 
 **PR #43**（2026-10-17, L1 prompt 注入防御）合入 main `8bc15b57`。
 
-### L4 — `__non_finite__` 哨兵 ⏳ 30m 实际非 dead
+### L4 — `__non_finite__` 哨兵 ✅ skip（2026-10-17 复核）
 
 **复核结论**：标记 `{"__non_finite__": "..."}` 是 load-bearing（让
 `allow_nan=False` 不抛错且符合 RFC 7159），不是 dead code。前端缺消费者
@@ -140,6 +140,9 @@ class label）注入 LLM prompt → 模型被诱导越权或泄露 system prompt
 
 **判定**：skip，不修。`__non_finite__` 是 JSON 序列化正确性必需，UI 渲染
 是前端降级问题，独立的 UX 项。
+
+**SSOT 关闭理由**：30m 估算前提"实际非 dead"已确认；不在本 SSOT 范围
+(后端序列化正确性),后续若用户报 UX 降级再开独立 UX backlog。
 
 ### Task 12.5 — code-reviewer on P0-P1 changed files ✅ 已派发
 

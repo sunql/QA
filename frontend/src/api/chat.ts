@@ -497,6 +497,7 @@ export async function resumeMultiStepRun(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const parser = new StreamChunkParser();
+  let sawTerminal = false;
 
   try {
     while (true) {
@@ -504,18 +505,22 @@ export async function resumeMultiStepRun(
       if (done) break;
       const text = decoder.decode(value, { stream: true });
       for (const frame of parser.feed(text)) {
+        if (frame.event === "done" || frame.event === "error") sawTerminal = true;
         dispatchFrame(frame, handlers);
       }
     }
     const tail = decoder.decode();
     if (tail) {
       for (const frame of parser.feed(tail)) {
+        if (frame.event === "done" || frame.event === "error") sawTerminal = true;
         dispatchFrame(frame, handlers);
       }
     }
     for (const frame of parser.flush()) {
+      if (frame.event === "done" || frame.event === "error") sawTerminal = true;
       dispatchFrame(frame, handlers);
     }
+    if (!sawTerminal) throw new Error("stream interrupted: no done/error before EOF");
   } finally {
     reader.releaseLock();
   }

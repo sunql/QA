@@ -768,4 +768,25 @@ describe("api/chat 续跑与压缩（Task 9）", () => {
     expect("modelOverride" in body).toBe(false);
     expect(body.fromStepIndex).toBe(2);
   });
+
+  it("resumeMultiStepRun 流式 EOF 之前没收到 done/error → 抛 stream interrupted", async () => {
+    // 构造一个无 terminal 帧的流：只产出 1 帧 (meta) 就 EOF，
+    // 验证 sawTerminal 守门能识别这种异常 EOF 并抛出明确错误，
+    // 而不是静默成功让 UI 误以为续跑完整结束。
+    const encoder = new TextEncoder();
+    const streamNoTerminal = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('event: meta\ndata: {"foo":"bar"}\n\n'));
+        controller.close();
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, body: streamNoTerminal })
+    );
+
+    await expect(resumeMultiStepRun("r-1", 0, {})).rejects.toThrow(
+      "stream interrupted: no done/error before EOF"
+    );
+  });
 });

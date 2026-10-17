@@ -101,6 +101,12 @@ class CheckpointAnswerRequest(CamelModel):
 
     action: CheckpointAction
     choice: dict[str, Any] = Field(default_factory=dict)
+    model_id: int | None = Field(
+        default=None,
+        gt=0,
+        alias="modelId",
+        description="续跑模型 id; None 走原 turn.model_id",
+    )
 
 
 # --- 响应体 -----------------------------------------------------------------

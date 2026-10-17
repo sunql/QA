@@ -246,6 +246,28 @@ per `docs/superpowers/specs/2026-10-13-1012-code-review-cross-refs.md`：
 - **X4 流式 CRLF + EOF 守门（chat + research 共用）** ✅ **PR #47** `3c7ea35f` — additive parser 改动（compat with M5）
 - **X5 会话归属 + 状态互斥** ✅ **PR #41** `2c037d72` — abort→answer 200→409 契约
 
+### 71 红收尾 + N3 预算降级信号 ✅ **PR #51** Main `655a4cbe`
+
+8 commits / 31 files / +1190/-68 / 350 测试 0 回归（PR #20/#21/#24/#25/#26/#27/#23 净收）：
+
+| 来源 PR | 修法 | 红 |
+|---|---|---|
+| #20 | FastAPI 0.136.1 `_IncludedRouter` 不存在，删 dead code 分支 | 1 |
+| #21 | `/share/{token}` 拎独立 router，去 `mustChangePasswordGuard` | 1 |
+| #23 | 4 wiki fixture password + cache_clear + item.profile + must_change_password | 9 |
+| #24 | 3 fixture 同步 item.profile + must_change_password（与 #23 同 root cause family） | 13 |
+| #25 | rbac review 修复 + 4 fixture 跟新契约对齐（password 必填 / item.profile 叶子 / 签名补 dbSession） | 12 |
+| #26 | ontology fixture 13 文件 mock 跟 M0-P0.4 3-collection refactor 对齐 | 9 |
+| #27 | M3 预算闸门静默失效 → 用户可见降级信号（第 7 个 error code `ERROR_BUDGET_METERING_DEGRADED`） | 0 红 (净功能) |
+
+测试验证（10 integration 文件 187/187 绿 + ontology 13 文件 163/163 绿 = **350/350**）：
+- test_rbac_api 42, test_user_clearance 3, test_route_auth_guard 4, test_identity_create_user_password 3,
+  test_evaluation_report_share 14, test_wiki_link_admin_api 12, test_wiki_import_api 43,
+  test_wiki_import_retry_api 10, test_wiki_reclassify_api 21, test_wiki_suggestion_api 35
+- ontology 13 文件 163 passed (commit `31af4202` 描述)
+
+合并时阻塞：test_rbac_api 11 真红（password 必填 + item.profile 叶子 + 签名补 dbSession 缺参）→ `8dd5e7a4` 修完 42/42 绿。
+
 ### N4 — qwen-uplift 知识保留 ⏳ 独立 plan
 
 per `qa-system-qwen-multistep-uplift` 记忆，qwen-uplift 回滚后

@@ -132,7 +132,7 @@ class label）注入 LLM prompt → 模型被诱导越权或泄露 system prompt
 
 **PR #43**（2026-10-17, L1 prompt 注入防御）合入 main `8bc15b57`。
 
-### L4 — `__non_finite__` 哨兵 ⏳ 30m 实际非 dead
+### L4 — `__non_finite__` 哨兵 ✅ skip（2026-10-17 复核）
 
 **复核结论**：标记 `{"__non_finite__": "..."}` 是 load-bearing（让
 `allow_nan=False` 不抛错且符合 RFC 7159），不是 dead code。前端缺消费者
@@ -140,6 +140,9 @@ class label）注入 LLM prompt → 模型被诱导越权或泄露 system prompt
 
 **判定**：skip，不修。`__non_finite__` 是 JSON 序列化正确性必需，UI 渲染
 是前端降级问题，独立的 UX 项。
+
+**SSOT 关闭理由**：30m 估算前提"实际非 dead"已确认；不在本 SSOT 范围
+(后端序列化正确性),后续若用户报 UX 降级再开独立 UX backlog。
 
 ### Task 12.5 — code-reviewer on P0-P1 changed files ✅ 已派发
 
@@ -268,16 +271,30 @@ per `docs/superpowers/specs/2026-10-13-1012-code-review-cross-refs.md`：
 
 合并时阻塞：test_rbac_api 11 真红（password 必填 + item.profile 叶子 + 签名补 dbSession 缺参）→ `8dd5e7a4` 修完 42/42 绿。
 
-### N4 — qwen-uplift 知识保留 ⏳ 独立 plan
+### N4 — qwen-uplift 知识保留 ✅ spec 入口 / 路线图触发条件明确
+
+**2026-10-17 spec 落定**：[`docs/superpowers/specs/2026-10-17-n4-qwen-knowledge-design.md`](../../docs/superpowers/specs/2026-10-17-n4-qwen-knowledge-design.md)
 
 per `qa-system-qwen-multistep-uplift` 记忆，qwen-uplift 回滚后
 `pc.selected` frozen + 路由 hook 不可达的知识未沉淀。
 
-**所需**：独立 plan（"按任务匹配模型"的更激进方案）
+**SSOT 收口**：本 spec 落地后，N4 知识保留从"独立 plan"降级为"**路线图触发条件**"——
+不再 YAGNI 提前实施，等触发条件满足才开新 spec/plan：
+
+1. 用户报障 ≥ 3 次：同一类题在当前默认 model 上反复失败且切另一 model 成功率 ≥ 30%
+2. 新模型接入 ≥ 2 个且能力差异显著
+3. `routing_metrics` 数据驱动：失败率 × 任务模式差值 ≥ 2x
+
+**红线写入 spec §5.2**：禁止后端覆盖用户 `modelId`（per `qa-system-no-model-override`）。
+任何"按任务模式路由"扩展必须只对 `dto.modelId is None` 生效，绝不能改 user-chosen。
+
+**P3 清理 backlog 新增**（不在本 spec）：`step_subquestion_rewriter.py` +
+`test_chat_multistep_rewrite_hook.py` + `test_step_subquestion_rewriter.py` 是
+2026-10-04 uplift 残留孤儿 3 文件，0 import 引用，独立清理 task。
 
 **注意区分**：N4 qwen 知识保留 ≠ N4 手动续跑 PR #48。
 - **N4 手动续跑**（PR #48，已合）：用户级"Qwen 失败后手动选 deepseek 续跑"功能，**本 SSOT 范围外**
-- **N4 qwen 知识保留**（本条）：路由策略级"按任务模式自动选模型"功能，**仍 OPEN**
+- **N4 qwen 知识保留**（本条）：路由策略级"按任务模式自动选模型"功能，**已收口 → spec 入口**
 
 ## 优先级排序（实际状态 2026-10-17）
 
@@ -296,7 +313,7 @@ per `qa-system-qwen-multistep-uplift` 记忆，qwen-uplift 回滚后
 | 5 | Frontend 13 红 | ✅ | `aeed0633` (#36) | 4 文件 111/111 全绿（chatStore + ChatPage + chatApi + chatKpiWarning） |
 | 6 | L1 prompt 注入 | ✅ | `8bc15b57` (#43) | 78/78 L1 测试；6 LLM 入口 + 11 label 白名单 + U+200B |
 | 7 | M4 NULL 墓碑 | ✅ | `433b6355` (#35) | 0128→0131 renumber + chat_context user_id!=-1 + 29 个 legacy 调用补 user/datasource |
-| 8 | N4 qwen 知识保留 | ⏳ | — | 独立 plan（路由策略："按任务匹配模型"） |
+| 8 | N4 qwen 知识保留 | ✅ | `ffabc14d` (spec) | 决策记录 + 路线图触发条件 + 红线写入；P3 清理 backlog 新增孤儿 3 文件 |
 | ─ | chat PLAN_EMPTY fixture | ✅ | `29f481bd` (#29) | 4 chat test files 38 reds |
 | ─ | model_config_api apiKey fixture | ✅ | `c025c04a` (#33) | 422 校验对齐 P1-2 |
 | ─ | **N4 手动续跑** (PR #48) | ✅ | `5f447349` (PR #48, merged 2026-10-17) | 17 commits / 24 files / +1775/-90 / 31 tests；**SSOT 范围外**，仅 cross-ref |

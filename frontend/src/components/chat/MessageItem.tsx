@@ -50,6 +50,7 @@ function MessageItem({
   // loading 用作续跑按钮的禁用位，流式进行中防重复点击（R5）。
   const resumeRun = useChatStore((s) => s.resumeRun);
   const loading = useChatStore((s) => s.loading);
+  const selectedModelId = useChatStore((s) => s.selectedModelId);
   const isUser = message.role === "user";
 
   if (isUser) {
@@ -165,6 +166,7 @@ function MessageItem({
                 <MultiStepPlanCard
                   steps={message.steps}
                   currentStepIndex={message.currentStepIndex}
+                  originalModelId={message.originalModelId ?? selectedModelId ?? 0}
                   onResume={(runId, fromStepIndex) => resumeRun(runId, fromStepIndex, message.id)}
                   disabled={loading}
                 />

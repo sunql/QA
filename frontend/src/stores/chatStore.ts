@@ -557,6 +557,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       timestamp: Date.now(),
       isStreaming: true,
       assistantMessageId, // P1-3
+      originalModelId: get().selectedModelId ?? undefined,
     };
     set((state) => ({
       messages: [...state.messages, userMsg, placeholderMsg],

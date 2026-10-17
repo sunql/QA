@@ -99,6 +99,10 @@ def classifyError(exc: BaseException) -> ErrorType:
         return ErrorType.LLM
 
     # 6. Nl2SqlError
+    # 注：Nl2SqlError 包含重试耗尽（ErrorType.PROVIDER_TRANSIENT 在第 4 步先匹配）
+    # 之外的协议级失败（SQL 解析错误、Provider 4xx 重试耗尽后的兜底）。这里把
+    # Nl2SqlError 落到 PROVIDER_PROTOCOL 是**重试耗尽**后的兜底分类，不是把
+    # "任何 Nl2SqlError 都视为协议问题" — 详见第 4 步 cause chain 优先。
     if isinstance(exc, Nl2SqlError):
         return ErrorType.PROVIDER_PROTOCOL
 

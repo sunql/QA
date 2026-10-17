@@ -66,6 +66,9 @@ function isIntent(value: unknown): value is IntentType {
 
 // 会话回传的历史消息上限（20 条 ≈ 10 轮）
 const HISTORY_LIMIT = 20;
+// 后端 fetch 断开 / EventSource 关闭时，浏览器 FetchError.message 常含此字样
+// （与 line 206/846 P1-3 注释里的 "stream interrupted" 口径一致）
+const STREAM_INTERRUPTED_DETECTION = "interrupted";
 
 let idCounter = 0;
 
@@ -823,7 +826,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : i18n.t("errors.networkError");
       const errDetail = (err as { detail?: string }).detail ?? null;
-      const isInterrupted = err instanceof Error && err.message.includes("interrupted");
+      const isInterrupted = err instanceof Error && err.message.includes(STREAM_INTERRUPTED_DETECTION);
       set((state) => {
         const last = state.messages[state.messages.length - 1];
         // 已通过 error 事件展示具体错误时，不覆盖为通用错误文案（LOW#8 修复）

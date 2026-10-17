@@ -236,7 +236,12 @@ interface ChatState {
    * 而不是「最后一条」——否则用户上滚点旧卡片续跑时，旧卡片纹丝不动、
    * 最新的消息被污染。
    */
-  resumeRun: (runId: string, fromStepIndex: number, messageId: string) => Promise<void>;
+  resumeRun: (
+    runId: string,
+    fromStepIndex: number,
+    messageId: string,
+    modelId?: number | null
+  ) => Promise<void>;
   clearMessages: () => void;
   resetSession: () => void;
   /**
@@ -859,7 +864,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
   },
 
-  resumeRun: async (runId, fromStepIndex, messageId) => {
+  resumeRun: async (runId, fromStepIndex, messageId, modelId) => {
     // 开跑前清掉上一次续跑/警告留下的横幅（同一条消息反复续跑时不留残影）。
     // 用定向 patch：只碰被点的那条消息，其余消息保持引用相等。
     set((state) => ({
@@ -869,7 +874,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }));
     try {
       // 事件写回被点的那条消息（不是最后一条）——见 ChatState.resumeRun 注释
-      await resumeMultiStepRun(runId, fromStepIndex, streamHandlers(set, messageId));
+      // modelId 透传：不传 / undefined → null（后端用 run 原 model）；传具体 id → 后端切到该 model 续跑。
+      await resumeMultiStepRun(
+        runId,
+        fromStepIndex,
+        streamHandlers(set, messageId),
+        { modelId: modelId ?? null }
+      );
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : i18n.t("errors.unknownError");
       // 失败**只**挂独立横幅字段，绝不写 content / isError：MessageItem 的

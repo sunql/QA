@@ -1,7 +1,7 @@
 """research_checkpoint 加 original_question 列（X3 防御）。
 
-Revision ID: 0128
-Revises: 0127
+Revision ID: 0130
+Revises: 0129
 Create Date: 2026-10-16
 
 X3（1012 cross-refs spec §P0-X3）：检查点恢复保留本轮研究问题。
@@ -20,8 +20,8 @@ from __future__ import annotations
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0128"
-down_revision = "0127"
+revision = "0130"
+down_revision = "0129"
 branch_labels = None
 depends_on = None
 

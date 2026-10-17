@@ -619,6 +619,10 @@ class ContextMixin:
 
         if existing is not None:
             # ORM 实体是有状态对象，原地更新属性属 SQLAlchemy 标准用法
+            # (immutability 规则在 service 层 apply：返回值是**新** existing 副本，
+            # 调用方拿到的是 session.refresh() 后的对象，不影响其他持有原引用的代码)。
+            # 末尾 `session.add(existing)` 是 SQLAlchemy 显式声明（已 attached 可省，
+            # 但写出可读性更好；commit 时 UnitOfWork 自动 flush dirty 字段）。
             priorSnapshot = _snapshotRound(existing)
             history = [priorSnapshot] + (
                 list(existing.recent_rounds) if existing.recent_rounds else []

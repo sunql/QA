@@ -18,6 +18,36 @@ from app.services.identity_service import IdentityService
 from app.schemas.rbac import UserCreate
 from app.dependencies import CurrentUser
 from app.domain.exceptions import ValidationError
+from app.models.menu_config import MenuConfig
+
+
+@pytest.fixture(autouse=True)
+async def _seedItemProfileMenu(dbSession) -> None:
+    """71 红 A1 流 M2 修（fix/test-fixture-item-profile-seed）：seed item.profile 菜单行。
+
+    IdentityService.create_user 默认给新用户授 DEFAULT_NEW_USER_MENU_CODE
+    （permission_grant 表 menu_code FK → menu_config.code）。本测试调
+    IdentityService 直接接口（不经 HTTP），如果 menu_config 缺 item.profile 行，
+    pg_insert 会撞 ``fk_permission_grant_menu`` ⇒ IntegrityError。
+
+    修法：autouse fixture pre-seed item.profile 为 adminsys section 的 child leaf，
+    与 test_rbac_api._seedMenus 同款模式（避免触发 MenuConfigStructureError
+    「section 必须 path=None」校验）。
+    """
+    from sqlalchemy import select
+
+    existing = (await dbSession.execute(
+        select(MenuConfig).where(MenuConfig.code == "item.profile")
+    )).scalar_one_or_none()
+    if existing is None:
+        section = MenuConfig(code="adminsys", label_key="admin_sys", sort_order=90)
+        section.children = [
+            MenuConfig(
+                code="item.profile", label_key="profile", path="/profile", sort_order=99
+            ),
+        ]
+        dbSession.add(section)
+        await dbSession.commit()
 
 
 @pytest.mark.asyncio

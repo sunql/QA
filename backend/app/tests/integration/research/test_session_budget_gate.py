@@ -34,6 +34,7 @@ from app.domain.enums import DataSourceType
 from app.domain.models import DataSource, SessionTokenUsage
 from app.infrastructure.security.crypto import encryptApiKey
 from app.models.rbac import User
+from app.services.research_agent_ports import TERMINAL_ERROR_CODES
 from app.services.research_agent_service import ResearchAgentService
 from app.services.research_event_bus import bus
 from app.services.research_session_service import ResearchSessionService
@@ -128,9 +129,49 @@ def _service(*, sessionBudget: float | None, **kwargs: Any) -> ResearchAgentServ
         modelConfigs=kwargs.get("modelConfigs", FakeModelConfigs()),
         modelRouter=kwargs.get("modelRouter", FakeModelRouter()),
         ontology=kwargs.get("ontology", FakeOntology()),
+        tokenUsage=kwargs.get("tokenUsage"),
         autoConfirm=True,
         sessionBudget=sessionBudget,
     )
+
+
+class _FlakyTokenUsage:
+    """前 `failures` 次 `getSessionCost` 抛错、之后返回 `cost`（模拟计量**持续**打嗝后恢复）。
+
+    不碰 DB ⇒ 无需种 `session_token_usage` 行。
+
+    **三个读法必须齐全**（照 `TokenUsageService` 公开面）：`buildRoutingContext` 会依次读
+    `getSessionCost` / `getSessionTurnCount` / `getLastModelId`，缺一个就 `AttributeError`
+    → 被那里的 `except` 吞成零上下文路由 —— 用例能过有一层「靠异常被吞」的偶然性，会
+    掩盖真实接线问题（假替身保真度：memory `qa-system-fake-double-fidelity`）。
+
+    `calls` / `failures_on` 记录调用序与抛错位置，供用例钉住「那次失败确实落在**闸门**上」
+    —— 闸门只读 `getSessionCost` 就返回；路由上下文读 `getSessionCost` 后**紧跟**
+    `getSessionTurnCount`（`research_agent_model_resolution.py:72-74`），且 `_runFrom`
+    的相位边界闸门**先于**该相位的模型解析（`research_agent_service.py:636`）。
+    """
+
+    def __init__(self, *, failures: int, cost: Decimal = Decimal("0.01")) -> None:
+        self._remaining = failures
+        self._cost = cost
+        self.calls: list[str] = []
+        self.failures_on: list[int] = []
+
+    async def getSessionCost(self, session: Any, sessionId: str) -> Decimal:
+        self.calls.append("cost")
+        if self._remaining > 0:
+            self._remaining -= 1
+            self.failures_on.append(len(self.calls) - 1)
+            raise RuntimeError("计量持续打嗝")
+        return self._cost
+
+    async def getSessionTurnCount(self, session: Any, sessionId: str) -> int:
+        self.calls.append("turns")
+        return 0
+
+    async def getLastModelId(self, session: Any, sessionId: str) -> str | None:
+        self.calls.append("model")
+        return None
 
 
 async def _createSession(client: AsyncClient, headers: dict[str, str]) -> str:
@@ -278,3 +319,71 @@ async def test_gate_path_never_consults_the_model_router(
 
     assert events[-1] == "research.error"  # 本轮确实终止了（非「什么都没发生」）
     assert router.calls == [], "闸门路径绝不允许选/换模型"
+
+
+# ---------------------------------------------------------------------------
+# 4. 读失败 ⇒ 降级可见（§3.2）：fail-open 不变，但发一条降级 `research.error`
+# ---------------------------------------------------------------------------
+
+
+async def test_repeated_cost_read_failures_emit_one_degraded_error_and_still_done(
+    client: AsyncClient, authHeaders: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """计量**持续**读失败 ⇒ 恰好一条降级 `research.error`，且本轮仍正常 `done`。
+
+    接线级证明：单测只证明判定逻辑，这里证明它真的挂进了相位边界、真的经 SSE 出帧、
+    且**不**关流、**不**落 failed（`terminal=False` 的可执行表述）。
+    """
+    monkeypatch.setattr(
+        researchModule,
+        "buildResearchAgentService",
+        lambda: _service(
+            sessionBudget=_INJECTED_BUDGET, tokenUsage=_FlakyTokenUsage(failures=99)
+        ),
+    )
+    sid = await _createSession(client, authHeaders)
+
+    events, payloads = await _runTurnCapturingStream(client, authHeaders, sid)
+
+    assert events[-1] == "research.done", "降级不得关流/不得到此为止"
+    assert events.count("research.error") == 1, "整轮（7 个相位边界）只发一条"
+    idx = events.index("research.error")
+    err = payloads[idx]
+    assert err["code"] == "budget_metering_degraded"
+    assert err["uiHint"] == "degraded"
+    assert err["code"] not in TERMINAL_ERROR_CODES, "降级 event 不得进终态集合"
+    assert err["message"], "用户可见文案不得为空"
+    assert "research.intent" in events and idx > events.index("research.intent")
+    assert idx < events.index("research.plan"), "N=2 ⇒ 第二个相位边界前发出"
+    assert await _sessionStatus(client, authHeaders, sid) == "done"
+
+
+async def test_single_cost_read_failure_is_silent(
+    client: AsyncClient, authHeaders: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**反向断言**：只失败一次（< 阈值）⇒ 无 `research.error`，照常 `done`。
+
+    并钉住那次失败**确实落在闸门**（否则本用例证明不了「闸门单次读失败 ⇒ 静默」）：
+    闸门的相位边界读（`_runFrom` 循环头）**先于**该相位的模型解析 ⇒ 首个
+    `getSessionCost` 来自闸门；路由上下文那次读会**紧跟** `getSessionTurnCount`。
+    """
+    usage = _FlakyTokenUsage(failures=1)
+    monkeypatch.setattr(
+        researchModule,
+        "buildResearchAgentService",
+        lambda: _service(sessionBudget=_INJECTED_BUDGET, tokenUsage=usage),
+    )
+    sid = await _createSession(client, authHeaders)
+
+    events, _ = await _runTurnCapturingStream(client, authHeaders, sid)
+
+    assert "research.error" not in events
+    assert events[-1] == "research.done"
+    assert await _sessionStatus(client, authHeaders, sid) == "done"
+    # 对照组：路由上下文**确实**跑过（否则下面的顺序断言是空转 —— 没有第二个消费者）
+    assert "turns" in usage.calls, "路由上下文未运行 ⇒ 顺序断言无意义"
+    # 那次失败落在**第 0 次读**（闸门），且闸门的读**不**紧跟 turnCount 读
+    assert usage.failures_on == [0], "唯一那次失败必须落在闸门（不是路由上下文）"
+    assert usage.calls[:2] == ["cost", "cost"], (
+        "首个 getSessionCost 之后不是 getSessionTurnCount ⇒ 它是闸门那次（非路由）"
+    )

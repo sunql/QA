@@ -130,6 +130,33 @@ describe("ResearchSessionPage", () => {
     });
   });
 
+  // §3.2 预算闸门降级可见化：后端 fail-open 放行本轮，用户必须看得见 —— 两个面。
+  // 这条断言是「store 标志位存在但调用点没透传」那类静默 bug 的守卫（有 prop 无
+  // 渲染 ⇒ 用户看到的是「什么都没发生」）。
+  it("预算计量降级 ⇒ 主区 warning Alert + 时间线各一条（且不关流）", async () => {
+    stubOpenFetch(
+      'event: research.connected\ndata: {"sessionId":"s1"}\n\n',
+      'event: research.intent\ndata: {}\n\n',
+      'event: research.error\ndata: {"code":"budget_metering_degraded","message":"会话成本计量连续读取失败：本轮预算闸门失效并放行","uiHint":"degraded"}\n\n',
+      'event: research.plan\ndata: {}\n\n',
+    );
+
+    renderPage();
+
+    // 面 1：主区常驻 Alert（不经 Drawer 就能看见）
+    const alert = await screen.findByText("会话成本计量连续读取失败：本轮预算闸门失效并放行");
+    expect(alert.closest(".ant-alert-warning")).not.toBeNull();
+
+    // 面 2：时间线 Drawer 内的一条（degraded 有进度语义）
+    fireEvent.click(screen.getByRole("button", { name: /时间线/ }));
+    await waitFor(() => {
+      expect(screen.getByText("预算计量降级，本轮闸门放行")).toBeInTheDocument();
+    });
+
+    // 降级不关流：后面的 plan 帧仍被消化（流打开 ⇒ 进度继续累积）
+    expect(useResearchStore.getState().streaming).toBe(true);
+  });
+
   it("首轮问题在流建立（onOpen）之后才提交", async () => {
     let resolveFetch!: (value: unknown) => void;
     vi.stubGlobal(

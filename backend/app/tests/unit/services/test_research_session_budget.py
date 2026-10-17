@@ -16,8 +16,14 @@ from typing import Any
 
 import pytest
 
-from app.services.research_agent_ports import SessionBudgetExceeded
+from app.services.research_agent_ports import (
+    BUDGET_METERING_DEGRADED_MESSAGE,
+    ERROR_BUDGET_METERING_DEGRADED,
+    EVENT_ERROR,
+    SessionBudgetExceeded,
+)
 from app.services.research_agent_service import (
+    SESSION_BUDGET_COST_READ_FAILURE_THRESHOLD,
     SESSION_BUDGET_EXCEEDED_MESSAGE,
     ResearchAgentService,
     sessionBudgetMessage,
@@ -146,3 +152,127 @@ def test_budget_exception_is_a_runtime_error_mentioning_termination_not_model_sw
     doc = SessionBudgetExceeded.__doc__ or ""
     assert "终止" in doc
     assert "换模型" in doc or "模型" in doc
+
+
+# ---------------------------------------------------------------------------
+# 5. 读失败计数 + 降级事件（§3.2：fail-open 不变，只加用户可见信号）
+# ---------------------------------------------------------------------------
+
+
+class _Emit:
+    """emit 替身：收 `(name, payload)` 帧，供断言「发了什么 / 发了几次」。"""
+
+    def __init__(self) -> None:
+        self.frames: list[tuple[str, dict[str, Any]]] = []
+
+    async def __call__(self, name: str, payload: dict[str, Any]) -> None:
+        self.frames.append((name, payload))
+
+
+async def test_below_threshold_read_failures_stay_silent() -> None:
+    """**阈值下静默**：单次读失败只是放行，不发事件（瞬时抖动不该惊动用户）。"""
+    svc = _service(sessionBudget=0.1, tokenUsage=_FakeTokenUsage(broken=True))
+    emit = _Emit()
+
+    assert await svc._sessionBudgetExceeded(object(), uuid.uuid4(), emit=emit) is False
+    assert emit.frames == []
+
+
+async def test_threshold_consecutive_failures_emit_one_degraded_error() -> None:
+    """连续 N 次读失败 ⇒ 恰好一条降级 `research.error`（code/message/uiHint 逐字钉住）。"""
+    svc = _service(sessionBudget=0.1, tokenUsage=_FakeTokenUsage(broken=True))
+    emit = _Emit()
+
+    for _ in range(SESSION_BUDGET_COST_READ_FAILURE_THRESHOLD):
+        assert await svc._sessionBudgetExceeded(object(), uuid.uuid4(), emit=emit) is False
+
+    assert len(emit.frames) == 1
+    name, payload = emit.frames[0]
+    assert name == EVENT_ERROR
+    assert payload == {
+        "code": ERROR_BUDGET_METERING_DEGRADED,
+        "message": BUDGET_METERING_DEGRADED_MESSAGE,
+        "uiHint": "degraded",
+    }
+
+
+async def test_full_turn_of_failures_emits_only_once() -> None:
+    """整轮（7 个相位边界）持续失败也**只发一条**（emit-once，不刷屏）。"""
+    svc = _service(sessionBudget=0.1, tokenUsage=_FakeTokenUsage(broken=True))
+    emit = _Emit()
+
+    for _ in range(7):
+        assert await svc._sessionBudgetExceeded(object(), uuid.uuid4(), emit=emit) is False
+
+    assert len(emit.frames) == 1
+
+
+async def test_success_resets_the_consecutive_streak() -> None:
+    """**判别性用例**：失败=「连续」计数；中间一次成功必须断 streak。
+
+    F,S,F ⇒ 0 帧。删掉 `_sessionBudgetExceeded` 里 `self._budgetCostReadFailures = 0`
+    那行，第二次 F 会把计数推到阈值 ⇒ 本用例转红。
+    """
+    usage = _FakeTokenUsage(Decimal("0.01"))
+    svc = _service(sessionBudget=0.1, tokenUsage=usage)
+    emit = _Emit()
+
+    usage.broken = True
+    assert await svc._sessionBudgetExceeded(object(), uuid.uuid4(), emit=emit) is False
+    usage.broken = False
+    assert await svc._sessionBudgetExceeded(object(), uuid.uuid4(), emit=emit) is False
+    usage.broken = True
+    assert await svc._sessionBudgetExceeded(object(), uuid.uuid4(), emit=emit) is False
+
+    assert emit.frames == []
+
+
+async def test_recovery_then_refailure_does_not_re_emit() -> None:
+    """恢复后再失败**不重发**（每-turn 一次）：F,F,S,F,F ⇒ 仍恰好 1 帧。"""
+    usage = _FakeTokenUsage(Decimal("0.01"))
+    svc = _service(sessionBudget=0.1, tokenUsage=usage)
+    emit = _Emit()
+
+    usage.broken = True
+    await svc._sessionBudgetExceeded(object(), uuid.uuid4(), emit=emit)  # F
+    await svc._sessionBudgetExceeded(object(), uuid.uuid4(), emit=emit)  # F ⇒ 发第 1 条
+    usage.broken = False
+    await svc._sessionBudgetExceeded(object(), uuid.uuid4(), emit=emit)  # S ⇒ 断 streak
+    usage.broken = True
+    await svc._sessionBudgetExceeded(object(), uuid.uuid4(), emit=emit)  # F
+    await svc._sessionBudgetExceeded(object(), uuid.uuid4(), emit=emit)  # F ⇒ 不再发
+
+    assert len(emit.frames) == 1
+
+
+@pytest.mark.parametrize("budget", [0.0, -1.0])
+async def test_disabled_gate_never_reads_or_emits(budget: float) -> None:
+    """闸门被显式关闭（`budget <= 0`）⇒ 不读、不计数、**永不**发降级事件。
+
+    即使计量器坏掉也不能借此事件逃逸：`budget <= 0` 的早退**结构上先于**读。
+    """
+    usage = _FakeTokenUsage(broken=True)
+    svc = _service(sessionBudget=budget, tokenUsage=usage)
+    emit = _Emit()
+
+    for _ in range(SESSION_BUDGET_COST_READ_FAILURE_THRESHOLD + 1):
+        assert await svc._sessionBudgetExceeded(object(), uuid.uuid4(), emit=emit) is False
+
+    assert usage.calls == 0
+    assert emit.frames == []
+
+
+async def test_message_read_failure_does_not_count_or_emit() -> None:
+    """**双读守卫**：`_sessionBudgetMessage` 二次读失败既不发事件、也不计入 streak。
+
+    计数若误放进 `_readSessionCost`（被文案路径复用），此处 `_budgetCostReadFailures`
+    会变成 1 ⇒ 本断言转红。
+    """
+    svc = _service(sessionBudget=0.1, tokenUsage=_FakeTokenUsage(broken=True))
+    emit = _Emit()
+
+    assert await svc._sessionBudgetMessage(object(), uuid.uuid4()) == (
+        SESSION_BUDGET_EXCEEDED_MESSAGE
+    )
+    assert emit.frames == []
+    assert svc._budgetCostReadFailures == 0

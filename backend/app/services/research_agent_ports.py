@@ -175,7 +175,18 @@ ERROR_STEP_FAILED = "step_failed"
 """通用步失败的 error code（与 checkpoint signal 词汇 `low_confidence_step` 解耦）。"""
 ERROR_CHECKPOINT_CONFLICT = "checkpoint_conflict"
 """并发 checkpoint 决策冲突：另一请求已先一步决/过期，应返回 409。"""
+ERROR_BUDGET_METERING_DEGRADED = "budget_metering_degraded"
+"""会话成本计量**连续**读失败 ⇒ 预算闸门降级放行（fail-open 不变，但显式可见）。
+
+不是「超预算」，而是「读不出成本」——闸门至此对**该会话**形同虚设，用户须知情。
+`terminal=False` ⇒ 不关流、不落 failed（研究继续，只是没了费用护栏）。
+"""
 LLM_UNAVAILABLE_MESSAGE = "无可用 LLM 客户端：本轮 LLM 段降级（计划/假设/报告文本可能不完整）"
+BUDGET_METERING_DEGRADED_MESSAGE = (
+    "会话成本计量连续读取失败：本轮预算闸门失效并放行"
+    "（成本可能已超预算但未拦截），研究继续"
+)
+"""预算闸门降级放行的**唯一**用户可见文案（发射点与测试共用）。"""
 MSG_ALL_STEPS_FAILED = "研究计划全部步失败（无一成功），本 turn 终止"
 """all-steps-failed 急停 RuntimeError 的**唯一字符串**（被 `_guardedRun` 透出为
 `research.error.{turn_failed}` 事件的 message 字段，错误码仍是 `ERROR_TURN_FAILED`）。
@@ -197,6 +208,8 @@ class ErrorSpec:
 # --- error code SSOT（Task 8.5 用户裁定；勿自行增删 code 或改变 terminal 归属）----
 # 注：sql_validation_failed / step_failed 的 sessionStatus 是**默认（等待用户）**语义——
 # 落动态 checkpoint ⇒ awaiting_user；autoConfirm 测试模式下可能直接跑到 done。不为它加分支逻辑。
+# 第 7 个 code（budget_metering_degraded）是 §3.2 已知限制的裁定落地（非 Task 8.5 原始 6 个）；
+# 新增/变更仍须同步 `test_research_event_bus.py` 的精确集合守卫与 `test_error_specs_table_matches_ruling`。
 ERROR_SPECS: dict[str, ErrorSpec] = {
     ERROR_TURN_FAILED: ErrorSpec(
         terminal=True,
@@ -239,6 +252,13 @@ ERROR_SPECS: dict[str, ErrorSpec] = {
         payloadFields=(),
         uiHint="conflict",
         summary="并发 checkpoint 决策冲突：另一请求已决/过期，HTTP 应收 409",
+    ),
+    ERROR_BUDGET_METERING_DEGRADED: ErrorSpec(
+        terminal=False,
+        sessionStatus=STATUS_RUNNING,
+        payloadFields=(),
+        uiHint="degraded",
+        summary="成本计量连续读失败：预算闸门降级放行，状态机继续推进",
     ),
 }
 

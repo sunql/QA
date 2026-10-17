@@ -14,7 +14,7 @@ Phase 8 还会加：
   GET    /api/v1/data-quality/reports/{id}/compare?otherId=...
   POST   /api/v1/data-quality/reports/{id}/share
   DELETE /api/v1/data-quality/reports/shares/{share_id}
-  GET    /api/v1/data-quality/reports/share/{token}     token-only 公开访问
+  GET    /api/v1/data-quality/reports/share/{token}     token-only 公开访问（在 evaluation_report_share_resolve 独立 router，无 mustChangePasswordGuard）
 """
 
 from __future__ import annotations
@@ -411,16 +411,6 @@ async def revokeShare(
     await share_service.revoke_share(session, share_id=share_id, actor=user)
 
 
-@router.get(
-    "/share/{token}",
-    response_model=EvaluationReportRead,
-)
-async def resolveShare(
-    token: str,
-    session: AsyncSession = Depends(getDb),
-    share_service: EvaluationReportShareService = Depends(
-        get_evaluation_report_share_service,
-    ),
-) -> EvaluationReportRead:
-    """按 token 公开访问（不需登录）。access_count 自增。"""
-    return await share_service.resolve_share_to_read(session, token=token)
+# NOTE: 公开的 GET /share/{token} 已迁到 evaluation_report_share_resolve.py
+# （独立 router，无 mustChangePasswordGuard 守卫）— fix/data-quality-share-auth-policy
+# 2026-10-16 修 ``PUBLIC_ROUTES`` 白名单 vs 实际鉴权不一致。

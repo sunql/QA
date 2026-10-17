@@ -72,6 +72,33 @@ def fakeMinio() -> Iterator[MagicMock]:
         yield fake
 
 
+@pytest.fixture(autouse=True)
+async def _seedItemProfileMenu(dbSession: AsyncSession) -> None:
+    """71 红 A1 流 M2 修（fix/wiki-import-and-misc）：seed item.profile 菜单行。
+
+    IdentityService.create_user 默认给新用户授 DEFAULT_NEW_USER_MENU_CODE
+    （permission_grant 表 menu_code FK → menu_config.code）。本文件有
+    4 个测试直接调 /api/v1/users 创建用户（alice/bob/wiki-curator），
+    触发 fk_permission_grant_menu ⇒ IntegrityError。
+    修法：与 PR #25 同款 autouse pre-seed item.profile 为 adminsys section
+    的 child leaf，避免触发 MenuConfigStructureError 「section 必须 path=None」校验。
+    """
+    from app.models.menu_config import MenuConfig
+
+    existing = (await dbSession.execute(
+        select(MenuConfig).where(MenuConfig.code == "item.profile")
+    )).scalar_one_or_none()
+    if existing is None:
+        section = MenuConfig(code="adminsys", label_key="admin_sys", sort_order=90)
+        section.children = [
+            MenuConfig(
+                code="item.profile", label_key="profile", path="/profile", sort_order=99
+            ),
+        ]
+        dbSession.add(section)
+        await dbSession.commit()
+
+
 class _FakeLlmClient:
     """假 LLM 客户端：记录调用次数，返回可配置内容（模拟真实 BaseLlmClient）。
 
@@ -467,6 +494,10 @@ async def test_preview_file_rejects_when_stub_auth_disabled(
     解析是 CPU 密集的，暴露给未认证客户端等于送一个免鉴权的放大器。
     """
     monkeypatch.setenv("AUTH_STUB_ENABLED", "0")
+    # 71 红 A1 流 RC-B 修（fix/wiki-import-and-misc）：getSettings 是 @lru_cache，
+    # 必须 cache_clear 才会重读 env 变量。
+    from app.config import getSettings
+    getSettings.cache_clear()
 
     resp = await client.post(
         f"{_BASE}/preview-file",
@@ -946,9 +977,24 @@ async def test_list_tasks_hides_other_users_jobs(
         resp = await client.post(
             "/api/v1/users",
             headers=_ADMIN_HEADERS,
-            json={"username": username, "display_name": username, "email": None},
+            json={
+                "username": username,
+                "display_name": username,
+                "email": None,
+                "password": f"{username}-Pass123",
+            },
         )
         assert resp.status_code == 201, resp.text
+    # 71 红 A1 流 M3 修（fix/wiki-import-and-misc）：清 alice/bob 的
+    # must_change_password，否则 wiki router 挂的 mustChangePasswordGuard 会 403。
+    from app.domain.models import User as _User
+    from sqlalchemy import update as _update
+    await dbSession.execute(
+        _update(_User)
+        .where(_User.username.in_(("alice", "bob")))
+        .values(must_change_password=False)
+    )
+    await dbSession.commit()
 
     modelId = await _seedModel(dbSession)
     with patch(_INVOKER_CLIENT, return_value=_FakeLlmClient()):
@@ -990,6 +1036,10 @@ async def test_wiki_routes_reject_when_stub_auth_disabled(
     回归点：wiki 写接口曾漏挂认证依赖，导致未认证客户端可改删条目。
     """
     monkeypatch.setenv("AUTH_STUB_ENABLED", "0")
+    # 71 红 A1 流 RC-B 修（fix/wiki-import-and-misc）：getSettings 是 @lru_cache，
+    # 必须 cache_clear 才会重读 env 变量。
+    from app.config import getSettings
+    getSettings.cache_clear()
 
     assert (await client.get(_PAGES)).status_code == 403
     assert (await client.delete(f"{_PAGES}/ANY")).status_code == 403

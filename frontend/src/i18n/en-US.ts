@@ -2959,6 +2959,7 @@ export const enUS = {
       hypothesis: "Forming hypothesis",
       finding: "Drawing conclusion",
       report: "Generating report",
+      degraded: "Budget metering degraded; gate bypassed this turn",
     },
     timeline: {
       detail: "View",

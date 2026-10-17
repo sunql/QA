@@ -5,6 +5,7 @@
 // （事件名本身就是语义，不能像 wikiChat 那样压成 kind）。
 
 import { create } from "zustand";
+import { i18n } from "../i18n";
 import {
   answerCheckpoint as apiAnswerCheckpoint,
   createResearchSession,
@@ -90,6 +91,7 @@ export function buildInitialState(): ResearchDataState {
     streaming: false,
     error: null,
     conflictError: null,
+    degradedNotice: null,
   };
 }
 
@@ -129,7 +131,24 @@ export function applyResearchEvent(
           conflictError: message,
         };
       }
-      // 降级类（degraded / 字段缺失）：流保持打开，状态机会继续推进，后面可能还有 done。
+      // 降级类（degraded）：流保持打开，状态机会继续推进，后面可能还有 done。
+      // 同时落 degradedNotice —— 这是 degraded 类**唯一**的 UI 面（主区常驻 Alert）。
+      // 分支按 uiHint 的**类**，不按 code（规则 ③）：`budget_metering_degraded` 之外的
+      // 既有 degraded code（llm_unavailable / step_failed / sql_validation_failed /
+      // hypothesis_generation_failed）也走这里 —— 它们此前对用户完全静默，本次**统一**
+      // 补上这个面；文案一律取后端 message（各 code 各自的措辞），前端不写 code 判断。
+      if (event.payload.uiHint === "degraded") {
+        return {
+          events,
+          // 兜底必须是**已翻译**文案：此处不进 t() 渲染（页面 Alert 直渲 message），
+          // 写 i18n key 会让用户看到字面 key（与 ResearchProgress 走 t() 的口径不一致）。
+          degradedNotice:
+            typeof event.payload.message === "string" && event.payload.message.length > 0
+              ? event.payload.message
+              : i18n.t("research.progress.degraded"),
+        };
+      }
+      // 其余（uiHint 缺失 / 未来未知取值）：只追加事件，不关流、不设提示（fail-safe）。
       return { events };
     }
     default:
@@ -192,6 +211,10 @@ interface ResearchDataState {
   streaming: boolean;
   error: string | null;
   conflictError: string | null;
+  /** 降级类 `research.error` 的可见信号（§3.2 预算闸门静默失效）。后端 fail-open 放行
+   *  本轮但用户必须看得见 —— 与 `error` 同生命周期：开新流即清，流内不清（降级期间
+   *  状态机仍在推进，提示要一直挂着，直到下一轮开始）。 */
+  degradedNotice: string | null;
 }
 
 interface ResearchState extends ResearchDataState {
@@ -234,6 +257,7 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
   streaming: false,
   error: null,
   conflictError: null,
+  degradedNotice: null,
 
   loadSessions: async () => {
     set({ sessionsLoading: true });
@@ -275,6 +299,9 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
         events: [],
         report: null,
         error: null,
+        // 跨会话必须清：切到一个**已结束**会话时不会建流（useResearchSession 对终态会话
+        // 直接 return），若不清，上一会话的降级横幅会原样挂在新会话页面上（误导）。
+        degradedNotice: null,
       });
     } catch (err) {
       set({ error: errorMessage(err) });
@@ -284,7 +311,7 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
   },
 
   sendQuestion: async (question, mode = "research") => {
-    set({ loading: true, error: null });
+    set({ loading: true, error: null, degradedNotice: null });
     try {
       const session = await createResearchSession({ question, mode });
       set({
@@ -293,6 +320,7 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
         events: [],
         pendingCheckpoint: null,
         report: null,
+        degradedNotice: null,
       });
       // 起首轮：状态机后台跑，进度走 SSE。流编排（先 connectStream 再提交 turn）
       // 由调用方负责 —— 后端不做历史回放，故 store 不在这里隐式建流。
@@ -366,7 +394,8 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
       onOpen?.();
     };
 
-    set({ streaming: true, error: null });
+    // 新流开始 = 新一轮：清上一轮的降级提示（与 error 同生命周期）
+    set({ streaming: true, error: null, degradedNotice: null });
     const cursorKey = lastEventIdKey(sessionId);
     // 去重游标（本次连接内单调递增）：后端**先订阅再回放**，落在窗口内的事件会被投递
     // 两次 ⇒ `event.id <= lastSeq` 的事件丢弃。`id == null`（后端未落库）无 seq 可判，
@@ -423,6 +452,7 @@ export const useResearchStore = create<ResearchState>()((set, get) => ({
       streaming: false,
       error: null,
       conflictError: null,
+      degradedNotice: null,
     });
   },
 

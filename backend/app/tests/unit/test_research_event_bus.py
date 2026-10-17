@@ -11,6 +11,7 @@ import pytest
 
 from app.api.v1 import research as researchModule
 from app.services.research_agent_ports import (
+    ERROR_BUDGET_METERING_DEGRADED,
     ERROR_CHECKPOINT_CONFLICT,
     ERROR_HYPOTHESIS_FAILED,
     ERROR_LLM_UNAVAILABLE,
@@ -153,6 +154,7 @@ def test_is_terminal_only_closes_on_done_or_turn_failure(
         (ERROR_SQL_VALIDATION_FAILED, False, "awaiting_user", ("stepIndex",), "degraded"),
         (ERROR_STEP_FAILED, False, "awaiting_user", ("stepIndex",), "degraded"),
         (ERROR_CHECKPOINT_CONFLICT, False, "awaiting_user", (), "conflict"),
+        (ERROR_BUDGET_METERING_DEGRADED, False, "running", (), "degraded"),
     ],
 )
 def test_error_specs_table_matches_ruling(
@@ -168,7 +170,10 @@ def test_error_specs_table_matches_ruling(
 
 
 def test_error_specs_covers_exactly_the_ruled_codes() -> None:
-    """ERROR_SPECS 键集合 == 裁定的 6 个 code（不多不少，防止后人悄悄增删 code）。"""
+    """ERROR_SPECS 键集合 == 裁定的 7 个 code（不多不少，防止后人悄悄增删 code）。
+
+    Task 8.5 原始 6 个 + §3.2 裁定的 `budget_metering_degraded`（预算闸门降级可见化）。
+    """
     assert set(ERROR_SPECS) == {
         ERROR_TURN_FAILED,
         ERROR_LLM_UNAVAILABLE,
@@ -176,6 +181,7 @@ def test_error_specs_covers_exactly_the_ruled_codes() -> None:
         ERROR_SQL_VALIDATION_FAILED,
         ERROR_STEP_FAILED,
         ERROR_CHECKPOINT_CONFLICT,
+        ERROR_BUDGET_METERING_DEGRADED,
     }
 
 
@@ -195,6 +201,7 @@ def test_terminal_error_codes_derived_from_specs() -> None:
         (ERROR_HYPOTHESIS_FAILED, {}),
         (ERROR_SQL_VALIDATION_FAILED, {"stepIndex": 0}),
         (ERROR_STEP_FAILED, {"stepIndex": 2}),
+        (ERROR_BUDGET_METERING_DEGRADED, {}),
     ],
 )
 def test_error_payload_constructor_matches_spec_fields(code: str, fields: dict) -> None:

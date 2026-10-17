@@ -43,7 +43,8 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.research_models import ResearchCheckpoint, ResearchSession
+from app.domain.models import AuditLog
+from app.domain.research_models import ResearchCheckpoint, ResearchSession, ResearchTurn
 from app.services.intent_service import IntentService
 from app.services.model_config_service import ModelConfigService
 from app.services.model_router_service import ModelRouterService
@@ -133,6 +134,31 @@ def sessionBudgetMessage(cost: Decimal, budget: Decimal) -> str:
         f" 已达预算上限 ${budget:.{SESSION_BUDGET_MESSAGE_DECIMALS}f}，"
         f"本轮研究终止；{SESSION_BUDGET_HINT}"
     )
+
+
+async def _audit_resume_model_change(
+    session: AsyncSession,
+    *,
+    turn_id: uuid.UUID,
+    user_id: int,
+    old_model_id: int,
+    new_model_id: int,
+) -> None:
+    """记录 research turn 模型变更到 audit_log（spec N4）。
+
+    ResearchTurn.id 是 UUID，走 entity_id_str 列；entity_id 留 NULL。
+    """
+    entry = AuditLog(
+        entity_type="research_turn",
+        entity_id=None,
+        entity_id_str=str(turn_id),
+        action="UPDATE",
+        actor=str(user_id) if user_id is not None else "",
+        before_json={"model_id": old_model_id},
+        after_json={"model_id": new_model_id},
+    )
+    session.add(entry)
+    await session.flush()
 
 
 class ResearchAgentService(ResearchAgentPhasesMixin):
@@ -322,6 +348,7 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         checkpointId: uuid.UUID,
         action: str,
         choice: dict[str, Any],
+        model_id: int | None = None,
         emit: Emit | None = None,
     ) -> str:
         """按用户决策续跑：resolve checkpoint → 回到下一相位。
@@ -366,6 +393,19 @@ class ResearchAgentService(ResearchAgentPhasesMixin):
         run_state = await self._sessions.getRunStateByTurn(session, checkpoint.turn_id)
         if run_state is None or run_state.session_id != checkpoint.session_id:
             raise ValueError(f"checkpoint 对应的 run state 不存在: checkpoint={checkpointId}")
+
+        # N4: model_id 变更写入 session.model_id + audit_log（幂等：仅在 model_id 实际变化时写）
+        if model_id is not None and session_row.model_id != model_id:
+            old_model_id = session_row.model_id
+            session_row.model_id = model_id
+            await session.flush()
+            await _audit_resume_model_change(
+                session,
+                turn_id=checkpoint.turn_id,
+                user_id=session_row.created_by,
+                old_model_id=old_model_id,
+                new_model_id=model_id,
+            )
 
         rewritten = await self._recordResumeTurn(
             session, checkpoint, action=action, choice=choice, checkpointId=checkpointId

@@ -136,6 +136,7 @@ from app.services.step_aggregator import StepAggregator
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.supplier_360_service import Supplier360Service
 from app.services.step_subquestion_rewriter import StepSubquestionRewriter
+from app.services.token_usage_service import COST_SOURCE_ESTIMATED
 from app.services.supplier_name_resolver import SupplierNameResolver
 from app.services.supplier_risk_service import SupplierRiskService, buildRiskAnswer
 from app.services.schema_introspection_service import (
@@ -1955,6 +1956,8 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             await self._recordUsage(
                 session, sessionId, primary, promptTokens, completionTokens,
                 purpose=f"fallback_{purpose}",
+                # 异常里提取的 token ⇒ 估算口径（与 retry-gen 同口径）。
+                cost_source=COST_SOURCE_ESTIMATED,
             )
             try:
                 result = await _callWithRetryBackoff(caller, fallback)

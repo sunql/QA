@@ -22,6 +22,7 @@ from app.services.research_agent_ports import LlmUsageRecorder
 from app.services.token_usage_service import (
     COST_SOURCE_MEASURED,
     COST_SOURCE_UNKNOWN,
+    TokenUsageService,
 )
 
 
@@ -80,6 +81,25 @@ def test_session_token_usage_read_keeps_legacy_null() -> None:
     )
 
     assert row.model_dump(by_alias=True)["costSource"] is None
+
+
+@pytest.mark.asyncio
+async def test_record_usage_rejects_unknown_cost_source() -> None:
+    # Arrange —— 拼错的口径必须在写库前 fail fast（静默失真无法事后发现）。
+    service = TokenUsageService()
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="invalid cost_source"):
+        await service.recordUsage(
+            None,  # 校验先于任何 session 使用
+            sessionId="s-1",
+            modelConfigId=None,
+            modelName=None,
+            promptTokens=1,
+            completionTokens=1,
+            cost=Decimal("0"),
+            cost_source="measuredish",
+        )
 
 
 @pytest.mark.asyncio

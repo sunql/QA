@@ -67,7 +67,9 @@ GET /api/v1/sessions/{sessionId}/usage/list
 
 - `backend/app/services/token_usage_service.py`：新增常量 SSOT `COST_SOURCE_MEASURED` / `COST_SOURCE_ESTIMATED` / `COST_SOURCE_UNKNOWN` / `COST_SOURCES`。
 - `backend/app/services/chat_usage.py`：两处默认值与 retry-gen 的 `"estimated"` 改用常量（行为不变）。
-- `rag_qa_service` / `report_template_service`：显式 `cost_source=COST_SOURCE_MEASURED`（token 来自客户端上报、单价来自配置）。
+- `rag_qa_service` / `report_template_service`：正常路径显式 `cost_source=COST_SOURCE_MEASURED`（token 来自 provider 上报、单价来自配置）。
+- **失败补账路径标 `estimated`**：报告总结 `_accountFailure`、假设生成 `_accountHypothesisFailure`、chat fallback 降级（异常里提取的 token 属部分用量，与 retry-gen 同口径）。
+- `TokenUsageService.recordUsage`：默认值 `COST_SOURCE_UNKNOWN`（新行不再静默落 NULL），写入前按 `COST_SOURCES` 校验，拼错口径 fail fast。
 - `research_agent_ports.LlmUsageRecorder`：`measured`（查到配置）/ `unknown`（查不到，成本为占位 0）。
 - `frontend/src/types/session.ts`：`SessionTokenUsage.costSource: string | null`。
 - `frontend/src/pages/UsagePage.tsx`：`COST_SOURCE_LABELS` 白名单 + 流水表新增「成本口径」列。
@@ -84,6 +86,8 @@ GET /api/v1/sessions/{sessionId}/usage/list
 验证结果：
 
 - 后端：`uv run pytest app/tests/unit/test_cost_source_labeling.py app/tests/unit/test_rag_qa_service.py app/tests/integration/test_model_config_api.py -q` ⇒ **30 passed**（真实 PG `qa_metadata_test_solo`）。
+- 复核补丁后扩展回归（+ `test_report_templates.py` / `test_chat_service.py` / `integration/test_token_usage_service.py`）⇒ **247 passed / 4 failed**；4 个失败全为 `TestBuildAnswerPrompt` 存量 rot（与 `origin/main` 基线清单同名），非本变更引入。
+- 新增锚点：`test_failure_path_usage_labeled_estimated`（异常 token ⇒ estimated）、`test_record_usage_rejects_unknown_cost_source`（词表校验 fail fast）。
 
 ## 7. 安全审查
 

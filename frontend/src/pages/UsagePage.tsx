@@ -45,10 +45,11 @@ const COST_SOURCE_LABELS: Record<string, { key: string; color: string }> = {
 const COST_SOURCE_UNKNOWN_LABEL = "forms.usage.costSource.unknown";
 
 function costSourceLabel(value: string | null): { key: string; color: string } {
-  return (value && COST_SOURCE_LABELS[value]) || {
-    key: COST_SOURCE_UNKNOWN_LABEL,
-    color: "default",
-  };
+  // hasOwnProperty：value 是 DB 原始字符串，"constructor" 等原型键不能被当成命中。
+  if (value && Object.prototype.hasOwnProperty.call(COST_SOURCE_LABELS, value)) {
+    return COST_SOURCE_LABELS[value];
+  }
+  return { key: COST_SOURCE_UNKNOWN_LABEL, color: "default" };
 }
 
 // 选中会话的明细：按模型聚合卡片 + 流水明细表

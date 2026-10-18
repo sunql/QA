@@ -5,7 +5,7 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { ConfigProvider, message } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import KpiCatalogPage from "../pages/KpiCatalogPage";
-import type { KpiCatalog } from "../types/kpiCatalog";
+import type { KpiCatalog, KpiDatasourceSuggestion } from "../types/kpiCatalog";
 
 const { mockKpi } = vi.hoisted(() => ({
   mockKpi: {
@@ -36,6 +36,7 @@ const api = vi.hoisted(() => ({
   createKpi: vi.fn(),
   updateKpi: vi.fn(),
   deleteKpi: vi.fn(),
+  getDatasourceSuggestions: vi.fn(),
 }));
 
 vi.mock("../api/kpiCatalog", () => api);
@@ -65,6 +66,7 @@ describe("KpiCatalogPage", () => {
     datasourceApi.listDataSources.mockResolvedValue([
       { id: 7, name: "DWS_TEST", isActive: true },
     ]);
+    api.getDatasourceSuggestions.mockResolvedValue([]);
   });
 
   it("渲染标题与表格，并加载 KPI 列表", async () => {
@@ -163,6 +165,109 @@ describe("KpiCatalogPage", () => {
       // 编辑表单预填 record.datasourceId，提交时原样带回
       expect(payload.datasourceId).toBe(7);
     });
+  });
+
+  it("编辑时展示数据源建议，点击采用后提交建议值", async () => {
+    const user = userEvent.setup();
+    api.getDatasourceSuggestions.mockResolvedValue([
+      {
+        datasourceId: 9,
+        name: "DWS_SUGGESTED",
+        score: 0.9,
+        reasons: ["legacy_name_exact"],
+      },
+    ]);
+    datasourceApi.listDataSources.mockResolvedValue([
+      { id: 7, name: "DWS_TEST", isActive: true },
+      { id: 9, name: "DWS_SUGGESTED", isActive: true },
+    ]);
+    api.updateKpi.mockResolvedValue(mockKpi);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+
+    expect(
+      await screen.findByText(/建议绑定数据源：DWS_SUGGESTED/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/完全一致/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /采\s?用/ }));
+    await user.click(screen.getByRole("button", { name: /确\s?定/ }));
+
+    await waitFor(() => {
+      expect(api.updateKpi).toHaveBeenCalledTimes(1);
+      const [, payload] = api.updateKpi.mock.calls[0];
+      expect(payload.datasourceId).toBe(9);
+    });
+  });
+
+  it("建议与当前绑定相同时不提示", async () => {
+    const user = userEvent.setup();
+    api.getDatasourceSuggestions.mockResolvedValue([
+      {
+        datasourceId: 7,
+        name: "DWS_TEST",
+        score: 0.9,
+        reasons: ["legacy_name_exact"],
+      },
+    ]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+
+    await waitFor(() =>
+      expect(api.getDatasourceSuggestions).toHaveBeenCalledWith(1),
+    );
+    expect(screen.queryByText(/建议绑定数据源/)).not.toBeInTheDocument();
+  });
+
+  it("切换编辑目标时在途建议不会串到另一个 KPI", async () => {
+    const user = userEvent.setup();
+    api.listKpis.mockResolvedValue([
+      { ...mockKpi, id: 1, kpiCode: "KPI_A" },
+      { ...mockKpi, id: 2, kpiCode: "KPI_B", datasourceId: null },
+    ]);
+    let resolveA: (rows: KpiDatasourceSuggestion[]) => void = () => {};
+    api.getDatasourceSuggestions.mockImplementation((id: number) => {
+      if (id === 1) {
+        return new Promise<KpiDatasourceSuggestion[]>((resolve) => {
+          resolveA = resolve;
+        });
+      }
+      return Promise.resolve([
+        {
+          datasourceId: 9,
+          name: "B_SUGGESTED",
+          score: 0.9,
+          reasons: ["legacy_name_exact" as const],
+        },
+      ]);
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("KPI_A")).toBeInTheDocument());
+
+    const editButtons = screen.getAllByRole("button", { name: /编\s?辑/ });
+    await user.click(editButtons[0]); // A：请求挂起
+    await user.click(editButtons[1]); // B：立即返回
+    expect(
+      await screen.findByText(/建议绑定数据源：B_SUGGESTED/),
+    ).toBeInTheDocument();
+
+    // A 的迟到的响应必须被丢弃
+    resolveA([
+      {
+        datasourceId: 8,
+        name: "A_SUGGESTED",
+        score: 0.9,
+        reasons: ["legacy_name_exact"],
+      },
+    ]);
+    await waitFor(() =>
+      expect(screen.queryByText(/A_SUGGESTED/)).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText(/建议绑定数据源：B_SUGGESTED/)).toBeInTheDocument();
   });
 
   it("点击删除并确认调用 deleteKpi", async () => {

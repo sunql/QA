@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   Table,
   Button,
@@ -10,6 +10,7 @@ import {
   Tag,
   Tooltip,
   Popconfirm,
+  Alert,
   message,
 } from "antd";
 import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
@@ -18,11 +19,13 @@ import {
   createKpi,
   updateKpi,
   deleteKpi,
+  getDatasourceSuggestions,
 } from "../api/kpiCatalog";
 import type {
   KpiCatalog,
   KpiCatalogCreate,
   KpiCatalogUpdate,
+  KpiDatasourceSuggestion,
   KpiStatus,
 } from "../types/kpiCatalog";
 import { KPI_STATUS_OPTIONS } from "../types/kpiCatalog";
@@ -81,6 +84,9 @@ export default function KpiCatalogPage() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<KpiCatalog | null>(null);
+  const [suggestions, setSuggestions] = useState<KpiDatasourceSuggestion[]>([]);
+  // 建议请求序号：切换编辑目标 / 新建时让在途响应作废，避免串到别的 KPI
+  const suggestionSeq = useRef(0);
   const [form] = Form.useForm<KpiFormValues>();
   const [filters, setFilters] = useState<FilterValues>({});
   const updateFilter = useCallback(
@@ -120,13 +126,16 @@ export default function KpiCatalogPage() {
   }, [load]);
 
   const openCreate = () => {
+    suggestionSeq.current += 1;
     setEditing(null);
+    setSuggestions([]);
     void form.setFieldsValue(EMPTY_KPI_FORM);
     setModalOpen(true);
   };
 
   const openEdit = (record: KpiCatalog) => {
     setEditing(record);
+    setSuggestions([]);
     void form.setFieldsValue({
       kpiCode: record.kpiCode,
       kpiName: record.kpiName,
@@ -143,6 +152,16 @@ export default function KpiCatalogPage() {
       status: record.status,
     });
     setModalOpen(true);
+    // 建议是增强提示：失败不影响编辑流程，静默降级为空
+    const seq = ++suggestionSeq.current;
+    void getDatasourceSuggestions(record.id)
+      .then((rows) => {
+        if (seq !== suggestionSeq.current) return;
+        setSuggestions(rows.filter((s) => s.datasourceId !== record.datasourceId));
+      })
+      .catch(() => {
+        if (seq === suggestionSeq.current) setSuggestions([]);
+      });
   };
 
   const handleDelete = async (id: number) => {
@@ -201,6 +220,8 @@ export default function KpiCatalogPage() {
       // 错误由拦截器提示
     }
   };
+
+  const topSuggestion = editing ? suggestions[0] : undefined;
 
   const columns = [
     { title: t("kpiCatalog.columns.kpiCode"), dataIndex: "kpiCode", width: 200 },
@@ -389,6 +410,27 @@ export default function KpiCatalogPage() {
               placeholder={t("kpiCatalog.placeholders.datasourceId")}
             />
           </Form.Item>
+          {topSuggestion && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={t("kpiCatalog.suggestions.hint", { name: topSuggestion.name })}
+              description={t(
+                `kpiCatalog.suggestions.reasons.${topSuggestion.reasons[0]}`,
+              )}
+              action={
+                <Button
+                  size="small"
+                  onClick={() =>
+                    form.setFieldValue("datasourceId", topSuggestion.datasourceId)
+                  }
+                >
+                  {t("kpiCatalog.suggestions.apply")}
+                </Button>
+              }
+            />
+          )}
           <Form.Item name="dataSource" label={t("kpiCatalog.labels.dataSource")}>
             <Input placeholder={t("kpiCatalog.placeholders.dataSource")} />
           </Form.Item>

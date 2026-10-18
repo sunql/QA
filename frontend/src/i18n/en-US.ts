@@ -1814,6 +1814,18 @@ export const enUS = {
       owner: "Owner dept./person",
     },
     unbound: "Unbound",
+    suggestions: {
+      hint: "Suggested data source: {name}",
+      apply: "Apply",
+      reasons: {
+        legacy_name_exact:
+          "Based on: legacy data-source text exactly matches the data source name",
+        legacy_name_fuzzy:
+          "Based on: legacy data-source text partially matches the data source name",
+        ontology_table:
+          "Based on: the linked ontology metric's class table exists in this data source",
+      },
+    },
   },
 
   feature: {

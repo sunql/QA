@@ -30,6 +30,19 @@ export interface KpiCatalog {
   updatedTime: string | null;
 }
 
+/** P1a：数据源绑定建议（只读提示，需用户手动采用）。 */
+export type KpiDatasourceSuggestionReason =
+  | "legacy_name_exact"
+  | "legacy_name_fuzzy"
+  | "ontology_table";
+
+export interface KpiDatasourceSuggestion {
+  datasourceId: number;
+  name: string;
+  score: number;
+  reasons: KpiDatasourceSuggestionReason[];
+}
+
 export interface KpiCatalogCreate {
   kpiCode: string;
   kpiName: string;

@@ -501,6 +501,7 @@ MSG_CHART_TITLE_RESULT = "查询结果"
 # =============================================================================
 
 MSG_KPI_CATALOG_NOT_FOUND = "KPI Catalog id={id} 不存在"
+MSG_KPI_CATALOG_CODE_NOT_FOUND = "KPI 编码「{code}」不存在"
 MSG_KPI_CATALOG_DUPLICATE_CODE = "KPI 编码「{code}」已存在"
 MSG_KPI_CATALOG_STATUS_NULL = "KPI status 不允许为 null（NOT NULL 约束）"
 
@@ -510,6 +511,11 @@ MSG_KPI_DATASOURCE_REQUIRED = "KPI 必须绑定一个数据源（datasource_id �
 MSG_KPI_DATASOURCE_NOT_FOUND = "KPI 绑定的数据源 id={id} 不存在"
 MSG_KPI_DATASOURCE_INACTIVE = "KPI 绑定的数据源 id={id}（{name}）已停用"
 MSG_DATASOURCE_HAS_KPI_BINDINGS = "数据源 id={id} 被 {count} 个 KPI 引用，无法删除"
+MSG_KPI_BULK_BIND_TOO_MANY = "批量绑定最多 {limit} 行（实际 {actual} 行）"
+MSG_KPI_BULK_BIND_ADMIN_REQUIRED = "批量绑定 KPI 数据源需要 admin 角色"
+MSG_KPI_BULK_BIND_ALREADY_BOUND = (
+    "KPI「{code}」已绑定数据源 id={id}，force=false 不覆盖"
+)
 
 
 # =============================================================================

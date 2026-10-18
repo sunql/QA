@@ -26,12 +26,14 @@ F2 已 merged 的 `kpi_catalog.datasource_id` 列（migration 0125, FK → `data
 
 ### 2.2 Out of scope（本 spec 不做）
 
-- **不实现"自动反查"流程**：不写 batch backfill 脚本、不走 ontology_metric.target_class_id → ontology_class.source_table → data_source.name 反查链。原因：用户裁定 A 方案（必填），反查属后续独立工单。
+> **2026-10-18 followup 注**：以下两项已在 followup 分支 `feat/f2-followups`（[PR #56](https://github.com/sunql/QA/pull/56)，stacked on #55；SSOT: [`Harness/changes/2026-10-18-kpi-datasource-followups/summary.md`](../../Harness/changes/2026-10-18-kpi-datasource-followups/summary.md)）交付，不再属于 out of scope：
+> - **batch backfill** → `scripts/backfill_kpi_datasource.py`（默认预览，`--apply` 落库）+ `POST /api/v1/kpi-catalog/bulk-bind-datasource`（admin，上限 1000 行）。
+> - **ontology 反查链** → `GET /api/v1/kpi-catalog/{id}/datasource-suggestions`（`KpiDatasourceSuggestionService`：legacy 精确 0.9 / ontology 表 0.8 / legacy 模糊 0.55）；**只给建议，永不自动绑定**。
+
 - **不改 chat 路径的 L1 mismatch 逻辑**：F2 现状的 `datasource_id IS NULL ⇒ 不校验` 保留；仅当**新建/更新后** datasource_id 真正被填上时，警告才能触发。
-- **不动历史 NULL 行**：本 spec 不迁移数据；history rows 在 chat 路径上保持"NULL ⇒ 不校验"。
+- **不动历史 NULL 行**：本 spec 不迁移数据；history rows 在 chat 路径上保持"NULL ⇒ 不校验"。回填由 followup 工具负责（默认预览 + 人工确认映射）。
 - **不加 KpiCatalog update 显式 unbind 端点**：用户在 §1 选 A 方案，未要求独立 unbind；KpiCatalogUpdate 接受 `datasource_id: int | None = None` 已允许显式置 null。
 - **不动 `data_source` text 列**：保留为 legacy 字段（业务源名），与 `datasource_id` FK 并存，不强制绑定。
-- **不动 ontology 反查链**：用户选 A，反查属后续独立工单。
 
 ## 3. 当前现状冻结（as of 2026-10-17 main `aef0124e`）
 

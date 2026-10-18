@@ -41,6 +41,49 @@ uv run alembic revision --autogenerate -m "desc"  # 生成新迁移
 uv run alembic downgrade -1     # 回滚一步
 ```
 
+### F2 KPI–数据源 FK 上线顺序（0132，2026-10-18）
+
+0132 把 `kpi_catalog.datasource_id` 的外键从 `ON DELETE SET NULL` 改为
+`ON DELETE RESTRICT`，同时 F2 起 `KpiCatalogCreate.datasourceId` 为**必填**。
+两条契约叠加决定部署顺序：
+
+1. **先部署 backend**（镜像 CMD 启动时自动执行 `alembic upgrade head`，
+   见 `Dockerfile.backend:84`）——迁移 + 新契约一起上线。
+2. **再部署 frontend**。
+   - 旧前端 + 新后端：创建 KPI 不带 `datasourceId` → 422（可感知、可恢复）。
+   - 新前端 + 旧后端：多余字段被忽略，安全。
+   因此 backend 必须先于 frontend，不能反过来。
+
+上线前后各跑一次 preflight（只读，三项）：
+
+```bash
+docker exec -w /app qa-backend uv run python scripts/preflight_kpi_fk.py
+```
+
+预期输出：
+
+```
+[PASS] alembic_version: current=0132 required>=0132
+[PASS] fk_on_delete: fk_kpi_catalog_datasource confdeltype='r' required='r' (r=RESTRICT)
+[PASS] bound_kpi_rows: N 个 KPI 已绑定数据源（信息项）
+```
+
+第二项 FAIL 说明迁移没生效（或容器还在跑旧镜像），此时不要切前端流量。
+
+**批量写入口（`POST /api/v1/kpi-catalog/bulk-bind-datasource`）的鉴权前提**：
+
+该端点是非 admin 403 的批量绑定（单次最多 1000 行），但**在 stub 鉴权模式下
+`X-User-Roles` 由客户端自填**，等于任何人都能拿到批量写权限。因此上线该端点前必须确认：
+
+- `APP_ENV=production`、`AUTH_MODE=real`、`AUTH_STUB_ENABLED=0`（启动期校验见
+  `backend/app/config.py:280`，任一不满足会 ERROR 告警）；
+- 反向代理剥离客户端传入的 `X-User-*` 头；
+- backend 的 `8000:8000` 端口不对公网/办公网开放（见 `docker/docker-compose.yml:170`），
+  只允许经 nginx 访问——直连 8000 会绕过代理层的头部剥离。
+
+**回滚**：`uv run alembic downgrade 0131` 恢复 SET NULL 语义（服务层 409 守卫
+仍在，数据不会被静默解绑）。回滚后前端必须同步回退，否则创建 KPI 仍会 422。
+
 ## 日志
 
 - 后端日志级别由 `LOG_LEVEL` 控制。

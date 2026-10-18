@@ -45,11 +45,14 @@ class KpiCatalogService:
         self._outbox = outbox or OutboxService()
         self._acl = acl or AclService()
 
-    async def listKpis(self, session: AsyncSession) -> list[KpiCatalog]:
-        """按 kpi_code 升序列表。"""
-        result = await session.execute(
-            select(KpiCatalog).order_by(KpiCatalog.kpi_code)
-        )
+    async def listKpis(
+        self, session: AsyncSession, *, unbound: bool = False
+    ) -> list[KpiCatalog]:
+        """按 kpi_code 升序列表；``unbound`` 只返回未绑定数据源的 KPI（P2 报告用）。"""
+        stmt = select(KpiCatalog).order_by(KpiCatalog.kpi_code)
+        if unbound:
+            stmt = stmt.where(KpiCatalog.datasource_id.is_(None))
+        result = await session.execute(stmt)
         return list(result.scalars().all())
 
     async def getKpi(self, session: AsyncSession, id: int) -> KpiCatalog:

@@ -12,36 +12,56 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import CurrentUser, getCurrentUser, getDb
+from app.dependencies import (
+    CurrentUser,
+    getAdminOnlyActor,
+    getCurrentUser,
+    getDb,
+)
 from app.domain.schemas import (
     KpiCatalogCreate,
     KpiCatalogHistoryRead,
     KpiCatalogRead,
     KpiCatalogUpdate,
+    KpiDatasourceBulkBindItem,
+    KpiDatasourceBulkBindResult,
+    KpiDatasourceSuggestionRead,
     KpiSearchHit,
     KpiSearchResponse,
 )
 from app.services.history_service import HistoryService
+from app.services.kpi_catalog_service import KpiCatalogService
+from app.services.kpi_datasource_binding_service import (
+    BULK_BIND_MAX_ROWS,
+    KpiDatasourceBindingService,
+)
+from app.services.kpi_datasource_suggestion_service import (
+    KpiDatasourceSuggestionService,
+)
 from app.services.kpi_semantic_match_service import (
     KpiSemanticMatchService,
     getKpiSemanticMatchService,
 )
-from app.services.kpi_catalog_service import KpiCatalogService
 
 router = APIRouter(dependencies=[])
 _service = KpiCatalogService()
 _history_service = HistoryService()
+_suggestion_service = KpiDatasourceSuggestionService()
+_binding_service = KpiDatasourceBindingService()
 
 
 @router.get("", response_model=list[KpiCatalogRead], status_code=status.HTTP_200_OK)
 async def listKpis(
+    unbound: bool = Query(False, description="只返回未绑定数据源的 KPI"),
     _user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> list[KpiCatalogRead]:
-    """列出所有 KPI（按 kpi_code 升序）。"""
-    return [KpiCatalogRead.model_validate(e) for e in await _service.listKpis(db)]
+    """列出所有 KPI（按 kpi_code 升序）；``unbound=true`` 只返回未绑定行。"""
+    rows = await _service.listKpis(db, unbound=unbound)
+    return [KpiCatalogRead.model_validate(e) for e in rows]
 
 
 # NOTE: /search 必须在 /{id} 之前注册（FastAPI 路由按顺序匹配）
@@ -91,6 +111,24 @@ async def createKpi(
     return KpiCatalogRead.model_validate(await _service.createKpi(db, dto, user))
 
 
+# NOTE: 两段静态路径必须在 /{id} 之前注册（FastAPI 路由按顺序匹配）
+@router.post(
+    "/bulk-bind-datasource",
+    response_model=KpiDatasourceBulkBindResult,
+    status_code=status.HTTP_200_OK,
+    summary="批量绑定 KPI 数据源（admin）",
+)
+async def bulkBindKpiDatasource(
+    # 行数上限在请求体校验阶段就生效（service 层仍保留同一上限做防御纵深）
+    items: Annotated[list[KpiDatasourceBulkBindItem], Field(max_length=BULK_BIND_MAX_ROWS)],
+    force: bool = Query(False, description="已绑定其他数据源时是否覆盖"),
+    admin: CurrentUser = Depends(getAdminOnlyActor),
+    db: AsyncSession = Depends(getDb),
+) -> KpiDatasourceBulkBindResult:
+    """批量绑定（逐行 commit，部分成功；上限 1000 行，非 admin 403）。"""
+    return await _binding_service.bulkBind(db, items, admin, force=force)
+
+
 @router.get("/{id}", response_model=KpiCatalogRead, status_code=status.HTTP_200_OK)
 async def getKpi(
     id: int,
@@ -125,6 +163,24 @@ async def deleteKpi(
 # ---------------------------------------------------------------------------
 # Phase 4.5: kpi_catalog_history 回放 API
 # ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{id}/datasource-suggestions",
+    response_model=list[KpiDatasourceSuggestionRead],
+    status_code=status.HTTP_200_OK,
+    summary="KPI 数据源绑定建议（只读提示）",
+)
+async def suggestKpiDatasource(
+    id: int,
+    _user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+) -> list[KpiDatasourceSuggestionRead]:
+    """基于 legacy 名称与 ontology 表反查给出绑定建议；不写库。"""
+    return [
+        KpiDatasourceSuggestionRead.model_validate(s, from_attributes=True)
+        for s in await _suggestion_service.suggest(db, id)
+    ]
 
 
 @router.get(

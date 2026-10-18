@@ -57,7 +57,6 @@ from app.services.messages_zh import (
 )
 from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
 from app.services.multi_step_retry import ERROR_KIND_PERMANENT
-from app.services.multi_step_dependency import MultiStepDependencyResolver
 from app.services.nl2sql_service import _readFloatConfig
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.think_block import applyThinkPolicy
@@ -650,11 +649,6 @@ class MultiStepMixin:
         last_sql: str | None = None
         last_data: list[dict] = []
 
-        # P1-4：plan 级别依赖校验（cycle / unknown dep）— 不命中不抛错，仅日志。
-        MultiStepDependencyResolver.validate(multiStepPlan)
-        # P1-4：失败步索引（供下游 depends_on 跳过判定 + on_failure 策略）
-        failed_indexes: set[int] = set()
-
         # 落库只针对**数据步**（汇总步不执行 SQL、没有 sql/data 可落）。
         # 汇总步仍计入 completedCount（见下方 early-return 封口），故 runStatusFor
         # 的分母用 len(multiStepPlan.steps)（含汇总步）而不是 len(subQuestions)。
@@ -673,27 +667,12 @@ class MultiStepMixin:
         # _hasDataStepResult / _multiStepResponse 的入参）；这里一律用 int。
         completedCount = 0
         anyFailed = False
-        anySkipped = False
 
         for index, step_plan in enumerate(multiStepPlan.steps):
             if await self._shouldSkipStep(index, startIndex):
                 # 续跑：更早的步已 succeeded。跳过执行但**照样计入完成数**（理由见
                 # `_shouldSkipStep` 的文档字符串）。
                 completedCount += 1
-                continue
-            # P1-4：依赖失败 → 标 skipped 不执行（不影响 runStatusFor 计数）
-            if any(dep in failed_indexes for dep in step_plan.depends_on):
-                skipped_result = StepResult(
-                    step_index=index,
-                    description=step_plan.description,
-                    sub_question=step_plan.sub_question,
-                    skipped=True,
-                    skip_reason=(
-                        f"依赖步骤 {[d for d in step_plan.depends_on if d in failed_indexes]} 失败"
-                    ),
-                )
-                completed.append(skipped_result)
-                anySkipped = True
                 continue
             if step_plan.aggregation_only:
                 if not _hasDataStepResult(completed):
@@ -776,7 +755,7 @@ class MultiStepMixin:
                 await self._closeRun(
                     session, run,
                     status=runStatusFor(
-                        completedCount, len(multiStepPlan.steps), anyFailed, anySkipped
+                        completedCount, len(multiStepPlan.steps), anyFailed
                     ),
                     completedSteps=completedCount,
                     currentStepIdx=len(multiStepPlan.steps),
@@ -845,10 +824,6 @@ class MultiStepMixin:
                         run=run, tokens=stepRun.tokens, cost=stepRun.cost,
                     )
                     anyFailed = True
-                # P1-4：失败索引入集合；按 on_failure 决定是否立即终止
-                failed_indexes.add(index)
-                if step_plan.on_failure == "abort":
-                    break
             elif run is not None:
                 await self._persistStepSuccess(
                     session, stepsByIdx[index],
@@ -870,7 +845,7 @@ class MultiStepMixin:
         await self._closeRun(
             session, run,
             status=runStatusFor(
-                completedCount, len(multiStepPlan.steps), anyFailed, anySkipped
+                completedCount, len(multiStepPlan.steps), anyFailed
             ),
             completedSteps=completedCount,
             # run 已收尾，指针挪到末尾；resume 用的是 Task 7 prepareResume 另写的值，
@@ -931,8 +906,7 @@ class MultiStepMixin:
 
         inheritance_snapshot（B5 HIGH-1）：多步 B/C 降级路径的快照，支持下一轮追问。
         """
-        succeeded = [r for r in completed if r.sql is not None and not r.skipped]
-        skipped = [r for r in completed if r.skipped]
+        succeeded = [r for r in completed if r.sql is not None]
         if succeeded:
             answer = MSG_MULTI_STEP_DEGRADE_PARTIAL.format(
                 done=len(succeeded), total=len(completed),
@@ -940,8 +914,8 @@ class MultiStepMixin:
         else:
             answer = MSG_MULTI_STEP_DEGRADE_FAILED
         logger.warning(
-            "多步执行异常：无可用的 aggregation 步骤，降级收尾（成功 %d / 跳过 %d / 共 %d 步）",
-            len(succeeded), len(skipped), len(completed),
+            "多步执行异常：无可用的 aggregation 步骤，降级收尾（成功 %d / 共 %d 步）",
+            len(succeeded), len(completed),
         )
         await self._storeSessionMessages(
             session, dto.sessionId, dto.question, answer, last_sql,

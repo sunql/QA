@@ -144,10 +144,10 @@ MSG_DATASOURCE_HAS_KPI_BINDINGS = "数据源 id={id} 被 {count} 个 KPI 引用�
 ```python
 def upgrade() -> None:
     op.drop_constraint(
-        "kpi_catalog_datasource_id_fkey", "kpi_catalog", type_="foreignkey"
+        "fk_kpi_catalog_datasource", "kpi_catalog", type_="foreignkey"
     )
     op.create_foreign_key(
-        "kpi_catalog_datasource_id_fkey",
+        "fk_kpi_catalog_datasource",
         "kpi_catalog", "data_source",
         ["datasource_id"], ["id"],
         ondelete="RESTRICT",
@@ -155,15 +155,17 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_constraint(
-        "kpi_catalog_datasource_id_fkey", "kpi_catalog", type_="foreignkey"
+        "fk_kpi_catalog_datasource", "kpi_catalog", type_="foreignkey"
     )
     op.create_foreign_key(
-        "kpi_catalog_datasource_id_fkey",
+        "fk_kpi_catalog_datasource",
         "kpi_catalog", "data_source",
         ["datasource_id"], ["id"],
         ondelete="SET NULL",
     )
 ```
+
+> ⚠️ **FK 约束名说明**：原 migration 0125 创建时使用显式名 `fk_kpi_catalog_datasource`（非 Alembic 默认 `kpi_catalog_datasource_id_fkey`）。本 spec §4.5 示例代码已与实际对齐；若未来数据库重构改名，须同步更新此处。**禁止**依赖 Alembic 默认命名（实施时务必 `SELECT conname FROM pg_constraint WHERE conrelid = 'kpi_catalog'::regclass AND contype='f';` 查实际名）。
 
 **不需数据迁移**：当前 `kpi_catalog.datasource_id` 全表 NULL（per F2 1.2a 部署后实情），FK 行为变更无碰撞。
 

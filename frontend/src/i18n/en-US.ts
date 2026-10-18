@@ -1780,6 +1780,7 @@ export const enUS = {
       grain: "Grain",
       unit: "Unit",
       dataSource: "Data Source",
+      datasourceId: "Bound Data Source",
       owner: "Owner",
       version: "Version",
       status: "Status",
@@ -1795,6 +1796,7 @@ export const enUS = {
       grain: "Grain",
       unit: "Unit",
       dataSource: "Data Source",
+      datasourceId: "Bound Data Source",
       owner: "Owner",
       version: "Version",
       status: "Status",
@@ -1808,8 +1810,10 @@ export const enUS = {
       grain: "e.g. Supplier+Month",
       unit: "e.g. %, days, CNY",
       dataSource: "e.g. DWS_SUPPLIER_MONTHLY",
+      datasourceId: "Select the data source this KPI is computed from",
       owner: "Owner dept./person",
     },
+    unbound: "Unbound",
   },
 
   feature: {

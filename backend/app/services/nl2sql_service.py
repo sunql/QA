@@ -589,15 +589,29 @@ class Nl2SqlService:
 
     @staticmethod
     def applyRefineDirect(
-        sql: str, plan: QueryPlan | None, question: str, *, maxLimit: int = _REFINE_MAX_LIMIT_DEFAULT
+        sql: str,
+        plan: QueryPlan | None,
+        question: str,
+        *,
+        maxLimit: int = _REFINE_MAX_LIMIT_DEFAULT,
+        datasourceType: DataSourceType | str | None = None,
     ) -> str | None:
         """REFINE 捷径：纯代码改写上一轮 SQL（行数/排序/筛选），不调 LLM。
 
         maxLimit 为魔数治理 Phase 2 hard tier 注入参数：默认 _DEFAULT，
         编排层（generateSql）传 system_config 现读值；直接调本方法时
         缺省为默认值（既有调用零改动）。
+
+        datasourceType 传给 sqlglot 决定解析/输出方言（Oracle 的 FETCH FIRST
+        不得被改写为 LIMIT）。
         """
-        return applyRefineDirect(sql, plan, question, maxLimit=maxLimit)
+        return applyRefineDirect(
+            sql,
+            plan,
+            question,
+            maxLimit=maxLimit,
+            datasourceType=datasourceType,
+        )
 
     # ------------------------------------------------------------------
     # 编排入口（保留在门面）：流式 SQL 解析 + SQL 生成。

@@ -17,6 +17,7 @@ from datetime import date as _date
 import sqlglot
 from sqlglot import exp
 
+from app.domain.enums import DataSourceType
 from app.domain.query_plan import QueryPlan
 
 
@@ -79,6 +80,47 @@ _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_㐀-鿿][A-Za-z0-9_㐀-鿿]*$")
 # 缺席/格式错返 _DEFAULT。
 _REFINE_MAX_LIMIT_DEFAULT = 1000
 
+# 数据源类型 → sqlglot 方言名（postgresql 在 sqlglot 里叫 postgres）。
+_SQLGLOT_DIALECTS: dict[DataSourceType, str] = {
+    DataSourceType.MYSQL: "mysql",
+    DataSourceType.POSTGRESQL: "postgres",
+    DataSourceType.ORACLE: "oracle",
+}
+# 新建 ORDER BY 节点时显式设 nulls_first 为**方言默认值**，sqlglot 序列化时
+# 才会省略 NULLS 子句；否则它会按自己的默认展开成 NULLS LAST 或 CASE WHEN，
+# 前者改变 Oracle/PG 的 DESC 语义（两者 DESC 默认 NULLS FIRST），后者让
+# MySQL 输出变脏。各方言的「DESC 默认即 NULLS FIRST」情况：
+_NULLS_DEFAULT_MATCHES_DESC = frozenset({"oracle", "postgres"})
+# MySQL：ASC 默认 NULLS FIRST，DESC 默认 NULLS LAST（与上面相反）。
+_NULLS_DEFAULT_MATCHES_ASC = frozenset({"mysql"})
+
+
+def _nullsFirst(dialect: str | None, desc: bool) -> bool | None:
+    """返回该方言下与默认一致的 nulls_first 值；None 表示保持未设置。"""
+    if dialect in _NULLS_DEFAULT_MATCHES_ASC:
+        return not desc
+    if dialect in _NULLS_DEFAULT_MATCHES_DESC:
+        return desc
+    # 默认方言：ASC 显式置 NULLS FIRST（而非 sqlglot 默认的 NULLS LAST），
+    # DESC 不设置即可省略子句。
+    return True if not desc else None
+
+
+def _sqlglotDialect(datasourceType: DataSourceType | str | None) -> str | None:
+    """把数据源类型映射为 sqlglot 方言名；未知类型返回 None（默认方言）。
+
+    脏值 fail-fast 由上游 ``coerceDatasourceType`` 负责；本函数只服务
+    最佳努力的 REFINE 捷径，未知值退回默认方言，不额外抛错。
+    """
+    if isinstance(datasourceType, DataSourceType):
+        return _SQLGLOT_DIALECTS.get(datasourceType)
+    if isinstance(datasourceType, str):
+        try:
+            return _SQLGLOT_DIALECTS.get(DataSourceType(datasourceType.lower()))
+        except ValueError:
+            return None
+    return None
+
 
 def _extractLimit(question: str, maxLimit: int = _REFINE_MAX_LIMIT_DEFAULT) -> int | None:
     """从问题中提取行数并钳制到上限；无法识别返回 None。
@@ -92,25 +134,32 @@ def _extractLimit(question: str, maxLimit: int = _REFINE_MAX_LIMIT_DEFAULT) -> i
     return min(int(raw), maxLimit)
 
 
-def _rewriteLimit(sql: str, n: int) -> str | None:
+def _rewriteLimit(sql: str, n: int, *, dialect: str | None = None) -> str | None:
     """改写顶层 LIMIT/FETCH FIRST 为指定行数。
 
     AST 化后：仅简单顶层 SELECT（无 CTE / 子查询 / window）走快路径；
     字符串字面量内的 LIMIT 不被改写（AST 自动 quote-aware）；
     嵌套 / CTE / window / 解析失败 → 返 None（让两阶段生成接手）。
     """
-    return rewriteTopLimit(sql, n)
+    return rewriteTopLimit(sql, n, dialect=dialect)
 
 
 # Public API
-def rewriteTopLimit(sql: str, n: int) -> str | None:
-    """公开 API：AST 化 LIMIT 改写。
+def rewriteTopLimit(sql: str, n: int, *, dialect: str | None = None) -> str | None:
+    """公开 API：AST 化 LIMIT 改写（按数据源方言解析与输出）。
+
+    Args:
+        sql: 输入 SQL
+        n: 目标行数
+        dialect: sqlglot 方言名（"mysql"/"postgres"/"oracle"）；None 用默认方言
 
     Returns:
-        改写后的 SQL 字符串（quote-aware）；非简单 SELECT / 解析失败 → None。
+        改写后的 SQL 字符串（quote-aware）；非简单 SELECT / 无既有行数子句 /
+        解析失败 → None。无既有行数子句时不追加——ROWNUM 等非 AST limit 形式
+        追加 LIMIT/FETCH 会改变语义或产生方言非法语法，交给 LLM 两阶段。
     """
     try:
-        tree = sqlglot.parse_one(sql)
+        tree = sqlglot.parse_one(sql, dialect=dialect)
     except sqlglot.errors.ParseError:
         return None
 
@@ -123,9 +172,12 @@ def rewriteTopLimit(sql: str, n: int) -> str | None:
         return None
     if list(tree.find_all(exp.Window)):
         return None
+    # 无既有行数子句 → 不追加（LOW-2 安全决策）
+    if tree.args.get("limit") is None:
+        return None
 
     tree.set("limit", exp.Limit(expression=exp.Literal.number(n)))
-    return tree.sql()
+    return tree.sql(dialect=dialect)
 
 
 def _extractSort(question: str, columns: tuple[str, ...]) -> tuple[str, str] | None:
@@ -156,23 +208,34 @@ def _extractSort(question: str, columns: tuple[str, ...]) -> tuple[str, str] | N
     return None
 
 
-def _rewriteOrderBy(sql: str, col: str, direction: str) -> str | None:
+def _orderColumn(col: str) -> exp.Column:
+    """构造排序列节点：安全标识符按原样输出，其余退回带引号形式。
+
+    ``exp.column()`` 会给非 ASCII 标识符自动加引号（"收货数量"），改变输出
+    文本且无必要；列名已过安全白名单，可直接用未加引号的 Identifier。
+    """
+    quoted = not _SAFE_IDENT_RE.fullmatch(col)
+    return exp.Column(this=exp.Identifier(this=col, quoted=quoted))
+
+
+def _rewriteOrderBy(sql: str, col: str, direction: str, *, dialect: str | None = None) -> str | None:
     """改写顶层 ORDER BY（只动顶层；嵌套内层不动）。
 
     AST 化后：用 sqlglot 解析 → 只对顶层 Select.order 操作 → 序列化。
     解析失败 / 非 Select → 返 None。
     """
-    return rewriteOrderBy(sql, col, direction)
+    return rewriteOrderBy(sql, col, direction, dialect=dialect)
 
 
 # Public API
-def rewriteOrderBy(sql: str, col: str, direction: str) -> str | None:
-    """公开 API：AST 化顶层 ORDER BY 改写。
+def rewriteOrderBy(sql: str, col: str, direction: str, *, dialect: str | None = None) -> str | None:
+    """公开 API：AST 化顶层 ORDER BY 改写（按数据源方言解析与输出）。
 
     Args:
         sql: 输入 SQL
         col: 排序列（已通过 _SAFE_IDENT_RE 校验的安全标识符）
         direction: "ASC" / "DESC"
+        dialect: sqlglot 方言名（"mysql"/"postgres"/"oracle"）；None 用默认方言
 
     Returns:
         改写后的 SQL；解析失败 / 非 Select → None。
@@ -180,7 +243,7 @@ def rewriteOrderBy(sql: str, col: str, direction: str) -> str | None:
         无顶层 ORDER BY → 末尾追加。
     """
     try:
-        tree = sqlglot.parse_one(sql)
+        tree = sqlglot.parse_one(sql, dialect=dialect)
     except sqlglot.errors.ParseError:
         return None
 
@@ -188,11 +251,12 @@ def rewriteOrderBy(sql: str, col: str, direction: str) -> str | None:
         return None
 
     desc = direction.upper() == "DESC"
-    new_order = exp.Order(
-        expressions=[exp.Ordered(this=exp.column(col), desc=desc)]
-    )
-    tree.set("order", new_order)
-    return tree.sql()
+    ordered = exp.Ordered(this=_orderColumn(col), desc=desc)
+    nullsFirst = _nullsFirst(dialect, desc)
+    if nullsFirst is not None:
+        ordered.set("nulls_first", nullsFirst)
+    tree.set("order", exp.Order(expressions=[ordered]))
+    return tree.sql(dialect=dialect)
 
 
 def _quoteFilterValue(val: str) -> str | None:
@@ -383,7 +447,12 @@ def _rewriteWhere(sql: str, cond: str) -> str:
 
 
 def applyRefineDirect(
-    sql: str, plan: QueryPlan | None, question: str, *, maxLimit: int = _REFINE_MAX_LIMIT_DEFAULT
+    sql: str,
+    plan: QueryPlan | None,
+    question: str,
+    *,
+    maxLimit: int = _REFINE_MAX_LIMIT_DEFAULT,
+    datasourceType: DataSourceType | str | None = None,
 ) -> str | None:
     """REFINE 捷径：纯代码改写上一轮 SQL（行数/排序/筛选），不调 LLM。
 
@@ -397,9 +466,12 @@ def applyRefineDirect(
     聚合别名非法）。列名匹配对大小写不敏感。
 
     maxLimit 运行期从 system_config.REFINE_MAX_LIMIT 现读（魔数治理 Phase 2）。
+    datasourceType 决定 sqlglot 解析/输出方言：Oracle 的 FETCH FIRST 必须保持
+    FETCH FIRST，不能被改写成方言非法的 LIMIT。
     """
     if not sql or not question:
         return None
+    dialect = _sqlglotDialect(datasourceType)
     planColumns = (
         tuple(c for c in plan.selectedProperties if _SAFE_IDENT_RE.fullmatch(c))
         if plan
@@ -410,14 +482,14 @@ def applyRefineDirect(
 
     limit = _extractLimit(question, maxLimit)
     if limit is not None:
-        rewritten = _rewriteLimit(sql, limit)
+        rewritten = _rewriteLimit(sql, limit, dialect=dialect)
         if rewritten is not None:
             sql = rewritten
             transformed = True
 
     sort = _extractSort(question, sortColumns)
     if sort is not None:
-        rewritten = _rewriteOrderBy(sql, sort[0], sort[1])
+        rewritten = _rewriteOrderBy(sql, sort[0], sort[1], dialect=dialect)
         if rewritten is not None:
             sql = rewritten
             transformed = True

@@ -10,10 +10,11 @@ ADMIN_HEADERS = {"X-User-Id": "audit-kpi-admin", "X-User-Roles": "admin"}
 class TestKpiCatalogAudit:
     """6 cases: CREATE success / UPDATE success / DELETE success / actor_departments injected."""
 
-    async def test_create_kpi_writes_audit(self, client, dbSession) -> None:
+    async def test_create_kpi_writes_audit(self, client, dbSession, seed_data_source) -> None:
         resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"AUD_KPI_CREATE_{id(self)}",
                 "kpiName": "审计测试KPI",
                 "formula": "SELECT COUNT(*)",
@@ -35,11 +36,12 @@ class TestKpiCatalogAudit:
         rows = audit_resp.json()["rows"]
         assert any(r["entityId"] == kpi_id and r["action"] == "CREATE" for r in rows)
 
-    async def test_update_kpi_writes_audit(self, client, dbSession) -> None:
+    async def test_update_kpi_writes_audit(self, client, dbSession, seed_data_source) -> None:
         # Create then update
         create_resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"AUD_KPI_UPDATE_{id(self)}",
                 "kpiName": "原始名称",
                 "formula": "SELECT 1",
@@ -66,11 +68,12 @@ class TestKpiCatalogAudit:
         rows = audit_resp.json()["rows"]
         assert any(r["entityId"] == kpi_id and r["action"] == "UPDATE" for r in rows)
 
-    async def test_delete_kpi_writes_audit(self, client, dbSession) -> None:
+    async def test_delete_kpi_writes_audit(self, client, dbSession, seed_data_source) -> None:
         # Create then delete
         create_resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"AUD_KPI_DEL_{id(self)}",
                 "kpiName": "待删除",
                 "formula": "SELECT 1",
@@ -95,10 +98,11 @@ class TestKpiCatalogAudit:
         rows = audit_resp.json()["rows"]
         assert any(r["entityId"] == kpi_id and r["action"] == "DELETE" for r in rows)
 
-    async def test_create_kpi_actor_departments_injected(self, client, dbSession) -> None:
+    async def test_create_kpi_actor_departments_injected(self, client, dbSession, seed_data_source) -> None:
         resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"AUD_KPI_DEPT_{id(self)}",
                 "kpiName": "部门审计",
                 "formula": "SELECT 1",
@@ -123,11 +127,12 @@ class TestKpiCatalogAudit:
         ]
         assert len(matching) >= 1
 
-    async def test_update_kpi_has_before_and_after(self, client, dbSession) -> None:
+    async def test_update_kpi_has_before_and_after(self, client, dbSession, seed_data_source) -> None:
         # Create KPI
         create_resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"AUD_KPI_BEFORE_{id(self)}",
                 "kpiName": "原始",
                 "formula": "SELECT 1",
@@ -158,11 +163,12 @@ class TestKpiCatalogAudit:
         # At least one UPDATE should have both beforeJson and afterJson
         assert any(r.get("beforeJson") and r.get("afterJson") for r in update_rows)
 
-    async def test_delete_kpi_has_before_no_after(self, client, dbSession) -> None:
+    async def test_delete_kpi_has_before_no_after(self, client, dbSession, seed_data_source) -> None:
         # Create then delete
         create_resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"AUD_KPI_DEL2_{id(self)}",
                 "kpiName": "删除测试",
                 "formula": "SELECT 1",

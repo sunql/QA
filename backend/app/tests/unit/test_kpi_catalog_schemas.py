@@ -32,9 +32,11 @@ class TestKpiCatalogSchemas:
         dto = KpiCatalogCreate(
             kpiCode="KPI_SUPPLIER_OTD",
             kpiName="供应商准时交付率",
+            datasourceId=1,
         )
         assert dto.kpi_code == "KPI_SUPPLIER_OTD"
         assert dto.kpi_name == "供应商准时交付率"
+        assert dto.datasource_id == 1
         # 默认值
         assert dto.status == KpiStatus.DRAFT
         # version / revision_count 由 service 兜底（DTO 默认 None）
@@ -45,19 +47,27 @@ class TestKpiCatalogSchemas:
         assert dto.owner is None
         assert dto.unit is None
 
+    def test_create_rejects_missing_datasource_id(self) -> None:
+        """F2 §4.1：datasource_id 必填（reverse guard）。"""
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            KpiCatalogCreate(kpiCode="K1", kpiName="n")
+
     def test_create_rejects_oversized_code(self) -> None:
         import pytest
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError):
-            KpiCatalogCreate(kpiCode="x" * 51, kpiName="n")
+            KpiCatalogCreate(kpiCode="x" * 51, kpiName="n", datasourceId=1)
 
     def test_create_rejects_empty_name(self) -> None:
         import pytest
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError):
-            KpiCatalogCreate(kpiCode="K1", kpiName="")
+            KpiCatalogCreate(kpiCode="K1", kpiName="", datasourceId=1)
 
     def test_update_partial_fields(self) -> None:
         dto = KpiCatalogUpdate(status="PUBLISHED", owner="采购部")
@@ -97,8 +107,9 @@ class TestKpiCatalogSchemas:
         assert read.status == KpiStatus.DRAFT
 
     def test_model_dump_json_by_alias_camelcase(self) -> None:
-        dto = KpiCatalogCreate(kpiCode="K1", kpiName="N")
+        dto = KpiCatalogCreate(kpiCode="K1", kpiName="N", datasourceId=1)
         dumped = dto.model_dump(mode="json", by_alias=True)
         assert "kpiCode" in dumped
         assert "kpiName" in dumped
+        assert dumped["datasourceId"] == 1
         assert dumped["status"] == "DRAFT"

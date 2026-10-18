@@ -56,29 +56,39 @@ class _Helper:
 class TestKpiAcl:
     """PUT/DELETE 走 AclService：admin 通过；owner 部门通过；其他部门 403。"""
 
-    async def _create(self, client, code: str, owner: str) -> dict:
+    async def _create(self, client, seed_data_source, code: str, owner: str) -> dict:
         resp = await client.post(
             "/api/v1/kpi-catalog",
-            json={"kpiCode": code, "kpiName": f"测试-{code}", "owner": owner},
+            json={
+                "datasourceId": seed_data_source.id,
+                "kpiCode": code,
+                "kpiName": f"测试-{code}",
+                "owner": owner,
+            },
         )
         assert resp.status_code == 201, resp.text
         return resp.json()
 
-    async def test_create_does_not_require_acl(self, client, dbSession) -> None:
+    async def test_create_does_not_require_acl(self, client, dbSession, seed_data_source) -> None:
         """CREATE 不走 ACL；任何部门都能创建新 KPI。"""
         await _Helper.clean(dbSession)
         # 任何部门（甚至无部门）都能 POST
         resp = await client.post(
             "/api/v1/kpi-catalog",
-            json={"kpiCode": "KPI_GOV_A", "kpiName": "A", "owner": PROCUREMENT},
+            json={
+                "datasourceId": seed_data_source.id,
+                "kpiCode": "KPI_GOV_A",
+                "kpiName": "A",
+                "owner": PROCUREMENT,
+            },
             headers={"X-User-Id": "alice", "X-User-Departments": FINANCE},
         )
         assert resp.status_code == 201
 
-    async def test_update_owner_dept_passes(self, client, dbSession) -> None:
+    async def test_update_owner_dept_passes(self, client, dbSession, seed_data_source) -> None:
         """owner=procurement + user=procurement → 200。"""
         await _Helper.clean(dbSession)
-        kpi = await self._create(client, "KPI_GOV_B", PROCUREMENT)
+        kpi = await self._create(client, seed_data_source, "KPI_GOV_B", PROCUREMENT)
         resp = await client.put(
             f"/api/v1/kpi-catalog/{kpi['id']}",
             json={"kpiName": "改后"},
@@ -87,10 +97,10 @@ class TestKpiAcl:
         assert resp.status_code == 200
         assert resp.json()["kpiName"] == "改后"
 
-    async def test_update_other_dept_returns_403(self, client, dbSession) -> None:
+    async def test_update_other_dept_returns_403(self, client, dbSession, seed_data_source) -> None:
         """owner=procurement + user=finance → 403。"""
         await _Helper.clean(dbSession)
-        kpi = await self._create(client, "KPI_GOV_C", PROCUREMENT)
+        kpi = await self._create(client, seed_data_source, "KPI_GOV_C", PROCUREMENT)
         resp = await client.put(
             f"/api/v1/kpi-catalog/{kpi['id']}",
             json={"kpiName": "改后"},
@@ -104,10 +114,10 @@ class TestKpiAcl:
         body = resp.json()
         assert "无权修改" in body.get("error", "")
 
-    async def test_update_admin_any_owner_passes(self, client, dbSession) -> None:
+    async def test_update_admin_any_owner_passes(self, client, dbSession, seed_data_source) -> None:
         """admin 角色可改任意 owner。"""
         await _Helper.clean(dbSession)
-        kpi = await self._create(client, "KPI_GOV_D", PROCUREMENT)
+        kpi = await self._create(client, seed_data_source, "KPI_GOV_D", PROCUREMENT)
         resp = await client.put(
             f"/api/v1/kpi-catalog/{kpi['id']}",
             json={"kpiName": "admin改"},
@@ -115,10 +125,10 @@ class TestKpiAcl:
         )
         assert resp.status_code == 200
 
-    async def test_delete_other_dept_returns_403(self, client, dbSession) -> None:
+    async def test_delete_other_dept_returns_403(self, client, dbSession, seed_data_source) -> None:
         """DELETE 其他部门 → 403。"""
         await _Helper.clean(dbSession)
-        kpi = await self._create(client, "KPI_GOV_E", PROCUREMENT)
+        kpi = await self._create(client, seed_data_source, "KPI_GOV_E", PROCUREMENT)
         resp = await client.delete(
             f"/api/v1/kpi-catalog/{kpi['id']}",
             headers={
@@ -129,10 +139,10 @@ class TestKpiAcl:
         )
         assert resp.status_code == 403
 
-    async def test_empty_owner_only_admin_can_modify(self, client, dbSession) -> None:
+    async def test_empty_owner_only_admin_can_modify(self, client, dbSession, seed_data_source) -> None:
         """owner 为空 + 非 admin → 403；admin → 200。"""
         await _Helper.clean(dbSession)
-        kpi = await self._create(client, "KPI_GOV_F", "")
+        kpi = await self._create(client, seed_data_source, "KPI_GOV_F", "")
         # 非 admin + 有部门 → 403
         resp = await client.put(
             f"/api/v1/kpi-catalog/{kpi['id']}",
@@ -152,10 +162,10 @@ class TestKpiAcl:
         )
         assert resp2.status_code == 200
 
-    async def test_multi_department_user_can_match_any(self, client, dbSession) -> None:
+    async def test_multi_department_user_can_match_any(self, client, dbSession, seed_data_source) -> None:
         """多部门成员：任一匹配即通过。"""
         await _Helper.clean(dbSession)
-        kpi = await self._create(client, "KPI_GOV_G", FINANCE)
+        kpi = await self._create(client, seed_data_source, "KPI_GOV_G", FINANCE)
         resp = await client.put(
             f"/api/v1/kpi-catalog/{kpi['id']}",
             json={"kpiName": "双岗改"},
@@ -170,11 +180,16 @@ class TestKpiAcl:
 class TestKpiAudit:
     """audit_log 写入：CREATE / UPDATE / DELETE 都有记录 + actor 正确。"""
 
-    async def test_create_writes_audit_create(self, client, dbSession) -> None:
+    async def test_create_writes_audit_create(self, client, dbSession, seed_data_source) -> None:
         await _Helper.clean(dbSession)
         resp = await client.post(
             "/api/v1/kpi-catalog",
-            json={"kpiCode": "KPI_GOV_H", "kpiName": "H", "owner": PROCUREMENT},
+            json={
+                "datasourceId": seed_data_source.id,
+                "kpiCode": "KPI_GOV_H",
+                "kpiName": "H",
+                "owner": PROCUREMENT,
+            },
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
         kpiId = resp.json()["id"]
@@ -197,12 +212,17 @@ class TestKpiAudit:
         assert rows[0].after_json["kpi_code"] == "KPI_GOV_H"
 
     async def test_update_writes_audit_update_with_before_after(
-        self, client, dbSession
+        self, client, dbSession, seed_data_source
     ) -> None:
         await _Helper.clean(dbSession)
         resp = await client.post(
             "/api/v1/kpi-catalog",
-            json={"kpiCode": "KPI_GOV_I", "kpiName": "原名", "owner": PROCUREMENT},
+            json={
+                "datasourceId": seed_data_source.id,
+                "kpiCode": "KPI_GOV_I",
+                "kpiName": "原名",
+                "owner": PROCUREMENT,
+            },
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
         kpiId = resp.json()["id"]
@@ -226,11 +246,16 @@ class TestKpiAudit:
         assert rows[0].before_json["kpi_name"] == "原名"
         assert rows[0].after_json["kpi_name"] == "新名"
 
-    async def test_delete_writes_audit_delete(self, client, dbSession) -> None:
+    async def test_delete_writes_audit_delete(self, client, dbSession, seed_data_source) -> None:
         await _Helper.clean(dbSession)
         resp = await client.post(
             "/api/v1/kpi-catalog",
-            json={"kpiCode": "KPI_GOV_J", "kpiName": "J", "owner": PROCUREMENT},
+            json={
+                "datasourceId": seed_data_source.id,
+                "kpiCode": "KPI_GOV_J",
+                "kpiName": "J",
+                "owner": PROCUREMENT,
+            },
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
         kpiId = resp.json()["id"]
@@ -254,12 +279,17 @@ class TestKpiAudit:
         assert rows[0].after_json is None
 
     async def test_audit_actor_departments_comma_joined(
-        self, client, dbSession
+        self, client, dbSession, seed_data_source
     ) -> None:
         await _Helper.clean(dbSession)
         resp = await client.post(
             "/api/v1/kpi-catalog",
-            json={"kpiCode": "KPI_GOV_K", "kpiName": "K", "owner": PROCUREMENT},
+            json={
+                "datasourceId": seed_data_source.id,
+                "kpiCode": "KPI_GOV_K",
+                "kpiName": "K",
+                "owner": PROCUREMENT,
+            },
             headers={
                 "X-User-Id": "carol",
                 "X-User-Departments": f"{PROCUREMENT},{FINANCE}",
@@ -282,11 +312,12 @@ class TestKpiAudit:
 class TestKpiHistory:
     """kpi_catalog_history 写入：每次变更完整快照 + revision 自增 + FK ON DELETE SET NULL。"""
 
-    async def test_create_writes_history_revision_zero(self, client, dbSession) -> None:
+    async def test_create_writes_history_revision_zero(self, client, dbSession, seed_data_source) -> None:
         await _Helper.clean(dbSession)
         resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": "KPI_GOV_L",
                 "kpiName": "L",
                 "owner": PROCUREMENT,
@@ -307,11 +338,16 @@ class TestKpiHistory:
         assert rows[0].snapshot_json["formula"] == "F0"
         assert rows[0].changed_by == "alice"
 
-    async def test_revision_increments_on_each_update(self, client, dbSession) -> None:
+    async def test_revision_increments_on_each_update(self, client, dbSession, seed_data_source) -> None:
         await _Helper.clean(dbSession)
         resp = await client.post(
             "/api/v1/kpi-catalog",
-            json={"kpiCode": "KPI_GOV_M", "kpiName": "M", "owner": PROCUREMENT},
+            json={
+                "datasourceId": seed_data_source.id,
+                "kpiCode": "KPI_GOV_M",
+                "kpiName": "M",
+                "owner": PROCUREMENT,
+            },
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
         kpiId = resp.json()["id"]
@@ -334,13 +370,14 @@ class TestKpiHistory:
         assert revisions == [0, 1, 2, 3]
 
     async def test_history_snapshot_preserves_old_value_on_update(
-        self, client, dbSession
+        self, client, dbSession, seed_data_source
     ) -> None:
         """update 写入的 snapshot 是「更新后」值（与 audit_log.before 互补）。"""
         await _Helper.clean(dbSession)
         resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": "KPI_GOV_N",
                 "kpiName": "N-原",
                 "formula": "OLD",
@@ -382,13 +419,18 @@ class TestKpiHistory:
         assert rev1.snapshot_json["formula"] == "NEW"
 
     async def test_delete_keeps_history_with_null_kpi_id(
-        self, client, dbSession
+        self, client, dbSession, seed_data_source
     ) -> None:
         """DELETE KPI → history.kpi_id 变 NULL（FK ON DELETE SET NULL）；snapshot 仍可查。"""
         await _Helper.clean(dbSession)
         resp = await client.post(
             "/api/v1/kpi-catalog",
-            json={"kpiCode": "KPI_GOV_O", "kpiName": "O", "owner": PROCUREMENT},
+            json={
+                "datasourceId": seed_data_source.id,
+                "kpiCode": "KPI_GOV_O",
+                "kpiName": "O",
+                "owner": PROCUREMENT,
+            },
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
         kpiId = resp.json()["id"]
@@ -417,13 +459,18 @@ class TestKpiAclRollbackOnFailure:
     """事务绑定：审计/历史 与 业务 共享事务（任一失败 → 全部回滚）。"""
 
     async def test_acl_denied_does_not_write_audit_or_history(
-        self, client, dbSession
+        self, client, dbSession, seed_data_source
     ) -> None:
         """ACL 拒绝 → 不应产生 audit_log 与 history 行（service 早于 audit 抛错）。"""
         await _Helper.clean(dbSession)
         resp = await client.post(
             "/api/v1/kpi-catalog",
-            json={"kpiCode": "KPI_GOV_P", "kpiName": "P", "owner": PROCUREMENT},
+            json={
+                "datasourceId": seed_data_source.id,
+                "kpiCode": "KPI_GOV_P",
+                "kpiName": "P",
+                "owner": PROCUREMENT,
+            },
             headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
         )
         kpiId = resp.json()["id"]

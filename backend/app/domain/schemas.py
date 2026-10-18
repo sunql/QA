@@ -745,6 +745,7 @@ class KpiCatalogRead(CamelModel):
     grain: str | None = None
     unit: str | None = None
     data_source: str | None = None
+    datasource_id: int | None = None
     owner: str | None = None
     version: str
     revision_count: int

@@ -65,7 +65,7 @@ class TestAuditExportApi:
         )
         assert resp.status_code == status.HTTP_403_FORBIDDEN
 
-    async def test_export_csv_properly_escapes_special_chars(self, client, dbSession) -> None:
+    async def test_export_csv_properly_escapes_special_chars(self, client, dbSession, seed_data_source) -> None:
         """Audit row with comma/quote/newline in kpiName must round-trip via csv.reader.
 
         Regression test for csv escaping bug: prior implementation used
@@ -79,6 +79,7 @@ class TestAuditExportApi:
         kpi_resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"AUDIT_CSV_{id(self)}",
                 "kpiName": "CSV escape test, with \"quote\" and \nnewline",
                 "formula": "SELECT 1",

@@ -1,6 +1,6 @@
 # F2 收尾：PR #55 修复 + P0/P1/P2 后续项 — SSOT（2026-10-18）
 
-> **状态**：✅ IMPL-COMPLETE（2026-10-18；followup 分支 `feat/f2-followups`，base = 修复后的 PR #55）
+> **状态**：✅ IMPL-COMPLETE + 全量回归验证通过（2026-10-18；followup 分支 `feat/f2-followups` → [PR #56](https://github.com/sunql/QA/pull/56)，base = 修复后的 PR #55）
 > **前序 SSOT**：[`Harness/changes/2026-10-18-kpi-datasource-write-flow-spec/summary.md`](../2026-10-18-kpi-datasource-write-flow-spec/summary.md)（spec + 8 用例，PR #55）
 > **Spec**：[`docs/superpowers/specs/2026-10-18-kpi-datasource-write-flow-design.md`](../../docs/superpowers/specs/2026-10-18-kpi-datasource-write-flow-design.md)
 > **Plan**：`~/.claude/plans/eager-puzzling-creek.md`（Step 0 + Task 1–5 + 最终评估）
@@ -20,6 +20,8 @@ recon 发现 #55 「只跑了 9 个新用例，整条存量链路没有回归」
 | 4 | `test_delete_datasource_sets_kpi_datasource_id_to_null` 在 0132 RESTRICT 下失效 | 改名 `test_delete_referenced_datasource_raises_fk_violation`，断言 `IntegrityError` + KPI 未解绑 |
 
 另修 model/migration 漂移：`models.py` FK 仍写 `SET NULL` → 改为 `RESTRICT`（commit `10d9bb60`）。
+
+**全量回归又抓出 2 个漏网文件**（commit `e6ed5a83`，仍在 #55）：`test_reports_api._seed_kpi` 的创建 payload 缺 `datasourceId`（422）；`test_research_adapters` 直接 seed `datasource_id=1` 撞 0132 新 FK。
 
 **验证**：0.1 的 9 个文件 **98 passed**（修复前 48 failed）；前端 `KpiCatalogPage` 15 passed。
 
@@ -91,8 +93,20 @@ recon 发现 #55 「只跑了 9 个新用例，整条存量链路没有回归」
 - **批量写入口的鉴权依赖部署配置**：stub 模式下 `X-User-Roles` 由客户端自填，任何人都能请求 admin 端点。代码侧已做路由 + service 双层 admin 断言，但最终安全边界是 `AUTH_MODE=real` + `AUTH_STUB_ENABLED=0` + 代理剥离 `X-User-*` + 不暴露 backend 端口（见 runbook）。
 - **测试环境**：全部集成测试跑真实 PG 上的**隔离测试库** `qa_metadata_test_solo`（5433 实例；与业务库 `qa_metadata` 同名不同库，勿混用）。
 
-## 6. 相关
+## 6. 全量回归与基线对比（2026-10-18）
 
-- PR #55：F2 spec + 实施（修复后 mergeable）
-- followup PR：本分支（P2a / P1b / P2b / P1a / P0）
+- **带改动全量**：`pytest app/tests` → `102 failed, 6679 passed, 2 errors`（1:45:47）。
+- **基线对照**：origin/main `aef0124e` 独立 worktree，**逐一复跑同一 104 个失败节点** → `100 failed, 4 passed`。
+- **差异 4 个**：
+  - `test_reports_api::test_monthly_ops_generate_approve_then_visible`（创建 payload 缺 `datasourceId` → 422）
+  - `test_research_adapters` 2 例（直插 `datasource_id=1` 撞 0132 FK）
+  - 以上 3 例是 #55 的存量漏改，已在 #55 补 `e6ed5a83`，rebase 后 **3 passed**。
+  - `test_chat_service::test_class_filter_logs_successful_pruning`：分支上隔离单跑通过，属既有 set 迭代顺序 flake（memory `qa-system-set-iteration-nondeterminism`），非本次引入。
+- **结论：净新增失败 0**。102 个存量失败均为环境/历史 rot：alembic 测试的写库闸要求库名 `qa_metadata_test`（本次用 `qa_metadata_test_solo`）、stub-auth 全局配置类用例、chat/LLM mock 腐烂、Oracle 引号用例等。
+- 跨分支复跑基线前需把测试库 `alembic_version` 从 `0132` 临时改回基线 head `0131`（否则基线代码 `Can't locate revision '0132'`）；复跑分支代码时 `_ensureSchema` 会自动升级回 0132。
+
+## 7. 相关
+
+- PR #55：F2 spec + 实施（修复后 mergeable；含 `e6ed5a83` 漏网用例修复）
+- followup PR [#56](https://github.com/sunql/QA/pull/56)：本分支（P2a / P1b / P2b / P1a / P0）
 - 运行手册：[`Harness/wiki/operations-runbook.md`](../../wiki/operations-runbook.md) §「F2 KPI–数据源 FK 上线顺序」

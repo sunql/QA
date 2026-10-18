@@ -26,7 +26,7 @@ F2 已 merged 的 `kpi_catalog.datasource_id` 列（migration 0125, FK → `data
 
 ### 2.2 Out of scope（本 spec 不做）
 
-> **2026-10-18 followup 注**：以下两项已在 followup 分支 `feat/f2-followups`（SSOT: [`Harness/changes/2026-10-18-kpi-datasource-followups/summary.md`](../../Harness/changes/2026-10-18-kpi-datasource-followups/summary.md)）交付，不再属于 out of scope：
+> **2026-10-18 followup 注**：以下两项已在 followup 分支 `feat/f2-followups`（[PR #56](https://github.com/sunql/QA/pull/56)，stacked on #55；SSOT: [`Harness/changes/2026-10-18-kpi-datasource-followups/summary.md`](../../Harness/changes/2026-10-18-kpi-datasource-followups/summary.md)）交付，不再属于 out of scope：
 > - **batch backfill** → `scripts/backfill_kpi_datasource.py`（默认预览，`--apply` 落库）+ `POST /api/v1/kpi-catalog/bulk-bind-datasource`（admin，上限 1000 行）。
 > - **ontology 反查链** → `GET /api/v1/kpi-catalog/{id}/datasource-suggestions`（`KpiDatasourceSuggestionService`：legacy 精确 0.9 / ontology 表 0.8 / legacy 模糊 0.55）；**只给建议，永不自动绑定**。
 

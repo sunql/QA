@@ -104,25 +104,42 @@ async def buildPreview(session: AsyncSession) -> list[PreviewRow]:
     return rows
 
 
+def _uniqueIndex(sources: list[DataSource], normalize: Any) -> dict[str, int]:
+    """名称 → id，但**只保留唯一命中**；重名一律剔除（歧义不猜）。"""
+    hits: dict[str, list[int]] = {}
+    for ds in sources:
+        hits.setdefault(normalize(ds.name), []).append(ds.id)
+    return {key: ids[0] for key, ids in hits.items() if len(ids) == 1}
+
+
 async def _resolveDatasources(
     session: AsyncSession, rows: list[MappingRow]
 ) -> dict[str, int]:
-    """datasource 列（ID 或名称）→ data_source.id；仅收录可解析的键。"""
+    """datasource 列（ID 或名称）→ data_source.id；仅收录可无歧义解析的键。
+
+    解析优先级：ID → 名称精确（去首尾空白）→ 名称大小写不敏感。
+    同名启用数据源多于一个时视为歧义、不解析（该行 failed，提示改用 ID），
+    避免把 KPI 绑到猜测的某个同名源上。
+    """
     wanted = {r.datasource for r in rows}
-    byId: dict[str, int] = {}
-    byName: dict[str, int] = {}
-    sources = (
-        await session.execute(select(DataSource).where(DataSource.is_active.is_(True)))
-    ).scalars().all()
-    for ds in sources:
-        byId[str(ds.id)] = ds.id
-        byName[ds.name.strip().lower()] = ds.id
+    sources = list(
+        (
+            await session.execute(
+                select(DataSource).where(DataSource.is_active.is_(True))
+            )
+        ).scalars().all()
+    )
+    byId = {str(ds.id): ds.id for ds in sources}
+    byExactName = _uniqueIndex(sources, lambda name: name.strip())
+    byLowerName = _uniqueIndex(sources, lambda name: name.strip().lower())
     resolved: dict[str, int] = {}
     for key in wanted:
         if key in byId:
             resolved[key] = byId[key]
-        elif key.strip().lower() in byName:
-            resolved[key] = byName[key.strip().lower()]
+        elif key.strip() in byExactName:
+            resolved[key] = byExactName[key.strip()]
+        elif key.strip().lower() in byLowerName:
+            resolved[key] = byLowerName[key.strip().lower()]
     return resolved
 
 
@@ -143,7 +160,10 @@ async def runBackfill(
                     "row": row.row,
                     "kpiCode": row.kpi_code,
                     "status": "failed",
-                    "error": f"数据源「{row.datasource}」不存在或已停用",
+                    "error": (
+                        f"数据源「{row.datasource}」不存在、已停用"
+                        "或同名有歧义（歧义时请改填 ID）"
+                    ),
                 }
             )
             continue
@@ -155,7 +175,7 @@ async def runBackfill(
         session, [item for _, item in items], _ACTOR, force=force
     )
     # 把 bulk 的 1..N 行号还原成 CSV 行号，便于对着文件排查
-    for (rowNo, _), resultRow in zip(items, bulk.results):
+    for (rowNo, _), resultRow in zip(items, bulk.results, strict=True):
         results.append(
             {
                 "row": rowNo,

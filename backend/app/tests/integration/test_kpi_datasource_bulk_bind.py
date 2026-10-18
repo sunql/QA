@@ -16,7 +16,11 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies import CurrentUser
+from app.domain.exceptions import PermissionDeniedError
 from app.domain.models import AuditOutbox, DataSource, KpiCatalog
+from app.domain.schemas import KpiDatasourceBulkBindItem
+from app.services.kpi_datasource_binding_service import KpiDatasourceBindingService
 
 ADMIN_HEADERS = {"X-User-Id": "bulk-admin", "X-User-Roles": "admin"}
 USER_HEADERS = {"X-User-Id": "bulk-user", "X-User-Roles": "user"}
@@ -172,6 +176,22 @@ async def test_non_admin_forbidden(
         headers=USER_HEADERS,
     )
     assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_service_rejects_non_admin_actor(
+    dbSession: AsyncSession, seed_data_source: DataSource,
+) -> None:
+    """防御纵深：绕过路由直接调 service 也 fail-closed（不依赖路由守卫）。"""
+    service = KpiDatasourceBindingService()
+    actor = CurrentUser(userId="direct-user", roles=("user",), departments=())
+
+    with pytest.raises(PermissionDeniedError, match="admin"):
+        await service.bulkBind(
+            dbSession,
+            [KpiDatasourceBulkBindItem(kpi_code="ANY", datasource_id=seed_data_source.id)],
+            actor,
+        )
 
 
 @pytest.mark.asyncio

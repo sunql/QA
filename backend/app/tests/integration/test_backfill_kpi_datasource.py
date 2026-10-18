@@ -49,6 +49,16 @@ async def _addSource(dbSession: AsyncSession, name: str) -> DataSource:
     return ds
 
 
+async def _reloadKpi(dbSession: AsyncSession, kpi: KpiCatalog) -> KpiCatalog:
+    """跨 commit 重读（脚本内部逐行 commit，本地 identity map 已过期）。"""
+    result = await dbSession.execute(
+        select(KpiCatalog)
+        .where(KpiCatalog.id == kpi.id)
+        .execution_options(populate_existing=True)
+    )
+    return result.scalar_one()
+
+
 async def _addKpi(
     dbSession: AsyncSession,
     code: str,
@@ -115,6 +125,38 @@ async def test_preview_is_read_only_and_includes_suggestion(
     ).scalar_one()
     assert stored.datasource_id is None
     assert ds.id > 0
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_name_rejected_but_exact_case_resolves(
+    dbSession: AsyncSession, tmp_path: Path,
+) -> None:
+    """大小写不敏感重名 → 歧义不猜；精确大小写命中仍然优先解析。"""
+    module = _loadModule()
+    dsExact = await _addSource(dbSession, "BACKFILL_AMBIG_DS")
+    await _addSource(dbSession, "backfill_ambig_ds")
+    kpiAmbig = await _addKpi(dbSession, "BACKFILL_KPI_AMBIG")
+    kpiExact = await _addKpi(dbSession, "BACKFILL_KPI_EXACT")
+    exactDsId = dsExact.id
+
+    path = tmp_path / "m.csv"
+    path.write_text(
+        "kpi_code,datasource\n"
+        "BACKFILL_KPI_AMBIG,Backfill_Ambig_DS\n"
+        "BACKFILL_KPI_EXACT,BACKFILL_AMBIG_DS\n",
+        encoding="utf-8",
+    )
+    rows = module.parseMappingCsv(path)
+
+    results, bound, skipped, failed = await module.runBackfill(dbSession, rows, force=False)
+
+    assert (bound, skipped, failed) == (1, 0, 1)
+    ambig = next(r for r in results if r["kpiCode"] == "BACKFILL_KPI_AMBIG")
+    assert ambig["status"] == "failed"
+    assert "歧义" in ambig["error"]
+
+    assert (await _reloadKpi(dbSession, kpiAmbig)).datasource_id is None
+    assert (await _reloadKpi(dbSession, kpiExact)).datasource_id == exactDsId
 
 
 @pytest.mark.asyncio

@@ -30,6 +30,7 @@ from app.domain.schemas import (
 )
 from app.services.kpi_catalog_service import KpiCatalogService
 from app.services.messages_zh import (
+    MSG_KPI_BULK_BIND_ADMIN_REQUIRED,
     MSG_KPI_BULK_BIND_ALREADY_BOUND,
     MSG_KPI_BULK_BIND_TOO_MANY,
     MSG_KPI_CATALOG_CODE_NOT_FOUND,
@@ -51,6 +52,10 @@ class KpiDatasourceBindingService:
         force: bool = False,
     ) -> KpiDatasourceBulkBindResult:
         """批量绑定 KPI → 数据源；返回逐行结果与计数。"""
+        # 防御纵深：路由已用 getAdminOnlyActor 拦截，service 自身 fail-closed，
+        # 防止将来被脚本/内部调用绕过路由时静默获得批量写权限。
+        if "admin" not in (actor.roles or ()):
+            raise PermissionDeniedError(MSG_KPI_BULK_BIND_ADMIN_REQUIRED)
         if len(items) > BULK_BIND_MAX_ROWS:
             raise ValidationError(
                 MSG_KPI_BULK_BIND_TOO_MANY.format(

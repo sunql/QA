@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import (
@@ -31,18 +32,19 @@ from app.domain.schemas import (
     KpiSearchHit,
     KpiSearchResponse,
 )
+from app.services.history_service import HistoryService
+from app.services.kpi_catalog_service import KpiCatalogService
 from app.services.kpi_datasource_binding_service import (
+    BULK_BIND_MAX_ROWS,
     KpiDatasourceBindingService,
 )
 from app.services.kpi_datasource_suggestion_service import (
     KpiDatasourceSuggestionService,
 )
-from app.services.history_service import HistoryService
 from app.services.kpi_semantic_match_service import (
     KpiSemanticMatchService,
     getKpiSemanticMatchService,
 )
-from app.services.kpi_catalog_service import KpiCatalogService
 
 router = APIRouter(dependencies=[])
 _service = KpiCatalogService()
@@ -117,7 +119,8 @@ async def createKpi(
     summary="批量绑定 KPI 数据源（admin）",
 )
 async def bulkBindKpiDatasource(
-    items: list[KpiDatasourceBulkBindItem],
+    # 行数上限在请求体校验阶段就生效（service 层仍保留同一上限做防御纵深）
+    items: Annotated[list[KpiDatasourceBulkBindItem], Field(max_length=BULK_BIND_MAX_ROWS)],
     force: bool = Query(False, description="已绑定其他数据源时是否覆盖"),
     admin: CurrentUser = Depends(getAdminOnlyActor),
     db: AsyncSession = Depends(getDb),

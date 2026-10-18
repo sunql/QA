@@ -70,6 +70,17 @@ docker exec -w /app qa-backend uv run python scripts/preflight_kpi_fk.py
 
 第二项 FAIL 说明迁移没生效（或容器还在跑旧镜像），此时不要切前端流量。
 
+**批量写入口（`POST /api/v1/kpi-catalog/bulk-bind-datasource`）的鉴权前提**：
+
+该端点是非 admin 403 的批量绑定（单次最多 1000 行），但**在 stub 鉴权模式下
+`X-User-Roles` 由客户端自填**，等于任何人都能拿到批量写权限。因此上线该端点前必须确认：
+
+- `APP_ENV=production`、`AUTH_MODE=real`、`AUTH_STUB_ENABLED=0`（启动期校验见
+  `backend/app/config.py:280`，任一不满足会 ERROR 告警）；
+- 反向代理剥离客户端传入的 `X-User-*` 头；
+- backend 的 `8000:8000` 端口不对公网/办公网开放（见 `docker/docker-compose.yml:170`），
+  只允许经 nginx 访问——直连 8000 会绕过代理层的头部剥离。
+
 **回滚**：`uv run alembic downgrade 0131` 恢复 SET NULL 语义（服务层 409 守卫
 仍在，数据不会被静默解绑）。回滚后前端必须同步回退，否则创建 KPI 仍会 422。
 

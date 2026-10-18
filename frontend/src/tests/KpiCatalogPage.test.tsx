@@ -5,7 +5,7 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { ConfigProvider, message } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import KpiCatalogPage from "../pages/KpiCatalogPage";
-import type { KpiCatalog } from "../types/kpiCatalog";
+import type { KpiCatalog, KpiDatasourceSuggestion } from "../types/kpiCatalog";
 
 const { mockKpi } = vi.hoisted(() => ({
   mockKpi: {
@@ -221,6 +221,53 @@ describe("KpiCatalogPage", () => {
       expect(api.getDatasourceSuggestions).toHaveBeenCalledWith(1),
     );
     expect(screen.queryByText(/建议绑定数据源/)).not.toBeInTheDocument();
+  });
+
+  it("切换编辑目标时在途建议不会串到另一个 KPI", async () => {
+    const user = userEvent.setup();
+    api.listKpis.mockResolvedValue([
+      { ...mockKpi, id: 1, kpiCode: "KPI_A" },
+      { ...mockKpi, id: 2, kpiCode: "KPI_B", datasourceId: null },
+    ]);
+    let resolveA: (rows: KpiDatasourceSuggestion[]) => void = () => {};
+    api.getDatasourceSuggestions.mockImplementation((id: number) => {
+      if (id === 1) {
+        return new Promise<KpiDatasourceSuggestion[]>((resolve) => {
+          resolveA = resolve;
+        });
+      }
+      return Promise.resolve([
+        {
+          datasourceId: 9,
+          name: "B_SUGGESTED",
+          score: 0.9,
+          reasons: ["legacy_name_exact" as const],
+        },
+      ]);
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("KPI_A")).toBeInTheDocument());
+
+    const editButtons = screen.getAllByRole("button", { name: /编\s?辑/ });
+    await user.click(editButtons[0]); // A：请求挂起
+    await user.click(editButtons[1]); // B：立即返回
+    expect(
+      await screen.findByText(/建议绑定数据源：B_SUGGESTED/),
+    ).toBeInTheDocument();
+
+    // A 的迟到的响应必须被丢弃
+    resolveA([
+      {
+        datasourceId: 8,
+        name: "A_SUGGESTED",
+        score: 0.9,
+        reasons: ["legacy_name_exact"],
+      },
+    ]);
+    await waitFor(() =>
+      expect(screen.queryByText(/A_SUGGESTED/)).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText(/建议绑定数据源：B_SUGGESTED/)).toBeInTheDocument();
   });
 
   it("点击删除并确认调用 deleteKpi", async () => {

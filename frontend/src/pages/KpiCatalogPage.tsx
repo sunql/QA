@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   Table,
   Button,
@@ -85,6 +85,8 @@ export default function KpiCatalogPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<KpiCatalog | null>(null);
   const [suggestions, setSuggestions] = useState<KpiDatasourceSuggestion[]>([]);
+  // 建议请求序号：切换编辑目标 / 新建时让在途响应作废，避免串到别的 KPI
+  const suggestionSeq = useRef(0);
   const [form] = Form.useForm<KpiFormValues>();
   const [filters, setFilters] = useState<FilterValues>({});
   const updateFilter = useCallback(
@@ -124,6 +126,7 @@ export default function KpiCatalogPage() {
   }, [load]);
 
   const openCreate = () => {
+    suggestionSeq.current += 1;
     setEditing(null);
     setSuggestions([]);
     void form.setFieldsValue(EMPTY_KPI_FORM);
@@ -150,11 +153,15 @@ export default function KpiCatalogPage() {
     });
     setModalOpen(true);
     // 建议是增强提示：失败不影响编辑流程，静默降级为空
+    const seq = ++suggestionSeq.current;
     void getDatasourceSuggestions(record.id)
-      .then((rows) =>
-        setSuggestions(rows.filter((s) => s.datasourceId !== record.datasourceId)),
-      )
-      .catch(() => setSuggestions([]));
+      .then((rows) => {
+        if (seq !== suggestionSeq.current) return;
+        setSuggestions(rows.filter((s) => s.datasourceId !== record.datasourceId));
+      })
+      .catch(() => {
+        if (seq === suggestionSeq.current) setSuggestions([]);
+      });
   };
 
   const handleDelete = async (id: number) => {

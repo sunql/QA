@@ -1,6 +1,6 @@
 ---
 created: 2026-09-01
-updated: 2026-09-01
+updated: 2026-10-18
 ---
 
 # Frontend
@@ -97,6 +97,21 @@ useEffect(() => {
 - **必须有用例断言请求头**（`expect(init.headers).toMatchObject({ Authorization: ..., "X-Tenant-Id": ... })`）：`wikiChat` 当初正是因为没有任何头断言，才把「完全没注入」的 403 带到线上。
 
 **遗留**：`api/chatHistory.ts` 仍发死值 `X-User-Id`；`datasource` / `localImport` 有重复拦截器；`RoutingMetricsPage` 不发鉴权头。
+
+## Chat 流式消息绑定的生命周期（fix-chat-assistant-message-id-lifecycle）
+
+**SSOT**：`src/stores/chatStore.ts` 的 `currentAssistantMessageId` —— 「当前在途 assistant 轮次」的唯一指针；`sendMessage` 内 `isCurrent()` 用**严格相等**决定每个 SSE 帧能否落库。
+
+- **指针生命周期 = 一轮流的生命周期**。`sendMessage` 创建 placeholder 时写入；`onDone` / `onError` 与 `finally` 经 `releaseAssistantMessageId()` 释放；`clearMessages` / `resetSession` / `clearForUserSwitch` / `setDatasourceId` / `enterChannel` / `loadSessionMessages` / `deleteSession` 也显式释放。
+- **所有 catch 与非流式成功分支必须先过 `isCurrent()`**：切会话后旧轮迟到的响应/失败不得改写新一轮的消息、`loading` 或指针（code-review 复现：旧 catch 无条件置 null 会抢走新一轮指针，后者全部帧被丢弃）。这些分支**不直接写指针**，释放统一由 `finally` 的条件释放完成。
+- **`releaseAssistantMessageId()` 必须条件比较**（`get() === assistantMessageId` 才置 null）：本轮晚到的 `finally` 若无条件清空，会抹掉下一轮刚写入的 id，下一轮所有帧随后被严格守卫丢弃 ⇒ 回复空白。`finally` 的 `loading`/`isStreaming` 复位同样要求指针仍属于本轮。
+- **不变量：指针被清 = 没有轮次拥有 `loading`**。所有清指针的入口必须一并 `loading: false`。孤儿轮次的收尾因指针不匹配不会复位 loading；若切换动作漏了这一步，流进行中切数据源/渠道会让输入框永久禁用（`sendMessage` 的 `if (loading) return` 静默早返）。
+- **`null` 不再表示「放行」**。旧实现 `id === null || id === assistantMessageId` 把「无在途轮次」当成合法消费者，导致会话切换清指针后，上一轮残留 token/done 仍 patch 到新会话最后一条消息。生产代码里 `sendMessageStream` 只有 `sendMessage` 一个调用点，无旁路消费者。
+- **误标 aborted**：`sendMessage` 开头按指针中止上一轮。指针不释放时，下一次发送会把**已完成**的回复标成 aborted；旧用例曾把这个 bug 断言为期望行为，现已改为回归用例（已完成轮不标 aborted；真在途轮仍标）。
+- **`sendDocQa` 也参与轮次所有权**（该子系统没有 `currentAssistantMessageId`，所有权判据是「自己创建的占位消息仍是当前渠道的最后一条」）：切渠道 / 载入历史 / 发下一条消息后，旧 doc-QA 流的 `token` / `citations` / `done` / `error` 与 catch 分支一律丢弃。否则晚到的帧会 `patchLastMessage` 到新气泡上，且 `done`/`error` 会把新一轮的 `loading` 关掉（typescript-reviewer 与 code-reviewer 联合复现的跨渠道串台）。
+- **`loadSessionMessages` 失败保留 messages**（与 `clearMessages` 不同），所以必须就地给被放弃的占位收尾（`isStreaming: false` + `aborted: true`）：指针已清 ⇒ 后续帧全被丢弃，留着 `isStreaming` 就是一个永远转圈、永不更新的气泡。
+- **测试断言不能写在 `mockImplementation` 里**：`sendMessageStream` 的 mock 与 SSE handler 同一调用栈，`AssertionError` 会被 `sendMessage` 的 catch 吞掉（当前指针已释放 ⇒ 连错误分支都不写），用例照样通过。要捕获状态到局部变量、出 mock 后再断言。
+- **测试锚点**：`src/tests/chatStore.assistantMessageId.test.ts`（19 例：3 条收尾路径 + 2 条 aborted 语义 + 8 个会话切换入口 + 晚到帧/交叠轮次/孤儿流回归）与 `src/tests/chatStore.docQaOwnership.test.ts`（2 例：doc-QA 切渠道后的 token/done 与失败隔离）。
 
 ## 研究型 Agent 入口（research）（feat-research-entry-ux-fixes）
 

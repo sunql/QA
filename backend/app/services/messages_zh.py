@@ -504,6 +504,12 @@ MSG_KPI_CATALOG_NOT_FOUND = "KPI Catalog id={id} 不存在"
 MSG_KPI_CATALOG_DUPLICATE_CODE = "KPI 编码「{code}」已存在"
 MSG_KPI_CATALOG_STATUS_NULL = "KPI status 不允许为 null（NOT NULL 约束）"
 
+# KPI Catalog datasource 绑定（F2 写入流收尾 — 2026-10-18 spec §4.4）
+MSG_KPI_DATASOURCE_REQUIRED = "KPI 必须绑定一个数据源（datasource_id 必填）"
+MSG_KPI_DATASOURCE_NOT_FOUND = "KPI 绑定的数据源 id={id} 不存在"
+MSG_KPI_DATASOURCE_INACTIVE = "KPI 绑定的数据源 id={id}（{name}）已停用"
+MSG_DATASOURCE_HAS_KPI_BINDINGS = "数据源 id={id} 被 {count} 个 KPI 引用，无法删除"
+
 
 # =============================================================================
 # AI Feature Layer（Phase 4.3）

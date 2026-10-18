@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
@@ -216,7 +217,18 @@ class DataSourceService:
             before=before_state,
         )
         await session.delete(ds)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            # 计数查询与删除之间的并发竞态：KPI 在窗口期内绑定了该源，
+            # FK RESTRICT 在 commit 时兜底。映射为 409 而不是 500（计数可能过期，
+            # 至少 1 个引用是确定的）。
+            await session.rollback()
+            raise ConflictError(
+                MSG_DATASOURCE_HAS_KPI_BINDINGS.format(
+                    id=datasourceId, count=max(ref_count, 1)
+                )
+            ) from exc
         await dispose_adapter(datasourceId)
         logger.info("删除数据源 id=%s", datasourceId)
 

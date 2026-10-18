@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
@@ -108,8 +109,15 @@ async def test_deleteDatasource_route_returns_409(
     error = body.get("error", "")
     assert "KPI" in error
     assert "1 个" in error
-    # DS 未被删除
-    assert await dbSession.get(DataSource, ds_id) is not None
+    # DS 未被删除（populate_existing：绕过本地 identity map 的缓存对象）
+    still = (
+        await dbSession.execute(
+            select(DataSource)
+            .where(DataSource.id == ds_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    assert still is not None
 
 
 @pytest.mark.asyncio

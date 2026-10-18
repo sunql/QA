@@ -103,6 +103,30 @@ def test_parse_csv_rejects_bad_header(tmp_path: Path) -> None:
         module.parseMappingCsv(path)
 
 
+def test_parse_csv_rejects_empty_cells(tmp_path: Path) -> None:
+    """空 kpi_code / 空 datasource 在解析阶段就报干净错误（不进 Pydantic 栈）。"""
+    module = _loadModule()
+    for body, match in (
+        ("kpi_code,datasource\n,DWS_A\n", "kpi_code 为空"),
+        ("kpi_code,datasource\nK1,\n", "datasource 为空"),
+    ):
+        path = tmp_path / "m.csv"
+        path.write_text(body, encoding="utf-8")
+        with pytest.raises(ValueError, match=match):
+            module.parseMappingCsv(path)
+
+
+@pytest.mark.asyncio
+async def test_run_backfill_rejects_over_row_limit(dbSession: AsyncSession) -> None:
+    module = _loadModule()
+    rows = [
+        module.MappingRow(idx, f"K{idx}", "1") for idx in range(2, 2 + 1001)
+    ]
+
+    with pytest.raises(ValueError, match="超过批量上限"):
+        await module.runBackfill(dbSession, rows, force=False)
+
+
 @pytest.mark.asyncio
 async def test_preview_is_read_only_and_includes_suggestion(
     dbSession: AsyncSession,

@@ -39,8 +39,20 @@ async def test_preflight_all_checks_pass_at_head(dbSession: AsyncSession) -> Non
         "bound_kpi_rows",
     ]
     assert all(r.passed for r in results), [r.detail for r in results if not r.passed]
-    assert results[0].detail.startswith("current=0132") or ">=0132" in results[0].detail
-    assert "'r'" in results[1].detail
+    assert results[0].detail.startswith("current=0132")
+    assert "confdeltype='r'" in results[1].detail
+
+
+def test_revision_compare_rejects_hash_and_old_revisions() -> None:
+    """反向守卫：hash revision（b1ea…）字符串上大于 '0132'，必须判为未达标。"""
+    preflight = _loadModule()
+    atLeast = preflight._revisionAtLeast
+    assert atLeast("0132", "0132") is True
+    assert atLeast("0133", "0132") is True
+    assert atLeast("0200", "0132") is True
+    assert atLeast("0131", "0132") is False
+    assert atLeast("b1ea6cb32588", "0132") is False
+    assert atLeast("", "0132") is False
 
 
 @pytest.mark.asyncio

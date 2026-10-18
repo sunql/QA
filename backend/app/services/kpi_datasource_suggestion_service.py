@@ -49,6 +49,18 @@ class DatasourceSuggestion:
     reasons: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class SuggestionContext:
+    """一次批量建议共享的只读快照（数据源 + schema_cache）。
+
+    ``schema_data`` 是完整 schema JSON（可能数 MB），逐 KPI 重新加载会放大
+    成 N 倍流量；预检脚本一次预览 N 个 KPI 时用同一份快照。
+    """
+
+    sources: tuple[DataSource, ...]
+    schemaRows: tuple[SchemaCache, ...]
+
+
 def _addHit(
     hits: dict[int, _Hit], ds: DataSource, score: float, reason: str
 ) -> None:
@@ -62,12 +74,23 @@ def _addHit(
 
 
 class KpiDatasourceSuggestionService:
+    async def buildContext(self, session: AsyncSession) -> SuggestionContext:
+        """加载一次批量建议可复用的只读快照。"""
+        sources = await self._activeSources(session)
+        schemaRows = (await session.execute(select(SchemaCache))).scalars().all()
+        return SuggestionContext(tuple(sources), tuple(schemaRows))
+
     async def suggest(
-        self, session: AsyncSession, kpiId: int
+        self,
+        session: AsyncSession,
+        kpiId: int,
+        *,
+        context: SuggestionContext | None = None,
     ) -> list[DatasourceSuggestion]:
         """返回该 KPI 的数据源绑定建议；未知 KPI 抛 NotFoundError。"""
         kpi = await KpiCatalogService().getKpi(session, kpiId)
-        sources = await self._activeSources(session)
+        ctx = context or await self.buildContext(session)
+        sources = ctx.sources
         if not sources:
             return []
 
@@ -81,7 +104,9 @@ class KpiDatasourceSuggestionService:
                 elif legacy in name or name in legacy:
                     _addHit(hits, ds, _SCORE_FUZZY, "legacy_name_fuzzy")
 
-        ontologyIds = await self._ontologyDatasourceIds(session, kpi.metric_id)
+        ontologyIds = await self._ontologyDatasourceIds(
+            session, kpi.metric_id, ctx.schemaRows
+        )
         for ds in sources:
             if ds.id in ontologyIds:
                 _addHit(hits, ds, _SCORE_ONTOLOGY, "ontology_table")
@@ -101,7 +126,9 @@ class KpiDatasourceSuggestionService:
 
     @staticmethod
     async def _ontologyDatasourceIds(
-        session: AsyncSession, metricId: int | None
+        session: AsyncSession,
+        metricId: int | None,
+        schemaRows: tuple[SchemaCache, ...],
     ) -> set[int]:
         """metric → class.source_table → schema_cache 中持有该表的数据源。"""
         if metricId is None:
@@ -110,14 +137,20 @@ class KpiDatasourceSuggestionService:
         if metric is None or metric.target_class_id is None:
             return set()
         ontologyClass = await session.get(OntologyClass, metric.target_class_id)
-        if ontologyClass is None or not (ontologyClass.source_table or "").strip():
+        if (
+            ontologyClass is None
+            or ontologyClass.valid_to is not None  # 软删除（墓碑）不再参与建议
+            or not (ontologyClass.source_table or "").strip()
+        ):
             return set()
         target = ontologyClass.source_table.strip().upper()
 
-        rows = (await session.execute(select(SchemaCache))).scalars().all()
         matched: set[int] = set()
-        for row in rows:
+        for row in schemaRows:
             for table in row.schema_data or []:
+                # schema_data 是无类型 JSONB，历史行里可能有非 dict 条目
+                if not isinstance(table, dict):
+                    continue
                 name = str(table.get("table_name", "")).strip().upper()
                 if name == target:
                     matched.add(row.datasource_id)

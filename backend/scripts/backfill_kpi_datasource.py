@@ -39,7 +39,10 @@ from app.domain.models import DataSource
 from app.domain.schemas import KpiDatasourceBulkBindItem
 from app.infrastructure.database import getSessionFactory
 from app.services.kpi_catalog_service import KpiCatalogService
-from app.services.kpi_datasource_binding_service import KpiDatasourceBindingService
+from app.services.kpi_datasource_binding_service import (
+    BULK_BIND_MAX_ROWS,
+    KpiDatasourceBindingService,
+)
 from app.services.kpi_datasource_suggestion_service import (
     KpiDatasourceSuggestionService,
 )
@@ -81,7 +84,12 @@ def parseMappingCsv(path: Path) -> list[MappingRow]:
                 continue
             if len(raw) < 2:
                 raise ValueError(f"第 {idx} 行缺少 datasource 列：{raw!r}")
-            rows.append(MappingRow(idx, raw[0].strip(), raw[1].strip()))
+            kpiCode, datasource = raw[0].strip(), raw[1].strip()
+            if not kpiCode:
+                raise ValueError(f"第 {idx} 行 kpi_code 为空")
+            if not datasource:
+                raise ValueError(f"第 {idx} 行 datasource 为空")
+            rows.append(MappingRow(idx, kpiCode, datasource))
     return rows
 
 
@@ -89,9 +97,10 @@ async def buildPreview(session: AsyncSession) -> list[PreviewRow]:
     """未绑定 KPI + 首条建议（只读）。"""
     catalog = KpiCatalogService()
     suggestions = KpiDatasourceSuggestionService()
+    context = await suggestions.buildContext(session)  # 全量 schema 只加载一次
     rows: list[PreviewRow] = []
     for kpi in await catalog.listKpis(session, unbound=True):
-        top = (await suggestions.suggest(session, kpi.id) or [None])[0]
+        top = (await suggestions.suggest(session, kpi.id, context=context) or [None])[0]
         rows.append(
             PreviewRow(
                 kpi_code=kpi.kpi_code,
@@ -147,6 +156,11 @@ async def runBackfill(
     session: AsyncSession, rows: list[MappingRow], *, force: bool
 ) -> tuple[list[Any], int, int, int]:
     """按 CSV 落库；返回 (逐行结果, bound, skipped, failed)。"""
+    if len(rows) > BULK_BIND_MAX_ROWS:
+        raise ValueError(
+            f"CSV 共 {len(rows)} 行，超过批量上限 {BULK_BIND_MAX_ROWS} 行；"
+            "请拆分为多个文件分批执行"
+        )
     resolved = await _resolveDatasources(session, rows)
     items: list[tuple[int, KpiDatasourceBulkBindItem]] = []
     results: list[Any] = []
@@ -227,10 +241,14 @@ async def main(argv: list[str] | None = None) -> int:
         if not args.apply:
             _printPreview(await buildPreview(session))
             return 0
-        rows = parseMappingCsv(args.mapping)
-        results, bound, skipped, failed = await runBackfill(
-            session, rows, force=args.force
-        )
+        try:
+            rows = parseMappingCsv(args.mapping)
+            results, bound, skipped, failed = await runBackfill(
+                session, rows, force=args.force
+            )
+        except ValueError as exc:  # CSV 结构问题：干净报错，不打 traceback
+            print(f"映射文件有误：{exc}", file=sys.stderr)
+            return 1
         _printResults(results, bound, skipped, failed)
         return 1 if failed else 0
 

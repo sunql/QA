@@ -51,6 +51,21 @@ recon 发现 #55 「只跑了 9 个新用例，整条存量链路没有回归」
 - **批量 admin API**：`POST /api/v1/kpi-catalog/bulk-bind-datasource`（`getAdminOnlyActor`，上限 1000 行，`?force=true`）。`KpiDatasourceBindingService.bulkBind` 逐行 commit、逐行交代 `bound / skipped / failed`；写路径复用 `updateKpi`（校验 + ACL + outbox/审计/history + 匹配缓存）。
 - **回填脚本** `scripts/backfill_kpi_datasource.py`：默认预览（未绑定 KPI + 建议，绝不写库）；`--mapping m.csv --apply` 落库（`datasource` 可填 ID 或名称）；`--force` 覆盖已绑其他源的行；幂等（二次执行全 skipped）；有 failed → exit 1。
 - 测试：bulk API 5 例（混合批次/force/幂等 skip/403/超限 422）；脚本 4 例（CSV 解析守卫/预览只读/名称+ID 解析/幂等）。
+- **安全审查加固**（`d7da6680`）：
+  - 请求体在 Pydantic 解析阶段即限制 1000 行（`Field(max_length=...)`），不再先解析超大 JSON；
+  - `bulkBind` 服务层显式断言 admin（**绕过路由直调也 fail-closed**），新增直调 service 的 403 用例；
+  - 回填数据源名称只接受**无歧义**解析（精确大小写优先，其次唯一的大小写不敏感匹配）；重名多源时该行 failed 并提示改用 ID，新增歧义用例；
+  - runbook 记录批量写端点的 stub 鉴权前提（`APP_ENV=production` + `AUTH_MODE=real` + `AUTH_STUB_ENABLED=0` + 不裸露 backend `8000` 端口）。
+
+## 2.6 代码审查整改（`review-fixes` 提交）
+
+- **消除假绿断言**：bulk skip 用例改用 `_reload(populate_existing)`；删除守卫用例跨 session 重读 DS；无信号用例先 seed 一个无关启用源（否则空源早退，删掉整个匹配器测试仍绿）；preflight 断言改为检查具体文案。
+- **补覆盖**：批量绑定**停用数据源** → failed；同源双信号 → reasons 合并；`schema_data` 畸形条目（非 dict）不 500；墓碑 class（`valid_to`）不参与建议。
+- **建议服务**：`SuggestionContext` 一次加载数据源 + schema_cache，回填预览 N 个 KPI 只扫一遍（此前逐 KPI 全量加载）。
+- **preflight 版本比较**：只认数字 revision（hash revision `b1ea6cb32588` 此前被字符串比较误判为 `>=0132`）；多 head 时逐行要求达标。
+- **回填脚本**：CSV 空 `kpi_code`/`datasource`、超过 1000 行 → 干净报错 + exit 1（不再抛 traceback）。
+- **删除竞态**：`datasourceService.delete` 的计数查询与 commit 之间若有 KPI 并发绑定，FK RESTRICT 抛 `IntegrityError` → 映射为 409 而非 500。
+- `bulkBind` docstring 澄清：只有三类领域错误逐行隔离，意外错误直接抛出（已提交行保留、重跑幂等）。
 
 ## 3. 用户已定决策
 
@@ -73,7 +88,8 @@ recon 发现 #55 「只跑了 9 个新用例，整条存量链路没有回归」
 - **legacy NULL 行仍需人工确认映射**：脚本只做建议与落库，不判断业务正确性；建议里 `legacy_name_fuzzy` 分值低（0.55），批量落库前应先抽样核对。
 - **ontology 反查依赖 `schema_cache`**：未 introspect 的数据源不会命中 `ontology_table` 信号（静默少一条建议，不报错）。
 - **部署顺序**：backend 必须先于 frontend（0132 + 必填契约）；上线前后跑 `preflight_kpi_fk.py`。
-- **测试环境**：全部集成测试跑真实 PG 5433 `qa_metadata_test_solo`。
+- **批量写入口的鉴权依赖部署配置**：stub 模式下 `X-User-Roles` 由客户端自填，任何人都能请求 admin 端点。代码侧已做路由 + service 双层 admin 断言，但最终安全边界是 `AUTH_MODE=real` + `AUTH_STUB_ENABLED=0` + 代理剥离 `X-User-*` + 不暴露 backend 端口（见 runbook）。
+- **测试环境**：全部集成测试跑真实 PG 上的**隔离测试库** `qa_metadata_test_solo`（5433 实例；与业务库 `qa_metadata` 同名不同库，勿混用）。
 
 ## 6. 相关
 

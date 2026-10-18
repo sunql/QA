@@ -9,7 +9,9 @@ ACL、outbox → audit_log / history、匹配缓存刷新全部复用单条更�
 - ``skipped``：已绑定同一数据源（零副作用，不产生 revision/审计噪声）
 - ``failed``：KPI 编码不存在 / 数据源不存在或停用 / 已绑其他数据源且
   ``force=False`` / ACL 拒绝
-- 单行失败不中断整批
+- 上述领域错误按行记录、不中断整批；**意外错误**（如 outbox/commit 失败）
+  直接抛出——已 commit 的行保留、session 交由调用方回滚，重跑时已绑定行变
+  ``skipped``（幂等），但该次响应不会包含逐行结果
 """
 
 from __future__ import annotations

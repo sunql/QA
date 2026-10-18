@@ -2,7 +2,7 @@
 
 在部署含 0132 迁移的 backend 之前/之后运行，确认库已进入 RESTRICT 语义：
 
-1. ``alembic_version`` >= ``0132``（4 位零填充，字符串比较即可）
+1. ``alembic_version`` >= ``0132``（只认数字版本号；hash revision 不参与比较）
 2. ``fk_kpi_catalog_datasource`` 存在且 ``confdeltype='r'``（ON DELETE RESTRICT）
 3. ``kpi_catalog.datasource_id IS NOT NULL`` 行数（信息项：非 0 只 WARN，不 FAIL）
 
@@ -31,6 +31,16 @@ _CONSTRAINT = "fk_kpi_catalog_datasource"
 _RESTRICT = "r"
 
 
+def _revisionAtLeast(revision: str, target: str) -> bool:
+    """版本号是否达到 target。
+
+    只认 4 位零填充的数字版本号：链上还存在 hash 命名的 revision
+    （如 ``b1ea6cb32588``），字符串比较 ``"b..." >= "0132"`` 会误判为 True。
+    hash 版本或空版本一律视为未达标（这类库本就不在 0132 之后）。
+    """
+    return revision.isdigit() and revision >= target
+
+
 @dataclass(frozen=True)
 class CheckResult:
     """单项检查结果（frozen，不可变）。"""
@@ -48,12 +58,14 @@ async def runChecks(session: Any) -> list[CheckResult]:
     version = (
         await session.execute(text("SELECT version_num FROM alembic_version"))
     ).scalars().all()
-    current = max(version) if version else ""
+    current = ",".join(sorted(version)) if version else "<empty>"
+    # 多 head 时每一行都必须达标；任一 hash/旧版本 → FAIL
     results.append(
         CheckResult(
             name="alembic_version",
-            passed=current >= _TARGET_REVISION,
-            detail=f"current={current or '<empty>'} required>={_TARGET_REVISION}",
+            passed=bool(version)
+            and all(_revisionAtLeast(v, _TARGET_REVISION) for v in version),
+            detail=f"current={current} required>={_TARGET_REVISION}",
         )
     )
 

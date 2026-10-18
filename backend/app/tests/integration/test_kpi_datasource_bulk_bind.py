@@ -163,7 +163,8 @@ async def test_same_binding_is_skipped_without_side_effects(
     body = resp.json()
     assert body["skipped"] == 1
     assert body["results"][0]["reason"] == "already_bound"
-    assert (await dbSession.get(KpiCatalog, kpi.id)).revision_count == 0
+    # populating_existing 重读：dbSession 的对象在 API 的另一 session commit 后已过期
+    assert (await _reload(dbSession, kpi.id)).revision_count == 0
 
 
 @pytest.mark.asyncio
@@ -176,6 +177,27 @@ async def test_non_admin_forbidden(
         headers=USER_HEADERS,
     )
     assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_inactive_datasource_row_fails(
+    client: AsyncClient, dbSession: AsyncSession,
+) -> None:
+    inactive = await _addSource(dbSession, "BULK_INACTIVE_DS")
+    inactive.is_active = False
+    await dbSession.commit()
+    kpi = await _addKpi(dbSession, "BULK_KPI_INACTIVE")
+
+    resp = await client.post(
+        _URL,
+        json=[{"kpiCode": "BULK_KPI_INACTIVE", "datasourceId": inactive.id}],
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["failed"] == 1
+    assert body["results"][0]["status"] == "failed"
+    assert (await _reload(dbSession, kpi.id)).datasource_id is None
 
 
 @pytest.mark.asyncio

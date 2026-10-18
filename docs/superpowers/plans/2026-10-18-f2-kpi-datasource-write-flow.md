@@ -439,16 +439,25 @@ Expected: 2 FAIL — I4 可能 PASS（因旧实现就直接 delete 没校验）�
 
 ```python
 # F2 §4.3: 删前查 KPI 引用计数，>0 抛 409
+# 注意：delete 方法的参数名是 datasourceId（不是 id，会 shadow builtin）
 from sqlalchemy import func, select
+from app.domain.exceptions import ConflictError
 from app.domain.models import KpiCatalog
-ref_count = await session.execute(
-    select(func.count()).select_from(KpiCatalog).where(KpiCatalog.datasource_id == id)
-)
-if ref_count.scalar_one() > 0:
-    from app.domain.exceptions import ConflictError
-    from app.services.messages_zh import MSG_DATASOURCE_HAS_KPI_BINDINGS
-    raise ConflictError(MSG_DATASOURCE_HAS_KPI_BINDINGS.format(id=id, count=ref_count.scalar_one()))
+from app.services.messages_zh import MSG_DATASOURCE_HAS_KPI_BINDINGS
+ref_count_scalar = (
+    await session.execute(
+        select(func.count()).select_from(KpiCatalog).where(
+            KpiCatalog.datasource_id == datasourceId
+        )
+    )
+).scalar_one()
+if ref_count_scalar > 0:
+    raise ConflictError(
+        MSG_DATASOURCE_HAS_KPI_BINDINGS.format(id=datasourceId, count=ref_count_scalar)
+    )
 ```
+
+> 把 imports 提到文件顶部（与已有 import 区合并），别内联在方法内。scalar_one() 调用 1 次存到变量。
 
 - [ ] **Step 4: 跑测试确认 PASS**
 

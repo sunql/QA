@@ -7,8 +7,11 @@ import type {
 
 const BASE = "/kpi-catalog";
 
-export async function listKpis(): Promise<KpiCatalog[]> {
-  const res = await httpClient.get<KpiCatalog[]>(BASE);
+export async function listKpis(unbound = false): Promise<KpiCatalog[]> {
+  const res = await httpClient.get<KpiCatalog[]>(
+    BASE,
+    unbound ? { params: { unbound: true } } : undefined,
+  );
   return res.data;
 }
 

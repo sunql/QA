@@ -37,11 +37,13 @@ _history_service = HistoryService()
 
 @router.get("", response_model=list[KpiCatalogRead], status_code=status.HTTP_200_OK)
 async def listKpis(
+    unbound: bool = Query(False, description="只返回未绑定数据源的 KPI"),
     _user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> list[KpiCatalogRead]:
-    """列出所有 KPI（按 kpi_code 升序）。"""
-    return [KpiCatalogRead.model_validate(e) for e in await _service.listKpis(db)]
+    """列出所有 KPI（按 kpi_code 升序）；``unbound=true`` 只返回未绑定行。"""
+    rows = await _service.listKpis(db, unbound=unbound)
+    return [KpiCatalogRead.model_validate(e) for e in rows]
 
 
 # NOTE: /search 必须在 /{id} 之前注册（FastAPI 路由按顺序匹配）

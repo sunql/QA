@@ -1,6 +1,6 @@
 import { httpClient } from "./client";
 import { API_BASE_URL } from "../config";
-import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery, StepPlanOverviewItem, StepPlanView, StepResultView, StreamChartData, StreamDataQualityPayload, StreamSummary, TablePayload, VisualRationale } from "../types/chat";
+import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery, TablePayload, VisualRationale } from "../types/chat";
 import { i18n } from "../i18n";
 import { authHeaders } from "./authHeaders";
 import { asChartOption, asTablePayload, asVisualRationale, normalizeChartType } from "../utils/chartContract";

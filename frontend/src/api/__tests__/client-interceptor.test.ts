@@ -7,7 +7,7 @@
  * - 200 / other 4xx -> no side effects
  */
 
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Pure function mirroring the actual interceptor logic from client.ts
@@ -42,7 +42,6 @@ describe("client.ts response interceptor 401 vs 403", () => {
     let href = "";
     Object.defineProperty(window, "location", {
       value: {
-        href,
         set href(val: string) { href = val; },
         get href() { return href; },
       },

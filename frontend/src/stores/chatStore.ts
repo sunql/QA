@@ -500,6 +500,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       ...(sameChannel ? {} : { messages: [], sessions: [] }),
       sessionsError: null,
       error: null,
+      // 换渠道/回到空会话：上一条渠道的在途流作废（晚到帧不得落到新屏幕）。
+      // 指针被清 = 没有轮次拥有 loading，必须一并复位，否则孤儿流的 finally
+      // 因指针不匹配而跳过复位，输入框永久禁用。
+      currentAssistantMessageId: null,
+      loading: false,
     });
 
     if (pointer === null) return; // 没有可恢复的目标
@@ -524,6 +529,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       datasourceId: id,
       ...(hasConversation ? { sessionId: generateSessionId() } : {}),
       messages: [],
+      // 换数据源 = 新会话：上一轮的流若还在，它的帧不得再落进新会话。
+      // 指针被清 = 没有轮次拥有 loading，必须一并复位（孤儿流的 finally 会跳过复位）。
+      currentAssistantMessageId: null,
+      loading: false,
     });
   },
 
@@ -605,11 +614,17 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     };
 
     // P1-3：closure 守卫 —— 所有 12 handler 头加。
-    // currentAssistantMessageId 为 null 时（即 sendMessageStream 被直接调用，非 chatStore.sendMessage），
-    // 不拦截任何事件（让 chatApi.test.ts 的直接 SSE 测试能正常收到帧）。
-    const isCurrent = () => {
-      const id = get().currentAssistantMessageId;
-      return id === null || id === assistantMessageId;
+    // 只认本轮的 id：指针被清（本轮结束）或换成下一轮后，晚到的帧一律丢弃。
+    // 旧实现把 null 当「放行」，导致会话切换清指针后，上一轮残留的 token/done 仍会
+    // patch 到新会话的最后一条消息上。
+    const isCurrent = () => get().currentAssistantMessageId === assistantMessageId;
+
+    // 只释放本轮的指针：本轮 finally 可能晚于下一轮的 set 执行，无条件置 null 会
+    // 把下一轮的 id 清掉（下一轮的全部帧随后被 isCurrent 丢弃）。
+    const releaseAssistantMessageId = () => {
+      if (get().currentAssistantMessageId === assistantMessageId) {
+        set({ currentAssistantMessageId: null });
+      }
     };
 
     try {
@@ -760,6 +775,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               ),
               loading: false,
             }));
+            releaseAssistantMessageId();
             void attachHypotheses();
           },
           onError: (message, detail) => {
@@ -774,12 +790,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               loading: false,
               error: message,
             }));
+            releaseAssistantMessageId();
           },
         });
       } else {
-        // 非流式分支（不改；也要 reset currentAssistantMessageId）
+        // 非流式分支：响应是异步的，回来时本轮可能已被切会话/清空取代
         try {
           const response = await sendChatMessage(payload);
+          // 轮次已被取代：迟到的响应不得写入新会话的消息，也不得释放新一轮的指针
+          if (!isCurrent()) return;
           set((state) => ({
             messages: patchLastMessage(state.messages, {
               content: response.answer,
@@ -823,30 +842,30 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               ),
             }),
             loading: false,
-            currentAssistantMessageId: null,
           }));
           void attachHypotheses();
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : i18n.t("errors.networkError");
           const errDetail = (err as { detail?: string }).detail ?? null;
-          set((state) => {
-            const last = state.messages[state.messages.length - 1];
-            // 已通过 error 事件展示具体错误时，不覆盖为通用错误文案（LOW#8 修复）
-            if (last?.isError) {
-              return { loading: false };
-            }
-            return {
-              messages: patchLastMessage(state.messages, {
-                content: errMsg,
-                errorDetail: errDetail,
-                isError: true,
-                isStreaming: false,
-              }),
-              loading: false,
-              currentAssistantMessageId: null,
-              error: errMsg,
-            };
-          });
+          if (isCurrent()) {
+            set((state) => {
+              const last = state.messages[state.messages.length - 1];
+              // 已通过 error 事件展示具体错误时，不覆盖为通用错误文案（LOW#8 修复）
+              if (last?.isError) {
+                return { loading: false };
+              }
+              return {
+                messages: patchLastMessage(state.messages, {
+                  content: errMsg,
+                  errorDetail: errDetail,
+                  isError: true,
+                  isStreaming: false,
+                }),
+                loading: false,
+                error: errMsg,
+              };
+            });
+          }
           throw err;
         }
       }
@@ -854,39 +873,45 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       const errMsg = err instanceof Error ? err.message : i18n.t("errors.networkError");
       const errDetail = (err as { detail?: string }).detail ?? null;
       const isInterrupted = err instanceof Error && err.message.includes(STREAM_INTERRUPTED_DETECTION);
-      set((state) => {
-        const last = state.messages[state.messages.length - 1];
-        // 已通过 error 事件展示具体错误时，不覆盖为通用错误文案（LOW#8 修复）
-        if (last?.isError) {
-          return { loading: false, interrupted: isInterrupted };
-        }
-        return {
-          messages: patchLastMessage(state.messages, {
-            content: errMsg,
-            errorDetail: errDetail,
-            isError: true,
-            isStreaming: false,
-            ...(isInterrupted ? { interrupted: true } : {}),
-          }),
-          loading: false,
-          error: errMsg,
-          interrupted: isInterrupted,
-        };
-      });
+      // 轮次已被取代（切会话/清空后用户已开新一轮）：迟到的失败不得改写新一轮的消息、
+      // loading 或指针。指针释放统一交给 finally 的条件释放。
+      if (isCurrent()) {
+        set((state) => {
+          const last = state.messages[state.messages.length - 1];
+          // 已通过 error 事件展示具体错误时，不覆盖为通用错误文案（LOW#8 修复）
+          if (last?.isError) {
+            return { loading: false, interrupted: isInterrupted };
+          }
+          return {
+            messages: patchLastMessage(state.messages, {
+              content: errMsg,
+              errorDetail: errDetail,
+              isError: true,
+              isStreaming: false,
+              ...(isInterrupted ? { interrupted: true } : {}),
+            }),
+            loading: false,
+            error: errMsg,
+            interrupted: isInterrupted,
+          };
+        });
+      }
       // P1-3：EOF 守门（stream interrupted: no done/error before EOF）需要抛出，
       // 其他错误由 inner catch 已处理，吞掉不向上传播。
       if (isInterrupted) throw err;
     } finally {
       // P1-3：loading 重置（正常/异常都需重置，避免按钮永久禁用）。
-      // currentAssistantMessageId 的清理由 onDone/onError handler 负责（正常流），
-      // finally 这里不再重复清（避免在 mock 测试中覆盖 handler 已设置的 null）。
       // 若 loading 仍为 true（未收到 done/error），强制复位 isStreaming（HIGH#3 兜底）。
-      if (get().loading) {
+      // 只在指针仍属于本轮时复位：迟到的 finally 不得关掉下一轮的 loading/流式状态。
+      if (get().currentAssistantMessageId === assistantMessageId && get().loading) {
         set((state) => ({
           loading: false,
           messages: patchLastMessage(state.messages, { isStreaming: false }),
         }));
       }
+      // 所有收尾路径（done / error / 异常 / 无终端帧）都释放本轮指针；
+      // 条件比较保证不会清掉下一轮已经写入的 id。
+      releaseAssistantMessageId();
     }
   },
 
@@ -939,7 +964,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   clearMessages: () => {
     invalidatePendingLoads();
-    set({ messages: [], error: null });
+    // 清空即作废在途轮次：指针与 loading 一起复位（见 enterChannel 的说明）
+    set({ messages: [], error: null, currentAssistantMessageId: null, loading: false });
   },
 
   resetSession: () => {
@@ -954,6 +980,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       sessionId: makeSessionId(channel),
       loading: false,
       error: null,
+      currentAssistantMessageId: null,
     });
   },
 
@@ -969,6 +996,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       error: null,
       sessions: [],
       sessionsError: null,
+      currentAssistantMessageId: null,
     });
   },
 
@@ -998,6 +1026,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       error: null,
     }));
 
+    // doc_qa 没有 currentAssistantMessageId（那是 chat 轮次的指针），所有权以
+    // 「自己创建的占位消息仍是当前渠道的最后一条」为准。切渠道 / 载入历史 /
+    // 发下一条消息之后，旧流的 token/done/error 一律丢弃 —— 否则晚到的帧
+    // 会 patch 到别的消息上，done/error 还会把新一轮的 loading 关掉。
+    const placeholderId = placeholderMsg.id;
+    const stillOwned = () => {
+      const { channel: currentChannel, messages } = get();
+      return currentChannel === "doc_qa" && messages[messages.length - 1]?.id === placeholderId;
+    };
+
     try {
       await searchDocumentsQa(
         {
@@ -1008,6 +1046,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           documentType: filters.documentType,
         },
         (event) => {
+          if (!stillOwned()) return;
           switch (event.kind) {
             case "meta":
               break;
@@ -1052,6 +1091,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         },
       );
     } catch (err) {
+      // 被取代的轮次不得把错误写进新气泡，也不得抢走新一轮的 loading
+      if (!stillOwned()) return;
       const errMsg = err instanceof Error ? err.message : i18n.t("errors.networkError");
       set((state) => ({
         messages: patchLastMessage(state.messages, {
@@ -1097,6 +1138,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         loading: false,
         error: null,
         sessionsError: null,
+        // 载入的是另一条会话：上一轮的流即便还在，也不得 patch 这批消息
+        currentAssistantMessageId: null,
       });
       return "loaded";
     } catch (err) {
@@ -1107,7 +1150,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       // 清掉指向这个载不动的会话的指针：留着它，每次刷新都会重放同一个失败，
       // 而失败只在历史面板展开时可见（收起面板时完全静默）—— 表现为「刷新后永远空白」。
       if (readLastSessionId(channel) === sessionId) writeLastSessionId(channel, null);
-      set({ sessionsError: msg });
+      // 这一分支保留 messages（不像 clearMessages 那样清空），所以被放弃的在途
+      // 轮次的占位必须就地收尾：指针已清 ⇒ 它后续的帧全被丢弃，留着
+      // isStreaming=true 就是一个永远转圈、永远不会更新的气泡。
+      const settled = get().messages.map((m) =>
+        m.isStreaming ? { ...m, isStreaming: false, aborted: true } : m
+      );
+      // 指针被清 = 没有轮次拥有 loading；不回 false 会让输入框卡死
+      set({ sessionsError: msg, messages: settled, currentAssistantMessageId: null, loading: false });
       return "failed";
     }
   },
@@ -1133,6 +1183,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       messages: [],
       loading: false,
       error: null,
+      currentAssistantMessageId: null,
     });
   },
 

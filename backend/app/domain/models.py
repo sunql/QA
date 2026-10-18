@@ -385,7 +385,11 @@ class KpiCatalog(Base, TimestampMixin):
     unit: Mapped[str | None] = mapped_column(String(50), nullable=True)
     data_source: Mapped[str | None] = mapped_column(Text, nullable=True)
     datasource_id: Mapped[int | None] = mapped_column(
-        BigIntFk, ForeignKey("data_source.id", ondelete="SET NULL"), nullable=True
+        # 0132（F2 §4.5）：SET NULL → RESTRICT，与 migration 保持一致。
+        # 删数据源前须先解绑 KPI（服务层 409 守卫 + DB 约束双保险）。
+        BigIntFk,
+        ForeignKey("data_source.id", ondelete="RESTRICT"),
+        nullable=True,
     )
     owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
     version: Mapped[str] = mapped_column(

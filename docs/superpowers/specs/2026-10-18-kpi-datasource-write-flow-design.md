@@ -137,9 +137,9 @@ MSG_KPI_DATASOURCE_INACTIVE = "KPI 绑定的数据源 id={id}（{name}）已停�
 MSG_DATASOURCE_HAS_KPI_BINDINGS = "数据源 id={id} 被 {count} 个 KPI 引用，无法删除"
 ```
 
-### 4.5 FK 行为变更（migration 0126）
+### 4.5 FK 行为变更（migration 0132）
 
-新 migration `0126_kpi_catalog_datasource_fk_restrict.py`：
+新 migration `0132_kpi_catalog_datasource_fk_restrict.py`：
 
 ```python
 def upgrade() -> None:
@@ -204,7 +204,9 @@ Legacy rows: kpi_catalog.datasource_id IS NULL（migration 0125 之前的历史�
 |---|---|---|
 | I1 | `createKpi` datasource_id=不存在 | 422 + `MSG_KPI_DATASOURCE_NOT_FOUND` |
 | I2 | `createKpi` datasource_id=is_active=false | 422 + `MSG_KPI_DATASOURCE_INACTIVE` |
-| I3 | `updateKpi` datasource_id=None 跳过校验 | 通过 + 列保持原值 |
+| I3 | `updateKpi` datasource_id=None 跳过校验 | 通过 + 列解绑到 None (per §4.1) |
+
+> 2026-10-18 实施注：实际验证 9 用例 PASS = 3 DTO + 1 happy-path lock-test + 2 updateKpi/createKpi invalid + 2 DS delete 边界。happy-path lock-test (`createKpi` 持久化 `datasource_id` 到列 + DB 二次读落库) 是 §4.2 隐含必验项，防 subagent 漏写 entity 字段。
 
 ### 5.3 datasource_service.delete 校验（integration / 真 PG 5434，2 用例）
 
@@ -250,7 +252,7 @@ KpiCatalog 测试 fixture 全量加 `datasource_id=seed_data_source.id`。
 **本 spec 不写实施计划**。当 §6 触发条件满足时，新建独立 plan（per `superpowers:writing-plans` skill 流程）：
 - Task 1：DTO 改造（U1-U3）
 - Task 2：service 校验（I1-I3）
-- Task 3：FK 改 RESTRICT migration 0126
+- Task 3：FK 改 RESTRICT migration 0132
 - Task 4：datasource_service.delete 校验（I4-I5）
 - Task 5：fixture + 既有测试兼容
 - Task 6：5 reviewer gate + 实跑 8 用例
@@ -266,7 +268,7 @@ KpiCatalog 测试 fixture 全量加 `datasource_id=seed_data_source.id`。
 **理由**：纯 A 方案（仅强填，FK 保留 SET NULL）下，运营误删一个被 KPI 用的 DS → KPI 失联但无迹象 → 后续 KpiCatalogUpdate 不报 FK 错（因为已 NULL）。D 方案在删 DS 时就拒。
 
 **风险**：改 FK 行为（SET NULL → RESTRICT）属 schema 行为变更。需：
-- 单独 migration 0126（不进原 0125）便于追溯
+- 单独 migration 0132（不进原 0125）便于追溯
 - 部署顺序：先合 backend migration，再启用 service 校验（CI 时机）
 - rollback plan：downgrade 回 SET NULL + service 校验也可单独回滚
 
@@ -280,7 +282,9 @@ KpiCatalog 测试 fixture 全量加 `datasource_id=seed_data_source.id`。
 
 ### 8.3 既有测试 fixture 改动面
 
-per `grep -rn "KpiCatalog(" backend/app/tests/` 实测至少 8 个测试文件需补 `datasource_id=<some DS>`。属 TDD 配套改动，**不属回归**。
+per `grep -rn "KpiCatalog(" backend/app/tests/` 实测 15 个测试文件 15 处 `KpiCatalog(...)` 构造点 + `backend/scripts/seed_kpi_catalog.py` 1 处 = **16 处 / 16 文件** 需补 `datasource_id=<some DS>`。属 TDD 配套改动，**不属回归**。
+
+> 2026-10-18 实施注：实测 31 处影响面 = 16 文件 (上) + 15 旧 fixture 文件因 `seed_data_source` 新 fixture 化引起的间接 fixture chain 刷新。Task 6 commit `3e195b35` 完成。
 
 ### 8.4 chat 警告实际生效条件
 

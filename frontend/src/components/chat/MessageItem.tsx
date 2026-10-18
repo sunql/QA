@@ -26,7 +26,26 @@ const KPI_WARNING_I18N_KEYS = Object.freeze({
   KPI_DATASOURCE_MISMATCH: "multiStep.KPI_DATASOURCE_MISMATCH",
 } as const);
 
-const { Paragraph } = Typography;
+// P2-1：errorType → 差异化提示（白名单制）。只列「用户能采取动作」的类别；
+// domain / llm / internal 的正文已面向用户，不再追加。未知值一律不渲染。
+const ERROR_TYPE_HINT_KEYS = Object.freeze({
+  permission: "messageItem.errorHints.permission",
+  provider_transient: "messageItem.errorHints.providerTransient",
+  provider_protocol: "messageItem.errorHints.providerProtocol",
+  query_timeout: "messageItem.errorHints.queryTimeout",
+  db_connectivity: "messageItem.errorHints.dbConnectivity",
+  sql_syntax: "messageItem.errorHints.sqlSyntax",
+  schema_reference: "messageItem.errorHints.schemaReference",
+} as const);
+
+function errorTypeHintKey(errorType: string | null | undefined): string | null {
+  if (!errorType) return null;
+  return (
+    ERROR_TYPE_HINT_KEYS[errorType as keyof typeof ERROR_TYPE_HINT_KEYS] ?? null
+  );
+}
+
+const { Paragraph, Text } = Typography;
 
 interface MessageItemProps {
   message: ChatMessage;
@@ -76,6 +95,15 @@ function MessageItem({
         {message.isError ? (
           <>
             <Alert type="error" showIcon message={message.content} />
+            {/* P2-1：细分错误类型给出可操作的下一步；白名单外的类型不渲染。 */}
+            {(() => {
+              const hintKey = errorTypeHintKey(message.errorType);
+              return hintKey ? (
+                <div style={{ marginTop: 8 }}>
+                  <Text type="secondary">{t(hintKey)}</Text>
+                </div>
+              ) : null;
+            })()}
             {message.errorDetail ? (
               <div style={{ marginTop: 8 }}>
                 <Collapse

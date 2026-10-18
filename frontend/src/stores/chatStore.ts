@@ -442,11 +442,12 @@ function streamHandlers(
         ),
         loading: false,
       })),
-    onError: (message, detail) =>
+    onError: (message, detail, errorType) =>
       set((state) => ({
         messages: patchMessage(state.messages, targetId, {
           content: message,
           errorDetail: detail ?? null,
+          errorType: errorType ?? null,
           isError: true,
           isStreaming: false,
         }),
@@ -762,12 +763,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             }));
             void attachHypotheses();
           },
-          onError: (message, detail) => {
+          onError: (message, detail, errorType) => {
             if (!isCurrent()) return;
             set((state) => ({
               messages: patchLastMessage(state.messages, {
                 content: message,
                 errorDetail: detail ?? null,
+                errorType: errorType ?? null,
                 isError: true,
                 isStreaming: false,
               }),

@@ -196,10 +196,10 @@ describe("api/chat", () => {
     expect(JSON.parse(init.body)).toEqual(payload);
   });
 
-  it("sendMessageStream error 事件调用 onError（含 detail）", async () => {
+  it("sendMessageStream error 事件调用 onError（含 detail + errorType）", async () => {
     const stream = sseStream(
       'event: meta\ndata: {"intent":"query"}\n\n',
-      'event: error\ndata: {"error":"数据源 99999 不存在","detail":"类 PRECEIPTD 不存在；属性 收货数量 不存在"}\n\n'
+      'event: error\ndata: {"error":"数据源 99999 不存在","detail":"类 PRECEIPTD 不存在；属性 收货数量 不存在","errorType":"schema_reference"}\n\n'
     );
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
 
@@ -207,11 +207,12 @@ describe("api/chat", () => {
     await sendMessageStream(makePayload(), { onError });
     expect(onError).toHaveBeenCalledWith(
       "数据源 99999 不存在",
-      "类 PRECEIPTD 不存在；属性 收货数量 不存在"
+      "类 PRECEIPTD 不存在；属性 收货数量 不存在",
+      "schema_reference"
     );
   });
 
-  it("sendMessageStream error 事件无 detail 时第二参为 undefined", async () => {
+  it("sendMessageStream error 事件无 detail/errorType 时后两参为 undefined", async () => {
     const stream = sseStream(
       'event: meta\ndata: {"intent":"query"}\n\n',
       'event: error\ndata: {"error":"数据源 99999 不存在"}\n\n'
@@ -220,7 +221,7 @@ describe("api/chat", () => {
 
     const onError = vi.fn();
     await sendMessageStream(makePayload(), { onError });
-    expect(onError).toHaveBeenCalledWith("数据源 99999 不存在", undefined);
+    expect(onError).toHaveBeenCalledWith("数据源 99999 不存在", undefined, undefined);
   });
 
   it("sendMessageStream HTTP 非 200 时抛出错误", async () => {

@@ -1,6 +1,6 @@
 # kpi_catalog.datasource_id 接入写入流 — Spec SSOT（2026-10-18）
 
-> **状态**：✅ IMPL-COMPLETE（2026-10-18 预防性实施, 9/9 PASS, PR #TBD Task 8 push 后回填）
+> **状态**：✅ IMPL-COMPLETE（2026-10-18 预防性实施, 9/9 PASS, [**PR #55**](https://github.com/sunql/QA/pull/55)）
 > **Spec 路径**：[`docs/superpowers/specs/2026-10-18-kpi-datasource-write-flow-design.md`](../../docs/superpowers/specs/2026-10-18-kpi-datasource-write-flow-design.md)
 > **Plan 路径**：[`docs/superpowers/plans/2026-10-18-f2-kpi-datasource-write-flow.md`](../../docs/superpowers/plans/2026-10-18-f2-kpi-datasource-write-flow.md)
 > **继承**：[F2 AIChat 生产缺陷 phase01 §1.2 (1.2a `ba3303e` + 1.2b `188cf84` + 1.2c `7b0544c`) 已 merged PR #18](https://github.com/sunql/QA/pull/18) main `aef0124e`
@@ -80,7 +80,7 @@ SELECT count(*) FROM kpi_catalog WHERE datasource_id IS NOT NULL;
 - P2 SSOT（**本项不属**）：[`Harness/changes/aichat-p2-followups-2026-10-16/remaining-work-ssot.md`](../../Harness/changes/aichat-p2-followups-2026-10-16/remaining-work-ssot.md)
 - 主 main HEAD：`aef0124e`
 - 实施 plan：[`docs/superpowers/plans/2026-10-18-f2-kpi-datasource-write-flow.md`](../../docs/superpowers/plans/2026-10-18-f2-kpi-datasource-write-flow.md)（8 task, 11 commit clean）
-- 实施 PR：#TBD（Task 8 push 后回填）
+- 实施 PR：[**#55**](https://github.com/sunql/QA/pull/55)（2026-10-18 推送, 13 commits clean, code-reviewer 终审 READY TO MERGE）
 
 ## 6. 变更日志
 

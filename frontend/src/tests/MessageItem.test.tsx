@@ -161,6 +161,16 @@ describe("MessageItem 消息渲染", () => {
     expect(screen.queryByText(/messageItem\.errorHints\./)).toBeNull();
   });
 
+  it("原型链键名（constructor）不命中白名单、不崩溃", () => {
+    renderItem({
+      content: "服务不可用",
+      isError: true,
+      errorType: "constructor",
+    });
+    expect(screen.getByText("服务不可用")).toBeInTheDocument();
+    expect(screen.queryByText(/messageItem\.errorHints\./)).toBeNull();
+  });
+
   it("错误消息展示「添加到术语词典」入口", () => {
     renderItem({ content: "无法生成查询计划", isError: true });
     expect(screen.getByRole("button", { name: "添加到术语词典" })).toBeInTheDocument();

@@ -55,15 +55,15 @@ P2-1 让后端 `error` SSE 事件携带细粒度 `errorType`（`permission` / `p
 - `frontend/src/api/chat.ts`：`error` 分支透传 `d.errorType`（仅 string）。
 - `frontend/src/stores/chatStore.ts`：两处 `onError`（首发 / 续跑）把 `errorType` 写入消息；网络异常兜底路径不伪造类型。
 - `frontend/src/types/chat.ts`：`ChatMessage.errorType` + 注释说明渲染前必须过白名单。
-- `frontend/src/components/chat/MessageItem.tsx`：`ERROR_TYPE_HINT_KEYS` + `errorTypeHintKey()`；错误 Alert 下方渲染 `Text type="secondary"` 提示。
+- `frontend/src/components/chat/MessageItem.tsx`：`ERROR_TYPE_HINT_KEYS` + `errorTypeHintKey()`；错误 Alert 下方渲染 `Text type="secondary"` 提示。查表用 `Object.prototype.hasOwnProperty.call` 而非下标 + `??` —— `"constructor"` / `"toString"` 等原型链键名会绕过白名单并把函数传进 `t()`（无 ErrorBoundary，整块消息子树白屏）。
 - `frontend/src/i18n/{zh-CN,en-US}.ts`：`messageItem.errorHints.*` 7 条中英文案。
 
 ## 6. 测试
 
 - `frontend/src/tests/chatApi.test.ts`：error 帧带 `errorType` ⇒ 第三参透传；缺失 ⇒ 三参 `(msg, undefined, undefined)`。
 - `frontend/src/tests/chatStore.test.ts`：错误消息回填 `errorType=db_connectivity`。
-- `frontend/src/tests/MessageItem.test.tsx`：已知 `query_timeout` ⇒ 真实提示文案 + 反向断言无裸 key；未知 `some_future_type` ⇒ 无提示且不泄露枚举。
-- 结果：3 个文件 **126 passed**；`npx tsc --noEmit` 通过。
+- `frontend/src/tests/MessageItem.test.tsx`：已知 `query_timeout` ⇒ 真实提示文案 + 反向断言无裸 key；未知 `some_future_type` ⇒ 无提示且不泄露枚举；原型链键 `constructor` ⇒ 不命中、不崩溃。
+- 结果：3 个文件 **127 passed**；`npx tsc --noEmit` 通过。
 
 ## 7. 安全审查
 

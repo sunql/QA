@@ -40,9 +40,11 @@ const ERROR_TYPE_HINT_KEYS = Object.freeze({
 
 function errorTypeHintKey(errorType: string | null | undefined): string | null {
   if (!errorType) return null;
-  return (
-    ERROR_TYPE_HINT_KEYS[errorType as keyof typeof ERROR_TYPE_HINT_KEYS] ?? null
-  );
+  // 必须用 hasOwnProperty 而非下标 + ??：errorType 是系统边界字符串，
+  // "constructor"/"toString"/"__proto__" 会命中原型链上的继承值，绕过白名单。
+  return Object.prototype.hasOwnProperty.call(ERROR_TYPE_HINT_KEYS, errorType)
+    ? ERROR_TYPE_HINT_KEYS[errorType as keyof typeof ERROR_TYPE_HINT_KEYS]
+    : null;
 }
 
 const { Paragraph, Text } = Typography;

@@ -12,7 +12,7 @@ import pytest
 
 from app.domain.enums import DataSourceType
 from app.domain.query_plan import QueryPlan
-from app.services.nl2sql_refine import rewriteOrderBy, rewriteTopLimit
+from app.services.nl2sql_refine import rewriteTopLimit
 from app.services.nl2sql_service import Nl2SqlService
 
 
@@ -99,6 +99,24 @@ class TestOrderByDialect:
         out = _direct(sql, _plan("NAME"), "按 NAME 升序", DataSourceType.MYSQL)
         assert out is not None
         assert out.endswith("ORDER BY NAME ASC LIMIT 10")
+
+
+class TestCombinedRewrites:
+    """行数 + 排序/筛选叠加：行数无法改写时必须整体放弃，不能吞掉用户要求。"""
+
+    def test_sort_plus_unsatisfiable_limit_falls_back(self) -> None:
+        sql = "SELECT NAME, QTY FROM ZJTH.T"  # 无既有行数子句
+        assert _direct(sql, _plan("NAME", "QTY"), "按 QTY 降序，只看前 3 条") is None
+
+    def test_filter_plus_unsatisfiable_limit_falls_back(self) -> None:
+        sql = "SELECT NAME FROM ZJTH.T WHERE QTY > 1"
+        assert _direct(sql, _plan("NAME"), "只看前 3 条，NAME 为 A 的") is None
+
+    def test_sort_plus_satisfiable_limit_applies_both(self) -> None:
+        sql = "SELECT NAME FROM ZJTH.T LIMIT 10"
+        out = _direct(sql, _plan("NAME"), "按 NAME 降序，只看前 3 条")
+        assert out is not None
+        assert "ORDER BY NAME DESC LIMIT 3" in out
 
 
 @pytest.mark.parametrize(

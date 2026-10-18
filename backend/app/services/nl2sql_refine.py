@@ -483,9 +483,13 @@ def applyRefineDirect(
     limit = _extractLimit(question, maxLimit)
     if limit is not None:
         rewritten = _rewriteLimit(sql, limit, dialect=dialect)
-        if rewritten is not None:
-            sql = rewritten
-            transformed = True
+        if rewritten is None:
+            # 用户明确要求行数但当前 SQL 无法安全改写（无既有行数子句/ROWNUM/
+            # 嵌套等）→ 整体放弃捷径。否则排序/筛选改写会让用户拿到一份
+            # 「忽略了前 N 条」的结果，且 LLM 两阶段兜底也被绕过。
+            return None
+        sql = rewritten
+        transformed = True
 
     sort = _extractSort(question, sortColumns)
     if sort is not None:

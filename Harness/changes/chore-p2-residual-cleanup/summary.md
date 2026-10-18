@@ -75,7 +75,8 @@ Phase 3 收尾审计发现四块「已实现但从未接线」的死代码，以
 
 验证结果：
 
-- （待全量 unit 套件完成后填写）
+- 全量 unit 套件（本分支，真实 PG `qa_metadata_test_solo`）：**4232 passed / 28 failed / 53 warnings**（1001s）。
+- 28 个失败**全部为存量红**（rot）：在 `origin/main`（6bb757ae）基线 worktree 上跑同一组 28 个用例，同样 **28 failed**（8.3s），逐条同名 ⇒ **净新增失败 0**。失败集中在 `test_refine_shortcuts.py`(15) / `test_chat_service.py`(4) / `test_rate_limit.py`(3) / `test_chat_service_stream.py`(2) / `test_datasource_pool.py`(2) / `test_dependencies.py` / `test_intent_classify_order.py` / `test_no_sqlite_fallback.py`；**无一**触及 `hypothesis_service` / `model_router_service` / 本次删除的模块。
 - `uv run ruff check app/services/hypothesis_service.py app/services/model_router_service.py` → All checks passed。
 
 ## 7. 安全审查

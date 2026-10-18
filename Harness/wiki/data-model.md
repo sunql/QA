@@ -6,7 +6,9 @@
 模型配置：`model_name`(唯一)、`provider`、`api_endpoint`、`api_key_encrypted`(Fernet 加密)、`cost_per_1k_input/output`、`max_input_tokens`、`weight`(0-100)、`cost_threshold`、`is_active`、时间戳。
 
 ### session_token_usage
-会话 Token 流水：`session_id`、`model_config_id`(FK)、`model_name`、`prompt_tokens`、`completion_tokens`、`total_tokens`、`cost`、`request_time`、`purpose`。索引 `(session_id, request_time)` 与 `(model_config_id, request_time)`。
+会话 Token 流水：`session_id`、`model_config_id`(FK)、`model_name`、`prompt_tokens`、`completion_tokens`、`total_tokens`、`cost`、`request_time`、`purpose`、`cost_source`。索引 `(session_id, request_time)` 与 `(model_config_id, request_time)`。
+
+**`cost_source`（P1-2，migration 0126，2026-10-18 收尾）**：成本口径，取值为白名单 `measured`（token 由 provider 上报、单价来自 `llm_config`）、`estimated`（只有部分用量，如异常里提取的 token）、`unknown`（无法定价，如研究链路按名称查不到配置 ⇒ 成本是占位 0）。常量 SSOT 在 `app/services/token_usage_service.py`（`COST_SOURCE_*` / `COST_SOURCES`）。写入方：chat 主链路（默认 `measured`，retry-gen 为 `estimated`）、doc-QA、报告总结、研究 `LlmUsageRecorder`（无配置时 `unknown`）。**NULL = 0126 之前的早期行**，与 `unknown` 语义不同（后者是「当时确实无法定价」）。读侧 `GET /api/v1/sessions/{id}/usage/list` 以 `costSource` 暴露；前端 `UsagePage` 按白名单映射文案，未知值一律显示「未知」，**绝不把原始枚举拼进 i18n key**（缺 key 会回显 key 本身）。
 
 ### 后续表（Phase 2-3）
 - `ontology_class`：本体类，`source_table` 映射物理表，支持 `parent_class_id` 继承，`version` + `valid_from/to` 版本。

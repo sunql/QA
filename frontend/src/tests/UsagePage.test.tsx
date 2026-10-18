@@ -62,6 +62,7 @@ const ROWS: SessionTokenUsage[] = [
     cost: 0.005,
     requestTime: "2026-08-12T10:00:00Z",
     purpose: "nl2sql",
+    costSource: "measured",
   },
   {
     id: 2,
@@ -73,6 +74,7 @@ const ROWS: SessionTokenUsage[] = [
     cost: 0.002,
     requestTime: "2026-08-12T10:05:00Z",
     purpose: "answer",
+    costSource: "estimated",
   },
 ];
 
@@ -196,6 +198,20 @@ describe("UsagePage", () => {
     // 流水表中的用途标签（唯一）
     expect(screen.getByText("nl2sql")).toBeInTheDocument();
     expect(screen.getByText("answer")).toBeInTheDocument();
+  });
+
+  it("成本口径按白名单渲染，未知值回落「未知」且不泄露原始枚举", async () => {
+    api.listSessionUsage.mockResolvedValue([
+      { ...ROWS[0], costSource: "measured" },
+      { ...ROWS[1], costSource: "weird_source" },
+    ]);
+    renderPage();
+    await screen.findByText("按模型汇总", undefined, { timeout: 3000 });
+    expect(screen.getByText("实测")).toBeInTheDocument();
+    // 未知枚举 → 「未知」，绝不原样展示，也不展示 i18n key
+    expect(screen.getByText("未知")).toBeInTheDocument();
+    expect(screen.queryByText(/weird_source/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/forms\.usage\.costSource/)).not.toBeInTheDocument();
   });
 
   it("点击刷新按钮重新拉取会话列表", async () => {

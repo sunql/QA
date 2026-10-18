@@ -26,6 +26,14 @@ from app.domain.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# 成本口径 SSOT（P1-2）：写入方必须显式标注，读侧按白名单收窄。
+COST_SOURCE_MEASURED = "measured"    # token 由 provider 上报、单价来自 llm_config
+COST_SOURCE_ESTIMATED = "estimated"  # 只有部分用量（如异常里提取的 token），成本为估算
+COST_SOURCE_UNKNOWN = "unknown"      # 无法定价（如研究链路按名称查不到 llm_config）
+COST_SOURCES = frozenset(
+    {COST_SOURCE_MEASURED, COST_SOURCE_ESTIMATED, COST_SOURCE_UNKNOWN}
+)
+
 
 class TokenUsageService:
     """Token 消耗流水服务。"""

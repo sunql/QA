@@ -51,7 +51,7 @@ from app.services.model_router_service import ModelRouterService, RoutingContext
 from app.services.nl2sql_service import _readFloatConfig
 from app.services.report_templates import REPORT_TEMPLATES, listTemplateMetas
 from app.services.supplier_360_service import Supplier360Service
-from app.services.token_usage_service import TokenUsageService
+from app.services.token_usage_service import COST_SOURCE_MEASURED, TokenUsageService
 
 logger = logging.getLogger(__name__)
 
@@ -544,6 +544,8 @@ class ReportTemplateService:
             completionTokens=completionTokens,
             cost=cost,
             purpose=PURPOSE_REPORT_SUMMARY,
+            # 与 chat 同 SSOT 的 _costFor 现算 ⇒ 实测口径。
+            cost_source=COST_SOURCE_MEASURED,
         )
 
     async def _accountFailure(

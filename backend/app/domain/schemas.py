@@ -756,6 +756,17 @@ class KpiCatalogRead(CamelModel):
     updated_time: datetime | None = None
 
 
+class KpiDatasourceSuggestionRead(CamelModel):
+    """P1a：KPI → 数据源绑定建议（只读提示，永不自动写入）。"""
+
+    datasource_id: int
+    name: str
+    score: float
+    reasons: list[
+        Literal["legacy_name_exact", "legacy_name_fuzzy", "ontology_table"]
+    ]
+
+
 class FeatureDefinitionCreate(CamelModel):
     """AI 特征定义创建请求（Phase 4.3）。
 

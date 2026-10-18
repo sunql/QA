@@ -1839,6 +1839,15 @@ export const zhCN = {
       owner: "责任部门/人",
     },
     unbound: "未绑定",
+    suggestions: {
+      hint: "建议绑定数据源：{name}",
+      apply: "采用",
+      reasons: {
+        legacy_name_exact: "依据：历史「数据来源」文本与数据源名称完全一致",
+        legacy_name_fuzzy: "依据：历史「数据来源」文本与数据源名称部分匹配",
+        ontology_table: "依据：关联本体指标所属类的主表存在于该数据源",
+      },
+    },
   },
 
   feature: {

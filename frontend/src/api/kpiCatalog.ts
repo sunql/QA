@@ -3,6 +3,7 @@ import type {
   KpiCatalog,
   KpiCatalogCreate,
   KpiCatalogUpdate,
+  KpiDatasourceSuggestion,
 } from "../types/kpiCatalog";
 
 const BASE = "/kpi-catalog";
@@ -11,6 +12,15 @@ export async function listKpis(unbound = false): Promise<KpiCatalog[]> {
   const res = await httpClient.get<KpiCatalog[]>(
     BASE,
     unbound ? { params: { unbound: true } } : undefined,
+  );
+  return res.data;
+}
+
+export async function getDatasourceSuggestions(
+  kpiId: number,
+): Promise<KpiDatasourceSuggestion[]> {
+  const res = await httpClient.get<KpiDatasourceSuggestion[]>(
+    `${BASE}/${kpiId}/datasource-suggestions`,
   );
   return res.data;
 }

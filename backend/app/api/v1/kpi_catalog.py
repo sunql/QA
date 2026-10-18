@@ -20,8 +20,12 @@ from app.domain.schemas import (
     KpiCatalogHistoryRead,
     KpiCatalogRead,
     KpiCatalogUpdate,
+    KpiDatasourceSuggestionRead,
     KpiSearchHit,
     KpiSearchResponse,
+)
+from app.services.kpi_datasource_suggestion_service import (
+    KpiDatasourceSuggestionService,
 )
 from app.services.history_service import HistoryService
 from app.services.kpi_semantic_match_service import (
@@ -33,6 +37,7 @@ from app.services.kpi_catalog_service import KpiCatalogService
 router = APIRouter(dependencies=[])
 _service = KpiCatalogService()
 _history_service = HistoryService()
+_suggestion_service = KpiDatasourceSuggestionService()
 
 
 @router.get("", response_model=list[KpiCatalogRead], status_code=status.HTTP_200_OK)
@@ -127,6 +132,24 @@ async def deleteKpi(
 # ---------------------------------------------------------------------------
 # Phase 4.5: kpi_catalog_history 回放 API
 # ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{id}/datasource-suggestions",
+    response_model=list[KpiDatasourceSuggestionRead],
+    status_code=status.HTTP_200_OK,
+    summary="KPI 数据源绑定建议（只读提示）",
+)
+async def suggestKpiDatasource(
+    id: int,
+    _user: CurrentUser = Depends(getCurrentUser),
+    db: AsyncSession = Depends(getDb),
+) -> list[KpiDatasourceSuggestionRead]:
+    """基于 legacy 名称与 ontology 表反查给出绑定建议；不写库。"""
+    return [
+        KpiDatasourceSuggestionRead.model_validate(s, from_attributes=True)
+        for s in await _suggestion_service.suggest(db, id)
+    ]
 
 
 @router.get(

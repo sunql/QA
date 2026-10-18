@@ -319,18 +319,23 @@ class TestKpiDatasourceMigration:
         assert fk_row[2] == "data_source", "FK must reference data_source table"
         assert fk_row[3] == "id", "FK must reference data_source.id column"
 
-    async def test_delete_datasource_sets_kpi_datasource_id_to_null(
+    async def test_delete_referenced_datasource_raises_fk_violation(
         self,
         client: AsyncClient,
         dbSession: AsyncSession,
     ) -> None:
-        """Delete a datasource that a KPI is bound to -> KPI.datasource_id becomes NULL.
+        """Delete a datasource that a KPI is bound to -> FK violation (RESTRICT).
 
-        This is the ON DELETE SET NULL guard: data source hard-delete should NOT raise
-        ForeignKeyViolation.  The KPI record survives with datasource_id=NULL.
+        0132 changed the FK from ON DELETE SET NULL to ON DELETE RESTRICT: an
+        accidental datasource hard-delete must NOT silently unbind KPIs.  The
+        service layer guards this with a 409 before SQL runs; the DB constraint
+        is the second line of defense.
         """
+        from sqlalchemy.exc import IntegrityError
+
         ds = await _seedDatasource(dbSession, _CHAT_DS_ID + 10)
-        kpi = await _seedKpi(dbSession, "KPI_DELETE_GUARD", ds.id)
+        ds_id = ds.id  # rollback 后 ORM 对象会 expire；先取标量，避免同步 lazy-load
+        kpi = await _seedKpi(dbSession, "KPI_DELETE_GUARD", ds_id)
         kpi_id = kpi.id
 
         # Verify datasource_id is set before delete
@@ -338,17 +343,23 @@ class TestKpiDatasourceMigration:
             text("SELECT datasource_id FROM kpi_catalog WHERE id = :id"),
             {"id": kpi_id},
         )
-        assert result.scalar() == ds.id
+        assert result.scalar() == ds_id
 
         # Delete the datasource (hard delete, no FK cleanup)
-        await dbSession.delete(ds)
-        await dbSession.commit()
+        with pytest.raises(IntegrityError):
+            await dbSession.delete(ds)
+            await dbSession.commit()
+        await dbSession.rollback()
 
-        # KPI.datasource_id must be NULL, not raise FK violation
+        # KPI still bound to the original DS; DS still exists.
         result = await dbSession.execute(
             text("SELECT datasource_id FROM kpi_catalog WHERE id = :id"),
             {"id": kpi_id},
         )
-        assert result.scalar() is None, (
-            "After deleting bound datasource, KPI.datasource_id must be NULL"
+        assert result.scalar() == ds_id, (
+            "After FK-restricted delete attempt, KPI.datasource_id must be unchanged"
         )
+        alive = await dbSession.execute(
+            text("SELECT count(*) FROM data_source WHERE id = :id"), {"id": ds_id}
+        )
+        assert alive.scalar() == 1

@@ -27,6 +27,7 @@ import type {
 } from "../types/kpiCatalog";
 import { KPI_STATUS_OPTIONS } from "../types/kpiCatalog";
 import { useTranslation } from "../i18n";
+import { useDatasourceOptions, datasourceName } from "../hooks/useDatasourceOptions";
 import { useTablePagination } from "../utils/useTablePagination";
 import FilterBar from "../components/ontology/FilterBar";
 import type { FilterField } from "../components/ontology/FilterBar";
@@ -50,6 +51,7 @@ interface KpiFormValues {
   grain: string;
   unit: string;
   dataSource: string;
+  datasourceId?: number;
   owner: string;
   version: string;
   status: KpiStatus;
@@ -65,6 +67,7 @@ const EMPTY_KPI_FORM: KpiFormValues = {
   grain: "",
   unit: "",
   dataSource: "",
+  datasourceId: undefined,
   owner: "",
   version: "v1.0",
   status: "DRAFT",
@@ -73,6 +76,7 @@ const EMPTY_KPI_FORM: KpiFormValues = {
 export default function KpiCatalogPage() {
   const { t } = useTranslation();
   const { pagination } = useTablePagination();
+  const sources = useDatasourceOptions();
   const [kpis, setKpis] = useState<KpiCatalog[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -133,6 +137,7 @@ export default function KpiCatalogPage() {
       grain: record.grain ?? "",
       unit: record.unit ?? "",
       dataSource: record.dataSource ?? "",
+      datasourceId: record.datasourceId ?? undefined,
       owner: record.owner ?? "",
       version: record.version,
       status: record.status,
@@ -164,6 +169,7 @@ export default function KpiCatalogPage() {
           grain: values.grain || null,
           unit: values.unit || null,
           dataSource: values.dataSource || null,
+          datasourceId: values.datasourceId ?? null,
           owner: values.owner || null,
           version: values.version || undefined,
           status: values.status,
@@ -181,6 +187,7 @@ export default function KpiCatalogPage() {
           grain: values.grain || undefined,
           unit: values.unit || undefined,
           dataSource: values.dataSource || undefined,
+          datasourceId: values.datasourceId!,
           owner: values.owner || undefined,
           version: values.version || undefined,
           status: values.status,
@@ -214,6 +221,17 @@ export default function KpiCatalogPage() {
     },
     { title: t("kpiCatalog.columns.grain"), dataIndex: "grain", width: 120 },
     { title: t("kpiCatalog.columns.unit"), dataIndex: "unit", width: 80 },
+    {
+      title: t("kpiCatalog.columns.datasourceId"),
+      dataIndex: "datasourceId",
+      width: 160,
+      render: (id: number | null) =>
+        id ? (
+          datasourceName(sources, id)
+        ) : (
+          <Tag color="default">{t("kpiCatalog.unbound")}</Tag>
+        ),
+    },
     { title: t("kpiCatalog.columns.owner"), dataIndex: "owner", width: 120 },
     {
       title: t("kpiCatalog.columns.version"),
@@ -358,6 +376,19 @@ export default function KpiCatalogPage() {
               <Input placeholder={t("kpiCatalog.placeholders.owner")} />
             </Form.Item>
           </Space.Compact>
+          <Form.Item
+            name="datasourceId"
+            label={t("kpiCatalog.labels.datasourceId")}
+            rules={[{ required: true, message: t("forms.required") }]}
+          >
+            <Select
+              showSearch
+              optionFilterProp="label"
+              allowClear={!!editing}
+              options={sources.map((s) => ({ value: s.id, label: s.name }))}
+              placeholder={t("kpiCatalog.placeholders.datasourceId")}
+            />
+          </Form.Item>
           <Form.Item name="dataSource" label={t("kpiCatalog.labels.dataSource")}>
             <Input placeholder={t("kpiCatalog.placeholders.dataSource")} />
           </Form.Item>

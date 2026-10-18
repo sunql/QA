@@ -19,6 +19,7 @@ const { mockKpi } = vi.hoisted(() => ({
     grain: "供应商+月",
     unit: "%",
     dataSource: "DWS_SUPPLIER_MONTHLY",
+    datasourceId: 7,
     owner: "采购部",
     version: "v1.0",
     revisionCount: 0,
@@ -39,6 +40,12 @@ const api = vi.hoisted(() => ({
 
 vi.mock("../api/kpiCatalog", () => api);
 
+const datasourceApi = vi.hoisted(() => ({
+  listDataSources: vi.fn(),
+}));
+
+vi.mock("../api/datasource", () => datasourceApi);
+
 function renderPage() {
   return render(
     <ConfigProvider locale={zhCN}>
@@ -55,6 +62,9 @@ describe("KpiCatalogPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.listKpis.mockResolvedValue([mockKpi]);
+    datasourceApi.listDataSources.mockResolvedValue([
+      { id: 7, name: "DWS_TEST", isActive: true },
+    ]);
   });
 
   it("渲染标题与表格，并加载 KPI 列表", async () => {
@@ -95,6 +105,10 @@ describe("KpiCatalogPage", () => {
     await user.type(codeInput, "KPI_TEST_NEW");
     await user.type(nameInput, "新 KPI");
 
+    // F2：创建 KPI 必须绑定数据源（后端 datasourceId 必填）
+    await user.click(screen.getByRole("combobox", { name: /绑定数据源/ }));
+    await user.click(await screen.findByTitle("DWS_TEST"));
+
     await user.click(screen.getByRole("button", { name: /确\s?定/ }));
 
     await waitFor(() => {
@@ -102,6 +116,7 @@ describe("KpiCatalogPage", () => {
       const payload = api.createKpi.mock.calls[0][0];
       expect(payload.kpiCode).toBe("KPI_TEST_NEW");
       expect(payload.kpiName).toBe("新 KPI");
+      expect(payload.datasourceId).toBe(7);
     });
   });
 
@@ -145,6 +160,8 @@ describe("KpiCatalogPage", () => {
       expect(payload.kpiCode).toBe("KPI_SUPPLIER_OTD");
       expect(payload.kpiName).toBe("供应商准时交付率 v2");
       expect(payload.status).toBe("PUBLISHED");
+      // 编辑表单预填 record.datasourceId，提交时原样带回
+      expect(payload.datasourceId).toBe(7);
     });
   });
 
@@ -236,6 +253,20 @@ describe("KpiCatalogPage", () => {
     await waitFor(() => expect(screen.getByText("KPI_OTHER")).toBeInTheDocument());
   });
 
+  it("未绑定数据源的 KPI 在列表显示「未绑定」标签（反向：有绑定则显示数据源名）", async () => {
+    api.listKpis.mockResolvedValue([
+      { ...mockKpi, id: 1, kpiCode: "K_BOUND", datasourceId: 7 },
+      { ...mockKpi, id: 2, kpiCode: "K_UNBOUND", datasourceId: null },
+    ]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("K_BOUND")).toBeInTheDocument());
+
+    // 有绑定 → 按 id 映射名称
+    expect(screen.getByText("DWS_TEST")).toBeInTheDocument();
+    // 未绑定 → Tag
+    expect(screen.getByText("未绑定")).toBeInTheDocument();
+  });
+
   it("业务定义长文本渲染 Tooltip", async () => {
     const LONG = "这是一段非常长的业务定义描述文本，用于验证超出列宽时悬停可查看完整内容。";
     api.listKpis.mockResolvedValue([{ ...mockKpi, businessDefinition: LONG }]);
@@ -266,6 +297,8 @@ describe("KpiCatalogPage", () => {
     const nameInput = screen.getByPlaceholderText(/供应商准时交付率/);
     await user.type(codeInput, "KPI_FAIL");
     await user.type(nameInput, "失败 KPI");
+    await user.click(screen.getByRole("combobox", { name: /绑定数据源/ }));
+    await user.click(await screen.findByTitle("DWS_TEST"));
     await user.click(screen.getByRole("button", { name: /确\s?定/ }));
 
     await waitFor(() => {

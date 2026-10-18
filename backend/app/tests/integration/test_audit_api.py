@@ -24,12 +24,13 @@ async def drainOutbox(dbSession) -> int:
 class TestAuditApi:
     """audit_log 查询 API：4 个端点。"""
 
-    async def test_list_all_returns_audit_records(self, client, dbSession) -> None:
+    async def test_list_all_returns_audit_records(self, client, dbSession, seed_data_source) -> None:
         """创建 KPI → audit 写入 → 全量查询能查到。"""
         # 创建 KPI（触发 audit CREATE）
         kpi_resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"AUDIT_TEST_{id(self)}",
                 "kpiName": "审计测试KPI",
                 "formula": "SELECT COUNT(*)",
@@ -52,12 +53,13 @@ class TestAuditApi:
         create_rows = [r for r in rows if r["action"] == "CREATE" and r["entityType"] == "kpi_catalog"]
         assert len(create_rows) >= 1
 
-    async def test_list_by_entity_returns_kpi_history(self, client, dbSession) -> None:
+    async def test_list_by_entity_returns_kpi_history(self, client, dbSession, seed_data_source) -> None:
         """by-entity 端点返回指定 KPI 的变更历史。"""
         # 创建 KPI
         kpi_resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"AUDIT_ENTITY_{id(self)}",
                 "kpiName": "实体查询测试",
                 "formula": "SELECT 1",
@@ -95,12 +97,13 @@ class TestAuditApi:
         for r in rows:
             assert r["actor"] == "test-admin"
 
-    async def test_get_by_id_returns_single_record(self, client, dbSession) -> None:
+    async def test_get_by_id_returns_single_record(self, client, dbSession, seed_data_source) -> None:
         """先拿到 audit ID → 再按 ID 查询。"""
         # 创建 KPI 拿到 audit 记录 ID
         kpi_resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"AUDIT_ID_{id(self)}",
                 "kpiName": "ID查询测试",
                 "formula": "SELECT 1",
@@ -174,12 +177,13 @@ class TestAuditApi:
         assert isinstance(body["rows"], list)
         assert isinstance(body["total"], int)
 
-    async def test_list_actor_ilike_fuzzy(self, client, dbSession) -> None:
+    async def test_list_actor_ilike_fuzzy(self, client, dbSession, seed_data_source) -> None:
         """actor='张' matches actor containing '张', not exact."""
         # 先有数据
         await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"AUDIT_ILIKE_{id(self)}",
                 "kpiName": "模糊匹配测试",
                 "formula": "SELECT 1",
@@ -246,12 +250,13 @@ class TestAuditApi:
         )
         assert resp.status_code == status.HTTP_403_FORBIDDEN
 
-    async def test_list_entity_id_filter(self, client, dbSession) -> None:
+    async def test_list_entity_id_filter(self, client, dbSession, seed_data_source) -> None:
         """entity_id filter does CAST TEXT ILIKE."""
         # 创建 KPI，然后按其 ID 搜索
         kpi_resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"AUDIT_EID_{id(self)}",
                 "kpiName": "ID过滤测试",
                 "formula": "SELECT 1",

@@ -108,6 +108,8 @@ async def seededAdapters(dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatc
             status="PUBLISHED",
             semantic_keywords=KPI_KEYWORDS,
             match_threshold=Decimal("0.5"),
+            # KPI 召回臂与数据源无关；0132 起 datasource_id 有 FK，硬编码 1 会撞约束
+            datasource_id=None,
         )
     )
     dbSession.add(

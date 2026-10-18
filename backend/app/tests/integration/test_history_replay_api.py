@@ -23,12 +23,13 @@ async def drainOutbox(dbSession) -> int:
 class TestKpiHistoryReplayApi:
     """GET /api/v1/kpi-catalog/{id}/history 系列端点。"""
 
-    async def test_list_kpi_history_returns_revisions(self, client, dbSession) -> None:
+    async def test_list_kpi_history_returns_revisions(self, client, dbSession, seed_data_source) -> None:
         """创建 KPI → 更新 → 查 history 有多条记录。"""
         # 创建 KPI（revision=0 的 history 写入）
         kpi_resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"HIST_TEST_{id(self)}",
                 "kpiName": "历史回放测试",
                 "formula": "SELECT 1",
@@ -65,11 +66,12 @@ class TestKpiHistoryReplayApi:
         assert "kpi_name" in rows[0]["snapshotJson"]
         assert rows[0]["snapshotJson"]["kpi_name"] == "历史回放测试-已更新"
 
-    async def test_get_kpi_history_revision_returns_snapshot(self, client, dbSession) -> None:
+    async def test_get_kpi_history_revision_returns_snapshot(self, client, dbSession, seed_data_source) -> None:
         """GET /kpi-catalog/{id}/history/{revision} 返回指定快照。"""
         kpi_resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
+                "datasourceId": seed_data_source.id,
                 "kpiCode": f"HIST_REV_{id(self)}",
                 "kpiName": "Revision 测试",
                 "formula": "SELECT 1",

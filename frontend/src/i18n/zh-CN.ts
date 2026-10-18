@@ -1805,6 +1805,7 @@ export const zhCN = {
       grain: "粒度",
       unit: "单位",
       dataSource: "数据来源",
+      datasourceId: "绑定数据源",
       owner: "责任部门",
       version: "版本",
       status: "状态",
@@ -1820,6 +1821,7 @@ export const zhCN = {
       grain: "粒度",
       unit: "单位",
       dataSource: "数据来源",
+      datasourceId: "绑定数据源",
       owner: "责任部门",
       version: "版本",
       status: "状态",
@@ -1833,8 +1835,10 @@ export const zhCN = {
       grain: "如：供应商+月",
       unit: "如：%、天、元",
       dataSource: "如：DWS_SUPPLIER_MONTHLY",
+      datasourceId: "选择该 KPI 计算所依据的数据源",
       owner: "责任部门/人",
     },
+    unbound: "未绑定",
   },
 
   feature: {

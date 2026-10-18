@@ -19,6 +19,7 @@ export interface KpiCatalog {
   grain: string | null;
   unit: string | null;
   dataSource: string | null;
+  datasourceId: number | null;
   owner: string | null;
   version: string;
   revisionCount: number;
@@ -32,6 +33,7 @@ export interface KpiCatalog {
 export interface KpiCatalogCreate {
   kpiCode: string;
   kpiName: string;
+  datasourceId: number;
   businessDefinition?: string;
   formula?: string;
   numerator?: string;
@@ -49,6 +51,7 @@ export interface KpiCatalogCreate {
 export interface KpiCatalogUpdate {
   kpiCode?: string;
   kpiName?: string;
+  datasourceId?: number | null;
   businessDefinition?: string | null;
   formula?: string | null;
   numerator?: string | null;

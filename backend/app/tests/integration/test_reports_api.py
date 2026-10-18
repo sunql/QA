@@ -85,11 +85,11 @@ async def _seed_llm_config(dbSession: AsyncSession) -> LlmConfig:
     return config
 
 
-async def _seed_kpi(client: AsyncClient, code: str) -> None:
+async def _seed_kpi(client: AsyncClient, code: str, datasourceId: int) -> None:
     resp = await client.post(
         "/api/v1/kpi-catalog",
         json={"kpiCode": code, "kpiName": f"{code} 名称", "formula": "SELECT 1",
-              "unit": "%", "owner": "采购部"},
+              "unit": "%", "owner": "采购部", "datasourceId": datasourceId},
         headers=ADMIN_HEADERS,
     )
     assert resp.status_code == status.HTTP_201_CREATED, resp.text
@@ -140,12 +140,12 @@ class TestTemplatesEndpoint:
 @pytest.mark.asyncio
 class TestGenerateAndReviewFlow:
     async def test_monthly_ops_generate_approve_then_visible(
-        self, client, dbSession, monkeypatch
+        self, client, dbSession, monkeypatch, seed_data_source
     ) -> None:
         llm = _ReportLlm()
         monkeypatch.setattr(reports_module._service, "_llmFactory", lambda _c: llm)
         await _seed_llm_config(dbSession)
-        await _seed_kpi(client, "KPI_SUPPLIER_OTD")
+        await _seed_kpi(client, "KPI_SUPPLIER_OTD", seed_data_source.id)
         await _seed_supplier(dbSession)
 
         resp = await _generate(client, ALICE_HEADERS)

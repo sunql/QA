@@ -1,16 +1,8 @@
-"""KPI Catalog 服务（Phase 4.1 + Phase 4.5 governance hardening）。
+"""KPI Catalog service.
 
-与 OntologyService.createMetric/updateMetric 同模式，但更轻：
-- 不写 Neo4j / Milvus（KPI 是治理层，不进向量检索）
-- revision_count 由 service 自增（PUT 时不论改什么都 +1）
-- 不强制 metric_id 关联（业务 KPI 可先于技术 metric 存在）
-
-Phase 4.5 governance hardening 增量：
-- deleteKpi / updateKpi 走 AclService.assertCanModify（owner-based ACL）
-
-feat-audit-outbox 增量：
-- createKpi / updateKpi / deleteKpi 只入队 audit_outbox（同事务）；
-  audit_log / kpi_catalog_history 由独立 worker 进程消费写入（审计失败不回滚业务）
+Legacy rows: kpi_catalog.datasource_id IS NULL（migration 0125 之前的历史行 +
+未填的运营行）— chat 路径 L1 mismatch 检查会跳过（per chat_stream_output.py:197
+"NULL ⇒ 不校验"分支），不警告。要让警告生效，必须先 PUT 一次以填补 datasource_id。
 """
 
 from __future__ import annotations
@@ -25,16 +17,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
-from app.domain.models import KpiCatalog
+from app.domain.models import DataSource, KpiCatalog
 from app.domain.schemas import KpiCatalogCreate, KpiCatalogUpdate
 from app.services.acl_service import AclService
 from app.services.kpi_match_cache import get_kpi_match_cache
-from app.services.outbox_service import OutboxService
 from app.services.messages_zh import (
     MSG_KPI_CATALOG_DUPLICATE_CODE,
     MSG_KPI_CATALOG_NOT_FOUND,
     MSG_KPI_CATALOG_STATUS_NULL,
+    MSG_KPI_DATASOURCE_INACTIVE,
+    MSG_KPI_DATASOURCE_NOT_FOUND,
 )
+from app.services.outbox_service import OutboxService
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +89,18 @@ class KpiCatalogService:
             owner=dto.owner,
             version=dto.version or "v1.0",
             status=dto.status.value,
+            datasource_id=dto.datasource_id,  # F2 §4.2: 持久化到列（subagent Task 3 漏写，单独 commit 补）
             metric_id=dto.metric_id,
             created_by=dto.created_by,
             semantic_keywords=dto.semantic_keywords,
             match_threshold=Decimal(str(dto.match_threshold)) if dto.match_threshold is not None else Decimal("0.75"),
         )
+        # F2 §4.2: 校验 datasource 存在 + is_active
+        ds = await session.get(DataSource, dto.datasource_id)
+        if ds is None:
+            raise ValidationError(MSG_KPI_DATASOURCE_NOT_FOUND.format(id=dto.datasource_id))
+        if not ds.is_active:
+            raise ValidationError(MSG_KPI_DATASOURCE_INACTIVE.format(id=ds.id, name=ds.name))
         session.add(entity)
         try:
             await session.flush()
@@ -144,6 +145,13 @@ class KpiCatalogService:
             entity_label="KPI",
             entity_code=entity.kpi_code,
         )
+        # F2 §4.2: updateKpi 仅在 datasource_id 非 None 时校验
+        if dto.datasource_id is not None:
+            ds = await session.get(DataSource, dto.datasource_id)
+            if ds is None:
+                raise ValidationError(MSG_KPI_DATASOURCE_NOT_FOUND.format(id=dto.datasource_id))
+            if not ds.is_active:
+                raise ValidationError(MSG_KPI_DATASOURCE_INACTIVE.format(id=ds.id, name=ds.name))
         before = _entityToDict(entity)
         updates = dto.model_dump(exclude_unset=True)
         # status 是 NOT NULL 列；显式 null 应被拒绝（前端清空表单用「不改」而非「传 null」）
@@ -214,12 +222,12 @@ def _entityToDict(entity: KpiCatalog) -> dict:
     （`Object of type datetime is not JSON serializable`），故在此统一转字符串/数值。
     """
     out: dict = {}
-    for col in entity.__table__.columns.keys():
-        v = getattr(entity, col)
+    for col in entity.__table__.columns:
+        v = getattr(entity, col.name)
         if isinstance(v, datetime):
-            out[col] = v.isoformat()
+            out[col.name] = v.isoformat()
         elif isinstance(v, Decimal):
-            out[col] = float(v)
+            out[col.name] = float(v)
         else:
-            out[col] = v
+            out[col.name] = v
     return out

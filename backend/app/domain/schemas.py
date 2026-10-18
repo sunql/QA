@@ -696,6 +696,7 @@ class KpiCatalogCreate(CamelModel):
     owner: str | None = Field(default=None, max_length=100)
     version: str | None = Field(default=None, max_length=20)
     status: KpiStatus = KpiStatus.DRAFT
+    datasource_id: int = Field(..., ge=1, description="绑定的业务数据源 ID（FK → data_source.id）")
     metric_id: int | None = None
     created_by: str | None = Field(default=None, max_length=50)
     semantic_keywords: list[str] | None = Field(
@@ -729,6 +730,7 @@ class KpiCatalogUpdate(CamelModel):
     owner: str | None = Field(default=None, max_length=100)
     version: str | None = Field(default=None, max_length=20)
     status: KpiStatus | None = Field(default=None, description="KPI 状态；显式传 null 会被 422 拒绝（NOT NULL 约束）")
+    datasource_id: int | None = Field(default=None, ge=1, description="重绑数据源；显式传 null 解绑")
     metric_id: int | None = None
 
 
@@ -743,6 +745,7 @@ class KpiCatalogRead(CamelModel):
     grain: str | None = None
     unit: str | None = None
     data_source: str | None = None
+    datasource_id: int | None = None
     owner: str | None = None
     version: str
     revision_count: int

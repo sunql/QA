@@ -767,6 +767,33 @@ class KpiDatasourceSuggestionRead(CamelModel):
     ]
 
 
+class KpiDatasourceBulkBindItem(CamelModel):
+    """P0：批量绑定一行（kpi_code → datasource_id）。"""
+
+    kpi_code: str = Field(..., min_length=1, max_length=50)
+    datasource_id: int = Field(..., ge=1)
+
+
+class KpiDatasourceBulkBindResultRow(CamelModel):
+    """逐行结果：bound（已写入）/ skipped（已是该数据源）/ failed。"""
+
+    row: int
+    kpi_code: str
+    status: Literal["bound", "skipped", "failed"]
+    kpi_id: int | None = None
+    datasource_id: int | None = None
+    reason: str | None = None
+    error: str | None = None
+
+
+class KpiDatasourceBulkBindResult(CamelModel):
+    total: int
+    bound: int
+    skipped: int
+    failed: int
+    results: list[KpiDatasourceBulkBindResultRow]
+
+
 class FeatureDefinitionCreate(CamelModel):
     """AI 特征定义创建请求（Phase 4.3）。
 

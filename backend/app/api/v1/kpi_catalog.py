@@ -14,15 +14,25 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import CurrentUser, getCurrentUser, getDb
+from app.dependencies import (
+    CurrentUser,
+    getAdminOnlyActor,
+    getCurrentUser,
+    getDb,
+)
 from app.domain.schemas import (
     KpiCatalogCreate,
     KpiCatalogHistoryRead,
     KpiCatalogRead,
     KpiCatalogUpdate,
+    KpiDatasourceBulkBindItem,
+    KpiDatasourceBulkBindResult,
     KpiDatasourceSuggestionRead,
     KpiSearchHit,
     KpiSearchResponse,
+)
+from app.services.kpi_datasource_binding_service import (
+    KpiDatasourceBindingService,
 )
 from app.services.kpi_datasource_suggestion_service import (
     KpiDatasourceSuggestionService,
@@ -38,6 +48,7 @@ router = APIRouter(dependencies=[])
 _service = KpiCatalogService()
 _history_service = HistoryService()
 _suggestion_service = KpiDatasourceSuggestionService()
+_binding_service = KpiDatasourceBindingService()
 
 
 @router.get("", response_model=list[KpiCatalogRead], status_code=status.HTTP_200_OK)
@@ -96,6 +107,23 @@ async def createKpi(
     CREATE 不做 ACL（任何部门都能创建新 KPI）；审计 + 历史快照由 service 层写入。
     """
     return KpiCatalogRead.model_validate(await _service.createKpi(db, dto, user))
+
+
+# NOTE: 两段静态路径必须在 /{id} 之前注册（FastAPI 路由按顺序匹配）
+@router.post(
+    "/bulk-bind-datasource",
+    response_model=KpiDatasourceBulkBindResult,
+    status_code=status.HTTP_200_OK,
+    summary="批量绑定 KPI 数据源（admin）",
+)
+async def bulkBindKpiDatasource(
+    items: list[KpiDatasourceBulkBindItem],
+    force: bool = Query(False, description="已绑定其他数据源时是否覆盖"),
+    admin: CurrentUser = Depends(getAdminOnlyActor),
+    db: AsyncSession = Depends(getDb),
+) -> KpiDatasourceBulkBindResult:
+    """批量绑定（逐行 commit，部分成功；上限 1000 行，非 admin 403）。"""
+    return await _binding_service.bulkBind(db, items, admin, force=force)
 
 
 @router.get("/{id}", response_model=KpiCatalogRead, status_code=status.HTTP_200_OK)

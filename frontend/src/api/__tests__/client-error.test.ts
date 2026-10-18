@@ -7,7 +7,7 @@
  * - 401 side effects: localStorage token removal + redirect preserved from Task 2.1
  */
 
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Types mirroring client.ts
@@ -67,7 +67,10 @@ describe("normalizeError", () => {
     localStorage.setItem("token", "fake-token-12345");
     let href = "";
     Object.defineProperty(window, "location", {
-      value: { href, set href(val: string) { href = val; }, get href() { return href; } },
+      value: {
+        set href(val: string) { href = val; },
+        get href() { return href; },
+      },
       writable: true,
       configurable: true,
     });

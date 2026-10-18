@@ -79,15 +79,21 @@ def test_meta_intent_l1_not_in_intent_type_enum() -> None:
 
 
 _CHAT_STREAM_PATH = Path(__file__).resolve().parents[2] / "services" / "chat_stream.py"
+_CHAT_STREAM_ENTRY_PATH = Path(__file__).resolve().parents[2] / "services" / "chat_stream_entry.py"
 
 
 def _read_chat_stream_source() -> str:
-    """Read chat_stream.py source for static-assertion tests.
+    """Read chat_stream_entry.py source for static-assertion tests.
 
     Avoids importing the module (which has heavy side effects: DB session,
     LLM clients). The wire contract is encoded in the literal text.
+
+    Post Phase 1.2 split (PR #54 follow-up): the meta frame ternary that
+    was in chat_stream.py moved to chat_stream_entry.py (where the entry
+    StreamEntryMixin now constructs the meta frame). This test still
+    asserts the same constants are referenced verbatim.
     """
-    return _CHAT_STREAM_PATH.read_text(encoding="utf-8")
+    return _CHAT_STREAM_ENTRY_PATH.read_text(encoding="utf-8")
 
 
 def test_chat_stream_uses_meta_intent_constants_for_l1() -> None:

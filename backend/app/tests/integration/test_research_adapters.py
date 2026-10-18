@@ -108,6 +108,7 @@ async def seededAdapters(dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatc
             status="PUBLISHED",
             semantic_keywords=KPI_KEYWORDS,
             match_threshold=Decimal("0.5"),
+            datasource_id=1,
         )
     )
     dbSession.add(

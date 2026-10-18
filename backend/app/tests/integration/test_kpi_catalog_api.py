@@ -277,8 +277,10 @@ class TestKpiCatalogDbConstraints:
         import pytest
 
         bad = KpiCatalog(
+            datasource_id=1,
             kpi_code="KPI_BAD",
             kpi_name="bad",
+            version="1",
             status="BOGUS",  # type: ignore[arg-type]
         )
         dbSession.add(bad)

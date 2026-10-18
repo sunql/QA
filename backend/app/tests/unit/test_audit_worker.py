@@ -32,11 +32,25 @@ from app.workers.audit_worker import AuditWorker, registerSignalHandlers
 
 async def _seedKpi(dbSession: AsyncSession, kpiId: int) -> KpiCatalog:
     """造真实 KPI 行（history 表有 FK 约束，必须真实存在）。"""
+    # Create a minimal DataSource for FK constraint (F2 §5.4)
+    ds = DataSource(
+        name=f"KPI_SEED_DS_{kpiId}",
+        type="postgresql",
+        host="localhost",
+        port=5432,
+        database_name="test",
+        username="test",
+        password_encrypted="test",
+        is_active=True,
+    )
+    dbSession.add(ds)
+    await dbSession.flush()
     kpi = KpiCatalog(
         id=kpiId,
         kpi_code=f"KPI_TEST_{kpiId}",
         kpi_name="回款率",
         revision_count=1,
+        datasource_id=ds.id,
     )
     dbSession.add(kpi)
     await dbSession.commit()

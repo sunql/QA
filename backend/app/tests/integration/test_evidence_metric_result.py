@@ -87,7 +87,7 @@ async def _seedL1HookKpi(dbSession: AsyncSession, *, kpiCode: str):
             is_enabled=True,
         )
     )
-    dbSession.add(KpiCatalog(kpi_code=kpiCode, kpi_name="MR钩子指标", formula=sqlText))
+    dbSession.add(KpiCatalog(kpi_code=kpiCode, kpi_name="MR钩子指标", formula=sqlText, datasource_id=ds.id))
     await dbSession.commit()
 
     from app.domain.models import KpiCatalog as KpiCatalogModel

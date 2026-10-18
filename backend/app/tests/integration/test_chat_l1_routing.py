@@ -60,6 +60,7 @@ async def _seedKpi(dbSession: AsyncSession, **kwargs) -> KpiCatalog:
         business_definition=kwargs.get("business_definition", "这是一个测试指标"),
         formula=kwargs.get("formula"),
         unit=kwargs.get("unit"),
+        datasource_id=kwargs.get("datasource_id"),
         status=KpiStatus.PUBLISHED.value,
         match_threshold=Decimal("0.5"),
         semantic_keywords=kwargs.get("semantic_keywords", ["测试", "指标"]),

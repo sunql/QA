@@ -10,14 +10,17 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient
 from neo4j import Driver, GraphDatabase
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
+from app.domain.models import DataSource, KpiCatalog
 from app.infrastructure import database as dbModule
 from app.infrastructure.llm.embedding_provider_factory import resetEmbeddingClientCache
 from app.infrastructure.security import crypto
@@ -290,3 +293,69 @@ def milvusSeedExternalId(milvusCleanClient):
          "external_id": "obj:metric:5003"},
     ])
     return {"seeded": 3, "external_ids": ["obj:class:5001", "obj:property:5002", "obj:metric:5003"]}
+
+
+# ---------------------------------------------------------------------------
+# KPI Catalog + DataSource fixtures (F2 §5.4)
+# ---------------------------------------------------------------------------
+
+@pytest_asyncio.fixture
+async def seed_data_source(dbSession: AsyncSession) -> DataSource:
+    """F2 §5.4: 默认 is_active=true 的 DataSource fixture。"""
+    ds = DataSource(
+        name="TEST_DS_DEFAULT",
+        type="mysql",
+        host="x", port=3306,
+        database_name="x", username="x",
+        password_encrypted="x",
+        is_active=True,
+    )
+    dbSession.add(ds)
+    await dbSession.commit()
+    await dbSession.refresh(ds)
+    return ds
+
+
+@pytest_asyncio.fixture
+async def seed_inactive_data_source(dbSession: AsyncSession) -> DataSource:
+    """F2 I2: is_active=false 的 DataSource fixture。"""
+    ds = DataSource(
+        name="INACTIVE_TEST_DS",
+        type="mysql",
+        host="x", port=3306,
+        database_name="x", username="x",
+        password_encrypted="x",
+        is_active=False,
+    )
+    dbSession.add(ds)
+    await dbSession.commit()
+    await dbSession.refresh(ds)
+    return ds
+
+
+@pytest_asyncio.fixture
+async def sample_kpi(dbSession: AsyncSession, seed_data_source: DataSource) -> KpiCatalog:
+    """F2 I3: 绑定了 seed_data_source 的 KpiCatalog。"""
+    kpi = KpiCatalog(
+        kpi_code="SAMPLE_KPI_FIXTURE",
+        kpi_name="sample",
+        business_definition="d",
+        formula="SUM(x)",
+        numerator="x",
+        denominator=None,
+        grain="g",
+        unit="u",
+        data_source="legacy_text",
+        owner="o",
+        version="1",  # model: Mapped[str]，不是 int
+        # status 默认 KpiStatus.DRAFT（server_default 也是 DRAFT.value），不传
+        metric_id=None,
+        created_by="u",
+        semantic_keywords=[],
+        match_threshold=Decimal("0.5"),  # Numeric(3,2) → 必须 Decimal
+        datasource_id=seed_data_source.id,
+    )
+    dbSession.add(kpi)
+    await dbSession.commit()
+    await dbSession.refresh(kpi)
+    return kpi

@@ -710,15 +710,31 @@ def _composeImages() -> set[str]:
     return images
 
 
+def _scriptImages() -> set[str]:
+    """从 IMAGES=(...) 数组里取镜像名。
+
+    数组元素带引号（  "postgres:16-alpine" ），正则必须容许首尾引号，
+    否则 listed 恒为空、missing 恒为全集，这个测试就永久失败。
+    """
+    text = SCRIPT.read_text(encoding="utf-8")
+    block = re.search(r"^IMAGES=\((.*?)^\)", text, re.S | re.M)
+    assert block, "找不到 IMAGES=(...) 数组"
+    return set(re.findall(r"""['"]?([a-z0-9._/-]+:[a-zA-Z0-9._-]+)['"]?""",
+                          block.group(1)))
+
+
 def test_script_exists():
     assert SCRIPT.exists(), "build_offline_images.sh 必须存在"
 
 
 def test_script_lists_every_compose_image():
-    text = SCRIPT.read_text(encoding="utf-8")
-    listed = set(re.findall(r"^\s*([a-z0-9._/-]+:[a-zA-Z0-9._-]+)\s*$", text, re.M))
-    missing = _composeImages() - listed
+    missing = _composeImages() - _scriptImages()
     assert not missing, f"脚本漏了这些镜像：{sorted(missing)}"
+
+
+def test_script_parser_is_not_silently_empty():
+    """守卫上面那个引号 bug：解析出 0 个镜像时必须红，而不是让 missing 变成全集。"""
+    assert len(_scriptImages()) >= 8, f"只解析出 {len(_scriptImages())} 个镜像，正则多半坏了"
 
 
 def test_script_forces_amd64_platform():
@@ -807,7 +823,7 @@ echo "把 images.manifest.sha256 一起带走，CentOS 侧要复核"
 chmod +x backend/scripts/build_offline_images.sh
 cd backend && python -m pytest app/tests/unit/test_build_offline_images.py -v
 ```
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 5: 联网机上真跑**
 

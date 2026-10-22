@@ -1268,20 +1268,51 @@ ssh root@<centos> 'cd /opt/qa/docker && \
 ```python
 """复用键指纹比对。
 
-两条不可让步的性质：
-1. 任何输出都不含密钥明文
-2. CRLF 造成的假不一致必须被识别出来（否则运维会去查一个不存在的问题）
+三条不可让步的性质：
+1. 任何输出（stdout / stderr / 异常消息）都不含密钥明文
+2. CRLF 行尾被归一，不能因此报出「假不一致」（否则运维会去查一个不存在的问题）
+3. 失败原因必须能区分开：读不到文件（3）≠ 用法错（2）≠ 键不一致（1）
+   —— 运维只看得懂退出码，混成一个「非零」会让他去查一个不存在的不一致
 """
 
 from __future__ import annotations
+
+import pytest
 
 from scripts.verify_env_keys import (
     REUSE_KEYS,
     compare,
     extractValues,
+    findEmptyValues,
     fingerprint,
     main,
+    parseEnvFile,
+    render,
 )
+
+# sha256("")[:12] —— 空值指纹。缺失/空值一旦被当成正常指纹渲染出来，
+# 报告里就会出现两行一模一样的 12 位十六进制，运维无从判断该不该动手。
+EMPTY_FP = "e3b0c44298fc"
+
+
+def _allKeysDict() -> dict[str, str]:
+    """4 个复用键齐备、无空值无重复的键值表。"""
+    return {
+        "SECRET_KEY": "a",
+        "NEO4J_PASSWORD": "b",
+        "MINIO_ROOT_USER": "c",
+        "MINIO_ROOT_PASSWORD": "d",
+    }
+
+
+def _envBody(secretKey: str = "a") -> str:
+    """4 个复用键齐备的 .env 文本。"""
+    return (
+        f"SECRET_KEY={secretKey}\n"
+        "NEO4J_PASSWORD=b\n"
+        "MINIO_ROOT_USER=c\n"
+        "MINIO_ROOT_PASSWORD=d\n"
+    )
 
 
 def test_reuse_keys_are_exactly_the_four_from_spec():
@@ -1330,29 +1361,57 @@ def test_extract_last_wins_on_duplicate_key():
 
 
 def test_compare_reports_all_keys_not_just_the_first_diff():
-    src = {"SECRET_KEY": "a", "NEO4J_PASSWORD": "b", "MINIO_ROOT_USER": "c",
-           "MINIO_ROOT_PASSWORD": "d"}
-    dst = dict(src, SECRET_KEY="WRONG")
+    """必须报**全部**不一致项，且顺序跟随 REUSE_KEYS。
+
+    旧版这条测试只让 1 个键不同，于是「只返回第一处不一致」的实现照样绿 ——
+    名字宣称的行为根本没被测到。这里让 2 个键不同并逐项断言。
+    """
+    src = _allKeysDict()
+    dst = dict(src, SECRET_KEY="WRONG1", MINIO_ROOT_PASSWORD="WRONG4")
     mismatches = compare(src, dst)
-    assert mismatches == [("SECRET_KEY", fingerprint("a"), fingerprint("WRONG"))]
+    assert mismatches == [
+        ("SECRET_KEY", fingerprint("a"), fingerprint("WRONG1")),
+        ("MINIO_ROOT_PASSWORD", fingerprint("d"), fingerprint("WRONG4")),
+    ], "两处不一致都要报，且顺序必须跟随 REUSE_KEYS"
 
 
 def test_compare_empty_on_full_match():
-    src = {"SECRET_KEY": "a", "NEO4J_PASSWORD": "b", "MINIO_ROOT_USER": "c",
-           "MINIO_ROOT_PASSWORD": "d"}
-    assert compare(src, src) == []
+    assert compare(_allKeysDict(), _allKeysDict()) == []
 
 
 def test_missing_key_is_reported_not_silently_skipped():
-    src = {"SECRET_KEY": "a", "NEO4J_PASSWORD": "b", "MINIO_ROOT_USER": "c",
-           "MINIO_ROOT_PASSWORD": "d"}
-    mismatches = compare(src, {})
+    mismatches = compare(_allKeysDict(), {})
     assert len(mismatches) == 4, "缺失必须报，不能当作一致"
+
+
+def test_compare_marks_missing_dest_side_as_none_not_empty_fingerprint():
+    """目标侧缺失必须是 None，不是 fingerprint("")。
+
+    否则报告里会出现「源端=目标端=e3b0c44298fc」两行一样的值，
+    运维看到会以为「这俩一样，是误报」。
+    """
+    mismatches = compare(_allKeysDict(), {})
+    assert mismatches == [
+        ("SECRET_KEY", fingerprint("a"), None),
+        ("NEO4J_PASSWORD", fingerprint("b"), None),
+        ("MINIO_ROOT_USER", fingerprint("c"), None),
+        ("MINIO_ROOT_PASSWORD", fingerprint("d"), None),
+    ]
+    assert EMPTY_FP not in [fp for _, _, fp in mismatches if fp]
+
+
+def test_compare_marks_missing_source_side_as_none():
+    mismatches = compare({}, _allKeysDict())
+    assert mismatches == [
+        ("SECRET_KEY", None, fingerprint("a")),
+        ("NEO4J_PASSWORD", None, fingerprint("b")),
+        ("MINIO_ROOT_USER", None, fingerprint("c")),
+        ("MINIO_ROOT_PASSWORD", None, fingerprint("d")),
+    ]
 
 
 def test_render_output_contains_only_fingerprints():
     """报告里只能出现指纹。若有人后来加了「顺手打印明文方便排查」，这里会红。"""
-    from scripts.verify_env_keys import render
     report = render([("SECRET_KEY", fingerprint("real-secret"), fingerprint("wrong-secret"))])
     assert "SECRET_KEY" in report
     assert "real-secret" not in report
@@ -1360,26 +1419,63 @@ def test_render_output_contains_only_fingerprints():
     assert fingerprint("wrong-secret") in report
 
 
+def test_render_missing_side_shows_marker_not_empty_fingerprint():
+    """缺失侧渲染成「缺失」字样，绝不能让空值指纹冒充成一个真实指纹。"""
+    report = render([("SECRET_KEY", None, fingerprint("real"))])
+    assert "SECRET_KEY" in report
+    assert "缺失" in report
+    assert EMPTY_FP not in report, "缺失侧不得渲染成 fingerprint('')"
+
+
+def test_render_missing_dest_side_shows_marker():
+    report = render([("NEO4J_PASSWORD", fingerprint("real"), None)])
+    assert "缺失" in report
+    assert EMPTY_FP not in report
+    assert fingerprint("real") in report
+
+
 def test_render_on_match_prints_no_secret_names():
-    from scripts.verify_env_keys import render
     out = render([])
     assert out.strip().endswith("✓")
     for key in REUSE_KEYS:
         assert key not in out
 
 
+def test_find_empty_values_flags_both_sides_empty():
+    """两端都空 —— 判一致可以，但空 SECRET_KEY 当 Fernet 主密钥是不能用的。"""
+    assert findEmptyValues({"SECRET_KEY": "", "NEO4J_PASSWORD": "b"}, dict(
+        {"SECRET_KEY": "", "NEO4J_PASSWORD": "b"})) == ["SECRET_KEY"]
+    assert findEmptyValues({"SECRET_KEY": ""}, {"SECRET_KEY": "x"}) == []
+
+
+def test_empty_value_on_both_sides_warns_but_still_exits_zero(tmp_path, capsys):
+    src, dst = tmp_path / "a.env", tmp_path / "b.env"
+    body = "SECRET_KEY=\nNEO4J_PASSWORD=b\nMINIO_ROOT_USER=c\nMINIO_ROOT_PASSWORD=d\n"
+    src.write_text(body, encoding="utf-8")
+    dst.write_text(body, encoding="utf-8")
+    assert main(["prog", str(src), str(dst)]) == 0
+    out = capsys.readouterr().out
+    assert "WARN" in out, "两端都空必须留一条告警，否则空 SECRET_KEY 会被无声放行"
+    assert "全部一致" in out
+
+
 def test_parse_env_file_reads_from_disk(tmp_path):
     """parseEnvFile 是唯一碰文件系统的入口，不能只测不覆盖。"""
-    from scripts.verify_env_keys import parseEnvFile
     p = tmp_path / ".env"
     p.write_text("# c\nSECRET_KEY=abc\n", encoding="utf-8")
     assert parseEnvFile(p) == {"SECRET_KEY": "abc"}
 
 
+def test_parse_env_file_raises_oserror_on_missing_path(tmp_path):
+    """parseEnvFile 不吞异常 —— 把「读不到」映射成退出码是 main 的职责。"""
+    with pytest.raises(OSError):
+        parseEnvFile(tmp_path / "nope.env")
+
+
 def test_main_exit_code_zero_on_match(tmp_path, capsys):
     """退出码是这个脚本唯一的交付物 —— 门禁脚本靠它，不靠人眼看输出。"""
     src, dst = tmp_path / "a.env", tmp_path / "b.env"
-    body = "SECRET_KEY=a\nNEO4J_PASSWORD=b\nMINIO_ROOT_USER=c\nMINIO_ROOT_PASSWORD=d\n"
+    body = _envBody()
     src.write_text(body, encoding="utf-8")
     dst.write_text(body, encoding="utf-8")
     assert main(["prog", str(src), str(dst)]) == 0
@@ -1388,21 +1484,78 @@ def test_main_exit_code_zero_on_match(tmp_path, capsys):
 
 def test_main_exit_code_one_on_mismatch(tmp_path, capsys):
     src, dst = tmp_path / "a.env", tmp_path / "b.env"
-    src.write_text("SECRET_KEY=a\nNEO4J_PASSWORD=b\nMINIO_ROOT_USER=c\n"
-                   "MINIO_ROOT_PASSWORD=d\n", encoding="utf-8")
-    dst.write_text("SECRET_KEY=WRONG\nNEO4J_PASSWORD=b\nMINIO_ROOT_USER=c\n"
-                   "MINIO_ROOT_PASSWORD=d\n", encoding="utf-8")
+    src.write_text(_envBody(), encoding="utf-8")
+    dst.write_text(_envBody("WRONG"), encoding="utf-8")
+    assert main(["prog", str(src), str(dst)]) == 1
+    captured = capsys.readouterr()
+    assert "DIFF" in captured.out
+    assert "WRONG" not in captured.out, "不一致时 stdout 也不许回显明文"
+    assert "WRONG" not in captured.err, "stderr 同样不许回显明文"
+    assert captured.err.strip() == "", "比对报告只走 stdout；stderr 留给真正的错误"
+
+
+def test_main_reports_missing_key_as_marker_not_empty_fingerprint(tmp_path, capsys):
+    """端到端：目标侧缺 SECRET_KEY 时，运维看到的报告里必须是「缺失」。
+
+    若渲染成 fingerprint("")，报告会印出「源端=目标端=e3b0c44298fc」两行一样的值，
+    运维会认为「这俩本来就一样，是误报」，从而放行一个缺密钥的迁移。
+    """
+    src, dst = tmp_path / "a.env", tmp_path / "b.env"
+    src.write_text(_envBody(), encoding="utf-8")
+    dst.write_text("NEO4J_PASSWORD=b\nMINIO_ROOT_USER=c\nMINIO_ROOT_PASSWORD=d\n",
+                   encoding="utf-8")
     assert main(["prog", str(src), str(dst)]) == 1
     out = capsys.readouterr().out
-    assert "DIFF" in out
-    assert "WRONG" not in out, "不一致时也不许回显明文"
+    assert "SECRET_KEY" in out
+    assert "缺失" in out
+    assert EMPTY_FP not in out, "缺失侧渲染成空值指纹，运维会误以为两端相同"
 
 
 def test_main_exit_code_two_on_bad_usage(capsys):
     """参数个数不对必须与「比对不一致」区分开 —— 否则门禁会把用法错误读成迁移失败。"""
     assert main(["prog"]) == 2
     assert capsys.readouterr().err.strip() != ""
+
+
+def test_main_exit_code_three_on_unreadable_env(tmp_path, capsys):
+    """读不到 .env 必须有自己的退出码。
+
+    真实故障：operator 的 scp 失败或路径写错。若这里沿用 1，门禁读成
+    「有键不一致」，而 stdout 里一行 DIFF 都没有 —— 运维会去查一个不存在的问题。
+    """
+    src = tmp_path / "a.env"
+    src.write_text(_envBody(), encoding="utf-8")
+    assert main(["prog", str(src), str(tmp_path / "nope.env")]) == 3
+    captured = capsys.readouterr()
+    assert captured.err.strip() != "", "读不到文件要有可读的原因"
+    assert captured.out.strip() == "", "读不到文件时不得输出比对报告，否则会被误读成结论"
+
+
+def test_exit_codes_three_two_one_zero_are_all_distinguishable(tmp_path):
+    """四条路径的退出码两两不同 —— 门禁只能靠退出码分类。"""
+    good = tmp_path / "good.env"
+    good.write_text(_envBody(), encoding="utf-8")
+    bad = tmp_path / "bad.env"
+    bad.write_text(_envBody("WRONG"), encoding="utf-8")
+    missing = tmp_path / "missing.env"
+
+    assert main(["prog"]) == 2
+    assert main(["prog", str(good), str(missing)]) == 3
+    assert main(["prog", str(good), str(bad)]) == 1
+    assert main(["prog", str(good), str(good)]) == 0
+
+
+def test_io_error_message_carries_no_secret_value(tmp_path, capsys):
+    """IO 错误消息只能带 errno + 路径，绝不能带任何值。"""
+    rawValue = "SUPER-SECRET-NEVER-PRINT"
+    src = tmp_path / "a.env"
+    src.write_text(_envBody(rawValue), encoding="utf-8")
+    assert main(["prog", str(src), str(tmp_path / "nope.env")]) == 3
+    captured = capsys.readouterr()
+    assert rawValue not in captured.err, "IO 错误消息不得回显任何值"
+    assert rawValue not in captured.out
 ```
+
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1419,20 +1572,28 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'scripts.verify_env_
 """比对源端与 CentOS 侧 .env 中的复用键。
 
 4 个值必须逐字复用（spec §7.1）。肉眼在 44 位 base64 上发现不了抄错，
-本脚本比对 sha256 指纹，且**任何输出都不含明文**。
+本脚本比对 sha256 指纹，且**任何输出都不含明文**（stdout / stderr / 异常消息）。
 
 ⚠️ spec §7.1 正文写「5 个」，但同段 `REUSE_KEYS` 只列 4 个 —— 个数是 spec 笔误，
 以 `REUSE_KEYS` 为准（测试 `test_reuse_keys_are_exactly_the_four_from_spec` 钉死）。
 
 用法：
     python -m scripts.verify_env_keys <源端.env> <centos.env>
-退出码 0 = 全一致；1 = 有缺失或不一致。
+
+退出码（运维只看这个，四条路径两两可分）：
+    0 = 4 个复用键全一致
+    1 = 有缺失或不一致
+    2 = 参数个数不对（用法错）
+    3 = .env 读不到（路径不存在 / 无权限 / 是个目录）
+
+2 与 3 必须与 1 分开：若 `scp` 失败被读成 1，运维会去找一个根本不存在的不一致。
 """
 
 from __future__ import annotations
 
 import hashlib
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 # spec §7.1：只有 POSTGRES_PASSWORD / JWT_SECRET 可以换新
@@ -1443,6 +1604,17 @@ REUSE_KEYS: tuple[str, ...] = (
     "MINIO_ROOT_PASSWORD",
 )
 
+# 缺失侧渲染成这个字样，而不是 fingerprint("")。
+# 两者指纹相同（都是 sha256("")[:12]）的话，报告里会出现两行一模一样的值，
+# 运维看到「源端=目标端」会以为匹配、是误报。
+MISSING_MARKER = "缺失"
+
+# main() 的退出码
+EXIT_OK = 0
+EXIT_MISMATCH = 1
+EXIT_BAD_USAGE = 2
+EXIT_UNREADABLE = 3
+
 
 def fingerprint(value: str) -> str:
     """值的 sha256 前 12 位。仅用于比对，不泄露明文。"""
@@ -1450,7 +1622,12 @@ def fingerprint(value: str) -> str:
 
 
 def extractValues(text: str) -> dict[str, str]:
-    """解析 .env。只认第一行出现的键；剥 CR、去首尾引号。"""
+    """解析 .env；剥 CR、去首尾引号。
+
+    重复键**后出现者胜**（与 docker compose 一致）：docker/.env 里 NEO4J_PASSWORD
+    出现两次，compose 用的是最后那个值，这里若取首个就会比对一个 compose 根本没在
+    用的值，报出运维查不出来的「不一致」。测试 `test_extract_last_wins_on_duplicate_key` 钉死。
+    """
     out: dict[str, str] = {}
     for line in text.splitlines():
         stripped = line.strip()
@@ -1462,23 +1639,45 @@ def extractValues(text: str) -> dict[str, str]:
 
 
 def parseEnvFile(path: str | Path) -> dict[str, str]:
+    """读一个 .env。读不到就抛 OSError —— 映射成退出码是 main 的职责。"""
     return extractValues(Path(path).read_text(encoding="utf-8", errors="replace"))
 
 
-def compare(src: dict[str, str], dst: dict[str, str]) -> list[tuple[str, str, str]]:
-    """返回全部不一致项 (key, 源端指纹, 目标端指纹)。缺失也计入。"""
-    mismatches: list[tuple[str, str, str]] = []
+def compare(src: dict[str, str], dst: dict[str, str]) -> list[tuple[str, str | None, str | None]]:
+    """返回全部不一致项 (key, 源端指纹, 目标端指纹)；缺失侧用 None。
+
+    缺失也计入不一致 —— 缺失的 .env 绝不等于「键一致」。
+    """
+    mismatches: list[tuple[str, str | None, str | None]] = []
     for key in REUSE_KEYS:
         a, b = src.get(key), dst.get(key)
         if a is None or b is None or fingerprint(a) != fingerprint(b):
-            mismatches.append((key, fingerprint(a or ""), fingerprint(b or "")))
+            mismatches.append((key, None if a is None else fingerprint(a),
+                               None if b is None else fingerprint(b)))
     return mismatches
 
 
-def render(mismatches: list[tuple[str, str, str]]) -> str:
+def findEmptyValues(src: dict[str, str], dst: dict[str, str]) -> list[str]:
+    """两端都在但都是空值的复用键。
+
+    空值 == 空值，按「同值」判一致（不因此报 DIFF），但必须告警：
+    空 SECRET_KEY 不能当 Fernet 主密钥用，会让 5 个数据源密码 + 6 个 LLM key 不可解。
+    """
+    return [key for key in REUSE_KEYS
+            if src.get(key) == "" and dst.get(key) == ""]
+
+
+def render(mismatches: list[tuple[str, str | None, str | None]],
+           emptyKeys: Sequence[str] = ()) -> str:
     lines = ["复用键指纹比对结果（只显示指纹，无明文）："]
     for key, srcFp, dstFp in mismatches:
-        lines.append(f"  DIFF  {key}\n          源端={srcFp}\n          目标={dstFp}")
+        lines.append(
+            f"  DIFF  {key}\n"
+            f"          源端={MISSING_MARKER if srcFp is None else srcFp}\n"
+            f"          目标={MISSING_MARKER if dstFp is None else dstFp}"
+        )
+    for key in emptyKeys:
+        lines.append(f"  WARN  {key}：两端都是空值，按同值判一致；但空 SECRET_KEY 不能当 Fernet 主密钥")
     if not mismatches:
         lines.append("  全部一致 ✓")
     return "\n".join(lines)
@@ -1487,31 +1686,51 @@ def render(mismatches: list[tuple[str, str, str]]) -> str:
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
         print("用法：python -m scripts.verify_env_keys <源端.env> <centos.env>", file=sys.stderr)
-        return 2
-    mismatches = compare(parseEnvFile(argv[1]), parseEnvFile(argv[2]))
-    print(render(mismatches))
-    return 1 if mismatches else 0
+        return EXIT_BAD_USAGE
+    try:
+        src = parseEnvFile(argv[1])
+        dst = parseEnvFile(argv[2])
+    except OSError as exc:
+        # 只带 errno 与路径，不含任何文件内容。退出码单列，否则「scp 失败」
+        # 会被门禁读成「键不一致」，运维去查一个不存在的问题。
+        print(f"读取 .env 失败：{exc}", file=sys.stderr)
+        return EXIT_UNREADABLE
+    mismatches = compare(src, dst)
+    print(render(mismatches, findEmptyValues(src, dst)))
+    return EXIT_MISMATCH if mismatches else EXIT_OK
 
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv))
 ```
 
+
 - [ ] **Step 4: 跑测试确认通过**
 
 ```bash
 cd backend && python -m pytest app/tests/unit/test_verify_env_keys.py -v
 ```
-Expected: 16 passed
+Expected: 27 passed
 
 - [ ] **Step 5: 真实比对**
 
 ```bash
 scp root@<centos>:/opt/qa/docker/.env /tmp/centos.env
 cd backend && python -m scripts.verify_env_keys ../docker/.env /tmp/centos.env
-echo "exit=$?"
+rc=$?
+echo "exit=$rc"
+case "$rc" in
+  0) echo "OK：4 个复用键全一致" ;;
+  1) echo "FAIL：有缺失或不一致 —— 看上面逐项 DIFF（缺失侧显示「缺失」）"; exit 1 ;;
+  2) echo "FAIL：用法错，参数个数不对"; exit 1 ;;
+  3) echo "FAIL：.env 读不到 —— 多半是上一行 scp 失败或路径写错，**不是**密钥不一致"; exit 1 ;;
+  *) echo "FAIL：未知退出码 $rc"; exit 1 ;;
+esac
 ```
-**门禁**：输出「全部一致 ✓」，exit=0。
+**门禁**：`OK：4 个复用键全一致`，`exit=0`。
+> 四个退出码必须分开看。早期版本读不到文件时也返回 1，于是 `scp` 失败会被
+> 门禁读成「有不一致」—— 运维去找一个不存在的不一致，正是这个脚本要防的事。
+> 所以 **3 必须单独判**，不要写成 `test "$rc" -eq 0` 之外再靠人眼读数字。
 > 不一致时**不要**手工比对明文 —— 改用脚本的逐项定位，或直接重新从源端 `docker/.env` 复制那一个键。
 > ⚠️ 不要用 `git show` 取值：`docker/.env` 已 gitignore（`.gitignore:46`），那只会拿到仓库里的占位符。
 

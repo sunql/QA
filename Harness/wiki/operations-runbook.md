@@ -10,6 +10,96 @@ docker compose -f docker/docker-compose.yml --env-file docker/.env up -d
 服务端口：
 - 前端 5173、后端 8000(/docs)、PostgreSQL **5433**（容器 5432 映射到宿主 5433，避 OpenMetadata 占用；详见下方「迁移与端口映射」）、Neo4j 7474/7687、Milvus 19530、MySQL 3306。
 
+## 部署（2026-10-22）
+
+### 构建源必须是干净的 git worktree
+
+`docker/docker-compose.yml` 里 backend/frontend 的 build context 是仓库根，
+所以**你执行 build 的那个目录的 checkout，就是会被烤进镜像的源码**。
+
+**不要从主仓直接构建。** 2026-10-22 实测踩中：主仓当时停在 detached HEAD
+`9cdd934c`，比 `origin/main` 落后 5 天，且**不含** `0132` 迁移 —— 而 prod 的
+`alembic_version` 已经是 `0132`。`Dockerfile.backend` 的 CMD 是
+`alembic upgrade head && uvicorn`，用它重建后重启会 `Can't locate revision`
+→ `&&` 短路 → uvicorn 根本不起 → 整个后端挂掉。
+
+主仓还会积累本地 artifact（`backend/.env`、`.pytest_cache/`、`.coverage`、
+`.DS_Store`），worktree 天然没有这些。
+
+```bash
+git worktree prune
+git worktree add --detach /private/tmp/qa-deploy-$(date +%Y%m%d) origin/main
+cp <主仓>/docker/.env /private/tmp/qa-deploy-.../docker/.env   # gitignored，必须拷
+```
+
+### 标准部署步骤
+
+```bash
+cd /private/tmp/qa-deploy-YYYYMMDD/docker
+
+# 1. 回滚锚点（旧镜像别变成 dangling）
+docker tag qa-system-backend:latest  qa-system-backend:pre-deploy-YYYYMMDD
+docker tag qa-system-frontend:latest qa-system-frontend:pre-deploy-YYYYMMDD
+
+# 2. 构建（项目名 qa-system 硬编码在 compose 顶部，换目录不会另起一套栈）
+docker compose --env-file .env build backend frontend
+
+# 3. 密钥 preflight（见下节），不过就不要往下走
+
+# 4. 换容器。用 stop 不要用 down —— 同栈 postgres/neo4j/milvus 都在这个 network 上
+docker compose --env-file .env stop backend frontend
+docker compose --env-file .env up -d backend frontend
+```
+
+后端镜像重建实测 ~9 分钟（apt + uv sync 层会 miss cache），别当卡死。
+
+### 部署前必须过：镜像密钥 preflight
+
+`.dockerignore` 排的是 build context，而 `Dockerfile.backend` 里
+`COPY backend/ ./` 会把整个 `backend/` 塞进镜像。`backend/.env` 被 `.gitignore`
+挡住所以不会进版本库，但**它照样会进 build context** —— 2026-10-22 发现
+`.dockerignore` 当时没有任何 `.env` 规则，装 `localhost:5433` dev 库凭据的
+`.env` 会被烤进镜像。
+
+```bash
+uv run python backend/scripts/preflight_image_secrets.py          # 默认 qa-system-backend:latest
+uv run python backend/scripts/preflight_image_secrets.py <image>  # 或指定镜像
+```
+
+预期（干净镜像）：
+
+```
+[PASS] no_secret_env_files: 镜像 qa-system-backend:latest 内未发现敏感 .env
+[PASS] env_example_present: 模板 .env.example 在位，探针有效
+```
+
+任一 FAIL → **不要部署**。第一项 FAIL 说明 `.env` 已在镜像里，重建并轮换凭据。
+
+第二项是**反向守卫**，不是凑数：`.env.example` 必须存在，否则说明探针本身
+失效了，第一项会因为「没查到东西」而静默 PASS。
+
+**这不影响运行时**：`app/config.py` 的 pydantic `env_file=".env"` 只是兜底，
+进程环境变量优先；compose 用 `env_file: - .env`（即 `docker/.env`）注入配置。
+镜像里没有 `/app/.env` 容器照样正常跑。
+
+### 部署后核对
+
+```bash
+docker diff qa-backend | grep -cE '^[CA]'          # 应为 0（容器与镜像零漂移）
+docker exec qa-backend alembic current              # 应为 head，且与部署前一致
+curl -s http://localhost:8000/openapi.json | python3 -c "import sys,json;print(len(json.load(sys.stdin)['paths']))"
+curl -s http://localhost:5173/ | grep -oE 'index-[A-Za-z0-9_-]+\.js'   # bundle hash 应变化
+```
+
+探针要用**基线为 0、新树 >0** 的串（否则证明不了什么），并且**旧容器上先跑一遍
+对照**：
+
+```bash
+docker exec qa-backend grep -c '<探针串>' /app/app/services/chat_context.py
+```
+
+openapi paths 数只做「不降」检查；本次改动若不涉及路由，数目本就该不变。
+
 ## 本地开发
 
 ```bash

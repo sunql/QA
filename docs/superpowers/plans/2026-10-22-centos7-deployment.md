@@ -975,12 +975,19 @@ echo "== 校验和 =="
 cd "$OUT_DIR"
 sha256sum ./*.tar > images.manifest.sha256
 
-# ⚠️ 顺手把每个镜像的**解析后 digest** 记下来。`ollama/ollama:latest` 是浮动 tag：
+# ⚠️ 顺手把每个镜像的**镜像 ID** 记下来。`ollama/ollama:latest` 是浮动 tag：
 # 今天造的离线包和三个月后重建的同名 tag 未必是同一个镜像层，而 CentOS 是内网隔离的，
 # 拉不到、也换不了 —— 届时没有任何手段确认装的到底是哪个版本。
-docker images --digests --format '{{.Repository}}:{{.Tag}}@{{.ID}}' \
+# 用 `.ID`（镜像 config 的短 sha）而不是 `RepoDigest`：从 tar `docker load` 进来的镜像
+# **没有** RepoDigests，比对它必然两边都空 ⇒ 恒过。
+docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
   | grep -v '<none>' | sort > images.digests.txt
 cat images.digests.txt
+# ⚠️ 必须硬断言，不要只 `wc -l` 打个数字：格式串写错 / 匹配全被 grep 掉时
+# 这个文件会是空的，而下游所有按它做的比对都会「空空如也 ⇒ 通过」。
+n=$(wc -l < images.digests.txt)
+[ "$n" -ge 11 ] || { echo "ABORT: images.digests.txt 只有 $n 行，期望 >= 11"; exit 1; }
+echo "镜像 ID 记录 $n 行"
 
 echo "== 完成 =="
 ls -lh "$OUT_DIR"
@@ -1007,16 +1014,32 @@ ssh root@<centos> 'cd /opt/qa-transfer/images && sha256sum -c images.manifest.sh
 # 证明不了 load 进去的是同一个镜像
 scp /opt/qa-transfer/images/images.digests.txt root@<centos>:/opt/qa-transfer/images/
 ssh root@<centos> 'cd /opt/qa-transfer/images && \
-  docker images --format "{{.Repository}}:{{.Tag}}@{{.ID}}" | grep -v "<none>" | sort \
-  | diff - images.digests.txt && echo "DIGEST-OK"'
+  [ -s images.digests.txt ] || { echo "ABORT: images.digests.txt 缺失或为空 —— 无从核对镜像 ID"; exit 1; } && \
+  docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | grep -v "<none>" | sort \
+    > /tmp/centos-images.txt && \
+  if comm -13 /tmp/centos-images.txt images.digests.txt | grep -q .; then \
+    echo "DIGEST-MISMATCH —— 下列镜像在 CentOS 上的 ID 与源端记录不符（或根本没装上）："; \
+    comm -13 /tmp/centos-images.txt images.digests.txt; \
+  else echo "DIGEST-OK"; fi'
 ```
-**门禁**：`DIGEST-OK`。`diff` 有输出就说明某个镜像的 ID 与源端不符
-（浮动 tag 在造包与装载之间被更新过，或 tar 与记录对不上），**停下查清楚再继续**。
+**门禁 1**：`sha256sum -c` 全过。
+**门禁 2**：`DIGEST-OK`。
+**门禁 3**：转移包里有且仅有 **11 个**镜像。
+> ⚠️ 这里必须用 `comm -13` 单向比对，**不能用 `diff -`**：`diff` 比的是两边全集，
+> 而 CentOS 上还可能有跟转移包无关的镜像（装 Docker 时拉的 base 镜像等），
+> 那些多出来的行会让 `diff` 永远非空 ⇒ 门禁恒红。反过来，`comm -13 f1 f2`
+> 只列「在 f2 里但不在 f1 里」的行，正好等于「该在却不在、或 ID 对不上」。
+>
+> 四个方向都实跑验证过：ID 漂移 ⇒ 报出来；镜像缺失 ⇒ 报出来；宿主多出无关镜像 ⇒ 放行；
+> **`images.digests.txt` 为空 ⇒ 会假绿**（`comm` 两边都没东西可比，必然空输出 ⇒ OK）。
+> 最后一条是 `comm` 形状自带的坑，所以上面那句 `[ -s images.digests.txt ]` 前置断言
+> 是这条门禁的组成部分，不是可选的健壮性装饰。
+>
 > 这条不是形式检查：`ollama/ollama:latest` 是浮动 tag，Task 5 的 `docker run … ollama pull`
 > 与 Task 4 的 `docker save` 之间只要有一次 pull，就可能出现两者不是同一层的情况，
 > 而 CentOS 内网拉不到、也换不了。
 
-**门禁**：`sha256sum -c` 全过，且 `docker images` 共列出 **11 个**镜像：
+11 个镜像的来源：
 
 | 来源 | 个数 | 清单 |
 |---|---|---|
@@ -1028,10 +1051,17 @@ ssh root@<centos> 'cd /opt/qa-transfer/images && \
 > Task 9 的三条前置断言和卷导入全靠它做 helper 容器，离线机上漏了它，
 > Task 9 会在第一条断言就报 `Unable to find image 'alpine:3.20'`。
 >
-> 逐条数而不是只数个数：
+> 逐条数而不是只数个数，且**数转移包里的、不是数 CentOS 全部镜像**：
 > ```bash
-> ssh root@<centos> 'docker images --format "{{.Repository}}:{{.Tag}}" | grep -v "<none>" | sort | wc -l'   # 期望 11
+> ssh root@<centos> 'cd /opt/qa-transfer/images && \
+>   n=$(wc -l < images.digests.txt); echo "转移包镜像数=$n"; \
+>   [ "$n" -eq 11 ] || { echo "ABORT: 期望 11 个，实际 $n 个"; exit 1; }'
 > ```
+> 门禁 2 已经逐个确认过这 11 个都在、且 ID 对得上，所以门禁 3 只需锁住「不多不少」。
+> ⚠️ 不要写成 `ssh … 'docker images … | wc -l'` —— 那数的是 CentOS 上**所有**镜像，
+> 装 Docker 过程本身可能拉进来无关镜像，个数就不止 11，门禁恒红。
+> 多一个镜像意味着 overlay/base compose 的 `image:` 引用表和离线包对不上，
+> 那正是这套门禁要抓的。
 
 - [ ] **Step 6: 【硬门禁】逐镜像真跑一遍**
 

@@ -520,10 +520,26 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // 仅在已有对话时换 sessionId：空会话上无谓换 id 反而把上层 / 测试传的 s-test 之类
     // 锚点丢掉，且语义上「无旧 state 可清」本就允许沿用。
     const hasConversation = get().messages.length > 0;
+    // 兑现 :96 的不变量——切数据源正是「要重新决定屏幕上显示哪个会话」的动作。
+    // 不清的话，在途 loadSessionMessages 的 `seq !== sessionLoadSeq` 过期检查会放行，
+    // 上一个数据源的会话消息在切换之后落进新数据源（跨数据源串台）。
+    invalidatePendingLoads();
+    // loading 不清 ⇒ sendMessage 的 `if (loading) return` 让新数据源在整个在途
+    // 请求返回前不可用；error 不清 ⇒ 旧数据源的错误横幅跟着切过来；
+    // currentAssistantMessageId 不清 ⇒ 下一条消息的 P1-3 中止分支会去标新列表里的
+    // 消息（此时 messages 已清空，标不到任何东西，但会把意图留在旧 id 上）。
+    // 在途流自己的 handler 仍可能回调，但它们按 assistantMessageId 定位，
+    // 消息列表已空 ⇒ patchMessage 退化为恒等变换，不会把旧数据写进新会话。
+    // 注意 sessions / sessionsError 故意不清：历史列表只按 channel 过滤
+    // (api/chatHistory.ts:16)，不按数据源分域，清了会毁掉用户还能回去的合法历史。
     set({
       datasourceId: id,
       ...(hasConversation ? { sessionId: generateSessionId() } : {}),
       messages: [],
+      loading: false,
+      error: null,
+      currentAssistantMessageId: null,
+      interrupted: false,
     });
   },
 

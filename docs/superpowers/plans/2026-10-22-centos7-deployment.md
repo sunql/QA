@@ -757,8 +757,35 @@ test "$(docker compose -f docker/docker-compose.yml -f docker/docker-compose.cen
   || { echo "FAIL: mysql_data 被误删，MySQL 数据将落容器可写层"; exit 1; }
 ```
 
+```bash
+# 6.4 `!override` 标签本身必须在位（查 overlay 源文件，不是查合并结果 ——
+#     合并结果里 compose 已经把它解析掉了，根本看不到这个标签）
+test "$(grep -cE '^[[:space:]]*volumes: !override[[:space:]]*$' \
+        docker/docker-compose.centos.yml)" -eq 1 \
+  && echo "OK: !override 标签在位" \
+  || { echo "FAIL: !override 标签缺失或不精确"; exit 1; }
+```
+
 **反向自检**（防止 6.2 又变成假绿）：临时把 overlay 里的 `!override` 删掉，让
 bind mount 回来，重跑 6.2 —— 必须报 `FAIL`。恢复后再跑一次，必须报 `OK`。
+
+> ⚠️ **6.2 单独不够，必须配 6.4。** 6.2 查的是**合并结果**，而合并结果里
+> `!override` 已经被 compose 解析掉了 —— 标签丢没丢，6.2 只能从「bind mount 回没回来」
+> 间接推断。实测三种坏法：
+>
+> | overlay 写法 | 6.2（查合并结果） | 6.4（查源文件） |
+> |---|---|---|
+> | `volumes: !override` | OK | OK |
+> | `volumes:`（标签删了） | **FAIL** | FAIL |
+> | `volumes: !overide`（拼错） | **OK —— bind mount 已悄悄回来** | FAIL |
+> | `volumes: !override []`（空列表） | OK（数据卷也一起没了） | FAIL |
+>
+> 拼错这一行最危险：`docker compose config` 对**未知 tag** 是 rc=0、stderr 为空、
+> 按普通列表处理 —— 完全静默，Mac 侧和 CentOS 侧表现一致，没人看得出来。
+> 而 `!override` 一丢，SELinux 要命的那个 bind mount 就原样回到生产机上。
+>
+> 这也是本仓没有 CI（无 `.github/workflows`）的代价：那 8 条单测不会被自动重跑，
+> 本步的 6.4 是部署当天唯一一次会真正执行的断言。
 
 > ⚠️ **`!override` 是长期维护债，改主 compose 时必须同步。**
 > 它是**整字段替换**：overlay 里 `mysql-demo.volumes` 写死成 `[mysql_data:/var/lib/mysql]`。

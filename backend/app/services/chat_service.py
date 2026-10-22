@@ -265,6 +265,11 @@ from app.services.chat_context import (
 )
 from app.services.chat_usage import UsageMixin
 from app.services.chat_stream import StreamMixin
+from app.services.chat_stream_entry import StreamEntryMixin
+from app.services.chat_stream_multistep import StreamMultiStepMixin
+from app.services.chat_stream_persist import StreamPersistMixin
+from app.services.chat_stream_query import StreamQueryMixin
+from app.services.chat_stream_shortcuts import StreamShortcutMixin
 from app.services.evidence_record_service import (
     resetChatSessionId,
     resetChatUserId,
@@ -317,7 +322,12 @@ def _wrapMultistepInputs(
     return safe_sub, safe_inj, safe_st
 
 
-class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin, L1L4PreambleMixin):
+class ChatService(
+    RecallMixin, MultiStepMixin, MultiStepPersistMixin,
+    StreamEntryMixin, StreamShortcutMixin, StreamQueryMixin, StreamMultiStepMixin, StreamPersistMixin,
+    ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin,
+    ChatStreamOutputMixin, L1L4PreambleMixin,
+):
     """自然语言问答编排服务。
 
     组合 ChatStreamOutputMixin 提供流式回答输出的超时保护与降级能力。

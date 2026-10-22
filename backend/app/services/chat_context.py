@@ -242,10 +242,10 @@ def _stateRowRank(row: SessionQueryState) -> tuple[bool, int, Any, int]:
 
     **这个方向现在不承担隔离职责，别再把它当防线。** 2026-10-22 实测：
     把第一键翻成 `not is_stub`，`test_chat_query_state_is_stub.py` 8 条
-    **全绿** —— 隔离改由 `_saveQueryState` 的 `userId is None → user_id IS NULL`
-    过滤保证（见该函数 else 分支），候选集在进入排序前就已经是单一归属桶，
-    第一键无从左右跨用户的选择。第 ⑥ 条钉的是「不劫持别人」这个**结果**，
-    不再钉排序键方向。
+    **全绿** —— 隔离改由 `_loadQueryState` 与 `_saveQueryState` 两侧各自的
+    `userId is None → user_id IS NULL` 过滤保证，候选集在进入排序前就已经是
+    单一归属桶，第一键无从左右跨用户的选择。第 ⑥ 条钉的是「不劫持别人」这个
+    **结果**，不再钉排序键方向。
 
     保留当前方向而不是翻成 `not is_stub`，是**失效安全**选择：万一日后有人
     删掉那道过滤，现状方向退化成「只影响同归属行之间的 tiebreak」，
@@ -594,6 +594,11 @@ class ContextMixin:
         M4：0128 迁移把所有 `user_id IS NULL` 的旧行墓碑化为 -1（归属未明的 P0-3
         前遗留桶），读侧统一 `WHERE user_id != -1` 排除墓碑。防止任意 user 读到
         别人留下的 NULL 桶造成跨用户上下文污染。
+
+        2026-10-22 读侧收紧（与写侧对称）：`userId is None` 时补 `user_id IS NULL`。
+        收紧前读侧不过滤 user_id，匿名读能直接取回**别的真实用户**的 real 行，
+        追问继承到的就是别人的上一轮上下文。现两侧口径一致：写得进的桶 = 读得到的桶。
+        由 `test_chat_query_state_is_stub.py` 第 ⑧ 条钉住。
         """
         stmt = select(SessionQueryState).where(
             SessionQueryState.session_id == sessionId,
@@ -606,6 +611,41 @@ class ContextMixin:
         )
         if userId is not None:
             stmt = stmt.where(SessionQueryState.user_id == userId)
+        else:
+            # 匿名读与匿名写必须看到同一个桶：`user_id IS NULL`。
+            #
+            # 收紧前读侧完全不过滤 user_id，候选集是「本 session 下所有
+            # `is_stub=False` 且 `user_id != -1` 的行」—— **别人的 real 行就在其中**，
+            # 匿名读会把它的 last_question / last_plan / inheritance_snapshot
+            # 当成自己的上一轮追问锚点。与 M4 同类的跨用户污染，方向相反：
+            # M4 挡「归属未明的墓碑」，本条挡「归属明确是别人的」。
+            #
+            # ⚠️ 本条与上面恒定的 `user_id != -1` 存在三值逻辑交互，别单独删任何一道：
+            # SQL 里 `NULL != -1` 求值为 NULL 而非 TRUE，故 NULL 行在 `!= -1`
+            # 下就已被排除，两道过滤叠加的候选集恒为空 —— 匿名读恒为 None。
+            # 但这**不代表本条多余**：没有它时 `user_id = 42` 的行是满足
+            # `!= -1` 的，那才是真正的泄露面。两道各挡一类（NULL 桶 / 他人的
+            # real 行），删任一道都会漏。
+            #
+            # 匿名读恒为 None 是**正确**答案而非功能退化，依据是一条应用层不变量：
+            # **`is_stub=False ⟹ user_id IS NOT NULL`**。INSERT 分支写死
+            # `is_stub=userId is None`；UPDATE 分支的 `is_stub=False` 写在
+            # `if userId is not None:` 里，与 `existing.user_id = userId` 同一块。
+            # 故应用写出的行里，`user_id IS NULL ∧ is_stub=False` 只可能来自 0129
+            # backfill 的历史遗留行（归属未知的桶，M4 早已认定是污染源），
+            # 匿名请求从来没有「属于自己的」状态可读。
+            #
+            # 匿名请求本来就读不回自己写的状态（那些行 is_stub=True，被上面无条件
+            # 排掉）；匿名读唯一原本能「生效」的场景就是读到别人的 real 行 ——
+            # 那是污染而非功能。
+            #
+            # ⚠️ 本条在**生产可达**，不是纯防御：chat_stream 的重分类入口传的是
+            # `userId=user.dbUserId if user is not None else None`，stub/anonymous
+            # 请求头解析不到 DB 用户时 dbUserId 就是 None。此前此处的 docstring 与
+            # models.py 类注释都写着「chat 路由有 router 级 Depends(getCurrentUser)
+            # 故生产不可达」——**那是错的**：router 只保证 `user` 对象存在，
+            # 不保证 `dbUserId` 非空。
+            stmt = stmt.where(SessionQueryState.user_id.is_(None))
         if datasourceId is not None:
             stmt = stmt.where(SessionQueryState.datasource_id == datasourceId)
         rows = (await session.execute(stmt)).scalars().all()
@@ -636,13 +676,11 @@ class ContextMixin:
         「读」和「找要更新的那一行」必须是同一个选择口径，否则读到的锚点与被覆盖的
         行可能不是同一行（追问继承的就是别人的上一轮）。
 
-        2026-10-22 的匿名收紧让两侧在 `userId is None` 时**刻意分叉**了：
-        写侧收窄成 `user_id IS NULL`（否则匿名写会劫持别人的 real 行），
-        读侧维持「排除墓碑即可」。这个分叉是安全的，因为读侧还额外排掉
-        `is_stub == False` —— 而匿名写产出的行恒为 `is_stub=True`，匿名写的
-        状态本来就读不回来。读侧的「userId is None 时可读到别人的 real 行」
-        是同一类洞的另一面（匿名**读**），chat 路由有 router 级
-        `Depends(getCurrentUser)` 故生产不可达，未在本改动里一并收紧。
+        2026-10-22 的匿名收紧原本让两侧在 `userId is None` 时**刻意分叉**：
+        写侧收窄成 `user_id IS NULL`，读侧维持「排除墓碑即可」。这个分叉已被
+        后续补齐 —— 读侧也加上了同一道 `user_id IS NULL`（见 `_loadQueryState`）。
+        现在两侧口径一致：**写得进的桶，就是读得到的桶**，读写共享同一个候选集
+        定义，`_selectStateRow` 的选择口径在两侧也就真正一致了。
         """
         # P0-3：按三元查 existing（不传新参数时退化为按 session_id 唯一）
         stmt = select(SessionQueryState).where(

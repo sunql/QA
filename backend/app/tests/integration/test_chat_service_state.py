@@ -18,6 +18,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies import CurrentUser
 from app.domain.enums import ChartType, DataSourceType, IntentType
 from app.domain.exceptions import NotFoundError
 from app.domain.models import (
@@ -234,6 +235,19 @@ def _dto(question: str, datasourceId: int = 1) -> ChatRequest:
     return ChatRequest(sessionId="s1", question=question, datasourceId=datasourceId)
 
 
+# dbUserId 必须与本文件各处 `_saveQueryState(..., userId=1)` 的 1 对齐。
+#
+# 为什么这些用例必须显式传 user：生产唯一入口是 api/v1/chat.py 的
+# `processMessage(dto, session, user=_user)`（router 级 Depends(getCurrentUser)），
+# 服务内部据此推 `userId=user.dbUserId`。2026-10-22 读侧收紧后
+# `userId is None` 会补 `user_id IS NULL`，于是「不传 user 也能读到上一轮」
+# 这个测试捷径失效了 —— 它本就与生产不符：stub 请求（X-User-Id 查无此人）
+# 的 dbUserId 也是 None，那种场景下拿不到上一轮状态是**正确**行为。
+_USER = CurrentUser(
+    userId="state-user", tenantId="default", roles=("user",), departments=(), dbUserId=1,
+)
+
+
 def _buildService(
     *,
     datasource: DataSource | None = None,
@@ -275,7 +289,7 @@ class TestChatService:
             resultColumns=["NAME", "TOTAL_QTY"],
             userId=1, datasourceId=1,
         )
-        response = await service.processMessage(_dto("换成柱状图"), dbSession)
+        response = await service.processMessage(_dto("换成柱状图"), dbSession, user=_USER)
         assert response.intent == IntentType.REFINE.value
         assert response.chartType == ChartType.BAR.value
 
@@ -436,7 +450,7 @@ class TestQueryState:
         await dbSession.commit()
 
         # 不传 userId：应只返回真实行（墓碑被过滤）
-        loaded = await service._loadQueryState(dbSession, "s-mixed")
+        loaded = await service._loadQueryState(dbSession, "s-mixed", userId=42)
         assert loaded is not None
         assert loaded.user_id == 42
         assert loaded.last_question == "real-question"
@@ -469,7 +483,7 @@ class TestQueryState:
         assert state.last_question == "各供应商的收货数量汇总"
         assert state.last_plan["target"] == "t"
         assert state.last_result_columns == ["NAME", "TOTAL_QTY"]
-        loaded = await service._loadQueryState(dbSession, "s1", datasourceId=1)
+        loaded = await service._loadQueryState(dbSession, "s1", userId=1, datasourceId=1)
         assert loaded is not None
         assert loaded.turn_count == 1
         assert loaded.last_plan["target"] == "t"
@@ -502,7 +516,7 @@ class TestQueryState:
             dbSession, "s1", question="q", plan=plan, sql="s", resultColumns=[],
             userId=1, datasourceId=1,
         )
-        loaded = await service._loadQueryState(dbSession, "s1", datasourceId=1)
+        loaded = await service._loadQueryState(dbSession, "s1", userId=1, datasourceId=1)
         restored = QueryPlan.from_dict(loaded.last_plan)
         assert restored == plan
 
@@ -522,7 +536,7 @@ class TestQueryState:
             resultColumns=["BPSNUM", "TOTAL_QTY"],
             userId=1, datasourceId=1,
         )
-        state = await service._loadQueryState(dbSession, "s1")
+        state = await service._loadQueryState(dbSession, "s1", userId=1)
         assert state is not None
         prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         assert "各供应商的收货数量汇总" in prompt
@@ -546,7 +560,7 @@ class TestQueryState:
             dbSession, "s1", question="q2", plan=None, sql="SELECT 2", resultColumns=[],
             userId=1, datasourceId=1,
         )
-        state = await service._loadQueryState(dbSession, "s1")
+        state = await service._loadQueryState(dbSession, "s1", userId=1)
         assert state is not None
         assert state.recent_rounds is not None
         assert len(state.recent_rounds) == 1
@@ -561,7 +575,7 @@ class TestQueryState:
                 dbSession, "s1", question=f"q{i}", plan=None, sql=f"SELECT {i}", resultColumns=[],  # M4: 加 scope（与 _loadQueryState 读侧 WHERE user_id != -1 契约对齐）
             userId=1, datasourceId=1,
             )
-        state = await service._loadQueryState(dbSession, "s1")
+        state = await service._loadQueryState(dbSession, "s1", userId=1)
         assert state is not None
         assert [r["q"] for r in state.recent_rounds] == ["q2", "q1"]
 
@@ -575,7 +589,7 @@ class TestQueryState:
                 dbSession, "s1", question=f"q{i}", plan=None, sql=f"SELECT {i}", resultColumns=[],  # M4: 加 scope（与 _loadQueryState 读侧 WHERE user_id != -1 契约对齐）
             userId=1, datasourceId=1,
             )
-        state = await service._loadQueryState(dbSession, "s1")
+        state = await service._loadQueryState(dbSession, "s1", userId=1)
         assert state is not None
         assert len(state.recent_rounds) == _RECENT_ROUNDS_LIMIT
         # 最新的历史是倒数第二轮
@@ -592,7 +606,7 @@ class TestQueryState:
             dbSession, "s1", question="q2", plan=None, sql="SELECT 2", resultColumns=[],
             userId=1, datasourceId=1,
         )
-        state = await service._loadQueryState(dbSession, "s1")
+        state = await service._loadQueryState(dbSession, "s1", userId=1)
         prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         assert "q1" in prompt
         assert "SELECT 1" in prompt
@@ -604,7 +618,7 @@ class TestQueryState:
             dbSession, "s1", question="q1", plan=None, sql="SELECT 1", resultColumns=[],
             userId=1, datasourceId=1,
         )
-        state = await service._loadQueryState(dbSession, "s1")
+        state = await service._loadQueryState(dbSession, "s1", userId=1)
         prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         assert "更早" not in prompt
 
@@ -619,7 +633,7 @@ class TestQueryState:
             dbSession, "s1", question="q2", plan=None, sql="SELECT 2", resultColumns=[],
             userId=1, datasourceId=1,
         )
-        state = await service._loadQueryState(dbSession, "s1")
+        state = await service._loadQueryState(dbSession, "s1", userId=1)
         prompt = service._buildStatePrompt(state, IntentType.FOLLOW_UP, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         assert "q1" in prompt
         assert "追问" in prompt
@@ -631,7 +645,7 @@ class TestQueryState:
             dbSession, "s1", question="q2", plan=None, sql="SELECT 2", resultColumns=[],
             userId=1, datasourceId=1,
         )
-        state = await service._loadQueryState(dbSession, "s1")
+        state = await service._loadQueryState(dbSession, "s1", userId=1)
         assert state is not None
         # 模拟脏数据：字符串、None、整数、以及一个合法 dict
         state.recent_rounds = ["bad", None, 123, {"q": "ok", "s": "SELECT 1"}]
@@ -654,7 +668,7 @@ class TestQueryState:
             dbSession, "s1", question="q2", plan=None, sql="SELECT 2", resultColumns=[],
             userId=1, datasourceId=1,
         )
-        state = await service._loadQueryState(dbSession, "s1")
+        state = await service._loadQueryState(dbSession, "s1", userId=1)
         prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         # 历史里的长 q/s 被截断到上限 + 省略号
         assert "..." in prompt
@@ -673,7 +687,7 @@ class TestQueryState:
             dbSession, "s1", question="q2", plan=None, sql="SELECT 2", resultColumns=[],
             userId=1, datasourceId=1,
         )
-        state = await service._loadQueryState(dbSession, "s1")
+        state = await service._loadQueryState(dbSession, "s1", userId=1)
         prompt = service._buildStatePrompt(state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT)
         # 原文进入 prompt（注入层会转义为 &lt;img&gt;）
         assert "q1 <img>" in prompt
@@ -689,7 +703,7 @@ class TestQueryState:
             dbSession, "s1", question="q2", plan=None, sql="SELECT 2", resultColumns=[],
             userId=1, datasourceId=1,
         )
-        await service.processMessage(_dto("按数量升序排列"), dbSession)
+        await service.processMessage(_dto("按数量升序排列"), dbSession, user=_USER)
         # 上一轮问题与历史注入到 SQL 阶段 system prompt（calls[1]）；
         # calls[0] 是 plan 阶段，不带历史。<> 已转义为 &lt;/&gt;。
         assert len(llm.calls) >= 2
@@ -698,10 +712,17 @@ class TestQueryState:
         assert "<img>" not in injected
 
     async def test_pipeline_saves_query_state_after_success(self, dbSession) -> None:
-        """完整查询流水线成功后，会话查询状态被 UPSERT（含 ReAct 计划与结果列）。"""
+        """完整查询流水线成功后，会话查询状态被 UPSERT（含 ReAct 计划与结果列）。
+
+        注：这条在 base `0ea463b3` 上**已经是红的**（同一条 `assert None is not None`，
+        已在 base worktree 上实测复现）—— `processMessage` 不传 user ⇒ 写侧落
+        `user_id = NULL` 的行，而读侧的 M4 过滤 `user_id != -1` 在三值逻辑下把
+        NULL 行排掉，匿名读恒为 None。与本文件其余 4 处同一根因，此处一并补
+        `user=_USER`。
+        """
         service, _, _, _ = _buildService()
-        await service.processMessage(_dto("各供应商的收货数量汇总"), dbSession)
-        state = await service._loadQueryState(dbSession, "s1")
+        await service.processMessage(_dto("各供应商的收货数量汇总"), dbSession, user=_USER)
+        state = await service._loadQueryState(dbSession, "s1", userId=1)
         assert state is not None
         assert state.turn_count == 1
         assert state.last_question == "各供应商的收货数量汇总"
@@ -721,7 +742,7 @@ class TestQueryState:
             resultColumns=["NAME", "TOTAL_QTY"],
             userId=1, datasourceId=1,
         )
-        response = await service.processMessage(_dto("按数量升序排列"), dbSession)
+        response = await service.processMessage(_dto("按数量升序排列"), dbSession, user=_USER)
         assert response.intent == IntentType.REFINE.value
         # calls[0]=计划 system、calls[1]=SQL system，均注入上一轮状态
         assert "<previous_query_state>" in llm.calls[0][0][1]
@@ -742,7 +763,7 @@ class TestQueryState:
             resultColumns=["NAME", "TOTAL_QTY"],
             userId=1, datasourceId=1,
         )
-        response = await service.processMessage(_dto("按 QTY 升序排列"), dbSession)
+        response = await service.processMessage(_dto("按 QTY 升序排列"), dbSession, user=_USER)
         assert response.intent == IntentType.REFINE.value
         # 捷径命中：不再有计划/SQL 两阶段 LLM 调用，仅 chart + answer 共 2 次
         assert len(llm.calls) == 2

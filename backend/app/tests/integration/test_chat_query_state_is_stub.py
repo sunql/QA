@@ -22,6 +22,7 @@ docstring 把方向写反了。注意这个方向**现在不承担隔离职责**
   ⑤ 反向断言：同一 session 同时有 stub 行 + real 行 → 读回 real 行
   ⑥ 反向断言：匿名写不得覆写同 session 下真实用户的行（守结果，不守排序键方向）
   ⑦ 反向断言：session 下只有别人的 real 行时，匿名写另开 stub 行而不劫持
+  ⑧ 反向断言（读侧）：匿名读不得取回别人的 real 行；反向守卫同一行以真实身份读得到
 
 迁移 round-trip（upgrade/downgrade）由 alembic 内置覆盖，本文件不重复造。
 fixtures 复用 test_chat_api.py（_seed / _installFakes / _PipelineLlm / _FakeAdapter / _RouterFor）。
@@ -299,10 +300,15 @@ class TestQueryStateIsStub:
         await dbSession.commit()
 
         # _loadQueryState 读全 scope：应返回 real 行而非 stub 行
+        #
+        # ⚠️ 必须以**真实身份**读（userId=user.id）。2026-10-22 读侧收紧后
+        # `userId is None` 会补 `user_id IS NULL`（与写侧对称），匿名读拿不到
+        # 任何人的 real 行 —— 本条要守的是「stub 行被排除、real 行读得到」，
+        # 而非「不声明身份也能读到」。匿名读那一面由第 ⑧ 条钉。
         from app.services.chat_context import ContextMixin
 
         mixin = ContextMixin()
-        state = await mixin._loadQueryState(dbSession, "rev-s1")
+        state = await mixin._loadQueryState(dbSession, "rev-s1", userId=user.id)
         assert state is not None, "_loadQueryState 应返回 real 行，不应为 None"
         assert state.is_stub is False, (
             f"返回的行 is_stub 应为 False（real 行），实际 {state.is_stub!r}；"
@@ -470,3 +476,60 @@ class TestQueryStateIsStub:
         assert anon[0].is_stub is True
         assert anon[0].turn_count == 1
         assert anon[0].last_question == "匿名的新问题"
+
+    async def test_anonymous_read_never_returns_a_real_users_row(self, dbSession) -> None:
+        """⑧ 反向断言（**读**侧）：匿名读不得取回**别的真实用户**的那一行。
+
+        ⑦ 收紧的是写侧。读侧 `_loadQueryState` 在 `userId is None` 时原先
+        **完全不过滤 user_id**，候选集是「本 session 下所有 `is_stub=False`
+        且 `user_id != -1` 的行」—— 于是**别人的 real 行**能被匿名读直接取回，
+        追问继承到的就是别人的上一轮上下文。与 M4 要防的跨用户污染同类，
+        只是方向相反：M4 挡的是「归属未明」，本条挡的是「归属是别人」。
+
+        本条与写侧刻意对称：`userId is None → user_id IS NULL`，读到的桶必须
+        与写得进的桶是同一个。收紧后匿名读在这张表上实际恒为 None
+        （匿名写产出的行 `is_stub=True`，被读侧无条件排掉），这是**正确**答案 ——
+        匿名读唯一原本能「生效」的场景就是读到别人的 real 行，那是污染而非功能。
+
+        反向守卫：同一行以真实身份读**必须读得到**。否则本条可能假绿 ——
+        万一这行被 `is_stub=False` / `user_id != -1` 之类的既有条件排掉了，
+        匿名读返回 None 只是因为「什么都没查到」，而不是被匿名守卫拦住。
+        守「是谁拒的」而非只守状态码（memory qa-system-same-status-code-false-green）。
+        """
+        from app.services.chat_context import ContextMixin
+
+        _REAL_USER_ID = 42
+        _DS_ID = 4242
+        mixin = ContextMixin()
+
+        # session 下只有真实用户 42 的 real 行，没有任何匿名行
+        dbSession.add(
+            SessionQueryState(
+                session_id="anon-read-s1",
+                user_id=_REAL_USER_ID,
+                datasource_id=_DS_ID,
+                is_stub=False,
+                last_question="真实用户自己的上一轮",
+                turn_count=4,
+            )
+        )
+        await dbSession.commit()
+
+        # 匿名读：不得取回别人的 real 行
+        state = await mixin._loadQueryState(dbSession, "anon-read-s1", userId=None)
+        assert state is None, (
+            f"匿名读取回了真实用户 {_REAL_USER_ID} 的状态行（user_id={state.user_id!r}, "
+            f"last_question={getattr(state, 'last_question', None)!r}）；"
+            "读侧缺少 userId is None → user_id IS NULL 过滤，构成跨用户上下文泄露"
+        )
+
+        # 反向守卫：同一行以真实身份读必须读得到 —— 证明拒绝来自匿名守卫本身
+        owned = await mixin._loadQueryState(
+            dbSession, "anon-read-s1", userId=_REAL_USER_ID
+        )
+        assert owned is not None, (
+            "真实用户读自己的行必须成功；若本条失败，说明上方那个 None 是"
+            "「行压根读不到」而非匿名守卫拦下的，本用例就假绿了"
+        )
+        assert owned.user_id == _REAL_USER_ID
+        assert owned.last_question == "真实用户自己的上一轮"

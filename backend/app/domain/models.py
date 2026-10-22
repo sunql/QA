@@ -874,12 +874,23 @@ class SessionQueryState(Base, TimestampMixin):
     避免切换数据源后用错 state / 跨用户窃取上下文。
     NULL 列兼容历史无 scope 的旧行。
 
-    M4（方案 A，0128 迁移）：user_id = -1 是墓碑值，把 P0-3 前的 NULL 行 UPDATE 为 -1，
+    M4（方案 A，0131 迁移）：user_id = -1 是墓碑值，把 P0-3 前的 NULL 行 UPDATE 为 -1，
     表示「归属未明的遗留桶，禁止读」。读侧统一 `WHERE user_id != -1` 排除。
-    M5（0129 backfill + is_stub 列）：M4 的 -1 墓碑行在迁移 0129 中被 backfill 为 is_stub=True，
-    进一步走读侧 `WHERE is_stub=false` 过滤。写侧在 userId is None 时设 is_stub=True。
-    is_stub 比 scope 完整度更强的排序信号：is_stub=False 的行（real 行）在任何情况下
-    都优先于 is_stub=True 的行。
+    M5（0129 is_stub 列）：写侧在 userId is None 时设 is_stub=True，读侧 `WHERE is_stub=false`
+    排除 stub 行 —— 真正兜底的是这条 SQL。排序键 `is_stub` 的方向与直觉相反：
+    `_stateRowRank` 返回 `row.is_stub` 而 `_selectStateRow` 取 `max()`，bool 里
+    `True=1 > False=0`，故排序**优先选 stub 行**。读侧无碍（stub 行被 SQL 先排掉），
+    写侧承重（写侧刻意不排 is_stub，`userId is None` 时又不加 user 过滤，
+    real 行与 stub 行会同时候选 —— 优先选 stub 行才使匿名写不劫持真实用户的行）。
+    别把这行键「修正」成 `not is_stub`，那会造成跨用户上下文污染。详见
+    `chat_context._stateRowRank` docstring。
+
+    注意：**不要**以为 0131 造的墓碑会被标成 is_stub=True。迁移链是
+    0127→0129→0130→0131，0129 里那句 `UPDATE ... SET is_stub=true WHERE user_id=-1`
+    跑在 0131 造出 -1 行之前，一行都没命中；墓碑保持 is_stub=False。
+    排除墓碑的唯一有效手段是 `user_id != -1`（读侧 chat_context.py:582 /
+    写侧 :625）。没有补回填迁移：is_stub 的消费点只关心 stub 行，无人依赖墓碑的
+    is_stub 值，补迁移修不了任何行为。
     """
 
     __tablename__ = "session_query_state"

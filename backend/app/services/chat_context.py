@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import IntentType
@@ -231,14 +231,31 @@ _STATE_HISTORY_FIELD_LIMIT_DEFAULT = 500
 
 
 def _stateRowRank(row: SessionQueryState) -> tuple[bool, int, Any, int]:
-    """`_selectStateRow` 的排序键，元组比较，越大越优先。
+    """`_selectStateRow` 的排序键，元组比较，`max()` 取最大者。
 
-    M5：is_stub=False 作为第一键（False < True in bool），max() 取出的行
-    必然是 is_stub=False 的 real 行。stub 行即使 scope 完整也不会被选中。
+    ⚠️ 第一键 `row.is_stub` 的方向容易读反，这里写清楚**实际行为**：
+
+    bool 在 Python 里 `True=1 > False=0`，所以 `max()` 优先选中的
+    **是 is_stub=True 的 stub 行**，不是 real 行。此前本函数、
+    `_loadQueryState`、本仓测试模块 docstring、`models.py` 类注释四处
+    都写成「is_stub=False 为第一键 ⇒ max 选 real 行」，与代码相反。
+
+    这个方向不是笔误，是承重的，分两侧看：
+
+    - **读侧无影响**：`_loadQueryState` 在 SQL 层先排 `is_stub == False`，
+      stub 行根本到不了这里，第一键在读路径上是死的。
+    - **写侧是关键**：`_saveQueryState` 刻意不排 is_stub（否则匿名写每轮都
+      INSERT 新行，stub 行无界增长），且 `userId is None` 时**不加 user 过滤**
+      —— 于是同一 session 下「user 42 的 real 行」与「匿名 stub 行」会同时
+      进入候选集。此时优先选中 stub 行，正是匿名写不劫持真实用户上下文的原因。
+      若照旧注释的字面说法把键改成 `not is_stub`，匿名写就会改为对别人的 real
+      行 `turn_count += 1` 并覆写 last_question（跨用户污染，与 M4 同类）。
+
+    方向由 `test_chat_query_state_is_stub.py` 第 ⑥ 条反向断言钉住。
     其次按 scope 完整度 → 更新时间 → 主键，与原有策略一致。
     """
     return (
-        # ① is_stub：real 行（False）优先于 stub 行（True）
+        # ① is_stub：stub 行（True=1）优先于 real 行（False=0）—— 见 docstring
         row.is_stub,
         # ② scope 完整度：两个维度都非 NULL 的行优先
         (row.user_id is not None) + (row.datasource_id is not None),
@@ -563,8 +580,9 @@ class ContextMixin:
         任一 None 不过滤；既有 17+ 调用点不传新参数时行为不变。
 
         M5：读侧追加 `is_stub=False` 过滤，排除 stub 模式写入的行。
-        即使 stub 行存在，也不会被读到。`_stateRowRank` 的第一排序键
-        `is_stub` 作为纵深防御，确保 real 行永远优先于 stub 行。
+        即使 stub 行存在，也不会被读到 —— 是这条 SQL 在兜底，不是排序键：
+        `_stateRowRank` 的第一键 `is_stub` 在读路径上是**反向的**（`max()` 实际
+        优先选 stub 行），只是 stub 行到不了那里。详见 `_stateRowRank` docstring。
 
         F1：调用方给全 scope 时唯一约束（uq_session_query_state_scope）保证最多一行，
         直接 `scalar_one_or_none()` 是安全的；但给**部分**或**不给** scope 时，
@@ -578,8 +596,12 @@ class ContextMixin:
         """
         stmt = select(SessionQueryState).where(
             SessionQueryState.session_id == sessionId,
-            SessionQueryState.is_stub == False,  # M5：排除 stub 行（M4 的 -1 墓碑行已被 0129 backfill 为 is_stub=True）
-            SessionQueryState.user_id != -1,  # M4：排除 user_id = -1 墓碑行（0128 迁移 NULL→-1；M5 0129 backfill 为 is_stub=True 双重保险）
+            SessionQueryState.is_stub == False,  # M5：排除 stub 行（匿名写 userId=None 落的半 scope 行）
+            # M4：排除 user_id = -1 墓碑行（0131 迁移把 P0-3 前的 NULL user_id 行置为 -1）。
+            # 这里**不是**「与 is_stub 的双重保险」：迁移链是 0127→0129→0130→0131，
+            # 0129 的 `is_stub` backfill 跑在 0131 造出 -1 行之前，一行都没命中；
+            # 0131 造出的墓碑保持 is_stub=False。排除墓碑的**唯一**有效手段就是这一条。
+            SessionQueryState.user_id != -1,
         )
         if userId is not None:
             stmt = stmt.where(SessionQueryState.user_id == userId)
@@ -614,7 +636,30 @@ class ContextMixin:
         行可能不是同一行（追问继承的就是别人的上一轮）。
         """
         # P0-3：按三元查 existing（不传新参数时退化为按 session_id 唯一）
-        stmt = select(SessionQueryState).where(SessionQueryState.session_id == sessionId)
+        stmt = select(SessionQueryState).where(
+            SessionQueryState.session_id == sessionId,
+            # M4：与 `_loadQueryState` 对齐，排除 user_id=-1 墓碑行。
+            # 本方法自己写着契约「查 existing 的那一步与 _loadQueryState 共用
+            # _selectStateRow，读和找要更新的那一行必须是同一个口径」，而读侧
+            # (:579-583) 排除了墓碑、写侧原先没排 —— userId is None（匿名写）
+            # 且 session_id 撞上遗留桶时，墓碑会进候选集并被 existing 分支
+            # `turn_count += 1` 覆写。墓碑在 `_stateRowRank` 眼里还是"完整行"：
+            # -1 is not None 记作 scope 完整，而 0129 的 is_stub backfill 跑在
+            # 0131 造出 -1 行之前，墓碑保持 is_stub=False。
+            # 排不到候选就走 INSERT 分支，本轮状态落新行 —— 这才是对的。
+            #
+            # 注意必须写成 `IS NULL OR != -1` 而不能直接 `!= -1`：SQL 三值逻辑下
+            # `NULL != -1` 求值为 NULL（非真），会把 user_id IS NULL 的 stub 行
+            # 一并排掉，匿名写就再也命中不了 existing 分支、每轮都 INSERT。
+            # 读侧 (:582) 可以直接写 `!= -1`，因为 stub 行已被 is_stub=False
+            # 排过一次，写侧没有这层双保险。SQL NULL 之间互不相等，
+            # uq_session_query_state_scope 也拦不住 ⇒ 同一 session 无界增长。
+            # 由 test_chat_query_state_tombstone_write.py 第 ② 条反向断言钉住。
+            or_(
+                SessionQueryState.user_id.is_(None),
+                SessionQueryState.user_id != -1,
+            ),
+        )
         if userId is not None:
             stmt = stmt.where(SessionQueryState.user_id == userId)
         if datasourceId is not None:

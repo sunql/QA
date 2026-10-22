@@ -31,8 +31,15 @@ interface MultiStepPlanCardProps {
   currentStepIndex?: number;
   /** N4 qwen 续跑：该消息首发时使用的模型 id（透传给 ResumeRunButton） */
   originalModelId: number;
-  /** 失败步的续跑回调；不传则不渲染续跑按钮（如历史回放、单步路径） */
-  onResume?: (runId: string, fromStepIndex: number) => void;
+  /**
+   * 失败步的续跑回调；不传则不渲染续跑按钮（如历史回放、单步路径）。
+   *
+   * 第三参 modelId 必须在这里声明：ResumeRunButton 会带它回调（选中的模型 id，
+   * 或 null = 用原模型）。此前本类型只声明 2 参，JS 静默丢弃第三参 ⇒ 用户在
+   * Popover 里选的模型到不了 MessageItem ⇒ 续跑永远按 run 的原模型跑，
+   * 「换模型续跑」（N4）在 Chat 侧整个失效。
+   */
+  onResume?: (runId: string, fromStepIndex: number, modelId: number | null) => void;
   /** 流式进行中：禁用续跑按钮，防重复点击（由调用方从 store 的 loading 提供） */
   disabled?: boolean;
 }

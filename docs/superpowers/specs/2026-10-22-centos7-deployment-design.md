@@ -100,7 +100,7 @@ Milvus 集合实体数实测（`pymilvus` 查询）：
 
 ### 3.3 迁移敏感配置（本次必须处理）
 
-**3.3.1 `SECRET_KEY` 是 Fernet 主密钥（致命项）**
+#### 3.3.1 `SECRET_KEY` 是 Fernet 主密钥（致命项）
 
 `backend/app/config.py:82` 的 `secretKey` 即 Fernet 主密钥，`backend/app/infrastructure/security/crypto.py:24-33` 的 `_getFernet()` 用它构造 `Fernet` 实例。以下三处数据用它加密，密文前缀已实测确认为 `gAAAAA`（Fernet v0x80 token）：
 
@@ -116,7 +116,7 @@ Milvus 集合实体数实测（`pymilvus` 查询）：
 > ```
 > 这条命令在**空环境首次部署**时正确，在**带数据迁移**时是破坏性的。迁移场景必须逐字复制源环境 `SECRET_KEY`。
 
-**3.3.2 Embedding 现状**
+#### 3.3.2 Embedding 现状
 
 `embedding_provider` 3 行，激活行是 `id=2 oMLX bge-m3 8bit`，`provider_type=omlx`，`base_url=http://127.0.0.1:8888/v1`，`dimension=1024`。该服务运行在 **macOS 宿主机**（Apple Silicon MLX），容器经 `host.docker.internal:host-gateway` 访问。
 
@@ -130,7 +130,7 @@ Milvus 集合实体数实测（`pymilvus` 查询）：
 
 **结论**：`bge-m3` 在 Ollama 与 oMLX 上同族同 1024 维 ⇒ `_DIM` 不变、集合无需重建、维度守卫照常通过、已有向量在维度上仍有效。
 
-**3.3.3 LLM 现状**
+#### 3.3.3 LLM 现状
 
 `llm_config` 6 行：
 
@@ -144,7 +144,7 @@ Milvus 集合实体数实测（`pymilvus` 查询）：
 
 **3 条激活模型在 CentOS 上全部不可用**（2 条云端不可达 + 1 条指向 Mac）。
 
-**3.3.4 数据源现状**
+#### 3.3.4 数据源现状
 
 `data_source` 5 行，仅 1 条是真业务依赖：
 
@@ -156,7 +156,7 @@ Milvus 集合实体数实测（`pymilvus` 查询）：
 | 4 | recall-probe | postgresql | `localhost:5432` | qa_metadata | ❌ 探针 |
 | 5 | phase13_realdata_pg | postgresql | `localhost:5433` | qa_metadata_test | ❌ 探针 |
 
-**3.3.5 容器启动契约**
+#### 3.3.5 容器启动契约
 
 `docker/Dockerfile.backend` 的 `CMD` 是 `sh -c "alembic upgrade head && uvicorn ..."`。`alembic upgrade head` 失败会 `&&` 短路导致 uvicorn 根本不起 —— 这就是 `qa-system-deploy-source-must-be-fresh-worktree` 记录的事故成因（主仓缺 `0132` 而 prod 已在 `0132` ⇒ `Can't locate revision` ⇒ 后端整体挂掉）。
 
@@ -217,35 +217,52 @@ Milvus 集合实体数实测（`pymilvus` 查询）：
 
 ### 5.1 Docker CE 在 CentOS 7 的官方包（第一手核实）
 
-Docker 官方仓库 `https://download.docker.com/linux/centos/7/x86_64/stable/` 的 `repodata`（`<revision>1717607461` = **2024-06-04 UTC**）**已冻结**（Docker 停止为 CentOS 7 发包的时刻）。经代理拉取 `primary.xml.gz` 解析（337 包 / 99 个 `docker-ce` 版本），并绕过元数据直接 HTTP HEAD 探测 RPM 文件本体交叉验证，最高可用版本：
+Docker 官方仓库 `https://download.docker.com/linux/centos/7/x86_64/stable/` 的 `repodata`（`<revision>1717607461` = **2024-06-04 UTC**）**已冻结**（Docker 停止为 CentOS 7 发包的时刻）。经代理拉取 `primary.xml.gz` 解析（337 包；`docker-ce` 99 个版本 / `docker-ce-cli` 82 / `docker-compose-plugin` 26 / `containerd.io` 52），**再绕过元数据直接 HTTP HEAD 探测 RPM 本体交叉验证**：
 
-| 包 | 最高 el7 x86_64 版本 | 验证方式 |
+| 包 | 最高 el7 x86_64 | 本方案选用 | HEAD 验证 |
+|---|---|---|---|
+| `docker-ce` | 26.1.4-1.el7 | **24.0.9-1.el7** | ✅ 200 |
+| `docker-ce-cli` | 26.1.4-1.el7 | **24.0.9-1.el7** | ✅ 200 |
+| `containerd.io` | 1.6.33-3.1.el7 | 1.6.33-3.1.el7 | — |
+| `docker-compose-plugin` | 2.27.1 | 2.27.1 | ✅ 200 |
+
+`docker-ce` 版本族分布：`24.0.x`(至 **9**) / `25.0.x`(至 5) / `26.1.x`(至 4)。**24.0.9 是 24.0 系列最后一个补丁版**，本方案取它而非 24.0.7。
+
+#### 为什么选 24.0.9 而不是可得的最高版 26.1.4
+
+> ⚠️ **"RPM 存在" ≠ "守护进程能在 kernel 3.10 上起来"**。仓库冻结后无人再对 CentOS 7 做持续验证，**不存在任何一手来源确认或否认这些版本能否在 kernel 3.10 + systemd 219 上启动**。
+
+需要说清楚的是：**24.0.9 的运行时同样未经任何一手来源验证**。选它不是"这个已验证那个没验证"，而是**在两个都未验证的选项里取更保守的那个**：
+
+| | 24.0.9（选用） | 26.1.4（可得最高） |
 |---|---|---|
-| `docker-ce` | **26.1.4-1.el7** | repodata 解析 + `26.1.5` / `27.0.0` 均返回 **404** |
-| `containerd.io` | 1.6.33-3.1.el7 | |
-| `docker-compose-plugin` | 2.27.1 | |
-| `docker-buildx-plugin` | 0.14.1 | |
+| CentOS 7 上的运行时验证 | 无一手来源 | 无一手来源 |
+| runc 世代风险 | 更早，低于社区已在 CentOS 7 上报障的 `runc create failed: EOF: unknown` 世代 | 更新，正落在该风险区间内 |
+| 反方论据（**记录在案，供将来推翻**） | — | 它是 Docker 为 el7 发布的**最后一版**。按"平台停止支持前发布的版本通常被测得最充分"推断，它反而可能是 el7 上验证最充分的那个 |
 
-> ⚠️ **"RPM 存在" ≠ "守护进程能在 kernel 3.10 上起来"**。该仓库冻结后无人再对 CentOS 7 做持续验证，**也不存在任何一手来源确认或否认 26.1.4 能否在 kernel 3.10 + systemd 219 上启动**。因此 26.1.4 是**待实测项**，必须在 P1 实跑验证，并准备降级锚点。
->
-> **支持 26.1.4 可用的间接证据**（均非"有人跑通过"）：
-> 1. `docker-ce-26.1.4-1.el7` 是 **el7 原生构建**，符号依赖为 `GLIBC_2.14` / `LIBSYSTEMD_209`，CentOS 7 的 glibc 2.17 / systemd 219 均满足 ⇒ **它确实是链接到 CentOS 7 的**。但"链接得上" ≠ "起得来"。
-> 2. runc 对 systemd 版本是**特性门控而非硬性最低要求**：读到版本 < 242 / < 244 时走 `logrus.Debugf` 并降级到 cgroupfs，找不到拒绝启动的代码路径。（⚠️ 该结论基于阅读 runc **1.1.14** 源码；若 26.1.4 捆绑的是 runc 1.2.x 则不适用——P1 需 `rpm -q runc` 确认。）
-> 3. `containerd.io` 虽声明对 `runc` 的无版本依赖、而 CentOS 7.9 extras 里只有 2018 年的 `runc-1.0.0-70.rc10`，但 **`containerd.io` 自带 runc**（其 filelist 含 `/usr/bin/runc`、`/usr/bin/containerd-shim-runc-v2`），该隐患不成立。
->
-> **P1 必须跑的三条实测命令**（这才是真正的判定，不是推断）：
-> ```bash
-> rpm -q runc containerd.io docker-ce   # 确认用的是自带的 runc，不是 1.0.0-rc10
-> systemctl start docker && docker info # 真正的测试：守护进程能否起来
-> docker run --rm hello-world          # 真正的测试：容器能否真跑
-> ```
->
-> **降级路径（三级，按序尝试）**：
-> | 级别 | 版本 | 适用症状 | 代价 |
-> |---|---|---|---|
-> 首选 | `26.1.4-1.el7` | — | — |
-> 退一 | **`24.0.7-1.el7`** | `runc create failed: ... EOF: unknown`（已知 CentOS 7 上有此类报告，且 24.0.7 低于 runc 1.2 世代） | 几乎无：compose 插件仍在 2.2x |
-> 退二 | `20.10.24-1.el7` | 上述均失败 | compose 插件降到 2.20 档，失去 `--wait` 等新特性；方案其余部分不变 |
+选定 24.0.9，是为了让**happy path 上不残留任何未验证前提**。若 P1 实测 24.0.9 一切正常且希望换更新的，`26.1.4-1.el7` 就在同一仓库里，改版本号即可——但届时本节的未验证标记要一并转移过去，不能因为"换新版本所以标记失效"。
+
+支持该系列可用的间接证据（均非"有人跑通过"）：
+1. `docker-ce-*.el7` 是 **el7 原生构建**，符号依赖 `GLIBC_2.14` / `LIBSYSTEMD_209`，CentOS 7 的 glibc 2.17 / systemd 219 均满足 ⇒ **确实是链接到 CentOS 7 的**。但"链接得上" ≠ "起得来"。
+2. runc 对 systemd 版本是**特性门控而非硬性最低要求**：读到版本 < 242 / < 244 时走 `logrus.Debugf` 并降级到 cgroupfs，找不到拒绝启动的代码路径。（⚠️ 该结论基于阅读 runc **1.1.14** 源码；若捆绑的是 runc 1.2.x 则不适用——P1 用 `rpm -q runc` 确认。）
+3. `containerd.io` 虽声明对 `runc` 的无版本依赖、而 CentOS 7.9 extras 里只有 2018 年的 `runc-1.0.0-70.rc10`，但 **`containerd.io` 自带 runc**（filelist 含 `/usr/bin/runc`、`/usr/bin/containerd-shim-runc-v2`），该隐患不成立。
+
+#### P1 必跑的实测命令（这才是判定，不是推断）
+
+```bash
+rpm -q runc containerd.io docker-ce docker-ce-cli   # 确认用的是自带的 runc，不是 extras 的 1.0.0-rc10
+systemctl start docker && docker info                # 守护进程能否起来
+docker run --rm hello-world                         # 容器能否真跑
+docker compose version                              # compose 插件能否与该 engine 通信
+```
+
+#### 版本阶梯
+
+| 级别 | 版本 | 何时用 | 代价 |
+|---|---|---|---|
+| **选用** | **`24.0.9-1.el7`** | 默认路径 | — |
+| 可选升 | `26.1.4-1.el7` | 24.0.9 一切正常、且愿意承担上表的未验证标记 | 同上，仅换版本号 |
+| 降级 | `20.10.24-1.el7` | 24.0.9 起不来（`failed to start daemon` / `runc create failed: EOF: unknown`） | compose 插件降到 2.20 档，失去 `--wait` 等新特性；方案其余部分不变 |
 
 > 调研过程中多个中文技术站（phpnode.cn / yisu.com / CSDN 等）声称「Docker CE 23.x+ 要求 kernel ≥ 4.18，CentOS 7 最高只能 20.10.x」。**该结论无任何一手来源**——检索到的全部是 SEO 内容农场，其中还夹着可证伪的伪事实（某页称「Docker 24+ 默认要求 cgroup v2」）。而官方 repodata 直接证明 26.1.4 是 Docker 为 CentOS 7 发布的最后一个版本。**不要采信中文站的这个说法。**
 
@@ -288,20 +305,25 @@ ls -Zd /data /var/lib/docker                                 # SELinux 上下文
 
 **门禁**：全部有输出且 `ftype=1`、`uname -r ≥ 3.10.0-514`。
 **分支决策**：
-- Docker 26.1.4 起不来 → 降级 **24.0.7**，再不行 → 20.10.24（见 §5.1 三级降级表）
+- Docker 24.0.9 起不来 → 降级 **20.10.24**（见 §5.1 版本阶梯）
 - CPU 缺 AVX2 → `mysql:8.0` 钉 `8.0.32`
 
 ### P1 · Docker 装机
 
 ```bash
-# 联网机：导出 4 个 RPM + 依赖到 /opt/qa-transfer/
+# 联网机：把下列 4 个 RPM 下载到 /opt/qa-transfer/，连同依赖一起带进内网
+#   https://download.docker.com/linux/centos/7/x86_64/stable/Packages/
 yum install -y yum-utils device-mapper-persistent-data lvm2
-curl -fsSL https://get.docker.com | sh          # 或 yum-config-manager 后手动装
-yum install -y docker-ce-26.1.4-1.el7.x86_64 \
-               containerd.io-1.6.33-3.1.el7.x86_64 \
-               docker-compose-plugin-2.27.1-1.el7.x86_64
+
+# 内网 CentOS：离线安装（版本取 §5.1 版本阶梯的「选用」档）
+yum install -y /opt/qa-transfer/docker-ce-24.0.9-1.el7.x86_64.rpm \
+               /opt/qa-transfer/docker-ce-cli-24.0.9-1.el7.x86_64.rpm \
+               /opt/qa-transfer/containerd.io-1.6.33-3.1.el7.x86_64.rpm \
+               /opt/qa-transfer/docker-compose-plugin-2.27.1-1.el7.x86_64.rpm
 systemctl enable --now docker
 ```
+> `docker-ce-cli` **不可省**：它才提供 `docker` 命令本身，漏装则后续所有 `docker` 调用 command not found。
+> 不要用 `curl https://get.docker.com | sh` —— 该脚本面向当前发行版，对 EOL 的 el7 会解析出错误的仓库配置。
 
 **daemon.json**（`/etc/docker/daemon.json`）：
 
@@ -334,13 +356,15 @@ systemctl enable --now docker
 
 **门禁**：逐表行数与源端一致（至少 `ontology_class` / `data_source` / `system_config` 三表），Neo4j `MATCH (n) RETURN count(n)` 等于源端。
 
-### P6 · Milvus 重建回填
+### P6 · Embedding provider 切换（**必须在 P7 回填之前**）
 
-**门禁**：集合实体数达到源端对应值。
+**门禁**：`GET /api/v1/embedding-providers/active` 返回 `provider_type=ollama`、`dimension=1024`，且 baseUrl 解析后指向 CentOS 宿主上的 Ollama。详见 §6.6。
 
-### P7 · Embedding / LLM 切换
+### P7 · Milvus 重建回填 + LLM 切换
 
-**门禁**：`GET /api/v1/embedding-providers/active` 返回 `provider_type=ollama`；一次语义检索返回合理结果。
+**门禁**：集合实体数达到附录 A 快照值（用 `diag_milvus_embedding_state.py` 核，不是看脚本 exit 0）。详见 §6.5。
+
+> ⚠️ **编号顺序 ≠ 执行顺序**：P7 的回填依赖 P6 的 provider 切换，因为回填要真实调用 embedding，而迁移过来的 provider 行指向 Mac 上才存在的后端。
 
 ### P8 · 冒烟验收
 
@@ -415,6 +439,32 @@ docker exec qa-mysql-demo sh -c \
 
 > **`backup_milvus.sh` 不执行。** 它是裸 tar 卷备份，Milvus 按 §4.5 走重建路径。
 
+#### 护栏：导出后先自检，再往下走
+
+四份产物在**导出完成、尚未拷贝**这个时点就应当校验。跳过这步的话，损坏要到 CentOS 上导入失败时才暴露，那时排查成本高得多。
+
+```bash
+cd backups
+# 1) 四份产物都在，且非空
+for f in pg/*.dump neo4j/*.dump objects/*.tar.gz mysql/*.sql; do
+  [ -s "$f" ] && echo "OK   $f  $(du -h "$f" | cut -f1)" || echo "EMPTY/MISSING  $f"
+done
+
+# 2) PG dump 结构完整（-Fc custom format 可被解析）
+docker run --rm -v "$PWD/pg:/b:ro" postgres:16-alpine \
+  pg_restore --list /b/qa_metadata_*.dump | tail -5
+#    期望：列出 TABLE DATA / DATABASE 等条目，末尾无 "error" 字样
+
+# 3) MySQL dump 有内容且不是只有注释
+grep -vcE '^(--|/\\*|!|$)' mysql/*.sql   # 期望 > 0
+
+# 4) 记录校验和，拷贝到 CentOS 后在那边复核（传输损坏的唯一低成本检测手段）
+find pg neo4j objects mysql -type f \( -name '*.dump' -o -name '*.tar.gz' -o -name '*.sql' \) \
+  | sort | xargs sha256sum | tee ../transfer-manifest.sha256
+```
+
+> **PG dump 完整性补充**：`pg_restore --list` 只验证**目录结构**可解析，不验证数据块 CRC。若要更强的保证，在 CentOS 侧 `pg_restore` 时**不加 `--list`**、跑真实恢复，让它自己校验——真实恢复失败会明确报 `invalid compressed data` 之类。
+
 ### 6.3 Ollama 模型离线预置
 
 CentOS 无法 `ollama pull`。模型 blob 是内容寻址文件，整目录带走即可。
@@ -437,40 +487,92 @@ tar xzf /opt/qa-transfer/ollama-models.tar.gz -C /srv/
 
 ### 6.4 P5 · CentOS 数据导入
 
-```bash
-# PostgreSQL —— 先起空库（不含 volume），再恢复
-docker compose up -d postgres
-docker exec qa-postgres pg_restore -U qa_user -d qa_metadata --clean --if-exists < /path/to/qa_metadata.dump
-docker exec qa-postgres psql -U qa_user -d qa_metadata -tAc "select version_num from alembic_version;"
-# 期望 0132 —— 确认与 backend 镜像的 head 对齐
+#### 护栏：本段全部是破坏性操作，三条前置断言必须先过
 
-# Neo4j —— 起空库后 load
-docker compose up -d neo4j
+以下命令带 `--clean --if-exists`、覆盖卷 tar、直接 load 到目标库。**在任何一条命令之前**，逐条确认：
+
+```bash
+# 断言 1：backend 绝不能已经在跑（它会跑 seed，污染半空库）
+docker ps --format '{{.Names}}' | grep -qx qa-backend \
+  && { echo "ABORT: backend 在跑，先 docker compose stop backend"; exit 1; }
+
+# 断言 2：目标卷确实是空的。若非空说明之前有人导过，不要叠加导入。
+for v in qa-system_pg_data qa-system_neo4j_data qa-system_objects_data; do
+  n=$(docker run --rm -v "$v:/d" alpine:3.20 sh -c 'ls -A /d | wc -l')
+  echo "$v  entries=$n"; [ "$n" -eq 0 ] || echo "  ⚠️ 非空，确认后再继续"
+done
+
+# 断言 3：传输完整性（对照 §6.2 生成的清单）
+sha256sum -c transfer-manifest.sha256
+```
+
+#### 导入（严格按序，每步验完再下一步）
+
+```bash
+# --- PostgreSQL ---
+docker compose up -d postgres
+# ⚠️ `-i` 不可省：docker exec 默认不接 stdin。缺了它，`<` 重定向的内容根本进不去。
+#    实测（postgres:16-alpine）：此时 pg_restore 读空流会以 exit 1 响亮失败——
+#    `pg_restore: error: input file is too short (read 0, expected 5)`。
+#    这是好事（不会假绿），但前提是**有人真的读了那条报错**。
+#    紧跟其后的 "立即验" 就是防这个：只看容器 healthy 会漏掉恢复根本没发生。
+docker exec -i qa-postgres pg_restore -U qa_user -d qa_metadata --clean --if-exists < backup/pg/qa_metadata_*.dump
+# 立即验：版本号 + 关键表行数（对比附录 A）
+docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc "select version_num from alembic_version;"
+#   期望 0132 —— 与 backend 镜像的 head 对齐
+docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc "select count(*) from audit_log;"
+#   期望 17100（不是 pg_stat 的估算值，见附录 A）
+
+# --- Neo4j（server 必须停着，load 才允许） ---
+docker compose up -d neo4j && docker compose stop neo4j
 docker run --rm -v qa-system_neo4j_data:/data -v $PWD/backup:/backup \
   neo4j:5.23-community neo4j-admin database load neo4j --from-path=/backup --overwrite-destination=true
+docker compose start neo4j
+# 立即验
+docker exec -i qa-neo4j cypher-shell -u neo4j -p "$NEO4J_PASSWORD" \
+  "MATCH (n) RETURN count(n);"     # 期望 ≈ 3753
 
-# qa-objects —— 卷 tar 还原
+# --- qa-objects ---
 docker run --rm -v qa-system_objects_data:/data -v $PWD/backup:/backup \
   alpine:3.20 sh -c 'cd /data && tar xzf /backup/objects_data_*.tar.gz'
+# 立即验：目录非空
+docker run --rm -v qa-system_objects_data:/data alpine:3.20 sh -c 'ls -A /data | head'
 
-# MySQL demo
+# --- MySQL demo ---
 docker compose up -d mysql-demo
 docker exec -i qa-mysql-demo sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" wms_demo' < backup/mysql/wms_demo.sql
+# 立即验
+docker exec -i qa-mysql-demo sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -NBe "select count(*) from information_schema.tables where table_schema=\"wms_demo\";"'
 ```
+
+> **每一步的"立即验"不可省。** 跳过验证一路走到底的话，故障会在 P7 embedding 回填甚至 P8 冒烟时才浮现，那时已经无法区分"迁移丢了"还是"回填失败"。
 
 **导入顺序铁律**：PostgreSQL 与 Neo4j 必须**先于 backend 首次启动**完成恢复。否则 backend 启动时会跑一堆 seed / schema drift 校验，作用在半空库上，产生脏数据。backend 的 `depends_on` 只保证容器顺序，不保证恢复完成 —— 恢复必须手工串行。
 
-### 6.5 P6 · Milvus 重建回填
+### 6.5 P7 · Milvus 重建回填
+
+#### 前置条件：embedding provider 必须**已经**指向 CentOS 的 Ollama
+
+回填要真实调用 embedding。DB 里迁移过来的是 Mac 上的 provider 行（`omlx` / MLX 之类），在 CentOS 上那个后端不存在。**因此 §6.6 的 provider 切换必须先于本节的回填执行**，不能按 P6→P7 的编号顺序走。
 
 ```bash
+# 0. 先做 §6.6 的 embedding provider 切换，确认 /active 返回的是 centos ollama 那一行
+curl http://localhost:5173/api/v1/embedding-providers/active -H "Authorization: Bearer $JWT"
+#    确认 baseUrl 解析后指向 host.docker.internal:11434，且 dimension=1024
+
 # 1. 起 Milvus 全家桶，等健康（backend 启动不需要它，但回填需要）
 docker compose up -d milvus-etcd milvus-minio milvus-standalone
 #    集合无需手工建表：milvus_client._ensureCollection() 在**首次写入路径**上惰性创建
 #    （ensureQueryCollection / ensureDocumentCollection / ensureWikiPageCollection）。
 #    即"第一条 insert/search 时集合才出现"，故 Milvus 必须先于回填脚本就绪。
 
+# 1. 【强烈建议先跑】--dry-run 验证全链路，不写 Milvus
+#    ⚠️ dry-run 仍会真实调用 embedding API 产生费用，但不会写入任何向量
+docker exec qa-backend python scripts/backfill_milvus_embeddings.py --dry-run
+#    通过标准：能连库、能取到类/属性、embedding 生成无维度错误（必须是 1024）
+
 # 2. 本体向量（3742 property + 50 class）
-docker exec qa-backend python scripts/backfill_milvus_embeddings.py --cleanup
+docker exec qa-backend python scripts/backfill_milvus_embeddings.py
 
 # 3. Wiki 向量（64 页，需 admin 身份）
 curl -X POST http://localhost:5173/api/v1/wiki/vector-sync -H "Authorization: Bearer $JWT"
@@ -479,9 +581,27 @@ curl -X POST http://localhost:5173/api/v1/wiki/vector-sync -H "Authorization: Be
 #    源文件已在 qa-objects volume 中恢复，重新走文档上传/解析流程生成 chunk 与向量
 ```
 
-**注意**：`scripts/reset_milvus_collections.py` 会 drop 三个集合但保留 `query_embeddings`。若要走完整重建，用它先清干净再回填。
+#### 关于 `--cleanup`：CentOS 上**默认不需要**，且历史上正是它出过事故
 
-### 6.6 P7 · Embedding 切换
+`backfill_milvus_embeddings.py` 的 docstring 记着一件已修复的事故（2026-09-30）：
+
+> 此前 cleanup 调的是 `dropCollection()` / `ensureCollection()` —— 在 Task 14 丢弃旧 `ontology_embeddings` 之后**二者已成 no-op**，于是 cleanup **静默退化为纯 append**：每跑一次就多一整套向量（32 类被堆成 98 行、3642 属性被堆成 10926 行），检索 topK 窗口被重复项吃光。
+
+三点推论：
+
+1. **CentOS 上 Milvus 卷是重建的、集合为空**，普通回填走 `syncEmbedding`（按 `ontology_id` 先删后插，**幂等**）就够了。**不要因为脚本支持 `--cleanup` 就顺手加上** —— 在干净空库上跑 cleanup 只会徒增风险。
+2. `--cleanup` 的用途是**收敛一个已经重复的集合**。若回填需要重跑、或从 Mac 侧导过脏数据，才用它；它与 `--sources` / `--skip-classes` **互斥**（同时给会 `SystemExit`）。
+3. 无论走哪条路，**回填后必须核对行数**，因为历史故障的特征正是"脚本 exit 0 但行数翻倍"：
+
+```bash
+# 期望：class≈54、property≈3742、query_embeddings≈1061、wiki≈64
+docker exec qa-backend python scripts/diag_milvus_embedding_state.py
+```
+对比附录 A 的快照。若任一项**接近整数倍翻倍**（例如 3742 → 7484），就是踩了上面那个坑，改用 `--cleanup` 收敛后重验。
+
+> 另有 `scripts/reset_milvus_collections.py` 会 drop 三个集合但**保留 `query_embeddings`**。本方案不需要它——CentOS 上从空集合开始，不需要预清理。只有在确认需要保留 query 而重置其余时才用。
+
+### 6.6 P6 · Embedding provider 切换（须先于 §6.5 回填）
 
 ```bash
 # 通过管理 API 切换（走 CRUD，不要手改库 —— 手改会绕过缓存失效）
@@ -560,6 +680,37 @@ ollama:
 | `NL2SQL_NO_SCOPE_ROW_LIMIT` | `1000` | 不变 |
 | `APP_ENV` | `production` | 从 `development` 改 |
 
+#### 逐字复制项的校验方法（**导入前**做，不要等导入后报 400）
+
+"逐字复制"最常见的失败不是忘了填，而是**抄错一个字符**——肉眼在 44 位 base64 上是发现不了的。以下校验**全部在 P4 起容器之前、在源端和 CentOS 侧各跑一次**，比对的是字节而不是肉眼：
+
+```bash
+# 变量名清单（这 5 个必须逐字复用，其余按上表处理）
+REUSE_KEYS="SECRET_KEY NEO4J_PASSWORD MINIO_ROOT_USER MINIO_ROOT_PASSWORD"
+
+# 1) 生成指纹：只输出 SHA-256，不回显密钥本身
+#    贴到日志/工单里是安全的，密钥本身不进任何输出
+printenv | grep -E "^(${REUSE_KEYS// /|})=" | sort \
+  | sha256sum | cut -d' ' -f1
+```
+**判定**：源端与 CentOS 侧两次输出**必须完全相同**。
+
+若不相同，逐项定位（同样不回显明文）：
+```bash
+for k in $REUSE_KEYS; do
+  a=$(grep -m1 "^$k=" /path/to/source/docker/.env | sha256sum | cut -c1-12)
+  b=$(grep -m1 "^$k=" /path/to/centos/docker/.env | sha256sum | cut -c1-12)
+  [ "$a" = "$b" ] && echo "OK   $k" || echo "DIFF $k  src=$a dst=$b"
+done
+```
+
+**两个容易踩的坑**：
+1. `.env` 里值带引号 / 尾部有 `\r`（Windows 换行）时 `sha256sum` 就不一致了。CentOS 侧从 Windows 中转文件时用 `dos2unix docker/.env` 先清掉 CR。
+2. `docker/.env` 若已 gitignore，**不要用 `git show` 取值**——那会拿到仓库里的占位符而非现网值。现网值只在源端那份工作副本的 `docker/.env` 里。
+
+**导入后仍需二次验证**（指纹一致只证明密钥没抄错，不证明密文与密钥配对正确）：
+见 §8.1 第 3 条 —— 用**迁移过来的**那条 THBI Oracle 数据源做连接测试，必须真的建连成功。
+
 ### 7.2 数据导入后的业务配置修正
 
 ```sql
@@ -616,7 +767,10 @@ UPDATE data_source SET is_active = false
 
 1. `curl http://<centos>:5173/api/v1/health` → `{"status":"ok"}`
 2. 注册模型 → 201
-3. 注册 / 验证 **THBI Oracle** 数据源 → 连接测试通过
+3. **验证迁移过来的** THBI Oracle 数据源（`id=1`，`192.168.205.70:1521`）→ 连接测试通过。
+   ⚠️ **不要重新注册一条来测**：新注册的数据源不经过 `password_encrypted` 解密路径，测通了也不证明 SECRET_KEY 用对了。必须用导入后库里那一条。
+   **解密失败的特征**（已核实）：`data_source.password_encrypted` 由 `business_db_pool.py:708` 走 `decryptApiKey()` 解密；`crypto.py:50-51` 捕获 `InvalidToken` → 抛 `ConfigError`；`ConfigError` 无专门状态码分支，在 `exceptions.py:206 statusForError` 落到 **`return 400`**。响应体文案固定为 `API Key 密文无法解密，可能密钥已变更`。
+   ⚠️ 该文案里的 "API Key" 有误导性——`decryptApiKey` 是通用加密助手，数据源密码走同一函数。看到这句文案时**不要去查 `llm_config`**，先查 `data_source.password_encrypted`。
 4. 定义知识类 `库存` → 成功
 5. **提问 → 返回回复 + SQL + 图表 + Token 计量**
 6. `GET /api/v1/data-quality/rules` → 200（表缺失会 500）
@@ -642,7 +796,7 @@ UPDATE data_source SET is_active = false
 | ID | 风险 | 等级 | 缓解 | 触发时 |
 |---|---|---|---|---|
 | R1 | **`SECRET_KEY` 被重新生成** | 🔴 致命 | §7.1 逐字复制；**导入后立刻验**：`curl /datasources` + 逐个试连 THBI Oracle | 解密抛 `ConfigError`，HTTP 400 |
-| R2 | Docker 26.1.4 在 kernel 3.10 起不来（**可获得但运行时未验证**，无一手来源） | 🟠 高 | P1 跑 `docker info` + `hello-world` 实测；三级降级 24.0.7 → 20.10.24（§5.1） | `failed to start daemon` / `runc create failed: EOF: unknown` |
+| R2 | **任何** el7 版 Docker 在 kernel 3.10 起不来（**可获得 ≠ 能启动**，所有候选版本均无一手来源） | 🟠 高 | 选用 24.0.9（较保守，见 §5.1）；P1 跑 `docker info` + `hello-world` + `docker compose version` 实测；起不来降级 20.10.24 | `failed to start daemon` / `runc create failed: EOF: unknown` |
 | R3 | **`data_source` 指向不可达端点** | 🟠 高 | §7.2 停用 4 条 | NL2SQL 连接超时 |
 | R4 | Ollama 仍只听 `127.0.0.1` | 🟠 高 | §6.7 `OLLAMA_HOST=0.0.0.0` | 容器内 embedding 连接被拒 |
 | R5 | 对话模型指向 Mac / 云端死端点 | 🟠 高 | §6.7 停用 5 条 | chat 503 |
@@ -659,20 +813,61 @@ UPDATE data_source SET is_active = false
 
 ## 10. 已知缺口：双活漂移（用户已确认接受）
 
-Mac 与 CentOS **各自独立执行 alembic 迁移**。`main` 上新增迁移 0133 时：
+### 10.1 先厘清一件事：漂移有两个维度，性质完全不同
 
-- Mac：pull → rebuild → `alembic upgrade head` → 0133
-- CentOS：**必须独立重复一遍同样流程**
+| | **schema 漂移**（表结构 / alembic 版本） | **数据漂移**（行内容） |
+|---|---|---|
+| 会不会自己收敛 | **会** | **永不** |
+| 为什么 | `Dockerfile.backend` 的 `CMD` 是 `alembic upgrade head && uvicorn`（见 §3.3.5）——**两边都是容器启动时自动迁移**，没有"谁决定升不升"这一步 | 各自写入，无同步机制（§2.1 已定为一次性导数） |
+| 风险 | 低但有：存在**中间态窗口**，且破坏性迁移不可逆 | 中：新会话 / 新数据源 / 新 ontology 只在一侧存在 |
 
-漏掉 CentOS ⇒ 两边 schema 分叉，CentOS 上的缺陷在 Mac 上复现不了，反之亦然。
+**这个区别决定了下面的判断**：schema 不需要"同步机制"，只需要"别在错误的时间启动容器"；数据才是真正需要人管的部分。
 
-**这与 `qa-system-deploy-source-must-be-fresh-worktree` 是同一类病**（部署源不新鲜 ⇒ 上线崩）。缓解建议（不在本次实施范围，用户已选择接受风险）：
+### 10.2 触发条件与具体场景
+
+**场景 A —— 谁先跑 migration，其实不是人决定的**
+
+由于两边都是启动时 `alembic upgrade head`，"谁先升"取决于**哪个 backend 容器先被拉起**。实际后果：
+
+- CentOS 先起、Mac 后起 ⇒ 两边最终都在 0133，**自动收敛，无需人工干预**
+- Mac 先起、CentOS 后起 ⇒ 同上
+- **危险的不是顺序，而是中间态**：在 CentOS 升到 0133 之后、Mac 还没 pull 新镜像的这段时间里，Mac 上跑的是**0132 的代码 + 0133 的 schema**。如果 0133 是破坏性的（drop 列 / 改类型），Mac 的旧代码可能在下次启动时行为异常。
+
+**场景 B —— 破坏性迁移在 Mac 上先落地**
+
+Mac 上是开发数据，通常无所谓。但如果某次迁移的 `downgrade()` 不可用或数据已不可回滚，而 Mac 与 CentOS 有**业务相关的数据差异**，Mac 那边的自动升级就是一次不可逆的本地数据丢失。缓解靠约定：涉及 `drop` / 数据改写的迁移，**先在 CentOS 验一遍再 pull 到 Mac**。
+
+**场景 C —— 缺陷只在单侧可复现**
+
+Mac 上复现不了 CentOS 的数据形态（反过来也是）。这是双活的固有代价，不靠流程消除，只能靠**在 CentOS 上跑验收**来覆盖（§8 就是在 CentOS 上跑的）。
+
+**场景 D —— 4 条开发探针数据源长期分叉**
+
+§7.2 只在 CentOS 侧停用 `localmysql` / `smoke` / `recall-probe` / `phase13_realdata_pg`，Mac 侧保留。**两边该表内容会长期不同，属预期**，不要试图"对齐"。
+
+### 10.3 冲突时怎么判
+
+给一条明确的裁决规则，避免每次都重新讨论：
+
+> **业务数据以 CentOS 为准；Mac 是开发草稿，不承担权威性。**
+
+具体到冲突：
+- **schema 冲突**（同名迁移在两侧产生不同结果）⇒ 以 `main` 上的迁移文件为准，两边都回到该文件重新 `upgrade`。**不要**在任一侧手工改 `alembic_version` 对齐（铁律 `qa-system-never-fake-alembic-version-number`）。
+- **数据冲突**（同一实体两侧内容不同）⇒ CentOS 赢。需要拿 Mac 的数据过去时，走一次性导出导入，不要建双向同步。
+- **不确定谁对** ⇒ 去查 `audit_log`（CentOS 有 17100 行，见附录 A），那边有操作留痕。
+
+### 10.4 未采纳的缓解措施（用户已选择接受风险）
+
+以下是**建议但本次不做**的事，记录在此以免将来重复讨论：
 
 1. 部署 runbook 改为**双目标清单式**：每次部署产出两条记录（Mac + CentOS 各自的镜像 tag 与 alembic 版本）
-2. CentOS 侧加一个只读版本探针（脚本或接口），随时能回答"CentOS 现在在 0132 还是 0133"
+2. CentOS 侧加一个**只读版本探针**（脚本或接口），随时能回答"CentOS 现在在 0132 还是 0133"
 3. 仓库无 CI（`qa-system-no-ci-main-can-go-red`），两边都不会自动提醒
 
-**另一处漂移**：`data_source` 里那 4 条开发探针在两边会各自演化。§7.2 只在 CentOS 侧停用，Mac 侧保留作为开发便利 —— 两边该表内容将长期不同，属预期。
+第 2 条的**临时替代**：随时可以手工查
+```bash
+docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc "select version_num from alembic_version;"
+```
 
 ---
 

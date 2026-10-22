@@ -14,6 +14,16 @@ Backfill：将 user_id=-1 的 M4 墓碑行标记为 is_stub=True（这些行是 
 Idempotent：backfill 的 WHERE user_id=-1 AND is_stub=False 只命中未处理行，
 重复执行是安全的。
 
+⚠️ 这句 backfill **实际一行都没命中**。M5 先合、拿的是 0129；M4 后合，
+按下面「若 M5 先合」的规约改号到了 0131（0130 已被 research checkpoint 占用）。
+最终链是 0127→0129→0130→0131，所以本 backfill 跑在 0131 造出 -1 行**之前**，
+执行时表里还不存在 user_id=-1 的行。0131 造出的墓碑保持 is_stub=False。
+
+排除墓碑的唯一有效手段是读/写侧的 `user_id != -1`，不是 is_stub。
+详见 models.py SessionQueryState 的类 docstring。
+没有补一条回填迁移来补正：is_stub 的消费点只关心 stub 行，无人依赖墓碑的
+is_stub 值，补迁移不会改变任何行为。
+
 合并顺序：M4 (PR #35, branch fix/m4-session-query-state-null-stamp) 占 0128，
 本迁移编 0129 是有意避开冲突的占位。
 - 若 M4 先合：M5 rebase 后 down_revision 由 0127 改为 0128

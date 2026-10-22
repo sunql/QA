@@ -1,8 +1,13 @@
 """SessionQueryState 把 NULL user_id 行墓碑化为 -1。
 
-Revision ID: 0128
-Revises: 0127
+Revision ID: 0131
+Revises: 0130
 Create Date: 2026-10-16
+
+（头部原先误写 `Revision ID: 0128 / Revises: 0127`，与文件里的
+`revision = "0131" / down_revision = "0130"` 对不上——0128/0127 那两个号在
+2026-10-17 的 renumber 里已经换给了别的迁移。此处只改正文档字符串，不动
+`revision` / `down_revision` 常量：本迁移已在各环境 apply 过。）
 
 M4：P0-3 上线前写的 `(NULL, NULL, session_id)` 旧行（无 user_id 归属）可被任何
 用户读 —— 因为 P0-3 三元 (user, datasource, session) 过滤在 NULL 行不命中，

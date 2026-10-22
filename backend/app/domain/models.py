@@ -874,12 +874,18 @@ class SessionQueryState(Base, TimestampMixin):
     避免切换数据源后用错 state / 跨用户窃取上下文。
     NULL 列兼容历史无 scope 的旧行。
 
-    M4（方案 A，0128 迁移）：user_id = -1 是墓碑值，把 P0-3 前的 NULL 行 UPDATE 为 -1，
+    M4（方案 A，0131 迁移）：user_id = -1 是墓碑值，把 P0-3 前的 NULL 行 UPDATE 为 -1，
     表示「归属未明的遗留桶，禁止读」。读侧统一 `WHERE user_id != -1` 排除。
-    M5（0129 backfill + is_stub 列）：M4 的 -1 墓碑行在迁移 0129 中被 backfill 为 is_stub=True，
-    进一步走读侧 `WHERE is_stub=false` 过滤。写侧在 userId is None 时设 is_stub=True。
-    is_stub 比 scope 完整度更强的排序信号：is_stub=False 的行（real 行）在任何情况下
-    都优先于 is_stub=True 的行。
+    M5（0129 is_stub 列）：写侧在 userId is None 时设 is_stub=True，读侧 `WHERE is_stub=false`
+    排除 stub 行。is_stub 比 scope 完整度更强的排序信号：is_stub=False 的行（real 行）在
+    任何情况下都优先于 is_stub=True 的行。
+
+    注意：**不要**以为 0131 造的墓碑会被标成 is_stub=True。迁移链是
+    0127→0129→0130→0131，0129 里那句 `UPDATE ... SET is_stub=true WHERE user_id=-1`
+    跑在 0131 造出 -1 行之前，一行都没命中；墓碑保持 is_stub=False。
+    排除墓碑的唯一有效手段是 `user_id != -1`（读侧 chat_context.py:582 /
+    写侧 :625）。没有补回填迁移：is_stub 的消费点只关心 stub 行，无人依赖墓碑的
+    is_stub 值，补迁移修不了任何行为。
     """
 
     __tablename__ = "session_query_state"

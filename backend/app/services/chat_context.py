@@ -578,8 +578,12 @@ class ContextMixin:
         """
         stmt = select(SessionQueryState).where(
             SessionQueryState.session_id == sessionId,
-            SessionQueryState.is_stub == False,  # M5：排除 stub 行（M4 的 -1 墓碑行已被 0129 backfill 为 is_stub=True）
-            SessionQueryState.user_id != -1,  # M4：排除 user_id = -1 墓碑行（0128 迁移 NULL→-1；M5 0129 backfill 为 is_stub=True 双重保险）
+            SessionQueryState.is_stub == False,  # M5：排除 stub 行（匿名写 userId=None 落的半 scope 行）
+            # M4：排除 user_id = -1 墓碑行（0131 迁移把 P0-3 前的 NULL user_id 行置为 -1）。
+            # 这里**不是**「与 is_stub 的双重保险」：迁移链是 0127→0129→0130→0131，
+            # 0129 的 `is_stub` backfill 跑在 0131 造出 -1 行之前，一行都没命中；
+            # 0131 造出的墓碑保持 is_stub=False。排除墓碑的**唯一**有效手段就是这一条。
+            SessionQueryState.user_id != -1,
         )
         if userId is not None:
             stmt = stmt.where(SessionQueryState.user_id == userId)

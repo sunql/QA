@@ -765,6 +765,19 @@ UPDATE data_source SET is_active = false
 
 ### 8.1 通用冒烟（`Harness/skills/deploy-verify`）
 
+> **前置事实（2026-10-22 实测）**：源端**只有一把** `SECRET_KEY`。仓库内 6 个 `.env`
+> （`docker/` `backend/` 及 3 个 worktree）、8 个 backend 镜像内 `/app/.env`、以及运行中
+> `qa-backend` 的环境变量，**指纹全部相同**（`sha256(值)` 前 12 位 = `8a8718589408`）。
+>
+> 由此得到两条对验收有用的推论：
+> 1. **历史上没有发生过 SECRET_KEY 轮换。** 所以第 3 条若失败，原因**只可能是 CentOS
+>    侧抄错了**，不存在"这行本来就解不开"这种干扰项 —— 失败信号是干净的，无需二次归因。
+> 2. 正确值有且仅有一个，取自源端 `docker/.env`（§7.1 已给指纹比对法）。
+>
+> ⚠️ **不要用镜像里的 `.env` 作为取值来源**。6 个镜像烤进了 2026-08-27 当时的 `.env`
+> （`qa-system-old-images-contain-secrets`）。本次实测它们与现网同key，但镜像里的凭据是
+> **2 个月前的快照**，且镜像本身是泄露面 —— 取值只用源端 `docker/.env`。
+
 1. `curl http://<centos>:5173/api/v1/health` → `{"status":"ok"}`
 2. 注册模型 → 201
 3. **验证迁移过来的** THBI Oracle 数据源（`id=1`，`192.168.205.70:1521`）→ 连接测试通过。

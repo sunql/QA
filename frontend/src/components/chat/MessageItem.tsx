@@ -167,7 +167,9 @@ function MessageItem({
                   steps={message.steps}
                   currentStepIndex={message.currentStepIndex}
                   originalModelId={message.originalModelId ?? selectedModelId ?? 0}
-                  onResume={(runId, fromStepIndex) => resumeRun(runId, fromStepIndex, message.id)}
+                  onResume={(runId, fromStepIndex, modelId) =>
+                    resumeRun(runId, fromStepIndex, message.id, modelId)
+                  }
                   disabled={loading}
                 />
               </div>

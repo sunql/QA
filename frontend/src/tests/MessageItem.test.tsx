@@ -1,8 +1,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
+
+// ResumeRunButton 渲染即调 useLlmModels（本文件里任何带 steps 的消息都会走到）。
+// 默认值必须在**模块级**给全：只在本文件末尾那个 describe 的 beforeEach 里设的话，
+// 别的 describe（如「续跑失败横幅」）先跑就会拿到 undefined，ResumeRunButton
+// 解构 data 直接崩——那不是被测行为，是 mock 漏配。
+const useLlmModelsMock = vi.fn(() => ({
+  data: [
+    { id: 1, modelName: "deepseek-chat", provider: "OPENAI_COMPATIBLE_PROXY" },
+    { id: 2, modelName: "Qwen3.8-27B-4bit", provider: "OLLAMA" },
+  ],
+  loading: false,
+  error: null,
+  reload: vi.fn(),
+}));
+vi.mock("../hooks/useLlmModels", () => ({
+  useLlmModels: () => useLlmModelsMock(),
+}));
+
 import MessageItem from "../components/chat/MessageItem";
+import { useChatStore } from "../stores/chatStore";
 import type { ChatMessage } from "../types/chat";
 
 function renderItem(overrides: Partial<ChatMessage> = {}) {
@@ -452,5 +471,81 @@ describe("MessageItem 消息级 visualRationale（Task 8，多步汇总）", () 
   it("无 visualRationale 时不渲染说明行", () => {
     renderItem({ content: "查询完成。" });
     expect(screen.queryByText("汇总为文字结论，各步骤图表见上方")).toBeNull();
+  });
+});
+
+/**
+ * N4「换模型续跑」在 Chat 侧真正生效的那一跳。
+ *
+ * 断点就在本文件对应的组件里：`MessageItem` 给 `MultiStepPlanCard` 的 onResume
+ * 回调原先只声明 `(runId, fromStepIndex)` 两个形参，于是 ResumeRunButton 传来的
+ * 第 3 参 modelId 被**静默丢弃**——用户明明在 Popover 里选了模型，store 收到的
+ * 仍是 undefined，续跑照 run 的原模型跑。
+ *
+ * 注意断言要落在这一层而不是 MultiStepPlanCard 层：那张卡只是把 prop 直传给
+ * ResumeRunButton（MultiStepPlanCard.tsx:140），运行时第 3 参本来就流得过去，
+ * 在那层写测试**回退修复后依然全绿**，抓不到本 bug（已实测确认）。
+ *
+ * 反向自检：把 onResume 的回调改回 2 参形参 ⇒ 下面两条都红。
+ */
+/** 本文件末尾那组用例会替掉 store 的 resumeRun；用完必须还原，别泄漏给别的用例。 */
+const realResumeRun = useChatStore.getState().resumeRun;
+
+describe("MessageItem 换模型续跑（N4 接缝）", () => {
+  const FAILED_STEP = {
+    stepIndex: 2,
+    description: "统计各供应商收货量",
+    subQuestion: "各供应商收货量是多少",
+    aggregationOnly: false,
+    status: "error" as const,
+    error: "oMLX timeout",
+    sql: null,
+    summary: null,
+    runId: "r-1",
+  };
+
+  beforeEach(() => {
+    useChatStore.setState({ loading: false, selectedModelId: null } as any);
+  });
+
+  afterEach(() => {
+    useChatStore.setState({ resumeRun: realResumeRun } as any);
+  });
+
+  /** 渲染一条带失败步的 assistant 消息，并展开分析计划面板。 */
+  function renderFailedStepMessage() {
+    renderItem({
+      content: "续跑失败",
+      originalModelId: 2,
+      steps: [FAILED_STEP] as any,
+    });
+    fireEvent.click(screen.getByText("查看分析计划"));
+  }
+
+  it("选「原模型续跑」→ resumeRun 收到 modelId=null", async () => {
+    const resumeRun = vi.fn();
+    useChatStore.setState({ resumeRun } as any);
+    renderFailedStepMessage();
+
+    fireEvent.click(screen.getByTestId("resume-run"));
+    await waitFor(() => screen.getByTestId("resume-with-original"));
+    fireEvent.click(screen.getByTestId("resume-with-original"));
+
+    expect(resumeRun).toHaveBeenCalledWith("r-1", 2, "m-1", null);
+  });
+
+  it("选另一个模型续跑 → resumeRun 第 4 参必须带所选 modelId（本 bug 的守卫）", async () => {
+    const resumeRun = vi.fn();
+    useChatStore.setState({ resumeRun } as any);
+    renderFailedStepMessage();
+
+    fireEvent.click(screen.getByTestId("resume-run"));
+    await waitFor(() => screen.getByTestId("resume-model-select"));
+    // 原模型是 Qwen(2)；换成 deepseek(1)
+    fireEvent.mouseDown(document.querySelector(".ant-select-selector") as HTMLElement);
+    fireEvent.click(await screen.findByText(/^deepseek-chat/));
+    fireEvent.click(screen.getByTestId("resume-with-selected"));
+
+    expect(resumeRun).toHaveBeenCalledWith("r-1", 2, "m-1", 1);
   });
 });

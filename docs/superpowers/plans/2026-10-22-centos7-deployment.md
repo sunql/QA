@@ -491,7 +491,16 @@ ssh root@<centos> 'rpm -qa | grep -E "^(docker|containerd)" | sort > /root/qa-ce
 
 **Interfaces:**
 - Consumes: 无
-- Produces: `docker-compose.centos.yml`，用法 `docker compose -f docker-compose.yml -f docker-compose.centos.yml up -d`。定义 1 个新服务 `ollama`，并覆盖 `qa-objects` 去掉 `./init` 挂载
+- Produces: `docker-compose.centos.yml`，用法 `docker compose -f docker-compose.yml -f docker-compose.centos.yml up -d`。定义 1 个新服务 `ollama`，并覆盖 `mysql-demo` 去掉 `./init` bind mount（**保留 `mysql_data`**，见下）
+
+> **⚠️ 这个覆盖的对象是 `mysql-demo`，不是 `qa-objects`。**
+> 仓库里唯一的 bind mount 在 `docker-compose.yml:142`，属于 `mysql-demo`：
+> `- ./init:/docker-entrypoint-initdb.d`。`qa-objects` 只有 `objects_data:/data`，
+> 覆盖它的 `volumes` 对 `./init` 毫无作用。
+> 也不能用 `volumes: []`：那不是「删掉 bind mount」，而是「删掉这个服务的全部卷」，
+> 实测在 Compose v5.6.0 上空列表恰好被当成「不覆盖」（`objects_data` 存活），
+> 但这是版本相关的实现细节，不能依赖 —— 换个 compose 版本就可能把 MinIO 数据卷剥掉。
+> 正确做法是 `!override` 显式重列，只保留 `mysql_data`。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -514,6 +523,27 @@ import yaml
 OVERLAY = Path(__file__).resolve().parents[4] / "docker" / "docker-compose.centos.yml"
 
 
+class _ComposeLoader(yaml.SafeLoader):
+    """能读懂 Compose 专属 YAML 标签的 SafeLoader。
+
+    overlay 是写给 `docker compose` 读的。`!override`（Compose ≥ 2.24）
+    表示「整个替换掉这个字段」，PyYAML 不认识它，`yaml.safe_load` 会抛
+    ConstructorError。对本测试而言，标签本身没有语义 —— 我们要断言的是
+    替换之后留下的内容，所以直接把标签剥掉、保留值。
+    """
+
+
+def _unwrapUnknownTag(loader, suffix, node):
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
+    return loader.construct_scalar(node)
+
+
+_ComposeLoader.add_multi_constructor("", _unwrapUnknownTag)
+
+
 @pytest.fixture(scope="module")
 def overlay() -> dict:
     """文件不存在时抛 FileNotFoundError（测试 ERROR），而不是 skip。
@@ -521,7 +551,7 @@ def overlay() -> dict:
     skip 会让「文件被误删」和「测试还没写」长得一模一样 —— 这正是
     qa-system-chat-plan-empty-fixture-pattern 记录的假绿模式。
     """
-    return yaml.safe_load(OVERLAY.read_text(encoding="utf-8"))
+    return yaml.load(OVERLAY.read_text(encoding="utf-8"), Loader=_ComposeLoader)
 
 
 def test_overlay_defines_ollama_service(overlay):
@@ -550,14 +580,29 @@ def test_ollama_does_not_publish_ports(overlay):
     assert "ports" not in overlay["services"]["ollama"]
 
 
-def test_overlay_removes_init_bind_mount(overlay):
-    """overlay 不能「删除」挂载，只能用空列表覆盖。"""
-    assert overlay["services"]["qa-objects"]["volumes"] == []
+def test_overlay_drops_init_bind_mount(overlay):
+    """唯一那个 bind mount 挂在 mysql-demo 上（docker-compose.yml:142）。
+
+    这个断言必须查真正被改动的服务。查错服务会让「什么都没改」和
+    「改对了」长得一模一样 —— 恒真断言是本仓最常见的假绿来源。
+    """
+    volumes = overlay["services"]["mysql-demo"]["volumes"]
+    assert volumes is not None
+    assert all("./init" not in str(v) for v in volumes)
+
+
+def test_overlay_keeps_mysql_data_volume(overlay):
+    """`!override` 是整字段替换，不是「删除其中一项」。
+
+    漏掉这一条：MySQL 的数据目录会落进容器可写层，`docker compose down`
+    之后就没了 —— 而这正是 overlay 里唯一有数据风险的写法。
+    """
+    assert "mysql_data:/var/lib/mysql" in overlay["services"]["mysql-demo"]["volumes"]
 
 
 def test_overlay_does_not_touch_other_services(overlay):
-    """overlay 只允许改 ollama 与 qa-objects，其余服务一律不得出现。"""
-    assert set(overlay["services"]) == {"ollama", "qa-objects"}
+    """overlay 只允许改 ollama 与 mysql-demo，其余服务一律不得出现。"""
+    assert set(overlay["services"]) == {"ollama", "mysql-demo"}
 ```
 
 - [ ] **Step 2: 声明 pyyaml 依赖**
@@ -589,7 +634,7 @@ dev = [
 ```bash
 cd backend && python -m pytest app/tests/unit/test_compose_centos_overlay.py -v
 ```
-Expected: 7 ERROR with `FileNotFoundError: .../docker/docker-compose.centos.yml`
+Expected: 8 ERROR with `FileNotFoundError: .../docker/docker-compose.centos.yml`
 
 - [ ] **Step 4: 写 overlay**
 
@@ -602,6 +647,9 @@ Expected: 7 ERROR with `FileNotFoundError: .../docker/docker-compose.centos.yml`
 # 为什么用 overlay 而不是改主 compose：Mac 长期双活当开发机（spec §10）。
 # CentOS 专属处理全部隔离在这个文件里，Mac 侧 `docker compose up` 逐字不变，
 # 出问题删掉本文件即可完全回退。
+#
+# ⚠️ `!override` 需要 Compose ≥ 2.24。el7 仓库能装到的 docker-compose-plugin
+#    上限是 2.27.1（Task 2 实测确认），够用。
 #
 # 依据 docs/superpowers/specs/2026-10-22-centos7-deployment-design.md
 
@@ -624,12 +672,18 @@ services:
     # 不映射宿主端口：只有 backend 需要访问，走容器网络更安全。
     # 需要手工调试时用 docker exec qa-ollama ollama list
 
-  # ===== MinIO 覆盖：去掉 ./init bind mount =====
-  # 唯一那个 bind mount 是空的 docker/init/。CentOS 上 SELinux 对 bind mount
-  # 的标签策略是常见坑，而这里挂的是空目录 —— 直接用空列表覆盖掉最省事。
-  # 见 spec §7.3。
-  qa-objects:
-    volumes: []
+  # ===== 去掉唯一的 bind mount（spec §7.3）=====
+  # `./init:/docker-entrypoint-initdb.d` 挂在 mysql-demo 上（docker-compose.yml:142），
+  # 而 docker/init/ 是空目录。CentOS 上 SELinux 对 bind mount 的标签策略是常见坑，
+  # 为一个空目录冒这个险不划算。
+  #
+  # 为什么是 `!override` 而不是 `volumes: []`：
+  #   - `[]` 是「把这个服务的卷清空」，会把 mysql_data 一起剥掉；
+  #   - Compose 没有「删除列表中某一项」的写法，只能整字段替换再重列。
+  # 所以这里必须把 mysql_data 原样写回来 —— 漏了就是静默的数据丢失。
+  mysql-demo:
+    volumes: !override
+      - mysql_data:/var/lib/mysql
 
 volumes:
   ollama_models:
@@ -640,20 +694,37 @@ volumes:
 ```bash
 cd backend && python -m pytest app/tests/unit/test_compose_centos_overlay.py -v
 ```
-Expected: 7 passed
+Expected: 8 passed
 
 - [ ] **Step 6: 验证 overlay 能被 compose 解析且合并正确**
 
-```bash
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.centos.yml config --services
-```
-Expected 输出 10 行，含 `ollama`，且 `backend` / `postgres` 等原样保留。
+⚠️ 本步必须**全局**验证，不能 `grep` 某个服务再数 `init` —— 那样「查错了服务」
+和「根本没删掉」输出的都是 `0`，是恒真断言。下面的写法数的是整个合并结果。
 
 ```bash
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.centos.yml config \
-  | grep -A3 'qa-objects:' | grep -c 'init' 
+# 6.1 合并后仍是 10 个服务（原有 9 个 + ollama），原服务一个不少
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.centos.yml config --services
 ```
-Expected: `0` —— 确认 bind mount 真的被覆盖掉了。
+Expected: 输出 9 行原有服务名 + `ollama`，共 10 行。
+
+```bash
+# 6.2 bind mount 真的没了（数整个合并结果里的挂载点）
+test "$(docker compose -f docker/docker-compose.yml -f docker/docker-compose.centos.yml config \
+        | grep -c 'docker-entrypoint-initdb.d')" -eq 0 \
+  && echo "OK: ./init bind mount 已移除" \
+  || { echo "FAIL: bind mount 仍在"; exit 1; }
+```
+
+```bash
+# 6.3 数据卷没被一起剥掉（!override 整字段替换，最容易丢的就是它）
+test "$(docker compose -f docker/docker-compose.yml -f docker/docker-compose.centos.yml config \
+        | grep -c 'mysql_data')" -ge 1 \
+  && echo "OK: mysql_data 存活" \
+  || { echo "FAIL: mysql_data 被误删，MySQL 数据将落容器可写层"; exit 1; }
+```
+
+**反向自检**（防止 6.2 又变成假绿）：临时把 overlay 里的 `!override` 删掉，让
+bind mount 回来，重跑 6.2 —— 必须报 `FAIL`。恢复后再跑一次，必须报 `OK`。
 
 - [ ] **Step 7: 提交**
 
@@ -661,7 +732,7 @@ Expected: `0` —— 确认 bind mount 真的被覆盖掉了。
 git add docker/docker-compose.centos.yml \
         backend/app/tests/unit/test_compose_centos_overlay.py \
         backend/pyproject.toml
-git commit -m "feat(deploy): CentOS compose overlay — 加 ollama、去空 bind mount"
+git commit -m "feat(deploy): CentOS compose overlay — 加 ollama、去 mysql-demo 空 bind mount"
 ```
 
 ---

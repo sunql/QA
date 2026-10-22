@@ -1461,6 +1461,14 @@ from __future__ import annotations
 from scripts.verify_migration import EXPECTED, checkAll, renderReport
 
 
+def _asyncReturning(value):
+    """造一个可 await 的替身，替掉真连库的 _queryAll。"""
+    async def _fake(dsn: str) -> dict:
+        return value
+
+    return _fake
+
+
 def test_expected_matches_spec_appendix_a():
     assert EXPECTED["audit_log"] == 17100
     assert EXPECTED["ontology_class"] == 54
@@ -1469,6 +1477,36 @@ def test_expected_matches_spec_appendix_a():
     assert EXPECTED["evidence"] == 1729
     assert EXPECTED["user_sessions"] == 544
     assert EXPECTED["session_message"] == 1420
+    assert EXPECTED["multi_step_step"] == 27
+
+
+def test_growing_set_covers_every_tolerated_table():
+    """GROWING 常量此前没有任何测试引用 —— 写空了测试照样全绿。"""
+    from scripts.verify_migration import GROWING
+    assert GROWING == {"user_sessions", "session_message", "session_token_usage"}
+    assert GROWING <= set(EXPECTED)
+
+
+def test_checkAll_defaults_to_growing_tolerances():
+    """不显式传 tolerate 时必须就是 GROWING，否则生产调用（走默认值）不受任何保护。"""
+    assert checkAll(dict(EXPECTED, user_sessions=1)) != []
+    assert checkAll(dict(EXPECTED, user_sessions=EXPECTED["user_sessions"] - 3)) == []
+
+
+def test_checkAll_tolerates_upward_growth_on_growing_tables():
+    """导出与核对之间还会写入会话数据。多出来的行不是丢数据，必须放过。
+
+    反向陷阱：把容忍条件写成 `got < want`（只放过小幅下降），
+    每次正常增长都会变成一条「对不上」，门禁直接卡死。
+    """
+    grew = dict(EXPECTED, user_sessions=EXPECTED["user_sessions"] + 500,
+                session_message=EXPECTED["session_message"] + 3000)
+    assert checkAll(grew) == []
+
+
+def test_checkAll_still_flags_upward_growth_on_static_tables():
+    """非 GROWING 表多出数据是真异常（多半是 seed 跑过了），不能一起放过。"""
+    assert len(checkAll(dict(EXPECTED, audit_log=17101))) == 1
 
 
 def test_checkAll_passes_on_exact_match():
@@ -1511,7 +1549,32 @@ def test_parseDsn_leaves_plain_dsn_untouched():
     from scripts.verify_migration import _parseDsn
     plain = "postgresql://u:p@localhost:5433/qa_metadata"
     assert _parseDsn(plain) == plain
+
+
+def test_main_exit_code_two_on_bad_usage(capsys):
+    """2 必须与 1 区分，否则门禁会把「命令写错了」读成「迁移失败」。"""
+    from scripts.verify_migration import main
+    assert main(["prog"]) == 2
+    assert main(["prog", "--dsn"]) == 2
+    assert capsys.readouterr().err.strip() != ""
+
+
+def test_main_exit_code_zero_when_all_match(monkeypatch, capsys):
+    from scripts.verify_migration import main
+    monkeypatch.setattr("scripts.verify_migration._queryAll",
+                        _asyncReturning(dict(EXPECTED)))
+    assert main(["prog", "--dsn", "postgresql://u:p@h:5432/db"]) == 0
+    assert "全部对上" in capsys.readouterr().out
+
+
+def test_main_exit_code_one_when_counts_drift(monkeypatch, capsys):
+    from scripts.verify_migration import main
+    monkeypatch.setattr("scripts.verify_migration._queryAll",
+                        _asyncReturning(dict(EXPECTED, audit_log=6)))
+    assert main(["prog", "--dsn", "postgresql://u:p@h:5432/db"]) == 1
+    assert "audit_log" in capsys.readouterr().out
 ```
+
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1551,10 +1614,10 @@ EXPECTED: dict[str, int] = {
     "multi_step_step": 27,
 }
 
-# 导出后仍在增长的表：少几条不算丢数据
+# 导出后仍在增长的表：涨多少都正常，只有掉下去才可能是丢数据
 GROWING: frozenset[str] = frozenset({"user_sessions", "session_message", "session_token_usage"})
 
-# 容忍上限：即使在 GROWING 里，少于该比例仍判为丢数据
+# 容忍下限：GROWING 表只要不低于 (1 - SLACK) × 基线就放过
 GROWING_SLACK = 0.20
 
 
@@ -1574,7 +1637,11 @@ def checkAll(
             continue
         if got == want:
             continue
-        if table in tolerate and got < want and got >= want * (1 - GROWING_SLACK):
+        # GROWING 表只要不低于阈值就放过：**向上一定放过**。
+        # 导出与核对之间必然还会写入会话数据，多出来的行不是问题；
+        # 只有「少了」才可能是丢数据。写成 `got < want` 会把每一次
+        # 正常增长报成失败，把门禁变成噪声。
+        if table in tolerate and got >= want * (1 - GROWING_SLACK):
             continue
         failures.append({"table": table, "expected": want, "actual": got})
     return failures
@@ -1631,7 +1698,7 @@ if __name__ == "__main__":
 ```bash
 cd backend && python -m pytest app/tests/unit/test_verify_migration.py -v
 ```
-Expected: 8 passed
+Expected: 15 passed
 
 - [ ] **Step 5: 启动 backend（此时才允许）**
 
@@ -1645,10 +1712,19 @@ ssh root@<centos> 'cd /opt/qa/docker && \
 
 ```bash
 scp backend/scripts/verify_migration.py root@<centos>:/opt/qa/
-ssh root@<centos> 'docker cp /opt/qa/verify_migration.py qa-backend:/app/scripts/
-  docker exec qa-backend python -m scripts.verify_migration --dsn "$DATABASE_URL"'
+ssh root@<centos> "docker cp /opt/qa/verify_migration.py qa-backend:/app/scripts/ \
+  && docker exec qa-backend sh -c 'python -m scripts.verify_migration --dsn \"\$DATABASE_URL\"'"
 ```
+⚠️ **必须多一层 `sh -c`**：`$DATABASE_URL` 只存在于**容器内**的环境里，CentOS 宿主
+的 root shell 没有这个变量。写成 `docker exec qa-backend python -m ... --dsn "$DATABASE_URL"`
+时，变量会在宿主 shell 上展开成空串 ⇒ `--dsn ""` ⇒ 用法错误退出 2 —— 在一个
+数据完全正常的环境上，门禁会红。`sh -c` 把字符串原样送进容器，由容器自己的 shell 展开。
+
 **门禁**：`全部对上 ✓`。**这一步没过就不要往下走** —— 带着残缺数据起 backend 会让 seed 在半空库上产出脏数据（spec §6.4 铁律）。
+
+> 反向自检：故意把阈值改小（如把 `audit_log` 期望改成 17000），重跑本步必须报
+> `audit_log: 期望 17000，实际 17100` 并返回 1。恢复后再跑一次必须回到 ✓。
+> 一条只在成功时才绿的命令，等于没有命令。
 
 ---
 

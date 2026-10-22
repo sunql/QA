@@ -5,9 +5,13 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import sys
 import types
+
+import pytest
 
 from scripts import preflight_centos
 from scripts.preflight_centos import ProbeResult, evaluate, runProbe
@@ -136,15 +140,77 @@ def test_probeGlibc_reads_only_the_first_line(monkeypatch):
     assert evaluate("glibc", preflight_centos._probeGlibc()) == ("hard", "")
 
 
-def test_probeXfsFtype_checks_the_parent_that_will_host_docker(monkeypatch):
-    """装机前 /var/lib/docker 不存在；查它 findmnt 返回空 → 误判成「非 XFS，通过」。
+def _stubSubprocessByCommand(monkeypatch, outputs):
+    """按命令首元素返回不同 stdout 的替身；未登记的命令返回空串。
 
-    必须查 /var/lib，否则设计稿 §6 P0 里头号 hard failure 永远不会触发。
+    上一版替身对**每个**命令都回同一段非空 stdout，于是「findmnt 什么也没查到」
+    这一种真实宿主上最要紧的情况根本表达不出来 —— 断言只能锁 argv，锁不住行为。
     """
-    stub = _stubSubprocess(monkeypatch, "xfs\nxfs_info = {\n\tftype=0\n}\n")
+    class _Done:
+        def __init__(self, text: str) -> None:
+            self.stdout = text
+
+    def fakeRun(cmd, **kwargs):
+        fakeRun.calls.append(list(cmd))
+        return _Done(outputs.get(cmd[0], ""))
+
+    fakeRun.calls = []
+    monkeypatch.setattr(
+        preflight_centos,
+        "subprocess",
+        types.SimpleNamespace(PIPE=-1, run=fakeRun),
+    )
+    return fakeRun
+
+
+XFS_INFO_FTYPE0 = "xfs_info = {\n\tftype=0\n}\n"
+XFS_INFO_FTYPE1 = "xfs_info = {\n\tftype=1\n}\n"
+
+
+def test_probeXfsFtype_reports_ftype_zero_on_xfs(monkeypatch):
+    """XFS 且 ftype=0 → 必须报 0（设计稿 §6 P0 头号 hard failure）。"""
+    _stubSubprocessByCommand(monkeypatch, {"findmnt": "xfs\n", "xfs_info": XFS_INFO_FTYPE0})
     assert preflight_centos._probeXfsFtype() == "0"
-    assert stub.calls[0] == ["findmnt", "-no", "FSTYPE", "/var/lib"]
-    assert stub.calls[1] == ["xfs_info", "/var/lib"]
+    assert evaluate("xfs_ftype", "0")[0] == "hard"
+
+
+def test_probeXfsFtype_passes_on_xfs_with_ftype_one(monkeypatch):
+    """XFS 且 ftype=1 → 报 1，判定不拦。"""
+    _stubSubprocessByCommand(monkeypatch, {"findmnt": "xfs\n", "xfs_info": XFS_INFO_FTYPE1})
+    assert preflight_centos._probeXfsFtype() == "1"
+    assert evaluate("xfs_ftype", "1")[1] == ""
+
+
+def test_probeXfsFtype_passes_on_non_xfs(monkeypatch):
+    """非 XFS 宿主（ext4 等）不适用 ftype 判定 → 放行。"""
+    _stubSubprocessByCommand(monkeypatch, {"findmnt": "ext4\n"})
+    assert preflight_centos._probeXfsFtype() == "1"
+
+
+def test_probeXfsFtype_raises_when_filesystem_type_undeterminable(monkeypatch):
+    """判定不出文件系统类型必须抛（硬失败），不能回 '1' 冒充「已通过」。
+
+    勘察脚本的职责是抓拦路石；「没量到」不等于「量到合格」。
+    """
+    _stubSubprocessByCommand(monkeypatch, {"findmnt": ""})
+    with pytest.raises(RuntimeError):
+        preflight_centos._probeXfsFtype()
+
+
+def test_probeXfsFtype_uses_target_form_of_findmnt(monkeypatch):
+    """findmnt 的位置参数是**精确挂载点匹配**：/var/lib 不是挂载点时返回空（rc=1）。
+
+    util-linux 2.23.2（CentOS 7）实测：
+        findmnt -no FSTYPE /var/lib   → 空, rc=1
+        findmnt -no FSTYPE -T /var/lib → 所在文件系统类型, rc=0
+    故必须用 -T 解析「包含该路径的文件系统」。
+    """
+    stub = _stubSubprocessByCommand(monkeypatch, {"findmnt": "xfs\n", "xfs_info": XFS_INFO_FTYPE1})
+    preflight_centos._probeXfsFtype()
+    findmntCall = stub.calls[0]
+    assert findmntCall[:3] == ["findmnt", "-no", "FSTYPE"]
+    assert "-T" in findmntCall
+    assert findmntCall[-1] == preflight_centos.DOCKER_PARENT
 
 
 def test_evaluate_tolerates_non_numeric_values():
@@ -188,3 +254,72 @@ def test_main_json_output_is_parseable(monkeypatch, capsys):
             "message": preflight_centos.evaluate("xfs_ftype", "0")[1],
         }
     ]
+
+
+def test_evaluate_rejects_non_finite_numbers():
+    """nan/inf 不是「合格的测量值」。
+
+    float('nan') < 32.0 是 False ⇒ 若照单全收，evaluate('mem_total_gb', 'nan')
+    会返回 message='' —— 一台内存未知的机器被判为通过 32 GB 门槛。
+    """
+    for name in ("cpu_cores", "mem_total_gb", "docker_disk_free_gb"):
+        for bad in ("nan", "inf", "-inf"):
+            severity, message = evaluate(name, bad)
+            assert severity == "hard", (name, bad)
+            assert "无法解析" in message, (name, bad)
+
+
+def test_asFloat_returns_none_for_non_numeric_input():
+    """_asFloat 必须对 None 也成立 —— float(None) 抛的是 TypeError 不是 ValueError。"""
+    assert preflight_centos._asFloat(None) is None
+    assert preflight_centos._asFloat("unknown") is None
+    assert preflight_centos._asFloat("nan") is None
+    assert preflight_centos._asFloat("12.5") == 12.5
+
+
+def test_module_annotations_never_evaluate_callable_subscription():
+    """3.6 上 `collections.abc.Callable[...]` 不可下标（PEP 585 要 3.9）。
+
+    def 的参数注解在**定义时**求值，所以裸写 `fn: Callable[[], str]`
+    会让整个模块在 3.6 上 import 就炸（TypeError: 'ABCMeta' object is not
+    subscriptable）。凡提到 Callable 的注解必须加引号，永不求值。
+    """
+    tree = ast.parse(_moduleSource())
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        annotations = [arg.annotation for arg in node.args.args]
+        annotations.append(node.returns)
+        for ann in annotations:
+            if ann is None:
+                continue
+            if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+                continue  # 加了引号 → 永不求值，安全
+            if "Callable" in ast.dump(ann):
+                offenders.append(f"{node.name}: {ast.dump(ann)}")
+    assert offenders == []
+
+
+def test_module_has_no_repo_internal_imports():
+    """这个文件会被拷到裸 CentOS 宿主当独立脚本跑。
+
+    backend/scripts/__init__.py 里就有 `from __future__ import annotations`
+    （3.7+ 语法），所以只要本模块 import 了 scripts 包，3.6 上就是 SyntaxError。
+    故只允许标准库。
+    """
+    tree = ast.parse(_moduleSource())
+    repoRoots = {"scripts", "app", "backend"}
+    imported = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.append(node.module)
+    offenders = [name for name in imported if name.split(".")[0] in repoRoots]
+    assert offenders == []
+
+
+def _moduleSource() -> str:
+    """preflight_centos.py 的源码文本（用于静态守护）。"""
+    return inspect.getsource(preflight_centos)

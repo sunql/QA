@@ -12,11 +12,20 @@
 Python。故本文件刻意保持 3.6 兼容：
 - 不用 `from __future__ import annotations`
 - 内建泛型注解一律加引号（`"list[ProbeResult]"`），PEP 585 在 3.9 才有
+- 提到 `Callable` 的注解也加引号（`"Callable[[], str]"`）：
+  `collections.abc.Callable[...]` 的下标要 3.9（PEP 585），而 def 的参数注解
+  在**定义时**求值 —— 裸写会让整个模块在 3.6 上 import 即抛 TypeError
 - 不用 `subprocess.run(capture_output=..., text=...)`，改用 PIPE + universal_newlines（3.7+）
+
+另有硬约束：本文件**不得 import 任何仓内模块**。它会被拷到裸 CentOS 宿主上
+当独立文件跑（`python3 /root/preflight_centos.py --json`），而
+`backend/scripts/__init__.py` 里就有 `from __future__ import annotations`
+（3.7+ 语法），import 那个包在 3.6 上直接 SyntaxError。
 测试跑在现代 Python 上，不受此约束。
 """
 
 import json
+import math
 import os
 import platform
 import shutil
@@ -41,8 +50,13 @@ class ProbeResult(NamedTuple):
     message: str = ""           # 不达标时的补救建议；运维只看 value 是没用的，必须显式带出来
 
 
-def runProbe(name: str, fn: Callable[[], str]) -> ProbeResult:
-    """执行单个探测；异常不外泄，转成失败结果。"""
+def runProbe(name: str, fn: "Callable[[], str]") -> ProbeResult:
+    """执行单个探测；异常不外泄，转成失败结果。
+
+    fn 的注解加了引号：`Callable[[], str]` 在 3.6 上求值会抛
+    TypeError（collections.abc 的 ABC 不可下标，PEP 585 要 3.9），
+    而 def 的参数注解是在定义时求值的 —— 不加引号整个模块都 import 不了。
+    """
     try:
         return ProbeResult(name, True, fn(), "hard")
     except Exception as exc:  # noqa: BLE001 — 探测失败本身就是要报告的结论
@@ -63,11 +77,18 @@ def _kernelTuple(value: str) -> "tuple[int, ...]":
 
 
 def _asFloat(value: str) -> "Optional[float]":
-    """宽松取浮点；解析不出来返回 None，让 evaluate 能给出可读结论而不是抛 ValueError。"""
+    """宽松取浮点；解析不出来返回 None，让 evaluate 能给出可读结论而不是抛 ValueError。
+
+    非有限值（nan/inf）同样返回 None：nan 的比较恒为 False，
+    若放行过去 evaluate 会把「内存未知」判成「内存达标」。
+    """
     try:
-        return float(value)
-    except ValueError:
+        num = float(value)
+    except (TypeError, ValueError):
         return None
+    if not math.isfinite(num):
+        return None
+    return num
 
 
 def evaluate(name: str, value: str) -> "tuple[str, str]":
@@ -175,10 +196,24 @@ def _probeSelinux() -> str:
 
 
 def _probeXfsFtype() -> str:
-    # 查 /var/lib 而不是 /var/lib/docker：装机前 docker 目录根本不存在，
-    # findmnt 对不存在的路径返回空 → 会误判成「非 XFS，通过」，于是设计稿 §6 P0
-    # 里头号 hard failure（ftype=0）在计划规定的那一次运行里永远不可能触发。
-    mount = _capture(["findmnt", "-no", "FSTYPE", DOCKER_PARENT])
+    # 查 /var/lib 而不是 /var/lib/docker：装机前 docker 目录根本不存在。
+    #
+    # findmnt 的**位置参数是精确挂载点匹配**，不是「包含该路径的文件系统」：
+    # util-linux 2.23.2（CentOS 7）实测
+    #     findmnt -no FSTYPE /var/lib   → 空, rc=1（/var/lib 不是挂载点）
+    #     findmnt -no FSTYPE -T /var/lib → 所在文件系统类型, rc=0
+    # 用位置参数会拿到空串 → 误判成「非 XFS，通过」，于是设计稿 §6 P0 里头号
+    # hard failure（ftype=0）在真实宿主上永远不可能触发。
+    # 顺序必须是 -no FSTYPE -T <path>：util-linux 2.23.2 会拒绝 -T -no FSTYPE
+    # （--target and --source can't be used together）。
+    mount = _capture(["findmnt", "-no", "FSTYPE", "-T", DOCKER_PARENT]).strip()
+    if not mount:
+        # 判不出来 ≠ 合格。勘察脚本的职责是抓拦路石，量不到就硬失败，
+        # 让操作者自己跑一次 findmnt 看看到底是什么文件系统。
+        raise RuntimeError(
+            f"无法判定 {DOCKER_PARENT} 所在文件系统类型：请手动执行 "
+            f"'findmnt -no FSTYPE -T {DOCKER_PARENT}' 查看输出"
+        )
     if "xfs" not in mount:
         return "1"  # 非 XFS，无需判定
     info = _capture(["xfs_info", DOCKER_PARENT])

@@ -24,9 +24,38 @@ docs/
 *.md
 !backend/README.md
 
+# ===== 密钥 / 本地环境文件（防烤进镜像，2026-10-22 加）=====
+# backend/.env 装的是 localhost:5433 的 dev 库凭据。它被 .gitignore 挡住，
+# 不会进版本库 —— 但**照样会进 build context** ⇒ Dockerfile.backend 的
+# `COPY backend/ ./` 把它烤进镜像，任何拿到镜像的人都能读到。
+#
+# docker/.env（compose --env-file）同理不该进 build context：它由宿主文件系统上
+# 的 --env-file 读取，与 build context 无关，排掉不影响容器注入配置。
+#
+# 不影响运行时：app/config.py 的 pydantic `env_file=".env"` 只是兜底，进程环境变量
+# 优先，compose 用 env_file 把配置注入进程环境。镜像里没有 /app/.env 照样正常跑。
+#
+# `!` 例外必须保留：.env.example 是模板，新人 onboarding 依赖它。
+**/.env
+**/.env.local
+**/.env.*.local
+!**/.env.example
+
+# ===== 测试/类型缓存（不进镜像）=====
+backend/.pytest_cache/
+backend/.coverage
+backend/coverage.xml
+backend/htmlcov/
+
 # ===== 其他 =====
 node_modules/
 .claude/
 .superpowers/
 migration/
 *.log
+
+# 嵌套 worktree（.worktrees/*）不是构建源，却会被整个拷进 build context ——
+# 既撑大 context，每个 worktree 里还各有一份 backend/.env。
+# **必须放在 `!**/.env.example` 之后**：docker 的 .dockerignore 是「后匹配覆盖先匹配」，
+# 放前面会被上面的 `!` 例外重新拉回来（2026-10-22 实测）。
+.worktrees/

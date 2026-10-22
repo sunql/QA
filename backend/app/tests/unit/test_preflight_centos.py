@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import json
+import sys
+import types
+
 from scripts import preflight_centos
 from scripts.preflight_centos import ProbeResult, evaluate, runProbe
 
@@ -91,3 +95,96 @@ def test_main_reports_probe_crash_instead_of_raising(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "[FAIL] mem_total_gb" in captured.out
     assert "FileNotFoundError" in captured.out
+
+
+# glibc 2.17 的 ldd --version 真实输出（CentOS 7.9）：四行，末行以 PURPOSE. 收尾
+LDD_VERSION_OUTPUT = """ldd (GNU libc) 2.17
+Copyright (C) 1992-2016 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+"""
+
+
+def _stubSubprocess(monkeypatch, stdout: str):
+    """把 preflight_centos 里的 subprocess 换成只回固定 stdout 的替身。"""
+    class _Done:
+        def __init__(self, text: str) -> None:
+            self.stdout = text
+
+    def fakeRun(cmd, **kwargs):
+        fakeRun.calls.append(list(cmd))
+        return _Done(stdout)
+
+    fakeRun.calls = []
+    monkeypatch.setattr(
+        preflight_centos,
+        "subprocess",
+        types.SimpleNamespace(PIPE=-1, run=fakeRun),
+    )
+    return fakeRun
+
+
+def test_probeGlibc_reads_only_the_first_line(monkeypatch):
+    """ldd --version 是四行；对整段 split() 取末字段会拿到 'PURPOSE.'。
+
+    'PURPOSE.' → _kernelTuple → (0,) → < (2,17,0) → 好机器被报成 glibc 0.x 阻断。
+    """
+    stub = _stubSubprocess(monkeypatch, LDD_VERSION_OUTPUT)
+    assert preflight_centos._probeGlibc() == "2.17"
+    assert stub.calls == [["ldd", "--version"]]
+    # 端到端：好机器必须判为通过，message 为空
+    assert evaluate("glibc", preflight_centos._probeGlibc()) == ("hard", "")
+
+
+def test_probeXfsFtype_checks_the_parent_that_will_host_docker(monkeypatch):
+    """装机前 /var/lib/docker 不存在；查它 findmnt 返回空 → 误判成「非 XFS，通过」。
+
+    必须查 /var/lib，否则设计稿 §6 P0 里头号 hard failure 永远不会触发。
+    """
+    stub = _stubSubprocess(monkeypatch, "xfs\nxfs_info = {\n\tftype=0\n}\n")
+    assert preflight_centos._probeXfsFtype() == "0"
+    assert stub.calls[0] == ["findmnt", "-no", "FSTYPE", "/var/lib"]
+    assert stub.calls[1] == ["xfs_info", "/var/lib"]
+
+
+def test_evaluate_tolerates_non_numeric_values():
+    """evaluate 是发布出去的接口，测试直接调 —— 不能因 'unknown' 抛 ValueError。"""
+    for name in ("cpu_cores", "mem_total_gb", "docker_disk_free_gb"):
+        severity, message = evaluate(name, "unknown")
+        assert severity == "hard"
+        assert "无法解析" in message
+
+
+def test_main_exits_1_when_verdict_fails(monkeypatch, capsys):
+    """判定不通过 → 退出码 1，且补救建议必须印出来（只印 value 运维没法动手）。"""
+    monkeypatch.setattr(preflight_centos, "PROBES", (("xfs_ftype", lambda: "0"),))
+    assert preflight_centos.main() == 1
+    captured = capsys.readouterr()
+    assert "[FAIL] xfs_ftype: 0" in captured.out
+    assert "mkfs.xfs -m ftype=1" in captured.out
+    assert "阻断" in captured.err
+
+
+def test_main_exits_0_with_warning_on_soft_failure(monkeypatch, capsys):
+    """soft 未满足（缺 AVX2）→ 退出码 0，但 stderr 要有告警。"""
+    monkeypatch.setattr(preflight_centos, "PROBES", (("cpu_avx2", lambda: "absent"),))
+    assert preflight_centos.main() == 0
+    captured = capsys.readouterr()
+    assert "缺 AVX2" in captured.out
+    assert "警告" in captured.err
+
+
+def test_main_json_output_is_parseable(monkeypatch, capsys):
+    monkeypatch.setattr(preflight_centos, "PROBES", (("xfs_ftype", lambda: "0"),))
+    monkeypatch.setattr(sys, "argv", ["preflight_centos", "--json"])
+    preflight_centos.main()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == [
+        {
+            "name": "xfs_ftype",
+            "ok": False,
+            "value": "0",
+            "severity": "hard",
+            "message": preflight_centos.evaluate("xfs_ftype", "0")[1],
+        }
+    ]

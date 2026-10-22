@@ -104,6 +104,16 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# preflight_centos.py 的唯一执行环境是**装 Docker 之前**的 CentOS 7.9 宿主，
+# 其系统 python3 = 3.6.8（那时还没有容器可用，也不该给宿主另装 Python）。
+# 下面四条规则都会把它改写成宿主跑不起来的写法：
+#   UP021/UP022 — capture_output / text 是 3.7+
+#   UP037       — PEP 585 内建泛型注解（去引号）是 3.9+
+#   UP045       — `X | None` 是 3.10+
+# 故该文件必须保持 3.6 兼容写法，与仓内 target-version = "py312" 刻意不同。
+"scripts/preflight_centos.py" = ["UP021", "UP022", "UP037", "UP045"]
+
 [dependency-groups]
 dev = [
     "xlwt>=1.3.0",

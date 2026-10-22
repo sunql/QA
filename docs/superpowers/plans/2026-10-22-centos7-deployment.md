@@ -2118,15 +2118,22 @@ ssh root@<centos> 'docker images | grep qa-system-backend'
 - Consumes: Task 1–14 的实测结果
 - Produces: 让下一个人不重踩 spec 里发现的坑
 
-- [ ] **Step 1: 两处 `Fernet.generate_key()` 加警告**
+- [ ] **Step 1: 给**所有**生成 SECRET_KEY 的入口加警告（4 处，不是 2 处）**
 
-`docs/deployment/00-overview.md` 与 `02-environment.md` 里这条命令：
+实测生成入口共 **4 条路径，分布在 2 个文件的 2 个代码块**：
 
-```bash
-python -c "from cryptography.fernet import Fernet; print('SECRET_KEY='+Fernet.generate_key().decode())" >> docker/.env
-```
+| # | 位置 | 命令 |
+|---|---|---|
+| 1 | `docs/deployment/00-overview.md:49` | `python -c "…print('SECRET_KEY='+Fernet.generate_key().decode())" >> docker/.env` |
+| 2 | `docs/deployment/02-environment.md:32` | `python -c "…print(Fernet.generate_key().decode())"` |
+| 3 | `docs/deployment/02-environment.md:34` | `openssl rand -base64 32` |
+| 4 | `docs/deployment/02-environment.md:38` | `docker compose run --rm backend python -c "…"` |
 
-在这两条**下方**插入：
+> ⚠️ 只在 #1 和 #2 下面插警告是不够的：#3/#4 与 #2 在**同一个 ```bash 代码块**里，
+> 三条是并列的「任选其一」。漏掉它们，读者照抄 openssl 或容器那两条照样换掉主密钥 ——
+> 而这正是 `qa-system-secret-key-must-be-reused` 记的那个不可逆事故。
+
+在 `00-overview.md:49` 那个代码块**下方**插入：
 
 ```markdown
 > ⚠️ **仅限空环境首次部署。**
@@ -2136,6 +2143,21 @@ python -c "from cryptography.fernet import Fernet; print('SECRET_KEY='+Fernet.ge
 > 迁移场景下必须**逐字复制源环境**的 `SECRET_KEY`，并用
 > `python -m scripts.verify_env_keys <源.env> <新.env>` 比对指纹。
 ```
+
+在 `02-environment.md` 那个「生成方式（任选其一）」代码块**下方**（`## 关键原则` 之前）
+插入**同一段**警告，并加一句：
+
+```markdown
+> ⚠️ **以上三条（Python / openssl / 容器）都只在空环境首次部署时用。**
+> `SECRET_KEY` 就是 Fernet 主密钥（`crypto.py:_getFernet()`）。**带数据迁移时任何一条
+> 都会让所有既有密文永久不可解** —— 5 个数据源密码（含 THBI Oracle 生产库）、6 个 LLM key、
+> embedding key 全部报废，且无法回滚，只能重新导数。
+> 迁移场景下必须**逐字复制源环境**的 `SECRET_KEY`，并用
+> `python -m scripts.verify_env_keys <源.env> <新.env>` 比对指纹。
+```
+
+**门禁**：`grep -rn "generate_key\|rand -base64 32" docs/deployment/` 的每一处，
+其所在代码块下方都能搜到「仅限空环境首次部署」。
 
 - [ ] **Step 2: `01-prerequisites.md` 加 CentOS 7 受限路径**
 

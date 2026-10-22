@@ -874,8 +874,15 @@ def test_compose_image_loader_tolerates_the_centos_overlay():
 
 
 def test_script_forces_amd64_platform():
+    """脚本把平台抽成了变量（`docker pull --platform "$PLATFORM"`），
+    所以不能断言字面量 "--platform linux/amd64" 在文件里 —— 那样恒失败。
+    拆成两条：flag 用到了，且 PLATFORM 的值确实是 amd64。两条缺一不可：
+    只断 flag 的话，写成 PLATFORM=linux/arm64 照样过。
+    """
     text = SCRIPT.read_text(encoding="utf-8")
-    assert "--platform linux/amd64" in text, "Mac 是 arm64，不钉平台会打出跑不了的镜像"
+    assert "--platform" in text, "拉镜像和 build 都没钉平台"
+    assert re.search(r'^PLATFORM="linux/amd64"$', text, re.M), \
+        "Mac 是 arm64，不钉 amd64 会打出跑不了的镜像"
 
 
 def test_script_saves_and_checksums():
@@ -941,8 +948,13 @@ NPM_REGISTRY="$NPM_REGISTRY" \
 echo "== 打包 =="
 TAG="$(date '+%Y%m%d-%H%M')"
 docker save -o "$OUT_DIR/all-$TAG.tar" "${IMAGES[@]}"
-docker compose -f docker-compose.yml -f docker-compose.centos.yml images -q \
-  | xargs docker save -o "$OUT_DIR/built-$TAG.tar"
+# 只存本地构建的那两个。⚠️ 不要用 `docker compose images -q` —— 它列出**所有**服务的
+# 镜像（含刚 pull 的 8 个外部镜像），会把 milvus / neo4j 之类再存一遍，
+# 离线包凭空多几个 GB。`config --images` 给的是镜像**名**（docker save 也吃名），
+# 减去 IMAGES 数组后剩下的正好是 backend / frontend。
+BUILT="$(docker compose -f docker-compose.yml -f docker-compose.centos.yml config --images \
+  | grep -vxF -f <(printf '%s\n' "${IMAGES[@]}"))"
+docker save -o "$OUT_DIR/built-$TAG.tar" $BUILT
 
 echo "== 校验和 =="
 cd "$OUT_DIR"

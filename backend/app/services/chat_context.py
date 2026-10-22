@@ -240,22 +240,23 @@ def _stateRowRank(row: SessionQueryState) -> tuple[bool, int, Any, int]:
     `_loadQueryState`、本仓测试模块 docstring、`models.py` 类注释四处
     都写成「is_stub=False 为第一键 ⇒ max 选 real 行」，与代码相反。
 
-    这个方向不是笔误，是承重的，分两侧看：
+    **这个方向现在不承担隔离职责，别再把它当防线。** 2026-10-22 实测：
+    把第一键翻成 `not is_stub`，`test_chat_query_state_is_stub.py` 8 条
+    **全绿** —— 隔离改由 `_loadQueryState` 与 `_saveQueryState` 两侧各自的
+    `userId is None → user_id IS NULL` 过滤保证，候选集在进入排序前就已经是
+    单一归属桶，第一键无从左右跨用户的选择。第 ⑥ 条钉的是「不劫持别人」这个
+    **结果**，不再钉排序键方向。
 
-    - **读侧无影响**：`_loadQueryState` 在 SQL 层先排 `is_stub == False`，
-      stub 行根本到不了这里，第一键在读路径上是死的。
-    - **写侧是关键**：`_saveQueryState` 刻意不排 is_stub（否则匿名写每轮都
-      INSERT 新行，stub 行无界增长），且 `userId is None` 时**不加 user 过滤**
-      —— 于是同一 session 下「user 42 的 real 行」与「匿名 stub 行」会同时
-      进入候选集。此时优先选中 stub 行，正是匿名写不劫持真实用户上下文的原因。
-      若照旧注释的字面说法把键改成 `not is_stub`，匿名写就会改为对别人的 real
-      行 `turn_count += 1` 并覆写 last_question（跨用户污染，与 M4 同类）。
+    保留当前方向而不是翻成 `not is_stub`，是**失效安全**选择：万一日后有人
+    删掉那道过滤，现状方向退化成「只影响同归属行之间的 tiebreak」，
+    反方向则退化成跨用户污染。两者失效后果不对等。
 
-    方向由 `test_chat_query_state_is_stub.py` 第 ⑥ 条反向断言钉住。
-    其次按 scope 完整度 → 更新时间 → 主键，与原有策略一致。
+    次要按 scope 完整度 → 更新时间 → 主键，与原有策略一致。
     """
     return (
-        # ① is_stub：stub 行（True=1）优先于 real 行（False=0）—— 见 docstring
+        # ① is_stub：stub 行（True=1）优先于 real 行（False=0）—— 见 docstring。
+        # 保留这个方向是失效安全选择，不是承重：隔离靠的是 `_saveQueryState`
+        # 写侧的 user_id 过滤。
         row.is_stub,
         # ② scope 完整度：两个维度都非 NULL 的行优先
         (row.user_id is not None) + (row.datasource_id is not None),
@@ -593,6 +594,11 @@ class ContextMixin:
         M4：0128 迁移把所有 `user_id IS NULL` 的旧行墓碑化为 -1（归属未明的 P0-3
         前遗留桶），读侧统一 `WHERE user_id != -1` 排除墓碑。防止任意 user 读到
         别人留下的 NULL 桶造成跨用户上下文污染。
+
+        2026-10-22 读侧收紧（与写侧对称）：`userId is None` 时补 `user_id IS NULL`。
+        收紧前读侧不过滤 user_id，匿名读能直接取回**别的真实用户**的 real 行，
+        追问继承到的就是别人的上一轮上下文。现两侧口径一致：写得进的桶 = 读得到的桶。
+        由 `test_chat_query_state_is_stub.py` 第 ⑧ 条钉住。
         """
         stmt = select(SessionQueryState).where(
             SessionQueryState.session_id == sessionId,
@@ -605,6 +611,41 @@ class ContextMixin:
         )
         if userId is not None:
             stmt = stmt.where(SessionQueryState.user_id == userId)
+        else:
+            # 匿名读与匿名写必须看到同一个桶：`user_id IS NULL`。
+            #
+            # 收紧前读侧完全不过滤 user_id，候选集是「本 session 下所有
+            # `is_stub=False` 且 `user_id != -1` 的行」—— **别人的 real 行就在其中**，
+            # 匿名读会把它的 last_question / last_plan / inheritance_snapshot
+            # 当成自己的上一轮追问锚点。与 M4 同类的跨用户污染，方向相反：
+            # M4 挡「归属未明的墓碑」，本条挡「归属明确是别人的」。
+            #
+            # ⚠️ 本条与上面恒定的 `user_id != -1` 存在三值逻辑交互，别单独删任何一道：
+            # SQL 里 `NULL != -1` 求值为 NULL 而非 TRUE，故 NULL 行在 `!= -1`
+            # 下就已被排除，两道过滤叠加的候选集恒为空 —— 匿名读恒为 None。
+            # 但这**不代表本条多余**：没有它时 `user_id = 42` 的行是满足
+            # `!= -1` 的，那才是真正的泄露面。两道各挡一类（NULL 桶 / 他人的
+            # real 行），删任一道都会漏。
+            #
+            # 匿名读恒为 None 是**正确**答案而非功能退化，依据是一条应用层不变量：
+            # **`is_stub=False ⟹ user_id IS NOT NULL`**。INSERT 分支写死
+            # `is_stub=userId is None`；UPDATE 分支的 `is_stub=False` 写在
+            # `if userId is not None:` 里，与 `existing.user_id = userId` 同一块。
+            # 故应用写出的行里，`user_id IS NULL ∧ is_stub=False` 只可能来自 0129
+            # backfill 的历史遗留行（归属未知的桶，M4 早已认定是污染源），
+            # 匿名请求从来没有「属于自己的」状态可读。
+            #
+            # 匿名请求本来就读不回自己写的状态（那些行 is_stub=True，被上面无条件
+            # 排掉）；匿名读唯一原本能「生效」的场景就是读到别人的 real 行 ——
+            # 那是污染而非功能。
+            #
+            # ⚠️ 本条在**生产可达**，不是纯防御：chat_stream 的重分类入口传的是
+            # `userId=user.dbUserId if user is not None else None`，stub/anonymous
+            # 请求头解析不到 DB 用户时 dbUserId 就是 None。此前此处的 docstring 与
+            # models.py 类注释都写着「chat 路由有 router 级 Depends(getCurrentUser)
+            # 故生产不可达」——**那是错的**：router 只保证 `user` 对象存在，
+            # 不保证 `dbUserId` 非空。
+            stmt = stmt.where(SessionQueryState.user_id.is_(None))
         if datasourceId is not None:
             stmt = stmt.where(SessionQueryState.datasource_id == datasourceId)
         rows = (await session.execute(stmt)).scalars().all()
@@ -634,6 +675,12 @@ class ContextMixin:
         F1：查 existing 的那一步与 `_loadQueryState` 共用 `_selectStateRow` ——
         「读」和「找要更新的那一行」必须是同一个选择口径，否则读到的锚点与被覆盖的
         行可能不是同一行（追问继承的就是别人的上一轮）。
+
+        2026-10-22 的匿名收紧原本让两侧在 `userId is None` 时**刻意分叉**：
+        写侧收窄成 `user_id IS NULL`，读侧维持「排除墓碑即可」。这个分叉已被
+        后续补齐 —— 读侧也加上了同一道 `user_id IS NULL`（见 `_loadQueryState`）。
+        现在两侧口径一致：**写得进的桶，就是读得到的桶**，读写共享同一个候选集
+        定义，`_selectStateRow` 的选择口径在两侧也就真正一致了。
         """
         # P0-3：按三元查 existing（不传新参数时退化为按 session_id 唯一）
         stmt = select(SessionQueryState).where(
@@ -662,6 +709,24 @@ class ContextMixin:
         )
         if userId is not None:
             stmt = stmt.where(SessionQueryState.user_id == userId)
+        else:
+            # 匿名写只能配对匿名桶，绝不劫持任何真实用户的行。
+            #
+            # 不加这道过滤时，候选集是「本 session 下所有 user_id IS NULL 或
+            # != -1 的行」，于是**别人的 real 行**也在其中；此时
+            # `_stateRowRank` 优先选 stub 行的方向救不了场 —— 候选集里压根没有
+            # stub 行。选中别人的 real 行就等于对它 `turn_count += 1` 并覆写
+            # last_question / last_plan / last_sql / inheritance_snapshot，
+            # 与 M4 要防的跨用户污染同类。
+            #
+            # 收紧后排序键不再承重：候选集只剩匿名桶，方向变了也无所谓。
+            # 由 test_chat_query_state_is_stub.py 第 ⑦ 条反向断言钉住。
+            #
+            # 为什么不担心匿名多轮继承因此退化：匿名写产出的行 is_stub=True，
+            # 而 `_loadQueryState` 无条件排 `is_stub == False` —— 匿名写的状态
+            # 本来就从来读不回来。它唯一「生效」的场景恰恰是劫持别人的 real 行，
+            # 那是污染而非功能。
+            stmt = stmt.where(SessionQueryState.user_id.is_(None))
         if datasourceId is not None:
             stmt = stmt.where(SessionQueryState.datasource_id == datasourceId)
         rows = (await session.execute(stmt)).scalars().all()

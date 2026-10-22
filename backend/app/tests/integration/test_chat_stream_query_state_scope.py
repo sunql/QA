@@ -239,6 +239,15 @@ class TestStreamQueryStateScope:
                     user_id=user.id,
                     datasource_id=ds.id,
                 ),
+                # 同一用户、半 scope 的历史行：让「只给 userId」的读取真的有多候选，
+                # 否则 `_selectStateRow` 的去重职责在本用例里没有鉴别力（见下方 partial）。
+                SessionQueryState(
+                    session_id="legacy-sid",
+                    last_question="同用户半 scope 的那一轮",
+                    turn_count=3,
+                    user_id=user.id,
+                    datasource_id=None,
+                ),
             ]
         )
         await dbSession.commit()
@@ -250,18 +259,44 @@ class TestStreamQueryStateScope:
 
         service = _Svc()
 
-        # 无 scope 读取：必须选出一行（优先 scoped 行），不得抛 MultipleResultsFound
+        # 无 scope（匿名）读取：一行都取不回 —— 不抛 MultipleResultsFound，且不得
+        # 把**别人的 real 行**当成自己的上一轮。
+        #
+        # ⚠️ 2026-10-22 读侧收紧后匿名读是 `user_id IS NULL`，与写侧对称。原断言
+        # `unscoped.user_id == user.id` 钉的正是本 PR 要堵的洞：收紧前读侧完全不过滤
+        # user_id，匿名读会把 alice 的 last_question / last_plan / inheritance_snapshot
+        # 当成自己的追问锚点。
+        #
+        # 为什么这里连**历史 NULL 桶**也读不到（不是 bug，是两道过滤叠加的结果）：
+        # `_loadQueryState` 的 SQL 恒带 M4 的 `user_id != -1`，而 SQL 三值逻辑下
+        # `NULL != -1` 求值为 NULL 而非 TRUE，NULL 行一律被 WHERE 排除。所以
+        # `user_id IS NULL` ∧ `user_id != -1` 的候选集恒为空 —— 收紧没有让任何一行
+        # 从「读得到」变成「读不到」。
         unscoped = await service._loadQueryState(dbSession, "legacy-sid")
-        assert unscoped is not None
-        assert unscoped.user_id == user.id, "多行并存时应优先返回 scope 完全匹配的那行"
-        assert unscoped.datasource_id == ds.id
+        assert unscoped is None, (
+            f"匿名读取回了状态行（user_id={unscoped.user_id!r}，"
+            f"last_question={unscoped.last_question!r}）—— 两行并存时既可能抛 "
+            "MultipleResultsFound，更可能把别人的 real 行泄露给匿名请求"
+        )
 
-        # 显式 scope 读取：SQL 已过滤到唯一行，行为不变
+        # 反向守卫：同一批数据以真实身份读**必须**读得到 alice 的行 ——
+        # 证明上面那个 None 来自匿名守卫本身，不是「数据压根没写进去」。
         scoped = await service._loadQueryState(
             dbSession, "legacy-sid", userId=user.id, datasourceId=ds.id
         )
-        assert scoped is not None
+        assert scoped is not None, "带全 scope 读取取不到自己那行"
         assert scoped.last_question == "带 scope 的那一轮"
+
+        # 部分 scope（只给 userId）：候选集真的有 3 行里的 2 行，必须确定性地选出一行
+        # 而不是抛 MultipleResultsFound —— 这才是本用例 docstring 的职责。
+        partial = await service._loadQueryState(
+            dbSession, "legacy-sid", userId=user.id
+        )
+        assert partial is not None, "只给 userId 的读取取不到任何行"
+        assert partial.last_question == "带 scope 的那一轮", (
+            "候选集含 alice 的全 scope 行与半 scope 行，应按 scope 完整度取全 scope 那行；"
+            f"实际取回 {partial.last_question!r}"
+        )
 
         # 同 session 下的真实请求也不能被这行遗留数据打挂
         _installStreamFakes(monkeypatch, config)

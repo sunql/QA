@@ -1,0 +1,46 @@
+# CentOS 7 生产环境 overlay —— 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.centos.yml up -d
+#
+# 为什么用 overlay 而不是改主 compose：Mac 长期双活当开发机（spec §10）。
+# CentOS 专属处理全部隔离在这个文件里，Mac 侧 `docker compose up` 逐字不变，
+# 出问题删掉本文件即可完全回退。
+#
+# ⚠️ `!override` 需要 Compose ≥ 2.24。el7 仓库能装到的 docker-compose-plugin
+#    上限是 2.27.1（Task 2 实测确认），够用。
+#
+# 依据 docs/superpowers/specs/2026-10-22-centos7-deployment-design.md
+
+services:
+  # ===== 本地 LLM / embedding =====
+  ollama:
+    image: ollama/ollama:latest
+    container_name: qa-ollama
+    restart: unless-stopped
+    environment:
+      # ⚠️ 不可省。默认只听 127.0.0.1，backend 容器经 host-gateway 够不着。
+      # 仓库里 grep 不到任何 OLLAMA_HOST，这是纯运维项，没有代码兜底。
+      OLLAMA_HOST: 0.0.0.0:11434
+      # 32G 机器上内存预算合计 ≈32G（偏紧，spec §7.4）。模型空闲 5 分钟后
+      # 释放权重，避免长期占着约 12G；并发限 1，避免 KV cache 翻倍。
+      OLLAMA_KEEP_ALIVE: 5m
+      OLLAMA_NUM_PARALLEL: 1
+    volumes:
+      - ollama_models:/root/.ollama
+    # 不映射宿主端口：只有 backend 需要访问，走容器网络更安全。
+    # 需要手工调试时用 docker exec qa-ollama ollama list
+
+  # ===== 去掉唯一的 bind mount（spec §7.3）=====
+  # `./init:/docker-entrypoint-initdb.d` 挂在 mysql-demo 上（docker-compose.yml:142），
+  # 而 docker/init/ 是空目录。CentOS 上 SELinux 对 bind mount 的标签策略是常见坑，
+  # 为一个空目录冒这个险不划算。
+  #
+  # 为什么是 `!override` 而不是 `volumes: []`：
+  #   - `[]` 是「把这个服务的卷清空」，会把 mysql_data 一起剥掉；
+  #   - Compose 没有「删除列表中某一项」的写法，只能整字段替换再重列。
+  # 所以这里必须把 mysql_data 原样写回来 —— 漏了就是静默的数据丢失。
+  mysql-demo:
+    volumes: !override
+      - mysql_data:/var/lib/mysql
+
+volumes:
+  ollama_models:

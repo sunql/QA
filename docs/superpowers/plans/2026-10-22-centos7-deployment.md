@@ -971,7 +971,7 @@ echo "把 images.manifest.sha256 一起带走，CentOS 侧要复核"
 chmod +x backend/scripts/build_offline_images.sh
 cd backend && python -m pytest app/tests/unit/test_build_offline_images.py -v
 ```
-Expected: 5 passed
+Expected: 6 passed
 
 - [ ] **Step 5: 联网机上真跑**
 
@@ -982,7 +982,22 @@ ssh root@<centos> 'cd /opt/qa-transfer/images && sha256sum -c images.manifest.sh
   for f in *.tar; do docker load -i "$f"; done && docker images'
 ```
 
-**门禁**：`sha256sum -c` 全过；`docker images` 能列出全部 10 个镜像。
+**门禁**：`sha256sum -c` 全过，且 `docker images` 共列出 **11 个**镜像：
+
+| 来源 | 个数 | 清单 |
+|---|---|---|
+| 脚本 `IMAGES` 数组（pull 下来 save） | 9 | `postgres:16-alpine` `neo4j:5.23-community` `quay.io/coreos/etcd:v3.5.5` `minio/minio:RELEASE.2023-03-20T20-16-18Z` `milvusdb/milvus:v2.4.6` `minio/minio:RELEASE.2024-06-13T22-53-53Z` `mysql:8.0` `alpine:3.20` `ollama/ollama:latest` |
+| 联网机上本地 build 后 save | 2 | `qa-system-backend:latest` `qa-system-frontend:latest` |
+
+> 别写成「10 个」——它既不是 pull 数（9）也不是 Step 6 逐镜像跑的数量（11），
+> 而差一个正是 `alpine:3.20` 或某个 build 镜像漏掉的情形。`alpine:3.20` 尤其关键：
+> Task 9 的三条前置断言和卷导入全靠它做 helper 容器，离线机上漏了它，
+> Task 9 会在第一条断言就报 `Unable to find image 'alpine:3.20'`。
+>
+> 逐条数而不是只数个数：
+> ```bash
+> ssh root@<centos> 'docker images --format "{{.Repository}}:{{.Tag}}" | grep -v "<none>" | sort | wc -l'   # 期望 11
+> ```
 
 - [ ] **Step 6: 【硬门禁】逐镜像真跑一遍**
 
@@ -1014,7 +1029,13 @@ qa-system-frontend:latest|
 LIST
 REMOTE
 ```
-**门禁**：每一行都是 `RUN-OK`。
+**门禁**：`RUN-OK` 恰好 **11** 行，且每一行都是 `RUN-OK`（无 `RUN-FAIL`）。
+
+> 必须连行数一起数：只看「没有 RUN-FAIL」的话，清单被改短（少一行镜像）会
+> 静默通过 —— 这是本仓最常见的假绿形状（空输出 ⇒ 通过）。
+> ```bash
+> ssh root@<centos> 'docker images --format "{{.Repository}}:{{.Tag}}" | grep -cv "<none>"'   # 期望 11
+> ```
 
 > `docker load` 成功**不等于**镜像能跑 —— load 只解包 layer，`run` 才真正走 overlay2 + runc + cgroup。
 > 命令列留空表示用镜像默认 CMD（服务类镜像会一直跑，超时即成功）。刻意**不用** `--entrypoint /bin/sh`：`minio` / `milvus` 镜像里没有 shell，那样只会得到 126/127 假失败。

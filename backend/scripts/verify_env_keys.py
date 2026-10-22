@@ -38,6 +38,16 @@ REUSE_KEYS: tuple[str, ...] = (
 # 运维看到「源端=目标端」会以为匹配、是误报。
 MISSING_MARKER = "缺失"
 
+# 某个键是空值时给出的建议。只对 SECRET_KEY 有专门的警告 ——
+# 它是 Fernet 主密钥，空了会让 5 个数据源密码 + 6 个 LLM key 永久不可解。
+# 其余键给通用文案；不要在这里写死 "SECRET_KEY"，否则谈 MINIO_ROOT_USER 时
+# 会印出一句跟自己那个键无关的忠告。
+_EMPTY_ADVICE: dict[str, str] = {
+    "SECRET_KEY": "空 SECRET_KEY 不能当 Fernet 主密钥用",
+}
+
+_GENERIC_EMPTY_ADVICE = "空值同样不可用于生产，请确认这不是漏填"
+
 # main() 的退出码
 EXIT_OK = 0
 EXIT_MISMATCH = 1
@@ -96,6 +106,11 @@ def findEmptyValues(src: dict[str, str], dst: dict[str, str]) -> list[str]:
             if src.get(key) == "" and dst.get(key) == ""]
 
 
+def emptyAdvice(key: str) -> str:
+    """空值告警的后半句。谈哪个键就说哪个键的话。"""
+    return _EMPTY_ADVICE.get(key, _GENERIC_EMPTY_ADVICE)
+
+
 def render(mismatches: list[tuple[str, str | None, str | None]],
            emptyKeys: Sequence[str] = ()) -> str:
     lines = ["复用键指纹比对结果（只显示指纹，无明文）："]
@@ -106,7 +121,7 @@ def render(mismatches: list[tuple[str, str | None, str | None]],
             f"          目标={MISSING_MARKER if dstFp is None else dstFp}"
         )
     for key in emptyKeys:
-        lines.append(f"  WARN  {key}：两端都是空值，按同值判一致；但空 SECRET_KEY 不能当 Fernet 主密钥")
+        lines.append(f"  WARN  {key}：两端都是空值，按同值判一致；{emptyAdvice(key)}")
     if not mismatches:
         lines.append("  全部一致 ✓")
     return "\n".join(lines)
@@ -119,9 +134,11 @@ def main(argv: list[str]) -> int:
     try:
         src = parseEnvFile(argv[1])
         dst = parseEnvFile(argv[2])
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         # 只带 errno 与路径，不含任何文件内容。退出码单列，否则「scp 失败」
         # 会被门禁读成「键不一致」，运维去查一个不存在的问题。
+        # ValueError 一并接住：路径含 NUL 时 pathlib 抛的是它而不是 OSError，
+        # 漏掉就等于把上面那个问题原样装回来（异常穿出去 → 退出码 1）。
         print(f"读取 .env 失败：{exc}", file=sys.stderr)
         return EXIT_UNREADABLE
     mismatches = compare(src, dst)

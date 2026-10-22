@@ -182,13 +182,16 @@ def test_find_empty_values_flags_both_sides_empty():
 
 def test_empty_value_on_both_sides_warns_but_still_exits_zero(tmp_path, capsys):
     src, dst = tmp_path / "a.env", tmp_path / "b.env"
-    body = "SECRET_KEY=\nNEO4J_PASSWORD=b\nMINIO_ROOT_USER=c\nMINIO_ROOT_PASSWORD=d\n"
+    body = ("SECRET_KEY=\nNEO4J_PASSWORD=LEAKCANARY-warn\n"
+            "MINIO_ROOT_USER=c\nMINIO_ROOT_PASSWORD=d\n")
     src.write_text(body, encoding="utf-8")
     dst.write_text(body, encoding="utf-8")
     assert main(["prog", str(src), str(dst)]) == 0
-    out = capsys.readouterr().out
-    assert "WARN" in out, "两端都空必须留一条告警，否则空 SECRET_KEY 会被无声放行"
-    assert "全部一致" in out
+    captured = capsys.readouterr()
+    assert "WARN" in captured.out, "两端都空必须留一条告警，否则空 SECRET_KEY 会被无声放行"
+    assert "全部一致" in captured.out
+    assert "LEAKCANARY-warn" not in captured.out, "WARN 分支的 stdout 也不许回显明文"
+    assert "LEAKCANARY-warn" not in captured.err, "WARN 分支的 stderr 同样不许回显明文"
 
 
 def test_parse_env_file_reads_from_disk(tmp_path):
@@ -205,13 +208,20 @@ def test_parse_env_file_raises_oserror_on_missing_path(tmp_path):
 
 
 def test_main_exit_code_zero_on_match(tmp_path, capsys):
-    """退出码是这个脚本唯一的交付物 —— 门禁脚本靠它，不靠人眼看输出。"""
+    """退出码是这个脚本唯一的交付物 —— 门禁脚本靠它，不靠人眼看输出。
+
+    「全一致」这条路径也必须守住「输出不含明文」：它恰恰是有人会顺手加
+    「调试时打印一下源 env」的地方，而且每次干净部署都会走到。
+    """
     src, dst = tmp_path / "a.env", tmp_path / "b.env"
-    body = _envBody()
+    body = _envBody("LEAKCANARY-abc123")
     src.write_text(body, encoding="utf-8")
     dst.write_text(body, encoding="utf-8")
     assert main(["prog", str(src), str(dst)]) == 0
-    assert "全部一致" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "全部一致" in captured.out
+    assert "LEAKCANARY-abc123" not in captured.out, "成功路径的 stdout 也不许回显明文"
+    assert "LEAKCANARY-abc123" not in captured.err, "成功路径的 stderr 同样不许回显明文"
 
 
 def test_main_exit_code_one_on_mismatch(tmp_path, capsys):
@@ -241,6 +251,49 @@ def test_main_reports_missing_key_as_marker_not_empty_fingerprint(tmp_path, caps
     assert "SECRET_KEY" in out
     assert "缺失" in out
     assert EMPTY_FP not in out, "缺失侧渲染成空值指纹，运维会误以为两端相同"
+
+
+def test_warn_advice_names_the_key_it_is_actually_about(tmp_path, capsys):
+    """WARN 行谈的是哪个空键，建议文案就得是哪个键的。
+
+    旧文案把 SECRET_KEY 写死在句子里，于是谈 MINIO_ROOT_USER 时会印出
+    「WARN MINIO_ROOT_USER：…但空 SECRET_KEY 不能当 Fernet 主密钥」，
+    运维读到的是一句跟自己那个键无关的忠告。
+    """
+    src, dst = tmp_path / "a.env", tmp_path / "b.env"
+    body = "SECRET_KEY=a\nNEO4J_PASSWORD=b\nMINIO_ROOT_USER=\nMINIO_ROOT_PASSWORD=d\n"
+    src.write_text(body, encoding="utf-8")
+    dst.write_text(body, encoding="utf-8")
+    assert main(["prog", str(src), str(dst)]) == 0
+    warnLine = next(ln for ln in capsys.readouterr().out.splitlines() if "WARN" in ln)
+    assert "MINIO_ROOT_USER" in warnLine
+    assert "Fernet" not in warnLine, "谈 MINIO_ROOT_USER 却建议 Fernet 主密钥，会把运维带偏"
+
+
+def test_warn_advice_for_secret_key_does_mention_fernet(tmp_path, capsys):
+    """空的是 SECRET_KEY 时，恰恰要保留「不能当 Fernet 主密钥」这句。"""
+    src, dst = tmp_path / "a.env", tmp_path / "b.env"
+    body = "SECRET_KEY=\nNEO4J_PASSWORD=b\nMINIO_ROOT_USER=c\nMINIO_ROOT_PASSWORD=d\n"
+    src.write_text(body, encoding="utf-8")
+    dst.write_text(body, encoding="utf-8")
+    assert main(["prog", str(src), str(dst)]) == 0
+    warnLine = next(ln for ln in capsys.readouterr().out.splitlines() if "WARN" in ln)
+    assert "SECRET_KEY" in warnLine
+    assert "Fernet" in warnLine
+
+
+def test_main_exit_code_three_on_path_with_embedded_nul(tmp_path, capsys):
+    """路径里带 NUL 时 pathlib 抛的是 ValueError，不是 OSError。
+
+    漏掉它就等于把 I1 的老问题又装回来：异常一路穿出去，退出码 1，
+    与「键不一致」不可分。
+    """
+    src = tmp_path / "a.env"
+    src.write_text(_envBody(), encoding="utf-8")
+    assert main(["prog", str(src), "bad\x00path.env"]) == 3
+    captured = capsys.readouterr()
+    assert captured.err.strip() != ""
+    assert captured.out.strip() == "", "读不到文件时不得输出比对报告"
 
 
 def test_main_exit_code_two_on_bad_usage(capsys):

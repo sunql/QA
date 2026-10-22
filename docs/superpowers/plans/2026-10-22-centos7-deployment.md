@@ -1046,7 +1046,7 @@ ssh root@<centos> 'cd /opt/qa/docker && \
 
 **Interfaces:**
 - Consumes: 源端 `docker/.env` 与 CentOS 侧 `docker/.env`
-- Produces: 退出码 0 = 5 个键全一致；1 = 有不一致（**且只打印指纹，不打印值**）
+- Produces: 退出码 0 = 4 个复用键全一致；1 = 有缺失或不一致（**且只打印指纹，不打印值**）；2 = 参数个数不对
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1065,6 +1065,7 @@ from scripts.verify_env_keys import (
     compare,
     extractValues,
     fingerprint,
+    main,
 )
 
 
@@ -1100,6 +1101,17 @@ def test_extract_keeps_equals_signs_inside_value():
 
 def test_extract_strips_surrounding_quotes():
     assert extractValues('SECRET_KEY="abc"\n')["SECRET_KEY"] == "abc"
+
+
+def test_extract_last_wins_on_duplicate_key():
+    """真实文件里 docker/.env 的 NEO4J_PASSWORD 出现了两次（第 14、40 行）。
+
+    重复键必须与 docker compose 取值一致 —— compose 也是「后出现者胜」。
+    若这里改成 first-wins，本脚本会比对 compose 根本没在用的那个值，
+    报出一个运维查不出来的「不一致」。这条测试把该行为钉死。
+    """
+    out = extractValues("NEO4J_PASSWORD=first\nNEO4J_PASSWORD=second\n")
+    assert out["NEO4J_PASSWORD"] == "second"
 
 
 def test_compare_reports_all_keys_not_just_the_first_diff():
@@ -1139,6 +1151,42 @@ def test_render_on_match_prints_no_secret_names():
     assert out.strip().endswith("✓")
     for key in REUSE_KEYS:
         assert key not in out
+
+
+def test_parse_env_file_reads_from_disk(tmp_path):
+    """parseEnvFile 是唯一碰文件系统的入口，不能只测不覆盖。"""
+    from scripts.verify_env_keys import parseEnvFile
+    p = tmp_path / ".env"
+    p.write_text("# c\nSECRET_KEY=abc\n", encoding="utf-8")
+    assert parseEnvFile(p) == {"SECRET_KEY": "abc"}
+
+
+def test_main_exit_code_zero_on_match(tmp_path, capsys):
+    """退出码是这个脚本唯一的交付物 —— 门禁脚本靠它，不靠人眼看输出。"""
+    src, dst = tmp_path / "a.env", tmp_path / "b.env"
+    body = "SECRET_KEY=a\nNEO4J_PASSWORD=b\nMINIO_ROOT_USER=c\nMINIO_ROOT_PASSWORD=d\n"
+    src.write_text(body, encoding="utf-8")
+    dst.write_text(body, encoding="utf-8")
+    assert main(["prog", str(src), str(dst)]) == 0
+    assert "全部一致" in capsys.readouterr().out
+
+
+def test_main_exit_code_one_on_mismatch(tmp_path, capsys):
+    src, dst = tmp_path / "a.env", tmp_path / "b.env"
+    src.write_text("SECRET_KEY=a\nNEO4J_PASSWORD=b\nMINIO_ROOT_USER=c\n"
+                   "MINIO_ROOT_PASSWORD=d\n", encoding="utf-8")
+    dst.write_text("SECRET_KEY=WRONG\nNEO4J_PASSWORD=b\nMINIO_ROOT_USER=c\n"
+                   "MINIO_ROOT_PASSWORD=d\n", encoding="utf-8")
+    assert main(["prog", str(src), str(dst)]) == 1
+    out = capsys.readouterr().out
+    assert "DIFF" in out
+    assert "WRONG" not in out, "不一致时也不许回显明文"
+
+
+def test_main_exit_code_two_on_bad_usage(capsys):
+    """参数个数不对必须与「比对不一致」区分开 —— 否则门禁会把用法错误读成迁移失败。"""
+    assert main(["prog"]) == 2
+    assert capsys.readouterr().err.strip() != ""
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1155,8 +1203,11 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'scripts.verify_env_
 ```python
 """比对源端与 CentOS 侧 .env 中的复用键。
 
-5 个值必须逐字复用（spec §7.1）。肉眼在 44 位 base64 上发现不了抄错，
+4 个值必须逐字复用（spec §7.1）。肉眼在 44 位 base64 上发现不了抄错，
 本脚本比对 sha256 指纹，且**任何输出都不含明文**。
+
+⚠️ spec §7.1 正文写「5 个」，但同段 `REUSE_KEYS` 只列 4 个 —— 个数是 spec 笔误，
+以 `REUSE_KEYS` 为准（测试 `test_reuse_keys_are_exactly_the_four_from_spec` 钉死）。
 
 用法：
     python -m scripts.verify_env_keys <源端.env> <centos.env>
@@ -1236,7 +1287,7 @@ if __name__ == "__main__":
 ```bash
 cd backend && python -m pytest app/tests/unit/test_verify_env_keys.py -v
 ```
-Expected: 11 passed
+Expected: 16 passed
 
 - [ ] **Step 5: 真实比对**
 

@@ -879,9 +879,10 @@ class SessionQueryState(Base, TimestampMixin):
     M5（0129 is_stub 列）：写侧在 userId is None 时设 is_stub=True，读侧 `WHERE is_stub=false`
     排除 stub 行 —— 真正兜底的是这条 SQL。排序键 `is_stub` 的方向与直觉相反：
     `_stateRowRank` 返回 `row.is_stub` 而 `_selectStateRow` 取 `max()`，bool 里
-    `True=1 > False=0`，故排序**优先选 stub 行**。读侧无碍（stub 行被 SQL 先排掉），
-    写侧承重（写侧刻意不排 is_stub，`userId is None` 时又不加 user 过滤，
-    real 行与 stub 行会同时候选 —— 优先选 stub 行才使匿名写不劫持真实用户的行）。
+    `True=1 > False=0`，故排序**优先选 stub 行**。读侧无碍（stub 行被 SQL 先排掉）；
+    写侧的匿名隔离**不靠**这个排序键，靠的是 `_saveQueryState` 在
+    `userId is None` 时追加的 `user_id IS NULL` 过滤（2026-10-22 收紧）——
+    候选集在进入排序前就只剩匿名桶，排序键只决定同桶内部的 tiebreak。
     别把这行键「修正」成 `not is_stub`，那会造成跨用户上下文污染。详见
     `chat_context._stateRowRank` docstring。
 

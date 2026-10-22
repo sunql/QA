@@ -802,12 +802,33 @@ COMPOSE_FILES = [REPO / "docker" / "docker-compose.yml",
 SCRIPT = REPO / "backend" / "scripts" / "build_offline_images.sh"
 
 
+class _ComposeLoader(yaml.SafeLoader):
+    """能读懂 Compose 专属 YAML 标签的 SafeLoader。
+
+    overlay 里有 `!override`（Compose ≥ 2.24 的整字段替换标签）。
+    `yaml.safe_load` 不认识它，会抛 ConstructorError —— 于是这个测试在
+    overlay 一落地就直接 ERROR，而不是给出有意义的断言。
+    标签本身对「收集镜像名」没有语义，剥掉、保留值即可。
+    """
+
+
+def _unwrapUnknownTag(loader, suffix, node):
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
+    return loader.construct_scalar(node)
+
+
+_ComposeLoader.add_multi_constructor("", _unwrapUnknownTag)
+
+
 def _composeImages() -> set[str]:
     images: set[str] = set()
     for path in COMPOSE_FILES:
         if not path.exists():
             continue
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=_ComposeLoader)
         for svc in (data.get("services") or {}).values():
             if "image" in svc:
                 images.add(svc["image"])
@@ -837,8 +858,19 @@ def test_script_lists_every_compose_image():
 
 
 def test_script_parser_is_not_silently_empty():
-    """守卫上面那个引号 bug：解析出 0 个镜像时必须红，而不是让 missing 变成全集。"""
-    assert len(_scriptImages()) >= 8, f"只解析出 {len(_scriptImages())} 个镜像，正则多半坏了"
+    """守卫上面那个引号 bug：解析出 0 个镜像时必须红，而不是让 missing 变成全集。
+
+    下限取 9 —— 合并后 compose 的 8 个外部镜像 + alpine:3.20（通用工具容器，
+    Task 4 Step 6 的 run 门禁也要用它）。写成 8 的话，正则只多吐出一个也能过。
+    """
+    assert len(_scriptImages()) >= 9, f"只解析出 {len(_scriptImages())} 个镜像，正则多半坏了"
+
+
+def test_compose_image_loader_tolerates_the_centos_overlay():
+    """overlay 用 `!override`，普通 safe_load 读不了 —— 守卫这一点别退回去。"""
+    images = _composeImages()
+    assert "ollama/ollama:latest" in images, "overlay 里的 ollama 必须被收进来"
+    assert "postgres:16-alpine" in images
 
 
 def test_script_forces_amd64_platform():

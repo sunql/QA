@@ -101,6 +101,25 @@ function invalidatePendingLoads(): void {
   sessionLoadSeq += 1;
 }
 
+/**
+ * 流代次：与 `sessionLoadSeq` 同构的第二把锁，锁的是**在途流**而不是在途加载。
+ *
+ * 为什么需要它（12 个 SSE handler 的 `isCurrent()` 挡不住这些）：
+ * `sendMessage` 里 await 之后的收尾写入 —— finally、内外两层 catch、
+ * 非流式响应 —— 全都**绕过** `isCurrent()`，且用的是 `patchLastMessage`
+ * （无条件写「最后一条」）。切数据源后新流已把自己的消息追加进列表，
+ * 于是旧流的收尾写入会精确命中新会话的消息：旧流的 finally 把新流的
+ * `loading` 复位、给新流消息打上 `isStreaming:false`；旧流的报错覆写新流正文；
+ * 旧流的非流式响应还会把 `currentAssistantMessageId` 清成 null —— 而
+ * `isCurrent()` 把 `id === null` 当作「无守卫，放行」，等于顺手拆掉全部
+ * 12 个 handler 的防线。
+ *
+ * 因此「谁有权写 store」不能只靠消息列表碰巧是空的来隐式保证，必须显式记代次。
+ * 每条 `sendMessage` 开跑时领一代（`++streamGen`），凡「要重新决定屏幕上显示
+ * 哪个会话」的动作都 bump 一次，所有更老的流随即失去写入权。
+ */
+let streamGen = 0;
+
 function toHistory(messages: ChatMessage[]): HistoryMessage[] {
   return messages.slice(-HISTORY_LIMIT).map((m) => ({ role: m.role, content: m.content }));
 }
@@ -524,12 +543,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // 不清的话，在途 loadSessionMessages 的 `seq !== sessionLoadSeq` 过期检查会放行，
     // 上一个数据源的会话消息在切换之后落进新数据源（跨数据源串台）。
     invalidatePendingLoads();
-    // loading 不清 ⇒ sendMessage 的 `if (loading) return` 让新数据源在整个在途
-    // 请求返回前不可用；error 不清 ⇒ 旧数据源的错误横幅跟着切过来；
-    // currentAssistantMessageId 不清 ⇒ 下一条消息的 P1-3 中止分支会去标新列表里的
-    // 消息（此时 messages 已清空，标不到任何东西，但会把意图留在旧 id 上）。
-    // 在途流自己的 handler 仍可能回调，但它们按 assistantMessageId 定位，
-    // 消息列表已空 ⇒ patchMessage 退化为恒等变换，不会把旧数据写进新会话。
+    // 同时作废在途**流**的写入权（见 streamGen）。清 loading / currentAssistantMessageId
+    // 让新数据源能立刻提问，但代价是在途流此后仍会回调 finally / catch；
+    // 那些写入绕过 isCurrent() 且写「最后一条」，没有代次锁就会写进新会话。
+    // 修这条时曾把 loading 与 currentAssistantMessageId 留着当「天然护栏」——
+    // 那个护栏是偶然成立的（靠消息列表碰巧是空 + id 恰好没被清），不是设计。
+    streamGen += 1;
     // 注意 sessions / sessionsError 故意不清：历史列表只按 channel 过滤
     // (api/chatHistory.ts:16)，不按数据源分域，清了会毁掉用户还能回去的合法历史。
     set({
@@ -550,6 +569,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   sendMessage: async (question, useStream = false, chartType = null) => {
     const { sessionId, messages, datasourceId, loading, currentAssistantMessageId } = get();
+    // 领一代：本次发送是唯一有写入权的流。上一次在途流（被 P1-3 中止的、
+    // 或切数据源后失权的）的收尾写入自此全部作废——见 streamGen 的说明。
+    const gen = ++streamGen;
+    const isLive = () => streamGen === gen;
     // P1-3：中止前一条还在进行中的流
     if (currentAssistantMessageId) {
       set((state) => ({
@@ -612,6 +635,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         if (!items.length) return;
         const current = items.filter((h) => h.turnQuestion === question);
         if (!current.length) return;
+        // 回填是 await 之后才落地的，期间可能已切数据源／已发新问题
+        if (!isLive()) return;
         set((state) => ({
           messages: patchLastMessage(state.messages, { hypotheses: current }),
         }));
@@ -624,6 +649,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // currentAssistantMessageId 为 null 时（即 sendMessageStream 被直接调用，非 chatStore.sendMessage），
     // 不拦截任何事件（让 chatApi.test.ts 的直接 SSE 测试能正常收到帧）。
     const isCurrent = () => {
+      // 代次优先于 id：已失权的流连「id 恰好还是自己的」也不许写。
+      if (!isLive()) return false;
       const id = get().currentAssistantMessageId;
       return id === null || id === assistantMessageId;
     };
@@ -796,6 +823,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         // 非流式分支（不改；也要 reset currentAssistantMessageId）
         try {
           const response = await sendChatMessage(payload);
+          // 失权的流不得把响应写进新会话，也不得清 currentAssistantMessageId
+          // ——清空会让仍在飞的流的 isCurrent() 因 `id === null` 全线放行。
+          if (!isLive()) return;
           set((state) => ({
             messages: patchLastMessage(state.messages, {
               content: response.answer,
@@ -845,6 +875,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : i18n.t("errors.networkError");
           const errDetail = (err as { detail?: string }).detail ?? null;
+          // 失权的流：报错照常向上抛，但不写 store —— patchLastMessage 会把
+          // 旧流的错误文案盖到**新会话的消息**正文上，并挂错全局错误横幅。
+          if (!isLive()) throw err;
           set((state) => {
             const last = state.messages[state.messages.length - 1];
             // 已通过 error 事件展示具体错误时，不覆盖为通用错误文案（LOW#8 修复）
@@ -870,6 +903,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       const errMsg = err instanceof Error ? err.message : i18n.t("errors.networkError");
       const errDetail = (err as { detail?: string }).detail ?? null;
       const isInterrupted = err instanceof Error && err.message.includes(STREAM_INTERRUPTED_DETECTION);
+      // 失权的流不写 store（理由同内层 catch）；EOF 守门的抛错语义保持不变。
+      if (!isLive()) {
+        if (isInterrupted) throw err;
+        return;
+      }
       set((state) => {
         const last = state.messages[state.messages.length - 1];
         // 已通过 error 事件展示具体错误时，不覆盖为通用错误文案（LOW#8 修复）
@@ -897,7 +935,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       // currentAssistantMessageId 的清理由 onDone/onError handler 负责（正常流），
       // finally 这里不再重复清（避免在 mock 测试中覆盖 handler 已设置的 null）。
       // 若 loading 仍为 true（未收到 done/error），强制复位 isStreaming（HIGH#3 兜底）。
-      if (get().loading) {
+      // 仅当代次仍然有效才复位：失权的流若在此执行，会把**新流**的 loading 置回
+      // false（输入框提前解禁，用户得以再发一条 → 新流被抢走 assistant id 而
+      // 静默截断），并给新流的消息打上 isStreaming:false。
+      if (isLive() && get().loading) {
         set((state) => ({
           loading: false,
           messages: patchLastMessage(state.messages, { isStreaming: false }),
@@ -955,6 +996,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   clearMessages: () => {
     invalidatePendingLoads();
+    streamGen += 1;
     set({ messages: [], error: null });
   },
 
@@ -965,6 +1007,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     writeLastSessionId(channel, null);
     // 在途回放不得把旧会话的消息搬回来（「新对话」之后屏幕上必须是空的）
     invalidatePendingLoads();
+    streamGen += 1;
     set({
       messages: [],
       sessionId: makeSessionId(channel),
@@ -978,6 +1021,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // 指针由 authStore 侧 clearLastSessionIds() 清（那里才知道「换人」这件事）；
     // 这里只负责内存：messages 与 sessionId 都是上一个人的，必须换掉。
     invalidatePendingLoads();
+    streamGen += 1;
     set({
       messages: [],
       sessionId: makeSessionId(channel),

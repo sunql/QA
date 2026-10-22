@@ -1491,10 +1491,16 @@ docker run --rm -v qa-system_neo4j_data:/data -v /opt/qa-transfer:/backup \
   --from-path=/backup/neo4j --overwrite-destination=true
 docker compose -f /opt/qa/docker/docker-compose.yml \
                -f /opt/qa/docker/docker-compose.centos.yml start neo4j
-docker exec -i qa-neo4j cypher-shell -u neo4j -p "$NEO4J_PASSWORD" \
-  "MATCH (n) RETURN count(n);"'   # 期望 3753
+docker exec -i qa-neo4j sh -c \
+  '"'"'cypher-shell -u neo4j -p "$NEO4J_PASSWORD" "MATCH (n) RETURN count(n);"'"'"''   # 期望 3753
 ```
 **门禁**：`count(n)` = 3753。
+
+> ⚠️ **必须多一层 `sh -c`**：`$NEO4J_PASSWORD` 只存在于**容器内**的环境里，CentOS 宿主
+> 的 root shell 没有这个变量（它在 `docker/.env` 与 neo4j 容器 env 里）。整段命令被
+> `ssh '…'` 单引号包着 ⇒ 由**宿主** shell 展开 ⇒ `cypher-shell -u neo4j -p ""` ⇒ 认证失败。
+> 同一 Step 的 Step 4 对 `\$MYSQL_ROOT_PASSWORD` 做了同样的转义，这里漏了 —— 两处写法
+> 必须一致，否则「MySQL 验得过、Neo4j 验不过」会被误判成数据没导全。
 
 - [ ] **Step 4: 导入 qa-objects + MySQL + 立即验**
 
@@ -1815,25 +1821,46 @@ ssh root@<centos> "docker cp /opt/qa/verify_migration.py qa-backend:/app/scripts
 
 > ⚠️ **编号顺序 ≠ 执行顺序**：Task 12 的回填要真实调 embedding，迁移过来的 provider 指向 Mac 上的 oMLX，在 CentOS 上不存在。必须先做本 Task。
 
-- [ ] **Step 1: 登录取 JWT**
+- [ ] **Step 1: 登录取 JWT，落盘到 CentOS**
 
 ```bash
-ssh root@<centos> 'JWT=$(curl -s -X POST http://localhost:5173/api/v1/auth/login \
+ssh -t root@<centos> 'umask 077
+read -rs -p "admin 密码: " PW; echo
+curl -s -X POST http://localhost:5173/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PASSWORD\"}" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)[\"access_token\"])")
-echo "${JWT:0:20}..."   # 只回显前 20 字符'
+  -d "{\"username\":\"admin\",\"password\":\"$PW\"}" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)[\"access_token\"])" > /root/.qa-jwt
+unset PW
+[ -s /root/.qa-jwt ] || { echo "登录失败 —— 把上面返回体原样贴出来再查"; exit 1; }
+echo "token 已落盘：$(wc -c < /root/.qa-jwt) 字节（不打印内容）"'
 ```
+**门禁**：`token 已落盘：<若干> 字节`。
+
+> ⚠️ **token 必须落盘，不能靠 shell 变量传。** 早期版本在 Step 1 的 `ssh` 里
+> `JWT=$(…)`，然后 Step 2/3/4 各自的 `ssh` 里用 `$JWT` —— **每条 `ssh` 都是一个全新的
+> 远端 shell，Step 1 的 `JWT` 早就随那个 shell 一起没了**。而且这三条用的是双引号包
+> `ssh`，`$JWT` 由**本地 Mac shell** 展开，本地更没有 ⇒ 发出的是
+> `Authorization: Bearer `（空）⇒ 全部 401。Task 12 Step 4 与 Task 13 Step 2 同理，
+> 一共 5 处。token 落 `/root/.qa-jwt`（`umask 077`）后，各 Step 用
+> `docker exec -e JWT="$(cat /root/.qa-jwt)"` 注入容器，由**容器自己的 shell** 展开。
+> `-t` 是必须的：不加 `-t` 时 ssh 不分配 tty，`read` 会去读 heredoc/管道而不是终端。
+> 任一步返回 401 就是 token 过期或落盘失败 —— 重跑本步，不要往下走。
 
 - [ ] **Step 2: 创建并激活 CentOS Ollama provider**
 
 ```bash
-ssh root@<centos> "docker exec qa-backend sh -c '
+ssh root@<centos> 'bash -s' <<'REMOTE'
+set -e
+# 显式守卫：`$(cat …)` 失败不会触发 set -e（它在参数位置），空 token 会变成
+# 一条 401 的静默请求，看上去像「provider 切不过去」，实际是根本没带 token。
+[ -s /root/.qa-jwt ] || { echo "缺 /root/.qa-jwt —— 回 Task 11 Step 1 重取 token"; exit 1; }
+docker exec -e JWT="$(cat /root/.qa-jwt)" qa-backend sh -c '
 curl -s -X POST http://localhost:8000/api/v1/embedding-providers \
-  -H \"Authorization: Bearer $JWT\" -H \"Content-Type: application/json\" \
-  -d \"{\\\"name\\\":\\\"Ollama bge-m3 (centos)\\\",\\\"providerType\\\":\\\"ollama\\\",\\
-       \\\"baseUrl\\\":\\\"http://localhost:11434/v1\\\",\\\"modelName\\\":\\\"bge-m3:latest\\\",\\
-       \\\"dimension\\\":1024,\\\"isActive\\\":true}\"'"
+  -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" \
+  -d "{\"name\":\"Ollama bge-m3 (centos)\",\"providerType\":\"ollama\",\
+       \"baseUrl\":\"http://localhost:11434/v1\",\"modelName\":\"bge-m3:latest\",\
+       \"dimension\":1024,\"isActive\":true}"'
+REMOTE
 ```
 要点：
 - `baseUrl` **故意写 `localhost`** —— resolver 按 `EMBEDDING_HOST_OVERRIDE` 改写成 `host.docker.internal`（`embedding_client.py:35-52`），与 macOS 上同一套机制
@@ -1843,18 +1870,30 @@ curl -s -X POST http://localhost:8000/api/v1/embedding-providers \
 - [ ] **Step 3: 验证**
 
 ```bash
-ssh root@<centos> "docker exec qa-backend sh -c '
+ssh root@<centos> 'bash -s' <<'REMOTE'
+set -e
+# 显式守卫：`$(cat …)` 失败不会触发 set -e（它在参数位置），空 token 会变成
+# 一条 401 的静默请求，看上去像「provider 切不过去」，实际是根本没带 token。
+[ -s /root/.qa-jwt ] || { echo "缺 /root/.qa-jwt —— 回 Task 11 Step 1 重取 token"; exit 1; }
+docker exec -e JWT="$(cat /root/.qa-jwt)" qa-backend sh -c '
 curl -s http://localhost:8000/api/v1/embedding-providers/active \
-  -H \"Authorization: Bearer $JWT\"'"
+  -H "Authorization: Bearer $JWT"'
+REMOTE
 ```
-**门禁**：返回 `providerType=ollama`、`dimension=1024`。
+**门禁**：返回 `providerType=ollama`、`dimension=1024`。返回 401 ⇒ 回 Step 1 重取 token。
 
 - [ ] **Step 4: 真实调一次 embedding**
 
 ```bash
-ssh root@<centos> "docker exec qa-backend sh -c '
+ssh root@<centos> 'bash -s' <<'REMOTE'
+set -e
+# 显式守卫：`$(cat …)` 失败不会触发 set -e（它在参数位置），空 token 会变成
+# 一条 401 的静默请求，看上去像「provider 切不过去」，实际是根本没带 token。
+[ -s /root/.qa-jwt ] || { echo "缺 /root/.qa-jwt —— 回 Task 11 Step 1 重取 token"; exit 1; }
+docker exec -e JWT="$(cat /root/.qa-jwt)" qa-backend sh -c '
 curl -s -X POST http://localhost:8000/api/v1/embedding-providers/active/test \
-  -H \"Authorization: Bearer $JWT\"'"
+  -H "Authorization: Bearer $JWT"'
+REMOTE
 ```
 **门禁**：维度必须返回 **1024**。不是则停 —— 与 `milvus_client.py:38` 的 `_DIM` 不一致会抛 `ConfigError`。
 
@@ -1905,9 +1944,15 @@ ssh root@<centos> 'docker exec qa-backend python scripts/diag_milvus_embedding_s
 - [ ] **Step 4: Wiki 向量**
 
 ```bash
-ssh root@<centos> "docker exec qa-backend sh -c '
+ssh root@<centos> 'bash -s' <<'REMOTE'
+set -e
+# 显式守卫：`$(cat …)` 失败不会触发 set -e（它在参数位置），空 token 会变成
+# 一条 401 的静默请求，看上去像「provider 切不过去」，实际是根本没带 token。
+[ -s /root/.qa-jwt ] || { echo "缺 /root/.qa-jwt —— 回 Task 11 Step 1 重取 token"; exit 1; }
+docker exec -e JWT="$(cat /root/.qa-jwt)" qa-backend sh -c '
 curl -s -X POST http://localhost:8000/api/v1/wiki/vector-sync \
-  -H \"Authorization: Bearer $JWT\"'"
+  -H "Authorization: Bearer $JWT"'
+REMOTE
 ```
 
 - [ ] **Step 5: RAG 文档重新 ingest**
@@ -1924,20 +1969,38 @@ curl -s -X POST http://localhost:8000/api/v1/wiki/vector-sync \
 - [ ] **Step 1: 停用 Mac 开发探针数据源**
 
 ```bash
-ssh root@<centos> 'docker exec -i qa-postgres psql -U qa_user -d qa_metadata -c "
+ssh root@<centos> 'bash -s' <<'REMOTE'
+set -e
+docker exec -i qa-postgres psql -U qa_user -d qa_metadata <<'SQL'
 UPDATE data_source SET is_active = false
- WHERE name IN (\$\$${q:-localmysql}\$,\$smoke\$,\$recall-probe\$,\$phase13_realdata_pg\$);
-"'
+ WHERE name IN ('localmysql', 'smoke', 'recall-probe', 'phase13_realdata_pg');
+SQL
+docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc \
+  "SELECT name FROM data_source WHERE is_active ORDER BY name;"
+REMOTE
 ```
-> SQL 里用双引号包名字时注意转义。执行后核对：只剩 `THBI Oracle` 一条 `is_active=true`。
+**门禁**：最后一条查询**只回显 `THBI Oracle` 一行**。多出任何一行就是漏掉的探针源。
+
+> ⚠️ 早期版本这里写的是 `... name IN (\$\$${q:-localmysql}\$,\$smoke\$...)`，试图用
+> Postgres 的 `$$…$$` dollar-quoting 躲开外层引号。实测该写法必然失败：
+> `\$$` 只产出**一个** `$`，psql 直接报
+> `ERROR: unterminated dollar-quoted string at or near "$$localmysql$,$smoke$,..."`。
+> `$$` 在 shell 里还有 PID 展开的歧义，双重不牢。改用 `<<'SQL'` heredoc：
+> 引号定界符让 shell 完全不碰内容，SQL 里想写什么就写什么。
 > `localmysql` 指向 `host.docker.internal:3306` 库名 `srm`，而 CentOS 上该端口是 compose 自带的 `mysql-demo`（库名 `wms_demo`），库名不匹配，必然连不上。
 
 - [ ] **Step 2: 【R1 致命项】验证迁移过来的 THBI Oracle 能解密**
 
 ```bash
-ssh root@<centos> "docker exec qa-backend sh -c '
+ssh root@<centos> 'bash -s' <<'REMOTE'
+set -e
+# 显式守卫：`$(cat …)` 失败不会触发 set -e（它在参数位置），空 token 会变成
+# 一条 401 的静默请求，看上去像「provider 切不过去」，实际是根本没带 token。
+[ -s /root/.qa-jwt ] || { echo "缺 /root/.qa-jwt —— 回 Task 11 Step 1 重取 token"; exit 1; }
+docker exec -e JWT="$(cat /root/.qa-jwt)" qa-backend sh -c '
 curl -s -X POST http://localhost:8000/api/v1/data-sources/1/test \
-  -H \"Authorization: Bearer $JWT\"'"
+  -H "Authorization: Bearer $JWT"'
+REMOTE
 ```
 **门禁**：连接测试通过。
 
@@ -1984,7 +2047,15 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:5173/api/v1/data-quali
 
 从另一台机器用 LAN IP 访问 `http://<centos>:5173`。前端走同源 `/api/v1`（`VITE_API_BASE_URL` 留空），应自动适配 LAN IP，无需改配置。
 
-- [ ] **Step 4: 清理镜像泄露（顺手做，spec 未列但同源）**
+- [ ] **Step 4: 销毁临时 token**
+
+```bash
+ssh root@<centos> 'shred -u /root/.qa-jwt 2>/dev/null || rm -f /root/.qa-jwt; \
+  ls -l /root/.qa-jwt 2>&1 | tail -1'
+```
+**门禁**：回显 `No such file or directory`。留着就是一份可用的 admin 会话凭据落盘。
+
+- [ ] **Step 5: 清理镜像泄露（顺手做，spec 未列但同源）**
 
 ```bash
 ssh root@<centos> 'docker images | grep qa-system-backend'

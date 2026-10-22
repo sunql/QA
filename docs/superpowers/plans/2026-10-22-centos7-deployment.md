@@ -1451,16 +1451,22 @@ ssh root@<centos> 'cd /opt/qa/docker
 docker ps --format "{{.Names}}" | grep -qx qa-backend \
   && { echo "ABORT: backend 在跑，先停"; exit 1; }
 
-# 断言 2：目标卷确实是空的
+# 断言 2：三个目标卷**存在**且**确实是空的**
+# ⚠️ 必须先查存在性：`docker run -v NAME:/d` 对不存在的命名卷会**自动创建**一个空卷。
+# 少了这一句，断言 2 就永远在检查一个刚出生的空卷 → 恒过 → 一条不可能失败的守卫，
+# 而它守的正是本 Task 的破坏性导入。卷名前缀 `qa-system` 来自
+# docker/docker-compose.yml:1 的 `name:` 键（不是目录名 docker），已实跑 `config` 核实。
 for v in qa-system_pg_data qa-system_neo4j_data qa-system_objects_data; do
+  docker volume inspect "$v" >/dev/null 2>&1 \
+    || { echo "ABORT: 卷 $v 不存在（compose 从没起过？项目名变了？）"; exit 1; }
   n=$(docker run --rm -v "$v:/d" alpine:3.20 sh -c "ls -A /d | wc -l")
-  echo "$v entries=$n"; [ "$n" -eq 0 ] || echo "  ⚠️ 非空，确认后再继续"
+  echo "$v entries=$n"; [ "$n" -eq 0 ] || { echo "ABORT: $v 非空"; exit 1; }
 done
 
 # 断言 3：传输完整性
 sha256sum -c /opt/qa-transfer/transfer-manifest.sha256'
 ```
-**门禁**：断言 1 必须无输出；断言 3 全 OK。断言 2 非空时**停下来人工确认**，不要继续。
+**门禁**：断言 1 必须无输出；断言 2 三行都打 `entries=0`；断言 3 全 OK。任一 ABORT 即停。
 
 - [ ] **Step 2: 导入 PostgreSQL + 立即验**
 

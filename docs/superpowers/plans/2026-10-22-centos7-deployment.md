@@ -1425,13 +1425,18 @@ docker exec qa-mysql-demo sh -c \
 - [ ] **Step 2: 自检四份产物（spec §6.2）**
 
 ```bash
-cd backups
+cd /path/to/qa-system/backups
 for f in pg/*.dump neo4j/*.dump objects/*.tar.gz mysql/*.sql; do
   [ -s "$f" ] && echo "OK   $f  $(du -h "$f" | cut -f1)" || echo "EMPTY/MISSING  $f"
 done
 
+# ⚠️ 整段必须单引号 + sh -c：`/b/qa_metadata_*.dump` 这个 glob 在**宿主**不存在
+# （宿主没有 /b），不引号的话宿主 shell 不会展开它（bash 留字面量、zsh 直接报
+# `no matches found` 并中止整条命令），而 docker run 直接 exec 没有 shell，
+# 容器里也就没人展开 ⇒ pg_restore 收到字面量 `/b/qa_metadata_*.dump` ⇒ 报
+# could not open input file。加 sh -c 后由**容器内**的 sh 对挂载卷展开。
 docker run --rm -v "$PWD/pg:/b:ro" postgres:16-alpine \
-  pg_restore --list /b/qa_metadata_*.dump | tail -5
+  sh -c 'pg_restore --list /b/qa_metadata_*.dump' | tail -5
 #   期望：列出 TABLE DATA / DATABASE 等条目，末尾无 error
 
 grep -vcE '^(--|/\*|!|$)' mysql/*.sql   # 期望 > 0
@@ -1446,11 +1451,20 @@ find pg neo4j objects mysql -type f \( -name '*.dump' -o -name '*.tar.gz' -o -na
 - [ ] **Step 3: 传过去并复核校验和**
 
 ```bash
+# ⚠️ 回到仓库根：Step 2 结束时 cwd 是 backups/，而本 Step 的路径是相对仓库根的。
+# 少了这行 cd，两条 scp 都会找不到路径（`backups/*` 在 backups/ 里不存在，
+# 而 manifest 写在 backups/ 的**上一级**）。
+cd /path/to/qa-system
 scp -r backups/* root@<centos>:/opt/qa-transfer/
 scp transfer-manifest.sha256 root@<centos>:/opt/qa-transfer/
 ssh root@<centos> 'cd /opt/qa-transfer && sha256sum -c transfer-manifest.sha256'
 ```
-**门禁**：每行都 `OK`。
+**门禁**：每行都 `OK`，且**行数与 Step 2 的 `find` 产物数一致**。
+> 行数不必等于 4 —— 四类产物里 neo4j/pg 按日期分文件，实际是 N 行。
+> 要对的是 N：源端 `wc -l < transfer-manifest.sha256`，与 CentOS 侧
+> `sha256sum -c … | grep -c ': OK$'` 两边必须相同。少传一类时
+> `sha256sum -c` 只会对**存在的那几行**报 OK，不会抱怨少文件 —— 属「空/残缺
+> 输出 ⇒ 通过」那一族，必须数行。
 
 ---
 

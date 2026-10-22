@@ -76,7 +76,8 @@
   - `runProbe(name: str, fn: Callable[[], str]) -> ProbeResult`
   - `ProbeResult = NamedTuple("ProbeResult", [("name", str), ("ok", bool), ("value", str), ("severity", str)])`，`severity ∈ {"hard", "soft"}`
   - `main() -> int`，`hard` 失败返回 1，`soft` 失败返回 0 但在 JSON 中标记
-  - CLI：`python -m scripts.preflight_centos [--json]`
+  - CLI：**Mac/测试侧** `python -m scripts.preflight_centos [--json]`；
+    **CentOS 宿主侧**必须 `python3 /root/preflight_centos.py [--json]`（裸文件，不能走 `-m scripts.`，见 Task 2 Step 1）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -396,8 +397,15 @@ git commit -m "feat(deploy): CentOS 宿主勘察脚本 + 6 项单测"
 ```bash
 # 把 preflight_centos.py 传到 CentOS
 scp backend/scripts/preflight_centos.py root@<centos>:/root/
-ssh root@<centos> 'cd /root && python3 -m scripts.preflight_centos --json'
+ssh root@<centos> 'python3 /root/preflight_centos.py --json'
 ```
+
+⚠️ **必须按裸文件跑，不能写 `python3 -m scripts.preflight_centos`。** 两个原因：
+1. `scp` 落地的是 `/root/preflight_centos.py`，那里既没有 `scripts` 包也没有
+   `scripts/preflight_centos.py` 这个模块路径，`-m scripts.` 必然 ModuleNotFoundError；
+2. 仓内 `backend/scripts/__init__.py:6` 有 `from __future__ import annotations`，
+   那是 3.7+ 语法，在 CentOS 7 的 python3 3.6.8 上 import 到包这一层就 SyntaxError ——
+   哪怕模块本身完全兼容 3.6，也进不去。该脚本零个仓内 import，按文件跑即可。
 
 按结果处理：
 - `xfs_ftype=0` → **必须重格式化**挂载点再继续：
@@ -481,6 +489,27 @@ ssh root@<centos> 'set -x
 ssh root@<centos> 'rpm -qa | grep -E "^(docker|containerd)" | sort > /root/qa-centos-docker-versions.txt; cat /root/qa-centos-docker-versions.txt'
 ```
 > 这份快照进 §11 的文档回写清单 —— 将来别人复现时需要知道实测通过的到底是哪个版本。
+
+- [ ] **Step 6: 装机后复检 ftype（Step 1 那次查不到真答案）**
+
+Step 1 的勘察查的是 `/var/lib` 所在文件系统 —— 那是**装机前唯一可查的东西**，
+因为 `/var/lib/docker` 当时还不存在。但 spec §6 P0 与设计稿真正关心的是
+**`/var/lib/docker` 这个挂载点本身**（spec:299 `xfs_info /var/lib/docker`）。
+若运维在 P1 里给 `/var/lib/docker` 单独挂了个卷，那个卷完全没被 Step 1 看过。
+
+Docker 起来之后必须再查一次真实挂载点：
+
+```bash
+ssh root@<centos> 'findmnt -no FSTYPE -T /var/lib/docker; xfs_info /var/lib/docker 2>/dev/null | grep ftype'
+```
+**门禁**：`FSTYPE` 非空；若为 `xfs`，`ftype` 必须是 `1`。
+不是 xfs（或 XFS 且 ftype=1）才算过 —— 与 Step 1 的分支处理一致。
+
+> `findmnt -no FSTYPE -T <path>` 里的 `-T` 是必需的：去掉它就是「精确匹配挂载点」，
+> 而 `/var/lib` 在默认 CentOS 7 上**不是**挂载点 ⇒ findmnt 返回空、退出码 1 ⇒
+> 任何「空输出即通过」的写法都会把这次检查变成空转。
+> 另外 `-T` 必须紧跟 `-no FSTYPE` 之后写成 `-no FSTYPE -T <path>`；
+> 写成 `-T -no FSTYPE` 会被 util-linux 2.23.2 拒（`--target and --source can't be used together`）。
 
 ---
 

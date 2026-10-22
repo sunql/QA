@@ -760,6 +760,20 @@ test "$(docker compose -f docker/docker-compose.yml -f docker/docker-compose.cen
 **反向自检**（防止 6.2 又变成假绿）：临时把 overlay 里的 `!override` 删掉，让
 bind mount 回来，重跑 6.2 —— 必须报 `FAIL`。恢复后再跑一次，必须报 `OK`。
 
+> ⚠️ **`!override` 是长期维护债，改主 compose 时必须同步。**
+> 它是**整字段替换**：overlay 里 `mysql-demo.volumes` 写死成 `[mysql_data:/var/lib/mysql]`。
+> 以后有人给主 compose 的 `mysql-demo` 加一个新卷（新加的 `mycache:/var/cache` 之类），
+> **不会**自动出现在 CentOS 上 —— 那个卷在 CentOS 侧静默消失，容器起来才报找不到目录。
+> Mac 侧一切正常，所以本地开发永远发现不了。
+>
+> 两条防护，都要做：
+> 1. 在主 compose 的 `mysql-demo` 处加一行注释，指向本 overlay 文件；
+> 2. 每次改主 compose 的 `mysql-demo.volumes` 后，重跑 6.3 确认 `mysql_data` 计数，
+>    并肉眼核对 overlay 里重列的卷列表与主 compose 一致。
+>
+> Compose 没有「从列表里删掉某一项」的写法，这是唯一的解法；真要避免这份债，
+> 只能回头改主 compose 里那个 `./init` bind mount 的来源（例如让 init 脚本进镜像）。
+
 - [ ] **Step 7: 提交**
 
 ```bash
@@ -961,9 +975,16 @@ echo "== 校验和 =="
 cd "$OUT_DIR"
 sha256sum ./*.tar > images.manifest.sha256
 
+# ⚠️ 顺手把每个镜像的**解析后 digest** 记下来。`ollama/ollama:latest` 是浮动 tag：
+# 今天造的离线包和三个月后重建的同名 tag 未必是同一个镜像层，而 CentOS 是内网隔离的，
+# 拉不到、也换不了 —— 届时没有任何手段确认装的到底是哪个版本。
+docker images --digests --format '{{.Repository}}:{{.Tag}}@{{.ID}}' \
+  | grep -v '<none>' | sort > images.digests.txt
+cat images.digests.txt
+
 echo "== 完成 =="
 ls -lh "$OUT_DIR"
-echo "把 images.manifest.sha256 一起带走，CentOS 侧要复核"
+echo "把 images.manifest.sha256 和 images.digests.txt 一起带走，CentOS 侧要复核"
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
@@ -981,7 +1002,19 @@ bash backend/scripts/build_offline_images.sh
 scp -r /opt/qa-transfer/images root@<centos>:/opt/qa-transfer/
 ssh root@<centos> 'cd /opt/qa-transfer/images && sha256sum -c images.manifest.sha256 && \
   for f in *.tar; do docker load -i "$f"; done && docker images'
+
+# 装载后逐个核对 ID 与源端记录一致 —— sha256sum 只证明**传输**没坏，
+# 证明不了 load 进去的是同一个镜像
+scp /opt/qa-transfer/images/images.digests.txt root@<centos>:/opt/qa-transfer/images/
+ssh root@<centos> 'cd /opt/qa-transfer/images && \
+  docker images --format "{{.Repository}}:{{.Tag}}@{{.ID}}" | grep -v "<none>" | sort \
+  | diff - images.digests.txt && echo "DIGEST-OK"'
 ```
+**门禁**：`DIGEST-OK`。`diff` 有输出就说明某个镜像的 ID 与源端不符
+（浮动 tag 在造包与装载之间被更新过，或 tar 与记录对不上），**停下查清楚再继续**。
+> 这条不是形式检查：`ollama/ollama:latest` 是浮动 tag，Task 5 的 `docker run … ollama pull`
+> 与 Task 4 的 `docker save` 之间只要有一次 pull，就可能出现两者不是同一层的情况，
+> 而 CentOS 内网拉不到、也换不了。
 
 **门禁**：`sha256sum -c` 全过，且 `docker images` 共列出 **11 个**镜像：
 
@@ -1114,6 +1147,32 @@ ssh root@<centos> 'git clone https://github.com/sunql/QA.git /opt/qa && cd /opt/
 ```bash
 ssh root@<centos> 'cd /opt/qa && cp docker/.env.example docker/.env && chmod 600 docker/.env'
 ```
+
+> ⚠️ **必须改 3 个值，否则 backend 在 CentOS 上够不到 Ollama。**
+>
+> `.env.example` 里这 3 个都指向 `host.docker.internal`：
+>
+> | 键 | 模板值 | CentOS 上改成 |
+> |---|---|---|
+> | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | `http://ollama:11434` |
+> | `EMBEDDING_API_BASE` | `http://host.docker.internal:11434/v1` | `http://ollama:11434/v1` |
+> | `EMBEDDING_HOST_OVERRIDE` | `host.docker.internal` | `ollama` |
+>
+> 原因（已实跑 `docker compose config` 核实）：backend 确实有
+> `extra_hosts: host.docker.internal=host-gateway`，所以那个**主机名在容器里解析得开**；
+> 但 Task 3 的 overlay **刻意不给 ollama 映射宿主端口**，于是宿主 11434 上没有任何东西
+> 在听 ⇒ 域名解析成功、连接被拒。这条坑很隐蔽：名字能解析会让人以为通了。
+>
+> `ollama` 是 compose 网络里的服务名，backend 与它同在 `default` 网络，直接可达 ——
+> 这也正是 overlay「不映射宿主端口」这个设计的用意。
+>
+> ```bash
+> # ⚠️ sed 表达式写成**一行**，不要在引号内用 `\` 折行 —— 折行后的续行缩进会被
+> # 吃进表达式，实测报 `bad flag in substitute command`。
+> ssh root@<centos> 'cd /opt/qa/docker && sed -i -e "s#^OLLAMA_BASE_URL=.*#OLLAMA_BASE_URL=http://ollama:11434#" -e "s#^EMBEDDING_API_BASE=.*#EMBEDDING_API_BASE=http://ollama:11434/v1#" -e "s#^EMBEDDING_HOST_OVERRIDE=.*#EMBEDDING_HOST_OVERRIDE=ollama#" .env'
+> ssh root@<centos> 'grep -E "^(OLLAMA_BASE_URL|EMBEDDING_API_BASE|EMBEDDING_HOST_OVERRIDE)=" /opt/qa/docker/.env'
+> ```
+> **门禁**：回显 3 行，且值分别是 `http://ollama:11434`、`http://ollama:11434/v1`、`ollama`。
 
 - [ ] **Step 3: 起中间件（不起 backend）**
 
@@ -1905,7 +1964,12 @@ curl -s -X POST http://localhost:8000/api/v1/embedding-providers \
 REMOTE
 ```
 要点：
-- `baseUrl` **故意写 `localhost`** —— resolver 按 `EMBEDDING_HOST_OVERRIDE` 改写成 `host.docker.internal`（`embedding_client.py:35-52`），与 macOS 上同一套机制
+- `baseUrl` **故意写 `localhost`** —— resolver 按 `EMBEDDING_HOST_OVERRIDE` 把它改写成
+  CentOS 上可达的地址（`embedding_client.py:_applyHostOverride`，只改写 loopback 主机）。
+  **在 CentOS 上该变量的值是 `ollama`**（Task 6 Step 2 已改），所以这条 `localhost`
+  最终会变成 `http://ollama:11434/v1` —— 同一套代码，Mac 上是 `host.docker.internal`，
+  CentOS 上是 compose 服务名。**若这里照抄成 `host.docker.internal`，
+  Step 4 的维度门禁必挂**，而且失败原因（连接被拒）看着像模型没就绪，其实是地址不对。
 - **走 CRUD API，不要手改库** —— 手改会绕过缓存失效
 - 走 API 不违反「禁止后端覆盖用户 modelId」铁律：这是人在显式操作，不是系统按内容改派
 
@@ -2055,8 +2119,21 @@ REMOTE
 
 对话模型选型**不在本计划范围**（spec §7.5）——用户在管理页自行配置。本步骤只保证通道就绪：
 ```bash
-ssh root@<centos> 'docker exec qa-ollama ollama list'   # 确认目标模型已离线就位
+# 门禁 A：模型已离线就位（容器活着）
+ssh root@<centos> 'docker exec qa-ollama ollama list'   # 确认目标模型在列
+
+# 门禁 B：**backend 容器真的连得到** —— 这才是对话能不能用的那条
+ssh root@<centos> 'docker exec qa-backend python -c "
+import urllib.request, json
+r = urllib.request.urlopen(\"http://ollama:11434/api/tags\", timeout=5)
+print(json.load(r))"'
 ```
+> ⚠️ **门禁 A 通过不等于通道就绪。** `ollama list` 是在 ollama 容器**内部**执行的，
+> 它只证明容器活着，不证明 backend 够得着。Task 6 Step 2 那 3 个 `.env` 值如果没改
+> （仍指 `host.docker.internal`，而 overlay 又不映射宿主端口），A 会绿、B 必挂 ——
+> 而且 B 的报错是连接被拒，看起来像「模型没拉下来」，会被误诊到 Ollama 安装上。
+> B 才是这一步真正要验的东西。
+>
 > 内网不可达 `api.deepseek.com` / `api.minimax.cn`。迁移过来的 3 条激活 LLM 配置**全部不可用**，需全部重新指向本地 Ollama。
 
 ---

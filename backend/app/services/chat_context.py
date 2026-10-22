@@ -231,14 +231,31 @@ _STATE_HISTORY_FIELD_LIMIT_DEFAULT = 500
 
 
 def _stateRowRank(row: SessionQueryState) -> tuple[bool, int, Any, int]:
-    """`_selectStateRow` 的排序键，元组比较，越大越优先。
+    """`_selectStateRow` 的排序键，元组比较，`max()` 取最大者。
 
-    M5：is_stub=False 作为第一键（False < True in bool），max() 取出的行
-    必然是 is_stub=False 的 real 行。stub 行即使 scope 完整也不会被选中。
+    ⚠️ 第一键 `row.is_stub` 的方向容易读反，这里写清楚**实际行为**：
+
+    bool 在 Python 里 `True=1 > False=0`，所以 `max()` 优先选中的
+    **是 is_stub=True 的 stub 行**，不是 real 行。此前本函数、
+    `_loadQueryState`、本仓测试模块 docstring、`models.py` 类注释四处
+    都写成「is_stub=False 为第一键 ⇒ max 选 real 行」，与代码相反。
+
+    这个方向不是笔误，是承重的，分两侧看：
+
+    - **读侧无影响**：`_loadQueryState` 在 SQL 层先排 `is_stub == False`，
+      stub 行根本到不了这里，第一键在读路径上是死的。
+    - **写侧是关键**：`_saveQueryState` 刻意不排 is_stub（否则匿名写每轮都
+      INSERT 新行，stub 行无界增长），且 `userId is None` 时**不加 user 过滤**
+      —— 于是同一 session 下「user 42 的 real 行」与「匿名 stub 行」会同时
+      进入候选集。此时优先选中 stub 行，正是匿名写不劫持真实用户上下文的原因。
+      若照旧注释的字面说法把键改成 `not is_stub`，匿名写就会改为对别人的 real
+      行 `turn_count += 1` 并覆写 last_question（跨用户污染，与 M4 同类）。
+
+    方向由 `test_chat_query_state_is_stub.py` 第 ⑥ 条反向断言钉住。
     其次按 scope 完整度 → 更新时间 → 主键，与原有策略一致。
     """
     return (
-        # ① is_stub：real 行（False）优先于 stub 行（True）
+        # ① is_stub：stub 行（True=1）优先于 real 行（False=0）—— 见 docstring
         row.is_stub,
         # ② scope 完整度：两个维度都非 NULL 的行优先
         (row.user_id is not None) + (row.datasource_id is not None),
@@ -563,8 +580,9 @@ class ContextMixin:
         任一 None 不过滤；既有 17+ 调用点不传新参数时行为不变。
 
         M5：读侧追加 `is_stub=False` 过滤，排除 stub 模式写入的行。
-        即使 stub 行存在，也不会被读到。`_stateRowRank` 的第一排序键
-        `is_stub` 作为纵深防御，确保 real 行永远优先于 stub 行。
+        即使 stub 行存在，也不会被读到 —— 是这条 SQL 在兜底，不是排序键：
+        `_stateRowRank` 的第一键 `is_stub` 在读路径上是**反向的**（`max()` 实际
+        优先选 stub 行），只是 stub 行到不了那里。详见 `_stateRowRank` docstring。
 
         F1：调用方给全 scope 时唯一约束（uq_session_query_state_scope）保证最多一行，
         直接 `scalar_one_or_none()` 是安全的；但给**部分**或**不给** scope 时，

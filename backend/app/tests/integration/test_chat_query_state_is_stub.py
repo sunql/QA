@@ -5,8 +5,13 @@
 但仍会错误返回（多行并存时取 max），导致后续逻辑读到 NULL user_id/datasource_id。
 
 修复：新增 `is_stub` 列，写侧在 userId is None 时标记 is_stub=True；
-读侧追加 `WHERE is_stub = false`。`_stateRowRank` 将 `is_stub=False` 作为第一
-排序键（False < True in tuple，max 选最大即 is_stub=False 的行）。
+读侧追加 `WHERE is_stub = false`（**真正兜底的是这条 SQL**）。
+
+⚠️ `_stateRowRank` 的第一排序键是 `row.is_stub`，而 `max()` 取最大者，
+bool 里 `True=1 > False=0` ⇒ 排序实际优先选 **stub 行**。此前本文件的模块
+docstring 把方向写反了。写侧刻意不排 is_stub（否则匿名写每轮 INSERT 新行），
+所以这个「反方向」正承重：匿名写不会劫持同 session 下真实用户的行。详见
+`_stateRowRank` docstring，方向由第 ⑥ 条钉住。
 
 测试设计：
   ① _saveQueryState(userId=None) → is_stub=True
@@ -15,6 +20,7 @@
   ④ existing-branch 更新：userId=None → userId=1 时 is_stub 翻为 False
   ④b existing-branch stub→stub：连续两次 stub 走真路径 is_stub 保持 True
   ⑤ 反向断言：同一 session 同时有 stub 行 + real 行 → 读回 real 行
+  ⑥ 反向断言：匿名写不得覆写同 session 下真实用户的行（钉住排序键方向）
 
 迁移 round-trip（upgrade/downgrade）由 alembic 内置覆盖，本文件不重复造。
 fixtures 复用 test_chat_api.py（_seed / _installFakes / _PipelineLlm / _FakeAdapter / _RouterFor）。
@@ -305,3 +311,92 @@ class TestQueryStateIsStub:
             "返回的行应有非 NULL user_id（real 行），实际为 NULL；"
             "stub 行未被正确排除"
         )
+
+    async def test_anonymous_write_never_touches_a_real_users_row(
+        self, dbSession
+    ) -> None:
+        """⑥ 反向断言：匿名写不得覆写同 session 下**别的真实用户**的那一行。
+
+        `_saveQueryState` 在 `userId is None` 时**不加 user 过滤**，所以同一 session
+        下「user 42 的 real 行」与「匿名 stub 行」会同时进入 `_selectStateRow` 的
+        候选集。此时 `max()` 取 `is_stub=True`（bool True=1 > False=0）恰好选中
+        stub 行 —— 这不是笔误，是承重的。
+
+        读侧另有 SQL 层 `is_stub == False` 过滤兜底（`_loadQueryState` :581），
+        写侧**没有**这层：候选集里 real 行与 stub 行并存时，全靠这个排序键把
+        匿名写导向 stub 行。若照 docstring 的字面说法把排序键「修好」成
+        `not is_stub`，匿名写就会改为 `turn_count += 1` 并覆写真实用户的
+        last_question —— 跨用户上下文污染，与 M4 要防的洞是同一个。
+
+        ⑤ 守的是读侧且被 SQL 过滤提前兜住，钉不住这个方向；方向由本条钉。
+
+        **本条只覆盖「两行并存」的情形，是部分保护**：若 session 下只有别人的
+        real 行、没有 stub 行，匿名写仍会选中那一行（候选集里没有更「匿名」的
+        可选）。收紧它需要在 `userId is None` 分支再加一道
+        `user_id IS NULL` 过滤，属于超出本批范围的写侧口径变更，未在此改动。
+        """
+        from app.services.chat_context import ContextMixin
+
+        _REAL_USER_ID = 42
+        _DS_ID = 4242
+        mixin = ContextMixin()
+
+        dbSession.add(
+            SessionQueryState(
+                session_id="rev-s2",
+                user_id=_REAL_USER_ID,
+                datasource_id=_DS_ID,
+                is_stub=False,
+                last_question="真实用户自己的上一轮",
+                turn_count=4,
+            )
+        )
+        dbSession.add(
+            SessionQueryState(
+                session_id="rev-s2",
+                user_id=None,
+                datasource_id=_DS_ID,
+                is_stub=True,
+                last_question="匿名桶的上一轮",
+                turn_count=2,
+            )
+        )
+        await dbSession.commit()
+
+        # 匿名写：不带 user_id 过滤，real 行与 stub 行同时候选
+        await mixin._saveQueryState(
+            dbSession,
+            "rev-s2",
+            question="匿名的新问题",
+            plan=None,
+            sql="SELECT 1",
+            resultColumns=[],
+            userId=None,
+            datasourceId=_DS_ID,
+        )
+
+        rows = {
+            r.user_id: r
+            for r in (
+                await dbSession.execute(
+                    select(SessionQueryState).where(
+                        SessionQueryState.session_id == "rev-s2"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        }
+        real = rows[_REAL_USER_ID]
+        stub = rows[None]
+
+        assert real.turn_count == 4, (
+            f"真实用户的行 turn_count 被匿名写改成 {real.turn_count}（原 4）；"
+            "排序键方向被翻成 not is_stub ⇒ 匿名写选中了别人的 real 行"
+        )
+        assert real.last_question == "真实用户自己的上一轮", (
+            f"真实用户的行 last_question 被覆写成 {real.last_question!r}；"
+            "匿名写跨用户污染了上下文"
+        )
+        assert stub.turn_count == 3, f"匿名行应累计到第 3 轮，实际 {stub.turn_count}"
+        assert stub.last_question == "匿名的新问题"

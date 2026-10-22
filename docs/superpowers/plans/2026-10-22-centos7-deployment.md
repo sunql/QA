@@ -1488,6 +1488,19 @@ echo "exit=$?"
 > 不一致时**不要**手工比对明文 —— 改用脚本的逐项定位，或直接重新从源端 `docker/.env` 复制那一个键。
 > ⚠️ 不要用 `git show` 取值：`docker/.env` 已 gitignore（`.gitignore:46`），那只会拿到仓库里的占位符。
 
+> 📌 **本 Task 排在 Task 6（起容器）之后，与 spec §7.1「全部在 P4 起容器之前」不一致。**
+> 排在这里是因为脚本本身就是 Task 7 才写出来的，Task 6 时它还不存在。
+> 已核实**这个偏离不造成实际损害**：
+> - Task 6 Step 3 起的 8 个服务里没有 backend，Fernet 只被 backend 侧
+>   （`datasource_service` / `embedding_provider_service`）使用 ⇒ 此时还没加密过任何东西；
+> - 唯一会跑 SQL 的 `./init` 挂载在 `mysql-demo` 上，而 Task 3 的 overlay 已经把它去掉了，
+>   且 `docker/init/` 目录本身是空的 ⇒ 没有 init 脚本会加密。
+>
+> 真正不可逆的第一个时点是 **Task 10 启动 backend**，它在 Task 7 之后。
+> ⚠️ 因此这条依赖不要倒过来：**Task 10 之前 Task 7 必须已经过了**。
+> 如果哪天有人调整任务顺序，把 Task 7 挪到 Task 10 之后，就等于把
+> 「用错的主密钥写进去一批新密文」变成了可随时发生的事故。
+
 ---
 
 ## Task 8: 源端数据导出与自检

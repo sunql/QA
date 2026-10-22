@@ -517,6 +517,7 @@ ssh root@<centos> 'findmnt -no FSTYPE -T /var/lib/docker; xfs_info /var/lib/dock
 
 **Files:**
 - Create: `docker/docker-compose.centos.yml`
+- Test: `backend/app/tests/unit/test_compose_centos_overlay.py`
 
 **Interfaces:**
 - Consumes: 无

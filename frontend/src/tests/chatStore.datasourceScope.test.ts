@@ -56,8 +56,12 @@ describe("chatStore datasource scope", () => {
     expect(result.current.sessionId).not.toBe(oldSid);
   });
 
-  // sendMessage:547 是 `if (loading) return`。切源不清 loading ⇒ 在途请求未回前
-  // store 完全不接受新提问；不清 error ⇒ 上一个数据源的错误横幅跟着切过来。
+  // 切源要把 loading / error / interrupted / currentAssistantMessageId 一并清掉，
+  // 新数据源才能立刻提问，旧数据源的错误横幅也不会跟着切过来。
+  //
+  // 代价与配套：清掉之后在途流的收尾写入会打到新会话的消息上，所以必须同时有
+  // streamGen 代次锁 + chatStore.datasourceSwitchStream.test.ts 的三条守卫。
+  // 这里的断言只管「新源可用」，不管「新源不被旧流污染」。
   it("setDatasourceId 清 loading / error / interrupted，使新数据源可立即提问", () => {
     useChatStore.setState({
       loading: true,
@@ -118,6 +122,10 @@ describe("chatStore datasource scope", () => {
       useChatStore.getState().setDatasourceId(2);
     });
 
-    expect(useChatStore.getState().sessions).toEqual([{ id: "s1" }]);
+    const s = useChatStore.getState();
+    expect(s.sessions).toEqual([{ id: "s1" }]);
+    // sessionsError 一并断言：与 sessions 同属「历史面板」状态，两者要么都留
+    // 要么都清。只断言其一的话，另一侧被顺手清掉不会有任何用例报警。
+    expect(s.sessionsError).toBe("旧告警");
   });
 });

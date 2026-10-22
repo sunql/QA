@@ -614,9 +614,10 @@ def test_overlay_does_not_touch_other_services(overlay):
 #     "pyyaml>=6.0.1",
 ```
 
-改完的 `[project.optional-dependencies]` 段落应为：
+⚠️ 本文件里 `[project.optional-dependencies]` 下**已经有 `ml` 这一组**（`transformers>=4.40.0`）。
+只往 `dev` 里加一行，**不要动 `ml`**。改完的 `dev` 段落应为（原样替换，只多一行）：
+
 ```toml
-[project.optional-dependencies]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.23.0",
@@ -628,6 +629,9 @@ dev = [
     "aiosqlite>=0.20.0",
 ]
 ```
+
+> Task 1 已在本文件加过一段 `[tool.ruff.lint.per-file-ignores]`（针对
+> `scripts/preflight_centos.py` 的 3.6 兼容规则）。**保留它**，别当成残留删掉。
 
 - [ ] **Step 3: 跑测试确认失败**
 

@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import IntentType
@@ -614,7 +614,30 @@ class ContextMixin:
         行可能不是同一行（追问继承的就是别人的上一轮）。
         """
         # P0-3：按三元查 existing（不传新参数时退化为按 session_id 唯一）
-        stmt = select(SessionQueryState).where(SessionQueryState.session_id == sessionId)
+        stmt = select(SessionQueryState).where(
+            SessionQueryState.session_id == sessionId,
+            # M4：与 `_loadQueryState` 对齐，排除 user_id=-1 墓碑行。
+            # 本方法自己写着契约「查 existing 的那一步与 _loadQueryState 共用
+            # _selectStateRow，读和找要更新的那一行必须是同一个口径」，而读侧
+            # (:579-583) 排除了墓碑、写侧原先没排 —— userId is None（匿名写）
+            # 且 session_id 撞上遗留桶时，墓碑会进候选集并被 existing 分支
+            # `turn_count += 1` 覆写。墓碑在 `_stateRowRank` 眼里还是"完整行"：
+            # -1 is not None 记作 scope 完整，而 0129 的 is_stub backfill 跑在
+            # 0131 造出 -1 行之前，墓碑保持 is_stub=False。
+            # 排不到候选就走 INSERT 分支，本轮状态落新行 —— 这才是对的。
+            #
+            # 注意必须写成 `IS NULL OR != -1` 而不能直接 `!= -1`：SQL 三值逻辑下
+            # `NULL != -1` 求值为 NULL（非真），会把 user_id IS NULL 的 stub 行
+            # 一并排掉，匿名写就再也命中不了 existing 分支、每轮都 INSERT。
+            # 读侧 (:582) 可以直接写 `!= -1`，因为 stub 行已被 is_stub=False
+            # 排过一次，写侧没有这层双保险。SQL NULL 之间互不相等，
+            # uq_session_query_state_scope 也拦不住 ⇒ 同一 session 无界增长。
+            # 由 test_chat_query_state_tombstone_write.py 第 ② 条反向断言钉住。
+            or_(
+                SessionQueryState.user_id.is_(None),
+                SessionQueryState.user_id != -1,
+            ),
+        )
         if userId is not None:
             stmt = stmt.where(SessionQueryState.user_id == userId)
         if datasourceId is not None:

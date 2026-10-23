@@ -96,9 +96,30 @@ def test_checkAll_tolerates_upward_growth_on_growing_tables():
     assert checkAll(grew) == []
 
 
-def test_checkAll_still_flags_upward_growth_on_static_tables():
-    """非 GROWING 表多出数据是真异常（多半是 seed 跑过了），不能一起放过。"""
-    assert len(checkAll(dict(EXPECTED, audit_log=17101))) == 1
+def test_checkAll_passes_static_tables_that_grew_after_the_baseline():
+    """静态表「比基线多」是正常的，必须放过。
+
+    基线是 dump **之前**量的，dump 的快照更晚 ⇒ 恢复出来的行数 >= 基线，
+    多出来的部分是导出期间新写入的。判成「不一致」就是在好环境上报迁移失败。
+    反向陷阱：写成 `got != want`，一次正确的恢复永远红。
+    """
+    assert checkAll(dict(EXPECTED, audit_log=17101, evidence=1800)) == []
+
+
+def test_checkAll_fails_static_table_below_the_baseline():
+    """静态表「比基线少」才是真丢数据 —— 这个方向不需要容差，精确检测。"""
+    failures = checkAll(dict(EXPECTED, audit_log=EXPECTED["audit_log"] - 1))
+    assert len(failures) == 1
+    assert failures[0]["table"] == "audit_log"
+
+
+def test_growing_slack_is_unchanged_when_a_baseline_is_used():
+    """GROWING 的语义一个字不动：向上放过、向下在 slack 内放过、超出才报。"""
+    baseline = dict(EXPECTED, user_sessions=EXPECTED["user_sessions"] + 10)
+    withinSlack = dict(baseline, user_sessions=EXPECTED["user_sessions"] - 20)
+    assert checkAll(withinSlack, expect=baseline, floor=EXPECTED) == []
+    beyondSlack = dict(baseline, user_sessions=1)
+    assert len(checkAll(beyondSlack, expect=baseline, floor=EXPECTED)) == 1
 
 
 def test_checkAll_passes_on_exact_match():
@@ -472,3 +493,73 @@ def test_main_exit_code_two_on_unknown_flag():
 def test_main_exit_code_two_on_baseline_without_value():
     from scripts.verify_migration import main
     assert main(["prog", "--dsn", FAKE_DSN, "--baseline"]) == 2
+
+
+# ── I-1：附录 A 的下限「接没接上」此前没有任何测试 ────────────────────────
+# checkAll 内部的 floor 逻辑本身有测试，但 `main` 到底传没传 floor=EXPECTED
+# 一条测试都没有。把 verify_migration.py:286 改成 checkAll(actual, expect=baseline)
+# （或更危险的 floor=baseline）后，45 条测试全绿 —— 见本轮变异记录。
+# 所以下面这几条必须在 **main 层面**钉住接线，checkAll 层的单测在两种接线
+# 下都同样通过，钉不住。
+
+def test_main_reports_below_appendix_floor_as_floor_not_drift(monkeypatch, tmp_path, capsys):
+    """附录 A 的下限必须在 main 上真的接上：低于下限要报「低于附录 A 下限」。"""
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED, audit_log=500)          # 基线本身已低于附录 A 的 17100
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(dict(baseline)))
+    assert main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)]) == 1
+    out = capsys.readouterr().out
+    assert "audit_log" in out
+    assert "低于附录 A 下限" in out
+
+
+def test_main_keeps_growing_slack_when_baseline_is_used(monkeypatch, tmp_path, capsys):
+    """下限是附录 A（不是基线），且 GROWING slack 在传基线时仍然生效。"""
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED, user_sessions=EXPECTED["user_sessions"] + 1)   # 545
+    actual = dict(baseline, user_sessions=EXPECTED["user_sessions"])          # 544
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(actual))
+    rc = main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)])
+    assert rc == 0, capsys.readouterr().out
+
+
+# ── I-3：静态表的非对称语义，main 层面钉住 ────────────────────────────────
+# 下面两条合起来锁死方向：多了要过，少了要红。
+# 方向写反（`got > want` 才过 / `got != want` 才红）时至少一条会红。
+
+def test_main_passes_when_static_tables_come_back_above_baseline(monkeypatch, tmp_path, capsys):
+    """dump 的快照比计数晚 ⇒ 恢复出来的只多不少。这是正常路径，必须绿。"""
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED, audit_log=17101, evidence=1738, multi_step_step=30)
+    restored = dict(baseline, audit_log=17105, evidence=1740, multi_step_step=31)
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(restored))
+    rc = main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)])
+    assert rc == 0, capsys.readouterr().out
+
+
+def test_main_fails_when_static_table_comes_back_below_baseline(monkeypatch, tmp_path, capsys):
+    """少了才是丢数据。基线早于 dump ⇒ 这个方向是精确检测，不需要容差。"""
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED, audit_log=17101)
+    monkeypatch.setattr("scripts.verify_migration._queryAll",
+                        _asyncReturning(dict(baseline, audit_log=17090)))
+    rc = main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)])
+    assert rc == 1
+    assert "audit_log" in capsys.readouterr().out
+
+
+def test_fallback_without_baseline_lets_drifted_static_tables_pass(monkeypatch, capsys):
+    """回落路径（目标是 2026-10-22 的附录 A）现在对静态表基本恒过。
+
+    这不是好事，是「不再误报」的代价：任何现库都比那份快照新，所以
+    「不低于」几乎必然成立。这条测试把这个事实钉住，免得有人把回落
+    路径当成「还在严格核对」来依赖。告警里必须说清楚这一点。
+    """
+    from scripts.verify_migration import main
+    drifted = dict(EXPECTED, audit_log=17101, evidence=1738, multi_step_step=30)
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(drifted))
+    rc = main(["prog", "--dsn", FAKE_DSN])
+    captured = capsys.readouterr()
+    assert rc == 0, captured.out
+    # 告警必须承认「这条路径几乎恒过」，否则回落会被当成真门禁
+    assert "恒过" in captured.err or "低于" in captured.err

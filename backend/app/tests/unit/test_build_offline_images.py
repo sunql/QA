@@ -174,3 +174,19 @@ def test_script_saves_and_checksums():
         "images.digests.txt 必须有行数硬断言，否则空文件会让下游比对恒过"
     assert int(re.search(r'\[ "\$n" -ge (\d+) \]', code).group(1)) >= 10, \
         "行数下限太低，空清单照样能过"
+    # ⚠️ digests 清单必须**只记打包的那几个**，不能全量 `docker images`：
+    # Step 5 的 `comm -13` 语义是「在源端记录里、却不在 CentOS 上」⇒ 报 ID 不符。
+    # 联网构建机跑着开发栈，必然有与转移包无关的镜像；全量记下来 ⇒ 门禁 2 必然假红。
+    assert ".packaged.txt" in code, "必须先按打包清单过滤，不能全量记 docker images"
+    awkProg = re.search(r"awk '([^']*)'", code)
+    assert awkProg, "必须用 awk 按打包清单过滤"
+    assert "($1 in p)" in awkProg.group(1), "awk 过滤条件必须保留「在打包清单里」这一侧"
+    assert "!($1 in p)" not in awkProg.group(1), "awk 过滤条件写反了就变成记别人的镜像"
+    # $BUILT 是空格分隔的**一个字符串**：zsh 默认不拆未加引号的参数展开，
+    # 靠单词拆分在 zsh 下会把两个镜像名写进同一行 ⇒ .packaged.txt 少一项 ⇒ ABORT。
+    assert "tr ' ' '\\n'" in code, "$BUILT 必须用 tr 拆行，不能靠 shell 单词拆分"
+    # ⚠️ `config --images` 给的是**裸名**（"qa-system-backend"），而 `docker images`
+    # 给的是**带 tag** 的（"qa-system-backend:latest"）—— 不补 tag 就永远匹配不上，
+    # 本地构建的那两个会被过滤掉、行数断言直接 ABORT（实测 8 行 / 期望 11）。
+    assert re.search(r"tr ' ' '\\n'.*:latest", code), \
+        "裸名必须补 :latest 才能和 docker images 的 repo:tag 对上"

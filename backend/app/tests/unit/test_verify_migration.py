@@ -534,6 +534,26 @@ def test_main_keeps_growing_slack_when_baseline_is_used(monkeypatch, tmp_path, c
     assert rc == 0, capsys.readouterr().out
 
 
+def test_main_compares_against_the_baseline_not_appendix_a(monkeypatch, tmp_path, capsys):
+    """目标是基线，不是附录 A —— 这条是两者唯一的区分点。
+
+    为什么需要它：把 `main` 里的 `checkAll(actual, expect=baseline, floor=EXPECTED)`
+    换成 `checkAll(actual)`（收了 --baseline 却拿附录 A 当目标）时，其余测试
+    全部照样绿 —— 因为它们的基线值与 EXPECTED 相同或更高，两种目标结果一致。
+    这里让基线 17500（源库在附录 A 之后又长了）、恢复出来 17200：
+      目标=基线   → 17200 < 17500 → 丢数据，红
+      目标=附录A  → 17200 >= 17100 → 放过，绿
+    这个变异是被 mutation harness 抓出来的，不是想出来的。
+    """
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED, audit_log=17500)
+    monkeypatch.setattr("scripts.verify_migration._queryAll",
+                        _asyncReturning(dict(baseline, audit_log=17200)))
+    rc = main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)])
+    assert rc == 1
+    assert "audit_log" in capsys.readouterr().out
+
+
 # ── I-3：静态表的非对称语义，main 层面钉住 ────────────────────────────────
 # 下面两条合起来锁死方向：多了要过，少了要红。
 # 方向写反（`got > want` 才过 / `got != want` 才红）时至少一条会红。

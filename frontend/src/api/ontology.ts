@@ -1,6 +1,6 @@
 import axios from "axios";
 import { httpClient, showMessageError } from "./client";
-import { API_BASE_URL } from "../config";
+import { API_BASE_URL, LONG_RUNNING_TIMEOUT_MS } from "../config";
 import { authHeaders } from "./authHeaders";
 import { i18n } from "../i18n";
 import type {
@@ -180,7 +180,11 @@ export async function deleteSemanticRelation(id: number): Promise<void> {
 
 /** 一键补关系：join 全量入图 + X3 外键补 ref_class_id（幂等修复）。 */
 export async function backfillRelations(): Promise<RelationBackfillResult> {
-  const res = await httpClient.post<RelationBackfillResult>(`${BASE}/relations/backfill`);
+  const res = await httpClient.post<RelationBackfillResult>(
+    `${BASE}/relations/backfill`,
+    undefined,
+    { timeout: LONG_RUNNING_TIMEOUT_MS }
+  );
   return res.data;
 }
 
@@ -188,7 +192,9 @@ export async function backfillRelations(): Promise<RelationBackfillResult> {
 
 /** POST /ontology/batch — 执行：syncGraph / inferJoins / applyManifest（任选其一或多个）。 */
 export async function runOntologyBatch(payload: BatchRelationRequest): Promise<BatchRelationResult> {
-  const res = await httpClient.post<BatchRelationResult>(`${BASE}/batch`, payload);
+  const res = await httpClient.post<BatchRelationResult>(`${BASE}/batch`, payload, {
+    timeout: LONG_RUNNING_TIMEOUT_MS,
+  });
   return res.data;
 }
 
@@ -196,7 +202,9 @@ export async function runOntologyBatch(payload: BatchRelationRequest): Promise<B
 export async function previewOntologyBatch(
   payload: BatchRelationRequest
 ): Promise<BatchRelationResult> {
-  const res = await httpClient.post<BatchRelationResult>(`${BASE}/batch/preview`, payload);
+  const res = await httpClient.post<BatchRelationResult>(`${BASE}/batch/preview`, payload, {
+    timeout: LONG_RUNNING_TIMEOUT_MS,
+  });
   return res.data;
 }
 
@@ -284,7 +292,9 @@ export async function syncMissingEmbeddings(): Promise<EmbeddingSyncMissingResul
 /** 图谱对账：以 PG 为真源补齐 Neo4j 缺失的类/属性节点与边，返回摘要。 */
 export async function syncMissingGraph(): Promise<GraphSyncMissingResult> {
   const res = await httpClient.post<GraphSyncMissingResult>(
-    `${BASE}/graph/sync-missing`
+    `${BASE}/graph/sync-missing`,
+    undefined,
+    { timeout: LONG_RUNNING_TIMEOUT_MS }
   );
   return res.data;
 }

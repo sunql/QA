@@ -1836,6 +1836,12 @@ find pg neo4j objects mysql rowcounts.baseline.json -type f \
 
 > `pg_restore --list` 只验证**目录结构**可解析，不校验数据块。传输损坏要靠 CentOS 侧真实恢复时报错才暴露 —— 那正是 Task 9 逐步验证存在的意义。
 
+> ⚠️ **没有任何东西把 `rowcounts.baseline.json` 和 `pg/qa_metadata_*.dump` 配成一对。**
+> manifest 各自单独校验和，坏掉的能查出来，**配错**查不出来。而非对称规则下
+> 「拿旧基线 + 新 dump」会静默通过（向上永远放过），旧的相等判据反而会把它顶出来。
+> 概率低（Step 1 两者连着产出），但排查前顺手对一眼：`rowcounts.baseline.json`
+> 里的 `measured_at` 日期，应当和 dump 文件名里的日期是**同一次导出**。
+
 - [ ] **Step 3: 传过去并复核校验和**
 
 ```bash
@@ -1904,17 +1910,20 @@ docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc \
   "select version_num from alembic_version;"          # 期望 0132
 # ⚠️ **不写死行数。** 附录 A 是 2026-10-22 的一次快照，源库一直在被写入：
 # audit_log / evidence / multi_step_step 的实测值已经与它不一致，照附录 A
-# 核对会把一次**正确的恢复**判成失败（静态表没有 slack，17101 对 17100 就是红）。
+# ⚠️ 向上漂移**不会**误报：静态表只判「不低于基线」，17101 ≥ 17100 是绿的。
+# 拿附录 A 当**目标**丢的是向下的精度（目标钉在 17100 时少一行照样过），
+# 拿它当**下限**才是稳的 —— 脚本里下限绝对生效，优先级在 slack 之前。
 # 基线以 Task 8 Step 1 随包传过来的 rowcounts.baseline.json 为准 ——
 # Task 10 会用脚本严格核对，这里只做一眼确认。
 # ⚠️ 取值注意：jsonb 输出是 `{"audit_log": 17101}` —— **冒号后仍有空格**
 # （`json_build_object` 更糟，冒号前后都有空格）。所以下面用 `: *[0-9]*`，
 # 且第二段用 `[0-9][0-9]*` 而不是 `[0-9]*`：后者能匹配空串，取出来是空的。
-# ⚠️ 引号：整段被外层的单引号包着，里面**不能再出现单引号**。一出现外层引号
-# 就提前闭合：zsh 整块以 no matches found 中止，**pg_restore 根本不会跑**，
-# 运维看到的是一个 glob 错误而不是一次恢复；bash 则把模式剥成裸的
-# [0-9][0-9]* 交给远端 glob。取数那行用本计划约定的
-# 「闭合引号 - 双引号包一个单引号 - 重开引号」嵌了一层，与 Step 3 同一写法。
+# ⚠️ 引号：整段被外层的单引号包着，里面**不能出现未转义的单引号**。
+# 一个未转义的单引号就提前闭合外层引号：zsh 整块以 no matches found 中止，
+# **pg_restore 根本不会跑**，运维看到的是一个 glob 错误而不是一次恢复；
+# bash 则把模式剥成裸的 [0-9][0-9]* 交给远端 glob。
+# 要写字面单引号，就按本计划约定的「闭合引号 - 双引号包一个单引号 -
+# 重开引号」嵌一层，取数那行就是这么写的，与 Step 3 同一写法。
 for t in audit_log ontology_class; do
   live=$(docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc \
     "select count(*) from $t")
@@ -1927,8 +1936,11 @@ done'
 ```
 > **引号约定（这一块特有，改动后两个 shell 都要实跑）**：整段被
 > `ssh root@<centos> '…'` 的单引号包着，远端 shell 收到的就是这段文本的逐字拷贝。
-> 里面**不能出现任何单引号**，否则外层引号提前闭合 —— 后果见块内注释。
-> 嵌一层的写法与 Step 3 的 cypher-shell 同一约定（文本形如 `'"'"'`）。
+> 里面**不能出现未转义的单引号** —— 出现一个，外层引号就提前闭合，后果见块内注释。
+> 要写字面单引号，用本计划约定的嵌法（闭合引号 → 双引号包一个单引号 → 重开引号，
+> 文本形如 `'"'"'`），与 Step 3 的 cypher-shell 同一写法。
+> ⚠️ 这里是「**未**转义」，不是「一个都不许有」：下面取值行里那几个单引号是转义过的。
+> 照字面把整行的单引号删掉，会**重新引入 I-2** —— zsh 整块中止，`pg_restore` 不跑。
 
 **门禁**：`version_num` = `0132`；两张表 `live >= baseline`（基线量在 dump 之前，
 所以「等于或更多」都正常，只有更少才是丢数据）。任一 ABORT → **停**，不要继续。
@@ -1981,9 +1993,13 @@ ssh root@<centos> 'docker run --rm -v qa-system_objects_data:/data \
 
 **Interfaces:**
 - Consumes: 导入后的 PG / Neo4j；Task 8 Step 1 产出的 `rowcounts.baseline.json`（导出时刻的实测 count(*)）
-- Produces: 退出码 0 = 全部对上；1 = 有偏差（逐项列出期望 vs 实际与**原因**）；2 = 用法错误；3 = 环境不可用（基线读不了 / 连不上库 / 查询失败）
+- Produces: 退出码 0 = 全部通过（都不低于判定阈值，**不是**与基线完全相等）；1 = 有偏差（逐项列出期望 vs 实际与**原因**）；2 = 用法错误；3 = 环境不可用（基线读不了 / 连不上库 / 查询失败）
 
-> 目标行数取自 `--baseline` 指向的基线（导出那一刻的实测值），不是 spec 附录 A 的快照。附录 A 只当**绝对下限**用：源库一直在被写入，静态表的实测值已经与附录 A 不一致（audit_log 17100→17101、evidence 1729→1738、multi_step_step 27→30），拿它当目标会把一次正确的恢复判成迁移失败。
+> 目标行数取自 `--baseline` 指向的基线（导出那一刻的实测值），不是 spec 附录 A 的快照。附录 A 只当**绝对下限**用：源库一直在被写入，实测值已经比附录 A 高（audit_log 17100→17101、evidence 1729→1738、multi_step_step 27→30）。
+> ⚠️ 拿附录 A 当**目标**和拿它当**下限**不是一回事，别混。静态表只判「不低于」，
+> 所以向上漂移**不会**误报 —— 17101 ≥ 17100 是绿的，「静态表多一行就红」是 I-3
+> 裁定**之前**的旧结论，已经作废。真正丢掉的是向下的精度：目标钉死在 17100 时，
+> 相对真基线 17101 少一行（17100）照样通过。
 
 > **方向不对称：静态表只判「低于基线」，不判「等于基线」。**
 > 基线在 `pg_dump` **之前**量（Task 8 Step 1），dump 的快照更晚 ⇒ 恢复出来的
@@ -2181,7 +2197,12 @@ def test_main_exit_code_zero_when_all_match(monkeypatch, capsys):
     monkeypatch.setattr("scripts.verify_migration._queryAll",
                         _asyncReturning(dict(EXPECTED)))
     assert main(["prog", "--dsn", "postgresql://u:p@h:5432/db"]) == 0
-    assert "全部对上" in capsys.readouterr().out
+    # 「全部对上」是**相等**语义。非对称规则下静态表只判「不低于」，
+    # 比基线多 1 行也是绿的 —— 成功行若还写「对上」，运维会以为
+    # 行数被逐格核对过。措辞必须跟着语义走，所以正向、反向都断言。
+    out = capsys.readouterr().out
+    assert "全部通过 ✓" in out
+    assert "全部对上" not in out
 
 
 def test_main_exit_code_one_when_counts_drift(monkeypatch, capsys):
@@ -2326,7 +2347,11 @@ def test_main_exit_code_two_on_whitespace_only_dsn(monkeypatch):
 
 # ── I5：基线改成「导出那一刻实测的行数」 ──────────────────────────────────
 # 附录 A 是 2026-10-22 的一次快照：audit_log 已漂到 17101、evidence 1738、
-# multi_step_step 30（静态表 ⇒ 门禁必红）。基线文件由 Task 8 导出时产出。
+# multi_step_step 30。基线文件由 Task 8 导出时产出。
+# ⚠️ 别再写「静态表 ⇒ 门禁必红」：那是**相等**语义下的结论，已经作废。
+# 非对称规则下静态表只判「不低于」，17101 ≥ 17100 是绿的 —— 向上漂移不再误报，
+# 向下才精确到基线本身。几乎恒过的是**回落**路径（拿附录 A 当目标），
+# 不是静态表判据本身。
 
 
 def _writeBaseline(tmp_path, tables: dict, measuredAt: str = "2026-10-22T09:00:00+08:00",
@@ -2441,7 +2466,7 @@ def test_main_uses_baseline_target_end_to_end(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(dict(baseline)))
     assert main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)]) == 0
     captured = capsys.readouterr()
-    assert "全部对上" in captured.out
+    assert "全部通过 ✓" in captured.out
     assert "已知漂移" not in captured.err
 
 
@@ -2613,7 +2638,9 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'scripts.verify_migr
 真实 17100，差 3 个数量级。
 
 不传 `--baseline` 时回落到 spec 附录 A（2026-10-22 的一次快照）。**这份快照已知漂移**：
-源库一直在被写入，静态表的实测值已经与附录 A 不一致，照它核对会把正常环境判成迁移失败。
+源库一直在被写入，实测值已经比附录 A 高（audit_log 17100→17101、evidence 1729→1738、
+multi_step_step 27→30）。因为静态表只判「不低于」（见下），向上漂移**不会**误报；
+但向下只精确到附录 A 那个数：真基线是 17101 时 restored 17099 会红、17100 不会。
 所以回落会打一条醒目的告警；计划里的 Step 6 始终传 `--baseline`。
 
 传了 `--baseline` 时同时做两件事：
@@ -2632,7 +2659,7 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'scripts.verify_migr
     python -m scripts.verify_migration --dsn <DSN> --baseline backups/rowcounts.baseline.json
 
 退出码：
-    0 = 全部对上
+    0 = 全部通过（都不低于判定阈值；**不是**「与基线完全相等」）
     1 = 有偏差（逐项列出期望 vs 实际与原因）
     2 = 用法错误
     3 = 环境不可用（基线读不了 / 连不上库 / 查询失败，不是数据问题，别去查数据）
@@ -2807,8 +2834,11 @@ def renderReport(
 ) -> str:
     checked = len(EXPECTED) if tableCount is None else tableCount
     if not failures:
-        suffix = f"，目标：{targetLabel}" if targetLabel else ""
-        return f"全部对上 ✓（{checked} 张表{suffix}）"
+        # ⚠️ 措辞必须跟着语义走。静态表判「不低于基线」、会话类表判「不低于基线的
+        # 80%」，比基线**多**的行也放过 —— 所以既不能写「全部对上」（那是相等语义），
+        # 也不该写「都不低于导出基线」（会话类表在 slack 内可以比基线低）。
+        suffix = f"，目标：{targetLabel}" if targetLabel else "，目标：spec 附录 A 的回落快照"
+        return f"全部通过 ✓（{checked} 张表都不低于判定阈值{suffix}）"
     lines = [f"{len(failures)} 张表对不上："]
     for f in failures:
         reason = f.get("reason", REASON_DRIFT)
@@ -2862,10 +2892,12 @@ async def _queryAll(dsn: str) -> dict[str, int | None]:
 
 
 def _warnAppendixSnapshot() -> None:
-    """回落提醒。静默回落会让运维重新制造这次要消除的困惑。
+    """回落提醒。静默回落会让运维重新制造这次已消除的困惑。
 
-    还要说实话：静态表只判「不低于基线」，而附录 A 比任何现库都旧 ⇒ 这条
-    回落路径对静态表**几乎恒过**。它只能挡住数量级级别的丢失。别把它当门禁用。
+    还要说实话：静态表只判「不低于」，而附录 A 比任何现库都旧 ⇒ 这条回落路径
+    对静态表**几乎恒过**。实测灵敏度（audit_log，目标 17100）：restored 17099 /
+    17000 / 16000 全部报红；漏掉的只有「恰好落在附录 A 与真基线之间」的那一两行 ——
+    真基线是 17101 时 restored 17100 会绿。别把它当门禁用。
     """
     print(
         "=" * 70 + "\n"
@@ -2873,7 +2905,9 @@ def _warnAppendixSnapshot() -> None:
         "!! 这份快照已知漂移 —— 源库一直在被写入，audit_log / evidence /\n"
         "!! multi_step_step 的实测值已经与附录 A 不一致。\n"
         "!! 而且静态表只判「不低于基线」，附录 A 比任何现库都旧 ⇒\n"
-        "!! 这条回落路径对静态表**几乎恒过**，只能挡住数量级级别的丢失。\n"
+        "!! 这条回落路径对静态表**几乎恒过**：它只精确到附录 A 那个数。\n"
+        "!! audit_log 目标 17100，restored 17099 / 17000 / 16000 都报红；\n"
+        "!! 漏的只有恰好落在 17100..真基线之间的那一两行。\n"
         "!! 计划里的 Step 6 始终传 --baseline；只有临时排查才不带。\n"
         + "=" * 70,
         file=sys.stderr,
@@ -2940,39 +2974,49 @@ ssh root@<centos> 'cd /opt/qa/docker && \
 - [ ] **Step 6: 真实核对**
 
 ```bash
-# ⚠️ 三步**分开**做。串在一个 && 里时，任何一步失败（scp 断网、backend 没起、
-# 路径写错）都会塌成退出码 1，而 case 会把它读成「行数有偏差」，让运维去报告里
-# 找一份根本不存在的输出 —— 脚本压根没跑过。失败关闭是对的，指错方向是灾难。
-scp backend/scripts/verify_migration.py root@<centos>:/opt/qa/ \
-  || { echo "ABORT: 脚本没传过去（本地路径不对 / 网络断了）"; exit 1; }
-ssh root@<centos> "docker cp /opt/qa/verify_migration.py qa-backend:/app/scripts/" \
-  || { echo "ABORT: 脚本没 cp 进容器（backend 没起？/opt/qa 路径不对？）"; exit 1; }
-ssh root@<centos> "docker cp /opt/qa-transfer/rowcounts.baseline.json qa-backend:/app/" \
-  || { echo "ABORT: 基线没 cp 进容器（Task 8 没传过来？）"; exit 1; }
+# ⚠️ 整段放进子 shell。这些 exit 1 跑在**运维本地的交互 shell** 里，不是远端：
+# Task 9 的块裹在 ssh '…' 里，exit 只结束远端；这一块跑在本地，粘进终端时
+# 一次 scp 断网就能把运维的会话直接关掉。子 shell 里 exit 只结束子 shell。
+# 门禁一点没弱：子 shell 返回非 0，外面照样判（末尾那句 false 就是干这个的 ——
+# 在 set -e 的脚本里致命，在交互 shell 里无害）。
+(
+  # ⚠️ 三步**分开**做。串在一个 && 里时，任何一步失败（scp 断网、backend 没起、
+  # 路径写错）都会塌成退出码 1，而 case 会把它读成「行数有偏差」，让运维去报告里
+  # 找一份根本不存在的输出 —— 脚本压根没跑过。失败关闭是对的，指错方向是灾难。
+  scp backend/scripts/verify_migration.py root@<centos>:/opt/qa/ \
+    || { echo "ABORT: 脚本没传过去（本地路径不对 / 网络断了）"; exit 1; }
+  ssh root@<centos> "docker cp /opt/qa/verify_migration.py qa-backend:/app/scripts/" \
+    || { echo "ABORT: 脚本没 cp 进容器（backend 没起？/opt/qa 路径不对？）"; exit 1; }
+  ssh root@<centos> "docker cp /opt/qa-transfer/rowcounts.baseline.json qa-backend:/app/" \
+    || { echo "ABORT: 基线没 cp 进容器（Task 8 没传过来？）"; exit 1; }
 
-# 只有这一条的退出码会进 case —— 它才是「核对脚本」的退出码
-ssh root@<centos> "docker exec qa-backend sh -c 'python -m scripts.verify_migration --dsn \"\$DATABASE_URL\" --baseline /app/rowcounts.baseline.json'"
-rc=$?
-echo "exit=$rc"
-case "$rc" in
-  0) echo "OK：8 张表都不低于导出基线，且都不低于 spec 附录 A 下限" ;;
-  1) echo "FAIL：有偏差 —— 看上面逐项『期望/实际/原因』。『表不存在』与『低于附录 A 下限』先查迁移与备份，别去查网络"; exit 1 ;;
-  2) echo "FAIL：用法错 —— 看 stderr 的用法行"; exit 1 ;;
-  3) echo "FAIL：环境不可用（基线读不了 / 连不上库）—— 不是行数偏差，先修基线文件或 DATABASE_URL"; exit 1 ;;
-  *) echo "FAIL：未知退出码 $rc —— 多半是 ssh 自己失败或脚本崩了，看上面有没有 traceback"; exit 1 ;;
-esac
+  # 只有这一条的退出码会进 case —— 它才是「核对脚本」的退出码
+  rc=0
+  ssh root@<centos> "docker exec qa-backend sh -c 'python -m scripts.verify_migration --dsn \"\$DATABASE_URL\" --baseline /app/rowcounts.baseline.json'" || rc=$?
+  echo "exit=$rc"
+  case "$rc" in
+    0) echo "OK：8 张表都不低于判定阈值（静态表=基线本身、会话类表=基线的 80%），且都不低于 spec 附录 A 下限" ;;
+    1) echo "FAIL：有偏差 —— 看上面逐项『期望/实际/原因』。『表不存在』与『低于附录 A 下限』先查迁移与备份，别去查网络"; exit 1 ;;
+    2) echo "FAIL：用法错 —— 看 stderr 的用法行"; exit 1 ;;
+    3) echo "FAIL：环境不可用（基线读不了 / 连不上库）—— 不是行数偏差，先修基线文件或 DATABASE_URL"; exit 1 ;;
+    *) echo "FAIL：未知退出码 $rc —— 多半是 ssh 自己失败或脚本崩了，看上面有没有 traceback"; exit 1 ;;
+  esac
+) || { echo "ABORT：门禁未通过 —— 不要往下走（原因见上面那一行）"; false; }
 ```
 
 > `--baseline` **必须传**。不传会回落到 spec 附录 A 的快照并打一条醒目告警。
 > 更要紧的是：**回落路径对静态表几乎恒过** —— 附录 A 比任何现库都旧，而静态表
-> 只判「不低于」，于是几乎必然成立。它只能挡住数量级级别的丢失，不是门禁。
-> 告警里写了这一句，不是为了吓唬，是为了不让有人把回落当成「还在严格核对」。
+> 只判「不低于」，于是几乎必然成立。它不是门禁：它只精确到附录 A 那个数
+> （audit_log 目标 17100 ⇒ restored 17099 / 17000 / 16000 都报红），
+> 漏的只有恰好落在附录 A 与真基线之间的那一两行。告警里写了这一句，
+> 不是为了吓唬，是为了不让有人把回落当成「还在严格核对」。
+
 ⚠️ **必须多一层 `sh -c`**：`$DATABASE_URL` 只存在于**容器内**的环境里，CentOS 宿主
 的 root shell 没有这个变量。写成 `docker exec qa-backend python -m ... --dsn "$DATABASE_URL"`
 时，变量会在宿主 shell 上展开成空串 ⇒ `--dsn ""` ⇒ 用法错误退出 2 —— 在一个
 数据完全正常的环境上，门禁会红。`sh -c` 把字符串原样送进容器，由容器自己的 shell 展开。
 
-**门禁**：输出 `全部对上 ✓` 且 `exit=0`。**这一步没过就不要往下走** —— 带着残缺数据起 backend 会让 seed 在半空库上产出脏数据（spec §6.4 铁律）。
+**门禁**：输出 `全部通过 ✓（8 张表都不低于判定阈值…）` 且 `exit=0`。**这一步没过就不要往下走** —— 带着残缺数据起 backend 会让 seed 在半空库上产出脏数据（spec §6.4 铁律）。
 
 > **退出码必须分开判**，不要只写 `test "$rc" -eq 0` 之外再靠人眼读数字：
 > 2 是「命令写错了」，3 是「环境没准备好」，两者都不是「行数不对」。
@@ -2985,11 +3029,17 @@ esac
 >    基线量在 dump 之前，恢复出来的只多不少。这条专门钉方向：把非对称语义写反
 >    （改成「多了才算不一致」）的话，它会红；
 > 3. 把 `--baseline` 指向一个不存在的路径，重跑必须返回 3；
-> 4. 恢复基线文件，重跑必须回到 `全部对上 ✓` 且 `exit=0`。
+> 4. 恢复基线文件，重跑必须回到 `全部通过 ✓（…）` 且 `exit=0`。
 
-> ⚠️ 非对称的代价：静态表**多**出来的行（seed 跑两遍、重复导入之类）不再被这条
-> 门禁查出。补偿是 Task 9 Step 2 的 `version_num` 断言与 Task 14 的冒烟 ——
-> 它们能发现「跑了两遍」，只是不在这条门禁里。别把行数门禁当成唯一防线。
+> ⚠️ 非对称的代价：静态表**多**出来的行（seed 跑两遍、重复导入之类）不再被这条行数门禁查出。
+> 真正兜住它的是**导入的幂等性**，不是别的断言：`pg_restore --clean --if-exists`
+> （Task 9 Step 2）会 drop 后重建，所以重跑一遍恢复不会叠加；Task 9 Step 1 的
+> 断言 2 又要求三个目标卷**为空**才允许导入，第二次恢复根本进不去。
+> 说清楚剩下的缺口：**seed 跑两遍造成的多余行，本计划里没有任何东西会发现。**
+> （`version_num` 指望不上：它是单行 PK 表，且被 `--clean` 重建过 ——
+> 恢复一次、恢复两次、以及恢复出 100 条重复 `audit_log` 的那次，它都是 `0132`。
+> Task 14 第 9 项「PG 行数抽查 —— Task 10 已做」就是本 Step 自己，不构成独立复核。）
+> 要补就单独加一条查询，别指望这条门禁顺手捎带。
 
 > ⚠️ **`audit_log` 之类的表将来被合法清理时（归档、保留策略），不要放宽脚本。**
 > 正确做法：把这次清理记进变更记录，并更新 spec 附录 A 的数字

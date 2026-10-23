@@ -52,7 +52,7 @@
 | `backend/app/tests/unit/test_build_offline_images.py` | 断言脚本镜像清单与 compose 一致，防漏打镜像 | Task 4 |
 | `backend/scripts/verify_env_keys.py` | 比对源端与 CentOS 侧 `.env` 的复用键指纹（CRLF 安全、不回显明文） | Task 7 |
 | `backend/app/tests/unit/test_verify_env_keys.py` | 上者的单测 | Task 7 |
-| `backend/scripts/verify_migration.py` | 导入后行数核对（对比 spec 附录 A 实测值） | Task 10 |
+| `backend/scripts/verify_migration.py` | 导入后行数核对（目标是导出时实测基线，spec 附录 A 只作绝对下限） | Task 10 |
 | `backend/app/tests/unit/test_verify_migration.py` | 上者的单测 | Task 10 |
 | `docs/deployment/00-overview.md` | 追加「带数据迁移时禁止生成新 SECRET_KEY」警告 | Task 15 |
 | `docs/deployment/02-environment.md` | 同上 | Task 15 |
@@ -984,7 +984,11 @@ echo "== 构建 backend / frontend =="
 # （qa-system-frontend-build-npm-registry）。
 # docker/Dockerfile.backend 已硬编码 aliyun Debian + aliyun PyPI 源，无需覆盖。
 NPM_REGISTRY="$NPM_REGISTRY" \
-  docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+# ⚠️ compose 文件在 `docker/` 下，build context 是 `..`（= 仓库根）。
+# 这里必须带 `docker/` 前缀：Step 5 从**仓库根**调用本脚本，脚本自己不 cd，
+# 裸文件名会 no such file or directory。CentOS 侧那几处是 `cd /opt/qa/docker`
+# 之后的裸名，那是对的，别照着它们抄。
+  docker compose -f docker/docker-compose.yml -f docker/docker-compose.centos.yml \
     build --platform "$PLATFORM" backend frontend
 
 echo "== 打包 =="
@@ -994,7 +998,11 @@ docker save -o "$OUT_DIR/all-$TAG.tar" "${IMAGES[@]}"
 # 镜像（含刚 pull 的 8 个外部镜像），会把 milvus / neo4j 之类再存一遍，
 # 离线包凭空多几个 GB。`config --images` 给的是镜像**名**（docker save 也吃名），
 # 减去 IMAGES 数组后剩下的正好是 backend / frontend。
-BUILT="$(docker compose -f docker-compose.yml -f docker-compose.centos.yml config --images \
+# ⚠️ compose 文件在 `docker/` 下，build context 是 `..`（= 仓库根）。
+# 这里必须带 `docker/` 前缀：Step 5 从**仓库根**调用本脚本，脚本自己不 cd，
+# 裸文件名会 no such file or directory。CentOS 侧那几处是 `cd /opt/qa/docker`
+# 之后的裸名，那是对的，别照着它们抄。
+BUILT="$(docker compose -f docker/docker-compose.yml -f docker/docker-compose.centos.yml config --images \
   | grep -vxF -f <(printf '%s\n' "${IMAGES[@]}"))"
 docker save -o "$OUT_DIR/built-$TAG.tar" $BUILT
 
@@ -2413,7 +2421,12 @@ def test_loadBaseline_rejects_baseline_missing_a_table(tmp_path):
 
 
 def test_checkAll_targets_the_measured_baseline_not_appendix_a(tmp_path):
-    """实测值 17101 就是对的 —— 拿附录 A 的 17100 当目标会误报。"""
+    """目标是实测基线，不是附录 A。
+
+    注意别把这条写成「拿 17100 当目标会误报」—— 非对称规则下 restored 17101 ≥
+    17100 是**绿的**。拿附录 A 当目标真正丢掉的是**向下的精度**：真基线 17101 时，
+    restored 17100 会在真基线下报红、在这份回落目标下放行。
+    """
     baseline = dict(EXPECTED, audit_log=17101, evidence=1738, multi_step_step=30)
     assert checkAll(dict(baseline), expect=baseline, floor=EXPECTED) == []
 

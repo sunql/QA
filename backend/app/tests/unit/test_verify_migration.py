@@ -400,7 +400,12 @@ def test_loadBaseline_rejects_baseline_missing_a_table(tmp_path):
 
 
 def test_checkAll_targets_the_measured_baseline_not_appendix_a(tmp_path):
-    """实测值 17101 就是对的 —— 拿附录 A 的 17100 当目标会误报。"""
+    """目标是实测基线，不是附录 A。
+
+    注意别把这条写成「拿 17100 当目标会误报」—— 非对称规则下 restored 17101 ≥
+    17100 是**绿的**。拿附录 A 当目标真正丢掉的是**向下的精度**：真基线 17101 时，
+    restored 17100 会在真基线下报红、在这份回落目标下放行。
+    """
     baseline = dict(EXPECTED, audit_log=17101, evidence=1738, multi_step_step=30)
     assert checkAll(dict(baseline), expect=baseline, floor=EXPECTED) == []
 

@@ -109,6 +109,12 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.systemConfig", "code": "item.adminOrganizations", "label_key": "menu.item.adminOrganizations", "icon_code": "org", "sort_order": 560, "path": "/admin/organizations"},
     {"parent": "section.systemConfig", "code": "item.adminMenus", "label_key": "menu.item.adminMenus", "icon_code": "menu", "sort_order": 570, "path": "/admin/menus"},
     {"parent": "section.systemConfig", "code": "item.adminSystemConfig", "label_key": "menu.item.adminSystemConfig", "icon_code": "setting", "sort_order": 580, "path": "/admin/system-config"},
+    # feat-user-onboarding（2026-09-20）默认授给新用户的菜单是 item.profile
+    # （rbac.py DEFAULT_NEW_USER_MENU_CODE），permission_grant.menu_code 有 FK 指向
+    # 本表 ⇒ 新装库缺这行会让「新建用户」500（2026-10-23 CentOS7 首装实测踩中）。
+    # 取值与开发库权威行一致；changePassword 默认隐藏（visible=false，改密走弹窗流程）。
+    {"parent": "section.systemConfig", "code": "item.profile", "label_key": "menu.item.profile", "icon_code": "user", "sort_order": 580, "path": "/profile"},
+    {"parent": "section.systemConfig", "code": "item.changePassword", "label_key": "menu.item.changePassword", "icon_code": "lock", "sort_order": 585, "path": "/change-password", "visible": False},
     # Audit & Security（仅保留审计日志）
     {"parent": "section.auditSecurity", "code": "item.adminAudit", "label_key": "menu.item.adminAudit", "icon_code": "audit", "sort_order": 610, "path": "/admin/audit"},
     # item.adminFeatureRules 已搬到 section.bizConfig sort_order=365（与 item.features 配套）
@@ -172,7 +178,8 @@ async def seed_menu_config(
                     icon_code=it["icon_code"],
                     sort_order=it["sort_order"],
                     path=it["path"],
-                    visible=True,
+                    # visible 仅对首次 INSERT 生效（冲突即 DO NOTHING，不回滚 UI 编辑）
+                    visible=it.get("visible", True),
                 )
                 .on_conflict_do_nothing(index_elements=["code"])
             )

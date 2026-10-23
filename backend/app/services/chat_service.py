@@ -40,7 +40,7 @@ from app.services.chat_constants import (
     USAGE_PURPOSE_NL2SQL,
 )
 from app.domain.chart_spec import ChartSpec, SpecKpi
-from app.domain.enums import ChartType, IntentType
+from app.domain.enums import ChartType, DataSourceType, IntentType
 from app.domain.exceptions import (
     ConfigError,
     ConflictError,
@@ -1027,7 +1027,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
         question = sub_question if sub_question is not None else dto.question
 
         if intent == IntentType.REFINE and state is not None and state.last_sql:
-            rewritten = self._tryRefineDirect(state, question)
+            rewritten = self._tryRefineDirect(state, question, pc.ds.type)
             if rewritten is not None:
                 return _SqlOutcome(plan=_statePlan(state), sql=rewritten, sqlConfig=None)
 
@@ -1143,13 +1143,20 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             cachedTokens=mergedCachedTokens,
         )
 
-    def _tryRefineDirect(self, state: SessionQueryState, question: str) -> str | None:
+    def _tryRefineDirect(
+        self,
+        state: SessionQueryState,
+        question: str,
+        datasourceType: DataSourceType | str | None = None,
+    ) -> str | None:
         """尝试纯代码改写上一轮 SQL（排序/行数/简单筛选）；无法改写返回 None。"""
         sql = state.last_sql
         if not sql:
             return None
         try:
-            return self._nl2sql.applyRefineDirect(sql, _statePlan(state), question)
+            return self._nl2sql.applyRefineDirect(
+                sql, _statePlan(state), question, datasourceType=datasourceType
+            )
         except Exception:
             # 捷径属最佳努力：任何意外失败都退回 LLM 两阶段，不阻断流水线
             logger.warning("REFINE 捷径改写失败，退回 LLM: %s", question, exc_info=True)

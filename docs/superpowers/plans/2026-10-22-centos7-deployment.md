@@ -1761,17 +1761,17 @@ esac
 
 ```bash
 cd /path/to/qa-system
-./scripts/backup_pg.sh                          # → backups/pg/qa_metadata_*.dump（-Fc）
-./scripts/backup_neo4j.sh                       # → backups/neo4j/neo4j_*.dump
-./scripts/backup_objects.sh                     # → backups/objects/objects_data_*.tar.gz
-mkdir -p backups/mysql
-docker exec qa-mysql-demo sh -c \
-  'mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --routines --triggers wms_demo' \
-  > backups/mysql/wms_demo.sql
+mkdir -p backups
 
-# 行数基线：**紧跟 pg_dump 量**，中间不要插别的操作。
-# pg_dump 是单事务快照，量出来的值 >= dump 里的值；静态表两者相等，
-# 会话类表差的那几行由 Task 10 的 GROWING slack 吸收。
+# ── 行数基线：量在 pg_dump **之前**，中间不要插任何别的操作 ──────────────
+# 顺序决定方向，不是比较逻辑决定方向：
+#   计数早于 dump 的快照 ⇒ 恢复出来的行数必然 >= 基线。
+# 所以静态表判「不得低于基线」，而「高于」是导出期间的新写入，必须放过。
+# 反过来（量在 dump 之后）只剩 restored < baseline 这一种偏差，
+# 但那样任何正常写入都会让静态表偏小，得靠 slack 兜 —— 而静态表本来不该有
+# slack，兜了就是「用容差盖住方向搞反」。
+# 前提：这批表只追加（audit_log / evidence / *sessions 都是）。会被 DELETE 的表
+# 不适用这条推理，量在 dump 之前反而可能量到已删掉的状态。
 # ⚠️ 用 jsonb 不是 json：json 输出是 `"t" : 3`（冒号前后都有空格），
 # 冒号位置不固定；jsonb 固定成 `"t": 3`，Task 9 Step 2 的取值只需容一个空格。
 docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tA > backups/rowcounts.baseline.json <<'SQL'
@@ -1793,6 +1793,13 @@ SELECT jsonb_build_object(
        )::text
 FROM counts;
 SQL
+./scripts/backup_pg.sh                          # → backups/pg/qa_metadata_*.dump（-Fc）
+./scripts/backup_neo4j.sh                       # → backups/neo4j/neo4j_*.dump
+./scripts/backup_objects.sh                     # → backups/objects/objects_data_*.tar.gz
+mkdir -p backups/mysql
+docker exec qa-mysql-demo sh -c \
+  'mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --routines --triggers wms_demo' \
+  > backups/mysql/wms_demo.sql
 ```
 > **`backup_milvus.sh` 不执行。** 它是裸 tar 卷备份，Milvus 按 spec §4.5 走重建路径。
 
@@ -1903,14 +1910,28 @@ docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc \
 # ⚠️ 取值注意：jsonb 输出是 `{"audit_log": 17101}` —— **冒号后仍有空格**
 # （`json_build_object` 更糟，冒号前后都有空格）。所以下面用 `: *[0-9]*`，
 # 且第二段用 `[0-9][0-9]*` 而不是 `[0-9]*`：后者能匹配空串，取出来是空的。
+# ⚠️ 引号：整段被外层的单引号包着，里面**不能再出现单引号**。一出现外层引号
+# 就提前闭合：zsh 整块以 no matches found 中止，**pg_restore 根本不会跑**，
+# 运维看到的是一个 glob 错误而不是一次恢复；bash 则把模式剥成裸的
+# [0-9][0-9]* 交给远端 glob。取数那行用本计划约定的
+# 「闭合引号 - 双引号包一个单引号 - 重开引号」嵌了一层，与 Step 3 同一写法。
 for t in audit_log ontology_class; do
   live=$(docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc \
     "select count(*) from $t")
-  base=$(grep -o "\"$t\": *[0-9]*" rowcounts.baseline.json | grep -o '[0-9][0-9]*')
+  base=$(grep -o "\"$t\": *[0-9]*" rowcounts.baseline.json | grep -o '"'"'[0-9][0-9]*'"'"')
   echo "$t live=$live baseline=$base"
+  [ -n "$base" ] || { echo "ABORT: 基线里读不到 $t（文件损坏，或不是本次导出的那一份）"; exit 1; }
+  # 基线量在 pg_dump 之前 ⇒ 恢复出来的只多不少。**少**才是丢数据。
+  [ "$live" -ge "$base" ] || { echo "ABORT: $t live=$live < baseline=$base —— 传输丢了数据"; exit 1; }
 done'
 ```
-**门禁**：`version_num` = `0132`；两张表 `live` 与 `baseline` 相等。任一不符 → **停**，不要继续。
+> **引号约定（这一块特有，改动后两个 shell 都要实跑）**：整段被
+> `ssh root@<centos> '…'` 的单引号包着，远端 shell 收到的就是这段文本的逐字拷贝。
+> 里面**不能出现任何单引号**，否则外层引号提前闭合 —— 后果见块内注释。
+> 嵌一层的写法与 Step 3 的 cypher-shell 同一约定（文本形如 `'"'"'`）。
+
+**门禁**：`version_num` = `0132`；两张表 `live >= baseline`（基线量在 dump 之前，
+所以「等于或更多」都正常，只有更少才是丢数据）。任一 ABORT → **停**，不要继续。
 
 - [ ] **Step 3: 导入 Neo4j + 立即验**
 
@@ -1963,6 +1984,13 @@ ssh root@<centos> 'docker run --rm -v qa-system_objects_data:/data \
 - Produces: 退出码 0 = 全部对上；1 = 有偏差（逐项列出期望 vs 实际与**原因**）；2 = 用法错误；3 = 环境不可用（基线读不了 / 连不上库 / 查询失败）
 
 > 目标行数取自 `--baseline` 指向的基线（导出那一刻的实测值），不是 spec 附录 A 的快照。附录 A 只当**绝对下限**用：源库一直在被写入，静态表的实测值已经与附录 A 不一致（audit_log 17100→17101、evidence 1729→1738、multi_step_step 27→30），拿它当目标会把一次正确的恢复判成迁移失败。
+
+> **方向不对称：静态表只判「低于基线」，不判「等于基线」。**
+> 基线在 `pg_dump` **之前**量（Task 8 Step 1），dump 的快照更晚 ⇒ 恢复出来的
+> 行数必然 >= 基线，多出来的是导出期间新写入的。判成「不一致」就是在好环境上
+> 报迁移失败。而「低于」这一侧不需要容差：对只追加的表它是精确的丢数据检测。
+> GROWING 表的 slack 语义一个字没动。
+> 代价说清楚：静态表**多**出来的行（seed 跑两遍之类）不再被这条门禁查出。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -2065,9 +2093,37 @@ def test_checkAll_tolerates_upward_growth_on_growing_tables():
     assert checkAll(grew) == []
 
 
-def test_checkAll_still_flags_upward_growth_on_static_tables():
-    """非 GROWING 表多出数据是真异常（多半是 seed 跑过了），不能一起放过。"""
-    assert len(checkAll(dict(EXPECTED, audit_log=17101))) == 1
+def test_checkAll_passes_static_tables_that_grew_after_the_baseline():
+    """静态表「比基线多」是正常的，必须放过。
+
+    基线是 dump **之前**量的，dump 的快照更晚 ⇒ 恢复出来的行数 >= 基线，
+    多出来的部分是导出期间新写入的。判成「不一致」就是在好环境上报迁移失败。
+    反向陷阱：写成 `got != want`，一次正确的恢复永远红。
+    """
+    assert checkAll(dict(EXPECTED, audit_log=17101, evidence=1800)) == []
+
+
+def test_checkAll_fails_static_table_below_the_baseline():
+    """静态表「比基线少」才是真丢数据 —— 这个方向不需要容差，精确检测。"""
+    failures = checkAll(dict(EXPECTED, audit_log=EXPECTED["audit_log"] - 1))
+    assert len(failures) == 1
+    assert failures[0]["table"] == "audit_log"
+
+
+def test_growing_slack_is_unchanged_when_a_baseline_is_used():
+    """GROWING 的语义一个字不动：向上放过、向下在 slack 内放过、超出才报。
+
+    这里**不传 floor**，只验 slack 这一层。传了 floor 就测不出 slack 了：
+    附录 A 下限是绝对的，会先于 slack 生效（见
+    test_appendix_floor_also_covers_growing_tables）。两者混在一起时，
+    真正生效的是更严的那条，slack 永远没被验到。
+    """
+    baseline = dict(EXPECTED, user_sessions=EXPECTED["user_sessions"] + 10)        # 554
+    withinSlack = dict(baseline, user_sessions=baseline["user_sessions"] - 20)     # 534
+    assert withinSlack["user_sessions"] >= baseline["user_sessions"] * (1 - 0.20)  # slack 内
+    assert checkAll(withinSlack, expect=baseline) == []
+    beyondSlack = dict(baseline, user_sessions=1)
+    assert len(checkAll(beyondSlack, expect=baseline)) == 1
 
 
 def test_checkAll_passes_on_exact_match():
@@ -2359,7 +2415,11 @@ def test_checkAll_below_appendix_floor_gets_its_own_reason():
 
 
 def test_appendix_floor_also_covers_growing_tables():
-    """下限是绝对的：GROWING 表在 slack 之内但已跌破附录 A，同样要报。"""
+    """下限是绝对的：GROWING 表在 slack 之内但已跌破附录 A，同样要报。
+
+    也就是说**下限先于 slack 生效**。这不是 bug，是「附录 A 是绝对下限」
+    这个裁定的直接后果 —— 别为了给 slack 腾空间把它改成可协商的。
+    """
     from scripts.verify_migration import REASON_BELOW_FLOOR
     baseline = dict(EXPECTED, user_sessions=EXPECTED["user_sessions"])
     justBelowFloor = EXPECTED["user_sessions"] - 4      # slack 之内（−4 > −20%）
@@ -2441,6 +2501,96 @@ def test_main_exit_code_two_on_unknown_flag():
 def test_main_exit_code_two_on_baseline_without_value():
     from scripts.verify_migration import main
     assert main(["prog", "--dsn", FAKE_DSN, "--baseline"]) == 2
+
+
+# ── I-1：附录 A 的下限「接没接上」此前没有任何测试 ────────────────────────
+# checkAll 内部的 floor 逻辑本身有测试，但 `main` 到底传没传 floor=EXPECTED
+# 一条测试都没有。把 verify_migration.py:286 改成 checkAll(actual, expect=baseline)
+# （或更危险的 floor=baseline）后，45 条测试全绿 —— 见本轮变异记录。
+# 所以下面这几条必须在 **main 层面**钉住接线，checkAll 层的单测在两种接线
+# 下都同样通过，钉不住。
+
+def test_main_reports_below_appendix_floor_as_floor_not_drift(monkeypatch, tmp_path, capsys):
+    """附录 A 的下限必须在 main 上真的接上：低于下限要报「低于附录 A 下限」。"""
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED, audit_log=500)          # 基线本身已低于附录 A 的 17100
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(dict(baseline)))
+    assert main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)]) == 1
+    out = capsys.readouterr().out
+    assert "audit_log" in out
+    assert "低于附录 A 下限" in out
+
+
+def test_main_keeps_growing_slack_when_baseline_is_used(monkeypatch, tmp_path, capsys):
+    """下限是附录 A（不是基线），且 GROWING slack 在传基线时仍然生效。"""
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED, user_sessions=EXPECTED["user_sessions"] + 1)   # 545
+    actual = dict(baseline, user_sessions=EXPECTED["user_sessions"])          # 544
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(actual))
+    rc = main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)])
+    assert rc == 0, capsys.readouterr().out
+
+
+def test_main_compares_against_the_baseline_not_appendix_a(monkeypatch, tmp_path, capsys):
+    """目标是基线，不是附录 A —— 这条是两者唯一的区分点。
+
+    为什么需要它：把 `main` 里的 `checkAll(actual, expect=baseline, floor=EXPECTED)`
+    换成 `checkAll(actual)`（收了 --baseline 却拿附录 A 当目标）时，其余测试
+    全部照样绿 —— 因为它们的基线值与 EXPECTED 相同或更高，两种目标结果一致。
+    这里让基线 17500（源库在附录 A 之后又长了）、恢复出来 17200：
+      目标=基线   → 17200 < 17500 → 丢数据，红
+      目标=附录A  → 17200 >= 17100 → 放过，绿
+    这个变异是被 mutation harness 抓出来的，不是想出来的。
+    """
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED, audit_log=17500)
+    monkeypatch.setattr("scripts.verify_migration._queryAll",
+                        _asyncReturning(dict(baseline, audit_log=17200)))
+    rc = main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)])
+    assert rc == 1
+    assert "audit_log" in capsys.readouterr().out
+
+
+# ── I-3：静态表的非对称语义，main 层面钉住 ────────────────────────────────
+# 下面两条合起来锁死方向：多了要过，少了要红。
+# 方向写反（`got > want` 才过 / `got != want` 才红）时至少一条会红。
+
+def test_main_passes_when_static_tables_come_back_above_baseline(monkeypatch, tmp_path, capsys):
+    """dump 的快照比计数晚 ⇒ 恢复出来的只多不少。这是正常路径，必须绿。"""
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED, audit_log=17101, evidence=1738, multi_step_step=30)
+    restored = dict(baseline, audit_log=17105, evidence=1740, multi_step_step=31)
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(restored))
+    rc = main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)])
+    assert rc == 0, capsys.readouterr().out
+
+
+def test_main_fails_when_static_table_comes_back_below_baseline(monkeypatch, tmp_path, capsys):
+    """少了才是丢数据。基线早于 dump ⇒ 这个方向是精确检测，不需要容差。"""
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED, audit_log=17101)
+    monkeypatch.setattr("scripts.verify_migration._queryAll",
+                        _asyncReturning(dict(baseline, audit_log=17090)))
+    rc = main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)])
+    assert rc == 1
+    assert "audit_log" in capsys.readouterr().out
+
+
+def test_fallback_without_baseline_lets_drifted_static_tables_pass(monkeypatch, capsys):
+    """回落路径（目标是 2026-10-22 的附录 A）现在对静态表基本恒过。
+
+    这不是好事，是「不再误报」的代价：任何现库都比那份快照新，所以
+    「不低于」几乎必然成立。这条测试把这个事实钉住，免得有人把回落
+    路径当成「还在严格核对」来依赖。告警里必须说清楚这一点。
+    """
+    from scripts.verify_migration import main
+    drifted = dict(EXPECTED, audit_log=17101, evidence=1738, multi_step_step=30)
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(drifted))
+    rc = main(["prog", "--dsn", FAKE_DSN])
+    captured = capsys.readouterr()
+    assert rc == 0, captured.out
+    # 告警必须承认「这条路径几乎恒过」，否则回落会被当成真门禁
+    assert "恒过" in captured.err or "低于" in captured.err
 ```
 
 
@@ -2470,6 +2620,12 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'scripts.verify_migr
     目标 = 导出时的实测值（判断传输有没有丢数据）
     下限 = spec 附录 A（绝对下限，防止基线本身不可信，比如导错库）
 低于下限的表会以「低于附录 A 下限」单独标出，与传输漂移区分开。
+
+**方向是不对称的：静态表只判「低于基线」，不判「等于基线」。**
+基线在 pg_dump **之前**量（见计划 Task 8 Step 1），dump 的快照更晚，
+所以恢复出来的行数必然 >= 基线，多出来的是导出期间新写入的行 ——
+判成「不一致」就是在好环境上报迁移失败。而「低于」这一侧不需要容差：
+对只追加的表它是精确的丢数据检测。GROWING 表的 slack 语义一个字没动。
 
 用法：
     python -m scripts.verify_migration --dsn postgresql://qa_user:...@localhost:5433/qa_metadata
@@ -2623,11 +2779,20 @@ def checkAll(
             continue
         if got == want:
             continue
-        # GROWING 表只要不低于阈值就放过：**向上一定放过**。
-        # 导出与核对之间必然还会写入会话数据，多出来的行不是问题；
-        # 只有「少了」才可能是丢数据。写成 `got < want` 会把每一次
-        # 正常增长报成失败，把门禁变成噪声。
-        if table in tolerate and got >= want * (1 - GROWING_SLACK):
+        if table in tolerate:
+            # GROWING 表只要不低于阈值就放过：**向上一定放过**。
+            # 导出与核对之间必然还会写入会话数据，多出来的行不是问题；
+            # 只有「少了」才可能是丢数据。写成 `got < want` 会把每一次
+            # 正常增长报成失败，把门禁变成噪声。
+            if got >= want * (1 - GROWING_SLACK):
+                continue
+        elif got >= want:
+            # 静态表：**只判「低于」**，不比「相等」。
+            # 基线是在 pg_dump **之前**量的，dump 的快照更晚 ⇒ 恢复出来的行数
+            # 必然 >= 基线，多出来的是导出期间新写入的行。写成 `got != want`
+            # 会在一次完全正确的恢复上永远报「迁移失败」。
+            # 代价：静态表多出来的行（seed 跑两遍之类）不再被查出 ——
+            # 方向不对称是这条规则的固有取舍，不是疏忽。
             continue
         failures.append({
             "table": table, "expected": want, "actual": got, "reason": REASON_DRIFT,
@@ -2697,13 +2862,19 @@ async def _queryAll(dsn: str) -> dict[str, int | None]:
 
 
 def _warnAppendixSnapshot() -> None:
-    """回落提醒。静默回落会让运维重新制造这次要消除的困惑。"""
+    """回落提醒。静默回落会让运维重新制造这次要消除的困惑。
+
+    还要说实话：静态表只判「不低于基线」，而附录 A 比任何现库都旧 ⇒ 这条
+    回落路径对静态表**几乎恒过**。它只能挡住数量级级别的丢失。别把它当门禁用。
+    """
     print(
         "=" * 70 + "\n"
         "!! 未提供 --baseline：正在用 2026-10-22 spec 附录 A 的快照核对。\n"
         "!! 这份快照已知漂移 —— 源库一直在被写入，audit_log / evidence /\n"
-        "!! multi_step_step 的实测值已经与附录 A 不一致，照它核对会把正常环境\n"
-        "!! 判成「迁移失败」。计划里的 Step 6 始终传 --baseline；只有临时排查才不带。\n"
+        "!! multi_step_step 的实测值已经与附录 A 不一致。\n"
+        "!! 而且静态表只判「不低于基线」，附录 A 比任何现库都旧 ⇒\n"
+        "!! 这条回落路径对静态表**几乎恒过**，只能挡住数量级级别的丢失。\n"
+        "!! 计划里的 Step 6 始终传 --baseline；只有临时排查才不带。\n"
         + "=" * 70,
         file=sys.stderr,
     )
@@ -2756,7 +2927,7 @@ if __name__ == "__main__":
 ```bash
 cd backend && python -m pytest app/tests/unit/test_verify_migration.py -v
 ```
-Expected: 45 passed
+Expected: 53 passed
 
 - [ ] **Step 5: 启动 backend（此时才允许）**
 
@@ -2769,23 +2940,33 @@ ssh root@<centos> 'cd /opt/qa/docker && \
 - [ ] **Step 6: 真实核对**
 
 ```bash
-scp backend/scripts/verify_migration.py root@<centos>:/opt/qa/
-ssh root@<centos> "docker cp /opt/qa/verify_migration.py qa-backend:/app/scripts/ \
-  && docker cp /opt/qa-transfer/rowcounts.baseline.json qa-backend:/app/ \
-  && docker exec qa-backend sh -c 'python -m scripts.verify_migration --dsn \"\$DATABASE_URL\" --baseline /app/rowcounts.baseline.json'"
+# ⚠️ 三步**分开**做。串在一个 && 里时，任何一步失败（scp 断网、backend 没起、
+# 路径写错）都会塌成退出码 1，而 case 会把它读成「行数有偏差」，让运维去报告里
+# 找一份根本不存在的输出 —— 脚本压根没跑过。失败关闭是对的，指错方向是灾难。
+scp backend/scripts/verify_migration.py root@<centos>:/opt/qa/ \
+  || { echo "ABORT: 脚本没传过去（本地路径不对 / 网络断了）"; exit 1; }
+ssh root@<centos> "docker cp /opt/qa/verify_migration.py qa-backend:/app/scripts/" \
+  || { echo "ABORT: 脚本没 cp 进容器（backend 没起？/opt/qa 路径不对？）"; exit 1; }
+ssh root@<centos> "docker cp /opt/qa-transfer/rowcounts.baseline.json qa-backend:/app/" \
+  || { echo "ABORT: 基线没 cp 进容器（Task 8 没传过来？）"; exit 1; }
+
+# 只有这一条的退出码会进 case —— 它才是「核对脚本」的退出码
+ssh root@<centos> "docker exec qa-backend sh -c 'python -m scripts.verify_migration --dsn \"\$DATABASE_URL\" --baseline /app/rowcounts.baseline.json'"
 rc=$?
 echo "exit=$rc"
 case "$rc" in
-  0) echo "OK：8 张表与导出时实测基线一致，且都不低于 spec 附录 A 下限" ;;
+  0) echo "OK：8 张表都不低于导出基线，且都不低于 spec 附录 A 下限" ;;
   1) echo "FAIL：有偏差 —— 看上面逐项『期望/实际/原因』。『表不存在』与『低于附录 A 下限』先查迁移与备份，别去查网络"; exit 1 ;;
   2) echo "FAIL：用法错 —— 看 stderr 的用法行"; exit 1 ;;
   3) echo "FAIL：环境不可用（基线读不了 / 连不上库）—— 不是行数偏差，先修基线文件或 DATABASE_URL"; exit 1 ;;
-  *) echo "FAIL：未知退出码 $rc"; exit 1 ;;
+  *) echo "FAIL：未知退出码 $rc —— 多半是 ssh 自己失败或脚本崩了，看上面有没有 traceback"; exit 1 ;;
 esac
 ```
 
-> `--baseline` **必须传**。不传会回落到 spec 附录 A 的快照并打一条醒目告警：
-> 静默回落会让运维重新制造这次要消除的困惑（在正常环境上读出一份「迁移失败」）。
+> `--baseline` **必须传**。不传会回落到 spec 附录 A 的快照并打一条醒目告警。
+> 更要紧的是：**回落路径对静态表几乎恒过** —— 附录 A 比任何现库都旧，而静态表
+> 只判「不低于」，于是几乎必然成立。它只能挡住数量级级别的丢失，不是门禁。
+> 告警里写了这一句，不是为了吓唬，是为了不让有人把回落当成「还在严格核对」。
 ⚠️ **必须多一层 `sh -c`**：`$DATABASE_URL` 只存在于**容器内**的环境里，CentOS 宿主
 的 root shell 没有这个变量。写成 `docker exec qa-backend python -m ... --dsn "$DATABASE_URL"`
 时，变量会在宿主 shell 上展开成空串 ⇒ `--dsn ""` ⇒ 用法错误退出 2 —— 在一个
@@ -2797,11 +2978,18 @@ esac
 > 2 是「命令写错了」，3 是「环境没准备好」，两者都不是「行数不对」。
 > 把 3 混进 1，运维就会去查一个不存在的数据问题。
 
-> 反向自检（三条分别覆盖「目标用错」「环境不可用」「真通过」，都要实跑过）：
-> 1. 把 `rowcounts.baseline.json` 里 `audit_log` 的值改小 100，重跑必须报
->    `audit_log: 期望 …，实际 …（行数偏差）` 并返回 1；
-> 2. 把 `--baseline` 指向一个不存在的路径，重跑必须返回 3；
-> 3. 恢复基线文件，重跑必须回到 `全部对上 ✓` 且 `exit=0`。
+> 反向自检（四条，覆盖四个不同方向，都要实跑过）：
+> 1. 把基线里 `audit_log` 的值改**大**到 999999，重跑必须报
+>    `audit_log: 期望 999999，实际 …（行数偏差）` 并返回 1；
+> 2. 把基线里某张**静态**表的值改**小** 100，重跑必须**仍然通过**（`exit=0`）——
+>    基线量在 dump 之前，恢复出来的只多不少。这条专门钉方向：把非对称语义写反
+>    （改成「多了才算不一致」）的话，它会红；
+> 3. 把 `--baseline` 指向一个不存在的路径，重跑必须返回 3；
+> 4. 恢复基线文件，重跑必须回到 `全部对上 ✓` 且 `exit=0`。
+
+> ⚠️ 非对称的代价：静态表**多**出来的行（seed 跑两遍、重复导入之类）不再被这条
+> 门禁查出。补偿是 Task 9 Step 2 的 `version_num` 断言与 Task 14 的冒烟 ——
+> 它们能发现「跑了两遍」，只是不在这条门禁里。别把行数门禁当成唯一防线。
 
 > ⚠️ **`audit_log` 之类的表将来被合法清理时（归档、保留策略），不要放宽脚本。**
 > 正确做法：把这次清理记进变更记录，并更新 spec 附录 A 的数字

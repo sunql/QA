@@ -5,7 +5,9 @@
 真实 17100，差 3 个数量级。
 
 不传 `--baseline` 时回落到 spec 附录 A（2026-10-22 的一次快照）。**这份快照已知漂移**：
-源库一直在被写入，静态表的实测值已经与附录 A 不一致，照它核对会把正常环境判成迁移失败。
+源库一直在被写入，实测值已经比附录 A 高（audit_log 17100→17101、evidence 1729→1738、
+multi_step_step 27→30）。因为静态表只判「不低于」（见下），向上漂移**不会**误报；
+但向下只精确到附录 A 那个数：真基线是 17101 时 restored 17099 会红、17100 不会。
 所以回落会打一条醒目的告警；计划里的 Step 6 始终传 `--baseline`。
 
 传了 `--baseline` 时同时做两件事：
@@ -24,7 +26,7 @@
     python -m scripts.verify_migration --dsn <DSN> --baseline backups/rowcounts.baseline.json
 
 退出码：
-    0 = 全部对上
+    0 = 全部通过（都不低于判定阈值；**不是**「与基线完全相等」）
     1 = 有偏差（逐项列出期望 vs 实际与原因）
     2 = 用法错误
     3 = 环境不可用（基线读不了 / 连不上库 / 查询失败，不是数据问题，别去查数据）
@@ -199,8 +201,11 @@ def renderReport(
 ) -> str:
     checked = len(EXPECTED) if tableCount is None else tableCount
     if not failures:
-        suffix = f"，目标：{targetLabel}" if targetLabel else ""
-        return f"全部对上 ✓（{checked} 张表{suffix}）"
+        # ⚠️ 措辞必须跟着语义走。静态表判「不低于基线」、会话类表判「不低于基线的
+        # 80%」，比基线**多**的行也放过 —— 所以既不能写「全部对上」（那是相等语义），
+        # 也不该写「都不低于导出基线」（会话类表在 slack 内可以比基线低）。
+        suffix = f"，目标：{targetLabel}" if targetLabel else "，目标：spec 附录 A 的回落快照"
+        return f"全部通过 ✓（{checked} 张表都不低于判定阈值{suffix}）"
     lines = [f"{len(failures)} 张表对不上："]
     for f in failures:
         reason = f.get("reason", REASON_DRIFT)
@@ -254,10 +259,12 @@ async def _queryAll(dsn: str) -> dict[str, int | None]:
 
 
 def _warnAppendixSnapshot() -> None:
-    """回落提醒。静默回落会让运维重新制造这次要消除的困惑。
+    """回落提醒。静默回落会让运维重新制造这次已消除的困惑。
 
-    还要说实话：静态表只判「不低于基线」，而附录 A 比任何现库都旧 ⇒ 这条
-    回落路径对静态表**几乎恒过**。它只能挡住数量级级别的丢失。别把它当门禁用。
+    还要说实话：静态表只判「不低于」，而附录 A 比任何现库都旧 ⇒ 这条回落路径
+    对静态表**几乎恒过**。实测灵敏度（audit_log，目标 17100）：restored 17099 /
+    17000 / 16000 全部报红；漏掉的只有「恰好落在附录 A 与真基线之间」的那一两行 ——
+    真基线是 17101 时 restored 17100 会绿。别把它当门禁用。
     """
     print(
         "=" * 70 + "\n"
@@ -265,7 +272,9 @@ def _warnAppendixSnapshot() -> None:
         "!! 这份快照已知漂移 —— 源库一直在被写入，audit_log / evidence /\n"
         "!! multi_step_step 的实测值已经与附录 A 不一致。\n"
         "!! 而且静态表只判「不低于基线」，附录 A 比任何现库都旧 ⇒\n"
-        "!! 这条回落路径对静态表**几乎恒过**，只能挡住数量级级别的丢失。\n"
+        "!! 这条回落路径对静态表**几乎恒过**：它只精确到附录 A 那个数。\n"
+        "!! audit_log 目标 17100，restored 17099 / 17000 / 16000 都报红；\n"
+        "!! 漏的只有恰好落在 17100..真基线之间的那一两行。\n"
         "!! 计划里的 Step 6 始终传 --baseline；只有临时排查才不带。\n"
         + "=" * 70,
         file=sys.stderr,

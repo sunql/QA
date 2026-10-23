@@ -601,5 +601,11 @@ def test_fallback_without_baseline_lets_drifted_static_tables_pass(monkeypatch, 
     rc = main(["prog", "--dsn", FAKE_DSN])
     captured = capsys.readouterr()
     assert rc == 0, captured.out
-    # 告警必须承认「这条路径几乎恒过」，否则回落会被当成真门禁
-    assert "恒过" in captured.err or "低于" in captured.err
+    # 告警必须承认「这条路径几乎恒过」，否则回落会被当成真门禁。
+    # ⚠️ 这里必须匹配完整的「几乎恒过」，不能退化成 `or "低于"`：告警里另有一句
+    # 「不低于基线」含「低于」二字，`or` 会被那句满足，于是删掉「承认恒过」
+    # 那一整行测试照样全绿 —— 变异 harness 实测过，确实存活。
+    assert "几乎恒过" in captured.err
+    # 灵敏度也要钉：回落不是「只能挡住数量级级别的丢失」，它精确到附录 A 那个数。
+    # 这句一旦改回模糊说法，Minor 1 的修正就悄悄退回去了。
+    assert "17099" in captured.err

@@ -1755,9 +1755,9 @@ esac
 
 **Interfaces:**
 - Consumes: macOS 上运行中的生产栈
-- Produces: `backups/{pg,neo4j,objects,mysql}/` 四类产物 + `transfer-manifest.sha256`
+- Produces: `backups/{pg,neo4j,objects,mysql}/` 四类产物 + `backups/rowcounts.baseline.json`（**导出那一刻实测的 count(*)**）+ `transfer-manifest.sha256`
 
-- [ ] **Step 1: 导出四类**
+- [ ] **Step 1: 导出四类 + 量出行数基线**
 
 ```bash
 cd /path/to/qa-system
@@ -1768,6 +1768,31 @@ mkdir -p backups/mysql
 docker exec qa-mysql-demo sh -c \
   'mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --routines --triggers wms_demo' \
   > backups/mysql/wms_demo.sql
+
+# 行数基线：**紧跟 pg_dump 量**，中间不要插别的操作。
+# pg_dump 是单事务快照，量出来的值 >= dump 里的值；静态表两者相等，
+# 会话类表差的那几行由 Task 10 的 GROWING slack 吸收。
+# ⚠️ 用 jsonb 不是 json：json 输出是 `"t" : 3`（冒号前后都有空格），
+# 冒号位置不固定；jsonb 固定成 `"t": 3`，Task 9 Step 2 的取值只需容一个空格。
+docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tA > backups/rowcounts.baseline.json <<'SQL'
+WITH counts AS (
+  SELECT 'audit_log'         AS t, count(*) AS c FROM audit_log
+  UNION ALL SELECT 'ontology_class',      count(*) FROM ontology_class
+  UNION ALL SELECT 'system_config',       count(*) FROM system_config
+  UNION ALL SELECT 'session_token_usage', count(*) FROM session_token_usage
+  UNION ALL SELECT 'evidence',            count(*) FROM evidence
+  UNION ALL SELECT 'user_sessions',       count(*) FROM user_sessions
+  UNION ALL SELECT 'session_message',     count(*) FROM session_message
+  UNION ALL SELECT 'multi_step_step',     count(*) FROM multi_step_step
+)
+SELECT jsonb_build_object(
+         'measured_at', to_char(now() AT TIME ZONE 'Asia/Shanghai',
+                              'YYYY-MM-DD"T"HH24:MI:SS'),
+         'database',    current_database(),
+         'tables',      jsonb_object_agg(t, c)
+       )::text
+FROM counts;
+SQL
 ```
 > **`backup_milvus.sh` 不执行。** 它是裸 tar 卷备份，Milvus 按 spec §4.5 走重建路径。
 
@@ -1790,7 +1815,14 @@ docker run --rm -v "$PWD/pg:/b:ro" postgres:16-alpine \
 
 grep -vcE '^(--|/\*|!|$)' mysql/*.sql   # 期望 > 0
 
-find pg neo4j objects mysql -type f \( -name '*.dump' -o -name '*.tar.gz' -o -name '*.sql' \) \
+# 基线也要自检：非空 + 能被 Task 10 的脚本读懂（缺表/坏 JSON ⇒ 退 3）。
+[ -s rowcounts.baseline.json ] && echo "OK   rowcounts.baseline.json" \
+  || echo "EMPTY/MISSING  rowcounts.baseline.json"
+python -c "import json; print('baseline tables:', len(json.load(open('rowcounts.baseline.json'))['tables']))"
+#   期望 baseline tables: 8
+
+find pg neo4j objects mysql rowcounts.baseline.json -type f \
+  \( -name '*.dump' -o -name '*.tar.gz' -o -name '*.sql' -o -name 'rowcounts.baseline.json' \) \
   | sort | xargs sha256sum > ../transfer-manifest.sha256
 ```
 **门禁**：四份都非空；`pg_restore --list` 无 error；manifest 生成。
@@ -1809,7 +1841,7 @@ scp transfer-manifest.sha256 root@<centos>:/opt/qa-transfer/
 ssh root@<centos> 'cd /opt/qa-transfer && sha256sum -c transfer-manifest.sha256'
 ```
 **门禁**：每行都 `OK`，且**行数与 Step 2 的 `find` 产物数一致**。
-> 行数不必等于 4 —— 四类产物里 neo4j/pg 按日期分文件，实际是 N 行。
+> 行数不必等于 5 —— 四类产物里 neo4j/pg 按日期分文件，实际是 N 行，加上 `rowcounts.baseline.json` 共 N+1 行。基线进 manifest 才能验它没在传输中坏掉；坏掉的基线 Task 10 会退 3，但那时已经在 CentOS 上了。
 > 要对的是 N：源端 `wc -l < transfer-manifest.sha256`，与 CentOS 侧
 > `sha256sum -c … | grep -c ': OK$'` 两边必须相同。少传一类时
 > `sha256sum -c` 只会对**存在的那几行**报 OK，不会抱怨少文件 —— 属「空/残缺
@@ -1863,12 +1895,22 @@ docker exec -i qa-postgres pg_restore -U qa_user -d qa_metadata --clean --if-exi
 #    但前提是有人真读了那条报错。
 docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc \
   "select version_num from alembic_version;"          # 期望 0132
-docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc \
-  "select count(*) from audit_log;"                   # 期望 17100（不是 pg_stat 估算值）
-docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc \
-  "select count(*) from ontology_class;"              # 期望 54'
+# ⚠️ **不写死行数。** 附录 A 是 2026-10-22 的一次快照，源库一直在被写入：
+# audit_log / evidence / multi_step_step 的实测值已经与它不一致，照附录 A
+# 核对会把一次**正确的恢复**判成失败（静态表没有 slack，17101 对 17100 就是红）。
+# 基线以 Task 8 Step 1 随包传过来的 rowcounts.baseline.json 为准 ——
+# Task 10 会用脚本严格核对，这里只做一眼确认。
+# ⚠️ 取值注意：jsonb 输出是 `{"audit_log": 17101}` —— **冒号后仍有空格**
+# （`json_build_object` 更糟，冒号前后都有空格）。所以下面用 `: *[0-9]*`，
+# 且第二段用 `[0-9][0-9]*` 而不是 `[0-9]*`：后者能匹配空串，取出来是空的。
+for t in audit_log ontology_class; do
+  live=$(docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc \
+    "select count(*) from $t")
+  base=$(grep -o "\"$t\": *[0-9]*" rowcounts.baseline.json | grep -o '[0-9][0-9]*')
+  echo "$t live=$live baseline=$base"
+done'
 ```
-**门禁**：三条数字全部对上。任一不符 → **停**，不要继续。
+**门禁**：`version_num` = `0132`；两张表 `live` 与 `baseline` 相等。任一不符 → **停**，不要继续。
 
 - [ ] **Step 3: 导入 Neo4j + 立即验**
 
@@ -1917,8 +1959,10 @@ ssh root@<centos> 'docker run --rm -v qa-system_objects_data:/data \
 - Test: `backend/app/tests/unit/test_verify_migration.py`
 
 **Interfaces:**
-- Consumes: 导入后的 PG / Neo4j
-- Produces: 退出码 0 = 全部对上；1 = 有偏差（逐项列出期望 vs 实际）
+- Consumes: 导入后的 PG / Neo4j；Task 8 Step 1 产出的 `rowcounts.baseline.json`（导出时刻的实测 count(*)）
+- Produces: 退出码 0 = 全部对上；1 = 有偏差（逐项列出期望 vs 实际与**原因**）；2 = 用法错误；3 = 环境不可用（基线读不了 / 连不上库 / 查询失败）
+
+> 目标行数取自 `--baseline` 指向的基线（导出那一刻的实测值），不是 spec 附录 A 的快照。附录 A 只当**绝对下限**用：源库一直在被写入，静态表的实测值已经与附录 A 不一致（audit_log 17100→17101、evidence 1729→1738、multi_step_step 27→30），拿它当目标会把一次正确的恢复判成迁移失败。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1931,6 +1975,10 @@ pg_stat_user_tables.n_live_tup 在这个库上偏差可达 3 个数量级
 
 from __future__ import annotations
 
+import asyncio
+import json
+import sys
+
 from scripts.verify_migration import EXPECTED, checkAll, renderReport
 
 
@@ -1940,6 +1988,43 @@ def _asyncReturning(value):
         return value
 
     return _fake
+
+
+def _asyncFailing(exc: Exception):
+    """造一个一被 await 就抛异常的替身，用来模拟连不上库。"""
+    async def _fake(dsn: str) -> dict:
+        raise exc
+
+    return _fake
+
+
+def _fakeAsyncpg(countsFor: dict[str, object]):
+    """造一个 asyncpg 替身。
+
+    countsFor 里的表名 → 抛出的异常对象；其余表 → 返回 100。
+    exceptions 借用真实 asyncpg，保证实现里的 isinstance 判断与测试抛的是同一个类。
+    """
+    import types
+
+    import asyncpg
+
+    class FakeConn:
+        async def fetchval(self, query: str) -> int:
+            table = query.rsplit(" ", 1)[-1]
+            if table in countsFor:
+                raise countsFor[table]
+            return 100
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(dsn: str) -> FakeConn:
+        return FakeConn()
+
+    return types.SimpleNamespace(
+        exceptions=asyncpg.exceptions,
+        connect=connect,
+    )
 
 
 def test_expected_matches_spec_appendix_a():
@@ -1956,8 +2041,11 @@ def test_expected_matches_spec_appendix_a():
 def test_growing_set_covers_every_tolerated_table():
     """GROWING 常量此前没有任何测试引用 —— 写空了测试照样全绿。"""
     from scripts.verify_migration import GROWING
-    assert GROWING == {"user_sessions", "session_message", "session_token_usage"}
-    assert GROWING <= set(EXPECTED)
+    # 断言左侧写成 set(...) 而不是 GROWING：ruff SIM300 会把全大写的名字
+    # 当成「常量」，判成 Yoda 条件。语义与 brief 原写法完全一致。
+    expectedGrowing = {"user_sessions", "session_message", "session_token_usage"}
+    assert set(GROWING) == expectedGrowing
+    assert set(EXPECTED) >= set(GROWING)
 
 
 def test_checkAll_defaults_to_growing_tolerances():
@@ -2046,6 +2134,313 @@ def test_main_exit_code_one_when_counts_drift(monkeypatch, capsys):
                         _asyncReturning(dict(EXPECTED, audit_log=6)))
     assert main(["prog", "--dsn", "postgresql://u:p@h:5432/db"]) == 1
     assert "audit_log" in capsys.readouterr().out
+
+
+# ── I1：退出码 3 / _redact / 缺表 这三条路径此前零覆盖 ──────────────────────
+# 变异证明：`return 3` 改 `return 1`、`_redact` 整个函数体清空、
+# 整段 try/except 删除 —— 15 条测试全绿。
+
+FAKE_DSN = "postgresql://qa_fake:s3cr3t-never-real@localhost:5433/qa_metadata"
+
+
+def test_main_exit_code_three_when_database_unreachable(monkeypatch, capsys):
+    """连不上库必须落到 3，而不是混进 1 里让运维去查一个不存在的数据问题。"""
+    from scripts.verify_migration import main
+    monkeypatch.setattr("scripts.verify_migration._queryAll",
+                        _asyncFailing(OSError("connection refused")))
+    assert main(["prog", "--dsn", FAKE_DSN]) == 3
+    err = capsys.readouterr().err
+    assert "OSError" in err
+    assert "connection refused" in err
+
+
+def test_main_exit_code_three_output_never_echoes_credentials(monkeypatch, capsys):
+    """错误路径同样不许把口令写进 stderr —— 门禁日志会被人贴进工单。"""
+    from scripts.verify_migration import main
+    leaky = OSError(f"cannot connect to {FAKE_DSN}")
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncFailing(leaky))
+    assert main(["prog", "--dsn", FAKE_DSN]) == 3
+    captured = capsys.readouterr()
+    assert "s3cr3t-never-real" not in captured.err
+    assert "s3cr3t-never-real" not in captured.out
+    assert "<DSN>" in captured.err
+
+
+def test_redact_masks_password_and_dsn():
+    from scripts.verify_migration import _redact
+    message = f"failed to reach {FAKE_DSN} (password s3cr3t-never-real)"
+    out = _redact(FAKE_DSN, message)
+    assert "s3cr3t-never-real" not in out
+    assert "<DSN>" in out
+    assert "***" in out
+
+
+def test_redact_leaves_message_alone_without_credentials():
+    """没有口令的 DSN 不该被瞎改写 —— 无凭据可抹时必须原样返回。"""
+    from scripts.verify_migration import _redact
+    assert _redact("postgresql://localhost:5433/qa_metadata", "boom") == "boom"
+    assert _redact("", "boom") == "boom"
+
+
+def test_redact_handles_dsn_without_password_part():
+    """postgresql://user@host 形式（无冒号）不能被当成有口令而崩掉。"""
+    from scripts.verify_migration import _redact
+    assert _redact("postgresql://onlyuser@localhost:5433/db", "boom") == "boom"
+
+
+def test_checkAll_reports_missing_table_with_its_own_reason():
+    """缺表与「行数不对」是两种诊断，报告里必须能分开。"""
+    from scripts.verify_migration import REASON_MISSING_TABLE
+    partial = {table: n for table, n in EXPECTED.items() if table != "evidence"}
+    failures = checkAll(partial)
+    assert len(failures) == 1
+    assert failures[0]["table"] == "evidence"
+    assert failures[0]["reason"] == REASON_MISSING_TABLE
+
+
+def test_checkAll_treats_explicit_none_as_missing_table():
+    """_queryAll 对不存在的表回 None，与「键压根没有」必须同义。"""
+    from scripts.verify_migration import REASON_MISSING_TABLE
+    failures = checkAll(dict(EXPECTED, evidence=None))
+    assert len(failures) == 1
+    assert failures[0]["reason"] == REASON_MISSING_TABLE
+
+
+def test_renderReport_counts_the_tables_actually_checked():
+    """用基线核对时表数可能不等于 len(EXPECTED)，成功行不能报错数。"""
+    assert "3 张表" in renderReport([], tableCount=3)
+
+
+# ── I2：缺表被误报成「连接问题」 ──────────────────────────────────────────
+# 半恢复的库（表还在、内容空）正是 spec §6.4 铁律场景，
+# 报成连接问题会把运维送去查网络。
+
+
+def test_queryAll_records_none_for_missing_table_and_keeps_querying(monkeypatch):
+    """一张表不存在不能中断整轮统计：后面的表还得数出来，才能逐项定位。"""
+    import asyncpg
+
+    import scripts.verify_migration as vm
+    monkeypatch.setitem(sys.modules, "asyncpg", _fakeAsyncpg({
+        "evidence": asyncpg.exceptions.UndefinedTableError('relation "evidence" does not exist'),
+    }))
+    out = asyncio.run(vm._queryAll(FAKE_DSN))
+    assert out["evidence"] is None
+    # 循环必须继续：evidence 之后的表也要有结果
+    assert out["user_sessions"] == 100
+    assert out["multi_step_step"] == 100
+
+
+def test_main_exit_code_one_when_table_is_missing(monkeypatch, capsys):
+    """缺表 ⇒ 退出码 1 + 点名表名，不是 3。仍然失败关闭，只是诊断变了。"""
+    from scripts.verify_migration import main
+    partial = {table: n for table, n in EXPECTED.items() if table != "evidence"}
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(partial))
+    assert main(["prog", "--dsn", FAKE_DSN]) == 1
+    captured = capsys.readouterr()
+    assert "evidence" in captured.out
+    assert "连接" not in captured.out
+
+
+# ── I3：空 --dsn 静默回落到 asyncpg 默认值 ────────────────────────────────
+# python -m scripts.verify_migration --dsn "" 会真的去连 ::1:5432 / 127.0.0.1:5432，
+# 也就是「悄悄查了别的库」→ 好的环境报「迁移失败」。brief 写明是退出码 2。
+
+def test_main_exit_code_two_on_empty_dsn(monkeypatch, capsys):
+    """空 DSN 是用法错误，且必须在碰数据库之前就退掉。"""
+    from scripts.verify_migration import main
+    touched = []
+
+    async def _neverCalled(dsn: str) -> dict:
+        touched.append(dsn)
+        return {}
+
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _neverCalled)
+    assert main(["prog", "--dsn", ""]) == 2
+    assert touched == []
+    assert capsys.readouterr().err.strip() != ""
+
+
+def test_main_exit_code_two_on_whitespace_only_dsn(monkeypatch):
+    """全是空白同样是用法错误 —— strip() 后为空才算数。"""
+    from scripts.verify_migration import main
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(dict(EXPECTED)))
+    assert main(["prog", "--dsn", "   \t "]) == 2
+
+
+# ── I5：基线改成「导出那一刻实测的行数」 ──────────────────────────────────
+# 附录 A 是 2026-10-22 的一次快照：audit_log 已漂到 17101、evidence 1738、
+# multi_step_step 30（静态表 ⇒ 门禁必红）。基线文件由 Task 8 导出时产出。
+
+
+def _writeBaseline(tmp_path, tables: dict, measuredAt: str = "2026-10-22T09:00:00+08:00",
+                   name: str = "rowcounts.baseline.json"):
+    path = tmp_path / name
+    path.write_text(json.dumps({
+        "measured_at": measuredAt,
+        "database": "qa_metadata",
+        "tables": tables,
+    }, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def test_loadBaseline_reads_export_time_counts(tmp_path):
+    from scripts.verify_migration import loadBaseline
+    path = _writeBaseline(tmp_path, dict(EXPECTED, audit_log=17101, evidence=1738))
+    assert loadBaseline(path) == dict(EXPECTED, audit_log=17101, evidence=1738)
+
+
+def test_loadBaseline_rejects_missing_file():
+    from scripts.verify_migration import BaselineError, loadBaseline
+    try:
+        loadBaseline("/nonexistent/rowcounts.baseline.json")
+    except BaselineError:
+        return
+    raise AssertionError("读不到基线文件必须是 BaselineError，而不是别的异常")
+
+
+def test_loadBaseline_rejects_malformed_json(tmp_path):
+    from scripts.verify_migration import BaselineError, loadBaseline
+    path = tmp_path / "broken.json"
+    path.write_text("{not json", encoding="utf-8")
+    try:
+        loadBaseline(str(path))
+    except BaselineError:
+        return
+    raise AssertionError("坏 JSON 必须是 BaselineError")
+
+
+def test_loadBaseline_rejects_table_counts_that_are_not_integers(tmp_path):
+    from scripts.verify_migration import BaselineError, loadBaseline
+    path = _writeBaseline(tmp_path, dict(EXPECTED, audit_log="一万七"))
+    try:
+        loadBaseline(path)
+    except BaselineError:
+        return
+    raise AssertionError("非整数行数必须是 BaselineError")
+
+
+def test_loadBaseline_rejects_baseline_missing_a_table(tmp_path):
+    """基线里没提到的表不能被静默跳过 —— 那等于没核对。"""
+    from scripts.verify_migration import BaselineError, loadBaseline
+    partial = {table: n for table, n in EXPECTED.items() if table != "audit_log"}
+    try:
+        loadBaseline(_writeBaseline(tmp_path, partial))
+    except BaselineError:
+        return
+    raise AssertionError("基线漏表必须是 BaselineError")
+
+
+def test_checkAll_targets_the_measured_baseline_not_appendix_a(tmp_path):
+    """实测值 17101 就是对的 —— 拿附录 A 的 17100 当目标会误报。"""
+    baseline = dict(EXPECTED, audit_log=17101, evidence=1738, multi_step_step=30)
+    assert checkAll(dict(baseline), expect=baseline, floor=EXPECTED) == []
+
+
+def test_checkAll_flags_drift_against_the_baseline_target():
+    """静态表比导出时少 ⇒ 传输丢了数据。"""
+    baseline = dict(EXPECTED, audit_log=17101)
+    failures = checkAll(dict(baseline, audit_log=17090), expect=baseline, floor=EXPECTED)
+    assert len(failures) == 1
+    assert failures[0]["table"] == "audit_log"
+    assert failures[0]["expected"] == 17101
+    assert failures[0]["actual"] == 17090
+
+
+def test_checkAll_below_appendix_floor_gets_its_own_reason():
+    """基线本身不可信（导错库）时，下限兜底。理由必须能与传输漂移区分开。"""
+    from scripts.verify_migration import REASON_BELOW_FLOOR, REASON_DRIFT
+    baseline = dict(EXPECTED, audit_log=500)
+    failures = checkAll(dict(baseline), expect=baseline, floor=EXPECTED)
+    assert len(failures) == 1
+    assert failures[0]["reason"] == REASON_BELOW_FLOOR
+    assert failures[0]["reason"] != REASON_DRIFT
+    assert REASON_BELOW_FLOOR in renderReport(failures)
+
+
+def test_appendix_floor_also_covers_growing_tables():
+    """下限是绝对的：GROWING 表在 slack 之内但已跌破附录 A，同样要报。"""
+    from scripts.verify_migration import REASON_BELOW_FLOOR
+    baseline = dict(EXPECTED, user_sessions=EXPECTED["user_sessions"])
+    justBelowFloor = EXPECTED["user_sessions"] - 4      # slack 之内（−4 > −20%）
+    failures = checkAll(dict(baseline, user_sessions=justBelowFloor),
+                        expect=baseline, floor=EXPECTED)
+    assert len(failures) == 1
+    assert failures[0]["reason"] == REASON_BELOW_FLOOR
+
+
+def test_checkAll_without_floor_keeps_appendix_a_as_plain_target():
+    """不给 floor（未传基线的旧路径）时行为不变：GROWING 仍按 slack 容忍。"""
+    assert checkAll(dict(EXPECTED, user_sessions=EXPECTED["user_sessions"] - 4)) == []
+
+
+def test_main_uses_baseline_target_end_to_end(monkeypatch, tmp_path, capsys):
+    """端到端：基线 17101、库也是 17101 ⇒ 通过；且不再打「附录 A 已知漂移」的警。"""
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED, audit_log=17101)
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(dict(baseline)))
+    assert main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)]) == 0
+    captured = capsys.readouterr()
+    assert "全部对上" in captured.out
+    assert "已知漂移" not in captured.err
+
+
+def test_main_reds_when_baseline_disagrees_with_the_restore(monkeypatch, tmp_path, capsys):
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED, audit_log=17101)
+    monkeypatch.setattr("scripts.verify_migration._queryAll",
+                        _asyncReturning(dict(baseline, audit_log=17090)))
+    assert main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)]) == 1
+    assert "audit_log" in capsys.readouterr().out
+
+
+def test_main_warns_loudly_when_baseline_omitted(monkeypatch, capsys):
+    """静默回落 = 让运维重新制造这次要消除的困惑。回落必须吵。"""
+    from scripts.verify_migration import main
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(dict(EXPECTED)))
+    assert main(["prog", "--dsn", FAKE_DSN]) == 0
+    err = capsys.readouterr().err
+    assert "2026-10-22" in err
+    assert "已知漂移" in err
+    assert "附录 A" in err
+    assert "!" in err
+
+
+def test_main_accepts_baseline_before_dsn(monkeypatch, tmp_path):
+    from scripts.verify_migration import main
+    baseline = dict(EXPECTED)
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(dict(baseline)))
+    assert main(["prog", "--baseline", _writeBaseline(tmp_path, baseline), "--dsn", FAKE_DSN]) == 0
+
+
+def test_main_exit_code_three_when_baseline_unreadable(monkeypatch, capsys):
+    """基线读不了 ⇒ 环境不可用（3），不是行数偏差（1），也不是不该去连库。"""
+    from scripts.verify_migration import main
+    touched = []
+
+    async def _neverCalled(dsn: str) -> dict:
+        touched.append(dsn)
+        return {}
+
+    monkeypatch.setattr("scripts.verify_migration._queryAll", _neverCalled)
+    assert main(["prog", "--dsn", FAKE_DSN, "--baseline", "/nonexistent/baseline.json"]) == 3
+    assert touched == []
+    assert capsys.readouterr().err.strip() != ""
+
+
+def test_main_exit_code_two_on_empty_baseline_path():
+    from scripts.verify_migration import main
+    assert main(["prog", "--dsn", FAKE_DSN, "--baseline", ""]) == 2
+
+
+def test_main_exit_code_two_on_unknown_flag():
+    from scripts.verify_migration import main
+    assert main(["prog", "--dsn", FAKE_DSN, "--nope", "x"]) == 2
+
+
+def test_main_exit_code_two_on_baseline_without_value():
+    from scripts.verify_migration import main
+    assert main(["prog", "--dsn", FAKE_DSN, "--baseline"]) == 2
 ```
 
 
@@ -2063,19 +2458,38 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'scripts.verify_migr
 ```python
 """导入后行数核对。
 
-基线取 spec 附录 A 的实测 count(*)，**不是** pg_stat_user_tables.n_live_tup
-——后者是估算值，在本库上 audit_log 报 6、真实 17100，差 3 个数量级。
+基线取 **Task 8 导出那一刻实测的 count(*)**（`--baseline rowcounts.baseline.json`），
+不是 pg_stat_user_tables.n_live_tup —— 后者是估算值，在本库上 audit_log 报 6、
+真实 17100，差 3 个数量级。
+
+不传 `--baseline` 时回落到 spec 附录 A（2026-10-22 的一次快照）。**这份快照已知漂移**：
+源库一直在被写入，静态表的实测值已经与附录 A 不一致，照它核对会把正常环境判成迁移失败。
+所以回落会打一条醒目的告警；计划里的 Step 6 始终传 `--baseline`。
+
+传了 `--baseline` 时同时做两件事：
+    目标 = 导出时的实测值（判断传输有没有丢数据）
+    下限 = spec 附录 A（绝对下限，防止基线本身不可信，比如导错库）
+低于下限的表会以「低于附录 A 下限」单独标出，与传输漂移区分开。
 
 用法：
     python -m scripts.verify_migration --dsn postgresql://qa_user:...@localhost:5433/qa_metadata
+    python -m scripts.verify_migration --dsn <DSN> --baseline backups/rowcounts.baseline.json
+
+退出码：
+    0 = 全部对上
+    1 = 有偏差（逐项列出期望 vs 实际与原因）
+    2 = 用法错误
+    3 = 环境不可用（基线读不了 / 连不上库 / 查询失败，不是数据问题，别去查数据）
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+from pathlib import Path
 
-# spec 附录 A（2026-10-22 实测 count(*)）
+# spec 附录 A（2026-10-22 实测 count(*)）。既是回落时的目标，也是传了基线时的绝对下限。
 EXPECTED: dict[str, int] = {
     "audit_log": 17100,
     "ontology_class": 54,
@@ -2090,23 +2504,122 @@ EXPECTED: dict[str, int] = {
 # 导出后仍在增长的表：涨多少都正常，只有掉下去才可能是丢数据
 GROWING: frozenset[str] = frozenset({"user_sessions", "session_message", "session_token_usage"})
 
-# 容忍下限：GROWING 表只要不低于 (1 - SLACK) × 基线就放过
+# 容忍下限：GROWING 表只要不低于 (1 - SLACK) × 目标就放过
 GROWING_SLACK = 0.20
+
+# 三种偏差各有各的诊断，报告里必须能分开
+REASON_MISSING_TABLE = "表不存在"
+REASON_BELOW_FLOOR = "低于附录 A 下限"
+REASON_DRIFT = "行数偏差"
+
+USAGE = (
+    "用法：python -m scripts.verify_migration --dsn <DATABASE_URL> "
+    "[--baseline <rowcounts.baseline.json>]"
+)
+
+
+class UsageError(Exception):
+    """命令行用法错误 ⇒ 退出码 2。"""
+
+
+class BaselineError(Exception):
+    """基线文件不可用 ⇒ 退出码 3（环境问题，不是行数偏差）。"""
+
+
+def loadBaseline(path: str) -> dict[str, int]:
+    """读 Task 8 导出时刻的实测行数。
+
+    读不了、坏 JSON、缺表、行数不是整数 —— 全部收敛成 BaselineError，
+    因为它们都是同一件事：这份环境没准备好，别去查数据。
+    """
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise BaselineError(f"读不到基线文件 {path}（{type(exc).__name__}）") from exc
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BaselineError(f"基线文件不是合法 JSON：{path}") from exc
+    tables = parsed.get("tables") if isinstance(parsed, dict) else None
+    if not isinstance(tables, dict):
+        raise BaselineError(f"基线文件缺 tables 段：{path}")
+    missing = [table for table in EXPECTED if table not in tables]
+    if missing:
+        # 漏表 ≠ 通过。少核一张表就等于把「有没有丢数据」这件事留了个洞。
+        raise BaselineError(f"基线漏了 {len(missing)} 张表：{', '.join(sorted(missing))}")
+    counts: dict[str, int] = {}
+    for table in EXPECTED:
+        value = tables[table]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise BaselineError(f"基线里 {table} 的行数不是整数：{value!r}")
+        counts[table] = value
+    return counts
+
+
+def parseArgs(argv: list[str]) -> tuple[str, str | None]:
+    """→ (dsn, baselinePath | None)。用法错误抛 UsageError。
+
+    空 --dsn 是用法错误（退出码 2），不是「让 asyncpg 用默认值」。
+    否则 --dsn "" 会真的去连 ::1:5432 / 127.0.0.1:5432，也就是
+    「悄悄查了别的库」→ 好的环境报「迁移失败」。
+    """
+    dsn: str | None = None
+    baselinePath: str | None = None
+    index = 1
+    while index < len(argv):
+        flag = argv[index]
+        if flag == "--dsn":
+            if dsn is not None or index + 1 >= len(argv):
+                raise UsageError("--dsn 需要一个值，且只能给一次")
+            dsn = argv[index + 1]
+            index += 2
+            continue
+        if flag == "--baseline":
+            if baselinePath is not None or index + 1 >= len(argv):
+                raise UsageError("--baseline 需要一个值，且只能给一次")
+            baselinePath = argv[index + 1]
+            index += 2
+            continue
+        raise UsageError(f"无法识别的参数：{flag}")
+    if dsn is None:
+        raise UsageError("缺少 --dsn")
+    if not dsn.strip():
+        raise UsageError("--dsn 是空的")
+    if baselinePath is not None and not baselinePath.strip():
+        raise UsageError("--baseline 路径是空的")
+    return dsn, baselinePath
 
 
 def checkAll(
-    actual: dict[str, int],
+    actual: dict[str, int | None],
     expect: dict[str, int] | None = None,
+    floor: dict[str, int] | None = None,
     tolerate: set[str] | None = None,
-) -> list[dict]:
-    """返回偏差列表。tolerate 里的表允许小幅下降。"""
-    expect = expect or EXPECTED
-    tolerate = tolerate if tolerate is not None else set(GROWING)
-    failures: list[dict] = []
+) -> list[dict[str, object]]:
+    """返回偏差列表。
+
+    expect = 目标行数（缺省 EXPECTED）；floor = 绝对下限（缺省不设）。
+    tolerate 里的表允许小幅下降。actual 里的 None 表示这张表没查到。
+    """
+    expect = EXPECTED if expect is None else expect
+    tolerate = set(GROWING) if tolerate is None else tolerate
+    floor = {} if floor is None else floor
+    failures: list[dict[str, object]] = []
     for table, want in expect.items():
         got = actual.get(table)
         if got is None:
-            failures.append({"table": table, "expected": want, "actual": None})
+            failures.append({
+                "table": table, "expected": want, "actual": None,
+                "reason": REASON_MISSING_TABLE,
+            })
+            continue
+        lowerBound = floor.get(table)
+        if lowerBound is not None and got < lowerBound:
+            # 下限是绝对的，连 GROWING 的 slack 也盖不过它。
+            failures.append({
+                "table": table, "expected": want, "actual": got,
+                "reason": REASON_BELOW_FLOOR,
+            })
             continue
         if got == want:
             continue
@@ -2116,17 +2629,27 @@ def checkAll(
         # 正常增长报成失败，把门禁变成噪声。
         if table in tolerate and got >= want * (1 - GROWING_SLACK):
             continue
-        failures.append({"table": table, "expected": want, "actual": got})
+        failures.append({
+            "table": table, "expected": want, "actual": got, "reason": REASON_DRIFT,
+        })
     return failures
 
 
-def renderReport(failures: list[dict]) -> str:
+def renderReport(
+    failures: list[dict[str, object]],
+    tableCount: int | None = None,
+    targetLabel: str = "",
+) -> str:
+    checked = len(EXPECTED) if tableCount is None else tableCount
     if not failures:
-        return f"全部对上 ✓（{len(EXPECTED)} 张表）"
+        suffix = f"，目标：{targetLabel}" if targetLabel else ""
+        return f"全部对上 ✓（{checked} 张表{suffix}）"
     lines = [f"{len(failures)} 张表对不上："]
     for f in failures:
-        lines.append(f"  {f['table']}: 期望 {f['expected']}，实际 {f['actual']}")
-    lines.append("若表在 GROWING 里且下降幅度很小，可能是导出后继续写入；若是对不上，先别启动 backend。")
+        reason = f.get("reason", REASON_DRIFT)
+        lines.append(f"  {f['table']}: 期望 {f['expected']}，实际 {f['actual']}（{reason}）")
+    lines.append("『表不存在』与『低于附录 A 下限』先查迁移与备份，别去查网络。")
+    lines.append("若是 GROWING 表且下降幅度很小，可能是导出后继续写入；若是对不上，先别启动 backend。")
     return "\n".join(lines)
 
 
@@ -2139,26 +2662,88 @@ def _parseDsn(databaseUrl: str) -> str:
     return databaseUrl.replace("postgresql+asyncpg://", "postgresql://", 1)
 
 
-async def _queryAll(dsn: str) -> dict[str, int]:
+def _redact(dsn: str, message: str) -> str:
+    """把错误消息里的 DSN 与口令抹掉 —— 错误输出同样不许带凭据。"""
+    if dsn:
+        message = message.replace(dsn, "<DSN>")
+    _, _, credentials = dsn.partition("://")
+    userInfo, atSign, _ = credentials.partition("@")
+    if atSign and ":" in userInfo:
+        password = userInfo.split(":", 1)[1]
+        if password:
+            message = message.replace(password, "***")
+    return message
+
+
+async def _queryAll(dsn: str) -> dict[str, int | None]:
     import asyncpg
 
     conn = await asyncpg.connect(dsn)
     try:
-        out: dict[str, int] = {}
+        out: dict[str, int | None] = {}
         for table in EXPECTED:
-            out[table] = await conn.fetchval(f"SELECT count(*) FROM {table}")  # noqa: S608 — 表名来自模块常量
+            try:
+                out[table] = await conn.fetchval(f"SELECT count(*) FROM {table}")  # noqa: S608 — 表名来自模块常量
+            except asyncpg.exceptions.UndefinedTableError:
+                # 半恢复的库（表没建出来）正是 spec §6.4 铁律场景。
+                # 记 None 交给 checkAll 报成「表不存在」，退出码仍是 1：
+                # 失败关闭不变，只有诊断变了。让异常冒上去会被 main 归成
+                # 「连接/查询问题」，把运维送去查一个明明在库里的问题；
+                # 中断整轮统计则会让后面所有表都查不成。
+                out[table] = None
         return out
     finally:
         await conn.close()
 
 
+def _warnAppendixSnapshot() -> None:
+    """回落提醒。静默回落会让运维重新制造这次要消除的困惑。"""
+    print(
+        "=" * 70 + "\n"
+        "!! 未提供 --baseline：正在用 2026-10-22 spec 附录 A 的快照核对。\n"
+        "!! 这份快照已知漂移 —— 源库一直在被写入，audit_log / evidence /\n"
+        "!! multi_step_step 的实测值已经与附录 A 不一致，照它核对会把正常环境\n"
+        "!! 判成「迁移失败」。计划里的 Step 6 始终传 --baseline；只有临时排查才不带。\n"
+        + "=" * 70,
+        file=sys.stderr,
+    )
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 3 or argv[1] != "--dsn":
-        print("用法：python -m scripts.verify_migration --dsn <DATABASE_URL>", file=sys.stderr)
+    try:
+        rawDsn, baselinePath = parseArgs(argv)
+    except UsageError as exc:
+        print(f"{exc}\n{USAGE}", file=sys.stderr)
         return 2
-    actual = asyncio.run(_queryAll(_parseDsn(argv[2])))
-    failures = checkAll(actual)
-    print(renderReport(failures))
+
+    dsn = _parseDsn(rawDsn)
+    baseline: dict[str, int] | None = None
+    if baselinePath is not None:
+        try:
+            baseline = loadBaseline(baselinePath)
+        except BaselineError as exc:
+            print(f"基线不可用：{exc}", file=sys.stderr)
+            print("这是环境问题，不是行数偏差；先修基线文件。", file=sys.stderr)
+            return 3
+    else:
+        _warnAppendixSnapshot()
+
+    try:
+        actual = asyncio.run(_queryAll(dsn))
+    except Exception as exc:
+        # 连不上库不是「行数对不上」。不区分的话，一个连错库的部署
+        # 会带着退出码 1 进门禁，运维去查一个不存在的数据问题。
+        print(f"查询失败（{type(exc).__name__}）：{_redact(dsn, str(exc))}", file=sys.stderr)
+        print("这是连接/查询问题，不是行数偏差；请先确认 DATABASE_URL 与容器网络。", file=sys.stderr)
+        return 3
+
+    if baseline is None:
+        failures = checkAll(actual)
+        targetLabel = ""
+    else:
+        failures = checkAll(actual, expect=baseline, floor=EXPECTED)
+        targetLabel = f"导出基线 {baselinePath}"
+    print(renderReport(failures, targetLabel=targetLabel))
     return 1 if failures else 0
 
 
@@ -2171,7 +2756,7 @@ if __name__ == "__main__":
 ```bash
 cd backend && python -m pytest app/tests/unit/test_verify_migration.py -v
 ```
-Expected: 15 passed
+Expected: 45 passed
 
 - [ ] **Step 5: 启动 backend（此时才允许）**
 
@@ -2186,17 +2771,43 @@ ssh root@<centos> 'cd /opt/qa/docker && \
 ```bash
 scp backend/scripts/verify_migration.py root@<centos>:/opt/qa/
 ssh root@<centos> "docker cp /opt/qa/verify_migration.py qa-backend:/app/scripts/ \
-  && docker exec qa-backend sh -c 'python -m scripts.verify_migration --dsn \"\$DATABASE_URL\"'"
+  && docker cp /opt/qa-transfer/rowcounts.baseline.json qa-backend:/app/ \
+  && docker exec qa-backend sh -c 'python -m scripts.verify_migration --dsn \"\$DATABASE_URL\" --baseline /app/rowcounts.baseline.json'"
+rc=$?
+echo "exit=$rc"
+case "$rc" in
+  0) echo "OK：8 张表与导出时实测基线一致，且都不低于 spec 附录 A 下限" ;;
+  1) echo "FAIL：有偏差 —— 看上面逐项『期望/实际/原因』。『表不存在』与『低于附录 A 下限』先查迁移与备份，别去查网络"; exit 1 ;;
+  2) echo "FAIL：用法错 —— 看 stderr 的用法行"; exit 1 ;;
+  3) echo "FAIL：环境不可用（基线读不了 / 连不上库）—— 不是行数偏差，先修基线文件或 DATABASE_URL"; exit 1 ;;
+  *) echo "FAIL：未知退出码 $rc"; exit 1 ;;
+esac
 ```
+
+> `--baseline` **必须传**。不传会回落到 spec 附录 A 的快照并打一条醒目告警：
+> 静默回落会让运维重新制造这次要消除的困惑（在正常环境上读出一份「迁移失败」）。
 ⚠️ **必须多一层 `sh -c`**：`$DATABASE_URL` 只存在于**容器内**的环境里，CentOS 宿主
 的 root shell 没有这个变量。写成 `docker exec qa-backend python -m ... --dsn "$DATABASE_URL"`
 时，变量会在宿主 shell 上展开成空串 ⇒ `--dsn ""` ⇒ 用法错误退出 2 —— 在一个
 数据完全正常的环境上，门禁会红。`sh -c` 把字符串原样送进容器，由容器自己的 shell 展开。
 
-**门禁**：`全部对上 ✓`。**这一步没过就不要往下走** —— 带着残缺数据起 backend 会让 seed 在半空库上产出脏数据（spec §6.4 铁律）。
+**门禁**：输出 `全部对上 ✓` 且 `exit=0`。**这一步没过就不要往下走** —— 带着残缺数据起 backend 会让 seed 在半空库上产出脏数据（spec §6.4 铁律）。
 
-> 反向自检：故意把阈值改小（如把 `audit_log` 期望改成 17000），重跑本步必须报
-> `audit_log: 期望 17000，实际 17100` 并返回 1。恢复后再跑一次必须回到 ✓。
+> **退出码必须分开判**，不要只写 `test "$rc" -eq 0` 之外再靠人眼读数字：
+> 2 是「命令写错了」，3 是「环境没准备好」，两者都不是「行数不对」。
+> 把 3 混进 1，运维就会去查一个不存在的数据问题。
+
+> 反向自检（三条分别覆盖「目标用错」「环境不可用」「真通过」，都要实跑过）：
+> 1. 把 `rowcounts.baseline.json` 里 `audit_log` 的值改小 100，重跑必须报
+>    `audit_log: 期望 …，实际 …（行数偏差）` 并返回 1；
+> 2. 把 `--baseline` 指向一个不存在的路径，重跑必须返回 3；
+> 3. 恢复基线文件，重跑必须回到 `全部对上 ✓` 且 `exit=0`。
+
+> ⚠️ **`audit_log` 之类的表将来被合法清理时（归档、保留策略），不要放宽脚本。**
+> 正确做法：把这次清理记进变更记录，并更新 spec 附录 A 的数字
+> （`EXPECTED` 就是从那儿抄的，Task 8 的基线也会随下一次导出重新生成）。
+> 为了迁就一次清理去改 `GROWING_SLACK` 或下限，等于把门禁的判据
+> 交给下一个做清理的人 —— 那次清理大概不会有记录。
 > 一条只在成功时才绿的命令，等于没有命令。
 
 ---

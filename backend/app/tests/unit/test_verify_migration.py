@@ -184,7 +184,12 @@ def test_main_exit_code_zero_when_all_match(monkeypatch, capsys):
     monkeypatch.setattr("scripts.verify_migration._queryAll",
                         _asyncReturning(dict(EXPECTED)))
     assert main(["prog", "--dsn", "postgresql://u:p@h:5432/db"]) == 0
-    assert "全部对上" in capsys.readouterr().out
+    # 「全部对上」是**相等**语义。非对称规则下静态表只判「不低于」，
+    # 比基线多 1 行也是绿的 —— 成功行若还写「对上」，运维会以为
+    # 行数被逐格核对过。措辞必须跟着语义走，所以正向、反向都断言。
+    out = capsys.readouterr().out
+    assert "全部通过 ✓" in out
+    assert "全部对上" not in out
 
 
 def test_main_exit_code_one_when_counts_drift(monkeypatch, capsys):
@@ -329,7 +334,11 @@ def test_main_exit_code_two_on_whitespace_only_dsn(monkeypatch):
 
 # ── I5：基线改成「导出那一刻实测的行数」 ──────────────────────────────────
 # 附录 A 是 2026-10-22 的一次快照：audit_log 已漂到 17101、evidence 1738、
-# multi_step_step 30（静态表 ⇒ 门禁必红）。基线文件由 Task 8 导出时产出。
+# multi_step_step 30。基线文件由 Task 8 导出时产出。
+# ⚠️ 别再写「静态表 ⇒ 门禁必红」：那是**相等**语义下的结论，已经作废。
+# 非对称规则下静态表只判「不低于」，17101 ≥ 17100 是绿的 —— 向上漂移不再误报，
+# 向下才精确到基线本身。几乎恒过的是**回落**路径（拿附录 A 当目标），
+# 不是静态表判据本身。
 
 
 def _writeBaseline(tmp_path, tables: dict, measuredAt: str = "2026-10-22T09:00:00+08:00",
@@ -444,7 +453,7 @@ def test_main_uses_baseline_target_end_to_end(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr("scripts.verify_migration._queryAll", _asyncReturning(dict(baseline)))
     assert main(["prog", "--dsn", FAKE_DSN, "--baseline", _writeBaseline(tmp_path, baseline)]) == 0
     captured = capsys.readouterr()
-    assert "全部对上" in captured.out
+    assert "全部通过 ✓" in captured.out
     assert "已知漂移" not in captured.err
 
 

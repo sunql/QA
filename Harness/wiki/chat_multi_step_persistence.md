@@ -1,6 +1,6 @@
 ---
 created: 2026-10-06
-updated: 2026-10-06
+updated: 2026-10-18
 sources:
   - docs/superpowers/specs/2026-10-05-multi-step-persist.md
   - docs/superpowers/plans/2026-10-05-multi-step-persist.md
@@ -146,6 +146,19 @@ POST /api/v1/chat/multi-step/{runId}/resume
 - 续跑经 store 的 `resumeRun` 统一发起，与首发共用同一套 SSE handler；`Idempotency-Key` 由前端 `crypto.randomUUID()` 生成。
 - 续跑的写入**按目标消息定向**：只更新被续跑的那条 assistant 消息，不动最新那条（见变更记录 Task 9 的续跑定向写入修复）。
 - 非流式渲染下**没有**续跑入口与压缩徽章（`runId` / 「已压缩」只走 SSE 增量，非流式 `steps` 负载不带），见遗留项 8。
+
+## 9. JSONB 归一 SSOT（chore-p2-jsonsafe）
+
+三条链路的 JSONB 落库共用 `app/utils/json_safe.py:jsonSafe`（`Decimal→float`、
+`datetime/date→isoformat`、tuple→list、未知类型→`str`、不可变且无变化时保持对象同一性）：
+
+| 调用方 | 用途 |
+|---|---|
+| `multi_step_persistence` / `multi_step_compressor` | `data` / `data_compressed` / `chart_option` |
+| `chat_chart_persist.boundedChartOption / boundedTableOption` | `session_message` 的图表/表负载（2026-10-18 由本模块原样复制件 `_jsonSafe` 收敛而来） |
+
+**刻意不合并**的两个同名函数：`stream_events._jsonSafe`（SSE 出口契约：`Decimal→str`、非有限值哨兵）与
+`research_session_service._coerceJsonSafe`（bytes/set 展开 + `json.dumps` 兜底）—— 语义不同，合并会改线上契约。
 
 ## 相关条目
 

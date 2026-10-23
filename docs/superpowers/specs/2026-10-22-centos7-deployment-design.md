@@ -354,7 +354,11 @@ systemctl enable --now docker
 
 ### P5 · 数据导入
 
-**门禁**：逐表行数与源端一致（至少 `ontology_class` / `data_source` / `system_config` 三表），Neo4j `MATCH (n) RETURN count(n)` 等于源端。
+**门禁**：逐表行数**不低于导出时实测基线**（不是「与源端相等」—— 基线在 `pg_dump`
+之前量，dump 快照更晚，恢复值必然 >= 基线，多出来的是导出期间新写入的行，判成不一致
+就是在好环境上报迁移失败）。PG 侧由 `backend/scripts/verify_migration.py` 核，
+目标取**导出时的实测行数**，spec 附录 A 只作**绝对下限**。Neo4j
+`MATCH (n) RETURN count(n)` 等于源端。详见计划 Task 10。
 
 ### P6 · Embedding provider 切换（**必须在 P7 回填之前**）
 
@@ -517,11 +521,12 @@ docker compose up -d postgres
 #    这是好事（不会假绿），但前提是**有人真的读了那条报错**。
 #    紧跟其后的 "立即验" 就是防这个：只看容器 healthy 会漏掉恢复根本没发生。
 docker exec -i qa-postgres pg_restore -U qa_user -d qa_metadata --clean --if-exists < backup/pg/qa_metadata_*.dump
-# 立即验：版本号 + 关键表行数（对比附录 A）
+# 立即验：版本号 + 关键表行数（对比**导出时实测基线**；spec 附录 A 只当绝对下限）
 docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc "select version_num from alembic_version;"
 #   期望 0132 —— 与 backend 镜像的 head 对齐
 docker exec -i qa-postgres psql -U qa_user -d qa_metadata -tAc "select count(*) from audit_log;"
-#   期望 17100（不是 pg_stat 的估算值，见附录 A）
+#   期望 >= 导出那一刻的实测行数；附录 A 的 17100 是**绝对下限**，不是判定目标
+#   （也不是 pg_stat 的估算值，见附录 A）
 
 # --- Neo4j（server 必须停着，load 才允许） ---
 docker compose up -d neo4j && docker compose stop neo4j

@@ -1704,7 +1704,9 @@ REMOTE
 > 命令列留空表示用镜像默认 CMD（服务类镜像会一直跑，超时即成功）。刻意**不用** `--entrypoint /bin/sh`：`minio` / `milvus` 镜像里没有 shell，那样只会得到 126/127 假失败。
 > 任一 `RUN-FAIL` 且 rc=125，回 Task 2 Step 4 降级 Docker 版本。
 
----## Task 5: Ollama 模型离线预置
+---
+
+## Task 5: Ollama 模型离线预置
 
 **Files:** 无代码文件。纯运维。
 

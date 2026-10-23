@@ -48,8 +48,8 @@
 | `backend/pyproject.toml` | `dev` extras 补 `pyyaml>=6.0.1`（原为传递依赖） | Task 3 |
 | `backend/scripts/preflight_centos.py` | 宿主勘察：内核 / XFS ftype / AVX2 / glibc / CPU / 内存 / 磁盘 / SELinux。JSON 输出 + 非零退出码 | Task 1 |
 | `backend/app/tests/unit/test_preflight_centos.py` | 上者的单测 | Task 1 |
-| `backend/scripts/build_offline_images.sh` | 联网机造镜像 + `docker save` 打包（纯编排） | Task 4 |
-| `backend/app/tests/unit/test_build_offline_images.py` | 断言脚本镜像清单与 compose 一致，防漏打镜像 | Task 4 |
+| `backend/scripts/build_offline_images.py` | 联网机造镜像 + `docker save` 打包 + 产出镜像 ID 清单（有逻辑的部分都在这里，所以是 Python 不是 bash） | Task 4 |
+| `backend/app/tests/unit/test_build_offline_images.py` | 上者的行为单测（喂假数据断言转换结果），防漏打镜像 | Task 4 |
 | `backend/scripts/verify_env_keys.py` | 比对源端与 CentOS 侧 `.env` 的复用键指纹（CRLF 安全、不回显明文） | Task 7 |
 | `backend/app/tests/unit/test_verify_env_keys.py` | 上者的单测 | Task 7 |
 | `backend/scripts/verify_migration.py` | 导入后行数核对（目标是导出时实测基线，spec 附录 A 只作绝对下限） | Task 10 |
@@ -815,8 +815,9 @@ git commit -m "feat(deploy): CentOS compose overlay — 加 ollama、去 mysql-d
 ## Task 4: 离线镜像构建与交付
 
 **Files:**
-- Create: `backend/scripts/build_offline_images.sh`
-- Test: `backend/app/tests/unit/test_build_offline_images.py`（断言脚本里的镜像清单与 compose 一致）
+- Create: `backend/scripts/build_offline_images.py`
+- Delete: `backend/scripts/build_offline_images.sh`（旧 bash 版 —— 计划里的全局约束是「有逻辑的脚本一律写 Python + pytest，bash 只做纯编排」，而旧脚本里全是逻辑）
+- Test: `backend/app/tests/unit/test_build_offline_images.py`（断言脚本的**转换行为**：tag 归一 / 成员过滤 / 行数门禁，喂假数据而不是断脚本文本的形状）
 
 **Interfaces:**
 - Consumes: Task 3 的 overlay
@@ -825,10 +826,16 @@ git commit -m "feat(deploy): CentOS compose overlay — 加 ollama、去 mysql-d
 - [ ] **Step 1: 写失败测试**
 
 ```python
-"""离线镜像清单必须与 compose 实际用到的镜像一致。
+"""离线镜像脚本（Python 版）的行为单测。
 
-这是防「漏打一个镜像，到了 CentOS 才 pull 失败」的唯一低成本检查。
-compose 里新增/删除服务时，这个测试会先红。
+只喂假数据：不真调 docker、不真跑 compose、不碰网络。
+
+断言的是**行为**（喂假数据看输出），不是脚本文本的形状 ——
+旧 bash 版只能断 `"awk '([^']*)'" in text` 这种字符串，
+转换逻辑本身测不到，tag 归一与分隔符两个缺陷正是这么漏出去的
+（`config --images` 给裸名、`docker images` 给带 tag 的，两边永远对不上）。
+
+依据 docs/superpowers/specs/2026-10-22-centos7-deployment-design.md §6.1。
 """
 
 from __future__ import annotations
@@ -836,12 +843,25 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import yaml
+
+from scripts import build_offline_images as mod
+from scripts.build_offline_images import (
+    MIN_IMAGE_COUNT,
+    NPM_REGISTRY_DEFAULT,
+    PLATFORM,
+    collectDigests,
+    filterPackaged,
+    normalizeTag,
+)
 
 REPO = Path(__file__).resolve().parents[4]
 COMPOSE_FILES = [REPO / "docker" / "docker-compose.yml",
                  REPO / "docker" / "docker-compose.centos.yml"]
-SCRIPT = REPO / "backend" / "scripts" / "build_offline_images.sh"
+
+# compose 里没有 image: 字段的两个服务 —— 它们是本地 build 出来的
+BUILT_IMAGE_NAMES = ["qa-system-backend:latest", "qa-system-frontend:latest"]
 
 
 class _ComposeLoader(yaml.SafeLoader):
@@ -877,147 +897,344 @@ def _composeImages() -> set[str]:
     return images
 
 
-def _scriptImages() -> set[str]:
-    """从 IMAGES=(...) 数组里取镜像名。
+class FakeDocker:
+    """假 docker：按命令形状回放固定输出，并记录所有调用。
 
-    数组元素带引号（  "postgres:16-alpine" ），正则必须容许首尾引号，
-    否则 listed 恒为空、missing 恒为全集，这个测试就永久失败。
+    协议与脚本里的 runCommand 一致：run(args, env=None) -> stdout。
     """
-    text = SCRIPT.read_text(encoding="utf-8")
-    block = re.search(r"^IMAGES=\((.*?)^\)", text, re.S | re.M)
-    assert block, "找不到 IMAGES=(...) 数组"
-    return set(re.findall(r"""['"]?([a-z0-9._/-]+:[a-zA-Z0-9._-]+)['"]?""",
-                          block.group(1)))
+
+    def __init__(self, composeImages=None, localImages=None, ids=None):
+        self.composeImages = composeImages if composeImages is not None else []
+        self.localImages = localImages if localImages is not None else []
+        self.ids = ids or {}
+        self.calls: list[tuple[list[str], dict | None]] = []
+
+    def __call__(self, args, env=None):
+        args = list(args)
+        self.calls.append((args, env))
+        if args[:2] == ["docker", "pull"]:
+            return ""
+        if args[:2] == ["docker", "compose"]:
+            if "config" in args:
+                return "".join(name + "\n" for name in self.composeImages)
+            return ""
+        if args[:2] == ["docker", "images"]:
+            return "".join(name + "\n" for name in self.localImages)
+        if args[:3] == ["docker", "image", "inspect"]:
+            return self.ids.get(args[-1], "sha256:" + "0" * 64)
+        if args[:2] == ["docker", "save"]:
+            return ""
+        raise AssertionError(f"未预期的命令：{args!r}")
+
+    def commands(self) -> list[list[str]]:
+        return [args for args, _ in self.calls]
 
 
-def _scriptCode() -> str:
-    """脚本里去掉注释之后的正文。
-
-    裸子串断言最常见的假绿来源就是注释：注释里写一句 "docker save" 就能让
-    `assert "docker save" in text` 成立，命令真被删了测试照样绿。
-    凡是「某个东西必须真的在跑」的断言，都得在这份正文上做。
-
-    整行注释和行尾注释都要剥 —— 只剥整行的话，把命令挪到行尾注释里
-    （`build frontend  # --build-arg ...`）照样能骗过断言。
-    """
-    text = SCRIPT.read_text(encoding="utf-8")
-    lines = []
-    for line in text.splitlines():
-        if line.lstrip().startswith("#"):
-            continue
-        lines.append(re.sub(r"\s+#.*$", "", line))
-    return "\n".join(lines)
+def _fakeId(tag: str) -> str:
+    """给一个 tag 编一个稳定的假短 ID（12 位，与 docker images 的 {{.ID}} 同形）。"""
+    seed = sum(ord(ch) for ch in tag)
+    return "sha256:" + format(seed, "012x")
 
 
-def test_script_exists():
-    assert SCRIPT.exists(), "build_offline_images.sh 必须存在"
+def _defaultComposeImages() -> list[str]:
+    """compose 视角：8 个外部镜像（带 image: 字段）+ 2 个本地 build 的裸名。"""
+    return sorted(_composeImages()) + ["qa-system-backend", "qa-system-frontend"]
 
 
-def test_script_lists_every_compose_image():
-    missing = _composeImages() - _scriptImages()
+def _localImages() -> list[str]:
+    """本机视角：脚本 pull 的 9 个 + 本地 build 的 2 个。"""
+    return sorted(mod.IMAGES) + BUILT_IMAGE_NAMES
+
+
+# ---------------------------------------------------------------- normalizeTag
+
+
+def test_normalizeTag_appends_latest_to_bare_name():
+    assert normalizeTag("qa-system-backend") == "qa-system-backend:latest"
+
+
+def test_normalizeTag_keeps_existing_tag():
+    assert normalizeTag("postgres:16-alpine") == "postgres:16-alpine"
+
+
+def test_normalizeTag_handles_registry_path_without_tag():
+    """带 registry 路径的裸名也要补 tag（老 sed 的 /^([^/:]+)$/ 漏了这种）。"""
+    assert normalizeTag("myorg/foo") == "myorg/foo:latest"
+
+
+def test_normalizeTag_keeps_registry_port_repo():
+    """registry 带端口（host:5000/foo）时，冒号不是 tag 分隔符。"""
+    assert normalizeTag("host:5000/foo") == "host:5000/foo:latest"
+
+
+def test_normalizeTag_keeps_registry_path_with_tag():
+    assert normalizeTag("quay.io/coreos/etcd:v3.5.5") == "quay.io/coreos/etcd:v3.5.5"
+
+
+# --------------------------------------------------------------- filterPackaged
+
+
+def test_filterPackaged_drops_unrelated_images():
+    packaged = {"postgres:16-alpine", "qa-system-backend:latest"}
+    lines = ["postgres:16-alpine", "hello-world:latest", "argwarn-b:latest"]
+    assert filterPackaged(packaged, lines) == ["postgres:16-alpine"]
+
+
+def test_filterPackaged_drops_stale_tags_of_same_repo():
+    """构建机留着 qa-system-backend:pre-deploy-… 时，只按仓库名匹配会把它也收进去
+    ⇒ Step 5 那边「缺一个」⇒ 假红。必须按 repo:tag 精确匹配。"""
+    packaged = {"qa-system-backend:latest"}
+    lines = ["qa-system-backend:pre-deploy-20261022", "qa-system-backend:latest"]
+    assert filterPackaged(packaged, lines) == ["qa-system-backend:latest"]
+
+
+def test_filterPackaged_dedupes_repeated_names():
+    packaged = {"postgres:16-alpine"}
+    lines = ["postgres:16-alpine", "postgres:16-alpine"]
+    assert filterPackaged(packaged, lines) == ["postgres:16-alpine"]
+
+
+# --------------------------------------------------------------- collectDigests
+
+
+def test_collectDigests_emits_one_line_per_tag():
+    """重复 tag 必须只出一行（Step 5 门禁 3 是 n -eq 11，多一行就挂）。"""
+    def fakeInspect(tag: str) -> str:
+        return "sha256:d9e853e87e55aaaa"
+
+    out = collectDigests(["alpine:3.20"], fakeInspect)
+    assert out == ["alpine:3.20 d9e853e87e55"]
+
+
+def test_collectDigests_strips_sha256_prefix_and_truncates_to_12():
+    """inspect 的 {{.Id}} 是 64 位带 sha256: 前缀的，
+    而 Step 5 消费侧的 docker images 给的是 12 位无前缀 ——
+    两步（去前缀 + 截断）少做任何一步，11 行全部对不上 ⇒ DIGEST-MISMATCH 假红。"""
+    def fakeInspect(tag: str) -> str:
+        return "sha256:70303b0ef676bbbb"
+
+    assert collectDigests(["qa-system-backend:latest"], fakeInspect) == \
+        ["qa-system-backend:latest 70303b0ef676"]
+
+
+def test_collectDigests_sorts_by_repo_tag():
+    def fakeInspect(tag: str) -> str:
+        return "sha256:" + "1" * 64
+
+    out = collectDigests(["postgres:16-alpine", "alpine:3.20"], fakeInspect)
+    assert out == ["alpine:3.20 111111111111", "postgres:16-alpine 111111111111"]
+
+
+def test_collectDigests_line_matches_step5_consumer_format():
+    """Step 5 消费侧是 `docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}"`，
+    产出的行必须与它逐字节同形（单空格 + 12 位小写十六进制，无前缀）。"""
+    def fakeInspect(tag: str) -> str:
+        return "sha256:d9e853e87e55526f"
+
+    line = collectDigests(["postgres:16-alpine"], fakeInspect)[0]
+    assert re.fullmatch(r"[^ ]+ [0-9a-f]{12}", line), line
+
+
+def test_collectDigests_dedupes_same_tag():
+    def fakeInspect(tag: str) -> str:
+        return "sha256:" + "2" * 64
+
+    assert collectDigests(["alpine:3.20", "alpine:3.20"], fakeInspect) == \
+        ["alpine:3.20 222222222222"]
+
+
+# ------------------------------------------------------------------ 契约常量
+
+
+def test_images_matches_compose_external_images():
+    """compose 里新增/删除外部镜像时这个测试先红（防漏打镜像）。"""
+    missing = _composeImages() - set(mod.IMAGES)
     assert not missing, f"脚本漏了这些镜像：{sorted(missing)}"
-    # compose 文件的**路径**也得对：Step 5 从**仓库根**调用本脚本，脚本自己不 cd，
-    # 裸文件名（-f docker-compose.yml）会 no such file or directory。
-    code = _scriptCode()
-    assert "-f docker/docker-compose.yml" in code, \
-        "compose 路径必须是 docker/docker-compose.yml（Step 5 从仓库根调用）"
-    assert "-f docker/docker-compose.centos.yml" in code, \
-        "compose 路径必须是 docker/docker-compose.centos.yml（Step 5 从仓库根调用）"
-    # ⚠️ 只断「存在」不够：脚本里有两处 compose 调用，把其中一处退回裸文件名
-    # 时「存在」仍然成立。所以反过来断裸写法一次都不许出现。
-    assert "-f docker-compose.yml" not in code, "compose 路径不能退回裸文件名"
-    assert "-f docker-compose.centos.yml" not in code, "compose 路径不能退回裸文件名"
 
 
-def test_script_parser_is_not_silently_empty():
-    """守卫上面那个引号 bug：解析出 0 个镜像时必须红，而不是让 missing 变成全集。
-
-    下限取 9 —— 合并后 compose 的 8 个外部镜像 + alpine:3.20（通用工具容器，
-    Task 4 Step 6 的 run 门禁也要用它）。写成 8 的话，正则只多吐出一个也能过。
-    """
-    assert len(_scriptImages()) >= 9, f"只解析出 {len(_scriptImages())} 个镜像，正则多半坏了"
-
-
-def test_compose_image_loader_tolerates_the_centos_overlay():
-    """overlay 用 `!override`，普通 safe_load 读不了 —— 守卫这一点别退回去。"""
-    images = _composeImages()
-    assert "ollama/ollama:latest" in images, "overlay 里的 ollama 必须被收进来"
-    assert "postgres:16-alpine" in images
+def test_images_constant_is_the_nine_external_images():
+    assert mod.IMAGES == (
+        "postgres:16-alpine",
+        "neo4j:5.23-community",
+        "quay.io/coreos/etcd:v3.5.5",
+        "minio/minio:RELEASE.2023-03-20T20-16-18Z",
+        "milvusdb/milvus:v2.4.6",
+        "minio/minio:RELEASE.2024-06-13T22-53-53Z",
+        "mysql:8.0",
+        "alpine:3.20",
+        "ollama/ollama:latest",
+    )
 
 
-def test_script_forces_amd64_platform():
-    """脚本把平台抽成了变量（`docker pull --platform "$PLATFORM"`），
-    所以不能断言字面量 "--platform linux/amd64" 在文件里 —— 那样恒失败。
-    拆成三条：pull 用了 flag、PLATFORM 的值确实是 amd64、compose build 侧也钉住了。
-    三条缺一不可：只断 flag 的话，写成 PLATFORM=linux/arm64 照样过；
-    只断 pull 的话，build 侧退化成 arm64 镜像照样过。
-
-    compose build 侧不是靠 `--platform`：`docker compose build` 根本没有这个 flag
-    （compose v2.27.1 与 v5.6.0 的 build 子命令都没有），写了会报 unknown flag。
-    真正生效的是 DOCKER_DEFAULT_PLATFORM —— compose 的 applyPlatforms() 读它
-    给没写 platform 的服务补 build.platforms。
-    """
-    text = SCRIPT.read_text(encoding="utf-8")
-    code = _scriptCode()
-    assert "--platform" in text, "拉镜像和 build 都没钉平台"
-    assert re.search(r'^PLATFORM="linux/amd64"$', text, re.M), \
-        "Mac 是 arm64，不钉 amd64 会打出跑不了的镜像"
-    # ⚠️ 下面两条必须断**正文**而不是全文：注释里就写着 "--platform" 和
-    # "DOCKER_DEFAULT_PLATFORM"，断全文的话命令被删了测试照样绿。
-    assert "--platform" in code, "docker pull 必须显式钉平台"
-    assert re.search(r'DOCKER_DEFAULT_PLATFORM="\$PLATFORM"', code), \
-        "compose build 必须用 DOCKER_DEFAULT_PLATFORM 钉住 amd64"
+def test_min_image_count_is_eleven():
+    assert MIN_IMAGE_COUNT == 11
 
 
-def test_script_passes_npm_registry_to_the_frontend_build():
-    """NPM_REGISTRY 必须以 `--build-arg` 传进 build 阶段。
-
-    只写 `NPM_REGISTRY=xxx docker compose build` 是不够的：宿主环境变量只参与
-    compose 自身的 ${} 插值，buildkit 收不到（实测 build args 里只有
-    VITE_API_BASE_URL）。少了 --build-arg，Dockerfile.frontend 的
-    ARG NPM_REGISTRY 会退回默认的 registry.npmjs.org —— 正是这条要防的卡死。
-    """
-    code = _scriptCode()
-    assert '--build-arg NPM_REGISTRY="$NPM_REGISTRY"' in code, \
-        "NPM_REGISTRY 必须用 --build-arg 传，否则前端构建会走官方 npm 源"
+def test_platform_is_amd64():
+    """Mac 是 arm64、CentOS 是 x86_64 —— 平台不钉死会打出跑不了的镜像。"""
+    assert PLATFORM == "linux/amd64"
 
 
-def test_script_saves_and_checksums():
-    text = SCRIPT.read_text(encoding="utf-8")
-    code = _scriptCode()
-    assert "docker save" in text
-    assert "sha256sum" in text
-    # ⚠️ 上面两条是子串断言，注释里出现 "docker save" 也能满足它们 ——
-    # 只断子串的话，把两处 docker save 全删掉测试照样绿。两个 tar
-    # （外部镜像包 + 本地构建包）必须各有一条真正的 docker save 命令。
-    assert code.count("docker save -o") >= 2, \
-        "外部镜像包与本地构建包两个 tar 都要有 docker save 命令"
-    assert "sha256sum" in code, "sha256sum 必须真的在跑，不能只写在注释里"
-    # 镜像 ID 清单是 Step 5 门禁 2（DIGEST-OK 比对）的输入，脚本不产出它
-    # Step 5 就无从比对。而且必须带硬断言：文件为空时下游比对会「空空如也 ⇒ 通过」。
-    assert re.search(r'>\s*images\.digests\.txt', code), \
-        "必须产出镜像 ID 清单 images.digests.txt"
-    assert re.search(r'\[ "\$n" -ge (\d+) \]', code), \
-        "images.digests.txt 必须有行数硬断言，否则空文件会让下游比对恒过"
-    assert int(re.search(r'\[ "\$n" -ge (\d+) \]', code).group(1)) >= 10, \
-        "行数下限太低，空清单照样能过"
-    # ⚠️ digests 清单必须**只记打包的那几个**，不能全量 `docker images`：
-    # Step 5 的 `comm -13` 语义是「在源端记录里、却不在 CentOS 上」⇒ 报 ID 不符。
-    # 联网构建机跑着开发栈，必然有与转移包无关的镜像；全量记下来 ⇒ 门禁 2 必然假红。
-    assert ".packaged.txt" in code, "必须先按打包清单过滤，不能全量记 docker images"
-    awkProg = re.search(r"awk '([^']*)'", code)
-    assert awkProg, "必须用 awk 按打包清单过滤"
-    assert "($1 in p)" in awkProg.group(1), "awk 过滤条件必须保留「在打包清单里」这一侧"
-    assert "!($1 in p)" not in awkProg.group(1), "awk 过滤条件写反了就变成记别人的镜像"
-    # $BUILT 是空格分隔的**一个字符串**：zsh 默认不拆未加引号的参数展开，
-    # 靠单词拆分在 zsh 下会把两个镜像名写进同一行 ⇒ .packaged.txt 少一项 ⇒ ABORT。
-    assert "tr ' ' '\\n'" in code, "$BUILT 必须用 tr 拆行，不能靠 shell 单词拆分"
-    # ⚠️ `config --images` 给的是**裸名**（"qa-system-backend"），而 `docker images`
-    # 给的是**带 tag** 的（"qa-system-backend:latest"）—— 不补 tag 就永远匹配不上，
-    # 本地构建的那两个会被过滤掉、行数断言直接 ABORT（实测 8 行 / 期望 11）。
-    assert re.search(r"tr ' ' '\\n'.*:latest", code), \
-        "裸名必须补 :latest 才能和 docker images 的 repo:tag 对上"
+def test_npm_registry_default_is_the_mirror():
+    assert NPM_REGISTRY_DEFAULT == "https://registry.npmmirror.com"
 
+
+# ------------------------------------------------------------------ 命令形状
+
+
+def test_pull_command_pins_platform():
+    """拉镜像必须显式钉平台。"""
+    args = mod.pullCommand("postgres:16-alpine")
+    assert args[:2] == ["docker", "pull"]
+    assert "--platform" in args
+    assert args[args.index("--platform") + 1] == PLATFORM
+
+
+def test_compose_build_command_has_no_platform_flag():
+    """`docker compose build` 没有 --platform 这个 flag（compose v2.27.1 / v5.6.0
+    的 build 子命令选项里都没有），写成它会 unknown flag 直接中断脚本。"""
+    args = mod.buildCommand(NPM_REGISTRY_DEFAULT)
+    assert "--platform" not in args
+
+
+def test_compose_build_pins_platform_through_environment():
+    """不设 DOCKER_DEFAULT_PLATFORM 时 compose 的 build --print 里根本没有
+    platforms 字段 ⇒ 静默按宿主架构构建（比 build 报错危险得多）。"""
+    env = mod.buildEnv()
+    assert env["DOCKER_DEFAULT_PLATFORM"] == PLATFORM
+
+
+def test_compose_build_passes_npm_registry_as_build_arg():
+    """环境变量前缀传不进 buildkit（宿主变量只参与 compose 自身的 ${} 插值），
+    必须走 --build-arg。"""
+    args = mod.buildCommand("https://example.test/npm")
+    assert "--build-arg" in args
+    assert "NPM_REGISTRY=https://example.test/npm" in args
+
+
+def test_compose_build_targets_backend_and_frontend():
+    args = mod.buildCommand(NPM_REGISTRY_DEFAULT)
+    assert args[-2:] == ["backend", "frontend"]
+
+
+def test_compose_args_use_repo_relative_docker_paths():
+    """compose 文件在 docker/ 下，build context 是 ..（= 仓库根）。
+    本脚本从**仓库根**被调用、自己不 cd ⇒ 必须带 docker/ 前缀。"""
+    args = mod.composeArgs()
+    assert "docker/docker-compose.yml" in args
+    assert "docker/docker-compose.centos.yml" in args
+    assert "docker-compose.yml" not in args
+    assert "docker-compose.centos.yml" not in args
+
+
+def test_inspect_command_uses_image_id_not_repo_digest():
+    """必须用镜像 ID（.Id）而不是 RepoDigest —— 从 tar load 进来的镜像
+    没有 RepoDigests，比对它必然两边都空 ⇒ 恒过。"""
+    args = mod.inspectCommand("alpine:3.20")
+    assert args[:3] == ["docker", "image", "inspect"]
+    assert "{{.Id}}" in args
+    assert "RepoDigest" not in args
+
+
+# ------------------------------------------------------------------ 全流程
+
+
+def test_pipeline_pulls_every_image_and_saves_two_tars():
+    docker = FakeDocker(composeImages=_defaultComposeImages(),
+                        localImages=_localImages())
+    mod.collectOfflineImages(docker, "/tmp/qa-out", tag="20260101-0000")
+
+    pulled = [args[-1] for args in docker.commands() if args[:2] == ["docker", "pull"]]
+    assert pulled == list(mod.IMAGES)
+
+    saves = [args for args in docker.commands() if args[:2] == ["docker", "save"]]
+    assert len(saves) == 2
+    # 命令形如 docker save -o <路径> <镜像...>
+    assert saves[0][4:] == list(mod.IMAGES)
+    assert saves[1][4:] == BUILT_IMAGE_NAMES
+    assert saves[0][3].endswith("all-20260101-0000.tar")
+    assert saves[1][3].endswith("built-20260101-0000.tar")
+
+
+def test_pipeline_never_uses_compose_images_q():
+    """`docker compose images -q` 列出**所有**服务的镜像（含刚 pull 的 9 个），
+    离线包凭空多几个 GB。只能用 config --images 减去外部镜像。"""
+    docker = FakeDocker(composeImages=_defaultComposeImages(),
+                        localImages=_localImages())
+    mod.collectOfflineImages(docker, "/tmp/qa-out", tag="20260101-0000")
+
+    for args in docker.commands():
+        assert "images" not in args or "-q" not in args, f"不该用 compose images -q：{args!r}"
+
+
+def test_pipeline_collects_digests_only_for_packaged_images():
+    """digests 只记打包的那 11 个 —— 联网构建机跑着开发栈，
+    `docker images` 全量导出必然让 Step 5 门禁 2 假红。"""
+    docker = FakeDocker(
+        composeImages=_defaultComposeImages(),
+        localImages=_localImages()
+        + ["hello-world:latest", "argwarn-b:latest", "qa-system-backend:pre-deploy-20261022"],
+    )
+    bundle = mod.collectOfflineImages(docker, "/tmp/qa-out", tag="20260101-0000")
+
+    assert len(bundle.digests) == MIN_IMAGE_COUNT
+    recorded = {line.split(" ")[0] for line in bundle.digests}
+    assert recorded == set(mod.IMAGES) | set(BUILT_IMAGE_NAMES)
+    assert "hello-world:latest" not in recorded
+    assert "qa-system-backend:pre-deploy-20261022" not in recorded
+
+
+def test_pipeline_reports_missing_built_images_with_readable_error():
+    """拿不到本地 build 镜像时要给一句人话报错，不能让天书冒出来。"""
+    docker = FakeDocker(composeImages=_defaultComposeImages(),
+                        localImages=sorted(mod.IMAGES))
+    with pytest.raises(RuntimeError) as exc:
+        mod.collectOfflineImages(docker, "/tmp/qa-out", tag="20260101-0000")
+    message = str(exc.value)
+    assert "qa-system-backend:latest" in message
+    assert "qa-system-frontend:latest" in message
+
+
+def test_pipeline_rejects_short_digest_list():
+    """digests 行数不足时必须硬失败 —— 空/短清单会让下游比对「空空如也 ⇒ 通过」。"""
+    # 只 build 出来 1 个镜像 ⇒ 打包 10 个 < 11 ⇒ 行数硬断言必须拦住
+    docker = FakeDocker(composeImages=sorted(_composeImages()) + ["qa-system-backend"],
+                        localImages=sorted(mod.IMAGES) + ["qa-system-backend:latest"])
+    with pytest.raises(RuntimeError) as exc:
+        mod.collectOfflineImages(docker, "/tmp/qa-out", tag="20260101-0000")
+    assert str(MIN_IMAGE_COUNT) in str(exc.value)
+
+
+def test_pipeline_build_command_carries_platform_env():
+    docker = FakeDocker(composeImages=_defaultComposeImages(),
+                        localImages=_localImages())
+    mod.collectOfflineImages(docker, "/tmp/qa-out", tag="20260101-0000")
+
+    buildEnvs = [env for args, env in docker.calls
+                 if args[:2] == ["docker", "compose"] and "build" in args]
+    assert buildEnvs and buildEnvs[0]["DOCKER_DEFAULT_PLATFORM"] == PLATFORM
+
+
+# ------------------------------------------------------------------ 产物文件
+
+
+def test_write_digests_writes_one_line_per_image(tmp_path):
+    path = mod.writeDigests(str(tmp_path), ["alpine:3.20 d9e853e87e55"])
+    assert Path(path).read_text(encoding="utf-8") == "alpine:3.20 d9e853e87e55\n"
+
+
+def test_write_manifest_covers_only_the_given_tars(tmp_path):
+    """校验和只算本次产出的两个 tar —— 目录里可能留着上一次的 tar，
+    清单列进不属于本次转移包的文件，Step 5 的 sha256sum -c 就对不上。"""
+    current = tmp_path / "all-20260101-0000.tar"
+    stale = tmp_path / "all-20251231-0000.tar"
+    current.write_bytes(b"current")
+    stale.write_bytes(b"stale")
+
+    path = mod.writeManifest(str(tmp_path), [str(current)])
+    content = Path(path).read_text(encoding="utf-8")
+    assert "all-20260101-0000.tar" in content
+    assert "all-20251231-0000.tar" not in content
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1025,147 +1242,369 @@ def test_script_saves_and_checksums():
 ```bash
 cd backend && python -m pytest app/tests/unit/test_build_offline_images.py -v
 ```
-Expected: FAIL —— `AssertionError: build_offline_images.sh 必须存在`
+Expected: FAIL —— `ImportError: cannot import name 'build_offline_images' from 'scripts'`（脚本还没写）
 
 - [ ] **Step 3: 写脚本**
 
-`backend/scripts/build_offline_images.sh`：
+`backend/scripts/build_offline_images.py`：
 
-```bash
-#!/usr/bin/env bash
-# 联网 x86_64 构建机：拉齐镜像 -> docker save -> 校验和。
-# 产物 scp 到内网 CentOS 后 docker load。
-# 依据 docs/superpowers/specs/2026-10-22-centos7-deployment-design.md §6.1
-set -euo pipefail
+```python
+"""离线镜像构建与交付（联网 x86_64 构建机）。
 
-OUT_DIR="${OUT_DIR:-/opt/qa-transfer/images}"
-# Mac 是 arm64、CentOS 是 x86_64 —— 平台不钉死会打出跑不了的镜像
-PLATFORM="linux/amd64"
-NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
+把 9 个外部镜像 + 2 个本地 build 的镜像拉齐、`docker save` 成 tar，
+并产出两个随包带走的文件：
+    images.manifest.sha256  —— 本次产出的 tar 的校验和
+    images.digests.txt      —— 打包的那 11 个镜像的短 ID 清单
 
-# 与 docker-compose.yml + docker-compose.centos.yml 保持一致
-# （backend/frontend 是本地构建，不在此列）
-IMAGES=(
-  "postgres:16-alpine"
-  "neo4j:5.23-community"
-  "quay.io/coreos/etcd:v3.5.5"
-  "minio/minio:RELEASE.2023-03-20T20-16-18Z"
-  "milvusdb/milvus:v2.4.6"
-  "minio/minio:RELEASE.2024-06-13T22-53-53Z"
-  "mysql:8.0"
-  "alpine:3.20"
-  "ollama/ollama:latest"
+依据 docs/superpowers/specs/2026-10-22-centos7-deployment-design.md §6.1。
+
+形态说明：这一版是 Python 写的（旧的 bash 版已删）。计划里的全局约束写着
+「有逻辑的脚本一律写 Python + pytest，bash 只做纯编排」—— 旧脚本里全是逻辑
+（集合减、tag 归一、成员过滤、行数门禁），单测只能断脚本文本的形状，
+转换逻辑本身测不到，tag 归一与分隔符两个缺陷正是这么漏出去的。
+
+用法（必须从**仓库根**跑）：
+    python3 backend/scripts/build_offline_images.py
+
+⚠️ Python 版本：本脚本要跑在**联网 x86_64 构建机**上，而那台机器由谁提供、
+什么系统都还没定（spec 附录「待定」清单第 4 条）。CentOS 7 自带的是
+python3.6，所以本文件刻意保持 3.6 兼容：
+- 不用 `from __future__ import annotations`（3.7+ 语法）
+- 内建泛型注解一律加引号（"list[str]"），PEP 585 要 3.9
+- 不用 subprocess.run(capture_output=..., text=...)，改用 PIPE + universal_newlines（3.7+）
+（与同目录 preflight_centos.py 同一套约束与理由。）
+"""
+
+import hashlib
+import os
+import subprocess
+import sys
+from collections.abc import Iterable
+from datetime import datetime
+from typing import NamedTuple
+
+# 与 docker-compose.yml + docker-compose.centos.yml 里带 image: 字段的服务一致
+# （backend/frontend 是本地 build 出来的，不在此列）
+IMAGES = (
+    "postgres:16-alpine",
+    "neo4j:5.23-community",
+    "quay.io/coreos/etcd:v3.5.5",
+    "minio/minio:RELEASE.2023-03-20T20-16-18Z",
+    "milvusdb/milvus:v2.4.6",
+    "minio/minio:RELEASE.2024-06-13T22-53-53Z",
+    "mysql:8.0",
+    "alpine:3.20",
+    "ollama/ollama:latest",
 )
-
-mkdir -p "$OUT_DIR"
-
-echo "== 拉取镜像（$PLATFORM）=="
-for img in "${IMAGES[@]}"; do
-  echo "-- $img"
-  docker pull --platform "$PLATFORM" "$img"
-done
-
-echo "== 构建 backend / frontend =="
-# ⚠️ 必须在联网机做，且 NPM_REGISTRY 必须覆盖为国内源：
+# Mac 是 arm64、CentOS 是 x86_64 —— 平台不钉死会打出跑不了的镜像
+PLATFORM = "linux/amd64"
 # docker/Dockerfile.frontend 默认走 registry.npmjs.org，内网构建会卡死
-# （qa-system-frontend-build-npm-registry）。
-# docker/Dockerfile.backend 已硬编码 aliyun Debian + aliyun PyPI 源，无需覆盖。
-# ⚠️ compose 文件在 `docker/` 下，build context 是 `..`（= 仓库根）。
-# 这里必须带 `docker/` 前缀：Step 5 从**仓库根**调用本脚本，脚本自己不 cd，
-# 裸文件名会 no such file or directory。CentOS 侧那几处是 `cd /opt/qa/docker`
-# 之后的裸名，那是对的，别照着它们抄。
-# ⚠️ NPM_REGISTRY 必须用 `--build-arg` 传，不能只靠 `NPM_REGISTRY=xxx docker
-# compose build` 的环境变量前缀：宿主环境变量只参与 compose 自身的 ${} 插值，
-# buildkit 收不到（实测 build args 里只有 VITE_API_BASE_URL）。
-# 所以这里**不写**那个环境变量前缀 —— 它除了被 --build-arg 覆盖之外没有任何作用，
-# 留着还会让 shellcheck 报 SC2097/SC2098。
-# ⚠️ 钉平台只有 DOCKER_DEFAULT_PLATFORM 一条路：`docker compose build` 没有
-# `--platform` 这个 flag（compose v2.27.1 / v5.6.0 的 build 子命令都没有），
-# 写成 `build --platform` 会直接报 unknown flag 而中断脚本。
-# compose 的 applyPlatforms() 会读 DOCKER_DEFAULT_PLATFORM，给没写 platform
-# 的服务补上 build.platforms，效果等价。
-DOCKER_DEFAULT_PLATFORM="$PLATFORM" \
-  docker compose -f docker/docker-compose.yml -f docker/docker-compose.centos.yml \
-    build --build-arg NPM_REGISTRY="$NPM_REGISTRY" backend frontend
+# （qa-system-frontend-build-npm-registry）
+NPM_REGISTRY_DEFAULT = "https://registry.npmmirror.com"
+# 9 个外部镜像 + 2 个本地 build 的镜像
+MIN_IMAGE_COUNT = 11
+OUT_DIR_DEFAULT = "/opt/qa-transfer/images"
+# compose 文件在 docker/ 下，build context 是 ..（= 仓库根）。
+# 本脚本从**仓库根**被调用、自己不 cd ⇒ 必须带 docker/ 前缀，裸文件名会
+# no such file or directory。CentOS 侧那几处裸名是在 cd /opt/qa/docker 之后的，
+# 本来就对，别照着它们抄。
+COMPOSE_BASE = "docker/docker-compose.yml"
+COMPOSE_CENTOS = "docker/docker-compose.centos.yml"
+BUILT_SERVICES = ("backend", "frontend")
+# docker images 的 {{.ID}} 给的是 12 位短 ID —— digests 文件必须同形
+SHORT_ID_LENGTH = 12
+# docker image inspect --format '{{.Id}}' 给的是带 sha256: 前缀的 64 位全串
+SHA256_PREFIX = "sha256:"
 
-echo "== 打包 =="
-TAG="$(date '+%Y%m%d-%H%M')"
-docker save -o "$OUT_DIR/all-$TAG.tar" "${IMAGES[@]}"
-# 只存本地构建的那两个。⚠️ 不要用 `docker compose images -q` —— 它列出**所有**服务的
-# 镜像（含刚 pull 的 8 个外部镜像），会把 milvus / neo4j 之类再存一遍，
-# 离线包凭空多几个 GB。`config --images` 给的是镜像**名**（docker save 也吃名），
-# 减去 IMAGES 数组后剩下的正好是 backend / frontend。
-# ⚠️ compose 文件在 `docker/` 下，build context 是 `..`（= 仓库根）。
-# 这里必须带 `docker/` 前缀：Step 5 从**仓库根**调用本脚本，脚本自己不 cd，
-# 裸文件名会 no such file or directory。CentOS 侧那几处是 `cd /opt/qa/docker`
-# 之后的裸名，那是对的，别照着它们抄。
-# ⚠️ `$BUILT` 统一成**空格分隔**的一个字符串：`config --images` 本来是一行一个
-# （换行分隔），而下面 `docker save … $BUILT` 靠的是 shell 的单词拆分 ——
-# bash 的 IFS 含空格和换行，两者都能拆；zsh 默认**不**拆未加引号的参数展开。
-# 统一成空格后，拆分行为与来源分隔符解耦，脚本里也只有一种分隔符要处理。
-BUILT="$(docker compose -f docker/docker-compose.yml -f docker/docker-compose.centos.yml config --images \
-  | grep -vxF -f <(printf '%s\n' "${IMAGES[@]}") | tr '\n' ' ')"
-# shellcheck disable=SC2086  # $BUILT 是多行镜像名列表，必须靠单词拆分成多个参数
-docker save -o "$OUT_DIR/built-$TAG.tar" $BUILT
 
-echo "== 校验和 =="
-cd "$OUT_DIR"
-sha256sum ./*.tar > images.manifest.sha256
+class OfflineImageBundle(NamedTuple):
+    """一次离线镜像打包的结果。"""
 
-# ⚠️ 顺手把每个镜像的**镜像 ID** 记下来。`ollama/ollama:latest` 是浮动 tag：
-# 今天造的离线包和三个月后重建的同名 tag 未必是同一个镜像层，而 CentOS 是内网隔离的，
-# 拉不到、也换不了 —— 届时没有任何手段确认装的到底是哪个版本。
-# 用 `.ID`（镜像 config 的短 sha）而不是 `RepoDigest`：从 tar `docker load` 进来的镜像
-# **没有** RepoDigests，比对它必然两边都空 ⇒ 恒过。
-# ⚠️ 必须**只记打包的那几个**，不能 `docker images` 全量导出：
-# 下游 Step 5 的 `comm -13` 语义是「在源端记录里、却不在 CentOS 上」⇒ 报 ID 不符。
-# 联网构建机是台跑着开发栈的机器，`docker images` 里必然有**与转移包无关**的镜像；
-# 全量记下来，那些镜像在 CentOS 上就「缺失」⇒ 门禁 2 必然假红。
-# 只记这 11 个，才是这条门禁想问的问题：装上去的是不是同一层。
-# ⚠️ `$BUILT` 是空格分隔的**一个字符串**，靠 `tr` 拆行而不是靠 shell 的单词拆分：
-# 脚本 shebang 是 bash（会拆分），但 zsh 默认**不**拆未加引号的参数展开 ——
-# 实测在 zsh 下 `printf '%s\n' $BUILT` 会把两个镜像名印在同一行，
-# 于是 .packaged.txt 少一项、11 行断言 ABORT。（`docker save … $BUILT`
-# 同样依赖拆分，但那是 bash 脚本内、在 shebang 下跑的，没问题。）
-# ⚠️ `config --images` 给的是**裸名**（"qa-system-backend"），而 `docker images` 给的是
-# **带 tag** 的（"qa-system-backend:latest"）—— 拿去直接 awk 匹配永远匹配不上，
-# 本地构建的那两个会被过滤掉、行数断言直接 ABORT（实测 8 行 / 期望 11）。
-# compose 对没有 `image:` 字段的服务按 <project>-<service> 命名、tag 默认 latest
-# （compose v2.27.1 pkg/api/api.go GetImageNameOrDefault），所以给裸名补 :latest；
-# 已经带 tag 的原样保留。
-# ⚠️ 匹配必须**带 tag** 精确匹配：构建机上留着旧 tag（"qa-system-backend:pre-deploy-…"）
-# 时，只按仓库名匹配会把旧 tag 也记进去 ⇒ Step 5 那边必然「缺一个」⇒ 假红。
-{ printf '%s\n' "${IMAGES[@]}"; printf '%s\n' "$BUILT"; } | tr ' ' '\n' | sed -E 's/^([^/:]+)$/\1:latest/' | grep -v '^$' | sort -u > "$OUT_DIR/.packaged.txt"
-docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
-  | grep -v '<none>' \
-  | awk 'NR==FNR{p[$1]=1;next} ($1 in p)' "$OUT_DIR/.packaged.txt" - \
-  | sort > images.digests.txt
-rm -f "$OUT_DIR/.packaged.txt"
-cat images.digests.txt
-# ⚠️ 必须硬断言，不要只 `wc -l` 打个数字：格式串写错 / 匹配全被 grep 掉时
-# 这个文件会是空的，而下游所有按它做的比对都会「空空如也 ⇒ 通过」。
-n=$(wc -l < images.digests.txt)
-[ "$n" -ge 11 ] || { echo "ABORT: images.digests.txt 只有 $n 行，期望 >= 11"; exit 1; }
-echo "镜像 ID 记录 $n 行"
+    tag: str
+    allTar: str
+    builtTar: str
+    packaged: list
+    built: list
+    digests: list
 
-echo "== 完成 =="
-ls -lh "$OUT_DIR"
-echo "把 images.manifest.sha256 和 images.digests.txt 一起带走，CentOS 侧要复核"
 
+# ----------------------------------------------------------------- 纯函数
+
+
+def normalizeTag(name: str) -> str:
+    """裸名补 :latest；已带 tag 的原样保留。
+
+    tag 分隔符只看**最后一个 '/' 之后**有没有冒号：`host:5000/foo` 的冒号是
+    registry 端口，不是 tag。带 registry 路径的裸名（`myorg/foo`）也要补 ——
+    老实现的 `/^([^/:]+)$/` 漏了这种，会把 `myorg/foo` 当成已带 tag 而原样留下。
+    """
+    _, _, tail = name.rpartition("/")
+    if ":" in tail:
+        return name
+    return name + ":latest"
+
+
+def filterPackaged(packaged: "Iterable[str]", imageNames: "Iterable[str]") -> "list[str]":
+    """只保留在 packaged 里的镜像名（集合减 / 成员过滤）。
+
+    匹配按 **repo:tag 精确**：`qa-system-backend:pre-deploy-…` 与
+    `qa-system-backend:latest` 是两个不同的镜像，只按仓库名匹配会把构建机上
+    留着的旧 tag 也收进去 ⇒ Step 5 那边「缺一个」⇒ 假红。
+
+    返回值是**归一后**的名字（裸名补 :latest），且去重 —— 同一个镜像名
+    在 `docker images` 里出现两次也只能产出一行。
+    """
+    keep = set(normalizeTag(name) for name in packaged)
+    out = []
+    for name in imageNames:
+        key = normalizeTag(name)
+        if key in keep and key not in out:
+            out.append(key)
+    return out
+
+
+def shortImageId(inspectOutput: str) -> str:
+    """把 `docker image inspect --format '{{.Id}}'` 的输出压成 12 位短 ID。
+
+    两步都要做：去 `sha256:` 前缀 **且** 截断到 12 位。
+    Step 5 的消费侧是 `docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}"`，
+    那一列是 12 位无前缀的 —— 只去前缀不去长度，得到的是 64 位全串，
+    `comm -13` 就 11 行全部对不上 ⇒ DIGEST-MISMATCH 假红。
+    """
+    raw = inspectOutput.strip()
+    if raw.startswith(SHA256_PREFIX):
+        raw = raw[len(SHA256_PREFIX):]
+    return raw[:SHORT_ID_LENGTH]
+
+
+def collectDigests(packaged: "Iterable[str]", inspectFn) -> "list[str]":
+    """逐 tag 取 ID —— 天然每个 tag 一行，重复 tag 不可能产生重复行。
+
+    返回 ["<repo:tag> <12位短ID不带前缀>", ...]，按 repo:tag 排序。
+    逐 tag inspect 而不是 `docker images` 全量导出：后者的输出里同一 tag
+    可能出现两行（多平台 manifest），会让 Step 5 门禁 3 的 `n -eq 11` 挂掉。
+    """
+    out = []
+    for name in sorted(set(normalizeTag(item) for item in packaged)):
+        out.append(f"{name} {shortImageId(inspectFn(name))}")
+    return out
+
+
+def parseImageList(stdout: str) -> "list[str]":
+    """把命令输出切成镜像名列表，丢掉空行与 `<none>`（悬空镜像）。"""
+    names = []
+    for line in stdout.splitlines():
+        name = line.strip()
+        if not name or "<none>" in name:
+            continue
+        names.append(name)
+    return names
+
+
+def selectBuiltImages(composeImages: "Iterable[str]", externalImages: "Iterable[str]") -> "list[str]":
+    """compose 用到的镜像里减去外部镜像，剩下的就是本地 build 的那两个。
+
+    `config --images` 对没有 `image:` 字段的服务给的是**裸名**
+    （compose 按 <project>-<service> 命名、tag 默认 latest），
+    所以这里顺手补上 :latest。
+    """
+    external = set(externalImages)
+    out = []
+    for name in composeImages:
+        if name in external or name in out:
+            continue
+        out.append(normalizeTag(name))
+    return out
+
+
+# ----------------------------------------------------------------- 命令形状
+
+
+def composeArgs() -> "list[str]":
+    """compose 的两份文件：基线 + CentOS overlay。"""
+    return ["-f", COMPOSE_BASE, "-f", COMPOSE_CENTOS]
+
+
+def pullCommand(image: str) -> "list[str]":
+    """拉镜像必须显式钉平台（Mac 是 arm64，CentOS 是 x86_64）。"""
+    return ["docker", "pull", "--platform", PLATFORM, image]
+
+
+def buildCommand(npmRegistry: str) -> "list[str]":
+    """本地 build backend / frontend。
+
+    ⚠️ 这里**没有** `--platform`：`docker compose build` 根本没有这个 flag
+    （compose v2.27.1 / v5.6.0 的 build 子命令选项里都没有），写成它会
+    `unknown flag: --platform` 直接中断脚本。钉平台靠 buildEnv()。
+
+    ⚠️ NPM_REGISTRY 必须走 `--build-arg`：`NPM_REGISTRY=xxx docker compose build`
+    的环境变量前缀传不进 buildkit —— 宿主环境变量只参与 compose 自身的 ${} 插值，
+    而 compose 文件里没引用它（实测 `--print` 的 args 只有 VITE_API_BASE_URL）。
+    """
+    args = ["docker", "compose"] + composeArgs()
+    args += ["build", "--build-arg", "NPM_REGISTRY=" + npmRegistry]
+    return args + list(BUILT_SERVICES)
+
+
+def buildEnv() -> dict:
+    """build 的环境变量：DOCKER_DEFAULT_PLATFORM 是钉平台唯一有效的办法。
+
+    不设它时 compose 的 `build --print` 里**根本没有 platforms 字段**
+    ⇒ 静默按宿主架构构建，arm64 镜像进不了 x86_64。
+    这是**静默失败**，比 build 报错危险得多。
+    """
+    env = dict(os.environ)
+    env["DOCKER_DEFAULT_PLATFORM"] = PLATFORM
+    return env
+
+
+def composeImagesCommand() -> "list[str]":
+    """`config --images` 给镜像**名**（docker save 也吃名）。
+
+    ⚠️ 不要用 `docker compose images -q` —— 它列出**所有**服务的镜像
+    （含刚 pull 的 9 个外部镜像），离线包凭空多几个 GB。
+    """
+    return ["docker", "compose"] + composeArgs() + ["config", "--images"]
+
+
+def localImagesCommand() -> "list[str]":
+    """本机镜像清单（repo:tag），用于核对打包的那几个是不是真的都在。"""
+    return ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"]
+
+
+def inspectCommand(tag: str) -> "list[str]":
+    """逐 tag 取镜像 ID。
+
+    用 `.Id`（image config 的 sha）而不是 `RepoDigest`：从 tar `docker load`
+    进来的镜像**没有** RepoDigests，比对它必然两边都空 ⇒ 恒过。
+    """
+    return ["docker", "image", "inspect", "--format", "{{.Id}}", tag]
+
+
+def saveCommand(outPath: str, images: "Iterable[str]") -> "list[str]":
+    """`docker save` 一个 tar。"""
+    return ["docker", "save", "-o", outPath] + list(images)
+
+
+# ----------------------------------------------------------------- 执行
+
+
+def runCommand(args, env=None) -> str:
+    """跑一条命令；非零退出就抛错并带上 stderr，不静默吞。"""
+    proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          universal_newlines=True, env=env)
+    if proc.returncode != 0:
+        raise RuntimeError(f"命令失败（exit {proc.returncode}）："
+                           f"{' '.join(args)}\n{(proc.stderr or '').strip()}")
+    return proc.stdout
+
+
+def collectOfflineImages(run, outDir: str, npmRegistry: str = NPM_REGISTRY_DEFAULT,
+                       tag=None) -> OfflineImageBundle:
+    """跑完整条 docker 管线（不写文件），返回 OfflineImageBundle。
+
+    run 是注入点：测试传假 docker，不真调 docker。
+    """
+    for image in IMAGES:
+        run(pullCommand(image))
+
+    run(buildCommand(npmRegistry), buildEnv())
+
+    composeImages = parseImageList(run(composeImagesCommand()))
+    built = selectBuiltImages(composeImages, IMAGES)
+    if not built:
+        raise RuntimeError(
+            "拿不到本地构建的镜像名：`compose config --images` 减去外部镜像后是空的"
+            f"（compose 给出：{', '.join(composeImages)}）。是不是 compose 文件路径不对，"
+            "或者服务全都带 image: 字段了？")
+
+    stamp = tag or datetime.now().strftime("%Y%m%d-%H%M")
+    allTar = os.path.join(outDir, f"all-{stamp}.tar")
+    builtTar = os.path.join(outDir, f"built-{stamp}.tar")
+    run(saveCommand(allTar, IMAGES))
+    run(saveCommand(builtTar, built))
+
+    packaged = list(IMAGES) + list(built)
+    present = set(filterPackaged(packaged, parseImageList(run(localImagesCommand()))))
+    missing = [name for name in packaged if name not in present]
+    if missing:
+        raise RuntimeError(
+            f"本地找不到这些镜像：{', '.join(missing)}。是不是 compose build 没成功，"
+            "或者 pull 没拉全？")
+
+    digests = collectDigests(packaged, lambda name: run(inspectCommand(name)))
+    # ⚠️ 必须硬断言，不要只打个数字：清单为空/过短时，下游所有按它做的比对
+    # 都会「空空如也 ⇒ 通过」（假绿）。Step 5 门禁 3 是 n -eq 11。
+    if len(digests) < MIN_IMAGE_COUNT:
+        raise RuntimeError(f"images.digests.txt 只有 {len(digests)} 行，"
+                           f"期望 >= {MIN_IMAGE_COUNT}")
+
+    return OfflineImageBundle(stamp, allTar, builtTar, packaged, built, digests)
+
+
+def writeDigests(outDir: str, lines: "Iterable[str]") -> str:
+    """写镜像 ID 清单：一行一个 `<repo:tag> <12位短ID>`。"""
+    path = os.path.join(outDir, "images.digests.txt")
+    with open(path, "w") as handle:
+        for line in lines:
+            handle.write(line + "\n")
+    return path
+
+
+def writeManifest(outDir: str, tarPaths: "Iterable[str]") -> str:
+    """写 tar 的校验和清单（`sha256sum -c` 能吃的格式）。
+
+    ⚠️ 只算**本次产出**的 tar，不能扫整个目录：$OUT_DIR 里可能留着上一次的 tar，
+    清单会列进不属于本次转移包的文件，Step 5 的 `sha256sum -c` 必然报缺文件。
+    """
+    entries = []
+    for tarPath in tarPaths:
+        digest = hashlib.sha256()
+        with open(tarPath, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        entries.append(f"{digest.hexdigest()}  ./{os.path.basename(tarPath)}")
+    path = os.path.join(outDir, "images.manifest.sha256")
+    with open(path, "w") as handle:
+        handle.write("\n".join(entries) + "\n")
+    return path
+
+
+def main() -> int:
+    outDir = os.environ.get("OUT_DIR", OUT_DIR_DEFAULT)
+    npmRegistry = os.environ.get("NPM_REGISTRY", NPM_REGISTRY_DEFAULT)
+
+    if not os.path.exists(COMPOSE_BASE):
+        raise RuntimeError(
+            f"请从**仓库根**运行：compose 文件在 docker/ 下（{COMPOSE_BASE} 不存在）。"
+            "用法：cd <repo> && python3 backend/scripts/build_offline_images.py")
+
+    os.makedirs(outDir, exist_ok=True)
+    bundle = collectOfflineImages(runCommand, outDir, npmRegistry)
+    digestsPath = writeDigests(outDir, bundle.digests)
+    manifestPath = writeManifest(outDir, [bundle.allTar, bundle.builtTar])
+
+    print(f"镜像 ID 记录 {len(bundle.digests)} 行 -> {digestsPath}")
+    print(f"校验和清单 -> {manifestPath}")
+    print("把 images.manifest.sha256 和 images.digests.txt 一起带走，CentOS 侧要复核")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
 
 ```bash
-chmod +x backend/scripts/build_offline_images.sh
 cd backend && python -m pytest app/tests/unit/test_build_offline_images.py -v
 ```
-Expected: 7 passed
+Expected: 33 passed
 
 - [ ] **Step 5: 联网机上真跑**
 
 ```bash
-bash backend/scripts/build_offline_images.sh
+python3 backend/scripts/build_offline_images.py
 scp -r /opt/qa-transfer/images root@<centos>:/opt/qa-transfer/
 ssh root@<centos> 'cd /opt/qa-transfer/images && sha256sum -c images.manifest.sha256 && \
   for f in *.tar; do docker load -i "$f"; done && docker images'
@@ -1265,9 +1704,7 @@ REMOTE
 > 命令列留空表示用镜像默认 CMD（服务类镜像会一直跑，超时即成功）。刻意**不用** `--entrypoint /bin/sh`：`minio` / `milvus` 镜像里没有 shell，那样只会得到 126/127 假失败。
 > 任一 `RUN-FAIL` 且 rc=125，回 Task 2 Step 4 降级 Docker 版本。
 
----
-
-## Task 5: Ollama 模型离线预置
+---## Task 5: Ollama 模型离线预置
 
 **Files:** 无代码文件。纯运维。
 

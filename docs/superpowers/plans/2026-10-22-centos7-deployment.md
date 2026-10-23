@@ -983,13 +983,19 @@ echo "== 构建 backend / frontend =="
 # docker/Dockerfile.frontend 默认走 registry.npmjs.org，内网构建会卡死
 # （qa-system-frontend-build-npm-registry）。
 # docker/Dockerfile.backend 已硬编码 aliyun Debian + aliyun PyPI 源，无需覆盖。
-NPM_REGISTRY="$NPM_REGISTRY" \
-# ⚠️ compose 文件在 `docker/` 下，build context 是 `..`（= 仓库根）。
-# 这里必须带 `docker/` 前缀：Step 5 从**仓库根**调用本脚本，脚本自己不 cd，
-# 裸文件名会 no such file or directory。CentOS 侧那几处是 `cd /opt/qa/docker`
-# 之后的裸名，那是对的，别照着它们抄。
+# ⚠️ `docker compose build` **没有** `--platform` 这个 flag（实跑报
+# `unknown flag: --platform`；compose v2.27.1 的 build 子命令选项里没有它），
+# 配上 `set -euo pipefail` 会让脚本在这里直接中断。
+# 钉平台只有 `DOCKER_DEFAULT_PLATFORM` 一条路：compose 的 applyPlatforms() 会读它，
+# 给没写 platform 的服务补上 build.platforms。实测：不设它，`build --print` 里
+# **根本没有 platforms 字段** ⇒ 那就是按宿主架构构建，arm64 镜像进不了 x86_64。
+# ⚠️ `NPM_REGISTRY=xxx docker compose build` 的**环境变量前缀也传不进去**：
+# 宿主环境变量只参与 compose 自身的 ${} 插值，而 compose 文件里没引用 NPM_REGISTRY，
+# buildkit 收不到（实测 `--print` 的 args 只有 VITE_API_BASE_URL）。
+# 必须走 `--build-arg` —— Dockerfile.frontend:6 自己写的就是这条命令。
+DOCKER_DEFAULT_PLATFORM="$PLATFORM" \
   docker compose -f docker/docker-compose.yml -f docker/docker-compose.centos.yml \
-    build --platform "$PLATFORM" backend frontend
+    build --build-arg NPM_REGISTRY="$NPM_REGISTRY" backend frontend
 
 echo "== 打包 =="
 TAG="$(date '+%Y%m%d-%H%M')"
@@ -1015,8 +1021,22 @@ sha256sum ./*.tar > images.manifest.sha256
 # 拉不到、也换不了 —— 届时没有任何手段确认装的到底是哪个版本。
 # 用 `.ID`（镜像 config 的短 sha）而不是 `RepoDigest`：从 tar `docker load` 进来的镜像
 # **没有** RepoDigests，比对它必然两边都空 ⇒ 恒过。
+# ⚠️ 必须**只记打包的那几个**，不能 `docker images` 全量导出：
+# 下游 Step 5 的 `comm -13` 语义是「在源端记录里、却不在 CentOS 上」⇒ 报 ID 不符。
+# 联网构建机是台跑着开发栈的机器，`docker images` 里必然有**与转移包无关**的镜像；
+# 全量记下来，那些镜像在 CentOS 上就「缺失」⇒ 门禁 2 必然假红。
+# 只记这 11 个，才是这条门禁想问的问题：装上去的是不是同一层。
+# ⚠️ `$BUILT` 是空格分隔的**一个字符串**，靠 `tr` 拆行而不是靠 shell 的单词拆分：
+# 脚本 shebang 是 bash（会拆分），但 zsh 默认**不**拆未加引号的参数展开 ——
+# 实测在 zsh 下 `printf '%s\n' $BUILT` 会把两个镜像名印在同一行，
+# 于是 .packaged.txt 少一项、11 行断言 ABORT。（`docker save … $BUILT`
+# 同样依赖拆分，但那是 bash 脚本内、在 shebang 下跑的，没问题。）
+{ printf '%s\n' "${IMAGES[@]}"; printf '%s\n' "$BUILT" | tr ' ' '\n'; } | sort -u > "$OUT_DIR/.packaged.txt"
 docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
-  | grep -v '<none>' | sort > images.digests.txt
+  | grep -v '<none>' \
+  | awk 'NR==FNR{p[$1]=1;next} ($1 in p)' "$OUT_DIR/.packaged.txt" - \
+  | sort > images.digests.txt
+rm -f "$OUT_DIR/.packaged.txt"
 cat images.digests.txt
 # ⚠️ 必须硬断言，不要只 `wc -l` 打个数字：格式串写错 / 匹配全被 grep 掉时
 # 这个文件会是空的，而下游所有按它做的比对都会「空空如也 ⇒ 通过」。

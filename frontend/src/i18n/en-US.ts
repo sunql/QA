@@ -767,6 +767,13 @@ export const enUS = {
       driverTooltip: "Field from the data model",
       sqlDetail: "View verification SQL",
       disclaimer: "These are possible explanations based on current data and the data model (not causal conclusions). Send the verification SQL to investigate further.",
+      status: {
+        pending: "Pending",
+        supported: "Supported",
+        contradicted: "Contradicted",
+        inconclusive: "Inconclusive",
+        execution_failed: "Execution failed",
+      },
     },
     // Visual output strategy (Task 8): rationale copy keyed by backend ruleId.
     // {rows}/{kind} are i18next interpolation placeholders matching the backend params keys.

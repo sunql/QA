@@ -1614,8 +1614,8 @@ ssh root@<centos> 'cd /opt/qa-transfer/images && sha256sum -c images.manifest.sh
 scp /opt/qa-transfer/images/images.digests.txt root@<centos>:/opt/qa-transfer/images/
 ssh root@<centos> 'cd /opt/qa-transfer/images && \
   [ -s images.digests.txt ] || { echo "ABORT: images.digests.txt 缺失或为空 —— 无从核对镜像 ID"; exit 1; } && \
-  docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | grep -v "<none>" | sort \
-    > /tmp/centos-images.txt && \
+  docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | grep -v "<none>" | \
+    LC_ALL=C sort > /tmp/centos-images.txt && \
   if comm -13 /tmp/centos-images.txt images.digests.txt | grep -q .; then \
     echo "DIGEST-MISMATCH —— 下列镜像在 CentOS 上的 ID 与源端记录不符（或根本没装上）："; \
     comm -13 /tmp/centos-images.txt images.digests.txt; \

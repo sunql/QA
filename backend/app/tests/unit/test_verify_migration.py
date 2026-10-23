@@ -114,12 +114,19 @@ def test_checkAll_fails_static_table_below_the_baseline():
 
 
 def test_growing_slack_is_unchanged_when_a_baseline_is_used():
-    """GROWING 的语义一个字不动：向上放过、向下在 slack 内放过、超出才报。"""
-    baseline = dict(EXPECTED, user_sessions=EXPECTED["user_sessions"] + 10)
-    withinSlack = dict(baseline, user_sessions=EXPECTED["user_sessions"] - 20)
-    assert checkAll(withinSlack, expect=baseline, floor=EXPECTED) == []
+    """GROWING 的语义一个字不动：向上放过、向下在 slack 内放过、超出才报。
+
+    这里**不传 floor**，只验 slack 这一层。传了 floor 就测不出 slack 了：
+    附录 A 下限是绝对的，会先于 slack 生效（见
+    test_appendix_floor_also_covers_growing_tables）。两者混在一起时，
+    真正生效的是更严的那条，slack 永远没被验到。
+    """
+    baseline = dict(EXPECTED, user_sessions=EXPECTED["user_sessions"] + 10)        # 554
+    withinSlack = dict(baseline, user_sessions=baseline["user_sessions"] - 20)     # 534
+    assert withinSlack["user_sessions"] >= baseline["user_sessions"] * (1 - 0.20)  # slack 内
+    assert checkAll(withinSlack, expect=baseline) == []
     beyondSlack = dict(baseline, user_sessions=1)
-    assert len(checkAll(beyondSlack, expect=baseline, floor=EXPECTED)) == 1
+    assert len(checkAll(beyondSlack, expect=baseline)) == 1
 
 
 def test_checkAll_passes_on_exact_match():
@@ -411,7 +418,11 @@ def test_checkAll_below_appendix_floor_gets_its_own_reason():
 
 
 def test_appendix_floor_also_covers_growing_tables():
-    """下限是绝对的：GROWING 表在 slack 之内但已跌破附录 A，同样要报。"""
+    """下限是绝对的：GROWING 表在 slack 之内但已跌破附录 A，同样要报。
+
+    也就是说**下限先于 slack 生效**。这不是 bug，是「附录 A 是绝对下限」
+    这个裁定的直接后果 —— 别为了给 slack 腾空间把它改成可协商的。
+    """
     from scripts.verify_migration import REASON_BELOW_FLOOR
     baseline = dict(EXPECTED, user_sessions=EXPECTED["user_sessions"])
     justBelowFloor = EXPECTED["user_sessions"] - 4      # slack 之内（−4 > −20%）

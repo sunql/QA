@@ -13,6 +13,12 @@
     下限 = spec 附录 A（绝对下限，防止基线本身不可信，比如导错库）
 低于下限的表会以「低于附录 A 下限」单独标出，与传输漂移区分开。
 
+**方向是不对称的：静态表只判「低于基线」，不判「等于基线」。**
+基线在 pg_dump **之前**量（见计划 Task 8 Step 1），dump 的快照更晚，
+所以恢复出来的行数必然 >= 基线，多出来的是导出期间新写入的行 ——
+判成「不一致」就是在好环境上报迁移失败。而「低于」这一侧不需要容差：
+对只追加的表它是精确的丢数据检测。GROWING 表的 slack 语义一个字没动。
+
 用法：
     python -m scripts.verify_migration --dsn postgresql://qa_user:...@localhost:5433/qa_metadata
     python -m scripts.verify_migration --dsn <DSN> --baseline backups/rowcounts.baseline.json
@@ -165,11 +171,20 @@ def checkAll(
             continue
         if got == want:
             continue
-        # GROWING 表只要不低于阈值就放过：**向上一定放过**。
-        # 导出与核对之间必然还会写入会话数据，多出来的行不是问题；
-        # 只有「少了」才可能是丢数据。写成 `got < want` 会把每一次
-        # 正常增长报成失败，把门禁变成噪声。
-        if table in tolerate and got >= want * (1 - GROWING_SLACK):
+        if table in tolerate:
+            # GROWING 表只要不低于阈值就放过：**向上一定放过**。
+            # 导出与核对之间必然还会写入会话数据，多出来的行不是问题；
+            # 只有「少了」才可能是丢数据。写成 `got < want` 会把每一次
+            # 正常增长报成失败，把门禁变成噪声。
+            if got >= want * (1 - GROWING_SLACK):
+                continue
+        elif got >= want:
+            # 静态表：**只判「低于」**，不比「相等」。
+            # 基线是在 pg_dump **之前**量的，dump 的快照更晚 ⇒ 恢复出来的行数
+            # 必然 >= 基线，多出来的是导出期间新写入的行。写成 `got != want`
+            # 会在一次完全正确的恢复上永远报「迁移失败」。
+            # 代价：静态表多出来的行（seed 跑两遍之类）不再被查出 ——
+            # 方向不对称是这条规则的固有取舍，不是疏忽。
             continue
         failures.append({
             "table": table, "expected": want, "actual": got, "reason": REASON_DRIFT,
@@ -239,13 +254,19 @@ async def _queryAll(dsn: str) -> dict[str, int | None]:
 
 
 def _warnAppendixSnapshot() -> None:
-    """回落提醒。静默回落会让运维重新制造这次要消除的困惑。"""
+    """回落提醒。静默回落会让运维重新制造这次要消除的困惑。
+
+    还要说实话：静态表只判「不低于基线」，而附录 A 比任何现库都旧 ⇒ 这条
+    回落路径对静态表**几乎恒过**。它只能挡住数量级级别的丢失。别把它当门禁用。
+    """
     print(
         "=" * 70 + "\n"
         "!! 未提供 --baseline：正在用 2026-10-22 spec 附录 A 的快照核对。\n"
         "!! 这份快照已知漂移 —— 源库一直在被写入，audit_log / evidence /\n"
-        "!! multi_step_step 的实测值已经与附录 A 不一致，照它核对会把正常环境\n"
-        "!! 判成「迁移失败」。计划里的 Step 6 始终传 --baseline；只有临时排查才不带。\n"
+        "!! multi_step_step 的实测值已经与附录 A 不一致。\n"
+        "!! 而且静态表只判「不低于基线」，附录 A 比任何现库都旧 ⇒\n"
+        "!! 这条回落路径对静态表**几乎恒过**，只能挡住数量级级别的丢失。\n"
+        "!! 计划里的 Step 6 始终传 --baseline；只有临时排查才不带。\n"
         + "=" * 70,
         file=sys.stderr,
     )

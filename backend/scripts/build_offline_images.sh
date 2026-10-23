@@ -65,8 +65,12 @@ docker save -o "$OUT_DIR/all-$TAG.tar" "${IMAGES[@]}"
 # 这里必须带 `docker/` 前缀：Step 5 从**仓库根**调用本脚本，脚本自己不 cd，
 # 裸文件名会 no such file or directory。CentOS 侧那几处是 `cd /opt/qa/docker`
 # 之后的裸名，那是对的，别照着它们抄。
+# ⚠️ `$BUILT` 统一成**空格分隔**的一个字符串：`config --images` 本来是一行一个
+# （换行分隔），而下面 `docker save … $BUILT` 靠的是 shell 的单词拆分 ——
+# bash 的 IFS 含空格和换行，两者都能拆；zsh 默认**不**拆未加引号的参数展开。
+# 统一成空格后，拆分行为与来源分隔符解耦，脚本里也只有一种分隔符要处理。
 BUILT="$(docker compose -f docker/docker-compose.yml -f docker/docker-compose.centos.yml config --images \
-  | grep -vxF -f <(printf '%s\n' "${IMAGES[@]}"))"
+  | grep -vxF -f <(printf '%s\n' "${IMAGES[@]}") | tr '\n' ' ')"
 # shellcheck disable=SC2086  # $BUILT 是多行镜像名列表，必须靠单词拆分成多个参数
 docker save -o "$OUT_DIR/built-$TAG.tar" $BUILT
 
@@ -79,8 +83,30 @@ sha256sum ./*.tar > images.manifest.sha256
 # 拉不到、也换不了 —— 届时没有任何手段确认装的到底是哪个版本。
 # 用 `.ID`（镜像 config 的短 sha）而不是 `RepoDigest`：从 tar `docker load` 进来的镜像
 # **没有** RepoDigests，比对它必然两边都空 ⇒ 恒过。
+# ⚠️ 必须**只记打包的那几个**，不能 `docker images` 全量导出：
+# 下游 Step 5 的 `comm -13` 语义是「在源端记录里、却不在 CentOS 上」⇒ 报 ID 不符。
+# 联网构建机是台跑着开发栈的机器，`docker images` 里必然有**与转移包无关**的镜像；
+# 全量记下来，那些镜像在 CentOS 上就「缺失」⇒ 门禁 2 必然假红。
+# 只记这 11 个，才是这条门禁想问的问题：装上去的是不是同一层。
+# ⚠️ `$BUILT` 是空格分隔的**一个字符串**，靠 `tr` 拆行而不是靠 shell 的单词拆分：
+# 脚本 shebang 是 bash（会拆分），但 zsh 默认**不**拆未加引号的参数展开 ——
+# 实测在 zsh 下 `printf '%s\n' $BUILT` 会把两个镜像名印在同一行，
+# 于是 .packaged.txt 少一项、11 行断言 ABORT。（`docker save … $BUILT`
+# 同样依赖拆分，但那是 bash 脚本内、在 shebang 下跑的，没问题。）
+# ⚠️ `config --images` 给的是**裸名**（"qa-system-backend"），而 `docker images` 给的是
+# **带 tag** 的（"qa-system-backend:latest"）—— 拿去直接 awk 匹配永远匹配不上，
+# 本地构建的那两个会被过滤掉、行数断言直接 ABORT（实测 8 行 / 期望 11）。
+# compose 对没有 `image:` 字段的服务按 <project>-<service> 命名、tag 默认 latest
+# （compose v2.27.1 pkg/api/api.go GetImageNameOrDefault），所以给裸名补 :latest；
+# 已经带 tag 的原样保留。
+# ⚠️ 匹配必须**带 tag** 精确匹配：构建机上留着旧 tag（"qa-system-backend:pre-deploy-…"）
+# 时，只按仓库名匹配会把旧 tag 也记进去 ⇒ Step 5 那边必然「缺一个」⇒ 假红。
+{ printf '%s\n' "${IMAGES[@]}"; printf '%s\n' "$BUILT"; } | tr ' ' '\n' | sed -E 's/^([^/:]+)$/\1:latest/' | grep -v '^$' | sort -u > "$OUT_DIR/.packaged.txt"
 docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
-  | grep -v '<none>' | sort > images.digests.txt
+  | grep -v '<none>' \
+  | awk 'NR==FNR{p[$1]=1;next} ($1 in p)' "$OUT_DIR/.packaged.txt" - \
+  | sort > images.digests.txt
+rm -f "$OUT_DIR/.packaged.txt"
 cat images.digests.txt
 # ⚠️ 必须硬断言，不要只 `wc -l` 打个数字：格式串写错 / 匹配全被 grep 掉时
 # 这个文件会是空的，而下游所有按它做的比对都会「空空如也 ⇒ 通过」。

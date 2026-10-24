@@ -48,7 +48,7 @@ function renderPage() {
 describe("EntityMappingPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.listMappings.mockResolvedValue([mockMapping]);
+    api.listMappings.mockResolvedValue({ rows: [mockMapping], total: 1 });
   });
 
   it("渲染标题与表格，并加载映射列表", async () => {
@@ -81,9 +81,11 @@ describe("EntityMappingPage", () => {
 
     await user.click(screen.getByText("新建映射"));
 
-    // 实体类型下拉（combobox 顺序：顶部筛选=0，表单 entityType=1，sourceSystem=2，matchRule=3）
-    const comboboxes = screen.getAllByRole("combobox");
-    await user.click(comboboxes[1]);
+    // 服务端分页后分页条（含每页条数下拉）常驻 → 全局 combobox 下标不可靠，
+    // 改按弹窗作用域取：modal 内顺序 = entityType, sourceSystem, matchRule
+    const modal = await screen.findByRole("dialog");
+    const modalComboboxes = modal.querySelectorAll(".ant-select-selection-search-input");
+    await user.click(modalComboboxes[0] as HTMLElement);
     // 可点击选项是 .ant-select-item-option（带 title 属性）；role=option 的是不可点击的 a11y 复制层
     await user.click(await screen.findByTitle("MATERIAL"));
 
@@ -94,8 +96,8 @@ describe("EntityMappingPage", () => {
     await user.type(screen.getByLabelText("源系统 Key"), "M000001");
     await user.type(screen.getByLabelText("源系统编码"), "M000001");
 
-    // 源系统下拉
-    await user.click(screen.getAllByRole("combobox")[2]);
+    // 源系统下拉（弹窗内第 2 个）
+    await user.click(modalComboboxes[1] as HTMLElement);
     await user.click(await screen.findByTitle("SRM"));
 
     // 模态框确定按钮（okText="保存" → antd 加空格："保 存"）
@@ -153,9 +155,9 @@ describe("EntityMappingPage", () => {
     });
   });
 
-  it("切换实体类型筛选后按 entityType 重新拉取", async () => {
+  it("切换实体类型筛选后按 entityType 重新拉取（回第 1 页）", async () => {
     const user = userEvent.setup();
-    api.listMappings.mockResolvedValue([mockMapping]);
+    api.listMappings.mockResolvedValue({ rows: [mockMapping], total: 1 });
     renderPage();
     await waitFor(() => expect(screen.getByText("SUP000001")).toBeInTheDocument());
 
@@ -164,7 +166,11 @@ describe("EntityMappingPage", () => {
     await user.click(await screen.findByText("NCR"));
 
     await waitFor(() => {
-      expect(api.listMappings).toHaveBeenCalledWith({ entityType: "NCR" });
+      expect(api.listMappings).toHaveBeenCalledWith({
+        entityType: "NCR",
+        limit: 20,
+        offset: 0,
+      });
     });
   });
 });

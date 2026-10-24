@@ -43,7 +43,9 @@ class TestEntityMappingApi:
     async def test_list_empty(self, client) -> None:
         resp = await client.get("/api/v1/entity-mappings")
         assert resp.status_code == 200
-        assert resp.json() == []
+        body = resp.json()
+        assert body["rows"] == []
+        assert body["total"] == 0
 
     async def test_create_get_update_roundtrip(self, client) -> None:
         # CREATE
@@ -80,10 +82,11 @@ class TestEntityMappingApi:
         assert upd_body["entityType"] == "SUPPLIER"
         assert upd_body["enterpriseKey"] == 100001
 
-        # LIST 含 1 条
+        # LIST 含 1 条（分页信封：rows + total）
         listing = await client.get("/api/v1/entity-mappings")
         assert listing.status_code == 200
-        assert len(listing.json()) == 1
+        assert len(listing.json()["rows"]) == 1
+        assert listing.json()["total"] == 1
 
     async def test_delete_returns_204_and_gone(self, client) -> None:
         created = await client.post("/api/v1/entity-mappings", json=_payload())
@@ -108,7 +111,7 @@ class TestEntityMappingApi:
         )
         resp = await client.get("/api/v1/entity-mappings?enterpriseKey=100002")
         assert resp.status_code == 200
-        rows = resp.json()
+        rows = resp.json()["rows"]
         assert len(rows) == 1
         assert rows[0]["enterpriseKey"] == 100002
 
@@ -128,13 +131,41 @@ class TestEntityMappingApi:
         )
         by_type = await client.get("/api/v1/entity-mappings?entityType=MATERIAL")
         assert by_type.status_code == 200
-        assert len(by_type.json()) == 1
-        assert by_type.json()[0]["entityType"] == "MATERIAL"
+        assert len(by_type.json()["rows"]) == 1
+        assert by_type.json()["rows"][0]["entityType"] == "MATERIAL"
+        assert by_type.json()["total"] == 1
 
         by_system = await client.get("/api/v1/entity-mappings?sourceSystem=ERP")
         assert by_system.status_code == 200
-        assert len(by_system.json()) == 1
-        assert by_system.json()[0]["sourceSystem"] == "ERP"
+        assert len(by_system.json()["rows"]) == 1
+        assert by_system.json()["rows"][0]["sourceSystem"] == "ERP"
+
+    async def test_list_pagination_rows_and_total(self, client) -> None:
+        """分页信封：total 独立于当前页（fix-entity-mapping-page-pagination）。
+
+        total 是「满足过滤条件的总条数」而非「本页行数」——前端分页渲染
+        靠它算页数；offset 翻页窗口正确、total 不随 offset 变。
+        """
+        for i in range(1, 6):
+            await client.post(
+                "/api/v1/entity-mappings",
+                json=_payload(enterpriseKey=500000 + i, enterpriseCode=f"SUP5{i:05d}",
+                              sourceKey=f"V5{i:05d}", sourceCode=f"V5{i:05d}"),
+            )
+        page1 = await client.get("/api/v1/entity-mappings?limit=2&offset=0")
+        assert page1.status_code == 200
+        assert len(page1.json()["rows"]) == 2
+        assert page1.json()["total"] == 5
+
+        page3 = await client.get("/api/v1/entity-mappings?limit=2&offset=4")
+        assert page3.status_code == 200
+        assert len(page3.json()["rows"]) == 1
+        assert page3.json()["total"] == 5
+
+        # total 跟随过滤条件，不跟随分页窗口
+        filtered = await client.get("/api/v1/entity-mappings?limit=2&enterpriseKey=500003")
+        assert filtered.json()["total"] == 1
+        assert len(filtered.json()["rows"]) == 1
 
     async def test_duplicate_unique_constraint_returns_422(self, client) -> None:
         """同实体类型 + 同企业代理键 + 同源系统不允许重复。"""
@@ -177,11 +208,12 @@ class TestEntityMappingApi:
             )
         first_page = await client.get("/api/v1/entity-mappings?limit=2&offset=0")
         assert first_page.status_code == 200
-        assert len(first_page.json()) == 2
+        assert len(first_page.json()["rows"]) == 2
+        assert first_page.json()["total"] == 3
 
         second_page = await client.get("/api/v1/entity-mappings?limit=2&offset=2")
         assert second_page.status_code == 200
-        rows = second_page.json()
+        rows = second_page.json()["rows"]
         assert len(rows) == 1
         assert rows[0]["enterpriseKey"] == 200003
 

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -153,6 +153,25 @@ class EntityMappingService:
         stmt = stmt.limit(limit).offset(offset)
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+    async def countMappings(
+        self,
+        session: AsyncSession,
+        *,
+        entityType: str | None = None,
+        sourceSystem: SourceSystem | None = None,
+        enterpriseKey: int | None = None,
+    ) -> int:
+        """满足过滤条件的总条数（分页渲染用；与 listMappings 同一套过滤语义）。"""
+        stmt = select(func.count()).select_from(EntityMapping)
+        if entityType is not None:
+            stmt = stmt.where(EntityMapping.entity_type == entityType)
+        if sourceSystem is not None:
+            stmt = stmt.where(EntityMapping.source_system == sourceSystem)
+        if enterpriseKey is not None:
+            stmt = stmt.where(EntityMapping.enterprise_key == enterpriseKey)
+        result = await session.execute(stmt)
+        return result.scalar() or 0
 
     async def getMapping(self, session: AsyncSession, id: int) -> EntityMapping:
         """按 id 取映射；不存在抛 NotFoundError。"""

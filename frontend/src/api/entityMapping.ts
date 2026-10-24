@@ -3,6 +3,7 @@ import type {
   EntityMappingBulkResult,
   EntityMappingCreate,
   EntityMappingListFilter,
+  EntityMappingPage,
   EntityMappingRead,
   EntityMappingSearchHit,
   EntityMappingUpdate,
@@ -13,8 +14,8 @@ const BASE = "/entity-mappings";
 
 export async function listMappings(
   filter?: EntityMappingListFilter,
-): Promise<EntityMappingRead[]> {
-  const res = await httpClient.get<EntityMappingRead[]>(BASE, {
+): Promise<EntityMappingPage> {
+  const res = await httpClient.get<EntityMappingPage>(BASE, {
     params: filter as Record<string, string | number | undefined>,
   });
   return res.data;

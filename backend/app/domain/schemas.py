@@ -2462,6 +2462,20 @@ class EntityMappingRead(CamelModel):
     )
 
 
+class EntityMappingPage(CamelModel):
+    """编码映射分页响应（fix-entity-mapping-page-pagination 2026-10-24）。
+
+    rows 为当前页 EntityMappingRead 列表，total 为满足过滤条件的总条数
+    （独立于 limit/offset，前端用于分页渲染）。
+
+    替代「裸 list[EntityMappingRead]」响应：生产 entity_mapping 已 35 万行
+    （THBI 同步），前端原页面无分页控件 + 后端默认 limit=200，永远只显示
+    前 200 行。范式与 AuditLogPage 一致（feat-audit-history-api Task 1）。
+    """
+    rows: list["EntityMappingRead"]
+    total: int
+
+
 class EntityMappingBulkImportItem(CamelModel):
     """批量导入单行请求 DTO（feat-entity-mapping-bulk-import 2026-09-16）。
 

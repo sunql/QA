@@ -24,6 +24,7 @@ from app.domain.schemas import (
     EntityMappingBulkImportItem,
     EntityMappingBulkResult,
     EntityMappingCreate,
+    EntityMappingPage,
     EntityMappingRead,
     EntityMappingSearchHit,
     EntityMappingUpdate,
@@ -42,7 +43,7 @@ def getEntityMappingService() -> EntityMappingService:
     return EntityMappingService()
 
 
-@router.get("", response_model=list[EntityMappingRead])
+@router.get("", response_model=EntityMappingPage)
 async def listEntityMappings(
     _user: CurrentUser = Depends(getCurrentUser),
     entityType: BusinessObjectCodeType | None = Query(default=None, alias="entityType"),
@@ -52,7 +53,12 @@ async def listEntityMappings(
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(getDb),
     service: EntityMappingService = Depends(getEntityMappingService),
-) -> list[EntityMappingRead]:
+) -> EntityMappingPage:
+    """分页列表（fix-entity-mapping-page-pagination 2026-10-24）。
+
+    响应从裸 list 改为 {rows, total} 信封（范式同 AuditLogPage）：生产
+    entity_mapping 已 35 万行，前端需要 total 渲染分页，不能只看前 200 行。
+    """
     mappings = await service.listMappings(
         session,
         entityType=entityType,
@@ -61,7 +67,16 @@ async def listEntityMappings(
         limit=limit,
         offset=offset,
     )
-    return [entityMappingToRead(m) for m in mappings]
+    total = await service.countMappings(
+        session,
+        entityType=entityType,
+        sourceSystem=sourceSystem,
+        enterpriseKey=enterpriseKey,
+    )
+    return EntityMappingPage(
+        rows=[entityMappingToRead(m) for m in mappings],
+        total=total,
+    )
 
 
 @router.get("/search", response_model=list[EntityMappingSearchHit])

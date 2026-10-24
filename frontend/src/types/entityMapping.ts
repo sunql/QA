@@ -62,6 +62,16 @@ export interface EntityMappingListFilter {
   entityType?: EntityType;
   sourceSystem?: SourceSystem;
   enterpriseKey?: number;
+  /** 服务端分页参数（fix-entity-mapping-page-pagination 2026-10-24）。 */
+  limit?: number;
+  offset?: number;
+}
+
+/** 分页信封（与后端 EntityMappingPage 对齐；范式同 AuditLogPage）。
+ *  生产 entity_mapping 35 万行，页面必须按 total 渲染分页。 */
+export interface EntityMappingPage {
+  rows: EntityMappingRead[];
+  total: number;
 }
 
 /** Phase 6.x：搜索结果轻量 DTO（与后端 EntityMappingSearchHit 对齐）。

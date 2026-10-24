@@ -500,3 +500,36 @@ async def test_answer_stream_zero_usage_writes_no_ledger_row() -> None:
     assert _added_of(session, SessionTokenUsage) == []
     # 消息照旧落库（零台账 ≠ 不落消息）
     assert len(_added_of(session, SessionMessage)) >= 2
+
+
+@pytest.mark.asyncio
+async def test_answer_stream_labels_cost_source_measured() -> None:
+    """成本口径必须显式标注：token 由客户端上报、单价来自配置 ⇒ measured。
+
+    P1-2 的台账列此前只在 chat 主链路写入；doc-QA 直接调
+    ``TokenUsageService.recordUsage`` 不传 ``cost_source`` ⇒ NULL（读侧无法区分
+    「实测」与「早期未标注」）。本用例钉住写入侧必须带口径。
+    """
+    from app.domain.models import SessionTokenUsage
+
+    svc = RagQaService()
+    svc._rag_svc = MagicMock()
+    svc._rag_svc.searchDocuments = AsyncMock(return_value=[
+        {"document_id": "DOC-A", "document_name": "合同", "chunk_text": "条款", "score": 0.85},
+    ])
+    svc._llm_factory = MagicMock(return_value=_make_fake_client(["好。"]))
+
+    session = _mock_session()
+    dto = DocQaRequest(session_id="sess-src", question="abc", top_k=8)
+
+    _ = [
+        ev
+        async for ev in svc.answer_stream(
+            session, dto, actor=CurrentUser(userId="u-1", departments=[]),
+            configs=[_doc_qa_cfg()],
+        )
+    ]
+
+    rows = _added_of(session, SessionTokenUsage)
+    assert len(rows) == 1
+    assert rows[0].cost_source == "measured"

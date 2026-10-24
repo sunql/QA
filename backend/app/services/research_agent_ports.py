@@ -30,7 +30,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import LlmConfig
 from app.domain.multi_step_plan import MAX_PLAN_DATA_STEPS
-from app.services.token_usage_service import TokenUsageService
+from app.services.token_usage_service import (
+    COST_SOURCE_MEASURED,
+    COST_SOURCE_UNKNOWN,
+    TokenUsageService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +386,8 @@ class LlmUsageRecorder:
             completionTokens=completionTokens,
             cost=cost,
             purpose=purpose,
+            # 按名称反查不到配置时成本是占位 0（不是实测），必须显式区分。
+            cost_source=COST_SOURCE_MEASURED if config is not None else COST_SOURCE_UNKNOWN,
         )
 
     @staticmethod

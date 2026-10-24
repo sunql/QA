@@ -110,3 +110,15 @@ useEffect(() => {
 - **数据源名映射**：`hooks/useDatasourceOptions.ts` 导出 `useDatasourceOptions()`（启用中的源清单）与 `datasourceName(sources, id)`（id → 名称，**查不到的 id 回落 `` `#id` ``**——有 id 就让用户看到"某个库"，取不到名字不等于不渲染）。**取源失败一律回落空清单**——数据源名只是辅助信息，不做页面可用性的前提（仅展示层降级，不阻断页面）。
 - **报告页模式说明**：`ResearchReportPage.tsx` 在模式 Tag 右侧渲染 `research.list.modeDesc.<mode>`（与新建表单下拉项**同一个 i18n key**）。`payload.mode` 运行时是任意 string ⇒ 先经 `asResearchMode()` 收窄；未知值 Tag 与说明**同时**不渲染（不构造文案、不显示原始 key）。
 - **共享 `error` 槽的单一归属**：`researchStore.error` 由**会话页**渲染成 Alert，故**只有会话加载/追问类失败**才写它。列表页的删除失败**自带** `message.error`（`ResearchListPage.tsx`），`deleteSession` 因此**只 rethrow 不写槽** —— 否则列表页的删除错误会短暂串到**另一个**已打开会话页的 Alert 里。
+
+## 请求超时（两层）（fix-ontology-batch-frontend-timeout）
+
+axios 超时**两层**，别顺手调齐（2026-10-23 定，2026-10-24 加例外）：
+
+- 全局 `REQUEST_TIMEOUT_MS = 30_000`（`src/config.ts`）——普通请求。错误挂 30s 才报，别为个别长接口调大它
+- `LONG_RUNNING_TIMEOUT_MS = 280_000`——长操作 per-call 覆盖：`/ontology/batch/preview`、`/ontology/relations/backfill`、`/ontology/graph/sync-missing`
+- **例外**：`runOntologyBatch`（`POST /ontology/batch`）单独用 **300_000 临时预算**（生产批量执行实测贴近 nginx 上限）。长期方案 202 + 后台任务 + 轮询，届时移除
+
+**硬约束**：nginx `proxy_read_timeout=300s` 是上限，280s 是留余量；守卫测试 `ontologyBatchApiTimeout.test.ts` 锁定各调用值，新增长操作调用必须加进去。
+
+**运维语义**：axios 超时 ≠ 后端停止——操作还在跑，超时后**别重试**，先刷新看结果；「网络异常，请稍后重试」文案 = status=0 专有（前端掐断），后端 4xx/5xx 不显示它。

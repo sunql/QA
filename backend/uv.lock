@@ -2999,6 +2999,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
+    { name = "pyyaml" },
     { name = "respx" },
     { name = "ruff" },
 ]
@@ -3048,6 +3049,7 @@ requires-dist = [
     { name = "python-louvain", specifier = ">=0.16" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "python-pptx", specifier = ">=1.0.2" },
+    { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.1" },
     { name = "reportlab", specifier = ">=4.2.0" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0" },

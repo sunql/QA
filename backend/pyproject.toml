@@ -59,6 +59,7 @@ dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=5.0.0",
+    "pyyaml>=6.0.1",
     "respx>=0.21.0",
     "anyio>=4.4.0",
     "ruff>=0.6.0",
@@ -103,6 +104,33 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# preflight_centos.py 的唯一执行环境是**装 Docker 之前**的 CentOS 7.9 宿主，
+# 其系统 python3 = 3.6.8（那时还没有容器可用，也不该给宿主另装 Python）。
+# 下面五条规则都会把它改写成宿主跑不起来的写法：
+#   UP021/UP022 — capture_output / text 是 3.7+
+#   UP035       — 会把 `from typing import Callable` 推成 collections.abc，
+#                 而 `collections.abc.Callable[...]` 的下标要 3.9（PEP 585）
+#   UP037       — PEP 585 内建泛型注解（去引号）是 3.9+
+#   UP045       — `X | None` 是 3.10+
+# 故该文件必须保持 3.6 兼容写法，与仓内 target-version = "py312" 刻意不同。
+#
+# 模式用 `**/scripts/preflight_centos.py`：per-file-ignores 的模式按**配置文件所在
+# 目录**解析，`scripts/preflight_centos.py` 只在 `cd backend` 或显式 --config 时
+# 命中，从仓库根跑 `ruff check --config backend/pyproject.toml ...` 会失效。
+"**/scripts/preflight_centos.py" = ["UP021", "UP022", "UP035", "UP037", "UP045"]
+
+# build_offline_images.py 的执行环境是**联网 x86_64 构建机**，
+# 而那台机器由谁提供、什么系统都还没定（spec 附录「待定」清单第 4 条）。
+# CentOS 7 自带的系统 python3 = 3.6.8，所以该文件与 preflight_centos.py 一样
+# 保持 3.6 兼容写法（下面五条规则都会把它改写成跑不起来的写法）：
+#   UP021/UP022 — capture_output / text 是 3.7+
+#   UP035       — 会把 `from typing import Callable` 推成 collections.abc，
+#                 而 `collections.abc.Callable[...]` 的下标要 3.9（PEP 585）
+#   UP037       — PEP 585 内建泛型注解（去引号）是 3.9+
+#   UP045       — `X | None` 是 3.10+
+"**/scripts/build_offline_images.py" = ["UP021", "UP022", "UP035", "UP037", "UP045"]
 
 [dependency-groups]
 dev = [

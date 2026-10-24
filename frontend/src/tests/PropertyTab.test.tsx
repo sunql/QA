@@ -38,7 +38,7 @@ const mockProperty: OntologyProperty = {
 };
 
 const api = vi.hoisted(() => ({
-  listPropertiesByClass: vi.fn(),
+  listAllProperties: vi.fn(),
   createProperty: vi.fn(),
   updateProperty: vi.fn(),
   deleteProperty: vi.fn(),
@@ -57,21 +57,34 @@ function renderTab(classes: OntologyClass[] = [mockClass]) {
 describe("PropertyTab — 加载", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.listPropertiesByClass.mockResolvedValue([mockProperty]);
+    api.listAllProperties.mockResolvedValue([mockProperty]);
   });
 
-  it("classes 非空时拉取每个 class 的属性列表", async () => {
+  it("classes 非空时用全局端点一次拉全量（N+1 修复）", async () => {
     renderTab();
-    await waitFor(() =>
-      expect(api.listPropertiesByClass).toHaveBeenCalledWith(1),
-    );
+    await waitFor(() => expect(api.listAllProperties).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("amountField")).toBeInTheDocument();
   });
 
-  it("单 class 加载失败时组件不崩（其余继续）", async () => {
-    api.listPropertiesByClass.mockRejectedValueOnce(new Error("网错"));
+  it("不属于当前类列表的属性被过滤（软删类属性不显示）", async () => {
+    // 全局端点 GET /ontology/properties 不做软删类过滤；
+    // PropertyTab 按当前类 id 收窄，保持旧逐类拉取的行为。
+    const orphanProp: OntologyProperty = {
+      ...mockProperty,
+      id: 101,
+      classId: 999,
+      propertyName: "orphanField",
+    };
+    api.listAllProperties.mockResolvedValue([mockProperty, orphanProp]);
     renderTab();
-    await waitFor(() => expect(api.listPropertiesByClass).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("amountField")).toBeInTheDocument();
+    expect(screen.queryByText("orphanField")).not.toBeInTheDocument();
+  });
+
+  it("全局端点加载失败时组件不崩", async () => {
+    api.listAllProperties.mockRejectedValueOnce(new Error("网错"));
+    renderTab();
+    await waitFor(() => expect(api.listAllProperties).toHaveBeenCalledTimes(1));
     // 渲染了表格
     expect(screen.getByRole("table")).toBeInTheDocument();
   });
@@ -79,7 +92,7 @@ describe("PropertyTab — 加载", () => {
   it("classes 为空时不调用 API + 渲染空表格", async () => {
     renderTab([]);
     await new Promise((r) => setTimeout(r, 50));
-    expect(api.listPropertiesByClass).not.toHaveBeenCalled();
+    expect(api.listAllProperties).not.toHaveBeenCalled();
     expect(screen.getByRole("table")).toBeInTheDocument();
   });
 });
@@ -87,7 +100,7 @@ describe("PropertyTab — 加载", () => {
 describe("PropertyTab — Create 流", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.listPropertiesByClass.mockResolvedValue([mockProperty]);
+    api.listAllProperties.mockResolvedValue([mockProperty]);
     api.createProperty.mockResolvedValue(mockProperty);
   });
 
@@ -122,7 +135,7 @@ describe("PropertyTab — Create 流", () => {
 describe("PropertyTab — Delete 流", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.listPropertiesByClass.mockResolvedValue([mockProperty]);
+    api.listAllProperties.mockResolvedValue([mockProperty]);
     api.deleteProperty.mockResolvedValue(undefined);
   });
 
@@ -166,7 +179,7 @@ describe("PropertyTab — Delete 流", () => {
 describe("PropertyTab — Edit 流", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.listPropertiesByClass.mockResolvedValue([mockProperty]);
+    api.listAllProperties.mockResolvedValue([mockProperty]);
     api.updateProperty.mockResolvedValue(mockProperty);
   });
 
@@ -189,14 +202,14 @@ describe("PropertyTab — Edit 流", () => {
 describe("PropertyTab — 刷新", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    api.listPropertiesByClass.mockResolvedValue([mockProperty]);
+    api.listAllProperties.mockResolvedValue([mockProperty]);
   });
 
   it("点击刷新按钮重新拉取", async () => {
     const user = userEvent.setup();
     renderTab();
     await screen.findByText("amountField");
-    expect(api.listPropertiesByClass).toHaveBeenCalledTimes(1);
+    expect(api.listAllProperties).toHaveBeenCalledTimes(1);
 
     const refreshBtn = screen
       .getAllByRole("button")
@@ -205,7 +218,7 @@ describe("PropertyTab — 刷新", () => {
     await user.click(refreshBtn!);
 
     await waitFor(() =>
-      expect(api.listPropertiesByClass.mock.calls.length).toBeGreaterThanOrEqual(2),
+      expect(api.listAllProperties.mock.calls.length).toBeGreaterThanOrEqual(2),
     );
   });
 });
@@ -239,11 +252,10 @@ const siteProp = (isForeignKey: boolean, refClassId: number | null): OntologyPro
   refClassId,
 });
 
-/** 只在 class 1 下挂属性：两个类返回同一份会让 getByText 命中多行。 */
+/** 只挂 class 1 的属性：siteProp 的 classId 继承自 mockProperty（classId=1），
+ *  Facility（id=7）下没有属性，组件按 classId 过滤后只有一行。 */
 function mockPropsOnOrderClass(prop: OntologyProperty) {
-  api.listPropertiesByClass.mockImplementation((clsId: number) =>
-    Promise.resolve(clsId === mockClass.id ? [prop] : []),
-  );
+  api.listAllProperties.mockResolvedValue([prop]);
 }
 
 /** 引用类 Select 的选中项（弹窗内 3 个 Select 中的最后一个）。 */

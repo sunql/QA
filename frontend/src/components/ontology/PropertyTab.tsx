@@ -16,7 +16,7 @@ import {
 } from "antd";
 import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
-  listPropertiesByClass,
+  listAllProperties,
   createProperty,
   updateProperty,
   deleteProperty,
@@ -75,16 +75,15 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const allProps: OntologyProperty[] = [];
-      for (const cls of classes) {
-        try {
-          const props = await listPropertiesByClass(cls.id);
-          allProps.push(...props.map((p) => ({ ...p, classId: cls.id })));
-        } catch {
-          // 忽略单个类的错误
-        }
-      }
-      setProperties(allProps);
+      // 全局端点一次拉全量（每条自带 classId），前端过滤到当前类列表。
+      // 旧实现逐类循环调 listPropertiesByClass：N 类 = N 次串行请求（生产 36 类
+      // 明显卡顿），与 OntologyPropertyAdminPage 用全局端点规避 N+1 是同一修法。
+      // 全局端点不含软删类过滤，按当前类 id 收窄以保持旧行为。
+      const classIds = new Set(classes.map((c) => c.id));
+      const all = await listAllProperties();
+      setProperties(all.filter((p) => classIds.has(p.classId)));
+    } catch {
+      // 错误已由拦截器提示
     } finally {
       setLoading(false);
     }

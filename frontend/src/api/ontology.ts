@@ -190,10 +190,15 @@ export async function backfillRelations(): Promise<RelationBackfillResult> {
 
 // ===== Batch Relation Engine（通用批量关系引擎） =====
 
-/** POST /ontology/batch — 执行：syncGraph / inferJoins / applyManifest（任选其一或多个）。 */
+/** POST /ontology/batch — 执行：syncGraph / inferJoins / applyManifest（任选其一或多个）。
+ *
+ * 超时 300s 是批量接口的**临时等待预算**（生产实测可贴近 nginx 300s 硬上限），
+ * 不代表所有长操作都用 5 分钟——其余长操作仍走 LONG_RUNNING_TIMEOUT_MS(280s)。
+ * 长期方案：202 + 后台任务 + 轮询进度（参考研究线 bg-task 架构），届时移除本预算。
+ */
 export async function runOntologyBatch(payload: BatchRelationRequest): Promise<BatchRelationResult> {
   const res = await httpClient.post<BatchRelationResult>(`${BASE}/batch`, payload, {
-    timeout: LONG_RUNNING_TIMEOUT_MS,
+    timeout: 300_000,
   });
   return res.data;
 }

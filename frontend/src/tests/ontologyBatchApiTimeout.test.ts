@@ -4,7 +4,11 @@
  * 在生产数据量下超 30s ⇒ axios 客户端掐断 ⇒ 前端报「网络异常」（status=0 路径）。
  * nginx proxy_read_timeout=300s 是硬上限，per-call 超时必须留余量（280s）。
  *
- * SSOT：config.ts LONG_RUNNING_TIMEOUT_MS；本测试锁定 4 个长操作调用都带上它。
+ * 例外（2026-10-24）：runOntologyBatch 用 300s 临时等待预算（生产批量执行
+ * 实测可贴近上限；长期方案是 202+后台任务+轮询，届时移除）。其余 3 个长操作
+ * 仍走 LONG_RUNNING_TIMEOUT_MS(280s)。
+ *
+ * SSOT：config.ts LONG_RUNNING_TIMEOUT_MS；本测试锁定各调用的超时值。
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -30,12 +34,12 @@ describe("ontology 长操作 per-call 超时", () => {
     httpMock.post.mockResolvedValue({ data: {} });
   });
 
-  it("批量执行 POST /ontology/batch 带 280s 超时", async () => {
+  it("批量执行 POST /ontology/batch 用 300s 临时等待预算", async () => {
     await runOntologyBatch({ syncGraph: true, onConflict: "skip" });
     expect(httpMock.post).toHaveBeenCalledWith(
       "/ontology/batch",
       { syncGraph: true, onConflict: "skip" },
-      { timeout: LONG_RUNNING_TIMEOUT_MS }
+      { timeout: 300_000 }
     );
   });
 
@@ -68,5 +72,9 @@ describe("ontology 长操作 per-call 超时", () => {
 
   it("长超时常量必须留余量小于 nginx 300s 上限", () => {
     expect(LONG_RUNNING_TIMEOUT_MS).toBe(280_000);
+  });
+
+  it("批量执行的临时预算不得低于常量预算（临时指放宽，不是收紧）", () => {
+    expect(300_000).toBeGreaterThanOrEqual(LONG_RUNNING_TIMEOUT_MS);
   });
 });

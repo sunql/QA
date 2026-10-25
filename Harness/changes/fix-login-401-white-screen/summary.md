@@ -31,8 +31,24 @@
 - 新增：App 未知路径兜底（authed → `/chat`、未登录 → `/login`）；RequireAuth 真实路由白名单语义。
 - 净新增失败 0：全量 9 红 = client.test.ts 3（干净 HEAD 复跑确认既有）+ kpi/ontology 5（记录在案基线红）。
 
-## 4. 已知边界 / 后续
+## 4. 后续批：改密 401 同族修复（e85ff666）
 
-- **ChangePasswordPage 同族问题未修**（改旧密码错 → 401 被拦截器清 token 踢回 /login，提示也读不到）：修它需要拦截器区分「登录接口 401」与「会话过期 401」，超出本期，单独开变更。
+- 根因：改旧密码错 → 后端 `AuthFailedError` → 401，拦截器无条件清 token/store
+  把正在改密的用户踢回 `/login`；ChangePasswordPage 读 `e.response.data.error`
+  （AppError 上不存在）永远弹「网络异常」。
+- 拦截器：401 清登录态前按 URL 豁免凭证校验接口（`CREDENTIAL_CHECK_URLS =
+  ["/auth/me/password"]`）——该 401 = 旧密码错、token 仍有效，页面自己提示。
+- ChangePasswordPage：catch 按 AppError.status 分流（401=当前密码不正确 /
+  422=弱密码双保险 / 其余=网络异常），与 LoginPage 同口径。
+- 测试：拦截器加豁免用例；ChangePasswordPage 测试改断言 mock message.error
+  ——**antd message 渲染在 document.body 的 portal，跨测试残留会让 DOM 文本
+  断言不稳定**（「Found multiple elements」/「Unable to find」随机切换），toast
+  类断言一律走 message mock。
+- 验证：受影响 31/31 绿、全量净新增失败 0（同 9 条既有红）、tsc 干净。
+
+## 5. 已知边界 / 后续
+
 - `state.from` 只记 pathname 不带 search（`/data-quality?tab=reports` 重登录后落默认 tab）——既有行为，未动。
-- 部署：纯前端改动；生产走前端镜像 rebuild（`--build-arg VITE_API_BASE_URL=` 必须显式空，见 PROD-FRONTEND-REBUILD 同款流程）。
+- 生产部署：纯前端改动，走前端镜像 rebuild（`/tmp/PROD-FRONTEND-REBUILD-1025.md`）：
+  tarball `frontend-src-e85ff666.tar.gz`（sha256 `d2874c22…`，git archive 自 e85ff666）。
+- 本分支尚未合 main；生产验证通过后合并。

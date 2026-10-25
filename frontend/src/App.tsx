@@ -138,6 +138,11 @@ export default function App() {
         <Route path="research/:id/report" element={<ResearchReportPage />} />
         </Route>
       </Route>
+
+      {/* 兜底：未知路径重定向到 /（登录态决定去向——未登录经 RequireAuth 落 /login）。
+          fix/login-401-white-screen：没有兜底路由时未知路径（如旧的 /auth/login）
+          一律白屏无提示。 */}
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }

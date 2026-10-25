@@ -25,7 +25,10 @@ export interface AppError extends Error {
  * definitions) so downstream consumers (e.g. LoginPage) can branch on the code
  * rather than parsing raw message strings.
  *
- * 401 side effects (localStorage.clear + redirect) are preserved from Task 2.1.
+ * 纯归一化：401 的登录态清理（localStorage + authStore）由响应拦截器负责，
+ * 掉线重定向由 RequireAuth 软跳转负责，登录失败提示由 LoginPage toast 负责。
+ * （fix/login-401-white-screen：旧实现在此处 window.location.href 硬跳
+ * "/auth/login"——不存在的路由白屏，且页面卸载吃掉 LoginPage 的错误提示。）
  */
 export function normalizeError(err: AxiosError<ApiResponse<unknown>>): AppError {
   const status = err.response?.status ?? 0;
@@ -42,12 +45,6 @@ export function normalizeError(err: AxiosError<ApiResponse<unknown>>): AppError 
 
   // Object.assign to a fresh Error — same pattern as brief GREEN
   const appErr: AppError = Object.assign(new Error(message), { code, status, detail });
-
-  // 401: clear token + redirect (Task 2.1 — preserved)
-  if (status === 401) {
-    localStorage.removeItem("token");
-    window.location.href = "/auth/login";
-  }
 
   return appErr;
 }
@@ -85,6 +82,15 @@ function showError(content: string): void {
  */
 export function showMessageError(content: string): void {
   showError(content);
+}
+
+/** 401 但并非会话过期的凭证校验接口：改密接口的 401 = 旧密码校验失败，
+ *  用户 token 仍有效——清登录态会把正在改密的人踢回 /login 且提示丢失
+ *  （fix/login-401-white-screen 后续，2026-10-25）。由调用页自己 toast。 */
+const CREDENTIAL_CHECK_URLS = ["/auth/me/password"];
+
+function isCredentialCheckRequest(url: string | undefined): boolean {
+  return CREDENTIAL_CHECK_URLS.some((u) => (url ?? "").includes(u));
 }
 
 // 创建带默认配置的 axios 实例
@@ -129,10 +135,11 @@ export function createHttpClient(): AxiosInstance {
       const apiDetail = (error.response?.data as { detail?: unknown } | undefined)?.detail;
 
       // 401：token 失效 / 未登录 → 清 store 触发重定向到 /login
+      // 例外：凭证校验接口（改密）的 401 = 旧密码错，token 仍有效，不清登录态
       // 不弹 toast（避免每次跳转都弹"登录已失效"，已经准备重定向了）
       // 直接 setState 而非 logout()：拦截器是同步路径，不需要异步调 API
       // audit-fx-2.1：同时清理 localStorage（持久层），防止过期 token 被 persist 恢复
-      if (status === 401) {
+      if (status === 401 && !isCredentialCheckRequest(error.config?.url)) {
         localStorage.removeItem("token");
         useAuthStore.setState({
           token: null,

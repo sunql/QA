@@ -85,4 +85,33 @@ describe("App 路由", () => {
     const probe = await screen.findByTestId("probe-path");
     expect(probe.textContent).toBe("/chat");
   });
+
+  it("未知路径兜底重定向到 /（已登录最终落 /chat）", async () => {
+    // fix/login-401-white-screen：没有 * 兜底路由时未知路径（如旧的 /auth/login）
+    // 一律白屏无提示。
+    render(
+      <ConfigProvider locale={zhCN}>
+        <MemoryRouter initialEntries={["/no-such-page"]}>
+          <App />
+          <LocationProbe />
+        </MemoryRouter>
+      </ConfigProvider>
+    );
+    const probe = await screen.findByTestId("probe-path");
+    expect(probe.textContent).toBe("/chat");
+  });
+
+  it("未知路径兜底（未登录经 RequireAuth 落 /login）", async () => {
+    useAuthStore.setState({ token: null, user: null, mustChangePassword: false });
+    render(
+      <ConfigProvider locale={zhCN}>
+        <MemoryRouter initialEntries={["/no-such-page"]}>
+          <App />
+          <LocationProbe />
+        </MemoryRouter>
+      </ConfigProvider>
+    );
+    const probe = await screen.findByTestId("probe-path");
+    expect(probe.textContent).toBe("/login");
+  });
 });

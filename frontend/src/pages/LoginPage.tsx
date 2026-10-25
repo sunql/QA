@@ -3,6 +3,7 @@ import { useNavigate, useLocation, Navigate } from "react-router-dom";
 import { Form, Input, Button, Checkbox, message } from "antd";
 import { useTranslation } from "react-i18next";
 import { useAuthStore } from "../stores/authStore";
+import type { AppError } from "../api/client";
 
 export default function LoginPage() {
   const { t } = useTranslation();
@@ -30,17 +31,17 @@ export default function LoginPage() {
       const from = (loc.state as { from?: string } | null)?.from ?? "/";
       nav(from, { replace: true });
     } catch (e: unknown) {
-      // Extract detail.code for user-facing error messages (Finding 10 — audit-fx-3.3)
-      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-      const code = typeof detail === "object" && detail !== null && "code" in detail
-        ? String((detail as { code: unknown }).code)
-        : null;
-
-      if (code === "AUTH_INVALID" || code === "E_AUTH_INVALID_PASSWORD") {
+      // 拦截器 reject 的是 normalizeError 产出的 AppError（code/status/detail，
+      // **无 .response**；fix/login-401-white-screen，2026-10-25）。
+      // 旧实现读 e.response.data.detail.code —— AppError 上不存在该形状，
+      // 登录失败永远落到 networkError 分支弹「网络异常」。
+      // 后端登录失败（用户不存在 / 密码错 / 账号禁用）统一 401 防枚举
+      // （AuthFailedError → HTTP 401），因此登录接口上 status=401 即
+      // 「账号或密码错误」；429 = 限流；其余按网络异常兜底。
+      const appErr = e as Partial<AppError> | null;
+      if (appErr?.status === 401) {
         message.error(t("auth.login.invalidCredentials")); // 账号或密码错误
-      } else if (code === "AUTH_EXPIRED" || code === "E_AUTH_EXPIRED") {
-        message.error("会话已过期，请重新登录");
-      } else if (code === "AUTH_RATE_LIMITED" || code === "E_AUTH_RATE_LIMITED") {
+      } else if (appErr?.status === 429) {
         message.error(t("auth.login.rateLimited")); // 请求过于频繁，请稍后再试
       } else {
         message.error(t("auth.login.networkError"));

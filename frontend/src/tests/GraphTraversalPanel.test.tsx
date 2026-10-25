@@ -55,7 +55,7 @@ describe("GraphTraversalPanel", () => {
         <GraphTraversalPanel />
       </ConfigProvider>
     );
-    await userEvent.type(screen.getByPlaceholderText(/100001/), "100001");
+    await userEvent.type(screen.getByPlaceholderText(/10105|100001/), "100001");
     await userEvent.click(screen.getByRole("button", { name: /遍历/ }));
 
     await waitFor(() => expect(mockedTraverse).toHaveBeenCalledTimes(1));
@@ -72,7 +72,7 @@ describe("GraphTraversalPanel", () => {
         <GraphTraversalPanel />
       </ConfigProvider>
     );
-    await userEvent.type(screen.getByPlaceholderText(/100001/), "100001");
+    await userEvent.type(screen.getByPlaceholderText(/10105|100001/), "100001");
     await userEvent.click(screen.getByRole("button", { name: /遍历/ }));
 
     expect(await screen.findByText(/遍历失败/)).toBeTruthy();

@@ -283,7 +283,14 @@ class GraphRelationService:
         for label, _, _ in _SHEET16_EXTRA_ENTITIES:
             if label not in BUSINESS_ENTITY_LABELS:
                 violations.append(label)
-        for relType in ("SUPPLIES", "CONTAINS", "GENERATES", "INSPECTED_BY", "SIGNED"):
+        for relType in (
+            "SUPPLIES",
+            "CONTAINS",
+            "GENERATES",
+            "INSPECTED_BY",
+            "SIGNED",
+            "PLACES",  # THBI 采购订单回填（feat-business-graph-backfill）
+        ):
             if relType not in BUSINESS_RELATION_TYPES:
                 violations.append(relType)
         return violations

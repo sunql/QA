@@ -11,7 +11,7 @@ import logging
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
-from neo4j import GraphDatabase, Driver
+from neo4j import Driver, GraphDatabase
 
 from app.config import getSettings
 from app.domain.enums import ClassRelationType
@@ -44,6 +44,8 @@ BUSINESS_ENTITY_LABELS = frozenset(
 # Supplier-SUPPLIES->Material / PurchaseOrder-CONTAINS->Material /
 # PurchaseOrder-GENERATES->GoodsReceipt / GoodsReceipt-INSPECTED_BY->IncomingInspection /
 # IncomingInspection-GENERATED->NCR / Supplier-SIGNED->Contract
+# PLACES（Supplier->PurchaseOrder）为 THBI 采购订单真实数据回填新增
+# （feat-business-graph-backfill）：demo 种子里没有「供应商下单」语义边。
 # CQL 关系类型同样不可参数化，白名单防注入。
 BUSINESS_RELATION_TYPES = frozenset(
     {
@@ -52,12 +54,22 @@ BUSINESS_RELATION_TYPES = frozenset(
         "GENERATES",
         "INSPECTED_BY",
         "SIGNED",
+        "PLACES",
     }
 )
 
 # 多跳遍历上限（Phase 6.3）：防止无界 variable-length path 拖垮图库。
 # 业务链路语义上限为 5 跳（Supplier->Material<-PO->GR->IQC->NCR）。
 _MAX_TRAVERSAL_HOPS = 5
+
+# 单次遍历返回的路径数上限（feat-business-graph-backfill）：demo 图无此担忧，
+# 真实采购数据入图后百万级边下 variable-length path 可能展开数十万行，
+# 无上限会把图库和 API 一起拖垮。CQL 里以 LIMIT $pathLimit 参数化消费。
+_MAX_TRAVERSAL_PATHS = 1_000
+
+# 批量写分批大小（feat-business-graph-backfill）：UNWIND 每批参数行数。
+# 真实采购数据规模（35 万供应对 / 92 万 CONTAINS 行）下平衡单事务内存与往返次数。
+_BUSINESS_BATCH_SIZE = 10_000
 
 
 # 本体「类 × 类」语义关系类型（Phase 5.6 关系重构）：直接由 ClassRelationType 枚举派生，
@@ -636,6 +648,100 @@ def linkBusinessRelation(
         )
 
 
+def ensureBusinessKeyIndex() -> None:
+    """确保 BusinessEntity(key) 索引存在（幂等，schema 级操作）。
+
+    MERGE/MATCH on key 无索引会退化成 label 扫描——批量写 10k 行/批 ×
+    全 label 扫描是 O(n²)（2026-10-25 dev 回填实测：无索引时节点写入
+    逐步变慢）。写路径与遍历起点校验全部受益。
+    """
+    driver = getDriver()
+    with driver.session() as session:
+        session.run(
+            "CREATE INDEX business_entity_key IF NOT EXISTS "
+            "FOR (b:BusinessEntity) ON (b.key)"
+        )
+
+
+def upsertBusinessEntityNodes(label: str, rows: list[dict[str, Any]]) -> int:
+    """批量幂等创建/更新业务实体节点（UNWIND 分批，返回触及节点数）。
+
+    真实采购数据规模（~51 万节点）下，逐节点单 session MERGE（
+    upsertBusinessEntityNode）每次调用一次 round-trip，会是几十小时级灾难；
+    批量版单事务吞 `_BUSINESS_BATCH_SIZE` 行。同步驱动调用方需自行
+    ``asyncio.to_thread`` 包装（同 upsertBusinessEntityNode 的约定）。
+    写前必须先 ensureBusinessKeyIndex（applyGraphPlan 已接线）。
+
+    - label：白名单校验（同单条版）
+    - rows：[{"key", "code", "name", "source"}]，key 必填非空；name/code/source
+      可为 None —— CQL 用 COALESCE 保留图内已有值（重放不回清 enrichment）
+    """
+    _assertBusinessLabel(label)
+    for row in rows:
+        if not str(row.get("key") or "").strip():
+            raise ValueError("rows 每项必须含非空 key")
+    if not rows:
+        return 0
+    driver = getDriver()
+    cql = f"""
+        UNWIND $rows AS row
+        MERGE (b:BusinessEntity:{label} {{key: row.key}})
+        SET b.code = COALESCE(row.code, b.code),
+            b.name = COALESCE(row.name, b.name),
+            b.entityType = $label,
+            b.source = COALESCE(row.source, b.source)
+        RETURN count(b) AS cnt
+    """
+    written = 0
+    with driver.session() as session:
+        for i in range(0, len(rows), _BUSINESS_BATCH_SIZE):
+            summary = session.run(
+                cql, rows=rows[i : i + _BUSINESS_BATCH_SIZE], label=label
+            ).single()
+            written += summary["cnt"] if summary else 0
+    return written
+
+
+def linkBusinessRelations(
+    relType: str,
+    fromLabel: str,
+    toLabel: str,
+    pairs: list[dict[str, Any]],
+) -> int:
+    """批量幂等创建业务关系边（UNWIND 分批，返回触及边数）。
+
+    语义同 linkBusinessRelation：两端节点必须已存在（MATCH 非 MERGE，
+    防边写入悄悄创建孤立节点），重放不产生重复边。调用方需自行
+    ``asyncio.to_thread`` 包装。
+    """
+    _assertBusinessRelation(relType)
+    _assertBusinessLabel(fromLabel)
+    _assertBusinessLabel(toLabel)
+    for pair in pairs:
+        if not str(pair.get("fromKey") or "").strip() or not str(
+            pair.get("toKey") or ""
+        ).strip():
+            raise ValueError("pairs 每项必须含非空 fromKey/toKey")
+    if not pairs:
+        return 0
+    driver = getDriver()
+    cql = f"""
+        UNWIND $pairs AS pair
+        MATCH (a:BusinessEntity:{fromLabel} {{key: pair.fromKey}}),
+              (b:BusinessEntity:{toLabel} {{key: pair.toKey}})
+        MERGE (a)-[r:{relType}]->(b)
+        RETURN count(r) AS cnt
+    """
+    written = 0
+    with driver.session() as session:
+        for i in range(0, len(pairs), _BUSINESS_BATCH_SIZE):
+            summary = session.run(
+                cql, pairs=pairs[i : i + _BUSINESS_BATCH_SIZE]
+            ).single()
+            written += summary["cnt"] if summary else 0
+    return written
+
+
 def deleteBusinessGraph() -> int:
     """清空业务实体子图（含全部边）。本体节点（Class/Property/Metric）不受影响。
 
@@ -723,11 +829,13 @@ def traverseBusinessGraph(
       depth=1 时即起始节点；depth≥2 时为路径中间节点（如 S→M→PO 行的
       from=Material、rel=CONTAINS、to=PurchaseOrder）。
     - to*：可达终点节点 key / code / name / entityType
-    - relType：末边关系类型（白名单内的 6 种业务关系）
+    - relType：末边关系类型（白名单内的 7 种业务关系）
 
     用 variable-length path ``[*1..N]``（由 maxHops 拼入 CQL 前强制
     ``1 <= maxHops <= _MAX_TRAVERSAL_HOPS``，防无界遍历）。
     遍历会展开所有方向（-），符合业务推理语义（如从物料反查供应商）。
+    结果行数以 ``LIMIT $pathLimit``（_MAX_TRAVERSAL_PATHS）封顶——
+    真实采购数据入图后百万级边，深度遍历可能展开数十万路径，必须封顶。
     """
     _assertBusinessLabel(startLabel)
     if not 1 <= maxHops <= _MAX_TRAVERSAL_HOPS:
@@ -747,10 +855,10 @@ def traverseBusinessGraph(
                type(rels[-1]) AS relType,
                end.key AS toKey, end.code AS toCode,
                end.name AS toName, end.entityType AS toType
+        LIMIT $pathLimit
     """
     with driver.session() as session:
-        return [
-            {
+        return [            {
                 "depth": r["depth"],
                 "fromKey": r["fromKey"],
                 "fromCode": r["fromCode"],
@@ -762,7 +870,7 @@ def traverseBusinessGraph(
                 "toName": r["toName"],
                 "toType": r["toType"],
             }
-            for r in session.run(cql, key=startKey)
+            for r in session.run(cql, key=startKey, pathLimit=_MAX_TRAVERSAL_PATHS)
         ]
 
 

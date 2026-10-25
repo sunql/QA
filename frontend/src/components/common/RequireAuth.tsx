@@ -1,8 +1,13 @@
 import { Navigate, Outlet, useLocation } from "react-router-dom";
 import { useAuthStore } from "../../stores/authStore";
 
-/** X2 (QA-1012-01 #3 关联前端)：must_change_password 时允许访问的白名单路径。 */
-export const ALLOWED_WHEN_MUST_CHANGE = ["/auth/change-password", "/auth/login"];
+/** X2 (QA-1012-01 #3 关联前端)：must_change_password 时允许访问的白名单路径。
+ *
+ * fix/login-401-white-screen（2026-10-25）：旧值 "/auth/change-password"、
+ * "/auth/login" 都是前端路由表里不存在的路径（真实路由是 /change-password、
+ * /login），mustChangePassword 流程会被自己重定向到白屏。
+ */
+export const ALLOWED_WHEN_MUST_CHANGE = ["/change-password", "/login"];
 
 /** 判断 pathname 是否在白名单内（精确匹配 + 子路径，前缀边界防误判）。
 
@@ -26,7 +31,7 @@ export default function RequireAuth() {
   }
 
   if (mustChangePassword && !isAllowedWhenMustChange(location.pathname)) {
-    return <Navigate to="/auth/change-password" replace />;
+    return <Navigate to="/change-password" replace />;
   }
 
   return <Outlet />;

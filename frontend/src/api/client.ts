@@ -25,7 +25,10 @@ export interface AppError extends Error {
  * definitions) so downstream consumers (e.g. LoginPage) can branch on the code
  * rather than parsing raw message strings.
  *
- * 401 side effects (localStorage.clear + redirect) are preserved from Task 2.1.
+ * 纯归一化：401 的登录态清理（localStorage + authStore）由响应拦截器负责，
+ * 掉线重定向由 RequireAuth 软跳转负责，登录失败提示由 LoginPage toast 负责。
+ * （fix/login-401-white-screen：旧实现在此处 window.location.href 硬跳
+ * "/auth/login"——不存在的路由白屏，且页面卸载吃掉 LoginPage 的错误提示。）
  */
 export function normalizeError(err: AxiosError<ApiResponse<unknown>>): AppError {
   const status = err.response?.status ?? 0;
@@ -42,12 +45,6 @@ export function normalizeError(err: AxiosError<ApiResponse<unknown>>): AppError 
 
   // Object.assign to a fresh Error — same pattern as brief GREEN
   const appErr: AppError = Object.assign(new Error(message), { code, status, detail });
-
-  // 401: clear token + redirect (Task 2.1 — preserved)
-  if (status === 401) {
-    localStorage.removeItem("token");
-    window.location.href = "/auth/login";
-  }
 
   return appErr;
 }

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Form, Input, Button, Card, message, Progress } from "antd";
 import { useTranslation } from "../i18n";
 import { useAuthStore } from "../stores/authStore";
+import type { AppError } from "../api/client";
 
 const POLICY = /^(?=.*[A-Za-z])(?=.*\d).{8,}$/;
 
@@ -33,11 +34,18 @@ export default function ChangePasswordPage() {
       await changeOwn(v.oldPassword, v.newPassword);
       message.info(t("auth.changePassword.success"));
       nav("/login", { replace: true });
-    } catch (e: any) {
-      const code = e?.response?.data?.error;
-      if (code === "MSG_OLD_PASSWORD_INCORRECT") message.error(t("auth.changePassword.oldWrong"));
-      else if (e?.response?.data?.error === "MSG_PASSWORD_TOO_WEAK") message.error(t("auth.changePassword.weak"));
-      else message.error(t("auth.login.networkError"));
+    } catch (e: unknown) {
+      // 拦截器 reject 的是 AppError（无 .response；fix/login-401-white-screen 同口径）。
+      // 按状态分流：401 = 旧密码校验失败（拦截器已豁免改密接口不清登录态）；
+      // 422 = 后端弱密码双保险（前端 POLICY 预检通常先拦）；其余走网络异常兜底。
+      const appErr = e as Partial<AppError> | null;
+      if (appErr?.status === 401) {
+        message.error(t("auth.changePassword.oldWrong"));
+      } else if (appErr?.status === 422) {
+        message.error(t("auth.changePassword.weak"));
+      } else {
+        message.error(t("auth.login.networkError"));
+      }
     } finally {
       setSubmitting(false);
     }

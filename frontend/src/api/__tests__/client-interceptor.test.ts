@@ -18,7 +18,7 @@ import type { InternalAxiosRequestConfig } from "axios";
 import { createHttpClient } from "../client";
 import { useAuthStore } from "../../stores/authStore";
 
-/** 造一个拒绝式 adapter：模拟后端返回给定 status + data。 */
+/** 造一个拒绝式 adapter：模拟后端返回给定 status + data（config.url 由 axios 填充）。 */
 function makeRejectingAdapter(status: number, data: unknown) {
   return (config: InternalAxiosRequestConfig) => {
     const response = {
@@ -97,6 +97,19 @@ describe("client.ts response interceptor 401 vs 403（真链路）", () => {
         status: 401,
         code: "AUTH_INVALID",
       });
+    });
+  });
+
+  describe("401 on 改密接口（凭证校验失败，非会话过期）", () => {
+    it("does NOT clear token/store — 用户留在改密页自己提示", async () => {
+      client.defaults.adapter = makeRejectingAdapter(
+        401,
+        { success: false, error: "MSG_OLD_PASSWORD_INCORRECT", detail: null }
+      );
+      await expect(client.put("/auth/me/password", {})).rejects.toMatchObject({ status: 401 });
+      expect(localStorage.getItem("token")).toBe("fake-token-12345");
+      expect(useAuthStore.getState().token).toBe("fake-token-12345");
+      expect(assignedHrefs).toEqual([]);
     });
   });
 

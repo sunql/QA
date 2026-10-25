@@ -127,7 +127,9 @@
 - 现状结论：工具不是程序搜索发现的；执行体（handler/arg_extractor）在代码侧
   白名单 `_VALID_HANDLER_REFS`，暴露与元数据由 `agent_tool_config` DB 行管理；
   新工具 = 代码 handler（发版）+ 配置行（免发版）
-- **方向 A（本文档即交付）**：新增工具操作手册 + 排障速查
+- **方向 A（本文档即交付）**：新增工具操作手册 + 排障速查（2026-10-25 补全
+  handler 写法约定：AgentHandler/ToolResult/extractor 契约、登记点、注册期
+  fail-fast、测试路径；并修正白名单快照 BUILTIN 6→7，漏计 supplier_360）
 - **方向 B（做，待排期）**：`GET /admin/tools/registry` 只读暴露代码侧白名单 +
   extractor 清单，`/admin/tools` 表单 ref/extractor 改下拉，录入时拦截而非装配期报错
 - **方向 C（不做）**：插件式动态加载 handler——与「代码执行体可信、DB 只管

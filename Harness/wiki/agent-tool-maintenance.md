@@ -23,15 +23,80 @@ handler」生成 AgentTool。
 
 ## 当前白名单清单（2026-10-25 快照）
 
-- **BUILTIN handler**（6）：`supplier_risk`、`graph_traverse`、
+- **BUILTIN handler**（7）：`supplier_360`、`supplier_risk`、`graph_traverse`、
   `wiki_search`、`wiki_read`、`rule_evaluate`、`coverage_status`（wiki 族在
-  `agent_tools_wiki.py`）
+  `agent_tools_wiki.py`，经 `**WIKI_HANDLERS` 并入 `BUILTIN_HANDLERS`）
 - **NL2SQL handler**（1）：`nl2sql_default`
 - **arg_extractor**（5）：`supplier_key`、`supplier_risk_key`、
   `supplier_graph_key`、`wiki_text`、`wiki_no_args`
 
-> 快照会过时——以 `agent_tools.py` 的 `_VALID_HANDLER_REFS` / `ARG_EXTRACTORS`
-> 为准；方向 B 落地后 `/admin/tools` 下拉即实时清单。
+> 快照会过时——以 `agent_tools.py` 的 `BUILTIN_HANDLERS` / `NL2SQL_HANDLERS` /
+> `ARG_EXTRACTORS` 字典为准；`_VALID_HANDLER_REFS` 是从字典 keys 派生的
+> frozenset，**登记进 handler 字典即自动入白名单**。方向 B 落地后
+> `/admin/tools` 下拉即实时清单。
+
+## handler 写法约定（新能力工具的代码侧规格）
+
+类型契约全部在 `backend/app/services/agent_tool_types.py`（M8 从 agent_tools
+下沉，解 wiki 域循环导入；`agent_tools` 仍 re-export，旧 import 路径照旧可用）：
+
+```python
+# 签名（三参，缺一不可）
+AgentHandler  = Callable[[AsyncSession, dict, AgentToolContext], Awaitable[ToolResult]]
+ArgExtractor  = Callable[[str], dict | None]
+
+@dataclass(frozen=True)
+class ToolResult:
+    data: dict                      # 必须 JSON-serializable（camelCase alias 对齐 API 契约）
+    answer: str                     # 面向用户的文字答案
+    tokens_used: int = 0            # 调了 LLM 就必须计量（项目核心约束③）
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost: float = 0.0               # 单价只能来自 ctx.llm_config 真实配置
+    llm_model_name: str | None = None
+```
+
+**写 handler 的规则：**
+
+1. **放哪个文件**：通用领域 → `agent_tools.py`；Wiki 域 → `agent_tools_wiki.py`。
+   不要新建第三个 handler 模块（又要动类型下沉结构，收益为零）。
+2. **不要自造返回形状**：`data` 结构对齐同文件既有 handler（参照
+   `_graphTraverseHandler` 的 `model_dump(mode="json", by_alias=True)` 模式）；
+   文字答案放 `answer`，不要塞进 data 让前端自己拼。
+3. **`ctx` 用法**：`ctx.llm_factory` / `ctx.llm_config` 成对使用——调 LLM 的
+   handler 必须按真实模型单价计量（只给工厂不给配置 ⇒ 降级路径，见
+   SupplierRiskService）；纯查询 handler 三个 token 字段留默认 0。
+   `ctx.actor` 供日志溯源。
+4. **args 缺 key 的语义**：arg_extractor 解析失败返回 `None` ⇒ 运行时抛
+   ValidationError(422)；handler 内部只管消费已解析的 args。
+
+**写 extractor 的规则：**
+
+1. 签名 `(raw: str) -> dict | None`，纯函数（lambda 包装既有 intent 解析函数
+   即可，参照 `ARG_EXTRACTORS` 里 `supplier_key` 三兄弟的写法）。
+2. **无参工具返回 `{}` 而不是 `None`**——`None` 语义是「这次输入解析不出参数」
+   ⇒ 422；无参工具永远不该 422（`wiki_no_args` 的 docstring 明确此契约）。
+3. 需要新解析逻辑时先看 `intent_service.py` 既有 extract 函数能否复用。
+
+**登记（两处 dict，缺一装配即失败）：**
+
+```python
+# agent_tools.py（或领域文件后 ** 并入）
+BUILTIN_HANDLERS["my_new_tool"] = _myNewToolHandler      # ← handler 入册
+ARG_EXTRACTORS["my_tool_key"]   = lambda raw: ...        # ← extractor 入册
+# _VALID_HANDLER_REFS 由 keys 派生，不用手改
+```
+
+**注册期 fail-fast（`AgentToolRegistry._validate`，别等运行时 403）：**
+`data_object` 必须非空全大写；`data_layers` 元素必须非空全大写（与
+`AgentAccessPolicy` 归一化后的精确比较，大小写不一致会静默 fail-closed）；
+层无关工具允许 `data_layers=()`（回退对象粒度）。
+
+**测试要求**：`backend/app/tests/unit/test_agent_tool_assembly.py`——
+a) 白名单一致性断言（`test_builtin_has_expected_keys` /
+   `test_arg_extractors_expected_keys` / `test_valid_handler_refs_mapping`
+   的 keys 集合断言，新工具必须补进期望集合）；b) assemble 正例
+   （DB 行 → handler 指向一致）；c) handler 行为单测（对齐既有 handler 测试）。
 
 ## 关键语义
 
@@ -74,11 +139,13 @@ handler」生成 AgentTool。
 
 **新能力（发版）：**
 1. 在 `agent_tools.py`（或领域文件 `agent_tools_wiki.py`）写 handler：
-   签名对齐 `AgentHandler`，返回结构对齐同文件既有 handler（不要自造形状）
+   签名/返回结构/extractor 规则照上文「handler 写法约定」，不要自造形状
 2. 需要参数提取就写 extractor 并登记 `ARG_EXTRACTORS`；不需要则复用
-   `wiki_no_args` 类似的空参模式
-3. handler 名登记进 `_VALID_HANDLER_REFS` 对应 kind 的 frozenset
-4. 单测对齐 `test_agent_tool_assembly.py`（白名单一致性断言 + handler 行为）
+   `wiki_no_args` 模式（返回 `{}`，不是 `None`）
+3. handler 名登记进 `BUILTIN_HANDLERS` / `NL2SQL_HANDLERS` 对应字典
+   （`_VALID_HANDLER_REFS` 自动派生）
+4. 单测对齐 `backend/app/tests/unit/test_agent_tool_assembly.py`
+   （白名单一致性断言 + handler 行为）
 5. 发版后 `/admin/tools` 建配置行：name（小写下划线，创建后不可改）、
    handler_kind / handler_ref / arg_extractor_kind、暴露面元数据
 6. 给目标 Agent 绑定 `tool_name = name`（Agent Registry 页）

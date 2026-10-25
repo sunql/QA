@@ -135,6 +135,11 @@
 - **顺手修**：`/admin/tools` 页面无菜单入口（路由存在但 seed 缺行）——补
   `item.adminTools`（systemConfig sort_order=590）+ menu.item.adminTools i18n；
   admin 角色旁路全量菜单（seed_rbac.py），免 permission_grant 即可见
+- **顺手修 2（用户验收反馈）**：工具管理页 dataLayers 下拉原前端硬编码
+  `[DIM,DWD,FEATURE]` 子集，与 7 层 DB 词表脱节——对齐 Agent Registry 同款
+  `/agents/options`（`1cc9addb`；后端 tool config 对 data_layers 本就自由
+  字符串无词表校验，非本次回归；词表校验是否要补到 tool config 写侧 → 并入
+  方向 B 排期一起看）
 
 ## 8. 进度记录（2026-10-25）
 

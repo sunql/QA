@@ -90,6 +90,8 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.bizConfig", "code": "item.features", "label_key": "menu.item.features", "icon_code": "cluster", "sort_order": 360, "path": "/features"},
     {"parent": "section.bizConfig", "code": "item.adminFeatureRules", "label_key": "menu.item.adminFeatureRules", "icon_code": "tool", "sort_order": 365, "path": "/admin/feature-rules"},
     {"parent": "section.bizConfig", "code": "item.businessObjects", "label_key": "menu.item.businessObjects", "icon_code": "cluster", "sort_order": 370, "path": "/business-objects"},
+    # feat-data-domain-layer：数据域管理页（业务对象主域/附域的授权源）
+    {"parent": "section.bizConfig", "code": "item.dataDomains", "label_key": "menu.item.dataDomains", "icon_code": "cluster", "sort_order": 372, "path": "/data-domains"},
     {"parent": "section.bizConfig", "code": "item.ontologyProperties", "label_key": "menu.item.ontologyProperties", "icon_code": "tags", "sort_order": 375, "path": "/ontology-properties"},
     # Foundation
     {"parent": "section.foundation", "code": "item.datasource", "label_key": "menu.item.datasource", "icon_code": "database", "sort_order": 410, "path": "/datasource"},

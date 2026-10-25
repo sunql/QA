@@ -299,6 +299,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.services.business_object_registry import businessObjectRegistry
 
         await businessObjectRegistry.warmUp(session)
+        # feat-data-domain-layer：数据域 + 数据层规则注册表（Agent 词表 DB SSOT；
+        # schema validator / chat_recall 经同步快路径消费，未 warmUp fallback 常量）。
+        # 幂等 seed 先行（迁移 0133/0134 已管 prod 首装，此处兜底防漂移）
+        from scripts.seed_data_domain import seedDataDomains, seedLayerRules
+
+        await seedDataDomains(session)
+        await seedLayerRules(session)
+        from app.services.data_domain_registry import dataDomainRegistry
+        from app.services.layer_rule_registry import layerRuleRegistry
+
+        await dataDomainRegistry.warmUp(session)
+        await layerRuleRegistry.warmUp(session)
         # Phase 1 Task 1.3：KpiMatchCache 启动预热，加载所有 PUBLISHED KPI
         from app.services.kpi_match_cache import kpi_match_cache
 
@@ -403,6 +415,7 @@ def createApp() -> FastAPI:
         auth,
         business_object,
         chat,
+        data_domains,
         data_lineage,
         data_quality,
         data_quality_generate,
@@ -509,6 +522,9 @@ def createApp() -> FastAPI:
     )
     app.include_router(
         business_object.router, prefix="/api/v1", tags=["business-object"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
+    )
+    app.include_router(
+        data_domains.router, prefix="/api/v1/data-domains", tags=["data-domain"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
     app.include_router(features.router, prefix="/api/v1/features", tags=["features"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(

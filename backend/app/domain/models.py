@@ -423,17 +423,48 @@ class KpiCatalog(Base, TimestampMixin):
         return f"<KpiCatalog id={self.id} code={self.kpi_code} status={self.status}>"
 
 
+class DataLayerRule(Base, TimestampMixin):
+    """数据层规则（feat-data-domain-layer 方案 2）。
+
+    Agent 数据层词表 + 表名前缀识别的 DB SSOT。pattern 非空 = 前缀规则
+    （priority 小者先匹配，ODS_DIM_ 必须先于 ODS_）；pattern 为空 = 手工
+    声明层（如 FEATURE，不可由表名前缀探测）。datasource_type 预留按源类型
+    分默认规则，NULL = 全类型通用。
+    """
+
+    __tablename__ = "data_layer_rule"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    layer: Mapped[str] = mapped_column(String(20), nullable=False)
+    pattern: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    datasource_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    def __repr__(self) -> str:
+        return f"<DataLayerRule layer={self.layer} pattern={self.pattern}>"
+
+
 class BusinessObject(Base, TimestampMixin):
-    """业务对象注册表 SSOT（Phase 4）。"""
+    """业务对象注册表 SSOT（Phase 4）。
+
+    feat-data-domain-layer（0133）：header_class_id 收紧 NOT NULL + 唯一索引
+    （一个本体类只允许被一个 BO 作 header）；primary_domain_id 必填——
+    「有且只有一个主域」由 NOT NULL 列天然保证，附域走 BusinessObjectDomain。
+    """
 
     __tablename__ = "business_object"
 
     code: Mapped[str] = mapped_column(String(20), primary_key=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    header_class_id: Mapped[int | None] = mapped_column(
+    header_class_id: Mapped[int] = mapped_column(
         BigIntFk,
         ForeignKey("ontology_class.id", ondelete="RESTRICT"),
-        nullable=True,
+        nullable=False,
+    )
+    primary_domain_id: Mapped[str] = mapped_column(
+        ForeignKey("data_domain.code", ondelete="RESTRICT"),
+        nullable=False,
     )
     graph_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -441,6 +472,53 @@ class BusinessObject(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<BusinessObject code={self.code} name={self.name}>"
+
+
+class DataDomain(Base, TimestampMixin):
+    """企业数据域基础数据（feat-data-domain-layer 方案 1）。
+
+    Agent 授权域词表的 DB SSOT（迁移自 agent_vocabulary.AGENT_DATA_DOMAINS 常量，
+    常量降级为 registry 未 warmUp 时的 fallback）。主管理组织来自组织管理；
+    覆盖度域轴（class_domain_mapping）是独立分类轴，与本表无关。
+    """
+
+    __tablename__ = "data_domain"
+
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    primary_org_id: Mapped[int | None] = mapped_column(
+        BigIntFk,
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<DataDomain code={self.code} name={self.name}>"
+
+
+class BusinessObjectDomain(Base):
+    """业务对象附域关联（feat-data-domain-layer 方案 1）。
+
+    主域在 business_object.primary_domain_id；本表只存附域（服务层校验
+    domain_id ≠ primary_domain_id）。双 FK CASCADE：BO 或域删除时联动清理。
+    """
+
+    __tablename__ = "business_object_domain"
+
+    bo_code: Mapped[str] = mapped_column(
+        ForeignKey("business_object.code", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    domain_id: Mapped[str] = mapped_column(
+        ForeignKey("data_domain.code", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    def __repr__(self) -> str:
+        return f"<BusinessObjectDomain bo={self.bo_code} domain={self.domain_id}>"
 
 
 class FeatureDefinition(Base, TimestampMixin):

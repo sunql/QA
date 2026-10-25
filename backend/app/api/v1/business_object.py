@@ -30,7 +30,7 @@ async def listBusinessObjects(
     service: BusinessObjectService = Depends(getBusinessObjectService),
 ) -> list[BusinessObjectRead]:
     rows = await service.listObjects(session)
-    return [BusinessObjectRead.model_validate(r) for r in rows]
+    return [await service.buildRead(session, r) for r in rows]
 
 
 @router.get("/{code}", response_model=BusinessObjectRead)
@@ -40,7 +40,7 @@ async def getBusinessObject(
     service: BusinessObjectService = Depends(getBusinessObjectService),
 ) -> BusinessObjectRead:
     row = await service.getObject(session, code)
-    return BusinessObjectRead.model_validate(row)
+    return await service.buildRead(session, row)
 
 
 @router.post(
@@ -53,7 +53,7 @@ async def createBusinessObject(
     user: CurrentUser = Depends(getCurrentUser),
 ) -> BusinessObjectRead:
     row = await service.createObject(session, payload, actor=user.userId)
-    return BusinessObjectRead.model_validate(row)
+    return await service.buildRead(session, row)
 
 
 @router.put("/{code}", response_model=BusinessObjectRead)
@@ -64,7 +64,7 @@ async def updateBusinessObject(
     service: BusinessObjectService = Depends(getBusinessObjectService),
 ) -> BusinessObjectRead:
     row = await service.updateObject(session, code, payload)
-    return BusinessObjectRead.model_validate(row)
+    return await service.buildRead(session, row)
 
 
 @router.delete("/{code}", status_code=status.HTTP_204_NO_CONTENT)

@@ -13,6 +13,7 @@ router = APIRouter()
 def _register() -> None:
     """懒注册各子路由，避免循环导入。"""
     from app.api.v1.documents import router as documentsRouter
+    from app.api.v1.data_domains import router as dataDomainsRouter
     from app.api.v1.menu_config import router as menuConfigRouter
     from app.api.v1.messages import router as messagesRouter
     from app.api.v1.model_config import router as modelConfigRouter
@@ -26,6 +27,9 @@ def _register() -> None:
     router.include_router(messagesRouter, prefix="/messages", tags=["messages"])
     router.include_router(
         menuConfigRouter, prefix="/menu-config", tags=["menu-config"]
+    )
+    router.include_router(
+        dataDomainsRouter, prefix="/data-domains", tags=["data-domain"]
     )
 
 

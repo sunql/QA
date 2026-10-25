@@ -599,6 +599,18 @@ MSG_BUSINESS_OBJECT_GRAPH_LABEL_MISMATCH = (
 MSG_BUSINESS_OBJECT_IN_USE = "业务对象「{code}」正被以下表引用，无法删除：{tables}"
 
 # =============================================================================
+# feat-data-domain-layer（方案 1）：数据域基础数据 + 业务对象域绑定
+# =============================================================================
+
+MSG_DATA_DOMAIN_NOT_FOUND = "数据域「{code}」不存在"
+MSG_DATA_DOMAIN_CODE_EXISTS = "数据域代码「{code}」已存在"
+MSG_DATA_DOMAIN_IN_USE = "数据域「{code}」正被以下位置引用，无法删除：{refs}"
+MSG_DATA_DOMAIN_ORG_NOT_FOUND = "管理组织 id={org_id} 不存在"
+MSG_BUSINESS_OBJECT_DOMAIN_CONFLICT = (
+    "业务对象「{code}」的附域「{domain}」与主域重复，附域不能等于主域"
+)
+
+# =============================================================================
 # 数据质量规则自动生成（dq-rule-auto-generation Task 4）
 # =============================================================================
 

@@ -56,6 +56,8 @@ from typing import Annotated, Any, Literal, Mapping
 from pydantic import BeforeValidator
 
 from app.services.business_object_registry import businessObjectRegistry
+from app.services.data_domain_registry import dataDomainRegistry
+from app.services.layer_rule_registry import layerRuleRegistry
 
 
 def _validateBusinessObjectCode(code: str) -> str:
@@ -89,6 +91,23 @@ BusinessObjectCodeNew = Annotated[str, BeforeValidator(_validateBusinessObjectCo
 Unlike BusinessObjectCodeType, this does NOT check the registry — a code being
 CREATED is by definition not yet in the registry. DB CHECK constraint (uppercase
 VARCHAR(20)) enforces the rest.
+"""
+
+
+def _validateDataDomainCode(code: str) -> str:
+    """Runtime validation against data_domain table via registry（仅 enabled 码）。"""
+    if not dataDomainRegistry.isValid(code):
+        raise ValueError(f"Invalid data domain code: {code!r}")
+    return code
+
+
+DataDomainCodeType = Annotated[str, BeforeValidator(_validateDataDomainCode)]
+"""已存在且启用的数据域 code（feat-data-domain-layer）。
+
+用于 BO 挂域、Agent dataDomains 等引用点；格式校验复用
+`_validateBusinessObjectCodeFormat`（大写+字母数字+下划线，≤20），存在性由
+dataDomainRegistry 保证。DataDomainCreate 自身的 code 用 format-only 版本
+（create payload paradox：新域尚不在 registry）。
 """
 
 from app.domain.error_messages import (
@@ -2758,13 +2777,37 @@ class AgentAccessPolicyRead(CamelModel):
     created_time: datetime | None = None
 
 
+def _allowedAgentDomains() -> tuple[str, ...]:
+    """域词表当前合法值（feat-data-domain-layer：SSOT 已迁 DB）。
+
+    dataDomainRegistry 已 warmUp → DB enabled 集（管理端可动态加域）；
+    未 warmUp（单测/极早期启动）→ AGENT_DATA_DOMAINS 常量 fallback。
+    **授权词表语义不变**：两个来源都是闭合集合，绝不允许未加载即放行。
+    """
+    if dataDomainRegistry.isWarmedUp():
+        return tuple(sorted(dataDomainRegistry.getEnabled()))
+    return AGENT_DATA_DOMAINS
+
+
+def _allowedAgentLayers() -> tuple[str, ...]:
+    """层词表当前合法值（feat-data-domain-layer 方案 2：SSOT 已迁 DB）。
+
+    layerRuleRegistry 已 warmUp → data_layer_rule 全部 enabled 层（含 FEATURE
+    手工声明层）；未 warmUp → AGENT_DATA_LAYERS 常量 fallback。
+    """
+    if layerRuleRegistry.isWarmedUp():
+        return layerRuleRegistry.distinctLayers()
+    return AGENT_DATA_LAYERS
+
+
 def _vocabCheckDomains(values: list[str]) -> list[str]:
     """域归一化 + 词表校验 + 去重保序；非法值抛 ValueError（Pydantic 422）。"""
+    allowed = _allowedAgentDomains()
     normalized = [normalizeAgentDomain(x) for x in values]
-    rejected = [x for x in normalized if x not in AGENT_DATA_DOMAINS]
+    rejected = [x for x in normalized if x not in allowed]
     if rejected:
         raise ValueError(MSG_AGENT_DOMAIN_NOT_IN_VOCAB.format(
-            value=",".join(rejected), allowed=",".join(AGENT_DATA_DOMAINS)
+            value=",".join(rejected), allowed=",".join(allowed)
         ))
     seen: set[str] = set()
     deduped: list[str] = []
@@ -2776,11 +2819,12 @@ def _vocabCheckDomains(values: list[str]) -> list[str]:
 
 def _vocabCheckLayers(values: list[str]) -> list[str]:
     """层归一化 + 词表校验 + 去重保序；复用既有 `_normalizeDataLayer`（None → None 会被过滤）。"""
+    allowed = _allowedAgentLayers()
     normalized = [n for n in (_normalizeDataLayer(x) for x in values if x is not None) if n]
-    rejected = [x for x in normalized if x not in AGENT_DATA_LAYERS]
+    rejected = [x for x in normalized if x not in allowed]
     if rejected:
         raise ValueError(MSG_AGENT_LAYER_NOT_IN_VOCAB.format(
-            value=",".join(rejected), allowed=",".join(AGENT_DATA_LAYERS)
+            value=",".join(rejected), allowed=",".join(allowed)
         ))
     seen: set[str] = set()
     deduped: list[str] = []
@@ -3090,12 +3134,16 @@ class AgentToolConfigRead(AgentToolConfigBase):
 
 
 class BusinessObjectCreate(CamelModel):
-    """创建业务对象 (Phase 4.4)."""
+    """创建业务对象 (Phase 4.4；feat-data-domain-layer 收紧 header/主域必填)."""
 
     code: BusinessObjectCodeNew = Field(...)
     name: str = Field(..., min_length=1, max_length=100)
-    header_class_id: int | None = None
+    # 0133 起收紧为必填（规则①）：无本体类的 BO 无法参与图谱与问答
+    header_class_id: int = Field(...)
     graph_label: str | None = Field(default=None, max_length=100)
+    # 规则②：主域必填且唯一（附域经 attachedDomainIds）；必须为已启用的域
+    primary_domain_id: DataDomainCodeType = Field(...)
+    attached_domain_ids: list[DataDomainCodeType] = Field(default_factory=list)
     description: str | None = Field(default=None, max_length=4000)
 
 
@@ -3105,6 +3153,8 @@ class BusinessObjectUpdate(CamelModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     header_class_id: int | None = None
     graph_label: str | None = Field(default=None, max_length=100)
+    primary_domain_id: DataDomainCodeType | None = None
+    attached_domain_ids: list[DataDomainCodeType] | None = None
     description: str | None = Field(default=None, max_length=4000)
 
 
@@ -3117,11 +3167,64 @@ class BusinessObjectRead(CamelModel):
 
     code: BusinessObjectCodeType
     name: str
-    header_class_id: int | None = None
+    header_class_id: int
+    primary_domain_id: str
+    attached_domain_ids: list[str] = Field(default_factory=list)
     graph_label: str | None = None
     description: str | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
+
+
+class DataDomainCreate(CamelModel):
+    """创建数据域（feat-data-domain-layer 方案 1）。"""
+
+    # create payload paradox 同 BO：format-only，存在性由 DB PK 约束兜底
+    code: BusinessObjectCodeNew = Field(...)
+    name: str = Field(..., min_length=1, max_length=100)
+    primary_org_id: int | None = None
+    description: str | None = Field(default=None, max_length=4000)
+    enabled: bool = True
+
+
+class DataDomainUpdate(CamelModel):
+    """更新数据域（code 不可改）。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    primary_org_id: int | None = None
+    description: str | None = Field(default=None, max_length=4000)
+    enabled: bool | None = None
+
+
+class DataDomainRead(CamelModel):
+    """数据域响应（含主管理组织名称，供管理页直显）。"""
+
+    code: str
+    name: str
+    primary_org_id: int | None = None
+    primary_org_name: str | None = None
+    description: str | None = None
+    enabled: bool = True
+    created_time: datetime | None = None
+    updated_time: datetime | None = None
+
+
+class DataLayerCountRead(CamelModel):
+    """单层数据表计数（feat-data-domain-layer 方案 2）。"""
+
+    layer: str
+    table_count: int
+
+
+class DataSourceLayersRead(CamelModel):
+    """按数据源探测的数据层分布（cache-only；miss 时 fromCache=false）。"""
+
+    datasource_id: int
+    schema_name: str
+    from_cache: bool
+    total_tables: int = 0
+    unknown_tables: int = 0
+    layers: list[DataLayerCountRead] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

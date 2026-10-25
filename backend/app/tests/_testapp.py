@@ -23,6 +23,7 @@ from app.api.v1 import (
     audit,
     business_object,
     chat,
+    data_domains,
     data_lineage,
     data_quality,
     data_quality_generate,
@@ -205,6 +206,9 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     )
     testApp.include_router(
         business_object.router, prefix="/api/v1", tags=["business-object"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
+    )
+    testApp.include_router(
+        data_domains.router, prefix="/api/v1/data-domains", tags=["data-domain"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
     testApp.include_router(features.router, prefix="/api/v1/features", tags=["features"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(

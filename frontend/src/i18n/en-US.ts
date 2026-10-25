@@ -551,7 +551,7 @@ export const enUS = {
     hint: "Start from a business entity (Supplier / Material / Purchase Order / Goods Receipt / Incoming Inspection / NCR / Contract) and reason across hops to see reachable entities on the supply-chain path. Or ask AIChatService 'what materials does supplier X involve'.",
     startType: "Start type",
     startKey: "Entity key (enterprise_key / document_id)",
-    startKeyPlaceholder: "e.g. 100001",
+    startKeyPlaceholder: "e.g. 10105",
     maxHops: "Max hops",
     query: "Traverse",
     invalidKey: "Please enter an entity key",

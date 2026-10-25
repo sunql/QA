@@ -556,7 +556,7 @@ export const zhCN = {
     hint: "从业务实体（供应商 / 物料 / 采购订单 / 收货 / 来料检验 / NCR / 合同）出发做多跳推理，查看供应链链路上的可达实体。也可在 AIChatService 中问「供应商 X 涉及哪些物料」自动触发。",
     startType: "起点类型",
     startKey: "实体键（enterprise_key / document_id）",
-    startKeyPlaceholder: "如 100001",
+    startKeyPlaceholder: "如 10105",
     maxHops: "最大跳数",
     query: "遍历",
     invalidKey: "请输入实体键",

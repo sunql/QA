@@ -43,6 +43,7 @@
 - [nl2sql-engine](../wiki/nl2sql-engine.md) - Prompt 策略 + SQL Guard（4 层路由）
 - [model-router](../wiki/model-router.md) - 路由算法与成本模型
 - [agent-loop](../wiki/agent-loop.md) - L4 Agent Loop（纯 Python async while loop，非 LangGraph）
+- [agent-runtime](../wiki/agent-runtime.md) - Agent 运行时总览（数据模型 / 管理面 / 两条执行路径 / chat 触发入口）
 - [chart-rendering](../wiki/chart-rendering.md) - ECharts 生成规则
 - [metric-pipeline](../wiki/metric-pipeline.md) - 复杂指标管线（CTE 派生 / 冷指标晋升）
 - [chat-service-assessment](../wiki/chat-service-assessment.md) - Chat 服务 SSOT 评估（§2.4 LOW / §15 残差 SSOT）

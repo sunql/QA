@@ -12,6 +12,20 @@ vi.mock("../api/businessObject", () => ({
   updateBusinessObject: vi.fn().mockResolvedValue({}),
   deleteBusinessObject: vi.fn(),
 }));
+vi.mock("../api/dataDomain", () => ({
+  listDataDomains: vi.fn().mockResolvedValue([
+    {
+      code: "PROCUREMENT",
+      name: "采购域",
+      primaryOrgId: null,
+      primaryOrgName: null,
+      description: null,
+      enabled: true,
+      createdTime: "2026-10-25T00:00:00Z",
+      updatedTime: "2026-10-25T00:00:00Z",
+    },
+  ]),
+}));
 vi.mock("../api/ontology", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/ontology")>();
   return { ...actual, listClasses: listClassesMock };
@@ -75,7 +89,9 @@ describe("BusinessObjectPage", () => {
         code: "SUPPLIER",
         name: "供应商",
         graphLabel: "Supplier",
-        headerClassId: null,
+        headerClassId: 11,
+        primaryDomainId: "PROCUREMENT",
+        attachedDomainIds: [],
         description: null,
         createdTime: "2026-09-04T00:00:00Z",
         updatedTime: "2026-09-04T00:00:00Z",
@@ -97,7 +113,9 @@ describe("BusinessObjectPage", () => {
         code: "SUPPLIER",
         name: "供应商",
         graphLabel: "Supplier",
-        headerClassId: null,
+        headerClassId: 11,
+        primaryDomainId: "PROCUREMENT",
+        attachedDomainIds: [],
         description: null,
         createdTime: "2026-09-04T00:00:00Z",
         updatedTime: "2026-09-04T00:00:00Z",
@@ -217,6 +235,12 @@ describe("BusinessObjectPage", () => {
     fireEvent.mouseDown(headerSelect);
     fireEvent.click(await within(document.body).findByText("Supplier（供应商）"));
 
+    // 选主数据域（0133 起必填）
+    const domainItem = within(modal).getByText("主数据域").closest(".ant-form-item") as HTMLElement;
+    const domainSelect = domainItem.querySelector(".ant-select-selector") as HTMLElement;
+    fireEvent.mouseDown(domainSelect);
+    fireEvent.click(await within(document.body).findByText("采购域（PROCUREMENT）"));
+
     // 提交
     fireEvent.click(within(modal).getByRole("button", { name: /确\s*定/ }));
 
@@ -225,6 +249,7 @@ describe("BusinessObjectPage", () => {
     expect(payload.code).toBe("INVOICE");
     expect(payload.name).toBe("发票对象");
     expect(payload.headerClassId).toBe(11);
+    expect(payload.primaryDomainId).toBe("PROCUREMENT");
     expect(payload.graphLabel).toBe("Supplier");
   });
 
@@ -246,6 +271,20 @@ describe("BusinessObjectPage", () => {
     fireEvent.change(codeInput, { target: { value: "bad-code" } });
     const nameInput = within(modal).getByLabelText("名称") as HTMLInputElement;
     fireEvent.change(nameInput, { target: { value: "非法 code 测试" } });
+
+    // 选头表类 + 主数据域（0133 起均必填；code 格式非法时才应拦下提交）
+    const headerClassItem = within(modal).getByText("头表类").closest(".ant-form-item") as HTMLElement;
+    const headerSelect = headerClassItem.querySelector(".ant-select-selector") as HTMLElement;
+    fireEvent.mouseDown(headerSelect);
+    fireEvent.click(await within(document.body).findByText("Supplier（供应商）"));
+
+
+    // 选主数据域（0133 起必填；code 格式非法时才应拦下提交）
+    const domainItem = within(modal).getByText("主数据域").closest(".ant-form-item") as HTMLElement;
+    const domainSelect = domainItem.querySelector(".ant-select-selector") as HTMLElement;
+    fireEvent.mouseDown(domainSelect);
+    fireEvent.click(await within(document.body).findByText("采购域（PROCUREMENT）"));
+
     fireEvent.click(within(modal).getByRole("button", { name: /确\s*定/ }));
 
     // 等待验证错误出现

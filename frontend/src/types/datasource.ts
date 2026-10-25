@@ -117,3 +117,20 @@ export interface SchemaIntrospectResponse {
   tables: TableSchema[];
   cachedAt: string;
 }
+
+// feat-data-domain-layer 方案 2：数据层分布（cache-only 探测）
+export interface DataLayerCount {
+  layer: string;
+  tableCount: number;
+}
+
+export interface DataSourceLayersRead {
+  datasourceId: number;
+  schemaName: string;
+  /** false = schema 缓存缺失，前端应引导先执行探测（后端不做实时探库） */
+  fromCache: boolean;
+  totalTables: number;
+  /** 前缀规则未命中的表数（ERP 原生命名断层显式透出，不吞） */
+  unknownTables: number;
+  layers: DataLayerCount[];
+}

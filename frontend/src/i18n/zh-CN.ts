@@ -156,6 +156,7 @@ export const zhCN = {
       kpiCatalog: "KPI 目录",
       features: "特征目录",
       businessObjects: "业务对象",
+      dataDomains: "数据域",
       ontologyProperties: "本体属性管理",
       datasource: "数据源",
       localImport: "本地数据初始化",
@@ -1915,6 +1916,16 @@ export const zhCN = {
   datasource: {
     importToOntology: "智能导入到本体",
     cacheSchema: "缓存 Schema",
+    layers: {
+      action: "数据层分布",
+      title: "数据层分布 — {{name}}",
+      notCached: "该数据源尚未缓存 Schema，以下为空结果；请先执行「缓存 Schema」。",
+      totalTables: "缓存表总数：{{count}}",
+      noLayerData: "无已分类的表",
+      layer: "数据层",
+      tableCount: "表数量",
+      unknownTables: "未识别前缀的表：{{count}}",
+    },
   },
 
   featureRules: {
@@ -2812,6 +2823,8 @@ export const zhCN = {
       code: "代码",
       name: "名称",
       headerClassId: "头表类",
+      primaryDomain: "主数据域",
+      attachedDomains: "附加数据域",
       graphLabel: "图标签",
       description: "描述",
       updatedTime: "更新时间",
@@ -2834,13 +2847,51 @@ export const zhCN = {
     },
     tooltips: {
       headerClassId: "关联到本体类；图标签将按其 className 自动派生",
+      primaryDomain: "业务对象有且只有一个主数据域；本体类经头表类继承该域归属",
+      attachedDomains: "附加数据域（可多个，不能与主域重复）；Agent 按域授权时两者皆生效",
       graphLabelAuto: "由头表类自动派生，编辑时切换头表类即可同步",
     },
     placeholders: {
-      selectHeaderClass: "搜索类名 / 别名以选择本体类（可选）",
+      selectHeaderClass: "搜索类名 / 别名以选择本体类",
+      selectPrimaryDomain: "选择主数据域",
+      selectAttachedDomains: "选择附加数据域（可多选）",
+      noDomain: "暂无启用中的数据域",
       graphLabelAuto: "（选本体类后自动填充）",
       noClass: "暂无本体类",
       codeNew: "例如 INVOICE（仅大写字母、数字、下划线，1-20 字符）",
+    },
+    validation: {
+      codeFormat: "代码必须为大写字母 / 数字 / 下划线，1-20 字符",
+      attachedEqualsPrimary: "附加数据域不能与主数据域相同",
+    },
+  },
+
+  dataDomain: {
+    title: "数据域",
+    newButton: "新建数据域",
+    columns: {
+      code: "代码",
+      name: "名称",
+      primaryOrg: "主管理组织",
+      description: "描述",
+      enabled: "启用",
+    },
+    modal: {
+      createTitle: "新建数据域",
+      editTitle: "编辑数据域",
+      confirmDelete: "确定删除数据域「{code}」？",
+    },
+    messages: {
+      submitFailed: "提交失败：{detail}",
+      deleteFailed: "删除失败：{detail}",
+    },
+    tooltips: {
+      primaryOrg: "该数据域的主管理组织（可选）",
+      enabled: "禁用后不可再关联到新的业务对象 / Agent",
+    },
+    placeholders: {
+      codeNew: "例如 PROCUREMENT（仅大写字母、数字、下划线，1-20 字符）",
+      selectOrg: "选择主管理组织",
     },
     validation: {
       codeFormat: "代码必须为大写字母 / 数字 / 下划线，1-20 字符",

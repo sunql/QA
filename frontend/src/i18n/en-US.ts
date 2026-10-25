@@ -150,6 +150,7 @@ export const enUS = {
       kpiCatalog: "KPI Catalog",
       features: "Feature Catalog",
       businessObjects: "Business Objects",
+      dataDomains: "Data Domains",
       ontologyProperties: "Ontology Property Management",
       datasource: "Data Sources",
       localImport: "Local Data Initialization",
@@ -1893,6 +1894,16 @@ export const enUS = {
   datasource: {
     importToOntology: "Import to Ontology",
     cacheSchema: "Cache Schema",
+    layers: {
+      action: "Data Layers",
+      title: "Data Layers — {{name}}",
+      notCached: "Schema not cached yet for this datasource, the result below is empty. Run \"Cache Schema\" first.",
+      totalTables: "Cached tables: {{count}}",
+      noLayerData: "No classified tables",
+      layer: "Data Layer",
+      tableCount: "Tables",
+      unknownTables: "Tables with unrecognized prefix: {{count}}",
+    },
   },
 
   featureRules: {
@@ -2799,6 +2810,8 @@ export const enUS = {
       code: "Code",
       name: "Name",
       headerClassId: "Header Class",
+      primaryDomain: "Primary Domain",
+      attachedDomains: "Attached Domains",
       graphLabel: "Graph Label",
       description: "Description",
       updatedTime: "Updated Time",
@@ -2821,13 +2834,51 @@ export const enUS = {
     },
     tooltips: {
       headerClassId: "Link to an ontology class; graph label is auto-derived from its className",
+      primaryDomain: "A business object has exactly one primary data domain; ontology classes inherit it via the header class",
+      attachedDomains: "Attached domains (multiple allowed, cannot duplicate the primary); both take effect for Agent domain authorization",
       graphLabelAuto: "Auto-derived from the header class; switching the header class updates it",
     },
     placeholders: {
-      selectHeaderClass: "Search by class name or alias (optional)",
+      selectHeaderClass: "Search by class name or alias",
+      selectPrimaryDomain: "Select primary data domain",
+      selectAttachedDomains: "Select attached data domains (multiple)",
+      noDomain: "No enabled data domains",
       graphLabelAuto: "(auto-filled after picking a header class)",
       noClass: "No ontology classes available",
       codeNew: "e.g. INVOICE (uppercase letters, digits, underscore; 1-20 chars)",
+    },
+    validation: {
+      codeFormat: "Code must be uppercase letters, digits, or underscore; 1-20 chars",
+      attachedEqualsPrimary: "Attached domains cannot duplicate the primary domain",
+    },
+  },
+
+  dataDomain: {
+    title: "Data Domains",
+    newButton: "New Data Domain",
+    columns: {
+      code: "Code",
+      name: "Name",
+      primaryOrg: "Primary Org",
+      description: "Description",
+      enabled: "Enabled",
+    },
+    modal: {
+      createTitle: "New Data Domain",
+      editTitle: "Edit Data Domain",
+      confirmDelete: "Delete data domain \"{code}\"?",
+    },
+    messages: {
+      submitFailed: "Submit failed: {detail}",
+      deleteFailed: "Delete failed: {detail}",
+    },
+    tooltips: {
+      primaryOrg: "Primary managing organization of this data domain (optional)",
+      enabled: "Disabled domains cannot be linked to new business objects / agents",
+    },
+    placeholders: {
+      codeNew: "e.g. PROCUREMENT (uppercase letters, digits, underscore; 1-20 chars)",
+      selectOrg: "Select primary organization",
     },
     validation: {
       codeFormat: "Code must be uppercase letters, digits, or underscore; 1-20 chars",

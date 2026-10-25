@@ -95,14 +95,43 @@ docker run --rm --entrypoint sh qa-system-frontend:tmp-20261025 -c \
 ## 7. 上线
 
 ```bash
-docker tag qa-system-frontend:tmp-20261025 qa-system-frontend:latest
+> ⚠️ **2026-10-25 生产实踩坑（本步的真正命门）**：生产 compose 引用的镜像名
+> 是**下划线**的 `qa-system_frontend`，与 build/tag 用的连字符
+> `qa-system-frontend` 是**两个不同镜像**。tag 到连字符名上 build 得再对，
+> 容器重建后仍跑 24h 前的旧镜像（当时证据：容器 Up 8 分钟但 bundle 还是旧
+> hash）。**tag 前必须先确认 compose 实际引用的镜像名**：
+>
+> ```bash
+> docker ps --filter name=frontend --format '{{.Image}}'   # 这才是 compose 认的名字
+> ```
+
+```bash
+# tag 到 compose 实际引用的镜像名（生产实测是下划线 qa-system_frontend）
+docker tag qa-system-frontend:tmp-20261025 qa-system_frontend:latest
+# （若 compose 里写的确实是连字符名，才 tag qa-system-frontend:latest）
+
 cd <生产 compose 目录>          # 有 docker-compose.yml + .env 的目录
-docker compose up -d --no-deps --no-build frontend
+docker compose up -d --no-deps --no-build --force-recreate frontend
+
+# 兜底路线（生产 build 反复出问题时）：本机交叉构建 amd64 后 docker save 打包
+# 传输，docker load + 同款 tag/force-recreate（2026-10-25 实际走通的路径，26MB）：
+#   本机  docker build --platform linux/amd64 -f docker/Dockerfile.frontend \
+#           --build-arg VITE_API_BASE_URL= -t qa-system-frontend:amd64-1025 .
+#         docker save qa-system-frontend:amd64-1025 | gzip > /tmp/qa-frontend-amd64-1025.tar.gz
+#   生产  docker load -i /opt/qa-frontend-amd64-1025.tar.gz
+#         docker tag qa-system-frontend:amd64-1025 qa-system_frontend:latest
 ```
+```
+
+
+
 
 - `--no-deps`：不连带重启 backend。
 - `--no-build`：命门 2，防 compose 按 build 段用 `.env` 重烤错误值。
+- `--force-recreate`：即使 image ID 判断有偏差也强制重建容器（不加时 tag 新
+  镜像后 compose 可能认为「无变化」而不重建）。
 - 容器重建后，此前 docker cp 进去的 frontend html 自动消失——无所谓，镜像里已是新代码。
+
 
 ## 8. 运行时验证
 

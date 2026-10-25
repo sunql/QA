@@ -82,3 +82,59 @@ handler」生成 AgentTool。
 5. 发版后 `/admin/tools` 建配置行：name（小写下划线，创建后不可改）、
    handler_kind / handler_ref / arg_extractor_kind、暴露面元数据
 6. 给目标 Agent 绑定 `tool_name = name`（Agent Registry 页）
+
+
+
+
+方案 3：Agent 工具维护机制（当时三问的第三问）
+
+起因
+
+你当时的问题：数据域、数据层都能在页面维护了，那 Agent 的工具是怎么维护的？新增一个工具要不要改代码？管理入口在哪？
+
+现状结论（已核实当前代码）
+
+工具采用的是**「代码执行体 + DB 元数据」双结构**，不是程序自动发现：
+
+┌──────────────────┬─────────────────────────┬────────────────────────────────────────────────┬────────────────────────┐
+│        层        │          载体           │                      内容                      │        改动代价        │
+├──────────────────┼─────────────────────────┼────────────────────────────────────────────────┼────────────────────────┤
+│ 执行体（代码侧） │ agent_tools.py +        │ handler 函数本体 + 白名单 _VALID_HANDLER_REFS  │ 要发版                 │
+│                  │ agent_tools_wiki.py     │ + 参数提取器 ARG_EXTRACTORS                    │                        │
+├──────────────────┼─────────────────────────┼────────────────────────────────────────────────┼────────────────────────┤
+│                  │                         │ name / description / data_object（ACL 主体）/  │ 免发版，/admin/tools   │
+│ 元数据（DB 侧）  │ agent_tool_config 表    │ data_layers / input_schema / handler_kind /    │ 页面 CRUD              │
+│                  │                         │ handler_ref / arg_extractor_kind               │                        │
+└──────────────────┴─────────────────────────┴────────────────────────────────────────────────┴────────────────────────┘
+
+当前代码侧白名单里的可用执行体（agent_tools.py:239）：
+
+- BUILTIN（6 个）：supplier_risk、graph_traverse + wiki 族 4 个（wiki_search / wiki_read / rule_evaluate / coverage_status）
+- NL2SQL（1 个）：nl2sql_default
+- arg_extractor（5 个）：supplier_key ×3、wiki_text、wiki_no_args
+
+装配链路：AgentToolAssembly.assemble 启动/读取时校验 DB 行的 handler_kind → handler_ref → arg_extractor_kind 三级都在白名单内，任一不符直接 raise（DB 层还有 handler_kind CHECK 约束兜底），然后合并「DB 元数据 + 代码 handler」生成 AgentTool。
+
+关键语义：
+1. 新增一个「真新能力」的工具 = 必须发版——先写 handler + extractor 并进白名单（发版），再在 /admin/tools 建配置行（免发版）
+2. 只调既有工具的暴露面 = 免发版——改描述、ACL 主体（data_object）、授权数据层（data_layers，这次方案 2 之后已 DB 驱动）、input_schema，都不用动代码
+3. name 创建后不可改（与 AgentDefinition.tool_name 是 FK-by-name 引用）
+
+当时记录的两个待议方向（SSOT §7）
+
+方向 A：补文档 / runbook
+写一份「新增 Agent 工具操作手册」：什么需求只改 DB、什么需求要动代码、handler 的写法约定（签名、返回结构）、extractor 选择、测试要求、装配失败时的排障路径（agent_tool_config {name}: handler_ref ... 不在白名单 这类报错的含义）。
+→ 代价小，纯文档；受益者是后续维护者（包括我自己以后的会话）。
+
+方向 B：「工具 discovered-from-registry」增强
+现在的痛点是 /admin/tools 填 handler_ref 靠手写——填了白名单里不存在的 ref，要等到装配时才报错，且管理页上看不到「代码里到底有哪些 handler 可用」。可做一个只读 API（如 GET /admin/tools/registry）暴露白名单 + extractor 清单，管理页改成下拉选择而不是手填，配置错误在录入时就拦住。
+→ 中等代价：1 个只读端点 + AdminToolsPage 表单改造 + 测试；不改变「新能力要发版」的本质。
+
+方向 C（更远，不建议现在做）：插件式动态加载
+让 handler 免发版动态注册。架构级变更：安全面（任意代码执行边界）、进程内热载的测试与回滚都复杂，和现有「代码执行体可信、DB 只管暴露面」的清白边界冲突。除非你有明确诉求，否则不建议。
+
+我的建议
+
+A + B 做，C 不做：A 解决「怎么维护」的知识断层，B 解决「配置填错才发现」的体验断层，两者都不动现有安全边界。工作量大约 B 为主（半天级），A 随 B 一起写进 Harness wiki。
+
+你倾向哪个方向？或者你当时问这个问题的原始诉求如果有别的侧重点（比如「业务人员能不能自己造工具」），也可以直接说，那会影响 A/B 的取舍。

@@ -119,12 +119,22 @@
 - 部署注意：prod alembic 0132 → 本次 2 个迁移；0133 的存量清理守卫在 prod
   数据不同时可能阻断，runbook 要写明先跑守卫 SQL 盘点
 
-## 7. 方案 3 记录（待单独讨论）
+## 7. 方案 3（2026-10-25 讨论）
+
+**定稿：方向 A + B 做，方向 C 不做。** 完整文档（双结构总览、白名单快照、
+排障速查、新增工具 checklist）→ `Harness/wiki/agent-tool-maintenance.md`。
 
 - 现状结论：工具不是程序搜索发现的；执行体（handler/arg_extractor）在代码侧
-  白名单 `_VALID_HANDLER_REFS`，暴露与元数据由 `agent_tool_config` DB 行管理，
-  管理入口 AdminToolsPage；新工具 = 代码 handler（发版）+ 配置行（免发版）
-- 待议：是否补 runbook 文档、是否需要「工具 discovered-from-registry」类增强
+  白名单 `_VALID_HANDLER_REFS`，暴露与元数据由 `agent_tool_config` DB 行管理；
+  新工具 = 代码 handler（发版）+ 配置行（免发版）
+- **方向 A（本文档即交付）**：新增工具操作手册 + 排障速查
+- **方向 B（做，待排期）**：`GET /admin/tools/registry` 只读暴露代码侧白名单 +
+  extractor 清单，`/admin/tools` 表单 ref/extractor 改下拉，录入时拦截而非装配期报错
+- **方向 C（不做）**：插件式动态加载 handler——与「代码执行体可信、DB 只管
+  暴露面」安全边界冲突，无明确诉求不立项
+- **顺手修**：`/admin/tools` 页面无菜单入口（路由存在但 seed 缺行）——补
+  `item.adminTools`（systemConfig sort_order=590）+ menu.item.adminTools i18n；
+  admin 角色旁路全量菜单（seed_rbac.py），免 permission_grant 即可见
 
 ## 8. 进度记录（2026-10-25）
 

@@ -1,7 +1,7 @@
 # 变更：fix-login-401-white-screen（登录失败白屏 + 错误提示不可达）
 
 - **日期**：2026-10-25
-- **分支**：`fix/login-401-white-screen`（自 eb70f1bf），commit `0802894b`
+- **分支**：`fix/login-401-white-screen`（自 eb70f1bf），已合 main `ad36d27e`（2026-10-25）；生产已上线验证（镜像包路线）
 - **状态**：dev 完成（36/36 受影响测试绿、全量净新增失败 0、tsc 干净）；待用户验证 + 部署
 
 ## 0. 用户报障

@@ -1,26 +1,50 @@
 # 生产发布方案：feat-data-domain-layer（数据域 + 数据层 + 工具页同源化）
 
 - **日期**：2026-10-25
-- **目标**：192.168.205.82（CentOS 7，内网隔离，Docker Compose，compose 目录 `/root/docker`）
+- **目标**：192.168.205.82（CentOS 7，内网隔离，Docker Compose）
 - **代码基线**：`7e852b88`（main 之后 7 个提交：后端 ca02b9b5 / 前端 47a31fd9+1cc9addb / 菜单 28d419a8 / docs 其余）
 - **迁移**：0132（生产当前）→ 0133 → 0134（后端容器 CMD 自带 `alembic upgrade head`，docker ps 已实证）
 - **操作分工**：以下所有生产服务器操作由你手工执行；交付物（镜像包、本文档）由开发机准备
+
+## qa_compose：生产 compose 控制标准入口（后续所有发版命令照此用）
+
+生产使用独立 compose 文件，所有容器控制命令统一封装（**每个新 shell 会话先定义一次**，
+或写入 `/root/.bashrc` 永久生效）：
+
+```bash
+qa_compose() {
+  docker-compose -p qa-system \
+    --env-file /opt/qa-system/docker/.env \
+    -f /opt/qa-system/docker/docker-compose.centos7.yml "$@"
+}
+
+# 任何操作前先校验配置合法性（改过 yml / env 后必跑）：
+qa_compose config --quiet && echo COMPOSE_OK
+```
+
+- 路径基准：`/opt/qa-system/docker/`（`docker-compose.centos7.yml` + `.env`）
+- `-p qa-system` 是 **frontend 镜像名 `qa-system_frontend` 的派生源**（project 名 + 下划线）；
+  backend 镜像则是 compose 文件里的显式 tag `qa-backend:offline`——两个名字来源不同，tag 时别混
+- 本文后续 `qa_compose stop backend`、`qa_compose run --rm backend alembic upgrade head`、
+  `qa_compose up -d backend frontend`、`qa_compose logs backend` 全走这个入口
+- **不要动 `/opt/qa-system/docker/.env`**（SECRET_KEY 是 Fernet 主密钥，换了 5 数据源密码 + 6 LLM key 永久不可解）
 
 ## 生产环境容器/镜像实测清单（2026-10-25 docker ps 实证，后续发版照此填名）
 
 | 容器名 | 镜像（compose 引用名） | 端口（宿主机） | 本次动作 |
 |---|---|---|---|
 | `qa-backend` | **`qa-backend:offline`**（显式名，非派生名） | 8000 | **替换** |
-| `qa-frontend` | **`qa-system_frontend`**（下划线，历史坑坐实） | 5173→80 | **替换** |
-| `qa-postgres` | postgres:16-alpine | 127.0.0.1:5433→5432 | 不动（只跑 SQL） |
+| `qa-frontend` | **`qa-system_frontend`**（下划线，`-p qa-system` 派生） | 5173→80 | **替换** |
+| `qa-postgres` | postgres:16-alpine | 127.0.0.1:5433→5432（仅本机） | 不动（只跑 SQL） |
 | `qa-milvus` / `qa-milvus-etcd` / `qa-milvus-minio` | milvus v2.4.6 族 | 19530 / 9091（仅本机） | 不动 |
 | `qa-neo4j` | neo4j:5.23-community | 7474 / 7687（仅本机） | 不动 |
 | `qa-ollama` + `qa-ollama-https` | ollama/ollama + nginx:alpine | 8443 | 不动 |
 | `qa-objects` | minio | 9000-9001（仅本机） | 不动 |
 
-> 关键差异：**backend 镜像是显式 tag `qa-backend:offline`**，frontend 是 compose
-> 派生的下划线名 `qa-system_frontend`——两个 tag 目标不同，别混用。
-> 业务库名以 `docker exec qa-postgres env | grep POSTGRES_DB` 为准（预期 `qa_metadata`）。
+> PG 访问一律走 `docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" ...'`
+> （凭据在 `/opt/qa-system/docker/.env` 注入的容器 env 里，不要打印、不要宿主机硬编码）。
+> 库名以 `docker exec qa-postgres env | grep POSTGRES_DB` 为准（预期 `qa_metadata`）。
+> 宿主机直连口 127.0.0.1:5433 仅本机可用。
 
 ## Phase 0 交付物（开发机已备好，sha256 已回填）
 
@@ -36,6 +60,9 @@
 ## Phase 1 生产预检（只读，不改动）
 
 ```bash
+# ⓪ compose 配置合法性
+qa_compose config --quiet && echo COMPOSE_OK
+
 # ① 当前迁移版本（期望 0132）
 docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
   "SELECT version_num FROM alembic_version;"'
@@ -59,7 +86,6 @@ df -h /var/lib/docker
 ```
 
 - ② 全 0 → 可直接升级；有引用 → 把输出发我，给补绑/清理 SQL 后再继续
-- **不要动 `.env`**（SECRET_KEY 是 Fernet 主密钥，换了 5 数据源密码 + 6 LLM key 永久不可解）
 
 ## Phase 2 备份
 
@@ -84,14 +110,18 @@ docker load -i qa-frontend-amd64-1025-ddl.tar.gz
 # tag 到生产现役名（与 docker ps 实测一致）
 docker tag qa-system-backend:amd64-1025-ddl   qa-backend:offline
 docker tag qa-system-frontend:amd64-1025-ddl  qa-system_frontend
+
+# 确认 compose 现在解析到新镜像（image id 应与刚 load 的一致）
+docker images | grep -E 'qa-backend|qa-system_frontend'
+qa_compose config | grep image
 ```
 
 ## Phase 4 迁移（显式跑，不靠容器 CMD——守卫 raise 时看得见、不会 crash-loop）
 
 ```bash
-cd /root/docker
-docker compose stop backend
-docker compose run --rm backend alembic upgrade head
+qa_compose config --quiet && echo COMPOSE_OK
+qa_compose stop backend
+qa_compose run --rm backend alembic upgrade head
 # 预期输出 0133 -> 0134 两行 running；若 RuntimeError「0133 阻断」→ 回 Phase 1② 处置
 
 # 确认
@@ -102,9 +132,8 @@ docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
 ## Phase 5 起容器 + seed 菜单
 
 ```bash
-cd /root/docker
-docker compose up -d backend frontend
-docker compose logs backend --since 3m | grep -E "Application startup|Traceback"   # 期望 startup complete 无 Traceback
+qa_compose up -d backend frontend
+qa_compose logs backend --since 3m | grep -E "Application startup|Traceback"   # 期望 startup complete 无 Traceback
 
 # 菜单 seed（item.dataDomains + item.adminTools 两行靠这个进来；upsert 幂等）
 docker exec -e PYTHONPATH=/app -w /app qa-backend python scripts/seed_menu_config.py
@@ -131,8 +160,7 @@ UI（登录后）：
 ## Phase 7 回滚（仅在验收失败时）
 
 ```bash
-cd /root/docker
-docker compose stop backend frontend
+qa_compose stop backend frontend
 
 # ① DB 回滚：用 Phase 2① 的 dump 恢复（优先）；alembic downgrade 0132 会删
 #    data_domain/data_layer_rule 及挂域数据，不推荐
@@ -142,5 +170,5 @@ docker exec -i qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
 # ② 镜像回滚：备份 tag 打回现役名
 docker tag qa-backend:pre-ddl-1025         qa-backend:offline
 docker tag qa-system_frontend:pre-ddl-1025 qa-system_frontend
-docker compose up -d backend frontend
+qa_compose up -d backend frontend
 ```

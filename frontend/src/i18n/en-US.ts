@@ -168,6 +168,7 @@ export const enUS = {
       adminOrganizations: "Organizations",
       adminMenus: "Menus",
       adminSystemConfig: "System Config",
+      adminTools: "Tool Management",
       wikiPages: "Knowledge Pages",
       wikiImport: "Knowledge Import",
       wikiConflicts: "Conflict Detection",

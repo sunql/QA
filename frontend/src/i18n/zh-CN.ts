@@ -174,6 +174,7 @@ export const zhCN = {
       adminOrganizations: "组织管理",
       adminMenus: "菜单管理",
       adminSystemConfig: "系统参数",
+      adminTools: "工具管理",
       wikiPages: "知识条目",
       wikiImport: "知识导入",
       wikiConflicts: "冲突检测",

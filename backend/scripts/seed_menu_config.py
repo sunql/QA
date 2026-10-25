@@ -111,6 +111,8 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.systemConfig", "code": "item.adminOrganizations", "label_key": "menu.item.adminOrganizations", "icon_code": "org", "sort_order": 560, "path": "/admin/organizations"},
     {"parent": "section.systemConfig", "code": "item.adminMenus", "label_key": "menu.item.adminMenus", "icon_code": "menu", "sort_order": 570, "path": "/admin/menus"},
     {"parent": "section.systemConfig", "code": "item.adminSystemConfig", "label_key": "menu.item.adminSystemConfig", "icon_code": "setting", "sort_order": 580, "path": "/admin/system-config"},
+    # feat-agent-tool-config-db：Agent 工具元数据管理（执行体白名单在代码侧，此处只管暴露面）
+    {"parent": "section.systemConfig", "code": "item.adminTools", "label_key": "menu.item.adminTools", "icon_code": "tool", "sort_order": 590, "path": "/admin/tools"},
     # feat-user-onboarding（2026-09-20）默认授给新用户的菜单是 item.profile
     # （rbac.py DEFAULT_NEW_USER_MENU_CODE），permission_grant.menu_code 有 FK 指向
     # 本表 ⇒ 新装库缺这行会让「新建用户」500（2026-10-23 CentOS7 首装实测踩中）。

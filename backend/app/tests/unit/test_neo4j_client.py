@@ -34,3 +34,46 @@ def testSanitizeUriStripsEmbeddedCredentials() -> None:
 def testSanitizeUriKeepsBareUri() -> None:
     # 无内嵌凭据时原样返回
     assert neo4j._sanitizeUri("bolt://localhost:7687") == "bolt://localhost:7687"
+
+
+# =============================================================================
+# 业务子图批量写（feat-business-graph-backfill）
+# =============================================================================
+
+
+def testBusinessRelationTypesContainsPlaces() -> None:
+    # THBI 采购订单回填引入 Supplier-PLACES->PurchaseOrder 语义边
+    assert "PLACES" in neo4j.BUSINESS_RELATION_TYPES
+
+
+def testUpsertBusinessEntityNodesRejectsUnknownLabel() -> None:
+    # 守卫必须在访问 driver 之前抛错（同 upsertBusinessEntityNode 模式）
+    for bad in ("User", "Class; DROP", "`Supplier`"):
+        with pytest.raises(ValueError, match="Invalid business entity label"):
+            neo4j.upsertBusinessEntityNodes(bad, [{"key": "k", "code": "c"}])
+
+
+def testUpsertBusinessEntityNodesRejectsRowsWithoutKey() -> None:
+    # 行结构校验在白名单之后、driver 之前（防批量写悄悄写入脏行）
+    for badRows in ([{"code": "c"}], [{"key": "   "}]):  # 缺 key / 空 key
+        with pytest.raises(ValueError, match="rows"):
+            neo4j.upsertBusinessEntityNodes("Supplier", badRows)
+
+
+def testLinkBusinessRelationsRejectsUnknownRelationOrLabel() -> None:
+    with pytest.raises(ValueError, match="Invalid business relation type"):
+        neo4j.linkBusinessRelations("OWNS", "Supplier", "Material", [])
+    with pytest.raises(ValueError, match="Invalid business entity label"):
+        neo4j.linkBusinessRelations("SUPPLIES", "Hacker", "Material", [])
+    with pytest.raises(ValueError, match="Invalid business entity label"):
+        neo4j.linkBusinessRelations("SUPPLIES", "Supplier", "Hacker", [])
+
+
+def testTraversalHasPathCap() -> None:
+    # 生产规模图（百万边）下 variable-length path 必须有行数上限，防单查询拖垮图库
+    assert neo4j._MAX_TRAVERSAL_PATHS > 0
+    # CQL 里必须真的消费这个上限（防「常量存在但没接线」的假绿）
+    import inspect
+
+    source = inspect.getsource(neo4j.traverseBusinessGraph)
+    assert "LIMIT" in source

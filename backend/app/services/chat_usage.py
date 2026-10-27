@@ -501,3 +501,25 @@ class UsageMixin:
             Decimal(completionTokens) * Decimal(str(config.cost_per_1k_output)) / Decimal(1000)
         )
         return inputCost + outputCost
+
+    @staticmethod
+    def calculateCost(
+        config: Any,
+        promptTokens: int,
+        completionTokens: int,
+        cachedTokens: int | None = None,
+        cacheHitMultiplier: float = 0.0,
+    ) -> Decimal:
+        """公开的成本计算入口（编排计量模块调用）。
+
+        只委托 `_costFor`（既有口径 SSOT），不复制成本公式：编排侧与 Chat 侧
+        必须共用同一套单价与 cache hit 折扣语义，否则两条链路的成本不可比。
+        `_costFor` 本身与它的全部既有调用方保持字节不变。
+        """
+        return UsageMixin._costFor(
+            config,
+            promptTokens,
+            completionTokens,
+            cachedTokens=cachedTokens,
+            cacheHitMultiplier=cacheHitMultiplier,
+        )

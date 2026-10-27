@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -432,13 +433,16 @@ class AgentOrchestrationStore:
         now: datetime,
         *,
         consumedStepId: int | None = None,
+        consumedToolFailureIds: Sequence[int] | None = None,
     ) -> None:
         """RUNNING -> PAUSED：清租约但**不**写 finished_at（不是终态）。
 
         取消优先：若 `cancel_requested` 已置位，暂停不再成立，抛
         ``LeaseLostError(cancelled)`` 让 Runner 走取消收尾。`consumedStepId`
         用于把已产出 ASK_USER 的 PLAN 标为 SKIPPED —— 用户恢复后应重新规划，
-        而不是把同一个问题再问一遍。
+        而不是把同一个问题再问一遍。`consumedToolFailureIds` 用于 TOOL_FAILED
+        暂停：把本次连续失败行标为 SKIPPED，恢复后失败预算从 0 重新计数
+        （否则恢复后提交的 FAILED 行会让阈值判定立即再次触发）。
         """
         current = await self._lockLeasedRun(session, runId, leaseOwner, now, rejectCancel=False)
         if current.cancel_requested:
@@ -450,19 +454,48 @@ class AgentOrchestrationStore:
         current.lease_until = None
         current.revision = int(current.revision or 1) + 1
         if consumedStepId is not None:
-            consumed = await session.execute(
-                update(AgentOrchestrationStep)
-                .where(
-                    AgentOrchestrationStep.id == consumedStepId,
-                    AgentOrchestrationStep.run_id == runId,
-                    AgentOrchestrationStep.kind == StepKind.PLAN.value,
-                    AgentOrchestrationStep.status == StepStatus.SUCCEEDED.value,
-                )
-                .values(status=StepStatus.SKIPPED.value)
+            await self._consumeSteps(
+                session,
+                runId,
+                [consumedStepId],
+                kind=StepKind.PLAN.value,
+                expectedStatus=StepStatus.SUCCEEDED.value,
             )
-            if consumed.rowcount != 1:
-                raise RuntimeError("orchestration consumed PLAN step not found")
+        if consumedToolFailureIds:
+            await self._consumeSteps(
+                session,
+                runId,
+                list(consumedToolFailureIds),
+                kind=StepKind.TOOL.value,
+                expectedStatus=StepStatus.FAILED.value,
+            )
         await session.commit()
+
+    async def _consumeSteps(
+        self,
+        session: AsyncSession,
+        runId: int,
+        stepIds: Sequence[int],
+        *,
+        kind: str,
+        expectedStatus: str,
+    ) -> None:
+        """把已被暂停「消费」的步骤行标为 SKIPPED：必须全部命中，否则抛不变量错误。
+
+        条件 UPDATE 与暂停写在同一事务：全成功或全失败，崩溃恢复后语义一致。
+        """
+        consumed = await session.execute(
+            update(AgentOrchestrationStep)
+            .where(
+                AgentOrchestrationStep.id.in_(stepIds),
+                AgentOrchestrationStep.run_id == runId,
+                AgentOrchestrationStep.kind == kind,
+                AgentOrchestrationStep.status == expectedStatus,
+            )
+            .values(status=StepStatus.SKIPPED.value)
+        )
+        if consumed.rowcount != len(stepIds):
+            raise RuntimeError("orchestration consumed step rows not found")
 
     async def succeedRun(
         self,

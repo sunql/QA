@@ -643,6 +643,13 @@ class AgentOrchestrationRunner:
     async def _onPause(
         self, runId: int, workerId: str, error: OrchestrationPauseError
     ) -> None:
+        # TOOL_FAILED 的暂停必须连同失败行一起消费：阈值判定只依赖已提交
+        # 步骤行，崩溃恢复时才能区分「暂停还没写」与「用户已经恢复」。不消费
+        # 的话，恢复后字节级一致的 step 行会让阈值判定再次触发，运行无法恢复。
+        consumedIds: list[int] | None = None
+        if error.code == PauseCode.TOOL_FAILED.value:
+            steps = await self._reader.loadSteps(runId)
+            consumedIds = [step.id for step in self._trailingFailedToolSteps(steps)]
         try:
             async with self._sessionFactory() as session:
                 await self._store.pauseRun(
@@ -652,6 +659,7 @@ class AgentOrchestrationRunner:
                     error.code,
                     error.detail or None,
                     self._clock(),
+                    consumedToolFailureIds=consumedIds,
                 )
             logger.info("run %s 暂停（%s）", runId, error.code)
         except LeaseLostError as lost:
@@ -704,13 +712,20 @@ class AgentOrchestrationRunner:
         return max(1, value)
 
     @staticmethod
-    def _trailingToolFailures(steps: Sequence[AgentOrchestrationStep]) -> int:
-        """从持久化步骤推导「连续工具失败次数」——崩溃后仍然成立。"""
-        count = 0
+    def _trailingFailedToolSteps(
+        steps: Sequence[AgentOrchestrationStep],
+    ) -> list[AgentOrchestrationStep]:
+        """尾部连续失败（非 FAILED 的 TOOL 行即终止）的 TOOL 行，最新在前。"""
+        failed: list[AgentOrchestrationStep] = []
         for step in reversed(steps):
             if step.kind != StepKind.TOOL.value:
                 continue
             if step.status != StepStatus.FAILED.value:
                 break
-            count += 1
-        return count
+            failed.append(step)
+        return failed
+
+    @staticmethod
+    def _trailingToolFailures(steps: Sequence[AgentOrchestrationStep]) -> int:
+        """从持久化步骤推导「连续工具失败次数」——崩溃后仍然成立。"""
+        return len(AgentOrchestrationRunner._trailingFailedToolSteps(steps))

@@ -286,6 +286,7 @@ class _FakeStore:
         now,
         *,
         consumedStepId=None,
+        consumedToolFailureIds=None,
     ) -> None:
         self.calls.append("pauseRun")
         if self.pauseError is not None:
@@ -297,6 +298,10 @@ class _FakeStore:
         self.run.lease_until = None
         if consumedStepId is not None:
             self._step(consumedStepId).status = "SKIPPED"
+        for stepId in consumedToolFailureIds or []:
+            step = self._step(stepId)
+            assert step.status == "FAILED", "consumed TOOL row must still be FAILED"
+            step.status = "SKIPPED"
 
     async def succeedRun(self, session, runId, leaseOwner, answer, now) -> None:
         self.calls.append("succeedRun")
@@ -522,6 +527,28 @@ async def _drive(
     runner: AgentOrchestrationRunner, runId: int = 1
 ) -> None:
     await asyncio.wait_for(runner.runClaimed(runId, _WORKER), timeout=5)
+
+
+def _resumeThroughTask7(store: _FakeStore) -> None:
+    """模拟 Task 7 ``resumeRun`` 的列级语义，然后重新 claim。
+
+    真实服务只改 run 列（PAUSED → QUEUED、清 pause/lease/started_at、
+    revision+1），**不碰 step 行**；worker 的 ``claimNext`` 同样只改 run 列。
+    这里刻意照抄这两步，确保测试覆盖「步骤行完全由暂停/执行写入决定」。
+    """
+    store.run.status = "QUEUED"
+    store.run.pause_code = None
+    store.run.pause_detail = None
+    store.run.error_code = None
+    store.run.error_message = None
+    store.run.lease_owner = None
+    store.run.lease_until = None
+    store.run.started_at = None
+    store.run.revision += 1
+    store.run.status = "RUNNING"
+    store.run.lease_owner = _WORKER
+    store.run.lease_until = _NOW + timedelta(seconds=_LEASE_SECONDS)
+    store.run.started_at = _NOW
 
 
 # ---------------------------------------------------------------------------
@@ -798,7 +825,8 @@ async def test_two_consecutive_tool_exceptions_pause_tool_failed() -> None:
     assert len(planner.calls) == 2
     assert len(executor.invocations) == 2
     tools = [step for step in store.steps if step.kind == "TOOL"]
-    assert [tool.status for tool in tools] == ["FAILED", "FAILED"]
+    # 暂停写入时消费掉尾部失败行：这样用户恢复后能从干净的计数重新规划。
+    assert [tool.status for tool in tools] == ["SKIPPED", "SKIPPED"]
     failed = tools[0]
     assert "secret" not in (failed.error_message or "")
     assert "secret" not in (failed.output_json or {}).get("text", "")
@@ -810,7 +838,7 @@ async def test_two_consecutive_tool_exceptions_pause_tool_failed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_with_two_committed_tool_failures_pauses_without_replanning() -> None:
+async def test_crash_before_pause_with_two_committed_tool_failures_pauses_without_replanning() -> None:
     """崩溃在「TOOL FAILED 提交」与「暂停写入」之间：已提交行重建判定。"""
     runner, store, planner, executor, _ = _build(planner=_FakePlanner())
     for query in ("a", "b"):
@@ -837,6 +865,48 @@ async def test_resume_with_two_committed_tool_failures_pauses_without_replanning
     assert executor.invocations == []
     assert store.run.status == "PAUSED"
     assert store.run.pause_code == "TOOL_FAILED"
+    # 暂停写入时把崩溃窗口里的失败行一并消费，恢复后才不会再次触发阈值。
+    tools = [step for step in store.steps if step.kind == "TOOL"]
+    assert [tool.status for tool in tools] == ["SKIPPED", "SKIPPED"]
+
+
+@pytest.mark.asyncio
+async def test_resume_after_tool_failed_pause_replans_and_counts_fresh() -> None:
+    """用户真正恢复后必须重新规划：失败预算由暂停一次性结算，不跨恢复累计。"""
+    planner = _FakePlanner(
+        [
+            CallToolAction("wiki_search", {"query": "a"}, "first"),
+            CallToolAction("wiki_search", {"query": "b"}, "second"),
+            CallToolAction("wiki_search", {"query": "c"}, "after resume"),
+            FinishAction("done"),
+        ]
+    )
+    runner, store, planner, executor, _ = _build(
+        planner=planner,
+        invokeErrors=[
+            RuntimeError("first"),
+            RuntimeError("second"),
+            RuntimeError("third"),
+        ],
+    )
+
+    await _drive(runner)
+
+    assert store.run.status == "PAUSED"
+    assert store.run.pause_code == "TOOL_FAILED"
+    assert len(planner.calls) == 2
+
+    _resumeThroughTask7(store)
+    await _drive(runner)
+
+    # 恢复后确实又调用了一次 Planner（不是 0 次），并且这次失败从 1 重新计数：
+    # 若旧失败仍被计入，第三次失败会立刻再次暂停，而不是继续到 FINISH。
+    assert len(planner.calls) == 4
+    assert len(executor.invocations) == 3
+    assert store.run.status == "SUCCEEDED"
+    assert store.run.final_answer == "done"
+    tools = [step for step in store.steps if step.kind == "TOOL"]
+    assert [tool.status for tool in tools] == ["SKIPPED", "SKIPPED", "FAILED"]
 
 
 @pytest.mark.asyncio

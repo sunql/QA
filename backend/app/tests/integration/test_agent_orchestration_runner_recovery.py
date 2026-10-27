@@ -31,12 +31,16 @@ import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.dependencies import CurrentUser
 from app.domain.agent_orchestration_models import (
+    AgentOrchestrationBinding,
+    AgentOrchestrationProfile,
     AgentOrchestrationRun,
     AgentOrchestrationStep,
     AgentOrchestrationUsage,
 )
-from app.domain.models import LlmConfig
+from app.domain.agent_orchestration_schemas import AgentRunResume
+from app.domain.models import AgentDefinition, AgentToolConfig, LlmConfig
 from app.infrastructure.llm.base_client import (
     BaseLlmClient,
     LlmMessage,
@@ -44,6 +48,7 @@ from app.infrastructure.llm.base_client import (
     StreamChunk,
 )
 from app.services import agent_orchestration_metering
+from app.services.agent_orchestration_run_service import AgentOrchestrationRunService
 from app.services.agent_orchestration_runner import AgentOrchestrationRunner
 from app.services.agent_orchestration_store import AgentOrchestrationStore
 from app.services.agent_orchestration_types import PreparedTool
@@ -271,6 +276,62 @@ async def _seed(
         session.expunge(run)
         session.expunge(config)
         return run, config
+
+
+async def _seedResumePrerequisites(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    agentCode: str = "runner-agent",
+) -> None:
+    """造出 Task 7 ``resumeRun`` 会重新校验的少量治理行。
+
+    Runner 自己只依赖 run 快照；但真实恢复服务会重新加载 Agent、profile、
+    绑定与模型，并重建一次工具快照。这里直接落库这些行，测试的恢复动作
+    仍然走**真实服务**，不复制它的业务逻辑。
+    """
+    async with factory() as session:
+        agent = AgentDefinition(
+            agent_code=agentCode,
+            agent_name="runner agent",
+            description="orchestration runner test agent",
+            data_domains=["PROCUREMENT"],
+            data_layers=["DIM"],
+            status="active",
+        )
+        session.add(agent)
+        await session.flush()
+        profile = AgentOrchestrationProfile(
+            agent_id=agent.id,
+            instructions="answer supplier questions read-only",
+            enabled=True,
+        )
+        session.add(profile)
+        await session.flush()
+        session.add(
+            AgentOrchestrationBinding(
+                profile_id=profile.id,
+                tool_name="wiki_search",
+                enabled=True,
+                sort_order=0,
+            )
+        )
+        session.add(
+            AgentToolConfig(
+                name="wiki_search",
+                description="search wiki",
+                data_object="WIKI_PAGE",
+                data_layers=[],
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+                handler_kind="BUILTIN",
+                handler_ref="wiki_search",
+                enabled=True,
+            )
+        )
+        await session.commit()
 
 
 async def _claim(
@@ -715,5 +776,60 @@ async def test_crash_between_tool_failure_commit_and_pause_does_not_replan(
     # The committed FAILED rows already prove the threshold: no new planning.
     assert len(client.calls) == 2
     steps = await _loadSteps(sessionFactory, run.id)
-    assert len([step for step in steps if step.kind == "TOOL"]) == 2
+    tools = [step for step in steps if step.kind == "TOOL"]
+    assert len(tools) == 2
+    # 暂停写入时消费掉失败行：用户恢复后才能重新规划。
+    assert [step.status for step in tools] == ["SKIPPED", "SKIPPED"]
     assert len(executor.invocations) == 2
+
+
+async def test_resume_after_tool_failed_pause_replans_through_the_real_service(
+    sessionFactory: async_sessionmaker[AsyncSession],
+    scriptedClient: Callable[[list[str]], _ScriptedLlmClient],
+) -> None:
+    """Paused TOOL_FAILED → 真实 resumeRun → 重新 claim：必须重新规划并继续。
+
+    第二次执行里第一个工具仍然失败，但这次失败只能算 1 次（不是 3 次），
+    所以运行会继续到 FINISH，而不是立刻再次暂停。
+    """
+    client = scriptedClient(
+        [CALL_TOOL_JSON, CALL_TOOL_JSON, CALL_TOOL_JSON, FINISH_JSON]
+    )
+    run, _ = await _seed(sessionFactory)
+    await _seedResumePrerequisites(sessionFactory)
+    await _claim(sessionFactory, run.id, WORKER_1)
+    executor = _RecordingExecutor(handler=_raiseToolError)
+
+    await _runner(sessionFactory, executor=executor).runClaimed(run.id, WORKER_1)
+
+    paused = await _loadRun(sessionFactory, run.id)
+    assert paused.status == "PAUSED"
+    assert paused.pause_code == "TOOL_FAILED"
+    assert len(client.calls) == 2
+
+    # 恢复走真实 Task 7 服务：只改 run 列，步骤行保持暂停时的样子。
+    async with sessionFactory() as session:
+        await AgentOrchestrationRunService().resumeRun(
+            session,
+            run.run_id,
+            AgentRunResume(),
+            CurrentUser(userId="tester"),
+        )
+    resumed = await _loadRun(sessionFactory, run.id)
+    assert resumed.status == "QUEUED"
+    assert resumed.pause_code is None
+    assert resumed.lease_owner is None
+
+    await _claim(sessionFactory, run.id, WORKER_2)
+    await _runner(sessionFactory, executor=executor).runClaimed(run.id, WORKER_2)
+
+    finished = await _loadRun(sessionFactory, run.id)
+    assert finished.status == "SUCCEEDED"
+    assert finished.final_answer
+    # 两次新的 Planner 调用：恢复后重新规划，一次失败后继续到 FINISH。
+    assert len(client.calls) == 4
+    assert len(executor.invocations) == 3
+    steps = await _loadSteps(sessionFactory, run.id)
+    tools = [step for step in steps if step.kind == "TOOL"]
+    # 暂停时消费的两条旧失败行仍保留审计痕迹，新失败行独立计数。
+    assert [step.status for step in tools] == ["SKIPPED", "SKIPPED", "FAILED"]

@@ -421,10 +421,11 @@ request_time    TIMESTAMPTZ NOT NULL
 
 ### 迁移文件
 
-- `alembic/versions/0135_agent_orchestration.py` — 建 5 张表 + 5 个索引（revision id
-  `0135_agent_orchestration` = **24 字符**，文件名含 `.py` = **27 字符**；
-  `alembic_version.version_num` 是 `varchar(32)`，≤ 32 约束内）
-  - revision `0135`，`down_revision = "0134"`（线性接在 `0134_data_layer_rule` 之后）
+- `alembic/versions/0135_agent_orchestration.py` — 建 5 张表 + 5 个索引
+  - **文件主干（stem）** = `0135_agent_orchestration`（**24 字符**）；文件名含 `.py` = **27 字符**
+  - **revision id** = `0135`（**4 字符**），`down_revision = "0134"`
+    （线性接在 `0134_data_layer_rule` 之后）
+  - `alembic_version.version_num` 是 `varchar(32)` ⇒ **三个值（4 / 24 / 27 字符）都在约束内**
   - **downgrade 会 DROP 这 5 张表** ⇒ 回滚口径是「停 Worker + 关 flag」，**不做 downgrade**（见灰度手册 §5）
 
 **已知缺口（不阻塞上线，但要记账）**：

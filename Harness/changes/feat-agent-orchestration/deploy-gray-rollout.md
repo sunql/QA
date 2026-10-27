@@ -313,6 +313,11 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
 > 下面三项由 `security-reviewer` 与 `code-reviewer` 共同提出（M1/M2/M3 = 安全 MEDIUM
 > M1/M2/M3；代码评审 M4/M10/M11），**两位评审一致要求：在生产把开关打开之前关闭**。
 > 任一项未关闭 ⇒ **不要**把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。
+>
+> **编号说明（可追溯性用）**：上面括号里的 `M1`/`M2`/`M3` 与「代码评审 M4/M10/M11」
+> 是**开发期评审的发现编号**，只为可追溯性记录在这里；原始评审报告是开发期产物、
+> 不随仓库存档。**下面三项每一项都自带完整描述**（事实 + 影响 + 关闭方式）⇒
+> **不需要任何外部文档就能照着勾**。
 
 - [ ] **P1 — 只读白名单的 TOCTOU（读-改-写竞态）**
       白名单断言发生在 `prepare()` 读到的**第一份**行上

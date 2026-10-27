@@ -77,6 +77,12 @@ Agent 分别跑，或者塞进 chat 让 L4 自由发挥——后者不受预算/
 | `code-reviewer` | changes-requested：0 Critical / **2 Important** / 11 Minor | I1（灰度手册阶段 0 会改变既有 Agent 行为）→ **本变更已修**（手册 §2.5 + §9 坑 12）；I2（`_replayTool` 未捕获 `PlannerProtocolError`）→ 已在修复轮次修掉 |
 | 实现方 | 「多工具 + 可回放 + 预算」三件事必须成对出现，缺一就是半成品 | 采纳独立表 + 独立 Worker |
 
+> **编号说明（可追溯性用）**：表里的 `I1` / `I2` 是**开发期代码评审的发现编号**，
+> 只为可追溯性记录在这里；原始评审报告是开发期产物、不随仓库存档。
+> **每处都自带完整描述**（括号里就是描述）⇒ **不需要任何外部文档就能读懂**。
+> 本文件其它地方出现的 `M<n>`（安全 MEDIUM / 代码评审 Minor）与 `L<n>`（安全 LOW）
+> 同理，说明见本文件 §7 的「编号说明」。
+
 ---
 
 ## 3. 数据模型变更
@@ -96,10 +102,11 @@ Agent 分别跑，或者塞进 chat 让 L4 自由发挥——后者不受预算/
 | `agent_orchestration_usage` | 计量台账（run 级 + 每步） | 无索引（**已知缺口**，见 §7 限制 9） |
 
 **迁移文件**：`backend/alembic/versions/0135_agent_orchestration.py`
-（revision id `0135_agent_orchestration` = **24 字符**；文件名含 `.py` 为 **27 字符**；
-`alembic_version.version_num` 是 `varchar(32)`，≤ 32 约束内）。
-`revision = "0135"`，`down_revision = "0134"`
-（线性接在 `0134_data_layer_rule` 之后）。
+
+- **文件主干（stem）** = `0135_agent_orchestration`（**24 字符**）；文件名含 `.py` 为 **27 字符**；
+- **revision id** = `0135`（**4 字符**），`down_revision` = `0134`
+  （线性接在 `0134_data_layer_rule` 之后）；
+- `alembic_version.version_num` 是 `varchar(32)` ⇒ **三个值（4 / 24 / 27 字符）都在约束内**。
 
 > **回滚口径**：`0135` 的 downgrade 会 **DROP 这 5 张表** ⇒ 回滚**不做 downgrade**，
 > 而是「停 Worker + 把 `ENABLE_AGENT_ORCHESTRATION` 改回 `false`」，表留着无害
@@ -160,12 +167,22 @@ DTO 契约见 `backend/app/domain/agent_orchestration_schemas.py`：
 `pause_code`：`NEEDS_INPUT` / `AMBIGUOUS` / `PERMISSION_DENIED` / `BUDGET_EXHAUSTED` /
 `TOOL_FAILED` / `PLANNER_OUTPUT_INVALID` / `AGENT_UNAVAILABLE` / `INFRASTRUCTURE_ERROR`。
 
-### 4.3 既有契约：**不变**
+### 4.3 既有契约：**服务端不变；客户端渲染的失败文案有变（见 §4.4）**
 
 `AgentDefinitionCreate/Update/Read`、`AgentRunRequest/AgentRunRead`、
-`/agents/options`、既有 run API 的状态码/错误码/错误消息、
-AgentRegistryPage / AgentRuntimePage / ChatPage 的现有行为——**一律不变**。
+`/agents/options`、既有 run API 的**服务端**状态码/错误码/错误消息——
+**一律不变**。
 既有 `POST /api/v1/agents/{code}/run` 仍只执行原 `tool_name`（原字段为空仍按旧规则 409）。
+
+⚠️ **前端渲染的失败文案不是「一律不变」**：既有页面（AgentRegistryPage /
+AgentRuntimePage / **ChatPage**）都走共享的 `frontend/src/api/client.ts`，而本分支
+改了它的 `normalizeError` ⇒ 这些页面在失败时**显示的文案**会变（响应体顶层
+`error` 优先于 axios 的「Request failed with status code NNN」）。**服务端契约没变，
+变的是客户端把同一个响应渲染成什么字**。这是**修 bug 而不是回归**：仓内
+`frontend/src/tests/client.test.ts` 本分支**未改**，它既有的两条用例
+（「HTTP 错误时优先使用响应体 error 消息」/「把 status 挂到 reject Error 上供业务页分流」）
+在分支基线上就是红的（base 9 红 → 分支 7 红）——基线的 `normalizeError` 没能满足
+仓里自己的测试。详见本文件 §4.4。
 
 ### 4.4 ⚠️ 超出设计稿 §9.3 允许范围的改动（必须记账）
 
@@ -317,6 +334,12 @@ FastAPI `Depends(getCurrentUser)`（全部 9 条路由**强制鉴权**）、
 
 **结论：approved-with-deferred — 0 CRITICAL / 0 HIGH / 3 MEDIUM / 8 LOW。**
 10 条安全不变量全部 PASS，11 条对抗性检查全部 PASS（带 file:line 取证）。
+
+> **编号说明（可追溯性用）**：本节与 §7.1 里出现的 `M1`–`M3`（安全评审的 MEDIUM）、
+> `L1`–`L8`（安全评审的 LOW）以及「代码评审 M4`–`M11」是**开发期评审的发现编号**，
+> 只为让评审结论可追溯而记录在这里；它们的原始评审报告是开发期产物、不随仓库存档。
+> **每一行都自带完整描述**（事实 + 影响 + 处置）⇒ **不需要任何外部文档就能读懂**，
+> 编号本身不承载额外信息。
 
 | 严重度 | 编号 | 摘要 | 处置 |
 |---|---|---|---|
@@ -513,7 +536,14 @@ orchestration_paths = 9
 2. `TEST_DATABASE_URL`（仓内标准测试变量；**本次用的就是它**）
 3. `DATABASE_URL`
 4. `PG*`（`PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE`），
-   **默认端口 5436 / 默认库 `qa_metadata_test`** ⇒ 裸跑**不会**落到 dev 库
+   **默认端口 5436 / 默认库 `qa_metadata_test`**
+
+⚠️ **裸跑默认落到隔离库只在「环境里没有 `DATABASE_URL`」时成立**：`DATABASE_URL`
+会按上面的顺序被命中，而开发者的 shell 里通常正导出着 dev 库的
+`DATABASE_URL=…@localhost:5433/qa_metadata` ⇒ 裸跑会指向 **dev 库**。
+因此脚本在**接触数据库之前**有硬守卫：目标库名**不以 `qa_metadata_test` 开头**
+⇒ **拒绝运行**（写 stderr、非零码退出、一个字节都不写）；只有用
+`AGENT_ORCHESTRATION_REALDATA_DATABASE_URL` 显式覆盖时才放行（那是操作者自己的选择）。
 
 > ⚠️ 脚本**会写库**（并在退出前还原）⇒ **只允许指向隔离实例**。
 
@@ -534,6 +564,11 @@ TEST_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5436/qa_metadata_
 
 - `SKIP` 表示「**本步骤在当前库上无法执行**」，它**既不等于通过、也不等于失败**；
   库的种子状态不是脚本的缺陷。**退出码只由 `FAIL` 决定**，`SKIP` **不进**失败清单。
+- ⚠️ **有跳过步骤的运行不会说「all steps passed」**：结尾汇总会另外打印
+  `NOTE  M step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失败）` 并逐项列出
+  被跳过的步骤；**只有 0 失败且 0 跳过时**才会打印 `OK  all steps passed`。
+  退出码仍然只由 `FAIL` 决定（`SKIP` 不影响退出码）——「跳过不是通过」由**汇总文案**
+  表达，而不是靠改退出码。
 - `S7` 需要一个 `status='active'` 且尚无编排 profile 的 `agent_definition`：
   库里没有 ⇒ 脚本**自建**一个（退出时删除）；自建也失败 ⇒ `SKIP`。
 - `S8` 需要一个 `is_active` 的 `llm_config`：库里没有 ⇒ 脚本**自建**一个
@@ -550,8 +585,11 @@ TEST_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5436/qa_metadata_
   **绝不**声称写了没写的行。此时 `S6` 会因该工具不可编排而 `FAIL`（运行**不是**绿的）。
 - **SKIP 与 FAIL 的分类依据是异常的具体类型**：`NotFoundError` / `ConflictError` /
   `ValidationError`（库种子不满足）⇒ `SKIP` 并写明缺什么；**其它**异常 ⇒ `FAIL`
-  （脚本或环境的缺陷，必须暴露）。建 profile / 建 run 这类**服务调用**同样受这条
-  规则保护——前置条件不满足时输出 `SKIP`，**不会**抛出未捕获的 traceback。
+  （脚本或环境的缺陷，必须暴露）。这条规则同时覆盖**三条**路径：
+  ① 建 profile / 建 run 这类**服务调用**；② **准备前置条件**（自建 ACTIVE Agent /
+  启用的模型配置）——`IntegrityError` / `OperationalError` 这类**真缺陷**在这里会
+  记 `FAIL`（退出码非零），**不会**被当成「库种子不满足」蒙混成 `SKIP`；
+  ③ 其它任何步骤。**不会**抛出未捕获的 traceback。
 
 #### 本次运行（两次连续运行，**完整 stdout，逐行未删改**）
 
@@ -644,7 +682,8 @@ stdout 与运行 1 **逐行一致**，除了三个每次必然不同的自增/�
 为了验证「前置条件不满足 ⇒ `SKIP` 而不是 traceback」，在**同一个隔离测试库**上
 临时把第一波工具 `supplier_360` 置成 `enabled=false` 跑了一次，**跑完立刻改回
 `enabled=true`**（改前改后都核验过：7 个工具全部 `enabled=true`、
-`input_schema` 全部 `{}`、其余表零残留）。关键输出：
+`input_schema` 全部 `{}`、其余表零残留）。下面是这次运行的**关键输出摘录**
+（**不是完整 stdout**——完整 stdout 只在上面那次 canonical 运行里给）：
 
 ```
       supplier_360: 未写入（UPDATE 命中 0 行；该行 enabled=False）
@@ -652,15 +691,32 @@ stdout 与运行 1 **逐行一致**，除了三个每次必然不同的自增/�
       graph_traverse: input_schema {} -> {"type": "object", "properties": {"key": {"type": "string"}}, "additionalProperties": false}（enabled 保持 True 未改）
 SKIP  S5 schema-only 修复 — 实际写入 2 行，未写入 1 行：supplier_360（该行 enabled=False；第一波只写 enabled=true 的行）（库种子前置条件未满足；本步骤在当前库上无法完整执行）
 FAIL  S6 三个已启用工具可编排 — supplier_360=False, supplier_risk=True, graph_traverse=True
+PASS  S6 脚本没有翻转任何 enabled — wiki_search: pre enabled=True → now enabled=True；wiki_read: pre enabled=True → now enabled=True；rule_evaluate: pre enabled=True → now enabled=True；coverage_status: pre enabled=True → now enabled=True（脚本全程不写 enabled；观测到的运行前状态如上，不同库种子不同——enabled=true 的库说明该库把 wiki 工具种成了启用态）
+PASS  S6 只读白名单仍是 7 项 — READ_ONLY_HANDLER_REFS=['coverage_status', 'graph_traverse', 'rule_evaluate', 'supplier_360', 'supplier_risk', 'wiki_read', 'wiki_search']
+      使用 Agent：REALDATA_ORCHESTRATION_AGENT（脚本自建（退出时删除））
 SKIP  S7 编排 profile — 建 profile 的前置条件未满足（ValidationError: 工具已禁用：supplier_360）；本步骤在当前库上无法执行
-SKIP  S8 创建 run — S7 已 SKIP（目标库没有可用的 ACTIVE Agent）
+SKIP  S8 创建 run — S7 已 SKIP（建 profile 的前置条件未满足（ValidationError: 工具已禁用：supplier_360）；本步骤在当前库上无法执行）
+PASS  S9 feature-off 时新路由缺席 — /openapi.json 中的编排路径 = []
 PASS  S10 自建行已清理 — 自建 run / profile / Agent / 模型配置均已删除
 PASS  S10 阶段 0 schema 已还原 — 3 行 input_schema 已写回运行前的原值
+PASS  S2 既有表行数前后一致 — 六张既有表行数无变化
+------------------------------------------------------------------------
+FAILED  1 step(s):
+  - S6 三个已启用工具可编排: supplier_360=False, supplier_risk=True, graph_traverse=True
+NOTE  3 step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失败）
+  - S5 schema-only 修复: 实际写入 2 行，未写入 1 行：supplier_360（该行 enabled=False；第一波只写 enabled=true 的行）（库种子前置条件未满足；本步骤在当前库上无法完整执行）
+  - S7 编排 profile: 建 profile 的前置条件未满足（ValidationError: 工具已禁用：supplier_360）；本步骤在当前库上无法执行
+  - S8 创建 run: S7 已 SKIP（建 profile 的前置条件未满足（ValidationError: 工具已禁用：supplier_360）；本步骤在当前库上无法执行）
 ```
 
-⇒ **无 traceback、stderr 为空**；S5 如实汇报「写入 2 行、未写入 1 行」，
+⇒ **无 traceback、stderr 为空、退出码 1**；S5 如实汇报「写入 2 行、未写入 1 行」，
 S7 输出 `SKIP` 并**写明缺什么**（工具被禁用），
+S8 的 `SKIP` 原因**照抄 S7 的真实原因**（旧版本这里写的是「目标库没有可用的
+ACTIVE Agent」——**那句话是错的**：Agent 一直存在，失败的是建 profile），
 S6 因为该工具确实不可编排而 `FAIL` ⇒ **退出码 1，运行不是绿的**。
+
+⚠️ 结尾**没有** `OK  all steps passed`：有 1 个 `FAIL` + 3 个 `SKIP` ⇒ 汇总如实
+列出失败项**和**被跳过的步骤。退出码仍只由 `FAIL` 决定（这里是 1）。
 
 ### 8.4 未执行项（明确记录，不得当成已完成）
 
@@ -699,7 +755,9 @@ S6 因为该工具确实不可编排而 `FAIL` ⇒ **退出码 1，运行不是�
 - [x] frontmatter 元数据齐全（日期 / 作者 / Phase / 状态 / 关联变更 / 迁移版本 / MEMORY）
 - [x] 9 段都非空，无 TBD/TODO/待补 占位
 - [x] 第 2 段 ≥ 2 个候选方案对比（A / B / C 三案 + 取舍表 + 最终决定）
-- [x] 第 3 段迁移 revision id ≤ 32 字符（`0135_agent_orchestration` = 24；文件名含 `.py` = 27）
+- [x] 第 3 段迁移标识 ≤ 32 字符（**revision id** `0135` = 4；**文件主干（stem）**
+      `0135_agent_orchestration` = 24；文件名含 `.py` = 27 ⇒ 三个值都在
+      `alembic_version.version_num` 的 `varchar(32)` 约束内）
 - [x] 第 7 段触发了 security-reviewer 则必填 CRITICAL/HIGH/MEDIUM/LOW 至少 1 项
       （0 CRITICAL / 0 HIGH / 3 MEDIUM / 8 LOW，另有代码评审 2 Important / 11 Minor）
 - [x] 第 8 段 docker compose 冒烟命令 + 输出贴出（§8.1）

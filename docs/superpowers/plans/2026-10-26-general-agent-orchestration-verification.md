@@ -252,7 +252,13 @@ orchestration_paths = 9
 **目标库（canonical）= 隔离测试库 `localhost:5436/qa_metadata_test`** —— **不是** dev 库
 `5433/qa_metadata`，**更不是**生产。脚本的 DSN 解析顺序（先命中先用）：
 `AGENT_ORCHESTRATION_REALDATA_DATABASE_URL` → **`TEST_DATABASE_URL`（本次用的就是它）** →
-`DATABASE_URL` → `PG*`（默认端口 **5436** / 默认库 **`qa_metadata_test`**，裸跑不会落到 dev 库）。
+`DATABASE_URL` → `PG*`（默认端口 **5436** / 默认库 **`qa_metadata_test`**）。
+
+⚠️ **裸跑默认落到隔离库只在「环境里没有 `DATABASE_URL`」时成立**：`DATABASE_URL`
+会按上面的顺序被命中，而开发者的 shell 里通常正导出着 dev 库的
+`DATABASE_URL=…@localhost:5433/qa_metadata`。脚本因此在**接触数据库之前**有硬守卫：
+目标库名**不以 `qa_metadata_test` 开头** ⇒ **拒绝运行**（写 stderr、非零码退出、
+一个字节都不写）；只有用 `AGENT_ORCHESTRATION_REALDATA_DATABASE_URL` 显式覆盖时才放行。
 
 **前置条件与 SKIP 语义**：库种子不满足前提的步骤输出 `SKIP  <步骤> — <缺什么>`，
 **不是** `FAIL`，也**不进**失败清单（库的种子状态不是脚本的缺陷；退出码只由 `FAIL` 决定）。
@@ -263,10 +269,19 @@ orchestration_paths = 9
 行数**汇报（第一波只写 `enabled=true` 的行；某工具被禁用 ⇒ 该行没写成 ⇒ 按
 「未写入 + 原因」汇报，`S6` 随后会 `FAIL`，运行**不是**绿的）。**SKIP 与 FAIL 的
 分类依据是异常的具体类型**：`NotFoundError` / `ConflictError` / `ValidationError`
-⇒ SKIP 并写明缺什么；其它异常 ⇒ FAIL——建 profile / 建 run 这类服务调用同样受这条
-规则保护，前置条件不满足时输出 `SKIP`，**不会**抛未捕获的 traceback。
+⇒ SKIP 并写明缺什么；其它异常 ⇒ FAIL——这条规则同时覆盖**建 profile / 建 run
+这类服务调用**、**准备前置条件**（自建 Agent / 模型配置：`IntegrityError` /
+`OperationalError` 这类真缺陷在这里会记 FAIL 并让退出码非零，**不会**被当成
+「库种子不满足」蒙混成 SKIP）、以及其它任何步骤；前置条件不满足时输出 `SKIP`，
+**不会**抛未捕获的 traceback。
 `S6` 断言的是「**脚本没有翻转任何 `enabled`**」，
 判定文本报出**观测到的运行前状态**（不同库种子不同）。
+
+⚠️ **有跳过步骤的运行不会说「all steps passed」**：结尾汇总会另外打印
+`NOTE  M step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失败）` 并逐项列出
+被跳过的步骤；**只有 0 失败且 0 跳过时**才会打印 `OK  all steps passed`。
+退出码仍然**只由 `FAIL` 决定**（`SKIP` 不影响退出码）——「跳过不是通过」由**汇总
+文案**表达，而不是靠改退出码（幂等口径「退出码相同 + PASS/SKIP 集合相同」依赖这一点）。
 
 ```bash
 cd backend
@@ -333,8 +348,11 @@ stdout 与运行 1 **逐行一致**，只有三个每次必然不同的自增/�
 > `supplier_360` 置成 `enabled=false` 跑了一次，**跑完立刻改回 `enabled=true`**
 > （改前改后都核验过：7 个工具全部 `enabled=true`、`input_schema` 全部 `{}`、
 > 其余表零残留）。结果是 **S5 `SKIP`（如实写「实际写入 2 行，未写入 1 行」）、
-> S6 `FAIL`、S7 `SKIP`（写明「工具已禁用：supplier_360」）、S8 `SKIP`**，
+> S6 `FAIL`、S7 `SKIP`（写明「工具已禁用：supplier_360」）、S8 `SKIP`（原因**照抄
+> S7 的真实原因**，不再臆断成「没有可用的 ACTIVE Agent」）**，
 > **无 traceback、stderr 为空、退出码 1** ⇒ 运行**不是**绿的。
+> 结尾汇总是 `FAILED  1 step(s):` + `NOTE  3 step(s) skipped …`（逐项列出），
+> **没有** `OK  all steps passed`。
 
 > **非 canonical 观察（旧记录）**：交付时曾在 **dev 库 `5433/qa_metadata`** 上跑过一次并
 > 得到全 PASS。该次运行**不是** canonical 证据——脚本自己的规矩是「绝不碰 dev 库」，

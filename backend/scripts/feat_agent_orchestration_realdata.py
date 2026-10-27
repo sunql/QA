@@ -22,7 +22,11 @@ DSN 解析顺序见 ``feat_agent_orchestration_realdata_lib.resolveDatabaseUrl``
 3. ``DATABASE_URL``
 4. ``PG*`` 变量拼装（默认 **5436 / qa_metadata_test**）
 
-⚠️ 默认值刻意指向隔离库，裸跑**不会**落到 dev 库（5433）。
+⚠️ 裸跑**默认**落到隔离库（5436 / ``qa_metadata_test``）——但**仅当环境里没有**
+``DATABASE_URL`` 时才成立：``DATABASE_URL`` 会按上面的解析顺序被命中。
+脚本因此在**接触数据库之前**做一次守卫：目标库名不以 ``qa_metadata_test``
+开头 ⇒ **拒绝运行**（写 stderr、非零码退出，一个字节都不写）；只有用
+``AGENT_ORCHESTRATION_REALDATA_DATABASE_URL`` 显式覆盖时才放行。
 ⚠️ 绝不指向生产。
 
 前置条件（库种子）与 SKIP 语义
@@ -37,13 +41,19 @@ DSN 解析顺序见 ``feat_agent_orchestration_realdata_lib.resolveDatabaseUrl``
   没有时脚本**自建**一个（退出时删除）；自建也失败 ⇒ ``SKIP``。
 
 ``SKIP`` 的语义：这一步在当前库上**无法执行**——它既不是「通过」也不是
-「失败」。退出码只由 ``FAIL`` 决定。
+「失败」。退出码只由 ``FAIL`` 决定（``SKIP`` **不影响**退出码）。
 
-⚠️ **SKIP / FAIL 的分类依据是异常的具体类型**（``PREREQUISITE_ERRORS``）：
+⚠️ **有跳过步骤的运行不会说「all steps passed」**：结尾汇总会另外打印
+``NOTE  M step(s) skipped …`` 并逐项列出被跳过的步骤；只有 **0 失败且 0 跳过**
+时才会打印 ``OK  all steps passed``。
+
+⚠️ **SKIP / FAIL 的分类依据是异常的具体类型**（``PREREQUISITE_ERRORS``，
+定义在 ``feat_agent_orchestration_realdata_db``）：
 ``NotFoundError`` / ``ConflictError`` / ``ValidationError`` ⇒ 库种子不满足 ⇒ SKIP；
 其它任何异常 ⇒ **FAIL**（脚本或环境的缺陷，必须暴露，不能被吞掉）。
-建 profile / 建 run 这些**服务调用**同样受这条规则保护——前置条件不满足时
-输出 SKIP 并写明缺什么，**不会**抛出未捕获的 traceback。
+建 profile / 建 run 这些**服务调用**、以及**准备前置条件**（自建 Agent /
+模型配置）同样受这条规则保护——前置条件不满足时输出 SKIP 并写明缺什么，
+**不会**抛出未捕获的 traceback；真正的缺陷会记 FAIL 并让退出码非零。
 
 覆盖的步骤
 ----------
@@ -130,17 +140,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from feat_agent_orchestration_realdata_lib import (  # noqa: E402
     DISABLED_WIKI_TOOLS,
     EXPECTED_ALEMBIC_VERSION,
-    FAILURES,
     FIRST_WAVE_TOOLS,
     LEGACY_TABLES,
     MARKER,
     NEW_TABLES,
     SCRIPT_ACTOR,
     TOOL_SCHEMAS,
+    assertSafeTarget,
     check,
     failStep,
+    lastSkipReason,
     maskDsn,
     passStep,
+    printSummary,
     resolveDatabaseUrl,
     skipStep,
 )
@@ -150,11 +162,15 @@ from feat_agent_orchestration_realdata_lib import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 DATABASE_URL, DSN_SOURCE = resolveDatabaseUrl()
+# 目标库守卫：**在接触数据库之前**拒绝写非测试库（dev 库 / 生产）。
+# 通过时静默——canonical 捕获必须逐字节不变。
+assertSafeTarget(DATABASE_URL, DSN_SOURCE)
 os.environ["DATABASE_URL"] = DATABASE_URL
 # 默认静默 SQL 回显（脚本输出只保留 PASS/FAIL/SKIP 行；需要排查时设 LOG_LEVEL=INFO）
 os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 from feat_agent_orchestration_realdata_db import (  # noqa: E402
+    PREREQUISITE_ERRORS,
     ToolRow,
     countScriptResidue,
     deleteScriptRows,
@@ -179,11 +195,7 @@ from app.domain.agent_orchestration_schemas import (  # noqa: E402
     AgentOrchestrationToggle,
     AgentRunCreate,
 )
-from app.domain.exceptions import (  # noqa: E402
-    ConflictError,
-    NotFoundError,
-    ValidationError,
-)
+from app.domain.exceptions import ValidationError  # noqa: E402
 from app.infrastructure.database import getEngine, getSessionFactory  # noqa: E402
 from app.services.agent_orchestration_config_service import (  # noqa: E402
     AgentOrchestrationConfigService,
@@ -203,26 +215,6 @@ from app.services.agent_orchestration_validation import (  # noqa: E402
 # **绕过 logger 级别** ⇒ 真正能压住它的只有「把引擎的 echo 标志关掉」
 # （见 main() 里 getEngine().echo = False）。
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-
-
-# ---------------------------------------------------------------------------
-# 失败分类：前置条件形态 vs 真正的缺陷
-# ---------------------------------------------------------------------------
-#
-# ``SKIP`` 的含义是「这一步在当前库上**无法执行**」——库的种子不满足前提
-# （没有 ACTIVE 的 Agent / 没有启用的模型配置 / 工具被禁用 / 工具行不存在 …）。
-# 这些是**领域异常**，脚本按具体类型判定，不靠「捕获所有异常」蒙混：
-#
-# - ``PREREQUISITE_ERRORS``（下面这个元组）⇒ SKIP（写明缺什么）；
-# - 其它任何异常 ⇒ **FAIL**（脚本/环境缺陷，必须暴露，不能被吞掉）。
-#
-# ⚠️ 领域异常的语义：
-# - ``NotFoundError``：Agent / 模型配置 / profile / run 不存在；
-# - ``ConflictError``：Agent 已有 profile、profile 已禁用、模型配置已停用、
-#   编排配置没有可用的工具绑定；
-# - ``ValidationError``：工具不存在 / 工具已禁用 / 工具不在只读白名单 /
-#   schema 不合法（``assertOrchestrationToolValid`` 抛的）。
-PREREQUISITE_ERRORS = (NotFoundError, ConflictError, ValidationError)
 
 
 # ---------------------------------------------------------------------------
@@ -732,16 +724,17 @@ async def _checkLegacyCountsUnchanged(
     )
 
 
-def _printSummary() -> int:
-    """结尾汇总：任一 ``FAIL`` ⇒ 非零码。"""
-    print("-" * 72)
-    if FAILURES:
-        print(f"FAILED  {len(FAILURES)} step(s):")
-        for item in FAILURES:
-            print(f"  - {item}")
-        return 1
-    print("OK  all steps passed")
-    return 0
+def _s8SkipReason() -> str:
+    """S8 因 S7 未产出 Agent 而跳过时的原因——**不臆断** S7 的具体原因。
+
+    S7 可能是 ``SKIP``（库种子不满足），也可能是 ``FAIL``（脚本缺陷）：两种
+    情况都没有产出 Agent。用 ``SKIPS`` 登记表把 S7 的 SKIP 原因原样带过来
+    （不靠字符串切分）；没有 S7 的 SKIP 记录时只说「S7 未产出可用的 Agent」。
+    """
+    reason = lastSkipReason("S7 ")
+    if reason is not None:
+        return f"S7 已 SKIP（{reason}）"
+    return "S7 未产出可用的 Agent（见上方 S7 的判定行）"
 
 
 async def main() -> int:
@@ -776,7 +769,7 @@ async def main() -> int:
             if agentCode is not None:
                 await step8_createRun(session, actor, agentCode)
             else:
-                skipStep("S8 创建 run", "S7 已 SKIP（目标库没有可用的 ACTIVE Agent）")
+                skipStep("S8 创建 run", _s8SkipReason())
 
         await step9_featureOff()
     finally:
@@ -784,7 +777,7 @@ async def main() -> int:
             await step10_cleanup(session, originalSchemas)
             await _checkLegacyCountsUnchanged(session, beforeCounts)
 
-    return _printSummary()
+    return printSummary()
 
 
 if __name__ == "__main__":

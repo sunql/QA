@@ -1,8 +1,9 @@
-"""通用多工具 Agent 编排真实数据验证脚本的**共享常量、DSN 解析与输出 helper**。
+r"""通用多工具 Agent 编排真实数据验证脚本的**共享常量、DSN 解析与输出 helper**。
 
 脚本分三个模块（按职责拆，避免单文件超 800 行）：
 
-- ``feat_agent_orchestration_realdata_lib``（本文件）：常量、DSN 解析、三种判定输出；
+- ``feat_agent_orchestration_realdata_lib``（本文件）：常量、DSN 解析、三种判定输出、
+  结尾汇总、目标库安全守卫；
 - ``feat_agent_orchestration_realdata_db``：数据库访问helper（工具行适配器、
   快照 / 还原、前置条件自建行、清理）；
 - ``feat_agent_orchestration_realdata``（入口）：S1–S10 各步骤与主流程。
@@ -20,7 +21,12 @@ DSN 解析顺序（先命中先用）：
 3. ``DATABASE_URL``
 4. ``PG*`` 变量拼装（默认端口 **5436** / 库 **qa_metadata_test**）
 
-⚠️ 默认值刻意指向隔离库，裸跑**不会**落到 dev 库（5433）。
+⚠️ 裸跑**默认**落到隔离库（5436 / ``qa_metadata_test``）——但**仅当环境里没有**
+``DATABASE_URL`` 时才成立：``DATABASE_URL`` 会按上面的解析顺序被命中。
+因此脚本在**接触数据库之前**做一次守卫：目标库名不以 ``qa_metadata_test``
+开头 ⇒ **拒绝运行**（非零码退出，一个字节都不写）；只有用
+``AGENT_ORCHESTRATION_REALDATA_DATABASE_URL`` 显式覆盖时才放行（那是操作者
+自己的选择）。
 ⚠️ 绝不指向生产。
 
 前置条件（库种子）与 SKIP 语义
@@ -35,7 +41,11 @@ DSN 解析顺序（先命中先用）：
   一个（退出时删除）；自建也失败 ⇒ ``SKIP``。
 
 ``SKIP`` 的语义：该步骤在当前库上**无法执行**——它既不是「通过」也不是
-「失败」。退出码只由 ``FAIL`` 决定。
+「失败」。退出码只由 ``FAIL`` 决定（``SKIP`` **不影响**退出码）。
+
+⚠️ **有跳过步骤的运行不会说「all steps passed」**：结尾汇总会另外打印
+``NOTE  M step(s) skipped …`` 并逐项列出被跳过的步骤；只有 **0 失败且 0 跳过**
+时才会打印 ``OK  all steps passed``。
 
 自清理与幂等
 ------------
@@ -155,8 +165,18 @@ DSN_ENV_ORDER = (
     "DATABASE_URL",
 )
 
+# 显式覆盖变量：用它指定目标库 ⇒ 操作者自己的选择，守卫放行。
+OVERRIDE_ENV_NAME = "AGENT_ORCHESTRATION_REALDATA_DATABASE_URL"
+
+# 仓内测试库的命名约定（``qa_metadata_test`` / ``qa_metadata_test_solo`` …）。
+# 目标库名不以它开头 ⇒ 脚本**拒绝**执行。
+SAFE_DATABASE_PREFIX = "qa_metadata_test"
+
 # 收集失败项；``SKIP`` **不进**这个列表（库种子不满足不是脚本的缺陷）
 FAILURES: list[str] = []
+
+# 收集被跳过的步骤（``(步骤, 原因)``）；退出码**不受**它影响，但汇总必须如实列出。
+SKIPS: list[tuple[str, str]] = []
 
 
 def maskDsn(dsn: str) -> str:
@@ -180,7 +200,8 @@ def resolveDatabaseUrl() -> tuple[str, str]:
     3. ``DATABASE_URL``
     4. ``PG*`` 变量拼装（默认端口 **5436** / 库 **qa_metadata_test**）
 
-    ⚠️ 默认值刻意指向**隔离测试库**，绝不让裸跑落到 dev 库（5433）。
+    ⚠️ 默认值刻意指向**隔离测试库**；但只要环境里有 ``DATABASE_URL``，它会
+    按上面的顺序被命中 ⇒ 脚本用 :func:`assertSafeTarget` 兜住这种情况。
     """
     for name in DSN_ENV_ORDER:
         value = os.environ.get(name)
@@ -201,6 +222,45 @@ def resolveDatabaseUrl() -> tuple[str, str]:
     return dsn, "PG* 变量拼装"
 
 
+def databaseNameOf(dsn: str) -> str:
+    """从 DSN 里取库名（去掉查询串 / 参数，取路径的最后一段）。
+
+    形如 ``postgresql+asyncpg://user:pwd@host:5436/qa_metadata_test?ssl=require``
+    ⇒ ``qa_metadata_test``；没有路径 ⇒ 空串。
+    """
+    withoutQuery = dsn.split("?", 1)[0].split("#", 1)[0]
+    if "://" not in withoutQuery:
+        return ""
+    hostAndPath = withoutQuery.split("://", 1)[1].rsplit("@", 1)[-1]
+    _, separator, path = hostAndPath.partition("/")
+    if not separator:
+        return ""
+    return path.strip("/")
+
+
+def assertSafeTarget(dsn: str, source: str) -> None:
+    """**接触数据库之前**的目标库守卫：拒绝写非测试库。
+
+    - 显式覆盖变量（``AGENT_ORCHESTRATION_REALDATA_DATABASE_URL``）⇒ 放行
+      （操作者自己选的库）；
+    - 其它来源 ⇒ 目标库名必须以 ``qa_metadata_test`` 开头，否则**拒绝运行**
+      （写 stderr 并以非零码退出，**不连库、不写任何东西**）。
+
+    通过时**不打印任何东西**（canonical 捕获必须逐字节不变）。
+    """
+    if source == OVERRIDE_ENV_NAME:
+        return
+    database = databaseNameOf(dsn)
+    if database.startswith(SAFE_DATABASE_PREFIX):
+        return
+    raise SystemExit(
+        f"拒绝执行：解析出的目标库 {database!r} 不是测试库"
+        f"（库名必须以 {SAFE_DATABASE_PREFIX} 开头）。"
+        "本脚本会写库，只允许对隔离测试库执行。"
+        f"如确需指定其它库，请用 {OVERRIDE_ENV_NAME} 显式覆盖。"
+    )
+
+
 def passStep(step: str, detail: str = "") -> None:
     """断言成立。"""
     print(f"PASS  {step}" + (f" — {detail}" if detail else ""))
@@ -218,8 +278,41 @@ def skipStep(step: str, reason: str) -> None:
     语义：目标库的种子不满足该步骤的前提（例如没有 ACTIVE 的 Agent）。
     ``SKIP`` **不等于**该断言通过，也**不等于**该断言失败——它表示
     「本步骤在当前库上无法执行」。仓内失败项数与退出码只由 ``FAIL`` 决定。
+
+    原因会记进 :data:`SKIPS`，供结尾汇总如实列出（不靠字符串切分）。
     """
+    SKIPS.append((step, reason))
     print(f"SKIP  {step} — {reason}")
+
+
+def lastSkipReason(stepPrefix: str) -> str | None:
+    """最近一次以 ``stepPrefix`` 开头的 ``SKIP`` 原因（没有则 ``None``）。"""
+    for name, reason in reversed(SKIPS):
+        if name.startswith(stepPrefix):
+            return reason
+    return None
+
+
+def printSummary() -> int:
+    """结尾汇总：任一 ``FAIL`` ⇒ 非零码。
+
+    ⚠️ **有跳过步骤时不能说「all steps passed」**：跳过不是通过。退出码仍然
+    只由 ``FAIL`` 决定（``SKIP`` 不影响退出码），但汇总会把跳过的步骤逐项
+    列出来。0 失败 **且** 0 跳过时才打印 ``OK  all steps passed``。
+    """
+    print("-" * 72)
+    if FAILURES:
+        print(f"FAILED  {len(FAILURES)} step(s):")
+        for item in FAILURES:
+            print(f"  - {item}")
+    if SKIPS:
+        print(f"NOTE  {len(SKIPS)} step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失败）")
+        for step, reason in SKIPS:
+            print(f"  - {step}: {reason}")
+    if FAILURES or SKIPS:
+        return 1 if FAILURES else 0
+    print("OK  all steps passed")
+    return 0
 
 
 def check(step: str, ok: bool, detail: str = "") -> bool:

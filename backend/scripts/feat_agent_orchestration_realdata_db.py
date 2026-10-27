@@ -30,13 +30,34 @@ from feat_agent_orchestration_realdata_lib import (
     SCRIPT_ACTOR,
     SCRIPT_AGENT_CODE,
     SCRIPT_MODEL_NAME,
+    failStep,
     skipStep,
 )
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import AgentStatus
+from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import AgentDefinition, LlmConfig
+
+# ---------------------------------------------------------------------------
+# 失败分类：前置条件形态 vs 真正的缺陷
+# ---------------------------------------------------------------------------
+#
+# ``SKIP`` 的含义是「这一步在当前库上**无法执行**」——库的种子不满足前提
+# （没有 ACTIVE 的 Agent / 没有启用的模型配置 / 工具被禁用 / 工具行不存在 …）。
+# 这些是**领域异常**，脚本按具体类型判定，不靠「捕获所有异常」蒙混：
+#
+# - ``PREREQUISITE_ERRORS``（下面这个元组）⇒ SKIP（写明缺什么）；
+# - 其它任何异常 ⇒ **FAIL**（脚本/环境缺陷，必须暴露，不能被吞掉）。
+#
+# ⚠️ 领域异常的语义：
+# - ``NotFoundError``：Agent / 模型配置 / profile / run 不存在；
+# - ``ConflictError``：Agent 已有 profile、profile 已禁用、模型配置已停用、
+#   编排配置没有可用的工具绑定；
+# - ``ValidationError``：工具不存在 / 工具已禁用 / 工具不在只读白名单 /
+#   schema 不合法（``assertOrchestrationToolValid`` 抛的）。
+PREREQUISITE_ERRORS = (NotFoundError, ConflictError, ValidationError)
 
 
 @dataclass(frozen=True)
@@ -205,7 +226,7 @@ async def pickActiveAgentCode(session: AsyncSession) -> str | None:
     return rows[0] if rows else None
 
 
-async def ensureAgent(session: AsyncSession) -> tuple[str | None, bool]:
+async def ensureAgent(session: AsyncSession) -> tuple[str, bool]:
     """确保有一个可用的 ACTIVE Agent，返回 ``(agent_code, 是否脚本自建)``。
 
     优先**借用**既有 ACTIVE Agent（脚本不删它）；库里一个都没有时**自建**
@@ -234,7 +255,7 @@ async def ensureAgent(session: AsyncSession) -> tuple[str | None, bool]:
     return SCRIPT_AGENT_CODE, True
 
 
-async def ensureModelConfig(session: AsyncSession) -> tuple[int | None, bool]:
+async def ensureModelConfig(session: AsyncSession) -> tuple[int, bool]:
     """确保有一个启用的模型配置，返回 ``(model_id, 是否脚本自建)``。"""
     existing = (
         await session.execute(
@@ -333,22 +354,26 @@ async def countScriptResidue(session: AsyncSession) -> int:
 async def prepareAgent(session: AsyncSession, stepLabel: str) -> str | None:
     """准备一个可用的 ACTIVE Agent（优先借用既有的；没有就自建）。
 
-    两条路都走不通 ⇒ 输出 ``SKIP`` 并返回 ``None``（该步骤在当前库上无法执行）。
+    **前置条件形态**的领域异常（``PREREQUISITE_ERRORS``）⇒ ``SKIP``（写明缺什么）；
+    **其它**异常（``IntegrityError`` / ``OperationalError`` 等，即脚本或环境的
+    缺陷）⇒ ``FAIL``——必须暴露，不能被当成「库种子不满足」蒙混过去。
+
+    返回 ``None`` 表示这一步已被判定（跳过或失败）。
     """
     try:
         agentCode, isSelfCreated = await ensureAgent(session)
-    except Exception as error:  # noqa: BLE001 — 前置条件不足按 SKIP 处理，不算脚本缺陷
+    except PREREQUISITE_ERRORS as error:
         skipStep(
             stepLabel,
             f"无法准备 ACTIVE 的 agent_definition（{type(error).__name__}: {error}）"
             "；本步骤在当前库上无法执行",
         )
         return None
-    if agentCode is None:
-        skipStep(
+    except Exception as error:  # noqa: BLE001 — 非前置条件异常 = 缺陷，记 FAIL 暴露
+        failStep(
             stepLabel,
-            "目标库没有 status='active' 且尚无编排 profile 的 agent_definition，"
-            "自建也未成功（库种子前置条件未满足；本步骤在当前库上无法执行）",
+            f"准备 ACTIVE 的 agent_definition 抛出非前置条件异常"
+            f"（{type(error).__name__}: {error}）",
         )
         return None
     origin = "脚本自建（退出时删除）" if isSelfCreated else "借用既有 Agent（不删除）"
@@ -359,22 +384,25 @@ async def prepareAgent(session: AsyncSession, stepLabel: str) -> str | None:
 async def prepareModelConfig(session: AsyncSession, stepLabel: str) -> int | None:
     """准备一个启用的模型配置（优先借用既有的；没有就自建）。
 
-    两条路都走不通 ⇒ 输出 ``SKIP`` 并返回 ``None``（该步骤在当前库上无法执行）。
+    异常分类与 :func:`prepareAgent` 一致：前置条件形态 ⇒ ``SKIP``，
+    其它异常 ⇒ ``FAIL``。
+
+    返回 ``None`` 表示这一步已被判定（跳过或失败）。
     """
     try:
         modelId, isSelfCreated = await ensureModelConfig(session)
-    except Exception as error:  # noqa: BLE001 — 前置条件不足按 SKIP 处理
+    except PREREQUISITE_ERRORS as error:
         skipStep(
             stepLabel,
             f"无法准备 is_active 的 llm_config（{type(error).__name__}: {error}）；"
             "本步骤在当前库上无法执行",
         )
         return None
-    if modelId is None:
-        skipStep(
+    except Exception as error:  # noqa: BLE001 — 非前置条件异常 = 缺陷，记 FAIL 暴露
+        failStep(
             stepLabel,
-            "llm_config 里没有 is_active 的模型配置，自建也未成功"
-            "（库种子前置条件未满足；本步骤在当前库上无法执行）",
+            f"准备 is_active 的 llm_config 抛出非前置条件异常"
+            f"（{type(error).__name__}: {error}）",
         )
         return None
     origin = "脚本自建（退出时删除）" if isSelfCreated else "借用既有模型配置（不删除）"

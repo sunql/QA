@@ -48,6 +48,8 @@ dependencies = [
     "fastmcp>=2.0.0",
     "bcrypt>=5.0.0",
     "pyjwt>=2.14.0",
+    # Agent orchestration: strict tool input-schema validation (read-only whitelist)
+    "jsonschema>=4.26,<5",
 ]
 
 [project.optional-dependencies]

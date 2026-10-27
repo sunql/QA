@@ -26,7 +26,7 @@ from app.domain.agent_orchestration_models import (
 from app.domain.exceptions import LlmClientError
 from app.domain.models import LlmConfig
 from app.infrastructure import database as dbModule
-from app.infrastructure.llm.base_client import LlmMessage, LlmResponse
+from app.infrastructure.llm.base_client import LlmMessage, LlmResponse, StreamChunk
 from app.services.agent_orchestration_metering import (
     MeteredLlmClient,
     OrchestrationUsageRecorder,
@@ -37,14 +37,21 @@ from app.services.chat_usage import UsageMixin
 class _FakeLlmClient:
     """Provider double: one deterministic answer, no network."""
 
-    def __init__(self, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        error: Exception | None = None,
+        promptTokens: int = 11,
+        completionTokens: int = 7,
+        chunks: list[StreamChunk] | None = None,
+    ) -> None:
         self.error = error
+        self.chunks = chunks
         self.response = LlmResponse(
             content="ok",
             modelName="orchestration-metering-model",
-            promptTokens=11,
-            completionTokens=7,
-            totalTokens=18,
+            promptTokens=promptTokens,
+            completionTokens=completionTokens,
+            totalTokens=promptTokens + completionTokens,
             cachedTokens=3,
         )
 
@@ -65,8 +72,8 @@ class _FakeLlmClient:
         raise NotImplementedError
 
     async def completeStream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        raise NotImplementedError
-        yield  # pragma: no cover
+        for chunk in self.chunks or []:
+            yield chunk
 
     async def close(self) -> None:
         return None
@@ -446,3 +453,90 @@ async def test_recorder_failure_is_raised_not_swallowed(
 
     rows = await _usageRows(dbSession, 999999)
     assert rows == []
+
+
+async def test_usage_less_call_is_recorded_as_unknown_and_leaves_the_run_incomplete(
+    dbSession: AsyncSession,
+) -> None:
+    """provider 不报用量 ⇒ UNKNOWN + cost_complete=false。
+
+    记成 ESTIMATED/cost 0 会让 run 变成「已知的完整账单」，而账单数字是编的。
+    """
+    config = await _seedConfig(dbSession)
+    run = await _seedRun(dbSession, config)
+    recorder = _recorder(config)
+    client = MeteredLlmClient(
+        _FakeLlmClient(promptTokens=0, completionTokens=0),
+        recorder,
+        runId=run.id,
+        stepId=None,
+        callerType="PLANNER",
+    )
+
+    await client.complete([LlmMessage(role="user", content="hi")])
+
+    rows = await _usageRows(dbSession, run.id)
+    assert len(rows) == 1
+    usage = rows[0]
+    assert usage.call_status == "SUCCEEDED"
+    assert usage.cost_source == "UNKNOWN"
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert usage.cost == Decimal("0")
+
+    reloadedRun = await _reloadRun(dbSession, run.id)
+    assert reloadedRun.cost_source == "UNKNOWN"
+    assert reloadedRun.cost_complete is False
+    assert reloadedRun.total_tokens == 0
+    assert reloadedRun.cost == Decimal("0")
+
+
+async def test_stream_without_terminal_usage_is_recorded_as_unknown(
+    dbSession: AsyncSession,
+) -> None:
+    """ollama 截断流：终止块 0/0 ⇒ 用量未知 ⇒ run 不可声称账单完整。"""
+    config = await _seedConfig(dbSession)
+    run = await _seedRun(dbSession, config)
+    recorder = _recorder(config)
+    client = MeteredLlmClient(
+        _FakeLlmClient(
+            chunks=[
+                StreamChunk(
+                    content="a",
+                    isDone=False,
+                    promptTokens=0,
+                    completionTokens=0,
+                    modelName="orchestration-metering-model",
+                ),
+                StreamChunk(
+                    content="",
+                    isDone=True,
+                    promptTokens=0,
+                    completionTokens=0,
+                    modelName="orchestration-metering-model",
+                ),
+            ]
+        ),
+        recorder,
+        runId=run.id,
+        stepId=None,
+        callerType="PLANNER",
+    )
+
+    chunks = [
+        chunk
+        async for chunk in client.completeStream([LlmMessage(role="user", content="hi")])
+    ]
+    assert len(chunks) == 2
+
+    rows = await _usageRows(dbSession, run.id)
+    assert len(rows) == 1
+    usage = rows[0]
+    assert usage.call_status == "SUCCEEDED"
+    assert usage.cost_source == "UNKNOWN"
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+
+    reloadedRun = await _reloadRun(dbSession, run.id)
+    assert reloadedRun.cost_source == "UNKNOWN"
+    assert reloadedRun.cost_complete is False

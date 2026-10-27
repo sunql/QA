@@ -480,3 +480,146 @@ def test_calculate_cost_delegate_matches_the_established_cost_math() -> None:
     )
 
     assert actual == expected
+
+
+# ---------------------------------------------------------------------------
+# unknown usage (a provider that reports no usage is NOT a free call)
+# ---------------------------------------------------------------------------
+
+
+async def test_complete_without_usage_is_recorded_as_unknown() -> None:
+    """0/0 用量 = 「provider 没告诉我花了多少」，不是「这次免费」。
+
+    记成 ESTIMATED/cost 0 会让 run 汇总出一个「已知的完整账单」，
+    而账单里的数字是编的 —— 这正是绑定规则禁止的。
+    """
+    recorder = _FakeRecorder()
+    fake = _FakeLlmClient(
+        response=LlmResponse(
+            content="ok",
+            modelName="test-model",
+            promptTokens=0,
+            completionTokens=0,
+            totalTokens=0,
+        )
+    )
+
+    await _client(fake, recorder).complete([LlmMessage(role="user", content="hi")])
+
+    usage = recorder.lastUsage
+    assert usage["callStatus"] == "SUCCEEDED"
+    assert usage["costSource"] == "UNKNOWN"
+    assert usage["promptTokens"] == 0
+    assert usage["completionTokens"] == 0
+    assert usage["cost"] == Decimal("0")
+    # 未知的用量不得走定价路径。
+    assert recorder.costCalls == []
+
+
+async def test_complete_stream_with_zero_terminal_usage_is_recorded_as_unknown() -> None:
+    """ollama 截断流：终止块 token 数为 0 —— 用量未知，不得记成 0 成本的 ESTIMATED。"""
+    recorder = _FakeRecorder()
+    fake = _FakeLlmClient(
+        chunks=[
+            StreamChunk(content="a", isDone=False, promptTokens=0, completionTokens=0, modelName="m"),
+            StreamChunk(content="", isDone=True, promptTokens=0, completionTokens=0, modelName="m"),
+        ]
+    )
+
+    chunks = [
+        chunk
+        async for chunk in _client(fake, recorder).completeStream(
+            [LlmMessage(role="user", content="hi")]
+        )
+    ]
+
+    assert len(chunks) == 2
+    usage = recorder.lastUsage
+    assert usage["callStatus"] == "SUCCEEDED"
+    assert usage["costSource"] == "UNKNOWN"
+    assert usage["promptTokens"] == 0
+    assert usage["completionTokens"] == 0
+    assert recorder.costCalls == []
+
+
+async def test_complete_with_tools_with_zero_usage_is_recorded_as_unknown() -> None:
+    recorder = _FakeRecorder()
+    fake = _FakeLlmClient(
+        toolsResponse=LlmResponseWithTools(
+            content="done",
+            usage={"prompt_tokens": 0, "completion_tokens": 0},
+        )
+    )
+
+    await _client(fake, recorder).complete_with_tools(
+        [LlmMessage(role="user", content="hi")]
+    )
+
+    usage = recorder.lastUsage
+    assert usage["callStatus"] == "SUCCEEDED"
+    assert usage["costSource"] == "UNKNOWN"
+    assert recorder.costCalls == []
+
+
+async def test_non_llm_exception_with_a_tokens_attribute_is_recorded_as_unknown() -> None:
+    """只有 LlmClientError 携带可信用量；别的异常有个 .tokens 属性也不作数。"""
+
+    class _WeirdError(Exception):
+        def __init__(self) -> None:
+            super().__init__("weird")
+            self.tokens = (99, 99)
+
+    recorder = _FakeRecorder()
+    fake = _FakeLlmClient(error=_WeirdError())
+
+    with pytest.raises(_WeirdError):
+        await _client(fake, recorder).complete([LlmMessage(role="user", content="hi")])
+
+    usage = recorder.lastUsage
+    assert usage["callStatus"] == "FAILED"
+    assert usage["costSource"] == "UNKNOWN"
+    assert usage["promptTokens"] == 0
+    assert usage["completionTokens"] == 0
+
+
+# ---------------------------------------------------------------------------
+# streaming edge cases
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_failure_after_the_terminal_chunk_records_one_success_row() -> None:
+    """终止块已见 ⇒ 用量已知；provider 之后再抛错不得再记一次失败。"""
+    recorder = _FakeRecorder()
+    fake = _FakeLlmClient(streamError=LlmClientError("boom after done"))
+
+    with pytest.raises(LlmClientError):
+        async for _chunk in _client(fake, recorder).completeStream(
+            [LlmMessage(role="user", content="hi")]
+        ):
+            pass
+
+    assert len(recorder.usageCalls) == 1
+    usage = recorder.lastUsage
+    assert usage["callStatus"] == "SUCCEEDED"
+    assert usage["costSource"] == "ESTIMATED"
+    assert usage["promptTokens"] == 21
+    assert usage["completionTokens"] == 9
+
+
+async def test_abandoned_stream_still_records_a_usage_row() -> None:
+    """消费者提前放弃（客户端断线）：这次花费也必须有台账。"""
+    recorder = _FakeRecorder()
+    fake = _FakeLlmClient()
+    client = _client(fake, recorder)
+
+    stream = client.completeStream([LlmMessage(role="user", content="hi")])
+    async for _chunk in stream:
+        break
+    await stream.aclose()
+    await client.flushPendingRecords()
+
+    usage = recorder.lastUsage
+    assert usage["callStatus"] == "FAILED"
+    assert usage["costSource"] == "UNKNOWN"
+    assert usage["promptTokens"] == 0
+    assert usage["completionTokens"] == 0

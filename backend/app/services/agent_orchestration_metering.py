@@ -17,6 +17,11 @@ Cost labelling (the part that must not drift)
 - Unknown tokens ⇒ ``cost_source=UNKNOWN`` and the run's ``cost_complete``
   turns false. ``summarizeCostSources`` is the single place that decides the
   aggregate, so the run level and the usage level can never disagree.
+- A provider that reports **no** usage (missing ``usage`` block, or a 0/0
+  token count as a truncated ollama stream produces) is *unknown*, not
+  *free*: such a call is recorded ``UNKNOWN``/``cost_complete=false`` and
+  never as an ``ESTIMATED`` row with cost 0 — a "known total" of zero would
+  be exactly the fabricated complete bill this labelling forbids.
 
 Single fact source
 ------------------
@@ -41,10 +46,14 @@ Nothing is swallowed. A provider failure is recorded (with the tokens the
 exception carries, if any) and the original exception is re-raised; a
 recorder failure is logged with run/step/caller context and re-raised, because
 silently dropping the accounting failure would hide real spend.
+Only ``LlmClientError`` carries trustworthy token counts (see
+``consumedTokens``); any other exception is recorded as an unknown-usage
+failure even if it happens to expose a ``.tokens`` attribute.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterable
 from decimal import Decimal
@@ -58,7 +67,7 @@ from app.domain.agent_orchestration_models import (
     AgentOrchestrationStep,
     AgentOrchestrationUsage,
 )
-from app.domain.exceptions import LLMUnavailableError
+from app.domain.exceptions import LlmClientError, LLMUnavailableError
 from app.infrastructure.llm.base_client import (
     BaseLlmClient,
     LlmMessage,
@@ -73,6 +82,7 @@ from app.services.agent_orchestration_types import (
     MeteredCompletion,
 )
 from app.services.chat_usage import UsageMixin
+from app.services.llm_retry_policy import consumedTokens
 from app.services.nl2sql_service import _readFloatConfig
 
 logger = logging.getLogger(__name__)
@@ -417,6 +427,7 @@ class MeteredLlmClient(BaseLlmClient):
         self._runId = runId
         self._stepId = stepId
         self._callerType = callerType
+        self._backgroundTasks: set[asyncio.Task[None]] = set()
 
     # -- BaseLlmClient surface ------------------------------------------
 
@@ -450,9 +461,10 @@ class MeteredLlmClient(BaseLlmClient):
             await self._recordFailure(exc)
             raise
         promptTokens, completionTokens, cachedTokens = _usageFromMapping(result.usage)
-        if result.usage is None:
-            # The provider answered but reported no usage: the call succeeded,
-            # the cost is unknown.
+        if result.usage is None or _isUnknownUsage(promptTokens, completionTokens):
+            # The provider answered but reported no usage (missing block, or a
+            # 0/0 block that means "usage unknown"): the call succeeded, the
+            # cost is unknown.
             await self._recordUnknown(callStatus=SUCCEEDED)
         else:
             await self._recordSuccess(
@@ -470,6 +482,8 @@ class MeteredLlmClient(BaseLlmClient):
         **kwargs: Any,
     ) -> AsyncIterator[StreamChunk]:
         terminal: StreamChunk | None = None
+        completed = False
+        recorded = False
         try:
             async for chunk in self._client.completeStream(
                 messages,
@@ -481,22 +495,76 @@ class MeteredLlmClient(BaseLlmClient):
                 if getattr(chunk, "isDone", False):
                     terminal = chunk
                 yield chunk
+            completed = True
         except Exception as exc:
-            await self._recordFailure(exc)
+            if terminal is None:
+                # 失败发生在终止块之前：用量未知（除非异常自带 token）。
+                await self._recordFailure(exc)
+                recorded = True
+            else:
+                # 终止块已见 ⇒ 用量已知；provider 在终止块之后抛错不能再记一次
+                # 失败，否则同一次调用会在台账里出两行。
+                await self._recordStreamSuccess(terminal)
+                recorded = True
             raise
-        if terminal is None:
-            # The stream ended without a terminal usage block: the tokens are
-            # unknown, the call itself did not fail.
-            await self._recordUnknown(callStatus=SUCCEEDED)
-            return
-        await self._recordSuccess(
-            int(terminal.promptTokens or 0),
-            int(terminal.completionTokens or 0),
-            getattr(terminal, "cachedTokens", None),
-        )
+        finally:
+            if not recorded:
+                if terminal is not None:
+                    await self._recordStreamSuccess(terminal)
+                elif completed:
+                    # 流正常结束但没有终止用量块：调用成功，用量未知。
+                    await self._recordUnknown(callStatus=SUCCEEDED)
+                else:
+                    # 消费者中途放弃（GeneratorExit / CancelledError）：async
+                    # generator 在 GeneratorExit 处理中 await 会抛 RuntimeError，
+                    # 只能派一个后台任务补记一条 UNKNOWN/FAILED —— 否则「客户端
+                    # 断线 ⇒ 这次花费完全没有台账」。
+                    self._scheduleAbandonRecord()
 
     async def close(self) -> None:
         await self._client.close()
+
+    async def flushPendingRecords(self) -> None:
+        """等待后台补记的用量行落库（消费者提前放弃流的场景）。
+
+        调用方在收尾时调用一次，即可保证「放弃消费的那次调用」也有台账。
+        """
+        pending = list(self._backgroundTasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _scheduleAbandonRecord(self) -> None:
+        """消费者放弃流时补记一条 UNKNOWN/FAILED。
+
+        不能在 GeneratorExit 处理中 await（async generator 会抛
+        `RuntimeError: async generator ignored GeneratorExit`），所以派一个
+        后台任务；记录失败只落日志，不影响已经在传播的异常。
+        """
+        try:
+            task = asyncio.create_task(self._recordUnknown(callStatus=FAILED))
+        except RuntimeError as exc:  # 没有运行中的事件循环
+            logger.warning(
+                "orchestration stream abandoned: could not schedule the usage row: %s",
+                exc,
+            )
+            return
+        self._backgroundTasks.add(task)
+        task.add_done_callback(self._onBackgroundTaskDone)
+
+    def _onBackgroundTaskDone(self, task: asyncio.Task[None]) -> None:
+        self._backgroundTasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "orchestration usage accounting failed (abandoned stream): "
+                "run=%s step=%s caller=%s error=%s",
+                self._runId,
+                self._stepId,
+                self._callerType,
+                exc,
+            )
 
     # -- Planner protocol -------------------------------------------------
 
@@ -519,12 +587,36 @@ class MeteredLlmClient(BaseLlmClient):
         except Exception as exc:
             await self._recordFailure(exc)
             raise
-        usageId = await self._recordSuccess(
+        usageId = await self._recordUsageOfResponse(response)
+        return response, usageId
+
+    async def _recordUsageOfResponse(self, response: LlmResponse) -> int:
+        """记录一次成功补全的用量。
+
+        provider 没给出可用用量（``usage`` 字段缺失、或 ollama 截断流那样
+        只报 0/0）时，用量是**未知**而不是「0 成本」：记成 UNKNOWN +
+        cost_complete=false。反之记 ESTIMATED —— 本地单价算出来的成本永远
+        只是估算，绝不能冒充 MEASURED。
+        """
+        if response.isApproximateUsage:
+            return await self._recordUnknown(callStatus=SUCCEEDED)
+        return await self._recordSuccess(
             int(response.promptTokens or 0),
             int(response.completionTokens or 0),
             getattr(response, "cachedTokens", None),
         )
-        return response, usageId
+
+    async def _recordStreamSuccess(self, chunk: StreamChunk) -> int:
+        """记录一次成功流式调用的用量（终止块的 0/0 同样视为未知）。"""
+        promptTokens = int(chunk.promptTokens or 0)
+        completionTokens = int(chunk.completionTokens or 0)
+        if _isUnknownUsage(promptTokens, completionTokens):
+            return await self._recordUnknown(callStatus=SUCCEEDED)
+        return await self._recordSuccess(
+            promptTokens,
+            completionTokens,
+            getattr(chunk, "cachedTokens", None),
+        )
 
     async def _recordSuccess(
         self,
@@ -552,18 +644,22 @@ class MeteredLlmClient(BaseLlmClient):
         )
 
     async def _recordFailure(self, exc: Exception) -> None:
-        """Record a failed call: known tokens are priced, unknown ones are not."""
-        tokens = getattr(exc, "tokens", None)
-        if not isinstance(tokens, (tuple, list)) or len(tokens) < 2:
+        """Record a failed call: known tokens are priced, unknown ones are not.
+
+        只有 `LlmClientError` 按约定携带可信用量（`consumedTokens` 是本仓的
+        SSOT：LlmClientError.tokens → retryGenTokens）。别的异常即使恰好有个
+        `.tokens` 属性也不作数 —— 那是巧合，不是计量契约。
+        """
+        tokens = consumedTokens(exc) if isinstance(exc, LlmClientError) else (0, 0)
+        if tokens == (0, 0):
             await self._recordUnknown(callStatus=FAILED)
             return
-        promptTokens, completionTokens = int(tokens[0] or 0), int(tokens[1] or 0)
         await self._recordSuccess(
-            promptTokens, completionTokens, None, callStatus=FAILED
+            int(tokens[0] or 0), int(tokens[1] or 0), None, callStatus=FAILED
         )
 
-    async def _recordUnknown(self, *, callStatus: str = FAILED) -> None:
-        await self._recorder.recordUsage(
+    async def _recordUnknown(self, *, callStatus: str = FAILED) -> int:
+        usageId = await self._recorder.recordUsage(
             runId=self._runId,
             stepId=self._stepId,
             callerType=self._callerType,
@@ -576,6 +672,18 @@ class MeteredLlmClient(BaseLlmClient):
             costSource=UNKNOWN,
             callStatus=callStatus,
         )
+        return usageId
+
+
+def _isUnknownUsage(promptTokens: int, completionTokens: int) -> bool:
+    """0/0 表示 provider 没有给出可用用量。
+
+    与 `LlmResponse.isApproximateUsage` 同义（那里只有 LlmResponse 有这个
+    property，流式终止块与 usage mapping 没有）：provider 省略 usage 字段、
+    或 ollama 那样截断出一个 token 数为 0 的终止块，都属于「用量未知」，
+    不是「这次调用花了 0 块」。
+    """
+    return promptTokens == 0 and completionTokens == 0
 
 
 def _usageFromMapping(usage: dict | None) -> tuple[int, int, int | None]:

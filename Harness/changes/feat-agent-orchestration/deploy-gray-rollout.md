@@ -34,7 +34,7 @@
 | 4 | 编排只允许 7 个只读 handler：`supplier_360` / `supplier_risk` / `graph_traverse` / `wiki_search` / `wiki_read` / `rule_evaluate` / `coverage_status` | `READ_ONLY_HANDLER_REFS` |
 | 5 | 两个新菜单项**不进**默认 `seed_menu_config.ITEMS`（默认暴露 = 提前上线） | `backend/scripts/seed_menu_config.py` |
 | 6 | **绝不重新生成 `SECRET_KEY`**：它是 Fernet 主密钥，换新 = 5 个数据源密码 + 6 把 LLM key 永久不可解 | 运维红线 |
-| 7 | **绝不 `cat`/`print` `.env`**（含 `docker/.env`）；改配置用编辑器，验证用 `docker compose config` 的**服务名**而不是环境变量值。唯一例外：读回**单个非敏感开关** `docker compose exec backend printenv ENABLE_AGENT_ORCHESTRATION`（不涉及任何密钥/口令） | 运维红线 |
+| 7 | **绝不 `cat`/`print` `.env`**（含 `docker/.env`）；改配置用编辑器，验证用 `docker compose config` 的**服务名**而不是环境变量值。唯一例外：读回**单个非敏感开关**（如 `docker compose … exec backend printenv ENABLE_AGENT_ORCHESTRATION`，沿用本手册统一的 `-f` 参数）—— 只读这一个变量，**不要 dump 整个环境**，更不涉及任何密钥/口令 | 运维红线 |
 | 8 | 生产操作全部由人手动执行 | 本手册 |
 
 ---
@@ -176,8 +176,10 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
    ```
 2. 迁移（由 backend 容器启动时的 `alembic upgrade head` 完成，或手工执行）：
    ```bash
-   docker compose exec backend alembic upgrade head
-   docker compose exec backend alembic current   # 期望 0135
+   docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+     exec backend alembic upgrade head
+   docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+     exec backend alembic current   # 期望 0135
    ```
 3. 新建 5 张表（**只增不改**既有表）：
    `agent_orchestration_profile` / `agent_orchestration_binding` /
@@ -199,11 +201,16 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
      docker tag qa-system-backend:latest qa-system-agent-orchestration-worker:latest
      ```
      tag 名必须与目标机 compose 解析出的名字一致 —— 以目标机
-     `docker compose --profile agent-orchestration config --images` 的输出为准
-     （不同 compose 版本可能是下划线）。
-   - **重新构建**（构建机上）：`docker compose --profile agent-orchestration build agent-orchestration-worker`，
+     `docker compose -f docker-compose.yml -f docker-compose.centos.yml --profile agent-orchestration config --images`
+     的输出为准（不同 compose 版本可能是下划线）。
+   - **重新构建**（构建机上）：
+     ```bash
+     docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+       --profile agent-orchestration build agent-orchestration-worker
+     ```
      再 `docker save` 进传输包。
-3. 注意：`docker compose config --images`（**不带** `--profile`）**不含** Worker 镜像
+3. 注意：`docker compose -f docker-compose.yml -f docker-compose.centos.yml config --images`
+   （**不带** `--profile`）**不含** Worker 镜像
    ⇒ 离线镜像包脚本（`backend/scripts/build_offline_images.py`）默认不会带它，
    需要按上面第 2 步单独补进传输包。
 
@@ -215,12 +222,13 @@ curl -s -o /dev/null -w '%{http_code}\n' http://<host>:8000/api/v1/agent-orchest
 curl -s -o /dev/null -w '%{http_code}\n' http://<host>:8000/api/v1/agent-runs
 
 # ② Worker 没起来
-docker compose ps | grep agent-orchestration   # 期望：无输出
+docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+  ps | grep agent-orchestration   # 期望：无输出
 ```
 
 验收判据：
 - 两条 curl 都是 **404**；
-- `docker compose ps` 里没有 Worker；
+- `docker compose ... ps` 里没有 Worker；
 - **旧契约不变**：`/api/v1/chat` 等既有端点行为与上线前一致（抽样比对关键返回）；
 - 菜单里没有「编排配置 / 编排任务」两项。
 
@@ -232,18 +240,21 @@ docker compose ps | grep agent-orchestration   # 期望：无输出
 1. 在**测试环境**的 `docker/.env` 里把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`
    （用编辑器改，**不要 cat**）。
 2. **重建** backend 容器（路由在进程启动时注册）：
-   > ⚠️ 必须用 `up -d --force-recreate`，**不要用 `docker compose restart`**：
+   > ⚠️ 必须用 `up -d --force-recreate --no-build`，**不要用 `docker compose restart`**：
    > `restart` 只是把**既有容器**停掉再起，**不会重新读取 `env_file`** ——
    > 容器里仍是创建时烘进去的 `ENABLE_AGENT_ORCHESTRATION=false`，
    > 路由不会注册，下一步的 401 判据必然失败（且会把人引向错误的原因）。
+   > `--no-build` 保证这一步**只重建容器、不重建镜像**（镜像部署是阶段 2 的事；
+   > 少了它，离线机上可能触发一次构建尝试而失败，把 backend 带下去）。
    ```bash
-   docker compose up -d --force-recreate backend
+   docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+     up -d --force-recreate --no-build backend
    ```
-   （生产用 overlay 的机器上加 `-f docker-compose.yml -f docker-compose.centos.yml`。）
 
-   然后**把开关读回来确认它真的生效**：
+   然后**把开关读回来确认它真的生效**（只读**单个非敏感开关**，不 dump 整个环境）：
    ```bash
-   docker compose exec backend printenv ENABLE_AGENT_ORCHESTRATION   # 期望：true
+   docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+     exec backend printenv ENABLE_AGENT_ORCHESTRATION   # 期望：true
    ```
    输出不是 `true` ⇒ **停下排查**（多半是 env 文件没被重新读取），不要继续往下走。
 3. 启动 Worker（§3 的启动命令）：
@@ -252,8 +263,8 @@ docker compose ps | grep agent-orchestration   # 期望：无输出
      --profile agent-orchestration up -d agent-orchestration-worker
    ```
 4. 验收：
-   - `docker compose logs --tail 50 agent-orchestration-worker` 出现
-     `agent orchestration worker 启动（worker=... poll=2.0s lease=60s）`；
+   - `docker compose -f docker-compose.yml -f docker-compose.centos.yml logs --tail 50 agent-orchestration-worker`
+     出现 `agent orchestration worker 启动（worker=... poll=2.0s lease=60s）`；
    - 同一时间 `GET /api/v1/agent-orchestrations` 返回 **401**（路由已注册，只是没登录）
      —— 与阶段 3 的 404 形成对照，说明「flag 真的把路由打开了」。
 
@@ -332,10 +343,18 @@ python -m scripts.seed_agent_orchestration_menu
 生产由人手动执行，顺序与测试环境完全一致：
 
 1. 阶段 1（备份 + 迁移）→ 阶段 2（部署镜像）→ 阶段 3（验证默认关闭）；
-2. 生产 `docker/.env` 设 `ENABLE_AGENT_ORCHESTRATION=true` → **重建** backend 容器
-   （`docker compose up -d --force-recreate backend`；**不要用 `docker compose restart`**，
-   它不重读 `env_file`，开关不会生效）→ 再读回确认
-   `docker compose exec backend printenv ENABLE_AGENT_ORCHESTRATION` 输出 `true`；
+2. 生产 `docker/.env` 设 `ENABLE_AGENT_ORCHESTRATION=true` → **重建** backend 容器：
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+     up -d --force-recreate --no-build backend
+   ```
+   （**不要用 `docker compose restart`**，它不重读 `env_file`，开关不会生效；
+   `--no-build` 保证只重建容器、不重建镜像）→ 再读回确认（只读**单个非敏感开关**）：
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+     exec backend printenv ENABLE_AGENT_ORCHESTRATION
+   ```
+   输出 `true` 才继续；
 3. 启动 Worker（§3 命令）；
 4. 阶段 5 验收（**只跑一个只读 profile**）；
 5. 阶段 6 播种菜单 → 阶段 7 浏览器冒烟；
@@ -347,8 +366,8 @@ python -m scripts.seed_agent_orchestration_menu
 
 | 顺序 | 动作 | 期望结果 |
 |---|---|---|
-| 1 | 排空租约（§7）→ `docker compose ... --profile agent-orchestration stop agent-orchestration-worker` | Worker 退出，无悬挂租约 |
-| 2 | 生产 `docker/.env` 把 `ENABLE_AGENT_ORCHESTRATION` 改回 `false` → **重建** backend（`docker compose up -d --force-recreate backend`；**不能用 `restart`**，它不重读 `env_file`）→ 读回确认 `docker compose exec backend printenv ENABLE_AGENT_ORCHESTRATION` 输出 `false` | 新路由消失：`curl` 回到 **404** |
+| 1 | 排空租约（§7）→ `docker compose -f docker-compose.yml -f docker-compose.centos.yml --profile agent-orchestration stop agent-orchestration-worker` | Worker 退出，无悬挂租约 |
+| 2 | 生产 `docker/.env` 把 `ENABLE_AGENT_ORCHESTRATION` 改回 `false` → **重建** backend（`docker compose -f docker-compose.yml -f docker-compose.centos.yml up -d --force-recreate --no-build backend`；**不能用 `restart`**，它不重读 `env_file`）→ 读回确认（只读**单个非敏感开关**）`docker compose -f docker-compose.yml -f docker-compose.centos.yml exec backend printenv ENABLE_AGENT_ORCHESTRATION` 输出 `false` | 新路由消失：`curl` 回到 **404** |
 | 3 | 菜单行可保留（前端入口隐藏即可）；要彻底摘掉再执行 `DELETE FROM menu_config WHERE code IN ('item.agentOrchestration','item.agentTasks')` | — |
 | 4 | **不要** `alembic downgrade 0135` | 5 张表保留，历史 run/配置不丢 |
 | 5 | **不要**重新生成 `SECRET_KEY` | 见 §1 约束 6 |
@@ -357,7 +376,8 @@ python -m scripts.seed_agent_orchestration_menu
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://<host>:8000/api/v1/agent-runs   # 404
-docker compose ps | grep agent-orchestration                                   # 无
+docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+  ps | grep agent-orchestration                                               # 无
 ```
 
 ---
@@ -463,7 +483,7 @@ ORDER BY updated_time DESC;
    `ConstructorError`；解析 overlay 的脚本/测试要注册 `!override` 的
    multi-constructor（仓库里已有范例：`backend/app/tests/unit/test_compose_centos_overlay.py`）。
 4. **compose 自动派生的镜像名跨版本不同**（`qa-system-backend` vs `qa-system_backend`）：
-   离线部署一律以**目标机** `docker compose ... config --images` 的输出为准。
+   离线部署一律以**目标机** `docker compose -f docker-compose.yml -f docker-compose.centos.yml config --images` 的输出为准。
 5. **`config --images` 不带 `--profile` 时不含 Worker 镜像** ⇒ 离线包要单独补。
 6. **profile 里的变量插值照样会发生**：即使 profile 没激活，
    `${XXX:?}` 形式的必填变量缺失也会让 `config` 失败。
@@ -472,8 +492,15 @@ ORDER BY updated_time DESC;
    两边都要做，缺一个就是「看得见点不动」或「能调但没入口」。
 9. **`docker compose restart` 不重读 `env_file`**：它只把既有容器停掉再起，
    容器里的环境变量还是**创建时**烘进去的那份 ⇒ 改完 `.env` 的开关不会生效。
-   改 env 文件后的正确动作是 **`up -d --force-recreate <service>`**，
-   并用 `docker compose exec <service> printenv <VAR>` 读回确认。
+   改 env 文件后的正确动作是 **`up -d --force-recreate --no-build <service>`**
+   （沿用本手册统一的 `-f docker-compose.yml -f docker-compose.centos.yml` 参数），
+   然后**只读回那一个非敏感开关**确认：
+   `docker compose … exec <service> printenv <单个非敏感开关变量>`
+   —— 只读这一个变量，不要 dump 整个环境（见 §1 约束 7）。
+10. **重建容器 ≠ 重建镜像**：`--force-recreate` 只重新创建容器，
+    加上 `--no-build` 后**绝不触发镜像构建**（离线机上一次构建尝试会直接失败
+    并可能把 backend 带下去）。镜像的部署是**更早的阶段 2** 的事；
+    阶段 2 已经把镜像（含 Worker 镜像）放到目标机，重建阶段只复用它。
 
 ---
 
@@ -483,8 +510,9 @@ ORDER BY updated_time DESC;
       （优先在 `/admin/tools` 页面改；SQL 只是兜底路径）
 - [ ] 阶段 1：已备份；`alembic current = 0135`；5 张表在；既有表行数未变
 - [ ] 阶段 2：Worker 镜像已在目标机就位（名字与 `config --images` 一致）
-- [ ] 阶段 3：新路由 **404**；`docker compose ps` 无 Worker；旧契约不变
-- [ ] 阶段 4：backend 是 **重建**（`--force-recreate`）的，`printenv` 读回开关 = `true`；
+- [ ] 阶段 3：新路由 **404**；`docker compose … ps` 无 Worker；旧契约不变
+- [ ] 阶段 4：backend 是 **重建**（`--force-recreate --no-build`）的，
+      `printenv` 读回开关 = `true`；
       flag 打开后路由变 **401**（= 已注册）；Worker 日志出现「worker 启动」
 - [ ] 阶段 5：profile 可创建/启用；run 走完 `QUEUED→RUNNING→SUCCEEDED`；token 有计量
 - [ ] 阶段 6：前端路由 `/agent-orchestrations`、`/agent-tasks` 已上线；

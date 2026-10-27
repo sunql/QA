@@ -181,7 +181,7 @@ export interface AgentRunRead {
   costComplete: boolean;
   finalAnswer?: string | null;
   pauseCode?: PauseCode | null;
-  /** pauseDetail 的预算键为 iteration | tool | cost | time。 */
+  /** pauseDetail 只有一个 budget 键，其值标明被耗尽的预算：iteration | tool | cost | time。 */
   pauseDetail?: JsonObject | null;
   errorCode?: string | null;
   errorMessage?: string | null;

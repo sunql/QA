@@ -9,6 +9,19 @@
 #    上限是 2.27.1（Task 2 实测确认），够用。
 #
 # 依据 docs/superpowers/specs/2026-10-22-centos7-deployment-design.md
+#
+# ===== 通用 Agent 编排 Worker：本文件**不**定义它 =====
+# 编排 Worker（agent-orchestration-worker）定义在 docker-compose.yml 里，
+# 带 `profiles: [agent-orchestration]`。Compose 合并 `-f` 文件时，基础文件里
+# 的服务会被 overlay **继承**，所以 CentOS 生产自动继承同一条部署契约：
+#   - 默认不启动（profile 门控）：`up -d` 不会碰它；
+#   - 不发布宿主端口；
+#   - 不被 backend / frontend 拉起。
+# 刻意不在这里重复定义：重复定义就多一份漂移源（哪天这里少写 profiles，
+# 生产就会默认把 Worker 起起来 —— 那正是本次要防的事）。
+# 生产灰度启动命令（详见 Harness/changes/feat-agent-orchestration/deploy-gray-rollout.md）：
+#   docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+#     --profile agent-orchestration up -d agent-orchestration-worker
 
 services:
   # ===== 本地 LLM / embedding =====

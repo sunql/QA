@@ -1,0 +1,450 @@
+# 通用 Agent 编排：灰度上线手册（feat-agent-orchestration / Task 11）
+
+> **本文件是手册，不是脚本。** 所有生产操作（迁移、部署、起停 Worker、播种菜单）
+> 由人手动执行；本仓只交付「工件 + 手册」，不代跑任何生产命令。
+>
+> 关联变更：`feat-agent-orchestration`（本目录；SSOT summary 待本特性收尾时补齐）
+> · 任务书：`.superpowers/sdd/2026-10-26-general-agent-orchestration/task-11-brief.md`
+> · 迁移：`backend/alembic/versions/0135_agent_orchestration.py`（revision `0135`）
+> · 部署契约：`docker/docker-compose.yml` 里的 `agent-orchestration-worker` 服务
+> · 菜单脚本：`backend/scripts/seed_agent_orchestration_menu.py`
+
+---
+
+## 0. 一句话现状（先看这里）
+
+**今天没有任何工具可以被编排绑定。** 白名单里的 7 个只读工具
+`input_schema` 全是 `{}`，而编排的工具合法性判定
+（`app/services/agent_orchestration_validation.py::validateObjectSchema`）
+要求「根 `type="object"` + `properties` 是对象 + `additionalProperties` 为 false 或缺省」
+⇒ `{}` 不合法 ⇒ 7 个工具全部 `isOrchestrationToolValid == false`
+⇒ 创建编排配置时绑定工具会直接 422。
+
+所以**阶段 0（补 schema + 启用工具）必须先做完**，后面的阶段才有意义。
+
+---
+
+## 1. 硬约束（任何阶段都不得违反）
+
+| # | 约束 | 落在哪 |
+|---|---|---|
+| 1 | `ENABLE_AGENT_ORCHESTRATION` 默认 `false`；关闭 = 不注册新路由 **且** 不起 Worker | `backend/app/config.py`、`backend/app/main.py` |
+| 2 | Worker 只在显式 `--profile agent-orchestration` 时启动；**默认 `up` 永不包含它** | `docker/docker-compose.yml` |
+| 3 | Worker **不发布宿主端口**、**不被 API/前端 `depends_on` 拉起** | 同上 |
+| 4 | 编排只允许 7 个只读 handler：`supplier_360` / `supplier_risk` / `graph_traverse` / `wiki_search` / `wiki_read` / `rule_evaluate` / `coverage_status` | `READ_ONLY_HANDLER_REFS` |
+| 5 | 两个新菜单项**不进**默认 `seed_menu_config.ITEMS`（默认暴露 = 提前上线） | `backend/scripts/seed_menu_config.py` |
+| 6 | **绝不重新生成 `SECRET_KEY`**：它是 Fernet 主密钥，换新 = 5 个数据源密码 + 6 把 LLM key 永久不可解 | 运维红线 |
+| 7 | **绝不 `cat`/`print` `.env`**（含 `docker/.env`）；改配置用编辑器，验证用 `docker compose config` 的**服务名**而不是环境变量值 | 运维红线 |
+| 8 | 生产操作全部由人手动执行 | 本手册 |
+
+---
+
+## 2. 阶段 0：让工具「可绑定」（前置，最容易漏）
+
+### 2.1 实测现状（2026-10-27，开发库 `qa_metadata` 只读查询）
+
+| name | handler_ref | enabled | input_schema | 可绑定？ |
+|---|---|---|---|---|
+| `supplier_360` | supplier_360 | true | `{}` | ❌ schema 不合法 |
+| `supplier_risk` | supplier_risk | true | `{}` | ❌ schema 不合法 |
+| `graph_traverse` | graph_traverse | true | `{}` | ❌ schema 不合法 |
+| `wiki_search` | wiki_search | **false** | `{}` | ❌ schema 不合法 + 已禁用 |
+| `wiki_read` | wiki_read | **false** | `{}` | ❌ schema 不合法 + 已禁用 |
+| `rule_evaluate` | rule_evaluate | **false** | `{}` | ❌ schema 不合法 + 已禁用 |
+| `coverage_status` | coverage_status | **false** | `{}` | ❌ schema 不合法 + 已禁用 |
+
+> 复核命令（只读）：
+> ```sql
+> SELECT name, handler_ref, enabled, input_schema
+> FROM agent_tool_config ORDER BY name;
+> ```
+
+### 2.2 绑定一个工具必须做**两件事**（缺一不可）
+
+1. **写合法的 object schema**（下表三选一，必须与真实 handler 契约一致）；
+2. **把该工具 `enabled = true`**（当前 4 个是 false，即使 schema 合法也不可绑定）。
+
+### 2.3 参考 schema（与真实 handler 参数契约一致）
+
+`supplier_360` / `supplier_risk` / `graph_traverse` 的 handler 读 `args["key"]`（字符串）：
+
+```json
+{"type": "object", "properties": {"key": {"type": "string"}}, "additionalProperties": false}
+```
+
+`wiki_search` / `wiki_read` / `rule_evaluate` 的 handler 读 `args["query"]`（字符串）：
+
+```json
+{"type": "object", "properties": {"query": {"type": "string"}}, "additionalProperties": false}
+```
+
+`coverage_status` 是无参工具（handler 读 `args = {}`）：
+
+```json
+{"type": "object", "properties": {}}
+```
+
+> `additionalProperties: false` 是有意义的：编排侧 `validateToolArguments` 会**递归拒绝**
+> schema 未声明的键。写成 `"additionalProperties": true` 会被 `validateObjectSchema` 判不合格。
+>
+> 这些 schema 与线上「工具定义」页面（`/admin/tools`）维护的是同一张表
+> `agent_tool_config`（列：`name` / `handler_kind` / `handler_ref` / `enabled` / `input_schema`）。
+> 优先用页面改；用 SQL 改之前先备份该行。
+
+```sql
+-- 改 schema（示例：supplier_360）
+UPDATE agent_tool_config
+SET input_schema = '{"type":"object","properties":{"key":{"type":"string"}},"additionalProperties":false}'::jsonb,
+    enabled = true
+WHERE name = 'supplier_360';
+```
+
+### 2.4 验证
+
+```sql
+SELECT name, enabled, input_schema FROM agent_tool_config
+WHERE handler_ref IN ('supplier_360','supplier_risk','graph_traverse',
+                      'wiki_search','wiki_read','rule_evaluate','coverage_status');
+```
+
+判据：想绑定的那个工具 `enabled = true` 且 `input_schema` 形如 §2.3。
+再开 flag 后调用 `GET /api/v1/agent-orchestrations/tool-options`，
+该工具必须出现在返回列表里（该端点只列**当前有效**的工具）。
+
+---
+
+## 3. 部署契约（Worker 长什么样）
+
+| 项 | 值 |
+|---|---|
+| 服务名 | `agent-orchestration-worker`（容器名 `qa-agent-orchestration-worker`） |
+| profile | `agent-orchestration`（**只有**它 ⇒ 默认不启动） |
+| 镜像 | 与 `backend` 同源（同一 `docker/Dockerfile.backend` + 同一 build context），compose 自动派生名 `qa-system-agent-orchestration-worker`（compose 版本不同可能是下划线 `qa-system_agent-orchestration-worker`） |
+| 端口 | **无**（不发布宿主端口） |
+| 命令 | `python -m app.workers.agent_orchestration_worker`（覆盖镜像默认 CMD；Worker **不跑 alembic**，迁移由 backend 容器负责） |
+| 环境 | `env_file: .env` + `ENABLE_AGENT_ORCHESTRATION=true`（**覆盖** .env 里的同名变量） |
+| 依赖 | 与 backend 相同：`postgres` / `neo4j` / `milvus-standalone`（均 `service_healthy`） |
+| 重启策略 | `unless-stopped`（与 backend 一致） |
+| CentOS | **不在** `docker-compose.centos.yml` 里重复定义 —— overlay 合并时继承基础文件定义（含 `profiles`） |
+
+启动 / 停止命令（生产在 `docker/` 目录下执行，overlay 已合并）：
+
+```bash
+# 启动（仅此一条命令会带起 Worker）
+docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+  --profile agent-orchestration up -d agent-orchestration-worker
+
+# 优雅停止（SIGTERM：当前 run 跑完再退）
+docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+  --profile agent-orchestration stop agent-orchestration-worker
+```
+
+> ⚠️ **不要用 `docker kill -9`**：会留下悬挂租约（`lease_until` 未过期时别的 Worker 接不了）。
+> 停之前先做 §7 的租约排空检查。
+
+---
+
+## 4. 分阶段灰度序列
+
+每个阶段都有**进入条件**和**验收判据**；不满足不要进下一阶段。
+
+### 阶段 1：备份 + 迁移（flag 仍关闭）
+
+1. 备份（元数据库）：
+   ```bash
+   pg_dump -h <pg-host> -U <user> -d qa_metadata -Fc -f /backup/qa_metadata_$(date +%Y%m%d-%H%M).dump
+   ```
+   另存一份现有 `agent_tool_config`：
+   ```sql
+   COPY (SELECT * FROM agent_tool_config) TO '/tmp/agent_tool_config_backup.csv' CSV HEADER;
+   ```
+2. 迁移（由 backend 容器启动时的 `alembic upgrade head` 完成，或手工执行）：
+   ```bash
+   docker compose exec backend alembic upgrade head
+   docker compose exec backend alembic current   # 期望 0135
+   ```
+3. 新建 5 张表（**只增不改**既有表）：
+   `agent_orchestration_profile` / `agent_orchestration_binding` /
+   `agent_orchestration_run` / `agent_orchestration_step` / `agent_orchestration_usage`
+4. 验收：`alembic current` = `0135`；`\dt agent_orchestration*` 五张表都在；
+   **既有表行数没变**。
+
+> **回滚口径**：本阶段的回滚是「把 flag 保持关闭」，
+> **不是** `alembic downgrade` —— `0135` 的 downgrade 会 **DROP 这 5 张表**。
+> 表留着无害（没有路由就没有写入），留表回滚是本手册的既定口径。
+
+### 阶段 2：部署镜像
+
+1. 正常更新 backend 镜像（迁移在它启动时自动跑）。
+2. Worker 镜像：与 backend **同一份 Dockerfile/context**，内容等价。
+   离线机（CentOS，无外网、无构建机）做法二选一：
+   - **免重建**（推荐）：把已传输的 backend 镜像打一个 Worker 名的 tag
+     ```bash
+     docker tag qa-system-backend:latest qa-system-agent-orchestration-worker:latest
+     ```
+     tag 名必须与目标机 compose 解析出的名字一致 —— 以目标机
+     `docker compose --profile agent-orchestration config --images` 的输出为准
+     （不同 compose 版本可能是下划线）。
+   - **重新构建**（构建机上）：`docker compose --profile agent-orchestration build agent-orchestration-worker`，
+     再 `docker save` 进传输包。
+3. 注意：`docker compose config --images`（**不带** `--profile`）**不含** Worker 镜像
+   ⇒ 离线镜像包脚本（`backend/scripts/build_offline_images.py`）默认不会带它，
+   需要按上面第 2 步单独补进传输包。
+
+### 阶段 3：验证「默认仍然是关的」
+
+```bash
+# ① 新路由不存在 ⇒ 404（不是 401！路由没注册时不存在鉴权层）
+curl -s -o /dev/null -w '%{http_code}\n' http://<host>:8000/api/v1/agent-orchestrations
+curl -s -o /dev/null -w '%{http_code}\n' http://<host>:8000/api/v1/agent-runs
+
+# ② Worker 没起来
+docker compose ps | grep agent-orchestration   # 期望：无输出
+```
+
+验收判据：
+- 两条 curl 都是 **404**；
+- `docker compose ps` 里没有 Worker；
+- **旧契约不变**：`/api/v1/chat` 等既有端点行为与上线前一致（抽样比对关键返回）；
+- 菜单里没有「编排配置 / 编排任务」两项。
+
+> ⚠️ 判据必须是 404 而不是 401：路由未注册时请求不会进入鉴权依赖，
+> 用「没带 token 所以 401」当证据是典型的假绿。
+
+### 阶段 4：测试环境打开 flag + 起 Worker
+
+1. 在**测试环境**的 `docker/.env` 里把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`
+   （用编辑器改，**不要 cat**）。
+2. 重启 backend（路由在进程启动时注册）：
+   ```bash
+   docker compose restart backend
+   ```
+3. 启动 Worker（§3 的启动命令）：
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+     --profile agent-orchestration up -d agent-orchestration-worker
+   ```
+4. 验收：
+   - `docker compose logs --tail 50 agent-orchestration-worker` 出现
+     `agent orchestration worker 启动（worker=... poll=2.0s lease=60s）`；
+   - 同一时间 `GET /api/v1/agent-orchestrations` 返回 **401**（路由已注册，只是没登录）
+     —— 与阶段 3 的 404 形成对照，说明「flag 真的把路由打开了」。
+
+### 阶段 5：验收跑通
+
+1. `GET /api/v1/agent-orchestrations/tool-options`
+   → 期望能看到阶段 0 里准备好 schema 且 enabled 的工具（**至少 1 个**，
+   否则后面必然 422）。
+2. 建一个**只读** profile：
+   ```bash
+   curl -X POST http://<host>:8000/api/v1/agent-orchestrations \
+     -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+     -d '{"agentCode":"<agent_code>","instructions":"只读汇总，禁止任何写操作",
+          "toolNames":["supplier_360"]}'
+   ```
+   - profile 创建后是 **disabled**，需要显式启用：
+     `POST /api/v1/agent-orchestrations/<agent_code>/toggle`，body `{"enabled":true,"revision":1}`
+     （`revision` 是乐观锁，改过之后要用最新的）。
+3. 建一次 run：
+   ```bash
+   curl -X POST http://<host>:8000/api/v1/agent-runs \
+     -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+     -d '{"agentCode":"<agent_code>","input":"<问题>","modelConfigId":<id>}'
+   ```
+   → 期望 **202** + `{"run_id":"...","status":"QUEUED"}`。
+4. 验收清单：
+   - run 被 Worker 领走：`GET /api/v1/agent-runs/<run_id>` 状态从 `QUEUED` → `RUNNING` → `SUCCEEDED`；
+   - 轨迹：`GET /api/v1/agent-runs/<run_id>/steps` 有步骤记录；
+   - 计量：`promptTokens` / `completionTokens` / `totalTokens` > 0，
+     `costSource` 不得是 `UNKNOWN` 之外的糊弄值（`ESTIMATED` 需在验收记录里注明）；
+   - 只读性：本次 run 没有产生任何写操作（编排只允许白名单里的只读工具）。
+
+### 阶段 6：显式播种菜单（**唯一**的菜单入口）
+
+```bash
+cd backend
+python -m scripts.seed_agent_orchestration_menu
+```
+
+- 首次输出 `seed_agent_orchestration_menu: 2 rows inserted`；重复执行输出 `0 rows inserted`
+  （幂等：`on_conflict_do_nothing(index_elements=["code"])`）。
+- 播种内容（挂在 `section.aiAgent` 下，sort_order 140/150，不与既有 110/120/130 冲突）：
+
+  | code | label_key | icon_code | sort_order | path |
+  |---|---|---|---|---|
+  | `item.agentOrchestration` | `menu.item.agentOrchestration` | `appstore` | 140 | `/agent-orchestrations` |
+  | `item.agentTasks` | `menu.item.agentTasks` | `thunderbolt` | 150 | `/agent-tasks` |
+
+- 验证：
+  ```sql
+  SELECT c.code, c.path, c.sort_order, p.code AS parent
+  FROM menu_config c JOIN menu_config p ON p.id = c.parent_id
+  WHERE c.code IN ('item.agentOrchestration','item.agentTasks');
+  ```
+  → 两行，parent 均为 `section.aiAgent`。
+- **UI 优先**：已存在的行不会被覆盖（哪怕被菜单管理页改过 label/path/排序）。
+- 父菜单 `section.aiAgent` 不存在时脚本**直接报错**（不静默跳过）——
+  此时先跑 `python -m scripts.seed_menu_config`。
+- ⚠️ 默认菜单种子里**没有**这两项，所以新装库默认看不到入口（这是刻意的）。
+
+### 阶段 7：浏览器冒烟
+
+1. 登录 → 侧边栏「智能体」分组下出现「编排配置」「编排任务」两项；
+2. 点进去页面能打开（**无 500**），空态提示正常；
+3. 旧菜单项位置/图标没有被改动（父菜单分组与其它子项顺序不变）。
+
+### 阶段 8：生产启用（**需要审批**）
+
+生产由人手动执行，顺序与测试环境完全一致：
+
+1. 阶段 1（备份 + 迁移）→ 阶段 2（部署镜像）→ 阶段 3（验证默认关闭）；
+2. 生产 `docker/.env` 设 `ENABLE_AGENT_ORCHESTRATION=true` → 重启 backend；
+3. 启动 Worker（§3 命令）；
+4. 阶段 5 验收（**只跑一个只读 profile**）；
+5. 阶段 6 播种菜单 → 阶段 7 浏览器冒烟；
+6. 观察一个工作日：`agent_orchestration_run` 的状态分布、token 成本、失败原因。
+
+---
+
+## 5. 回滚手册（分钟级，不动数据）
+
+| 顺序 | 动作 | 期望结果 |
+|---|---|---|
+| 1 | 排空租约（§7）→ `docker compose ... --profile agent-orchestration stop agent-orchestration-worker` | Worker 退出，无悬挂租约 |
+| 2 | 生产 `docker/.env` 把 `ENABLE_AGENT_ORCHESTRATION` 改回 `false` → 重启 backend | 新路由消失：`curl` 回到 **404** |
+| 3 | 菜单行可保留（前端入口隐藏即可）；要彻底摘掉再执行 `DELETE FROM menu_config WHERE code IN ('item.agentOrchestration','item.agentTasks')` | — |
+| 4 | **不要** `alembic downgrade 0135` | 5 张表保留，历史 run/配置不丢 |
+| 5 | **不要**重新生成 `SECRET_KEY` | 见 §1 约束 6 |
+
+回滚后校验：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://<host>:8000/api/v1/agent-runs   # 404
+docker compose ps | grep agent-orchestration                                   # 无
+```
+
+---
+
+## 6. 相关接口清单（供冒烟/验收用）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/agent-orchestrations` | 建 profile（创建后默认 disabled） |
+| GET | `/api/v1/agent-orchestrations` | 列 profile |
+| GET | `/api/v1/agent-orchestrations/tool-options` | 列**当前有效**的编排工具（不含 handlerRef） |
+| GET/PUT | `/api/v1/agent-orchestrations/{agentCode}` | 查/改 profile（PUT 需带 `revision`） |
+| POST | `/api/v1/agent-orchestrations/{agentCode}/toggle` | 启停 profile（`enabled` + `revision`） |
+| POST | `/api/v1/agent-runs` | 建 run（202，QUEUED） |
+| GET | `/api/v1/agent-runs` / `/{runId}` / `/{runId}/steps` | 列/查/轨迹 |
+| POST | `/api/v1/agent-runs/{runId}/resume` | 恢复 PAUSED 的 run（按 pause_code 决定是否需要 `input`） |
+| POST | `/api/v1/agent-runs/{runId}/cancel` | 请求取消 |
+
+- 全部需要登录（`Depends(getCurrentUser)`）：**flag 关闭 ⇒ 404**；
+  **flag 开启但没带 token ⇒ 401**。两者含义完全不同，别混。
+- 编排不在 API 进程里跑：FastAPI 的 `BackgroundTasks` 一律不用，
+  执行体只在 Worker 进程里。
+
+---
+
+## 7. 停 Worker 前的租约排空检查
+
+Worker 领走一条 run 时会写 `lease_owner` / `lease_until`（租约默认 60s）。
+强杀进程会让这条 run 的租约悬挂，直到 `lease_until` 过期才有人能接手。
+
+```sql
+-- ① 正在跑的 run
+SELECT run_id, status, lease_owner, lease_until, updated_time
+FROM agent_orchestration_run
+WHERE status = 'RUNNING'
+ORDER BY updated_time;
+
+-- ② 租约已过期但状态还是 RUNNING 的（悬挂租约）
+SELECT run_id, lease_owner, lease_until
+FROM agent_orchestration_run
+WHERE status = 'RUNNING' AND lease_until < now();
+```
+
+排空判据：**① 的结果为空**（或只剩 ② 这类已被放弃的悬挂租约）。
+
+- 仍有 `RUNNING` 时：先等它自然结束（Worker 会续租），
+  或显式取消 `POST /api/v1/agent-runs/<run_id>/cancel` 再停。
+- `QUEUED` 的 run 不用管：Worker 下次启动会重新领（这是**期望行为**）。
+- 停完再确认一次：
+  ```sql
+  SELECT count(*) FROM agent_orchestration_run WHERE status = 'RUNNING';
+  ```
+
+---
+
+## 8. PAUSED / CANCELLED run 检查
+
+```sql
+-- ① 状态 × 暂停码分布
+SELECT status, pause_code, count(*)
+FROM agent_orchestration_run
+GROUP BY status, pause_code
+ORDER BY status, pause_code;
+
+-- ② 需要人工关注的 run
+SELECT run_id, agent_code, status, pause_code, pause_detail,
+       cancel_requested, lease_owner, updated_time
+FROM agent_orchestration_run
+WHERE status IN ('PAUSED','CANCELLED')
+ORDER BY updated_time DESC;
+```
+
+`pause_code` 语义与处置：
+
+| pause_code | 含义 | 处置 |
+|---|---|---|
+| `NEEDS_INPUT` | 缺输入 | `POST /{runId}/resume`，body 带 `input` |
+| `AMBIGUOUS` | 提问有歧义 | 同上，`input` 里补齐指代/范围 |
+| `PERMISSION_DENIED` | 复查 ACL 时权限不足 | 调整用户/角色的工具授权后再 resume |
+| `BUDGET_EXHAUSTED` | 预算耗尽 | resume 时用 `additionalIterations` / `additionalToolCalls` / `additionalCostUsd` / `additionalTimeoutSeconds` 放宽 |
+| `TOOL_FAILED` | 工具连续失败 | 先查工具自身可用性/schema，再 resume |
+| `PLANNER_OUTPUT_INVALID` | Planner 输出不合法 | 查 LLM 输出与提示词（可能需要换模型配置） |
+| `AGENT_UNAVAILABLE` | 绑定的 agent 不可用 | 恢复 agent / 模型配置后 resume |
+| `INFRASTRUCTURE_ERROR` | 基础设施异常（DB/LLM 连接） | 先恢复依赖，再 resume |
+
+- `CANCELLED` 的 run 应当 `cancel_requested = true`；
+  若出现「状态 CANCELLED 但仍占着租约」的 run，说明取消与执行有竞态，
+  按 §7 处理悬挂租约。
+- **恢复后要复查**：resume 会重新校验当前工具是否仍然合法
+  （阶段 0 改过 schema/enabled 之后，老 run 的工具快照可能已不匹配）。
+
+---
+
+## 9. 已知坑（提前知道，少走弯路）
+
+1. **`docker/.env` 不在仓库里**（gitignore）⇒ `docker compose config` 会直接报
+   “env file not found”。做配置校验时用一份**假的** `.env` + 假的必填环境变量，
+   不要打印真 `.env`。
+2. **`docker-compose.centos.yml` 是 overlay，不能单独 `config`**：
+   `mysql-demo` 只有在合并基础文件后才有 image/build ⇒ 必须
+   `-f docker-compose.yml -f docker-compose.centos.yml`。
+3. **overlay 里有 `!override` 标签** ⇒ `yaml.safe_load` 直接抛
+   `ConstructorError`；解析 overlay 的脚本/测试要注册 `!override` 的
+   multi-constructor（仓库里已有范例：`backend/app/tests/unit/test_compose_centos_overlay.py`）。
+4. **compose 自动派生的镜像名跨版本不同**（`qa-system-backend` vs `qa-system_backend`）：
+   离线部署一律以**目标机** `docker compose ... config --images` 的输出为准。
+5. **`config --images` 不带 `--profile` 时不含 Worker 镜像** ⇒ 离线包要单独补。
+6. **profile 里的变量插值照样会发生**：即使 profile 没激活，
+   `${XXX:?}` 形式的必填变量缺失也会让 `config` 失败。
+7. **不要 `alembic downgrade 0135`**：会 DROP 5 张表（回滚口径 = 停 Worker + 关 flag）。
+8. **菜单入口 ≠ 功能上线**：菜单是显式播种的，路由受 flag 控制 ——
+   两边都要做，缺一个就是「看得见点不动」或「能调但没入口」。
+
+---
+
+## 10. 上线检查清单
+
+- [ ] 阶段 0：目标工具 `input_schema` 合法 **且** `enabled = true`；`tool-options` 能看到它
+- [ ] 阶段 1：已备份；`alembic current = 0135`；5 张表在；既有表行数未变
+- [ ] 阶段 2：Worker 镜像已在目标机就位（名字与 `config --images` 一致）
+- [ ] 阶段 3：新路由 **404**；`docker compose ps` 无 Worker；旧契约不变
+- [ ] 阶段 4：flag 打开后路由变 **401**（= 已注册）；Worker 日志出现「worker 启动」
+- [ ] 阶段 5：profile 可创建/启用；run 走完 `QUEUED→RUNNING→SUCCEEDED`；token 有计量
+- [ ] 阶段 6：菜单脚本输出 `2 rows inserted`（首次）；SQL 查到两行挂在 `section.aiAgent`
+- [ ] 阶段 7：浏览器两项菜单可见可打开，无 500
+- [ ] 阶段 8：生产启用**已获审批**；观察期指标已安排
+- [ ] 回滚路径已演练：停 Worker（先排空租约）→ flag 关 → 新路由回到 404；表保留

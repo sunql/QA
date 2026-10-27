@@ -127,6 +127,14 @@ describe("api/agentOrchestrationApi — 运行", () => {
     expect(Object.prototype.hasOwnProperty.call(call[1].params, "offset")).toBe(false);
   });
 
+  it("listAgentRuns 发送 offset 分页参数", async () => {
+    httpMock.get.mockResolvedValue({ data: [] });
+    await listAgentRuns({ offset: 20 });
+    const call = httpMock.get.mock.calls[0];
+    expect(call[0]).toBe("/agent-runs");
+    expect(call[1].params).toEqual({ offset: 20 });
+  });
+
   it("listAgentRuns 无 filter 时不发送任何 query 值", async () => {
     httpMock.get.mockResolvedValue({ data: [] });
     await listAgentRuns();

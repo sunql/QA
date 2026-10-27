@@ -7,28 +7,19 @@ import type {
   AgentOrchestrationToolOptionRead,
   AgentRunCreate,
   AgentRunCreated,
+  AgentRunListFilters,
   AgentRunRead,
   AgentRunResume,
+  AgentRunStepQuery,
   AgentRunStepRead,
-  RunStatus,
 } from "../types/agentOrchestration";
 
 const ORCHESTRATION_PREFIX = "/agent-orchestrations";
 const RUN_PREFIX = "/agent-runs";
 
-/** 列表运行的可选过滤条件；未定义的项不会被发送。 */
-export interface AgentRunListFilters {
-  agentCode?: string;
-  status?: RunStatus;
-  limit?: number;
-  offset?: number;
-}
-
-/** 轨迹查询的可选参数；afterStepNo 为闭区间下界（step_no >= afterStepNo）。 */
-export interface AgentRunStepQuery {
-  afterStepNo?: number;
-  limit?: number;
-}
+// 查询参数类型定义在 types 模块（前后端契约集中地），这里再导出一次，
+// 便于调用方只从 api 模块 import 即可拿到完整签名。
+export type { AgentRunListFilters, AgentRunStepQuery };
 
 // ---------------------------------------------------------------------------
 // 编排配置
@@ -123,6 +114,13 @@ export async function getAgentRun(runId: string): Promise<AgentRunRead> {
   return res.data;
 }
 
+/**
+ * 查询运行轨迹。
+ *
+ * `query.afterStepNo` 是闭区间下界（`step_no >= afterStepNo`）：要只取比已持有的
+ * 最后一步更新的步骤，调用方必须传 `lastStepNo + 1`；直接传 `lastStepNo` 会把
+ * 最后一步重新取回，导致重复渲染。
+ */
 export async function getAgentRunSteps(
   runId: string,
   query?: AgentRunStepQuery,

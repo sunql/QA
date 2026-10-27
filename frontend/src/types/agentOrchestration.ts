@@ -130,6 +130,26 @@ export interface AgentRunResume {
   additionalTimeoutSeconds?: number;
 }
 
+/** 列出运行的可选过滤条件；未定义的项不会被发送。 */
+export interface AgentRunListFilters {
+  agentCode?: string;
+  status?: RunStatus;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * 轨迹查询的可选参数。
+ *
+ * `afterStepNo` 是**闭区间下界**（`step_no >= afterStepNo`）。要只取「比已持有的
+ * 最后一条更新」的步骤，调用方必须传 `lastStepNo + 1`——直接传 `lastStepNo`
+ * 会把最后一步重新取回，导致重复渲染。
+ */
+export interface AgentRunStepQuery {
+  afterStepNo?: number;
+  limit?: number;
+}
+
 /** POST /agent-runs 请求响应（202）。 */
 export interface AgentRunCreated {
   runId: string;
@@ -160,8 +180,8 @@ export interface AgentRunRead {
   /** false 且 costSource=UNKNOWN 表示成本从未被测量，不能当作已测总量展示。 */
   costComplete: boolean;
   finalAnswer?: string | null;
-  /** pauseDetail 的预算键为 iteration | tool | cost | time。 */
   pauseCode?: PauseCode | null;
+  /** pauseDetail 的预算键为 iteration | tool | cost | time。 */
   pauseDetail?: JsonObject | null;
   errorCode?: string | null;
   errorMessage?: string | null;

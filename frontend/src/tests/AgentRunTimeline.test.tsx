@@ -144,6 +144,15 @@ describe("AgentRunTimeline", () => {
     expect(container.textContent).toContain("<script>alert('x')</script>");
   });
 
+  it("JSON 无法序列化时降级为字符串，不抛异常", () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    renderTimeline({
+      steps: [makeStep({ stepNo: 5, kind: "TOOL", inputJson: circular })],
+    });
+    expect(screen.getByText("[object Object]")).toBeInTheDocument();
+  });
+
   it("没有步骤时展示空状态", () => {
     renderTimeline({ steps: [] });
     expect(screen.getByText("暂无执行轨迹")).toBeInTheDocument();

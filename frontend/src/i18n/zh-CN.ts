@@ -674,6 +674,8 @@ export const zhCN = {
       pauseReason: "暂停原因",
       cancelButton: "取消运行",
       cancelRequested: "已请求取消，运行仍在进行中，等待下一次轮询确认。",
+      runError: "运行失败：{message}",
+      runErrorCode: "错误码：{code}",
       resumeTitle: "恢复运行",
       resumeButton: "恢复运行",
       supplementaryInputLabel: "补充输入",

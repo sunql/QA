@@ -364,6 +364,108 @@ describe("AgentTaskPage", () => {
     expect(screen.queryByText("运行 ID：run-1")).toBeNull();
   });
 
+  it("运行级失败时展示后端的失败原因（没有 FAILED 步骤行时也不能吞掉诊断）", async () => {
+    api.getAgentRun.mockResolvedValue(
+      makeRun({
+        status: "FAILED",
+        errorCode: "PLANNER_OUTPUT_INVALID",
+        errorMessage: "规划器输出不合法：缺少 action",
+      }),
+    );
+    renderPage();
+    await flush();
+    await createRun();
+    await advance(RUN_POLL_MS);
+    expect(
+      screen.getByText("运行失败：规划器输出不合法：缺少 action"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("错误码：PLANNER_OUTPUT_INVALID")).toBeInTheDocument();
+  });
+
+  it("422 但后端没给诊断文案时给出通用校验提示", async () => {
+    api.createAgentRun.mockRejectedValue(
+      Object.assign(new Error(""), { status: 422 }),
+    );
+    renderPage();
+    await flush();
+    await createRun();
+    expect(screen.getByText("请求参数校验未通过")).toBeInTheDocument();
+  });
+
+  it("服务端返回 500 时展示带后端文案的操作失败提示", async () => {
+    api.createAgentRun.mockRejectedValue(
+      Object.assign(new Error("服务器内部错误"), { status: 500 }),
+    );
+    renderPage();
+    await flush();
+    await createRun();
+    expect(screen.getByText("操作失败：服务器内部错误")).toBeInTheDocument();
+  });
+
+  it("拒绝值不是 Error 对象时按网络异常处理，不抛未捕获异常", async () => {
+    api.createAgentRun.mockRejectedValue("socket hang up");
+    renderPage();
+    await flush();
+    await createRun();
+    expect(screen.getByText("网络异常，请稍后重试")).toBeInTheDocument();
+
+    api.createAgentRun.mockRejectedValue({ detail: "weird" });
+    await createRun();
+    expect(screen.getAllByText("网络异常，请稍后重试")).toHaveLength(1);
+  });
+
+  it("编排配置列表加载失败时展示错误提示", async () => {
+    api.listOrchestrations.mockRejectedValue(new Error("boom"));
+    renderPage();
+    await flush();
+    expect(screen.getByText("编排配置列表加载失败")).toBeInTheDocument();
+  });
+
+  it("模型列表加载失败时展示错误提示", async () => {
+    api.listModels.mockRejectedValue(new Error("boom"));
+    renderPage();
+    await flush();
+    expect(screen.getByText("模型列表加载失败")).toBeInTheDocument();
+  });
+
+  it("预算耗尽但后端没给预算明细时提示无法匹配预算增量", async () => {
+    api.getAgentRun.mockResolvedValue(
+      makeRun({ status: "PAUSED", pauseCode: "BUDGET_EXHAUSTED", pauseDetail: null }),
+    );
+    renderPage();
+    await flush();
+    await createRun();
+    await advance(RUN_POLL_MS);
+    expect(
+      screen.getByText("后端未返回预算明细，无法自动匹配预算增量"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /恢\s*复\s*运\s*行/ }));
+    await flush();
+    expect(api.resumeAgentRun).not.toHaveBeenCalled();
+  });
+
+  it("预算耗尽在 tool 上时提交的是追加工具调用次数", async () => {
+    api.getAgentRun.mockResolvedValue(
+      makeRun({
+        status: "PAUSED",
+        pauseCode: "BUDGET_EXHAUSTED",
+        pauseDetail: { budget: "tool" },
+      }),
+    );
+    renderPage();
+    await flush();
+    await createRun();
+    await advance(RUN_POLL_MS);
+    expect(screen.getByLabelText("追加工具调用次数")).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("spinbutton"), { target: { value: "5" } });
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: /恢\s*复\s*运\s*行/ }));
+    await flush();
+    expect(api.resumeAgentRun).toHaveBeenCalledWith("run-1", {
+      additionalToolCalls: 5,
+    });
+  });
+
   it("终态运行不再轮询，但仍然展示完整轨迹与最终结论", async () => {
     const step1 = makeStep({ stepNo: 1, kind: "TOOL", toolName: "supplier_risk" });
     const step2 = makeStep({ stepNo: 2, kind: "TOOL", toolName: "supplier_otsd" });

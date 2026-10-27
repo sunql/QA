@@ -675,6 +675,8 @@ export const enUS = {
       cancelButton: "Cancel Run",
       cancelRequested:
         "Cancellation requested; the run is still going, waiting for the next poll to confirm.",
+      runError: "Run failed: {message}",
+      runErrorCode: "Error code: {code}",
       resumeTitle: "Resume Run",
       resumeButton: "Resume Run",
       supplementaryInputLabel: "Supplementary Input",

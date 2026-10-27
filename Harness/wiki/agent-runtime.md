@@ -1,13 +1,16 @@
-# Agent 运行时总览（数据模型 / 管理面 / 两条执行路径 / chat 接入）
+# Agent 运行时总览（数据模型 / 管理面 / 三条执行路径 / chat 接入）
 
 > 2026-10-25 梳理自代码实读。定位：伞形文档——L4 循环细节见 [[agent-loop]]，
 > 工具双结构见 [[agent-tool-maintenance]]，NL2SQL 上下文见 [[nl2sql-engine]]。
+> 2026-10-28 增量：新增**第三条**执行路径（通用多工具编排，见路径 C）。
 
 ## 一句话定位
 
 **Agent = 「代码工具执行体（白名单）+ DB 元数据（免发版调暴露面）+
 deny-by-default 分层 ACL」的可注册调度单元**；运行时要么单工具直跑
-（显式指名 / 确定性意图），要么进 LLM 驱动的有界循环（L4），失败全线降级 NL2SQL。
+（显式指名 / 确定性意图），要么进 LLM 驱动的有界循环（L4），失败全线降级 NL2SQL；
+2026-10-28 起还有**第三条**独立路径——通用多工具编排（路径 C），它有自己的
+配置面、运行面与 Worker 进程，**默认关闭**，且**不从 chat 触发**。
 
 ## 1. 数据模型：Agent 不是一段代码，是一行注册元数据
 
@@ -33,7 +36,11 @@ deny-by-default 分层 ACL」的可注册调度单元**；运行时要么单工�
 - 装配校验三级白名单（handler_kind → handler_ref → arg_extractor_kind），
   详见 [[agent-tool-maintenance]]
 
-## 3. 运行面：两条执行路径
+## 3. 运行面：三条执行路径
+
+三条路径**彼此独立**：各自有入口、状态存储与生命周期，**互不调用**。
+路径 A / B 走 API 进程的同步链路；路径 C 走**独立 Worker 进程**（异步排队）。
+
 
 ### 路径 A —— 单工具直跑（`AgentRuntimeService.run`）
 
@@ -77,7 +84,37 @@ cost_cap / error`。关键细节：
   list_joins）+ SQL Guard 双层检查
 - 实现细节、prompt 预算策略、错误恢复表 → **[[agent-loop]]**
 
+### 路径 C —— 通用多工具编排（`AgentOrchestrationRunner` + 独立 Worker）
+
+`backend/app/services/agent_orchestration_runner.py` +
+`backend/app/workers/agent_orchestration_worker.py`（2026-10-28 新增，Phase 6.6）。
+
+**与路径 A / B 完全独立**——不是「把 L4 泛化」，而是**第三套运行面**：
+
+| 维度 | 路径 C 的做法 |
+|---|---|
+| 入口 | `POST /api/v1/agent-runs` → **202** + `QUEUED`（**不**从 `POST /agents/{code}/run` 进入，也**不**从 chat 触发） |
+| 执行体 | **独立 Worker 进程**（`python -m app.workers.agent_orchestration_worker`），FastAPI 的 `BackgroundTasks` 一律不用 |
+| 配置面 | 新表 `agent_orchestration_profile` / `agent_orchestration_binding`（一个 Agent 一份编排 profile + 工具绑定），**不改** `agent_definition` / `agent_tool_config` |
+| 工具集合 | **只读白名单 7 个 handler**（`supplier_360` / `supplier_risk` / `graph_traverse` / `wiki_search` / `wiki_read` / `rule_evaluate` / `coverage_status`），`READ_ONLY_HANDLER_REFS` 硬编码 |
+| 循环形态 | **Planner → 工具调用 → Observation** 的多步循环（`agent_orchestration_planner.py` + `agent_orchestration_tool_executor.py`），预算上限 `max_iterations` / `max_tool_calls` / `max_cost_usd` |
+| 状态 | `QUEUED` → `RUNNING` → `SUCCEEDED` / `FAILED` / `PAUSED` / `CANCELLED`；`PAUSED` 可 `resume`，租约（`lease_owner` / `lease_until`）防重复执行 |
+| 开关 | `ENABLE_AGENT_ORCHESTRATION` **默认 `false`** ⇒ **不注册新路由 且 不起 Worker**；Worker 只在 compose `--profile agent-orchestration` 时启动，**不发布宿主端口**、**不在 `depends_on`** 里 |
+
+**关键约束**：路径 C **复用**路径 A 的 ACL 与只读判定（`_enforcePolicies` 同一套
+deny-by-default 分层 ACL、同一套 `arg_extractor`），但**不复用**路径 B 的 L4 循环。
+旧 Agent 的既有行为**零变化**（`input_schema` 改动对 legacy 路径无副作用；
+`enabled` 是唯一影响行为的开关）。
+
+- 设计稿：`docs/superpowers/specs/2026-10-26-general-agent-orchestration-design.md`
+- 灰度手册：`Harness/changes/feat-agent-orchestration/deploy-gray-rollout.md`
+- 变更 SSOT：`Harness/changes/feat-agent-orchestration/summary.md`
+
 ## 4. chat 接入：Agent 的四个触发入口
+
+> **路径 C 不在此表内** —— 通用多工具编排**没有** chat 触发入口，
+> 只从 `POST /api/v1/agent-runs` 排队进入。
+
 
 `ChatService.processMessage`（`chat_service.py:463-493`）意图管线，优先级递减：
 
@@ -93,7 +130,9 @@ cost_cap / error`。关键细节：
 - **prompt 安全**：LLM 入口统一走 `prompt_sanitizer`（wrapUntrusted + security
   preamble，L1 注入防御，PR #43）
 - **DB 只读**：业务库连接 `_assert_read_only` 兜底（`business_db_pool`）
-- **计量**：两条路径 token/cost 全链路透传落台账（`_recordUsage`）
+- **计量**：路径 A / B token/cost 全链路透传落台账（`_recordUsage`）；路径 C 有**独立**的
+  `agent_orchestration_usage` 台账（run 级汇总 + 每步明细，`cost_source` 区分
+  `MEASURED` / `ESTIMATED` / `UNKNOWN` / `MIXED`）
 - **不可变**：`AgentToolContext` / `ToolResult` / `AgentTool` 均 frozen dataclass
 
 ## 关联文件
@@ -107,5 +146,13 @@ cost_cap / error`。关键细节：
 | 绑定 cache | `backend/app/services/agent_binding_cache.py` |
 | 语义路由 | `backend/app/services/agent_routing_service.py` |
 | chat 分发 | `backend/app/services/chat_service.py`（`_handleAgentRun` / `_maybeRunL4AgentLoop`） |
+| 编排配置面（路径 C） | `backend/app/services/agent_orchestration_config_service.py` |
+| 编排运行面（路径 C） | `backend/app/services/agent_orchestration_run_service.py` / `agent_orchestration_runner.py` / `agent_orchestration_runner_support.py` / `agent_orchestration_run_views.py` |
+| 编排 Planner / 工具执行（路径 C） | `backend/app/services/agent_orchestration_planner.py` / `agent_orchestration_tool_executor.py` |
+| 编排存储 / 计量（路径 C） | `backend/app/services/agent_orchestration_store.py` / `agent_orchestration_metering.py` / `agent_orchestration_cost.py` |
+| 编排模型 / 契约（路径 C） | `backend/app/domain/agent_orchestration_models.py` / `backend/app/domain/agent_orchestration_schemas.py` / `backend/app/services/agent_orchestration_types.py` / `agent_orchestration_validation.py` |
+| 编排 Worker（路径 C） | `backend/app/workers/agent_orchestration_worker.py` |
+| 编排 API（路径 C） | `backend/app/api/v1/agent_orchestrations.py` / `backend/app/api/v1/agent_runs.py` |
 | 工具维护手册 | [[agent-tool-maintenance]] |
 | L4 loop 细节 | [[agent-loop]] |
+| 编排变更 SSOT | [feat-agent-orchestration](../changes/feat-agent-orchestration/summary.md) |

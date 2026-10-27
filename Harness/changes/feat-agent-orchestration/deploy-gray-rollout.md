@@ -3,11 +3,13 @@
 > **本文件是手册，不是脚本。** 所有生产操作（迁移、部署、起停 Worker、播种菜单）
 > 由人手动执行；本仓只交付「工件 + 手册」，不代跑任何生产命令。
 >
-> 关联变更：`feat-agent-orchestration`（本目录；SSOT summary 待本特性收尾时补齐）
+> 关联变更：[feat-agent-orchestration](summary.md)（本目录；变更 SSOT）
 > · 任务书：`.superpowers/sdd/2026-10-26-general-agent-orchestration/task-11-brief.md`
+> · 设计稿：`docs/superpowers/specs/2026-10-26-general-agent-orchestration-design.md`
 > · 迁移：`backend/alembic/versions/0135_agent_orchestration.py`（revision `0135`）
 > · 部署契约：`docker/docker-compose.yml` 里的 `agent-orchestration-worker` 服务
 > · 菜单脚本：`backend/scripts/seed_agent_orchestration_menu.py`
+> · 验证报告：`docs/superpowers/plans/2026-10-26-general-agent-orchestration-verification.md`
 
 ---
 
@@ -20,7 +22,10 @@
 ⇒ `{}` 不合法 ⇒ 7 个工具全部 `isOrchestrationToolValid == false`
 ⇒ 创建编排配置时绑定工具会直接 422。
 
-所以**阶段 0（补 schema + 启用工具）必须先做完**，后面的阶段才有意义。
+所以**阶段 0（补 schema）必须先做完**，后面的阶段才有意义。
+
+> **第一波只补 schema，不翻 `enabled`** —— 翻 `enabled` 会改变 4 个既有 legacy Agent
+> 的可运行性，属于需要单独审批的后续波次（§2.5、§9 坑 12）。
 
 ---
 
@@ -36,6 +41,7 @@
 | 6 | **绝不重新生成 `SECRET_KEY`**：它是 Fernet 主密钥，换新 = 5 个数据源密码 + 6 把 LLM key 永久不可解 | 运维红线 |
 | 7 | **绝不 `cat`/`print` `.env`**（含 `docker/.env`）；改配置用编辑器，验证用 `docker compose config` 的**服务名**而不是环境变量值。唯一例外：读回**单个非敏感开关**（如 `docker compose … exec backend printenv ENABLE_AGENT_ORCHESTRATION`，沿用本手册统一的 `-f` 参数）—— 只读这一个变量，**不要 dump 整个环境**，更不涉及任何密钥/口令 | 运维红线 |
 | 8 | 生产操作全部由人手动执行 | 本手册 |
+| 9 | **阶段 0 第一波不翻 `agent_tool_config.enabled`** —— 只补 `input_schema`。翻 `enabled` 会让 4 个既有 legacy Agent 从 409 不可运行变为可执行（§2.5、§9 坑 12） | 本手册 §2.5 |
 
 ---
 
@@ -62,7 +68,12 @@
 ### 2.2 绑定一个工具必须做**两件事**（缺一不可）
 
 1. **写合法的 object schema**（下表三选一，必须与真实 handler 契约一致）；
-2. **把该工具 `enabled = true`**（当前 4 个是 false，即使 schema 合法也不可绑定）。
+2. **把该工具 `enabled = true`**（否则即使 schema 合法也不可绑定）。
+
+> ⚠️ **第 2 步不是无副作用的**：对某些工具，它会改变**既有** legacy Agent 的行为。
+> ⇒ **第一波（推荐）只做第 1 步** —— 只绑定三个**已经 `enabled = true`** 的工具
+> （`supplier_360` / `supplier_risk` / `graph_traverse`），**一个 `enabled` 开关都不要翻**。
+> 4 个 wiki 工具属于**后续波次**，需要**单独评估 + 单独审批**。详见 §2.5。
 
 ### 2.3 参考 schema（与真实 handler 参数契约一致）
 
@@ -96,7 +107,8 @@
 
 1. 打开 `/admin/tools`，找到目标工具（按 `name`）点「编辑」；
 2. 「输入 schema」填 §2.3 里对应的 JSON（`type` / `properties` / `additionalProperties`）；
-3. 勾选「启用」（= `enabled = true`）；
+3. **第一波：不要动「启用」开关**（三个目标工具本来就是已启用状态，保存 schema 即可）；
+   翻「启用」属于 §2.5 的**后续波次**，需要单独评估 + 单独审批；
 4. 保存后按 §2.4 复核（只读 SQL + `tool-options` 都要过）。
 
 #### 兜底 / 进阶：直接写 SQL
@@ -105,12 +117,14 @@
 `COPY (SELECT * FROM agent_tool_config) TO '/tmp/agent_tool_config_backup.csv' CSV HEADER;`）。
 
 ```sql
--- 改 schema（示例：supplier_360）
+-- 第一波：只改 schema，**不动 enabled**（示例：supplier_360）
 UPDATE agent_tool_config
-SET input_schema = '{"type":"object","properties":{"key":{"type":"string"}},"additionalProperties":false}'::jsonb,
-    enabled = true
+SET input_schema = '{"type":"object","properties":{"key":{"type":"string"}},"additionalProperties":false}'::jsonb
 WHERE name = 'supplier_360';
 ```
+
+> ⚠️ **不要在这一步顺手写 `enabled = true`** —— 那是 §2.5 的后续波次，
+> 会改变 4 个既有 legacy Agent 的可运行性。
 
 > ⚠️ SQL 路径绕过页面的校验与留痕，改完**必须**执行 §2.4 的复核，
 > 并把改动记进灰度验收记录。
@@ -123,9 +137,57 @@ WHERE handler_ref IN ('supplier_360','supplier_risk','graph_traverse',
                       'wiki_search','wiki_read','rule_evaluate','coverage_status');
 ```
 
-判据：想绑定的那个工具 `enabled = true` 且 `input_schema` 形如 §2.3。
-再开 flag 后调用 `GET /api/v1/agent-orchestrations/tool-options`，
-该工具必须出现在返回列表里（该端点只列**当前有效**的工具）。
+判据：
+
+- **第一波**：`supplier_360` / `supplier_risk` / `graph_traverse` 三行
+  `enabled` 仍是 `true`（**未被改动**）且 `input_schema` 形如 §2.3；
+- **同时**：`wiki_search` / `wiki_read` / `rule_evaluate` / `coverage_status`
+  四行的 `enabled` **仍然是 `false`**（没被顺手翻掉）；
+- 再开 flag 后调用 `GET /api/v1/agent-orchestrations/tool-options`，
+  上面三个工具必须出现在返回列表里（该端点只列**当前有效**的工具）。
+
+### 2.5 波次划分：第一波（只补 schema） vs 后续波次（翻 `enabled`）
+
+**为什么必须分波次。** 白名单里的 4 个 wiki 工具（`wiki_search` / `wiki_read` /
+`rule_evaluate` / `coverage_status`）当前 `enabled = false`，而它们**分别绑定在
+4 个 `status = active` 的既有 legacy Agent 上**（实测于 2026-10-28 开发库
+`qa_metadata` 只读查询）：
+
+| 被禁用的工具 | 绑定的既有 legacy Agent | Agent 状态 |
+|---|---|---|
+| `wiki_search` | id 6 `WIKI_SEARCH_AGENT` | active |
+| `wiki_read` | id 7 `WIKI_READ_AGENT` | active |
+| `rule_evaluate` | id 8 `WIKI_RULE_AGENT` | active |
+| `coverage_status` | id 9 `WIKI_COVERAGE_AGENT` | active |
+
+legacy 运行时解析绑定工具走 `AgentToolConfigRegistry`，它**只装载 `enabled = true`
+的行**（`backend/app/services/agent_tool_config_registry.py:33` 的 `warmUp`、
+`:79` 的 `reload_one`）；工具缺失或被禁用时抛
+`ConflictError(409 tool_unbound_or_disabled)`
+（`backend/app/services/agent_runtime_service.py:165-178`，其 docstring 明写
+「tool 不存在或被禁用 → ConflictError(409 tool_unbound_or_disabled)」）。
+
+⇒ 这 4 个 Agent **今天就是 409 不可运行**；把 `enabled` 翻成 `true` 会让它们
+**从「409 不可运行」变成「真的执行」** —— 这是对**既有功能**的行为变更，
+与本特性的底线「现有功能零行为变化」冲突。
+
+⇒ 而**只改 `input_schema` 对 legacy 路径是无副作用的**：
+`AgentToolAssembly.assemble` 只是把 `input_schema` 拷进描述符
+（`backend/app/services/agent_tools.py:281`），legacy 的入参来自 `arg_extractor`
+（`backend/app/services/agent_runtime_service.py:140`），编排模块之外没有生产代码读
+`input_schema`。**⇒ `enabled` 是唯一影响行为的开关。**
+
+**波次约定：**
+
+| 波次 | 动作 | 影响面 | 审批 |
+|---|---|---|---|
+| **第一波（推荐，本手册默认）** | 只给 `supplier_360` / `supplier_risk` / `graph_traverse` 补合法 schema；**一个 `enabled` 都不翻** | 既有 legacy 行为**零变化**（这三个工具本来就已启用，legacy 读的是 `arg_extractor`） | 随本特性的灰度审批 |
+| **后续波次（另行评估、另行审批）** | 翻 4 个 wiki 工具的 `enabled = true`，使其可被编排绑定 | **4 个既有 legacy Agent 从 409 不可运行变为可执行** —— 必须单独评估（ACL、prompt 面、输出质量）并单独审批 | **单独审批**；影响必须记进灰度验收记录 |
+
+> 后续波次的 SQL 形如
+> `UPDATE agent_tool_config SET enabled = true WHERE name = 'wiki_search';`
+> —— **本手册的阶段 0 不执行它**。要执行时，先按上表登记 4 个 Agent 的影响面，
+> 再走独立审批，并在灰度验收记录里逐个写明「从 409 → 可运行」。
 
 ---
 
@@ -235,11 +297,57 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
 验收判据：
 - 两条 curl 都是 **404**；
 - `docker compose ... ps` 里没有 Worker；
-- **旧契约不变**：`/api/v1/chat` 等既有端点行为与上线前一致（抽样比对关键返回）；
+- **旧契约不变**：`/api/v1/chat` 等既有端点行为与上线前一致（抽样比对关键返回）。
+  ⚠️ **这条成立的前提是阶段 0 只补了 schema、没有翻任何 `enabled`**（§2.5 第一波）。
+  如果有人提前翻了 4 个 wiki 工具的 `enabled`，4 个既有 legacy Agent 会从
+  「409 不可运行」变成「真的执行」⇒ **旧契约已变**，此时本判据**不成立**，
+  必须按 §2.5 走后续波次的单独评估与审批；
 - 菜单里没有「编排配置 / 编排任务」两项。
 
 > ⚠️ 判据必须是 404 而不是 401：路由未注册时请求不会进入鉴权依赖，
 > 用「没带 token 所以 401」当证据是典型的假绿。
+
+### 阶段 3.5：PRE-ENABLE CHECKLIST（把 `ENABLE_AGENT_ORCHESTRATION` 打开**之前**必须逐项关闭）
+
+> 本特性**出厂即关闭**（`ENABLE_AGENT_ORCHESTRATION` 默认 `false`，不注册新路由、不起 Worker）。
+> 下面三项由 `security-reviewer` 与 `code-reviewer` 共同提出（M1/M2/M3 = 安全 MEDIUM
+> M1/M2/M3；代码评审 M4/M10/M11），**两位评审一致要求：在生产把开关打开之前关闭**。
+> 任一项未关闭 ⇒ **不要**把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。
+
+- [ ] **P1 — 只读白名单的 TOCTOU（读-改-写竞态）**
+      白名单断言发生在 `prepare()` 读到的**第一份**行上
+      （`backend/app/services/agent_orchestration_tool_executor.py:90-91`：
+      `_loadEnabledToolConfig` + `_assertReadOnlyBuiltin`），而**真正被执行**的 handler
+      是从**第二次**读取装配出来的（`_resolveTool` → `registry.reload_one`，同文件 `:246`）。
+      两次读取之间如果管理员改了 `handler_ref`，断言过的行与执行的行就不是同一行。
+      **当前不可利用**（唯一不在白名单里的 handler `nl2sql_default` 是惰性占位符），
+      但**一旦把 NL2SQL 接进编排就会变成可利用路径**。
+      **关闭方式**：在**实际被执行的那一行**上重新断言只读白名单。
+
+- [ ] **P2 — 租约只在「轮边界」续**
+      `renewLease` 在整个仓库里**只被调用一次**，位于 `_safetyPoint`
+      （`backend/app/services/agent_orchestration_runner.py:156-168`，续租调用在 `:162`）；
+      编排路径的 LLM 客户端**没有显式 timeout**（`openai_client.py` 不传 `timeout`，
+      沿用 OpenAI SDK 默认读超时 600s），而租约默认 **60s**。
+      ⇒ 单轮规划慢于 60s 就会**丢租约** ⇒ `_recoverOneExpired` 重新排队 ⇒ 该轮**重做**
+      （重复 LLM 花费；`getOrCreatePlanStep` 复用 RUNNING 的 PLAN 行且**不**累加
+      `iteration_count`，所以 `max_iterations` 约束不到它）。
+      **写入侧是安全的**（所有写都走 `_lockLeasedRun`）。
+      **关闭方式**：给 LLM 调用设显式超时（小于租约），或把续租下沉到轮内。
+
+- [ ] **P3 — Planner 的工具目录无长度 / 数量上界**
+      `_buildMessages` / `_reduceToolCatalog`
+      （`backend/app/services/agent_orchestration_planner.py:371-410`）把工具目录原样拼进
+      system prompt；`agent_tool_config.description` 是**无界 `Text`**，
+      `tool_names` 也**没有元素个数上限**。
+      ⇒ 目录膨胀会直接推高每轮 prompt 成本与超窗风险。
+      **关闭方式**：给目录加元素数上限与描述长度截断（并在 `tool_names` 上加
+      `max_length`）。
+
+> 本清单**不要求**在本手册里改代码——它是**启用前的闸门**。
+> 若三项都无法在本轮灰度前关闭，处置口径是：**保持 `ENABLE_AGENT_ORCHESTRATION=false`**
+> （特性出厂即关，业务不受影响），把三项挂到变更记录的「已知限制」里，
+> 走独立变更再修。
 
 ### 阶段 4：测试环境打开 flag + 起 Worker
 
@@ -278,8 +386,11 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
 ### 阶段 5：验收跑通
 
 1. `GET /api/v1/agent-orchestrations/tool-options`
-   → 期望能看到阶段 0 里准备好 schema 且 enabled 的工具（**至少 1 个**，
+   → 期望能看到阶段 0 第一波准备好的**三个**工具
+   （`supplier_360` / `supplier_risk` / `graph_traverse`，**至少 1 个**，
    否则后面必然 422）。
+   ⚠️ **4 个 wiki 工具不应出现在这个列表里** —— 它们仍是 `enabled = false`，
+   除非已经走完 §2.5 的**后续波次单独审批**（那一波才允许它们出现）。
 2. 建一个**只读** profile：
    ```bash
    curl -X POST http://<host>:8000/api/v1/agent-orchestrations \
@@ -349,6 +460,7 @@ python -m scripts.seed_agent_orchestration_menu
 
 生产由人手动执行，顺序与测试环境完全一致：
 
+0. **阶段 3.5 的 PRE-ENABLE CHECKLIST 三项已逐项关闭**（缺一不可）；
 1. 阶段 1（备份 + 迁移）→ 阶段 2（部署镜像）→ 阶段 3（验证默认关闭）；
 2. 生产 `docker/.env` 设 `ENABLE_AGENT_ORCHESTRATION=true` → **重建** backend 容器：
    ```bash
@@ -512,13 +624,33 @@ ORDER BY updated_time DESC;
     compose 派生名与 backend 的**不同** ⇒ 启动前镜像必须已按**阶段 2** 就位
     （名字以目标机 `config --images` 为准）。带 `--no-build` 后，镜像缺失会**明确报错**
     而不是隐式构建一个来自当前 build context 的镜像。
+12. **「把工具启用一下」不是无副作用的**：现象 —— 阶段 0 顺手把
+    `wiki_search` / `wiki_read` / `rule_evaluate` / `coverage_status` 的 `enabled`
+    翻成 `true` 以便编排绑定，结果**4 个既有 legacy Agent**（`WIKI_SEARCH_AGENT` id 6 /
+    `WIKI_READ_AGENT` id 7 / `WIKI_RULE_AGENT` id 8 / `WIKI_COVERAGE_AGENT` id 9，
+    全部 `status = active`）的行为变了。为什么 —— legacy 运行时经
+    `AgentToolConfigRegistry` 解析绑定工具，它**只装载 `enabled = true` 的行**
+    （`backend/app/services/agent_tool_config_registry.py:33` warmUp、`:79` reload_one），
+    工具缺失/禁用时抛 `ConflictError(409 tool_unbound_or_disabled)`
+    （`backend/app/services/agent_runtime_service.py:165-178`）⇒ 这 4 个 Agent
+    **从「409 不可运行」变成「真的执行」**，是既有功能的行为变更。
+    **只改 `input_schema` 是无害的**（`AgentToolAssembly.assemble` 只把它拷进描述符，
+    legacy 入参来自 `arg_extractor`，编排模块之外没有生产代码读它）——
+    **⇒ `enabled` 是唯一影响行为的开关**。
+    怎么办 —— **第一波只补 schema**，只绑定本来就已启用的
+    `supplier_360` / `supplier_risk` / `graph_traverse`；4 个 wiki 工具留到
+    **后续波次**，单独评估 + 单独审批（§2.5）。
 
 ---
 
 ## 10. 上线检查清单
 
-- [ ] 阶段 0：目标工具 `input_schema` 合法 **且** `enabled = true`；`tool-options` 能看到它
-      （优先在 `/admin/tools` 页面改；SQL 只是兜底路径）
+- [ ] 阶段 0（**第一波：只补 schema，不翻 `enabled`**）：`supplier_360` / `supplier_risk` /
+      `graph_traverse` 的 `input_schema` 合法；它们的 `enabled` **仍是 `true`（未被动过）**；
+      4 个 wiki 工具的 `enabled` **仍是 `false`**；`tool-options` 能看到那三个工具
+      （优先在 `/admin/tools` 页面改；SQL 只是兜底路径）—— 详见 §2.5
+- [ ] 阶段 3.5：PRE-ENABLE CHECKLIST 三项（只读白名单 TOCTOU / 租约续租时机 /
+      Planner 工具目录无上界）**已逐项关闭**（缺一 ⇒ 保持 flag = `false`）
 - [ ] 阶段 1：已备份；`alembic current = 0135`；5 张表在；既有表行数未变
 - [ ] 阶段 2：Worker 镜像已在目标机就位（名字与 `config --images` 一致）
 - [ ] 阶段 3：新路由 **404**；`docker compose … ps` 无 Worker；旧契约不变

@@ -299,3 +299,133 @@ created_at / updated_at TIMESTAMPTZ
 
 迁移链：`0117 → b1ea6cb32588_run_state → 0118 → 0119 → 0120 → 0121`（**非**线性 0117→0118；
 `0118` 的 `down_revision` 是 hash 命名的 `b1ea6cb32588`）。生产库 head：`0121`（2026-10-13 部署冒烟实测）。
+
+## Phase 6.6 增量：通用多工具 Agent 编排
+
+**日期**：2026-10-28 · **变更**：[feat-agent-orchestration](../changes/feat-agent-orchestration/summary.md)
+· **Wiki**：[[agent-runtime]]
+
+**只新增，不改既有表**（设计稿 §2.2 的非回归底线）。既有 6 张 Agent 相关表
+（`agent_definition` / `agent_access_policy` / `agent_tool_config` / `agent_schedule` /
+`agent_run_log` / `session_token_usage`）**零改动**——编排配置与运行记录全部落在
+下面 5 张新表里。
+
+### agent_orchestration_profile（一个 Agent 一份编排配置）
+
+```
+id                     BIGINT PK
+agent_id               BIGINT FK → agent_definition.id (ON DELETE CASCADE)  -- UNIQUE
+instructions           TEXT NOT NULL         -- 编排指令（进 LLM 前过 prompt sanitizer）
+enabled                BOOLEAN NOT NULL DEFAULT false    -- 新建一律停用，需显式 toggle
+default_max_iterations INTEGER NOT NULL DEFAULT 20
+default_max_tool_calls INTEGER NOT NULL DEFAULT 30
+default_max_cost_usd   NUMERIC(16,8) NOT NULL DEFAULT 5
+default_timeout_seconds INTEGER NOT NULL DEFAULT 900
+max_observation_chars  INTEGER NOT NULL DEFAULT 50000
+revision               INTEGER NOT NULL DEFAULT 1        -- 乐观锁
+created_time / updated_time TIMESTAMPTZ
+```
+
+约束：`uq_agent_orchestration_profile_agent`（一个 Agent 只一份）、
+`ck_agent_orchestration_profile_limits`（各项上限 > 0 / 成本 ≥ 0）、
+`ck_agent_orchestration_profile_revision`（`revision >= 1`）。
+
+### agent_orchestration_binding（profile ↔ 工具绑定）
+
+```
+id            BIGINT PK
+profile_id    BIGINT FK → agent_orchestration_profile.id (ON DELETE CASCADE)
+tool_name     VARCHAR(64) NOT NULL       -- 指向 agent_tool_config.name
+enabled       BOOLEAN NOT NULL DEFAULT true
+sort_order    INTEGER NOT NULL DEFAULT 0
+```
+
+约束：`uq_agent_orchestration_binding_tool`（`profile_id` + `tool_name` 唯一）、
+`ck_agent_orchestration_binding_sort_order`（`sort_order >= 0`）。
+**表里不存 handler_ref** —— handler 一律从 `agent_tool_config` 现读，杜绝动态 handler 注入。
+
+### agent_orchestration_run（一次编排运行）
+
+```
+run_id                  VARCHAR(36) NOT NULL   -- UNIQUE，外部标识
+agent_id / agent_code   BIGINT / VARCHAR(64)   -- agent_id 可空（Agent 被删后历史仍在）
+profile_revision        INTEGER NOT NULL       -- 快照用的 profile 版本
+instructions_snapshot   TEXT NOT NULL          -- 指令快照
+tool_bindings_snapshot  JSONB NOT NULL         -- 工具绑定快照（执行时按它约束）
+max_observation_chars   INTEGER NOT NULL
+question                TEXT NOT NULL
+created_by              VARCHAR(64) NOT NULL
+model_config_id         BIGINT NOT NULL
+status                  VARCHAR(32) NOT NULL DEFAULT 'QUEUED'
+max_iterations / max_tool_calls INTEGER NOT NULL
+max_cost_usd            NUMERIC(16,8) NOT NULL
+timeout_seconds         INTEGER NOT NULL
+iteration_count / tool_call_count / prompt_tokens / completion_tokens / total_tokens INTEGER NOT NULL DEFAULT 0
+cost                    NUMERIC(20,8) NOT NULL DEFAULT 0
+cost_source             VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'   -- MEASURED/ESTIMATED/UNKNOWN/MIXED
+cost_complete           BOOLEAN NOT NULL DEFAULT false
+final_answer            TEXT                   -- 可空
+pause_code              VARCHAR(64)            -- 可空：暂停原因
+pause_detail            JSONB                  -- 可空
+error_code / error_message                       -- 可空
+cancel_requested        BOOLEAN NOT NULL DEFAULT false
+lease_owner / lease_until                        -- Worker 租约（可空）
+revision                INTEGER NOT NULL DEFAULT 1
+queued_at / started_at / finished_at TIMESTAMPTZ
+created_time / updated_time TIMESTAMPTZ
+```
+
+索引：`uq_agent_orchestration_run_run_id`（`run_id` 唯一）、
+`ix_agent_orchestration_run_status_id`（`status`,`id`——Worker 扫描队列用）、
+`ix_agent_orchestration_run_creator_time`（`created_by`,`created_time`——「我的运行」列表）、
+`ix_agent_orchestration_run_agent_time`（`agent_id`,`created_time`）。
+
+### agent_orchestration_step（运行的轨迹）
+
+```
+id            BIGINT PK
+run_id        BIGINT FK → agent_orchestration_run.id (ON DELETE CASCADE)
+step_no       INTEGER NOT NULL        -- 全局递增序号
+iteration_no  INTEGER NOT NULL        -- 第几轮
+kind          VARCHAR(32) NOT NULL    -- PLAN / TOOL
+status        VARCHAR(32) NOT NULL DEFAULT 'RUNNING'   -- RUNNING/SUCCEEDED/FAILED/SKIPPED
+action        VARCHAR(32)             -- 可空：CALL_TOOL / FINISH / ASK_USER
+plan_summary / answer TEXT            -- 可空
+tool_name     VARCHAR(64)             -- 可空
+input_json / output_json JSONB        -- 可空
+error_code / error_message            -- 可空
+prompt_tokens / completion_tokens INTEGER NOT NULL DEFAULT 0
+cost          NUMERIC(20,8) NOT NULL DEFAULT 0
+started_at    TIMESTAMPTZ NOT NULL
+finished_at   TIMESTAMPTZ             -- 可空
+```
+
+索引：`ix_agent_orchestration_step_run_step`（`run_id`,`step_no`）。
+
+### agent_orchestration_usage（计量台账）
+
+```
+id              BIGINT PK
+run_id          BIGINT FK → agent_orchestration_run.id (ON DELETE CASCADE)
+step_id         BIGINT FK → agent_orchestration_step.id (ON DELETE SET NULL)  -- 可空
+caller_type     VARCHAR(32) NOT NULL    -- PLANNER / TOOL
+model_config_id BIGINT NOT NULL
+model_name      VARCHAR(50) NOT NULL
+prompt_tokens / completion_tokens INTEGER NOT NULL DEFAULT 0
+cached_tokens   INTEGER                 -- 可空
+cost            NUMERIC(20,8) NOT NULL DEFAULT 0
+cost_source     VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'
+call_status     VARCHAR(32) NOT NULL    -- SUCCEEDED / OUTPUT_INVALID / FAILED
+request_time    TIMESTAMPTZ NOT NULL
+```
+
+### 迁移文件
+
+- `alembic/versions/0135_agent_orchestration.py` — 建 5 张表 + 4 个索引（**28 字符**，≤ 32 约束内）
+  - revision `0135`，`down_revision = "0134"`（线性接在 `0134_data_layer_rule` 之后）
+  - **downgrade 会 DROP 这 5 张表** ⇒ 回滚口径是「停 Worker + 关 flag」，**不做 downgrade**（见灰度手册 §5）
+
+**已知缺口（不阻塞上线，但要记账）**：
+
+- `(run_id, iteration_no, kind)` **没有** DB 级唯一索引（靠应用层保证幂等）；
+- `agent_orchestration_usage` **没有** `run_id` 索引（用量台账按 run 聚合时会全表扫）。

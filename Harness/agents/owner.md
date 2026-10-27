@@ -43,7 +43,7 @@
 - [nl2sql-engine](../wiki/nl2sql-engine.md) - Prompt 策略 + SQL Guard（4 层路由）
 - [model-router](../wiki/model-router.md) - 路由算法与成本模型
 - [agent-loop](../wiki/agent-loop.md) - L4 Agent Loop（纯 Python async while loop，非 LangGraph）
-- [agent-runtime](../wiki/agent-runtime.md) - Agent 运行时总览（数据模型 / 管理面 / 两条执行路径 / chat 触发入口）
+- [agent-runtime](../wiki/agent-runtime.md) - Agent 运行时总览（数据模型 / 管理面 / 三条执行路径 / chat 触发入口）
 - [chart-rendering](../wiki/chart-rendering.md) - ECharts 生成规则
 - [metric-pipeline](../wiki/metric-pipeline.md) - 复杂指标管线（CTE 派生 / 冷指标晋升）
 - [chat-service-assessment](../wiki/chat-service-assessment.md) - Chat 服务 SSOT 评估（§2.4 LOW / §15 残差 SSOT）
@@ -59,6 +59,7 @@
 
 ### 变更 `changes/`
 - [_template/summary.md](../changes/_template/summary.md) - 变更 SSOT 模板
+- [feat-agent-orchestration](../changes/feat-agent-orchestration/summary.md) - 通用多工具 Agent 编排（Phase 6.6；第三条执行路径 + 迁移 0135 + 默认关闭 + 灰度手册）
 - **近 30 天热点（按 SSOT 性质）**：
   - [2026-09-30-chat-session-restore](../changes/2026-09-30-chat-session-restore/summary.md) - 刷新恢复上次会话（分渠道指针 + 挂载回放）+ 会话归属守卫铺到 6 个端点（守卫归属查询改按渠道并集）
   - [chore-magic-number-governance](../changes/chore-magic-number-governance/summary.md) - 魔数治理 Phase 2 15/15（0087 easy + 0088 medium + 0089 hard）

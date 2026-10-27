@@ -122,3 +122,78 @@ axios 超时**两层**，别顺手调齐（2026-10-23 定，2026-10-24 加例外
 **硬约束**：nginx `proxy_read_timeout=300s` 是上限，280s 是留余量；守卫测试 `ontologyBatchApiTimeout.test.ts` 锁定各调用值，新增长操作调用必须加进去。
 
 **运维语义**：axios 超时 ≠ 后端停止——操作还在跑，超时后**别重试**，先刷新看结果；「网络异常，请稍后重试」文案 = status=0 专有（前端掐断），后端 4xx/5xx 不显示它。
+
+## 通用 Agent 编排 UI（feat-agent-orchestration）
+
+**日期**：2026-10-28 · **变更**：[feat-agent-orchestration](../changes/feat-agent-orchestration/summary.md)
+· **Wiki**：[[agent-runtime]]
+
+### 路由
+
+| 路径 | 组件 | 说明 |
+|------|------|------|
+| `/agent-orchestrations` | `pages/AgentOrchestrationPage.tsx` | 编排配置列表 + 新建/编辑弹窗 + 启停 |
+| `/agent-tasks` | `pages/AgentTaskPage.tsx` | 编排任务（run）列表 + 创建 run + 时间线 + 恢复/取消 |
+
+路由在 `src/App.tsx:115-116` **无条件注册**（见下方「已知限制」）。
+
+### 轮询模型（任务页）
+
+```typescript
+// src/components/agent/task/useAgentRunTracker.ts
+export const RUN_POLL_MS = 2000;              // 固定 2s 一跳
+
+const afterStepNo = lastStepNoRef.current + 1;  // 闭区间下界 ⇒ 只取增量
+const [read, incoming] = await Promise.all([
+  getAgentRun(runId),
+  getAgentRunSteps(runId, { afterStepNo }),
+]);
+```
+
+要点：
+
+- `afterStepNo` 是**闭区间下界**（后端返回 `step_no >= afterStepNo`）⇒ 每次传
+  `lastStepNo + 1`，**绝不重取最后一步**。
+- 只在 `QUEUED` / `RUNNING` 时轮询；进入终态或 `PAUSED` 停轮询（终态再补拉一次快照）。
+- 用 `setTimeout` 递归（不是 `setInterval`），避免慢请求叠请求。
+- **代次机制**：每次 effect 重启换一代次，旧定时器链即使晚一拍恢复也因代次不匹配
+  而不再续期 ⇒ 不会出现两条并行的轮询链。
+- **404 ⇒ 停止轮询，绝不伪造一个终态运行出来**（`onMissing` → `setPollStopped(true)`）。
+- 拉取用 `Promise.all` 并行取「run 快照 + 增量步骤」。
+
+### 错误文案分流
+
+`src/components/agent/task/errors.ts` 的 `describeError` **只按 HTTP status 分流**：
+
+| status | 文案键 |
+|---|---|
+| 404 | `agentTask.messages.runNotFound` |
+| 403 | `agentTask.messages.forbidden` |
+| 409 | `agentTask.messages.conflict` |
+| 422 | `agentTask.messages.validationFailed`（带 detail）/ `…Generic` |
+| `undefined` / `0` | `agentTask.messages.networkError`（= 前端掐断） |
+
+> **不要用 `AppError.code` 判别**：后端对所有 DomainError 都返回 `code = "UNKNOWN"`。
+> `AppError.message` 的取值优先级 = 响应 `detail` 对象里的 `message` → 响应体**顶层
+> `error`** → axios 兜底文案（`src/api/client.ts` 的 `normalizeError`）。
+> ⚠️ `normalizeError` 这条「抬升顶层 `error`」是本特性**对共享模块的改动**，
+> 超出设计稿 §9.3 允许的前端范围 —— 已记在变更 SSOT §4。
+
+### 特性关闭时的降级
+
+后端 `ENABLE_AGENT_ORCHESTRATION=false` ⇒ 编排路由**不注册** ⇒ API 返回 **404**：
+
+- 任务页：404 ⇒ 停止轮询，提示「运行不存在」（**不会**伪装成已结束）；
+- 配置页：列表加载 404 ⇒ 显示「编排配置列表加载失败」。
+
+### 已知限制（前端）
+
+- **两条路由无条件注册**（不进 feature flag）⇒ 特性关闭时页面仍可打开，只是数据接口 404。
+  没有专门的「特性未启用」页面态。
+- **系统上限硬编码在前端**（20 / 30 / 5 USD / 900 / 1000-50000），而
+  `backend/app/config.py` 允许用环境变量覆盖 ⇒ 覆盖过的部署会出现 UI 边界漂移
+  （服务端仍按 `assertWithinSystemCeilings` 兜底）。
+- `errorStatus` / `errorDetailText` 在
+  `pages/AgentOrchestrationPage.tsx` 与 `components/agent/task/errors.ts` **逐字重复**。
+- `useResumeControls.ts` 的 `resumeRun` **吞掉自身异常** ⇒ 恢复被拒（409/422）时
+  `form.reset()` 仍会执行，用户填的内容丢失。

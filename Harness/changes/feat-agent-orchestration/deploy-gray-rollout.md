@@ -34,7 +34,7 @@
 | 4 | 编排只允许 7 个只读 handler：`supplier_360` / `supplier_risk` / `graph_traverse` / `wiki_search` / `wiki_read` / `rule_evaluate` / `coverage_status` | `READ_ONLY_HANDLER_REFS` |
 | 5 | 两个新菜单项**不进**默认 `seed_menu_config.ITEMS`（默认暴露 = 提前上线） | `backend/scripts/seed_menu_config.py` |
 | 6 | **绝不重新生成 `SECRET_KEY`**：它是 Fernet 主密钥，换新 = 5 个数据源密码 + 6 把 LLM key 永久不可解 | 运维红线 |
-| 7 | **绝不 `cat`/`print` `.env`**（含 `docker/.env`）；改配置用编辑器，验证用 `docker compose config` 的**服务名**而不是环境变量值 | 运维红线 |
+| 7 | **绝不 `cat`/`print` `.env`**（含 `docker/.env`）；改配置用编辑器，验证用 `docker compose config` 的**服务名**而不是环境变量值。唯一例外：读回**单个非敏感开关** `docker compose exec backend printenv ENABLE_AGENT_ORCHESTRATION`（不涉及任何密钥/口令） | 运维红线 |
 | 8 | 生产操作全部由人手动执行 | 本手册 |
 
 ---
@@ -89,7 +89,20 @@
 >
 > 这些 schema 与线上「工具定义」页面（`/admin/tools`）维护的是同一张表
 > `agent_tool_config`（列：`name` / `handler_kind` / `handler_ref` / `enabled` / `input_schema`）。
-> 优先用页面改；用 SQL 改之前先备份该行。
+
+#### 首选：走 UI（`/admin/tools`「工具定义」页）
+
+与 seed 脚本的「UI 优先」纪律一致 —— 页面上改的值就是权威值，不会被任何脚本覆盖。
+
+1. 打开 `/admin/tools`，找到目标工具（按 `name`）点「编辑」；
+2. 「输入 schema」填 §2.3 里对应的 JSON（`type` / `properties` / `additionalProperties`）；
+3. 勾选「启用」（= `enabled = true`）；
+4. 保存后按 §2.4 复核（只读 SQL + `tool-options` 都要过）。
+
+#### 兜底 / 进阶：直接写 SQL
+
+页面改不了、或要批量改时再用。**用之前先备份该行**（阶段 1 已给出备份命令：
+`COPY (SELECT * FROM agent_tool_config) TO '/tmp/agent_tool_config_backup.csv' CSV HEADER;`）。
 
 ```sql
 -- 改 schema（示例：supplier_360）
@@ -98,6 +111,9 @@ SET input_schema = '{"type":"object","properties":{"key":{"type":"string"}},"add
     enabled = true
 WHERE name = 'supplier_360';
 ```
+
+> ⚠️ SQL 路径绕过页面的校验与留痕，改完**必须**执行 §2.4 的复核，
+> 并把改动记进灰度验收记录。
 
 ### 2.4 验证
 
@@ -215,10 +231,21 @@ docker compose ps | grep agent-orchestration   # 期望：无输出
 
 1. 在**测试环境**的 `docker/.env` 里把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`
    （用编辑器改，**不要 cat**）。
-2. 重启 backend（路由在进程启动时注册）：
+2. **重建** backend 容器（路由在进程启动时注册）：
+   > ⚠️ 必须用 `up -d --force-recreate`，**不要用 `docker compose restart`**：
+   > `restart` 只是把**既有容器**停掉再起，**不会重新读取 `env_file`** ——
+   > 容器里仍是创建时烘进去的 `ENABLE_AGENT_ORCHESTRATION=false`，
+   > 路由不会注册，下一步的 401 判据必然失败（且会把人引向错误的原因）。
    ```bash
-   docker compose restart backend
+   docker compose up -d --force-recreate backend
    ```
+   （生产用 overlay 的机器上加 `-f docker-compose.yml -f docker-compose.centos.yml`。）
+
+   然后**把开关读回来确认它真的生效**：
+   ```bash
+   docker compose exec backend printenv ENABLE_AGENT_ORCHESTRATION   # 期望：true
+   ```
+   输出不是 `true` ⇒ **停下排查**（多半是 env 文件没被重新读取），不要继续往下走。
 3. 启动 Worker（§3 的启动命令）：
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.centos.yml \
@@ -251,10 +278,12 @@ docker compose ps | grep agent-orchestration   # 期望：无输出
      -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
      -d '{"agentCode":"<agent_code>","input":"<问题>","modelConfigId":<id>}'
    ```
-   → 期望 **202** + `{"run_id":"...","status":"QUEUED"}`。
+   → 期望 **202** + `{"runId":"...","status":"QUEUED"}`
+   （`AgentRunCreated` 是 CamelModel，字段序列化成 **camelCase**：`runId` / `status`；
+   找 `run_id` 是找不到的）。
 4. 验收清单：
-   - run 被 Worker 领走：`GET /api/v1/agent-runs/<run_id>` 状态从 `QUEUED` → `RUNNING` → `SUCCEEDED`；
-   - 轨迹：`GET /api/v1/agent-runs/<run_id>/steps` 有步骤记录；
+   - run 被 Worker 领走：`GET /api/v1/agent-runs/<runId>` 状态从 `QUEUED` → `RUNNING` → `SUCCEEDED`；
+   - 轨迹：`GET /api/v1/agent-runs/<runId>/steps` 有步骤记录；
    - 计量：`promptTokens` / `completionTokens` / `totalTokens` > 0，
      `costSource` 不得是 `UNKNOWN` 之外的糊弄值（`ESTIMATED` 需在验收记录里注明）；
    - 只读性：本次 run 没有产生任何写操作（编排只允许白名单里的只读工具）。
@@ -303,7 +332,10 @@ python -m scripts.seed_agent_orchestration_menu
 生产由人手动执行，顺序与测试环境完全一致：
 
 1. 阶段 1（备份 + 迁移）→ 阶段 2（部署镜像）→ 阶段 3（验证默认关闭）；
-2. 生产 `docker/.env` 设 `ENABLE_AGENT_ORCHESTRATION=true` → 重启 backend；
+2. 生产 `docker/.env` 设 `ENABLE_AGENT_ORCHESTRATION=true` → **重建** backend 容器
+   （`docker compose up -d --force-recreate backend`；**不要用 `docker compose restart`**，
+   它不重读 `env_file`，开关不会生效）→ 再读回确认
+   `docker compose exec backend printenv ENABLE_AGENT_ORCHESTRATION` 输出 `true`；
 3. 启动 Worker（§3 命令）；
 4. 阶段 5 验收（**只跑一个只读 profile**）；
 5. 阶段 6 播种菜单 → 阶段 7 浏览器冒烟；
@@ -316,7 +348,7 @@ python -m scripts.seed_agent_orchestration_menu
 | 顺序 | 动作 | 期望结果 |
 |---|---|---|
 | 1 | 排空租约（§7）→ `docker compose ... --profile agent-orchestration stop agent-orchestration-worker` | Worker 退出，无悬挂租约 |
-| 2 | 生产 `docker/.env` 把 `ENABLE_AGENT_ORCHESTRATION` 改回 `false` → 重启 backend | 新路由消失：`curl` 回到 **404** |
+| 2 | 生产 `docker/.env` 把 `ENABLE_AGENT_ORCHESTRATION` 改回 `false` → **重建** backend（`docker compose up -d --force-recreate backend`；**不能用 `restart`**，它不重读 `env_file`）→ 读回确认 `docker compose exec backend printenv ENABLE_AGENT_ORCHESTRATION` 输出 `false` | 新路由消失：`curl` 回到 **404** |
 | 3 | 菜单行可保留（前端入口隐藏即可）；要彻底摘掉再执行 `DELETE FROM menu_config WHERE code IN ('item.agentOrchestration','item.agentTasks')` | — |
 | 4 | **不要** `alembic downgrade 0135` | 5 张表保留，历史 run/配置不丢 |
 | 5 | **不要**重新生成 `SECRET_KEY` | 见 §1 约束 6 |
@@ -372,7 +404,7 @@ WHERE status = 'RUNNING' AND lease_until < now();
 排空判据：**① 的结果为空**（或只剩 ② 这类已被放弃的悬挂租约）。
 
 - 仍有 `RUNNING` 时：先等它自然结束（Worker 会续租），
-  或显式取消 `POST /api/v1/agent-runs/<run_id>/cancel` 再停。
+  或显式取消 `POST /api/v1/agent-runs/<runId>/cancel` 再停。
 - `QUEUED` 的 run 不用管：Worker 下次启动会重新领（这是**期望行为**）。
 - 停完再确认一次：
   ```sql
@@ -438,16 +470,22 @@ ORDER BY updated_time DESC;
 7. **不要 `alembic downgrade 0135`**：会 DROP 5 张表（回滚口径 = 停 Worker + 关 flag）。
 8. **菜单入口 ≠ 功能上线**：菜单是显式播种的，路由受 flag 控制 ——
    两边都要做，缺一个就是「看得见点不动」或「能调但没入口」。
+9. **`docker compose restart` 不重读 `env_file`**：它只把既有容器停掉再起，
+   容器里的环境变量还是**创建时**烘进去的那份 ⇒ 改完 `.env` 的开关不会生效。
+   改 env 文件后的正确动作是 **`up -d --force-recreate <service>`**，
+   并用 `docker compose exec <service> printenv <VAR>` 读回确认。
 
 ---
 
 ## 10. 上线检查清单
 
 - [ ] 阶段 0：目标工具 `input_schema` 合法 **且** `enabled = true`；`tool-options` 能看到它
+      （优先在 `/admin/tools` 页面改；SQL 只是兜底路径）
 - [ ] 阶段 1：已备份；`alembic current = 0135`；5 张表在；既有表行数未变
 - [ ] 阶段 2：Worker 镜像已在目标机就位（名字与 `config --images` 一致）
 - [ ] 阶段 3：新路由 **404**；`docker compose ps` 无 Worker；旧契约不变
-- [ ] 阶段 4：flag 打开后路由变 **401**（= 已注册）；Worker 日志出现「worker 启动」
+- [ ] 阶段 4：backend 是 **重建**（`--force-recreate`）的，`printenv` 读回开关 = `true`；
+      flag 打开后路由变 **401**（= 已注册）；Worker 日志出现「worker 启动」
 - [ ] 阶段 5：profile 可创建/启用；run 走完 `QUEUED→RUNNING→SUCCEEDED`；token 有计量
 - [ ] 阶段 6：前端路由 `/agent-orchestrations`、`/agent-tasks` 已上线；
       菜单脚本输出 `2 rows inserted`（首次）；SQL 查到两行挂在 `section.aiAgent`

@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import shutil
@@ -298,25 +297,39 @@ def test_centos_merged_config_keeps_worker_opt_in(composeWorkspace: Path):
     assert worker["build"] == mergedProfile["services"]["backend"]["build"]
 
 
-def test_default_compose_config_is_valid(profileConfig):
-    """默认 config 必须能被 compose 正常渲染（不靠 skip 掩盖解析失败）。"""
+def test_default_compose_config_is_valid(defaultConfig):
+    """**默认**（不带 `--profile`）config 必须能被 compose 正常渲染。
+
+    这里用的是 `defaultConfig` 而不是 `profileConfig`：本用例校验的是
+    **默认部署**的渲染结果，渲染失败时 fixture 会直接失败（不是 skip）。
+    """
     if not _dockerComposeAvailable():
         pytest.skip("docker compose 不可用，有效形状断言无法执行")
-    assert "backend" in profileConfig["services"]
-    assert "frontend" in profileConfig["services"]
+    services = defaultConfig["services"]
+    assert "backend" in services
+    assert "frontend" in services
+    # 默认渲染里不该有 Worker（profile 门控生效）；这条与
+    # test_default_config_excludes_worker_service 互为「默认 vs 带 profile」对照。
+    assert WORKER_SERVICE not in services, (
+        f"默认 config 里出现了 Worker：{sorted(services)}"
+    )
 
 
 # ----------------------------------------------------------------------
 # 3. 菜单种子脚本契约
 # ----------------------------------------------------------------------
 def _loadSeedModule() -> Any:
-    """按路径加载 seed 脚本模块（脚本不在 app 包里）。"""
-    path = REPO_ROOT / "backend" / "scripts" / "seed_agent_orchestration_menu.py"
-    spec = importlib.util.spec_from_file_location("seed_agent_orchestration_menu", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    """加载 seed 脚本模块。
+
+    刻意用**包路径**导入（`scripts.seed_agent_orchestration_menu`），不用
+    `importlib` 按文件路径加载：按路径加载会让同一份源码在 `sys.modules` 里
+    出现两个身份（`seed_agent_orchestration_menu` 与
+    `scripts.seed_agent_orchestration_menu`），集成测试 monkeypatch 的正是后者，
+    两份模块互不可见 ⇒ monkeypatch 不生效（假绿/假红都可能）。
+    """
+    from scripts import seed_agent_orchestration_menu
+
+    return seed_agent_orchestration_menu
 
 
 def test_orchestration_seed_declares_exactly_two_items():

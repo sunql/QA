@@ -110,6 +110,19 @@ class OrchestrationPauseError(Exception):
         self.detail = detail or {}
 
 
+class LeaseLostError(Exception):
+    """控制流异常：租约已丢失或 run 已被取消。
+
+    Runner 捕获后必须立即停止当前 run 的工作且**不写入任何状态**。它刻意不继承
+    ``OrchestrationPauseError``：租约丢失是 Worker 侧并发事实，绝不能变成用户
+    可见的暂停（也不该触发 Planner 纠正）。
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class PlannerProtocolError(Exception):
     pass
 

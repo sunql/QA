@@ -39,7 +39,11 @@ function errorStatus(error: unknown): number | undefined {
   return error instanceof Error ? (error as StatusError).status : undefined;
 }
 
-/** 取后端给出的诊断文本（AppError.message 来自响应 detail.message）。 */
+/**
+ * 取后端给出的诊断文本。
+ * AppError.message 的来源优先级：响应 detail 对象里的 message → 响应体顶层 error
+ * → axios 兜底文案（见 api/client.ts 的 normalizeError）。
+ */
 function errorDetailText(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;

@@ -3,7 +3,10 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { MemoryRouter } from "react-router-dom";
 import { App, ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
+import type { AxiosError } from "axios";
 import AgentOrchestrationPage from "../pages/AgentOrchestrationPage";
+import { normalizeError } from "../api/client";
+import type { ApiResponse } from "../types/common";
 import type { AgentDefinition } from "../types/agentRegistry";
 import type {
   AgentOrchestrationProfileRead,
@@ -140,6 +143,17 @@ function profileRow(agentCode: string): HTMLElement {
 async function findProfileRow(agentCode: string): Promise<HTMLElement> {
   await waitFor(() => expect(profileRow(agentCode)).toBeTruthy());
   return profileRow(agentCode);
+}
+
+/** 构造 axios 形状的错误（后端 ErrorResponse：业务文案在顶层 error）。 */
+function axiosLikeError(
+  status: number,
+  data: Record<string, unknown>,
+): AxiosError<ApiResponse<unknown>> {
+  return {
+    response: { status, data },
+    message: `Request failed with status code ${status}`,
+  } as unknown as AxiosError<ApiResponse<unknown>>;
 }
 
 async function fillCreateForm(instructions: string): Promise<void> {
@@ -359,8 +373,10 @@ describe("AgentOrchestrationPage", () => {
 
   it("更新返回 422 → 展示具体校验原因，而非通用失败文案", async () => {
     orchestrationApi.listOrchestrations.mockResolvedValue([existingProfile]);
+    // 走真实传输路径：错误文案放在响应体顶层 error（后端 ErrorResponse 的形状），
+    // 由 normalizeError 提取；手写 Error("中文") 会让用例与真实链路脱节。
     orchestrationApi.updateOrchestration.mockRejectedValue(
-      Object.assign(new Error("工具不存在：tool_x"), { status: 422 }),
+      normalizeError(axiosLikeError(422, { success: false, error: "工具不存在：tool_x", detail: null })),
     );
     renderPage();
     const row = await findProfileRow(AGENT_CODE);

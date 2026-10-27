@@ -213,10 +213,16 @@ class AgentOrchestrationToolExecutor:
         session: AsyncSession,
         toolName: str,
     ) -> AgentTool:
+        """Reload from the current row, then resolve the tool.
+
+        Admin edits do not invalidate the shared registry cache, so the cached
+        ``AgentTool`` may be stale (for example after a ``handler_ref`` change).
+        Reloading unconditionally keeps the read-only gate (evaluated on the
+        freshly loaded config row) and the executed/ACL-checked tool derived
+        from that same current row.
+        """
+        await self._registry.reload_one(session, toolName)
         tool = self._registry.get(toolName)
-        if tool is None:
-            await self._registry.reload_one(session, toolName)
-            tool = self._registry.get(toolName)
         if tool is None:
             raise _unavailable()
         return tool

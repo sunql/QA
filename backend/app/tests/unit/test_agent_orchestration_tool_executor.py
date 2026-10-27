@@ -226,10 +226,19 @@ class _FakeGuard:
 
 
 class _FakeRegistry:
-    """In-memory tool registry double (no DB access)."""
+    """In-memory tool registry double (no DB access).
 
-    def __init__(self, tools: dict[str, AgentTool]) -> None:
+    ``reloadTools`` simulates re-assembly from the current DB row: entries
+    replace whatever stale tool was cached under the same name.
+    """
+
+    def __init__(
+        self,
+        tools: dict[str, AgentTool],
+        reloadTools: dict[str, AgentTool] | None = None,
+    ) -> None:
         self._tools = dict(tools)
+        self._reloadTools = dict(reloadTools or {})
         self.reloadCalls: list[str] = []
 
     def get(self, name: str):
@@ -237,6 +246,8 @@ class _FakeRegistry:
 
     async def reload_one(self, session, name) -> None:  # noqa: ARG002
         self.reloadCalls.append(name)
+        if name in self._reloadTools:
+            self._tools[name] = self._reloadTools[name]
 
 
 def _build(
@@ -244,18 +255,28 @@ def _build(
     state: _State | None = None,
     tools: dict[str, AgentTool] | None = None,
     guard: _FakeGuard | None = None,
-) -> tuple[AgentOrchestrationToolExecutor, _State, _FakeSession, _FakeGuard, _FakeRegistry]:
+    reloadTools: dict[str, AgentTool] | None = None,
+) -> tuple[
+    AgentOrchestrationToolExecutor,
+    _State,
+    _FakeSession,
+    _FakeGuard,
+    _FakeRegistry,
+    AsyncMock,
+]:
     state = state or _State()
     guard = guard or _FakeGuard()
+    handler = AsyncMock(return_value=ToolResult(data={"ok": True}, answer="ok"))
     registry = _FakeRegistry(
-        tools if tools is not None else {_TOOL_NAME: _tool()}
+        tools if tools is not None else {_TOOL_NAME: _tool(handler=handler)},
+        reloadTools=reloadTools,
     )
     executor = AgentOrchestrationToolExecutor(
         executionGuard=guard,
         toolRegistry=registry,
         runtime=AgentRuntimeService(registry=registry),
     )
-    return executor, state, _FakeSession(state), guard, registry
+    return executor, state, _FakeSession(state), guard, registry, handler
 
 
 def _prepare(executor, session, run=None):
@@ -273,7 +294,7 @@ class TestPrepareSuccess:
     @pytest.mark.asyncio
     async def test_prepare_returns_frozen_prepared_tool_without_calling_handler(self):
         handler = AsyncMock(return_value=ToolResult(data={"ok": True}, answer="ok"))
-        executor, _, session, guard, _ = _build(
+        executor, _, session, guard, _, _ = _build(
             tools={_TOOL_NAME: _tool(handler=handler)}
         )
 
@@ -291,7 +312,7 @@ class TestPrepareSuccess:
     async def test_invoke_is_the_only_handler_call_site(self):
         result = ToolResult(data={"hit": 1}, answer="found")
         handler = AsyncMock(return_value=result)
-        executor, _, session, _, _ = _build(tools={_TOOL_NAME: _tool(handler=handler)})
+        executor, _, session, _, _, _ = _build(tools={_TOOL_NAME: _tool(handler=handler)})
         prepared = await _prepare(executor, session)
         context = AgentToolContext(actor="orchestration")
 
@@ -309,13 +330,47 @@ class TestPrepareSuccess:
     async def test_guard_runs_before_any_state_load(self):
         guard = _FakeGuard()
         guard.error = OrchestrationPauseError("BUDGET_EXHAUSTED", "budget exhausted")
-        executor, _, session, _, _ = _build(guard=guard)
+        executor, _, session, _, _, handler = _build(guard=guard)
 
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
 
         assert excInfo.value.code == "BUDGET_EXHAUSTED"
         assert session.queries == []
+        assert handler.await_count == 0
+
+
+class TestCurrentToolResolution:
+    """The executed tool must come from the current row, not a stale cache."""
+
+    @pytest.mark.asyncio
+    async def test_reloads_and_executes_current_config_over_stale_cached_tool(self):
+        staleResult = ToolResult(data={"stale": True}, answer="stale")
+        currentResult = ToolResult(data={"current": True}, answer="current")
+        staleHandler = AsyncMock(return_value=staleResult)
+        currentHandler = AsyncMock(return_value=currentResult)
+        # Simulates a cache entry assembled from an older handler_ref:
+        # different data object/layers that this Agent is not authorized for.
+        stale = _tool(
+            handler=staleHandler,
+            data_layers=("FEATURE",),
+            data_object="SUPPLIER",
+        )
+        current = _tool(handler=currentHandler)
+        executor, _, session, _, registry, _ = _build(
+            tools={_TOOL_NAME: stale},
+            reloadTools={_TOOL_NAME: current},
+        )
+
+        prepared = await _prepare(executor, session)
+        context = AgentToolContext(actor="orchestration")
+        invoked = await executor.invoke(session, prepared, context)
+
+        assert registry.reloadCalls == [_TOOL_NAME]
+        assert prepared.tool is current
+        assert invoked is currentResult
+        assert currentHandler.await_count == 1
+        assert staleHandler.await_count == 0
 
 
 class TestPlannerMistakes:
@@ -323,13 +378,14 @@ class TestPlannerMistakes:
 
     @pytest.mark.asyncio
     async def test_tool_absent_from_run_snapshot_is_planner_error(self):
-        executor, _, session, _, _ = _build()
+        executor, _, session, _, _, handler = _build()
         with pytest.raises(PlannerProtocolError):
             await _prepare(executor, session, run=_runRow(snapshot=[]))
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_schema_mismatch_is_planner_error(self):
-        executor, _, session, _, _ = _build()
+        executor, _, session, _, _, handler = _build()
         with pytest.raises(PlannerProtocolError):
             await executor.prepare(
                 session=session,
@@ -339,10 +395,11 @@ class TestPlannerMistakes:
                 leaseOwner="worker-1",
                 now=datetime(2026, 10, 27, tzinfo=UTC),
             )
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_unknown_argument_key_is_planner_error(self):
-        executor, _, session, _, _ = _build()
+        executor, _, session, _, _, handler = _build()
         with pytest.raises(PlannerProtocolError, match="arguments"):
             await executor.prepare(
                 session=session,
@@ -352,17 +409,19 @@ class TestPlannerMistakes:
                 leaseOwner="worker-1",
                 now=datetime(2026, 10, 27, tzinfo=UTC),
             )
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_invalid_current_schema_is_planner_error(self):
         state = _State(toolConfig=_toolConfig(input_schema={}))
-        executor, _, session, _, _ = _build(state=state)
+        executor, _, session, _, _, handler = _build(state=state)
         with pytest.raises(PlannerProtocolError):
             await _prepare(executor, session)
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_planner_error_does_not_leak_argument_values(self):
-        executor, _, session, _, _ = _build()
+        executor, _, session, _, _, handler = _build()
         secret = "supplier-秘密-100001"
         with pytest.raises(PlannerProtocolError) as excInfo:
             await executor.prepare(
@@ -374,6 +433,7 @@ class TestPlannerMistakes:
                 now=datetime(2026, 10, 27, tzinfo=UTC),
             )
         assert secret not in str(excInfo.value)
+        assert handler.await_count == 0
 
 
 class TestCurrentStateLoss:
@@ -381,89 +441,99 @@ class TestCurrentStateLoss:
 
     @pytest.mark.asyncio
     async def test_missing_agent_pauses(self):
-        executor, _, session, _, _ = _build(state=_State(agent=None))
+        executor, _, session, _, _, handler = _build(state=_State(agent=None))
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "AGENT_UNAVAILABLE"
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_non_active_agent_pauses(self):
-        executor, _, session, _, _ = _build(
+        executor, _, session, _, _, handler = _build(
             state=_State(agent=_agent(status=AgentStatus.DRAFT.value))
         )
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "AGENT_UNAVAILABLE"
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_missing_profile_pauses(self):
-        executor, _, session, _, _ = _build(state=_State(profile=None))
+        executor, _, session, _, _, handler = _build(state=_State(profile=None))
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "AGENT_UNAVAILABLE"
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_disabled_profile_pauses(self):
-        executor, _, session, _, _ = _build(
+        executor, _, session, _, _, handler = _build(
             state=_State(profile=_profile(enabled=False))
         )
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "AGENT_UNAVAILABLE"
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_missing_current_binding_pauses(self):
-        executor, _, session, _, _ = _build(state=_State(binding=None))
+        executor, _, session, _, _, handler = _build(state=_State(binding=None))
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "AGENT_UNAVAILABLE"
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_disabled_binding_pauses(self):
-        executor, _, session, _, _ = _build(
+        executor, _, session, _, _, handler = _build(
             state=_State(binding=_binding(enabled=False))
         )
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "AGENT_UNAVAILABLE"
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_missing_tool_config_pauses(self):
-        executor, _, session, _, _ = _build(state=_State(toolConfig=None))
+        executor, _, session, _, _, handler = _build(state=_State(toolConfig=None))
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "AGENT_UNAVAILABLE"
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_disabled_tool_config_pauses(self):
-        executor, _, session, _, _ = _build(
+        executor, _, session, _, _, handler = _build(
             state=_State(toolConfig=_toolConfig(enabled=False))
         )
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "AGENT_UNAVAILABLE"
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_non_builtin_handler_pauses(self):
-        executor, _, session, _, _ = _build(
+        executor, _, session, _, _, handler = _build(
             state=_State(toolConfig=_toolConfig(handler_kind="NL2SQL"))
         )
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "AGENT_UNAVAILABLE"
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_handler_ref_removed_from_whitelist_pauses(self):
-        executor, _, session, _, _ = _build(
+        executor, _, session, _, _, handler = _build(
             state=_State(toolConfig=_toolConfig(handler_ref="nl2sql_default"))
         )
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "AGENT_UNAVAILABLE"
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_tool_missing_from_registry_pauses(self):
-        executor, _, session, _, _ = _build(tools={})
+        executor, _, session, _, _, _ = _build(tools={})
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "AGENT_UNAVAILABLE"
@@ -472,7 +542,7 @@ class TestCurrentStateLoss:
     async def test_handler_is_never_called_on_state_loss(self):
         handler = AsyncMock(return_value=ToolResult(data={}, answer="never"))
         state = _State(toolConfig=_toolConfig(enabled=False))
-        executor, _, session, _, _ = _build(
+        executor, _, session, _, _, _ = _build(
             state=state, tools={_TOOL_NAME: _tool(handler=handler)}
         )
         with pytest.raises(OrchestrationPauseError):
@@ -486,7 +556,7 @@ class TestAclDenial:
     @pytest.mark.asyncio
     async def test_deny_by_default_pauses_with_permission_denied(self):
         handler = AsyncMock(return_value=ToolResult(data={}, answer="never"))
-        executor, _, session, _, _ = _build(
+        executor, _, session, _, _, _ = _build(
             state=_State(agent=_agent(policies=[])),
             tools={_TOOL_NAME: _tool(handler=handler)},
         )
@@ -508,11 +578,12 @@ class TestAclDenial:
                 ),
             ]
         )
-        executor, _, session, _, _ = _build(state=_State(agent=agent))
+        executor, _, session, _, _, handler = _build(state=_State(agent=agent))
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "PERMISSION_DENIED"
         assert "FORBIDDEN" not in excInfo.value.message
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_historical_lowercase_forbidden_layer_is_enforced(self):
@@ -524,15 +595,16 @@ class TestAclDenial:
                 ),
             ]
         )
-        executor, _, session, _, _ = _build(state=_State(agent=agent))
+        executor, _, session, _, _, handler = _build(state=_State(agent=agent))
         with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
         assert excInfo.value.code == "PERMISSION_DENIED"
+        assert handler.await_count == 0
 
     @pytest.mark.asyncio
     async def test_wildcard_layer_read_allows_layered_tool(self):
         agent = _agent(policies=[_policy(data_layer=None)])
-        executor, _, session, _, _ = _build(
+        executor, _, session, _, _, _ = _build(
             state=_State(agent=agent),
             tools={_TOOL_NAME: _tool(data_layers=("DIM", "FEATURE"))},
         )
@@ -542,9 +614,10 @@ class TestAclDenial:
     @pytest.mark.asyncio
     async def test_lowercase_historical_grant_is_honoured(self):
         agent = _agent(policies=[_policy(data_layer=" dim ")])
-        executor, _, session, _, _ = _build(state=_State(agent=agent))
+        executor, _, session, _, _, handler = _build(state=_State(agent=agent))
         prepared = await _prepare(executor, session)
         assert prepared.tool.name == _TOOL_NAME
+        assert handler.await_count == 0
 
 
 # ---------------------------------------------------------------------------

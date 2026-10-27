@@ -1,6 +1,6 @@
-import { Button, Space, Switch, Table, Tag } from "antd";
-import type { TableColumnsType } from "antd";
+import { Table } from "antd";
 import { useTranslation } from "../../i18n";
+import { buildOrchestrationProfileColumns } from "./OrchestrationProfileColumns";
 import type { AgentOrchestrationProfileRead } from "../../types/agentOrchestration";
 
 export interface OrchestrationProfileTableProps {
@@ -23,53 +23,7 @@ export default function OrchestrationProfileTable({
   onToggle,
 }: OrchestrationProfileTableProps) {
   const { t } = useTranslation();
-
-  const columns: TableColumnsType<AgentOrchestrationProfileRead> = [
-    {
-      title: t("agentOrchestration.columns.agentCode"),
-      dataIndex: "agentCode",
-      key: "agentCode",
-    },
-    {
-      title: t("agentOrchestration.columns.tools"),
-      key: "tools",
-      render: (_value, record) =>
-        t("agentOrchestration.toolCount", { count: record.bindings.length }),
-    },
-    {
-      title: t("agentOrchestration.columns.enabled"),
-      key: "enabled",
-      render: (_value, record) => (
-        <Space>
-          <Switch
-            checked={record.enabled}
-            aria-label={t("agentOrchestration.columns.enabled")}
-            onChange={() => onToggle(record)}
-          />
-          <Tag color={record.enabled ? "green" : "default"}>
-            {record.enabled
-              ? t("agentOrchestration.status.enabled")
-              : t("agentOrchestration.status.disabled")}
-          </Tag>
-        </Space>
-      ),
-    },
-    {
-      title: t("agentOrchestration.columns.revision"),
-      dataIndex: "revision",
-      key: "revision",
-    },
-    {
-      title: t("agentOrchestration.columns.actions"),
-      key: "actions",
-      render: (_value, record) => (
-        <Button size="small" onClick={() => onEdit(record)}>
-          {t("agentOrchestration.editButton")}
-        </Button>
-      ),
-    },
-  ];
-
+  const columns = buildOrchestrationProfileColumns({ t, onEdit, onToggle });
   return (
     <Table<AgentOrchestrationProfileRead>
       rowKey="agentCode"

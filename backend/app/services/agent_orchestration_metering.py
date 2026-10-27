@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Any
 
@@ -76,9 +76,13 @@ from app.infrastructure.llm.base_client import (
     StreamChunk,
 )
 from app.infrastructure.llm.factory import createClient
+from app.services import agent_orchestration_cost
+from app.services.agent_orchestration_cost import isUnknownUsage, usageFromMapping
+from app.services.agent_orchestration_cost import (
+    summarizeCostSources as summarizeCostSources,
+)
 from app.services.agent_orchestration_types import (
     CallStatus,
-    CostSource,
     MeteredCompletion,
 )
 from app.services.chat_usage import UsageMixin
@@ -87,10 +91,11 @@ from app.services.nl2sql_service import _readFloatConfig
 
 logger = logging.getLogger(__name__)
 
-MEASURED = CostSource.MEASURED.value
-ESTIMATED = CostSource.ESTIMATED.value
-UNKNOWN = CostSource.UNKNOWN.value
-MIXED = CostSource.MIXED.value
+# 成本来源常量与聚合函数的**兼容引用**：真实定义已搬到
+# app.services.agent_orchestration_cost（计量模块只负责落库）。
+MEASURED = agent_orchestration_cost.MEASURED
+ESTIMATED = agent_orchestration_cost.ESTIMATED
+UNKNOWN = agent_orchestration_cost.UNKNOWN
 
 SUCCEEDED = CallStatus.SUCCEEDED.value
 OUTPUT_INVALID = CallStatus.OUTPUT_INVALID.value
@@ -102,44 +107,6 @@ DEFAULT_CACHE_HIT_MULTIPLIER = 0.0
 MSG_LLM_UNAVAILABLE = "LLM 服务不可用"
 
 _UNKNOWN_MODEL_NAME = "unknown"
-
-
-# ---------------------------------------------------------------------------
-# cost source summary
-# ---------------------------------------------------------------------------
-
-
-def summarizeCostSources(sources: Iterable[str]) -> tuple[str, bool]:
-    """Aggregate usage-row cost sources into ``(source, complete)``.
-
-    Truth table (the run level is the aggregate of that run's usage rows):
-
-    ==========================  ================  ==========
-    usage row sources           run cost_source   complete
-    ==========================  ================  ==========
-    (none)                      UNKNOWN           False
-    all MEASURED                MEASURED          True
-    all ESTIMATED               ESTIMATED         True
-    MEASURED + ESTIMATED        MIXED             True
-    anything with UNKNOWN       UNKNOWN           False
-    ==========================  ================  ==========
-
-    An unrecognized source is treated like UNKNOWN: an unclassifiable cost
-    figure must never be presented as measured or complete.
-    """
-    values = {str(source) for source in sources if source is not None}
-    if not values:
-        return (UNKNOWN, False)
-    if UNKNOWN in values:
-        return (UNKNOWN, False)
-    known = values - {UNKNOWN}
-    if known == {MEASURED}:
-        return (MEASURED, True)
-    if known == {ESTIMATED}:
-        return (ESTIMATED, True)
-    if known == {MEASURED, ESTIMATED} or MIXED in known:
-        return (MIXED, True)
-    return (UNKNOWN, False)
 
 
 # ---------------------------------------------------------------------------
@@ -211,27 +178,16 @@ class OrchestrationUsageRecorder:
     ) -> int:
         """Insert one usage row and fold it into the run/step counters.
 
-        Transaction order (deliberate): **lock the run row first** → insert
-        the usage row (flush for its id) → increment the run (and step)
-        counters → recompute the run's cost source from *all* usage rows of
-        that run → commit. The run lock is what keeps two concurrent
-        recorders from overwriting ``cost_source`` with a stale partial
-        aggregate.
+        事务顺序（详见模块 docstring 的 *Transaction discipline*）：
+        **先锁 run 行** → 写 usage 行（flush 拿 id）→ 折算 run/step 计数 →
+        提交。锁先行是为了让两个并发记账器不会用各自的局部聚合覆盖
+        ``cost_source``。
 
-        Why the lock comes first: inserting the usage row first takes a
-        ``FOR KEY SHARE`` lock on the referenced run row (the foreign key
-        check). Two recorders that each hold that key-share lock and then
-        ask for ``FOR UPDATE`` on the same row deadlock — the key-share lock
-        of one blocks the update the other is waiting for. Locking the run
-        row first removes the cycle (verified against real PostgreSQL with
-        four concurrent recorders).
-
-        Returns the new usage row id. Raises (never swallows) on failure.
+        返回新的 usage 行 id；失败时回滚并原样抛出（绝不吞掉）。
         """
         async with self._sessionFactory() as session:
             try:
-                run = await self._lockRun(session, runId)
-                usageId = await self._insertUsage(
+                usageId = await self._writeUsageRow(
                     session,
                     runId=runId,
                     stepId=stepId,
@@ -245,28 +201,72 @@ class OrchestrationUsageRecorder:
                     costSource=costSource,
                     callStatus=callStatus,
                 )
-                await self._applyCounters(
-                    session,
-                    run=run,
-                    stepId=stepId,
-                    promptTokens=promptTokens,
-                    completionTokens=completionTokens,
-                    cost=cost,
-                )
                 await session.commit()
                 return usageId
             except Exception:
                 await session.rollback()
-                logger.error(
-                    "orchestration usage accounting failed: run=%s step=%s "
-                    "caller=%s status=%s",
-                    runId,
-                    stepId,
-                    callerType,
-                    callStatus,
-                    exc_info=True,
-                )
+                self._logAccountingFailure(runId, stepId, callerType, callStatus)
                 raise
+
+    def _logAccountingFailure(
+        self,
+        runId: int,
+        stepId: int | None,
+        callerType: str,
+        callStatus: str,
+    ) -> None:
+        """记账失败：留下 run/step/caller 上下文（异常由调用方原样抛出）。"""
+        logger.error(
+            "orchestration usage accounting failed: run=%s step=%s "
+            "caller=%s status=%s",
+            runId,
+            stepId,
+            callerType,
+            callStatus,
+            exc_info=True,
+        )
+
+    async def _writeUsageRow(
+        self,
+        session: AsyncSession,
+        *,
+        runId: int,
+        stepId: int | None,
+        callerType: str,
+        modelConfigId: int,
+        modelName: str,
+        promptTokens: int,
+        completionTokens: int,
+        cachedTokens: int | None,
+        cost: Decimal,
+        costSource: str,
+        callStatus: str,
+    ) -> int:
+        """在**已开启的**事务里锁 run 行、写 usage 行、折算计数。"""
+        run = await self._lockRun(session, runId)
+        usageId = await self._insertUsage(
+            session,
+            runId=runId,
+            stepId=stepId,
+            callerType=callerType,
+            modelConfigId=modelConfigId,
+            modelName=modelName,
+            promptTokens=promptTokens,
+            completionTokens=completionTokens,
+            cachedTokens=cachedTokens,
+            cost=cost,
+            costSource=costSource,
+            callStatus=callStatus,
+        )
+        await self._applyCounters(
+            session,
+            run=run,
+            stepId=stepId,
+            promptTokens=promptTokens,
+            completionTokens=completionTokens,
+            cost=cost,
+        )
+        return usageId
 
     async def markOutputInvalid(self, usageId: int) -> None:
         """Flip a recorded call to ``OUTPUT_INVALID`` — call status only.
@@ -460,8 +460,8 @@ class MeteredLlmClient(BaseLlmClient):
         except Exception as exc:
             await self._recordFailure(exc)
             raise
-        promptTokens, completionTokens, cachedTokens = _usageFromMapping(result.usage)
-        if result.usage is None or _isUnknownUsage(promptTokens, completionTokens):
+        promptTokens, completionTokens, cachedTokens = usageFromMapping(result.usage)
+        if result.usage is None or isUnknownUsage(promptTokens, completionTokens):
             # The provider answered but reported no usage (missing block, or a
             # 0/0 block that means "usage unknown"): the call succeeded, the
             # cost is unknown.
@@ -610,7 +610,7 @@ class MeteredLlmClient(BaseLlmClient):
         """记录一次成功流式调用的用量（终止块的 0/0 同样视为未知）。"""
         promptTokens = int(chunk.promptTokens or 0)
         completionTokens = int(chunk.completionTokens or 0)
-        if _isUnknownUsage(promptTokens, completionTokens):
+        if isUnknownUsage(promptTokens, completionTokens):
             return await self._recordUnknown(callStatus=SUCCEEDED)
         return await self._recordSuccess(
             promptTokens,
@@ -673,31 +673,6 @@ class MeteredLlmClient(BaseLlmClient):
             callStatus=callStatus,
         )
         return usageId
-
-
-def _isUnknownUsage(promptTokens: int, completionTokens: int) -> bool:
-    """0/0 表示 provider 没有给出可用用量。
-
-    与 `LlmResponse.isApproximateUsage` 同义（那里只有 LlmResponse 有这个
-    property，流式终止块与 usage mapping 没有）：provider 省略 usage 字段、
-    或 ollama 那样截断出一个 token 数为 0 的终止块，都属于「用量未知」，
-    不是「这次调用花了 0 块」。
-    """
-    return promptTokens == 0 and completionTokens == 0
-
-
-def _usageFromMapping(usage: dict | None) -> tuple[int, int, int | None]:
-    """Read ``(prompt, completion, cached)`` out of a provider usage mapping."""
-    if not isinstance(usage, dict):
-        return (0, 0, None)
-    promptTokens = int(usage.get("prompt_tokens") or 0)
-    completionTokens = int(usage.get("completion_tokens") or 0)
-    cachedTokens = usage.get("cached_tokens")
-    return (
-        promptTokens,
-        completionTokens,
-        int(cachedTokens) if isinstance(cachedTokens, int) else None,
-    )
 
 
 # ---------------------------------------------------------------------------

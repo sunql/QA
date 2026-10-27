@@ -83,7 +83,26 @@ class AgentOrchestrationStore:
         """
         await self._recoverOneExpired(session, now)
 
-        runId = (
+        runId = await self._nextQueuedRunId(session)
+        if runId is None:
+            await session.commit()
+            return None
+
+        claimed = await self._claimQueuedRun(session, runId, workerId, leaseSeconds, now)
+        if claimed is None:
+            # 候选行在锁内已不是 QUEUED（理论上不会发生）：放弃本轮，不误报 claim。
+            await session.commit()
+            return None
+
+        if claimed in session:
+            # commit 后仍可安全读取字段，不依赖调用方的 expire_on_commit 配置。
+            session.expunge(claimed)
+        await session.commit()
+        return claimed
+
+    async def _nextQueuedRunId(self, session: AsyncSession) -> int | None:
+        """取一条 QUEUED 候选行 id（``SKIP LOCKED``：跳过别人锁住的行）。"""
+        return (
             await session.execute(
                 select(AgentOrchestrationRun.id)
                 .where(AgentOrchestrationRun.status == RunStatus.QUEUED.value)
@@ -92,11 +111,17 @@ class AgentOrchestrationStore:
                 .with_for_update(skip_locked=True)
             )
         ).scalar_one_or_none()
-        if runId is None:
-            await session.commit()
-            return None
 
-        claimed = (
+    async def _claimQueuedRun(
+        self,
+        session: AsyncSession,
+        runId: int,
+        workerId: str,
+        leaseSeconds: int,
+        now: datetime,
+    ) -> AgentOrchestrationRun | None:
+        """把候选行从 QUEUED 改成 RUNNING 并挂上租约。"""
+        return (
             await session.execute(
                 update(AgentOrchestrationRun)
                 .where(
@@ -115,16 +140,6 @@ class AgentOrchestrationStore:
                 .returning(AgentOrchestrationRun)
             )
         ).scalar_one_or_none()
-        if claimed is None:
-            # 候选行在锁内已不是 QUEUED（理论上不会发生）：放弃本轮，不误报 claim。
-            await session.commit()
-            return None
-
-        if claimed in session:
-            # commit 后仍可安全读取字段，不依赖调用方的 expire_on_commit 配置。
-            session.expunge(claimed)
-        await session.commit()
-        return claimed
 
     async def renewLease(
         self,
@@ -330,15 +345,7 @@ class AgentOrchestrationStore:
             session, run.id, leaseOwner, now, rejectCancel=True
         )
         expectedArgs = jsonSafe(dict(args))
-        existing = (
-            await session.execute(
-                select(AgentOrchestrationStep).where(
-                    AgentOrchestrationStep.run_id == current.id,
-                    AgentOrchestrationStep.iteration_no == planStep.iteration_no,
-                    AgentOrchestrationStep.kind == StepKind.TOOL.value,
-                )
-            )
-        ).scalar_one_or_none()
+        existing = await self._findToolStep(session, current.id, planStep.iteration_no)
         if existing is not None:
             if existing.tool_name != toolName or (existing.input_json or {}) != expectedArgs:
                 raise RuntimeError("orchestration TOOL replay mismatch")
@@ -363,6 +370,23 @@ class AgentOrchestrationStore:
         session.expunge(step)
         await session.commit()
         return step
+
+    async def _findToolStep(
+        self,
+        session: AsyncSession,
+        runId: int,
+        iterationNo: int,
+    ) -> AgentOrchestrationStep | None:
+        """按唯一键 `(run_id, iteration_no, kind=TOOL)` 找本轮的 TOOL 行。"""
+        return (
+            await session.execute(
+                select(AgentOrchestrationStep).where(
+                    AgentOrchestrationStep.run_id == runId,
+                    AgentOrchestrationStep.iteration_no == iterationNo,
+                    AgentOrchestrationStep.kind == StepKind.TOOL.value,
+                )
+            )
+        ).scalar_one_or_none()
 
     async def completePlanStep(
         self,
@@ -434,15 +458,16 @@ class AgentOrchestrationStore:
         *,
         consumedStepId: int | None = None,
         consumedToolFailureIds: Sequence[int] | None = None,
+        consumedRunningToolIds: Sequence[int] | None = None,
     ) -> None:
         """RUNNING -> PAUSED：清租约但**不**写 finished_at（不是终态）。
 
         取消优先：若 `cancel_requested` 已置位，暂停不再成立，抛
-        ``LeaseLostError(cancelled)`` 让 Runner 走取消收尾。`consumedStepId`
-        用于把已产出 ASK_USER 的 PLAN 标为 SKIPPED —— 用户恢复后应重新规划，
-        而不是把同一个问题再问一遍。`consumedToolFailureIds` 用于 TOOL_FAILED
-        暂停：把本次连续失败行标为 SKIPPED，恢复后失败预算从 0 重新计数
-        （否则恢复后提交的 FAILED 行会让阈值判定立即再次触发）。
+        ``LeaseLostError(cancelled)`` 让 Runner 走取消收尾。
+
+        被「消费」的步骤行（`consumedStepId` / `consumedToolFailureIds` /
+        `consumedRunningToolIds`）在**同一事务**里落到 SKIPPED，详见
+        ``_consumePausedSteps``。
         """
         current = await self._lockLeasedRun(session, runId, leaseOwner, now, rejectCancel=False)
         if current.cancel_requested:
@@ -453,6 +478,34 @@ class AgentOrchestrationStore:
         current.lease_owner = None
         current.lease_until = None
         current.revision = int(current.revision or 1) + 1
+        await self._consumePausedSteps(
+            session,
+            runId,
+            consumedStepId=consumedStepId,
+            consumedToolFailureIds=consumedToolFailureIds,
+            consumedRunningToolIds=consumedRunningToolIds,
+        )
+        await session.commit()
+
+    async def _consumePausedSteps(
+        self,
+        session: AsyncSession,
+        runId: int,
+        *,
+        consumedStepId: int | None,
+        consumedToolFailureIds: Sequence[int] | None,
+        consumedRunningToolIds: Sequence[int] | None,
+    ) -> None:
+        """把本次暂停「消费」的步骤行标为 SKIPPED。
+
+        - `consumedStepId`：已产出 ASK_USER 的 PLAN —— 用户恢复后应重新规划，
+          而不是把同一个问题再问一遍。
+        - `consumedToolFailureIds`：TOOL_FAILED 暂停的连续失败行 —— 恢复后
+          失败预算从 0 重新计数（否则恢复后提交的 FAILED 行会让阈值判定
+          立即再次触发）。
+        - `consumedRunningToolIds`：崩溃重放时的暂停 —— 那条还停在 RUNNING
+          的 TOOL 行，恢复后重新规划而不是重放同一组已经不合法的参数。
+        """
         if consumedStepId is not None:
             await self._consumeSteps(
                 session,
@@ -469,7 +522,14 @@ class AgentOrchestrationStore:
                 kind=StepKind.TOOL.value,
                 expectedStatus=StepStatus.FAILED.value,
             )
-        await session.commit()
+        if consumedRunningToolIds:
+            await self._consumeSteps(
+                session,
+                runId,
+                list(consumedRunningToolIds),
+                kind=StepKind.TOOL.value,
+                expectedStatus=StepStatus.RUNNING.value,
+            )
 
     async def _consumeSteps(
         self,

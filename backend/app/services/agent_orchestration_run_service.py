@@ -58,6 +58,11 @@ from app.domain.exceptions import (
 )
 from app.domain.models import AgentDefinition, AgentToolConfig, LlmConfig
 from app.services.acl_service import ADMIN_ROLE
+from app.services.agent_orchestration_run_views import (
+    runToAuditDict,
+    runToRead,
+    stepToRead,
+)
 from app.services.agent_orchestration_tool_executor import (
     MSG_ORCH_PERMISSION_DENIED,
 )
@@ -65,8 +70,6 @@ from app.services.agent_orchestration_types import (
     CostSource,
     PauseCode,
     RunStatus,
-    StepKind,
-    StepStatus,
 )
 from app.services.agent_orchestration_validation import (
     assertWithinSystemCeilings,
@@ -156,33 +159,14 @@ class AgentOrchestrationRunService:
         limits = self._mergeLimits(profile, dto.limits)
         assertWithinSystemCeilings(limits)
 
-        run = AgentOrchestrationRun(
-            run_id=str(uuid.uuid4()),
-            agent_id=agent.id,
-            agent_code=agent.agent_code,
-            profile_revision=profile.revision,
-            instructions_snapshot=profile.instructions,
-            tool_bindings_snapshot=snapshot,
-            max_observation_chars=profile.max_observation_chars,
+        run = _newQueuedRun(
+            agent=agent,
+            profile=profile,
+            modelConfig=modelConfig,
+            snapshot=snapshot,
+            limits=limits,
             question=dto.input,
-            created_by=actor.userId,
-            model_config_id=modelConfig.id,
-            status=RunStatus.QUEUED.value,
-            max_iterations=int(limits["max_iterations"]),
-            max_tool_calls=int(limits["max_tool_calls"]),
-            max_cost_usd=Decimal(str(limits["max_cost_usd"])),
-            timeout_seconds=int(limits["timeout_seconds"]),
-            iteration_count=0,
-            tool_call_count=0,
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
-            cost=Decimal("0"),
-            cost_source=CostSource.UNKNOWN.value,
-            cost_complete=False,
-            cancel_requested=False,
-            revision=1,
-            queued_at=datetime.now(UTC),
+            createdBy=actor.userId,
         )
         session.add(run)
         await session.flush()
@@ -279,9 +263,31 @@ class AgentOrchestrationRunService:
             raise ConflictError(
                 f"只有暂停中的编排运行可以恢复（当前状态 {run.status}）"
             )
-        before = _runToAuditDict(run)
+        before = runToAuditDict(run)
         self._assertPauseRequirements(run, dto)
+        await self._assertResumableConfig(session, run)
+        limits = self._applyIncrements(run, dto)
+        self._applyResumeState(run, dto, limits)
+        await session.flush()
+        await self._enqueueAudit(
+            session,
+            run,
+            actor,
+            eventAction="updated",
+            before=before,
+        )
+        await session.commit()
+        return runToRead(run)
 
+    async def _assertResumableConfig(
+        self,
+        session: AsyncSession,
+        run: AgentOrchestrationRun,
+    ) -> None:
+        """恢复前的**当前**配置复查：Agent / profile / 模型 / 工具绑定 / ACL。
+
+        快照本身保持冻结（不被新配置覆盖），这里只确认「当前配置仍然可用」。
+        """
         agent = await self._loadAgentForRun(session, run)
         self._assertAgentActive(agent)
         profile = await self._loadEnabledProfile(session, agent)
@@ -293,8 +299,13 @@ class AgentOrchestrationRunService:
                 session, agent, run.tool_bindings_snapshot
             )
 
-        limits = self._applyIncrements(run, dto)
-
+    def _applyResumeState(
+        self,
+        run: AgentOrchestrationRun,
+        dto: AgentRunResume,
+        limits: dict[str, Any],
+    ) -> None:
+        """把 run 从 PAUSED 改写回 QUEUED（清暂停/租约，追加补充输入）。"""
         if dto.input:
             run.question = f"{run.question}{SUPPLEMENT_SEPARATOR}{dto.input}"
         run.pause_code = None
@@ -312,16 +323,6 @@ class AgentOrchestrationRunService:
         run.max_tool_calls = int(limits["max_tool_calls"])
         run.max_cost_usd = Decimal(str(limits["max_cost_usd"]))
         run.timeout_seconds = int(limits["timeout_seconds"])
-        await session.flush()
-        await self._enqueueAudit(
-            session,
-            run,
-            actor,
-            eventAction="updated",
-            before=before,
-        )
-        await session.commit()
-        return runToRead(run)
 
     # ------------------------------------------------------------------
     # 取消
@@ -339,7 +340,7 @@ class AgentOrchestrationRunService:
             raise ConflictError(
                 f"已结束的编排运行无法取消（当前状态 {run.status}）"
             )
-        before = _runToAuditDict(run)
+        before = runToAuditDict(run)
         if run.status == RunStatus.RUNNING.value:
             # 运行中不伪装成已终止：只置标志，由 Worker 在安全点收尾。
             run.cancel_requested = True
@@ -645,110 +646,55 @@ class AgentOrchestrationRunService:
             actor_departments=tuple(actor.departments or []),
             payload={
                 "before": before,
-                "after": _runToAuditDict(run),
+                "after": runToAuditDict(run),
             },
         )
 
 
 # ---------------------------------------------------------------------------
-# 模块级公开映射（前端与 Worker 集成测试共用）
+# run 行构造
 # ---------------------------------------------------------------------------
 
 
-def runToRead(run: AgentOrchestrationRun) -> AgentRunRead:
-    """ORM run → 读模型。"""
-    return AgentRunRead(
-        run_id=run.run_id,
-        agent_code=run.agent_code,
-        question=run.question,
-        created_by=run.created_by,
-        model_config_id=run.model_config_id,
-        status=RunStatus(run.status),
-        instructions_snapshot=run.instructions_snapshot,
-        tool_bindings_snapshot=list(run.tool_bindings_snapshot or []),
-        max_iterations=run.max_iterations,
-        max_tool_calls=run.max_tool_calls,
-        max_cost_usd=float(run.max_cost_usd),
-        timeout_seconds=run.timeout_seconds,
-        iteration_count=run.iteration_count,
-        tool_call_count=run.tool_call_count,
-        prompt_tokens=run.prompt_tokens,
-        completion_tokens=run.completion_tokens,
-        total_tokens=run.total_tokens,
-        cost=float(run.cost),
-        cost_source=CostSource(run.cost_source),
-        cost_complete=run.cost_complete,
-        final_answer=run.final_answer,
-        pause_code=PauseCode(run.pause_code) if run.pause_code else None,
-        pause_detail=run.pause_detail,
-        error_code=run.error_code,
-        error_message=run.error_message,
-        cancel_requested=run.cancel_requested,
-        created_time=run.created_time,
-        updated_time=run.updated_time,
-        queued_at=run.queued_at,
-        started_at=run.started_at,
-        finished_at=run.finished_at,
-        revision=run.revision,
+def _newQueuedRun(
+    *,
+    agent: AgentDefinition,
+    profile: AgentOrchestrationProfile,
+    modelConfig: LlmConfig,
+    snapshot: list[dict[str, Any]],
+    limits: dict[str, Any],
+    question: str,
+    createdBy: str,
+) -> AgentOrchestrationRun:
+    """构造一条 QUEUED 的 run 行（instructions + 工具快照 + 预算在创建时冻结）。"""
+    return AgentOrchestrationRun(
+        run_id=str(uuid.uuid4()),
+        agent_id=agent.id,
+        agent_code=agent.agent_code,
+        profile_revision=profile.revision,
+        instructions_snapshot=profile.instructions,
+        tool_bindings_snapshot=snapshot,
+        max_observation_chars=profile.max_observation_chars,
+        question=question,
+        created_by=createdBy,
+        model_config_id=modelConfig.id,
+        status=RunStatus.QUEUED.value,
+        max_iterations=int(limits["max_iterations"]),
+        max_tool_calls=int(limits["max_tool_calls"]),
+        max_cost_usd=Decimal(str(limits["max_cost_usd"])),
+        timeout_seconds=int(limits["timeout_seconds"]),
+        iteration_count=0,
+        tool_call_count=0,
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        cost=Decimal("0"),
+        cost_source=CostSource.UNKNOWN.value,
+        cost_complete=False,
+        cancel_requested=False,
+        revision=1,
+        queued_at=datetime.now(UTC),
     )
-
-
-def stepToRead(step: AgentOrchestrationStep) -> AgentRunStepRead:
-    """ORM step → 读模型。"""
-    return AgentRunStepRead(
-        step_no=step.step_no,
-        iteration_no=step.iteration_no,
-        kind=StepKind(step.kind),
-        status=StepStatus(step.status),
-        action=step.action,
-        plan_summary=step.plan_summary,
-        tool_name=step.tool_name,
-        input_json=step.input_json,
-        output_json=step.output_json,
-        answer=step.answer,
-        error_code=step.error_code,
-        error_message=step.error_message,
-        prompt_tokens=step.prompt_tokens,
-        completion_tokens=step.completion_tokens,
-        cost=float(step.cost),
-        started_at=step.started_at,
-        finished_at=step.finished_at,
-    )
-
-
-def _runToAuditDict(run: AgentOrchestrationRun) -> dict[str, Any]:
-    """审计 payload：只含 run 自身公开字段。
-
-    绝不含模型 api key / provider 凭据 / handler_ref 等工具配置内部信息。
-    """
-    return {
-        "runId": run.run_id,
-        "agentCode": run.agent_code,
-        "status": run.status,
-        "modelConfigId": run.model_config_id,
-        "question": run.question,
-        "instructionsSnapshot": run.instructions_snapshot,
-        "toolBindingsSnapshot": copy.deepcopy(run.tool_bindings_snapshot or []),
-        "maxIterations": run.max_iterations,
-        "maxToolCalls": run.max_tool_calls,
-        "maxCostUsd": float(run.max_cost_usd),
-        "timeoutSeconds": run.timeout_seconds,
-        "iterationCount": run.iteration_count,
-        "toolCallCount": run.tool_call_count,
-        "promptTokens": run.prompt_tokens,
-        "completionTokens": run.completion_tokens,
-        "totalTokens": run.total_tokens,
-        "cost": float(run.cost),
-        "costSource": run.cost_source,
-        "costComplete": run.cost_complete,
-        "finalAnswer": run.final_answer,
-        "pauseCode": run.pause_code,
-        "pauseDetail": copy.deepcopy(run.pause_detail),
-        "errorCode": run.error_code,
-        "errorMessage": run.error_message,
-        "cancelRequested": run.cancel_requested,
-        "revision": run.revision,
-    }
 
 
 def _isReadable(run: AgentOrchestrationRun, actor: CurrentUser) -> bool:

@@ -229,10 +229,11 @@ describe("AgentTaskPage", () => {
     const step2 = makeStep({ stepNo: 2, kind: "TOOL", toolName: "supplier_otsd" });
     api.getAgentRunSteps.mockImplementation(
       async (_runId: string, query?: { afterStepNo?: number }) => {
-        const after = query?.afterStepNo ?? 0;
-        if (after === 0) return [step1, step0];
-        if (after === 2) return [step2];
-        return [];
+        const pages: Record<number, AgentRunStepRead[]> = {
+          0: [step1, step0],
+          2: [step2],
+        };
+        return pages[query?.afterStepNo ?? 0] ?? [];
       },
     );
 

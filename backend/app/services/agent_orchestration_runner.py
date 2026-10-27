@@ -276,7 +276,21 @@ class AgentOrchestrationRunner:
             args=dict(toolStep.input_json or {}),
             summary="",
         )
-        prepared = await self._prepareWithInfraRetry(run, action, workerId, now)
+        try:
+            prepared = await self._prepareWithInfraRetry(run, action, workerId, now)
+        except PlannerProtocolError as error:
+            # 崩溃窗口内**工具配置变了**（schema 被收紧/删字段）：落库的旧参数
+            # 已不可能通过当前配置。暂停（可恢复）而不是失败（终态），并把这条
+            # 还停在 RUNNING 的 TOOL 行消费掉：恢复后重新规划，绝不重放旧参数。
+            logger.warning(
+                "run %s 崩溃重放的工具参数不再合法（工具配置已变更，需重新规划）：%s",
+                run.id,
+                error,
+            )
+            await self._pauseConsumingTool(
+                run, toolStep, workerId, PauseCode.PLANNER_OUTPUT_INVALID.value
+            )
+            return
         config = await self._requireModelConfig(run)
         await self._executeTool(
             run,
@@ -336,29 +350,8 @@ class AgentOrchestrationRunner:
         retry = RetryBudget(
             int(getattr(self._settings, "agentOrchestrationMaxPlannerCorrections", 2))
         )
-        infraFailures = 0
         while True:
-            try:
-                action = await self._planOnce(
-                    run, steps, metered, retry.correction
-                )
-            except PlannerProtocolError as error:
-                if not retry.recordProtocolFailure(error):
-                    raise OrchestrationPauseError(
-                        PauseCode.PLANNER_OUTPUT_INVALID.value, MSG_PLANNER_INVALID
-                    ) from error
-                continue
-            except INFRASTRUCTURE_EXCEPTIONS as error:
-                # 基础设施重试额度按阶段局部计数：Planner 侧与 prepare 侧各自
-                # 有界，避免一次瞬时抖动耗尽另一阶段的机会。
-                infraFailures += 1
-                if infraFailures > INFRASTRUCTURE_RETRY_LIMIT:
-                    raise OrchestrationPauseError(
-                        PauseCode.INFRASTRUCTURE_ERROR.value, MSG_INFRASTRUCTURE_ERROR
-                    ) from error
-                logger.warning("run %s Planner 调用失败，重试：%s", run.id, error)
-                continue
-
+            action = await self._planWithRetry(run, steps, metered, retry)
             if isinstance(action, CallToolAction):
                 prepared = await self._prepareOrCorrect(
                     run, planStep, action, retry, workerId
@@ -389,6 +382,36 @@ class AgentOrchestrationRunner:
                 await self._succeed(run, action.answer, workerId)
                 return
             raise RuntimeError("planner returned an unsupported action")
+
+    async def _planWithRetry(
+        self,
+        run: AgentOrchestrationRun,
+        steps: Sequence[AgentOrchestrationStep],
+        metered: MeteredStep,
+        retry: RetryBudget,
+    ) -> PlannerAction:
+        """规划调用 + 有界的协议/基础设施重试。
+
+        协议错误（Planner 说错话）走 ``retry`` 的纠正预算；基础设施错误
+        （provider/DB 抖动）走**阶段局部**的计数：Planner 侧与 prepare 侧
+        各自有界，避免一次瞬时抖动耗尽另一阶段的机会。
+        """
+        infraFailures = 0
+        while True:
+            try:
+                return await self._planOnce(run, steps, metered, retry.correction)
+            except PlannerProtocolError as error:
+                if not retry.recordProtocolFailure(error):
+                    raise OrchestrationPauseError(
+                        PauseCode.PLANNER_OUTPUT_INVALID.value, MSG_PLANNER_INVALID
+                    ) from error
+            except INFRASTRUCTURE_EXCEPTIONS as error:
+                infraFailures += 1
+                if infraFailures > INFRASTRUCTURE_RETRY_LIMIT:
+                    raise OrchestrationPauseError(
+                        PauseCode.INFRASTRUCTURE_ERROR.value, MSG_INFRASTRUCTURE_ERROR
+                    ) from error
+                logger.warning("run %s Planner 调用失败，重试：%s", run.id, error)
 
     async def _planOnce(
         self,
@@ -618,6 +641,31 @@ class AgentOrchestrationRunner:
                 None,
                 self._clock(),
                 consumedStepId=planStep.id,
+            )
+        raise RunFinished
+
+    async def _pauseConsumingTool(
+        self,
+        run: AgentOrchestrationRun,
+        toolStep: AgentOrchestrationStep,
+        workerId: str,
+        code: str,
+    ) -> None:
+        """暂停并消费掉那条还停在 RUNNING 的 TOOL 行（崩溃重放专用）。
+
+        消费与暂停写在同一事务里（全成功或全失败）：要么运行停在 PAUSED 且
+        陈旧的 TOOL 行落到终态（SKIPPED），要么两者都没发生。恢复时
+        `_resumePersisted` 看到的是终态行 ⇒ 重新规划，不会再重放旧参数。
+        """
+        async with self._sessionFactory() as session:
+            await self._store.pauseRun(
+                session,
+                run.id,
+                workerId,
+                code,
+                None,
+                self._clock(),
+                consumedRunningToolIds=[toolStep.id],
             )
         raise RunFinished
 

@@ -261,6 +261,11 @@ docker compose ps | grep agent-orchestration   # 期望：无输出
 
 ### 阶段 6：显式播种菜单（**唯一**的菜单入口）
 
+> **前置**：前端路由 `/agent-orchestrations` 与 `/agent-tasks` 必须**已经上线**
+> （`frontend/src/App.tsx` 里能匹配这两个路径）。菜单行先于页面存在的话，
+> 侧边栏点进去就是 404 —— 入口暴露 ≠ 功能可用，顺序反了就是「看得见点不动」。
+> 本仓当前尚未包含这两个前端路由，播种前请确认对应前端任务已完成。
+
 ```bash
 cd backend
 python -m scripts.seed_agent_orchestration_menu
@@ -444,7 +449,8 @@ ORDER BY updated_time DESC;
 - [ ] 阶段 3：新路由 **404**；`docker compose ps` 无 Worker；旧契约不变
 - [ ] 阶段 4：flag 打开后路由变 **401**（= 已注册）；Worker 日志出现「worker 启动」
 - [ ] 阶段 5：profile 可创建/启用；run 走完 `QUEUED→RUNNING→SUCCEEDED`；token 有计量
-- [ ] 阶段 6：菜单脚本输出 `2 rows inserted`（首次）；SQL 查到两行挂在 `section.aiAgent`
+- [ ] 阶段 6：前端路由 `/agent-orchestrations`、`/agent-tasks` 已上线；
+      菜单脚本输出 `2 rows inserted`（首次）；SQL 查到两行挂在 `section.aiAgent`
 - [ ] 阶段 7：浏览器两项菜单可见可打开，无 500
 - [ ] 阶段 8：生产启用**已获审批**；观察期指标已安排
 - [ ] 回滚路径已演练：停 Worker（先排空租约）→ flag 关 → 新路由回到 404；表保留

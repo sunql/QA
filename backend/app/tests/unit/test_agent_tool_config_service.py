@@ -207,7 +207,9 @@ class TestDeleteTool:
         get_mock = MagicMock(scalar_one_or_none=MagicMock(return_value=row))
         refs_mock = MagicMock()
         refs_mock.scalars.return_value.all.return_value = ["SUPPLIER_360_AGENT"]
-        session = _sessionWithExecute([get_mock, refs_mock])
+        no_orch_mock = MagicMock()
+        no_orch_mock.scalars.return_value.all.return_value = []
+        session = _sessionWithExecute([get_mock, refs_mock, no_orch_mock])
         with pytest.raises(ConflictError) as exc_info:
             await service.deleteTool(session, "supplier_360", _admin())
         assert exc_info.value.referencing_agents == ["SUPPLIER_360_AGENT"]
@@ -218,7 +220,9 @@ class TestDeleteTool:
         get_mock = MagicMock(scalar_one_or_none=MagicMock(return_value=row))
         no_refs_mock = MagicMock()
         no_refs_mock.scalars.return_value.all.return_value = []
-        session = _sessionWithExecute([get_mock, no_refs_mock])
+        no_orch_mock = MagicMock()
+        no_orch_mock.scalars.return_value.all.return_value = []
+        session = _sessionWithExecute([get_mock, no_refs_mock, no_orch_mock])
         await service.deleteTool(session, "supplier_360", _admin())
         session.delete.assert_awaited_once_with(row)
         service._outbox.enqueue.assert_awaited_once()

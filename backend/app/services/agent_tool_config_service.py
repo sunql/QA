@@ -13,6 +13,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
+from app.domain.agent_orchestration_models import (
+    AgentOrchestrationBinding,
+    AgentOrchestrationProfile,
+)
 from app.domain.enums import AgentToolHandlerKind
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import AgentDefinition, AgentToolConfig
@@ -26,6 +30,8 @@ from app.services.agent_tools import _VALID_HANDLER_REFS
 from app.services.outbox_service import OutboxService
 
 logger = logging.getLogger(__name__)
+
+_ORCHESTRATION_IN_USE_CODE = "agent_tool_in_use_orchestration"
 
 
 def _configRowToDict(row: AgentToolConfig) -> dict:
@@ -192,7 +198,7 @@ class AgentToolConfigService:
     ) -> None:
         row = await self.getTool(session, name)
 
-        # 检查 AgentDefinition.tool_name 是否引用此工具
+        # 检查 AgentDefinition.tool_name（历史）与编排 profile 绑定（新）是否引用此工具
         referencing = (
             await session.execute(
                 select(AgentDefinition.agent_code).where(
@@ -200,6 +206,13 @@ class AgentToolConfigService:
                 )
             )
         ).scalars().all()
+        orchestrationReferencing = await self._orchestrationReferencing(session, name)
+        if orchestrationReferencing:
+            raise _OrchestrationToolInUseConflict(
+                name,
+                sorted(orchestrationReferencing),
+                sorted(referencing),
+            )
         if referencing:
             raise _ToolInUseConflict(name, list(referencing))
 
@@ -217,6 +230,29 @@ class AgentToolConfigService:
             actor_departments=tuple(actor.departments or []),
             payload={"before": before, "after": None},
         )
+
+    async def _orchestrationReferencing(
+        self,
+        session: AsyncSession,
+        name: str,
+    ) -> list[str]:
+        """返回编排 profile 绑定该工具的 Agent codes（任何 enabled 状态都算引用）。"""
+        rows = (
+            await session.execute(
+                select(AgentDefinition.agent_code)
+                .join(
+                    AgentOrchestrationProfile,
+                    AgentOrchestrationProfile.agent_id == AgentDefinition.id,
+                )
+                .join(
+                    AgentOrchestrationBinding,
+                    AgentOrchestrationBinding.profile_id
+                    == AgentOrchestrationProfile.id,
+                )
+                .where(AgentOrchestrationBinding.tool_name == name)
+            )
+        ).scalars().all()
+        return list(rows)
 
     async def toggleEnabled(
         self,
@@ -297,4 +333,32 @@ class _ToolInUseConflict(ConflictError):
             detail=f"referencingAgents={referencing}",
         )
         self.referencing_agents = referencing
+        self.tool_name = name
+
+
+class _OrchestrationToolInUseConflict(ConflictError):
+    """编排 profile 绑定该工具时抛出（稳定 code + 排序后的 Agent codes）。
+
+    detail 只含 Agent codes 与稳定 code，不含工具配置载荷；历史
+    ``referencingAgents`` 与编排列表可能同时出现。
+    """
+
+    def __init__(
+        self,
+        name: str,
+        orchestrationAgents: list[str],
+        legacyAgents: list[str],
+    ) -> None:
+        sortedOrchestration = sorted(orchestrationAgents)
+        sortedLegacy = sorted(legacyAgents)
+        parts = [_ORCHESTRATION_IN_USE_CODE]
+        if sortedLegacy:
+            parts.append(f"referencingAgents={sortedLegacy}")
+        parts.append(f"orchestrationAgents={sortedOrchestration}")
+        super().__init__(
+            f"agent_tool_config 被 Agent 引用，无法删除: {name}",
+            detail="; ".join(parts),
+        )
+        self.orchestration_agents = sortedOrchestration
+        self.referencing_agents = sortedLegacy
         self.tool_name = name

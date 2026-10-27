@@ -3,13 +3,16 @@
 Only provider responses and tool side effects are deterministic test doubles.
 Configuration, snapshots, ACL, claims, state transitions and usage metering all
 use production implementations. Scenarios 4 and 5 additionally have mandatory
-focused race/crash suites; their executed commands are recorded in Task 10's
-report rather than represented by skipped tests here.
+focused race/crash suites; those suites are **not** re-run here (they run in the
+same command per the brief), but their presence is asserted in-tree by
+`test_requiredRaceAndCrashSuitesExistInTree` so that deleting or renaming a
+mandatory suite fails the tree instead of silently degrading scenarios 4 and 5.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -90,6 +93,19 @@ _LLM_PROMPT_TOKENS = 11
 _LLM_COMPLETION_TOKENS = 7
 # 成本核对容差：USD 金额列 Numeric(20,8)，1e-8 即一个存储精度量子。
 _COST_TOLERANCE = Decimal("1e-8")
+# 场景 4/5 的深度依赖两个「必跑套件」。它们与本文件在同一条命令里执行，
+# 这里只断言依赖**存在于测试树**（不重跑）：套件被删除/改名/用例被删，
+# 本断言必须红——否则「只跑验收文件」会静默地把场景 4/5 降级成报告里的一句话。
+_REQUIRED_SUITES: dict[str, tuple[str, ...]] = {
+    "app.tests.integration.test_agent_orchestration_worker_claim": (
+        "test_concurrent_claims_never_double_claim",
+        "test_expired_lease_is_recovered_into_a_fresh_window",
+    ),
+    "app.tests.integration.test_agent_orchestration_runner_recovery": (
+        "test_crash_after_handler_before_output_commit_replays_the_handler",
+        "test_crash_after_tool_row_creation_replays_the_same_step_and_args",
+    ),
+}
 
 
 @pytest.fixture
@@ -733,3 +749,27 @@ async def test_scenario_8_delete_guards_and_historical_agent_code(
     assert listing.status_code == 200 and [row["runId"] for row in listing.json()] == [runId]
     persisted = await _runRow(runId)
     assert persisted.agent_id is None and persisted.agent_code == AGENT_CODE
+
+
+def test_requiredRaceAndCrashSuitesExistInTree() -> None:
+    """场景 4/5 的必跑套件必须在测试树里存在，且暴露其关键用例。
+
+    只断言依赖存在（模块可导入 + 关键用例可调用），不重跑它们——两个套件与
+    本文件在同一条 pytest 命令里执行。缺模块、改名、删用例都必须让本用例变红。
+    """
+    assert _REQUIRED_SUITES, "必跑套件清单为空——场景 4/5 的依赖网会空集通过"
+    for moduleName, functionNames in _REQUIRED_SUITES.items():
+        try:
+            module = importlib.import_module(moduleName)
+        except ImportError as exc:
+            raise AssertionError(
+                f"必跑套件 {moduleName} 不存在（{exc}）——"
+                "删除/改名会让场景 4/5 的深度静默退化"
+            ) from exc
+        for functionName in functionNames:
+            function = getattr(module, functionName, None)
+            assert function is not None, (
+                f"必跑套件 {moduleName} 缺少必需用例 {functionName}"
+                "（删除/改名会让场景 4/5 的深度静默退化）"
+            )
+            assert callable(function), f"{moduleName}.{functionName} 不可调用"

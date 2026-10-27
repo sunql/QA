@@ -2480,3 +2480,6 @@ class ReportInstance(Base, TimestampMixin):
             f"<ReportInstance id={self.id} template={self.template_code} "
             f"status={self.status}>"
         )
+
+
+from app.domain import agent_orchestration_models as _agent_orchestration_models  # noqa: E402,F401

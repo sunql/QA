@@ -1,3 +1,5 @@
+import re
+
 from sqlalchemy import inspect, text
 
 from app.domain.models import Base
@@ -57,3 +59,25 @@ async def test_pause_code_is_constrained_to_the_protocol_values(dbSession):
         "INFRASTRUCTURE_ERROR",
     ):
         assert code in rows[0]
+
+
+async def _costSourceCheckValues(dbSession, table: str, constraint: str) -> set[str]:
+    definition = (await dbSession.execute(
+        text(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid=to_regclass(:table) AND conname=:constraint"
+        ),
+        {"table": table, "constraint": constraint},
+    )).scalar_one()
+    return set(re.findall(r"'([A-Z_]+)'", definition))
+
+
+async def test_run_cost_source_allows_mixed_while_usage_stays_three(dbSession):
+    runValues = await _costSourceCheckValues(
+        dbSession, "agent_orchestration_run", "ck_agent_orchestration_run_cost_source"
+    )
+    usageValues = await _costSourceCheckValues(
+        dbSession, "agent_orchestration_usage", "ck_agent_orchestration_usage_cost_source"
+    )
+    assert runValues == {"MEASURED", "ESTIMATED", "UNKNOWN", "MIXED"}
+    assert usageValues == {"MEASURED", "ESTIMATED", "UNKNOWN"}

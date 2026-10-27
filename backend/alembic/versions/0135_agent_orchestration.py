@@ -115,7 +115,7 @@ _RUN_SCHEMA = (
         name="ck_agent_orchestration_run_pause_code",
     ),
     sa.CheckConstraint(
-        "cost_source IN ('MEASURED','ESTIMATED','UNKNOWN')",
+        "cost_source IN ('MEASURED','ESTIMATED','UNKNOWN','MIXED')",
         name="ck_agent_orchestration_run_cost_source",
     ),
     sa.CheckConstraint(

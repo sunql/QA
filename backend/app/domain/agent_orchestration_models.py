@@ -139,7 +139,7 @@ class AgentOrchestrationRun(Base, TimestampMixin):
             name="ck_agent_orchestration_run_pause_code",
         ),
         CheckConstraint(
-            "cost_source IN ('MEASURED','ESTIMATED','UNKNOWN')",
+            "cost_source IN ('MEASURED','ESTIMATED','UNKNOWN','MIXED')",
             name="ck_agent_orchestration_run_cost_source",
         ),
         CheckConstraint("profile_revision >= 1 AND revision >= 1", name="ck_agent_orchestration_run_revision"),

@@ -561,6 +561,15 @@ def createApp() -> FastAPI:
             tags=["agent-orchestrations"],
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
         )
+        # Task 7：run 生命周期（create/list/get/steps/resume/cancel）
+        from app.api.v1 import agent_runs
+
+        app.include_router(
+            agent_runs.router,
+            prefix="/api/v1/agent-runs",
+            tags=["agent-runs"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
     app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     # auth.router 和 authRouter.router 不加 guard：白名单路径 /auth/me、/auth/change-password、/auth/logout 需无条件放行

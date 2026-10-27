@@ -23,7 +23,6 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import getSettings
 from app.dependencies import CurrentUser
 from app.domain.agent_orchestration_models import (
     AgentOrchestrationBinding,
@@ -40,17 +39,40 @@ from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import AgentDefinition, AgentToolConfig
 from app.services.acl_service import ADMIN_ROLE, AclService
 from app.services.agent_orchestration_validation import (
+    BUILTIN_HANDLER_KIND,
     READ_ONLY_HANDLER_REFS,
-    validateObjectSchema,
+    assertOrchestrationToolValid,
+    assertWithinSystemCeilings,
 )
 from app.services.agent_registry_service import AgentRegistryService
 from app.services.outbox_service import OutboxService
 
 logger = logging.getLogger(__name__)
 
-_BUILTIN_HANDLER_KIND = "BUILTIN"
 _AUDIT_EVENT_PREFIX = "agent_orchestration_profile"
 _AUDIT_ENTITY_TYPE = "agent_orchestration_profile"
+
+# profile DTO 字段 → 共享预算校验的规范字段名（错误信息仍显示 DTO 字段名）。
+_PROFILE_LIMIT_LABELS = {
+    "max_iterations": "default_max_iterations",
+    "max_tool_calls": "default_max_tool_calls",
+    "max_cost_usd": "default_max_cost_usd",
+    "timeout_seconds": "default_timeout_seconds",
+    "max_observation_chars": "max_observation_chars",
+}
+
+
+def _profileLimits(
+    dto: AgentOrchestrationProfileCreate | AgentOrchestrationProfileUpdate,
+) -> dict[str, float]:
+    """profile 预算 → 共享预算校验的规范字段。"""
+    return {
+        "max_iterations": dto.default_max_iterations,
+        "max_tool_calls": dto.default_max_tool_calls,
+        "max_cost_usd": float(dto.default_max_cost_usd),
+        "timeout_seconds": dto.default_timeout_seconds,
+        "max_observation_chars": dto.max_observation_chars,
+    }
 
 
 def _profileToRead(
@@ -305,7 +327,7 @@ class AgentOrchestrationConfigService:
                     select(AgentToolConfig)
                     .where(
                         AgentToolConfig.enabled.is_(True),
-                        AgentToolConfig.handler_kind == _BUILTIN_HANDLER_KIND,
+                        AgentToolConfig.handler_kind == BUILTIN_HANDLER_KIND,
                         AgentToolConfig.handler_ref.in_(
                             sorted(READ_ONLY_HANDLER_REFS)
                         ),
@@ -320,7 +342,7 @@ class AgentOrchestrationConfigService:
         options: list[dict] = []
         for row in rows:
             try:
-                validateObjectSchema(row.input_schema)
+                assertOrchestrationToolValid(row, row.name)
             except ValidationError:
                 logger.warning(
                     "agent orchestration tool option omitted "
@@ -345,39 +367,8 @@ class AgentOrchestrationConfigService:
         self,
         dto: AgentOrchestrationProfileCreate | AgentOrchestrationProfileUpdate,
     ) -> None:
-        settings = getSettings()
-        ceilings = (
-            (
-                "default_max_iterations",
-                dto.default_max_iterations,
-                settings.agentOrchestrationMaxIterations,
-            ),
-            (
-                "default_max_tool_calls",
-                dto.default_max_tool_calls,
-                settings.agentOrchestrationMaxToolCalls,
-            ),
-            (
-                "default_max_cost_usd",
-                dto.default_max_cost_usd,
-                settings.agentOrchestrationMaxCostUsd,
-            ),
-            (
-                "default_timeout_seconds",
-                dto.default_timeout_seconds,
-                settings.agentOrchestrationMaxTimeoutSeconds,
-            ),
-            (
-                "max_observation_chars",
-                dto.max_observation_chars,
-                settings.agentOrchestrationMaxObservationChars,
-            ),
-        )
-        for fieldName, value, ceiling in ceilings:
-            if value > ceiling:
-                raise ValidationError(
-                    f"{fieldName} 超出系统上限 {ceiling}"
-                )
+        """预算上限校验委托共享助手（编排运行共用同一份系统天花板）。"""
+        assertWithinSystemCeilings(_profileLimits(dto), _PROFILE_LIMIT_LABELS)
 
     async def _assertNoProfile(
         self,
@@ -438,13 +429,7 @@ class AgentOrchestrationConfigService:
             row = byName.get(name)
             if row is None:
                 raise ValidationError(f"工具不存在：{name}")
-            if not row.enabled:
-                raise ValidationError(f"工具已禁用：{name}")
-            if row.handler_kind != _BUILTIN_HANDLER_KIND:
-                raise ValidationError(f"工具 handler 类型不受支持：{name}")
-            if row.handler_ref not in READ_ONLY_HANDLER_REFS:
-                raise ValidationError(f"工具 handler 不在只读白名单：{name}")
-            validateObjectSchema(row.input_schema)
+            assertOrchestrationToolValid(row, name)
             ordered.append(row)
         return ordered
 

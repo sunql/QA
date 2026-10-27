@@ -245,6 +245,15 @@ def buildTestApp(testFactory: Any) -> FastAPI:
             tags=["agent-orchestrations"],
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
         )
+        # Task 7：run 生命周期（create/list/get/steps/resume/cancel）
+        from app.api.v1 import agent_runs
+
+        testApp.include_router(
+            agent_runs.router,
+            prefix="/api/v1/agent-runs",
+            tags=["agent-runs"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
     testApp.include_router(users.router, tags=["users"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(roles.router, tags=["roles"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(organizations.router, tags=["organizations"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])

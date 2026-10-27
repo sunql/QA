@@ -11,16 +11,24 @@ Security posture (deny by default):
   keyword, never the submitted argument values.
 - Observations are bounded JSON-safe strings; the canonical
   ``app.utils.json_safe.jsonSafe`` is the only normalizer used.
+
+本模块同时是**编排子系统的两个跨任务共享判定**的唯一事实源（避免两条路径漂移）：
+- 「当前有效工具」：``isOrchestrationToolValid`` / ``assertOrchestrationToolValid``
+  （编排配置绑定与编排运行快照共用同一判定）；
+- 「系统预算硬上限」：``assertWithinSystemCeilings``（编排配置默认值与编排运行
+  预算共用同一份上限）。
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Protocol
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
+from app.config import getSettings
 from app.domain.exceptions import ValidationError
 from app.services.agent_tool_types import ToolResult
 from app.utils.json_safe import jsonSafe
@@ -35,8 +43,29 @@ READ_ONLY_HANDLER_REFS = frozenset({
     "coverage_status",
 })
 
+BUILTIN_HANDLER_KIND = "BUILTIN"
+
 _OBSERVATION_MARKER = "[truncated]"
 _MAX_REPORTED_ERRORS = 10
+
+# 规范预算字段名 → Settings 上的系统硬上限属性名。
+_SYSTEM_CEILING_FIELDS: tuple[tuple[str, str], ...] = (
+    ("max_iterations", "agentOrchestrationMaxIterations"),
+    ("max_tool_calls", "agentOrchestrationMaxToolCalls"),
+    ("max_cost_usd", "agentOrchestrationMaxCostUsd"),
+    ("timeout_seconds", "agentOrchestrationMaxTimeoutSeconds"),
+    ("max_observation_chars", "agentOrchestrationMaxObservationChars"),
+)
+
+
+class OrchestrationToolRow(Protocol):
+    """判定「当前有效工具」所需的最小工具行接口（避免校验层依赖 ORM）。"""
+
+    name: str
+    enabled: bool
+    handler_kind: str
+    handler_ref: str
+    input_schema: Any
 
 
 def validateObjectSchema(schema: Any) -> None:
@@ -64,6 +93,60 @@ def validateObjectSchema(schema: Any) -> None:
             "tool input schema is invalid",
             detail=_schemaErrorLocation(exc),
         ) from exc
+
+
+def assertOrchestrationToolValid(config: OrchestrationToolRow, toolName: str) -> None:
+    """断言该工具**当前**可用于编排，失败抛 ``ValidationError``。
+
+    判定 = enabled + BUILTIN + 命中只读白名单 + ``validateObjectSchema`` 通过。
+    这是编排配置绑定与编排运行快照共用的唯一判定（两条路径不得各自实现）。
+    """
+    if not config.enabled:
+        raise ValidationError(f"工具已禁用：{toolName}")
+    if config.handler_kind != BUILTIN_HANDLER_KIND:
+        raise ValidationError(f"工具 handler 类型不受支持：{toolName}")
+    if config.handler_ref not in READ_ONLY_HANDLER_REFS:
+        raise ValidationError(f"工具 handler 不在只读白名单：{toolName}")
+    validateObjectSchema(config.input_schema)
+
+
+def isOrchestrationToolValid(config: OrchestrationToolRow | None) -> bool:
+    """``assertOrchestrationToolValid`` 的布尔版本：当前是否可用作编排工具。"""
+    if config is None:
+        return False
+    try:
+        assertOrchestrationToolValid(config, config.name)
+    except ValidationError:
+        return False
+    return True
+
+
+def systemCeilings() -> dict[str, float]:
+    """系统预算硬上限（单一事实源）：编排配置与编排运行共用。"""
+    settings = getSettings()
+    return {
+        field: float(getattr(settings, attribute))
+        for field, attribute in _SYSTEM_CEILING_FIELDS
+    }
+
+
+def assertWithinSystemCeilings(
+    limits: Mapping[str, float],
+    labels: Mapping[str, str] | None = None,
+) -> None:
+    """校验每个预算不超过系统硬上限；超限抛 ``ValidationError``（422）。
+
+    ``limits`` 的键必须是规范字段名（见 ``_SYSTEM_CEILING_FIELDS``）。
+    ``labels`` 把规范字段名映射成调用方 DTO 的字段名（编排配置用
+    ``default_max_*``，编排运行用 ``max_*``），错误信息因此始终指向调用方
+    自己的字段，而上限值只有一份。
+    """
+    ceilings = systemCeilings()
+    for field, value in limits.items():
+        ceiling = ceilings[field]
+        if value > ceiling:
+            label = (labels or {}).get(field, field)
+            raise ValidationError(f"{label} 超出系统上限 {ceiling}")
 
 
 def validateToolArguments(schema: dict, args: Any) -> dict:

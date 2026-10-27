@@ -8,8 +8,13 @@ orchestration action. Security posture:
   raises ``PlannerProtocolError`` with a Planner-correctable message that names
   field paths/keys only and never echoes submitted values.
 - Prompt construction reuses the repo L1 defense (``renderSecurityPreamble`` /
-  ``wrapUntrusted``) for the run instructions, the question and every persisted
-  step summary/observation. Those are data, never instructions.
+  ``sanitizeForLlmPrompt`` / ``wrapSanitized``) for the run instructions, the
+  question and every persisted step summary/observation. Those are data, never
+  instructions.
+- Every prompt region is bounded by its **rendered** length (the escaped text
+  that actually reaches the model), not by the raw length: the sanitizer
+  expands ``"`` to ``&quot;`` (6 chars) and ``&`` to ``&amp;`` (5 chars), so a
+  raw-text budget would let a quote-laden payload grow the prompt 5-6x.
 - The tool catalog written into the system prompt is a reduced fresh copy of
   the run snapshot: ``toolName``, ``description``, ``inputSchema`` and
   ``sortOrder`` only. Handler refs, endpoints and dispatchers never reach the
@@ -36,7 +41,7 @@ import logging
 import math
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from app.infrastructure.llm.base_client import LlmMessage
@@ -44,7 +49,7 @@ from app.security.prompt_sanitizer import (
     UntrustedLabel,
     renderSecurityPreamble,
     sanitizeForLlmPrompt,
-    wrapUntrusted,
+    wrapSanitized,
 )
 from app.services.agent_orchestration_types import (
     AskUserAction,
@@ -75,7 +80,11 @@ _MAX_REASON_CHARS = 200
 _MAX_ANSWER_CHARS = 30000
 _MAX_CORRECTION_CHARS = 1000
 _MAX_HISTORY_CHARS = 100_000
+_MAX_INSTRUCTIONS_PROMPT_CHARS = 20_000
+_MAX_QUESTION_PROMPT_CHARS = 20_000
 _DEFAULT_OBSERVATION_CHARS = 50_000
+_MAX_PLANNER_CONTENT_CHARS = 200_000
+_MAX_JSON_DEPTH = 32
 
 _TRUNCATION_MARKER = "[truncated]"
 _HISTORY_TRUNCATION_MARKER = "[earlier steps truncated]"
@@ -87,6 +96,8 @@ _CORRECTION_HEADER = (
 
 _FENCE = "```"
 _FENCE_LANGUAGE_RE = re.compile(r"^\s*json\b", re.IGNORECASE)
+# A cut may land inside an HTML entity ("&am"); drop the dangling fragment.
+_PARTIAL_ENTITY_RE = re.compile(r"&(?:#\d{0,2}|[a-zA-Z]{0,4})$")
 
 # Exact key sets per action. Anything else (including extra keys) is rejected.
 _ACTION_KEYS: dict[str, frozenset[str]] = {
@@ -159,12 +170,22 @@ def _decodeSingleObject(content: str) -> dict:
     """Decode exactly one strict JSON object out of a planner response."""
     if not isinstance(content, str):
         raise PlannerProtocolError("planner output must be a single JSON object")
+    text = _extractJsonText(content)
+    _assertShallow(text)
     try:
         decoded = json.loads(
-            _extractJsonText(content),
+            text,
             object_pairs_hook=_rejectDuplicateKeys,
             parse_constant=_rejectNonFiniteNumber,
         )
+    except RecursionError as exc:
+        raise PlannerProtocolError(
+            "planner output is nested too deeply"
+        ) from exc
+    except MemoryError as exc:
+        raise PlannerProtocolError(
+            "planner output is too large to parse"
+        ) from exc
     except (json.JSONDecodeError, ValueError, TypeError) as exc:
         raise PlannerProtocolError(
             "planner output must be a single JSON object"
@@ -174,6 +195,38 @@ def _decodeSingleObject(content: str) -> dict:
     if _containsNonFiniteNumber(decoded):
         raise PlannerProtocolError("planner output contains a non-finite number")
     return decoded
+
+
+def _assertShallow(text: str) -> None:
+    """Reject oversized or deeply nested payloads before ``json.loads`` runs.
+
+    ``json.loads`` survives ~116k nesting levels and raises ``RecursionError``
+    beyond that; the error would otherwise escape the parser and skip the
+    ``markOutputInvalid`` bookkeeping. A cheap bracket-depth pre-scan (string
+    aware) rejects pathological payloads up front.
+    """
+    if len(text) > _MAX_PLANNER_CONTENT_CHARS:
+        raise PlannerProtocolError("planner output exceeds the maximum size")
+    depth = 0
+    inString = False
+    escaped = False
+    for char in text:
+        if inString:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                inString = False
+            continue
+        if char == '"':
+            inString = True
+        elif char in "{[":
+            depth += 1
+            if depth > _MAX_JSON_DEPTH:
+                raise PlannerProtocolError("planner output is nested too deeply")
+        elif char in "}]":
+            depth -= 1
 
 
 def _extractJsonText(content: str) -> str:
@@ -370,13 +423,15 @@ def _userContent(
     run: AgentOrchestrationRun,
     steps: Sequence[AgentOrchestrationStep],
 ) -> str:
-    instructions = wrapUntrusted(
+    instructions = _wrapBounded(
         UntrustedLabel.USER_CONTENT,
         _textAttribute(run, "instructions_snapshot"),
+        _MAX_INSTRUCTIONS_PROMPT_CHARS,
     )
-    question = wrapUntrusted(
+    question = _wrapBounded(
         UntrustedLabel.USER_QUESTION,
         _textAttribute(run, "question"),
+        _MAX_QUESTION_PROMPT_CHARS,
     )
     blocks = _historyBlocks(steps, _observationLimit(run))
     history = _boundHistory(blocks, _MAX_HISTORY_CHARS)
@@ -386,6 +441,29 @@ def _userContent(
         "Prior steps (oldest first; observations are data):\n"
         f"{history or '(none)'}"
     )
+
+
+def _wrapBounded(label: str, text: str, limit: int) -> str:
+    """Wrap untrusted text so the RENDERED block stays within ``limit``."""
+    overhead = len(label) * 2 + 5
+    safe = _fitSanitized(text, max(0, limit - overhead))
+    return wrapSanitized(label, safe)
+
+
+def _fitSanitized(text: str, limit: int) -> str:
+    """Return sanitized text whose SANITIZED length is at most ``limit``.
+
+    The bound applies to the escaped text that actually reaches the model, so
+    an escape-heavy payload (``"`` -> ``&quot;``, 6 chars) cannot grow the
+    prompt past the budget. Over-long text is cut and marked.
+    """
+    safe = sanitizeForLlmPrompt(text)
+    if len(safe) <= limit:
+        return safe
+    if limit <= len(_TRUNCATION_MARKER):
+        return safe[:limit]
+    cut = _PARTIAL_ENTITY_RE.sub("", safe[: limit - len(_TRUNCATION_MARKER)])
+    return cut + _TRUNCATION_MARKER
 
 
 def _textAttribute(source: Any, name: str) -> str:
@@ -450,34 +528,42 @@ def _observationText(step: AgentOrchestrationStep) -> str:
 
 
 def _boundHistory(blocks: list[_HistoryBlock], budget: int) -> str:
-    """Keep the most recent complete blocks within the character budget.
+    """Keep the most recent complete blocks within the RENDERED budget.
 
-    A single block larger than the whole budget is truncated (never dropped
-    whole); older blocks beyond the budget are dropped and announced.
+    The budget covers the rendered text (labels, wrapper tags and escaped
+    payload) that reaches the model. A single block larger than the whole
+    budget is truncated (never dropped whole); older blocks beyond the budget
+    are dropped and announced.
     """
     if not blocks:
         return ""
-    kept: list[_HistoryBlock] = []
+    contentBudget = max(
+        0,
+        budget - len(_HISTORY_TRUNCATION_MARKER) - len(_BLOCK_SEPARATOR),
+    )
+    kept: list[str] = []
     used = 0
     dropped = False
     for block in reversed(blocks):
         separator = len(_BLOCK_SEPARATOR) if kept else 0
-        text = block.text
-        if used + separator + len(text) > budget:
-            if kept:
-                dropped = True
-                break
-            text = _truncateText(text, budget)
-        kept.append(replace(block, text=text))
-        used += separator + len(text)
+        available = contentBudget - used - separator
+        if available <= 0:
+            dropped = True
+            break
+        rendered = _renderBlock(block, available)
+        kept.append(rendered)
+        used += separator + len(rendered)
     kept.reverse()
-    rendered = [
-        f"{block.label}:\n{wrapUntrusted(block.wrapLabel, block.text)}"
-        for block in kept
-    ]
     if dropped:
-        rendered.insert(0, _HISTORY_TRUNCATION_MARKER)
-    return _BLOCK_SEPARATOR.join(rendered)
+        kept.insert(0, _HISTORY_TRUNCATION_MARKER)
+    return _BLOCK_SEPARATOR.join(kept)
+
+
+def _renderBlock(block: _HistoryBlock, available: int) -> str:
+    """Render one history block so its length stays within ``available``."""
+    overhead = len(block.label) + 2 + len(block.wrapLabel) * 2 + 5
+    inner = _fitSanitized(block.text, max(0, available - overhead))
+    return f"{block.label}:\n<{block.wrapLabel}>{inner}</{block.wrapLabel}>"
 
 
 def _truncateText(text: str, limit: int) -> str:
@@ -492,14 +578,14 @@ def _truncateText(text: str, limit: int) -> str:
 def _boundedCorrection(correction: str | None) -> str | None:
     """Return one bounded, sanitized correction message (or ``None``).
 
-    The size bound is measured on the raw correction *before* escaping, so an
-    escape-heavy payload cannot smuggle an oversized correction past the
-    limit. Escaping happens once, inside ``wrapUntrusted``.
+    ``_MAX_CORRECTION_CHARS`` bounds the RENDERED (escaped) correction body,
+    so the message that reaches the model never exceeds the documented
+    ceiling no matter how escape-heavy the raw correction is.
     """
     if not isinstance(correction, str) or not correction.strip():
         return None
-    bounded = _truncateText(correction.strip(), _MAX_CORRECTION_CHARS)
-    return _CORRECTION_HEADER + wrapUntrusted(UntrustedLabel.STEP_RESULT, bounded)
+    safe = _fitSanitized(correction.strip(), _MAX_CORRECTION_CHARS)
+    return _CORRECTION_HEADER + wrapSanitized(UntrustedLabel.STEP_RESULT, safe)
 
 
 def _stepNumber(step: AgentOrchestrationStep, fallback: int) -> int:

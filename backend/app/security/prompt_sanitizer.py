@@ -3,6 +3,8 @@
 公共 API：
   - sanitizeForLlmPrompt(text): 5 字符 HTML entity 转义 + U+200B 打断 </x>
   - wrapUntrusted(label, text): 把 text 包成 <label>...</label>，label 走白名单
+  - wrapSanitized(label, safeText): 包**已 sanitize** 文本（不二次转义），供
+    需要按渲染后长度裁剪的调用方使用
   - UntrustedLabel: 11 个预定义 label（防 label 注入；含 3 个向后兼容旧标签）
   - SECURITY_PREAMBLE_EN / _ZH: system prompt guard 段
   - renderSecurityPreamble(): 拼接中英 guard
@@ -99,11 +101,8 @@ def sanitizeForLlmPrompt(text: str) -> str:
     return _insertZeroWidthAfterEscapedOpen(after_fence)
 
 
-def wrapUntrusted(label: str, text: str) -> str:
-    """把 text 包成 <label>...</label>，label 内部用 sanitizeForLlmPrompt。
-
-    label 必须是预定义常量（白名单内），不接受运行时拼字符串。
-    """
+def _assertAllowedLabel(label: str) -> None:
+    """校验 label 命名与白名单，防止运行时拼接 label 注入。"""
     if not _LABEL_PATTERN.match(label):
         raise ValueError(
             f"invalid untrusted-wrap label: {label!r} "
@@ -114,8 +113,28 @@ def wrapUntrusted(label: str, text: str) -> str:
             f"untrusted-wrap label {label!r} not in whitelist; "
             f"use UntrustedLabel.<CONSTANT>"
         )
+
+
+def wrapUntrusted(label: str, text: str) -> str:
+    """把 text 包成 <label>...</label>，label 内部用 sanitizeForLlmPrompt。
+
+    label 必须是预定义常量（白名单内），不接受运行时拼字符串。
+    """
+    _assertAllowedLabel(label)
     safe = sanitizeForLlmPrompt(text)
     return f"<{label}>{safe}</{label}>"
+
+
+def wrapSanitized(label: str, safeText: str) -> str:
+    """把**已经 sanitize 过**的文本包成 <label>...</label>（不二次转义）。
+
+    给需要先按「渲染后长度」裁剪、再包裹的调用方用：先用
+    ``sanitizeForLlmPrompt`` + 长度裁剪得到 ``safeText``，再走本函数，
+    避免二次转义把长度放大 5~6 倍。label 白名单校验与 ``wrapUntrusted``
+    完全一致。
+    """
+    _assertAllowedLabel(label)
+    return f"<{label}>{safeText}</{label}>"
 
 
 # System prompt guard 段（中英双语）

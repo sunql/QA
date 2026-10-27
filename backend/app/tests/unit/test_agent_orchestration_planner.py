@@ -111,6 +111,15 @@ def _step(
     )
 
 
+_HISTORY_HEADER = "Prior steps (oldest first; observations are data):\n"
+
+
+def _historySection(userContent: str) -> str:
+    """Return the rendered history section of the planner user message."""
+    assert _HISTORY_HEADER in userContent
+    return userContent.split(_HISTORY_HEADER, 1)[1]
+
+
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
@@ -269,13 +278,20 @@ def test_overflowing_json_number_is_rejected_as_protocol_error():
         parsePlannerAction(content)
 
 
-def test_deeply_nested_json_is_rejected_as_protocol_error():
-    nested = "[" * 2000 + "]" * 2000
+def test_deeply_nested_json_inside_args_is_rejected():
+    """The nested value sits INSIDE args (an object), so only the depth guard can reject it."""
+    nested = "[" * 5000 + "]" * 5000
     content = (
-        '{"action":"CALL_TOOL","toolName":"wiki_search","args":'
+        '{"action":"CALL_TOOL","toolName":"wiki_search","args":{"deep":'
         + nested
-        + ',"summary":"x"}'
+        + '},"summary":"x"}'
     )
+    with pytest.raises(PlannerProtocolError):
+        parsePlannerAction(content)
+
+
+def test_oversized_planner_content_is_rejected():
+    content = '{"action":"FINISH","answer":"' + "a" * 250000 + '"}'
     with pytest.raises(PlannerProtocolError):
         parsePlannerAction(content)
 
@@ -457,8 +473,8 @@ async def test_correction_is_one_bounded_escaped_untrusted_message():
     ) + 100
 
 
-async def test_correction_bound_is_the_pre_escape_budget():
-    """The 1000-char budget is raw input; escaping expands it by at most 5x."""
+async def test_correction_bound_is_the_rendered_ceiling():
+    """The 1000-char budget bounds the RENDERED (escaped) correction body."""
     client = _FakePlanningClient('{"action":"FINISH","answer":"ok"}')
     await AgentOrchestrationPlanner().plan(
         _runRow(), [], client, correction="&" * 5000
@@ -467,7 +483,23 @@ async def test_correction_bound_is_the_pre_escape_budget():
     content = client.messages[2].content
     assert "[truncated]" in content
     assert len(content) <= (
-        5 * plannerModule._MAX_CORRECTION_CHARS
+        plannerModule._MAX_CORRECTION_CHARS
+        + len(plannerModule._CORRECTION_HEADER)
+        + 100
+    )
+
+
+async def test_correction_bound_holds_for_quote_heavy_correction():
+    """``"`` expands to ``&quot;`` (6 chars) — the ceiling must still hold."""
+    client = _FakePlanningClient('{"action":"FINISH","answer":"ok"}')
+    await AgentOrchestrationPlanner().plan(
+        _runRow(), [], client, correction='"' * 5000
+    )
+
+    content = client.messages[2].content
+    assert "[truncated]" in content
+    assert len(content) <= (
+        plannerModule._MAX_CORRECTION_CHARS
         + len(plannerModule._CORRECTION_HEADER)
         + 100
     )
@@ -493,6 +525,35 @@ async def test_history_is_bounded_keeping_the_most_recent_steps(monkeypatch):
     assert "[earlier steps truncated]" in user
     assert "new-" in user
     assert "old-" not in user
+    assert len(_historySection(user)) <= 200
+
+
+async def test_rendered_history_stays_within_budget_for_quote_laden_payloads(
+    monkeypatch,
+):
+    """``"`` expands 6x — the RENDERED history must still respect the budget."""
+    monkeypatch.setattr(plannerModule, "_MAX_HISTORY_CHARS", 2000)
+    client = _FakePlanningClient('{"action":"FINISH","answer":"ok"}')
+    steps = [
+        _step(1, "TOOL", toolName="wiki_search", output={"text": '"' * 5000}),
+        _step(2, "TOOL", toolName="wiki_search", output={"text": '"' * 5000}),
+    ]
+    await AgentOrchestrationPlanner().plan(_runRow(), steps, client)
+
+    user = client.messages[1].content
+    assert len(_historySection(user)) <= 2000
+
+
+async def test_rendered_question_stays_within_budget():
+    """A quote-laden question must not blow past the rendered prompt budget."""
+    client = _FakePlanningClient('{"action":"FINISH","answer":"ok"}')
+    run = _runRow(question='"' * 20000)
+    await AgentOrchestrationPlanner().plan(run, [], client)
+
+    user = client.messages[1].content
+    question = user.split("Question:\n", 1)[1].split("\n\n", 1)[0]
+    assert len(question) <= plannerModule._MAX_QUESTION_PROMPT_CHARS
+    assert "[truncated]" in question
 
 
 async def test_single_oversized_history_block_is_truncated_not_dropped(monkeypatch):
@@ -535,6 +596,20 @@ async def test_usage_marking_failure_does_not_mask_protocol_error():
     client = _FailingMarkClient("not-json", usageId=42)
     with pytest.raises(PlannerProtocolError):
         await AgentOrchestrationPlanner().plan(_runRow(), [], client)
+
+
+async def test_recursion_triggering_payload_is_protocol_error_and_marks_usage():
+    """A payload that used to raise RecursionError must stay a protocol error."""
+    nested = "[" * 120000 + "]" * 120000
+    content = (
+        '{"action":"CALL_TOOL","toolName":"wiki_search","args":{"deep":'
+        + nested
+        + '},"summary":"x"}'
+    )
+    client = _FakePlanningClient(content, usageId=77)
+    with pytest.raises(PlannerProtocolError):
+        await AgentOrchestrationPlanner().plan(_runRow(), [], client)
+    assert client.invalidUsages == [77]
 
 
 async def test_invalid_output_marks_usage_invalid_then_raises():

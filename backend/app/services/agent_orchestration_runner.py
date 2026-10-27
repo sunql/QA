@@ -42,6 +42,7 @@ from app.services.agent_orchestration_planner import (
 from app.services.agent_orchestration_runner_support import (
     INFRASTRUCTURE_EXCEPTIONS,
     INFRASTRUCTURE_RETRY_LIMIT,
+    MSG_PLANNER_INVALID,
     AgentOrchestrationRunReader,
     MeteredStep,
     RetryBudget,
@@ -82,7 +83,6 @@ ERROR_TOOL_EXECUTION = "TOOL_EXECUTION_FAILED"
 MSG_INTERNAL_ERROR = "编排运行遇到内部错误，已安全停止"
 MSG_INFRASTRUCTURE_ERROR = "编排运行依赖的外部服务暂时不可用"
 MSG_MODEL_UNAVAILABLE = "编排运行所需的模型配置当前不可用"
-MSG_PLANNER_INVALID = "Planner 输出不符合编排协议"
 MSG_TOOL_FAILED = "工具执行失败"
 
 
@@ -187,6 +187,13 @@ class AgentOrchestrationRunner:
             if last.status == StepStatus.RUNNING.value:
                 await self._replayTool(run, last, workerId, now)
                 return True
+            # 崩溃可能发生在「TOOL FAILED 提交」与「暂停写入」之间：阈值判定
+            # 必须能从已提交的 TOOL 行重建，否则恢复后会多调一次 Planner，
+            # 甚至因为下一次工具成功而悄悄越过应该暂停的失败次数。
+            if self._trailingToolFailures(steps) >= self._maxToolFailures():
+                raise OrchestrationPauseError(
+                    PauseCode.TOOL_FAILED.value, MSG_TOOL_FAILED
+                )
             return False
         if last.kind != StepKind.PLAN.value:
             return False
@@ -217,7 +224,10 @@ class AgentOrchestrationRunner:
             await self._succeed(run, planStep.answer or "", workerId)
             return
         if action == ASK_USER:
-            await self._pauseForUser(run, planStep, workerId)
+            # 恢复路径：planStep 是刚从库里读出的已提交行，理由已持久化。
+            await self._pauseForUser(
+                run, planStep, workerId, planStep.plan_summary or ""
+            )
             return
         raise RuntimeError(f"persisted PLAN action {action!r} cannot be resumed")
 
@@ -368,7 +378,9 @@ class AgentOrchestrationRunner:
                 return
             if isinstance(action, AskUserAction):
                 await self._completePlan(run, planStep, action, workerId)
-                await self._pauseForUser(run, planStep, workerId)
+                # 暂停码必须来自**手中的动作**：planStep 是提交前读出的陈旧
+                # 对象，真实 store 在新会话提交，读它的 plan_summary 永远为 None。
+                await self._pauseForUser(run, planStep, workerId, action.reason)
                 return
             if isinstance(action, FinishAction):
                 # FINISH 在任何 post-response 预算检查之前处理：本次合法完成的
@@ -581,11 +593,11 @@ class AgentOrchestrationRunner:
         run: AgentOrchestrationRun,
         planStep: AgentOrchestrationStep,
         workerId: str,
+        reason: str,
     ) -> None:
-        reason = (planStep.plan_summary or "").lower()
         code = (
             PauseCode.AMBIGUOUS.value
-            if "ambiguous" in reason
+            if "ambiguous" in (reason or "").lower()
             else PauseCode.NEEDS_INPUT.value
         )
         await self._pauseConsumingPlan(run, planStep, workerId, code)

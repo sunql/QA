@@ -234,10 +234,16 @@ class _FakeStore:
         self.calls.append("completePlanStep")
         if self.completePlanError is not None:
             raise self.completePlanError
-        step = self._step(stepId)
-        _applyPlanAction(step, action)
-        step.status = "SUCCEEDED"
-        step.finished_at = now
+        # 真实 store 在新会话里提交，调用方持有的对象保持提交前的样子（陈旧）。
+        # 这里同样换成新对象，防止 Runner 靠内存别名读到尚未重新查询的字段。
+        persisted = _FakeStep(**vars(self._step(stepId)))
+        _applyPlanAction(persisted, action)
+        persisted.status = "SUCCEEDED"
+        persisted.finished_at = now
+        index = next(
+            i for i, step in enumerate(self.steps) if step.id == stepId
+        )
+        self.steps[index] = persisted
 
     async def completeToolStep(
         self,
@@ -694,7 +700,8 @@ async def test_permission_denial_pauses_immediately_without_handler_or_feedback(
     assert store.run.pause_code == "PERMISSION_DENIED"
     assert executor.invocations == []
     assert [step.kind for step in store.steps] == ["PLAN"]
-    assert "PERMISSION" not in (store.run.pause_detail or {})
+    # 暂停不携带任何策略细节：detail 为空，且文案只有通用拒绝语。
+    assert store.run.pause_detail is None
 
 
 # ---------------------------------------------------------------------------
@@ -803,6 +810,36 @@ async def test_two_consecutive_tool_exceptions_pause_tool_failed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_with_two_committed_tool_failures_pauses_without_replanning() -> None:
+    """崩溃在「TOOL FAILED 提交」与「暂停写入」之间：已提交行重建判定。"""
+    runner, store, planner, executor, _ = _build(planner=_FakePlanner())
+    for query in ("a", "b"):
+        store._appendStep(
+            kind="PLAN",
+            status="SUCCEEDED",
+            action="CALL_TOOL",
+            tool_name="wiki_search",
+            input_json={"query": query},
+        )
+        store._appendStep(
+            kind="TOOL",
+            status="FAILED",
+            tool_name="wiki_search",
+            input_json={"query": query},
+            error_code="TOOL_EXECUTION_FAILED",
+        )
+    store.run.iteration_count = 2
+    store.run.tool_call_count = 2
+
+    await _drive(runner)
+
+    assert planner.calls == []
+    assert executor.invocations == []
+    assert store.run.status == "PAUSED"
+    assert store.run.pause_code == "TOOL_FAILED"
+
+
+@pytest.mark.asyncio
 async def test_a_successful_tool_resets_the_consecutive_failure_counter() -> None:
     planner = _FakePlanner(
         [
@@ -812,11 +849,7 @@ async def test_a_successful_tool_resets_the_consecutive_failure_counter() -> Non
             FinishAction("done"),
         ]
     )
-    runner, store, _, executor, _ = _build(
-        planner=planner,
-        invokeErrors=[RuntimeError("boom"), RuntimeError("boom again")],
-    )
-    executor.invokeErrors = [RuntimeError("boom")]
+    runner, store, _, executor, _ = _build(planner=planner)
 
     # Sequence: fail(1), success(reset), fail(1), FINISH -> limit 2 never hit.
     # The second injected failure is consumed by the middle call only if the
@@ -863,7 +896,7 @@ async def test_planner_infrastructure_errors_are_retried_then_pause() -> None:
     assert len(planner.calls) == 1 + _INFRA_RETRY_LIMIT
     assert store.run.status == "PAUSED"
     assert store.run.pause_code == "INFRASTRUCTURE_ERROR"
-    assert "sk-secret" not in (store.run.pause_detail or {}).get("message", "")
+    assert store.run.pause_detail is None
     assert store.run.error_message is None
     assert executor.invocations == []
 

@@ -63,6 +63,10 @@ ASK_USER_JSON = (
     '{"action":"ASK_USER","question":"which supplier code?",'
     '"reason":"the question does not name a supplier"}'
 )
+ASK_USER_AMBIGUOUS_JSON = (
+    '{"action":"ASK_USER","question":"which supplier code?",'
+    '"reason":"The request is AMBIGUOUS between two suppliers"}'
+)
 
 
 class SimulatedWorkerCrash(BaseException):
@@ -87,6 +91,10 @@ class _RecordingExecutor:
         self.invocations.append(dict(prepared.args))
         self.contexts.append(context)
         return self._handler(dict(prepared.args))
+
+
+def _raiseToolError(args: dict[str, Any]) -> ToolResult:
+    raise RuntimeError(f"tool handler blew up for {args!r}")
 
 
 def _fakeTool() -> AgentTool:
@@ -177,6 +185,11 @@ class _CrashingStore(AgentOrchestrationStore):
         self._maybeCrash("before_complete_tool")
         await super().completeToolStep(*args, **kwargs)
         self._maybeCrash("after_complete_tool")
+
+    async def pauseRun(self, *args: Any, **kwargs: Any) -> None:
+        # 崩溃点：暂停判定已做出、TOOL FAILED 已提交，但暂停尚未写入。
+        self._maybeCrash("before_pause")
+        await super().pauseRun(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -635,3 +648,72 @@ async def test_reclaimed_run_with_cancellation_finalizes_without_any_llm_call(
     assert persisted.finished_at is not None
     steps = await _loadSteps(sessionFactory, run.id)
     assert steps == []
+
+
+# ---------------------------------------------------------------------------
+# fix round 1: pause-code and crash-safety regressions
+# ---------------------------------------------------------------------------
+
+
+async def test_first_execution_ambiguous_reason_pauses_ambiguous(
+    sessionFactory: async_sessionmaker[AsyncSession],
+    scriptedClient: Callable[[list[str]], _ScriptedLlmClient],
+) -> None:
+    """The pause code comes from the ACTION's reason, not the stale step row."""
+
+    client = scriptedClient([ASK_USER_AMBIGUOUS_JSON])
+    run, _ = await _seed(sessionFactory)
+    await _claim(sessionFactory, run.id, WORKER_1)
+
+    await _runner(sessionFactory).runClaimed(run.id, WORKER_1)
+
+    persisted = await _loadRun(sessionFactory, run.id)
+    assert persisted.status == "PAUSED"
+    assert persisted.pause_code == "AMBIGUOUS"
+    assert persisted.pause_detail is None
+    assert len(client.calls) == 1
+    steps = await _loadSteps(sessionFactory, run.id)
+    assert [step.status for step in steps] == ["SKIPPED"]
+    assert steps[0].plan_summary == "The request is AMBIGUOUS between two suppliers"
+
+
+async def test_crash_between_tool_failure_commit_and_pause_does_not_replan(
+    sessionFactory: async_sessionmaker[AsyncSession],
+    scriptedClient: Callable[[list[str]], _ScriptedLlmClient],
+) -> None:
+    """Two committed FAILED rows must reproduce TOOL_FAILED without an LLM call."""
+
+    client = scriptedClient([CALL_TOOL_JSON, CALL_TOOL_JSON])
+    run, _ = await _seed(sessionFactory)
+    await _claim(sessionFactory, run.id, WORKER_1)
+    executor = _RecordingExecutor(handler=_raiseToolError)
+
+    with pytest.raises(SimulatedWorkerCrash):
+        await _runner(
+            sessionFactory, store=_CrashingStore("before_pause"), executor=executor
+        ).runClaimed(run.id, WORKER_1)
+
+    crashed = await _loadRun(sessionFactory, run.id)
+    assert crashed.status == "RUNNING"
+    crashedSteps = await _loadSteps(sessionFactory, run.id)
+    assert [step.kind for step in crashedSteps] == ["PLAN", "TOOL", "PLAN", "TOOL"]
+    assert [step.status for step in crashedSteps] == [
+        "SUCCEEDED",
+        "FAILED",
+        "SUCCEEDED",
+        "FAILED",
+    ]
+    assert len(client.calls) == 2
+    assert len(executor.invocations) == 2
+
+    await _expireLeaseAndReclaim(sessionFactory, run.id)
+    await _runner(sessionFactory, executor=executor).runClaimed(run.id, WORKER_2)
+
+    persisted = await _loadRun(sessionFactory, run.id)
+    assert persisted.status == "PAUSED"
+    assert persisted.pause_code == "TOOL_FAILED"
+    # The committed FAILED rows already prove the threshold: no new planning.
+    assert len(client.calls) == 2
+    steps = await _loadSteps(sessionFactory, run.id)
+    assert len([step for step in steps if step.kind == "TOOL"]) == 2
+    assert len(executor.invocations) == 2

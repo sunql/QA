@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -161,7 +161,3 @@ class AgentOrchestrationRunReader:
 
 def isInfrastructureError(error: Exception) -> bool:
     return isinstance(error, INFRASTRUCTURE_EXCEPTIONS)
-
-
-def utcnow() -> datetime:
-    return datetime.now(UTC)

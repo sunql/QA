@@ -342,4 +342,116 @@ describe("AgentOrchestrationPage", () => {
     await waitFor(() => expect(agentApi.listAgents).toHaveBeenCalled());
     expect(agentApi.runAgent).not.toHaveBeenCalled();
   });
+
+  it("工具列表为空 → 渲染空状态，且不伪造任何工具选项", async () => {
+    orchestrationApi.listOrchestrationToolOptions.mockResolvedValue([]);
+    renderPage();
+    await waitFor(() =>
+      expect(orchestrationApi.listOrchestrationToolOptions).toHaveBeenCalled(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: NEW_PROFILE_BUTTON }));
+    expect(await screen.findByText("暂无可用的只读工具")).toBeInTheDocument();
+
+    openSelect(1);
+    expect(document.querySelectorAll(".ant-select-item-option")).toHaveLength(0);
+  });
+
+  it("更新返回 422 → 展示具体校验原因，而非通用失败文案", async () => {
+    orchestrationApi.listOrchestrations.mockResolvedValue([existingProfile]);
+    orchestrationApi.updateOrchestration.mockRejectedValue(
+      Object.assign(new Error("工具不存在：tool_x"), { status: 422 }),
+    );
+    renderPage();
+    const row = await findProfileRow(AGENT_CODE);
+
+    fireEvent.click(within(row).getByRole("button", { name: EDIT_BUTTON }));
+    fireEvent.click(await screen.findByRole("button", { name: SAVE_BUTTON }));
+
+    expect(
+      await screen.findByText("参数校验未通过：工具不存在：tool_x"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("更新编排配置失败")).toBeNull();
+  });
+
+  it("创建时 Agent 不存在（404）→ 展示专属文案，而非通用失败文案", async () => {
+    orchestrationApi.createOrchestration.mockRejectedValue(
+      Object.assign(new Error("not found"), { status: 404 }),
+    );
+    renderPage();
+    await waitFor(() => expect(agentApi.listAgents).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: NEW_PROFILE_BUTTON }));
+    await fillCreateForm("先查风险再汇总");
+    fireEvent.click(screen.getByRole("button", { name: CREATE_BUTTON }));
+
+    expect(
+      await screen.findByText("找不到对应的 Agent 或编排配置"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("创建编排配置失败")).toBeNull();
+  });
+
+  it("切换启用状态遇到 409 → 展示冲突文案，并可刷新列表重试", async () => {
+    orchestrationApi.listOrchestrations.mockResolvedValue([existingProfile]);
+    orchestrationApi.toggleOrchestration.mockRejectedValue(
+      Object.assign(new Error("conflict"), { status: 409 }),
+    );
+    renderPage();
+    const row = await findProfileRow(AGENT_CODE);
+
+    fireEvent.click(within(row).getByRole("switch"));
+    expect(
+      await screen.findByText("配置已被他人修改，请刷新后重试"),
+    ).toBeInTheDocument();
+
+    const callsBeforeRefresh =
+      orchestrationApi.listOrchestrations.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: /刷\s*新/ }));
+    await waitFor(() =>
+      expect(
+        orchestrationApi.listOrchestrations.mock.calls.length,
+      ).toBeGreaterThan(callsBeforeRefresh),
+    );
+  });
+
+  it("更新被 ACL 拒绝（403）→ 展示权限文案，而非通用失败文案", async () => {
+    orchestrationApi.listOrchestrations.mockResolvedValue([existingProfile]);
+    orchestrationApi.updateOrchestration.mockRejectedValue(
+      Object.assign(new Error("forbidden"), { status: 403 }),
+    );
+    renderPage();
+    const row = await findProfileRow(AGENT_CODE);
+
+    fireEvent.click(within(row).getByRole("button", { name: EDIT_BUTTON }));
+    fireEvent.click(await screen.findByRole("button", { name: SAVE_BUTTON }));
+
+    expect(
+      await screen.findByText("没有权限修改该 Agent 的编排配置"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("更新编排配置失败")).toBeNull();
+  });
+
+  it("拒绝值不是 Error（null）→ 仍给出提示，不抛 TypeError", async () => {
+    orchestrationApi.createOrchestration.mockRejectedValue(null);
+    renderPage();
+    await waitFor(() => expect(agentApi.listAgents).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: NEW_PROFILE_BUTTON }));
+    await fillCreateForm("先查风险再汇总");
+    fireEvent.click(screen.getByRole("button", { name: CREATE_BUTTON }));
+
+    expect(await screen.findByText("创建编排配置失败")).toBeInTheDocument();
+  });
+
+  it("预算输入的上限与后端系统天花板一致", async () => {
+    renderPage();
+    await waitFor(() => expect(agentApi.listAgents).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: NEW_PROFILE_BUTTON }));
+    const modal = (await screen.findByRole("dialog")) as HTMLElement;
+    const spinbuttons = within(modal).getAllByRole("spinbutton");
+    expect(
+      spinbuttons.map((input) => input.getAttribute("aria-valuemax")),
+    ).toEqual(["20", "30", "5", "900", "50000"]);
+  });
 });

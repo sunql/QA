@@ -7,12 +7,8 @@ import {
   Form,
   Modal,
   Space,
-  Switch,
-  Table,
-  Tag,
   Typography,
 } from "antd";
-import type { TableColumnsType } from "antd";
 import { useTranslation } from "../i18n";
 import { listAgents } from "../api/agentRegistry";
 import {
@@ -26,6 +22,7 @@ import OrchestrationProfileForm, {
   DEFAULT_PROFILE_VALUES,
 } from "../components/agent/OrchestrationProfileForm";
 import type { ProfileFormValues } from "../components/agent/OrchestrationProfileForm";
+import OrchestrationProfileTable from "../components/agent/OrchestrationProfileTable";
 import type { AgentDefinition } from "../types/agentRegistry";
 import type {
   AgentOrchestrationProfileRead,
@@ -35,6 +32,18 @@ import type {
 /** 后端把 axios 错误归一化成 AppError{code,status,detail}，没有 .response。 */
 interface StatusError extends Error {
   status?: number;
+}
+
+/** 安全取 HTTP 状态码：拒绝值可能是 null/undefined，不能直接取属性。 */
+function errorStatus(error: unknown): number | undefined {
+  return error instanceof Error ? (error as StatusError).status : undefined;
+}
+
+/** 取后端给出的诊断文本（AppError.message 来自响应 detail.message）。 */
+function errorDetailText(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return "";
 }
 
 /** 绑定工具按 sortOrder 排序后的名称列表（不修改入参）。 */
@@ -140,18 +149,46 @@ export default function AgentOrchestrationPage() {
     };
   }, []);
 
-  /** 写操作的错误提示：409 是乐观锁冲突，单独给友好文案。 */
+  /**
+   * 写操作的错误提示：按状态码分流，避免把权限/校验/找不到统统说成“失败”。
+   * 422 追加后端给出的具体原因（如「工具不存在：X」「超出系统上限 20」）。
+   */
   function describeFailure(error: unknown, failureKey: string): string {
-    const status = (error as StatusError).status;
+    const status = errorStatus(error);
     if (status === 409) return t("agentOrchestration.messages.conflict");
+    if (status === 403) return t("agentOrchestration.messages.forbidden");
+    if (status === 404) return t("agentOrchestration.messages.agentNotFound");
+    if (status === 422) {
+      const detail = errorDetailText(error);
+      return detail
+        ? t("agentOrchestration.messages.validationFailed", { detail })
+        : t("agentOrchestration.messages.validationFailedGeneric");
+    }
     return t(failureKey);
   }
 
   function describeCreateFailure(error: unknown): string {
-    const status = (error as StatusError).status;
-    if (status === 409) return t("agentOrchestration.messages.duplicate");
-    return t("agentOrchestration.messages.createFailed");
+    if (errorStatus(error) === 409) {
+      return t("agentOrchestration.messages.duplicate");
+    }
+    return describeFailure(error, "agentOrchestration.messages.createFailed");
   }
+
+  /** 重新拉取配置列表；冲突后用它把服务端最新 revision 同步回 state。 */
+  const refreshProfiles = async (): Promise<void> => {
+    try {
+      const rows = await listOrchestrations();
+      setProfiles(rows);
+      setEditing((current) => {
+        if (!current) return current;
+        return (
+          rows.find((row) => row.agentCode === current.agentCode) ?? current
+        );
+      });
+    } catch {
+      setPageError(t("agentOrchestration.messages.loadProfilesFailed"));
+    }
+  };
 
   const openCreate = (): void => {
     setEditing(null);
@@ -218,6 +255,8 @@ export default function AgentOrchestrationPage() {
           ? describeFailure(error, "agentOrchestration.messages.updateFailed")
           : describeCreateFailure(error),
       );
+      // 乐观锁冲突：拉一次最新列表，把服务端 revision 同步回来，用户可直接重试。
+      if (errorStatus(error) === 409) void refreshProfiles();
     } finally {
       setSaving(false);
     }
@@ -242,6 +281,8 @@ export default function AgentOrchestrationPage() {
       setPageError(
         describeFailure(error, "agentOrchestration.messages.toggleFailed"),
       );
+      // 乐观锁冲突：拉一次最新列表，把服务端 revision 同步回来，用户可直接重试。
+      if (errorStatus(error) === 409) void refreshProfiles();
     }
   };
 
@@ -254,52 +295,6 @@ export default function AgentOrchestrationPage() {
     label: option.toolName,
   }));
 
-  const columns: TableColumnsType<AgentOrchestrationProfileRead> = [
-    {
-      title: t("agentOrchestration.columns.agentCode"),
-      dataIndex: "agentCode",
-      key: "agentCode",
-    },
-    {
-      title: t("agentOrchestration.columns.tools"),
-      key: "tools",
-      render: (_value, record) =>
-        t("agentOrchestration.toolCount", { count: record.bindings.length }),
-    },
-    {
-      title: t("agentOrchestration.columns.enabled"),
-      key: "enabled",
-      render: (_value, record) => (
-        <Space>
-          <Switch
-            checked={record.enabled}
-            aria-label={t("agentOrchestration.columns.enabled")}
-            onChange={() => void handleToggle(record)}
-          />
-          <Tag color={record.enabled ? "green" : "default"}>
-            {record.enabled
-              ? t("agentOrchestration.status.enabled")
-              : t("agentOrchestration.status.disabled")}
-          </Tag>
-        </Space>
-      ),
-    },
-    {
-      title: t("agentOrchestration.columns.revision"),
-      dataIndex: "revision",
-      key: "revision",
-    },
-    {
-      title: t("agentOrchestration.columns.actions"),
-      key: "actions",
-      render: (_value, record) => (
-        <Button size="small" onClick={() => openEdit(record)}>
-          {t("agentOrchestration.editButton")}
-        </Button>
-      ),
-    },
-  ];
-
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Card size="small">
@@ -310,22 +305,25 @@ export default function AgentOrchestrationPage() {
           <Typography.Paragraph type="secondary">
             {t("agentOrchestration.subtitle")}
           </Typography.Paragraph>
-          <Button type="primary" onClick={openCreate}>
-            {t("agentOrchestration.createButton")}
-          </Button>
+          <Space>
+            <Button type="primary" onClick={openCreate}>
+              {t("agentOrchestration.createButton")}
+            </Button>
+            <Button onClick={() => void refreshProfiles()}>
+              {t("agentOrchestration.refreshButton")}
+            </Button>
+          </Space>
         </Space>
       </Card>
 
       {pageError ? <Alert type="error" showIcon message={pageError} /> : null}
 
       <Card size="small">
-        <Table<AgentOrchestrationProfileRead>
-          rowKey="agentCode"
-          columns={columns}
-          dataSource={profiles}
+        <OrchestrationProfileTable
+          profiles={profiles}
           loading={loading}
-          pagination={false}
-          locale={{ emptyText: t("agentOrchestration.empty.profiles") }}
+          onEdit={openEdit}
+          onToggle={(profile) => void handleToggle(profile)}
         />
       </Card>
 

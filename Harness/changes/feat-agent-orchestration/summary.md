@@ -575,9 +575,11 @@ TEST_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5436/qa_metadata_
   退出码仍然只由 `FAIL` 决定（`SKIP` 不影响退出码）——「跳过不是通过」由**汇总文案**
   表达，而不是靠改退出码。
 - `S7` 需要一个 `status='active'` 且尚无编排 profile 的 `agent_definition`：
-  库里没有 ⇒ 脚本**自建**一个（退出时删除）；自建也失败 ⇒ `SKIP`。
+  库里没有 ⇒ 脚本**自建**一个（退出时删除）；自建失败 ⇒ 按异常类型判定
+  （前置条件形态 ⇒ `SKIP`；其它异常 ⇒ `FAIL`）。
 - `S8` 需要一个 `is_active` 的 `llm_config`：库里没有 ⇒ 脚本**自建**一个
-  （退出时删除）；自建也失败 ⇒ `SKIP`。
+  （退出时删除）；自建失败 ⇒ 按异常类型判定（前置条件形态 ⇒ `SKIP`；
+  其它异常 ⇒ `FAIL`）。
 - `S4` 的「禁用工具被拒」分支：`assertOrchestrationToolValid` 是**纯函数**
   （只读行的 5 个字段、不碰 DB），所以脚本拿**真实行的副本**置 `enabled=False`
   来验证禁用分支，**不写库**；输出会明说这一点。
@@ -590,11 +592,13 @@ TEST_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5436/qa_metadata_
   **绝不**声称写了没写的行。此时 `S6` 会因该工具不可编排而 `FAIL`（运行**不是**绿的）。
 - **SKIP 与 FAIL 的分类依据是异常的具体类型**：`NotFoundError` / `ConflictError` /
   `ValidationError`（库种子不满足）⇒ `SKIP` 并写明缺什么；**其它**异常 ⇒ `FAIL`
-  （脚本或环境的缺陷，必须暴露）。这条规则同时覆盖**三条**路径：
+  （脚本或环境的缺陷，必须暴露）。这条规则覆盖**两条**路径：
   ① 建 profile / 建 run 这类**服务调用**；② **准备前置条件**（自建 ACTIVE Agent /
   启用的模型配置）——`IntegrityError` / `OperationalError` 这类**真缺陷**在这里会
-  记 `FAIL`（退出码非零），**不会**被当成「库种子不满足」蒙混成 `SKIP`；
-  ③ 其它任何步骤。**不会**抛出未捕获的 traceback。
+  记 `FAIL`（退出码非零），**不会**被当成「库种子不满足」蒙混成 `SKIP`。
+  **其它步骤（S1/S2/S5/S6/S9/S10 与退出前的清理块）没有这一层分类**：那里冒出
+  未预期异常会**以未捕获的 traceback 直接冒出来**（`main()` 只有 `try/finally`、
+  没有 `except`）——这是**刻意的**：脚本不吞异常，缺陷必须显形。
 
 #### 本次运行（两次连续运行，**完整 stdout，逐行未删改**）
 
@@ -684,7 +688,7 @@ stdout 与运行 1 **逐行一致**，除了三个每次必然不同的自增/�
 
 #### 前置条件不满足时的行为（**单独实测**，非 canonical 运行）
 
-为了验证「前置条件不满足 ⇒ `SKIP` 而不是 traceback」，在**同一个隔离测试库**上
+为了验证「**准备前置条件**不满足 ⇒ `SKIP` 而不是 traceback」，在**同一个隔离测试库**上
 临时把第一波工具 `supplier_360` 置成 `enabled=false` 跑了一次，**跑完立刻改回
 `enabled=true`**（改前改后都核验过：7 个工具全部 `enabled=true`、
 `input_schema` 全部 `{}`、其余表零残留）。下面是这次运行的**关键输出摘录**

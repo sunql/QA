@@ -269,11 +269,13 @@ orchestration_paths = 9
 行数**汇报（第一波只写 `enabled=true` 的行；某工具被禁用 ⇒ 该行没写成 ⇒ 按
 「未写入 + 原因」汇报，`S6` 随后会 `FAIL`，运行**不是**绿的）。**SKIP 与 FAIL 的
 分类依据是异常的具体类型**：`NotFoundError` / `ConflictError` / `ValidationError`
-⇒ SKIP 并写明缺什么；其它异常 ⇒ FAIL——这条规则同时覆盖**建 profile / 建 run
-这类服务调用**、**准备前置条件**（自建 Agent / 模型配置：`IntegrityError` /
+⇒ SKIP 并写明缺什么；其它异常 ⇒ FAIL——这条规则覆盖**建 profile / 建 run
+这类服务调用**与**准备前置条件**（自建 Agent / 模型配置：`IntegrityError` /
 `OperationalError` 这类真缺陷在这里会记 FAIL 并让退出码非零，**不会**被当成
-「库种子不满足」蒙混成 SKIP）、以及其它任何步骤；前置条件不满足时输出 `SKIP`，
-**不会**抛未捕获的 traceback。
+「库种子不满足」蒙混成 SKIP）这两条路径；**准备前置条件**不满足时输出 `SKIP`，
+**不会**抛未捕获的 traceback。其它步骤（S1/S2/S5/S6/S9/S10 与退出前的清理块）
+**没有**这一层分类——那里冒出未预期异常会**以未捕获的 traceback 直接冒出来**
+（`main()` 只有 `try/finally`、没有 `except`），这是**刻意的**：脚本不吞异常。
 `S6` 断言的是「**脚本没有翻转任何 `enabled`**」，
 判定文本报出**观测到的运行前状态**（不同库种子不同）。
 

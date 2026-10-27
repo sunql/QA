@@ -46,19 +46,19 @@ from app.domain.models import (
 from app.domain.schemas import AgentAccessPolicyCreate, AgentDefinitionCreate
 from app.infrastructure.llm.base_client import StreamChunk
 from app.services.agent_registry_service import AgentRegistryService
-from app.tests.integration.test_agent_runtime_api import (
-    _createOrchestrationProfile,
-    _createOrchestrationTool,
-    _orchestrationClient,
-    _orchestrationRunCount,
-    _spyOrchestration,
+from app.tests._orchestration_support import (
+    createOrchestrationProfile,
+    createOrchestrationTool,
+    orchestrationClient,
+    orchestrationRunCount,
+    spyOrchestration,
 )
 
 
 @pytest.fixture
 async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
     """本模块默认 client：编排开关版（隔离断言需要 profile 端点）。"""
-    async for apiClient in _orchestrationClient(monkeypatch):
+    async for apiClient in orchestrationClient(monkeypatch):
         yield apiClient
 
 
@@ -732,9 +732,9 @@ async def _seedChatOrchestrationIsolation(client: AsyncClient, dbSession: AsyncS
     await _seedFeatureAndValue(
         dbSession, 1, "SUPPLIER_RISK_SCORE", "SUP000001", 0.50, unit="score", window="12M",
     )
-    await _createOrchestrationTool(client, "chat_iso_tool_a", "wiki_search")
-    await _createOrchestrationTool(client, "chat_iso_tool_b", "wiki_read")
-    await _createOrchestrationProfile(
+    await createOrchestrationTool(client, "chat_iso_tool_a", "wiki_search")
+    await createOrchestrationTool(client, "chat_iso_tool_b", "wiki_read")
+    await createOrchestrationProfile(
         client, "SUPPLIER_RISK_AGENT", ["chat_iso_tool_a", "chat_iso_tool_b"]
     )
 
@@ -752,7 +752,7 @@ class TestChatOrchestrationIsolation:
         """显式指名 Agent：仍走旧 runtime，编排 run 零行、新 runner 零调用。"""
         await _seedChatOrchestrationIsolation(client, dbSession)
         await _setupChatFakes(monkeypatch, dbSession)
-        runnerCalls, creationCalls = _spyOrchestration(monkeypatch)
+        runnerCalls, creationCalls = spyOrchestration(monkeypatch)
 
         resp = await client.post(
             "/api/v1/chat",
@@ -769,7 +769,7 @@ class TestChatOrchestrationIsolation:
         assert body["agentRun"]["tool"] == "supplier_risk"
         assert runnerCalls == []
         assert creationCalls == []
-        assert await _orchestrationRunCount(dbSession) == 0
+        assert await orchestrationRunCount(dbSession) == 0
 
     @pytest.mark.asyncio
     async def test_chat_semantic_routing_does_not_enter_orchestration(
@@ -778,7 +778,7 @@ class TestChatOrchestrationIsolation:
         """语义路由（无显式 Agent 指名）：同样不进新编排 Worker。"""
         await _seedChatOrchestrationIsolation(client, dbSession)
         await _setupChatFakes(monkeypatch, dbSession)
-        runnerCalls, creationCalls = _spyOrchestration(monkeypatch)
+        runnerCalls, creationCalls = spyOrchestration(monkeypatch)
 
         resp = await client.post(
             "/api/v1/chat",
@@ -795,4 +795,4 @@ class TestChatOrchestrationIsolation:
         assert body.get("agentRun") is None
         assert runnerCalls == []
         assert creationCalls == []
-        assert await _orchestrationRunCount(dbSession) == 0
+        assert await orchestrationRunCount(dbSession) == 0

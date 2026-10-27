@@ -18,17 +18,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import date, datetime, timezone
-from decimal import Decimal
-from typing import Any
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import getSettings
 from app.dependencies import CurrentUser
-from app.domain.agent_orchestration_models import AgentOrchestrationRun
 from app.domain.enums import (
     AgentPermission,
     AgentResponseLatency,
@@ -42,21 +37,21 @@ from app.domain.enums import (
 from app.domain.models import DataSource, EntityMapping, FeatureDefinition, FeatureValue
 from app.domain.schemas import AgentAccessPolicyCreate, AgentDefinitionCreate
 from app.infrastructure import neo4j_client as neo4j
-from app.infrastructure.llm.embedding_provider_factory import resetEmbeddingClientCache
-from app.infrastructure.security import crypto
 from app.services.agent_binding_cache import agent_binding_cache
-from app.services.agent_orchestration_run_service import AgentOrchestrationRunService
-from app.services.agent_orchestration_runner import AgentOrchestrationRunner
 from app.services.agent_registry_service import AgentRegistryService
-from app.services.agent_runtime_service import AgentRuntimeService
 from app.services.agent_tool_config_registry import agent_tool_config_registry
 from app.services.agent_tool_config_service import AgentToolConfigService
-from app.tests import _pg_support
+from app.tests._orchestration_support import (
+    createOrchestrationProfile,
+    createOrchestrationTool,
+    orchestrationClient,
+    orchestrationRunCount,
+    spyOrchestration,
+)
 
 AUTH_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
 _ADMIN = CurrentUser(userId="test-admin", roles=("admin",))
 
-ORCHESTRATION_PROFILE_PATH = "/api/v1/agent-orchestrations"
 # 旧 AgentRunRead 的完整字段集合（camelCase）——旧端点形状不得被新字段污染。
 _LEGACY_RUN_READ_KEYS = {
     "agentCode",
@@ -118,158 +113,11 @@ _TOOL_SEEDS = [
 ]
 
 
-async def _orchestrationClient(
-    monkeypatch: pytest.MonkeyPatch,
-) -> AsyncIterator[AsyncClient]:
-    """编排开关版 client 的**实现**（供本模块与其他模块的 client fixture 复用）。
-
-    开关只影响「哪些路由存在」，不影响旧端点行为；物理隔离断言需要**真实存在**
-    的编排 profile（新建 profile 只能走公开 API，而新路由在开关关闭时不注册）。
-    """
-    monkeypatch.setenv("ENABLE_AGENT_ORCHESTRATION", "true")
-    getSettings.cache_clear()
-    crypto.resetFernet()
-    resetEmbeddingClientCache()
-    try:
-        async for apiClient in _pg_support.pgApiClient():
-            yield apiClient
-    finally:
-        getSettings.cache_clear()
-
-
 @pytest.fixture
 async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
-    """本模块的 client：打开编排开关（见 _orchestrationClient）。"""
-    async for apiClient in _orchestrationClient(monkeypatch):
+    """本模块的 client：打开编排开关（见 orchestrationClient）。"""
+    async for apiClient in orchestrationClient(monkeypatch):
         yield apiClient
-
-
-_ORCHESTRATION_TOOL_SCHEMA = {
-    "type": "object",
-    "properties": {"query": {"type": "string"}},
-    "additionalProperties": False,
-}
-
-
-async def _createOrchestrationTool(
-    client: AsyncClient, name: str, handlerRef: str
-) -> None:
-    """经公开 API 建一个**编排可用**的只读工具（严格 object schema 是编排绑定前提）。"""
-    response = await client.post(
-        "/api/v1/agent-tools",
-        headers=AUTH_HEADERS,
-        json={
-            "name": name,
-            "description": f"{name} 编排隔离用只读工具",
-            "data_object": "WIKI_PAGE",
-            "data_layers": ["DIM"],
-            "input_schema": _ORCHESTRATION_TOOL_SCHEMA,
-            "handler_kind": "BUILTIN",
-            "handler_ref": handlerRef,
-            "arg_extractor_kind": "wiki_text",
-        },
-    )
-    assert response.status_code == 201, response.text
-
-
-async def _createOrchestrationProfile(
-    client: AsyncClient, agentCode: str, toolNames: list[str]
-) -> dict[str, Any]:
-    """经公开 API 建一个**已启用**的多工具编排 profile（并回读启用后的状态）。"""
-    created = await client.post(
-        ORCHESTRATION_PROFILE_PATH,
-        headers=AUTH_HEADERS,
-        json={
-            "agentCode": agentCode,
-            "instructions": "仅使用绑定的只读工具，然后结束。",
-            "toolNames": toolNames,
-        },
-    )
-    assert created.status_code == 201, created.text
-    toggled = await client.post(
-        f"{ORCHESTRATION_PROFILE_PATH}/{agentCode}/toggle",
-        headers=AUTH_HEADERS,
-        json={"enabled": True, "revision": created.json()["revision"]},
-    )
-    assert toggled.status_code == 200, toggled.text
-    body = toggled.json()
-    assert body["enabled"] is True
-    assert [binding["toolName"] for binding in body["bindings"]] == toolNames
-    return body
-
-
-async def _orchestrationRunCount(dbSession: AsyncSession) -> int:
-    return int(
-        (
-            await dbSession.execute(
-                select(func.count()).select_from(AgentOrchestrationRun)
-            )
-        ).scalar_one()
-    )
-
-
-def _spyOrchestrationRunner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> list[tuple[int, str]]:
-    """给新编排 runner 装间谍：任何一次 runClaimed 调用都会被记录。
-
-    间谍**委托真实实现**（call-through），因此即使被调用也不会把 runner 变成
-    空操作——否则「断言从未被调用」会在别处复用时变成假绿。
-    """
-    calls: list[tuple[int, str]] = []
-    original = AgentOrchestrationRunner.runClaimed
-
-    async def spyRunClaimed(self: Any, runId: int, workerId: str) -> None:
-        calls.append((runId, workerId))
-        await original(self, runId, workerId)
-
-    monkeypatch.setattr(AgentOrchestrationRunner, "runClaimed", spyRunClaimed)
-    return calls
-
-
-def _spyOrchestrationRunCreation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> list[str]:
-    """给**编排 run 创建入口**（``AgentOrchestrationRunService.createRun``）装间谍。
-
-    旧链路若被改写成「顺手排一次编排 run」，落点就是这里（而不是
-    ``runClaimed``——后者只由 Worker 调用）。间谍同样委托真实实现。
-    """
-    calls: list[str] = []
-    original = AgentOrchestrationRunService.createRun
-
-    async def spyCreateRun(self: Any, *args: Any, **kwargs: Any) -> Any:
-        dto = args[1] if len(args) > 1 else kwargs.get("dto")
-        calls.append(getattr(dto, "agent_code", "<unknown>"))
-        return await original(self, *args, **kwargs)
-
-    monkeypatch.setattr(AgentOrchestrationRunService, "createRun", spyCreateRun)
-    return calls
-
-
-def _spyOrchestration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> tuple[list[tuple[int, str]], list[str]]:
-    """同时装上「编排 runner 调用」与「编排 run 创建」两个间谍。"""
-    return (
-        _spyOrchestrationRunner(monkeypatch),
-        _spyOrchestrationRunCreation(monkeypatch),
-    )
-
-
-def _spyLegacyRuntime(
-    monkeypatch: pytest.MonkeyPatch,
-) -> list[tuple[str, str]]:
-    """给旧 AgentRuntimeService.run 装间谍（记录 agent_code 与输入）。"""
-    calls: list[tuple[str, str]] = []
-    original = AgentRuntimeService.run
-
-    async def spyRun(self: Any, session: AsyncSession, agent_code: str, input_text: str, **kwargs: Any):
-        calls.append((agent_code, input_text))
-        return await original(self, session, agent_code, input_text, **kwargs)
-
-    monkeypatch.setattr(AgentRuntimeService, "run", spyRun)
-    return calls
 
 
 @pytest.fixture(autouse=True)
@@ -712,12 +560,12 @@ class TestLegacyPhysicalSeparation:
         """有多工具编排 profile 时，旧 run 仍只执行 legacy tool_name。"""
         await _seedAgent(dbSession, "SUPPLIER_360_AGENT")
         await _seedSupplier(dbSession, 100001, "SUP000001")
-        await _createOrchestrationTool(client, "legacy_iso_tool_a", "wiki_search")
-        await _createOrchestrationTool(client, "legacy_iso_tool_b", "wiki_read")
-        await _createOrchestrationProfile(
+        await createOrchestrationTool(client, "legacy_iso_tool_a", "wiki_search")
+        await createOrchestrationTool(client, "legacy_iso_tool_b", "wiki_read")
+        await createOrchestrationProfile(
             client, "SUPPLIER_360_AGENT", ["legacy_iso_tool_a", "legacy_iso_tool_b"]
         )
-        runnerCalls, creationCalls = _spyOrchestration(monkeypatch)
+        runnerCalls, creationCalls = spyOrchestration(monkeypatch)
 
         resp = await client.post(
             _run_url("SUPPLIER_360_AGENT"),
@@ -732,7 +580,7 @@ class TestLegacyPhysicalSeparation:
         # 旧 AgentRunRead 形状原样返回（不多不少一个字段）
         assert set(body.keys()) == _LEGACY_RUN_READ_KEYS
         # 编排子系统零副作用
-        assert await _orchestrationRunCount(dbSession) == 0
+        assert await orchestrationRunCount(dbSession) == 0
         assert runnerCalls == []
         assert creationCalls == []
 
@@ -742,12 +590,12 @@ class TestLegacyPhysicalSeparation:
     ) -> None:
         """无 legacy 工具绑定的 Agent：即使有有效多工具 profile，旧端点仍 409。"""
         await _seedAgent(dbSession, "PROCUREMENT_COPILOT_AGENT")
-        await _createOrchestrationTool(client, "legacy_iso_tool_a", "wiki_search")
-        await _createOrchestrationTool(client, "legacy_iso_tool_b", "wiki_read")
-        await _createOrchestrationProfile(
+        await createOrchestrationTool(client, "legacy_iso_tool_a", "wiki_search")
+        await createOrchestrationTool(client, "legacy_iso_tool_b", "wiki_read")
+        await createOrchestrationProfile(
             client, "PROCUREMENT_COPILOT_AGENT", ["legacy_iso_tool_a", "legacy_iso_tool_b"]
         )
-        runnerCalls, creationCalls = _spyOrchestration(monkeypatch)
+        runnerCalls, creationCalls = spyOrchestration(monkeypatch)
 
         resp = await client.post(
             _run_url("PROCUREMENT_COPILOT_AGENT"),
@@ -756,6 +604,6 @@ class TestLegacyPhysicalSeparation:
         )
         assert resp.status_code == 409, resp.text
         assert "不可运行" in resp.text
-        assert await _orchestrationRunCount(dbSession) == 0
+        assert await orchestrationRunCount(dbSession) == 0
         assert runnerCalls == []
         assert creationCalls == []

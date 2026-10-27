@@ -29,22 +29,24 @@ from app.domain.enums import (
     AgentStatus,
     AgentTriggerType,
 )
-from app.domain.models import AgentRunLog, AgentSchedule
+from app.domain.models import AgentSchedule
 from app.domain.schemas import AgentDefinitionCreate, AgentScheduleCreate
 from app.services.agent_registry_service import AgentRegistryService
 from app.services.agent_scheduler_service import AgentSchedulerService
 from app.services.agent_tool_config_registry import agent_tool_config_registry
+from app.tests._orchestration_support import (
+    createOrchestrationProfile,
+    createOrchestrationTool,
+    orchestrationClient,
+    orchestrationRunCount,
+    spyLegacyRuntime,
+    spyOrchestration,
+)
 from app.tests.integration.test_agent_runtime_api import (
-    _createOrchestrationProfile,
-    _createOrchestrationTool,
     _defaultPolicies,
-    _orchestrationClient,
-    _orchestrationRunCount,
     _seedFeatureAndValue,
     _seedFeatureDatasource,
     _seedSupplier,
-    _spyLegacyRuntime,
-    _spyOrchestration,
 )
 from scripts.seed_agents import _AGENT_DEFAULT_BINDINGS as AGENT_DEFAULT_BINDINGS
 
@@ -59,9 +61,9 @@ _OWNER = CurrentUser(userId="bob", roles=("analyst",), departments=("procurement
 async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
     """本模块默认 client：编排开关版（隔离断言需要 profile 端点）。
 
-    实现复用 test_agent_runtime_api 的 ``_orchestrationClient``（唯一定义处）。
+    实现复用 app.tests._orchestration_support 的 ``orchestrationClient``（唯一定义处）。
     """
-    async for apiClient in _orchestrationClient(monkeypatch):
+    async for apiClient in orchestrationClient(monkeypatch):
         yield apiClient
 
 
@@ -423,13 +425,13 @@ class TestAgentScheduleOrchestrationIsolation:
         await _seedFeatureAndValue(
             dbSession, 5003, "late_payment_rate", "SUP000001", 0.35
         )
-        await _createOrchestrationTool(client, "sched_iso_tool_a", "wiki_search")
-        await _createOrchestrationTool(client, "sched_iso_tool_b", "wiki_read")
-        await _createOrchestrationProfile(
+        await createOrchestrationTool(client, "sched_iso_tool_a", "wiki_search")
+        await createOrchestrationTool(client, "sched_iso_tool_b", "wiki_read")
+        await createOrchestrationProfile(
             client, "SUPPLIER_RISK_AGENT", ["sched_iso_tool_a", "sched_iso_tool_b"]
         )
-        legacyCalls = _spyLegacyRuntime(monkeypatch)
-        runnerCalls, creationCalls = _spyOrchestration(monkeypatch)
+        legacyCalls = spyLegacyRuntime(monkeypatch)
+        runnerCalls, creationCalls = spyOrchestration(monkeypatch)
 
         created = await client.post(
             "/api/v1/agents/SUPPLIER_RISK_AGENT/schedules",
@@ -455,4 +457,4 @@ class TestAgentScheduleOrchestrationIsolation:
         assert legacyCalls[0][0] == "SUPPLIER_RISK_AGENT"
         assert runnerCalls == []
         assert creationCalls == []
-        assert await _orchestrationRunCount(dbSession) == 0
+        assert await orchestrationRunCount(dbSession) == 0

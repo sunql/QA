@@ -24,12 +24,12 @@ from sqlalchemy import select
 
 from app.domain.models import SessionMessage, SessionTokenUsage
 from app.models.system_config import SystemConfig
-from app.tests.integration.test_agent_runtime_api import (
-    _createOrchestrationProfile,
-    _createOrchestrationTool,
-    _orchestrationClient,
-    _orchestrationRunCount,
-    _spyOrchestration,
+from app.tests._orchestration_support import (
+    createOrchestrationProfile,
+    createOrchestrationTool,
+    orchestrationClient,
+    orchestrationRunCount,
+    spyOrchestration,
 )
 from app.tests.integration.test_chat_api import (
     _FakeAdapter,
@@ -44,9 +44,9 @@ from app.tests.integration.test_chat_api import (
 async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
     """本模块默认 client：编排开关版（隔离断言需要 profile 端点）。
 
-    实现复用 test_agent_runtime_api 的 ``_orchestrationClient``（唯一定义处）。
+    实现复用 app.tests._orchestration_support 的 ``orchestrationClient``（唯一定义处）。
     """
-    async for apiClient in _orchestrationClient(monkeypatch):
+    async for apiClient in orchestrationClient(monkeypatch):
         yield apiClient
 
 
@@ -280,8 +280,8 @@ async def test_l4_does_not_enter_orchestration_worker(
     llm = _L4Llm()
     _installL4Fakes(monkeypatch, config, llm)
 
-    await _createOrchestrationTool(client, "l4_iso_tool_a", "wiki_search")
-    await _createOrchestrationTool(client, "l4_iso_tool_b", "wiki_read")
+    await createOrchestrationTool(client, "l4_iso_tool_a", "wiki_search")
+    await createOrchestrationTool(client, "l4_iso_tool_b", "wiki_read")
     created = await client.post(
         "/api/v1/agents",
         headers={"X-User-Id": "l4-admin", "X-User-Roles": "admin"},
@@ -298,13 +298,13 @@ async def test_l4_does_not_enter_orchestration_worker(
         },
     )
     assert created.status_code == 201, created.text
-    await _createOrchestrationProfile(
+    await createOrchestrationProfile(
         client, "L4_ORCH_ISO_AGENT", ["l4_iso_tool_a", "l4_iso_tool_b"]
     )
-    runnerCalls, creationCalls = _spyOrchestration(monkeypatch)
+    runnerCalls, creationCalls = spyOrchestration(monkeypatch)
 
     await _runL4Chat(client, ds.id, llm)
 
     assert runnerCalls == []
     assert creationCalls == []
-    assert await _orchestrationRunCount(dbSession) == 0
+    assert await orchestrationRunCount(dbSession) == 0

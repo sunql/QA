@@ -148,12 +148,18 @@ WHERE handler_ref IN ('supplier_360','supplier_risk','graph_traverse',
 ```bash
 # 启动（仅此一条命令会带起 Worker）
 docker compose -f docker-compose.yml -f docker-compose.centos.yml \
-  --profile agent-orchestration up -d agent-orchestration-worker
+  --profile agent-orchestration up -d --no-build agent-orchestration-worker
 
 # 优雅停止（SIGTERM：当前 run 跑完再退）
 docker compose -f docker-compose.yml -f docker-compose.centos.yml \
   --profile agent-orchestration stop agent-orchestration-worker
 ```
+
+> ⚠️ **启动前 Worker 镜像必须已在位**：Worker 服务有 `build:` 且**没有** `image:` 键，
+> compose 派生出的名字（`qa-system-agent-orchestration-worker`，见 §3 镜像行）与 backend 的
+> 派生名**不同** ⇒ 必须先按**阶段 2**（部署镜像）把镜像放到目标机、名字与目标机
+> `config --images` 的输出一致。`--no-build` 保证启动**绝不触发构建**：
+> 镜像缺失时直接报 “image not found”，而不是偷偷拿当前 build context 构建一个。
 
 > ⚠️ **不要用 `docker kill -9`**：会留下悬挂租约（`lease_until` 未过期时别的 Worker 接不了）。
 > 停之前先做 §7 的租约排空检查。
@@ -257,10 +263,11 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
      exec backend printenv ENABLE_AGENT_ORCHESTRATION   # 期望：true
    ```
    输出不是 `true` ⇒ **停下排查**（多半是 env 文件没被重新读取），不要继续往下走。
-3. 启动 Worker（§3 的启动命令）：
+3. 启动 Worker（§3 的启动命令；Worker 镜像必须已按阶段 2 就位，
+   `--no-build` 让镜像缺失时直接报错而不是隐式构建）：
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.centos.yml \
-     --profile agent-orchestration up -d agent-orchestration-worker
+     --profile agent-orchestration up -d --no-build agent-orchestration-worker
    ```
 4. 验收：
    - `docker compose -f docker-compose.yml -f docker-compose.centos.yml logs --tail 50 agent-orchestration-worker`
@@ -501,6 +508,10 @@ ORDER BY updated_time DESC;
     加上 `--no-build` 后**绝不触发镜像构建**（离线机上一次构建尝试会直接失败
     并可能把 backend 带下去）。镜像的部署是**更早的阶段 2** 的事；
     阶段 2 已经把镜像（含 Worker 镜像）放到目标机，重建阶段只复用它。
+11. **Worker 启动同理必须带 `--no-build`**：Worker 服务有 `build:` 且没有 `image:` 键，
+    compose 派生名与 backend 的**不同** ⇒ 启动前镜像必须已按**阶段 2** 就位
+    （名字以目标机 `config --images` 为准）。带 `--no-build` 后，镜像缺失会**明确报错**
+    而不是隐式构建一个来自当前 build context 的镜像。
 
 ---
 

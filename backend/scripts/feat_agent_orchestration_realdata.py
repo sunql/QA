@@ -36,9 +36,11 @@ DSN 解析顺序见 ``feat_agent_orchestration_realdata_lib.resolveDatabaseUrl``
 
 - ``S7`` 需要一个 ``status='active'`` 且尚无编排 profile 的
   ``agent_definition``：优先**借用**既有 Agent；一个都没有时脚本**自建**
-  一个（退出时删除，且不计入 S2 基线行数）；自建也失败 ⇒ ``SKIP``。
+  一个（退出时删除，且不计入 S2 基线行数）；自建失败 ⇒ 按异常类型判定
+  （前置条件形态 ⇒ ``SKIP``；其它异常 ⇒ ``FAIL``）。
 - ``S8`` 需要一个 ``is_active`` 的 ``llm_config``：优先**借用**既有的；
-  没有时脚本**自建**一个（退出时删除）；自建也失败 ⇒ ``SKIP``。
+  没有时脚本**自建**一个（退出时删除）；自建失败 ⇒ 按异常类型判定
+  （前置条件形态 ⇒ ``SKIP``；其它异常 ⇒ ``FAIL``）。
 
 ``SKIP`` 的语义：这一步在当前库上**无法执行**——它既不是「通过」也不是
 「失败」。退出码只由 ``FAIL`` 决定（``SKIP`` **不影响**退出码）。
@@ -421,7 +423,7 @@ async def step7_profile(session: AsyncSession, actor: CurrentUser) -> str | None
 
     前置条件：需要一个 ACTIVE 且尚无编排 profile 的 Agent。优先**借用**既有的；
     库里一个都没有 ⇒ 脚本**自建**一个（退出时删除，不计入 S2 基线）。
-    两条路都走不通 ⇒ **SKIP**（库种子前置条件未满足，不是脚本缺陷）。
+    两条路都走不通 ⇒ 按异常类型判定（前置条件形态 ⇒ **SKIP**；其它异常 ⇒ **FAIL**）。
     """
     await deleteScriptRows(session)
     agentCode = await prepareAgent(session, "S7 编排 profile")

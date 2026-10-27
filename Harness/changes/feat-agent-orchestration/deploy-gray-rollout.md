@@ -310,8 +310,8 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
 ### 阶段 3.5：PRE-ENABLE CHECKLIST（把 `ENABLE_AGENT_ORCHESTRATION` 打开**之前**必须逐项关闭）
 
 > 本特性**出厂即关闭**（`ENABLE_AGENT_ORCHESTRATION` 默认 `false`，不注册新路由、不起 Worker）。
-> 下面三项由 `security-reviewer` 与 `code-reviewer` 共同提出（M1/M2/M3 = 安全 MEDIUM
-> M1/M2/M3；代码评审 M4/M10/M11），**两位评审一致要求：在生产把开关打开之前关闭**。
+> 下面三项由 `security-reviewer` 与 `code-reviewer` 共同提出（安全 MEDIUM M1/M2/M3；
+> 代码评审 M4/M10/M11），**两位评审一致要求：在生产把开关打开之前关闭**。
 > 任一项未关闭 ⇒ **不要**把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。
 >
 > **编号说明（可追溯性用）**：上面括号里的 `M1`/`M2`/`M3` 与「代码评审 M4/M10/M11」

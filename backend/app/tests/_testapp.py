@@ -82,6 +82,7 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     解决：直接从各子路由模块 import 并以正确前缀挂载到测试 app，绕过 v1Router。
     """
     testApp = FastAPI(title="QA System API (test)")
+    settings = getSettings()
 
     # 限流：limiter.state + 429 处理器（与 main.py 一致），默认关闭。
     # audit-fx-3.1: 移除 SlowAPIMiddleware，改为路由级 rateLimitDep（在 getCurrentUser
@@ -234,6 +235,16 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         agent_runtime.router, prefix="/api/v1/agents", tags=["agents"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
     testApp.include_router(agent_tools.router, tags=["agent-tools"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    # 通用 Agent 编排配置 API：与 main.py 同一开关、同一依赖；关闭时不注册（404）。
+    if settings.enableAgentOrchestration:
+        from app.api.v1 import agent_orchestrations
+
+        testApp.include_router(
+            agent_orchestrations.router,
+            prefix="/api/v1/agent-orchestrations",
+            tags=["agent-orchestrations"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
     testApp.include_router(users.router, tags=["users"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(roles.router, tags=["roles"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(organizations.router, tags=["organizations"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])

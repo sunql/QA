@@ -550,6 +550,17 @@ def createApp() -> FastAPI:
         agent_runtime.router, prefix="/api/v1/agents", tags=["agents"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
     app.include_router(agent_tools.router, tags=["agent-tools"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    # 通用 Agent 编排（Task 3）：feature flag 关闭时整组路由不注册（404），
+    # 且模块级 import 也必须留在条件内，避免未启用的子系统被加载。
+    if settings.enableAgentOrchestration:
+        from app.api.v1 import agent_orchestrations
+
+        app.include_router(
+            agent_orchestrations.router,
+            prefix="/api/v1/agent-orchestrations",
+            tags=["agent-orchestrations"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
     app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     # auth.router 和 authRouter.router 不加 guard：白名单路径 /auth/me、/auth/change-password、/auth/logout 需无条件放行

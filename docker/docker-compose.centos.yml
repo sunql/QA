@@ -21,7 +21,12 @@
 # 生产就会默认把 Worker 起起来 —— 那正是本次要防的事）。
 # 生产灰度启动命令（详见 Harness/changes/feat-agent-orchestration/deploy-gray-rollout.md）：
 #   docker compose -f docker-compose.yml -f docker-compose.centos.yml \
-#     --profile agent-orchestration up -d agent-orchestration-worker
+#     --profile agent-orchestration up -d --no-build agent-orchestration-worker
+#
+# ⚠️ `--no-build` 不能省：Worker 服务只有 build:、没有 image:，compose 会派生出
+#    与 backend 不同的镜像名。离线机上没有该镜像时，`up -d` 会隐式触发一次构建
+#    （必然失败），加了 `--no-build` 才会直接报"镜像不存在"，指向阶段 2 的
+#    docker tag / 离线包补镜像这一步。
 
 services:
   # ===== 本地 LLM / embedding =====

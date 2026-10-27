@@ -9,7 +9,7 @@
 --------------------------------------
 - ``feat_agent_orchestration_realdata_lib``：常量、DSN 解析、PASS/FAIL/SKIP 输出；
 - ``feat_agent_orchestration_realdata_db``：数据库访问 helper（工具行适配器、
-  快照 / 还原、前置条件自建行、清理）；
+  快照 / 还原、前置条件自建行、清理期查询与残留计数）；
 - 本文件（入口）：S1–S10 各步骤与主流程。
 
 目标库（唯一被允许的破坏性写入目标）
@@ -39,6 +39,12 @@ DSN 解析顺序见 ``feat_agent_orchestration_realdata_lib.resolveDatabaseUrl``
 ``SKIP`` 的语义：这一步在当前库上**无法执行**——它既不是「通过」也不是
 「失败」。退出码只由 ``FAIL`` 决定。
 
+⚠️ **SKIP / FAIL 的分类依据是异常的具体类型**（``PREREQUISITE_ERRORS``）：
+``NotFoundError`` / ``ConflictError`` / ``ValidationError`` ⇒ 库种子不满足 ⇒ SKIP；
+其它任何异常 ⇒ **FAIL**（脚本或环境的缺陷，必须暴露，不能被吞掉）。
+建 profile / 建 run 这些**服务调用**同样受这条规则保护——前置条件不满足时
+输出 SKIP 并写明缺什么，**不会**抛出未捕获的 traceback。
+
 覆盖的步骤
 ----------
 1. 迁移版本 = ``0135``，五张新表都在。
@@ -53,6 +59,8 @@ DSN 解析顺序见 ``feat_agent_orchestration_realdata_lib.resolveDatabaseUrl``
 5. 阶段 0 的**只修 schema**动作：只改三个**已启用**工具
    （``supplier_360`` / ``supplier_risk`` / ``graph_traverse``）的
    ``input_schema``，**绝不翻 ``enabled``**。
+   ⚠️「写入 N 行」按 UPDATE 的**实际命中行数**汇报；命中 0 行（工具被禁用）时
+   按「未写入 + 原因」汇报，**绝不**声称写了。
    ⚠️ 理由：4 个 wiki 工具被 4 个既有 legacy Agent 绑定；既有运行时只加载
    ``enabled=true`` 的工具行，否则抛 ``ConflictError(409 tool_unbound_or_disabled)``
    ⇒ 翻转 ``enabled`` 会让那 4 个**既有** Agent 从「409 不可运行」变成
@@ -127,6 +135,7 @@ from feat_agent_orchestration_realdata_lib import (  # noqa: E402
     LEGACY_TABLES,
     MARKER,
     NEW_TABLES,
+    SCRIPT_ACTOR,
     TOOL_SCHEMAS,
     check,
     failStep,
@@ -147,12 +156,14 @@ os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 from feat_agent_orchestration_realdata_db import (  # noqa: E402
     ToolRow,
+    countScriptResidue,
     deleteScriptRows,
-    ensureAgent,
-    ensureModelConfig,
+    fetchScriptRows,
     fetchToolRow,
     fetchToolRows,
     legacyCounts,
+    prepareAgent,
+    prepareModelConfig,
     restoreToolSchemas,
     snapshotEnabledFlags,
     snapshotToolSchemas,
@@ -168,7 +179,11 @@ from app.domain.agent_orchestration_schemas import (  # noqa: E402
     AgentOrchestrationToggle,
     AgentRunCreate,
 )
-from app.domain.exceptions import ValidationError  # noqa: E402
+from app.domain.exceptions import (  # noqa: E402
+    ConflictError,
+    NotFoundError,
+    ValidationError,
+)
 from app.infrastructure.database import getEngine, getSessionFactory  # noqa: E402
 from app.services.agent_orchestration_config_service import (  # noqa: E402
     AgentOrchestrationConfigService,
@@ -188,6 +203,26 @@ from app.services.agent_orchestration_validation import (  # noqa: E402
 # **绕过 logger 级别** ⇒ 真正能压住它的只有「把引擎的 echo 标志关掉」
 # （见 main() 里 getEngine().echo = False）。
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+
+
+# ---------------------------------------------------------------------------
+# 失败分类：前置条件形态 vs 真正的缺陷
+# ---------------------------------------------------------------------------
+#
+# ``SKIP`` 的含义是「这一步在当前库上**无法执行**」——库的种子不满足前提
+# （没有 ACTIVE 的 Agent / 没有启用的模型配置 / 工具被禁用 / 工具行不存在 …）。
+# 这些是**领域异常**，脚本按具体类型判定，不靠「捕获所有异常」蒙混：
+#
+# - ``PREREQUISITE_ERRORS``（下面这个元组）⇒ SKIP（写明缺什么）；
+# - 其它任何异常 ⇒ **FAIL**（脚本/环境缺陷，必须暴露，不能被吞掉）。
+#
+# ⚠️ 领域异常的语义：
+# - ``NotFoundError``：Agent / 模型配置 / profile / run 不存在；
+# - ``ConflictError``：Agent 已有 profile、profile 已禁用、模型配置已停用、
+#   编排配置没有可用的工具绑定；
+# - ``ValidationError``：工具不存在 / 工具已禁用 / 工具不在只读白名单 /
+#   schema 不合法（``assertOrchestrationToolValid`` 抛的）。
+PREREQUISITE_ERRORS = (NotFoundError, ConflictError, ValidationError)
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +313,10 @@ async def step5_fixSchemas(session: AsyncSession, originalSchemas: dict[str, Any
 
     原始值由调用方在写入前快照 ⇒ 退出时（步骤 10）可原样写回。
     目标库没种这三个工具行 ⇒ **SKIP**（库种子前置条件未满足，不是脚本缺陷）。
+
+    ⚠️ 「写入 N 行」必须**如实**汇报：``writeToolSchema`` 只写 ``enabled=true``
+    的行并返回 UPDATE 的命中行数 ⇒ 命中 0 行（工具被禁用）时**不能**打印
+    「写了」——那种行按「未写入 + 原因」汇报。
     """
     missing = [
         name for name in FIRST_WAVE_TOOLS if await fetchToolRow(session, name) is None
@@ -291,25 +330,51 @@ async def step5_fixSchemas(session: AsyncSession, originalSchemas: dict[str, Any
         return
 
     changed = 0
+    notWritten: list[str] = []
     for name in FIRST_WAVE_TOOLS:
-        row = await fetchToolRow(session, name)
-        if row is None:
-            failStep("S5 schema 修复", f"agent_tool_config 里没有 {name} 行")
+        written, reason = await _fixOneToolSchema(session, name)
+        if reason is not None:
+            notWritten.append(reason)
             continue
-        target = TOOL_SCHEMAS[name]
-        before = row["input_schema"]
-        if before == target:
-            print(f"      {name}: schema 已是目标值，未写入（enabled={row['enabled']}）")
-            continue
-        await writeToolSchema(session, row["id"], target)
-        changed += 1
-        print(
-            f"      {name}: input_schema {json.dumps(before, ensure_ascii=False)}"
-            f" -> {json.dumps(target, ensure_ascii=False)}"
-            f"（enabled 保持 {row['enabled']} 未改）"
-        )
+        changed += written
     await session.commit()
+    if notWritten:
+        skipStep(
+            "S5 schema-only 修复",
+            f"实际写入 {changed} 行，未写入 {len(notWritten)} 行："
+            f"{'；'.join(notWritten)}（库种子前置条件未满足；本步骤在当前库上无法完整执行）",
+        )
+        return
     passStep("S5 schema-only 修复", f"实际写入 {changed} 行（enabled 未翻转；退出前会还原）")
+
+
+async def _fixOneToolSchema(session: AsyncSession, name: str) -> tuple[int, str | None]:
+    """修一个工具的 ``input_schema``（**不动** ``enabled``）。
+
+    返回 ``(写入行数, 未写入原因)``：
+    - ``(1, None)`` ⇒ 真的写入了；
+    - ``(0, None)`` ⇒ schema 本来就是目标值（没写，也没问题）；
+    - ``(0, 原因)`` ⇒ **没写成**（工具被禁用 / 行不存在）——原因必须如实汇报。
+    """
+    row = await fetchToolRow(session, name)
+    if row is None:
+        failStep("S5 schema 修复", f"agent_tool_config 里没有 {name} 行")
+        return 0, f"{name}（agent_tool_config 里没有该行）"
+    target = TOOL_SCHEMAS[name]
+    before = row["input_schema"]
+    if before == target:
+        print(f"      {name}: schema 已是目标值，未写入（enabled={row['enabled']}）")
+        return 0, None
+    written = await writeToolSchema(session, row["id"], target)
+    if written == 0:
+        print(f"      {name}: 未写入（UPDATE 命中 0 行；该行 enabled={row['enabled']}）")
+        return 0, f"{name}（该行 enabled={row['enabled']}；第一波只写 enabled=true 的行）"
+    print(
+        f"      {name}: input_schema {json.dumps(before, ensure_ascii=False)}"
+        f" -> {json.dumps(target, ensure_ascii=False)}"
+        f"（enabled 保持 {row['enabled']} 未改）"
+    )
+    return 1, None
 
 
 async def step6_toolOptions(session: AsyncSession, preEnabledFlags: dict[str, bool]) -> None:
@@ -367,37 +432,68 @@ async def step7_profile(session: AsyncSession, actor: CurrentUser) -> str | None
     两条路都走不通 ⇒ **SKIP**（库种子前置条件未满足，不是脚本缺陷）。
     """
     await deleteScriptRows(session)
-    try:
-        agentCode, isSelfCreated = await ensureAgent(session)
-    except Exception as error:  # noqa: BLE001 — 前置条件不足按 SKIP 处理，不算脚本缺陷
-        skipStep(
-            "S7 编排 profile",
-            f"无法准备 ACTIVE 的 agent_definition（{type(error).__name__}: {error}）"
-            "；本步骤在当前库上无法执行",
-        )
-        return None
+    agentCode = await prepareAgent(session, "S7 编排 profile")
     if agentCode is None:
-        skipStep(
-            "S7 编排 profile",
-            "目标库没有 status='active' 且尚无编排 profile 的 agent_definition，"
-            "自建也未成功（库种子前置条件未满足；本步骤在当前库上无法执行）",
-        )
         return None
-    origin = "脚本自建（退出时删除）" if isSelfCreated else "借用既有 Agent（不删除）"
-    print(f"      使用 Agent：{agentCode}（{origin}）")
 
     configService = AgentOrchestrationConfigService()
-    created = await configService.create(
-        session,
-        AgentOrchestrationProfileCreate(
-            agent_code=agentCode,
-            instructions=(
-                f"[{MARKER}] 只读汇总：仅允许调用白名单只读工具，禁止任何写操作。"
-            ),
-            tool_names=list(FIRST_WAVE_TOOLS),
-        ),
-        actor,
+    created = await _createProfile(configService, session, actor, agentCode)
+    if created is None:
+        return None
+    _checkProfileShape(created)
+
+    toggled = await _toggleProfile(configService, session, actor, agentCode, created.revision)
+    if toggled is None:
+        return None
+    check(
+        "S7 toggle 后启用且 revision=2",
+        toggled.enabled is True and toggled.revision == 2,
+        f"enabled={toggled.enabled} revision={toggled.revision}",
     )
+    return agentCode
+
+
+async def _createProfile(
+    configService: AgentOrchestrationConfigService,
+    session: AsyncSession,
+    actor: CurrentUser,
+    agentCode: str,
+) -> Any | None:
+    """建 profile。
+
+    **前置条件形态**的领域异常（``PREREQUISITE_ERRORS``）⇒ ``SKIP``（写明缺什么）；
+    **其它**异常 ⇒ ``FAIL``（脚本/环境的缺陷，必须暴露，不能被吞掉）。
+    返回 ``None`` 表示这一步已被判定（跳过或失败）。
+    """
+    try:
+        return await configService.create(
+            session,
+            AgentOrchestrationProfileCreate(
+                agent_code=agentCode,
+                instructions=(
+                    f"[{MARKER}] 只读汇总：仅允许调用白名单只读工具，禁止任何写操作。"
+                ),
+                tool_names=list(FIRST_WAVE_TOOLS),
+            ),
+            actor,
+        )
+    except PREREQUISITE_ERRORS as error:
+        skipStep(
+            "S7 编排 profile",
+            f"建 profile 的前置条件未满足（{type(error).__name__}: {error}）；"
+            "本步骤在当前库上无法执行",
+        )
+        return None
+    except Exception as error:  # noqa: BLE001 — 非前置条件异常 = 缺陷，记 FAIL 暴露
+        failStep(
+            "S7 编排 profile",
+            f"建 profile 抛出非前置条件异常（{type(error).__name__}: {error}）",
+        )
+        return None
+
+
+def _checkProfileShape(created: Any) -> None:
+    """profile 创建后的两条判定（创建后停用 + 绑定的是三个只读工具）。"""
     check(
         "S7 profile 创建后为停用",
         created.enabled is False and created.revision == 1,
@@ -410,53 +506,92 @@ async def step7_profile(session: AsyncSession, actor: CurrentUser) -> str | None
         f"bindings={bound}",
     )
 
-    toggled = await configService.toggle(
-        session,
-        agentCode,
-        AgentOrchestrationToggle(enabled=True, revision=created.revision),
-        actor,
-    )
-    check(
-        "S7 toggle 后启用且 revision=2",
-        toggled.enabled is True and toggled.revision == 2,
-        f"enabled={toggled.enabled} revision={toggled.revision}",
-    )
-    return agentCode
+
+async def _toggleProfile(
+    configService: AgentOrchestrationConfigService,
+    session: AsyncSession,
+    actor: CurrentUser,
+    agentCode: str,
+    revision: int,
+) -> Any | None:
+    """启用 profile（``revision=2``）。异常分类与 ``_createProfile`` 一致。"""
+    try:
+        return await configService.toggle(
+            session,
+            agentCode,
+            AgentOrchestrationToggle(enabled=True, revision=revision),
+            actor,
+        )
+    except PREREQUISITE_ERRORS as error:
+        skipStep(
+            "S7 编排 profile",
+            f"toggle 的前置条件未满足（{type(error).__name__}: {error}）；"
+            "本步骤在当前库上无法执行",
+        )
+        return None
+    except Exception as error:  # noqa: BLE001 — 非前置条件异常 = 缺陷，记 FAIL 暴露
+        failStep(
+            "S7 编排 profile",
+            f"toggle 抛出非前置条件异常（{type(error).__name__}: {error}）",
+        )
+        return None
 
 
 async def step8_createRun(
     session: AsyncSession, actor: CurrentUser, agentCode: str
 ) -> None:
     """建 run：QUEUED + runId；快照只含只读工具（只读性成立）。"""
-    try:
-        modelId, isSelfCreated = await ensureModelConfig(session)
-    except Exception as error:  # noqa: BLE001 — 前置条件不足按 SKIP 处理
-        skipStep(
-            "S8 创建 run",
-            f"无法准备 is_active 的 llm_config（{type(error).__name__}: {error}）；"
-            "本步骤在当前库上无法执行",
-        )
-        return
+    modelId = await prepareModelConfig(session, "S8 创建 run")
     if modelId is None:
-        skipStep(
-            "S8 创建 run",
-            "llm_config 里没有 is_active 的模型配置，自建也未成功"
-            "（库种子前置条件未满足；本步骤在当前库上无法执行）",
-        )
         return
-    origin = "脚本自建（退出时删除）" if isSelfCreated else "借用既有模型配置（不删除）"
-    print(f"      使用模型配置：id={modelId}（{origin}）")
 
     runService = AgentOrchestrationRunService()
-    created = await runService.createRun(
-        session,
-        AgentRunCreate(
-            agent_code=agentCode,
-            input=f"[{MARKER}] 只读冒烟：列出该 Agent 可用的只读能力，不做任何写操作。",
-            model_config_id=int(modelId),
-        ),
-        actor,
-    )
+    created = await _createRun(runService, session, actor, agentCode, modelId)
+    if created is None:
+        return
+    await _checkRunShape(session, created)
+
+
+async def _createRun(
+    runService: AgentOrchestrationRunService,
+    session: AsyncSession,
+    actor: CurrentUser,
+    agentCode: str,
+    modelId: int,
+) -> Any | None:
+    """建 run。
+
+    **前置条件形态**的领域异常（``PREREQUISITE_ERRORS``）⇒ ``SKIP``（写明缺什么）；
+    **其它**异常 ⇒ ``FAIL``（脚本/环境的缺陷，必须暴露，不能被吞掉）。
+    返回 ``None`` 表示这一步已被判定（跳过或失败）。
+    """
+    try:
+        return await runService.createRun(
+            session,
+            AgentRunCreate(
+                agent_code=agentCode,
+                input=f"[{MARKER}] 只读冒烟：列出该 Agent 可用的只读能力，不做任何写操作。",
+                model_config_id=modelId,
+            ),
+            actor,
+        )
+    except PREREQUISITE_ERRORS as error:
+        skipStep(
+            "S8 创建 run",
+            f"建 run 的前置条件未满足（{type(error).__name__}: {error}）；"
+            "本步骤在当前库上无法执行",
+        )
+        return None
+    except Exception as error:  # noqa: BLE001 — 非前置条件异常 = 缺陷，记 FAIL 暴露
+        failStep(
+            "S8 创建 run",
+            f"建 run 抛出非前置条件异常（{type(error).__name__}: {error}）",
+        )
+        return None
+
+
+async def _checkRunShape(session: AsyncSession, created: Any) -> None:
+    """run 创建后的三条判定（QUEUED / run_id 非空 / 快照只含只读工具）。"""
     check(
         "S8 run 创建为 QUEUED",
         str(created.status) == "RunStatus.QUEUED" or created.status.value == "QUEUED",
@@ -517,21 +652,15 @@ async def step9_featureOff() -> None:
 
 async def step10_cleanup(session: AsyncSession, originalSchemas: dict[str, Any]) -> None:
     """**自清理**：删自建行 + 还原阶段 0 的 schema 改动 ⇒ 库回到运行脚本前。"""
-    runs = (
-        await session.execute(
-            text("SELECT run_id, status FROM agent_orchestration_run WHERE question LIKE :m"),
-            {"m": f"%{MARKER}%"},
-        )
-    ).all()
-    profiles = (
-        await session.execute(
-            text(
-                "SELECT agent_id, enabled, revision FROM agent_orchestration_profile "
-                "WHERE instructions LIKE :m"
-            ),
-            {"m": f"%{MARKER}%"},
-        )
-    ).all()
+    await _printRowsToDelete(session)
+    await deleteScriptRows(session)
+    await _checkNoResidue(session)
+    await _restoreStage0Schemas(session, originalSchemas)
+
+
+async def _printRowsToDelete(session: AsyncSession) -> None:
+    """打印即将删除的自建行（run 在前、profile 在后）。"""
+    runs, profiles = await fetchScriptRows(session)
     for run in runs:
         print(f"      删除自建 run: run_id={run[0]} status={run[1]}")
     for profile in profiles:
@@ -539,26 +668,22 @@ async def step10_cleanup(session: AsyncSession, originalSchemas: dict[str, Any])
             f"      删除自建 profile: agent_id={profile[0]} "
             f"enabled={profile[1]} revision={profile[2]}"
         )
-    await deleteScriptRows(session)
-    remaining = (
-        await session.execute(
-            text(
-                "SELECT (SELECT count(*) FROM agent_orchestration_run WHERE question LIKE :m)"
-                " + (SELECT count(*) FROM agent_orchestration_profile WHERE instructions LIKE :m)"
-                " + (SELECT count(*) FROM agent_definition "
-                "   WHERE agent_code = 'REALDATA_ORCHESTRATION_AGENT')"
-                " + (SELECT count(*) FROM llm_config "
-                "   WHERE model_name = 'realdata-orchestration-model')"
-            ),
-            {"m": f"%{MARKER}%"},
-        )
-    ).scalar_one()
+
+
+async def _checkNoResidue(session: AsyncSession) -> None:
+    """自建行必须**零残留**（run / profile / Agent / 模型配置）。"""
+    remaining = await countScriptResidue(session)
     check(
         "S10 自建行已清理",
-        int(remaining) == 0,
+        remaining == 0,
         "自建 run / profile / Agent / 模型配置均已删除" if not remaining else f"残留行数={remaining}",
     )
 
+
+async def _restoreStage0Schemas(
+    session: AsyncSession, originalSchemas: dict[str, Any]
+) -> None:
+    """把阶段 0 改写过的 ``input_schema`` 写回运行前的原值并核验。"""
     if not originalSchemas:
         skipStep("S10 阶段 0 schema 已还原", "脚本未改写过任何 input_schema，无需还原")
         return
@@ -573,21 +698,60 @@ async def step10_cleanup(session: AsyncSession, originalSchemas: dict[str, Any])
     )
 
 
+def _silenceSqlEcho() -> None:
+    """关掉引擎的 SQL 回显，让 stdout 只剩判定行。
+
+    引擎在非生产环境默认 echo SQL（``app.infrastructure.database.getEngine`` 用
+    ``echo=not settings.isProduction``）。SQLAlchemy 的 echo 日志走
+    ``InstanceLogger``，它直接调 ``logger._log()`` **绕过 logger 级别**，
+    所以压 logger 级别压不住——必须把引擎自己的 ``echo`` 标志关掉
+    （关掉后 ``_should_log_info()`` 为 False，连接不再打 SQL）。
+    """
+    getEngine().echo = False
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+
+
+async def _checkLegacyCountsUnchanged(
+    session: AsyncSession, beforeCounts: dict[str, int]
+) -> None:
+    """六张既有表的行数必须前后一致（自建行不计入基线）。"""
+    if not beforeCounts:
+        return
+    afterCounts = await legacyCounts(session)
+    drift = {
+        table: (beforeCounts[table], afterCounts[table])
+        for table in LEGACY_TABLES
+        if beforeCounts[table] != afterCounts[table]
+    }
+    check(
+        "S2 既有表行数前后一致",
+        not drift,
+        "六张既有表行数无变化"
+        if not drift
+        else f"行数变化 {drift}",
+    )
+
+
+def _printSummary() -> int:
+    """结尾汇总：任一 ``FAIL`` ⇒ 非零码。"""
+    print("-" * 72)
+    if FAILURES:
+        print(f"FAILED  {len(FAILURES)} step(s):")
+        for item in FAILURES:
+            print(f"  - {item}")
+        return 1
+    print("OK  all steps passed")
+    return 0
+
+
 async def main() -> int:
     print(f"TARGET  {maskDsn(DATABASE_URL)}  (from {DSN_SOURCE})")
     print(f"MARKER = {MARKER}")
     print("-" * 72)
 
     sessionFactory = getSessionFactory()
-    # 引擎在非生产环境默认 echo SQL（app.infrastructure.database.getEngine 用
-    # ``echo=not settings.isProduction``）。SQLAlchemy 的 echo 日志走
-    # ``InstanceLogger``，它直接调 ``logger._log()`` **绕过 logger 级别**，
-    # 所以压 logger 级别压不住——必须把引擎自己的 ``echo`` 标志关掉
-    # （关掉后 ``_should_log_info()`` 为 False，连接不再打 SQL）。
-    # 这样脚本 stdout 只剩判定行，录进文档的证据才是完整可读的。
-    getEngine().echo = False
-    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-    actor = CurrentUser(userId="realdata-script", roles=("admin",), departments=())
+    _silenceSqlEcho()
+    actor = CurrentUser(userId=SCRIPT_ACTOR, roles=("admin",), departments=())
 
     beforeCounts: dict[str, int] = {}
     originalSchemas: dict[str, Any] = {}
@@ -618,29 +782,9 @@ async def main() -> int:
     finally:
         async with sessionFactory() as session:
             await step10_cleanup(session, originalSchemas)
-            if beforeCounts:
-                afterCounts = await legacyCounts(session)
-                drift = {
-                    table: (beforeCounts[table], afterCounts[table])
-                    for table in LEGACY_TABLES
-                    if beforeCounts[table] != afterCounts[table]
-                }
-                check(
-                    "S2 既有表行数前后一致",
-                    not drift,
-                    "六张既有表行数无变化"
-                    if not drift
-                    else f"行数变化 {drift}",
-                )
+            await _checkLegacyCountsUnchanged(session, beforeCounts)
 
-    print("-" * 72)
-    if FAILURES:
-        print(f"FAILED  {len(FAILURES)} step(s):")
-        for item in FAILURES:
-            print(f"  - {item}")
-        return 1
-    print("OK  all steps passed")
-    return 0
+    return _printSummary()
 
 
 if __name__ == "__main__":

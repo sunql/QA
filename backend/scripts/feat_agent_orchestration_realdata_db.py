@@ -1,6 +1,6 @@
 """真实数据验证脚本的**数据库访问 helper**（按职责从入口脚本拆出）。
 
-包含四类东西：
+包含五类东西：
 
 1. :class:`ToolRow` —— ``OrchestrationToolRow`` 协议（``agent_orchestration_validation.py:61``）
    的结构化实现。``assertOrchestrationToolValid`` / ``isOrchestrationToolValid``
@@ -9,6 +9,8 @@
 2. 行读取helper（工具行 / schema 快照 / enabled 快照 / 既有表行数）。
 3. 阶段 0 的 **snapshot → 修改 → 还原**（退出时把库恢复原状）。
 4. 前置条件自建行（没有 ACTIVE Agent / 没有 active 模型配置时自建，退出时删除）。
+5. 清理期的查询（脚本自建行清单 / 残留计数）与前置条件准备
+   （:func:`prepareAgent` / :func:`prepareModelConfig`）。
 
 ⚠️ 本模块 import ``app.*`` ⇒ 必须在入口脚本设置好 ``DATABASE_URL`` **之后**
 才被 import。
@@ -28,6 +30,7 @@ from feat_agent_orchestration_realdata_lib import (
     SCRIPT_ACTOR,
     SCRIPT_AGENT_CODE,
     SCRIPT_MODEL_NAME,
+    skipStep,
 )
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,15 +142,23 @@ async def legacyCounts(session: AsyncSession) -> dict[str, int]:
     return counts
 
 
-async def writeToolSchema(session: AsyncSession, toolId: Any, schema: Any) -> None:
-    """写入某个工具的 ``input_schema``（**不动** ``enabled``）。"""
-    await session.execute(
+async def writeToolSchema(session: AsyncSession, toolId: Any, schema: Any) -> int:
+    """写入某个工具的 ``input_schema``（**不动** ``enabled``）。
+
+    返回 UPDATE **实际命中的行数**：
+    - ``1`` ⇒ 真的写进去了；
+    - ``0`` ⇒ 该行不存在或 ``enabled IS TRUE`` 不成立（只写启用的行）⇒ **没写**。
+
+    ⚠️ 调用方必须用这个行数汇报，**不能**无条件声称「写了 N 行」。
+    """
+    result = await session.execute(
         text(
             "UPDATE agent_tool_config SET input_schema = :schema "
             "WHERE id = :id AND enabled IS TRUE"
         ),
         {"schema": json.dumps(schema), "id": toolId},
     )
+    return int(result.rowcount or 0)
 
 
 async def restoreToolSchemas(
@@ -277,3 +288,95 @@ async def deleteScriptRows(session: AsyncSession) -> None:
         {"name": SCRIPT_MODEL_NAME},
     )
     await session.commit()
+
+
+async def fetchScriptRows(session: AsyncSession) -> tuple[list[Any], list[Any]]:
+    """本脚本自建的 run 行与 profile 行（按 marker 匹配）。"""
+    runs = (
+        await session.execute(
+            text("SELECT run_id, status FROM agent_orchestration_run WHERE question LIKE :m"),
+            {"m": f"%{MARKER}%"},
+        )
+    ).all()
+    profiles = (
+        await session.execute(
+            text(
+                "SELECT agent_id, enabled, revision FROM agent_orchestration_profile "
+                "WHERE instructions LIKE :m"
+            ),
+            {"m": f"%{MARKER}%"},
+        )
+    ).all()
+    return list(runs), list(profiles)
+
+
+async def countScriptResidue(session: AsyncSession) -> int:
+    """本脚本自建行的**残留计数**（run + profile + 自建 Agent + 自建模型配置）。"""
+    remaining = (
+        await session.execute(
+            text(
+                "SELECT (SELECT count(*) FROM agent_orchestration_run WHERE question LIKE :m)"
+                " + (SELECT count(*) FROM agent_orchestration_profile WHERE instructions LIKE :m)"
+                " + (SELECT count(*) FROM agent_definition WHERE agent_code = :agentCode)"
+                " + (SELECT count(*) FROM llm_config WHERE model_name = :modelName)"
+            ),
+            {
+                "m": f"%{MARKER}%",
+                "agentCode": SCRIPT_AGENT_CODE,
+                "modelName": SCRIPT_MODEL_NAME,
+            },
+        )
+    ).scalar_one()
+    return int(remaining)
+
+
+async def prepareAgent(session: AsyncSession, stepLabel: str) -> str | None:
+    """准备一个可用的 ACTIVE Agent（优先借用既有的；没有就自建）。
+
+    两条路都走不通 ⇒ 输出 ``SKIP`` 并返回 ``None``（该步骤在当前库上无法执行）。
+    """
+    try:
+        agentCode, isSelfCreated = await ensureAgent(session)
+    except Exception as error:  # noqa: BLE001 — 前置条件不足按 SKIP 处理，不算脚本缺陷
+        skipStep(
+            stepLabel,
+            f"无法准备 ACTIVE 的 agent_definition（{type(error).__name__}: {error}）"
+            "；本步骤在当前库上无法执行",
+        )
+        return None
+    if agentCode is None:
+        skipStep(
+            stepLabel,
+            "目标库没有 status='active' 且尚无编排 profile 的 agent_definition，"
+            "自建也未成功（库种子前置条件未满足；本步骤在当前库上无法执行）",
+        )
+        return None
+    origin = "脚本自建（退出时删除）" if isSelfCreated else "借用既有 Agent（不删除）"
+    print(f"      使用 Agent：{agentCode}（{origin}）")
+    return agentCode
+
+
+async def prepareModelConfig(session: AsyncSession, stepLabel: str) -> int | None:
+    """准备一个启用的模型配置（优先借用既有的；没有就自建）。
+
+    两条路都走不通 ⇒ 输出 ``SKIP`` 并返回 ``None``（该步骤在当前库上无法执行）。
+    """
+    try:
+        modelId, isSelfCreated = await ensureModelConfig(session)
+    except Exception as error:  # noqa: BLE001 — 前置条件不足按 SKIP 处理
+        skipStep(
+            stepLabel,
+            f"无法准备 is_active 的 llm_config（{type(error).__name__}: {error}）；"
+            "本步骤在当前库上无法执行",
+        )
+        return None
+    if modelId is None:
+        skipStep(
+            stepLabel,
+            "llm_config 里没有 is_active 的模型配置，自建也未成功"
+            "（库种子前置条件未满足；本步骤在当前库上无法执行）",
+        )
+        return None
+    origin = "脚本自建（退出时删除）" if isSelfCreated else "借用既有模型配置（不删除）"
+    print(f"      使用模型配置：id={modelId}（{origin}）")
+    return int(modelId)

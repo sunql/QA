@@ -208,7 +208,7 @@ AgentRegistryPage / AgentRuntimePage / ChatPage 的现有行为——**一律不
 | 轮询 hook | `frontend/src/components/agent/task/useAgentRunTracker.ts` |
 | compose 契约 | `docker/docker-compose.yml` 的 `agent-orchestration-worker`（`profiles: [agent-orchestration]`） |
 | 菜单脚本 | `backend/scripts/seed_agent_orchestration_menu.py` |
-| 真实数据脚本 | `backend/scripts/feat_agent_orchestration_realdata.py` |
+| 真实数据脚本 | `backend/scripts/feat_agent_orchestration_realdata.py`（入口：S1–S10 与主流程）<br>`backend/scripts/feat_agent_orchestration_realdata_lib.py`（常量、DSN 解析、PASS/FAIL/SKIP 输出）<br>`backend/scripts/feat_agent_orchestration_realdata_db.py`（数据库访问 helper：工具行适配、快照/还原、前置条件自建行、清理） |
 
 ### 5.2 关键算法
 
@@ -498,7 +498,9 @@ orchestration_paths = 9
 
 ### 8.3 真实数据验证脚本输出
 
-脚本：`backend/scripts/feat_agent_orchestration_realdata.py`
+脚本：`backend/scripts/feat_agent_orchestration_realdata.py`（入口）
++ `feat_agent_orchestration_realdata_lib.py`（常量 / DSN 解析 / 判定输出）
++ `feat_agent_orchestration_realdata_db.py`（数据库访问 helper）。
 （**幂等**：自建行按 marker 删除后重建；**不翻任何 `enabled`**；既有 6 张表行数前后比对；
 阶段 0 改写的 3 行 `input_schema` **在退出前写回原值**）。
 
@@ -517,9 +519,13 @@ orchestration_paths = 9
 
 ```bash
 cd backend
-TEST_DATABASE_URL='postgresql+asyncpg://qa_user:***@localhost:5436/qa_metadata_test' \
+TEST_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5436/qa_metadata_test' \
   ./.venv/bin/python scripts/feat_agent_orchestration_realdata.py
 ```
+
+> ⚠️ `<user>` / `<pwd>` 是**占位符**：把它换成隔离测试库的真实账号与口令。
+> 口令**不要**写进仓库、`.env` 或任何文档；本文档里出现的 `qa_user:***@…` 是**打码**形态
+> （脚本自己的 `TARGET` 输出也是这个形态），照抄 `***` 是**认证失败**的。
 
 #### 前置条件与 SKIP 语义
 
@@ -538,6 +544,14 @@ TEST_DATABASE_URL='postgresql+asyncpg://qa_user:***@localhost:5436/qa_metadata_t
 - `S6` 断言的是「**脚本没有翻转任何 `enabled`**」——这个不变量在**任何**库上都成立；
   判定文本会报出**观测到的运行前状态**（不同库种子不同，wiki 工具可能是
   `enabled=true` 也可能是 `false`）。
+- `S5` 的「写入 N 行」按 UPDATE 的**实际命中行数**汇报：第一波只写 `enabled=true`
+  的行，某个工具被禁用 ⇒ 该行**没写成** ⇒ 按「未写入 + 原因」汇报
+  （`SKIP S5 schema-only 修复 — 实际写入 2 行，未写入 1 行：…`），
+  **绝不**声称写了没写的行。此时 `S6` 会因该工具不可编排而 `FAIL`（运行**不是**绿的）。
+- **SKIP 与 FAIL 的分类依据是异常的具体类型**：`NotFoundError` / `ConflictError` /
+  `ValidationError`（库种子不满足）⇒ `SKIP` 并写明缺什么；**其它**异常 ⇒ `FAIL`
+  （脚本或环境的缺陷，必须暴露）。建 profile / 建 run 这类**服务调用**同样受这条
+  规则保护——前置条件不满足时输出 `SKIP`，**不会**抛出未捕获的 traceback。
 
 #### 本次运行（两次连续运行，**完整 stdout，逐行未删改**）
 
@@ -589,7 +603,7 @@ stdout 与运行 1 **逐行一致**，除了三个每次必然不同的自增/�
 | S8 的 `run_id` | `343cab6b-0f61-4c41-8c70-d844070b7dfc` | `137c8f7f-b41b-45f2-83bf-244ff89f00ec` |
 | S10 打印的 `agent_id` | `agent_id=4` | `agent_id=5` |
 
-**幂等的口径**（**F1.6 重新定义**）：**连续两次运行 ⇒ 退出码相同 + PASS/SKIP 集合相同**
+**幂等的口径**：**连续两次运行 ⇒ 退出码相同 + PASS/SKIP 集合相同**
 （`FAIL` 集合为空）。实测：
 
 | | 退出码 | PASS | FAIL | SKIP | PASS/SKIP 集合 |
@@ -604,7 +618,13 @@ stdout 与运行 1 **逐行一致**，除了三个每次必然不同的自增/�
 > **非 canonical 观察（旧记录）**：本特性交付时曾在 **dev 库 `5433/qa_metadata`** 上
 > 跑过一次并得到全 PASS。该次运行**不是** canonical 证据——脚本自己的规矩是
 > 「绝不碰 dev 库」，而那次运行**永久改写了 3 行 `input_schema` 且没有还原**
-> （正是本轮 F1.4 修掉的问题）。该次记录**已被上面的隔离库证据取代**。
+> （当前版本的脚本会在退出前把写过的 `input_schema` 写回原值，不再留残留）。
+> 该次记录**已被上面的隔离库证据取代**。
+>
+> ⚠️ **dev 库至今仍带着那次旧运行留下的残留**：那 3 行
+> （`supplier_360` / `supplier_risk` / `graph_traverse`）的 `input_schema` 仍是当时
+> 写入的值。**这是刻意不清理的**——本特性不碰 dev 库，清理动作超出本变更范围
+> （残留本身是良性的：schema-only 正是灰度手册阶段 0 规定的动作）。
 
 #### 这次运行证明了什么
 
@@ -618,6 +638,29 @@ stdout 与运行 1 **逐行一致**，除了三个每次必然不同的自增/�
   行全部删除（实测残留计数全为 0），阶段 0 改写的 3 行 `input_schema`
   **已写回运行前的原值**（实测运行后这 3 行仍是 `{}`）—— **零残留**；
 - **幂等**：见上表（两次运行退出码相同、PASS/SKIP 集合相同）。
+
+#### 前置条件不满足时的行为（**单独实测**，非 canonical 运行）
+
+为了验证「前置条件不满足 ⇒ `SKIP` 而不是 traceback」，在**同一个隔离测试库**上
+临时把第一波工具 `supplier_360` 置成 `enabled=false` 跑了一次，**跑完立刻改回
+`enabled=true`**（改前改后都核验过：7 个工具全部 `enabled=true`、
+`input_schema` 全部 `{}`、其余表零残留）。关键输出：
+
+```
+      supplier_360: 未写入（UPDATE 命中 0 行；该行 enabled=False）
+      supplier_risk: input_schema {} -> {"type": "object", "properties": {"key": {"type": "string"}}, "additionalProperties": false}（enabled 保持 True 未改）
+      graph_traverse: input_schema {} -> {"type": "object", "properties": {"key": {"type": "string"}}, "additionalProperties": false}（enabled 保持 True 未改）
+SKIP  S5 schema-only 修复 — 实际写入 2 行，未写入 1 行：supplier_360（该行 enabled=False；第一波只写 enabled=true 的行）（库种子前置条件未满足；本步骤在当前库上无法完整执行）
+FAIL  S6 三个已启用工具可编排 — supplier_360=False, supplier_risk=True, graph_traverse=True
+SKIP  S7 编排 profile — 建 profile 的前置条件未满足（ValidationError: 工具已禁用：supplier_360）；本步骤在当前库上无法执行
+SKIP  S8 创建 run — S7 已 SKIP（目标库没有可用的 ACTIVE Agent）
+PASS  S10 自建行已清理 — 自建 run / profile / Agent / 模型配置均已删除
+PASS  S10 阶段 0 schema 已还原 — 3 行 input_schema 已写回运行前的原值
+```
+
+⇒ **无 traceback、stderr 为空**；S5 如实汇报「写入 2 行、未写入 1 行」，
+S7 输出 `SKIP` 并**写明缺什么**（工具被禁用），
+S6 因为该工具确实不可编排而 `FAIL` ⇒ **退出码 1，运行不是绿的**。
 
 ### 8.4 未执行项（明确记录，不得当成已完成）
 
@@ -662,7 +705,8 @@ stdout 与运行 1 **逐行一致**，除了三个每次必然不同的自增/�
 - [x] 第 8 段 docker compose 冒烟命令 + 输出贴出（§8.1）
 - [x] 第 8 段 `/openapi.json` 端点冒烟命令 + 输出贴出（§8.2，进程内 + 真实 HTTP 两轮）
 - [x] 第 8 段真实数据验证脚本输出贴出（§8.3）：命令
-      `TEST_DATABASE_URL='postgresql+asyncpg://qa_user:***@localhost:5436/qa_metadata_test' ./.venv/bin/python scripts/feat_agent_orchestration_realdata.py`
+      `TEST_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5436/qa_metadata_test' ./.venv/bin/python scripts/feat_agent_orchestration_realdata.py`
+      （`<user>` / `<pwd>` 是占位符，真实口令不入文档；输出里一律打码成 `qa_user:***@…`）
       在**隔离测试库** `5436/qa_metadata_test` 上连跑两次，**两次退出码都是 0**，
       **两次的 PASS/SKIP 集合完全一致**（各 20 PASS / 0 FAIL / 0 SKIP），
       完整 stdout（逐行未删改）贴在 §8.3；本次运行**没有产生任何 SKIP 行**
@@ -674,5 +718,5 @@ stdout 与运行 1 **逐行一致**，除了三个每次必然不同的自增/�
 - [x] 至少 1 条 MEMORY 索引已在 `~/.claude/projects/.../memory/MEMORY.md` 添加
       （索引行 + 详情文件均已存在；由控制方写入）
 - [x] 涉及真实 SQL/DB 改动时 `scripts/<feature>_realdata.py` 已跑通
-      （`backend/scripts/feat_agent_orchestration_realdata.py`，目标库 = 隔离测试库
-      `5436/qa_metadata_test`，退出码 0；详见 §8.3）
+      （`backend/scripts/feat_agent_orchestration_realdata.py` + `_lib.py` + `_db.py` 三个模块，
+      目标库 = 隔离测试库 `5436/qa_metadata_test`，退出码 0；详见 §8.3）

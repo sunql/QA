@@ -27,7 +27,7 @@
 | V9 | Playwright（mock） | `npx playwright test` | ⚠️ **27 failed**（基线也是 27，净新增 0）—— **不可称「E2E 通过」** |
 | V10 | compose 冒烟（特性关闭） | `docker compose config --services/--images` + `docker ps` | ✅ Worker **未**启动、**不**在默认服务清单 |
 | V11 | `/openapi.json` 端点冒烟 | 进程内 + 真实 HTTP | ✅ 关闭时 9 条路径**全部缺席**（404） |
-| V12 | 真实数据脚本 | `backend/scripts/feat_agent_orchestration_realdata.py` | ✅ **连跑两次都是 exit 0**，PASS/SKIP 集合一致（20 PASS / 0 FAIL / 0 SKIP）；目标库 = 隔离测试库 `5436/qa_metadata_test`（见 §6.2） |
+| V12 | 真实数据脚本 | `backend/scripts/feat_agent_orchestration_realdata.py`（+ `_lib.py` / `_db.py` 两个 helper 模块） | ✅ **连跑两次都是 exit 0**，PASS/SKIP 集合一致（20 PASS / 0 FAIL / 0 SKIP）；目标库 = 隔离测试库 `5436/qa_metadata_test`（见 §6.2） |
 
 ---
 
@@ -35,6 +35,10 @@
 
 **环境**：容器 `qa-pg-orchestration`，`localhost:5436/qa_metadata_test`（**隔离测试库**）；
 Neo4j `bolt://localhost:7688`。**未触碰** dev 库（5433）与生产。
+
+> ⚠️ 下面命令里的 `qa_user:***@…` 是**打码**形态：`*` 代表真实口令。
+> 实跑时把 `***` 换成隔离测试库的真实口令（或按 §6.2 的 `<user>:<pwd>` 占位符形态写），
+> 照抄 `***` 会**认证失败**。口令**不写进**仓库、`.env` 或任何文档。
 
 > **两个 pytest session 必须分开跑**：集成与单测的 seed fixture 会 TRUNCATE/INSERT
 > **同一个共享测试库**。混在一个 session 里必然撞出 1 failed + 9 ERRORS
@@ -70,7 +74,9 @@ TEST_NEO4J_URI=bolt://localhost:7688 \
 cd backend
 ./.venv/bin/ruff check app/services/agent_orchestration_*.py app/domain/agent_orchestration_*.py \
   app/api/v1/agent_orchestrations.py app/api/v1/agent_runs.py app/workers/agent_orchestration_worker.py \
-  scripts/feat_agent_orchestration_realdata.py
+  scripts/feat_agent_orchestration_realdata.py \
+  scripts/feat_agent_orchestration_realdata_lib.py \
+  scripts/feat_agent_orchestration_realdata_db.py
 ```
 
 ```
@@ -253,14 +259,24 @@ orchestration_paths = 9
 `S7` 需要一个 `status='active'` 且尚无编排 profile 的 `agent_definition`（没有则脚本**自建**，
 退出时删除），`S8` 需要一个 `is_active` 的 `llm_config`（没有则脚本**自建**，退出时删除）。
 `S4` 的禁用分支拿**真实行的副本**置 `enabled=False` 来验证（`assertOrchestrationToolValid`
-是纯函数，**不写库**），输出里明说这一点。`S6` 断言的是「**脚本没有翻转任何 `enabled`**」，
+是纯函数，**不写库**），输出里明说这一点。`S5` 的「写入 N 行」按 UPDATE 的**实际命中
+行数**汇报（第一波只写 `enabled=true` 的行；某工具被禁用 ⇒ 该行没写成 ⇒ 按
+「未写入 + 原因」汇报，`S6` 随后会 `FAIL`，运行**不是**绿的）。**SKIP 与 FAIL 的
+分类依据是异常的具体类型**：`NotFoundError` / `ConflictError` / `ValidationError`
+⇒ SKIP 并写明缺什么；其它异常 ⇒ FAIL——建 profile / 建 run 这类服务调用同样受这条
+规则保护，前置条件不满足时输出 `SKIP`，**不会**抛未捕获的 traceback。
+`S6` 断言的是「**脚本没有翻转任何 `enabled`**」，
 判定文本报出**观测到的运行前状态**（不同库种子不同）。
 
 ```bash
 cd backend
-TEST_DATABASE_URL='postgresql+asyncpg://qa_user:***@localhost:5436/qa_metadata_test' \
+TEST_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5436/qa_metadata_test' \
   ./.venv/bin/python scripts/feat_agent_orchestration_realdata.py
 ```
+
+> ⚠️ `<user>` / `<pwd>` 是**占位符**：把它换成隔离测试库的真实账号与口令。
+> 口令**不要**写进仓库、`.env` 或任何文档；下面 stdout 里出现的 `qa_user:***@…` 是
+> **打码**形态（脚本自己的 `TARGET` 输出也是这个形态），照抄 `***` 会**认证失败**。
 
 **完整 stdout（逐行未删改）**：
 
@@ -313,10 +329,23 @@ stdout 与运行 1 **逐行一致**，只有三个每次必然不同的自增/�
 > ACTIVE Agent 与启用的模型配置，所以 S4/S6/S7/S8 都**真正执行**了。若在别的库上跑
 > 而出现 `SKIP`，那一行会写明缺什么（见上方「SKIP 语义」）。
 
+> **前置条件不满足时的行为（单独实测，非 canonical）**：在同一隔离测试库上临时把
+> `supplier_360` 置成 `enabled=false` 跑了一次，**跑完立刻改回 `enabled=true`**
+> （改前改后都核验过：7 个工具全部 `enabled=true`、`input_schema` 全部 `{}`、
+> 其余表零残留）。结果是 **S5 `SKIP`（如实写「实际写入 2 行，未写入 1 行」）、
+> S6 `FAIL`、S7 `SKIP`（写明「工具已禁用：supplier_360」）、S8 `SKIP`**，
+> **无 traceback、stderr 为空、退出码 1** ⇒ 运行**不是**绿的。
+
 > **非 canonical 观察（旧记录）**：交付时曾在 **dev 库 `5433/qa_metadata`** 上跑过一次并
 > 得到全 PASS。该次运行**不是** canonical 证据——脚本自己的规矩是「绝不碰 dev 库」，
-> 而那次运行**永久改写了 3 行 `input_schema` 且没有还原**（正是后来 F1.4 修掉的问题）。
+> 而那次运行**永久改写了 3 行 `input_schema` 且没有还原**（当前版本的脚本会在退出前
+> 把写过的 `input_schema` 写回原值，不再留残留）。
 > 该次记录**已被上面的隔离库证据取代**。
+>
+> ⚠️ **dev 库至今仍带着那次旧运行留下的残留**：那 3 行
+> （`supplier_360` / `supplier_risk` / `graph_traverse`）的 `input_schema` 仍是当时
+> 写入的值。**这是刻意不清理的**——本特性不碰 dev 库，清理动作超出本变更范围
+> （残留本身是良性的：schema-only 正是灰度手册阶段 0 规定的动作）。
 
 ---
 

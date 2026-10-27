@@ -2,63 +2,106 @@
 
 目的
 ----
-在**真实 PostgreSQL**（``qa_metadata``，prod 同源）上验证本特性的关键不变量，
-每一步输出一行 ``PASS`` / ``FAIL``，任一失败即以非零码退出。
+在**真实 PostgreSQL** 上验证本特性的关键不变量，每一步输出一行
+``PASS`` / ``FAIL`` / ``SKIP``，任一 ``FAIL`` 即以非零码退出。
+
+模块划分（按职责拆，单文件均 < 800 行）
+--------------------------------------
+- ``feat_agent_orchestration_realdata_lib``：常量、DSN 解析、PASS/FAIL/SKIP 输出；
+- ``feat_agent_orchestration_realdata_db``：数据库访问 helper（工具行适配器、
+  快照 / 还原、前置条件自建行、清理）；
+- 本文件（入口）：S1–S10 各步骤与主流程。
+
+目标库（唯一被允许的破坏性写入目标）
+------------------------------------
+**隔离测试库** ``localhost:5436/qa_metadata_test``。
+DSN 解析顺序见 ``feat_agent_orchestration_realdata_lib.resolveDatabaseUrl``：
+
+1. ``AGENT_ORCHESTRATION_REALDATA_DATABASE_URL``
+2. ``TEST_DATABASE_URL``（仓内标准测试变量）
+3. ``DATABASE_URL``
+4. ``PG*`` 变量拼装（默认 **5436 / qa_metadata_test**）
+
+⚠️ 默认值刻意指向隔离库，裸跑**不会**落到 dev 库（5433）。
+⚠️ 绝不指向生产。
+
+前置条件（库种子）与 SKIP 语义
+-------------------------------
+本脚本**只**断言与本特性自身相关的行为。目标库的种子不满足前提时，
+该步骤输出 ``SKIP``（**不是** ``FAIL``）并说明缺什么：
+
+- ``S7`` 需要一个 ``status='active'`` 且尚无编排 profile 的
+  ``agent_definition``：优先**借用**既有 Agent；一个都没有时脚本**自建**
+  一个（退出时删除，且不计入 S2 基线行数）；自建也失败 ⇒ ``SKIP``。
+- ``S8`` 需要一个 ``is_active`` 的 ``llm_config``：优先**借用**既有的；
+  没有时脚本**自建**一个（退出时删除）；自建也失败 ⇒ ``SKIP``。
+
+``SKIP`` 的语义：这一步在当前库上**无法执行**——它既不是「通过」也不是
+「失败」。退出码只由 ``FAIL`` 决定。
 
 覆盖的步骤
 ----------
-1. 迁移版本 = ``0135``，五张新表都在（``agent_orchestration_profile`` /
-   ``agent_orchestration_binding`` / ``agent_orchestration_run`` /
-   ``agent_orchestration_step`` / ``agent_orchestration_usage``）。
-2. 设计 §2.2 点名的**六张既有表**行数在「特性的写入路径」前后完全一致
-   （``agent_definition`` / ``agent_access_policy`` / ``agent_tool_config`` /
-   ``agent_schedule`` / ``agent_run_log`` / ``session_token_usage``）。
+1. 迁移版本 = ``0135``，五张新表都在。
+2. 设计 §2.2 点名的**六张既有表**行数在脚本的写入路径前后完全一致
+   （``agent_definition`` 的计数**排除脚本自建的那一行**）。
 3. ``validateObjectSchema`` 真的排除 ``{}``（空 schema 非法）。
-4. **禁用工具路径**（不写任何数据）：绑定 ``wiki_search`` 会被后端自己的
-   ``ValidationError("工具已禁用：wiki_search")`` 拒绝（API 边界即 422）。
+4. **禁用工具路径**（不写任何数据）：取 ``wiki_search`` 的**真实行**，
+   复制一份并把副本的 ``enabled`` 置 ``False``，验证
+   ``assertOrchestrationToolValid`` 走禁用分支 ⇒
+   ``ValidationError("工具已禁用：wiki_search")``（API 边界即 422）。
+   ⚠️ 输出会明说这是「副本」，不会让人误读成「真实行被禁用了」。
 5. 阶段 0 的**只修 schema**动作：只改三个**已启用**工具
    （``supplier_360`` / ``supplier_risk`` / ``graph_traverse``）的
    ``input_schema``，**绝不翻 ``enabled``**。
-   ⚠️ 理由：4 个 wiki 工具被 4 个既有 legacy Agent 绑定
-   （``WIKI_SEARCH_AGENT`` / ``WIKI_READ_AGENT`` / ``WIKI_RULE_AGENT`` /
-   ``WIKI_COVERAGE_AGENT``，均 ``status=active``）；既有运行时只加载
-   ``enabled=true`` 的工具行（``agent_tool_config_registry.py:33,79``），
-   否则抛 ``ConflictError(409 tool_unbound_or_disabled)``
-   （``agent_runtime_service.py:165-178``）⇒ 翻转 ``enabled`` 会让那 4 个
-   **既有** Agent 从「409 不可运行」变成「真的执行」，属于对现有功能的行为变更。
-   改 ``input_schema`` 本身对既有链路是**惰性**的（既有参数来自
-   ``arg_extractor``），所以本步骤不改变任何既有行为。
-6. 修复后三个工具 ``isOrchestrationToolValid`` 为真；四个 wiki 工具的
-   ``enabled`` 仍然是 ``false``（证明脚本没有翻转开关）。
-7. 为一个**既有** Agent 建编排 profile：创建后 ``enabled=false`` /
+   ⚠️ 理由：4 个 wiki 工具被 4 个既有 legacy Agent 绑定；既有运行时只加载
+   ``enabled=true`` 的工具行，否则抛 ``ConflictError(409 tool_unbound_or_disabled)``
+   ⇒ 翻转 ``enabled`` 会让那 4 个**既有** Agent 从「409 不可运行」变成
+   「真的执行」，属于对现有功能的行为变更。改 ``input_schema`` 本身对既有
+   链路是**惰性**的，所以本步骤不改变任何既有行为。
+   ⚠️ 写入前的原值会被快照，退出前（步骤 10）**原样写回**。
+6. 修复后三个工具可用；**四个 wiki 工具的 ``enabled`` 标志与脚本运行前
+   完全一致**（脚本全程不写 ``enabled``）——这是「脚本没有翻转任何开关」
+   的不变量，**在任何库上都成立**（输出里会报告观测到的运行前状态）。
+7. 为一个 ACTIVE Agent 建编排 profile：创建后 ``enabled=false`` /
    ``revision=1``；toggle 之后 ``revision=2``。
 8. 建一次 run：返回 ``QUEUED`` + ``runId``；快照里只有只读白名单里的工具名
    ⇒ 只读性成立（本脚本不执行任何工具）。
 9. feature-off 路径：``ENABLE_AGENT_ORCHESTRATION=false`` 时新路由不出现在
    ``/openapi.json``。
+10. **还原**：删除本脚本自建的 profile / run / Agent / 模型配置，并把步骤 5
+    改过的 3 行 ``input_schema`` **写回原值**，然后断言还原生效。
 
-幂等
-----
+自清理与幂等
+------------
 - 脚本**只写自己拥有的行**：profile 用 ``instructions`` 里的标记串
-  （``MARKER``）识别，run 用 ``question`` 里的标记串识别；每次运行先删掉自己
-  上一次的残留再重建。
-- 步骤 5 的 schema 写入是**幂等**的：值相同就不写。
-- 对 ``agent_tool_config`` 的修改只改 ``input_schema``（行数不变），
-  并且脚本会打印改动前后的原值，便于按 ``<表名>_<YYYYMMDD>`` 约定回溯。
+  （``MARKER``）识别，run 用 ``question`` 里的标记串识别；自建的
+  ``agent_definition`` / ``llm_config`` 行用固定 code / model_name 识别。
+- 步骤 5 的 schema 写入**会在退出前被还原**（见步骤 10）⇒ 脚本运行结束后
+  库**回到运行脚本前的状态**：自建行零残留，被改写的 3 行
+  ``input_schema`` 也回到原值。
+  ⚠️ 「阶段 0 只补 schema 确实有效」这个结论由**步骤 5 自己的输出**给出，
+  而不是由「脚本留下痕迹」给出。
+- **幂等的口径**：连续两次运行 ⇒ **退出码相同** 且 **PASS/SKIP 集合相同**
+  （``FAIL`` 集合为空）。第二次运行步骤 5 仍会写入 3 行（因为第一次结束时
+  已把 schema 还原成原值），这是**预期**的。
 
 用法
 ----
 ::
 
-    # 显式指定 DSN（推荐；口令不要写进仓库）
-    export AGENT_ORCHESTRATION_REALDATA_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5433/qa_metadata'
+    # 推荐：显式指定隔离测试库（口令不要写进仓库）
+    export TEST_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5436/qa_metadata_test'
     cd backend && ./.venv/bin/python scripts/feat_agent_orchestration_realdata.py
 
-    # 或用 PG* 变量拼装（PGPASSWORD 必填）
-    PGPASSWORD=... PGHOST=localhost PGPORT=5433 PGUSER=qa_user PGDATABASE=qa_metadata \
+    # 或用 AGENT_ORCHESTRATION_REALDATA_DATABASE_URL 显式覆盖
+    cd backend && AGENT_ORCHESTRATION_REALDATA_DATABASE_URL='postgresql+asyncpg://…' \
         ./.venv/bin/python scripts/feat_agent_orchestration_realdata.py
 
-⚠️ 绝不指向生产服务器。本脚本会写库。
+    # 或用 PG* 变量拼装（PGPASSWORD 必填；默认 5436 / qa_metadata_test）
+    PGPASSWORD=... PGHOST=localhost PGPORT=5436 PGUSER=qa_user PGDATABASE=qa_metadata_test \
+        ./.venv/bin/python scripts/feat_agent_orchestration_realdata.py
+
+⚠️ 绝不指向生产服务器。本脚本会写库（并在退出前还原）。
 """
 
 from __future__ import annotations
@@ -72,116 +115,50 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# 允许从 scripts/ 直接运行：把 backend/ 放进 sys.path
+# 允许从 scripts/ 直接运行：把 backend/ 与 scripts/ 放进 sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from feat_agent_orchestration_realdata_lib import (  # noqa: E402
+    DISABLED_WIKI_TOOLS,
+    EXPECTED_ALEMBIC_VERSION,
+    FAILURES,
+    FIRST_WAVE_TOOLS,
+    LEGACY_TABLES,
+    MARKER,
+    NEW_TABLES,
+    TOOL_SCHEMAS,
+    check,
+    failStep,
+    maskDsn,
+    passStep,
+    resolveDatabaseUrl,
+    skipStep,
+)
 
 # ---------------------------------------------------------------------------
 # 配置（必须在 import app.* 之前解析：app.config 读 DATABASE_URL）
 # ---------------------------------------------------------------------------
 
-MARKER = "feat-agent-orchestration-realdata"
-
-EXPECTED_ALEMBIC_VERSION = "0135"
-
-NEW_TABLES = (
-    "agent_orchestration_profile",
-    "agent_orchestration_binding",
-    "agent_orchestration_run",
-    "agent_orchestration_step",
-    "agent_orchestration_usage",
-)
-
-# 设计 §2.2：结构/约束/语义不得改动的既有表
-LEGACY_TABLES = (
-    "agent_definition",
-    "agent_access_policy",
-    "agent_tool_config",
-    "agent_schedule",
-    "agent_run_log",
-    "session_token_usage",
-)
-
-# 阶段 0：schema-only 修复目标（这三个工具本来就 enabled=true）
-FIRST_WAVE_TOOLS = ("supplier_360", "supplier_risk", "graph_traverse")
-
-# 这四个工具必须保持 enabled=false（本脚本绝不碰）
-DISABLED_WIKI_TOOLS = ("wiki_search", "wiki_read", "rule_evaluate", "coverage_status")
-
-# 灰度手册 §2.3 的权威 schema（脚本与手册必须同源，不能各写一份）
-TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
-    "supplier_360": {
-        "type": "object",
-        "properties": {"key": {"type": "string"}},
-        "additionalProperties": False,
-    },
-    "supplier_risk": {
-        "type": "object",
-        "properties": {"key": {"type": "string"}},
-        "additionalProperties": False,
-    },
-    "graph_traverse": {
-        "type": "object",
-        "properties": {"key": {"type": "string"}},
-        "additionalProperties": False,
-    },
-    "wiki_search": {
-        "type": "object",
-        "properties": {"query": {"type": "string"}},
-        "additionalProperties": False,
-    },
-    "wiki_read": {
-        "type": "object",
-        "properties": {"query": {"type": "string"}},
-        "additionalProperties": False,
-    },
-    "rule_evaluate": {
-        "type": "object",
-        "properties": {"query": {"type": "string"}},
-        "additionalProperties": False,
-    },
-    "coverage_status": {"type": "object", "properties": {}},
-}
-
-
-def _maskDsn(dsn: str) -> str:
-    """口令一律打码（``user:***@host``）。"""
-    if "@" not in dsn or "://" not in dsn:
-        return "***"
-    scheme, rest = dsn.split("://", 1)
-    creds, host = rest.rsplit("@", 1)
-    if ":" in creds:
-        user, _ = creds.split(":", 1)
-        return f"{scheme}://{user}:***@{host}"
-    return f"{scheme}://***@{host}"
-
-
-def _resolveDatabaseUrl() -> str:
-    """DSN 解析顺序：显式变量 → DATABASE_URL → PG* 变量拼装。"""
-    explicit = os.environ.get("AGENT_ORCHESTRATION_REALDATA_DATABASE_URL")
-    if explicit:
-        return explicit
-    fallback = os.environ.get("DATABASE_URL")
-    if fallback:
-        return fallback
-    password = os.environ.get("PGPASSWORD") or os.environ.get("POSTGRES_PASSWORD")
-    if not password:
-        raise SystemExit(
-            "缺少数据库口令：请设置 AGENT_ORCHESTRATION_REALDATA_DATABASE_URL "
-            "（或 DATABASE_URL / PGPASSWORD）。脚本绝不内置任何口令。"
-        )
-    host = os.environ.get("PGHOST", "localhost")
-    port = os.environ.get("PGPORT", "5433")
-    user = os.environ.get("PGUSER", "qa_user")
-    database = os.environ.get("PGDATABASE", "qa_metadata")
-    return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{database}"
-
-
-DATABASE_URL = _resolveDatabaseUrl()
+DATABASE_URL, DSN_SOURCE = resolveDatabaseUrl()
 os.environ["DATABASE_URL"] = DATABASE_URL
-# 默认静默 SQL 回显（脚本输出只保留 PASS/FAIL 行；需要排查时设 LOG_LEVEL=INFO）
+# 默认静默 SQL 回显（脚本输出只保留 PASS/FAIL/SKIP 行；需要排查时设 LOG_LEVEL=INFO）
 os.environ.setdefault("LOG_LEVEL", "WARNING")
 
+from feat_agent_orchestration_realdata_db import (  # noqa: E402
+    ToolRow,
+    deleteScriptRows,
+    ensureAgent,
+    ensureModelConfig,
+    fetchToolRow,
+    fetchToolRows,
+    legacyCounts,
+    restoreToolSchemas,
+    snapshotEnabledFlags,
+    snapshotToolSchemas,
+    toolRow,
+    writeToolSchema,
+)
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
@@ -192,8 +169,7 @@ from app.domain.agent_orchestration_schemas import (  # noqa: E402
     AgentRunCreate,
 )
 from app.domain.exceptions import ValidationError  # noqa: E402
-from app.domain.models import AgentDefinition, LlmConfig  # noqa: E402
-from app.infrastructure.database import getSessionFactory  # noqa: E402
+from app.infrastructure.database import getEngine, getSessionFactory  # noqa: E402
 from app.services.agent_orchestration_config_service import (  # noqa: E402
     AgentOrchestrationConfigService,
 )
@@ -207,32 +183,11 @@ from app.services.agent_orchestration_validation import (  # noqa: E402
     validateObjectSchema,
 )
 
-# 引擎在非生产环境默认 echo SQL（info 级）；本脚本的输出只保留 PASS/FAIL 行。
+# 引擎在非生产环境默认 echo SQL（info 级）；本脚本的输出只保留判定行。
+# ⚠️ SQLAlchemy 的 echo 日志走 InstanceLogger，它直接调 ``logger._log()``
+# **绕过 logger 级别** ⇒ 真正能压住它的只有「把引擎的 echo 标志关掉」
+# （见 main() 里 getEngine().echo = False）。
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-
-
-# ---------------------------------------------------------------------------
-# 输出helpers
-# ---------------------------------------------------------------------------
-
-FAILURES: list[str] = []
-
-
-def passStep(step: str, detail: str = "") -> None:
-    print(f"PASS  {step}" + (f" — {detail}" if detail else ""))
-
-
-def failStep(step: str, detail: str) -> None:
-    FAILURES.append(f"{step}: {detail}")
-    print(f"FAIL  {step} — {detail}")
-
-
-def check(step: str, ok: bool, detail: str = "") -> bool:
-    if ok:
-        passStep(step, detail)
-    else:
-        failStep(step, detail or "断言不成立")
-    return ok
 
 
 # ---------------------------------------------------------------------------
@@ -267,16 +222,6 @@ async def step1_schema(session: AsyncSession) -> None:
     )
 
 
-async def _legacyCounts(session: AsyncSession) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for table in LEGACY_TABLES:
-        value = (
-            await session.execute(text(f"SELECT count(*) FROM {table}"))  # noqa: S608
-        ).scalar_one()
-        counts[table] = int(value)
-    return counts
-
-
 async def step3_schemaValidation() -> None:
     """``validateObjectSchema`` 真的排除 ``{}``。"""
     try:
@@ -291,50 +236,63 @@ async def step3_schemaValidation() -> None:
 
 
 async def step4_disabledToolPath(session: AsyncSession) -> None:
-    """禁用工具路径：绑定 wiki_search 必须被后端自己的校验拒绝（不写库）。"""
-    row = (
-        await session.execute(
-            text(
-                "SELECT name, enabled, handler_kind, handler_ref, input_schema "
-                "FROM agent_tool_config WHERE name = :name"
-            ),
-            {"name": "wiki_search"},
-        )
-    ).mappings().first()
+    """禁用工具路径（**不写库**）。
+
+    ``assertOrchestrationToolValid`` 是纯函数 ⇒ 取 ``wiki_search`` 的**真实行**，
+    复制一份并把副本的 ``enabled`` 置 ``False``，验证禁用分支被拒。
+    输出会明说是「副本」，避免被误读成「真实行被禁用了」。
+    """
+    row = await fetchToolRow(session, "wiki_search")
     if row is None:
-        failStep("S4 禁用工具路径", "agent_tool_config 里没有 wiki_search 行")
+        skipStep(
+            "S4 禁用工具路径",
+            "agent_tool_config 里没有 wiki_search 行（目标库未种该工具，无法取真实行）",
+        )
         return
-    check(
-        "S4 wiki_search 仍是禁用态",
-        not bool(row["enabled"]),
-        f"enabled={row['enabled']}（脚本不翻转它）",
+
+    live = toolRow(row)
+    disabledCopy = ToolRow(
+        name=live.name,
+        enabled=False,
+        handler_kind=live.handler_kind,
+        handler_ref=live.handler_ref,
+        input_schema=live.input_schema,
     )
+    print(f"      wiki_search 真实行 enabled={live.enabled}（脚本全程不写 enabled）")
     try:
-        assertOrchestrationToolValid(row, "wiki_search")
+        assertOrchestrationToolValid(disabledCopy, "wiki_search")
     except ValidationError as error:
         expected = "工具已禁用：wiki_search"
         check(
             "S4 禁用工具被拒",
             str(error) == expected,
-            f"message={error!s} (期望 {expected!r})",
+            f"message={error!s} (期望 {expected!r})；"
+            "针对真实行的副本置 enabled=False 验证禁用分支（未写库）",
         )
     else:
         failStep("S4 禁用工具被拒", "assertOrchestrationToolValid 没有拒绝禁用工具")
 
 
-async def step5_fixSchemas(session: AsyncSession) -> None:
-    """阶段 0 的 schema-only 修复（不动 ``enabled``）。"""
+async def step5_fixSchemas(session: AsyncSession, originalSchemas: dict[str, Any]) -> None:
+    """阶段 0 的 schema-only 修复（不动 ``enabled``）。
+
+    原始值由调用方在写入前快照 ⇒ 退出时（步骤 10）可原样写回。
+    目标库没种这三个工具行 ⇒ **SKIP**（库种子前置条件未满足，不是脚本缺陷）。
+    """
+    missing = [
+        name for name in FIRST_WAVE_TOOLS if await fetchToolRow(session, name) is None
+    ]
+    if missing:
+        skipStep(
+            "S5 schema-only 修复",
+            f"目标库 agent_tool_config 缺少工具行 {missing}"
+            "（库种子前置条件未满足；本步骤在当前库上无法执行）",
+        )
+        return
+
     changed = 0
     for name in FIRST_WAVE_TOOLS:
-        row = (
-            await session.execute(
-                text(
-                    "SELECT id, name, enabled, handler_ref, input_schema "
-                    "FROM agent_tool_config WHERE name = :name"
-                ),
-                {"name": name},
-            )
-        ).mappings().first()
+        row = await fetchToolRow(session, name)
         if row is None:
             failStep("S5 schema 修复", f"agent_tool_config 里没有 {name} 行")
             continue
@@ -343,13 +301,7 @@ async def step5_fixSchemas(session: AsyncSession) -> None:
         if before == target:
             print(f"      {name}: schema 已是目标值，未写入（enabled={row['enabled']}）")
             continue
-        await session.execute(
-            text(
-                "UPDATE agent_tool_config SET input_schema = :schema "
-                "WHERE id = :id AND enabled IS TRUE"
-            ),
-            {"schema": json.dumps(target), "id": row["id"]},
-        )
+        await writeToolSchema(session, row["id"], target)
         changed += 1
         print(
             f"      {name}: input_schema {json.dumps(before, ensure_ascii=False)}"
@@ -357,21 +309,14 @@ async def step5_fixSchemas(session: AsyncSession) -> None:
             f"（enabled 保持 {row['enabled']} 未改）"
         )
     await session.commit()
-    passStep("S5 schema-only 修复", f"实际写入 {changed} 行（enabled 未翻转）")
+    passStep("S5 schema-only 修复", f"实际写入 {changed} 行（enabled 未翻转；退出前会还原）")
 
 
-async def step6_toolOptions(session: AsyncSession) -> None:
-    """修复后：3 个已启用工具可用，4 个 wiki 工具仍禁用。"""
-    rows = (
-        await session.execute(
-            text(
-                "SELECT name, enabled, handler_kind, handler_ref, input_schema "
-                "FROM agent_tool_config WHERE name = ANY(:names)"
-            ),
-            {"names": list(FIRST_WAVE_TOOLS) + list(DISABLED_WIKI_TOOLS)},
-        )
-    ).mappings().all()
-    byName = {row["name"]: row for row in rows}
+async def step6_toolOptions(session: AsyncSession, preEnabledFlags: dict[str, bool]) -> None:
+    """修复后：3 个第一波工具可用；**4 个 wiki 工具的 enabled 未被翻转**。"""
+    byName = await fetchToolRows(
+        session, tuple(FIRST_WAVE_TOOLS) + tuple(DISABLED_WIKI_TOOLS)
+    )
 
     okFirst = all(
         isOrchestrationToolValid(byName.get(name)) for name in FIRST_WAVE_TOOLS
@@ -384,15 +329,29 @@ async def step6_toolOptions(session: AsyncSession) -> None:
             for name in FIRST_WAVE_TOOLS
         ),
     )
-    stillDisabled = [
-        name for name in DISABLED_WIKI_TOOLS if not byName.get(name)
-        or bool(byName[name]["enabled"])
-    ]
-    check(
-        "S6 四个 wiki 工具仍未启用",
-        not stillDisabled,
-        "全部 enabled=false（证明脚本没有改变既有 legacy Agent 的可运行性）",
-    )
+
+    missing = [name for name in DISABLED_WIKI_TOOLS if name not in byName]
+    if missing:
+        skipStep(
+            "S6 四个 wiki 工具的 enabled 不变量",
+            f"目标库缺少工具行 {missing}，无法比较运行前后的 enabled",
+        )
+    else:
+        nowEnabled = {name: byName[name].enabled for name in DISABLED_WIKI_TOOLS}
+        unchanged = all(
+            preEnabledFlags.get(name) == nowEnabled[name] for name in DISABLED_WIKI_TOOLS
+        )
+        detail = "；".join(
+            f"{name}: pre enabled={preEnabledFlags.get(name)} → now enabled={nowEnabled[name]}"
+            for name in DISABLED_WIKI_TOOLS
+        )
+        check(
+            "S6 脚本没有翻转任何 enabled",
+            unchanged,
+            f"{detail}（脚本全程不写 enabled；观测到的运行前状态如上，"
+            "不同库种子不同——enabled=true 的库说明该库把 wiki 工具种成了启用态）",
+        )
+
     check(
         "S6 只读白名单仍是 7 项",
         len(READ_ONLY_HANDLER_REFS) == 7,
@@ -400,49 +359,32 @@ async def step6_toolOptions(session: AsyncSession) -> None:
     )
 
 
-async def _pickAgent(session: AsyncSession) -> str | None:
-    """挑一个既有 ACTIVE Agent（优先有编排工具绑定的），且没有既有 profile。"""
-    rows = (
-        await session.execute(
-            text(
-                "SELECT a.agent_code FROM agent_definition a "
-                "LEFT JOIN agent_orchestration_profile p ON p.agent_id = a.id "
-                "WHERE a.status = 'active' AND p.id IS NULL "
-                "ORDER BY (a.tool_name IN ('supplier_360','supplier_risk','graph_traverse')) DESC, "
-                "a.agent_code LIMIT 5"
-            )
-        )
-    ).scalars().all()
-    return rows[0] if rows else None
-
-
-async def _cleanupOwnedRows(session: AsyncSession, agentCode: str) -> None:
-    """删除本脚本上一次留下的 profile / run（级联删绑定、step、usage）。"""
-    await session.execute(
-        text(
-            "DELETE FROM agent_orchestration_run WHERE question LIKE :marker"
-        ),
-        {"marker": f"%{MARKER}%"},
-    )
-    await session.execute(
-        text(
-            "DELETE FROM agent_orchestration_profile WHERE instructions LIKE :marker"
-        ),
-        {"marker": f"%{MARKER}%"},
-    )
-    await session.commit()
-
-
 async def step7_profile(session: AsyncSession, actor: CurrentUser) -> str | None:
-    """建 profile（enabled=false / revision=1）→ toggle（revision=2）。"""
-    agentCode = await _pickAgent(session)
-    if agentCode is None:
-        failStep(
+    """建 profile（enabled=false / revision=1）→ toggle（revision=2）。
+
+    前置条件：需要一个 ACTIVE 且尚无编排 profile 的 Agent。优先**借用**既有的；
+    库里一个都没有 ⇒ 脚本**自建**一个（退出时删除，不计入 S2 基线）。
+    两条路都走不通 ⇒ **SKIP**（库种子前置条件未满足，不是脚本缺陷）。
+    """
+    await deleteScriptRows(session)
+    try:
+        agentCode, isSelfCreated = await ensureAgent(session)
+    except Exception as error:  # noqa: BLE001 — 前置条件不足按 SKIP 处理，不算脚本缺陷
+        skipStep(
             "S7 编排 profile",
-            "没有可用的既有 ACTIVE Agent（都已有 profile）；请先清理或换库",
+            f"无法准备 ACTIVE 的 agent_definition（{type(error).__name__}: {error}）"
+            "；本步骤在当前库上无法执行",
         )
         return None
-    await _cleanupOwnedRows(session, agentCode)
+    if agentCode is None:
+        skipStep(
+            "S7 编排 profile",
+            "目标库没有 status='active' 且尚无编排 profile 的 agent_definition，"
+            "自建也未成功（库种子前置条件未满足；本步骤在当前库上无法执行）",
+        )
+        return None
+    origin = "脚本自建（退出时删除）" if isSelfCreated else "借用既有 Agent（不删除）"
+    print(f"      使用 Agent：{agentCode}（{origin}）")
 
     configService = AgentOrchestrationConfigService()
     created = await configService.create(
@@ -486,14 +428,24 @@ async def step8_createRun(
     session: AsyncSession, actor: CurrentUser, agentCode: str
 ) -> None:
     """建 run：QUEUED + runId；快照只含只读工具（只读性成立）。"""
-    modelId = (
-        await session.execute(
-            text("SELECT id FROM llm_config WHERE is_active IS TRUE ORDER BY id LIMIT 1")
+    try:
+        modelId, isSelfCreated = await ensureModelConfig(session)
+    except Exception as error:  # noqa: BLE001 — 前置条件不足按 SKIP 处理
+        skipStep(
+            "S8 创建 run",
+            f"无法准备 is_active 的 llm_config（{type(error).__name__}: {error}）；"
+            "本步骤在当前库上无法执行",
         )
-    ).scalar_one_or_none()
-    if modelId is None:
-        failStep("S8 创建 run", "llm_config 里没有启用中的模型配置")
         return
+    if modelId is None:
+        skipStep(
+            "S8 创建 run",
+            "llm_config 里没有 is_active 的模型配置，自建也未成功"
+            "（库种子前置条件未满足；本步骤在当前库上无法执行）",
+        )
+        return
+    origin = "脚本自建（退出时删除）" if isSelfCreated else "借用既有模型配置（不删除）"
+    print(f"      使用模型配置：id={modelId}（{origin}）")
 
     runService = AgentOrchestrationRunService()
     created = await runService.createRun(
@@ -563,8 +515,8 @@ async def step9_featureOff() -> None:
     )
 
 
-async def step10_cleanup(session: AsyncSession, agentCode: str | None) -> None:
-    """删除本脚本自建的行 ⇒ 库回到运行脚本前的状态（零残留）。"""
+async def step10_cleanup(session: AsyncSession, originalSchemas: dict[str, Any]) -> None:
+    """**自清理**：删自建行 + 还原阶段 0 的 schema 改动 ⇒ 库回到运行脚本前。"""
     runs = (
         await session.execute(
             text("SELECT run_id, status FROM agent_orchestration_run WHERE question LIKE :m"),
@@ -587,67 +539,99 @@ async def step10_cleanup(session: AsyncSession, agentCode: str | None) -> None:
             f"      删除自建 profile: agent_id={profile[0]} "
             f"enabled={profile[1]} revision={profile[2]}"
         )
-    await _cleanupOwnedRows(session, agentCode or "")
+    await deleteScriptRows(session)
     remaining = (
         await session.execute(
             text(
                 "SELECT (SELECT count(*) FROM agent_orchestration_run WHERE question LIKE :m)"
                 " + (SELECT count(*) FROM agent_orchestration_profile WHERE instructions LIKE :m)"
+                " + (SELECT count(*) FROM agent_definition "
+                "   WHERE agent_code = 'REALDATA_ORCHESTRATION_AGENT')"
+                " + (SELECT count(*) FROM llm_config "
+                "   WHERE model_name = 'realdata-orchestration-model')"
             ),
             {"m": f"%{MARKER}%"},
         )
     ).scalar_one()
-    check("S10 自建行已清理", int(remaining) == 0, f"残留行数={remaining}")
+    check(
+        "S10 自建行已清理",
+        int(remaining) == 0,
+        "自建 run / profile / Agent / 模型配置均已删除" if not remaining else f"残留行数={remaining}",
+    )
+
+    if not originalSchemas:
+        skipStep("S10 阶段 0 schema 已还原", "脚本未改写过任何 input_schema，无需还原")
+        return
+    restored = await restoreToolSchemas(session, originalSchemas)
+    notRestored = sorted(name for name, ok in restored.items() if not ok)
+    check(
+        "S10 阶段 0 schema 已还原",
+        not notRestored,
+        "3 行 input_schema 已写回运行前的原值"
+        if not notRestored
+        else f"未还原 {notRestored}",
+    )
 
 
 async def main() -> int:
-    print(f"DSN  = {_maskDsn(DATABASE_URL)}")
+    print(f"TARGET  {maskDsn(DATABASE_URL)}  (from {DSN_SOURCE})")
     print(f"MARKER = {MARKER}")
     print("-" * 72)
 
     sessionFactory = getSessionFactory()
-    # 引擎在非生产环境默认 echo SQL；把它的 logger 压到 WARNING，
-    # 让脚本输出只剩 PASS/FAIL 行（排查时用 LOG_LEVEL=INFO 恢复）。
-    logging.getLogger("sqlalchemy.engine.Engine").setLevel(logging.WARNING)
+    # 引擎在非生产环境默认 echo SQL（app.infrastructure.database.getEngine 用
+    # ``echo=not settings.isProduction``）。SQLAlchemy 的 echo 日志走
+    # ``InstanceLogger``，它直接调 ``logger._log()`` **绕过 logger 级别**，
+    # 所以压 logger 级别压不住——必须把引擎自己的 ``echo`` 标志关掉
+    # （关掉后 ``_should_log_info()`` 为 False，连接不再打 SQL）。
+    # 这样脚本 stdout 只剩判定行，录进文档的证据才是完整可读的。
+    getEngine().echo = False
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
     actor = CurrentUser(userId="realdata-script", roles=("admin",), departments=())
 
     beforeCounts: dict[str, int] = {}
-    agentCode: str | None = None
+    originalSchemas: dict[str, Any] = {}
 
-    async with sessionFactory() as session:
-        await step1_schema(session)
-        beforeCounts = await _legacyCounts(session)
-        passStep(
-            "S2 既有表基线行数",
-            ", ".join(f"{table}={count}" for table, count in beforeCounts.items()),
-        )
+    try:
+        async with sessionFactory() as session:
+            await step1_schema(session)
+            beforeCounts = await legacyCounts(session)
+            passStep(
+                "S2 既有表基线行数",
+                ", ".join(f"{table}={count}" for table, count in beforeCounts.items()),
+            )
 
-        await step3_schemaValidation()
-        await step4_disabledToolPath(session)
-        await step5_fixSchemas(session)
-        await step6_toolOptions(session)
+            await step3_schemaValidation()
+            await step4_disabledToolPath(session)
+            originalSchemas = await snapshotToolSchemas(session)
+            preEnabledFlags = await snapshotEnabledFlags(session)
+            await step5_fixSchemas(session, originalSchemas)
+            await step6_toolOptions(session, preEnabledFlags)
 
-        agentCode = await step7_profile(session, actor)
-        if agentCode is not None:
-            await step8_createRun(session, actor, agentCode)
+            agentCode = await step7_profile(session, actor)
+            if agentCode is not None:
+                await step8_createRun(session, actor, agentCode)
+            else:
+                skipStep("S8 创建 run", "S7 已 SKIP（目标库没有可用的 ACTIVE Agent）")
 
-    await step9_featureOff()
-
-    async with sessionFactory() as session:
-        await step10_cleanup(session, agentCode)
-        afterCounts = await _legacyCounts(session)
-        drift = {
-            table: (beforeCounts[table], afterCounts[table])
-            for table in LEGACY_TABLES
-            if beforeCounts[table] != afterCounts[table]
-        }
-        check(
-            "S2 既有表行数前后一致",
-            not drift,
-            "六张既有表行数无变化"
-            if not drift
-            else f"行数变化 {drift}",
-        )
+        await step9_featureOff()
+    finally:
+        async with sessionFactory() as session:
+            await step10_cleanup(session, originalSchemas)
+            if beforeCounts:
+                afterCounts = await legacyCounts(session)
+                drift = {
+                    table: (beforeCounts[table], afterCounts[table])
+                    for table in LEGACY_TABLES
+                    if beforeCounts[table] != afterCounts[table]
+                }
+                check(
+                    "S2 既有表行数前后一致",
+                    not drift,
+                    "六张既有表行数无变化"
+                    if not drift
+                    else f"行数变化 {drift}",
+                )
 
     print("-" * 72)
     if FAILURES:

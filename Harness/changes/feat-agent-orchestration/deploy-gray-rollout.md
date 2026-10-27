@@ -65,7 +65,7 @@
 > FROM agent_tool_config ORDER BY name;
 > ```
 
-### 2.2 绑定一个工具必须做**两件事**（缺一不可）
+### 2.2 绑定一个工具通常要做**两件事**；**第一波只做第 1 步**
 
 1. **写合法的 object schema**（下表三选一，必须与真实 handler 契约一致）；
 2. **把该工具 `enabled = true`**（否则即使 schema 合法也不可绑定）。

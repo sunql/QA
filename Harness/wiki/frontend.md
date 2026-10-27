@@ -193,7 +193,11 @@ const [read, incoming] = await Promise.all([
 - **系统上限硬编码在前端**（20 / 30 / 5 USD / 900 / 1000-50000），而
   `backend/app/config.py` 允许用环境变量覆盖 ⇒ 覆盖过的部署会出现 UI 边界漂移
   （服务端仍按 `assertWithinSystemCeilings` 兜底）。
-- `errorStatus` / `errorDetailText` 在
-  `pages/AgentOrchestrationPage.tsx` 与 `components/agent/task/errors.ts` **逐字重复**。
-- `useResumeControls.ts` 的 `resumeRun` **吞掉自身异常** ⇒ 恢复被拒（409/422）时
-  `form.reset()` 仍会执行，用户填的内容丢失。
+- **两套并行的 status 分流 + 两份 i18n 键族**：`describeFailure`
+  （`components/agent/useOrchestrationProfiles.ts:62-78`，用 `agentOrchestration.*` 键）与
+  `describeError`（`components/agent/task/errors.ts:30-45`，用 `agentTask.*` 键）是两套
+  独立实现，同一种 status 在两处各自映射到各自的语言包键。
+  （`errorStatus` / `errorDetailText` **不是**重复定义——它们只在 `errors.ts` 定义一次。）
+- `useAgentRunTracker.ts:224-226` 的 `useCallAction` catch 把 `resumeRun` 的异常转成
+  `setActionError`（`resumeRun` 因此**正常 resolve**）⇒ 恢复被拒（409/422）时
+  `useResumeActions.ts:46-51` 的 `reset()` 仍会执行，用户填的内容丢失。

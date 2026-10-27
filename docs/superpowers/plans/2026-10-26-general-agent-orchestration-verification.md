@@ -27,7 +27,7 @@
 | V9 | Playwright（mock） | `npx playwright test` | ⚠️ **27 failed**（基线也是 27，净新增 0）—— **不可称「E2E 通过」** |
 | V10 | compose 冒烟（特性关闭） | `docker compose config --services/--images` + `docker ps` | ✅ Worker **未**启动、**不**在默认服务清单 |
 | V11 | `/openapi.json` 端点冒烟 | 进程内 + 真实 HTTP | ✅ 关闭时 9 条路径**全部缺席**（404） |
-| V12 | 真实数据脚本 | `backend/scripts/feat_agent_orchestration_realdata.py` | ✅ exit 0，全部 PASS |
+| V12 | 真实数据脚本 | `backend/scripts/feat_agent_orchestration_realdata.py` | ✅ **连跑两次都是 exit 0**，PASS/SKIP 集合一致（20 PASS / 0 FAIL / 0 SKIP）；目标库 = 隔离测试库 `5436/qa_metadata_test`（见 §6.2） |
 
 ---
 
@@ -243,34 +243,80 @@ orchestration_paths = 9
 
 ### 6.2 真实数据脚本
 
+**目标库（canonical）= 隔离测试库 `localhost:5436/qa_metadata_test`** —— **不是** dev 库
+`5433/qa_metadata`，**更不是**生产。脚本的 DSN 解析顺序（先命中先用）：
+`AGENT_ORCHESTRATION_REALDATA_DATABASE_URL` → **`TEST_DATABASE_URL`（本次用的就是它）** →
+`DATABASE_URL` → `PG*`（默认端口 **5436** / 默认库 **`qa_metadata_test`**，裸跑不会落到 dev 库）。
+
+**前置条件与 SKIP 语义**：库种子不满足前提的步骤输出 `SKIP  <步骤> — <缺什么>`，
+**不是** `FAIL`，也**不进**失败清单（库的种子状态不是脚本的缺陷；退出码只由 `FAIL` 决定）。
+`S7` 需要一个 `status='active'` 且尚无编排 profile 的 `agent_definition`（没有则脚本**自建**，
+退出时删除），`S8` 需要一个 `is_active` 的 `llm_config`（没有则脚本**自建**，退出时删除）。
+`S4` 的禁用分支拿**真实行的副本**置 `enabled=False` 来验证（`assertOrchestrationToolValid`
+是纯函数，**不写库**），输出里明说这一点。`S6` 断言的是「**脚本没有翻转任何 `enabled`**」，
+判定文本报出**观测到的运行前状态**（不同库种子不同）。
+
 ```bash
 cd backend
-./.venv/bin/python scripts/feat_agent_orchestration_realdata.py
+TEST_DATABASE_URL='postgresql+asyncpg://qa_user:***@localhost:5436/qa_metadata_test' \
+  ./.venv/bin/python scripts/feat_agent_orchestration_realdata.py
 ```
 
+**完整 stdout（逐行未删改）**：
+
 ```
-DSN  = postgresql+asyncpg://qa_user:***@localhost:5433/qa_metadata
+TARGET  postgresql+asyncpg://qa_user:***@localhost:5436/qa_metadata_test  (from TEST_DATABASE_URL)
+MARKER = feat-agent-orchestration-realdata
+------------------------------------------------------------------------
 PASS  S1 迁移版本 — version_num=0135 (期望 0135)
 PASS  S1 五张新表 — 存在 5/5
-PASS  S2 既有表基线行数 — agent_definition=9, agent_access_policy=12, agent_tool_config=7, agent_schedule=0, agent_run_log=0, session_token_usage=2413
+PASS  S2 既有表基线行数 — agent_definition=0, agent_access_policy=0, agent_tool_config=7, agent_schedule=0, agent_run_log=0, session_token_usage=0
 PASS  S3 空 schema 被拒 — ValidationError: tool input schema root type must be 'object'
-PASS  S4 禁用工具被拒 — message=工具已禁用：wiki_search (期望 '工具已禁用：wiki_search')
-PASS  S5 schema-only 修复 — 实际写入 3 行（enabled 未翻转）
+PASS  S3 合法 schema 通过 — supplier_360 的 §2.3 schema 被接受
+      wiki_search 真实行 enabled=True（脚本全程不写 enabled）
+PASS  S4 禁用工具被拒 — message=工具已禁用：wiki_search (期望 '工具已禁用：wiki_search')；针对真实行的副本置 enabled=False 验证禁用分支（未写库）
+      supplier_360: input_schema {} -> {"type": "object", "properties": {"key": {"type": "string"}}, "additionalProperties": false}（enabled 保持 True 未改）
+      supplier_risk: input_schema {} -> {"type": "object", "properties": {"key": {"type": "string"}}, "additionalProperties": false}（enabled 保持 True 未改）
+      graph_traverse: input_schema {} -> {"type": "object", "properties": {"key": {"type": "string"}}, "additionalProperties": false}（enabled 保持 True 未改）
+PASS  S5 schema-only 修复 — 实际写入 3 行（enabled 未翻转；退出前会还原）
 PASS  S6 三个已启用工具可编排 — supplier_360=True, supplier_risk=True, graph_traverse=True
-PASS  S6 四个 wiki 工具仍未启用 — 全部 enabled=false
+PASS  S6 脚本没有翻转任何 enabled — wiki_search: pre enabled=True → now enabled=True；wiki_read: pre enabled=True → now enabled=True；rule_evaluate: pre enabled=True → now enabled=True；coverage_status: pre enabled=True → now enabled=True（脚本全程不写 enabled；观测到的运行前状态如上，不同库种子不同——enabled=true 的库说明该库把 wiki 工具种成了启用态）
 PASS  S6 只读白名单仍是 7 项 — READ_ONLY_HANDLER_REFS=['coverage_status', 'graph_traverse', 'rule_evaluate', 'supplier_360', 'supplier_risk', 'wiki_read', 'wiki_search']
-PASS  S7 profile 创建后为停用 — agent=PROCUREMENT_COPILOT enabled=False revision=1
+      使用 Agent：REALDATA_ORCHESTRATION_AGENT（脚本自建（退出时删除））
+PASS  S7 profile 创建后为停用 — agent=REALDATA_ORCHESTRATION_AGENT enabled=False revision=1
 PASS  S7 绑定的是三个只读工具 — bindings=['graph_traverse', 'supplier_360', 'supplier_risk']
 PASS  S7 toggle 后启用且 revision=2 — enabled=True revision=2
-PASS  S8 run 创建为 QUEUED — run_id=37647bd9-3368-492d-a519-f96b088a2f6d status=QUEUED
+      使用模型配置：id=4（脚本自建（退出时删除））
+PASS  S8 run 创建为 QUEUED — run_id=343cab6b-0f61-4c41-8c70-d844070b7dfc status=QUEUED
+PASS  S8 run_id 非空 — run_id=343cab6b-0f61-4c41-8c70-d844070b7dfc
 PASS  S8 快照只含只读白名单工具 — snapshot_tools=['graph_traverse', 'supplier_360', 'supplier_risk']（无任何写工具）
+      run_id=343cab6b-0f61-4c41-8c70-d844070b7dfc（由本脚本创建；Worker 若在跑会接手该 run）
 PASS  S9 feature-off 时新路由缺席 — /openapi.json 中的编排路径 = []
-PASS  S10 自建行已清理 — 残留行数=0
+      删除自建 run: run_id=343cab6b-0f61-4c41-8c70-d844070b7dfc status=QUEUED
+      删除自建 profile: agent_id=4 enabled=True revision=2
+PASS  S10 自建行已清理 — 自建 run / profile / Agent / 模型配置均已删除
+PASS  S10 阶段 0 schema 已还原 — 3 行 input_schema 已写回运行前的原值
 PASS  S2 既有表行数前后一致 — 六张既有表行数无变化
+------------------------------------------------------------------------
 OK  all steps passed
 ```
 
-退出码 `0`；**幂等**（第二次运行同样 OK）。
+**退出码 `0`**（stderr 为空）。
+
+**幂等的口径**：**连续两次运行 ⇒ 退出码相同 + PASS/SKIP 集合相同**（`FAIL` 集合为空）。
+上面这段是**运行 1**；**运行 2** 用同一条命令紧接着再跑一次，**退出码同样是 `0`**，
+stdout 与运行 1 **逐行一致**，只有三个每次必然不同的自增/随机值不同
+（模型配置 id `4`→`5`；`run_id` `343cab6b-…`→`137c8f7f-…`；S10 打印的 `agent_id` `4`→`5`）。
+两次的 PASS/SKIP 集合 `diff` **为空**（各 20 PASS / 0 FAIL / 0 SKIP）。
+
+> **本次两次运行都没有出现 `SKIP` 行** —— 隔离库已种好 7 个内置工具，脚本又能自建
+> ACTIVE Agent 与启用的模型配置，所以 S4/S6/S7/S8 都**真正执行**了。若在别的库上跑
+> 而出现 `SKIP`，那一行会写明缺什么（见上方「SKIP 语义」）。
+
+> **非 canonical 观察（旧记录）**：交付时曾在 **dev 库 `5433/qa_metadata`** 上跑过一次并
+> 得到全 PASS。该次运行**不是** canonical 证据——脚本自己的规矩是「绝不碰 dev 库」，
+> 而那次运行**永久改写了 3 行 `input_schema` 且没有还原**（正是后来 F1.4 修掉的问题）。
+> 该次记录**已被上面的隔离库证据取代**。
 
 ---
 

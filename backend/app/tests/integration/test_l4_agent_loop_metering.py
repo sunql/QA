@@ -15,20 +15,40 @@ config 的单价无关。后果有两层：
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from decimal import Decimal
 
 import pytest
+from httpx import AsyncClient
 from sqlalchemy import select
 
 from app.domain.models import SessionMessage, SessionTokenUsage
 from app.models.system_config import SystemConfig
+from app.tests.integration.test_agent_runtime_api import (
+    _createOrchestrationProfile,
+    _createOrchestrationTool,
+    _orchestrationClient,
+    _orchestrationRunCount,
+    _spyOrchestration,
+)
 from app.tests.integration.test_chat_api import (
     _FakeAdapter,
     _PipelineLlm,
     _RouterFor,
-    _StubEmbeddingService,
     _seed,
+    _StubEmbeddingService,
 )
+
+
+@pytest.fixture
+async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
+    """本模块默认 client：编排开关版（隔离断言需要 profile 端点）。
+
+    实现复用 test_agent_runtime_api 的 ``_orchestrationClient``（唯一定义处）。
+    """
+    async for apiClient in _orchestrationClient(monkeypatch):
+        yield apiClient
+
 
 SESSION_ID = "l4-sess-metering"
 
@@ -245,3 +265,46 @@ async def test_l4_mid_loop_failure_still_meters_spent_tokens(
     assert rows[0].completion_tokens == _COMPLETION_TOKENS
     assert rows[0].cost == _EXPECTED_COST
     assert rows[0].model_config_id == config.id
+
+
+@pytest.mark.asyncio
+async def test_l4_does_not_enter_orchestration_worker(
+    client, dbSession, monkeypatch
+) -> None:
+    """spec 10.3：L4 仍完全留在旧链路——新编排 runner 零调用、编排 run 零行。
+
+    环境里同时存在一个**已启用的多工具编排 profile**，所以「没进新 Worker」
+    是隔离结论，而不是「本来就没配置可进」。
+    """
+    config, ds = await _seedL4(dbSession)
+    llm = _L4Llm()
+    _installL4Fakes(monkeypatch, config, llm)
+
+    await _createOrchestrationTool(client, "l4_iso_tool_a", "wiki_search")
+    await _createOrchestrationTool(client, "l4_iso_tool_b", "wiki_read")
+    created = await client.post(
+        "/api/v1/agents",
+        headers={"X-User-Id": "l4-admin", "X-User-Roles": "admin"},
+        json={
+            "agent_code": "L4_ORCH_ISO_AGENT",
+            "agent_name": "L4 编排隔离对照 Agent",
+            "description": "L4 与新编排子系统的隔离对照",
+            "data_domains": ["PROCUREMENT"],
+            "data_layers": ["DIM"],
+            "status": "active",
+            "policies": [
+                {"data_object": "WIKI_PAGE", "permission": "read", "data_layer": "DIM"}
+            ],
+        },
+    )
+    assert created.status_code == 201, created.text
+    await _createOrchestrationProfile(
+        client, "L4_ORCH_ISO_AGENT", ["l4_iso_tool_a", "l4_iso_tool_b"]
+    )
+    runnerCalls, creationCalls = _spyOrchestration(monkeypatch)
+
+    await _runL4Chat(client, ds.id, llm)
+
+    assert runnerCalls == []
+    assert creationCalls == []
+    assert await _orchestrationRunCount(dbSession) == 0

@@ -20,6 +20,7 @@ Error semantics:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -43,11 +44,14 @@ from app.services.agent_orchestration_types import (
 )
 from app.services.agent_orchestration_validation import (
     READ_ONLY_HANDLER_REFS,
+    validateObjectSchema,
     validateToolArguments,
 )
 from app.services.agent_runtime_service import AgentRuntimeService
 from app.services.agent_tool_config_registry import AgentToolConfigRegistry
 from app.services.agent_tool_types import AgentTool, AgentToolContext, ToolResult
+
+logger = logging.getLogger(__name__)
 
 _BUILTIN_HANDLER_KIND = "BUILTIN"
 
@@ -200,6 +204,24 @@ class AgentOrchestrationToolExecutor:
         toolName: str,
         args: dict[str, Any],
     ) -> dict[str, Any]:
+        """先校验**存储的 schema 本身**，再校验 Planner 参数。
+
+        两类的责任方不同：存储的 schema 损坏是运维/配置故障，Planner 无论怎么
+        纠正都不可能通过 ⇒ ``AGENT_UNAVAILABLE`` 暂停（等管理员修复）；只有
+        schema 合法而参数不匹配才是 Planner 的错误 ⇒ ``PlannerProtocolError``
+        走同一步的有限纠正。合并成一个 try 会把前者误报为后者，令运行在
+        必然失败的纠正循环里烧完预算。
+        """
+        try:
+            validateObjectSchema(config.input_schema or {})
+        except ValidationError as exc:
+            logger.error(
+                "orchestration tool %s has an unusable stored input schema: %s",
+                toolName,
+                exc.message,
+                exc_info=True,
+            )
+            raise _unavailable() from exc
         try:
             return validateToolArguments(config.input_schema or {}, args)
         except ValidationError as exc:

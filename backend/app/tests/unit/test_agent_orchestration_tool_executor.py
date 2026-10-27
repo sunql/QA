@@ -28,6 +28,7 @@ from app.services.agent_orchestration_tool_executor import (
 )
 from app.services.agent_orchestration_types import (
     OrchestrationPauseError,
+    PauseCode,
     PlannerProtocolError,
     PreparedTool,
 )
@@ -412,11 +413,13 @@ class TestPlannerMistakes:
         assert handler.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_invalid_current_schema_is_planner_error(self):
+    async def test_invalid_current_schema_is_agent_unavailable_not_planner_error(self):
+        """存储的 schema 损坏是配置故障：Planner 纠正不可能修好它。"""
         state = _State(toolConfig=_toolConfig(input_schema={}))
         executor, _, session, _, _, handler = _build(state=state)
-        with pytest.raises(PlannerProtocolError):
+        with pytest.raises(OrchestrationPauseError) as excInfo:
             await _prepare(executor, session)
+        assert excInfo.value.code == PauseCode.AGENT_UNAVAILABLE.value
         assert handler.await_count == 0
 
     @pytest.mark.asyncio

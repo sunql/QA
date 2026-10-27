@@ -33,6 +33,8 @@ import SupplierRiskPage from "./pages/SupplierRiskPage";
 import ReportsPage from "./pages/ReportsPage";
 import AgentRegistryPage from "./pages/AgentRegistryPage";
 import AgentRuntimePage from "./pages/AgentRuntimePage";
+import AgentOrchestrationPage from "./pages/AgentOrchestrationPage";
+import AgentTaskPage from "./pages/AgentTaskPage";
 import AdminAuditPage from "./pages/AdminAuditPage";
 import AdminToolsPage from "./pages/AdminToolsPage";
 import AdminFeatureRulesPage from "./pages/AdminFeatureRulesPage";
@@ -110,6 +112,8 @@ export default function App() {
         <Route path="reports" element={<ReportsPage />} />
         <Route path="agents/run" element={<AgentRuntimePage />} />
         <Route path="agents" element={<AgentRegistryPage />} />
+        <Route path="agent-orchestrations" element={<AgentOrchestrationPage />} />
+        <Route path="agent-tasks" element={<AgentTaskPage />} />
         <Route path="admin/audit" element={<AdminAuditPage />} />
         <Route path="admin/tools" element={<AdminToolsPage />} />
         <Route path="admin/feature-rules" element={<AdminFeatureRulesPage />} />

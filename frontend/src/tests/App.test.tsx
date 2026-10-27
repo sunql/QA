@@ -35,6 +35,21 @@ vi.mock("../api/menuConfig", () => ({
   fetchMenuConfig: vi.fn().mockResolvedValue({ sections: [], items: [] }),
 }));
 
+// 页面级 mock：只关心路由命中哪个页面，不关心页面内部的数据加载。
+// 组件返回字符串（ReactNode），避免在 vi.mock 工厂里写 JSX。
+vi.mock("../pages/AgentOrchestrationPage", () => ({
+  default: () => "AgentOrchestrationPage",
+}));
+vi.mock("../pages/AgentTaskPage", () => ({
+  default: () => "AgentTaskPage",
+}));
+vi.mock("../pages/AgentRuntimePage", () => ({
+  default: () => "AgentRuntimePage",
+}));
+vi.mock("../pages/AgentRegistryPage", () => ({
+  default: () => "AgentRegistryPage",
+}));
+
 // 哨兵组件：渲染到 <App /> 之外（与 AppLayout 并列），把当前 pathname 暴露给测试。
 // 不能直接断言 AppLayout Header（受 selectedItem 计算影响，复杂），
 // 也不能直接渲染 ChatPage（依赖 chatStore 数据，mock 链长）。
@@ -113,5 +128,24 @@ describe("App 路由", () => {
     );
     const probe = await screen.findByTestId("probe-path");
     expect(probe.textContent).toBe("/login");
+  });
+
+  // 通用 Agent 编排：两个新页面必须能被直接深链访问，且不夺走旧 Agent 路由。
+  const ROUTE_CASES: { path: string; marker: string }[] = [
+    { path: "/agent-orchestrations", marker: "AgentOrchestrationPage" },
+    { path: "/agent-tasks", marker: "AgentTaskPage" },
+    { path: "/agents/run", marker: "AgentRuntimePage" },
+    { path: "/agents", marker: "AgentRegistryPage" },
+  ];
+
+  it.each(ROUTE_CASES)("直接访问 $path 渲染 $marker", async ({ path, marker }) => {
+    render(
+      <ConfigProvider locale={zhCN}>
+        <MemoryRouter initialEntries={[path]}>
+          <App />
+        </MemoryRouter>
+      </ConfigProvider>
+    );
+    expect(await screen.findByText(marker)).toBeInTheDocument();
   });
 });

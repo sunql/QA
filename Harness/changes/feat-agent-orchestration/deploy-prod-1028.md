@@ -36,8 +36,8 @@ qa_compose config --quiet && echo COMPOSE_OK   # 改过 yml/env 后必跑
 
 | 文件 | 内容 | sha256 | 大小 |
 |---|---|---|---|
-| `/tmp/qa-backend-amd64-1028-orch.tar.gz` | `qa-system-backend:amd64-1028-orch`（linux/amd64） | （见 §交付物回填） | — |
-| `/tmp/qa-frontend-amd64-1028-orch.tar.gz` | `qa-system-frontend:amd64-1028-orch`（linux/amd64，`VITE_API_BASE_URL=` 空） | （见 §交付物回填） | — |
+| `/tmp/qa-backend-amd64-1028-orch.tar.gz` | `qa-system-backend:amd64-1028-orch`（linux/amd64，已核验） | `ece3794fbe0c99636299cce4016dd4ff90b2d3456714a85dded37098077ee9a5` | 217M |
+| `/tmp/qa-frontend-amd64-1028-orch.tar.gz` | `qa-system-frontend:amd64-1028-orch`（linux/amd64，已核验，`VITE_API_BASE_URL=` 空） | `aeb72d209fc0167fdec3b6c5d5f3a17811177419651ae1602a4a3445f8e598c4` | 26M |
 
 > 两镜像 `--platform linux/amd64` 构建；frontend 显式空 `VITE_API_BASE_URL`（1024 实踩）。
 > 传输后先 `shasum -a 256` 比对再 load。

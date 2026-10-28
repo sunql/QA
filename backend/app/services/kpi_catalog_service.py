@@ -325,6 +325,18 @@ def _grainCoversDimension(grain: str, key: str) -> bool:
     return any(alias in grain for alias in _DIM_ALIASES.get(key, ()))
 
 
+def grainCoverageGaps(grain: str | None, dimensionDefaults: object) -> list[str]:
+    """grain 文本未覆盖的维度键列表（B2 编译期对账与 B5 写侧弱校验共用同一判定）。
+
+    dimensionDefaults 非 dict 或为空、grain 空白 → 无缺口（无可对账内容）。
+    """
+    if not isinstance(dimensionDefaults, dict) or not dimensionDefaults:
+        return []
+    if not grain or not grain.strip():
+        return []
+    return [key for key in dimensionDefaults if not _grainCoversDimension(grain, key)]
+
+
 async def _warnGrainMismatch(
     session: AsyncSession,
     metricId: int | None,
@@ -334,10 +346,9 @@ async def _warnGrainMismatch(
     """B5：grain 与挂靠 metric 的 dimension_defaults 粒度弱校验（只警告不阻断）。
 
     grain 是自由文本（如「月+供应商」），dimension_defaults 是维度键 dict ——
-    无法做等值判定，只做启发式包含检查（见 _DIM_ALIASES）：dimension_defaults
-    的每个键（或其中文别名）都应在 grain 文本中出现。缺失 → logger.warning
-    （治理声明与技术实现可能漂移，供人工复核；表单级提示需要响应契约变更，
-    延后到 B3 批次一并做）。
+    无法做等值判定，只做启发式别名包含检查（见 grainCoverageGaps / _DIM_ALIASES）：
+    缺失 → logger.warning（治理声明与技术实现可能漂移，供人工复核；表单级提示
+    需要响应契约变更，延后到 B3 批次一并做）。
     """
     if metricId is None or not grain or not grain.strip():
         return
@@ -346,10 +357,7 @@ async def _warnGrainMismatch(
     metric = await session.get(OntologyMetric, metricId)
     if metric is None:
         return
-    dims = metric.dimension_defaults
-    if not isinstance(dims, dict) or not dims:
-        return
-    missing = [key for key in dims if not _grainCoversDimension(grain, key)]
+    missing = grainCoverageGaps(grain, metric.dimension_defaults)
     if missing:
         logger.warning(
             "KPI %s grain=%r 未覆盖挂靠 metric(id=%d) dimension_defaults 的键 %s"

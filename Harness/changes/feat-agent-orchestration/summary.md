@@ -302,10 +302,10 @@ FastAPI `Depends(getCurrentUser)`（全部 9 条路由**强制鉴权**）、
 | backend lint | `backend/.venv/bin/ruff check <14 个新文件>` | `All checks passed!`（exit 0） |
 | 前端类型 | `npx tsc -p tsconfig.json --noEmit` | exit 0 |
 | E2E 类型 | `npx tsc -p e2e/tsconfig.json --noEmit` | exit 0 |
-| 后端集成 session | `pytest app/tests/integration`（独立 session） | **107 passed** |
-| 后端单测 session | `pytest app/tests/unit`（独立 session） | **231 passed** |
+| 后端集成 session | 12 个编排定向测试文件（独立 session） | **84 passed** |
+| 后端单测 session | 12 个编排定向测试文件（独立 session） | **253 passed** |
 | 前端定向 vitest | 6 个 Task-16 测试文件 | `Test Files 6 passed (6)` / `Tests 78 passed (78)` |
-| **新代码覆盖率** | 编排模块（integration + unit 两个 session，`--cov-append`，**命令见验证报告 §2.1**） | **2204 stmts / 119 miss / 94.60%**（门槛 ≥80%） |
+| **新代码覆盖率** | 18 个显式编排模块（integration + unit 两个 session，`--cov-append`，**命令见验证报告 §2.1**） | **2220 stmts / 172 miss / 92.25%**（门槛 ≥80%） |
 
 > **为什么必须分两个 pytest session**：集成与单测的 seed fixture 会对**同一个共享测试库**
 > 做 TRUNCATE/INSERT，混在一个 session 里会撞出 1 failed + 9 ERRORS（`UniqueViolationError`
@@ -313,12 +313,12 @@ FastAPI `Depends(getCurrentUser)`（全部 9 条路由**强制鉴权**）、
 > `fk_business_object_primary_domain`）—— 那是**争用**，不是分支缺陷（两位评审独立复现、
 > 结论一致）。因此按隔离 session 分别跑再取并集，并在报告里写明原因。
 >
-> 独立复测（Task 16 实施者，17 个模块口径）：`TOTAL 2204 stmts / 119 miss / 95%`，
-> `Required test coverage of 80.0% reached. Total coverage: 94.60%`。
-> **可复算的门禁口径就是这一条**（命令见验证报告 §2.1）：它展开是 **17 个模块**
-> ⇒ 产出 **94.60%**。另有一个 **15 个模块**的口径曾测得 **94.44%**，但**该 15 模块
-> 清单未随仓库存档** ⇒ **不可复算**；两者差异**只来自模块集合**（17 vs 15），
-> 不是回归，都远超 80% 门槛。
+> 当前 HEAD 独立复测（18 个显式模块）：`TOTAL 2220 stmts / 172 miss / 92%`，
+> `Required test coverage of 80.0% reached. Total coverage: 92.25%`。
+> **可复算的门禁口径以验证报告 §2.1 的显式模块命令为准**。旧的 15 模块
+> `94.44%` 清单未存档、不可复算；旧的 17 模块 `94.60%` 是最终修复前的历史测量。
+> 不能用带引号的 `--cov=..._*` 简写：coverage 会把 `*` 当字面模块名并漏测，
+> 因此当前命令逐一列出 18 个模块。
 
 **净新增失败 = 0**（与基线 `4d4114bb` 对比，同一套测试库，从不并发跑）：
 
@@ -348,7 +348,7 @@ FastAPI `Depends(getCurrentUser)`（全部 9 条路由**强制鉴权**）、
 
 | 严重度 | 编号 | 摘要 | 处置 |
 |---|---|---|---|
-| **MEDIUM** | M1（= 代码评审 M10） | **只读白名单的 TOCTOU**：白名单断言在 `prepare()` 读到的**第一份**行上（`agent_orchestration_tool_executor.py:90-91`），而真正执行的 handler 从**第二次**读取装配（`_resolveTool` → `registry.reload_one`，同文件 `:246`）。两次读之间管理员改 `handler_ref` 即绕过。**当前不可利用**（唯一非白名单 handler `nl2sql_default` 是惰性占位符），**一旦接上 NL2SQL 就变成可利用路径** | **已实证不可利用**（当前）+ **前提条件**：评审在真实 PG 上实测两个会话下 `expire_on_commit=False` 的 identity map 让第二次读拿到**同一行版本** ⇒ 断言过的行与执行的行在**同一 session 的 identity map 下**自洽。**前提条件**：两次读之间**没有别的会话**改这一行 `handler_ref` ⇒ **一旦接上 NL2SQL / 一旦允许跨会话并发改 `handler_ref`** 就变成可利用路径。⇒ 登记为灰度手册 **PRE-ENABLE CHECKLIST P1**，生产开 flag 前必须关闭 |
+| **MEDIUM** | M1（= 代码评审 M10） | **只读白名单的 TOCTOU**：白名单断言在 `prepare()` 读到的**第一份**行上（`agent_orchestration_tool_executor.py:90-91`），而真正执行的 handler 从**第二次**读取装配（`_resolveTool` → `registry.reload_one`，同文件 `:253`）。两次读之间管理员改 `handler_ref` 即绕过。**当前不可利用**（唯一非白名单 handler `nl2sql_default` 是惰性占位符），**一旦接上 NL2SQL 就变成可利用路径** | **已实证不可利用**（当前）+ **前提条件**：评审在真实 PG 上实测两个会话下 `expire_on_commit=False` 的 identity map 让第二次读拿到**同一行版本** ⇒ 断言过的行与执行的行在**同一 session 的 identity map 下**自洽。**前提条件**：两次读之间**没有别的会话**改这一行 `handler_ref` ⇒ **一旦接上 NL2SQL / 一旦允许跨会话并发改 `handler_ref`** 就变成可利用路径。⇒ 登记为灰度手册 **PRE-ENABLE CHECKLIST P1**，生产开 flag 前必须关闭 |
 | **MEDIUM** | M2（= 代码评审 M4） | **租约只在轮边界续**：`renewLease` 全仓库只被调用一次（`agent_orchestration_runner.py:156-168`，调用点 `:162`）；编排路径的 LLM 客户端**无显式 timeout**（沿用 OpenAI SDK 默认读超时 600s），租约默认 60s ⇒ 单轮慢于 60s 就丢租约 ⇒ 回收重排队 ⇒ 该轮重做（重复 LLM 花费；`getOrCreatePlanStep` 复用 RUNNING 的 PLAN 行且**不**累加 `iteration_count`，`max_iterations` 约束不到）。写入侧安全（都走 `_lockLeasedRun`） | **待修**（**不是已处置**）—— 尚未修复；已登记为灰度手册 PRE-ENABLE CHECKLIST 的 **P2**，**启用前必须关闭**；在此之前**保持 `ENABLE_AGENT_ORCHESTRATION=false`**（本特性出厂即关，业务不受影响）。**缓解窗口**：慢于租约（默认 `AGENT_ORCHESTRATION_LEASE_SECONDS=60`）的工具调用在多 Worker 部署下会被第二个 Worker 并发重放（重复执行 + 重复 LLM 花费）；灰度期间按**单 Worker + 只跑只读快工具**部署，并把租约调大到覆盖最长工具耗时 |
 | **MEDIUM** | M3（= 代码评审 M11） | **Planner 工具目录无长度/数量上界**：`agent_orchestration_planner.py:371-410`（`_buildMessages` / `_reduceToolCatalog`）把目录原样拼进 system prompt；`agent_tool_config.description` 是无界 `Text`，`tool_names` 无元素个数上限 | **待修**（**不是已处置**）—— 尚未修复；已登记为灰度手册 PRE-ENABLE CHECKLIST 的 **P3**，**启用前必须关闭**；在此之前**保持 `ENABLE_AGENT_ORCHESTRATION=false`**（本特性出厂即关，业务不受影响）。**缓解窗口**：灰度期间由管理员把工具目录控制在白名单规模（`READ_ONLY_HANDLER_REFS` 的 **7** 个）以内，避免 `description` / `inputSchema` 膨胀 |
 | LOW × 8 | L1–L8 | 见下方「已知限制」第 6 / 8 / 9 / 10 / 11 项（对应 L1 / L2 / L3 / L4 / L5 / L7 / L8 共 **7** 条；**L6 尚未归档到下方清单**，原始安全评审报告为开发期产物、不随仓库存档） | 记入下方清单 |
@@ -602,7 +602,7 @@ TEST_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5436/qa_metadata_
   `ValidationError`（库种子不满足）⇒ `SKIP` 并写明缺什么；**其它**异常 ⇒ `FAIL`
   （脚本或环境的缺陷，必须暴露）。
   这条规则覆盖 **5 处分类点**，分两类：① **服务调用**（建 profile / toggle / 建 run）
-  ——`realdata.py` 的 3 处（`:474` / `:519` / `:572`）；② **准备前置条件**
+  ——`realdata.py` 的 3 处（`:476` / `:521` / `:574`）；② **准备前置条件**
   （自建 ACTIVE Agent / 启用的模型配置）——`_db.py` 的 2 处（`:365` / `:394`）
   ——`IntegrityError` / `OperationalError` 这类**真缺陷**在这里会记 `FAIL`
   （退出码非零），**不会**被当成「库种子不满足」蒙混成 `SKIP`。
@@ -739,14 +739,24 @@ S6 因为该工具确实不可编排而 `FAIL` ⇒ **退出码 1，运行不是�
 ⚠️ 结尾**没有** `OK  all steps passed`：有 1 个 `FAIL` + 3 个 `SKIP` ⇒ 汇总如实
 列出失败项**和**被跳过的步骤。退出码仍只由 `FAIL` 决定（这里是 1）。
 
-### 8.4 未执行项（明确记录，不得当成已完成）
+### 8.4 真实进程端到端补测
+
+最终修复后在产品代码 `9b051a10` 上启动真实 uvicorn、独立 Worker 和隔离 PostgreSQL
+`5436/qa_metadata_test`；仅外部 LLM 使用本地确定性 OpenAI-compatible planner。
+真实 run `4310b2c8-2af7-4f15-a7e4-e160414093a3` 最终 **SUCCEEDED**：
+3 轮规划、2 次真实工具调用（`wiki_search` / `coverage_status`）、54 tokens，
+最终答案及两个 TOOL `outputJson` 均可见。Worker 成功自预热并 claim run；
+真实 HTTP 轮询以闭区间游标取回 step 0/1/2/4 的同号 RUNNING→SUCCEEDED 更新，
+直接覆盖 C1/C2 原故障形态。详见[验证报告 §6.4](../../../docs/superpowers/plans/2026-10-26-general-agent-orchestration-verification.md)。
+这不是浏览器冒烟；真实浏览器项仍未执行。
+
+### 8.5 未执行项（明确记录，不得当成已完成）
 
 | 项 | 状态 | 原因 |
 |---|---|---|
 | **生产部署** | **未执行** | 生产操作全部由人手动执行（灰度手册）。本次交付的是工件 + 手册，**没有**碰生产机、**没有**改 `/opt/qa-system/docker/.env` |
 | **生产 `ENABLE_AGENT_ORCHESTRATION=true`** | **未执行** | 同上；且 PRE-ENABLE CHECKLIST 三项尚未关闭 |
 | **真实栈浏览器冒烟（Playwright 打真后端）** | **未执行** | 本仓 Playwright 是**浏览器级 mock**（`e2e/support/mockApi.ts` 拦截 `/api/v1/**`，`playwright.config.ts` 只起 Vite）⇒ 打不出真栈。**mock 套件本身是 27 红（分支前后都是）**，本特性新增的 4 条 `agent-orchestration.spec.ts` 全绿，但**不能说「E2E 通过」** |
-| **worker 端到端跑完一条真实 run** | **未执行** | 需要一个**启用的**编排 profile + 可用 LLM + 起 Worker 进程。本次只在本地用脚本验证了「建 run ⇒ QUEUED ⇒ 快照正确 ⇒ 清理」，**没有**让 Worker 领起来跑完。真实链路验证放在灰度手册的阶段 5（人工执行） |
 | **菜单播种在生产执行** | **未执行** | 人工操作（灰度手册阶段 6） |
 
 ---

@@ -427,7 +427,7 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
       **事实**：白名单断言发生在 `prepare()` 读到的**第一份**行上
       （`backend/app/services/agent_orchestration_tool_executor.py:90-91`：
       `_loadEnabledToolConfig` + `_assertReadOnlyBuiltin`），而**真正被执行**的 handler
-      是从**第二次**读取装配出来的（`_resolveTool` → `registry.reload_one`，同文件 `:246`）。
+      是从**第二次**读取装配出来的（`_resolveTool` → `registry.reload_one`，同文件 `:253`）。
       两次读取之间如果管理员改了 `handler_ref`，断言过的行与执行的行就不是同一行。
       **当前状态：已实证不可利用** —— 评审在真实 PostgreSQL 上验证过：同一 session 内
       `expire_on_commit=False` 的 identity map 让第二次读拿到的是**同一行版本**

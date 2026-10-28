@@ -17,9 +17,9 @@
 | # | 验证项 | 手段 | 结论 |
 |---|---|---|---|
 | V1 | 后端静态检查 | `ruff check`（14 个新文件） | ✅ 通过 |
-| V2 | 后端集成测试 | 独立 pytest session | ✅ 107 passed |
-| V3 | 后端单元测试 | 独立 pytest session | ✅ 231 passed |
-| V4 | 新代码覆盖率 | 两个 session `--cov-append` | ✅ 94.60%（门槛 80%）；控制方 15 模块口径曾测得 94.44%（清单未存档、不可复算） |
+| V2 | 后端集成测试 | 12 个编排定向测试文件，独立 pytest session | ✅ 84 passed |
+| V3 | 后端单元测试 | 12 个编排定向测试文件，独立 pytest session | ✅ 253 passed |
+| V4 | 新代码覆盖率 | 18 个显式模块；两个 session `--cov-append` | ✅ **2220 stmts / 172 miss / 92.25%**（门槛 80%）；旧的 15/17 模块数字不再作为当前 HEAD 口径 |
 | V5 | 前端类型检查 | `npx tsc -p tsconfig.json --noEmit` | ✅ exit 0 |
 | V6 | E2E 类型检查 | `npx tsc -p e2e/tsconfig.json --noEmit` | ✅ exit 0 |
 | V7 | 前端定向单测 | 6 个 Task-16 测试文件 | ✅ 78 passed |
@@ -28,6 +28,7 @@
 | V10 | compose 冒烟（特性关闭） | `docker compose config --services/--images` + `docker ps` | ✅ Worker **未**启动、**不**在默认服务清单 |
 | V11 | `/openapi.json` 端点冒烟 | 进程内 + 真实 HTTP | ✅ 关闭时 9 条路径**全部缺席**（404） |
 | V12 | 真实数据脚本 | `backend/scripts/feat_agent_orchestration_realdata.py`（+ `_lib.py` / `_db.py` 两个 helper 模块） | ✅ **连跑两次都是 exit 0**，PASS/SKIP 集合一致（20 PASS / 0 FAIL / 0 SKIP）；目标库 = 隔离测试库 `5436/qa_metadata_test`（见 §6.2） |
+| V13 | 真实进程端到端 | 真实 uvicorn + 独立 Worker + 真实 PostgreSQL；仅外部 LLM 换成本地确定性 HTTP planner | ✅ SUCCEEDED；3 轮规划 / 2 次真实工具调用；闭区间游标实际取回 4 次同号 RUNNING→SUCCEEDED 更新（见 §6.4） |
 
 ---
 
@@ -50,22 +51,26 @@ Neo4j `bolt://localhost:7688`。**未触碰** dev 库（5433）与生产。
 cd backend
 TEST_DATABASE_URL=postgresql+asyncpg://qa_user:***@localhost:5436/qa_metadata_test \
 TEST_NEO4J_URI=bolt://localhost:7688 \
-./.venv/bin/python -m pytest app/tests/integration -q
+./.venv/bin/python -m pytest \
+  app/tests/integration/test_agent_orchestration_*.py \
+  app/tests/integration/test_agent_tool_config_delete_without_0135.py -q
 ```
 
 ```
-107 passed, 24 warnings in 91.06s
+84 passed, 24 warnings in 98.85s
 ```
 
 ```bash
 cd backend
 TEST_DATABASE_URL=postgresql+asyncpg://qa_user:***@localhost:5436/qa_metadata_test \
 TEST_NEO4J_URI=bolt://localhost:7688 \
-./.venv/bin/python -m pytest app/tests/unit -q
+./.venv/bin/python -m pytest \
+  app/tests/unit/test_agent_orchestration_*.py \
+  app/tests/unit/test_agent_tool_config_service.py -q
 ```
 
 ```
-231 passed in 91.27s
+253 passed in 129.02s
 ```
 
 **静态检查**：
@@ -87,27 +92,54 @@ All checks passed!
 
 ```bash
 cd backend
+rm -f .coverage  # 只清本次新生成的 coverage 数据，避免并入旧结果
+COV_ARGS=(
+  --cov=app.services.agent_orchestration_config_service
+  --cov=app.services.agent_orchestration_cost
+  --cov=app.services.agent_orchestration_metering
+  --cov=app.services.agent_orchestration_planner
+  --cov=app.services.agent_orchestration_run_service
+  --cov=app.services.agent_orchestration_run_views
+  --cov=app.services.agent_orchestration_runner_support
+  --cov=app.services.agent_orchestration_runner
+  --cov=app.services.agent_orchestration_store
+  --cov=app.services.agent_orchestration_tool_executor
+  --cov=app.services.agent_orchestration_types
+  --cov=app.services.agent_orchestration_validation
+  --cov=app.domain.agent_orchestration_models
+  --cov=app.domain.agent_orchestration_schemas
+  --cov=app.api.v1.agent_orchestrations
+  --cov=app.api.v1.agent_runs
+  --cov=app.workers.agent_orchestration_worker
+  --cov-append
+)
 # integration session
-./.venv/bin/python -m pytest app/tests/integration -q --cov=app.services.agent_orchestration_* \
-  --cov=app.domain.agent_orchestration_* --cov=app.api.v1.agent_orchestrations \
-  --cov=app.api.v1.agent_runs --cov=app.workers.agent_orchestration_worker --cov-append
-# unit session（同样参数，再 --cov-append）
+./.venv/bin/python -m pytest \
+  app/tests/integration/test_agent_orchestration_*.py \
+  app/tests/integration/test_agent_tool_config_delete_without_0135.py \
+  -q "${COV_ARGS[@]}"
+# unit session（覆盖数据追加到同一 .coverage）
+./.venv/bin/python -m pytest \
+  app/tests/unit/test_agent_orchestration_*.py \
+  app/tests/unit/test_agent_tool_config_service.py \
+  -q "${COV_ARGS[@]}"
 ```
 
-> **覆盖率口径**：上面这条命令展开是 **17 个模块** ⇒ 产出 **94.60%**；控制方另按
-> **15 个模块**测得 **94.44%**，但**该 15 模块清单未随仓库存档** ⇒ **不可复算**；
-> 两者差异**只来自模块集合**，都远超 80% 门槛，**可复算的门禁口径是上面这条命令的
-> 94.60%**。
+> **当前 HEAD 的可复算口径是 18 个显式模块**。不要把
+> `'--cov=app.services.agent_orchestration_*'` 当作等价简写：加引号后 zsh 虽不展开报错，
+> coverage 却会把 `*` 当成字面模块名并警告 `module-not-imported`，导致 services/domain
+> 完全不计入。未加引号又会被 zsh 的 `nomatch` 拒绝，因此这里逐模块列全。
 
 ```
-TOTAL 2204 stmts / 119 miss / 95%
-Required test coverage of 80.0% reached. Total coverage: 94.60%
+integration: 84 passed
+unit:        253 passed
+TOTAL 2220 stmts / 172 miss / 92%
+Required test coverage of 80.0% reached. Total coverage: 92.25%
 ```
 
-> **两个口径**：控制器口径（15 个模块）= `2083 stmts / 117 miss / **94.44%**`
-> （**该 15 模块清单未随仓库存档 ⇒ 不可复算**，见上方口径说明）；
-> Task 16 实施者口径（17 个模块）= `2204 stmts / 119 miss / 95%（94.60%）`。
-> 差异来自**模块集合不同**（多算 2 个模块），**不是回归**。两者都远超 80% 门槛。
+> 旧的 15 模块 `2083 / 117 / 94.44%` 清单未存档、不可复算；旧的 17 模块
+> `2204 / 119 / 94.60%` 属于最终修复前的历史测量。当前 18 模块口径包含拆分后的
+> `run_views` / `runner_support` 以及 C1/I2 新增执行行，以 **92.25%** 为准。
 
 ---
 
@@ -277,7 +309,7 @@ orchestration_paths = 9
 分类依据是异常的具体类型**：`NotFoundError` / `ConflictError` / `ValidationError`
 ⇒ SKIP 并写明缺什么；其它异常 ⇒ FAIL——这条规则覆盖 **5 处分类点**，分两类：
 ① **服务调用**（建 profile / toggle / 建 run）——`realdata.py` 的 3 处
-（`:474` / `:519` / `:572`）；② **准备前置条件**（自建 ACTIVE Agent / 启用的
+（`:476` / `:521` / `:574`）；② **准备前置条件**（自建 ACTIVE Agent / 启用的
 模型配置）——`_db.py` 的 2 处（`:365` / `:394`）。`IntegrityError` /
 `OperationalError` 这类真缺陷在这里会记 FAIL 并让退出码非零，**不会**被当成
 「库种子不满足」蒙混成 SKIP。**准备前置条件**不满足时输出 `SKIP`，
@@ -378,6 +410,29 @@ stdout 与运行 1 **逐行一致**，只有三个每次必然不同的自增/�
 > 写入的值。**这是刻意不清理的**——本特性不碰 dev 库，清理动作超出本变更范围
 > （残留本身是良性的：schema-only 正是灰度手册阶段 0 规定的动作）。
 
+### 6.4 真实进程端到端（最终修复后补测）
+
+2026-10-28 在产品代码 `9b051a10` 上补跑真实部署形态：启动真实
+`uvicorn app.main:app`、独立 `python -m app.workers.agent_orchestration_worker`
+和隔离 PostgreSQL `localhost:5436/qa_metadata_test`。只把外部 LLM 换成本地确定性
+OpenAI-compatible HTTP planner；API、Worker 自预热、工具注册表、Agent ACL、
+`wiki_search` / `coverage_status` 真实 handler、步骤落库与计量均为真实实现。
+未触碰 dev 5433、开发 Milvus 或生产。
+
+| 断言 | 实测结果 |
+|---|---|
+| run 终态 | `SUCCEEDED`，`finalAnswer=真实栈验证完成：两次工具调用与最终答案均可见` |
+| 规划与工具 | 3 次 planner 调用；`wiki_search`、`coverage_status` 各 1 次，两个 TOOL step 均有 `outputJson` |
+| 计量 | prompt 33 + completion 21 = total 54 tokens |
+| C1 部署缺口 | 独立 Worker 启动后成功 claim 并完成 run，未出现冷注册表 `RuntimeError` |
+| C2 游标缺口 | 22 次真实 HTTP 轮询中，step 0/1/2/4 分别以 `afterStepNo=stepNo` 再次取回同号行的 RUNNING→SUCCEEDED 更新；最终 PLAN answer 可见 |
+
+证据文件：运行 harness 输出 `/tmp/qa-real-stack-evidence.json`（`result=PASS`），
+进程日志 `/tmp/qa-real-stack-api.log` / `/tmp/qa-real-stack-worker.log`。
+这些是本次本机临时取证，不是仓库 SSOT；上表已固化全部关键结果。run id
+`4310b2c8-2af7-4f15-a7e4-e160414093a3`。测试进程均在 `finally` 中停止。
+该验证是 **API/Worker/PG 真实链路**，仍不等于真实浏览器冒烟。
+
 ---
 
 ## 7. 未执行项（**不得**当作已完成）
@@ -387,7 +442,6 @@ stdout 与运行 1 **逐行一致**，只有三个每次必然不同的自增/�
 | 生产部署 | ❌ 未执行 | 人工操作（[灰度手册](../../Harness/changes/feat-agent-orchestration/deploy-gray-rollout.md)）。本次**没有**碰生产机、**没有**改 `/opt/qa-system/docker/.env` |
 | 生产 `ENABLE_AGENT_ORCHESTRATION=true` | ❌ 未执行 | 同上；PRE-ENABLE CHECKLIST 三项未关闭 |
 | 真实栈浏览器冒烟 | ❌ 未执行 | Playwright 是浏览器级 mock（`e2e/support/mockApi.ts` 拦 `/api/v1/**`），打不出真栈 |
-| Worker 端到端跑完一条真实 run | ❌ 未执行 | 需要启用的 profile + 可用 LLM + 起 Worker 进程。本次只验证到「建 run ⇒ QUEUED ⇒ 快照正确 ⇒ 清理」 |
 | 菜单播种在生产执行 | ❌ 未执行 | 人工操作（手册阶段 6） |
 
 ---
@@ -425,8 +479,9 @@ stdout 与运行 1 **逐行一致**，只有三个每次必然不同的自增/�
 ## 9. 结论
 
 - **净新增失败 = 0**（后端 / 前端 / Playwright 三套均为 0）。
-- **新代码覆盖率 94.60%**（门槛 80%）；控制方 15 模块口径曾测得 94.44%（清单未存档、不可复算）。
+- **新代码覆盖率 92.25%**（18 个显式模块，2220 stmts / 172 miss；门槛 80%）。
 - **默认关闭、Worker 不自启、路由不注册**三条安全姿态均已实测。
 - **真实数据脚本 exit 0 且幂等**，证明只读约束与「不改既有功能」。
+- **真实 API + 独立 Worker + PostgreSQL 链路 PASS**：3 轮规划、2 次真实工具调用、最终答案与同号步骤终态更新均可见（§6.4）。
 - **3 个 MEDIUM 安全项刻意挂账** ⇒ 已进 PRE-ENABLE CHECKLIST（现对应 P1–P3），作为生产启用前的硬闸门。
 - **生产未部署**；灰度由人按手册执行。

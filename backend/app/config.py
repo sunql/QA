@@ -216,6 +216,10 @@ class Settings(BaseSettings):
     # ===== 路由策略 =====
     sessionAffinityTurns: int = Field(default=3, alias="SESSION_AFFINITY_TURNS")
     nl2sqlMaxRetries: int = Field(default=2, alias="NL2SQL_MAX_RETRIES")
+    # B3 灰度开关：KPI 治理契约注入 plan system prompt（关闭 = prompt 与 B3 前完全一致）
+    kpiContractInjectionEnabled: bool = Field(
+        default=True, alias="KPI_CONTRACT_INJECTION_ENABLED"
+    )
 
     # ===== 证据分页（feat-evidence-extension）=====
     evidence_page_default: int = Field(default=50, alias="EVIDENCE_PAGE_DEFAULT")

@@ -22,8 +22,10 @@ from __future__ import annotations
 import logging
 import re
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import getSettings
 from app.domain.models import KpiCatalog, OntologyMetric
 from app.services.audit_service import AuditService
 
@@ -170,3 +172,106 @@ async def reconcileKpiContract(
         "已落 audit（entity_type=%s）",
         metric.id, len(findingsByKpi), _RECON_KPI_ENTITY_TYPE,
     )
+
+
+# ---------------------------------------------------------------------------
+# B3：KPI 契约块装配（问句匹配 → B2 门禁 → 渲染；注入 nl2sql plan system prompt）
+# ---------------------------------------------------------------------------
+
+_KPI_CONTRACT_MAX_KPIS = 3
+_KPI_CONTRACT_FIELD_MAX_LEN = 120
+
+
+def _truncField(text: str | None) -> str | None:
+    """治理字段截断（numerator/denominator 是 Text 无界列，prompt 预算封顶）。"""
+    if not text or not text.strip():
+        return None
+    text = " ".join(text.strip().split())
+    return text[:_KPI_CONTRACT_FIELD_MAX_LEN]
+
+
+async def buildKpiContractBlock(
+    session: AsyncSession, question: str
+) -> str | None:
+    """按问句装配 KPI 治理契约块（B3 注入点 B：plan 之前注入，影响选类与聚合）。
+
+    链路：KpiSemanticMatchService.matchAll（KpiMatchCache，只索引 PUBLISHED，
+    冷缓存安全降级空列表）→ confidence 降序 Top-3 → 逐个过 B2 门禁 → 渲染条目。
+
+    门禁口径：任何 verdict=mismatch 的检查 → 该 KPI 不注入（宁可少注入不注入
+    错的）；unknown 允许注入（治理声明无法被技术公式反驳，恰是治理文本唯一
+    可用的场景——诚实口径，不把 unknown 当「不通过」）。
+
+    零回归契约：无匹配 / 空问句 / 开关关闭 → None（调用方 prompt 侧零改动）；
+    装配器内部异常由调用方（nl2sql_service）兜底降级，不阻断 plan。
+    """
+    if not question or not question.strip():
+        return None
+    if not getSettings().kpiContractInjectionEnabled:
+        return None
+
+    from app.services.kpi_match_cache import get_kpi_match_cache
+    from app.services.kpi_semantic_match_service import getKpiSemanticMatchService
+
+    matches = await getKpiSemanticMatchService().matchAll(
+        question.strip(), limit=_KPI_CONTRACT_MAX_KPIS
+    )
+    if not matches:
+        return None
+
+    codes = [m.code for m in matches]
+    rows = (
+        await session.execute(
+            select(KpiCatalog).where(KpiCatalog.kpi_code.in_(codes))
+        )
+    ).scalars().all()
+    byCode = {row.kpi_code: row for row in rows}
+
+    entries: list[str] = []
+    for match in matches:
+        kpi = byCode.get(match.code)
+        if kpi is None:
+            continue
+        # B2 门禁：mismatch → 不注入
+        metric: OntologyMetric | None = None
+        if kpi.metric_id is not None:
+            metric = await session.get(OntologyMetric, kpi.metric_id)
+        if metric is not None:
+            verdicts = [
+                finding["verdict"]
+                for finding in (
+                    _checkFormulaSemantics(kpi, metric),
+                    _checkGrainCoverage(kpi, metric),
+                    _checkFormulaMixing(kpi, metric),
+                )
+                if finding is not None
+            ]
+            if _RECON_VERDICT_MISMATCH in verdicts:
+                logger.warning(
+                    "KPI %s 对账 mismatch，B3 不注入其治理契约", kpi.kpi_code
+                )
+                continue
+        entry = f"- {_truncField(kpi.kpi_name) or kpi.kpi_code} ({kpi.kpi_code}"
+        if getattr(kpi, "version", None):
+            entry += f", {kpi.version}"
+        entry += ")"
+        fields: list[str] = []
+        for label, value in (
+            ("分子", _truncField(kpi.numerator)),
+            ("分母", _truncField(kpi.denominator)),
+            ("粒度", _truncField(kpi.grain)),
+            ("单位", _truncField(kpi.unit)),
+        ):
+            if value:
+                fields.append(f"{label}: {value}")
+        if fields:
+            entry += "\n  " + " | ".join(fields)
+        if metric is not None:
+            formula = _truncField(metric.formula)
+            if formula:
+                entry += f"\n  技术公式: {formula}（聚合函数 {metric.agg_function}）"
+        entries.append(entry)
+
+    if not entries:
+        return None
+    return "\n".join(entries)

@@ -26,7 +26,7 @@ _HTML5_ESCAPE: dict[str, str] = {
 # label 命名规则：小写字母开头 + 小写字母/数字/下划线
 _LABEL_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
-# 预定义 label 白名单（11 个 = 8 个新 + 3 个旧代码已有）
+# 预定义 label 白名单（12 个 = 8 个新 + 1 个 B3 + 3 个旧代码已有）
 _ALLOWED_LABELS: frozenset[str] = frozenset(
     {
         # 8 个 L1 新增（spec 定义）
@@ -38,6 +38,8 @@ _ALLOWED_LABELS: frozenset[str] = frozenset(
         "sql_result",
         "step_result",
         "agent_tool_result",
+        # B3：KPI 治理契约（plan system prompt）
+        "kpi_contract",
         # 3 个向后兼容（旧代码已用，避免一次性重命名多处）
         "feature_catalog",   # nl2sql_prompts.py 现有标签
         "term_dictionary",   # nl2sql_prompts.py 现有标签
@@ -47,7 +49,7 @@ _ALLOWED_LABELS: frozenset[str] = frozenset(
 
 
 class UntrustedLabel:
-    """11 个预定义 label 常量 — 防 label 注入。"""
+    """12 个预定义 label 常量 — 防 label 注入。"""
 
     USER_QUESTION = "user_question"
     ONTOLOGY_RECALL = "ontology_recall"
@@ -57,6 +59,7 @@ class UntrustedLabel:
     SQL_RESULT = "sql_result"
     STEP_RESULT = "step_result"
     AGENT_TOOL_RESULT = "agent_tool_result"
+    KPI_CONTRACT = "kpi_contract"  # B3：KPI 治理契约（plan prompt 专用）
     # 向后兼容旧代码（feature_catalog / term_dictionary / user_content）
     FEATURE_CATALOG = "feature_catalog"
     TERM_DICTIONARY = "term_dictionary"

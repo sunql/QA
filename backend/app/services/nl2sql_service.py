@@ -58,6 +58,7 @@ from app.services.nl2sql_plan import (
     _NL2SQL_TRUNCATION_BACKOFF_DEFAULT,
 )
 from app.services.nl2sql_semantic_guard import findShareDenominatorIssues
+from app.services.kpi_contract_reconcile import buildKpiContractBlock
 from app.services.nl2sql_prompts import (
     _buildPlanSystemPrompt,
     _buildPlanUserPrompt,
@@ -276,6 +277,24 @@ async def _readRefineConfig(session: AsyncSession) -> dict[str, int]:
             session, "REFINE_MAX_LIMIT", _REFINE_MAX_LIMIT_DEFAULT
         ),
     }
+
+
+async def _buildKpiContractOrNone(
+    session: AsyncSession | None, question: str | None
+) -> str | None:
+    """B3：装配 KPI 治理契约文本（plan system prompt 注入用）。
+
+    session 缺席（部分调用方无 DB 会话）/ 空问句 → None；装配器内部异常
+    （匹配缓存、门禁查询等）→ warning 降级 None——契约是附加工序，
+    任何失败都不阻断 plan 流水线。
+    """
+    if session is None or not question or not question.strip():
+        return None
+    try:
+        return await buildKpiContractBlock(session, question)
+    except Exception:  # noqa: BLE001 - 契约装配失败不阻断 plan
+        logger.warning("KPI 治理契约装配失败（不阻断 plan）", exc_info=True)
+        return None
 
 
 class Nl2SqlService:
@@ -532,6 +551,7 @@ class Nl2SqlService:
             featureCatalogText=featureCatalogText,
             globalFiltersText=globalFiltersText,
             wikiRulesBlock=wikiRulesBlock,
+            kpiContractText=await _buildKpiContractOrNone(session, question),
         )
         # 多步子问题常丢失主问题的时间范围（如主问「2025 年采购情况」，
         # 子问题只剩「查各供应商采购额」）→ 并集判定，宁可不限也不误限。

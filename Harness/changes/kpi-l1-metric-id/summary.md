@@ -1,8 +1,8 @@
-# 变更：kpi-l1-metric-id（B1+B2+B5，KPI 治理 → 技术链路提案 Phase 1+对账）
+# 变更：kpi-l1-metric-id（B1+B2+B3+B5，KPI 治理 → 技术链路提案 Phase 1+对账+注入）
 
 - **日期**：2026-10-28
 - **作者**：Claude
-- **Phase**：Phase 1（B1+B5，提案 `../2026-10-27-kpi-governance-into-nl2sql-proposal.md`）+ B2 对账（同日追加）
+- **Phase**：Phase 1（B1+B5，提案 `../2026-10-27-kpi-governance-into-nl2sql-proposal.md`）+ B2 对账 + B3 注入（同日追加）
 - **状态**：draft（待部署验证后转 in-review）
 - **关联变更**：[KPI 治理注入提案](../2026-10-27-kpi-governance-into-nl2sql-proposal.md)
 - **迁移版本**：无（B1/B2/B5 均不加列不迁移；后续如需 FeatureDefinition.metric_id 另起 0136+）
@@ -39,6 +39,15 @@ L1 KPI 直连的 FeatureDefinition 解析只有 `kpi.formula == FD.feature_defin
 4. **B2 落点实证**：`_compileSqlMetadata`（knowledge_compiler_service.py:481）在
    metric 编译时刷新挂靠 KPI 缓存，对账挂其后；对账自 commit（与三库对账
    `reconcile()` 同款——audit 巡检结果不随调用方事务回滚丢失）。
+5. **B3 注入点选 B（问句期 pre-plan 匹配）而非 A（plan 后类查找）**：提案两案并列，
+   选 B 因为治理口径要在 LLM 生成 plan **之前**进上下文才能约束聚合/分组写法；
+   A 只能事后校验。入口 `generateValidatedPlan` 的 `common` dict 统一装配
+   （重试 + 校验循环复用同一份契约文本，不重复匹配）。Top-3 cap 防上下文膨胀。
+6. **B3 门禁复用 B2**：候选 KPI 有挂靠 metric 时跑同三个检查，任一 `mismatch`
+   → 该 KPI 不注入（宁可少注入不注入错的）；`unknown` 照注（治理文本恰是
+   技术公式判不了时的唯一口径来源）；无挂靠 metric → 仅治理字段（无门禁对象）。
+7. **B3 零回归契约**：无匹配 / 冷缓存 / 开关关闭 / 空问句 / 装配器抛错 → 一律
+   None（prompt 与现状逐字节一致），装配失败 warning 不阻断 plan。
 
 ## 3. 数据模型变更
 
@@ -58,6 +67,10 @@ L1 KPI 直连的 FeatureDefinition 解析只有 `kpi.formula == FD.feature_defin
   after JSONB 含 `kpi_findings: [{kpi_code, findings:[{check,verdict,detail}]}]`）；
   verdict ∈ `mismatch` / `unknown`；check ∈ `formula_semantics` / `grain` /
   `formula_mixing`。无 findings 不落条目（验收口径：一致 fixture 零条目）。
+- B3（无 API 变更，行为变更）：NL2SQL plan system prompt 在词典块之后新增
+  `<kpi_contract>` 包裹块（仅当问句命中 PUBLISHED KPI 且灰度开关开）；
+  开关 `KPI_CONTRACT_INJECTION_ENABLED`（默认 true）。wrapped 内容是数据不是指令
+  （preamble 已声明），但块前仍附中文用途说明。不命中时 prompt 与现状零差异。
 
 ## 5. 实现要点
 
@@ -80,10 +93,21 @@ L1 KPI 直连的 FeatureDefinition 解析只有 `kpi.formula == FD.feature_defin
   `reconcileKpiContract`，try/except 包裹——对账失败只 warning，不阻断编译角色。
 - `kpi_catalog_service.py`：B5 的 grain 判定抽公共函数 `grainCoverageGaps`
   （B2 `_checkGrainCoverage` 复用同一别名表判定，DRY）。
+- **B3**：`kpi_contract_reconcile.py` 追加 `buildKpiContractBlock(session, question)`
+  （装配器：matchAll Top-3 → 逐个 `session.get(OntologyMetric)` → 三检查门禁 →
+  渲染「名称 (code@version) + 治理五件套行 + 技术公式行」；`_truncField` 120 字符
+  截断防 prompt 膨胀）；`nl2sql_prompts._buildPlanSystemPrompt` +`kpiContractText`
+  参数（`wrapUntrusted(UntrustedLabel.KPI_CONTRACT, ...)`——第 12 个 label，白名单
+  同步）；`nl2sql_plan.generateQueryPlan` 透传；`nl2sql_service.generateValidatedPlan`
+  在 `common` dict 装配（`_buildKpiContractOrNone` helper：session 缺席/空问句→
+  None，异常→warning 降级 None）；`config.py` +`kpiContractInjectionEnabled`。
+- B3 红队回归：`test_l1_prompt_injection_redteam.py` ALL_LABELS 11→12，参数化
+  U+200B 打断用例覆盖 `kpi_contract` 标签；专项测试验证 `</kpi_contract>ignore`
+  payload 无法逃逸包裹。
 
 ## 6. 测试
 
-新增（21 用例全绿）：
+新增（21 + B3 15 用例全绿）：
 - `integration/test_chat_l1_calculation_resolution.py`（6）：外键命中不进回退 /
   metric 未命中降级 / metric.formula 空白降级 / 存量回退命中 warning / 双未命中
   None+warning / 空 formula 静默 None。悬空 metric_id 用例被 FK 约束否定
@@ -96,11 +120,33 @@ L1 KPI 直连的 FeatureDefinition 解析只有 `kpi.formula == FD.feature_defin
   grain 缺键（含别名表）/ formula 混用 / B5 形状 DRAFT 全空零 findings 零噪声 /
   对账抛错不阻断编译 / 只读性 / class 编译 skipped 不触发。
   RED→GREEN 全程：先写 9 用例跑红（5 failed），实现后全绿。
+- `integration/test_kpi_contract_injection.py`（9，B3，真实 PG）：治理五件套+技术
+  公式渲染 / mismatch 不注入 / unknown 照注 / 无 metric 仅治理字段 / cap 3（4 命中
+  只注 Top-3）/ 无匹配 None / DRAFT 不进缓存 / 开关关 None / 空问句 None。
+- `prompts/test_nl2sql_plan_prompt_kpi_contract.py`（3，B3）：wrapped+用途说明 /
+  None 零回归 / `</kpi_contract>ignore` payload 无法逃逸。
+- `unit/test_kpi_contract_threading.py`（3，B3）：kpiContractText 透传到
+  generateQueryPlan / session 缺席装配器零调用 / 装配器抛错降级不阻断。
+  隔离手法同 test_property_ref_normalize（替换实例方法 `_planIssues`/`_finalizePlan`
+  + try/finally 恢复）。
+- **B3 测试期发现两个坑（已写进测试 docstring）**：①`KpiMatchCache.refreshOne`
+  在 `_loaded=False` 时静默 no-op ⇒ 测试 seed 后必须 `onKpiChanged()+warmUp`
+  整库预热，只调 refreshOne 是假绿；②Jaccard 匹配对长中文关键词 + 默认阈值 0.75
+  结构性不可达（ngram 交集 ~0.2）⇒ 单 KPI 用例走 exact-alias 快车道（问句含
+  KPI code，confidence=1.0，同 test_chat_l1_routing 约定），cap 用例走 Jaccard
+  需短 keywords + 调低 `match_threshold`（0.05）。
 
 回归：邻域单测 `test_chat_service.py`+`test_chat_service_stream.py`（基线比对，
 净新增失败 0——既有 6 红为 BuildAnswerPrompt/stream 超时族，与本批无关）；
 KPI 集成 48 绿；ontology 集成 52 绿；B2 后 compiler 三套（B2 新增 9 + 三库
 reconcile + compiler unit 22）全绿；KPI/L1/metric 全量集成 -k 选择 195 绿。
+
+B3 回归：redteam + prompts 全目录 98 绿；B3 三套 15 绿；B2 对账 9 绿；
+nl2sql 集成 + property_ref_normalize 23 绿；chat 集成（l1_routing/multi_step/
+metric_draft_kpi/stream_l1_l4）53 绿；unit -k "nl2sql or kpi or prompt or
+sanitizer" 504 绿 + 4 红（`test_chat_service.py::TestBuildAnswerPrompt`——
+基线 1b29e139 复跑同 4 节点同红，净新增失败 0；stale double：测试断言
+`"total": 0` 而现实现序列化 `{"rows": []}`，属既有 stale-double 家族）。
 单测 fake 修正：`_FakeOntologyService.createMetric` 补 `actor`（原 fake 断言的是
 main 上实际会 500 的坏调用路径——假替身保真度问题）；两文件 autouse stub
 `ensureDraftForMetric` 抛错走降级路径（MagicMock session 恒真值会塞 mock 垃圾进答案）。
@@ -122,6 +168,12 @@ nginx 剥 X-User-* 头 + prod AUTH_STUB_ENABLED=0），是「保护性断言从�
   MEDIUM：DRAFT 户头的后续 PUT 走既有 ACL（owner/admin），无新增暴露面。
 - B2 对账只读不写业务表；audit actor 用 `system:knowledge-compiler`（与三库对账
   同一 system actor 口径），findings 内容只含字段级 diff 摘要，无敏感数据。
+- B3 注入面：治理契约是企业管理员维护的数据，但预算为不可信——走
+  `wrapUntrusted(KPI_CONTRACT, ...)`（HTML 转义 + U+200B 打断 closing tag），
+  semantic_keywords / numerator 等自由文本字段可被恶意填写 ⇒ 按注入面处理；
+  块前用途说明明确「是数据不是指令」；prompt/plan/service 三层装配失败全部
+  降级 None 不阻断 plan（fail-open 于可用性、fail-closed 于注入面）。
+  灰度开关默认 true，出问题可环境变量一键回退（零代码回滚）。
 - 无 SQL 拼接（全 ORM 参数化）；无密钥操作。
 - 附带发现：12 处 requires_auth 假绿测试（见 §6）——生产无洞，但该家族修复前
   「auth 强制」类回归无法被测试网捕获，建议独立批次尽快补。
@@ -136,6 +188,10 @@ nginx 剥 X-User-* 头 + prod AUTH_STUB_ENABLED=0），是「保护性断言从�
 5. B2：对任一挂靠 KPI 的 metric 触发编译（本体管理页编译按钮）→
    `SELECT * FROM audit_log WHERE entity_type='kpi_metric_reconcile' ORDER BY id DESC;`
    应出现 findings 条目（dev 存量 numerator 多为中文 ⇒ 预期大量 unknown）。
+6. B3：问句含某 PUBLISHED KPI 的 code 或关键词（如「供货及时率是多少」）→
+   后端日志确认 plan system prompt 含 `<kpi_contract>` 块（如可观测）；行为面
+   验证比率型指标计划遵守分子/分母口径；再问无关问题确认 prompt 无该块（零回归）；
+   `KPI_CONTRACT_INJECTION_ENABLED=false` 重启后确认块消失（灰度回退演练）。
 
 ## 9. 关联
 

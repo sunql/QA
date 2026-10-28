@@ -97,6 +97,9 @@ MSG_DEFINE_METRIC_GUIDE_EXAMPLE = "定义指标 销售额 = SUM(order.amount)"
 # 指标已创建的回复模板，{name} 指标名 {formula} 公式
 MSG_METRIC_DEFINED = "指标「{name}」已定义：{formula}"
 
+# B5：/metric 成功后自动挂靠的 DRAFT KPI 户头尾注，{code} 户头编码
+MSG_METRIC_DRAFT_KPI_SUFFIX = "（已创建草稿 KPI 户头 {code}，补全治理字段并发布后生效）"
+
 # 引导用户使用 /define 斜杠指令创建类
 MSG_DEFINE_CLASS_GUIDE_PREFIX = "请使用格式：/define 类名 [alias=别名] [desc=描述]。例如："
 MSG_DEFINE_CLASS_GUIDE_EXAMPLE = "/define 产品 alias=Product desc=公司销售商品"

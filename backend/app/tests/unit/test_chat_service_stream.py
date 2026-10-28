@@ -63,6 +63,18 @@ def _isolate_value_sample_cache():
     clearValueSampleCache()
 
 
+@pytest.fixture(autouse=True)
+def _stub_ensure_draft_kpi(monkeypatch):
+    """B5：同 test_chat_service 的 stub（本文件复用其 _FakeOntologyService，
+    domain 命令用例同样不该触发真实建户头查询）。"""
+    from app.services.kpi_catalog_service import KpiCatalogService
+
+    async def _raise(self, session, metric, **kwargs):
+        raise RuntimeError("unit: draft KPI creation stubbed off")
+
+    monkeypatch.setattr(KpiCatalogService, "ensureDraftForMetric", _raise)
+
+
 class _StreamPipelineLlm:
     """complete() 供 nl2sql/chart；completeStream() 供回答（可配置失败）。"""
 

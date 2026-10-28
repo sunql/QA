@@ -8,7 +8,7 @@ Legacy rows: kpi_catalog.datasource_id IS NULL（migration 0125 之前的历史�
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
+from app.domain.enums import KpiStatus
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import DataSource, KpiCatalog
 from app.domain.schemas import KpiCatalogCreate, KpiCatalogUpdate
@@ -104,6 +105,7 @@ class KpiCatalogService:
             raise ValidationError(MSG_KPI_DATASOURCE_NOT_FOUND.format(id=dto.datasource_id))
         if not ds.is_active:
             raise ValidationError(MSG_KPI_DATASOURCE_INACTIVE.format(id=ds.id, name=ds.name))
+        await _warnGrainMismatch(session, dto.metric_id, dto.grain, dto.kpi_code)
         session.add(entity)
         try:
             await session.flush()
@@ -166,6 +168,9 @@ class KpiCatalogService:
         for key, value in updates.items():
             setattr(entity, key, value)
         entity.revision_count += 1
+        # B5：grain 与挂靠 metric 的 dimension_defaults 粒度弱校验（改挂靠或改 grain 时）
+        if "metric_id" in updates or "grain" in updates:
+            await _warnGrainMismatch(session, entity.metric_id, entity.grain, entity.kpi_code)
         # outbox 入队（同一事务绑定）：worker 消费后写 audit_log + history
         await self._outbox.enqueue(
             session,
@@ -216,6 +221,141 @@ class KpiCatalogService:
         await session.commit()
         get_kpi_match_cache().onKpiChanged(entity.kpi_code)
         logger.info("删除 KPI Catalog id=%d by %s", id, actor.userId)
+
+    async def ensureDraftForMetric(
+        self,
+        session: AsyncSession,
+        metric: "OntologyMetric",
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+    ) -> KpiCatalog:
+        """为 metric 幂等创建 DRAFT 治理户头（B5：消灭「有技术形态无户头」的孤儿）。
+
+        chat `/metric` 只建 ontology_metric ⇒ 指标永远进不了 KPI 直连/报告/治理。
+        本方法在该 metric 已有挂靠 KPI 时直接返回（幂等，可重复调用）；否则插入：
+
+        - status=DRAFT：不进 L1 匹配缓存（refreshOne 只收 PUBLISHED），人工补全
+          numerator/denominator/grain/semantic_keywords 并发布后才对企业可见；
+        - **不走 createKpi**：createKpi 承载 F2 的 datasource 强校验（人工治理入口
+          的契约），自动户头在创建时还没有数据源可绑——绕开 dto 直接落实体，
+          但保留 outbox（kpi_created）→ audit_log + kpi_catalog_history 的同一管线。
+        - formula/numerator/denominator 留空：kpi.formula 在现行契约下是
+          FeatureDefinition 锚文本，由 metric.formula 承担技术公式，不双写。
+
+        kpi_code 生成：``KPI_AUTO_M{metric.id}``（确定性，幂等重跑不产生新行）；
+        极小概率与手工创建的 code 撞车 → 加时间戳后缀兜底。
+        """
+        existing = await session.execute(
+            select(KpiCatalog).where(KpiCatalog.metric_id == metric.id)
+        )
+        found = existing.scalar_one_or_none()
+        if found is not None:
+            logger.info(
+                "metric_id=%d 已有挂靠 KPI code=%s，跳过自动建户头",
+                metric.id, found.kpi_code,
+            )
+            return found
+
+        kpiCode = f"KPI_AUTO_M{metric.id}"
+        if await self.get_by_code(session, kpiCode) is not None:
+            kpiCode = f"{kpiCode}_{int(datetime.now(timezone.utc).timestamp())}"
+        entity = KpiCatalog(
+            kpi_code=kpiCode,
+            kpi_name=metric.metric_name,
+            status=KpiStatus.DRAFT.value,
+            metric_id=metric.id,
+            created_by=actor,
+            match_threshold=Decimal("0.75"),
+        )
+        session.add(entity)
+        try:
+            await session.flush()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise ConflictError(
+                MSG_KPI_CATALOG_DUPLICATE_CODE.format(code=kpiCode)
+            ) from exc
+        # 与 createKpi 同管线：worker 消费 kpi_created 写 audit_log + history
+        await self._outbox.enqueue(
+            session,
+            event_type="kpi_created",
+            entity_type="kpi_catalog",
+            entity_id=entity.id,
+            actor=actor,
+            actor_departments=actor_departments,
+            payload={"after": _entityToDict(entity)},
+        )
+        await session.commit()
+        await session.refresh(entity)
+        await get_kpi_match_cache().refreshOne(session, entity.kpi_code)
+        logger.info(
+            "metric_id=%d 自动创建 DRAFT KPI 户头 code=%s by %s",
+            metric.id, entity.kpi_code, actor,
+        )
+        return entity
+
+
+# B5 弱校验的维度别名表：dimension_defaults 的键多为英文技术名（month/supplier），
+# grain 是中文自由文本（「按月+供应商」）——裸子串匹配会恒告警（全是噪声）。
+# 命中判定 = 键本身或其常见中文别名出现在 grain 中；别名表外的键按原文匹配。
+_DIM_ALIASES: dict[str, tuple[str, ...]] = {
+    "month": ("月", "按月"),
+    "date": ("日期", "日"),
+    "day": ("日", "天"),
+    "week": ("周",),
+    "quarter": ("季度",),
+    "year": ("年",),
+    "supplier": ("供应商",),
+    "material": ("物料",),
+    "product": ("产品",),
+    "customer": ("客户",),
+    "warehouse": ("仓库", "仓"),
+    "region": ("区域", "大区"),
+    "org": ("组织", "部门"),
+    "category": ("品类", "类别"),
+    "channel": ("渠道",),
+}
+
+
+def _grainCoversDimension(grain: str, key: str) -> bool:
+    """grain 文本是否覆盖维度键（键原文或别名表中的别名任一出现即算覆盖）。"""
+    if key in grain:
+        return True
+    return any(alias in grain for alias in _DIM_ALIASES.get(key, ()))
+
+
+async def _warnGrainMismatch(
+    session: AsyncSession,
+    metricId: int | None,
+    grain: str | None,
+    kpiCode: str,
+) -> None:
+    """B5：grain 与挂靠 metric 的 dimension_defaults 粒度弱校验（只警告不阻断）。
+
+    grain 是自由文本（如「月+供应商」），dimension_defaults 是维度键 dict ——
+    无法做等值判定，只做启发式包含检查（见 _DIM_ALIASES）：dimension_defaults
+    的每个键（或其中文别名）都应在 grain 文本中出现。缺失 → logger.warning
+    （治理声明与技术实现可能漂移，供人工复核；表单级提示需要响应契约变更，
+    延后到 B3 批次一并做）。
+    """
+    if metricId is None or not grain or not grain.strip():
+        return
+    from app.domain.models import OntologyMetric
+
+    metric = await session.get(OntologyMetric, metricId)
+    if metric is None:
+        return
+    dims = metric.dimension_defaults
+    if not isinstance(dims, dict) or not dims:
+        return
+    missing = [key for key in dims if not _grainCoversDimension(grain, key)]
+    if missing:
+        logger.warning(
+            "KPI %s grain=%r 未覆盖挂靠 metric(id=%d) dimension_defaults 的键 %s"
+            "——粒度声明与技术默认维度可能不一致，请人工复核",
+            kpiCode, grain, metricId, missing,
+        )
 
 
 def _entityToDict(entity: KpiCatalog) -> dict:

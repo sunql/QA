@@ -20,7 +20,6 @@ kpi_metric_reconcile），自 commit（与三库对账 reconcile() 同款，避�
 from __future__ import annotations
 
 import logging
-import re
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import getSettings
 from app.domain.models import KpiCatalog, OntologyMetric
 from app.services.audit_service import AuditService
+from app.services.nl2sql_semantic_guard import (
+    denominatorContractWarning,
+    extractSqlIdentifiers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,23 +57,9 @@ _MSG_RECON_MIXING = (
     "（kpi.formula 的契约语义是 FeatureDefinition 锚文本，不应存 SQL 公式）"
 )
 
-# SQL 标识符抽取：只认 [a-z_][a-z0-9_]* 形态的 token；SQL 关键字/常见函数名剔除。
+# SQL 标识符抽取已上收至 nl2sql_semantic_guard.extractSqlIdentifiers（B4 复用
+# 同一词法；semantic_guard 是低层纯函数模块，依赖方向本模块 → 守卫模块）。
 # numerator/denominator 多为中文业务文本 → 抽不出 token 是常态 → verdict=unknown。
-_SQL_IDENTIFIER_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
-_SQL_STOPWORDS = frozenset({
-    "sum", "count", "avg", "max", "min", "case", "when", "then", "else", "end",
-    "and", "or", "not", "null", "as", "on", "by", "distinct", "over", "partition",
-    "cast", "interval", "coalesce", "nullif", "round", "abs", "greatest", "least",
-    "select", "from", "where", "group", "order", "having", "join", "left", "right",
-    "inner", "outer", "desc", "asc", "limit",
-})
-
-
-def _extractSqlIdentifiers(text: str | None) -> set[str]:
-    """从公式/声明文本抽取列名候选集合（小写、剔 SQL 关键字与函数名）。"""
-    if not text:
-        return set()
-    return {t.lower() for t in _SQL_IDENTIFIER_RE.findall(text)} - _SQL_STOPWORDS
 
 
 def _checkFormulaSemantics(kpi: KpiCatalog, metric: OntologyMetric) -> dict | None:
@@ -84,8 +73,8 @@ def _checkFormulaSemantics(kpi: KpiCatalog, metric: OntologyMetric) -> dict | No
     ):
         return None
     kpiSide = " ".join(part for part in (kpi.numerator, kpi.denominator) if part)
-    kpiTokens = _extractSqlIdentifiers(kpiSide)
-    metricTokens = _extractSqlIdentifiers(metric.formula)
+    kpiTokens = extractSqlIdentifiers(kpiSide)
+    metricTokens = extractSqlIdentifiers(metric.formula)
     if not kpiTokens or not metricTokens:
         return {
             "check": _RECON_CHECK_FORMULA,
@@ -275,3 +264,57 @@ async def buildKpiContractBlock(
     if not entries:
         return None
     return "\n".join(entries)
+
+
+# ---------------------------------------------------------------------------
+# B4：分母契约弱校验装配（问句匹配 KPI → denominator 声明 → 守卫纯函数）
+# ---------------------------------------------------------------------------
+
+
+async def buildKpiDenominatorWarning(
+    session: AsyncSession, question: str | None, sql: str | None
+) -> str | None:
+    """按问句装配 B4 分母契约示警（L2 出口：答案渲染层前置，不硬拒）。
+
+    链路：matchAll（Top-3，同 B3 匹配口径）→ 第一个 denominator 非空的命中 KPI →
+    `denominatorContractWarning(sql, denominator)` 弱校验。与 B3 注入的差异：
+    不走灰度开关（示警面不是 prompt 注入面）、不做 B2 门禁（治理声明与 metric
+    的对账结论不影响「SQL 是否符合声明」这一独立问题）。
+
+    零回归契约：无匹配 / denominator 空 / 判不了 / 本函数任何异常 → None
+    （示警面永不阻断答案——try/except 收口在此处，调用方直连）。
+    """
+    if not question or not question.strip() or not sql:
+        return None
+    try:
+        from app.services.kpi_semantic_match_service import getKpiSemanticMatchService
+
+        matches = await getKpiSemanticMatchService().matchAll(
+            question.strip(), limit=_KPI_CONTRACT_MAX_KPIS
+        )
+        if not matches:
+            return None
+        rows = (
+            await session.execute(
+                select(KpiCatalog).where(
+                    KpiCatalog.kpi_code.in_([m.code for m in matches])
+                )
+            )
+        ).scalars().all()
+        byCode = {row.kpi_code: row for row in rows}
+        denominator = next(
+            (
+                byCode[m.code].denominator
+                for m in matches
+                if m.code in byCode
+                and byCode[m.code].denominator
+                and byCode[m.code].denominator.strip()
+            ),
+            None,
+        )
+        if not denominator:
+            return None
+        return denominatorContractWarning(sql, denominator)
+    except Exception:  # noqa: BLE001 - 示警装配失败不阻断答案
+        logger.warning("KPI 分母契约示警装配失败（不阻断答案）", exc_info=True)
+        return None

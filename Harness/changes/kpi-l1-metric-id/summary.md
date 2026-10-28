@@ -1,8 +1,8 @@
-# 变更：kpi-l1-metric-id（B1+B2+B3+B5，KPI 治理 → 技术链路提案 Phase 1+对账+注入）
+# 变更：kpi-l1-metric-id（B1+B2+B3+B4+B5，KPI 治理 → 技术链路提案 Phase 1 全量）
 
 - **日期**：2026-10-28
 - **作者**：Claude
-- **Phase**：Phase 1（B1+B5，提案 `../2026-10-27-kpi-governance-into-nl2sql-proposal.md`）+ B2 对账 + B3 注入（同日追加）
+- **Phase**：Phase 1（B1+B5，提案 `../2026-10-27-kpi-governance-into-nl2sql-proposal.md`）+ B2 对账 + B3 注入 + B4 守卫（同日追加）
 - **状态**：draft（待部署验证后转 in-review）
 - **关联变更**：[KPI 治理注入提案](../2026-10-27-kpi-governance-into-nl2sql-proposal.md)
 - **迁移版本**：无（B1/B2/B5 均不加列不迁移；后续如需 FeatureDefinition.metric_id 另起 0136+）
@@ -17,7 +17,9 @@ L1 KPI 直连的 FeatureDefinition 解析只有 `kpi.formula == FD.feature_defin
 **无一条命中**（全部静默降级为无数据回答）；`ontology_metric` 总数为 0（/metric 从未
 成功过）。B1 = 解析契约改「外键链路优先 + 等值回退可见化」；B5 = 消灭「有技术形态无
 治理户头」的孤儿指标；B2 = 编译期「治理五件套 ↔ 技术公式」一致性对账（B3 注入的
-可信前提——注入未经对账的治理声明等于把漂移喂给 LLM）。
+可信前提——注入未经对账的治理声明等于把漂移喂给 LLM）；B3 = 问句命中的治理
+契约注入 plan 上下文（生成前约束聚合口径）；B4 = 生成后分母契约弱校验示警
+（治理声明 vs 生成 SQL 的实际漂移面可见化）。
 
 ## 2. 设计评审
 
@@ -48,6 +50,14 @@ L1 KPI 直连的 FeatureDefinition 解析只有 `kpi.formula == FD.feature_defin
    技术公式判不了时的唯一口径来源）；无挂靠 metric → 仅治理字段（无门禁对象）。
 7. **B3 零回归契约**：无匹配 / 冷缓存 / 开关关闭 / 空问句 / 装配器抛错 → 一律
    None（prompt 与现状逐字节一致），装配失败 warning 不阻断 plan。
+8. **B4 守卫哲学**：弱校验（声明列 ⊆ SQL 分母列，包含即可，不做等价证明）+
+   示警不硬拒（提案原设计：治理声明可能有历史误差，先积累数据）→ 复用 L2
+   歧义示警出口（答案前置 ⚠️ 文本，与 shareWarning 同模式）。两个刻意偏离：
+   ①不走 `kpiContractInjectionEnabled` 灰度开关（示警面不是 prompt 注入面，
+   无污染风险且 shareWarning 同类均无开关）；②不做 B2 门禁（对账结论是
+   「治理 vs 技术公式」，B4 问题是「SQL vs 治理声明」，两个独立问题）。
+   判不了的一律 None：中文声明抽不出列名 / SQL 无除法表达式 / 装配异常
+   （诚实口径，不谎报任一方向）。
 
 ## 3. 数据模型变更
 
@@ -71,6 +81,10 @@ L1 KPI 直连的 FeatureDefinition 解析只有 `kpi.formula == FD.feature_defin
   `<kpi_contract>` 包裹块（仅当问句命中 PUBLISHED KPI 且灰度开关开）；
   开关 `KPI_CONTRACT_INJECTION_ENABLED`（默认 true）。wrapped 内容是数据不是指令
   （preamble 已声明），但块前仍附中文用途说明。不命中时 prompt 与现状零差异。
+- B4（无 API 变更，行为变更）：chat 单步与 SSE 流式答案可能前置
+  `⚠️ KPI 口径提示：治理契约声明的分母列 X 未全部出现在生成 SQL 的分母表达式中…`
+  （仅当问句命中 PUBLISHED KPI、其 denominator 抽得出列名、且与 SQL 分母列
+  不兼容时）。无命中/判不了时答案与现状零差异。
 
 ## 5. 实现要点
 
@@ -104,10 +118,20 @@ L1 KPI 直连的 FeatureDefinition 解析只有 `kpi.formula == FD.feature_defin
 - B3 红队回归：`test_l1_prompt_injection_redteam.py` ALL_LABELS 11→12，参数化
   U+200B 打断用例覆盖 `kpi_contract` 标签；专项测试验证 `</kpi_contract>ignore`
   payload 无法逃逸包裹。
+- **B4**：`nl2sql_semantic_guard.py` 新增纯函数 `denominatorContractWarning(sql,
+  denominatorDeclared)`（除法表达式右操作数深度感知扫描 → 声明列 ⊆ 分母列集合，
+  宁漏不误报：WHERE 内除法/窗口定义列也进集合只会偏大）+ `extractSqlIdentifiers`
+  公共词法（自 `kpi_contract_reconcile` 上收——semantic_guard 是低层纯函数模块，
+  依赖方向 reconcile → guard，DRY）；`kpi_contract_reconcile.py` 追加异步装配器
+  `buildKpiDenominatorWarning(session, question, sql)`（matchAll Top-3 同 B3 口径 →
+  第一个 denominator 非空的命中 KPI → 纯函数；try/except 收口在装配器内部，
+  调用方直连）；`chat_service.py` / `chat_stream.py` 接线镜像 shareWarning 模式
+  （答案前置 / SSE 首批 token 下发，快照 answerPieces 同引用保断连兜底可见）；
+  `messages_zh.py` +`MSG_NL2SQL_DENOMINATOR_CONTRACT_WARNING`。
 
 ## 6. 测试
 
-新增（21 + B3 15 用例全绿）：
+新增（21 + B3 15 + B4 18 用例全绿）：
 - `integration/test_chat_l1_calculation_resolution.py`（6）：外键命中不进回退 /
   metric 未命中降级 / metric.formula 空白降级 / 存量回退命中 warning / 双未命中
   None+warning / 空 formula 静默 None。悬空 metric_id 用例被 FK 约束否定
@@ -135,6 +159,11 @@ L1 KPI 直连的 FeatureDefinition 解析只有 `kpi.formula == FD.feature_defin
   结构性不可达（ngram 交集 ~0.2）⇒ 单 KPI 用例走 exact-alias 快车道（问句含
   KPI code，confidence=1.0，同 test_chat_l1_routing 约定），cap 用例走 Jaccard
   需短 keywords + 调低 `match_threshold`（0.05）。
+- `unit/test_nl2sql_denominator_contract.py`（12，B4）：兼容/NULLIF 包裹/窗口/子查询
+  通过 / 错列示警 / 多列部分缺失 / 字面量剥离 / 中文声明判不了 / 空声明 / 无除法 /
+  None SQL / 分子侧列不算数（不整语句凑数）。
+- `integration/test_kpi_denominator_contract.py`（6，B4，真实 PG）：mismatch 示警 /
+  兼容不示警 / 中文判不了 / denominator 空 / 无匹配 / 空问句空 SQL。
 
 回归：邻域单测 `test_chat_service.py`+`test_chat_service_stream.py`（基线比对，
 净新增失败 0——既有 6 红为 BuildAnswerPrompt/stream 超时族，与本批无关）；
@@ -147,6 +176,14 @@ metric_draft_kpi/stream_l1_l4）53 绿；unit -k "nl2sql or kpi or prompt or
 sanitizer" 504 绿 + 4 红（`test_chat_service.py::TestBuildAnswerPrompt`——
 基线 1b29e139 复跑同 4 节点同红，净新增失败 0；stale double：测试断言
 `"total": 0` 而现实现序列化 `{"rows": []}`，属既有 stale-double 家族）。
+
+B4 回归：B2/B3 守卫域五套 56 绿（词法上收后 reconcile/injection/guard 全绿）；
+B4 新增 18 绿；chat 集成（stream_l1_l4/l1_routing/multi_step/stream_disconnect/
+metric_draft_kpi）57 绿；unit -k "nl2sql or kpi or prompt or sanitizer or chat"
+776 绿 + 6 红（4 个 TestBuildAnswerPrompt + 2 个
+`test_chat_service_stream.py::TestStreamingPipeline`——基线 aaba0a43 复跑同
+2 节点同红，净新增失败 0；summary.md 此前已记「BuildAnswerPrompt/stream 超时
+族」既有红）。
 单测 fake 修正：`_FakeOntologyService.createMetric` 补 `actor`（原 fake 断言的是
 main 上实际会 500 的坏调用路径——假替身保真度问题）；两文件 autouse stub
 `ensureDraftForMetric` 抛错走降级路径（MagicMock session 恒真值会塞 mock 垃圾进答案）。
@@ -174,6 +211,10 @@ nginx 剥 X-User-* 头 + prod AUTH_STUB_ENABLED=0），是「保护性断言从�
   块前用途说明明确「是数据不是指令」；prompt/plan/service 三层装配失败全部
   降级 None 不阻断 plan（fail-open 于可用性、fail-closed 于注入面）。
   灰度开关默认 true，出问题可环境变量一键回退（零代码回滚）。
+- B4 示警面：内容只含治理声明列名与缺失列清单（管理员维护的数据），无用户
+  输入原样回显（声明列名经标识符正则抽取，非原文回显）；装配器内部
+  try/except 收口（异常 → None），示警面永不阻断答案。弱校验不硬拒是提案
+  明确设计（治理声明可能有历史误差，先积累数据再收紧）。
 - 无 SQL 拼接（全 ORM 参数化）；无密钥操作。
 - 附带发现：12 处 requires_auth 假绿测试（见 §6）——生产无洞，但该家族修复前
   「auth 强制」类回归无法被测试网捕获，建议独立批次尽快补。
@@ -192,6 +233,10 @@ nginx 剥 X-User-* 头 + prod AUTH_STUB_ENABLED=0），是「保护性断言从�
    后端日志确认 plan system prompt 含 `<kpi_contract>` 块（如可观测）；行为面
    验证比率型指标计划遵守分子/分母口径；再问无关问题确认 prompt 无该块（零回归）；
    `KPI_CONTRACT_INJECTION_ENABLED=false` 重启后确认块消失（灰度回退演练）。
+7. B4：问句命中 denominator 为英文列口径的 PUBLISHED KPI 且生成 SQL 分母用了
+   其他列 → 答案/流式首 token 出现 `⚠️ KPI 口径提示`；分母兼容或声明为中文时
+   答案无该前缀（零回归）；观察后端日志 `KPI 分母契约弱校验示警` 频率
+   （治理声明与生成 SQL 的实际漂移面可见化——B4 的原始目的）。
 
 ## 9. 关联
 

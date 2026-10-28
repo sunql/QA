@@ -44,6 +44,7 @@ from app.services.error_classification import classifyError, sanitizeErrorMessag
 # 整条流水线复用，避免每段 _costFor 调用都查 DB。
 from app.services.nl2sql_service import _readFloatConfig
 from app.services.nl2sql_semantic_guard import shareAmbiguityWarning
+from app.services.kpi_contract_reconcile import buildKpiDenominatorWarning
 from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.chat_helpers import (
     _MSG_STEP_AGGREGATION_SKIPPED,
@@ -787,6 +788,15 @@ class StreamMixin:
         if shareWarning:
             answerPieces.append(shareWarning)
             yield StreamEvent(EVENT_TOKEN, {"content": shareWarning})
+        # B4 分母契约弱校验（kpi-governance B4）：治理声明分母列未出现在生成
+        # SQL 的分母表达式中 → 示警前置（L2 出口，不硬拒）。快照 answerPieces
+        # 同引用，先追加后 yield 保证断连兜底可见（同 shareWarning 约定）。
+        denominatorWarning = await buildKpiDenominatorWarning(
+            session, dto.question, finalSql
+        )
+        if denominatorWarning:
+            answerPieces.append(denominatorWarning)
+            yield StreamEvent(EVENT_TOKEN, {"content": denominatorWarning})
         # 默认取主模型名：即使流异常地零块完成，done 事件仍报告一个合理的模型名
         answerModelName: str | None = pc.selected.model_name
         # Think_Hide（feat-think-hide）：开启时对 token 流增量过滤 <think> 思维链，

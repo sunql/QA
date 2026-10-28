@@ -53,9 +53,11 @@ DSN 解析顺序见 ``feat_agent_orchestration_realdata_lib.resolveDatabaseUrl``
 定义在 ``feat_agent_orchestration_realdata_db``）：
 ``NotFoundError`` / ``ConflictError`` / ``ValidationError`` ⇒ 库种子不满足 ⇒ SKIP；
 其它任何异常 ⇒ **FAIL**（脚本或环境的缺陷，必须暴露，不能被吞掉）。
-建 profile / 建 run 这些**服务调用**、以及**准备前置条件**（自建 Agent /
-模型配置）同样受这条规则保护——前置条件不满足时输出 SKIP 并写明缺什么，
-**不会**抛出未捕获的 traceback；真正的缺陷会记 FAIL 并让退出码非零。
+**5 处分类点**（3 处服务调用 + 2 处准备前置条件）同样受这条规则保护
+——建 profile / toggle / 建 run 是 3 处**服务调用**（`realdata.py`），
+自建 Agent / 模型配置是 2 处**准备前置条件**（`_db.py`）——前置条件不满足时
+输出 SKIP 并写明缺什么，**不会**抛出未捕获的 traceback；真正的缺陷会记 FAIL
+并让退出码非零。
 
 覆盖的步骤
 ----------

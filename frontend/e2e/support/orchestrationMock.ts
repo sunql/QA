@@ -120,6 +120,8 @@ export interface OrchestrationState {
   orchestrationProfiles: MockOrchestrationProfile[];
   orchestrationTools: MockOrchestrationToolOption[];
   agentRuns: MockAgentRun[];
+  /** 每条运行被拉取轨迹的次数：用来模拟「同一 step_no 的行被原地改写」。 */
+  stepPolls: Record<string, number>;
 }
 
 // ===== 通用 Agent 编排的种子数据 =====
@@ -495,6 +497,30 @@ export async function handleAgentRunRoutes(route: Route, ctx: RouteCtx<Orchestra
   return handleAgentRunItemRoutes(route, ctx);
 }
 
+/**
+ * 把一条步骤「原地改写」成终态。
+ *
+ * 后端的 step 行是**原地改写**的：同一个 step_no 的行从 RUNNING 被改成
+ * SUCCEEDED（补上 outputJson / answer），而不是新增一行。mock 必须复现这个
+ * 前提，否则前端用错游标（排他）时 E2E 仍然全绿。
+ */
+function settleStep(step: MockAgentRunStep): MockAgentRunStep {
+  if (step.status !== "RUNNING") return step;
+  return {
+    ...step,
+    status: "SUCCEEDED",
+    finishedAt: NOW,
+    outputJson:
+      step.outputJson ??
+      (step.kind === "TOOL"
+        ? { text: `工具 ${step.toolName ?? "未知"} 返回 2 条记录` }
+        : null),
+    answer:
+      step.answer ??
+      (step.kind === "PLAN" ? "规划结论：正在查询供应商收货数量" : null),
+  };
+}
+
 /** 单次运行：详情 / 轨迹 / 恢复 / 取消。 */
 async function handleAgentRunItemRoutes(route: Route, ctx: RouteCtx<OrchestrationState>): Promise<void> {
   const { method, path, backend } = ctx;
@@ -503,10 +529,16 @@ async function handleAgentRunItemRoutes(route: Route, ctx: RouteCtx<Orchestratio
     const run = findRun(backend, stepsMatch[1]);
     if (!run) return respondJson(route, 404, fail("找不到该运行"));
     const afterStepNo = Number(ctx.query.get("afterStepNo") ?? "0");
+    // 第一次拉到的是原样（可能还在 RUNNING）；之后 mock 把同一 step_no 的行
+    // **原地改写**成终态 —— 前端只有用闭区间下界游标（step_no >= afterStepNo）
+    // 才能拿到改写后的那一行。
+    const pollCount = (backend.stepPolls[run.runId] ?? 0) + 1;
+    backend.stepPolls[run.runId] = pollCount;
+    const steps = pollCount <= 1 ? run.steps : run.steps.map(settleStep);
     return respondJson(
       route,
       200,
-      ok(run.steps.filter((step) => step.stepNo >= afterStepNo)),
+      ok(steps.filter((step) => step.stepNo >= afterStepNo)),
     );
   }
   const resumeMatch = path.match(/^\/agent-runs\/([^/]+)\/resume$/);
@@ -557,5 +589,6 @@ export function orchestrationSeed(): OrchestrationState {
     })),
     orchestrationTools: SEED_ORCHESTRATION_TOOLS.map((t) => ({ ...t })),
     agentRuns: [],
+    stepPolls: {},
   };
 }

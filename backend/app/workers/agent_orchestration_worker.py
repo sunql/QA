@@ -7,6 +7,8 @@ claim 事务提交并关闭后才调用注入的 ``ClaimedRunRunner``（LLM/工�
 - 依赖注入：``settings`` / ``sessionFactory`` / ``runner``，本模块**不在导入期**
   依赖后续的 Runner 实现（只有 ``main`` 内函数级导入）；
 - feature flag 关闭：``run`` 立即返回并记 info，不轮询、不建会话；
+- 启动预热：flag 打开时，``run`` 在**轮询之前**先预热 DB-backed 注册表
+  （见 ``warmUpWorkerCaches``）——Worker 是独立进程，不经过 API 的 lifespan；
 - 优雅停机：SIGTERM/SIGINT -> ``requestStop``（仅主线程注册，测试里静默跳过）；
 - 异常隔离：Runner 抛错记 run/worker 上下文后继续轮询；租约丢失属于控制流，
   只记 info 不记 error。
@@ -24,6 +26,7 @@ import logging
 import os
 import signal
 import socket
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -32,13 +35,54 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings, getSettings
 from app.services.agent_orchestration_store import AgentOrchestrationStore
 from app.services.agent_orchestration_types import ClaimedRunRunner, LeaseLostError
+from app.services.agent_tool_config_registry import (
+    AgentToolConfigRegistry,
+    agent_tool_config_registry,
+)
+from app.services.feature_rule_registry import FeatureRuleRegistry, feature_rule_registry
 
 logger = logging.getLogger(__name__)
+
+# Worker 预热入口：``(sessionFactory) -> awaitable``，可在测试里注入替身。
+WorkerCacheWarmUp = Callable[[async_sessionmaker[AsyncSession]], Awaitable[None]]
 
 
 def _defaultWorkerId() -> str:
     """进程级稳定标识（长度 <= 128，满足 lease_owner 列宽）。"""
     return f"{socket.gethostname()}:{os.getpid()}"[:128]
+
+
+async def warmUpWorkerCaches(
+    sessionFactory: async_sessionmaker[AsyncSession],
+    registry: AgentToolConfigRegistry | None = None,
+    featureRegistry: FeatureRuleRegistry | None = None,
+) -> None:
+    """Worker 进程启动预热：与 API 进程 lifespan 的 warmUp 等价。
+
+    Worker 是**独立进程**（``docker-compose`` 的 ``agent-orchestration-worker``），
+    不经过 API 的 lifespan ⇒ API 里那一次 ``agent_tool_config_registry.warmUp``
+    对 Worker 完全无效。冷启动时 ``AgentToolConfigRegistry.get()`` 抛
+    ``RuntimeError("... 未 warmUp（lifespan bug）")``，而 ``RuntimeError`` 不在
+    ``INFRASTRUCTURE_EXCEPTIONS`` 里 ⇒ 编排 run 一走到工具解析就必然判 FAILED。
+
+    同时预热 ``feature_rule_registry``：``supplier_360`` / ``supplier_risk``
+    两个只读 handler 内部调用 ``feature_rule_registry.getEnabledRules()``，
+    冷态同样抛 ``RuntimeError``——只预热工具注册表仍会让这两个工具必挂。
+
+    预热用**独立会话**：warmUp 只读，且不与后续 claim / 工具执行的事务混在
+    同一个事务里。
+
+    ``registry`` / ``featureRegistry`` 允许注入**未预热的真实实例**（回归测试
+    用它复现「Worker 进程冷启动」这一形态）；缺省时预热模块单例。
+    """
+    toolRegistry = registry if registry is not None else agent_tool_config_registry
+    ruleRegistry = (
+        featureRegistry if featureRegistry is not None else feature_rule_registry
+    )
+    async with sessionFactory() as session:
+        await toolRegistry.warmUp(session)
+        await ruleRegistry.warmUp(session)
+        await session.commit()
 
 
 class AgentOrchestrationWorker:
@@ -52,6 +96,7 @@ class AgentOrchestrationWorker:
         *,
         workerId: str | None = None,
         store: AgentOrchestrationStore | None = None,
+        warmUp: WorkerCacheWarmUp | None = None,
     ) -> None:
         self._settings = settings
         self._sessionFactory = sessionFactory
@@ -59,6 +104,7 @@ class AgentOrchestrationWorker:
         self._workerId = workerId or _defaultWorkerId()
         self._store = store or AgentOrchestrationStore()
         self._stopEvent = asyncio.Event()
+        self._warmUp = warmUp
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -75,6 +121,10 @@ class AgentOrchestrationWorker:
                 "agent orchestration 未启用（ENABLE_AGENT_ORCHESTRATION=false），worker 不轮询"
             )
             return
+
+        # 预热必须早于任何 run 被 claim、早于任何工具被解析：Worker 进程不经过
+        # API 的 lifespan，冷态注册表会让工具解析直接 RuntimeError ⇒ run 判 FAILED。
+        await self._warmUpCaches()
 
         registerSignalHandlers(self.requestStop)
         logger.info(
@@ -95,6 +145,11 @@ class AgentOrchestrationWorker:
                     )
         finally:
             logger.info("agent orchestration worker 已停止（worker=%s）", self._workerId)
+
+    async def _warmUpCaches(self) -> None:
+        """预热 DB-backed 缓存（可注入替身；缺省走模块级 ``warmUpWorkerCaches``）。"""
+        warmUp = self._warmUp if self._warmUp is not None else warmUpWorkerCaches
+        await warmUp(self._sessionFactory)
 
     async def runOnce(self) -> bool:
         """claim 一个 run 并执行一次；没有可 claim 的 run 时返回 False。

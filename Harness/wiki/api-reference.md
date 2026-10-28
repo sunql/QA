@@ -224,3 +224,34 @@
 > **暂停**（`pause_code = PERMISSION_DENIED`），不把策略内部信息（data_object /
 > data_layer）泄进 Planner 的 Observation（`agent_orchestration_tool_executor.py:252-261`）。
 > 处置方式是 `resume` 前调整授权，而不是重试。
+
+### DELETE /api/v1/agent-tools/{name} 的 409 与 `detail` 形状
+
+| 情况 | HTTP | `error` 文案 |
+|---|---|---|
+| 工具被 legacy Agent（`agent_definition.tool_name`）引用 | **409** | `agent_tool_config 被 Agent 引用，无法删除: <name>` |
+| 工具被编排 profile 绑定（`agent_orchestration_binding.tool_name`） | **409** | 同上（**文案不变**） |
+
+`detail` 是 `; ` 分隔的**字符串**（不是 JSON 对象）。新增的稳定 code 段
+`agent_tool_in_use_orchestration` 标识「编排引用」这一路：
+
+```
+agent_tool_in_use_orchestration; referencingAgents=['legacy_agent']; orchestrationAgents=['orch_agent']
+```
+
+- 第一段恒为 `agent_tool_in_use_orchestration`（稳定 code，可用于分支判断）。
+- `referencingAgents=[...]`：**legacy** Agent codes 列表，**只有非空时才有这一段**。
+- `orchestrationAgents=[...]`：编排 profile 绑定该工具的 Agent codes 列表
+  （恒存在 —— 至少有一个编排引用才会走这一路）。
+- 编排冲突这一路的两个列表都**排序后**输出；`detail` **不含**工具配置载荷
+  （不泄露 `input_schema` 等）。
+- 编排引用**优先判定**：同时被 legacy Agent 与编排 profile 引用时走上面这条
+  `agent_tool_in_use_orchestration` 形状（两段都在）。
+- 编排特性开关（`ENABLE_AGENT_ORCHESTRATION`）**关闭时完全不查**编排引用 ⇒
+  `detail` 退回旧的 `referencingAgents=[...]` 形状（无 code 段）。
+- 开关打开但**目标库还没升到 0135**（编排表不存在）时，编排引用检查 **fail-soft**
+  ⇒ 视为「无编排引用」，同样退回旧形状，而不是 500。
+
+> 事实源：`backend/app/services/agent_tool_config_service.py` 的
+> `_OrchestrationToolInUseConflict`（detail 组装）与
+> `backend/app/api/v1/agent_tools.py` 的 `DELETE /api/v1/agent-tools/{name}` 路由。

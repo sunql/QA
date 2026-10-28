@@ -212,28 +212,51 @@ describe("AgentTaskPage", () => {
     expect(screen.getByText("运行 ID：run-1")).toBeInTheDocument();
   });
 
-  it("运行中按固定周期轮询，并按 lastStepNo+1 增量拉取、去重排序合并步骤", async () => {
-    const step0 = makeStep({
-      stepNo: 0,
+  it("轮询按闭区间下界拉取：原地改写的同一步骤会被刷新（规划结论与工具输出可见）", async () => {
+    // 后端语义（agent_orchestration_store）：step 行是**原地改写**的，
+    // step_no 不变（RUNNING → SUCCEEDED）；`afterStepNo` 是**闭区间下界**
+    // （step_no >= afterStepNo）。因此前端必须用闭区间游标，否则被改写的
+    // 那一行永远拉不回来 —— 规划结论 / 工具输出 / 步骤错误永久不可见。
+    //
+    // 后端顺序：PLAN 行先落 RUNNING，随后被改写成 SUCCEEDED；工具行在其后创建。
+    const planRunning = makeStep({
+      stepNo: 1,
       kind: "PLAN",
       action: "CALL_TOOL",
       planSummary: "先查风险",
-      toolName: "supplier_risk",
+      status: "RUNNING",
+      answer: null,
     });
-    const step1 = makeStep({
+    const planSucceeded = makeStep({
       stepNo: 1,
+      kind: "PLAN",
+      action: "CALL_TOOL",
+      planSummary: "先查风险",
+      status: "SUCCEEDED",
+      answer: "规划结论：先查供应商风险",
+    });
+    const toolRunning = makeStep({
+      stepNo: 2,
       kind: "TOOL",
       toolName: "supplier_risk",
-      outputJson: { text: "{}", truncated: false, original_chars: 2 },
+      status: "RUNNING",
+      outputJson: null,
     });
-    const step2 = makeStep({ stepNo: 2, kind: "TOOL", toolName: "supplier_otsd" });
+    const toolSucceeded = makeStep({
+      stepNo: 2,
+      kind: "TOOL",
+      toolName: "supplier_risk",
+      status: "SUCCEEDED",
+      outputJson: { text: "风险等级：低", truncated: false, original_chars: 6 },
+    });
+
+    // 「服务端当前状态」：每轮之间由用例显式推进，模拟后端原地改写。
+    let serverRows: AgentRunStepRead[] = [planRunning];
     api.getAgentRunSteps.mockImplementation(
       async (_runId: string, query?: { afterStepNo?: number }) => {
-        const pages: Record<number, AgentRunStepRead[]> = {
-          0: [step1, step0],
-          2: [step2],
-        };
-        return pages[query?.afterStepNo ?? 0] ?? [];
+        const afterStepNo = query?.afterStepNo ?? 0;
+        // 后端语义：闭区间下界。
+        return serverRows.filter((step) => step.stepNo >= afterStepNo);
       },
     );
 
@@ -241,18 +264,32 @@ describe("AgentTaskPage", () => {
     await flush();
     await createRun();
 
+    // 第 1 轮：只有 PLAN 行，且还在 RUNNING。
     await advance(RUN_POLL_MS);
     expect(api.getAgentRunSteps).toHaveBeenCalledWith("run-1", { afterStepNo: 0 });
+    expect(screen.getAllByTestId(/agent-run-step-/)).toHaveLength(1);
+    expect(screen.queryByText("规划结论：先查供应商风险")).toBeNull();
+
+    // 第 2 轮：PLAN 行被原地改写成 SUCCEEDED（带结论），工具行刚创建（RUNNING）。
+    serverRows = [toolRunning, planSucceeded];
+    await advance(RUN_POLL_MS);
+    // 闭区间下界 ⇒ 游标是 lastStepNo（1）本身，不是 lastStepNo + 1（2）。
+    expect(api.getAgentRunSteps).toHaveBeenCalledWith("run-1", { afterStepNo: 1 });
+    expect(screen.getByText("规划结论：先查供应商风险")).toBeInTheDocument();
     // 乱序返回也按 stepNo 升序渲染
     const rendered = screen.getAllByTestId(/agent-run-step-/);
     expect(rendered.map((node) => node.getAttribute("data-testid"))).toEqual([
-      "agent-run-step-0",
       "agent-run-step-1",
+      "agent-run-step-2",
     ]);
 
+    // 第 3 轮：工具行被原地改写成 SUCCEEDED（带 outputJson）。
+    serverRows = [toolSucceeded, planSucceeded];
     await advance(RUN_POLL_MS);
     expect(api.getAgentRunSteps).toHaveBeenCalledWith("run-1", { afterStepNo: 2 });
-    expect(screen.getAllByTestId(/agent-run-step-/)).toHaveLength(3);
+    fireEvent.click(screen.getByRole("button", { name: "查看输出" }));
+    await flush();
+    expect(screen.getByText("风险等级：低")).toBeInTheDocument();
   });
 
   it("暂停后停止轮询", async () => {

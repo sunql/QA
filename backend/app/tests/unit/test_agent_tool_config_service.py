@@ -10,6 +10,8 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+from sqlalchemy.exc import ProgrammingError
+
 from app.dependencies import CurrentUser
 from app.domain.enums import AgentToolHandlerKind
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
@@ -53,6 +55,38 @@ def service():
     outbox = MagicMock()
     outbox.enqueue = AsyncMock()
     return AgentToolConfigService(outbox=outbox)
+
+
+class _SettingsStub:
+    """最小 settings 替身：deleteTool 只用到 enableAgentOrchestration。"""
+
+    def __init__(self, enabled: bool) -> None:
+        self.enableAgentOrchestration = enabled
+
+
+def _serviceWithFlag(enabled: bool) -> AgentToolConfigService:
+    outbox = MagicMock()
+    outbox.enqueue = AsyncMock()
+    return AgentToolConfigService(outbox=outbox, settings=_SettingsStub(enabled))
+
+
+def _missingOrchestrationTable() -> ProgrammingError:
+    """asyncpg「relation does not exist」在 SQLAlchemy 侧的形态（DBAPI ProgrammingError）。"""
+    return ProgrammingError(
+        "SELECT agent_definition.agent_code ...",
+        params=None,
+        orig=Exception('relation "agent_orchestration_profile" does not exist'),
+    )
+
+
+def _executedSqlMentions(session: MagicMock, needle: str) -> bool:
+    """session.execute 过的 SQL 里是否出现过某个标识符（表名片段）。"""
+    for call in session.execute.await_args_list:
+        statement = call.args[0]
+        compiled = str(statement.compile(compile_kwargs={"literal_binds": True}))
+        if needle in compiled:
+            return True
+    return False
 
 
 class TestListTools:
@@ -229,6 +263,97 @@ class TestDeleteTool:
         kwargs = service._outbox.enqueue.await_args.kwargs
         assert kwargs["event_type"] == "agent_tool_deleted"
         assert kwargs["payload"]["after"] is None
+
+
+class TestDeleteToolOrchestrationFlag:
+    """编排特性开关对 deleteTool 的影响（I2）。
+
+    - flag 关闭 ⇒ **完全不查**编排表（编排表在未迁移到 0135 的库上可能不存在）
+    - flag 打开但编排表不存在 ⇒ fail-soft（降级为「没有编排引用」）而不是 500
+    """
+
+    @pytest.mark.asyncio
+    async def test_deleteTool_flagOff_never_queries_orchestration_table(self):
+        service = _serviceWithFlag(False)
+        row = _rowMock(name="supplier_360", id=42)
+        get_mock = MagicMock(scalar_one_or_none=MagicMock(return_value=row))
+        no_refs_mock = MagicMock()
+        no_refs_mock.scalars.return_value.all.return_value = []
+        session = _sessionWithExecute([get_mock, no_refs_mock])
+
+        await service.deleteTool(session, "supplier_360", _admin())
+
+        # 只查了 2 次：工具行本身 + 历史 AgentDefinition.tool_name 引用
+        assert session.execute.await_count == 2
+        assert not _executedSqlMentions(session, "agent_orchestration")
+        session.delete.assert_awaited_once_with(row)
+
+    @pytest.mark.asyncio
+    async def test_deleteTool_flagOff_survives_missing_orchestration_tables(self):
+        """flag 关闭时即使编排表不存在也不会抛（表缺失 ⇒ 查询失败 ⇒ 不能到查询那步）。"""
+        service = _serviceWithFlag(False)
+        row = _rowMock(name="supplier_360", id=42)
+        get_mock = MagicMock(scalar_one_or_none=MagicMock(return_value=row))
+        no_refs_mock = MagicMock()
+        no_refs_mock.scalars.return_value.all.return_value = []
+        # 第 3 次执行会抛「表不存在」—— flag 关闭时它根本不该发生
+        session = _sessionWithExecute(
+            [get_mock, no_refs_mock, _missingOrchestrationTable()]
+        )
+
+        await service.deleteTool(session, "supplier_360", _admin())
+
+        assert session.execute.await_count == 2
+        session.delete.assert_awaited_once_with(row)
+
+    @pytest.mark.asyncio
+    async def test_deleteTool_flagOn_missing_orchestration_tables_fails_soft(self):
+        """flag 打开但库还没迁移到 0135 ⇒ 降级为「无编排引用」，不抛 500。"""
+        service = _serviceWithFlag(True)
+        row = _rowMock(name="supplier_360", id=42)
+        get_mock = MagicMock(scalar_one_or_none=MagicMock(return_value=row))
+        no_refs_mock = MagicMock()
+        no_refs_mock.scalars.return_value.all.return_value = []
+        session = _sessionWithExecute(
+            [get_mock, no_refs_mock, _missingOrchestrationTable()]
+        )
+
+        await service.deleteTool(session, "supplier_360", _admin())
+
+        assert session.execute.await_count == 3
+        assert _executedSqlMentions(session, "agent_orchestration")
+        session.delete.assert_awaited_once_with(row)
+        service._outbox.enqueue.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_deleteTool_reads_flag_at_call_time(self, monkeypatch):
+        """settings 缺省时开关在调用点读取；环境变更后须清 getSettings 缓存。"""
+        from app.config import getSettings
+
+        outbox = MagicMock()
+        outbox.enqueue = AsyncMock()
+        service = AgentToolConfigService(outbox=outbox)
+
+        def _buildSession() -> MagicMock:
+            row = _rowMock(name="supplier_360", id=42)
+            get_mock = MagicMock(scalar_one_or_none=MagicMock(return_value=row))
+            no_refs_mock = MagicMock()
+            no_refs_mock.scalars.return_value.all.return_value = []
+            no_orch_mock = MagicMock()
+            no_orch_mock.scalars.return_value.all.return_value = []
+            return _sessionWithExecute([get_mock, no_refs_mock, no_orch_mock])
+
+        monkeypatch.setenv("ENABLE_AGENT_ORCHESTRATION", "false")
+        getSettings.cache_clear()
+        offSession = _buildSession()
+        await service.deleteTool(offSession, "supplier_360", _admin())
+        assert offSession.execute.await_count == 2
+
+        monkeypatch.setenv("ENABLE_AGENT_ORCHESTRATION", "true")
+        getSettings.cache_clear()
+        onSession = _buildSession()
+        await service.deleteTool(onSession, "supplier_360", _admin())
+        assert onSession.execute.await_count == 3
 
 
 class TestToggleEnabled:

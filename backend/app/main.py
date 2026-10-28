@@ -276,14 +276,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         seeded = await seed_agent_tool_bindings(session)
         if seeded:
             logger.info("agent_tool_binding seed: %d new rows", seeded)
-        from scripts.seed_agent_tool_configs import seedAgentToolConfigs
+        from scripts.seed_agent_tool_configs import TOOL_SEEDS, seedAgentToolConfigs
         from app.services.agent_tool_config_registry import (
             agent_tool_config_registry,
         )
 
         tool_changed = await seedAgentToolConfigs(session)
         if tool_changed:
-            logger.info("agent_tool_config seed: %d/%d updated", tool_changed, 3)
+            # 分母用 len(TOOL_SEEDS)：写死 3 会让人以为只有 3 个工具被 seed 管理，
+            # 而实际是 7 个 —— 这条日志是操作员发现 seed 重置 input_schema 的线索。
+            logger.info(
+                "agent_tool_config seed: %d/%d updated", tool_changed, len(TOOL_SEEDS)
+            )
         # Task 6：cache 预热必须在 seed 之后（seed 写入了 tool_name）；
         # 若 seed 失败（RuntimeError），不继续 warmUp（fail-fast）。
         await agent_binding_cache.warmUp(session)

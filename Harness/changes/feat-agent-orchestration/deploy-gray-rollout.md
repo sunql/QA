@@ -24,8 +24,9 @@
 
 所以**阶段 0（补 schema）必须先做完**，后面的阶段才有意义。
 
-> **第一波只补 schema，不翻 `enabled`** —— 翻 `enabled` 会改变 4 个既有 legacy Agent
-> 的可运行性，属于需要单独审批的后续波次（§2.5、§9 坑 12）。
+> **第一波只补 schema，不翻 `enabled`** —— 在 4 个 wiki 工具**实测为 `false`** 的环境里，
+> 翻 `enabled` 会改变 4 个既有 legacy Agent 的可运行性，属于需要单独审批的后续波次
+> （§2.5、§9 坑 12）。
 
 ---
 
@@ -41,23 +42,38 @@
 | 6 | **绝不重新生成 `SECRET_KEY`**：它是 Fernet 主密钥，换新 = 5 个数据源密码 + 6 把 LLM key 永久不可解 | 运维红线 |
 | 7 | **绝不 `cat`/`print` `.env`**（含 `docker/.env`）；改配置用编辑器，验证用 `docker compose config` 的**服务名**而不是环境变量值。唯一例外：读回**单个非敏感开关**（如 `docker compose … exec backend printenv ENABLE_AGENT_ORCHESTRATION`，沿用本手册统一的 `-f` 参数）—— 只读这一个变量，**不要 dump 整个环境**，更不涉及任何密钥/口令 | 运维红线 |
 | 8 | 生产操作全部由人手动执行 | 本手册 |
-| 9 | **阶段 0 第一波不翻 `agent_tool_config.enabled`** —— 只补 `input_schema`。翻 `enabled` 会让 4 个既有 legacy Agent 从 409 不可运行变为可执行（§2.5、§9 坑 12） | 本手册 §2.5 |
+| 9 | **阶段 0 第一波不翻 `agent_tool_config.enabled`** —— 只补 `input_schema`。当 4 个 wiki 工具**实测为 `false`** 时，翻 `enabled` 会让 4 个既有 legacy Agent 从 409 不可运行变为可执行（§2.5、§9 坑 12） | 本手册 §2.5 |
 
 ---
 
 ## 2. 阶段 0：让工具「可绑定」（前置，最容易漏）
 
-### 2.1 实测现状（2026-10-27，开发库 `qa_metadata` 只读查询）
+**进入条件**：能登录目标环境的元数据库、且能读写 `agent_tool_config`。
+阶段 0 **不需要** 0135（它只改 `agent_tool_config` 的一列）。
+但必须先知道一件事：**0135 是新镜像的硬前置** —— 0135 的迁移脚本只随**新镜像**
+交付，旧镜像的 alembic head 是 `0134` ⇒ 在**旧镜像**里执行 `alembic upgrade head`
+是 **no-op**（详见 §4 阶段 1 / 阶段 2）。
+
+### 2.1 实测现状（2026-10-28，开发库 `qa_metadata` 只读查询；与 §2.5 同一次查询）
 
 | name | handler_ref | enabled | input_schema | 可绑定？ |
 |---|---|---|---|---|
 | `supplier_360` | supplier_360 | true | `{}` | ❌ schema 不合法 |
 | `supplier_risk` | supplier_risk | true | `{}` | ❌ schema 不合法 |
 | `graph_traverse` | graph_traverse | true | `{}` | ❌ schema 不合法 |
-| `wiki_search` | wiki_search | **false** | `{}` | ❌ schema 不合法 + 已禁用 |
-| `wiki_read` | wiki_read | **false** | `{}` | ❌ schema 不合法 + 已禁用 |
-| `rule_evaluate` | rule_evaluate | **false** | `{}` | ❌ schema 不合法 + 已禁用 |
-| `coverage_status` | coverage_status | **false** | `{}` | ❌ schema 不合法 + 已禁用 |
+| `wiki_search` | wiki_search | **false** | `{}` | ❌ schema 不合法（该库遗留：已禁用） |
+| `wiki_read` | wiki_read | **false** | `{}` | ❌ schema 不合法（该库遗留：已禁用） |
+| `rule_evaluate` | rule_evaluate | **false** | `{}` | ❌ schema 不合法（该库遗留：已禁用） |
+| `coverage_status` | coverage_status | **false** | `{}` | ❌ schema 不合法（该库遗留：已禁用） |
+
+> ⚠️ **`enabled` 这一列是历史行状态**，**不是**本仓 seed 的产物：
+> 本仓 `backend/scripts/seed_agent_tool_configs.py:35/45/55/68/78/88/98` 把
+> **全部 7 个工具**都写成 `"enabled": True`，
+> `backend/app/services/agent_tool_config_service.py:339` 也是
+> `enabled=fields.get("enabled", True)`；**没有任何迁移**把 wiki 工具置为 disabled。
+> ⇒ 在任何由**本仓 seed** 造出来的环境里，这 4 行**本来就是 `true`**。
+> 所以「四行是 `false`」**不是**本仓可复现的基线，只是那台库的遗留状态；
+> 阶段 0 的判据因此是**分支式**的（见 §2.4）。
 
 > 复核命令（只读）：
 > ```sql
@@ -103,7 +119,15 @@
 
 #### 首选：走 UI（`/admin/tools`「工具定义」页）
 
-与 seed 脚本的「UI 优先」纪律一致 —— 页面上改的值就是权威值，不会被任何脚本覆盖。
+与 seed 脚本的「UI 优先」纪律一致 —— 页面上改的值就是权威值。
+
+> ⚠️ **但 `input_schema` 有例外**：backend 每次启动都跑
+> `seed_agent_tool_configs.py`，其更新分支
+> （`backend/app/services/agent_tool_config_service.py:349`
+> 的 `existing.input_schema = fields.get("input_schema", {})`）
+> 会把 `input_schema` 重置为 `{}` ⇒ **写完 schema 后重建 backend 容器有可能
+> 把它抹掉**（触发条件：该行元数据与 seed 不一致）。因此**每次重建后必须重跑
+> §2.4 的复核**。
 
 1. 打开 `/admin/tools`，找到目标工具（按 `name`）点「编辑」；
 2. 「输入 schema」填 §2.3 里对应的 JSON（`type` / `properties` / `additionalProperties`）；
@@ -137,23 +161,44 @@ WHERE handler_ref IN ('supplier_360','supplier_risk','graph_traverse',
                       'wiki_search','wiki_read','rule_evaluate','coverage_status');
 ```
 
-判据：
+判据（**分支式**）：先实测 `enabled`，再按分支走 ——
+「四行是 `false`」是那台库的**历史行状态**，不是本仓可复现的基线（见 §2.1 的 ⚠️）。
 
-- **第一波**：`supplier_360` / `supplier_risk` / `graph_traverse` 三行
-  `enabled` 仍是 `true`（**未被改动**）且 `input_schema` 形如 §2.3；
-- **同时**：`wiki_search` / `wiki_read` / `rule_evaluate` / `coverage_status`
-  四行的 `enabled` **仍然是 `false`**（没被顺手翻掉）；
-- 再开 flag 后调用 `GET /api/v1/agent-orchestrations/tool-options`，
+- **共同项（两个分支都要满足）**：`supplier_360` / `supplier_risk` / `graph_traverse`
+  三行的 `enabled` **未被改动**，且 `input_schema` 形如 §2.3；
+- **分支 A —— 实测 `wiki_search` / `wiki_read` / `rule_evaluate` / `coverage_status`
+  四行的 `enabled` 为 `false`**：
+  - 本波次（只补 schema）**成立**；
+  - 这四行**必须保持 `false`**（没被顺手翻掉）—— 翻它们属于 §2.5 的**后续波次**，
+    需要单独评估 + 单独审批；
+  - 灰度验收记录里写明「这 4 个工具在本环境实测为 `false`，本波次未触碰」。
+- **分支 B —— 实测那四行的 `enabled` 为 `true`**（**本仓 seed 造出来的环境就是这一支**）：
+  - 这 4 个 legacy Agent（§2.5 表里的 id 6 / 7 / 8 / 9）**本来就在执行**，
+    本波次**只需补 schema**，`enabled` 一个都不用动；
+  - **必须把「它们本来就是启用的」写进灰度验收记录**（否则后续有人按 §2.5 的
+    「409 不可运行」叙述去判断，会得出相反结论）。
+- **再开 flag 后**调用 `GET /api/v1/agent-orchestrations/tool-options`，
   上面三个工具必须出现在返回列表里（该端点只列**当前有效**的工具）。
 
 ### 2.5 波次划分：第一波（只补 schema） vs 后续波次（翻 `enabled`）
 
 **为什么必须分波次。** 白名单里的 4 个 wiki 工具（`wiki_search` / `wiki_read` /
-`rule_evaluate` / `coverage_status`）当前 `enabled = false`，而它们**分别绑定在
-4 个 `status = active` 的既有 legacy Agent 上**（实测于 2026-10-28 开发库
-`qa_metadata` 只读查询）：
+`rule_evaluate` / `coverage_status`）**分别绑定在 4 个 `status = active` 的
+既有 legacy Agent 上**（实测于 2026-10-28 开发库 `qa_metadata` 只读查询，
+与 §2.1 是**同一次查询**）。
 
-| 被禁用的工具 | 绑定的既有 legacy Agent | Agent 状态 |
+> ⚠️ **前提校正（务必先读）**：这 4 个工具的 `enabled = false` 是**那台库的
+> 历史行状态**，**不是**本仓 seed 的产物 —— 本仓
+> `backend/scripts/seed_agent_tool_configs.py:35/45/55/68/78/88/98` 把
+> **全部 7 个工具**都写成 `"enabled": True`
+> （`backend/app/services/agent_tool_config_service.py:339` 的
+> `enabled=fields.get("enabled", True)`），**没有任何迁移**把 wiki 工具置为 disabled。
+> ⇒ 下文的「409 不可运行」**只在实测为 `false` 的环境里成立**；
+> 在由本仓 seed 造出来的环境里，这 4 个工具**本来就是启用的**、
+> 那 4 个 legacy Agent **本来就是可运行的** ⇒ 下面的行为变更推演**不适用**，
+> 本波次**只需补 schema**（并按 §2.4 的分支 B 把这件事写进灰度验收记录）。
+
+| 4 个 wiki 工具 | 绑定的既有 legacy Agent | Agent 状态 |
 |---|---|---|
 | `wiki_search` | id 6 `WIKI_SEARCH_AGENT` | active |
 | `wiki_read` | id 7 `WIKI_READ_AGENT` | active |
@@ -167,9 +212,11 @@ legacy 运行时解析绑定工具走 `AgentToolConfigRegistry`，它**只装载
 （`backend/app/services/agent_runtime_service.py:165-178`，其 docstring 明写
 「tool 不存在或被禁用 → ConflictError(409 tool_unbound_or_disabled)」）。
 
-⇒ 这 4 个 Agent **今天就是 409 不可运行**；把 `enabled` 翻成 `true` 会让它们
-**从「409 不可运行」变成「真的执行」** —— 这是对**既有功能**的行为变更，
-与本特性的底线「现有功能零行为变化」冲突。
+⇒ **实测为 `false` 的环境里**，这 4 个 Agent **今天就是 409 不可运行**；
+把 `enabled` 翻成 `true` 会让它们**从「409 不可运行」变成「真的执行」** ——
+这是对**既有功能**的行为变更，与本特性的底线「现有功能零行为变化」冲突。
+⇒ **实测为 `true` 的环境里**，它们**本来就在执行**，翻 `enabled` 是个**空操作**
+（后续波次对这类环境**没有意义**；它只对**新出现**的 disabled 工具才有价值）。
 
 ⇒ 而**只改 `input_schema` 对 legacy 路径是无副作用的**：
 `AgentToolAssembly.assemble` 只是把 `input_schema` 拷进描述符
@@ -182,12 +229,14 @@ legacy 运行时解析绑定工具走 `AgentToolConfigRegistry`，它**只装载
 | 波次 | 动作 | 影响面 | 审批 |
 |---|---|---|---|
 | **第一波（推荐，本手册默认）** | 只给 `supplier_360` / `supplier_risk` / `graph_traverse` 补合法 schema；**一个 `enabled` 都不翻** | 既有 legacy 行为**零变化**（这三个工具本来就已启用，legacy 读的是 `arg_extractor`） | 随本特性的灰度审批 |
-| **后续波次（另行评估、另行审批）** | 翻 4 个 wiki 工具的 `enabled = true`，使其可被编排绑定 | **4 个既有 legacy Agent 从 409 不可运行变为可执行** —— 必须单独评估（ACL、prompt 面、输出质量）并单独审批 | **单独审批**；影响必须记进灰度验收记录 |
+| **后续波次（另行评估、另行审批）** | 翻 4 个 wiki 工具的 `enabled = true`，使其可被编排绑定 | **仅当这 4 个工具实测为 `false`**：4 个既有 legacy Agent 从 409 不可运行变为可执行 —— 必须单独评估（ACL、prompt 面、输出质量）并单独审批。**实测为 `true` 时**：无行为变化，但也无收益 | **单独审批**；影响必须记进灰度验收记录 |
 
 > 后续波次的 SQL 形如
 > `UPDATE agent_tool_config SET enabled = true WHERE name = 'wiki_search';`
 > —— **本手册的阶段 0 不执行它**。要执行时，先按上表登记 4 个 Agent 的影响面，
-> 再走独立审批，并在灰度验收记录里逐个写明「从 409 → 可运行」。
+> 再走独立审批，并在灰度验收记录里逐个写明「从 409 → 可运行」
+> （**仅在实测为 `false` 时**才有这一句；实测为 `true` 时记录「本来就是启用的，
+> 本次翻开关为空操作」）。
 
 ---
 
@@ -232,7 +281,15 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
 
 每个阶段都有**进入条件**和**验收判据**；不满足不要进下一阶段。
 
-### 阶段 1：备份 + 迁移（flag 仍关闭）
+### 阶段 1：备份 + 记录当前版本（flag 仍关闭）
+
+**进入条件**：
+
+- 目标环境当前跑的是**旧镜像**（本特性尚未上线，`ENABLE_AGENT_ORCHESTRATION` 关闭）；
+- 阶段 0 的三个目标工具 schema 已按 §2.4 复核通过；
+- **0135 是新镜像的硬前置**：0135 的迁移脚本只随**新镜像**交付，旧镜像的 alembic
+  head 是 `0134` ⇒ **在旧镜像下执行不了 0135**。
+  ⇒ 本阶段**不执行迁移**，迁移**明确归到阶段 2 的镜像更新**（见下面第 2 步与阶段 2）。
 
 1. 备份（元数据库）：
    ```bash
@@ -242,26 +299,45 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
    ```sql
    COPY (SELECT * FROM agent_tool_config) TO '/tmp/agent_tool_config_backup.csv' CSV HEADER;
    ```
-2. 迁移（由 backend 容器启动时的 `alembic upgrade head` 完成，或手工执行）：
+2. **检查并记录当前版本（只读，不迁移）**：
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.centos.yml \
-     exec backend alembic upgrade head
-   docker compose -f docker-compose.yml -f docker-compose.centos.yml \
-     exec backend alembic current   # 期望 0135
+     exec backend alembic current
    ```
-3. 新建 5 张表（**只增不改**既有表）：
-   `agent_orchestration_profile` / `agent_orchestration_binding` /
-   `agent_orchestration_run` / `agent_orchestration_step` / `agent_orchestration_usage`
-4. 验收：`alembic current` = `0135`；`\dt agent_orchestration*` 五张表都在；
-   **既有表行数没变**。
+   → **记录输出**（迁移前应为 `0134`）。
+   > ⚠️ **不要在这里执行 `alembic upgrade head`** —— 此刻跑着的还是**旧镜像**，
+   > 它的 alembic head 就是 `0134` ⇒ 这条命令是 **no-op**，`alembic current`
+   > 会永远停在 `0134`，本阶段的验收判据就永远过不去。
+   > **0135 由阶段 2 的新镜像执行**（新镜像的 backend 容器**第一次启动**时，
+   > 镜像 CMD `docker/Dockerfile.backend:84`
+   > = `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000`
+   > 会自动跑 `alembic upgrade head`）。
+3. 5 张表（**只增不改**既有表）：`agent_orchestration_profile` /
+   `agent_orchestration_binding` / `agent_orchestration_run` /
+   `agent_orchestration_step` / `agent_orchestration_usage`
+   —— **本阶段它们还不在**（迁移未执行，符合预期）；建表发生在阶段 2。
+4. 验收（**与「迁移在阶段 2」这条路径自洽**）：
+   - 备份已生成（`qa_metadata_*.dump` + `agent_tool_config_backup.csv`）；
+   - 已**记录**迁移前的 `alembic current`（旧镜像 ⇒ 应为 `0134`）；
+   - 5 张 `agent_orchestration*` 表**尚不存在**；
+   - **既有表行数没变**。
+   ⇒ 「`alembic current = 0135`」与「五张表都在」这两条判据**属于阶段 2**
+   （见阶段 2 第 4 步），因为**只有新镜像能执行 0135**。
 
 > **回滚口径**：本阶段的回滚是「把 flag 保持关闭」，
 > **不是** `alembic downgrade` —— `0135` 的 downgrade 会 **DROP 这 5 张表**。
 > 表留着无害（没有路由就没有写入），留表回滚是本手册的既定口径。
+>
+> ⚠️ **0135 之后的回滚口径不是「回滚镜像」**，而是「**新镜像 + 关 flag**」——
+> 详见 §5：一旦 0135 已执行，回到**旧镜像**会被启动期的 schema 漂移门
+> （`backend/app/infrastructure/schema_drift.py:113-115`，`"alembic"` /
+> `"missing_table"` 均为 `blocking`）挡住 ⇒ 旧镜像的 backend **起不来**。
 
-### 阶段 2：部署镜像
+### 阶段 2：部署镜像（**0135 在这一步随新镜像执行**）
 
-1. 正常更新 backend 镜像（迁移在它启动时自动跑）。
+1. 正常更新 backend 镜像 —— **0135 的迁移随新镜像执行**：
+   新镜像的 backend 容器**第一次启动**时，镜像 CMD（`docker/Dockerfile.backend:84`）
+   会自动跑 `alembic upgrade head` ⇒ **0135 就在这一步落库**。
 2. Worker 镜像：与 backend **同一份 Dockerfile/context**，内容等价。
    离线机（CentOS，无外网、无构建机）做法二选一：
    - **免重建**（推荐）：把已传输的 backend 镜像打一个 Worker 名的 tag
@@ -281,6 +357,22 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
    （**不带** `--profile`）**不含** Worker 镜像
    ⇒ 离线镜像包脚本（`backend/scripts/build_offline_images.py`）默认不会带它，
    需要按上面第 2 步单独补进传输包。
+4. **迁移验收（0135 已随新镜像执行）** —— 在**新镜像的 backend 容器已经启动**
+   之后执行（阶段 4 / 阶段 8 的 `up -d --force-recreate --no-build backend`
+   就是那一次启动；若此刻 backend 容器还没用新镜像重启过，本步顺延到它启动之后）：
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+     exec backend alembic current   # 期望 0135
+   ```
+   - `alembic current` = `0135`；
+   - `\dt agent_orchestration*` **五张表都在**：
+     `agent_orchestration_profile` / `agent_orchestration_binding` /
+     `agent_orchestration_run` / `agent_orchestration_step` /
+     `agent_orchestration_usage`；
+   - **既有表行数没变**（0135 只建表，不改既有表）。
+   > ⚠️ 若 `alembic current` 仍是 `0134` ⇒ **新镜像没真正跑起来**（跑的还是旧镜像，
+   > 旧镜像的 alembic head 就是 `0134`，`alembic upgrade head` 是 no-op）
+   > ⇒ **停下排查镜像，不要继续往下走**。
 
 ### 阶段 3：验证「默认仍然是关的」
 
@@ -310,49 +402,189 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
 ### 阶段 3.5：PRE-ENABLE CHECKLIST（把 `ENABLE_AGENT_ORCHESTRATION` 打开**之前**必须逐项关闭）
 
 > 本特性**出厂即关闭**（`ENABLE_AGENT_ORCHESTRATION` 默认 `false`，不注册新路由、不起 Worker）。
-> 下面三项由 `security-reviewer` 与 `code-reviewer` 共同提出（安全 MEDIUM M1/M2/M3；
-> 代码评审 M4/M10/M11），**两位评审一致要求：在生产把开关打开之前关闭**。
+> 下面 **14 项**由 `security-reviewer`、`code-reviewer` 与最终评审共同提出，
+> **全部要求：在生产把开关打开之前关闭**。
 > 任一项未关闭 ⇒ **不要**把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。
 >
-> **编号说明（可追溯性用）**：上面括号里的 `M1`/`M2`/`M3` 与「代码评审 M4/M10/M11」
-> 是**开发期评审的发现编号**，只为可追溯性记录在这里；原始评审报告是开发期产物、
-> 不随仓库存档。**下面三项每一项都自带完整描述**（事实 + 影响 + 关闭方式）⇒
-> **不需要任何外部文档就能照着勾**。
+> **编号说明（可追溯性用）**：
+>
+> - **P1 / P2 / P3** —— 开发期评审的发现（安全 MEDIUM `M1`/`M2`/`M3`；
+>   代码评审 `M10`/`M4`/`M11`）。原始评审报告是开发期产物、不随仓库存档，
+>   **下面每一项都自带完整描述**（事实 + 影响 + 关闭方式）⇒
+>   **不需要任何外部文档就能照着勾**。
+> - **P4 – P11** —— 最终评审 §3 的条目编号（`A-10` / `A-20` / `A-30` / `A-39` /
+>   `A-61` / `A-68` / `A-72` / `A-81`+`A-82` 合并为一条），**每条都是开放闸门**。
+> - **P12 – P14** —— 同样来自最终评审 §3（`A-79` / `A-80` / `B-28`），但它们是
+>   **灰度手册里命令与文字的机械修正**，**已由本次修复派单直接关闭**
+>   ⇒ 留在清单里只作**留痕**（每条都带证据）。
+>
+> **P1 / P2 / P3 的措辞形态不同，请按各自形态理解**：
+> P1 是「**已实证不可利用**（当前）+ **前提条件**（前提一旦被破坏就变成可利用路径）」，
+> P2 / P3 是「**待修** + **缓解窗口**（未修时靠什么撑住）」。
+> **登记进清单 ≠ 已处置**：每一条都必须有真实的关闭动作。
 
-- [ ] **P1 — 只读白名单的 TOCTOU（读-改-写竞态）**
-      白名单断言发生在 `prepare()` 读到的**第一份**行上
+- [ ] **P1 — 只读白名单的 TOCTOU（读-改-写竞态）｜已实证不可利用 + 前提条件**
+      **事实**：白名单断言发生在 `prepare()` 读到的**第一份**行上
       （`backend/app/services/agent_orchestration_tool_executor.py:90-91`：
       `_loadEnabledToolConfig` + `_assertReadOnlyBuiltin`），而**真正被执行**的 handler
       是从**第二次**读取装配出来的（`_resolveTool` → `registry.reload_one`，同文件 `:246`）。
       两次读取之间如果管理员改了 `handler_ref`，断言过的行与执行的行就不是同一行。
-      **当前不可利用**（唯一不在白名单里的 handler `nl2sql_default` 是惰性占位符），
-      但**一旦把 NL2SQL 接进编排就会变成可利用路径**。
+      **当前状态：已实证不可利用** —— 评审在真实 PostgreSQL 上验证过：同一 session 内
+      `expire_on_commit=False` 的 identity map 让第二次读拿到的是**同一行版本**
+      ⇒ 断言行与执行行一致（**同一 session 内自洽**）。
+      **前提条件（一旦破坏就变成可利用路径）**：
+      ① 两次读之间**没有别的会话 / 进程**改这一行；
+      ② 白名单之外的 handler 保持惰性 —— 当前唯一不在白名单里的 handler
+      `nl2sql_default` 是惰性占位符，**一旦把 NL2SQL 接进编排，前提 ② 就被破坏**。
+      **影响**：前提被破坏时，被执行的对象可能不是被断言过的那一行 ⇒ 只读白名单被绕过。
       **关闭方式**：在**实际被执行的那一行**上重新断言只读白名单。
+      **未关闭 ⇒ 不要把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。**
 
-- [ ] **P2 — 租约只在「轮边界」续**
-      `renewLease` 在整个仓库里**只被调用一次**，位于 `_safetyPoint`
+- [ ] **P2 — 租约只在「轮边界」续｜待修 + 缓解窗口**
+      **事实**：`renewLease` 在整个仓库里**只被调用一次**，位于 `_safetyPoint`
       （`backend/app/services/agent_orchestration_runner.py:156-168`，续租调用在 `:162`）；
       编排路径的 LLM 客户端**没有显式 timeout**（`openai_client.py` 不传 `timeout`，
-      沿用 OpenAI SDK 默认读超时 600s），而租约默认 **60s**。
+      沿用 OpenAI SDK 默认读超时 600s），而租约默认 **60s**
+      （`AGENT_ORCHESTRATION_LEASE_SECONDS`，`backend/app/config.py:169`）。
       ⇒ 单轮规划慢于 60s 就会**丢租约** ⇒ `_recoverOneExpired` 重新排队 ⇒ 该轮**重做**
       （重复 LLM 花费；`getOrCreatePlanStep` 复用 RUNNING 的 PLAN 行且**不**累加
       `iteration_count`，所以 `max_iterations` 约束不到它）。
       **写入侧是安全的**（所有写都走 `_lockLeasedRun`）。
-      **关闭方式**：给 LLM 调用设显式超时（小于租约），或把续租下沉到轮内。
+      **影响**（评审 ID `M4` / `C-04`）：慢工具被**第二个 Worker 并发重放**
+      ⇒ 重复执行 + **重复 LLM 费用**，直接击穿本特性的成本预算语义。
+      **关闭方式**：给 LLM 调用设显式 timeout（小于租约），或把续租下沉到轮内
+      （工具调用内续租 / 租约时长绑定最长工具耗时）。
+      **缓解窗口（未修时靠什么撑住）**：灰度期间按**单 Worker** 部署（杜绝第二个
+      Worker 并发重放）、只跑**只读快工具**，并把 `AGENT_ORCHESTRATION_LEASE_SECONDS`
+      调大到覆盖最长工具耗时；
+      **未关闭 ⇒ 不要把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。**
 
-- [ ] **P3 — Planner 的工具目录无长度 / 数量上界**
-      `_buildMessages` / `_reduceToolCatalog`
+- [ ] **P3 — Planner 的工具目录无长度 / 数量上界｜待修 + 缓解窗口**
+      **事实**：`_buildMessages` / `_reduceToolCatalog`
       （`backend/app/services/agent_orchestration_planner.py:371-410`）把工具目录原样拼进
       system prompt；`agent_tool_config.description` 是**无界 `Text`**，
       `tool_names` 也**没有元素个数上限**。
       ⇒ 目录膨胀会直接推高每轮 prompt 成本与超窗风险。
+      **影响**（评审 ID `M11` / `C-11`）：绕开了本分支唯一的提示预算防线，
+      且**每次请求都生效**（不是偶发）。
       **关闭方式**：给目录加元素数上限与描述长度截断（并在 `tool_names` 上加
       `max_length`）。
+      **缓解窗口（未修时靠什么撑住）**：灰度期间由管理员把工具目录控制在
+      **白名单规模（7 个）**以内，避免 `description` / `input_schema` 膨胀；
+      **未关闭 ⇒ 不要把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。**
+
+- [ ] **P4 — A-10 · `validateObjectSchema` 接受 `$ref`/`anyOf`/`oneOf`/`allOf`，嵌套对象绕过严格遍历**
+      **事实**：`backend/app/services/agent_orchestration_validation.py:71` 的
+      `validateObjectSchema` 要求 `type == "object"`、`properties` 是 dict、
+      `additionalProperties` 为 `false` 或缺省、拒绝 `patternProperties`；
+      但**不拒绝** `$ref` / `anyOf` / `oneOf` / `allOf`，且 `properties` 的**值**
+      （嵌套对象）**不做递归校验** ⇒ 组合子可以绕过严格遍历。
+      **影响**：写进 `input_schema` 的组合子不会被展开校验 ⇒ 编排侧的工具入参校验
+      比预期的松（嵌套对象里的未声明键可能不被拒）。
+      **关闭方式**：启用前加一句「**拒绝组合子**」（`$ref`/`anyOf`/`oneOf`/`allOf`
+      一律不接受），并对 `properties` 的值递归校验。
+      **未关闭 ⇒ 不要把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。**
+
+- [ ] **P5 — A-20 · `GET /{agentCode}` 仅要求登录，无 owner/admin 过滤（= I1，跨部门信息泄露）**
+      **事实**：`backend/app/api/v1/agent_orchestrations.py:91-104` 的 `getProfile`（`:96` 起）
+      只挂了 `Depends(getCurrentUser)`，**没有** owner / admin 过滤
+      ⇒ 任何登录用户按 `agentCode` 就能读到别人部门的 profile。
+      **影响**：跨部门信息泄露（profile 里含 instructions 与工具绑定）。
+      **关闭方式**：加 owner/admin 过滤（**越权统一 404**，不要用 403 暴露存在性）。
+      **未关闭 ⇒ 不要把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。**
+
+- [ ] **P6 — A-30 · PATCH 接受未校验的 `arg_extractor_kind` ⇒ 一次配置编辑可致下次启动预热崩**
+      **事实**：`backend/app/services/agent_tool_config_service.py:183-184` 直接把请求里的
+      `arg_extractor_kind` 赋给行，**没有**按 `ARG_EXTRACTORS`
+      （`backend/app/services/agent_tools.py:232`）校验。
+      **影响**：写入一个不存在的 extractor ⇒ 下次启动预热时 legacy 运行时解析绑定工具
+      会崩 ⇒ **一次配置编辑就能打挂 backend 启动**。
+      **关闭方式**：按 `ARG_EXTRACTORS` 校验 `arg_extractor_kind`，非法值 422。
+      **未关闭 ⇒ 不要把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。**
+
+- [ ] **P7 — A-39 · `completeStream` 消费者放弃 generator 时不写用量行；终态用量后 provider 抛错会被丢弃（= I13）**
+      **事实**：`backend/app/services/agent_orchestration_metering.py` 的 `completeStream`
+      已处理了一部分：provider 在终态块**之后**抛错 ⇒ 走 `except` 分支记终态用量；
+      消费者在**还没有终态块**时放弃 ⇒ `finally` 派后台任务补记
+      （`_scheduleAbandonRecord`）。
+      **仍存缺口**：消费者**见到终态块之后**再放弃时，`finally` 里仍走
+      `await self._recordStreamSuccess(terminal)` —— 在 `GeneratorExit` 处理中
+      `await` 会抛 `RuntimeError` ⇒ 那一行用量**照样丢**。
+      **影响**：违反「所有 LLM 调用都要有用量记录」⇒ 台账漏账、成本不可核对。
+      **关闭方式**：补用量行 —— 把终态落账也改成与放弃路径一致的后台补记，
+      并补一条「消费者提前 break（含终态块之后）」的用例。
+      **未关闭 ⇒ 不要把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。**
+
+- [ ] **P8 — A-61 · 租约过期以调用方墙钟为准，多主机时钟偏移可能提前回收活租约**
+      **事实**：租约的 `lease_until` 用**各 Worker 自己的墙钟**计算与判定
+      ⇒ 多主机部署时若节点之间有时钟偏移，可能把**还活着的**租约判成过期并回收。
+      **影响**：活着的 run 被第二个 Worker 抢走 ⇒ 重复执行 + 重复 LLM 费用
+      （与 `C-04` / P2 叠加）。
+      **关闭方式**：部署手册写明 **NTP** 要求（灰度期间所有节点与同一 NTP 源同步）。
+      **未关闭 ⇒ 不要把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。**
+
+- [ ] **P9 — A-68 · 步骤表 `(run_id, iteration_no, kind)` 无 DB 唯一约束**
+      **事实**：`backend/alembic/versions/0135_agent_orchestration.py:137-177` 的
+      `agent_orchestration_step` 只对 `("run_id", "step_no")` 建了唯一约束
+      （`uq_agent_orchestration_step_run_step`），`iteration_no` / `kind` 是普通列
+      ⇒ 同一 `(run_id, iteration_no, kind)` 可以写入多条步骤。
+      **影响**：重放 / 并发下同一轮 PLAN / TOOL 步骤可能重复落库，关联计量也随重复步骤
+      虚增 ⇒ 轨迹与成本统计不可信。
+      **关闭方式**：启用前在步骤表补唯一约束 `(run_id, iteration_no, kind)`。
+      **未关闭 ⇒ 不要把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。**
+
+- [ ] **P10 — A-72 · `AUTH_MODE=stub` 下 12 条新路由的**运行期**匿名 401 未覆盖**
+      **事实**：`backend/app/tests/integration/test_agent_orchestration_route_auth.py`
+      的 docstring 明写「断言的是**路由依赖声明**（静态结构），不是运行时行为」
+      ⇒ 12 条新路由的**运行期**匿名请求被拒**没有被覆盖**。
+      **影响**：鉴权依赖可能在重构中静默丢失而测试仍绿 ⇒ 匿名可访问（数据泄露）。
+      **关闭方式**：补运行期匿名请求被拒的断言（匿名请求 ⇒ 401），
+      与现有的静态声明断言并存。
+      **未关闭 ⇒ 不要把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。**
+
+- [ ] **P11 — A-81 + A-82 · `AgentRunRead` 双份导出（不同形状）；`StepStatus` 双份导出（不同取值集）**
+      **事实**：`frontend/src/types/agentRuntime.ts:9` 与
+      `frontend/src/types/agentOrchestration.ts:160` 各有一份 `AgentRunRead`（形状不同）；
+      `frontend/src/types/chat.ts:142` 与 `frontend/src/types/agentOrchestration.ts:21`
+      各有一份 `StepStatus`（取值集不同：小写 `"pending" | "running" | …` vs 大写
+      `"RUNNING" | "SUCCEEDED" | …`，后端口径见
+      `backend/app/services/agent_orchestration_types.py:39`）。
+      评审把 **A-82 记为 A-81 的重复条目** ⇒ 这里**合并为一条**。
+      **影响**：同名类型两套取值 ⇒ 前后端对齐时极易拿错那一份 ⇒ 类型系统不再兜底。
+      **关闭方式**：**定名或按域重命名**（如 `AgentRunRead` → `OrchestrationAgentRunRead`、
+      `StepStatus` → `OrchestrationStepStatus`），并统一到后端枚举的取值集。
+      **未关闭 ⇒ 不要把 `ENABLE_AGENT_ORCHESTRATION` 改成 `true`。**
+
+- [x] **P12 — A-79 · 阶段 8 / 回滚的 recreate 命令漏了 `-f` 覆盖标志｜已关闭（本派单已修）**
+      **事实**：评审指出阶段 8 / 回滚的 `docker compose` 命令漏了
+      `-f docker-compose.yml -f docker-compose.centos.yml`，在 CentOS overlay 环境下
+      会解析出错误的镜像 / 卷。
+      **关闭方式**：**所有**生产用 compose 命令都带两个 `-f`。
+      **已关闭 + 证据**：本手册的生产命令（阶段 1 第 2 步、阶段 2 第 2/4 步、阶段 3、
+      阶段 4 第 2/3/4 步、阶段 8 第 2 步、§5 回滚第 1/2 步与回滚后校验段）
+      **已逐条核对**，每一条都带 `-f docker-compose.yml -f docker-compose.centos.yml`。
+
+- [x] **P13 — A-80 · `docker compose up -d --force-recreate backend` 在离线生产机上可能触发镜像构建｜已关闭（本派单已修）**
+      **事实**：backend 服务带 `build:` 且没有 `image:` 键 ⇒ 少了 `--no-build`，
+      `up` 可能隐式触发一次构建；离线机上这次构建会直接失败并可能把 backend 带下去。
+      **关闭方式**：所有 `up -d --force-recreate` 都带 `--no-build`。
+      **已关闭 + 证据**：本手册的 `up -d --force-recreate`（阶段 4 第 2 步、
+      阶段 8 第 2 步、§5 回滚第 2 步）**已逐条核对**，每一条都带 `--no-build`。
+
+- [x] **P14 — B-28 · `--force-recreate` 带来的**未被记录的 backend 重启窗口**｜已关闭（本派单已修）**
+      **事实**：`up -d --force-recreate` 会停掉旧容器再起新容器 ⇒ 有一段时间
+      backend **不可用**，手册原先没有记录这个窗口。
+      **关闭方式**：手册注明「**重建 backend 会有一段重启窗口，灰度窗口内择时执行**」。
+      **已关闭 + 证据**：阶段 4 第 2 步与阶段 8 第 2 步旁均已加注该提示。
 
 > 本清单**不要求**在本手册里改代码——它是**启用前的闸门**。
-> 若三项都无法在本轮灰度前关闭，处置口径是：**保持 `ENABLE_AGENT_ORCHESTRATION=false`**
-> （特性出厂即关，业务不受影响），把三项挂到变更记录的「已知限制」里，
-> 走独立变更再修。
+> 其中 **3 条（A-79 / A-80 / B-28，即 P12 – P14）已由本次修复派单直接关闭**
+> （证据见各条），其余 **11 条（P1 – P11）仍是开放闸门**。
+>
+> ⚠️ **登记进清单 ≠ 已处置**：**每一条都必须有真实的关闭动作**
+> （改代码 / 改配置 / 写进验收记录 / 演练一次），否则**保持
+> `ENABLE_AGENT_ORCHESTRATION=false`**（特性出厂即关，业务不受影响），
+> 把未关闭的项挂到变更记录的「已知限制」里，走独立变更再修。
 
 ### 阶段 4：测试环境打开 flag + 起 Worker
 
@@ -365,6 +597,9 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
    > 路由不会注册，下一步的 401 判据必然失败（且会把人引向错误的原因）。
    > `--no-build` 保证这一步**只重建容器、不重建镜像**（镜像部署是阶段 2 的事；
    > 少了它，离线机上可能触发一次构建尝试而失败，把 backend 带下去）。
+   > ⚠️ **重建 backend 会有一段重启窗口，灰度窗口内择时执行** ——
+   > `up -d --force-recreate` 会先停旧容器再起新容器，这段时间 backend **不可用**
+   > （旧容器已停、新容器还没监听）。
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.centos.yml \
      up -d --force-recreate --no-build backend
@@ -376,6 +611,17 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
      exec backend printenv ENABLE_AGENT_ORCHESTRATION   # 期望：true
    ```
    输出不是 `true` ⇒ **停下排查**（多半是 env 文件没被重新读取），不要继续往下走。
+
+   **复核 schema（重建后必做）** —— 重建会触发 backend 启动时的 seed，
+   它**可能**把 `input_schema` 重置为 `{}`（见 §2.3 的 ⚠️）：
+   ```sql
+   SELECT name, enabled, input_schema FROM agent_tool_config
+   WHERE handler_ref IN ('supplier_360','supplier_risk','graph_traverse',
+                         'wiki_search','wiki_read','rule_evaluate','coverage_status');
+   ```
+   **期望**：三个目标工具（`supplier_360` / `supplier_risk` / `graph_traverse`）
+   的 `input_schema` **仍形如 §2.3**（不是 `{}`），且 `enabled` 未被改动。
+   若 `input_schema` 是 `{}` ⇒ 按 §2.4 的兜底 SQL **重写一次**，再复核。
 3. 启动 Worker（§3 的启动命令；Worker 镜像必须已按阶段 2 就位，
    `--no-build` 让镜像缺失时直接报错而不是隐式构建）：
    ```bash
@@ -394,8 +640,9 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
    → 期望能看到阶段 0 第一波准备好的**三个**工具
    （`supplier_360` / `supplier_risk` / `graph_traverse`，**至少 1 个**，
    否则后面必然 422）。
-   ⚠️ **4 个 wiki 工具不应出现在这个列表里** —— 它们仍是 `enabled = false`，
-   除非已经走完 §2.5 的**后续波次单独审批**（那一波才允许它们出现）。
+   ⚠️ **4 个 wiki 工具不应因为本波次而出现在这个列表里** —— 本波次**不翻**它们的
+   `enabled`。若它们**本来就**出现在列表里（实测为 `true` 的分支 B，见 §2.4），
+   那是该环境的历史状态，**不是**本波次造成的。
 2. 建一个**只读** profile：
    ```bash
    curl -X POST http://<host>:8000/api/v1/agent-orchestrations \
@@ -424,10 +671,13 @@ docker compose -f docker-compose.yml -f docker-compose.centos.yml \
 
 ### 阶段 6：显式播种菜单（**唯一**的菜单入口）
 
-> **前置**：前端路由 `/agent-orchestrations` 与 `/agent-tasks` 必须**已经上线**
-> （`frontend/src/App.tsx` 里能匹配这两个路径）。菜单行先于页面存在的话，
-> 侧边栏点进去就是 404 —— 入口暴露 ≠ 功能可用，顺序反了就是「看得见点不动」。
-> 本仓当前尚未包含这两个前端路由，播种前请确认对应前端任务已完成。
+> **前置**：本仓**已包含**这两个前端路由 —— `frontend/src/App.tsx:115-116`
+> **无条件注册**了 `<Route path="agent-orchestrations" …/>` 与
+> `<Route path="agent-tasks" …/>` ⇒ **不需要**再等前端任务。
+> 播种前要确认的是**目标环境的 frontend 镜像已包含本次前端改动**
+> （镜像比本仓旧 ⇒ 点进去是 **404**，不是「功能没做」）。
+> 菜单行先于页面存在的话，侧边栏点进去就是 404 —— 入口暴露 ≠ 功能可用，
+> 顺序反了就是「看得见点不动」。
 
 ```bash
 cd backend
@@ -465,20 +715,37 @@ python -m scripts.seed_agent_orchestration_menu
 
 生产由人手动执行，顺序与测试环境完全一致：
 
-0. **阶段 3.5 的 PRE-ENABLE CHECKLIST 三项已逐项关闭**（缺一不可）；
-1. 阶段 1（备份 + 迁移）→ 阶段 2（部署镜像）→ 阶段 3（验证默认关闭）；
+0. **阶段 3.5 的 PRE-ENABLE CHECKLIST 14 项已逐项关闭**（缺一不可；其中 P12 – P14
+   已由本次修复派单关闭，其余 **11 项 P1 – P11 必须各自有真实关闭动作** ——
+   「登记进清单 ≠ 已处置」）；
+1. 阶段 1（备份 + 记录当前版本）→ 阶段 2（部署镜像，**0135 随新镜像执行**）
+   → 阶段 3（验证默认关闭）；
 2. 生产 `docker/.env` 设 `ENABLE_AGENT_ORCHESTRATION=true` → **重建** backend 容器：
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.centos.yml \
      up -d --force-recreate --no-build backend
    ```
    （**不要用 `docker compose restart`**，它不重读 `env_file`，开关不会生效；
-   `--no-build` 保证只重建容器、不重建镜像）→ 再读回确认（只读**单个非敏感开关**）：
+   `--no-build` 保证只重建容器、不重建镜像）
+   > ⚠️ **重建 backend 会有一段重启窗口，灰度窗口内择时执行** ——
+   > `up -d --force-recreate` 会先停旧容器再起新容器，这段时间 backend **不可用**。
+   → 再读回确认（只读**单个非敏感开关**）：
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.centos.yml \
      exec backend printenv ENABLE_AGENT_ORCHESTRATION
    ```
    输出 `true` 才继续；
+
+   **复核 schema（重建后必做）** —— 重建会触发 backend 启动时的 seed，
+   它**可能**把 `input_schema` 重置为 `{}`（见 §2.3 的 ⚠️）：
+   ```sql
+   SELECT name, enabled, input_schema FROM agent_tool_config
+   WHERE handler_ref IN ('supplier_360','supplier_risk','graph_traverse',
+                         'wiki_search','wiki_read','rule_evaluate','coverage_status');
+   ```
+   **期望**：三个目标工具（`supplier_360` / `supplier_risk` / `graph_traverse`）
+   的 `input_schema` **仍形如 §2.3**（不是 `{}`），且 `enabled` 未被改动。
+   若 `input_schema` 是 `{}` ⇒ 按 §2.4 的兜底 SQL **重写一次**，再复核；
 3. 启动 Worker（§3 命令）；
 4. 阶段 5 验收（**只跑一个只读 profile**）；
 5. 阶段 6 播种菜单 → 阶段 7 浏览器冒烟；
@@ -487,6 +754,16 @@ python -m scripts.seed_agent_orchestration_menu
 ---
 
 ## 5. 回滚手册（分钟级，不动数据）
+
+> ⚠️ **回滚口径 = 「新镜像 + 关 flag」，**不是**「回滚镜像」。**
+> 0135 一旦执行，DB 的 `alembic_version` 就是 `0135`；此时若把镜像换回**旧镜像**
+> （alembic head = `0134`），旧 backend 启动时的 schema 漂移门会判「迁移版本不一致」
+> ⇒ **blocking** ⇒ 容器**起不来**
+> （`backend/app/infrastructure/schema_drift.py:113-115`：
+> `"alembic"` / `"missing_table"` 均为 `blocking`）。
+> ⇒ **回滚时镜像保持新版本**，只把 `ENABLE_AGENT_ORCHESTRATION` 改回 `false`
+> （路由不注册、Worker 不起 ⇒ 功能关闭，backend 照常运行）。
+> **不要** `alembic downgrade 0135`（那会 DROP 5 张表，见 §9 坑 7）。
 
 | 顺序 | 动作 | 期望结果 |
 |---|---|---|
@@ -612,6 +889,10 @@ ORDER BY updated_time DESC;
 6. **profile 里的变量插值照样会发生**：即使 profile 没激活，
    `${XXX:?}` 形式的必填变量缺失也会让 `config` 失败。
 7. **不要 `alembic downgrade 0135`**：会 DROP 5 张表（回滚口径 = 停 Worker + 关 flag）。
+   **也不要回滚到旧镜像**：0135 执行后 DB 版本是 `0135`，旧镜像的 head 是 `0134`
+   ⇒ 启动期的 schema 漂移门判 **blocking** ⇒ backend 起不来
+   （`backend/app/infrastructure/schema_drift.py:113-115`）。
+   ⇒ 回滚 = **新镜像 + 关 flag**（见 §5）。
 8. **菜单入口 ≠ 功能上线**：菜单是显式播种的，路由受 flag 控制 ——
    两边都要做，缺一个就是「看得见点不动」或「能调但没入口」。
 9. **`docker compose restart` 不重读 `env_file`**：它只把既有容器停掉再起，
@@ -645,26 +926,39 @@ ORDER BY updated_time DESC;
     怎么办 —— **第一波只补 schema**，只绑定本来就已启用的
     `supplier_360` / `supplier_risk` / `graph_traverse`；4 个 wiki 工具留到
     **后续波次**，单独评估 + 单独审批（§2.5）。
+    ⚠️ **前提校正**：这 4 个工具的 `enabled = false` 是**那台库的历史行状态**，
+    **不是**本仓 seed 的产物（本仓 seed 把 7 个工具全写成 `enabled = True`，
+    见 §2.1 / §2.4）⇒ 在由本仓 seed 造出来的环境里，它们**本来就是启用的**、
+    这 4 个 Agent **本来就是可运行的**，上面的行为变更**不会发生**。
 
 ---
 
 ## 10. 上线检查清单
 
 - [ ] 阶段 0（**第一波：只补 schema，不翻 `enabled`**）：`supplier_360` / `supplier_risk` /
-      `graph_traverse` 的 `input_schema` 合法；它们的 `enabled` **仍是 `true`（未被动过）**；
-      4 个 wiki 工具的 `enabled` **仍是 `false`**；`tool-options` 能看到那三个工具
-      （优先在 `/admin/tools` 页面改；SQL 只是兜底路径）—— 详见 §2.5
-- [ ] 阶段 3.5：PRE-ENABLE CHECKLIST 三项（只读白名单 TOCTOU / 租约续租时机 /
-      Planner 工具目录无上界）**已逐项关闭**（缺一 ⇒ 保持 flag = `false`）
-- [ ] 阶段 1：已备份；`alembic current = 0135`；5 张表在；既有表行数未变
+      `graph_traverse` 的 `input_schema` 合法；它们的 `enabled` **未被改动**；
+      4 个 wiki 工具的 `enabled` **按 §2.4 的分支判定**（实测 `false` ⇒ 保持 `false`；
+      实测 `true` ⇒ 保持 `true` 并在验收记录里写明「它们本来就是启用的」）；
+      `tool-options` 能看到那三个工具（优先在 `/admin/tools` 页面改；SQL 只是兜底路径）
+      —— 详见 §2.4 / §2.5
+- [ ] 阶段 3.5：PRE-ENABLE CHECKLIST **14 项**（P1 – P14）**已逐项关闭**
+      （P12 – P14 已由本次修复派单关闭；P1 – P11 必须各自有真实关闭动作 ——
+      **登记 ≠ 已处置**；缺一 ⇒ 保持 flag = `false`）
+- [ ] 阶段 1：已备份；已**记录**迁移前的 `alembic current`（旧镜像 ⇒ `0134`）；
+      5 张表尚未建（迁移在阶段 2）
+- [ ] 阶段 2：新镜像已就位；新 backend 容器启动后 `alembic current = 0135`；
+      5 张表在；既有表行数未变
 - [ ] 阶段 2：Worker 镜像已在目标机就位（名字与 `config --images` 一致）
 - [ ] 阶段 3：新路由 **404**；`docker compose … ps` 无 Worker；旧契约不变
 - [ ] 阶段 4：backend 是 **重建**（`--force-recreate --no-build`）的，
       `printenv` 读回开关 = `true`；
-      flag 打开后路由变 **401**（= 已注册）；Worker 日志出现「worker 启动」
+      flag 打开后路由变 **401**（= 已注册）；Worker 日志出现「worker 启动」；
+      **重建后已复核 `input_schema`**（三个目标工具仍形如 §2.3，不是 `{}`）
 - [ ] 阶段 5：profile 可创建/启用；run 走完 `QUEUED→RUNNING→SUCCEEDED`；token 有计量
-- [ ] 阶段 6：前端路由 `/agent-orchestrations`、`/agent-tasks` 已上线；
+- [ ] 阶段 6：目标环境的 frontend 镜像**已包含**本分支前端改动
+      （本仓 `frontend/src/App.tsx:115-116` 已无条件注册这两条路由）；
       菜单脚本输出 `2 rows inserted`（首次）；SQL 查到两行挂在 `section.aiAgent`
 - [ ] 阶段 7：浏览器两项菜单可见可打开，无 500
 - [ ] 阶段 8：生产启用**已获审批**；观察期指标已安排
-- [ ] 回滚路径已演练：停 Worker（先排空租约）→ flag 关 → 新路由回到 404；表保留
+- [ ] 回滚路径已演练：停 Worker（先排空租约）→ **新镜像 + flag 关** → 新路由回到 404；
+      表保留（**不回滚镜像**、**不 downgrade**）

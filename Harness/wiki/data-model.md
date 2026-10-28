@@ -400,7 +400,16 @@ started_at    TIMESTAMPTZ NOT NULL
 finished_at   TIMESTAMPTZ             -- 可空
 ```
 
-索引：`ix_agent_orchestration_step_run_step`（`run_id`,`step_no`）。
+索引：`ix_agent_orchestration_step_run_step`（`run_id`,`step_no`）——**非唯一**索引。
+
+约束：`uq_agent_orchestration_step_run_step`（`run_id` + `step_no` **唯一**——同一 run 内
+step 序号不重复）、`ck_agent_orchestration_step_kind`（`kind IN ('PLAN','TOOL')`）、
+`ck_agent_orchestration_step_status`（`status IN ('RUNNING','SUCCEEDED','FAILED','SKIPPED')`）、
+`ck_agent_orchestration_step_action`（`action IN ('CALL_TOOL','FINISH','ASK_USER')`）、
+`ck_agent_orchestration_step_counters`（`step_no >= 0` 且 `iteration_no >= 0` 且
+`prompt_tokens >= 0` 且 `completion_tokens >= 0` 且 `cost >= 0`）。
+外键只有一条：`run_id → agent_orchestration_run.id`（`ON DELETE CASCADE`，已在上方字段表列出）。
+完整清单见 `backend/alembic/versions/0135_agent_orchestration.py:162-177`。
 
 ### agent_orchestration_usage（计量台账）
 

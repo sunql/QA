@@ -75,6 +75,16 @@ class _FakeRunner:
             raise self._errors.pop(0)
 
 
+class _FakeWarmUp:
+    """记录 Worker 启动预热是否被调用（不碰数据库）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    async def __call__(self, sessionFactory: Any) -> None:
+        self.calls.append(sessionFactory)
+
+
 def _settings(**overrides: Any) -> Any:
     values: dict[str, Any] = {
         "enableAgentOrchestration": True,
@@ -91,6 +101,7 @@ def _worker(
     runner: Any | None = None,
     factory: Any | None = None,
     settings: Any | None = None,
+    warmUp: Any | None = None,
 ) -> AgentOrchestrationWorker:
     return AgentOrchestrationWorker(
         settings or _settings(),
@@ -98,6 +109,8 @@ def _worker(
         runner or _FakeRunner(),
         workerId="worker-test",
         store=store or _FakeStore(),
+        # 预热替身：单元测试不连数据库（真实预热由集成测试覆盖）。
+        warmUp=warmUp if warmUp is not None else _FakeWarmUp(),
     )
 
 
@@ -105,11 +118,13 @@ async def test_disabled_worker_returns_without_polling(caplog: Any) -> None:
     store = _FakeStore([SimpleNamespace(id=1)])
     runner = _FakeRunner()
     factory = _FakeSessionFactory()
+    warmUp = _FakeWarmUp()
     worker = _worker(
         store=store,
         runner=runner,
         factory=factory,
         settings=_settings(enableAgentOrchestration=False),
+        warmUp=warmUp,
     )
 
     with caplog.at_level(logging.INFO):
@@ -118,6 +133,8 @@ async def test_disabled_worker_returns_without_polling(caplog: Any) -> None:
     assert store.calls == []
     assert runner.calls == []
     assert factory.created == 0
+    # flag 关闭 ⇒ 一次数据库访问都不发生（预热也不许发生）。
+    assert warmUp.calls == []
     assert any("未启用" in record.getMessage() for record in caplog.records)
 
 
@@ -211,13 +228,16 @@ async def test_request_stop_before_run_skips_polling() -> None:
     store = _FakeStore([SimpleNamespace(id=1)])
     runner = _FakeRunner()
     factory = _FakeSessionFactory()
-    worker = _worker(store=store, runner=runner, factory=factory)
+    warmUp = _FakeWarmUp()
+    worker = _worker(store=store, runner=runner, factory=factory, warmUp=warmUp)
 
     worker.requestStop()
     await worker.run()
 
     assert store.calls == []
     assert factory.created == 0
+    # 预热拿到的是 Worker 自己的会话工厂（真实预热在集成测试里覆盖）。
+    assert warmUp.calls == [factory]
 
 
 async def test_run_loop_stops_after_store_requests_stop() -> None:
@@ -230,3 +250,24 @@ async def test_run_loop_stops_after_store_requests_stop() -> None:
 
     assert len(store.calls) == 1
     assert runner.calls == [(11, "worker-test")]
+
+
+async def test_run_warms_caches_before_claiming_any_run() -> None:
+    """C1：预热必须发生在**任何 run 被 claim 之前**（冷态注册表 ⇒ 工具解析必挂）。"""
+    store = _FakeStore([SimpleNamespace(id=12)])
+    runner = _FakeRunner()
+    warmUp = _FakeWarmUp()
+    worker = _worker(store=store, runner=runner, warmUp=warmUp)
+    warmedBeforeClaim: list[bool] = []
+
+    def _onClaim() -> None:
+        warmedBeforeClaim.append(bool(warmUp.calls))
+        worker.requestStop()
+
+    store.onClaim = _onClaim
+
+    await asyncio.wait_for(worker.run(), timeout=2)
+
+    assert len(warmUp.calls) == 1
+    assert warmedBeforeClaim == [True]
+    assert runner.calls == [(12, "worker-test")]

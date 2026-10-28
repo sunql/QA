@@ -59,7 +59,11 @@ interface PollSessionOptions {
 /**
  * 启动一条轮询链，返回停止函数。
  *
- * afterStepNo 是闭区间下界，因此每次都传 lastStepNo + 1，绝不重取最后一步。
+ * afterStepNo 是**闭区间下界**（后端取 step_no >= afterStepNo），所以这里传的是
+ * lastStepNo **本身**，不是 lastStepNo + 1：后端会**原地改写**同一 stepNo 的行
+ * （RUNNING → SUCCEEDED），排他游标会让这一行永远拉不回来——工具输出 / PLAN
+ * 答案 / 步骤错误因此永远不可见。闭区间下界 + mergeStepLists 的「后到覆盖先到」
+ * 让最后一行能被正确刷新（每轮多取一行，代价可忽略）。
  */
 function startPolling(options: PollSessionOptions): () => void {
   const { runId, shouldPoll, lastStepNoRef, handlersRef } = options;
@@ -70,7 +74,7 @@ function startPolling(options: PollSessionOptions): () => void {
 
   const fetchOnce = async (): Promise<void> => {
     try {
-      const afterStepNo = lastStepNoRef.current + 1;
+      const afterStepNo = Math.max(0, lastStepNoRef.current);
       const [read, incoming] = await Promise.all([
         getAgentRun(runId),
         getAgentRunSteps(runId, { afterStepNo }),
@@ -94,6 +98,8 @@ function startPolling(options: PollSessionOptions): () => void {
   if (shouldPoll) {
     timer = setTimeout(() => void tick(), RUN_POLL_MS);
   } else {
+    // 终态/暂停：补取一次轨迹。用的仍是**闭区间**游标 ⇒ 最后一行（可能被原地
+    // 改写成终态）也能在这一轮被刷新。
     void fetchOnce();
   }
 
@@ -161,7 +167,7 @@ function useRunStore(): RunStore {
   const [pollStopped, setPollStopped] = useState(false);
   const [cancelRequested, setCancelRequested] = useState(false);
 
-  /** 已持有的最后一条步骤号；下一次只取比它更新的步骤。 */
+  /** 已持有的最后一条步骤号；下一次取「stepNo >= 它」的步骤（闭区间下界）。 */
   const lastStepNoRef = useRef(-1);
 
   /** 合并新到的步骤，并推进 lastStepNo 游标。 */

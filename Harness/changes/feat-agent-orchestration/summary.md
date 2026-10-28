@@ -73,7 +73,7 @@ Agent 分别跑，或者塞进 chat 让 L4 自由发挥——后者不受预算/
 
 | 视角 | 结论 | 落点 |
 |---|---|---|
-| `security-reviewer` | approved-with-deferred：0 CRITICAL / 0 HIGH / **3 MEDIUM** / 8 LOW | 3 个 MEDIUM 全部进灰度手册的 **PRE-ENABLE CHECKLIST**（§7、§8） |
+| `security-reviewer` | approved-with-deferred：0 CRITICAL / 0 HIGH / **3 MEDIUM** / 8 LOW | 3 个 MEDIUM 全部进灰度手册的 **PRE-ENABLE CHECKLIST**（现对应 P1–P3） |
 | `code-reviewer` | changes-requested：0 Critical / **2 Important** / 11 Minor | I1（灰度手册阶段 0 会改变既有 Agent 行为）→ **本变更已修**（手册 §2.5 + §9 坑 12）；I2（`_replayTool` 未捕获 `PlannerProtocolError`）→ 已在修复轮次修掉 |
 | 实现方 | 「多工具 + 可回放 + 预算」三件事必须成对出现，缺一就是半成品 | 采纳独立表 + 独立 Worker |
 
@@ -305,7 +305,7 @@ FastAPI `Depends(getCurrentUser)`（全部 9 条路由**强制鉴权**）、
 | 后端集成 session | `pytest app/tests/integration`（独立 session） | **107 passed** |
 | 后端单测 session | `pytest app/tests/unit`（独立 session） | **231 passed** |
 | 前端定向 vitest | 6 个 Task-16 测试文件 | `Test Files 6 passed (6)` / `Tests 78 passed (78)` |
-| **新代码覆盖率** | 编排模块（integration + unit 两个 session，`--cov-append`） | **2083 stmts / 117 miss / 94.44%**（门槛 ≥80%） |
+| **新代码覆盖率** | 编排模块（integration + unit 两个 session，`--cov-append`，**命令见验证报告 §2.1**） | **2204 stmts / 119 miss / 94.60%**（门槛 ≥80%） |
 
 > **为什么必须分两个 pytest session**：集成与单测的 seed fixture 会对**同一个共享测试库**
 > 做 TRUNCATE/INSERT，混在一个 session 里会撞出 1 failed + 9 ERRORS（`UniqueViolationError`
@@ -315,14 +315,17 @@ FastAPI `Depends(getCurrentUser)`（全部 9 条路由**强制鉴权**）、
 >
 > 独立复测（Task 16 实施者，17 个模块口径）：`TOTAL 2204 stmts / 119 miss / 95%`，
 > `Required test coverage of 80.0% reached. Total coverage: 94.60%`。
-> 与上表 94.44% 的差异来自**模块集合不同**（17 vs 15），不是回归。
+> **可复算的门禁口径就是这一条**（命令见验证报告 §2.1）：它展开是 **17 个模块**
+> ⇒ 产出 **94.60%**。另有一个 **15 个模块**的口径曾测得 **94.44%**，但**该 15 模块
+> 清单未随仓库存档** ⇒ **不可复算**；两者差异**只来自模块集合**（17 vs 15），
+> 不是回归，都远超 80% 门槛。
 
 **净新增失败 = 0**（与基线 `4d4114bb` 对比，同一套测试库，从不并发跑）：
 
 | 套件 | 分支 | 基线 | 结论 |
 |---|---|---|---|
 | 后端全树 `pytest app/tests` | 1 failed | 1 failed（同一个 `test_chat_service.py::TestChatService::test_class_filter_logs_successful_pruning`） | **净新增 0**（既有失败：`pytest_sessionstart` 先挂 2 个 root handler，导致 `seed_ontology.py:37` 的 `logging.basicConfig` 变成 no-op，root logger 停在 WARNING，测试断言的 INFO 记录从未发出） |
-| 前端 vitest 全量 | 193 文件 / 1809 测试，**7 failed** | 191 文件 / 1773 测试，**9 failed** | **净新增 0**（7 ⊂ 9；7 个是 `client.test.ts`(1) / `kpiCatalogApi.test.ts`(1) / `ontologyApi.test.ts`(5)） |
+| 前端 vitest 全量 | 195 文件 / 1851 测试，**7 failed** | 191 文件 / 1773 测试，**9 failed** | **净新增 0**（7 ⊂ 9；7 个是 `client.test.ts`(1) / `kpiCatalogApi.test.ts`(1) / `ontologyApi.test.ts`(5)） |
 | Playwright（mock） | **27 failed / 1 skipped / 5 passed**（33 测试，11 spec） | **27 failed / 1 skipped / 1 passed**（29 测试，10 spec） | **净新增 0**（失败用例名清单**完全一致**，27 = 27，空 diff；本分支新增的 4 条 `agent-orchestration.spec.ts` 全绿） |
 
 ---
@@ -332,7 +335,9 @@ FastAPI `Depends(getCurrentUser)`（全部 9 条路由**强制鉴权**）、
 **已触发 `security-reviewer`**（触发条件：认证、用户输入、外部 API 调用、SQL/DB 写入）。
 评审对象：`git diff 4d4114bb...HEAD`。
 
-**结论：approved-with-deferred — 0 CRITICAL / 0 HIGH / 3 MEDIUM / 8 LOW。**
+**结论：approved-with-deferred — 0 CRITICAL / 0 HIGH / 3 MEDIUM / 8 LOW**
+（LOW 8 条中**已归档到下方「已知限制」清单的是 7** 条；**L6 未归档**，原始安全评审报告
+为开发期产物、不随仓库存档）。
 10 条安全不变量全部 PASS，11 条对抗性检查全部 PASS（带 file:line 取证）。
 
 > **编号说明（可追溯性用）**：本节与 §7.1 里出现的 `M1`–`M3`（安全评审的 MEDIUM）、
@@ -343,15 +348,18 @@ FastAPI `Depends(getCurrentUser)`（全部 9 条路由**强制鉴权**）、
 
 | 严重度 | 编号 | 摘要 | 处置 |
 |---|---|---|---|
-| **MEDIUM** | M1（= 代码评审 M10） | **只读白名单的 TOCTOU**：白名单断言在 `prepare()` 读到的**第一份**行上（`agent_orchestration_tool_executor.py:90-91`），而真正执行的 handler 从**第二次**读取装配（`_resolveTool` → `registry.reload_one`，同文件 `:246`）。两次读之间管理员改 `handler_ref` 即绕过。**当前不可利用**（唯一非白名单 handler `nl2sql_default` 是惰性占位符），**一旦接上 NL2SQL 就变成可利用路径** | **未修（刻意挂账）** ⇒ 进灰度手册 **PRE-ENABLE CHECKLIST P1**，生产开 flag 前必须关闭 |
-| **MEDIUM** | M2（= 代码评审 M4） | **租约只在轮边界续**：`renewLease` 全仓库只被调用一次（`agent_orchestration_runner.py:156-168`，调用点 `:162`）；编排路径的 LLM 客户端**无显式 timeout**（沿用 OpenAI SDK 默认读超时 600s），租约默认 60s ⇒ 单轮慢于 60s 就丢租约 ⇒ 回收重排队 ⇒ 该轮重做（重复 LLM 花费；`getOrCreatePlanStep` 复用 RUNNING 的 PLAN 行且**不**累加 `iteration_count`，`max_iterations` 约束不到）。写入侧安全（都走 `_lockLeasedRun`） | **未修（刻意挂账）** ⇒ PRE-ENABLE CHECKLIST **P2** |
-| **MEDIUM** | M3（= 代码评审 M11） | **Planner 工具目录无长度/数量上界**：`agent_orchestration_planner.py:371-410`（`_buildMessages` / `_reduceToolCatalog`）把目录原样拼进 system prompt；`agent_tool_config.description` 是无界 `Text`，`tool_names` 无元素个数上限 | **未修（刻意挂账）** ⇒ PRE-ENABLE CHECKLIST **P3** |
-| LOW × 8 | L1–L8 | 见下方「已知限制」第 6 / 8 / 9 / 10 / 11 项 | 记入下方清单 |
+| **MEDIUM** | M1（= 代码评审 M10） | **只读白名单的 TOCTOU**：白名单断言在 `prepare()` 读到的**第一份**行上（`agent_orchestration_tool_executor.py:90-91`），而真正执行的 handler 从**第二次**读取装配（`_resolveTool` → `registry.reload_one`，同文件 `:246`）。两次读之间管理员改 `handler_ref` 即绕过。**当前不可利用**（唯一非白名单 handler `nl2sql_default` 是惰性占位符），**一旦接上 NL2SQL 就变成可利用路径** | **已实证不可利用**（当前）+ **前提条件**：评审在真实 PG 上实测两个会话下 `expire_on_commit=False` 的 identity map 让第二次读拿到**同一行版本** ⇒ 断言过的行与执行的行在**同一 session 的 identity map 下**自洽。**前提条件**：两次读之间**没有别的会话**改这一行 `handler_ref` ⇒ **一旦接上 NL2SQL / 一旦允许跨会话并发改 `handler_ref`** 就变成可利用路径。⇒ 登记为灰度手册 **PRE-ENABLE CHECKLIST P1**，生产开 flag 前必须关闭 |
+| **MEDIUM** | M2（= 代码评审 M4） | **租约只在轮边界续**：`renewLease` 全仓库只被调用一次（`agent_orchestration_runner.py:156-168`，调用点 `:162`）；编排路径的 LLM 客户端**无显式 timeout**（沿用 OpenAI SDK 默认读超时 600s），租约默认 60s ⇒ 单轮慢于 60s 就丢租约 ⇒ 回收重排队 ⇒ 该轮重做（重复 LLM 花费；`getOrCreatePlanStep` 复用 RUNNING 的 PLAN 行且**不**累加 `iteration_count`，`max_iterations` 约束不到）。写入侧安全（都走 `_lockLeasedRun`） | **待修**（**不是已处置**）—— 尚未修复；已登记为灰度手册 PRE-ENABLE CHECKLIST 的 **P2**，**启用前必须关闭**；在此之前**保持 `ENABLE_AGENT_ORCHESTRATION=false`**（本特性出厂即关，业务不受影响）。**缓解窗口**：慢于租约（默认 `AGENT_ORCHESTRATION_LEASE_SECONDS=60`）的工具调用在多 Worker 部署下会被第二个 Worker 并发重放（重复执行 + 重复 LLM 花费）；灰度期间按**单 Worker + 只跑只读快工具**部署，并把租约调大到覆盖最长工具耗时 |
+| **MEDIUM** | M3（= 代码评审 M11） | **Planner 工具目录无长度/数量上界**：`agent_orchestration_planner.py:371-410`（`_buildMessages` / `_reduceToolCatalog`）把目录原样拼进 system prompt；`agent_tool_config.description` 是无界 `Text`，`tool_names` 无元素个数上限 | **待修**（**不是已处置**）—— 尚未修复；已登记为灰度手册 PRE-ENABLE CHECKLIST 的 **P3**，**启用前必须关闭**；在此之前**保持 `ENABLE_AGENT_ORCHESTRATION=false`**（本特性出厂即关，业务不受影响）。**缓解窗口**：灰度期间由管理员把工具目录控制在白名单规模（`READ_ONLY_HANDLER_REFS` 的 **7** 个）以内，避免 `description` / `inputSchema` 膨胀 |
+| LOW × 8 | L1–L8 | 见下方「已知限制」第 6 / 8 / 9 / 10 / 11 项（对应 L1 / L2 / L3 / L4 / L5 / L7 / L8 共 **7** 条；**L6 尚未归档到下方清单**，原始安全评审报告为开发期产物、不随仓库存档） | 记入下方清单 |
 
-**MEDIUM 的处置口径**：本特性**出厂即关闭**，生产开 flag 是人工操作 ⇒
-「未修」不等于「不可上线」。三项写进[灰度手册](deploy-gray-rollout.md)的
-**PRE-ENABLE CHECKLIST（阶段 3.5）**，作为**生产启用前必须逐项关闭的闸门**；
-若本轮灰度前关不掉 ⇒ 保持 `ENABLE_AGENT_ORCHESTRATION=false`（业务不受影响），
+**MEDIUM 的处置口径**：三项**都是「待修 + 已登记为启用前闸门」**——
+M1 为**已实证不可利用（当前）+ 前提条件**，M2 / M3 为**尚未修复**；
+**「登记进 PRE-ENABLE CHECKLIST」不等于「已处置」**。本特性**出厂即关闭**，
+生产开 flag 是人工操作 ⇒「待修」不等于「不可上线」；三项写进
+[灰度手册](deploy-gray-rollout.md)的 **PRE-ENABLE CHECKLIST（阶段 3.5）**
+（M1 ⇒ P1、M2 ⇒ P2、M3 ⇒ P3），作为**生产启用前必须逐项关闭的闸门**；
+若本轮灰度前关不掉 ⇒ **保持 `ENABLE_AGENT_ORCHESTRATION=false`**（业务不受影响），
 挂账走独立变更。
 
 ### 7.1 已知限制清单（11 项 + 1 条部署纪律）
@@ -369,7 +377,7 @@ FastAPI `Depends(getCurrentUser)`（全部 9 条路由**强制鉴权**）、
 | 9 | **缺 DB 级唯一索引** | `(run_id, iteration_no, kind)` 没有唯一索引；`agent_orchestration_usage` 没有 `run_id` 索引（按 run 聚合会全表扫）。（安全 L2 / L3） |
 | 10 | **`tool_names` 无 `max_length`，`agent_tool_config.description` 是无界 `Text`** | （安全 L5 / M3；与 M3 同源） |
 | 11 | **两条前端路由无条件注册** | 不进 feature flag ⇒ 特性关闭时页面仍能打开（只是数据接口 404），没有专门的「特性未启用」页态。（安全 L8） |
-| 12（部署纪律） | **阶段 0 的 `enabled` 开关会改变既有 legacy Agent 的可运行性** | 4 个 wiki 工具绑在 4 个 `status=active` 的既有 Agent 上（`WIKI_SEARCH_AGENT` id 6 / `WIKI_READ_AGENT` id 7 / `WIKI_RULE_AGENT` id 8 / `WIKI_COVERAGE_AGENT` id 9）；legacy registry 只装载 `enabled=true` 的行（`agent_tool_config_registry.py:33,79`），否则 409（`agent_runtime_service.py:165-178`）⇒ 翻开关 = 4 个 Agent 从「409 不可运行」变「真的执行」。**处置**：第一波**只补 schema**，翻开关推到**后续波次单独审批**（见[灰度手册 §2.5](deploy-gray-rollout.md)、§9 坑 12） |
+| 12（部署纪律） | **阶段 0 的 `enabled` 开关会改变既有 legacy Agent 的可运行性** | 4 个 wiki 工具绑在 4 个 `status=active` 的既有 Agent 上（`WIKI_SEARCH_AGENT` id 6 / `WIKI_READ_AGENT` id 7 / `WIKI_RULE_AGENT` id 8 / `WIKI_COVERAGE_AGENT` id 9）；legacy registry 只装载 `enabled=true` 的行（`agent_tool_config_registry.py:33,79`），否则 409（`agent_runtime_service.py:165-178`）。⚠️ **前提是分支式的**：「这 4 行 `enabled=false`」是**历史行状态**，**不是**本仓 seed 的产物（本仓 seed 会把全部 **7** 个工具写成 `enabled=true`）——**实测为 `false`** ⇒ 这 4 个 Agent 今天 409 不可运行，翻开关 = 4 个 Agent 从「409 不可运行」变「真的执行」；本波次（**只补 schema**）成立，翻开关推到**后续波次单独审批**。**实测为 `true`** ⇒ 这 4 个 legacy Agent **本来就在执行**，本波次**只需补 schema**，并把「它们本来就是启用的」写进灰度验收记录。**处置**：第一波**只补 schema**，翻开关推到**后续波次单独审批**（见[灰度手册 §2.5](deploy-gray-rollout.md)、§9 坑 12） |
 
 ---
 
@@ -592,13 +600,17 @@ TEST_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5436/qa_metadata_
   **绝不**声称写了没写的行。此时 `S6` 会因该工具不可编排而 `FAIL`（运行**不是**绿的）。
 - **SKIP 与 FAIL 的分类依据是异常的具体类型**：`NotFoundError` / `ConflictError` /
   `ValidationError`（库种子不满足）⇒ `SKIP` 并写明缺什么；**其它**异常 ⇒ `FAIL`
-  （脚本或环境的缺陷，必须暴露）。这条规则覆盖**两条**路径：
-  ① 建 profile / 建 run 这类**服务调用**；② **准备前置条件**（自建 ACTIVE Agent /
-  启用的模型配置）——`IntegrityError` / `OperationalError` 这类**真缺陷**在这里会
-  记 `FAIL`（退出码非零），**不会**被当成「库种子不满足」蒙混成 `SKIP`。
-  **其它步骤（S1/S2/S5/S6/S9/S10 与退出前的清理块）没有这一层分类**：那里冒出
+  （脚本或环境的缺陷，必须暴露）。
+  这条规则覆盖 **5 处分类点**，分两类：① **服务调用**（建 profile / toggle / 建 run）
+  ——`realdata.py` 的 3 处（`:474` / `:519` / `:572`）；② **准备前置条件**
+  （自建 ACTIVE Agent / 启用的模型配置）——`_db.py` 的 2 处（`:365` / `:394`）
+  ——`IntegrityError` / `OperationalError` 这类**真缺陷**在这里会记 `FAIL`
+  （退出码非零），**不会**被当成「库种子不满足」蒙混成 `SKIP`。
+  **其它步骤（S1/S2/S3/S4/S5/S6/S9/S10 与退出前的清理块）没有这一层分类**：那里冒出
   未预期异常会**以未捕获的 traceback 直接冒出来**（`main()` 只有 `try/finally`、
-  没有 `except`）——这是**刻意的**：脚本不吞异常，缺陷必须显形。
+  没有 `except`）——这是**刻意的**：脚本不吞异常，缺陷必须显形。（`S3` / `S4` 只
+  捕获 `ValidationError` 当作**预期被拒的断言**，**不是** SKIP/FAIL 分类；那里冒出
+  **其它**异常，同样以未捕获的 traceback 冒出来。）
 
 #### 本次运行（两次连续运行，**完整 stdout，逐行未删改**）
 
@@ -754,7 +766,8 @@ S6 因为该工具确实不可编排而 `FAIL` ⇒ **退出码 1，运行不是�
 - **Rules**：
   - [变更记录强制规范](../../rules/变更记录强制规范.md)（§一 的 5 条硬约束 —— 本变更的合并闸门）
   - [开发流程规范](../../rules/开发流程规范.md)（真实数据验证门禁）
-- **Memory**：[qa-system-general-agent-orchestration.md](/Users/sunql/.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-general-agent-orchestration.md)
+- **Memory**：`qa-system-general-agent-orchestration.md`（本机 `~/.claude/projects/…/memory/`
+  下的记忆文件，**不随仓库存档**；索引行在同目录的 `MEMORY.md`）
 - **入口索引**：[Harness/agents/owner.md](../../agents/owner.md)
 
 ---
@@ -779,8 +792,9 @@ S6 因为该工具确实不可编排而 `FAIL` ⇒ **退出码 1，运行不是�
       完整 stdout（逐行未删改）贴在 §8.3；本次运行**没有产生任何 SKIP 行**
       （若出现，§8.3 会逐条列出其原因）
 - [x] 第 9 段 ≥ 3 个跨文件链接：§9 共 **12 条**跨文件链接（设计稿 / 灰度手册 / 验证报告 /
-      真实数据脚本 / 4 个 Wiki / 2 条 Rules / Memory / owner.md），**12 条全部是 Markdown 链接**
-      （无裸路径），且已逐条 `test -e` 验证**全部解析成功**
+      真实数据脚本 / 4 个 Wiki / 2 条 Rules / Memory / owner.md），其中仓库内 **11 条**相对链接
+      全部解析成功（已逐条 `test -e` 验证）；Memory 条目在本机 `~/.claude/projects/...` 下，
+      **不随仓库存档**
 - [x] 相关 wiki 文档已更新（数据模型 / 接口 / 架构 / 前端 —— 4 处全改）
 - [x] 至少 1 条 MEMORY 索引已在 `~/.claude/projects/.../memory/MEMORY.md` 添加
       （索引行 + 详情文件均已存在；由控制方写入）

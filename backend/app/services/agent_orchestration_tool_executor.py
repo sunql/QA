@@ -235,13 +235,20 @@ class AgentOrchestrationToolExecutor:
         session: AsyncSession,
         toolName: str,
     ) -> AgentTool:
-        """Reload from the current row, then resolve the tool.
+        """Reload the row into the registry, then resolve the assembled tool.
 
         Admin edits do not invalidate the shared registry cache, so the cached
-        ``AgentTool`` may be stale (for example after a ``handler_ref`` change).
-        Reloading unconditionally keeps the read-only gate (evaluated on the
-        freshly loaded config row) and the executed/ACL-checked tool derived
-        from that same current row.
+        ``AgentTool`` may be stale (for example after a ``handler_ref`` change);
+        this reload keeps the executed tool in sync with the row **as observed
+        by this session**.
+
+        **不要**把这读成「每次都读到最新行」：只读白名单断言
+        （``_assertReadOnlyBuiltin``）发生在 ``prepare()`` 的**第一份**行上
+        （``_loadEnabledToolConfig``），而真正执行的 handler 由这里的**第二次**
+        读取装配。同一 session 内两者自洽 —— ``expire_on_commit=False`` 的
+        identity map 让第二次读拿到的是**同一行版本**（评审已在真实 PG 上实证）；
+        但**跨会话 / 跨进程的并发修改**（别的会话在两次读之间改了
+        ``handler_ref``）仍然是竞态，此时断言过的行与执行的行可能不是同一行。
         """
         await self._registry.reload_one(session, toolName)
         tool = self._registry.get(toolName)

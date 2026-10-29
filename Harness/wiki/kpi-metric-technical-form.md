@@ -1,6 +1,7 @@
 # KPI 指标技术形态治理
 
-> **状态**：设计已批准（2026-10-28），**未实施**。
+> **状态**：**P1 + P1-数据工具链已实施（2026-10-29，分支 `feat/kpi-metric-technical-form`）**；prod 迁移/回填未执行；Tier A（P2）与结构化→SQL 编译器（P3）未实现。
+> **灰度默认**：`KPI_CONTRACT_INJECTION_ENABLED` = true（代码默认）、`KPI_METRIC_GATE_ENABLED` = false、`KPI_METRIC_TIER_A_ENABLED` = false。
 > **Spec**：[`docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md`](../../docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md)（608 行）
 > **变更 SSOT**：[`Harness/changes/2026-10-28-kpi-metric-technical-form/summary.md`](../changes/2026-10-28-kpi-metric-technical-form/summary.md)
 
@@ -217,8 +218,8 @@ KPI: DRAFT → PUBLISHED  ⟸ 必须同时满足：
 
 | 期 | 内容 | 状态 |
 |---|---|---|
-| **P1** | 迁移 `0136`/`0137` + `ontology_metric` 扩列 + `ontology_metric_source` 新表 + `kpi_catalog` 扩列 + DTO 补 `semantic_keywords`/`match_threshold` + 对账模块 + Tier B 契约注入 + 缓存三洞修复 | 待实施 |
-| **P1-数据** | 12 条 `ontology_metric` 反向合成（治理口径 + `docs/data-knowledge/采购域.md` 血缘）→ **产出需业务方审核后落库**；`semantic_keywords` 补全；`datasource_id` 绑定 | 待实施 |
+| **P1** | 迁移 `0136`/`0137` + `ontology_metric` 扩列 + `ontology_metric_source` 新表 + `kpi_catalog` 扩列 + DTO 补 `semantic_keywords`/`match_threshold` + 对账模块 + Tier B 契约注入 + 缓存三洞修复 | **✅ 已实施**（2026-10-29） |
+| **P1-数据** | 12 条 `ontology_metric` 反向合成（治理口径 + `docs/data-knowledge/采购域.md` 血缘）→ **产出需业务方审核后落库**；`semantic_keywords` 补全；`datasource_id` 绑定 | **工具链 ✅ / prod 落库 ⏳**（审核清单 `docs/kpi-metric-backfill-review.md` 已生成：12 新建 / 0 匹配） |
 | **P2** | Tier A 确定性直通 + 问句约束检测 + 发布闸门 | 待实施（独立立项） |
 | **P3** | 结构化 → SQL 编译器（`COMPILED` 路径）+ `feature_definition.metric_id` FK | 可选 |
 
@@ -274,4 +275,24 @@ KPI: DRAFT → PUBLISHED  ⟸ 必须同时满足：
 - [metric-pipeline](metric-pipeline.md) —— 冷指标晋升 / 路由层聚合；本文的 §9 T3 与其口径家谱对齐
 - [data-model](data-model.md) —— `ontology_metric` / `kpi_catalog` 列清单
 - [数据与AI治理规范](../rules/数据与AI治理规范.md) —— 本体版本 / 指标审查 / 路由策略
-- [变更 SSOT](../changes/2026-10-28-kpi-metric-technical-form/summary.md) —— 本设计的决策记录与实施计划入口
+- [变更 SSOT](../changes/2026-10-28-kpi-metric-technical-form/summary.md) —— 本设计的决策记录、实施结果（§10）与上线风险（§11）
+
+---
+
+## 14. 实施结果（2026-10-29）
+
+| 项 | 实测 |
+|---|---|
+| 迁移 | `0136_metric_structured` + `0137_metric_source_unique` 已落地（分支 head = 0137）；**prod 仍为 0135** |
+| 回填（隔离测试库 5434） | 12 条：第 1 次 `created=12`，第 2 次 `created=0 updated=12`（幂等）；`ontology_metric` `0 → 12 → 12` |
+| 对账 verdict | **12/12 `mismatch`** —— PLAN 刻意保留治理列（业务口径）≠ 物理列的偏差（T15-L），属设计上的多签互锁 |
+| 契约块（现状） | **空**（全 mismatch ⇒ 对账拦截）；模拟治理列对齐后 575 字符、prompt 4361 字符 |
+| exact-alias | 命中，`confidence = 1.0`；Jaccard 自然语言路径最高分 **0.0** ⇒ 不可达（遗留项 L1） |
+| 裸表名 join | 22 引用 / 命中 13（59.1%） |
+| prod 只读验证 | S1 **FAIL**（`0135`，预期）；S2–S9 SKIP；prod 未被写入，`system_config` 28 行 0 KPI 开关 |
+
+**范围边界（必读）**：NL2SQL 只消费结构化口径的**形状**（聚合阶 / 粒度键 / 来源类+role / 允许 SQL 形态），**不消费 `expr`** —— Tier A 属 P2、结构化→SQL 编译器属 P3。**回填 ≠ 自动生成正确 SQL。**
+
+**灰度风险**：prod 无 KPI 开关行 ⇒ 代码默认 Tier B 注入 **True**、闸门 **False**、Tier A **False**。今天因 12/12 mismatch，块为空、注入不生效；风险窗口在**治理列对齐之后**打开（注入自动生效，无需翻开关）。上线前须显式二选一（先写 `false` 再开 / 接受默认）。
+
+证据：[`realdata-run.txt`](../changes/2026-10-28-kpi-metric-technical-form/realdata-run.txt)、[变更 SSOT §10/§11](../changes/2026-10-28-kpi-metric-technical-form/summary.md)、[回填审核清单](../../../docs/kpi-metric-backfill-review.md)。

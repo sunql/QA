@@ -1,9 +1,10 @@
 # 变更：2026-10-28-kpi-metric-technical-form
 
-- **日期**：2026-10-28
+- **日期**：2026-10-28（设计）/ 2026-10-29（实施完成）
 - **作者**：Claude（与用户逐节确认）
-- **Phase**：Phase 6.7 指标技术形态治理（编号待实施时按开发流程规范落定）
-- **状态**：draft（**设计已批准，未实施**）
+- **Phase**：Phase 6.7 指标技术形态治理
+- **状态**：**implemented（P1 + P1-数据工具链已落地；prod 迁移/回填未执行，见 §11）**
+- **分支**：`feat/kpi-metric-technical-form`
 - **Spec 路径**：[`docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md`](../../docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md)（608 行）
 - **Spec commit**：`4a4f736f`（分支 `docs/kpi-metric-technical-form-spec`，base `main` @ `3ecd780c`）
 - **关联变更**：
@@ -11,7 +12,8 @@
   - predecessor：[feat-complex-metric-pipeline](../feat-complex-metric-pipeline/summary.md)（辛普森悖论口径基线，`aggregation_order` 语义来源）
   - predecessor：[2026-10-18-kpi-datasource-write-flow-spec](../2026-10-18-kpi-datasource-write-flow-spec/summary.md)（`datasource_id` 写入流；本项闸门条件⑤依赖它）
   - **未合并分支**：[kpi-l1-metric-id](../../../../Harness/changes/kpi-l1-metric-id/summary.md)（`feat/kpi-l1-metric-id` @ `fd84d092`；B1–B5 —— **本项不复用其 B2/B3**，处置见 §2.4）
-- **迁移版本**：`0136_metric_structured`, `0137_metric_source_unique`（计划，alembic head 现为 `0135`）
+- **迁移版本**：`0136_metric_structured`（已落地）、`0137_metric_source_unique`（已落地）；分支 head = `0137`，**prod 仍为 `0135`**
+- **实跑证据**：[`realdata-run.txt`](realdata-run.txt)（prod 只读 + 隔离测试库回填幂等的完整 stdout）
 - **MEMORY**：[`qa-system-kpi-metric-technical-form-design.md`](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-kpi-metric-technical-form-design.md)
 
 ---
@@ -315,8 +317,16 @@ KPI: DRAFT → PUBLISHED  ⟸ 必须同时满足：
 
 ### 6.4 真实数据验证脚本（开发门禁）
 
-`scripts/kpi_metric_contract_realdata.py` —— 幂等、可复现，输出：12 条 KPI 的挂靠状态、对账 verdict、命中/未命中明细。
-**目标库守卫**：非 `qa_metadata_test*` 库名直接拒绝运行（沿用通用 Agent 编排那次的做法）。
+`backend/scripts/kpi_metric_realdata.py`（S1–S9，拆 4 模块：入口 / `_db` 读库 helper / `_inject` 契约注入 / `_lib` 常量与输出语义）—— 幂等、可复现，输出：迁移与结构、回填预览、三层对账逐 tier、发布闸门、契约注入端到端、exact-alias 可用性、缓存动态性、裸表名 join、回填落库幂等。
+
+**目标库守卫（四层）**：
+
+1. DSN **只**来自 `--database-url` 或 `KPI_METRIC_REALDATA_DATABASE_URL` —— 不读 `TEST_DATABASE_URL` / `DATABASE_URL` / `PG*`（避免验证对象被偷换）；
+2. 库名白名单 `^qa_metadata(_test.*)?$`；
+3. 目标是 `qa_metadata`（prod 同源，5433 端口）时必须显式 `--allow-prod-write`；
+4. 连上后 `SELECT current_database()` 实测复核。
+
+**输出语义**：PASS / FAIL / SKIP 三态；退出码 `0`=全 PASS、`1`=有 FAIL、`2`=无 FAIL 但有 SKIP；结尾固定 `RESULT: PASS|SKIP|FAIL steps=9 passed=… failed=… skipped=…`；有跳过时**不打印** `OK all steps passed`。
 
 ### 6.5 覆盖率
 
@@ -363,7 +373,7 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 | 4 | Tier A 灰度（**默认关**） | `KPI_METRIC_TIER_A_ENABLED=true` ⇒ L1 命中走 0 LLM 直通 |
 | 5 | 发布闸门（**默认关**） | `KPI_METRIC_GATE_ENABLED=true` ⇒ DRAFT→PUBLISHED 缺项返回 409 + 缺项清单 |
 | 6 | 前端发布 | 指标管理页 / KPI 页两处字段可见可编辑 |
-| 7 | 真实数据验证 | `scripts/kpi_metric_contract_realdata.py` 跑通，输出对账报告 |
+| 7 | 真实数据验证 | `backend/scripts/kpi_metric_realdata.py --database-url <DSN>` 跑通；只读模式下 S1 必须 PASS、S2–S8 全 PASS、S9 SKIP；退出码 `2` |
 
 > ⚠️ 步骤 1 前须处理 **alembic 版本漂移**：alembic 读 `DATABASE_URL`，pytest 读 `TEST_DATABASE_URL`；换分支后 `alembic_version` 残留要 `UPDATE`。
 > ⚠️ 迁移/测试**不得触碰生产 Milvus / Neo4j**。
@@ -382,25 +392,128 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 
 ### 8.4 数据前置（需业务方提供，代码不能编）
 
-| 项 | 现状 | 谁提供 |
+| 项 | 现状（2026-10-29） | 谁提供 |
 |---|---|---|
-| 12 条 KPI 的 `semantic_keywords` | 全空 | 业务方 + 种子脚本（**修 C3 后才生效**） |
+| 12 条 KPI 的 `semantic_keywords` | 全空 | 业务方 + `seed_kpi_semantic_index.py`（**修 C3 后才生效**） |
 | 12 条 KPI 的 `datasource_id` | **12/12 NULL** | 业务方（直接影响闸门条件⑤） |
-| 12 条 `ontology_metric` 行 | **0 行** | 由治理口径 + `docs/data-knowledge/采购域.md` 血缘**反向合成**，产出需业务方审核后落库 |
+| 12 条 `ontology_metric` 行 | prod **0 行**；回填 PLAN 已生成（12 新建 / 0 匹配，审核清单见 [`docs/kpi-metric-backfill-review.md`](../../../docs/kpi-metric-backfill-review.md)），**尚未落 prod** | 业务方审核清单后**人工**发起 `kpi_metric_backfill.py --apply --allow-prod-write` |
 
-> 回填脚本默认**预览**，显式 `--apply` 才落库。
+> 回填脚本默认**预览**，显式 `--apply` 才落库；目标是 `qa_metadata` 时还必须加 `--allow-prod-write`（写前自动 `pg_dump` 备份）。
+>
+> ⚠️ **运维调用方式已变**（Task 15）：`kpi_metric_backfill.py` **必须显式传 `--database-url`**（不读环境变量，因为本机默认 `DATABASE_URL` 指向 5432 的 OpenMetadata PG）；`seed_kpi_semantic_index.py` 同样改为显式 `--database-url`（env 仅兜底）+ `--allow-prod-write` + `--dry-run`。旧的「裸跑脚本」调用方式**不再有效**。
 
 ---
 
 ## 9. 关联
 
 - **Spec**：[`docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md`](../../docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md)
-- **Wiki**：[`Harness/wiki/kpi-metric-technical-form.md`](../../wiki/kpi-metric-technical-form.md)（新增：架构参考）
+- **Wiki**：[`Harness/wiki/kpi-metric-technical-form.md`](../../wiki/kpi-metric-technical-form.md)（架构参考 + §14 实施结果）
+- **实跑证据**：[`realdata-run.txt`](realdata-run.txt)（prod 只读 S1 FAIL 为预期 + 隔离测试库 S9 幂等 9/9 PASS）
+- **回填审核清单**：[`docs/kpi-metric-backfill-review.md`](../../../docs/kpi-metric-backfill-review.md)（2026-10-29 从 prod 只读生成，12 新建 / 0 匹配）
 - **Rules**：[`Harness/rules/开发流程规范.md`](../../rules/开发流程规范.md)（10 阶段工作流）、[`Harness/rules/变更记录强制规范.md`](../../rules/变更记录强制规范.md)
 - **Memory**：[`qa-system-kpi-metric-technical-form-design.md`](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-kpi-metric-technical-form-design.md)
 - **关联变更**：[feat-kpi-catalog-governance](../feat-kpi-catalog-governance/summary.md)、[feat-complex-metric-pipeline](../feat-complex-metric-pipeline/summary.md)、[2026-10-18-kpi-datasource-write-flow-spec](../2026-10-18-kpi-datasource-write-flow-spec/summary.md)、[kpi-l1-metric-id](../kpi-l1-metric-id/summary.md)（未合并分支，**部分被本项取代**）
 - **业务口径来源**：[`docs/data-knowledge/采购域.md`](../../../docs/data-knowledge/采购域.md)（§431-465 KPI 定义 / §550-581 表血缘）
 - **提案（另一分支，同处需一并修正）**：`Harness/changes/2026-10-27-kpi-governance-into-nl2sql-proposal.md:156`
+
+---
+
+## 10. 实施结果（2026-10-29）
+
+### 10.1 交付范围
+
+**已落地（P1 + P1-数据工具链）**：
+
+| 块 | 内容 |
+|---|---|
+| 迁移 | `0136_metric_structured`（`ontology_metric` 扩 9 列 + `ontology_metric_source` 建表 + `kpi_catalog` 扩 3 列）、`0137_metric_source_unique`（UNIQUE 三元组 + `class_id` 索引）；分支 head = `0137` |
+| 服务层 | `kpi_metric_spec.py`（治理/技术两侧的规范化 Spec）、三层对账引擎、`kpi_contract_builder.py`（动态匹配 + 对账门禁 + 比率形态写死）、`kpi_metric_publish_gate.py`（5 项硬条件 + 409 缺项明细） |
+| 注入链 | 第 12 个 `UntrustedLabel.KPI_CONTRACT`；`prompt/plan/service/chat` 四层透传；`KPI_CONTRACT_INJECTION_ENABLED` 灰度 |
+| 缓存 | C1 按 id 失效 / C2 冷缓存重建 / C3 TTL 兜底绕过 ORM 写入 |
+| 前端 | 本体指标结构化编辑器；KPI 目录页「技术形态挂靠」列 + 语义关键词 / 匹配阈值 / 治理列 |
+| 数据工具链 | `kpi_metric_backfill.py`（默认预览、`--apply` 落库、`--allow-prod-write`、自动备份）；`docs/kpi-metric-backfill-review.md`（prod 只读生成，12 新建 / 0 匹配）；`seed_kpi_semantic_index.py` 接入守卫 |
+| 验证 | `backend/scripts/kpi_metric_realdata.py`（S1–S9）+ 单测（守卫 / 输出三态 / 覆盖率） |
+
+**未落地（按设计分期）**：Tier A 确定性直通（P2，默认关且未接线）、问句约束检测（P2）、结构化 → SQL 编译器（P3）、`feature_definition.metric_id` FK（P3）。
+
+### 10.2 实测数字（见 [`realdata-run.txt`](realdata-run.txt)）
+
+| 项 | 实测 |
+|---|---|
+| 目录 KPI 数 | 12（tier A 4 / tier B 5 / tier C 3） |
+| 回填落库（隔离测试库） | 第 1 次 `created=12`；第 2 次 `created=0 updated=12`（幂等）；`ontology_metric` 行数 `0 → 12 → 12` |
+| 对账 verdict | **12/12 `mismatch`**（PLAN 刻意保留治理列 vs 物理列偏差，T15-L） |
+| 契约块（现状） | **0 字符**（全 mismatch ⇒ 对账拦截，不注入） |
+| 契约块（治理列对齐后模拟） | 575 字符；prompt 4361 字符，含标题 / 比率形态指引 / KPI code |
+| exact-alias | `KPI_SUPPLIER_OTD` 命中，`confidence = 1.0` |
+| Jaccard 自然语言路径 | 「供应商准时交付率是多少」最高分 **0.0** ⇒ 不可达（遗留项 L1） |
+| 裸表名 join | 22 个表引用 / 命中 13（59.1%） |
+| prod 迁移状态 | `alembic_version = '0135'` ⇒ S1 FAIL（**预期**），S2–S9 SKIP |
+| prod `system_config` | 28 行，KPI 开关 0 行（只读跑前/跑后一致） |
+
+### 10.3 测试与静态检查
+
+| 项 | 结果 |
+|---|---|
+| 单测（本任务两文件） | 30 passed；新模块覆盖率 `kpi_metric_spec.py` **100%**、`kpi_metric_realdata_lib.py` **96%** |
+| KPI 单测扫面 | 349 passed |
+| 集成（6 文件：backfill_apply / contract_injection / publish_gate_api / persistence / schema / publish_gate_http） | 71 passed（unit 与 integration **分两个 session**） |
+| ruff | 新增文件 0 告警；改动文件无新增告警（`All checks passed!`） |
+| 数据库 | 真实 PostgreSQL（5434 `qa_metadata_test_t16`，`alembic upgrade head` 到 0137）；无 sqlite |
+
+`kpi_metric_realdata.py` / `_db.py` / `_inject.py` 是**真库入口脚本**，由 S1–S9 实跑覆盖（不适用 pytest 覆盖率口径）；纯函数层（`_lib` / `_spec`）已按上表覆盖。
+
+---
+
+## 11. 上线前必读：两条硬结论与风险清单
+
+### 11.1 硬结论 ①：回填 ≠ 自动生成正确 SQL（范围边界）
+
+本特性当前 NL2SQL **只消费结构化口径的「形状」**：聚合阶、粒度键、来源类 + `role`、允许的 SQL 形态（以及治理五件套的展示文本）。
+
+**不消费结构化 `expr`** —— Tier A（确定性直通）属 **P2**，结构化 → SQL 编译器属 **P3**。因此：
+
+> **回填 12 条指标后，LLM 仍需自己推导 SQL；结构化 `expr` 不会自动变成可执行 SQL。**
+> 不要因为「库里有结构化口径」就认为「SQL 已经由机器生成」。
+
+### 11.2 硬结论 ②：灰度开关默认值与真实风险窗口
+
+prod `system_config` **没有任何 KPI 开关行** ⇒ 走代码默认：
+
+| 开关 | 代码默认 | 现状含义 |
+|---|---|---|
+| `KPI_CONTRACT_INJECTION_ENABLED` | **True** | 满足匹配 + 对账条件即注入（无需翻开关） |
+| `KPI_METRIC_GATE_ENABLED` | **False** | 发布闸门只观察、不阻断 |
+| `KPI_METRIC_TIER_A_ENABLED` | **False** | Tier A 未接线，保持关 |
+
+**实测修正（重要）**：回填后 **12/12 全部 `mismatch`**（PLAN 刻意保留「治理列 = 业务口径、技术列 = 物理列」的偏差，见 T15-L）⇒ **今天即使落库，契约块仍为空、注入实际不生效**。风险窗口在**业务方审核并对齐治理列之后**才打开 —— 那一刻起注入自动开始，**不需要任何人翻开关**。
+
+**上线前二选一**（须由人决定并执行）：
+
+1. **先写 `KPI_CONTRACT_INJECTION_ENABLED=false`**，业务方审核对齐后再开启；或
+2. **接受默认（True）**，并接受「治理列对齐即注入」的隐式生效。
+
+⚠️ 本任务**只记录清单与风险，未改 prod 任何开关**（只读跑前/跑后 `system_config` 均为 28 行、KPI 开关 0 行）。
+
+### 11.3 上线前清单
+
+- [ ] prod 迁移 `0136` / `0137`（**尚未执行**）
+- [ ] 业务方审核 [`docs/kpi-metric-backfill-review.md`](../../../docs/kpi-metric-backfill-review.md)（12 新建 / 0 匹配）
+- [ ] **人工**发起 `kpi_metric_backfill.py --database-url <prod DSN> --apply --allow-prod-write`（S9 语义已在隔离测试库证明幂等；prod 未跑）
+- [ ] 补齐 `semantic_keywords` / `datasource_id`（12/12 仍为 NULL）
+- [ ] 决定 §11.2 的开关策略（先关后开 / 接受默认）
+- [ ] 治理列对齐后重跑 `kpi_metric_realdata.py`，确认 verdict 从 `mismatch` 转 `pass` 且契约块非空
+- [ ] `security-reviewer` 结论 + compose 冒烟（SSOT 清单另两项，**不在 Task 16 范围**）
+
+### 11.4 运维调用方式变更（必须通知运维）
+
+| 脚本 | 旧调用 | 新调用 |
+|---|---|---|
+| `kpi_metric_backfill.py` | 直接裸跑（读环境变量） | **必须** `--database-url <DSN>`；写 `qa_metadata` 还须 `--allow-prod-write`；默认只预览，`--apply` 才落库 |
+| `seed_kpi_semantic_index.py` | 直接裸跑 | `--database-url <DSN>`（env `DATABASE_URL` 仅兜底）+ `--allow-prod-write`（prod）+ `--dry-run` 可预览 |
+| `kpi_metric_realdata.py` | —（新增） | `--database-url <DSN>`；写库/回填还需 `--apply-backfill`；prod 只读也须 `--allow-prod-write`（按库名的显式 opt-in） |
+
+> 为什么强制显式：本机 `backend/app/config.py:58` 的默认 `DATABASE_URL` 指向 **5432 的 OpenMetadata PG**，裸跑会打错库。
 
 ---
 
@@ -410,14 +523,14 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 - [x] 9 段都非空，无 TBD/TODO/待补 占位（§6/§7/§8 为 draft 期的**计划**内容，非结果）
 - [x] 第 2 段 ≥ 2 个候选方案对比（三层选型各 ≥ 2）
 - [x] 第 3 段迁移文件名 ≤ 32 字符（`0136_metric_structured` 19 / `0137_metric_source_unique` 27）
-- [ ] 第 7 段触发 `security-reviewer` 并填结论（**实施时必填**）
-- [ ] 第 8 段 docker compose 冒烟命令 + 输出贴出（**实施时必填**）
+- [ ] 第 7 段触发 `security-reviewer` 并填结论（**未做 —— 不在 Task 16 范围**）
+- [ ] 第 8 段 docker compose 冒烟命令 + 输出贴出（**未做 —— 不在 Task 16 范围**）
 - [x] 第 9 段 ≥ 3 个跨文件链接
 - [x] 相关 wiki 文档已更新（新增 `wiki/kpi-metric-technical-form.md` + 修正 `metric-pipeline.md` / `nl2sql-engine.md` 的 `sql_template` 漂移）
 - [x] 至少 1 条 MEMORY 索引已在 MEMORY.md 添加
-- [ ] `scripts/kpi_metric_contract_realdata.py` 已跑通（**实施时必填**）
+- [x] `backend/scripts/kpi_metric_realdata.py` 已跑通（prod 只读 + 隔离测试库，见 [`realdata-run.txt`](realdata-run.txt)）
 
-> 上述 3 项未打勾 → **本变更不得实施合并**（本记录状态保持 `draft`）。
+> **合并门禁现状**：剩余 2 项（`security-reviewer` 结论 / compose 冒烟）**未完成**，不在 Task 16 范围 ⇒ **合并前仍须补齐**；在此之前本变更可视为「代码已实现」，但**不满足合并条件**。
 
 ---
 

@@ -23,7 +23,7 @@ import {
   getDatasourceSuggestions,
 } from "../api/kpiCatalog";
 import { listMetrics } from "../api/ontology";
-import type { OntologyMetric } from "../types/ontology";
+import type { MetricStatus, OntologyMetric } from "../types/ontology";
 import type {
   KpiCatalog,
   KpiDatasourceSuggestion,
@@ -50,6 +50,12 @@ const KPI_STATUS_TAG_COLOR: Record<KpiStatus, string> = {
   DRAFT: "default",
   PUBLISHED: "green",
   DEPRECATED: "orange",
+};
+
+/** 本体指标状态 Tag 配色（位于「技术形态挂靠」列）。 */
+const METRIC_STATUS_TAG_COLOR: Record<MetricStatus, string> = {
+  DRAFT: "default",
+  PUBLISHED: "green",
 };
 
 export default function KpiCatalogPage() {
@@ -151,11 +157,13 @@ export default function KpiCatalogPage() {
       owner: record.owner ?? "",
       version: record.version,
       status: record.status,
-      semanticKeywords: record.semanticKeywords ?? [],
+      // 四个数组一律展开拷贝：form store 不得持有 `kpis` state 里的同一实例
+      // （rc-select 若原地处理会静默污染 state 且不触发重渲染）
+      semanticKeywords: [...(record.semanticKeywords ?? [])],
       matchThreshold: record.matchThreshold ?? DEFAULT_MATCH_THRESHOLD,
-      grainKeys: record.grainKeys ?? [],
-      numeratorColumns: record.numeratorColumns ?? [],
-      denominatorColumns: record.denominatorColumns ?? [],
+      grainKeys: [...(record.grainKeys ?? [])],
+      numeratorColumns: [...(record.numeratorColumns ?? [])],
+      denominatorColumns: [...(record.denominatorColumns ?? [])],
       metricId: record.metricId ?? undefined,
     });
     setModalOpen(true);
@@ -246,7 +254,7 @@ export default function KpiCatalogPage() {
         return (
           <Space size={4}>
             <span>{metric.metricName}</span>
-            <Tag color={metric.status === "PUBLISHED" ? "green" : "default"}>
+            <Tag color={METRIC_STATUS_TAG_COLOR[metric.status]}>
               {t(`enums.metricStatus.${metric.status}`)}
             </Tag>
           </Space>
@@ -441,7 +449,7 @@ export default function KpiCatalogPage() {
                 type: "number",
                 min: 0,
                 max: 1,
-                message: t("kpiCatalog.placeholders.matchThreshold"),
+                message: t("kpiCatalog.validation.matchThresholdRange"),
               },
             ]}
           >

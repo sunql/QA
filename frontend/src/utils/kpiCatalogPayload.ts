@@ -32,7 +32,8 @@ export interface KpiFormValues {
   version: string;
   status: KpiStatus;
   semanticKeywords: string[];
-  matchThreshold: number;
+  /** rc-input-number 清空时回传 `null`（不是 undefined）⇒ 类型必须如实反映。 */
+  matchThreshold: number | null;
   grainKeys: string[];
   numeratorColumns: string[];
   denominatorColumns: string[];
@@ -81,11 +82,13 @@ export function buildKpiUpdatePayload(values: KpiFormValues): KpiCatalogUpdate {
     owner: values.owner || null,
     version: values.version || undefined,
     status: values.status,
-    semanticKeywords: values.semanticKeywords,
-    matchThreshold: values.matchThreshold,
-    grainKeys: values.grainKeys,
-    numeratorColumns: values.numeratorColumns,
-    denominatorColumns: values.denominatorColumns,
+    // 数组一律拷贝：payload 不得持有 form store / React state 里的实例（禁止别名共享）
+    semanticKeywords: [...values.semanticKeywords],
+    // 清空阈值 ⇒ 复位为默认值（后端 update 路径同样把显式 null 归一为 0.75）
+    matchThreshold: values.matchThreshold ?? DEFAULT_MATCH_THRESHOLD,
+    grainKeys: [...values.grainKeys],
+    numeratorColumns: [...values.numeratorColumns],
+    denominatorColumns: [...values.denominatorColumns],
     metricId: values.metricId ?? null,
   };
 }
@@ -106,11 +109,11 @@ export function buildKpiCreatePayload(values: KpiFormValues): KpiCatalogCreate {
     owner: values.owner || undefined,
     version: values.version || undefined,
     status: values.status,
-    semanticKeywords: values.semanticKeywords,
-    matchThreshold: values.matchThreshold,
-    grainKeys: values.grainKeys,
-    numeratorColumns: values.numeratorColumns,
-    denominatorColumns: values.denominatorColumns,
+    semanticKeywords: [...values.semanticKeywords],
+    matchThreshold: values.matchThreshold ?? DEFAULT_MATCH_THRESHOLD,
+    grainKeys: [...values.grainKeys],
+    numeratorColumns: [...values.numeratorColumns],
+    denominatorColumns: [...values.denominatorColumns],
     metricId: values.metricId ?? null,
   };
 }

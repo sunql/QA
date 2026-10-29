@@ -38,6 +38,11 @@ logger = logging.getLogger(__name__)
 # 治理侧结构化列（改动它们 ⇒ 闸门必须按**新值**判对账，而不是旧口径）
 _GOVERNANCE_KEYS = ("numerator_columns", "denominator_columns", "grain_keys")
 
+# match_threshold 的默认值：与 DB server_default 一致（models.KpiCatalog 处为
+# Numeric(3, 2), nullable=False, default=Decimal("0.75")）。create / update 两条路径
+# 共用，避免「一边归一、一边写穿 NOT NULL」的不对称。
+_DEFAULT_MATCH_THRESHOLD = Decimal("0.75")
+
 
 def _governanceOverride(
     entity: KpiCatalog, updates: dict
@@ -132,7 +137,11 @@ class KpiCatalogService:
             metric_id=dto.metric_id,
             created_by=dto.created_by,
             semantic_keywords=dto.semantic_keywords,
-            match_threshold=Decimal(str(dto.match_threshold)) if dto.match_threshold is not None else Decimal("0.75"),
+            match_threshold=(
+                Decimal(str(dto.match_threshold))
+                if dto.match_threshold is not None
+                else _DEFAULT_MATCH_THRESHOLD
+            ),
             # P1：治理侧结构化列（漏写 ⇒ 对账恒 unknown / 闸门恒拦）
             grain_keys=dto.grain_keys,
             numerator_columns=dto.numerator_columns,
@@ -210,9 +219,17 @@ class KpiCatalogService:
         # status / metric_id 是枚举/int；service 层把 KpiStatus 归一为字符串
         if "status" in updates and updates["status"] is not None:
             updates["status"] = updates["status"].value
-        # Numeric 列归一为 Decimal：asyncpg 不接受 float 直接绑到 Numeric
-        if "match_threshold" in updates and updates["match_threshold"] is not None:
-            updates["match_threshold"] = Decimal(str(updates["match_threshold"]))
+        # Numeric 列归一为 Decimal：asyncpg 不接受 float 直接绑到 Numeric。
+        # match_threshold 是 NOT NULL 列（DB 默认 0.75）；创建路径已把 None 归一为默认值
+        # （见 createKpi），update 路径必须对称，否则显式 null 会写穿 NOT NULL 约束 ⇒
+        # commit 抛 IntegrityError ⇒ 无全局处理器 ⇒ 500。
+        # 语义：「显式 null = 复位成默认阈值」，与创建路径一致（status 没有默认值，故不做同样处理）。
+        if "match_threshold" in updates:
+            updates["match_threshold"] = (
+                Decimal(str(updates["match_threshold"]))
+                if updates["match_threshold"] is not None
+                else _DEFAULT_MATCH_THRESHOLD
+            )
         # P1 发布闸门：发布前过闸；按**新值**判定（同一请求里改挂靠/治理列也要算）
         if targetStatus == KpiStatus.PUBLISHED:
             await enforceKpiPublishGate(

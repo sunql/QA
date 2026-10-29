@@ -7,6 +7,11 @@ import zhCN from "antd/locale/zh_CN";
 import KpiCatalogPage from "../pages/KpiCatalogPage";
 import type { KpiCatalog, KpiDatasourceSuggestion } from "../types/kpiCatalog";
 import type { OntologyMetric } from "../types/ontology";
+import {
+  buildKpiCreatePayload,
+  buildKpiUpdatePayload,
+  emptyKpiForm,
+} from "../utils/kpiCatalogPayload";
 
 const { mockKpi } = vi.hoisted(() => ({
   mockKpi: {
@@ -27,7 +32,8 @@ const { mockKpi } = vi.hoisted(() => ({
     status: "PUBLISHED",
     metricId: null,
     semanticKeywords: ["准时交付"],
-    matchThreshold: 0.75,
+    // 刻意取**非默认值**：若 openEdit 漏回填 matchThreshold，表单会退回 0.75 ⇒ 断言才有判别力
+    matchThreshold: 0.6,
     grainKeys: ["supplier_code"],
     numeratorColumns: ["QTY"],
     denominatorColumns: ["AMOUNT"],
@@ -500,7 +506,8 @@ describe("KpiCatalogPage — 结构化口径与技术形态挂靠", () => {
     expect(payload.numeratorColumns).toEqual(["QTY"]);
     expect(payload.denominatorColumns).toEqual(["AMOUNT"]);
     expect(payload.metricId).toBe(42);
-    expect(payload.matchThreshold).toBe(0.75);
+    // 0.6 ≠ DEFAULT_MATCH_THRESHOLD(0.75) ⇒ 证明回填路径真的生效，而非默认值兜底
+    expect(payload.matchThreshold).toBe(0.6);
   });
 
   it("语义关键词 tags Select 可输入新标签并进入 payload", async () => {
@@ -553,5 +560,80 @@ describe("KpiCatalogPage — 结构化口径与技术形态挂靠", () => {
     await waitFor(() => expect(api.updateKpi).toHaveBeenCalled());
     const payload = api.updateKpi.mock.calls[0][1];
     expect(payload.metricId).toBeNull();
+  });
+
+  it("清空「匹配阈值」后提交复位为默认 0.75（不是 null / undefined）", async () => {
+    const user = userEvent.setup();
+    api.updateKpi.mockResolvedValue({ ...mockKpi });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    const thresholdItem = (await screen.findByText("匹配阈值")).closest(
+      ".ant-form-item",
+    );
+    expect(thresholdItem).not.toBeNull();
+    const thresholdInput = thresholdItem!.querySelector("input");
+    expect(thresholdInput).not.toBeNull();
+    // rc-input-number 清空 ⇒ onChange(null) ⇒ Form 值变 null（校验规则不拦空值）
+    await user.clear(thresholdInput!);
+
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateKpi).toHaveBeenCalled());
+    const payload = api.updateKpi.mock.calls[0][1];
+    // 后端 match_threshold 是 NOT NULL 列 ⇒ 前端必须发显式默认值，发 null 会 500
+    expect(payload.matchThreshold).toBe(0.75);
+  });
+
+  it("提交的数组字段不持有 record 的同一实例（禁止别名共享）", async () => {
+    const user = userEvent.setup();
+    api.updateKpi.mockResolvedValue({ ...mockKpi });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    await user.click(await screen.findByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateKpi).toHaveBeenCalled());
+    const payload = api.updateKpi.mock.calls[0][1];
+    // 值相等但实例不同：payload 不得与 fixture record 的数组共享同一实例
+    expect(payload.semanticKeywords).toEqual(mockKpi.semanticKeywords);
+    expect(payload.semanticKeywords).not.toBe(mockKpi.semanticKeywords);
+    expect(payload.grainKeys).not.toBe(mockKpi.grainKeys);
+    expect(payload.numeratorColumns).not.toBe(mockKpi.numeratorColumns);
+    expect(payload.denominatorColumns).not.toBe(mockKpi.denominatorColumns);
+  });
+});
+
+/**
+ * 上一条 UI 用例无法区分「payload 拷贝」与「rc-select 挂载时归一」——
+ * 即便 buildKpi*Payload 去掉展开拷贝，表单值仍会被 rc-select 换成新数组 ⇒ 用例照样绿。
+ * 故在这里直接对工厂函数做实例身份断言，真正锁住「payload 不持有入参实例」的不变量。
+ */
+describe("kpiCatalogPayload — 数组字段不与入参共享实例", () => {
+  it("buildKpiUpdatePayload / buildKpiCreatePayload 各自拷贝四个数组", () => {
+    const values = {
+      ...emptyKpiForm(),
+      semanticKeywords: ["准时交付"],
+      grainKeys: ["supplier_code"],
+      numeratorColumns: ["QTY"],
+      denominatorColumns: ["AMOUNT"],
+    };
+    const payloads = [
+      buildKpiUpdatePayload(values),
+      buildKpiCreatePayload(values),
+    ];
+    for (const payload of payloads) {
+      expect(payload.semanticKeywords).toEqual(values.semanticKeywords);
+      expect(payload.semanticKeywords).not.toBe(values.semanticKeywords);
+      expect(payload.grainKeys).not.toBe(values.grainKeys);
+      expect(payload.numeratorColumns).not.toBe(values.numeratorColumns);
+      expect(payload.denominatorColumns).not.toBe(values.denominatorColumns);
+    }
   });
 });

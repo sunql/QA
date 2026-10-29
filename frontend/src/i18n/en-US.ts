@@ -2036,6 +2036,9 @@ export const enUS = {
       denominatorColumns: "Press Enter to add, e.g. AMOUNT",
       owner: "Owner dept./person",
     },
+    validation: {
+      matchThresholdRange: "Enter a value between 0 and 1",
+    },
     unbound: "Unbound",
     suggestions: {
       hint: "Suggested data source: {name}",

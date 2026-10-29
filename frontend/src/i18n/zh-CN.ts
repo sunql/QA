@@ -2057,6 +2057,9 @@ export const zhCN = {
       denominatorColumns: "回车新增，如：AMOUNT",
       owner: "责任部门/人",
     },
+    validation: {
+      matchThresholdRange: "请输入 0 到 1 之间的数值",
+    },
     unbound: "未绑定",
     suggestions: {
       hint: "建议绑定数据源：{name}",

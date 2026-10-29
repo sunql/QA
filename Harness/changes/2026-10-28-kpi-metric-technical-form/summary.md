@@ -478,6 +478,14 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 > S3.4 自身的已知局限（刻意不修，靠单测兜）：① 只丢一个方向的列级 code 时无判别力；
 > ② 技术列抽取与引擎**同源**（都用 `MeasureSpec.columns()`），该输入退化时 S3.4 会跟着绿。
 
+**S2.2′ 归属校验的已知局限（Minor，登记不修）**：归属键是 `ontology_metric.metric_name`
+（模型 `unique=True`、DB 有 `uq_metric_name`），而该字段**可通过 API 改名**
+（`OntologyMetricUpdate.metric_name` → `PUT /api/v1/ontology/metrics/{id}`）。
+改名后即使 `metric_id` 归属**正确**，S2.2′ 也会报 `FAIL … 挂错 [...]` ——
+语义上把「改名」报成「挂错」。**当前不可达**（prod `ontology_metric = 0`、前端不编辑该字段），
+且下次 `--apply` 的 `_desiredValues` 会把名字写回（自愈）。
+⇒ 若将来开放改名，需把 S2.2′ 的文案区分「名称漂移」与「挂错」，或改用不可变的归属键。
+
 ---
 
 ## 11. 上线前必读：两条硬结论与风险清单

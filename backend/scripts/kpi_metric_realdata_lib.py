@@ -1,10 +1,18 @@
 """KPI 指标技术形态治理：真实数据验证脚本的**共享常量、DSN 解析与输出 helper**。
 
-脚本分三个模块（按职责拆，单文件均 < 800 行）：
+脚本分六个模块（按职责拆，单文件均 < 800 行）：
 
 - ``kpi_metric_realdata_lib``（本文件）：常量、DSN 解析、三种判定输出、结尾汇总；
 - ``kpi_metric_realdata_db``：数据库只读 helper + 开关行的读写与还原；
+- ``kpi_metric_realdata_s3``：S3 的判定 oracle（列差异 / 分母判定 / formula 覆盖）；
+- ``kpi_metric_realdata_s4``：S4 发布闸门（开关 ON/OFF 的可还原写）；
+- ``kpi_metric_realdata_inject``：S5 契约注入端到端（含审核模拟）；
 - ``kpi_metric_realdata``（入口）：S1–S9 各步骤与主流程。
+
+⚠️ 本模块**必须保持零 app 依赖**：入口在设置 ``DATABASE_URL`` **之前**就 import 它，
+此时 import ``app.*`` 会让 ``app.config`` 读到默认 DSN（``localhost:5432``，那是
+OpenMetadata 的库）。``_s3`` / ``_s4`` 允许 import app，但只能被入口在
+``DATABASE_URL`` 设置**之后**导入。
 
 目标库
 ------

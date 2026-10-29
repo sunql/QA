@@ -588,32 +588,13 @@ describe("KpiCatalogPage — 结构化口径与技术形态挂靠", () => {
     expect(payload.matchThreshold).toBe(0.75);
   });
 
-  it("提交的数组字段不持有 record 的同一实例（禁止别名共享）", async () => {
-    const user = userEvent.setup();
-    api.updateKpi.mockResolvedValue({ ...mockKpi });
-    renderPage();
-    await waitFor(() =>
-      expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument(),
-    );
-
-    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
-    await user.click(await screen.findByRole("button", { name: /确\s*定/ }));
-
-    await waitFor(() => expect(api.updateKpi).toHaveBeenCalled());
-    const payload = api.updateKpi.mock.calls[0][1];
-    // 值相等但实例不同：payload 不得与 fixture record 的数组共享同一实例
-    expect(payload.semanticKeywords).toEqual(mockKpi.semanticKeywords);
-    expect(payload.semanticKeywords).not.toBe(mockKpi.semanticKeywords);
-    expect(payload.grainKeys).not.toBe(mockKpi.grainKeys);
-    expect(payload.numeratorColumns).not.toBe(mockKpi.numeratorColumns);
-    expect(payload.denominatorColumns).not.toBe(mockKpi.denominatorColumns);
-  });
 });
 
 /**
- * 上一条 UI 用例无法区分「payload 拷贝」与「rc-select 挂载时归一」——
- * 即便 buildKpi*Payload 去掉展开拷贝，表单值仍会被 rc-select 换成新数组 ⇒ 用例照样绿。
- * 故在这里直接对工厂函数做实例身份断言，真正锁住「payload 不持有入参实例」的不变量。
+ * Q6：UI 层「payload 不与 record 别名共享」的断言**恒真**——rc-field-form 在
+ * 表单初值 / 挂载时就会重建数组，即便 buildKpi*Payload 去掉展开拷贝，表单值
+ * 也已不是 record 的实例 ⇒ UI 用例无法判别。
+ * 真正承重的是下面的工厂函数测试：直接对入参实例做身份断言。
  */
 describe("kpiCatalogPayload — 数组字段不与入参共享实例", () => {
   it("buildKpiUpdatePayload / buildKpiCreatePayload 各自拷贝四个数组", () => {

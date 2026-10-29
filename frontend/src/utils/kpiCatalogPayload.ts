@@ -3,8 +3,10 @@
  *
  * 从 `pages/KpiCatalogPage.tsx` 抽出，理由：
  * 1. `handleSubmit` 原本要把同一批字段逐字写两遍（create / update）⇒ 超 50 行；
- * 2. 表单初值必须是**工厂函数**——模块级单例会让 4 个 tags 数组共享同一实例，
- *    rc-select 的 `mode="tags"` 存在原地处理路径 ⇒ 违反「禁止原地修改」约束。
+ * 2. 表单初值必须是**工厂函数**——模块级单例会让 4 个 tags 数组共享同一实例。
+ *    数组重建发生在 rc-field-form 的 `set.js`（`setValue` 递归 merge 时会生成
+ *    新数组），不是 rc-select 的原地处理；无论哪一层重建，payload 都不能持有
+ *    表单 store / React state 的实例 ⇒ 违反「禁止原地修改」约束。
  */
 
 import type {

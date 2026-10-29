@@ -90,6 +90,18 @@ class TestBuildDatasourceNamePattern:
         assert stripDatasourceNames("XTHBI ORACLE", pattern) == "XTHBI ORACLE"
         assert stripDatasourceNames("THBI ORACLEX", pattern) == "THBI ORACLEX"
 
+    def test_lowercase_letter_adjacency_is_not_stripped(self) -> None:
+        """Q2：模式是 IGNORECASE，边界必须仍然拒绝**小写字母**邻接。
+
+        ``xthbi oracle`` 里的 ``thbi oracle`` 前一个字符是 ``x`` —— 若把
+        IGNORECASE 改成只作用于词体（或边界退化成 ``(?i:...)``），这里会被
+        摘成 ``"x"``，把表名信号收窄。锁住「大小写不敏感 ≠ 边界失效」。
+        """
+        pattern = buildDatasourceNamePattern(["THBI Oracle"])
+
+        assert pattern is not None
+        assert stripDatasourceNames("xthbi oracle", pattern) == "xthbi oracle"
+
     def test_pattern_prefers_longer_name_first(self) -> None:
         pattern = buildDatasourceNamePattern(["A B", "A B C"])
 

@@ -49,6 +49,13 @@ const mockMetric: OntologyMetric = {
 const mockMetricWithMeasure: OntologyMetric = {
   ...mockMetric,
   numeratorMeasure: { agg: "SUM", expr: "QTY", filter: null, class_id: 7, class_alias: "Order" },
+  denominatorMeasure: {
+    agg: "COUNT",
+    expr: "ORDER_ID",
+    filter: null,
+    class_id: 8,
+    class_alias: "OrderItem",
+  },
 };
 
 const api = vi.hoisted(() => ({
@@ -223,6 +230,12 @@ describe("MetricTab — 编辑流", () => {
     expect(payload.numeratorMeasure?.class_alias).toBe("Order");
     expect(payload.numeratorMeasure?.agg).toBe("SUM");
     expect(payload.numeratorMeasure?.expr).toBe("QTY");
+    // Q4：分母侧必须与分子侧对称回传 class_id / class_alias；
+    // 只锁分子侧时，分母的绑定信息被清空也照样绿。
+    expect(payload.denominatorMeasure?.class_id).toBe(8);
+    expect(payload.denominatorMeasure?.class_alias).toBe("OrderItem");
+    expect(payload.denominatorMeasure?.agg).toBe("COUNT");
+    expect(payload.denominatorMeasure?.expr).toBe("ORDER_ID");
   });
 });
 

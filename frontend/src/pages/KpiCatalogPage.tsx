@@ -158,7 +158,7 @@ export default function KpiCatalogPage() {
       version: record.version,
       status: record.status,
       // 四个数组一律展开拷贝：form store 不得持有 `kpis` state 里的同一实例
-      // （rc-select 若原地处理会静默污染 state 且不触发重渲染）
+      // （rc-field-form 的 set.js 在 setValue 时会递归 merge 并重建数组）
       semanticKeywords: [...(record.semanticKeywords ?? [])],
       matchThreshold: record.matchThreshold ?? DEFAULT_MATCH_THRESHOLD,
       grainKeys: [...(record.grainKeys ?? [])],

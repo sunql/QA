@@ -180,14 +180,12 @@ INDEX(class_id)
 | `/api/v1/ontology/metrics/{id}` | GET | 响应加九字段 |
 | `/api/v1/ontology/metrics/{id}` | DELETE | 行为不变（CASCADE 删 source 行） |
 | `/api/v1/kpi-catalog` | POST | 不变（`semantic_keywords` 已有） |
-| `/api/v1/kpi-catalog/{id}` | PUT | 请求体加 `semanticKeywords` / `matchThreshold` |
+| `/api/v1/kpi-catalog/{id}` | PUT | 请求体加 `semanticKeywords` / `matchThreshold`；**状态流转也走本端点**（body 带 `status`），DRAFT→PUBLISHED 需过发布闸门（§5.5），不满足 → **409 + 明确缺项**。**没有** `PUT /{id}/status` 子路由 |
 | `/api/v1/kpi-catalog` | GET | 响应加 `semanticKeywords` / `matchThreshold` |
-| `/api/v1/kpi-catalog/{id}/status` | PUT | **状态机收紧**：DRAFT→PUBLISHED 需过发布闸门（§5.5），不满足 → **409 + 明确缺项** |
 
-**新增响应字段（列表/详情）**：`metricId` + **对账 verdict**（`pass` / `mismatch` / `unknown` / 未挂）—— 前端"技术形态挂靠"列的数据源。
+**新增响应字段（列表/详情）**：仅 `metricId`。**对账 verdict 目前不通过任何 API 暴露**（前端拿不到，UI 不显示 verdict）——详见 §10.1 未落地项。
 
-**错误码**（新增 1 类，复用现有信封）：
-`MSG_KPI_METRIC_GATE_FAILED` —— 载荷列出缺失项（`metric_id` / `metric.status` / `execution_source` / `datasource_id` / `reconcile`），供前端逐条提示。
+**错误码**（复用现有信封）：`MSG_KPI_GATE_BLOCKED`（"发布闸门未通过：…"）拼进 `ConflictError` 的正文；不是 `MSG_KPI_METRIC_GATE_FAILED`。注意 `AppError.code` 当前恒为 `UNKNOWN`，前端按 **HTTP status** 分流、从 `ErrorResponse.error`（顶层字符串）取文案（`ErrorResponse.detail` 恒 `null`），不要按 code 判断。
 
 ---
 
@@ -279,7 +277,7 @@ KPI: DRAFT → PUBLISHED  ⟸ 必须同时满足：
 
 | 文件 | 改动 |
 |---|---|
-| `KpiCatalogPage.tsx`（462 行） | 表单：`metricId`（本体指标选择器）、`semanticKeywords`（Tags）、`grainKeys`/`numeratorColumns`/`denominatorColumns`；列表：新增"技术形态挂靠"列（metric 名 + 对账 verdict） |
+| `KpiCatalogPage.tsx`（462 行） | 表单：`metricId`（本体指标选择器）、`semanticKeywords`（Tags）、`grainKeys`/`numeratorColumns`/`denominatorColumns`；列表：新增"技术形态挂靠"列（metric 名 + **metric 状态 Tag**，颜色取自 `METRIC_STATUS_TAG_COLOR`；**不显示对账 verdict** —— API 未暴露） |
 | `MetricTab.tsx`（336 行） | 新增：`metricType` / `status` / `owner` / `aggregationOrder` / `grainKeys` / `numeratorMeasure` / `denominatorMeasure` / `executionSource`；结构化编辑器复用 `dimensionDefaults` 的 string↔JSON 模式（`:113-118`），**不引入新组件库** |
 
 ---
@@ -350,7 +348,7 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 | **任意 SQL 执行**：`formula` / `calculation_logic` 是可执行 SQL | Tier A 执行前必过 `_assert_read_only`（现成，feature 路径已用）；**不得引入绕过该校验的新执行入口** |
 | **口径文本里的指令**：`numerator`/`denominator`/`formula` 是人填的自由文本 | 契约块整体走 `wrapUntrusted`；不把治理文本拼进可执行片段 |
 | **越权取数**：Tier A 直通绕过 NL2SQL 的 scope 校验 | ⚠️ **必查**：Tier A 执行前必须复用 NL2SQL 的数据源 scope 与只读校验，**不得因"确定性执行"而跳过授权判定** |
-| **measure 内嵌 `class_id` 无 FK**（JSON 内引用） | 应用层校验 `class_id` 存在且 `role` 匹配，否则对账判 `unknown`（不静默通过） |
+| **measure 内嵌 `class_id` 无 FK**（JSON 内引用） | **现状：应用层没有 `class_id` 存在性 / `role` 匹配校验**（`MeasureSpecSchema` 只校验 `agg`；`schemas.py:639` 的 docstring 与实现不符，已修正）。只有回填脚本在写库前检查；手工写入的悬空 `class_id` 会让契约块渲染降级为 `class#{id}`（人读占位），**不构成注入面**（`expr`/`filter` 走 `wrapUntrusted`，`class_alias` 经 `_clipField` 截断，不进可执行 SQL）。敞口登记为遗留项，不在本期修 |
 | **发布闸门可被绕过** | 闸门在 **service 层**强制（不只在 API 层）；直接改库绕过由部署期对账脚本兜底 |
 
 ### 7.3 实施门禁
@@ -373,7 +371,7 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 | 4 | Tier A 灰度（**默认关**） | `KPI_METRIC_TIER_A_ENABLED=true` ⇒ L1 命中走 0 LLM 直通 |
 | 5 | 发布闸门（**默认关**） | `KPI_METRIC_GATE_ENABLED=true` ⇒ DRAFT→PUBLISHED 缺项返回 409 + 缺项清单 |
 | 6 | 前端发布 | 指标管理页 / KPI 页两处字段可见可编辑 |
-| 7 | 真实数据验证 | `backend/scripts/kpi_metric_realdata.py --database-url <DSN>` 跑通。按库/模式区分（**三态退出码**）：**测试库 + `--apply-backfill` ⇒ 全 PASS / exit 0**；**测试库只读 ⇒ 无 FAIL 但有 SKIP（S9 恒 SKIP）⇒ exit 2**；**prod 只读 ⇒ S1 FAIL（迁移未应用）/ exit 1**（FAIL 优先于 SKIP）；「全跳过」也落 `2`，不会被读成通过 |
+| 7 | 真实数据验证 | `backend/scripts/kpi_metric_realdata.py --database-url <DSN>` 跑通。按库/模式区分（**三态退出码**）：**测试库 + `--apply-backfill` ⇒ 全 PASS / exit 0**；**测试库只读 ⇒ 无 FAIL 但有 SKIP（S9 恒 SKIP）⇒ exit 2**；**prod 只读 ⇒ S1 FAIL（迁移未应用）/ exit 1**（FAIL 优先于 SKIP）；**prod 迁移后只读 ⇒ S4 主动 SKIP（S4 需临时改写 `system_config` 灰度开关，prod 一律不写）⇒ 无 FAIL 时有 SKIP，exit 2**；「全跳过」也落 `2`，不会被读成通过 |
 
 > ⚠️ 步骤 1 前须处理 **alembic 版本漂移**：alembic 读 `DATABASE_URL`，pytest 读 `TEST_DATABASE_URL`；换分支后 `alembic_version` 残留要 `UPDATE`。
 > ⚠️ 迁移/测试**不得触碰生产 Milvus / Neo4j**。
@@ -400,7 +398,7 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 
 > 回填脚本默认**预览**，显式 `--apply` 才落库；目标是 `qa_metadata` 时还必须加 `--allow-prod-write`（写前自动 `pg_dump` 备份）。
 >
-> ⚠️ **运维调用方式已变**（Task 15）：`kpi_metric_backfill.py` **必须显式传 `--database-url`**（不读环境变量，因为本机默认 `DATABASE_URL` 指向 5432 的 OpenMetadata PG）；`seed_kpi_semantic_index.py` 同样改为显式 `--database-url`（env 仅兜底）+ `--allow-prod-write` + `--dry-run`。旧的「裸跑脚本」调用方式**不再有效**。
+> ⚠️ **运维调用方式已变**（Task 15）：`kpi_metric_backfill.py` **必须显式传 `--database-url`**（不读环境变量，因为本机默认 `DATABASE_URL` 指向 5432 的 OpenMetadata PG）；`seed_kpi_semantic_index.py` 同样改为**只认**显式 `--database-url`（**没有任何环境变量兜底**）+ `--allow-prod-write` + `--dry-run`。旧的「裸跑脚本」调用方式**不再有效**。
 
 ---
 
@@ -434,7 +432,7 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 | 数据工具链 | `kpi_metric_backfill.py`（默认预览、`--apply` 落库、`--allow-prod-write`、自动备份）；`docs/kpi-metric-backfill-review.md`（prod 只读生成，12 新建 / 0 匹配）；`seed_kpi_semantic_index.py` 接入守卫 |
 | 验证 | `backend/scripts/kpi_metric_realdata.py`（S1–S9）+ 单测（守卫 / 输出三态 / 覆盖率） |
 
-**未落地（按设计分期）**：Tier A 确定性直通（P2，默认关且未接线）、问句约束检测（P2）、结构化 → SQL 编译器（P3）、`feature_definition.metric_id` FK（P3）。
+**未落地（按设计分期）**：Tier A 确定性直通（P2，默认关且未接线）、问句约束检测（P2）、结构化 → SQL 编译器（P3）、`feature_definition.metric_id` FK（P3）、**对账 verdict 未暴露到 API / UI**（`KpiCatalogRead` 只有 `metricId`；前端"技术形态挂靠"列显示的是 metric 状态 Tag，不是 verdict）。
 
 ### 10.2 实测数字（见 [`realdata-run.txt`](realdata-run.txt)）
 
@@ -485,6 +483,24 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 语义上把「改名」报成「挂错」。**当前不可达**（prod `ontology_metric = 0`、前端不编辑该字段），
 且下次 `--apply` 的 `_desiredValues` 会把名字写回（自愈）。
 ⇒ 若将来开放改名，需把 S2.2′ 的文案区分「名称漂移」与「挂错」，或改用不可变的归属键。
+
+### 10.5 回填语义清单（Q9 / 原 15m-2、15m-4、15m-10）
+
+1. **默认（只填空）模式会「复活」人工删除 / 清空的数据**：脚本对已存在指标只填
+   `None`/空值，且会把 plan 里存在而库里缺失的 source 行重新插入 ⇒ 人工删掉的
+   source 行、人工清空的 `[]` / `""` 会被填回。要保留人工删除/清空结果，必须停用
+   回填或改走人工流程（「不覆盖非空值」≠「尊重删除」）。
+2. **`PUBLISHED` 只有 `--overwrite` 才会降 `DRAFT`**：默认模式不动发布状态。
+   带 `--overwrite` 时已发布指标会被回退为 `DRAFT`，必须重新发布并重新过闸门。
+3. **落库逐条 commit**：中途失败会留下**已提交前缀**，不会整体回滚。用 `--dry-run`
+   的 `created` / `updated` 计数与库内实际行数逐条核对，再决定补跑范围。
+4. **F5：同名指标的 `metric_type` 不会被默认模式纠正**：若库里已有同名指标
+   `metric_type` 是 DB 默认 `MEASURE`、而 plan 判为 `RATIO`，默认（只填空）模式
+   视为「已有非空值」不覆盖 ⇒ 技术形态仍是错的；需 `--overwrite`（并承担降
+   `DRAFT` 的后果）或人工改 `metric_type`。**不要以为回填跑过就代表类型已对齐。**
+
+> 早先「默认模式不删除任何行 ⇒ 完全无副作用」的旧表述作废：不删除行不等于
+> 不回填被删/被清空的值。
 
 ---
 
@@ -537,7 +553,7 @@ prod `system_config` **没有任何 KPI 开关行** ⇒ 走代码默认：
 | 脚本 | 旧调用 | 新调用 |
 |---|---|---|
 | `kpi_metric_backfill.py` | 直接裸跑（读环境变量） | **必须** `--database-url <DSN>`；写 `qa_metadata` 还须 `--allow-prod-write`；默认只预览，`--apply` 才落库 |
-| `seed_kpi_semantic_index.py` | 直接裸跑 | `--database-url <DSN>`（env `DATABASE_URL` 仅兜底）+ `--allow-prod-write`（prod）+ `--dry-run` 可预览 |
+| `seed_kpi_semantic_index.py` | 直接裸跑 | `--database-url <DSN>`（**只认显式参数，不读任何环境变量**；缺参直接 `SystemExit` 并提示）+ `--allow-prod-write`（prod）+ `--dry-run` 可预览 |
 | `kpi_metric_realdata.py` | —（新增） | `--database-url <DSN>`；写库/回填还需 `--apply-backfill`；prod 只读也须 `--allow-prod-write`（按库名的显式 opt-in） |
 
 > 为什么强制显式：本机 `backend/app/config.py:58` 的默认 `DATABASE_URL` 指向 **5432 的 OpenMetadata PG**，裸跑会打错库。

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -39,7 +40,11 @@ async def test_preflight_all_checks_pass_at_head(dbSession: AsyncSession) -> Non
         "bound_kpi_rows",
     ]
     assert all(r.passed for r in results), [r.detail for r in results if not r.passed]
-    assert results[0].detail.startswith("current=0132")
+    # 不钉死具体版本（新增迁移后 head 会前进），但必须**真的读到了版本**：
+    # 解析 `current=NNNN required>=NNNN` 并校验 current >= required。
+    match = re.search(r"^current=(\d{4}) required>=(\d{4})$", results[0].detail)
+    assert match is not None, results[0].detail
+    assert int(match.group(1)) >= int(match.group(2))
     assert "confdeltype='r'" in results[1].detail
 
 

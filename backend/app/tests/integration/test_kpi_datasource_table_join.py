@@ -220,16 +220,20 @@ async def test_datasource_name_fragment_does_not_leak_into_other_datasource(
 ) -> None:
     """B-3：含空白数据源名被切碎后，碎片不能冒充别的数据源的表名。
 
-    正确源 ``THBI Oracle`` 持有表 ``ORDERS``；错误源 ``WRONG_DS`` 恰好持有表
+    正确源 ``THBI Oracle`` 持有表 ``ORDERS``；错误源 ``AAA WRONG`` 恰好持有表
     ``THBI``（片段碰名）。``data_source = "THBI Oracle ORDERS"`` 未修复时会被
-    切成 ``THBI/ORACLE/ORDERS`` ⇒ ``THBI`` 给 ``WRONG_DS`` 产出 0.85 的
+    切成 ``THBI/ORACLE/ORDERS`` ⇒ ``THBI`` 给 ``AAA WRONG`` 产出 0.85 的
     ``legacy_table_exact``。
+
+    错误源名必须以 ``AAA`` 开头：建议按 ``(-score, name)`` 排序，若两个源都是
+    0.85，字典序会让 ``THBI Oracle`` 天然排第一 ⇒ 「正确源在 TOP」断言恒真。
+    改成 ``AAA WRONG`` 后，只有「0.85 压过 0.80」真的生效，正确源才可能在首位。
 
     必须**双向**断言：只断言正确源存在会假绿（错源仍可能并列出现）。
     """
     correct = await _addSource(dbSession, "THBI Oracle")
     await _addSchema(dbSession, correct.id, ["ORDERS"])
-    wrong = await _addSource(dbSession, "WRONG_DS")
+    wrong = await _addSource(dbSession, "AAA WRONG")
     await _addSchema(dbSession, wrong.id, ["THBI"])
     kpi = await _addKpi(dbSession, "TJ_KPI_DS_FRAGMENT", "THBI Oracle ORDERS")
 

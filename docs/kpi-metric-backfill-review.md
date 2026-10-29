@@ -41,16 +41,30 @@
 
 - **默认（不带 `--overwrite`）**：对已存在的指标 / 来源 / KPI 治理列**只填空值**，
   已有非空值一律不覆盖；也**不删除**任何 source 行 ⇒ 人工修订过的公式、owner、
-  治理列不会被脚本回退。
+  治理列不会被脚本回退。**但「只填空」会把人工删掉的 source 行重新插回、把人工
+  清空的 `[]` / `""` 再填回**——「不覆盖非空值」不等于「尊重人工删除」，
+  需要保留删除/清空结果的，必须先停用回填或改走人工流程。
 - **`--overwrite`**：全量重写 + 删除 plan 之外的 source 行。
-  **若目标指标当前是 `PUBLISHED`，写完后会被回退为 `DRAFT`，必须重新发布并
-  重新过发布闸门**（否则契约注入口径会与指标本体不一致）。
+  **只有带 `--overwrite` 时，已是 `PUBLISHED` 的指标才会被降回 `DRAFT`**；
+  默认（只填空）模式不动发布状态。被降级的指标必须重新发布并重新过发布闸门
+  （否则契约注入口径会与指标本体不一致）。
+- **落库是逐条 commit**：中途失败时已处理的条目**已经提交**，不会整体回滚。
+  失败后用 `--dry-run` 的 `created` / `updated` 计数与库内实际行数逐条复核，
+  再决定补跑哪些 KPI；不要假设「失败 = 一行都没写」。
+- **同名指标的 `metric_type` 不会被默认模式纠正**：若库里已有同名指标
+  `metric_type` 是 DB 默认 `MEASURE`、而本清单判为 `RATIO`，默认（只填空）模式
+  视为「已有非空值」不覆盖 ⇒ 技术形态仍是错的。需 `--overwrite`（并承担降
+  `DRAFT` 的后果）或人工改 `metric_type`。
 
 ## 正式库备份（T15-B，不可跳过）
 
 `--apply` 到 `qa_metadata`（prod 同源）时脚本会**自己先跑 pg_dump**：
-`/tmp/<table>_<YYYYMMDD>_<alembic_revision>.sql`（`ontology_metric` / `ontology_metric_source` / `kpi_catalog`），口令走 `PGPASSWORD` 环境变量、不进 argv。
-备份先写 `.tmp` 再原子替换；产物不存在或为空 ⇒ 脚本**拒绝写入**。
+`<系统临时目录>/kpi_metric_backups/<table>_<YYYYMMDD>_<alembic_revision>_<host>_<port>_<db>.sql`
+（`ontology_metric` / `ontology_metric_source` / `kpi_catalog`），口令走 `PGPASSWORD`
+环境变量、不进 argv。
+备份目录以 `0700` 创建、文件以 `0600` 独占创建（`O_EXCL|O_NOFOLLOW`，拒绝符号链接
+与覆盖）；文件名带目标库身份，dev / prod 同名库不会互相复用备份。产物不存在或为空
+⇒ 脚本**拒绝写入**。失败信息与 schema 提示里的密码会被打码。
 
 ## 逐条核对
 

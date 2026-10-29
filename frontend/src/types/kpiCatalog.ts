@@ -25,6 +25,16 @@ export interface KpiCatalog {
   revisionCount: number;
   status: KpiStatus;
   metricId: number | null;
+  /** L1 语义匹配关键词。 */
+  semanticKeywords: string[] | null;
+  /** 语义匹配阈值（0~1，后端默认 0.75）。 */
+  matchThreshold: number;
+  /** 结构化粒度键。 */
+  grainKeys: string[] | null;
+  /** 分子列名数组（治理侧声明，对账用）。 */
+  numeratorColumns: string[] | null;
+  /** 分母列名数组（治理侧声明，对账用）。 */
+  denominatorColumns: string[] | null;
   createdBy: string | null;
   createdTime: string | null;
   updatedTime: string | null;
@@ -59,6 +69,11 @@ export interface KpiCatalogCreate {
   version?: string;
   status?: KpiStatus;
   metricId?: number | null;
+  semanticKeywords?: string[];
+  matchThreshold?: number;
+  grainKeys?: string[];
+  numeratorColumns?: string[];
+  denominatorColumns?: string[];
   createdBy?: string;
 }
 
@@ -77,4 +92,9 @@ export interface KpiCatalogUpdate {
   version?: string;
   status?: KpiStatus;
   metricId?: number | null;
+  semanticKeywords?: string[] | null;
+  matchThreshold?: number | null;
+  grainKeys?: string[] | null;
+  numeratorColumns?: string[] | null;
+  denominatorColumns?: string[] | null;
 }

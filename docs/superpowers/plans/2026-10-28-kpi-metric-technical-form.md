@@ -2713,6 +2713,10 @@ git commit -m "feat: KPI 指标技术形态——灰度开关读取 + 对账审�
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
+import pytest
+
 from app.services.kpi_contract_builder import (
     ContractEntry,
     SourceClassRef,
@@ -2770,6 +2774,12 @@ def test_ratio_guidance_unknown_order_returns_none() -> None:
     assert ratioSqlGuidance(None) is None
 
 
+def test_ratio_guidance_only_for_ratio_metric_type() -> None:
+    """MEASURE 型指标即使残留 aggregation_order 也不发比率指引。"""
+    assert ratioSqlGuidance("WEIGHTED_RATIO", "RATIO") is not None
+    assert ratioSqlGuidance("WEIGHTED_RATIO", "MEASURE") is None
+
+
 def test_render_entry_includes_governance_five_tuple() -> None:
     entry = ContractEntry(
         kpi_code="KPI_A",
@@ -2809,6 +2819,19 @@ def test_render_entry_lists_source_classes_with_roles() -> None:
     assert "DWD_SUPPLIER（DENOMINATOR）" in text
 
 
+def test_render_entry_shows_source_table_when_differs() -> None:
+    """源表名与别名不同时要出现（表名是 NL2SQL 落地依据）。"""
+    entry = ContractEntry(
+        kpi_code="KPI_A",
+        kpi_name="指标A",
+        verdict="pass",
+        source_classes=(
+            SourceClassRef("DWD_INSPECTION", "dwd_inspection_t", "NUMERATOR"),
+        ),
+    )
+    assert "DWD_INSPECTION（NUMERATOR）→dwd_inspection_t" in renderContractEntry(entry)
+
+
 def test_render_block_is_empty_for_no_entries() -> None:
     assert renderContractBlock(()) == ""
 
@@ -2827,11 +2850,8 @@ def test_render_block_contains_all_entries() -> None:
 
 def test_contract_entry_is_immutable() -> None:
     entry = ContractEntry(kpi_code="KPI_A", kpi_name="指标A", verdict="pass")
-    try:
+    with pytest.raises(FrozenInstanceError):
         entry.verdict = "mismatch"  # type: ignore[misc]
-    except Exception:
-        return
-    raise AssertionError("ContractEntry 必须不可变")
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -2948,9 +2968,17 @@ class ContractEntry:
     degraded: bool = False
 
 
-def ratioSqlGuidance(aggregationOrder: str | None) -> tuple[str, str] | None:
-    """返回 (允许形态, 禁止形态)；非比率型返回 None。"""
+def ratioSqlGuidance(
+    aggregationOrder: str | None, metricType: str | None = None
+) -> tuple[str, str] | None:
+    """返回 (允许形态, 禁止形态)；非比率型返回 None。
+
+    ``metricType`` 传入时，只有 ``RATIO`` 才发指引 —— 否则一个 MEASURE 型指标
+    若历史上残留了 aggregation_order，会被误写成比率口径。
+    """
     if not aggregationOrder:
+        return None
+    if metricType is not None and metricType.strip().upper() != MetricType.RATIO.value:
         return None
     return _RATIO_SQL_GUIDANCE.get(aggregationOrder.strip().upper())
 
@@ -2988,7 +3016,7 @@ def renderContractEntry(entry: ContractEntry) -> str:
         )
     if entry.source_classes:
         rendered = "、".join(
-            f"{ref.classAlias}（{ref.role}）" for ref in entry.source_classes
+            _renderSourceClass(ref) for ref in entry.source_classes
         )
         lines.append(f"  - 源表与角色：{rendered}")
     lines.append(f"  - 对账状态：{entry.verdict}")
@@ -2998,6 +3026,15 @@ def renderContractEntry(entry: ContractEntry) -> str:
             "本口径不走确定性直通（Tier A）"
         )
     return "\n".join(lines)
+
+
+def _renderSourceClass(ref: SourceClassRef) -> str:
+    """源类渲染：别名（角色）+ 物理表（表名与别名不同时才追加）。"""
+    base = f"{ref.classAlias}（{ref.role}）"
+    table = (ref.sourceTable or "").strip()
+    if not table or table == ref.classAlias:
+        return base
+    return f"{base}→{table}"
 
 
 def renderContractBlock(entries: tuple[ContractEntry, ...]) -> str:
@@ -3069,12 +3106,9 @@ async def _loadSourceClasses(
     classRows = await session.execute(
         select(OntologyClass).where(OntologyClass.id.in_(classIds))
     )
-    aliasById = {
-        c.id: (c.class_alias or c.class_name) for c in classRows.scalars().all()
-    }
-    tableById = {
-        c.id: c.source_table for c in classRows.scalars().all()
-    }
+    classes = list(classRows.scalars().all())
+    aliasById = {c.id: (c.class_alias or c.class_name) for c in classes}
+    tableById = {c.id: c.source_table for c in classes}
     roleOrder = {"BASE": 0, "NUMERATOR": 1, "DENOMINATOR": 2, "FILTER": 3}
     ordered = sorted(sources, key=lambda s: (roleOrder.get(s.role, 9), s.class_id))
     return tuple(
@@ -3105,6 +3139,7 @@ async def buildKpiContractBlock(
     """构建 Tier B 的 KPI 契约块；无可注入内容时返回空串。
 
     开关 ``KPI_CONTRACT_INJECTION_ENABLED`` 关闭时直接返回空串（不查库）。
+    单个 KPI 构建失败只丢该条，不影响其余 KPI（spec §7.4 永不静默：写 warning）。
     """
     enabled = await readKpiMetricSwitch(session, SWITCH_CONTRACT_INJECTION, True)
     if not enabled:
@@ -3115,7 +3150,11 @@ async def buildKpiContractBlock(
         return ""
     entries: list[ContractEntry] = []
     for code in codes:
-        entry = await _buildEntry(session, code)
+        try:
+            entry = await _buildEntry(session, code)
+        except Exception:
+            logger.warning("KPI 契约条目构建失败，跳过 code=%s", code, exc_info=True)
+            continue
         if entry is not None:
             entries.append(entry)
     if not entries:
@@ -3124,12 +3163,17 @@ async def buildKpiContractBlock(
 
 
 async def _buildEntry(session: AsyncSession, kpiCode: str) -> ContractEntry | None:
-    """构建一个 KPI 的契约条目；mismatch（无法判定/不存在）时返回 None（不注入）。"""
+    """构建一个 KPI 的契约条目；mismatch / metric 缺失时返回 None（不注入）。"""
     kpi = await _loadKpi(session, kpiCode)
     if kpi is None:
         return None
     metric = await _loadMetric(session, kpi.metric_id)
-    result = reconcileMetric(_governanceOf(kpi), _techniqueOf(metric))
+    if metric is None:
+        # metric_id 为空或悬空 ⇒ Tier C（spec §7.4），不注入契约。
+        logger.warning("KPI 未挂靠可用本体指标，降级 Tier C code=%s", kpi.kpi_code)
+        return None
+    technique = _techniqueOf(metric)
+    result = reconcileMetric(_governanceOf(kpi), technique)
     try:
         await recordReconcileResult(
             session, kpiId=kpi.id, kpiCode=kpi.kpi_code, result=result
@@ -3143,7 +3187,7 @@ async def _buildEntry(session: AsyncSession, kpiCode: str) -> ContractEntry | No
             result.reasons(),
         )
         return None
-    guidance = ratioSqlGuidance(_techniqueOf(metric).aggregation_order)
+    guidance = ratioSqlGuidance(technique.aggregation_order, technique.metric_type)
     allowed, forbidden = guidance if guidance else (None, None)
     sourceClasses = await _loadSourceClasses(session, metric)
     return ContractEntry(
@@ -3156,11 +3200,11 @@ async def _buildEntry(session: AsyncSession, kpiCode: str) -> ContractEntry | No
         grain=kpi.grain,
         unit=kpi.unit,
         owner=kpi.owner,
-        metric_name=metric.metric_name if metric is not None else None,
-        metric_type=metric.metric_type if metric is not None else None,
-        agg_function=metric.agg_function if metric is not None else None,
-        aggregation_order=metric.aggregation_order if metric is not None else None,
-        grain_keys=tuple(metric.grain_keys or ()) if metric is not None else (),
+        metric_name=metric.metric_name,
+        metric_type=metric.metric_type,
+        agg_function=metric.agg_function,
+        aggregation_order=metric.aggregation_order,
+        grain_keys=tuple(metric.grain_keys or ()),
         source_classes=sourceClasses,
         allowed_sql_shape=allowed,
         forbidden_sql_shape=forbidden,
@@ -3175,7 +3219,7 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@loca
   uv run pytest app/tests/unit/test_kpi_contract_block.py -q
 ```
 
-Expected: PASS（12 passed）
+Expected: PASS（13 passed）
 
 - [ ] **Step 5: 提交**
 

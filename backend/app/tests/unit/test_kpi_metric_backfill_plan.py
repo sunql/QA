@@ -17,6 +17,7 @@ from sqlalchemy.exc import ProgrammingError
 
 import scripts.kpi_metric_backfill as cliModule
 from app.services.nl2sql_semantic_guard import measureColumnIdentifiers
+from app.tests._pg_support import resolveTestDatabaseUrl
 from scripts.kpi_metric_backfill import (
     PLAN,
     MeasurePlan,
@@ -31,6 +32,11 @@ from scripts.kpi_metric_backfill import (
     renderPreview,
     renderReviewChecklist,
     verifyPlan,
+)
+from scripts.kpi_metric_backfill_apply import (
+    _measureProblems,
+    _measureSchema,
+    _ResolvedClass,
 )
 
 EXPECTED_TIER_COUNTS = {"A": 4, "B": 5, "C": 3}
@@ -51,9 +57,12 @@ def test_plan_covers_twelve_kpis_and_has_unique_codes() -> None:
     assert all(p.formula for p in PLAN)  # 每条都有口径声明
 
 
-def test_buildPlans_returns_the_same_plan_set() -> None:
-    """`buildPlans()` 是 PLAN 的唯一访问入口（不是第二份真相）。"""
-    assert [p.kpiCode for p in buildPlans()] == [p.kpiCode for p in PLAN]
+def test_buildPlans_returns_twelve_unique_entries() -> None:
+    """入口有判别力：12 条、`metric_code`（kpiCode）唯一、指标名非空（M-3）。"""
+    plans = list(buildPlans())
+    assert len(plans) == 12
+    assert len({p.kpiCode for p in plans}) == 12
+    assert all(p.metricName for p in plans)
 
 
 def test_tier_distribution_is_a4_b5_c3() -> None:
@@ -217,7 +226,11 @@ def test_verify_plan_detects_missing_column() -> None:
         }
     )
     missing = verifyPlan(plan, index)
-    assert missing == ("DWD_PURCHASE_ORDER_LINE.PROMISED_RECEIPT_DATE",)
+    # 度量缺列 + M-6 的粒度键存在性校验（FACILITY_CODE 两张表都没有）
+    assert missing == (
+        "DWD_PURCHASE_ORDER_LINE.PROMISED_RECEIPT_DATE",
+        "GRAIN.FACILITY_CODE",
+    )
 
 
 def test_verify_plan_passes_when_all_columns_exist() -> None:
@@ -239,8 +252,10 @@ def test_verify_plan_accepts_table_keyed_index() -> None:
     """表名键索引同样可用（apply 内部按 source_table 解析后校验）。"""
     plan = next(p for p in PLAN if p.kpiCode == "KPI_SUPPLIER_OTD")
     index = {
-        "DWD_GOODS_RECEIPT_LINE": frozenset({"RECEIPT_DATE"}),
-        "DWD_PURCHASE_ORDER_LINE": frozenset({"PROMISED_RECEIPT_DATE"}),
+        "DWD_GOODS_RECEIPT_LINE": frozenset({"RECEIPT_DATE", "SUPPLIER_CODE"}),
+        "DWD_PURCHASE_ORDER_LINE": frozenset(
+            {"PROMISED_RECEIPT_DATE", "FACILITY_CODE"}
+        ),
     }
     assert verifyPlan(plan, index) == ()
 
@@ -258,26 +273,33 @@ def test_verify_plan_accepts_arithmetic_expression() -> None:
         classTable="DWD_PURCHASE_INVOICE_LINE",
         classAlias="DWD_PURCHASE_INVOICE_LINE",
     )
-    plan = replace(base, numerator=arithmetic, denominator=None, classRefs=())
+    plan = replace(
+        base,
+        numerator=arithmetic,
+        denominator=None,
+        classRefs=(("DWD_PURCHASE_INVOICE_LINE", "NUMERATOR"),),
+        grainKeys=("QUANTITY",),
+    )
     assert verifyPlan(
         plan, {"DWD_PURCHASE_INVOICE_LINE": frozenset({"UNIT_PRICE_NET", "QUANTITY"})}
     ) == ()
     assert verifyPlan(
         plan, {"DWD_PURCHASE_INVOICE_LINE": frozenset({"UNIT_PRICE_NET"})}
-    ) == ("DWD_PURCHASE_INVOICE_LINE.QUANTITY",)
+    ) == ("DWD_PURCHASE_INVOICE_LINE.QUANTITY", "GRAIN.QUANTITY")
 
 
 # ── 目标库守卫（T15-W 四道闸）────────────────────────────────────────
 
 
 def test_safe_target_rejects_unknown_database() -> None:
-    with pytest.raises(SystemExit):
+    """M-2：`match=` 必须能区分「是谁拒的」（白名单），否则写错分支也能绿。"""
+    with pytest.raises(SystemExit, match="不在白名单内"):
         assertSafeTarget("postgresql+asyncpg://u:p@host:5432/qa_system_prod")
 
 
 def test_safe_target_rejects_production_database_without_opt_in() -> None:
     """真生产库名（与 dev 同名）⇒ 白名单放行，但缺 opt-in ⇒ 必须拒绝。"""
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit, match="是正式库"):
         assertSafeTarget("postgresql+asyncpg://u:p@host:5432/qa_metadata")
 
 
@@ -359,6 +381,40 @@ async def test_session_target_assertion_rejects_mismatched_database() -> None:
         await _assertSameDatabase(_FakeSession("qa_metadata"), "qa_metadata_test_t15")
 
 
+# ── M-1：度量类解析不得静默写 class_id=None / 别名必须一致 ─────────────
+
+
+def _resolvedOtd() -> dict[str, _ResolvedClass]:
+    return {
+        "DWD_GOODS_RECEIPT_LINE": _ResolvedClass(3, "DWD_GOODS_RECEIPT_LINE"),
+        "DWD_PURCHASE_ORDER_LINE": _ResolvedClass(14, "DWD_PURCHASE_ORDER_LINE"),
+    }
+
+
+def test_measure_problems_rejects_alias_mismatch() -> None:
+    """M-1：class 的 source_table 与度量 classAlias 对不上 ⇒ 必须被拒。"""
+    base = next(p for p in PLAN if p.kpiCode == "KPI_SUPPLIER_OTD")
+    plan = replace(base, numerator=replace(base.numerator, classAlias="OTHER_TABLE"))
+
+    problems = _measureProblems(plan, _resolvedOtd())
+    assert problems
+    assert "classAlias" in problems[0]
+
+    with pytest.raises(ValueError, match="不一致"):
+        _measureSchema(plan.numerator, _resolvedOtd())
+
+
+def test_measure_problems_rejects_unresolved_class() -> None:
+    """M-1：解析不到类 ⇒ 报「未解析」，绝不静默写 class_id=None。"""
+    base = next(p for p in PLAN if p.kpiCode == "KPI_SUPPLIER_OTD")
+    resolved = {"DWD_PURCHASE_ORDER_LINE": _ResolvedClass(14, "DWD_PURCHASE_ORDER_LINE")}
+
+    problems = _measureProblems(base, resolved)
+    assert any("未解析" in item for item in problems)
+    with pytest.raises(ValueError, match="class_id=None"):
+        _measureSchema(base.numerator, resolved)
+
+
 # ── CLI 纯函数（预览两类计数 / 审核清单 / 备份闸 / 错误提示）────────────
 
 
@@ -372,14 +428,37 @@ def test_preview_reports_new_and_matched_counts_separately() -> None:
     )
     preview = renderPreview(PLAN, context)
     assert "新建本体指标：10 条" in preview
-    assert "匹配到已有指标（只补结构化字段）：2 条" in preview
+    assert "匹配到已有指标（默认只填空值；`--overwrite` 才覆盖）：2 条" in preview
+    assert "`--overwrite` 语义" in preview
+    assert "回退为 DRAFT" in preview
     assert "物理列缺失（将降级）：DWD_X.MISSING_COL" in preview
     assert "本体类未解析（将跳过）：DWD_Y（BASE）" in preview
 
 
 def test_preview_without_context_treats_everything_as_new() -> None:
     assert "新建本体指标：12 条" in renderPreview(PLAN)
-    assert "匹配到已有指标（只补结构化字段）：0 条" in renderPreview(PLAN)
+    assert (
+        "匹配到已有指标（默认只填空值；`--overwrite` 才覆盖）：0 条" in renderPreview(PLAN)
+    )
+
+
+def test_preview_warns_published_metrics_revert_to_draft() -> None:
+    """FIX-I1：预览必须点名「哪些已 PUBLISHED 的指标在 --overwrite 下会降级」。"""
+    context = cliModule.PreviewContext(
+        existingMetricNames=frozenset({PLAN[0].metricName}),
+        publishedMetricNames=frozenset({PLAN[0].metricName}),
+    )
+    preview = renderPreview(PLAN, context)
+    assert "已存在且已 PUBLISHED 的指标" in preview
+    assert PLAN[0].metricName in preview
+
+
+def test_checklist_documents_overwrite_revert_semantics() -> None:
+    """FIX-S1：清单必须写清 --overwrite 会让 PUBLISHED 回退 DRAFT。"""
+    checklist = renderReviewChecklist(PLAN)
+    assert "`--overwrite`" in checklist
+    assert "回退为 `DRAFT`" in checklist
+    assert "只填空值" in checklist
 
 
 def test_checklist_states_tier_b_injection_default_on_decision() -> None:
@@ -450,10 +529,13 @@ def test_write_checklist_noop_and_relative_path(
     assert absolute.exists()
 
 
-def test_backup_path_uses_today_and_table_name() -> None:
-    path = cliModule._backupPath("ontology_metric")
+def test_backup_path_uses_today_table_and_revision() -> None:
+    """M-4：文件名带 alembic revision，旧版本/半截备份可辨识。"""
+    path = cliModule._backupPath("ontology_metric", "0135")
     assert path.parent == Path("/tmp")
-    assert path.name.startswith("ontology_metric_") and path.suffix == ".sql"
+    assert path.name.startswith("ontology_metric_")
+    assert path.stem.endswith("_0135")
+    assert path.suffix == ".sql"
 
 
 def _fakeDump(status: int, stderr: bytes = b"") -> object:
@@ -465,7 +547,9 @@ def test_pg_dump_accepts_missing_table_and_rejects_other_errors(
 ) -> None:
     out = tmp_path / "a.sql"
 
-    def _runSkip(command: list[str], stdout: object, stderr: int) -> object:
+    def _runSkip(
+        command: list[str], stdout: object, stderr: int, env: dict[str, str]
+    ) -> object:
         stdout.write(b"")  # type: ignore[attr-defined]
         return _fakeDump(1, b'pg_dump: error: no matching tables were found')
 
@@ -476,15 +560,47 @@ def test_pg_dump_accepts_missing_table_and_rejects_other_errors(
     monkeypatch.setattr(
         cliModule.subprocess,
         "run",
-        lambda command, stdout, stderr: _fakeDump(1, b"boom"),
+        lambda command, stdout, stderr, env: _fakeDump(1, b"boom"),
     )
     with pytest.raises(SystemExit, match="备份失败"):
         cliModule._pgDump("postgresql+asyncpg://u:p@h:5432/qa_metadata", "t", out)
 
 
+def test_pg_dump_argv_never_contains_password(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIX-I2：口令只走 ``PGPASSWORD`` 环境变量，argv 里永不出现。"""
+    captured: dict[str, object] = {}
+
+    def _run(command: list[str], stdout: object, stderr: int, env: dict[str, str]) -> object:
+        captured["command"] = command
+        captured["env"] = env
+        stdout.write(b"-- dump")  # type: ignore[attr-defined]
+        return _fakeDump(0, b"")
+
+    monkeypatch.setattr(cliModule.subprocess, "run", _run)
+    dsn = "postgresql+asyncpg://qa_user:Tr0ub4dor-Secret@localhost:5433/qa_metadata"
+    target = tmp_path / "a.sql"
+
+    cliModule._pgDump(dsn, "ontology_metric", target)
+
+    command = captured["command"]
+    env = captured["env"]
+    assert isinstance(command, list) and isinstance(env, dict)
+    joined = " ".join(command)
+    assert "Tr0ub4dor-Secret" not in joined
+    assert "--dbname" not in command
+    assert env["PGPASSWORD"] == "Tr0ub4dor-Secret"
+    assert "-d" in command and "qa_metadata" in command
+    assert "-U" in command and "qa_user" in command
+    assert target.exists() and not target.with_name(target.name + ".tmp").exists()
+
+
 def test_pg_dump_rejects_non_postgres_dsn(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="PostgreSQL"):
         cliModule._pgDump("sqlite:///x.db", "t", tmp_path / "a.sql")
+    with pytest.raises(SystemExit, match="PostgreSQL"):
+        cliModule._pgDump("not-a-dsn", "t", tmp_path / "a.sql")
 
 
 def test_ensure_prod_backup_requires_all_tables(
@@ -492,18 +608,19 @@ def test_ensure_prod_backup_requires_all_tables(
 ) -> None:
     monkeypatch.setattr(cliModule, "_BACKUP_DIR", tmp_path)
 
-    def _write(command: list[str], table: str, path: Path) -> None:
+    def _write(databaseUrl: str, table: str, path: Path) -> None:
         path.write_bytes(b"-- dump")
 
     monkeypatch.setattr(cliModule, "_pgDump", _write)
-    paths = cliModule._ensureProdBackup("postgresql://u:p@h/qa_metadata")
+    paths = cliModule._ensureProdBackup("postgresql://u:p@h/qa_metadata", "0135")
     assert len(paths) == len(cliModule._BACKUP_TABLES)
+    assert all("0135" in path.name for path in paths)
 
     for path in paths:
         path.unlink()
     monkeypatch.setattr(cliModule, "_pgDump", lambda *a, **k: None)
     with pytest.raises(SystemExit, match="备份不完整"):
-        cliModule._ensureProdBackup("postgresql://u:p@h/qa_metadata")
+        cliModule._ensureProdBackup("postgresql://u:p@h/qa_metadata", "0135")
 
 
 def test_print_banner_and_summary(
@@ -517,8 +634,9 @@ def test_print_banner_and_summary(
         updated=("B",),
         degraded=("C",),
         skipped=("D",),
-        unboundDataSource=("E",),
-        unresolvedClasses=("F",),
+        unbound_data_source=("E",),
+        unresolved_classes=("F",),
+        reverted_to_draft=("G",),
     )
     cliModule._printSummary(summary, "qa_metadata")
     out = capsys.readouterr().out
@@ -526,6 +644,120 @@ def test_print_banner_and_summary(
     assert "备份：/tmp" not in out  # 用的是 tmp_path 而不是硬编码 /tmp
     assert "created=1 updated=1 degraded=1 skipped=1" in out
     assert "未绑定数据源的 KPI（1 条" in out
+    assert "回退为 DRAFT" in out and "G" in out
+
+
+def _cliArgs(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "apply": False,
+        "allow_prod_write": False,
+        "overwrite": False,
+        "embed": False,
+        "out": None,
+        "only": None,
+        "database_url": "postgresql+asyncpg://u:p@localhost:5434/qa_metadata_test_t15",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class _FakeEngine:
+    def __init__(self) -> None:
+        self.disposed = False
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+
+class _FakeSessionContext:
+    def __init__(self, session: object) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> object:
+        return self._session
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class _FakeFactory:
+    """只满足 `_run` 的调用面：`factory()` 异步上下文 + `kw["bind"].dispose()`。"""
+
+    def __init__(self) -> None:
+        self.kw = {"bind": _FakeEngine()}
+
+    def __call__(self) -> _FakeSessionContext:
+        return _FakeSessionContext(object())
+
+
+async def test_run_backs_up_before_first_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-4 接线：prod + --apply ⇒ 备份**必须先于**任何写库调用。"""
+    events: list[str] = []
+    dump = tmp_path / "backup.sql"
+    dump.write_bytes(b"-- dump")
+    factory = _FakeFactory()
+
+    monkeypatch.setattr(cliModule, "buildSessionFactory", lambda _dsn: factory)
+    monkeypatch.setattr(
+        cliModule, "assertSafeTarget", lambda _dsn, allowProdWrite=False: "qa_metadata"
+    )
+
+    async def _same(_session: object, _name: str) -> None:
+        events.append("assert-target")
+
+    async def _context(_session: object, _plans: object) -> cliModule.PreviewContext:
+        events.append("preview")
+        return cliModule.PreviewContext()
+
+    async def _apply(_session: object, _plans: object, **_kwargs: object):
+        events.append("apply")
+        return cliModule.ApplySummary()
+
+    async def _revision(_dsn: str) -> str:
+        return "0135"
+
+    def _backup(_dsn: str, revision: str) -> tuple[Path, ...]:
+        assert revision == "0135"
+        events.append("backup")
+        return (dump,)
+
+    monkeypatch.setattr(cliModule, "_assertSameDatabase", _same)
+    monkeypatch.setattr(cliModule, "_previewContext", _context)
+    monkeypatch.setattr(cliModule, "applyPlans", _apply)
+    monkeypatch.setattr(cliModule, "_alembicRevision", _revision)
+    monkeypatch.setattr(cliModule, "_ensureProdBackup", _backup)
+
+    args = _cliArgs(
+        apply=True,
+        allow_prod_write=True,
+        database_url="postgresql+asyncpg://u:p@localhost:5433/qa_metadata",
+    )
+    assert await cliModule._run(args) == 0
+    assert "backup" in events and "apply" in events
+    assert events.index("backup") < events.index("apply")
+    assert factory.kw["bind"].disposed is True
+
+
+async def test_run_reports_connection_refused_without_traceback() -> None:
+    """FIX-I4：端口拒绝（OSError）⇒ SystemExit 友好提示，不吐 traceback。"""
+    args = _cliArgs(
+        database_url="postgresql+asyncpg://qa_user:pw@127.0.0.1:5999/qa_metadata_test_t15"
+    )
+    with pytest.raises(SystemExit, match="连接目标库失败"):
+        await cliModule._run(args)
+
+
+async def test_run_reports_bad_password_without_leaking_it() -> None:
+    """FIX-I4：错误口令（asyncpg InvalidPassword）⇒ SystemExit 且口令被打码。"""
+    badPassword = "definitely-wrong-password"
+    dsn = resolveTestDatabaseUrl()
+    assert "qa_pg_dev_2026" in dsn
+    args = _cliArgs(database_url=dsn.replace("qa_pg_dev_2026", badPassword))
+    with pytest.raises(SystemExit, match="连接目标库失败") as excinfo:
+        await cliModule._run(args)
+    assert badPassword not in str(excinfo.value)
 
 
 def test_main_help_exits_zero() -> None:

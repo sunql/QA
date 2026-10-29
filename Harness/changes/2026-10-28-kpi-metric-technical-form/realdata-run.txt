@@ -373,3 +373,18 @@ NOTE  8 step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失�
   - S8 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
 RESULT: FAIL steps=9 passed=0 failed=1 skipped=8
 INFO  跳过步骤数 = 8；例如：迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+
+========================================================================
+## E. 2026-10-30 迁移后 prod 只读复跑（F8 真实 prod 证据）
+
+- 前置：备份 /tmp/ontology_metric_20261030.sql + /tmp/kpi_catalog_20261030.sql（均含
+  dump complete 标记；catalog 12 行 COPY 完整）后，alembic 0135 → 0137。
+- 命令：`kpi_metric_realdata.py --database-url <prod 5433 DSN> --allow-prod-write`（只读，未加 --apply-backfill）
+- RESULT: SKIP steps=9 passed=4 failed=0 skipped=5（退出码 2 = 无 FAIL 有 SKIP）
+- S1 全 PASS：0137 / ontology_metric 9 列 / kpi_catalog 3 列 / source 表 + UNIQUE + 索引
+- S2 PASS：12 KPI（tier A4/B5/C3）；tier A 物理列 4/4 齐备；已挂靠 0（未回填）
+- **S4 SKIP 文案 =「目标库是正式库：…prod 一律不写」⇒ F8（isProd 短路在真实 prod 生效），
+  此前只有单测证据（复审遗留项关闭）**
+- S3/S5/S7.2/S9 SKIP：回填未落库 + 无 semantic_keywords，符合预期（≠ 通过）
+- 对比 D 段（0135 时期）：S1 由 FAIL 转 PASS，S4 SKIP 文案由「迁移未应用」转为「正式库不写开关」，
+  其余 SKIP 语义一致 —— 修复未引入回归的结论在 0137 上继续成立。

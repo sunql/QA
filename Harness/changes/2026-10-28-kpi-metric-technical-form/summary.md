@@ -3,7 +3,7 @@
 - **日期**：2026-10-28（设计）/ 2026-10-29（实施完成）
 - **作者**：Claude（与用户逐节确认）
 - **Phase**：Phase 6.7 指标技术形态治理
-- **状态**：**已实施，待部署验证**（P1 + P1-数据工具链已落地；tier 分布 **A4 / B5 / C3**；prod 迁移/回填未执行，见 §11）
+- **状态**：**已实施；prod 已迁移（0137），回填/关键词待业务审核后执行**（P1 + P1-数据工具链已落地；tier 分布 **A4 / B5 / C3**；见 §11）
 - **分支**：`feat/kpi-metric-technical-form`
 - **Spec 路径**：[`docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md`](../../docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md)（608 行）
 - **Spec commit**：`4a4f736f`（分支 `docs/kpi-metric-technical-form-spec`，base `main` @ `3ecd780c`）
@@ -12,7 +12,7 @@
   - predecessor：[feat-complex-metric-pipeline](../feat-complex-metric-pipeline/summary.md)（辛普森悖论口径基线，`aggregation_order` 语义来源）
   - predecessor：[2026-10-18-kpi-datasource-write-flow-spec](../2026-10-18-kpi-datasource-write-flow-spec/summary.md)（`datasource_id` 写入流；本项闸门条件⑤依赖它）
   - **未合并分支**：[kpi-l1-metric-id](../../../../Harness/changes/kpi-l1-metric-id/summary.md)（`feat/kpi-l1-metric-id` @ `fd84d092`；B1–B5 —— **本项不复用其 B2/B3**，处置见 §2.4）
-- **迁移版本**：`0136_metric_structured`（已落地）、`0137_metric_source_unique`（已落地）；分支 head = `0137`，**prod 仍为 `0135`**
+- **迁移版本**：`0136_metric_structured`（已落地）、`0137_metric_source_unique`（已落地）；分支 head = `0137`，**prod 已于 2026-10-30 迁移到 `0137`**（迁移前备份见 §11.3）
 - **实跑证据**：[`realdata-run.txt`](realdata-run.txt)（prod 只读 + 隔离测试库回填幂等的完整 stdout）
 - **MEMORY**：[`qa-system-kpi-metric-technical-form-design.md`](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-kpi-metric-technical-form-design.md)
 
@@ -543,17 +543,17 @@ prod `system_config` **没有任何 KPI 开关行** ⇒ 走代码默认：
 - [x] prod 备份受影响表（**2026-10-30 已完成**）：`/tmp/ontology_metric_20261030.sql`（0 行，仅结构）
   + `/tmp/kpi_catalog_20261030.sql`（12 行，COPY 数据完整，两份均含 dump complete 标记）；
   `ontology_class`（54 行）迁移不改动、`ontology_metric_source` 在 0136 前尚不存在，均无需备份
-- [ ] prod 迁移 `0136` / `0137`（**尚未执行**）
+- [x] prod 迁移 `0136` / `0137`（**2026-10-30 完成**：alembic `0135→0137`；验证 9+3 列全到、
+  `ontology_metric_source` 建表 + UNIQUE 三元组 + class_id 索引、行数不变 catalog=12/metric=0）
+- [x] **迁移后在真实 prod 复验 F8**（复审遗留）：2026-10-30 prod 只读 realdata，S4 显示
+  「目标库是正式库：…prod 一律不写」SKIP（非「迁移未应用」FAIL），failed=0 / passed=4 / skipped=5
+  （S3/S5/S7.2/S9 因回填未落库 SKIP，符合预期）⇒ F8 具备真实 prod 证据
 - [ ] 业务方审核 [`docs/kpi-metric-backfill-review.md`](../../../docs/kpi-metric-backfill-review.md)（12 新建 / 0 匹配）
 - [ ] **人工**发起 `kpi_metric_backfill.py --database-url <prod DSN> --apply --allow-prod-write`（S9 语义已在隔离测试库证明幂等；prod 未跑）
 - [ ] 补齐 `semantic_keywords` / `datasource_id`（12/12 仍为 NULL）
 - [ ] 决定 §11.2 的开关策略（先关后开 / 接受默认）
 - [ ] 治理列对齐后重跑 `kpi_metric_realdata.py`，确认 verdict 从 `mismatch` 转 `pass` 且契约块非空
 - [ ] `security-reviewer` 结论 + compose 冒烟（SSOT 清单另两项，**不在 Task 16 范围**）
-- [ ] **迁移应用后在真实 prod 上复验 F8**（复审遗留）：prod 当前 0135，S4 无论是否带
-  isProd 短路都因「迁移未应用」SKIP ⇒ F8（S4 在 prod 不读不写任何开关）目前**只有单测证据**
-  （`test_kpi_metric_realdata_prod_guards.py`），需在已迁移 prod 上跑一次只读 realdata，
-  确认 S4 显示「正式库不写开关」的 SKIP 而非「迁移未应用」的 SKIP
 - [ ] **单独立项（复审 Important #2，本波不修）**：`MetricTechniqueForm` 只对
   RATIO/DIFFERENCE 渲染分母行（`MetricTechniqueForm.tsx:174-183`），而 MEASURE 指标携带
   历史分母是合法状态（后端 schema 不禁止、默认回填可形成）⇒ 用户编辑这种指标只改名字保存，

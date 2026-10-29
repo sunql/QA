@@ -4559,6 +4559,7 @@ git commit -m "fix: KPI 语义匹配缓存三洞——按 id 失效（改名残�
 - Modify: `backend/app/services/ontology_service.py`（`createMetric` / `updateMetric` **写入新列** + 发布前过闸）
 - Test: `backend/app/tests/unit/test_kpi_metric_publish_gate.py`（新建，纯函数）
 - Test: `backend/app/tests/integration/test_kpi_metric_publish_gate_api.py`（新建，服务层链路）
+- Test: `backend/app/tests/integration/test_kpi_metric_publish_gate_http.py`（新建，HTTP 链路：unknown 放行 / mismatch 拦截 / 409 中文正文）
 - Test: `backend/app/tests/integration/test_kpi_metric_persistence.py`（新建，新列落库）
 
 **Interfaces:**
@@ -4590,6 +4591,17 @@ KPI: DRAFT → PUBLISHED ⟸
 > 治理侧在 KPI 上，若指标发布也要求治理 pass，则「KPI 要指标已发布 / 指标要 KPI 已发布」
 > 互锁，死锁。指标方向只校验**技术侧自洽**（层 1 / 层 3 不 mismatch）+
 > 关联 KPI **不得 mismatch**（unknown 放行）。
+
+> 📌 **2026-10-29 修复回路补记（计划缺陷已修，样例代码同步）**：
+> 1. 原样例把 `needsDenominator`（RATIO + DIFFERENCE）与「比率聚合阶」写在同一分支
+>    ⇒ DIFFERENCE 被强制要求 `WEIGHTED_RATIO` / `AVG_OF_RATIOS`，与对账层
+>    `_checkRatio`（只对 RATIO 生效）自相矛盾，差值型在闸门全开后永远无法发布。
+>    已拆为 `_denominatorItems`（RATIO + DIFFERENCE 需要分母）与 **仅 RATIO** 的
+>    比率聚合阶判定；DIFFERENCE 允许 `aggregation_order=NONE`。
+> 2. 原样例把 `layer2.reasons()`（英文 reason 码）拼进用户可见 409 正文，
+>    中文 `ReconcileFinding.detail` 被丢弃、`MSG_KPI_RECONCILE_FINDING` 成死代码。
+>    已改为 `renderReconcileFindings`（中文层名 + 中文 detail）渲染正文，
+>    reason 码只进 `enforce*` 的 warn 日志。
 
 ---
 
@@ -4839,6 +4851,7 @@ from app.services.kpi_metric_reconcile import (
     GovernanceSpec,
     MeasureSpec,
     MetricTechnique,
+    ReconcileFinding,
     reconcileExecutableVsStructured,
     reconcileGovernanceVsTechnique,
     reconcileTechniqueInternal,
@@ -4860,6 +4873,9 @@ from app.services.messages_zh import (
     MSG_KPI_GATE_NO_EXECUTION_SOURCE,
     MSG_KPI_GATE_RECONCILE_MISMATCH,
     MSG_KPI_GATE_RECONCILE_UNKNOWN,
+    MSG_KPI_RECONCILE_FINDING,
+    MSG_KPI_RECONCILE_FINDING_NO_DETAIL,
+    MSG_KPI_RECONCILE_LAYER_NAMES,
 )
 
 logger = logging.getLogger(__name__)
@@ -4876,11 +4892,16 @@ class GateItem:
 
 @dataclass(frozen=True)
 class GateResult:
-    """闸门结果（不可变）。"""
+    """闸门结果（不可变）。
+
+    ``entityId`` 在 create 路径上可能是 None（闸门在 flush 之前触发）。
+    ``reasonCodes`` 是英文对账码（只进 warn 日志，不进用户正文）。
+    """
 
     entityType: str
-    entityId: int
+    entityId: int | None
     items: tuple[GateItem, ...]
+    reasonCodes: tuple[str, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -4896,6 +4917,19 @@ class GateResult:
         )
 
 
+def renderReconcileFindings(findings: tuple[ReconcileFinding, ...]) -> str:
+    """对账 findings → 用户可见中文正文（中文层名 + 中文 detail）。"""
+    if not findings:
+        return MSG_KPI_RECONCILE_FINDING_NO_DETAIL
+    return "；".join(
+        MSG_KPI_RECONCILE_FINDING.format(
+            layer=MSG_KPI_RECONCILE_LAYER_NAMES.get(f.layer, f.layer),
+            detail=f.detail or MSG_KPI_RECONCILE_FINDING_NO_DETAIL,
+        )
+        for f in findings
+    )
+
+
 def buildKpiGateItems(
     *,
     metricId: int | None,
@@ -4909,12 +4943,11 @@ def buildKpiGateItems(
     hasExecution = bool(executionSource) and (
         executionSource != MetricExecutionSource.NONE.value
     )
+    detail = reconcileDetail or MSG_KPI_RECONCILE_FINDING_NO_DETAIL
     if reconcileVerdict == VERDICT_MISMATCH:
-        reconcileMessage = MSG_KPI_GATE_RECONCILE_MISMATCH.format(
-            detail=reconcileDetail or "口径不一致"
-        )
+        reconcileMessage = MSG_KPI_GATE_RECONCILE_MISMATCH.format(detail=detail)
     else:
-        reconcileMessage = MSG_KPI_GATE_RECONCILE_UNKNOWN
+        reconcileMessage = MSG_KPI_GATE_RECONCILE_UNKNOWN.format(detail=detail)
     return (
         GateItem("metric_linked", MSG_KPI_GATE_MISSING_METRIC, metricId is not None),
         GateItem(
@@ -4934,6 +4967,82 @@ def buildKpiGateItems(
     )
 
 
+def _baseMetricItems(
+    *,
+    metricType: str,
+    numeratorMeasure: object | None,
+    executionSource: str | None,
+    grainKeys: tuple[str, ...],
+) -> tuple[GateItem, ...]:
+    """本体指标自身的基础 4 项。"""
+    hasExecution = bool(executionSource) and (
+        executionSource != MetricExecutionSource.NONE.value
+    )
+    return (
+        GateItem("metric_type", MSG_KPI_GATE_METRIC_NO_TYPE, bool(metricType)),
+        GateItem(
+            "numerator",
+            MSG_KPI_GATE_METRIC_NO_NUMERATOR,
+            numeratorMeasure is not None,
+        ),
+        GateItem(
+            "execution_source",
+            MSG_KPI_GATE_NO_EXECUTION_SOURCE,
+            hasExecution,
+        ),
+        GateItem("grain", MSG_KPI_GATE_METRIC_NO_GRAIN, bool(grainKeys)),
+    )
+
+
+def _denominatorItems(
+    *,
+    metricType: str,
+    denominatorMeasure: object | None,
+    aggregationOrder: str | None,
+) -> tuple[GateItem, ...]:
+    """分母 + 比率聚合阶。
+
+    RATIO 与 DIFFERENCE 都需要分母（DIFFERENCE 的分母语义是减数）；
+    **只有 RATIO** 需要合法的比率聚合阶（差值型没有辛普森悖论，
+    ``MetricAggregationOrder.NONE`` 即为非比率型指标的合法值）。
+    """
+    if metricType not in _TYPES_REQUIRING_DENOMINATOR:
+        return ()
+    items = (
+        GateItem(
+            "denominator",
+            MSG_KPI_GATE_METRIC_NO_DENOMINATOR,
+            denominatorMeasure is not None,
+        ),
+    )
+    if metricType != MetricType.RATIO.value:
+        return items
+    order = (aggregationOrder or "").strip().upper()
+    return items + (
+        GateItem(
+            "aggregation_order",
+            MSG_KPI_GATE_METRIC_NO_AGGREGATION_ORDER,
+            order in _RATIO_AGGREGATION_ORDERS,
+        ),
+    )
+
+
+def _qualityItems(
+    *, degraded: bool, linkedMismatch: tuple[str, ...]
+) -> tuple[GateItem, ...]:
+    """技术形态降级 + 关联 KPI 对账 2 项。"""
+    return (
+        GateItem("degraded", MSG_KPI_GATE_METRIC_DEGRADED, not degraded),
+        GateItem(
+            "linked_mismatch",
+            MSG_KPI_GATE_METRIC_LINKED_MISMATCH.format(
+                items="；".join(linkedMismatch)
+            ),
+            not linkedMismatch,
+        ),
+    )
+
+
 def buildMetricGateItems(
     *,
     metricType: str | None,
@@ -4947,53 +5056,20 @@ def buildMetricGateItems(
 ) -> tuple[GateItem, ...]:
     """本体指标发布闸门。纯函数，无 IO。"""
     metricTypeValue = (metricType or "").strip().upper()
-    needsDenominator = metricTypeValue in _TYPES_REQUIRING_DENOMINATOR
-    order = (aggregationOrder or "").strip().upper()
-    hasExecution = bool(executionSource) and (
-        executionSource != MetricExecutionSource.NONE.value
-    )
-    items: list[GateItem] = [
-        GateItem("metric_type", MSG_KPI_GATE_METRIC_NO_TYPE, bool(metricTypeValue)),
-        GateItem(
-            "numerator",
-            MSG_KPI_GATE_METRIC_NO_NUMERATOR,
-            numeratorMeasure is not None,
-        ),
-        GateItem(
-            "execution_source",
-            MSG_KPI_GATE_NO_EXECUTION_SOURCE,
-            hasExecution,
-        ),
-        GateItem("grain", MSG_KPI_GATE_METRIC_NO_GRAIN, bool(grainKeys)),
-    ]
-    if needsDenominator:
-        items.append(
-            GateItem(
-                "denominator",
-                MSG_KPI_GATE_METRIC_NO_DENOMINATOR,
-                denominatorMeasure is not None,
-            )
+    return (
+        _baseMetricItems(
+            metricType=metricTypeValue,
+            numeratorMeasure=numeratorMeasure,
+            executionSource=executionSource,
+            grainKeys=grainKeys,
         )
-        items.append(
-            GateItem(
-                "aggregation_order",
-                MSG_KPI_GATE_METRIC_NO_AGGREGATION_ORDER,
-                order in _RATIO_AGGREGATION_ORDERS,
-            )
+        + _denominatorItems(
+            metricType=metricTypeValue,
+            denominatorMeasure=denominatorMeasure,
+            aggregationOrder=aggregationOrder,
         )
-    items.append(
-        GateItem("degraded", MSG_KPI_GATE_METRIC_DEGRADED, not degraded)
+        + _qualityItems(degraded=degraded, linkedMismatch=linkedMismatch)
     )
-    items.append(
-        GateItem(
-            "linked_mismatch",
-            MSG_KPI_GATE_METRIC_LINKED_MISMATCH.format(
-                items="；".join(linkedMismatch)
-            ),
-            not linkedMismatch,
-        )
-    )
-    return tuple(items)
 
 
 def _techniqueOf(metric: OntologyMetric) -> MetricTechnique:
@@ -5033,11 +5109,16 @@ async def checkMetricPublishGate(
     )
     linked = await _loadLinkedKpis(session, metric.id)
     linkedMismatch: list[str] = []
+    reasonCodes: list[str] = list(layer1.reasons() + layer3.reasons())
     for kpi in linked:
         governance = _governanceOf(kpi)
         layer2 = reconcileGovernanceVsTechnique(governance, tech)
+        # 只拦 mismatch；unknown 放行（打破 KPI / 指标互锁）
         if layer2.verdict == VERDICT_MISMATCH:
-            linkedMismatch.append(f"{kpi.kpi_code}: {layer2.reasons()}")
+            linkedMismatch.append(
+                f"{kpi.kpi_code}: {renderReconcileFindings(layer2.findings)}"
+            )
+            reasonCodes.extend(layer2.reasons())
     items = buildMetricGateItems(
         metricType=tech.metric_type,
         numeratorMeasure=tech.numerator,
@@ -5049,7 +5130,10 @@ async def checkMetricPublishGate(
         linkedMismatch=tuple(linkedMismatch),
     )
     return GateResult(
-        entityType="ontology_metric", entityId=metric.id, items=items
+        entityType="ontology_metric",
+        entityId=metric.id,
+        items=items,
+        reasonCodes=tuple(reasonCodes),
     )
 
 
@@ -5075,16 +5159,20 @@ async def checkKpiPublishGate(
     technique = _techniqueOf(metric) if metric is not None else MetricTechnique()
     governance = _governanceOf(kpi)
     layer2 = reconcileGovernanceVsTechnique(governance, technique)
-    detail = "；".join(layer2.reasons())
     items = buildKpiGateItems(
         metricId=effectiveMetricId,
         metricStatus=metric.status if metric is not None else None,
         executionSource=metric.execution_source if metric is not None else None,
         datasourceId=effectiveDatasourceId,
         reconcileVerdict=layer2.verdict,
-        reconcileDetail=detail,
+        reconcileDetail=renderReconcileFindings(layer2.findings),
     )
-    return GateResult(entityType="kpi_catalog", entityId=kpi.id, items=items)
+    return GateResult(
+        entityType="kpi_catalog",
+        entityId=kpi.id,
+        items=items,
+        reasonCodes=layer2.reasons(),
+    )
 
 
 def _governanceOf(kpi: KpiCatalog) -> GovernanceSpec:

@@ -1072,6 +1072,10 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             wiki_chunks_for_trace = []
 
         # ★ KPI 口径契约注入（Tier B）：按命中 KPI 动态构建（失败隔离）。
+        # 失败隔离的 try/except **刻意放在 `_collectKpiContractBlock` 内部**
+        # （与上面 wiki 块的「调用点 inline try/except」形状相反）：契约采集要连
+        # 开关读取、语义匹配、DB 拉取多步，任一步抛错都必须整体降级为空块。
+        # 别把这里的异常处理搬到调用点。
         kpi_contract_block = await self._collectKpiContractBlock(session, question)
 
         (planResult, sqlResult), sqlConfig, (wastedPt, wastedCt) = await self._callWithFallback(

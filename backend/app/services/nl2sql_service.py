@@ -383,7 +383,14 @@ class Nl2SqlService:
         dictionaryText: str | None = None,
         featureCatalogText: str | None = None,
     ) -> str:
-        """推理阶段 System Prompt：要求模型先输出结构化查询计划 JSON。"""
+        """推理阶段 System Prompt：要求模型先输出结构化查询计划 JSON。
+
+        ⚠️ **本门面仅供测试使用**（唯一调用方 `app/tests/unit/test_nl2sql_service.py`）。
+        它**不透传** `wikiRulesBlock` / `kpiContractBlock` —— 生产链路的
+        `Nl2SqlService.generateValidatedPlan` → `nl2sql_plan.generateQueryPlan`
+        → `nl2sql_prompts._buildPlanSystemPrompt` 才是权威路径。
+        若将来有生产代码改走本门面，会**静默丢掉**契约块与 wiki 规则块。
+        """
         return _buildPlanSystemPrompt(
             schemaText, dialect, schemaPrefix,
             context=context, priorState=priorState, fewShot=fewShot,

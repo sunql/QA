@@ -70,7 +70,7 @@ class UntrustedLabel:
 
 
 # 在 _sanitizeContext 之后追加：U+200B 打断 *任意* 关闭标签 + 自闭标签
-# 注意：neutralizeFence 仍会处理 user_content 历史兼容，但 L1 防御需覆盖所有 8 个 label。
+# 注意：neutralizeFence 仍会处理 user_content 历史兼容，但 L1 防御需覆盖所有白名单 label。
 # 顺序：先 HTML escape，再 neutralizeFence（user_content 兼容），最后 break 任意 label 关闭/自闭。
 _CLOSING_TAG_PATTERN = re.compile(r"&lt;/([a-z][a-z0-9_]*)\b")
 _SELF_CLOSING_TAG_PATTERN = re.compile(r"&lt;([a-z][a-z0-9_]*)/&gt;")
@@ -79,10 +79,10 @@ _SELF_CLOSING_TAG_PATTERN = re.compile(r"&lt;([a-z][a-z0-9_]*)/&gt;")
 def _insertZeroWidthAfterEscapedOpen(text: str) -> str:
     """在 HTML 转义后的 `&lt;/x>` 和 `&lt;x/>` 模式中插入 U+200B。
 
-    防御面覆盖 8 个白名单 label + 旧 user_content fence，避免 close-tag/self-close
+    防御面覆盖全部白名单 label + 旧 user_content fence，避免 close-tag/self-close
     跨 LLM 工具还原后闭合外层包装。
     必须在 neutralizeFence 之后调用（neutralizeFence 处理 user_content；本函数补
-    其余 8 个 label 的关闭/自闭）。
+    其余白名单 label 的关闭/自闭）。
     """
     zws = "​"
     # 1. &lt;/x> → &lt;/x>
@@ -98,7 +98,7 @@ def sanitizeForLlmPrompt(text: str) -> str:
     1. HTML entity escape（& < > " '；比旧 _sanitizeContext 3 字符版多 " '）
     2. neutralizeFence（用户内容历史兼容）
     3. _insertZeroWidthAfterEscapedOpen：插入 U+200B 打断 *任意* label 的
-       关闭标签（&lt;/x>）和自闭标签（&lt;x/&gt;），覆盖 8 个白名单 label
+       关闭标签（&lt;/x>）和自闭标签（&lt;x/&gt;），覆盖全部白名单 label
     """
     escaped = "".join(_HTML5_ESCAPE.get(c, c) for c in text)
     after_fence = neutralizeFence(escaped)

@@ -242,19 +242,17 @@ async def test_generate_validated_plan_forwards_contract_block() -> None:
 # 4. chat 层
 # ---------------------------------------------------------------------------
 
-async def test_collect_kpi_contract_block_swallows_error() -> None:
+async def test_collect_kpi_contract_block_swallows_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """契约构建抛异常 → 返回空串，不阻断 chat 流水线（同 wiki 注入失败语义）。"""
     service = ChatService.__new__(ChatService)
 
     async def _boom(*args: object, **kwargs: object) -> str:
         raise RuntimeError("契约构建炸了")
 
-    original = chat_service_module.buildKpiContractBlock
-    chat_service_module.buildKpiContractBlock = _boom  # type: ignore[assignment]
-    try:
-        result = await service._collectKpiContractBlock(None, "问题")  # type: ignore[arg-type]
-    finally:
-        chat_service_module.buildKpiContractBlock = original  # type: ignore[assignment]
+    monkeypatch.setattr(chat_service_module, "buildKpiContractBlock", _boom)
+    result = await service._collectKpiContractBlock(None, "问题")  # type: ignore[arg-type]
     assert result == ""
 
 
@@ -382,6 +380,9 @@ async def test_build_contract_block_isolates_single_kpi_failure(
     block = await buildKpiContractBlock(dbSession, "问题")
 
     assert "KPI_OK_ONE" in block
+    # 故障 KPI 连**部分内容**都不许漏进块里（只断言兄弟 KPI 存在不够：
+    # 若某次重构让故障 KPI 的半截文本被渲染出来，这条断言抓不到）。
+    assert "KPI_BOOM" not in block
 
 
 async def test_build_contract_block_returns_empty_when_switch_off(

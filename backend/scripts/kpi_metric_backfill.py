@@ -30,12 +30,19 @@
 T15-A：守卫校验的 DSN 与真正落库的 DSN 是**同一个** —— 会话由
 ``buildSessionFactory(databaseUrl)`` 自建（不用 ``getSessionFactory()``），
 落库前再断言 ``SELECT current_database()`` 等于守卫放行的库名。
+
+破坏性语义（FIX-I1）
+--------------------
+默认**非破坏性**：已存在的指标只填空值、source 行只追加、KPI 治理列只填空值。
+``--overwrite`` 才全量重写；该模式下若目标指标当前是 ``PUBLISHED``，写完后
+**回退为 ``DRAFT``**（需重新发布过闸）。预览与审核清单都会打印这条提示。
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -46,8 +53,15 @@ from pathlib import Path
 # 允许从 scripts/ 直接运行
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import asyncpg  # noqa: E402
 from sqlalchemy import select, text  # noqa: E402
-from sqlalchemy.exc import OperationalError, ProgrammingError  # noqa: E402
+from sqlalchemy.engine import make_url  # noqa: E402
+from sqlalchemy.exc import (  # noqa: E402
+    ArgumentError,
+    DBAPIError,
+    OperationalError,
+    ProgrammingError,
+)
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     async_sessionmaker,
@@ -111,6 +125,7 @@ class PreviewContext:
     matchedKpiCodes: frozenset[str] = frozenset()
     degraded: tuple[tuple[str, tuple[str, ...]], ...] = ()
     unresolvedClasses: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    publishedMetricNames: frozenset[str] = frozenset()
 
     def isExisting(self, plan: KpiBackfillPlan) -> bool:
         return plan.kpiCode in self.matchedKpiCodes or (
@@ -156,10 +171,24 @@ def renderPreview(
     lines = ["# KPI 指标技术形态回填预览", ""]
     lines.append(f"共 {len(plans)} 条。**默认预览不写库**；落库请加 `--apply`。")
     lines.append(f"- 新建本体指标：{len(fresh)} 条")
-    lines.append(f"- 匹配到已有指标（只补结构化字段）：{len(existing)} 条")
+    lines.append(f"- 匹配到已有指标（默认只填空值；`--overwrite` 才覆盖）：{len(existing)} 条")
     lines.append(
         "- 档位分布：" + " / ".join(f"{tier} {tiers[tier]}" for tier in sorted(tiers))
     )
+    lines.append(
+        "- `--overwrite` 语义：全量重写 + 删除 plan 之外的 source 行；"
+        "**已 PUBLISHED 的指标会被回退为 DRAFT，需重新发布过闸**。"
+    )
+    published = sorted(
+        plan.metricName
+        for plan in existing
+        if plan.metricName in ctx.publishedMetricNames
+    )
+    if published:
+        lines.append(
+            "- ⚠️ 以下已存在且已 PUBLISHED 的指标，在 `--overwrite` 下会回退为 "
+            "DRAFT（需重新发布过闸）：" + "、".join(published)
+        )
     lines.append("")
 
     degraded = _issueMap(ctx.degraded)
@@ -227,11 +256,21 @@ _REVIEW_PREAMBLE: tuple[str, ...] = (
     "> 在 `system_config` 写 `config_key='KPI_CONTRACT_INJECTION_ENABLED'`、",
     "> `config_value='false'`（按 `seed_system_config.py` 的 upsert 口径）。",
     "",
+    "## `--overwrite` 的破坏性语义（默认关闭，FIX-I1）",
+    "",
+    "- **默认（不带 `--overwrite`）**：对已存在的指标 / 来源 / KPI 治理列**只填空值**，",
+    "  已有非空值一律不覆盖；也**不删除**任何 source 行 ⇒ 人工修订过的公式、owner、",
+    "  治理列不会被脚本回退。",
+    "- **`--overwrite`**：全量重写 + 删除 plan 之外的 source 行。",
+    "  **若目标指标当前是 `PUBLISHED`，写完后会被回退为 `DRAFT`，必须重新发布并",
+    "  重新过发布闸门**（否则契约注入口径会与指标本体不一致）。",
+    "",
     "## 正式库备份（T15-B，不可跳过）",
     "",
     "`--apply` 到 `qa_metadata`（prod 同源）时脚本会**自己先跑 pg_dump**：",
-    "`/tmp/<table>_<YYYYMMDD>.sql`（`ontology_metric` / `ontology_metric_source` / `kpi_catalog`）。",
-    "备份产物不存在或为空 ⇒ 脚本**拒绝写入**。",
+    "`/tmp/<table>_<YYYYMMDD>_<alembic_revision>.sql`（`ontology_metric` / "
+    "`ontology_metric_source` / `kpi_catalog`），口令走 `PGPASSWORD` 环境变量、不进 argv。",
+    "备份先写 `.tmp` 再原子替换；产物不存在或为空 ⇒ 脚本**拒绝写入**。",
     "",
     "## 逐条核对",
     "",
@@ -309,13 +348,47 @@ def _selectPlans(only: str | None) -> list[KpiBackfillPlan]:
     return [plan for plan in plans if plan.kpiCode in wanted]
 
 
+def _isMissingStatusColumn(exc: ProgrammingError) -> bool:
+    """仅识别「0135 的 prod 没有 ontology_metric.status」这一种缺列（其余照抛）。"""
+    sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    return sqlstate == "42703" and "status" in str(exc).lower()
+
+
+async def _metricFacts(session: AsyncSession) -> tuple[frozenset[str], frozenset[str]]:
+    """读指标名 + PUBLISHED 集合。
+
+    ``ontology_metric.status`` 是 0136 才加的列；针对 0135 的 prod 只读预览时
+    退化为「读名字、PUBLISHED 集合为空」并明示，**不把缺列当成无指标**。
+    """
+    try:
+        rows = (
+            await session.execute(
+                select(OntologyMetric.metric_name, OntologyMetric.status)
+            )
+        ).all()
+    except ProgrammingError as exc:
+        if not _isMissingStatusColumn(exc):
+            raise
+        await session.rollback()
+        print(
+            "⚠️ 目标库无 ontology_metric.status（迁移 0136 未应用）⇒ "
+            "本次预览不判定 PUBLISHED，`--overwrite` 前请自行确认发布状态"
+        )
+        names = (
+            await session.execute(select(OntologyMetric.metric_name))
+        ).scalars().all()
+        return frozenset(names), frozenset()
+    return (
+        frozenset(name for name, _status in rows),
+        frozenset(name for name, status in rows if status == "PUBLISHED"),
+    )
+
+
 async def _previewContext(
     session: AsyncSession, plans: Sequence[KpiBackfillPlan]
 ) -> PreviewContext:
     """读目标库事实（**只 select 旧库也有的列** ⇒ 0135 的 prod 也能 dry-run）。"""
-    names = frozenset(
-        (await session.execute(select(OntologyMetric.metric_name))).scalars().all()
-    )
+    names, published = await _metricFacts(session)
     kpiRows = (
         await session.execute(
             select(KpiCatalog.kpi_code, KpiCatalog.metric_id)
@@ -344,25 +417,59 @@ async def _previewContext(
         matchedKpiCodes=matched,
         degraded=tuple(degraded),
         unresolvedClasses=tuple(unresolved),
+        publishedMetricNames=published,
     )
 
 
-def _backupPath(table: str) -> Path:
-    return _BACKUP_DIR / f"{table}_{date.today():%Y%m%d}.sql"
+def _backupPath(table: str, revision: str) -> Path:
+    """备份文件名带当日日期 + alembic revision（M-4：半截/旧版本备份可辨识）。"""
+    safeRevision = revision.strip() or "unknown"
+    return _BACKUP_DIR / f"{table}_{date.today():%Y%m%d}_{safeRevision}.sql"
+
+
+def _dumpTarget(databaseUrl: str) -> tuple[list[str], dict[str, str]]:
+    """把 DSN 拆成 argv 前缀 + 环境变量（FIX-I2：**口令永不进 argv**）。"""
+    try:
+        url = make_url(databaseUrl)
+    except ArgumentError as exc:
+        raise SystemExit(
+            f"备份要求可解析的 PostgreSQL DSN，当前为：{maskDsn(databaseUrl)}"
+        ) from exc
+    if not url.drivername.startswith("postgresql") or not url.database:
+        raise SystemExit(f"备份要求 PostgreSQL DSN，当前为：{maskDsn(databaseUrl)}")
+    command = [
+        "pg_dump",
+        "-h",
+        url.host or "localhost",
+        "-p",
+        str(url.port or 5432),
+        "-U",
+        url.username or "",
+        "-d",
+        url.database,
+    ]
+    env = dict(os.environ)
+    if url.password:
+        env["PGPASSWORD"] = str(url.password)
+    return command, env
 
 
 def _pgDump(databaseUrl: str, table: str, path: Path) -> None:
-    plain = databaseUrl.replace("postgresql+asyncpg://", "postgresql://", 1)
-    if not plain.startswith("postgresql://"):
-        raise SystemExit(f"备份要求 PostgreSQL DSN，当前为：{maskDsn(databaseUrl)}")
-    command = ["pg_dump", "--dbname", plain, "-t", table]
+    """单表备份：先写 ``.tmp`` 再原子替换（M-4：半截 dump 不会被当成合法备份）。"""
+    command, env = _dumpTarget(databaseUrl)
+    tmp = path.with_name(path.name + ".tmp")
     try:
-        with path.open("wb") as handle:
-            result = subprocess.run(command, stdout=handle, stderr=subprocess.PIPE)
+        with tmp.open("wb") as handle:
+            result = subprocess.run(
+                [*command, "-t", table], stdout=handle, stderr=subprocess.PIPE, env=env
+            )
     except FileNotFoundError as exc:
+        tmp.unlink(missing_ok=True)
         raise SystemExit("备份失败：找不到 pg_dump（写正式库必须先备份）。") from exc
     if result.returncode == 0:
+        os.replace(tmp, path)
         return
+    tmp.unlink(missing_ok=True)
     path.unlink(missing_ok=True)
     stderr = result.stderr.decode("utf-8", "replace")
     if "no matching tables" in stderr:
@@ -371,11 +478,28 @@ def _pgDump(databaseUrl: str, table: str, path: Path) -> None:
     raise SystemExit(f"备份失败（{table}）：{stderr[-500:]}")
 
 
-def _ensureProdBackup(databaseUrl: str) -> tuple[Path, ...]:
+async def _alembicRevision(databaseUrl: str) -> str:
+    """读目标库的 alembic revision（只读；读不到 ⇒ ``unknown``，不阻断备份）。"""
+    factory = buildSessionFactory(databaseUrl)
+    try:
+        async with factory() as session:
+            try:
+                revision = (
+                    await session.execute(text("SELECT version_num FROM alembic_version"))
+                ).scalar_one()
+            except (ProgrammingError, OperationalError):
+                print("⚠️ 读不到 alembic_version，备份文件名使用 revision=unknown")
+                return "unknown"
+            return str(revision)
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+def _ensureProdBackup(databaseUrl: str, revision: str) -> tuple[Path, ...]:
     """闸 4：写正式库前必须完成当日备份（存在且非空则复用）⇒ T15-B。"""
     paths: list[Path] = []
     for table in _BACKUP_TABLES:
-        path = _backupPath(table)
+        path = _backupPath(table, revision)
         if not path.exists() or path.stat().st_size == 0:
             _pgDump(databaseUrl, table, path)
         if path.exists() and path.stat().st_size > 0:
@@ -403,12 +527,17 @@ def _printSummary(summary: ApplySummary, targetDb: str) -> None:
         print(f"⚠️ 因物理列缺失降级：{'、'.join(summary.degraded)}")
     if summary.skipped:
         print(f"⚠️ 已跳过（KPI 或本体类不存在）：{'、'.join(summary.skipped)}")
-    if summary.unresolvedClasses:
-        print(f"⚠️ 未解析的本体类：{'；'.join(summary.unresolvedClasses)}")
-    if summary.unboundDataSource:
+    if summary.unresolved_classes:
+        print(f"⚠️ 未解析的本体类：{'；'.join(summary.unresolved_classes)}")
+    if summary.unbound_data_source:
         print(
-            f"ℹ️ 未绑定数据源的 KPI（{len(summary.unboundDataSource)} 条，"
-            "发布闸门会拦，需人工绑定）：" + "、".join(summary.unboundDataSource)
+            f"ℹ️ 未绑定数据源的 KPI（{len(summary.unbound_data_source)} 条，"
+            "发布闸门会拦，需人工绑定）：" + "、".join(summary.unbound_data_source)
+        )
+    if summary.reverted_to_draft:
+        print(
+            "⚠️ 以下指标原为 PUBLISHED，`--overwrite` 已将其回退为 DRAFT，"
+            "**需重新发布并重新过发布闸门**：" + "、".join(summary.reverted_to_draft)
         )
 
 
@@ -426,6 +555,24 @@ def _schemaGapHint(exc: ProgrammingError) -> str | None:
     return None
 
 
+def _scrubSecrets(message: str, databaseUrl: str) -> str:
+    """错误文本里若出现 DSN 口令则打码（FIX-I2 的同类风险：日志泄密）。"""
+    try:
+        password = make_url(databaseUrl).password
+    except (ArgumentError, ValueError):
+        return message
+    if password:
+        return message.replace(str(password), "***")
+    return message
+
+
+def connectionErrorExit(exc: BaseException, databaseUrl: str) -> SystemExit:
+    """FIX-I4：连接类失败统一转 SystemExit（不吐 traceback、不带口令）。"""
+    root = getattr(exc, "orig", None) or exc
+    detail = _scrubSecrets(str(root), databaseUrl)
+    return SystemExit(f"❌ 连接目标库失败（{maskDsn(databaseUrl)}）：{detail}")
+
+
 async def _run(args: argparse.Namespace) -> int:
     databaseUrl = _requireDatabaseUrl(args.database_url)
     targetDb = assertSafeTarget(databaseUrl, allowProdWrite=args.allow_prod_write)
@@ -433,7 +580,8 @@ async def _run(args: argparse.Namespace) -> int:
 
     backups: tuple[Path, ...] = ()
     if args.apply and targetDb == PROD_DB_NAME:
-        backups = _ensureProdBackup(databaseUrl)
+        revision = await _alembicRevision(databaseUrl)
+        backups = _ensureProdBackup(databaseUrl, revision)
         _printBanner(targetDb, backups)
 
     print(f"目标库：{targetDb}（{maskDsn(databaseUrl)}）")
@@ -447,7 +595,12 @@ async def _run(args: argparse.Namespace) -> int:
             if not args.apply:
                 print("预览模式：未写库。确认无误后加 `--apply` 落库。")
                 return 0
-            summary = await applyPlans(session, plans, syncEmbedding=args.embed)
+            summary = await applyPlans(
+                session,
+                plans,
+                overwrite=args.overwrite,
+                syncEmbedding=args.embed,
+            )
             _printSummary(summary, targetDb)
             return 0
     except ProgrammingError as exc:
@@ -456,9 +609,8 @@ async def _run(args: argparse.Namespace) -> int:
             raise
         print(f"❌ {hint}")
         return 2
-    except OperationalError as exc:
-        print(f"❌ 连接目标库失败（{maskDsn(databaseUrl)}）：{exc.orig or exc}")
-        return 1
+    except (OperationalError, OSError, DBAPIError, asyncpg.PostgresError) as exc:
+        raise connectionErrorExit(exc, databaseUrl) from exc
     finally:
         await factory.kw["bind"].dispose()
 
@@ -488,6 +640,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="KPI 指标技术形态回填/合成脚本（默认预览，--apply 才落库）"
     )
     parser.add_argument("--apply", action="store_true", help="真正写库（默认只预览）")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=(
+            "破坏性更新：全量重写已存在指标 + 删除 plan 之外的 source 行；"
+            "PUBLISHED 指标会被回退为 DRAFT（默认只填空值）"
+        ),
+    )
     parser.add_argument(
         "--allow-prod-write",
         action="store_true",

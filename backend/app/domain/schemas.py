@@ -41,6 +41,10 @@ from app.domain.enums import (
     KpiStatus,
     LineageLayer,
     MatchRule,
+    MetricAggregationOrder,
+    MetricExecutionSource,
+    MetricStatus,
+    MetricType,
     ObjectType,
     RefreshFrequency,
     ReportTimeWindowType,
@@ -621,6 +625,40 @@ class OntologyPropertyUpdate(CamelModel):
         return v
 
 
+_MEASURE_AGG_ALLOWED: frozenset[str] = frozenset(
+    {"SUM", "COUNT", "AVG", "COUNT_DISTINCT"}
+)
+
+
+class MeasureSpecSchema(CamelModel):
+    """结构化度量定义（numerator_measure / denominator_measure 共用形状）。
+
+    agg：聚合函数（SUM / COUNT / AVG / COUNT_DISTINCT）。
+    expr：表达式文本（列名或列名算术式），如 "ACTUAL_RECEIPT_DATE - PROMISED_DATE"。
+    filter：过滤谓词（如 "IQCRESULT = 'FAIL'"），可为 None。
+    class_id：源类 ID（应用层校验存在性，DB 无法对 JSON 内嵌引用加 FK）。
+    class_alias：源类别名（人读，冗余存储便于 prompt 渲染）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    agg: str = Field(..., description="SUM|COUNT|AVG|COUNT_DISTINCT")
+    expr: str | None = Field(default=None, max_length=1000)
+    filter: str | None = Field(default=None, max_length=1000)
+    class_id: int | None = None
+    class_alias: str | None = Field(default=None, max_length=100)
+
+    @field_validator("agg")
+    @classmethod
+    def _validateAgg(cls, value: str) -> str:
+        token = value.strip().upper()
+        if token not in _MEASURE_AGG_ALLOWED:
+            raise ValueError(
+                f"measure agg 非法：{value!r}；应为 {sorted(_MEASURE_AGG_ALLOWED)}"
+            )
+        return token
+
+
 class OntologyMetricCreate(CamelModel):
     metric_name: str = Field(..., min_length=1, max_length=100)
     metric_alias: str | None = Field(default=None, max_length=100)
@@ -629,6 +667,16 @@ class OntologyMetricCreate(CamelModel):
     target_class_id: int | None = None
     dimension_defaults: dict | None = None
     created_by: str | None = None
+    # ── P1 指标技术形态 ────────────────────────────────────────────
+    metric_type: MetricType = MetricType.MEASURE
+    numerator_measure: MeasureSpecSchema | None = None
+    denominator_measure: MeasureSpecSchema | None = None
+    aggregation_order: MetricAggregationOrder | None = None
+    grain_keys: list[str] | None = None
+    filter_expression: str | None = Field(default=None, max_length=2000)
+    status: MetricStatus = MetricStatus.DRAFT
+    owner: str | None = Field(default=None, max_length=100)
+    execution_source: MetricExecutionSource | None = None
 
 
 class OntologyMetricUpdate(CamelModel):
@@ -638,6 +686,16 @@ class OntologyMetricUpdate(CamelModel):
     agg_function: str | None = None
     target_class_id: int | None = None
     dimension_defaults: dict | None = None
+    # ── P1 指标技术形态 ────────────────────────────────────────────
+    metric_type: MetricType | None = None
+    numerator_measure: MeasureSpecSchema | None = None
+    denominator_measure: MeasureSpecSchema | None = None
+    aggregation_order: MetricAggregationOrder | None = None
+    grain_keys: list[str] | None = None
+    filter_expression: str | None = Field(default=None, max_length=2000)
+    status: MetricStatus | None = None
+    owner: str | None = Field(default=None, max_length=100)
+    execution_source: MetricExecutionSource | None = None
 
 
 class OntologyClassRead(CamelModel):
@@ -694,6 +752,16 @@ class OntologyMetricRead(CamelModel):
     created_by: str | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
+    # ── P1 指标技术形态 ────────────────────────────────────────────
+    metric_type: MetricType = MetricType.MEASURE
+    numerator_measure: dict | None = None
+    denominator_measure: dict | None = None
+    aggregation_order: MetricAggregationOrder | None = None
+    grain_keys: list[str] | None = None
+    filter_expression: str | None = None
+    status: MetricStatus = MetricStatus.DRAFT
+    owner: str | None = None
+    execution_source: MetricExecutionSource | None = None
 
 
 class KpiCatalogCreate(CamelModel):
@@ -717,6 +785,15 @@ class KpiCatalogCreate(CamelModel):
     status: KpiStatus = KpiStatus.DRAFT
     datasource_id: int = Field(..., ge=1, description="绑定的业务数据源 ID（FK → data_source.id）")
     metric_id: int | None = None
+    grain_keys: list[str] | None = Field(
+        default=None, description="结构化粒度键（业务人员可填，词汇有限）"
+    )
+    numerator_columns: list[str] | None = Field(
+        default=None, description="分子列名数组（治理侧声明，对账用）"
+    )
+    denominator_columns: list[str] | None = Field(
+        default=None, description="分母列名数组（治理侧声明，对账用）"
+    )
     created_by: str | None = Field(default=None, max_length=50)
     semantic_keywords: list[str] | None = Field(
         default=None,
@@ -751,6 +828,15 @@ class KpiCatalogUpdate(CamelModel):
     status: KpiStatus | None = Field(default=None, description="KPI 状态；显式传 null 会被 422 拒绝（NOT NULL 约束）")
     datasource_id: int | None = Field(default=None, ge=1, description="重绑数据源；显式传 null 解绑")
     metric_id: int | None = None
+    semantic_keywords: list[str] | None = Field(
+        default=None, description="L1 语义匹配关键词"
+    )
+    match_threshold: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="匹配阈值，默认 0.75"
+    )
+    grain_keys: list[str] | None = None
+    numerator_columns: list[str] | None = None
+    denominator_columns: list[str] | None = None
 
 
 class KpiCatalogRead(CamelModel):
@@ -770,6 +856,11 @@ class KpiCatalogRead(CamelModel):
     revision_count: int
     status: KpiStatus
     metric_id: int | None = None
+    semantic_keywords: list[str] | None = None
+    match_threshold: float = 0.75
+    grain_keys: list[str] | None = None
+    numerator_columns: list[str] | None = None
+    denominator_columns: list[str] | None = None
     created_by: str | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None

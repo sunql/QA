@@ -175,6 +175,7 @@ cd frontend && npm run test -- --run
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.domain.enums import (
     MetricAggregationOrder,
@@ -287,7 +288,9 @@ def test_json_columns_use_jsonb_variant() -> None:
         (KpiCatalog, "denominator_columns"),
     ):
         col = table.__table__.columns[name]
-        assert "JSONB" in str(col.type), f"{table.__tablename__}.{name} 不是 JSONB variant"
+        # with_variant 不体现在 str(基类型) 上，必须按 PG 方言解析 impl 才见真身
+        impl = col.type.dialect_impl(postgresql.dialect())
+        assert "JSONB" in str(impl), f"{table.__tablename__}.{name} 不是 JSONB variant"
 
 
 @pytest.mark.parametrize("col_name", ["numerator_measure", "denominator_measure", "grain_keys"])
@@ -492,7 +495,7 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@loca
   uv run pytest app/tests/unit/test_kpi_metric_models.py -q
 ```
 
-Expected: PASS（14 passed）
+Expected: PASS（15 passed —— 12 个普通用例 + 1 个 parametrize ×3）
 
 - [ ] **Step 6: 提交**
 
@@ -4786,7 +4789,7 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@loca
   uv run pytest app/tests/unit/test_kpi_metric_publish_gate.py -q
 ```
 
-Expected: PASS（14 passed）
+Expected: PASS（14 passed —— 以实现时实际用例数为准）
 
 - [ ] **Step 6: 写服务层链路测试（真实 PG）**
 

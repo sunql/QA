@@ -143,7 +143,11 @@ function MetricMetaRow() {
           </Form.Item>
         </Col>
         <Col span={12}>
-          <Form.Item name="status" label={t("forms.ontology.metricLabels.status")}>
+          <Form.Item
+            name="status"
+            label={t("forms.ontology.metricLabels.status")}
+            extra={t("forms.ontology.metricHints.publishGateNotice")}
+          >
             <Select
               options={METRIC_STATUS_OPTIONS.map((o) => ({
                 value: o.value,

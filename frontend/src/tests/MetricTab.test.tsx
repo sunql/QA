@@ -45,6 +45,12 @@ const mockMetric: OntologyMetric = {
   executionSource: null,
 };
 
+/** 带非空 measure 的指标：用于守住「编辑回显 class_id / class_alias」的接线。 */
+const mockMetricWithMeasure: OntologyMetric = {
+  ...mockMetric,
+  numeratorMeasure: { agg: "SUM", expr: "QTY", filter: null, class_id: 7, class_alias: "Order" },
+};
+
 const api = vi.hoisted(() => ({
   listMetrics: vi.fn(),
   createMetric: vi.fn(),
@@ -80,6 +86,15 @@ describe("MetricTab — 渲染 + 加载", () => {
     await waitFor(() => expect(api.listMetrics).toHaveBeenCalled());
     // 组件不崩（Table 仍渲染，只是无数据）
     expect(screen.getByRole("table")).toBeInTheDocument();
+  });
+
+  it("列表展示指标类型 / 聚合阶 / 执行来源三列", async () => {
+    renderTab();
+    await screen.findByText("订单金额");
+    // 三列表头渲染的是词典译文；key 拼错会显示裸 key 而不会红。
+    expect(screen.getByText("指标类型")).toBeInTheDocument();
+    expect(screen.getByText("聚合阶")).toBeInTheDocument();
+    expect(screen.getByText("执行来源")).toBeInTheDocument();
   });
 });
 
@@ -181,6 +196,33 @@ describe("MetricTab — 编辑流", () => {
     await waitFor(() =>
       expect(api.updateMetric).toHaveBeenCalledWith(10, expect.objectContaining({ metricName: "改后" })),
     );
+  });
+
+  it("只改指标名时把原 measure 的 class_id / class_alias 原样回传（不抹掉回填信息）", async () => {
+    api.listMetrics.mockResolvedValue([mockMetricWithMeasure]);
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByText("订单金额");
+
+    const editBtn = screen.getAllByRole("button").find((b) =>
+      (b.textContent || "").replace(/\s+/g, "").includes("编辑"),
+    );
+    expect(editBtn).toBeDefined();
+    await user.click(editBtn!);
+
+    // 只改指标名；分子/分母字段保持原样（改了会走「measure 清空」的另一条分支）。
+    const nameInput = await screen.findByLabelText("指标名");
+    await user.clear(nameInput);
+    await user.type(nameInput, "订单金额改");
+
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateMetric).toHaveBeenCalled());
+    const payload = api.updateMetric.mock.calls[0][1];
+    expect(payload.numeratorMeasure?.class_id).toBe(7);
+    expect(payload.numeratorMeasure?.class_alias).toBe("Order");
+    expect(payload.numeratorMeasure?.agg).toBe("SUM");
+    expect(payload.numeratorMeasure?.expr).toBe("QTY");
   });
 });
 

@@ -95,4 +95,8 @@ describe.each(DICTIONARIES)("%s — 指标技术形态 i18n", (_locale, dict) =>
       expectNonEmpty(dict, ["forms", "ontology", "metricPlaceholders", key]);
     }
   });
+
+  it("forms.ontology.metricHints.publishGateNotice 存在且非空", () => {
+    expectNonEmpty(dict, ["forms", "ontology", "metricHints", "publishGateNotice"]);
+  });
 });

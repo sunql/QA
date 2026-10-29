@@ -1862,6 +1862,10 @@ export const zhCN = {
         filterExpression: "全局过滤谓词",
         owner: "技术口径负责人",
       },
+      metricHints: {
+        publishGateNotice:
+          "发布将走闸门：指标结构化口径未齐或与关联 KPI 不一致时会被拒绝，并列出缺项。",
+      },
 
       classOptionLabel: "{name}（{alias}）",
       classOptionLabelNoAlias: "{name}",

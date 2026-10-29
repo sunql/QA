@@ -3,8 +3,9 @@ import type { MeasureSpec } from "../types/ontology";
 /** 分子/分母在表单里的扁平形状（三个输入框，不嵌套对象）。 */
 export interface MeasureFormValues {
   agg: string | undefined;
-  expr: string;
-  filter: string;
+  // 字段未注册时（如 MEASURE 类型下的分母）antd 不返回值 ⇒ 运行时是 undefined。
+  expr: string | undefined;
+  filter: string | undefined;
 }
 
 export const EMPTY_MEASURE_FORM: MeasureFormValues = {
@@ -33,8 +34,8 @@ export function toMeasureSpec(
 ): MeasureSpec | null {
   const agg = (values.agg ?? "").trim().toUpperCase();
   if (!agg) return null;
-  const expr = values.expr.trim();
-  const filter = values.filter.trim();
+  const expr = values.expr?.trim() ?? "";
+  const filter = values.filter?.trim() ?? "";
   if (!expr && !filter) return null;
   return {
     agg,

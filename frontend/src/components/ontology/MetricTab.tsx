@@ -57,8 +57,9 @@ interface MetricFormValues {
   numeratorExpr: string;
   numeratorFilter: string;
   denominatorAgg: string | undefined;
-  denominatorExpr: string;
-  denominatorFilter: string;
+  // needsDenominator=false 时这两个字段未注册 ⇒ validateFields 不返回它们。
+  denominatorExpr: string | undefined;
+  denominatorFilter: string | undefined;
   grainKeys: string[];
   filterExpression: string;
   owner: string;
@@ -262,13 +263,11 @@ export default function MetricTab({ classes }: MetricTabProps) {
       }
       setModalOpen(false);
       void load();
-    } catch (err) {
-      // 表单校验失败：antd 已在字段下列出原因，无需额外提示。
-      if (err instanceof Error && err.message.includes(t("forms.required"))) return;
-      // 发布闸门 409（缺项明细由后端 message 提供，已由 axios 响应拦截器统一
-      // toast）与其它错误：此处只保证不静默吞错、不关闭弹窗（setModalOpen(false)
-      // 在 await 之后 ⇒ 抛错时不执行）。文案不在此二次加工。
-      return;
+    } catch {
+      // 表单校验失败：antd 已在字段下就地列出原因（validateFields 的 reject 值
+      // 不是 Error，无从按 message 分流）；发布闸门 409 与其它错误的文案由
+      // axios 响应拦截器统一 toast。此处只需保证不关闭弹窗 ——
+      // `setModalOpen(false)` 在 await 之后，抛错时不会执行。
     }
   };
 

@@ -26,6 +26,12 @@ describe("toMeasureSpec", () => {
     expect(toMeasureSpec({ agg: "SUM", expr: "", filter: "" })).toBeNull();
   });
 
+  it("expr / filter 为 undefined（字段未注册）⇒ null（不抛错）", () => {
+    expect(
+      toMeasureSpec({ agg: "SUM", expr: undefined, filter: undefined }),
+    ).toBeNull();
+  });
+
   it("只填 filter 也算有效 measure", () => {
     const m = toMeasureSpec({ agg: "COUNT", expr: "", filter: "STATUS='OK'" });
     expect(m?.filter).toBe("STATUS='OK'");

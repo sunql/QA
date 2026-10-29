@@ -1840,6 +1840,10 @@ export const enUS = {
         filterExpression: "Global filter predicate",
         owner: "Technical caliber owner",
       },
+      metricHints: {
+        publishGateNotice:
+          "Publishing goes through the gate: it is rejected when the metric's structured caliber is incomplete or conflicts with linked KPIs, and the missing items are listed.",
+      },
       classOptionLabel: "{name} ({alias})",
       classOptionLabelNoAlias: "{name}",
       filter: {

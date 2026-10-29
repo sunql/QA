@@ -3,7 +3,7 @@
 - **日期**：2026-10-28（设计）/ 2026-10-29（实施完成）
 - **作者**：Claude（与用户逐节确认）
 - **Phase**：Phase 6.7 指标技术形态治理
-- **状态**：**已实施；prod 已迁移（0137）+ 已回填（12 指标挂靠）**；待办=关键词/数据源绑定 + 开关策略 + 治理列对齐（见 §11）
+- **状态**：**已实施；prod 已迁移（0137）+ 已回填 + 关键词/数据源已配**；待办=开关策略 + 治理列对齐（见 §11）
 - **分支**：`feat/kpi-metric-technical-form`
 - **Spec 路径**：[`docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md`](../../docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md)（608 行）
 - **Spec commit**：`4a4f736f`（分支 `docs/kpi-metric-technical-form-spec`，base `main` @ `3ecd780c`）

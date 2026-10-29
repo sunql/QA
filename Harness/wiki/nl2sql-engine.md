@@ -106,10 +106,19 @@ L4: Pure Python async while loop Agent (5 NL2SQL tools, iterative)
 
 #### L1 — KPI Semantic Match (`KpiSemanticMatchService`)
 
-- Jaccard similarity on `kpi_catalog.semantic_keywords` (stored as `TEXT[]` in PG, or JSON array).
-- Keyword extraction: tokenize question, remove stopwords, compute set intersection / union.
-- Match threshold: configurable (default 0.4). Below threshold → L1 miss → fall through to L2.
-- On match: return pre-defined SQL from `kpi_catalog.sql_template` directly.
+- Jaccard similarity on `kpi_catalog.semantic_keywords` (stored as `TEXT[]` in PG).
+- Keyword extraction: 匹配侧按 Jaccard 算；**晋升侧**用 `metric_promotion_service._extract_keywords`（英文按空格切 + 中文 bigram，最多 5 个）。
+- Match threshold: **每条 KPI 自己的** `kpi_catalog.match_threshold`（`Numeric(3,2)`，列默认值 **0.75**）。
+  ⚠️ 原文写 "default 0.4 (configurable via `KPI_MATCH_THRESHOLD` env var)" —— **无此环境变量**，已更正。
+- **快慢两条车道**（`kpi_semantic_match_service.py:212/226`）：
+  1. **exact-alias**（`_matchExactAlias`）：问句含 KPI code / 别名 ⇒ `confidence=1.0` 直接命中，**不受阈值约束**；
+  2. **Jaccard**（`_matchByKeywords`）：`score >= threshold AND score >= float(kpi.match_threshold)`。
+- On match: ⚠️ 原文写 "return pre-defined SQL from `kpi_catalog.sql_template`" —— **`sql_template` 列不存在**（已更正）。
+  真实路径：`kpi.formula` → `chat_service._resolveCalculationFeature` → `FeatureDefinition.calculation_logic`（可执行 SQL）。
+- 🔴 **该路径当前 100% 失效**：`_resolveCalculationFeature` 用
+  `FeatureDefinition.feature_definition == kpi.formula` 做**等值匹配**（散文描述列 vs 技术公式列），
+  dev 库 12 KPI × 6 feature 命中 **0** ⇒ 全部流量落回 L2。
+  根因与修复方案见 [kpi-metric-technical-form](kpi-metric-technical-form.md) §9 T2。
 - **Code**: `app/services/kpi_semantic_match_service.py`
 
 #### L2 — LLM Single SQL (existing ReAct two-phase)

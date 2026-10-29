@@ -11,7 +11,14 @@
 ### 后续表（Phase 2-3）
 - `ontology_class`：本体类，`source_table` 映射物理表，支持 `parent_class_id` 继承，`version` + `valid_from/to` 版本。
 - `ontology_property`：属性，`data_type`、`is_primary_key`、`is_foreign_key`、`ref_class_id`、`source_column`。
-- `ontology_metric`：指标，`formula`、`agg_function`、`target_class_id`、`dimension_defaults`(JSON)。
+- `ontology_metric`：指标，**技术形态 SSOT**。现有列：`formula`(Text NN，逃生舱)、`agg_function`(varchar20 default 'SUM')、`target_class_id`(FK→ontology_class，单值，语义=role=BASE)、`dimension_defaults`(JSON，**零消费者**)。
+  🔴 **该表在 NL2SQL 链路零消费者**（`nl2sql_service.py:34-35` 不 import、`nl2sql_prompts.py` 0 个 "etric"、`buildSchemaText` 只渲染类、`chat_recall` 用 `typeFilter="class"`）⇒ **补数据不改变任何一条 SQL**。
+  扩展设计（`metric_type` / `numerator_measure` / `denominator_measure` / `aggregation_order` / `grain_keys` / `filter_expression` / `status` / `owner` / `execution_source`）见 [kpi-metric-technical-form](kpi-metric-technical-form.md)。
+- `kpi_catalog`：KPI 业务目录，**治理 SSOT**。列：`kpi_code`(unique)、`kpi_name`、`business_definition`、`formula`、`numerator`、`denominator`、`grain`、`unit`、`data_source`(血缘文本)、`datasource_id`(FK→data_source，**RESTRICT**)、`owner`、`version`(default 'v1.0')、`revision_count`、`status`(`KpiStatus`: DRAFT/PUBLISHED/DEPRECATED)、`metric_id`(FK→ontology_metric，nullable)、`created_by`、`semantic_keywords`(`ARRAY(String(64))`)、`match_threshold`(`Numeric(3,2)` default 0.75)。
+  通过 `metric_id` 弱关联 `ontology_metric`（KPI 可先于 metric 存在：业务定义先行、技术实现后置）。不进 Neo4j / Milvus（治理层不入向量检索）。
+  ⚠️ dev 库现状：`semantic_keywords` **12/12 全空**、`datasource_id` **12/12 全 NULL**、挂靠 `metric_id` **0 条**。
+- `ontology_metric_source`：**规划中**（未实施）。`ontology_metric` 的多源类 M:N 表 —— `metric_id`(FK→ontology_metric, CASCADE)、`class_id`(FK→ontology_class, RESTRICT)、`role`(NUMERATOR/DENOMINATOR/FILTER/BASE)、`UNIQUE(metric_id, class_id, role)`。
+  必要性：9/12 KPI 的 `data_source` 含 `+`（多表；3 条单表：`KPI_PAYMENT_ON_TIME` / `KPI_SUPPLIER_DEFECT_RATE` / `KPI_SUPPLIER_FPY`）⇒ `target_class_id` 单值 FK 表达不了其中 9 条真实口径。
 - `data_source`：数据源，`type`、`connection_url`、`encrypted_password`、`is_read_only`、`is_default`。
 - `session_message`（Phase 5）：会话消息持久化，`session_id`、`role`(user/assistant)、`content`、`question`(assistant 回填)、`sql_generated`(assistant 回填)、时间戳。索引 `(session_id, created_time)`。用于 NL2SQL 前注入最近 5 轮上下文；服务端无记录时回退到客户端 `history` 字段。注入前按预算收口（H3，2026-09-26）：单条正文/历史 SQL 各限 500 字符，拼接后总预算 4000 字符，超预算丢最旧整块并记 `历史上下文按预算裁剪` —— 上下文会被注入 plan/SQL/answer 各阶段，不限长则长轮次下每轮 prompt 成本线性膨胀。**Migration 0051** 新增字段：`routing_layer`（VARCHAR(10)，L1/L2/L3/L4）、`latency_ms`（INTEGER，毫秒）、`token_cost_usd`（FLOAT，美元）。**Migration 0105** 新增字段：`chart_type`（VARCHAR(20)，NULL）、`chart_option`（JSONB，NULL）—— 让图表进最终报告（聊天回答 + 导出 PDF）并让**历史回放也能看到图**。两条必须在**唯一落库点**（`chat_context._storeSessionMessages`，归一函数在 `chat_chart_persist.py`）做的归一：`chart_type` 归一为裸字符串（`ChatResponse.chartType` 是 `ChartType | None`，pydantic 保留**枚举成员**，直接落 VARCHAR 会存成 `ChartType.BAR` 这种脏值）；`chart_option` 的 TABLE 负载 `rows` 截到 200 行并记 `truncated: true`（`QUERY_ROW_LIMIT` 默认 0 = 不限行，而表格 builder 返回**全量** data，不截则有把十万行塞进一行的风险）。**只截落库份**，实时响应仍发全量；`truncated` 必须在**读侧两侧**都披露（PDF 与前端回放）。
 

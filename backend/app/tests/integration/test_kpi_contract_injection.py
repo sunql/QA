@@ -395,3 +395,49 @@ async def test_build_contract_block_returns_empty_when_switch_off(
     monkeypatch.setattr(builder_module, "readKpiMetricSwitch", _fakeSwitch)
 
     assert await buildKpiContractBlock(dbSession, "问题") == ""
+
+
+async def test_build_contract_block_omits_ratio_guidance_for_measure_type(
+    dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T16-05 回归：MEASURE 型 + 残留 ``aggregation_order`` ⇒ **不发**比率指引。
+
+    ``ratioSqlGuidance`` 单测只证明了函数本身；这里钉住**调用点**：契约块必须
+    按 ``techniqueOf()`` 得到的 metric_type 走。若调用点漏传 metric_type，
+    一个曾经是比率型、后来改成 MEASURE 的指标会把「SUM(分子)/SUM(分母)」
+    写进 prompt —— 模型据此把度量值算成一个比率。
+    """
+    metric = OntologyMetric(
+        metric_name="到货批次平均时长",
+        formula="SELECT AVG(DURATION_HOURS) FROM DWD_GOODS_RECEIPT_LINE",
+        agg_function="AVG",
+        target_class_id=None,
+        dimension_defaults={},
+        metric_type=MetricType.MEASURE.value,
+        numerator_measure={"agg": "AVG", "expr": "DURATION_HOURS"},
+        denominator_measure=None,
+        # 历史残留：指标已改成 MEASURE，aggregation_order 没清
+        aggregation_order=MetricAggregationOrder.WEIGHTED_RATIO.value,
+        grain_keys=["SUPPLIER_CODE"],
+        filter_expression=None,
+        status="PUBLISHED",
+        owner="tech-owner",
+        execution_source="NONE",
+    )
+    dbSession.add(metric)
+    await dbSession.flush()
+    await _seedKpi(
+        dbSession,
+        code="KPI_MEASURE_RESIDUAL",
+        name="到货批次平均时长",
+        metricId=metric.id,
+    )
+    _matchOnly(monkeypatch, ["KPI_MEASURE_RESIDUAL"])
+
+    block = await buildKpiContractBlock(dbSession, "问题")
+
+    assert "KPI_MEASURE_RESIDUAL" in block
+    assert "SUM(分子)/SUM(分母)" not in block
+    assert "AVG(分子/分母)" not in block
+    # 残留值本身仍如实呈现（不隐藏事实，只是不据此发指引）
+    assert "聚合阶：WEIGHTED_RATIO" in block

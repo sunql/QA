@@ -443,6 +443,34 @@ async def test_publish_gate_blocks_the_backfilled_kpi(dbSession: AsyncSession) -
     assert REASON_GOVERNANCE_COLUMN_NOT_IN_TECHNICAL in gate.reasonCodes
 
 
+async def test_publish_gate_uses_passed_governance_over_stored_values(
+    dbSession: AsyncSession,
+) -> None:
+    """T16-06 回归：``governance=`` 覆盖必须按**传入值**判定，不能退回实体旧值。
+
+    场景：同一请求里既改治理口径又发布。若闸门读实体上尚未提交的旧列，
+    就会用旧口径判 pass/fail —— 两个方向都是错的。
+    这里先断言「不传覆盖 ⇒ reconcile 不通过」，再断言「传按技术侧填的覆盖 ⇒
+    reconcile 通过」，两条缺一不可（只写后者时，若实现恒 pass 也是绿的）。
+    """
+    kpi, _, _ = await _seedOtd(dbSession)
+    await applyPlans(dbSession, [_plan("KPI_SUPPLIER_OTD")])
+    await dbSession.refresh(kpi)
+
+    baseline = await checkKpiPublishGate(dbSession, kpi)
+    assert "reconcile" in {item.code for item in baseline.items if not item.ok}
+
+    passedIn = GovernanceSpec(
+        numerator_columns=("RECEIPT_DATE",),
+        denominator_columns=("PROMISED_RECEIPT_DATE",),
+        grain_keys=("SUPPLIER_CODE", "FACILITY_CODE"),
+    )
+    overridden = await checkKpiPublishGate(dbSession, kpi, governance=passedIn)
+
+    assert "reconcile" not in {item.code for item in overridden.items if not item.ok}
+    assert overridden.reasonCodes == ()
+
+
 async def test_apply_skips_missing_kpi(dbSession: AsyncSession) -> None:
     await _seedClasses(dbSession)
     dsId = await _seedDatasource(dbSession)

@@ -41,13 +41,8 @@ from app.domain.models import (
 )
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_audit import recordReconcileResult
-from app.services.kpi_metric_reconcile import (
-    VERDICT_MISMATCH,
-    GovernanceSpec,
-    MeasureSpec,
-    MetricTechnique,
-    reconcileMetric,
-)
+from app.services.kpi_metric_reconcile import VERDICT_MISMATCH, reconcileMetric
+from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
 from app.services.kpi_metric_switches import (
     SWITCH_CONTRACT_INJECTION,
     readKpiMetricSwitch,
@@ -189,29 +184,6 @@ def renderContractBlock(entries: tuple[ContractEntry, ...]) -> str:
     return f"{header}\n{body}"
 
 
-def _techniqueOf(metric: OntologyMetric | None) -> MetricTechnique:
-    if metric is None:
-        return MetricTechnique()
-    return MetricTechnique(
-        metric_type=metric.metric_type or MetricType.MEASURE.value,
-        numerator=MeasureSpec.fromRaw(metric.numerator_measure),
-        denominator=MeasureSpec.fromRaw(metric.denominator_measure),
-        aggregation_order=metric.aggregation_order,
-        grain_keys=tuple(metric.grain_keys or ()),
-        filter_expression=metric.filter_expression,
-        formula=metric.formula,
-        execution_source=metric.execution_source,
-    )
-
-
-def _governanceOf(kpi: KpiCatalog) -> GovernanceSpec:
-    return GovernanceSpec(
-        numerator_columns=tuple(kpi.numerator_columns or ()),
-        denominator_columns=tuple(kpi.denominator_columns or ()),
-        grain_keys=tuple(kpi.grain_keys or ()),
-    )
-
-
 async def _loadKpi(session: AsyncSession, kpiCode: str) -> KpiCatalog | None:
     row = await session.execute(
         select(KpiCatalog).where(KpiCatalog.kpi_code == kpiCode)
@@ -320,8 +292,8 @@ async def _buildEntry(session: AsyncSession, kpiCode: str) -> ContractEntry | No
         # metric_id 为空或悬空 ⇒ Tier C（spec §7.4），不注入契约。
         logger.warning("KPI 未挂靠可用本体指标，降级 Tier C code=%s", kpi.kpi_code)
         return None
-    technique = _techniqueOf(metric)
-    result = reconcileMetric(_governanceOf(kpi), technique)
+    technique = techniqueOf(metric)
+    result = reconcileMetric(governanceSpecOf(kpi), technique)
     try:
         await recordReconcileResult(
             session, kpiId=kpi.id, kpiCode=kpi.kpi_code, result=result

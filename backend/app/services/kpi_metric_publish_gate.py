@@ -35,13 +35,13 @@ from app.services.kpi_metric_reconcile import (
     VERDICT_MISMATCH,
     VERDICT_PASS,
     GovernanceSpec,
-    MeasureSpec,
     MetricTechnique,
     ReconcileFinding,
     reconcileExecutableVsStructured,
     reconcileGovernanceVsTechnique,
     reconcileTechniqueInternal,
 )
+from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
 from app.services.kpi_metric_switches import SWITCH_GATE, readKpiMetricSwitch
 from app.services.messages_zh import (
     MSG_KPI_GATE_BLOCKED,
@@ -287,29 +287,6 @@ def buildMetricGateItems(
     )
 
 
-def _techniqueOf(metric: OntologyMetric) -> MetricTechnique:
-    """指标实体 → 技术形态快照（只读，不改实体）。"""
-    return MetricTechnique(
-        metric_type=metric.metric_type or MetricType.MEASURE.value,
-        numerator=MeasureSpec.fromRaw(metric.numerator_measure),
-        denominator=MeasureSpec.fromRaw(metric.denominator_measure),
-        aggregation_order=metric.aggregation_order,
-        grain_keys=tuple(metric.grain_keys or ()),
-        filter_expression=metric.filter_expression,
-        formula=metric.formula,
-        execution_source=metric.execution_source,
-    )
-
-
-def _governanceOf(kpi: KpiCatalog) -> GovernanceSpec:
-    """KPI 实体 → 治理侧快照（只读，不改实体）。"""
-    return GovernanceSpec(
-        numerator_columns=tuple(kpi.numerator_columns or ()),
-        denominator_columns=tuple(kpi.denominator_columns or ()),
-        grain_keys=tuple(kpi.grain_keys or ()),
-    )
-
-
 async def _loadLinkedKpis(
     session: AsyncSession, metricId: int | None
 ) -> tuple[KpiCatalog, ...]:
@@ -336,7 +313,7 @@ def _linkedMismatchOf(
     """关联 KPI 的层 2 对账：**只拦 mismatch**（unknown 放行，打破互锁）。"""
     mismatches: list[_LinkedMismatch] = []
     for kpi in linked:
-        layer2 = reconcileGovernanceVsTechnique(_governanceOf(kpi), technique)
+        layer2 = reconcileGovernanceVsTechnique(governanceSpecOf(kpi), technique)
         # 只有 mismatch 计入（unknown 放行；反向实验把它改成 != VERDICT_PASS 时
         # ⇒ 用例 test_metric_publish_allowed_when_linked_kpi_governance_unknown 必须变红）
         if layer2.verdict == VERDICT_MISMATCH:
@@ -359,7 +336,8 @@ async def checkMetricPublishGate(
     technique: MetricTechnique | None = None,
 ) -> GateResult:
     """本体指标发布闸门（只读检查）。"""
-    tech = technique if technique is not None else _techniqueOf(metric)
+    # 统一用 techniqueOf() 的空值语义（None ⇒ 空技术形态），不再有两套判断。
+    tech = technique if technique is not None else techniqueOf(metric)
     layer1 = reconcileTechniqueInternal(tech)
     layer3 = reconcileExecutableVsStructured(tech)
     degraded = (
@@ -412,9 +390,9 @@ async def checkKpiPublishGate(
     metric: OntologyMetric | None = None
     if effectiveMetricId is not None:
         metric = await session.get(OntologyMetric, effectiveMetricId)
-    technique = _techniqueOf(metric) if metric is not None else MetricTechnique()
+    technique = techniqueOf(metric)
     effectiveGovernance = (
-        governance if governance is not None else _governanceOf(kpi)
+        governance if governance is not None else governanceSpecOf(kpi)
     )
     layer2 = reconcileGovernanceVsTechnique(effectiveGovernance, technique)
     items = buildKpiGateItems(

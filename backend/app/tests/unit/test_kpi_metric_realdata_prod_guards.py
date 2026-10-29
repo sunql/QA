@@ -154,7 +154,8 @@ async def test_step9_test_database_does_not_backup(
 
     await module.step9_applyBackfill(object(), isProd=False)
 
-    assert events == ["apply"]
+    # S9 固定跑两遍（幂等验证）⇒ 两次 apply，且全程没有 backup/banner。
+    assert events == ["apply", "apply"]
 
 
 def test_entry_module_imported_with_expected_globals(

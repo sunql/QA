@@ -463,6 +463,8 @@ def _targetIdentity(databaseUrl: str) -> str:
 def _safeRevision(revision: str) -> str:
     """revision 只允许 ``[A-Za-z0-9_.-]``（防止 ``/``、``..`` 拼进路径）。"""
     cleaned = re.sub(r"[^A-Za-z0-9_.-]", "", revision or "")
+    # 单个 "." 可保留，但 ".." / 前导点会构成上跳或隐藏文件语义 ⇒ 折叠/去掉。
+    cleaned = re.sub(r"\.{2,}", ".", cleaned).strip(".")
     return cleaned or "unknown"
 
 

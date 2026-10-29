@@ -540,6 +540,9 @@ prod `system_config` **没有任何 KPI 开关行** ⇒ 走代码默认：
 
 ### 11.3 上线前清单
 
+- [x] prod 备份受影响表（**2026-10-30 已完成**）：`/tmp/ontology_metric_20261030.sql`（0 行，仅结构）
+  + `/tmp/kpi_catalog_20261030.sql`（12 行，COPY 数据完整，两份均含 dump complete 标记）；
+  `ontology_class`（54 行）迁移不改动、`ontology_metric_source` 在 0136 前尚不存在，均无需备份
 - [ ] prod 迁移 `0136` / `0137`（**尚未执行**）
 - [ ] 业务方审核 [`docs/kpi-metric-backfill-review.md`](../../../docs/kpi-metric-backfill-review.md)（12 新建 / 0 匹配）
 - [ ] **人工**发起 `kpi_metric_backfill.py --database-url <prod DSN> --apply --allow-prod-write`（S9 语义已在隔离测试库证明幂等；prod 未跑）

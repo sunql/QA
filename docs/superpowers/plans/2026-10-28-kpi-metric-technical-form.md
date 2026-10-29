@@ -1431,6 +1431,8 @@ git commit -m "feat: 上收 extractSqlIdentifiers + 新增 measureColumnIdentifi
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from app.services.kpi_metric_reconcile import (
@@ -1821,7 +1823,7 @@ def test_merge_clean_is_not_degraded_and_tier_a_eligible() -> None:
 
 def test_result_is_immutable() -> None:
     r = reconcileMetric(GovernanceSpec(), MetricTechnique())
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         r.verdict = "pass"  # type: ignore[misc]
 ```
 
@@ -1876,7 +1878,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.domain.enums import MetricExecutionSource, MetricType
+from app.domain.enums import (
+    MetricAggregationOrder,
+    MetricExecutionSource,
+    MetricType,
+)
 from app.services.nl2sql_semantic_guard import (
     extractSqlIdentifiers,
     measureColumnIdentifiers,
@@ -1948,7 +1954,7 @@ class MeasureSpec:
     class_alias: str | None = None
 
     @staticmethod
-    def fromRaw(raw: object) -> "MeasureSpec | None":
+    def fromRaw(raw: object) -> MeasureSpec | None:
         """从 DB 的 JSON 值构造。非 dict / 缺 agg ⇒ None（判不了就不判）。"""
         if not isinstance(raw, dict):
             return None
@@ -2293,7 +2299,7 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@loca
   uv run pytest app/tests/unit/test_kpi_metric_reconcile.py -q
 ```
 
-Expected: PASS（36 passed）
+Expected: PASS（37 passed）
 
 - [ ] **Step 5: 提交**
 

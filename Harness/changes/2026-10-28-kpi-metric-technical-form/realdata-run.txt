@@ -303,3 +303,73 @@ NOTE  1 step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失�
   - S9 回填落库 + 幂等: 只读模式未加 --apply-backfill（落库需业务方审核后显式发起）
 RESULT: SKIP steps=9 passed=8 failed=0 skipped=1
 INFO  跳过步骤数 = 1；例如：None
+
+────────────────────────────────────────────────────────────────────────
+D. 2026-10-29 最终修复波后 prod 只读**回归**重跑（F1–F11 落地后，HEAD 含 e0aa4a68）
+   命令：cd backend && ./.venv/bin/python -m scripts.kpi_metric_realdata \
+           --database-url postgresql+asyncpg://qa_user:***@localhost:5433/qa_metadata \
+           --allow-prod-write
+   退出码：1（与 A 段一致：S1 FAIL + 8 SKIP）
+
+   ⚠️ 本段的证明范围 = 「修复未引入 prod 回归」，**不是** F8 的功能验证。
+      F8（`step4_publishGate(isProd=True)` ⇒ 不碰任何开关直接 SKIP）针对的是
+      **已迁移**的 prod；而 prod 仍在 0135，S4 无论是否带 isProd 短路都会因
+      「迁移未应用」而 SKIP，两条路径输出完全相同 ⇒ 本段对 F8 无判别力。
+      F8 的功能验证由单测承担：
+      backend/app/tests/unit/test_kpi_metric_realdata_prod_guards.py
+      （isProd=True ⇒ writeSwitchValue 调用 0 次 + SKIPS 增加）。
+
+   跑前 / 跑后只读复核（psql，5433/qa_metadata）：
+     alembic_version      0135 → 0135
+     system_config KPI_*   0 行 → 0 行
+     ontology_metric       0 行 → 0 行
+     kpi_catalog          12 行 → 12 行
+   ⇒ prod 未被写入。
+────────────────────────────────────────────────────────────────────────
+
+TARGET  postgresql+asyncpg://qa_user:***@localhost:5433/qa_metadata  (from --database-url)
+DATABASE  qa_metadata
+MODE  read-only
+PLAN STEPS = 9
+------------------------------------------------------------------------
+SKIP  S9 回填落库 + 幂等 — 只读模式未加 --apply-backfill（落库需业务方审核后显式发起）
+PASS  PREFLIGHT current_database() = 守卫认定库名 — qa_metadata
+INFO  计数不可读（结构未迁移？）：ProgrammingError("(sqlalchemy.dialects.postgresql.asyncpg.ProgrammingError) <class 'asyncpg.exceptions.UndefinedColumnError'>: column kpi_catalog.grain_keys does not exist")
+INFO  alembic_version 实测 = '0135'
+INFO  system_config[KPI_CONTRACT_INJECTION_ENABLED] 缺失（走代码默认值）
+INFO  system_config[KPI_METRIC_GATE_ENABLED] 缺失（走代码默认值）
+INFO  system_config[KPI_METRIC_TIER_A_ENABLED] 缺失（走代码默认值）
+INFO  STEP S1 begin
+FAIL  S1.1 迁移版本 = 0137 — 实际 '0135'
+FAIL  S1.2 ontology_metric 新增 9 列 — 缺失 ['aggregation_order', 'denominator_measure', 'execution_source', 'filter_expression', 'grain_keys', 'metric_type', 'numerator_measure', 'owner', 'status']
+FAIL  S1.3 kpi_catalog 新增 3 列 — 缺失 ['denominator_columns', 'grain_keys', 'numerator_columns']
+FAIL  S1.4 ontology_metric_source 表存在 — 列数 0
+FAIL  S1.5 UNIQUE(metric_id, class_id, role) — 实际约束列组合 []
+FAIL  S1.6 ontology_metric_source.class_id 索引 — 断言不成立
+INFO  STEP S1 end
+SKIP  S2 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S3 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S4 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S5 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S6 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S7 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S8 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+------------------------------------------------------------------------
+FAILED  6 check(s) failed:
+  - S1.1 迁移版本 = 0137: 实际 '0135'
+  - S1.2 ontology_metric 新增 9 列: 缺失 ['aggregation_order', 'denominator_measure', 'execution_source', 'filter_expression', 'grain_keys', 'metric_type', 'numerator_measure', 'owner', 'status']
+  - S1.3 kpi_catalog 新增 3 列: 缺失 ['denominator_columns', 'grain_keys', 'numerator_columns']
+  - S1.4 ontology_metric_source 表存在: 列数 0
+  - S1.5 UNIQUE(metric_id, class_id, role): 实际约束列组合 []
+  - S1.6 ontology_metric_source.class_id 索引: 断言不成立
+NOTE  8 step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失败）
+  - S9 回填落库 + 幂等: 只读模式未加 --apply-backfill（落库需业务方审核后显式发起）
+  - S2 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S3 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S4 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S5 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S6 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S7 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S8 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+RESULT: FAIL steps=9 passed=0 failed=1 skipped=8
+INFO  跳过步骤数 = 8；例如：迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行

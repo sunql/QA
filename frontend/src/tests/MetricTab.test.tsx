@@ -45,9 +45,15 @@ const mockMetric: OntologyMetric = {
   executionSource: null,
 };
 
-/** 带非空 measure 的指标：用于守住「编辑回显 class_id / class_alias」的接线。 */
+/** 带非空 measure 的指标：用于守住「编辑回显 class_id / class_alias」的接线。
+ *
+ * ⚠️ `metricType` 必须是 `RATIO`：`MetricTechniqueForm` 只对 RATIO/DIFFERENCE
+ * 渲染分母行，MEASURE 下分母字段不在表单里注册 ⇒ antd 不返回它们 ⇒
+ * `toMeasureSpec` 按设计返回 null（分母被清空），分母断言会恒失败。
+ */
 const mockMetricWithMeasure: OntologyMetric = {
   ...mockMetric,
+  metricType: "RATIO",
   numeratorMeasure: { agg: "SUM", expr: "QTY", filter: null, class_id: 7, class_alias: "Order" },
   denominatorMeasure: {
     agg: "COUNT",

@@ -406,7 +406,7 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 
 - **Spec**：[`docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md`](../../docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md)
 - **Wiki**：[`Harness/wiki/kpi-metric-technical-form.md`](../../wiki/kpi-metric-technical-form.md)（架构参考 + §14 实施结果）
-- **实跑证据**：[`realdata-run.txt`](realdata-run.txt)（A：prod 只读 S1 FAIL 为预期 / exit 1；B：隔离测试库回填 S9 幂等 9/9 PASS / exit 0；C：回填后只读复跑 0 FAIL 但有 SKIP / **exit 2**）
+- **实跑证据**：[`realdata-run.txt`](realdata-run.txt)（A：prod 只读 S1 FAIL 为预期 / exit 1；B：隔离测试库回填 S9 幂等 9/9 PASS / exit 0；C：回填后只读复跑 0 FAIL 但有 SKIP / **exit 2**；D：2026-10-29 最终修复波后 prod 只读**回归**重跑 exit 1，跑前/跑后 prod 四项只读计数一致。**D 段不证明 F8** —— prod 仍在 0135，S4 两条路径同样 SKIP，F8 由单测 `test_kpi_metric_realdata_prod_guards.py` 验证）
 - **回填审核清单**：[`docs/kpi-metric-backfill-review.md`](../../../docs/kpi-metric-backfill-review.md)（2026-10-29 从 prod 只读生成，12 新建 / 0 匹配）
 - **Rules**：[`Harness/rules/开发流程规范.md`](../../rules/开发流程规范.md)（10 阶段工作流）、[`Harness/rules/变更记录强制规范.md`](../../rules/变更记录强制规范.md)
 - **Memory**：[`qa-system-kpi-metric-technical-form-design.md`](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-kpi-metric-technical-form-design.md)

@@ -1081,9 +1081,14 @@ Expected: FAIL —— `ImportError: cannot import name 'MeasureSpecSchema' from 
 
 - [ ] **Step 3: 加 `MeasureSpecSchema` + 扩展 DTO**
 
-在 `backend/app/domain/schemas.py` 中，紧邻 `OntologyMetricCreate` 之前插入：
+在 `backend/app/domain/schemas.py` 中，紧邻 `OntologyMetricCreate` 之前插入（白名单常量与 validator 的位置不能颠倒：validator 必须在类体内；`extra="forbid"` 只收紧本子 DTO，不改变全局 `CamelModel`）：
 
 ```python
+_MEASURE_AGG_ALLOWED: frozenset[str] = frozenset(
+    {"SUM", "COUNT", "AVG", "COUNT_DISTINCT"}
+)
+
+
 class MeasureSpecSchema(CamelModel):
     """结构化度量定义（numerator_measure / denominator_measure 共用形状）。
 
@@ -1094,30 +1099,23 @@ class MeasureSpecSchema(CamelModel):
     class_alias：源类别名（人读，冗余存储便于 prompt 渲染）。
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     agg: str = Field(..., description="SUM|COUNT|AVG|COUNT_DISTINCT")
     expr: str | None = Field(default=None, max_length=1000)
     filter: str | None = Field(default=None, max_length=1000)
     class_id: int | None = None
     class_alias: str | None = Field(default=None, max_length=100)
-```
 
-并给 `agg` 加白名单校验 —— 在 `MeasureSpecSchema` 之后紧跟一个 validator：
-
-```python
-_MEASURE_AGG_ALLOWED: frozenset[str] = frozenset(
-    {"SUM", "COUNT", "AVG", "COUNT_DISTINCT"}
-)
-
-
-@field_validator("agg")
-@classmethod
-def _validateAgg(cls, value: str) -> str:
-    token = value.strip().upper()
-    if token not in _MEASURE_AGG_ALLOWED:
-        raise ValueError(
-            f"measure agg 非法：{value!r}；应为 {sorted(_MEASURE_AGG_ALLOWED)}"
-        )
-    return token
+    @field_validator("agg")
+    @classmethod
+    def _validateAgg(cls, value: str) -> str:
+        token = value.strip().upper()
+        if token not in _MEASURE_AGG_ALLOWED:
+            raise ValueError(
+                f"measure agg 非法：{value!r}；应为 {sorted(_MEASURE_AGG_ALLOWED)}"
+            )
+        return token
 ```
 
 > 若 `schemas.py` 顶部还没 import `field_validator`，补上：

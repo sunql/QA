@@ -712,3 +712,8 @@ MSG_KPI_GATE_METRIC_NO_NUMERATOR = "未配置分子度量（numerator_measure �
 MSG_KPI_GATE_METRIC_NO_DENOMINATOR = "比率型指标未配置分母度量（denominator_measure 为空）"
 MSG_KPI_GATE_METRIC_NO_AGGREGATION_ORDER = "比率型指标未配置聚合阶（aggregation_order 为空）"
 MSG_KPI_GATE_BLOCKED = "发布闸门未通过：{items}"
+# 本体指标方向（结构化齐全 / 技术形态未降级 / 关联 KPI 无 mismatch）
+MSG_KPI_GATE_METRIC_NO_TYPE = "本体指标未配置指标类型（metric_type 为空）"
+MSG_KPI_GATE_METRIC_NO_GRAIN = "本体指标未配置结构化粒度键（grain_keys 为空）"
+MSG_KPI_GATE_METRIC_DEGRADED = "本体指标技术形态降级（结构化口径与可执行 SQL 列引用不一致）"
+MSG_KPI_GATE_METRIC_LINKED_MISMATCH = "关联 KPI 口径对账不通过：{items}"

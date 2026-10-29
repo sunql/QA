@@ -16,11 +16,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
+from app.domain.enums import KpiStatus
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import DataSource, KpiCatalog
 from app.domain.schemas import KpiCatalogCreate, KpiCatalogUpdate
 from app.services.acl_service import AclService
 from app.services.kpi_match_cache import get_kpi_match_cache
+from app.services.kpi_metric_publish_gate import enforceKpiPublishGate
+from app.services.kpi_metric_reconcile import GovernanceSpec
 from app.services.messages_zh import (
     MSG_KPI_CATALOG_DUPLICATE_CODE,
     MSG_KPI_CATALOG_NOT_FOUND,
@@ -31,6 +34,39 @@ from app.services.messages_zh import (
 from app.services.outbox_service import OutboxService
 
 logger = logging.getLogger(__name__)
+
+# 治理侧结构化列（改动它们 ⇒ 闸门必须按**新值**判对账，而不是旧口径）
+_GOVERNANCE_KEYS = ("numerator_columns", "denominator_columns", "grain_keys")
+
+
+def _governanceOverride(
+    entity: KpiCatalog, updates: dict
+) -> GovernanceSpec | None:
+    """本次请求改动了治理列 ⇒ 用新旧合并后的治理快照；否则返回 None（用实体现值）。"""
+    if not any(key in updates for key in _GOVERNANCE_KEYS):
+        return None
+    return GovernanceSpec(
+        numerator_columns=tuple(
+            updates.get("numerator_columns", entity.numerator_columns) or ()
+        ),
+        denominator_columns=tuple(
+            updates.get("denominator_columns", entity.denominator_columns) or ()
+        ),
+        grain_keys=tuple(updates.get("grain_keys", entity.grain_keys) or ()),
+    )
+
+
+def _publishGateOverrides(entity: KpiCatalog, updates: dict) -> dict:
+    """闸门覆盖参数：只覆盖本次请求**明确改动**的字段（显式 null = 解绑）。"""
+    overrides: dict = {}
+    if "metric_id" in updates:
+        overrides["metricId"] = updates["metric_id"]
+    if "datasource_id" in updates:
+        overrides["datasourceId"] = updates["datasource_id"]
+    governance = _governanceOverride(entity, updates)
+    if governance is not None:
+        overrides["governance"] = governance
+    return overrides
 
 
 class KpiCatalogService:
@@ -97,6 +133,10 @@ class KpiCatalogService:
             created_by=dto.created_by,
             semantic_keywords=dto.semantic_keywords,
             match_threshold=Decimal(str(dto.match_threshold)) if dto.match_threshold is not None else Decimal("0.75"),
+            # P1：治理侧结构化列（漏写 ⇒ 对账恒 unknown / 闸门恒拦）
+            grain_keys=dto.grain_keys,
+            numerator_columns=dto.numerator_columns,
+            denominator_columns=dto.denominator_columns,
         )
         # F2 §4.2: 校验 datasource 存在 + is_active
         ds = await session.get(DataSource, dto.datasource_id)
@@ -104,6 +144,9 @@ class KpiCatalogService:
             raise ValidationError(MSG_KPI_DATASOURCE_NOT_FOUND.format(id=dto.datasource_id))
         if not ds.is_active:
             raise ValidationError(MSG_KPI_DATASOURCE_INACTIVE.format(id=ds.id, name=ds.name))
+        # P1 发布闸门：创建即 PUBLISHED 也要过闸（不通过 ⇒ 409，且不入库）
+        if dto.status == KpiStatus.PUBLISHED:
+            await enforceKpiPublishGate(session, entity)
         session.add(entity)
         try:
             await session.flush()
@@ -162,9 +205,19 @@ class KpiCatalogService:
         # status 是 NOT NULL 列；显式 null 应被拒绝（前端清空表单用「不改」而非「传 null」）
         if "status" in updates and updates["status"] is None:
             raise ValidationError(MSG_KPI_CATALOG_STATUS_NULL)
+        # 目标状态（枚举成员，归一前取）—— 发布闸门据此判断是否要过闸
+        targetStatus = updates.get("status")
         # status / metric_id 是枚举/int；service 层把 KpiStatus 归一为字符串
         if "status" in updates and updates["status"] is not None:
             updates["status"] = updates["status"].value
+        # Numeric 列归一为 Decimal：asyncpg 不接受 float 直接绑到 Numeric
+        if "match_threshold" in updates and updates["match_threshold"] is not None:
+            updates["match_threshold"] = Decimal(str(updates["match_threshold"]))
+        # P1 发布闸门：发布前过闸；按**新值**判定（同一请求里改挂靠/治理列也要算）
+        if targetStatus == KpiStatus.PUBLISHED:
+            await enforceKpiPublishGate(
+                session, entity, **_publishGateOverrides(entity, updates)
+            )
         for key, value in updates.items():
             setattr(entity, key, value)
         entity.revision_count += 1

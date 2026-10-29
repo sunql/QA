@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.dependencies import CurrentUser
-from app.domain.enums import ClassRelationType
+from app.domain.enums import ClassRelationType, MetricStatus, MetricType
 from app.domain.exceptions import (
     MilvusError,
     NotFoundError,
@@ -61,6 +61,8 @@ from app.services.audit_service import AuditService
 from app.services.embedding_service import EmbeddingService
 from app.services.id_mapping_service import IdMappingService
 from app.services.join_inference import SAGE_X3_REFERENCE_MAP
+from app.services.kpi_metric_publish_gate import enforceMetricPublishGate
+from app.services.kpi_metric_reconcile import MeasureSpec, MetricTechnique
 from app.services.messages_zh import (
     MSG_CLASS_ALREADY_EXPIRED,
     MSG_CLASS_INHERIT_CYCLE,
@@ -173,6 +175,32 @@ def _metricEmbeddingText(metric: OntologyMetric) -> str:
 
 # 自动同步后台任务的强引用集合（create_task 弱引用会被 GC，需持握防丢失）
 _PENDING_SYNC_TASKS: set[asyncio.Task] = set()
+
+
+def _mergedTechnique(entity: OntologyMetric, updates: dict) -> MetricTechnique:
+    """「实体现值 + 本次请求新值」合并出的技术形态快照（**不改实体**）。
+
+    发布闸门要在落属性**之前**按新值判定（否则「同一请求里补结构化列 + 发布」
+    会被旧口径拦下），但闸门失败时不能留下脏的实体属性 ⇒ 用快照代替改实体。
+    """
+    return MetricTechnique(
+        metric_type=(
+            updates.get("metric_type")
+            or entity.metric_type
+            or MetricType.MEASURE.value
+        ),
+        numerator=MeasureSpec.fromRaw(
+            updates.get("numerator_measure", entity.numerator_measure)
+        ),
+        denominator=MeasureSpec.fromRaw(
+            updates.get("denominator_measure", entity.denominator_measure)
+        ),
+        aggregation_order=updates.get("aggregation_order", entity.aggregation_order),
+        grain_keys=tuple(updates.get("grain_keys", entity.grain_keys) or ()),
+        filter_expression=updates.get("filter_expression", entity.filter_expression),
+        formula=updates.get("formula", entity.formula),
+        execution_source=updates.get("execution_source", entity.execution_source),
+    )
 
 
 def makeJoinKey(
@@ -893,7 +921,31 @@ class OntologyService:
             target_class_id=dto.target_class_id,
             dimension_defaults=dto.dimension_defaults,
             created_by=dto.created_by,
+            # ── P1 指标技术形态（显式列清单：漏写 ⇒ DB 里是 NULL，
+            #    对账 / 契约注入 / 发布闸门读到的全是空值）──────────────
+            metric_type=dto.metric_type.value,
+            numerator_measure=(
+                dto.numerator_measure.model_dump() if dto.numerator_measure else None
+            ),
+            denominator_measure=(
+                dto.denominator_measure.model_dump()
+                if dto.denominator_measure
+                else None
+            ),
+            aggregation_order=(
+                dto.aggregation_order.value if dto.aggregation_order else None
+            ),
+            grain_keys=dto.grain_keys,
+            filter_expression=dto.filter_expression,
+            status=dto.status.value,
+            owner=dto.owner,
+            execution_source=(
+                dto.execution_source.value if dto.execution_source else None
+            ),
         )
+        # P1 发布闸门：创建即 PUBLISHED 也要过闸（不通过 ⇒ 409，且不入库）
+        if dto.status == MetricStatus.PUBLISHED:
+            await enforceMetricPublishGate(session, entity)
         session.add(entity)
         await session.flush()
         await _audit.record(
@@ -972,6 +1024,19 @@ class OntologyService:
         entity = await self.getMetric(session, id)
         before = _entityToDict(entity)
         updates = dto.model_dump(exclude_unset=True)
+        # 目标状态（枚举成员，归一前取）—— 发布闸门据此判断是否要过闸
+        targetStatus = updates.get("status")
+        # 枚举列归一为字符串：model_dump(python 模式) 返回枚举成员而非 .value
+        for key in ("metric_type", "aggregation_order", "status", "execution_source"):
+            value = updates.get(key)
+            if value is not None and hasattr(value, "value"):
+                updates[key] = value.value
+        # P1 发布闸门：**先过闸再落属性** —— 闸门失败时实体保持原样
+        #（不留下「内存已改、库里没改」的脏状态），且按**新值**判定。
+        if targetStatus == MetricStatus.PUBLISHED:
+            await enforceMetricPublishGate(
+                session, entity, technique=_mergedTechnique(entity, updates)
+            )
         for key, value in updates.items():
             setattr(entity, key, value)
         await session.flush()

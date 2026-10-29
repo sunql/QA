@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 from collections.abc import Sequence
 from decimal import Decimal
@@ -282,7 +281,7 @@ def _parseArgs(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--database-url",
         default=None,
-        help="目标库 DSN（必选；env DATABASE_URL 仅作兜底）",
+        help="目标库 DSN（必选；不读任何环境变量）",
     )
     parser.add_argument(
         "--allow-prod-write",
@@ -294,13 +293,18 @@ def _parseArgs(argv: Sequence[str] | None) -> argparse.Namespace:
 
 
 def _requireDatabaseUrl(explicit: str | None) -> str:
-    databaseUrl = explicit or os.environ.get("DATABASE_URL")
-    if not databaseUrl:
+    """闸 1：只认 ``--database-url``，**不读** ``DATABASE_URL`` / ``TEST_DATABASE_URL``。
+
+    dev 工作流普遍导出 ``DATABASE_URL`` ⇒ 作为兜底会把种子打到非预期库；
+    本仓其它工具链（``kpi_metric_realdata_lib.resolveDatabaseUrl``）同口径。
+    """
+    if not explicit:
         raise SystemExit(
-            "缺少目标库：必须传 --database-url（env DATABASE_URL 仅作兜底，"
+            "缺少数据库连接：请用 --database-url 指定目标库。"
+            "本脚本不猜环境变量（不读 DATABASE_URL / TEST_DATABASE_URL —— "
             "本机默认配置指向 5432 的 OpenMetadata PG，不可信）。"
         )
-    return databaseUrl
+    return explicit
 
 
 async def _runSeed(args: argparse.Namespace) -> int:

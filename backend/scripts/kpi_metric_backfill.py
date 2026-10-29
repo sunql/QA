@@ -43,12 +43,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import BinaryIO
 
 # 允许从 scripts/ 直接运行
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -112,9 +115,16 @@ __all__ = [
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-_BACKUP_DIR = Path("/tmp")
+# 备份目录：**私有**（0700），位于系统临时目录下，跨运行稳定 ⇒ 当日备份可复用。
+_BACKUP_DIR = Path(tempfile.gettempdir()) / "kpi_metric_backups"
+_BACKUP_DIR_MODE = 0o700
+_BACKUP_FILE_MODE = 0o600
 _BACKUP_TABLES = ("ontology_metric", "ontology_metric_source", "kpi_catalog")
 _SQLSTATE_UNDEFINED = ("42703", "42P01")
+
+# 「prod 缺 ontology_metric.status」专用判据：必须限定表名 + 列名。
+# 裸 "status" 会命中任何 SQL 文本里带 status 的缺列错误（如 grain_keys 缺失）。
+_MISSING_STATUS_COLUMN = re.compile(r'"?ontology_metric"?\s*\.\s*"?status"?')
 
 
 @dataclass(frozen=True)
@@ -351,7 +361,13 @@ def _selectPlans(only: str | None) -> list[KpiBackfillPlan]:
 def _isMissingStatusColumn(exc: ProgrammingError) -> bool:
     """仅识别「0135 的 prod 没有 ontology_metric.status」这一种缺列（其余照抛）。"""
     sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
-    return sqlstate == "42703" and "status" in str(exc).lower()
+    if sqlstate != "42703":
+        return False
+    orig = getattr(exc, "orig", None)
+    text_ = str(orig) if orig is not None else ""
+    # 真实报错的 SQL 文本在 str(exc) 里（orig 只有 'column "status" does not exist'），
+    # 两处都搜：判据必须限定 `ontology_metric.status`，不能是裸 status。
+    return bool(_MISSING_STATUS_COLUMN.search(f"{text_}\n{exc}"))
 
 
 async def _metricFacts(session: AsyncSession) -> tuple[frozenset[str], frozenset[str]]:
@@ -421,10 +437,59 @@ async def _previewContext(
     )
 
 
-def _backupPath(table: str, revision: str) -> Path:
-    """备份文件名带当日日期 + alembic revision（M-4：半截/旧版本备份可辨识）。"""
-    safeRevision = revision.strip() or "unknown"
-    return _BACKUP_DIR / f"{table}_{date.today():%Y%m%d}_{safeRevision}.sql"
+def _backupDir() -> Path:
+    """创建（或复用）**私有**备份目录；权限只收紧不放宽。"""
+    directory = _BACKUP_DIR
+    if directory.is_symlink():
+        raise SystemExit(f"备份目录是符号链接 ⇒ 拒绝使用：{directory}")
+    directory.mkdir(mode=_BACKUP_DIR_MODE, parents=True, exist_ok=True)
+    os.chmod(directory, _BACKUP_DIR_MODE)
+    return directory
+
+
+def _targetIdentity(databaseUrl: str) -> str:
+    """从 DSN 派生 ``host_port_db``，清洗成 ``[A-Za-z0-9_.-]``。
+
+    dev 与 prod 同名 ``qa_metadata`` ⇒ 文件名必须带 host/port 才能区分目标库。
+    """
+    try:
+        url = make_url(databaseUrl)
+    except ArgumentError:
+        return "unknown-target"
+    raw = f"{url.host or 'localhost'}_{url.port or 5432}_{url.database or 'unknown'}"
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", raw)
+
+
+def _safeRevision(revision: str) -> str:
+    """revision 只允许 ``[A-Za-z0-9_.-]``（防止 ``/``、``..`` 拼进路径）。"""
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "", revision or "")
+    return cleaned or "unknown"
+
+
+def _backupPath(table: str, revision: str, databaseUrl: str) -> Path:
+    """备份文件名带日期 + **目标库身份** + revision（跨库/旧版本备份均可辨识）。"""
+    name = (
+        f"{table}_{date.today():%Y%m%d}_"
+        f"{_targetIdentity(databaseUrl)}_{_safeRevision(revision)}.sql"
+    )
+    return _backupDir() / name
+
+
+def _openExclusive(path: Path) -> BinaryIO:
+    """``O_EXCL | O_NOFOLLOW`` 打开文件：已存在 / 符号链接 ⇒ 失败，不覆盖。"""
+    try:
+        fd = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            _BACKUP_FILE_MODE,
+        )
+    except OSError as exc:
+        # O_NOFOLLOW 命中符号链接时 POSIX 报 ELOOP（不是 FileExistsError），
+        # 与 O_EXCL 的「已存在」一并按失败处理：绝不跟随 / 覆盖。
+        raise SystemExit(
+            f"备份临时文件已存在或不可安全创建（可能是符号链接，拒绝跟随）：{path}"
+        ) from exc
+    return os.fdopen(fd, "wb")
 
 
 def _dumpTarget(databaseUrl: str) -> tuple[list[str], dict[str, str]]:
@@ -459,7 +524,7 @@ def _pgDump(databaseUrl: str, table: str, path: Path) -> None:
     command, env = _dumpTarget(databaseUrl)
     tmp = path.with_name(path.name + ".tmp")
     try:
-        with tmp.open("wb") as handle:
+        with _openExclusive(tmp) as handle:
             result = subprocess.run(
                 [*command, "-t", table], stdout=handle, stderr=subprocess.PIPE, env=env
             )
@@ -475,7 +540,10 @@ def _pgDump(databaseUrl: str, table: str, path: Path) -> None:
     if "no matching tables" in stderr:
         print(f"⚠️ 备份跳过 {table}：目标库尚无该表（迁移未应用）")
         return
-    raise SystemExit(f"备份失败（{table}）：{stderr[-500:]}")
+    # stderr 可能回显 DSN / 口令 ⇒ 必须打码
+    raise SystemExit(
+        _scrubSecrets(f"备份失败（{table}）：{stderr[-500:]}", databaseUrl)
+    )
 
 
 async def _alembicRevision(databaseUrl: str) -> str:
@@ -496,10 +564,15 @@ async def _alembicRevision(databaseUrl: str) -> str:
 
 
 def _ensureProdBackup(databaseUrl: str, revision: str) -> tuple[Path, ...]:
-    """闸 4：写正式库前必须完成当日备份（存在且非空则复用）⇒ T15-B。"""
+    """闸 4：写正式库前必须完成当日备份（存在且非空则复用）⇒ T15-B。
+
+    文件名含目标库身份（host/port/db）⇒ 复用只可能复用**同一目标库**的备份。
+    """
     paths: list[Path] = []
     for table in _BACKUP_TABLES:
-        path = _backupPath(table, revision)
+        path = _backupPath(table, revision, databaseUrl)
+        if path.is_symlink():
+            raise SystemExit(f"备份文件是符号链接 ⇒ 拒绝复用/覆盖：{path}")
         if not path.exists() or path.stat().st_size == 0:
             _pgDump(databaseUrl, table, path)
         if path.exists() and path.stat().st_size > 0:
@@ -541,16 +614,18 @@ def _printSummary(summary: ApplySummary, targetDb: str) -> None:
         )
 
 
-def _schemaGapHint(exc: ProgrammingError) -> str | None:
+def _schemaGapHint(exc: ProgrammingError, databaseUrl: str) -> str | None:
     sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
     text_ = f"{exc}"
     if sqlstate in _SQLSTATE_UNDEFINED or any(
         marker in text_ for marker in ("UndefinedColumn", "UndefinedTable", "does not exist")
     ):
+        detail = text_.splitlines()[0] if text_ else str(exc)
+        # 原始错误可能回显连接串 / 口令 ⇒ 打码后再展示
         return (
             "目标库缺少本分支的迁移（0136/0137 的列或表不存在）⇒ 先执行 "
             "`DATABASE_URL=<该库> ./.venv/bin/python -m alembic upgrade head`。\n"
-            f"原始错误：{text_.splitlines()[0] if text_ else exc}"
+            f"原始错误：{_scrubSecrets(detail, databaseUrl)}"
         )
     return None
 
@@ -604,7 +679,7 @@ async def _run(args: argparse.Namespace) -> int:
             _printSummary(summary, targetDb)
             return 0
     except ProgrammingError as exc:
-        hint = _schemaGapHint(exc)
+        hint = _schemaGapHint(exc, databaseUrl)
         if hint is None:
             raise
         print(f"❌ {hint}")

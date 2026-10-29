@@ -80,6 +80,7 @@ import asyncio
 import logging
 import os
 import sys
+from functools import partial
 from collections import Counter
 from pathlib import Path
 
@@ -157,6 +158,8 @@ from app.services.kpi_semantic_match_service import (  # noqa: E402
     getKpiSemanticMatchService,
 )
 from scripts.kpi_metric_backfill import (  # noqa: E402
+    _ensureProdBackup,
+    _printBanner,
     applyPlans,
     buildPlans,
     classColumnIndex,
@@ -191,6 +194,14 @@ from scripts.kpi_metric_realdata_s3 import (  # noqa: E402
 )
 from scripts.kpi_metric_realdata_s4 import step4_publishGate  # noqa: E402
 
+from scripts.kpi_metric_db_guard import (  # noqa: E402
+    PROD_DB_NAME,
+    databaseNameOf,
+)
+
+# F8：目标库是否为正式库（由入口从 DSN 判定后传入 S4/S9，不在步骤内重写常量）
+_IS_PROD = databaseNameOf(DATABASE_URL) == PROD_DB_NAME
+
 # PLAN 的构造保证（不是库内实测值；库内实测值另行打印）
 EXPECTED_TIER_COUNTS = {"A": 4, "B": 5, "C": 3}
 
@@ -204,6 +215,9 @@ SWITCH_KEYS = (SWITCH_CONTRACT_INJECTION, SWITCH_GATE, SWITCH_TIER_A)
 # （不是 FAIL）：它们在新列缺失的库上根本没法执行，把「无法执行」判成「失败」
 # 会让人误读成「特性有 7 个缺陷」。
 _SCHEMA_READY = False
+
+# S1 实测到的 alembic 版本（S9 备份文件名用**实测值**，不用常量 EXPECTED_）
+_ALEMBIC_VERSION = ""
 
 # 依赖 0136/0137 新结构的步骤（S1 之后才能跑）
 _SCHEMA_DEPENDENT_STEPS = frozenset({"S2", "S3", "S4", "S5", "S6", "S7", "S8"})
@@ -256,8 +270,9 @@ async def _preflight(session: AsyncSession) -> None:
 
 
 async def step1_schema(session: AsyncSession) -> None:
-    global _SCHEMA_READY
+    global _SCHEMA_READY, _ALEMBIC_VERSION
     version = await readAlembicVersion(session)
+    _ALEMBIC_VERSION = version
     _SCHEMA_READY = version == EXPECTED_ALEMBIC_VERSION
     check(
         "S1.1 迁移版本 = " + EXPECTED_ALEMBIC_VERSION,
@@ -608,9 +623,20 @@ async def step8_legacyTableJoin(session: AsyncSession) -> None:
 # ── S9 回填落库（仅 --apply-backfill） ────────────────────────────────
 
 
-async def step9_applyBackfill(session: AsyncSession) -> None:
-    """跑两遍回填（默认非破坏性模式），验证幂等。"""
+async def step9_applyBackfill(
+    session: AsyncSession, *, isProd: bool = False
+) -> None:
+    """跑两遍回填（默认非破坏性模式），验证幂等。
+
+    ``isProd=True``（目标库是正式库）时必须**先备份再写**（闸 4）：
+    复用回填脚本的 ``_ensureProdBackup``（表清单 SSOT 在那边），revision 用
+    S1 实测到的当前 alembic 版本。备份失败 ⇒ ``SystemExit``，绝不继续写。
+    """
     plans = list(buildPlans())
+    if isProd:
+        revision = _ALEMBIC_VERSION or await readAlembicVersion(session)
+        backups = _ensureProdBackup(DATABASE_URL, revision)
+        _printBanner(TARGET_DB, backups)
     before = await countMetrics(session)
 
     first = await applyPlans(session, plans)
@@ -662,14 +688,16 @@ def _buildSteps(applyBackfill: bool) -> list[tuple[str, object]]:
         ("S1", step1_schema),
         ("S2", step2_backfillPreview),
         ("S3", step3_reconcile),
-        ("S4", step4_publishGate),
+        # F8：prod 一律不写 system_config ⇒ 入口判定后传入，步骤内直接 SKIP
+        ("S4", partial(step4_publishGate, isProd=_IS_PROD)),
         ("S5", step5_contractInjection),
         ("S6", step6_exactAlias),
         ("S7", step7_cacheDynamic),
         ("S8", step8_legacyTableJoin),
     ]
     if applyBackfill:
-        steps.insert(2, ("S9", step9_applyBackfill))
+        # F7：prod 回填写库前必须先备份（闸 4）
+        steps.insert(2, ("S9", partial(step9_applyBackfill, isProd=_IS_PROD)))
     else:
         # 只读模式**不会**执行 S9 —— 必须显式登记为 SKIP，否则汇总里的
         # ``passed=`` 会把它算成「通过」（9 步里只跑了 8 步）。

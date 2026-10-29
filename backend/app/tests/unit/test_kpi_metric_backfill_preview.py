@@ -41,17 +41,26 @@ class _MetricFactsSession:
         self.rollbacks += 1
 
 
-def _undefinedColumn(column: str) -> ProgrammingError:
+def _undefinedColumn(
+    column: str, statement: str = "SELECT 1"
+) -> ProgrammingError:
+    """构造真实形态：SQL 文本里带表名限定列，orig 里是 PostgreSQL 缺列消息。"""
     orig = RuntimeError(f'column "{column}" does not exist')
     orig.sqlstate = "42703"  # type: ignore[attr-defined]
-    return ProgrammingError("SELECT 1", {}, orig)
+    return ProgrammingError(statement, {}, orig)
 
 
 async def test_metric_facts_degrades_when_prod_lacks_status(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """0135 的 prod 没有 status ⇒ 退化为「只读名字、不判定 PUBLISHED」并明示。"""
-    session = _MetricFactsSession(_undefinedColumn("status"), ["KPI_A", "KPI_B"])
+    session = _MetricFactsSession(
+        _undefinedColumn(
+            "status",
+            "SELECT ontology_metric.metric_name, ontology_metric.status FROM ontology_metric",
+        ),
+        ["KPI_A", "KPI_B"],
+    )
 
     names, published = await cliModule._metricFacts(session)  # type: ignore[arg-type]
 
@@ -62,7 +71,17 @@ async def test_metric_facts_degrades_when_prod_lacks_status(
 
 
 async def test_metric_facts_propagates_other_missing_columns() -> None:
-    """只豁免 status 这一列；其它缺列（含非 42703）必须照抛。"""
-    session = _MetricFactsSession(_undefinedColumn("grain_keys"), [])
+    """只豁免 ``ontology_metric.status`` 这一列。
+
+    负向 SQL **故意含另一个表的 status 列**：这才能判出「裸 status」判据的
+    误命中（旧实现只看 ``"status" in str(exc)`` ⇒ 会把 formula 缺列也当 status）。
+    """
+    session = _MetricFactsSession(
+        _undefinedColumn(
+            "formula",
+            "SELECT kpi_catalog.status, ontology_metric.formula FROM ontology_metric",
+        ),
+        [],
+    )
     with pytest.raises(ProgrammingError):
         await cliModule._metricFacts(session)  # type: ignore[arg-type]

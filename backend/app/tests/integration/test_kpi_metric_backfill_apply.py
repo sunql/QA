@@ -476,10 +476,23 @@ async def test_apply_skips_missing_kpi(dbSession: AsyncSession) -> None:
     dsId = await _seedDatasource(dbSession)
     await _seedSchemaCache(dbSession, dsId)
 
-    summary = await applyPlans(dbSession, [_plan("KPI_SUPPLIER_OTD")])
+    plan = _plan("KPI_SUPPLIER_OTD")
+    summary = await applyPlans(dbSession, [plan])
 
     assert summary.skipped == ("KPI_SUPPLIER_OTD",)
     assert summary.created == ()
+    # Q1：补判别力 —— 这条必须走「KPI 不存在」分支，而不是「有 KPI 但未绑定数据源」：
+    # skipped 与 unbound_data_source 是两回事，只断言 skipped 无法区分。
+    assert summary.updated == ()
+    assert summary.unbound_data_source == ()
+    metric = (
+        await dbSession.execute(
+            select(OntologyMetric).where(
+                OntologyMetric.metric_name == plan.metricName
+            )
+        )
+    ).scalar_one_or_none()
+    assert metric is None
 
 
 async def test_apply_skips_when_class_table_unresolved(dbSession: AsyncSession) -> None:

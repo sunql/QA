@@ -107,7 +107,21 @@ async def _gateOff(session: AsyncSession, target: KpiCatalog) -> None:
     )
 
 
-async def step4_publishGate(session: AsyncSession) -> None:
+async def step4_publishGate(session: AsyncSession, *, isProd: bool = False) -> None:
+    """S4 发布闸门。
+
+    ``isProd=True`` 时**不碰任何开关**（连读都不读）直接 SKIP：本步骤需要临时
+    改写 ``system_config`` 的灰度开关，进程被 SIGKILL 时 ``finally`` 不会执行
+    ⇒ 正式库会残留 ``KPI_METRIC_GATE_ENABLED=true``，此后真实用户发布 KPI
+    全被 409 阻断。该验证只在隔离测试库进行。
+    """
+    if isProd:
+        skipStep(
+            "S4 发布闸门",
+            "目标库是正式库：S4 需要临时改写 system_config 的灰度开关，"
+            "prod 一律不写；请在隔离测试库验证 S4",
+        )
+        return
     kpis = await fetchKpis(session)
     if not kpis:
         skipStep("S4 发布闸门", "库里没有 kpi_catalog 行")

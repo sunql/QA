@@ -510,10 +510,44 @@ def test_schema_gap_hint_detects_missing_migration_only() -> None:
     missing = ProgrammingError(
         "SELECT 1", {}, RuntimeError('column "grain_keys" does not exist')
     )
-    hint = cliModule._schemaGapHint(missing)
+    dsn = "postgresql+asyncpg://qa_user:S3cret@localhost:5433/qa_metadata"
+    hint = cliModule._schemaGapHint(missing, dsn)
     assert hint is not None and "alembic upgrade head" in hint
     other = ProgrammingError("SELECT 1", {}, RuntimeError("syntax error"))
-    assert cliModule._schemaGapHint(other) is None
+    assert cliModule._schemaGapHint(other, dsn) is None
+
+
+def test_schema_gap_hint_scrubs_password() -> None:
+    """F10：原始错误文本可能回显 DSN 口令 ⇒ 展示前必须打码。"""
+    dsn = "postgresql+asyncpg://qa_user:S3cret@localhost:5433/qa_metadata"
+    missing = ProgrammingError(
+        "SELECT 1",
+        {},
+        RuntimeError(f'could not connect to {dsn}: column "x" does not exist'),
+    )
+    hint = cliModule._schemaGapHint(missing, dsn)
+    assert hint is not None
+    assert "S3cret" not in hint
+    assert "***" in hint
+
+
+def test_pg_dump_failure_scrubs_password(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F10：pg_dump stderr 可能含 DSN / 口令 ⇒ SystemExit 文本必须打码。"""
+    dsn = "postgresql+asyncpg://qa_user:S3cret@localhost:5433/qa_metadata"
+    stderr = b"pg_dump: connection failed: password S3cret rejected"
+
+    def _fakeRun(*_args: object, **_kwargs: object) -> object:
+        return _fakeDump(1, stderr)
+
+    monkeypatch.setattr(cliModule.subprocess, "run", _fakeRun)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cliModule._pgDump(dsn, "t", tmp_path / "x.sql")
+
+    assert "S3cret" not in str(excinfo.value)
+    assert "***" in str(excinfo.value)
 
 
 def test_write_checklist_noop_and_relative_path(
@@ -529,13 +563,82 @@ def test_write_checklist_noop_and_relative_path(
     assert absolute.exists()
 
 
-def test_backup_path_uses_today_table_and_revision() -> None:
-    """M-4：文件名带 alembic revision，旧版本/半截备份可辨识。"""
-    path = cliModule._backupPath("ontology_metric", "0135")
-    assert path.parent == Path("/tmp")
+def test_backup_path_uses_today_table_revision_and_target_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-4 / F2：文件名带 revision **和目标库身份**，旧版本/跨库备份可辨识。"""
+    monkeypatch.setattr(cliModule, "_BACKUP_DIR", tmp_path / "backups")
+    path = cliModule._backupPath(
+        "ontology_metric",
+        "0135",
+        "postgresql+asyncpg://u:p@localhost:5433/qa_metadata",
+    )
+    assert path.parent == tmp_path / "backups"
     assert path.name.startswith("ontology_metric_")
+    assert "localhost_5433_qa_metadata" in path.name
     assert path.stem.endswith("_0135")
     assert path.suffix == ".sql"
+
+
+def test_backup_path_differs_for_different_target_databases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2：dev 与 prod 同名 qa_metadata ⇒ 必须靠 host/port 区分文件名。"""
+    monkeypatch.setattr(cliModule, "_BACKUP_DIR", tmp_path / "backups")
+    dev = cliModule._backupPath(
+        "kpi_catalog", "0137", "postgresql+asyncpg://u:p@localhost:5433/qa_metadata"
+    )
+    prod = cliModule._backupPath(
+        "kpi_catalog", "0137", "postgresql+asyncpg://u:p@prod-host:5432/qa_metadata"
+    )
+    assert dev.name != prod.name
+    assert "localhost_5433" in dev.name
+    assert "prod-host_5432" in prod.name
+
+
+def test_backup_path_sanitizes_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2：revision 不得拼进路径分隔符 / 上跳（``=`` 全清，空则 unknown）。"""
+    monkeypatch.setattr(cliModule, "_BACKUP_DIR", tmp_path / "backups")
+    dsn = "postgresql+asyncpg://u:p@localhost:5434/qa_metadata_test"
+
+    path = cliModule._backupPath("t", " 0135/../x y ", dsn)
+    assert "/" not in path.name and " " not in path.name and ".." not in path.name
+    assert cliModule._backupPath("t", "   ", dsn).stem.endswith("_unknown")
+
+
+def test_backup_dir_is_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2：备份目录权限必须 0700（目录权限不可放宽）。"""
+    target = tmp_path / "private"
+    monkeypatch.setattr(cliModule, "_BACKUP_DIR", target)
+    directory = cliModule._backupDir()
+    assert directory == target
+    assert (directory.stat().st_mode & 0o777) == 0o700
+
+
+def test_pg_dump_refuses_symlinked_tmp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2：``.tmp`` 被预置成符号链接 ⇒ 必须失败退出，绝不跟随覆盖受害文件。"""
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do-not-touch", encoding="utf-8")
+    target = tmp_path / "backup.sql"
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.symlink_to(victim)
+
+    def _shouldNotRun(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("O_NOFOLLOW 失败后不得再调用 pg_dump")
+
+    monkeypatch.setattr(cliModule.subprocess, "run", _shouldNotRun)
+
+    with pytest.raises(SystemExit, match="符号链接"):
+        cliModule._pgDump(
+            "postgresql+asyncpg://u:p@h:5432/qa_metadata", "t", target
+        )
+    assert victim.read_text(encoding="utf-8") == "do-not-touch"
 
 
 def _fakeDump(status: int, stderr: bytes = b"") -> object:
@@ -612,9 +715,12 @@ def test_ensure_prod_backup_requires_all_tables(
         path.write_bytes(b"-- dump")
 
     monkeypatch.setattr(cliModule, "_pgDump", _write)
-    paths = cliModule._ensureProdBackup("postgresql://u:p@h/qa_metadata", "0135")
+    dsn = "postgresql://u:p@h/qa_metadata"
+    paths = cliModule._ensureProdBackup(dsn, "0135")
     assert len(paths) == len(cliModule._BACKUP_TABLES)
     assert all("0135" in path.name for path in paths)
+    # F2：文件名必须带目标库身份（同库复用、跨库不复用）
+    assert all("h_5432_qa_metadata" in path.name for path in paths)
 
     for path in paths:
         path.unlink()

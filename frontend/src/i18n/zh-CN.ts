@@ -2024,6 +2024,7 @@ export const zhCN = {
       reasons: {
         legacy_name_exact: "依据：历史「数据来源」文本与数据源名称完全一致",
         legacy_name_fuzzy: "依据：历史「数据来源」文本与数据源名称部分匹配",
+        legacy_table_exact: "依据：历史「数据来源」文本中的表名存在于该数据源",
         ontology_table: "依据：关联本体指标所属类的主表存在于该数据源",
       },
     },

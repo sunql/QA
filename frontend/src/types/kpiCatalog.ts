@@ -34,6 +34,7 @@ export interface KpiCatalog {
 export type KpiDatasourceSuggestionReason =
   | "legacy_name_exact"
   | "legacy_name_fuzzy"
+  | "legacy_table_exact"
   | "ontology_table";
 
 export interface KpiDatasourceSuggestion {

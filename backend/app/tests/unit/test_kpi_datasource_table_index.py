@@ -1,0 +1,200 @@
+"""Task 12 纯函数单测：`splitLegacyTableNames` / `buildTableIndex`。
+
+这些函数是「裸表名 → 数据源」精确 join 的全部逻辑边界（分隔符、大小写、
+脏 JSONB 条目、同一张表被多个数据源持有），放在 unit 层以免每次都跑 PG。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from app.domain.models import SchemaCache
+from app.services.kpi_datasource_suggestion_service import (
+    KpiDatasourceSuggestionService,
+    SuggestionContext,
+    buildTableIndex,
+    splitLegacyTableNames,
+)
+
+
+def _schemaRow(datasourceId: int, tables: list[object]) -> SchemaCache:
+    return SchemaCache(
+        id=datasourceId,
+        datasource_id=datasourceId,
+        schema_name="",
+        schema_data=tables,  # type: ignore[arg-type]
+        schema_version="md5-unit",
+    )
+
+
+class TestSplitLegacyTableNames:
+    def test_returns_empty_for_none(self) -> None:
+        assert splitLegacyTableNames(None) == ()
+
+    def test_returns_empty_for_blank_text(self) -> None:
+        assert splitLegacyTableNames("   ") == ()
+
+    def test_single_table_name_is_upper_cased(self) -> None:
+        assert splitLegacyTableNames("dwd_payment") == ("DWD_PAYMENT",)
+
+    def test_splits_on_space_and_plus(self) -> None:
+        assert splitLegacyTableNames("DWD_PURCHASE_ORDER + DWD_GOODS_RECEIPT") == (
+            "DWD_PURCHASE_ORDER",
+            "DWD_GOODS_RECEIPT",
+        )
+
+    def test_splits_on_comma_and_ideographic_comma(self) -> None:
+        assert splitLegacyTableNames("T_A, T_B、T_C") == ("T_A", "T_B", "T_C")
+
+    def test_deduplicates_while_preserving_order(self) -> None:
+        assert splitLegacyTableNames("T_B T_A T_B") == ("T_B", "T_A")
+
+    def test_strips_surrounding_whitespace(self) -> None:
+        assert splitLegacyTableNames("  T_A  ") == ("T_A",)
+
+
+class TestBuildTableIndex:
+    def test_empty_rows_produce_empty_index(self) -> None:
+        assert buildTableIndex(()) == {}
+
+    def test_indexes_table_name_upper_cased(self) -> None:
+        rows = (_schemaRow(1, [{"table_name": "dwd_payment"}]),)
+
+        assert buildTableIndex(rows) == {"DWD_PAYMENT": (1,)}
+
+    def test_skips_non_dict_entries(self) -> None:
+        rows = (_schemaRow(1, ["BAD", None, 123, {"table_name": "T_A"}]),)
+
+        assert buildTableIndex(rows) == {"T_A": (1,)}
+
+    def test_skips_entries_without_table_name(self) -> None:
+        rows = (_schemaRow(1, [{}, {"table_name": "  "}, {"table_name": "T_A"}]),)
+
+        assert buildTableIndex(rows) == {"T_A": (1,)}
+
+    def test_same_table_in_multiple_sources_yields_sorted_ids(self) -> None:
+        rows = (_schemaRow(2, [{"table_name": "T_A"}]), _schemaRow(1, [{"table_name": "t_a"}]))
+
+        assert buildTableIndex(rows) == {"T_A": (1, 2)}
+
+    def test_same_source_multiple_tables_are_aggregated(self) -> None:
+        rows = (_schemaRow(1, [{"table_name": "T_A"}, {"table_name": "T_B"}]),)
+
+        assert buildTableIndex(rows) == {"T_A": (1,), "T_B": (1,)}
+
+    def test_rows_without_datasource_id_are_skipped(self) -> None:
+        rows = (_schemaRow(1, [{"table_name": "T_A"}]),)
+        rows[0].datasource_id = None  # type: ignore[assignment]
+
+        assert buildTableIndex(rows) == {}
+
+
+class _StubSession:
+    """只实现 ``get`` 的假 session（``_ontologyDatasourceIds`` 唯一的 DB 依赖）。"""
+
+    def __init__(self, entities: dict[tuple[str, int], Any]) -> None:
+        self.entities = entities
+
+    async def get(self, model: Any, ident: int) -> Any:
+        return self.entities.get((model.__name__, ident))
+
+
+class _FakeMetric:
+    def __init__(self, targetClassId: int | None) -> None:
+        self.target_class_id = targetClassId
+
+
+class _FakeClass:
+    def __init__(self, sourceTable: str | None, validTo: Any = None) -> None:
+        self.source_table = sourceTable
+        self.valid_to = validTo
+
+
+class TestOntologyDatasourceIds:
+    @staticmethod
+    def _context() -> SuggestionContext:
+        return SuggestionContext(
+            sources=(),
+            schemaRows=(),
+            tableDatasourceIds={"T_A": (7,)},
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_metric_id_returns_empty(self) -> None:
+        session = _StubSession({})
+
+        assert (
+            await KpiDatasourceSuggestionService._ontologyDatasourceIds(
+                session, None, self._context()
+            )
+            == set()
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_metric_returns_empty(self) -> None:
+        session = _StubSession({})
+
+        assert (
+            await KpiDatasourceSuggestionService._ontologyDatasourceIds(
+                session, 42, self._context()
+            )
+            == set()
+        )
+
+    @pytest.mark.asyncio
+    async def test_metric_without_target_class_returns_empty(self) -> None:
+        session = _StubSession({("OntologyMetric", 1): _FakeMetric(None)})
+
+        assert (
+            await KpiDatasourceSuggestionService._ontologyDatasourceIds(
+                session, 1, self._context()
+            )
+            == set()
+        )
+
+    @pytest.mark.asyncio
+    async def test_class_without_source_table_returns_empty(self) -> None:
+        session = _StubSession(
+            {
+                ("OntologyMetric", 1): _FakeMetric(2),
+                ("OntologyClass", 2): _FakeClass("  "),
+            }
+        )
+
+        assert (
+            await KpiDatasourceSuggestionService._ontologyDatasourceIds(
+                session, 1, self._context()
+            )
+            == set()
+        )
+
+    @pytest.mark.asyncio
+    async def test_tombstoned_class_returns_empty(self) -> None:
+        session = _StubSession(
+            {
+                ("OntologyMetric", 1): _FakeMetric(2),
+                ("OntologyClass", 2): _FakeClass("T_A", validTo="2026-01-01"),
+            }
+        )
+
+        assert (
+            await KpiDatasourceSuggestionService._ontologyDatasourceIds(
+                session, 1, self._context()
+            )
+            == set()
+        )
+
+    @pytest.mark.asyncio
+    async def test_source_table_resolves_to_datasource_ids(self) -> None:
+        session = _StubSession(
+            {
+                ("OntologyMetric", 1): _FakeMetric(2),
+                ("OntologyClass", 2): _FakeClass(" t_a "),
+            }
+        )
+
+        assert await KpiDatasourceSuggestionService._ontologyDatasourceIds(
+            session, 1, self._context()
+        ) == {7}

@@ -2005,6 +2005,8 @@ export const enUS = {
           "Based on: legacy data-source text exactly matches the data source name",
         legacy_name_fuzzy:
           "Based on: legacy data-source text partially matches the data source name",
+        legacy_table_exact:
+          "Based on: a table name in the legacy Data Source text exists in this data source",
         ontology_table:
           "Based on: the linked ontology metric's class table exists in this data source",
       },

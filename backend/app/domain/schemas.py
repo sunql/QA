@@ -873,7 +873,12 @@ class KpiDatasourceSuggestionRead(CamelModel):
     name: str
     score: float
     reasons: list[
-        Literal["legacy_name_exact", "legacy_name_fuzzy", "ontology_table"]
+        Literal[
+            "legacy_name_exact",
+            "legacy_name_fuzzy",
+            "legacy_table_exact",
+            "ontology_table",
+        ]
     ]
 
 

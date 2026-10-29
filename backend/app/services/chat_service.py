@@ -84,6 +84,7 @@ from app.services.chart_service import ChartService
 from app.services.chat_stream_output import _ANSWER_SYSTEM_PROMPT, ChatStreamOutputMixin
 from app.services.data_summary import summarize_data
 from app.services.datasource_service import DataSourceService
+from app.services.kpi_contract_builder import buildKpiContractBlock
 from app.services.kpi_semantic_match_service import KpiMatchResult, KpiSemanticMatchService
 from app.services.embedding_service import EmbeddingService
 from app.services.intent_service import IntentResult, IntentService
@@ -1070,6 +1071,9 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             wiki_block = ""
             wiki_chunks_for_trace = []
 
+        # ★ KPI 口径契约注入（Tier B）：按命中 KPI 动态构建（失败隔离）。
+        kpi_contract_block = await self._collectKpiContractBlock(session, question)
+
         (planResult, sqlResult), sqlConfig, (wastedPt, wastedCt) = await self._callWithFallback(
             session, dto.sessionId, pc.configs, pc.selected, "nl2sql",
             lambda cfg: self._twoStageGenerate(
@@ -1091,6 +1095,8 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                 globalFiltersText=global_filters.text if global_filters else None,
                 # ★ wiki-ontology-link Task 6：业务规则块注入计划 system prompt。
                 wikiRulesBlock=wiki_block,
+                # ★ KPI 口径契约（Tier B）：业务方签字的口径规范，注入计划 system prompt。
+                kpiContractBlock=kpi_contract_block,
                 # 魔数治理 Phase 2 hard tier：session 传入让 nl2sql 编排层现读阈值。
                 session=session,
             ),
@@ -1283,6 +1289,26 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                 })
         return block, trace_data
 
+    async def _collectKpiContractBlock(
+        self, session: AsyncSession, question: str
+    ) -> str:
+        """构建 KPI 口径契约块（Tier B 注入，spec §7.3）。
+
+        失败隔离：任何异常 → log warning → 返回 "" → 不阻断 chat 流水线
+        （与 wiki 注入同一失败语义，见 _planAndGenerateSql）。
+
+        内容来源是**业务方填写的治理口径**（KPI 目录 + 本体指标技术形态），
+        属于不可信输入 —— 真正的包裹在 prompt 层（wrapUntrusted KPI_CONTRACT），
+        本方法只负责产出文本。
+        """
+        try:
+            return await buildKpiContractBlock(session, question)
+        except Exception:
+            logger.warning(
+                "KPI contract injection failed: %s", question, exc_info=True
+            )
+            return ""
+
     @staticmethod
     def _classRecallScores(classes: list[Any]) -> list[Any]:
         """把 _selectRelevantClasses 产出的 class 列表转成 ScoredOntology(type="class")。
@@ -1404,6 +1430,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
         featureCatalogText: str | None = None,
         globalFiltersText: str | None = None,
         wikiRulesBlock: str | None = None,
+        kpiContractBlock: str | None = None,
         session: Any = None,
     ) -> tuple[Any, Any]:
         """两阶段 LLM 调用：先生成并校验查询计划，再基于计划生成 SQL。
@@ -1422,6 +1449,8 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
         session：可选 DB 会话（魔数治理 Phase 2 hard tier），传入时
         generateValidatedPlan / generateSql 现读 system_config 阈值；
         缺席时落默认值（既有调用零改动）。
+        kpiContractBlock（feat-kpi-metric-technical-form Tier B）：KPI 口径契约块，
+        透传进计划阶段 system prompt；None = 不注入。
         """
         planResult = await self._nl2sql.generateValidatedPlan(
             question, classes, client, cfg,
@@ -1433,6 +1462,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             featureCatalogText=featureCatalogText,
             globalFiltersText=globalFiltersText,
             wikiRulesBlock=wikiRulesBlock,
+            kpiContractBlock=kpiContractBlock,
             session=session,
         )
         if planResult.plan.isUnanswerable:

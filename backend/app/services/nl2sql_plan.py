@@ -195,6 +195,7 @@ async def generateQueryPlan(
     scopeQuestion: str | None = None,
     globalFiltersText: str | None = None,
     wikiRulesBlock: str | None = None,
+    kpiContractBlock: str | None = None,
     maxTokens: int = _NL2SQL_MAX_TOKENS_DEFAULT,
     ownerHintMaxClasses: int = _OWNER_HINT_MAX_CLASSES_DEFAULT,
 ) -> PlanResult:
@@ -210,6 +211,9 @@ async def generateQueryPlan(
     globalFiltersText（feat-multistep-global-filter B 层）为多步场景下跨步骤共享的
     范围类约束（外购/内外贸/站点/物料类别/财年等），渲染进 user prompt 的
     [global_constraints] 块；None = 单步场景，不注入。
+    kpiContractBlock（feat-kpi-metric-technical-form Tier B）：KPI 口径契约块文本，
+    经 wrapUntrusted(UntrustedLabel.KPI_CONTRACT) 注入计划阶段 system prompt；
+    None = 不注入。
     返回不可变 PlanResult。
 
     maxTokens 与 ownerHintMaxClasses 为魔数治理 Phase 2 hard tier 注入参数：
@@ -243,6 +247,7 @@ async def generateQueryPlan(
             dictionaryText=dictionaryText,
             featureCatalogText=featureCatalogText,
             wikiRulesBlock=wikiRulesBlock,
+            kpiContractBlock=kpiContractBlock,
         )
         userPrompt = _buildPlanUserPrompt(
             question, errors,

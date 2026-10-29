@@ -5,7 +5,7 @@
   - wrapUntrusted(label, text): 把 text 包成 <label>...</label>，label 走白名单
   - wrapSanitized(label, safeText): 包**已 sanitize** 文本（不二次转义），供
     需要按渲染后长度裁剪的调用方使用
-  - UntrustedLabel: 11 个预定义 label（防 label 注入；含 3 个向后兼容旧标签）
+  - UntrustedLabel: 12 个预定义 label（防 label 注入；含 3 个向后兼容旧标签）
   - SECURITY_PREAMBLE_EN / _ZH: system prompt guard 段
   - renderSecurityPreamble(): 拼接中英 guard
 """
@@ -28,7 +28,7 @@ _HTML5_ESCAPE: dict[str, str] = {
 # label 命名规则：小写字母开头 + 小写字母/数字/下划线
 _LABEL_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
-# 预定义 label 白名单（11 个 = 8 个新 + 3 个旧代码已有）
+# 预定义 label 白名单（12 个 = 9 个新 + 3 个旧代码已有）
 _ALLOWED_LABELS: frozenset[str] = frozenset(
     {
         # 8 个 L1 新增（spec 定义）
@@ -44,12 +44,14 @@ _ALLOWED_LABELS: frozenset[str] = frozenset(
         "feature_catalog",   # nl2sql_prompts.py 现有标签
         "term_dictionary",   # nl2sql_prompts.py 现有标签
         "user_content",      # hypothesis_service.py 现有标签
+        # 1 个 KPI 口径契约（feat-kpi-metric-technical-form Tier B 注入）
+        "kpi_contract",
     }
 )
 
 
 class UntrustedLabel:
-    """11 个预定义 label 常量 — 防 label 注入。"""
+    """12 个预定义 label 常量 — 防 label 注入。"""
 
     USER_QUESTION = "user_question"
     ONTOLOGY_RECALL = "ontology_recall"
@@ -63,6 +65,8 @@ class UntrustedLabel:
     FEATURE_CATALOG = "feature_catalog"
     TERM_DICTIONARY = "term_dictionary"
     USER_CONTENT = "user_content"
+    # KPI 口径契约（Tier B 注入；内容来自业务方填写的治理口径）
+    KPI_CONTRACT = "kpi_contract"
 
 
 # 在 _sanitizeContext 之后追加：U+200B 打断 *任意* 关闭标签 + 自闭标签

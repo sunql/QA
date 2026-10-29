@@ -403,3 +403,16 @@ INFO  跳过步骤数 = 8；例如：迁移未应用到 0137（新列/新表缺�
   - S4/S9/S7.2 SKIP 语义同 E 段
 - 证据文件（会话外不留档）：预览 /tmp/kpi_backfill_preview_20261030.txt、
   apply /tmp/kpi_backfill_apply_20261030.txt、复跑 /tmp/kpi_realdata_post_backfill_20261030.txt
+
+========================================================================
+## G. 2026-10-30 语义关键词种子 + 数据源绑定 + 复跑
+
+- seed：`seed_kpi_semantic_index.py --dry-run` 预览后正式落库，`affected=12`
+  （4 交付 + 3 质量 + 2 价格 + 3 财务/合规；threshold 0.75；走 updateKpi 链路，
+  自动备份 ontology_metric / ontology_metric_source / kpi_catalog）
+- 数据源绑定：`UPDATE kpi_catalog SET datasource_id=1, updated_time=now() WHERE metric_id IS NOT NULL`
+  （=「THBI Oracle」data_source.id=1；UPDATE 12；备份 /tmp/kpi_catalog_20261030_predatasource.sql）
+- 复跑：RESULT failed=0 / passed=6 / skipped=3 —— **S7.2 由 SKIP 转 PASS**
+  （关键词「成本节约」命中 KPI_COST_SAVING，findByAnyKeyword 链路 prod 生效）；
+  S3 仍 12/12 mismatch（预期，待治理列对齐）；S4/S5.9/S9 SKIP 语义同前
+- 至此发布闸门条件⑤（datasource_id）满足；闸门剩余可拦因素 = 灰度开关（未配置）

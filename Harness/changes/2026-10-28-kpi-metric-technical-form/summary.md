@@ -554,7 +554,11 @@ prod `system_config` **没有任何 KPI 开关行** ⇒ 走代码默认：
   库内复核 metric=12 / source=18 / 挂靠 12/12；复跑 realdata failed=0，S3 确认 12/12 mismatch
   与 PLAN 登记偏差一致、S5.1 契约块 0 字符=对账拦截生效；脚本提示 **12 条 KPI 未绑数据源，
   发布闸门会拦**——对应下一条 datasource_id 项）
-- [ ] 补齐 `semantic_keywords` / `datasource_id`（12/12 仍为 NULL）
+- [x] 补齐 `semantic_keywords` / `datasource_id`（**2026-10-30 完成**：seed 脚本
+  `affected=12`（中英关键词组 + threshold 0.75，走 `updateKpi` 链路，自动备份三表）；
+  `datasource_id` 12/12 绑定 `data_source.id=1`「THBI Oracle」（UPDATE 前手工备份
+  `/tmp/kpi_catalog_20261030_predatasource.sql`）；复跑 realdata S7.2 转 PASS，
+  failed=0 / passed=6 / skipped=3）
 - [ ] 决定 §11.2 的开关策略（先关后开 / 接受默认）
 - [ ] 治理列对齐后重跑 `kpi_metric_realdata.py`，确认 verdict 从 `mismatch` 转 `pass` 且契约块非空
 - [ ] `security-reviewer` 结论 + compose 冒烟（SSOT 清单另两项，**不在 Task 16 范围**）

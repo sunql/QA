@@ -200,10 +200,15 @@ def renderContractBlock(entries: tuple[ContractEntry, ...]) -> str:
     blocks: list[str] = [header]
     totalChars = len(header)
     omitted = 0
+    # 尾注预留（复审 Minor #1）：最坏情况是「除当前条目外全部被省略」，
+    # 尾注计数取该上界 ⇒ 无论省略多少条，最终整块都不超 KPI_CONTRACT_MAX_BLOCK_CHARS。
+    tailnoteReserve = (
+        len(f"[…更多 KPI 契约因长度上限未注入，共 {len(entries)} 条]") + 1
+    )
     for index, entry in enumerate(entries):
         rendered = renderContractEntry(entry)
         # +1 是 join 用的换行
-        if totalChars + len(rendered) + 1 > KPI_CONTRACT_MAX_BLOCK_CHARS:
+        if totalChars + len(rendered) + 1 + tailnoteReserve > KPI_CONTRACT_MAX_BLOCK_CHARS:
             omitted = len(entries) - index
             break
         blocks.append(rendered)

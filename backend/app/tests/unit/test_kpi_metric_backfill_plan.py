@@ -669,6 +669,31 @@ def test_pg_dump_accepts_missing_table_and_rejects_other_errors(
         cliModule._pgDump("postgresql+asyncpg://u:p@h:5432/qa_metadata", "t", out)
 
 
+def test_pg_dump_failure_never_deletes_existing_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """复审 Important #1：dump 失败**不得**删除已存在的最终备份（并发 TOCTOU）。
+
+    交错场景：A 已 ``os.replace`` 写出有效备份；B 的 dump 失败。
+    旧实现失败路径 ``path.unlink()`` 会把 A 的回滚点删掉，而 A 可能已开始写 prod。
+    """
+    survivor = tmp_path / "survivor.sql"
+    survivor.write_text("VALID-BACKUP-FROM-OTHER-PROCESS", encoding="utf-8")
+
+    monkeypatch.setattr(
+        cliModule.subprocess,
+        "run",
+        lambda command, stdout, stderr, env: _fakeDump(1, b"boom"),
+    )
+
+    with pytest.raises(SystemExit, match="备份失败"):
+        cliModule._pgDump("postgresql+asyncpg://u:p@h:5432/qa_metadata", "t", survivor)
+
+    assert survivor.exists(), "失败路径删掉了别的进程刚生成的有效备份"
+    assert survivor.read_text(encoding="utf-8") == "VALID-BACKUP-FROM-OTHER-PROCESS"
+    assert not (tmp_path / "survivor.sql.tmp").exists(), "自己的 .tmp 必须清理"
+
+
 def test_pg_dump_argv_never_contains_password(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

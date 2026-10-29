@@ -59,7 +59,7 @@
 ## 正式库备份（T15-B，不可跳过）
 
 `--apply` 到 `qa_metadata`（prod 同源）时脚本会**自己先跑 pg_dump**：
-`<系统临时目录>/kpi_metric_backups/<table>_<YYYYMMDD>_<alembic_revision>_<host>_<port>_<db>.sql`
+`<系统临时目录>/kpi_metric_backups/<table>_<YYYYMMDD>_<host>_<port>_<db>_<alembic_revision>.sql`
 （`ontology_metric` / `ontology_metric_source` / `kpi_catalog`），口令走 `PGPASSWORD`
 环境变量、不进 argv。
 备份目录以 `0700` 创建、文件以 `0600` 独占创建（`O_EXCL|O_NOFOLLOW`，拒绝符号链接

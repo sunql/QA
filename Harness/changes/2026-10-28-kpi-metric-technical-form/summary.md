@@ -547,6 +547,16 @@ prod `system_config` **没有任何 KPI 开关行** ⇒ 走代码默认：
 - [ ] 决定 §11.2 的开关策略（先关后开 / 接受默认）
 - [ ] 治理列对齐后重跑 `kpi_metric_realdata.py`，确认 verdict 从 `mismatch` 转 `pass` 且契约块非空
 - [ ] `security-reviewer` 结论 + compose 冒烟（SSOT 清单另两项，**不在 Task 16 范围**）
+- [ ] **迁移应用后在真实 prod 上复验 F8**（复审遗留）：prod 当前 0135，S4 无论是否带
+  isProd 短路都因「迁移未应用」SKIP ⇒ F8（S4 在 prod 不读不写任何开关）目前**只有单测证据**
+  （`test_kpi_metric_realdata_prod_guards.py`），需在已迁移 prod 上跑一次只读 realdata，
+  确认 S4 显示「正式库不写开关」的 SKIP 而非「迁移未应用」的 SKIP
+- [ ] **单独立项（复审 Important #2，本波不修）**：`MetricTechniqueForm` 只对
+  RATIO/DIFFERENCE 渲染分母行（`MetricTechniqueForm.tsx:174-183`），而 MEASURE 指标携带
+  历史分母是合法状态（后端 schema 不禁止、默认回填可形成）⇒ 用户编辑这种指标只改名字保存，
+  前端会显式提交 `denominatorMeasure: null`，**静默清空历史分母及其 `class_id/class_alias`**
+  （数据丢失）。修法候选：编辑 MEASURE 时若 `existing.denominator` 非空则原样回传
+  （与 `class_id` 的「前端只负责不破坏」原则一致）+ 补「MEASURE 携带历史分母编辑保存」回归测试
 
 ### 11.4 运维调用方式变更（必须通知运维）
 

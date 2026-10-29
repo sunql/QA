@@ -537,7 +537,11 @@ def _pgDump(databaseUrl: str, table: str, path: Path) -> None:
         os.replace(tmp, path)
         return
     tmp.unlink(missing_ok=True)
-    path.unlink(missing_ok=True)
+    # ⚠️ **绝不删除最终 ``path``**（并发 TOCTOU，复审 Important #1）：
+    # 本函数只写 ``.tmp`` 再 ``os.replace`` 原子替换 ⇒ ``path`` 此时要么不存在，
+    # 要么是**另一个进程刚刚写好的完整有效备份**。若在这里 ``path.unlink()``，
+    # 并发场景下会把别人的回滚点删掉，而那个进程可能已经通过备份检查、开始写 prod。
+    # 「失败不留半截文件」由 ``.tmp`` + 原子替换保证，不需要碰 ``path``。
     stderr = result.stderr.decode("utf-8", "replace")
     if "no matching tables" in stderr:
         print(f"⚠️ 备份跳过 {table}：目标库尚无该表（迁移未应用）")

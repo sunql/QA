@@ -201,3 +201,29 @@ def test_render_block_drops_entries_over_limit_and_notes_count(
     assert "KPI_1" not in block
     assert "KPI_2" not in block
     assert "[…更多 KPI 契约因长度上限未注入，共 2 条]" in block
+    # 复审 Minor #1：尾注本身也计入预算 ⇒ 含尾注的整块不超上限
+    assert len(block) <= 500
+
+
+def test_render_block_stays_within_cap_when_tailnote_appended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """边界：已接受条目贴近上限 ⇒ 追加尾注后整块仍不超上限（旧实现会超）。"""
+    entries = tuple(
+        ContractEntry(
+            kpi_code=f"KPI_{index}",
+            kpi_name="条目",
+            verdict="pass",
+            business_definition="丙" * 90,
+        )
+        for index in range(30)
+    )
+    monkeypatch.setattr(builderModule, "KPI_CONTRACT_MAX_BLOCK_CHARS", 1200)
+
+    block = renderContractBlock(entries)
+
+    assert len(block) <= 1200
+    if "未注入" in block:
+        # 尾注存在时，header + 已接受条目 + 尾注整体 ≤ 上限
+        assert block.endswith("]")
+        assert "共" in block.splitlines()[-1]

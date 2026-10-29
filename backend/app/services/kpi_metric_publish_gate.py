@@ -37,6 +37,7 @@ from app.services.kpi_metric_reconcile import (
     GovernanceSpec,
     MeasureSpec,
     MetricTechnique,
+    ReconcileFinding,
     reconcileExecutableVsStructured,
     reconcileGovernanceVsTechnique,
     reconcileTechniqueInternal,
@@ -58,6 +59,9 @@ from app.services.messages_zh import (
     MSG_KPI_GATE_NO_EXECUTION_SOURCE,
     MSG_KPI_GATE_RECONCILE_MISMATCH,
     MSG_KPI_GATE_RECONCILE_UNKNOWN,
+    MSG_KPI_RECONCILE_FINDING,
+    MSG_KPI_RECONCILE_FINDING_NO_DETAIL,
+    MSG_KPI_RECONCILE_LAYER_NAMES,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,11 +104,15 @@ class GateResult:
 
     ``entityId`` 在 create 路径上可能是 None（闸门在 flush 之前触发，
     主键尚未分配）。
+
+    ``reasonCodes`` 是对账 finding 的英文机器码（``grain_mismatch`` 等）：
+    **不进用户正文**，只供 ``enforce*`` 的 warn 日志 grep。
     """
 
     entityType: str
     entityId: int | None
     items: tuple[GateItem, ...]
+    reasonCodes: tuple[str, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -120,6 +128,23 @@ class GateResult:
         )
 
 
+def renderReconcileFindings(findings: tuple[ReconcileFinding, ...]) -> str:
+    """对账 findings → 用户可见中文正文（层名映射 + finding 的中文 detail）。
+
+    英文 reason 码（``grain_mismatch`` 等）不进正文，只由 ``enforce*`` 写 warn 日志。
+    未知层值原样展示，不静默丢层次信息。
+    """
+    if not findings:
+        return MSG_KPI_RECONCILE_FINDING_NO_DETAIL
+    return "；".join(
+        MSG_KPI_RECONCILE_FINDING.format(
+            layer=MSG_KPI_RECONCILE_LAYER_NAMES.get(finding.layer, finding.layer),
+            detail=finding.detail or MSG_KPI_RECONCILE_FINDING_NO_DETAIL,
+        )
+        for finding in findings
+    )
+
+
 def buildKpiGateItems(
     *,
     metricId: int | None,
@@ -133,12 +158,11 @@ def buildKpiGateItems(
     hasExecution = bool(executionSource) and (
         executionSource != MetricExecutionSource.NONE.value
     )
+    detail = reconcileDetail or MSG_KPI_RECONCILE_FINDING_NO_DETAIL
     if reconcileVerdict == VERDICT_MISMATCH:
-        reconcileMessage = MSG_KPI_GATE_RECONCILE_MISMATCH.format(
-            detail=reconcileDetail or "口径不一致"
-        )
+        reconcileMessage = MSG_KPI_GATE_RECONCILE_MISMATCH.format(detail=detail)
     else:
-        reconcileMessage = MSG_KPI_GATE_RECONCILE_UNKNOWN
+        reconcileMessage = MSG_KPI_GATE_RECONCILE_UNKNOWN.format(detail=detail)
     return (
         GateItem("metric_linked", MSG_KPI_GATE_MISSING_METRIC, metricId is not None),
         GateItem(
@@ -158,6 +182,82 @@ def buildKpiGateItems(
     )
 
 
+def _baseMetricItems(
+    *,
+    metricType: str,
+    numeratorMeasure: object | None,
+    executionSource: str | None,
+    grainKeys: tuple[str, ...],
+) -> tuple[GateItem, ...]:
+    """本体指标自身的基础 4 项。"""
+    hasExecution = bool(executionSource) and (
+        executionSource != MetricExecutionSource.NONE.value
+    )
+    return (
+        GateItem("metric_type", MSG_KPI_GATE_METRIC_NO_TYPE, bool(metricType)),
+        GateItem(
+            "numerator",
+            MSG_KPI_GATE_METRIC_NO_NUMERATOR,
+            numeratorMeasure is not None,
+        ),
+        GateItem(
+            "execution_source",
+            MSG_KPI_GATE_NO_EXECUTION_SOURCE,
+            hasExecution,
+        ),
+        GateItem("grain", MSG_KPI_GATE_METRIC_NO_GRAIN, bool(grainKeys)),
+    )
+
+
+def _denominatorItems(
+    *,
+    metricType: str,
+    denominatorMeasure: object | None,
+    aggregationOrder: str | None,
+) -> tuple[GateItem, ...]:
+    """分母 + 比率聚合阶。
+
+    RATIO 与 DIFFERENCE 都需要分母（DIFFERENCE 的分母语义是减数）；
+    **只有 RATIO** 需要合法的比率聚合阶（差值型没有辛普森悖论，
+    ``MetricAggregationOrder.NONE`` 即为非比率型指标的合法值）。
+    """
+    if metricType not in _TYPES_REQUIRING_DENOMINATOR:
+        return ()
+    items = (
+        GateItem(
+            "denominator",
+            MSG_KPI_GATE_METRIC_NO_DENOMINATOR,
+            denominatorMeasure is not None,
+        ),
+    )
+    if metricType != MetricType.RATIO.value:
+        return items
+    order = (aggregationOrder or "").strip().upper()
+    return items + (
+        GateItem(
+            "aggregation_order",
+            MSG_KPI_GATE_METRIC_NO_AGGREGATION_ORDER,
+            order in _RATIO_AGGREGATION_ORDERS,
+        ),
+    )
+
+
+def _qualityItems(
+    *, degraded: bool, linkedMismatch: tuple[str, ...]
+) -> tuple[GateItem, ...]:
+    """技术形态降级 + 关联 KPI 对账 2 项。"""
+    return (
+        GateItem("degraded", MSG_KPI_GATE_METRIC_DEGRADED, not degraded),
+        GateItem(
+            "linked_mismatch",
+            MSG_KPI_GATE_METRIC_LINKED_MISMATCH.format(
+                items="；".join(linkedMismatch)
+            ),
+            not linkedMismatch,
+        ),
+    )
+
+
 def buildMetricGateItems(
     *,
     metricType: str | None,
@@ -171,47 +271,19 @@ def buildMetricGateItems(
 ) -> tuple[GateItem, ...]:
     """本体指标发布闸门。纯函数，无 IO。"""
     metricTypeValue = (metricType or "").strip().upper()
-    needsDenominator = metricTypeValue in _TYPES_REQUIRING_DENOMINATOR
-    order = (aggregationOrder or "").strip().upper()
-    hasExecution = bool(executionSource) and (
-        executionSource != MetricExecutionSource.NONE.value
-    )
-    items: tuple[GateItem, ...] = (
-        GateItem("metric_type", MSG_KPI_GATE_METRIC_NO_TYPE, bool(metricTypeValue)),
-        GateItem(
-            "numerator",
-            MSG_KPI_GATE_METRIC_NO_NUMERATOR,
-            numeratorMeasure is not None,
-        ),
-        GateItem(
-            "execution_source",
-            MSG_KPI_GATE_NO_EXECUTION_SOURCE,
-            hasExecution,
-        ),
-        GateItem("grain", MSG_KPI_GATE_METRIC_NO_GRAIN, bool(grainKeys)),
-    )
-    if needsDenominator:
-        items = items + (
-            GateItem(
-                "denominator",
-                MSG_KPI_GATE_METRIC_NO_DENOMINATOR,
-                denominatorMeasure is not None,
-            ),
-            GateItem(
-                "aggregation_order",
-                MSG_KPI_GATE_METRIC_NO_AGGREGATION_ORDER,
-                order in _RATIO_AGGREGATION_ORDERS,
-            ),
+    return (
+        _baseMetricItems(
+            metricType=metricTypeValue,
+            numeratorMeasure=numeratorMeasure,
+            executionSource=executionSource,
+            grainKeys=grainKeys,
         )
-    return items + (
-        GateItem("degraded", MSG_KPI_GATE_METRIC_DEGRADED, not degraded),
-        GateItem(
-            "linked_mismatch",
-            MSG_KPI_GATE_METRIC_LINKED_MISMATCH.format(
-                items="；".join(linkedMismatch)
-            ),
-            not linkedMismatch,
-        ),
+        + _denominatorItems(
+            metricType=metricTypeValue,
+            denominatorMeasure=denominatorMeasure,
+            aggregationOrder=aggregationOrder,
+        )
+        + _qualityItems(degraded=degraded, linkedMismatch=linkedMismatch)
     )
 
 
@@ -250,15 +322,33 @@ async def _loadLinkedKpis(
     return tuple(result.scalars().all())
 
 
+@dataclass(frozen=True)
+class _LinkedMismatch:
+    """一个关联 KPI 的层 2 mismatch：中文正文 + 英文 reason 码分离。"""
+
+    message: str
+    reasonCodes: tuple[str, ...]
+
+
 def _linkedMismatchOf(
     linked: tuple[KpiCatalog, ...], technique: MetricTechnique
-) -> tuple[str, ...]:
+) -> tuple[_LinkedMismatch, ...]:
     """关联 KPI 的层 2 对账：**只拦 mismatch**（unknown 放行，打破互锁）。"""
-    mismatches: list[str] = []
+    mismatches: list[_LinkedMismatch] = []
     for kpi in linked:
         layer2 = reconcileGovernanceVsTechnique(_governanceOf(kpi), technique)
+        # 只有 mismatch 计入（unknown 放行；反向实验把它改成 != VERDICT_PASS 时
+        # ⇒ 用例 test_metric_publish_allowed_when_linked_kpi_governance_unknown 必须变红）
         if layer2.verdict == VERDICT_MISMATCH:
-            mismatches.append(f"{kpi.kpi_code}: {'；'.join(layer2.reasons())}")
+            mismatches.append(
+                _LinkedMismatch(
+                    message=(
+                        f"{kpi.kpi_code}: "
+                        f"{renderReconcileFindings(layer2.findings)}"
+                    ),
+                    reasonCodes=layer2.reasons(),
+                )
+            )
     return tuple(mismatches)
 
 
@@ -275,7 +365,7 @@ async def checkMetricPublishGate(
     degraded = (
         layer1.verdict == VERDICT_MISMATCH or layer3.verdict == VERDICT_MISMATCH
     )
-    linked = await _loadLinkedKpis(session, metric.id)
+    linkedFindings = _linkedMismatchOf(await _loadLinkedKpis(session, metric.id), tech)
     items = buildMetricGateItems(
         metricType=tech.metric_type,
         numeratorMeasure=tech.numerator,
@@ -284,10 +374,18 @@ async def checkMetricPublishGate(
         grainKeys=tech.grain_keys,
         executionSource=tech.execution_source,
         degraded=degraded,
-        linkedMismatch=_linkedMismatchOf(linked, tech),
+        linkedMismatch=tuple(f.message for f in linkedFindings),
+    )
+    reasonCodes = (
+        layer1.reasons()
+        + layer3.reasons()
+        + tuple(code for f in linkedFindings for code in f.reasonCodes)
     )
     return GateResult(
-        entityType=ENTITY_TYPE_METRIC, entityId=metric.id, items=items
+        entityType=ENTITY_TYPE_METRIC,
+        entityId=metric.id,
+        items=items,
+        reasonCodes=reasonCodes,
     )
 
 
@@ -319,16 +417,20 @@ async def checkKpiPublishGate(
         governance if governance is not None else _governanceOf(kpi)
     )
     layer2 = reconcileGovernanceVsTechnique(effectiveGovernance, technique)
-    detail = "；".join(layer2.reasons())
     items = buildKpiGateItems(
         metricId=effectiveMetricId,
         metricStatus=metric.status if metric is not None else None,
         executionSource=metric.execution_source if metric is not None else None,
         datasourceId=effectiveDatasourceId,
         reconcileVerdict=layer2.verdict,
-        reconcileDetail=detail,
+        reconcileDetail=renderReconcileFindings(layer2.findings),
     )
-    return GateResult(entityType=ENTITY_TYPE_KPI, entityId=kpi.id, items=items)
+    return GateResult(
+        entityType=ENTITY_TYPE_KPI,
+        entityId=kpi.id,
+        items=items,
+        reasonCodes=layer2.reasons(),
+    )
 
 
 async def _gateEnabled(session: AsyncSession) -> bool:
@@ -355,10 +457,11 @@ async def enforceKpiPublishGate(
         return result
     if not await _gateEnabled(session):
         logger.warning(
-            "KPI 发布闸门未通过（开关关闭，仅观察）id=%s code=%s items=%s",
+            "KPI 发布闸门未通过（开关关闭，仅观察）id=%s code=%s items=%s reasons=%s",
             kpi.id,
             kpi.kpi_code,
             [item.code for item in result.failedItems],
+            list(result.reasonCodes),
         )
         return result
     raise ConflictError(result.message())
@@ -376,9 +479,10 @@ async def enforceMetricPublishGate(
         return result
     if not await _gateEnabled(session):
         logger.warning(
-            "本体指标发布闸门未通过（开关关闭，仅观察）id=%s items=%s",
+            "本体指标发布闸门未通过（开关关闭，仅观察）id=%s items=%s reasons=%s",
             metric.id,
             [item.code for item in result.failedItems],
+            list(result.reasonCodes),
         )
         return result
     raise ConflictError(result.message())

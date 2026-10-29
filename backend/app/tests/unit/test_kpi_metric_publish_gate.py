@@ -15,6 +15,12 @@ from app.services.kpi_metric_publish_gate import (
     GateResult,
     buildKpiGateItems,
     buildMetricGateItems,
+    renderReconcileFindings,
+)
+from app.services.kpi_metric_reconcile import (
+    LAYER_GOVERNANCE,
+    VERDICT_UNKNOWN,
+    ReconcileFinding,
 )
 
 
@@ -159,6 +165,51 @@ def test_kpi_gate_mismatch_message_carries_detail() -> None:
     assert "粒度键不一致" in reconcile.message
 
 
+def test_kpi_gate_unknown_message_renders_actual_cause() -> None:
+    """unknown 分支按真实成因渲染（不是「治理侧未填结构化列」静态文案）。"""
+    items = buildKpiGateItems(
+        metricId=1,
+        metricStatus="PUBLISHED",
+        executionSource="COMPILED",
+        datasourceId=7,
+        reconcileVerdict="unknown",
+        reconcileDetail="[治理层] 治理侧未声明结构化粒度键",
+    )
+    reconcile = next(i for i in items if i.code == "reconcile")
+    assert reconcile.ok is False
+    assert "治理侧未声明结构化粒度键" in reconcile.message
+
+
+# ── 对账 findings 渲染（FIX-2）───────────────────────────────────────
+
+
+def test_render_reconcile_findings_uses_chinese_layer_and_detail() -> None:
+    findings = (
+        ReconcileFinding(
+            layer=LAYER_GOVERNANCE,
+            reason="governance_columns_absent",
+            detail="治理侧未声明分子列",
+            verdict=VERDICT_UNKNOWN,
+        ),
+    )
+    text = renderReconcileFindings(findings)
+    assert text == "[治理层] 治理侧未声明分子列"
+    assert "governance_columns_absent" not in text
+
+
+def test_render_reconcile_findings_empty_is_explicit() -> None:
+    """空 findings 返回明确兜底文案，不返回空串（否则正文出现「：」裸尾）。"""
+    text = renderReconcileFindings(())
+    assert text.strip() != ""
+
+
+def test_render_reconcile_findings_keeps_unknown_layer_readable() -> None:
+    """未知 layer 值原样展示（不静默丢层次信息）。"""
+    findings = (ReconcileFinding("future_layer", "x", "明细", VERDICT_UNKNOWN),)
+    text = renderReconcileFindings(findings)
+    assert "[future_layer] 明细" in text
+
+
 # ── 本体指标方向 ─────────────────────────────────────────────────────
 
 
@@ -206,6 +257,23 @@ def test_metric_gate_ratio_requires_valid_aggregation_order() -> None:
         aggregationOrder="NONE",
     )
     assert "aggregation_order" in _failed(items)
+
+
+def test_metric_gate_difference_allows_none_aggregation_order() -> None:
+    """DIFFERENCE 没有辛普森悖论 ⇒ 允许 aggregation_order=NONE（对齐 _checkRatio）。"""
+    items = _metricItems(
+        metricType="DIFFERENCE",
+        denominatorMeasure={"agg": "SUM", "expr": "AMOUNT"},
+        aggregationOrder="NONE",
+    )
+    assert _failed(items) == []
+    assert "aggregation_order" not in _codes(items)
+
+
+def test_metric_gate_difference_requires_denominator() -> None:
+    """DIFFERENCE 仍需要分母度量（语义是减数）。"""
+    items = _metricItems(metricType="DIFFERENCE", aggregationOrder="NONE")
+    assert "denominator" in _failed(items)
 
 
 def test_metric_gate_requires_grain_keys() -> None:
@@ -280,7 +348,14 @@ def test_gate_result_failed_items_and_message() -> None:
 
 
 def test_gate_result_entity_id_may_be_none() -> None:
-    """createKpi 路径上闸门在 flush 之前触发 ⇒ entity.id 尚未分配。"""
-    result = GateResult(entityType="kpi_catalog", entityId=None, items=())
+    """createKpi 路径上闸门在 flush 之前触发 ⇒ entity.id 尚未分配。
+
+    用**非空且含失败项**的 items 断言：空 items 恒通过（``all(()) is True``），
+    没有区分度。
+    """
+    failed = GateItem("metric_linked", "未挂靠本体指标", False)
+    result = GateResult(entityType="kpi_catalog", entityId=None, items=(failed,))
     assert result.entityId is None
-    assert result.passed is True
+    assert result.passed is False
+    assert result.failedItems == (failed,)
+    assert "未挂靠本体指标" in result.message()

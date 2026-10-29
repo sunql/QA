@@ -699,6 +699,15 @@ MSG_KPI_RECONCILE_ENTITY_TYPE = "kpi_metric_reconcile"
 MSG_KPI_RECONCILE_VERDICT = "对账结果：{verdict}"
 # 单条 finding 的可读文本
 MSG_KPI_RECONCILE_FINDING = "[{layer}] {detail}"
+# finding 无 detail 时的兜底（不臆测成因）
+MSG_KPI_RECONCILE_FINDING_NO_DETAIL = "未记录具体对账明细"
+# 对账层英文常量 → 中文层名（英文常量同时用于审计落库，此处只做展示映射；
+# 未收录的层值原样展示，不静默丢层次信息）
+MSG_KPI_RECONCILE_LAYER_NAMES = {
+    "technique_internal": "技术层",
+    "governance": "治理层",
+    "executable": "可执行层",
+}
 
 # ── KPI 发布闸门（P1）────────────────────────────────────────────────
 MSG_KPI_GATE_MISSING_METRIC = "未挂靠本体指标（metric_id 为空）"
@@ -706,11 +715,11 @@ MSG_KPI_GATE_METRIC_NOT_FOUND = "挂靠的本体指标不存在（metric_id 悬�
 MSG_KPI_GATE_METRIC_NOT_PUBLISHED = "本体指标未发布（status != PUBLISHED）"
 MSG_KPI_GATE_NO_EXECUTION_SOURCE = "本体指标无可执行口径（execution_source 为空或 NONE）"
 MSG_KPI_GATE_RECONCILE_MISMATCH = "口径对账不通过（mismatch）：{detail}"
-MSG_KPI_GATE_RECONCILE_UNKNOWN = "口径对账未完成（unknown）：治理侧未填结构化列"
+MSG_KPI_GATE_RECONCILE_UNKNOWN = "口径对账未完成（unknown）：{detail}"
 MSG_KPI_GATE_NO_DATASOURCE = "未绑定业务数据源（datasource_id 为空）"
 MSG_KPI_GATE_METRIC_NO_NUMERATOR = "未配置分子度量（numerator_measure 为空）"
-MSG_KPI_GATE_METRIC_NO_DENOMINATOR = "比率型指标未配置分母度量（denominator_measure 为空）"
-MSG_KPI_GATE_METRIC_NO_AGGREGATION_ORDER = "比率型指标未配置聚合阶（aggregation_order 为空）"
+MSG_KPI_GATE_METRIC_NO_DENOMINATOR = "指标未配置分母度量（denominator_measure 为空）"
+MSG_KPI_GATE_METRIC_NO_AGGREGATION_ORDER = "比率型指标未配置合法聚合阶（aggregation_order）"
 MSG_KPI_GATE_BLOCKED = "发布闸门未通过：{items}"
 # 本体指标方向（结构化齐全 / 技术形态未降级 / 关联 KPI 无 mismatch）
 MSG_KPI_GATE_METRIC_NO_TYPE = "本体指标未配置指标类型（metric_type 为空）"

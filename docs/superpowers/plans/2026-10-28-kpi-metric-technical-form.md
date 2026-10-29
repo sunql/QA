@@ -1043,7 +1043,8 @@ def test_camel_case_alias_on_measure_field() -> None:
         formula="f",
         numeratorMeasure={"agg": "SUM"},
     )
-    assert dto.numerator_measure == {"agg": "SUM"}
+    assert dto.numerator_measure is not None
+    assert dto.numerator_measure.agg == "SUM"
 
 
 def test_measure_spec_schema_accepts_minimal() -> None:
@@ -1221,11 +1222,13 @@ class OntologyMetricRead(CamelModel):
 ```python
     metric_id: int | None = None
     semantic_keywords: list[str] | None = None
-    match_threshold: float
+    match_threshold: float = 0.75
     grain_keys: list[str] | None = None
     numerator_columns: list[str] | None = None
     denominator_columns: list[str] | None = None
 ```
+
+> `KpiCatalogRead.match_threshold` 使用与 DB 相同的 0.75 默认值，避免把既有手工构造 Read DTO 的调用方变成必填破坏；ORM 读路径仍总是携带实际存储值。
 
 并在该文件顶部的 `from app.domain.enums import (...)` 里补上 5 个枚举名。
 
